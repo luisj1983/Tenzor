@@ -268,21 +268,79 @@ auto MatMulBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<T
     const auto& b = saved_tensors_[1];
     const auto& grad_out = grad_outputs[0];
 
-    auto a_ndim = a.shape().size();
-    auto b_ndim = b.shape().size();
+    // Audit-6 AA.8: cast to signed so `ndim - 2` doesn't wrap when ndim == 1.
+    // PyTorch's matmul has four broadcast modes that all funnel through this
+    // backward — handle them explicitly:
+    //   * 1D @ 1D → scalar dot product. grad_a = grad * b, grad_b = grad * a.
+    //   * 1D @ ND → treat 1D as a row vector (unsqueeze axis 0), compute the
+    //               ND backward, then squeeze axis 0 from grad_a.
+    //   * ND @ 1D → treat 1D as a column vector (unsqueeze axis -1), compute
+    //               the ND backward, then squeeze axis -1 from grad_b.
+    //   * ND @ ND (both rank >= 2) → standard transpose-on-last-two-axes form.
+    const int64_t a_ndim = static_cast<int64_t>(a.shape().size());
+    const int64_t b_ndim = static_cast<int64_t>(b.shape().size());
+
+    auto conj_if_complex = [](const Tensor& t) {
+        return t.is_complex() ? conj(t) : t;
+    };
 
     Tensor grad_a, grad_b;
-    if (a.is_complex() || b.is_complex()) {
-        // Wirtinger: d/d(conj(A)) (A@B) uses conj(B^T) and conj(A^T)
-        auto b_ct = conj(transpose(b, b_ndim - 2, b_ndim - 1));
-        auto a_ct = conj(transpose(a, a_ndim - 2, a_ndim - 1));
-        grad_a = matmul(grad_out, b_ct);
-        grad_b = matmul(a_ct, grad_out);
+
+    if (a_ndim == 1 && b_ndim == 1) {
+        // Dot product: y = a · b is a scalar. grad shape matches the scalar.
+        // dL/da = grad * b, dL/db = grad * a. (Conjugate `a`/`b` for complex
+        // Wirtinger to match the rank-2 branch's `conj(transpose(...))` form.)
+        grad_a = mul(grad_out, conj_if_complex(b));
+        grad_b = mul(grad_out, conj_if_complex(a));
+    } else if (a_ndim == 1) {
+        // 1D @ ND. unsqueeze a to (1, K), compute via standard ND form, then
+        // squeeze axis -2 from the resulting grad_a.
+        auto a2 = unsqueeze(a, 0);                          // (1, K)
+        auto grad_out_2 = unsqueeze(grad_out, b_ndim - 2);  // (..., 1, N)
+        if (a.is_complex() || b.is_complex()) {
+            auto b_ct = conj(transpose(b, b_ndim - 2, b_ndim - 1));
+            auto a_ct = conj(transpose(a2, 0, 1));
+            auto grad_a_2 = matmul(grad_out_2, b_ct);       // (..., 1, K)
+            grad_b = matmul(a_ct, grad_out_2);              // (..., K, N)
+            grad_a = squeeze(grad_a_2, b_ndim - 2);
+        } else {
+            auto b_t = transpose(b, b_ndim - 2, b_ndim - 1);
+            auto a_t = transpose(a2, 0, 1);
+            auto grad_a_2 = matmul(grad_out_2, b_t);
+            grad_b = matmul(a_t, grad_out_2);
+            grad_a = squeeze(grad_a_2, b_ndim - 2);
+        }
+    } else if (b_ndim == 1) {
+        // ND @ 1D. unsqueeze b to (K, 1), compute via standard ND form, then
+        // squeeze the trailing axis from grad_b.
+        auto b2 = unsqueeze(b, 1);                          // (K, 1)
+        auto grad_out_2 = unsqueeze(grad_out, a_ndim - 1);  // (..., M, 1)
+        if (a.is_complex() || b.is_complex()) {
+            auto b_ct = conj(transpose(b2, 0, 1));
+            auto a_ct = conj(transpose(a, a_ndim - 2, a_ndim - 1));
+            grad_a = matmul(grad_out_2, b_ct);              // (..., M, K)
+            auto grad_b_2 = matmul(a_ct, grad_out_2);       // (..., K, 1)
+            grad_b = squeeze(grad_b_2, static_cast<int64_t>(grad_b_2.shape().size()) - 1);
+        } else {
+            auto b_t = transpose(b2, 0, 1);
+            auto a_t = transpose(a, a_ndim - 2, a_ndim - 1);
+            grad_a = matmul(grad_out_2, b_t);
+            auto grad_b_2 = matmul(a_t, grad_out_2);
+            grad_b = squeeze(grad_b_2, static_cast<int64_t>(grad_b_2.shape().size()) - 1);
+        }
     } else {
-        auto b_t = transpose(b, b_ndim - 2, b_ndim - 1);
-        auto a_t = transpose(a, a_ndim - 2, a_ndim - 1);
-        grad_a = matmul(grad_out, b_t);
-        grad_b = matmul(a_t, grad_out);
+        // Both rank >= 2: standard form. `a_ndim - 2` is now safe (signed).
+        if (a.is_complex() || b.is_complex()) {
+            auto b_ct = conj(transpose(b, b_ndim - 2, b_ndim - 1));
+            auto a_ct = conj(transpose(a, a_ndim - 2, a_ndim - 1));
+            grad_a = matmul(grad_out, b_ct);
+            grad_b = matmul(a_ct, grad_out);
+        } else {
+            auto b_t = transpose(b, b_ndim - 2, b_ndim - 1);
+            auto a_t = transpose(a, a_ndim - 2, a_ndim - 1);
+            grad_a = matmul(grad_out, b_t);
+            grad_b = matmul(a_t, grad_out);
+        }
     }
 
     return {grad_a, grad_b};
@@ -305,17 +363,55 @@ auto MatMulBackward::backward_with_variables(std::vector<Variable> grad_outputs)
 
     const auto& grad_out = grad_outputs[0];
 
-    // Use Variable operations for higher-order gradient tracking
-    auto a_ndim = saved_a.shape().size();
-    auto b_ndim = saved_b.shape().size();
+    // Audit-6 AA.8: signed dims + 1D-input special cases, mirroring the
+    // Tensor-level backward above.
+    const int64_t a_ndim = static_cast<int64_t>(saved_a.shape().size());
+    const int64_t b_ndim = static_cast<int64_t>(saved_b.shape().size());
+    const bool is_complex = saved_a.tensor().is_complex() ||
+                            saved_b.tensor().is_complex();
 
     Variable grad_a, grad_b;
-    if (saved_a.tensor().is_complex() || saved_b.tensor().is_complex()) {
-        // Wirtinger: route transpose and conj through the Variable-level
-        // overloads so the grad_fn carried on saved_a / saved_b survives
-        // (audit-5 X.5 / Y.9). Raw `Variable(conj(transpose(t)), false)`
-        // severed the chain — second-order grads through complex matmul
-        // were zero on the saved-input branch.
+
+    if (a_ndim == 1 && b_ndim == 1) {
+        // 1D · 1D dot product. grad_a = grad * conj(b), grad_b = grad * conj(a)
+        // (Variable * Variable propagates grad_fn for higher-order).
+        auto b_for = is_complex ? tenzor::conj(saved_b) : saved_b;
+        auto a_for = is_complex ? tenzor::conj(saved_a) : saved_a;
+        grad_a = grad_out * b_for;
+        grad_b = grad_out * a_for;
+    } else if (a_ndim == 1) {
+        auto a2 = tenzor::unsqueeze(saved_a, 0);            // (1, K)
+        auto grad_out_2 = tenzor::unsqueeze(grad_out, b_ndim - 2);  // (..., 1, N)
+        Variable b_t, a_t;
+        if (is_complex) {
+            b_t = tenzor::conj(tenzor::transpose(saved_b, b_ndim - 2, b_ndim - 1));
+            a_t = tenzor::conj(tenzor::transpose(a2, 0, 1));
+        } else {
+            b_t = tenzor::transpose(saved_b, b_ndim - 2, b_ndim - 1);
+            a_t = tenzor::transpose(a2, 0, 1);
+        }
+        auto grad_a_2 = tenzor::matmul(grad_out_2, b_t);    // (..., 1, K)
+        grad_b = tenzor::matmul(a_t, grad_out_2);           // (..., K, N)
+        grad_a = tenzor::squeeze(grad_a_2, b_ndim - 2);
+    } else if (b_ndim == 1) {
+        auto b2 = tenzor::unsqueeze(saved_b, 1);            // (K, 1)
+        auto grad_out_2 = tenzor::unsqueeze(grad_out, a_ndim - 1);  // (..., M, 1)
+        Variable b_t, a_t;
+        if (is_complex) {
+            b_t = tenzor::conj(tenzor::transpose(b2, 0, 1));
+            a_t = tenzor::conj(tenzor::transpose(saved_a, a_ndim - 2, a_ndim - 1));
+        } else {
+            b_t = tenzor::transpose(b2, 0, 1);
+            a_t = tenzor::transpose(saved_a, a_ndim - 2, a_ndim - 1);
+        }
+        grad_a = tenzor::matmul(grad_out_2, b_t);           // (..., M, K)
+        auto grad_b_2 = tenzor::matmul(a_t, grad_out_2);    // (..., K, 1)
+        grad_b = tenzor::squeeze(grad_b_2,
+                                 static_cast<int64_t>(grad_b_2.shape().size()) - 1);
+    } else if (is_complex) {
+        // Wirtinger ND @ ND. Audit-5 X.5 / Y.9: route through Variable
+        // overloads so grad_fn on saved inputs survives the second-order
+        // pass.
         auto b_t = tenzor::transpose(saved_b, b_ndim - 2, b_ndim - 1);
         auto a_t = tenzor::transpose(saved_a, a_ndim - 2, a_ndim - 1);
         auto b_ct = tenzor::conj(b_t);

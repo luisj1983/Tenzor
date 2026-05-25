@@ -1,0 +1,245 @@
+#version 450
+
+// AA.11 — Vulkan CTCLossForward
+//
+// Log-domain forward-backward DP for CTC over an extended label sequence
+// ext_label[i] = blank if i even, target[i/2] if i odd, length L = 2*S+1.
+//
+//   alpha[t, s] = log P(emit ext_label[0..s] up to time t)
+//   beta[t, s]  = log P(emit ext_label[s..L-1] from time t)
+//
+// Loss = -log_sum_exp(alpha[T-1, L-1], alpha[T-1, L-2])
+//
+// Gradient w.r.t. log_probs:
+//   grad[t, c] = exp(log_probs[t, c])
+//              - sum_{s : ext_label[s] == c} exp(alpha[t,s] + beta[t,s] - logZ)
+//
+// AA.10 fix is mirrored here: log-posterior accumulation goes into a
+// dedicated scratch tile (post_scratch), never into grad_out. Convert at
+// the very end (single pass over T_n x C) so partial writes can't poison
+// successive t iterations.
+//
+// Parallelisation:
+//   - One workgroup per batch element (gl_WorkGroupID.x = n).
+//   - Threads within the workgroup parallelise over the L extended-label
+//     positions for each timestep; T iterations are sequential.
+//   - alpha / beta / post_scratch live in global storage buffers
+//     (working set is N*T*L*4 bytes each; shared memory is insufficient).
+
+layout(local_size_x_id = 0) in;
+layout(constant_id = 0) const uint WORKGROUP_SIZE = 128;
+
+layout(binding = 0) readonly buffer LogProbs { float log_probs[]; };       // (T_max, N, C)
+layout(binding = 1) readonly buffer Targets { int targets[]; };            // (N, S_max)
+layout(binding = 2) readonly buffer InputLengths { int input_lengths[]; }; // (N,)
+layout(binding = 3) readonly buffer TargetLengths { int target_lengths[]; };// (N,)
+layout(binding = 4) buffer AlphaBuf { float alpha_buf[]; };                // (N, T_max, L_max)
+layout(binding = 5) buffer BetaBuf { float beta_buf[]; };                  // (N, T_max, L_max)
+layout(binding = 6) buffer PostScratch { float post_scratch[]; };          // (N, T_max, C)
+layout(binding = 7) buffer LossOut { float loss_out[]; };                  // (N,)
+layout(binding = 8) buffer GradOut { float grad_out[]; };                  // (T_max, N, C)
+
+layout(push_constant) uniform PushConstants {
+    uint T_max;
+    uint N;
+    uint C;
+    uint S_max;
+    uint L_max;
+    int  blank;
+    uint zero_infinity;   // bool encoded as 0/1
+} pc;
+
+const float NEG_INF = -1.0 / 0.0;
+
+// Numerically stable log(exp(a) + exp(b)).
+float log_add(float a, float b) {
+    if (a == NEG_INF) return b;
+    if (b == NEG_INF) return a;
+    float m = max(a, b);
+    return m + log(1.0 + exp(-abs(a - b)));
+}
+
+// ext_label[s]: blank at even s, target[s/2] at odd s.
+int ext_label(int s, uint n) {
+    if ((s & 1) == 0) return pc.blank;
+    return targets[n * pc.S_max + uint(s / 2)];
+}
+
+shared float s_logZ;
+shared int s_T_n;
+shared int s_S_n;
+shared int s_L_n;
+shared uint s_is_inf;  // 0/1, set after loss computation
+
+void main() {
+    uint n = gl_WorkGroupID.x;
+    if (n >= pc.N) return;
+    uint tid = gl_LocalInvocationID.x;
+    uint nthreads = gl_WorkGroupSize.x;
+
+    // Per-batch metadata (broadcast via shared mem).
+    if (tid == 0) {
+        s_T_n = input_lengths[n];
+        s_S_n = target_lengths[n];
+        s_L_n = 2 * s_S_n + 1;
+    }
+    barrier();
+    int T_n = s_T_n;
+    int S_n = s_S_n;
+    int L_n = s_L_n;
+
+    // Per-batch base offsets into global workspaces.
+    uint alpha_base = n * pc.T_max * pc.L_max;
+    uint beta_base  = n * pc.T_max * pc.L_max;
+    uint post_base  = n * pc.T_max * pc.C;
+
+    // Degenerate case: zero loss, zero grad.
+    if (T_n <= 0 || S_n <= 0 || uint(L_n) > pc.L_max) {
+        if (tid == 0) loss_out[n] = 0.0;
+        for (uint idx = tid; idx < pc.T_max * pc.C; idx += nthreads) {
+            uint t = idx / pc.C;
+            uint c = idx % pc.C;
+            grad_out[t * pc.N * pc.C + n * pc.C + c] = 0.0;
+        }
+        return;
+    }
+
+    // -------- Forward DP: alpha[t, s] --------
+    // Initialise alpha at t = 0.
+    for (uint s = tid; s < uint(L_n); s += nthreads) {
+        int sx = int(s);
+        if (sx == 0) {
+            alpha_buf[alpha_base + 0u * pc.L_max + 0u] =
+                log_probs[0u * pc.N * pc.C + n * pc.C + uint(ext_label(0, n))];
+        } else if (sx == 1 && L_n > 1) {
+            alpha_buf[alpha_base + 0u * pc.L_max + 1u] =
+                log_probs[0u * pc.N * pc.C + n * pc.C + uint(ext_label(1, n))];
+        } else {
+            alpha_buf[alpha_base + 0u * pc.L_max + s] = NEG_INF;
+        }
+    }
+    barrier();
+
+    for (int t = 1; t < T_n; ++t) {
+        for (uint s = tid; s < uint(L_n); s += nthreads) {
+            int sx = int(s);
+            float a = alpha_buf[alpha_base + uint(t - 1) * pc.L_max + s];
+            if (sx > 0) {
+                a = log_add(a, alpha_buf[alpha_base + uint(t - 1) * pc.L_max + uint(sx - 1)]);
+            }
+            int c_s = ext_label(sx, n);
+            if (sx > 1 && c_s != pc.blank && c_s != ext_label(sx - 2, n)) {
+                a = log_add(a, alpha_buf[alpha_base + uint(t - 1) * pc.L_max + uint(sx - 2)]);
+            }
+            alpha_buf[alpha_base + uint(t) * pc.L_max + s] =
+                a + log_probs[uint(t) * pc.N * pc.C + n * pc.C + uint(c_s)];
+        }
+        barrier();
+    }
+
+    // -------- logZ --------
+    if (tid == 0) {
+        float term1 = alpha_buf[alpha_base + uint(T_n - 1) * pc.L_max + uint(L_n - 1)];
+        float term2 = (L_n > 1)
+            ? alpha_buf[alpha_base + uint(T_n - 1) * pc.L_max + uint(L_n - 2)]
+            : NEG_INF;
+        s_logZ = log_add(term1, term2);
+    }
+    barrier();
+    float logZ = s_logZ;
+
+    // -------- Backward DP: beta[t, s] --------
+    for (uint s = tid; s < uint(L_n); s += nthreads) {
+        int sx = int(s);
+        if (sx == L_n - 1 || (sx == L_n - 2 && L_n > 1)) {
+            beta_buf[beta_base + uint(T_n - 1) * pc.L_max + s] = 0.0;
+        } else {
+            beta_buf[beta_base + uint(T_n - 1) * pc.L_max + s] = NEG_INF;
+        }
+    }
+    barrier();
+
+    for (int t = T_n - 2; t >= 0; --t) {
+        for (uint s = tid; s < uint(L_n); s += nthreads) {
+            int sx = int(s);
+            int c_s = ext_label(sx, n);
+            float b = beta_buf[beta_base + uint(t + 1) * pc.L_max + s]
+                    + log_probs[uint(t + 1) * pc.N * pc.C + n * pc.C + uint(c_s)];
+            if (sx < L_n - 1) {
+                int c_s1 = ext_label(sx + 1, n);
+                float term = beta_buf[beta_base + uint(t + 1) * pc.L_max + uint(sx + 1)]
+                           + log_probs[uint(t + 1) * pc.N * pc.C + n * pc.C + uint(c_s1)];
+                b = log_add(b, term);
+            }
+            if (sx < L_n - 2 && c_s != pc.blank && c_s != ext_label(sx + 2, n)) {
+                int c_s2 = ext_label(sx + 2, n);
+                float term = beta_buf[beta_base + uint(t + 1) * pc.L_max + uint(sx + 2)]
+                           + log_probs[uint(t + 1) * pc.N * pc.C + n * pc.C + uint(c_s2)];
+                b = log_add(b, term);
+            }
+            beta_buf[beta_base + uint(t) * pc.L_max + s] = b;
+        }
+        barrier();
+    }
+
+    // -------- Loss --------
+    float per_sample_loss = -logZ;
+    bool is_inf = isinf(per_sample_loss);
+    if (pc.zero_infinity != 0u && is_inf) {
+        per_sample_loss = 0.0;
+    }
+    if (tid == 0) {
+        loss_out[n] = per_sample_loss;
+        s_is_inf = is_inf ? 1u : 0u;
+    }
+    barrier();
+    bool inf_flag = (s_is_inf != 0u);
+
+    // -------- Gradient --------
+    // Zero-infinity short-circuit: zero out the full (T_max, n, :) row.
+    if (pc.zero_infinity != 0u && inf_flag) {
+        for (uint idx = tid; idx < pc.T_max * pc.C; idx += nthreads) {
+            uint t = idx / pc.C;
+            uint c = idx % pc.C;
+            grad_out[t * pc.N * pc.C + n * pc.C + c] = 0.0;
+        }
+        return;
+    }
+
+    // AA.10 mirror: accumulate log-posteriors into post_scratch[n, *, *],
+    // then convert in one pass. Pre-zero the grad row (for t in [T_n, T_max))
+    // and seed scratch with NEG_INF.
+    for (uint idx = tid; idx < pc.T_max * pc.C; idx += nthreads) {
+        uint t = idx / pc.C;
+        uint c = idx % pc.C;
+        grad_out[t * pc.N * pc.C + n * pc.C + c] = 0.0;
+        post_scratch[post_base + t * pc.C + c] = NEG_INF;
+    }
+    barrier();
+
+    // Single-thread accumulation over (t, s) — matches CPU reference.
+    if (tid == 0) {
+        for (int t = 0; t < T_n; ++t) {
+            for (int s = 0; s < L_n; ++s) {
+                int c = ext_label(s, n);
+                float posterior = alpha_buf[alpha_base + uint(t) * pc.L_max + uint(s)]
+                                + beta_buf[beta_base + uint(t) * pc.L_max + uint(s)];
+                uint slot_idx = post_base + uint(t) * pc.C + uint(c);
+                post_scratch[slot_idx] = log_add(post_scratch[slot_idx], posterior);
+            }
+        }
+    }
+    barrier();
+
+    // Pass 2: convert log-posterior to gradient.
+    uint TnC = uint(T_n) * pc.C;
+    for (uint idx = tid; idx < TnC; idx += nthreads) {
+        uint t = idx / pc.C;
+        uint c = idx % pc.C;
+        float lp = log_probs[t * pc.N * pc.C + n * pc.C + c];
+        float post = post_scratch[post_base + t * pc.C + c];
+        float prob = exp(lp);
+        float post_prob = (post == NEG_INF) ? 0.0 : exp(post - logZ);
+        grad_out[t * pc.N * pc.C + n * pc.C + c] = prob - post_prob;
+    }
+}

@@ -83,6 +83,11 @@ auto ctc_loss_forward_kernel(
     int64_t alpha_elems = N * T_max * L_max;
     Tensor alpha_buf({alpha_elems}, DType::Float32, log_probs.device());
     Tensor beta_buf({alpha_elems}, DType::Float32, log_probs.device());
+    // AA.10: per-block (T_max, C) scratch for log-space posterior
+    // accumulation — must not alias grad_out, or partial writes leak
+    // across iterations and produce +inf grads.
+    int64_t post_elems = N * T_max * C;
+    Tensor post_scratch({post_elems}, DType::Float32, log_probs.device());
 
     if (N == 0 || T_max == 0 || C == 0) {
         if (loss_out.numel() > 0) {
@@ -102,6 +107,7 @@ auto ctc_loss_forward_kernel(
     const int32_t* tl_data = static_cast<const int32_t*>(target_lengths.data_ptr());
     float* alpha_data = static_cast<float*>(alpha_buf.data_ptr());
     float* beta_data = static_cast<float*>(beta_buf.data_ptr());
+    float* post_data = static_cast<float*>(post_scratch.data_ptr());
     float* loss_data = static_cast<float*>(loss_out.data_ptr());
     float* grad_data = static_cast<float*>(grad_out.data_ptr());
 
@@ -235,39 +241,43 @@ auto ctc_loss_forward_kernel(
                 return;
             }
 
-            // Zero this batch's grad slice.
+            // AA.10 fix: accumulate log-posteriors into a dedicated
+            // per-block scratch tile (post_data[n, t, c]) for all t first;
+            // only after every t has been processed do we read log_probs
+            // and convert to the final gradient. The previous in-place
+            // version aliased the global grad cell as both log-space
+            // accumulator and final exp-space gradient — partial writes
+            // leaked across iterations, producing +inf grads.
+            float* post_n = post_data + n * T_max_c * C_c;
+
             for (int64_t idx = tid; idx < T_max_c * C_c; idx += nthreads) {
                 int64_t t = idx / C_c;
                 int64_t c = idx % C_c;
                 grad_data[t * N_c * C_c + n * C_c + c] = 0.0f;
+                post_n[t * C_c + c] = NEG_INF;
             }
             item.barrier(sycl::access::fence_space::global_space);
 
-            for (int64_t t = 0; t < T_n; ++t) {
-                for (int64_t c = tid; c < C_c; c += nthreads) {
-                    grad_data[t * N_c * C_c + n * C_c + c] = NEG_INF;
-                }
-                item.barrier(sycl::access::fence_space::global_space);
-
-                if (tid == 0) {
+            if (tid == 0) {
+                for (int64_t t = 0; t < T_n; ++t) {
                     for (int64_t s = 0; s < L_n; ++s) {
                         int32_t c = ext_label(s);
                         float posterior = alpha[t * L_max_c + s] + beta[t * L_max_c + s];
-                        float& slot = grad_data[t * N_c * C_c + n * C_c + c];
+                        float& slot = post_n[t * C_c + c];
                         slot = ctc_log_add(slot, posterior);
                     }
                 }
-                item.barrier(sycl::access::fence_space::global_space);
+            }
+            item.barrier(sycl::access::fence_space::global_space);
 
-                for (int64_t c = tid; c < C_c; c += nthreads) {
-                    float lp = lp_data[t * N_c * C_c + n * C_c + c];
-                    float& slot = grad_data[t * N_c * C_c + n * C_c + c];
-                    float prob = sycl::exp(lp);
-                    float post = slot;
-                    float post_prob = (post == NEG_INF) ? 0.0f : sycl::exp(post - logZ);
-                    slot = prob - post_prob;
-                }
-                item.barrier(sycl::access::fence_space::global_space);
+            for (int64_t idx = tid; idx < T_n * C_c; idx += nthreads) {
+                int64_t t = idx / C_c;
+                int64_t c = idx % C_c;
+                float lp = lp_data[t * N_c * C_c + n * C_c + c];
+                float post = post_n[t * C_c + c];
+                float prob = sycl::exp(lp);
+                float post_prob = (post == NEG_INF) ? 0.0f : sycl::exp(post - logZ);
+                grad_data[t * N_c * C_c + n * C_c + c] = prob - post_prob;
             }
         });
     });

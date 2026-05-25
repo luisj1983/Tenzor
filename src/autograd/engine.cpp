@@ -526,6 +526,39 @@ auto BackwardEngine::execute(Variable& root, std::optional<Tensor> gradient,
             }
         }
     }
+
+    // Audit-6 AA.7: V.4 accumulation preserves the upstream (promoted) dtype
+    // throughout backward to avoid per-step half-precision rounding. The
+    // user-facing `leaf.grad` contract is `leaf.grad.dtype == leaf.dtype`
+    // (PyTorch); downcast every leaf that ended up with a promoted gradient.
+    // This is a no-op for the common F32/F32 case.
+    for (auto& func : sorted) {
+        if (!func) continue;
+        for (auto& var : func->input_variables()) {
+            if (!var.requires_grad()) continue;
+            if (!var.is_leaf() && !var.retains_grad()) continue;
+            if (!var.impl_) continue;
+            std::lock_guard lock(*var.impl_->grad_mutex_);
+            if (!var.impl_->grad_.has_value()) continue;
+            const auto leaf_dt = var.dtype();
+            if (var.impl_->grad_->dtype() != leaf_dt) {
+                var.impl_->grad_ = var.impl_->grad_->to(leaf_dt);
+            }
+        }
+    }
+    // Also handle the root itself when it is a leaf with grad (the root
+    // gradient was assigned in user-supplied dtype but accumulate paths may
+    // have promoted it). Same dtype-equality fast path.
+    if (root.requires_grad() && (root.is_leaf() || root.retains_grad()) &&
+        root.impl_) {
+        std::lock_guard lock(*root.impl_->grad_mutex_);
+        if (root.impl_->grad_.has_value()) {
+            const auto root_dt = root.dtype();
+            if (root.impl_->grad_->dtype() != root_dt) {
+                root.impl_->grad_ = root.impl_->grad_->to(root_dt);
+            }
+        }
+    }
     // ScopeGuards handle cleanup in both normal and exception paths
 }
 
@@ -899,6 +932,36 @@ auto BackwardEngine::execute_multi(std::vector<Variable*> roots,
                     accumulate_grad(next_funcs[i].get(), input_grads[i]);
                 }
             }
+        }
+    }
+
+    // Audit-6 AA.7: mirror the single-root downcast — restore PyTorch's
+    // `leaf.grad.dtype == leaf.dtype` contract by casting any promoted
+    // accumulator back to the leaf's declared dtype.
+    for (auto& func : sorted) {
+        if (!func) continue;
+        for (auto& var : func->input_variables()) {
+            if (!var.requires_grad()) continue;
+            if (!var.is_leaf() && !var.retains_grad()) continue;
+            if (!var.impl_) continue;
+            std::lock_guard lock(*var.impl_->grad_mutex_);
+            if (!var.impl_->grad_.has_value()) continue;
+            const auto leaf_dt = var.dtype();
+            if (var.impl_->grad_->dtype() != leaf_dt) {
+                var.impl_->grad_ = var.impl_->grad_->to(leaf_dt);
+            }
+        }
+    }
+    for (auto* root : roots) {
+        if (!root) continue;
+        if (!root->requires_grad()) continue;
+        if (!root->is_leaf() && !root->retains_grad()) continue;
+        if (!root->impl_) continue;
+        std::lock_guard lock(*root->impl_->grad_mutex_);
+        if (!root->impl_->grad_.has_value()) continue;
+        const auto root_dt = root->dtype();
+        if (root->impl_->grad_->dtype() != root_dt) {
+            root->impl_->grad_ = root->impl_->grad_->to(root_dt);
         }
     }
     // ScopeGuards handle cleanup in both normal and exception paths

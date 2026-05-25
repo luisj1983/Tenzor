@@ -540,6 +540,14 @@ public:
     auto dispatchNestedFromPadded(const Tensor& padded, const Tensor& offsets) -> Tensor;
     auto dispatchCrossEntropy(const Tensor& log_probs, const Tensor& targets,
                              int64_t reduction) -> Tensor;
+    // AA.11: CTC forward-backward DP. Returns {loss_per_sample (N,) Float32,
+    // raw_grad (T_max, N, C) Float32}.
+    auto dispatchCTCLossForward(const Tensor& log_probs,
+                                const Tensor& targets,
+                                const Tensor& input_lengths,
+                                const Tensor& target_lengths,
+                                int64_t blank,
+                                bool zero_infinity) -> std::vector<Tensor>;
 
     // Advanced reduction operations
     auto dispatchArgmax(const Tensor& input, int64_t dim, bool keepdim) -> Tensor;

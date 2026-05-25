@@ -695,38 +695,45 @@ auto MultiheadAttention::forward(const Variable& query,
         std::vector<int64_t> mask_shape = {batch_size, 1, 1, seq_len_k};
         Tensor padding_mask = reshape(key_padding_mask, mask_shape);
 
-        // V.28: accept either a boolean mask (PyTorch convention: True =
-        // ignore) or a float mask (non-zero = ignore).  The previous code
-        // built `threshold = full(0.5, padding_mask.dtype())`, which truncates
-        // 0.5 to 0 under Bool — making `gt(mask, 0)` true for every cell that
-        // happens to be true, but also for every false cell (since gt(false,
-        // 0) is false but the threshold was equal, not strictly less).  More
-        // critically, downstream `where(neg_inf, zero)` allocates -inf at the
-        // mask's dtype: for a Bool mask, -inf truncates to 1, masking
-        // *everything* additively by 1 instead of -inf.  Normalise to Float32
-        // up front so all derived tensors live at a real floating dtype.
+        // V.28 / AA.1: branch on dtype to honour PyTorch's two distinct
+        // key_padding_mask conventions:
+        //   - Bool / integer mask: indicator semantics, True = ignore.
+        //     Convert via `gt(mask, 0.5)` + `where(-inf, 0)`.
+        //   - Floating mask: ADDITIVE semantics (0.0 = keep, -inf = mask).
+        //     Add the mask directly to combined_mask, without thresholding.
+        //
+        // The previous code unconditionally took the threshold path, which
+        // silently inverted float additive masks: a finite mask value like
+        // -inf was treated as "0.5? no" → keep, while finite 0.0 was also
+        // treated as "0.5? no" → keep — so masked positions were never
+        // actually masked under the additive convention.
         const DType mask_dtype = padding_mask.dtype();
-        if (mask_dtype == DType::Bool) {
-            padding_mask = padding_mask.to(DType::Float32);
-        } else if (mask_dtype != DType::Float32 && mask_dtype != DType::Float64 &&
-                   mask_dtype != DType::Float16 && mask_dtype != DType::BFloat16) {
-            // Integer mask (Int8/Int32/Int64): treat as 0/1 indicator, widen
-            // to Float32 so the threshold/neg_inf comparison is well-defined.
-            padding_mask = padding_mask.to(DType::Float32);
+        const bool is_floating_mask =
+            (mask_dtype == DType::Float32 || mask_dtype == DType::Float64 ||
+             mask_dtype == DType::Float16 || mask_dtype == DType::BFloat16);
+
+        Tensor broadcastable_mask;
+        if (is_floating_mask) {
+            // Additive float mask: pass through unchanged. Downstream `add`
+            // broadcasts [N,1,1,Sk] across [N,H,Sq,Sk].
+            broadcastable_mask = padding_mask;
+        } else {
+            // Bool or integer indicator mask: widen to Float32 so the
+            // threshold/where path is well-defined (Bool truncates -inf
+            // to 1, integers can't represent -inf at all).
+            if (mask_dtype != DType::Float32) {
+                padding_mask = padding_mask.to(DType::Float32);
+            }
+
+            auto pm_shape = std::vector<int64_t>(padding_mask.shape().begin(), padding_mask.shape().end());
+            Tensor neg_inf_tensor = full(pm_shape, -std::numeric_limits<float>::infinity(),
+                                         padding_mask.dtype(), padding_mask.device());
+            Tensor zero_tensor = zeros(pm_shape, padding_mask.dtype(), padding_mask.device());
+            Tensor threshold = full(pm_shape, 0.5f, padding_mask.dtype(), padding_mask.device());
+
+            Tensor mask_gt = Tensor(gt(padding_mask, threshold));
+            broadcastable_mask = Tensor(where(mask_gt, neg_inf_tensor, zero_tensor));
         }
-
-        // Create -inf tensor for masked positions using device-agnostic tensor ops
-        auto pm_shape = std::vector<int64_t>(padding_mask.shape().begin(), padding_mask.shape().end());
-        Tensor neg_inf_tensor = full(pm_shape, -std::numeric_limits<float>::infinity(),
-                                     padding_mask.dtype(), padding_mask.device());
-        Tensor zero_tensor = zeros(pm_shape, padding_mask.dtype(), padding_mask.device());
-        Tensor threshold = full(pm_shape, 0.5f, padding_mask.dtype(), padding_mask.device());
-
-        // where(mask > 0.5, -inf, 0.0) — runs on GPU if tensors are on GPU.
-        // Result keeps the [batch, 1, 1, seq_k] shape; broadcasting deferred
-        // to the additive combine below (downstream `add` handles it).
-        Tensor mask_gt = Tensor(gt(padding_mask, threshold));
-        Tensor broadcastable_mask = Tensor(where(mask_gt, neg_inf_tensor, zero_tensor));
 
         if (combined_mask.shape().size() > 0) {
             combined_mask = Tensor(add(combined_mask, broadcastable_mask));

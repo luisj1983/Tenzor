@@ -6452,4 +6452,134 @@ auto VulkanBackend::dispatchPhiloxDropoutMask(const std::vector<int64_t>& shape,
     return output;
 }
 
+// ============================================================================
+// AA.11 — CTC forward-backward DP (Vulkan)
+// ============================================================================
+//
+// Mirrors src/backends/cuda/kernels/ctc.cu / rocm/kernels/ctc_loss.hip.cpp /
+// oneapi/kernels/ctc_loss.cpp: one workgroup per batch element, log-domain
+// alpha/beta over extended labels, gradient computed via the AA.10
+// per-block scratch pattern (post_scratch never aliases grad_out).
+//
+//   inputs:  log_probs (T_max, N, C) Float32,
+//            targets (N, S_max) Int32,
+//            input_lengths (N,) Int32,
+//            target_lengths (N,) Int32
+//   outputs: loss_per_sample (N,) Float32,
+//            raw_grad (T_max, N, C) Float32
+//
+// Push constants carry shape/blank/zero_infinity; storage buffers carry
+// inputs, outputs, and three workspace tiles (alpha, beta, post_scratch).
+auto VulkanBackend::dispatchCTCLossForward(const Tensor& log_probs_in,
+                                           const Tensor& targets_in,
+                                           const Tensor& input_lengths_in,
+                                           const Tensor& target_lengths_in,
+                                           int64_t blank,
+                                           bool zero_infinity) -> std::vector<Tensor> {
+    if (log_probs_in.shape().size() != 3) {
+        throw std::invalid_argument(
+            "ctc_loss_forward (Vulkan): log_probs must be 3D (T, N, C)");
+    }
+
+    int32_t device_id = log_probs_in.device().index;
+
+    // Stage inputs onto the device with expected dtypes (Float32 / Int32).
+    auto to_int32 = [&](const Tensor& t) -> Tensor {
+        Tensor x = t;
+        if (x.dtype() != DType::Int32) x = x.to(DType::Int32);
+        return x.contiguous();
+    };
+    Tensor log_probs = (log_probs_in.dtype() == DType::Float32)
+        ? log_probs_in.contiguous()
+        : log_probs_in.to(DType::Float32).contiguous();
+    Tensor targets = to_int32(targets_in);
+    Tensor input_lengths = to_int32(input_lengths_in);
+    Tensor target_lengths = to_int32(target_lengths_in);
+
+    int64_t T_max = log_probs.shape()[0];
+    int64_t N     = log_probs.shape()[1];
+    int64_t C     = log_probs.shape()[2];
+
+    auto tgt_shape = targets.shape();
+    int64_t S_max = (tgt_shape.size() >= 2) ? tgt_shape[1]
+                  : (tgt_shape.size() == 1) ? tgt_shape[0] : 0;
+    int64_t L_max = 2 * S_max + 1;
+
+    Tensor loss_out({N}, DType::Float32, log_probs.device());
+    Tensor grad_out({T_max, N, C}, DType::Float32, log_probs.device());
+
+    if (N == 0 || T_max == 0 || C == 0) {
+        // Zero-sized: nothing to dispatch. Leave outputs zero-initialised
+        // (Tensor ctor zeroes via the caching allocator's clear path).
+        return {loss_out, grad_out};
+    }
+
+    // Workspace tiles. alpha / beta: (N, T_max, L_max). post_scratch:
+    // (N, T_max, C). All Float32, on the same device.
+    int64_t ab_elems = N * T_max * L_max;
+    int64_t post_elems = N * T_max * C;
+    Tensor alpha_buf({ab_elems}, DType::Float32, log_probs.device());
+    Tensor beta_buf({ab_elems}, DType::Float32, log_probs.device());
+    Tensor post_scratch({post_elems}, DType::Float32, log_probs.device());
+
+    auto* pipeline = getPipeline("ctc_forward", device_id);
+
+    struct PushConstants {
+        uint32_t T_max;
+        uint32_t N;
+        uint32_t C;
+        uint32_t S_max;
+        uint32_t L_max;
+        int32_t  blank;
+        uint32_t zero_infinity;
+    } pc{};
+    pc.T_max = static_cast<uint32_t>(T_max);
+    pc.N     = static_cast<uint32_t>(N);
+    pc.C     = static_cast<uint32_t>(C);
+    pc.S_max = static_cast<uint32_t>(S_max);
+    pc.L_max = static_cast<uint32_t>(L_max);
+    pc.blank = static_cast<int32_t>(blank);
+    pc.zero_infinity = zero_infinity ? 1u : 0u;
+
+    std::vector<std::pair<uint32_t, const void*>> bindings = {
+        {0, log_probs.data_ptr()},
+        {1, targets.data_ptr()},
+        {2, input_lengths.data_ptr()},
+        {3, target_lengths.data_ptr()},
+        {4, alpha_buf.data_ptr()},
+        {5, beta_buf.data_ptr()},
+        {6, post_scratch.data_ptr()},
+        {7, loss_out.data_ptr()},
+        {8, grad_out.data_ptr()},
+    };
+    std::vector<size_t> sizes = {
+        static_cast<size_t>(log_probs.numel() * log_probs.dtype_size()),
+        static_cast<size_t>(targets.numel() * dtype_size(targets.dtype())),
+        static_cast<size_t>(input_lengths.numel() * dtype_size(input_lengths.dtype())),
+        static_cast<size_t>(target_lengths.numel() * dtype_size(target_lengths.dtype())),
+        static_cast<size_t>(alpha_buf.numel() * alpha_buf.dtype_size()),
+        static_cast<size_t>(beta_buf.numel() * beta_buf.dtype_size()),
+        static_cast<size_t>(post_scratch.numel() * post_scratch.dtype_size()),
+        static_cast<size_t>(loss_out.numel() * loss_out.dtype_size()),
+        static_cast<size_t>(grad_out.numel() * grad_out.dtype_size()),
+    };
+
+    VkDescriptorSet descSet = allocateAndWriteDescriptorSet(
+        device_id, pipeline, bindings, sizes);
+
+    VkCommandBuffer cmdBuffer = beginSingleTimeCommands(device_id);
+    vkCmdBindPipeline(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
+    vkCmdBindDescriptorSets(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE,
+                            pipeline->layout(), 0, 1, &descSet, 0, nullptr);
+    vkCmdPushConstants(cmdBuffer, pipeline->layout(),
+                       VK_SHADER_STAGE_COMPUTE_BIT,
+                       0, sizeof(pc), &pc);
+    // One workgroup per batch element.
+    vkCmdDispatch(cmdBuffer, static_cast<uint32_t>(N), 1, 1);
+    insertComputeOnlyBarrier(cmdBuffer);
+    endSingleTimeCommands(cmdBuffer, device_id);
+
+    return {loss_out, grad_out};
+}
+
 } // namespace tenzor

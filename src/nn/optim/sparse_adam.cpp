@@ -163,6 +163,22 @@ auto SparseAdam::step_impl() -> void {
                         Tensor grad_rows = needs_upcast ? sg_values.to(state_dt)
                                                         : sg_values;
 
+                        // AA.2: sg.indices() lives on the producer's device
+                        // (usually CPU) even when the optimizer state /
+                        // parameters live on GPU. `index_select` / `scatter`
+                        // dispatch by the data tensor's device, so feeding a
+                        // CPU index tensor into a GPU index_select would
+                        // either fall back, error, or silently read garbage.
+                        // Move flat_row_idx onto the parameter's device and
+                        // ensure it's Int64 before the first use.
+                        const Device param_device = param.tensor().device();
+                        if (flat_row_idx.dtype() != DType::Int64) {
+                            flat_row_idx = flat_row_idx.to(DType::Int64);
+                        }
+                        if (flat_row_idx.device() != param_device) {
+                            flat_row_idx = flat_row_idx.to(param_device);
+                        }
+
                         auto m_rows = index_select(m_flat, 0, flat_row_idx);
                         auto v_rows = index_select(v_flat, 0, flat_row_idx);
 

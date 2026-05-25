@@ -14,6 +14,7 @@
 #include "tenzor/autograd/function.hpp"
 #include "tenzor/backend/fast_dispatch.hpp"
 #include "tenzor/backend/op_attributes.hpp"
+#include "tenzor/nn/utils/variable_cast.hpp"
 #include <stdexcept>
 #include <string>
 #include <cmath>
@@ -67,56 +68,80 @@ KLDivLoss::KLDivLoss(const std::string& reduction, bool log_target)
 auto KLDivLoss::forward(const Variable& input, const Variable& target) -> Variable {
     // KL(P||Q) = sum(P * (log(P) - log(Q)))
     // input = log(Q), target = P (or log(P) if log_target=true)
+    //
+    // AA.4: clamp(target, 1e-7, 1.0) and log() on Float16 collapse —
+    // 1e-7f < 6.1e-5 (F16 smallest normal), so the clamp lower bound
+    // rounds to 0 and log(0) blows up. exp(target) for log_target=true
+    // is also unstable in the narrow F16 dynamic range. Widen the whole
+    // computation to Float32 and cast the loss back to the input dtype
+    // at the end.
+    const DType orig_dtype = input.tensor().dtype();
+    const bool needs_upcast = (orig_dtype == DType::Float16 ||
+                               orig_dtype == DType::BFloat16);
+    Variable input_f32 = needs_upcast
+        ? tenzor::nn::variable_cast(input, DType::Float32)
+        : input;
+    Variable target_f32 = needs_upcast
+        ? tenzor::nn::variable_cast(target, DType::Float32)
+        : target;
 
+    Variable result;
     // Simplified implementation matching manual test
     if (!log_target_) {
         // Standard case: target contains probabilities, input contains log probabilities
-        auto target_clamped = clamp(target, 1e-7f, 1.0f);
+        auto target_clamped = clamp(target_f32, 1e-7f, 1.0f);
         auto log_target = log(target_clamped);
-        auto diff = log_target - input;
-        auto loss_unreduced = target * diff;
+        auto diff = log_target - input_f32;
+        auto loss_unreduced = target_f32 * diff;
 
         // Apply reduction inline
         if (reduction_ == "none") {
-            return loss_unreduced;
+            result = loss_unreduced;
         } else if (reduction_ == "mean") {
-            return mean(loss_unreduced);
+            result = mean(loss_unreduced);
         } else if (reduction_ == "sum") {
-            return sum(loss_unreduced);
+            result = sum(loss_unreduced);
         } else { // batchmean
             auto summed = sum(loss_unreduced);
-            int64_t batch_size = input.shape()[0];
+            int64_t batch_size = input_f32.shape()[0];
             if (batch_size > 0) {
                 auto scale = 1.0f / static_cast<float>(batch_size);
                 auto scale_var = scalar_var(scale, summed);
-                return summed * scale_var;
+                result = summed * scale_var;
+            } else {
+                result = mean(loss_unreduced);
             }
-            return mean(loss_unreduced);
         }
     } else {
         // log_target case: both inputs are log probabilities
-        auto exp_target = exp(target);
-        auto diff = target - input;
+        auto exp_target = exp(target_f32);
+        auto diff = target_f32 - input_f32;
         auto loss_unreduced = exp_target * diff;
 
         // Apply reduction inline
         if (reduction_ == "none") {
-            return loss_unreduced;
+            result = loss_unreduced;
         } else if (reduction_ == "mean") {
-            return mean(loss_unreduced);
+            result = mean(loss_unreduced);
         } else if (reduction_ == "sum") {
-            return sum(loss_unreduced);
+            result = sum(loss_unreduced);
         } else { // batchmean
             auto summed = sum(loss_unreduced);
-            int64_t batch_size = input.shape()[0];
+            int64_t batch_size = input_f32.shape()[0];
             if (batch_size > 0) {
                 auto scale = 1.0f / static_cast<float>(batch_size);
                 auto scale_var = scalar_var(scale, summed);
-                return summed * scale_var;
+                result = summed * scale_var;
+            } else {
+                result = mean(loss_unreduced);
             }
-            return mean(loss_unreduced);
         }
     }
+
+    if (needs_upcast) {
+        result = tenzor::nn::variable_cast(result, orig_dtype);
+    }
+    return result;
 }
 
 //==============================================================================
@@ -135,8 +160,25 @@ FocalLoss::FocalLoss(double alpha, double gamma, const std::string& reduction)
 
 auto FocalLoss::forward(const Variable& input, const Variable& target) -> Variable {
     // Focal Loss: FL(p_t) = -alpha * (1 - p_t)^gamma * log(p_t)
+    //
+    // AA.4: clamp(probs, 1e-7, 1 - 1e-7) and log/exp on Float16 collapse —
+    // 1e-7f < 6.1e-5 (F16 smallest normal), so the clamp lower bound rounds
+    // to 0, log(0) blows up, and gamma * log(1 - p) at small 1-p saturates
+    // the F16 dynamic range. Widen the entire computation to Float32 and
+    // cast the loss back to the input dtype at the end. `variable_cast`
+    // wires a TypeCastBackward node so gradients flow through the cast.
+    const DType orig_dtype = input.tensor().dtype();
+    const bool needs_upcast = (orig_dtype == DType::Float16 ||
+                               orig_dtype == DType::BFloat16);
+    Variable input_f32 = needs_upcast
+        ? tenzor::nn::variable_cast(input, DType::Float32)
+        : input;
+    Variable target_f32 = needs_upcast
+        ? tenzor::nn::variable_cast(target, DType::Float32)
+        : target;
+
     // Use log_softmax + exp for autograd-aware softmax computation
-    auto log_probs = tenzor::log_softmax(input, 1);  // This has autograd support
+    auto log_probs = tenzor::log_softmax(input_f32, 1);  // This has autograd support
     auto probs = exp(log_probs);  // This also has autograd support
 
     // Clamp to avoid numerical issues
@@ -161,12 +203,16 @@ auto FocalLoss::forward(const Variable& input, const Variable& target) -> Variab
 
     // Compute focal loss: -alpha * (1-p)^gamma * log(p) * target
     auto alpha_var = scalar_var(static_cast<float>(alpha_), modulating_factor);
-    auto loss_unreduced = neg(modulating_factor * alpha_var * log_probs_clamped * target);
+    auto loss_unreduced = neg(modulating_factor * alpha_var * log_probs_clamped * target_f32);
 
     // Sum over class dimension
     auto loss_per_sample = sum(loss_unreduced, 1, false);
 
-    return apply_reduction(loss_per_sample, reduction_);
+    Variable reduced = apply_reduction(loss_per_sample, reduction_);
+    if (needs_upcast) {
+        reduced = tenzor::nn::variable_cast(reduced, orig_dtype);
+    }
+    return reduced;
 }
 
 //==============================================================================

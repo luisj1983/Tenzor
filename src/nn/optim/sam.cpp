@@ -165,6 +165,16 @@ auto SAM::step(std::function<Variable()> closure) -> Variable {
     //    the (now perturbation-aware) gradients.
     second_step();
 
+    // AA.3: SAM's step(closure) drives the underlying optimizer via
+    // first_step()/second_step() — neither bumps the SAM-level step counter
+    // nor fires post-step hooks registered on the SAM wrapper itself.
+    // Pruning, EMA, etc. hooks that callers attach to the SAM optimizer
+    // would otherwise never re-fire after the initial registration, so
+    // re-impose dense masks would silently disappear. Replicate the
+    // bookkeeping that Optimizer::step() normally performs.
+    step_count_total_.fetch_add(1, std::memory_order_release);
+    fire_post_step_hooks_();
+
     return initial_loss;
 }
 

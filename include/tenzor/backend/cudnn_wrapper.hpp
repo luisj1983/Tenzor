@@ -74,16 +74,28 @@ private:
 
 class CuDNNWorkspace {
 public:
+    // Audit-6 AA.12: `get()` previously called `resize()` under no lock, so
+    // two streams hitting cuDNN concurrently could race: stream A's
+    // `cudaFree(buffer_)` would invalidate the pointer stream B's kernel
+    // was about to read. The cudaMalloc return code was also dropped, so
+    // OOM silently produced a nullptr that crashed deep in cuDNN.
+    //
+    // The immediate fix is a single mutex serialising both `get()` and
+    // `resize()` plus checked cudaMalloc. Stream-scoped workspaces and a
+    // proper retire-after-stream-sync are tracked as a follow-up; the
+    // mutex closes the wrong-math hazard now.
     static void* get(size_t required_size) {
         static CuDNNWorkspace instance;
+        std::lock_guard<std::mutex> lock(instance.mu_);
         if (required_size > instance.size_) {
-            instance.resize(required_size);
+            instance.resize_locked(required_size);
         }
         return instance.buffer_;
     }
 
     static size_t current_size() {
         static CuDNNWorkspace instance;
+        std::lock_guard<std::mutex> lock(instance.mu_);
         return instance.size_;
     }
 
@@ -117,17 +129,30 @@ private:
         }
     }
 
-    void resize(size_t new_size) {
+    // Caller must hold `mu_`.
+    void resize_locked(size_t new_size) {
         if (buffer_) {
             cudaFree(buffer_);
+            buffer_ = nullptr;
         }
         // Allocate with some extra headroom to reduce reallocations
         size_ = new_size + (new_size / 4);  // 25% extra
-        cudaMalloc(&buffer_, size_);
+        cudaError_t err = cudaMalloc(&buffer_, size_);
+        if (err != cudaSuccess) {
+            // Reset state so a later, smaller allocation can succeed
+            buffer_ = nullptr;
+            size_t failed_size = size_;
+            size_ = 0;
+            throw std::runtime_error(
+                std::string("CuDNNWorkspace: cudaMalloc(") +
+                std::to_string(failed_size) + ") failed: " +
+                cudaGetErrorString(err));
+        }
     }
 
     void* buffer_;
     size_t size_;
+    std::mutex mu_;
 };
 
 // ============================================================================

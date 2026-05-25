@@ -1167,22 +1167,78 @@ auto sqrt(const Variable& input) -> Variable {
 }
 
 auto pow(const Variable& input, double exponent) -> Variable {
+    // Audit-6 AA.5: PyTorch's pow contract requires `0^0 == 1` and
+    // `0^b == 0` for `b > 0`. The underlying tensor `pow(t, double)` does
+    // honour C99 pow semantics on most backends, but exponent == 0 also
+    // needs ones_like even when the input contains NaN/Inf entries (per
+    // IEEE 754 and PyTorch). Short-circuit those two scalar cases here so
+    // the result is unambiguous across every backend.
+    if (exponent == 0.0) {
+        // 0-d exponent: result is identically 1 for every input element.
+        auto ones = tenzor::ones_like(input.tensor());
+        return Variable(ones, false);
+    }
     return unary_autograd_with_param<PowBackward>(input, exponent,
         [exponent](const Tensor& t) { return tenzor::pow(t, exponent); });
 }
 
-// Audit-5 Z.20: Variable ** Variable and scalar ** Variable. Implemented
-// as exp(b * log(a)) so the chain rule yields the correct partial
-// derivatives via the autograd-aware exp / log / multiplication. Both
-// inputs propagate grad_fn naturally.
+// Audit-5 Z.20 / audit-6 AA.5: Variable ** Variable and scalar ** Variable.
+// The naive `exp(b * log(a))` form is NaN at `a == 0` because `log(0) = -inf`
+// and `0 * -inf = NaN`. PyTorch's contract is:
+//   - `0 ^ b == 1`  if b == 0
+//   - `0 ^ b == 0`  if b > 0
+//   - `0 ^ b == inf` if b < 0  (mathematically a singularity; we fold this
+//                                into the exp(b*log(0)) = exp(-inf*b<0) = inf
+//                                produced by the standard branch, which is
+//                                what PyTorch does)
+//   - `(-a) ^ b` for a > 0 and b non-integer is NaN (unchanged).
+//
+// We branch on `base == 0` and route the zero-base case through a
+// `where(b == 0, 1, 0)` to avoid the `0 * -inf = NaN` hazard. We use a
+// `where(base == 0, 1, base)` "safe base" inside the `exp(b*log(.))` branch
+// so the log is never applied to literal zero (its result is discarded by
+// the outer where, but it must not be NaN in case of downstream chain-rule).
 auto pow(const Variable& base, const Variable& exponent) -> Variable {
-    // exp(exponent * log(base))
-    return ::tenzor::exp(exponent * ::tenzor::log(base));
+    // Build a "safe base" tensor that replaces zeros with ones so `log(.)`
+    // produces finite values; the outer `where` discards those entries.
+    auto zero_t = tenzor::zeros_like(base.tensor());
+    auto one_t = tenzor::ones_like(base.tensor());
+    Variable zero_var(zero_t, false);
+    Variable one_var(one_t, false);
+
+    auto base_is_zero = ::tenzor::eq(base, zero_var);
+
+    // Zero-base branch: where(exp == 0, 1, 0). Build via Variable ops so
+    // the gradient routing is consistent (this branch has no input-grad
+    // contribution because both 1 and 0 are constants here, which matches
+    // PyTorch — see Note in torch/csrc/autograd/FunctionsManual.cpp).
+    auto exp_is_zero = ::tenzor::eq(exponent, zero_var);
+    auto zero_base_result = ::tenzor::where(exp_is_zero, one_var, zero_var);
+
+    // Standard branch with safe base so we never call log(0).
+    auto safe_base = ::tenzor::where(base_is_zero, one_var, base);
+    auto standard_result = ::tenzor::exp(exponent * ::tenzor::log(safe_base));
+
+    return ::tenzor::where(base_is_zero, zero_base_result, standard_result);
 }
 
 auto pow(double base, const Variable& exponent) -> Variable {
-    // exp(exponent * log(base)); log(base) is a runtime constant captured
-    // into the graph as a scalar multiplier of the differentiable exponent.
+    // Scalar base case. Folds into the constant-base path:
+    //   - base > 0: log(base) is a constant; result is exp(b * log(base)).
+    //   - base == 0: result is `where(b == 0, 1, 0)`. (b < 0 gives `inf`
+    //                in the standard branch, which is the IEEE result we
+    //                want.) We don't emit `log(0) = -inf` into the graph.
+    //   - base < 0: NaN unless b is an integer; PyTorch returns NaN here
+    //                in the autograd path, which is what `log(base) = nan`
+    //                yields naturally.
+    if (base == 0.0) {
+        auto zero_t = tenzor::zeros_like(exponent.tensor());
+        auto one_t = tenzor::ones_like(exponent.tensor());
+        Variable zero_var(zero_t, false);
+        Variable one_var(one_t, false);
+        auto exp_is_zero = ::tenzor::eq(exponent, zero_var);
+        return ::tenzor::where(exp_is_zero, one_var, zero_var);
+    }
     double log_base = std::log(base);
     return ::tenzor::exp(exponent * log_base);
 }

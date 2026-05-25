@@ -45,6 +45,9 @@ namespace {
 constexpr int CTC_THREADS_PER_BLOCK = 128;
 
 __device__ __forceinline__ float log_add(float a, float b) {
+    // -fno-fast-math is forced on this file via the ROCm CMakeLists so
+    // -INFINITY semantics are reliable; the global -ffast-math flag would
+    // otherwise let the compiler eliminate -inf-comparison branches.
     constexpr float NEG_INF = -INFINITY;
     if (a == NEG_INF) return b;
     if (b == NEG_INF) return a;
@@ -59,6 +62,7 @@ __global__ void ctc_forward_backward_kernel(
     const int32_t* __restrict__ target_lengths,
     float* __restrict__ alpha_buf,
     float* __restrict__ beta_buf,
+    float* __restrict__ post_scratch,  // (N, T_max, C) log-posterior scratch
     float* __restrict__ loss_out,
     float* __restrict__ grad_out,
     int64_t T_max,
@@ -78,6 +82,9 @@ __global__ void ctc_forward_backward_kernel(
     const int32_t S_n = target_lengths[n];
     const int64_t L_n = 2 * S_n + 1;
 
+    // -fno-fast-math is forced on this file via the ROCm CMakeLists so
+    // -INFINITY semantics are reliable; the global -ffast-math flag would
+    // otherwise let the compiler eliminate -inf-comparison branches.
     constexpr float NEG_INF = -INFINITY;
 
     float* alpha = alpha_buf + n * T_max * L_max;
@@ -183,39 +190,44 @@ __global__ void ctc_forward_backward_kernel(
         return;
     }
 
-    // Zero the grad slice for this batch element.
+    // AA.10 fix: accumulate log-posteriors into a dedicated per-block
+    // scratch tile (post_scratch[n, t, c]) for all t first; only after
+    // every t has been processed do we read log_probs and convert to the
+    // final gradient. The previous in-place implementation aliased the
+    // global grad_out cell as both log-space accumulator and final
+    // exp-space gradient — partial writes from iteration t leaked into
+    // iteration t+1 readers, producing +inf grads. CPU reference uses a
+    // private std::vector per batch element; this is the GPU equivalent.
+    float* post_n = post_scratch + n * T_max * C;
+
     for (int64_t idx = tid; idx < T_max * C; idx += nthreads) {
         int64_t t = idx / C;
         int64_t c = idx % C;
         grad_out[t * N * C + n * C + c] = 0.0f;
+        post_n[t * C + c] = NEG_INF;
     }
     __syncthreads();
 
-    for (int64_t t = 0; t < T_n; ++t) {
-        for (int64_t c = tid; c < C; c += nthreads) {
-            grad_out[t * N * C + n * C + c] = NEG_INF;
-        }
-        __syncthreads();
-
-        if (tid == 0) {
+    if (tid == 0) {
+        for (int64_t t = 0; t < T_n; ++t) {
             for (int64_t s = 0; s < L_n; ++s) {
                 int32_t c = ext_label(s);
                 float posterior = alpha[t * L_max + s] + beta[t * L_max + s];
-                float& slot = grad_out[t * N * C + n * C + c];
+                float& slot = post_n[t * C + c];
                 slot = log_add(slot, posterior);
             }
         }
-        __syncthreads();
+    }
+    __syncthreads();
 
-        for (int64_t c = tid; c < C; c += nthreads) {
-            float lp = log_probs[t * N * C + n * C + c];
-            float& slot = grad_out[t * N * C + n * C + c];
-            float prob = expf(lp);
-            float post = slot;
-            float post_prob = (post == NEG_INF) ? 0.0f : expf(post - logZ);
-            slot = prob - post_prob;
-        }
-        __syncthreads();
+    for (int64_t idx = tid; idx < T_n * C; idx += nthreads) {
+        int64_t t = idx / C;
+        int64_t c = idx % C;
+        float lp = log_probs[t * N * C + n * C + c];
+        float post = post_n[t * C + c];
+        float prob = expf(lp);
+        float post_prob = (post == NEG_INF) ? 0.0f : expf(post - logZ);
+        grad_out[t * N * C + n * C + c] = prob - post_prob;
     }
 }
 
@@ -261,6 +273,10 @@ auto ctc_loss_forward_kernel(
     int64_t alpha_elems = N * T_max * L_max;
     Tensor alpha_buf({alpha_elems}, DType::Float32, log_probs.device());
     Tensor beta_buf({alpha_elems}, DType::Float32, log_probs.device());
+    // AA.10: per-block (T_max, C) scratch for log-space posterior
+    // accumulation — must not alias grad_out.
+    int64_t post_elems = N * T_max * C;
+    Tensor post_scratch({post_elems}, DType::Float32, log_probs.device());
 
     if (N == 0 || T_max == 0 || C == 0) {
         if (loss_out.numel() > 0) {
@@ -285,6 +301,7 @@ auto ctc_loss_forward_kernel(
                        target_lengths.data<int32_t>(),
                        alpha_buf.data<float>(),
                        beta_buf.data<float>(),
+                       post_scratch.data<float>(),
                        loss_out.data<float>(),
                        grad_out.data<float>(),
                        T_max, N, C, S_max, L_max,

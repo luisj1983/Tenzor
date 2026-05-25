@@ -4699,6 +4699,23 @@ Returns:
         // it is the same contract Tensor has had since R.18, and matches
         // PyTorch's behaviour for the in-place index_put_ pattern.
         .def("__setitem__", [](tenzor::Variable& self, py::object key, py::object value) {
+            // Audit-6 AA.9: PyTorch's contract — a leaf Variable that
+            // `requires_grad` cannot be the target of an in-place op because
+            // the write would silently discard the leaf invariant
+            // (`leaf.grad_fn == None`, `leaf.version_counter` unchanged).
+            // Previously Tenzor wrote through `self.tensor()` with no guard;
+            // saved-for-backward tensors then observed stale values without
+            // any version-counter trip, producing wrong gradients with no
+            // diagnostic. The long-term fix is to wire __setitem__ through
+            // an autograd `CopySlices` node with a version bump; the
+            // immediate fix is to refuse the write so the bug stops being
+            // silent.
+            if (self.requires_grad() && self.is_leaf()) {
+                throw py::value_error(
+                    "a leaf Variable that requires grad is being used in an "
+                    "in-place operation (Variable.__setitem__). Detach the "
+                    "Variable first or wrap the write in a no_grad() block.");
+            }
             // Delegate to Tensor.__setitem__ semantics by reusing the
             // underlying tensor reference. Unwrap a Variable value to its
             // tensor first so the broadcast path sees a Tensor as expected.
@@ -4710,7 +4727,8 @@ Returns:
             py::object py_dst = py::cast(&dst, py::return_value_policy::reference);
             py_dst.attr("__setitem__")(key, inner_value);
         }, py::arg("key"), py::arg("value"),
-           "Assign to variable slice/element (in-place; not differentiable through the write)")
+           "Assign to variable slice/element (in-place; not differentiable through the write). "
+           "Raises ValueError on a leaf Variable with requires_grad=True (PyTorch contract).")
         .def_property_readonly("strides", [](const tenzor::Variable& v) {
             auto s = v.tensor().strides();
             py::tuple result(s.size());

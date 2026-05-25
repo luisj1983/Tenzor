@@ -68,6 +68,7 @@ __global__ void ctc_forward_backward_kernel(
     const int32_t* __restrict__ target_lengths,  // (N,)
     float* __restrict__ alpha_buf,         // (N, T_max, L_max) workspace
     float* __restrict__ beta_buf,          // (N, T_max, L_max) workspace
+    float* __restrict__ post_scratch,      // (N, T_max, C) per-block log-posterior scratch
     float* __restrict__ loss_out,          // (N,)
     float* __restrict__ grad_out,          // (T_max, N, C)
     int64_t T_max,
@@ -209,12 +210,16 @@ __global__ void ctc_forward_backward_kernel(
     //   grad[t, c] = exp(log_probs[t, c])
     //              - sum_{s : ext_label[s] == c} exp(alpha[t,s] + beta[t,s] - logZ)
     //
-    // Implemented in two passes per (t, c):
-    //   pass 1: log_sum_{s : ext_label[s] == c} (alpha[t,s] + beta[t,s])
-    //   pass 2: combine with exp(log_probs) and subtract.
-    //
-    // Threads parallelise over c (with T sequential because alpha/beta
-    // are per-timestep but reads are independent across (t, c)).
+    // AA.10 fix: accumulate log-posteriors into a dedicated per-block
+    // scratch tile (post_scratch[(n, t, c)]) for *all* t first; only after
+    // every t has been processed do we read log_probs and convert to the
+    // final gradient.  The previous in-place implementation aliased the
+    // global grad_out cell as both the log-space accumulator (initialised
+    // to NEG_INF) and the final exp-space gradient — partial writes from
+    // iteration t leaked into iteration t+1 readers on backends that
+    // cache global memory across __syncthreads(), producing +inf grads.
+    // The CPU reference avoids this by using a private std::vector per
+    // batch element; the scratch tile is the GPU equivalent.
     // ----------------------------------------------------------------
 
     if (zero_infinity && is_inf) {
@@ -227,72 +232,50 @@ __global__ void ctc_forward_backward_kernel(
         return;
     }
 
-    // First, zero the grad slice for this batch element.
+    // Per-block scratch slice [(t, c)] inside post_scratch[n, *, *].
+    float* post_n = post_scratch + n * T_max * C;
+
+    // First, zero the grad slice for this batch element (handles t >= T_n
+    // padding) and seed the scratch with NEG_INF so log_add picks up the
+    // first posterior cleanly.
     for (int64_t idx = tid; idx < T_max * C; idx += nthreads) {
         int64_t t = idx / C;
         int64_t c = idx % C;
         grad_out[t * N * C + n * C + c] = 0.0f;
+        post_n[t * C + c] = NEG_INF;
     }
     __syncthreads();
 
-    for (int64_t t = 0; t < T_n; ++t) {
-        // Accumulate log-posterior per class via log-sum-exp. Multiple
-        // ext_label positions can map to the same class c (the blank in
-        // particular appears at every even index). We do this serialised
-        // per (t) by a single thread to avoid races; given L is usually
-        // small relative to C, the cost is negligible vs the matmul work
-        // already done. Future optimisation: scatter to per-c accumulators
-        // with per-class locks, but the simple serialised version is
-        // correct and clear.
-        if (tid == 0) {
-            // Initialise: log_posterior[c] = NEG_INF (use grad slot as
-            // scratch, NEG_INF sentinel encoded as a huge negative finite
-            // number isn't safe — use a per-block scratch tile in shared
-            // memory keyed by c). For simplicity and clarity we encode
-            // "no contribution" via the grad value itself being NaN
-            // sentinel, but that's fragile. Instead, accumulate into
-            // grad_out[t, n, c] in *log* space, then in a second pass
-            // convert.
-            //
-            // Use grad cell as the running log-sum-exp accumulator. We
-            // already zeroed it above; convert "0" to "no contribution"
-            // by tracking a parallel hit-mask. The simplest correct path:
-            // initialise the per-c accumulator to NEG_INF in a separate
-            // tile, then write back.
-        }
-        // Per-class accumulator in shared memory would need O(C) shared,
-        // which can exceed 48KB for large C. Use global memory: write
-        // log-posterior to grad_out cell (initial NEG_INF), update by
-        // log_add. We re-init grad slice to NEG_INF for this t below.
-        for (int64_t c = tid; c < C; c += nthreads) {
-            grad_out[t * N * C + n * C + c] = NEG_INF;
-        }
-        __syncthreads();
-
-        // Single-thread accumulation across L_n positions for this t.
-        if (tid == 0) {
+    // Pass 1: accumulate log-posteriors per (t, c) in private scratch.
+    // Serialised per t over L_n positions (which is small), parallelised
+    // over t when L is small enough that no thread is the bottleneck.
+    // For simplicity we keep the proven single-thread accumulation over s
+    // (matches CPU reference exactly).
+    if (tid == 0) {
+        for (int64_t t = 0; t < T_n; ++t) {
             for (int64_t s = 0; s < L_n; ++s) {
                 int32_t c = ext_label(s);
                 float posterior = alpha[t * L_max + s] + beta[t * L_max + s];
-                float& slot = grad_out[t * N * C + n * C + c];
+                float& slot = post_n[t * C + c];
                 slot = log_add(slot, posterior);
             }
         }
-        __syncthreads();
+    }
+    __syncthreads();
 
-        // Convert log-posterior to gradient.
-        for (int64_t c = tid; c < C; c += nthreads) {
-            float lp = log_probs[t * N * C + n * C + c];
-            float& slot = grad_out[t * N * C + n * C + c];
-            float prob = expf(lp);
-            float post = slot;  // may be NEG_INF if no s maps here
-            float post_prob = (post == NEG_INF) ? 0.0f : expf(post - logZ);
-            slot = prob - post_prob;
-        }
-        __syncthreads();
+    // Pass 2: convert log-posterior to gradient by combining with
+    // exp(log_probs) and subtracting. All threads parallelise over (t, c).
+    for (int64_t idx = tid; idx < T_n * C; idx += nthreads) {
+        int64_t t = idx / C;
+        int64_t c = idx % C;
+        float lp = log_probs[t * N * C + n * C + c];
+        float post = post_n[t * C + c];
+        float prob = expf(lp);
+        float post_prob = (post == NEG_INF) ? 0.0f : expf(post - logZ);
+        grad_out[t * N * C + n * C + c] = prob - post_prob;
     }
 
-    // Pad: t in [T_n, T_max) should be zero (already from the zero init).
+    // Pad: t in [T_n, T_max) is already zeroed above.
 }
 
 } // anonymous namespace
@@ -343,6 +326,11 @@ auto ctc_loss_forward_kernel(
     int64_t alpha_elems = N * T_max * L_max;
     Tensor alpha_buf({alpha_elems}, DType::Float32, log_probs.device());
     Tensor beta_buf({alpha_elems}, DType::Float32, log_probs.device());
+    // AA.10: per-block (T_max, C) scratch for log-space posterior
+    // accumulation — must not alias grad_out, or partial writes from
+    // iteration t leak into iteration t+1's readers.
+    int64_t post_elems = N * T_max * C;
+    Tensor post_scratch({post_elems}, DType::Float32, log_probs.device());
 
     if (N == 0 || T_max == 0 || C == 0) {
         // Zero-sized tensors: nothing to do. Zero out outputs for safety.
@@ -370,6 +358,7 @@ auto ctc_loss_forward_kernel(
         target_lengths.data<int32_t>(),
         alpha_buf.data<float>(),
         beta_buf.data<float>(),
+        post_scratch.data<float>(),
         loss_out.data<float>(),
         grad_out.data<float>(),
         T_max, N, C, S_max, L_max,

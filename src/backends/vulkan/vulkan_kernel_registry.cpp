@@ -1184,16 +1184,21 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
                 mode, include_last_offset)};
         });
 
-    // CTC Loss (audit Phase 3.7)
-    // Vulkan compute-shader port of src/backends/cuda/kernels/ctc.cu is TODO.
-    // Throws so the dispatcher never silently falls back to CPU.
+    // CTC Loss (audit Phase 3.7 + AA.11)
+    // Vulkan SPIR-V compute shader port of src/backends/cuda/kernels/ctc.cu;
+    // see src/backends/vulkan/kernels/ctc_forward.comp and
+    // VulkanBackend::dispatchCTCLossForward in vulkan_ops_misc.cpp.
     table.register_kernel(OpId::CTCLossForward,
-        [](std::span<const Tensor>, const OpAttributes&) -> std::vector<Tensor> {
-            throw std::runtime_error(
-                "CTCLossForward on Vulkan: not implemented. "
-                "Port src/backends/cuda/kernels/ctc.cu to a SPIR-V compute "
-                "shader, or run the loss on the CPU device "
-                "(no silent fallback is permitted).");
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            if (inputs.size() != 4) {
+                throw std::invalid_argument(
+                    "CTCLossForward (Vulkan): expected 4 inputs "
+                    "[log_probs, targets, input_lengths, target_lengths]");
+            }
+            int64_t blank = attrs.get_int(AttrKey::Blank, 0);
+            bool zero_infinity = attrs.get_bool(AttrKey::ZeroInfinity, false);
+            return get_vulkan_backend()->dispatchCTCLossForward(
+                inputs[0], inputs[1], inputs[2], inputs[3], blank, zero_infinity);
         });
 
     // ========================================================================

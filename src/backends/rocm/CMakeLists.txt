@@ -98,6 +98,16 @@ set_source_files_properties(kernels/normalization.hip.cpp
     PROPERTIES COMPILE_FLAGS "-fno-fast-math"
 )
 
+# AA.10: ctc_loss relies on IEEE -inf semantics for its log-add sentinel
+# (NEG_INF), isfinite() for zero_infinity branch, and log1p/exp at the
+# extremes of the log-sum-exp reduction. -ffast-math implies
+# -ffinite-math-only which makes isfinite() always true and lets the
+# compiler eliminate -inf-comparison branches, producing NaN forward
+# outputs for any T > ~25.
+set_source_files_properties(kernels/ctc_loss.hip.cpp
+    PROPERTIES COMPILE_FLAGS "-fno-fast-math"
+)
+
 # Create HIP kernels library (static, internal use only)
 add_library(tenzor_rocm_kernels STATIC ${ROCM_HIP_SOURCES})
 
