@@ -114,7 +114,16 @@ auto FSDP2::shard_parameters() -> void {
     // share the param's TensorImpl) holds from cycle 1 onward, and cycle 0
     // can't have prior activations to orphan because forward has not run
     // yet at shard time.
-    unsharded_dst_.clear();
+    //
+    // EE.13: do NOT clear unsharded_dst_/sharded_dst_ here. shard_parameters()
+    // may be called mid-training (e.g. after add_param_group) and the
+    // persistent slots from prior cycles already have stable TensorImpls
+    // captured by saved-for-backward activations. Clearing them forces the
+    // next unshard_params() into the !slot_valid adoption branch, which
+    // swaps param->tensor() to a new TensorImpl and orphans those captures.
+    // unshard_params() itself handles dtype/shape transitions (e.g. mixed
+    // precision reconfig) via the slot_valid check and falls through to
+    // the adoption path only when the existing slot is genuinely incompatible.
 
     is_sharded_ = true;
 }
@@ -275,11 +284,38 @@ auto FSDP2::unshard_params() -> void {
                                                        slot_it->second.shape().end()) == full_shape;
 
                 if (!slot_valid) {
-                    // First unshard for this parameter (or layout/dtype change
-                    // due to mixed-precision reconfiguration).  Take ownership
-                    // of the freshly-allgathered tensor; subsequent cycles
-                    // will copy into this slot in-place.
-                    unsharded_dst_[name] = full;
+                    // EE.13: if a slot exists from a prior shard cycle (e.g.
+                    // shard_parameters() was called mid-training via
+                    // add_param_group), reuse its TensorImpl via the in-place
+                    // zero_/add_ path so saved-for-backward activations that
+                    // captured the prior unsharded layout remain valid.
+                    // R.18 preserved.
+                    //
+                    // Only on the very first shard (no prior slot) — or when
+                    // dtype/device/numel/shape genuinely changed (mixed
+                    // precision reconfig) and the slot bytes can no longer
+                    // be reused — take the fresh-adoption path.
+                    auto existing_it = unsharded_dst_.find(name);
+                    bool has_prior_slot = (existing_it != unsharded_dst_.end()) &&
+                                          existing_it->second.is_valid();
+                    bool shape_compatible = has_prior_slot &&
+                                            existing_it->second.dtype() == full.dtype() &&
+                                            existing_it->second.device() == full.device() &&
+                                            existing_it->second.numel() == full.numel() &&
+                                            std::vector<int64_t>(
+                                                existing_it->second.shape().begin(),
+                                                existing_it->second.shape().end()) == full_shape;
+                    if (shape_compatible) {
+                        Tensor& slot = existing_it->second;
+                        slot.zero_();
+                        add_(slot, full);
+                    } else {
+                        // First unshard for this parameter (or layout/dtype change
+                        // due to mixed-precision reconfiguration).  Take ownership
+                        // of the freshly-allgathered tensor; subsequent cycles
+                        // will copy into this slot in-place.
+                        unsharded_dst_[name] = full;
+                    }
                 } else {
                     Tensor& slot = slot_it->second;
                     slot.zero_();

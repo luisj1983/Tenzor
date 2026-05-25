@@ -58,8 +58,7 @@ auto Adam::step_impl() -> void {
             hp.beta1        = ParamGroup::or_else(g->beta1, beta1_);
             hp.beta2        = ParamGroup::or_else(g->beta2, beta2_);
             hp.eps          = ParamGroup::or_else(g->eps,   eps_);
-            // amsgrad isn't currently a ParamGroup field — kept on
-            // the optimizer member for now (D.4 follow-up).
+            hp.amsgrad      = ParamGroup::or_else(g->amsgrad, amsgrad_);
         }
         return hp;
     };
@@ -482,6 +481,7 @@ auto AdamW::step_impl() -> void {
             hp.beta1        = ParamGroup::or_else(g->beta1, beta1_);
             hp.beta2        = ParamGroup::or_else(g->beta2, beta2_);
             hp.eps          = ParamGroup::or_else(g->eps,   eps_);
+            hp.amsgrad      = ParamGroup::or_else(g->amsgrad, amsgrad_);
         }
         return hp;
     };

@@ -62,18 +62,89 @@ void register_optim(py::module_& m) {
                    ", norm_type=" + std::to_string(self.norm_type) + ")";
         });
 
-    // ParamGroup struct for per-group hyperparameters
+    // ParamGroup struct for per-group hyperparameters.
+    // EE.16: PyTorch parity — param_groups accept any optimiser hyperparam
+    // override per group. The struct already carries optional fields for
+    // momentum/dampening/nesterov/beta1/beta2/eps/amsgrad/centered/alpha/
+    // rho/lr_decay/initial_accumulator_value (see optimizer.hpp); expose
+    // them all as kwargs on the constructor and as read/write properties.
+    // Each individual optimiser's step_impl() resolves the per-group value
+    // via ParamGroup::or_else(g->field, member_default).
     py::class_<tenzor::optim::ParamGroup>(optim, "ParamGroup",
-        "Parameter group with individual learning rate and weight decay")
-        .def(py::init([](std::vector<std::shared_ptr<tenzor::Variable>> params, double lr, double weight_decay) {
-            return tenzor::optim::ParamGroup{std::move(params), lr, weight_decay};
-        }), py::arg("params"), py::arg("lr"), py::arg("weight_decay") = 0.0)
+        "Parameter group with per-group hyperparameter overrides")
+        .def(py::init([](std::vector<std::shared_ptr<tenzor::Variable>> params,
+                         double lr,
+                         double weight_decay,
+                         std::optional<double> momentum,
+                         std::optional<double> dampening,
+                         std::optional<bool>   nesterov,
+                         std::optional<double> beta1,
+                         std::optional<double> beta2,
+                         std::optional<double> eps,
+                         std::optional<bool>   amsgrad,
+                         std::optional<bool>   centered,
+                         std::optional<double> alpha,
+                         std::optional<double> rho,
+                         std::optional<double> lr_decay,
+                         std::optional<double> initial_accumulator_value) {
+            tenzor::optim::ParamGroup g{std::move(params), lr, weight_decay};
+            g.momentum                   = momentum;
+            g.dampening                  = dampening;
+            g.nesterov                   = nesterov;
+            g.beta1                      = beta1;
+            g.beta2                      = beta2;
+            g.eps                        = eps;
+            g.amsgrad                    = amsgrad;
+            g.centered                   = centered;
+            g.alpha                      = alpha;
+            g.rho                        = rho;
+            g.lr_decay                   = lr_decay;
+            g.initial_accumulator_value  = initial_accumulator_value;
+            return g;
+        }), py::arg("params"), py::arg("lr"), py::arg("weight_decay") = 0.0,
+            py::arg("momentum")                  = py::none(),
+            py::arg("dampening")                 = py::none(),
+            py::arg("nesterov")                  = py::none(),
+            py::arg("beta1")                     = py::none(),
+            py::arg("beta2")                     = py::none(),
+            py::arg("eps")                       = py::none(),
+            py::arg("amsgrad")                   = py::none(),
+            py::arg("centered")                  = py::none(),
+            py::arg("alpha")                     = py::none(),
+            py::arg("rho")                       = py::none(),
+            py::arg("lr_decay")                  = py::none(),
+            py::arg("initial_accumulator_value") = py::none())
         .def_readwrite("params", &tenzor::optim::ParamGroup::params,
              "Parameters in this group")
         .def_readwrite("lr", &tenzor::optim::ParamGroup::lr,
              "Learning rate for this group")
         .def_readwrite("weight_decay", &tenzor::optim::ParamGroup::weight_decay,
              "Weight decay (L2 regularization) for this group")
+        .def_readwrite("momentum", &tenzor::optim::ParamGroup::momentum,
+             "Per-group SGD/RMSprop momentum (None = use optimiser default)")
+        .def_readwrite("dampening", &tenzor::optim::ParamGroup::dampening,
+             "Per-group SGD dampening (None = use optimiser default)")
+        .def_readwrite("nesterov", &tenzor::optim::ParamGroup::nesterov,
+             "Per-group SGD Nesterov flag (None = use optimiser default)")
+        .def_readwrite("beta1", &tenzor::optim::ParamGroup::beta1,
+             "Per-group Adam-family beta1 (None = use optimiser default)")
+        .def_readwrite("beta2", &tenzor::optim::ParamGroup::beta2,
+             "Per-group Adam-family beta2 (None = use optimiser default)")
+        .def_readwrite("eps", &tenzor::optim::ParamGroup::eps,
+             "Per-group eps (None = use optimiser default)")
+        .def_readwrite("amsgrad", &tenzor::optim::ParamGroup::amsgrad,
+             "Per-group AMSGrad flag (None = use optimiser default)")
+        .def_readwrite("centered", &tenzor::optim::ParamGroup::centered,
+             "Per-group RMSprop centered flag (None = use optimiser default)")
+        .def_readwrite("alpha", &tenzor::optim::ParamGroup::alpha,
+             "Per-group RMSprop/ASGD alpha (None = use optimiser default)")
+        .def_readwrite("rho", &tenzor::optim::ParamGroup::rho,
+             "Per-group Adadelta rho (None = use optimiser default)")
+        .def_readwrite("lr_decay", &tenzor::optim::ParamGroup::lr_decay,
+             "Per-group Adagrad lr_decay (None = use optimiser default)")
+        .def_readwrite("initial_accumulator_value",
+             &tenzor::optim::ParamGroup::initial_accumulator_value,
+             "Per-group Adagrad initial_accumulator_value (None = use default)")
         .def("__repr__", [](const tenzor::optim::ParamGroup& self) {
             return "ParamGroup(params=" + std::to_string(self.params.size()) +
                    ", lr=" + std::to_string(self.lr) +

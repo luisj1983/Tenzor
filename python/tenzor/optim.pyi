@@ -4,10 +4,55 @@ from __future__ import annotations
 from typing import List, Dict, Any, Optional, Callable, Tuple, Iterable
 from tenzor import Tensor
 
+class ParamGroup:
+    """Parameter group with per-group hyperparameter overrides.
+
+    Mirrors the C++ ``tenzor::optim::ParamGroup`` struct exposed by
+    ``bindings_optim.cpp``. Every hyperparameter (except ``params``, ``lr``,
+    and ``weight_decay``) is optional; unset fields fall back to the owning
+    optimiser's default at ``step()`` time (see ``ParamGroup::or_else`` in
+    ``optimizer.hpp``).
+    """
+
+    params: List[Tensor]
+    lr: float
+    weight_decay: float
+    momentum: Optional[float]
+    dampening: Optional[float]
+    nesterov: Optional[bool]
+    beta1: Optional[float]
+    beta2: Optional[float]
+    eps: Optional[float]
+    amsgrad: Optional[bool]
+    centered: Optional[bool]
+    alpha: Optional[float]
+    rho: Optional[float]
+    lr_decay: Optional[float]
+    initial_accumulator_value: Optional[float]
+
+    def __init__(
+        self,
+        params: List[Tensor],
+        lr: float,
+        weight_decay: float = 0.0,
+        momentum: Optional[float] = None,
+        dampening: Optional[float] = None,
+        nesterov: Optional[bool] = None,
+        beta1: Optional[float] = None,
+        beta2: Optional[float] = None,
+        eps: Optional[float] = None,
+        amsgrad: Optional[bool] = None,
+        centered: Optional[bool] = None,
+        alpha: Optional[float] = None,
+        rho: Optional[float] = None,
+        lr_decay: Optional[float] = None,
+        initial_accumulator_value: Optional[float] = None,
+    ) -> None: ...
+
 class Optimizer:
     """Base class for all optimizers."""
 
-    param_groups: List[Dict[str, Any]]
+    param_groups: List[ParamGroup]
     defaults: Dict[str, Any]
 
     def __init__(self, params: Iterable[Tensor], defaults: Dict[str, Any]) -> None: ...
@@ -16,7 +61,7 @@ class Optimizer:
     def step(self, closure: Optional[Callable[[], float]] = None) -> Optional[float]: ...
     def state_dict(self) -> Dict[str, Any]: ...
     def load_state_dict(self, state_dict: Dict[str, Any]) -> None: ...
-    def add_param_group(self, param_group: Dict[str, Any]) -> None: ...
+    def add_param_group(self, param_group: ParamGroup) -> None: ...
 
 class SGD(Optimizer):
     """Stochastic Gradient Descent optimizer."""

@@ -64,7 +64,8 @@ struct VariableImpl {
           next_hook_id_(other.next_hook_id_.load(std::memory_order_acquire)),
           grad_mutex_(other.grad_mutex_),  // Share mutex — copies share grad_ storage
           thread_safe_(other.thread_safe_.load(std::memory_order_acquire)),
-          creation_metadata_(other.creation_metadata_) {}
+          creation_metadata_(other.creation_metadata_),
+          preserve_grad_dtype_(other.preserve_grad_dtype_.load(std::memory_order_acquire)) {}
 
     VariableImpl(VariableImpl&& other) noexcept
         : data_(std::move(other.data_)),
@@ -77,7 +78,8 @@ struct VariableImpl {
           hooks_([&]() { std::unique_lock lock(other.hooks_mutex_); return std::move(other.hooks_); }()),
           next_hook_id_(other.next_hook_id_.load(std::memory_order_acquire)),
           grad_mutex_(std::move(other.grad_mutex_)),
-          thread_safe_(other.thread_safe_.load(std::memory_order_acquire)) {}
+          thread_safe_(other.thread_safe_.load(std::memory_order_acquire)),
+          preserve_grad_dtype_(other.preserve_grad_dtype_.load(std::memory_order_acquire)) {}
 
     VariableImpl& operator=(const VariableImpl& other) {
         if (this != &other) {
@@ -102,6 +104,7 @@ struct VariableImpl {
             next_hook_id_.store(other.next_hook_id_.load(std::memory_order_relaxed), std::memory_order_relaxed);
             grad_mutex_ = other.grad_mutex_;
             thread_safe_.store(other.thread_safe_.load(std::memory_order_relaxed), std::memory_order_relaxed);
+            preserve_grad_dtype_.store(other.preserve_grad_dtype_.load(std::memory_order_relaxed), std::memory_order_relaxed);
         }
         return *this;
     }
@@ -127,6 +130,7 @@ struct VariableImpl {
             next_hook_id_.store(other.next_hook_id_.load(std::memory_order_relaxed), std::memory_order_relaxed);
             grad_mutex_ = std::move(other.grad_mutex_);
             thread_safe_.store(other.thread_safe_.load(std::memory_order_relaxed), std::memory_order_relaxed);
+            preserve_grad_dtype_.store(other.preserve_grad_dtype_.load(std::memory_order_relaxed), std::memory_order_relaxed);
         }
         return *this;
     }
@@ -196,6 +200,12 @@ struct VariableImpl {
     /// Forward-pass creation metadata for anomaly detection tracebacks.
     /// Only populated when anomaly detection is enabled. Null otherwise (zero overhead).
     std::shared_ptr<AnomalyMetadata> creation_metadata_;
+
+    /// Audit-7 EE.1: when true, the engine's AA.7 final downcast skips this
+    /// Variable so .grad keeps the promoted (typically F32) dtype even though
+    /// the parameter is F16/BF16. Standard PyTorch AMP "fp32 master weights"
+    /// pattern; opt-in to preserve backwards compatibility.
+    std::atomic<bool> preserve_grad_dtype_{false};
 };
 
 /**
@@ -571,6 +581,21 @@ public:
      * @return true if gradients should be retained (even for non-leaf variables)
      */
     auto retains_grad() const -> bool;
+
+    /**
+     * @brief Opt into preserving the upstream/promoted gradient dtype on this
+     *        leaf, bypassing the engine's AA.7 final downcast.
+     *
+     * Audit-7 EE.1: standard PyTorch AMP "fp32 master weights" pattern needs
+     * the F32 gradient to remain F32 even when the parameter is F16/BF16.
+     * Default is false (downcast to leaf dtype, matching PyTorch's default).
+     */
+    auto set_preserve_grad_dtype(bool value) -> void;
+
+    /**
+     * @brief Whether this leaf opts out of the AA.7 final grad downcast.
+     */
+    auto preserve_grad_dtype() const -> bool;
 
     // ============================================================================
     // Autograd Context

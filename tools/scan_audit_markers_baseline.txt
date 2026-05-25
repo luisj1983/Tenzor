@@ -18,4 +18,4 @@ tests/performance/bench_cublas_cudnn.cpp:268
 tests/performance/bench_cublas_cudnn.cpp:274
 tests/performance/bench_cublas_cudnn.cpp:296
 tests/performance/bench_cublas_cudnn.cpp:302
-tools/audit_tolerances.py:35
+tools/audit_tolerances.py:40

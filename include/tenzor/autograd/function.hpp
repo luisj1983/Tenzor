@@ -2443,12 +2443,16 @@ private:
 
 class STFTBackward : public Function {
 public:
+    // Audit-7 EE.4: `input_dtype` records the forward STFT input's real dtype
+    // (Float32 / Float64 / Float16 / BFloat16). The adjoint emits the
+    // time-domain gradient in that same dtype instead of unconditionally F32.
     STFTBackward(int64_t n_fft, int64_t hop_length, int64_t win_length,
                  Tensor window, bool center, bool normalized, bool onesided,
-                 int64_t signal_length)
+                 int64_t signal_length, DType input_dtype)
         : n_fft_(n_fft), hop_length_(hop_length), win_length_(win_length),
           window_(std::move(window)), center_(center), normalized_(normalized),
-          onesided_(onesided), signal_length_(signal_length) {}
+          onesided_(onesided), signal_length_(signal_length),
+          input_dtype_(input_dtype) {}
     auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
     auto name() const -> std::string override { return "STFTBackward"; }
@@ -2462,15 +2466,20 @@ private:
     bool normalized_;
     bool onesided_;
     int64_t signal_length_;
+    DType input_dtype_;  ///< Audit-7 EE.4: real-dtype of forward input.
 };
 
 class ISTFTBackward : public Function {
 public:
+    // Audit-7 EE.4: `input_dtype` records the forward ISTFT input's complex
+    // dtype (Complex64 / Complex128). The adjoint emits the freq-domain
+    // gradient in that same dtype instead of unconditionally Complex64.
     ISTFTBackward(int64_t n_fft, int64_t hop_length, int64_t win_length,
-                  Tensor window, bool center, bool normalized, bool onesided)
+                  Tensor window, bool center, bool normalized, bool onesided,
+                  DType input_dtype)
         : n_fft_(n_fft), hop_length_(hop_length), win_length_(win_length),
           window_(std::move(window)), center_(center), normalized_(normalized),
-          onesided_(onesided) {}
+          onesided_(onesided), input_dtype_(input_dtype) {}
     auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
     auto name() const -> std::string override { return "ISTFTBackward"; }
@@ -2483,6 +2492,7 @@ private:
     bool center_;
     bool normalized_;
     bool onesided_;
+    DType input_dtype_;  ///< Audit-7 EE.4: complex-dtype of forward input.
 };
 
 // =========================================================================

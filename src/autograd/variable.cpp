@@ -204,6 +204,19 @@ auto Variable::retains_grad() const -> bool {
     return impl_ && impl_->retain_grad_;
 }
 
+// Audit-7 EE.1: opt-in for fp32-master-weights AMP — engine's AA.7 final
+// downcast loop checks this flag and skips dtype coercion when true.
+auto Variable::set_preserve_grad_dtype(bool value) -> void {
+    if (!impl_) {
+        throw std::runtime_error("Cannot set preserve_grad_dtype on uninitialized Variable");
+    }
+    impl_->preserve_grad_dtype_.store(value, std::memory_order_release);
+}
+
+auto Variable::preserve_grad_dtype() const -> bool {
+    return impl_ && impl_->preserve_grad_dtype_.load(std::memory_order_acquire);
+}
+
 auto Variable::zero_grad() -> void {
     if (impl_) {
         if (impl_->thread_safe_.load(std::memory_order_acquire)) {

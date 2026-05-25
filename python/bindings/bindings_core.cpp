@@ -847,7 +847,8 @@ Returns:
              "Flatten consecutive dimensions into one")
         .def("view", &tenzor::Tensor::view,
              py::arg("shape"),
-             "Return a view with a new shape (tensor must be contiguous)")
+             "Return a view with a new shape (tensor must be contiguous)",
+             py::call_guard<py::gil_scoped_release>())
         .def("expand", [](const tenzor::Tensor& self, std::vector<int64_t> shape) {
              return tenzor::expand(self, std::move(shape));
              }, py::arg("shape"),
@@ -3519,6 +3520,17 @@ Returns:
          }, "Move dimensions to new positions (alias for movedim)",
          py::arg("input"), py::arg("source"), py::arg("destination"),
          py::call_guard<py::gil_scoped_release>());
+    // Audit-7 EE.3: Variable overload first so pybind picks it for Variable
+    // inputs (preserves autograd). Underlying path: autograd::slice (which
+    // owns its SliceBackward) then autograd::clone for detached storage.
+    m.def("narrow_copy",
+         [](const tenzor::Variable& v, int64_t dim, int64_t start, int64_t length) {
+             auto sliced = tenzor::slice(
+                 v, dim, start, start + length, /*step=*/1);
+             return tenzor::clone(sliced);
+         },
+         "Narrow with copy semantics (autograd-aware overload)",
+         py::arg("input"), py::arg("dim"), py::arg("start"), py::arg("length"));
     m.def("narrow_copy", [](const tenzor::Tensor& t, int64_t dim, int64_t start, int64_t length) {
          return tenzor::narrow_copy(t, dim, start, length);
          }, "Narrow with copy semantics",
@@ -3896,10 +3908,32 @@ Returns:
          }, "Roll tensor elements along dimension",
          py::arg("input"), py::arg("shifts"), py::arg("dim") = 0,
          py::call_guard<py::gil_scoped_release>());
+    // Audit-7 EE.3: Variable overload preserves autograd via repeated slices.
+    m.def("split_with_sizes",
+         [](const tenzor::Variable& v, const std::vector<int64_t>& split_sizes, int64_t dim) {
+             return tenzor::split_with_sizes(v, split_sizes, dim);
+         },
+         "Split Variable into chunks with specified sizes (autograd-aware)",
+         py::arg("input"), py::arg("split_sizes"), py::arg("dim") = 0);
     m.def("split_with_sizes", [](const tenzor::Tensor& input, const std::vector<int64_t>& split_sizes, int64_t dim) {
          return tenzor::split_with_sizes(input, split_sizes, dim);
          }, "Split tensor into chunks with specified sizes",
          py::arg("input"), py::arg("split_sizes"), py::arg("dim") = 0,
+         py::call_guard<py::gil_scoped_release>());
+    // Audit-7 EE.3: Variable-aware unbind. Tensor-side variant remains
+    // available via tensor.unbind() (method) — expose autograd one here.
+    m.def("unbind",
+         [](const tenzor::Variable& v, int64_t dim) {
+             return tenzor::unbind(v, dim);
+         },
+         "Unbind Variable along a dimension (autograd-aware)",
+         py::arg("input"), py::arg("dim") = 0);
+    m.def("unbind",
+         [](const tenzor::Tensor& t, int64_t dim) {
+             return tenzor::unbind(t, dim);
+         },
+         "Unbind tensor along a dimension",
+         py::arg("input"), py::arg("dim") = 0,
          py::call_guard<py::gil_scoped_release>());
 
     m.def("view_as_real",
@@ -4079,6 +4113,17 @@ Returns:
              "Enable gradient retention for non-leaf variables")
         .def_property_readonly("retains_grad", &tenzor::Variable::retains_grad,
              "Check if variable retains gradient")
+        // Audit-7 EE.1: AMP fp32-master-weights opt-in. When True, the engine's
+        // AA.7 final downcast leaves .grad in the upstream (promoted) dtype.
+        .def("set_preserve_grad_dtype",
+             &tenzor::Variable::set_preserve_grad_dtype,
+             py::arg("value"),
+             "Opt into preserving the promoted gradient dtype on this leaf "
+             "(skips the AA.7 final downcast). Standard PyTorch AMP "
+             "fp32-master-weights pattern.")
+        .def_property_readonly("preserve_grad_dtype",
+             &tenzor::Variable::preserve_grad_dtype,
+             "Whether this leaf opts out of the AA.7 final grad downcast.")
         // Shape / numel exposed as properties to match Tensor's API surface;
         // callers can treat Variable.shape like Tensor.shape (a list).
         .def_property_readonly("shape", [](const tenzor::Variable& self) {

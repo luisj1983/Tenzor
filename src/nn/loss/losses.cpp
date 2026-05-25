@@ -1,5 +1,6 @@
 #include "tenzor/nn/loss/losses.hpp"
 #include "tenzor/nn/activations/activations.hpp"
+#include "tenzor/nn/utils/variable_cast.hpp"
 #include "tenzor/ops/math.hpp"
 #include "tenzor/ops/reduction.hpp"
 #include "tenzor/ops/creation.hpp"
@@ -51,7 +52,23 @@ auto BCELoss::forward(const Variable& input, const Variable& target) -> Variable
     // Instead, compute via the logit (inverse sigmoid) and use the stable formula:
     //   logit = log(p / (1-p))  (clamp p to avoid log(0))
     //   BCE = max(logit, 0) - logit * target + log(1 + exp(-|logit|))
-    auto p = clamp(input, 1e-7f, 1.0f - 1e-7f);
+    //
+    // AA.4 / EE.9: clamp(p, 1e-7, 1 - 1e-7) on Float16 collapses — 1e-7f
+    // is below F16's smallest normal (~6.1e-5), so the lower bound rounds
+    // to 0 and log(0) blows up. Widen the entire computation to Float32
+    // and cast the loss back to the input dtype at the end. `variable_cast`
+    // wires a TypeCastBackward node so gradients flow through the cast.
+    const DType orig_dtype = input.tensor().dtype();
+    const bool needs_upcast = (orig_dtype == DType::Float16 ||
+                               orig_dtype == DType::BFloat16);
+    Variable input_f32 = needs_upcast
+        ? tenzor::nn::variable_cast(input, DType::Float32)
+        : input;
+    Variable target_f32 = needs_upcast
+        ? tenzor::nn::variable_cast(target, DType::Float32)
+        : target;
+
+    auto p = clamp(input_f32, 1e-7f, 1.0f - 1e-7f);
     // Compute logit = log(p / (1 - p))  where (1 - p) = -(p - 1)
     auto one_minus_p = scalar_sub(1.0f, p);
     auto logit = log(p / one_minus_p);
@@ -60,19 +77,27 @@ auto BCELoss::forward(const Variable& input, const Variable& target) -> Variable
     auto neg_abs = neg(abs_logit);
     auto max_val = (logit + abs_logit) / 2.0f;  // max(logit, 0) = (logit + |logit|) / 2
     auto log_term = log(exp(neg_abs) + 1.0f);
-    auto loss = max_val - logit * target + log_term;
+    auto loss = max_val - logit * target_f32 + log_term;
 
+    Variable reduced;
     switch (reduction_) {
         case Reduction::None:
-            return loss;
+            reduced = loss;
+            break;
         case Reduction::Mean:
-            return mean(loss);
+            reduced = mean(loss);
+            break;
         case Reduction::Sum:
-            return sum(loss);
+            reduced = sum(loss);
+            break;
         case Reduction::BatchMean:
-            return sum(loss) / static_cast<float>(loss.tensor().shape()[0]);
+            reduced = sum(loss) / static_cast<float>(loss.tensor().shape()[0]);
+            break;
     }
-    return loss;
+    if (needs_upcast) {
+        reduced = tenzor::nn::variable_cast(reduced, orig_dtype);
+    }
+    return reduced;
 }
 
 // BCEWithLogitsLoss implementation

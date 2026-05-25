@@ -545,21 +545,42 @@ auto ImagBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Ten
     return {result};
 }
 
-// Higher-order gradient implementations for complex number ops
+// Audit-7 EE.5: higher-order (create_graph=True) backwards for the complex
+// triplet must stay in Variable land. The previous implementations called
+// backward({grad.tensor()}) and rewrapped, which severed the autograd graph
+// after the first .backward(create_graph=True) call so second derivatives
+// would be zero.
 auto ConjBackward::backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> {
-    auto result_tensors = backward({grad_outputs[0].tensor()});
-    return {Variable(result_tensors[0], grad_outputs[0].requires_grad())};
+    // Mirror the raw-Tensor backward: real dtype → identity, complex → conj.
+    // Both use the Variable-level autograd::conj which preserves the graph.
+    const auto& g = grad_outputs[0];
+    if (!g.tensor().is_complex()) {
+        return {g};
+    }
+    return {tenzor::conj(g)};
 }
 
 auto RealBackward::backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> {
-    // Same logic as backward but using Variable ops for graph tracking
-    auto result_tensors = backward({grad_outputs[0].tensor()});
-    return {Variable(result_tensors[0], grad_outputs[0].requires_grad())};
+    // PyTorch contract: grad_z = complex(grad_real, 0).
+    // Build it with Variable ops so the graph survives create_graph=True:
+    // [grad, zeros] -> unsqueeze each on dim -1 -> cat on dim -1 -> view_as_complex.
+    const auto& g = grad_outputs[0];
+    Variable zero_v(zeros_like(g.tensor()), false);
+    auto g_u = tenzor::unsqueeze(g, -1);
+    auto z_u = tenzor::unsqueeze(zero_v, -1);
+    auto stacked = tenzor::cat(std::vector<Variable>{g_u, z_u}, /*dim=*/-1);
+    return {tenzor::view_as_complex(stacked)};
 }
 
 auto ImagBackward::backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> {
-    auto result_tensors = backward({grad_outputs[0].tensor()});
-    return {Variable(result_tensors[0], grad_outputs[0].requires_grad())};
+    // PyTorch contract: grad_z = 0 + j*grad_imag.
+    // Same construction as RealBackward but with (zeros, grad) order.
+    const auto& g = grad_outputs[0];
+    Variable zero_v(zeros_like(g.tensor()), false);
+    auto z_u = tenzor::unsqueeze(zero_v, -1);
+    auto g_u = tenzor::unsqueeze(g, -1);
+    auto stacked = tenzor::cat(std::vector<Variable>{z_u, g_u}, /*dim=*/-1);
+    return {tenzor::view_as_complex(stacked)};
 }
 
 } // namespace tenzor

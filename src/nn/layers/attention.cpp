@@ -60,6 +60,36 @@ public:
     auto is_higher_order_stub() const -> bool override { return true; }
 };
 
+// Y.19 / EE.11 / EE.12: normalise a Bool or integer attention mask to a float
+// additive mask (-inf where True/non-zero, 0 elsewhere). PyTorch's MHA accepts
+// Bool masks where True = "ignore"; without this widening the downstream
+// `scores + mask` adds 1.0 (Bool→float of true) at masked positions instead of
+// -inf, leaking attention. The same fix is mirrored in gqa_attention.cpp.
+// Returns the normalised Tensor; passes through float dtypes unchanged.
+static auto normalize_attn_mask(const Tensor& attn_mask) -> Tensor {
+    const DType am_dtype = attn_mask.dtype();
+    if (am_dtype == DType::Float32 || am_dtype == DType::Float64 ||
+        am_dtype == DType::Float16 || am_dtype == DType::BFloat16) {
+        return attn_mask;
+    }
+    auto pm_shape = std::vector<int64_t>(attn_mask.shape().begin(),
+                                         attn_mask.shape().end());
+    if (am_dtype == DType::Bool) {
+        Tensor neg_inf_tensor = full(pm_shape, -std::numeric_limits<float>::infinity(),
+                                     DType::Float32, attn_mask.device());
+        Tensor zero_tensor = zeros(pm_shape, DType::Float32, attn_mask.device());
+        return Tensor(where(attn_mask, neg_inf_tensor, zero_tensor));
+    }
+    // Integer mask: treat as 0/1 indicator, widen to a float -inf/0 mask.
+    Tensor as_float = attn_mask.to(DType::Float32);
+    Tensor threshold = full(pm_shape, 0.5f, DType::Float32, attn_mask.device());
+    Tensor neg_inf_tensor = full(pm_shape, -std::numeric_limits<float>::infinity(),
+                                 DType::Float32, attn_mask.device());
+    Tensor zero_tensor = zeros(pm_shape, DType::Float32, attn_mask.device());
+    Tensor mask_gt = Tensor(gt(as_float, threshold));
+    return Tensor(where(mask_gt, neg_inf_tensor, zero_tensor));
+}
+
 static auto attention_cast(const Variable& input, DType target_dtype) -> Variable {
     if (input.dtype() == target_dtype) return input;
     auto converted = input.tensor().to(target_dtype);
@@ -485,8 +515,14 @@ auto MultiheadAttention::scaled_dot_product_attention(
                     std::to_string(scores_dim));
             }
         }
+        // Y.19 / EE.11: Bool/integer masks (PyTorch convention: True = ignore)
+        // must be widened to a float -inf/0 mask before the additive combine.
+        // Without this, `float scores + Bool mask` adds 1.0 at masked positions
+        // instead of -inf, leaking attention through. Mirrors the normalisation
+        // block in MultiheadAttention::forward (lines ~643-664).
+        Tensor normalised_mask = normalize_attn_mask(attn_mask);
         // Add mask (mask should have -inf for positions to mask out)
-        Variable mask_var(attn_mask, false);
+        Variable mask_var(normalised_mask, false);
         scores = scores + mask_var;
     }
 
@@ -640,28 +676,7 @@ auto MultiheadAttention::forward(const Variable& query,
         // this, the downstream `add(combined_mask, broadcastable_mask)`
         // computes `float + bool` (treated as 0/1), so masked positions get
         // an additive `1.0` instead of `-inf`, leaking attention to them.
-        Tensor normalised_mask = attn_mask;
-        const DType am_dtype = normalised_mask.dtype();
-        if (am_dtype == DType::Bool) {
-            auto pm_shape = std::vector<int64_t>(normalised_mask.shape().begin(),
-                                                 normalised_mask.shape().end());
-            Tensor neg_inf_tensor = full(pm_shape, -std::numeric_limits<float>::infinity(),
-                                         DType::Float32, normalised_mask.device());
-            Tensor zero_tensor = zeros(pm_shape, DType::Float32, normalised_mask.device());
-            normalised_mask = Tensor(where(normalised_mask, neg_inf_tensor, zero_tensor));
-        } else if (am_dtype != DType::Float32 && am_dtype != DType::Float64 &&
-                   am_dtype != DType::Float16 && am_dtype != DType::BFloat16) {
-            // Integer mask: treat as 0/1 indicator, widen to a float -inf/0 mask.
-            auto pm_shape = std::vector<int64_t>(normalised_mask.shape().begin(),
-                                                 normalised_mask.shape().end());
-            Tensor as_float = normalised_mask.to(DType::Float32);
-            Tensor threshold = full(pm_shape, 0.5f, DType::Float32, normalised_mask.device());
-            Tensor neg_inf_tensor = full(pm_shape, -std::numeric_limits<float>::infinity(),
-                                         DType::Float32, normalised_mask.device());
-            Tensor zero_tensor = zeros(pm_shape, DType::Float32, normalised_mask.device());
-            Tensor mask_gt = Tensor(gt(as_float, threshold));
-            normalised_mask = Tensor(where(mask_gt, neg_inf_tensor, zero_tensor));
-        }
+        Tensor normalised_mask = normalize_attn_mask(attn_mask);
 
         auto am_shape = normalised_mask.shape();
         if (am_shape.size() == 2) {

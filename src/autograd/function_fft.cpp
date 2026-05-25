@@ -716,9 +716,17 @@ auto STFTBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Ten
     // grad_outputs[0] has STFT shape (..., freq_bins, num_frames).
     // Use the true STFT linear adjoint (overlap-add of windowed IFFT frames
     // **without** ISTFT's window-sum normalisation). PyTorch's contract.
-    return {stft_adjoint_impl(grad_outputs[0], n_fft_, hop_length_, win_length_,
-                              window_, center_, normalized_, onesided_,
-                              signal_length_)};
+    //
+    // Audit-7 EE.4: the adjoint internally computes in Float32 (see
+    // stft_adjoint_impl). Cast back to the forward input's real dtype so
+    // F64/F16/BF16 callers don't get a silently-widened F32 grad.
+    Tensor grad_t = stft_adjoint_impl(grad_outputs[0], n_fft_, hop_length_, win_length_,
+                                       window_, center_, normalized_, onesided_,
+                                       signal_length_);
+    if (grad_t.dtype() != input_dtype_) {
+        grad_t = grad_t.to(input_dtype_);
+    }
+    return {grad_t};
 }
 
 auto ISTFTBackward::forward(std::vector<Variable>) -> std::vector<Variable> {
@@ -729,8 +737,16 @@ auto ISTFTBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Te
     // grad_outputs[0] has ISTFT output shape (..., signal_length).
     // True ISTFT linear adjoint = STFT with each frame divided by the same
     // window_sum the forward ISTFT applied.
-    return {istft_adjoint_impl(grad_outputs[0], n_fft_, hop_length_, win_length_,
-                               window_, center_, normalized_, onesided_)};
+    //
+    // Audit-7 EE.4: adjoint internally builds a Complex64 tensor; cast back
+    // to the forward complex dtype (Complex64 vs Complex128) so the chain
+    // preserves the user's precision choice.
+    Tensor grad_t = istft_adjoint_impl(grad_outputs[0], n_fft_, hop_length_, win_length_,
+                                        window_, center_, normalized_, onesided_);
+    if (grad_t.dtype() != input_dtype_) {
+        grad_t = grad_t.to(input_dtype_);
+    }
+    return {grad_t};
 }
 
 } // namespace tenzor

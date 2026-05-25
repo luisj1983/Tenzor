@@ -54,6 +54,7 @@ struct ParamGroup {
     std::optional<double> beta1;
     std::optional<double> beta2;
     std::optional<double> eps;
+    std::optional<bool>   amsgrad;      ///< Adam / AdamW / AdamAtan2
     std::optional<bool>   centered;     ///< RMSprop
     std::optional<double> alpha;        ///< RMSprop / ASGD
     std::optional<double> rho;          ///< Adadelta

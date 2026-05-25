@@ -207,6 +207,17 @@ auto BackwardEngine::synthesize_or_validate_root_grad(const Variable& root,
             "User-supplied gradient shape mismatch: expected " +
             fmt(root_shape) + " got " + fmt(grad_shape));
     }
+    // Audit-7 EE.2: also reject dtype/device mismatch — silent .to() coercion
+    // hides bugs (e.g. F64 seed on F32 root, or CPU seed on CUDA root).
+    if (user_grad->dtype() != root.tensor().dtype() ||
+        user_grad->device() != root.tensor().device()) {
+        throw AutogradException(
+            std::string("Mismatched grad dtype/device: expected ") +
+            std::string(dtype_name(root.tensor().dtype())) + " on " +
+            root.tensor().device().to_string() + ", got " +
+            std::string(dtype_name(user_grad->dtype())) + " on " +
+            user_grad->device().to_string());
+    }
     return std::move(*user_grad);
 }
 
@@ -539,6 +550,10 @@ auto BackwardEngine::execute(Variable& root, std::optional<Tensor> gradient,
     // user-facing `leaf.grad` contract is `leaf.grad.dtype == leaf.dtype`
     // (PyTorch); downcast every leaf that ended up with a promoted gradient.
     // This is a no-op for the common F32/F32 case.
+    //
+    // Audit-7 EE.1: opt-out via Variable::set_preserve_grad_dtype(true) for
+    // the standard AMP "fp32 master weights" pattern (F16/BF16 params with
+    // F32 grads). When set, we leave the promoted gradient as-is.
     for (auto& func : sorted) {
         if (!func) continue;
         for (auto& var : func->input_variables()) {
@@ -548,7 +563,8 @@ auto BackwardEngine::execute(Variable& root, std::optional<Tensor> gradient,
             std::lock_guard lock(*var.impl_->grad_mutex_);
             if (!var.impl_->grad_.has_value()) continue;
             const auto leaf_dt = var.dtype();
-            if (var.impl_->grad_->dtype() != leaf_dt) {
+            if (var.impl_->grad_->dtype() != leaf_dt &&
+                !var.impl_->preserve_grad_dtype_.load(std::memory_order_acquire)) {
                 var.impl_->grad_ = var.impl_->grad_->to(leaf_dt);
             }
         }
@@ -561,7 +577,8 @@ auto BackwardEngine::execute(Variable& root, std::optional<Tensor> gradient,
         std::lock_guard lock(*root.impl_->grad_mutex_);
         if (root.impl_->grad_.has_value()) {
             const auto root_dt = root.dtype();
-            if (root.impl_->grad_->dtype() != root_dt) {
+            if (root.impl_->grad_->dtype() != root_dt &&
+                !root.impl_->preserve_grad_dtype_.load(std::memory_order_acquire)) {
                 root.impl_->grad_ = root.impl_->grad_->to(root_dt);
             }
         }
@@ -980,6 +997,8 @@ auto BackwardEngine::execute_multi(std::vector<Variable*> roots,
     // Audit-6 AA.7: mirror the single-root downcast — restore PyTorch's
     // `leaf.grad.dtype == leaf.dtype` contract by casting any promoted
     // accumulator back to the leaf's declared dtype.
+    // Audit-7 EE.1: opt-out via Variable::set_preserve_grad_dtype(true)
+    // for AMP fp32-master-weights.
     for (auto& func : sorted) {
         if (!func) continue;
         for (auto& var : func->input_variables()) {
@@ -989,7 +1008,8 @@ auto BackwardEngine::execute_multi(std::vector<Variable*> roots,
             std::lock_guard lock(*var.impl_->grad_mutex_);
             if (!var.impl_->grad_.has_value()) continue;
             const auto leaf_dt = var.dtype();
-            if (var.impl_->grad_->dtype() != leaf_dt) {
+            if (var.impl_->grad_->dtype() != leaf_dt &&
+                !var.impl_->preserve_grad_dtype_.load(std::memory_order_acquire)) {
                 var.impl_->grad_ = var.impl_->grad_->to(leaf_dt);
             }
         }
@@ -1002,7 +1022,8 @@ auto BackwardEngine::execute_multi(std::vector<Variable*> roots,
         std::lock_guard lock(*root->impl_->grad_mutex_);
         if (!root->impl_->grad_.has_value()) continue;
         const auto root_dt = root->dtype();
-        if (root->impl_->grad_->dtype() != root_dt) {
+        if (root->impl_->grad_->dtype() != root_dt &&
+            !root->impl_->preserve_grad_dtype_.load(std::memory_order_acquire)) {
             root->impl_->grad_ = root->impl_->grad_->to(root_dt);
         }
     }

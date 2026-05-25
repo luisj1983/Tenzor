@@ -442,6 +442,34 @@ auto chunk(const Variable& input, int64_t chunks, int64_t dim = 0) -> std::vecto
  */
 auto split(const Variable& input, int64_t split_size, int64_t dim = 0) -> std::vector<Variable>;
 
+/**
+ * @brief Variable-level split_with_sizes — heterogeneous chunks along `dim`.
+ *
+ * Audit-7 EE.3: mirrors V.10 (chunk/split) so callers that need uneven splits
+ * keep the autograd graph. Each output is built by `autograd::slice`, so each
+ * carries its own SliceBackward.
+ */
+auto split_with_sizes(const Variable& input,
+                      const std::vector<int64_t>& split_sizes,
+                      int64_t dim = 0) -> std::vector<Variable>;
+
+/**
+ * @brief Variable-level unbind — split `input` along `dim` into a list of
+ *        Variables, each with that dim squeezed out.
+ *
+ * Audit-7 EE.3: decomposes into `autograd::slice` + `autograd::squeeze` so
+ * each output Variable carries SliceBackward + SqueezeBackward chains.
+ */
+auto unbind(const Variable& input, int64_t dim = 0) -> std::vector<Variable>;
+
+/**
+ * @brief Variable-level clone — fresh storage copy with identity grad.
+ *
+ * Audit-7 EE.3: gradient passes through identity. Implemented as `input * 1.0`
+ * so the output gets fresh storage from MulBackward without new Function classes.
+ */
+auto clone(const Variable& input) -> Variable;
+
 // ============================================================================
 // Matrix Operations
 // ============================================================================

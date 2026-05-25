@@ -141,17 +141,26 @@ void register_nn(py::module_& m) {
         // ====================================================================
         // Parameter and buffer management
         // ====================================================================
+        // EE.14: release the GIL during the recursive submodule walk so other
+        // Python threads (e.g. background dataloader workers) can run while
+        // we traverse the submodule tree and build the shared_ptr<Variable>
+        // vector. pybind11 reacquires the GIL automatically when marshalling
+        // the return value back into Python objects.
         .def("parameters", &tenzor::nn::Module::parameters,
+             py::call_guard<py::gil_scoped_release>(),
              "Get all parameters (recursive through submodules)")
         .def("own_parameters", &tenzor::nn::Module::own_parameters,
              "Get only this module's direct parameters (not submodules')")
         .def("named_parameters", &tenzor::nn::Module::named_parameters,
+             py::call_guard<py::gil_scoped_release>(),
              "Get all parameters with their names")
         .def("buffers", &tenzor::nn::Module::buffers,
+             py::call_guard<py::gil_scoped_release>(),
              "Get all buffers (non-trainable tensors, recursive)")
         .def("own_buffers", &tenzor::nn::Module::own_buffers,
              "Get only this module's direct buffers")
         .def("named_buffers", &tenzor::nn::Module::named_buffers,
+             py::call_guard<py::gil_scoped_release>(),
              "Get all buffers with their names")
         .def("get_submodules", &tenzor::nn::Module::get_submodules,
              py::return_value_policy::reference_internal,

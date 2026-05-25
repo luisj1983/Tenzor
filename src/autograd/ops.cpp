@@ -918,6 +918,77 @@ auto split(const Variable& input, int64_t split_size, int64_t dim) -> std::vecto
     return result;
 }
 
+// Audit-7 EE.3: Variable-level split_with_sizes — heterogeneous chunk widths.
+// Same decomposition strategy as chunk/split: each output is `autograd::slice`
+// so its own SliceBackward routes the gradient back to the correct window.
+auto split_with_sizes(const Variable& input,
+                      const std::vector<int64_t>& split_sizes,
+                      int64_t dim) -> std::vector<Variable> {
+    const int64_t ndim = static_cast<int64_t>(input.shape().size());
+    if (dim < 0) dim += ndim;
+    if (dim < 0 || dim >= ndim) {
+        throw std::out_of_range("autograd::split_with_sizes: dim out of range");
+    }
+    const int64_t dim_size = input.shape()[dim];
+
+    int64_t total = 0;
+    for (int64_t s : split_sizes) {
+        if (s < 0) {
+            throw std::invalid_argument(
+                "autograd::split_with_sizes: split sizes must be non-negative");
+        }
+        total += s;
+    }
+    if (total != dim_size) {
+        throw std::invalid_argument(
+            "autograd::split_with_sizes: sum of split_sizes (" +
+            std::to_string(total) + ") does not match dim size (" +
+            std::to_string(dim_size) + ")");
+    }
+
+    std::vector<Variable> result;
+    result.reserve(split_sizes.size());
+    int64_t start = 0;
+    for (int64_t s : split_sizes) {
+        result.push_back(slice(input, dim, start, start + s, /*step=*/1));
+        start += s;
+    }
+    return result;
+}
+
+// Audit-7 EE.3: Variable-level clone — fresh storage with identity grad.
+// Implemented as `input * 1.0` so existing MulBackward already does the right
+// thing (∂(x*1)/∂x = 1) without adding a new Function class. The output
+// tensor is freshly allocated by the multiplication kernel, satisfying the
+// narrow_copy "detached storage" contract.
+auto clone(const Variable& input) -> Variable {
+    if (!input.requires_grad() || !is_grad_enabled()) {
+        return Variable(input.tensor().clone(), false);
+    }
+    return input * 1.0;
+}
+
+// Audit-7 EE.3: Variable-level unbind — split along `dim` then squeeze.
+// Pattern mirrors raw `tenzor::unbind` (slice(dim, i, i+1) then squeeze(dim))
+// but both stages are autograd-aware so the resulting Variables carry
+// SliceBackward + SqueezeBackward chains.
+auto unbind(const Variable& input, int64_t dim) -> std::vector<Variable> {
+    const int64_t ndim = static_cast<int64_t>(input.shape().size());
+    if (dim < 0) dim += ndim;
+    if (dim < 0 || dim >= ndim) {
+        throw std::out_of_range("autograd::unbind: dim out of range");
+    }
+    const int64_t n = input.shape()[dim];
+
+    std::vector<Variable> result;
+    result.reserve(static_cast<size_t>(n));
+    for (int64_t i = 0; i < n; ++i) {
+        auto s = slice(input, dim, i, i + 1, /*step=*/1);
+        result.push_back(squeeze(s, dim));
+    }
+    return result;
+}
+
 auto bmm(const Variable& a, const Variable& b) -> Variable {
     if ((!a.requires_grad() && !b.requires_grad()) || !is_grad_enabled()) {
         // No gradient needed, just compute
@@ -2546,9 +2617,11 @@ auto stft(const Variable& input,
     int64_t signal_length = input.tensor().shape().back();
     auto result = tenzor::fft::stft(input.tensor(), n_fft, hop_length, win_length,
                                      window, center, normalized, onesided);
+    // Audit-7 EE.4: capture input dtype so the adjoint can return the
+    // time-domain gradient in the original (possibly non-F32) dtype family.
     auto grad_fn = std::make_shared<STFTBackward>(
         n_fft, hop_length, win_length, window, center, normalized, onesided,
-        signal_length);
+        signal_length, input.tensor().dtype());
     grad_fn->set_next_functions({input.grad_fn()});
     grad_fn->set_input_variables({input});
     Variable output(result, true);
@@ -2572,8 +2645,11 @@ auto istft(const Variable& input,
     }
     auto result = tenzor::fft::istft(input.tensor(), n_fft, hop_length, win_length,
                                       window, center, normalized, onesided, length);
+    // Audit-7 EE.4: capture complex input dtype so the adjoint stays in the
+    // forward family (Complex64 vs Complex128).
     auto grad_fn = std::make_shared<ISTFTBackward>(
-        n_fft, hop_length, win_length, window, center, normalized, onesided);
+        n_fft, hop_length, win_length, window, center, normalized, onesided,
+        input.tensor().dtype());
     grad_fn->set_next_functions({input.grad_fn()});
     grad_fn->set_input_variables({input});
     Variable output(result, true);

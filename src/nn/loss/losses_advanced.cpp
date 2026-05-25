@@ -864,31 +864,50 @@ PoissonNLLLoss::PoissonNLLLoss(bool log_input, bool full, double eps,
     : log_input_(log_input), full_(full), eps_(eps), reduction_(reduction) {}
 
 auto PoissonNLLLoss::forward(const Variable& input, const Variable& target) -> Variable {
+    // AA.4 / EE.10: default eps_ = 1e-8 is below F16's smallest normal
+    // (~6.1e-5), so `input + eps` and clamp(target, eps, FLT_MAX) both
+    // collapse the eps term to 0 in Float16, then log(0) blows up. Widen
+    // the entire computation to Float32 and cast the loss back to the
+    // input dtype at the end. `variable_cast` wires a TypeCastBackward
+    // node so gradients flow through the cast.
+    const DType orig_dtype = input.tensor().dtype();
+    const bool needs_upcast = (orig_dtype == DType::Float16 ||
+                               orig_dtype == DType::BFloat16);
+    Variable input_c = needs_upcast
+        ? tenzor::nn::variable_cast(input, DType::Float32)
+        : input;
+    Variable target_c = needs_upcast
+        ? tenzor::nn::variable_cast(target, DType::Float32)
+        : target;
+
     Variable loss;
     if (log_input_) {
         // loss = exp(input) - target * input
-        loss = exp(input) - target * input;
+        loss = exp(input_c) - target_c * input_c;
     } else {
         // loss = input - target * log(input + eps)
-        auto eps_var = scalar_var(static_cast<float>(eps_), input);
-        loss = input - target * log(input + eps_var);
+        auto eps_var = scalar_var(static_cast<float>(eps_), input_c);
+        loss = input_c - target_c * log(input_c + eps_var);
     }
 
     if (full_) {
         // Add Stirling approximation: target * log(target) - target + 0.5 * log(2 * pi * target)
         // Simplified: use only the dominant term target * log(target) - target for target > 1
-        auto eps_var = scalar_var(static_cast<float>(eps_), target);
-        auto target_safe = clamp(target, static_cast<float>(eps_), std::numeric_limits<float>::max());
+        auto target_safe = clamp(target_c, static_cast<float>(eps_), std::numeric_limits<float>::max());
         auto stirling = target_safe * log(target_safe) - target_safe;
         // Add 0.5 * log(2*pi*target)
-        auto half = scalar_var(0.5f, target);
-        auto two_pi = scalar_var(static_cast<float>(2.0 * M_PI), target);
+        auto half = scalar_var(0.5f, target_c);
+        auto two_pi = scalar_var(static_cast<float>(2.0 * M_PI), target_c);
         stirling = stirling + half * log(two_pi * target_safe);
         loss = loss + stirling;
     }
 
     auto red_str = reduction_to_string(reduction_);
-    return apply_reduction(loss, red_str);
+    Variable reduced = apply_reduction(loss, red_str);
+    if (needs_upcast) {
+        reduced = tenzor::nn::variable_cast(reduced, orig_dtype);
+    }
+    return reduced;
 }
 
 auto poisson_nll_loss(const Variable& input, const Variable& target,
@@ -907,14 +926,33 @@ CosineEmbeddingLoss::CosineEmbeddingLoss(double margin, Reduction reduction)
 
 auto CosineEmbeddingLoss::forward(const Variable& input1, const Variable& input2,
                                   const Variable& target) -> Variable {
+    // AA.4 / EE.10: eps = 1e-8 used to stabilise the norm denominator is
+    // below F16's smallest normal (~6.1e-5), so `norm_sq + eps` collapses
+    // to norm_sq in Float16; when both vectors are near zero, sqrt(0) * sqrt(0)
+    // produces a div-by-zero. Widen the entire computation to Float32 and
+    // cast the loss back to the input dtype at the end. `variable_cast`
+    // wires a TypeCastBackward node so gradients flow through the cast.
+    const DType orig_dtype = input1.tensor().dtype();
+    const bool needs_upcast = (orig_dtype == DType::Float16 ||
+                               orig_dtype == DType::BFloat16);
+    Variable input1_c = needs_upcast
+        ? tenzor::nn::variable_cast(input1, DType::Float32)
+        : input1;
+    Variable input2_c = needs_upcast
+        ? tenzor::nn::variable_cast(input2, DType::Float32)
+        : input2;
+    Variable target_c = needs_upcast
+        ? tenzor::nn::variable_cast(target, DType::Float32)
+        : target;
+
     // Compute cosine similarity along last dimension
     // cos_sim = sum(x1 * x2, dim=-1) / (norm(x1) * norm(x2))
-    auto product = input1 * input2;
-    int64_t last_dim = static_cast<int64_t>(input1.shape().size()) - 1;
+    auto product = input1_c * input2_c;
+    int64_t last_dim = static_cast<int64_t>(input1_c.shape().size()) - 1;
     auto dot = sum(product, last_dim, false);
 
-    auto norm1_sq = sum(input1 * input1, last_dim, false);
-    auto norm2_sq = sum(input2 * input2, last_dim, false);
+    auto norm1_sq = sum(input1_c * input1_c, last_dim, false);
+    auto norm2_sq = sum(input2_c * input2_c, last_dim, false);
     auto eps_var = scalar_var(1e-8f, norm1_sq);
     auto norms = sqrt(norm1_sq + eps_var) * sqrt(norm2_sq + eps_var);
     auto cos_sim = dot / norms;
@@ -922,7 +960,7 @@ auto CosineEmbeddingLoss::forward(const Variable& input1, const Variable& input2
     // loss = (1 - cos_sim) if y = 1
     // loss = max(0, cos_sim - margin) if y = -1
     auto one = scalar_var(1.0f, cos_sim);
-    auto pos_mask = (target + one) * scalar_var(0.5f, cos_sim);
+    auto pos_mask = (target_c + one) * scalar_var(0.5f, cos_sim);
     auto neg_mask = (one - pos_mask);
 
     auto margin_var = scalar_var(static_cast<float>(margin_), cos_sim);
@@ -931,7 +969,11 @@ auto CosineEmbeddingLoss::forward(const Variable& input1, const Variable& input2
     auto loss = pos_mask * pos_loss + neg_mask * neg_loss;
 
     auto red_str = reduction_to_string(reduction_);
-    return apply_reduction(loss, red_str);
+    Variable reduced = apply_reduction(loss, red_str);
+    if (needs_upcast) {
+        reduced = tenzor::nn::variable_cast(reduced, orig_dtype);
+    }
+    return reduced;
 }
 
 auto cosine_embedding_loss(const Variable& input1, const Variable& input2,
@@ -1171,11 +1213,29 @@ auto GaussianNLLLoss::forward(const Variable& input, const Variable& target,
                                const Variable& var) -> Variable {
     // loss = 0.5 * (log(var) + (input - target)^2 / var)
     // Optionally + 0.5 * log(2*pi) when full=true
+    //
+    // AA.4 / EE.10: default eps_ = 1e-6 is below F16's smallest normal
+    // (~6.1e-5), so clamp(var, eps, FLT_MAX) collapses small variances to
+    // 0 in Float16; log(0) blows up and diff*diff/0 produces inf. Widen
+    // the entire computation to Float32 and cast the loss back to the
+    // input dtype at the end. `variable_cast` wires a TypeCastBackward
+    // node so gradients flow through the cast.
+    const DType orig_dtype = input.tensor().dtype();
+    const bool needs_upcast = (orig_dtype == DType::Float16 ||
+                               orig_dtype == DType::BFloat16);
+    Variable input_c = needs_upcast
+        ? tenzor::nn::variable_cast(input, DType::Float32)
+        : input;
+    Variable target_c = needs_upcast
+        ? tenzor::nn::variable_cast(target, DType::Float32)
+        : target;
+    Variable var_c = needs_upcast
+        ? tenzor::nn::variable_cast(var, DType::Float32)
+        : var;
 
-    auto eps_var = scalar_var(static_cast<float>(eps_), var);
-    auto var_clamped = clamp(var, static_cast<float>(eps_), std::numeric_limits<float>::max());
+    auto var_clamped = clamp(var_c, static_cast<float>(eps_), std::numeric_limits<float>::max());
 
-    auto diff = input - target;
+    auto diff = input_c - target_c;
     auto half = scalar_var(0.5f, diff);
     auto loss = half * (log(var_clamped) + diff * diff / var_clamped);
 
@@ -1185,7 +1245,11 @@ auto GaussianNLLLoss::forward(const Variable& input, const Variable& target,
     }
 
     auto red_str = reduction_to_string(reduction_);
-    return apply_reduction(loss, red_str);
+    Variable reduced = apply_reduction(loss, red_str);
+    if (needs_upcast) {
+        reduced = tenzor::nn::variable_cast(reduced, orig_dtype);
+    }
+    return reduced;
 }
 
 auto gaussian_nll_loss(const Variable& input, const Variable& target,

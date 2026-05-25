@@ -45,23 +45,26 @@ auto AdamAtan2::step_impl() -> void {
     // Audit D.4: per-parameter hyperparameters resolve from the
     // active ParamGroup (when one was set up) or fall through to
     // the optimiser-wide defaults stored on this AdamAtan2 instance.
-    // `amsgrad` is not a ParamGroup field and stays optimiser-wide.
+    // EE.16: amsgrad is now a ParamGroup field too — falls back to the
+    // optimiser-wide default when the group leaves it unset.
     struct AdamAtan2HP {
         double lr;
         double beta1;
         double beta2;
         double eps;
         double weight_decay;
+        bool   amsgrad;
     };
 
     auto resolve = [&](size_t i) -> AdamAtan2HP {
-        AdamAtan2HP hp{lr_, beta1_, beta2_, eps_, weight_decay_};
+        AdamAtan2HP hp{lr_, beta1_, beta2_, eps_, weight_decay_, amsgrad_};
         if (const auto* g = find_group_for_param(i)) {
             hp.lr           = g->lr;
             hp.weight_decay = g->weight_decay;
             hp.beta1        = ParamGroup::or_else(g->beta1, beta1_);
             hp.beta2        = ParamGroup::or_else(g->beta2, beta2_);
             hp.eps          = ParamGroup::or_else(g->eps,   eps_);
+            hp.amsgrad      = ParamGroup::or_else(g->amsgrad, amsgrad_);
         }
         return hp;
     };
@@ -89,7 +92,7 @@ auto AdamAtan2::step_impl() -> void {
             std::vector<Tensor> inputs = {
                 param_tensor, grad_tensor, exp_avg_[i], exp_avg_sq_[i]
             };
-            if (amsgrad_ && i < max_exp_avg_sq_.size()) {
+            if (hp.amsgrad && i < max_exp_avg_sq_.size()) {
                 inputs.push_back(max_exp_avg_sq_[i]);
             }
 
@@ -102,7 +105,7 @@ auto AdamAtan2::step_impl() -> void {
             attrs.set(AttrKey::Eps, hp.eps);
             attrs.set(AttrKey::WeightDecay, hp.weight_decay);
             attrs.set(AttrKey::Step, step_count_);
-            attrs.set(AttrKey::Amsgrad, amsgrad_);
+            attrs.set(AttrKey::Amsgrad, hp.amsgrad);
 
             dispatch(OpId::FusedAdamAtan2Step, inputs, attrs);
             total_params++;
@@ -147,7 +150,13 @@ auto AdamAtan2::step_impl() -> void {
         auto v_hat = exp_avg_sq_[i] * scalar(1.0 / bias_correction2);
 
         // AMSGrad: use maximum of past squared gradients
-        if (amsgrad_) {
+        // EE.16: hp.amsgrad honours per-group override; resolves to amsgrad_
+        // when the group leaves it unset (preserving the pre-EE.16 default).
+        // initialize_buffers() / on_parameters_appended_ still allocate
+        // max_exp_avg_sq_ slots whenever amsgrad_ is set on the optimiser, so
+        // a group that turns amsgrad on at add_param_group time still has the
+        // buffer available; a group that turns it off simply skips the slot.
+        if (hp.amsgrad && i < max_exp_avg_sq_.size()) {
             // Element-wise max using comparison
             auto mask = max_exp_avg_sq_[i] > v_hat;
             auto mask_f = mask.to(state_dt);
