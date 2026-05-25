@@ -56,6 +56,9 @@ auto VulkanBackend::dispatchConj(const Tensor& input) -> Tensor {
     bool is_float64 = (input.dtype() == DType::Float64 || input.dtype() == DType::Complex128);
     bool is_bfloat16_conj = (input.dtype() == DType::BFloat16);
 
+    if (is_float64) {
+        vulkan::ensure_fp64_supported(device_id, "Conj");
+    }
     std::string shader_name = is_float64 ? "conj_f64" : is_bfloat16_conj ? "conj_bf16" : "conj";
     auto* pipeline = getPipeline(shader_name, device_id);
 
@@ -121,6 +124,9 @@ auto VulkanBackend::dispatchReal(const Tensor& input) -> Tensor {
     if (input.dtype() == DType::Complex64 || input.dtype() == DType::Complex128) {
         int32_t device_id = input.device().index;
         bool is_c128 = (input.dtype() == DType::Complex128);
+        if (is_c128) {
+            vulkan::ensure_fp64_supported(device_id, "Real");
+        }
         std::string shader_name = is_c128 ? "complex_to_real_f64" : "complex_to_real";
         auto* pipeline = getPipeline(shader_name, device_id);
 
@@ -202,6 +208,9 @@ auto VulkanBackend::dispatchReal(const Tensor& input) -> Tensor {
     bool is_float64 = (input.dtype() == DType::Float64);
     bool is_bfloat16_real = (input.dtype() == DType::BFloat16);
 
+    if (is_float64) {
+        vulkan::ensure_fp64_supported(device_id, "Real");
+    }
     std::string shader_name = is_float64 ? "real_f64" : is_bfloat16_real ? "real_bf16" : "real";
     auto* pipeline = getPipeline(shader_name, device_id);
 
@@ -265,6 +274,9 @@ auto VulkanBackend::dispatchImag(const Tensor& input) -> Tensor {
     if (input.dtype() == DType::Complex64 || input.dtype() == DType::Complex128) {
         int32_t device_id = input.device().index;
         bool is_c128 = (input.dtype() == DType::Complex128);
+        if (is_c128) {
+            vulkan::ensure_fp64_supported(device_id, "Imag");
+        }
         std::string shader_name = is_c128 ? "imag_f64" : "imag";
         auto* pipeline = getPipeline(shader_name, device_id);
 
@@ -344,6 +356,9 @@ auto VulkanBackend::dispatchImag(const Tensor& input) -> Tensor {
     bool is_float64 = (input.dtype() == DType::Float64);
     bool is_bfloat16_imag = (input.dtype() == DType::BFloat16);
 
+    if (is_float64) {
+        vulkan::ensure_fp64_supported(device_id, "Imag");
+    }
     std::string shader_name = is_float64 ? "imag_f64" : is_bfloat16_imag ? "imag_bf16" : "imag";
     auto* pipeline = getPipeline(shader_name, device_id);
 
@@ -418,6 +433,9 @@ auto VulkanBackend::dispatchAngle(const Tensor& input) -> Tensor {
     if (input.dtype() == DType::Complex64 || input.dtype() == DType::Complex128) {
         int32_t device_id = input.device().index;
         bool is_c128 = (input.dtype() == DType::Complex128);
+        if (is_c128) {
+            vulkan::ensure_fp64_supported(device_id, "Angle");
+        }
         std::string shader_name = is_c128 ? "angle_f64" : "angle";
         auto* pipeline = getPipeline(shader_name, device_id);
 
@@ -495,6 +513,9 @@ auto VulkanBackend::dispatchAngle(const Tensor& input) -> Tensor {
     int32_t device_id = input.device().index;
     bool is_float64 = (input.dtype() == DType::Float64);
 
+    if (is_float64) {
+        vulkan::ensure_fp64_supported(device_id, "Angle");
+    }
     std::string shader_name = is_float64 ? "angle_f64" : "angle";
     auto* pipeline = getPipeline(shader_name, device_id);
 
@@ -551,6 +572,9 @@ auto VulkanBackend::dispatchPolar(const Tensor& abs, const Tensor& angle) -> Ten
     if (abs.dtype() == DType::Float32 || abs.dtype() == DType::Float64) {
         int32_t device_id = abs.device().index;
         bool is_f64 = (abs.dtype() == DType::Float64);
+        if (is_f64) {
+            vulkan::ensure_fp64_supported(device_id, "Polar");
+        }
         std::string shader_name = is_f64 ? "polar_f64" : "polar";
         auto* pipeline = getPipeline(shader_name, device_id);
 
@@ -632,6 +656,9 @@ auto VulkanBackend::dispatchPolar(const Tensor& abs, const Tensor& angle) -> Ten
     int32_t device_id = abs.device().index;
     bool is_float64 = (abs.dtype() == DType::Float64);
 
+    if (is_float64) {
+        vulkan::ensure_fp64_supported(device_id, "Polar");
+    }
     std::string shader_name = is_float64 ? "polar_f64" : "polar";
     auto* pipeline = getPipeline(shader_name, device_id);
 
@@ -727,6 +754,9 @@ auto VulkanBackend::dispatchComplexTensor(const Tensor& real, const Tensor& imag
     int32_t device_id = real.device().index;
     bool is_float64 = (real.dtype() == DType::Float64);
 
+    if (is_float64) {
+        vulkan::ensure_fp64_supported(device_id, "ComplexTensor");
+    }
     std::string shader_name = is_float64 ? "complex_from_parts_f64" : "complex_from_parts";
     auto* pipeline = getPipeline(shader_name, device_id);
 

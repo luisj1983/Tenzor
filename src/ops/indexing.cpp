@@ -40,6 +40,14 @@ auto scatter(const Tensor& input, int64_t dim, const Tensor& index, const Tensor
 }
 
 auto scatter_add(const Tensor& input, int64_t dim, const Tensor& index, const Tensor& src) -> Tensor {
+    // audit-6 BB.1: normalise negative dim at the dispatcher so backends that
+    // index `shape[dim]` without their own normalisation don't underflow.
+    // Mirrors select_scatter / slice_scatter (Y.6).
+    const int64_t ndim = static_cast<int64_t>(input.shape().size());
+    if (dim < 0) dim += ndim;
+    if (dim < 0 || dim >= ndim) {
+        throw std::out_of_range("scatter_add: dim out of range");
+    }
     NewOpAttributes attrs;
     attrs.set(AttrKey::Dim, dim);
     std::vector<Tensor> inputs = {input, index, src};
@@ -49,6 +57,12 @@ auto scatter_add(const Tensor& input, int64_t dim, const Tensor& index, const Te
 auto scatter_reduce(const Tensor& input, int64_t dim, const Tensor& index,
                     const Tensor& src, const std::string& reduce,
                     bool include_self) -> Tensor {
+    // audit-6 BB.1: same negative-dim normalisation as scatter_add above.
+    const int64_t ndim = static_cast<int64_t>(input.shape().size());
+    if (dim < 0) dim += ndim;
+    if (dim < 0 || dim >= ndim) {
+        throw std::out_of_range("scatter_reduce: dim out of range");
+    }
     NewOpAttributes attrs;
     attrs.set(AttrKey::Dim, dim);
     attrs.set(AttrKey::Reduction, reduce);
@@ -517,6 +531,12 @@ auto index_copy(const Tensor& input, int64_t dim, const Tensor& index, const Ten
 }
 
 auto index_fill(const Tensor& input, int64_t dim, const Tensor& index, double value) -> Tensor {
+    // audit-6 BB.1: normalise negative dim at the dispatcher (mirrors Y.6).
+    const int64_t ndim = static_cast<int64_t>(input.shape().size());
+    if (dim < 0) dim += ndim;
+    if (dim < 0 || dim >= ndim) {
+        throw std::out_of_range("index_fill: dim out of range");
+    }
     NewOpAttributes attrs;
     attrs.set(AttrKey::Dim, dim);
     attrs.set(AttrKey::Value, value);
@@ -614,6 +634,17 @@ auto slice_scatter(const Tensor& input, const Tensor& src, int64_t dim,
 
 auto diagonal_scatter(const Tensor& input, const Tensor& src, int64_t offset,
                       int64_t dim1, int64_t dim2) -> Tensor {
+    // audit-6 BB.1: normalise negative dim1/dim2 at the dispatcher so backends
+    // that index `shape[dimX]` without their own normalisation don't underflow.
+    const int64_t ndim = static_cast<int64_t>(input.shape().size());
+    if (dim1 < 0) dim1 += ndim;
+    if (dim2 < 0) dim2 += ndim;
+    if (dim1 < 0 || dim1 >= ndim) {
+        throw std::out_of_range("diagonal_scatter: dim1 out of range");
+    }
+    if (dim2 < 0 || dim2 >= ndim) {
+        throw std::out_of_range("diagonal_scatter: dim2 out of range");
+    }
     NewOpAttributes attrs;
     attrs.set(AttrKey::Diagonal, offset);
     attrs.set(AttrKey::Dim1, dim1);

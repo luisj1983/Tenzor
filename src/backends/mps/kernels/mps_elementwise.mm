@@ -1617,6 +1617,13 @@ std::vector<Tensor> mps_fused_sgd_step(const Tensor& param, const Tensor& grad,
                                          float lr, float momentum, float weight_decay) {
     ensure_initialized();
 
+    // The Metal kernel hard-codes `device float*` so F16/BF16 params would be
+    // reinterpreted as garbage. Reject explicitly until the half-precision
+    // master-weights upcast is wired up (mirrors audit-5 Z.7 for Vulkan).
+    if (param.dtype() == DType::Float16 || param.dtype() == DType::BFloat16) {
+        throw std::runtime_error("MPS fused Adam/SGD requires F32 params — F16/BF16 master-weights upcast not yet wired");
+    }
+
     // Clone param and momentum_buf (updated in-place by the kernel)
     Tensor out_param = param;  // shared storage, kernel writes in-place
     Tensor out_momentum = momentum_buf;
@@ -1655,6 +1662,13 @@ std::vector<Tensor> mps_fused_adam_step(const Tensor& param, const Tensor& grad,
                                          float eps, float bc1, float bc2,
                                          float weight_decay) {
     ensure_initialized();
+
+    // The Metal kernel hard-codes `device float*` so F16/BF16 params would be
+    // reinterpreted as garbage. Reject explicitly until the half-precision
+    // master-weights upcast is wired up (mirrors audit-5 Z.7 for Vulkan).
+    if (param.dtype() == DType::Float16 || param.dtype() == DType::BFloat16) {
+        throw std::runtime_error("MPS fused Adam/SGD requires F32 params — F16/BF16 master-weights upcast not yet wired");
+    }
 
     Tensor out_param = param;
     Tensor out_m = exp_avg;

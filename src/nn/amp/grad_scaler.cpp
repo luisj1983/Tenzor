@@ -235,10 +235,28 @@ auto GradScaler::clip_grad_norm_(optim::Optimizer& optimizer, double max_norm, d
     // Collect parameters and delegate to the utility function
     // Use a mutable copy of the parameter vector since clip_grad_norm_ takes by value
     auto params = optimizer.parameters();
-    return nn::utils::clip_grad_norm_(
+    double result = nn::utils::clip_grad_norm_(
         std::vector<std::shared_ptr<Variable>>(params.begin(), params.end()),
         max_norm, norm_type
     );
+
+    // BB.13: Y.32 introduced the F32 unscaled-grad side-table that
+    // ``check_inf_nan_`` consults when the param's grad is F16/BF16. The
+    // clip utility just mutated ``param->grad()`` in place — the F32 entry
+    // now holds the pre-clip value and would either (a) report a stale
+    // overflow that was actually clipped away, or (b) hide a freshly
+    // introduced clipped-to-inf value. Re-sync the side-table from the
+    // post-clip grad so check_inf_nan_ sees the same numbers the optimizer
+    // will step against.
+    for (auto& param : optimizer.parameters()) {
+        if (!param || !param->has_grad()) continue;
+        if (f32_unscaled_grads_.find(param.get()) == f32_unscaled_grads_.end()) {
+            continue;
+        }
+        f32_unscaled_grads_[param.get()] = param->grad().value().to(DType::Float32);
+    }
+
+    return result;
 }
 
 auto GradScaler::clip_grad_value_(optim::Optimizer& optimizer, double clip_value) -> void {
@@ -253,6 +271,16 @@ auto GradScaler::clip_grad_value_(optim::Optimizer& optimizer, double clip_value
         std::vector<std::shared_ptr<Variable>>(params.begin(), params.end()),
         clip_value
     );
+
+    // BB.13: re-sync the F32 side-table after the in-place value clip — see
+    // the comment in clip_grad_norm_ above for the rationale.
+    for (auto& param : optimizer.parameters()) {
+        if (!param || !param->has_grad()) continue;
+        if (f32_unscaled_grads_.find(param.get()) == f32_unscaled_grads_.end()) {
+            continue;
+        }
+        f32_unscaled_grads_[param.get()] = param->grad().value().to(DType::Float32);
+    }
 }
 
 auto GradScaler::load_state_dict(const std::unordered_map<std::string, float>& state) -> void {

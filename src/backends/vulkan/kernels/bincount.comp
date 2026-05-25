@@ -20,16 +20,13 @@ layout(push_constant) uniform PushConstants {
 // Atomic add for float using compare-and-swap loop
 void atomicAddFloat(uint idx, float val) {
     uint old_bits = output_data[idx];
-    uint new_bits;
-    for (int attempt = 0; attempt < 1024; ++attempt) {
+    for (int attempt = 0; attempt < 65536; ++attempt) {
         float old_val = uintBitsToFloat(old_bits);
-        new_bits = floatBitsToUint(old_val + val);
+        uint new_bits = floatBitsToUint(old_val + val);
         uint result = atomicCompSwap(output_data[idx], old_bits, new_bits);
         if (result == old_bits) return;
         old_bits = result;
     }
-    // Last-resort direct write
-    output_data[idx] = new_bits;
 }
 
 void main() {

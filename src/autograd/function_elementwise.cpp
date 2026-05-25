@@ -493,7 +493,15 @@ auto ConjBackward::forward(std::vector<Variable> inputs) -> std::vector<Variable
 }
 
 auto ConjBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> {
-    return {conj(grad_outputs[0])};
+    // audit-6 BB.4: X.5 routes real-Variable conj() through this class so
+    // grad_fn is preserved. For real dtypes, conj(z) == z and the gradient is
+    // simply identity — and calling conj() on a real tensor would throw if
+    // OpId::Conj isn't registered for that backend. Short-circuit here.
+    const auto& grad = grad_outputs[0];
+    if (!grad.is_complex()) {
+        return {grad};
+    }
+    return {conj(grad)};
 }
 
 // RealBackward: real(z) -> grad_z = 0.5 * grad (with zero imaginary part)

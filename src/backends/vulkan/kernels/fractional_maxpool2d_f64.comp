@@ -18,6 +18,8 @@ layout(push_constant) uniform PushConstants {
     uint out_w;
     uint total_output;
     uint has_samples;
+    uint kernel_h;
+    uint kernel_w;
 } params;
 
 void main() {
@@ -39,17 +41,23 @@ void main() {
         sample_w = samples_data[sample_idx + 1];
     }
 
-    float h_ratio = float(params.H) / float(params.out_h);
-    float w_ratio = float(params.W) / float(params.out_w);
+    // Pool window is always kernel_h x kernel_w; start derived from sample.
+    float h_ratio = float(params.H - params.kernel_h) / float(max(params.out_h - 1u, 1u));
+    float w_ratio = float(params.W - params.kernel_w) / float(max(params.out_w - 1u, 1u));
 
-    int h_start = int(floor((float(oh) + sample_h) * h_ratio - sample_h));
-    int h_end   = int(floor((float(oh + 1) + sample_h) * h_ratio - sample_h));
-    int w_start = int(floor((float(ow) + sample_w) * w_ratio - sample_w));
-    int w_end   = int(floor((float(ow + 1) + sample_w) * w_ratio - sample_w));
+    int h_start = (oh == params.out_h - 1u)
+        ? int(params.H - params.kernel_h)
+        : int(floor((float(oh) + sample_h) * h_ratio));
+    int w_start = (ow == params.out_w - 1u)
+        ? int(params.W - params.kernel_w)
+        : int(floor((float(ow) + sample_w) * w_ratio));
+
+    int h_end = h_start + int(params.kernel_h);
+    int w_end = w_start + int(params.kernel_w);
 
     h_start = max(h_start, 0);
-    h_end   = min(h_end, int(params.H));
     w_start = max(w_start, 0);
+    h_end   = min(h_end, int(params.H));
     w_end   = min(w_end, int(params.W));
     if (h_end <= h_start) h_end = h_start + 1;
     if (w_end <= w_start) w_end = w_start + 1;

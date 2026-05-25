@@ -203,9 +203,11 @@ void register_nn(py::module_& m) {
         // ====================================================================
         .def("train", &tenzor::nn::Module::train,
              py::arg("mode") = true,
-             "Set training mode (affects dropout, batchnorm, etc.)")
+             "Set training mode (affects dropout, batchnorm, etc.)",
+             py::call_guard<py::gil_scoped_release>())
         .def("eval", &tenzor::nn::Module::eval,
-             "Set evaluation mode - equivalent to train(False)")
+             "Set evaluation mode - equivalent to train(False)",
+             py::call_guard<py::gil_scoped_release>())
         .def("is_training", &tenzor::nn::Module::is_training,
              "Check if module is in training mode")
         .def_property_readonly("training", &tenzor::nn::Module::is_training,
@@ -254,7 +256,8 @@ void register_nn(py::module_& m) {
         // Gradient management
         // ====================================================================
         .def("zero_grad", &tenzor::nn::Module::zero_grad,
-             "Zero all parameter gradients")
+             "Zero all parameter gradients",
+             py::call_guard<py::gil_scoped_release>())
         .def("requires_grad_", [](tenzor::nn::Module& self, bool requires_grad) {
             for (auto& param : self.parameters()) {
                 param->set_requires_grad(requires_grad);
@@ -267,7 +270,8 @@ void register_nn(py::module_& m) {
         // Serialization
         // ====================================================================
         .def("state_dict", &tenzor::nn::Module::state_dict,
-             "Get module state as dictionary (parameters + buffers)")
+             "Get module state as dictionary (parameters + buffers)",
+             py::call_guard<py::gil_scoped_release>())
         // Audit-4 W.17 / audit-5 Z.22: mirror PyTorch's
         // ``Module.load_state_dict`` semantics. PyTorch returns
         // ``_IncompatibleKeys(missing_keys, unexpected_keys)`` *only* in

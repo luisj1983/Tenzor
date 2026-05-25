@@ -1,4 +1,5 @@
 #include "tenzor/nn/optim/sam.hpp"
+#include "tenzor/nn/optim/master_weights.hpp"
 #include "tenzor/ops/creation.hpp"
 #include "tenzor/ops/math.hpp"
 #include "tenzor/ops/reduction.hpp"
@@ -38,14 +39,20 @@ auto SAM::first_step() -> void {
         return rho_;
     };
 
-    // Compute global gradient norm across all parameters
+    // Compute global gradient norm across all parameters.
+    // BB.11: when the param dtype is F16/BF16, take the squared-norm
+    // accumulator at Float32 — the per-element grad*grad multiply in
+    // half precision underflows for small grads (1e-4 squared ≈ 1e-8 →
+    // 0 in F16), biasing ||grad|| toward zero and inflating epsilon.
     double grad_norm_sq = 0.0;
 
     for (auto& param_ptr : parameters_) {
         if (!param_ptr || !param_ptr->has_grad()) continue;
         const Tensor& grad = param_ptr->grad().value();
+        const DType state_dt = optim_state_dtype(grad.dtype());
+        Tensor grad_compute = (grad.dtype() == state_dt) ? grad : grad.to(state_dt);
         // Sum of squared elements
-        auto norm_sq = sum(grad * grad);
+        auto norm_sq = sum(grad_compute * grad_compute);
         // Move to CPU before reading host-side; data<T>() on a GPU tensor returns
         // a device pointer and dereferencing it from host code segfaults.
         auto norm_sq_cpu = norm_sq.to(DType::Float64).to(Device::cpu());
@@ -72,16 +79,39 @@ auto SAM::first_step() -> void {
         const double rho_i = resolve(i);
         const double scale = rho_i / grad_norm;
 
-        // epsilon_i = rho_i * grad_i / ||grad||_2
-        auto scalar = [&](double value) -> Tensor {
-            return full({1}, value, param_ptr->tensor().dtype(), param_ptr->tensor().device());
-        };
+        const DType param_dt = param_ptr->tensor().dtype();
+        const DType state_dt = optim_state_dtype(param_dt);
 
-        Tensor eps = grad * scalar(scale);
-        epsilon_.push_back(eps.clone());
+        if (state_dt != param_dt) {
+            // BB.11: F16/BF16 path — upcast param + grad to Float32, build
+            // epsilon at F32, perturb at F32, then cast the resulting
+            // tensor back to the param dtype. Storing epsilon at param
+            // dtype rounds 1e-7 (typical rho * grad / norm magnitude) to
+            // zero in F16 and erodes BF16 momentum across steps.
+            Tensor grad_f32 = grad.to(state_dt);
+            Tensor scale_f32 = full({1}, scale, state_dt, param_ptr->tensor().device());
+            Tensor eps_f32 = grad_f32 * scale_f32;
 
-        // Perturb weights: w = w + epsilon
-        param_ptr->tensor() = param_ptr->tensor() + eps;
+            // epsilon_ stays at F32 so second_step subtracts the exact F32
+            // perturbation (re-casting back to F16/BF16 would lose precision
+            // again on the restore).
+            epsilon_.push_back(eps_f32.clone());
+
+            Tensor param_f32 = param_ptr->tensor().to(state_dt);
+            param_ptr->tensor() = (param_f32 + eps_f32).to(param_dt);
+        } else {
+            // epsilon_i = rho_i * grad_i / ||grad||_2 (param dtype is already
+            // at least Float32 precision — no upcast needed).
+            auto scalar = [&](double value) -> Tensor {
+                return full({1}, value, param_dt, param_ptr->tensor().device());
+            };
+
+            Tensor eps = grad * scalar(scale);
+            epsilon_.push_back(eps.clone());
+
+            // Perturb weights: w = w + epsilon
+            param_ptr->tensor() = param_ptr->tensor() + eps;
+        }
     }
 }
 
@@ -90,10 +120,22 @@ auto SAM::second_step() -> void {
         throw std::runtime_error("SAM::second_step: first_step() must be called first");
     }
 
-    // Restore original weights: w = w - epsilon
+    // Restore original weights: w = w - epsilon.
+    // BB.11: epsilon_ for F16/BF16 params is stored at Float32 to preserve
+    // the perturbation magnitude across the round-trip; subtract in F32 and
+    // cast the result back to the param dtype so the restored weights
+    // exactly match the pre-perturbation value.
     for (size_t i = 0; i < parameters_.size(); ++i) {
         if (!parameters_[i] || epsilon_[i].numel() == 0) continue;
-        parameters_[i]->tensor() = parameters_[i]->tensor() - epsilon_[i];
+        auto& param_t = parameters_[i]->tensor();
+        const DType param_dt = param_t.dtype();
+        if (epsilon_[i].dtype() != param_dt) {
+            // F16/BF16 master-weights restore path.
+            Tensor param_f32 = param_t.to(epsilon_[i].dtype());
+            param_t = (param_f32 - epsilon_[i]).to(param_dt);
+        } else {
+            param_t = param_t - epsilon_[i];
+        }
     }
 
     // Step the base optimizer with the gradients from the perturbed point

@@ -11,6 +11,7 @@
  */
 
 #include "tenzor/nn/optim/lbfgs.hpp"
+#include "tenzor/nn/optim/master_weights.hpp"
 #include "tenzor/ops/creation.hpp"
 #include "tenzor/ops/math.hpp"
 #include "tenzor/ops/reduction.hpp"
@@ -178,14 +179,44 @@ auto LBFGS::on_parameters_appended_(size_t /*old_count*/, size_t /*new_count*/) 
         "parameters in one group instead. See audit K.1.");
 }
 
+// BB.12: when any parameter is F16/BF16 we promote the entire flat
+// curvature-history path to Float32. The two-loop recursion accumulates
+// over ~history_size past gradients; storing s/y at F16 underflows for
+// typical L-BFGS step deltas (1e-3 squared ≈ 1e-6 → 0 in F16) and erodes
+// the rho_history = 1/<y,s> denominator to noise after a few outer
+// iterations.
+auto LBFGS::flat_state_dtype_() const -> DType {
+    for (const auto& p : parameters_) {
+        if (!p) continue;
+        if (optim_state_dtype(p->tensor().dtype()) == DType::Float32 &&
+            p->tensor().dtype() != DType::Float32) {
+            return DType::Float32;
+        }
+    }
+    // No half-precision params; let the gather use the params' native dtype.
+    // First non-null param dictates.
+    for (const auto& p : parameters_) {
+        if (!p) continue;
+        return p->tensor().dtype();
+    }
+    return DType::Float32;
+}
+
 auto LBFGS::gather_flat_params() const -> Tensor {
     // Concatenate flattened views of every parameter into one 1D tensor.
+    // BB.12: promote to F32 if any param is half-precision so the
+    // curvature-history math runs at full precision.
+    const DType target_dt = flat_state_dtype_();
     std::vector<Tensor> flat_parts;
     flat_parts.reserve(parameters_.size());
     for (const auto& p : parameters_) {
         if (!p) continue;
         auto& t = p->tensor();
-        flat_parts.push_back(reshape(t, {t.numel()}));
+        auto flat = reshape(t, {t.numel()});
+        if (flat.dtype() != target_dt) {
+            flat = flat.to(target_dt);
+        }
+        flat_parts.push_back(flat);
     }
     if (flat_parts.empty()) {
         throw std::runtime_error("LBFGS: no parameters to optimize");
@@ -194,6 +225,10 @@ auto LBFGS::gather_flat_params() const -> Tensor {
 }
 
 auto LBFGS::gather_flat_grad() const -> Tensor {
+    // BB.12: mirror gather_flat_params — F16/BF16 grads get upcast to F32
+    // before entering the two-loop recursion so y_history_ deltas are kept
+    // at F32 precision.
+    const DType target_dt = flat_state_dtype_();
     std::vector<Tensor> flat_parts;
     flat_parts.reserve(parameters_.size());
     for (const auto& p : parameters_) {
@@ -201,10 +236,14 @@ auto LBFGS::gather_flat_grad() const -> Tensor {
         auto& t = p->tensor();
         if (p->has_grad()) {
             const auto& g = *p->grad();
-            flat_parts.push_back(reshape(g, {g.numel()}));
+            auto flat = reshape(g, {g.numel()});
+            if (flat.dtype() != target_dt) {
+                flat = flat.to(target_dt);
+            }
+            flat_parts.push_back(flat);
         } else {
             // Treat missing gradient as zero; this matches PyTorch semantics.
-            flat_parts.push_back(zeros({t.numel()}, t.dtype(), t.device()));
+            flat_parts.push_back(zeros({t.numel()}, target_dt, t.device()));
         }
     }
     if (flat_parts.empty()) {
@@ -214,7 +253,11 @@ auto LBFGS::gather_flat_grad() const -> Tensor {
 }
 
 auto LBFGS::apply_flat_delta(const Tensor& delta) -> void {
-    // Unflatten delta back to per-parameter shapes and add to each tensor.
+    // BB.12: delta arrives in the F32 master-state dtype (or the params'
+    // native dtype if no half-precision params exist). Add to each param
+    // in F32, then cast the final tensor back to the param's dtype — only
+    // the public write to param.tensor() narrows precision, the math itself
+    // stays at F32.
     int64_t offset = 0;
     for (auto& p : parameters_) {
         if (!p) continue;
@@ -223,13 +266,20 @@ auto LBFGS::apply_flat_delta(const Tensor& delta) -> void {
         auto slice_1d = narrow(delta, /*dim=*/0, offset, n);
         auto shape_vec = std::vector<int64_t>(t.shape().begin(), t.shape().end());
         auto slice_shaped = reshape(slice_1d, shape_vec);
-        if (slice_shaped.dtype() != t.dtype()) {
-            slice_shaped = slice_shaped.to(t.dtype());
-        }
         if (slice_shaped.device() != t.device()) {
             slice_shaped = slice_shaped.to(t.device());
         }
-        t = t + slice_shaped;
+        const DType param_dt = t.dtype();
+        if (slice_shaped.dtype() != param_dt) {
+            // Compute t + delta in delta's dtype (F32), then cast back to
+            // the param dtype. This keeps the addition at F32 precision so
+            // the small-step delta isn't rounded to zero against a much
+            // larger param value in F16/BF16.
+            Tensor t_promoted = t.to(slice_shaped.dtype());
+            t = (t_promoted + slice_shaped).to(param_dt);
+        } else {
+            t = t + slice_shaped;
+        }
         offset += n;
     }
 }

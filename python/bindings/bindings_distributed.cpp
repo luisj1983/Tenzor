@@ -314,15 +314,19 @@ void register_distributed(py::module_& m) {
 
     py::class_<tenzor::distributed::FP16Compressor>(distributed, "FP16Compressor")
         .def(py::init<>())
-        .def("compress", &tenzor::distributed::FP16Compressor::compress, py::arg("gradient"))
-        .def("decompress", &tenzor::distributed::FP16Compressor::decompress, py::arg("compressed"))
+        .def("compress", &tenzor::distributed::FP16Compressor::compress, py::arg("gradient"),
+             py::call_guard<py::gil_scoped_release>())
+        .def("decompress", &tenzor::distributed::FP16Compressor::decompress, py::arg("compressed"),
+             py::call_guard<py::gil_scoped_release>())
         .def("name", &tenzor::distributed::FP16Compressor::name)
         .def("reset", &tenzor::distributed::FP16Compressor::reset);
 
     py::class_<tenzor::distributed::TopKCompressor>(distributed, "TopKCompressor")
         .def(py::init<double>(), py::arg("ratio") = 0.01)
-        .def("compress", &tenzor::distributed::TopKCompressor::compress, py::arg("gradient"))
-        .def("decompress", &tenzor::distributed::TopKCompressor::decompress, py::arg("compressed"))
+        .def("compress", &tenzor::distributed::TopKCompressor::compress, py::arg("gradient"),
+             py::call_guard<py::gil_scoped_release>())
+        .def("decompress", &tenzor::distributed::TopKCompressor::decompress, py::arg("compressed"),
+             py::call_guard<py::gil_scoped_release>())
         .def("name", &tenzor::distributed::TopKCompressor::name)
         .def("reset", &tenzor::distributed::TopKCompressor::reset);
 

@@ -5462,6 +5462,7 @@ auto VulkanBackend::dispatchSegmentReduce(const Tensor& data, const Tensor& offs
 // ============================================================================
 
 auto VulkanBackend::dispatchFractionalMaxPool2dForward(const Tensor& input, int64_t out_h, int64_t out_w,
+                                                        int64_t kernel_h, int64_t kernel_w,
                                                         const Tensor* random_samples) -> std::pair<Tensor, Tensor> {
     bool is_f64 = (input.dtype() == DType::Float64);
     DType compute_dtype = is_f64 ? DType::Float64 : DType::Float32;
@@ -5479,10 +5480,12 @@ auto VulkanBackend::dispatchFractionalMaxPool2dForward(const Tensor& input, int6
     Tensor indices({N, C, out_h, out_w}, DType::Int32, input.device());
     Tensor samples_buf = has_samples ? *random_samples : Tensor({1}, DType::Float32, input.device());
 
-    struct { uint32_t N, C, H, W, out_h, out_w, total, has_samples; } pc;
+    struct { uint32_t N, C, H, W, out_h, out_w, total, has_samples, kernel_h, kernel_w; } pc;
     pc.N = N; pc.C = C; pc.H = H; pc.W = W;
     pc.out_h = out_h; pc.out_w = out_w;
     pc.total = total; pc.has_samples = has_samples ? 1 : 0;
+    pc.kernel_h = static_cast<uint32_t>(kernel_h);
+    pc.kernel_w = static_cast<uint32_t>(kernel_w);
 
     std::vector<std::pair<uint32_t, const void*>> bindings = {
         {0, input_compute.data_ptr()}, {1, output.data_ptr()},
@@ -5555,6 +5558,7 @@ auto VulkanBackend::dispatchFractionalMaxPool2dBackward(const Tensor& grad_outpu
 }
 
 auto VulkanBackend::dispatchFractionalMaxPool3dForward(const Tensor& input, int64_t out_d, int64_t out_h, int64_t out_w,
+                                                        int64_t kernel_d, int64_t kernel_h, int64_t kernel_w,
                                                         const Tensor* random_samples) -> std::pair<Tensor, Tensor> {
     bool is_f64 = (input.dtype() == DType::Float64);
     DType compute_dtype = is_f64 ? DType::Float64 : DType::Float32;
@@ -5572,10 +5576,13 @@ auto VulkanBackend::dispatchFractionalMaxPool3dForward(const Tensor& input, int6
     Tensor indices({N, C, out_d, out_h, out_w}, DType::Int32, input.device());
     Tensor samples_buf = has_samples ? *random_samples : Tensor({1}, DType::Float32, input.device());
 
-    struct { uint32_t N, C, D, H, W, out_d, out_h, out_w, total, has_samples; } pc;
+    struct { uint32_t N, C, D, H, W, out_d, out_h, out_w, total, has_samples, kernel_d, kernel_h, kernel_w; } pc;
     pc.N = N; pc.C = C; pc.D = D; pc.H = H; pc.W = W;
     pc.out_d = out_d; pc.out_h = out_h; pc.out_w = out_w;
     pc.total = total; pc.has_samples = has_samples ? 1 : 0;
+    pc.kernel_d = static_cast<uint32_t>(kernel_d);
+    pc.kernel_h = static_cast<uint32_t>(kernel_h);
+    pc.kernel_w = static_cast<uint32_t>(kernel_w);
 
     std::vector<std::pair<uint32_t, const void*>> bindings = {
         {0, input_compute.data_ptr()}, {1, output.data_ptr()},

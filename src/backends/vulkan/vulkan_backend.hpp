@@ -654,10 +654,12 @@ public:
 
     // Fractional Max Pool + Max Unpool operations
     auto dispatchFractionalMaxPool2dForward(const Tensor& input, int64_t out_h, int64_t out_w,
+                                            int64_t kernel_h, int64_t kernel_w,
                                             const Tensor* random_samples) -> std::pair<Tensor, Tensor>;
     auto dispatchFractionalMaxPool2dBackward(const Tensor& grad_output, const Tensor& indices,
                                              const std::vector<int64_t>& input_shape) -> Tensor;
     auto dispatchFractionalMaxPool3dForward(const Tensor& input, int64_t out_d, int64_t out_h, int64_t out_w,
+                                            int64_t kernel_d, int64_t kernel_h, int64_t kernel_w,
                                             const Tensor* random_samples) -> std::pair<Tensor, Tensor>;
     auto dispatchFractionalMaxPool3dBackward(const Tensor& grad_output, const Tensor& indices,
                                              const std::vector<int64_t>& input_shape) -> Tensor;

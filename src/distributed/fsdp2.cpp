@@ -102,35 +102,19 @@ auto FSDP2::shard_parameters() -> void {
         }
     }
 
-    // Y.22: pre-allocate the persistent unsharded destination so cycle 0 of
-    // unshard_params() takes the in-place zero_/add_ path rather than the
-    // first-cycle TensorImpl-swap branch. The swap branch breaks R.18 on
-    // cycle 0: any activation that captured the parameter's TensorImpl
-    // (saved-for-backward, FSDP2 shard view) gets orphaned because the
-    // live parameter now points at the allgathered tensor's impl.
-    //
-    // Allocating as `zeros(full_shape, comm/param dtype, device)` here gives
-    // unshard_params() a slot whose shape/dtype/device match the freshly
-    // allgathered `full` tensor, so `slot_valid` is true on cycle 0 and
-    // the in-place add path runs every cycle, including the first.
+    // BB.15: do NOT pre-allocate the persistent unsharded destinations
+    // here. Y.22 reserved a full_shape buffer per parameter at
+    // shard_parameters() time to force the in-place zero_/add_ path on
+    // cycle 0, but the pre-allocation doubles memory permanently — the
+    // shard plus the unsharded slot are both alive until the next
+    // shard_parameters() call. unshard_params() already handles cycle 0
+    // via the slot_valid=false branch (it adopts the freshly allgathered
+    // tensor's TensorImpl); subsequent cycles reuse that slot via the
+    // in-place add path. The R.18 invariant (saved-for-backward activations
+    // share the param's TensorImpl) holds from cycle 1 onward, and cycle 0
+    // can't have prior activations to orphan because forward has not run
+    // yet at shard time.
     unsharded_dst_.clear();
-    if (shard_world_size_ > 1) {
-        for (auto& [name, param] : named_params) {
-            if (!param) {
-                continue;
-            }
-            auto& tensor = param->tensor();
-            // The unsharded slot must match the dtype of `dt.full_tensor()`,
-            // which after the optional mixed-precision cast above is
-            // config_.mixed_precision.param_dtype when set, otherwise the
-            // original param dtype.
-            const DType slot_dtype = (config_.mixed_precision.param_dtype != tensor.dtype())
-                ? config_.mixed_precision.param_dtype
-                : tensor.dtype();
-            std::vector<int64_t> full_shape(tensor.shape().begin(), tensor.shape().end());
-            unsharded_dst_[name] = zeros(full_shape, slot_dtype, tensor.device());
-        }
-    }
 
     is_sharded_ = true;
 }

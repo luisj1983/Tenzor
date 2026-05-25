@@ -7,6 +7,9 @@
 #include "tenzor/ops/math.hpp"
 #include "tenzor/autograd/ops.hpp"
 #include "tenzor/ops/creation.hpp"
+#include "tenzor/backend/fast_dispatch.hpp"
+#include "tenzor/backend/op_attributes.hpp"
+#include "tenzor/utils/logging.hpp"
 
 #ifdef TENZOR_CUDA_ENABLED
 #include <cuda_runtime.h>
@@ -185,8 +188,10 @@ auto async_matmul(const Tensor& a, const Tensor& b) -> Future<Tensor> {
 #ifdef TENZOR_CUDA_ENABLED
     if (device.type == Device::Type::CUDA) {
         return detail::async_gpu_op(device, [a, b](StreamHandle stream) {
-            // For now, call synchronous matmul
-            // In production, this would use cuBLAS with stream parameter
+            // Call synchronous matmul; the wrapping async_gpu_op enqueues on
+            // a dedicated CUDA stream so callers can overlap multiple matmuls.
+            // A cuBLAS-with-stream variant is a future optimisation but does
+            // not change the externally observable contract.
             return matmul(a, b);
         });
     }
@@ -198,44 +203,90 @@ auto async_matmul(const Tensor& a, const Tensor& b) -> Future<Tensor> {
     });
 }
 
+namespace {
+
+// BB.25 (audit-6): build the OpAttributes shape expected by the
+// Conv2dForward kernel registry across every backend. Conv2dForward's
+// per-axis macros (TENZOR_READ_CONV2D_ATTRS) read both the scalar legacy
+// keys and the per-axis StrideH/W, PaddingH/W, DilationH/W entries, so
+// populate both — mirroring F::conv2d in src/nn/functional.cpp.
+auto build_conv2d_attrs(int64_t stride, int64_t padding,
+                        int64_t dilation, int64_t groups) -> NewOpAttributes {
+    NewOpAttributes attrs;
+    attrs.set(AttrKey::Stride,    stride);
+    attrs.set(AttrKey::Padding,   padding);
+    attrs.set(AttrKey::Dilation,  dilation);
+    attrs.set(AttrKey::StrideH,   stride);
+    attrs.set(AttrKey::StrideW,   stride);
+    attrs.set(AttrKey::PaddingH,  padding);
+    attrs.set(AttrKey::PaddingW,  padding);
+    attrs.set(AttrKey::DilationH, dilation);
+    attrs.set(AttrKey::DilationW, dilation);
+    attrs.set(AttrKey::Groups,    groups);
+    return attrs;
+}
+
+auto run_conv2d_via_dispatch(const Tensor& input, const Tensor& weight,
+                             const std::optional<Tensor>& bias,
+                             int64_t stride, int64_t padding,
+                             int64_t dilation, int64_t groups) -> Tensor {
+    std::vector<Tensor> inputs_vec;
+    inputs_vec.reserve(bias.has_value() ? 3 : 2);
+    inputs_vec.push_back(input);
+    inputs_vec.push_back(weight);
+    if (bias.has_value()) {
+        inputs_vec.push_back(*bias);
+    }
+    auto attrs = build_conv2d_attrs(stride, padding, dilation, groups);
+    auto outputs = ::tenzor::dispatch_to_device(
+        OpId::Conv2dForward, input.device().type, inputs_vec, attrs);
+    return outputs[0];
+}
+
+} // anonymous namespace
+
 auto async_conv2d(
     const Tensor& input,
     const Tensor& weight,
-    [[maybe_unused]] const std::optional<Tensor>& bias,
+    const std::optional<Tensor>& bias,
     int64_t stride,
     int64_t padding,
     int64_t dilation,
-    [[maybe_unused]] int64_t groups
+    int64_t groups
 ) -> Future<Tensor> {
     Device device = input.device();
 
-    // Create output tensor with proper shape calculation
-    // Conv2d output: (N, out_channels, H_out, W_out)
-    auto batch_size = input.shape()[0];
-    auto in_height = input.shape()[2];
-    auto in_width = input.shape()[3];
-    auto out_channels = weight.shape()[0];
-    auto kernel_h = weight.shape()[2];
-    auto kernel_w = weight.shape()[3];
-
-    auto out_height = (in_height + 2 * padding - dilation * (kernel_h - 1) - 1) / stride + 1;
-    auto out_width = (in_width + 2 * padding - dilation * (kernel_w - 1) - 1) / stride + 1;
-
 #ifdef TENZOR_CUDA_ENABLED
     if (device.type == Device::Type::CUDA) {
-        return detail::async_gpu_op(device, [=](StreamHandle stream) {
-            // For now, return properly shaped zero tensor
-            // Full conv2d would need backend implementation
-            return zeros({batch_size, out_channels, out_height, out_width}, input.dtype(), device);
-        });
+        return detail::async_gpu_op(device,
+            [input, weight, bias, stride, padding, dilation, groups]
+            (StreamHandle /*stream*/) {
+                return run_conv2d_via_dispatch(input, weight, bias,
+                                               stride, padding, dilation, groups);
+            });
     }
 #endif
 
-    // CPU path: execute in thread pool
-    return detail::async_cpu_op([=]() {
-        // Return properly shaped zero tensor
-        return zeros({batch_size, out_channels, out_height, out_width}, input.dtype(), device);
-    });
+    // Non-CUDA GPU backends (ROCm / OneAPI / Vulkan) have a Conv2dForward
+    // registry entry but the StreamManager only tracks CUDA streams. Emit a
+    // one-time warning so callers understand the async wrapper is currently
+    // synchronous on these backends, then dispatch on the CPU thread pool
+    // (the underlying kernel itself still executes on the device).
+    if (device.type == Device::Type::ROCm ||
+        device.type == Device::Type::OneAPI ||
+        device.type == Device::Type::Vulkan) {
+        TENZOR_WARN_ONCE(
+            "async_conv2d: non-CUDA GPU backends do not yet have a dedicated "
+            "async stream; the op dispatches on the CPU thread pool while the "
+            "kernel itself runs on the device. Result is correct but does not "
+            "overlap with other GPU work.");
+    }
+
+    return detail::async_cpu_op(
+        [input, weight, bias, stride, padding, dilation, groups]() {
+            return run_conv2d_via_dispatch(input, weight, bias,
+                                           stride, padding, dilation, groups);
+        });
 }
 
 auto async_add(const Tensor& a, const Tensor& b) -> Future<Tensor> {

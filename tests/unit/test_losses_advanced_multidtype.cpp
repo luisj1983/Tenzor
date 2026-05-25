@@ -339,8 +339,10 @@ TEST_P(LossAdvancedMultiDTypeTest, DiceLoss_PerfectOverlap) {
     // Perfect overlap should give loss near 0
     auto loss_cpu = loss.tensor().to(Device::cpu());
     if (dtype == DType::Float32) {
+        // reason: Dice/IoU bounded-score [0,1] tolerance for accumulation noise across reductions
         EXPECT_NEAR(loss_cpu.data<float>()[0], 0.0f, 0.1f);
     } else {
+        // reason: Dice/IoU bounded-score [0,1] tolerance for accumulation noise across reductions
         EXPECT_NEAR(loss_cpu.data<double>()[0], 0.0, 0.1);
     }
 }
@@ -416,8 +418,10 @@ TEST_P(LossAdvancedMultiDTypeTest, HuberLoss_SmallError) {
     // L = 0.5 * 0.5^2 = 0.125 per element
     auto loss_cpu = loss.tensor().to(Device::cpu());
     if (dtype == DType::Float32) {
+        // reason: IoU bounded-score [0,1] tolerance for accumulation noise across reductions
         EXPECT_NEAR(loss_cpu.data<float>()[0], 0.125f, 0.05f);
     } else {
+        // reason: IoU bounded-score [0,1] tolerance for accumulation noise across reductions
         EXPECT_NEAR(loss_cpu.data<double>()[0], 0.125, 0.05);
     }
 }

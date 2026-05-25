@@ -26,6 +26,10 @@ layout(push_constant) uniform PushConstants {
     uint padding_d;
     uint padding_h;
     uint padding_w;
+    uint dilation_d;
+    uint dilation_h;
+    uint dilation_w;
+    uint ceil_mode;
 } params;
 
 float16_t readF16Element(uint flat_idx) {
@@ -43,7 +47,7 @@ void writeF16Element(uint flat_idx, float16_t val) {
     uint mask = 0xFFFFu << half_offset;
 
     uint old_word = output_data[word_idx];
-    for (int attempt = 0; attempt < 1024; ++attempt) {
+    for (int attempt = 0; attempt < 65536; ++attempt) {
         uint new_word = (old_word & ~mask) | (new_bits << half_offset);
         uint result = atomicCompSwap(output_data[word_idx], old_word, new_word);
         if (result == old_word) return;
@@ -73,15 +77,15 @@ void main() {
     uint in_spatial = params.in_depth * params.in_height * params.in_width;
 
     for (uint kd = 0; kd < params.kernel_d; kd++) {
-        int d_in = d_start + int(kd);
+        int d_in = d_start + int(kd) * int(params.dilation_d);
         if (d_in < 0 || d_in >= int(params.in_depth)) continue;
 
         for (uint kh = 0; kh < params.kernel_h; kh++) {
-            int h_in = h_start + int(kh);
+            int h_in = h_start + int(kh) * int(params.dilation_h);
             if (h_in < 0 || h_in >= int(params.in_height)) continue;
 
             for (uint kw = 0; kw < params.kernel_w; kw++) {
-                int w_in = w_start + int(kw);
+                int w_in = w_start + int(kw) * int(params.dilation_w);
                 if (w_in < 0 || w_in >= int(params.in_width)) continue;
 
                 uint input_idx = bc * in_spatial +

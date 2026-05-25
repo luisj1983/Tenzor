@@ -1699,22 +1699,43 @@ auto VulkanBackend::dispatchMaxPool3dForward(const Tensor& input, const OpAttrib
     int64_t padding_d = attrs.has(AttrKey::PaddingD) ? attrs.get_int(AttrKey::PaddingD) : pd;
     int64_t padding_h = attrs.has(AttrKey::PaddingH) ? attrs.get_int(AttrKey::PaddingH) : pd;
     int64_t padding_w = attrs.has(AttrKey::PaddingW) ? attrs.get_int(AttrKey::PaddingW) : pd;
+    int64_t dil = attrs.get_int(AttrKey::Dilation, 1);
+    int64_t dilation_d = attrs.has(AttrKey::DilationD) ? attrs.get_int(AttrKey::DilationD) : dil;
+    int64_t dilation_h = attrs.has(AttrKey::DilationH) ? attrs.get_int(AttrKey::DilationH) : dil;
+    int64_t dilation_w = attrs.has(AttrKey::DilationW) ? attrs.get_int(AttrKey::DilationW) : dil;
+    bool ceil_mode = attrs.get_int(AttrKey::CeilMode, 0) != 0;
     if (kernel_d <= 0 || kernel_h <= 0 || kernel_w <= 0 ||
-        stride_d <= 0 || stride_h <= 0 || stride_w <= 0) {
+        stride_d <= 0 || stride_h <= 0 || stride_w <= 0 ||
+        dilation_d <= 0 || dilation_h <= 0 || dilation_w <= 0) {
         throw std::invalid_argument(
-            "Vulkan max_pool3d: kernel_size and stride must be positive "
+            "Vulkan max_pool3d: kernel_size, stride, and dilation must be positive "
             "(got kernel=" + std::to_string(kernel_d) + "x" +
             std::to_string(kernel_h) + "x" + std::to_string(kernel_w) +
             ", stride=" + std::to_string(stride_d) + "x" +
-            std::to_string(stride_h) + "x" + std::to_string(stride_w) + ")");
+            std::to_string(stride_h) + "x" + std::to_string(stride_w) +
+            ", dilation=" + std::to_string(dilation_d) + "x" +
+            std::to_string(dilation_h) + "x" + std::to_string(dilation_w) + ")");
     }
 
     int64_t batch = input_shape[0], channels = input_shape[1];
     int64_t in_depth = input_shape[2], in_height = input_shape[3], in_width = input_shape[4];
 
-    int64_t out_depth = (in_depth + 2 * padding_d - kernel_d) / stride_d + 1;
-    int64_t out_height = (in_height + 2 * padding_h - kernel_h) / stride_h + 1;
-    int64_t out_width = (in_width + 2 * padding_w - kernel_w) / stride_w + 1;
+    // PyTorch out shape: floor((in + 2*pad - dilation*(kernel-1) - 1) / stride) + 1
+    // ceil_mode bumps to ceil(...).
+    auto compute_out = [&](int64_t in, int64_t pad, int64_t dil_v, int64_t k, int64_t s) -> int64_t {
+        int64_t num = in + 2 * pad - dil_v * (k - 1) - 1;
+        if (ceil_mode) {
+            // ceil(num / s) = (num + s - 1) / s for positive num, but PyTorch
+            // also guards the last window to ensure it starts within input.
+            int64_t out = (num + s - 1) / s + 1;
+            if ((out - 1) * s >= in + pad) out -= 1;
+            return out;
+        }
+        return num / s + 1;
+    };
+    int64_t out_depth  = compute_out(in_depth,  padding_d, dilation_d, kernel_d, stride_d);
+    int64_t out_height = compute_out(in_height, padding_h, dilation_h, kernel_h, stride_h);
+    int64_t out_width  = compute_out(in_width,  padding_w, dilation_w, kernel_w, stride_w);
 
     int32_t device_id = input.device().index;
 
@@ -1755,6 +1776,8 @@ auto VulkanBackend::dispatchMaxPool3dForward(const Tensor& input, const OpAttrib
         uint32_t kernel_d, kernel_h, kernel_w;
         uint32_t stride_d, stride_h, stride_w;
         uint32_t padding_d, padding_h, padding_w;
+        uint32_t dilation_d, dilation_h, dilation_w;
+        uint32_t ceil_mode;
     } pc;
 
     pc.n_elements = static_cast<uint32_t>(output.numel());
@@ -1774,6 +1797,10 @@ auto VulkanBackend::dispatchMaxPool3dForward(const Tensor& input, const OpAttrib
     pc.padding_d = static_cast<uint32_t>(padding_d);
     pc.padding_h = static_cast<uint32_t>(padding_h);
     pc.padding_w = static_cast<uint32_t>(padding_w);
+    pc.dilation_d = static_cast<uint32_t>(dilation_d);
+    pc.dilation_h = static_cast<uint32_t>(dilation_h);
+    pc.dilation_w = static_cast<uint32_t>(dilation_w);
+    pc.ceil_mode = ceil_mode ? 1u : 0u;
 
     vkCmdPushConstants(cmdBuffer, pipeline->layout(), VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), &pc);
     vkCmdDispatch(cmdBuffer, static_cast<uint32_t>(div_wg(output.numel(), devices_[device_id].workgroupSize)), 1, 1);

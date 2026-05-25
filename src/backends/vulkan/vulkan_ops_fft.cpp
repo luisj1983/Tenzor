@@ -107,6 +107,10 @@ auto VulkanBackend::dispatchStack(std::span<const Tensor> inputs, int64_t dim) -
     bool is_float64 = (inputs[0].dtype() == DType::Float64);
     DType dtype = inputs[0].dtype();
 
+    if (is_float64) {
+        vulkan::ensure_fp64_supported(device_id, "Stack");
+    }
+
     int64_t num_tensors = static_cast<int64_t>(inputs.size());
     int64_t elements_per_tensor = inputs[0].numel();
 
@@ -262,6 +266,9 @@ auto VulkanBackend::dispatchTake(const Tensor& input, const Tensor& indices) -> 
     int32_t device_id = input.device().index;
     bool is_float64 = (input.dtype() == DType::Float64);
 
+    if (is_float64) {
+        vulkan::ensure_fp64_supported(device_id, "Take");
+    }
     std::string shader_name = is_float64 ? "take_f64" : "take";
     auto* pipeline = getPipeline(shader_name, device_id);
 
@@ -401,6 +408,10 @@ auto VulkanBackend::dispatchTile(const Tensor& input, const std::vector<int64_t>
     int32_t device_id = input.device().index;
     bool is_float64 = (input.dtype() == DType::Float64);
     DType dtype = input.dtype();
+
+    if (is_float64) {
+        vulkan::ensure_fp64_supported(device_id, "Tile");
+    }
 
     auto in_shape = input.shape();
     size_t ndims = std::max(in_shape.size(), reps.size());
@@ -543,6 +554,7 @@ auto VulkanBackend::dispatchPut(const Tensor& input, const Tensor& indices_in,
     bool is_float64 = (input.dtype() == DType::Float64);
 
     if (is_float64) {
+        vulkan::ensure_fp64_supported(device_id, "Put");
         // Y.10: put_f64.comp uses GL_EXT_shader_atomic_int64 for CAS-based
         // Float64 atomicAdd when accumulating; gate so unsupported devices
         // fail fast instead of hitting an opaque SPIR-V validation error.
@@ -659,6 +671,9 @@ auto VulkanBackend::runFFTButterfly(const Tensor& input, uint32_t fft_size,
     int32_t device_id = input.device().index;
     bool is_f64 = (input.dtype() == DType::Complex128);
     bool is_f16 = (input.dtype() == DType::Float16);
+    if (is_f64) {
+        vulkan::ensure_fp64_supported(device_id, "FFTButterfly");
+    }
     uint32_t num_stages = log2_int(fft_size);
 
     // We ping-pong between two buffers for each stage
@@ -762,6 +777,9 @@ auto VulkanBackend::runMixedRadixFFT(const Tensor& input, int64_t N, uint32_t di
     int32_t device_id = input.device().index;
     bool is_f64 = (input.dtype() == DType::Complex128);
     bool is_f16 = (input.dtype() == DType::Float16);
+    if (is_f64) {
+        vulkan::ensure_fp64_supported(device_id, "MixedRadixFFT");
+    }
 
     size_t elem_size = is_f16 ? 4 : (is_f64 ? 16 : 8);
     size_t buf_size = input.numel() * elem_size;
@@ -824,6 +842,9 @@ auto VulkanBackend::runFFTScale(Tensor& data, uint32_t n, double scale_factor) -
     bool is_f64 = (data.dtype() == DType::Complex128);
     bool is_f16 = (data.dtype() == DType::Float16);
 
+    if (is_f64) {
+        vulkan::ensure_fp64_supported(device_id, "FFTScale");
+    }
     if (is_f16) {
         // F16: each complex element = 1 uint32 word
         std::string shader = "fft_scale_f16";
@@ -917,6 +938,9 @@ auto VulkanBackend::runFFTChirpMultiply(Tensor& data, const Tensor& chirp,
     int32_t device_id = data.device().index;
     bool is_f64 = (data.dtype() == DType::Complex128);
 
+    if (is_f64) {
+        vulkan::ensure_fp64_supported(device_id, "FFTChirpMultiply");
+    }
     std::string shader = is_f64 ? "fft_bluestein_chirp_f64" : "fft_bluestein_chirp";
     auto* pipeline = getPipeline(shader, device_id);
 
@@ -952,6 +976,9 @@ auto VulkanBackend::runFFTChirpGen(Tensor& output, uint32_t N, int32_t sign) -> 
     int32_t device_id = output.device().index;
     bool is_f64 = (output.dtype() == DType::Complex128);
 
+    if (is_f64) {
+        vulkan::ensure_fp64_supported(device_id, "FFTChirpGen");
+    }
     std::string shader = is_f64 ? "fft_bluestein_chirp_gen_f64" : "fft_bluestein_chirp_gen";
     auto* pipeline = getPipeline(shader, device_id);
 
@@ -987,6 +1014,9 @@ auto VulkanBackend::runFFTConjKernelGen(Tensor& output, uint32_t N, uint32_t M,
     int32_t device_id = output.device().index;
     bool is_f64 = (output.dtype() == DType::Complex128);
 
+    if (is_f64) {
+        vulkan::ensure_fp64_supported(device_id, "FFTConjKernelGen");
+    }
     std::string shader = is_f64 ? "fft_bluestein_conj_kernel_f64" : "fft_bluestein_conj_kernel";
     auto* pipeline = getPipeline(shader, device_id);
 
@@ -1112,6 +1142,9 @@ auto VulkanBackend::dispatchFFTBluestein(const Tensor& input, int64_t signal_len
 auto VulkanBackend::dispatchFFT(const Tensor& input, int64_t dim, int64_t n,
                                  const std::string& norm) -> Tensor {
     // Input is Complex64 or Complex128 (interleaved re/im)
+    if (input.dtype() == DType::Complex128) {
+        vulkan::ensure_fp64_supported(input.device().index, "FFT");
+    }
     auto shape = input.shape();
     int64_t ndim = static_cast<int64_t>(shape.size());
     if (dim < 0) dim += ndim;
@@ -1342,6 +1375,10 @@ auto VulkanBackend::dispatchRFFT(const Tensor& input, int64_t dim, int64_t n,
     int64_t signal_len = shape[dim];
     bool is_f64 = (input.dtype() == DType::Float64);
     bool is_f16 = (input.dtype() == DType::Float16);
+
+    if (is_f64) {
+        vulkan::ensure_fp64_supported(input.device().index, "RFFT");
+    }
 
     // GPU-side pad or truncate when requested RFFT length differs from input length
     Tensor working_input = input;
@@ -1614,6 +1651,10 @@ auto VulkanBackend::dispatchIRFFT(const Tensor& input, int64_t dim, int64_t n,
     int64_t output_len = n;
     bool is_f64 = (input_c.dtype() == DType::Complex128);
     bool is_f16 = (input_c.dtype() == DType::Float16);
+
+    if (is_f64) {
+        vulkan::ensure_fp64_supported(input.device().index, "IRFFT");
+    }
 
     if (output_len < 2) {
         throw std::invalid_argument(std::format(

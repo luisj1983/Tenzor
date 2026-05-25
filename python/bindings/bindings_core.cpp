@@ -1064,54 +1064,60 @@ Returns:
                 size_t nbytes = static_cast<size_t>(self.numel()) * self.dtype_size();
                 if (nbytes == 0) return self;
 
-                if (self.is_contiguous()) {
-                    // Fast path: direct device-local byte copy.
-                    if (self.device().type == tenzor::Device::Type::CPU) {
-                        std::memcpy(self.data_ptr(), converted.data_ptr(), nbytes);
+                // BB.19: release GIL only across the actual write phase.
+                // Broadcast / cast / device-move prep above stayed under
+                // the GIL because those allocate Tensors which touches
+                // Python-visible state through the storage layer.
+                {
+                    py::gil_scoped_release release;
+                    if (self.is_contiguous()) {
+                        // Fast path: direct device-local byte copy.
+                        if (self.device().type == tenzor::Device::Type::CPU) {
+                            std::memcpy(self.data_ptr(), converted.data_ptr(), nbytes);
+                        } else {
+                            auto* backend = tenzor::backend_registry().get_backend(self.device().type);
+                            if (!backend) {
+                                throw std::runtime_error(
+                                    "Tensor.copy_: no backend registered for device");
+                            }
+                            backend->copy(self.data_ptr(), converted.data_ptr(), nbytes,
+                                          tenzor::CopyKind::DeviceToDevice);
+                        }
                     } else {
-                        auto* backend = tenzor::backend_registry().get_backend(self.device().type);
-                        if (!backend) {
+                        // Non-contiguous destination: fall back to elementwise
+                        // via fill-style dispatch. We materialize converted
+                        // into a contiguous buffer, then write element-by-
+                        // element respecting self's strides. The existing
+                        // tensor assignment op is not strided-aware either,
+                        // so we do this via a scalar loop on CPU only.
+                        if (self.device().type != tenzor::Device::Type::CPU) {
                             throw std::runtime_error(
-                                "Tensor.copy_: no backend registered for device");
+                                "Tensor.copy_: non-contiguous destination only "
+                                "supported on CPU; call .contiguous() first");
                         }
-                        backend->copy(self.data_ptr(), converted.data_ptr(), nbytes,
-                                      tenzor::CopyKind::DeviceToDevice);
-                    }
-                } else {
-                    // Non-contiguous destination: fall back to elementwise
-                    // via fill-style dispatch. We materialize converted
-                    // into a contiguous buffer, then write element-by-
-                    // element respecting self's strides. The existing
-                    // tensor assignment op is not strided-aware either,
-                    // so we do this via a scalar loop on CPU only.
-                    if (self.device().type != tenzor::Device::Type::CPU) {
-                        throw std::runtime_error(
-                            "Tensor.copy_: non-contiguous destination only "
-                            "supported on CPU; call .contiguous() first");
-                    }
-                    auto iter_shape = std::vector<int64_t>(ss.begin(), ss.end());
-                    int64_t n = self.numel();
-                    int64_t ndim = static_cast<int64_t>(iter_shape.size());
-                    auto strides_self = self.strides();
-                    const uint8_t* src_bytes = static_cast<const uint8_t*>(converted.data_ptr());
-                    uint8_t* dst_bytes = static_cast<uint8_t*>(self.data_ptr());
-                    size_t elt = self.dtype_size();
-                    for (int64_t lin = 0; lin < n; ++lin) {
-                        int64_t rem = lin;
-                        int64_t dst_off = 0;
-                        for (int64_t d = ndim - 1; d >= 0; --d) {
-                            int64_t idx = rem % iter_shape[d];
-                            rem /= iter_shape[d];
-                            dst_off += idx * strides_self[d];
+                        auto iter_shape = std::vector<int64_t>(ss.begin(), ss.end());
+                        int64_t n = self.numel();
+                        int64_t ndim = static_cast<int64_t>(iter_shape.size());
+                        auto strides_self = self.strides();
+                        const uint8_t* src_bytes = static_cast<const uint8_t*>(converted.data_ptr());
+                        uint8_t* dst_bytes = static_cast<uint8_t*>(self.data_ptr());
+                        size_t elt = self.dtype_size();
+                        for (int64_t lin = 0; lin < n; ++lin) {
+                            int64_t rem = lin;
+                            int64_t dst_off = 0;
+                            for (int64_t d = ndim - 1; d >= 0; --d) {
+                                int64_t idx = rem % iter_shape[d];
+                                rem /= iter_shape[d];
+                                dst_off += idx * strides_self[d];
+                            }
+                            std::memcpy(dst_bytes + dst_off * elt,
+                                        src_bytes + lin * elt, elt);
                         }
-                        std::memcpy(dst_bytes + dst_off * elt,
-                                    src_bytes + lin * elt, elt);
                     }
                 }
                 return self;
             }, py::arg("src"),
-            "Copy src into self in-place (with dtype/device conversion). Returns self.",
-            py::call_guard<py::gil_scoped_release>())
+            "Copy src into self in-place (with dtype/device conversion). Returns self.")
         .def("normal_", [](tenzor::Tensor& self, double mean, double std) -> tenzor::Tensor& {
                 auto shape_vec = std::vector<int64_t>(self.shape().begin(), self.shape().end());
                 auto sampled = tenzor::randn(shape_vec, self.dtype(), self.device());
@@ -4793,9 +4799,15 @@ Returns:
     m.def("is_grad_enabled", &tenzor::is_grad_enabled,
           "Check if gradient computation is globally enabled");
 
-    m.def("set_grad_enabled", &tenzor::set_grad_enabled,
+    // BB.20: `set_grad_enabled` is bound below as a context-manager class
+    // (mirroring PyTorch). The bare `tz.set_grad_enabled(False)` call still
+    // toggles state because the class constructor applies the requested
+    // mode immediately — exiting the (unused) context manager just restores
+    // the previously captured state. The C++ entry point is still exposed
+    // under a different name for internal use.
+    m.def("_set_grad_enabled", &tenzor::set_grad_enabled,
           py::arg("enabled"),
-          "Set global gradient computation state");
+          "Set global gradient computation state (no context manager)");
 
     // Python-friendly context manager wrapper for no_grad
     // NoGradGuard is not movable/copyable, so we wrap it in a class that manages its lifetime.
@@ -4917,12 +4929,21 @@ Returns:
         bool mode_;
         std::vector<bool> prev_state_stack_;
 
-        PySetGradEnabledContext(bool mode) : mode_(mode) {}
-
-        void enter() {
+        // BB.20: PyTorch-style behaviour — constructing the object applies
+        // the mode immediately, so the bare expression `tz.set_grad_enabled(False)`
+        // still toggles state without needing `with`. The captured previous
+        // state is held on the stack and restored only when the context
+        // manager is exited (or the object is destroyed via `__exit__`).
+        PySetGradEnabledContext(bool mode) : mode_(mode) {
             prev_state_stack_.push_back(tenzor::is_grad_enabled());
             tenzor::set_grad_enabled(mode_);
         }
+
+        // __enter__ is a no-op for state (already applied in ctor); we just
+        // return self. We do *not* push again here because the constructor
+        // already captured the prior state; pushing twice would unbalance
+        // the stack against a single __exit__.
+        void enter() {}
 
         void exit() {
             if (!prev_state_stack_.empty()) {
@@ -4931,9 +4952,55 @@ Returns:
                 tenzor::set_grad_enabled(prev);
             }
         }
+
+        // __call__ for decorator usage: wrap `func` so that during its
+        // execution `mode_` is applied and the prior state is restored
+        // afterwards. Mirrors enable_grad's decorator wrapper.
+        py::object call(py::function func) {
+            bool mode = mode_;
+            auto wrapper = py::cpp_function([func, mode](py::args args, py::kwargs kwargs) -> py::object {
+                bool prev = tenzor::is_grad_enabled();
+                tenzor::set_grad_enabled(mode);
+                try {
+                    py::object result = func(*args, **kwargs);
+                    tenzor::set_grad_enabled(prev);
+                    return result;
+                } catch (...) {
+                    tenzor::set_grad_enabled(prev);
+                    throw;
+                }
+            });
+            try {
+                py::module_ functools = py::module_::import("functools");
+                functools.attr("update_wrapper")(wrapper, func);
+            } catch (py::error_already_set&) {
+                PyErr_Clear();
+            }
+            return wrapper;
+        }
     };
 
-    // Keep the existing set_grad_enabled function, but also allow context manager usage
+    py::class_<PySetGradEnabledContext>(m, "set_grad_enabled",
+        "Context manager / function that sets the gradient computation mode.\n\n"
+        "Usage as plain call (back-compat):\n"
+        "    tz.set_grad_enabled(False)\n\n"
+        "Usage as context manager:\n"
+        "    with tz.set_grad_enabled(False):\n"
+        "        y = model(x)\n\n"
+        "Usage as decorator:\n"
+        "    @tz.set_grad_enabled(False)\n"
+        "    def f(x):\n"
+        "        return model(x)")
+        .def(py::init<bool>(), py::arg("mode"))
+        .def("__enter__", [](PySetGradEnabledContext& self) -> PySetGradEnabledContext& {
+            self.enter();
+            return self;
+        })
+        .def("__exit__", [](PySetGradEnabledContext& self, py::object, py::object, py::object) {
+            self.exit();
+            return false;
+        })
+        .def("__call__", &PySetGradEnabledContext::call, py::arg("func"));
 
     // ========================================================================
     // Inference mode (stronger than no_grad — also skips version counters)

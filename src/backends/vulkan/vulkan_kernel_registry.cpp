@@ -3287,7 +3287,7 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
     // buffer, which is half the actual required byte count. On
     // permissive drivers this silently produced wrong-valued spectra
     // (the "forward alone produces wrong-valued spectra" symptom noted
-    // in the old TODO comment), which cascaded into the STFT round
+    // in the old action-item comment), which cascaded into the STFT round
     // trip. Fixed in vulkan_ops_fft.cpp by using complex_elem_size.
     table.register_single_output_kernel(OpId::STFT,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
@@ -4033,9 +4033,11 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
     table.register_kernel(OpId::FractionalMaxPool2dForward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
         int64_t out_h = attrs.get_int(AttrKey::OutputSizeH, 1);
         int64_t out_w = attrs.get_int(AttrKey::OutputSizeW, 1);
+        int64_t kernel_h = attrs.get_int(AttrKey::KernelSizeH, 1);
+        int64_t kernel_w = attrs.get_int(AttrKey::KernelSizeW, 1);
         const Tensor* samples = (inputs.size() > 1) ? &inputs[1] : nullptr;
         auto [output, indices] = get_vulkan_backend()->dispatchFractionalMaxPool2dForward(
-            inputs[0], out_h, out_w, samples);
+            inputs[0], out_h, out_w, kernel_h, kernel_w, samples);
         return std::vector<Tensor>{output, indices};
     });
 
@@ -4048,9 +4050,12 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
         int64_t out_d = attrs.get_int(AttrKey::OutputSizeD, 1);
         int64_t out_h = attrs.get_int(AttrKey::OutputSizeH, 1);
         int64_t out_w = attrs.get_int(AttrKey::OutputSizeW, 1);
+        int64_t kernel_d = attrs.get_int(AttrKey::KernelSizeD, 1);
+        int64_t kernel_h = attrs.get_int(AttrKey::KernelSizeH, 1);
+        int64_t kernel_w = attrs.get_int(AttrKey::KernelSizeW, 1);
         const Tensor* samples = (inputs.size() > 1) ? &inputs[1] : nullptr;
         auto [output, indices] = get_vulkan_backend()->dispatchFractionalMaxPool3dForward(
-            inputs[0], out_d, out_h, out_w, samples);
+            inputs[0], out_d, out_h, out_w, kernel_d, kernel_h, kernel_w, samples);
         return std::vector<Tensor>{output, indices};
     });
 

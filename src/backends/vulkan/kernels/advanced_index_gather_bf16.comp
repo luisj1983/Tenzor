@@ -28,7 +28,7 @@ void writeF16bits(uint element_idx, uint bits16) {
     uint mask = 0xFFFFu << half_offset;
     uint new_bits = (bits16 & 0xFFFFu) << half_offset;
     uint old_word = dst_data[word_idx];
-    for (int attempt = 0; attempt < 1024; ++attempt) {
+    for (int attempt = 0; attempt < 65536; ++attempt) {
         uint new_word = (old_word & ~mask) | new_bits;
         uint result = atomicCompSwap(dst_data[word_idx], old_word, new_word);
         if (result == old_word) return;

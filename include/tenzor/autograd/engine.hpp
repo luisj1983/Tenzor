@@ -196,6 +196,22 @@ private:
      * @return Vector of accumulated gradient tensors
      */
     auto get_accumulated_grads(Function* func) -> const std::vector<Tensor>&;
+
+    /**
+     * @brief Validate or synthesize the root gradient seed for a backward pass.
+     *
+     * Shared by `execute()` and `execute_multi()` (audit-6 BB.2). If the user
+     * did not provide a gradient and the root is scalar (numel == 1), returns
+     * `ones_like(root.tensor())`. If the user did not provide a gradient and
+     * the root is non-scalar, throws AutogradException. Otherwise validates
+     * that the supplied gradient's shape matches the root's shape.
+     *
+     * @param root Root variable being backproped.
+     * @param user_grad Caller-supplied gradient, if any.
+     * @return The validated or synthesized gradient tensor.
+     */
+    auto synthesize_or_validate_root_grad(const Variable& root,
+                                          std::optional<Tensor> user_grad) -> Tensor;
 };
 
 /**

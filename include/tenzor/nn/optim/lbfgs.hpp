@@ -144,6 +144,11 @@ private:
     auto gather_flat_grad() const -> Tensor;
     auto apply_flat_delta(const Tensor& delta) -> void;  // params += delta
     auto two_loop_recursion(const Tensor& grad) const -> Tensor;  // returns search direction
+
+    // BB.12: dtype that gather_flat_* should produce. Returns Float32 when
+    // any param is half-precision (so curvature history stays at full
+    // precision); otherwise returns the params' native dtype.
+    auto flat_state_dtype_() const -> DType;
 };
 
 } // namespace optim

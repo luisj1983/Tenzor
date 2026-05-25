@@ -179,41 +179,48 @@ static void check_for_anomaly(const std::vector<Tensor>& grads,
 // Use the shared promote_types() for gradient dtype promotion.
 // This replaces the old local promote_types() that duplicated type_promotion.cpp logic.
 
+auto BackwardEngine::synthesize_or_validate_root_grad(const Variable& root,
+                                                      std::optional<Tensor> user_grad) -> Tensor {
+    if (!user_grad.has_value()) {
+        if (root.tensor().numel() != 1) {
+            // PyTorch message wording: keep parity with torch.autograd.
+            throw AutogradException(
+                "grad can be implicitly created only for scalar outputs "
+                "(tensor has " + std::to_string(root.tensor().numel()) + " elements)");
+        }
+        return ones_like(root.tensor());
+    }
+
+    auto grad_shape = user_grad->shape();
+    auto root_shape = root.tensor().shape();
+    if (grad_shape.size() != root_shape.size() ||
+        !std::equal(grad_shape.begin(), grad_shape.end(), root_shape.begin())) {
+        auto fmt = [](std::span<const int64_t> s) {
+            std::string r = "[";
+            for (size_t i = 0; i < s.size(); ++i) {
+                if (i > 0) r += ", ";
+                r += std::to_string(s[i]);
+            }
+            return r + "]";
+        };
+        throw AutogradException(
+            "User-supplied gradient shape mismatch: expected " +
+            fmt(root_shape) + " got " + fmt(grad_shape));
+    }
+    return std::move(*user_grad);
+}
+
 auto BackwardEngine::execute(Variable& root, std::optional<Tensor> gradient,
                              bool retain_graph, bool create_graph) -> void {
     if (!root.requires_grad()) {
         return;
     }
 
-    // Initialize gradient
-    if (!gradient.has_value()) {
-        if (root.tensor().numel() != 1) {
-            throw AutogradException(
-                "backward() requires an explicit gradient argument for non-scalar outputs "
-                "(tensor has " + std::to_string(root.tensor().numel()) + " elements)");
-        }
-        gradient = ones_like(root.tensor());
-    } else {
-        // Validate user-supplied gradient shape matches root tensor shape
-        auto grad_shape = gradient->shape();
-        auto root_shape = root.tensor().shape();
-        if (grad_shape.size() != root_shape.size() ||
-            !std::equal(grad_shape.begin(), grad_shape.end(), root_shape.begin())) {
-            auto fmt = [](std::span<const int64_t> s) {
-                std::string r = "[";
-                for (size_t i = 0; i < s.size(); ++i) {
-                    if (i > 0) r += ", ";
-                    r += std::to_string(s[i]);
-                }
-                return r + "]";
-            };
-            throw AutogradException(
-                "User-supplied gradient shape mismatch: expected " +
-                fmt(root_shape) + " got " + fmt(grad_shape));
-        }
-    }
+    // audit-6 BB.2: route through shared helper so single-root and multi-root
+    // paths agree on scalar-implicit-ones and shape-mismatch behaviour.
+    Tensor seed = synthesize_or_validate_root_grad(root, std::move(gradient));
 
-    root.set_grad(*gradient);
+    root.set_grad(seed);
 
     // If no grad_fn, this is a leaf variable, nothing to backprop
     if (!root.grad_fn()) {
@@ -670,12 +677,44 @@ auto BackwardEngine::execute_multi(std::vector<Variable*> roots,
         graph_guard.emplace();
     }
 
-    // Initialize gradients for each root
+    // audit-6 BB.2 + BB.3: validate / synthesize each root gradient and merge
+    // duplicate roots (last-writer-wins previously dropped contributions when
+    // the same Variable appeared multiple times, e.g. autograd.grad((y, y), x)).
+    // Sum the gradients for each unique root identity (VariableImpl*) before
+    // seeding, so we set_grad / accumulate_grad exactly once per unique root.
+    std::unordered_map<VariableImpl*, Tensor> root_seeds;
+    std::vector<VariableImpl*> root_order;  // preserve first-seen order
     for (size_t i = 0; i < roots.size(); ++i) {
         if (!roots[i] || !roots[i]->requires_grad()) {
             continue;
         }
-        roots[i]->set_grad(gradients[i]);
+        Tensor seed = synthesize_or_validate_root_grad(
+            *roots[i],
+            std::optional<Tensor>(std::move(gradients[i])));
+        auto* key = roots[i]->impl_.get();
+        auto it = root_seeds.find(key);
+        if (it == root_seeds.end()) {
+            root_seeds.emplace(key, std::move(seed));
+            root_order.push_back(key);
+        } else {
+            // Duplicate root: sum gradient contributions (matches the
+            // PyTorch semantics of grad_outputs being added together).
+            it->second = add(it->second, seed);
+        }
+    }
+
+    // Now seed each unique root exactly once.
+    // We need fast lookup from VariableImpl* back to a Variable* in `roots` —
+    // first-occurrence wins so set_grad is observable on the canonical handle.
+    std::unordered_map<VariableImpl*, Variable*> first_root_handle;
+    for (auto* r : roots) {
+        if (!r) continue;
+        auto* key = r->impl_.get();
+        first_root_handle.emplace(key, r);  // emplace = no-op if already present
+    }
+    for (auto* key : root_order) {
+        Variable* r = first_root_handle[key];
+        r->set_grad(root_seeds[key]);
     }
 
     // Build combined topological sort from all roots using iterative DFS
@@ -725,10 +764,13 @@ auto BackwardEngine::execute_multi(std::vector<Variable*> roots,
         }
     }
 
-    // Seed gradient accumulators for root grad_fns
-    for (size_t i = 0; i < roots.size(); ++i) {
-        if (roots[i] && roots[i]->grad_fn()) {
-            accumulate_grad(roots[i]->grad_fn().get(), gradients[i]);
+    // Seed gradient accumulators for root grad_fns. audit-6 BB.3: use the
+    // deduped per-unique-root cumulative seed so duplicate roots contribute
+    // their gradients exactly once (summed), not last-writer-wins.
+    for (auto* key : root_order) {
+        Variable* r = first_root_handle[key];
+        if (r && r->grad_fn()) {
+            accumulate_grad(r->grad_fn().get(), root_seeds[key]);
         }
     }
 

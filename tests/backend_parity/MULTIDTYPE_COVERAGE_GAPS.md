@@ -211,6 +211,11 @@ tests/unit/test_scatter_add_dtype_coverage.cpp
 tests/unit/test_simd.cpp
 tests/unit/test_softmax_stride_audit.cpp
 tests/unit/test_strided_fill_dtype_coverage.cpp
+# audit-6 BB.26 — dtype-orthogonal regression coverage from the audit-5
+# closure pass; the companions below test slice-semantics / multi-device
+# wiring, not dtype-specific numerics.
+tests/autograd/test_chunk_split.cpp                   # dtype-agnostic: tests chunk/split slice semantics on empty/non-empty dims, not arithmetic
+tests/autograd/test_save_backward_multi_device.cpp    # multi-device-only by construction (GPU↔CPU traversal); dtype-orthogonal
 <!-- KNOWN-INTENTIONAL-END -->
 
 ## How to add a companion

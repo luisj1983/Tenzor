@@ -37,12 +37,12 @@ void writeF16(uint element_idx, float value) {
     uint mask = 0xFFFFu << shift;
 
     uint old_val = output_data[word_idx];
-    uint new_val, expected;
-    do {
-        expected = old_val;
-        new_val = (expected & ~mask) | (new_bits << shift);
-        old_val = atomicCompSwap(output_data[word_idx], expected, new_val);
-    } while (old_val != expected);
+    for (int attempt = 0; attempt < 65536; ++attempt) {
+        uint new_val = (old_val & ~mask) | (new_bits << shift);
+        uint result = atomicCompSwap(output_data[word_idx], old_val, new_val);
+        if (result == old_val) return;
+        old_val = result;
+    }
 }
 
 int start_index(int a, int b, int c) {

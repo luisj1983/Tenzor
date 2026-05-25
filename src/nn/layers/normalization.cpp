@@ -35,6 +35,31 @@ inline auto jit_record_rms_norm(const ::tenzor::Tensor& x,
     tracer.record_op(std::move(op));
 }
 
+// BB.16: V.24/Y.20 added per-call-site guards to refuse backend kernels
+// that regress to returning only {output} when the layer-side backward
+// needs results[1] / results[2]. The guard was duplicated at five sites
+// (LayerNorm, GroupNorm, InstanceNorm2d, InstanceNorm1d, RMSNorm GPU)
+// and missing at others (the RMSNorm CPU path returns {output, rrms}
+// directly without dispatch, but any future norm forward dispatch
+// will need the same check). Extract into one helper so adding a new
+// site is a one-line call. min_required defaults to 3 — the
+// {output, mean/sum-stat, rstd/rrms} contract shared by LayerNorm,
+// GroupNorm, InstanceNorm; pass 2 for the {output, rrms} RMSNorm case.
+inline auto check_norm_outputs(const std::vector<::tenzor::Tensor>& results,
+                               const char* op_name,
+                               std::size_t min_required = 3) -> void {
+    if (results.size() < min_required) {
+        throw std::runtime_error(
+            std::string(op_name) +
+            ": backend kernel returned " +
+            std::to_string(results.size()) +
+            " tensors; the contract requires at least " +
+            std::to_string(min_required) +
+            " ({output, mean/stat, rstd/rrms}). Fix the backend kernel "
+            "registration.");
+    }
+}
+
 }  // namespace
 #include <cmath>
 #include <stdexcept>
@@ -866,6 +891,9 @@ auto LayerNorm::forward_impl(const Variable& input_orig) -> Variable {
 
         std::vector<Tensor> inputs_vec = {x, weight_dev, bias_dev};
         auto results = dispatch<OpId::FusedLayerNorm>(inputs_vec, attrs);
+        // BB.16: inference fast path reads results[0] — guard the read so
+        // a regressing backend that returns an empty vector surfaces here.
+        check_norm_outputs(results, "LayerNorm fused inference", /*min_required=*/1);
         return Variable(results[0], false);
     }
 
@@ -982,13 +1010,7 @@ auto LayerNorm::forward_impl(const Variable& input_orig) -> Variable {
         // stats from their forward kernel directly. Contract-enforced below.
         std::vector<Tensor> inputs_vec = {x, weight_dev, bias_dev};
         auto results = dispatch<OpId::LayerNorm>(inputs_vec, attrs);
-        if (results.size() < 3) {
-            throw std::runtime_error(
-                "LayerNorm: backend kernel returned " +
-                std::to_string(results.size()) +
-                " tensors; the contract requires {output, mean, rstd}. Fix "
-                "the backend kernel registration.");
-        }
+        check_norm_outputs(results, "LayerNorm");
         Tensor out_dev  = results[0];
         Tensor mean_dev = results[1];
         Tensor rstd_dev = results[2];
@@ -1872,16 +1894,10 @@ auto GroupNorm::forward_impl(const Variable& input) -> Variable {
         attrs.set(AttrKey::Eps, eps_);
         std::vector<Tensor> inputs_vec = {input_compute, weight_tensor, bias_tensor};
         auto results = dispatch<OpId::GroupNorm>(inputs_vec, attrs);
-        // Y.20: mirror V.24's LayerNorm contract guard. Reading results[1] /
-        // results[2] without checking size would SEGFAULT in this layer (not
-        // the kernel) if a backend regresses to returning {output} only.
-        if (results.size() < 3) {
-            throw std::runtime_error(
-                "GroupNorm: backend kernel returned " +
-                std::to_string(results.size()) +
-                " tensors; the contract requires {output, mean, rstd}. Fix "
-                "the backend kernel registration.");
-        }
+        // BB.16: shared helper (V.24/Y.20 contract guard). Reading
+        // results[1] / results[2] without checking size would SEGFAULT in
+        // this layer if a backend regresses to returning {output} only.
+        check_norm_outputs(results, "GroupNorm");
 
         Tensor output = results[0];
         Tensor saved_mean = results[1];
@@ -2484,16 +2500,8 @@ auto InstanceNorm2d::forward_impl(const Variable& input) -> Variable {
     attrs.set(AttrKey::Eps, static_cast<double>(eps_));
     std::vector<Tensor> inputs_vec = {input.tensor(), weight_tensor, bias_tensor};
     auto results = dispatch<OpId::InstanceNorm>(inputs_vec, attrs);
-    // Y.20: mirror V.24's LayerNorm contract guard. Reading results[1] /
-    // results[2] without checking size would SEGFAULT in this layer (not
-    // the kernel) if a backend regresses to returning {output} only.
-    if (results.size() < 3) {
-        throw std::runtime_error(
-            "InstanceNorm2d: backend kernel returned " +
-            std::to_string(results.size()) +
-            " tensors; the contract requires {output, mean, rstd}. Fix "
-            "the backend kernel registration.");
-    }
+    // BB.16: shared helper — InstanceNorm2d 2D path (already had the guard).
+    check_norm_outputs(results, "InstanceNorm2d");
 
     Tensor output = results[0];
     Tensor saved_mean = results[1];   // [N, C]
@@ -2624,16 +2632,12 @@ auto InstanceNorm1d::forward_impl(const Variable& input) -> Variable {
     attrs.set(AttrKey::Eps, static_cast<double>(eps_));
     std::vector<Tensor> inputs_vec = {input_4d, weight_tensor, bias_tensor};
     auto results = dispatch<OpId::InstanceNorm>(inputs_vec, attrs);
-    // Y.20: mirror V.24's LayerNorm contract guard. Reading results[1] /
-    // results[2] without checking size would SEGFAULT in this layer (not
-    // the kernel) if a backend regresses to returning {output} only.
-    if (results.size() < 3) {
-        throw std::runtime_error(
-            "InstanceNorm1d: backend kernel returned " +
-            std::to_string(results.size()) +
-            " tensors; the contract requires {output, mean, rstd}. Fix "
-            "the backend kernel registration.");
-    }
+    // BB.16: shared helper — InstanceNorm1d wrapper path. The 1D wrapper
+    // reshapes to 4D and reuses the InstanceNorm2d kernel registration;
+    // every backend that satisfies the {output, mean, rstd} contract for
+    // 2D also satisfies it here, but a regressing backend must surface
+    // the contract violation in this wrapper, not segfault on results[1].
+    check_norm_outputs(results, "InstanceNorm1d");
 
     // Reshape output back to (N, C, L)
     Tensor output = results[0].reshape({N, C, L});
@@ -2969,6 +2973,10 @@ auto RMSNorm::forward_impl(const Variable& input) -> Variable {
 
         std::vector<Tensor> inputs_vec = {x, weight_cuda};
         auto results = dispatch<OpId::FusedRMSNorm>(inputs_vec, attrs);
+        // BB.16: inference fast paths still read results[0]; require at
+        // least the output tensor (full {output, rrms} contract is only
+        // needed by the training path that wires up the backward).
+        check_norm_outputs(results, "RMSNorm CUDA inference", /*min_required=*/1);
         jit_record_rms_norm(x, weight_cuda, results[0], eps_, normalized_shape_);
         return Variable(results[0], false);  // results[0] is output, [1] is rrms
     }
@@ -2991,6 +2999,9 @@ auto RMSNorm::forward_impl(const Variable& input) -> Variable {
 
         std::vector<Tensor> inputs_vec = {x, weight_vk};
         auto results = dispatch<OpId::FusedRMSNorm>(inputs_vec, attrs);
+        // BB.16: same as the CUDA inference fast path above — guard the
+        // read of results[0] so a regressing backend surfaces here.
+        check_norm_outputs(results, "RMSNorm Vulkan inference", /*min_required=*/1);
         jit_record_rms_norm(x, weight_vk, results[0], eps_, normalized_shape_);
         return Variable(results[0], false);
     }
@@ -3076,18 +3087,11 @@ auto RMSNorm::forward_impl(const Variable& input) -> Variable {
         std::vector<Tensor> inputs_vec = {x, weight_dev};
         auto results = dispatch<OpId::FusedRMSNorm>(inputs_vec, attrs);
 
-        // Contract: every backend's FusedRMSNorm must return {output, rrms}.
-        // Anything less means the backward cannot reconstruct the
-        // 1/sqrt(mean(x^2)+eps) factor and will silently miscompute or read
-        // past the saved-tensor vector. Surface the contract violation here
-        // instead of letting it manifest as a backward-time SEGV.
-        if (results.size() < 2) {
-            throw std::runtime_error(
-                "RMSNorm: backend FusedRMSNorm kernel returned " +
-                std::to_string(results.size()) +
-                " tensors; the contract requires {output, rrms}. Fix the "
-                "backend kernel registration to emit the saved rrms tensor.");
-        }
+        // BB.16: shared helper. RMSNorm only requires {output, rrms} (no
+        // mean), so pass min_required=2. Without this guard, the backward
+        // cannot reconstruct the 1/sqrt(mean(x^2)+eps) factor and will
+        // silently miscompute or read past the saved-tensor vector.
+        check_norm_outputs(results, "RMSNorm (FusedRMSNorm)", /*min_required=*/2);
         Tensor output = results[0];
         Tensor saved_rrms = results[1];
         jit_record_rms_norm(x, weight_dev, output, eps_, normalized_shape_);

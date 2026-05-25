@@ -568,6 +568,16 @@ auto SequentialLR::load_state_dict(
                 child[k.substr(prefix.size())] = v;
             }
         }
+        // BB.14: the outer SequentialLR also writes a top-level
+        // "scheduler_type" = "SequentialLR" entry. After stripping the
+        // "child{i}_." prefix, that key has no prefix and would be
+        // forwarded verbatim into the child's load_state_dict, where
+        // check_scheduler_type throws because the child expects its own
+        // identifier (e.g. "StepLR"). The prefix-match loop above already
+        // excludes it, but children may carry their own properly-prefixed
+        // "child{i}_.scheduler_type" entry — strip any stray bare key
+        // defensively so the child only sees its own prefixed identifier.
+        child.erase("scheduler_type");
         if (!child.empty()) {
             schedulers_[i]->load_state_dict(child);
         }
@@ -610,6 +620,11 @@ auto ChainedScheduler::load_state_dict(
                 child[k.substr(prefix.size())] = v;
             }
         }
+        // BB.14: mirror SequentialLR — strip any unprefixed "scheduler_type"
+        // entry so children only see their own prefixed identifier. Without
+        // this, a nested ChainedScheduler-of-ChainedScheduler whose entries
+        // collide on the bare key would fail check_scheduler_type.
+        child.erase("scheduler_type");
         if (!child.empty()) {
             schedulers_[i]->load_state_dict(child);
         }

@@ -85,7 +85,9 @@ TEST_F(ConfigTest, FloatGetSet) {
     auto value = config.get_float("learning_rate");
 
     ASSERT_TRUE(value.has_value());
-    EXPECT_NEAR(*value, 0.001, 1e-6);
+    // BB.27 (audit-6): atof is deterministic — no parsing noise — so a
+    // bit-exact check is the right contract for the config float parser.
+    EXPECT_DOUBLE_EQ(*value, 0.001);
 }
 
 // Test 5: Bool get/set
@@ -173,7 +175,8 @@ TEST_F(ConfigTest, LoadFromFile) {
 
     auto lr = config.get_float("learning_rate");
     ASSERT_TRUE(lr.has_value());
-    EXPECT_NEAR(*lr, 0.001, 1e-6);
+    // BB.27 (audit-6): atof is deterministic; bit-exact check.
+    EXPECT_DOUBLE_EQ(*lr, 0.001);
 
     auto det = config.get_bool("deterministic");
     ASSERT_TRUE(det.has_value());
@@ -268,6 +271,7 @@ TEST_F(ConfigTest, RoundtripSaveLoad) {
     // Verify values
     EXPECT_EQ(*config2.get_string("model"), "resnet50");
     EXPECT_EQ(*config2.get_int("epochs"), 100);
-    EXPECT_NEAR(*config2.get_float("momentum"), 0.9, 1e-6);
+    // BB.27 (audit-6): atof is deterministic; bit-exact check.
+    EXPECT_DOUBLE_EQ(*config2.get_float("momentum"), 0.9);
     EXPECT_TRUE(*config2.get_bool("use_amp"));
 }

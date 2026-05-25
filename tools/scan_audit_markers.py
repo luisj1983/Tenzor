@@ -3,8 +3,11 @@
 Scan the repository for lingering audit markers in source files.
 
 Walks the tree (skipping vendored / build / VCS / worktree directories) and
-reports every occurrence of TODO / FIXME / HACK / "for now" / "placeholder" /
-"simplified" / "naive" inside C++/CUDA/HIP/GLSL-compute/Python source files.
+reports every occurrence of TODO / FIXME / HACK as a *comment marker* —
+explicitly requiring a `//` (C++/CUDA/HIP/GLSL) or `#` (Python) comment
+prefix on the same line, so descriptive prose that happens to mention
+"naive" / "placeholder" / "simplified" / "for now" does not trip the
+linter.
 
 Exit code:
     0  no NEW matches (anything already in the baseline is grandfathered in)
@@ -17,6 +20,15 @@ Use --strict to ignore the baseline and fail on every marker; use
 X.11: gated as a required CI check; the baseline lets pre-existing markers
 in benchmarks / examples / archived tests stay quiet while still catching
 any new TODO/HACK/etc. introduced by a PR.
+
+CC.15 (audit-6): regex tightened from the original "any TODO/FIXME/HACK
+*or* one of the soft phrases anywhere on the line" form. The soft phrases
+("for now" / "placeholder" / "simplified" / "naive") fired on perfectly
+fine descriptive comments — e.g. "A naive memcpy past these strides would
+…" — producing 21 false positives in audit-5 against zero real new
+markers. The TODO/FIXME/HACK keywords now require a comment-introducer
+prefix (`//` or `#`) on the same line, matching how the project actually
+spells real action-required markers.
 """
 
 from __future__ import annotations
@@ -55,15 +67,14 @@ EXCLUDED_FILENAMES = {
     "scan_audit_markers.py",
 }
 
-# Case-insensitive match: bare words for TODO/FIXME/HACK, phrase matches for
-# the "soft" markers that show up in comments or strings.
+# CC.15: only flag TODO/FIXME/HACK when they appear inside a comment on the
+# same line. We match a `//` (C-family) or `#` (Python) introducer that
+# precedes the keyword anywhere on the line. The keyword check is
+# case-sensitive — lowercase `todo`/`hack` in prose ("the hack would be…")
+# is not a marker; project convention is to write the keyword in all caps
+# when it's meant as an action item.
 MARKER_PATTERN = re.compile(
-    r"\b(?:TODO|FIXME|HACK)\b"
-    r"|for\s+now"
-    r"|placeholder"
-    r"|simplified"
-    r"|naive",
-    flags=re.IGNORECASE,
+    r"(?://|#).*?\b(?:TODO|FIXME|HACK)\b"
 )
 
 

@@ -28,6 +28,10 @@ layout(push_constant) uniform PushConstants {
     uint padding_d;           // Padding depth
     uint padding_h;           // Padding height
     uint padding_w;           // Padding width
+    uint dilation_d;          // Dilation depth
+    uint dilation_h;          // Dilation height
+    uint dilation_w;          // Dilation width
+    uint ceil_mode;           // 1 if ceil_mode else 0 (recorded for parity; output shape already accounts)
 } params;
 
 void main() {
@@ -55,15 +59,15 @@ void main() {
     uint in_spatial = params.in_depth * params.in_height * params.in_width;
 
     for (uint kd = 0; kd < params.kernel_d; kd++) {
-        int d_in = d_start + int(kd);
+        int d_in = d_start + int(kd) * int(params.dilation_d);
         if (d_in < 0 || d_in >= int(params.in_depth)) continue;
 
         for (uint kh = 0; kh < params.kernel_h; kh++) {
-            int h_in = h_start + int(kh);
+            int h_in = h_start + int(kh) * int(params.dilation_h);
             if (h_in < 0 || h_in >= int(params.in_height)) continue;
 
             for (uint kw = 0; kw < params.kernel_w; kw++) {
-                int w_in = w_start + int(kw);
+                int w_in = w_start + int(kw) * int(params.dilation_w);
                 if (w_in < 0 || w_in >= int(params.in_width)) continue;
 
                 uint input_idx = bc * in_spatial +

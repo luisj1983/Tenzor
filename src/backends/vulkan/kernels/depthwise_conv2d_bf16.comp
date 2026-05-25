@@ -58,7 +58,7 @@ void writeBF16Output(uint flat_idx, float val) {
     uint mask = 0xFFFFu << half_offset;
 
     uint old_word = output_data[word_idx];
-    for (int attempt = 0; attempt < 1024; ++attempt) {
+    for (int attempt = 0; attempt < 65536; ++attempt) {
         uint new_word = (old_word & ~mask) | (new_bits << half_offset);
         uint result = atomicCompSwap(output_data[word_idx], old_word, new_word);
         if (result == old_word) return;

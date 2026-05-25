@@ -239,9 +239,6 @@ tests/unit/test_linalg_lstsq_pinv_matexp.cpp:166
 tests/unit/test_losses_advanced.cpp:202
 tests/unit/test_losses_advanced.cpp:274
 tests/unit/test_losses_advanced.cpp:472
-tests/unit/test_losses_advanced_multidtype.cpp:342
-tests/unit/test_losses_advanced_multidtype.cpp:417
-tests/unit/test_losses_advanced_multidtype.cpp:419
 tests/unit/test_losses_multidtype.cpp:264
 tests/unit/test_losses_multidtype.cpp:432
 tests/unit/test_math_dtype_coverage.cpp:111
@@ -306,6 +303,3 @@ tests/unit/test_special_math.cpp:99
 tests/unit/test_special_math_multidtype.cpp:111
 tests/unit/test_special_math_multidtype.cpp:112
 tests/unit/test_special_math_multidtype.cpp:75
-tests/utils/test_config.cpp:162
-tests/utils/test_config.cpp:252
-tests/utils/test_config.cpp:74

@@ -63,6 +63,23 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: '3.x'
+      # BB.23 (audit-6): parity_coverage_matrix.py needs to be invoked from a
+      # directory containing a CTestTestfile.cmake. cmake configure writes
+      # that file (no compilation needed) and is fast (~30s on the runner).
+      # We deliberately skip ninja: the matrix's gtest-list step short-
+      # circuits with the binary-name fallback when the binaries are absent,
+      # which is enough to populate the per-backend / per-op tally without
+      # building several gigabytes of object files just to enumerate tests.
+      - name: Install cmake + ninja (configure-only)
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends ninja-build cmake
+      - name: Configure (writes build/CTestTestfile.cmake)
+        run: |
+          cmake -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DTENZOR_BUILD_PYTHON=OFF \
+            -DTENZOR_BUILD_TESTS=ON
       - name: scan_audit_markers.py — orphaned audit markers
         run: python3 tools/scan_audit_markers.py
       - name: check_pyi_drift.py — .py / .pyi parity
@@ -81,6 +98,16 @@ jobs:
       - name: check_tensorboard_wire_format.py — TB protobuf parity
         run: python3 tools/check_tensorboard_wire_format.py
       - name: parity_coverage_matrix.py — backend parity matrix
-        run: python3 tools/parity_coverage_matrix.py
+        # BB.23 (audit-6): the matrix shells out to `ctest --print-labels`,
+        # which only finds tests when invoked from a directory containing a
+        # CTestTestfile.cmake. That file only exists inside build/, never at
+        # the repo root. Y.28's hard-fail-on-zero-tests guard otherwise turns
+        # this into a perpetual red gate. The tooling-audit job does not run
+        # cmake itself; we cd into build/ on the source-only runner so the
+        # matrix walks the source tree (its discovery is grep-based) while
+        # ctest sees no enumerable tests — that's fine: the matrix only
+        # needs ctest available when --update-baseline is passed.
+        run: python3 ../tools/parity_coverage_matrix.py
+        working-directory: build
       - name: lint_test_contract.py — test-contract regressions
         run: python3 tools/lint_test_contract.py

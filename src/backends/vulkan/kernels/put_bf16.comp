@@ -47,7 +47,7 @@ void writeBF16(uint element_idx, float value) {
     uint mask = 0xFFFFu << half_offset;
 
     uint old_word = output_data[word_idx];
-    for (int attempt = 0; attempt < 1024; ++attempt) {
+    for (int attempt = 0; attempt < 65536; ++attempt) {
         uint new_word = (old_word & ~mask) | (new_bits << half_offset);
         uint result = atomicCompSwap(output_data[word_idx], old_word, new_word);
         if (result == old_word) return;
@@ -61,7 +61,7 @@ void atomicAddBF16(uint element_idx, float val) {
     uint half_offset = (element_idx % 2) * 16;
 
     uint old_word = output_data[word_idx];
-    for (int attempt = 0; attempt < 1024; ++attempt) {
+    for (int attempt = 0; attempt < 65536; ++attempt) {
         // Extract current BF16 value
         uint old_bits = (old_word >> half_offset) & 0xFFFFu;
         float old_val = unpackBF16x2(old_bits).x;

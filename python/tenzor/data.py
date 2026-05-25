@@ -777,6 +777,10 @@ class _PrefetchWorker:
         # num_workers in {1, >=2}.
         self._worker_init_fn = worker_init_fn
         self._dataset = dataset
+        # BB.22: cooperative-stop flag so a consumer that bails out
+        # mid-iteration (raise, break, GC) can unblock the producer
+        # thread which would otherwise sit forever on a full queue.
+        self._alive = True
         self._thread = threading.Thread(target=self._run, daemon=True)
         self._thread.start()
 
@@ -794,11 +798,24 @@ class _PrefetchWorker:
             if self._worker_init_fn is not None:
                 self._worker_init_fn(0)
             for item in self._iterable:
+                # BB.22: bail out early if the consumer has detached.
+                if not self._alive:
+                    break
                 self._queue.put(item)
         except Exception as e:
-            self._queue.put(e)
+            # Only try to surface the error if we haven't been closed; a
+            # closed queue may already have been drained and pushing
+            # again is harmless but pointless.
+            if self._alive:
+                try:
+                    self._queue.put(e)
+                except Exception:
+                    pass
         finally:
-            self._queue.put(self._sentinel)
+            try:
+                self._queue.put(self._sentinel)
+            except Exception:
+                pass
 
     def __iter__(self):
         return self
@@ -810,6 +827,27 @@ class _PrefetchWorker:
         if isinstance(item, Exception):
             raise item
         return item
+
+    def close(self):
+        """BB.22: cooperatively stop the producer thread.
+
+        Clears ``self._alive`` so ``_run`` exits its loop on the next
+        iteration, and drains the queue so any ``put`` blocked on a
+        full queue unblocks immediately.
+        """
+        self._alive = False
+        try:
+            while True:
+                self._queue.get_nowait()
+        except Empty:
+            pass
+
+    def __del__(self):
+        try:
+            self.close()
+        except Exception:
+            # Destructors must not raise.
+            pass
 
 
 _WORKER_SENTINEL = "__DONE__"

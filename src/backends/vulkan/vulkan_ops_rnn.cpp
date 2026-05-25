@@ -27,6 +27,9 @@ auto VulkanBackend::dispatchLSTMForward(const Tensor& input, const Tensor& W_ih,
     bool is_f64 = (input.dtype() == DType::Float64);
     std::string cell_shader = is_f64 ? "lstm_cell_f64" : "lstm_cell";
     int32_t device_id = input.device().index;
+    if (is_f64) {
+        vulkan::ensure_fp64_supported(device_id, "LSTMForward");
+    }
 
     // Output tensor: [seq_len, batch_size, hidden_size]
     Tensor output({seq_len, batch_size, hidden_size}, input.dtype(), input.device());
@@ -124,6 +127,9 @@ auto VulkanBackend::dispatchGRUForward(const Tensor& input, const Tensor& W_ih, 
     bool is_f64 = (input.dtype() == DType::Float64);
     std::string cell_shader = is_f64 ? "gru_cell_f64" : "gru_cell";
     int32_t device_id = input.device().index;
+    if (is_f64) {
+        vulkan::ensure_fp64_supported(device_id, "GRUForward");
+    }
 
     Tensor output({seq_len, batch_size, hidden_size}, input.dtype(), input.device());
 
@@ -220,6 +226,9 @@ auto VulkanBackend::dispatchLSTMCellBackward(const Tensor& grad_h, const Tensor&
     bool is_f64  = (grad_h.dtype() == DType::Float64);
     bool is_f16  = (grad_h.dtype() == DType::Float16);
     bool is_bf16 = (grad_h.dtype() == DType::BFloat16);
+    if (is_f64) {
+        vulkan::ensure_fp64_supported(device_id, "LSTMCellBackward");
+    }
     std::string shader = is_f64  ? "lstm_cell_backward_f64"
                        : is_f16  ? "lstm_cell_backward_f16"
                        : is_bf16 ? "lstm_cell_backward_bf16"
@@ -282,6 +291,9 @@ auto VulkanBackend::dispatchGRUCellBackward(const Tensor& grad_h, const Tensor& 
     bool is_f64  = (grad_h.dtype() == DType::Float64);
     bool is_f16  = (grad_h.dtype() == DType::Float16);
     bool is_bf16 = (grad_h.dtype() == DType::BFloat16);
+    if (is_f64) {
+        vulkan::ensure_fp64_supported(device_id, "GRUCellBackward");
+    }
     std::string shader = is_f64  ? "gru_cell_backward_f64"
                        : is_f16  ? "gru_cell_backward_f16"
                        : is_bf16 ? "gru_cell_backward_bf16"

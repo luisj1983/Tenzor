@@ -46,7 +46,7 @@ void main() {
             uint out_mask = 0xFFFFu << out_half_offset;
 
             uint old_word = output_data[out_word_idx];
-            for (int attempt = 0; attempt < 1024; ++attempt) {
+            for (int attempt = 0; attempt < 65536; ++attempt) {
                 uint new_word = (old_word & ~out_mask) | (val << out_half_offset);
                 uint cas_result = atomicCompSwap(output_data[out_word_idx], old_word, new_word);
                 if (cas_result == old_word) break;
