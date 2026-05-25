@@ -911,6 +911,7 @@ def _worker_loop(
     worker_init_fn: Optional[Callable],
     rank: int = 0,
     world_size: int = 1,
+    batch_size: int = 1,
 ):
     """Target function for each DataLoader worker process."""
     _worker_info_tls.info = WorkerInfo(
@@ -947,9 +948,15 @@ def _worker_loop(
                     # late-binding inside the worker) propagate to the
                     # main thread instead of being silently swallowed.
                     pass
-                if len(batch) >= 1:
+                # HH.16: honour the DataLoader's configured batch_size for
+                # IterableDataset workers (was hardcoded to flush every 1
+                # item, so multi-worker iterable loaders ignored batch_size
+                # entirely and the collate_fn saw size-1 batches).
+                if len(batch) >= batch_size:
                     output_queue.put((worker_id, collate_fn(batch)))
                     batch = []
+            # Trailing remainder flush (e.g. dataset length not divisible
+            # by batch_size).
             if batch:
                 output_queue.put((worker_id, collate_fn(batch)))
         else:
@@ -983,6 +990,7 @@ class _MultiProcessLoader:
         seed: int,
         rank: int = 0,
         world_size: int = 1,
+        batch_size: int = 1,
     ):
         self._dataset = dataset
         self._batch_sampler = batch_sampler
@@ -995,6 +1003,9 @@ class _MultiProcessLoader:
         self._seed = seed
         self._rank = rank
         self._world_size = world_size
+        # HH.16: forwarded to _worker_loop so IterableDataset workers flush
+        # at the user's configured batch_size instead of every 1 item.
+        self._batch_size = batch_size
         self._workers: list[mp.Process] = []
         self._index_queues: list[mp.Queue] = []
         self._output_queue: Optional[mp.Queue] = None
@@ -1038,6 +1049,7 @@ class _MultiProcessLoader:
                     self._worker_init_fn,
                     self._rank,
                     self._world_size,
+                    self._batch_size,
                 ),
                 daemon=True,
             )
@@ -1397,6 +1409,10 @@ class DataLoader(Generic[T_co]):
                 seed=random.randint(0, 2**31),
                 rank=self.rank,
                 world_size=self.world_size,
+                # HH.16: pass user-configured batch_size so IterableDataset
+                # workers flush at the right granularity. Map-style loaders
+                # use batch_sampler and ignore this.
+                batch_size=(self.batch_size if self.batch_size is not None else 1),
             )
         return _wrap_pin_memory(iter(self._multiprocess_loader), self.pin_memory)
 

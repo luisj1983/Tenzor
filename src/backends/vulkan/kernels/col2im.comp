@@ -1,8 +1,9 @@
 #version 450
 
 // Col2im (Fold) operation for converting column format back to image
-// Transforms (N, C*K*K, L) → (N,C,H,W) with atomic accumulation
+// Transforms (N, C*K_h*K_w, L) → (N,C,H,W) with atomic accumulation
 // Note: This shader requires GL_EXT_shader_atomic_float extension
+// HH.6: per-axis kernel/stride/padding/dilation.
 #extension GL_EXT_shader_atomic_float : enable
 
 layout(local_size_x_id = 0) in;
@@ -16,10 +17,14 @@ layout(push_constant) uniform PushConstants {
     uint channels;
     uint height;
     uint width;
-    uint kernel_size;
-    uint stride;
-    uint padding;
-    uint dilation;
+    uint kernel_h;
+    uint kernel_w;
+    uint stride_h;
+    uint stride_w;
+    uint pad_h;
+    uint pad_w;
+    uint dil_h;
+    uint dil_w;
     uint out_h;
     uint out_w;
 } params;
@@ -30,7 +35,7 @@ void main() {
 
     // Calculate derived values
     uint num_blocks = params.out_h * params.out_w;
-    uint col_channels = params.channels * params.kernel_size * params.kernel_size;
+    uint col_channels = params.channels * params.kernel_h * params.kernel_w;
 
     // Decode flat index to (b, col_c, block_idx)
     uint temp = idx;
@@ -39,17 +44,17 @@ void main() {
     uint b = temp;
 
     // Decode col_c to (c, kh, kw)
-    uint kw = col_c % params.kernel_size;
-    uint kh = (col_c / params.kernel_size) % params.kernel_size;
-    uint c = col_c / (params.kernel_size * params.kernel_size);
+    uint kw = col_c % params.kernel_w;
+    uint kh = (col_c / params.kernel_w) % params.kernel_h;
+    uint c = col_c / (params.kernel_h * params.kernel_w);
 
     // Calculate output position from block_idx
     uint oh = block_idx / params.out_w;
     uint ow = block_idx % params.out_w;
 
     // Calculate output position in image
-    int ih = int(oh * params.stride) - int(params.padding) + int(kh * params.dilation);
-    int iw = int(ow * params.stride) - int(params.padding) + int(kw * params.dilation);
+    int ih = int(oh * params.stride_h) - int(params.pad_h) + int(kh * params.dil_h);
+    int iw = int(ow * params.stride_w) - int(params.pad_w) + int(kw * params.dil_w);
 
     // Check bounds
     if (ih >= 0 && ih < int(params.height) && iw >= 0 && iw < int(params.width)) {

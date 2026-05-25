@@ -17,6 +17,7 @@
 #include "tenzor/ops/transform.hpp"
 #include <algorithm>
 #include <stdexcept>
+#include <unordered_set>
 
 namespace tenzor::distributed {
 
@@ -50,17 +51,30 @@ FSDP2::FSDP2(std::shared_ptr<nn::Module> module, FSDP2Config config)
 FSDP2::~FSDP2() = default;
 
 auto FSDP2::shard_parameters() -> void {
-    if (is_sharded_) {
-        return;  // Already sharded
+    // HH.15: previously this early-returned when is_sharded_ was already true,
+    // which meant parameters added mid-training via add_param_group never got
+    // a DTensor wrapper and silently fell out of all-gather / reduce-scatter.
+    // Replace with a diff loop that appends any named_parameter not already
+    // present in sharded_params_. Existing slots stay put (EE.13 invariant —
+    // saved-for-backward activations share their TensorImpl).
+    auto named_params = module_->named_parameters();
+    if (!is_sharded_) {
+        sharded_params_.clear();
+        sharded_params_.reserve(named_params.size());
     }
 
-    auto named_params = module_->named_parameters();
-    sharded_params_.clear();
-    sharded_params_.reserve(named_params.size());
+    // Build a lookup over already-sharded names so the diff is O(N) over
+    // current params instead of O(N*M) string compares.
+    std::unordered_set<std::string> already_sharded;
+    already_sharded.reserve(sharded_params_.size());
+    for (auto& [n, _dt] : sharded_params_) already_sharded.insert(n);
 
     for (auto& [name, param] : named_params) {
         if (!param) {
             continue;
+        }
+        if (already_sharded.contains(name)) {
+            continue;  // Preserve existing DTensor slot.
         }
 
         auto& tensor = param->tensor();

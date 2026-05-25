@@ -5,6 +5,7 @@
 
 #include "tenzor/nn/loss/contrastive.hpp"
 #include "tenzor/nn/activations/activations.hpp"
+#include "tenzor/nn/utils/variable_cast.hpp"
 #include "tenzor/ops/math.hpp"
 #include "tenzor/ops/reduction.hpp"
 #include "tenzor/ops/creation.hpp"
@@ -21,21 +22,39 @@ namespace tenzor::nn {
 
 namespace {
 
-// L2-normalize along the last dimension
+// L2-normalize along the last dimension.
+//
+// HH.11: when input is Float16/BFloat16 the literal 1e-8 eps rounds to 0 and
+// the sqrt(0) branch produces NaN gradients on any zero-magnitude row. Upcast
+// to Float32 for the eps add / sqrt and narrow the normalised output back to
+// the input dtype on return so callers (cosine_similarity_matrix, …) keep
+// their dtype invariants.
 auto l2_normalize(const Variable& input) -> Variable {
+    const DType orig_dtype = input.tensor().dtype();
+    const bool needs_upcast = (orig_dtype == DType::Float16 ||
+                               orig_dtype == DType::BFloat16);
+    const DType compute_dtype = needs_upcast ? DType::Float32 : orig_dtype;
+    Variable x = needs_upcast
+        ? tenzor::nn::variable_cast(input, DType::Float32)
+        : input;
+
     // norm = sqrt(sum(x^2, dim=-1, keepdim=true) + eps)
-    auto squared = input * input;
+    auto squared = x * x;
     auto sum_sq = sum(squared, -1, /*keepdim=*/true);
-    auto eps_tensor = full({1}, 1e-8f, input.dtype(), input.device());
+    auto eps_tensor = full({1}, 1e-8f, compute_dtype, x.device());
     Variable eps_var(eps_tensor, false);
     auto norm_val = sum_sq + eps_var;
 
     // sqrt via: x * rsqrt(x) = sqrt(x), but we only have sqrt on tensors
     // Use: exp(0.5 * log(norm_val))
-    auto half = Variable(full({1}, 0.5f, input.dtype(), input.device()), false);
+    auto half = Variable(full({1}, 0.5f, compute_dtype, x.device()), false);
     auto sqrt_norm = exp(half * log(norm_val));
 
-    return input / sqrt_norm;
+    auto normalized = x / sqrt_norm;
+    if (needs_upcast) {
+        normalized = tenzor::nn::variable_cast(normalized, orig_dtype);
+    }
+    return normalized;
 }
 
 // Compute pairwise cosine similarity matrix
@@ -59,35 +78,52 @@ auto cosine_similarity_matrix(const Variable& a, const Variable& b) -> Variable 
 // give it an unambiguous name.
 auto local_pairwise_distance(const Variable& a, const Variable& b, double p) -> Variable {
     // ||a - b||_p per sample
-    auto diff = a - b;
+    //
+    // HH.11: same Float16/BFloat16 underflow story as l2_normalize — the
+    // 1e-8 eps tensor would land at 0 in the input dtype, so we upcast the
+    // inputs for the eps-add / sqrt / log / exp chain and narrow the
+    // distance scalar back at the end. TripletLoss math downstream stays
+    // in the input dtype.
+    const DType orig_dtype = a.tensor().dtype();
+    const bool needs_upcast = (orig_dtype == DType::Float16 ||
+                               orig_dtype == DType::BFloat16);
+    const DType compute_dtype = needs_upcast ? DType::Float32 : orig_dtype;
+    Variable a_c = needs_upcast ? tenzor::nn::variable_cast(a, DType::Float32) : a;
+    Variable b_c = needs_upcast ? tenzor::nn::variable_cast(b, DType::Float32) : b;
+    auto diff = a_c - b_c;
 
+    Variable dist;
     if (p == 2.0) {
         // L2 distance: sqrt(sum(diff^2))
         auto sq = diff * diff;
         auto sum_sq = sum(sq, -1, /*keepdim=*/false);
-        auto eps_tensor = full({1}, 1e-8f, a.dtype(), a.device());
+        auto eps_tensor = full({1}, 1e-8f, compute_dtype, a_c.device());
         Variable eps_var(eps_tensor, false);
         auto safe_sum = sum_sq + eps_var;
-        auto half = Variable(full({1}, 0.5f, a.dtype(), a.device()), false);
-        return exp(half * log(safe_sum));
+        auto half = Variable(full({1}, 0.5f, compute_dtype, a_c.device()), false);
+        dist = exp(half * log(safe_sum));
     } else if (p == 1.0) {
         // L1 distance: sum(|diff|)
         auto abs_diff = abs(diff);
-        return sum(abs_diff, -1, /*keepdim=*/false);
+        dist = sum(abs_diff, -1, /*keepdim=*/false);
     } else {
         // General Lp: (sum(|diff|^p))^(1/p)
         auto abs_diff = abs(diff);
-        auto p_tensor = Variable(full({1}, static_cast<float>(p), a.dtype(), a.device()), false);
-        auto inv_p = Variable(full({1}, static_cast<float>(1.0 / p), a.dtype(), a.device()), false);
+        auto p_tensor = Variable(full({1}, static_cast<float>(p), compute_dtype, a_c.device()), false);
+        auto inv_p = Variable(full({1}, static_cast<float>(1.0 / p), compute_dtype, a_c.device()), false);
         // |diff|^p = exp(p * log(|diff| + eps))
-        auto eps_tensor = full({1}, 1e-8f, a.dtype(), a.device());
+        auto eps_tensor = full({1}, 1e-8f, compute_dtype, a_c.device());
         Variable eps_var(eps_tensor, false);
         auto pow_p = exp(p_tensor * log(abs_diff + eps_var));
         auto sum_pow = sum(pow_p, -1, /*keepdim=*/false);
         // sum^(1/p) = exp((1/p) * log(sum))
-        auto eps2 = Variable(full({1}, 1e-8f, a.dtype(), a.device()), false);
-        return exp(inv_p * log(sum_pow + eps2));
+        auto eps2 = Variable(full({1}, 1e-8f, compute_dtype, a_c.device()), false);
+        dist = exp(inv_p * log(sum_pow + eps2));
     }
+    if (needs_upcast) {
+        dist = tenzor::nn::variable_cast(dist, orig_dtype);
+    }
+    return dist;
 }
 
 // Create scalar Variable

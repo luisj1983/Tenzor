@@ -79,12 +79,41 @@ def nearest_test_name(lines: list[str], idx: int) -> str:
     return "<file-scope>"
 
 
-def _loose_literal(line: str) -> float | None:
-    """Return the first numeric literal in ``line`` that looks like a
-    tolerance and exceeds ``LOOSE_THRESHOLD``. ``None`` if no match — caller
-    uses this both to filter and to embed into the baseline key.
+_NEAR_CALL_RX = re.compile(
+    r"\b(EXPECT_NEAR|ASSERT_NEAR|DOUBLES_EQUAL)\s*\("
+)
+
+
+def _split_top_level_args(arglist: str) -> list[str]:
+    """Split a comma-separated argument list, respecting parens / brackets /
+    template depth. Used to pick out arg[2] (the tolerance) from
+    EXPECT_NEAR(value, expected, atol).
     """
-    for lit_match in LITERAL_RX.finditer(line):
+    args: list[str] = []
+    depth = 0
+    current: list[str] = []
+    for ch in arglist:
+        if ch in "([{<":
+            depth += 1
+            current.append(ch)
+        elif ch in ")]}>":
+            depth -= 1
+            current.append(ch)
+            if depth < 0:
+                break
+        elif ch == "," and depth == 0:
+            args.append("".join(current).strip())
+            current = []
+        else:
+            current.append(ch)
+    if current:
+        args.append("".join(current).strip())
+    return args
+
+
+def _literal_in(s: str) -> float | None:
+    """Pick the first loose-magnitude numeric literal in ``s``."""
+    for lit_match in LITERAL_RX.finditer(s):
         try:
             val = float(lit_match.group(1))
         except ValueError:
@@ -92,6 +121,43 @@ def _loose_literal(line: str) -> float | None:
         if LOOSE_THRESHOLD <= val < 1.0:
             return val
     return None
+
+
+def _loose_literal(line: str) -> float | None:
+    """Return the numeric literal in ``line`` that represents the tolerance
+    threshold (not the expected value), if it exceeds ``LOOSE_THRESHOLD``.
+
+    HH.24: previously returned the first loose literal anywhere on the line,
+    which for ``EXPECT_NEAR(x, expected, atol)`` mistakenly picked ``expected``
+    when it happened to fall in [1e-3, 1.0). For EXPECT_NEAR / ASSERT_NEAR /
+    DOUBLES_EQUAL we now parse the call's top-level arguments and inspect the
+    3rd argument (the tolerance). For other matched macros (EXPECT_LT,
+    gradcheck, ...) we keep the original first-literal heuristic.
+    """
+    m = _NEAR_CALL_RX.search(line)
+    if m:
+        # Walk forward from the opening paren to find the matching close,
+        # then split the inner arg list at the top level.
+        start = m.end()  # position right after the '('
+        depth = 1
+        i = start
+        while i < len(line) and depth > 0:
+            c = line[i]
+            if c == "(":
+                depth += 1
+            elif c == ")":
+                depth -= 1
+                if depth == 0:
+                    break
+            i += 1
+        inner = line[start:i]
+        args = _split_top_level_args(inner)
+        if len(args) >= 3:
+            return _literal_in(args[2])
+        # If the call spans multiple lines we won't see args[2] here.
+        # Fall through to the legacy first-literal heuristic so we still
+        # emit *some* signal rather than silently dropping the line.
+    return _literal_in(line)
 
 
 def _format_value(value: float) -> str:

@@ -17,6 +17,7 @@
 
 #include <cstring>
 #include <filesystem>
+#include <unistd.h>  // HH.26: getpid() to disambiguate parallel ctest shards
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -37,9 +38,12 @@ public:
 class StateSyncCheckpointTest : public ::testing::Test {
 protected:
     void SetUp() override {
+        // HH.26: include pid so parallel ctest shards (sharing the gtest
+        // random seed) don't collide on the same temp directory.
         checkpoint_dir_ =
             (std::filesystem::temp_directory_path() /
              ("tenzor_state_sync_test_" +
+              std::to_string(::getpid()) + "_" +
               std::to_string(::testing::UnitTest::GetInstance()->random_seed())))
                 .string();
         std::filesystem::remove_all(checkpoint_dir_);

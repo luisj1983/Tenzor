@@ -265,7 +265,15 @@ auto Adagrad::set_lr(double lr) -> void {
     if (lr < 0.0) {
         throw std::invalid_argument("Learning rate must be non-negative");
     }
+    // HH.14: rescale every ParamGroup's lr by lr/old_lr.
+    const double old_lr = lr_;
     lr_ = lr;
+    if (old_lr == 0.0) {
+        for (auto& g : param_groups_) g.lr = lr;
+    } else {
+        const double scale = lr / old_lr;
+        for (auto& g : param_groups_) g.lr *= scale;
+    }
 }
 
 auto Adagrad::get_lr() const -> double {

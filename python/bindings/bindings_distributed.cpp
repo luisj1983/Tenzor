@@ -18,6 +18,7 @@
 #include <tenzor/distributed/sequence_parallel.hpp>
 #include <tenzor/distributed/tensor_parallel.hpp>
 #include <tenzor/nn/module.hpp>
+#include <tenzor/autograd/variable.hpp>
 
 namespace py = pybind11;
 
@@ -34,13 +35,18 @@ void register_distributed(py::module_& m) {
         .value("AVG", tenzor::distributed::ReduceOp::AVG)
         .export_values();
 
+    // HH.17: release the GIL while bootstrapping the process group — the
+    // call blocks on a TCP rendezvous and other Python threads (e.g. dataset
+    // workers) need to keep running. Same rationale for init_rpc /
+    // shutdown_rpc below.
     distributed.def("init_process_group", &tenzor::distributed::init_process_group,
         "Initialize distributed process group",
         py::arg("backend") = "nccl",
         py::arg("rank") = -1,
         py::arg("world_size") = -1,
         py::arg("master_addr") = "localhost",
-        py::arg("master_port") = 29500);
+        py::arg("master_port") = 29500,
+        py::call_guard<py::gil_scoped_release>());
 
     distributed.def("destroy_process_group", &tenzor::distributed::destroy_process_group,
         "Destroy process group and cleanup resources");
@@ -352,13 +358,16 @@ void register_distributed(py::module_& m) {
             &tenzor::distributed::rpc::RpcAgentConfig::enable_heartbeat,
             "Enable health monitoring (default: true)");
 
+    // HH.17: GIL release — both blocking on a network setup / teardown.
     rpc.def("init_rpc", &tenzor::distributed::rpc::init_rpc,
         py::arg("name"), py::arg("rank"), py::arg("world_size"),
         py::arg("config") = tenzor::distributed::rpc::RpcAgentConfig{},
-        "Initialize the RPC framework");
+        "Initialize the RPC framework",
+        py::call_guard<py::gil_scoped_release>());
 
     rpc.def("shutdown_rpc", &tenzor::distributed::rpc::shutdown_rpc,
-        "Shut down the RPC framework");
+        "Shut down the RPC framework",
+        py::call_guard<py::gil_scoped_release>());
 
     // V.36: rpc_sync blocks the calling Python thread on a network round-trip
     // (potentially seconds).  The C++ implementation in `rpc.cpp` returns
@@ -391,12 +400,34 @@ void register_distributed(py::module_& m) {
                         -> std::vector<tenzor::Tensor> {
                         py::gil_scoped_acquire gil;
                         py::object result = py_fn(args);
-                        return result.cast<std::vector<tenzor::Tensor>>();
+                        // HH.18: registered callables that return
+                        // List[Variable] previously triggered a py::cast_error
+                        // here because the cast<List[Tensor]> path doesn't
+                        // know how to walk Variable wrappers. Try the
+                        // Variable path first and extract .tensor() so the
+                        // C++ RPC wire (Tensor-only) is happy; fall back to
+                        // the plain-Tensor cast for the common case.
+                        // Note: Variable wire serialisation (preserving the
+                        // grad_fn chain across the network) is out of scope
+                        // here — this only routes the forward result.
+                        try {
+                            auto vars = result.cast<std::vector<
+                                tenzor::Variable>>();
+                            std::vector<tenzor::Tensor> tensors;
+                            tensors.reserve(vars.size());
+                            for (auto& v : vars) {
+                                tensors.push_back(v.tensor());
+                            }
+                            return tensors;
+                        } catch (const py::cast_error&) {
+                            return result.cast<std::vector<tenzor::Tensor>>();
+                        }
                     });
         },
         py::arg("name"), py::arg("fn"),
         "Register a Python callable under `name` for remote invocation. "
-        "The callable receives and returns a list of Tensors.");
+        "The callable receives a list of Tensors and returns a list of "
+        "Tensors (or Variables; their .tensor() is extracted for the wire).");
 
     rpc.def("has_function",
         [](const std::string& name) -> bool {

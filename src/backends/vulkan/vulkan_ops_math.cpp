@@ -2270,28 +2270,40 @@ auto VulkanBackend::dispatchIm2Col(const Tensor& input, const OpAttributes& attr
     int64_t height = input_shape[2];
     int64_t width = input_shape[3];
 
-    // Extract attributes
-    int64_t kernel_size = attrs.get_int(AttrKey::KernelSize);
-    int64_t stride = attrs.get_int(AttrKey::Stride, 1);
-    int64_t padding = attrs.get_int(AttrKey::Padding, 0);
-    int64_t dilation = attrs.get_int(AttrKey::Dilation, 1);
+    // HH.6: per-axis kernel/stride/padding/dilation. The shader's PushConstants
+    // now carry (kernel_h, kernel_w, stride_h, stride_w, pad_h, pad_w, dil_h,
+    // dil_w) so asymmetric tuples like kernel_size=(3,5) are honoured.
+    const auto kernel_2d = ::tenzor::backend::attrs::read_2d(attrs,
+        AttrKey::KernelSize, AttrKey::KernelSizeH, AttrKey::KernelSizeW, 0);
+    const auto stride_2d   = ::tenzor::backend::attrs::stride_2d(attrs);
+    const auto padding_2d  = ::tenzor::backend::attrs::padding_2d(attrs);
+    const auto dilation_2d = ::tenzor::backend::attrs::dilation_2d(attrs);
+    int64_t kernel_h = kernel_2d[0];
+    int64_t kernel_w = kernel_2d[1];
+    int64_t stride_h = stride_2d[0];
+    int64_t stride_w = stride_2d[1];
+    int64_t pad_h = padding_2d[0];
+    int64_t pad_w = padding_2d[1];
+    int64_t dil_h = dilation_2d[0];
+    int64_t dil_w = dilation_2d[1];
 
     // Calculate output dimensions
-    int64_t out_h = (height + 2*padding - dilation*(kernel_size-1) - 1) / stride + 1;
-    int64_t out_w = (width + 2*padding - dilation*(kernel_size-1) - 1) / stride + 1;
+    int64_t out_h = (height + 2*pad_h - dil_h*(kernel_h-1) - 1) / stride_h + 1;
+    int64_t out_w = (width + 2*pad_w - dil_w*(kernel_w-1) - 1) / stride_w + 1;
     int64_t num_blocks = out_h * out_w;
 
-    // Output shape: (N, C*K*K, L)
-    std::vector<int64_t> out_shape = {batch, channels * kernel_size * kernel_size, num_blocks};
+    // Output shape: (N, C*K_h*K_w, L)
+    std::vector<int64_t> out_shape = {batch, channels * kernel_h * kernel_w, num_blocks};
     Tensor output(out_shape, input.dtype(), input.device());
 
     int32_t device_id = input.device().index;
     std::string im2col_shader = (input.dtype() == DType::Float64) ? "im2col_f64"
-                              : (input.dtype() == DType::Float16) ? "im2col_f16" : "im2col";
+                              : (input.dtype() == DType::Float16) ? "im2col_f16"
+                              : (input.dtype() == DType::BFloat16) ? "im2col_bf16" : "im2col";
     auto* pipeline = getPipeline(im2col_shader, device_id);
 
     // Total elements to process
-    int64_t total_elements = batch * channels * kernel_size * kernel_size * num_blocks;
+    int64_t total_elements = batch * channels * kernel_h * kernel_w * num_blocks;
 
     // Prepare buffers
     const void* buffer_in = input.data_ptr();
@@ -2309,17 +2321,21 @@ auto VulkanBackend::dispatchIm2Col(const Tensor& input, const OpAttributes& attr
     VkDescriptorSet descriptorSet = allocateAndWriteDescriptorSet(
         device_id, pipeline, bindings, sizes);
 
-    // Push constants
+    // Push constants (HH.6: per-axis kernel/stride/padding/dilation)
     struct PushConstants {
         uint32_t n_elements;
         uint32_t batch;
         uint32_t channels;
         uint32_t height;
         uint32_t width;
-        uint32_t kernel_size;
-        uint32_t stride;
-        uint32_t padding;
-        uint32_t dilation;
+        uint32_t kernel_h;
+        uint32_t kernel_w;
+        uint32_t stride_h;
+        uint32_t stride_w;
+        uint32_t pad_h;
+        uint32_t pad_w;
+        uint32_t dil_h;
+        uint32_t dil_w;
         uint32_t out_h;
         uint32_t out_w;
     } push_constants;
@@ -2329,10 +2345,14 @@ auto VulkanBackend::dispatchIm2Col(const Tensor& input, const OpAttributes& attr
     push_constants.channels = static_cast<uint32_t>(channels);
     push_constants.height = static_cast<uint32_t>(height);
     push_constants.width = static_cast<uint32_t>(width);
-    push_constants.kernel_size = static_cast<uint32_t>(kernel_size);
-    push_constants.stride = static_cast<uint32_t>(stride);
-    push_constants.padding = static_cast<uint32_t>(padding);
-    push_constants.dilation = static_cast<uint32_t>(dilation);
+    push_constants.kernel_h = static_cast<uint32_t>(kernel_h);
+    push_constants.kernel_w = static_cast<uint32_t>(kernel_w);
+    push_constants.stride_h = static_cast<uint32_t>(stride_h);
+    push_constants.stride_w = static_cast<uint32_t>(stride_w);
+    push_constants.pad_h = static_cast<uint32_t>(pad_h);
+    push_constants.pad_w = static_cast<uint32_t>(pad_w);
+    push_constants.dil_h = static_cast<uint32_t>(dil_h);
+    push_constants.dil_w = static_cast<uint32_t>(dil_w);
     push_constants.out_h = static_cast<uint32_t>(out_h);
     push_constants.out_w = static_cast<uint32_t>(out_w);
 
@@ -2380,28 +2400,22 @@ auto VulkanBackend::dispatchCol2Im(const Tensor& input, const OpAttributes& attr
     // per-dim AttrKey::Channels / Height / Width. Previously we read those
     // missing keys as 0, producing empty output tensors.
     //
-    // audit V.13: read per-axis attrs and reject asymmetric kernel/stride/
-    // padding/dilation. The col2im.comp shader push-constants are scalar; a
-    // dispatcher that stores per-axis (H/W) variants would silently see them
-    // dropped because the previous code only read the scalar AttrKey::*.
+    // HH.6: per-axis kernel/stride/padding/dilation. The col2im*.comp shaders
+    // now take (kernel_h, kernel_w, stride_h, stride_w, pad_h, pad_w, dil_h,
+    // dil_w) so asymmetric tuples are honoured rather than rejected.
     const auto kernel_2d_axes  = ::tenzor::backend::attrs::read_2d(attrs,
         AttrKey::KernelSize, AttrKey::KernelSizeH, AttrKey::KernelSizeW, 0);
     const auto stride_2d_axes  = ::tenzor::backend::attrs::stride_2d(attrs);
     const auto padding_2d_axes = ::tenzor::backend::attrs::padding_2d(attrs);
     const auto dilation_2d_axes= ::tenzor::backend::attrs::dilation_2d(attrs);
-    if (kernel_2d_axes[0] != kernel_2d_axes[1] || stride_2d_axes[0] != stride_2d_axes[1] ||
-        padding_2d_axes[0] != padding_2d_axes[1] || dilation_2d_axes[0] != dilation_2d_axes[1]) {
-        throw std::invalid_argument(
-            "col2im (Vulkan): backend kernel only supports symmetric kernel/stride/padding/dilation; "
-            "got kernel=" + std::to_string(kernel_2d_axes[0]) + "x" + std::to_string(kernel_2d_axes[1]) +
-            ", stride=" + std::to_string(stride_2d_axes[0]) + "x" + std::to_string(stride_2d_axes[1]) +
-            ", padding=" + std::to_string(padding_2d_axes[0]) + "x" + std::to_string(padding_2d_axes[1]) +
-            ", dilation=" + std::to_string(dilation_2d_axes[0]) + "x" + std::to_string(dilation_2d_axes[1]));
-    }
-    int64_t kernel_size = kernel_2d_axes[0];
-    int64_t stride = stride_2d_axes[0];
-    int64_t padding = padding_2d_axes[0];
-    int64_t dilation = dilation_2d_axes[0];
+    int64_t kernel_h = kernel_2d_axes[0];
+    int64_t kernel_w = kernel_2d_axes[1];
+    int64_t stride_h = stride_2d_axes[0];
+    int64_t stride_w = stride_2d_axes[1];
+    int64_t pad_h = padding_2d_axes[0];
+    int64_t pad_w = padding_2d_axes[1];
+    int64_t dil_h = dilation_2d_axes[0];
+    int64_t dil_w = dilation_2d_axes[1];
 
     int64_t height = 0, width = 0, channels = 0;
     if (attrs.has(AttrKey::OutputSize)) {
@@ -2420,24 +2434,24 @@ auto VulkanBackend::dispatchCol2Im(const Tensor& input, const OpAttributes& attr
     if (attrs.has(AttrKey::Channels)) {
         channels = attrs.get_int(AttrKey::Channels);
     } else {
-        // Derive channels from input: input shape (N, C*K*K, L) so
-        // C = second-dim / (kernel_size^2). Fall back if kernel_size <= 0.
-        if (kernel_size <= 0) {
-            throw std::invalid_argument("col2im: kernel_size must be positive");
+        // Derive channels from input: input shape (N, C*K_h*K_w, L) so
+        // C = second-dim / (K_h*K_w). HH.6: per-axis kernel dims.
+        if (kernel_h <= 0 || kernel_w <= 0) {
+            throw std::invalid_argument("col2im: kernel_h/kernel_w must be positive");
         }
         int64_t col_dim = input_shape[1];
-        int64_t k_sq = kernel_size * kernel_size;
-        if (col_dim % k_sq != 0) {
+        int64_t k_prod = kernel_h * kernel_w;
+        if (col_dim % k_prod != 0) {
             throw std::invalid_argument(
                 "col2im: second input dim (" + std::to_string(col_dim) +
-                ") must be divisible by kernel^2 (" + std::to_string(k_sq) + ")");
+                ") must be divisible by kernel_h*kernel_w (" + std::to_string(k_prod) + ")");
         }
-        channels = col_dim / k_sq;
+        channels = col_dim / k_prod;
     }
 
-    // Calculate output dimensions
-    int64_t out_h = (height + 2*padding - dilation*(kernel_size-1) - 1) / stride + 1;
-    int64_t out_w = (width + 2*padding - dilation*(kernel_size-1) - 1) / stride + 1;
+    // Calculate output dimensions (HH.6: per-axis)
+    int64_t out_h = (height + 2*pad_h - dil_h*(kernel_h-1) - 1) / stride_h + 1;
+    int64_t out_w = (width  + 2*pad_w - dil_w*(kernel_w-1) - 1) / stride_w + 1;
 
     // Output shape: (N, C, H, W)
     std::vector<int64_t> out_shape = {batch, channels, height, width};
@@ -2479,15 +2493,17 @@ auto VulkanBackend::dispatchCol2Im(const Tensor& input, const OpAttributes& attr
     }
 
     // Now perform col2im operation - select dtype-specific variant
-    bool is_col2im_f16 = (input.dtype() == DType::Float16);
-    bool is_col2im_f64 = (input.dtype() == DType::Float64);
-    std::string col2im_shader = is_col2im_f16 ? "col2im_f16"
-                              : is_col2im_f64 ? "col2im_f64"
+    bool is_col2im_f16  = (input.dtype() == DType::Float16);
+    bool is_col2im_bf16 = (input.dtype() == DType::BFloat16);
+    bool is_col2im_f64  = (input.dtype() == DType::Float64);
+    std::string col2im_shader = is_col2im_f16  ? "col2im_f16"
+                              : is_col2im_bf16 ? "col2im_bf16"
+                              : is_col2im_f64  ? "col2im_f64"
                               : "col2im";
     auto* pipeline = getPipeline(col2im_shader, device_id);
 
-    // Total elements to process
-    int64_t col_channels = channels * kernel_size * kernel_size;
+    // Total elements to process (HH.6: per-axis K_h*K_w)
+    int64_t col_channels = channels * kernel_h * kernel_w;
     int64_t num_blocks = out_h * out_w;
     int64_t total_elements = batch * col_channels * num_blocks;
 
@@ -2505,17 +2521,21 @@ auto VulkanBackend::dispatchCol2Im(const Tensor& input, const OpAttributes& attr
     VkDescriptorSet descriptorSet = allocateAndWriteDescriptorSet(
         device_id, pipeline, bindings, sizes);
 
-    // Push constants
+    // Push constants (HH.6: per-axis kernel/stride/padding/dilation)
     struct PushConstants {
         uint32_t n_elements;
         uint32_t batch;
         uint32_t channels;
         uint32_t height;
         uint32_t width;
-        uint32_t kernel_size;
-        uint32_t stride;
-        uint32_t padding;
-        uint32_t dilation;
+        uint32_t kernel_h;
+        uint32_t kernel_w;
+        uint32_t stride_h;
+        uint32_t stride_w;
+        uint32_t pad_h;
+        uint32_t pad_w;
+        uint32_t dil_h;
+        uint32_t dil_w;
         uint32_t out_h;
         uint32_t out_w;
     } push_constants;
@@ -2525,10 +2545,14 @@ auto VulkanBackend::dispatchCol2Im(const Tensor& input, const OpAttributes& attr
     push_constants.channels = static_cast<uint32_t>(channels);
     push_constants.height = static_cast<uint32_t>(height);
     push_constants.width = static_cast<uint32_t>(width);
-    push_constants.kernel_size = static_cast<uint32_t>(kernel_size);
-    push_constants.stride = static_cast<uint32_t>(stride);
-    push_constants.padding = static_cast<uint32_t>(padding);
-    push_constants.dilation = static_cast<uint32_t>(dilation);
+    push_constants.kernel_h = static_cast<uint32_t>(kernel_h);
+    push_constants.kernel_w = static_cast<uint32_t>(kernel_w);
+    push_constants.stride_h = static_cast<uint32_t>(stride_h);
+    push_constants.stride_w = static_cast<uint32_t>(stride_w);
+    push_constants.pad_h = static_cast<uint32_t>(pad_h);
+    push_constants.pad_w = static_cast<uint32_t>(pad_w);
+    push_constants.dil_h = static_cast<uint32_t>(dil_h);
+    push_constants.dil_w = static_cast<uint32_t>(dil_w);
     push_constants.out_h = static_cast<uint32_t>(out_h);
     push_constants.out_w = static_cast<uint32_t>(out_w);
 

@@ -1242,12 +1242,24 @@ Returns:
         // per the DLPack protocol so consumers can make stream/device
         // decisions without touching the payload.
         // ---------------------------------------------------------------
-        .def("__dlpack__", [](const tenzor::Tensor& self, py::object /*stream*/) -> py::capsule {
-                // We accept the `stream` argument for protocol compatibility
-                // but don't currently synchronize on it — producers that
-                // need stream ordering should synchronize their own work
-                // before handing out the tensor. A future cuda_stream_wait
-                // hook can thread through here without changing the API.
+        .def("__dlpack__", [](const tenzor::Tensor& self,
+                              py::object /*stream*/,
+                              py::object /*max_version*/,
+                              py::object /*dl_device*/,
+                              py::object /*copy*/) -> py::capsule {
+                // HH.22: DLPack v0.8 negotiation. We accept ``stream``,
+                // ``max_version``, ``dl_device``, ``copy`` for protocol
+                // compatibility but don't currently synchronize / negotiate
+                // on them — producers that need stream ordering should
+                // synchronize their own work before handing out the tensor.
+                // TODO: thread ``stream`` through to backend event-wait once
+                // CUDA/ROCm stream APIs are exposed on the Device hooks; for
+                // ``max_version`` we always emit the legacy v0.7 capsule
+                // ("dltensor"), which the spec lets us advertise regardless
+                // of the caller's ``max_version``. ``copy=True`` and
+                // ``dl_device`` cross-device export are similarly accepted
+                // and ignored. Rejecting them outright is what breaks the
+                // NumPy 2.0 / JAX consumers that always pass these kwargs.
                 DLManagedTensor* managed = tenzor::to_dlpack(self);
                 // Capsule destructor: if the consumer never renamed the
                 // capsule to "used_dltensor", call the DLPack deleter
@@ -1272,10 +1284,15 @@ Returns:
                 return py::capsule(managed, "dltensor", destructor);
             },
             py::arg("stream") = py::none(),
+            py::arg("max_version") = py::none(),
+            py::arg("dl_device") = py::none(),
+            py::arg("copy") = py::none(),
             "DLPack producer hook: return a PyCapsule wrapping a "
             "DLManagedTensor. Enables zero-copy interop with NumPy, JAX, "
             "CuPy, PyTorch, and TVM via their respective from_dlpack() "
-            "entry points.")
+            "entry points. Accepts the DLPack v0.8 kwargs (stream, "
+            "max_version, dl_device, copy) for protocol compatibility; "
+            "they are currently ignored.")
         .def("__dlpack_device__", [](const tenzor::Tensor& self) -> py::tuple {
                 // Return (device_type_code, device_id) as int pair.
                 // device_type_code matches the DLDeviceType enum values:
@@ -2023,7 +2040,10 @@ Returns:
 
                 auto shape = state[0].cast<std::vector<int64_t>>();
                 auto dtype_int = state[1].cast<int>();
-                if (dtype_int < 0 || dtype_int > static_cast<int>(tenzor::DType::Complex128))
+                // HH.20: pickle previously rejected FP8 + QInt enumerators
+                // (Complex128 is no longer the last enumerator). Allow the
+                // full enum range up to QInt4x2.
+                if (dtype_int < 0 || dtype_int > static_cast<int>(tenzor::DType::QInt4x2))
                     throw py::value_error("Invalid dtype in pickle state: " + std::to_string(dtype_int));
                 for (auto d : shape)
                     if (d < 0) throw py::value_error("Negative dimension in pickle state");
@@ -2422,10 +2442,16 @@ Returns:
         }, py::arg("key"), "Get tensor slice or element")
         .def("__setitem__", [](tenzor::Tensor& self, py::object key, py::object value) {
             // Phase A (GIL held): Parse Python key and value into C++ types
-            enum class SetIndexKind { Int, Slice, Tuple };
+            // HH.19: extend __setitem__ with BoolMask and FancyIndex parity
+            // with __getitem__. Top-level Tensor keys with Bool dtype route
+            // through masked_fill/masked_scatter; integer Tensor keys route
+            // through index_put.
+            enum class SetIndexKind { Int, Slice, Tuple, BoolMask, FancyIndex };
             SetIndexKind kind;
             int64_t int_idx = 0;
             int64_t slice_start = 0, slice_stop = 0, slice_step = 1;  // Audit J11: stepped slice for __setitem__
+            tenzor::Tensor mask_tensor;
+            std::vector<tenzor::Tensor> fancy_indices;
 
             struct SetTupleEntry {
                 bool is_int;
@@ -2436,7 +2462,26 @@ Returns:
             std::vector<SetTupleEntry> tuple_entries;
 
             // Parse key
-            if (py::isinstance<py::int_>(key)) {
+            if (py::isinstance<tenzor::Tensor>(key)) {
+                // HH.19: Bool tensor → masked write; integer tensor → index_put.
+                tenzor::Tensor idx = py::cast<tenzor::Tensor>(key);
+                if (idx.dtype() == tenzor::DType::Bool) {
+                    kind = SetIndexKind::BoolMask;
+                    mask_tensor = idx;
+                } else {
+                    kind = SetIndexKind::FancyIndex;
+                    fancy_indices.push_back(idx);
+                }
+            } else if (py::isinstance<tenzor::Variable>(key)) {
+                tenzor::Tensor idx = py::cast<tenzor::Variable>(key).tensor();
+                if (idx.dtype() == tenzor::DType::Bool) {
+                    kind = SetIndexKind::BoolMask;
+                    mask_tensor = idx;
+                } else {
+                    kind = SetIndexKind::FancyIndex;
+                    fancy_indices.push_back(idx);
+                }
+            } else if (py::isinstance<py::int_>(key)) {
                 kind = SetIndexKind::Int;
                 int_idx = py::cast<int64_t>(key);
             } else if (py::isinstance<py::slice>(key)) {
@@ -2776,6 +2821,31 @@ Returns:
                     // Audit J11: pass slice_step (was hard-coded to 1).
                     target = self.slice(0, slice_start, slice_stop, slice_step);
                     break;
+                }
+                case SetIndexKind::BoolMask: {
+                    // HH.19: bool-mask write. Scalar value → masked_fill;
+                    // tensor value → masked_scatter. Both produce a new
+                    // tensor with the same shape as self; reuse the same
+                    // copy_with_broadcast helper to write the result back
+                    // into self in place (preserves aliasing semantics).
+                    tenzor::Tensor result;
+                    if (is_scalar_value) {
+                        result = tenzor::masked_fill(self, mask_tensor, scalar_value);
+                    } else {
+                        result = tenzor::masked_scatter(self, mask_tensor, val);
+                    }
+                    copy_with_broadcast(self, result);
+                    return;
+                }
+                case SetIndexKind::FancyIndex: {
+                    // HH.19: integer-tensor write. index_put writes in place;
+                    // it requires the source as a Tensor (scalar values get
+                    // promoted via make_scalar_tensor above).
+                    std::vector<std::optional<tenzor::Tensor>> idx_opt;
+                    idx_opt.reserve(fancy_indices.size());
+                    for (auto& t : fancy_indices) idx_opt.emplace_back(t);
+                    tenzor::index_put(self, idx_opt, val);
+                    return;
                 }
                 case SetIndexKind::Tuple: {
                     target = self;
@@ -4822,6 +4892,54 @@ Returns:
                 result[i] = s[i];
             return result;
         })
+        // HH.21: cross-framework interop on the user-facing Variable type.
+        // Each path emits a UserWarning (the conversion implicitly detaches
+        // from the autograd graph — consumers see plain numbers/arrays and
+        // gradients will NOT flow back through this boundary) and then
+        // forwards to the corresponding Tensor binding via py::cast on the
+        // underlying tensor.
+        .def("__array__", [](const tenzor::Variable& self,
+                             py::object dtype,
+                             py::object copy) -> py::object {
+            PyErr_WarnEx(PyExc_UserWarning,
+                "Implicit detach of Variable for array/dlpack export — "
+                "gradients will not flow through this conversion.", 1);
+            auto& t = self.tensor();
+            py::object py_t = py::cast(&t, py::return_value_policy::reference);
+            return py_t.attr("__array__")(dtype, copy);
+        }, py::arg("dtype") = py::none(), py::arg("copy") = py::none(),
+           "NumPy __array__ protocol on Variable. Implicitly detaches from "
+           "autograd graph (UserWarning).")
+        .def("__dlpack__", [](const tenzor::Variable& self,
+                              py::object stream,
+                              py::object max_version,
+                              py::object dl_device,
+                              py::object copy) -> py::object {
+            PyErr_WarnEx(PyExc_UserWarning,
+                "Implicit detach of Variable for array/dlpack export — "
+                "gradients will not flow through this conversion.", 1);
+            auto& t = self.tensor();
+            py::object py_t = py::cast(&t, py::return_value_policy::reference);
+            return py_t.attr("__dlpack__")(
+                py::arg("stream") = stream,
+                py::arg("max_version") = max_version,
+                py::arg("dl_device") = dl_device,
+                py::arg("copy") = copy);
+        }, py::arg("stream") = py::none(),
+           py::arg("max_version") = py::none(),
+           py::arg("dl_device") = py::none(),
+           py::arg("copy") = py::none(),
+           "DLPack producer hook on Variable. Implicitly detaches from "
+           "autograd graph (UserWarning).")
+        .def("__dlpack_device__", [](const tenzor::Variable& self) -> py::object {
+            PyErr_WarnEx(PyExc_UserWarning,
+                "Implicit detach of Variable for array/dlpack export — "
+                "gradients will not flow through this conversion.", 1);
+            auto& t = self.tensor();
+            py::object py_t = py::cast(&t, py::return_value_policy::reference);
+            return py_t.attr("__dlpack_device__")();
+        }, "DLPack device hook on Variable. Implicitly detaches from "
+           "autograd graph (UserWarning).")
         // Pickle support for model saving/loading
         .def(py::pickle(
             // __getstate__: serialize to (shape, dtype_int, device_str, requires_grad, bytes)
@@ -4851,7 +4969,10 @@ Returns:
 
                 auto shape = state[0].cast<std::vector<int64_t>>();
                 auto dtype_int = state[1].cast<int>();
-                if (dtype_int < 0 || dtype_int > static_cast<int>(tenzor::DType::Complex128))
+                // HH.20: pickle previously rejected FP8 + QInt enumerators
+                // (Complex128 is no longer the last enumerator). Allow the
+                // full enum range up to QInt4x2.
+                if (dtype_int < 0 || dtype_int > static_cast<int>(tenzor::DType::QInt4x2))
                     throw std::runtime_error("Invalid dtype in pickle state: " + std::to_string(dtype_int));
                 for (auto d : shape)
                     if (d < 0) throw std::runtime_error("Negative dimension in pickle state");

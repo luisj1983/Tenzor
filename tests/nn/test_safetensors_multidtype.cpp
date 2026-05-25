@@ -8,6 +8,7 @@
 #include "tenzor/nn/safetensors.hpp"
 #include "tenzor/nn/serialize.hpp"
 #include <filesystem>
+#include <unistd.h>  // HH.26: getpid() to disambiguate parallel ctest shards
 
 using namespace tenzor;
 using namespace tenzor::testing;
@@ -18,9 +19,13 @@ protected:
 
     void SetUp() override {
         MultiBackendDTypeTest::SetUp();
-        test_path_ = "/tmp/tenzor_safetensors_multidtype_" +
-                      std::to_string(::testing::UnitTest::GetInstance()->random_seed()) +
-                      ".safetensors";
+        // HH.26: include pid so parallel ctest shards (sharing the gtest
+        // random seed) don't collide on the same temp file.
+        test_path_ = (std::filesystem::temp_directory_path() /
+                      ("tenzor_safetensors_multidtype_" +
+                       std::to_string(::getpid()) + "_" +
+                       std::to_string(::testing::UnitTest::GetInstance()->random_seed()) +
+                       ".safetensors")).string();
     }
 
     void TearDown() override {

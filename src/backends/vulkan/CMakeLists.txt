@@ -39,8 +39,13 @@ file(GLOB SHADER_FILES "${SHADER_DIR}/*.comp")
 set(SHADERS "")
 foreach(SHADER_FILE ${SHADER_FILES})
     get_filename_component(SHADER_NAME ${SHADER_FILE} NAME_WE)
-    # Exclude shaders that need SPIR-V 1.3 (handled separately below)
-    if(NOT SHADER_NAME STREQUAL "reduction_subgroup" AND NOT SHADER_NAME STREQUAL "reduction_tree")
+    # Exclude shaders that need SPIR-V 1.3 (handled separately below).
+    # HH.9: 'conv2d' is the dead pre-im2col path with a mismatched
+    # 18-uint push-constant struct — moved to kernels/_disabled/, but
+    # guard the embed list so accidental re-adds don't trap getPipeline.
+    if(NOT SHADER_NAME STREQUAL "reduction_subgroup" AND
+       NOT SHADER_NAME STREQUAL "reduction_tree" AND
+       NOT SHADER_NAME STREQUAL "conv2d")
         list(APPEND SHADERS ${SHADER_NAME})
     endif()
 endforeach()

@@ -266,29 +266,69 @@ auto Adam::initialize_buffers() -> void {
 
 // Audit K.1: extend exp_avg_ / exp_avg_sq_ / max_exp_avg_sq_ when
 // add_param_group appends new parameters mid-training.
+//
+// HH.13: the amsgrad slot decision must respect the per-group override
+// (g->amsgrad), not just the optimizer-wide amsgrad_. Without this, a
+// param added via add_param_group({.amsgrad = true}) onto an
+// `amsgrad_=false` optimizer silently has no max_exp_avg_sq_ slot and
+// step_impl() falls back to the non-AMSGrad path for that param.
 auto Adam::on_parameters_appended_(size_t old_count, size_t new_count) -> void {
+    auto group_amsgrad = [this](size_t i) -> bool {
+        const auto* g = find_group_for_param(i);
+        if (!g) return amsgrad_;
+        return ParamGroup::or_else(g->amsgrad, amsgrad_);
+    };
+
+    // First pass: figure out whether *any* new param needs max_exp_avg_sq_
+    // and the highest index that does, so we allocate a contiguous tail
+    // (the per-index access pattern in step_impl uses max_exp_avg_sq_[i]
+    // directly with `i < max_exp_avg_sq_.size()` as the guard).
+    bool any_amsgrad = !max_exp_avg_sq_.empty();
+    size_t max_amsgrad_idx = max_exp_avg_sq_.empty()
+        ? 0 : (max_exp_avg_sq_.size() - 1);
+    for (size_t i = old_count; i < new_count; ++i) {
+        if (group_amsgrad(i)) {
+            any_amsgrad = true;
+            max_amsgrad_idx = i;
+        }
+    }
+
     exp_avg_.reserve(new_count);
     exp_avg_sq_.reserve(new_count);
-    if (amsgrad_) max_exp_avg_sq_.reserve(new_count);
+    if (any_amsgrad) max_exp_avg_sq_.reserve(max_amsgrad_idx + 1);
     for (size_t i = old_count; i < new_count; ++i) {
         const auto& param = parameters_[i];
         if (param) {
             // R.16: see Adam::initialize_buffers for the dtype rationale.
             exp_avg_.push_back(make_optim_state(param->tensor()));
             exp_avg_sq_.push_back(make_optim_state(param->tensor()));
-            if (amsgrad_) {
+            if (any_amsgrad && i <= max_amsgrad_idx) {
                 max_exp_avg_sq_.push_back(make_optim_state(param->tensor()));
             }
         } else {
             exp_avg_.push_back(Tensor{});
             exp_avg_sq_.push_back(Tensor{});
-            if (amsgrad_) max_exp_avg_sq_.push_back(Tensor{});
+            if (any_amsgrad && i <= max_amsgrad_idx) {
+                max_exp_avg_sq_.push_back(Tensor{});
+            }
         }
     }
 }
 
 auto Adam::set_lr(double lr) -> void {
+    // HH.14: PyTorch convention — when the optimizer-wide LR changes,
+    // every ParamGroup's lr scales by the same factor so per-group
+    // relative LRs are preserved across scheduler.step(). Without this,
+    // schedulers silently no-op on grouped-param optimizers (they read
+    // optimizer.lr_ but step_impl() reads group.lr).
+    const double old_lr = lr_;
     lr_ = lr;
+    if (old_lr == 0.0) {
+        for (auto& g : param_groups_) g.lr = lr;
+    } else {
+        const double scale = lr / old_lr;
+        for (auto& g : param_groups_) g.lr *= scale;
+    }
 }
 
 auto Adam::get_lr() const -> double {
@@ -575,7 +615,15 @@ auto AdamW::step_impl() -> void {
 }
 
 auto AdamW::set_lr(double lr) -> void {
+    // HH.14: see Adam::set_lr.
+    const double old_lr = lr_;
     lr_ = lr;
+    if (old_lr == 0.0) {
+        for (auto& g : param_groups_) g.lr = lr;
+    } else {
+        const double scale = lr / old_lr;
+        for (auto& g : param_groups_) g.lr *= scale;
+    }
 }
 
 auto AdamW::get_lr() const -> double {
@@ -599,24 +647,42 @@ auto AdamW::initialize_buffers() -> void {
     }
 }
 
-// Audit K.1.
+// Audit K.1. HH.13: per-group amsgrad override (see Adam::on_parameters_appended_).
 auto AdamW::on_parameters_appended_(size_t old_count, size_t new_count) -> void {
+    auto group_amsgrad = [this](size_t i) -> bool {
+        const auto* g = find_group_for_param(i);
+        if (!g) return amsgrad_;
+        return ParamGroup::or_else(g->amsgrad, amsgrad_);
+    };
+
+    bool any_amsgrad = !max_exp_avg_sq_.empty();
+    size_t max_amsgrad_idx = max_exp_avg_sq_.empty()
+        ? 0 : (max_exp_avg_sq_.size() - 1);
+    for (size_t i = old_count; i < new_count; ++i) {
+        if (group_amsgrad(i)) {
+            any_amsgrad = true;
+            max_amsgrad_idx = i;
+        }
+    }
+
     exp_avg_.reserve(new_count);
     exp_avg_sq_.reserve(new_count);
-    if (amsgrad_) max_exp_avg_sq_.reserve(new_count);
+    if (any_amsgrad) max_exp_avg_sq_.reserve(max_amsgrad_idx + 1);
     for (size_t i = old_count; i < new_count; ++i) {
         const auto& param = parameters_[i];
         if (param) {
             // R.16: see AdamW::initialize_buffers.
             exp_avg_.push_back(make_optim_state(param->tensor()));
             exp_avg_sq_.push_back(make_optim_state(param->tensor()));
-            if (amsgrad_) {
+            if (any_amsgrad && i <= max_amsgrad_idx) {
                 max_exp_avg_sq_.push_back(make_optim_state(param->tensor()));
             }
         } else {
             exp_avg_.push_back(Tensor{});
             exp_avg_sq_.push_back(Tensor{});
-            if (amsgrad_) max_exp_avg_sq_.push_back(Tensor{});
+            if (any_amsgrad && i <= max_amsgrad_idx) {
+                max_exp_avg_sq_.push_back(Tensor{});
+            }
         }
     }
 }

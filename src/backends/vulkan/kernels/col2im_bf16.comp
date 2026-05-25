@@ -1,12 +1,13 @@
 #version 450
 
 // Col2im (Fold) operation for BFloat16
-// Transforms (N, C*K*K, L) -> (N,C,H,W) with accumulation
+// Transforms (N, C*K_h*K_w, L) -> (N,C,H,W) with accumulation
 // BF16 packed buffers (2 BFloat16 per uint32), arithmetic in float32
 // Note: Cannot use atomicAdd on packed BF16 — use read-modify-write
 // (col2im threads may race on the same output element, so this shader
 //  is only safe when dispatched with non-overlapping output mapping,
 //  or when used as part of a serial accumulation strategy.)
+// HH.6: per-axis kernel/stride/padding/dilation.
 layout(local_size_x_id = 0) in;
 
 layout(binding = 0) buffer Input { uint input_data[]; };
@@ -18,10 +19,14 @@ layout(push_constant) uniform PushConstants {
     uint channels;
     uint height;
     uint width;
-    uint kernel_size;
-    uint stride;
-    uint padding;
-    uint dilation;
+    uint kernel_h;
+    uint kernel_w;
+    uint stride_h;
+    uint stride_w;
+    uint pad_h;
+    uint pad_w;
+    uint dil_h;
+    uint dil_w;
     uint out_h;
     uint out_w;
 } params;
@@ -58,7 +63,7 @@ void main() {
 
     // Calculate derived values
     uint num_blocks = params.out_h * params.out_w;
-    uint col_channels = params.channels * params.kernel_size * params.kernel_size;
+    uint col_channels = params.channels * params.kernel_h * params.kernel_w;
 
     // Decode flat index to (b, col_c, block_idx)
     uint temp = idx;
@@ -67,17 +72,17 @@ void main() {
     uint b = temp;
 
     // Decode col_c to (c, kh, kw)
-    uint kw = col_c % params.kernel_size;
-    uint kh = (col_c / params.kernel_size) % params.kernel_size;
-    uint c = col_c / (params.kernel_size * params.kernel_size);
+    uint kw = col_c % params.kernel_w;
+    uint kh = (col_c / params.kernel_w) % params.kernel_h;
+    uint c = col_c / (params.kernel_h * params.kernel_w);
 
     // Calculate output position from block_idx
     uint oh = block_idx / params.out_w;
     uint ow = block_idx % params.out_w;
 
     // Calculate output position in image
-    int ih = int(oh * params.stride) - int(params.padding) + int(kh * params.dilation);
-    int iw = int(ow * params.stride) - int(params.padding) + int(kw * params.dilation);
+    int ih = int(oh * params.stride_h) - int(params.pad_h) + int(kh * params.dil_h);
+    int iw = int(ow * params.stride_w) - int(params.pad_w) + int(kw * params.dil_w);
 
     // Check bounds
     if (ih >= 0 && ih < int(params.height) && iw >= 0 && iw < int(params.width)) {

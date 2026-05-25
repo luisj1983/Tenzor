@@ -10,6 +10,7 @@
  */
 
 #include "tenzor/tenzor.hpp"
+#include "common.hpp"
 #include "tenzor/ops/math.hpp"
 #include "tenzor/ops/reduction.hpp"
 #include "tenzor/utils/benchmark.hpp"
@@ -336,11 +337,18 @@ int main(int argc, char** argv) {
             json_output = true;
         }
     }
+    // HH.25: parse --device / --device-id from argv. benchmark_ops.cpp uses
+    // ``randn(shape)`` without an explicit device, so the parsed device is
+    // currently only reported in the header — actually re-targeting the
+    // creation calls is a follow-up. The flag is accepted so the Python
+    // runner can pass ``--device <name>`` uniformly across binaries.
+    tenzor::Device bench_device = tenzor::bench::parse_device_arg(argc, argv);
 
     if (!json_output) {
         std::cout << "\n";
         std::cout << "========================================\n";
         std::cout << "  Tenzor Operations Benchmark Suite\n";
+        std::cout << "  device=" << bench_device.to_string() << "\n";
         std::cout << "========================================\n";
         std::cout << "\nTarget Performance Metrics:\n";
         std::cout << "  MatMul (4096x4096):  < 20ms (PyTorch: 22ms)\n";

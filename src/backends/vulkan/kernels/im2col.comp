@@ -1,7 +1,8 @@
 #version 450
 
 // Im2col (Unfold) operation for converting image to column format
-// Transforms (N,C,H,W) → (N, C*K*K, L) where L=out_h*out_w
+// Transforms (N,C,H,W) → (N, C*K_h*K_w, L) where L=out_h*out_w
+// HH.6: per-axis kernel/stride/padding/dilation (asymmetric tuples supported).
 layout(local_size_x_id = 0) in;
 
 layout(binding = 0) buffer Input { float input_data[]; };
@@ -13,10 +14,14 @@ layout(push_constant) uniform PushConstants {
     uint channels;
     uint height;
     uint width;
-    uint kernel_size;
-    uint stride;
-    uint padding;
-    uint dilation;
+    uint kernel_h;
+    uint kernel_w;
+    uint stride_h;
+    uint stride_w;
+    uint pad_h;
+    uint pad_w;
+    uint dil_h;
+    uint dil_w;
     uint out_h;
     uint out_w;
 } params;
@@ -31,8 +36,8 @@ void main() {
     // Decode flat index to (b, c, kh, kw, block_idx)
     uint temp = idx;
     uint block_idx = temp % num_blocks; temp /= num_blocks;
-    uint kw = temp % params.kernel_size; temp /= params.kernel_size;
-    uint kh = temp % params.kernel_size; temp /= params.kernel_size;
+    uint kw = temp % params.kernel_w; temp /= params.kernel_w;
+    uint kh = temp % params.kernel_h; temp /= params.kernel_h;
     uint c = temp % params.channels; temp /= params.channels;
     uint b = temp;
 
@@ -41,15 +46,15 @@ void main() {
     uint ow = block_idx % params.out_w;
 
     // Calculate input position with padding and dilation
-    int ih = int(oh * params.stride) - int(params.padding) + int(kh * params.dilation);
-    int iw = int(ow * params.stride) - int(params.padding) + int(kw * params.dilation);
+    int ih = int(oh * params.stride_h) - int(params.pad_h) + int(kh * params.dil_h);
+    int iw = int(ow * params.stride_w) - int(params.pad_w) + int(kw * params.dil_w);
 
-    // Column index in output: (c * K * K + kh * K + kw)
-    uint col_c = c * params.kernel_size * params.kernel_size +
-                 kh * params.kernel_size + kw;
+    // Column index in output: (c * K_h * K_w + kh * K_w + kw)
+    uint col_c = c * params.kernel_h * params.kernel_w +
+                 kh * params.kernel_w + kw;
 
     // Output index: (b, col_c, block_idx)
-    uint output_idx = b * (params.channels * params.kernel_size * params.kernel_size * num_blocks) +
+    uint output_idx = b * (params.channels * params.kernel_h * params.kernel_w * num_blocks) +
                       col_c * num_blocks +
                       block_idx;
 

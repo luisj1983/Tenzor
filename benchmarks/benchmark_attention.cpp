@@ -13,6 +13,7 @@
  */
 
 #include "tenzor/tenzor.hpp"
+#include "common.hpp"
 #include "tenzor/nn/layers/attention.hpp"
 #include "tenzor/nn/layers/transformer.hpp"
 #include "tenzor/nn/layers/linear.hpp"
@@ -26,6 +27,12 @@
 using namespace tenzor;
 using namespace tenzor::nn;
 using namespace tenzor::benchmark;
+
+// HH.25: global device parsed from argv in main(). Defaults to CPU so the
+// previous unflagged invocations stay correct.
+namespace {
+tenzor::Device g_bench_device = tenzor::Device::cpu();
+}
 
 // Benchmark configuration
 constexpr size_t WARMUP_ITERATIONS = 5;
@@ -213,7 +220,7 @@ void benchmark_causal_attention() {
         auto input_var = Variable(input, false);
 
         // Create causal mask
-        auto causal_mask = create_causal_mask(seq_len, Device::cpu(), DType::Float32);
+        auto causal_mask = create_causal_mask(seq_len, g_bench_device, DType::Float32);
 
         // Bidirectional (no mask)
         Benchmark bench_bi("Bidirectional seq=" + std::to_string(seq_len),
@@ -467,9 +474,13 @@ void benchmark_attention_memory() {
 }
 
 int main(int argc, char** argv) {
+    // HH.25: parse --device / --device-id from argv so the runner can target
+    // the GPU backends that the binary was supposed to exercise.
+    g_bench_device = tenzor::bench::parse_device_arg(argc, argv);
     std::cout << "\n";
     std::cout << "========================================\n";
     std::cout << "  Tenzor Attention Benchmark Suite\n";
+    std::cout << "  device=" << g_bench_device.to_string() << "\n";
     std::cout << "========================================\n";
     std::cout << "\nTarget Performance Metrics:\n";
     std::cout << "  BERT-base (seq=512):  < 5ms forward pass\n";

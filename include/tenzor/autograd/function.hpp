@@ -500,6 +500,10 @@ public:
         std::lock_guard lock(offload_mutex_);
         saved_tensors_.clear();
         saved_versions_.clear();
+        // HH.5: also clear the offload-baseline vectors so a Function reused
+        // after release_saved_tensors() doesn't inherit stale state.
+        pre_offload_versions_.clear();
+        was_offloaded_ = false;
         tensors_offloaded_.store(false, std::memory_order_relaxed);
     }
 
@@ -594,6 +598,15 @@ protected:
     mutable std::vector<Tensor> saved_tensors_;                     ///< Tensors saved for backward
     mutable std::vector<uint64_t> saved_versions_;                  ///< Tensor versions at save time (for in-place detection)
     mutable std::vector<uint64_t> saved_view_base_versions_;       ///< View base versions at save time (0 if not a view)
+    /// HH.5: pre-offload version baselines for the in-place detector.
+    /// When tensors are offloaded to CPU and later reloaded with .to(),
+    /// the post-reload Tensor has a fresh version counter. Storing the
+    /// PRE-offload version here keeps the version-tracking assertion
+    /// meaningful on the non-offloaded path; on the offloaded path it
+    /// is documented as a best-effort signal (the GPU-side offload may
+    /// legitimately bump the version through reload_saved_tensors_locked).
+    mutable std::vector<uint64_t> pre_offload_versions_;
+    mutable bool was_offloaded_{false};                             ///< HH.5: latch — true once any tensor in this Function has been offloaded
     mutable std::vector<Variable> saved_variables_;                 ///< Variables saved for backward (preserves graph for create_graph)
     mutable Device offloaded_device_{Device::cpu()};                ///< Original device of the first offloaded tensor (legacy; reload uses offloaded_devices_)
     mutable std::vector<Device> offloaded_devices_;                 ///< V.5: per-tensor original device; reload sends each tensor back to its own source device

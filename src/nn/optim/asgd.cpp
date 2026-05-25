@@ -100,7 +100,15 @@ auto ASGD::step_impl() -> void {
 }
 
 auto ASGD::set_lr(double lr) -> void {
+    // HH.14: rescale every ParamGroup's lr by lr/old_lr.
+    const double old_lr = lr_;
     lr_ = lr;
+    if (old_lr == 0.0) {
+        for (auto& g : param_groups_) g.lr = lr;
+    } else {
+        const double scale = lr / old_lr;
+        for (auto& g : param_groups_) g.lr *= scale;
+    }
 }
 
 auto ASGD::get_lr() const -> double {

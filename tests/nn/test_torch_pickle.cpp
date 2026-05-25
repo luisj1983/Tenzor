@@ -20,6 +20,7 @@
 #include <cstdint>
 #include <cstring>
 #include <filesystem>
+#include <unistd.h>  // HH.26: getpid() to disambiguate parallel ctest shards
 #include <fstream>
 #include <vector>
 
@@ -281,9 +282,13 @@ static auto* const g_env = ::testing::AddGlobalTestEnvironment(new TorchPickleEn
 class TorchPickleTest : public ::testing::Test {
 protected:
     void SetUp() override {
-        test_path_ = "/tmp/tenzor_test_torch_pickle_" +
-                      std::to_string(::testing::UnitTest::GetInstance()->random_seed()) +
-                      ".pth";
+        // HH.26: include pid so parallel ctest shards (sharing the gtest
+        // random seed) don't collide on the same temp file.
+        test_path_ = (std::filesystem::temp_directory_path() /
+                      ("tenzor_test_torch_pickle_" +
+                       std::to_string(::getpid()) + "_" +
+                       std::to_string(::testing::UnitTest::GetInstance()->random_seed()) +
+                       ".pth")).string();
     }
     void TearDown() override {
         std::filesystem::remove(test_path_);

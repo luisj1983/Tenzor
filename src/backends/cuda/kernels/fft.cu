@@ -1085,19 +1085,36 @@ inline int64_t next_pow2(int64_t n) {
 // RAII wrapper for CUDA device memory
 // ============================================================================
 
+// HH.8: CudaDevicePtr now uses cudaMallocAsync/cudaFreeAsync against the
+// captured stream so Bluestein workspaces don't force a device-wide sync
+// per FFT call. Plain cudaFree implicitly synchronises the whole device,
+// which defeats stream concurrency. Every FFT entry point (cuda_fft_kernel,
+// cuda_ifft_kernel, cuda_rfft_kernel, cuda_irfft_kernel, and the
+// bluestein_*_cuda helpers) plumbs the active stream through to here.
 template<typename T>
 struct CudaDevicePtr {
     T* ptr = nullptr;
+    cudaStream_t stream = nullptr;
 
     CudaDevicePtr() = default;
-    explicit CudaDevicePtr(int64_t count) {
-        TENZOR_CUDA_CHECK(cudaMalloc(&ptr, count * sizeof(T)));
+    CudaDevicePtr(int64_t count, cudaStream_t s)
+        : stream(s) {
+        // cudaMallocAsync requires a stream-ordered memory pool. The default
+        // pool is created on demand in driver runtime API >= 11.2.
+        TENZOR_CUDA_CHECK(cudaMallocAsync(&ptr, count * sizeof(T), stream));
     }
-    ~CudaDevicePtr() { if (ptr) cudaFree(ptr); }
+    ~CudaDevicePtr() {
+        if (ptr) {
+            // cudaFreeAsync defers the free until prior work on `stream`
+            // completes; no device-wide sync.
+            cudaFreeAsync(ptr, stream);
+        }
+    }
 
     CudaDevicePtr(const CudaDevicePtr&) = delete;
     CudaDevicePtr& operator=(const CudaDevicePtr&) = delete;
-    CudaDevicePtr(CudaDevicePtr&& o) noexcept : ptr(o.ptr) { o.ptr = nullptr; }
+    CudaDevicePtr(CudaDevicePtr&& o) noexcept
+        : ptr(o.ptr), stream(o.stream) { o.ptr = nullptr; }
 
     T* get() const { return ptr; }
 };
@@ -1417,13 +1434,13 @@ void bluestein_fft_cuda(const T* d_in, T* d_out,
     int64_t total_slices = batch_size * inner_size;
 
     // Allocate workspace
-    CudaDevicePtr<T> chirp_owner(2 * N);
+    CudaDevicePtr<T> chirp_owner(2 * N, stream);
     T* chirp = chirp_owner.get();
-    CudaDevicePtr<T> b_buf_owner(2 * M);
+    CudaDevicePtr<T> b_buf_owner(2 * M, stream);
     T* b_buf = b_buf_owner.get();
-    CudaDevicePtr<T> B_buf_owner(2 * M);
+    CudaDevicePtr<T> B_buf_owner(2 * M, stream);
     T* B_buf = B_buf_owner.get();
-    CudaDevicePtr<T> a_buf_owner(2 * M * total_slices);
+    CudaDevicePtr<T> a_buf_owner(2 * M * total_slices, stream);
     T* a_buf = a_buf_owner.get();
 
     // Step 1: Generate chirp: chirp[k] = exp(-j * pi * k^2 / N)
@@ -1491,8 +1508,8 @@ void bluestein_fft_cuda(const T* d_in, T* d_out,
             d_out, a_buf, chirp, N, M, total_slices, inner_size);
         TENZOR_CUDA_CHECK(cudaGetLastError());
     }
-
-    TENZOR_CUDA_CHECK(cudaStreamSynchronize(stream));
+    // HH.8: no cudaStreamSynchronize — workspaces tear down via
+    // cudaFreeAsync on `stream` once Step 8 retires.
 }
 
 // ============================================================================
@@ -1513,13 +1530,13 @@ void bluestein_fft_complex_cuda(const T* d_in, T* d_out,
 
     int64_t total_slices = batch_size * inner_size;
 
-    CudaDevicePtr<T> chirp_owner(2 * N);
+    CudaDevicePtr<T> chirp_owner(2 * N, stream);
     T* chirp = chirp_owner.get();
-    CudaDevicePtr<T> b_buf_owner(2 * M);
+    CudaDevicePtr<T> b_buf_owner(2 * M, stream);
     T* b_buf = b_buf_owner.get();
-    CudaDevicePtr<T> B_buf_owner(2 * M);
+    CudaDevicePtr<T> B_buf_owner(2 * M, stream);
     T* B_buf = B_buf_owner.get();
-    CudaDevicePtr<T> a_buf_owner(2 * M * total_slices);
+    CudaDevicePtr<T> a_buf_owner(2 * M * total_slices, stream);
     T* a_buf = a_buf_owner.get();
 
     // Step 1: chirp[k] = exp(sign * j * pi * k^2 / N)
@@ -1587,8 +1604,8 @@ void bluestein_fft_complex_cuda(const T* d_in, T* d_out,
             d_out, a_buf, chirp, N, M, total_slices, inner_size);
         TENZOR_CUDA_CHECK(cudaGetLastError());
     }
-
-    TENZOR_CUDA_CHECK(cudaStreamSynchronize(stream));
+    // HH.8: no cudaStreamSynchronize — workspaces tear down via
+    // cudaFreeAsync on `stream` once Step 8 retires.
 }
 
 // ============================================================================
@@ -1800,7 +1817,7 @@ auto cuda_fft_kernel(const Tensor& input, int64_t dim, int64_t n,
         // We need to treat the data as interleaved complex with inner_size stride.
         if (is_float32) {
             float* data_ptr = reinterpret_cast<float*>(output.data_ptr());
-            CudaDevicePtr<float> tmp_out(output.numel() * 2);
+            CudaDevicePtr<float> tmp_out(output.numel() * 2, stream);
             bluestein_fft_complex_cuda(data_ptr, tmp_out.get(),
                                        N_out, outer_size, inner_size,
                                        -1.0f, stream);
@@ -1809,7 +1826,7 @@ auto cuda_fft_kernel(const Tensor& input, int64_t dim, int64_t n,
                 cudaMemcpyDeviceToDevice, stream));
         } else {
             double* data_ptr = reinterpret_cast<double*>(output.data_ptr());
-            CudaDevicePtr<double> tmp_out(output.numel() * 2);
+            CudaDevicePtr<double> tmp_out(output.numel() * 2, stream);
             bluestein_fft_complex_cuda(data_ptr, tmp_out.get(),
                                        N_out, outer_size, inner_size,
                                        -1.0, stream);
@@ -1905,7 +1922,7 @@ auto cuda_ifft_kernel(const Tensor& input, int64_t dim, int64_t n,
     } else {
         if (is_float32) {
             float* data_ptr = reinterpret_cast<float*>(output.data_ptr());
-            CudaDevicePtr<float> tmp_out(output.numel() * 2);
+            CudaDevicePtr<float> tmp_out(output.numel() * 2, stream);
             bluestein_fft_complex_cuda(data_ptr, tmp_out.get(),
                                        N_out, outer_size, inner_size,
                                        1.0f, stream);
@@ -1914,7 +1931,7 @@ auto cuda_ifft_kernel(const Tensor& input, int64_t dim, int64_t n,
                 cudaMemcpyDeviceToDevice, stream));
         } else {
             double* data_ptr = reinterpret_cast<double*>(output.data_ptr());
-            CudaDevicePtr<double> tmp_out(output.numel() * 2);
+            CudaDevicePtr<double> tmp_out(output.numel() * 2, stream);
             bluestein_fft_complex_cuda(data_ptr, tmp_out.get(),
                                        N_out, outer_size, inner_size,
                                        1.0, stream);
@@ -2007,7 +2024,7 @@ auto cuda_rfft_kernel(const Tensor& input, int64_t dim, int64_t n,
     if (is_float32) {
         if (use_cooley_tukey) {
             // Pack real into interleaved complex
-            CudaDevicePtr<float> d_buf(2 * n * batch);
+            CudaDevicePtr<float> d_buf(2 * n * batch, stream);
             int64_t total = n * batch;
             {
                 int grid = static_cast<int>((total + block_size - 1) / block_size);
@@ -2036,7 +2053,7 @@ auto cuda_rfft_kernel(const Tensor& input, int64_t dim, int64_t n,
         } else {
             // Bluestein: compute full N-point FFT on real data, then truncate
             int64_t full_complex_numel = batch * n * 2;  // inner_size=1 for last dim
-            CudaDevicePtr<float> d_full(full_complex_numel);
+            CudaDevicePtr<float> d_full(full_complex_numel, stream);
             TENZOR_CUDA_CHECK(cudaMemsetAsync(d_full.get(), 0,
                 full_complex_numel * sizeof(float), stream));
 
@@ -2061,7 +2078,7 @@ auto cuda_rfft_kernel(const Tensor& input, int64_t dim, int64_t n,
     } else {
         // Float64 path
         if (use_cooley_tukey) {
-            CudaDevicePtr<double> d_buf(2 * n * batch);
+            CudaDevicePtr<double> d_buf(2 * n * batch, stream);
             int64_t total = n * batch;
             {
                 int grid = static_cast<int>((total + block_size - 1) / block_size);
@@ -2087,7 +2104,7 @@ auto cuda_rfft_kernel(const Tensor& input, int64_t dim, int64_t n,
             }
         } else {
             int64_t full_complex_numel = batch * n * 2;
-            CudaDevicePtr<double> d_full(full_complex_numel);
+            CudaDevicePtr<double> d_full(full_complex_numel, stream);
             TENZOR_CUDA_CHECK(cudaMemsetAsync(d_full.get(), 0,
                 full_complex_numel * sizeof(double), stream));
 
@@ -2186,7 +2203,7 @@ auto cuda_irfft_kernel(const Tensor& input, int64_t dim, int64_t n,
         float scale = static_cast<float>(scale_d);
 
         if (use_cooley_tukey) {
-            CudaDevicePtr<float> d_buf(2 * n * batch);
+            CudaDevicePtr<float> d_buf(2 * n * batch, stream);
             {
                 int64_t total = batch * n;
                 int grid = static_cast<int>((total + block_size - 1) / block_size);
@@ -2207,7 +2224,7 @@ auto cuda_irfft_kernel(const Tensor& input, int64_t dim, int64_t n,
         } else {
             // Bluestein: reconstruct full spectrum, inverse FFT, extract real
             int64_t full_complex_numel = batch * n * 2;
-            CudaDevicePtr<float> d_full(full_complex_numel);
+            CudaDevicePtr<float> d_full(full_complex_numel, stream);
             {
                 int64_t total = batch * n;
                 int grid = static_cast<int>((total + block_size - 1) / block_size);
@@ -2216,7 +2233,7 @@ auto cuda_irfft_kernel(const Tensor& input, int64_t dim, int64_t n,
                 TENZOR_CUDA_CHECK(cudaGetLastError());
             }
 
-            CudaDevicePtr<float> d_ifft(full_complex_numel);
+            CudaDevicePtr<float> d_ifft(full_complex_numel, stream);
             TENZOR_CUDA_CHECK(cudaMemsetAsync(d_ifft.get(), 0,
                 full_complex_numel * sizeof(float), stream));
             bluestein_fft_complex_cuda(d_full.get(), d_ifft.get(),
@@ -2235,7 +2252,7 @@ auto cuda_irfft_kernel(const Tensor& input, int64_t dim, int64_t n,
         double scale = scale_d;
 
         if (use_cooley_tukey) {
-            CudaDevicePtr<double> d_buf(2 * n * batch);
+            CudaDevicePtr<double> d_buf(2 * n * batch, stream);
             {
                 int64_t total = batch * n;
                 int grid = static_cast<int>((total + block_size - 1) / block_size);
@@ -2255,7 +2272,7 @@ auto cuda_irfft_kernel(const Tensor& input, int64_t dim, int64_t n,
             }
         } else {
             int64_t full_complex_numel = batch * n * 2;
-            CudaDevicePtr<double> d_full(full_complex_numel);
+            CudaDevicePtr<double> d_full(full_complex_numel, stream);
             {
                 int64_t total = batch * n;
                 int grid = static_cast<int>((total + block_size - 1) / block_size);
@@ -2264,7 +2281,7 @@ auto cuda_irfft_kernel(const Tensor& input, int64_t dim, int64_t n,
                 TENZOR_CUDA_CHECK(cudaGetLastError());
             }
 
-            CudaDevicePtr<double> d_ifft(full_complex_numel);
+            CudaDevicePtr<double> d_ifft(full_complex_numel, stream);
             TENZOR_CUDA_CHECK(cudaMemsetAsync(d_ifft.get(), 0,
                 full_complex_numel * sizeof(double), stream));
             bluestein_fft_complex_cuda(d_full.get(), d_ifft.get(),

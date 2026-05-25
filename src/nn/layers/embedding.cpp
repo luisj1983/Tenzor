@@ -1000,12 +1000,26 @@ auto Embedding::renorm_embeddings(const Tensor& indices) -> void {
     }
 
     // scale = min(1, max_norm / (norm + eps)).
-    Tensor eps   = tenzor::full({}, 1e-8, wt_dtype, dev);
-    Tensor mn    = tenzor::full({}, max_norm_, wt_dtype, dev);
-    Tensor one   = tenzor::full({}, 1.0, wt_dtype, dev);
-    Tensor norms_eps = tenzor::add(norm, eps);
+    //
+    // HH.12: 1e-8 underflows to 0 in Float16/BFloat16, so the divide-by-zero
+    // branch produces inf/nan whenever a row has zero norm. Build the eps /
+    // ratio in Float32 when wt_dtype is half-precision and cast back to
+    // wt_dtype just before the in-place scale, so the actual weight tensor
+    // remains in its declared dtype.
+    const bool eps_needs_upcast = (wt_dtype == DType::Float16 ||
+                                   wt_dtype == DType::BFloat16);
+    const DType ratio_dtype = eps_needs_upcast ? DType::Float32 : wt_dtype;
+    Tensor norm_for_ratio = eps_needs_upcast ? norm.to(DType::Float32) : norm;
+    Tensor eps   = tenzor::full({}, 1e-8, ratio_dtype, dev);
+    Tensor mn    = tenzor::full({}, max_norm_, ratio_dtype, dev);
+    Tensor one   = tenzor::full({}, 1.0, ratio_dtype, dev);
+    Tensor norms_eps = tenzor::add(norm_for_ratio, eps);
     Tensor ratio = tenzor::div(mn, norms_eps);
     Tensor scale = tenzor::minimum(ratio, one);              // (num_idx, 1)
+    if (eps_needs_upcast) {
+        scale = scale.to(wt_dtype);
+        one   = one.to(wt_dtype);
+    }
 
     // Override scale = 1 for any entry that points at the padding row.
     if (padding_idx_ >= 0) {

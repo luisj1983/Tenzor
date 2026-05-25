@@ -7,6 +7,7 @@
 #include "tenzor/ops/math.hpp"
 #include "tenzor/ops/reduction.hpp"
 #include "tenzor/ops/indexing.hpp"
+#include "tenzor/ops/transform.hpp"
 #include "tenzor/ops/type_promotion.hpp"
 #include "tenzor/utils/error.hpp"
 #include <unordered_set>
@@ -63,6 +64,53 @@ static void check_for_anomaly(const std::vector<Tensor>& grads,
     for (size_t i = 0; i < grads.size(); ++i) {
         const auto& grad = grads[i];
         if (grad.numel() == 0) continue;
+
+        // HH.3: complex grads (Complex64/Complex128) carry NaN/Inf in either
+        // the real or imaginary part. Decompose via real()/imag() and OR the
+        // masks together so the count + diagnostic reflects all anomalies.
+        Tensor probe;
+        if (grad.is_complex()) {
+            // real()/imag() return real-typed views; combine masks across
+            // both components so a NaN in either part is detected.
+            Tensor re = tenzor::real(grad);
+            Tensor im = tenzor::imag(grad);
+            auto nan_mask = logical_or(isnan(re), isnan(im));
+            auto inf_mask = logical_or(isinf(re), isinf(im));
+            auto nan_count = sum(nan_mask.to(DType::Int64));
+            auto inf_count = sum(inf_mask.to(DType::Int64));
+            bool has_nan = nan_count.item<int64_t>() > 0;
+            bool has_inf = inf_count.item<int64_t>() > 0;
+            if (has_nan || has_inf) {
+                std::string func_name = typeid(*func).name();
+#ifdef __GNUC__
+                int status = 0;
+                char* demangled = abi::__cxa_demangle(func_name.c_str(), nullptr, nullptr, &status);
+                if (status == 0 && demangled) {
+                    func_name = demangled;
+                    free(demangled);
+                }
+#endif
+                std::string anomaly;
+                if (has_nan && has_inf) anomaly = "NaN and Inf";
+                else if (has_nan) anomaly = "NaN";
+                else anomaly = "Inf";
+                std::string detail;
+                detail += "\n  Gradient shape: [";
+                for (size_t d = 0; d < grad.shape().size(); ++d) {
+                    if (d > 0) detail += ", ";
+                    detail += std::to_string(grad.shape()[d]);
+                }
+                detail += "]";
+                detail += "\n  NaN count: " + std::to_string(nan_count.item<int64_t>());
+                detail += "\n  Inf count: " + std::to_string(inf_count.item<int64_t>());
+                detail += "\n  (complex grad — counts merged over real+imag components)";
+                throw AutogradException(
+                    "Anomaly detected: gradient output " + std::to_string(i) +
+                    " contains " + anomaly + " values in backward of '" +
+                    func_name + "'" + detail);
+            }
+            continue;
+        }
 
         // Only check floating-point gradients (integer grads can't be NaN/Inf)
         if (grad.dtype() != DType::Float32 && grad.dtype() != DType::Float64 &&
@@ -179,6 +227,35 @@ static void check_for_anomaly(const std::vector<Tensor>& grads,
 // Use the shared promote_types() for gradient dtype promotion.
 // This replaces the old local promote_types() that duplicated type_promotion.cpp logic.
 
+// HH.1: shared shape-check used by both single-root (execute) and multi-root
+// (execute_multi) accumulation loops. Previously only the single-root path
+// validated; multi-root silently let a mismatched grad through and crashed
+// later inside accumulate_unlocked or in the user's hook.
+static void validate_grad_shape_or_throw(const Variable& var,
+                                         const Tensor& grad,
+                                         const std::string& func_name,
+                                         size_t input_index) {
+    auto grad_shape = grad.shape();
+    auto var_shape = var.tensor().shape();
+    if (grad_shape.size() == var_shape.size() &&
+        std::equal(grad_shape.begin(), grad_shape.end(), var_shape.begin())) {
+        return;
+    }
+    std::string expected, got;
+    for (size_t s = 0; s < var_shape.size(); ++s) {
+        if (s > 0) expected += ",";
+        expected += std::to_string(var_shape[s]);
+    }
+    for (size_t s = 0; s < grad_shape.size(); ++s) {
+        if (s > 0) got += ",";
+        got += std::to_string(grad_shape[s]);
+    }
+    throw AutogradException(
+        "In " + func_name + ".backward(): gradient for input " +
+        std::to_string(input_index) + " has shape [" + got +
+        "], expected [" + expected + "]");
+}
+
 auto BackwardEngine::synthesize_or_validate_root_grad(const Variable& root,
                                                       std::optional<Tensor> user_grad) -> Tensor {
     if (!user_grad.has_value()) {
@@ -284,6 +361,14 @@ auto BackwardEngine::execute(Variable& root, std::optional<Tensor> gradient,
     // RAII guards for exception-safe cleanup
     ScopeGuard accum_guard{[&]{ grad_accumulators_ = std::move(saved_accumulators); }};
     ScopeGuard cleanup_guard{[&]{ clear_gradients(); cleanup_graph(); }};
+
+    // HH.4: track leaves that actually received an accumulation during this
+    // backward so the dtype-downcast finalization loop visits them all.
+    // The pre-existing loop iterated `func->input_variables()` which misses
+    // leaves reached purely through the `next_funcs` chain (a leaf whose
+    // accumulator was seeded by accumulate_grad on a downstream Function
+    // never appears as an `input_variables_` entry of that Function).
+    std::unordered_set<VariableImpl*> touched_leaves;
 
     // Seed root gradient into accumulator so the root function is handled
     // uniformly — no fragile "empty accumulators = root" assumption.
@@ -435,24 +520,9 @@ auto BackwardEngine::execute(Variable& root, std::optional<Tensor> gradient,
 
                 Tensor grad_to_apply = input_grads[i];
 
-                // Validate gradient shape matches variable shape
-                auto grad_shape = grad_to_apply.shape();
-                auto var_shape = var.tensor().shape();
-                if (grad_shape.size() != var_shape.size() ||
-                    !std::equal(grad_shape.begin(), grad_shape.end(), var_shape.begin())) {
-                    std::string expected, got;
-                    for (size_t s = 0; s < var_shape.size(); ++s) {
-                        if (s > 0) expected += ",";
-                        expected += std::to_string(var_shape[s]);
-                    }
-                    for (size_t s = 0; s < grad_shape.size(); ++s) {
-                        if (s > 0) got += ",";
-                        got += std::to_string(grad_shape[s]);
-                    }
-                    throw AutogradException(
-                        "In " + function->name() + ".backward(): gradient for input " +
-                        std::to_string(i) + " has shape [" + got + "], expected [" + expected + "]");
-                }
+                // HH.1: validate gradient shape matches variable shape via the
+                // shared helper used by both single-root and multi-root paths.
+                validate_grad_shape_or_throw(var, grad_to_apply, function->name(), i);
 
                 // Apply hooks (access through impl_ for handle pattern)
                 // Take shared_lock for thread-safe iteration, then copy hooks
@@ -507,6 +577,9 @@ auto BackwardEngine::execute(Variable& root, std::optional<Tensor> gradient,
 #endif
                         std::lock_guard lock(*var.impl_->grad_mutex_);
                         accumulate_unlocked();
+                        // HH.4: record the leaf as touched so the finalization
+                        // loop downcasts its grad to its own dtype if mismatched.
+                        touched_leaves.insert(var.impl_.get());
                         // When create_graph=true, capture the Variable form
                         // of the gradient so .grad_variable() on the leaf returns
                         // something whose grad_fn chains back through the original
@@ -568,19 +641,20 @@ auto BackwardEngine::execute(Variable& root, std::optional<Tensor> gradient,
     // Audit-7 EE.1: opt-out via Variable::set_preserve_grad_dtype(true) for
     // the standard AMP "fp32 master weights" pattern (F16/BF16 params with
     // F32 grads). When set, we leave the promoted gradient as-is.
-    for (auto& func : sorted) {
-        if (!func) continue;
-        for (auto& var : func->input_variables()) {
-            if (!var.requires_grad()) continue;
-            if (!var.is_leaf() && !var.retains_grad()) continue;
-            if (!var.impl_) continue;
-            std::lock_guard lock(*var.impl_->grad_mutex_);
-            if (!var.impl_->grad_.has_value()) continue;
-            const auto leaf_dt = var.dtype();
-            if (var.impl_->grad_->dtype() != leaf_dt &&
-                !var.impl_->preserve_grad_dtype_.load(std::memory_order_acquire)) {
-                var.impl_->grad_ = var.impl_->grad_->to(leaf_dt);
-            }
+    //
+    // HH.4: iterate the touched_leaves set captured at every accumulation
+    // site so leaves reached purely through next_funcs accumulation chain
+    // (not present in any sorted function's input_variables()) are still
+    // downcast. The pre-existing `for (auto& func : sorted)` loop missed
+    // those, leaving such leaves' .grad in the promoted dtype.
+    for (auto* leaf_impl : touched_leaves) {
+        if (!leaf_impl) continue;
+        std::lock_guard lock(*leaf_impl->grad_mutex_);
+        if (!leaf_impl->grad_.has_value()) continue;
+        const auto leaf_dt = leaf_impl->data_.dtype();
+        if (leaf_impl->grad_->dtype() != leaf_dt &&
+            !leaf_impl->preserve_grad_dtype_.load(std::memory_order_acquire)) {
+            leaf_impl->grad_ = leaf_impl->grad_->to(leaf_dt);
         }
     }
     // Also handle the root itself when it is a leaf with grad (the root
@@ -832,6 +906,11 @@ auto BackwardEngine::execute_multi(std::vector<Variable*> roots,
     // std::move (above). Only the graph-cleanup guard is installed here.
     ScopeGuard cleanup_guard_multi{[&]{ clear_gradients(); cleanup_graph(); }};
 
+    // HH.4: track leaves that actually received an accumulation; mirrors the
+    // single-root path so leaves reached purely through next_funcs are also
+    // downcast in the finalization loop below.
+    std::unordered_set<VariableImpl*> touched_leaves;
+
     {
         // Execute backward in reverse topological order
         for (auto it = sorted.rbegin(); it != sorted.rend(); ++it) {
@@ -930,10 +1009,11 @@ auto BackwardEngine::execute_multi(std::vector<Variable*> roots,
                 }
             }
 
-            // Release saved tensors to free memory — only if we're not retaining the graph
-            if (!retain_graph) {
-                function->release_saved_tensors();
-            }
+            // HH.2: release_saved_tensors() was previously called HERE,
+            // before hook execution and accumulation. That broke hooks that
+            // capture saved tensors by reference (the single-root path
+            // releases AFTER hooks+accumulate; multi-root must match).
+            // Move below, after the accumulation loop completes.
 
             // Accumulate gradients to input variables
             auto& input_vars = function->input_variables();
@@ -942,6 +1022,12 @@ auto BackwardEngine::execute_multi(std::vector<Variable*> roots,
                 if (!var.requires_grad()) continue;
 
                 Tensor grad_to_apply = input_grads[i];
+
+                // HH.1: validate gradient shape matches variable shape via
+                // the shared helper. Previously only the single-root path
+                // checked; multi-root let mismatched shapes through and
+                // crashed inside the accumulation or in a user hook.
+                validate_grad_shape_or_throw(var, grad_to_apply, function->name(), i);
 
                 if (var.impl_) {
                     std::map<size_t, std::function<Tensor(const Tensor&)>> hooks_copy;
@@ -983,6 +1069,10 @@ auto BackwardEngine::execute_multi(std::vector<Variable*> roots,
 #endif
                         std::lock_guard lock(*var.impl_->grad_mutex_);
                         accumulate_unlocked();
+                        // HH.4: record touched leaf so the finalization
+                        // dtype-downcast loop visits it even when the leaf
+                        // is reached only through next_funcs chains.
+                        touched_leaves.insert(var.impl_.get());
                         // V.2: mirror the single-root path — capture the
                         // Variable form of the gradient on the leaf when
                         // create_graph is set so .grad_variable() chains
@@ -1017,6 +1107,14 @@ auto BackwardEngine::execute_multi(std::vector<Variable*> roots,
                     accumulate_grad(next_funcs[i].get(), input_grads[i]);
                 }
             }
+
+            // HH.2: release saved tensors AFTER hooks + accumulation, matching
+            // the single-root execute() path. Hooks may capture saved tensors
+            // via closures, so they must remain alive through the accumulation
+            // loop above.
+            if (!retain_graph) {
+                function->release_saved_tensors();
+            }
         }
     }
 
@@ -1025,19 +1123,18 @@ auto BackwardEngine::execute_multi(std::vector<Variable*> roots,
     // accumulator back to the leaf's declared dtype.
     // Audit-7 EE.1: opt-out via Variable::set_preserve_grad_dtype(true)
     // for AMP fp32-master-weights.
-    for (auto& func : sorted) {
-        if (!func) continue;
-        for (auto& var : func->input_variables()) {
-            if (!var.requires_grad()) continue;
-            if (!var.is_leaf() && !var.retains_grad()) continue;
-            if (!var.impl_) continue;
-            std::lock_guard lock(*var.impl_->grad_mutex_);
-            if (!var.impl_->grad_.has_value()) continue;
-            const auto leaf_dt = var.dtype();
-            if (var.impl_->grad_->dtype() != leaf_dt &&
-                !var.impl_->preserve_grad_dtype_.load(std::memory_order_acquire)) {
-                var.impl_->grad_ = var.impl_->grad_->to(leaf_dt);
-            }
+    //
+    // HH.4: iterate touched_leaves so leaves reached only via next_funcs
+    // accumulation (not present in any sorted function's input_variables())
+    // are also downcast.
+    for (auto* leaf_impl : touched_leaves) {
+        if (!leaf_impl) continue;
+        std::lock_guard lock(*leaf_impl->grad_mutex_);
+        if (!leaf_impl->grad_.has_value()) continue;
+        const auto leaf_dt = leaf_impl->data_.dtype();
+        if (leaf_impl->grad_->dtype() != leaf_dt &&
+            !leaf_impl->preserve_grad_dtype_.load(std::memory_order_acquire)) {
+            leaf_impl->grad_ = leaf_impl->grad_->to(leaf_dt);
         }
     }
     for (auto* root : roots) {
