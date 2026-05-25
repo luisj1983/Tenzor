@@ -1439,6 +1439,17 @@ Returns:
                  py::gil_scoped_release release;
                  cpu_tensor = tenzor::numpy::prepare_tensor_for_numpy(t);
              }
+             // FF.23: detect whether prepare_tensor_for_numpy already
+             // produced a freshly-allocated host buffer (i.e. the input
+             // was non-CPU and ``to(cpu)`` had to copy). When that is
+             // the case the resulting NumPy array does NOT alias any
+             // Tenzor storage the caller could later mutate, so the
+             // trailing ``arr.copy()`` for ``copy=True`` is a redundant
+             // second allocation. Compare storage identity: a different
+             // ``Storage*`` means the buffer is already fresh.
+             const bool storage_already_fresh =
+                 (cpu_tensor.storage().get() != t.storage().get());
+
              // Y.25: thread the no-copy intent into create_numpy_array so
              // the strided-view-exceeds-storage fallback also honours the
              // NumPy 2.0 strict semantics (raises ValueError instead of
@@ -1446,11 +1457,17 @@ Returns:
              py::object arr = tenzor::numpy::create_numpy_array(
                  cpu_tensor, t.dtype(), /*want_no_copy=*/want_no_copy);
 
-             if (want_force_copy && !dtype_requested) {
+             if (want_force_copy && !dtype_requested && !storage_already_fresh) {
                  // Caller demanded a fresh allocation; the zero-copy view
                  // path above doesn't satisfy that. Force a NumPy-side
                  // copy via .copy() so the returned array does not alias
                  // Tenzor storage.
+                 //
+                 // FF.23: skip the copy when storage_already_fresh — the
+                 // device-to-host transfer in prepare_tensor_for_numpy
+                 // has already produced an independent host buffer, so a
+                 // second .copy() would double-allocate without changing
+                 // the aliasing properties.
                  arr = arr.attr("copy")();
              }
 
@@ -4766,6 +4783,24 @@ Returns:
                     "a leaf Variable that requires grad is being used in an "
                     "in-place operation (Variable.__setitem__). Detach the "
                     "Variable first or wrap the write in a no_grad() block.");
+            }
+            // FF.22: warn on non-leaf Variable.__setitem__. AA.9 closed
+            // the leaf-with-grad path above; the non-leaf path still
+            // silently mutates ``self.tensor()`` without registering a
+            // ``CopySlices`` autograd node, so saved-for-backward
+            // tensors that alias this storage observe the post-mutation
+            // values and the gradient is computed against the wrong
+            // forward state. The full fix is a proper CopySlices node;
+            // until then, emit a UserWarning so the user can either
+            // suppress (via warnings.filterwarnings) or refactor the
+            // code into a functional form (index_put, scatter, ...).
+            if (!self.is_leaf()) {
+                PyErr_WarnEx(PyExc_UserWarning,
+                    "Variable.__setitem__ on a non-leaf Variable does not "
+                    "track in-place semantics in autograd; saved tensors "
+                    "may see post-mutation values. CopySlices implementation "
+                    "is a known follow-up.",
+                    1);
             }
             // Delegate to Tensor.__setitem__ semantics by reusing the
             // underlying tensor reference. Unwrap a Variable value to its

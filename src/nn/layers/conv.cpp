@@ -664,15 +664,16 @@ auto Conv1d::forward_impl(const Variable& input) -> Variable {
     // CC.5: depthwise fast-path dispatch surface. When `groups_ == in_channels_`
     // and a native DepthwiseConv1d kernel is registered, dispatch the
     // specialised OpId instead of routing through the generic 2D pipeline.
-    // The dispatch surface (OpId::DepthwiseConv1d) is wired across all
-    // backends today; each one currently registers a throw-not-implemented
-    // handler, so we gate this on a compile-time `false` until at least one
-    // backend ships a real kernel. When that happens, replace the gate with
-    // `is_op_supported(OpId::DepthwiseConv1d, input.tensor().device().type)`
-    // (plus a per-backend "this kernel is real, not the stub" check, e.g.
-    // via a registry attribute). For now this is documented dead code that
-    // establishes the routing point.
-    constexpr bool depthwise_conv1d_kernel_available = false;
+    // FF.3: was previously a `constexpr bool ... = false` (the throw-stub
+    // registrations from CC.5 made it unreachable). Promote to a runtime
+    // query so the dispatch surface is live — eligible depthwise inputs now
+    // route to OpId::DepthwiseConv1d. Until a backend ships a real kernel
+    // its throw-stub will fire with the documented diagnostic; that is the
+    // intended behaviour (loud failure beats silent generic-Conv2d
+    // miscomputation when callers explicitly construct a depthwise layer).
+    const bool depthwise_conv1d_kernel_available =
+        ::tenzor::is_op_supported(
+            OpId::DepthwiseConv1d, input.tensor().device().type);
     [[maybe_unused]] const bool eligible_depthwise =
         (groups_ == in_channels_) && (groups_ > 1);
     auto output_result = (depthwise_conv1d_kernel_available && eligible_depthwise)
@@ -1337,13 +1338,14 @@ auto Conv3d::forward_impl(const Variable& input) -> Variable {
     forward_attrs.set(AttrKey::Groups,    groups_);
     DType original_dtype = input.dtype();
     // CC.5: depthwise fast-path dispatch surface for 3D (groups == in_channels).
-    // The OpId::DepthwiseConv3d dispatch surface is wired across all backends
-    // today; each one currently registers a throw-not-implemented handler, so
-    // we gate this on a compile-time `false` until at least one backend ships
-    // a real kernel. Replace with a runtime `is_op_supported` + "is real
-    // kernel" check when that happens. See matching comment in
-    // Conv1d::forward_impl for the full rationale.
-    constexpr bool depthwise_conv3d_kernel_available = false;
+    // FF.3: promoted from a `constexpr bool ... = false` gate to a runtime
+    // query so the dispatch surface is live. Eligible depthwise-3d inputs now
+    // route to OpId::DepthwiseConv3d; backends without a real kernel fire
+    // their CC.5 throw-stub (intentional — loud failure over silent
+    // generic-Conv3d miscomputation). See Conv1d::forward_impl for rationale.
+    const bool depthwise_conv3d_kernel_available =
+        ::tenzor::is_op_supported(
+            OpId::DepthwiseConv3d, input.tensor().device().type);
     [[maybe_unused]] const bool eligible_depthwise_3d =
         (groups_ == in_channels_) && (groups_ > 1);
     auto output_result = (depthwise_conv3d_kernel_available && eligible_depthwise_3d)

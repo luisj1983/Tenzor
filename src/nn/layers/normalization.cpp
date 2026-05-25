@@ -2710,9 +2710,11 @@ auto InstanceNorm1d::reset_parameters() -> void {
 
 InstanceNorm3d::InstanceNorm3d(int64_t num_features, double eps, bool affine)
     : num_features_(num_features),
-      in2d_(num_features, eps, affine) {
-    auto in2d_ptr = std::shared_ptr<InstanceNorm2d>(&in2d_, [](InstanceNorm2d*) {});
-    register_module("in2d", in2d_ptr);
+      // audit-7 FF.13: heap-allocate the delegate so register_module owns a
+      // real shared_ptr (no no-op-deleter wrap of a stack member, which was
+      // fragile under copy/move of the enclosing InstanceNorm3d).
+      in2d_(std::make_shared<InstanceNorm2d>(num_features, eps, affine)) {
+    register_module("in2d", in2d_);
 }
 
 auto InstanceNorm3d::forward_impl(const Variable& input) -> Variable {
@@ -2724,9 +2726,21 @@ auto InstanceNorm3d::forward_impl(const Variable& input) -> Variable {
 
     int64_t N = shape[0], C = shape[1], D = shape[2], H = shape[3], W = shape[4];
 
-    // Use tenzor::reshape (autograd-aware) to maintain computation graph
+    // audit-7 FF.18: reshape [N,C,D,H,W] -> [N,C,D*H,W] (the prior shape)
+    // dispatches to InstanceNorm2d, which saves mean/rstd at shape
+    // [N,C,1,1] — visually a 2D-spatial stat shape, but the underlying
+    // reduction is over D*H*W per (n, c) instance, identical to a 1D-flat
+    // reduction.  We keep the 4D reshape (InstanceNorm1d does not exist as
+    // a separate dispatch path in this layer file, and synthesising one
+    // would introduce a redundant code path) but document the invariant:
+    // mean[n, c, 0, 0] and rstd[n, c, 0, 0] are the mean/rstd over all
+    // D*H*W elements of the (n, c) instance.  The 2D-spatial shape is
+    // therefore *equivalent* to [N, C, 1] up to a trailing singleton; the
+    // backward in InstanceNorm2d consumes the stat at the same shape it
+    // was saved at, so consumers see no inconsistency.
+    // Use tenzor::reshape (autograd-aware) to maintain computation graph.
     auto reshaped = tenzor::reshape(input, {N, C, D * H, W});
-    auto result = in2d_.forward(reshaped);
+    auto result = in2d_->forward(reshaped);
     return tenzor::reshape(result, {N, C, D, H, W});
 }
 

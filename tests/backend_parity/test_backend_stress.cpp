@@ -9,10 +9,19 @@
 #include <gtest/gtest.h>
 #include <tenzor/tenzor.hpp>
 #include "parity_test_utils.hpp"
+#include "../backend_test_fixture.hpp"
 #include <chrono>
 
 using namespace tenzor;
 using namespace tenzor::testing;
+
+// FF.29: BackendStressParity sibling suite — TEST_P-wrapped versions of a
+// subset of the original BackendStress TEST() cases. These let the parity
+// coverage matrix see per-(op, backend) instead of one undifferentiated cell
+// per op. The original TEST() variants stay for now: they use the
+// `test_operation_parity` helper that loops backends internally, which is
+// still meaningful as an integrated check.
+class BackendStressParity : public BackendTest {};
 
 // ============================================================================
 // Large Tensor Tests
@@ -313,6 +322,95 @@ TEST(BackendStress, StabilityUnderLoad_Repeated) {
         }, {x}, 1e-5f, 1e-7f, "Stability Iteration " + std::to_string(iter));
     }
 }
+
+// ============================================================================
+// FF.29: TEST_P backend-parameterized variants of selected stress tests.
+// Smaller shapes than the original BackendStress.* — the goal here is
+// matrix-coverage breadth, not the original benchmark heft.
+// ============================================================================
+
+TEST_P(BackendStressParity, LargeTensor_1GB) {
+    // ~64 MiB tensor (smaller than the original 1GB so the per-(backend, dtype)
+    // matrix cells run in seconds, not minutes; the original TEST() at the top
+    // of the file still exercises the full 1GB profile).
+    auto a = randn({4096, 4096}, DType::Float32, Device::cpu());
+    auto b = randn({4096, 4096}, DType::Float32, Device::cpu());
+    test_operation_parity_single([](const std::vector<Tensor>& inputs) {
+        return inputs[0] + inputs[1];
+    }, {a, b}, device, 1e-6f, 1e-8f, "Stress LargeTensor 64MiB Add");
+}
+
+TEST_P(BackendStressParity, LargeTensor_MatMul) {
+    auto a = randn({1024, 1024}, DType::Float32, Device::cpu());
+    auto b = randn({1024, 1024}, DType::Float32, Device::cpu());
+    test_operation_parity_single([](const std::vector<Tensor>& inputs) {
+        return matmul(inputs[0], inputs[1]);
+    }, {a, b}, device, 1e-3f, 1e-5f, "Stress LargeMatMul 1024x1024");
+}
+
+TEST_P(BackendStressParity, LargeBatch_Conv2d) {
+    auto a = randn({8, 64, 32, 32}, DType::Float32, Device::cpu());
+    auto b = randn({8, 64, 32, 32}, DType::Float32, Device::cpu());
+    test_operation_parity_single([](const std::vector<Tensor>& inputs) {
+        return inputs[0] + inputs[1];
+    }, {a, b}, device, 1e-5f, 1e-7f, "Stress LargeConvSize Add");
+}
+
+TEST_P(BackendStressParity, ManySmallOperations_Sequential) {
+    auto x = randn({32, 32}, DType::Float32, Device::cpu());
+    test_operation_parity_single([](const std::vector<Tensor>& inputs) {
+        auto result = inputs[0];
+        for (int i = 0; i < 1000; ++i) {
+            result = result + 0.001f;
+        }
+        return result;
+    }, {x}, device, 1e-4f, 1e-6f, "Stress 1000 Sequential Ops");
+}
+
+TEST_P(BackendStressParity, ManySmallOperations_Chained) {
+    auto x = randn({16, 16}, DType::Float32, Device::cpu());
+    test_operation_parity_single([](const std::vector<Tensor>& inputs) {
+        auto result = inputs[0];
+        for (int i = 0; i < 100; ++i) {
+            result = clamp_min(result * 0.99f + 0.01f, 0.0f);
+        }
+        return result;
+    }, {x}, device, 1e-4f, 1e-6f, "Stress 100 Chained Ops");
+}
+
+TEST_P(BackendStressParity, ComplexChain_MathOps) {
+    auto a = randn({32, 64}, DType::Float32, Device::cpu());
+    auto b = randn({64, 32}, DType::Float32, Device::cpu());
+    auto c = randn({32, 32}, DType::Float32, Device::cpu());
+    test_operation_parity_single([](const std::vector<Tensor>& inputs) {
+        auto mm = matmul(inputs[0], inputs[1]);
+        auto added = mm + inputs[2];
+        return clamp(added, -6.0f, 6.0f);
+    }, {a, b, c}, device, 1e-4f, 1e-6f, "Stress Complex Math Chain");
+}
+
+TEST_P(BackendStressParity, ComplexChain_Reductions) {
+    auto input = randn({32, 128}, DType::Float32, Device::cpu());
+    test_operation_parity_single([](const std::vector<Tensor>& inputs) {
+        auto exp_x = exp(inputs[0]);
+        auto sum_exp = sum(exp_x, -1, true);
+        return exp_x / sum_exp;  // Manual softmax
+    }, {input}, device, 1e-5f, 1e-7f, "Stress Manual Softmax Chain");
+}
+
+TEST_P(BackendStressParity, MemoryPressure_AllocDealloc) {
+    auto x = randn({64, 64}, DType::Float32, Device::cpu());
+    test_operation_parity_single([](const std::vector<Tensor>& inputs) {
+        auto result = inputs[0];
+        for (int i = 0; i < 100; ++i) {
+            auto temp = randn({64, 64}, DType::Float32, inputs[0].device());
+            result = result + temp * 0.01f;
+        }
+        return result;
+    }, {x}, device, 1e-4f, 1e-6f, "Stress Alloc/Dealloc");
+}
+
+INSTANTIATE_BACKEND_TESTS(BackendStressParity);
 
 int main(int argc, char** argv) {
     ::testing::InitGoogleTest(&argc, argv);

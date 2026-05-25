@@ -18,6 +18,7 @@
 #include <vector>
 #include <chrono>
 #include <thread>
+#include <type_traits>  // FF.6: std::is_same_v in logcumsumexp_hip_kernel guard
 #include "fp16_saturate.h"
 
 namespace tenzor {
@@ -6568,6 +6569,14 @@ __global__ void logcumsumexp_hip_kernel(
     const T* __restrict__ input, T* __restrict__ output,
     int64_t dim_size, int64_t inner_size, int64_t total_slices)
 {
+    // FF.6: ROCm's HIP `isnan`/`isinf` intrinsics canonicalise NaN/Inf bit
+    // patterns silently on __half (and propagate unreliably across some
+    // driver/arch combos — see feedback_rocm_intrinsic_nan).  Gate this
+    // template to F32/F64 only; the host dispatcher already routes Float16
+    // through the F32 widen-narrow path.
+    static_assert(std::is_same_v<T, float> || std::is_same_v<T, double>,
+        "logcumsumexp_hip_kernel: only F32/F64 supported on ROCm; "
+        "__half NaN intrinsic is unreliable");
     HIP_KERNEL_LOOP(idx, total_slices) {
         int64_t outer = idx / inner_size;
         int64_t inner = idx % inner_size;

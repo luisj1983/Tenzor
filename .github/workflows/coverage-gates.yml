@@ -107,7 +107,12 @@ jobs:
         # matrix walks the source tree (its discovery is grep-based) while
         # ctest sees no enumerable tests — that's fine: the matrix only
         # needs ctest available when --update-baseline is passed.
-        run: python3 ../tools/parity_coverage_matrix.py
+        #
+        # FF.30: pass --require-real-ctest so a CI run with a skipped build
+        # step (zero ctest tests) raises RuntimeError instead of silently
+        # exiting with an empty matrix. The `Configure` step above writes
+        # build/CTestTestfile.cmake, so the normal case is non-empty.
+        run: python3 ../tools/parity_coverage_matrix.py --require-real-ctest
         working-directory: build
       - name: lint_test_contract.py — test-contract regressions
         run: python3 tools/lint_test_contract.py

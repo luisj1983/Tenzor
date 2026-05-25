@@ -130,6 +130,14 @@ public:
     /// pooling and reduction backward paths that pack double into uint64).
     auto has_atomic_int64(int32_t device_id) const -> bool;
 
+    /// FF.8: Whether the device advertises VK_EXT_shader_atomic_float with
+    /// SSBO 64-bit float atomic-add support
+    /// (shaderBufferFloat64AtomicAdd). Used by host-side capability gates
+    /// for shaders that perform `atomicAdd(double)` on an SSBO (F64
+    /// backward paths that take the direct double-atomicAdd path rather
+    /// than the int64-CAS pack).
+    auto has_atomic_float64(int32_t device_id) const -> bool;
+
 private:
     // Vulkan context management
 
@@ -143,7 +151,8 @@ private:
         std::unique_ptr<vulkan::DescriptorPool> descriptorPool;
         bool canPreserveDenormsF32 = false;  // Whether GPU supports denormal preservation for float32
         bool hasAtomicInt64 = false;          // Whether GPU supports VK_EXT_shader_atomic_int64
-        bool hasAtomicFloat = false;          // Whether GPU supports VK_EXT_shader_atomic_float
+        bool hasAtomicFloat = false;          // Whether GPU supports VK_EXT_shader_atomic_float (F32 add)
+        bool hasAtomicFloat64 = false;        // FF.8: Whether GPU supports VK_EXT_shader_atomic_float F64 buffer add
         bool hasSubgroupArithmetic = false;   // Whether GPU supports subgroup arithmetic ops
         uint32_t subgroupSize = 0;            // Subgroup (warp) size for this device
         uint32_t workgroupSize = 256;         // Optimal 1D workgroup size (power-of-2, from device limits)
@@ -1098,6 +1107,19 @@ void ensure_atomic_float_supported(int32_t device_id, const char* op_name);
  * public has_atomic_int64() accessor.
  */
 void ensure_atomic_int64_supported(int32_t device_id, const char* op_name);
+
+/**
+ * @brief FF.8: Throw a typed runtime_error with a uniform message if the
+ *        requested Vulkan device does not advertise VK_EXT_shader_atomic_float
+ *        with shaderBufferFloat64AtomicAdd.
+ *
+ * Same pattern as ensure_atomic_float_supported (U.5–U.7) but specifically
+ * for SPIR-V `atomicAdd(double)` on SSBOs.  Call this at the entry of any
+ * F64 backward dispatcher whose compute shader performs direct
+ * `atomicAdd(double)` (rather than the int64-CAS pack route guarded by
+ * ensure_atomic_int64_supported).
+ */
+void ensure_atomic_float64_storage_supported(int32_t device_id, const char* op_name);
 
 } // namespace vulkan
 

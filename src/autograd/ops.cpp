@@ -668,7 +668,13 @@ auto roll(const Variable& input, int64_t shifts, int64_t dim) -> Variable {
         return Variable(tenzor::roll(input.tensor(), shifts, dim), false);
     }
 
-    auto grad_fn = std::make_shared<RollBackward>(shifts, dim);
+    // FF.1: normalise negative dim against input rank before saving so RollBackward
+    // sees a canonical axis (mirrors Slice/Chunk/SelectScatter dim handling).
+    int64_t normalised_dim = dim;
+    auto ndim = static_cast<int64_t>(input.shape().size());
+    if (normalised_dim < 0) normalised_dim += ndim;
+
+    auto grad_fn = std::make_shared<RollBackward>(shifts, normalised_dim);
     std::vector<std::shared_ptr<Function>> next_funcs;
     next_funcs.push_back(input.grad_fn());
     grad_fn->set_next_functions(next_funcs);
@@ -1352,12 +1358,21 @@ auto pow(double base, const Variable& exponent) -> Variable {
     //                in the autograd path, which is what `log(base) = nan`
     //                yields naturally.
     if (base == 0.0) {
-        auto zero_t = tenzor::zeros_like(exponent.tensor());
-        auto one_t = tenzor::ones_like(exponent.tensor());
-        Variable zero_var(zero_t, false);
-        Variable one_var(one_t, false);
-        auto exp_is_zero = ::tenzor::eq(exponent, zero_var);
-        return ::tenzor::where(exp_is_zero, one_var, zero_var);
+        // FF.2: Route the zero-base branch through Variable-level where so the
+        // graph carries a dependency on exp_var. The previous early-return
+        // built a fresh Variable with no grad_fn → JVP and reverse-mode grad
+        // disagreed (JVP saw the constant, grad saw no input dependency at
+        // all). The data-branch tensors are ones_like / zeros_like of exp_var
+        // and remain constants (PyTorch convention is zero gradient through
+        // both branches), but `exp_is_zero = (exp_var == 0)` is now an
+        // exp_var-derived Variable so the chain rule has a path to walk.
+        auto ones_t = tenzor::ones_like(exponent.tensor());
+        auto zeros_t = tenzor::zeros_like(exponent.tensor());
+        Variable ones_v(ones_t, exponent.requires_grad());
+        Variable zeros_v(zeros_t, exponent.requires_grad());
+        Variable zero_scalar(tenzor::zeros_like(exponent.tensor()), false);
+        auto exp_is_zero = ::tenzor::eq(exponent, zero_scalar);
+        return ::tenzor::where(exp_is_zero, ones_v, zeros_v);
     }
     double log_base = std::log(base);
     return ::tenzor::exp(exponent * log_base);

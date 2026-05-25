@@ -14,6 +14,7 @@
 #include <tenzor/core/tensor.hpp>
 #include <tenzor/ops/creation.hpp>
 #include <tenzor/tenzor.hpp>
+#include "../multi_backend_dtype_fixture.hpp"  // FF.28: SKIP_WITH_REASON
 #include <chrono>
 #include <vector>
 #include <iomanip>
@@ -151,7 +152,7 @@ protected:
 // =============================================================================
 
 TEST_F(TransferBenchmarkTest, Bandwidth_CPUToGPU_1MB) {
-    if (!cuda_available) GTEST_SKIP() << "CUDA not available";
+    if (!cuda_available) SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "CUDA not available");
 
     TransferEngine engine(config);
     size_t size = 1 * 1024 * 1024;  // 1 MB
@@ -166,7 +167,7 @@ TEST_F(TransferBenchmarkTest, Bandwidth_CPUToGPU_1MB) {
 }
 
 TEST_F(TransferBenchmarkTest, Bandwidth_CPUToGPU_10MB) {
-    if (!cuda_available) GTEST_SKIP() << "CUDA not available";
+    if (!cuda_available) SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "CUDA not available");
 
     TransferEngine engine(config);
     size_t size = 10 * 1024 * 1024;  // 10 MB
@@ -181,7 +182,7 @@ TEST_F(TransferBenchmarkTest, Bandwidth_CPUToGPU_10MB) {
 }
 
 TEST_F(TransferBenchmarkTest, Bandwidth_CPUToGPU_100MB) {
-    if (!cuda_available) GTEST_SKIP() << "CUDA not available";
+    if (!cuda_available) SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "CUDA not available");
 
     TransferEngine engine(config);
     size_t size = 100 * 1024 * 1024;  // 100 MB
@@ -200,7 +201,7 @@ TEST_F(TransferBenchmarkTest, Bandwidth_CPUToGPU_100MB) {
 // =============================================================================
 
 TEST_F(TransferBenchmarkTest, Bandwidth_GPUToCPU_1MB) {
-    if (!cuda_available) GTEST_SKIP() << "CUDA not available";
+    if (!cuda_available) SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "CUDA not available");
 
     TransferEngine engine(config);
     size_t size = 1 * 1024 * 1024;  // 1 MB
@@ -215,7 +216,7 @@ TEST_F(TransferBenchmarkTest, Bandwidth_GPUToCPU_1MB) {
 }
 
 TEST_F(TransferBenchmarkTest, Bandwidth_GPUToCPU_10MB) {
-    if (!cuda_available) GTEST_SKIP() << "CUDA not available";
+    if (!cuda_available) SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "CUDA not available");
 
     TransferEngine engine(config);
     size_t size = 10 * 1024 * 1024;  // 10 MB
@@ -230,7 +231,7 @@ TEST_F(TransferBenchmarkTest, Bandwidth_GPUToCPU_10MB) {
 }
 
 TEST_F(TransferBenchmarkTest, Bandwidth_GPUToCPU_100MB) {
-    if (!cuda_available) GTEST_SKIP() << "CUDA not available";
+    if (!cuda_available) SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "CUDA not available");
 
     TransferEngine engine(config);
     size_t size = 100 * 1024 * 1024;  // 100 MB
@@ -249,7 +250,7 @@ TEST_F(TransferBenchmarkTest, Bandwidth_GPUToCPU_100MB) {
 // =============================================================================
 
 TEST_F(TransferBenchmarkTest, AsyncOverlap_SerialVsParallel) {
-    if (!cuda_available) GTEST_SKIP() << "CUDA not available";
+    if (!cuda_available) SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "CUDA not available");
 
     TransferEngine engine(config);
     size_t size = 10 * 1024 * 1024;  // 10 MB
@@ -290,7 +291,7 @@ TEST_F(TransferBenchmarkTest, AsyncOverlap_SerialVsParallel) {
 }
 
 TEST_F(TransferBenchmarkTest, AsyncOverlap_BidirectionalTransfers) {
-    if (!cuda_available) GTEST_SKIP() << "CUDA not available";
+    if (!cuda_available) SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "CUDA not available");
 
     TransferEngine engine(config);
     size_t size = 20 * 1024 * 1024;  // 20 MB
@@ -328,7 +329,7 @@ TEST_F(TransferBenchmarkTest, AsyncOverlap_BidirectionalTransfers) {
 // =============================================================================
 
 TEST_F(TransferBenchmarkTest, SustainedThroughput_100Transfers) {
-    if (!cuda_available) GTEST_SKIP() << "CUDA not available";
+    if (!cuda_available) SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "CUDA not available");
 
     TransferEngine engine(config);
     size_t size = 1 * 1024 * 1024;  // 1 MB
@@ -354,7 +355,7 @@ TEST_F(TransferBenchmarkTest, SustainedThroughput_100Transfers) {
 // =============================================================================
 
 TEST_F(TransferBenchmarkTest, Latency_SmallTransfer) {
-    if (!cuda_available) GTEST_SKIP() << "CUDA not available";
+    if (!cuda_available) SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "CUDA not available");
 
     TransferEngine engine(config);
     size_t size = 4;  // 4 bytes
@@ -372,7 +373,7 @@ TEST_F(TransferBenchmarkTest, Latency_SmallTransfer) {
 }
 
 TEST_F(TransferBenchmarkTest, Latency_AsyncOverhead) {
-    if (!cuda_available) GTEST_SKIP() << "CUDA not available";
+    if (!cuda_available) SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "CUDA not available");
 
     TransferEngine engine(config);
     size_t size = 1024;  // 1 KB
@@ -398,7 +399,7 @@ TEST_F(TransferBenchmarkTest, Latency_AsyncOverhead) {
 // =============================================================================
 
 TEST_F(TransferBenchmarkTest, PCIeUtilization_MaxBandwidth) {
-    if (!cuda_available) GTEST_SKIP() << "CUDA not available";
+    if (!cuda_available) SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "CUDA not available");
 
     TransferEngine engine(config);
 

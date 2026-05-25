@@ -125,6 +125,15 @@ private:
 
     ~CuDNNWorkspace() {
         if (buffer_) {
+            // FF.9: ensure all in-flight cuDNN/CUDA work that may still be
+            // reading the workspace has retired before we free it.  EE.6's
+            // last_used_stream_ approach is unsafe here because the stream
+            // recorded by `get()` may itself be in the middle of destruction
+            // (program exit / device teardown).  cudaDeviceSynchronize is the
+            // only reliably-correct option in the destructor — it's a heavy
+            // hammer but the workspace is a singleton freed exactly once at
+            // shutdown so the cost is negligible.
+            cudaDeviceSynchronize();
             cudaFree(buffer_);
         }
     }

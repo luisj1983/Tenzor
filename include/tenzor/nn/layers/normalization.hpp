@@ -318,11 +318,15 @@ public:
 
     /// @brief Get the epsilon value used for numerical stability (forwarded from the
     /// internal InstanceNorm2d delegate).
-    [[nodiscard]] auto eps() const -> double { return in2d_.eps(); }
+    [[nodiscard]] auto eps() const -> double { return in2d_->eps(); }
 
 private:
     int64_t num_features_;
-    InstanceNorm2d in2d_; ///< Delegate to InstanceNorm2d after reshaping
+    // audit-7 FF.13: hold delegate as shared_ptr so register_module can adopt
+    // it directly — the previous member-by-value + no-op-deleter shared_ptr
+    // wrap was fragile (any path that copied/moved the InstanceNorm3d would
+    // dangle the registered submodule pointer at the stale stack slot).
+    std::shared_ptr<InstanceNorm2d> in2d_; ///< Delegate to InstanceNorm2d after reshaping
 };
 
 /**

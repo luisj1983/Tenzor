@@ -2349,6 +2349,19 @@ ZeROStage2Optimizer::~ZeROStage2Optimizer() {
 auto ZeROStage2Optimizer::step_impl() -> void {
     std::lock_guard<std::mutex> lock(mutex_);
 
+    // audit-7 FF.15: extend CC.9's master_params <-> params lockstep
+    // invariant assertion from Stage 1 init to every Stage 2 step.  Stage 2
+    // shares the `partitions_` structure with Stage 1 and walks both vectors
+    // in lockstep in update_local_partition_*() / load_state_dict() — drift
+    // (e.g. via an add_param_group path that forgets to extend the master
+    // vector) would silently use the wrong master for a param.
+    if (config_.use_master_fp32) {
+        for (const auto& partition : partitions_) {
+            assert(partition.master_params.size() == partition.params.size()
+                   && "ZeRO Stage 2 master_params must align 1:1 with params");
+        }
+    }
+
     // Start profiling
     auto step_start = std::chrono::steady_clock::now();
     if (profiling_enabled_) {
@@ -3390,6 +3403,18 @@ auto ZeROStage3Optimizer::unregister_model() -> void {
 
 auto ZeROStage3Optimizer::step_impl() -> void {
     std::lock_guard<std::mutex> lock(mutex_);
+
+    // audit-7 FF.15: same lockstep invariant as Stage 2 (CC.9 from Stage 1
+    // init).  Stage 3 inherits the `partitions_` storage and walks
+    // master_params alongside params in update_local_partition().  After
+    // gather_parameter_impl reshuffles state mid-training, this is the only
+    // pre-step gate that catches drift.
+    if (config_.use_master_fp32) {
+        for (const auto& partition : partitions_) {
+            assert(partition.master_params.size() == partition.params.size()
+                   && "ZeRO Stage 3 master_params must align 1:1 with params");
+        }
+    }
 
     // Stage 3 step algorithm:
     // 1. Gradients are already reduced-scattered via backward hooks (inherited from Stage 2)

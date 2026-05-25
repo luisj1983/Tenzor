@@ -224,23 +224,28 @@ auto DivBackward::backward_with_variables(std::vector<Variable> grad_outputs) ->
         saved_b = Variable(saved_tensors_[1], false);
     }
 
-    // Zero-safe: replace zero denominator with epsilon (same guard as backward())
-    auto b_tensor = saved_b.tensor();
-    auto b_shape = std::vector<int64_t>(b_tensor.shape().begin(), b_tensor.shape().end());
-    auto zero_b = zeros(b_shape, b_tensor.dtype(), b_tensor.device());
-    auto eps_b = full(b_shape, detail::dtype_epsilon(b_tensor.dtype()),
-                      b_tensor.dtype(), b_tensor.device());
-    auto safe_b_tensor = where(eq(b_tensor, zero_b), eps_b, b_tensor);
-    Variable safe_b(safe_b_tensor, false);
+    // Zero-safe: replace zero denominator with epsilon (same guard as backward()).
+    // FF.4: construct `safe_b` via Variable-level ops so the grad_fn carried on
+    // `saved_b` (when `has_saved_variables()` is populated) survives into the
+    // backward graph — mirrors the audit-5 X.5 / Y.9 fix that was already
+    // applied to the complex Wirtinger paths. The previous implementation built
+    // `safe_b` from raw Tensor ops and wrapped with `Variable(..., false)`,
+    // severing the chain even at b != 0 (real and complex paths alike).
+    auto b_tensor_view = saved_b.tensor();
+    auto b_shape = std::vector<int64_t>(b_tensor_view.shape().begin(), b_tensor_view.shape().end());
+    auto zero_b_t = zeros(b_shape, b_tensor_view.dtype(), b_tensor_view.device());
+    auto eps_b_t = full(b_shape, detail::dtype_epsilon(b_tensor_view.dtype()),
+                        b_tensor_view.dtype(), b_tensor_view.device());
+    Variable zero_b_var(zero_b_t, false);
+    Variable eps_b_var(eps_b_t, false);
+    auto b_is_zero = ::tenzor::eq(saved_b, zero_b_var);
+    auto safe_b = ::tenzor::where(b_is_zero, eps_b_var, saved_b);
 
     Variable grad_a_unreduced, grad_b_unreduced;
     if (saved_a.tensor().is_complex() || saved_b.tensor().is_complex()) {
         // Wirtinger: route conj through the Variable-level overload so the
         // grad_fn carried on saved_a (and the zero-safe `safe_b`) survives.
         // Raw `Variable(conj(t), false)` severed the chain — audit-5 X.5.
-        // `safe_b` itself is the zero-guarded denominator and is intentionally
-        // non-differentiable at b=0; keeping it grad-free matches the original
-        // semantics while still letting conj(saved_a) carry its chain.
         auto conj_b = tenzor::conj(safe_b);
         auto conj_a = tenzor::conj(saved_a);
         grad_a_unreduced = grad_outputs[0] / conj_b;

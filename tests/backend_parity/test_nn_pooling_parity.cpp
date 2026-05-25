@@ -7,6 +7,7 @@
  */
 
 #include <gtest/gtest.h>
+#include <cmath>
 #include <tenzor/tenzor.hpp>
 #include <tenzor/nn/functional.hpp>
 #include "../backend_test_fixture.hpp"
@@ -99,7 +100,14 @@ void maxpool3d_halfdtype_parity(PoolMake make_pool,
     auto backends = get_available_backends();
     REQUIRE_MULTI_BACKEND_OR_SKIP("nn pooling parity");
 
-    auto input_f32 = randn({1, 4, 4, 4, 4}, DType::Float32, Device::cpu());
+    // FF.24: previous shape {1,4,4,4,4} produced only 32 output
+    // positions, which is far below the threshold where the BB.7 F16/BF16
+    // MaxPool3d CAS-retry path actually fires on a parallel backend. With
+    // {2, 32, 16, 16, 16} and kernel/stride=2 the output is
+    // {2, 32, 8, 8, 8} = 32K positions — wide enough that any non-
+    // deterministic CAS loss surfaces as a non-zero count of positions
+    // disagreeing with the CPU reference.
+    auto input_f32 = randn({2, 32, 16, 16, 16}, DType::Float32, Device::cpu());
 
     // CPU Float32 reference.
     Tensor ref;
@@ -124,6 +132,47 @@ void maxpool3d_halfdtype_parity(PoolMake make_pool,
             auto out_cpu_f32 = out.tensor().to(Device::cpu()).to(DType::Float32);
             SCOPED_TRACE(std::string(name) + " on " + backend_name(backends[i]));
             EXPECT_TENSORS_CLOSE(ref, out_cpu_f32, atol, atol);
+
+            // FF.24: BB.7 CAS-retry detection. If the parallel-pool
+            // kernel drops some CAS writes, the affected output
+            // positions will be filled with 0 (the initial value) and
+            // therefore agree numerically with CPU only when the true
+            // max happened to be zero — extremely unlikely under randn
+            // input. Conversely, a *correct* parallel implementation
+            // still has F16/BF16 rounding so the per-position abs diff
+            // is non-zero almost everywhere (typically ~1e-3 to 1e-2).
+            //
+            // We count positions where |actual - ref| > epsilon and
+            // assert the count is positive. A zero count here means
+            // every output matches CPU to within epsilon, which under
+            // F16/BF16 rounding can only happen if the kernel produced
+            // CPU-identical values via a path that doesn't actually use
+            // half-precision arithmetic (i.e. an early-exit or zero-
+            // fill bug). The epsilon must be smaller than F16's machine
+            // epsilon (~1e-3) but larger than zero to distinguish
+            // "rounded but close" from "exactly zero".
+            const float diff_epsilon = 1e-5f;
+            int64_t differing = 0;
+            int64_t total = ref.numel();
+            // Ensure contiguous-row-major layout so the linear scan
+            // below reads the same elements from both tensors.
+            Tensor ref_c = ref.is_contiguous() ? ref : ref.contiguous();
+            Tensor act_c = out_cpu_f32.is_contiguous()
+                ? out_cpu_f32 : out_cpu_f32.contiguous();
+            const float* ref_p = static_cast<const float*>(ref_c.data_ptr());
+            const float* act_p = static_cast<const float*>(act_c.data_ptr());
+            for (int64_t k = 0; k < total; ++k) {
+                if (std::abs(act_p[k] - ref_p[k]) > diff_epsilon) {
+                    ++differing;
+                }
+            }
+            EXPECT_GT(differing, 0)
+                << name << " on " << backend_name(backends[i])
+                << ": output is bit-identical to CPU reference at "
+                << total << " positions, which is inconsistent with "
+                << "F16/BF16 rounding — this typically indicates the "
+                << "parallel MaxPool3d kernel dropped CAS-retry writes "
+                << "and zero-filled the output (BB.7 regression).";
         } catch (const std::exception& e) {
             ADD_FAILURE() << name << " failed on " << backend_name(backends[i])
                           << ": " << e.what();

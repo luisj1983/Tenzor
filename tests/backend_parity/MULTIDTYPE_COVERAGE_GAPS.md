@@ -76,17 +76,17 @@ one-line trailing comment justifying CPU-only coverage.
 tests/nn/optim/test_adamw.cpp                # audit-6 CC.21: justified as out of scope for audit-6 — optimizer state buffers live on CPU regardless of param device; cross-backend AdamW parity is covered by backend_parity/ training-loop tests. File doc-comment already documents CPU-only-by-design.
 tests/test_autograd_transform.cpp            # audit-6 CC.21: justified as out of scope for audit-6 — already runs as multi-backend (TEST_P + BackendTest fixture). Adding a dtype axis would re-test the autograd-graph-stability surface, not new numerics; covered by reshape/permute parity tests in tests/backend_parity/.
 tests/nn/quantization/test_awq_quantizer.cpp
-tests/test_ciou_loss.cpp
-tests/test_contiguous_fix.cpp
+tests/test_ciou_loss.cpp                     # audit-7 FF.31: justified — CIoU is a detection loss with a known PyTorch-equivalent CPU reference; cross-backend correctness comes from the per-op (matmul, exp, log) parity tests its forward path uses. Adding a 5-backend × 3-dtype sweep would re-test those ops, not the loss math.
+tests/test_contiguous_fix.cpp                # audit-7 FF.31: justified — regression test for a stride/contiguity bug in tensor.slice() that surfaces in scalar arithmetic. The fix lives in backend-agnostic Tensor layout code; per-backend stride parity is already covered by tests/backend_parity/test_stride_parity.cpp.
 tests/integration/test_cross_backend.cpp
 tests/nn/quantization/test_gptq_quantizer.cpp
 tests/test_grad_accumulation.cpp             # audit-6 CC.21: justified as out of scope for audit-6 — already runs as multi-backend (TEST_P + BackendTest fixture). Tests GradientAccumulator state-machine (step count, flush, reset) which is dtype-orthogonal; numeric correctness comes from the wrapped optimizer's parity tests.
 tests/autograd/test_higher_order_contract.cpp # audit-6 CC.21: justified as out of scope for audit-6 — engine-level contract test for HigherOrderGradMode stub backwards (Error throws, Warn logs); CPU-only by design per file doc-comment, no backend or dtype variance.
 tests/autograd/test_higher_order_stubs_regression.cpp
-tests/autograd/test_inference_mode_guard.cpp
+tests/autograd/test_inference_mode_guard.cpp # audit-7 FF.31: justified — file header already documents "CPU-only infrastructure tests verifying RAII guard semantics, nesting behaviour, and effect on Variable grad_fn attachment". The InferenceModeGuard / NoGradGuard contract is dtype-orthogonal and the guard mechanism lives in autograd/variable.cpp, not in any backend kernel.
 tests/test_linear_reshape_integration.cpp
-tests/test_mask_rcnn_losses.cpp
-tests/test_minimal_training.cpp              # audit-6 CC.21: justified as out of scope for audit-6 — single-run NaN-debug smoke test for an Adam training loop; cross-backend training is covered by integration/test_training.cpp and the backend_parity/ training-loop tests.
+tests/test_mask_rcnn_losses.cpp              # audit-7 FF.31: justified — Mask R-CNN loss correctness is per-component (BCE, smooth-L1, mask CE); the underlying ops have their own multi-backend / multi-dtype companions. The test pins Device::cpu() in SetUp and verifies loss-decomposition shapes/values, not numeric parity across backends.
+tests/test_minimal_training.cpp              # audit-6 CC.21 + audit-7 FF.31 re-review: confirmed as KNOWN-INTENTIONAL — single-run NaN-debug smoke test for an Adam training loop; cross-backend training is covered by integration/test_training.cpp and the backend_parity/ training-loop tests. No action needed.
 tests/ops/test_new_ops.cpp
 tests/integration/test_nn.cpp
 tests/nn/quantization/test_observers_extended.cpp

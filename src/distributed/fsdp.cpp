@@ -365,7 +365,20 @@ auto FSDPUnit::all_gather_params() -> void {
     const bool use_mixed_precision = config_.mixed_precision &&
                                      config_.comm_dtype != dtype &&
                                      comm_narrower;
-    if (config_.mixed_precision && config_.comm_dtype != dtype && !comm_narrower) {
+    // audit-7 FF.17: the equal-size-but-different-family case (e.g. param
+    // dtype F16 with comm_dtype BF16, both 2 bytes) falls under the generic
+    // "no narrower" warning above, but the message is misleading — it isn't
+    // wider, it's the same width but a different bit layout.  Emit a more
+    // specific warning so the user knows their compression request produced
+    // no bandwidth savings and they should pick a strictly smaller dtype.
+    if (config_.mixed_precision &&
+        ::tenzor::dtype_size(dtype) == ::tenzor::dtype_size(config_.comm_dtype) &&
+        config_.comm_dtype != dtype) {
+        TENZOR_WARN_ONCE(
+            "FSDP: comm_dtype is the same size as the parameter dtype but a "
+            "different family; no compression applied — consider setting "
+            "comm_dtype to a smaller dtype (e.g. F8) for actual bandwidth savings.");
+    } else if (config_.mixed_precision && config_.comm_dtype != dtype && !comm_narrower) {
         TENZOR_WARN_ONCE(
             "FSDP: comm_dtype is no narrower than the parameter dtype; "
             "skipping the mixed-precision down-cast to avoid wasted bandwidth "

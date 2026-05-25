@@ -29,6 +29,14 @@ SAM::SAM(std::vector<optim::ParamGroup> groups,
 }
 
 auto SAM::first_step() -> void {
+    // audit-7 FF.11: SAM::step(closure) drives perturbation via first_step()
+    // without going through Optimizer::step(), so the base's clip_gradients_()
+    // pre-step would never run.  Apply SAM-level clipping here so the
+    // perturbation pass sees clipped gradients (i.e. clipping participates
+    // in finding the neighbour-maximum), matching the contract documented in
+    // Optimizer::step().
+    clip_gradients_();
+
     // Audit D.4: per-parameter `rho` resolves from the active ParamGroup
     // (when one was set up via the ParamGroup-list constructor) or falls
     // through to the optimiser-wide default stored on this SAM instance.
@@ -214,7 +222,10 @@ auto SAM::step(std::function<Variable()> closure) -> Variable {
     // would otherwise never re-fire after the initial registration, so
     // re-impose dense masks would silently disappear. Replicate the
     // bookkeeping that Optimizer::step() normally performs.
-    step_count_total_.fetch_add(1, std::memory_order_release);
+    // audit-7 FF.12: match base Optimizer::step()'s memory ordering
+    // (relaxed) so SAM doesn't impose stricter visibility than the base
+    // counter; the counter is monotonic-but-not-load-bearing for ordering.
+    step_count_total_.fetch_add(1, std::memory_order_relaxed);
     fire_post_step_hooks_();
 
     return initial_loss;

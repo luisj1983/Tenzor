@@ -67,6 +67,15 @@ void main() {
                 // Mark column as present
                 atomicOr(col_flag[c_col / 32u], 1u << (c_col % 32u));
 
+                // FF.10: insert a buffer memory barrier between the col_flag
+                // atomicOr and the acc_bits CAS so sibling threads observe
+                // the flag write before reading the partially-committed
+                // accumulator.  Without this the SPIR-V memory model permits
+                // a thread to see acc_bits updates before the col_flag
+                // bit-set, which corrupts the compaction step's "which
+                // columns are present" view of the row.
+                memoryBarrierBuffer();
+
                 // Atomic float add via CAS loop on shared uint array. Bounded
                 // to avoid GPU livelock under contention; mirrors BB.7
                 // saturation hard-stop pattern used elsewhere in the Vulkan

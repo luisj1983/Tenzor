@@ -3,6 +3,7 @@
 #include "tenzor/backend/op_attributes.hpp"
 #include <sycl/sycl.hpp>
 #include <stdexcept>
+#include <type_traits>  // FF.7: std::is_same_v in col2im atomic_ref guard
 
 namespace tenzor {
 namespace oneapi {
@@ -106,6 +107,12 @@ template<typename T>
 void col2im_kernel_impl(const T* data_col, int64_t channels, int64_t height, int64_t width,
                         int64_t kernel_h, int64_t kernel_w, int64_t pad, int64_t stride,
                         int64_t dilation, T* data_im, sycl::queue& queue) {
+    // FF.7: sycl::atomic_ref<T, ...> is only specified for 32-/64-bit IEEE
+    // floats (and integers).  Half / bfloat16 instantiations either fail to
+    // compile or silently fall back to non-atomic — gate to F32/F64 so the
+    // host dispatcher widens lower precision through the F32 path.
+    static_assert(std::is_same_v<T, float> || std::is_same_v<T, double>,
+        "im2col atomic_ref requires F32/F64");
     const int64_t output_h = (height + 2 * pad - dilation * (kernel_h - 1) - 1) / stride + 1;
     const int64_t output_w = (width + 2 * pad - dilation * (kernel_w - 1) - 1) / stride + 1;
     const int64_t im_size = channels * height * width;

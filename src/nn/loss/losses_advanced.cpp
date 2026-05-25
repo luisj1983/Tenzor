@@ -307,7 +307,22 @@ auto HuberLoss::forward(const Variable& input, const Variable& target) -> Variab
     //   L = 0.5 * clipped^2 + delta * (|diff| - clipped)
     // This is exact: small errors give 0.5*diff^2, large give delta*|diff| - 0.5*delta^2
 
-    auto diff = input - target;
+    // audit-7 FF.14: small delta (e.g. 1e-3 or below) makes 0.5 * delta^2 and
+    // delta * |diff| underflow / round to zero in F16/BF16, collapsing the
+    // quadratic-vs-linear distinction.  Mirror the AA.4 / EE.9 upcast
+    // pattern: widen input + target to Float32, compute clamp/quadratic at
+    // F32, then narrow the loss back to the original dtype.
+    const DType orig_dtype = input.tensor().dtype();
+    const bool needs_upcast = (orig_dtype == DType::Float16 ||
+                               orig_dtype == DType::BFloat16);
+    Variable input_f32 = needs_upcast
+        ? tenzor::nn::variable_cast(input, DType::Float32)
+        : input;
+    Variable target_f32 = needs_upcast
+        ? tenzor::nn::variable_cast(target, DType::Float32)
+        : target;
+
+    auto diff = input_f32 - target_f32;
     auto abs_diff = abs(diff);
 
     auto clipped = clamp(abs_diff, 0.0f, static_cast<float>(delta_));
@@ -318,7 +333,11 @@ auto HuberLoss::forward(const Variable& input, const Variable& target) -> Variab
     // L = 0.5 * clipped^2 + delta * (|diff| - clipped)
     auto loss_unreduced = half_var * clipped * clipped + delta_var * (abs_diff - clipped);
 
-    return apply_reduction(loss_unreduced, reduction_);
+    Variable reduced = apply_reduction(loss_unreduced, reduction_);
+    if (needs_upcast) {
+        reduced = tenzor::nn::variable_cast(reduced, orig_dtype);
+    }
+    return reduced;
 }
 
 //==============================================================================

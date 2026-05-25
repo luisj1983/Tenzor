@@ -26,6 +26,7 @@
 #include <tenzor/tenzor.hpp>
 #include <tenzor/backend/fused_ops.hpp>
 #include <tenzor/ops/creation.hpp>
+#include "multi_backend_dtype_fixture.hpp"  // FF.28: SKIP_WITH_REASON
 
 #include <vector>
 
@@ -90,7 +91,7 @@ auto run_fa_backward(int64_t batch_heads, int64_t seq_len, int64_t head_dim,
 }  // namespace
 
 TEST(FlashAttentionDropoutBackward, DropoutChangesGradient) {
-    if (!cuda_available()) GTEST_SKIP() << "CUDA not available";
+    if (!cuda_available()) SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "CUDA not available");
     // Fix seeds so input data is identical across runs (we use the same
     // call to randn).
     auto g0 = run_fa_backward(/*batch_heads=*/2, /*seq_len=*/16,
@@ -112,7 +113,7 @@ TEST(FlashAttentionDropoutBackward, DropoutChangesGradient) {
 }
 
 TEST(FlashAttentionDropoutBackward, SameSeedYieldsDeterministicGradient) {
-    if (!cuda_available()) GTEST_SKIP() << "CUDA not available";
+    if (!cuda_available()) SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "CUDA not available");
     // Two backward runs with the same seed must produce the same gradient
     // (modulo random input differences). To control inputs, we'd need to
     // share Q/K/V/dO across runs — this test only verifies the dropout-

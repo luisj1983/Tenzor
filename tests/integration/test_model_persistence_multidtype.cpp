@@ -10,6 +10,7 @@
 #include <tenzor/ops/creation.hpp>
 #include "../multi_backend_dtype_fixture.hpp"
 #include <filesystem>
+#include <unistd.h>  // FF.26: getpid for per-process temp path
 
 using namespace tenzor;
 using namespace tenzor::testing;
@@ -41,8 +42,16 @@ TEST_P(ModelPersistenceMultiDTypeTest, SaveLoadFile) {
     auto model = std::make_shared<nn::Linear>(8, 4);
     convert_model(model);
 
-    std::string path = "/tmp/tenzor_test_model_" +
-        std::to_string(std::hash<std::string>{}(backend_name())) + ".bin";
+    // FF.26: previously this was a hardcoded /tmp path keyed only on
+    // backend_name(), which raced when two parallel test processes ran on the
+    // same host. Mirror tests/utils/test_logging.cpp:19's pid+test-name pattern.
+    const auto* info =
+        ::testing::UnitTest::GetInstance()->current_test_info();
+    const std::string test_name = info ? info->name() : "unknown";
+    std::string path = (std::filesystem::temp_directory_path() /
+                        ("tenzor_test_model_" +
+                         std::to_string(::getpid()) + "_" + test_name + "_" +
+                         backend_name() + ".bin")).string();
 
     // Save
     model->save(path);

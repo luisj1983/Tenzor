@@ -310,16 +310,32 @@ def main() -> int:
                         help="Emit JSON instead of human-readable tables.")
     parser.add_argument("--label", default="backend_parity",
                         help="ctest label to filter by (default: backend_parity).")
+    parser.add_argument(
+        "--require-real-ctest",
+        action="store_true",
+        help=(
+            "FF.30: raise RuntimeError when ctest enumerates zero tests "
+            "(i.e. the tool was run outside build/, or the build step was "
+            "skipped). Without this flag the default Y.28 behaviour is "
+            "preserved — print an explanatory error and exit 2."
+        ),
+    )
     args = parser.parse_args()
 
     test_names = discover_all_tests(args.label)
-    # Y.28: ctest --show-only=json-v1 exits 0 with an empty test list when the
-    # tool is invoked outside of build/ (no CTestTestfile.cmake to scan). The
-    # legacy behaviour was to emit a silent empty matrix with exit 0 — the
-    # exact same output we'd produce for a perfectly green run. Treat the
-    # empty case as a hard failure so the caller (CI, audit tooling) cannot
-    # confuse "you ran me from the wrong directory" with "coverage is fine".
+    # Y.28 / FF.30: ctest --show-only=json-v1 exits 0 with an empty test list
+    # when the tool is invoked outside of build/ (no CTestTestfile.cmake to
+    # scan). The legacy behaviour was to emit a silent empty matrix with exit
+    # 0 — the exact same output we'd produce for a perfectly green run. The
+    # default still treats the empty case as exit 2 with a human-readable
+    # diagnostic. CI passes --require-real-ctest to escalate the same case
+    # into a RuntimeError so a CI step that silently skipped the build
+    # cannot mask the failure as a clean "no parity work to do" pass.
     if not test_names:
+        if args.require_real_ctest:
+            raise RuntimeError(
+                "ctest enumerated zero tests — was the build step skipped?"
+            )
         print(
             "ERROR: ctest enumerated zero tests for label "
             f"'{args.label}' — run this tool from the build/ directory "

@@ -11,6 +11,7 @@
 #include <tenzor/backend/fast_dispatch.hpp>
 #include <tenzor/backend/op_attributes.hpp>
 #include <tenzor/ops/op_id.hpp>
+#include "../multi_backend_dtype_fixture.hpp"  // FF.28: SKIP_WITH_REASON
 
 using namespace tenzor;
 
@@ -40,7 +41,7 @@ static auto random_f32(std::vector<int64_t> shape) -> Tensor {
 }  // namespace
 
 TEST_F(CudaFusedDtypeParity, FusedSoftmaxCrossEntropy_F16_NativeMatchesRef) {
-    if (!has_cuda()) GTEST_SKIP() << "CUDA not available";
+    if (!has_cuda()) SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "CUDA not available");
 
     // Build F32 logits & integer targets on CPU.
     auto logits_f32 = random_f32({16, 32});
@@ -69,7 +70,7 @@ TEST_F(CudaFusedDtypeParity, FusedSoftmaxCrossEntropy_F16_NativeMatchesRef) {
 }
 
 TEST_F(CudaFusedDtypeParity, FusedRMSNorm_F16_NativeMatchesRef) {
-    if (!has_cuda()) GTEST_SKIP() << "CUDA not available";
+    if (!has_cuda()) SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "CUDA not available");
 
     auto input_f32 = random_f32({4, 64});
     auto weight_f32 = random_f32({64});
@@ -99,7 +100,7 @@ TEST_F(CudaFusedDtypeParity, FusedRMSNorm_F16_NativeMatchesRef) {
 }
 
 TEST_F(CudaFusedDtypeParity, FusedSoftmaxCrossEntropy_BF16_NativeMatchesRef) {
-    if (!has_cuda()) GTEST_SKIP() << "CUDA not available";
+    if (!has_cuda()) SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "CUDA not available");
 
     auto logits_f32 = random_f32({16, 32});
     auto targets = zeros({16}, DType::Int64, Device::cpu());
@@ -129,7 +130,7 @@ TEST_F(CudaFusedDtypeParity, FusedSoftmaxCrossEntropy_BF16_NativeMatchesRef) {
 // rms_acc_type<T> traits (matches forward path).
 // ----------------------------------------------------------------------------
 TEST_F(CudaFusedDtypeParity, FusedRMSNormBackward_F16_NoThrow) {
-    if (!has_cuda()) GTEST_SKIP() << "CUDA not available";
+    if (!has_cuda()) SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "CUDA not available");
     auto input_f32 = random_f32({4, 64});
     auto weight_f32 = random_f32({64});
 
@@ -151,7 +152,7 @@ TEST_F(CudaFusedDtypeParity, FusedRMSNormBackward_F16_NoThrow) {
 }
 
 TEST_F(CudaFusedDtypeParity, FusedRMSNormBackward_BF16_NoThrow) {
-    if (!has_cuda()) GTEST_SKIP() << "CUDA not available";
+    if (!has_cuda()) SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "CUDA not available");
     auto input_f32 = random_f32({4, 64});
     auto weight_f32 = random_f32({64});
 

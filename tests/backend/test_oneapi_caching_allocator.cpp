@@ -18,6 +18,7 @@
 #include "tenzor/backend/loader.hpp"
 #include "tenzor/core/device.hpp"
 #include "tenzor/tenzor.hpp"
+#include "../multi_backend_dtype_fixture.hpp"  // FF.28: SKIP_WITH_REASON
 #include <vector>
 #include <algorithm>
 #include <thread>
@@ -48,12 +49,14 @@ protected:
         // Check if OneAPI backend is available
         auto* backend = backend_registry().get_backend(Device::Type::OneAPI);
         if (!backend || !backend->is_available()) {
-            GTEST_SKIP() << "OneAPI backend not available";
+            SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable,
+                             "OneAPI backend not available");
         }
 
         // The allocator is initialized by the backend, so we just need to check it's ready
         if (!OneAPICachingAllocator::get().is_initialized(0)) {
-            GTEST_SKIP() << "OneAPICachingAllocator not initialized";
+            SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable,
+                             "OneAPICachingAllocator not initialized");
         }
 
         allocator = &OneAPICachingAllocator::get();

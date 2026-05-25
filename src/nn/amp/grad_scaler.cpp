@@ -58,6 +58,16 @@ auto GradScaler::unscale_(optim::Optimizer& optimizer) -> void {
         return;  // Already unscaled
     }
 
+    // audit-7 FF.16: scope the F32 unscaled-grad side-table to *this*
+    // unscale_() invocation.  The side-table is keyed by raw param pointer,
+    // but a GradScaler instance may be shared across multiple optimizers
+    // (or the same optimizer may have param_groups added/removed between
+    // steps).  Relying on the trailing clear in step() leaves stale entries
+    // visible to check_inf_nan_() if a caller invokes unscale_() directly
+    // for a different optimizer without an intervening step().  Clear here
+    // before rebuilding the table for the current optimizer's params.
+    f32_unscaled_grads_.clear();
+
     // U.8: build inv_scale in Float32. For scale = 2^17 the F16
     // representation of 1/scale ≈ 7.6e-6 is denormal (rounds to zero),
     // so the F16/BF16 path below ALWAYS upcasts the grad to Float32,

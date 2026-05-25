@@ -12,7 +12,11 @@ TEST(ElasticTrainerTest, ConfigDefaults) {
     ElasticConfig config;
     EXPECT_EQ(config.max_restarts, 3);
     EXPECT_TRUE(config.auto_checkpoint);
-    EXPECT_EQ(config.checkpoint_dir, "/tmp/tenzor_elastic");
+    // FF.25: default is now `<tmpdir>/tenzor_elastic_<pid>`; assert the prefix
+    // rather than the exact path so the per-pid suffix and the platform tmpdir
+    // (`/tmp` on Linux, `$TMPDIR` elsewhere) are both accepted.
+    EXPECT_TRUE(config.checkpoint_dir.find("tenzor_elastic_") != std::string::npos)
+        << "checkpoint_dir = " << config.checkpoint_dir;
 }
 
 TEST(ElasticTrainerTest, Construction) {

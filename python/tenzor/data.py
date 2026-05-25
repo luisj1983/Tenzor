@@ -702,6 +702,22 @@ def _default_collate_impl(batch: list, _current_depth: int) -> Any:
 
     # Dict: collate each key's values independently.
     if isinstance(elem, dict):
+        # FF.21: validate that every sample carries the same key set
+        # before iterating. Pre-fix, the inner ``[d[k] for d in batch]``
+        # comprehension only inspected ``elem.keys()`` (sample 0); a
+        # sample with an extra key was silently dropped and a sample
+        # missing a key raised an opaque ``KeyError`` from deep inside
+        # the comprehension. Surface the mismatch up-front with the
+        # offending sample's index so the user can fix the dataset.
+        expected_keys = set(elem.keys())
+        for i, d in enumerate(batch):
+            if set(d.keys()) != expected_keys:
+                raise ValueError(
+                    f"default_collate: sample {i} has keys "
+                    f"{sorted(d.keys())} but sample 0 has "
+                    f"{sorted(expected_keys)} — all dict samples must "
+                    f"have the same keys"
+                )
         keys = elem.keys()
         return {
             k: _default_collate_impl([d[k] for d in batch], _current_depth + 1)
@@ -841,6 +857,37 @@ class _PrefetchWorker:
                 self._queue.get_nowait()
         except Empty:
             pass
+
+    def reset_for_new_epoch(self, iterable, dataset=None):
+        """FF.20: prepare a persistent num_workers=1 worker for a new epoch.
+
+        Drains any leftover items from the previous epoch, swaps in the
+        fresh batch generator for the new epoch, and re-arms the
+        cooperative-stop flag. The worker thread is restarted so the
+        new ``iterable`` is consumed under the same ``_PrefetchWorker``
+        identity (the same WorkerInfo and worker_init_fn semantics
+        apply across epochs).
+        """
+        # Stop the previous epoch's producer thread cooperatively and
+        # wait for it to finish before swapping the iterable.
+        self._alive = False
+        try:
+            while True:
+                self._queue.get_nowait()
+        except Empty:
+            pass
+        if self._thread.is_alive():
+            self._thread.join(timeout=5.0)
+        # Reset state for the new epoch.
+        self._iterable = iterable
+        if dataset is not None:
+            self._dataset = dataset
+        # Re-create the queue so any stale sentinel from the previous
+        # epoch is discarded.
+        self._queue = Queue(maxsize=self._queue.maxsize)
+        self._alive = True
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
 
     def __del__(self):
         try:
@@ -1242,6 +1289,14 @@ class DataLoader(Generic[T_co]):
         self.rank = rank
         self.world_size = world_size
         self._multiprocess_loader: Optional[_MultiProcessLoader] = None
+        # FF.20: persistent single-thread worker for num_workers=1 +
+        # persistent_workers=True. Pre-fix, every __iter__ call built a
+        # fresh _PrefetchWorker even when persistent_workers=True, so
+        # the persistent_workers flag was silently ignored on the
+        # single-worker fast path. We initialise lazily on first
+        # __iter__ so the worker_init_fn / WorkerInfo state is only
+        # created when actually iterating.
+        self._persistent_worker: Optional[_PrefetchWorker] = None
 
         is_iterable = isinstance(dataset, IterableDataset)
 
@@ -1296,6 +1351,30 @@ class DataLoader(Generic[T_co]):
             # Audit item Z.15: forward worker_init_fn and dataset so the
             # thread populates WorkerInfo and runs user-supplied init code,
             # matching the multi-process path's contract.
+            #
+            # FF.20: when ``persistent_workers=True`` reuse a single
+            # ``_PrefetchWorker`` across epochs. The legacy code always
+            # built a fresh worker per __iter__ call, so the
+            # ``persistent_workers`` flag was silently dropped on this
+            # fast path (worker_init_fn would re-run every epoch). The
+            # persistent worker is now created on first iteration and
+            # reset (queue drained, batch sampler re-iterated) for each
+            # subsequent epoch.
+            if self.persistent_workers:
+                if self._persistent_worker is None:
+                    self._persistent_worker = _PrefetchWorker(
+                        self._generate_batches(),
+                        queue_size=self.prefetch_factor,
+                        worker_init_fn=self.worker_init_fn,
+                        dataset=self.dataset,
+                    )
+                else:
+                    self._persistent_worker.reset_for_new_epoch(
+                        self._generate_batches(),
+                        dataset=self.dataset,
+                    )
+                return _wrap_pin_memory(self._persistent_worker, self.pin_memory)
+
             it = _PrefetchWorker(
                 self._generate_batches(),
                 queue_size=self.prefetch_factor,
@@ -1326,9 +1405,30 @@ class DataLoader(Generic[T_co]):
             return len(self.batch_sampler)
         raise TypeError("DataLoader with IterableDataset has no len()")
 
-    def __del__(self):
+    def close(self) -> None:
+        """FF.20: release the persistent single-thread worker (if any)
+        and tear down the multi-process worker pool.
+
+        Safe to call multiple times. Called automatically by ``__del__``
+        but exposed so user code can release worker resources eagerly
+        (e.g. between training and evaluation phases).
+        """
+        if self._persistent_worker is not None:
+            try:
+                self._persistent_worker.close()
+            except Exception:
+                pass
+            self._persistent_worker = None
         if self._multiprocess_loader is not None:
             self._multiprocess_loader._stop_workers()
+            self._multiprocess_loader = None
+
+    def __del__(self):
+        try:
+            self.close()
+        except Exception:
+            # Destructors must not raise.
+            pass
 
 
 # ---------------------------------------------------------------------------

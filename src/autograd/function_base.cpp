@@ -343,6 +343,17 @@ auto Function::backward_with_variables(std::vector<Variable> grad_outputs) -> st
                 "to fall through with disconnected gradient graph.");
         case HigherOrderGradMode::Warn: {
             auto count = g_higher_order_disconnection_count.fetch_add(1, std::memory_order_relaxed) + 1;
+            // FF.5: full suppression for production via env var.  Setting
+            // TENZOR_GRADIENT_MONITOR_QUIET (any non-empty value) silences the
+            // warning entirely; the atomic counter above still ticks so
+            // `higher_order_disconnection_count()` reports the true total.
+            // Cached once at first hit to avoid a getenv() syscall on every
+            // backward of every step.
+            static const bool quiet =
+                (std::getenv("TENZOR_GRADIENT_MONITOR_QUIET") != nullptr);
+            if (quiet) {
+                break;
+            }
             // CC.7: rate-limit the warning to avoid unbounded log spam when a
             // training loop hits a non-higher-order op every step (which is
             // typical — Warn-mode is meant to be a soft signal, not a flood).

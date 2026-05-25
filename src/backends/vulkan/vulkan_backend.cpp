@@ -546,6 +546,11 @@ void VulkanBackend::createLogicalDevices() {
         ctx.canPreserveDenormsF32 = canPreserveDenormsF32;
         ctx.hasAtomicInt64 = hasAtomicInt64;
         ctx.hasAtomicFloat = hasAtomicFloat;
+        // FF.8: record shaderBufferFloat64AtomicAdd separately so the F64
+        // backward dispatchers that emit `atomicAdd(double)` can gate on it
+        // without conflating with the F32 atomic-add feature above.
+        ctx.hasAtomicFloat64 = hasAtomicFloat &&
+            (atomicFloatFeatures.shaderBufferFloat64AtomicAdd == VK_TRUE);
 
         // Query subgroup properties for subgroup arithmetic support
         {
@@ -884,6 +889,13 @@ auto VulkanBackend::has_atomic_int64(int32_t device_id) const -> bool {
         return false;
     }
     return devices_[device_id].hasAtomicInt64;
+}
+
+auto VulkanBackend::has_atomic_float64(int32_t device_id) const -> bool {
+    if (device_id < 0 || static_cast<size_t>(device_id) >= devices_.size()) {
+        return false;
+    }
+    return devices_[device_id].hasAtomicFloat64;
 }
 
 auto VulkanBackend::recommended_workgroup_2d(GpuVendor vendor, OpKind op)
@@ -1353,6 +1365,29 @@ void ensure_atomic_int64_supported(int32_t device_id, const char* op_name) {
         throw std::runtime_error(
             std::string("[Vulkan ") + (op_name ? op_name : "?") +
             "] requires VK_EXT_shader_atomic_int64 (not supported on this device)");
+    }
+}
+
+// FF.8: Capability gate for shaders that perform `atomicAdd(double)` on an
+// SSBO (F64 backward dispatchers using the direct double-atomicAdd path).
+// Queries devices_[device_id].hasAtomicFloat64, which is set during device
+// init from VkPhysicalDeviceShaderAtomicFloatFeaturesEXT::
+// shaderBufferFloat64AtomicAdd. Mirrors ensure_atomic_float_supported
+// (U.5/U.6/U.7).
+void ensure_atomic_float64_storage_supported(int32_t device_id, const char* op_name) {
+    auto* backend = DispatchTableRegistry::get_backend(Device::Type::Vulkan);
+    if (backend == nullptr) {
+        throw std::runtime_error(
+            std::string("[Vulkan ") + (op_name ? op_name : "?") +
+            "] Vulkan backend is not initialised; cannot query "
+            "VK_EXT_shader_atomic_float (F64 buffer atomic-add)");
+    }
+    auto* vk = static_cast<VulkanBackend*>(backend);
+    if (!vk->has_atomic_float64(device_id)) {
+        throw std::runtime_error(
+            std::string("[Vulkan ") + (op_name ? op_name : "?") +
+            "] requires VK_EXT_shader_atomic_float with "
+            "shaderBufferFloat64AtomicAdd (not supported on this device)");
     }
 }
 

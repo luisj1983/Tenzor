@@ -20,6 +20,7 @@
 #include <tenzor/tenzor.hpp>
 #include "parity_test_utils.hpp"
 #include "golden_util.hpp"
+#include "../multi_backend_dtype_fixture.hpp"  // FF.28: SKIP_WITH_REASON
 #include <cstdlib>
 
 using namespace tenzor;
@@ -112,7 +113,8 @@ TEST_F(SkipPolicyMetaTest, SkipDropsBackendsFromGetAvailable) {
     for (auto& d : all) all_names.insert(backend_name(d));
 
     if (all.size() <= 1) {
-        GTEST_SKIP() << "Only one backend available — nothing to skip from.";
+        SKIP_WITH_REASON(SkipReason::BackendUnavailable,
+                         "Only one backend available — nothing to skip from.");
     }
 
     // Pick one non-CPU backend to skip via env.
@@ -196,7 +198,8 @@ TEST_F(SkipPolicyMetaTest, Macro_PassesThrough_WhenMultiBackendAvailable) {
     ScopedEnv skip("TENZOR_SKIP_BACKENDS", nullptr);
     ScopedEnv req("TENZOR_REQUIRE_MULTI_BACKEND", nullptr);
     if (get_available_backends().size() < 2) {
-        GTEST_SKIP() << "Single-backend host — pass-through assertion vacuous.";
+        SKIP_WITH_REASON(SkipReason::BackendUnavailable,
+                         "Single-backend host — pass-through assertion vacuous.");
     }
     bool reached = false;
     REQUIRE_MULTI_BACKEND_OR_SKIP("macro-level pass-through path");

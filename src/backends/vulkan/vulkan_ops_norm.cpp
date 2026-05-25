@@ -439,6 +439,13 @@ auto VulkanBackend::dispatchBatchNorm2dMeanVar(const Tensor& input) -> std::pair
     // Select shader based on dtype
     std::string shader_name = "batchnorm2d_mean_var";
     if (input.dtype() == DType::Float64) {
+        // FF.8: batchnorm2d_mean_var_f64.comp issues `atomicAdd(double)` on
+        // SSBO storage, which requires VK_EXT_shader_atomic_float +
+        // shaderBufferFloat64AtomicAdd.  Gate so unsupported devices fail
+        // fast with a readable diagnostic instead of an opaque SPIR-V
+        // validation error at pipeline creation.
+        vulkan::ensure_atomic_float64_storage_supported(
+            device_id, "BatchNorm2dMeanVar");
         shader_name = "batchnorm2d_mean_var_f64";
     } else if (input.dtype() == DType::Float16) {
         shader_name = "batchnorm2d_mean_var_f16";

@@ -9,6 +9,7 @@
 #include <tenzor/tenzor.hpp>
 #include <cmath>
 #include <vector>
+#include "../multi_backend_dtype_fixture.hpp"  // FF.28: SKIP_WITH_REASON
 
 using namespace tenzor;
 
@@ -27,7 +28,8 @@ protected:
             rocm_available = true;
         } catch (...) {
             rocm_available = false;
-            GTEST_SKIP() << "ROCm device not available, skipping tests";
+            SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable,
+                             "ROCm device not available, skipping tests");
         }
     }
 
@@ -39,7 +41,7 @@ protected:
 // ============================================================================
 
 TEST_F(ROCmReductionTest, SumFullReduction) {
-    if (!rocm_available) GTEST_SKIP();
+    if (!rocm_available) SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "ROCm device not available");
 
     auto rocm_device = Device::rocm(0);
 
@@ -61,7 +63,7 @@ TEST_F(ROCmReductionTest, SumFullReduction) {
 }
 
 TEST_F(ROCmReductionTest, MeanFullReduction) {
-    if (!rocm_available) GTEST_SKIP();
+    if (!rocm_available) SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "ROCm device not available");
 
     auto rocm_device = Device::rocm(0);
 
@@ -83,7 +85,7 @@ TEST_F(ROCmReductionTest, MeanFullReduction) {
 }
 
 TEST_F(ROCmReductionTest, MaxFullReduction) {
-    if (!rocm_available) GTEST_SKIP();
+    if (!rocm_available) SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "ROCm device not available");
 
     auto rocm_device = Device::rocm(0);
 
@@ -105,7 +107,7 @@ TEST_F(ROCmReductionTest, MaxFullReduction) {
 }
 
 TEST_F(ROCmReductionTest, MinFullReduction) {
-    if (!rocm_available) GTEST_SKIP();
+    if (!rocm_available) SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "ROCm device not available");
 
     auto rocm_device = Device::rocm(0);
 
@@ -131,7 +133,7 @@ TEST_F(ROCmReductionTest, MinFullReduction) {
 // ============================================================================
 
 TEST_F(ROCmReductionTest, SumAlongDimension) {
-    if (!rocm_available) GTEST_SKIP();
+    if (!rocm_available) SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "ROCm device not available");
 
     auto rocm_device = Device::rocm(0);
 
@@ -161,7 +163,7 @@ TEST_F(ROCmReductionTest, SumAlongDimension) {
 }
 
 TEST_F(ROCmReductionTest, MeanAlongDimension) {
-    if (!rocm_available) GTEST_SKIP();
+    if (!rocm_available) SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "ROCm device not available");
 
     auto rocm_device = Device::rocm(0);
 
@@ -183,7 +185,7 @@ TEST_F(ROCmReductionTest, MeanAlongDimension) {
 }
 
 TEST_F(ROCmReductionTest, MaxAlongDimension) {
-    if (!rocm_available) GTEST_SKIP();
+    if (!rocm_available) SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "ROCm device not available");
 
     auto rocm_device = Device::rocm(0);
 
@@ -205,7 +207,7 @@ TEST_F(ROCmReductionTest, MaxAlongDimension) {
 }
 
 TEST_F(ROCmReductionTest, MinAlongDimension) {
-    if (!rocm_available) GTEST_SKIP();
+    if (!rocm_available) SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "ROCm device not available");
 
     auto rocm_device = Device::rocm(0);
 
@@ -231,7 +233,7 @@ TEST_F(ROCmReductionTest, MinAlongDimension) {
 // ============================================================================
 
 TEST_F(ROCmReductionTest, SumKeepDim) {
-    if (!rocm_available) GTEST_SKIP();
+    if (!rocm_available) SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "ROCm device not available");
 
     auto rocm_device = Device::rocm(0);
 
@@ -261,7 +263,7 @@ TEST_F(ROCmReductionTest, SumKeepDim) {
 // ============================================================================
 
 TEST_F(ROCmReductionTest, LargeTensorSum) {
-    if (!rocm_available) GTEST_SKIP();
+    if (!rocm_available) SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "ROCm device not available");
 
     auto rocm_device = Device::rocm(0);
 
@@ -286,7 +288,7 @@ TEST_F(ROCmReductionTest, LargeTensorSum) {
 // ============================================================================
 
 TEST_F(ROCmReductionTest, SumFloat64) {
-    if (!rocm_available) GTEST_SKIP();
+    if (!rocm_available) SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "ROCm device not available");
 
     auto rocm_device = Device::rocm(0);
 
@@ -305,7 +307,7 @@ TEST_F(ROCmReductionTest, SumFloat64) {
 }
 
 TEST_F(ROCmReductionTest, SumInt32) {
-    if (!rocm_available) GTEST_SKIP();
+    if (!rocm_available) SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "ROCm device not available");
 
     auto rocm_device = Device::rocm(0);
 

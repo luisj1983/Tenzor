@@ -5,6 +5,7 @@
 #include <stdexcept>
 #include <cstring>
 #include <sstream>
+#include <mutex>
 
 namespace tenzor {
 namespace numpy {
@@ -14,27 +15,36 @@ namespace {
 // Try to get ml_dtypes.bfloat16 numpy dtype. Returns the dtype object on
 // success, or py::none() if ml_dtypes is not installed.
 //
-// CC.12: the cache is positive-only — once we resolve the bfloat16 dtype
-// from a successful import, it never changes for the life of the process,
-// so we cache it. But a failed import is NOT cached: ml_dtypes may have
-// been installed after the first call (e.g. on-demand via subprocess
-// during a JAX/Keras coexistence test), and the previous static `tried`
-// flag would lock us into the "raise ValueError" branch forever even
-// after a successful install. Re-attempt import on every call where we
-// don't already have the dtype.
+// FF.19: the lazy probe is serialised through ``std::once_flag`` so two
+// Python threads (each released the GIL at some point during a CPU
+// transfer and then re-acquired it) cannot race on initialising the
+// static cache. ``std::call_once`` guarantees the probe body runs
+// exactly once across all threads; the cached ``py::object`` is then
+// safe to read concurrently because subsequent calls only observe the
+// resolved value.
+//
+// Note: this trades the previous CC.12 "retry on failure" behaviour for
+// thread safety. ml_dtypes must therefore be installed *before* the
+// first BFloat16 numpy interop call (a one-line ``pip install
+// ml_dtypes`` at process start); subsequent installs in the same
+// process will not be picked up. This matches PyTorch's behaviour and
+// avoids the race where two threads simultaneously enter the import
+// path and assign to ``cached``.
 auto get_ml_dtypes_bfloat16() -> py::object {
-    static py::object cached = py::none();
-    if (cached.is_none()) {
+    static std::once_flag probe_flag;
+    static py::object cached_bfloat16_dtype = py::none();
+    std::call_once(probe_flag, []() {
         try {
             auto ml_dtypes = py::module_::import("ml_dtypes");
-            cached = py::dtype::from_args(ml_dtypes.attr("bfloat16"));
+            cached_bfloat16_dtype = py::dtype::from_args(ml_dtypes.attr("bfloat16"));
         } catch (const py::error_already_set&) {
-            // ml_dtypes not installed at this call — leave cached as
-            // py::none() so the next call re-attempts the import.
-            // Clear any pending Python error so it doesn't leak.
+            // ml_dtypes not installed — cached stays py::none(). The
+            // emit-side fallback in apply_bfloat16_dtype() will surface
+            // a typed ValueError when the user actually tries to expose
+            // a BFloat16 tensor to NumPy.
         }
-    }
-    return cached;
+    });
+    return cached_bfloat16_dtype;
 }
 
 // If the tensor dtype is BFloat16, reinterpret a uint16 NumPy array as

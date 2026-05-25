@@ -9,9 +9,11 @@
 
 #pragma once
 
+#include <filesystem>
 #include <functional>
 #include <memory>
 #include <string>
+#include <unistd.h>
 #include "rendezvous.hpp"
 #include "health_monitor.hpp"
 #include "../../nn/module.hpp"
@@ -42,7 +44,13 @@ using CheckpointFunction = std::function<void(const std::string& path, int32_t r
 struct ElasticConfig {
     RendezvousConfig rendezvous;
     HealthMonitorConfig health;
-    std::string checkpoint_dir{"/tmp/tenzor_elastic"};
+    // FF.25: per-pid temp path. The previous hardcoded "/tmp/tenzor_elastic"
+    // raced when two parallel test processes or two elastic trainer instances
+    // shared a host (CI matrix; rerun on top of a stale dir). Mirrors the
+    // logging/safetensors per-pid pattern.
+    std::string checkpoint_dir{
+        (std::filesystem::temp_directory_path() /
+         ("tenzor_elastic_" + std::to_string(::getpid()))).string()};
     int32_t max_restarts{3};           ///< Maximum recovery attempts
     bool auto_checkpoint{true};        ///< Checkpoint on failure detection
     /// User-provided checkpoint callback (audit J15). When `auto_checkpoint`
