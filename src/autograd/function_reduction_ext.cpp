@@ -605,8 +605,13 @@ auto LogSumExpBackward::backward(std::vector<Tensor> grad_outputs) -> std::vecto
 }
 
 auto LogSumExpBackward::backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> {
-    // logsumexp backward: grad * softmax(input, dim)
-    // softmax = exp(input - logsumexp) is a constant; compute at Tensor level
+    // logsumexp backward: grad * softmax(input, dim) where softmax = exp(input - lse)
+    // GG.1 / HH.10: on the higher-order path, recompute the softmax via the
+    // Variable-level ops sourced from saved_variables_[0] (the input Variable
+    // with its grad_fn chain). The previous code built softmax from raw saved
+    // tensors and wrapped as `Variable(..., false)`, severing the chain — so
+    // double-backward through cross-entropy (whose kernel is logsumexp) lost
+    // the softmax-Jacobian path.
     const auto& input = saved_tensors_[0];
     const auto& lse_out = saved_tensors_[1];
     auto input_shape_vec = std::vector<int64_t>(input.shape().begin(), input.shape().end());
@@ -615,13 +620,25 @@ auto LogSumExpBackward::backward_with_variables(std::vector<Variable> grad_outpu
     if (dim < 0) dim += input.shape().size();
     bool keepdim = (lse_out.ndim() == input.ndim());
 
-    auto lse_expanded = lse_out;
-    if (!keepdim) {
-        lse_expanded = unsqueeze(lse_out, dim);
+    Variable softmax_var;
+    if (has_saved_variables()) {
+        // Variable-level: lse = logsumexp(input, dim, keepdim); softmax =
+        // exp(input - expand(lse)). grad_fn chains back through input.
+        auto lse_v = tenzor::logsumexp(saved_variables_[0], dim, keepdim);
+        if (!keepdim) {
+            lse_v = tenzor::unsqueeze(lse_v, dim);
+        }
+        lse_v = tenzor::expand(lse_v, input_shape_vec);
+        softmax_var = tenzor::exp(saved_variables_[0] - lse_v);
+    } else {
+        auto lse_expanded = lse_out;
+        if (!keepdim) {
+            lse_expanded = unsqueeze(lse_out, dim);
+        }
+        lse_expanded = expand(lse_expanded, input_shape_vec);
+        auto softmax_val = exp(sub(input, lse_expanded));
+        softmax_var = Variable(softmax_val, false);
     }
-    lse_expanded = expand(lse_expanded, input_shape_vec);
-    auto softmax_val = exp(sub(input, lse_expanded));
-    Variable softmax_var(softmax_val, false);
 
     // Expand grad at Variable level
     auto grad_var = grad_outputs[0];

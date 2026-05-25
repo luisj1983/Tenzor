@@ -47,7 +47,16 @@ auto SqrtBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Ten
 }
 
 auto SqrtBackward::backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> {
-    Variable output_var(saved_tensors_[0], false);
+    // GG.1: when create_graph was active during forward, the input Variable
+    // is in saved_variables_[0]; recompute sqrt on the live graph so the
+    // chain back to the input is preserved. Falls back to the saved output
+    // Tensor (severs second-derivative) only when saved_variables_ is empty.
+    Variable output_var;
+    if (has_saved_variables()) {
+        output_var = tenzor::sqrt(saved_variables_[0]);
+    } else {
+        output_var = Variable(saved_tensors_[0], false);
+    }
     auto two_output = output_var * 2.0;
     return {grad_outputs[0] / two_output};
 }
@@ -85,25 +94,34 @@ auto PowBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tens
 
 auto PowBackward::backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> {
     // pow backward: grad * exponent * pow(input, exponent - 1)
-    const auto& input = saved_tensors_[0];
+    const auto& input_tensor = saved_tensors_[0];
     double exp_val = extract_scalar_param(saved_tensors_[1]);
 
     if (exp_val == 0.0) {
-        return {Variable(zeros(std::vector<int64_t>(input.shape().begin(), input.shape().end()),
-                               input.dtype(), input.device()), false)};
+        return {Variable(zeros(std::vector<int64_t>(input_tensor.shape().begin(), input_tensor.shape().end()),
+                               input_tensor.dtype(), input_tensor.device()), false)};
     }
     if (exp_val == 1.0) {
         return {grad_outputs[0]};
     }
 
-    // Stay in Tensor-land for the pow so we can use the `double` overload
-    // (`tenzor::pow(Tensor, double)` — see include/tenzor/ops/math.hpp). The
-    // Variable overload only accepts `float`, which would silently narrow
-    // 23 mantissa bits in the Float64 path. `input` has `requires_grad=false`
-    // so dropping the Variable wrap costs no graph connectivity.
-    auto pow_term_t = tenzor::pow(input, exp_val - 1.0);
-    Variable pow_term(pow_term_t, false);
-    auto scaled = pow_term * exp_val;
+    // GG.1: route the inner pow through the Variable channel when
+    // create_graph was active. Variable-level tenzor::pow takes a `float`
+    // exponent (see ops.hpp); the precision-narrowing concern (the
+    // pre-existing Float64 path used the Tensor `double` overload) still
+    // applies, so keep the Tensor recompute as the fallback and use the
+    // Variable-level overload only on the higher-order path. The
+    // saved input Variable's grad_fn chains back through the upstream
+    // forward graph for correct second derivatives.
+    Variable scaled;
+    if (has_saved_variables()) {
+        auto pow_term_v = tenzor::pow(saved_variables_[0], exp_val - 1.0);
+        scaled = pow_term_v * exp_val;
+    } else {
+        auto pow_term_t = tenzor::pow(input_tensor, exp_val - 1.0);
+        Variable pow_term(pow_term_t, false);
+        scaled = pow_term * exp_val;
+    }
     return {grad_outputs[0] * scaled};
 }
 
@@ -122,7 +140,13 @@ auto ReciprocalBackward::backward(std::vector<Tensor> grad_outputs) -> std::vect
 }
 
 auto ReciprocalBackward::backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> {
-    Variable output_var(saved_tensors_[0], false);
+    // GG.1: recompute output from saved input Variable on the higher-order path.
+    Variable output_var;
+    if (has_saved_variables()) {
+        output_var = tenzor::reciprocal(saved_variables_[0]);
+    } else {
+        output_var = Variable(saved_tensors_[0], false);
+    }
     return {grad_outputs[0] * tenzor::neg(output_var * output_var)};
 }
 
@@ -140,7 +164,11 @@ auto SinBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tens
 
 auto SinBackward::backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> {
     // sin backward: grad * cos(input)
-    Variable input_var(saved_tensors_[0], false);
+    // GG.1: prefer the saved input Variable so the graph chains back through
+    // the upstream forward; fall back to a fresh non-grad Variable wrap when
+    // create_graph was not active during forward.
+    Variable input_var = has_saved_variables() ? saved_variables_[0]
+                                                : Variable(saved_tensors_[0], false);
     return {grad_outputs[0] * tenzor::cos(input_var)};
 }
 
@@ -158,7 +186,9 @@ auto CosBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tens
 
 auto CosBackward::backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> {
     // cos backward: grad * (-sin(input))
-    Variable input_var(saved_tensors_[0], false);
+    // GG.1: see SinBackward comment.
+    Variable input_var = has_saved_variables() ? saved_variables_[0]
+                                                : Variable(saved_tensors_[0], false);
     return {grad_outputs[0] * tenzor::neg(tenzor::sin(input_var))};
 }
 
@@ -179,8 +209,15 @@ auto TanBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tens
 
 auto TanBackward::backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> {
     // tan backward: grad * (1 + tan(x)^2) = grad * sec^2(x)
-    // saved_tensors_[0] = tan(x) (output)
-    Variable output_var(saved_tensors_[0], false);
+    // GG.1: recompute tan from saved input Variable on the higher-order path
+    // so grad_fn chains back through the input; fall back to the saved
+    // output Tensor when create_graph was not active during forward.
+    Variable output_var;
+    if (has_saved_variables()) {
+        output_var = tenzor::tan(saved_variables_[0]);
+    } else {
+        output_var = Variable(saved_tensors_[0], false);
+    }
     auto sec_sq = output_var * output_var + 1.0;
     return {grad_outputs[0] * sec_sq};
 }
@@ -207,7 +244,9 @@ auto AsinBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Ten
 
 auto AsinBackward::backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> {
     // asin backward: grad / sqrt(1 - x^2)
-    Variable input_var(saved_tensors_[0], false);
+    // GG.1: prefer saved input Variable so the graph chains back.
+    Variable input_var = has_saved_variables() ? saved_variables_[0]
+                                                : Variable(saved_tensors_[0], false);
     auto one_tensor = ones(std::vector<int64_t>(saved_tensors_[0].shape().begin(),
                                                  saved_tensors_[0].shape().end()),
                            saved_tensors_[0].dtype(), saved_tensors_[0].device());
@@ -245,7 +284,9 @@ auto AcosBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Ten
 
 auto AcosBackward::backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> {
     // acos backward: -grad / sqrt(1 - x^2)
-    Variable input_var(saved_tensors_[0], false);
+    // GG.1: see AsinBackward.
+    Variable input_var = has_saved_variables() ? saved_variables_[0]
+                                                : Variable(saved_tensors_[0], false);
     auto one_tensor = ones(std::vector<int64_t>(saved_tensors_[0].shape().begin(),
                                                  saved_tensors_[0].shape().end()),
                            saved_tensors_[0].dtype(), saved_tensors_[0].device());
@@ -278,7 +319,9 @@ auto AtanBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Ten
 
 auto AtanBackward::backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> {
     // atan backward: grad / (1 + x^2)
-    Variable input_var(saved_tensors_[0], false);
+    // GG.1: see SinBackward.
+    Variable input_var = has_saved_variables() ? saved_variables_[0]
+                                                : Variable(saved_tensors_[0], false);
     auto denom = input_var * input_var + 1.0;
     return {grad_outputs[0] / denom};
 }
@@ -297,7 +340,9 @@ auto SinhBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Ten
 
 auto SinhBackward::backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> {
     // sinh backward: grad * cosh(input)
-    Variable input_var(saved_tensors_[0], false);
+    // GG.1: see SinBackward.
+    Variable input_var = has_saved_variables() ? saved_variables_[0]
+                                                : Variable(saved_tensors_[0], false);
     return {grad_outputs[0] * tenzor::cosh(input_var)};
 }
 
@@ -315,7 +360,9 @@ auto CoshBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Ten
 
 auto CoshBackward::backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> {
     // cosh backward: grad * sinh(input)
-    Variable input_var(saved_tensors_[0], false);
+    // GG.1: see SinBackward.
+    Variable input_var = has_saved_variables() ? saved_variables_[0]
+                                                : Variable(saved_tensors_[0], false);
     return {grad_outputs[0] * tenzor::sinh(input_var)};
 }
 
@@ -343,7 +390,9 @@ auto ErfBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tens
 
 auto ErfBackward::backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> {
     // erf backward: grad * (2/sqrt(pi)) * exp(-x^2)
-    Variable input_var(saved_tensors_[0], false);
+    // GG.1: see SinBackward.
+    Variable input_var = has_saved_variables() ? saved_variables_[0]
+                                                : Variable(saved_tensors_[0], false);
     constexpr double two_over_sqrt_pi = 1.1283791670955126;
 
     auto neg_x_sq = tenzor::neg(input_var * input_var);
@@ -371,7 +420,9 @@ auto ErfcBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Ten
 
 auto ErfcBackward::backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> {
     // erfc backward: grad * (-2/sqrt(pi)) * exp(-x^2)
-    Variable input_var(saved_tensors_[0], false);
+    // GG.1: see SinBackward.
+    Variable input_var = has_saved_variables() ? saved_variables_[0]
+                                                : Variable(saved_tensors_[0], false);
     constexpr double neg_two_over_sqrt_pi = -1.1283791670955126;
 
     auto neg_x_sq = tenzor::neg(input_var * input_var);
@@ -395,7 +446,13 @@ auto ErfInvBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<T
 }
 
 auto ErfInvBackward::backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> {
-    Variable output_var(saved_tensors_[0], false);
+    // GG.1: recompute erfinv from saved input Variable on the higher-order path.
+    Variable output_var;
+    if (has_saved_variables()) {
+        output_var = tenzor::erfinv(saved_variables_[0]);
+    } else {
+        output_var = Variable(saved_tensors_[0], false);
+    }
     constexpr double half_sqrt_pi = 0.8862269254527580;
     auto out_sq = output_var * output_var;
     auto exp_term = tenzor::exp(out_sq);
@@ -417,7 +474,9 @@ auto GammaBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Te
 }
 
 auto GammaBackward::backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> {
-    Variable input_var(saved_tensors_[0], false);
+    // GG.1: see SinBackward.
+    Variable input_var = has_saved_variables() ? saved_variables_[0]
+                                                : Variable(saved_tensors_[0], false);
     auto gamma_val = tenzor::gamma(input_var);
     auto digamma_val = tenzor::digamma(input_var);
     return {grad_outputs[0] * gamma_val * digamma_val};
@@ -436,7 +495,9 @@ auto LgammaBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<T
 }
 
 auto LgammaBackward::backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> {
-    Variable input_var(saved_tensors_[0], false);
+    // GG.1: see SinBackward.
+    Variable input_var = has_saved_variables() ? saved_variables_[0]
+                                                : Variable(saved_tensors_[0], false);
     return {grad_outputs[0] * tenzor::digamma(input_var)};
 }
 
@@ -453,7 +514,9 @@ auto DigammaBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<
 }
 
 auto DigammaBackward::backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> {
-    Variable input_var(saved_tensors_[0], false);
+    // GG.1: see SinBackward.
+    Variable input_var = has_saved_variables() ? saved_variables_[0]
+                                                : Variable(saved_tensors_[0], false);
     return {grad_outputs[0] * tenzor::polygamma(1, input_var)};
 }
 
@@ -470,7 +533,9 @@ auto BesselI0Backward::backward(std::vector<Tensor> grad_outputs) -> std::vector
 }
 
 auto BesselI0Backward::backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> {
-    Variable input_var(saved_tensors_[0], false);
+    // GG.1: see SinBackward.
+    Variable input_var = has_saved_variables() ? saved_variables_[0]
+                                                : Variable(saved_tensors_[0], false);
     return {grad_outputs[0] * tenzor::bessel_i1(input_var)};
 }
 
@@ -491,7 +556,9 @@ auto BesselI1Backward::backward(std::vector<Tensor> grad_outputs) -> std::vector
 }
 
 auto BesselI1Backward::backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> {
-    Variable input_var(saved_tensors_[0], false);
+    // GG.1: see SinBackward.
+    Variable input_var = has_saved_variables() ? saved_variables_[0]
+                                                : Variable(saved_tensors_[0], false);
     auto i0 = tenzor::bessel_i0(input_var);
     auto i1 = tenzor::bessel_i1(input_var);
     return {grad_outputs[0] * (i0 - i1 / input_var)};
@@ -522,7 +589,9 @@ auto SincBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Ten
 }
 
 auto SincBackward::backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> {
-    Variable input_var(saved_tensors_[0], false);
+    // GG.1: see SinBackward.
+    Variable input_var = has_saved_variables() ? saved_variables_[0]
+                                                : Variable(saved_tensors_[0], false);
     auto pi_x = input_var * M_PI;
     auto cos_px = tenzor::cos(pi_x);
     auto sin_px = tenzor::sin(pi_x);
@@ -553,7 +622,9 @@ auto Log2Backward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Ten
 
 auto Log2Backward::backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> {
     constexpr double ln2 = 0.6931471805599453;
-    Variable input_var(saved_tensors_[0], false);
+    // GG.1: see SinBackward.
+    Variable input_var = has_saved_variables() ? saved_variables_[0]
+                                                : Variable(saved_tensors_[0], false);
     return {grad_outputs[0] / (input_var * ln2)};
 }
 
@@ -575,7 +646,9 @@ auto Log10Backward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Te
 
 auto Log10Backward::backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> {
     constexpr double ln10 = 2.302585092994046;
-    Variable input_var(saved_tensors_[0], false);
+    // GG.1: see SinBackward.
+    Variable input_var = has_saved_variables() ? saved_variables_[0]
+                                                : Variable(saved_tensors_[0], false);
     return {grad_outputs[0] / (input_var * ln10)};
 }
 
@@ -594,7 +667,9 @@ auto Log1pBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Te
 
 auto Log1pBackward::backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> {
     // log1p backward: grad / (1 + x)
-    Variable input_var(saved_tensors_[0], false);
+    // GG.1: see SinBackward.
+    Variable input_var = has_saved_variables() ? saved_variables_[0]
+                                                : Variable(saved_tensors_[0], false);
     return {grad_outputs[0] / (input_var + 1.0)};
 }
 
@@ -616,7 +691,13 @@ auto Exp2Backward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Ten
 
 auto Exp2Backward::backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> {
     constexpr double ln2 = 0.6931471805599453;
-    Variable output_var(saved_tensors_[0], false);
+    // GG.1: recompute exp2 from saved input Variable on the higher-order path.
+    Variable output_var;
+    if (has_saved_variables()) {
+        output_var = tenzor::exp2(saved_variables_[0]);
+    } else {
+        output_var = Variable(saved_tensors_[0], false);
+    }
     return {grad_outputs[0] * (output_var * ln2)};
 }
 
@@ -634,7 +715,9 @@ auto Expm1Backward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Te
 
 auto Expm1Backward::backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> {
     // expm1 backward: grad * exp(input)
-    Variable input_var(saved_tensors_[0], false);
+    // GG.1: see SinBackward.
+    Variable input_var = has_saved_variables() ? saved_variables_[0]
+                                                : Variable(saved_tensors_[0], false);
     return {grad_outputs[0] * tenzor::exp(input_var)};
 }
 
@@ -663,8 +746,16 @@ auto Atan2Backward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Te
 
 auto Atan2Backward::backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> {
     // atan2 backward: grad_y = grad * x / (x^2 + y^2), grad_x = grad * (-y) / (x^2 + y^2)
-    Variable y_var(saved_tensors_[0], false);
-    Variable x_var(saved_tensors_[1], false);
+    // GG.1: prefer saved input Variables so both y and x graph-chains survive.
+    Variable y_var, x_var;
+    if (has_saved_variables()) {
+        require_saved_variables(2);
+        y_var = saved_variables_[0];
+        x_var = saved_variables_[1];
+    } else {
+        y_var = Variable(saved_tensors_[0], false);
+        x_var = Variable(saved_tensors_[1], false);
+    }
     auto denom = x_var * x_var + y_var * y_var;
     auto grad_y = reduce_grad_var_for_broadcasting(grad_outputs[0] * x_var / denom, input_shape_y_);
     auto grad_x = reduce_grad_var_for_broadcasting(grad_outputs[0] * tenzor::neg(y_var) / denom, input_shape_x_);

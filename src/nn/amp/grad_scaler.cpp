@@ -28,7 +28,7 @@ GradScaler::GradScaler(float init_scale,
     , growth_interval_(growth_interval)
     , growth_tracker_(0)
     , found_inf_nan_(false)
-    , has_unscaled_(false) {
+    , unscaled_for_() {
 
     if (init_scale <= 0.0f) {
         throw std::invalid_argument("init_scale must be positive");
@@ -54,8 +54,12 @@ auto GradScaler::scale(const Variable& loss) -> Variable {
 }
 
 auto GradScaler::unscale_(optim::Optimizer& optimizer) -> void {
-    if (has_unscaled_) {
-        return;  // Already unscaled
+    // audit-8 GG.6: track per-optimizer.  The previous single bool aliased
+    // across optimizers sharing this scaler — scaler.unscale_(opt_a) set
+    // the flag, scaler.step(opt_b) short-circuited unscale_(opt_b), and
+    // opt_b stepped with still-scaled grads.
+    if (unscaled_for_.count(&optimizer) > 0) {
+        return;  // Already unscaled for this optimizer this step
     }
 
     // audit-7 FF.16: scope the F32 unscaled-grad side-table to *this*
@@ -113,7 +117,7 @@ auto GradScaler::unscale_(optim::Optimizer& optimizer) -> void {
         }
     }
 
-    has_unscaled_ = true;
+    unscaled_for_.insert(&optimizer);  // audit-8 GG.6
 }
 
 auto GradScaler::check_inf_nan_(const optim::Optimizer& optimizer) const -> bool {
@@ -150,8 +154,8 @@ auto GradScaler::check_inf_nan_(const optim::Optimizer& optimizer) const -> bool
 }
 
 auto GradScaler::step(optim::Optimizer& optimizer) -> bool {
-    // Unscale gradients if not already done
-    if (!has_unscaled_) {
+    // Unscale gradients if not already done for this optimizer (GG.6).
+    if (unscaled_for_.count(&optimizer) == 0) {
         unscale_(optimizer);
     }
 
@@ -159,8 +163,9 @@ auto GradScaler::step(optim::Optimizer& optimizer) -> bool {
     found_inf_nan_ = check_inf_nan_(optimizer);
 
     if (found_inf_nan_) {
-        // Skip optimizer step due to overflow
-        has_unscaled_ = false;  // Reset for next iteration
+        // Skip optimizer step due to overflow.  Clear *only this optimizer's*
+        // unscale flag; siblings sharing the scaler keep their state intact.
+        unscaled_for_.erase(&optimizer);
         f32_unscaled_grads_.clear();  // Y.32: drop the side-table.
         return false;
     }
@@ -168,8 +173,8 @@ auto GradScaler::step(optim::Optimizer& optimizer) -> bool {
     // Perform optimizer step
     optimizer.step();
 
-    // Reset unscale flag for next iteration
-    has_unscaled_ = false;
+    // Reset unscale flag for this optimizer; siblings unaffected (GG.6).
+    unscaled_for_.erase(&optimizer);
     f32_unscaled_grads_.clear();  // Y.32: side-table only lives for one step.
 
     return true;
@@ -222,7 +227,7 @@ auto GradScaler::reset() -> void {
     scale_ = init_scale_;
     growth_tracker_ = 0;
     found_inf_nan_ = false;
-    has_unscaled_ = false;
+    unscaled_for_.clear();  // audit-8 GG.6
     f32_unscaled_grads_.clear();  // Y.32
 }
 
@@ -237,8 +242,8 @@ auto GradScaler::state_dict() const -> std::unordered_map<std::string, float> {
 }
 
 auto GradScaler::clip_grad_norm_(optim::Optimizer& optimizer, double max_norm, double norm_type) -> double {
-    // Ensure gradients are unscaled before clipping
-    if (!has_unscaled_) {
+    // Ensure gradients are unscaled before clipping (GG.6).
+    if (unscaled_for_.count(&optimizer) == 0) {
         unscale_(optimizer);
     }
 
@@ -270,8 +275,8 @@ auto GradScaler::clip_grad_norm_(optim::Optimizer& optimizer, double max_norm, d
 }
 
 auto GradScaler::clip_grad_value_(optim::Optimizer& optimizer, double clip_value) -> void {
-    // Ensure gradients are unscaled before clipping
-    if (!has_unscaled_) {
+    // Ensure gradients are unscaled before clipping (GG.6).
+    if (unscaled_for_.count(&optimizer) == 0) {
         unscale_(optimizer);
     }
 

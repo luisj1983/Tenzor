@@ -48,7 +48,13 @@ auto SigmoidBackward_AG::backward(std::vector<Tensor> grad_outputs) -> std::vect
 }
 
 auto SigmoidBackward_AG::backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> {
-    Variable output_var(saved_tensors_[0], false);
+    // GG.1: recompute sigmoid from saved input Variable on the higher-order path.
+    Variable output_var;
+    if (has_saved_variables()) {
+        output_var = tenzor::sigmoid(saved_variables_[0]);
+    } else {
+        output_var = Variable(saved_tensors_[0], false);
+    }
     auto one_tensor = ones(std::vector<int64_t>(saved_tensors_[0].shape().begin(), saved_tensors_[0].shape().end()),
                            saved_tensors_[0].dtype(), saved_tensors_[0].device());
     Variable one_var(one_tensor, false);
@@ -72,7 +78,13 @@ auto TanhBackward_AG::backward(std::vector<Tensor> grad_outputs) -> std::vector<
 }
 
 auto TanhBackward_AG::backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> {
-    Variable output_var(saved_tensors_[0], false);
+    // GG.1: recompute tanh from saved input Variable on the higher-order path.
+    Variable output_var;
+    if (has_saved_variables()) {
+        output_var = tenzor::tanh(saved_variables_[0]);
+    } else {
+        output_var = Variable(saved_tensors_[0], false);
+    }
     auto one_tensor = ones(std::vector<int64_t>(saved_tensors_[0].shape().begin(), saved_tensors_[0].shape().end()),
                            saved_tensors_[0].dtype(), saved_tensors_[0].device());
     Variable one_var(one_tensor, false);
@@ -133,7 +145,9 @@ auto GeluBackward::backward_with_variables(std::vector<Variable> grad_outputs) -
     // the derivation. This Variable-based path is used for higher-order
     // autograd (double backward); it must compute the same function as the
     // Tensor-based backward() above.
-    Variable input_var(saved_tensors_[0], false);
+    // GG.1: prefer the saved input Variable so the graph chains back.
+    Variable input_var = has_saved_variables() ? saved_variables_[0]
+                                                : Variable(saved_tensors_[0], false);
 
     constexpr double sqrt_2_over_pi = 0.7978845608028654;
     constexpr double coeff          = 0.044715;
@@ -206,8 +220,10 @@ auto EluBackward::backward_with_variables(std::vector<Variable> grad_outputs) ->
 
     auto ones_tensor = ones(shape_vec, input.dtype(), input.device());
 
-    // For the negative branch, use Variable ops so exp(input) is tracked
-    Variable input_var(input, false);
+    // For the negative branch, use Variable ops so exp(input) is tracked.
+    // GG.1: prefer the saved input Variable so the graph chains back.
+    Variable input_var = has_saved_variables() ? saved_variables_[0]
+                                                : Variable(input, false);
     auto neg_grad = tenzor::exp(input_var) * alpha_val;
 
     // where with non-differentiable mask: wrap Tensor constants as Variables
@@ -259,8 +275,10 @@ auto SeluBackward::backward_with_variables(std::vector<Variable> grad_outputs) -
 
     auto pos_grad_tensor = full(shape_vec, lambda, input.dtype(), input.device());
 
-    // Negative branch uses Variable exp for tracking
-    Variable input_var(input, false);
+    // Negative branch uses Variable exp for tracking.
+    // GG.1: prefer the saved input Variable so the graph chains back.
+    Variable input_var = has_saved_variables() ? saved_variables_[0]
+                                                : Variable(input, false);
     auto neg_grad = tenzor::exp(input_var) * (lambda * alpha);
 
     Variable mask_var(mask, false);
@@ -305,7 +323,9 @@ auto MishBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Ten
 auto MishBackward::backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> {
     // Mish backward: grad * (tanh(sp) + x * sigmoid(x) * (1 - tanh(sp)^2))
     // where sp = softplus(x) = log(1 + exp(x))
-    Variable input_var(saved_tensors_[0], false);
+    // GG.1: prefer the saved input Variable so the graph chains back.
+    Variable input_var = has_saved_variables() ? saved_variables_[0]
+                                                : Variable(saved_tensors_[0], false);
 
     // softplus(x) = log(1 + exp(x))
     auto exp_x = tenzor::exp(input_var);
@@ -399,7 +419,9 @@ auto SoftplusBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector
 
 auto SoftplusBackward::backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> {
     // Softplus backward: grad * sigmoid(beta * input)
-    Variable input_var(saved_tensors_[0], false);
+    // GG.1: prefer the saved input Variable so the graph chains back.
+    Variable input_var = has_saved_variables() ? saved_variables_[0]
+                                                : Variable(saved_tensors_[0], false);
     double beta_val = extract_scalar_param(saved_tensors_[1]);
 
     auto beta_x = input_var * beta_val;

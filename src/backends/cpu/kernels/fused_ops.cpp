@@ -1780,6 +1780,13 @@ auto fused_sgd_step_kernel(Tensor& param, const Tensor& grad, Tensor* momentum_b
             }
             p[i] -= static_cast<double>(lr) * grad_val;
         }
+    } else {
+        // audit-8 GG.2: F16/BF16 must be widened by the caller before reaching
+        // this kernel — silently no-op'ing was a P0 training-quality regression.
+        throw std::runtime_error(
+            "fused_sgd_step_kernel (CPU): unsupported dtype " +
+            std::string(dtype_name(param.dtype())) +
+            " — widen at caller via param.to(Float32) -> step -> cast back");
     }
 }
 
@@ -1854,6 +1861,12 @@ auto fused_adam_step_kernel(Tensor& param, const Tensor& grad,
             }
             p[i] -= step_size * m[i] / denom;
         }
+    } else {
+        // audit-8 GG.2: F16/BF16 must be widened by caller; silent no-op was a P0.
+        throw std::runtime_error(
+            "fused_adam_step_kernel (CPU): unsupported dtype " +
+            std::string(dtype_name(param.dtype())) +
+            " — widen at caller via param.to(Float32) -> step -> cast back");
     }
 }
 
@@ -1927,6 +1940,12 @@ auto fused_adam_atan2_step_kernel(Tensor& param, const Tensor& grad,
             double update = std::atan2(m[i], std::sqrt(v_hat) + static_cast<double>(eps));
             p[i] -= d_step_size * update;
         }
+    } else {
+        // audit-8 GG.2: F16/BF16 must be widened by caller; silent no-op was a P0.
+        throw std::runtime_error(
+            "fused_adam_atan2_step_kernel (CPU): unsupported dtype " +
+            std::string(dtype_name(param.dtype())) +
+            " — widen at caller via param.to(Float32) -> step -> cast back");
     }
 }
 
@@ -2000,6 +2019,12 @@ auto fused_rmsprop_step_kernel(Tensor& param, const Tensor& grad,
                 p[i] -= static_cast<double>(lr) * grad_val / avg;
             }
         }
+    } else {
+        // audit-8 GG.2: F16/BF16 must be widened by caller; silent no-op was a P0.
+        throw std::runtime_error(
+            "fused_rmsprop_step_kernel (CPU): unsupported dtype " +
+            std::string(dtype_name(param.dtype())) +
+            " — widen at caller via param.to(Float32) -> step -> cast back");
     }
 }
 
@@ -2045,6 +2070,12 @@ auto fused_adadelta_step_kernel(Tensor& param, const Tensor& grad,
             ad[i] = static_cast<double>(rho) * ad[i] + (1.0 - static_cast<double>(rho)) * delta * delta;
             p[i] -= static_cast<double>(lr) * delta;
         }
+    } else {
+        // audit-8 GG.2: F16/BF16 must be widened by caller; silent no-op was a P0.
+        throw std::runtime_error(
+            "fused_adadelta_step_kernel (CPU): unsupported dtype " +
+            std::string(dtype_name(param.dtype())) +
+            " — widen at caller via param.to(Float32) -> step -> cast back");
     }
 }
 
@@ -2084,6 +2115,12 @@ auto fused_adagrad_step_kernel(Tensor& param, const Tensor& grad,
             ss[i] += grad_val * grad_val;
             p[i] -= clr_d * grad_val / (std::sqrt(ss[i]) + static_cast<double>(eps));
         }
+    } else {
+        // audit-8 GG.2: F16/BF16 must be widened by caller; silent no-op was a P0.
+        throw std::runtime_error(
+            "fused_adagrad_step_kernel (CPU): unsupported dtype " +
+            std::string(dtype_name(param.dtype())) +
+            " — widen at caller via param.to(Float32) -> step -> cast back");
     }
 }
 

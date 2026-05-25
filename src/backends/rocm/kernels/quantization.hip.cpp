@@ -367,6 +367,12 @@ auto quantized_conv2d_hip(
     ));
 
     ROCBLAS_CHECK(rocblas_destroy_handle(handle));
+
+    // audit-8 GG.3: rocblas_gemm_ex is async on `stream` and reads col_buffer
+    // as operand A.  Without this sync, hipFree(col_buffer) may execute (and
+    // the page may be reused) before the GEMM completes, producing
+    // nondeterministic INT8 garbage.  Mirrors the sibling gemm_output free.
+    HIP_CHECK(hipStreamSynchronize(stream));
     HIP_CHECK(hipFree(col_buffer));
 
     // Step 3: Dequantize Int32 → Float32 and add bias

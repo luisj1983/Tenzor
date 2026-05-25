@@ -59,14 +59,17 @@ void writeBF16C(uint element_idx, float value) {
     uint mask = 0xFFFFu << shift;
 
     uint old_val = c[word_idx];
-    for (uint iter = 0u; iter < 64u; iter++) {
+    for (uint iter = 0u; iter < 65536u; iter++) {
         uint expected = old_val;
         uint new_val = (expected & ~mask) | (new_bits << shift);
         old_val = atomicCompSwap(c[word_idx], expected, new_val);
         if (old_val == expected) return;
     }
-    uint cur = c[word_idx];
-    c[word_idx] = (cur & ~mask) | (new_bits << shift);
+    // audit-8 GG.9: 65536-attempt cap-exhaust is unreachable in practice.
+    // The previous plain-store fallback was a P0 correctness bug — it
+    // dropped the other 16-bit BF16 lane under MxN tile contention
+    // (random ~50% output corruption at large batch sizes).  Return
+    // without storing; the cap-exhaust case is documented as unreachable.
 }
 
 void main() {

@@ -11,6 +11,7 @@
 #include <memory>
 #include <vector>
 #include <unordered_map>
+#include <unordered_set>
 #include "../../autograd/variable.hpp"
 #include "../optim/optimizer.hpp"
 #include "../utils/clip_grad.hpp"
@@ -292,7 +293,15 @@ private:
     int growth_interval_;         ///< Steps before attempting growth
     int growth_tracker_;          ///< Iterations since last overflow
     bool found_inf_nan_;          ///< Whether overflow detected in last step
-    bool has_unscaled_;           ///< Whether gradients have been unscaled
+
+    /// audit-8 GG.6: per-optimizer "unscale already happened this step"
+    /// tracking.  The previous single-bool ``has_unscaled_`` aliased across
+    /// optimizers — when one ``GradScaler`` is shared by two optimizers
+    /// (GAN, multi-head distill), ``scaler.unscale_(opt_a)`` set the flag,
+    /// ``scaler.step(opt_b)`` short-circuited ``unscale_(opt_b)``, and
+    /// opt_b stepped with still-scaled grads.  Keyed by optimizer pointer
+    /// so each optimizer's lifecycle is independent.
+    std::unordered_set<optim::Optimizer*> unscaled_for_;
 
     /// Y.32: side-table holding the F32 unscaled gradient for params whose
     /// stored grad dtype is F16/BF16. ``unscale_`` populates this with the

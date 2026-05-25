@@ -98,31 +98,48 @@ auto CumProdBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<
 auto CumProdBackward::backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> {
     // cumprod backward: flip(cumsum(flip(output * grad, dim), dim), dim) / input
     const auto& input = saved_tensors_[0];
-    const auto& output = saved_tensors_[1];
-    Variable output_var(output, false);
+    // GG.1: recompute cumprod from saved input Variable on the higher-order
+    // path so output_var carries grad_fn back through the upstream forward.
+    // The saved output Tensor (saved_tensors_[1]) is still used by the
+    // Tensor-only backward(); here we recompute to preserve the chain.
+    Variable output_var;
+    if (has_saved_variables()) {
+        output_var = tenzor::cumprod(saved_variables_[0], dim_);
+    } else {
+        output_var = Variable(saved_tensors_[1], false);
+    }
 
     auto prod_grad = output_var * grad_outputs[0];
     auto flipped = tenzor::flip(prod_grad, {dim_});
     auto cum = tenzor::cumsum(flipped, dim_);
     auto rev_cum = tenzor::flip(cum, {dim_});
 
-    // CC.3: zero-safe division at Tensor level (input is constant).
-    // Use ones (not eps) in the safe denominator — eps is dtype-dependent and
-    // distorts F16 gradients before the mask zeroes them out. See the matching
-    // comment in CumProdBackward::backward.
+    // CC.3: zero-safe division. Use ones (not eps) in the safe denominator —
+    // eps is dtype-dependent and distorts F16 gradients before the mask zeroes
+    // them out.
+    // GG.1: on the higher-order path, build the safe denominator via Variable
+    // ops sourced from saved_variables_[0] so the division's chain through
+    // the input survives create_graph.
     auto zero_t = zeros(std::vector<int64_t>(input.shape().begin(), input.shape().end()),
                         input.dtype(), input.device());
     auto ones_t = ones(std::vector<int64_t>(input.shape().begin(), input.shape().end()),
                        input.dtype(), input.device());
-    auto zero_mask = eq(input, zero_t);
-    auto safe_input = where(zero_mask, ones_t, input);
-    Variable safe_input_var(safe_input, false);
+    auto zero_mask = eq(input, zero_t);  // mask is non-differentiable
+    Variable mask_var(zero_mask, false);
+    Variable ones_var(ones_t, false);
+    Variable zero_var(zero_t, false);
+
+    Variable safe_input_var;
+    if (has_saved_variables()) {
+        safe_input_var = tenzor::where(mask_var, ones_var, saved_variables_[0]);
+    } else {
+        auto safe_input = where(zero_mask, ones_t, input);
+        safe_input_var = Variable(safe_input, false);
+    }
 
     auto result = rev_cum / safe_input_var;
 
     // Zero out positions where input was zero
-    Variable zero_var(zero_t, false);
-    Variable mask_var(zero_mask, false);
     return {tenzor::where(mask_var, zero_var, result)};
 }
 

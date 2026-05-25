@@ -88,16 +88,29 @@ void main() {
         barrier();
     }
 
-    // Write result (output is always contiguous, packed BF16)
+    // Write result (output is always contiguous, packed BF16).
+    //
+    // audit-8 GG.9: replace non-atomic read-modify-write with bounded CAS.
+    // Two invocations writing to adjacent BF16 lanes in the same uint32
+    // word would race; the loser's write was silently overwritten by
+    // the winner's full-word store.  Match the CAS retry pattern used
+    // by bmm_bf16.comp::writeBF16C; on cap-exhaust return without
+    // storing (cap-exhaust unreachable in practice).
     if (in_bounds) {
         uint out_elem = c_base + row * params.N + col;
         uint out_word = out_elem / 2;
         uint out_off = out_elem % 2;
-        uint bits = ((floatBitsToUint(sum) + 0x7FFFu + ((floatBitsToUint(sum) >> 16) & 1u)) >> 16);
-        // Read-modify-write for packed output
-        uint existing = c[out_word];
-        uint mask = 0xFFFFu << (out_off * 16);
-        uint new_word = (existing & ~mask) | (bits << (out_off * 16));
-        c[out_word] = new_word;
+        uint shift = out_off * 16u;
+        uint mask = 0xFFFFu << shift;
+        uint new_bits = ((floatBitsToUint(sum) + 0x7FFFu + ((floatBitsToUint(sum) >> 16) & 1u)) >> 16);
+
+        uint old_val = c[out_word];
+        for (uint iter = 0u; iter < 65536u; ++iter) {
+            uint expected = old_val;
+            uint new_val = (expected & ~mask) | (new_bits << shift);
+            old_val = atomicCompSwap(c[out_word], expected, new_val);
+            if (old_val == expected) return;
+        }
+        // cap-exhaust unreachable in practice; see bmm_bf16.comp note.
     }
 }

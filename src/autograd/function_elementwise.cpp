@@ -255,8 +255,11 @@ auto LogBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tens
 
 auto LogBackward::backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> {
     // d(log(x))/dx = 1/x
-    // Use Variable division for higher-order gradient tracking
-    Variable saved_input(saved_tensors_[0], false);
+    // GG.1: prefer the saved input Variable so the graph chains back through
+    // the upstream forward; fall back to a non-grad Variable wrap when
+    // create_graph was not active during forward.
+    Variable saved_input = has_saved_variables() ? saved_variables_[0]
+                                                  : Variable(saved_tensors_[0], false);
     return {grad_outputs[0] / saved_input};
 }
 
@@ -280,9 +283,16 @@ auto ExpBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tens
 }
 
 auto ExpBackward::backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> {
-    // d(exp(x))/dx = exp(x) = saved output
-    // Use Variable multiplication for higher-order gradient tracking
-    Variable saved_output(saved_tensors_[0], false);
+    // d(exp(x))/dx = exp(x).
+    // GG.1: recompute exp from saved input Variable on the higher-order path
+    // so the graph chains back to the original input. Fall back to the saved
+    // output Tensor when create_graph was not active during forward.
+    Variable saved_output;
+    if (has_saved_variables()) {
+        saved_output = tenzor::exp(saved_variables_[0]);
+    } else {
+        saved_output = Variable(saved_tensors_[0], false);
+    }
     return {grad_outputs[0] * saved_output};
 }
 
@@ -331,8 +341,14 @@ auto LogSoftmaxBackward::backward(std::vector<Tensor> grad_outputs) -> std::vect
 
 auto LogSoftmaxBackward::backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> {
     // dL/dx_i = dL/dy_i - exp(y_i) * sum_j(dL/dy_j)
-    // Use Variable operations for higher-order gradient tracking
-    Variable output_var(saved_tensors_[0], false);
+    // GG.1: recompute log_softmax(input) on the live graph when create_graph
+    // was active; fall back to the saved output Tensor otherwise.
+    Variable output_var;
+    if (has_saved_variables()) {
+        output_var = tenzor::log_softmax(saved_variables_[0], dim_);
+    } else {
+        output_var = Variable(saved_tensors_[0], false);
+    }
     auto grad_sum = tenzor::sum(grad_outputs[0], dim_, true);
     auto softmax_output = tenzor::exp(output_var);
     auto grad_input = grad_outputs[0] - softmax_output * grad_sum;
@@ -367,8 +383,14 @@ auto SoftmaxBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<
 
 auto SoftmaxBackward::backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> {
     // dL/dx_i = y_i * (dL/dy_i - sum_j(dL/dy_j * y_j))
-    // Use Variable operations for higher-order gradient tracking
-    Variable output_var(saved_tensors_[0], false);
+    // GG.1: recompute softmax(input) on the live graph when create_graph was
+    // active; fall back to the saved output Tensor otherwise.
+    Variable output_var;
+    if (has_saved_variables()) {
+        output_var = tenzor::softmax(saved_variables_[0], dim_);
+    } else {
+        output_var = Variable(saved_tensors_[0], false);
+    }
     auto dot_product = tenzor::sum(grad_outputs[0] * output_var, dim_, true);
     auto grad_input = output_var * (grad_outputs[0] - dot_product);
     return {grad_input};
@@ -415,7 +437,13 @@ auto AbsBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tens
 auto AbsBackward::backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> {
     // d(abs(x))/dx = sign(x), with epsilon guard to avoid NaN at x=0.
     // sign is non-differentiable, so compute it at Tensor level.
-    const auto& input = saved_tensors_[0];
+    // GG.1: the sign factor is a constant Variable (sign/gt/where are not
+    // differentiable); only grad_outputs[0]'s chain matters for higher-order
+    // autograd here. We still source the input Tensor from saved_variables_
+    // when available so the wrapped Tensor is the live one rather than the
+    // potentially-offloaded saved copy.
+    const auto& input = has_saved_variables() ? saved_variables_[0].tensor()
+                                              : saved_tensors_[0];
 
     double eps = 1e-7;
     if (input.dtype() == DType::Float64) eps = 1e-15;
@@ -470,8 +498,10 @@ auto ClampBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Te
 
 auto ClampBackward::backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> {
     // d(clamp(x, min, max))/dx = 1 if min <= x <= max, else 0
-    // The mask is non-differentiable, compute at Tensor level
-    const auto& input = saved_tensors_[0];
+    // The mask is non-differentiable, compute at Tensor level.
+    // GG.1: see AbsBackward comment.
+    const auto& input = has_saved_variables() ? saved_variables_[0].tensor()
+                                              : saved_tensors_[0];
     auto input_shape_vec = std::vector<int64_t>(input.shape().begin(), input.shape().end());
     auto ones_tensor = ones(input_shape_vec, input.dtype(), input.device());
     auto clamped = clamp(input, min_, max_);

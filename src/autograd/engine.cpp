@@ -507,18 +507,32 @@ auto BackwardEngine::execute(Variable& root, std::optional<Tensor> gradient,
 #endif
                         std::lock_guard lock(*var.impl_->grad_mutex_);
                         accumulate_unlocked();
-                        // When create_graph=true, also capture the Variable form
+                        // When create_graph=true, capture the Variable form
                         // of the gradient so .grad_variable() on the leaf returns
                         // something whose grad_fn chains back through the original
-                        // forward graph. For repeated accumulation (multiple
-                        // paths to same leaf), Variable-add would preserve the
-                        // graph too, but that's rare in practice; the first-path
-                        // assignment suffices for the common double-backward
-                        // pattern and we skip on subsequent accumulations.
-                        if (create_graph && i < var_input_grads.size() &&
-                            !var.impl_->grad_with_graph_impl_) {
-                            var.impl_->grad_with_graph_impl_ =
-                                var_input_grads[i].impl_;
+                        // forward graph.
+                        //
+                        // GG.8: when a leaf receives gradients via multiple paths
+                        // (e.g. loss = x*x + sin(x)), the FIRST accumulation
+                        // stored only var_input_grads[i] and subsequent
+                        // contributions were added at the raw-Tensor level —
+                        // the Variable graph reflected only the first path
+                        // and second-derivative through branchy higher-order
+                        // forwards dropped a path. Fix: sum at the Variable
+                        // level so grad_fn chains through all contributing
+                        // paths. The Variable-level operator+ does not touch
+                        // grad_mutex_ on its operands, so the single-lock
+                        // invariant (debug guard above) is preserved.
+                        if (create_graph && i < var_input_grads.size()) {
+                            if (!var.impl_->grad_with_graph_impl_) {
+                                var.impl_->grad_with_graph_impl_ =
+                                    var_input_grads[i].impl_;
+                            } else {
+                                Variable existing_var;
+                                existing_var.impl_ = var.impl_->grad_with_graph_impl_;
+                                var.impl_->grad_with_graph_impl_ =
+                                    (existing_var + var_input_grads[i]).impl_;
+                            }
                             var.impl_->grad_with_graph_cache_storage_.reset();
                         }
                     } else {
@@ -973,10 +987,22 @@ auto BackwardEngine::execute_multi(std::vector<Variable*> roots,
                         // Variable form of the gradient on the leaf when
                         // create_graph is set so .grad_variable() chains
                         // back through the forward graph.
-                        if (create_graph && i < var_input_grads.size() &&
-                            !var.impl_->grad_with_graph_impl_) {
-                            var.impl_->grad_with_graph_impl_ =
-                                var_input_grads[i].impl_;
+                        //
+                        // GG.8: branchy higher-order forwards (e.g. x*x +
+                        // sin(x)) reach the same leaf via multiple paths;
+                        // sum at the Variable level so grad_fn chains
+                        // through every contributing path instead of only
+                        // the first.
+                        if (create_graph && i < var_input_grads.size()) {
+                            if (!var.impl_->grad_with_graph_impl_) {
+                                var.impl_->grad_with_graph_impl_ =
+                                    var_input_grads[i].impl_;
+                            } else {
+                                Variable existing_var;
+                                existing_var.impl_ = var.impl_->grad_with_graph_impl_;
+                                var.impl_->grad_with_graph_impl_ =
+                                    (existing_var + var_input_grads[i]).impl_;
+                            }
                             var.impl_->grad_with_graph_cache_storage_.reset();
                         }
                     } else {

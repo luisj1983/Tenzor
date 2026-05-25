@@ -597,7 +597,11 @@ auto EighBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Ten
     auto VtgV = matmul(Vt, grad_V);  // (N, N)
 
     // F * (V^T @ dL/dV) + diag(dL/dW)
-    auto middle = add(mul(F, VtgV), diag(grad_W));  // (N, N)
+    // GG.7: diag_embed is batch-aware (works for (..., N) grad_W); the
+    // earlier diag(grad_W) threw "diag: input must be 1D or 2D" on batched
+    // input. diag_embed(grad_W, 0, -2, -1) places grad_W on the main
+    // diagonal of a (..., N, N) tensor for any batch shape.
+    auto middle = add(mul(F, VtgV), linalg::diag_embed(grad_W, 0, -2, -1));  // (..., N, N)
 
     // dL/dA = V @ middle @ V^T
     auto grad_A = matmul(matmul(V, middle), Vt);
@@ -624,7 +628,9 @@ auto EigvalshBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector
     auto Vt = transpose(V, V.ndim() - 2, V.ndim() - 1);
 
     // dL/dA = V @ diag(dL/dW) @ V^T
-    auto grad_diag = diag(grad_W);  // (N, N)
+    // GG.7: diag_embed is batch-aware; the earlier diag(grad_W) threw on
+    // batched input (ndim > 2).
+    auto grad_diag = linalg::diag_embed(grad_W, 0, -2, -1);  // (..., N, N)
     auto grad_A = matmul(matmul(V, grad_diag), Vt);
 
     // Symmetrize (since A is symmetric)

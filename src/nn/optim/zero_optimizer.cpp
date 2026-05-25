@@ -1555,11 +1555,25 @@ auto ZeROStage1Optimizer::update_local_partition() -> void {
     auto* sgd_opt = dynamic_cast<SGD*>(base_optimizer_.get());
 
     if (adam_opt) {
-        // Apply Adam update to local partition
-        update_partition_adam(partition, adam_opt->get_lr(), 0.9, 0.999, 1e-8, 0.0);
+        // audit-8 GG.5: read user-supplied β1/β2/ε/wd from the base optimizer
+        // instead of using PyTorch defaults — the previous hardcoded
+        // {0.9, 0.999, 1e-8, 0.0} silently overrode the user's Adam(...) ctor
+        // args, making ZeRO Stage 1 runs diverge from non-ZeRO equivalents.
+        update_partition_adam(partition,
+                              adam_opt->get_lr(),
+                              adam_opt->get_beta1(),
+                              adam_opt->get_beta2(),
+                              adam_opt->get_eps(),
+                              adam_opt->get_weight_decay());
     } else if (adamw_opt) {
-        // Apply AdamW update to local partition
-        update_partition_adamw(partition, adamw_opt->get_lr(), 0.9, 0.999, 1e-8, 0.01);
+        // audit-8 GG.5: see Adam branch above; AdamW had the additional
+        // foot-gun of silently forcing wd=0.01 over any user value.
+        update_partition_adamw(partition,
+                               adamw_opt->get_lr(),
+                               adamw_opt->get_beta1(),
+                               adamw_opt->get_beta2(),
+                               adamw_opt->get_eps(),
+                               adamw_opt->get_weight_decay());
     } else if (sgd_opt) {
         // Apply SGD update to local partition
         update_partition_sgd(partition, sgd_opt->get_lr(), 0.9, 0.0);
@@ -1648,11 +1662,16 @@ auto ZeROStage1Optimizer::update_local_partition_element_mode() -> void {
     Tensor& target = has_master ? partition.master_params[0] : param_slice;
 
     if (adam_opt || adamw_opt) {
-        const double lr     = adam_opt ? adam_opt->get_lr()  : adamw_opt->get_lr();
-        const double beta1  = 0.9;
-        const double beta2  = 0.999;
-        const double eps    = 1e-8;
-        const double wd     = adamw_opt ? 0.01 : 0.0;
+        // audit-8 GG.5: source β1/β2/ε/wd from the base optimizer rather
+        // than hardcoded PyTorch defaults.  Previously this branch silently
+        // overrode the user's Adam/AdamW ctor args, making the element-mode
+        // ZeRO update diverge from non-ZeRO training for any non-default
+        // hyperparam setting.
+        const double lr     = adam_opt ? adam_opt->get_lr()           : adamw_opt->get_lr();
+        const double beta1  = adam_opt ? adam_opt->get_beta1()        : adamw_opt->get_beta1();
+        const double beta2  = adam_opt ? adam_opt->get_beta2()        : adamw_opt->get_beta2();
+        const double eps    = adam_opt ? adam_opt->get_eps()          : adamw_opt->get_eps();
+        const double wd     = adam_opt ? adam_opt->get_weight_decay() : adamw_opt->get_weight_decay();
         step_count_++;
 
         // m = beta1*m + (1-beta1)*g

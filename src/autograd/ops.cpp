@@ -161,6 +161,10 @@ auto log(const Variable& input) -> Variable {
 
     // Save input tensor for backward pass
     grad_fn->save_for_backward({input.tensor()});
+    // GG.1: keep the input Variable for higher-order autograd.
+    if (is_creating_graph()) {
+        grad_fn->save_variables_for_backward({input});
+    }
 
     std::vector<std::shared_ptr<Function>> next_funcs;
 
@@ -196,6 +200,12 @@ auto exp(const Variable& input) -> Variable {
 
     // Save output for backward pass (d/dx exp(x) = exp(x))
     grad_fn->save_for_backward({result_tensor});
+    // GG.1: save the input Variable so backward_with_variables can
+    // recompute the output on the live graph (the saved output Tensor
+    // can't carry grad_fn back through this same Function — cycle).
+    if (is_creating_graph()) {
+        grad_fn->save_variables_for_backward({input});
+    }
 
     std::vector<std::shared_ptr<Function>> next_funcs;
 
@@ -265,6 +275,12 @@ auto softmax(const Variable& input, int64_t dim) -> Variable {
     auto result_tensor = dispatch(OpId::Softmax, input_tensors, attrs)[0];
 
     grad_fn->save_for_backward({result_tensor});
+    // GG.1: save input as Variable; backward_with_variables recomputes the
+    // softmax on the live graph (the saved output Tensor would create a
+    // grad_fn cycle if wrapped with requires_grad=true).
+    if (is_creating_graph()) {
+        grad_fn->save_variables_for_backward({input});
+    }
 
     std::vector<std::shared_ptr<Function>> next_funcs;
 
@@ -305,6 +321,11 @@ auto log_softmax(const Variable& input, int64_t dim) -> Variable {
     auto result_tensor = dispatch(OpId::LogSoftmax, input_tensors, attrs)[0];
 
     grad_fn->save_for_backward({result_tensor});
+    // GG.1: save input as Variable; backward_with_variables recomputes the
+    // log_softmax on the live graph.
+    if (is_creating_graph()) {
+        grad_fn->save_variables_for_backward({input});
+    }
 
     std::vector<std::shared_ptr<Function>> next_funcs;
 
@@ -336,6 +357,10 @@ auto abs(const Variable& input) -> Variable {
 
     // Save input tensor for backward pass
     grad_fn->save_for_backward({input.tensor()});
+    // GG.1: keep input Variable for higher-order autograd.
+    if (is_creating_graph()) {
+        grad_fn->save_variables_for_backward({input});
+    }
 
     std::vector<std::shared_ptr<Function>> next_funcs;
 
@@ -368,6 +393,10 @@ auto clamp(const Variable& input, double min, double max) -> Variable {
 
     // Save input tensor for backward pass
     grad_fn->save_for_backward({input.tensor()});
+    // GG.1: keep input Variable for higher-order autograd.
+    if (is_creating_graph()) {
+        grad_fn->save_variables_for_backward({input});
+    }
 
     std::vector<std::shared_ptr<Function>> next_funcs;
 
@@ -1115,6 +1144,13 @@ auto unary_autograd(const Variable& input, TensorOp&& tensor_op) -> Variable {
     }
     auto grad_fn = std::make_shared<BackwardT>();
     grad_fn->save_for_backward({input.tensor()});
+    // GG.1: also save the input Variable so backward_with_variables can
+    // walk the upstream graph for higher-order autograd. Without this, the
+    // Backward's `backward_with_variables` rewraps `saved_tensors_[0]` as
+    // a fresh `Variable(t, false)` and severs the chain.
+    if (is_creating_graph()) {
+        grad_fn->save_variables_for_backward({input});
+    }
     grad_fn->set_next_functions({input.grad_fn()});
     grad_fn->set_input_variables({input});
     auto result = tensor_op(input.tensor());
@@ -1124,6 +1160,12 @@ auto unary_autograd(const Variable& input, TensorOp&& tensor_op) -> Variable {
 }
 
 // Variant that saves output instead of input (for sigmoid, tanh, sqrt, etc.)
+// GG.1: ALSO saves the input Variable when create_graph is on, so that
+// backward_with_variables can recompute the output from the saved input
+// Variable (preserving the graph chain). The saved output Tensor remains
+// the cheap path used by Tensor-only backward(). We can't directly save
+// the output as a graph-connected Variable because the output's grad_fn
+// is the very Function we're constructing — that would be a cycle.
 template<typename BackwardT, typename TensorOp>
 auto unary_autograd_save_output(const Variable& input, TensorOp&& tensor_op) -> Variable {
     if (!input.requires_grad() || !is_grad_enabled()) {
@@ -1132,6 +1174,9 @@ auto unary_autograd_save_output(const Variable& input, TensorOp&& tensor_op) -> 
     auto result = tensor_op(input.tensor());
     auto grad_fn = std::make_shared<BackwardT>();
     grad_fn->save_for_backward({result});
+    if (is_creating_graph()) {
+        grad_fn->save_variables_for_backward({input});
+    }
     grad_fn->set_next_functions({input.grad_fn()});
     grad_fn->set_input_variables({input});
     Variable output(result, true);
@@ -1151,6 +1196,11 @@ auto unary_autograd_with_param(const Variable& input, Scalar param, TensorOp&& t
     auto grad_fn = std::make_shared<BackwardT>();
     auto param_tensor = full({1}, static_cast<double>(param), input.tensor().dtype(), input.tensor().device());
     grad_fn->save_for_backward({input.tensor(), param_tensor});
+    // GG.1: save only the input as a Variable; the scalar parameter is a
+    // constant (does not participate in the adjoint's autograd graph).
+    if (is_creating_graph()) {
+        grad_fn->save_variables_for_backward({input});
+    }
     grad_fn->set_next_functions({input.grad_fn()});
     grad_fn->set_input_variables({input});
     auto result = tensor_op(input.tensor());
@@ -1544,6 +1594,10 @@ auto atan2(const Variable& y, const Variable& x) -> Variable {
     grad_fn->input_shape_y_ = std::vector<int64_t>(y.shape().begin(), y.shape().end());
     grad_fn->input_shape_x_ = std::vector<int64_t>(x.shape().begin(), x.shape().end());
     grad_fn->save_for_backward({y.tensor(), x.tensor()});
+    // GG.1: keep input Variables for higher-order autograd through atan2.
+    if (is_creating_graph()) {
+        grad_fn->save_variables_for_backward({y, x});
+    }
     grad_fn->set_next_functions({y.grad_fn(), x.grad_fn()});
     grad_fn->set_input_variables({y, x});
     auto result = tenzor::atan2(y.tensor(), x.tensor());
@@ -1657,6 +1711,12 @@ auto logsumexp(const Variable& input, int64_t dim, bool keepdim) -> Variable {
     Tensor dim_t({1}, DType::Int64, Device::cpu());
     dim_t.data<int64_t>()[0] = dim;
     grad_fn->save_for_backward({input.tensor(), result, dim_t});
+    // GG.1: keep input Variable; backward_with_variables recomputes lse on
+    // the live graph (saved output Tensor cannot carry grad_fn back through
+    // this Function without forming a cycle).
+    if (is_creating_graph()) {
+        grad_fn->save_variables_for_backward({input});
+    }
     grad_fn->set_next_functions({input.grad_fn()});
     grad_fn->set_input_variables({input});
     Variable output(result, true);
@@ -2436,6 +2496,11 @@ auto cumprod(const Variable& input, int64_t dim) -> Variable {
     auto result = tenzor::cumprod(input.tensor(), dim);
     auto grad_fn = std::make_shared<CumProdBackward>(dim);
     grad_fn->save_for_backward({input.tensor(), result});
+    // GG.1: keep input Variable; backward_with_variables recomputes cumprod
+    // on the live graph.
+    if (is_creating_graph()) {
+        grad_fn->save_variables_for_backward({input});
+    }
     grad_fn->set_next_functions({input.grad_fn()});
     grad_fn->set_input_variables({input});
     Variable output(result, true);

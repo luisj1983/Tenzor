@@ -5,6 +5,7 @@
 
 #include "tenzor/nn/layers/moe.hpp"
 #include "tenzor/nn/activations/activations.hpp"
+#include "tenzor/nn/utils/variable_cast.hpp"
 #include "tenzor/autograd/ops.hpp"
 #include "tenzor/ops/math.hpp"
 #include "tenzor/ops/reduction.hpp"
@@ -155,13 +156,25 @@ auto MixtureOfExperts::forward_with_loss(const Variable& input)
         expert_counts = tenzor::scatter(expert_counts, 0, sidx, cnt);
     }
 
+    // audit-8 GG.4: keep probs_v as a Variable so the router's gradient
+    // path remains connected through the aux loss.  The previous code
+    // extracted probs_t via probs_v.tensor(), severing autograd; the
+    // resulting aux_loss had no grad_fn back to router_->weight/bias,
+    // so the load-balance signal silently never updated the router.
     auto N_scalar = tenzor::full({1}, static_cast<double>(N), DType::Float32, input.tensor().device());
-    auto freq = expert_counts / N_scalar;
-    auto scale = tenzor::full({1}, static_cast<double>(num_experts_) * aux_loss_weight_,
-                              DType::Float32, input.tensor().device());
-    auto aux_loss_t = tenzor::sum(freq * probs_mean.to(DType::Float32)) * scale;
+    auto freq_t = expert_counts / N_scalar;                              // [num_experts], no grad
+    auto scale_t = tenzor::full({1}, static_cast<double>(num_experts_) * aux_loss_weight_,
+                                DType::Float32, input.tensor().device());
 
-    auto aux_loss = Variable(aux_loss_t, input.requires_grad());
+    // Variable-level mean over the batch dim — preserves grad_fn to logits.
+    auto probs_mean_v = tenzor::mean(probs_v, /*dim=*/0, /*keepdim=*/false);
+    auto probs_mean_f32 = nn::variable_cast(probs_mean_v, DType::Float32);
+
+    // freq and scale are constants (no gradient flows through them).
+    auto freq_v = Variable(freq_t, /*requires_grad=*/false);
+    auto scale_v = Variable(scale_t, /*requires_grad=*/false);
+
+    auto aux_loss = tenzor::sum(freq_v * probs_mean_f32) * scale_v;
 
     return std::make_pair(output, aux_loss);
 }

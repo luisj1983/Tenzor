@@ -101,6 +101,16 @@ public:
     /** @brief Get current learning rate */
     auto get_lr() const -> double override;  // M15: explicit override marker
 
+    // audit-8 GG.5: expose the rest of Adam's hyperparameters so consumers
+    // like ZeRO Stage 1's element-mode update can read the user-supplied
+    // values instead of hardcoding PyTorch defaults.  Header-only inlines —
+    // additive, no ABI impact on stepping callers.
+    auto get_beta1() const -> double { return beta1_; }
+    auto get_beta2() const -> double { return beta2_; }
+    auto get_eps() const -> double { return eps_; }
+    auto get_weight_decay() const -> double { return weight_decay_; }
+    auto get_amsgrad() const -> bool { return amsgrad_; }
+
     /** @brief Get optimizer state (moment estimates) for serialization */
     auto state_dict() const -> std::unordered_map<std::string, Tensor> override;
 
@@ -214,6 +224,13 @@ public:
 
     /** @brief Get current learning rate */
     auto get_lr() const -> double override;  // M15: explicit override marker
+
+    // audit-8 GG.5: expose AdamW hyperparameters for ZeRO Stage 1.
+    auto get_beta1() const -> double { return beta1_; }
+    auto get_beta2() const -> double { return beta2_; }
+    auto get_eps() const -> double { return eps_; }
+    auto get_weight_decay() const -> double { return weight_decay_; }
+    auto get_amsgrad() const -> bool { return amsgrad_; }
 
     /** @brief Get optimizer state for serialization */
     auto state_dict() const -> std::unordered_map<std::string, Tensor> override;
