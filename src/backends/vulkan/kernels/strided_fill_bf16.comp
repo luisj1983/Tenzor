@@ -27,13 +27,18 @@ void atomicWriteHalf(uint word_idx, uint word_offset, uint val_bits) {
     uint mask = 0xFFFFu << shift;
     uint new_half = (val_bits & 0xFFFFu) << shift;
 
+    // Bounded CAS loop to avoid GPU livelock under contention; mirrors BB.7
+    // saturation hard-stop pattern used elsewhere in the Vulkan backend.
     uint prev = data[word_idx];
-    while (true) {
-        uint desired = (prev & ~mask) | new_half;
+    uint desired = (prev & ~mask) | new_half;
+    for (uint attempt = 0u; attempt < 65536u; ++attempt) {
+        desired = (prev & ~mask) | new_half;
         uint observed = atomicCompSwap(data[word_idx], prev, desired);
         if (observed == prev) return;  // CAS succeeded
         prev = observed;               // someone raced; retry with the latest value
     }
+    // Saturation hard-stop — extremely contended word; force last attempt.
+    data[word_idx] = desired;
 }
 
 // IEEE Float32 → BF16 bits via round-to-nearest-even.

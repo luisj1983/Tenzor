@@ -513,17 +513,15 @@ auto RealBackward::forward(std::vector<Variable> inputs) -> std::vector<Variable
 
 auto RealBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> {
     const auto& grad = grad_outputs[0];
-    // Gradient flows into the real part only: construct complex tensor
-    // with real=0.5*grad, imag=0
-    auto half_grad = mul(grad, full(
-        std::vector<int64_t>(grad.shape().begin(), grad.shape().end()),
-        0.5f, grad.dtype(), grad.device()));
-    auto zero = zeros(std::vector<int64_t>(grad.shape().begin(), grad.shape().end()),
-                      grad.dtype(), grad.device());
-    // Re-create complex: real part = 0.5 * grad, imag part = 0
-    // Use polar(abs, angle) or direct construction depending on available ops
-    // Simplest: cast back to complex dtype with imag=0
-    auto result = half_grad.to(input_dtype_);
+    // audit-7 DD.1: PyTorch contract for real(z) backward is
+    // grad_z = complex(grad_real, 0). No 0.5 factor. Build the complex
+    // tensor by stacking [grad, zeros] along a new trailing axis and
+    // viewing the result as complex.
+    auto zero = zeros_like(grad);
+    std::array<Tensor, 2> parts = {grad, zero};
+    std::span<const Tensor> parts_span(parts.data(), parts.size());
+    auto stacked = ::tenzor::stack(parts_span, /*dim=*/-1).contiguous();
+    auto result = ::tenzor::view_as_complex(stacked);
     return {result};
 }
 
@@ -536,23 +534,14 @@ auto ImagBackward::forward(std::vector<Variable> inputs) -> std::vector<Variable
 
 auto ImagBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> {
     const auto& grad = grad_outputs[0];
-    // Gradient flows into the imaginary part: construct complex tensor
-    // with real=0, imag=0.5*grad
-    // For Wirtinger convention, grad of imag w.r.t. conj(z) = -0.5j
-    // So the complex gradient has real=0 and imag=0.5*grad
-    auto half_grad = mul(grad, full(
-        std::vector<int64_t>(grad.shape().begin(), grad.shape().end()),
-        0.5f, grad.dtype(), grad.device()));
-    // Cast to complex with value in imaginary part
-    auto result = half_grad.to(input_dtype_);
-    // Multiply by j (imaginary unit): multiply by complex(0, 1)
-    // For the Wirtinger convention this gives us -0.5j * grad when
-    // accounting for the conjugate symmetry
-    auto j_factor = full(std::vector<int64_t>(result.shape().begin(), result.shape().end()),
-                         0.0f, input_dtype_, result.device());
-    // The result needs to route the gradient to the imaginary component
-    // Simplest correct approach: negate and place in imaginary
-    result = neg(result);  // -0.5 * grad as the imaginary component contribution
+    // audit-7 DD.2: PyTorch contract for imag(z) backward is
+    // grad_z = 0 + j*grad (real=0, imag=grad). Build via stack
+    // [zeros, grad] along a new trailing axis and view as complex.
+    auto zero = zeros_like(grad);
+    std::array<Tensor, 2> parts = {zero, grad};
+    std::span<const Tensor> parts_span(parts.data(), parts.size());
+    auto stacked = ::tenzor::stack(parts_span, /*dim=*/-1).contiguous();
+    auto result = ::tenzor::view_as_complex(stacked);
     return {result};
 }
 

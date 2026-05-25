@@ -61,13 +61,18 @@ void writeBF16(uint element_idx, float val) {
                       ((floatBitsToUint(val) >> 16) & 1u)) >> 16) & 0xFFFFu;
     uint new_half = bf16_bits << shift;
 
+    // Bounded CAS loop to avoid GPU livelock under contention; mirrors BB.7
+    // saturation hard-stop pattern used elsewhere in the Vulkan backend.
     uint prev = output_data[word_idx];
-    while (true) {
-        uint desired = (prev & ~mask) | new_half;
+    uint desired = (prev & ~mask) | new_half;
+    for (uint attempt = 0u; attempt < 65536u; ++attempt) {
+        desired = (prev & ~mask) | new_half;
         uint observed = atomicCompSwap(output_data[word_idx], prev, desired);
         if (observed == prev) return;
         prev = observed;
     }
+    // Saturation hard-stop — extremely contended word; force last attempt.
+    output_data[word_idx] = desired;
 }
 
 void main() {

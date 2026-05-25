@@ -29,13 +29,17 @@ void main() {
 
     float grad_val = grad_out_data[idx];
 
-    // Atomic float add via compare-and-swap loop
+    // Atomic float add via compare-and-swap loop. Bounded to avoid GPU livelock
+    // under contention; mirrors BB.7 saturation hard-stop pattern used by
+    // embedding_backward_f64_atomic / max_pool2d_backward_f64.
     uint expected = grad_in_data[target];
-    uint desired;
-    while (true) {
+    uint desired = expected;
+    for (uint attempt = 0u; attempt < 65536u; ++attempt) {
         desired = floatBitsToUint(uintBitsToFloat(expected) + grad_val);
         uint actual = atomicCompSwap(grad_in_data[target], expected, desired);
-        if (actual == expected) break;
+        if (actual == expected) return;
         expected = actual;
     }
+    // Saturation hard-stop — extremely contended slot; force last attempt.
+    grad_in_data[target] = desired;
 }

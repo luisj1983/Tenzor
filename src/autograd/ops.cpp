@@ -16,8 +16,10 @@
 #include "tenzor/ops/op_id.hpp"
 #include "tenzor/jit/tracer.hpp"
 #include "tenzor/utils/error.hpp"
+#include "tenzor/utils/logging.hpp"
 #include <algorithm>
 #include <cmath>
+#include <limits>
 #include <ranges>
 #include <optional>
 #include <stdexcept>
@@ -1218,9 +1220,53 @@ auto pow(const Variable& base, const Variable& exponent) -> Variable {
     auto exp_is_zero = ::tenzor::eq(exponent, zero_var);
     auto zero_base_result = ::tenzor::where(exp_is_zero, one_var, zero_var);
 
-    // Standard branch with safe base so we never call log(0).
-    auto safe_base = ::tenzor::where(base_is_zero, one_var, base);
-    auto standard_result = ::tenzor::exp(exponent * ::tenzor::log(safe_base));
+    // audit-7 DD.4: negative-base handling. PyTorch defines
+    // (-2)^3 == -8 for integer exponents but returns NaN for fractional
+    // exponents. The previous implementation reduced safe_base only on the
+    // base==0 path, leaving negative bases unchanged — `log(negative)`
+    // then poisoned the standard branch with NaN even for cases like
+    // (-2)^3 that have a well-defined real value.
+    //
+    // Strategy: route negative bases through `|base|^e` and multiply by
+    // the sign factor (-1)^e. The sign factor is computed as
+    // `cos(pi * round(e))` which is exactly ±1 whenever e is integer-valued.
+    // For non-integer exponents we emit a NaN result (matching PyTorch /
+    // IEEE) and warn once that the gradient through such a point is
+    // ill-defined.
+    auto base_is_neg = ::tenzor::lt(base, zero_var);
+    auto exp_is_int = ::tenzor::eq(::tenzor::round(exponent), exponent);
+
+    // safe_base used by the standard branch: replace base==0 with 1 (so
+    // log is finite) and replace negative bases with |base| (so log is
+    // finite for the integer-exp branch). The outer `where` cascade
+    // selects the right result per element.
+    auto abs_base = ::tenzor::abs(base);
+    auto safe_base = ::tenzor::where(base_is_zero, one_var, abs_base);
+    auto pos_branch = ::tenzor::exp(exponent * ::tenzor::log(safe_base));
+
+    // Sign factor for negative-base + integer-exponent case.
+    // cos(pi * k) == (-1)^k for any integer k; rounding the exponent
+    // first guarantees we never feed a non-integer multiple of pi to cos,
+    // so the result is always exactly ±1 on the integer-exp path.
+    const double pi = 3.14159265358979323846;
+    auto rounded_exp = ::tenzor::round(exponent);
+    auto sign_factor = ::tenzor::cos(rounded_exp * pi);
+    auto neg_base_int_result = sign_factor * pos_branch;
+
+    // Non-integer exponent on a negative base: undefined real gradient.
+    // Materialise NaN explicitly so the failure is loud and matches the
+    // IEEE convention.
+    auto nan_t = tenzor::full(
+        std::vector<int64_t>(base.shape().begin(), base.shape().end()),
+        std::numeric_limits<double>::quiet_NaN(),
+        base.tensor().dtype(), base.tensor().device());
+    Variable nan_var(nan_t, false);
+    TENZOR_WARN_ONCE("pow: negative base with non-integer exponent has no real "
+                     "gradient; emitting NaN for those elements");
+
+    auto neg_base_result = ::tenzor::where(exp_is_int, neg_base_int_result, nan_var);
+
+    auto standard_result = ::tenzor::where(base_is_neg, neg_base_result, pos_branch);
 
     return ::tenzor::where(base_is_zero, zero_base_result, standard_result);
 }
@@ -1606,11 +1652,18 @@ auto flatten(const Variable& input, int64_t start_dim, int64_t end_dim) -> Varia
 }
 
 auto where(const Variable& condition, const Variable& x, const Variable& y) -> Variable {
+    // audit-7 DD.3: backend `where` kernels (CUDA / ROCm / Vulkan / OneAPI)
+    // require contiguous bool input. CC.4 only forced contiguity on the
+    // SAVED condition for backward, but the forward dispatch still ran on
+    // the raw (possibly transposed/permuted) tensor and crashed. Materialise
+    // once at the top so both forward and backward see the same clean
+    // contiguous buffer.
+    auto cond_c = condition.tensor().contiguous();
     bool needs_grad = (x.requires_grad() || y.requires_grad()) && is_grad_enabled();
     if (!needs_grad) {
-        return Variable(tenzor::where(condition.tensor(), x.tensor(), y.tensor()), false);
+        return Variable(tenzor::where(cond_c, x.tensor(), y.tensor()), false);
     }
-    auto result = tenzor::where(condition.tensor(), x.tensor(), y.tensor());
+    auto result = tenzor::where(cond_c, x.tensor(), y.tensor());
     auto grad_fn = std::make_shared<WhereBackward>();
     // Condition is non-differentiable; only x and y carry gradients.
     // WhereBackward::backward returns {grad_x, grad_y} in that order, so
@@ -1627,7 +1680,7 @@ auto where(const Variable& condition, const Variable& x, const Variable& y) -> V
     // produced by a `transpose`/`permute` and never materialised). Forcing
     // contiguity at save-time gives the backward a clean buffer with no
     // hidden stride dependency.
-    grad_fn->save_for_backward({condition.tensor().contiguous()});
+    grad_fn->save_for_backward({cond_c});
     // audit-5 Y.4: save the un-broadcasted x/y shapes so the backward can
     // reduce the masked grad back to each input's original shape (mirroring
     // BinaryOp backwards). `tenzor::where` materialises the broadcast shape,

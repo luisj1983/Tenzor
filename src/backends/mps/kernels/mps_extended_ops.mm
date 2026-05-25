@@ -933,6 +933,14 @@ std::vector<Tensor> mps_fused_adadelta_step(const Tensor& param, const Tensor& g
                                               const Tensor& accum, const Tensor& delta_accum,
                                               float lr, float rho, float eps, float wd) {
     ensure_initialized();
+
+    // The Metal kernel hard-codes `device float*` so F16/BF16 params would be
+    // reinterpreted as garbage. Reject explicitly until the half-precision
+    // master-weights upcast is wired up (mirrors BB.8 / audit-5 Z.7).
+    if (param.dtype() == DType::Float16 || param.dtype() == DType::BFloat16) {
+        throw std::runtime_error("MPS fused Adadelta: F16/BF16 master-weights upcast not yet wired");
+    }
+
     size_t numel = param.numel();
 
     auto pipeline = get_pipeline("fused_adadelta_step_kernel");
@@ -966,6 +974,14 @@ std::vector<Tensor> mps_fused_adagrad_step(const Tensor& param, const Tensor& gr
                                              float lr, float lr_decay, float eps,
                                              float wd, float step) {
     ensure_initialized();
+
+    // The Metal kernel hard-codes `device float*` so F16/BF16 params would be
+    // reinterpreted as garbage. Reject explicitly until the half-precision
+    // master-weights upcast is wired up (mirrors BB.8 / audit-5 Z.7).
+    if (param.dtype() == DType::Float16 || param.dtype() == DType::BFloat16) {
+        throw std::runtime_error("MPS fused Adagrad: F16/BF16 master-weights upcast not yet wired");
+    }
+
     size_t numel = param.numel();
 
     auto pipeline = get_pipeline("fused_adagrad_step_kernel");
@@ -997,6 +1013,14 @@ std::vector<Tensor> mps_fused_rmsprop_step(const Tensor& param, const Tensor& gr
                                              const Tensor& sq_avg,
                                              float lr, float alpha, float eps, float wd) {
     ensure_initialized();
+
+    // The Metal kernel hard-codes `device float*` so F16/BF16 params would be
+    // reinterpreted as garbage. Reject explicitly until the half-precision
+    // master-weights upcast is wired up (mirrors BB.8 / audit-5 Z.7).
+    if (param.dtype() == DType::Float16 || param.dtype() == DType::BFloat16) {
+        throw std::runtime_error("MPS fused RMSprop: F16/BF16 master-weights upcast not yet wired");
+    }
+
     size_t numel = param.numel();
 
     auto pipeline = get_pipeline("fused_rmsprop_step_kernel");
@@ -1028,6 +1052,14 @@ std::vector<Tensor> mps_fused_adam_atan2_step(const Tensor& param, const Tensor&
                                                 float lr, float beta1, float beta2,
                                                 float eps, float bc1, float bc2, float wd) {
     ensure_initialized();
+
+    // The Metal kernel hard-codes `device float*` so F16/BF16 params would be
+    // reinterpreted as garbage. Reject explicitly until the half-precision
+    // master-weights upcast is wired up (mirrors BB.8 / audit-5 Z.7).
+    if (param.dtype() == DType::Float16 || param.dtype() == DType::BFloat16) {
+        throw std::runtime_error("MPS fused Adam-atan2: F16/BF16 master-weights upcast not yet wired");
+    }
+
     size_t numel = param.numel();
 
     auto pipeline = get_pipeline("fused_adam_atan2_step_kernel");

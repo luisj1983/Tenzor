@@ -67,15 +67,23 @@ void main() {
                 // Mark column as present
                 atomicOr(col_flag[c_col / 32u], 1u << (c_col % 32u));
 
-                // Atomic float add via CAS loop on shared uint array
+                // Atomic float add via CAS loop on shared uint array. Bounded
+                // to avoid GPU livelock under contention; mirrors BB.7
+                // saturation hard-stop pattern used elsewhere in the Vulkan
+                // backend.
                 uint old_val = acc_bits[c_col];
-                uint new_val;
-                while (true) {
+                uint new_val = old_val;
+                bool committed = false;
+                for (uint attempt = 0u; attempt < 65536u; ++attempt) {
                     float old_f = uintBitsToFloat(old_val);
                     new_val = floatBitsToUint(old_f + product);
                     uint prev = atomicCompSwap(acc_bits[c_col], old_val, new_val);
-                    if (prev == old_val) break;
+                    if (prev == old_val) { committed = true; break; }
                     old_val = prev;
+                }
+                if (!committed) {
+                    // Saturation hard-stop — extremely contended slot; force last attempt.
+                    acc_bits[c_col] = new_val;
                 }
             }
         }
