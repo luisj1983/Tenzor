@@ -243,8 +243,16 @@ auto GroupedQueryAttention::scaled_dot_product_attention(
         auto threshold = tenzor::full(std::vector<int64_t>(dist.shape().begin(), dist.shape().end()),
                                      static_cast<double>(half_window), DType::Float32, query.device());
         auto outside = tenzor::gt(dist, threshold);
+        // LL.8: -1e9 overflows to -inf in Float16/BFloat16 mask tensors; when
+        // all positions in a row are masked, softmax(-inf, -inf, ...) → NaN.
+        // Use -1e4 sentinel for half-precision (well within representable
+        // range) and true -inf only for Float32/Float64.
+        double mask_fill =
+            (query.dtype() == DType::Float16 || query.dtype() == DType::BFloat16)
+                ? -1e4
+                : -std::numeric_limits<double>::infinity();
         auto neg_large = full(std::vector<int64_t>(dist.shape().begin(), dist.shape().end()),
-                              -1e9, query.dtype(), query.device());
+                              mask_fill, query.dtype(), query.device());
         auto zero_mask = zeros(std::vector<int64_t>(dist.shape().begin(), dist.shape().end()),
                                query.dtype(), query.device());
         auto window_mask = where(outside, neg_large, zero_mask);

@@ -332,8 +332,18 @@ namespace cuda {
                                    bool align_corners) -> Tensor;
     auto interpolate_cuda(const Tensor& input, const std::vector<int64_t>& size, const std::string& mode, bool align_corners) -> Tensor;
     auto interpolate_backward_cuda(const Tensor& grad_output, const std::vector<int64_t>& input_size, const std::string& mode, bool align_corners) -> Tensor;
-    auto unfold_cuda(const Tensor& input, int64_t kernel_size, int64_t stride, int64_t padding, int64_t dilation, cudaStream_t stream) -> Tensor;
-    auto fold_cuda(const Tensor& input, const std::vector<int64_t>& output_size, int64_t kernel_size, int64_t stride, int64_t padding, int64_t dilation, cudaStream_t stream) -> Tensor;
+    auto unfold_cuda(const Tensor& input,
+                     int64_t kernel_h, int64_t kernel_w,
+                     int64_t stride_h, int64_t stride_w,
+                     int64_t padding_h, int64_t padding_w,
+                     int64_t dilation_h, int64_t dilation_w,
+                     cudaStream_t stream) -> Tensor;
+    auto fold_cuda(const Tensor& input, const std::vector<int64_t>& output_size,
+                   int64_t kernel_h, int64_t kernel_w,
+                   int64_t stride_h, int64_t stride_w,
+                   int64_t padding_h, int64_t padding_w,
+                   int64_t dilation_h, int64_t dilation_w,
+                   cudaStream_t stream) -> Tensor;
     auto box_iou_cuda(const Tensor& boxes1, const Tensor& boxes2, int iou_type) -> Tensor;
     auto nms_cuda_wrapper(const Tensor& boxes, const Tensor& scores, float iou_threshold) -> Tensor;
     auto gather_relative_position_bias(const Tensor& table, const Tensor& indices,
@@ -3759,47 +3769,38 @@ void register_cuda_kernels(BackendDispatchTable& table) {
     // inputs: [input]
     // attrs: kernel_size, stride, padding, dilation
     table.register_single_output_kernel(OpId::Unfold, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        // LL.3: per-axis Unfold accepts asymmetric kernel/stride/padding/dilation.
         const auto kernel_size = ::tenzor::backend::attrs::read_2d(attrs,
             AttrKey::KernelSize, AttrKey::KernelSizeH, AttrKey::KernelSizeW, 3);
         const auto stride   = ::tenzor::backend::attrs::stride_2d(attrs);
         const auto padding  = ::tenzor::backend::attrs::padding_2d(attrs);
         const auto dilation = ::tenzor::backend::attrs::dilation_2d(attrs);
-        // Phase 2.1: CUDA unfold kernel is scalar-only; reject asymmetric.
-        if (kernel_size[0] != kernel_size[1] || stride[0] != stride[1] ||
-            padding[0] != padding[1] || dilation[0] != dilation[1]) {
-            throw std::invalid_argument(
-                "Unfold (CUDA): backend kernel only supports symmetric kernel/stride/padding/dilation; "
-                "got kernel=" + std::to_string(kernel_size[0]) + "x" + std::to_string(kernel_size[1]) +
-                ", stride=" + std::to_string(stride[0]) + "x" + std::to_string(stride[1]) +
-                ", padding=" + std::to_string(padding[0]) + "x" + std::to_string(padding[1]) +
-                ", dilation=" + std::to_string(dilation[0]) + "x" + std::to_string(dilation[1]));
-        }
         cudaStream_t stream = get_cuda_stream(attrs);
         return cuda::unfold_cuda(inputs[0],
-            kernel_size[0], stride[0], padding[0], dilation[0], stream);
+            kernel_size[0], kernel_size[1],
+            stride[0], stride[1],
+            padding[0], padding[1],
+            dilation[0], dilation[1],
+            stream);
     });
 
     // inputs: [input]
     // attrs: output_size, kernel_size, stride, padding, dilation
     table.register_single_output_kernel(OpId::Fold, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        // LL.3: per-axis Fold accepts asymmetric kernel/stride/padding/dilation.
         auto output_size = attrs.get_int_list(AttrKey::OutputSize);
         const auto kernel_size = ::tenzor::backend::attrs::read_2d(attrs,
             AttrKey::KernelSize, AttrKey::KernelSizeH, AttrKey::KernelSizeW, 3);
         const auto stride   = ::tenzor::backend::attrs::stride_2d(attrs);
         const auto padding  = ::tenzor::backend::attrs::padding_2d(attrs);
         const auto dilation = ::tenzor::backend::attrs::dilation_2d(attrs);
-        if (kernel_size[0] != kernel_size[1] || stride[0] != stride[1] ||
-            padding[0] != padding[1] || dilation[0] != dilation[1]) {
-            throw std::invalid_argument(
-                "Fold (CUDA): backend kernel only supports symmetric kernel/stride/padding/dilation; "
-                "got kernel=" + std::to_string(kernel_size[0]) + "x" + std::to_string(kernel_size[1]) +
-                ", stride=" + std::to_string(stride[0]) + "x" + std::to_string(stride[1]) +
-                ", padding=" + std::to_string(padding[0]) + "x" + std::to_string(padding[1]) +
-                ", dilation=" + std::to_string(dilation[0]) + "x" + std::to_string(dilation[1]));
-        }
         cudaStream_t stream = get_cuda_stream(attrs);
         return cuda::fold_cuda(inputs[0], output_size,
-            kernel_size[0], stride[0], padding[0], dilation[0], stream);
+            kernel_size[0], kernel_size[1],
+            stride[0], stride[1],
+            padding[0], padding[1],
+            dilation[0], dilation[1],
+            stream);
     });
 
     // =========================================================================

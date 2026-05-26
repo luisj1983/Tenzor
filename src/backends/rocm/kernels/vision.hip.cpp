@@ -47,22 +47,26 @@ __global__ void unfold_kernel_hip(
     int64_t channels,
     int64_t height,
     int64_t width,
-    int64_t kernel_size,
-    int64_t stride,
-    int64_t padding,
-    int64_t dilation,
+    int64_t kernel_h,
+    int64_t kernel_w,
+    int64_t stride_h,
+    int64_t stride_w,
+    int64_t padding_h,
+    int64_t padding_w,
+    int64_t dilation_h,
+    int64_t dilation_w,
     int64_t out_h,
     int64_t out_w
 ) {
     int64_t num_blocks = out_h * out_w;
-    int64_t total_elements = batch * channels * kernel_size * kernel_size * num_blocks;
+    int64_t total_elements = batch * channels * kernel_h * kernel_w * num_blocks;
 
     HIP_KERNEL_LOOP(idx, total_elements) {
         // Decode flat index to (b, c, kh, kw, block_idx)
         int64_t temp = idx;
         int64_t block_idx = temp % num_blocks; temp /= num_blocks;
-        int64_t kw = temp % kernel_size; temp /= kernel_size;
-        int64_t kh = temp % kernel_size; temp /= kernel_size;
+        int64_t kw = temp % kernel_w; temp /= kernel_w;
+        int64_t kh = temp % kernel_h; temp /= kernel_h;
         int64_t c = temp % channels; temp /= channels;
         int64_t b = temp;
 
@@ -71,14 +75,14 @@ __global__ void unfold_kernel_hip(
         int64_t ow = block_idx % out_w;
 
         // Calculate input position with padding and dilation
-        int64_t ih = oh * stride - padding + kh * dilation;
-        int64_t iw = ow * stride - padding + kw * dilation;
+        int64_t ih = oh * stride_h - padding_h + kh * dilation_h;
+        int64_t iw = ow * stride_w - padding_w + kw * dilation_w;
 
-        // Column index in output: (c * K * K + kh * K + kw)
-        int64_t col_c = c * kernel_size * kernel_size + kh * kernel_size + kw;
+        // Column index in output: (c * Kh * Kw + kh * Kw + kw)
+        int64_t col_c = c * kernel_h * kernel_w + kh * kernel_w + kw;
 
         // Output index: (b, col_c, block_idx)
-        int64_t output_idx = b * (channels * kernel_size * kernel_size * num_blocks) +
+        int64_t output_idx = b * (channels * kernel_h * kernel_w * num_blocks) +
                             col_c * num_blocks +
                             block_idx;
 
@@ -106,15 +110,19 @@ __global__ void fold_kernel_hip(
     int64_t channels,
     int64_t height,
     int64_t width,
-    int64_t kernel_size,
-    int64_t stride,
-    int64_t padding,
-    int64_t dilation,
+    int64_t kernel_h,
+    int64_t kernel_w,
+    int64_t stride_h,
+    int64_t stride_w,
+    int64_t padding_h,
+    int64_t padding_w,
+    int64_t dilation_h,
+    int64_t dilation_w,
     int64_t out_h,
     int64_t out_w
 ) {
     int64_t num_blocks = out_h * out_w;
-    int64_t col_channels = channels * kernel_size * kernel_size;
+    int64_t col_channels = channels * kernel_h * kernel_w;
     int64_t total_elements = batch * col_channels * num_blocks;
 
     HIP_KERNEL_LOOP(idx, total_elements) {
@@ -125,17 +133,17 @@ __global__ void fold_kernel_hip(
         int64_t b = temp;
 
         // Decode col_c to (c, kh, kw)
-        int64_t kw = col_c % kernel_size;
-        int64_t kh = (col_c / kernel_size) % kernel_size;
-        int64_t c = col_c / (kernel_size * kernel_size);
+        int64_t kw = col_c % kernel_w;
+        int64_t kh = (col_c / kernel_w) % kernel_h;
+        int64_t c = col_c / (kernel_h * kernel_w);
 
         // Calculate output position from block_idx
         int64_t oh = block_idx / out_w;
         int64_t ow = block_idx % out_w;
 
         // Calculate output position in image
-        int64_t ih = oh * stride - padding + kh * dilation;
-        int64_t iw = ow * stride - padding + kw * dilation;
+        int64_t ih = oh * stride_h - padding_h + kh * dilation_h;
+        int64_t iw = ow * stride_w - padding_w + kw * dilation_w;
 
         // Check bounds
         if (ih >= 0 && ih < height && iw >= 0 && iw < width) {
@@ -440,22 +448,30 @@ __global__ void interpolate_bicubic_kernel_hip(
 // Host Functions
 // ============================================================================
 
-// Unfold host function
+// Unfold host function (LL.3: per-axis kernel/stride/padding/dilation)
 auto unfold_kernel(const Tensor& input,
-                   int64_t kernel_size,
-                   int64_t stride,
-                   int64_t padding,
-                   int64_t dilation,
+                   int64_t kernel_h,
+                   int64_t kernel_w,
+                   int64_t stride_h,
+                   int64_t stride_w,
+                   int64_t padding_h,
+                   int64_t padding_w,
+                   int64_t dilation_h,
+                   int64_t dilation_w,
                    hipStream_t stream) -> Tensor {
     // Float16 upcast: convert to Float32, compute, convert back
     if (input.dtype() == DType::Float16) {
-        return unfold_kernel(input.to(DType::Float32), kernel_size, stride, padding, dilation, stream)
+        return unfold_kernel(input.to(DType::Float32),
+            kernel_h, kernel_w, stride_h, stride_w,
+            padding_h, padding_w, dilation_h, dilation_w, stream)
             .to(DType::Float16);
     }
 
     // BFloat16 upcast: convert to Float32, compute, convert back
     if (input.dtype() == DType::BFloat16) {
-        return unfold_kernel(input.to(DType::Float32), kernel_size, stride, padding, dilation, stream)
+        return unfold_kernel(input.to(DType::Float32),
+            kernel_h, kernel_w, stride_h, stride_w,
+            padding_h, padding_w, dilation_h, dilation_w, stream)
             .to(DType::BFloat16);
     }
 
@@ -466,16 +482,16 @@ auto unfold_kernel(const Tensor& input,
     int64_t width = shape[3];
 
     // Calculate output dimensions
-    int64_t out_h = (height + 2 * padding - dilation * (kernel_size - 1) - 1) / stride + 1;
-    int64_t out_w = (width + 2 * padding - dilation * (kernel_size - 1) - 1) / stride + 1;
+    int64_t out_h = (height + 2 * padding_h - dilation_h * (kernel_h - 1) - 1) / stride_h + 1;
+    int64_t out_w = (width + 2 * padding_w - dilation_w * (kernel_w - 1) - 1) / stride_w + 1;
     int64_t num_blocks = out_h * out_w;
 
     // Create output tensor
-    std::vector<int64_t> output_shape = {batch, channels * kernel_size * kernel_size, num_blocks};
+    std::vector<int64_t> output_shape = {batch, channels * kernel_h * kernel_w, num_blocks};
     Tensor output(output_shape, input.dtype(), input.device());
 
     // Launch kernel
-    int64_t total_elements = batch * channels * kernel_size * kernel_size * num_blocks;
+    int64_t total_elements = batch * channels * kernel_h * kernel_w * num_blocks;
     int num_blocks_kernel = get_num_blocks(total_elements);
 
     if (input.dtype() == DType::Float32) {
@@ -484,7 +500,8 @@ auto unfold_kernel(const Tensor& input,
             input.data<float>(),
             output.data<float>(),
             batch, channels, height, width,
-            kernel_size, stride, padding, dilation,
+            kernel_h, kernel_w, stride_h, stride_w,
+            padding_h, padding_w, dilation_h, dilation_w,
             out_h, out_w
         );
     } else if (input.dtype() == DType::Float64) {
@@ -493,7 +510,8 @@ auto unfold_kernel(const Tensor& input,
             input.data<double>(),
             output.data<double>(),
             batch, channels, height, width,
-            kernel_size, stride, padding, dilation,
+            kernel_h, kernel_w, stride_h, stride_w,
+            padding_h, padding_w, dilation_h, dilation_w,
             out_h, out_w
         );
     } else {
@@ -504,23 +522,31 @@ auto unfold_kernel(const Tensor& input,
     return output;
 }
 
-// Fold host function
+// Fold host function (LL.3: per-axis kernel/stride/padding/dilation)
 auto fold_kernel(const Tensor& input,
                  const std::vector<int64_t>& output_size,
-                 int64_t kernel_size,
-                 int64_t stride,
-                 int64_t padding,
-                 int64_t dilation,
+                 int64_t kernel_h,
+                 int64_t kernel_w,
+                 int64_t stride_h,
+                 int64_t stride_w,
+                 int64_t padding_h,
+                 int64_t padding_w,
+                 int64_t dilation_h,
+                 int64_t dilation_w,
                  hipStream_t stream) -> Tensor {
     // Float16 upcast: convert to Float32, compute, convert back
     if (input.dtype() == DType::Float16) {
-        return fold_kernel(input.to(DType::Float32), output_size, kernel_size, stride, padding, dilation, stream)
+        return fold_kernel(input.to(DType::Float32), output_size,
+            kernel_h, kernel_w, stride_h, stride_w,
+            padding_h, padding_w, dilation_h, dilation_w, stream)
             .to(DType::Float16);
     }
 
     // BFloat16 upcast: convert to Float32, compute, convert back
     if (input.dtype() == DType::BFloat16) {
-        return fold_kernel(input.to(DType::Float32), output_size, kernel_size, stride, padding, dilation, stream)
+        return fold_kernel(input.to(DType::Float32), output_size,
+            kernel_h, kernel_w, stride_h, stride_w,
+            padding_h, padding_w, dilation_h, dilation_w, stream)
             .to(DType::BFloat16);
     }
 
@@ -529,13 +555,13 @@ auto fold_kernel(const Tensor& input,
     int64_t col_channels = shape[1];
     int64_t num_blocks = shape[2];
 
-    int64_t channels = col_channels / (kernel_size * kernel_size);
+    int64_t channels = col_channels / (kernel_h * kernel_w);
     int64_t height = output_size[0];
     int64_t width = output_size[1];
 
     // Calculate expected dimensions
-    int64_t out_h = (height + 2 * padding - dilation * (kernel_size - 1) - 1) / stride + 1;
-    int64_t out_w = (width + 2 * padding - dilation * (kernel_size - 1) - 1) / stride + 1;
+    int64_t out_h = (height + 2 * padding_h - dilation_h * (kernel_h - 1) - 1) / stride_h + 1;
+    int64_t out_w = (width + 2 * padding_w - dilation_w * (kernel_w - 1) - 1) / stride_w + 1;
 
     // Create output tensor (initialized to zero)
     std::vector<int64_t> output_shape = {batch, channels, height, width};
@@ -555,7 +581,8 @@ auto fold_kernel(const Tensor& input,
             input.data<float>(),
             output.data<float>(),
             batch, channels, height, width,
-            kernel_size, stride, padding, dilation,
+            kernel_h, kernel_w, stride_h, stride_w,
+            padding_h, padding_w, dilation_h, dilation_w,
             out_h, out_w
         );
     } else if (input.dtype() == DType::Float64) {
@@ -564,7 +591,8 @@ auto fold_kernel(const Tensor& input,
             input.data<double>(),
             output.data<double>(),
             batch, channels, height, width,
-            kernel_size, stride, padding, dilation,
+            kernel_h, kernel_w, stride_h, stride_w,
+            padding_h, padding_w, dilation_h, dilation_w,
             out_h, out_w
         );
     } else {

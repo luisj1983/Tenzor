@@ -81,13 +81,16 @@ auto AveragedModel::update_parameters(const std::vector<std::shared_ptr<Variable
             continue;
         }
 
-        // avg = (avg * n + param) / (n + 1)
+        // LL.5: PyTorch convention for numerically stable running mean —
+        // avg += (param - avg) / (n + 1). The (avg * n + param) / (n+1) form
+        // overflows at large n because avg*n grows linearly without bound.
         auto scalar = [&](double value) -> Tensor {
             return full({1}, value, state_dt, param.device());
         };
 
-        averaged_params_[i] = (averaged_params_[i] * scalar(static_cast<double>(n_averaged_))
-                               + param_hi) * scalar(1.0 / static_cast<double>(n_averaged_ + 1));
+        averaged_params_[i] = averaged_params_[i] +
+            (param_hi - averaged_params_[i]) *
+            scalar(1.0 / static_cast<double>(n_averaged_ + 1));
     }
 
     n_averaged_++;

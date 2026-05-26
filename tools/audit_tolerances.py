@@ -245,6 +245,14 @@ def main() -> int:
         "Use after legitimately introducing or removing a justified relaxed "
         "tolerance.",
     )
+    ap.add_argument(
+        "--check-baseline-clean",
+        action="store_true",
+        help="LL.20 (audit-9): fail (exit 1) if any baseline entry does NOT "
+        "match a current scan violation. Catches stale-drift — e.g. a test "
+        "tightened its tolerance but the baseline entry was forgotten. Run "
+        "alongside --strict for full freshness coverage.",
+    )
     args = ap.parse_args()
 
     root = Path(args.root)
@@ -277,6 +285,37 @@ def main() -> int:
         )
         print(f"baseline updated: {len(tokens)} entries -> {baseline_path}")
         return 0
+
+    # LL.20 (audit-9): --check-baseline-clean — fail if any baseline entry
+    # does NOT correspond to a current scan violation (i.e. a tolerance was
+    # tightened or a test was deleted but the baseline still lists it). Runs
+    # independently of --strict so it can be wired into CI as a separate
+    # ratchet step.
+    if args.check_baseline_clean:
+        baseline = _load_baseline(baseline_path)
+        current_tokens = {
+            _violation_token(p, tn, v) for (p, _, _, tn, v) in violations
+        }
+        stale = sorted(baseline - current_tokens)
+        if stale:
+            print(
+                f"LL.20: {len(stale)} stale baseline entry/entries — present in "
+                f"{baseline_path} but no longer match a current scan:"
+            )
+            for token in stale:
+                print(f"  {token}")
+            print(
+                "\nDrop these from the baseline (or regenerate with "
+                "`--update-baseline`)."
+            )
+            return 1
+        print(
+            f"OK: baseline clean — all {len(baseline)} entry/entries match "
+            f"a current scan violation."
+        )
+        # Fall through so --strict can also run if requested.
+        if not args.strict:
+            return 0
 
     if not violations:
         print("OK: no unjustified loose tolerances found.")

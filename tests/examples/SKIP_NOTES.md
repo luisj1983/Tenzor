@@ -4,36 +4,22 @@ This file lists showcase autograd examples that were intentionally not wired
 into `tests/examples/test_all_autograd_examples.cpp` and the reason for
 each skip.
 
-## 11_chat_ai
+## (no showcase examples currently deferred)
 
-**Reason**: GRU seq2seq with Bahdanau attention (424-line file) plus an
-interactive REPL after training. Already has a synthetic 6-pair fallback
-when `--data` is omitted (see `load_pairs` returning a hardcoded list of
-greetings if the file fails to open), so the data-loading concern from PR
-2.1 isn't actually a blocker.
+**audit-9 LL.19 (2026-05-26)**: `11_chat_ai` was previously listed here as
+deferred. It was wired into `ExampleRegression` by audit-8 II.15 — its
+runner now lives at `examples/cpp/showcase/11_chat_ai/autograd_runner.{cpp,hpp}`
+and is invoked from `tests/examples/test_all_autograd_examples.cpp`. The
+historical rationale (audit-3 / audit-4 W.28 re-evaluation) is preserved in
+git history; the deferral itself is resolved.
 
-The genuine reason it's still Tier B (after re-evaluation in PR 2.1
-extension): the autograd surface this example exercises (matmul, GRU
-gates, Bahdanau attention via softmax+matmul, log_softmax cross-entropy)
-is already covered by the wired examples — `07_rnn_sequence` covers GRU
-backward, `16_self_attention` covers attention backward, every example
-covers cross-entropy. Adding chat_ai would extract a 50+ line runner that
-duplicates the helpers (CharVocab, gru_step, bahdanau_context, sampling)
-without surfacing a new bug class.
+## Non-showcase examples deferred (audit-9 KK.27, 2026-05-26)
 
-If a future Tenzor change introduces a feature unique to chat_ai
-(e.g., changes to char-level tokenization or the specific Bahdanau
-formulation), wire it then. The synthetic-fallback path in `load_pairs`
-already makes the runner test-friendly — it's purely the runner-extraction
-labour that's deferred.
-
-The standalone showcase exe still builds and runs as before.
-
-**audit-4 W.28 (2026-05-24)**: re-evaluated; remains intentional. The
-autograd surface (GRU gates, Bahdanau attention, log_softmax cross-entropy)
-is still fully covered by `07_rnn_sequence` and `16_self_attention`. No
-new chat_ai-specific tensor logic has landed since audit-3, so the
-deferred runner is still the right call.
+The following non-showcase examples are intentionally NOT wired into
+`ExampleRegression` because their build targets are disabled in
+`examples/CMakeLists.txt` pending upstream dependencies. Wiring an
+autograd_runner would require those same dependencies, so the runner
+extraction is deferred until the executable target is re-enabled.
 
 ## bert_zero_stage1 (audit-9 KK.27, 2026-05-26)
 

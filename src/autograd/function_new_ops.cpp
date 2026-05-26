@@ -1645,6 +1645,15 @@ auto LinalgVecdotBackward::backward(std::vector<Tensor> grad_outputs) -> std::ve
     auto a_shape = std::vector<int64_t>(a.shape().begin(), a.shape().end());
     grad_expanded = expand(grad_expanded, a_shape);
 
+    // PyTorch convention: forward = sum(conj(a) * b, dim).
+    // Wirtinger gradients (real inputs: conj is identity, math unchanged):
+    //   grad_a = conj(grad) * b
+    //   grad_b = grad * conj(a)
+    if (a.is_complex()) {
+        auto grad_a = mul(tenzor::conj(grad_expanded), b);
+        auto grad_b = mul(grad_expanded, tenzor::conj(a));
+        return {grad_a, grad_b};
+    }
     auto grad_a = mul(grad_expanded, b);
     auto grad_b = mul(grad_expanded, a);
     return {grad_a, grad_b};
@@ -1663,6 +1672,15 @@ auto LinalgVecdotBackward::backward_with_variables(std::vector<Variable> grad_ou
                                          saved_tensors_[0].shape().end());
     grad_expanded = tenzor::expand(grad_expanded, a_shape);
 
+    // PyTorch convention: forward = sum(conj(a) * b, dim).
+    // Wirtinger gradients (real inputs: conj is identity, math unchanged):
+    //   grad_a = conj(grad) * b
+    //   grad_b = grad * conj(a)
+    if (saved_tensors_[0].is_complex()) {
+        Variable grad_a = tenzor::conj(grad_expanded) * b_var;
+        Variable grad_b = grad_expanded * tenzor::conj(a_var);
+        return {grad_a, grad_b};
+    }
     return {grad_expanded * b_var, grad_expanded * a_var};
 }
 

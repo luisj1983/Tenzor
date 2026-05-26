@@ -106,7 +106,8 @@ void register_jit(py::module_& m) {
         .def("to_string", &tenzor::jit::Graph::to_string,
              "Get string representation of graph")
         .def("topological_sort", &tenzor::jit::Graph::topological_sort)
-        .def("infer_types", &tenzor::jit::Graph::infer_types)
+        .def("infer_types", &tenzor::jit::Graph::infer_types,
+             py::call_guard<py::gil_scoped_release>())
         .def("__repr__", &tenzor::jit::Graph::to_string);
 
     py::class_<tenzor::jit::Tracer>(jit, "Tracer",
@@ -148,7 +149,8 @@ void register_jit(py::module_& m) {
              "Create compiler with optional default passes")
         .def("optimize", &tenzor::jit::Compiler::optimize,
              py::arg("graph"), py::arg("max_iterations") = 10,
-             "Optimize graph with all passes")
+             "Optimize graph with all passes",
+             py::call_guard<py::gil_scoped_release>())
         .def("set_verbose", &tenzor::jit::Compiler::set_verbose,
              py::arg("enable"),
              "Enable verbose logging")
@@ -166,7 +168,8 @@ void register_jit(py::module_& m) {
 
     jit.def("optimize_graph", &tenzor::jit::optimize_graph,
             py::arg("graph"),
-            "Apply standard optimizations to graph");
+            "Apply standard optimizations to graph",
+            py::call_guard<py::gil_scoped_release>());
 
     // Audit-8 II.11: serialise/deserialise are pure C++ disk I/O — no Python
     // objects touched. Drop the GIL across the call so other threads run.
@@ -194,7 +197,8 @@ void register_jit(py::module_& m) {
 
     jit.def("verify_graph", &tenzor::jit::verify_graph,
             py::arg("graph"),
-            "Verify graph integrity, returns list of errors");
+            "Verify graph integrity, returns list of errors",
+            py::call_guard<py::gil_scoped_release>());
 
     py::class_<tenzor::jit::CompiledModule,
                std::shared_ptr<tenzor::jit::CompiledModule>>(jit, "CompiledModule",
@@ -216,7 +220,8 @@ void register_jit(py::module_& m) {
              py::call_guard<py::gil_scoped_release>())
         .def("optimize_for_inference",
              &tenzor::jit::CompiledModule::optimize_for_inference,
-             "Apply inference-only optimization passes");
+             "Apply inference-only optimization passes",
+             py::call_guard<py::gil_scoped_release>());
 
     jit.def("trace_module",
             py::overload_cast<std::shared_ptr<tenzor::nn::Module>,

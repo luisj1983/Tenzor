@@ -6,17 +6,15 @@ name: Coverage Gates
 
 on:
   pull_request:
-    paths:
-      - 'include/tenzor/ops/op_id.hpp'
-      - 'tests/**'
-      - 'scripts/count_skips.py'
-      - 'scripts/audit_op_coverage.py'
-      # X.11: tooling-audit job — run when any of the linted sources or the
-      # tools themselves change. The tooling tools themselves are pure-Python
-      # so this also catches drift in tools/audit_tolerances_baseline.txt and
-      # tools/lint_test_contract_baseline.txt.
-      - 'tools/**'
-      - 'python/tenzor/**'
+    # LL.18 (audit-9): the previous `paths:` allowlist missed kernel-only PRs
+    # (src/backends/**/*.cpp, src/ops/**/*.cpp, include/tenzor/**/*.hpp other
+    # than op_id.hpp) which the tooling-audit job needs to run on — those PRs
+    # can introduce new untagged skips / tolerance regressions / dispatch
+    # gaps. Switch to `paths-ignore` so only pure documentation edits skip
+    # the gate; everything else (including kernels) runs it.
+    paths-ignore:
+      - '**/*.md'
+      - 'docs/**'
   push:
     branches: [main]
 

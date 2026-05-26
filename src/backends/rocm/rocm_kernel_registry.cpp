@@ -828,11 +828,18 @@ namespace rocm {
                                  hipStream_t stream) -> Tensor;
 
     // Vision operations (Unfold, Fold, Interpolate)
-    auto unfold_kernel(const Tensor& input, int64_t kernel_size, int64_t stride,
-                       int64_t padding, int64_t dilation, hipStream_t stream) -> Tensor;
+    auto unfold_kernel(const Tensor& input,
+                       int64_t kernel_h, int64_t kernel_w,
+                       int64_t stride_h, int64_t stride_w,
+                       int64_t padding_h, int64_t padding_w,
+                       int64_t dilation_h, int64_t dilation_w,
+                       hipStream_t stream) -> Tensor;
     auto fold_kernel(const Tensor& input, const std::vector<int64_t>& output_size,
-                     int64_t kernel_size, int64_t stride, int64_t padding,
-                     int64_t dilation, hipStream_t stream) -> Tensor;
+                     int64_t kernel_h, int64_t kernel_w,
+                     int64_t stride_h, int64_t stride_w,
+                     int64_t padding_h, int64_t padding_w,
+                     int64_t dilation_h, int64_t dilation_w,
+                     hipStream_t stream) -> Tensor;
     auto interpolate_kernel(const Tensor& input, const std::vector<int64_t>& size,
                             const std::string& mode, bool align_corners, hipStream_t stream) -> Tensor;
     // D3-followup ROCm: native atomicAdd-scatter bilinear backward.
@@ -4093,42 +4100,33 @@ void register_rocm_kernels(BackendDispatchTable& table) {
 
     // --- Vision Operations -----------------------------------------------------
     table.register_single_output_kernel(OpId::Unfold, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        // LL.3: per-axis Unfold accepts asymmetric kernel/stride/padding/dilation.
         const auto kernel_size = ::tenzor::backend::attrs::read_2d(attrs,
             AttrKey::KernelSize, AttrKey::KernelSizeH, AttrKey::KernelSizeW, 3);
         const auto stride   = ::tenzor::backend::attrs::stride_2d(attrs);
         const auto padding  = ::tenzor::backend::attrs::padding_2d(attrs);
         const auto dilation = ::tenzor::backend::attrs::dilation_2d(attrs);
-        // Phase 2.1: ROCm unfold kernel is scalar-only; reject asymmetric.
-        if (kernel_size[0] != kernel_size[1] || stride[0] != stride[1] ||
-            padding[0] != padding[1] || dilation[0] != dilation[1]) {
-            throw std::invalid_argument(
-                "Unfold (ROCm): backend kernel only supports symmetric kernel/stride/padding/dilation; "
-                "got kernel=" + std::to_string(kernel_size[0]) + "x" + std::to_string(kernel_size[1]) +
-                ", stride=" + std::to_string(stride[0]) + "x" + std::to_string(stride[1]) +
-                ", padding=" + std::to_string(padding[0]) + "x" + std::to_string(padding[1]) +
-                ", dilation=" + std::to_string(dilation[0]) + "x" + std::to_string(dilation[1]));
-        }
         return rocm::unfold_kernel(inputs[0],
-            kernel_size[0], stride[0], padding[0], dilation[0], get_hip_stream(attrs));
+            kernel_size[0], kernel_size[1],
+            stride[0], stride[1],
+            padding[0], padding[1],
+            dilation[0], dilation[1],
+            get_hip_stream(attrs));
     });
     table.register_single_output_kernel(OpId::Fold, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        // LL.3: per-axis Fold accepts asymmetric kernel/stride/padding/dilation.
         auto output_size = attrs.get_int_list(AttrKey::OutputSize);
         const auto kernel_size = ::tenzor::backend::attrs::read_2d(attrs,
             AttrKey::KernelSize, AttrKey::KernelSizeH, AttrKey::KernelSizeW, 3);
         const auto stride   = ::tenzor::backend::attrs::stride_2d(attrs);
         const auto padding  = ::tenzor::backend::attrs::padding_2d(attrs);
         const auto dilation = ::tenzor::backend::attrs::dilation_2d(attrs);
-        if (kernel_size[0] != kernel_size[1] || stride[0] != stride[1] ||
-            padding[0] != padding[1] || dilation[0] != dilation[1]) {
-            throw std::invalid_argument(
-                "Fold (ROCm): backend kernel only supports symmetric kernel/stride/padding/dilation; "
-                "got kernel=" + std::to_string(kernel_size[0]) + "x" + std::to_string(kernel_size[1]) +
-                ", stride=" + std::to_string(stride[0]) + "x" + std::to_string(stride[1]) +
-                ", padding=" + std::to_string(padding[0]) + "x" + std::to_string(padding[1]) +
-                ", dilation=" + std::to_string(dilation[0]) + "x" + std::to_string(dilation[1]));
-        }
         return rocm::fold_kernel(inputs[0], output_size,
-            kernel_size[0], stride[0], padding[0], dilation[0], get_hip_stream(attrs));
+            kernel_size[0], kernel_size[1],
+            stride[0], stride[1],
+            padding[0], padding[1],
+            dilation[0], dilation[1],
+            get_hip_stream(attrs));
     });
     table.register_single_output_kernel(OpId::Interpolate, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
         auto size = attrs.get_int_list(AttrKey::OutputSize);

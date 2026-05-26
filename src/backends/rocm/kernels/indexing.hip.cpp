@@ -287,6 +287,9 @@ auto scatter_hip(
     // Normalize dimension
     int64_t ndim = output.ndim();
     if (dim < 0) dim += ndim;
+    if (dim < 0 || dim >= ndim) {
+        throw std::out_of_range("scatter_hip: dim out of range");
+    }
 
     // Calculate dimensions
     int64_t outer_size = 1;
@@ -1580,6 +1583,9 @@ auto scatter_hip(
     // Normalize dimension
     int64_t ndim = output.ndim();
     if (dim < 0) dim += ndim;
+    if (dim < 0 || dim >= ndim) {
+        throw std::out_of_range("scatter_hip: dim out of range");
+    }
 
     int64_t outer_size = 1;
     for (int64_t i = 0; i < dim; ++i) {

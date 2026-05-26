@@ -373,7 +373,9 @@ OneCycleLR::OneCycleLR(
     double final_div_factor)
     : max_lr_(max_lr), pct_start_(pct_start),
       div_factor_(div_factor), final_div_factor_(final_div_factor),
-      anneal_strategy_(anneal_strategy), step_count_(0) {
+      anneal_strategy_(anneal_strategy), step_count_(-1) {
+    // LL.6: step_count_ starts at -1 so the first step() advances it to 0
+    // before computing — PyTorch convention.
 
     optimizer_.sgd = &optimizer;
     optimizer_type_ = OptimizerType::SGD;
@@ -393,10 +395,9 @@ OneCycleLR::OneCycleLR(
         throw std::invalid_argument("OneCycleLR: anneal_strategy must be 'cos' or 'linear'");
     }
 
-    // Set initial LR
-    double initial_lr = max_lr_ / div_factor_;
-    last_lr_ = initial_lr;
-    optimizer.set_lr(initial_lr);
+    // LL.6: Don't pre-set the optimizer LR here. The first step() call will
+    // increment step_count_ to 0 and compute the same initial LR.
+    last_lr_ = max_lr_ / div_factor_;
 }
 
 OneCycleLR::OneCycleLR(
@@ -411,7 +412,8 @@ OneCycleLR::OneCycleLR(
     double final_div_factor)
     : max_lr_(max_lr), pct_start_(pct_start),
       div_factor_(div_factor), final_div_factor_(final_div_factor),
-      anneal_strategy_(anneal_strategy), step_count_(0) {
+      anneal_strategy_(anneal_strategy), step_count_(-1) {
+    // LL.6: step_count_ starts at -1 so the first step() advances to 0.
 
     optimizer_.adam = &optimizer;
     optimizer_type_ = OptimizerType::Adam;
@@ -430,9 +432,8 @@ OneCycleLR::OneCycleLR(
         throw std::invalid_argument("OneCycleLR: anneal_strategy must be 'cos' or 'linear'");
     }
 
-    double initial_lr = max_lr_ / div_factor_;
-    last_lr_ = initial_lr;
-    optimizer.set_lr(initial_lr);
+    // LL.6: don't pre-set optimizer LR; first step() yields same value.
+    last_lr_ = max_lr_ / div_factor_;
 }
 
 OneCycleLR::OneCycleLR(
@@ -447,7 +448,8 @@ OneCycleLR::OneCycleLR(
     double final_div_factor)
     : max_lr_(max_lr), pct_start_(pct_start),
       div_factor_(div_factor), final_div_factor_(final_div_factor),
-      anneal_strategy_(anneal_strategy), step_count_(0) {
+      anneal_strategy_(anneal_strategy), step_count_(-1) {
+    // LL.6: step_count_ starts at -1 so the first step() advances to 0.
 
     optimizer_.adamw = &optimizer;
     optimizer_type_ = OptimizerType::AdamW;
@@ -466,9 +468,8 @@ OneCycleLR::OneCycleLR(
         throw std::invalid_argument("OneCycleLR: anneal_strategy must be 'cos' or 'linear'");
     }
 
-    double initial_lr = max_lr_ / div_factor_;
-    last_lr_ = initial_lr;
-    optimizer.set_lr(initial_lr);
+    // LL.6: don't pre-set optimizer LR; first step() yields same value.
+    last_lr_ = max_lr_ / div_factor_;
 }
 
 auto OneCycleLR::anneal_func(double start, double end, double pct) -> double {
@@ -502,10 +503,11 @@ auto OneCycleLR::compute_lr() -> double {
 }
 
 auto OneCycleLR::step() -> void {
+    // LL.6: increment FIRST, then compute (PyTorch convention).
+    step_count_++;
     double new_lr = compute_lr();
     last_lr_ = new_lr;
     set_optimizer_lr(new_lr);
-    step_count_++;
 }
 
 auto OneCycleLR::get_current_lr() const -> double {
@@ -602,19 +604,20 @@ CosineAnnealingWarmRestarts::CosineAnnealingWarmRestarts(
 }
 
 auto CosineAnnealingWarmRestarts::step() -> void {
+    // LL.6: increment FIRST (both step_count_ and T_cur_), THEN compute LR
+    // and handle restart roll-over (PyTorch convention).
     step_count_++;
-
-    // Update learning rate for CURRENT T_cur position
-    update_lr();
-
-    // THEN increment T_cur
     T_cur_++;
 
-    // Check if we've completed a restart period and need to reset
+    // Check if we've completed a restart period and need to reset before
+    // computing the new LR for the upcoming step.
     if (T_cur_ >= T_i_) {
-        T_cur_ = 0;  // Reset to start of new period
-        T_i_ *= T_mult_;  // Increase period length
+        T_cur_ = 0;          // Reset to start of new period
+        T_i_ *= T_mult_;     // Increase period length
     }
+
+    // Update learning rate for the CURRENT (post-increment) T_cur position.
+    update_lr();
 }
 
 auto CosineAnnealingWarmRestarts::update_lr() -> void {

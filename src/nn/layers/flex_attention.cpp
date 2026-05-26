@@ -176,7 +176,9 @@ auto causal_score_mod() -> ScoreModFn {
         // For Float16 we use -1e4 (fits in Float16 range, ~max negative
         // before overflow), for other dtypes -inf. softmax(-inf)=0 and
         // softmax(-1e4 + anything reasonable)≈0 so behavior matches.
-        bool use_neg_inf = (score.dtype() != DType::Float16);
+        // LL.7: BF16 also overflows on -inf cast → must use -1e4 sentinel too.
+        bool use_neg_inf = (score.dtype() != DType::Float16 &&
+                            score.dtype() != DType::BFloat16);
         double mask_val = use_neg_inf
             ? -std::numeric_limits<double>::infinity()
             : -1e4;

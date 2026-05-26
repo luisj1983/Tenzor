@@ -1289,6 +1289,18 @@ PYBIND11_MODULE(tenzor_core, m) {
             // ``__enter__`` would overwrite the first guard. Single-slot
             // semantics: a fresh ``autocast(...)`` per ``with`` block is
             // the supported pattern.
+            //
+            // LL.10: also reject re-entry on the same instance within a
+            // single thread (``with ac: with ac: ...``). The inner
+            // ``__enter__`` would otherwise overwrite ``guard_`` and
+            // destroy the outer guard early, silently corrupting the
+            // thread-local autocast stack. Matches PyTorch's documented
+            // behaviour: each ``with`` needs a fresh ``autocast(...)``.
+            if (guard_) {
+                throw std::runtime_error(
+                    "autocast context is not reentrant — use a fresh "
+                    "tz.amp.Autocast() per nested scope");
+            }
             guard_ = std::make_unique<tenzor::nn::amp::Autocast>(enabled_, dtype_, device_type_);
         }
 
@@ -2878,6 +2890,7 @@ void bind_compression(py::module& m) {
     profiler.def("export_chrome_trace", [](const std::string& path) {
         tenzor::AutogradProfiler::instance().export_chrome_trace(path);
     }, py::arg("path"),
+    py::call_guard<py::gil_scoped_release>(),
     "Export recorded trace events to Chrome Trace Event Format JSON file");
 
     // =========================================================================

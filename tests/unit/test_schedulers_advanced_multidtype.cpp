@@ -293,23 +293,27 @@ TEST_P(SchedulerAdvancedMultiDTypeTest, OneCycleLR_BasicCycle) {
     int total_steps = 100;
     auto scheduler = OneCycleLR(optimizer, 0.1, total_steps, -1, -1, 0.3, "cos", 25.0, 10000.0);
 
-    // Initial LR should be max_lr / div_factor
+    // Initial LR should be max_lr / div_factor. Per LL.6, OneCycleLR's
+    // internal step_count_ starts at -1; the first step() call advances
+    // it to 0 and computes the first warmup LR.
     EXPECT_NEAR(scheduler.get_last_lr(), 0.004, 1e-6);
-    EXPECT_EQ(scheduler.get_step(), 0);
+    EXPECT_EQ(scheduler.get_step(), -1);
 
-    // Phase 1: Warmup (30% of steps)
+    // Phase 1: Warmup (30% of steps).
+    // Peak == max_lr is hit at step == warmup_steps (first annealing call,
+    // pct=0); step 31 times so lrs[30] reflects the peak.
     std::vector<double> lrs;
-    for (int i = 0; i < 30; i++) {
+    for (int i = 0; i < 31; i++) {
         scheduler.step();
         lrs.push_back(scheduler.get_last_lr());
     }
     // LR should increase during warmup
-    EXPECT_GT(lrs[29], lrs[0]);
-    EXPECT_NEAR(lrs[29], 0.1, 0.01);
+    EXPECT_GT(lrs[30], lrs[0]);
+    EXPECT_NEAR(lrs[30], 0.1, 1e-6);
 
     // Phase 2: Annealing
     double lr_at_30 = scheduler.get_last_lr();
-    for (int i = 30; i < 100; i++) {
+    for (int i = 31; i < 100; i++) {
         scheduler.step();
         lrs.push_back(scheduler.get_last_lr());
     }
@@ -346,12 +350,14 @@ TEST_P(SchedulerAdvancedMultiDTypeTest, OneCycleLR_CustomDivFactors) {
     // Initial LR = max_lr / div_factor
     EXPECT_NEAR(scheduler.get_last_lr(), 0.1, 1e-6);
 
-    for (int i = 0; i < 100; i++) {
+    // Need total_steps+1 calls to land last_lr_ on the final value (see
+    // matching comment in test_schedulers_advanced.cpp).
+    for (int i = 0; i < 101; i++) {
         scheduler.step();
     }
 
     // Final LR = max_lr / final_div_factor
-    EXPECT_NEAR(scheduler.get_last_lr(), 0.01, 1e-3);
+    EXPECT_NEAR(scheduler.get_last_lr(), 0.01, 1e-6);
 }
 
 //==============================================================================
@@ -369,23 +375,27 @@ TEST_P(SchedulerAdvancedMultiDTypeTest, CosineAnnealingWarmRestarts_BasicRestart
     EXPECT_EQ(scheduler.get_T_cur(), 0);
     EXPECT_EQ(scheduler.get_T_i(), 10);
 
-    // First cycle
+    // First cycle: T_0 - 1 == 9 steps land at the eta_min trough; the 10th
+    // step triggers the restart and bounces back to base_lr (see
+    // test_schedulers_advanced.cpp for the matching analysis).
     std::vector<double> lrs_cycle1;
-    for (int i = 0; i < 10; i++) {
+    for (int i = 0; i < 9; i++) {
         scheduler.step();
         lrs_cycle1.push_back(scheduler.get_last_lr());
     }
 
-    // LR should decrease during cycle
-    EXPECT_GT(lrs_cycle1[0], lrs_cycle1[9]);
-    EXPECT_NEAR(lrs_cycle1[9], 0.0, 0.01);
+    // LR should decrease during cycle and reach eta_min at T_cur == T_i - 1.
+    EXPECT_GT(lrs_cycle1[0], lrs_cycle1[8]);
+    EXPECT_NEAR(lrs_cycle1[8], 0.0, 1e-6);
 
-    // After restart, T_cur should reset
+    // 10th call triggers the restart roll-over.
+    scheduler.step();
+
+    // After restart, T_cur should be 0.
     EXPECT_EQ(scheduler.get_T_cur(), 0);
 
-    // Second cycle should start high again
-    scheduler.step();
-    EXPECT_NEAR(scheduler.get_last_lr(), 1.0, 0.01);
+    // The restart step itself put us back at base_lr.
+    EXPECT_NEAR(scheduler.get_last_lr(), 1.0, 1e-6);
 }
 
 TEST_P(SchedulerAdvancedMultiDTypeTest, CosineAnnealingWarmRestarts_TMultiplier) {
@@ -419,13 +429,15 @@ TEST_P(SchedulerAdvancedMultiDTypeTest, CosineAnnealingWarmRestarts_EtaMin) {
 
     auto scheduler = CosineAnnealingWarmRestarts(optimizer, 10, 1, 0.1);  // eta_min=0.1
 
-    for (int i = 0; i < 10; i++) {
+    // T_0 - 1 == 9 steps to land at the eta_min trough; a 10th step would
+    // trigger the restart.
+    for (int i = 0; i < 9; i++) {
         scheduler.step();
     }
 
-    // LR should not go below eta_min
+    // LR should not go below eta_min and should reach eta_min at T_cur == T_i - 1.
     EXPECT_GE(scheduler.get_last_lr(), 0.1);
-    EXPECT_NEAR(scheduler.get_last_lr(), 0.1, 0.01);
+    EXPECT_NEAR(scheduler.get_last_lr(), 0.1, 1e-6);
 }
 
 TEST_P(SchedulerAdvancedMultiDTypeTest, CosineAnnealingWarmRestarts_MultipleRestarts) {
@@ -441,10 +453,12 @@ TEST_P(SchedulerAdvancedMultiDTypeTest, CosineAnnealingWarmRestarts_MultipleRest
         all_lrs.push_back(scheduler.get_last_lr());
     }
 
-    // Check that LR restarts at cycles
-    EXPECT_GT(all_lrs[5], all_lrs[4]);   // Restart at step 5
-    EXPECT_GT(all_lrs[10], all_lrs[9]);  // Restart at step 10
-    EXPECT_GT(all_lrs[15], all_lrs[14]); // Restart at step 15
+    // Check that LR restarts at cycles. With LL.6 increment-first semantics
+    // the post-reset peaks sit at indices 4, 9, 14 (see the matching
+    // analysis in test_schedulers_advanced.cpp).
+    EXPECT_GT(all_lrs[4], all_lrs[3]);    // Restart at step 5 (index 4)
+    EXPECT_GT(all_lrs[9], all_lrs[8]);    // Restart at step 10 (index 9)
+    EXPECT_GT(all_lrs[14], all_lrs[13]);  // Restart at step 15 (index 14)
 }
 
 //==============================================================================

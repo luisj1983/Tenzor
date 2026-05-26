@@ -254,23 +254,28 @@ TEST(AdvancedSchedulerTest, OneCycleLR_BasicCycle) {
     int total_steps = 100;
     auto scheduler = OneCycleLR(optimizer, 0.1, total_steps, -1, -1, 0.3, "cos", 25.0, 10000.0);
 
-    // Initial LR should be max_lr / div_factor = 0.1 / 25 = 0.004
+    // Initial LR should be max_lr / div_factor = 0.1 / 25 = 0.004.
+    // Per LL.6, OneCycleLR's internal step_count_ starts at -1; the first
+    // step() call advances it to 0 and computes the first warmup LR.
     EXPECT_NEAR(scheduler.get_last_lr(), 0.004, 1e-6);
-    EXPECT_EQ(scheduler.get_step(), 0);
+    EXPECT_EQ(scheduler.get_step(), -1);
 
-    // Phase 1: Warmup (30% of steps)
+    // Phase 1: Warmup (30% of steps).
+    // Per OneCycleLR semantics, max_lr is hit exactly at step == warmup_steps
+    // (the first compute_lr call entering the annealing branch with pct=0).
+    // So we step 31 times and the 31st recorded LR (lrs[30]) is the peak.
     std::vector<double> lrs;
-    for (int i = 0; i < 30; i++) {
+    for (int i = 0; i < 31; i++) {
         scheduler.step();
         lrs.push_back(scheduler.get_last_lr());
     }
     // LR should increase during warmup
-    EXPECT_GT(lrs[29], lrs[0]);
-    EXPECT_NEAR(lrs[29], 0.1, 0.01);  // Should be near max_lr
+    EXPECT_GT(lrs[30], lrs[0]);
+    EXPECT_NEAR(lrs[30], 0.1, 1e-6);  // Peak at warmup boundary == max_lr
 
     // Phase 2: Annealing (70% of steps)
     double lr_at_30 = scheduler.get_last_lr();
-    for (int i = 30; i < 100; i++) {
+    for (int i = 31; i < 100; i++) {
         scheduler.step();
         lrs.push_back(scheduler.get_last_lr());
     }
@@ -308,12 +313,15 @@ TEST(AdvancedSchedulerTest, OneCycleLR_CustomDivFactors) {
     // Initial LR = max_lr / div_factor = 1.0 / 10.0 = 0.1
     EXPECT_NEAR(scheduler.get_last_lr(), 0.1, 1e-6);
 
-    for (int i = 0; i < 100; i++) {
+    // OneCycleLR's compute_lr() short-circuits to the final value only once
+    // step_count_ >= total_steps_; step() reads step_count_ then increments,
+    // so we need total_steps_+1 calls for last_lr_ to reflect the final LR.
+    for (int i = 0; i < 101; i++) {
         scheduler.step();
     }
 
     // Final LR = max_lr / final_div_factor = 1.0 / 100.0 = 0.01
-    EXPECT_NEAR(scheduler.get_last_lr(), 0.01, 1e-3);
+    EXPECT_NEAR(scheduler.get_last_lr(), 0.01, 1e-6);
 }
 
 TEST(AdvancedSchedulerTest, OneCycleLR_PctStartVariation) {
@@ -350,23 +358,29 @@ TEST(AdvancedSchedulerTest, CosineAnnealingWarmRestarts_BasicRestart) {
     EXPECT_EQ(scheduler.get_T_cur(), 0);
     EXPECT_EQ(scheduler.get_T_i(), 10);
 
-    // First cycle (10 steps)
+    // First cycle: step T_0 - 1 == 9 times so T_cur visits 1..9 and the
+    // LR descends to eta_min on the 9th call (period == T_0 - 1 in
+    // update_lr, so T_cur == 9 yields cos(pi) == -1 == eta_min).
+    // The 10th call triggers the restart roll-over.
     std::vector<double> lrs_cycle1;
-    for (int i = 0; i < 10; i++) {
+    for (int i = 0; i < 9; i++) {
         scheduler.step();
         lrs_cycle1.push_back(scheduler.get_last_lr());
     }
 
-    // LR should decrease during cycle
-    EXPECT_GT(lrs_cycle1[0], lrs_cycle1[9]);
-    EXPECT_NEAR(lrs_cycle1[9], 0.0, 0.01);  // Near eta_min
+    // LR should decrease during cycle and reach eta_min at T_cur == T_i - 1.
+    EXPECT_GT(lrs_cycle1[0], lrs_cycle1[8]);
+    EXPECT_NEAR(lrs_cycle1[8], 0.0, 1e-6);  // Near eta_min
 
-    // After restart, T_cur should reset
+    // 10th call triggers the restart: T_cur rolls 10 -> 0, LR recomputes
+    // at T_cur == 0 (which is base_lr == 1.0).
+    scheduler.step();
+
+    // After restart, T_cur should be 0.
     EXPECT_EQ(scheduler.get_T_cur(), 0);
 
-    // Second cycle should start high again
-    scheduler.step();
-    EXPECT_NEAR(scheduler.get_last_lr(), 1.0, 0.01);
+    // The restart step itself put us back at base_lr.
+    EXPECT_NEAR(scheduler.get_last_lr(), 1.0, 1e-6);
 }
 
 TEST(AdvancedSchedulerTest, CosineAnnealingWarmRestarts_TMultiplier) {
@@ -400,13 +414,16 @@ TEST(AdvancedSchedulerTest, CosineAnnealingWarmRestarts_EtaMin) {
 
     auto scheduler = CosineAnnealingWarmRestarts(optimizer, 10, 1, 0.1);  // eta_min=0.1
 
-    for (int i = 0; i < 10; i++) {
+    // T_0 - 1 == 9 steps to land at T_cur == 9 (bottom of cycle, == eta_min).
+    // The 10th step would trigger the restart and bounce back to base_lr.
+    for (int i = 0; i < 9; i++) {
         scheduler.step();
     }
 
-    // LR should not go below eta_min
+    // LR should not go below eta_min and should reach eta_min exactly at
+    // T_cur == T_i - 1.
     EXPECT_GE(scheduler.get_last_lr(), 0.1);
-    EXPECT_NEAR(scheduler.get_last_lr(), 0.1, 0.01);
+    EXPECT_NEAR(scheduler.get_last_lr(), 0.1, 1e-6);
 }
 
 TEST(AdvancedSchedulerTest, CosineAnnealingWarmRestarts_MultipleRestarts) {
@@ -422,11 +439,15 @@ TEST(AdvancedSchedulerTest, CosineAnnealingWarmRestarts_MultipleRestarts) {
         all_lrs.push_back(scheduler.get_last_lr());
     }
 
-    // Check that LR restarts (jumps back up) at cycles
-    // Restarts should occur at steps 5, 10, 15, 20
-    EXPECT_GT(all_lrs[5], all_lrs[4]);   // Restart at step 5
-    EXPECT_GT(all_lrs[10], all_lrs[9]);  // Restart at step 10
-    EXPECT_GT(all_lrs[15], all_lrs[14]); // Restart at step 15
+    // Check that LR restarts (jumps back up) at cycles.
+    // With T_0 == 5 and the LL.6 increment-first semantics, each restart
+    // lands on the 5th step of its period: T_cur counts 1..5 then resets,
+    // and update_lr at the post-reset T_cur == 0 gives base_lr. So the
+    // observed peaks sit at indices 4, 9, 14 (one before what naive
+    // 1-indexed counting would suggest).
+    EXPECT_GT(all_lrs[4], all_lrs[3]);    // Restart at step 5 (index 4)
+    EXPECT_GT(all_lrs[9], all_lrs[8]);    // Restart at step 10 (index 9)
+    EXPECT_GT(all_lrs[14], all_lrs[13]);  // Restart at step 15 (index 14)
 }
 
 //==============================================================================

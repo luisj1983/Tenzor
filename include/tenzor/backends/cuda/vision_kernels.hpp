@@ -14,22 +14,24 @@ namespace cuda {
 
 /**
  * @brief Unfold operation (im2col for sliding windows) - CUDA implementation
+ *        LL.3: per-axis kernel/stride/padding/dilation.
  */
 auto unfold_cuda(const Tensor& input,
-                 int64_t kernel_size,
-                 int64_t stride,
-                 int64_t padding,
-                 int64_t dilation) -> Tensor;
+                 int64_t kernel_h, int64_t kernel_w,
+                 int64_t stride_h, int64_t stride_w,
+                 int64_t padding_h, int64_t padding_w,
+                 int64_t dilation_h, int64_t dilation_w) -> Tensor;
 
 /**
  * @brief Fold operation (col2im for sliding windows) - CUDA implementation
+ *        LL.3: per-axis kernel/stride/padding/dilation.
  */
 auto fold_cuda(const Tensor& input,
                const std::vector<int64_t>& output_size,
-               int64_t kernel_size,
-               int64_t stride,
-               int64_t padding,
-               int64_t dilation) -> Tensor;
+               int64_t kernel_h, int64_t kernel_w,
+               int64_t stride_h, int64_t stride_w,
+               int64_t padding_h, int64_t padding_w,
+               int64_t dilation_h, int64_t dilation_w) -> Tensor;
 
 /**
  * @brief Interpolate (resize) operation - CUDA implementation

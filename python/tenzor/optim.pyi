@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 from typing import List, Dict, Any, Optional, Callable, Tuple, Iterable
-from tenzor import Tensor
+from tenzor import Tensor, Variable
 
 class ParamGroup:
     """Parameter group with per-group hyperparameter overrides.
@@ -55,7 +55,7 @@ class Optimizer:
     param_groups: List[ParamGroup]
     defaults: Dict[str, Any]
 
-    def __init__(self, params: Iterable[Tensor], defaults: Dict[str, Any]) -> None: ...
+    def __init__(self, params: Iterable[Variable], defaults: Dict[str, Any]) -> None: ...
 
     def zero_grad(self, set_to_none: bool = False) -> None: ...
     def step(self, closure: Optional[Callable[[], float]] = None) -> Optional[float]: ...
@@ -68,7 +68,7 @@ class SGD(Optimizer):
 
     def __init__(
         self,
-        params: Iterable[Tensor],
+        params: Iterable[Variable],
         lr: float,
         momentum: float = 0.0,
         dampening: float = 0.0,
@@ -83,7 +83,7 @@ class Adam(Optimizer):
 
     def __init__(
         self,
-        params: Iterable[Tensor],
+        params: Iterable[Variable],
         lr: float = 1e-3,
         betas: Tuple[float, float] = (0.9, 0.999),
         eps: float = 1e-8,
@@ -98,7 +98,7 @@ class AdamW(Optimizer):
 
     def __init__(
         self,
-        params: Iterable[Tensor],
+        params: Iterable[Variable],
         lr: float = 1e-3,
         betas: Tuple[float, float] = (0.9, 0.999),
         eps: float = 1e-8,
@@ -113,7 +113,7 @@ class RMSprop(Optimizer):
 
     def __init__(
         self,
-        params: Iterable[Tensor],
+        params: Iterable[Variable],
         lr: float = 1e-2,
         alpha: float = 0.99,
         eps: float = 1e-8,
@@ -129,7 +129,7 @@ class Adagrad(Optimizer):
 
     def __init__(
         self,
-        params: Iterable[Tensor],
+        params: Iterable[Variable],
         lr: float = 1e-2,
         lr_decay: float = 0.0,
         weight_decay: float = 0.0,
@@ -144,7 +144,7 @@ class Adadelta(Optimizer):
 
     def __init__(
         self,
-        params: Iterable[Tensor],
+        params: Iterable[Variable],
         lr: float = 1.0,
         rho: float = 0.9,
         eps: float = 1e-6,
@@ -158,7 +158,7 @@ class LBFGS(Optimizer):
 
     def __init__(
         self,
-        params: Iterable[Tensor],
+        params: Iterable[Variable],
         lr: float = 1.0,
         max_iter: int = 20,
         max_eval: int = -1,
@@ -174,7 +174,7 @@ class Adamax(Optimizer):
 
     def __init__(
         self,
-        params: Iterable[Tensor],
+        params: Iterable[Variable],
         lr: float = 2e-3,
         beta1: float = 0.9,
         beta2: float = 0.999,
@@ -189,7 +189,7 @@ class NAdam(Optimizer):
 
     def __init__(
         self,
-        params: Iterable[Tensor],
+        params: Iterable[Variable],
         lr: float = 2e-3,
         beta1: float = 0.9,
         beta2: float = 0.999,
@@ -205,7 +205,7 @@ class RAdam(Optimizer):
 
     def __init__(
         self,
-        params: Iterable[Tensor],
+        params: Iterable[Variable],
         lr: float = 1e-3,
         beta1: float = 0.9,
         beta2: float = 0.999,

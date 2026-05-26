@@ -2333,7 +2333,12 @@ auto matrix_norm(const Tensor& input, double ord) -> Tensor {
 }
 
 auto vecdot(const Tensor& a, const Tensor& b, int64_t dim) -> Tensor {
-    // No LAPACKE needed — implemented as sum(a * b, dim)
+    // PyTorch convention: vecdot(a, b) = sum(conj(a) * b, dim).
+    // For real-valued inputs conj is identity, so the math is unchanged.
+    if (a.is_complex()) {
+        auto product = tenzor::mul(tenzor::conj(a), b);
+        return tenzor::sum(product, dim, false);
+    }
     auto product = tenzor::mul(a, b);
     return tenzor::sum(product, dim, false);
 }

@@ -22,22 +22,18 @@ backend-agnostic infrastructure or already parity-parameterized.
 
 | File | Notes |
 |------|-------|
-| `tests/nn/quantization/test_awq_quantizer.cpp` | INT4/INT8 quantization. |
-| `tests/test_ciou_loss.cpp` | Vision loss — float32/float16 |
-| `tests/test_contiguous_fix.cpp` | Stride-pattern regression — especially valuable cross-backend. |
-| `tests/integration/test_cross_backend.cpp` | Already cross-backend conceptually; confirm fixture use. |
-| `tests/nn/quantization/test_gptq_quantizer.cpp` | |
-| `tests/autograd/test_higher_order_stubs_regression.cpp` | |
-| `tests/autograd/test_inference_mode_guard.cpp` | Per-backend guard semantics. |
-| `tests/test_linear_reshape_integration.cpp` | |
-| `tests/test_mask_rcnn_losses.cpp` | |
-| `tests/ops/test_new_ops.cpp` | New op smoke — add dtype axis. |
-| `tests/integration/test_nn.cpp` | |
-| `tests/nn/quantization/test_observers_extended.cpp` | |
-| `tests/test_quantization_conversion.cpp` | |
-| `tests/autograd/test_strict_linalg_grad.cpp` | |
-| `tests/integration/test_training.cpp` | |
-| `tests/integration/test_training_loops.cpp` |  |
+| `tests/nn/quantization/test_awq_quantizer.cpp` | INT4/INT8 quantization — TODO: add `test_awq_quantizer_multidtype.cpp` using `MultiBackendDTypeTest` (currently plain TEST). |
+| `tests/test_ciou_loss.cpp` | Vision loss — float32/float16 — TODO: add `test_ciou_loss_multidtype.cpp` using `MultiBackendDTypeTest`. |
+| `tests/test_contiguous_fix.cpp` | Stride-pattern regression — TODO: add `test_contiguous_fix_multidtype.cpp` using `MultiBackendDTypeTest` to sweep stride patterns across backends. |
+| `tests/nn/quantization/test_gptq_quantizer.cpp` | TODO: add `test_gptq_quantizer_multidtype.cpp` using `MultiBackendDTypeTest`. |
+| `tests/autograd/test_higher_order_stubs_regression.cpp` | TODO: add `test_higher_order_stubs_regression_multidtype.cpp` using `MultiBackendDTypeTest`. |
+| `tests/autograd/test_inference_mode_guard.cpp` | Per-backend guard semantics — TODO: add `test_inference_mode_guard_multidtype.cpp` using `MultiBackendDTypeTest`. |
+| `tests/test_linear_reshape_integration.cpp` | TODO: add `test_linear_reshape_integration_multidtype.cpp` using `MultiBackendDTypeTest`. |
+| `tests/test_mask_rcnn_losses.cpp` | TODO: add `test_mask_rcnn_losses_multidtype.cpp` using `MultiBackendDTypeTest`. |
+| `tests/nn/quantization/test_observers_extended.cpp` | TODO: add `test_observers_extended_multidtype.cpp` using `MultiBackendDTypeTest`. |
+| `tests/test_quantization_conversion.cpp` | TODO: add `test_quantization_conversion_multidtype.cpp` using `MultiBackendDTypeTest`. |
+| `tests/autograd/test_strict_linalg_grad.cpp` | TODO: add `test_strict_linalg_grad_multidtype.cpp` using `MultiBackendDTypeTest`. |
+| `tests/integration/test_training_loops.cpp` | TODO: add `test_training_loops_multidtype.cpp` using `MultiBackendDTypeTest`. |
 
 <!--
 audit-8 II.18: the 5 entries below were marked "audit-6 CC.21: moved to
@@ -87,7 +83,7 @@ tests/test_autograd_transform.cpp            # audit-6 CC.21: justified as out o
 tests/nn/quantization/test_awq_quantizer.cpp
 tests/test_ciou_loss.cpp                     # audit-7 FF.31: justified — CIoU is a detection loss with a known PyTorch-equivalent CPU reference; cross-backend correctness comes from the per-op (matmul, exp, log) parity tests its forward path uses. Adding a 5-backend × 3-dtype sweep would re-test those ops, not the loss math.
 tests/test_contiguous_fix.cpp                # audit-7 FF.31: justified — regression test for a stride/contiguity bug in tensor.slice() that surfaces in scalar arithmetic. The fix lives in backend-agnostic Tensor layout code; per-backend stride parity is already covered by tests/backend_parity/test_stride_parity.cpp.
-tests/integration/test_cross_backend.cpp
+tests/integration/test_cross_backend.cpp     # audit-9 LL.16: confirmed cross-backend via TEST_P fixture (CrossBackendTest : public BackendTest). Fixture sweeps all built backends; dtype axis is intentionally CPU-anchored since the test verifies device-transfer round-trips and per-op consistency, not numeric parity across dtypes.
 tests/nn/quantization/test_gptq_quantizer.cpp
 tests/test_grad_accumulation.cpp             # audit-6 CC.21: justified as out of scope for audit-6 — already runs as multi-backend (TEST_P + BackendTest fixture). Tests GradientAccumulator state-machine (step count, flush, reset) which is dtype-orthogonal; numeric correctness comes from the wrapped optimizer's parity tests.
 tests/autograd/test_higher_order_contract.cpp # audit-6 CC.21: justified as out of scope for audit-6 — engine-level contract test for HigherOrderGradMode stub backwards (Error throws, Warn logs); CPU-only by design per file doc-comment, no backend or dtype variance.
@@ -96,12 +92,12 @@ tests/autograd/test_inference_mode_guard.cpp # audit-7 FF.31: justified — file
 tests/test_linear_reshape_integration.cpp
 tests/test_mask_rcnn_losses.cpp              # audit-7 FF.31: justified — Mask R-CNN loss correctness is per-component (BCE, smooth-L1, mask CE); the underlying ops have their own multi-backend / multi-dtype companions. The test pins Device::cpu() in SetUp and verifies loss-decomposition shapes/values, not numeric parity across backends.
 tests/test_minimal_training.cpp              # audit-6 CC.21 + audit-7 FF.31 re-review: confirmed as KNOWN-INTENTIONAL — single-run NaN-debug smoke test for an Adam training loop; cross-backend training is covered by integration/test_training.cpp and the backend_parity/ training-loop tests. No action needed.
-tests/ops/test_new_ops.cpp
-tests/integration/test_nn.cpp
+tests/ops/test_new_ops.cpp                   # audit-9 LL.16: confirmed cross-backend via TEST_P fixture (NewOpsTest : public MultiBackendDTypeTest). Already parametrised over 5 backends × 3 dtypes.
+tests/integration/test_nn.cpp                # audit-9 LL.16: confirmed cross-backend via TEST_P fixture (NNTest : public BackendTest). Integration coverage parametrised over backends; per-layer numeric parity comes from tests/nn/layers/*_multidtype.cpp companions.
 tests/nn/quantization/test_observers_extended.cpp
 tests/test_quantization_conversion.cpp
 tests/autograd/test_strict_linalg_grad.cpp
-tests/integration/test_training.cpp
+tests/integration/test_training.cpp          # audit-9 LL.16: confirmed cross-backend via TEST_P fixture (TrainingTest : public BackendTest). Integration coverage parametrised over backends; per-op numeric parity comes from backend_parity/ tests.
 tests/integration/test_training_loops.cpp
 
 # Grandfathered pre-existing gaps as of audit-3 baseline (2026-05-22). These

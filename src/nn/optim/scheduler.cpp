@@ -4,7 +4,9 @@
 #include "tenzor/nn/optim/rmsprop.hpp"
 #include "tenzor/nn/optim/adagrad.hpp"
 #include "tenzor/nn/optim/adadelta.hpp"
+#include <algorithm>
 #include <cmath>
+#include <cstdint>
 #include <cstring>
 #include <numbers>
 #include <stdexcept>
@@ -165,7 +167,10 @@ auto CosineAnnealingLR::update_lr() -> void {
     if (T_max_ == 0) {
         throw std::runtime_error("CosineAnnealingLR: T_max cannot be zero");
     }
-    double cosine_term = std::cos(std::numbers::pi * epoch_ / T_max_);
+    // LL.9: Clamp epoch to T_max so the cosine never rebounds below eta_min
+    // past the end of the schedule (PyTorch holds at eta_min after T_max).
+    const int64_t clamped_epoch = std::min<int64_t>(epoch_, T_max_);
+    double cosine_term = std::cos(std::numbers::pi * clamped_epoch / T_max_);
     double new_lr = eta_min_ + (base_lr_ - eta_min_) * (1.0 + cosine_term) / 2.0;
     last_lr_ = new_lr;
     optimizer_->set_lr(new_lr);
