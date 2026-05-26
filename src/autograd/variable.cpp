@@ -103,23 +103,30 @@ auto Variable::grad_variable() const -> const std::optional<Variable>& {
         throw std::runtime_error("Cannot access grad_variable of uninitialized Variable");
     }
     using OptVar = std::optional<Variable>;
-    if (!impl_->grad_with_graph_cache_storage_) {
-        impl_->grad_with_graph_cache_storage_.reset(
-            reinterpret_cast<char*>(new OptVar{}));
-    }
-    auto* cache = reinterpret_cast<OptVar*>(
-        impl_->grad_with_graph_cache_storage_.get());
-    if (impl_->grad_with_graph_impl_) {
-        if (!cache->has_value() ||
-            (*cache)->impl_ != impl_->grad_with_graph_impl_) {
-            Variable v;
-            v.impl_ = impl_->grad_with_graph_impl_;
-            *cache = std::move(v);
+    auto populate_cache = [&]() -> const std::optional<Variable>& {
+        if (!impl_->grad_with_graph_cache_storage_) {
+            impl_->grad_with_graph_cache_storage_.reset(
+                reinterpret_cast<char*>(new OptVar{}));
         }
-    } else {
-        cache->reset();
+        auto* cache = reinterpret_cast<OptVar*>(
+            impl_->grad_with_graph_cache_storage_.get());
+        if (impl_->grad_with_graph_impl_) {
+            if (!cache->has_value() ||
+                (*cache)->impl_ != impl_->grad_with_graph_impl_) {
+                Variable v;
+                v.impl_ = impl_->grad_with_graph_impl_;
+                *cache = std::move(v);
+            }
+        } else {
+            cache->reset();
+        }
+        return *cache;
+    };
+    if (impl_->thread_safe_.load(std::memory_order_acquire)) {
+        std::lock_guard lock(*impl_->grad_mutex_);
+        return populate_cache();
     }
-    return *cache;
+    return populate_cache();
 }
 
 auto Variable::has_grad() const -> bool {

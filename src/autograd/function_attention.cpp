@@ -542,9 +542,11 @@ auto FlashAttentionBackward::backward_with_variables(std::vector<Variable> grad_
                      "with dropout_p > 0 is not supported (structural zero stub).");
     }
     Variable dO = grad_outputs[0];
-    Variable Q(saved[0], false);
-    Variable K(saved[1], false);
-    Variable V(saved[2], false);
+    // audit-10 NN.1: prefer saved Variables (with grad_fn) when available so
+    // the second derivative path through Q/K/V projections stays connected.
+    Variable Q = has_saved_variables() ? saved_variables()[0] : Variable(saved[0], false);
+    Variable K = has_saved_variables() ? saved_variables()[1] : Variable(saved[1], false);
+    Variable V = has_saved_variables() ? saved_variables()[2] : Variable(saved[2], false);
     return composed_attention_backward_variable(dO, Q, K, V, scale_, causal_);
 }
 
@@ -559,9 +561,10 @@ auto FusedAttentionBackward::backward_with_variables(std::vector<Variable> grad_
     TENZOR_CHECK(saved.size() >= 4,
                  "FusedAttentionBackward::backward_with_variables: not enough saved tensors");
     Variable dO = grad_outputs[0];
-    Variable Q(saved[0], false);
-    Variable K(saved[1], false);
-    Variable V(saved[2], false);
+    // audit-10 NN.1: see FlashAttentionBackward — preserve Q/K/V graph.
+    Variable Q = has_saved_variables() ? saved_variables()[0] : Variable(saved[0], false);
+    Variable K = has_saved_variables() ? saved_variables()[1] : Variable(saved[1], false);
+    Variable V = has_saved_variables() ? saved_variables()[2] : Variable(saved[2], false);
     return composed_attention_backward_variable(dO, Q, K, V, scale_, causal_);
 }
 
@@ -581,9 +584,10 @@ auto FlexAttentionBackward::backward_with_variables(std::vector<Variable> grad_o
         return passthrough_stub_backward(std::move(grad_outputs));
     }
     Variable dO = grad_outputs[0];
-    Variable Q(saved[0], false);
-    Variable K(saved[1], false);
-    Variable V(saved[2], false);
+    // audit-10 NN.1: see FlashAttentionBackward — preserve Q/K/V graph.
+    Variable Q = has_saved_variables() ? saved_variables()[0] : Variable(saved[0], false);
+    Variable K = has_saved_variables() ? saved_variables()[1] : Variable(saved[1], false);
+    Variable V = has_saved_variables() ? saved_variables()[2] : Variable(saved[2], false);
     return composed_attention_backward_variable(dO, Q, K, V, scale_, /*causal=*/false);
 }
 
@@ -767,6 +771,10 @@ auto flash_attention(const Variable& Q,
     if (seed_t.is_valid())   saved.push_back(seed_t);
     if (offset_t.is_valid()) saved.push_back(offset_t);
     grad_fn->save_for_backward(saved);
+    // audit-10 NN.1: also save Q/K/V as Variables so the higher-order
+    // backward composes through their grad_fn chains instead of severing
+    // the graph by wrapping the raw saved tensors as non-grad Variables.
+    grad_fn->save_variables_for_backward({Q, K, V});
     grad_fn->set_next_functions({Q.grad_fn(), K.grad_fn(), V.grad_fn()});
     grad_fn->set_input_variables({Q, K, V});
 
@@ -797,6 +805,8 @@ auto fused_attention(const Variable& Q,
     std::vector<Tensor> saved = {Q.tensor(), K.tensor(), V.tensor(), O_t};
     if (L_t.is_valid()) saved.push_back(L_t);
     grad_fn->save_for_backward(saved);
+    // audit-10 NN.1: see flash_attention — preserve graph through Q/K/V.
+    grad_fn->save_variables_for_backward({Q, K, V});
     grad_fn->set_next_functions({Q.grad_fn(), K.grad_fn(), V.grad_fn()});
     grad_fn->set_input_variables({Q, K, V});
 
@@ -829,6 +839,8 @@ auto flex_attention(const Variable& Q,
     if (L_t.is_valid()) saved.push_back(L_t);
     if (has_block_mask) saved.push_back(block_mask);
     grad_fn->save_for_backward(saved);
+    // audit-10 NN.1: see flash_attention — preserve graph through Q/K/V.
+    grad_fn->save_variables_for_backward({Q, K, V});
     grad_fn->set_next_functions({Q.grad_fn(), K.grad_fn(), V.grad_fn()});
     grad_fn->set_input_variables({Q, K, V});
 

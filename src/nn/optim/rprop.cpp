@@ -47,7 +47,12 @@ auto Rprop::step_impl() -> void {
     auto resolve = [&](size_t i) -> RpropHP {
         RpropHP hp{lr_, eta_minus_, eta_plus_, step_min_, step_max_};
         if (const auto* g = find_group_for_param(i)) {
-            hp.lr = g->lr;
+            hp.lr        = g->lr;
+            // NN.15: honour per-ParamGroup Rprop overrides when present.
+            hp.eta_minus = ParamGroup::or_else(g->eta_minus, eta_minus_);
+            hp.eta_plus  = ParamGroup::or_else(g->eta_plus,  eta_plus_);
+            hp.step_min  = ParamGroup::or_else(g->step_min,  step_min_);
+            hp.step_max  = ParamGroup::or_else(g->step_max,  step_max_);
         }
         return hp;
     };

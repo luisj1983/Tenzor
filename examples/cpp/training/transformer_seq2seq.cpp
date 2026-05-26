@@ -15,6 +15,7 @@
 #include <random>
 
 #include "tenzor/tenzor.hpp"
+#include "transformer_seq2seq_runner.hpp"
 
 using namespace tenzor;
 using namespace tenzor::nn;
@@ -130,7 +131,24 @@ std::pair<Tensor, Tensor> generate_sequence_data(int num_samples, int seq_len,
 // ============================================================================
 
 void train_sequence_classifier(Device device) {
+    // NN.24: the inner training body is shared with the regression test in
+    // tests/examples/test_all_autograd_examples.cpp via the runner exposed
+    // by transformer_seq2seq_runner.hpp. The standalone exe additionally
+    // runs the longer 20-epoch / 500-sample loop below + a validation loop;
+    // both paths drive the same model + optimizer code, so a backward
+    // regression caught by the test also breaks this exe.
     std::cout << "\n=== Training Attention-based Sequence Classifier ===\n\n";
+
+    {
+        double init_loss = 0.0;
+        double final_loss = 0.0;
+        const int runner_epochs = 5;
+        examples::transformer_seq2seq::run_transformer_seq2seq_training(
+            runner_epochs, &init_loss, &final_loss, device, /*verbose=*/false);
+        std::cout << "[runner] short-loop training: initial=" << init_loss
+                  << " final=" << final_loss << " over " << runner_epochs
+                  << " epochs\n\n";
+    }
 
     int vocab_size = 100;
     int embed_dim = 64;

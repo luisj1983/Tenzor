@@ -86,7 +86,11 @@ void register_optim(py::module_& m) {
                          std::optional<double> alpha,
                          std::optional<double> rho,
                          std::optional<double> lr_decay,
-                         std::optional<double> initial_accumulator_value) {
+                         std::optional<double> initial_accumulator_value,
+                         std::optional<double> eta_minus,
+                         std::optional<double> eta_plus,
+                         std::optional<double> step_min,
+                         std::optional<double> step_max) {
             tenzor::optim::ParamGroup g{std::move(params), lr, weight_decay};
             g.momentum                   = momentum;
             g.dampening                  = dampening;
@@ -100,6 +104,11 @@ void register_optim(py::module_& m) {
             g.rho                        = rho;
             g.lr_decay                   = lr_decay;
             g.initial_accumulator_value  = initial_accumulator_value;
+            // NN.15: Rprop per-group overrides.
+            g.eta_minus                  = eta_minus;
+            g.eta_plus                   = eta_plus;
+            g.step_min                   = step_min;
+            g.step_max                   = step_max;
             return g;
         }), py::arg("params"), py::arg("lr"), py::arg("weight_decay") = 0.0,
             py::arg("momentum")                  = py::none(),
@@ -113,7 +122,11 @@ void register_optim(py::module_& m) {
             py::arg("alpha")                     = py::none(),
             py::arg("rho")                       = py::none(),
             py::arg("lr_decay")                  = py::none(),
-            py::arg("initial_accumulator_value") = py::none())
+            py::arg("initial_accumulator_value") = py::none(),
+            py::arg("eta_minus")                 = py::none(),
+            py::arg("eta_plus")                  = py::none(),
+            py::arg("step_min")                  = py::none(),
+            py::arg("step_max")                  = py::none())
         .def_readwrite("params", &tenzor::optim::ParamGroup::params,
              "Parameters in this group")
         .def_readwrite("lr", &tenzor::optim::ParamGroup::lr,
@@ -145,6 +158,15 @@ void register_optim(py::module_& m) {
         .def_readwrite("initial_accumulator_value",
              &tenzor::optim::ParamGroup::initial_accumulator_value,
              "Per-group Adagrad initial_accumulator_value (None = use default)")
+        // NN.15: Rprop per-group overrides.
+        .def_readwrite("eta_minus", &tenzor::optim::ParamGroup::eta_minus,
+             "Per-group Rprop eta_minus (None = use optimiser default)")
+        .def_readwrite("eta_plus", &tenzor::optim::ParamGroup::eta_plus,
+             "Per-group Rprop eta_plus (None = use optimiser default)")
+        .def_readwrite("step_min", &tenzor::optim::ParamGroup::step_min,
+             "Per-group Rprop step_min (None = use optimiser default)")
+        .def_readwrite("step_max", &tenzor::optim::ParamGroup::step_max,
+             "Per-group Rprop step_max (None = use optimiser default)")
         .def("__repr__", [](const tenzor::optim::ParamGroup& self) {
             return "ParamGroup(params=" + std::to_string(self.params.size()) +
                    ", lr=" + std::to_string(self.lr) +

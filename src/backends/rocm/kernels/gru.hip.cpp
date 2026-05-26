@@ -898,6 +898,10 @@ auto gru_forward_miopen(
         workspace.ptr,
         workspace_size));
 
+    // MIOpen is async on the handle's stream; ensure the workspace and weight
+    // buffers (HipBuffer RAII) are not freed mid-flight.
+    HIP_CHECK(hipStreamSynchronize(stream));
+
     // Cleanup descriptors
     for (int64_t t = 0; t < seq_len; ++t) {
         miopenDestroyTensorDescriptor(x_descs[t]);

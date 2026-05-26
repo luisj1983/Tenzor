@@ -20,6 +20,7 @@
 #include <algorithm>
 
 #include "tenzor/tenzor.hpp"
+#include "yolo_object_detection_runner.hpp"
 
 using namespace tenzor;
 using namespace tenzor::nn;
@@ -394,7 +395,22 @@ void demo_maxpool_downsampling() {
 // ============================================================================
 
 void train_detection_model(Device device) {
+    // NN.24: the tiny-backbone training body is shared with the regression
+    // test via examples::yolo_object_detection::run_yolo_object_detection_training.
+    // Run it first so this exe exercises the same code path the test does,
+    // then continue with the original deeper-backbone loop for the demo.
     std::cout << "\n=== Training YOLO-style Detection Model ===\n\n";
+
+    {
+        double init_loss = 0.0;
+        double final_loss = 0.0;
+        const int runner_iters = 10;
+        examples::yolo_object_detection::run_yolo_object_detection_training(
+            runner_iters, &init_loss, &final_loss, device, /*verbose=*/false);
+        std::cout << "[runner] short-loop training: initial=" << init_loss
+                  << " final=" << final_loss << " over " << runner_iters
+                  << " iterations\n\n";
+    }
 
     int num_classes = 20;
     int img_size = 128;  // Smaller for faster demo

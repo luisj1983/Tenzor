@@ -94,6 +94,36 @@ struct DeviceWorkspace {
     DeviceWorkspace& operator=(const DeviceWorkspace&) = delete;
 };
 
+/// NN.13: Stream-ordered RAII wrapper used for pivot / info workspaces in the
+/// custom LU paths (det / inv / solve / lu) that previously did bare
+/// cudaMalloc + cudaFree per call. Bare cudaFree implicitly performs a
+/// device-wide sync, which destroys stream concurrency; cudaFreeAsync defers
+/// the free until prior stream work retires. Mirrors HH.8's CudaDevicePtr in
+/// fft.cu.
+template<typename T>
+struct StreamWorkspace {
+    T* ptr = nullptr;
+    cudaStream_t stream = nullptr;
+
+    StreamWorkspace() = default;
+    StreamWorkspace(int64_t count, cudaStream_t s)
+        : stream(s) {
+        if (count > 0) {
+            CUDA_CHECK_LINALG(cudaMallocAsync(&ptr, count * sizeof(T), stream));
+        }
+    }
+    ~StreamWorkspace() {
+        if (ptr) cudaFreeAsync(ptr, stream);
+    }
+
+    StreamWorkspace(const StreamWorkspace&) = delete;
+    StreamWorkspace& operator=(const StreamWorkspace&) = delete;
+    StreamWorkspace(StreamWorkspace&& o) noexcept
+        : ptr(o.ptr), stream(o.stream) { o.ptr = nullptr; }
+
+    T* get() const { return ptr; }
+};
+
 /// Get batch count from shape (product of all dims except last two).
 int64_t batch_size(const Tensor& t) {
     auto shape = t.shape();
@@ -3846,12 +3876,12 @@ auto linalg_det_kernel(const Tensor& A, cudaStream_t stream) -> Tensor {
 
     auto result = zeros(out_shape, A.dtype(), A.device());
 
-    // Allocate pivots and info on device
-    int* d_pivots = nullptr;
-    int* d_info = nullptr;
-    CUDA_CHECK_LINALG(cudaMalloc(&d_pivots, nbatch * n * sizeof(int)));
-    CUDA_CHECK_LINALG(cudaMalloc(&d_info, nbatch * sizeof(int)));
-    CUDA_CHECK_LINALG(cudaMemset(d_info, 0, nbatch * sizeof(int)));
+    // NN.13: stream-ordered alloc/free so cudaFree doesn't device-sync.
+    StreamWorkspace<int> d_pivots_ws(nbatch * n, stream);
+    StreamWorkspace<int> d_info_ws(nbatch, stream);
+    int* d_pivots = d_pivots_ws.get();
+    int* d_info = d_info_ws.get();
+    CUDA_CHECK_LINALG(cudaMemsetAsync(d_info, 0, nbatch * sizeof(int), stream));
 
     if (A.dtype() == DType::Float32) {
         check_size_limit<float>(n, "det");
@@ -3884,8 +3914,6 @@ auto linalg_det_kernel(const Tensor& A, cudaStream_t stream) -> Tensor {
     }
 
     CUDA_CHECK_LINALG(cudaStreamSynchronize(stream ? stream : 0));
-    cudaFree(d_pivots);
-    cudaFree(d_info);
     return result;
 }
 
@@ -3908,11 +3936,12 @@ auto linalg_inv_kernel(const Tensor& A, cudaStream_t stream) -> Tensor {
 
     auto result = zeros(to_vec(work.shape()), A.dtype(), A.device());
 
-    int* d_pivots = nullptr;
-    int* d_info = nullptr;
-    CUDA_CHECK_LINALG(cudaMalloc(&d_pivots, nbatch * n * sizeof(int)));
-    CUDA_CHECK_LINALG(cudaMalloc(&d_info, nbatch * sizeof(int)));
-    CUDA_CHECK_LINALG(cudaMemset(d_info, 0, nbatch * sizeof(int)));
+    // NN.13: stream-ordered alloc/free so cudaFree doesn't device-sync.
+    StreamWorkspace<int> d_pivots_ws(nbatch * n, stream);
+    StreamWorkspace<int> d_info_ws(nbatch, stream);
+    int* d_pivots = d_pivots_ws.get();
+    int* d_info = d_info_ws.get();
+    CUDA_CHECK_LINALG(cudaMemsetAsync(d_info, 0, nbatch * sizeof(int), stream));
 
     if (A.dtype() == DType::Float32) {
         check_size_limit<float>(n, "inv");
@@ -3945,8 +3974,6 @@ auto linalg_inv_kernel(const Tensor& A, cudaStream_t stream) -> Tensor {
     }
 
     CUDA_CHECK_LINALG(cudaStreamSynchronize(stream ? stream : 0));
-    cudaFree(d_pivots);
-    cudaFree(d_info);
     return result;
 }
 
@@ -3972,11 +3999,12 @@ auto linalg_solve_kernel(const Tensor& A, const Tensor& B, cudaStream_t stream) 
     auto b_ndim = static_cast<int64_t>(b_shape.size());
     int64_t nrhs = (b_ndim >= 2) ? b_shape[b_ndim - 1] : 1;
 
-    int* d_pivots = nullptr;
-    int* d_info = nullptr;
-    CUDA_CHECK_LINALG(cudaMalloc(&d_pivots, nbatch * n * sizeof(int)));
-    CUDA_CHECK_LINALG(cudaMalloc(&d_info, nbatch * sizeof(int)));
-    CUDA_CHECK_LINALG(cudaMemset(d_info, 0, nbatch * sizeof(int)));
+    // NN.13: stream-ordered alloc/free so cudaFree doesn't device-sync.
+    StreamWorkspace<int> d_pivots_ws(nbatch * n, stream);
+    StreamWorkspace<int> d_info_ws(nbatch, stream);
+    int* d_pivots = d_pivots_ws.get();
+    int* d_info = d_info_ws.get();
+    CUDA_CHECK_LINALG(cudaMemsetAsync(d_info, 0, nbatch * sizeof(int), stream));
 
     if (A.dtype() == DType::Float32) {
         check_size_limit<float>(n, "solve");
@@ -4009,8 +4037,6 @@ auto linalg_solve_kernel(const Tensor& A, const Tensor& B, cudaStream_t stream) 
     }
 
     CUDA_CHECK_LINALG(cudaStreamSynchronize(stream ? stream : 0));
-    cudaFree(d_pivots);
-    cudaFree(d_info);
     return work_b;
 }
 
@@ -4396,11 +4422,12 @@ auto linalg_lu_kernel(const Tensor& A, cudaStream_t stream)
     piv_shape.push_back(n);
 
     // Allocate pivots and info on device
-    int* d_pivots = nullptr;
-    int* d_info = nullptr;
-    CUDA_CHECK_LINALG(cudaMalloc(&d_pivots, nbatch * n * sizeof(int)));
-    CUDA_CHECK_LINALG(cudaMalloc(&d_info, nbatch * sizeof(int)));
-    CUDA_CHECK_LINALG(cudaMemset(d_info, 0, nbatch * sizeof(int)));
+    // NN.13: stream-ordered alloc/free so cudaFree doesn't device-sync.
+    StreamWorkspace<int> d_pivots_ws(nbatch * n, stream);
+    StreamWorkspace<int> d_info_ws(nbatch, stream);
+    int* d_pivots = d_pivots_ws.get();
+    int* d_info = d_info_ws.get();
+    CUDA_CHECK_LINALG(cudaMemsetAsync(d_info, 0, nbatch * sizeof(int), stream));
 
     // Step 1: Run LU factorization in-place on work tensor
     auto L = zeros(mat_shape, original_dtype, A.device());
@@ -4445,8 +4472,6 @@ auto linalg_lu_kernel(const Tensor& A, cudaStream_t stream)
         nbatch * n * sizeof(int), cudaMemcpyDeviceToDevice, stream));
 
     CUDA_CHECK_LINALG(cudaStreamSynchronize(stream ? stream : 0));
-    cudaFree(d_pivots);
-    cudaFree(d_info);
     return {L, U, pivots_out};
 }
 

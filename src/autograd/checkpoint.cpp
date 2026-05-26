@@ -133,6 +133,78 @@ auto CheckpointFunction::backward(std::vector<Tensor> grad_outputs) -> std::vect
     return input_grads;
 }
 
+auto CheckpointFunction::backward_with_variables(std::vector<Variable> grad_outputs)
+    -> std::vector<Variable> {
+    // audit-10 NN.3: higher-order checkpoint backward. Recompute the forward
+    // with gradient tracking, then call the inner backward with
+    // create_graph=true so the inner ops build a second-order graph; harvest
+    // graph-carrying grads via grad_variable() on the recomputed inputs.
+
+    auto start_time = std::chrono::high_resolution_clock::now();
+
+    cached_recompute_inputs_.clear();
+    cached_recompute_inputs_.reserve(saved_tensors().size());
+    for (const auto& tensor : saved_tensors()) {
+        cached_recompute_inputs_.emplace_back(tensor, true);
+    }
+
+    auto recomputed_outputs = recompute_forward(cached_recompute_inputs_);
+
+    if (recomputed_outputs.size() != grad_outputs.size()) {
+        throw std::runtime_error("Checkpoint backward_with_variables: output count mismatch");
+    }
+
+    for (size_t i = 0; i < recomputed_outputs.size(); ++i) {
+        if (recomputed_outputs[i].requires_grad() && recomputed_outputs[i].grad_fn()) {
+            // retain_graph=true + create_graph=true so the second-order
+            // graph survives the inner backward.
+            recomputed_outputs[i].backward(
+                grad_outputs[i].tensor(),
+                /*retain_graph=*/true,
+                /*create_graph=*/true);
+        }
+    }
+
+    std::vector<Variable> input_grads;
+    input_grads.reserve(cached_recompute_inputs_.size());
+
+    for (size_t i = 0; i < cached_recompute_inputs_.size(); ++i) {
+        const auto& gv = cached_recompute_inputs_[i].grad_variable();
+        if (gv.has_value()) {
+            input_grads.push_back(*gv);
+        } else if (cached_recompute_inputs_[i].has_grad()) {
+            // Fall back to a non-graph-carrying Variable for the tensor grad.
+            input_grads.emplace_back(
+                cached_recompute_inputs_[i].grad().value(), false);
+        } else {
+            // No gradient computed - return a zero Variable (no graph).
+            input_grads.emplace_back(
+                Tensor::zeros_like(cached_recompute_inputs_[i].tensor()), false);
+        }
+    }
+
+    auto end_time = std::chrono::high_resolution_clock::now();
+    auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end_time - start_time);
+
+    auto& stats = get_checkpoint_stats();
+    stats.num_recomputations++;
+    stats.total_recompute_time_ms += duration.count() / 1000.0;
+    recompute_count_++;
+
+    has_cached_outputs_ = false;
+    cached_recompute_outputs_.clear();
+
+    return input_grads;
+}
+
+void CheckpointFunction::release_op_specific_state() {
+    // audit-10 NN.6: drop ad-hoc per-checkpoint state.
+    cached_recompute_outputs_.clear();
+    cached_recompute_inputs_.clear();
+    recomputed_intermediates_.clear();
+    has_cached_outputs_ = false;
+}
+
 auto CheckpointFunction::get_memory_savings() const -> size_t {
     return estimated_activation_memory_;
 }

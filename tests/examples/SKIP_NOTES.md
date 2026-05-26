@@ -42,3 +42,30 @@ re-enabled, follow the pattern used in `gradient_checkpointing` /
 - `examples/cpp/training/gradient_checkpointing.cpp` -> runner extracted
   into `gradient_checkpointing_runner.{cpp,hpp}`; wired via the same list
   and exercised by `ExampleRegression.GradientCheckpointingTrains`.
+
+## Non-showcase examples covered (audit-10 NN.24, 2026-05-26)
+
+- `examples/cpp/training/transformer_seq2seq.cpp` -> runner extracted
+  into `transformer_seq2seq_runner.{cpp,hpp}`; wired via
+  `NON_SHOWCASE_AUTOGRAD_RUNNER_TARGETS` and exercised by
+  `ExampleRegression.TransformerSeq2SeqTrains`.
+- `examples/cpp/training/yolo_object_detection.cpp` -> runner extracted
+  into `yolo_object_detection_runner.{cpp,hpp}`; wired via the same list
+  and exercised by `ExampleRegression.YoloObjectDetectionTrains`. The
+  test asserts `initial != final` (per the plan's fallback) rather than
+  monotonic decrease, because the simplified MSE-against-zeros surrogate
+  loss is not guaranteed to decrease on a few iterations of a randomly
+  initialised conv backbone.
+- `examples/cpp/training/gpt_text_generation.cpp` -> runner extracted
+  into `gpt_text_generation_runner.{cpp,hpp}`; wired via the same list
+  and exercised by `ExampleRegression.GptTextGenerationTrains`. NOTE:
+  the NN.24 plan referenced `examples/cpp/nlp/gpt_text_generation.cpp`,
+  but that file is a pure-inference example (greedy/top-k/top-p/beam
+  decoding with no training loop). The training-side counterpart lives
+  at `examples/cpp/training/gpt_text_generation.cpp` (executable target
+  `gpt_text_generation_training`) and is what this runner extracts from
+  — it exercises the same GPTBlock + MultiheadAttention + LayerNorm +
+  GELU + CrossEntropyLoss + Adam pipeline a real training regression
+  needs to cover. The nlp/ inference example is not training, so no
+  loss-decrease assertion applies; its TextGenerator strategies are
+  covered by other unit tests.

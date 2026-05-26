@@ -523,6 +523,22 @@ public:
     }
 
     /**
+     * @brief Release op-specific ad-hoc state held by subclasses.
+     *
+     * audit-10 NN.6: `release_saved_tensors()` and `clear_saved_variables()`
+     * only clear the common `saved_tensors_` / `saved_variables_` buckets.
+     * Subclasses that hold ad-hoc Tensor / SparseTensor / Variable members
+     * (e.g. CheckpointFunction's `cached_recompute_outputs_`,
+     * FusedLinearReLUBackward's `relu_output_`, sparse Backwards' transposed
+     * SparseTensor caches) used to keep that state alive until the Function
+     * destructor ran.  Engine cleanup now calls this hook so per-Function
+     * ad-hoc state is dropped together with the common buckets.
+     *
+     * Default impl: nothing.  Subclasses override.
+     */
+    virtual void release_op_specific_state() {}
+
+    /**
      * @brief Validate that saved tensors have not been modified in-place.
      *
      * Checks version counters recorded by save_for_backward() against
@@ -2861,6 +2877,9 @@ public:
     auto supports_higher_order() const -> bool override { return true; }
     auto name() const -> std::string override { return "SpMMBackward"; }
 
+    // audit-10 NN.6: drop ad-hoc transposed-CSR cache on cleanup.
+    void release_op_specific_state() override { sparse_transposed_.reset(); }
+
 private:
     std::optional<SparseTensor> sparse_transposed_;  ///< S^T stored in sparse format
 };
@@ -2887,6 +2906,9 @@ public:
     auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
     auto supports_higher_order() const -> bool override { return true; }
     auto name() const -> std::string override { return "SpMVBackward"; }
+
+    // audit-10 NN.6: drop ad-hoc transposed-CSR cache on cleanup.
+    void release_op_specific_state() override { sparse_transposed_.reset(); }
 
 private:
     std::optional<SparseTensor> sparse_transposed_;  ///< S^T stored in sparse format
@@ -2929,9 +2951,23 @@ public:
     auto supports_higher_order() const -> bool override { return true; }
     auto name() const -> std::string override { return "SpGEMMBackward"; }
 
+    // audit-10 NN.6: drop ad-hoc sparse transposed CSR caches on cleanup.
+    void release_op_specific_state() override {
+        sparse_a_t_.reset();
+        sparse_b_t_.reset();
+        sparse_grad_accumulated_ = false;
+    }
+
 private:
+    /// audit-10 NN.5: accumulate the sparse-grad slot side-effect once.
+    /// `backward_with_variables` previously delegated to `backward()` for the
+    /// SparseAdam accumulation, then rebuilt Variable-level dense grads — a
+    /// second `backward(retain_graph=true)` re-entered and double-accumulated.
+    auto accumulate_sparse_into_inputs(const Tensor& grad_c) -> void;
+
     std::optional<SparseTensor> sparse_a_t_;  ///< A^T in sparse format
     std::optional<SparseTensor> sparse_b_t_;  ///< B^T in sparse format
+    bool sparse_grad_accumulated_{false};
 };
 
 /**
@@ -2951,6 +2987,9 @@ public:
     auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
     auto supports_higher_order() const -> bool override { return true; }
     auto name() const -> std::string override { return "SparseTriSolveBackward"; }
+
+    // audit-10 NN.6: drop ad-hoc transposed-CSR cache on cleanup.
+    void release_op_specific_state() override { sparse_l_t_.reset(); }
 
 private:
     std::optional<SparseTensor> sparse_l_t_;  ///< L^T (or U^T) in sparse format
@@ -3039,6 +3078,9 @@ public:
     auto name() const -> std::string override { return "SparseSoftmaxBackward"; }
     auto op_id() const -> OpId override { return OpId::SparseSoftmax; }
 
+    // audit-10 NN.6: drop ad-hoc sparse output cache on cleanup.
+    void release_op_specific_state() override { output_sparse_.reset(); }
+
 private:
     std::optional<SparseTensor> output_sparse_;  ///< Y = softmax(X) saved for backward.
 };
@@ -3065,6 +3107,9 @@ public:
     auto supports_higher_order() const -> bool override { return true; }
     auto name() const -> std::string override { return "SparseLogSoftmaxBackward"; }
     auto op_id() const -> OpId override { return OpId::SparseLogSoftmax; }
+
+    // audit-10 NN.6: drop ad-hoc sparse output cache on cleanup.
+    void release_op_specific_state() override { output_sparse_.reset(); }
 
 private:
     std::optional<SparseTensor> output_sparse_;  ///< Y = log_softmax(X) saved for backward.
@@ -3115,6 +3160,9 @@ public:
 
     void set_relu_output(Tensor output) { relu_output_ = std::move(output); }
     auto op_id() const -> OpId override { return OpId::FusedLinearReLU; }
+
+    // audit-10 NN.6: drop the ad-hoc relu mask source on engine cleanup.
+    void release_op_specific_state() override { relu_output_ = Tensor(); }
 
 private:
     Tensor relu_output_;  // Output of ReLU (for computing mask in backward)

@@ -922,6 +922,15 @@ def _worker_loop(
     # Ignore SIGINT in workers — let the main process handle it
     signal.signal(signal.SIGINT, signal.SIG_IGN)
 
+    # OO.13: convert SIGTERM (sent by _stop_workers' terminate path) into a
+    # KeyboardInterrupt so the worker exits via the poison-pill `finally`
+    # block (which always emits a _WORKER_SENTINEL).  Without this the
+    # parent can deadlock on output_queue.get() when a worker is killed
+    # mid-batch before it had a chance to push its sentinel.
+    def _sigterm_handler(_signum, _frame):
+        raise KeyboardInterrupt
+    signal.signal(signal.SIGTERM, _sigterm_handler)
+
     if worker_init_fn is not None:
         worker_init_fn(worker_id)
 
@@ -968,10 +977,20 @@ def _worker_loop(
                 batch_indices = msg
                 batch = [dataset[i] for i in batch_indices]
                 output_queue.put((worker_id, collate_fn(batch)))
+    except KeyboardInterrupt:
+        # OO.13: SIGTERM-triggered shutdown — fall through to the sentinel
+        # emit in `finally` so the parent's output_queue.get() never blocks.
+        pass
     except Exception as e:
         output_queue.put((worker_id, e))
     finally:
-        output_queue.put((worker_id, _WORKER_SENTINEL))
+        try:
+            output_queue.put((worker_id, _WORKER_SENTINEL))
+        except (ValueError, OSError):
+            # OO.13: parent may have already closed the queue (post _stop_workers
+            # → cancel_join_thread/close).  Nothing to do — the parent's
+            # sentinel-or-timeout drain logic handles missing sentinels.
+            pass
 
 
 class _MultiProcessLoader:
@@ -1060,16 +1079,41 @@ class _MultiProcessLoader:
         for q in self._index_queues:
             try:
                 q.put_nowait(None)
-            except Full:
-                # Queue is full and the worker is busy; the worker will
-                # see the next poison-pill on the subsequent iteration.
-                # (Audit item H.1 — was bare `except Exception: pass`.)
+            except (Full, ValueError, OSError):
+                # OO.13: widen from bare `Full`.  After a previous
+                # _stop_workers (e.g. on shutdown error path) the underlying
+                # queue may already be closed → put_nowait raises ValueError
+                # ("Queue is closed") or OSError ("handle is closed"). Treat
+                # those identically to Full — the worker will see SIGTERM via
+                # terminate() below if it hasn't already exited.
                 pass
         for w in self._workers:
             w.join(timeout=5)
             if w.is_alive():
                 w.terminate()
+                # OO.13: terminate is asynchronous; wait for the worker to
+                # actually exit so its multiprocessing.Queue cleanup runs
+                # and our subsequent cancel_join_thread / close don't race
+                # against a still-publishing producer.
+                w.join(timeout=5.0)
         self._workers.clear()
+        # OO.13: release any leaked fds / semaphores from the output queue.
+        # cancel_join_thread() lets us exit without blocking on a stuck
+        # background feeder thread; close() releases the pipe handles.
+        if self._output_queue is not None:
+            try:
+                self._output_queue.cancel_join_thread()
+            except (AttributeError, OSError, ValueError):
+                pass
+            try:
+                self._output_queue.close()
+            except (AttributeError, OSError, ValueError):
+                pass
+            # Drop the reference so the next __iter__ falls into
+            # _start_workers (which allocates a fresh queue) rather than
+            # touching the closed handle.
+            self._output_queue = None
+        self._index_queues = []
 
     def __iter__(self):
         if not self._workers:

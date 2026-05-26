@@ -90,105 +90,76 @@ auto SpGEMMBackward::forward(std::vector<Variable> /*inputs*/) -> std::vector<Va
     throw std::runtime_error("SpGEMMBackward::forward should not be called directly");
 }
 
+auto SpGEMMBackward::accumulate_sparse_into_inputs(const Tensor& grad_c) -> void {
+    // audit-10 NN.5: SparseAdam accumulation side-effect, factored out of
+    // backward() so backward_with_variables can call it directly without
+    // re-entering backward() (which would re-accumulate under retain_graph).
+    if (sparse_grad_accumulated_) {
+        return;
+    }
+    if (sparse_b_t_.has_value() && !input_variables_.empty()) {
+        Tensor dense_grad_a = sparse::spmm(sparse_b_t_.value(), grad_c);
+        auto& a_var = input_variables_[0];
+        if (a_var.has_sparse_grad()) {
+            auto& existing = a_var.sparse_grad().value();
+            a_var.accumulate_sparse_grad(
+                SparseTensor::sparse_csr(existing.crow_indices(),
+                                          existing.col_indices(),
+                                          dense_grad_a,
+                                          existing.shape()));
+        }
+    }
+    if (sparse_a_t_.has_value() && input_variables_.size() >= 2) {
+        Tensor dense_grad_b = sparse::spmm(sparse_a_t_.value(), grad_c);
+        auto& b_var = input_variables_[1];
+        if (b_var.has_sparse_grad()) {
+            auto& existing = b_var.sparse_grad().value();
+            b_var.accumulate_sparse_grad(
+                SparseTensor::sparse_csr(existing.crow_indices(),
+                                          existing.col_indices(),
+                                          dense_grad_b,
+                                          existing.shape()));
+        }
+    }
+    sparse_grad_accumulated_ = true;
+}
+
 auto SpGEMMBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> {
-    // B.6: implementation analysis.
-    //
-    // C = A @ B with A and B both sparse (stored as CSR `SparseTensor`).
-    // The chain-rule gradients are:
-    //   grad_A = grad_C @ B^T
-    //   grad_B = A^T @ grad_C
-    //
-    // Computation: we call `sparse::spmm(B^T_sparse, grad_C_dense)` and
-    // `sparse::spmm(A^T_sparse, grad_C_dense)` — these are SPARSE-DENSE
-    // matmuls, not dense-dense. The sparse operand uses CSR row-iteration
-    // (no dense materialization of A or B at any point); the dense
-    // operand is grad_C which is genuinely dense from the autograd
-    // engine. This IS the sparse-aware computation the audit asked for —
-    // we never densify A or B.
-    //
-    // Return type is dense `Tensor` because the autograd engine's
-    // gradient slot for each leaf is a dense Tensor (the Variable class
-    // stores `Tensor grad_` not a sparse variant). Extending the engine
-    // to carry sparse gradients would require Variable<SparseTensor>
-    // or a Tensor type that wraps either dense or sparse storage — a
-    // public API addition. The dense return here is the natural materialization
-    // of (sparse @ dense), and any downstream optimizer that consumes
-    // sparse gradients can detect the sparsity pattern from the result
-    // (zeros at positions outside A's pattern).
+    // B.6: implementation analysis. C = A @ B (both sparse CSR). Chain rule:
+    //   grad_A = grad_C @ B^T  =  spmm(B^T_sparse, grad_C_dense)
+    //   grad_B = A^T @ grad_C  =  spmm(A^T_sparse, grad_C_dense)
+    // We never densify A or B. The engine stores dense grads in Variable's
+    // `grad_` slot, while the sparse_grad_ slot (for SparseAdam) is also
+    // accumulated as a side effect.
     auto& grad_c = grad_outputs[0];
-    // The result vector MUST align positionally with input_variables_:
-    //   result[0] = grad w.r.t. A
-    //   result[1] = grad w.r.t. B
-    // Pre-allocate with empty Tensor placeholders so a missing
-    // sparse_a_t_ / sparse_b_t_ doesn't shift grad_B into result[0]
-    // (audit item B.4).  Downstream engine code treats an empty Tensor
-    // at position k as "no gradient for input k".
+    // Result vector MUST align positionally with input_variables_:
+    // result[0]=grad_A, result[1]=grad_B. Pre-allocate with empty Tensors so
+    // a missing transposed factor doesn't shift positions (audit B.4).
     std::vector<Tensor> result(2);
 
-    // B.6: dual return — dense Tensor for the standard autograd engine
-    // (every leaf has a dense grad slot), AND a SparseTensor stored on
-    // each input Variable's sparse_grad_ slot for sparse-aware optimizers
-    // (SparseAdam, etc.). Mirrors the embedding pattern. The dense path
-    // and the sparse path agree on values; the sparse path stores only
-    // the nonzero positions matching the original A / B sparsity, which
-    // is what a sparse-aware optimizer wants for parameter updates.
+    // Sparse side-effect (SparseAdam accumulation). NN.5: gated by latch so
+    // a subsequent backward_with_variables call cannot double-accumulate.
+    accumulate_sparse_into_inputs(grad_c);
+
     if (sparse_b_t_.has_value()) {
-        // grad_A (dense, full shape of A)
-        Tensor dense_grad_a = sparse::spmm(sparse_b_t_.value(), grad_c);
-        // Project onto A's sparsity pattern for the sparse_grad slot. We
-        // recover A's CSR pattern from its transpose's CSC view (B^T's
-        // pattern equals A's transpose pattern, so for `grad_A` we use
-        // the same CSR structure A originally had).
-        // input_variables_[0] is A. Build a SparseTensor whose values are
-        // dense_grad_a at A's nonzero positions.
-        if (!input_variables_.empty()) {
-            auto& a_var = input_variables_[0];
-            // Read A's sparse pattern if A is a sparse-storage Variable.
-            // For Variables whose backing tensor is dense, fall back to
-            // dense-only — the sparse_grad_ slot stays empty.
-            if (a_var.sparse_grad().has_value() ||
-                a_var.has_sparse_grad()) {
-                // Sparse slot already initialized; use its layout.
-                auto& existing = a_var.sparse_grad().value();
-                a_var.accumulate_sparse_grad(
-                    SparseTensor::sparse_csr(existing.crow_indices(),
-                                              existing.col_indices(),
-                                              dense_grad_a,
-                                              existing.shape()));
-            }
-        }
-        result[0] = std::move(dense_grad_a);
+        result[0] = sparse::spmm(sparse_b_t_.value(), grad_c);
     }
     if (sparse_a_t_.has_value()) {
-        Tensor dense_grad_b = sparse::spmm(sparse_a_t_.value(), grad_c);
-        if (input_variables_.size() >= 2) {
-            auto& b_var = input_variables_[1];
-            if (b_var.has_sparse_grad()) {
-                auto& existing = b_var.sparse_grad().value();
-                b_var.accumulate_sparse_grad(
-                    SparseTensor::sparse_csr(existing.crow_indices(),
-                                              existing.col_indices(),
-                                              dense_grad_b,
-                                              existing.shape()));
-            }
-        }
-        result[1] = std::move(dense_grad_b);
+        result[1] = sparse::spmm(sparse_a_t_.value(), grad_c);
     }
     return result;
 }
 
 auto SpGEMMBackward::backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> {
     // R.5 — Variable-level rewrite. Forward C = A @ B (both sparse). A, B
-    // are saved as constant transposes (sparse_b_t_, sparse_a_t_). Dense
-    // grads:
-    //   grad_A = grad_C @ B^T  ==  spmm(B^T, grad_C)
-    //   grad_B = A^T @ grad_C  ==  spmm(A^T, grad_C)
-    // Run the tensor backward first to retain the existing sparse_grad
-    // accumulation side-effect (for SparseAdam), then recompute the
-    // returned dense grads at Variable level so grad_fn flows through
-    // grad_outputs[0].
-    auto _side = backward({grad_outputs[0].tensor()});
-    (void)_side;
+    // are saved as constant transposes (sparse_b_t_, sparse_a_t_):
+    //   grad_A = spmm(B^T, grad_C)
+    //   grad_B = spmm(A^T, grad_C)
+    //
+    // audit-10 NN.5: call the sparse side-effect helper directly (idempotent
+    // via the latch) so we don't re-enter backward() and double-accumulate
+    // under retain_graph=true.
+    accumulate_sparse_into_inputs(grad_outputs[0].tensor());
 
     std::vector<Variable> results(2);
     if (sparse_b_t_.has_value()) {

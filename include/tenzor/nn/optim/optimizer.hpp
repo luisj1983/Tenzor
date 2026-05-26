@@ -60,6 +60,11 @@ struct ParamGroup {
     std::optional<double> rho;          ///< Adadelta
     std::optional<double> lr_decay;     ///< Adagrad
     std::optional<double> initial_accumulator_value;  ///< Adagrad
+    // NN.15: Rprop per-group overrides.
+    std::optional<double> eta_minus;    ///< Rprop step-size shrink factor
+    std::optional<double> eta_plus;     ///< Rprop step-size grow factor
+    std::optional<double> step_min;     ///< Rprop minimum step size
+    std::optional<double> step_max;     ///< Rprop maximum step size
 
     /**
      * @brief Read a per-group hyperparam with optimizer-member fallback.

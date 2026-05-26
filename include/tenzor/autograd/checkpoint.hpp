@@ -123,6 +123,27 @@ public:
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
 
     /**
+     * @brief Higher-order (create_graph=true) backward pass.
+     *
+     * audit-10 NN.3: the default `backward_with_variables` throws when
+     * `supports_higher_order()` is false. Checkpoint recomputes the forward
+     * with gradient tracking already, so it can carry a graph through the
+     * recompute by re-running the same recompute path with create_graph=true
+     * on the inner `.backward()` call and harvesting `grad_variable()` from
+     * the recomputed inputs. That preserves the higher-order chain across
+     * the checkpoint boundary.
+     */
+    auto backward_with_variables(std::vector<Variable> grad_outputs)
+        -> std::vector<Variable> override;
+
+    auto supports_higher_order() const -> bool override { return true; }
+
+    /**
+     * @brief Release op-specific ad-hoc state (audit-10 NN.6).
+     */
+    void release_op_specific_state() override;
+
+    /**
      * @brief Get memory saved by checkpointing (bytes)
      *
      * Estimates memory savings compared to standard backprop.

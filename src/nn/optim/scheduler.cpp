@@ -350,9 +350,60 @@ ChainedScheduler::ChainedScheduler(std::vector<std::shared_ptr<LRScheduler>> sch
 }
 
 auto ChainedScheduler::step() -> void {
-    for (auto& scheduler : schedulers_) {
-        scheduler->step();
+    // NN.17: each child scheduler captures its own `base_lr_` at construction
+    // and writes optimizer.set_lr(base_lr * factor) every step.  Naively
+    // looping just lets the last child's write win, throwing away every
+    // earlier child's contribution — the chain is supposed to be the product
+    // of every child's factor.  Fix: snapshot the optimizer LR once before
+    // any child runs, then for each child compute its own factor relative
+    // to that snapshot, multiply, and write the cumulative product at the end.
+    //
+    // We need access to the shared optimizer.  Every concrete LRScheduler
+    // overrides `optimizer()` to expose its `optimizer_` pointer; we pick
+    // the first child that returns non-null.  (ChainedScheduler itself
+    // returns nullptr.)
+    Optimizer* opt = nullptr;
+    for (const auto& s : schedulers_) {
+        if (s) {
+            opt = s->optimizer();
+            if (opt) break;
+        }
     }
+
+    if (!opt) {
+        // No child exposes an optimizer (e.g. all children are nested
+        // ChainedSchedulers with stale APIs).  Fall back to the original
+        // last-wins behaviour rather than silently dropping the step.
+        for (auto& scheduler : schedulers_) {
+            if (scheduler) scheduler->step();
+        }
+        return;
+    }
+
+    const double initial_lr = opt->get_lr();
+    if (initial_lr == 0.0) {
+        // Degenerate: no factor can be recovered relative to zero.  Just
+        // run the children in order and let whoever wins, win.
+        for (auto& scheduler : schedulers_) {
+            if (scheduler) scheduler->step();
+        }
+        return;
+    }
+
+    double cumulative_factor = 1.0;
+    for (auto& scheduler : schedulers_) {
+        if (!scheduler) continue;
+        // Restore the snapshot before each child runs so every child sees
+        // the SAME baseline and reports its own factor (rather than seeing
+        // a previously-multiplied LR and reporting the wrong factor).
+        opt->set_lr(initial_lr);
+        scheduler->step();
+        const double child_lr = opt->get_lr();
+        const double factor   = child_lr / initial_lr;
+        cumulative_factor    *= factor;
+    }
+
+    opt->set_lr(initial_lr * cumulative_factor);
 }
 
 auto ChainedScheduler::get_last_lr() const -> double {

@@ -1103,6 +1103,7 @@ auto histogramdd_kernel(const Tensor& input,
         HIP_CHECK(hipGetLastError());
     }
 
+    HIP_CHECK(hipStreamSynchronize(stream));
     HIP_CHECK(hipFree(d_params));
 
     // Density normalisation

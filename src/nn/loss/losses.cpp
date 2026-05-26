@@ -108,29 +108,51 @@ auto BCEWithLogitsLoss::forward(const Variable& input, const Variable& target) -
     // BCE = max(x, 0) - x * z + log(1 + exp(-abs(x)))
     // where x = input, z = target
     // Simplify using: max(x, 0) = (x + abs(x)) / 2
+    //
+    // NN.14 / AA.4 / KK.18: For Float16/BFloat16, exp(-|x|) flushes to 0 when
+    // |x| ≥ ~7 in F16 (smallest normal ~6.1e-5).  Widen the computation to
+    // Float32 and cast the reduced loss back via variable_cast (mirrors BCELoss
+    // above).
+    const DType orig_dtype = input.tensor().dtype();
+    const bool needs_upcast = (orig_dtype == DType::Float16 ||
+                               orig_dtype == DType::BFloat16);
+    Variable input_f32 = needs_upcast
+        ? tenzor::nn::variable_cast(input, DType::Float32)
+        : input;
+    Variable target_f32 = needs_upcast
+        ? tenzor::nn::variable_cast(target, DType::Float32)
+        : target;
 
-    auto abs_input = abs(input);
+    auto abs_input = abs(input_f32);
     auto neg_abs = neg(abs_input);
 
     // Element-wise max(x, 0) = (x + abs(x)) / 2
-    auto max_val = (input + abs_input) / 2.0f;
+    auto max_val = (input_f32 + abs_input) / 2.0f;
 
-    auto xz = input * target;  // x * z
+    auto xz = input_f32 * target_f32;  // x * z
     auto log_term = log(exp(neg_abs) + 1.0f);
 
     auto loss_unreduced = max_val - xz + log_term;
 
+    Variable reduced;
     switch (reduction_) {
         case Reduction::None:
-            return loss_unreduced;
+            reduced = loss_unreduced;
+            break;
         case Reduction::Mean:
-            return mean(loss_unreduced);
+            reduced = mean(loss_unreduced);
+            break;
         case Reduction::Sum:
-            return sum(loss_unreduced);
+            reduced = sum(loss_unreduced);
+            break;
         case Reduction::BatchMean:
-            return sum(loss_unreduced) / static_cast<float>(loss_unreduced.tensor().shape()[0]);
+            reduced = sum(loss_unreduced) / static_cast<float>(loss_unreduced.tensor().shape()[0]);
+            break;
     }
-    return loss_unreduced;
+    if (needs_upcast) {
+        reduced = tenzor::nn::variable_cast(reduced, orig_dtype);
+    }
+    return reduced;
 }
 
 // CrossEntropyLoss implementation

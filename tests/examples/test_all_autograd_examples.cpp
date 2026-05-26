@@ -48,6 +48,13 @@
 #include "vit_image_classification_runner.hpp"
 #include "gradient_checkpointing_runner.hpp"
 
+// NN.24: top-3 non-showcase training examples wired for regression
+// coverage (transformer_seq2seq, yolo_object_detection,
+// gpt_text_generation training-side variant).
+#include "transformer_seq2seq_runner.hpp"
+#include "yolo_object_detection_runner.hpp"
+#include "gpt_text_generation_runner.hpp"
+
 class ExampleRegression : public ::testing::Test {
 protected:
     static void SetUpTestSuite() {
@@ -315,5 +322,53 @@ TEST_F(ExampleRegression, GradientCheckpointingTrains) {
     ASSERT_EQ(rc, 0);
     EXPECT_GT(initial - final_, kMinLossDecrease)
         << "gradient_checkpointing did not reduce loss: initial=" << initial
+        << " final=" << final_;
+}
+
+// NN.24: top-3 non-showcase training-example regressions. These
+// exercise feature surfaces (Embedding + MultiheadAttention +
+// LayerNorm + GELU for the two transformer-family models; Conv2d +
+// GroupNorm + Mish + LeakyReLU + ResidualBlock for the YOLO backbone)
+// that the showcase set doesn't combine in the same configuration, so
+// a backward regression there could pass the showcase tests while
+// breaking these training paths.
+TEST_F(ExampleRegression, TransformerSeq2SeqTrains) {
+    double initial = -1.0, final_ = -1.0;
+    int rc = tenzor::examples::transformer_seq2seq::
+        run_transformer_seq2seq_training(
+            /*epochs=*/10, &initial, &final_,
+            tenzor::Device::cpu(), false);
+    ASSERT_EQ(rc, 0);
+    EXPECT_GT(initial - final_, kMinLossDecrease)
+        << "transformer_seq2seq did not reduce loss: initial=" << initial
+        << " final=" << final_;
+}
+
+TEST_F(ExampleRegression, YoloObjectDetectionTrains) {
+    // YOLO uses an MSE-against-zeros surrogate loss on a randomly
+    // initialised model, so monotonic decrease is not guaranteed on a
+    // tiny number of steps. The plan's fallback applies: assert the
+    // loss moved at all, which is enough to prove backward ran and
+    // optimizer.step() updated weights.
+    double initial = -1.0, final_ = -1.0;
+    int rc = tenzor::examples::yolo_object_detection::
+        run_yolo_object_detection_training(
+            /*num_iterations=*/10, &initial, &final_,
+            tenzor::Device::cpu(), false);
+    ASSERT_EQ(rc, 0);
+    EXPECT_NE(initial, final_)
+        << "yolo_object_detection training did not move loss at all: "
+        << "initial=" << initial << " final=" << final_;
+}
+
+TEST_F(ExampleRegression, GptTextGenerationTrains) {
+    double initial = -1.0, final_ = -1.0;
+    int rc = tenzor::examples::gpt_text_generation::
+        run_gpt_text_generation_training(
+            /*epochs=*/10, &initial, &final_,
+            tenzor::Device::cpu(), false);
+    ASSERT_EQ(rc, 0);
+    EXPECT_GT(initial - final_, kMinLossDecrease)
+        << "gpt_text_generation did not reduce loss: initial=" << initial
         << " final=" << final_;
 }

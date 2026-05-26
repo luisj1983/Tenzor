@@ -38,7 +38,8 @@ jobs:
             -DTENZOR_BUILD_VULKAN=ON \
             -DTENZOR_BUILD_ONEAPI=OFF \
             -DTENZOR_BUILD_PYTHON=OFF \
-            -DTENZOR_BUILD_TESTS=ON
+            -DTENZOR_BUILD_TESTS=ON \
+            -DTENZOR_BUILD_EXAMPLES=ON
 
       - name: Build everything
         run: ninja -C build -j1
@@ -70,6 +71,10 @@ jobs:
       - name: Run cross-backend parity suite
         working-directory: build
         run: ctest -L "backend_parity" --output-on-failure -j1
+
+      - name: Examples-as-tests regression (audit-10 NN.23)
+        working-directory: build
+        run: ctest -L examples --output-on-failure -j1
 
       - name: Upload failure logs on failure
         if: failure()

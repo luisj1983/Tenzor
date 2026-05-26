@@ -646,13 +646,22 @@ auto FullyShardedDataParallel::finalize_backward() -> void {
 }
 
 auto FullyShardedDataParallel::summon_full_params() -> void {
+    // NN.18: forward post-hook (see register_hooks) would otherwise free the
+    // shards we just all-gathered the moment any wrapped module's forward()
+    // runs inside the summon window.  Each unit carries a re-entry counter
+    // (summon_depth_) — bump it here, the post-hook sees it non-zero and
+    // skips the free, and release_full_params() drops it.
     for (auto& unit : units_) {
+        unit->enter_summon();
         unit->all_gather_params();
     }
 }
 
 auto FullyShardedDataParallel::release_full_params() -> void {
+    // NN.18: pair with summon_full_params() — drop the re-entry counter
+    // *before* freeing so the actual free can proceed unblocked.
     for (auto& unit : units_) {
+        unit->exit_summon();
         unit->free_full_params();
     }
 }
@@ -697,6 +706,12 @@ auto FullyShardedDataParallel::register_hooks() -> void {
             unit_ptr->module().register_forward_post_hook(
                 [unit_ptr](nn::Module* /*module*/, const Variable& /*input*/,
                           const Variable& /*output*/) {
+                    // NN.18: skip the free when we're inside a summon window.
+                    // The user has explicitly asked for full (unsharded) params
+                    // for the duration of summon_full_params() / release_full_params();
+                    // letting a normal forward post-hook tear them down mid-window
+                    // turns the very next layer's forward into a sharded read.
+                    if (unit_ptr->in_summon()) return;
                     unit_ptr->free_full_params();
                 }
             );

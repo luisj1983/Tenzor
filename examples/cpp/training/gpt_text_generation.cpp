@@ -20,6 +20,7 @@
 #include <algorithm>
 
 #include "tenzor/tenzor.hpp"
+#include "gpt_text_generation_runner.hpp"
 
 using namespace tenzor;
 using namespace tenzor::nn;
@@ -218,7 +219,22 @@ void demo_embedding_layer(Device device) {
 // ============================================================================
 
 void train_gpt(Device device) {
+    // NN.24: the tiny-GPT training body is shared with the regression test
+    // via examples::gpt_text_generation::run_gpt_text_generation_training.
+    // Run it first so the exe exercises the same code path the test does,
+    // then continue with the original larger demo loop.
     std::cout << "\n=== Training Simple GPT Model ===\n\n";
+
+    {
+        double init_loss = 0.0;
+        double final_loss = 0.0;
+        const int runner_epochs = 5;
+        examples::gpt_text_generation::run_gpt_text_generation_training(
+            runner_epochs, &init_loss, &final_loss, device, /*verbose=*/false);
+        std::cout << "[runner] short-loop training: initial=" << init_loss
+                  << " final=" << final_loss << " over " << runner_epochs
+                  << " epochs\n\n";
+    }
 
     int64_t vocab_size = 1000;
     int64_t embed_dim = 128;

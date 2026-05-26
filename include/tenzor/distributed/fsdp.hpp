@@ -245,6 +245,30 @@ private:
     /** @brief Whether local shard is currently on CPU */
     bool offloaded_{false};
 
+    /**
+     * @brief NN.18: re-entry guard for summon_full_params().
+     *
+     * Incremented by FSDP::summon_full_params() before triggering forwards,
+     * decremented by FSDP::release_full_params() afterwards.  The forward
+     * post-hook (which would normally call free_full_params() to release
+     * the all-gathered shards immediately after each module forward) sees
+     * a non-zero depth and early-returns, leaving the full params resident
+     * for the duration of the summon window.  Without this guard, a
+     * forward executed *inside* summon_full_params() would free the very
+     * params summon was trying to keep around, and the next layer would
+     * read a sharded tensor.
+     */
+    int summon_depth_{0};
+
+public:
+    /** @brief NN.18: bump/drop the summon re-entry guard.  Internal — used
+     *         by FullyShardedDataParallel::summon_full_params() /
+     *         release_full_params(). */
+    auto enter_summon() -> void { ++summon_depth_; }
+    auto exit_summon()  -> void { if (summon_depth_ > 0) --summon_depth_; }
+    auto in_summon() const -> bool { return summon_depth_ > 0; }
+private:
+
     // ---- GPU communication resources ----
 
     /** @brief Whether the process group uses GPU backend */

@@ -245,25 +245,13 @@ void register_nn(py::module_& m) {
              py::call_guard<py::gil_scoped_release>())
         // String device overload for PyTorch compatibility
         .def("to", [](tenzor::nn::Module& self, const std::string& device) -> tenzor::nn::Module* {
-            if (device == "cpu") {
-                self.cpu();
-            } else if (device == "cuda" || device.rfind("cuda:", 0) == 0) {
-                int device_id = 0;
-                if (device.size() > 5) {
-                    try {
-                        device_id = std::stoi(device.substr(5));
-                    } catch (const std::exception&) {
-                        throw std::runtime_error("Invalid CUDA device ID in: " + device);
-                    }
-                }
-                self.cuda(device_id);
-            } else {
-                throw std::runtime_error("Unknown device: " + device);
-            }
+            // NN.20: delegate to Device::from_string for full backend coverage
+            // (cpu, cuda[:N], rocm[:N], vulkan[:N], oneapi[:N], mps, ...)
+            self.to(tenzor::Device::from_string(device));
             return &self;  // KK.20: enable chaining
         }, py::return_value_policy::reference,
              py::arg("device"),
-             "Move module to device specified by string ('cpu', 'cuda', 'cuda:0')",
+             "Move module to device specified by string ('cpu', 'cuda:0', 'rocm:0', 'vulkan', 'oneapi', 'mps')",
              py::call_guard<py::gil_scoped_release>())
         .def("cuda", [](tenzor::nn::Module& self, int device_id) -> tenzor::nn::Module* {
             self.cuda(device_id);

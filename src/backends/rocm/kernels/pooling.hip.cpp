@@ -132,6 +132,10 @@ auto maxpool2d_forward_miopen(
         workspace.ptr,
         workspace_size));
 
+    // MIOpen is async on the handle's stream; ensure the workspace HipBuffer
+    // RAII dtor does not race the kernel.
+    HIP_CHECK(hipStreamSynchronize(stream));
+
     // MIOpen stores indices in the workspace; if the caller wants indices as a
     // separate tensor we need to copy them out. The workspace layout is an
     // array of uint8_t / uint16_t depending on the input size, and MIOpen
@@ -234,6 +238,10 @@ auto maxpool2d_backward_miopen(
         input_desc_guard.desc,
         grad_input.data_ptr(),
         workspace.ptr));
+
+    // MIOpen is async on the handle's stream; ensure the workspace HipBuffer
+    // RAII dtor does not race the kernel.
+    HIP_CHECK(hipStreamSynchronize(stream));
 
     return grad_input;
 }

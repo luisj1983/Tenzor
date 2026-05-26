@@ -1866,6 +1866,7 @@ auto spgemm_standalone_typed_hip(
     hipcub::DeviceScan::ExclusiveSum(d_tmp, tmp_bytes, d_rnnz, d_crow_ub, M, stream);
     HIP_CHECK_SPARSE_SA(hipMalloc(&d_tmp, tmp_bytes));
     hipcub::DeviceScan::ExclusiveSum(d_tmp, tmp_bytes, d_rnnz, d_crow_ub, M, stream);
+    HIP_CHECK_SPARSE_SA(hipStreamSynchronize(stream));
     hipFree(d_tmp);
 
     int64_t lp = 0, lc = 0;
@@ -1876,6 +1877,7 @@ auto spgemm_standalone_typed_hip(
     HIP_CHECK_SPARSE_SA(hipMemcpyAsync(d_crow_ub + M, &total_ub, sizeof(int64_t), hipMemcpyHostToDevice, stream));
 
     if (total_ub == 0) {
+        HIP_CHECK_SPARSE_SA(hipStreamSynchronize(stream));
         hipFree(d_rnnz); hipFree(d_crow_ub);
         return {tenzor::zeros({M+1}, DType::Int64, a_crow.device()),
                 tenzor::empty({0}, DType::Int64, a_crow.device()),
@@ -1899,6 +1901,7 @@ auto spgemm_standalone_typed_hip(
     hipcub::DeviceScan::ExclusiveSum(d_tmp, tmp_bytes, d_annz, d_crow_f, M, stream);
     HIP_CHECK_SPARSE_SA(hipMalloc(&d_tmp, tmp_bytes));
     hipcub::DeviceScan::ExclusiveSum(d_tmp, tmp_bytes, d_annz, d_crow_f, M, stream);
+    HIP_CHECK_SPARSE_SA(hipStreamSynchronize(stream));
     hipFree(d_tmp);
 
     int64_t alp = 0, alc = 0;
@@ -1921,6 +1924,7 @@ auto spgemm_standalone_typed_hip(
             c_col_t.data<int64_t>(), c_vals_t.data<T>(), d_annz, M);
     }
 
+    HIP_CHECK_SPARSE_SA(hipStreamSynchronize(stream));
     hipFree(d_rnnz); hipFree(d_crow_ub); hipFree(d_col_ub);
     hipFree(d_vals_ub); hipFree(d_annz); hipFree(d_crow_f);
     return {c_crow_t, c_col_t, c_vals_t};

@@ -141,5 +141,41 @@ def test_variable_getitem_shape_is_correct():
     assert tuple(x[0, :, 2].data.shape) == (6,)
 
 
+# ---------------------------------------------------------------------------
+# NN.22: Ellipsis-in-middle of tuple index must not miscount consumed dims.
+# Previously ``x[0, ..., 2]`` on a 4-D tensor mis-subtracted the leading Int
+# from the ellipsis fill, producing the wrong shape (or out-of-range error).
+# ---------------------------------------------------------------------------
+
+def test_tensor_getitem_ellipsis_in_middle_shape():
+    x = tz.randn([4, 5, 6, 7], tz.dtype.float32)
+    # Int + ellipsis + Int: should consume first & last dim, keep middle two.
+    assert tuple(x[0, ..., 2].shape) == (5, 6)
+    # Ellipsis at front, trailing Int: drops last dim only.
+    assert tuple(x[..., 0].shape) == (4, 5, 6)
+    # Ellipsis at back, leading Int: drops first dim only.
+    assert tuple(x[0, ...].shape) == (5, 6, 7)
+    # Ellipsis between two slices: middle dims survive untouched.
+    assert tuple(x[1:3, ..., 0:2].shape) == (2, 5, 6, 2)
+    # 5-D with Int + ellipsis + Int.
+    y = tz.randn([2, 3, 4, 5, 6], tz.dtype.float32)
+    assert tuple(y[0, ..., 1].shape) == (3, 4, 5)
+
+
+def test_variable_getitem_ellipsis_in_middle_shape():
+    x = tz.Variable(tz.randn([4, 5, 6, 7], tz.dtype.float32), False)
+    assert tuple(x[0, ..., 2].data.shape) == (5, 6)
+    assert tuple(x[..., 0].data.shape) == (4, 5, 6)
+    assert tuple(x[0, ...].data.shape) == (5, 6, 7)
+
+
+def test_variable_getitem_ellipsis_in_middle_grad_flows():
+    x = tz.Variable(tz.randn([4, 5, 6, 7], tz.dtype.float32), True)
+    y = x[0, ..., 2]
+    assert tuple(y.data.shape) == (5, 6)
+    tz.sum(y).backward()
+    _assert_grad_flows(x, "ellipsis-in-middle indexing")
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-v"]))

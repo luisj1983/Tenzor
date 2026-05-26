@@ -428,6 +428,18 @@ Tensor mps_adaptive_avgpool2d_backward_kernel(
     const Tensor& grad_output, const std::vector<int64_t>& input_shape)
 {
     @autoreleasepool {
+        // F16/BF16 path: the half-precision Metal kernel scatters into
+        // `grad_input` without atomics. Adaptive pools can overlap windows so
+        // two threads can race on the same slot. Widen to F32, then narrow
+        // back. Mirrors F.11 / L.1 widen-narrow pattern.
+        DType orig_dtype = grad_output.dtype();
+        if (orig_dtype == DType::Float16 || orig_dtype == DType::BFloat16) {
+            Tensor grad_output_f32 = grad_output.to(DType::Float32);
+            Tensor grad_input_f32 = mps_adaptive_avgpool2d_backward_kernel(
+                grad_output_f32, input_shape);
+            return grad_input_f32.to(orig_dtype);
+        }
+
         Tensor grad_input(input_shape, grad_output.dtype(), grad_output.device());
         size_t bytes = grad_input.numel() * dtype_size(grad_input.dtype());
         std::memset(const_cast<void*>(grad_input.data_ptr()), 0, bytes);
@@ -553,6 +565,18 @@ Tensor mps_adaptive_maxpool3d_backward_kernel(
     // the previous mps_accelerate_single CPU roundtrip for
     // OpId::AdaptiveMaxPool3dBackward.
     @autoreleasepool {
+        // F16/BF16 path: Metal lacks half atomics so the *_f16 kernel does a
+        // non-atomic read-modify-write. Under ceil_mode (or any scatter where
+        // two outputs map to the same input index) this is last-writer-wins.
+        // Widen to F32 (atomic) and narrow back. Mirrors F.11 / L.1.
+        DType orig_dtype = grad_output.dtype();
+        if (orig_dtype == DType::Float16 || orig_dtype == DType::BFloat16) {
+            Tensor grad_output_f32 = grad_output.to(DType::Float32);
+            Tensor grad_input_f32 = mps_adaptive_maxpool3d_backward_kernel(
+                grad_output_f32, indices, input_shape);
+            return grad_input_f32.to(orig_dtype);
+        }
+
         Tensor grad_input(input_shape, grad_output.dtype(), grad_output.device());
         size_t bytes = grad_input.numel() * dtype_size(grad_input.dtype());
         std::memset(const_cast<void*>(grad_input.data_ptr()), 0, bytes);
@@ -714,6 +738,18 @@ Tensor mps_avgpool1d_backward_kernel(
     int64_t kernel_size, int64_t stride, int64_t padding)
 {
     @autoreleasepool {
+        // F16/BF16 path: half-precision Metal kernel scatters into
+        // `grad_input` without atomics. AvgPool with stride < kernel produces
+        // overlapping windows so two threads can race. Widen to F32, narrow
+        // back. Mirrors F.11 / L.1 widen-narrow pattern.
+        DType orig_dtype = grad_output.dtype();
+        if (orig_dtype == DType::Float16 || orig_dtype == DType::BFloat16) {
+            Tensor grad_output_f32 = grad_output.to(DType::Float32);
+            Tensor grad_input_f32 = mps_avgpool1d_backward_kernel(
+                grad_output_f32, input_shape, kernel_size, stride, padding);
+            return grad_input_f32.to(orig_dtype);
+        }
+
         Tensor grad_input(input_shape, grad_output.dtype(), grad_output.device());
         size_t bytes = grad_input.numel() * dtype_size(grad_input.dtype());
         std::memset(const_cast<void*>(grad_input.data_ptr()), 0, bytes);
@@ -793,6 +829,18 @@ Tensor mps_adaptive_avgpool1d_backward_kernel(
     const Tensor& grad_output, const std::vector<int64_t>& input_shape)
 {
     @autoreleasepool {
+        // F16/BF16 path: half-precision Metal kernel scatters into
+        // `grad_input` without atomics. Adaptive pools can overlap windows so
+        // two threads can race. Widen to F32, narrow back. Mirrors F.11 / L.1
+        // widen-narrow pattern.
+        DType orig_dtype = grad_output.dtype();
+        if (orig_dtype == DType::Float16 || orig_dtype == DType::BFloat16) {
+            Tensor grad_output_f32 = grad_output.to(DType::Float32);
+            Tensor grad_input_f32 = mps_adaptive_avgpool1d_backward_kernel(
+                grad_output_f32, input_shape);
+            return grad_input_f32.to(orig_dtype);
+        }
+
         Tensor grad_input(input_shape, grad_output.dtype(), grad_output.device());
         size_t bytes = grad_input.numel() * dtype_size(grad_input.dtype());
         std::memset(const_cast<void*>(grad_input.data_ptr()), 0, bytes);

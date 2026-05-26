@@ -2323,8 +2323,9 @@ auto fused_sgd_step_hip(
     bool nesterov,
     hipStream_t stream
 ) -> void {
-    // BFloat16: upcast to Float32, compute, convert back
-    if (param.dtype() == DType::BFloat16) {
+    // Float16/BFloat16: upcast to Float32, compute, convert back
+    if (param.dtype() == DType::Float16 || param.dtype() == DType::BFloat16) {
+        DType orig_dtype = param.dtype();
         auto param_f32 = param.to(DType::Float32);
         auto grad_f32 = grad.to(DType::Float32);
         Tensor mom_f32;
@@ -2335,8 +2336,8 @@ auto fused_sgd_step_hip(
         }
         fused_sgd_step_hip(param_f32, grad_f32, mom_f32_ptr, lr, momentum,
                            weight_decay, dampening, nesterov, stream);
-        param = param_f32.to(DType::BFloat16);
-        if (momentum_buffer) *momentum_buffer = mom_f32.to(DType::BFloat16);
+        param = param_f32.to(orig_dtype);
+        if (momentum_buffer) *momentum_buffer = mom_f32.to(orig_dtype);
         return;
     }
 
@@ -2458,8 +2459,9 @@ auto fused_adam_step_hip(
     Tensor* max_exp_avg_sq,
     bool amsgrad
 ) -> void {
-    // BFloat16: upcast to Float32, compute, convert back
-    if (param.dtype() == DType::BFloat16) {
+    // Float16/BFloat16: upcast to Float32, compute, convert back
+    if (param.dtype() == DType::Float16 || param.dtype() == DType::BFloat16) {
+        DType orig_dtype = param.dtype();
         auto param_f32 = param.to(DType::Float32);
         auto grad_f32 = grad.to(DType::Float32);
         auto ea_f32 = exp_avg.to(DType::Float32);
@@ -2472,10 +2474,10 @@ auto fused_adam_step_hip(
         }
         fused_adam_step_hip(param_f32, grad_f32, ea_f32, eas_f32, lr, beta1, beta2, eps,
                             weight_decay, step, decoupled_weight_decay, stream, meas_f32_ptr, amsgrad);
-        param = param_f32.to(DType::BFloat16);
-        exp_avg = ea_f32.to(DType::BFloat16);
-        exp_avg_sq = eas_f32.to(DType::BFloat16);
-        if (max_exp_avg_sq) *max_exp_avg_sq = meas_f32.to(DType::BFloat16);
+        param = param_f32.to(orig_dtype);
+        exp_avg = ea_f32.to(orig_dtype);
+        exp_avg_sq = eas_f32.to(orig_dtype);
+        if (max_exp_avg_sq) *max_exp_avg_sq = meas_f32.to(orig_dtype);
         return;
     }
 
@@ -2842,8 +2844,9 @@ auto fused_adam_atan2_step_hip(
     bool amsgrad,
     hipStream_t stream
 ) -> void {
-    // BFloat16: upcast to Float32, compute, convert back
-    if (param.dtype() == DType::BFloat16) {
+    // Float16/BFloat16: upcast to Float32, compute, convert back
+    if (param.dtype() == DType::Float16 || param.dtype() == DType::BFloat16) {
+        DType orig_dtype = param.dtype();
         auto param_f32 = param.to(DType::Float32);
         auto grad_f32 = grad.to(DType::Float32);
         auto ea_f32 = exp_avg.to(DType::Float32);
@@ -2856,10 +2859,10 @@ auto fused_adam_atan2_step_hip(
         }
         fused_adam_atan2_step_hip(param_f32, grad_f32, ea_f32, eas_f32, meas_f32_ptr,
                                   lr, beta1, beta2, eps, weight_decay, step, amsgrad, stream);
-        param = param_f32.to(DType::BFloat16);
-        exp_avg = ea_f32.to(DType::BFloat16);
-        exp_avg_sq = eas_f32.to(DType::BFloat16);
-        if (max_exp_avg_sq) *max_exp_avg_sq = meas_f32.to(DType::BFloat16);
+        param = param_f32.to(orig_dtype);
+        exp_avg = ea_f32.to(orig_dtype);
+        exp_avg_sq = eas_f32.to(orig_dtype);
+        if (max_exp_avg_sq) *max_exp_avg_sq = meas_f32.to(orig_dtype);
         return;
     }
 

@@ -572,19 +572,28 @@ auto BackwardEngine::execute(Variable& root, std::optional<Tensor> gradient,
                     };
 
                     if (var.impl_) {
+                        // NN.4: snapshot existing graph impl under the lock,
+                        // compute the Variable sum OUTSIDE the lock (some
+                        // AddBackward.forward paths can construct Variables
+                        // that touch grad_mutex_ — running the sum under the
+                        // lock risked a recursive lock for checkpoint-recovered
+                        // leaves), then re-acquire briefly to store the result.
+                        std::shared_ptr<VariableImpl> existing_graph_impl;
+                        bool need_graph_update = create_graph && i < var_input_grads.size();
+                        {
 #ifndef NDEBUG
-                        GradMutexDebugGuard single_lock_check;
+                            GradMutexDebugGuard single_lock_check;
 #endif
-                        std::lock_guard lock(*var.impl_->grad_mutex_);
-                        accumulate_unlocked();
-                        // HH.4: record the leaf as touched so the finalization
-                        // loop downcasts its grad to its own dtype if mismatched.
-                        touched_leaves.insert(var.impl_.get());
-                        // When create_graph=true, capture the Variable form
-                        // of the gradient so .grad_variable() on the leaf returns
-                        // something whose grad_fn chains back through the original
-                        // forward graph.
-                        //
+                            std::lock_guard lock(*var.impl_->grad_mutex_);
+                            accumulate_unlocked();
+                            // HH.4: record the leaf as touched so the finalization
+                            // loop downcasts its grad to its own dtype if mismatched.
+                            touched_leaves.insert(var.impl_.get());
+                            if (need_graph_update) {
+                                existing_graph_impl = var.impl_->grad_with_graph_impl_;
+                            }
+                        }
+
                         // GG.8: when a leaf receives gradients via multiple paths
                         // (e.g. loss = x*x + sin(x)), the FIRST accumulation
                         // stored only var_input_grads[i] and subsequent
@@ -593,20 +602,25 @@ auto BackwardEngine::execute(Variable& root, std::optional<Tensor> gradient,
                         // and second-derivative through branchy higher-order
                         // forwards dropped a path. Fix: sum at the Variable
                         // level so grad_fn chains through all contributing
-                        // paths. The Variable-level operator+ does not touch
-                        // grad_mutex_ on its operands, so the single-lock
-                        // invariant (debug guard above) is preserved.
-                        if (create_graph && i < var_input_grads.size()) {
-                            if (!var.impl_->grad_with_graph_impl_) {
-                                var.impl_->grad_with_graph_impl_ =
-                                    var_input_grads[i].impl_;
+                        // paths.
+                        if (need_graph_update) {
+                            std::shared_ptr<VariableImpl> new_impl;
+                            if (!existing_graph_impl) {
+                                new_impl = var_input_grads[i].impl_;
                             } else {
                                 Variable existing_var;
-                                existing_var.impl_ = var.impl_->grad_with_graph_impl_;
-                                var.impl_->grad_with_graph_impl_ =
+                                existing_var.impl_ = existing_graph_impl;
+                                new_impl =
                                     (existing_var + var_input_grads[i]).impl_;
                             }
-                            var.impl_->grad_with_graph_cache_storage_.reset();
+                            {
+#ifndef NDEBUG
+                                GradMutexDebugGuard single_lock_check;
+#endif
+                                std::lock_guard lock(*var.impl_->grad_mutex_);
+                                var.impl_->grad_with_graph_impl_ = new_impl;
+                                var.impl_->grad_with_graph_cache_storage_.reset();
+                            }
                         }
                     } else {
                         var.set_grad(grad_to_apply);
@@ -635,6 +649,11 @@ auto BackwardEngine::execute(Variable& root, std::optional<Tensor> gradient,
                 // create_graph=true workloads leak the entire higher-order
                 // graph even when retain_graph is false.
                 function->clear_saved_variables();
+                // audit-10 NN.6: release per-Function ad-hoc state (checkpoint
+                // recompute caches, FusedLinearReLUBackward::relu_output_,
+                // sparse transposed-CSR caches, etc.) so they don't survive
+                // until the Function destructs.
+                function->release_op_specific_state();
             }
         }
     }
@@ -1071,36 +1090,48 @@ auto BackwardEngine::execute_multi(std::vector<Variable*> roots,
                     };
 
                     if (var.impl_) {
+                        // NN.4: snapshot the existing graph impl under the
+                        // lock, drop the lock, run the Variable-level sum,
+                        // then re-acquire to store.
+                        std::shared_ptr<VariableImpl> existing_graph_impl;
+                        bool need_graph_update = create_graph && i < var_input_grads.size();
+                        {
 #ifndef NDEBUG
-                        GradMutexDebugGuard single_lock_check;
+                            GradMutexDebugGuard single_lock_check;
 #endif
-                        std::lock_guard lock(*var.impl_->grad_mutex_);
-                        accumulate_unlocked();
-                        // HH.4: record touched leaf so the finalization
-                        // dtype-downcast loop visits it even when the leaf
-                        // is reached only through next_funcs chains.
-                        touched_leaves.insert(var.impl_.get());
-                        // V.2: mirror the single-root path — capture the
-                        // Variable form of the gradient on the leaf when
-                        // create_graph is set so .grad_variable() chains
-                        // back through the forward graph.
-                        //
-                        // GG.8: branchy higher-order forwards (e.g. x*x +
-                        // sin(x)) reach the same leaf via multiple paths;
-                        // sum at the Variable level so grad_fn chains
-                        // through every contributing path instead of only
-                        // the first.
-                        if (create_graph && i < var_input_grads.size()) {
-                            if (!var.impl_->grad_with_graph_impl_) {
-                                var.impl_->grad_with_graph_impl_ =
-                                    var_input_grads[i].impl_;
+                            std::lock_guard lock(*var.impl_->grad_mutex_);
+                            accumulate_unlocked();
+                            // HH.4: record touched leaf so the finalization
+                            // dtype-downcast loop visits it even when the leaf
+                            // is reached only through next_funcs chains.
+                            touched_leaves.insert(var.impl_.get());
+                            if (need_graph_update) {
+                                existing_graph_impl = var.impl_->grad_with_graph_impl_;
+                            }
+                        }
+
+                        // V.2 / GG.8: mirror the single-root path — capture
+                        // the Variable form of the gradient on the leaf when
+                        // create_graph is set; sum at the Variable level so
+                        // grad_fn chains through every contributing path.
+                        if (need_graph_update) {
+                            std::shared_ptr<VariableImpl> new_impl;
+                            if (!existing_graph_impl) {
+                                new_impl = var_input_grads[i].impl_;
                             } else {
                                 Variable existing_var;
-                                existing_var.impl_ = var.impl_->grad_with_graph_impl_;
-                                var.impl_->grad_with_graph_impl_ =
+                                existing_var.impl_ = existing_graph_impl;
+                                new_impl =
                                     (existing_var + var_input_grads[i]).impl_;
                             }
-                            var.impl_->grad_with_graph_cache_storage_.reset();
+                            {
+#ifndef NDEBUG
+                                GradMutexDebugGuard single_lock_check;
+#endif
+                                std::lock_guard lock(*var.impl_->grad_mutex_);
+                                var.impl_->grad_with_graph_impl_ = new_impl;
+                                var.impl_->grad_with_graph_cache_storage_.reset();
+                            }
                         }
                     } else {
                         var.set_grad(grad_to_apply);
@@ -1124,6 +1155,8 @@ auto BackwardEngine::execute_multi(std::vector<Variable*> roots,
                 // audit-9 JJ.2: see single-root execute() at L630 — drop
                 // saved_variables_ to release the second-order graph.
                 function->clear_saved_variables();
+                // audit-10 NN.6: release per-Function ad-hoc state.
+                function->release_op_specific_state();
             }
         }
     }

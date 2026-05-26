@@ -78,20 +78,73 @@ target_link_libraries(vit_image_classification PRIVATE
 target_include_directories(vit_image_classification PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/cpp/training)
 
+# NN.24: transformer_seq2seq's attention training body lives in a runner
+# so tests/examples/test_all_autograd_examples.cpp can drive it. Mirrors
+# the KK.27 pattern from example_vit_image_classification_runner.
+add_library(example_transformer_seq2seq_runner OBJECT
+    cpp/training/transformer_seq2seq_runner.cpp)
+target_link_libraries(example_transformer_seq2seq_runner PUBLIC tenzor_core)
+target_include_directories(example_transformer_seq2seq_runner PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/cpp/training
+    ${CMAKE_SOURCE_DIR}/include)
+set_target_properties(example_transformer_seq2seq_runner PROPERTIES
+    CXX_STANDARD 23
+    CXX_STANDARD_REQUIRED ON
+    POSITION_INDEPENDENT_CODE ON)
+
 add_executable(transformer_seq2seq cpp/training/transformer_seq2seq.cpp)
-target_link_libraries(transformer_seq2seq PRIVATE tenzor_core)
+target_link_libraries(transformer_seq2seq PRIVATE
+    tenzor_core example_transformer_seq2seq_runner)
+target_include_directories(transformer_seq2seq PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/cpp/training)
 
 add_executable(vae_autoencoder cpp/training/vae_autoencoder.cpp)
 target_link_libraries(vae_autoencoder PRIVATE tenzor_core)
 
+# NN.24: yolo_object_detection's tiny-backbone training body lives in a
+# runner so tests/examples/test_all_autograd_examples.cpp can drive it.
+add_library(example_yolo_object_detection_runner OBJECT
+    cpp/training/yolo_object_detection_runner.cpp)
+target_link_libraries(example_yolo_object_detection_runner PUBLIC tenzor_core)
+target_include_directories(example_yolo_object_detection_runner PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/cpp/training
+    ${CMAKE_SOURCE_DIR}/include)
+set_target_properties(example_yolo_object_detection_runner PROPERTIES
+    CXX_STANDARD 23
+    CXX_STANDARD_REQUIRED ON
+    POSITION_INDEPENDENT_CODE ON)
+
 add_executable(yolo_object_detection cpp/training/yolo_object_detection.cpp)
-target_link_libraries(yolo_object_detection PRIVATE tenzor_core)
+target_link_libraries(yolo_object_detection PRIVATE
+    tenzor_core example_yolo_object_detection_runner)
+target_include_directories(yolo_object_detection PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/cpp/training)
 
 add_executable(unet_semantic_segmentation cpp/training/unet_semantic_segmentation.cpp)
 target_link_libraries(unet_semantic_segmentation PRIVATE tenzor_core)
 
+# NN.24: gpt_text_generation's SimpleGPT training body lives in a runner
+# so tests/examples/test_all_autograd_examples.cpp can drive it. The
+# NN.24 plan referenced examples/cpp/nlp/gpt_text_generation.cpp, but
+# that file is pure inference (no training loop); the training-side
+# example lives here in cpp/training/ and is what the regression test
+# actually needs to exercise. See tests/examples/SKIP_NOTES.md.
+add_library(example_gpt_text_generation_runner OBJECT
+    cpp/training/gpt_text_generation_runner.cpp)
+target_link_libraries(example_gpt_text_generation_runner PUBLIC tenzor_core)
+target_include_directories(example_gpt_text_generation_runner PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/cpp/training
+    ${CMAKE_SOURCE_DIR}/include)
+set_target_properties(example_gpt_text_generation_runner PROPERTIES
+    CXX_STANDARD 23
+    CXX_STANDARD_REQUIRED ON
+    POSITION_INDEPENDENT_CODE ON)
+
 add_executable(gpt_text_generation_training cpp/training/gpt_text_generation.cpp)
-target_link_libraries(gpt_text_generation_training PRIVATE tenzor_core)
+target_link_libraries(gpt_text_generation_training PRIVATE
+    tenzor_core example_gpt_text_generation_runner)
+target_include_directories(gpt_text_generation_training PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/cpp/training)
 
 # KK.27: gradient_checkpointing's deep-ResNet training body lives in a
 # runner so the regression test can drive it. OBJECT library shared between

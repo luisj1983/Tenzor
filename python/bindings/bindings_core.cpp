@@ -2396,7 +2396,14 @@ Returns:
                     tenzor::Tensor result = self;
 
                     // Count how many entries actually consume an input dim
-                    // (Int, Slice, Ellipsis, BoolMask).  NewAxis does not.
+                    // (Int, Slice, BoolMask).  NewAxis and Ellipsis do not
+                    // count toward the consuming total.
+                    // NN.22: previously this summed *all* consuming entries
+                    // (pre- and post-ellipsis), so the ellipsis ``fill`` calc
+                    // subtracted dims already accounted for by ``dim_cursor``.
+                    // Fix: track ``remaining_consuming`` and decrement as each
+                    // pre-ellipsis Int/Slice/BoolMask is processed, so at the
+                    // ellipsis only strictly-after consuming entries remain.
                     int consuming = 0;
                     int ellipsis_count = 0;
                     for (auto& e : tuple_entries) {
@@ -2408,6 +2415,7 @@ Returns:
                         throw std::runtime_error("Only one Ellipsis allowed per index");
                     }
 
+                    int remaining_consuming = consuming;
                     size_t dim_cursor = 0;
                     for (size_t i = 0; i < tuple_entries.size(); ++i) {
                         auto& entry = tuple_entries[i];
@@ -2418,9 +2426,12 @@ Returns:
                         }
                         if (entry.kind == TupleKind::Ellipsis) {
                             auto shape = result.shape();
+                            // Only the consuming entries *after* the ellipsis
+                            // determine the fill (remaining_consuming has been
+                            // decremented for each pre-ellipsis consuming entry).
                             int64_t fill = static_cast<int64_t>(shape.size()) -
                                            static_cast<int64_t>(dim_cursor) -
-                                           static_cast<int64_t>(consuming);
+                                           static_cast<int64_t>(remaining_consuming);
                             if (fill < 0) fill = 0;
                             dim_cursor += static_cast<size_t>(fill);
                             continue;
@@ -2446,6 +2457,7 @@ Returns:
                             auto nz = tenzor::nonzero(entry.mask).squeeze(1);
                             result = tenzor::index_select(result, static_cast<int64_t>(dim_cursor), nz);
                             dim_cursor++;
+                            remaining_consuming--;  // NN.22
                             continue;
                         }
                         if (entry.kind == TupleKind::Int) {
@@ -2463,6 +2475,7 @@ Returns:
                             } else {
                                 dim_cursor++;
                             }
+                            remaining_consuming--;  // NN.22
                             continue;
                         }
                         // Slice
@@ -2480,6 +2493,7 @@ Returns:
                         stop = std::clamp(stop, int64_t(0), dim_size);
                         result = result.slice(dim_cursor, start, stop, step);
                         dim_cursor++;
+                        remaining_consuming--;  // NN.22
                     }
                     return result;
                 }
@@ -4113,18 +4127,22 @@ Returns:
          py::arg("step") = 1);
     m.def("index_select", static_cast<tenzor::Tensor(*)(const tenzor::Tensor&, int64_t, const tenzor::Tensor&)>(&tenzor::index_select),
          "Select indices along dimension",
-         py::arg("input"), py::arg("dim"), py::arg("index"));
+         py::arg("input"), py::arg("dim"), py::arg("index"),
+         py::call_guard<py::gil_scoped_release>());
     m.def("gather", static_cast<tenzor::Tensor(*)(const tenzor::Tensor&, int64_t, const tenzor::Tensor&)>(&tenzor::gather),
          "Gather elements along dimension",
-         py::arg("input"), py::arg("dim"), py::arg("index"));
+         py::arg("input"), py::arg("dim"), py::arg("index"),
+         py::call_guard<py::gil_scoped_release>());
     m.def("scatter", [](const tenzor::Tensor& input, int64_t dim, const tenzor::Tensor& index, const tenzor::Tensor& src) {
          return tenzor::scatter(input, dim, index, src);
          }, "Scatter elements along dimension",
-         py::arg("input"), py::arg("dim"), py::arg("index"), py::arg("src"));
+         py::arg("input"), py::arg("dim"), py::arg("index"), py::arg("src"),
+         py::call_guard<py::gil_scoped_release>());
     m.def("scatter_add", [](const tenzor::Tensor& input, int64_t dim, const tenzor::Tensor& index, const tenzor::Tensor& src) {
          return tenzor::scatter_add(input, dim, index, src);
          }, "Scatter-add elements along dimension",
-         py::arg("input"), py::arg("dim"), py::arg("index"), py::arg("src"));
+         py::arg("input"), py::arg("dim"), py::arg("index"), py::arg("src"),
+         py::call_guard<py::gil_scoped_release>());
     m.def("scatter_reduce", [](const tenzor::Tensor& input, int64_t dim, const tenzor::Tensor& index,
                                 const tenzor::Tensor& src, const std::string& reduce, bool include_self) {
          return tenzor::scatter_reduce(input, dim, index, src, reduce, include_self);
@@ -4136,20 +4154,25 @@ Returns:
          static_cast<tenzor::Tensor (*)(const tenzor::Tensor&, const tenzor::Tensor&)>(
              &tenzor::masked_select),
          "Select elements where mask is true",
-         py::arg("input"), py::arg("mask"));
+         py::arg("input"), py::arg("mask"),
+         py::call_guard<py::gil_scoped_release>());
     m.def("masked_fill",
          static_cast<tenzor::Tensor (*)(const tenzor::Tensor&, const tenzor::Tensor&, float)>(
              &tenzor::masked_fill),
          "Fill elements with value where mask is true",
-         py::arg("input"), py::arg("mask"), py::arg("value"));
+         py::arg("input"), py::arg("mask"), py::arg("value"),
+         py::call_guard<py::gil_scoped_release>());
     m.def("where", [](const tenzor::Tensor& condition, const tenzor::Tensor& x, const tenzor::Tensor& y) {
          return tenzor::where(condition, x, y);
          }, "Conditional element selection",
-         py::arg("condition"), py::arg("x"), py::arg("y"));
+         py::arg("condition"), py::arg("x"), py::arg("y"),
+         py::call_guard<py::gil_scoped_release>());
     m.def("take", &tenzor::take, "Take elements from flattened tensor",
-         py::arg("input"), py::arg("index"));
+         py::arg("input"), py::arg("index"),
+         py::call_guard<py::gil_scoped_release>());
     m.def("put", &tenzor::put, "Put elements into flattened tensor",
-         py::arg("input"), py::arg("index"), py::arg("source"));
+         py::arg("input"), py::arg("index"), py::arg("source"),
+         py::call_guard<py::gil_scoped_release>());
     m.def("one_hot",
          static_cast<tenzor::Tensor (*)(const tenzor::Tensor&, int64_t)>(
              &tenzor::one_hot),
@@ -4799,6 +4822,9 @@ Returns:
                     // overloads so grad_fn back to ``self`` survives.
                     tenzor::Variable result = self;
 
+                    // NN.22: same fix as Tensor tuple path — count only
+                    // strictly-after-ellipsis consuming entries when computing
+                    // the ellipsis fill, via a running ``remaining_consuming``.
                     int consuming = 0;
                     int ellipsis_count = 0;
                     for (auto& e : tuple_entries) {
@@ -4810,6 +4836,7 @@ Returns:
                         throw std::runtime_error("Only one Ellipsis allowed per index");
                     }
 
+                    int remaining_consuming = consuming;
                     size_t dim_cursor = 0;
                     for (size_t i = 0; i < tuple_entries.size(); ++i) {
                         auto& entry = tuple_entries[i];
@@ -4822,7 +4849,7 @@ Returns:
                             auto shape = result.tensor().shape();
                             int64_t fill = static_cast<int64_t>(shape.size()) -
                                            static_cast<int64_t>(dim_cursor) -
-                                           static_cast<int64_t>(consuming);
+                                           static_cast<int64_t>(remaining_consuming);
                             if (fill < 0) fill = 0;
                             dim_cursor += static_cast<size_t>(fill);
                             continue;
@@ -4847,6 +4874,7 @@ Returns:
                             auto nz = ::tenzor::nonzero(entry.mask).squeeze(1);
                             result = ::tenzor::index_select(result, static_cast<int64_t>(dim_cursor), nz);
                             dim_cursor++;
+                            remaining_consuming--;  // NN.22
                             continue;
                         }
                         if (entry.kind == TupleKind::Int) {
@@ -4870,6 +4898,7 @@ Returns:
                             } else {
                                 dim_cursor++;
                             }
+                            remaining_consuming--;  // NN.22
                             continue;
                         }
                         // Slice
@@ -4887,6 +4916,7 @@ Returns:
                         stop  = std::clamp(stop,  int64_t(0), dim_size);
                         result = ::tenzor::slice(result, static_cast<int64_t>(dim_cursor), start, stop, step);
                         dim_cursor++;
+                        remaining_consuming--;  // NN.22
                     }
                     return result;
                 }

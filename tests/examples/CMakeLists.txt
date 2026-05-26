@@ -65,6 +65,14 @@ set(SHOWCASE_AUTOGRAD_RUNNER_TARGETS
 set(NON_SHOWCASE_AUTOGRAD_RUNNER_TARGETS
     example_vit_image_classification_runner
     example_gradient_checkpointing_runner
+    # NN.24: top-3 non-showcase training examples wired into regression
+    # coverage. The nlp/gpt_text_generation example is pure inference;
+    # the training-side counterpart (cpp/training/gpt_text_generation.cpp)
+    # is the one with an extractable loop and is what this target covers.
+    # See tests/examples/SKIP_NOTES.md.
+    example_transformer_seq2seq_runner
+    example_yolo_object_detection_runner
+    example_gpt_text_generation_runner
 )
 
 add_executable(test_all_autograd_examples test_all_autograd_examples.cpp)

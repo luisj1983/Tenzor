@@ -105,6 +105,19 @@ public:
     virtual auto load_state_dict(
         const std::unordered_map<std::string, Tensor>& state) -> void;
 
+    /**
+     * @brief Get the optimizer this scheduler manages, if any.
+     *
+     * NN.17: ChainedScheduler needs to read/write the optimizer LR across a
+     * sequence of children to make the chain truly multiplicative.  Each
+     * concrete scheduler stores its own optimizer reference; this virtual
+     * exposes it polymorphically.  Schedulers that do not manage an
+     * optimizer (e.g. ChainedScheduler itself) return nullptr.
+     *
+     * @return Pointer to the optimizer, or nullptr if none.
+     */
+    virtual auto optimizer() const -> Optimizer* { return nullptr; }
+
 protected:
     LRScheduler() = default;
 
@@ -166,6 +179,7 @@ public:
 
     auto step() -> void override;
     auto get_last_lr() const -> double override { return last_lr_; }
+    auto optimizer() const -> Optimizer* override { return optimizer_; }
 
     // Get current epoch
     auto get_epoch() const -> int { return epoch_; }
@@ -222,6 +236,7 @@ public:
 
     auto step() -> void override;
     auto get_last_lr() const -> double override { return last_lr_; }
+    auto optimizer() const -> Optimizer* override { return optimizer_; }
 
     // Get current epoch
     auto get_epoch() const -> int { return epoch_; }
@@ -288,6 +303,7 @@ public:
 
     auto step() -> void override;
     auto get_last_lr() const -> double override { return last_lr_; }
+    auto optimizer() const -> Optimizer* override { return optimizer_; }
 
     // Get current epoch
     auto get_epoch() const -> int { return epoch_; }
@@ -870,6 +886,8 @@ public:
     /** @brief Get the warmup steps count. */
     auto warmup_steps() const -> int64_t { return warmup_steps_; }
 
+    auto optimizer() const -> Optimizer* override { return &optimizer_; }
+
     auto state_dict() const -> std::unordered_map<std::string, Tensor> override;
     auto load_state_dict(
         const std::unordered_map<std::string, Tensor>& state) -> void override;
@@ -916,6 +934,7 @@ public:
     auto step() -> void override;
     auto get_last_lr() const -> double override { return last_lr_; }
     auto get_epoch() const -> int { return epoch_; }
+    auto optimizer() const -> Optimizer* override { return &optimizer_; }
 
     /** @brief Identifier of the lambda this scheduler was built with. */
     auto name() const -> const std::string& { return name_; }
@@ -962,6 +981,7 @@ public:
     auto step() -> void override;
     auto get_last_lr() const -> double override { return last_lr_; }
     auto get_epoch() const -> int { return epoch_; }
+    auto optimizer() const -> Optimizer* override { return &optimizer_; }
 
     auto state_dict() const -> std::unordered_map<std::string, Tensor> override;
     auto load_state_dict(
@@ -1000,6 +1020,7 @@ public:
     auto step() -> void override;
     auto get_last_lr() const -> double override { return last_lr_; }
     auto get_epoch() const -> int { return epoch_; }
+    auto optimizer() const -> Optimizer* override { return &optimizer_; }
 
     auto state_dict() const -> std::unordered_map<std::string, Tensor> override;
     auto load_state_dict(
@@ -1027,6 +1048,7 @@ public:
 
     auto step() -> void override;
     auto get_last_lr() const -> double override { return last_lr_; }
+    auto optimizer() const -> Optimizer* override { return &optimizer_; }
 
     auto state_dict() const -> std::unordered_map<std::string, Tensor> override;
     auto load_state_dict(
@@ -1054,6 +1076,7 @@ public:
 
     auto step() -> void override;
     auto get_last_lr() const -> double override { return last_lr_; }
+    auto optimizer() const -> Optimizer* override { return &optimizer_; }
 
     auto state_dict() const -> std::unordered_map<std::string, Tensor> override;
     auto load_state_dict(
@@ -1091,6 +1114,7 @@ public:
 
     auto step() -> void override;
     auto get_last_lr() const -> double override { return last_lr_; }
+    auto optimizer() const -> Optimizer* override { return &optimizer_; }
 
     /** @brief Identifier of the lambda this scheduler was built with. */
     auto name() const -> const std::string& { return name_; }
@@ -1123,6 +1147,7 @@ public:
 
     auto step() -> void override;
     auto get_last_lr() const -> double override { return last_lr_; }
+    auto optimizer() const -> Optimizer* override { return &optimizer_; }
 
     auto state_dict() const -> std::unordered_map<std::string, Tensor> override;
     auto load_state_dict(

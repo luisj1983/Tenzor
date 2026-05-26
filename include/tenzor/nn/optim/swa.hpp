@@ -16,8 +16,13 @@
 #include "scheduler.hpp"
 #include <vector>
 #include <memory>
+#include <functional>
 
 namespace tenzor {
+namespace nn {
+class Module;  // forward-declared so update_bn can take a Module& without
+               // pulling the entire NN-layer header chain into swa.hpp.
+}
 namespace optim {
 
 /**
@@ -89,6 +94,36 @@ public:
     auto averaged_params() const -> const std::vector<Tensor>& { return averaged_params_; }
 
     /**
+     * @brief Recompute BatchNorm running statistics by running forward
+     *        passes over a dataset.
+     *
+     * NN.16: `apply_to()` overwrites parameters but leaves BatchNorm running
+     * statistics matching the pre-SWA model — stale by construction.  PyTorch
+     * exposes `torch.optim.swa_utils.update_bn(loader, model)` for this.  We
+     * accept a `forward_pass` callback so the caller controls iteration
+     * (Tenzor does not expose a uniform C++ DataLoader interface).
+     *
+     * For every BatchNorm-class submodule of `model` (BatchNorm1d/2d/3d and
+     * SyncBatchNorm), this method:
+     *   1. Caches the layer's current `is_training()` flag.
+     *   2. Resets `running_mean` to zeros and `running_var` to ones (and
+     *      `num_batches_tracked` to 0 when present).
+     *   3. Switches the layer into `train()` mode so the forward pass
+     *      updates running statistics with batch statistics.
+     * Then it invokes `forward_pass(model)` exactly once — the caller must
+     * iterate the data loader and run `model.forward(batch)` for every
+     * sample they want included in the new statistics.  Gradients are not
+     * required; the caller may run under `NoGradGuard`.
+     * Finally it restores each layer's pre-call training flag.
+     *
+     * @param model        Module whose BN-class submodules should be refreshed.
+     * @param forward_pass Callback that iterates the data and runs
+     *                     `model.forward(batch)` for each batch.
+     */
+    auto update_bn(tenzor::nn::Module& model,
+                   const std::function<void(tenzor::nn::Module&)>& forward_pass) -> void;
+
+    /**
      * @brief Get the number of times parameters have been averaged.
      * @return Number of update_parameters() calls
      */
@@ -151,9 +186,18 @@ public:
     /** @brief Get the last computed learning rate */
     auto get_last_lr() const -> double override { return last_lr_; }
 
+    /** @brief NN.17: expose optimizer for ChainedScheduler. */
+    auto optimizer() const -> Optimizer* override { return &optimizer_; }
+
 private:
     Optimizer& optimizer_;
     double swa_lr_;
+    // NN.19: per-group initial LRs.  Captured at construction (one entry per
+    // ParamGroup) so the annealing loop interpolates each group independently
+    // and preserves the pre-SWA per-group LR ratios.  initial_lr_ is kept for
+    // backward-compat callers / get_last_lr() reporting (mirrors PyTorch's
+    // `_last_lr[0]`).
+    std::vector<double> initial_lrs_;
     double initial_lr_;
     double last_lr_;
     int anneal_epochs_;
