@@ -917,12 +917,19 @@ auto HRM::forward_with_aux(const Variable& input, const Tensor& mask)
                 break;  // Halt
             }
         } else if (act_) {
-            // Simple halting probability ACT
+            // Simple halting probability ACT.
+            // audit-10 OO.3: previously `cumulative_halt_prob = Variable(
+            //     cumulative_halt_prob.tensor() + halt_prob.tensor(), false)`
+            // discarded `halt_prob`'s grad_fn, severing autograd through the
+            // ACT halt-probability head.  Use Variable + Variable so the
+            // accumulator preserves the graph.  `should_halt` only inspects
+            // values (min + item<float>) so it doesn't need a graph; mirrors
+            // the MoE pattern from GG.4.
             auto halt_prob = act_->compute_halt_prob(h_state);
-            cumulative_halt_prob = Variable(
-                cumulative_halt_prob.tensor() + halt_prob.tensor(),
-                false);
+            cumulative_halt_prob = cumulative_halt_prob + halt_prob;
 
+            // Value-only halt decision: read the running min on host so the
+            // boolean break does not need to participate in autograd.
             if (act_->should_halt(cumulative_halt_prob)) {
                 break;
             }

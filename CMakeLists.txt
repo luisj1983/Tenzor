@@ -529,6 +529,8 @@ if(TENZOR_BUILD_PYTHON)
             ${CMAKE_CURRENT_SOURCE_DIR}/python/tenzor/jit.py
             # Audit-8 II.12: typed-exception re-export namespace.
             ${CMAKE_CURRENT_SOURCE_DIR}/python/tenzor/exceptions.py
+            # audit-10 OO.12: composable function transforms (torch.func parity).
+            ${CMAKE_CURRENT_SOURCE_DIR}/python/tenzor/func.py
         )
         # Subpackages (directories with their own __init__.py) — copied via
         # CMake's directory copy so that all files inside them land in the
@@ -546,6 +548,8 @@ if(TENZOR_BUILD_PYTHON)
             ${CMAKE_CURRENT_SOURCE_DIR}/python/tenzor/torch_interop.pyi
             # Audit-8 II.12: typed-exception namespace stub.
             ${CMAKE_CURRENT_SOURCE_DIR}/python/tenzor/exceptions.pyi
+            # audit-10 OO.12: composable function transforms stub.
+            ${CMAKE_CURRENT_SOURCE_DIR}/python/tenzor/func.pyi
         )
         set(_PY_ALL_INPUTS ${_PY_SOURCES} ${_PY_STUBS})
 

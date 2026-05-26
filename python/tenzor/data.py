@@ -1095,7 +1095,17 @@ class _MultiProcessLoader:
                 # actually exit so its multiprocessing.Queue cleanup runs
                 # and our subsequent cancel_join_thread / close don't race
                 # against a still-publishing producer.
-                w.join(timeout=5.0)
+                w.join(timeout=2.0)
+            # audit-10 OO.11: reclaim the Process object's bookkeeping fds.
+            # Python ≥3.7 exposes Process.close(); it raises ValueError if
+            # the worker is still alive (defensive — should not happen after
+            # the join above, but guard anyway so a stuck worker doesn't
+            # take the whole loader down).
+            if not w.is_alive():
+                try:
+                    w.close()
+                except (AttributeError, ValueError):
+                    pass
         self._workers.clear()
         # OO.13: release any leaked fds / semaphores from the output queue.
         # cancel_join_thread() lets us exit without blocking on a stuck
@@ -1113,6 +1123,23 @@ class _MultiProcessLoader:
             # _start_workers (which allocates a fresh queue) rather than
             # touching the closed handle.
             self._output_queue = None
+        # audit-10 OO.11: also tear down the per-worker index queues so
+        # their feeder threads exit and the underlying pipe / semaphore fds
+        # are released. Without this, every epoch (or every loader created
+        # and discarded) leaks num_workers Queue handles.
+        for iq in self._index_queues:
+            try:
+                iq.cancel_join_thread()
+            except (AttributeError, OSError, ValueError):
+                pass
+            try:
+                iq.close()
+            except (AttributeError, OSError, ValueError):
+                pass
+            try:
+                iq.join_thread()
+            except (AttributeError, OSError, ValueError, RuntimeError):
+                pass
         self._index_queues = []
 
     def __iter__(self):

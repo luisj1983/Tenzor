@@ -205,9 +205,23 @@ void register_optim(py::module_& m) {
              py::arg("params"), py::arg("lr"),
              py::arg("momentum") = 0.0, py::arg("dampening") = 0.0,
              py::arg("weight_decay") = 0.0, py::arg("nesterov") = false)
-        .def("step", [](tenzor::optim::SGD& self, std::optional<std::function<tenzor::Variable()>> closure) -> py::object {
-            if (closure) {
-                return py::cast(self.step(*closure));
+        .def("step", [](tenzor::optim::SGD& self, py::object closure) -> py::object {
+            if (!closure.is_none()) {
+                // audit-10 OO.9: closure path must release the GIL across the
+                // C++ step body too — only re-acquire when crossing back into
+                // Python for the closure invocation. Mirrors the closure-less
+                // path's Q.15 release.
+                py::function py_closure = closure.cast<py::function>();
+                auto closure_fn = [py_closure]() -> tenzor::Variable {
+                    py::gil_scoped_acquire gil;
+                    return py_closure().cast<tenzor::Variable>();
+                };
+                tenzor::Variable result;
+                {
+                    py::gil_scoped_release release;
+                    result = self.step(closure_fn);
+                }
+                return py::cast(result);
             }
             // Q.15: release the GIL so other Python threads (DataLoader
             // workers, DDP comm hooks) make progress while the step runs.
@@ -235,8 +249,22 @@ void register_optim(py::module_& m) {
              py::arg("params"), py::arg("lr") = 0.01,
              py::arg("lambd") = 1e-4, py::arg("alpha") = 0.75,
              py::arg("t0") = 1e6, py::arg("weight_decay") = 0.0)
-        .def("step", [](tenzor::optim::ASGD& self, std::optional<std::function<tenzor::Variable()>> closure) -> py::object {
-            if (closure) return py::cast(self.step(*closure));
+        .def("step", [](tenzor::optim::ASGD& self, py::object closure) -> py::object {
+            if (!closure.is_none()) {
+                // audit-10 OO.9: release the GIL across the C++ step body; only
+                // re-acquire to invoke the Python closure.
+                py::function py_closure = closure.cast<py::function>();
+                auto closure_fn = [py_closure]() -> tenzor::Variable {
+                    py::gil_scoped_acquire gil;
+                    return py_closure().cast<tenzor::Variable>();
+                };
+                tenzor::Variable result;
+                {
+                    py::gil_scoped_release release;
+                    result = self.step(closure_fn);
+                }
+                return py::cast(result);
+            }
             // Q.15: release GIL for the closure-less hot path.
             // X.8: scope so release ends before py::none() is built.
             { py::gil_scoped_release release; self.step(); }
@@ -262,8 +290,21 @@ void register_optim(py::module_& m) {
              py::arg("beta1") = 0.9, py::arg("beta2") = 0.999,
              py::arg("eps") = 1e-8, py::arg("weight_decay") = 0.0,
              py::arg("amsgrad") = false)
-        .def("step", [](tenzor::optim::Adam& self, std::optional<std::function<tenzor::Variable()>> closure) -> py::object {
-            if (closure) return py::cast(self.step(*closure));
+        .def("step", [](tenzor::optim::Adam& self, py::object closure) -> py::object {
+            if (!closure.is_none()) {
+                // audit-10 OO.9: release the GIL across the C++ step body too.
+                py::function py_closure = closure.cast<py::function>();
+                auto closure_fn = [py_closure]() -> tenzor::Variable {
+                    py::gil_scoped_acquire gil;
+                    return py_closure().cast<tenzor::Variable>();
+                };
+                tenzor::Variable result;
+                {
+                    py::gil_scoped_release release;
+                    result = self.step(closure_fn);
+                }
+                return py::cast(result);
+            }
             // X.8: scope the GIL release so `release` is destroyed (re-acquires
             // GIL) BEFORE `py::none()` is constructed in the return statement.
             // Constructing a py::object while the GIL is released triggers a
@@ -290,8 +331,21 @@ void register_optim(py::module_& m) {
              py::arg("beta1") = 0.9, py::arg("beta2") = 0.999,
              py::arg("eps") = 1e-8, py::arg("weight_decay") = 0.01,
              py::arg("amsgrad") = false)
-        .def("step", [](tenzor::optim::AdamW& self, std::optional<std::function<tenzor::Variable()>> closure) -> py::object {
-            if (closure) return py::cast(self.step(*closure));
+        .def("step", [](tenzor::optim::AdamW& self, py::object closure) -> py::object {
+            if (!closure.is_none()) {
+                // audit-10 OO.9: release the GIL across the C++ step body too.
+                py::function py_closure = closure.cast<py::function>();
+                auto closure_fn = [py_closure]() -> tenzor::Variable {
+                    py::gil_scoped_acquire gil;
+                    return py_closure().cast<tenzor::Variable>();
+                };
+                tenzor::Variable result;
+                {
+                    py::gil_scoped_release release;
+                    result = self.step(closure_fn);
+                }
+                return py::cast(result);
+            }
             // X.8: scope the GIL release so `release` is destroyed (re-acquires
             // GIL) BEFORE `py::none()` is constructed in the return statement.
             // Constructing a py::object while the GIL is released triggers a
@@ -324,8 +378,21 @@ void register_optim(py::module_& m) {
              py::arg("params"), py::arg("lr") = 0.01, py::arg("alpha") = 0.99,
              py::arg("eps") = 1e-8, py::arg("weight_decay") = 0.0,
              py::arg("momentum") = 0.0, py::arg("centered") = false)
-        .def("step", [](tenzor::optim::RMSprop& self, std::optional<std::function<tenzor::Variable()>> closure) -> py::object {
-            if (closure) return py::cast(self.step(*closure));
+        .def("step", [](tenzor::optim::RMSprop& self, py::object closure) -> py::object {
+            if (!closure.is_none()) {
+                // audit-10 OO.9: release the GIL across the C++ step body too.
+                py::function py_closure = closure.cast<py::function>();
+                auto closure_fn = [py_closure]() -> tenzor::Variable {
+                    py::gil_scoped_acquire gil;
+                    return py_closure().cast<tenzor::Variable>();
+                };
+                tenzor::Variable result;
+                {
+                    py::gil_scoped_release release;
+                    result = self.step(closure_fn);
+                }
+                return py::cast(result);
+            }
             // X.8: scope the GIL release so `release` is destroyed (re-acquires
             // GIL) BEFORE `py::none()` is constructed in the return statement.
             // Constructing a py::object while the GIL is released triggers a
@@ -348,8 +415,21 @@ void register_optim(py::module_& m) {
              py::arg("params"), py::arg("lr") = 0.01, py::arg("lr_decay") = 0.0,
              py::arg("weight_decay") = 0.0, py::arg("initial_accumulator_value") = 0.0,
              py::arg("eps") = 1e-10)
-        .def("step", [](tenzor::optim::Adagrad& self, std::optional<std::function<tenzor::Variable()>> closure) -> py::object {
-            if (closure) return py::cast(self.step(*closure));
+        .def("step", [](tenzor::optim::Adagrad& self, py::object closure) -> py::object {
+            if (!closure.is_none()) {
+                // audit-10 OO.9: release the GIL across the C++ step body too.
+                py::function py_closure = closure.cast<py::function>();
+                auto closure_fn = [py_closure]() -> tenzor::Variable {
+                    py::gil_scoped_acquire gil;
+                    return py_closure().cast<tenzor::Variable>();
+                };
+                tenzor::Variable result;
+                {
+                    py::gil_scoped_release release;
+                    result = self.step(closure_fn);
+                }
+                return py::cast(result);
+            }
             // X.8: scope the GIL release so `release` is destroyed (re-acquires
             // GIL) BEFORE `py::none()` is constructed in the return statement.
             // Constructing a py::object while the GIL is released triggers a
@@ -366,8 +446,21 @@ void register_optim(py::module_& m) {
         .def(py::init<std::vector<std::shared_ptr<tenzor::Variable>>, double, double, double, double>(),
              py::arg("params"), py::arg("lr") = 1.0, py::arg("rho") = 0.9,
              py::arg("eps") = 1e-6, py::arg("weight_decay") = 0.0)
-        .def("step", [](tenzor::optim::Adadelta& self, std::optional<std::function<tenzor::Variable()>> closure) -> py::object {
-            if (closure) return py::cast(self.step(*closure));
+        .def("step", [](tenzor::optim::Adadelta& self, py::object closure) -> py::object {
+            if (!closure.is_none()) {
+                // audit-10 OO.9: release the GIL across the C++ step body too.
+                py::function py_closure = closure.cast<py::function>();
+                auto closure_fn = [py_closure]() -> tenzor::Variable {
+                    py::gil_scoped_acquire gil;
+                    return py_closure().cast<tenzor::Variable>();
+                };
+                tenzor::Variable result;
+                {
+                    py::gil_scoped_release release;
+                    result = self.step(closure_fn);
+                }
+                return py::cast(result);
+            }
             // X.8: scope the GIL release so `release` is destroyed (re-acquires
             // GIL) BEFORE `py::none()` is constructed in the return statement.
             // Constructing a py::object while the GIL is released triggers a
@@ -384,8 +477,21 @@ void register_optim(py::module_& m) {
              py::arg("params"), py::arg("lr") = 1e-3,
              py::arg("beta1") = 0.9, py::arg("beta2") = 0.999,
              py::arg("eps") = 1e-8, py::arg("weight_decay") = 0.0)
-        .def("step", [](tenzor::optim::RAdam& self, std::optional<std::function<tenzor::Variable()>> closure) -> py::object {
-            if (closure) return py::cast(self.step(*closure));
+        .def("step", [](tenzor::optim::RAdam& self, py::object closure) -> py::object {
+            if (!closure.is_none()) {
+                // audit-10 OO.9: release the GIL across the C++ step body too.
+                py::function py_closure = closure.cast<py::function>();
+                auto closure_fn = [py_closure]() -> tenzor::Variable {
+                    py::gil_scoped_acquire gil;
+                    return py_closure().cast<tenzor::Variable>();
+                };
+                tenzor::Variable result;
+                {
+                    py::gil_scoped_release release;
+                    result = self.step(closure_fn);
+                }
+                return py::cast(result);
+            }
             // X.8: scope the GIL release so `release` is destroyed (re-acquires
             // GIL) BEFORE `py::none()` is constructed in the return statement.
             // Constructing a py::object while the GIL is released triggers a
@@ -409,8 +515,21 @@ void register_optim(py::module_& m) {
              py::arg("beta1") = 0.9, py::arg("beta2") = 0.999,
              py::arg("eps") = 1e-8, py::arg("weight_decay") = 0.0,
              py::arg("momentum_decay") = 4e-3)
-        .def("step", [](tenzor::optim::NAdam& self, std::optional<std::function<tenzor::Variable()>> closure) -> py::object {
-            if (closure) return py::cast(self.step(*closure));
+        .def("step", [](tenzor::optim::NAdam& self, py::object closure) -> py::object {
+            if (!closure.is_none()) {
+                // audit-10 OO.9: release the GIL across the C++ step body too.
+                py::function py_closure = closure.cast<py::function>();
+                auto closure_fn = [py_closure]() -> tenzor::Variable {
+                    py::gil_scoped_acquire gil;
+                    return py_closure().cast<tenzor::Variable>();
+                };
+                tenzor::Variable result;
+                {
+                    py::gil_scoped_release release;
+                    result = self.step(closure_fn);
+                }
+                return py::cast(result);
+            }
             // X.8: scope the GIL release so `release` is destroyed (re-acquires
             // GIL) BEFORE `py::none()` is constructed in the return statement.
             // Constructing a py::object while the GIL is released triggers a
@@ -433,8 +552,21 @@ void register_optim(py::module_& m) {
              py::arg("params"), py::arg("lr") = 2e-3,
              py::arg("beta1") = 0.9, py::arg("beta2") = 0.999,
              py::arg("eps") = 1e-8, py::arg("weight_decay") = 0.0)
-        .def("step", [](tenzor::optim::Adamax& self, std::optional<std::function<tenzor::Variable()>> closure) -> py::object {
-            if (closure) return py::cast(self.step(*closure));
+        .def("step", [](tenzor::optim::Adamax& self, py::object closure) -> py::object {
+            if (!closure.is_none()) {
+                // audit-10 OO.9: release the GIL across the C++ step body too.
+                py::function py_closure = closure.cast<py::function>();
+                auto closure_fn = [py_closure]() -> tenzor::Variable {
+                    py::gil_scoped_acquire gil;
+                    return py_closure().cast<tenzor::Variable>();
+                };
+                tenzor::Variable result;
+                {
+                    py::gil_scoped_release release;
+                    result = self.step(closure_fn);
+                }
+                return py::cast(result);
+            }
             // X.8: scope the GIL release so `release` is destroyed (re-acquires
             // GIL) BEFORE `py::none()` is constructed in the return statement.
             // Constructing a py::object while the GIL is released triggers a
@@ -457,8 +589,21 @@ void register_optim(py::module_& m) {
              py::arg("params"), py::arg("lr") = 1e-3,
              py::arg("beta1") = 0.9, py::arg("beta2") = 0.999,
              py::arg("eps") = 1e-6, py::arg("weight_decay") = 0.01)
-        .def("step", [](tenzor::optim::LAMB& self, std::optional<std::function<tenzor::Variable()>> closure) -> py::object {
-            if (closure) return py::cast(self.step(*closure));
+        .def("step", [](tenzor::optim::LAMB& self, py::object closure) -> py::object {
+            if (!closure.is_none()) {
+                // audit-10 OO.9: release the GIL across the C++ step body too.
+                py::function py_closure = closure.cast<py::function>();
+                auto closure_fn = [py_closure]() -> tenzor::Variable {
+                    py::gil_scoped_acquire gil;
+                    return py_closure().cast<tenzor::Variable>();
+                };
+                tenzor::Variable result;
+                {
+                    py::gil_scoped_release release;
+                    result = self.step(closure_fn);
+                }
+                return py::cast(result);
+            }
             // X.8: scope the GIL release so `release` is destroyed (re-acquires
             // GIL) BEFORE `py::none()` is constructed in the return statement.
             // Constructing a py::object while the GIL is released triggers a
@@ -481,8 +626,21 @@ void register_optim(py::module_& m) {
              py::arg("params"), py::arg("lr") = 1e-3,
              py::arg("beta1") = 0.9, py::arg("beta2") = 0.999,
              py::arg("eps") = 1e-8)
-        .def("step", [](tenzor::optim::SparseAdam& self, std::optional<std::function<tenzor::Variable()>> closure) -> py::object {
-            if (closure) return py::cast(self.step(*closure));
+        .def("step", [](tenzor::optim::SparseAdam& self, py::object closure) -> py::object {
+            if (!closure.is_none()) {
+                // audit-10 OO.9: release the GIL across the C++ step body too.
+                py::function py_closure = closure.cast<py::function>();
+                auto closure_fn = [py_closure]() -> tenzor::Variable {
+                    py::gil_scoped_acquire gil;
+                    return py_closure().cast<tenzor::Variable>();
+                };
+                tenzor::Variable result;
+                {
+                    py::gil_scoped_release release;
+                    result = self.step(closure_fn);
+                }
+                return py::cast(result);
+            }
             // X.8: scope the GIL release so `release` is destroyed (re-acquires
             // GIL) BEFORE `py::none()` is constructed in the return statement.
             // Constructing a py::object while the GIL is released triggers a
@@ -505,8 +663,21 @@ void register_optim(py::module_& m) {
              py::arg("params"), py::arg("lr") = 0.01,
              py::arg("eta_minus") = 0.5, py::arg("eta_plus") = 1.2,
              py::arg("step_min") = 1e-6, py::arg("step_max") = 50.0)
-        .def("step", [](tenzor::optim::Rprop& self, std::optional<std::function<tenzor::Variable()>> closure) -> py::object {
-            if (closure) return py::cast(self.step(*closure));
+        .def("step", [](tenzor::optim::Rprop& self, py::object closure) -> py::object {
+            if (!closure.is_none()) {
+                // audit-10 OO.9: release the GIL across the C++ step body too.
+                py::function py_closure = closure.cast<py::function>();
+                auto closure_fn = [py_closure]() -> tenzor::Variable {
+                    py::gil_scoped_acquire gil;
+                    return py_closure().cast<tenzor::Variable>();
+                };
+                tenzor::Variable result;
+                {
+                    py::gil_scoped_release release;
+                    result = self.step(closure_fn);
+                }
+                return py::cast(result);
+            }
             // X.8: scope the GIL release so `release` is destroyed (re-acquires
             // GIL) BEFORE `py::none()` is constructed in the return statement.
             // Constructing a py::object while the GIL is released triggers a
@@ -1027,9 +1198,24 @@ void register_optim(py::module_& m) {
              py::arg("eps") = 1e-8,
              py::arg("weight_decay") = 0.01,
              py::arg("amsgrad") = false)
-        .def("step", [](tenzor::optim::AdamAtan2& self, std::optional<std::function<tenzor::Variable()>> closure) -> py::object {
-            if (closure) return py::cast(self.step(*closure));
-            self.step(); return py::none();
+        .def("step", [](tenzor::optim::AdamAtan2& self, py::object closure) -> py::object {
+            if (!closure.is_none()) {
+                // audit-10 OO.9: release the GIL across the C++ step body too.
+                py::function py_closure = closure.cast<py::function>();
+                auto closure_fn = [py_closure]() -> tenzor::Variable {
+                    py::gil_scoped_acquire gil;
+                    return py_closure().cast<tenzor::Variable>();
+                };
+                tenzor::Variable result;
+                {
+                    py::gil_scoped_release release;
+                    result = self.step(closure_fn);
+                }
+                return py::cast(result);
+            }
+            // audit-10 OO.9: release the GIL for the closure-less hot path too.
+            { py::gil_scoped_release release; self.step(); }
+            return py::none();
         }, py::arg("closure") = py::none())
         .def("zero_grad", &tenzor::optim::AdamAtan2::zero_grad,
              py::call_guard<py::gil_scoped_release>())  // W.20

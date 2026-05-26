@@ -1233,23 +1233,33 @@ PYBIND11_MODULE(tenzor_core, m) {
              py::arg("backoff_factor") = 0.5f,
              py::arg("growth_interval") = 2000,
              "Create gradient scaler with specified parameters")
+        // audit-10 OO.8: release the GIL across the C++ kernel work in
+        // scale/unscale_/step/update/found_inf_nan. These touch parameter
+        // gradient buffers and dispatch backend kernels; holding the GIL
+        // serialised AMP training against DataLoader workers and any other
+        // Python thread.
         .def("scale", &tenzor::nn::amp::GradScaler::scale,
              py::arg("loss"),
-             "Scale loss by current scale factor")
+             "Scale loss by current scale factor",
+             py::call_guard<py::gil_scoped_release>())
         .def("unscale_", &tenzor::nn::amp::GradScaler::unscale_,
              py::arg("optimizer"),
-             "Unscale gradients in optimizer parameters")
+             "Unscale gradients in optimizer parameters",
+             py::call_guard<py::gil_scoped_release>())
         .def("step", &tenzor::nn::amp::GradScaler::step,
              py::arg("optimizer"),
-             "Execute optimizer step with overflow detection")
+             "Execute optimizer step with overflow detection",
+             py::call_guard<py::gil_scoped_release>())
         .def("update", &tenzor::nn::amp::GradScaler::update,
-             "Update scale factor based on overflow history")
+             "Update scale factor based on overflow history",
+             py::call_guard<py::gil_scoped_release>())
         .def("get_scale", &tenzor::nn::amp::GradScaler::get_scale,
              "Get current scale factor")
         .def("get_growth_tracker", &tenzor::nn::amp::GradScaler::get_growth_tracker,
              "Get number of consecutive successful iterations")
         .def("found_inf_nan", &tenzor::nn::amp::GradScaler::found_inf_nan,
-             "Check if overflow was detected in last step")
+             "Check if overflow was detected in last step",
+             py::call_guard<py::gil_scoped_release>())
         .def("reset", &tenzor::nn::amp::GradScaler::reset,
              "Reset scaler to initial state")
         .def("state_dict", &tenzor::nn::amp::GradScaler::state_dict,

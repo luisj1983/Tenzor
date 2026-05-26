@@ -24,6 +24,7 @@
 #include <filesystem>
 #include <memory>
 #include <string>
+#include <unistd.h>
 
 namespace tenzor { void initialize(); }
 
@@ -205,6 +206,15 @@ TEST(ExporterTest, UnsupportedLayerThrows) {
     auto dummy = std::make_shared<Dummy>();
     ExportOptions opts;
     opts.input_shape = {1};
-    EXPECT_THROW(export_to_tzlite(*dummy, "/tmp/should_not_exist.tzlite", opts),
+    // OO.20: build the temp path under the system temp dir and suffix with
+    // PID + random-seed so concurrent runs (or rerun-after-leak) cannot
+    // collide on a fixed /tmp/ name.
+    auto tmp_path = (std::filesystem::temp_directory_path()
+        / ("should_not_exist_"
+           + std::to_string(::getpid())
+           + "_"
+           + std::to_string(::testing::UnitTest::GetInstance()->random_seed())
+           + ".tzlite")).string();
+    EXPECT_THROW(export_to_tzlite(*dummy, tmp_path, opts),
                  std::runtime_error);
 }

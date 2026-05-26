@@ -12,6 +12,14 @@ surface via `MultiBackendDTypeTest` (see `tests/multi_backend_dtype_fixture.hpp`
 — 5 backends × {Float32, Float64, Float16}. The plain file is either a
 subset (forward-only on CPU) or covers behaviour that is dtype-agnostic.
 
+## Closed candidates (companion landed)
+
+- `tests/nn/quantization/test_awq_quantizer.cpp` — closed audit-10 OO.19. New
+  companion `tests/nn/quantization/test_awq_quantizer_multidtype.cpp`
+  inherits `MultiBackendDTypeTest`, sweeps {Float16, BFloat16, Float32} ×
+  5 backends, asserts compute_act_scales shape/non-negativity and that
+  quantize_layer round-trips for the dtype-converted weight.
+
 ## High-value candidates missing a companion
 
 These tests cover operations / layers / autograd that should plausibly run
@@ -22,7 +30,6 @@ backend-agnostic infrastructure or already parity-parameterized.
 
 | File | Notes |
 |------|-------|
-| `tests/nn/quantization/test_awq_quantizer.cpp` | INT4/INT8 quantization — TODO: add `test_awq_quantizer_multidtype.cpp` using `MultiBackendDTypeTest` (currently plain TEST). |
 | `tests/test_ciou_loss.cpp` | Vision loss — float32/float16 — TODO: add `test_ciou_loss_multidtype.cpp` using `MultiBackendDTypeTest`. |
 | `tests/test_contiguous_fix.cpp` | Stride-pattern regression — TODO: add `test_contiguous_fix_multidtype.cpp` using `MultiBackendDTypeTest` to sweep stride patterns across backends. |
 | `tests/nn/quantization/test_gptq_quantizer.cpp` | TODO: add `test_gptq_quantizer_multidtype.cpp` using `MultiBackendDTypeTest`. |
@@ -80,7 +87,6 @@ one-line trailing comment justifying CPU-only coverage.
 # Justifications appended inline; remaining entries unchanged.
 tests/nn/optim/test_adamw.cpp                # audit-6 CC.21: justified as out of scope for audit-6 — optimizer state buffers live on CPU regardless of param device; cross-backend AdamW parity is covered by backend_parity/ training-loop tests. File doc-comment already documents CPU-only-by-design.
 tests/test_autograd_transform.cpp            # audit-6 CC.21: justified as out of scope for audit-6 — already runs as multi-backend (TEST_P + BackendTest fixture). Adding a dtype axis would re-test the autograd-graph-stability surface, not new numerics; covered by reshape/permute parity tests in tests/backend_parity/.
-tests/nn/quantization/test_awq_quantizer.cpp
 tests/test_ciou_loss.cpp                     # audit-7 FF.31: justified — CIoU is a detection loss with a known PyTorch-equivalent CPU reference; cross-backend correctness comes from the per-op (matmul, exp, log) parity tests its forward path uses. Adding a 5-backend × 3-dtype sweep would re-test those ops, not the loss math.
 tests/test_contiguous_fix.cpp                # audit-7 FF.31: justified — regression test for a stride/contiguity bug in tensor.slice() that surfaces in scalar arithmetic. The fix lives in backend-agnostic Tensor layout code; per-backend stride parity is already covered by tests/backend_parity/test_stride_parity.cpp.
 tests/integration/test_cross_backend.cpp     # audit-9 LL.16: confirmed cross-backend via TEST_P fixture (CrossBackendTest : public BackendTest). Fixture sweeps all built backends; dtype axis is intentionally CPU-anchored since the test verifies device-transfer round-trips and per-op consistency, not numeric parity across dtypes.

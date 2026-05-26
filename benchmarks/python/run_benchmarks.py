@@ -82,9 +82,26 @@ def parse_args():
 
     parser.add_argument(
         "--device", "-d",
-        choices=["all", "cpu", "cuda"],
+        choices=["all", "cpu", "cuda", "rocm", "vulkan", "oneapi"],
         default="all",
         help="Device to benchmark on"
+    )
+
+    parser.add_argument(
+        "--device-id",
+        type=int,
+        default=0,
+        help="Device index passed to C++ benchmark binaries (default: 0)",
+    )
+
+    parser.add_argument(
+        "--cpp-bin-dir",
+        type=str,
+        default=None,
+        help=(
+            "OO.18: directory containing compiled benchmark_* binaries. "
+            "Defaults to <repo>/build/bin/."
+        ),
     )
 
     parser.add_argument(
@@ -263,6 +280,86 @@ def generate_summary(results: List[BenchmarkResult]):
                 print(f"    Faster than PyTorch: {overall_faster}/{len(all_speedups)} ({100*overall_faster/len(all_speedups):.0f}%)")
 
 
+def run_cpp_benchmarks(args) -> List[BenchmarkResult]:
+    """OO.18: walk ``build/bin/benchmark_*`` and invoke each binary with
+    ``--device``/``--device-id``. Binaries that don't recognise --device
+    (i.e. weren't wired by HH.25/KK.26) are skipped with a warning instead
+    of failing the whole run.
+
+    The Python benchmark suite has historically only exercised the Python
+    bindings; this hook lets ``--device`` actually flow through to the
+    compiled C++ benchmark drivers so a CUDA/ROCm/Vulkan run is possible
+    without rebuilding the Python suite for each backend.
+    """
+    import glob
+    import subprocess
+
+    if args.cpp_bin_dir is not None:
+        bin_dir = args.cpp_bin_dir
+    else:
+        bin_dir = os.path.join(
+            os.path.dirname(__file__), '..', '..', 'build', 'bin')
+    bin_dir = os.path.abspath(bin_dir)
+
+    if not os.path.isdir(bin_dir):
+        print(f"\n  [cpp-benchmarks] skipped — {bin_dir} not found")
+        return []
+
+    binaries = sorted(glob.glob(os.path.join(bin_dir, "benchmark_*")))
+    binaries = [b for b in binaries if os.access(b, os.X_OK)
+                and not b.endswith(".cpp")]
+    if not binaries:
+        print(f"\n  [cpp-benchmarks] no benchmark_* binaries in {bin_dir}")
+        return []
+
+    device = args.device if args.device != "all" else "cpu"
+    results: List[BenchmarkResult] = []
+    print("\n" + "=" * 80)
+    print(f"  C++ BENCHMARK BINARIES ({len(binaries)} found, device={device})")
+    print("=" * 80)
+    for binary in binaries:
+        cmd = [binary, "--device", device, "--device-id", str(args.device_id)]
+        try:
+            proc = subprocess.run(
+                cmd,
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=300,
+            )
+            if proc.returncode != 0:
+                # The binary likely doesn't accept --device yet — emit a
+                # warning so the gap is visible in the report.
+                print(
+                    f"  [skip] {os.path.basename(binary)} "
+                    f"(rc={proc.returncode}): "
+                    f"{proc.stderr.strip().splitlines()[-1] if proc.stderr else ''}"
+                )
+                continue
+            print(proc.stdout)
+            # Stdout is unstructured for these binaries — leave parsing to a
+            # future audit step. We still emit a sentinel BenchmarkResult so
+            # the JSON output records that the binary ran.
+            results.append(BenchmarkResult(
+                name=os.path.basename(binary),
+                category="cpp",
+                framework="tenzor",
+                device=device,
+                mean_ms=0.0,
+                std_ms=0.0,
+                min_ms=0.0,
+                max_ms=0.0,
+                median_ms=0.0,
+                p95_ms=0.0,
+                p99_ms=0.0,
+            ))
+        except subprocess.TimeoutExpired:
+            print(f"  [timeout] {os.path.basename(binary)}")
+        except Exception as e:
+            print(f"  [error] {os.path.basename(binary)}: {e}")
+    return results
+
+
 def main():
     args = parse_args()
     config = create_config(args)
@@ -290,6 +387,14 @@ def main():
 
     # Run benchmarks
     results = run_all_benchmarks(config, args.category)
+
+    # OO.18: also fan out to compiled benchmark_* binaries so --device
+    # propagates beyond the Python suite. The C++ drivers are best-effort;
+    # ones that don't yet accept --device are skipped with a warning.
+    try:
+        results.extend(run_cpp_benchmarks(args))
+    except Exception as e:
+        print(f"\n  [cpp-benchmarks] runner failed: {e}")
 
     # Generate summary
     generate_summary(results)

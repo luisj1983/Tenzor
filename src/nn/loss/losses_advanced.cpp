@@ -907,15 +907,43 @@ auto PoissonNLLLoss::forward(const Variable& input, const Variable& target) -> V
     // the entire computation to Float32 and cast the loss back to the
     // input dtype at the end. `variable_cast` wires a TypeCastBackward
     // node so gradients flow through the cast.
-    const DType orig_dtype = input.tensor().dtype();
-    const bool needs_upcast = (orig_dtype == DType::Float16 ||
-                               orig_dtype == DType::BFloat16);
-    Variable input_c = needs_upcast
+    //
+    // audit-10 OO.4: previously `needs_upcast` was driven solely by the
+    // input dtype.  When `log_input=true` the loss computes
+    // `exp(input) - target * input + …`; if `target` is F16/BF16 but
+    // `input` is F32, the product `target * input` was binding the result
+    // to the lower precision (broadcast follows the smaller operand's
+    // dtype in the math ops here), losing precision for large counts.
+    // Widen if EITHER input OR target is reduced precision, and pick the
+    // narrower dtype as the cast-back target so the user-visible dtype
+    // matches the dominant input.  Mirrors KK.18 / KK.19 / KLDivLoss.
+    const DType input_dtype = input.tensor().dtype();
+    const DType target_dtype = target.tensor().dtype();
+    auto is_reduced = [](DType d) {
+        return d == DType::Float16 || d == DType::BFloat16;
+    };
+    const bool needs_upcast = is_reduced(input_dtype) || is_reduced(target_dtype);
+    // Pick the cast-back dtype: prefer input's dtype (the user supplied it
+    // for the prediction); only fall back to target's dtype if input is
+    // already higher precision but target was reduced.
+    const DType orig_dtype = is_reduced(input_dtype) ? input_dtype : target_dtype;
+    Variable input_c = (needs_upcast && is_reduced(input_dtype))
         ? tenzor::nn::variable_cast(input, DType::Float32)
         : input;
-    Variable target_c = needs_upcast
+    Variable target_c = (needs_upcast && is_reduced(target_dtype))
         ? tenzor::nn::variable_cast(target, DType::Float32)
         : target;
+    // If only one side was reduced, the other may already be at F32 (or
+    // even F64).  If they differ now, lift the lower-precision side up so
+    // the loss math runs at uniform F32 (matching the comment above).
+    if (input_c.tensor().dtype() != target_c.tensor().dtype()) {
+        if (input_c.tensor().dtype() != DType::Float32) {
+            input_c = tenzor::nn::variable_cast(input_c, DType::Float32);
+        }
+        if (target_c.tensor().dtype() != DType::Float32) {
+            target_c = tenzor::nn::variable_cast(target_c, DType::Float32);
+        }
+    }
 
     Variable loss;
     if (log_input_) {

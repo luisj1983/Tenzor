@@ -107,6 +107,13 @@ public:
      * @par Complexity
      * O(1) - Simple scalar multiplication
      *
+     * @note (audit-10 OO.7) Throws std::runtime_error if called while any
+     * optimiser is mid-unscale (i.e. unscaled_for_ is non-empty). This
+     * detects nested `scaler.scale(loss)` calls inside the closure passed
+     * to `scaler.step(opt, closure)` — without the check, the closure's
+     * subsequent backward would write scaled grads on top of already
+     * unscaled ones. Matches PyTorch's behaviour.
+     *
      * @code
      * auto loss = criterion(output, target);
      * auto scaled_loss = scaler.scale(loss);

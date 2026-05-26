@@ -109,6 +109,12 @@ gradgradcheck = _autograd_cpp.gradgradcheck
 no_grad = _core.no_grad
 enable_grad = _core.enable_grad
 
+# audit-10 OO.12: expose the graph utilities (make_dot / optimize_graph)
+# that the C++ side registers under tenzor_core.autograd but the Python
+# autograd.py module never re-exported. Their .pyi declarations now match.
+make_dot = _autograd_cpp.make_dot
+optimize_graph = _autograd_cpp.optimize_graph
+
 # X.9: declare an explicit __all__ so check_pyi_drift.py picks up the
 # re-exports above (its inspect.getmodule() filter would otherwise drop
 # pybind11-defined symbols whose `__module__` points at tenzor_core).
@@ -119,8 +125,10 @@ __all__ = [
     "grad",
     "gradcheck",
     "gradgradcheck",
+    "make_dot",
     "no_grad",
     "enable_grad",
+    "optimize_graph",
 ]
 
 

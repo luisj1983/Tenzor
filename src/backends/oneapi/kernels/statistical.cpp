@@ -177,6 +177,13 @@ auto std_kernel(const Tensor& input, const OpAttributes& attrs, sycl::queue& que
         }
     } else {
         // Dimensional reduction: flatten to (outer_size x dim_size x inner_size)
+        // audit-10 OO.6: fold negative dim before the bounds check so the
+        // path mirrors prod_kernel (at L531 below) and never throws on a
+        // legitimate back-from-end axis that survived as negative because
+        // the earlier full-reduction-gate fold was guarded by an early
+        // `dim != INT64_MIN` short-circuit.  Applies symmetrically to
+        // var_kernel below.
+        if (dim < 0) dim += ndim;
         if (dim < 0 || dim >= ndim) {
             throw std::invalid_argument("std: dim out of range");
         }
@@ -401,6 +408,9 @@ auto var_kernel(const Tensor& input, const OpAttributes& attrs, sycl::queue& que
         }
     } else {
         // Dimensional reduction: flatten to (outer_size x dim_size x inner_size)
+        // audit-10 OO.6: see std_kernel above — fold negative dim before
+        // the bounds check, mirroring prod_kernel.
+        if (dim < 0) dim += ndim;
         if (dim < 0 || dim >= ndim) {
             throw std::invalid_argument("var: dim out of range");
         }

@@ -453,18 +453,43 @@ public:
     auto zero_grad() -> void;
 
     /**
-     * @brief Detach variable from computation graph.
+     * @brief Detach variable from computation graph (out-of-place).
      *
-     * Creates a new variable with the same data but no gradient history.
-     * Useful when you want to use a value without backpropagating through it.
+     * Returns a FRESH non-grad Variable sharing the underlying tensor data
+     * but without any grad_fn / requires_grad / higher-order state. This call
+     * does NOT mutate the source Variable in any way: in particular, the
+     * source's `grad_`, `grad_with_graph_impl_`, and
+     * `grad_with_graph_cache_storage_` are left intact. Use `detach_()` if
+     * you want to clear the source's autograd cache in place.
      *
-     * @return New detached variable
+     * @return New detached variable (fresh impl, no grad tracking)
      *
      * @code
      * Variable x_detached = x.detach();  // No gradients flow through x_detached
+     * // x still keeps its grad / grad_with_graph cache unchanged.
      * @endcode
      */
     auto detach() -> Variable;
+
+    /**
+     * @brief Detach this Variable from the computation graph IN PLACE.
+     *
+     * Clears the source Variable's autograd state directly:
+     *   - clears `grad_fn_` (becomes a leaf)
+     *   - clears `grad_` accumulator
+     *   - clears `grad_with_graph_impl_` and
+     *     `grad_with_graph_cache_storage_` (higher-order graph cache, see
+     *     audit-9 JJ.1)
+     * The underlying tensor data is preserved.
+     *
+     * Contrast with `detach()` which returns a fresh Variable and leaves
+     * the source untouched.
+     *
+     * Thread-safety: when the Variable was created with thread-safe grad
+     * accumulation, the higher-order cache mutation is performed under
+     * `grad_mutex_`.
+     */
+    auto detach_() -> void;
 
     /**
      * @brief Check if variable requires gradient.

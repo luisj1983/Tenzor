@@ -250,7 +250,34 @@ auto Variable::detach() -> Variable {
     if (!impl_) {
         throw std::runtime_error("Cannot detach uninitialized Variable");
     }
+    // audit-10 OO.1: out-of-place detach.  Returns a FRESH Variable with a
+    // brand-new impl: no grad_fn, no requires_grad, no grad accumulator,
+    // and no higher-order graph cache.  This intentionally does NOT mutate
+    // the source: the caller's `grad_`, `grad_with_graph_impl_`, and
+    // `grad_with_graph_cache_storage_` are preserved.  Use `detach_()` for
+    // the in-place variant that clears the source's autograd state.
     return Variable(impl_->data_.detach(), false);
+}
+
+auto Variable::detach_() -> void {
+    if (!impl_) {
+        throw std::runtime_error("Cannot detach_ uninitialized Variable");
+    }
+    // audit-10 OO.1: in-place detach.  Clears the source Variable's
+    // gradient state and higher-order graph cache.  Mirrors zero_grad()'s
+    // mutex-protected mutation of grad_with_graph_impl_ /
+    // grad_with_graph_cache_storage_ (audit-9 JJ.1).
+    impl_->grad_fn_.reset();
+    if (impl_->thread_safe_.load(std::memory_order_acquire) && impl_->grad_mutex_) {
+        std::lock_guard lock(*impl_->grad_mutex_);
+        impl_->grad_.reset();
+        impl_->grad_with_graph_impl_.reset();
+        impl_->grad_with_graph_cache_storage_.reset();
+    } else {
+        impl_->grad_.reset();
+        impl_->grad_with_graph_impl_.reset();
+        impl_->grad_with_graph_cache_storage_.reset();
+    }
 }
 
 auto Variable::requires_grad() const -> bool {

@@ -320,6 +320,17 @@ def main() -> int:
             "preserved — print an explanatory error and exit 2."
         ),
     )
+    parser.add_argument(
+        "--max-no-backend",
+        type=int,
+        default=None,
+        help=(
+            "OO.21: ratchet gate — exit 1 if the number of ops with no "
+            "detected backend (i.e. tested via helper-fn pattern instead of "
+            "TEST_P) exceeds this threshold. Set to the current count to "
+            "prevent regressions; lower it as cleanup PRs land."
+        ),
+    )
     args = parser.parse_args()
 
     test_names = discover_all_tests(args.label)
@@ -357,6 +368,21 @@ def main() -> int:
         print_json(cov)
     else:
         print_human(cov)
+
+    # OO.21: enforce the no-backend ratchet AFTER emitting the matrix so the
+    # diagnostic information is still visible in CI logs when the gate fails.
+    if args.max_no_backend is not None:
+        no_backend_count = sum(1 for c in cov.values() if not c.backends)
+        if no_backend_count > args.max_no_backend:
+            print(
+                f"\nOO.21: no-backend op count ({no_backend_count}) exceeds "
+                f"--max-no-backend ratchet threshold ({args.max_no_backend}). "
+                "Either tag the new helper-fn parity test with a backend "
+                "param in its name, refactor it to TEST_P, or update the "
+                "--max-no-backend value if the increase is deliberate.",
+                file=sys.stderr,
+            )
+            return 1
     return 0
 
 

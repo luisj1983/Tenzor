@@ -321,14 +321,28 @@ def main() -> int:
         print("OK: no unjustified loose tolerances found.")
         return 0
 
-    # Under --strict with a baseline, only NEW violations fail.
-    if args.strict and args.baseline is not None:
+    # Under --strict, only NEW violations fail. The baseline used is whatever
+    # baseline_path resolved to above (explicit --baseline, otherwise
+    # DEFAULT_BASELINE). OO.15: previously this required args.baseline to be
+    # explicitly set, which silently bypassed strict-mode enforcement when the
+    # caller relied on the default path.
+    if args.strict:
         baseline = _load_baseline(baseline_path)
         new_violations = [
             (p, ln, t, tn, v) for (p, ln, t, tn, v) in violations
             if _violation_token(p, tn, v) not in baseline
         ]
-        grandfathered = len(violations) - len(new_violations)
+        # OO.16: dedupe by baseline-key cardinality so the "pre-existing"
+        # tally matches the baseline line count exactly. Otherwise multiple
+        # per-line violations sharing the same path|test|value would inflate
+        # this number relative to the baseline file (e.g. 144 raw vs 132
+        # baseline keys).
+        grandfathered_tokens = {
+            _violation_token(p, tn, v)
+            for (p, _, _, tn, v) in violations
+            if _violation_token(p, tn, v) in baseline
+        }
+        grandfathered = len(grandfathered_tokens)
         if new_violations:
             print(
                 f"Found {len(new_violations)} NEW unjustified loose "

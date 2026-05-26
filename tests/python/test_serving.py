@@ -96,10 +96,19 @@ class TestModelRepository:
         srv = _make_server()
         repo = srv.repository()
         # Loading a non-existent file should raise, not silently succeed.
+        # OO.20: build a pid-suffixed path under the system temp dir so the
+        # test cannot collide with a real file at a hard-coded /tmp/ name.
+        missing_path = os.path.join(
+            tempfile.gettempdir(),
+            f"nonexistent_tenzor_model_{os.getpid()}.pt",
+        )
+        # Defensive: if a previous test crashed mid-write, remove the leftover.
+        if os.path.exists(missing_path):
+            os.remove(missing_path)
         with pytest.raises(Exception):
             repo.load_model(
                 "nonexistent_model",
-                "/tmp/nonexistent_tenzor_model_file.pt",
+                missing_path,
                 tz.Device("cpu"),
             )
 

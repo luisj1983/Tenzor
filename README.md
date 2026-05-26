@@ -10,7 +10,7 @@ A multi-backend tensor computation and deep learning library written in modern C
 
 ## What's in the box
 
-- **Multi-backend autograd** with op-count parity across CPU, CUDA, ROCm, OneAPI, and Vulkan (317 operations registered on each — see [`audit/README.md`](audit/README.md)).
+- **Multi-backend autograd** with op-count parity across CPU, CUDA, ROCm, OneAPI, and Vulkan — target/PyTorch-parity count is **317 operations**; current per-backend registration counts are recorded in [`audit/op_coverage_baseline_post_hardening.txt`](audit/op_coverage_baseline_post_hardening.txt), and the historical pre-hardening snapshot lives at [`audit/op_coverage_baseline_pre_hardening.txt`](audit/op_coverage_baseline_pre_hardening.txt) (see [`audit/README.md`](audit/README.md)).
 - **Multi-dtype dispatch**: Float32/64/16, BFloat16, Int8/16/32/64, UInt8/16/32/64, Bool, Complex64/128.
 - **NN module library**: Linear, Conv1d/2d/3d, BatchNorm/LayerNorm/GroupNorm/RMSNorm, MaxPool/AvgPool/Adaptive, RNN/LSTM/GRU (bidirectional), MultiheadAttention/ScaledDotProductAttention, dropout variants, embedding/embedding-bag, activations, sequential containers.
 - **Optimizers and schedulers**: SGD (+ Nesterov), Adam, AdamW, AdamAtan2, RMSprop, Adagrad. StepLR, MultiStepLR, ExponentialLR, CosineAnnealing(WarmRestarts), OneCycleLR, ReduceLROnPlateau, polynomial/linear warmup.

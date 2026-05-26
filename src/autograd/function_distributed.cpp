@@ -100,12 +100,18 @@ auto distributed_all_reduce(
     std::shared_ptr<distributed::ProcessGroupBase> pg,
     distributed::ReduceOp op) -> Variable
 {
+    // audit-10 OO.2: use std::runtime_error to match the Tensor-level
+    // DistributedAllReduceBackward::backward() validation above (which also
+    // throws runtime_error on null pg / non-differentiable op).  Previously
+    // the public wrapper threw std::invalid_argument, so callers writing
+    // try/catch around distributed_all_reduce vs. backward() needed two
+    // different handlers for the same logical precondition.
     if (pg == nullptr) {
-        throw std::invalid_argument(
+        throw std::runtime_error(
             "distributed_all_reduce: process_group must not be null");
     }
     if (!is_differentiable_reduce(op)) {
-        throw std::invalid_argument(
+        throw std::runtime_error(
             std::string("distributed_all_reduce: ReduceOp::") +
             reduce_op_name(op) +
             " is not differentiable. Only SUM and AVG are supported here.");

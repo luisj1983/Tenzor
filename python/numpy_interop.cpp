@@ -214,6 +214,39 @@ auto numpy_dtype_to_tenzor(const py::array& arr) -> DType {
         if (itemsize == 8) return DType::Complex64;
         if (itemsize == 16) return DType::Complex128;
     }
+    // audit-10 OO.10: branch on common non-numeric kinds before the generic
+    // fall-through so users get an actionable diagnostic instead of just
+    // "Unsupported NumPy dtype". Object-dtype is handled at the entry of
+    // numpy_to_tensor (see 5th-audit B'4); the rest get explicit messages
+    // here so they surface even via direct numpy_dtype_to_tenzor() callers.
+    if (kind == 'M') {
+        throw std::runtime_error(
+            "datetime64 arrays cannot be converted; convert to int64 "
+            "nanoseconds first (`.view('int64')` or `.astype('int64')`)");
+    }
+    if (kind == 'm') {
+        throw std::runtime_error(
+            "timedelta64 arrays cannot be converted; convert to int64 "
+            "microseconds/nanoseconds first");
+    }
+    if (kind == 'V') {
+        // 'V' covers raw void/structured/record dtypes (and ml_dtypes
+        // bfloat16/fp8 at specific itemsizes, which are handled above —
+        // anything reaching here is either a recarray/struct or an
+        // itemsize we don't recognise).
+        throw std::runtime_error(
+            "structured dtypes (recarray/struct) are not supported; split "
+            "fields and stack via np.stack(...)");
+    }
+    if (kind == 'U') {
+        throw std::runtime_error(
+            "unicode-string arrays are not supported; convert to int64 "
+            "token ids or use a tokenizer");
+    }
+    if (kind == 'S') {
+        throw std::runtime_error(
+            "byte-string arrays are not supported");
+    }
     std::ostringstream oss;
     oss << "Unsupported NumPy dtype: kind=" << kind << ", itemsize=" << itemsize
         << ", name=" << py::str(dtype).cast<std::string>();

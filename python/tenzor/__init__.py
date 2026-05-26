@@ -159,6 +159,21 @@ if _os.path.exists(_autograd_path):
     _sys.modules['tenzor.autograd'] = _autograd_module
     autograd = _autograd_module
 
+# audit-10 OO.12: load the composable function-transforms wrapper.  Mirrors
+# the autograd pattern: ``from .tenzor_core import *`` above bound
+# ``tenzor.func`` to the raw C++ submodule; we override that binding with a
+# Python module so ``func.pyi`` has a sibling ``.py`` for check_pyi_drift,
+# and so any future Python-side helpers can land here without changing C++.
+_func_transforms_path = _os.path.join(_os.path.dirname(__file__), 'func.py')
+if _os.path.exists(_func_transforms_path):
+    _func_transforms_spec = _importlib_util.spec_from_file_location(
+        'tenzor.func', _func_transforms_path)
+    _func_transforms_module = _importlib_util.module_from_spec(
+        _func_transforms_spec)
+    _func_transforms_spec.loader.exec_module(_func_transforms_module)
+    _sys.modules['tenzor.func'] = _func_transforms_module
+    func = _func_transforms_module
+
 # Expose linalg submodule from C++ bindings (det, inv, solve, svd, qr, etc.)
 from .tenzor_core import linalg
 _sys.modules['tenzor.linalg'] = linalg
@@ -492,6 +507,7 @@ __all__ = [
     "nn",
     "optim",
     "autograd",
+    "func",
     "linalg",
 
     # Submodules

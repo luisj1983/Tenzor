@@ -89,3 +89,13 @@ def gradgradcheck(
 ) -> bool:
     """Check second-order gradients by applying gradcheck to the gradient function."""
     ...
+
+# audit-10 OO.12: graph utilities exposed via tenzor_core.autograd; re-exported
+# from tenzor/autograd.py so they appear under the tenzor.autograd module.
+def make_dot(root: Variable, params: Any = ...) -> str:
+    """Generate a Graphviz DOT-format string for the computation graph rooted at ``root``."""
+    ...
+
+def optimize_graph(root: Variable) -> Any:
+    """Optimize the computation graph in-place; returns a stats dict with fusion / DCE counts."""
+    ...

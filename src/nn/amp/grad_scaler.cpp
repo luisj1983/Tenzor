@@ -44,7 +44,20 @@ GradScaler::GradScaler(float init_scale,
     }
 }
 
+// audit-10 OO.7: detect nested `scaler.scale(loss)` calls issued from inside
+// the closure passed to `scaler.step(opt, closure)`.  The outer step() runs
+// unscale_() on the optimizer before invoking the closure; that sets the
+// per-optimizer flag in `unscaled_for_`.  If the closure now calls
+// scale(loss) and backward()s through it, the resulting scaled grads are
+// added on top of the already-unscaled ones, silently corrupting the step.
+// PyTorch raises a RuntimeError in this scenario; do the same here so the
+// caller gets a fail-loud diagnostic instead of a numerically wrong update.
 auto GradScaler::scale(const Variable& loss) -> Variable {
+    if (!unscaled_for_.empty()) {
+        throw std::runtime_error(
+            "GradScaler::scale called while some optimisers are mid-unscale; "
+            "nested scale inside loss closures is not supported (PyTorch parity)");
+    }
     // Use Variable multiplication to preserve autograd graph
     // Raw Tensor multiplication would sever the computation graph
     auto scale_tensor = full({1}, static_cast<float>(scale_),
