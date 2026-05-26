@@ -443,12 +443,29 @@ auto SyncBatchNorm::forward_impl(const Variable& input) -> Variable {
 
         batch_var = local_sum_sq_dev * inv_count_t;
 
-        // Update running statistics
+        // Update running statistics.
+        //
+        // audit-10 MM.3: write through the buffer-map entries
+        // (buffers_["running_mean"]) rather than rebinding the local
+        // running_mean_ / running_var_ Variable fields.  Previously
+        // `running_mean_ = Variable(rm, false)` created a fresh TensorImpl
+        // but buffers_["running_mean"] still held the original shared_ptr
+        // captured at register_buffer time — state_dict / FSDP / checkpoint
+        // serialised the initial zeros / ones forever.  Mirrors the V.21 /
+        // R.18 pattern already used in BatchNorm.cpp:531, 626.
         if (track_running_stats_) {
             float decay = static_cast<float>(1.0 - momentum_);
             float mom = static_cast<float>(momentum_);
             auto rm = running_mean_.tensor() * decay + batch_mean * mom;
             auto rv = running_var_.tensor() * decay + batch_var * mom;
+            auto& rm_buf = buffers_["running_mean"];
+            auto& rv_buf = buffers_["running_var"];
+            if (rm_buf) rm_buf->tensor() = rm;
+            if (rv_buf) rv_buf->tensor() = rv;
+            // Keep the local Variable fields in sync (they alias the buffer
+            // map entries' TensorImpls on construction, and we're
+            // overwriting that TensorImpl's data — but be defensive in case
+            // a future ctor change breaks the alias).
             running_mean_ = Variable(rm, false);
             running_var_ = Variable(rv, false);
         }

@@ -348,6 +348,20 @@ auto MatMulBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<T
         }
     }
 
+    // audit-10 MM.1: reduce broadcasted batch axes back to operand shapes.
+    // Batched matmul like (B,M,K) @ (K,N) produces grad_b shaped (B,K,N)
+    // before reduction.  Every other arithmetic backward already does this;
+    // MatMul was the lone holdout.  Skip when input_shape_*_ is empty
+    // (legacy call paths that didn't go through the autograd::matmul
+    // forward wrapper) so the existing wrong-shape error surfaces as
+    // before.
+    if (!input_shape_a_.empty()) {
+        grad_a = reduce_grad_for_broadcasting(grad_a, input_shape_a_);
+    }
+    if (!input_shape_b_.empty()) {
+        grad_b = reduce_grad_for_broadcasting(grad_b, input_shape_b_);
+    }
+
     return {grad_a, grad_b};
 }
 
@@ -428,6 +442,15 @@ auto MatMulBackward::backward_with_variables(std::vector<Variable> grad_outputs)
         auto a_t = tenzor::transpose(saved_a, a_ndim - 2, a_ndim - 1);
         grad_a = tenzor::matmul(grad_out, b_t);
         grad_b = tenzor::matmul(a_t, grad_out);
+    }
+
+    // audit-10 MM.1: reduce broadcasted batch axes back to operand shapes.
+    // See the Tensor-level backward above for the rationale.
+    if (!input_shape_a_.empty()) {
+        grad_a = reduce_grad_var_for_broadcasting(grad_a, input_shape_a_);
+    }
+    if (!input_shape_b_.empty()) {
+        grad_b = reduce_grad_var_for_broadcasting(grad_b, input_shape_b_);
     }
 
     return {grad_a, grad_b};

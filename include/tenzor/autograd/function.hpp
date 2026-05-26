@@ -763,6 +763,15 @@ public:
     auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
     auto supports_higher_order() const -> bool override { return true; }
     auto op_id() const -> OpId override { return OpId::MatMul; }
+
+    // audit-10 MM.1: batched matmul broadcasts (e.g. (B,M,K) @ (K,N) =>
+    // grad_b has shape (B,K,N) but actual b is (K,N)) — every other
+    // arithmetic backward saves input shapes and reduces the broadcasted
+    // grad; MatMul was exempt and produced wrong-shaped grad_b.  Captured
+    // by the autograd::matmul forward wrapper before the Function is
+    // attached.
+    std::vector<int64_t> input_shape_a_;
+    std::vector<int64_t> input_shape_b_;
 };
 
 /**

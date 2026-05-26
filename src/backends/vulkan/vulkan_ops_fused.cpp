@@ -36,9 +36,16 @@ auto VulkanBackend::dispatchFusedSGDStep(std::span<const Tensor> inputs,
 
     bool has_momentum = (inputs.size() > 2 && momentum > 0.0f);
 
-    // For F16: param/grad are packed uint32, momentum is Float32
+    // For F16/BF16: param/grad are packed uint32, momentum is Float32.
+    // audit-10 MM.2: state_buf_size must be Float32-sized for BOTH F16 and
+    // BF16 paths.  Previously is_bfloat16 fell into the `else` branch and
+    // used the half-packed param size (~2 bytes/elem) — but fused_sgd_
+    // step_bf16.comp declares MomentumBuf as `float momentum_buf[]`
+    // (F32 master weights, 4 bytes/elem).  Descriptor write under-reported
+    // range → Vulkan validation error / OOB writes.  Mirrors fused_adam_
+    // atan2_step's correct logic.
     size_t buf_size = (is_float16 || is_bfloat16) ? ((numel + 1) / 2) * 4 : numel * inputs[0].dtype_size();
-    size_t state_buf_size = is_float16 ? numel * sizeof(float) : buf_size;
+    size_t state_buf_size = (is_float16 || is_bfloat16) ? numel * sizeof(float) : buf_size;
 
     // Bindings: grad(0), param(1), momentum_buf(2)
     std::vector<std::pair<uint32_t, const void*>> bindings = {
@@ -51,9 +58,12 @@ auto VulkanBackend::dispatchFusedSGDStep(std::span<const Tensor> inputs,
         bindings.push_back({2, inputs[2].data_ptr()});
         sizes.push_back(state_buf_size);
     } else {
-        // Dummy binding
+        // audit-10 OO.5: dummy binding must declare the SHADER's expected
+        // layout (F32 momentum_buf for F16/BF16 master-weights path), not
+        // the param buffer's packed layout.  Otherwise the descriptor write
+        // lies about layout and strict validation layers / MoltenVK fail.
         bindings.push_back({2, inputs[0].data_ptr()});
-        sizes.push_back(buf_size);
+        sizes.push_back(state_buf_size);
     }
 
     VkDescriptorSet descriptorSet = allocateAndWriteDescriptorSet(device_id, pipeline, bindings, sizes);

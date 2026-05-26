@@ -1073,6 +1073,12 @@ auto matmul(const Variable& a, const Variable& b) -> Variable {
     auto a_tensor = a.tensor();
     auto b_tensor = b.tensor();
 
+    // audit-10 MM.1: capture input shapes so the backward can reduce
+    // broadcasted grads back to the operand shapes.  Batched matmul like
+    // (B,M,K) @ (K,N) produces grad_b shaped (B,K,N) before reduction.
+    grad_fn->input_shape_a_.assign(a_tensor.shape().begin(), a_tensor.shape().end());
+    grad_fn->input_shape_b_.assign(b_tensor.shape().begin(), b_tensor.shape().end());
+
     grad_fn->save_for_backward({a_tensor, b_tensor});
 
     // When create_graph is active, also save Variables to preserve graph connections
