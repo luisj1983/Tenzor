@@ -176,6 +176,34 @@ public:
      */
     auto flat_grad() const -> const Tensor& { return flat_grad_; }
 
+    // audit-9 JJ.4: accessors needed by FullyShardedDataParallel::state_dict /
+    // load_state_dict to serialise per-rank shards.
+
+    /** @brief Get the local shard tensor (this rank's slice of flat_param_). */
+    auto local_shard() const -> const Tensor& { return local_shard_; }
+
+    /** @brief Get the byte offset into the flat buffer at which this shard starts. */
+    auto shard_offset() const -> size_t { return shard_offset_; }
+
+    /** @brief Get original (unflattened) parameter shapes, in flatten order. */
+    auto param_shapes() const -> const std::vector<std::vector<int64_t>>& { return param_shapes_; }
+
+    /** @brief Get original parameter element counts, in flatten order. */
+    auto param_numels() const -> const std::vector<size_t>& { return param_numels_; }
+
+    /** @brief Names of original parameters (matching param_shapes order). */
+    auto param_names() const -> std::vector<std::string>;
+
+    /**
+     * @brief Replace the local shard tensor in-place.
+     *
+     * audit-9 JJ.4: load_state_dict path needs to copy a saved shard into
+     * the live local_shard_.  Validates numel and dtype; throws on
+     * mismatch.  Does not adjust shard_offset_ — caller (FSDP::load_state_dict)
+     * is responsible for that.
+     */
+    auto copy_local_shard_from(const Tensor& src) -> void;
+
 private:
     nn::Module& module_;
     ProcessGroup* pg_;
@@ -396,6 +424,35 @@ public:
         summon_full_params();
         release_full_params();
     }
+
+    /**
+     * @brief Per-rank sharded checkpoint dictionary.
+     *
+     * audit-9 JJ.4: returns the per-rank shard of every flat-parameter
+     * tensor across all FSDP units, plus metadata (`world_size`, `rank`,
+     * unit/parameter names, original shapes) needed to reassemble at load
+     * time.  Round-trips with `load_state_dict()`.  Each rank's dict
+     * contains only its shard slice; checkpoint orchestration on the
+     * caller side concatenates across ranks (or uses an
+     * IO-format-aware sharded saver like distcp).
+     *
+     * Key layout: `unit_<i>/<param_name>/shard` -> Tensor (1-D, this
+     * rank's slice of the flat parameter).  Plus scalar metadata keys:
+     * `world_size`, `rank`, `<param>/orig_shape`,
+     * `<param>/flat_numel`.
+     */
+    auto state_dict() const -> std::unordered_map<std::string, Tensor>;
+
+    /**
+     * @brief Restore from a per-rank sharded checkpoint dictionary.
+     *
+     * audit-9 JJ.4: validates that `world_size` and `rank` match the
+     * current process group; validates flat-param numel + original shape
+     * for each unit; copies the shard tensors into the FSDP unit's
+     * flat-storage slice for this rank.  Throws on mismatch (changed
+     * world_size, mismatched unit count, mismatched parameter shape).
+     */
+    auto load_state_dict(const std::unordered_map<std::string, Tensor>& state) -> void;
 
 private:
     nn::Module& module_;

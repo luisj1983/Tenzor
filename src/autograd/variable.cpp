@@ -222,8 +222,19 @@ auto Variable::zero_grad() -> void {
         if (impl_->thread_safe_.load(std::memory_order_acquire)) {
             std::lock_guard lock(*impl_->grad_mutex_);
             impl_->grad_.reset();
+            // audit-9 JJ.1: also clear the higher-order graph-carrying
+            // gradient and its cached Variable handle.  Without this, a
+            // create_graph=true step leaves grad_with_graph_impl_ holding
+            // the previous iteration's graph; the next iteration's
+            // grad_variable() returns the stale chain, producing wrong
+            // second-order gradients and pinning the previous graph alive.
+            impl_->grad_with_graph_impl_.reset();
+            impl_->grad_with_graph_cache_storage_.reset();
         } else {
             impl_->grad_.reset();
+            // audit-9 JJ.1: see above.
+            impl_->grad_with_graph_impl_.reset();
+            impl_->grad_with_graph_cache_storage_.reset();
         }
     }
 }

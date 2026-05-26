@@ -700,6 +700,13 @@ auto conv2d_forward_miopen(
         ));
     }
 
+    // audit-9 JJ.6: sync `stream` before `workspace` (HipBuffer RAII at L633)
+    // goes out of scope.  ~HipBuffer calls bare `hipFree(ptr)`; MIOpen
+    // forward + ForwardBias are async on `stream` and still read the
+    // workspace — without the sync, hipFree can complete (and the page be
+    // reused) before MIOpen finishes, producing nondeterministic conv
+    // output under stream-parallel inference.
+    HIP_CHECK(hipStreamSynchronize(stream));
     return output;
 }
 #endif

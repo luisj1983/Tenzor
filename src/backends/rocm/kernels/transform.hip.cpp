@@ -671,6 +671,11 @@ auto repeat_kernel(const Tensor& input_in, const std::vector<int64_t>& repeats, 
         throw std::runtime_error("repeat_kernel: unsupported dtype");
     }
 
+    // audit-9 JJ.5: sync stream before freeing async-kernel input buffers.
+    // hipFree is device-sync only on the default stream; on a user stream
+    // the kernel may still be reading d_*_shape/d_repeats when the page
+    // gets reused.  Mirrors stack_kernel pattern at L833.
+    HIP_CHECK(hipStreamSynchronize(stream));
     HIP_CHECK(hipFree(d_input_shape));
     HIP_CHECK(hipFree(d_output_shape));
     HIP_CHECK(hipFree(d_repeats));
@@ -1063,6 +1068,8 @@ auto expand_kernel(const Tensor& input, const std::vector<int64_t>& new_shape, v
         throw std::runtime_error("expand_kernel: unsupported dtype");
     }
 
+    // audit-9 JJ.5: see repeat_kernel above — stream-sync before hipFree.
+    HIP_CHECK(hipStreamSynchronize(stream));
     HIP_CHECK(hipFree(d_input_shape));
     HIP_CHECK(hipFree(d_input_strides));
     HIP_CHECK(hipFree(d_output_shape));
@@ -1917,6 +1924,9 @@ auto strided_fill_kernel(Tensor& self, double value, hipStream_t stream) -> void
         throw std::runtime_error("strided_fill: unsupported dtype");
     }
 
+    // audit-9 JJ.5: see repeat_kernel — sync stream before freeing d_meta
+    // that the async strided_fill kernel still references.
+    HIP_CHECK(hipStreamSynchronize(stream));
     HIP_CHECK(hipFree(d_meta));
 }
 
@@ -2729,6 +2739,9 @@ auto repeat_interleave_tensor_kernel(const Tensor& input, const Tensor& repeats_
     HIP_CHECK(hipMalloc(&d_temp, temp_bytes));
     hipcub::DeviceScan::ExclusiveSum(d_temp, temp_bytes, d_repeats_i64, d_prefix,
                                      static_cast<int>(in_dim_size), stream);
+    // audit-9 JJ.5: ExclusiveSum is async on `stream`; sync before freeing
+    // the temp workspace.
+    HIP_CHECK(hipStreamSynchronize(stream));
     hipFree(d_temp);
 
     // Read only the total from device (2 scalars: last prefix + last repeat)

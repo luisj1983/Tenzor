@@ -310,7 +310,21 @@ void register_distributed(py::module_& m) {
         .def("release_full_params", &tenzor::distributed::FullyShardedDataParallel::release_full_params,
              py::call_guard<py::gil_scoped_release>())
         .def("total_params", &tenzor::distributed::FullyShardedDataParallel::total_params)
-        .def("sharded_param_bytes", &tenzor::distributed::FullyShardedDataParallel::sharded_param_bytes);
+        .def("sharded_param_bytes", &tenzor::distributed::FullyShardedDataParallel::sharded_param_bytes)
+        // audit-9 JJ.4: per-rank sharded checkpoint round-trip.  Without these
+        // bindings FSDP training literally could not be checkpointed from
+        // Python.  Both methods iterate every shard — release the GIL.
+        .def("state_dict", &tenzor::distributed::FullyShardedDataParallel::state_dict,
+             py::call_guard<py::gil_scoped_release>(),
+             "Per-rank sharded checkpoint dictionary.  Each rank returns its "
+             "own shard plus metadata; caller orchestrates cross-rank "
+             "checkpoint coordination.")
+        .def("load_state_dict", &tenzor::distributed::FullyShardedDataParallel::load_state_dict,
+             py::arg("state"),
+             py::call_guard<py::gil_scoped_release>(),
+             "Restore from a per-rank sharded checkpoint produced by "
+             "state_dict().  Validates world_size/rank/numel/shape "
+             "consistency; throws on mismatch.");
 
     // Gradient Compression
     py::class_<tenzor::distributed::CompressedGradient>(distributed, "CompressedGradient")

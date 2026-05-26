@@ -628,6 +628,13 @@ auto BackwardEngine::execute(Variable& root, std::optional<Tensor> gradient,
             // may access saved tensors via closures.
             if (!retain_graph) {
                 function->release_saved_tensors();
+                // audit-9 JJ.2: also drop saved_variables_ so the higher-order
+                // graph released here can actually be freed.  Each Function
+                // whose backward_with_variables saved Variables holds grad_fn
+                // chains across the second-order graph; without this clear,
+                // create_graph=true workloads leak the entire higher-order
+                // graph even when retain_graph is false.
+                function->clear_saved_variables();
             }
         }
     }
@@ -1114,6 +1121,9 @@ auto BackwardEngine::execute_multi(std::vector<Variable*> roots,
             // loop above.
             if (!retain_graph) {
                 function->release_saved_tensors();
+                // audit-9 JJ.2: see single-root execute() at L630 — drop
+                // saved_variables_ to release the second-order graph.
+                function->clear_saved_variables();
             }
         }
     }

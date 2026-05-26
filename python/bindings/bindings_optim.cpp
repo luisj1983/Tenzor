@@ -589,22 +589,55 @@ void register_optim(py::module_& m) {
              py::arg("state"),
              py::call_guard<py::gil_scoped_release>());  // W.20
 
-    // Stage 2 and 3 are aliased to Stage 1's binding for construction — they
-    // share the same `base_optimizer + config` signature, only the config
-    // type differs. The class is exposed so Python can type-check the handle.
+    // audit-9 JJ.3: Stage 2 and 3 must expose step/zero_grad/state_dict/
+    // load_state_dict explicitly even though they inherit from Stage 1.
+    // Optimizer::step() is non-virtual but dispatches to virtual step_impl(),
+    // so step()/state_dict()/load_state_dict() *do* resolve through the
+    // function-pointer binding (`&ZeROStage1Optimizer::step` etc.) to the
+    // derived class's step_impl/state_dict — but only when the binding is
+    // present.  zero_grad is non-virtual and SHADOWED on Stage3
+    // (zero_optimizer.cpp:3491), so we route it explicitly through the
+    // derived class's symbol on Stage3.  Without these bindings Python
+    // callers got the Stage1 binding's lambda dispatch chain — Stage2/3
+    // shard logic was unreachable from Python.
     py::class_<tenzor::optim::ZeROStage2Optimizer, tenzor::optim::ZeROStage1Optimizer,
                std::shared_ptr<tenzor::optim::ZeROStage2Optimizer>>(
         optim, "ZeROStage2Optimizer", "ZeRO Stage 2: gradient + optimizer state partitioning")
         .def(py::init<std::shared_ptr<tenzor::optim::Optimizer>,
                       const tenzor::optim::ZeROStage2Config&>(),
-             py::arg("base_optimizer"), py::arg("config"));
+             py::arg("base_optimizer"), py::arg("config"))
+        .def("step", [](tenzor::optim::ZeROStage2Optimizer& self) {
+            py::gil_scoped_release release;
+            self.step();
+        })
+        .def("zero_grad", &tenzor::optim::ZeROStage2Optimizer::zero_grad,
+             py::call_guard<py::gil_scoped_release>())
+        .def("state_dict", &tenzor::optim::ZeROStage2Optimizer::state_dict,
+             py::call_guard<py::gil_scoped_release>())
+        .def("load_state_dict", &tenzor::optim::ZeROStage2Optimizer::load_state_dict,
+             py::arg("state"),
+             py::call_guard<py::gil_scoped_release>());
 
     py::class_<tenzor::optim::ZeROStage3Optimizer, tenzor::optim::ZeROStage2Optimizer,
                std::shared_ptr<tenzor::optim::ZeROStage3Optimizer>>(
         optim, "ZeROStage3Optimizer", "ZeRO Stage 3: parameter + gradient + optimizer state partitioning")
         .def(py::init<std::shared_ptr<tenzor::optim::Optimizer>,
                       const tenzor::optim::Stage3Config&>(),
-             py::arg("base_optimizer"), py::arg("config"));
+             py::arg("base_optimizer"), py::arg("config"))
+        .def("step", [](tenzor::optim::ZeROStage3Optimizer& self) {
+            py::gil_scoped_release release;
+            self.step();
+        })
+        // Stage3 zero_grad shadows the base; bind via explicit qualified
+        // pointer so Stage3-specific per-param sharded clearing actually
+        // runs from Python.
+        .def("zero_grad", &tenzor::optim::ZeROStage3Optimizer::zero_grad,
+             py::call_guard<py::gil_scoped_release>())
+        .def("state_dict", &tenzor::optim::ZeROStage3Optimizer::state_dict,
+             py::call_guard<py::gil_scoped_release>())
+        .def("load_state_dict", &tenzor::optim::ZeROStage3Optimizer::load_state_dict,
+             py::arg("state"),
+             py::call_guard<py::gil_scoped_release>());
 
     // Learning rate schedulers
     auto lr_scheduler = optim.def_submodule("lr_scheduler", "Learning rate scheduling");

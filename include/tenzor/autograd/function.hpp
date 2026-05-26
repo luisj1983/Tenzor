@@ -508,6 +508,21 @@ public:
     }
 
     /**
+     * @brief Release saved Variables (graph-carrying) to free memory.
+     *
+     * audit-9 JJ.2: with `create_graph=true, retain_graph=false`, the engine
+     * cleanup loop clears `input_variables_` / `next_functions_` but
+     * previously left `saved_variables_` populated.  Each Function pinned
+     * live Variables whose grad_fn chains across the entire higher-order
+     * graph, so the second-order graph was never released even though the
+     * first-order graph was.  Engine cleanup now calls this immediately
+     * after `release_saved_tensors()` on the same Function.
+     */
+    void clear_saved_variables() {
+        saved_variables_.clear();
+    }
+
+    /**
      * @brief Validate that saved tensors have not been modified in-place.
      *
      * Checks version counters recorded by save_for_backward() against

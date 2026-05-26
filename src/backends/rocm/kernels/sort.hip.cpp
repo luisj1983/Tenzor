@@ -488,6 +488,10 @@ static void launch_argsort(const T* d_input, int64_t* d_output, int64_t n,
             d_input, d_keys_out, d_indices_in, d_output, static_cast<int>(n), 0, sizeof(T) * 8, stream));
     }
 
+    // audit-9 JJ.5: DeviceRadixSort::SortPairs is async on `stream`; sync
+    // before freeing the workspace + key/index temporaries so the in-flight
+    // sort doesn't read freed pages.
+    HIP_CHECK(hipStreamSynchronize(stream));
     HIP_CHECK(hipFree(d_temp_storage));
     HIP_CHECK(hipFree(d_keys_out));
     HIP_CHECK(hipFree(d_indices_in));

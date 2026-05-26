@@ -58,8 +58,13 @@ jobs:
             -DTENZOR_BUILD_PYTHON=ON \
             -DTENZOR_BUILD_TESTS=ON \
             -DTENZOR_BUILD_BENCHMARKS=OFF \
-            -DTENZOR_BUILD_EXAMPLES=OFF \
+            -DTENZOR_BUILD_EXAMPLES=ON \
             -DTENZOR_BUILD_MODEL_HUB=OFF
+        # audit-9 JJ.7: TENZOR_BUILD_EXAMPLES=ON in the gateway smoke job so
+        # tests/examples/{test_all_autograd_examples, test_hrm_example} link
+        # successfully (they depend on example_*_autograd_runner OBJECT libs
+        # produced only when examples are configured).  The HRM-style
+        # severed-grad_fn regression net is otherwise dark in CI.
 
       - name: Build core library
         run: ninja -C build tenzor_core
@@ -72,6 +77,17 @@ jobs:
 
       - name: Build tests
         run: ninja -C build
+
+      - name: Verify examples-as-tests are registered (audit-9 JJ.7)
+        working-directory: build
+        run: |
+          count=$(ctest -L examples -N 2>&1 | grep -cE "^\s*Test\s+#[0-9]+:" || true)
+          if [ "$count" -lt 22 ]; then
+            echo "ERROR: expected >=22 example-as-tests registered, got $count"
+            ctest -L examples -N || true
+            exit 1
+          fi
+          echo "OK: $count example-as-tests registered (audit-9 JJ.7 gate)"
 
       - name: Python import test
         run: |

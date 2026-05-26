@@ -312,7 +312,18 @@ add_subdirectory(lite)
 add_subdirectory(integration)
 add_subdirectory(backend_parity)
 add_subdirectory(utils)
-add_subdirectory(examples)
+# audit-9 JJ.7: only configure tests/examples/ when the showcase examples
+# are themselves being built — the test binary links against
+# example_*_autograd_runner OBJECT libraries created only under
+# examples/cpp/showcase/CMakeLists.txt (i.e. when TENZOR_BUILD_EXAMPLES=ON).
+# Without this guard, CI jobs that disable examples produce unresolved
+# OBJECT-library references at test-link time, silently masking the entire
+# HRM-style severed-grad_fn regression net.
+if(TENZOR_BUILD_EXAMPLES)
+    add_subdirectory(examples)
+else()
+    message(STATUS "tests/examples skipped: TENZOR_BUILD_EXAMPLES=OFF")
+endif()
 add_subdirectory(nested)
 add_subdirectory(sparse)
 

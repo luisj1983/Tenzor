@@ -704,4 +704,176 @@ auto FullyShardedDataParallel::register_hooks() -> void {
     }
 }
 
+// ============================================================================
+// audit-9 JJ.4: state_dict / load_state_dict implementations
+// ============================================================================
+
+auto FSDPUnit::param_names() const -> std::vector<std::string> {
+    // Mirror Module::own_parameters() iteration order so indices align with
+    // param_shapes_ / param_numels_.  We can't query `original_params_` for
+    // names directly (they're stored as Variable*); reconstruct from
+    // module_.named_parameters() filtered to those present in
+    // original_params_.
+    std::vector<std::string> out;
+    out.reserve(original_params_.size());
+    auto named = const_cast<nn::Module&>(module_).named_parameters();
+    // Build a Variable*-to-name map then iterate original_params_ in their
+    // own order.
+    std::unordered_map<const Variable*, std::string> by_ptr;
+    for (auto& [name, p] : named) {
+        if (p) by_ptr[p.get()] = name;
+    }
+    for (const auto& p : original_params_) {
+        auto it = by_ptr.find(p.get());
+        out.push_back(it != by_ptr.end() ? it->second : std::string{"<unknown>"});
+    }
+    return out;
+}
+
+auto FSDPUnit::copy_local_shard_from(const Tensor& src) -> void {
+    if (src.numel() != local_shard_.numel()) {
+        throw std::runtime_error(
+            "FSDPUnit::copy_local_shard_from: shard numel mismatch (expected " +
+            std::to_string(local_shard_.numel()) + ", got " +
+            std::to_string(src.numel()) + ")");
+    }
+    if (src.dtype() != local_shard_.dtype()) {
+        throw std::runtime_error(
+            "FSDPUnit::copy_local_shard_from: dtype mismatch");
+    }
+    // Copy device-agnostically; src may live on CPU (typical checkpoint
+    // restore) while the live shard is on GPU.
+    Tensor src_on_device = (src.device() == local_shard_.device())
+        ? src
+        : src.to(local_shard_.device());
+    local_shard_.copy_(src_on_device);
+}
+
+auto FullyShardedDataParallel::state_dict() const
+    -> std::unordered_map<std::string, Tensor> {
+    std::unordered_map<std::string, Tensor> out;
+
+    const int ws = pg_->world_size();
+    const int rank = pg_->rank();
+
+    // Metadata: world_size, rank as scalar tensors so the dict is uniform-type.
+    out["__world_size__"] = full({}, static_cast<double>(ws), DType::Int64, Device::cpu());
+    out["__rank__"]       = full({}, static_cast<double>(rank), DType::Int64, Device::cpu());
+    out["__num_units__"]  = full({}, static_cast<double>(units_.size()),
+                                 DType::Int64, Device::cpu());
+
+    for (size_t ui = 0; ui < units_.size(); ++ui) {
+        const auto& unit = *units_[ui];
+        const std::string up = "unit_" + std::to_string(ui) + "/";
+
+        out[up + "__total_numel__"] =
+            full({}, static_cast<double>(unit.total_numel()), DType::Int64, Device::cpu());
+        out[up + "__shard_numel__"] =
+            full({}, static_cast<double>(unit.shard_numel()), DType::Int64, Device::cpu());
+        out[up + "__shard_offset__"] =
+            full({}, static_cast<double>(unit.shard_offset()), DType::Int64, Device::cpu());
+
+        // Per-parameter metadata: name, original numel, shape (as 1-D Int64).
+        auto names = unit.param_names();
+        const auto& shapes = unit.param_shapes();
+        const auto& numels = unit.param_numels();
+        for (size_t pi = 0; pi < names.size(); ++pi) {
+            const std::string pp = up + "params/" + names[pi];
+            out[pp + "/numel"] =
+                full({}, static_cast<double>(numels[pi]), DType::Int64, Device::cpu());
+            // Encode shape as a 1-D Int64 tensor.
+            Tensor shape_t = zeros({static_cast<int64_t>(shapes[pi].size())},
+                                   DType::Int64, Device::cpu());
+            for (int64_t k = 0; k < static_cast<int64_t>(shapes[pi].size()); ++k) {
+                shape_t.data<int64_t>()[k] = shapes[pi][k];
+            }
+            out[pp + "/shape"] = shape_t;
+        }
+
+        // The actual shard payload: this rank's slice of flat_param_.
+        // Move to CPU for checkpoint portability.
+        out[up + "shard"] = unit.local_shard().to(Device::cpu());
+    }
+
+    return out;
+}
+
+auto FullyShardedDataParallel::load_state_dict(
+    const std::unordered_map<std::string, Tensor>& state) -> void {
+    auto get_or_throw = [&](const std::string& key) -> const Tensor& {
+        auto it = state.find(key);
+        if (it == state.end()) {
+            throw std::runtime_error("FSDP::load_state_dict: missing key '" + key + "'");
+        }
+        return it->second;
+    };
+
+    // Validate world_size and rank.
+    const int ws_now = pg_->world_size();
+    const int rank_now = pg_->rank();
+    int64_t ws_saved = get_or_throw("__world_size__").data<int64_t>()[0];
+    int64_t rank_saved = get_or_throw("__rank__").data<int64_t>()[0];
+    int64_t nu_saved = get_or_throw("__num_units__").data<int64_t>()[0];
+
+    if (ws_saved != ws_now) {
+        throw std::runtime_error(
+            "FSDP::load_state_dict: world_size mismatch (saved " +
+            std::to_string(ws_saved) + ", current " + std::to_string(ws_now) +
+            ").  Cross-world-size resharding is not supported by this API; "
+            "consult `summon_full_params` for a single-rank full-state save.");
+    }
+    if (rank_saved != rank_now) {
+        throw std::runtime_error(
+            "FSDP::load_state_dict: rank mismatch (saved " +
+            std::to_string(rank_saved) + ", current " + std::to_string(rank_now) + ")");
+    }
+    if (static_cast<size_t>(nu_saved) != units_.size()) {
+        throw std::runtime_error(
+            "FSDP::load_state_dict: num_units mismatch (saved " +
+            std::to_string(nu_saved) + ", current " + std::to_string(units_.size()) + ")");
+    }
+
+    for (size_t ui = 0; ui < units_.size(); ++ui) {
+        auto& unit = *units_[ui];
+        const std::string up = "unit_" + std::to_string(ui) + "/";
+
+        int64_t total_saved = get_or_throw(up + "__total_numel__").data<int64_t>()[0];
+        int64_t shard_saved = get_or_throw(up + "__shard_numel__").data<int64_t>()[0];
+        if (static_cast<size_t>(total_saved) != unit.total_numel()) {
+            throw std::runtime_error(
+                "FSDP::load_state_dict: " + up +
+                "total_numel mismatch (saved " + std::to_string(total_saved) +
+                ", current " + std::to_string(unit.total_numel()) + ")");
+        }
+        if (static_cast<size_t>(shard_saved) != unit.shard_numel()) {
+            throw std::runtime_error(
+                "FSDP::load_state_dict: " + up +
+                "shard_numel mismatch (saved " + std::to_string(shard_saved) +
+                ", current " + std::to_string(unit.shard_numel()) + ")");
+        }
+
+        // Validate per-parameter shapes.
+        auto names = unit.param_names();
+        const auto& shapes_cur = unit.param_shapes();
+        for (size_t pi = 0; pi < names.size(); ++pi) {
+            const std::string pp = up + "params/" + names[pi];
+            const Tensor& shape_saved = get_or_throw(pp + "/shape");
+            if (shape_saved.numel() != static_cast<int64_t>(shapes_cur[pi].size())) {
+                throw std::runtime_error(
+                    "FSDP::load_state_dict: " + pp + " rank mismatch");
+            }
+            for (int64_t k = 0; k < shape_saved.numel(); ++k) {
+                if (shape_saved.data<int64_t>()[k] != shapes_cur[pi][k]) {
+                    throw std::runtime_error(
+                        "FSDP::load_state_dict: " + pp + " shape[" +
+                        std::to_string(k) + "] mismatch");
+                }
+            }
+        }
+
+        // Copy the shard payload into the live local shard.
+        unit.copy_local_shard_from(get_or_throw(up + "shard"));
+    }
+}
+
 } // namespace tenzor::distributed
