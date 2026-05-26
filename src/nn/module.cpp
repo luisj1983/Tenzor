@@ -185,6 +185,26 @@ auto Module::register_buffer(std::string name, Variable buffer) -> void {
     buffers_[std::move(name)] = std::make_shared<Variable>(std::move(buffer));
 }
 
+auto Module::register_parameter_shared(std::string name,
+                                       std::shared_ptr<Variable> param) -> void {
+    if (!param) {
+        throw std::invalid_argument(
+            "Module::register_parameter_shared: param shared_ptr is null (name='" + name + "')");
+    }
+    // Enable thread-safe gradient accumulation, matching register_parameter().
+    param->make_thread_safe();
+    parameters_[std::move(name)] = std::move(param);
+}
+
+auto Module::register_buffer_shared(std::string name,
+                                    std::shared_ptr<Variable> buffer) -> void {
+    if (!buffer) {
+        throw std::invalid_argument(
+            "Module::register_buffer_shared: buffer shared_ptr is null (name='" + name + "')");
+    }
+    buffers_[std::move(name)] = std::move(buffer);
+}
+
 auto Module::register_module(std::string name, std::shared_ptr<Module> module) -> void {
     submodules_[std::move(name)] = std::move(module);
 }

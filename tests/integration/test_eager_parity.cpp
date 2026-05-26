@@ -338,7 +338,7 @@ TEST(EagerParity, JitVsEager_Mlp_Cpu_Float32) {
 // exactly the class of bug the G.13 parity contract exists to surface; the
 // test is intentionally kept failing until the JIT tracer fix lands (track
 // under "JIT Conv2d padding attribute lost during trace").
-// Once the JIT side is fixed, remove the GTEST_SKIP() below to re-enable the
+// Once the JIT side is fixed, remove the skip macro below to re-enable the
 // numeric parity check.
 TEST(EagerParity, JitVsEager_ConvStack_Cpu_Float32) {
     using namespace tenzor;

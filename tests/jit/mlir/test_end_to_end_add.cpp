@@ -22,6 +22,7 @@
 #include "tenzor/tenzor.hpp"
 
 #include <gtest/gtest.h>
+#include "../../multi_backend_dtype_fixture.hpp"
 
 #include <chrono>
 #include <cstdio>
@@ -96,10 +97,14 @@ auto add_self_fn() -> ::tenzor::jit::CompiledFunction::FnType {
 void run_add_on_target(const std::string& target) {
     ensure_core_init();
     if (!target_hw_present(target)) {
-        GTEST_SKIP() << "no hardware for target=" << target;
+        SKIP_WITH_REASON(tenzor::testing::SkipReason::BackendUnavailable,
+            "no hardware for target=" << target);
+        return;
     }
     if (!iree_target_supported(target)) {
-        GTEST_SKIP() << "iree-compile dist lacks target=" << target;
+        SKIP_WITH_REASON(tenzor::testing::SkipReason::BackendUnavailable,
+            "iree-compile dist lacks target=" << target);
+        return;
     }
 
     ::tenzor::jit::CompileConfig cfg;
@@ -161,7 +166,9 @@ TEST(EndToEndAdd, MLIRRocmMatchesEager) {
 TEST(EndToEndAdd, SecondInvocationHitsInProcessCache) {
     ensure_core_init();
     if (!target_hw_present("llvm-cpu")) {
-        GTEST_SKIP() << "no llvm-cpu";
+        SKIP_WITH_REASON(tenzor::testing::SkipReason::BackendUnavailable,
+            "no llvm-cpu");
+        return;
     }
 
     // Counter-based signal: every CompiledFunction call goes through the

@@ -47,7 +47,9 @@ protected:
         // not enabled" from validate_devices(). Until DataParallel grows a
         // generic backend path, restrict the test matrix to CUDA.
         if (device().type != Device::Type::CUDA) {
-            GTEST_SKIP() << "DataParallel currently requires the CUDA backend";
+            SKIP_WITH_REASON(tenzor::testing::SkipReason::KernelNotImplemented,
+                "DataParallel currently requires the CUDA backend");
+            return;
         }
 
         // Check if at least 1 device is available for this backend

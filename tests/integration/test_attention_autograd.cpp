@@ -7,6 +7,7 @@
 // docs/internals/attention-contract.md M9 gates.
 
 #include <gtest/gtest.h>
+#include "../multi_backend_dtype_fixture.hpp"
 #include "tenzor/tenzor.hpp"
 #include "tenzor/autograd/variable.hpp"
 #include "tenzor/autograd/ops.hpp"
@@ -307,15 +308,18 @@ TEST_F(AttentionAutogradTest, FlashAttentionPhiloxReplay_CrossBackendMask) {
     // hold. The per-backend determinism invariant — same seed → same
     // mask within a single backend — is covered by
     // `FlashAttentionPhiloxReplay_SeedDeterminism` and is fully green.
-    GTEST_SKIP() << "Cross-backend Philox bit-equality blocked on Phase 13b "
-                 << "unified Philox kernels (per-backend determinism is covered "
-                 << "by FlashAttentionPhiloxReplay_SeedDeterminism)";
+    SKIP_WITH_REASON(tenzor::testing::SkipReason::KnownBug,
+        "Cross-backend Philox bit-equality blocked on Phase 13b unified Philox kernels "
+        "(per-backend determinism is covered by FlashAttentionPhiloxReplay_SeedDeterminism)");
+    return;
     auto cpu_dev = ::tenzor::Device::cpu();
     if (!::tenzor::DispatchTableRegistry::has_backend(::tenzor::Device::Type::CUDA) &&
         !::tenzor::DispatchTableRegistry::has_backend(::tenzor::Device::Type::ROCm) &&
         !::tenzor::DispatchTableRegistry::has_backend(::tenzor::Device::Type::Vulkan) &&
         !::tenzor::DispatchTableRegistry::has_backend(::tenzor::Device::Type::OneAPI)) {
-        GTEST_SKIP() << "Cross-backend mask test requires ≥2 backends";
+        SKIP_WITH_REASON(tenzor::testing::SkipReason::RequiresMultiGPU,
+            "Cross-backend mask test requires >=2 backends");
+        return;
     }
 
     int64_t B = 1, H = 1, S = 4, D = 64;

@@ -177,7 +177,7 @@ TEST_F(SkipPolicyMetaTest, Macro_FailsRather_WhenRequireSetAndOnlyCpu) {
 
 // REQUIRE unset + only one backend reachable => the macro must SKIP. The
 // post-macro ADD_FAILURE is an "if the skip didn't fire, fail loudly" trap:
-// a properly working macro causes GTEST_SKIP() and the test reports SKIPPED;
+// a properly working macro invokes the skip path and the test reports SKIPPED;
 // a broken macro reaches the trap and the test reports FAILED.
 TEST_F(SkipPolicyMetaTest, Macro_SkipsRather_WhenRequireUnsetAndOnlyCpu) {
     ScopedEnv skip("TENZOR_SKIP_BACKENDS", "cuda,rocm,oneapi,vulkan");

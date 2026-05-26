@@ -214,7 +214,9 @@ TEST_P(TensorMultiDTypeTest, DeviceTransfer) {
 
 TEST_P(TensorMultiDTypeTest, RoundTripTransfer) {
     if (device().type == Device::Type::CPU) {
-        GTEST_SKIP() << "Round-trip test not applicable for CPU";
+        SKIP_WITH_REASON(tenzor::testing::SkipReason::BackendUnavailable,
+            "Round-trip test not applicable for CPU");
+        return;
     }
 
     // Create on device(), transfer to CPU, transfer back

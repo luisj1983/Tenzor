@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 #include "../backend_test_fixture.hpp"
+#include "../multi_backend_dtype_fixture.hpp"
 #include "tenzor/sparse/sparse_tensor.hpp"
 #include "tenzor/sparse/sparse_ops.hpp"
 #include "tenzor/ops/creation.hpp"
@@ -431,7 +432,9 @@ TEST_P(SparseTest, Float64Support) {
 // real+imag, recursively coalesces each, then recombines via complex().
 TEST_P(SparseTest, CoalesceComplex64) {
     if (GetParam() != "cpu") {
-        GTEST_SKIP() << "Complex coalesce: CPU-only test for now";
+        SKIP_WITH_REASON(tenzor::testing::SkipReason::KernelNotImplemented,
+            "Complex coalesce: CPU-only test for now");
+        return;
     }
     auto indices = Tensor({2, int64_t(3)}, DType::Int64, Device::cpu());
     auto* idx = indices.data<int64_t>();

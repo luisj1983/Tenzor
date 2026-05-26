@@ -9,6 +9,7 @@
 #include <gtest/gtest.h>
 #include <tenzor/tenzor.hpp>
 #include "parity_test_utils.hpp"
+#include "../multi_backend_dtype_fixture.hpp"
 #include <algorithm>
 #include <chrono>
 #include <cstdlib>
@@ -647,18 +648,22 @@ TEST(PerformanceRegression, DISABLED_BaselineRegressionCheck_MatMul512) {
     }
     if (!host_matches) {
         if (baseline_host.empty()) {
-            GTEST_SKIP() << "perf_baseline.json missing/empty/host field empty — "
-                         << "timings printed; regenerate with "
-                         << "`python tools/regen_perf_baseline.py`.";
+            SKIP_WITH_REASON(tenzor::testing::SkipReason::KnownBug,
+                "perf_baseline.json missing/empty/host field empty — "
+                "timings printed; regenerate with `python tools/regen_perf_baseline.py`.");
+            return;
         } else {
-            GTEST_SKIP() << "perf_baseline.json was recorded on host '" << baseline_host
-                         << "'; running on '" << host_buf << "'. "
-                         << "Timings printed; regression check skipped.";
+            SKIP_WITH_REASON(tenzor::testing::SkipReason::KnownBug,
+                "perf_baseline.json was recorded on host '" << baseline_host
+                << "'; running on '" << host_buf
+                << "'. Timings printed; regression check skipped.");
+            return;
         }
     } else if (!any_compared) {
-        GTEST_SKIP() << "perf_baseline.json host matched but has no MatMul_512x512 "
-                     << "entries. Regenerate with "
-                     << "`python tools/regen_perf_baseline.py`.";
+        SKIP_WITH_REASON(tenzor::testing::SkipReason::KnownBug,
+            "perf_baseline.json host matched but has no MatMul_512x512 entries. "
+            "Regenerate with `python tools/regen_perf_baseline.py`.");
+        return;
     }
 }
 

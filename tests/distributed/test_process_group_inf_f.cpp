@@ -7,6 +7,7 @@
 // inside the test harness.
 
 #include <gtest/gtest.h>
+#include "../multi_backend_dtype_fixture.hpp"
 #include <tenzor/tenzor.hpp>
 #include <tenzor/distributed/process_group.hpp>
 #include <tenzor/distributed/distributed.hpp>
@@ -45,7 +46,11 @@ std::unique_ptr<GlooProcessGroup> try_make_gloo_pg() {
 // single self-slice that becomes the output.
 TEST_F(ProcessGroupInfFTest, GlooAllToAllSingle_WorldSize1_Identity) {
     auto pg = try_make_gloo_pg();
-    if (!pg) GTEST_SKIP() << "Gloo TCP rendezvous unavailable on this host";
+    if (!pg) {
+        SKIP_WITH_REASON(tenzor::testing::SkipReason::BackendUnavailable,
+            "Gloo TCP rendezvous unavailable on this host");
+        return;
+    }
 
     auto in = zeros({4}, DType::Float32, Device::cpu());
     auto* p = in.data<float>();
@@ -105,7 +110,11 @@ TEST_F(ProcessGroupInfFTest, GlooSplit_SingleRank_ReturnsSubGroupOfOne) {
 // ----------------------------------------------------------------------------
 TEST_F(ProcessGroupInfFTest, GlooAllToAllSingle_ShapeMismatchThrows) {
     auto pg = try_make_gloo_pg();
-    if (!pg) GTEST_SKIP() << "Gloo TCP rendezvous unavailable on this host";
+    if (!pg) {
+        SKIP_WITH_REASON(tenzor::testing::SkipReason::BackendUnavailable,
+            "Gloo TCP rendezvous unavailable on this host");
+        return;
+    }
 
     auto in  = zeros({4}, DType::Float32, Device::cpu());
     auto out_wrong_shape = zeros({2}, DType::Float32, Device::cpu());

@@ -101,16 +101,33 @@ private:
      */
     auto compute_weight(const Tensor& weight) -> Tensor;
 
+    /**
+     * @brief Compute the normalised weight as a Variable (autograd-tracked).
+     *
+     * Result has a grad_fn rooted at `weight_orig_`, so backward propagates
+     * into the trainable leaf. The power-iteration vectors u/v and sigma
+     * itself enter as detached constants — power iteration is not
+     * differentiable, only the W/sigma divide is.
+     */
+    auto compute_weight_variable() -> Variable;
+
     std::shared_ptr<Module> module_;            ///< Target module (kept alive)
-    std::shared_ptr<Variable> param_;           ///< Cached parameter pointer
+    std::shared_ptr<Variable> param_;           ///< Layer's `weight` slot (now non-leaf, written by pre-hook)
+    std::shared_ptr<Variable> weight_orig_;     ///< Trainable original weight (registered as `name + "_orig"`)
+    std::shared_ptr<Variable> buffer_u_;        ///< Buffer Variable wrapping u_ (kept in sync with the Tensor)
+    std::shared_ptr<Variable> buffer_v_;        ///< Buffer Variable wrapping v_ (kept in sync with the Tensor)
     std::string param_name_;                    ///< Parameter name
     int64_t n_power_iterations_;                ///< Power iteration steps per forward
     double eps_;                                ///< Numerical stability epsilon
     Tensor u_;                                  ///< Left singular vector (out_features,)
     Tensor v_;                                  ///< Right singular vector (in_features,)
-    Tensor sigma_;                              ///< Current estimated spectral norm
+    Tensor sigma_;                              ///< Current estimated spectral norm (Tensor — non-differentiable)
     size_t hook_id_{0};                         ///< Registered hook ID for removal
     std::vector<int64_t> original_shape_;       ///< Original weight shape before reshape
+
+public:
+    /// Accessors used by tests / introspection.
+    auto weight_orig() const -> std::shared_ptr<Variable> { return weight_orig_; }
 };
 
 } // namespace tenzor::nn::utils

@@ -23,7 +23,7 @@
 #include <tenzor/nn/quantization/awq.hpp>
 #include <tenzor/ops/creation.hpp>
 #include <tenzor/ops/math.hpp>
-#include "multi_backend_dtype_fixture.hpp"
+#include "../../multi_backend_dtype_fixture.hpp"
 
 #include <algorithm>
 
@@ -60,7 +60,9 @@ TEST_P(AWQQuantizerMultiDTypeTest, ComputeActScalesShape) {
     // of integer activations is not part of the AWQ surface.
     if (dtype_ != DType::Float32 && dtype_ != DType::Float64 &&
         dtype_ != DType::Float16 && dtype_ != DType::BFloat16) {
-        GTEST_SKIP() << "AWQ activation scales are float-only.";
+        SKIP_WITH_REASON(tenzor::testing::SkipReason::DtypeUnsupportedOnBackend,
+            "AWQ activation scales are float-only.");
+        return;
     }
     try {
         auto act_cpu = tenzor::randn({8, 64}, DType::Float32, Device::cpu());
@@ -88,7 +90,9 @@ TEST_P(AWQQuantizerMultiDTypeTest, ComputeActScalesShape) {
 TEST_P(AWQQuantizerMultiDTypeTest, QuantizeLayerRoundTrip) {
     if (dtype_ != DType::Float32 && dtype_ != DType::Float64 &&
         dtype_ != DType::Float16 && dtype_ != DType::BFloat16) {
-        GTEST_SKIP() << "AWQ quantize_layer is float-only.";
+        SKIP_WITH_REASON(tenzor::testing::SkipReason::DtypeUnsupportedOnBackend,
+            "AWQ quantize_layer is float-only.");
+        return;
     }
 
     AWQConfig config;

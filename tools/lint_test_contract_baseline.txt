@@ -5,7 +5,7 @@
 /home/lee/Projects/Tenzor/tests/autograd/test_higher_order_contract.cpp:57:
 /home/lee/Projects/Tenzor/tests/autograd/test_higher_order_contract.cpp:89:
 /home/lee/Projects/Tenzor/tests/autograd/test_higher_order_stubs_regression.cpp:187:
-/home/lee/Projects/Tenzor/tests/backend_parity/test_performance_regression.cpp:564:
+/home/lee/Projects/Tenzor/tests/backend_parity/test_performance_regression.cpp:565:
 /home/lee/Projects/Tenzor/tests/core/test_inplace_version_detection_multidtype.cpp:46:
 /home/lee/Projects/Tenzor/tests/nn/layers/test_conv2d_multidtype.cpp:544:
 /home/lee/Projects/Tenzor/tests/nn/layers/test_hrm.cpp:422:

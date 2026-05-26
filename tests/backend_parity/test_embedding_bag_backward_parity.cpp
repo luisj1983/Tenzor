@@ -9,6 +9,7 @@
  */
 
 #include <gtest/gtest.h>
+#include "../multi_backend_dtype_fixture.hpp"
 #include <tenzor/tenzor.hpp>
 #include <tenzor/nn/layers/embedding.hpp>
 #include <tenzor/autograd/ops.hpp>
@@ -180,7 +181,9 @@ for (auto& [name, ptr] : layer.named_parameters()) {
 // ----------------------------------------------------------------------------
 TEST_P(EmbeddingBagParity, Kernel_ScattersByIndicesNotPosition) {
     if (!is_op_supported(OpId::EmbeddingBagBackward, device.type)) {
-        GTEST_SKIP() << "EmbeddingBagBackward not supported on " << backend_name(device);
+        SKIP_WITH_REASON(tenzor::testing::SkipReason::KernelNotImplemented,
+            "EmbeddingBagBackward not supported on " << backend_name(device));
+        return;
     }
 
     constexpr int64_t num_embeddings = 16;

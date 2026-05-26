@@ -17,6 +17,7 @@
  */
 
 #include <gtest/gtest.h>
+#include "../multi_backend_dtype_fixture.hpp"
 #include <tenzor/tenzor.hpp>
 #include <cmath>
 #include <limits>
@@ -620,9 +621,11 @@ TEST_P(EdgeCaseMultiDTypeTest, DivisionByZero) {
         // Neither matches the original EXPECT_THROW, so this whole branch is
         // skipped. If we ever wire a SIGFPE-to-exception handler we can
         // re-enable the CPU case.
-        GTEST_SKIP() << config_.backend.name
-                     << ": integer divide-by-zero has no portable behaviour "
-                        "(CPU SIGFPE / GPU silent UB).";
+        SKIP_WITH_REASON(tenzor::testing::SkipReason::KnownBug,
+            config_.backend.name
+            << ": integer divide-by-zero has no portable behaviour "
+            "(CPU SIGFPE / GPU silent UB).");
+        return;
     }
 }
 

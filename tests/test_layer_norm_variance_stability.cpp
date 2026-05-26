@@ -14,6 +14,7 @@
  */
 
 #include <gtest/gtest.h>
+#include "multi_backend_dtype_fixture.hpp"
 #include <tenzor/tenzor.hpp>
 #include <tenzor/autograd/variable.hpp>
 #include <tenzor/backend/fast_dispatch.hpp>
@@ -231,7 +232,9 @@ TEST(LayerNormVarianceStability, CudaMixedKernelLargeMeanFiniteOutput) {
         has_cuda = false;
     }
     if (!has_cuda) {
-        GTEST_SKIP() << "CUDA device unavailable; skipping CUDA-only test";
+        SKIP_WITH_REASON(tenzor::testing::SkipReason::BackendUnavailable,
+            "CUDA device unavailable; skipping CUDA-only test");
+        return;
     }
 
     Device cuda_dev = Device::cuda(0);

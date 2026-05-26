@@ -58,7 +58,9 @@ protected:
         // currently throw "DataParallel: CUDA support not enabled". Until
         // DataParallel grows a generic backend path, restrict to CUDA.
         if (device().type != Device::Type::CUDA) {
-            GTEST_SKIP() << "DataParallel currently requires the CUDA backend";
+            SKIP_WITH_REASON(tenzor::testing::SkipReason::KernelNotImplemented,
+                "DataParallel currently requires the CUDA backend");
+            return;
         }
 
         // Verify device is usable

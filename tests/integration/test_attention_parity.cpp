@@ -13,6 +13,7 @@
 // equivalence is not a contract requirement.
 
 #include <gtest/gtest.h>
+#include "../multi_backend_dtype_fixture.hpp"
 #include "tenzor/tenzor.hpp"
 #include "tenzor/autograd/variable.hpp"
 #include "tenzor/autograd/ops.hpp"
@@ -108,7 +109,9 @@ TEST_P(AttentionParityTest, MatchesCPU) {
             FAIL() << "Backend " << cs.name
                    << " not loaded but TENZOR_REQUIRE_MULTI_BACKEND=1";
         }
-        GTEST_SKIP() << "Backend " << cs.name << " not loaded — skip";
+        SKIP_WITH_REASON(tenzor::testing::SkipReason::BackendUnavailable,
+            "Backend " << cs.name << " not loaded");
+        return;
     }
 
     constexpr int64_t B = 2;

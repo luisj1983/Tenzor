@@ -26,6 +26,7 @@
 #include "tenzor/tenzor.hpp"
 
 #include <gtest/gtest.h>
+#include "../../multi_backend_dtype_fixture.hpp"
 
 #include <cstdio>
 #include <memory>
@@ -111,12 +112,16 @@ auto build_resnet18() -> std::shared_ptr<::tenzor::models::ResNet> {
 void run_jit_match(const std::string& target) {
     ensure_core_init();
     if (!target_hw_present(target)) {
-        GTEST_SKIP() << "no hardware for target=" << target;
+        SKIP_WITH_REASON(tenzor::testing::SkipReason::BackendUnavailable,
+            "no hardware for target=" << target);
+        return;
     }
     if (!iree_target_supported(target)) {
-        GTEST_SKIP() << "iree-compile does not have HAL target backend "
-                     << "'" << target << "' registered (rebuild iree-dist "
-                     << "with -DIREE_HAL_DRIVER_" << target << "=ON)";
+        SKIP_WITH_REASON(tenzor::testing::SkipReason::BackendUnavailable,
+            "iree-compile does not have HAL target backend '"
+            << target << "' registered (rebuild iree-dist with -DIREE_HAL_DRIVER_"
+            << target << "=ON)");
+        return;
     }
 
     auto m = build_resnet18();

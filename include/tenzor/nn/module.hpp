@@ -575,6 +575,32 @@ public:
      */
     auto load(const std::string& path) -> void;
 
+    /**
+     * @brief Register an existing shared Variable as a parameter (public hook).
+     *
+     * Unlike the protected register_parameter(name, Variable), this overload
+     * accepts the shared_ptr directly so external callers (e.g.
+     * `WeightNorm` / `SpectralNorm` reparameterisations) can register a
+     * Variable whose identity must remain stable across the call. The exact
+     * shared_ptr is stored, so the caller and the module share gradient state.
+     *
+     * @param name Parameter name
+     * @param param Existing parameter shared_ptr (must be non-null)
+     */
+    auto register_parameter_shared(std::string name, std::shared_ptr<Variable> param) -> void;
+
+    /**
+     * @brief Register an existing shared Variable as a buffer (public hook).
+     *
+     * Companion to register_parameter_shared() for non-trainable state
+     * tracked by reparameterisations (e.g. SpectralNorm power-iteration
+     * vectors `u`/`v`).
+     *
+     * @param name Buffer name
+     * @param buffer Existing buffer shared_ptr (must be non-null)
+     */
+    auto register_buffer_shared(std::string name, std::shared_ptr<Variable> buffer) -> void;
+
 protected:
     /**
      * @brief Register a parameter.

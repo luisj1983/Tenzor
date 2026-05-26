@@ -4,7 +4,7 @@
 //
 // Runs an end-to-end quantized inference on each available backend and
 // verifies the outputs agree within INT8 quantization noise. Backends not
-// available in this build/runtime are skipped via GTEST_SKIP — the test
+// available in this build/runtime are skipped via the skip macro — the test
 // passes cleanly on any subset of backends.
 //
 // Reference for parity: each backend's output compared against the CPU

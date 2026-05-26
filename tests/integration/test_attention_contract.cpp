@@ -16,6 +16,7 @@
 // the per-backend unit tests.
 
 #include <gtest/gtest.h>
+#include "../multi_backend_dtype_fixture.hpp"
 #include "tenzor/tenzor.hpp"
 #include "tenzor/backend/fast_dispatch.hpp"
 #include "tenzor/backend/dispatch_table.hpp"
@@ -89,8 +90,10 @@ TEST_P(AttentionContractTest, AllRequiredOpIdsRegistered) {
         if (require_multi_backend()) {
             FAIL() << "Backend " << dev.name << " not loaded but TENZOR_REQUIRE_MULTI_BACKEND=1";
         }
-        GTEST_SKIP() << "Backend " << dev.name << " not loaded — skipping (set "
-                        "TENZOR_REQUIRE_MULTI_BACKEND=1 to make this a hard fail)";
+        SKIP_WITH_REASON(tenzor::testing::SkipReason::BackendUnavailable,
+            "Backend " << dev.name << " not loaded (set TENZOR_REQUIRE_MULTI_BACKEND=1 "
+            "to make this a hard fail)");
+        return;
     }
 
     std::vector<std::string> missing;
