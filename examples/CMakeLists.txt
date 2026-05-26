@@ -57,8 +57,26 @@ target_link_libraries(mixed_precision_training PRIVATE tenzor_core)
 add_executable(gru_time_series cpp/training/gru_time_series.cpp)
 target_link_libraries(gru_time_series PRIVATE tenzor_core)
 
+# KK.27: vit_image_classification's training body lives in a runner so
+# tests/examples/test_all_autograd_examples.cpp can drive it. The runner is
+# an OBJECT library so it can be linked into both the standalone exe and
+# the test target without duplicating object files.
+add_library(example_vit_image_classification_runner OBJECT
+    cpp/training/vit_image_classification_runner.cpp)
+target_link_libraries(example_vit_image_classification_runner PUBLIC tenzor_core)
+target_include_directories(example_vit_image_classification_runner PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/cpp/training
+    ${CMAKE_SOURCE_DIR}/include)
+set_target_properties(example_vit_image_classification_runner PROPERTIES
+    CXX_STANDARD 23
+    CXX_STANDARD_REQUIRED ON
+    POSITION_INDEPENDENT_CODE ON)
+
 add_executable(vit_image_classification cpp/training/vit_image_classification.cpp)
-target_link_libraries(vit_image_classification PRIVATE tenzor_core)
+target_link_libraries(vit_image_classification PRIVATE
+    tenzor_core example_vit_image_classification_runner)
+target_include_directories(vit_image_classification PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/cpp/training)
 
 add_executable(transformer_seq2seq cpp/training/transformer_seq2seq.cpp)
 target_link_libraries(transformer_seq2seq PRIVATE tenzor_core)
@@ -75,8 +93,25 @@ target_link_libraries(unet_semantic_segmentation PRIVATE tenzor_core)
 add_executable(gpt_text_generation_training cpp/training/gpt_text_generation.cpp)
 target_link_libraries(gpt_text_generation_training PRIVATE tenzor_core)
 
+# KK.27: gradient_checkpointing's deep-ResNet training body lives in a
+# runner so the regression test can drive it. OBJECT library shared between
+# the standalone exe and the test target.
+add_library(example_gradient_checkpointing_runner OBJECT
+    cpp/training/gradient_checkpointing_runner.cpp)
+target_link_libraries(example_gradient_checkpointing_runner PUBLIC tenzor_core)
+target_include_directories(example_gradient_checkpointing_runner PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/cpp/training
+    ${CMAKE_SOURCE_DIR}/include)
+set_target_properties(example_gradient_checkpointing_runner PROPERTIES
+    CXX_STANDARD 23
+    CXX_STANDARD_REQUIRED ON
+    POSITION_INDEPENDENT_CODE ON)
+
 add_executable(gradient_checkpointing cpp/training/gradient_checkpointing.cpp)
-target_link_libraries(gradient_checkpointing PRIVATE tenzor_core)
+target_link_libraries(gradient_checkpointing PRIVATE
+    tenzor_core example_gradient_checkpointing_runner)
+target_include_directories(gradient_checkpointing PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/cpp/training)
 
 # ============================================================================
 # ZeRO Optimizer and Offloading Examples

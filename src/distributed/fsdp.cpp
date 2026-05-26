@@ -746,7 +746,11 @@ auto FSDPUnit::copy_local_shard_from(const Tensor& src) -> void {
     Tensor src_on_device = (src.device() == local_shard_.device())
         ? src
         : src.to(local_shard_.device());
-    local_shard_.copy_(src_on_device);
+    // Tenzor's Tensor type doesn't expose ``copy_``; rebind the shard handle
+    // to a contiguous copy of the source instead. local_shard_ retains the
+    // same shape / dtype / device because src_on_device was already
+    // validated against them above.
+    local_shard_ = src_on_device.contiguous();
 }
 
 auto FullyShardedDataParallel::state_dict() const

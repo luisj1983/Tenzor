@@ -952,6 +952,21 @@ auto ZeROStage1Optimizer::on_parameters_appended_(size_t /*old_count*/,
         // outright (throws below), so there is no per-param resize path on
         // that branch either. Document the invariant once here for the
         // reader who comes looking for the post-add_param_group assert.
+        //
+        // KK.14: tighter post-mutation invariant. After compute_element_partition_layout
+        // re-walks the parameter list, every partition's master_params must still hold
+        // the single-slot ElementLevel shape it had at construction time — i.e. either
+        // empty (use_master_fp32 disabled / unallocated) or exactly one Tensor slot.
+        // If a future mutator accidentally grew master_params into a per-param vector
+        // we would silently mis-index the master in step_impl().
+        if (config_.use_master_fp32) {
+            for (const auto& partition : partitions_) {
+                assert((partition.master_params.empty()
+                        || partition.master_params.size() == 1)
+                       && "ZeRO ElementLevel master_params must remain single-slot "
+                          "after add_param_group / on_parameters_appended_");
+            }
+        }
     } else {
         // ParamLevel partition_parameters() appends into partitions_[r].params
         // without clearing, so re-running it would duplicate existing

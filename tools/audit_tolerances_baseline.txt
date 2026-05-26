@@ -62,7 +62,6 @@ tests/autograd/test_gradcheck_missing.cpp|GradCheckMissingTest.RFFTIRFFT_RoundTr
 tests/autograd/test_gradcheck_missing.cpp|GradCheckMissingTest.TensorInv|0.001
 tests/autograd/test_gradcheck_multibackend.cpp|GradCheckMultiBackendTest.LSTMCell_RawSliceLooseTol|0.001
 tests/autograd/test_gradcheck_multibackend.cpp|GradCheckMultiBackendTest.ZetaWrtQ|0.5
-tests/backend_parity/test_sampling_parity.cpp|SamplingParity.Poisson_EmpiricalMean|0.1
 tests/core/test_distributions_advanced.cpp|DistributionsAdvancedTest.BetaSampleMeanAndRange|0.02
 tests/core/test_distributions_advanced.cpp|DistributionsAdvancedTest.GammaSampleMeanApproxConcentrationOverRate|0.08
 tests/core/test_distributions_advanced.cpp|DistributionsAdvancedTest.GammaSampleMeanApproxConcentrationOverRate|0.15
@@ -82,7 +81,6 @@ tests/core/test_new_features.cpp|NewFeaturesTest.ChainedScheduler_MultipleSchedu
 tests/core/test_new_features.cpp|NewFeaturesTest.Pareto_SampleAndLogProb|0.01
 tests/core/test_new_features.cpp|NewFeaturesTest.Pareto_SampleAndLogProb|0.3
 tests/core/test_new_features.cpp|NewFeaturesTest.Weibull_Sample|0.1
-tests/core/test_new_features_multidtype.cpp|NewFeaturesMultiDTypeTest.FunctionalLogSigmoid|0.1
 tests/core/test_new_features_multidtype.cpp|NewFeaturesMultiDTypeTest.Pareto_CDF|0.02
 tests/core/test_new_features_multidtype.cpp|NewFeaturesMultiDTypeTest.Pareto_SampleAndLogProb|0.05
 tests/core/test_new_features_multidtype.cpp|NewFeaturesMultiDTypeTest.Pareto_SampleAndLogProb|0.4
@@ -102,12 +100,9 @@ tests/nn/test_clip_grad_multidtype.cpp|ClipGradMultiDTypeTest.ClipGradNormReturn
 tests/ops/test_final_untested_multidtype.cpp|FinalUntestedMultiDTypeTest.NumericalGradient|0.01
 tests/test_creation_ops.cpp|CreationOpsTest.RandnFloat64|0.15
 tests/test_param_group_contract.cpp|ParamGroupContractTest.AdamPerGroupLearningRate|0.001
-tests/unit/test_attention.cpp|CausalMaskTest.MediumSize|0.001
-tests/unit/test_cpu_kernels.cpp|CPUKernelsTest.AddFloat32_VerySmallValues|0.1
 tests/unit/test_creation_dtype_coverage.cpp|CreationDtypeCoverage.ArangeBFloat16|0.01
 tests/unit/test_creation_dtype_coverage.cpp|CreationDtypeCoverage.LinspaceBFloat16|0.01
 tests/unit/test_creation_dtype_coverage.cpp|CreationDtypeCoverage.LinspaceFloat16|0.001
-tests/unit/test_data_parallel_single_gpu.cpp|DataParallelSingleGPUTest.Correctness_NumericalStability|0.1
 tests/unit/test_distributions_samplers.cpp|DistributionsSamplersTest.Binomial_MeanMatchesClosedForm|0.2
 tests/unit/test_distributions_samplers.cpp|DistributionsSamplersTest.Dirichlet_MeanMatchesAlpha|0.02
 tests/unit/test_distributions_samplers.cpp|DistributionsSamplersTest.HalfNormal_MeanMatchesClosedForm|0.05
@@ -136,7 +131,6 @@ tests/unit/test_optimizers_extended_multidtype.cpp|OptimizersExtendedMultiDTypeT
 tests/unit/test_optimizers_extended_multidtype.cpp|OptimizersExtendedMultiDTypeTest.RMSpropConvergence|0.1
 tests/unit/test_optimizers_multidtype.cpp|OptimizersMultiDTypeTest.SGDSimpleLinearRegression|0.5
 tests/unit/test_philox_dropout.cpp|PhiloxDropout.KeepRatioMatchesOneMinusP|0.02
-tests/unit/test_quantization_multidtype.cpp|QuantizationMultiDTypeTest.Dequantization_PerChannelReconstruction|0.1
 tests/unit/test_reductions_dtype_coverage.cpp|ReductionsDtypeCoverage.ScatterReduceBFloat16|0.01
 tests/unit/test_schedulers_advanced.cpp|AdvancedSchedulerTest.CosineAnnealingWarmRestarts_BasicRestart|0.01
 tests/unit/test_schedulers_advanced.cpp|AdvancedSchedulerTest.CosineAnnealingWarmRestarts_EtaMin|0.01

@@ -141,17 +141,36 @@ CrossEntropyLoss::CrossEntropyLoss(Reduction reduction, float label_smoothing,
       ignore_index_(ignore_index) {}
 
 auto CrossEntropyLoss::forward(const Variable& input, const Tensor& target) -> Variable {
+    // KK.19: log_softmax in F16/BF16 + label_smoothing/num_classes collapses
+    // to zero for large vocab (label_smoothing=0.1 / 32k ≈ 3.05e-6, below
+    // F16's smallest normal ~6.1e-5).  Widen the entire forward to Float32
+    // and narrow the loss back before the final reduction.  Subsumes the
+    // earlier BF16 clamp_min workaround on the ignore-index denominator.
+    const DType orig_dtype = input.tensor().dtype();
+    const bool needs_upcast = (orig_dtype == DType::Float16 ||
+                               orig_dtype == DType::BFloat16);
+    Variable input_c = needs_upcast
+        ? tenzor::nn::variable_cast(input, DType::Float32)
+        : input;
+    Tensor target_c = (needs_upcast && (target.dtype() == DType::Float16 ||
+                                        target.dtype() == DType::BFloat16))
+        ? target.to(DType::Float32)
+        : target;
+
     // Cross entropy with logits: -log_softmax(input)[target_class]
     // Use the log_softmax function from activations
-    auto log_probs = nn::log_softmax(input, 1);  // Compute log_softmax along dim=1
+    auto log_probs = nn::log_softmax(input_c, 1);  // Compute log_softmax along dim=1
 
-    auto num_classes = input.tensor().shape()[1];
+    auto num_classes = input_c.tensor().shape()[1];
 
     // Handle both one-hot encoded targets (Float32/Float64, shape [N, C]) and class indices (Int64, shape [N])
     Variable one_hot_var;
 
-    // Check if target is a floating point type (one-hot encoded)
-    bool is_float_target = (target.dtype() == DType::Float32 || target.dtype() == DType::Float64 || target.dtype() == DType::Float16) && target.ndim() == 2;
+    // Check if target is a floating point type (one-hot encoded).  KK.19:
+    // use the upcast target_c (F16/BF16 -> F32) for the dtype probe and the
+    // downstream one-hot construction so the smoothed-target arithmetic is
+    // entirely Float32.
+    bool is_float_target = (target_c.dtype() == DType::Float32 || target_c.dtype() == DType::Float64 || target_c.dtype() == DType::Float16) && target_c.ndim() == 2;
 
     // J.5: track which samples to ignore (class-index path only — one-hot
     // / soft targets carry weights directly so ignore_index is N/A there).
@@ -160,17 +179,17 @@ auto CrossEntropyLoss::forward(const Variable& input, const Tensor& target) -> V
     if (is_float_target) {
         // Target is already one-hot encoded (Float32 or Float64 with shape [N, C])
         // Convert to input dtype if needed for consistency
-        if (target.dtype() != input.tensor().dtype()) {
-            one_hot_var = Variable(target.to(input.tensor().dtype()), false);
+        if (target_c.dtype() != input_c.tensor().dtype()) {
+            one_hot_var = Variable(target_c.to(input_c.tensor().dtype()), false);
         } else {
-            one_hot_var = Variable(target, false);  // Don't need gradients w.r.t. targets
+            one_hot_var = Variable(target_c, false);  // Don't need gradients w.r.t. targets
         }
     } else {
         // Target contains class indices (Int64), need to create one-hot encoding
 
         // Ensure target is on same device as input for dispatch / mask ops.
-        Tensor target_dev = (target.device() == input.tensor().device())
-            ? target : target.to(input.tensor().device());
+        Tensor target_dev = (target_c.device() == input_c.tensor().device())
+            ? target_c : target_c.to(input_c.tensor().device());
 
         // Build keep mask + clamp ignored entries to a safe class index so
         // OneHot doesn't index out-of-bounds. The mask is later applied to
@@ -181,7 +200,7 @@ auto CrossEntropyLoss::forward(const Variable& input, const Tensor& target) -> V
         Tensor keep       = tenzor::ne(target_dev, ignore_t);
         Tensor zero_t     = tenzor::full_like(target_dev, 0.0);
         Tensor safe_target = tenzor::where(is_ignored, zero_t, target_dev);
-        keep_mask = keep.to(input.tensor().dtype());
+        keep_mask = keep.to(input_c.tensor().dtype());
 
         // Use backend dispatch for one-hot encoding (avoids GPU→CPU→GPU round-trip)
         NewOpAttributes oh_attrs;
@@ -192,8 +211,8 @@ auto CrossEntropyLoss::forward(const Variable& input, const Tensor& target) -> V
         Tensor one_hot = oh_results[0];
 
         // Convert to input dtype if needed (one_hot shader produces Float32)
-        if (one_hot.dtype() != input.tensor().dtype()) {
-            one_hot = one_hot.to(input.tensor().dtype());
+        if (one_hot.dtype() != input_c.tensor().dtype()) {
+            one_hot = one_hot.to(input_c.tensor().dtype());
         }
 
         one_hot_var = Variable(one_hot, false);
@@ -201,6 +220,8 @@ auto CrossEntropyLoss::forward(const Variable& input, const Tensor& target) -> V
 
     // Apply label smoothing if enabled:
     // smoothed_target = (1 - label_smoothing) * one_hot + label_smoothing / num_classes
+    // KK.19: this runs in input_c.dtype() (Float32 when the original input was
+    // F16/BF16), so label_smoothing/num_classes no longer underflows.
     if (label_smoothing_ > 0.0f) {
         auto smooth_target = one_hot_var * (1.0f - label_smoothing_);
         one_hot_var = smooth_target + (label_smoothing_ / static_cast<float>(num_classes));
@@ -222,14 +243,27 @@ auto CrossEntropyLoss::forward(const Variable& input, const Tensor& target) -> V
         neg_selected = neg_selected * mask_var;
     }
 
+    // KK.19: narrow back to the original dtype only after the reduction.
+    // Keeping the per-sample tensor in F32 preserves precision for the
+    // mean/sum reductions; the final scalar (or per-sample None reduction)
+    // can then be cast back to F16/BF16 cheaply.
+    auto finalize = [&](Variable v) -> Variable {
+        if (needs_upcast) {
+            return tenzor::nn::variable_cast(v, orig_dtype);
+        }
+        return v;
+    };
+
     switch (reduction_) {
         case Reduction::None:
-            return neg_selected;
+            return finalize(neg_selected);
         case Reduction::Mean: {
             if (keep_mask.has_value()) {
                 // Divide by number of non-ignored samples (clamped to >=1).
-                // Sum on Float32 because clamp_min lacks BF16 dispatch and
-                // the count is a tiny scalar — no precision concern.
+                // KK.19: with the F32 widen above, the denom and neg_selected
+                // share dtype (Float32 on upcast paths), so the clamp_min /
+                // dtype-bridge dance from before becomes a no-op.  The path
+                // still works for non-upcast (F32/F64) inputs as it always did.
                 const DType out_dtype = neg_selected.tensor().dtype();
                 Tensor mask_f32 = keep_mask->dtype() == DType::Float32
                                      ? *keep_mask
@@ -239,16 +273,16 @@ auto CrossEntropyLoss::forward(const Variable& input, const Tensor& target) -> V
                                    ? denom_f32
                                    : denom_f32.to(out_dtype);
                 Variable denom_var(denom, /*requires_grad=*/false);
-                return sum(neg_selected) / denom_var;
+                return finalize(sum(neg_selected) / denom_var);
             }
-            return mean(neg_selected);
+            return finalize(mean(neg_selected));
         }
         case Reduction::Sum:
-            return sum(neg_selected);
+            return finalize(sum(neg_selected));
         case Reduction::BatchMean:
-            return sum(neg_selected) / static_cast<float>(neg_selected.tensor().shape()[0]);
+            return finalize(sum(neg_selected) / static_cast<float>(neg_selected.tensor().shape()[0]));
     }
-    return neg_selected;
+    return finalize(neg_selected);
 }
 
 // NLLLoss implementation
@@ -271,27 +305,42 @@ auto NLLLoss::forward(const Variable& input, const Tensor& target) -> Variable {
     // clamped to 0 (so OneHot stays in-bounds) and the resulting per-sample
     // loss is zeroed via a (target != ignore_index) mask, with the mean
     // denominator counting only kept samples.
-    auto num_classes = input.tensor().shape()[1];
+    //
+    // KK.19: widen F16/BF16 inputs/targets to Float32 for the forward to
+    // avoid label-smoothing-like underflow paths and to keep parity with
+    // CrossEntropyLoss above; narrow the loss back at the very end.
+    const DType orig_dtype = input.tensor().dtype();
+    const bool needs_upcast = (orig_dtype == DType::Float16 ||
+                               orig_dtype == DType::BFloat16);
+    Variable input_c = needs_upcast
+        ? tenzor::nn::variable_cast(input, DType::Float32)
+        : input;
+    Tensor target_c = (needs_upcast && (target.dtype() == DType::Float16 ||
+                                        target.dtype() == DType::BFloat16))
+        ? target.to(DType::Float32)
+        : target;
+
+    auto num_classes = input_c.tensor().shape()[1];
 
     const bool is_float_target =
-        (target.dtype() == DType::Float32 || target.dtype() == DType::Float64 ||
-         target.dtype() == DType::Float16) && target.ndim() == 2;
+        (target_c.dtype() == DType::Float32 || target_c.dtype() == DType::Float64 ||
+         target_c.dtype() == DType::Float16) && target_c.ndim() == 2;
 
     Variable one_hot_var;
     std::optional<Tensor> keep_mask;  // populated on class-index path only
     if (is_float_target) {
         // Already one-hot (or soft-labelled) with shape [N, C].
-        if (target.dtype() != input.tensor().dtype()) {
-            one_hot_var = Variable(target.to(input.tensor().dtype()), false);
+        if (target_c.dtype() != input_c.tensor().dtype()) {
+            one_hot_var = Variable(target_c.to(input_c.tensor().dtype()), false);
         } else {
-            one_hot_var = Variable(target, false);
+            one_hot_var = Variable(target_c, false);
         }
     } else {
         // Class-index path: dispatch OneHot on the input's device so we
         // avoid a GPU→CPU→GPU round-trip.
-        Tensor target_dev = (target.device() == input.tensor().device())
-            ? target
-            : target.to(input.tensor().device());
+        Tensor target_dev = (target_c.device() == input_c.tensor().device())
+            ? target_c
+            : target_c.to(input_c.tensor().device());
 
         // Build keep mask + clamp ignored entries to a valid class index.
         Tensor ignore_t   = tenzor::full_like(target_dev,
@@ -300,7 +349,7 @@ auto NLLLoss::forward(const Variable& input, const Tensor& target) -> Variable {
         Tensor keep       = tenzor::ne(target_dev, ignore_t);
         Tensor zero_t     = tenzor::full_like(target_dev, 0.0);
         Tensor safe_target = tenzor::where(is_ignored, zero_t, target_dev);
-        keep_mask = keep.to(input.tensor().dtype());
+        keep_mask = keep.to(input_c.tensor().dtype());
 
         NewOpAttributes oh_attrs;
         oh_attrs.set(AttrKey::NumClasses, num_classes);
@@ -309,13 +358,13 @@ auto NLLLoss::forward(const Variable& input, const Tensor& target) -> Variable {
         auto oh_results = dispatch(OpId::OneHot, oh_inputs, oh_attrs);
         Tensor one_hot = oh_results[0];
 
-        if (one_hot.dtype() != input.tensor().dtype()) {
-            one_hot = one_hot.to(input.tensor().dtype());
+        if (one_hot.dtype() != input_c.tensor().dtype()) {
+            one_hot = one_hot.to(input_c.tensor().dtype());
         }
         one_hot_var = Variable(one_hot, false);
     }
 
-    auto weighted = input * one_hot_var;                 // [N, C]
+    auto weighted = input_c * one_hot_var;               // [N, C]
     auto loss_per_sample = sum(weighted, 1, false);      // [N]
     auto neg_loss = neg(loss_per_sample);
 
@@ -325,13 +374,20 @@ auto NLLLoss::forward(const Variable& input, const Tensor& target) -> Variable {
         neg_loss = neg_loss * mask_var;
     }
 
+    auto finalize = [&](Variable v) -> Variable {
+        if (needs_upcast) {
+            return tenzor::nn::variable_cast(v, orig_dtype);
+        }
+        return v;
+    };
+
     switch (reduction_) {
         case Reduction::None:
-            return neg_loss;
+            return finalize(neg_loss);
         case Reduction::Mean: {
             if (keep_mask.has_value()) {
                 // Same widen-narrow for the count denominator as in
-                // NLLLoss above (clamp_min has no BF16 dispatch).
+                // CrossEntropyLoss above (clamp_min has no BF16 dispatch).
                 const DType out_dtype = neg_loss.tensor().dtype();
                 Tensor mask_f32 = keep_mask->dtype() == DType::Float32
                                      ? *keep_mask
@@ -341,16 +397,16 @@ auto NLLLoss::forward(const Variable& input, const Tensor& target) -> Variable {
                                    ? denom_f32
                                    : denom_f32.to(out_dtype);
                 Variable denom_var(denom, /*requires_grad=*/false);
-                return sum(neg_loss) / denom_var;
+                return finalize(sum(neg_loss) / denom_var);
             }
-            return mean(neg_loss);
+            return finalize(mean(neg_loss));
         }
         case Reduction::Sum:
-            return sum(neg_loss);
+            return finalize(sum(neg_loss));
         case Reduction::BatchMean:
-            return sum(neg_loss) / static_cast<float>(neg_loss.tensor().shape()[0]);
+            return finalize(sum(neg_loss) / static_cast<float>(neg_loss.tensor().shape()[0]));
     }
-    return neg_loss;
+    return finalize(neg_loss);
 }
 
 // L1Loss implementation

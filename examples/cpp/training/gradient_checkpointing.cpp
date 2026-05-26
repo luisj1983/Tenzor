@@ -20,6 +20,11 @@
 #include <chrono>
 
 #include "tenzor/tenzor.hpp"
+// KK.27: the autograd training loop lives in gradient_checkpointing_runner.{cpp,hpp}
+// so the regression test in tests/examples/test_all_autograd_examples.cpp can
+// drive the same code path. Include the runner header so the standalone exe's
+// main() can invoke run_gradient_checkpointing_training() at the end.
+#include "gradient_checkpointing_runner.hpp"
 
 using namespace tenzor;
 using namespace tenzor::nn;
@@ -348,6 +353,17 @@ int main(int argc, char* argv[]) {
         demo_deep_network_stats();
         train_deep_network(device);
         demo_training_comparison(device);
+
+        // KK.27: also exercise the regression-tested runner so this
+        // standalone exe and the test target stay in lock-step. Small
+        // iteration count keeps the runtime negligible.
+        double init_loss = 0.0, final_loss = 0.0;
+        auto rc = tenzor::examples::gradient_checkpointing::
+            run_gradient_checkpointing_training(
+                /*num_iterations=*/4, &init_loss, &final_loss, device,
+                /*verbose=*/false);
+        std::cout << "\nRunner smoke test: initial=" << init_loss
+                  << " final=" << final_loss << " rc=" << rc << "\n";
 
         std::cout << "\n======================================================\n";
         std::cout << "   All checkpointing examples completed successfully! \n";

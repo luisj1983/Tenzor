@@ -103,13 +103,12 @@ void main() {
         uint mask = 0xFFFFu << shift;
 
         uint old_val = c[out_word];
-        for (uint iter = 0u; iter < 64u; iter++) {
+        for (uint iter = 0u; iter < 65536u; iter++) {
             uint expected = old_val;
             uint new_val = (expected & ~mask) | (bits << shift);
             old_val = atomicCompSwap(c[out_word], expected, new_val);
             if (old_val == expected) return;
         }
-        uint cur = c[out_word];
-        c[out_word] = (cur & ~mask) | (bits << shift);
+        // KK.9: removed non-atomic plain-store fallback; cap raised from 64 to 65536.
     }
 }

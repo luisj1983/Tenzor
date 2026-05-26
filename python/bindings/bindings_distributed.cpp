@@ -200,7 +200,11 @@ void register_distributed(py::module_& m) {
         .def("forward",
              &tenzor::distributed::ColumnParallelLinear::forward_impl,
              py::arg("input"),
-             "Forward pass: column-parallel matmul + optional all-gather");
+             "Forward pass: column-parallel matmul + optional all-gather",
+             // KK.21: release GIL — forward issues blocking collective comms
+             // and large matmuls that would otherwise stall other Python
+             // threads.  Mirrors DDP's L257 binding.
+             py::call_guard<py::gil_scoped_release>());
 
     py::class_<tenzor::distributed::RowParallelLinear, tenzor::nn::Module,
                std::shared_ptr<tenzor::distributed::RowParallelLinear>>(
@@ -214,7 +218,9 @@ void register_distributed(py::module_& m) {
         .def("forward",
              &tenzor::distributed::RowParallelLinear::forward_impl,
              py::arg("input"),
-             "Forward pass: row-parallel matmul + all-reduce");
+             "Forward pass: row-parallel matmul + all-reduce",
+             // KK.21: see ColumnParallelLinear above.
+             py::call_guard<py::gil_scoped_release>());
 
     py::class_<tenzor::distributed::ParallelAttention, tenzor::nn::Module,
                std::shared_ptr<tenzor::distributed::ParallelAttention>>(
@@ -225,7 +231,9 @@ void register_distributed(py::module_& m) {
         .def("forward",
              &tenzor::distributed::ParallelAttention::forward_impl,
              py::arg("input"),
-             "Forward pass: multi-head attention with sharded heads");
+             "Forward pass: multi-head attention with sharded heads",
+             // KK.21: see ColumnParallelLinear above.
+             py::call_guard<py::gil_scoped_release>());
 
     // --- Pipeline / Sequence parallel ---
     // Pipeline stages are typically built from user code so we expose the
@@ -242,7 +250,9 @@ void register_distributed(py::module_& m) {
         .def("forward", &tenzor::distributed::PipelineStage::forward,
              py::arg("input"),
              "Run the local sub-module's forward pass. Send/recv across "
-             "stages is handled by a scheduler, not this method.");
+             "stages is handled by a scheduler, not this method.",
+             // KK.21: see ColumnParallelLinear above.
+             py::call_guard<py::gil_scoped_release>());
 
     py::class_<tenzor::distributed::SequenceParallel,
                std::shared_ptr<tenzor::distributed::SequenceParallel>>(

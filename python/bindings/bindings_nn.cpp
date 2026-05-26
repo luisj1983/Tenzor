@@ -225,16 +225,26 @@ void register_nn(py::module_& m) {
         // ====================================================================
         // Device management
         // ====================================================================
-        .def("to", py::overload_cast<tenzor::Device>(&tenzor::nn::Module::to),
+        // KK.20: wrap the device/dtype `to` overloads in lambdas so they
+        // return self for PyTorch-style chaining (`model.to(dev).to(dtype)`).
+        // The underlying C++ Module::to returns void; without the lambda
+        // wrapper Python sees `None` and chained calls raise AttributeError.
+        .def("to", [](tenzor::nn::Module& self, tenzor::Device dev) -> tenzor::nn::Module* {
+            self.to(dev);
+            return &self;
+        }, py::return_value_policy::reference,
              py::arg("device"),
              "Move module to specified device",
              py::call_guard<py::gil_scoped_release>())
-        .def("to", py::overload_cast<tenzor::DType>(&tenzor::nn::Module::to),
+        .def("to", [](tenzor::nn::Module& self, tenzor::DType dt) -> tenzor::nn::Module* {
+            self.to(dt);
+            return &self;
+        }, py::return_value_policy::reference,
              py::arg("dtype"),
              "Convert module parameters to specified dtype",
              py::call_guard<py::gil_scoped_release>())
         // String device overload for PyTorch compatibility
-        .def("to", [](tenzor::nn::Module& self, const std::string& device) {
+        .def("to", [](tenzor::nn::Module& self, const std::string& device) -> tenzor::nn::Module* {
             if (device == "cpu") {
                 self.cpu();
             } else if (device == "cuda" || device.rfind("cuda:", 0) == 0) {
@@ -250,14 +260,22 @@ void register_nn(py::module_& m) {
             } else {
                 throw std::runtime_error("Unknown device: " + device);
             }
-        }, py::arg("device"),
+            return &self;  // KK.20: enable chaining
+        }, py::return_value_policy::reference,
+             py::arg("device"),
              "Move module to device specified by string ('cpu', 'cuda', 'cuda:0')",
              py::call_guard<py::gil_scoped_release>())
-        .def("cuda", &tenzor::nn::Module::cuda,
+        .def("cuda", [](tenzor::nn::Module& self, int device_id) -> tenzor::nn::Module* {
+            self.cuda(device_id);
+            return &self;
+        }, py::return_value_policy::reference,
              py::arg("device_id") = 0,
              "Move module to CUDA device",
              py::call_guard<py::gil_scoped_release>())
-        .def("cpu", &tenzor::nn::Module::cpu,
+        .def("cpu", [](tenzor::nn::Module& self) -> tenzor::nn::Module* {
+            self.cpu();
+            return &self;
+        }, py::return_value_policy::reference,
              "Move module to CPU",
              py::call_guard<py::gil_scoped_release>())
 

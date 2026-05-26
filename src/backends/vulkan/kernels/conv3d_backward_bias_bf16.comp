@@ -48,14 +48,13 @@ void writeBF16(uint element_idx, float value) {
     uint mask = 0xFFFFu << shift;
 
     uint old_val = grad_bias[word_idx];
-    for (uint iter = 0u; iter < 64u; iter++) {
+    for (uint iter = 0u; iter < 65536u; iter++) {
         uint expected = old_val;
         uint new_val = (expected & ~mask) | (new_bits << shift);
         old_val = atomicCompSwap(grad_bias[word_idx], expected, new_val);
         if (old_val == expected) return;
     }
-    uint cur = grad_bias[word_idx];
-    grad_bias[word_idx] = (cur & ~mask) | (new_bits << shift);
+    // KK.9: removed non-atomic plain-store fallback; cap raised from 64 to 65536.
 }
 
 void main() {

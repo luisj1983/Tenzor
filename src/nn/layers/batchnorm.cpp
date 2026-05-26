@@ -1306,10 +1306,11 @@ static int64_t bn3d_check_training_and_track(int64_t num_features,
 BatchNorm3d::BatchNorm3d(int64_t num_features, double eps, double momentum,
                          bool affine, bool track_running_stats)
     : num_features_(bn3d_check_training_and_track(num_features, /*training=*/true, track_running_stats)),
-      bn2d_(num_features, eps, momentum, affine, track_running_stats) {
-    // Register bn2d_ sub-module so its parameters are visible
-    auto bn2d_ptr = std::shared_ptr<BatchNorm2d>(&bn2d_, [](BatchNorm2d*) {});
-    register_module("bn2d", bn2d_ptr);
+      // KK.17: heap-allocate bn2d_ via make_shared so register_module owns a
+      // real shared_ptr (not a stack-member wrapped in a no-op deleter).
+      // Mirrors FF.13's InstanceNorm3d fix.
+      bn2d_(std::make_shared<BatchNorm2d>(num_features, eps, momentum, affine, track_running_stats)) {
+    register_module("bn2d", bn2d_);
 }
 
 auto BatchNorm3d::forward_impl(const Variable& input) -> Variable {
@@ -1327,7 +1328,7 @@ auto BatchNorm3d::forward_impl(const Variable& input) -> Variable {
     // constructing a raw Variable(tensor, requires_grad) would drop the
     // upstream chain and silently break .backward() on the final output.
     Variable reshaped = ::tenzor::reshape(input, {N, C, D * H, W});
-    Variable result = bn2d_.forward(reshaped);
+    Variable result = bn2d_->forward(reshaped);
 
     // Reshape back to (N, C, D, H, W), again autograd-aware.
     return ::tenzor::reshape(result, {N, C, D, H, W});

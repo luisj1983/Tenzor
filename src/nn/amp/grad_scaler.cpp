@@ -159,10 +159,15 @@ auto GradScaler::step(optim::Optimizer& optimizer) -> bool {
         unscale_(optimizer);
     }
 
-    // Check for inf/nan in unscaled gradients
-    found_inf_nan_ = check_inf_nan_(optimizer);
+    // KK.16: check for inf/nan in unscaled gradients.  Accumulate across
+    // optimizers that share this scaler — a wholesale assignment would let
+    // step(B) overwrite step(A)'s true with false, and update() would then
+    // grow the scale instead of backing off.  The flag is reset only in
+    // update() (or reset()), which marks the end of the iteration.
+    const bool optimizer_has_inf_nan = check_inf_nan_(optimizer);
+    found_inf_nan_ = found_inf_nan_ || optimizer_has_inf_nan;
 
-    if (found_inf_nan_) {
+    if (optimizer_has_inf_nan) {
         // Skip optimizer step due to overflow.  Clear *only this optimizer's*
         // unscale flag; siblings sharing the scaler keep their state intact.
         unscaled_for_.erase(&optimizer);

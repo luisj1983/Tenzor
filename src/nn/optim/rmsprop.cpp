@@ -67,33 +67,56 @@ auto RMSprop::initialize_buffers() -> void {
     grad_avg_.clear();
     momentum_buffer_.clear();
 
-    for (auto& param : parameters_) {
-        if (!param) continue;
+    // KK.15: per-group resolution.  Any param whose ParamGroup requests
+    // centered=true (or momentum>0) must have a buffer allocated, even
+    // when the optimiser-wide flag is false; otherwise step_impl()'s
+    // `i < grad_avg_.size()` / `i < momentum_buffer_.size()` guards
+    // silently fall back to vanilla RMSProp.
+    square_avg_.reserve(parameters_.size());
+    grad_avg_.reserve(parameters_.size());
+    momentum_buffer_.reserve(parameters_.size());
+
+    for (size_t i = 0; i < parameters_.size(); ++i) {
+        const auto& param = parameters_[i];
+        if (!param) {
+            square_avg_.push_back(Tensor{});
+            grad_avg_.push_back(Tensor{});
+            momentum_buffer_.push_back(Tensor{});
+            continue;
+        }
         const auto& param_data = param->tensor();
 
         // R.16: half-precision params get Float32 state buffers.
         square_avg_.push_back(make_optim_state(param_data));
 
-        // Initialize grad_avg (E[g]) if centered
-        if (centered_) {
+        // KK.15: resolve centered/momentum per-group with optimizer-wide
+        // fallback, matching step_impl()'s resolve() lambda.
+        const auto* g = find_group_for_param(i);
+        const bool   want_centered = g ? ParamGroup::or_else(g->centered, centered_) : centered_;
+        const double want_momentum = g ? ParamGroup::or_else(g->momentum, momentum_) : momentum_;
+
+        if (want_centered) {
             grad_avg_.push_back(make_optim_state(param_data));
+        } else {
+            grad_avg_.push_back(Tensor{});
         }
 
-        // Initialize momentum buffer if momentum > 0
-        if (momentum_ > 0.0) {
+        if (want_momentum > 0.0) {
             momentum_buffer_.push_back(make_optim_state(param_data));
+        } else {
+            momentum_buffer_.push_back(Tensor{});
         }
     }
 }
 
 // Audit K.1: extend square_avg_ (and grad_avg_ / momentum_buffer_ when
-// the optimiser-wide centered_ / momentum_ flags request them) for
+// the resolved per-group centered / momentum flags request them) for
 // parameters appended via add_param_group.  Mirrors initialize_buffers
 // so the per-parameter indexing in step_impl() stays valid.
 auto RMSprop::on_parameters_appended_(size_t old_count, size_t new_count) -> void {
     square_avg_.reserve(new_count);
-    if (centered_) grad_avg_.reserve(new_count);
-    if (momentum_ > 0.0) momentum_buffer_.reserve(new_count);
+    grad_avg_.reserve(new_count);
+    momentum_buffer_.reserve(new_count);
 
     for (size_t i = old_count; i < new_count; ++i) {
         const auto& param = parameters_[i];
@@ -101,16 +124,31 @@ auto RMSprop::on_parameters_appended_(size_t old_count, size_t new_count) -> voi
             const auto& param_data = param->tensor();
             // R.16: see RMSprop::initialize_buffers for dtype rationale.
             square_avg_.push_back(make_optim_state(param_data));
-            if (centered_) {
+
+            // KK.15: honour the per-group centered/momentum settings of
+            // the freshly-appended param.  Without this, a group with
+            // `centered=true` on an optimiser whose default `centered_`
+            // is false would have `i >= grad_avg_.size()` and silently
+            // run uncentered.
+            const auto* g = find_group_for_param(i);
+            const bool   want_centered = g ? ParamGroup::or_else(g->centered, centered_) : centered_;
+            const double want_momentum = g ? ParamGroup::or_else(g->momentum, momentum_) : momentum_;
+
+            if (want_centered) {
                 grad_avg_.push_back(make_optim_state(param_data));
+            } else {
+                grad_avg_.push_back(Tensor{});
             }
-            if (momentum_ > 0.0) {
+
+            if (want_momentum > 0.0) {
                 momentum_buffer_.push_back(make_optim_state(param_data));
+            } else {
+                momentum_buffer_.push_back(Tensor{});
             }
         } else {
             square_avg_.push_back(Tensor{});
-            if (centered_) grad_avg_.push_back(Tensor{});
-            if (momentum_ > 0.0) momentum_buffer_.push_back(Tensor{});
+            grad_avg_.push_back(Tensor{});
+            momentum_buffer_.push_back(Tensor{});
         }
     }
 }

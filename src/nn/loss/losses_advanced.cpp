@@ -823,16 +823,34 @@ auto CTCLoss::forward(const Variable& log_probs, const Tensor& targets,
 SoftMarginLoss::SoftMarginLoss(Reduction reduction) : reduction_(reduction) {}
 
 auto SoftMarginLoss::forward(const Variable& input, const Variable& target) -> Variable {
+    // KK.18: log(1 + exp(-y*x)) computed directly in F16/BF16 overflows for
+    // |x| > 11 (exp(11) ≈ 6e4, F16 max ≈ 6.55e4).  Widen to Float32, compute,
+    // narrow the loss back to the input dtype.  Mirrors AA.4 / EE.10
+    // (KLDivLoss / FocalLoss / HuberLoss / PoissonNLLLoss).
+    const DType orig_dtype = input.tensor().dtype();
+    const bool needs_upcast = (orig_dtype == DType::Float16 ||
+                               orig_dtype == DType::BFloat16);
+    Variable input_c = needs_upcast
+        ? tenzor::nn::variable_cast(input, DType::Float32)
+        : input;
+    Variable target_c = needs_upcast
+        ? tenzor::nn::variable_cast(target, DType::Float32)
+        : target;
+
     // loss = log(1 + exp(-y * x))
     // Use log1p(exp(-y*x)) for numerical stability when -y*x is large negative
-    auto neg_yx = neg(input * target);
+    auto neg_yx = neg(input_c * target_c);
     // softplus: log(1 + exp(x)) = max(x,0) + log(1 + exp(-|x|))
     // But since we need autograd, use: log(1 + exp(x))
     auto one = scalar_var(1.0f, neg_yx);
     auto loss = log(one + exp(neg_yx));
 
     auto red_str = reduction_to_string(reduction_);
-    return apply_reduction(loss, red_str);
+    Variable reduced = apply_reduction(loss, red_str);
+    if (needs_upcast) {
+        reduced = tenzor::nn::variable_cast(reduced, orig_dtype);
+    }
+    return reduced;
 }
 
 auto soft_margin_loss(const Variable& input, const Variable& target,
@@ -1133,22 +1151,39 @@ auto MultiLabelSoftMarginLoss::forward(const Variable& input,
     // log(sigma(x)) = x - log(1 + exp(x)) = -softplus(-x)
     // log(1-sigma(x)) = -log(1 + exp(x)) = -softplus(x)
 
-    auto one = scalar_var(1.0f, input);
-    auto neg_input = neg(input);
+    // KK.18: log(1 + exp(x)) computed directly in F16/BF16 overflows for
+    // |x| > 11 (exp(11) ≈ 6e4, F16 max ≈ 6.55e4).  Widen to Float32, compute,
+    // narrow the loss back.  Mirrors SoftMarginLoss above.
+    const DType orig_dtype = input.tensor().dtype();
+    const bool needs_upcast = (orig_dtype == DType::Float16 ||
+                               orig_dtype == DType::BFloat16);
+    Variable input_c = needs_upcast
+        ? tenzor::nn::variable_cast(input, DType::Float32)
+        : input;
+    Variable target_c = needs_upcast
+        ? tenzor::nn::variable_cast(target, DType::Float32)
+        : target;
+
+    auto one = scalar_var(1.0f, input_c);
+    auto neg_input = neg(input_c);
 
     // softplus(x) = log(1 + exp(x))
-    auto sp_pos = log(one + exp(input));     // log(1 + exp(x)) = softplus(x)
-    auto sp_neg = log(one + exp(neg_input)); // log(1 + exp(-x)) = softplus(-x)
+    auto sp_pos = log(one + exp(input_c));     // log(1 + exp(x)) = softplus(x)
+    auto sp_neg = log(one + exp(neg_input));   // log(1 + exp(-x)) = softplus(-x)
 
     // log(sigma(x)) = -softplus(-x), log(1-sigma(x)) = -softplus(x)
-    auto loss_per_element = target * sp_neg + (one - target) * sp_pos;
+    auto loss_per_element = target_c * sp_neg + (one - target_c) * sp_pos;
 
     // Average over class dimension (last dim)
-    int64_t class_dim = static_cast<int64_t>(input.shape().size()) - 1;
+    int64_t class_dim = static_cast<int64_t>(input_c.shape().size()) - 1;
     auto loss_per_sample = mean(loss_per_element, class_dim, false);
 
     auto red_str = reduction_to_string(reduction_);
-    return apply_reduction(loss_per_sample, red_str);
+    Variable reduced = apply_reduction(loss_per_sample, red_str);
+    if (needs_upcast) {
+        reduced = tenzor::nn::variable_cast(reduced, orig_dtype);
+    }
+    return reduced;
 }
 
 auto multi_label_soft_margin_loss(const Variable& input, const Variable& target,

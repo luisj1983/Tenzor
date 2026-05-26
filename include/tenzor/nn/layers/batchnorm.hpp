@@ -203,7 +203,11 @@ public:
 
 private:
     int64_t num_features_;
-    BatchNorm2d bn2d_; ///< Delegate to BatchNorm2d after reshaping
+    // KK.17: heap-allocated shared_ptr (mirrors FF.13 InstanceNorm3d fix).
+    // The previous `BatchNorm2d bn2d_` stack member was registered via a
+    // no-op-deleter shared_ptr<BatchNorm2d>(&bn2d_, [](BatchNorm2d*){}), which
+    // is fragile under copy/move of the enclosing BatchNorm3d.
+    std::shared_ptr<BatchNorm2d> bn2d_; ///< Delegate to BatchNorm2d after reshaping
 };
 
 } // namespace nn

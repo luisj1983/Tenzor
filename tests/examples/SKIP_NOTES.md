@@ -34,3 +34,25 @@ autograd surface (GRU gates, Bahdanau attention, log_softmax cross-entropy)
 is still fully covered by `07_rnn_sequence` and `16_self_attention`. No
 new chat_ai-specific tensor logic has landed since audit-3, so the
 deferred runner is still the right call.
+
+## bert_zero_stage1 (audit-9 KK.27, 2026-05-26)
+
+**Reason**: the example is intentionally disabled in
+`examples/CMakeLists.txt` (lines 97-98) pending the implementation of
+`tenzor/models/bert.hpp`, `distributed::get_default_process_group()`, and
+`nn::optim::AdamW`. Wiring an autograd_runner regression test would
+require those same dependencies, so the runner extraction is deferred
+until the upstream prerequisites land. Once the executable target is
+re-enabled, follow the pattern used in `gradient_checkpointing` /
+`vit_image_classification` to extract a runner and wire it into
+`tests/examples/test_all_autograd_examples.cpp`.
+
+## Non-showcase examples covered (audit-9 KK.27, 2026-05-26)
+
+- `examples/cpp/training/vit_image_classification.cpp` -> runner extracted
+  into `vit_image_classification_runner.{cpp,hpp}`; wired via
+  `NON_SHOWCASE_AUTOGRAD_RUNNER_TARGETS` in `tests/examples/CMakeLists.txt`
+  and exercised by `ExampleRegression.VitImageClassificationTrains`.
+- `examples/cpp/training/gradient_checkpointing.cpp` -> runner extracted
+  into `gradient_checkpointing_runner.{cpp,hpp}`; wired via the same list
+  and exercised by `ExampleRegression.GradientCheckpointingTrains`.

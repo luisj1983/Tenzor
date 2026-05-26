@@ -18,6 +18,11 @@
 #include <random>
 
 #include "tenzor/tenzor.hpp"
+// KK.27: a trimmed-down version of the training loop lives in
+// vit_image_classification_runner.{cpp,hpp} so the regression test in
+// tests/examples/test_all_autograd_examples.cpp can drive the same
+// MultiheadAttention + LayerNorm + GELU + AdamW pipeline.
+#include "vit_image_classification_runner.hpp"
 
 using namespace tenzor;
 using namespace tenzor::nn;
@@ -395,6 +400,16 @@ int main(int argc, char* argv[]) {
         train_with_cosine_warm_restarts(device);
         demo_adaptive_pooling(device);
         demo_gelu_and_layernorm(device);
+
+        // KK.27: exercise the regression-tested runner so the standalone
+        // exe and the test target stay in lock-step.
+        double init_loss = 0.0, final_loss = 0.0;
+        auto rc = tenzor::examples::vit_image_classification::
+            run_vit_classification_training(
+                /*epochs=*/2, &init_loss, &final_loss, device,
+                /*verbose=*/false);
+        std::cout << "\nRunner smoke test: initial=" << init_loss
+                  << " final=" << final_loss << " rc=" << rc << "\n";
 
         std::cout << "\n======================================================\n";
         std::cout << "   All transformer examples completed successfully!   \n";

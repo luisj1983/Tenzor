@@ -57,13 +57,25 @@ set(SHOWCASE_AUTOGRAD_RUNNER_TARGETS
     example_21_siamese_network_autograd_runner
 )
 
+# KK.27: non-showcase examples that also have regression coverage. These
+# OBJECT libraries are defined in examples/CMakeLists.txt and resolved at
+# end-of-configuration. bert_zero_stage1 is intentionally omitted because
+# its parent executable is itself disabled (see comment block in
+# examples/CMakeLists.txt and tests/examples/SKIP_NOTES.md).
+set(NON_SHOWCASE_AUTOGRAD_RUNNER_TARGETS
+    example_vit_image_classification_runner
+    example_gradient_checkpointing_runner
+)
+
 add_executable(test_all_autograd_examples test_all_autograd_examples.cpp)
 target_link_libraries(test_all_autograd_examples PRIVATE
     tenzor_core
     GTest::gtest_main
-    ${SHOWCASE_AUTOGRAD_RUNNER_TARGETS})
+    ${SHOWCASE_AUTOGRAD_RUNNER_TARGETS}
+    ${NON_SHOWCASE_AUTOGRAD_RUNNER_TARGETS})
 target_include_directories(test_all_autograd_examples PRIVATE
-    ${CMAKE_SOURCE_DIR}/examples/cpp/showcase)
+    ${CMAKE_SOURCE_DIR}/examples/cpp/showcase
+    ${CMAKE_SOURCE_DIR}/examples/cpp/training)
 set_target_properties(test_all_autograd_examples PROPERTIES
     CXX_STANDARD 23
     CXX_STANDARD_REQUIRED ON)

@@ -164,7 +164,11 @@ public:
         // Pool first token
         auto first_token = x.tensor().slice(1, 0, 1).squeeze(1);
         auto pooled = Variable(first_token, x.requires_grad());
-        pooled = tanh(pooler_->forward(pooled));
+        // Both ``tenzor::tanh`` (autograd op) and ``tenzor::nn::tanh``
+        // (activation wrapper) are pulled in by the using-directives at
+        // the top of this file. Disambiguate explicitly so the benchmark
+        // keeps building under stricter overload resolution.
+        pooled = ::tenzor::nn::tanh(pooler_->forward(pooled));
 
         return pooled;
     }

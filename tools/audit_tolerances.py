@@ -36,7 +36,16 @@ TOL_PATTERN = re.compile(
 )
 # Looser literals threshold: anything with magnitude > 1e-3 in the call.
 LOOSE_THRESHOLD = 1e-3
-LITERAL_RX = re.compile(r"(?<![A-Za-z_])(\d+(?:\.\d+)?(?:[eE][-+]?\d+)?)(?![A-Za-z_])")
+# KK.28: the original lookbehind/lookahead allowed a trailing letter
+# (notably the ``f`` suffix on a Float32 literal like ``1e-15f``). The regex
+# engine then back-tracked and matched the shorter prefix ``1e-1``, which
+# crosses the loose threshold and produced false positives for tight
+# tolerances. Rejecting trailing digits and dots as well makes the boundary
+# symmetric and prevents the back-tracker from finding *any* shorter
+# accepting prefix.
+LITERAL_RX = re.compile(
+    r"(?<![A-Za-z_\d.])(\d+(?:\.\d+)?(?:[eE][-+]?\d+)?)(?![A-Za-z_\d.])"
+)
 JUSTIFY_RX = re.compile(r"//.*\b(reason|because|tolerance|relaxed|FIXME|TODO|"
                         r"precision|noise|float32 accum|Float16 noise)", re.I)
 

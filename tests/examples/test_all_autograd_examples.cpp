@@ -43,6 +43,11 @@
 #include "20_multitask_learning/autograd_runner.hpp"
 #include "21_siamese_network/autograd_runner.hpp"
 
+// KK.27: non-showcase runners (paths added via target_include_directories
+// in tests/examples/CMakeLists.txt).
+#include "vit_image_classification_runner.hpp"
+#include "gradient_checkpointing_runner.hpp"
+
 class ExampleRegression : public ::testing::Test {
 protected:
     static void SetUpTestSuite() {
@@ -282,5 +287,33 @@ TEST_F(ExampleRegression, SiameseNetworkTrains) {
     ASSERT_GT(initial, 0.0);
     EXPECT_LT(final_, initial * 0.9)
         << "Siamese did not reduce loss by at least 10%: initial=" << initial
+        << " final=" << final_;
+}
+
+// KK.27: non-showcase example regressions. These exercise feature surfaces
+// (MultiheadAttention + LayerNorm + GELU + AdamW for ViT; deep-ResNet +
+// BatchNorm2d + Adam for gradient_checkpointing) that the showcase set
+// doesn't combine in the same configuration, so a backward regression
+// there could pass the showcase tests while breaking these training paths.
+TEST_F(ExampleRegression, VitImageClassificationTrains) {
+    double initial = -1.0, final_ = -1.0;
+    int rc = tenzor::examples::vit_image_classification::
+        run_vit_classification_training(
+            /*epochs=*/5, &initial, &final_, tenzor::Device::cpu(), false);
+    ASSERT_EQ(rc, 0);
+    EXPECT_GT(initial - final_, kMinLossDecrease)
+        << "ViT classification did not reduce loss: initial=" << initial
+        << " final=" << final_;
+}
+
+TEST_F(ExampleRegression, GradientCheckpointingTrains) {
+    double initial = -1.0, final_ = -1.0;
+    int rc = tenzor::examples::gradient_checkpointing::
+        run_gradient_checkpointing_training(
+            /*num_iterations=*/8, &initial, &final_,
+            tenzor::Device::cpu(), false);
+    ASSERT_EQ(rc, 0);
+    EXPECT_GT(initial - final_, kMinLossDecrease)
+        << "gradient_checkpointing did not reduce loss: initial=" << initial
         << " final=" << final_;
 }
