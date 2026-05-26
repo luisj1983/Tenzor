@@ -152,6 +152,10 @@ auto Rprop::initialize_buffers() -> void {
 // Audit K.1: extend step_sizes_ / prev_grads_ for parameters appended
 // via add_param_group.  Mirrors initialize_buffers — step_sizes start
 // at lr_ (not zero) so the first sign-comparison step makes progress.
+// Audit II.6 / HH.13 / EE.16: when a new ParamGroup overrides `lr`, use
+// the group's lr (not the optimiser-wide `lr_`) so per-group learning
+// rates take effect on the very first step. Mirrors Adam-family
+// per-group resolution.
 auto Rprop::on_parameters_appended_(size_t old_count, size_t new_count) -> void {
     step_sizes_.reserve(new_count);
     prev_grads_.reserve(new_count);
@@ -162,7 +166,11 @@ auto Rprop::on_parameters_appended_(size_t old_count, size_t new_count) -> void 
             const auto& pt = param->tensor();
             const DType state_dt = optim_state_dtype(pt.dtype());
             std::vector<int64_t> shape(pt.shape().begin(), pt.shape().end());
-            step_sizes_.push_back(full(shape, lr_, state_dt, pt.device()));
+            double init_lr = lr_;
+            if (const auto* g = find_group_for_param(i)) {
+                init_lr = g->lr;
+            }
+            step_sizes_.push_back(full(shape, init_lr, state_dt, pt.device()));
             prev_grads_.push_back(make_optim_state(pt));
         } else {
             step_sizes_.push_back(Tensor{});

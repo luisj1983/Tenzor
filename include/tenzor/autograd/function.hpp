@@ -1292,7 +1292,22 @@ private:
  */
 class SqueezeBackward : public Function {
 public:
-    SqueezeBackward(int64_t dim) : dim_(dim) {}
+    /**
+     * @param dim Dimension that was squeezed in the forward pass.
+     * @param input_ndim Rank of the (pre-squeeze) input tensor. Used to
+     *        normalise a negative @p dim into a non-negative index at
+     *        construction so that both `backward` (Tensor path) and
+     *        `backward_with_variables` (Variable path) operate on the
+     *        same positive index. Pass 0 (default) when the caller is
+     *        certain @p dim is already non-negative.
+     */
+    SqueezeBackward(int64_t dim, int64_t input_ndim = 0) {
+        if (dim < 0 && input_ndim > 0) {
+            dim_ = dim + input_ndim;
+        } else {
+            dim_ = dim;
+        }
+    }
     auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
     auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;

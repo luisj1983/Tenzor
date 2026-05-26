@@ -12,6 +12,7 @@
 #include <tenzor/nn/activations/activations.hpp>
 #include <tenzor/nn/loss/losses.hpp>
 #include <tenzor/nn/optim/adam.hpp>
+#include "common.hpp"
 #include <iostream>
 #include <memory>
 #include <vector>
@@ -59,8 +60,11 @@ int main() {
 
     // 3. Model checkpointing
     std::cout << "Setting up ModelCheckpointCallback...\n";
+    // II.20: PID-suffixed temp path to avoid concurrent-run collisions.
+    auto checkpoint_path =
+        tenzor::examples::example_tmp_path("tenzor_best_model") + ".pt";
     auto checkpoint = std::make_shared<ModelCheckpointCallback>(
-        "/tmp/tenzor_best_model.pt",
+        checkpoint_path,
         model,
         true,  // save_best_only
         "val_loss"

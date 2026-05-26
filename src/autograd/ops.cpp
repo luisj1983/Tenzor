@@ -674,7 +674,12 @@ auto squeeze(const Variable& input, int64_t dim) -> Variable {
         return Variable(tenzor::squeeze(input.tensor(), dim), false);
     }
 
-    auto grad_fn = std::make_shared<SqueezeBackward>(dim);
+    // Normalise negative dim at construction so both backward paths
+    // (Tensor / Variable) operate on the same positive index. The
+    // input rank is the pre-squeeze rank, which is exactly what the
+    // unsqueeze in backward expects.
+    auto grad_fn = std::make_shared<SqueezeBackward>(
+        dim, static_cast<int64_t>(input.tensor().ndim()));
     std::vector<std::shared_ptr<Function>> next_funcs;
     next_funcs.push_back(input.grad_fn());
     grad_fn->set_next_functions(next_funcs);

@@ -31,6 +31,7 @@
 #include "08_batch_normalization/autograd_runner.hpp"
 #include "09_dropout_regularization/autograd_runner.hpp"
 #include "10_custom_loss/autograd_runner.hpp"
+#include "11_chat_ai/autograd_runner.hpp"
 #include "12_residual_network/autograd_runner.hpp"
 #include "13_variational_autoencoder/autograd_runner.hpp"
 #include "14_gan/autograd_runner.hpp"
@@ -157,6 +158,16 @@ TEST_F(ExampleRegression, CustomLossTrains) {
     ASSERT_EQ(rc, 0);
     EXPECT_GT(initial - final_, kMinLossDecrease)
         << "Custom (focal) loss did not reduce loss: initial=" << initial
+        << " final=" << final_;
+}
+
+TEST_F(ExampleRegression, ChatAITrains) {
+    double initial = -1.0, final_ = -1.0;
+    int rc = tenzor::examples::showcase11::run_chat_ai_training(
+        /*epochs=*/12, &initial, &final_, tenzor::Device::cpu(), false);
+    ASSERT_EQ(rc, 0);
+    EXPECT_GT(initial - final_, kMinLossDecrease)
+        << "Chat AI (GRU+Bahdanau) did not reduce loss: initial=" << initial
         << " final=" << final_;
 }
 

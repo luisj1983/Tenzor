@@ -332,10 +332,17 @@ def main() -> int:
     # into a RuntimeError so a CI step that silently skipped the build
     # cannot mask the failure as a clean "no parity work to do" pass.
     if not test_names:
+        # II.14: previously the --require-real-ctest path raised an uncaught
+        # RuntimeError, which surfaced in CI logs as a Python traceback. Emit
+        # the same diagnostic message but as a clean stderr line + non-zero
+        # exit so CI shows an actionable error rather than a stack trace.
         if args.require_real_ctest:
-            raise RuntimeError(
-                "ctest enumerated zero tests — was the build step skipped?"
+            print(
+                "ERROR: ctest enumerated zero tests — was the build step "
+                "skipped? (--require-real-ctest)",
+                file=sys.stderr,
             )
+            return 2
         print(
             "ERROR: ctest enumerated zero tests for label "
             f"'{args.label}' — run this tool from the build/ directory "

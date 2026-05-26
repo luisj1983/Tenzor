@@ -22,27 +22,36 @@ backend-agnostic infrastructure or already parity-parameterized.
 
 | File | Notes |
 |------|-------|
-| `tests/nn/optim/test_adamw.cpp` | audit-6 CC.21: moved to KNOWN-INTENTIONAL — optimizer state lives on CPU; cross-backend covered by backend_parity training-loop tests. |
-| `tests/test_autograd_transform.cpp` | audit-6 CC.21: moved to KNOWN-INTENTIONAL — already multi-backend TEST_P. |
 | `tests/nn/quantization/test_awq_quantizer.cpp` | INT4/INT8 quantization. |
 | `tests/test_ciou_loss.cpp` | Vision loss — float32/float16 |
 | `tests/test_contiguous_fix.cpp` | Stride-pattern regression — especially valuable cross-backend. |
 | `tests/integration/test_cross_backend.cpp` | Already cross-backend conceptually; confirm fixture use. |
 | `tests/nn/quantization/test_gptq_quantizer.cpp` | |
-| `tests/test_grad_accumulation.cpp` | audit-6 CC.21: moved to KNOWN-INTENTIONAL — already multi-backend TEST_P, dtype-orthogonal state-machine test. |
-| `tests/autograd/test_higher_order_contract.cpp` | audit-6 CC.21: moved to KNOWN-INTENTIONAL — engine-level contract, CPU-only by design. |
 | `tests/autograd/test_higher_order_stubs_regression.cpp` | |
 | `tests/autograd/test_inference_mode_guard.cpp` | Per-backend guard semantics. |
 | `tests/test_linear_reshape_integration.cpp` | |
 | `tests/test_mask_rcnn_losses.cpp` | |
-| `tests/test_minimal_training.cpp` | audit-6 CC.21: moved to KNOWN-INTENTIONAL — single-run NaN-debug smoke. |
 | `tests/ops/test_new_ops.cpp` | New op smoke — add dtype axis. |
 | `tests/integration/test_nn.cpp` | |
 | `tests/nn/quantization/test_observers_extended.cpp` | |
 | `tests/test_quantization_conversion.cpp` | |
 | `tests/autograd/test_strict_linalg_grad.cpp` | |
 | `tests/integration/test_training.cpp` | |
-| `tests/integration/test_training_loops.cpp` | |
+| `tests/integration/test_training_loops.cpp` |  |
+
+<!--
+audit-8 II.18: the 5 entries below were marked "audit-6 CC.21: moved to
+KNOWN-INTENTIONAL" inline in this table and have been moved out — their
+canonical home is the machine-readable KNOWN-INTENTIONAL block further
+down. The CC.21 rationale is preserved verbatim per-entry there.
+
+  - tests/nn/optim/test_adamw.cpp
+  - tests/test_autograd_transform.cpp
+  - tests/test_grad_accumulation.cpp
+  - tests/autograd/test_higher_order_contract.cpp
+  - tests/test_minimal_training.cpp
+-->
+
 
 ## Known-intentional (kept CPU-only, no action)
 

@@ -193,12 +193,19 @@ void register_core(py::module_& m) {
             }
             return graph;
         }), py::arg("device_id") = 0)
+        // Audit-8 II.10: begin_capture / end_capture / replay are entirely
+        // C++/CUDA work that does not touch Python objects — drop the GIL
+        // so Python threads (DataLoader workers, DDP comm) can make progress
+        // while the graph is being captured or replayed.
         .def("begin_capture", &tenzor::CUDAGraph::begin_capture,
-             "Begin capturing CUDA operations")
+             "Begin capturing CUDA operations",
+             py::call_guard<py::gil_scoped_release>())
         .def("end_capture", &tenzor::CUDAGraph::end_capture,
-             "End capture and compile the graph")
+             "End capture and compile the graph",
+             py::call_guard<py::gil_scoped_release>())
         .def("replay", &tenzor::CUDAGraph::replay,
-             "Replay the captured graph")
+             "Replay the captured graph",
+             py::call_guard<py::gil_scoped_release>())
         .def("is_ready", &tenzor::CUDAGraph::is_ready,
              "Check if graph has been captured and is ready for replay")
         .def("__enter__", [](tenzor::CUDAGraph& self) -> tenzor::CUDAGraph& {
@@ -209,25 +216,73 @@ void register_core(py::module_& m) {
             self.end_capture();
         });
 
-    // Event wrapper for Python bindings
+    // Event wrapper for Python bindings.
+    //
+    // Audit-8 II.9: real RAII — the C++ destructor always frees the
+    // underlying EventHandle via ``backend->destroy_event``. Previously the
+    // class relied on a pybind11-bound ``__del__`` lambda, which Python may
+    // skip when the object is involved in a reference cycle (because
+    // ``__del__`` participates in finalization rules); pybind11 *always*
+    // invokes the C++ destructor when the Python wrapper is collected, so a
+    // proper dtor guarantees the GPU event is released regardless of how
+    // it became unreachable. Copying is disabled to keep ownership unique;
+    // moves transfer ownership and null out the source.
     struct PyEvent {
         tenzor::EventHandle handle{nullptr};
         tenzor::Backend* backend{nullptr};
+
+        PyEvent() = default;
+        PyEvent(const std::string& device, int32_t device_id, bool enable_timing) {
+            auto& loader = tenzor::backend_registry();
+            auto* be = loader.get_backend(device);
+            if (!be || !be->is_available()) {
+                throw std::runtime_error("Backend '" + device + "' is not available");
+            }
+            handle  = be->create_event(device_id, enable_timing);
+            backend = be;
+        }
+        PyEvent(const PyEvent&) = delete;
+        PyEvent& operator=(const PyEvent&) = delete;
+        PyEvent(PyEvent&& other) noexcept
+            : handle(other.handle), backend(other.backend) {
+            other.handle  = nullptr;
+            other.backend = nullptr;
+        }
+        PyEvent& operator=(PyEvent&& other) noexcept {
+            if (this != &other) {
+                if (handle && backend) {
+                    backend->destroy_event(handle);
+                }
+                handle        = other.handle;
+                backend       = other.backend;
+                other.handle  = nullptr;
+                other.backend = nullptr;
+            }
+            return *this;
+        }
+        ~PyEvent() {
+            if (handle && backend) {
+                try {
+                    backend->destroy_event(handle);
+                } catch (...) {
+                    // Destructors must not propagate exceptions out of pybind11
+                    // finalisation. Worst case the event handle leaks, which is
+                    // still better than aborting the Python interpreter.
+                }
+                handle  = nullptr;
+                backend = nullptr;
+            }
+        }
     };
 
     py::class_<PyEvent>(m, "Event",
         "Synchronization event for inter-stream coordination and timing.\n"
-        "Works with CUDA, ROCm, and OneAPI backends.")
+        "Works with CUDA, ROCm, and OneAPI backends.\n"
+        "Resource cleanup is handled by the C++ destructor, which pybind11\n"
+        "invokes deterministically when the Python wrapper is collected —\n"
+        "no reliance on Python's ``__del__`` finalizer.")
         .def(py::init([](const std::string& device, int32_t device_id, bool enable_timing) {
-            auto& loader = tenzor::backend_registry();
-            auto* backend = loader.get_backend(device);
-            if (!backend || !backend->is_available()) {
-                throw std::runtime_error("Backend '" + device + "' is not available");
-            }
-            PyEvent ev;
-            ev.handle = backend->create_event(device_id, enable_timing);
-            ev.backend = backend;
-            return ev;
+            return std::make_unique<PyEvent>(device, device_id, enable_timing);
         }), py::arg("device") = "cuda", py::arg("device_id") = 0, py::arg("enable_timing") = true)
         .def("record", [](PyEvent& self, tenzor::StreamHandle stream) {
             self.backend->record_event(self.handle, stream);
@@ -235,15 +290,15 @@ void register_core(py::module_& m) {
         .def("wait", [](PyEvent& self, tenzor::StreamHandle stream) {
             self.backend->wait_event(self.handle, stream);
         }, py::arg("stream") = nullptr, "Make a stream wait for this event")
+        .def("synchronize", [](PyEvent& self) {
+            // Audit-8 II.9: explicit host-side wait. Drop the GIL — this
+            // blocks until GPU work completes and never touches Python.
+            self.backend->synchronize_event(self.handle);
+        }, py::call_guard<py::gil_scoped_release>(),
+           "Block the calling host thread until this event has completed.")
         .def("elapsed_time", [](PyEvent& self, PyEvent& end_event) {
             return self.backend->event_elapsed_ms(self.handle, end_event.handle);
-        }, py::arg("end_event"), "Elapsed time in ms between this (start) and end_event")
-        .def("__del__", [](PyEvent& self) {
-            if (self.handle && self.backend) {
-                self.backend->destroy_event(self.handle);
-                self.handle = nullptr;
-            }
-        });
+        }, py::arg("end_event"), "Elapsed time in ms between this (start) and end_event");
 
     // Vulkan device availability
     m.def("vulkan_is_available", []() {
@@ -3161,6 +3216,12 @@ Returns:
          py::arg("device") = tenzor::Device::cpu(), py::arg("generator"));
 
     // save/load top-level functions (like torch.save / torch.load)
+    //
+    // Audit-8 II.11: the Python-side step (unpacking a dict / casting tensors)
+    // needs the GIL, but the actual disk I/O inside Serializer::save and
+    // Serializer::load does not touch any Python object. Drop the GIL just
+    // around the serializer call so other Python threads (e.g. DataLoader
+    // workers) can make progress during what may be hundreds of MB of disk I/O.
     m.def("save", [](py::object obj, const std::string& path) {
          // Accept either a state_dict (dict) or a Module
          if (py::isinstance<py::dict>(obj)) {
@@ -3169,10 +3230,16 @@ Returns:
              for (auto& [key, val] : dict) {
                  state[py::cast<std::string>(key)] = py::cast<tenzor::Tensor>(val);
              }
-             tenzor::nn::Serializer::save(state, path);
+             {
+                 py::gil_scoped_release release;
+                 tenzor::nn::Serializer::save(state, path);
+             }
          } else if (py::isinstance<tenzor::nn::Module>(obj)) {
              auto& module = py::cast<tenzor::nn::Module&>(obj);
-             module.save(path);
+             {
+                 py::gil_scoped_release release;
+                 module.save(path);
+             }
          } else {
              throw py::type_error("save() expects a state_dict (dict) or nn.Module");
          }
@@ -3180,6 +3247,10 @@ Returns:
          py::arg("obj"), py::arg("path"));
 
     m.def("load", [](const std::string& path) {
+         // No Python objects touched inside Serializer::load until the
+         // returned state_dict is converted back via pybind11's automatic
+         // caster on function return — that happens after this scope.
+         py::gil_scoped_release release;
          return tenzor::nn::Serializer::load(path);
          }, "Load a state_dict from file",
          py::arg("path"));

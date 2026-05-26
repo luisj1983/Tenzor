@@ -349,6 +349,12 @@ auto ROCmBackend::event_elapsed_ms(EventHandle start_event, EventHandle end_even
     return ms;
 }
 
+auto ROCmBackend::synchronize_event(EventHandle event) -> void {
+    if (!event) return;
+    check_hip_error(hipEventSynchronize(static_cast<hipEvent_t>(event)),
+                    "hipEventSynchronize");
+}
+
 auto ROCmBackend::memset(void* ptr, int value, size_t bytes, int32_t device_id) -> void {
     check_hip_error(hipSetDevice(device_id), "hipSetDevice in memset");
     check_hip_error(hipMemset(ptr, value, bytes), "hipMemset");

@@ -23,6 +23,7 @@
 #include <tenzor/nn/optim/zero_optimizer.hpp>
 #include <tenzor/nn/optim/adam.hpp>
 #include <tenzor/distributed/distributed.hpp>
+#include "../common.hpp"
 #include <iostream>
 #include <iomanip>
 #include <chrono>
@@ -317,7 +318,9 @@ int main(int argc, char** argv) {
         std::cout << "Saving checkpoint..." << std::endl;
     }
 
-    std::string checkpoint_path = "/tmp/bert_zero_stage1_checkpoint";
+    // II.20: PID-suffixed to avoid concurrent-run collisions.
+    std::string checkpoint_path =
+        tenzor::examples::example_tmp_path("bert_zero_stage1_checkpoint");
     optimizer.save_checkpoint(checkpoint_path);
 
     if (rank == 0) {

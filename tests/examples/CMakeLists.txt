@@ -44,6 +44,7 @@ set(SHOWCASE_AUTOGRAD_RUNNER_TARGETS
     example_08_batch_normalization_autograd_runner
     example_09_dropout_regularization_autograd_runner
     example_10_custom_loss_autograd_runner
+    example_11_chat_ai_autograd_runner
     example_12_residual_network_autograd_runner
     example_13_variational_autoencoder_autograd_runner
     example_14_gan_autograd_runner

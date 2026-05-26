@@ -194,11 +194,16 @@ auto SqueezeBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<
 }
 
 auto SqueezeBackward::backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> {
-    // Use Variable-level reshape to unsqueeze back to original shape
-    // This preserves the computation graph for higher-order gradients
+    // Use Variable-level reshape to unsqueeze back to original shape.
+    // This preserves the computation graph for higher-order gradients.
+    // dim_ has been normalised to a non-negative index at construction
+    // (see SqueezeBackward ctor), so we can use it directly.
     auto grad = grad_outputs[0];
     auto target_shape = std::vector<int64_t>(grad.shape().begin(), grad.shape().end());
     int64_t ndim_output = static_cast<int64_t>(target_shape.size()) + 1;
+    // Fall back to per-call normalisation when an older call site
+    // constructed SqueezeBackward without supplying input_ndim and the
+    // raw dim happened to be negative.
     int64_t dim = dim_ < 0 ? dim_ + ndim_output : dim_;
     target_shape.insert(target_shape.begin() + dim, 1);
     return {reshape(grad, target_shape)};

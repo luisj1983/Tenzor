@@ -18,6 +18,7 @@
 #include <tenzor/nn/optim/zero_optimizer.hpp>
 #include <tenzor/nn/optim/adam.hpp>
 #include <tenzor/distributed/distributed.hpp>
+#include "../common.hpp"
 #include <iostream>
 #include <iomanip>
 #include <filesystem>
@@ -147,8 +148,10 @@ int main(int argc, char** argv) {
     int batch_size = 16;
     int num_classes = 1000;
 
-    // Checkpoint paths
-    std::string checkpoint_dir = "/tmp/zero_checkpoints";
+    // Checkpoint paths — PID-suffixed to avoid collisions when multiple
+    // example processes run concurrently (II.20).
+    std::string checkpoint_dir =
+        tenzor::examples::example_tmp_path("zero_checkpoints");
     std::string checkpoint_path = checkpoint_dir + "/resnet_checkpoint";
 
     if (rank == 0) {

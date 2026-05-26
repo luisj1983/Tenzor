@@ -169,6 +169,7 @@ public:
     auto record_event(EventHandle event, StreamHandle stream = nullptr) -> void override;
     auto wait_event(EventHandle event, StreamHandle stream = nullptr) -> void override;
     auto event_elapsed_ms(EventHandle start_event, EventHandle end_event) -> float override;
+    auto synchronize_event(EventHandle event) -> void override;
 
     // Memory fill
     auto memset(void* ptr, int value, size_t bytes, int32_t device_id) -> void override;

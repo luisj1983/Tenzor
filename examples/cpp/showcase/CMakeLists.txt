@@ -86,6 +86,7 @@ set(AUTOGRAD_RUNNERS
     "08_batch_normalization_autograd:08_batch_normalization/autograd_runner.cpp"
     "09_dropout_regularization_autograd:09_dropout_regularization/autograd_runner.cpp"
     "10_custom_loss_autograd:10_custom_loss/autograd_runner.cpp"
+    "11_chat_ai_autograd:11_chat_ai/autograd_runner.cpp"
     "12_residual_network_autograd:12_residual_network/autograd_runner.cpp"
     "13_variational_autoencoder_autograd:13_variational_autoencoder/autograd_runner.cpp"
     "14_gan_autograd:14_gan/autograd_runner.cpp"

@@ -163,6 +163,16 @@ if _os.path.exists(_autograd_path):
 from .tenzor_core import linalg
 _sys.modules['tenzor.linalg'] = linalg
 
+# Audit-8 II.12: expose ``tenzor.exceptions`` as a typed-namespace alias to
+# the C++ exception classes registered on ``tenzor_core``. This gives users a
+# stable ``except tenzor.exceptions.ValueError`` surface that doesn't depend
+# on the wildcard ``from .tenzor_core import *`` import order and doesn't
+# shadow Python builtins when consumers write ``from tenzor.exceptions
+# import ...`` explicitly. The original ``tz.MemoryError``-style attribute
+# access continues to work (the typed exception names are still attributes of
+# the ``tenzor`` namespace via the wildcard import above).
+from . import exceptions as exceptions  # noqa: E402,F401
+
 # Load special functions submodule (Bessel, Erf, Gamma, Ndtr, ...)
 # Manually load to bypass the wildcard-import binding of `special` if
 # tenzor_core ever grows a `special` submodule (currently it does not, so

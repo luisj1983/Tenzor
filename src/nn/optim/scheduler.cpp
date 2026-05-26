@@ -217,6 +217,20 @@ auto LinearWarmupScheduler::step() -> void {
         last_lr_ = base_lr_ * factor;
         optimizer_.set_lr(last_lr_);
     } else {
+        // Audit II.7: when transitioning out of warmup, the base
+        // scheduler's internal epoch_ (or step) counter is still at 0
+        // even though `warmup_steps_` global steps have already
+        // elapsed. Naive delegation feeds the base its first epoch
+        // here, so e.g. a CosineAnnealingLR with T_max = total_steps
+        // overshoots by warmup_steps_. Fix: on the first post-warmup
+        // call, eagerly advance the base by warmup_steps_ ticks so its
+        // counter aligns with the global step number BEFORE applying
+        // its first lr.
+        if (step_count_ == warmup_steps_ + 1) {
+            for (int64_t i = 0; i < warmup_steps_; ++i) {
+                base_scheduler_->step();
+            }
+        }
         // After warmup: delegate to base scheduler
         base_scheduler_->step();
         last_lr_ = base_scheduler_->get_last_lr();

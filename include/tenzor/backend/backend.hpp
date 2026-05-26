@@ -308,6 +308,21 @@ public:
     }
 
     /**
+     * @brief Block the calling host thread until the event completes.
+     *
+     * Audit-8 II.9: ``tz.Event.synchronize()`` (Python) and any host-side
+     * "wait until this work is done" code path needs an explicit
+     * cudaEventSynchronize / hipEventSynchronize / sycl::event::wait. The
+     * default is a no-op so backends without async semantics (CPU) trivially
+     * satisfy the contract.
+     *
+     * @param event Event handle to wait on
+     */
+    virtual auto synchronize_event(EventHandle event) -> void {
+        (void)event;
+    }
+
+    /**
      * @brief Set the active device for this backend.
      *
      * Switches the hardware context to the specified device index.

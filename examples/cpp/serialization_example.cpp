@@ -4,6 +4,7 @@
 #include "tenzor/nn/optim/adam.hpp"
 #include "tenzor/ops/creation.hpp"
 #include "tenzor/ops/reduction.hpp"
+#include "common.hpp"
 #include <iostream>
 #include <memory>
 
@@ -66,8 +67,8 @@ int main() {
     std::cout << "Forward pass output (first element): "
               << output1.tensor().data<float>()[0] << "\n\n";
 
-    // Save model
-    std::string model_path = "/tmp/model.bin";
+    // Save model (II.20: PID-suffixed to avoid concurrent-run collisions)
+    std::string model_path = tenzor::examples::example_tmp_path("serialization_model") + ".bin";
     model->save(model_path);
     std::cout << "Saved model to " << model_path << "\n\n";
 
@@ -82,8 +83,8 @@ int main() {
     optimizer.step();
     std::cout << "Performed one training step\n";
 
-    // Save optimizer state
-    std::string optim_path = "/tmp/optimizer.bin";
+    // Save optimizer state (II.20: PID-suffixed)
+    std::string optim_path = tenzor::examples::example_tmp_path("serialization_optimizer") + ".bin";
     optimizer.save_state(optim_path);
     std::cout << "Saved optimizer state to " << optim_path << "\n\n";
 

@@ -3162,63 +3162,88 @@ auto maxpool3d_backward(const Tensor& grad_output, const Tensor& indices,
 
     Tensor grad_input(input_shape, grad_output.dtype(), grad_output.device());
 
+    // Audit II.5: chain sequential kernels through event deps so we
+    // only block once at the function epilogue instead of three round
+    // trips per backward call.
     if (grad_output.dtype() == DType::Float32) {
         const float* go = get_data_ptr<const float>(grad_output);
         const int64_t* idx = get_data_ptr<const int64_t>(indices);
         float* gi = get_data_ptr<float>(grad_input);
-        queue.fill(gi, 0.0f, in_size).wait();
-        queue.parallel_for<MaxPool3dBackwardFloat32>(sycl::range<1>(out_size), [=](sycl::id<1> gid) {
-            float gv = go[gid]; int64_t mi = idx[gid];
-            if (mi >= 0 && mi < in_size) {
-                sycl::atomic_ref<float, sycl::memory_order::relaxed, sycl::memory_scope::device,
-                                 sycl::access::address_space::global_space> ar(gi[mi]);
-                ar.fetch_add(gv);
-            }
-        }).wait();
+        sycl::event fill_ev = queue.fill(gi, 0.0f, in_size);
+        sycl::event scatter_ev = queue.submit([&](sycl::handler& cgh) {
+            cgh.depends_on(fill_ev);
+            cgh.parallel_for<MaxPool3dBackwardFloat32>(sycl::range<1>(out_size), [=](sycl::id<1> gid) {
+                float gv = go[gid]; int64_t mi = idx[gid];
+                if (mi >= 0 && mi < in_size) {
+                    sycl::atomic_ref<float, sycl::memory_order::relaxed, sycl::memory_scope::device,
+                                     sycl::access::address_space::global_space> ar(gi[mi]);
+                    ar.fetch_add(gv);
+                }
+            });
+        });
+        scatter_ev.wait();
     } else if (grad_output.dtype() == DType::Float64) {
         const double* go = get_data_ptr<const double>(grad_output);
         const int64_t* idx = get_data_ptr<const int64_t>(indices);
         double* gi = get_data_ptr<double>(grad_input);
-        queue.fill(gi, 0.0, in_size).wait();
-        queue.parallel_for<MaxPool3dBackwardFloat64>(sycl::range<1>(out_size), [=](sycl::id<1> gid) {
-            double gv = go[gid]; int64_t mi = idx[gid];
-            if (mi >= 0 && mi < in_size) {
-                sycl::atomic_ref<double, sycl::memory_order::relaxed, sycl::memory_scope::device,
-                                 sycl::access::address_space::global_space> ar(gi[mi]);
-                ar.fetch_add(gv);
-            }
-        }).wait();
+        sycl::event fill_ev = queue.fill(gi, 0.0, in_size);
+        sycl::event scatter_ev = queue.submit([&](sycl::handler& cgh) {
+            cgh.depends_on(fill_ev);
+            cgh.parallel_for<MaxPool3dBackwardFloat64>(sycl::range<1>(out_size), [=](sycl::id<1> gid) {
+                double gv = go[gid]; int64_t mi = idx[gid];
+                if (mi >= 0 && mi < in_size) {
+                    sycl::atomic_ref<double, sycl::memory_order::relaxed, sycl::memory_scope::device,
+                                     sycl::access::address_space::global_space> ar(gi[mi]);
+                    ar.fetch_add(gv);
+                }
+            });
+        });
+        scatter_ev.wait();
     } else if (grad_output.dtype() == DType::Float16) {
         const sycl::half* go = get_data_ptr<const sycl::half>(grad_output);
         const int64_t* idx = get_data_ptr<const int64_t>(indices);
         sycl::half* gi = get_data_ptr<sycl::half>(grad_input);
         float* acc = sycl::malloc_device<float>(in_size, queue);
-        queue.fill(acc, 0.0f, in_size).wait();
-        queue.parallel_for<MaxPool3dBackwardFloat16>(sycl::range<1>(out_size), [=](sycl::id<1> gid) {
-            float gv = static_cast<float>(go[gid]); int64_t mi = idx[gid];
-            if (mi >= 0 && mi < in_size) {
-                sycl::atomic_ref<float, sycl::memory_order::relaxed, sycl::memory_scope::device,
-                                 sycl::access::address_space::global_space> ar(acc[mi]);
-                ar.fetch_add(gv);
-            }
-        }).wait();
-        queue.parallel_for(sycl::range<1>(in_size), [=](sycl::id<1> i) { gi[i] = sycl::half(acc[i]); }).wait();
+        sycl::event fill_ev = queue.fill(acc, 0.0f, in_size);
+        sycl::event scatter_ev = queue.submit([&](sycl::handler& cgh) {
+            cgh.depends_on(fill_ev);
+            cgh.parallel_for<MaxPool3dBackwardFloat16>(sycl::range<1>(out_size), [=](sycl::id<1> gid) {
+                float gv = static_cast<float>(go[gid]); int64_t mi = idx[gid];
+                if (mi >= 0 && mi < in_size) {
+                    sycl::atomic_ref<float, sycl::memory_order::relaxed, sycl::memory_scope::device,
+                                     sycl::access::address_space::global_space> ar(acc[mi]);
+                    ar.fetch_add(gv);
+                }
+            });
+        });
+        sycl::event narrow_ev = queue.submit([&](sycl::handler& cgh) {
+            cgh.depends_on(scatter_ev);
+            cgh.parallel_for(sycl::range<1>(in_size), [=](sycl::id<1> i) { gi[i] = sycl::half(acc[i]); });
+        });
+        narrow_ev.wait();
         sycl::free(acc, queue);
     } else if (grad_output.dtype() == DType::BFloat16) {
         const uint16_t* go = get_data_ptr<const uint16_t>(grad_output);
         const int64_t* idx = get_data_ptr<const int64_t>(indices);
         uint16_t* gi = get_data_ptr<uint16_t>(grad_input);
         float* acc = sycl::malloc_device<float>(in_size, queue);
-        queue.fill(acc, 0.0f, in_size).wait();
-        queue.parallel_for<MaxPool3dBackwardBFloat16>(sycl::range<1>(out_size), [=](sycl::id<1> gid) {
-            float gv = bf16_to_f32(go[gid]); int64_t mi = idx[gid];
-            if (mi >= 0 && mi < in_size) {
-                sycl::atomic_ref<float, sycl::memory_order::relaxed, sycl::memory_scope::device,
-                                 sycl::access::address_space::global_space> ar(acc[mi]);
-                ar.fetch_add(gv);
-            }
-        }).wait();
-        queue.parallel_for(sycl::range<1>(in_size), [=](sycl::id<1> i) { gi[i] = f32_to_bf16(acc[i]); }).wait();
+        sycl::event fill_ev = queue.fill(acc, 0.0f, in_size);
+        sycl::event scatter_ev = queue.submit([&](sycl::handler& cgh) {
+            cgh.depends_on(fill_ev);
+            cgh.parallel_for<MaxPool3dBackwardBFloat16>(sycl::range<1>(out_size), [=](sycl::id<1> gid) {
+                float gv = bf16_to_f32(go[gid]); int64_t mi = idx[gid];
+                if (mi >= 0 && mi < in_size) {
+                    sycl::atomic_ref<float, sycl::memory_order::relaxed, sycl::memory_scope::device,
+                                     sycl::access::address_space::global_space> ar(acc[mi]);
+                    ar.fetch_add(gv);
+                }
+            });
+        });
+        sycl::event narrow_ev = queue.submit([&](sycl::handler& cgh) {
+            cgh.depends_on(scatter_ev);
+            cgh.parallel_for(sycl::range<1>(in_size), [=](sycl::id<1> i) { gi[i] = f32_to_bf16(acc[i]); });
+        });
+        narrow_ev.wait();
         sycl::free(acc, queue);
     } else {
         throw std::runtime_error("Unsupported dtype for maxpool3d_backward");

@@ -577,6 +577,14 @@ public:
         return ms;
     }
 
+    auto synchronize_event(EventHandle event) -> void override {
+        if (!event) return;
+        cudaError_t err = cudaEventSynchronize(static_cast<cudaEvent_t>(event));
+        if (err != cudaSuccess) {
+            throw std::runtime_error(std::string("cudaEventSynchronize failed: ") + cudaGetErrorString(err));
+        }
+    }
+
     auto memset(void* ptr, int value, size_t bytes, int32_t device_id) -> void override {
         cudaSetDevice(device_id);
         cudaError_t err = cudaMemset(ptr, value, bytes);

@@ -13,6 +13,7 @@
 #include <tenzor/backend/dispatch_table.hpp>
 #include "parity_test_utils.hpp"
 #include "required_ops.hpp"
+#include "../backend_test_fixture.hpp"
 #include <vector>
 #include <string>
 #include <sstream>
@@ -60,36 +61,29 @@ void check_backend_completeness(Device::Type device_type, const char* backend_na
         << join(missing);
 }
 
+const char* device_type_name(Device::Type t) {
+    switch (t) {
+        case Device::Type::CPU:    return "CPU";
+        case Device::Type::CUDA:   return "CUDA";
+        case Device::Type::ROCm:   return "ROCm";
+        case Device::Type::Vulkan: return "Vulkan";
+        case Device::Type::OneAPI: return "OneAPI";
+        default:                   return "Unknown";
+    }
+}
+
 }  // namespace
 
 // ===========================================================================
-// Per-backend completeness tests
+// II.17: collapsed the 5 hand-rolled per-backend TEST() cases into a single
+// TEST_P that runs over the BackendTest matrix. BackendTest::SetUp() handles
+// the "skip if backend not available" / "fail if TENZOR_REQUIRE_MULTI_BACKEND"
+// logic uniformly with the rest of the parity suite.
 // ===========================================================================
+class KernelCompletenessParity : public BackendTest {};
 
-// Lower-case case names so `ctest -R cuda` (lowercase) matches the
-// generated CTest entry KernelCompleteness.cuda. The user-facing strings
-// passed to check_backend_completeness keep their canonical capitalised
-// form for log messages.
-TEST(KernelCompleteness, cpu) {
-    check_backend_completeness(Device::Type::CPU, "CPU");
+TEST_P(KernelCompletenessParity, AllOpsRegistered) {
+    check_backend_completeness(device.type, device_type_name(device.type));
 }
 
-TEST(KernelCompleteness, cuda) {
-    if (!has_cuda()) GTEST_SKIP() << "CUDA backend not available";
-    check_backend_completeness(Device::Type::CUDA, "CUDA");
-}
-
-TEST(KernelCompleteness, rocm) {
-    if (!has_rocm()) GTEST_SKIP() << "ROCm backend not available";
-    check_backend_completeness(Device::Type::ROCm, "ROCm");
-}
-
-TEST(KernelCompleteness, vulkan) {
-    if (!has_vulkan()) GTEST_SKIP() << "Vulkan backend not available";
-    check_backend_completeness(Device::Type::Vulkan, "Vulkan");
-}
-
-TEST(KernelCompleteness, oneapi) {
-    if (!has_oneapi()) GTEST_SKIP() << "OneAPI backend not available";
-    check_backend_completeness(Device::Type::OneAPI, "OneAPI");
-}
+INSTANTIATE_BACKEND_TESTS(KernelCompletenessParity);

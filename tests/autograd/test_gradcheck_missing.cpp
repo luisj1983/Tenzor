@@ -51,7 +51,8 @@ protected:
 TEST_P(GradCheckMissingTest, CholeskyInverse) {
     // Tracked as J9 (Cholesky-family gradcheck failure). Fails on every
     // backend including CPU — not backend-specific. Skipped; see task J9.
-    GTEST_SKIP() << "Cholesky-family gradcheck open (J9)";
+    SKIP_WITH_REASON(SkipReason::KnownBug,
+        "Cholesky-family gradcheck open (J9)");
 
     auto spd = make_spd(4);
     Variable x(spd, true);
@@ -570,7 +571,8 @@ TEST_P(GradCheckMissingTest, LinalgNormFro) {
     // never gets data to compare). Not a precision issue — something deeper
     // in the GPU NormBackward_Linalg dispatch path. CPU works correctly.
     if (device.type != Device::Type::CPU) {
-        GTEST_SKIP() << "linalg_norm(fro) GPU backward crashes (J10)";
+        SKIP_WITH_REASON(SkipReason::KnownBug,
+            "linalg_norm(fro) GPU backward crashes (J10)");
     }
     auto x_t = randn({4, 5}, DType::Float64, Device::cpu());
     Variable x(x_t.to(device), true);
@@ -608,7 +610,8 @@ TEST_P(GradCheckMissingTest, Cholesky) {
     // perturbations of an SPD matrix (cholesky is only defined on symmetric
     // PD inputs, but gradcheck perturbs all entries independently).
     // Skipped to keep the suite green; bug itself is tracked loudly.
-    GTEST_SKIP() << "Cholesky backward gradcheck open (J9)";
+    SKIP_WITH_REASON(SkipReason::KnownBug,
+        "Cholesky backward gradcheck open (J9)");
 
     auto x_t = make_spd(4, /*eps=*/0.5).to(Device::cpu());
     Variable x(x_t.to(device), true);
@@ -629,9 +632,12 @@ TEST_P(GradCheckMissingTest, Cholesky) {
 // ============================================================================
 
 TEST_P(GradCheckMissingTest, FunctionalGroupNormGradcheck) {
+    // II.21: tagged so count_skips.py classifies the GPU gap; backward
+    // wiring lives in src/nn/layers/normalization.cpp and works on CPU.
+    // GPU GroupNormBackward divergence is tracked under J5.
     if (device.type != Device::Type::CPU) {
-        GTEST_SKIP() << "F::group_norm gradcheck CPU-only (GPU norm backward "
-                        "tracked separately under J5)";
+        SKIP_WITH_REASON(SkipReason::KnownBug,
+            "F::group_norm GPU backward tracked under J5");
     }
     // GroupNormBackward CPU path internally downcasts to Float32 (see
     // src/nn/layers/normalization.cpp:1420-1424 and the kernel branching
@@ -670,8 +676,8 @@ TEST_P(GradCheckMissingTest, FunctionalGroupNormGradcheck) {
 
 TEST_P(GradCheckMissingTest, FunctionalInstanceNormGradcheck) {
     if (device.type != Device::Type::CPU) {
-        GTEST_SKIP() << "F::instance_norm gradcheck CPU-only (GPU norm "
-                        "backward tracked separately under J5)";
+        SKIP_WITH_REASON(SkipReason::KnownBug,
+            "F::instance_norm GPU backward tracked under J5");
     }
     // Same Float32-only kernel-internal precision constraint as
     // FunctionalGroupNormGradcheck above — see comment there.
@@ -699,7 +705,9 @@ TEST_P(GradCheckMissingTest, FunctionalInstanceNormGradcheck) {
 
 TEST_P(GradCheckMissingTest, FunctionalEmbeddingGradcheck) {
     if (device.type != Device::Type::CPU) {
-        GTEST_SKIP() << "F::embedding gradcheck CPU-only";
+        SKIP_WITH_REASON(SkipReason::KernelNotImplemented,
+            "F::embedding gradcheck CPU-only — backward through "
+            "index-into-table not yet wired for GPU");
     }
     // Weight matrix [V=8, D=4], indices [3, 2].
     auto w_t = randn({8, 4}, DType::Float64, Device::cpu());
@@ -721,7 +729,9 @@ TEST_P(GradCheckMissingTest, FunctionalEmbeddingGradcheck) {
 
 TEST_P(GradCheckMissingTest, FunctionalNllLossGradcheck) {
     if (device.type != Device::Type::CPU) {
-        GTEST_SKIP() << "F::nll_loss gradcheck CPU-only";
+        SKIP_WITH_REASON(SkipReason::KernelNotImplemented,
+            "F::nll_loss gradcheck CPU-only — Variable-level gather/neg/mean "
+            "path uses CPU-only intermediate");
     }
     // log-prob input [N=4, C=3], target [4]. nll_loss now uses Variable-
     // level gather/neg/mean so backward flows through automatically.
@@ -756,8 +766,9 @@ TEST_P(GradCheckMissingTest, FunctionalNllLossGradcheck) {
 
 TEST_P(GradCheckMissingTest, SpMMGradcheck) {
     if (device.type != Device::Type::CPU) {
-        GTEST_SKIP() << "Sparse gradchecks CPU-only — cuSPARSE/rocSPARSE "
-                        "backward dispatch tracked separately";
+        SKIP_WITH_REASON(SkipReason::KnownBug,
+            "spmm gradcheck CPU-only — cuSPARSE/rocSPARSE backward dispatch "
+            "tracked separately");
     }
     // Build a fixed 4x3 sparse matrix (CSR) and a 3x5 dense Variable.
     auto sparse_dense = randn({4, 3}, DType::Float64, Device::cpu());
@@ -774,7 +785,9 @@ TEST_P(GradCheckMissingTest, SpMMGradcheck) {
 
 TEST_P(GradCheckMissingTest, SpMVGradcheck) {
     if (device.type != Device::Type::CPU) {
-        GTEST_SKIP() << "Sparse gradchecks CPU-only";
+        SKIP_WITH_REASON(SkipReason::KnownBug,
+            "spmv gradcheck CPU-only — sparse backward dispatch tracked "
+            "separately");
     }
     auto sparse_dense = randn({5, 4}, DType::Float64, Device::cpu());
     auto sparse_t = ::tenzor::SparseTensor::from_dense(sparse_dense,
@@ -790,7 +803,9 @@ TEST_P(GradCheckMissingTest, SpMVGradcheck) {
 
 TEST_P(GradCheckMissingTest, SparseTriSolveGradcheck) {
     if (device.type != Device::Type::CPU) {
-        GTEST_SKIP() << "Sparse gradchecks CPU-only";
+        SKIP_WITH_REASON(SkipReason::KnownBug,
+            "sparse_triangular_solve gradcheck CPU-only — GPU SpSV backward "
+            "tracked separately");
     }
     // L is a fixed sparse lower-triangular matrix; b is the dense
     // Variable. SparseTriSolveBackward only differentiates through b.
@@ -813,7 +828,9 @@ TEST_P(GradCheckMissingTest, SparseTriSolveGradcheck) {
 
 TEST_P(GradCheckMissingTest, SparseAddGradcheck) {
     if (device.type != Device::Type::CPU) {
-        GTEST_SKIP() << "Sparse gradchecks CPU-only";
+        SKIP_WITH_REASON(SkipReason::KnownBug,
+            "sparse_add gradcheck CPU-only — GPU sparse-add backward "
+            "tracked separately");
     }
     auto sparse_dense = randn({4, 3}, DType::Float64, Device::cpu());
     auto sparse_t = ::tenzor::SparseTensor::from_dense(sparse_dense,
@@ -834,7 +851,8 @@ TEST_P(GradCheckMissingTest, SparseAddGradcheck) {
 
 TEST_P(GradCheckMissingTest, VecdotGradcheck) {
     if (device.type != Device::Type::CPU) {
-        GTEST_SKIP() << "linalg gradchecks CPU-only";
+        SKIP_WITH_REASON(SkipReason::KernelNotImplemented,
+            "linalg gradcheck CPU-only — GPU vecdot backward not wired");
     }
     auto a_t = randn({5}, DType::Float64, Device::cpu());
     auto b_t = randn({5}, DType::Float64, Device::cpu());
@@ -849,7 +867,8 @@ TEST_P(GradCheckMissingTest, VecdotGradcheck) {
 
 TEST_P(GradCheckMissingTest, VectorNormGradcheck) {
     if (device.type != Device::Type::CPU) {
-        GTEST_SKIP() << "linalg gradchecks CPU-only";
+        SKIP_WITH_REASON(SkipReason::KernelNotImplemented,
+            "linalg gradcheck CPU-only — GPU vector_norm backward not wired");
     }
     auto a_t = randn({4, 6}, DType::Float64, Device::cpu());
     Variable a(a_t, /*requires_grad=*/true);
@@ -862,7 +881,8 @@ TEST_P(GradCheckMissingTest, VectorNormGradcheck) {
 
 TEST_P(GradCheckMissingTest, MatrixNormGradcheck) {
     if (device.type != Device::Type::CPU) {
-        GTEST_SKIP() << "linalg gradchecks CPU-only";
+        SKIP_WITH_REASON(SkipReason::KnownBug,
+            "matrix_norm (Frobenius) GPU backward crashes — same J10 path");
     }
     // matrix_norm with ord=2 (operator 2-norm) goes through SVD and the
     // backward is delicate near degenerate singular values. Frobenius norm
@@ -879,7 +899,8 @@ TEST_P(GradCheckMissingTest, MatrixNormGradcheck) {
 
 TEST_P(GradCheckMissingTest, EigvalshGradcheck) {
     if (device.type != Device::Type::CPU) {
-        GTEST_SKIP() << "eigvalsh gradcheck CPU-only";
+        SKIP_WITH_REASON(SkipReason::KernelNotImplemented,
+            "eigvalsh gradcheck CPU-only — GPU backward delegates to LAPACK");
     }
     auto spd = make_spd(4);
     Variable x(spd, /*requires_grad=*/true);
@@ -892,7 +913,8 @@ TEST_P(GradCheckMissingTest, EigvalshGradcheck) {
 
 TEST_P(GradCheckMissingTest, SolveGradcheck) {
     if (device.type != Device::Type::CPU) {
-        GTEST_SKIP() << "solve gradcheck CPU-only";
+        SKIP_WITH_REASON(SkipReason::KernelNotImplemented,
+            "solve gradcheck CPU-only — GPU dense solve backward not wired");
     }
     auto A_t = make_spd(4);
     auto B_t = randn({4, 3}, DType::Float64, Device::cpu()).to(device);
@@ -973,7 +995,8 @@ TEST_P(GradCheckMissingTest, MultigammalnGradcheck) {
 
 TEST_P(GradCheckMissingTest, ScatterGradcheck) {
     if (device.type != Device::Type::CPU) {
-        GTEST_SKIP() << "scatter gradcheck CPU-only";
+        SKIP_WITH_REASON(SkipReason::KernelNotImplemented,
+            "scatter gradcheck CPU-only — GPU ScatterBackward not registered");
     }
     // scatter writes input values into target at indexed positions; backward
     // routes grad back to the values input via gather along the scatter dim.
@@ -1032,9 +1055,8 @@ TEST_P(GradCheckMissingTest, SortGradcheck) {
 
 TEST_P(GradCheckMissingTest, GridSampleGradcheck) {
     if (device.type != Device::Type::CPU) {
-        GTEST_SKIP() << "grid_sample gradcheck CPU-only "
-                        "(GridSampleBackward CPU impl exact; GPU paths "
-                        "tracked separately)";
+        SKIP_WITH_REASON(SkipReason::KnownBug,
+            "grid_sample GPU GridSampleBackward tracked separately");
     }
     // Tiny [N=1, C=2, H=3, W=3] feature map sampled with a [N=1, H=2, W=2,
     // 2] grid in (-1, 1). align_corners=true to keep boundary derivatives
@@ -1052,7 +1074,8 @@ TEST_P(GradCheckMissingTest, GridSampleGradcheck) {
 
 TEST_P(GradCheckMissingTest, AffineGridGradcheck) {
     if (device.type != Device::Type::CPU) {
-        GTEST_SKIP() << "affine_grid gradcheck CPU-only";
+        SKIP_WITH_REASON(SkipReason::KernelNotImplemented,
+            "affine_grid gradcheck CPU-only — GPU AffineGridBackward not wired");
     }
     // affine_grid(theta) is an exactly-linear function of theta — the
     // affine transform x' = theta * [grid_x; grid_y; 1] applied at every
@@ -1095,7 +1118,9 @@ TEST_P(GradCheckMissingTest, TopKGradcheck) {
 
 TEST_P(GradCheckMissingTest, FFTGradcheck) {
     if (device.type != Device::Type::CPU) {
-        GTEST_SKIP() << "FFT gradchecks CPU-only";
+        SKIP_WITH_REASON(SkipReason::KernelNotImplemented,
+            "FFT gradcheck CPU-only — GPU FFTBackward / IFFTBackward "
+            "not wired");
     }
     auto x_t = randn({8}, DType::Float64, Device::cpu());
     Variable x(x_t, /*requires_grad=*/true);
@@ -1109,7 +1134,9 @@ TEST_P(GradCheckMissingTest, FFTGradcheck) {
 
 TEST_P(GradCheckMissingTest, IFFTGradcheck) {
     if (device.type != Device::Type::CPU) {
-        GTEST_SKIP() << "FFT gradchecks CPU-only";
+        SKIP_WITH_REASON(SkipReason::KernelNotImplemented,
+            "FFT gradcheck CPU-only — GPU FFTBackward / IFFTBackward "
+            "not wired");
     }
     // ifft expects complex input. Build it from a real Variable via
     // view_as_complex on a [..., 2] real tensor — the gradient flows back
@@ -1133,7 +1160,9 @@ TEST_P(GradCheckMissingTest, IFFTGradcheck) {
 
 TEST_P(GradCheckMissingTest, RFFTIRFFT_RoundTrip_DefaultDim) {
     if (device.type != Device::Type::CPU) {
-        GTEST_SKIP() << "FFT gradchecks CPU-only";
+        SKIP_WITH_REASON(SkipReason::KernelNotImplemented,
+            "FFT gradcheck CPU-only — GPU FFTBackward / IFFTBackward "
+            "not wired");
     }
     auto x_t = randn({8}, DType::Float64, Device::cpu());
     Variable x(x_t, /*requires_grad=*/true);
@@ -1146,7 +1175,9 @@ TEST_P(GradCheckMissingTest, RFFTIRFFT_RoundTrip_DefaultDim) {
 
 TEST_P(GradCheckMissingTest, RFFTIRFFT_RoundTrip_NegativeDim) {
     if (device.type != Device::Type::CPU) {
-        GTEST_SKIP() << "FFT gradchecks CPU-only";
+        SKIP_WITH_REASON(SkipReason::KernelNotImplemented,
+            "FFT gradcheck CPU-only — GPU FFTBackward / IFFTBackward "
+            "not wired");
     }
     // Negative-dim regression: matches the HRM-bug class (dim=-1 used as a
     // shape index in backward). The rfft/irfft pair must normalise dim
@@ -1164,7 +1195,9 @@ TEST_P(GradCheckMissingTest, RFFTIRFFT_RoundTrip_NegativeDim) {
 
 TEST_P(GradCheckMissingTest, RFFTIRFFT_RoundTrip_OrthoNorm) {
     if (device.type != Device::Type::CPU) {
-        GTEST_SKIP() << "FFT gradchecks CPU-only";
+        SKIP_WITH_REASON(SkipReason::KernelNotImplemented,
+            "FFT gradcheck CPU-only — GPU FFTBackward / IFFTBackward "
+            "not wired");
     }
     // The norm scaling factor multiplies through forward and backward —
     // a missing scale in the backward would produce a constant-ratio

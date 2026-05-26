@@ -25,6 +25,7 @@
 #include "tenzor/ops/math.hpp"
 #include "tenzor/ops/reduction.hpp"
 #include "tenzor/nn/activations/activations.hpp"
+#include "../common.hpp"
 
 using namespace tenzor;
 using namespace tenzor::models;
@@ -457,8 +458,9 @@ int main(int argc, char** argv) {
     std::cout << std::string(60, '-') << std::endl;
     std::cout << std::endl;
 
-    // Save model
-    std::string model_path = "/tmp/bert_sentiment_model.pt";
+    // Save model (II.20: PID-suffixed to avoid concurrent-run collisions)
+    std::string model_path =
+        tenzor::examples::example_tmp_path("bert_sentiment_model") + ".pt";
     std::cout << "Saving model to: " << model_path << std::endl;
     model.save(model_path);
     std::cout << "Model saved successfully" << std::endl;

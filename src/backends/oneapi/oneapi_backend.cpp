@@ -906,6 +906,16 @@ public:
         }
     }
 
+    auto synchronize_event(EventHandle event) -> void override {
+        if (!event) return;
+        auto* ev = static_cast<sycl::event*>(event);
+        try {
+            ev->wait_and_throw();
+        } catch (const sycl::exception& e) {
+            throw std::runtime_error(std::string("SYCL synchronize_event failed: ") + e.what());
+        }
+    }
+
     auto memset(void* ptr, int value, size_t bytes, int32_t device_id) -> void override {
         validate_device_id(device_id);
         try {

@@ -3,7 +3,7 @@
 # scanner's output. Pre-existing entries are ignored; new
 # markers FAIL the lint. Drive this list down over time.
 examples/cpp/custom_op_example.cpp:10
-python/bindings/bindings_core.cpp:1255
+python/bindings/bindings_core.cpp:1310
 scripts/count_skips.py:152
 tests/multi_backend_dtype_fixture.hpp:73
 tests/ops/test_batchnorm_dispatch_multidtype.cpp:22

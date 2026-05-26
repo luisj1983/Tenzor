@@ -527,6 +527,8 @@ if(TENZOR_BUILD_PYTHON)
             ${CMAKE_CURRENT_SOURCE_DIR}/python/tenzor/data.py
             ${CMAKE_CURRENT_SOURCE_DIR}/python/tenzor/overrides.py
             ${CMAKE_CURRENT_SOURCE_DIR}/python/tenzor/jit.py
+            # Audit-8 II.12: typed-exception re-export namespace.
+            ${CMAKE_CURRENT_SOURCE_DIR}/python/tenzor/exceptions.py
         )
         # Subpackages (directories with their own __init__.py) — copied via
         # CMake's directory copy so that all files inside them land in the
@@ -542,6 +544,8 @@ if(TENZOR_BUILD_PYTHON)
             ${CMAKE_CURRENT_SOURCE_DIR}/python/tenzor/functional.pyi
             ${CMAKE_CURRENT_SOURCE_DIR}/python/tenzor/optim.pyi
             ${CMAKE_CURRENT_SOURCE_DIR}/python/tenzor/torch_interop.pyi
+            # Audit-8 II.12: typed-exception namespace stub.
+            ${CMAKE_CURRENT_SOURCE_DIR}/python/tenzor/exceptions.pyi
         )
         set(_PY_ALL_INPUTS ${_PY_SOURCES} ${_PY_STUBS})
 

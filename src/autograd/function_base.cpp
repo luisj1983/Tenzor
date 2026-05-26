@@ -367,6 +367,24 @@ auto Function::backward_with_variables(std::vector<Variable> grad_outputs) -> st
         auto mode = get_higher_order_grad_mode();
         auto op_name = name();
 
+        // Audit II.2: a Function subclass that did NOT override
+        // backward_with_variables AND did NOT declare itself a
+        // passthrough stub via is_higher_order_stub() has landed in
+        // this default fallback unintentionally. Silently stripping
+        // requires_grad from its outputs would corrupt second-order
+        // derivatives without any signal to the caller. This is a
+        // developer error, not a configuration choice, so we throw
+        // unconditionally regardless of HigherOrderGradMode.
+        if (!is_higher_order_stub()) {
+            throw std::runtime_error(
+                "Function '" + op_name + "' did not override "
+                "backward_with_variables but create_graph=true was "
+                "requested; second-derivatives through this op will "
+                "be wrong. Override backward_with_variables in the "
+                "Backward class (or mark is_higher_order_stub()=true "
+                "if the second derivative is structurally zero).");
+        }
+
         switch (mode) {
         case HigherOrderGradMode::Error:
             throw std::runtime_error(

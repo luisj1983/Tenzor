@@ -388,14 +388,26 @@ inline void pack_b_avx512(
 // ============================================================================
 
 /**
- * @brief Scalar micro-kernel for non-SIMD fallback
+ * @brief Scalar micro-kernel for non-SIMD fallback.
+ *
+ * CONTRACT — Float32 ONLY.
+ *   This kernel is intentionally non-templated and accumulates in
+ *   `float` (single precision). Do NOT call it with `reinterpret_cast`
+ *   from a `double*` / `Float64` buffer: the body would read the upper
+ *   half of each double as a separate float, silently corrupting both
+ *   the values and the count. Float64 GEMM goes through MKL
+ *   `cblas_dgemm`; Float16 / BFloat16 widen to Float32 in the calling
+ *   layer. Callers must ensure A, B, C all point to Float32 storage.
+ *   See audit II.4 for the precision-truncation pattern this guards
+ *   against.
+ *
+ * The tile is (M rows × N cols × K reduction); the surrounding A/B/C
+ * buffers are slices of larger matrices so the caller must pass the
+ * FULL row strides (lda for A, ldb for B, ldc for C). The earlier
+ * version implicitly assumed lda==K and ldb==N — which made the
+ * (27, 32, 4) edge case (mr=3, nr=16) read the wrong columns of B for
+ * k>0, silently corrupting the last 3 rows of the result.
  */
-// Scalar edge micro-kernel. The tile is (M rows × N cols × K reduction);
-// the surrounding A/B/C buffers are slices of larger matrices so the
-// caller must pass the FULL row strides (lda for A, ldb for B, ldc for
-// C). The earlier version implicitly assumed lda==K and ldb==N — which
-// made the (27, 32, 4) edge case (mr=3, nr=16) read the wrong columns
-// of B for k>0, silently corrupting the last 3 rows of the result.
 inline void microkernel_scalar(
     const float* __restrict__ A,
     const float* __restrict__ B,

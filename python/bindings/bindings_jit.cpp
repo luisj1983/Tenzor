@@ -91,12 +91,18 @@ void register_jit(py::module_& m) {
              py::arg("inputs"),
              "Execute graph with runtime inputs",
              py::call_guard<py::gil_scoped_release>())
+        // Audit-8 II.11: Graph::save / Graph::load are pure disk I/O on the
+        // already-built C++ IR — no Python objects touched. Drop the GIL so
+        // other Python threads (DataLoader workers, DDP comm) keep running
+        // while a fused graph is written or read from disk.
         .def("save", &tenzor::jit::Graph::save,
              py::arg("path"),
-             "Save graph to file")
+             "Save graph to file",
+             py::call_guard<py::gil_scoped_release>())
         .def_static("load", &tenzor::jit::Graph::load,
              py::arg("path"),
-             "Load graph from file")
+             "Load graph from file",
+             py::call_guard<py::gil_scoped_release>())
         .def("to_string", &tenzor::jit::Graph::to_string,
              "Get string representation of graph")
         .def("topological_sort", &tenzor::jit::Graph::topological_sort)
@@ -162,13 +168,17 @@ void register_jit(py::module_& m) {
             py::arg("graph"),
             "Apply standard optimizations to graph");
 
+    // Audit-8 II.11: serialise/deserialise are pure C++ disk I/O — no Python
+    // objects touched. Drop the GIL across the call so other threads run.
     jit.def("save_graph", &tenzor::jit::save_graph,
             py::arg("graph"), py::arg("path"),
-            "Save graph to file");
+            "Save graph to file",
+            py::call_guard<py::gil_scoped_release>());
 
     jit.def("load_graph", &tenzor::jit::load_graph,
             py::arg("path"),
-            "Load graph from file");
+            "Load graph from file",
+            py::call_guard<py::gil_scoped_release>());
 
     jit.def("export_graph_text", &tenzor::jit::export_graph_text,
             py::arg("graph"), py::arg("path"),

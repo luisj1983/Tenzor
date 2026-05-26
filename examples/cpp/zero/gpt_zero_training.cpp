@@ -23,6 +23,7 @@
 #include <tenzor/nn/optim/zero_optimizer.hpp>
 #include <tenzor/nn/optim/adamw.hpp>
 #include <tenzor/distributed/distributed.hpp>
+#include "../common.hpp"
 #include <iostream>
 #include <iomanip>
 #include <chrono>
@@ -201,7 +202,10 @@ auto train(
                 std::cout << "Saving checkpoint at step " << step << "..." << std::endl;
             }
 
-            std::string checkpoint_path = "/tmp/gpt_zero_checkpoint_step_" + std::to_string(step);
+            // II.20: PID-suffixed temp path to avoid collisions.
+            std::string checkpoint_path =
+                tenzor::examples::example_tmp_path(
+                    "gpt_zero_checkpoint_step_" + std::to_string(step));
             optimizer.save_checkpoint(checkpoint_path);
 
             if (rank == 0) {
