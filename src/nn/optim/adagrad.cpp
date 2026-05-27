@@ -257,8 +257,8 @@ auto Adagrad::step_impl() -> void {
     }
 }
 
-auto Adagrad::zero_grad() -> void {
-    Optimizer::zero_grad();
+auto Adagrad::zero_grad(bool set_to_none) -> void {
+    Optimizer::zero_grad(set_to_none);
 }
 
 auto Adagrad::set_lr(double lr) -> void {

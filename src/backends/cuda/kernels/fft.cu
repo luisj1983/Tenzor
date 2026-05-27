@@ -60,15 +60,31 @@ namespace {
 struct CuFFTPlan {
     cufftHandle handle = 0;
     bool valid = false;
+    cudaStream_t stream_ = nullptr;  ///< Stream bound to this plan via set_stream.
 
     CuFFTPlan() = default;
-    ~CuFFTPlan() { if (valid) cufftDestroy(handle); }
+    ~CuFFTPlan() {
+        if (valid) {
+            // Audit QQ.7: synchronize the bound stream before destroying the
+            // cuFFT handle. cuFFT plans own internal workspace memory still
+            // referenced by inflight exec/normalization kernels; tearing the
+            // plan down while those kernels are queued races and can corrupt
+            // subsequent FFTs.
+            if (stream_ != nullptr) {
+                // Destructor must not throw — swallow errors.
+                (void)cudaStreamSynchronize(stream_);
+            }
+            cufftDestroy(handle);
+        }
+    }
 
     CuFFTPlan(const CuFFTPlan&) = delete;
     CuFFTPlan& operator=(const CuFFTPlan&) = delete;
 
-    CuFFTPlan(CuFFTPlan&& other) noexcept : handle(other.handle), valid(other.valid) {
+    CuFFTPlan(CuFFTPlan&& other) noexcept
+        : handle(other.handle), valid(other.valid), stream_(other.stream_) {
         other.valid = false;
+        other.stream_ = nullptr;
     }
 
     void create() {
@@ -78,6 +94,7 @@ struct CuFFTPlan {
 
     void set_stream(cudaStream_t stream) {
         CUFFT_CHECK(cufftSetStream(handle, stream));
+        stream_ = stream;
     }
 
     operator cufftHandle() const { return handle; }

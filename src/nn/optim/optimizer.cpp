@@ -158,9 +158,19 @@ auto Optimizer::param_groups() const -> const std::vector<ParamGroup>& {
     return param_groups_;
 }
 
-auto Optimizer::zero_grad() -> void {
+auto Optimizer::zero_grad(bool set_to_none) -> void {
     for (auto& param : parameters_) {
         if (!param) continue;
+
+        // QQ.14: set_to_none=true matches PyTorch 1.7+ default.  Drop the
+        // grad slot entirely so the next backward() allocates a fresh
+        // tensor (saves memory, avoids accidental in-place reuse).
+        // set_to_none=false zeros the existing tensor in-place so callers
+        // that captured a raw pointer to .grad() stay valid.
+        if (set_to_none) {
+            param->zero_grad();
+            continue;
+        }
 
         // Clear sparse gradient if present
         if (param->has_sparse_grad()) {

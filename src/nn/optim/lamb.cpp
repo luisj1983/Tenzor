@@ -3,6 +3,7 @@
 #include "tenzor/ops/creation.hpp"
 #include "tenzor/ops/math.hpp"
 #include "tenzor/ops/reduction.hpp"
+#include <algorithm>
 #include <cmath>
 
 namespace tenzor::optim {
@@ -11,21 +12,26 @@ namespace tenzor::optim {
 // shared across all optimisers via include/tenzor/nn/optim/master_weights.hpp.
 
 LAMB::LAMB(std::vector<std::shared_ptr<Variable>> params, double lr, double beta1,
-           double beta2, double eps, double weight_decay)
+           double beta2, double eps, double weight_decay,
+           double min_norm, double max_norm)
     : Optimizer(std::move(params)), lr_(lr), beta1_(beta1), beta2_(beta2),
-      eps_(eps), weight_decay_(weight_decay) {
+      eps_(eps), weight_decay_(weight_decay),
+      min_norm_(min_norm), max_norm_(max_norm) {
     initialize_buffers();
 }
 
 LAMB::LAMB(std::vector<optim::ParamGroup> groups,
            double default_lr, double default_beta1, double default_beta2,
-           double default_eps, double default_weight_decay)
+           double default_eps, double default_weight_decay,
+           double default_min_norm, double default_max_norm)
     : Optimizer(std::move(groups)),
       lr_(default_lr),
       beta1_(default_beta1),
       beta2_(default_beta2),
       eps_(default_eps),
-      weight_decay_(default_weight_decay) {
+      weight_decay_(default_weight_decay),
+      min_norm_(default_min_norm),
+      max_norm_(default_max_norm) {
     initialize_buffers();
 }
 
@@ -41,16 +47,20 @@ auto LAMB::step_impl() -> void {
         double beta2;
         double eps;
         double weight_decay;
+        double trust_min;
+        double trust_max;
     };
 
     auto resolve = [&](size_t i) -> LAMBHP {
-        LAMBHP hp{lr_, beta1_, beta2_, eps_, weight_decay_};
+        LAMBHP hp{lr_, beta1_, beta2_, eps_, weight_decay_, min_norm_, max_norm_};
         if (const auto* g = find_group_for_param(i)) {
             hp.lr           = g->lr;
             hp.weight_decay = g->weight_decay;
             hp.beta1        = ParamGroup::or_else(g->beta1, beta1_);
             hp.beta2        = ParamGroup::or_else(g->beta2, beta2_);
             hp.eps          = ParamGroup::or_else(g->eps,   eps_);
+            hp.trust_min    = ParamGroup::or_else(g->trust_ratio_min, min_norm_);
+            hp.trust_max    = ParamGroup::or_else(g->trust_ratio_max, max_norm_);
         }
         return hp;
     };
@@ -113,10 +123,14 @@ auto LAMB::step_impl() -> void {
             update_norm = static_cast<double>(un.data<float>()[0]);
         }
 
+        // QQ.12: clamp trust_ratio to [trust_min, trust_max].  Without this,
+        // a near-zero update_norm produces trust_ratio -> +Inf and the
+        // parameter step explodes.  PyTorch NVlamb defaults to [0, 10].
         double trust_ratio = 1.0;
         if (param_norm > 0.0 && update_norm > 0.0) {
             trust_ratio = param_norm / update_norm;
         }
+        trust_ratio = std::clamp(trust_ratio, hp.trust_min, hp.trust_max);
 
         // Apply update with trust ratio
         Tensor updated = param_hi - update * scalar(hp.lr * trust_ratio);
@@ -183,6 +197,9 @@ auto LAMB::state_dict() const -> std::unordered_map<std::string, Tensor> {
     state["beta2"]        = scalar_f64(beta2_);
     state["eps"]          = scalar_f64(eps_);
     state["weight_decay"] = scalar_f64(weight_decay_);
+    // QQ.12: persist trust-ratio clamp range.
+    state["min_norm"]     = scalar_f64(min_norm_);
+    state["max_norm"]     = scalar_f64(max_norm_);
 
     Tensor n({1}, DType::Int64, Device::cpu());
     n.data<int64_t>()[0] = static_cast<int64_t>(exp_avg_.size());
@@ -223,6 +240,10 @@ auto LAMB::load_state_dict(const std::unordered_map<std::string, Tensor>& state)
     beta2_        = get_f64("beta2",        beta2_);
     eps_          = get_f64("eps",          eps_);
     weight_decay_ = get_f64("weight_decay", weight_decay_);
+    // QQ.12: trust-ratio clamps (default to current values for backwards
+    // compatibility with pre-QQ.12 checkpoints).
+    min_norm_     = get_f64("min_norm",     min_norm_);
+    max_norm_     = get_f64("max_norm",     max_norm_);
 
     // V.27 / Y.17: cast to the R.16 master-weights dtype on load. Pre-R.16
     // checkpoints stored half-precision buffers; restoring them as-is would

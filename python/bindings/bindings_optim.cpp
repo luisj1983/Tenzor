@@ -90,7 +90,9 @@ void register_optim(py::module_& m) {
                          std::optional<double> eta_minus,
                          std::optional<double> eta_plus,
                          std::optional<double> step_min,
-                         std::optional<double> step_max) {
+                         std::optional<double> step_max,
+                         std::optional<double> trust_ratio_min,
+                         std::optional<double> trust_ratio_max) {
             tenzor::optim::ParamGroup g{std::move(params), lr, weight_decay};
             g.momentum                   = momentum;
             g.dampening                  = dampening;
@@ -109,6 +111,9 @@ void register_optim(py::module_& m) {
             g.eta_plus                   = eta_plus;
             g.step_min                   = step_min;
             g.step_max                   = step_max;
+            // QQ.12: LAMB trust-ratio clamps.
+            g.trust_ratio_min            = trust_ratio_min;
+            g.trust_ratio_max            = trust_ratio_max;
             return g;
         }), py::arg("params"), py::arg("lr"), py::arg("weight_decay") = 0.0,
             py::arg("momentum")                  = py::none(),
@@ -126,7 +131,9 @@ void register_optim(py::module_& m) {
             py::arg("eta_minus")                 = py::none(),
             py::arg("eta_plus")                  = py::none(),
             py::arg("step_min")                  = py::none(),
-            py::arg("step_max")                  = py::none())
+            py::arg("step_max")                  = py::none(),
+            py::arg("trust_ratio_min")           = py::none(),
+            py::arg("trust_ratio_max")           = py::none())
         .def_readwrite("params", &tenzor::optim::ParamGroup::params,
              "Parameters in this group")
         .def_readwrite("lr", &tenzor::optim::ParamGroup::lr,
@@ -167,6 +174,11 @@ void register_optim(py::module_& m) {
              "Per-group Rprop step_min (None = use optimiser default)")
         .def_readwrite("step_max", &tenzor::optim::ParamGroup::step_max,
              "Per-group Rprop step_max (None = use optimiser default)")
+        // QQ.12: LAMB trust-ratio clamps.
+        .def_readwrite("trust_ratio_min", &tenzor::optim::ParamGroup::trust_ratio_min,
+             "Per-group LAMB trust-ratio min (None = use optimiser default)")
+        .def_readwrite("trust_ratio_max", &tenzor::optim::ParamGroup::trust_ratio_max,
+             "Per-group LAMB trust-ratio max (None = use optimiser default)")
         .def("__repr__", [](const tenzor::optim::ParamGroup& self) {
             return "ParamGroup(params=" + std::to_string(self.params.size()) +
                    ", lr=" + std::to_string(self.lr) +
@@ -180,7 +192,11 @@ void register_optim(py::module_& m) {
     // DataLoader workers / DDP comm hooks make progress in parallel.
     py::class_<tenzor::optim::Optimizer, std::shared_ptr<tenzor::optim::Optimizer>>(optim, "Optimizer",
         "Base class for all optimizers")
-        .def("zero_grad", &tenzor::optim::Optimizer::zero_grad, "Zero out all parameter gradients",
+        // QQ.14: expose set_to_none kwarg (PyTorch 1.7+ default = True).
+        .def("zero_grad",
+             [](tenzor::optim::Optimizer& self, bool set_to_none) { self.zero_grad(set_to_none); },
+             py::arg("set_to_none") = true,
+             "Zero out all parameter gradients",
              py::call_guard<py::gil_scoped_release>())
         .def("state_dict", &tenzor::optim::Optimizer::state_dict, "Get optimizer state dictionary",
              py::call_guard<py::gil_scoped_release>())  // CC.24
@@ -230,7 +246,10 @@ void register_optim(py::module_& m) {
             return py::none();
         }, py::arg("closure") = py::none(),
            "Perform optimization step. Optionally takes a closure that recomputes the loss.")
-        .def("zero_grad", &tenzor::optim::SGD::zero_grad,
+        // QQ.14: expose set_to_none kwarg (PyTorch 1.7+ default = True).
+        .def("zero_grad",
+             [](tenzor::optim::SGD& self, bool s) { self.zero_grad(s); },
+             py::arg("set_to_none") = true,
              py::call_guard<py::gil_scoped_release>())  // W.20
         .def("set_lr", &tenzor::optim::SGD::set_lr,
              py::arg("lr"), "Set learning rate")
@@ -271,7 +290,10 @@ void register_optim(py::module_& m) {
             return py::none();
         }, py::arg("closure") = py::none(),
            "Perform optimization step. Optionally takes a closure that recomputes the loss.")
-        .def("zero_grad", &tenzor::optim::ASGD::zero_grad,
+        // QQ.14: expose set_to_none kwarg.
+        .def("zero_grad",
+             [](tenzor::optim::ASGD& self, bool s) { self.zero_grad(s); },
+             py::arg("set_to_none") = true,
              py::call_guard<py::gil_scoped_release>())  // W.20
         .def("set_lr", &tenzor::optim::ASGD::set_lr,
              py::arg("lr"), "Set learning rate")
@@ -312,7 +334,10 @@ void register_optim(py::module_& m) {
             { py::gil_scoped_release release; self.step(); }
             return py::none();
         }, py::arg("closure") = py::none())
-        .def("zero_grad", &tenzor::optim::Adam::zero_grad,
+        // QQ.14: expose set_to_none kwarg.
+        .def("zero_grad",
+             [](tenzor::optim::Adam& self, bool s) { self.zero_grad(s); },
+             py::arg("set_to_none") = true,
              py::call_guard<py::gil_scoped_release>())  // W.20
         .def("set_lr", &tenzor::optim::Adam::set_lr,
              py::arg("lr"), "Set learning rate")
@@ -353,7 +378,10 @@ void register_optim(py::module_& m) {
             { py::gil_scoped_release release; self.step(); }
             return py::none();
         }, py::arg("closure") = py::none())
-        .def("zero_grad", &tenzor::optim::AdamW::zero_grad,
+        // QQ.14: expose set_to_none kwarg.
+        .def("zero_grad",
+             [](tenzor::optim::AdamW& self, bool s) { self.zero_grad(s); },
+             py::arg("set_to_none") = true,
              py::call_guard<py::gil_scoped_release>())  // W.20
         .def("set_lr", &tenzor::optim::AdamW::set_lr,
              py::arg("lr"), "Set learning rate")
@@ -400,7 +428,10 @@ void register_optim(py::module_& m) {
             { py::gil_scoped_release release; self.step(); }
             return py::none();
         }, py::arg("closure") = py::none())
-        .def("zero_grad", &tenzor::optim::RMSprop::zero_grad,
+        // QQ.14: expose set_to_none kwarg.
+        .def("zero_grad",
+             [](tenzor::optim::RMSprop& self, bool s) { self.zero_grad(s); },
+             py::arg("set_to_none") = true,
              py::call_guard<py::gil_scoped_release>())  // W.20
         .def("state_dict", &tenzor::optim::RMSprop::state_dict,
              py::call_guard<py::gil_scoped_release>())  // CC.24
@@ -437,7 +468,10 @@ void register_optim(py::module_& m) {
             { py::gil_scoped_release release; self.step(); }
             return py::none();
         }, py::arg("closure") = py::none())
-        .def("zero_grad", &tenzor::optim::Adagrad::zero_grad,
+        // QQ.14: expose set_to_none kwarg.
+        .def("zero_grad",
+             [](tenzor::optim::Adagrad& self, bool s) { self.zero_grad(s); },
+             py::arg("set_to_none") = true,
              py::call_guard<py::gil_scoped_release>());  // W.20
 
     // Audit-4 U.14: Adadelta — same parent + shared_ptr fix as RMSprop / Adagrad.
@@ -468,7 +502,10 @@ void register_optim(py::module_& m) {
             { py::gil_scoped_release release; self.step(); }
             return py::none();
         }, py::arg("closure") = py::none())
-        .def("zero_grad", &tenzor::optim::Adadelta::zero_grad,
+        // QQ.14: expose set_to_none kwarg.
+        .def("zero_grad",
+             [](tenzor::optim::Adadelta& self, bool s) { self.zero_grad(s); },
+             py::arg("set_to_none") = true,
              py::call_guard<py::gil_scoped_release>());  // W.20
 
     py::class_<tenzor::optim::RAdam, tenzor::optim::Optimizer, std::shared_ptr<tenzor::optim::RAdam>>(optim, "RAdam",
@@ -499,7 +536,10 @@ void register_optim(py::module_& m) {
             { py::gil_scoped_release release; self.step(); }
             return py::none();
         }, py::arg("closure") = py::none())
-        .def("zero_grad", &tenzor::optim::RAdam::zero_grad,
+        // QQ.14: expose set_to_none kwarg.
+        .def("zero_grad",
+             [](tenzor::optim::RAdam& self, bool s) { self.zero_grad(s); },
+             py::arg("set_to_none") = true,
              py::call_guard<py::gil_scoped_release>())  // W.20
         .def("set_lr", &tenzor::optim::RAdam::set_lr, py::arg("lr"))
         .def("get_lr", &tenzor::optim::RAdam::get_lr)
@@ -537,7 +577,10 @@ void register_optim(py::module_& m) {
             { py::gil_scoped_release release; self.step(); }
             return py::none();
         }, py::arg("closure") = py::none())
-        .def("zero_grad", &tenzor::optim::NAdam::zero_grad,
+        // QQ.14: expose set_to_none kwarg.
+        .def("zero_grad",
+             [](tenzor::optim::NAdam& self, bool s) { self.zero_grad(s); },
+             py::arg("set_to_none") = true,
              py::call_guard<py::gil_scoped_release>())  // W.20
         .def("set_lr", &tenzor::optim::NAdam::set_lr, py::arg("lr"))
         .def("get_lr", &tenzor::optim::NAdam::get_lr)
@@ -574,7 +617,10 @@ void register_optim(py::module_& m) {
             { py::gil_scoped_release release; self.step(); }
             return py::none();
         }, py::arg("closure") = py::none())
-        .def("zero_grad", &tenzor::optim::Adamax::zero_grad,
+        // QQ.14: expose set_to_none kwarg.
+        .def("zero_grad",
+             [](tenzor::optim::Adamax& self, bool s) { self.zero_grad(s); },
+             py::arg("set_to_none") = true,
              py::call_guard<py::gil_scoped_release>())  // W.20
         .def("set_lr", &tenzor::optim::Adamax::set_lr, py::arg("lr"))
         .def("get_lr", &tenzor::optim::Adamax::get_lr)
@@ -585,10 +631,13 @@ void register_optim(py::module_& m) {
 
     py::class_<tenzor::optim::LAMB, tenzor::optim::Optimizer, std::shared_ptr<tenzor::optim::LAMB>>(optim, "LAMB",
         "LAMB optimizer for large-batch training")
-        .def(py::init<std::vector<std::shared_ptr<tenzor::Variable>>, double, double, double, double, double>(),
+        .def(py::init<std::vector<std::shared_ptr<tenzor::Variable>>,
+                      double, double, double, double, double, double, double>(),
              py::arg("params"), py::arg("lr") = 1e-3,
              py::arg("beta1") = 0.9, py::arg("beta2") = 0.999,
-             py::arg("eps") = 1e-6, py::arg("weight_decay") = 0.01)
+             py::arg("eps") = 1e-6, py::arg("weight_decay") = 0.01,
+             // QQ.12: trust-ratio clamp range (PyTorch NVlamb default).
+             py::arg("min_norm") = 0.0, py::arg("max_norm") = 10.0)
         .def("step", [](tenzor::optim::LAMB& self, py::object closure) -> py::object {
             if (!closure.is_none()) {
                 // audit-10 OO.9: release the GIL across the C++ step body too.
@@ -611,10 +660,18 @@ void register_optim(py::module_& m) {
             { py::gil_scoped_release release; self.step(); }
             return py::none();
         }, py::arg("closure") = py::none())
-        .def("zero_grad", &tenzor::optim::LAMB::zero_grad,
+        // QQ.14: expose set_to_none kwarg.
+        .def("zero_grad",
+             [](tenzor::optim::LAMB& self, bool s) { self.zero_grad(s); },
+             py::arg("set_to_none") = true,
              py::call_guard<py::gil_scoped_release>())  // W.20
         .def("set_lr", &tenzor::optim::LAMB::set_lr, py::arg("lr"))
         .def("get_lr", &tenzor::optim::LAMB::get_lr)
+        // QQ.12: runtime tuning of trust-ratio clamp range.
+        .def("set_min_norm", &tenzor::optim::LAMB::set_min_norm, py::arg("min_norm"))
+        .def("set_max_norm", &tenzor::optim::LAMB::set_max_norm, py::arg("max_norm"))
+        .def("get_min_norm", &tenzor::optim::LAMB::get_min_norm)
+        .def("get_max_norm", &tenzor::optim::LAMB::get_max_norm)
         .def("state_dict", &tenzor::optim::LAMB::state_dict,
              py::call_guard<py::gil_scoped_release>())  // CC.24
         .def("load_state_dict", &tenzor::optim::LAMB::load_state_dict, py::arg("state"),
@@ -648,7 +705,10 @@ void register_optim(py::module_& m) {
             { py::gil_scoped_release release; self.step(); }
             return py::none();
         }, py::arg("closure") = py::none())
-        .def("zero_grad", &tenzor::optim::SparseAdam::zero_grad,
+        // QQ.14: expose set_to_none kwarg.
+        .def("zero_grad",
+             [](tenzor::optim::SparseAdam& self, bool s) { self.zero_grad(s); },
+             py::arg("set_to_none") = true,
              py::call_guard<py::gil_scoped_release>())  // W.20
         .def("set_lr", &tenzor::optim::SparseAdam::set_lr, py::arg("lr"))
         .def("get_lr", &tenzor::optim::SparseAdam::get_lr)
@@ -686,7 +746,10 @@ void register_optim(py::module_& m) {
             return py::none();
         }, py::arg("closure") = py::none(),
            "Perform optimization step. Optionally takes a closure that recomputes the loss.")
-        .def("zero_grad", &tenzor::optim::Rprop::zero_grad,
+        // QQ.14: expose set_to_none kwarg.
+        .def("zero_grad",
+             [](tenzor::optim::Rprop& self, bool s) { self.zero_grad(s); },
+             py::arg("set_to_none") = true,
              py::call_guard<py::gil_scoped_release>())  // W.20
         .def("set_lr", &tenzor::optim::Rprop::set_lr,
              py::arg("lr"), "Set learning rate (initial step size)")
@@ -726,7 +789,10 @@ void register_optim(py::module_& m) {
             return self.step(closure);
         }, py::arg("closure"),
            "Perform an L-BFGS step. Closure must recompute loss and call loss.backward().")
-        .def("zero_grad", &tenzor::optim::LBFGS::zero_grad,
+        // QQ.14: expose set_to_none kwarg.
+        .def("zero_grad",
+             [](tenzor::optim::LBFGS& self, bool s) { self.zero_grad(s); },
+             py::arg("set_to_none") = true,
              py::call_guard<py::gil_scoped_release>())  // W.20
         .def("set_lr", &tenzor::optim::LBFGS::set_lr, py::arg("lr"))
         .def("get_lr", &tenzor::optim::LBFGS::get_lr)
@@ -774,7 +840,10 @@ void register_optim(py::module_& m) {
             py::gil_scoped_release release;  // Q.15
             self.step();
         })
-        .def("zero_grad", &tenzor::optim::ZeROStage1Optimizer::zero_grad,
+        // QQ.14: expose set_to_none kwarg.
+        .def("zero_grad",
+             [](tenzor::optim::ZeROStage1Optimizer& self, bool s) { self.zero_grad(s); },
+             py::arg("set_to_none") = true,
              py::call_guard<py::gil_scoped_release>())  // W.20
         .def("state_dict", &tenzor::optim::ZeROStage1Optimizer::state_dict,
              py::call_guard<py::gil_scoped_release>())  // CC.24
@@ -803,7 +872,10 @@ void register_optim(py::module_& m) {
             py::gil_scoped_release release;
             self.step();
         })
-        .def("zero_grad", &tenzor::optim::ZeROStage2Optimizer::zero_grad,
+        // QQ.14: expose set_to_none kwarg.
+        .def("zero_grad",
+             [](tenzor::optim::ZeROStage2Optimizer& self, bool s) { self.zero_grad(s); },
+             py::arg("set_to_none") = true,
              py::call_guard<py::gil_scoped_release>())
         .def("state_dict", &tenzor::optim::ZeROStage2Optimizer::state_dict,
              py::call_guard<py::gil_scoped_release>())
@@ -824,7 +896,10 @@ void register_optim(py::module_& m) {
         // Stage3 zero_grad shadows the base; bind via explicit qualified
         // pointer so Stage3-specific per-param sharded clearing actually
         // runs from Python.
-        .def("zero_grad", &tenzor::optim::ZeROStage3Optimizer::zero_grad,
+        // QQ.14: expose set_to_none kwarg.
+        .def("zero_grad",
+             [](tenzor::optim::ZeROStage3Optimizer& self, bool s) { self.zero_grad(s); },
+             py::arg("set_to_none") = true,
              py::call_guard<py::gil_scoped_release>())
         .def("state_dict", &tenzor::optim::ZeROStage3Optimizer::state_dict,
              py::call_guard<py::gil_scoped_release>())
@@ -1139,7 +1214,10 @@ void register_optim(py::module_& m) {
              "Compute perturbation and apply to weights")
         .def("second_step", &tenzor::optim::SAM::second_step,
              "Restore original weights and step the base optimizer")
-        .def("zero_grad", &tenzor::optim::SAM::zero_grad,
+        // QQ.14: expose set_to_none kwarg.
+        .def("zero_grad",
+             [](tenzor::optim::SAM& self, bool s) { self.zero_grad(s); },
+             py::arg("set_to_none") = true,
              py::call_guard<py::gil_scoped_release>())  // W.20
         .def("set_lr", &tenzor::optim::SAM::set_lr,
              py::arg("lr"), "Set learning rate on the base optimizer")
@@ -1217,7 +1295,10 @@ void register_optim(py::module_& m) {
             { py::gil_scoped_release release; self.step(); }
             return py::none();
         }, py::arg("closure") = py::none())
-        .def("zero_grad", &tenzor::optim::AdamAtan2::zero_grad,
+        // QQ.14: expose set_to_none kwarg.
+        .def("zero_grad",
+             [](tenzor::optim::AdamAtan2& self, bool s) { self.zero_grad(s); },
+             py::arg("set_to_none") = true,
              py::call_guard<py::gil_scoped_release>())  // W.20
         .def("set_lr", &tenzor::optim::AdamAtan2::set_lr)
         .def("get_lr", &tenzor::optim::AdamAtan2::get_lr)

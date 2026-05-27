@@ -295,6 +295,17 @@ auto BackwardEngine::synthesize_or_validate_root_grad(const Variable& root,
             std::string(dtype_name(user_grad->dtype())) + " on " +
             user_grad->device().to_string());
     }
+    // audit-11 QQ.6: reject non-floating-point / non-complex seed dtypes.
+    // Integer/Bool seeds silently accumulated into Float param grads as
+    // garbage; PyTorch raises RuntimeError ("only Tensors of floating point
+    // and complex dtype can require gradients" / "grad can be created only
+    // for floating-point Tensors"). Mirror that wording.
+    if (!user_grad->is_floating_point() && !user_grad->is_complex()) {
+        throw AutogradException(
+            std::string("User-supplied gradient must be floating-point or "
+                        "complex; got ") +
+            std::string(dtype_name(user_grad->dtype())));
+    }
     return std::move(*user_grad);
 }
 

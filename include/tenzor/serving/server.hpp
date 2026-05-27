@@ -273,6 +273,18 @@ public:
     auto wait() -> void;
 
     /**
+     * @brief Block until the server is stopped or the timeout expires.
+     *
+     * Audit-11 QQ.19: bounded wait so Python callers can release the GIL
+     * for the timeout window and re-acquire to service signals
+     * (KeyboardInterrupt) without leaking the server thread.
+     *
+     * @param timeout Maximum time to block before returning.
+     * @return true if the server stopped within the timeout, false on timeout.
+     */
+    auto wait_for(std::chrono::milliseconds timeout) -> bool;
+
+    /**
      * @brief Get the model repository.
      */
     auto repository() -> ModelRepository& { return repository_; }

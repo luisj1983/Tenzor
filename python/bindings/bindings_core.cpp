@@ -313,6 +313,18 @@ void register_core(py::module_& m) {
         return vulkan_backend ? vulkan_backend->device_count() : 0;
     }, "Get number of available Vulkan devices");
 
+    // Audit-11 QQ.17: DataLoader fork-safety probe for Vulkan. Mirrors
+    // cuda_is_initialized — true if a Vulkan instance has (or may have)
+    // been created in this process.
+    m.def("vulkan_is_initialized", []() {
+        auto& loader = tenzor::backend_registry();
+        auto* vulkan_backend = loader.get_backend("vulkan");
+        if (vulkan_backend == nullptr || !vulkan_backend->is_available()) {
+            return false;
+        }
+        return vulkan_backend->device_count() > 0;
+    }, "Check if Vulkan has (or may have) an active context — fork() guard for DataLoader");
+
     // OneAPI device availability
     m.def("oneapi_is_available", []() {
         auto& loader = tenzor::backend_registry();
@@ -325,6 +337,16 @@ void register_core(py::module_& m) {
         auto* oneapi_backend = loader.get_backend("oneapi");
         return oneapi_backend ? oneapi_backend->device_count() : 0;
     }, "Get number of available OneAPI devices");
+
+    // Audit-11 QQ.17: fork-safety probe for OneAPI/SYCL.
+    m.def("oneapi_is_initialized", []() {
+        auto& loader = tenzor::backend_registry();
+        auto* oneapi_backend = loader.get_backend("oneapi");
+        if (oneapi_backend == nullptr || !oneapi_backend->is_available()) {
+            return false;
+        }
+        return oneapi_backend->device_count() > 0;
+    }, "Check if OneAPI/SYCL has (or may have) an active context — fork() guard for DataLoader");
 
     // Op coverage introspection API
     m.def("get_supported_ops", [](const std::string& device_str) {
@@ -365,6 +387,17 @@ void register_core(py::module_& m) {
         auto* rocm_backend = loader.get_backend("rocm");
         return rocm_backend ? rocm_backend->device_count() : 0;
     }, "Get number of available ROCm devices");
+
+    // Audit-11 QQ.17: fork-safety probe for ROCm. HIP shares the
+    // CUDA-style driver-context-after-fork hazard.
+    m.def("rocm_is_initialized", []() {
+        auto& loader = tenzor::backend_registry();
+        auto* rocm_backend = loader.get_backend("rocm");
+        if (rocm_backend == nullptr || !rocm_backend->is_available()) {
+            return false;
+        }
+        return rocm_backend->device_count() > 0;
+    }, "Check if ROCm has (or may have) an active driver context — fork() guard for DataLoader");
 
     // List all available backends
     m.def("list_backends", []() {
@@ -2981,13 +3014,33 @@ Returns:
     // modern protocol) or a raw capsule named "dltensor" (legacy /
     // direct path). Matches the torch.from_dlpack / numpy.from_dlpack
     // signature.
-    m.def("from_dlpack", [](py::object obj) -> tenzor::Tensor {
+    //
+    // Audit-11 QQ.16: the v0.8 DLPack producer contract expects the
+    // consumer to pass `stream` so the producer can issue a wait_event
+    // on the consumer's compute stream before returning. Previously we
+    // called `obj.__dlpack__()` with no kwargs — on CUDA producers
+    // (PyTorch / JAX / CuPy) running on a non-default stream this is a
+    // race-condition: the consumer may read the buffer before the
+    // producer's kernel has finished. We now forward an explicit
+    // `stream` arg whenever the caller supplies one; auto-detection
+    // of the active backend stream is deferred until the backend
+    // exposes a stream-handle API to Python.
+    m.def("from_dlpack", [](py::object obj, py::object stream) -> tenzor::Tensor {
             py::capsule capsule;
             if (py::hasattr(obj, "__dlpack__")) {
-                // Modern protocol: call the producer to obtain a capsule.
-                // Pass stream=None — we don't have a compute stream to
-                // synchronize on at the module boundary.
-                py::object raw = obj.attr("__dlpack__")();
+                py::object raw;
+                if (!stream.is_none()) {
+                    // Forward the caller-supplied stream handle so the
+                    // producer can record/wait on it (v0.8 contract).
+                    py::dict kwargs;
+                    kwargs["stream"] = stream;
+                    raw = obj.attr("__dlpack__")(**kwargs);
+                } else {
+                    // No stream available — fall back to the v0.7
+                    // signature. Same semantics as before for CPU
+                    // producers and default-stream CUDA producers.
+                    raw = obj.attr("__dlpack__")();
+                }
                 capsule = raw.cast<py::capsule>();
             } else {
                 // Legacy: the caller handed us the capsule directly.
@@ -3008,12 +3061,17 @@ Returns:
             PyCapsule_SetName(capsule.ptr(), "used_dltensor");
             return tenzor::from_dlpack(managed);
         },
-        py::arg("obj"),
+        py::arg("obj"), py::arg("stream") = py::none(),
         "Zero-copy import from a DLPack producer (NumPy 2.0+, PyTorch, "
         "JAX, CuPy, TVM, or any object exposing __dlpack__). Returns a "
         "Tenzor tensor that shares memory with the original — the "
         "producer's storage is kept alive until the returned tensor is "
-        "destroyed.");
+        "destroyed.\n\n"
+        "stream: optional opaque stream handle (integer; 1 for the "
+        "CUDA default stream, 2 for the per-thread default) forwarded "
+        "to the producer per DLPack v0.8. Pass the value returned by "
+        "torch.cuda.current_stream().cuda_stream / cupy.cuda.get_current_stream().ptr "
+        "to avoid races on non-default streams.");
 
     // Operations
     m.def("zeros", &tenzor::zeros, "Create tensor filled with zeros",
@@ -4976,9 +5034,29 @@ Returns:
             // Delegate to Tensor.__setitem__ semantics by reusing the
             // underlying tensor reference. Unwrap a Variable value to its
             // tensor first so the broadcast path sees a Tensor as expected.
+            //
+            // Audit-11 QQ.18: if the value-side Variable carries a live
+            // autograd graph (requires_grad=True under an enabled grad
+            // context), the unwrap to `.tensor()` would silently sever
+            // its grad_fn — the scatter-write would then not contribute
+            // to backward, returning zero gradients with no diagnostic.
+            // Raise loudly until IndexPut/CopySlices is implemented.
             py::object inner_value = value;
             if (py::isinstance<tenzor::Variable>(value)) {
-                inner_value = py::cast(value.cast<tenzor::Variable>().tensor());
+                auto value_var = value.cast<tenzor::Variable>();
+                if (value_var.requires_grad() && tenzor::is_grad_enabled()) {
+                    throw std::runtime_error(
+                        "Variable.__setitem__ does not yet preserve autograd "
+                        "through the value side; assigning a Variable with "
+                        "requires_grad=True would silently sever its graph "
+                        "and the scatter-write would not contribute to "
+                        "backward(). Detach the value (`.detach()`) or wrap "
+                        "the scatter as an explicit functional op (e.g. "
+                        "index_put, scatter). Tracked in audit-11 QQ.18 — "
+                        "full IndexPut/CopySlices implementation is a "
+                        "follow-up.");
+                }
+                inner_value = py::cast(value_var.tensor());
             }
             auto& dst = self.tensor();
             py::object py_dst = py::cast(&dst, py::return_value_policy::reference);

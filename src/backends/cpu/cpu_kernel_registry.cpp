@@ -425,7 +425,7 @@ namespace cpu {
     auto fused_gelu_kernel(const Tensor& input) -> Tensor;
     auto fused_layer_norm_kernel(const Tensor& input, const std::vector<int64_t>& normalized_shape, const Tensor& weight, const Tensor& bias, float eps) -> std::tuple<Tensor, Tensor, Tensor>;
     auto fused_layer_norm_backward_kernel(const Tensor& grad_output, const Tensor& input, const std::vector<int64_t>& normalized_shape, const Tensor& mean, const Tensor& inv_std, const Tensor& weight) -> std::vector<Tensor>;
-    auto fused_conv2d_bn_relu_kernel(const Tensor& input, const Tensor& weight, const Tensor& conv_bias, const Tensor& bn_gamma, const Tensor& bn_beta, const Tensor& bn_running_mean, const Tensor& bn_running_var, int64_t stride, int64_t padding, float bn_momentum, float bn_eps, bool training) -> Tensor;
+    auto fused_conv2d_bn_relu_kernel(const Tensor& input, const Tensor& weight, const Tensor& conv_bias, const Tensor& bn_gamma, const Tensor& bn_beta, const Tensor& bn_running_mean, const Tensor& bn_running_var, int64_t stride_h, int64_t stride_w, int64_t padding_h, int64_t padding_w, int64_t dilation_h, int64_t dilation_w, float bn_momentum, float bn_eps, bool training) -> Tensor;
 
     // Creation
     auto zeros_kernel(const std::vector<int64_t>& shape, DType dtype, const Device& device) -> Tensor;
@@ -2183,13 +2183,20 @@ void register_cpu_kernels(BackendDispatchTable& table) {
 
     table.register_single_output_kernel(OpId::FusedConv2dBnReLU, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
         // inputs: [input, weight, conv_bias, bn_gamma, bn_beta, bn_running_mean, bn_running_var]
-        int64_t stride = attrs.get_int(AttrKey::Stride, 1);
-        int64_t padding = attrs.get_int(AttrKey::Padding, 0);
+        // Audit QQ.10: per-axis stride / padding / dilation with scalar fallback,
+        // mirroring the Conv2dForward / FusedConv2dReLU pattern (audit F.11).
+        const auto stride   = ::tenzor::backend::attrs::stride_2d(attrs);
+        const auto padding  = ::tenzor::backend::attrs::padding_2d(attrs);
+        const auto dilation = ::tenzor::backend::attrs::dilation_2d(attrs);
         float bn_momentum = static_cast<float>(attrs.get_float(AttrKey::Momentum, 0.1));
         float bn_eps = static_cast<float>(attrs.get_float(AttrKey::Eps, 1e-5));
         bool training = attrs.get_bool(AttrKey::Training, false);
-        return cpu::fused_conv2d_bn_relu_kernel(inputs[0], inputs[1], inputs[2], inputs[3], inputs[4], inputs[5], inputs[6],
-                                                  stride, padding, bn_momentum, bn_eps, training);
+        return cpu::fused_conv2d_bn_relu_kernel(
+            inputs[0], inputs[1], inputs[2], inputs[3], inputs[4], inputs[5], inputs[6],
+            stride[0], stride[1],
+            padding[0], padding[1],
+            dilation[0], dilation[1],
+            bn_momentum, bn_eps, training);
     });
 
     // =========================================================================

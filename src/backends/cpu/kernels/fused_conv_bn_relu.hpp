@@ -125,9 +125,12 @@ inline void im2col_optimized(
     int64_t width,
     int64_t kernel_h,
     int64_t kernel_w,
-    int64_t stride,
-    int64_t padding,
-    int64_t dilation,
+    int64_t stride_h,
+    int64_t stride_w,
+    int64_t padding_h,
+    int64_t padding_w,
+    int64_t dilation_h,
+    int64_t dilation_w,
     int64_t out_h,
     int64_t out_w
 ) {
@@ -142,10 +145,10 @@ inline void im2col_optimized(
 
                 for (int64_t c = 0; c < channels; ++c) {
                     for (int64_t kh = 0; kh < kernel_h; ++kh) {
-                        int64_t ih = oh * stride - padding + kh * dilation;
+                        int64_t ih = oh * stride_h - padding_h + kh * dilation_h;
 
                         for (int64_t kw = 0; kw < kernel_w; ++kw) {
-                            int64_t iw = ow * stride - padding + kw * dilation;
+                            int64_t iw = ow * stride_w - padding_w + kw * dilation_w;
 
                             if (ih >= 0 && ih < height && iw >= 0 && iw < width) {
                                 col_ptr[col_idx] = input[
@@ -187,8 +190,12 @@ inline void conv_bn_relu_folded(
     int64_t out_channels,
     int64_t kernel_h,
     int64_t kernel_w,
-    int64_t stride,
-    int64_t padding,
+    int64_t stride_h,
+    int64_t stride_w,
+    int64_t padding_h,
+    int64_t padding_w,
+    int64_t dilation_h,
+    int64_t dilation_w,
     int64_t out_h,
     int64_t out_w
 ) {
@@ -214,7 +221,8 @@ inline void conv_bn_relu_folded(
         im2col_optimized(
             input_b, col,
             /*batch=*/1, in_channels, height, width,
-            kernel_h, kernel_w, stride, padding, /*dilation=*/1,
+            kernel_h, kernel_w,
+            stride_h, stride_w, padding_h, padding_w, dilation_h, dilation_w,
             out_h, out_w
         );
 
@@ -301,8 +309,12 @@ inline void conv_bn_relu_training(
     int64_t out_channels,
     int64_t kernel_h,
     int64_t kernel_w,
-    int64_t stride,
-    int64_t padding,
+    int64_t stride_h,
+    int64_t stride_w,
+    int64_t padding_h,
+    int64_t padding_w,
+    int64_t dilation_h,
+    int64_t dilation_w,
     int64_t out_h,
     int64_t out_w,
     float momentum = 0.1f,
@@ -327,7 +339,8 @@ inline void conv_bn_relu_training(
         im2col_optimized(
             input_b, col,
             /*batch=*/1, in_channels, height, width,
-            kernel_h, kernel_w, stride, padding, /*dilation=*/1,
+            kernel_h, kernel_w,
+            stride_h, stride_w, padding_h, padding_w, dilation_h, dilation_w,
             out_h, out_w
         );
 
@@ -466,7 +479,8 @@ inline void conv_relu(
     im2col_optimized(
         input, col,
         batch, in_channels, height, width,
-        kernel_h, kernel_w, stride, padding, 1,
+        kernel_h, kernel_w,
+        stride, stride, padding, padding, /*dilation_h=*/1, /*dilation_w=*/1,
         out_h, out_w
     );
 

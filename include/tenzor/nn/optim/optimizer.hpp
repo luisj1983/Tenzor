@@ -65,6 +65,11 @@ struct ParamGroup {
     std::optional<double> eta_plus;     ///< Rprop step-size grow factor
     std::optional<double> step_min;     ///< Rprop minimum step size
     std::optional<double> step_max;     ///< Rprop maximum step size
+    // QQ.12: LAMB trust-ratio clamps (PyTorch's NVlamb default range is
+    // [0, 10]).  Without these, a near-zero update_norm yields
+    // trust_ratio -> +Inf which then drives the parameter to NaN.
+    std::optional<double> trust_ratio_min; ///< LAMB minimum trust ratio
+    std::optional<double> trust_ratio_max; ///< LAMB maximum trust ratio
 
     /**
      * @brief Read a per-group hyperparam with optimizer-member fallback.
@@ -245,6 +250,13 @@ public:
      * Clears gradients from previous iteration. Must be called before each backward pass
      * to prevent gradient accumulation.
      *
+     * @param set_to_none If true (PyTorch 1.7+ default), drop each parameter's
+     *        gradient slot entirely so the next backward() allocates a fresh
+     *        tensor (saves memory and avoids accidental in-place reuse).
+     *        If false, zero the existing gradient tensor in-place — matches
+     *        the pre-1.7 behaviour and keeps the same storage so callers
+     *        that captured a raw pointer to .grad() stay valid.
+     *
      * @par Complexity
      * O(P) where P is the total number of parameters
      *
@@ -254,7 +266,7 @@ public:
      * optimizer.step();       // Update parameters
      * @endcode
      */
-    auto zero_grad() -> void;
+    auto zero_grad(bool set_to_none = true) -> void;
 
     /**
      * @brief Get list of parameters being optimized

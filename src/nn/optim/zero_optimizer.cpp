@@ -479,8 +479,8 @@ auto ZeROStage1Optimizer::step_impl() -> void {
     }
 }
 
-auto ZeROStage1Optimizer::zero_grad() -> void {
-    base_optimizer_->zero_grad();
+auto ZeROStage1Optimizer::zero_grad(bool set_to_none) -> void {
+    base_optimizer_->zero_grad(set_to_none);
 }
 
 auto ZeROStage1Optimizer::state_dict_unlocked() const -> std::unordered_map<std::string, Tensor> {
@@ -3503,12 +3503,19 @@ auto ZeROStage3Optimizer::step_impl() -> void {
     // They will be gathered on-demand during next forward pass
 }
 
-auto ZeROStage3Optimizer::zero_grad() -> void {
-    // Zero gradients for local partition only
+auto ZeROStage3Optimizer::zero_grad(bool set_to_none) -> void {
+    // Zero gradients for local partition only.
+    // QQ.14: Variable::zero_grad() always drops the slot — when
+    // set_to_none=false we want an in-place zero instead so callers that
+    // captured raw pointers to .grad() stay valid.
     auto& partition = local_partition();
     for (auto& param : partition.params) {
-        if (param->has_grad()) {
+        if (!param || !param->has_grad()) continue;
+        if (set_to_none) {
             param->zero_grad();
+        } else {
+            auto& grad = param->mutable_grad().value();
+            grad.fill_(0.0);
         }
     }
 }

@@ -145,9 +145,9 @@ public:
     auto step_impl() -> void override;
 
     /**
-     * @brief Zero all parameter gradients
+     * @brief Zero all parameter gradients (QQ.14: see Optimizer::zero_grad).
      */
-    auto zero_grad() -> void;
+    auto zero_grad(bool set_to_none = true) -> void;
 
     /**
      * @brief Set new learning rate

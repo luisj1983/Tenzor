@@ -22,6 +22,18 @@
 #include "tenzor/ops/transform.hpp"
 #include "tenzor/ops/indexing.hpp"
 #include "tenzor/autograd/ops.hpp"
+#include "tenzor/utils/safe_math.hpp"
+
+#include <algorithm>
+
+namespace {
+/// Floor the caller-supplied eps_ at the dtype's representable epsilon so
+/// the where-mask doesn't compare/replace with a value that has already
+/// underflowed to zero in F16/BF16 (QQ.11).
+inline double floored_eps(double eps_in, ::tenzor::DType dtype) {
+    return std::max(eps_in, ::tenzor::detail::dtype_epsilon(dtype));
+}
+} // namespace
 
 namespace tenzor::nn::utils {
 
@@ -156,7 +168,8 @@ auto SpectralNorm::power_iteration(const Tensor& weight_2d) -> void {
         // a where(mask, ...) idiom so a zero norm becomes 1.0 (preserving
         // the previous direction) instead of a NaN/Inf.
         auto v_norm_t = norm(v_new);
-        Tensor v_eps_t = ::tenzor::full({}, eps_, v_norm_t.dtype(), v_norm_t.device());
+        Tensor v_eps_t = ::tenzor::full({}, floored_eps(eps_, v_norm_t.dtype()),
+                                        v_norm_t.dtype(), v_norm_t.device());
         Tensor v_mask  = ::tenzor::gt(v_norm_t, v_eps_t);
         Tensor v_one_t = ::tenzor::full({}, 1.0, v_norm_t.dtype(), v_norm_t.device());
         Tensor v_safe  = ::tenzor::where(v_mask, v_norm_t, v_one_t);
@@ -168,7 +181,8 @@ auto SpectralNorm::power_iteration(const Tensor& weight_2d) -> void {
                                {static_cast<int64_t>(u_.shape()[0])});
 
         auto u_norm_t = norm(u_new);
-        Tensor u_eps_t = ::tenzor::full({}, eps_, u_norm_t.dtype(), u_norm_t.device());
+        Tensor u_eps_t = ::tenzor::full({}, floored_eps(eps_, u_norm_t.dtype()),
+                                        u_norm_t.dtype(), u_norm_t.device());
         Tensor u_mask  = ::tenzor::gt(u_norm_t, u_eps_t);
         Tensor u_one_t = ::tenzor::full({}, 1.0, u_norm_t.dtype(), u_norm_t.device());
         Tensor u_safe  = ::tenzor::where(u_mask, u_norm_t, u_one_t);
@@ -202,7 +216,8 @@ auto SpectralNorm::compute_weight_variable() -> Variable {
     // is intentionally not part of the autograd graph — only the divide
     // is). Use a fresh constant Tensor so backward doesn't try to
     // differentiate sigma_.
-    Tensor eps_t = ::tenzor::full({}, eps_, sigma_.dtype(), sigma_.device());
+    Tensor eps_t = ::tenzor::full({}, floored_eps(eps_, sigma_.dtype()),
+                                   sigma_.dtype(), sigma_.device());
     Tensor mask  = ::tenzor::gt(sigma_, eps_t);
     Tensor safe  = ::tenzor::where(mask, sigma_, eps_t);
     if (safe.device() != weight_orig_->tensor().device()) safe = safe.to(weight_orig_->tensor().device());

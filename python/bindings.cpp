@@ -3011,7 +3011,90 @@ void bind_compression(py::module& m) {
             }
             ss << "], nnz=" << s.nnz() << ", dtype=" << tenzor::dtype_name(s.dtype()) << ")";
             return ss.str();
-        });
+        })
+        // Audit-11 QQ.15: pickle support. KK.22 listed pickle as done but
+        // the actual `py::pickle` binding never landed — `pickle.dumps` on
+        // any SparseTensor raised `TypeError: cannot pickle`. We serialise
+        // the layout discriminator plus the layout-specific component
+        // tensors; the unpickler routes to the matching factory.
+        .def(py::pickle(
+            [](const tenzor::SparseTensor& s) -> py::dict {
+                py::dict d;
+                d["layout"] = static_cast<int>(s.layout());
+                d["shape"] = std::vector<int64_t>(s.shape().begin(), s.shape().end());
+                d["device"] = s.device().to_string();
+                switch (s.layout()) {
+                    case tenzor::SparseLayout::COO:
+                        d["indices"] = s.indices();
+                        d["values"] = s.values();
+                        break;
+                    case tenzor::SparseLayout::CSR:
+                        d["crow_indices"] = s.crow_indices();
+                        d["col_indices"] = s.col_indices();
+                        d["values"] = s.values();
+                        break;
+                    case tenzor::SparseLayout::CSC:
+                        d["ccol_indices"] = s.ccol_indices();
+                        d["row_indices"] = s.row_indices();
+                        d["values"] = s.values();
+                        break;
+                    case tenzor::SparseLayout::BSR: {
+                        d["bsr_row_ptr"] = s.bsr_row_ptr();
+                        d["bsr_col_ind"] = s.bsr_col_ind();
+                        d["values"] = s.values();
+                        auto bs = s.block_size();
+                        d["block_size"] = py::make_tuple(bs.first, bs.second);
+                        break;
+                    }
+                }
+                return d;
+            },
+            [](py::dict d) -> tenzor::SparseTensor {
+                auto layout = static_cast<tenzor::SparseLayout>(d["layout"].cast<int>());
+                auto shape = d["shape"].cast<std::vector<int64_t>>();
+                auto build = [&]() -> tenzor::SparseTensor {
+                    switch (layout) {
+                        case tenzor::SparseLayout::COO:
+                            return tenzor::SparseTensor::sparse_coo(
+                                d["indices"].cast<tenzor::Tensor>(),
+                                d["values"].cast<tenzor::Tensor>(),
+                                shape);
+                        case tenzor::SparseLayout::CSR:
+                            return tenzor::SparseTensor::sparse_csr(
+                                d["crow_indices"].cast<tenzor::Tensor>(),
+                                d["col_indices"].cast<tenzor::Tensor>(),
+                                d["values"].cast<tenzor::Tensor>(),
+                                shape);
+                        case tenzor::SparseLayout::CSC:
+                            return tenzor::SparseTensor::sparse_csc(
+                                d["ccol_indices"].cast<tenzor::Tensor>(),
+                                d["row_indices"].cast<tenzor::Tensor>(),
+                                d["values"].cast<tenzor::Tensor>(),
+                                shape);
+                        case tenzor::SparseLayout::BSR: {
+                            auto bs_t = d["block_size"].cast<py::tuple>();
+                            std::pair<int64_t, int64_t> bs{
+                                bs_t[0].cast<int64_t>(),
+                                bs_t[1].cast<int64_t>()};
+                            return tenzor::SparseTensor::sparse_bsr(
+                                d["bsr_row_ptr"].cast<tenzor::Tensor>(),
+                                d["bsr_col_ind"].cast<tenzor::Tensor>(),
+                                d["values"].cast<tenzor::Tensor>(),
+                                shape, bs);
+                        }
+                    }
+                    throw std::runtime_error(
+                        "SparseTensor.__setstate__: unknown layout discriminator");
+                };
+                auto st = build();
+                if (d.contains("device")) {
+                    auto dev = tenzor::Device::from_string(d["device"].cast<std::string>());
+                    if (dev.type != st.device().type || dev.index != st.device().index) {
+                        st = st.to(dev);
+                    }
+                }
+                return st;
+            }));
 
     sparse_mod.def("sparse_coo", &tenzor::SparseTensor::sparse_coo,
         "Create a COO sparse tensor",
@@ -3183,9 +3266,28 @@ void bind_compression(py::module& m) {
 
     py::class_<tenzor::serving::InferenceServer>(serving, "InferenceServer")
         .def(py::init<tenzor::serving::ServerConfig>(), py::arg("config"))
-        .def("start", &tenzor::serving::InferenceServer::start)
-        .def("stop", &tenzor::serving::InferenceServer::stop)
-        .def("wait", &tenzor::serving::InferenceServer::wait)
+        // Audit-11 QQ.19: release the GIL on all blocking lifecycle calls.
+        // wait() previously held the GIL for the lifetime of the server
+        // thread, deadlocking any Python-side signal handler (e.g.
+        // KeyboardInterrupt could not be raised).
+        .def("start", &tenzor::serving::InferenceServer::start,
+             py::call_guard<py::gil_scoped_release>())
+        .def("stop", &tenzor::serving::InferenceServer::stop,
+             py::call_guard<py::gil_scoped_release>())
+        .def("wait", [](tenzor::serving::InferenceServer& self, double timeout_ms) -> bool {
+            // Release the GIL while we sleep/poll so signals (Ctrl-C)
+            // can interrupt the Python main thread.
+            py::gil_scoped_release release;
+            if (timeout_ms < 0.0) {
+                self.wait();
+                return true;
+            }
+            return self.wait_for(std::chrono::milliseconds(
+                static_cast<int64_t>(timeout_ms)));
+        }, py::arg("timeout_ms") = -1.0,
+           "Block until the server is stopped. Pass timeout_ms >= 0 to poll "
+           "for KeyboardInterrupt; returns True if the server stopped within "
+           "the timeout, False on timeout.")
         .def("repository", &tenzor::serving::InferenceServer::repository,
              py::return_value_policy::reference_internal);
 

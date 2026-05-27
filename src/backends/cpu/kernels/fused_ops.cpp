@@ -2132,7 +2132,9 @@ auto fused_conv2d_bn_relu_kernel(
     const Tensor& input, const Tensor& weight, const Tensor& conv_bias,
     const Tensor& bn_gamma, const Tensor& bn_beta,
     const Tensor& bn_running_mean, const Tensor& bn_running_var,
-    int64_t stride, int64_t padding,
+    int64_t stride_h, int64_t stride_w,
+    int64_t padding_h, int64_t padding_w,
+    int64_t dilation_h, int64_t dilation_w,
     float bn_momentum, float bn_eps, bool training) -> Tensor {
 
     // Widen-narrow for non-Float32 inputs (audit M3 / feedback_float16_widen_narrow).
@@ -2153,7 +2155,8 @@ auto fused_conv2d_bn_relu_kernel(
         Tensor out_f32 = fused_conv2d_bn_relu_kernel(
             input_f32, weight_f32, conv_bias_f32,
             bn_gamma_f32, bn_beta_f32, bn_rm_f32, bn_rv_f32,
-            stride, padding, bn_momentum, bn_eps, training);
+            stride_h, stride_w, padding_h, padding_w, dilation_h, dilation_w,
+            bn_momentum, bn_eps, training);
         return out_f32.to(orig_dtype);
     }
 
@@ -2166,8 +2169,8 @@ auto fused_conv2d_bn_relu_kernel(
     int64_t out_channels = w_shape[0];
     int64_t kernel_h = w_shape[2];
     int64_t kernel_w = w_shape[3];
-    int64_t out_h = (height + 2 * padding - kernel_h) / stride + 1;
-    int64_t out_w = (width + 2 * padding - kernel_w) / stride + 1;
+    int64_t out_h = (height + 2 * padding_h - dilation_h * (kernel_h - 1) - 1) / stride_h + 1;
+    int64_t out_w = (width  + 2 * padding_w - dilation_w * (kernel_w - 1) - 1) / stride_w + 1;
 
     Tensor output({batch, out_channels, out_h, out_w}, DType::Float32, input.device());
 
@@ -2182,7 +2185,8 @@ auto fused_conv2d_bn_relu_kernel(
             rm.data<float>(), rv.data<float>(),
             output.data<float>(),
             batch, in_channels, height, width,
-            out_channels, kernel_h, kernel_w, stride, padding,
+            out_channels, kernel_h, kernel_w,
+            stride_h, stride_w, padding_h, padding_w, dilation_h, dilation_w,
             out_h, out_w, bn_momentum, bn_eps);
     } else {
         // Inference path: fold BN into conv weights.
@@ -2220,7 +2224,8 @@ auto fused_conv2d_bn_relu_kernel(
             input.data<float>(), weight_folded.data<float>(), bias_folded.data<float>(),
             output.data<float>(),
             batch, in_channels, height, width,
-            out_channels, kernel_h, kernel_w, stride, padding,
+            out_channels, kernel_h, kernel_w,
+            stride_h, stride_w, padding_h, padding_w, dilation_h, dilation_w,
             out_h, out_w);
     }
 

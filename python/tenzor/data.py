@@ -1030,25 +1030,64 @@ class _MultiProcessLoader:
         self._output_queue: Optional[mp.Queue] = None
 
     def _start_workers(self):
-        # V.33: fork() corrupts the CUDA driver context in the child
-        # (silent garbage tensors, hangs).  When a non-CPU backend is live,
-        # fall back to spawn (or forkserver where available — spawn is the
-        # safest default).  We probe tenzor_core for an explicit query;
-        # absent that, any CUDA-available system also forces spawn.
-        ctx_name = "fork" if hasattr(os, "fork") else "spawn"
+        # V.33 / Audit-11 QQ.17: fork() corrupts any GPU driver context in
+        # the child (silent garbage tensors, hangs). We must probe **every**
+        # GPU backend, not just CUDA — ROCm, OneAPI/L0, and Vulkan all share
+        # the same driver-context-after-fork hazard. Earlier code only
+        # probed CUDA, so ROCm/OneAPI/Vulkan users silently forked into a
+        # corrupt driver state.
+        #
+        # Respect a user-set start method: if the caller already pinned the
+        # start method via `multiprocessing.set_start_method(...)`, honour
+        # it and warn if it conflicts with what GPU safety would have
+        # chosen.
+        gpu_active = False
         if hasattr(os, "fork"):
             try:
                 from . import tenzor_core as _core  # type: ignore[attr-defined]
-                cuda_active = bool(
-                    getattr(_core, "cuda_is_initialized", lambda: False)()
-                    or getattr(_core, "cuda_is_available", lambda: False)()
+                probes = (
+                    ("cuda_is_initialized", "cuda_is_available"),
+                    ("rocm_is_initialized", "rocm_is_available"),
+                    ("oneapi_is_initialized", "oneapi_is_available"),
+                    ("vulkan_is_initialized", "vulkan_is_available"),
                 )
-                if cuda_active:
-                    # forkserver inherits parent's CUDA state on first spawn,
-                    # so spawn is the unambiguous safe choice.
-                    ctx_name = "spawn"
+                for init_name, avail_name in probes:
+                    init_fn = getattr(_core, init_name, None)
+                    avail_fn = getattr(_core, avail_name, None)
+                    try:
+                        if (init_fn is not None and bool(init_fn())) or (
+                            avail_fn is not None and bool(avail_fn())
+                        ):
+                            gpu_active = True
+                            break
+                    except Exception:
+                        # A probe that throws is treated as "not active";
+                        # the next probe still runs.
+                        continue
             except ImportError:
                 pass
+
+        user_method = mp.get_start_method(allow_none=True)
+        if user_method is not None:
+            ctx_name = user_method
+            if gpu_active and user_method == "fork":
+                import warnings as _warnings
+                _warnings.warn(
+                    "DataLoader: a GPU backend (CUDA/ROCm/OneAPI/Vulkan) "
+                    "is active but multiprocessing start method is "
+                    "explicitly set to 'fork' — child processes will see "
+                    "a corrupted driver context (silent garbage tensors "
+                    "or hangs). Use 'spawn' or 'forkserver' for GPU "
+                    "workloads.",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
+        elif gpu_active:
+            # forkserver inherits parent's GPU state on first spawn,
+            # so spawn is the unambiguous safe choice.
+            ctx_name = "spawn"
+        else:
+            ctx_name = "fork" if hasattr(os, "fork") else "spawn"
         ctx = mp.get_context(ctx_name)
         self._output_queue = ctx.Queue(maxsize=self._prefetch_factor * self._num_workers)
         self._index_queues = [ctx.Queue(maxsize=self._prefetch_factor) for _ in range(self._num_workers)]

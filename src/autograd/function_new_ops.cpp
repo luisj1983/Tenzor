@@ -3930,22 +3930,56 @@ auto SegmentReduceBackward::backward(std::vector<Tensor> /*grad_outputs*/)
         "returns the necessary index/state.");
 }
 
-// --- GumbelSoftmax (non-diff: forward doesn't save the Gumbel noise) -----
+// --- GumbelSoftmax — audit-11 QQ.4: PyTorch-parity straight-through estimator.
+// Forward saves y_soft = softmax((logits + Gumbel)/tau). The gradient through
+// the soft sample equals the softmax Jacobian at y_soft, scaled by 1/tau:
+//   grad_logits = (y_soft * (grad_out - sum(grad_out * y_soft, dim, keepdim=true))) / tau
+// The `hard` quantisation is bypassed (STE: gradient is taken w.r.t. y_soft).
 auto GumbelSoftmaxBackward::forward(std::vector<Variable>) -> std::vector<Variable> {
     throw std::runtime_error("GumbelSoftmaxBackward::forward should not be called directly");
 }
-auto GumbelSoftmaxBackward::backward(std::vector<Tensor> /*grad_outputs*/)
+auto GumbelSoftmaxBackward::backward(std::vector<Tensor> grad_outputs)
     -> std::vector<Tensor> {
-    throw NonDifferentiable(
-        "gumbel_softmax: the correct backward is SoftmaxBackward applied to "
-        "the perturbed logits (logits + Gumbel noise) / tau, with the "
-        "straight-through estimator routed through the soft sample when "
-        "hard=true. The current forward does not save the Gumbel noise "
-        "drawn during sampling, so any backward we add here would either "
-        "re-sample (producing wrong, non-reproducible gradients) or ignore "
-        "tau. Marked NonDifferentiable until the forward saves the noise. "
-        "Compose softmax((logits + gumbel) / tau) directly if you need the "
-        "gradient.");
+    require_saved_tensors(1);
+    const auto& y_soft = saved_tensors_[0];
+    const auto& grad_out = grad_outputs[0];
+
+    int64_t ndim = static_cast<int64_t>(y_soft.ndim());
+    int64_t d = dim_ < 0 ? dim_ + ndim : dim_;
+
+    // PyTorch STE: grad_logits = y_soft * (grad_out - (grad_out * y_soft).sum(d, keepdim))/tau
+    auto prod = mul(grad_out, y_soft);
+    auto sum_prod = sum(prod, d, /*keepdim=*/true);
+    auto sum_b = expand(sum_prod, std::vector<int64_t>(y_soft.shape().begin(), y_soft.shape().end()));
+    auto diff = sub(grad_out, sum_b);
+    auto j = mul(y_soft, diff);
+    auto grad_logits = mul(j, 1.0 / tau_);
+    return {grad_logits};
+}
+auto GumbelSoftmaxBackward::backward_with_variables(std::vector<Variable> grad_outputs)
+    -> std::vector<Variable> {
+    // Variable-level rebuild for higher-order parity (audit II.2).
+    Variable y_soft_v;
+    if (has_saved_variables() && !saved_variables_.empty()) {
+        y_soft_v = saved_variables_[0];
+    } else {
+        require_saved_tensors(1);
+        y_soft_v = Variable(saved_tensors_[0], false);
+    }
+    int64_t ndim = static_cast<int64_t>(y_soft_v.tensor().ndim());
+    int64_t d = dim_ < 0 ? dim_ + ndim : dim_;
+    const auto& grad_var = grad_outputs[0];
+
+    std::vector<int64_t> shape_vec(y_soft_v.tensor().shape().begin(),
+                                   y_soft_v.tensor().shape().end());
+
+    auto prod = grad_var * y_soft_v;
+    auto sum_prod = tenzor::sum(prod, d, /*keepdim=*/true);
+    auto sum_b = tenzor::expand(sum_prod, shape_vec);
+    auto diff = grad_var - sum_b;
+    auto j = y_soft_v * diff;
+    auto grad_logits = j * (1.0 / tau_);
+    return {grad_logits};
 }
 
 // --- CumMax (differentiable: scatter_add of grad_values along dim using
@@ -3970,6 +4004,21 @@ auto CumMaxBackward::backward(std::vector<Tensor> grad_outputs)
     auto zero = zeros(input_shape, grad_out.dtype(), grad_out.device());
     return {scatter_add(zero, dim, indices, grad_out)};
 }
+// audit-11 QQ.5: provide higher-order path via Variable-level scatter_add.
+auto CumMaxBackward::backward_with_variables(std::vector<Variable> grad_outputs)
+    -> std::vector<Variable> {
+    require_saved_tensors(2);
+    const auto& shape_holder = saved_tensors_[0];
+    const auto& indices = saved_tensors_[1];  // Int64, non-diff
+    auto input_shape = std::vector<int64_t>(
+        shape_holder.shape().begin(), shape_holder.shape().end());
+    int64_t dim = dim_;
+    if (dim < 0) dim += static_cast<int64_t>(input_shape.size());
+    const auto& grad_var = grad_outputs[0];
+    auto zero = zeros(input_shape, grad_var.tensor().dtype(), grad_var.tensor().device());
+    Variable zero_var(zero, false);
+    return {tenzor::scatter_add(zero_var, dim, indices, grad_var)};
+}
 
 // --- CumMin (differentiable) ---------------------------------------------
 auto CumMinBackward::forward(std::vector<Variable>) -> std::vector<Variable> {
@@ -3989,6 +4038,21 @@ auto CumMinBackward::backward(std::vector<Tensor> grad_outputs)
 
     auto zero = zeros(input_shape, grad_out.dtype(), grad_out.device());
     return {scatter_add(zero, dim, indices, grad_out)};
+}
+// audit-11 QQ.5: higher-order path mirrors CumMaxBackward.
+auto CumMinBackward::backward_with_variables(std::vector<Variable> grad_outputs)
+    -> std::vector<Variable> {
+    require_saved_tensors(2);
+    const auto& shape_holder = saved_tensors_[0];
+    const auto& indices = saved_tensors_[1];
+    auto input_shape = std::vector<int64_t>(
+        shape_holder.shape().begin(), shape_holder.shape().end());
+    int64_t dim = dim_;
+    if (dim < 0) dim += static_cast<int64_t>(input_shape.size());
+    const auto& grad_var = grad_outputs[0];
+    auto zero = zeros(input_shape, grad_var.tensor().dtype(), grad_var.tensor().device());
+    Variable zero_var(zero, false);
+    return {tenzor::scatter_add(zero_var, dim, indices, grad_var)};
 }
 
 // =========================================================================

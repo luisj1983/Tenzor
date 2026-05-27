@@ -5262,6 +5262,9 @@ public:
         : tau_(tau), hard_(hard), dim_(dim) {}
     auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+    // audit-11 QQ.4: implement straight-through estimator (PyTorch parity).
+    auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
+    auto supports_higher_order() const -> bool override { return true; }
     auto name() const -> std::string override { return "GumbelSoftmaxBackward"; }
     auto op_id() const -> OpId override { return OpId::GumbelSoftmax; }
 private:
@@ -5282,6 +5285,9 @@ public:
     explicit CumMaxBackward(int64_t dim) : dim_(dim) {}
     auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+    // audit-11 QQ.5: higher-order — default would throw under II.2.
+    auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
+    auto supports_higher_order() const -> bool override { return true; }
     auto name() const -> std::string override { return "CumMaxBackward"; }
     auto op_id() const -> OpId override { return OpId::CumMax; }
 private:
@@ -5297,6 +5303,9 @@ public:
     explicit CumMinBackward(int64_t dim) : dim_(dim) {}
     auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+    // audit-11 QQ.5: higher-order — default would throw under II.2.
+    auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
+    auto supports_higher_order() const -> bool override { return true; }
     auto name() const -> std::string override { return "CumMinBackward"; }
     auto op_id() const -> OpId override { return OpId::CumMin; }
 private:

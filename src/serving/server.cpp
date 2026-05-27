@@ -308,6 +308,26 @@ auto InferenceServer::wait() -> void {
     }
 }
 
+auto InferenceServer::wait_for(std::chrono::milliseconds timeout) -> bool {
+    // Audit-11 QQ.19: bounded wait. We do not have a condition_variable on
+    // running_ in this path, so poll on the atomic. Resolution is bounded by
+    // a 10 ms tick — sufficient for KeyboardInterrupt latency, well below
+    // any realistic server-shutdown deadline.
+    using clock = std::chrono::steady_clock;
+    const auto deadline = clock::now() + timeout;
+    const auto tick = std::chrono::milliseconds(10);
+    while (running_.load(std::memory_order_acquire)) {
+        if (clock::now() >= deadline) {
+            return false;
+        }
+        std::this_thread::sleep_for(tick);
+    }
+    if (server_thread_.joinable()) {
+        server_thread_.join();
+    }
+    return true;
+}
+
 auto InferenceServer::serve_loop() -> void {
 #ifdef TENZOR_HAS_HTTPLIB
     using nlohmann::json;

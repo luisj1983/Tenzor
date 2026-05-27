@@ -16,6 +16,9 @@
 #include "tenzor/distributed/ddp.hpp"
 #include "tenzor/distributed/process_group.hpp"
 #include "tenzor/core/dtype.hpp"
+#include "tenzor/ops/creation.hpp"
+#include "tenzor/ops/indexing.hpp"
+#include "tenzor/ops/transform.hpp"
 #include "tenzor/utils/log.hpp"
 #include <algorithm>
 #include <cassert>
@@ -322,6 +325,97 @@ auto DistributedDataParallel::synchronize_gradients() -> void {
 // Async all-reduce and synchronization
 // ============================================================================
 
+namespace {
+/// QQ.13: build/refresh the per-bucket DTypeGroup coalescing buffers.
+/// Each call (re)packs every parameter gradient in `bucket.params` into a
+/// flat F? buffer per distinct dtype.  PyTorch DDP issues ONE all-reduce
+/// per bucket by this exact mechanism; without it we incur N collective
+/// launches per bucket (one per parameter), which dominates step time at
+/// even modest world sizes.
+auto pack_bucket_flat(GradBucket& bucket) -> void {
+    bucket.dtype_groups.clear();
+    if (bucket.params.empty()) return;
+
+    // First pass: group param indices by dtype (preserves bucket order
+    // within a group so the scatter back reconstructs in the same order
+    // and the offsets match).
+    struct Plan {
+        DType dt;
+        Device dev;
+        std::vector<size_t> indices;
+        std::vector<size_t> numels;
+        size_t total{0};
+    };
+    std::vector<Plan> plans;
+    for (size_t i = 0; i < bucket.params.size(); ++i) {
+        auto& p = bucket.params[i];
+        if (!p || !p->has_grad()) continue;
+        const Tensor& g = p->grad().value();
+        const size_t n = static_cast<size_t>(g.numel());
+        const DType dt = g.dtype();
+        const Device dev = g.device();
+        auto it = std::find_if(plans.begin(), plans.end(),
+            [&](const Plan& pl) { return pl.dt == dt && pl.dev == dev; });
+        if (it == plans.end()) {
+            plans.push_back(Plan{dt, dev, {i}, {n}, n});
+        } else {
+            it->indices.push_back(i);
+            it->numels.push_back(n);
+            it->total += n;
+        }
+    }
+
+    // Second pass: allocate the flat buffer per dtype group and
+    // slice_scatter each gradient in.  The scatter mirrors FSDP's
+    // collect_grads pattern (src/distributed/fsdp.cpp).
+    for (auto& pl : plans) {
+        GradBucket::DTypeGroup grp;
+        grp.flat = zeros({static_cast<int64_t>(pl.total)}, pl.dt, pl.dev);
+        grp.param_indices = std::move(pl.indices);
+        grp.numels = std::move(pl.numels);
+        grp.offsets.reserve(grp.numels.size());
+
+        size_t offset = 0;
+        for (size_t k = 0; k < grp.param_indices.size(); ++k) {
+            const size_t pi = grp.param_indices[k];
+            const size_t n  = grp.numels[k];
+            const Tensor& g = bucket.params[pi]->grad().value();
+            Tensor g_flat = g.reshape({static_cast<int64_t>(n)}).contiguous();
+            grp.flat = slice_scatter(grp.flat, g_flat, /*dim=*/0,
+                                     static_cast<int64_t>(offset),
+                                     static_cast<int64_t>(offset + n));
+            grp.offsets.push_back(offset);
+            offset += n;
+        }
+        bucket.dtype_groups.push_back(std::move(grp));
+    }
+}
+
+/// Scatter the reduced flat buffers back into per-parameter grads.
+auto unpack_bucket_flat(GradBucket& bucket, double scale) -> void {
+    for (auto& grp : bucket.dtype_groups) {
+        for (size_t k = 0; k < grp.param_indices.size(); ++k) {
+            const size_t pi = grp.param_indices[k];
+            const size_t off = grp.offsets[k];
+            const size_t n   = grp.numels[k];
+            auto& p = bucket.params[pi];
+            Tensor sliced = slice(grp.flat, /*dim=*/0,
+                                  static_cast<int64_t>(off),
+                                  static_cast<int64_t>(off + n));
+            auto shape_view = p->tensor().shape();
+            std::vector<int64_t> shape(shape_view.begin(), shape_view.end());
+            Tensor reshaped = sliced.reshape(shape).contiguous();
+            if (scale != 1.0) {
+                p->set_grad(reshaped * scale);
+            } else {
+                p->set_grad(std::move(reshaped));
+            }
+        }
+    }
+    bucket.dtype_groups.clear();
+}
+} // anonymous namespace
+
 auto DistributedDataParallel::all_reduce_bucket_async(
     GradBucket& bucket,
     size_t bucket_idx
@@ -349,30 +443,19 @@ auto DistributedDataParallel::all_reduce_bucket_async(
 
     void* this_bucket_stream = bucket_streams_[bucket_idx];
 
-    for (auto& param : bucket.params) {
-        if (!param || !param->has_grad()) {
-            continue;
-        }
+    // QQ.13: coalesce all of this bucket's gradients into ONE (or, for
+    // mixed-dtype buckets, one-per-dtype) flat buffer before issuing the
+    // collective.  PyTorch DDP's reducer.cpp does the same; without it we
+    // would launch N collectives per bucket (10-100x overhead).
+    pack_bucket_flat(bucket);
 
-        // Get the gradient tensor
-        Tensor grad = param->grad().value();
-
+    for (auto& grp : bucket.dtype_groups) {
         // Launch NCCL all-reduce asynchronously on this bucket's
-        // dedicated communication stream. The NCCL kernel reads
-        // gradient data from GPU memory; since the gradient was
-        // produced on the default compute stream, the same-GPU
-        // ordering between the producer kernel and ncclAllReduce
-        // is enforced by NCCL's internal dependency tracking on a
-        // single device.
-        //
-        // The optimizer step (on the default stream) must NOT read
-        // the gradient until the all-reduce completes -- handled by
-        // the per-bucket event recorded below and waited on in
-        // sync_comm().
-        //
-        // Use ReduceOp::AVG so NCCL (ncclAvg) fuses the divide-by
-        // world_size into the all-reduce kernel.
-        pg_->all_reduce_async(grad, ReduceOp::AVG, this_bucket_stream);
+        // dedicated communication stream.  Use ReduceOp::AVG so NCCL
+        // (ncclAvg) fuses the divide-by-world_size into the kernel; the
+        // sync (CPU) path divides manually instead since some backends
+        // don't support AVG.
+        pg_->all_reduce_async(grp.flat, ReduceOp::AVG, this_bucket_stream);
     }
 
     // Record a CUDA event on THIS bucket's stream after its
@@ -456,6 +539,16 @@ auto DistributedDataParallel::sync_comm() -> void {
         }
     }
 
+    // QQ.13: scatter each bucket's reduced flat buffer back into its
+    // per-parameter grads.  The all-reduce used ReduceOp::AVG (NCCL
+    // ncclAvg) so the buffer already holds the averaged gradient — pass
+    // scale=1.0 to unpack_bucket_flat.
+    for (auto& bucket : buckets_) {
+        if (!bucket.dtype_groups.empty()) {
+            unpack_bucket_flat(bucket, /*scale=*/1.0);
+        }
+    }
+
     // Audit N.1: release-store pairs with any subsequent acquire-load
     // (e.g. the next sync_comm() entry, or reset_buckets() before the
     // next step) so observers see the just-completed event waits.
@@ -471,33 +564,41 @@ auto DistributedDataParallel::all_reduce_bucket(GradBucket& bucket) -> void {
     int ws = pg_->world_size();
     auto start = std::chrono::high_resolution_clock::now();
 
-    for (auto& param : bucket.params) {
-        if (!param || !param->has_grad()) {
-            continue;
-        }
-
-        // Get the gradient tensor
-        Tensor grad = param->grad().value();
-
-        // Track communication bytes
-        comm_stats_.total_bytes_transferred += grad.numel() * dtype_size(grad.dtype());
-
-        // Optional gradient compression before all-reduce
-        if (compressor_) {
+    // QQ.13: coalesce per-bucket gradients into one collective per dtype
+    // group.  Compression takes a special-case fallback because the
+    // compressed payload is per-tensor — there is no equivalent of a
+    // "compressed flat buffer" without re-doing the encoder.
+    if (compressor_) {
+        // Compression path: one collective per parameter (existing
+        // behaviour) — coalescing here would require a compressor that
+        // operates on concatenated buffers, which we don't have.
+        for (auto& param : bucket.params) {
+            if (!param || !param->has_grad()) continue;
+            Tensor grad = param->grad().value();
+            comm_stats_.total_bytes_transferred += grad.numel() * dtype_size(grad.dtype());
             auto compressed = compressor_->compress(grad);
             pg_->all_reduce(compressed.data, ReduceOp::SUM);
             grad = compressor_->decompress(compressed);
-        } else {
-            // All-reduce: sum gradients across all processes
-            pg_->all_reduce(grad, ReduceOp::SUM);
+            if (ws > 1) {
+                param->set_grad(grad / static_cast<double>(ws));
+            } else {
+                param->set_grad(std::move(grad));
+            }
         }
-
-        // Divide by world_size to compute average gradient.
-        // This is equivalent to using ReduceOp::AVG but more explicit
-        // and works with backends that may not support AVG natively.
-        if (ws > 1) {
-            param->set_grad(grad / static_cast<double>(ws));
+    } else {
+        // Coalesced path: pack into per-dtype flat buffers, one
+        // all_reduce per buffer (matches PyTorch DDP reducer.cpp).
+        pack_bucket_flat(bucket);
+        for (auto& grp : bucket.dtype_groups) {
+            comm_stats_.total_bytes_transferred +=
+                grp.flat.numel() * dtype_size(grp.flat.dtype());
+            pg_->all_reduce(grp.flat, ReduceOp::SUM);
         }
+        // Divide by world_size to compute average gradient.  Equivalent
+        // to ReduceOp::AVG but works with backends that don't support
+        // AVG natively.
+        const double scale = (ws > 1) ? (1.0 / static_cast<double>(ws)) : 1.0;
+        unpack_bucket_flat(bucket, scale);
     }
 
     auto end = std::chrono::high_resolution_clock::now();

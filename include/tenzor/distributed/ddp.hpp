@@ -41,6 +41,25 @@ struct GradBucket {
 
     /** @brief Number of parameters whose gradients have been computed */
     size_t pending_count{0};
+
+    // QQ.13: flat coalescing buffer state.  PyTorch DDP issues ONE
+    // collective per bucket by gathering all the bucket's gradients into a
+    // contiguous buffer, all-reducing the buffer, then scattering back.
+    // Naively launching one collective per parameter is 10-100x more
+    // collective overhead.
+    //
+    // When a bucket holds parameters of mixed dtypes (rare; usually homo
+    // because the module is single-precision) we split into one flat
+    // buffer per dtype group.  Each group records: the flat tensor, the
+    // per-param offsets, the per-param numels, and the indices into
+    // `params` so the scatter back can rebuild grads in original shapes.
+    struct DTypeGroup {
+        Tensor flat;                       ///< Allocated once per step; reused across step boundaries
+        std::vector<size_t> param_indices; ///< Indices into GradBucket::params
+        std::vector<size_t> offsets;       ///< Flat-buffer offsets per param (same order)
+        std::vector<size_t> numels;        ///< Param numels (same order)
+    };
+    std::vector<DTypeGroup> dtype_groups;  ///< One group per distinct dtype in this bucket
 };
 
 /**

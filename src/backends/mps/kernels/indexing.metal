@@ -110,7 +110,11 @@ kernel void scatter_kernel(
     uint dim_idx = (id / inner_size) % idx_dim_size;
     uint outer = id / (inner_size * idx_dim_size);
     int dst_dim = indices[id];
-    // Note: scatter is not atomic-safe for duplicate indices
+    // Replace-mode scatter (NOT additive — see scatter_add_kernel below).
+    // Duplicate indices in `indices` are non-deterministic by design: the
+    // documented semantic is last-writer-wins, and the order of competing
+    // writes is unspecified. No atomic is required to satisfy that contract.
+    // Callers that need a deterministic result must ensure unique indices.
     output[(outer * dim_size + dst_dim) * inner_size + inner] = src[id];
 }
 
@@ -137,7 +141,7 @@ kernel void scatter_add_kernel(
 // ============================================================================
 
 kernel void index_add_kernel(
-    device float* output         [[buffer(0)]],
+    device atomic_float* output  [[buffer(0)]],
     device const float* source   [[buffer(1)]],
     device const int* indices    [[buffer(2)]],
     constant uint& outer_size    [[buffer(3)]],
@@ -152,8 +156,10 @@ kernel void index_add_kernel(
     int dst_dim = indices[idx];
     uint dst_idx = (outer * dim_size + dst_dim) * inner_size + inner;
     uint src_idx = (outer * index_size + idx) * inner_size + inner;
-    // Not atomic — host must serialize if needed
-    output[dst_idx] += source[src_idx];
+    // Duplicate indices accumulate into the same output cell — must use an
+    // atomic RMW. Plain `output[dst] += source[src]` races and silently
+    // drops contributions.
+    atomic_fetch_add_explicit(&output[dst_idx], source[src_idx], memory_order_relaxed);
 }
 
 kernel void index_copy_kernel(
@@ -172,6 +178,10 @@ kernel void index_copy_kernel(
     int dst_dim = indices[idx];
     uint dst_idx = (outer * dim_size + dst_dim) * inner_size + inner;
     uint src_idx = (outer * index_size + idx) * inner_size + inner;
+    // Replace-mode index_copy. Duplicate values in `indices` are
+    // non-deterministic by design (last-writer-wins, order unspecified).
+    // No atomic required — callers must supply unique indices for
+    // a deterministic result.
     output[dst_idx] = source[src_idx];
 }
 

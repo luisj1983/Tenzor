@@ -51,6 +51,30 @@ float readBF16From(uint flat_idx, uint buf_sel) {
     return (half_idx == 0) ? unpackBF16x2(packed).x : unpackBF16x2(packed >> 16).x;
 }
 
+// Single-element BF16 write into the packed grad_input buffer using a bounded
+// atomicCompSwap loop. Required because when `base` is odd or `spatial_size`
+// is odd the packed 32-bit word straddles two (N, C) slices and a plain
+// store would clobber the neighbour's half.
+void writeBF16(uint element_idx, float val) {
+    uint word_idx = element_idx / 2;
+    uint half_idx = element_idx % 2;
+    uint b = floatBitsToUint(val);
+    uint bits = ((b + 0x7FFFu + ((b >> 16) & 1u)) >> 16) & 0xFFFFu;
+    uint shift = half_idx * 16;
+    uint mask = 0xFFFFu << shift;
+
+    uint old_val = grad_input[word_idx];
+    for (uint iter = 0u; iter < 65536u; iter++) {
+        uint expected = old_val;
+        uint new_val = (expected & ~mask) | (bits << shift);
+        old_val = atomicCompSwap(grad_input[word_idx], expected, new_val);
+        if (old_val == expected) return;
+    }
+    // Saturation: 65536 retries exceeded — hardware/driver failure.
+    // Do NOT add a non-atomic fallback store: it would clobber the
+    // neighbouring packed half-word.
+}
+
 void main() {
     uint tid = gl_LocalInvocationID.x;
     uint nc_idx = gl_WorkGroupID.x;
@@ -67,23 +91,14 @@ void main() {
     bool zero_variance = (rstd > 100.0);
 
     if (zero_variance) {
-        uint num_words = (params.spatial_size + 1) / 2;
-        for (uint w = tid; w < num_words; w += WORKGROUP_SIZE) {
-            uint elem0 = w * 2;
-            uint elem1 = w * 2 + 1;
-            // grad_input = 0
-            uint out_word_idx = (base + elem0) / 2;
-            grad_input[out_word_idx] = ((floatBitsToUint(0.0) + 0x7FFFu + ((floatBitsToUint(0.0) >> 16) & 1u)) >> 16);
-
+        // Per-element atomic writes via writeBF16: see writeF16 note in
+        // instance_norm_backward_f16.comp — packed words straddle NC slices
+        // when base or spatial_size is odd.
+        for (uint i = tid; i < params.spatial_size; i += WORKGROUP_SIZE) {
+            writeBF16(base + i, 0.0);
             if (params.affine > 0) {
-                if (elem0 < params.spatial_size) {
-                    float dy = readBF16From(base + elem0, 0);
-                    atomicAdd(grad_bias[c], dy);
-                }
-                if (elem1 < params.spatial_size) {
-                    float dy = readBF16From(base + elem1, 0);
-                    atomicAdd(grad_bias[c], dy);
-                }
+                float dy = readBF16From(base + i, 0);
+                atomicAdd(grad_bias[c], dy);
             }
         }
         return;
@@ -117,38 +132,18 @@ void main() {
     float inv_n = 1.0 / float(params.spatial_size);
     barrier();
 
-    // Step 2: Compute grad_input and accumulate grad_weight, grad_bias
-    uint num_words = (params.spatial_size + 1) / 2;
-    for (uint w_idx = tid; w_idx < num_words; w_idx += WORKGROUP_SIZE) {
-        uint elem0 = w_idx * 2;
-        uint elem1 = w_idx * 2 + 1;
-        float r0 = 0.0, r1 = 0.0;
-
-        if (elem0 < params.spatial_size) {
-            float dy = readBF16From(base + elem0, 0);
-            float w = (params.affine > 0) ? weight_data[c] : 1.0;
-            float xhat = (readBF16From(base + elem0, 1) - mean) * rstd;
-            r0 = rstd * (dy * w - sum_dy_w * inv_n - xhat * sum_dy_w_xhat * inv_n);
-            if (params.affine > 0) {
-                atomicAdd(grad_weight[c], dy * xhat);
-                atomicAdd(grad_bias[c], dy);
-            }
+    // Step 2: Per-element atomic writes via writeBF16 — packed word-stores
+    // would clobber neighbouring NC slices when `base` or `spatial_size` is
+    // odd (the boundary 32-bit word is shared with another slice).
+    for (uint i = tid; i < params.spatial_size; i += WORKGROUP_SIZE) {
+        float dy = readBF16From(base + i, 0);
+        float w = (params.affine > 0) ? weight_data[c] : 1.0;
+        float xhat = (readBF16From(base + i, 1) - mean) * rstd;
+        float r = rstd * (dy * w - sum_dy_w * inv_n - xhat * sum_dy_w_xhat * inv_n);
+        writeBF16(base + i, r);
+        if (params.affine > 0) {
+            atomicAdd(grad_weight[c], dy * xhat);
+            atomicAdd(grad_bias[c], dy);
         }
-
-        if (elem1 < params.spatial_size) {
-            float dy = readBF16From(base + elem1, 0);
-            float w = (params.affine > 0) ? weight_data[c] : 1.0;
-            float xhat = (readBF16From(base + elem1, 1) - mean) * rstd;
-            r1 = rstd * (dy * w - sum_dy_w * inv_n - xhat * sum_dy_w_xhat * inv_n);
-            if (params.affine > 0) {
-                atomicAdd(grad_weight[c], dy * xhat);
-                atomicAdd(grad_bias[c], dy);
-            }
-        }
-
-        uint out_word_idx = (base + elem0) / 2;
-        uint bits0 = ((floatBitsToUint(r0) + 0x7FFFu + ((floatBitsToUint(r0) >> 16) & 1u)) >> 16);
-        uint bits1 = ((floatBitsToUint(r1) + 0x7FFFu + ((floatBitsToUint(r1) >> 16) & 1u)) >> 16);
-        grad_input[out_word_idx] = bits0 | (bits1 << 16);
     }
 }

@@ -9,6 +9,8 @@
 #include "../../include/tenzor/ops/math.hpp"
 #include "../../include/tenzor/ops/reduction.hpp"
 #include "../../include/tenzor/utils/log.hpp"
+#include "../../include/tenzor/autograd/ops.hpp"
+#include "../../include/tenzor/nn/utils/variable_cast.hpp"
 #include <chrono>
 #include <unordered_set>
 #include <unordered_map>
@@ -154,15 +156,39 @@ auto CheckpointFunction::backward_with_variables(std::vector<Variable> grad_outp
         throw std::runtime_error("Checkpoint backward_with_variables: output count mismatch");
     }
 
+    // audit-11 QQ.2: previously called recomputed_outputs[i].backward(
+    // grad_outputs[i].tensor(), ...) — .tensor() strips grad_fn from the
+    // outer Variable seed, so any third-order derivative through checkpoint
+    // was wrong. The Variable engine entry point only accepts a Tensor seed,
+    // so we build a scalar surrogate loss = sum_i sum(recomputed_outputs[i] *
+    // grad_outputs[i]) and back-propagate from THAT (standard VJP identity:
+    // d/dx <go, f(x)> == J(f)^T go). This keeps grad_outputs[i]'s Variable
+    // chain wired into the recompute graph for higher-order grads.
+    std::optional<Variable> surrogate;
     for (size_t i = 0; i < recomputed_outputs.size(); ++i) {
-        if (recomputed_outputs[i].requires_grad() && recomputed_outputs[i].grad_fn()) {
-            // retain_graph=true + create_graph=true so the second-order
-            // graph survives the inner backward.
-            recomputed_outputs[i].backward(
-                grad_outputs[i].tensor(),
-                /*retain_graph=*/true,
-                /*create_graph=*/true);
+        if (!(recomputed_outputs[i].requires_grad() && recomputed_outputs[i].grad_fn())) {
+            continue;
         }
+        Variable go = grad_outputs[i];
+        // Match dtype/device of the recomputed output if the inner forward
+        // upcast (e.g. FP16 → FP32) — otherwise the multiply would throw.
+        if (go.tensor().dtype() != recomputed_outputs[i].tensor().dtype()) {
+            go = tenzor::nn::variable_cast(go, recomputed_outputs[i].tensor().dtype());
+        }
+        auto prod = recomputed_outputs[i] * go;
+        auto term = tenzor::sum(prod);
+        if (!surrogate.has_value()) {
+            surrogate = term;
+        } else {
+            surrogate = *surrogate + term;
+        }
+    }
+    if (surrogate.has_value()) {
+        // retain_graph=true + create_graph=true so the second-order graph
+        // survives the inner backward.
+        surrogate->backward(std::nullopt,
+                            /*retain_graph=*/true,
+                            /*create_graph=*/true);
     }
 
     std::vector<Variable> input_grads;

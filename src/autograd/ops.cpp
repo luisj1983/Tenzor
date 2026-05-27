@@ -4709,18 +4709,52 @@ auto segment_reduce(const Variable& data, const Tensor& offsets,
     return output;
 }
 
-// gumbel_softmax — non-differentiable (forward doesn't save the Gumbel
-// noise; see GumbelSoftmaxBackward).
+// gumbel_softmax — audit-11 QQ.4: implements the straight-through estimator
+// (PyTorch parity for F.gumbel_softmax). We always draw the SOFT sample via
+// the kernel (hard=false), save it, and — if `hard=true` — replace the
+// returned value with an argmax/one-hot quantisation. The backward then runs
+// the softmax-Jacobian on the saved y_soft scaled by 1/tau. This matches
+// PyTorch's `(y_hard - y_soft).detach() + y_soft` STE semantics.
 auto gumbel_softmax(const Variable& logits, double tau, bool hard, int64_t dim)
     -> Variable {
-    auto result = tenzor::gumbel_softmax(logits.tensor(), tau, hard, dim);
+    // Always sample the SOFT Gumbel-softmax first; that's what carries the
+    // gradient (PyTorch STE).
+    auto y_soft = tenzor::gumbel_softmax(logits.tensor(), tau,
+                                         /*hard=*/false, dim);
+
+    Tensor result_tensor;
+    if (hard) {
+        int64_t ndim = static_cast<int64_t>(y_soft.ndim());
+        int64_t d = dim < 0 ? dim + ndim : dim;
+        const int64_t num_classes = y_soft.shape()[d];
+
+        Tensor moved = y_soft;
+        if (d != ndim - 1) {
+            moved = tenzor::transpose(y_soft, d, ndim - 1);
+        }
+        auto idx = tenzor::argmax(moved, /*dim=*/ndim - 1, /*keepdim=*/false);
+        auto onehot = tenzor::one_hot(idx, num_classes);
+        auto onehot_dt = onehot.to(y_soft.dtype());
+        if (d != ndim - 1) {
+            onehot_dt = tenzor::transpose(onehot_dt, d, ndim - 1);
+        }
+        result_tensor = onehot_dt;
+    } else {
+        result_tensor = y_soft;
+    }
+
     if (!logits.requires_grad() || !is_grad_enabled()) {
-        return Variable(result, false);
+        return Variable(result_tensor, false);
     }
     auto grad_fn = std::make_shared<GumbelSoftmaxBackward>(tau, hard, dim);
+    // Save y_soft for the STE backward.
+    grad_fn->save_for_backward({y_soft});
+    if (is_creating_graph()) {
+        grad_fn->save_variables_for_backward({Variable(y_soft, false)});
+    }
     grad_fn->set_next_functions({logits.grad_fn()});
     grad_fn->set_input_variables({logits});
-    Variable output(result, true);
+    Variable output(result_tensor, true);
     output.set_grad_fn(grad_fn);
     return output;
 }

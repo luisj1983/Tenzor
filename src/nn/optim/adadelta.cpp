@@ -217,8 +217,8 @@ auto Adadelta::step_impl() -> void {
     }
 }
 
-auto Adadelta::zero_grad() -> void {
-    Optimizer::zero_grad();
+auto Adadelta::zero_grad(bool set_to_none) -> void {
+    Optimizer::zero_grad(set_to_none);
 }
 
 auto Adadelta::set_lr(double lr) -> void {
