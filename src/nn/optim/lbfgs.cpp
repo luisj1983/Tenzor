@@ -125,6 +125,28 @@ LBFGS::LBFGS(std::vector<std::shared_ptr<Variable>> params,
     }
 }
 
+// audit-11 RR.7: L-BFGS is single-group-only by design.
+//
+// The two-loop recursion (Nocedal-Wright Algorithm 7.4) maintains a single
+// curvature history (s_history_, y_history_, rho_history_) over a single
+// flattened state vector. The line search consumes the global flat gradient
+// and produces one scalar step size for that vector. There is no
+// well-defined way to apply per-group hyperparameters (history_size,
+// tolerance_grad, tolerance_change, max_iter, max_eval, line_search,
+// learning rate) because:
+//
+//   * history_size: would require parallel histories, each with its own
+//     2-loop recursion; the cross-group secants cannot be combined into a
+//     single search direction without violating the underlying assumption
+//     that s_k, y_k come from the *same* objective.
+//   * tolerance_*: convergence is a property of the global objective, not a
+//     per-block local property.
+//   * max_iter / max_eval: the outer loop is over the whole problem.
+//
+// PyTorch's torch.optim.LBFGS makes the same restriction.  Callers who
+// want different settings per parameter subset must construct *separate*
+// LBFGS instances and run them sequentially (which corresponds to block
+// coordinate descent, a different algorithm).
 LBFGS::LBFGS(std::vector<optim::ParamGroup> groups,
              double default_lr,
              int default_max_iter,
@@ -143,10 +165,22 @@ LBFGS::LBFGS(std::vector<optim::ParamGroup> groups,
       tolerance_change_(default_tolerance_change),
       history_size_(default_history_size),
       line_search_(default_line_search) {
-    // PyTorch parity: torch.optim.LBFGS rejects multi-group configurations
-    // because the two-loop recursion operates on a single flattened state
-    // vector. Per-group hyperparameter dispatch would require running an
-    // independent line search per group, which defeats the algorithm.
+    // audit-11 RR.7: explicit single-group-only guard. The original audit-10
+    // check rejected != 1, including the empty case — we keep that stricter
+    // contract because zero groups means no parameters either, which is
+    // separately rejected below.  The >1 case is the one users most
+    // frequently hit by accident (mirroring AdamW's add_param_group habit),
+    // so the error message names the unresolvable hyperparams explicitly.
+    if (param_groups_.size() > 1) {
+        throw std::invalid_argument(
+            "LBFGS: multi-group ParamGroup not supported; LBFGS hyperparams "
+            "(history_size, tolerance_grad, tolerance_change, max_iter, "
+            "max_eval, line_search, lr) are global because the two-loop "
+            "recursion operates on a single flattened state vector. "
+            "Construct separate LBFGS instances per parameter subset and "
+            "run them sequentially (block coordinate descent) if you need "
+            "per-group settings.");
+    }
     if (param_groups_.size() != 1) {
         throw std::invalid_argument(
             "LBFGS: exactly one ParamGroup is supported (got " +

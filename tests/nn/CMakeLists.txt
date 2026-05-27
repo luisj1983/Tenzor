@@ -506,6 +506,15 @@ add_executable(test_gptq_quantizer quantization/test_gptq_quantizer.cpp)
 target_link_libraries(test_gptq_quantizer PRIVATE tenzor_core GTest::gtest_main)
 tenzor_discover_tests(test_gptq_quantizer LABELS "nn" DISCOVERY_TIMEOUT 60)
 
+# RR.21 (audit-11): multi-backend × multi-dtype companion for the GPTQ
+# quantizer, mirrors OO.19's AWQ companion above.
+add_executable(test_gptq_quantizer_multidtype
+    quantization/test_gptq_quantizer_multidtype.cpp)
+target_link_libraries(test_gptq_quantizer_multidtype
+    PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_gptq_quantizer_multidtype LABELS "nn"
+    DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST BACKENDS multi)
+
 add_executable(test_observers_extended quantization/test_observers_extended.cpp)
 target_link_libraries(test_observers_extended PRIVATE tenzor_core GTest::gtest_main)
 tenzor_discover_tests(test_observers_extended LABELS "nn" DISCOVERY_TIMEOUT 60)

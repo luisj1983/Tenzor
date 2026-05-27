@@ -32,8 +32,9 @@ auto ASGD::step_impl() -> void {
     // Audit D.4: per-parameter hyperparameters resolve from the
     // active ParamGroup (when one was set up) or fall through to
     // the optimiser-wide defaults stored on this ASGD instance.
-    // lambd and t0 have no ParamGroup-level override fields, so they
-    // always use the optimiser-wide defaults.
+    // audit-11 RR.6: lambd and t0 now also resolve per-group via the
+    // new ParamGroup::lambd / t0 optional overrides, mirroring NN.15's
+    // Rprop pattern.
     struct ASGDHP {
         double lr;
         double lambd;
@@ -48,6 +49,8 @@ auto ASGD::step_impl() -> void {
             hp.lr           = g->lr;
             hp.weight_decay = g->weight_decay;
             hp.alpha        = ParamGroup::or_else(g->alpha, alpha_);
+            hp.lambd        = ParamGroup::or_else(g->lambd, lambd_);
+            hp.t0           = ParamGroup::or_else(g->t0, t0_);
         }
         return hp;
     };

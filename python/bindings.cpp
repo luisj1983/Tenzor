@@ -1750,24 +1750,33 @@ PYBIND11_MODULE(tenzor_core, m) {
              py::arg("max_queue") = 10,
              py::arg("flush_secs") = 120,
              "Create SummaryWriter for specified log directory")
+        // RR.12: all writers below perform disk I/O (and add_histogram /
+        // add_image walk tensor storage on the host side).  Release the GIL
+        // so other Python threads can run concurrently with the write.
         .def("add_scalar", &tenzor::SummaryWriter::add_scalar,
              py::arg("tag"), py::arg("value"), py::arg("step"),
+             py::call_guard<py::gil_scoped_release>(),
              "Log scalar value")
         .def("add_histogram", &tenzor::SummaryWriter::add_histogram,
              py::arg("tag"), py::arg("tensor"), py::arg("step"),
              py::arg("bins") = 30,
+             py::call_guard<py::gil_scoped_release>(),
              "Log histogram of tensor values")
         .def("add_image", &tenzor::SummaryWriter::add_image,
              py::arg("tag"), py::arg("tensor"), py::arg("step"),
              py::arg("dataformats") = "CHW",
+             py::call_guard<py::gil_scoped_release>(),
              "Log image tensor")
         .def("add_graph", &tenzor::SummaryWriter::add_graph,
              py::arg("model_name"), py::arg("output"),
+             py::call_guard<py::gil_scoped_release>(),
              "Log computation graph by walking the autograd grad_fn chain "
              "of the given output Variable")
         .def("flush", &tenzor::SummaryWriter::flush,
+             py::call_guard<py::gil_scoped_release>(),
              "Flush all pending events to disk")
         .def("close", &tenzor::SummaryWriter::close,
+             py::call_guard<py::gil_scoped_release>(),
              "Close writer and release resources")
         .def("is_open", &tenzor::SummaryWriter::is_open,
              "Check if writer is open");
@@ -2834,10 +2843,13 @@ void bind_compression(py::module& m) {
             || tenzor::OpProfiler::instance().is_enabled();
     }, "Check if profiling is enabled");
 
+    // RR.13: profiler operations touch only C++ state; release the GIL so the
+    // global atomics inside the profilers don't serialize Python threads.
     profiler.def("reset", []() {
         tenzor::AutogradProfiler::instance().reset();
         tenzor::OpProfiler::instance().reset();
-    }, "Clear all recorded profiles");
+    }, py::call_guard<py::gil_scoped_release>(),
+    "Clear all recorded profiles");
 
     profiler.def("summary", []() {
         std::string out;
@@ -2847,14 +2859,25 @@ void bind_compression(py::module& m) {
         // Backward pass summary from AutogradProfiler
         out += tenzor::AutogradProfiler::instance().summary();
         return out;
-    }, "Get human-readable profiling summary (forward + backward)");
+    }, py::call_guard<py::gil_scoped_release>(),
+    "Get human-readable profiling summary (forward + backward)");
 
     profiler.def("profiles", [](std::optional<tenzor::ProfilePhase> phase) -> py::list {
-        py::list result;
+        // RR.13: do the C++ snapshot under release, then re-acquire to build
+        // the Python list.  The snapshots are plain POD vectors copied out of
+        // the singletons, so there is no aliasing risk while the GIL is down.
+        std::vector<tenzor::OpProfile> fwd_profs;
+        std::vector<tenzor::AutogradProfile> bwd_profs;
+        const bool want_fwd = !phase.has_value() || phase.value() == tenzor::ProfilePhase::Forward;
+        const bool want_bwd = !phase.has_value() || phase.value() == tenzor::ProfilePhase::Backward;
+        {
+            py::gil_scoped_release release;
+            if (want_fwd) fwd_profs = tenzor::OpProfiler::instance().profiles();
+            if (want_bwd) bwd_profs = tenzor::AutogradProfiler::instance().profiles();
+        }
 
-        // Forward profiles from OpProfiler (dispatch-level)
-        if (!phase.has_value() || phase.value() == tenzor::ProfilePhase::Forward) {
-            auto fwd_profs = tenzor::OpProfiler::instance().profiles();
+        py::list result;
+        if (want_fwd) {
             for (const auto& p : fwd_profs) {
                 py::dict d;
                 d["name"] = "OpId:" + std::to_string(static_cast<int>(p.op));
@@ -2867,10 +2890,7 @@ void bind_compression(py::module& m) {
                 result.append(d);
             }
         }
-
-        // Backward profiles from AutogradProfiler
-        if (!phase.has_value() || phase.value() == tenzor::ProfilePhase::Backward) {
-            auto bwd_profs = tenzor::AutogradProfiler::instance().profiles();
+        if (want_bwd) {
             for (const auto& p : bwd_profs) {
                 py::dict d;
                 d["name"] = p.name;
@@ -2883,7 +2903,6 @@ void bind_compression(py::module& m) {
                 result.append(d);
             }
         }
-
         return result;
     }, py::arg("phase") = py::none(),
     "Get profiling data as list of dicts. Optional phase filter.");
@@ -2895,7 +2914,8 @@ void bind_compression(py::module& m) {
         if (!s_fwd_guard) {
             s_fwd_guard = std::make_unique<tenzor::ProfilingInterceptorGuard>();
         }
-    }, "Enable trace mode (records per-invocation events for Chrome trace export)");
+    }, py::call_guard<py::gil_scoped_release>(),
+    "Enable trace mode (records per-invocation events for Chrome trace export)");
 
     profiler.def("export_chrome_trace", [](const std::string& path) {
         tenzor::AutogradProfiler::instance().export_chrome_trace(path);

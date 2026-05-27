@@ -1,8 +1,16 @@
 /**
  * @file test_data_parallel.cpp
  * @brief Comprehensive unit tests for DataParallel multi-GPU training
+ *
+ * RR.17 (audit-11): the 26 raw GTEST-SKIP sites with "CUDA not available..."
+ * sites that used to open every test body were promoted to a single
+ * SetUp()-level `SKIP_WITH_REASON(BackendUnavailable, ...)` on a
+ * BackendTest-derived fixture. Each test still runs CUDA-only (DataParallel
+ * itself is CUDA-specific), but the skip is now tagged with the
+ * structured skip-reason taxonomy so `scripts/count_skips.py` can attribute
+ * the skips correctly. Tests that additionally need ≥2 CUDA devices use
+ * `SkipReason::RequiresMultiGPU` from the per-test guard.
  */
-
 #include <gtest/gtest.h>
 #include <memory>
 #include <vector>
@@ -12,6 +20,8 @@
 #include "tenzor/core/tensor.hpp"
 #include "tenzor/autograd/variable.hpp"
 #include "tenzor/ops/creation.hpp"
+#include "../backend_test_fixture.hpp"
+#include "../multi_backend_dtype_fixture.hpp"
 
 #ifdef TENZOR_USE_CUDA
 #include <cuda_runtime.h>
@@ -19,6 +29,8 @@
 
 using namespace tenzor;
 using namespace tenzor::nn;
+using ::tenzor::testing::BackendTest;
+using ::tenzor::testing::SkipReason;
 
 // ============================================================================
 // Mock Module for Testing
@@ -78,22 +90,9 @@ private:
 // ============================================================================
 
 /**
- * @brief Check if CUDA is available
- */
-bool is_cuda_available() {
-#ifdef TENZOR_USE_CUDA
-    int device_count = 0;
-    cudaError_t err = cudaGetDeviceCount(&device_count);
-    return (err == cudaSuccess && device_count > 0);
-#else
-    return false;
-#endif
-}
-
-/**
  * @brief Get number of available CUDA devices
  */
-int get_device_count() {
+static int get_device_count() {
 #ifdef TENZOR_USE_CUDA
     int device_count = 0;
     cudaGetDeviceCount(&device_count);
@@ -104,14 +103,52 @@ int get_device_count() {
 }
 
 // ============================================================================
+// DataParallel fixture
+// ============================================================================
+//
+// DataParallel itself is a CUDA-only construct (it dispatches replicas across
+// CUDA device IDs). The fixture inherits BackendTest so all the standard env
+// var handling (TENZOR_SKIP_BACKENDS, TENZOR_REQUIRE_MULTI_BACKEND) works,
+// and we tag the "no CUDA at all" skip with the BackendUnavailable reason so
+// scripts/count_skips.py can attribute it correctly.
+//
+// Per-test SkipMultiGPU() helper handles the additional skip for the four
+// scatter/multi-device tests that require ≥2 CUDA devices.
+class DataParallelMultiBackendTest : public BackendTest {
+protected:
+    void SetUp() override {
+        // Run BackendTest::SetUp() first so env-var skips fire correctly.
+        BackendTest::SetUp();
+        if (::testing::Test::IsSkipped()) return;
+
+        if (device.type != Device::Type::CUDA) {
+            // DataParallel only works on CUDA. Mark non-CUDA params as
+            // unsupported with the structured reason.
+            SKIP_WITH_REASON(SkipReason::BackendUnavailable,
+                "DataParallel is CUDA-only");
+            return;
+        }
+        if (get_device_count() <= 0) {
+            SKIP_WITH_REASON(SkipReason::BackendUnavailable,
+                "CUDA not available");
+            return;
+        }
+    }
+
+    // Helper: per-test extra skip for cases needing ≥2 CUDA devices.
+    void SkipUnlessMultiGPU() {
+        if (get_device_count() < 2) {
+            SKIP_WITH_REASON(SkipReason::RequiresMultiGPU,
+                "DataParallel scatter test needs ≥2 CUDA devices");
+        }
+    }
+};
+
+// ============================================================================
 // Construction Tests
 // ============================================================================
 
-TEST(DataParallelTest, ConstructionWithValidDevices) {
-    if (!is_cuda_available()) {
-        GTEST_SKIP() << "CUDA not available, skipping test";
-    }
-
+TEST_P(DataParallelMultiBackendTest, ConstructionWithValidDevices) {
     auto module = std::make_shared<DoubleModule>();
 
     // Test construction with explicit device IDs
@@ -120,18 +157,14 @@ TEST(DataParallelTest, ConstructionWithValidDevices) {
     });
 }
 
-TEST(DataParallelTest, ConstructionWithNullModule) {
+TEST_P(DataParallelMultiBackendTest, ConstructionWithNullModule) {
     // Should throw when module is null
     EXPECT_THROW({
         DataParallel dp(nullptr, {0}, 0);
     }, std::invalid_argument);
 }
 
-TEST(DataParallelTest, ConstructionWithEmptyDeviceIdsAutoDetect) {
-    if (!is_cuda_available()) {
-        GTEST_SKIP() << "CUDA not available, skipping test";
-    }
-
+TEST_P(DataParallelMultiBackendTest, ConstructionWithEmptyDeviceIdsAutoDetect) {
     auto module = std::make_shared<DoubleModule>();
 
     // Empty device_ids should auto-detect available devices
@@ -141,11 +174,7 @@ TEST(DataParallelTest, ConstructionWithEmptyDeviceIdsAutoDetect) {
     });
 }
 
-TEST(DataParallelTest, ConstructionWithInvalidDeviceId) {
-    if (!is_cuda_available()) {
-        GTEST_SKIP() << "CUDA not available, skipping test";
-    }
-
+TEST_P(DataParallelMultiBackendTest, ConstructionWithInvalidDeviceId) {
     auto module = std::make_shared<DoubleModule>();
 
     // Invalid device ID should throw
@@ -154,11 +183,7 @@ TEST(DataParallelTest, ConstructionWithInvalidDeviceId) {
     }, std::invalid_argument);
 }
 
-TEST(DataParallelTest, ConstructionOutputDeviceNotInList) {
-    if (!is_cuda_available()) {
-        GTEST_SKIP() << "CUDA not available, skipping test";
-    }
-
+TEST_P(DataParallelMultiBackendTest, ConstructionOutputDeviceNotInList) {
     auto module = std::make_shared<DoubleModule>();
 
     // Output device must be in device_ids
@@ -167,11 +192,7 @@ TEST(DataParallelTest, ConstructionOutputDeviceNotInList) {
     }, std::invalid_argument);
 }
 
-TEST(DataParallelTest, ConstructionDefaultOutputDevice) {
-    if (!is_cuda_available()) {
-        GTEST_SKIP() << "CUDA not available, skipping test";
-    }
-
+TEST_P(DataParallelMultiBackendTest, ConstructionDefaultOutputDevice) {
     auto module = std::make_shared<DoubleModule>();
 
     // Default output device should be device_ids[0]
@@ -183,11 +204,7 @@ TEST(DataParallelTest, ConstructionDefaultOutputDevice) {
 // Single GPU Optimization Tests
 // ============================================================================
 
-TEST(DataParallelTest, SingleGPUOptimization) {
-    if (!is_cuda_available()) {
-        GTEST_SKIP() << "CUDA not available, skipping test";
-    }
-
+TEST_P(DataParallelMultiBackendTest, SingleGPUOptimization) {
     auto module = std::make_shared<DoubleModule>();
     DataParallel dp(module, {0}, 0);
 
@@ -208,14 +225,11 @@ TEST(DataParallelTest, SingleGPUOptimization) {
 }
 
 // ============================================================================
-// Scatter Operation Tests
+// Scatter Operation Tests (require ≥2 CUDA devices)
 // ============================================================================
 
-TEST(DataParallelTest, ScatterEvenBatchSize) {
-    if (!is_cuda_available() || get_device_count() < 2) {
-        GTEST_SKIP() << "Insufficient CUDA devices, skipping test";
-    }
-
+TEST_P(DataParallelMultiBackendTest, ScatterEvenBatchSize) {
+    SkipUnlessMultiGPU();
     auto module = std::make_shared<DoubleModule>();
     DataParallel dp(module, {0, 1}, 0);
 
@@ -230,11 +244,8 @@ TEST(DataParallelTest, ScatterEvenBatchSize) {
     });
 }
 
-TEST(DataParallelTest, ScatterUnevenBatchSize) {
-    if (!is_cuda_available() || get_device_count() < 2) {
-        GTEST_SKIP() << "Insufficient CUDA devices, skipping test";
-    }
-
+TEST_P(DataParallelMultiBackendTest, ScatterUnevenBatchSize) {
+    SkipUnlessMultiGPU();
     auto module = std::make_shared<DoubleModule>();
     DataParallel dp(module, {0, 1}, 0);
 
@@ -249,11 +260,8 @@ TEST(DataParallelTest, ScatterUnevenBatchSize) {
     });
 }
 
-TEST(DataParallelTest, ScatterBatchSizeTooSmall) {
-    if (!is_cuda_available() || get_device_count() < 2) {
-        GTEST_SKIP() << "Insufficient CUDA devices, skipping test";
-    }
-
+TEST_P(DataParallelMultiBackendTest, ScatterBatchSizeTooSmall) {
+    SkipUnlessMultiGPU();
     auto module = std::make_shared<DoubleModule>();
     DataParallel dp(module, {0, 1}, 0);
 
@@ -270,11 +278,7 @@ TEST(DataParallelTest, ScatterBatchSizeTooSmall) {
 // Gather Operation Tests
 // ============================================================================
 
-TEST(DataParallelTest, GatherConcatenatesCorrectly) {
-    if (!is_cuda_available()) {
-        GTEST_SKIP() << "CUDA not available, skipping test";
-    }
-
+TEST_P(DataParallelMultiBackendTest, GatherConcatenatesCorrectly) {
     auto module = std::make_shared<DoubleModule>();
     DataParallel dp(module, {0}, 0);
 
@@ -300,11 +304,7 @@ TEST(DataParallelTest, GatherConcatenatesCorrectly) {
 // Device Management Tests
 // ============================================================================
 
-TEST(DataParallelTest, DeviceIDsAccessor) {
-    if (!is_cuda_available()) {
-        GTEST_SKIP() << "CUDA not available, skipping test";
-    }
-
+TEST_P(DataParallelMultiBackendTest, DeviceIDsAccessor) {
     auto module = std::make_shared<DoubleModule>();
     std::vector<int> device_ids = {0};
     DataParallel dp(module, device_ids, 0);
@@ -313,22 +313,14 @@ TEST(DataParallelTest, DeviceIDsAccessor) {
     EXPECT_EQ(returned_ids, device_ids);
 }
 
-TEST(DataParallelTest, OutputDeviceAccessor) {
-    if (!is_cuda_available()) {
-        GTEST_SKIP() << "CUDA not available, skipping test";
-    }
-
+TEST_P(DataParallelMultiBackendTest, OutputDeviceAccessor) {
     auto module = std::make_shared<DoubleModule>();
     DataParallel dp(module, {0}, 0);
 
     EXPECT_EQ(dp.output_device(), 0);
 }
 
-TEST(DataParallelTest, BatchDimAccessor) {
-    if (!is_cuda_available()) {
-        GTEST_SKIP() << "CUDA not available, skipping test";
-    }
-
+TEST_P(DataParallelMultiBackendTest, BatchDimAccessor) {
     auto module = std::make_shared<DoubleModule>();
     DataParallel dp(module, {0}, 0, 1);  // Use dimension 1 as batch dim
 
@@ -339,11 +331,7 @@ TEST(DataParallelTest, BatchDimAccessor) {
 // Parameter Management Tests
 // ============================================================================
 
-TEST(DataParallelTest, ParametersFromMasterModule) {
-    if (!is_cuda_available()) {
-        GTEST_SKIP() << "CUDA not available, skipping test";
-    }
-
+TEST_P(DataParallelMultiBackendTest, ParametersFromMasterModule) {
     auto module = std::make_shared<SimpleLinearModule>(10, 5);
     DataParallel dp(module, {0}, 0);
 
@@ -354,11 +342,7 @@ TEST(DataParallelTest, ParametersFromMasterModule) {
     EXPECT_EQ(params.size(), master_params.size());
 }
 
-TEST(DataParallelTest, NamedParametersFromMasterModule) {
-    if (!is_cuda_available()) {
-        GTEST_SKIP() << "CUDA not available, skipping test";
-    }
-
+TEST_P(DataParallelMultiBackendTest, NamedParametersFromMasterModule) {
     auto module = std::make_shared<SimpleLinearModule>(10, 5);
     DataParallel dp(module, {0}, 0);
 
@@ -368,11 +352,7 @@ TEST(DataParallelTest, NamedParametersFromMasterModule) {
     EXPECT_EQ(named_params.size(), master_named_params.size());
 }
 
-TEST(DataParallelTest, ModuleAccessor) {
-    if (!is_cuda_available()) {
-        GTEST_SKIP() << "CUDA not available, skipping test";
-    }
-
+TEST_P(DataParallelMultiBackendTest, ModuleAccessor) {
     auto module = std::make_shared<DoubleModule>();
     DataParallel dp(module, {0}, 0);
 
@@ -384,11 +364,7 @@ TEST(DataParallelTest, ModuleAccessor) {
 // Training Mode Tests
 // ============================================================================
 
-TEST(DataParallelTest, TrainMode) {
-    if (!is_cuda_available()) {
-        GTEST_SKIP() << "CUDA not available, skipping test";
-    }
-
+TEST_P(DataParallelMultiBackendTest, TrainMode) {
     auto module = std::make_shared<DoubleModule>();
     DataParallel dp(module, {0}, 0);
 
@@ -397,11 +373,7 @@ TEST(DataParallelTest, TrainMode) {
     });
 }
 
-TEST(DataParallelTest, EvalMode) {
-    if (!is_cuda_available()) {
-        GTEST_SKIP() << "CUDA not available, skipping test";
-    }
-
+TEST_P(DataParallelMultiBackendTest, EvalMode) {
     auto module = std::make_shared<DoubleModule>();
     DataParallel dp(module, {0}, 0);
 
@@ -414,11 +386,7 @@ TEST(DataParallelTest, EvalMode) {
 // Edge Cases and Error Handling Tests
 // ============================================================================
 
-TEST(DataParallelTest, EmptyInputThrows) {
-    if (!is_cuda_available()) {
-        GTEST_SKIP() << "CUDA not available, skipping test";
-    }
-
+TEST_P(DataParallelMultiBackendTest, EmptyInputThrows) {
     auto module = std::make_shared<DoubleModule>();
     DataParallel dp(module, {0}, 0);
 
@@ -431,11 +399,7 @@ TEST(DataParallelTest, EmptyInputThrows) {
     }, std::runtime_error);
 }
 
-TEST(DataParallelTest, MultidimensionalInput) {
-    if (!is_cuda_available()) {
-        GTEST_SKIP() << "CUDA not available, skipping test";
-    }
-
+TEST_P(DataParallelMultiBackendTest, MultidimensionalInput) {
     auto module = std::make_shared<DoubleModule>();
     DataParallel dp(module, {0}, 0);
 
@@ -451,11 +415,7 @@ TEST(DataParallelTest, MultidimensionalInput) {
     });
 }
 
-TEST(DataParallelTest, NonZeroBatchDimension) {
-    if (!is_cuda_available()) {
-        GTEST_SKIP() << "CUDA not available, skipping test";
-    }
-
+TEST_P(DataParallelMultiBackendTest, NonZeroBatchDimension) {
     auto module = std::make_shared<DoubleModule>();
     DataParallel dp(module, {0}, 0, 1);  // Split along dimension 1
 
@@ -475,11 +435,7 @@ TEST(DataParallelTest, NonZeroBatchDimension) {
 // Correctness Tests
 // ============================================================================
 
-TEST(DataParallelTest, ForwardPassCorrectness) {
-    if (!is_cuda_available()) {
-        GTEST_SKIP() << "CUDA not available, skipping test";
-    }
-
+TEST_P(DataParallelMultiBackendTest, ForwardPassCorrectness) {
     auto module = std::make_shared<DoubleModule>();
     DataParallel dp(module, {0}, 0);
 
@@ -500,11 +456,7 @@ TEST(DataParallelTest, ForwardPassCorrectness) {
     }
 }
 
-TEST(DataParallelTest, BatchPreservation) {
-    if (!is_cuda_available()) {
-        GTEST_SKIP() << "CUDA not available, skipping test";
-    }
-
+TEST_P(DataParallelMultiBackendTest, BatchPreservation) {
     auto module = std::make_shared<DoubleModule>();
     DataParallel dp(module, {0}, 0);
 
@@ -525,11 +477,7 @@ TEST(DataParallelTest, BatchPreservation) {
 // Thread Safety Tests (Basic)
 // ============================================================================
 
-TEST(DataParallelTest, ReplicaInitializationThreadSafety) {
-    if (!is_cuda_available()) {
-        GTEST_SKIP() << "CUDA not available, skipping test";
-    }
-
+TEST_P(DataParallelMultiBackendTest, ReplicaInitializationThreadSafety) {
     auto module = std::make_shared<DoubleModule>();
     DataParallel dp(module, {0}, 0);
 
@@ -548,11 +496,7 @@ TEST(DataParallelTest, ReplicaInitializationThreadSafety) {
 // Integration Tests
 // ============================================================================
 
-TEST(DataParallelTest, MakeDataParallelHelper) {
-    if (!is_cuda_available()) {
-        GTEST_SKIP() << "CUDA not available, skipping test";
-    }
-
+TEST_P(DataParallelMultiBackendTest, MakeDataParallelHelper) {
     auto module = std::make_shared<DoubleModule>();
 
     // Test helper function
@@ -562,11 +506,7 @@ TEST(DataParallelTest, MakeDataParallelHelper) {
     });
 }
 
-TEST(DataParallelTest, MakeDataParallelAutoDetect) {
-    if (!is_cuda_available()) {
-        GTEST_SKIP() << "CUDA not available, skipping test";
-    }
-
+TEST_P(DataParallelMultiBackendTest, MakeDataParallelAutoDetect) {
     auto module = std::make_shared<DoubleModule>();
 
     // Test auto-detection
@@ -578,6 +518,19 @@ TEST(DataParallelTest, MakeDataParallelAutoDetect) {
 }
 
 // ============================================================================
+// Instantiate: CUDA-only (DataParallel does not support other backends).
+// The fixture's SetUp() will translate "device not present" into a
+// structured BackendUnavailable skip on hosts without a CUDA driver.
+// ============================================================================
+INSTANTIATE_TEST_SUITE_P(
+    DataParallelCuda,
+    DataParallelMultiBackendTest,
+    ::testing::Values(std::string("cuda")),
+    [](const ::testing::TestParamInfo<std::string>& info) {
+        return info.param;
+    });
+
+// ============================================================================
 // Main
 // ============================================================================
 
@@ -585,7 +538,7 @@ int main(int argc, char** argv) {
     ::testing::InitGoogleTest(&argc, argv);
 
     // Print CUDA availability info
-    if (is_cuda_available()) {
+    if (get_device_count() > 0) {
         std::cout << "CUDA is available. Device count: " << get_device_count() << std::endl;
     } else {
         std::cout << "CUDA is not available. Many tests will be skipped." << std::endl;

@@ -1037,6 +1037,17 @@ auto bmm(const Variable& a, const Variable& b) -> Variable {
 
     auto grad_fn = std::make_shared<BmmBackward>();
 
+    // audit-11 RR.2 (MM.1 sibling): capture input shapes so the backward
+    // can reduce broadcasted batch axes back to each operand's shape if
+    // forward bmm ever permits broadcast batch dims.  Mirrors the
+    // MatMulBackward MM.1 fix.
+    {
+        const auto& a_shape = a.tensor().shape();
+        const auto& b_shape = b.tensor().shape();
+        grad_fn->input_shape_a_.assign(a_shape.begin(), a_shape.end());
+        grad_fn->input_shape_b_.assign(b_shape.begin(), b_shape.end());
+    }
+
     // Save input tensors for backward pass
     grad_fn->save_for_backward({a.tensor(), b.tensor()});
 

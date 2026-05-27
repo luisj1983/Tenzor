@@ -234,8 +234,17 @@ auto SparseToDenseBackward::backward(std::vector<Tensor> grad_outputs) -> std::v
 
 auto SparseToDenseBackward::backward_with_variables(std::vector<Variable> grad_outputs)
     -> std::vector<Variable> {
-    auto result_tensors = backward({grad_outputs[0].tensor()});
-    return {Variable(result_tensors[0], grad_outputs[0].requires_grad())};
+    // audit-11 RR.3: previously called backward({grad_outputs[0].tensor()})
+    // and rewrapped, which severs grad_fn on grad_outputs[0] and kills
+    // second-order through the upstream gradient.  The adjoint here is a
+    // constant linear mask (depends only on saved sparsity pattern, not on
+    // any differentiable input), so multiplying the Variable grad by a
+    // constant mask Variable preserves the autograd graph through
+    // grad_outputs[0] for higher-order while keeping the mask itself a
+    // non-diff constant.
+    require_saved_tensors(1);
+    Variable mask_var(saved_tensors()[0], /*requires_grad=*/false);
+    return {grad_outputs[0] * mask_var};
 }
 
 // ============================================================================
@@ -267,8 +276,13 @@ auto DenseToSparseBackward::backward(std::vector<Tensor> grad_outputs) -> std::v
 
 auto DenseToSparseBackward::backward_with_variables(std::vector<Variable> grad_outputs)
     -> std::vector<Variable> {
-    auto result_tensors = backward({grad_outputs[0].tensor()});
-    return {Variable(result_tensors[0], grad_outputs[0].requires_grad())};
+    // audit-11 RR.3: see SparseToDenseBackward::backward_with_variables.
+    // The mask is the saved 0/1 selection (constant adjoint); multiplying
+    // grad_outputs[0] (Variable) by a constant mask Variable preserves
+    // higher-order through the upstream gradient.
+    require_saved_tensors(1);
+    Variable mask_var(saved_tensors()[0], /*requires_grad=*/false);
+    return {grad_outputs[0] * mask_var};
 }
 
 // ============================================================================

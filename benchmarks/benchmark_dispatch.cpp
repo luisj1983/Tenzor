@@ -13,11 +13,20 @@
 #include "tenzor/ops/fused_ops.hpp"
 #include "tenzor/utils/benchmark.hpp"
 #include "tenzor/backend/backend.hpp"
+#include "common.hpp"
 #include <iostream>
 #include <iomanip>
 #include <string>
 #include <unordered_map>
 #include <functional>
+
+// RR.19 (audit-11): global device parsed from argv in main(). Defaults to
+// CPU so previous unflagged invocations stay correct. The dispatch
+// benchmark previously relied on the runtime's default device — passing
+// --device cuda from the Python runner would silently still run on CPU.
+namespace {
+tenzor::Device g_bench_device = tenzor::Device::cpu();
+}
 
 using namespace tenzor;
 using namespace tenzor::benchmark;
@@ -150,8 +159,8 @@ void benchmark_dispatch_vs_direct() {
     std::cout << std::string(77, '-') << "\n";
 
     for (int64_t size : sizes) {
-        auto a = randn({size, size});
-        auto b = randn({size, size});
+        auto a = randn({size, size}, DType::Float32, g_bench_device);
+        auto b = randn({size, size}, DType::Float32, g_bench_device);
 
         Timer timer;
 
@@ -223,8 +232,8 @@ void benchmark_dtype_dispatch() {
 
     // abs benchmark
     {
-        auto a_f32 = randn({size, size}, DType::Float32);
-        auto a_f64 = randn({size, size}, DType::Float64);
+        auto a_f32 = randn({size, size}, DType::Float32, g_bench_device);
+        auto a_f64 = randn({size, size}, DType::Float64, g_bench_device);
 
         Timer timer;
 
@@ -266,10 +275,10 @@ void benchmark_dtype_dispatch() {
 
     // Add benchmark
     {
-        auto a_f32 = randn({size, size}, DType::Float32);
-        auto b_f32 = randn({size, size}, DType::Float32);
-        auto a_f64 = randn({size, size}, DType::Float64);
-        auto b_f64 = randn({size, size}, DType::Float64);
+        auto a_f32 = randn({size, size}, DType::Float32, g_bench_device);
+        auto b_f32 = randn({size, size}, DType::Float32, g_bench_device);
+        auto a_f64 = randn({size, size}, DType::Float64, g_bench_device);
+        auto b_f64 = randn({size, size}, DType::Float64, g_bench_device);
 
         Timer timer;
 
@@ -304,8 +313,13 @@ int main(int argc, char* argv[]) {
     // Initialize Tenzor library
     initialize();
 
+    // RR.19 (audit-11): parse the --device flag so the Python runner can
+    // exercise this binary on a GPU when one is available.
+    g_bench_device = tenzor::bench::parse_device_arg(argc, argv);
+
     std::cout << "========================================\n";
     std::cout << "  Tenzor Dispatch Overhead Benchmark\n";
+    std::cout << "  device=" << g_bench_device.to_string() << "\n";
     std::cout << "========================================\n";
     std::cout << "\nThis benchmark measures the overhead of the current\n";
     std::cout << "string-based dispatch mechanism vs alternatives.\n";

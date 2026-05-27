@@ -73,6 +73,13 @@ set(NON_SHOWCASE_AUTOGRAD_RUNNER_TARGETS
     example_transformer_seq2seq_runner
     example_yolo_object_detection_runner
     example_gpt_text_generation_runner
+    # RR.18 (audit-11): VAE / GRU / U-Net regression coverage so backward
+    # regressions in any of the Linear+ReLU+Sigmoid+MSELoss,
+    # GRU+LayerNorm+Dropout+Linear, or Conv2d+BatchNorm2d+ConvTranspose2d
+    # paths show up here even when the kernel-level tests still pass.
+    example_vae_autoencoder_runner
+    example_gru_time_series_runner
+    example_unet_semantic_segmentation_runner
 )
 
 add_executable(test_all_autograd_examples test_all_autograd_examples.cpp)

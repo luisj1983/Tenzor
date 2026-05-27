@@ -523,7 +523,27 @@ public:
      * and can modify or inspect it.
      *
      * @param hook Function that takes gradient tensor and returns (optionally modified) gradient
-     * @return Hook handle (currently unused, for future hook removal)
+     * @return Hook handle (use with unregister_hook to remove)
+     *
+     * @par Ownership contract (audit-11 RR.4):
+     * Hooks MUST own their captured state. Capturing by reference any local
+     * object whose lifetime ends before backward() runs is undefined
+     * behaviour — the engine retains the std::function (and any captured
+     * shared_ptr<VariableImpl>) for the duration of backward, but does not
+     * extend the lifetime of objects referenced by raw pointer or reference
+     * inside the closure. Always prefer capture-by-value (or by
+     * shared_ptr/weak_ptr) for any state the hook touches.
+     *
+     * @par Iteration snapshot semantics:
+     * Hooks are invoked under a snapshot of the currently-registered hook
+     * set taken at the start of the per-variable dispatch. Consequently,
+     * calling unregister_hook() (or clear_hooks()) from inside a hook does
+     * NOT prevent the current hook (or any other hook already in the
+     * snapshot) from firing during this backward pass — the unregistration
+     * takes effect on subsequent backward passes only. This guarantees that
+     * a hook safely outlives any concurrent unregistration during a single
+     * backward call, but also means hook authors cannot rely on
+     * "deregister-during-callback" to skip remaining hooks for this pass.
      *
      * @code
      * Variable x(tensor, true);

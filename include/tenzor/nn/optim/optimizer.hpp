@@ -65,6 +65,11 @@ struct ParamGroup {
     std::optional<double> eta_plus;     ///< Rprop step-size grow factor
     std::optional<double> step_min;     ///< Rprop minimum step size
     std::optional<double> step_max;     ///< Rprop maximum step size
+    // audit-11 RR.6: ASGD per-group overrides.  `alpha` is already shared
+    // with RMSprop (decay exponent) — ASGD reuses it for the averaging
+    // exponent.  `lambd` and `t0` are unique to ASGD.
+    std::optional<double> lambd;        ///< ASGD decay term (regularizer)
+    std::optional<double> t0;           ///< ASGD step at which averaging begins
     // QQ.12: LAMB trust-ratio clamps (PyTorch's NVlamb default range is
     // [0, 10]).  Without these, a near-zero update_norm yields
     // trust_ratio -> +Inf which then drives the parameter to NaN.

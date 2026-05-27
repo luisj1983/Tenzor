@@ -5848,8 +5848,18 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
     // Phase 9: Fractional Max Pool 2D
     // =========================================================================
     table.register_kernel(OpId::FractionalMaxPool2dForward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        int64_t out_h = attrs.get_int(AttrKey::OutputSizeH, 1);
-        int64_t out_w = attrs.get_int(AttrKey::OutputSizeW, 1);
+        // RR.8: honour per-axis OutputRatio{H,W} when set.
+        const auto& in_shape = inputs[0].shape();
+        const int64_t in_h = (in_shape.size() >= 2) ? in_shape[in_shape.size() - 2] : 0;
+        const int64_t in_w = (in_shape.size() >= 1) ? in_shape[in_shape.size() - 1] : 0;
+        const double ratio_h = attrs.get_float(AttrKey::OutputRatioH, 0.0);
+        const double ratio_w = attrs.get_float(AttrKey::OutputRatioW, 0.0);
+        int64_t out_h = (ratio_h > 0.0)
+            ? static_cast<int64_t>(std::floor(static_cast<double>(in_h) * ratio_h))
+            : attrs.get_int(AttrKey::OutputSizeH, 1);
+        int64_t out_w = (ratio_w > 0.0)
+            ? static_cast<int64_t>(std::floor(static_cast<double>(in_w) * ratio_w))
+            : attrs.get_int(AttrKey::OutputSizeW, 1);
         const Tensor* samples = (inputs.size() > 1) ? &inputs[1] : nullptr;
         auto [output, indices] = oneapi::fractional_maxpool2d_forward_kernel(inputs[0], out_h, out_w, samples, get_q(inputs));
         return std::vector<Tensor>{output, indices};
@@ -5864,9 +5874,23 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
     // Phase 9: Fractional Max Pool 3D
     // =========================================================================
     table.register_kernel(OpId::FractionalMaxPool3dForward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        int64_t out_d = attrs.get_int(AttrKey::OutputSizeD, 1);
-        int64_t out_h = attrs.get_int(AttrKey::OutputSizeH, 1);
-        int64_t out_w = attrs.get_int(AttrKey::OutputSizeW, 1);
+        // RR.8: honour per-axis OutputRatio{D,H,W} when set.
+        const auto& in_shape = inputs[0].shape();
+        const int64_t in_d = (in_shape.size() >= 3) ? in_shape[in_shape.size() - 3] : 0;
+        const int64_t in_h = (in_shape.size() >= 2) ? in_shape[in_shape.size() - 2] : 0;
+        const int64_t in_w = (in_shape.size() >= 1) ? in_shape[in_shape.size() - 1] : 0;
+        const double ratio_d = attrs.get_float(AttrKey::OutputRatioD, 0.0);
+        const double ratio_h = attrs.get_float(AttrKey::OutputRatioH, 0.0);
+        const double ratio_w = attrs.get_float(AttrKey::OutputRatioW, 0.0);
+        int64_t out_d = (ratio_d > 0.0)
+            ? static_cast<int64_t>(std::floor(static_cast<double>(in_d) * ratio_d))
+            : attrs.get_int(AttrKey::OutputSizeD, 1);
+        int64_t out_h = (ratio_h > 0.0)
+            ? static_cast<int64_t>(std::floor(static_cast<double>(in_h) * ratio_h))
+            : attrs.get_int(AttrKey::OutputSizeH, 1);
+        int64_t out_w = (ratio_w > 0.0)
+            ? static_cast<int64_t>(std::floor(static_cast<double>(in_w) * ratio_w))
+            : attrs.get_int(AttrKey::OutputSizeW, 1);
         const Tensor* samples = (inputs.size() > 1) ? &inputs[1] : nullptr;
         auto [output, indices] = oneapi::fractional_maxpool3d_forward_kernel(inputs[0], out_d, out_h, out_w, samples, get_q(inputs));
         return std::vector<Tensor>{output, indices};

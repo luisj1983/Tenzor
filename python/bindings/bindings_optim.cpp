@@ -92,7 +92,9 @@ void register_optim(py::module_& m) {
                          std::optional<double> step_min,
                          std::optional<double> step_max,
                          std::optional<double> trust_ratio_min,
-                         std::optional<double> trust_ratio_max) {
+                         std::optional<double> trust_ratio_max,
+                         std::optional<double> lambd,
+                         std::optional<double> t0) {
             tenzor::optim::ParamGroup g{std::move(params), lr, weight_decay};
             g.momentum                   = momentum;
             g.dampening                  = dampening;
@@ -114,6 +116,9 @@ void register_optim(py::module_& m) {
             // QQ.12: LAMB trust-ratio clamps.
             g.trust_ratio_min            = trust_ratio_min;
             g.trust_ratio_max            = trust_ratio_max;
+            // audit-11 RR.6: ASGD per-group overrides.
+            g.lambd                      = lambd;
+            g.t0                         = t0;
             return g;
         }), py::arg("params"), py::arg("lr"), py::arg("weight_decay") = 0.0,
             py::arg("momentum")                  = py::none(),
@@ -133,7 +138,9 @@ void register_optim(py::module_& m) {
             py::arg("step_min")                  = py::none(),
             py::arg("step_max")                  = py::none(),
             py::arg("trust_ratio_min")           = py::none(),
-            py::arg("trust_ratio_max")           = py::none())
+            py::arg("trust_ratio_max")           = py::none(),
+            py::arg("lambd")                     = py::none(),
+            py::arg("t0")                        = py::none())
         .def_readwrite("params", &tenzor::optim::ParamGroup::params,
              "Parameters in this group")
         .def_readwrite("lr", &tenzor::optim::ParamGroup::lr,
@@ -179,6 +186,11 @@ void register_optim(py::module_& m) {
              "Per-group LAMB trust-ratio min (None = use optimiser default)")
         .def_readwrite("trust_ratio_max", &tenzor::optim::ParamGroup::trust_ratio_max,
              "Per-group LAMB trust-ratio max (None = use optimiser default)")
+        // audit-11 RR.6: ASGD per-group overrides.
+        .def_readwrite("lambd", &tenzor::optim::ParamGroup::lambd,
+             "Per-group ASGD lambd (None = use optimiser default)")
+        .def_readwrite("t0", &tenzor::optim::ParamGroup::t0,
+             "Per-group ASGD t0 (None = use optimiser default)")
         .def("__repr__", [](const tenzor::optim::ParamGroup& self) {
             return "ParamGroup(params=" + std::to_string(self.params.size()) +
                    ", lr=" + std::to_string(self.lr) +

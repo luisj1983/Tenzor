@@ -30,6 +30,7 @@
 #include "cuda_error.hpp"
 #include <cuda_runtime.h>
 #include <array>
+#include <cmath>
 #include <cstdlib>
 #include <limits>
 #include <sstream>
@@ -590,8 +591,7 @@ namespace cuda {
 
     // Conv2d backward and transpose
     auto conv2d_backward_kernel(const Tensor& grad_output, const Tensor& input, const Tensor& weight, int64_t stride, int64_t padding, int64_t dilation, int64_t groups, bool compute_grad_input, bool compute_grad_weight, bool compute_grad_bias, cudaStream_t stream) -> std::tuple<Tensor, Tensor, Tensor>;
-    auto conv_transpose2d_forward_kernel(const Tensor& input, const Tensor& weight, const Tensor* bias, int64_t stride, int64_t padding, int64_t output_padding, int64_t dilation, int64_t groups, cudaStream_t stream) -> Tensor;
-    // M12 fix: per-axis overload.
+    // RR.9: only the per-axis overload remains; the dispatcher calls it directly.
     auto conv_transpose2d_forward_kernel(const Tensor& input, const Tensor& weight, const Tensor* bias, int64_t stride_h, int64_t stride_w, int64_t padding_h, int64_t padding_w, int64_t output_padding_h, int64_t output_padding_w, int64_t dilation_h, int64_t dilation_w, int64_t groups, cudaStream_t stream) -> Tensor;
     auto depthwise_conv2d_forward_kernel(const Tensor& input, const Tensor& weight, const Tensor* bias, int64_t stride, int64_t padding, int64_t dilation, cudaStream_t stream) -> Tensor;
     // Phase 2.1: per-axis overload.
@@ -5132,8 +5132,18 @@ void register_cuda_kernels(BackendDispatchTable& table) {
     // Phase 9: Fractional Max Pool 2D
     // =========================================================================
     table.register_kernel(OpId::FractionalMaxPool2dForward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        int64_t out_h = attrs.get_int(AttrKey::OutputSizeH, 1);
-        int64_t out_w = attrs.get_int(AttrKey::OutputSizeW, 1);
+        // RR.8: honour per-axis OutputRatio{H,W} when set (PyTorch ratio mode).
+        const auto& in_shape = inputs[0].shape();
+        const int64_t in_h = (in_shape.size() >= 2) ? in_shape[in_shape.size() - 2] : 0;
+        const int64_t in_w = (in_shape.size() >= 1) ? in_shape[in_shape.size() - 1] : 0;
+        const double ratio_h = attrs.get_float(AttrKey::OutputRatioH, 0.0);
+        const double ratio_w = attrs.get_float(AttrKey::OutputRatioW, 0.0);
+        int64_t out_h = (ratio_h > 0.0)
+            ? static_cast<int64_t>(std::floor(static_cast<double>(in_h) * ratio_h))
+            : attrs.get_int(AttrKey::OutputSizeH, 1);
+        int64_t out_w = (ratio_w > 0.0)
+            ? static_cast<int64_t>(std::floor(static_cast<double>(in_w) * ratio_w))
+            : attrs.get_int(AttrKey::OutputSizeW, 1);
         const Tensor* samples = (inputs.size() > 1) ? &inputs[1] : nullptr;
         auto [output, indices] = cuda::fractional_maxpool2d_forward_kernel(inputs[0], out_h, out_w, samples, get_cuda_stream(attrs));
         return std::vector<Tensor>{output, indices};
@@ -5153,9 +5163,23 @@ void register_cuda_kernels(BackendDispatchTable& table) {
     // pool computes stride from input/output ratio internally, and unpool uses
     // the saved index map. No per-axis collapse here.
     table.register_kernel(OpId::FractionalMaxPool3dForward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        int64_t out_d = attrs.get_int(AttrKey::OutputSizeD, 1);
-        int64_t out_h = attrs.get_int(AttrKey::OutputSizeH, 1);
-        int64_t out_w = attrs.get_int(AttrKey::OutputSizeW, 1);
+        // RR.8: honour per-axis OutputRatio{D,H,W} when set.
+        const auto& in_shape = inputs[0].shape();
+        const int64_t in_d = (in_shape.size() >= 3) ? in_shape[in_shape.size() - 3] : 0;
+        const int64_t in_h = (in_shape.size() >= 2) ? in_shape[in_shape.size() - 2] : 0;
+        const int64_t in_w = (in_shape.size() >= 1) ? in_shape[in_shape.size() - 1] : 0;
+        const double ratio_d = attrs.get_float(AttrKey::OutputRatioD, 0.0);
+        const double ratio_h = attrs.get_float(AttrKey::OutputRatioH, 0.0);
+        const double ratio_w = attrs.get_float(AttrKey::OutputRatioW, 0.0);
+        int64_t out_d = (ratio_d > 0.0)
+            ? static_cast<int64_t>(std::floor(static_cast<double>(in_d) * ratio_d))
+            : attrs.get_int(AttrKey::OutputSizeD, 1);
+        int64_t out_h = (ratio_h > 0.0)
+            ? static_cast<int64_t>(std::floor(static_cast<double>(in_h) * ratio_h))
+            : attrs.get_int(AttrKey::OutputSizeH, 1);
+        int64_t out_w = (ratio_w > 0.0)
+            ? static_cast<int64_t>(std::floor(static_cast<double>(in_w) * ratio_w))
+            : attrs.get_int(AttrKey::OutputSizeW, 1);
         const Tensor* samples = (inputs.size() > 1) ? &inputs[1] : nullptr;
         auto [output, indices] = cuda::fractional_maxpool3d_forward_kernel(inputs[0], out_d, out_h, out_w, samples, get_cuda_stream(attrs));
         return std::vector<Tensor>{output, indices};

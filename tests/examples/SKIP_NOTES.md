@@ -69,3 +69,26 @@ re-enabled, follow the pattern used in `gradient_checkpointing` /
   needs to cover. The nlp/ inference example is not training, so no
   loss-decrease assertion applies; its TextGenerator strategies are
   covered by other unit tests.
+
+## Non-showcase examples covered (audit-11 RR.18, 2026-05-27)
+
+- `examples/cpp/training/vae_autoencoder.cpp` -> runner extracted into
+  `vae_autoencoder_runner.{cpp,hpp}`; wired via
+  `NON_SHOWCASE_AUTOGRAD_RUNNER_TARGETS` and exercised by
+  `ExampleRegression.VaeAutoencoderTrains`. Asserts monotonic loss
+  decrease on a tiny deterministic synthetic batch (batch=2,
+  input_dim=16, latent_dim=4, 10 Adam steps).
+- `examples/cpp/training/gru_time_series.cpp` -> runner extracted into
+  `gru_time_series_runner.{cpp,hpp}`; wired via the same list and
+  exercised by `ExampleRegression.GruTimeSeriesTrains`. Asserts monotonic
+  loss decrease on a synthetic sine-wave batch (batch=2, seq_len=16,
+  10 Adam steps).
+- `examples/cpp/training/unet_semantic_segmentation.cpp` -> runner
+  extracted into `unet_semantic_segmentation_runner.{cpp,hpp}`; wired via
+  the same list and exercised by
+  `ExampleRegression.UnetSemanticSegmentationTrains`. The
+  CE-against-random-labels surrogate on a randomly-initialised conv
+  backbone is not guaranteed monotonic over a handful of steps, so the
+  test asserts `initial != final` (same fallback as the NN.24 YOLO
+  runner) — enough to prove backward propagates through Conv2d,
+  BatchNorm2d, ConvTranspose2d, cat, and the CrossEntropyLoss head.

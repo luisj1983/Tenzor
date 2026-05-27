@@ -2096,6 +2096,52 @@ kernel void softmax_normalize_kernel(
     }
 }
 
+// ---------------------------------------------------------------------------
+// RR.10: Half-precision softmax.
+//
+// PyTorch parity demands a true F16 implementation rather than a host-side
+// widen-narrow that defers max-subtract until after promotion (which would
+// overflow exp() for large inputs).  These kernels keep the max-subtract in
+// F16 (subtraction of finite halves cannot overflow), but accumulate the
+// exp + sum in F32 to avoid catastrophic precision loss for medium cols.
+// The final result is packed back to F16.
+// ---------------------------------------------------------------------------
+
+kernel void softmax_max_kernel_f16(
+    device const half* input [[buffer(0)]],
+    device half* row_max     [[buffer(1)]],
+    constant uint& cols      [[buffer(2)]],
+    uint row                 [[thread_position_in_grid]])
+{
+    half max_val = input[row * cols];
+    for (uint j = 1; j < cols; ++j) {
+        max_val = max(max_val, input[row * cols + j]);
+    }
+    row_max[row] = max_val;
+}
+
+kernel void softmax_normalize_kernel_f16(
+    device const half* input  [[buffer(0)]],
+    device const half* row_max [[buffer(1)]],
+    device half* output       [[buffer(2)]],
+    constant uint& cols       [[buffer(3)]],
+    uint row                  [[thread_position_in_grid]])
+{
+    // Subtract max in F16 (safe), then accumulate exp/sum in F32 (precision).
+    half m_h = row_max[row];
+    float sum = 0.0f;
+    for (uint j = 0; j < cols; ++j) {
+        half d = input[row * cols + j] - m_h;
+        float e = exp(float(d));
+        output[row * cols + j] = half(e);
+        sum += e;
+    }
+    float inv_sum = 1.0f / sum;
+    for (uint j = 0; j < cols; ++j) {
+        output[row * cols + j] = half(float(output[row * cols + j]) * inv_sum);
+    }
+}
+
 // ============================================================================
 // Embedding lookup
 // ============================================================================

@@ -76,9 +76,22 @@ public:
      * more than one (or zero) throws `std::invalid_argument`.
      *
      * The group's `lr` overrides the optimiser-wide default; everything
-     * else (max_iter / tolerances / history_size / line search variant) is
-     * LBFGS-specific and has no ParamGroup field, so the defaults supplied
-     * here are authoritative.
+     * else (max_iter / max_eval / tolerances / history_size / line search
+     * variant) is LBFGS-specific and has no ParamGroup field, so the
+     * defaults supplied here are authoritative.
+     *
+     * @par audit-11 RR.7 — single-group-only design rationale:
+     * The two-loop recursion maintains a single curvature history
+     * (s_history_, y_history_, rho_history_) over a single flattened state
+     * vector, and the line search consumes the global flat gradient to
+     * produce one scalar step. There is no well-defined way to apply
+     * per-group hyperparameters: parallel histories from different
+     * objectives cannot be combined into one search direction, convergence
+     * tolerances are global properties of the loss, and max_iter governs
+     * the outer loop over the whole problem. Callers needing different
+     * settings per parameter subset must construct *separate* LBFGS
+     * instances and run them sequentially (block coordinate descent) — see
+     * the constructor body for the runtime guard message.
      */
     explicit LBFGS(std::vector<optim::ParamGroup> groups,
                    double default_lr = 1.0,

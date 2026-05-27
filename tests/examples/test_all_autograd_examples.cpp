@@ -55,6 +55,11 @@
 #include "yolo_object_detection_runner.hpp"
 #include "gpt_text_generation_runner.hpp"
 
+// RR.18 (audit-11): VAE / GRU / U-Net runners.
+#include "vae_autoencoder_runner.hpp"
+#include "gru_time_series_runner.hpp"
+#include "unet_semantic_segmentation_runner.hpp"
+
 class ExampleRegression : public ::testing::Test {
 protected:
     static void SetUpTestSuite() {
@@ -370,5 +375,41 @@ TEST_F(ExampleRegression, GptTextGenerationTrains) {
     ASSERT_EQ(rc, 0);
     EXPECT_GT(initial - final_, kMinLossDecrease)
         << "gpt_text_generation did not reduce loss: initial=" << initial
+        << " final=" << final_;
+}
+
+// RR.18 (audit-11): VAE / GRU / U-Net regressions. VAE and GRU train on
+// deterministic synthetic batches whose MSE-style loss is expected to
+// decrease over a few Adam steps; U-Net's CE-against-random-labels
+// surrogate is not guaranteed monotonic on a randomly-initialised conv
+// backbone, so it uses the same `initial != final` fallback assertion as
+// the YOLO runner from NN.24.
+TEST_F(ExampleRegression, VaeAutoencoderTrains) {
+    double initial = -1.0, final_ = -1.0;
+    int rc = tenzor::examples::vae_autoencoder::run_vae_training(
+        /*num_steps=*/10, &initial, &final_, tenzor::Device::cpu(), false);
+    ASSERT_EQ(rc, 0);
+    EXPECT_GT(initial - final_, kMinLossDecrease)
+        << "VAE autoencoder did not reduce loss: initial=" << initial
+        << " final=" << final_;
+}
+
+TEST_F(ExampleRegression, GruTimeSeriesTrains) {
+    double initial = -1.0, final_ = -1.0;
+    int rc = tenzor::examples::gru_time_series::run_gru_training(
+        /*num_steps=*/10, &initial, &final_, tenzor::Device::cpu(), false);
+    ASSERT_EQ(rc, 0);
+    EXPECT_GT(initial - final_, kMinLossDecrease)
+        << "GRU time series did not reduce loss: initial=" << initial
+        << " final=" << final_;
+}
+
+TEST_F(ExampleRegression, UnetSemanticSegmentationTrains) {
+    double initial = -1.0, final_ = -1.0;
+    int rc = tenzor::examples::unet_semantic_segmentation::run_unet_training(
+        /*num_steps=*/10, &initial, &final_, tenzor::Device::cpu(), false);
+    ASSERT_EQ(rc, 0);
+    EXPECT_NE(initial, final_)
+        << "U-Net training did not move loss at all: initial=" << initial
         << " final=" << final_;
 }

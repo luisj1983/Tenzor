@@ -1670,6 +1670,47 @@ auto fractional_max_pool2d(const Variable& input,
     return {std::move(out), indices};
 }
 
+// RR.8: ratio-mode overload — output extent derived from input H/W at call time.
+auto fractional_max_pool2d(const Variable& input,
+                           std::pair<int64_t, int64_t> kernel_size,
+                           std::pair<double, double> output_ratio,
+                           const std::optional<Tensor>& random_samples)
+    -> std::pair<Variable, Tensor> {
+    if (input.shape().size() != 4) {
+        throw std::invalid_argument(
+            "F::fractional_max_pool2d (ratio) expects 4D input [N, C, H, W]");
+    }
+    if (!(output_ratio.first > 0.0 && output_ratio.first < 1.0 &&
+          output_ratio.second > 0.0 && output_ratio.second < 1.0)) {
+        throw std::invalid_argument(
+            "F::fractional_max_pool2d: output_ratio components must be in (0, 1)");
+    }
+
+    NewOpAttributes attrs;
+    attrs.set(AttrKey::KernelSize, kernel_size.first);
+    attrs.set(AttrKey::OutputRatioH, output_ratio.first);
+    attrs.set(AttrKey::OutputRatioW, output_ratio.second);
+
+    std::vector<Tensor> inputs_vec = {input.tensor()};
+    if (random_samples.has_value()) {
+        inputs_vec.push_back(random_samples.value());
+    }
+
+    auto result = dispatch_to_device(OpId::FractionalMaxPool2dForward,
+        input.tensor().device().type, inputs_vec, attrs);
+
+    Variable out(result[0], input.requires_grad());
+    Tensor indices = result[1];
+    if (input.requires_grad() && ::tenzor::is_grad_enabled()) {
+        std::vector<int64_t> in_shape(input.shape().begin(), input.shape().end());
+        auto backward_fn = std::make_shared<
+            IndexedPoolBackward<OpId::FractionalMaxPool2dBackward>>(
+                std::move(in_shape), indices);
+        wire_pool_grad_fn(out, input, backward_fn);
+    }
+    return {std::move(out), indices};
+}
+
 auto fractional_max_pool3d(const Variable& input,
                            std::tuple<int64_t, int64_t, int64_t> kernel_size,
                            std::tuple<int64_t, int64_t, int64_t> output_size,
@@ -1685,6 +1726,50 @@ auto fractional_max_pool3d(const Variable& input,
     attrs.set(AttrKey::OutputSizeD, std::get<0>(output_size));
     attrs.set(AttrKey::OutputSizeH, std::get<1>(output_size));
     attrs.set(AttrKey::OutputSizeW, std::get<2>(output_size));
+
+    std::vector<Tensor> inputs_vec = {input.tensor()};
+    if (random_samples.has_value()) {
+        inputs_vec.push_back(random_samples.value());
+    }
+
+    auto result = dispatch_to_device(OpId::FractionalMaxPool3dForward,
+        input.tensor().device().type, inputs_vec, attrs);
+
+    Variable out(result[0], input.requires_grad());
+    Tensor indices = result[1];
+    if (input.requires_grad() && ::tenzor::is_grad_enabled()) {
+        std::vector<int64_t> in_shape(input.shape().begin(), input.shape().end());
+        auto backward_fn = std::make_shared<
+            IndexedPoolBackward<OpId::FractionalMaxPool3dBackward>>(
+                std::move(in_shape), indices);
+        wire_pool_grad_fn(out, input, backward_fn);
+    }
+    return {std::move(out), indices};
+}
+
+// RR.8: ratio-mode overload for 3D fractional max pool.
+auto fractional_max_pool3d(const Variable& input,
+                           std::tuple<int64_t, int64_t, int64_t> kernel_size,
+                           std::tuple<double, double, double> output_ratio,
+                           const std::optional<Tensor>& random_samples)
+    -> std::pair<Variable, Tensor> {
+    if (input.shape().size() != 5) {
+        throw std::invalid_argument(
+            "F::fractional_max_pool3d (ratio) expects 5D input [N, C, D, H, W]");
+    }
+    const double rd = std::get<0>(output_ratio);
+    const double rh = std::get<1>(output_ratio);
+    const double rw = std::get<2>(output_ratio);
+    if (!(rd > 0.0 && rd < 1.0 && rh > 0.0 && rh < 1.0 && rw > 0.0 && rw < 1.0)) {
+        throw std::invalid_argument(
+            "F::fractional_max_pool3d: output_ratio components must be in (0, 1)");
+    }
+
+    NewOpAttributes attrs;
+    attrs.set(AttrKey::KernelSize, std::get<0>(kernel_size));
+    attrs.set(AttrKey::OutputRatioD, rd);
+    attrs.set(AttrKey::OutputRatioH, rh);
+    attrs.set(AttrKey::OutputRatioW, rw);
 
     std::vector<Tensor> inputs_vec = {input.tensor()};
     if (random_samples.has_value()) {

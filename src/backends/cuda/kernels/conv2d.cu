@@ -1874,27 +1874,11 @@ auto conv_transpose2d_forward_kernel(
     return output;
 }
 
-// M12 fix: scalar-args back-compat shim — duplicates the scalar values
-// to per-axis pairs and delegates to the per-axis kernel above.
-auto conv_transpose2d_forward_kernel(
-    const Tensor& input,
-    const Tensor& weight,
-    const Tensor* bias,
-    int64_t stride,
-    int64_t padding,
-    int64_t output_padding,
-    int64_t dilation,
-    int64_t groups,
-    cudaStream_t stream
-) -> Tensor {
-    return conv_transpose2d_forward_kernel(
-        input, weight, bias,
-        stride, stride,
-        padding, padding,
-        output_padding, output_padding,
-        dilation, dilation,
-        groups, stream);
-}
+// RR.9: scalar-arg overload removed.  The dispatcher
+// (cuda_kernel_registry.cpp) now always reads per-axis stride/padding/
+// output_padding/dilation via TENZOR_READ_CONVT2D_ATTRS() and calls the
+// per-axis overload directly.  The previous shim duplicated a single
+// `output_padding` into both axes, silently squashing asymmetric values.
 
 
 // ============================================================================

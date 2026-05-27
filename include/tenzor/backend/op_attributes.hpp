@@ -121,6 +121,11 @@ enum class AttrKey : uint16_t {
     OutputSizeH,
     OutputSizeW,
     OutputSizeD,
+    // Per-axis output ratios for fractional pooling (PyTorch supports
+    // either output_size OR output_ratio; when ratio_h>0, out_h = floor(H * ratio_h))
+    OutputRatioH,
+    OutputRatioW,
+    OutputRatioD,
     Chunks,
     SplitSize,
     Steps,

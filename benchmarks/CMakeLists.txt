@@ -16,6 +16,9 @@ set(BENCHMARK_TARGETS
     benchmark_embeddings
     benchmark_rnn
     benchmark_dispatch
+    # RR.19 (audit-11): benchmark_compression now honours --device, so
+    # wire it into the build so the Python runner can pick it up too.
+    benchmark_compression
 )
 
 # benchmark_ops - Matrix and tensor operations
@@ -77,6 +80,25 @@ target_include_directories(benchmark_rnn PRIVATE ${CMAKE_SOURCE_DIR}/include)
 add_executable(benchmark_dispatch benchmark_dispatch.cpp)
 target_link_libraries(benchmark_dispatch PRIVATE tenzor_core)
 target_include_directories(benchmark_dispatch PRIVATE ${CMAKE_SOURCE_DIR}/include)
+
+# RR.19 (audit-11): benchmark_compression — pruning / quantization
+# pipelines, driven via Google Benchmark. Needs --device flag wired into
+# argv via parse_device_arg(), see common.hpp. Falls back to the bundled
+# benchmark library or system one (must already be findable since other
+# benchmark binaries that use <benchmark/benchmark.h> compile).
+find_package(benchmark QUIET)
+if (benchmark_FOUND)
+    add_executable(benchmark_compression benchmark_compression.cpp)
+    target_link_libraries(benchmark_compression
+        PRIVATE tenzor_core benchmark::benchmark)
+    target_include_directories(benchmark_compression PRIVATE
+        ${CMAKE_SOURCE_DIR}/include)
+else()
+    message(STATUS "Google Benchmark not found — skipping benchmark_compression")
+    # Remove from the build list so foreach below doesn't reference an
+    # un-created target.
+    list(REMOVE_ITEM BENCHMARK_TARGETS benchmark_compression)
+endif()
 
 # Set C++ standard for all benchmarks
 foreach(target ${BENCHMARK_TARGETS})

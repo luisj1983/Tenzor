@@ -23,10 +23,19 @@
 #include "tenzor/ops/math.hpp"
 #include "tenzor/ops/reduction.hpp"
 #include "tenzor/utils/benchmark.hpp"
+#include "common.hpp"
 #include <iostream>
 #include <memory>
 #include <iomanip>
 #include <sstream>
+
+// RR.19 (audit-11): global device parsed from argv in main(). Defaults to
+// CPU. Replaces the previous "always-on-CPU" behaviour (model->to(device)
+// + Variable inputs both created on the default CPU device) so the Python
+// runner's --device flag actually selects the training-loop backend.
+namespace {
+tenzor::Device g_bench_device = tenzor::Device::cpu();
+}
 
 using namespace tenzor;
 using namespace tenzor::nn;
@@ -189,8 +198,8 @@ void benchmark_training_iteration() {
         auto criterion = std::make_shared<MSELoss>();
 
         // Create dummy data
-        auto input = Variable(randn({32, input_size}), true);
-        auto target = Variable(randn({32, output_size}), false);
+        auto input = Variable(randn({32, input_size}, DType::Float32, g_bench_device), true);
+        auto target = Variable(randn({32, output_size}, DType::Float32, g_bench_device), false);
 
         Benchmark bench(name, WARMUP_ITERATIONS, BENCHMARK_ITERATIONS);
 
@@ -243,8 +252,8 @@ void benchmark_batch_training() {
         std::vector<Variable> inputs;
         std::vector<Variable> targets;
         for (size_t i = 0; i < 10; ++i) {
-            inputs.push_back(Variable(randn({batch_size, 256}), true));
-            targets.push_back(Variable(randn({batch_size, 10}), false));
+            inputs.push_back(Variable(randn({batch_size, 256}, DType::Float32, g_bench_device), true));
+            targets.push_back(Variable(randn({batch_size, 10}, DType::Float32, g_bench_device), false));
         }
 
         Benchmark bench(name, 2, 10);
@@ -291,8 +300,12 @@ void benchmark_cnn_training() {
         auto criterion = std::make_shared<CrossEntropyLoss>();
 
         // Create dummy data
-        auto input = Variable(randn({batch_size, 3, image_size, image_size}), true);
+        auto input = Variable(randn({batch_size, 3, image_size, image_size}, DType::Float32, g_bench_device), true);
         // Create random integer targets for classification
+        // RR.19 (audit-11): intentionally CPU — target_ptr below uses
+        // raw data<int64_t>() host access to fill random labels. The
+        // resulting target_tensor is consumed by CrossEntropyLoss which
+        // accepts a CPU label tensor regardless of the model device.
         auto target_tensor = zeros({batch_size}, DType::Int64, Device::cpu());
         auto target_ptr = target_tensor.data<int64_t>();
         for (int64_t i = 0; i < batch_size; ++i) {
@@ -347,8 +360,8 @@ void benchmark_optimizers() {
         auto optimizer = std::make_shared<optim::SGD>(model->parameters(), 0.01, 0.9);
         auto criterion = std::make_shared<MSELoss>();
 
-        auto input = Variable(randn({batch_size, input_size}), true);
-        auto target = Variable(randn({batch_size, output_size}), false);
+        auto input = Variable(randn({batch_size, input_size}, DType::Float32, g_bench_device), true);
+        auto target = Variable(randn({batch_size, output_size}, DType::Float32, g_bench_device), false);
 
         Benchmark bench("SGD (momentum=0.9)", WARMUP_ITERATIONS, BENCHMARK_ITERATIONS);
 
@@ -372,8 +385,8 @@ void benchmark_optimizers() {
         auto optimizer = std::make_shared<optim::Adam>(model->parameters(), 0.001);
         auto criterion = std::make_shared<MSELoss>();
 
-        auto input = Variable(randn({batch_size, input_size}), true);
-        auto target = Variable(randn({batch_size, output_size}), false);
+        auto input = Variable(randn({batch_size, input_size}, DType::Float32, g_bench_device), true);
+        auto target = Variable(randn({batch_size, output_size}, DType::Float32, g_bench_device), false);
 
         Benchmark bench("Adam", WARMUP_ITERATIONS, BENCHMARK_ITERATIONS);
 
@@ -416,8 +429,8 @@ void benchmark_gradient_accumulation() {
         std::vector<Variable> inputs;
         std::vector<Variable> targets;
         for (size_t i = 0; i < steps; ++i) {
-            inputs.push_back(Variable(randn({32, 256}), true));
-            targets.push_back(Variable(randn({32, 10}), false));
+            inputs.push_back(Variable(randn({32, 256}, DType::Float32, g_bench_device), true));
+            targets.push_back(Variable(randn({32, 10}, DType::Float32, g_bench_device), false));
         }
 
         Benchmark bench(name, WARMUP_ITERATIONS, BENCHMARK_ITERATIONS);
@@ -458,8 +471,8 @@ void benchmark_memory_patterns() {
         auto model = std::make_shared<SimpleMLP>(512, 512, 10);
         model->train();
 
-        auto input = Variable(randn({32, 512}), true);
-        auto target = Variable(randn({32, 10}), false);
+        auto input = Variable(randn({32, 512}, DType::Float32, g_bench_device), true);
+        auto target = Variable(randn({32, 10}, DType::Float32, g_bench_device), false);
         auto criterion = std::make_shared<MSELoss>();
         auto optimizer = std::make_shared<optim::SGD>(model->parameters(), 0.01);
 
@@ -484,6 +497,10 @@ void benchmark_memory_patterns() {
 }
 
 int main(int argc, char** argv) {
+    // RR.19 (audit-11): pick up --device / --device-id from argv. Defaults
+    // to CPU when no flag is present, matching pre-RR.19 behaviour.
+    g_bench_device = tenzor::bench::parse_device_arg(argc, argv);
+
     bool json_output = false;
     for (int i = 1; i < argc; ++i) {
         if (std::string(argv[i]) == "--json") {
@@ -495,6 +512,7 @@ int main(int argc, char** argv) {
         std::cout << "\n";
         std::cout << "========================================\n";
         std::cout << "  Tenzor Training Benchmark Suite\n";
+        std::cout << "  device=" << g_bench_device.to_string() << "\n";
         std::cout << "========================================\n";
         std::cout << "\nTarget Performance Metrics:\n";
         std::cout << "  Training iteration:  < 5ms for small models\n";

@@ -297,8 +297,15 @@ void register_core(py::module_& m) {
         }, py::call_guard<py::gil_scoped_release>(),
            "Block the calling host thread until this event has completed.")
         .def("elapsed_time", [](PyEvent& self, PyEvent& end_event) {
+            // RR.11: PyTorch parity — Event.elapsed_time must wait for the
+            // end event to complete before reading the timing data, and the
+            // entire blocking sequence must release the GIL so other Python
+            // threads can run while we wait on the GPU.
+            self.backend->synchronize_event(end_event.handle);
             return self.backend->event_elapsed_ms(self.handle, end_event.handle);
-        }, py::arg("end_event"), "Elapsed time in ms between this (start) and end_event");
+        }, py::arg("end_event"),
+           py::call_guard<py::gil_scoped_release>(),
+           "Elapsed time in ms between this (start) and end_event; synchronizes end_event before reading.");
 
     // Vulkan device availability
     m.def("vulkan_is_available", []() {

@@ -1388,7 +1388,16 @@ public:
     auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
     auto supports_higher_order() const -> bool override { return true; }
     auto op_id() const -> OpId override { return OpId::Bmm; }
-};
+
+    // audit-11 RR.2: MM.1 sibling. If forward `bmm` ever permits a
+    // broadcasted batch dim (e.g. (1,M,K) @ (B,K,N) -> (B,M,N)), the
+    // chain-rule produces grads shaped as the broadcast output and must
+    // be reduced back to each operand's saved shape — same pattern as
+    // MatMulBackward's input_shape_a_/input_shape_b_.  Captured by the
+    // autograd::bmm forward wrapper before the Function is attached.
+    std::vector<int64_t> input_shape_a_;
+    std::vector<int64_t> input_shape_b_;
+};;
 
 /**
  * @brief Concatenation gradient function.

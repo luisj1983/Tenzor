@@ -699,6 +699,20 @@ auto fractional_max_pool2d(const Variable& input,
     -> std::pair<Variable, Tensor>;
 
 /**
+ * @brief 2D fractional max pooling with per-axis output_ratio (PyTorch parity).
+ *
+ * Equivalent to PyTorch's `nn.FractionalMaxPool2d(output_ratio=(rh, rw))`.
+ * Output size is computed deterministically as
+ * `out_h = floor(H * rh), out_w = floor(W * rw)` from the actual input
+ * spatial extent at call time.
+ */
+auto fractional_max_pool2d(const Variable& input,
+                           std::pair<int64_t, int64_t> kernel_size,
+                           std::pair<double, double> output_ratio,
+                           const std::optional<Tensor>& random_samples = std::nullopt)
+    -> std::pair<Variable, Tensor>;
+
+/**
  * @brief 3D fractional max pooling
  *
  * @param input Input tensor [N, C, D, H, W]
@@ -709,6 +723,15 @@ auto fractional_max_pool2d(const Variable& input,
 auto fractional_max_pool3d(const Variable& input,
                            std::tuple<int64_t, int64_t, int64_t> kernel_size,
                            std::tuple<int64_t, int64_t, int64_t> output_size,
+                           const std::optional<Tensor>& random_samples = std::nullopt)
+    -> std::pair<Variable, Tensor>;
+
+/**
+ * @brief 3D fractional max pooling with per-axis output_ratio (PyTorch parity).
+ */
+auto fractional_max_pool3d(const Variable& input,
+                           std::tuple<int64_t, int64_t, int64_t> kernel_size,
+                           std::tuple<double, double, double> output_ratio,
                            const std::optional<Tensor>& random_samples = std::nullopt)
     -> std::pair<Variable, Tensor>;
 

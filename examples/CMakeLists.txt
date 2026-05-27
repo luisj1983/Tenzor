@@ -54,8 +54,26 @@ target_link_libraries(mixed_precision_training PRIVATE tenzor_core)
 # Training Examples (Complete training pipelines covering all components)
 # ============================================================================
 
+# RR.18 (audit-11): GRU time-series runner extracted so the regression
+# test can drive the same GRU+LayerNorm+Dropout+Linear+Adam+MSELoss
+# pipeline. OBJECT library shared between the standalone exe and the
+# test target.
+add_library(example_gru_time_series_runner OBJECT
+    cpp/training/gru_time_series_runner.cpp)
+target_link_libraries(example_gru_time_series_runner PUBLIC tenzor_core)
+target_include_directories(example_gru_time_series_runner PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/cpp/training
+    ${CMAKE_SOURCE_DIR}/include)
+set_target_properties(example_gru_time_series_runner PROPERTIES
+    CXX_STANDARD 23
+    CXX_STANDARD_REQUIRED ON
+    POSITION_INDEPENDENT_CODE ON)
+
 add_executable(gru_time_series cpp/training/gru_time_series.cpp)
-target_link_libraries(gru_time_series PRIVATE tenzor_core)
+target_link_libraries(gru_time_series PRIVATE
+    tenzor_core example_gru_time_series_runner)
+target_include_directories(gru_time_series PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/cpp/training)
 
 # KK.27: vit_image_classification's training body lives in a runner so
 # tests/examples/test_all_autograd_examples.cpp can drive it. The runner is
@@ -98,8 +116,24 @@ target_link_libraries(transformer_seq2seq PRIVATE
 target_include_directories(transformer_seq2seq PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/cpp/training)
 
+# RR.18 (audit-11): VAE runner extracted for regression coverage of the
+# Linear + ReLU + Sigmoid + Adam + MSELoss pipeline.
+add_library(example_vae_autoencoder_runner OBJECT
+    cpp/training/vae_autoencoder_runner.cpp)
+target_link_libraries(example_vae_autoencoder_runner PUBLIC tenzor_core)
+target_include_directories(example_vae_autoencoder_runner PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/cpp/training
+    ${CMAKE_SOURCE_DIR}/include)
+set_target_properties(example_vae_autoencoder_runner PROPERTIES
+    CXX_STANDARD 23
+    CXX_STANDARD_REQUIRED ON
+    POSITION_INDEPENDENT_CODE ON)
+
 add_executable(vae_autoencoder cpp/training/vae_autoencoder.cpp)
-target_link_libraries(vae_autoencoder PRIVATE tenzor_core)
+target_link_libraries(vae_autoencoder PRIVATE
+    tenzor_core example_vae_autoencoder_runner)
+target_include_directories(vae_autoencoder PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/cpp/training)
 
 # NN.24: yolo_object_detection's tiny-backbone training body lives in a
 # runner so tests/examples/test_all_autograd_examples.cpp can drive it.
@@ -120,8 +154,25 @@ target_link_libraries(yolo_object_detection PRIVATE
 target_include_directories(yolo_object_detection PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/cpp/training)
 
+# RR.18 (audit-11): U-Net runner extracted for regression coverage of the
+# Conv2d + BatchNorm2d + ReLU + MaxPool + ConvTranspose2d + cat +
+# CrossEntropyLoss + Adam pipeline.
+add_library(example_unet_semantic_segmentation_runner OBJECT
+    cpp/training/unet_semantic_segmentation_runner.cpp)
+target_link_libraries(example_unet_semantic_segmentation_runner PUBLIC tenzor_core)
+target_include_directories(example_unet_semantic_segmentation_runner PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/cpp/training
+    ${CMAKE_SOURCE_DIR}/include)
+set_target_properties(example_unet_semantic_segmentation_runner PROPERTIES
+    CXX_STANDARD 23
+    CXX_STANDARD_REQUIRED ON
+    POSITION_INDEPENDENT_CODE ON)
+
 add_executable(unet_semantic_segmentation cpp/training/unet_semantic_segmentation.cpp)
-target_link_libraries(unet_semantic_segmentation PRIVATE tenzor_core)
+target_link_libraries(unet_semantic_segmentation PRIVATE
+    tenzor_core example_unet_semantic_segmentation_runner)
+target_include_directories(unet_semantic_segmentation PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/cpp/training)
 
 # NN.24: gpt_text_generation's SimpleGPT training body lives in a runner
 # so tests/examples/test_all_autograd_examples.cpp can drive it. The

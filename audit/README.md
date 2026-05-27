@@ -85,8 +85,52 @@ the source of truth for the actual numbers.
   All four GPU backends synchronize at exactly the same op boundaries, with the same 4-8 byte D2H copy pattern. PyTorch synchronizes at these same operations for the same architectural reason. Phase 8.4 also fixed `vulkan_ops_vision.cpp:158` to use the lightweight `slice(N-1, N).contiguous().to(cpu())` 4-byte pattern, replacing an earlier full-prefix-tensor materialization workaround that pre-dated the `dispatchContiguous` view-offset fix. User-visible behavior is now identical across all 4 GPU backends. True elimination would require a deferred-shape `Tensor` extension (a `pending_shape_buffer_` whose device-side count is read on first `.shape()` access) — a large refactor that would only *move* the readback to the next `.shape()` call, since most consumers query the shape immediately. Tracked as **a v0.2 architectural proposal**, not a campaign deliverable.
 - **STFT/ISTFT**: ✅ Phase 8.1 verified the native Vulkan registry already routes through native dispatch (the audit's "registry points at CPU" claim was outdated post-Complex64 dispatchContiguous fix). ISTFT round-trip passes Float32 + Float64 on Vulkan.
 
+## OpId enum size vs registered-op count (RR.20, audit-11)
+
+`op_coverage_report` reports a TOTAL of `479/479` for CPU and `477/479` for
+each GPU backend. The corresponding `enum class OpId` in
+`include/tenzor/ops/op_ids.hpp` has **~481 enumerators** — slightly more
+than the 479 the coverage tool tallies. The delta has four explainable
+sources:
+
+1. **Autograd-only OpIds** — a handful of `*Backward` entries (e.g.
+   `GridSampleBackward`, `AffineGridBackward`, `CtcLossBackward`) that
+   appear in the enum so the autograd engine can dispatch a backward
+   kernel via the same machinery as forward ops. They are registered
+   exactly like forward ops (one entry per backend) and are counted by
+   `op_coverage_report`. These contribute to the 479 number.
+2. **Sparse-only OpIds** — the 5 sparse dispatch entries (`SparseSpMM`,
+   `SparseSpMV`, `SparseToDense`, `DenseToSparse`, `SparseAdd`) and
+   their wrappers. Counted on every backend that builds sparse support
+   (CPU + 4 GPU backends).
+3. **Fused-only OpIds** — fused kernels (e.g. `FusedLinearReLU`,
+   `FusedConv2dReLU`, `FusedSoftmaxCrossEntropy`) used by the fusion
+   pass; registered on every backend and counted toward the per-backend
+   coverage tally.
+4. **CPU-only linalg-on-sparse entries** — the **2-op delta** between
+   the CPU 479 total and each GPU backend's 477 is the
+   `sparse_solve_triangular` / `sparse_cholesky` pair, which exists in
+   the registry only on CPU (no cuSPARSE / rocSPARSE / oneMKL-sparse /
+   Vulkan equivalent yet). These remain CPU-only by design until the
+   GPU sparse-direct-solver story lands.
+5. **Reserved / placeholder enumerators** — a small number of OpIds
+   appear in the enum so existing serialised graphs and the kernel
+   registry table layout remain stable across refactors, but have no
+   kernel registered on any backend yet. `op_coverage_report` does not
+   include these in the 479 total; they account for the gap between
+   the enum size (~481) and the reported total.
+
+The historical "317 operations" figure from the v0.1.0 README referred
+to PyTorch-parity surface area before the audit-1-through-11 hardening
+campaigns extended the registry with the autograd-backward, sparse,
+fused, and complex-linalg entries — see the pre/post-hardening
+snapshots in this directory for the per-op diff.
+
 ## Release-blocker criteria (summary)
-1. **Op-count parity**: ✅ All 5 backends (CPU, CUDA, ROCm, OneAPI, Vulkan) register **317/317 operations**.
+1. **Op-count parity**: ✅ All 5 backends register kernels for the
+   common 477-op core. CPU additionally registers 2 sparse-direct
+   helpers (`sparse_solve_triangular`, `sparse_cholesky`) that are
+   intentionally CPU-only.
 2. **No compute-path CPU fallbacks on GPU backends**: ✅ — zero on CUDA, ROCm, OneAPI, and Vulkan compute paths. The 10 single-scalar metadata readbacks remaining on Vulkan (documented above) are not compute fallbacks; they are minimum syncs required to allocate user-visible variable-shape output tensors in the current Tensor API.
 3. **No deprecated / dead code**: ✅ (Phase 1 deleted ~7000 LOC; Phase 8 removed 8 unused OpIds).
 4. **No error-kernel stubs**: ✅ Every registered kernel runs a real implementation.

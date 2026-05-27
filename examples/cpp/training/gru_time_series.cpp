@@ -19,6 +19,10 @@
 #include <random>
 
 #include "tenzor/tenzor.hpp"
+// RR.18 (audit-11): trimmed runner used by the regression test in
+// tests/examples/test_all_autograd_examples.cpp to exercise the same
+// GRU + LayerNorm + Dropout + Linear + Adam + MSELoss pipeline.
+#include "gru_time_series_runner.hpp"
 
 using namespace tenzor;
 using namespace tenzor::nn;

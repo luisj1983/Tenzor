@@ -26,11 +26,13 @@
 // The dispatch table is verified end-to-end; the SimdTrait → dispatch routing
 // is covered implicitly because SimdTrait<Op,float>::apply() calls g_dispatch.
 #include "simd_dispatch.hpp"
+#include "../multi_backend_dtype_fixture.hpp"  // for SkipReason / SKIP_WITH_REASON
 
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
 #include <limits>
+#include <memory>
 #include <string>
 #include <vector>
 #include <algorithm>
@@ -255,86 +257,58 @@ static void check_f64_ops(const char* level_name) {
 }
 
 // ============================================================================
-// Test: scalar level correctness (always runnable regardless of hardware)
+// RR.22 (audit-11): SimdLevel-parameterised fixture for ISA correctness.
+// ----------------------------------------------------------------------------
+// The 8 raw GTEST-SKIP sites that used to gate each of the 4 ISA
+// correctness tests (scalar/avx2/avx512 × F32/F64) were promoted to a single
+// SetUp()-level `SKIP_WITH_REASON(BackendUnavailable, …)` keyed on the
+// parameter so scripts/count_skips.py attributes the skips correctly. The
+// `sse2` level intentionally aliases scalar and is therefore not exposed as
+// its own parameter — the existing `EnvOverrideSse2MappedToScalar` smoke
+// test still covers the env-mapping behaviour.
 // ============================================================================
 
-TEST(SimdRuntimeDispatch, ScalarF32OpsCorrect) {
-    ForceSimdLevel force("scalar");
-    check_f32_ops("scalar");
-}
+class SimdLevelTest : public ::testing::TestWithParam<const char*> {
+protected:
+    const char* level_ = nullptr;
+    std::unique_ptr<ForceSimdLevel> force_;
 
-TEST(SimdRuntimeDispatch, ScalarF64OpsCorrect) {
-    ForceSimdLevel force("scalar");
-    check_f64_ops("scalar");
-}
-
-// ============================================================================
-// Test: AVX2 level correctness (skipped if hardware lacks AVX2)
-// ============================================================================
-
-TEST(SimdRuntimeDispatch, Avx2F32OpsCorrect) {
-#if defined(__x86_64__) || defined(_M_X64)
-    {
-        ForceSimdLevel force("avx2");
-        std::string level = get_simd_level();
-        if (level != "avx2") {
-            GTEST_SKIP() << "AVX2 not available on this CPU";
+    void SetUp() override {
+        level_ = GetParam();
+#if !(defined(__x86_64__) || defined(_M_X64))
+        if (std::string(level_) == "avx2" ||
+            std::string(level_) == "avx512") {
+            SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable,
+                std::string(level_) + " is x86-64 only");
+            return;
         }
-        check_f32_ops("avx2");
-    }
-#else
-    GTEST_SKIP() << "AVX2 only on x86-64";
 #endif
-}
-
-TEST(SimdRuntimeDispatch, Avx2F64OpsCorrect) {
-#if defined(__x86_64__) || defined(_M_X64)
-    {
-        ForceSimdLevel force("avx2");
-        std::string level = get_simd_level();
-        if (level != "avx2") {
-            GTEST_SKIP() << "AVX2 not available on this CPU";
+        // Try to force the requested SIMD level. If the host CPU lacks it,
+        // get_simd_level() will report something different — convert that
+        // into a structured BackendUnavailable skip rather than a raw one.
+        force_ = std::make_unique<ForceSimdLevel>(level_);
+        if (std::string(level_) != get_simd_level()) {
+            SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable,
+                std::string(level_) + " ISA not available on this CPU");
         }
-        check_f64_ops("avx2");
     }
-#else
-    GTEST_SKIP() << "AVX2 only on x86-64";
-#endif
+};
+
+TEST_P(SimdLevelTest, F32OpsCorrect) {
+    check_f32_ops(level_);
 }
 
-// ============================================================================
-// Test: AVX-512 level correctness (skipped if hardware lacks AVX-512)
-// ============================================================================
-
-TEST(SimdRuntimeDispatch, Avx512F32OpsCorrect) {
-#if defined(__x86_64__) || defined(_M_X64)
-    {
-        ForceSimdLevel force("avx512");
-        std::string level = get_simd_level();
-        if (level != "avx512") {
-            GTEST_SKIP() << "AVX-512 not available on this CPU";
-        }
-        check_f32_ops("avx512");
-    }
-#else
-    GTEST_SKIP() << "AVX-512 only on x86-64";
-#endif
+TEST_P(SimdLevelTest, F64OpsCorrect) {
+    check_f64_ops(level_);
 }
 
-TEST(SimdRuntimeDispatch, Avx512F64OpsCorrect) {
-#if defined(__x86_64__) || defined(_M_X64)
-    {
-        ForceSimdLevel force("avx512");
-        std::string level = get_simd_level();
-        if (level != "avx512") {
-            GTEST_SKIP() << "AVX-512 not available on this CPU";
-        }
-        check_f64_ops("avx512");
-    }
-#else
-    GTEST_SKIP() << "AVX-512 only on x86-64";
-#endif
-}
+INSTANTIATE_TEST_SUITE_P(
+    AllIsaLevels,
+    SimdLevelTest,
+    ::testing::Values("scalar", "avx2", "avx512"),
+    [](const ::testing::TestParamInfo<const char*>& info) {
+        return std::string(info.param);
+    });
 
 // ============================================================================
 // Test: All available levels produce consistent results vs scalar reference

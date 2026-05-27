@@ -18,6 +18,11 @@
 #include <memory>
 
 #include "tenzor/tenzor.hpp"
+// RR.18 (audit-11): a trimmed-down version of the SimpleVAE training body
+// lives in vae_autoencoder_runner.{cpp,hpp} so the regression test in
+// tests/examples/test_all_autograd_examples.cpp can drive the same
+// Linear + ReLU + Sigmoid + Adam + MSELoss pipeline.
+#include "vae_autoencoder_runner.hpp"
 
 using namespace tenzor;
 using namespace tenzor::nn;

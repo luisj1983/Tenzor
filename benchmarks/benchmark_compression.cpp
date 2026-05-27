@@ -12,8 +12,18 @@
 #include "tenzor/tenzor.hpp"
 #include "tenzor/nn/compression/pruning.hpp"
 #include "tenzor/nn/quantization.hpp"
+#include "common.hpp"
 #include <iostream>
 #include <iomanip>
+
+// RR.19 (audit-11): global device parsed from argv in main(). Defaults to
+// CPU so the historical unflagged Google-Benchmark invocations stay
+// correct. Replaces the 11 hardcoded `Device::cpu()` literals that
+// previously locked this binary to the host CPU regardless of the
+// --device flag the Python runner passes.
+namespace {
+tenzor::Device g_bench_device = tenzor::Device::cpu();
+}
 
 using namespace tenzor;
 using namespace tenzor::nn;
@@ -148,7 +158,7 @@ BENCHMARK(BM_Pruning_StructuredChannel)->Arg(30)->Arg(50)->Arg(70)->Unit(benchma
 // =============================================================================
 
 static void BM_Quantization_PerTensorSymmetric(benchmark::State& state) {
-    Tensor input({1024, 1024}, DType::Float32, Device::cpu());
+    Tensor input({1024, 1024}, DType::Float32, g_bench_device);
     input.randn_();
 
     for (auto _ : state) {
@@ -167,7 +177,7 @@ static void BM_Quantization_PerTensorSymmetric(benchmark::State& state) {
 BENCHMARK(BM_Quantization_PerTensorSymmetric)->Unit(benchmark::kMillisecond);
 
 static void BM_Quantization_PerTensorAsymmetric(benchmark::State& state) {
-    Tensor input({1024, 1024}, DType::Float32, Device::cpu());
+    Tensor input({1024, 1024}, DType::Float32, g_bench_device);
     input.randn_();
 
     for (auto _ : state) {
@@ -184,7 +194,7 @@ static void BM_Quantization_PerTensorAsymmetric(benchmark::State& state) {
 BENCHMARK(BM_Quantization_PerTensorAsymmetric)->Unit(benchmark::kMillisecond);
 
 static void BM_Quantization_PerChannel(benchmark::State& state) {
-    Tensor input({128, 512, 7, 7}, DType::Float32, Device::cpu());
+    Tensor input({128, 512, 7, 7}, DType::Float32, g_bench_device);
     input.randn_();
     int64_t axis = 1; // quantize per output channel
 
@@ -205,7 +215,7 @@ static void BM_Quantization_Observer_MinMax(benchmark::State& state) {
 
     for (auto _ : state) {
         for (int i = 0; i < 10; ++i) {
-            Tensor input({128, 256}, DType::Float32, Device::cpu());
+            Tensor input({128, 256}, DType::Float32, g_bench_device);
             input.randn_();
             observer->observe(input);
         }
@@ -220,7 +230,7 @@ static void BM_Quantization_Observer_Histogram(benchmark::State& state) {
     for (auto _ : state) {
         auto observer = std::make_unique<HistogramObserver>(num_bins);
         for (int i = 0; i < 10; ++i) {
-            Tensor input({128, 256}, DType::Float32, Device::cpu());
+            Tensor input({128, 256}, DType::Float32, g_bench_device);
             input.randn_();
             observer->observe(input);
         }
@@ -233,7 +243,7 @@ BENCHMARK(BM_Quantization_Observer_Histogram)->Arg(128)->Arg(256)->Arg(512)->Uni
 
 static void BM_Quantization_FakeQuantize(benchmark::State& state) {
     auto fake_quant = std::make_shared<FakeQuantize>();
-    Tensor input({64, 128}, DType::Float32, Device::cpu());
+    Tensor input({64, 128}, DType::Float32, g_bench_device);
     input.randn_();
     Variable var(input, true);
 
@@ -291,7 +301,7 @@ static void BM_MemoryFootprint_Baseline(benchmark::State& state) {
 
     for (auto _ : state) {
         state.PauseTiming();
-        Tensor weights({num_params}, DType::Float32, Device::cpu());
+        Tensor weights({num_params}, DType::Float32, g_bench_device);
         weights.randn_();
         state.ResumeTiming();
 
@@ -308,7 +318,7 @@ static void BM_MemoryFootprint_Quantized(benchmark::State& state) {
 
     for (auto _ : state) {
         state.PauseTiming();
-        Tensor weights({num_params}, DType::Float32, Device::cpu());
+        Tensor weights({num_params}, DType::Float32, g_bench_device);
         weights.randn_();
         state.ResumeTiming();
 
@@ -328,7 +338,7 @@ BENCHMARK(BM_MemoryFootprint_Quantized)->Range(1<<20, 1<<24)->Unit(benchmark::kM
 
 static void BM_Inference_FP32_Baseline(benchmark::State& state) {
     auto model = std::make_shared<BenchmarkModel>(784, 512, 3, 10);
-    Tensor input({32, 784}, DType::Float32, Device::cpu());
+    Tensor input({32, 784}, DType::Float32, g_bench_device);
     input.randn_();
     Variable var(input, false);
 
@@ -346,7 +356,7 @@ static void BM_Inference_Pruned_50Percent(benchmark::State& state) {
     auto config = prune_unstructured(model, 0.5f, ImportanceCriterion::L1);
     apply_pruning_masks(model, config);
 
-    Tensor input({32, 784}, DType::Float32, Device::cpu());
+    Tensor input({32, 784}, DType::Float32, g_bench_device);
     input.randn_();
     Variable var(input, false);
 
@@ -365,7 +375,7 @@ static void BM_Inference_Pruned_90Percent(benchmark::State& state) {
     auto config = prune_unstructured(model, 0.9f, ImportanceCriterion::L1);
     apply_pruning_masks(model, config);
 
-    Tensor input({32, 784}, DType::Float32, Device::cpu());
+    Tensor input({32, 784}, DType::Float32, g_bench_device);
     input.randn_();
     Variable var(input, false);
 
@@ -379,4 +389,21 @@ static void BM_Inference_Pruned_90Percent(benchmark::State& state) {
 }
 BENCHMARK(BM_Inference_Pruned_90Percent)->Unit(benchmark::kMicrosecond);
 
-BENCHMARK_MAIN();
+// RR.19 (audit-11): custom main() so we can parse the --device flag
+// before Google Benchmark consumes argv. Mirrors the parse_device_arg
+// pattern used by every other benchmark binary in this directory.
+int main(int argc, char** argv) {
+    g_bench_device = tenzor::bench::parse_device_arg(argc, argv);
+    tenzor::initialize();
+    std::cout << "[benchmark_compression] device="
+              << g_bench_device.to_string() << "\n";
+    ::benchmark::Initialize(&argc, argv);
+    if (::benchmark::ReportUnrecognizedArguments(argc, argv)) {
+        // --device/--device-id were already consumed; Google Benchmark
+        // will warn about any other unrecognized flags. Continue anyway
+        // so a typo on the runner's side doesn't kill the binary.
+    }
+    ::benchmark::RunSpecifiedBenchmarks();
+    ::benchmark::Shutdown();
+    return 0;
+}

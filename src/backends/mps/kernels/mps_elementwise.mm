@@ -414,8 +414,11 @@ Tensor mps_softmax_kernel(const Tensor& input, int64_t dim) {
     Tensor output(out_shape, input.dtype(), input.device());
     Tensor row_max({rows}, input.dtype(), input.device());
 
-    // Pass 1: compute max per row
-    auto pipeline_max = get_pipeline("softmax_max_kernel");
+    // RR.10: pick per-dtype softmax kernels.  F16 has dedicated kernels that
+    // subtract max in F16 (overflow-safe) and accumulate exp+sum in F32, then
+    // pack back to F16.  Falling back to the F32 kernel here would read F16
+    // buffer storage as F32 — silent corruption — so use shader_name_for_dtype.
+    auto pipeline_max = get_pipeline(shader_name_for_dtype("softmax_max_kernel", input.dtype()));
     id<MTLBuffer> buf_in = get_buffer(input);
     id<MTLBuffer> buf_max = get_buffer(row_max);
     id<MTLBuffer> buf_out = get_buffer(output);
@@ -434,8 +437,8 @@ Tensor mps_softmax_kernel(const Tensor& input, int64_t dim) {
     [cmd1 waitUntilCompleted];
     ::tenzor::mps::mps_cmd_check(cmd1, __func__);
 
-    // Pass 2: normalize
-    auto pipeline_norm = get_pipeline("softmax_normalize_kernel");
+    // Pass 2: normalize (same dtype-aware selection)
+    auto pipeline_norm = get_pipeline(shader_name_for_dtype("softmax_normalize_kernel", input.dtype()));
     id<MTLCommandBuffer> cmd2 = [g_command_queue commandBuffer];
     id<MTLComputeCommandEncoder> enc2 = [cmd2 computeCommandEncoder];
     [enc2 setComputePipelineState:pipeline_norm];

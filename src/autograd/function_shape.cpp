@@ -1,4 +1,5 @@
 #include "tenzor/autograd/function.hpp"
+#include "function_helpers.hpp"
 #include <cassert>
 #include "tenzor/autograd/ops.hpp"
 #include "tenzor/sparse/sparse_ops.hpp"
@@ -241,6 +242,17 @@ auto BmmBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tens
     // grad_b = a^T @ grad_output
     auto grad_b = bmm(a_transposed, grad_output);
 
+    // audit-11 RR.2 (MM.1 sibling): reduce broadcasted batch axes back to
+    // operand shapes.  Skip when input_shape_*_ is empty (legacy call
+    // paths that bypassed the autograd::bmm forward wrapper) so any
+    // existing wrong-shape error surfaces as before.
+    if (!input_shape_a_.empty()) {
+        grad_a = reduce_grad_for_broadcasting(grad_a, input_shape_a_);
+    }
+    if (!input_shape_b_.empty()) {
+        grad_b = reduce_grad_for_broadcasting(grad_b, input_shape_b_);
+    }
+
     return {grad_a, grad_b};
 }
 
@@ -261,6 +273,16 @@ auto BmmBackward::backward_with_variables(std::vector<Variable> grad_outputs) ->
     auto a_t = tenzor::transpose(saved_a, saved_a.shape().size() - 2, saved_a.shape().size() - 1);
     auto grad_a = tenzor::bmm(grad_out, b_t);
     auto grad_b = tenzor::bmm(a_t, grad_out);
+
+    // audit-11 RR.2 (MM.1 sibling): reduce broadcasted batch axes back to
+    // operand shapes.  See the Tensor-level backward above for rationale.
+    if (!input_shape_a_.empty()) {
+        grad_a = reduce_grad_var_for_broadcasting(grad_a, input_shape_a_);
+    }
+    if (!input_shape_b_.empty()) {
+        grad_b = reduce_grad_var_for_broadcasting(grad_b, input_shape_b_);
+    }
+
     return {grad_a, grad_b};
 }
 
