@@ -15,8 +15,16 @@ namespace a typed surface.
 
 from __future__ import annotations
 
+# S23: explicit ``builtins.X`` references avoid the recursive-base shadow
+# that occurs when a stub names its class the same as the builtin it
+# inherits from (``class NotImplementedError(NotImplementedError)`` resolved
+# the base name to the just-being-declared class). Importing ``builtins``
+# under aliases keeps the public stub names (``IndexError`` /
+# ``NotImplementedError`` / …) while disambiguating the bases.
+import builtins as _builtins
+
 # Base hierarchy — all derive from RuntimeError
-class TenzorError(RuntimeError):
+class TenzorError(_builtins.RuntimeError):
     """Root of the Tenzor exception hierarchy."""
 
 class ShapeError(TenzorError):
@@ -40,20 +48,23 @@ class TensorBoardError(TenzorError):
 # Python-parity exceptions — registered under
 # (PyExc_IndexError / PyExc_ValueError / ...) so they catch like the builtins
 # but the named classes are exposed for explicit ``except tenzor.exceptions.X``.
-class IndexError(IndexError):  # type: ignore[misc]
+# S23: bases are spelled ``_builtins.X`` to avoid the recursive-base name
+# resolution where ``class IndexError(IndexError)`` resolved the base to
+# the same not-yet-finished class.
+class IndexError(_builtins.IndexError):
     """Raised on out-of-range indexing of a tensor or sequence."""
 
-class MemoryError(MemoryError):  # type: ignore[misc]
+class MemoryError(_builtins.MemoryError):
     """Raised when a tensor allocation cannot be satisfied."""
 
-class NotImplementedError(NotImplementedError):  # type: ignore[misc]
+class NotImplementedError(_builtins.NotImplementedError):
     """Raised for ops not yet implemented on a given backend."""
 
-class RuntimeError(RuntimeError):  # type: ignore[misc]
+class RuntimeError(_builtins.RuntimeError):
     """Generic runtime error that doesn't fit another typed exception."""
 
-class TypeError(TypeError):  # type: ignore[misc]
+class TypeError(_builtins.TypeError):
     """Raised when an argument type is wrong (mirrors Python ``TypeError``)."""
 
-class ValueError(ValueError):  # type: ignore[misc]
+class ValueError(_builtins.ValueError):
     """Raised when an argument value is invalid (mirrors Python ``ValueError``)."""

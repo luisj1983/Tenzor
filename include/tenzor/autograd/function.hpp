@@ -5428,10 +5428,23 @@ private:
  */
 class ROIAlignBackward : public Function {
 public:
+    ROIAlignBackward() = default;
+    ROIAlignBackward(int64_t output_h, int64_t output_w,
+                     double spatial_scale, int64_t sampling_ratio, bool aligned)
+        : output_h_(output_h), output_w_(output_w),
+          spatial_scale_(spatial_scale), sampling_ratio_(sampling_ratio),
+          aligned_(aligned), configured_(true) {}
     auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
     auto name() const -> std::string override { return "ROIAlignBackward"; }
     auto op_id() const -> OpId override { return OpId::ROIAlignForward; }
+private:
+    int64_t output_h_ = 7;
+    int64_t output_w_ = 7;
+    double spatial_scale_ = 1.0 / 16.0;
+    int64_t sampling_ratio_ = 0;
+    bool aligned_ = true;
+    bool configured_ = false;
 };
 
 /**
@@ -5449,10 +5462,29 @@ public:
  */
 class DeformableConv2dBackward : public Function {
 public:
+    DeformableConv2dBackward() = default;
+    DeformableConv2dBackward(int64_t stride_h, int64_t stride_w,
+                             int64_t pad_h, int64_t pad_w,
+                             int64_t dilation_h, int64_t dilation_w,
+                             int64_t groups, int64_t offset_groups,
+                             bool use_mask, bool has_bias)
+        : stride_h_(stride_h), stride_w_(stride_w),
+          pad_h_(pad_h), pad_w_(pad_w),
+          dilation_h_(dilation_h), dilation_w_(dilation_w),
+          groups_(groups), offset_groups_(offset_groups),
+          use_mask_(use_mask), has_bias_(has_bias), configured_(true) {}
     auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
     auto name() const -> std::string override { return "DeformableConv2dBackward"; }
     auto op_id() const -> OpId override { return OpId::DeformableConv2dForward; }
+private:
+    int64_t stride_h_ = 1, stride_w_ = 1;
+    int64_t pad_h_ = 0, pad_w_ = 0;
+    int64_t dilation_h_ = 1, dilation_w_ = 1;
+    int64_t groups_ = 1, offset_groups_ = 1;
+    bool use_mask_ = false;
+    bool has_bias_ = false;
+    bool configured_ = false;
 };
 
 /**
@@ -5519,10 +5551,25 @@ private:
  */
 class MFCCBackward : public Function {
 public:
+    MFCCBackward() = default;
+    MFCCBackward(int64_t sample_rate, int64_t n_mfcc, int64_t n_mels,
+                 int64_t n_fft, int64_t hop_length, double f_min, double f_max)
+        : sample_rate_(sample_rate), n_mfcc_(n_mfcc), n_mels_(n_mels),
+          n_fft_(n_fft), hop_length_(hop_length),
+          f_min_(f_min), f_max_(f_max), configured_(true) {}
     auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
     auto name() const -> std::string override { return "MFCCBackward"; }
     auto op_id() const -> OpId override { return OpId::MFCC; }
+private:
+    int64_t sample_rate_ = 16000;
+    int64_t n_mfcc_ = 40;
+    int64_t n_mels_ = 128;
+    int64_t n_fft_ = 400;
+    int64_t hop_length_ = 160;
+    double f_min_ = 0.0;
+    double f_max_ = 0.0;
+    bool configured_ = false;
 };
 
 /**

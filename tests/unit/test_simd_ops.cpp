@@ -5,6 +5,7 @@
 
 #include <gtest/gtest.h>
 #include "tenzor/backends/cpu/simd.hpp"
+#include "tenzor/backend/runtime_simd.hpp"
 #include <vector>
 #include <cmath>
 #include <random>
@@ -15,11 +16,9 @@ using namespace tenzor::cpu;
 class SIMDOpsTest : public ::testing::Test {
 protected:
     void SetUp() override {
-        // Print CPU features
-        const auto& cpu = CPUInfo::get();
-        std::cout << "CPU Vendor: " << cpu.vendor() << "\n";
-        std::cout << "CPU Brand: " << cpu.brand() << "\n";
-        std::cout << "CPU Features: " << cpu.feature_string() << "\n";
+        // Print SIMD features via the canonical runtime_simd API.
+        const auto& cpu = ::tenzor::backend::get_simd_features();
+        std::cout << "CPU SIMD Features: " << cpu.to_string() << "\n";
         std::cout << std::endl;
     }
 
@@ -50,15 +49,15 @@ protected:
 // ============================================================================
 
 TEST_F(SIMDOpsTest, CPUFeatureDetection) {
-    const auto& cpu = CPUInfo::get();
+    const auto& cpu = ::tenzor::backend::get_simd_features();
 
     // Check that at least SSE2 is supported (required for x86-64)
     #if defined(__x86_64__) || defined(_M_X64)
-        EXPECT_TRUE(cpu.has(CPUFeature::SSE2));
+        EXPECT_TRUE(cpu.sse2);
     #endif
 
-    // Just log what we have
-    EXPECT_FALSE(cpu.vendor().empty());
+    // A non-empty feature summary string should be produced on any platform.
+    EXPECT_FALSE(cpu.to_string().empty());
 }
 
 // ============================================================================

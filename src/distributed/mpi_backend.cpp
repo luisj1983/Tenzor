@@ -7,10 +7,10 @@
  */
 
 #include "tenzor/distributed/mpi_backend.hpp"
+#include "tenzor/utils/error.hpp"  // NotImplementedError (S25 / audit-12) — needed in both branches
 
 #ifdef TENZOR_HAS_MPI
 
-#include "tenzor/utils/error.hpp"
 #include "tenzor/ops/creation.hpp"
 #include "tenzor/ops/transform.hpp"
 #include <stdexcept>
@@ -620,43 +620,43 @@ auto MPIBackend::initialize(int /*rank*/, int /*world_size*/,
 }
 
 auto MPIBackend::broadcast(Tensor&, int) -> void {
-    throw std::runtime_error("MPIBackend: MPI not available");
+    throw NotImplementedError("MPIBackend: MPI not available");
 }
 
 auto MPIBackend::all_reduce(Tensor&, ReduceOp) -> void {
-    throw std::runtime_error("MPIBackend: MPI not available");
+    throw NotImplementedError("MPIBackend: MPI not available");
 }
 
 auto MPIBackend::reduce(Tensor&, int, ReduceOp) -> void {
-    throw std::runtime_error("MPIBackend: MPI not available");
+    throw NotImplementedError("MPIBackend: MPI not available");
 }
 
 auto MPIBackend::all_gather(const Tensor&, std::vector<Tensor>&) -> void {
-    throw std::runtime_error("MPIBackend: MPI not available");
+    throw NotImplementedError("MPIBackend: MPI not available");
 }
 
 auto MPIBackend::gather(const Tensor&, std::vector<Tensor>&, int) -> void {
-    throw std::runtime_error("MPIBackend: MPI not available");
+    throw NotImplementedError("MPIBackend: MPI not available");
 }
 
 auto MPIBackend::scatter(const std::vector<Tensor>&, Tensor&, int) -> void {
-    throw std::runtime_error("MPIBackend: MPI not available");
+    throw NotImplementedError("MPIBackend: MPI not available");
 }
 
 auto MPIBackend::reduce_scatter(const std::vector<Tensor>&, Tensor&, ReduceOp) -> void {
-    throw std::runtime_error("MPIBackend: MPI not available");
+    throw NotImplementedError("MPIBackend: MPI not available");
 }
 
 auto MPIBackend::barrier() -> void {
-    throw std::runtime_error("MPIBackend: MPI not available");
+    throw NotImplementedError("MPIBackend: MPI not available");
 }
 
 auto MPIBackend::send(const Tensor&, int) -> void {
-    throw std::runtime_error("MPIBackend: MPI not available");
+    throw NotImplementedError("MPIBackend: MPI not available");
 }
 
 auto MPIBackend::recv(Tensor&, int) -> void {
-    throw std::runtime_error("MPIBackend: MPI not available");
+    throw NotImplementedError("MPIBackend: MPI not available");
 }
 
 auto MPIBackend::finalize() -> void {}

@@ -1270,7 +1270,8 @@ TEST_P(GradCheckMultiBackendTest, FractionalMaxPool2d) {
     auto samples = samples_cpu.to(device());
     auto f = [&samples](const Variable& v) -> Variable {
         auto [out, _] = nn::functional::fractional_max_pool2d(
-            v, /*kernel_size=*/{2, 2}, /*output_size=*/{3, 3}, samples);
+            v, /*kernel_size=*/std::pair<int64_t, int64_t>{2, 2},
+            /*output_size=*/std::pair<int64_t, int64_t>{3, 3}, samples);
         return tenzor::sum(out);
     };
     EXPECT_TRUE(gradcheck(f, x, eps(), tol(), tol()))
@@ -1285,7 +1286,8 @@ TEST_P(GradCheckMultiBackendTest, FractionalMaxPool3d) {
     auto samples = samples_cpu.to(device());
     auto f = [&samples](const Variable& v) -> Variable {
         auto [out, _] = nn::functional::fractional_max_pool3d(
-            v, /*kernel_size=*/{2, 2, 2}, /*output_size=*/{2, 2, 2}, samples);
+            v, /*kernel_size=*/std::tuple<int64_t, int64_t, int64_t>{2, 2, 2},
+            /*output_size=*/std::tuple<int64_t, int64_t, int64_t>{2, 2, 2}, samples);
         return tenzor::sum(out);
     };
     EXPECT_TRUE(gradcheck(f, x, eps(), tol(), tol()))

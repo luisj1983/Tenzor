@@ -7,6 +7,8 @@
 #include "tenzor/backend/fast_dispatch.hpp"
 #include "tenzor/backend/op_attributes.hpp"
 #include "tenzor/ops/op_id.hpp"
+#include "tenzor/optim/sparse_helpers.hpp"
+#include "tenzor/utils/logging.hpp"
 #include <cmath>
 #include <map>
 #include <tuple>
@@ -15,6 +17,38 @@ namespace tenzor::optim {
 
 // R.16 master-weights helpers (optim_state_dtype / make_optim_state) are
 // shared across all optimisers via include/tenzor/nn/optim/master_weights.hpp.
+
+namespace {
+// S27 wiring: detect a producer-supplied sparse gradient on `param`.
+// Adam / AdamW (and Adagrad, with its own copy) don't yet implement a
+// true sparse path the way SparseAdam does — we route through the
+// existing dense step but make the situation visible:
+//   1. Read the sparse grad via `extract_sparse_grad`.
+//   2. Materialise a dense tensor from the sparse grad (sum into existing
+//      dense grad if present, else use it directly) so the rest of the
+//      per-param update operates uniformly.
+//   3. Clear the sparse slot so the next step doesn't re-warn for the
+//      same accumulation.
+// The warn-once message is emitted at the call site because TENZOR_WARN_ONCE
+// uses a non-capturing lambda — variable optimiser-name parameters cannot
+// flow through it. Caller is responsible for the one-shot warning.
+inline auto adam_densify_sparse_grad(tenzor::Variable& param) -> bool {
+    auto sparse_opt = tenzor::optim::detail::extract_sparse_grad(param);
+    if (!sparse_opt.has_value()) return false;
+
+    tenzor::Tensor dense = sparse_opt->to_dense();
+    if (param.has_grad()) {
+        // Combine producer-supplied dense and sparse contributions so the
+        // resulting step reflects the full backward total.
+        const tenzor::Tensor& existing = param.grad().value();
+        param.set_grad(existing + dense);
+    } else {
+        param.set_grad(std::move(dense));
+    }
+    param.clear_sparse_grad();
+    return true;
+}
+}  // namespace
 
 // Adam::Adam implementation
 Adam::Adam(std::vector<std::shared_ptr<Variable>> params, double lr, double beta1,
@@ -85,7 +119,17 @@ auto Adam::step_impl() -> void {
 
     for (size_t i = 0; i < parameters_.size(); ++i) {
         auto& param_ptr = parameters_[i];
-        if (!param_ptr || !param_ptr->has_grad()) continue;
+        if (!param_ptr) continue;
+        // S27: detect producer-supplied sparse grads and densify; emit a
+        // one-shot warning. Adam has no sparse-aware fast path yet.
+        if (adam_densify_sparse_grad(*param_ptr)) {
+            TENZOR_WARN_ONCE(
+                "Adam: parameter received a sparse gradient but this "
+                "optimiser does not yet implement a sparse-aware update; "
+                "densifying and running the standard dense step. Use "
+                "SparseAdam for memory/perf-optimal sparse updates.");
+        }
+        if (!param_ptr->has_grad()) continue;
         auto& param = *param_ptr;
         const Tensor& grad = param.grad().value();
         HP hp = resolve(i);
@@ -528,7 +572,17 @@ auto AdamW::step_impl() -> void {
 
     for (size_t i = 0; i < parameters_.size(); ++i) {
         auto& param_ptr = parameters_[i];
-        if (!param_ptr || !param_ptr->has_grad()) continue;
+        if (!param_ptr) continue;
+        // S27: detect producer-supplied sparse grads and densify; emit a
+        // one-shot warning. AdamW has no sparse-aware fast path yet.
+        if (adam_densify_sparse_grad(*param_ptr)) {
+            TENZOR_WARN_ONCE(
+                "AdamW: parameter received a sparse gradient but this "
+                "optimiser does not yet implement a sparse-aware update; "
+                "densifying and running the standard dense step. Use "
+                "SparseAdam for memory/perf-optimal sparse updates.");
+        }
+        if (!param_ptr->has_grad()) continue;
         auto& param = *param_ptr;
         HP hp = resolve(i);
 

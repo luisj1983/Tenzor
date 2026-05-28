@@ -55,3 +55,39 @@ set_target_properties(test_autograd_profiler PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/bin"
 )
 tenzor_discover_tests(test_autograd_profiler DISCOVERY_TIMEOUT 60 BACKENDS cpu)
+
+# widen-narrow helper (release-prep S1)
+add_executable(test_utils_widen_narrow test_widen_narrow.cpp)
+target_link_libraries(test_utils_widen_narrow PRIVATE
+    tenzor_core
+    GTest::gtest
+    GTest::gtest_main
+)
+set_target_properties(test_utils_widen_narrow PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/bin"
+)
+tenzor_discover_tests(test_utils_widen_narrow DISCOVERY_TIMEOUT 60 BACKENDS cpu)
+
+# autograd-wrap helper (release-prep S1)
+add_executable(test_utils_autograd_wrap test_autograd_wrap.cpp)
+target_link_libraries(test_utils_autograd_wrap PRIVATE
+    tenzor_core
+    GTest::gtest
+    GTest::gtest_main
+)
+set_target_properties(test_utils_autograd_wrap PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/bin"
+)
+tenzor_discover_tests(test_utils_autograd_wrap DISCOVERY_TIMEOUT 60 BACKENDS cpu)
+
+# Dead-code cleanup coverage (release-prep S25)
+add_executable(test_utils_dead_code_cleanup test_dead_code_cleanup.cpp)
+target_link_libraries(test_utils_dead_code_cleanup PRIVATE
+    tenzor_core
+    GTest::gtest
+    GTest::gtest_main
+)
+set_target_properties(test_utils_dead_code_cleanup PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/bin"
+)
+tenzor_discover_tests(test_utils_dead_code_cleanup DISCOVERY_TIMEOUT 60 BACKENDS cpu)

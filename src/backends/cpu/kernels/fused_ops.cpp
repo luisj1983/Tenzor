@@ -3,6 +3,7 @@
 #include "tenzor/ops/creation.hpp"
 #include "tenzor/ops/reduction.hpp"
 #include "tenzor/utils/log.hpp"
+#include "tenzor/utils/widen_narrow.hpp"
 #include "buffer_pool.hpp"
 #include "fused_conv_bn_relu.hpp"
 #include <cmath>
@@ -56,107 +57,79 @@ auto fused_linear_relu_kernel(
     const Tensor& weight,
     const Tensor* bias
 ) -> Tensor {
-    // Flatten input to 2D if needed
-    auto input_shape = input.shape();
-    int64_t batch_size = 1;
-    for (size_t i = 0; i < input_shape.size() - 1; ++i) {
-        batch_size *= input_shape[i];
-    }
-    int64_t in_features = input_shape[input_shape.size() - 1];
-    int64_t out_features = weight.shape()[0];
-
-    // Perform matmul: (batch_size, in_features) @ (out_features, in_features).T
-    // = (batch_size, in_features) @ (in_features, out_features)
-    // = (batch_size, out_features)
-
-    // Reshape input to (batch_size, in_features)
-    Tensor input_2d = input.reshape({batch_size, in_features});
-
-    // Transpose weight from (out_features, in_features) to (in_features, out_features)
-    Tensor weight_t = weight.transpose(0, 1);
-
-    // Matrix multiplication
-    Tensor output = matmul(input_2d, weight_t);
-
-    // Add bias if provided and apply ReLU in single pass
-    const size_t total_elems = static_cast<size_t>(batch_size) * static_cast<size_t>(out_features);
-
-    if (input.dtype() == DType::Float32) {
-        float* out_data = output.data<float>();
-        const float* bias_data = bias ? bias->data<float>() : nullptr;
-
-        #pragma omp parallel for if(total_elems > ::tenzor::OmpThresholds::simple())
-        for (size_t i = 0; i < static_cast<size_t>(batch_size); ++i) {
-            for (size_t j = 0; j < static_cast<size_t>(out_features); ++j) {
-                size_t idx = i * out_features + j;
-                float val = out_data[idx];
-                if (bias_data) {
-                    val += bias_data[j];
-                }
-                out_data[idx] = std::max(0.0f, val);
+    // Widen Float16/BFloat16 inputs to Float32 so matmul + bias-add + ReLU
+    // can run on a single contiguous Float32 buffer; Float32/Float64 paths
+    // are pass-through (bit-identical to the prior implementation).
+    return ::tenzor::utils::widen_narrow_compute(input,
+        [&](const Tensor& in_wide) -> Tensor {
+            Tensor w_wide = ::tenzor::utils::is_half_precision(weight.dtype())
+                                ? weight.to(DType::Float32)
+                                : weight;
+            Tensor b_wide_storage;
+            const Tensor* b_ptr = bias;
+            if (bias != nullptr && ::tenzor::utils::is_half_precision(bias->dtype())) {
+                b_wide_storage = bias->to(DType::Float32);
+                b_ptr = &b_wide_storage;
             }
-        }
-    } else if (input.dtype() == DType::Float64) {
-        double* out_data = output.data<double>();
-        const double* bias_data = bias ? bias->data<double>() : nullptr;
 
-        #pragma omp parallel for if(total_elems > ::tenzor::OmpThresholds::simple())
-        for (size_t i = 0; i < static_cast<size_t>(batch_size); ++i) {
-            for (size_t j = 0; j < static_cast<size_t>(out_features); ++j) {
-                size_t idx = i * out_features + j;
-                double val = out_data[idx];
-                if (bias_data) {
-                    val += bias_data[j];
-                }
-                out_data[idx] = std::max(0.0, val);
+            // Flatten input to 2D if needed
+            auto input_shape = in_wide.shape();
+            int64_t batch_size = 1;
+            for (size_t i = 0; i < input_shape.size() - 1; ++i) {
+                batch_size *= input_shape[i];
             }
-        }
-    } else if (input.dtype() == DType::Float16) {
-        Tensor output_f32 = output.to(DType::Float32);
-        Tensor bias_f32 = bias ? bias->to(DType::Float32) : Tensor();
+            int64_t in_features = input_shape[input_shape.size() - 1];
+            int64_t out_features = w_wide.shape()[0];
 
-        float* out_data = output_f32.data<float>();
-        const float* bias_data = bias ? bias_f32.data<float>() : nullptr;
+            // Reshape input to (batch_size, in_features)
+            Tensor input_2d = in_wide.reshape({batch_size, in_features});
 
-        #pragma omp parallel for if(total_elems > ::tenzor::OmpThresholds::simple())
-        for (size_t i = 0; i < static_cast<size_t>(batch_size); ++i) {
-            for (size_t j = 0; j < static_cast<size_t>(out_features); ++j) {
-                size_t idx = i * out_features + j;
-                float val = out_data[idx];
-                if (bias_data) {
-                    val += bias_data[j];
+            // Transpose weight from (out_features, in_features) to (in_features, out_features)
+            Tensor weight_t = w_wide.transpose(0, 1);
+
+            // Matrix multiplication
+            Tensor output = matmul(input_2d, weight_t);
+
+            const size_t total_elems =
+                static_cast<size_t>(batch_size) * static_cast<size_t>(out_features);
+
+            if (output.dtype() == DType::Float32) {
+                float* out_data = output.data<float>();
+                const float* bias_data = b_ptr ? b_ptr->data<float>() : nullptr;
+
+                #pragma omp parallel for if(total_elems > ::tenzor::OmpThresholds::simple())
+                for (size_t i = 0; i < static_cast<size_t>(batch_size); ++i) {
+                    for (size_t j = 0; j < static_cast<size_t>(out_features); ++j) {
+                        size_t idx = i * out_features + j;
+                        float val = out_data[idx];
+                        if (bias_data) {
+                            val += bias_data[j];
+                        }
+                        out_data[idx] = std::max(0.0f, val);
+                    }
                 }
-                out_data[idx] = std::max(0.0f, val);
-            }
-        }
+            } else if (output.dtype() == DType::Float64) {
+                double* out_data = output.data<double>();
+                const double* bias_data = b_ptr ? b_ptr->data<double>() : nullptr;
 
-        output = output_f32.to(DType::Float16);
-    } else if (input.dtype() == DType::BFloat16) {
-        Tensor output_f32 = output.to(DType::Float32);
-        Tensor bias_f32 = bias ? bias->to(DType::Float32) : Tensor();
-
-        float* out_data = output_f32.data<float>();
-        const float* bias_data = bias ? bias_f32.data<float>() : nullptr;
-
-        #pragma omp parallel for if(total_elems > ::tenzor::OmpThresholds::simple())
-        for (size_t i = 0; i < static_cast<size_t>(batch_size); ++i) {
-            for (size_t j = 0; j < static_cast<size_t>(out_features); ++j) {
-                size_t idx = i * out_features + j;
-                float val = out_data[idx];
-                if (bias_data) {
-                    val += bias_data[j];
+                #pragma omp parallel for if(total_elems > ::tenzor::OmpThresholds::simple())
+                for (size_t i = 0; i < static_cast<size_t>(batch_size); ++i) {
+                    for (size_t j = 0; j < static_cast<size_t>(out_features); ++j) {
+                        size_t idx = i * out_features + j;
+                        double val = out_data[idx];
+                        if (bias_data) {
+                            val += bias_data[j];
+                        }
+                        out_data[idx] = std::max(0.0, val);
+                    }
                 }
-                out_data[idx] = std::max(0.0f, val);
             }
-        }
 
-        output = output_f32.to(DType::BFloat16);
-    }
-
-    // Reshape back to original batch dimensions
-    std::vector<int64_t> output_shape(input_shape.begin(), input_shape.end() - 1);
-    output_shape.push_back(out_features);
-    return output.reshape(output_shape);
+            // Reshape back to original batch dimensions
+            std::vector<int64_t> output_shape(input_shape.begin(), input_shape.end() - 1);
+            output_shape.push_back(out_features);
+            return output.reshape(output_shape);
+        });
 }
 
 /**
@@ -179,24 +152,39 @@ auto fused_conv2d_relu_kernel(
     int64_t dil_w,
     int64_t groups
 ) -> Tensor {
-    Tensor result = conv2d_forward_kernel(input, weight, bias,
-                                          stride_h, stride_w, pad_h, pad_w, dil_h, dil_w,
-                                          groups);
-    int64_t n = result.numel();
-    if (result.dtype() == DType::Float32) {
-        float* data = result.data<float>();
-        #pragma omp parallel for if(n > ::tenzor::OmpThresholds::simple())
-        for (int64_t i = 0; i < n; ++i) {
-            data[i] = std::max(0.0f, data[i]);
-        }
-    } else if (result.dtype() == DType::Float64) {
-        double* data = result.data<double>();
-        #pragma omp parallel for if(n > ::tenzor::OmpThresholds::simple())
-        for (int64_t i = 0; i < n; ++i) {
-            data[i] = std::max(0.0, data[i]);
-        }
-    }
-    return result;
+    // Widen Float16/BFloat16 inputs to Float32 so the activation step
+    // does not silently no-op. Float32/Float64 paths are pass-through and
+    // remain bit-identical (see tenzor::utils::widen_narrow_compute).
+    return ::tenzor::utils::widen_narrow_compute(input,
+        [&](const Tensor& in_wide) -> Tensor {
+            Tensor w_wide = ::tenzor::utils::is_half_precision(weight.dtype())
+                                ? weight.to(DType::Float32)
+                                : weight;
+            Tensor b_wide_storage;
+            const Tensor* b_ptr = bias;
+            if (bias != nullptr && ::tenzor::utils::is_half_precision(bias->dtype())) {
+                b_wide_storage = bias->to(DType::Float32);
+                b_ptr = &b_wide_storage;
+            }
+            Tensor result = conv2d_forward_kernel(in_wide, w_wide, b_ptr,
+                                                  stride_h, stride_w, pad_h, pad_w, dil_h, dil_w,
+                                                  groups);
+            int64_t n = result.numel();
+            if (result.dtype() == DType::Float32) {
+                float* data = result.data<float>();
+                #pragma omp parallel for if(n > ::tenzor::OmpThresholds::simple())
+                for (int64_t i = 0; i < n; ++i) {
+                    data[i] = std::max(0.0f, data[i]);
+                }
+            } else if (result.dtype() == DType::Float64) {
+                double* data = result.data<double>();
+                #pragma omp parallel for if(n > ::tenzor::OmpThresholds::simple())
+                for (int64_t i = 0; i < n; ++i) {
+                    data[i] = std::max(0.0, data[i]);
+                }
+            }
+            return result;
+        });
 }
 
 auto fused_conv2d_relu_kernel(
@@ -208,22 +196,37 @@ auto fused_conv2d_relu_kernel(
     int64_t dilation,
     int64_t groups
 ) -> Tensor {
-    Tensor result = conv2d_forward_kernel(input, weight, bias, stride, padding, dilation, groups);
-    int64_t n = result.numel();
-    if (result.dtype() == DType::Float32) {
-        float* data = result.data<float>();
-        #pragma omp parallel for if(n > ::tenzor::OmpThresholds::simple())
-        for (int64_t i = 0; i < n; ++i) {
-            data[i] = std::max(0.0f, data[i]);
-        }
-    } else if (result.dtype() == DType::Float64) {
-        double* data = result.data<double>();
-        #pragma omp parallel for if(n > ::tenzor::OmpThresholds::simple())
-        for (int64_t i = 0; i < n; ++i) {
-            data[i] = std::max(0.0, data[i]);
-        }
-    }
-    return result;
+    // Widen Float16/BFloat16 inputs to Float32 so the activation step
+    // does not silently no-op. Float32/Float64 paths are pass-through.
+    return ::tenzor::utils::widen_narrow_compute(input,
+        [&](const Tensor& in_wide) -> Tensor {
+            Tensor w_wide = ::tenzor::utils::is_half_precision(weight.dtype())
+                                ? weight.to(DType::Float32)
+                                : weight;
+            Tensor b_wide_storage;
+            const Tensor* b_ptr = bias;
+            if (bias != nullptr && ::tenzor::utils::is_half_precision(bias->dtype())) {
+                b_wide_storage = bias->to(DType::Float32);
+                b_ptr = &b_wide_storage;
+            }
+            Tensor result = conv2d_forward_kernel(in_wide, w_wide, b_ptr,
+                                                  stride, padding, dilation, groups);
+            int64_t n = result.numel();
+            if (result.dtype() == DType::Float32) {
+                float* data = result.data<float>();
+                #pragma omp parallel for if(n > ::tenzor::OmpThresholds::simple())
+                for (int64_t i = 0; i < n; ++i) {
+                    data[i] = std::max(0.0f, data[i]);
+                }
+            } else if (result.dtype() == DType::Float64) {
+                double* data = result.data<double>();
+                #pragma omp parallel for if(n > ::tenzor::OmpThresholds::simple())
+                for (int64_t i = 0; i < n; ++i) {
+                    data[i] = std::max(0.0, data[i]);
+                }
+            }
+            return result;
+        });
 }
 
 /**
@@ -371,8 +374,92 @@ auto fused_softmax_cross_entropy_kernel(
     bool compute_grad,
     const std::string& reduction
 ) -> std::vector<Tensor> {
+    // S13 rank-generalisation + dtype-preservation.
+    //
+    // Rank > 2: callers in seq2seq / classification-over-time hand us
+    // logits with shape (D1, ..., Dk, C) and targets with shape
+    // (D1, ..., Dk). Flatten the leading dims into a (B = prod(Di), C)
+    // problem, do the existing 2-D compute, then reshape grad_logits
+    // back to the original shape. Loss is reduced to scalar/per-sample
+    // by the existing reduction logic; for "none" reduction it returns
+    // a 1-D (B,) vector that we reshape back to (D1, ..., Dk).
+    //
+    // Dtype:
+    //   Float32/Float64: native, output dtype = input dtype (unchanged).
+    //   Float16/BFloat16: widen to Float32 internally for numeric safety
+    //     (matmul/exp/log range), but narrow grad_logits back to the
+    //     original half-precision dtype on return. Loss stays Float32 —
+    //     it's a scalar (or small per-sample vector) where extra
+    //     precision is desirable and downstream consumers handle the
+    //     dtype mismatch (gradient flow doesn't transit through loss).
+    const auto& logits_shape_v = logits.shape();
+    const int64_t ndim_logits = static_cast<int64_t>(logits_shape_v.size());
+    if (ndim_logits < 2) {
+        throw std::runtime_error(
+            "fused_softmax_cross_entropy: logits must have rank >= 2 "
+            "(found rank " + std::to_string(ndim_logits) + ")");
+    }
+
+    // Rank > 2: flatten leading dims into batch.
+    if (ndim_logits > 2) {
+        int64_t leading = 1;
+        for (int64_t i = 0; i < ndim_logits - 1; ++i) {
+            leading *= logits_shape_v[i];
+        }
+        int64_t C = logits_shape_v[ndim_logits - 1];
+        Tensor logits_2d = logits.reshape({leading, C});
+        Tensor targets_1d = targets.reshape({leading});
+        auto inner = fused_softmax_cross_entropy_kernel(
+            logits_2d, targets_1d, compute_grad, reduction);
+
+        // Reshape outputs back to leading-dim layout.
+        std::vector<int64_t> leading_shape(
+            logits_shape_v.begin(), logits_shape_v.end() - 1);
+        std::vector<Tensor> out;
+        out.reserve(inner.size());
+        // loss: scalar for mean/sum (passes through); per-sample (B,) for
+        // "none" — reshape back to leading dims.
+        if (reduction == "none") {
+            out.push_back(inner[0].reshape(leading_shape));
+        } else {
+            out.push_back(inner[0]);
+        }
+        if (compute_grad && inner.size() > 1) {
+            // grad_logits has shape (B, C); reshape back to (D1, ..., Dk, C).
+            std::vector<int64_t> grad_shape = leading_shape;
+            grad_shape.push_back(C);
+            out.push_back(inner[1].reshape(grad_shape));
+        }
+        return out;
+    }
+
     int64_t batch_size = logits.shape()[0];
     int64_t num_classes = logits.shape()[1];
+
+    // For half-precision inputs we widen to Float32, run the Float32 path,
+    // and narrow grad_logits back to the original dtype. The loss stays
+    // Float32 by intent (see comment above).
+    const DType orig_dtype = logits.dtype();
+    if (orig_dtype == DType::Float16 || orig_dtype == DType::BFloat16) {
+        Tensor logits_f32({batch_size, num_classes}, DType::Float32, logits.device());
+        float* lf32 = logits_f32.data<float>();
+        if (orig_dtype == DType::Float16) {
+            const Float16* src = logits.data<Float16>();
+            for (int64_t i = 0; i < batch_size * num_classes; ++i)
+                lf32[i] = static_cast<float>(src[i]);
+        } else {
+            const BFloat16* src = logits.data<BFloat16>();
+            for (int64_t i = 0; i < batch_size * num_classes; ++i)
+                lf32[i] = static_cast<float>(src[i]);
+        }
+        auto result = fused_softmax_cross_entropy_kernel(
+            logits_f32, targets, compute_grad, reduction);
+        // Narrow grad_logits back to the original half-precision dtype.
+        if (compute_grad && result.size() > 1) {
+            result[1] = result[1].to(orig_dtype);
+        }
+        return result;
+    }
 
     Tensor losses = zeros({batch_size}, logits.dtype(), logits.device());
     Tensor grad_logits;
@@ -491,22 +578,6 @@ auto fused_softmax_cross_entropy_kernel(
                 );
             }
         }
-    } else if (logits.dtype() == DType::Float16 || logits.dtype() == DType::BFloat16) {
-        // Convert to Float32 for precision, compute, then use Float32 loss
-        // Loss computation needs precision - keep output as Float32
-        Tensor logits_f32({batch_size, num_classes}, DType::Float32, logits.device());
-        float* lf32 = logits_f32.data<float>();
-        if (logits.dtype() == DType::Float16) {
-            const Float16* src = logits.data<Float16>();
-            for (int64_t i = 0; i < batch_size * num_classes; ++i)
-                lf32[i] = static_cast<float>(src[i]);
-        } else {
-            const BFloat16* src = logits.data<BFloat16>();
-            for (int64_t i = 0; i < batch_size * num_classes; ++i)
-                lf32[i] = static_cast<float>(src[i]);
-        }
-        auto result = fused_softmax_cross_entropy_kernel(logits_f32, targets, compute_grad, reduction);
-        return result;
     } else {
         throw std::runtime_error("fused_softmax_cross_entropy: unsupported dtype");
     }
@@ -1439,6 +1510,112 @@ static void attention_online_f32(
     }
 }
 
+// S13 fix — dtype-preservation. Native Float64 online-softmax attention.
+//
+// The Float32 path above relies on AVX2/AVX-512 SIMD intrinsics in
+// attn_dot/attn_scale/attn_axpy. The Float64 path here is a scalar
+// implementation (no Float64 SIMD intrinsics provided), but it keeps
+// every accumulator at double precision throughout — no silent
+// Float32 downcast like the previous warn-and-cast behaviour. The
+// scalar loop is small enough to be vectorised by the compiler on
+// most targets; correctness over peak throughput is the right
+// tradeoff for the Float64 path.
+static void attention_online_f64(
+    const double* __restrict__ q_data,
+    const double* __restrict__ k_data,
+    const double* __restrict__ v_data,
+    double* __restrict__ out_data,
+    int64_t batch_heads,
+    int64_t seq_q,
+    int64_t seq_k,
+    int64_t head_dim,
+    double scale,
+    bool causal,
+    int64_t H_q = 1,
+    int64_t q_heads_per_kv_head = 1
+) {
+    const int64_t q_stride = seq_q * head_dim;
+    const int64_t k_stride = seq_k * head_dim;
+    const int64_t H_kv = H_q / q_heads_per_kv_head;
+    const bool is_gqa = (q_heads_per_kv_head > 1);
+
+    #pragma omp parallel for schedule(dynamic) if(batch_heads > 1)
+    for (int64_t bh = 0; bh < batch_heads; ++bh) {
+        int64_t bh_kv;
+        if (is_gqa) {
+            int64_t b = bh / H_q;
+            int64_t h_q = bh % H_q;
+            int64_t h_kv = h_q / q_heads_per_kv_head;
+            bh_kv = b * H_kv + h_kv;
+        } else {
+            bh_kv = bh;
+        }
+        const double* q = q_data + bh * q_stride;
+        const double* k = k_data + bh_kv * k_stride;
+        const double* v = v_data + bh_kv * k_stride;
+        double* o = out_data + bh * q_stride;
+
+        alignas(64) double tile_scores[ATTN_TILE_K];
+
+        for (int64_t i = 0; i < seq_q; ++i) {
+            const double* qi = q + i * head_dim;
+            double* oi = o + i * head_dim;
+
+            double m_i = -std::numeric_limits<double>::infinity();
+            double l_i = 0.0;
+            std::memset(oi, 0, head_dim * sizeof(double));
+
+            const int64_t j_limit = causal ? std::min(i + 1, seq_k) : seq_k;
+
+            for (int64_t j0 = 0; j0 < j_limit; j0 += ATTN_TILE_K) {
+                const int64_t j1 = std::min(j0 + ATTN_TILE_K, j_limit);
+                const int64_t tile_len = j1 - j0;
+
+                double tile_max = -std::numeric_limits<double>::infinity();
+                for (int64_t t = 0; t < tile_len; ++t) {
+                    const double* k_row = k + (j0 + t) * head_dim;
+                    double dot = 0.0;
+                    for (int64_t d = 0; d < head_dim; ++d) {
+                        dot += qi[d] * k_row[d];
+                    }
+                    tile_scores[t] = dot * scale;
+                    tile_max = std::max(tile_max, tile_scores[t]);
+                }
+
+                const double m_new = std::max(m_i, tile_max);
+
+                if (l_i > 0.0) {
+                    const double correction = std::exp(m_i - m_new);
+                    for (int64_t d = 0; d < head_dim; ++d) {
+                        oi[d] *= correction;
+                    }
+                    l_i *= correction;
+                }
+
+                double tile_sum = 0.0;
+                for (int64_t t = 0; t < tile_len; ++t) {
+                    const double p = std::exp(tile_scores[t] - m_new);
+                    tile_sum += p;
+                    const double* v_row = v + (j0 + t) * head_dim;
+                    for (int64_t d = 0; d < head_dim; ++d) {
+                        oi[d] += p * v_row[d];
+                    }
+                }
+                l_i += tile_sum;
+
+                m_i = m_new;
+            }
+
+            if (l_i > 0.0) {
+                const double inv = 1.0 / l_i;
+                for (int64_t d = 0; d < head_dim; ++d) {
+                    oi[d] *= inv;
+                }
+            }
+        }
+    }
+}
+
 } // anonymous namespace
 
 auto fused_attention_kernel(const Tensor& Q, const Tensor& K, const Tensor& V,
@@ -1509,30 +1686,17 @@ auto fused_attention_kernel(const Tensor& Q, const Tensor& K, const Tensor& V,
             scale, causal, H_q, q_heads_per_kv_head
         );
     } else if (Q.dtype() == DType::Float64) {
-        // Float64: compute in Float32 for online-softmax numerical range,
-        // then store back. For full Float64 precision the user should cast
-        // Q/K/V to Float32 explicitly. We convert per-tensor here to keep
-        // the kernel simple and still correct.
-        static bool warned = false;
-        if (!warned) {
-            // Audit I.4: unified logger so TENZOR_LOG_LEVEL filter applies.
-            TENZOR_LOG_WARN("fused_attention computing Float64 in Float32 precision. "
-                            "Cast inputs to Float32 explicitly to suppress this warning.");
-            warned = true;
-        }
-        Tensor q32 = Q.to(DType::Float32);
-        Tensor k32 = K.to(DType::Float32);
-        Tensor v32 = V.to(DType::Float32);
-        Tensor out32(std::vector<int64_t>(q_shape.begin(), q_shape.end()),
-                     DType::Float32, Q.device());
-
-        attention_online_f32(
-            q32.data<float>(), k32.data<float>(), v32.data<float>(),
-            out32.data<float>(),
+        // S13 fix — native Float64 path. Previously this branch widened to
+        // Float32, computed, and narrowed back with a one-shot warning;
+        // that silently destroyed the user's requested precision. Now we
+        // run the online softmax in double throughout via
+        // attention_online_f64 (scalar, but precise).
+        attention_online_f64(
+            Q.data<double>(), K.data<double>(), V.data<double>(),
+            output.data<double>(),
             batch_heads, seq_len_q, seq_len_k, head_dim,
-            scale, causal, H_q, q_heads_per_kv_head
+            static_cast<double>(scale), causal, H_q, q_heads_per_kv_head
         );
-        output = out32.to(DType::Float64);
     } else if (Q.dtype() == DType::Float16) {
         // Float16: convert to Float32, compute, convert back.
         Tensor q32 = Q.to(DType::Float32);
@@ -1606,15 +1770,29 @@ auto fused_conv2d_sigmoid_kernel(const Tensor& input, const Tensor& weight, cons
                                   int64_t stride_h, int64_t stride_w,
                                   int64_t pad_h, int64_t pad_w,
                                   int64_t dil_h, int64_t dil_w, int64_t groups) -> Tensor {
-    Tensor result = conv2d_forward_kernel(input, weight, bias,
-                                          stride_h, stride_w, pad_h, pad_w, dil_h, dil_w, groups);
-    int64_t n = result.numel();
-    if (result.dtype() == DType::Float32) {
-        apply_sigmoid_inplace(result.data<float>(), n);
-    } else if (result.dtype() == DType::Float64) {
-        apply_sigmoid_inplace(result.data<double>(), n);
-    }
-    return result;
+    // Widen Float16/BFloat16 inputs to Float32 so the activation step
+    // does not silently no-op. Float32/Float64 paths are pass-through.
+    return ::tenzor::utils::widen_narrow_compute(input,
+        [&](const Tensor& in_wide) -> Tensor {
+            Tensor w_wide = ::tenzor::utils::is_half_precision(weight.dtype())
+                                ? weight.to(DType::Float32)
+                                : weight;
+            Tensor b_wide_storage;
+            const Tensor* b_ptr = bias;
+            if (bias != nullptr && ::tenzor::utils::is_half_precision(bias->dtype())) {
+                b_wide_storage = bias->to(DType::Float32);
+                b_ptr = &b_wide_storage;
+            }
+            Tensor result = conv2d_forward_kernel(in_wide, w_wide, b_ptr,
+                                                  stride_h, stride_w, pad_h, pad_w, dil_h, dil_w, groups);
+            int64_t n = result.numel();
+            if (result.dtype() == DType::Float32) {
+                apply_sigmoid_inplace(result.data<float>(), n);
+            } else if (result.dtype() == DType::Float64) {
+                apply_sigmoid_inplace(result.data<double>(), n);
+            }
+            return result;
+        });
 }
 
 auto fused_conv2d_sigmoid_kernel(const Tensor& input, const Tensor& weight, const Tensor* bias,
@@ -1627,15 +1805,29 @@ auto fused_conv2d_tanh_kernel(const Tensor& input, const Tensor& weight, const T
                                int64_t stride_h, int64_t stride_w,
                                int64_t pad_h, int64_t pad_w,
                                int64_t dil_h, int64_t dil_w, int64_t groups) -> Tensor {
-    Tensor result = conv2d_forward_kernel(input, weight, bias,
-                                          stride_h, stride_w, pad_h, pad_w, dil_h, dil_w, groups);
-    int64_t n = result.numel();
-    if (result.dtype() == DType::Float32) {
-        apply_tanh_inplace(result.data<float>(), n);
-    } else if (result.dtype() == DType::Float64) {
-        apply_tanh_inplace(result.data<double>(), n);
-    }
-    return result;
+    // Widen Float16/BFloat16 inputs to Float32 so the activation step
+    // does not silently no-op. Float32/Float64 paths are pass-through.
+    return ::tenzor::utils::widen_narrow_compute(input,
+        [&](const Tensor& in_wide) -> Tensor {
+            Tensor w_wide = ::tenzor::utils::is_half_precision(weight.dtype())
+                                ? weight.to(DType::Float32)
+                                : weight;
+            Tensor b_wide_storage;
+            const Tensor* b_ptr = bias;
+            if (bias != nullptr && ::tenzor::utils::is_half_precision(bias->dtype())) {
+                b_wide_storage = bias->to(DType::Float32);
+                b_ptr = &b_wide_storage;
+            }
+            Tensor result = conv2d_forward_kernel(in_wide, w_wide, b_ptr,
+                                                  stride_h, stride_w, pad_h, pad_w, dil_h, dil_w, groups);
+            int64_t n = result.numel();
+            if (result.dtype() == DType::Float32) {
+                apply_tanh_inplace(result.data<float>(), n);
+            } else if (result.dtype() == DType::Float64) {
+                apply_tanh_inplace(result.data<double>(), n);
+            }
+            return result;
+        });
 }
 
 auto fused_conv2d_tanh_kernel(const Tensor& input, const Tensor& weight, const Tensor* bias,
@@ -1648,15 +1840,29 @@ auto fused_conv2d_swish_kernel(const Tensor& input, const Tensor& weight, const 
                                 int64_t stride_h, int64_t stride_w,
                                 int64_t pad_h, int64_t pad_w,
                                 int64_t dil_h, int64_t dil_w, int64_t groups) -> Tensor {
-    Tensor result = conv2d_forward_kernel(input, weight, bias,
-                                          stride_h, stride_w, pad_h, pad_w, dil_h, dil_w, groups);
-    int64_t n = result.numel();
-    if (result.dtype() == DType::Float32) {
-        apply_swish_inplace(result.data<float>(), n);
-    } else if (result.dtype() == DType::Float64) {
-        apply_swish_inplace(result.data<double>(), n);
-    }
-    return result;
+    // Widen Float16/BFloat16 inputs to Float32 so the activation step
+    // does not silently no-op. Float32/Float64 paths are pass-through.
+    return ::tenzor::utils::widen_narrow_compute(input,
+        [&](const Tensor& in_wide) -> Tensor {
+            Tensor w_wide = ::tenzor::utils::is_half_precision(weight.dtype())
+                                ? weight.to(DType::Float32)
+                                : weight;
+            Tensor b_wide_storage;
+            const Tensor* b_ptr = bias;
+            if (bias != nullptr && ::tenzor::utils::is_half_precision(bias->dtype())) {
+                b_wide_storage = bias->to(DType::Float32);
+                b_ptr = &b_wide_storage;
+            }
+            Tensor result = conv2d_forward_kernel(in_wide, w_wide, b_ptr,
+                                                  stride_h, stride_w, pad_h, pad_w, dil_h, dil_w, groups);
+            int64_t n = result.numel();
+            if (result.dtype() == DType::Float32) {
+                apply_swish_inplace(result.data<float>(), n);
+            } else if (result.dtype() == DType::Float64) {
+                apply_swish_inplace(result.data<double>(), n);
+            }
+            return result;
+        });
 }
 
 auto fused_conv2d_swish_kernel(const Tensor& input, const Tensor& weight, const Tensor* bias,

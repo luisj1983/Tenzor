@@ -9,6 +9,7 @@
 #include "tenzor/ops/op_id.hpp"
 #include "tenzor/backend/op_attributes.hpp"
 #include "tenzor/jit/tracer.hpp"
+#include "tenzor/utils/autograd_wrap.hpp"
 
 namespace {
 
@@ -538,7 +539,7 @@ private:
     double eps_;
     int64_t normalized_size_;
     std::vector<int64_t> normalized_shape_;
-};;
+};
 
 auto LayerNormBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> {
     auto& grad_output_orig = grad_outputs[0];
@@ -827,7 +828,7 @@ auto LayerNorm::forward_impl(const Variable& input_orig) -> Variable {
     // `input_orig` deliberately so the rest of the body is untouched).
     Variable input = input_orig;
     if (!input_orig.tensor().is_contiguous()) {
-        input = Variable(input_orig.tensor().contiguous(), input_orig.requires_grad());
+        tenzor::utils::wrap_preserving_grad(input, input_orig.tensor().contiguous());
     }
 
     auto shape = input.shape();

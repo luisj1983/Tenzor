@@ -847,9 +847,19 @@ auto fft2_kernel(const Tensor& input,
     DType out_dtype = to_complex_dtype(input.dtype());
     auto precision = dfti_precision(input.dtype());
 
-    // Ensure complex input
-    Tensor inp = (input.dtype() == DType::Float32 || input.dtype() == DType::Float64)
-                 ? input.to(out_dtype) : input;
+    // S13 dtype-preservation fix: half-precision inputs must be packed into
+    // a Complex64 buffer via build_complex64_from_half — previously they
+    // fell through `inp = input` (still half), and the subsequent
+    // mkl_fftn_complex<std::complex<float>> call read garbage from a
+    // 2-byte-stride buffer. Mirror the fft_kernel half-precision path.
+    Tensor inp;
+    if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) {
+        inp = build_complex64_from_half(input);
+    } else if (input.dtype() == DType::Float32 || input.dtype() == DType::Float64) {
+        inp = input.to(out_dtype);
+    } else {
+        inp = input;  // already complex
+    }
     auto cont = inp.contiguous();
     auto shape = cont.shape();
 
@@ -886,7 +896,9 @@ auto fft2_kernel(const Tensor& input,
         return result;
     }
 
-    // Fallback: sequential 1D FFTs along each dimension
+    // Fallback: sequential 1D FFTs along each dimension. We pass `inp`
+    // (already widened to the correct complex dtype) so the per-axis
+    // fft_kernel doesn't try to re-widen a half input it can't reach.
     Tensor result = inp;
     for (size_t i = 0; i < norm_dims.size(); ++i) {
         result = fft_kernel(result, norm_dims[i], signal_lengths[i], norm);
@@ -906,8 +918,18 @@ auto ifft2_kernel(const Tensor& input,
     DType out_dtype = to_complex_dtype(input.dtype());
     auto precision = dfti_precision(input.dtype());
 
-    Tensor inp = (input.dtype() == DType::Float32 || input.dtype() == DType::Float64)
-                 ? input.to(out_dtype) : input;
+    // S13 dtype-preservation fix (parallel to fft2_kernel): handle
+    // Float16/BFloat16 inputs explicitly so half-precision storage is
+    // packed into Complex64 rather than fed straight into MKL's
+    // float-complex code path.
+    Tensor inp;
+    if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) {
+        inp = build_complex64_from_half(input);
+    } else if (input.dtype() == DType::Float32 || input.dtype() == DType::Float64) {
+        inp = input.to(out_dtype);
+    } else {
+        inp = input;  // already complex
+    }
     auto cont = inp.contiguous();
     auto shape = cont.shape();
 
@@ -1225,13 +1247,43 @@ void dft_1d_strided(const std::complex<T>* in,
     }
 }
 
+// S13 dtype-preservation fix: pack a half-precision (Float16/BFloat16)
+// tensor into a freshly-allocated Complex64 buffer. The MKL build has a
+// shared helper for this in the anonymous namespace above, but the
+// non-MKL block is its own translation-unit world — inlining the few
+// lines here is simpler than relocating the helper.
+template <typename HalfT>
+inline Tensor pack_half_to_complex64_(const Tensor& input) {
+    auto shape = input.shape();
+    Tensor out(std::vector<int64_t>(shape.begin(), shape.end()),
+               DType::Complex64, input.device());
+    auto* dst = out.data<std::complex<float>>();
+    const auto* src = input.data<HalfT>();
+    const int64_t n = input.numel();
+    for (int64_t i = 0; i < n; ++i) {
+        dst[i] = std::complex<float>(static_cast<float>(src[i]), 0.0f);
+    }
+    return out;
+}
+
 template<typename T>
 Tensor fft_1d_complex_dft(const Tensor& input, int64_t dim,
                           int64_t signal_len, std::string_view norm,
                           bool is_forward) {
     DType out_dtype = to_complex_dtype(input.dtype());
-    Tensor inp = (input.dtype() == DType::Float32 || input.dtype() == DType::Float64)
-                 ? input.to(out_dtype) : input;
+    // S13 dtype-preservation fix: mirror the MKL fft_kernel's half-precision
+    // handling in the DFT fallback so Float16/BFloat16 inputs are packed
+    // into Complex64 rather than reinterpreted as 2-byte complex storage.
+    Tensor inp;
+    if (input.dtype() == DType::Float16) {
+        inp = pack_half_to_complex64_<tenzor::Float16>(input);
+    } else if (input.dtype() == DType::BFloat16) {
+        inp = pack_half_to_complex64_<tenzor::BFloat16>(input);
+    } else if (input.dtype() == DType::Float32 || input.dtype() == DType::Float64) {
+        inp = input.to(out_dtype);
+    } else {
+        inp = input;
+    }
     auto cont = inp.contiguous();
     auto shape = cont.shape();
     int64_t N_in = shape[dim];

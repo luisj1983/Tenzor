@@ -28,25 +28,46 @@ PY_DIR = REPO_ROOT / "python" / "tenzor"
 
 
 def public_runtime_names(module) -> set[str]:
+    """Names that user code can attribute-access on ``module``.
+
+    S23: previously this preferred ``__all__`` and required ``owner is
+    module`` — that excluded names re-exported by ``from .tenzor_core
+    import *`` (CUDAGraph, Event, …) and made the .pyi look like it had
+    "extra" entries. The new logic enumerates ``dir(module)`` and keeps
+    names whose owner is the inspected module OR any sub-tenzor module
+    (the wildcard-import case). See ``check_pyi_parity.py`` for the
+    canonical implementation; this older checker now uses the same rule.
+    """
+    import typing
+
     names: set[str] = set()
-    # Prefer __all__ if explicitly declared — that's the module author's
-    # source of truth. Otherwise fall back to enumerating dir() and filtering
-    # to objects defined in this module (via inspect.getmodule).
-    declared_all = getattr(module, "__all__", None)
-    if isinstance(declared_all, (list, tuple)):
-        names.update(str(n) for n in declared_all if not str(n).startswith("_"))
-        return names
     for name in dir(module):
         if name.startswith("_"):
             continue
-        obj = getattr(module, name)
+        try:
+            obj = getattr(module, name)
+        except AttributeError:
+            continue
         if inspect.ismodule(obj):
-            continue  # skip re-exported modules
+            # Submodules: keep when the owner is a sub-tenzor module (these
+            # are intentional re-exports declared in the stub as plain
+            # ``submodule: Any`` lines). Skip stdlib/3rd-party module attrs.
+            owner = inspect.getmodule(obj)
+            owner_name = getattr(owner, "__name__", "") if owner else ""
+            mod_name = getattr(obj, "__name__", "") or ""
+            if mod_name.startswith("tenzor") or owner_name.startswith("tenzor"):
+                names.add(name)
+            continue
+        # Drop typing scaffolding leaked from the module body.
+        if isinstance(obj, typing.TypeVar):
+            continue
+        if obj is typing.TYPE_CHECKING:
+            continue
         owner = inspect.getmodule(obj)
         if owner is not None and owner is not module:
-            # Re-imported symbol from another module; don't require it in the
-            # stub for this module specifically.
-            continue
+            owner_name = getattr(owner, "__name__", "") or ""
+            if not (owner_name == "tenzor" or owner_name.startswith("tenzor.")):
+                continue
         names.add(name)
     return names
 
@@ -66,6 +87,16 @@ def public_pyi_names(pyi_path: Path) -> set[str]:
         elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
             if not node.target.id.startswith("_"):
                 names.add(node.target.id)
+        elif isinstance(node, ast.ImportFrom):
+            # PEP 484: ``from X import Y as Y`` (or ``from X import *``) is
+            # an explicit re-export. Plain ``from X import Y`` is annotation-
+            # use only and doesn't add Y to the stub's public surface.
+            for alias in node.names:
+                if alias.name == "*":
+                    continue
+                if alias.asname is not None and alias.asname == alias.name:
+                    if not alias.asname.startswith("_"):
+                        names.add(alias.asname)
     return names
 
 

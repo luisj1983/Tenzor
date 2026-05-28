@@ -513,7 +513,8 @@ auto max_pool2d(const Variable& input,
 auto avg_pool2d(const Variable& input,
                 std::pair<int64_t, int64_t> kernel_size,
                 std::pair<int64_t, int64_t> stride,
-                std::pair<int64_t, int64_t> padding) -> Variable {
+                std::pair<int64_t, int64_t> padding,
+                bool count_include_pad) -> Variable {
     if (input.shape().size() != 4) {
         throw std::invalid_argument(
             "F::avg_pool2d expects 4D input [N, C, H, W]");
@@ -524,9 +525,11 @@ auto avg_pool2d(const Variable& input,
     if (stride.second < 0) stride.second = kernel_size.second;
 
     // J7: Delegate to the Module (same rationale as max_pool2d above).
+    // S22: forward ``count_include_pad`` through to the AvgPool2d ctor.
     ::tenzor::nn::AvgPool2d pool(kernel_size.first,
                                  stride.first,
-                                 padding.first);
+                                 padding.first,
+                                 count_include_pad);
     return pool.forward(input);
 }
 
@@ -583,8 +586,10 @@ auto max_pool1d(const Variable& input,
 auto avg_pool1d(const Variable& input,
                 int64_t kernel_size,
                 int64_t stride,
-                int64_t padding) -> Variable {
-    ::tenzor::nn::AvgPool1d layer(kernel_size, stride, padding);
+                int64_t padding,
+                bool count_include_pad) -> Variable {
+    // S22: forward count_include_pad to the layer ctor.
+    ::tenzor::nn::AvgPool1d layer(kernel_size, stride, padding, count_include_pad);
     return layer.forward_impl(input);
 }
 
@@ -599,8 +604,10 @@ auto max_pool3d(const Variable& input,
 auto avg_pool3d(const Variable& input,
                 std::array<int64_t, 3> kernel_size,
                 std::array<int64_t, 3> stride,
-                std::array<int64_t, 3> padding) -> Variable {
-    ::tenzor::nn::AvgPool3d layer(kernel_size, stride, padding);
+                std::array<int64_t, 3> padding,
+                bool count_include_pad) -> Variable {
+    // S22: forward count_include_pad to the layer ctor.
+    ::tenzor::nn::AvgPool3d layer(kernel_size, stride, padding, count_include_pad);
     return layer.forward_impl(input);
 }
 

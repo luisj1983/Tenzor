@@ -486,6 +486,24 @@ add_executable(test_median_f16_bf16 test_median_f16_bf16.cpp)
 target_link_libraries(test_median_f16_bf16 PRIVATE tenzor_core GTest::gtest_main)
 tenzor_discover_tests(test_median_f16_bf16 DISCOVERY_TIMEOUT 60)
 
+# Stream S2 — CPU math.cpp kernels using TENZOR_DISPATCH_FLOATING_TYPES used to
+# throw "unsupported dtype" on Float16/BFloat16. Every callsite was either
+# wrapped with `tenzor::utils::widen_narrow_compute` or already had an internal
+# widen-narrow guard. This regression net verifies the kernels now accept
+# half-precision inputs and produce numerically-close results.
+add_executable(test_math_half_dispatch test_math_half_dispatch.cpp)
+target_link_libraries(test_math_half_dispatch PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_math_half_dispatch DISCOVERY_TIMEOUT 60 BACKENDS cpu)
+
+# Stream S4 — fused conv+activation CPU kernels used to silently skip the
+# activation step on Float16 / BFloat16 (no error, no warning). After
+# wrapping each kernel with widen_narrow_compute the activation now runs
+# at Float32 precision and the result is narrowed back. This test is the
+# regression net for that fix.
+add_executable(test_fused_conv_activation_dtype test_fused_conv_activation_dtype.cpp)
+target_link_libraries(test_fused_conv_activation_dtype PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_fused_conv_activation_dtype DISCOVERY_TIMEOUT 60 BACKENDS cpu)
+
 # Phase P0 / Fix 4 — Vulkan LayerNorm 3-tensor return: forward shader used
 # to compute mean/rstd in shared memory and discard them; backward read
 # them as inputs → OOB crash. Fix exposes them via new SSBO bindings.

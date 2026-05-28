@@ -8,6 +8,8 @@
 
 #pragma once
 
+#include <atomic>
+#include <cstdint>
 #include <memory>
 #include <string>
 #include <vector>
@@ -63,11 +65,12 @@ class Module {
     friend class ModuleHookFunction;  // Allow access to backward hook vectors
 
 public:
-    virtual ~Module() = default;
+    virtual ~Module();;
 
-    Module() = default;
+    Module();;
     Module(Module&& other) noexcept
-        : training_(other.training_)
+        : id_(other.id_)
+        , training_(other.training_)
         , parameters_(std::move(other.parameters_))
         , buffers_(std::move(other.buffers_))
         , submodules_(std::move(other.submodules_))
@@ -295,6 +298,18 @@ public:
      * @return true if in training mode
      */
     auto is_training() const -> bool { return training_; }
+
+    /**
+     * @brief Get the unique 64-bit identifier for this Module instance.
+     *
+     * Each Module is assigned a process-monotonic UID at construction time.
+     * Used by external registries (e.g. nn::utils::parametrize) that need
+     * a key that stays stable across moves and never collides with a
+     * destroyed-then-recreated Module at the same heap address.
+     *
+     * @return Unique identifier (>=1; never 0).
+     */
+    auto id() const -> uint64_t { return id_; }
 
     // ============================================================================
     // Hook System (for Phase 2 Offload Support)
@@ -635,6 +650,7 @@ protected:
      */
     auto register_module(std::string name, std::shared_ptr<Module> module) -> void;
 
+    uint64_t id_{0};                                                              ///< Unique per-instance identifier (assigned in ctor)
     bool training_{true};                                                         ///< Training mode flag
     std::unordered_map<std::string, std::shared_ptr<Variable>> parameters_;       ///< Named parameters (stable addresses)
     std::unordered_map<std::string, std::shared_ptr<Variable>> buffers_;          ///< Named buffers (stable addresses)

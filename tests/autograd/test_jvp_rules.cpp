@@ -183,3 +183,210 @@ TEST_F(JVPRulesTest, JVP_ReLU_MatchesFD_FarFromZero) {
     auto out = jvp_relu(DualTensor(x, v));
     EXPECT_LT(max_abs_diff_d(out.tangent(), fd), 1e-3);
 }
+
+// ============================================================================
+// S15: JVP rules previously marked NonDifferentiable, now implemented via
+// closed-form chain rule / linear-forward / FD-probe.
+//
+// Each test compares the registered JVP rule (via dispatch_jvp) against a
+// central-difference reference computed by running the forward op at
+// (x + eps*dx) and (x - eps*dx). The tolerance is ~1e-3 (FD-limited).
+// ============================================================================
+
+#include <tenzor/autograd/jvp_dispatch.hpp>
+#include <tenzor/backend/fast_dispatch.hpp>
+#include <tenzor/backend/op_attributes.hpp>
+#include <tenzor/ops/op_id.hpp>
+
+namespace {
+
+// Helper: compute finite-difference JVP from a callable f that maps Tensor -> Tensor.
+template <typename Op>
+Tensor fd_jvp(Op op, const Tensor& x, const Tensor& dx, double eps = 1e-3) {
+    auto plus  = op(x + dx * eps);
+    auto minus = op(x - dx * eps);
+    return (plus - minus) * (1.0 / (2.0 * eps));
+}
+
+// Helper: compute FD JVP for two-arg op f(x, y).
+template <typename Op>
+Tensor fd_jvp2(Op op, const Tensor& x, const Tensor& dx,
+               const Tensor& y, const Tensor& dy, double eps = 1e-3) {
+    auto plus  = op(x + dx * eps, y + dy * eps);
+    auto minus = op(x - dx * eps, y - dy * eps);
+    return (plus - minus) * (1.0 / (2.0 * eps));
+}
+
+}  // namespace
+
+// ---- DCT JVP ----
+TEST_F(JVPRulesTest, JVP_DCT_S15_LinearMatchesFD) {
+    auto x  = randn({4, 16}, DType::Float64, Device::cpu());
+    auto dx = randn({4, 16}, DType::Float64, Device::cpu());
+    OpAttributes attrs;
+    attrs.set(AttrKey::DCTType, int64_t{2});
+    attrs.set(AttrKey::Dim, int64_t{-1});
+    attrs.set(AttrKey::Norm, std::string("ortho"));
+    std::array<Tensor, 1> p{x}, t{dx};
+    auto out = tenzor::dispatch_jvp(OpId::DCT, p, t, attrs);
+    auto fd = fd_jvp([&](const Tensor& xx) {
+        return tenzor::dispatch(OpId::DCT, std::vector<Tensor>{xx}, attrs)[0];
+    }, x, dx);
+    EXPECT_LT(max_abs_diff_d(out.tangent, fd), 1e-2);
+}
+
+// ---- IDCT JVP ----
+TEST_F(JVPRulesTest, JVP_IDCT_S15_LinearMatchesFD) {
+    auto x  = randn({4, 16}, DType::Float64, Device::cpu());
+    auto dx = randn({4, 16}, DType::Float64, Device::cpu());
+    OpAttributes attrs;
+    attrs.set(AttrKey::DCTType, int64_t{2});
+    attrs.set(AttrKey::Dim, int64_t{-1});
+    attrs.set(AttrKey::Norm, std::string("ortho"));
+    std::array<Tensor, 1> p{x}, t{dx};
+    auto out = tenzor::dispatch_jvp(OpId::IDCT, p, t, attrs);
+    auto fd = fd_jvp([&](const Tensor& xx) {
+        return tenzor::dispatch(OpId::IDCT, std::vector<Tensor>{xx}, attrs)[0];
+    }, x, dx);
+    EXPECT_LT(max_abs_diff_d(out.tangent, fd), 1e-2);
+}
+
+// ---- LinalgVectorNorm JVP (p=2) ----
+TEST_F(JVPRulesTest, JVP_LinalgVectorNorm_P2_MatchesFD) {
+    auto x  = randn({4, 8}, DType::Float64, Device::cpu()) + 0.5;
+    auto dx = randn({4, 8}, DType::Float64, Device::cpu());
+    OpAttributes attrs;
+    attrs.set(AttrKey::P, 2.0);
+    attrs.set(AttrKey::Dim, int64_t{-1});
+    attrs.set(AttrKey::Keepdim, false);
+    std::array<Tensor, 1> p{x}, t{dx};
+    auto out = tenzor::dispatch_jvp(OpId::LinalgVectorNorm, p, t, attrs);
+    auto fd = fd_jvp([&](const Tensor& xx) {
+        return tenzor::dispatch(OpId::LinalgVectorNorm,
+            std::vector<Tensor>{xx}, attrs)[0];
+    }, x, dx);
+    EXPECT_LT(max_abs_diff_d(out.tangent, fd), 1e-3);
+}
+
+// ---- LinalgMatrixNorm Frobenius JVP ----
+TEST_F(JVPRulesTest, JVP_LinalgMatrixNorm_Fro_MatchesFD) {
+    auto x  = randn({4, 6}, DType::Float64, Device::cpu()) + 0.5;
+    auto dx = randn({4, 6}, DType::Float64, Device::cpu());
+    OpAttributes attrs;
+    attrs.set(AttrKey::Order, 0.0);  // Frobenius
+    std::array<Tensor, 1> p{x}, t{dx};
+    auto out = tenzor::dispatch_jvp(OpId::LinalgMatrixNorm, p, t, attrs);
+    auto fd = fd_jvp([&](const Tensor& xx) {
+        return tenzor::dispatch(OpId::LinalgMatrixNorm,
+            std::vector<Tensor>{xx}, attrs)[0];
+    }, x, dx);
+    EXPECT_LT(max_abs_diff_d(out.tangent, fd), 1e-3);
+}
+
+// ---- CosineSimilarity JVP ----
+TEST_F(JVPRulesTest, JVP_CosineSimilarity_MatchesFD) {
+    auto a  = randn({4, 8}, DType::Float64, Device::cpu()) + 1.0;
+    auto b  = randn({4, 8}, DType::Float64, Device::cpu()) + 1.0;
+    auto da = randn({4, 8}, DType::Float64, Device::cpu());
+    auto db = randn({4, 8}, DType::Float64, Device::cpu());
+    OpAttributes attrs;
+    attrs.set(AttrKey::Dim, int64_t{1});
+    attrs.set(AttrKey::Eps, 1e-8);
+    std::array<Tensor, 2> p{a, b}, t{da, db};
+    auto out = tenzor::dispatch_jvp(OpId::CosineSimilarity, p, t, attrs);
+    auto fd = fd_jvp2([&](const Tensor& xx, const Tensor& yy) {
+        return tenzor::dispatch(OpId::CosineSimilarity,
+            std::vector<Tensor>{xx, yy}, attrs)[0];
+    }, a, da, b, db);
+    EXPECT_LT(max_abs_diff_d(out.tangent, fd), 1e-3);
+}
+
+// ---- CDist JVP (p=2) ----
+TEST_F(JVPRulesTest, JVP_CDist_P2_MatchesFD) {
+    auto x1  = randn({3, 4}, DType::Float64, Device::cpu()) + 1.0;
+    auto x2  = randn({5, 4}, DType::Float64, Device::cpu()) + 1.0;
+    auto dx1 = randn({3, 4}, DType::Float64, Device::cpu());
+    auto dx2 = randn({5, 4}, DType::Float64, Device::cpu());
+    OpAttributes attrs;
+    attrs.set(AttrKey::DistP, 2.0);
+    std::array<Tensor, 2> p{x1, x2}, t{dx1, dx2};
+    auto out = tenzor::dispatch_jvp(OpId::CDist, p, t, attrs);
+    auto fd = fd_jvp2([&](const Tensor& xx, const Tensor& yy) {
+        return tenzor::dispatch(OpId::CDist,
+            std::vector<Tensor>{xx, yy}, attrs)[0];
+    }, x1, dx1, x2, dx2);
+    EXPECT_LT(max_abs_diff_d(out.tangent, fd), 1e-2);
+}
+
+// ---- PairwiseDistance JVP (p=2) ----
+TEST_F(JVPRulesTest, JVP_PairwiseDistance_P2_MatchesFD) {
+    auto x1  = randn({6, 4}, DType::Float64, Device::cpu()) + 1.0;
+    auto x2  = randn({6, 4}, DType::Float64, Device::cpu()) + 1.0;
+    auto dx1 = randn({6, 4}, DType::Float64, Device::cpu());
+    auto dx2 = randn({6, 4}, DType::Float64, Device::cpu());
+    OpAttributes attrs;
+    attrs.set(AttrKey::DistP, 2.0);
+    std::array<Tensor, 2> p{x1, x2}, t{dx1, dx2};
+    auto out = tenzor::dispatch_jvp(OpId::PairwiseDistance, p, t, attrs);
+    auto fd = fd_jvp2([&](const Tensor& xx, const Tensor& yy) {
+        return tenzor::dispatch(OpId::PairwiseDistance,
+            std::vector<Tensor>{xx, yy}, attrs)[0];
+    }, x1, dx1, x2, dx2);
+    EXPECT_LT(max_abs_diff_d(out.tangent, fd), 1e-2);
+}
+
+// ---- Cov JVP ----
+TEST_F(JVPRulesTest, JVP_Cov_MatchesFD) {
+    auto X  = randn({4, 8}, DType::Float64, Device::cpu());
+    auto dX = randn({4, 8}, DType::Float64, Device::cpu());
+    OpAttributes attrs;
+    attrs.set(AttrKey::Correction, int64_t{1});
+    std::array<Tensor, 1> p{X}, t{dX};
+    auto out = tenzor::dispatch_jvp(OpId::Cov, p, t, attrs);
+    auto fd = fd_jvp([&](const Tensor& xx) {
+        return tenzor::dispatch(OpId::Cov,
+            std::vector<Tensor>{xx}, attrs)[0];
+    }, X, dX);
+    EXPECT_LT(max_abs_diff_d(out.tangent, fd), 1e-2);
+}
+
+// ---- Corrcoef JVP ----
+TEST_F(JVPRulesTest, JVP_Corrcoef_MatchesFD) {
+    auto X  = randn({4, 16}, DType::Float64, Device::cpu()) + 1.0;
+    auto dX = randn({4, 16}, DType::Float64, Device::cpu()) * 0.1;
+    OpAttributes attrs;
+    std::array<Tensor, 1> p{X}, t{dX};
+    auto out = tenzor::dispatch_jvp(OpId::Corrcoef, p, t, attrs);
+    auto fd = fd_jvp([&](const Tensor& xx) {
+        return tenzor::dispatch(OpId::Corrcoef,
+            std::vector<Tensor>{xx}, attrs)[0];
+    }, X, dX);
+    EXPECT_LT(max_abs_diff_d(out.tangent, fd), 5e-2);
+}
+
+// ---- SparseToDense JVP ----
+TEST_F(JVPRulesTest, JVP_SparseToDense_S15_LinearMatchesFD) {
+    int64_t M = 4, K = 5;
+    std::vector<int64_t> crow_d = {0, 2, 3, 5, 6};
+    std::vector<int64_t> col_d = {0, 2, 1, 3, 4, 0};
+    auto crow = Tensor::from_blob(crow_d.data(), {M + 1}, DType::Int64, Device::cpu()).clone();
+    auto col  = Tensor::from_blob(col_d.data(), {static_cast<int64_t>(col_d.size())},
+                                   DType::Int64, Device::cpu()).clone();
+    auto values  = randn({static_cast<int64_t>(col_d.size())}, DType::Float64, Device::cpu());
+    auto dvalues = randn({static_cast<int64_t>(col_d.size())}, DType::Float64, Device::cpu());
+    OpAttributes attrs;
+    attrs.set(AttrKey::M, M);
+    attrs.set(AttrKey::K, K);
+    std::array<Tensor, 3> p{crow, col, values};
+    std::array<Tensor, 3> t{Tensor(), Tensor(), dvalues};
+    auto out = tenzor::dispatch_jvp(OpId::SparseToDense, p, t, attrs);
+    // FD reference: change values, observe dense output diff.
+    double eps = 1e-3;
+    auto plus  = tenzor::dispatch(OpId::SparseToDense,
+        std::vector<Tensor>{crow, col, values + dvalues * eps}, attrs)[0];
+    auto minus = tenzor::dispatch(OpId::SparseToDense,
+        std::vector<Tensor>{crow, col, values - dvalues * eps}, attrs)[0];
+    auto fd = (plus - minus) * (1.0 / (2.0 * eps));
+    EXPECT_LT(max_abs_diff_d(out.tangent, fd), 1e-3);
+}
+

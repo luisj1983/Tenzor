@@ -7,6 +7,7 @@
 #include "tenzor/backend/fast_dispatch.hpp"
 #include "tenzor/ops/op_id.hpp"
 #include "tenzor/backend/op_attributes.hpp"
+#include "tenzor/utils/autograd_wrap.hpp"
 #include <cmath>
 
 // SIMD headers for optimized BatchNorm
@@ -779,10 +780,10 @@ auto BatchNorm2d::forward_impl(const Variable& input) -> Variable {
                 weight_variable = *cached_weight_;
                 // Ensure device/dtype match
                 if (weight_variable.tensor().device() != original_device) {
-                    weight_variable = Variable(weight_variable.tensor().to(original_device), weight_variable.requires_grad());
+                    tenzor::utils::wrap_preserving_grad(weight_variable, weight_variable.tensor().to(original_device));
                 }
                 if (weight_variable.tensor().dtype() != input_dtype) {
-                    weight_variable = Variable(weight_variable.tensor().to(input_dtype), weight_variable.requires_grad());
+                    tenzor::utils::wrap_preserving_grad(weight_variable, weight_variable.tensor().to(input_dtype));
                 }
             } else {
                 weight_variable = Variable(ones({C}, input_dtype, original_device), false);

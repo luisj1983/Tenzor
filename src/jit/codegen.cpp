@@ -14,6 +14,7 @@
 #include "tenzor/ops/op_id.hpp"
 #include <sstream>
 #include <stdexcept>
+#include "tenzor/utils/error.hpp"  // NotImplementedError (S25 / audit-12)
 #include <iostream>
 #include <functional>
 
@@ -279,7 +280,7 @@ auto CompiledKernel::launch(const std::vector<const void*>& input_ptrs,
     ));
 #endif
 #else
-    throw std::runtime_error("GPU codegen not available (no CUDA/ROCm)");
+    throw NotImplementedError("GPU codegen not available (no CUDA/ROCm)");
 #endif
 }
 
@@ -416,7 +417,7 @@ auto KernelCache::compile(const std::string& source, const std::string& kernel_n
 
     return kernel;
 #else
-    throw std::runtime_error("GPU codegen not available (no CUDA/ROCm)");
+    throw NotImplementedError("GPU codegen not available (no CUDA/ROCm)");
 #endif
 }
 

@@ -740,42 +740,72 @@ auto LBFGS::load_state_dict(const std::unordered_map<std::string, Tensor>& state
     rho_history_.clear();
     has_prev_state_ = false;
 
-    auto get_i64 = [&](const std::string& key, int64_t fallback) -> int64_t {
+    // Audit S27: previously, missing keys silently fell back to constructor
+    // defaults, so a partially-saved checkpoint would resume with the wrong
+    // hyperparameters / convergence state and look like a clean reload. Now
+    // every required field must be present; only the s/y/rho history block
+    // and prev_flat_grad are tolerated as absent (documented below).
+    auto require = [&](const std::string& key) -> const Tensor& {
         auto it = state.find(key);
-        if (it == state.end()) return fallback;
-        auto cpu = (it->second.device() == Device::cpu()) ? it->second : it->second.to(Device::cpu());
+        if (it == state.end()) {
+            throw std::invalid_argument(
+                "LBFGS::load_state_dict: missing required key '" + key + "'");
+        }
+        return it->second;
+    };
+
+    auto load_i64 = [&](const std::string& key) -> int64_t {
+        const auto& t = require(key);
+        auto cpu = (t.device() == Device::cpu()) ? t : t.to(Device::cpu());
         if (cpu.dtype() == DType::Int64)  return cpu.data<int64_t>()[0];
         if (cpu.dtype() == DType::Int32)  return static_cast<int64_t>(cpu.data<int32_t>()[0]);
-        return fallback;
+        throw std::invalid_argument(
+            "LBFGS::load_state_dict: key '" + key + "' has unsupported integer dtype");
     };
-    auto get_f64 = [&](const std::string& key, double fallback) -> double {
-        auto it = state.find(key);
-        if (it == state.end()) return fallback;
-        auto cpu = (it->second.device() == Device::cpu()) ? it->second : it->second.to(Device::cpu());
+    auto load_f64 = [&](const std::string& key) -> double {
+        const auto& t = require(key);
+        auto cpu = (t.device() == Device::cpu()) ? t : t.to(Device::cpu());
         if (cpu.dtype() == DType::Float64) return cpu.data<double>()[0];
         if (cpu.dtype() == DType::Float32) return static_cast<double>(cpu.data<float>()[0]);
-        return fallback;
+        throw std::invalid_argument(
+            "LBFGS::load_state_dict: key '" + key + "' has unsupported float dtype");
     };
 
-    n_iter_           = static_cast<int>(get_i64("n_iter",       static_cast<int64_t>(n_iter_)));
-    lr_               = get_f64("lr",                lr_);
-    max_iter_         = static_cast<int>(get_i64("max_iter",     static_cast<int64_t>(max_iter_)));
-    max_eval_         = static_cast<int>(get_i64("max_eval",     static_cast<int64_t>(max_eval_)));
-    tolerance_grad_   = get_f64("tolerance_grad",    tolerance_grad_);
-    tolerance_change_ = get_f64("tolerance_change",  tolerance_change_);
-    history_size_     = static_cast<int>(get_i64("history_size", static_cast<int64_t>(history_size_)));
+    n_iter_           = static_cast<int>(load_i64("n_iter"));
+    lr_               = load_f64("lr");
+    max_iter_         = static_cast<int>(load_i64("max_iter"));
+    max_eval_         = static_cast<int>(load_i64("max_eval"));
+    tolerance_grad_   = load_f64("tolerance_grad");
+    tolerance_change_ = load_f64("tolerance_change");
+    history_size_     = static_cast<int>(load_i64("history_size"));
 
-    has_prev_state_ = (get_i64("has_prev_state", 0) != 0);
-    prev_loss_      = get_f64("prev_loss",      prev_loss_);
+    has_prev_state_ = (load_i64("has_prev_state") != 0);
+    prev_loss_      = load_f64("prev_loss");
+
+    // prev_flat_grad is tolerated as absent: state_dict() only writes it when
+    // has_prev_state_ is true and the cached gradient was non-empty.
     auto it_pg = state.find("prev_flat_grad");
     if (it_pg != state.end()) {
         prev_flat_grad_ = it_pg->second.clone();
+    } else if (has_prev_state_) {
+        throw std::invalid_argument(
+            "LBFGS::load_state_dict: has_prev_state is true but 'prev_flat_grad' is missing");
     }
 
+    // The s/y/rho history block is tolerated as absent: state_dict() only
+    // writes it when the optimizer has accumulated at least one curvature
+    // pair (s_history_ non-empty). A freshly-constructed checkpoint has no
+    // history.
     auto it_s = state.find("s");
     auto it_y = state.find("y");
     auto it_rho = state.find("rho");
-    if (it_s != state.end() && it_y != state.end() && it_rho != state.end()) {
+    const bool any_history = (it_s != state.end()) || (it_y != state.end()) || (it_rho != state.end());
+    const bool all_history = (it_s != state.end()) && (it_y != state.end()) && (it_rho != state.end());
+    if (any_history && !all_history) {
+        throw std::invalid_argument(
+            "LBFGS::load_state_dict: history keys 's', 'y', 'rho' must be present together");
+    }
+    if (all_history) {
         const auto& s_stack = it_s->second;
         const auto& y_stack = it_y->second;
         const auto& rho_t = it_rho->second;

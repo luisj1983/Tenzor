@@ -14,6 +14,7 @@
 
 #include <cstdint>
 #include <algorithm>
+#include <vector>
 
 #ifdef _OPENMP
 #include <omp.h>
@@ -77,9 +78,14 @@ auto quantized_linear_int4_kernel(
         for (int64_t o = 0; o < out_features; ++o) {
             const uint8_t* weight_row = weight_packed + o * packed_features;
 
-            // Pre-unpack INT4 weights to INT8 (thread-local stack buffer)
-            // Use alloca-like approach: VLA or fixed-size buffer
-            alignas(32) int8_t unpacked_weights[in_features]; // fits in stack for typical sizes
+            // Pre-unpack INT4 weights to INT8 (per-thread heap buffer).
+            // Previously used a C99-style VLA (`int8_t buf[in_features]`),
+            // which is non-standard in C++ and breaks on stricter compilers.
+            // std::vector keeps the buffer on the heap but is reused per
+            // outer iteration of the OpenMP parallel-for (one allocation per
+            // (thread, o) pair). For the typical 4096-feature sizes this is
+            // 4KB and well within L1.
+            std::vector<int8_t> unpacked_weights(static_cast<size_t>(in_features));
 
             for (int64_t p = 0; p < packed_features; ++p) {
                 unpack_int4(weight_row[p], unpacked_weights[p * 2], unpacked_weights[p * 2 + 1]);
@@ -97,7 +103,7 @@ auto quantized_linear_int4_kernel(
                 // Process 32 INT8 values at a time using _mm256_maddubs_epi16
                 for (; k + 32 <= in_features; k += 32) {
                     __m256i vi = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(input_row + k));
-                    __m256i vw = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(unpacked_weights + k));
+                    __m256i vw = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(unpacked_weights.data() + k));
                     // maddubs: treats first as unsigned, second as signed
                     // Since our input is signed INT8, use madd_epi16 on 16-bit widened values
                     __m128i vi_lo = _mm256_castsi256_si128(vi);

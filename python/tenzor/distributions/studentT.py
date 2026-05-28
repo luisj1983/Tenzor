@@ -1,89 +1,101 @@
-"""Student's t distribution."""
+"""Student's t distribution — Tensor-native (sample only).
+
+Proper reparameterisation for StudentT(df) routes through a Chi-square
+sample (``z / sqrt(chi2/df)``); since Chi2/Gamma have no reparam path
+in this implementation, StudentT.rsample is also unavailable.
+"""
+from __future__ import annotations
+
 import math
+
 import numpy as np
-# V.39: scipy is loaded lazily on first use to keep the public
-# `tenzor.distributions` import graph scipy-free (see distribution.py).
+
+from tenzor.tenzor_core import Tensor, Variable  # type: ignore
+
 from .distribution import (
     Distribution,
-    _to_numpy,
+    _broadcast_shape,
+    _shape_of,
+    _to_variable,
+    _wrap_numpy,
     _require_scipy_special,
     _require_scipy_stats,
 )
 
 
 class StudentT(Distribution):
-    """StudentT(df, loc=0, scale=1) — Student's t distribution.
+    """``StudentT(df, loc=0, scale=1)`` — Student's t distribution."""
 
-    Args:
-        df: Degrees of freedom (scalar or array, > 0).
-        loc: Location parameter (scalar or array, default 0).
-        scale: Scale parameter (scalar or array, > 0, default 1).
-    """
-
-    has_rsample = True
+    has_rsample = False
 
     def __init__(self, df, loc=0.0, scale=1.0):
-        self.df = _to_numpy(df)
-        self.loc = _to_numpy(loc)
-        self.scale = _to_numpy(scale)
-        super().__init__(
-            np.broadcast_shapes(self.df.shape, self.loc.shape, self.scale.shape)
-        )
+        self.df = _to_variable(df)
+        self.loc = _to_variable(loc)
+        self.scale = _to_variable(scale)
+        super().__init__(_broadcast_shape(_shape_of(self.df),
+                                          _shape_of(self.loc),
+                                          _shape_of(self.scale)))
 
     @property
     def mean(self):
-        # Mean = loc for df > 1, undefined otherwise
-        return np.where(self.df > 1.0, self.loc, np.nan)
+        df_np = np.asarray(self.df.tensor(), dtype=np.float64)
+        loc_np = np.asarray(self.loc.tensor(), dtype=np.float64)
+        return _wrap_numpy(np.where(df_np > 1.0, loc_np, np.nan))
 
     @property
     def variance(self):
-        # Var = scale^2 * df/(df-2) for df > 2, inf for 1 < df <= 2, undefined for df <= 1
-        df = self.df
-        s2 = self.scale ** 2
-        var = s2 * df / (df - 2.0)
-        return np.where(df > 2.0, var, np.where(df > 1.0, np.inf, np.nan))
+        df_np = np.asarray(self.df.tensor(), dtype=np.float64)
+        s_np = np.asarray(self.scale.tensor(), dtype=np.float64)
+        s2 = s_np ** 2
+        var = s2 * df_np / (df_np - 2.0)
+        out = np.where(df_np > 2.0, var, np.where(df_np > 1.0, np.inf, np.nan))
+        return _wrap_numpy(out)
 
     def sample(self, sample_shape=()):
-        shape = tuple(sample_shape) + self._batch_shape
-        z = np.random.standard_t(self.df, size=shape or None)
-        return self.loc + self.scale * z
-
-    def rsample(self, sample_shape=()):
-        return self.sample(sample_shape)
+        out_shape = tuple(sample_shape) + self._batch_shape
+        df_np = np.asarray(self.df.tensor(), dtype=np.float64)
+        loc_np = np.asarray(self.loc.tensor(), dtype=np.float64)
+        scale_np = np.asarray(self.scale.tensor(), dtype=np.float64)
+        z = np.random.standard_t(df_np, size=out_shape or None)
+        return _wrap_numpy(np.asarray(loc_np + scale_np * z, dtype=np.float32))
 
     def log_prob(self, value):
-        scipy_special = _require_scipy_special()
-        gammaln = scipy_special.gammaln
-        value = _to_numpy(value)
-        nu = self.df
-        y = (value - self.loc) / self.scale
-        # log p(y; nu) = lgamma((nu+1)/2) - 0.5*log(nu*pi) - lgamma(nu/2)
-        #              - 0.5*(nu+1)*log(1 + y^2/nu)
+        gammaln = _require_scipy_special().gammaln
+        v_np = np.asarray(_to_variable(value).tensor(), dtype=np.float64)
+        nu = np.asarray(self.df.tensor(), dtype=np.float64)
+        loc_np = np.asarray(self.loc.tensor(), dtype=np.float64)
+        scale_np = np.asarray(self.scale.tensor(), dtype=np.float64)
+        y = (v_np - loc_np) / scale_np
         log_unnorm = gammaln((nu + 1.0) / 2.0) - 0.5 * np.log(nu * math.pi) - gammaln(nu / 2.0)
         log_kernel = -0.5 * (nu + 1.0) * np.log(1.0 + y * y / nu)
-        return log_unnorm + log_kernel - np.log(self.scale)
+        return _wrap_numpy(log_unnorm + log_kernel - np.log(scale_np))
 
     def cdf(self, value):
         scipy_t = _require_scipy_stats().t
-        value = _to_numpy(value)
-        y = (value - self.loc) / self.scale
-        return scipy_t.cdf(y, df=self.df)
+        v_np = np.asarray(_to_variable(value).tensor(), dtype=np.float64)
+        df_np = np.asarray(self.df.tensor(), dtype=np.float64)
+        loc_np = np.asarray(self.loc.tensor(), dtype=np.float64)
+        scale_np = np.asarray(self.scale.tensor(), dtype=np.float64)
+        return _wrap_numpy(scipy_t.cdf((v_np - loc_np) / scale_np, df=df_np))
 
     def icdf(self, p):
         scipy_t = _require_scipy_stats().t
-        p = _to_numpy(p)
-        return self.loc + self.scale * scipy_t.ppf(p, df=self.df)
+        p_np = np.asarray(_to_variable(p).tensor(), dtype=np.float64)
+        df_np = np.asarray(self.df.tensor(), dtype=np.float64)
+        loc_np = np.asarray(self.loc.tensor(), dtype=np.float64)
+        scale_np = np.asarray(self.scale.tensor(), dtype=np.float64)
+        return _wrap_numpy(loc_np + scale_np * scipy_t.ppf(p_np, df=df_np))
 
     def entropy(self):
         scipy_special = _require_scipy_special()
         digamma = scipy_special.digamma
         betaln = scipy_special.betaln
-        nu = self.df
-        # H = 0.5*(nu+1)*(psi((nu+1)/2) - psi(nu/2))
-        #   + log(sqrt(nu) * B(nu/2, 0.5))
-        h = (0.5 * (nu + 1.0) * (digamma((nu + 1.0) / 2.0) - digamma(nu / 2.0))
-             + 0.5 * np.log(nu) + betaln(nu / 2.0, 0.5))
-        return h + np.log(self.scale)
+        nu = np.asarray(self.df.tensor(), dtype=np.float64)
+        scale_np = np.asarray(self.scale.tensor(), dtype=np.float64)
+        out = (np.log(scale_np)
+               + 0.5 * (nu + 1.0) * (digamma((nu + 1.0) / 2.0) - digamma(nu / 2.0))
+               + 0.5 * np.log(nu) + betaln(nu / 2.0, 0.5))
+        return _wrap_numpy(out)
 
     def support(self):
         return "(-inf, inf)"

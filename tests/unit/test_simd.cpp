@@ -9,6 +9,7 @@
 #include <gtest/gtest.h>
 #include "../backend_test_fixture.hpp"
 #include "tenzor/backends/cpu/simd.hpp"
+#include "tenzor/backend/runtime_simd.hpp"
 #include <vector>
 #include <cmath>
 #include <random>
@@ -69,44 +70,43 @@ protected:
 // CPU Feature Detection Tests
 // ============================================================================
 
-TEST_P(SIMDBackendTest, CPUInfoSingleton) {
-    // Test that CPUInfo::get() returns a valid singleton
-    const auto& cpu1 = CPUInfo::get();
-    const auto& cpu2 = CPUInfo::get();
+TEST_P(SIMDBackendTest, SIMDFeaturesSingleton) {
+    // runtime_simd's get_simd_features() returns a cached static reference;
+    // two calls must yield the same address.
+    const auto& f1 = ::tenzor::backend::get_simd_features();
+    const auto& f2 = ::tenzor::backend::get_simd_features();
 
-    EXPECT_EQ(&cpu1, &cpu2) << "CPUInfo should be a singleton on " << device.to_string();
+    EXPECT_EQ(&f1, &f2) << "SIMDFeatures cache should be a singleton on " << device.to_string();
 }
 
-TEST_P(SIMDBackendTest, CPUFeatureDetection) {
-    const auto& cpu = CPUInfo::get();
+TEST_P(SIMDBackendTest, SIMDFeatureDetection) {
+    const auto& cpu = ::tenzor::backend::get_simd_features();
 
-    // Vendor string should not be empty on x86
-    #if defined(__x86_64__) || defined(_M_X64)
-        EXPECT_FALSE(cpu.vendor().empty()) << "CPU vendor should be detected on " << device.to_string();
-    #endif
-
-    // Feature string should be retrievable
-    std::string features = cpu.feature_string();
+    // Feature summary string should be retrievable on every platform.
+    std::string features = cpu.to_string();
     EXPECT_TRUE(features.empty() || !features.empty())
         << "Feature string call should not crash on " << device.to_string();
 
-    // Test feature query methods
-    cpu.has_avx512();  // Should not crash
-    cpu.has_avx2();    // Should not crash
-    cpu.has_sse42();   // Should not crash
+    // Reading individual feature flags must be side-effect free.
+    (void)cpu.avx512f;
+    (void)cpu.avx2;
+    (void)cpu.sse42;
 }
 
-TEST_P(SIMDBackendTest, CPUFeatureBitOperations) {
-    // Test CPUFeature enum operations
-    CPUFeature combined = CPUFeature::SSE | CPUFeature::AVX;
-    CPUFeature masked = combined & CPUFeature::SSE;
+TEST_P(SIMDBackendTest, SIMDLevelOrdering) {
+    // Detected SIMD level must agree with the features struct's best_level().
+    auto level = ::tenzor::backend::detect_simd_level();
+    auto best = ::tenzor::backend::get_simd_features().best_level();
+    EXPECT_EQ(level, best)
+        << "detect_simd_level() and SIMDFeatures::best_level() must agree on "
+        << device.to_string();
 
-    EXPECT_TRUE(has_feature(combined, CPUFeature::SSE))
-        << "Bitwise operations on CPUFeature should work on " << device.to_string();
-    EXPECT_TRUE(has_feature(combined, CPUFeature::AVX))
-        << "Bitwise operations on CPUFeature should work on " << device.to_string();
-    EXPECT_FALSE(has_feature(combined, CPUFeature::AVX2))
-        << "Bitwise operations on CPUFeature should work on " << device.to_string();
+    // On x86-64 we must at least have SSE2 (baseline ISA).
+    #if defined(__x86_64__) || defined(_M_X64)
+        EXPECT_TRUE(::tenzor::backend::has_simd_feature(::tenzor::backend::SIMDLevel::SSE2))
+            << "SSE2 is baseline x86-64; detection must report it on "
+            << device.to_string();
+    #endif
 }
 
 // ============================================================================
@@ -835,8 +835,8 @@ TEST_P(SIMDBackendTest, ScalarSIMDConsistency) {
 // ============================================================================
 
 TEST_P(SIMDBackendTest, AVX2Operations) {
-    const auto& cpu = CPUInfo::get();
-    if (!cpu.has_avx2()) {
+    const auto& cpu = ::tenzor::backend::get_simd_features();
+    if (!cpu.avx2) {
         GTEST_SKIP() << "AVX2 not available on " << device.to_string();
     }
 
@@ -853,8 +853,8 @@ TEST_P(SIMDBackendTest, AVX2Operations) {
 }
 
 TEST_P(SIMDBackendTest, AVX512Operations) {
-    const auto& cpu = CPUInfo::get();
-    if (!cpu.has_avx512()) {
+    const auto& cpu = ::tenzor::backend::get_simd_features();
+    if (!cpu.avx512f) {
         GTEST_SKIP() << "AVX-512 not available on " << device.to_string();
     }
 

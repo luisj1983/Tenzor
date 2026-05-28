@@ -1,69 +1,93 @@
-"""Bernoulli distribution."""
+"""Bernoulli distribution — Tensor/Variable native."""
+from __future__ import annotations
+
 import numpy as np
-from .distribution import Distribution, _to_numpy
+
+import tenzor as _tz
+from tenzor.tenzor_core import Tensor, Variable  # type: ignore
+
+from .distribution import (
+    Distribution,
+    _shape_of,
+    _to_variable,
+    _wrap_numpy,
+)
+from ._reparam import standard_uniform
 
 
 class Bernoulli(Distribution):
-    """Bernoulli(probs) — Bernoulli distribution over {0, 1}.
+    """``Bernoulli(probs)`` — Bernoulli distribution over ``{0, 1}``.
+
+    Discrete distribution: ``rsample`` is not implemented (no
+    continuous reparameterisation).  ``sample`` returns a Tenzor Tensor
+    of 0/1 values (float32).
 
     Args:
-        probs: Probability of success (scalar or array, in [0, 1]).
+        probs: success probability (scalar / array / Tensor / Variable),
+            values in ``[0, 1]``.
     """
 
     has_rsample = False
 
     def __init__(self, probs):
-        self.probs = _to_numpy(probs)
-        super().__init__(self.probs.shape)
+        self.probs = _to_variable(probs)
+        super().__init__(_shape_of(self.probs))
 
     @property
     def mean(self):
-        return self.probs.copy()
+        return self.probs
 
     @property
     def variance(self):
         return self.probs * (1.0 - self.probs)
 
     def sample(self, sample_shape=()):
-        shape = tuple(sample_shape) + self._batch_shape
-        return (np.random.uniform(size=shape or None) < self.probs).astype(np.float64)
+        out_shape = tuple(sample_shape) + self._batch_shape
+        u = standard_uniform(out_shape if out_shape else [])
+        # u < probs → {0, 1} as float32.  Do the compare on numpy buffers
+        # to avoid Tensor-comparison shape rules; the result is detached.
+        u_np = np.asarray(u, dtype=np.float32)
+        p_np = np.asarray(self.probs.tensor(), dtype=np.float32)
+        out = (u_np < p_np).astype(np.float32)
+        return _wrap_numpy(out)
 
     def log_prob(self, value):
-        value = _to_numpy(value)
+        # log p(x) = x*log(p) + (1-x)*log(1-p)
+        value = _to_variable(value)
         eps = 1e-7
-        p = np.clip(self.probs, eps, 1.0 - eps)
-        return value * np.log(p) + (1.0 - value) * np.log(1.0 - p)
+        # Clamp via numpy to avoid log(0); the clamped tensor is detached
+        # from the autograd graph of `probs` for safety.  Gradient still
+        # flows through the un-clamped factor.
+        # Strict autograd-friendly clamp: use min(max(p, eps), 1-eps) via
+        # arithmetic — not supported here, so trade autograd through
+        # extreme p for numerical safety.  For p ∈ (eps, 1-eps) the
+        # gradient is correct.
+        log_p = _tz.log(self.probs + eps)
+        log_1mp = _tz.log((1.0 - self.probs) + eps)
+        return value * log_p + (1.0 - value) * log_1mp
 
     def entropy(self):
         eps = 1e-7
-        p = np.clip(self.probs, eps, 1.0 - eps)
-        return -(p * np.log(p) + (1.0 - p) * np.log(1.0 - p))
+        log_p = _tz.log(self.probs + eps)
+        log_1mp = _tz.log((1.0 - self.probs) + eps)
+        return -(self.probs * log_p + (1.0 - self.probs) * log_1mp)
 
     def cdf(self, value):
-        """CDF of Bernoulli (audit item E.5).
-
-        P(X <= k) = 0       if k < 0
-                  = 1 - p   if 0 <= k < 1
-                  = 1       if k >= 1
-        """
-        value = np.asarray(value, dtype=np.float64)
-        below = value < 0.0
-        between = (value >= 0.0) & (value < 1.0)
-        at_or_above = value >= 1.0
-        out = np.zeros_like(value)
-        out = np.where(between, 1.0 - self.probs, out)
+        value_np = np.asarray(_to_variable(value).tensor(), dtype=np.float64)
+        p_np = np.asarray(self.probs.tensor(), dtype=np.float64)
+        below = value_np < 0.0
+        between = (value_np >= 0.0) & (value_np < 1.0)
+        at_or_above = value_np >= 1.0
+        out = np.zeros_like(value_np)
+        out = np.where(between, 1.0 - p_np, out)
         out = np.where(at_or_above, np.ones_like(out), out)
         out = np.where(below, np.zeros_like(out), out)
-        return out
+        return _wrap_numpy(out)
 
     def icdf(self, q):
-        """Inverse CDF of Bernoulli (audit item E.5).
-
-        Q(q) = 0  if q <= 1 - p
-             = 1  if q >  1 - p
-        """
-        q = np.asarray(q, dtype=np.float64)
-        return (q > (1.0 - self.probs)).astype(np.float64)
+        q_np = np.asarray(_to_variable(q).tensor(), dtype=np.float64)
+        p_np = np.asarray(self.probs.tensor(), dtype=np.float64)
+        return _wrap_numpy((q_np > (1.0 - p_np)).astype(np.float32))
 
     def support(self):
         return "{0, 1}"

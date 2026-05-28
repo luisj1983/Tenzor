@@ -12,7 +12,9 @@
 #include "../module.hpp"
 #include "quantize.hpp"
 #include "qconfig.hpp"
+#include "observer.hpp"
 #include <array>
+#include <memory>
 #include <tuple>
 
 namespace tenzor {
@@ -468,8 +470,47 @@ public:
                qparams_.scheme == QuantizationScheme::PerChannelAsymmetric;
     }
 
+    /**
+     * @brief Switch to calibration / observe mode.
+     *
+     * In calibration mode, `forward_impl` records the input distribution
+     * via an internal HistogramObserver and passes the input through
+     * unchanged (preserving any grad_fn). Call `update_qparams_from_observer`
+     * to freeze the collected statistics into `qparams_` once calibration
+     * data has been observed, then call `set_calibrating(false)` (or
+     * `set_quantize_mode()`) to switch into the Q/DQ + STE inference path.
+     */
+    auto set_calibrating(bool calibrating) -> void;
+
+    /**
+     * @brief Shortcut: leave calibration mode and apply quantize/STE forward.
+     */
+    auto set_quantize_mode() -> void { set_calibrating(false); }
+
+    /**
+     * @brief Whether QuantStub is currently in calibration mode.
+     */
+    auto is_calibrating() const -> bool { return calibrating_; }
+
+    /**
+     * @brief Recompute `qparams_` from the internal observer's statistics.
+     *
+     * Uses HistogramObserver-derived percentile clipping for activation
+     * ranges, matching the PyTorch `prepare_qat` -> `convert` workflow.
+     * Safe to call repeatedly; resets next time `set_calibrating(true)` is
+     * called.
+     */
+    auto update_qparams_from_observer() -> void;
+
+    /**
+     * @brief Access the underlying observer (for direct inspection / reset).
+     */
+    auto observer() -> Observer* { return observer_.get(); }
+
 private:
-    QuantizationParams qparams_;  ///< Quantization parameters (scale, zero_point)
+    QuantizationParams qparams_;            ///< Quantization parameters (scale, zero_point)
+    bool calibrating_{false};               ///< True if next forward should observe
+    std::unique_ptr<Observer> observer_;    ///< Lazy-initialised activation observer
 };
 
 /**

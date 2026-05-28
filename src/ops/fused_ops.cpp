@@ -255,28 +255,39 @@ auto fused_softmax_cross_entropy(
     const Tensor& targets,
     const std::string& reduction
 ) -> Tensor {
-    // Validate inputs
-    if (logits.ndim() != 2) {
+    // S13: accept rank-2 (N, C) for the legacy case and rank > 2
+    // (D1, ..., Dk, C) with targets shape (D1, ..., Dk) for seq2seq-style
+    // classification-over-time. The CPU kernel flattens leading dims
+    // before computing and reshapes outputs back.
+    if (logits.ndim() < 2) {
         throw std::runtime_error(
-            "fused_softmax_cross_entropy: logits must be 2D (N, num_classes), got " +
+            "fused_softmax_cross_entropy: logits must have rank >= 2 "
+            "(N, ..., num_classes), got " +
             std::to_string(logits.ndim()) + "D"
         );
     }
 
-    if (targets.ndim() != 1) {
+    int64_t logit_ndim = logits.ndim();
+    int64_t target_ndim_expected = logit_ndim - 1;
+    if (targets.ndim() != target_ndim_expected) {
         throw std::runtime_error(
-            "fused_softmax_cross_entropy: targets must be 1D (N,), got " +
+            "fused_softmax_cross_entropy: targets must have rank " +
+            std::to_string(target_ndim_expected) +
+            " (one less than logits), got " +
             std::to_string(targets.ndim()) + "D"
         );
     }
 
-    int64_t batch_size = logits.shape()[0];
-    if (targets.shape()[0] != batch_size) {
-        throw std::runtime_error(
-            "fused_softmax_cross_entropy: batch size mismatch: logits has " +
-            std::to_string(batch_size) + ", targets has " +
-            std::to_string(targets.shape()[0])
-        );
+    // Check leading-dim alignment: targets.shape() == logits.shape()[:-1].
+    for (int64_t i = 0; i < target_ndim_expected; ++i) {
+        if (targets.shape()[i] != logits.shape()[i]) {
+            throw std::runtime_error(
+                "fused_softmax_cross_entropy: leading-dim mismatch at axis " +
+                std::to_string(i) + ": logits has " +
+                std::to_string(logits.shape()[i]) + ", targets has " +
+                std::to_string(targets.shape()[i])
+            );
+        }
     }
 
     if (reduction != "mean" && reduction != "sum" && reduction != "none") {
@@ -288,7 +299,7 @@ auto fused_softmax_cross_entropy(
 
     // Front-end target-index bounds validation so every backend enforces
     // identical semantics (CPU kernel previously did this post-hoc via NaN).
-    int64_t num_classes = logits.shape()[1];
+    int64_t num_classes = logits.shape()[logit_ndim - 1];
     if (targets.numel() > 0) {
         int64_t min_target = 0;
         int64_t max_target = 0;

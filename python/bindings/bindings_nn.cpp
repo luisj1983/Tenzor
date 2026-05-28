@@ -38,6 +38,9 @@
 #include <tenzor/nn/metrics.hpp>
 #include <tenzor/nn/loss/contrastive.hpp>
 #include <tenzor/nn/functional.hpp>
+#include <tenzor/backend/loader.hpp>
+#include <tenzor/backend/backend.hpp>
+#include <cstring>
 #include <tenzor/nn/utils/clip_grad.hpp>
 #include <tenzor/nn/utils/rnn_utils.hpp>
 #include <tenzor/nn/callbacks.hpp>
@@ -919,10 +922,11 @@ void register_nn(py::module_& m) {
 
     py::class_<tenzor::nn::AvgPool2d, tenzor::nn::Module,
                std::shared_ptr<tenzor::nn::AvgPool2d>>(nn, "AvgPool2d")
-        .def(py::init<int64_t, int64_t, int64_t>(),
+        .def(py::init<int64_t, int64_t, int64_t, bool>(),
              py::arg("kernel_size"),
              py::arg("stride") = -1,
-             py::arg("padding") = 0);
+             py::arg("padding") = 0,
+             py::arg("count_include_pad") = true);
 
     py::class_<tenzor::nn::MaxPool3d, tenzor::nn::Module,
                std::shared_ptr<tenzor::nn::MaxPool3d>>(nn, "MaxPool3d")
@@ -935,10 +939,11 @@ void register_nn(py::module_& m) {
 
     py::class_<tenzor::nn::AvgPool3d, tenzor::nn::Module,
                std::shared_ptr<tenzor::nn::AvgPool3d>>(nn, "AvgPool3d")
-        .def(py::init<int64_t, int64_t, int64_t>(),
+        .def(py::init<int64_t, int64_t, int64_t, bool>(),
              py::arg("kernel_size"),
              py::arg("stride") = -1,
-             py::arg("padding") = 0);
+             py::arg("padding") = 0,
+             py::arg("count_include_pad") = true);
 
     py::class_<tenzor::nn::AdaptiveAvgPool2d, tenzor::nn::Module,
                std::shared_ptr<tenzor::nn::AdaptiveAvgPool2d>>(nn, "AdaptiveAvgPool2d")
@@ -958,10 +963,11 @@ void register_nn(py::module_& m) {
 
     py::class_<tenzor::nn::AvgPool1d, tenzor::nn::Module,
                std::shared_ptr<tenzor::nn::AvgPool1d>>(nn, "AvgPool1d")
-        .def(py::init<int64_t, int64_t, int64_t>(),
+        .def(py::init<int64_t, int64_t, int64_t, bool>(),
              py::arg("kernel_size"),
              py::arg("stride") = -1,
-             py::arg("padding") = 0);
+             py::arg("padding") = 0,
+             py::arg("count_include_pad") = true);
 
     py::class_<tenzor::nn::AdaptiveAvgPool1d, tenzor::nn::Module,
                std::shared_ptr<tenzor::nn::AdaptiveAvgPool1d>>(nn, "AdaptiveAvgPool1d")
@@ -2400,10 +2406,15 @@ void register_nn(py::module_& m) {
        py::call_guard<py::gil_scoped_release>());
 
     nn.def("functional_avg_pool2d", [](const tenzor::Variable& input, int64_t kernel_size,
-                                        int64_t stride, int64_t padding) -> tenzor::Variable {
-        tenzor::nn::AvgPool2d layer(kernel_size, stride, padding);
+                                        int64_t stride, int64_t padding,
+                                        bool count_include_pad) -> tenzor::Variable {
+        // S22: thread count_include_pad through to AvgPool2d so the Python
+        // ``F.avg_pool2d(..., count_include_pad=False)`` path stops raising
+        // NotImplementedError.
+        tenzor::nn::AvgPool2d layer(kernel_size, stride, padding, count_include_pad);
         return layer.forward_impl(input);
     }, py::arg("input"), py::arg("kernel_size"), py::arg("stride") = -1, py::arg("padding") = 0,
+       py::arg("count_include_pad") = true,
        "Apply 2D average pooling",
        py::call_guard<py::gil_scoped_release>());
 
@@ -2439,11 +2450,15 @@ void register_nn(py::module_& m) {
 
     nn.def("functional_avg_pool1d",
            [](const tenzor::Variable& input, int64_t kernel_size,
-              int64_t stride, int64_t padding) -> tenzor::Variable {
-               return tenzor::nn::functional::avg_pool1d(input, kernel_size, stride, padding);
+              int64_t stride, int64_t padding,
+              bool count_include_pad) -> tenzor::Variable {
+               // S22: forward count_include_pad to the C++ free function.
+               return tenzor::nn::functional::avg_pool1d(input, kernel_size, stride, padding,
+                                                         count_include_pad);
            },
            py::arg("input"), py::arg("kernel_size"),
            py::arg("stride") = -1, py::arg("padding") = 0,
+           py::arg("count_include_pad") = true,
            "Apply 1D average pooling",
            py::call_guard<py::gil_scoped_release>());
 
@@ -2464,12 +2479,16 @@ void register_nn(py::module_& m) {
            [](const tenzor::Variable& input,
               std::array<int64_t, 3> kernel_size,
               std::array<int64_t, 3> stride,
-              std::array<int64_t, 3> padding) -> tenzor::Variable {
-               return tenzor::nn::functional::avg_pool3d(input, kernel_size, stride, padding);
+              std::array<int64_t, 3> padding,
+              bool count_include_pad) -> tenzor::Variable {
+               // S22: forward count_include_pad to the C++ free function.
+               return tenzor::nn::functional::avg_pool3d(input, kernel_size, stride, padding,
+                                                         count_include_pad);
            },
            py::arg("input"), py::arg("kernel_size"),
            py::arg("stride") = std::array<int64_t, 3>{-1, -1, -1},
            py::arg("padding") = std::array<int64_t, 3>{0, 0, 0},
+           py::arg("count_include_pad") = true,
            "Apply 3D average pooling",
            py::call_guard<py::gil_scoped_release>());
 
@@ -2550,23 +2569,132 @@ void register_nn(py::module_& m) {
     };
 
     nn.def("functional_batch_norm", [apply_affine_channel_first](
-            const tenzor::Variable& input, int64_t num_features,
-            bool training, double momentum, double eps,
+            const tenzor::Variable& input,
+            std::optional<tenzor::Tensor> running_mean,
+            std::optional<tenzor::Tensor> running_var,
             std::optional<tenzor::Variable> weight,
-            std::optional<tenzor::Variable> bias) -> tenzor::Variable {
-        // Y.24: run the transient layer in non-affine mode so the
-        // normalization-only output flows out, then apply the caller's
-        // affine via autograd-aware Variable ops.
+            std::optional<tenzor::Variable> bias,
+            bool training, double momentum, double eps) -> tenzor::Variable {
+        // S9: PyTorch-compatible signature
+        //   F.batch_norm(input, running_mean=None, running_var=None,
+        //                weight=None, bias=None, training=True,
+        //                momentum=0.1, eps=1e-5)
+        //
+        // Semantics:
+        //   - training=True : normalise by batch stats. If running_mean and
+        //     running_var are provided, update them in-place via the
+        //     BatchNorm2dUpdateRunningStats kernel after the forward.
+        //   - training=False: normalise by running_mean/running_var (which
+        //     MUST then be provided — matches PyTorch behaviour).
+        //   - running_mean and running_var are EITHER both provided OR both
+        //     None (PyTorch requires this same all-or-nothing pairing).
+        const bool has_stats = running_mean.has_value() && running_var.has_value();
+        if (running_mean.has_value() != running_var.has_value()) {
+            throw std::invalid_argument(
+                "F.batch_norm: running_mean and running_var must be provided "
+                "together (both or neither).");
+        }
+        if (!training && !has_stats) {
+            throw std::invalid_argument(
+                "F.batch_norm: running_mean and running_var must be provided "
+                "when training=False (eval mode requires running statistics).");
+        }
+
+        // Infer num_features from the most authoritative source.
+        int64_t num_features = -1;
+        if (weight.has_value()) {
+            num_features = static_cast<int64_t>(weight->shape()[0]);
+        } else if (bias.has_value()) {
+            num_features = static_cast<int64_t>(bias->shape()[0]);
+        } else if (has_stats) {
+            num_features = static_cast<int64_t>(running_mean->shape()[0]);
+        } else {
+            auto in_shape = input.tensor().shape();
+            if (in_shape.size() < 2) {
+                throw std::invalid_argument(
+                    "F.batch_norm: input must have at least 2 dimensions "
+                    "(N, C, ...).");
+            }
+            num_features = static_cast<int64_t>(in_shape[1]);
+        }
+
+        // Build a transient layer in non-affine mode. The caller's affine
+        // is applied after via autograd-aware Variable ops.
+        //
+        // track_running_stats is left at true unconditionally — the layer
+        // class rejects (training=true, track_running_stats=false) at
+        // construction, so we ALWAYS give it stats buffers. When the user
+        // passed running_mean / running_var we seed those buffers from
+        // their tensors and copy back after forward; when they did not, the
+        // layer's internal stats are just allocated, updated, and dropped
+        // when this binding returns.
         tenzor::nn::BatchNorm2d layer(num_features, eps, momentum,
-                                      /*affine=*/false, /*track_running_stats=*/true);
+                                      /*affine=*/false,
+                                      /*track_running_stats=*/true);
         layer.train(training);
+
+        // Helper: in-place byte copy from src into dst, casting through
+        // dst.dtype() / dst.device() as needed. Mirrors the semantics of
+        // the Python Tensor.copy_ binding (bindings_core.cpp).
+        auto copy_into = [](tenzor::Tensor& dst, const tenzor::Tensor& src) {
+            tenzor::Tensor converted = src;
+            if (converted.dtype() != dst.dtype()) {
+                converted = converted.to(dst.dtype());
+            }
+            if (converted.device() != dst.device()) {
+                converted = converted.to(dst.device());
+            }
+            if (!converted.is_contiguous()) {
+                converted = converted.contiguous();
+            }
+            size_t nbytes = static_cast<size_t>(dst.numel()) * dst.dtype_size();
+            if (nbytes == 0) return;
+            if (dst.device().type == tenzor::Device::Type::CPU) {
+                std::memcpy(dst.data_ptr(), converted.data_ptr(), nbytes);
+            } else {
+                auto* backend = tenzor::backend_registry().get_backend(dst.device().type);
+                if (!backend) {
+                    throw std::runtime_error(
+                        "F.batch_norm: no backend registered for device");
+                }
+                backend->copy(dst.data_ptr(), converted.data_ptr(), nbytes,
+                              tenzor::CopyKind::DeviceToDevice);
+            }
+        };
+
+        if (has_stats) {
+            // Seed the layer's buffers from the user's tensors. We byte-copy
+            // rather than reassign so the layer's buffer Variable keeps its
+            // registered identity and so the dtype/device of the layer's
+            // buffer (Float32/CPU at construction) matches what the layer
+            // expects throughout forward_impl. Device / dtype conversion is
+            // handled inside copy_into.
+            copy_into(layer.get_buffer("running_mean")->tensor(), *running_mean);
+            copy_into(layer.get_buffer("running_var")->tensor(), *running_var);
+        }
+
         auto y = layer.forward_impl(input);
+
+        if (has_stats && training) {
+            // The layer reassigned its internal buffers to the updated
+            // stats (and stored them as Float32). Mirror them back into the
+            // caller's tensors in-place so PyTorch's semantic of "running
+            // stats are updated under the user's eyes" holds.
+            copy_into(*running_mean, layer.get_buffer("running_mean")->tensor());
+            copy_into(*running_var, layer.get_buffer("running_var")->tensor());
+        }
+
         return apply_affine_channel_first(y, weight, bias);
-    }, py::arg("input"), py::arg("num_features"),
-       py::arg("training") = true, py::arg("momentum") = 0.1, py::arg("eps") = 1e-5,
+    }, py::arg("input"),
+       py::arg("running_mean") = py::none(),
+       py::arg("running_var") = py::none(),
        py::arg("weight") = py::none(), py::arg("bias") = py::none(),
-       "Apply batch normalization. weight/bias are optional Variables "
-       "([C]); when provided their gradients flow.",
+       py::arg("training") = true, py::arg("momentum") = 0.1, py::arg("eps") = 1e-5,
+       "Apply batch normalization (PyTorch-compatible signature). "
+       "running_mean/running_var are optional Tensors ([C]); when provided "
+       "they are updated in-place in training mode and used directly in "
+       "eval mode. weight/bias are optional Variables ([C]); when provided "
+       "their gradients flow.",
        py::call_guard<py::gil_scoped_release>());
 
     nn.def("functional_layer_norm", [apply_affine_trailing](

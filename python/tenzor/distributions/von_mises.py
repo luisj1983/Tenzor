@@ -1,84 +1,71 @@
-"""VonMises distribution."""
+"""VonMises distribution — Tensor-native (sample only)."""
+from __future__ import annotations
+
 import math
+
 import numpy as np
-# V.39: scipy is lazy (see distribution.py).
+
+from tenzor.tenzor_core import Tensor, Variable  # type: ignore
+
 from .distribution import (
     Distribution,
-    _to_numpy,
+    _broadcast_shape,
+    _shape_of,
+    _to_variable,
+    _wrap_numpy,
     _require_scipy_special,
     _require_scipy_stats,
 )
 
 
 class VonMises(Distribution):
-    """VonMises(loc, concentration) distribution on the circle.
+    """``VonMises(loc, concentration)`` distribution on the circle."""
 
-    Args:
-        loc: Location (mu) parameter in radians (scalar or array).
-        concentration: Concentration (kappa) parameter (scalar or array, >= 0).
-                       kappa=0 → uniform on circle; large kappa → concentrated near loc.
-    """
-
-    has_rsample = False  # Not straightforwardly reparameterizable
+    has_rsample = False  # No straightforward reparameterisation.
 
     def __init__(self, loc, concentration):
-        self.loc = _to_numpy(loc)
-        self.concentration = _to_numpy(concentration)
-        super().__init__(np.broadcast_shapes(self.loc.shape, self.concentration.shape))
+        self.loc = _to_variable(loc)
+        self.concentration = _to_variable(concentration)
+        super().__init__(_broadcast_shape(_shape_of(self.loc),
+                                          _shape_of(self.concentration)))
 
     @property
     def mean(self):
-        # Circular mean = loc
-        return self.loc.copy()
+        return self.loc
 
     @property
     def variance(self):
-        # Circular variance = 1 - I1(kappa) / I0(kappa)
-        sp = _require_scipy_special()
-        kappa = self.concentration
-        return 1.0 - sp.i1(kappa) / sp.i0(kappa)
+        scipy_special = _require_scipy_special()
+        k_np = np.asarray(self.concentration.tensor(), dtype=np.float64)
+        return _wrap_numpy(1.0 - scipy_special.i1(k_np) / scipy_special.i0(k_np))
 
     def sample(self, sample_shape=()):
-        shape = tuple(sample_shape) + self._batch_shape
-        return np.random.vonmises(self.loc, self.concentration, size=shape or None)
+        out_shape = tuple(sample_shape) + self._batch_shape
+        loc_np = np.asarray(self.loc.tensor(), dtype=np.float64)
+        k_np = np.asarray(self.concentration.tensor(), dtype=np.float64)
+        return _wrap_numpy(np.asarray(
+            np.random.vonmises(loc_np, k_np, size=out_shape or None),
+            dtype=np.float32,
+        ))
 
     def log_prob(self, value):
-        sp = _require_scipy_special()
-        value = _to_numpy(value)
-        # log p(x) = kappa * cos(x - mu) - log(2*pi*I0(kappa))
-        kappa = self.concentration
-        return (kappa * np.cos(value - self.loc)
-                - math.log(2 * math.pi) - np.log(sp.i0(kappa)))
+        scipy_special = _require_scipy_special()
+        v_np = np.asarray(_to_variable(value).tensor(), dtype=np.float64)
+        loc_np = np.asarray(self.loc.tensor(), dtype=np.float64)
+        k_np = np.asarray(self.concentration.tensor(), dtype=np.float64)
+        # log p(x) = k cos(x - loc) - log(2π I0(k))
+        out = (k_np * np.cos(v_np - loc_np)
+               - math.log(2.0 * math.pi)
+               - np.log(scipy_special.i0(k_np)))
+        return _wrap_numpy(out)
 
     def entropy(self):
-        # H = log(2*pi*I0(kappa)) - kappa * I1(kappa) / I0(kappa)
-        sp = _require_scipy_special()
-        kappa = self.concentration
-        i0k = sp.i0(kappa)
-        i1k = sp.i1(kappa)
-        return math.log(2 * math.pi) + np.log(i0k) - kappa * i1k / i0k
-
-    def cdf(self, value):
-        """CDF of VonMises (audit item E.5).
-
-        Uses the Marsaglia series via SciPy's vonmises.cdf, which sums
-
-            F(x; mu, kappa) = (x - mu) / (2 pi)
-                            + (1 / (pi I_0(kappa)))
-                              * Sum_{j>=1} (I_j(kappa) / j) * sin(j (x - mu))
-
-        and returns CDF in [0, 1] over the principal branch (-pi, pi].
-        """
-        _scipy_vonmises = _require_scipy_stats().vonmises
-        value = _to_numpy(value)
-        # scipy parameterises VonMises as kappa with loc=mu; broadcast manually.
-        return _scipy_vonmises.cdf(value, self.concentration, loc=self.loc)
-
-    def icdf(self, q):
-        """Inverse CDF (PPF) of VonMises (audit item E.5)."""
-        _scipy_vonmises = _require_scipy_stats().vonmises
-        q = _to_numpy(q)
-        return _scipy_vonmises.ppf(q, self.concentration, loc=self.loc)
+        scipy_special = _require_scipy_special()
+        k_np = np.asarray(self.concentration.tensor(), dtype=np.float64)
+        # H = -k I1(k)/I0(k) + log(2π I0(k))
+        out = (-k_np * scipy_special.i1(k_np) / scipy_special.i0(k_np)
+               + math.log(2.0 * math.pi) + np.log(scipy_special.i0(k_np)))
+        return _wrap_numpy(out)
 
     def support(self):
-        return "(-pi, pi]"
+        return "[-pi, pi)"

@@ -6,6 +6,7 @@
  */
 
 #include "tenzor/backends/cpu/simd.hpp"
+#include "tenzor/backend/runtime_simd.hpp"
 #include "simd_fast_math.hpp"
 #include <cmath>
 #include <algorithm>
@@ -116,10 +117,10 @@ auto gelu(const float* a, float* out, size_t size) -> void { scalar::gelu(a, out
 namespace simd {
 
 auto relu(const float* a, float* out, size_t size) -> void {
-    const auto& cpu = CPUInfo::get();
-    if (cpu.has_avx512()) {
+    const auto& cpu = ::tenzor::backend::get_simd_features();
+    if (cpu.avx512f) {
         avx512::relu(a, out, size);
-    } else if (cpu.has_avx2()) {
+    } else if (cpu.avx2) {
         avx2::relu(a, out, size);
     } else {
         scalar::relu(a, out, size);
@@ -127,10 +128,10 @@ auto relu(const float* a, float* out, size_t size) -> void {
 }
 
 auto sigmoid(const float* a, float* out, size_t size) -> void {
-    const auto& cpu = CPUInfo::get();
-    if (cpu.has_avx512()) {
+    const auto& cpu = ::tenzor::backend::get_simd_features();
+    if (cpu.avx512f) {
         avx512::sigmoid(a, out, size);
-    } else if (cpu.has_avx2()) {
+    } else if (cpu.avx2) {
         avx2::sigmoid(a, out, size);
     } else {
         scalar::sigmoid(a, out, size);
@@ -138,10 +139,10 @@ auto sigmoid(const float* a, float* out, size_t size) -> void {
 }
 
 auto tanh(const float* a, float* out, size_t size) -> void {
-    const auto& cpu = CPUInfo::get();
-    if (cpu.has_avx512()) {
+    const auto& cpu = ::tenzor::backend::get_simd_features();
+    if (cpu.avx512f) {
         avx512::tanh(a, out, size);
-    } else if (cpu.has_avx2()) {
+    } else if (cpu.avx2) {
         avx2::tanh(a, out, size);
     } else {
         scalar::tanh(a, out, size);
@@ -149,10 +150,10 @@ auto tanh(const float* a, float* out, size_t size) -> void {
 }
 
 auto gelu(const float* a, float* out, size_t size) -> void {
-    const auto& cpu = CPUInfo::get();
-    if (cpu.has_avx512()) {
+    const auto& cpu = ::tenzor::backend::get_simd_features();
+    if (cpu.avx512f) {
         avx512::gelu(a, out, size);
-    } else if (cpu.has_avx2()) {
+    } else if (cpu.avx2) {
         avx2::gelu(a, out, size);
     } else {
         scalar::gelu(a, out, size);

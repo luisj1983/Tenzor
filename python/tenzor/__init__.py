@@ -44,16 +44,19 @@ import os as _os
 if 'OMP_NUM_THREADS' not in _os.environ:
     try:
         import multiprocessing as _mp
-        physical_cores = _mp.cpu_count() or 1
+        # S23: underscore-prefix internal locals so they don't leak as
+        # ``tenzor.physical_cores`` / ``tenzor.siblings`` public attributes
+        # (which then drifted out of __init__.pyi).
+        _physical_cores = _mp.cpu_count() or 1
         # On Linux, try to detect hyperthreading to get physical core count
         try:
             with open('/sys/devices/system/cpu/cpu0/topology/thread_siblings_list') as f:
-                siblings = len(f.read().strip().split(','))
-                if siblings > 1:
-                    physical_cores = max(1, physical_cores // siblings)
+                _siblings = len(f.read().strip().split(','))
+                if _siblings > 1:
+                    _physical_cores = max(1, _physical_cores // _siblings)
         except (OSError, IOError):
             pass  # Non-Linux: use cpu_count() directly
-        _os.environ['OMP_NUM_THREADS'] = str(max(1, physical_cores))
+        _os.environ['OMP_NUM_THREADS'] = str(max(1, _physical_cores))
     except Exception as _omp_detect_exc:
         # Audit item H.1: replace bare `except Exception: pass`.  CPU-count
         # detection isn't critical — the user's OMP_NUM_THREADS / system
@@ -292,6 +295,23 @@ try:
     from .tenzor_core import optim as _cpp_optim  # type: ignore[import]
     _sys.modules['tenzor.optim'] = _cpp_optim
     optim = _cpp_optim
+    # S10: LR-scheduler namespace fix. The C++ bindings register all LR
+    # schedulers (StepLR, CyclicLR, OneCycleLR, ...) under the submodule
+    # ``tenzor.optim.lr_scheduler.*`` for PyTorch parity, but the .pyi stub
+    # and historical usage expect them on the top-level ``tenzor.optim.*``
+    # namespace too. Hoist every public name from ``lr_scheduler`` to the
+    # parent ``optim`` module so BOTH import paths resolve to the same class.
+    if hasattr(_cpp_optim, "lr_scheduler"):
+        _lr_sched = _cpp_optim.lr_scheduler
+        _sys.modules['tenzor.optim.lr_scheduler'] = _lr_sched
+        for _lr_name in dir(_lr_sched):
+            if _lr_name.startswith("_"):
+                continue
+            # Don't clobber an existing attr if pybind11 happened to also
+            # register the same name at top level (identity must hold).
+            if not hasattr(_cpp_optim, _lr_name):
+                setattr(_cpp_optim, _lr_name, getattr(_lr_sched, _lr_name))
+        del _lr_name, _lr_sched
 except (ImportError, AttributeError):
     pass
 

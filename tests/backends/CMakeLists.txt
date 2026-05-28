@@ -107,3 +107,57 @@ tenzor_discover_tests(test_mps_training DISCOVERY_TIMEOUT 60)
 add_executable(test_backend_kernel_ops test_backend_kernel_ops.cpp)
 target_link_libraries(test_backend_kernel_ops PRIVATE tenzor_core GTest::gtest_main)
 tenzor_discover_tests(test_backend_kernel_ops LABELS "backends" DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
+
+# Signed-INT8 regression for the CPU quantized_linear kernel (release-prep S3).
+# Verifies the AVX2 / AVX-512 paths use signed widening + madd_epi16 rather
+# than the (broken) unsigned _mm256_maddubs_epi16 / _mm512_dpbusd_epi32 path.
+add_executable(test_quantized_linear_signed test_quantized_linear_signed.cpp)
+target_link_libraries(test_quantized_linear_signed PRIVATE
+    tenzor_core tenzor_backend_cpu GTest::gtest_main)
+set_target_properties(test_quantized_linear_signed PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/bin")
+tenzor_discover_tests(test_quantized_linear_signed
+    LABELS "backends" DISCOVERY_TIMEOUT 60 BACKENDS cpu)
+
+# S13 dtype-preservation regressions: sampler/loss/FFT kernels that used to
+# silently change output dtype away from input dtype.
+add_executable(test_dtype_preservation test_dtype_preservation.cpp)
+target_link_libraries(test_dtype_preservation PRIVATE
+    tenzor_core tenzor_backend_cpu GTest::gtest_main)
+set_target_properties(test_dtype_preservation PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/bin")
+tenzor_discover_tests(test_dtype_preservation
+    LABELS "backends" DISCOVERY_TIMEOUT 60 BACKENDS cpu)
+
+# S17 CPU thread / SIMD unification regression: deprecates legacy CPUInfo,
+# unifies OMP thread defaults, exercises CPUBackend::event_elapsed_ms wall-clock.
+add_executable(test_thread_simd_unification test_thread_simd_unification.cpp)
+target_link_libraries(test_thread_simd_unification PRIVATE
+    tenzor_core tenzor_backend_cpu GTest::gtest_main)
+set_target_properties(test_thread_simd_unification PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/bin")
+tenzor_discover_tests(test_thread_simd_unification
+    LABELS "backends" DISCOVERY_TIMEOUT 60 BACKENDS cpu)
+
+# S26 OCL ICD workaround regression: verifies init.cpp's AMD-OCL probe
+# workaround glob-discovers libintelocl.so, honours TENZOR_OCL_ICD_PATH, and
+# fails silently when no oneAPI install is present.
+add_executable(test_init_ocl_workaround test_init_ocl_workaround.cpp)
+target_link_libraries(test_init_ocl_workaround PRIVATE
+    tenzor_core GTest::gtest_main)
+set_target_properties(test_init_ocl_workaround PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/bin")
+tenzor_discover_tests(test_init_ocl_workaround
+    LABELS "backends" DISCOVERY_TIMEOUT 60)
+
+# S14 indexing/reduction dtype gap fills: index_select/gather/scatter were
+# missing Int16/UInt16/UInt32/UInt64/Complex64/Complex128, and sum_kernel
+# was missing Int8/UInt8/Int16/UInt16/UInt32/UInt64/Bool. Includes the
+# Int8 200x127 overflow regression for the public sum() promotion path.
+add_executable(test_indexing_reduction_dtypes test_indexing_reduction_dtypes.cpp)
+target_link_libraries(test_indexing_reduction_dtypes PRIVATE
+    tenzor_core tenzor_backend_cpu GTest::gtest_main)
+set_target_properties(test_indexing_reduction_dtypes PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/bin")
+tenzor_discover_tests(test_indexing_reduction_dtypes
+    LABELS "backends" DISCOVERY_TIMEOUT 60 BACKENDS cpu)

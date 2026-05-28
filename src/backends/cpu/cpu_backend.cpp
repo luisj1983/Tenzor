@@ -2,6 +2,7 @@
 #include "tenzor/backend/dispatch_table.hpp"
 #include "tenzor/backend/op_attributes.hpp"
 #include "tenzor/backend/cpu_caching_allocator.hpp"
+#include <chrono>
 #include <cstring>
 #include <stdexcept>
 #include <thread>
@@ -11,8 +12,8 @@
 
 #ifdef _OPENMP
 #include <omp.h>
-#include "cpu_thread_config.hpp"
 #endif
+#include "cpu_thread_config.hpp"
 
 #ifndef _WIN32
 #include <dlfcn.h>
@@ -29,7 +30,10 @@
 // Fix: re-open tbbmalloc with RTLD_NODELETE at load time. This prevents
 // its static destructors from ever running, so scalable_free remains valid
 // when libtbb's destructor calls it. The OS reclaims all memory at exit.
-#ifndef _WIN32
+//
+// __attribute__((constructor)) is a GCC/Clang extension; MSVC compiles this
+// file unguarded only as a stub (TBB is not used on Windows), so we wrap.
+#if !defined(_WIN32) && (defined(__GNUC__) || defined(__clang__))
 __attribute__((constructor(101)))
 static void pin_tbb_libs() {
     // Pin all TBB libraries to prevent their static destructors from running
@@ -46,21 +50,11 @@ static void pin_tbb_libs() {
 }
 #endif
 
-// ============================================================================
-// Early OpenMP Configuration (Static Constructor)
-// ============================================================================
-// This runs when the CPU backend shared library is loaded, setting
-// OMP_NUM_THREADS before any OpenMP runtime initialization.
-// Note: This may not help if PyTorch/MKL is loaded first, but it ensures
-// our library uses all threads when loaded independently.
-__attribute__((constructor(102)))
-static void configure_openmp_early() {
-    if (std::getenv("OMP_NUM_THREADS") == nullptr) {
-        unsigned int num_threads = std::max(1u, std::thread::hardware_concurrency());
-        std::string env_value = std::to_string(num_threads);
-        setenv("OMP_NUM_THREADS", env_value.c_str(), 0);
-    }
-}
+// Audit-11 / Stream 17: the previous `configure_openmp_early` static
+// constructor was removed. There is now a single source of truth for OMP
+// thread configuration — tenzor::backends::cpu::configure_omp_threads() —
+// invoked from create_backend(). The competing static-constructor default
+// has been deleted so behaviour is deterministic regardless of load order.
 
 #ifdef _WIN32
 #include <windows.h>
@@ -70,144 +64,13 @@ static void configure_openmp_early() {
 
 namespace tenzor {
 
-// Forward declarations for CPU kernels
-namespace cpu {
-    auto add_kernel(const Tensor& a, const Tensor& b) -> Tensor;
-    auto sub_kernel(const Tensor& a, const Tensor& b) -> Tensor;
-    auto mul_kernel(const Tensor& a, const Tensor& b) -> Tensor;
-    auto div_kernel(const Tensor& a, const Tensor& b) -> Tensor;
-    auto matmul_kernel(const Tensor& a, const Tensor& b) -> Tensor;
-    auto sqrt_kernel(const Tensor& input) -> Tensor;
-    auto neg_kernel(const Tensor& input) -> Tensor;
-    auto abs_kernel(const Tensor& input) -> Tensor;
-    auto sign_kernel(const Tensor& input) -> Tensor;
-    auto clamp_kernel(const Tensor& input, double min_val, double max_val) -> Tensor;
-    auto log_kernel(const Tensor& input) -> Tensor;
-    auto exp_kernel(const Tensor& input) -> Tensor;
-    auto pow_kernel(const Tensor& input, double exponent) -> Tensor;
-    auto sum_kernel(const Tensor& input, int64_t dim, bool keepdim) -> Tensor;
-    auto mean_kernel(const Tensor& input, int64_t dim, bool keepdim) -> Tensor;
-    auto max_kernel(const Tensor& input, int64_t dim, bool keepdim) -> Tensor;
-    auto min_kernel(const Tensor& input, int64_t dim, bool keepdim) -> Tensor;
-    auto argmax_kernel(const Tensor& input, int64_t dim, bool keepdim) -> Tensor;
-    auto argmin_kernel(const Tensor& input, int64_t dim, bool keepdim) -> Tensor;
-    auto argsort_kernel(const Tensor& input, int64_t dim, bool descending) -> Tensor;
-    auto prod_kernel(const Tensor& input, int64_t dim, bool keepdim) -> Tensor;
-    auto var_kernel(const Tensor& input, int64_t dim, bool keepdim, int64_t correction) -> Tensor;
-    auto std_kernel(const Tensor& input, int64_t dim, bool keepdim, int64_t correction) -> Tensor;
-    auto norm_kernel(const Tensor& input, float p, int64_t dim, bool keepdim) -> Tensor;
-    auto any_kernel(const Tensor& input, int64_t dim, bool keepdim) -> Tensor;
-    auto all_kernel(const Tensor& input, int64_t dim, bool keepdim) -> Tensor;
-
-    // Comparison operations
-    auto eq_kernel(const Tensor& a, const Tensor& b) -> Tensor;
-    auto ne_kernel(const Tensor& a, const Tensor& b) -> Tensor;
-    auto lt_kernel(const Tensor& a, const Tensor& b) -> Tensor;
-    auto le_kernel(const Tensor& a, const Tensor& b) -> Tensor;
-    auto gt_kernel(const Tensor& a, const Tensor& b) -> Tensor;
-    auto ge_kernel(const Tensor& a, const Tensor& b) -> Tensor;
-    auto dot_kernel(const Tensor& a, const Tensor& b) -> Tensor;
-
-    // Trigonometric operations
-    auto sin_kernel(const Tensor& input) -> Tensor;
-    auto cos_kernel(const Tensor& input) -> Tensor;
-    auto tan_kernel(const Tensor& input) -> Tensor;
-    auto asin_kernel(const Tensor& input) -> Tensor;
-    auto acos_kernel(const Tensor& input) -> Tensor;
-    auto atan_kernel(const Tensor& input) -> Tensor;
-    auto sinh_kernel(const Tensor& input) -> Tensor;
-    auto cosh_kernel(const Tensor& input) -> Tensor;
-
-    // Rounding operations
-    auto round_kernel(const Tensor& input) -> Tensor;
-    auto floor_kernel(const Tensor& input) -> Tensor;
-    auto ceil_kernel(const Tensor& input) -> Tensor;
-
-    // Other math operations
-    auto reciprocal_kernel(const Tensor& input) -> Tensor;
-
-    // In-place operations
-    auto add_inplace_kernel(Tensor& a, const Tensor& b) -> void;
-    auto mul_inplace_kernel(Tensor& a, const Tensor& b) -> void;
-    auto sub_inplace_kernel(Tensor& a, const Tensor& b) -> void;
-    auto div_inplace_kernel(Tensor& a, const Tensor& b) -> void;
-
-    // Activation kernels
-    auto relu_kernel(const Tensor& input) -> Tensor;
-    auto relu_backward_kernel(const Tensor& grad_output, const Tensor& input) -> Tensor;
-    auto sigmoid_kernel(const Tensor& input) -> Tensor;
-    auto sigmoid_backward_kernel(const Tensor& grad_output, const Tensor& input) -> Tensor;
-    auto tanh_kernel(const Tensor& input) -> Tensor;
-    auto tanh_backward_kernel(const Tensor& grad_output, const Tensor& input) -> Tensor;
-    auto gelu_kernel(const Tensor& input) -> Tensor;
-    auto gelu_backward_kernel(const Tensor& grad_output, const Tensor& input) -> Tensor;
-    auto swish_kernel(const Tensor& input) -> Tensor;
-    auto swish_backward_kernel(const Tensor& grad_output, const Tensor& input) -> Tensor;
-    auto leaky_relu_kernel(const Tensor& input, double alpha) -> Tensor;
-    auto leaky_relu_backward_kernel(const Tensor& grad_output, const Tensor& input, double alpha) -> Tensor;
-    auto elu_kernel(const Tensor& input, float alpha) -> Tensor;
-    auto elu_backward_kernel(const Tensor& grad_output, const Tensor& input, float alpha) -> Tensor;
-    auto selu_kernel(const Tensor& input) -> Tensor;
-    auto selu_backward_kernel(const Tensor& grad_output, const Tensor& input) -> Tensor;
-    auto mish_kernel(const Tensor& input) -> Tensor;
-    auto mish_backward_kernel(const Tensor& grad_output, const Tensor& input) -> Tensor;
-    auto hardswish_kernel(const Tensor& input) -> Tensor;
-    auto hardsigmoid_kernel(const Tensor& input) -> Tensor;
-    auto softplus_kernel(const Tensor& input, float beta, float threshold) -> Tensor;
-    auto softplus_backward_kernel(const Tensor& grad_output, const Tensor& input, float beta, float threshold) -> Tensor;
-    auto softmax_kernel(const Tensor& input, int64_t dim) -> Tensor;
-    auto softmax_backward_kernel(const Tensor& grad_output, const Tensor& output, int64_t dim) -> Tensor;
-    auto log_softmax_kernel(const Tensor& input, int64_t dim) -> Tensor;
-    auto log_softmax_backward_kernel(const Tensor& grad_output, const Tensor& output, int64_t dim) -> Tensor;
-
-    // Transform kernels
-    auto contiguous_kernel(const Tensor& input) -> Tensor;
-    auto fill_kernel(const Tensor& input, float value) -> Tensor;
-    auto clone_kernel(const Tensor& input) -> Tensor;
-    auto reshape_kernel(const Tensor& input, const std::vector<int64_t>& new_shape) -> Tensor;
-    auto transpose_kernel(const Tensor& input, int64_t dim0, int64_t dim1) -> Tensor;
-    auto permute_kernel(const Tensor& input, const std::vector<int64_t>& dims) -> Tensor;
-    auto squeeze_kernel(const Tensor& input, int64_t dim) -> Tensor;
-    auto unsqueeze_kernel(const Tensor& input, int64_t dim) -> Tensor;
-
-    // BatchNorm kernels
-    auto batchnorm2d_mean_var_kernel(const Tensor& input) -> std::vector<Tensor>;
-    auto batchnorm2d_forward_kernel(const Tensor& input, const Tensor& mean, const Tensor& variance, float epsilon) -> Tensor;
-    auto batchnorm2d_forward_affine_kernel(const Tensor& input, const Tensor& mean, const Tensor& variance, const Tensor& gamma, const Tensor& beta, float epsilon) -> Tensor;
-    auto batchnorm2d_update_running_stats_kernel(Tensor& running_mean, Tensor& running_var, const Tensor& batch_mean, const Tensor& batch_var, float momentum) -> void;
-    auto batchnorm2d_backward_kernel(const Tensor& grad_output, const Tensor& input, const Tensor& mean, const Tensor& variance, const Tensor& gamma, float epsilon) -> std::vector<Tensor>;
-
-    // Creation kernels
-    auto zeros_kernel(const std::vector<int64_t>& shape, DType dtype, const Device& device) -> Tensor;
-    auto ones_kernel(const std::vector<int64_t>& shape, DType dtype, const Device& device) -> Tensor;
-    auto rand_kernel(const std::vector<int64_t>& shape, DType dtype, const Device& device) -> Tensor;
-    auto randn_kernel(const std::vector<int64_t>& shape, DType dtype, const Device& device) -> Tensor;
-
-    // Conv2d kernels
-    auto conv2d_forward_kernel(const Tensor& input, const Tensor& weight, const Tensor* bias, int64_t stride, int64_t padding, int64_t dilation, int64_t groups) -> Tensor;
-    auto conv2d_backward_input_kernel(const Tensor& grad_output, const Tensor& weight, const std::vector<int64_t>& input_shape, int64_t stride, int64_t padding, int64_t dilation, int64_t groups) -> Tensor;
-    auto conv2d_backward_weight_kernel(const Tensor& grad_output, const Tensor& input, const std::vector<int64_t>& weight_shape, int64_t stride, int64_t padding, int64_t dilation, int64_t groups) -> Tensor;
-    auto conv2d_backward_bias_kernel(const Tensor& grad_output) -> Tensor;
-    auto conv_transpose2d_forward_kernel(const Tensor& input, const Tensor& weight, const Tensor* bias, int64_t stride, int64_t padding, int64_t output_padding, int64_t dilation, int64_t groups) -> Tensor;
-
-    // Fused operation kernels
-    auto fused_linear_relu_kernel(const Tensor& input, const Tensor& weight, const Tensor* bias) -> Tensor;
-    auto fused_conv2d_relu_kernel(const Tensor& input, const Tensor& weight, const Tensor* bias, int64_t stride, int64_t padding, int64_t dilation, int64_t groups) -> Tensor;
-    auto fused_batchnorm_relu_kernel(const Tensor& input, const Tensor& running_mean, const Tensor& running_var, const Tensor& weight, const Tensor& bias, float eps) -> Tensor;
-    auto fused_softmax_cross_entropy_kernel(const Tensor& logits, const Tensor& targets, bool compute_grad, const std::string& reduction = "mean") -> std::vector<Tensor>;
-    auto fused_add_relu_kernel(const Tensor& a, const Tensor& b) -> Tensor;
-    auto fused_gelu_kernel(const Tensor& input) -> Tensor;
-    auto fused_layer_norm_kernel(const Tensor& input, const std::vector<int64_t>& normalized_shape, const Tensor& weight, const Tensor& bias, float eps) -> Tensor;
-
-    // Indexing kernels
-    auto index_select_kernel(const Tensor& input, int64_t dim, const Tensor& index) -> Tensor;
-    auto gather_kernel(const Tensor& input, int64_t dim, const Tensor& index) -> Tensor;
-    auto scatter_kernel(const Tensor& input, int64_t dim, const Tensor& index, const Tensor& src) -> Tensor;
-    auto scatter_add_kernel(const Tensor& input, int64_t dim, const Tensor& index, const Tensor& src) -> Tensor;
-    auto masked_select_kernel(const Tensor& input, const Tensor& mask) -> Tensor;
-    auto masked_fill_kernel(const Tensor& input, const Tensor& mask, float value) -> Tensor;
-    auto where_kernel(const Tensor& condition, const Tensor& x, const Tensor& y) -> Tensor;
-} // namespace cpu
+// Audit-12 / Stream 25: the long block of `namespace cpu { auto *_kernel(...); }`
+// forward declarations that lived here was dead code. The CPU kernel
+// registrations have lived in `cpu_kernel_registry.cpp` for many releases,
+// and that file declares the kernels it needs locally. Nothing in this file
+// calls any of those kernels directly (the only CPU symbol referenced from
+// `CPUBackend` is `cpu::CPUCachingAllocator`, declared via
+// `cpu_caching_allocator.hpp`). The forward declarations have been removed.
 
 // Forward declaration — defined in kernels/math.cpp
 void mkl_cleanup();
@@ -320,6 +183,55 @@ public:
 
     auto synchronize_stream([[maybe_unused]] StreamHandle stream) -> void override {
         // No-op for CPU
+    }
+
+    // ---- Event API (Stream 17 audit-11) -----------------------------------
+    // CPU "events" are wall-clock timestamps captured at record_event().
+    // EventHandle is `void*`; we heap-allocate a steady_clock::time_point so
+    // the handle remains valid across record/wait/elapsed calls. record_event
+    // is idempotent — re-recording overwrites the timestamp, matching the
+    // CUDA/HIP semantics.
+    using CPUEventClock = std::chrono::steady_clock;
+
+    auto create_event([[maybe_unused]] int32_t device_id,
+                      [[maybe_unused]] bool enable_timing = true) -> EventHandle override {
+        // Allocate a time_point in the "not yet recorded" state (epoch).
+        return new CPUEventClock::time_point{};
+    }
+
+    auto destroy_event(EventHandle event) -> void override {
+        delete static_cast<CPUEventClock::time_point*>(event);
+    }
+
+    auto record_event(EventHandle event,
+                      [[maybe_unused]] StreamHandle stream = nullptr) -> void override {
+        if (event == nullptr) {
+            return;
+        }
+        *static_cast<CPUEventClock::time_point*>(event) = CPUEventClock::now();
+    }
+
+    auto wait_event([[maybe_unused]] EventHandle event,
+                    [[maybe_unused]] StreamHandle stream = nullptr) -> void override {
+        // CPU work is synchronous — by the time control returns from a kernel,
+        // the work is done. Nothing to wait for.
+    }
+
+    auto event_elapsed_ms(EventHandle start_event,
+                          EventHandle end_event) -> float override {
+        if (start_event == nullptr || end_event == nullptr) {
+            return 0.0f;
+        }
+        auto* start = static_cast<CPUEventClock::time_point*>(start_event);
+        auto* end   = static_cast<CPUEventClock::time_point*>(end_event);
+        const auto delta = *end - *start;
+        // duration<float, milli> yields the elapsed time in fractional ms.
+        return std::chrono::duration<float, std::milli>(delta).count();
+    }
+
+    auto synchronize_event([[maybe_unused]] EventHandle event) -> void override {
+        // CPU work is synchronous: a recorded event is, by construction,
+        // already "complete" the moment it returns from record_event.
     }
 };
 

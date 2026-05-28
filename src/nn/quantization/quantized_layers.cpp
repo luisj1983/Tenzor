@@ -686,23 +686,74 @@ auto QuantizedLayerNorm::from_float(const Module& fp_ln, const QConfig& /*qconfi
 QuantStub::QuantStub(QuantizationParams qparams)
     : qparams_(std::move(qparams)) {}
 
+auto QuantStub::set_calibrating(bool calibrating) -> void {
+    calibrating_ = calibrating;
+    if (calibrating && !observer_) {
+        // Lazy: HistogramObserver with default 2048 bins and the standard
+        // percentile clipping. dtype/scheme are passed to calculate_qparams
+        // at finalisation time (via update_qparams_from_observer), not the
+        // constructor.
+        observer_ = std::make_unique<HistogramObserver>(/*num_bins=*/2048);
+    }
+}
+
+auto QuantStub::update_qparams_from_observer() -> void {
+    if (!observer_ || !observer_->has_data()) {
+        throw std::runtime_error(
+            "QuantStub::update_qparams_from_observer: no calibration data "
+            "observed. Call set_calibrating(true) and run at least one "
+            "forward pass with calibration inputs first.");
+    }
+    qparams_ = observer_->calculate_qparams(qparams_.dtype, qparams_.scheme);
+}
+
 auto QuantStub::forward_impl(const Variable& input) -> Variable {
-    // Audit item B.1: previously did quantize→dequantize on raw tensors
-    // and wrapped the result in `Variable(out, input.requires_grad())`,
-    // claiming gradient flow that the raw-tensor round-trip cannot
-    // deliver.  When the user does require_grad=true (QAT), route
-    // through fake_quantize_with_grad which has a real STE backward.
-    // When require_grad=false (PTQ inference path), do the cheap
-    // quantize→dequantize directly.
+    // S20: QuantStub now has three honest modes:
+    //
+    //   (a) calibrating_ == true
+    //       Observer collects the input distribution; the Variable passes
+    //       through unchanged (grad_fn preserved). This is the
+    //       PyTorch-style `prepare` -> calibration step before convert.
+    //
+    //   (b) calibrating_ == false, !requires_grad / no grad enabled
+    //       Real PTQ Q->DQ noise injection on the tensor (real quantise
+    //       to INT8 using stored scale/zp, then dequantise back to FP32).
+    //       Returns a fresh Variable with grad disabled — honest about the
+    //       loss of grad through an integer round-trip.
+    //
+    //   (c) calibrating_ == false, requires_grad and grad enabled (QAT)
+    //       Real STE through `fake_quantize_with_grad`: forward injects
+    //       Q/DQ noise, backward passes grad_output through (clipped to
+    //       the representable range). This is the autograd-Function path
+    //       that lets QAT training actually learn.
+    //
+    // The pre-S20 implementation lacked (a) entirely and the documentation
+    // misleadingly suggested the Variable carried quantisation metadata
+    // that downstream layers could read. With observe-mode + Q/DQ-with-STE
+    // the API matches what its docstring claims.
+
+    if (calibrating_) {
+        if (!observer_) {
+            // Defensive: set_calibrating wasn't called via the public API
+            // (e.g. constructed via aggregate initialisation). Allocate the
+            // observer on first observation so the call still works.
+            observer_ = std::make_unique<HistogramObserver>(/*num_bins=*/2048);
+        }
+        observer_->observe(input.tensor());
+        // Passthrough: returning `input` directly preserves grad_fn so a
+        // calibration step inside a larger autograd graph doesn't sever
+        // upstream training.
+        return input;
+    }
+
     if (!input.requires_grad() || !is_grad_enabled()) {
+        // (b) PTQ inference: real Q -> DQ on raw tensor.
         auto q_tensor = forward_to_quantized(input.tensor());
         Tensor dequantized = q_tensor.dequantize();
         return Variable(dequantized, /*requires_grad=*/false);
     }
 
-    // QAT path: STE through the quantization boundary.
-    // Extract scalar scale / zero_point from per-tensor params; reject
-    // per-channel here (QuantStub is per-tensor by definition).
+    // (c) QAT: STE through the quantisation boundary.
     if (qparams_.axis >= 0 && qparams_.scale.numel() > 1) {
         throw std::runtime_error(
             "QuantStub: QAT (requires_grad=true) is only supported for "
@@ -1971,57 +2022,199 @@ auto QuantizedConv1d::forward_impl(const Variable& input) -> Variable {
 }
 
 auto QuantizedConv1d::forward_quantized(const QuantizedTensor& input) -> Tensor {
-    // Dequantize and run FP32 conv1d as fallback
-    // A fused INT8 1D convolution kernel would be more efficient
-    Tensor fp_input = input.dequantize();
-    Tensor fp_weight = weight_.dequantize();
+    // Real INT8 Conv1d via im2col + quantized_linear_kernel.
+    //
+    // Pre-S20 this method dequantised both input and weight to FP32 and ran
+    // a textbook scalar conv, then returned FP32. The audit calls that "a
+    // lie" — the metadata says quantised but no INT8 arithmetic ever runs.
+    //
+    // Real INT8 path:
+    //   1. Build INT8 im2col matrix per (batch, group) of shape
+    //      [l_out, in_c_per_group * kernel_size], padding with `input_zp`.
+    //   2. Reuse the signed-safe INT8 GEMM kernel from QuantizedLinear
+    //      (`quantized_linear_kernel`, post-S3 fix uses _mm256/512_madd_epi16).
+    //      That kernel does INT8×INT8 -> INT32 accumulation + zero-point
+    //      correction + (input_scale * weight_scale / output_scale)
+    //      dequantisation + bias, writing FP32 directly.
+    //   3. Output is FP32 in the layer's natural output space (output_scale=1
+    //      for the dequantised path; the FP32 result is the dequantised
+    //      INT32 accumulator, just like QuantizedConv2d::forward_quantized).
+    //
+    // Per-channel weight quantisation reuses
+    // `quantized_linear_per_channel_kernel` analogously.
 
-    auto input_shape = fp_input.shape();
+    auto input_shape = input.shape();
+    if (input_shape.size() != 3) {
+        throw std::runtime_error(
+            "QuantizedConv1d: expected input of shape (N, C_in, L), got " +
+            std::to_string(input_shape.size()) + "D tensor");
+    }
     int64_t batch = input_shape[0];
+    int64_t in_c_total = input_shape[1];
     int64_t l_in = input_shape[2];
+    if (in_c_total != in_channels_) {
+        throw std::runtime_error(
+            "QuantizedConv1d: input has " + std::to_string(in_c_total) +
+            " channels but layer was constructed for " +
+            std::to_string(in_channels_));
+    }
 
     int64_t l_out = (l_in + 2 * padding_ - dilation_ * (kernel_size_ - 1) - 1) / stride_ + 1;
+    if (l_out <= 0) {
+        throw std::runtime_error(
+            "QuantizedConv1d: computed l_out=" + std::to_string(l_out) +
+            " is non-positive; check kernel/stride/padding/dilation");
+    }
 
-    auto original_device = fp_input.device();
-    Tensor output = zeros({batch, out_channels_, l_out}, DType::Float32, Device::cpu());
+    auto original_device = input.device();
 
-    auto fp_input_cpu = (fp_input.device() == Device::cpu()) ? fp_input : fp_input.to(Device::cpu());
-    auto fp_weight_cpu = (fp_weight.device() == Device::cpu()) ? fp_weight : fp_weight.to(Device::cpu());
+    // Pull INT8 tensors + qparams to CPU for the kernel.
+    Tensor input_data_cpu = input.data();
+    if (input_data_cpu.device() != Device::cpu()) {
+        input_data_cpu = input_data_cpu.to(Device::cpu());
+    }
+    Tensor weight_data_cpu = weight_.data();
+    if (weight_data_cpu.device() != Device::cpu()) {
+        weight_data_cpu = weight_data_cpu.to(Device::cpu());
+    }
 
-    const float* in_data = fp_input_cpu.data<float>();
-    const float* w_data = fp_weight_cpu.data<float>();
-    float* out_data = output.data<float>();
+    const auto& input_params = input.params();
+    const auto& weight_params = weight_.params();
 
-    int64_t in_c_per_group = in_channels_ / groups_;
-    int64_t out_c_per_group = out_channels_ / groups_;
+    Tensor input_scale_cpu = input_params.scale;
+    Tensor weight_scale_cpu = weight_params.scale;
+    Tensor input_zp_cpu = input_params.zero_point;
+    Tensor weight_zp_cpu = weight_params.zero_point;
+    if (input_scale_cpu.device() != Device::cpu())
+        input_scale_cpu = input_scale_cpu.to(Device::cpu());
+    if (weight_scale_cpu.device() != Device::cpu())
+        weight_scale_cpu = weight_scale_cpu.to(Device::cpu());
+    if (input_zp_cpu.device() != Device::cpu())
+        input_zp_cpu = input_zp_cpu.to(Device::cpu());
+    if (weight_zp_cpu.device() != Device::cpu())
+        weight_zp_cpu = weight_zp_cpu.to(Device::cpu());
+
+    const float input_scale = input_scale_cpu.data<const float>()[0];
+    const int32_t input_zp = input_zp_cpu.data<int32_t>()[0];
+
+    const bool is_per_channel =
+        (weight_params.scheme == QuantizationScheme::PerChannelSymmetric ||
+         weight_params.scheme == QuantizationScheme::PerChannelAsymmetric);
+
+    // Bias: Float32 on CPU (matches QuantizedLinear / QuantizedConv2d).
+    std::optional<Tensor> bias_f32;
+    const float* bias_data = nullptr;
+    if (bias_.has_value()) {
+        Tensor bias_cpu = *bias_;
+        if (bias_cpu.dtype() != DType::Float32) {
+            bias_cpu = bias_cpu.to(DType::Float32);
+        }
+        if (bias_cpu.device() != Device::cpu()) {
+            bias_cpu = bias_cpu.to(Device::cpu());
+        }
+        bias_f32 = bias_cpu;
+        bias_data = bias_f32->data<const float>();
+    }
+
+    const int8_t* input_data = input_data_cpu.data<int8_t>();
+    const int8_t* weight_data = weight_data_cpu.data<int8_t>();
+
+    const int64_t in_c_per_group = in_channels_ / groups_;
+    const int64_t out_c_per_group = out_channels_ / groups_;
+    const int64_t patch_dim = in_c_per_group * kernel_size_;
+
+    // Allocate FP32 output on CPU; the INT8 GEMM dequantises into FP32.
+    Tensor output({batch, out_channels_, l_out}, DType::Float32, Device::cpu());
+    float* output_data = output.data<float>();
+
+    // im2col buffer: [l_out, patch_dim] INT8, pad with input_zp (which is the
+    // quantised representation of 0.0 in the input scale).
+    std::vector<int8_t> col_buffer(static_cast<size_t>(l_out) * patch_dim);
+    // Temporary GEMM output buffer for one (batch, group) tile:
+    // shape [l_out, out_c_per_group] FP32, written column-major-by-row into
+    // the final NCL output below.
+    std::vector<float> gemm_out(static_cast<size_t>(l_out) * out_c_per_group);
+    // No bias inside the GEMM tile; we add bias when scattering to output so
+    // it isn't applied multiple times in the grouped case.
+
+    const int8_t pad_value = static_cast<int8_t>(
+        std::clamp<int32_t>(input_zp, -128, 127));
 
     for (int64_t n = 0; n < batch; ++n) {
         for (int64_t g = 0; g < groups_; ++g) {
+            // 1. Build im2col INT8 patches for this (batch, group) tile.
+            //    Row ol contains kernel_size patches across in_c_per_group
+            //    channels, laid out as [ic0_k0, ic0_k1, ..., ic1_k0, ...].
+            //    Out-of-range L positions are filled with pad_value.
+            std::fill(col_buffer.begin(), col_buffer.end(), pad_value);
+            for (int64_t ol = 0; ol < l_out; ++ol) {
+                int8_t* row = col_buffer.data() + ol * patch_dim;
+                for (int64_t ic = 0; ic < in_c_per_group; ++ic) {
+                    int64_t ic_abs = g * in_c_per_group + ic;
+                    int64_t in_base = (n * in_channels_ + ic_abs) * l_in;
+                    for (int64_t k = 0; k < kernel_size_; ++k) {
+                        int64_t il = ol * stride_ - padding_ + k * dilation_;
+                        int8_t v = pad_value;
+                        if (il >= 0 && il < l_in) {
+                            v = input_data[in_base + il];
+                        }
+                        row[ic * kernel_size_ + k] = v;
+                    }
+                }
+            }
+
+            // 2. Weight tile for this group is rows
+            //    [g*out_c_per_group .. (g+1)*out_c_per_group) of weight,
+            //    each row already [in_c_per_group * kernel_size] = patch_dim.
+            const int8_t* weight_tile =
+                weight_data + g * out_c_per_group * patch_dim;
+
+            // 3. INT8 GEMM: gemm_out[l_out, out_c_per_group] =
+            //      (col_buffer @ weight_tile^T) * (input_scale * weight_scale)
+            //    (no bias here — we add it once during scatter).
+            if (is_per_channel) {
+                const float* full_weight_scales =
+                    weight_scale_cpu.data<const float>();
+                const int32_t* full_weight_zps =
+                    weight_zp_cpu.data<int32_t>();
+                const float* weight_scales =
+                    full_weight_scales + g * out_c_per_group;
+                const int32_t* weight_zps =
+                    full_weight_zps + g * out_c_per_group;
+                kernels::quantized_linear_per_channel_kernel(
+                    col_buffer.data(), weight_tile,
+                    /*bias=*/nullptr, gemm_out.data(),
+                    /*batch_size=*/l_out,
+                    /*in_features=*/patch_dim,
+                    /*out_features=*/out_c_per_group,
+                    input_scale, weight_scales,
+                    /*output_scale=*/1.0f,
+                    input_zp, weight_zps);
+            } else {
+                const float weight_scale =
+                    weight_scale_cpu.data<const float>()[0];
+                const int32_t weight_zp =
+                    weight_zp_cpu.data<int32_t>()[0];
+                kernels::quantized_linear_kernel(
+                    col_buffer.data(), weight_tile,
+                    /*bias=*/nullptr, gemm_out.data(),
+                    /*batch_size=*/l_out,
+                    /*in_features=*/patch_dim,
+                    /*out_features=*/out_c_per_group,
+                    input_scale, weight_scale,
+                    /*output_scale=*/1.0f,
+                    input_zp, weight_zp);
+            }
+
+            // 4. Scatter [l_out, out_c_per_group] FP32 -> output (N, C, L).
+            //    Add bias once per output channel here.
             for (int64_t oc = 0; oc < out_c_per_group; ++oc) {
                 int64_t oc_abs = g * out_c_per_group + oc;
+                float b = (bias_data != nullptr) ? bias_data[oc_abs] : 0.0f;
+                int64_t out_base = (n * out_channels_ + oc_abs) * l_out;
                 for (int64_t ol = 0; ol < l_out; ++ol) {
-                    float sum = 0.0f;
-                    if (bias_.has_value()) {
-                        Tensor bias_cpu = *bias_;
-                        if (bias_cpu.device() != Device::cpu())
-                            bias_cpu = bias_cpu.to(Device::cpu());
-                        sum = bias_cpu.data<const float>()[oc_abs];
-                    }
-
-                    for (int64_t ic = 0; ic < in_c_per_group; ++ic) {
-                        int64_t ic_abs = g * in_c_per_group + ic;
-                        for (int64_t k = 0; k < kernel_size_; ++k) {
-                            int64_t il = ol * stride_ - padding_ + k * dilation_;
-                            if (il >= 0 && il < l_in) {
-                                int64_t in_idx = (n * in_channels_ + ic_abs) * l_in + il;
-                                int64_t w_idx = (oc_abs * in_c_per_group + ic) * kernel_size_ + k;
-                                sum += in_data[in_idx] * w_data[w_idx];
-                            }
-                        }
-                    }
-
-                    int64_t out_idx = (n * out_channels_ + oc_abs) * l_out + ol;
-                    out_data[out_idx] = sum;
+                    output_data[out_base + ol] =
+                        gemm_out[ol * out_c_per_group + oc] + b;
                 }
             }
         }

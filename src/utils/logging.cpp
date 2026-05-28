@@ -1,10 +1,52 @@
+/**
+ * @file logging.cpp
+ * @brief Stream 25 / Audit-12: deduplicated logger implementation.
+ *
+ * Historically Tenzor had two parallel logging implementations:
+ *
+ *   include/tenzor/utils/log.hpp     +  src/utils/log.cpp      (spdlog facade)
+ *   include/tenzor/utils/logging.hpp +  src/utils/logging.cpp  (custom Logger)
+ *
+ * The two systems used different macro names (`TENZOR_LOG_WARN` vs
+ * `TENZOR_LOG_WARNING`, `TENZOR_LOG_CRITICAL` vs `TENZOR_LOG_FATAL`), so
+ * they did not actively conflict, but every diagnostic message was being
+ * formatted twice — once by spdlog, once by the hand-rolled `Logger::log`
+ * that wrote to `std::cout` with an `ostringstream` per call.
+ *
+ * The spdlog-based facade (`log.hpp`) is more featureful (fmt-style
+ * variadic formatting, env-var-controlled levels, file/stderr sinks,
+ * coloured terminal output, registry-based access). It is the survivor.
+ *
+ * `logging.hpp` and its `Logger` class continue to exist as a thin shim
+ * routed through `log.hpp`, so the 22 callers using `TENZOR_LOG_WARNING`,
+ * `TENZOR_LOG_FATAL`, `TENZOR_WARN_ONCE`, and direct `Logger::instance()`
+ * keep compiling without churn. All output now flows through a single
+ * spdlog logger.
+ */
+
 #include "tenzor/utils/logging.hpp"
-#include <iostream>
-#include <fstream>
-#include <chrono>
-#include <iomanip>
+#include "tenzor/utils/log.hpp"
+
+#include <spdlog/sinks/basic_file_sink.h>
+
+#include <string>
 
 namespace tenzor {
+
+namespace {
+
+auto to_spdlog_level(LogLevel level) -> spdlog::level::level_enum {
+    switch (level) {
+        case LogLevel::Debug:   return spdlog::level::debug;
+        case LogLevel::Info:    return spdlog::level::info;
+        case LogLevel::Warning: return spdlog::level::warn;
+        case LogLevel::Error:   return spdlog::level::err;
+        case LogLevel::Fatal:   return spdlog::level::critical;
+    }
+    return spdlog::level::info;
+}
+
+}  // namespace
 
 auto Logger::instance() -> Logger& {
     static Logger logger;
@@ -14,31 +56,11 @@ auto Logger::instance() -> Logger& {
 auto Logger::log(LogLevel level, std::string_view message,
                 [[maybe_unused]] const std::source_location& location) -> void {
     if (level < level_) return;
-
-    auto now = std::chrono::system_clock::now();
-    auto time = std::chrono::system_clock::to_time_t(now);
-
-    std::ostringstream oss;
-    oss << "[" << std::put_time(std::localtime(&time), "%Y-%m-%d %H:%M:%S") << "] ";
-
-    switch (level) {
-        case LogLevel::Debug: oss << "[DEBUG] "; break;
-        case LogLevel::Info: oss << "[INFO] "; break;
-        case LogLevel::Warning: oss << "[WARNING] "; break;
-        case LogLevel::Error: oss << "[ERROR] "; break;
-        case LogLevel::Fatal: oss << "[FATAL] "; break;
-    }
-
-    oss << message;
-
-    if (console_enabled_) {
-        std::cout << oss.str() << std::endl;
-    }
-
-    if (!output_file_.empty()) {
-        std::ofstream file(output_file_, std::ios::app);
-        file << oss.str() << std::endl;
-    }
+    // Forward to the unified spdlog facade. The "%v" pattern in log.cpp
+    // already prefixes timestamp + severity + logger name, so we just emit
+    // the raw message payload.
+    auto lg = ::tenzor::utils::logger();
+    lg->log(to_spdlog_level(level), "{}", message);
 }
 
 auto Logger::debug(std::string_view message, const std::source_location& location) -> void {
@@ -63,6 +85,11 @@ auto Logger::fatal(std::string_view message, const std::source_location& locatio
 
 auto Logger::set_level(LogLevel level) -> void {
     level_ = level;
+    // Mirror onto the spdlog logger so env-driven filters and Logger-driven
+    // filters stay in sync. The minimum of the two wins (spdlog's filter is
+    // checked first; if it passes, our LogLevel `level_` is the second
+    // gate inside Logger::log).
+    ::tenzor::utils::logger()->set_level(to_spdlog_level(level));
 }
 
 auto Logger::get_level() const -> LogLevel {
@@ -71,10 +98,26 @@ auto Logger::get_level() const -> LogLevel {
 
 auto Logger::set_output_file(std::string_view path) -> void {
     output_file_ = path;
+    // Attach a file sink to the unified spdlog logger. Idempotent in spirit:
+    // adding a sink with the same path twice will duplicate writes, so this
+    // is best-effort and mostly used by tests.
+    try {
+        auto lg = ::tenzor::utils::logger();
+        auto file_sink = std::make_shared<spdlog::sinks::basic_file_sink_mt>(
+            std::string(path), /*truncate=*/false);
+        lg->sinks().push_back(std::move(file_sink));
+    } catch (const std::exception&) {
+        // Permission denied or path unreachable — silently fall back to the
+        // existing sinks (stderr remains available).
+    }
 }
 
 auto Logger::enable_console(bool enable) -> void {
     console_enabled_ = enable;
+    // The unified spdlog logger always keeps a stderr sink (created in
+    // log.cpp), so this flag is now an API-compat hint only. It is stored
+    // but no longer drives output routing — disabling stderr globally would
+    // affect every other consumer of the unified logger.
 }
 
 } // namespace tenzor

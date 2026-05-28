@@ -114,6 +114,21 @@ auto LazyLinear::materialize(int64_t in_features, Device device) -> void {
 
     in_features_ = in_features;
 
+    // S27 fix: honour `requested_device_` if the user called `.to(device)`
+    // before materialisation. Previously this branch defaulted to the
+    // `device` argument the caller (typically forward_impl) passed in, which
+    // came from the first input's device — meaning a `model.to("cuda")`
+    // followed by a CPU input silently materialised weights on CPU. The
+    // explicit `.to()` is a user intent that should win over the input's
+    // incidental device. Note: forward_impl already pre-resolves this when
+    // it has access to both signals; this guard catches any other entry
+    // point (e.g. tests / future direct callers) that calls materialize()
+    // with only an input device.
+    Device target_device = device;
+    if (requested_device_.has_value()) {
+        target_device = requested_device_.value();
+    }
+
     // V.29: honour any pre-materialisation `to(DType)` call.  We initialise
     // weight/bias at Float32 (so Xavier / uniform_ — which currently expect a
     // floating-point storage they can index as `float*` — work correctly),
@@ -123,7 +138,7 @@ auto LazyLinear::materialize(int64_t in_features, Device device) -> void {
     const DType target_dtype = requested_dtype_.value_or(DType::Float32);
 
     // Create weight tensor and initialize with Xavier uniform
-    auto weight_tensor = zeros({out_features_, in_features_}, DType::Float32, device);
+    auto weight_tensor = zeros({out_features_, in_features_}, DType::Float32, target_device);
     init::xavier_uniform_(weight_tensor);
     if (target_dtype != DType::Float32) {
         weight_tensor = weight_tensor.to(target_dtype);
@@ -133,7 +148,7 @@ auto LazyLinear::materialize(int64_t in_features, Device device) -> void {
 
     // Create bias tensor and initialize with Xavier uniform-derived bounds
     if (has_bias_) {
-        auto bias_tensor = zeros({out_features_}, DType::Float32, device);
+        auto bias_tensor = zeros({out_features_}, DType::Float32, target_device);
         // Use uniform initialization matching Xavier convention:
         // bound = 1 / sqrt(in_features) (same as PyTorch Linear default)
         float bound = 1.0f / std::sqrt(static_cast<float>(in_features_));

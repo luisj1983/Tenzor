@@ -185,17 +185,33 @@ auto istft(const Tensor& input,
 /**
  * @brief Griffin-Lim phase reconstruction algorithm.
  *
- * Reconstructs a time-domain signal from a magnitude spectrogram
- * by iteratively estimating the phase using STFT/ISTFT round-trips.
+ * Reconstructs a time-domain signal from a magnitude spectrogram |S| by
+ * iteratively estimating the phase via STFT/ISTFT round-trips.
  *
- * @param magnitude Magnitude spectrogram (from |STFT(signal)|)
- * @param n_fft FFT window size
- * @param hop_length Hop between windows (default: n_fft / 4)
- * @param win_length Window length (default: n_fft)
- * @param window Optional window tensor
- * @param n_iter Number of iterations (default: 32)
- * @param momentum Momentum for phase update (default: 0.99)
- * @return Reconstructed time-domain signal
+ * The implementation is the canonical Fast Griffin-Lim algorithm
+ * (Perraudin et al., 2013):
+ *   - Initialize phase uniformly in [-pi, pi) (zeros if n_iter==0).
+ *   - Maintain a complex spectrogram target S_k = |S| * exp(i * phase).
+ *   - At each iteration: x_hat = ISTFT(S_k); S_hat = STFT(x_hat);
+ *     t_n = S_hat - momentum * t_{n-1}; S_k = |S| * exp(i * angle(t_n)).
+ *   - momentum = 0 recovers the original Griffin-Lim (1984).
+ *   - momentum in (0, 1) accelerates convergence.
+ *
+ * The magnitude tensor may be Float32 or Float64. Internally everything is
+ * widened to Float32 / Complex64 (STFT's working dtype) and narrowed back on
+ * return.
+ *
+ * @param magnitude Magnitude spectrogram (real, non-negative).
+ *                  Shape: (..., freq_bins, num_frames).
+ * @param n_fft FFT window size.
+ * @param hop_length Hop between windows (default: n_fft / 4 when < 0).
+ * @param win_length Window length (default: n_fft when < 0).
+ * @param window Optional window tensor.
+ * @param n_iter Number of iterations (default 32). n_iter==0 returns the
+ *               zero-phase ISTFT of |S|.
+ * @param momentum Fast Griffin-Lim momentum in [0, 1) (default 0.99).
+ *                 0.0 recovers original Griffin-Lim.
+ * @return Reconstructed time-domain signal in the dtype of `magnitude`.
  */
 auto griffin_lim(const Tensor& magnitude,
                 int64_t n_fft,

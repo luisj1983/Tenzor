@@ -169,9 +169,38 @@ public:
 
     // Module interface implementation (not used - decoder requires 2 inputs)
     auto forward_impl(const Variable& input) -> Variable override {
-        // This shouldn't be called - decoder requires both aspp and low-level features
-        // Return input as dummy implementation
-        return input;
+        // Single-input variant: the canonical DeepLab v3+ decoder takes
+        // BOTH high-level ASPP features and low-level encoder features
+        // (used here via `low_level_reduce_` + concat + `refine_`).
+        // Module::forward only provides one input, so the low-level skip
+        // path is unavailable here — we degrade to the high-level-only
+        // branch instead of the previous identity stub (which silently
+        // dropped the entire decoder when wired into a Sequential).
+        //
+        // Reconstructed pipeline (high-level-only):
+        //   1. 4× bilinear upsample input  (H/16,W/16) → (H/4,W/4)
+        //   2. 1×1 classifier conv: aspp_channels → num_classes
+        //   3. 4× bilinear upsample          (H/4,W/4) → (H,W)
+        //
+        // This matches the spatial output of the dual-input forward
+        // exactly and uses the actual classifier_ weights, so the result
+        // is a meaningful segmentation logits map (not a no-op pass-
+        // through). The refine_ + low_level_reduce_ branches are skipped
+        // because they require low-level features that this overload
+        // does not receive.
+        const auto& shape = input.tensor().shape();
+        if (shape.size() != 4) {
+            throw std::runtime_error(
+                "DeepLabV3PlusDecoder::forward_impl: input must be 4D "
+                "(N, C, H, W)");
+        }
+        int64_t mid_h = shape[2] * 4;
+        int64_t mid_w = shape[3] * 4;
+        auto upsampled = nn::upsample_bilinear(input, mid_h, mid_w);
+        auto logits = classifier_->forward(upsampled);
+        int64_t out_h = mid_h * 4;
+        int64_t out_w = mid_w * 4;
+        return nn::upsample_bilinear(logits, out_h, out_w);
     }
 
 private:

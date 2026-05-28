@@ -266,6 +266,12 @@ auto index_select_kernel(const Tensor& input, int64_t dim, const Tensor& index) 
     else INDEX_SELECT_DISPATCH(DType::Int64, int64_t)
     else INDEX_SELECT_DISPATCH(DType::Int8, int8_t)
     else INDEX_SELECT_DISPATCH(DType::UInt8, uint8_t)
+    else INDEX_SELECT_DISPATCH(DType::Int16, int16_t)
+    else INDEX_SELECT_DISPATCH(DType::UInt16, uint16_t)
+    else INDEX_SELECT_DISPATCH(DType::UInt32, uint32_t)
+    else INDEX_SELECT_DISPATCH(DType::UInt64, uint64_t)
+    else INDEX_SELECT_DISPATCH(DType::Complex64, std::complex<float>)
+    else INDEX_SELECT_DISPATCH(DType::Complex128, std::complex<double>)
     else INDEX_SELECT_DISPATCH(DType::Bool, bool)
     else {
         throw std::runtime_error("index_select: unsupported dtype");
@@ -341,6 +347,12 @@ auto gather_kernel(const Tensor& input, int64_t dim, const Tensor& index) -> Ten
     else GATHER_DISPATCH(DType::Int64, int64_t)
     else GATHER_DISPATCH(DType::Int8, int8_t)
     else GATHER_DISPATCH(DType::UInt8, uint8_t)
+    else GATHER_DISPATCH(DType::Int16, int16_t)
+    else GATHER_DISPATCH(DType::UInt16, uint16_t)
+    else GATHER_DISPATCH(DType::UInt32, uint32_t)
+    else GATHER_DISPATCH(DType::UInt64, uint64_t)
+    else GATHER_DISPATCH(DType::Complex64, std::complex<float>)
+    else GATHER_DISPATCH(DType::Complex128, std::complex<double>)
     else GATHER_DISPATCH(DType::Bool, bool)
     else {
         throw std::runtime_error("gather: unsupported dtype");
@@ -412,6 +424,12 @@ auto scatter_kernel(const Tensor& input, int64_t dim, const Tensor& index, const
     else SCATTER_DISPATCH(DType::Int64, int64_t)
     else SCATTER_DISPATCH(DType::Int8, int8_t)
     else SCATTER_DISPATCH(DType::UInt8, uint8_t)
+    else SCATTER_DISPATCH(DType::Int16, int16_t)
+    else SCATTER_DISPATCH(DType::UInt16, uint16_t)
+    else SCATTER_DISPATCH(DType::UInt32, uint32_t)
+    else SCATTER_DISPATCH(DType::UInt64, uint64_t)
+    else SCATTER_DISPATCH(DType::Complex64, std::complex<float>)
+    else SCATTER_DISPATCH(DType::Complex128, std::complex<double>)
     else SCATTER_DISPATCH(DType::Bool, bool)
     else {
         throw std::runtime_error("scatter: unsupported dtype");

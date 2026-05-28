@@ -141,12 +141,14 @@ public:
     /// Scalar (symmetric) ctor.
     AvgPool2d(int64_t kernel_size,
              int64_t stride = -1,  // Default: same as kernel_size
-             int64_t padding = 0);
+             int64_t padding = 0,
+             bool count_include_pad = true);
 
     /// Per-axis ctor accepting (kernel_h, kernel_w) tuples.
     AvgPool2d(std::array<int64_t, 2> kernel_size,
              std::array<int64_t, 2> stride = {-1, -1},
-             std::array<int64_t, 2> padding = {0, 0});
+             std::array<int64_t, 2> padding = {0, 0},
+             bool count_include_pad = true);
 
     /**
      * @brief Forward pass through average pooling.
@@ -163,18 +165,21 @@ public:
         };
         return "kernel_size=" + pair(kernel_size_h_, kernel_size_w_) +
                ", stride="    + pair(stride_h_,      stride_w_) +
-               ", padding="   + pair(padding_h_,     padding_w_);
+               ", padding="   + pair(padding_h_,     padding_w_) +
+               ", count_include_pad=" + (count_include_pad_ ? "true" : "false");
     }
 
     auto get_kernel_size() const -> std::array<int64_t, 2> { return {kernel_size_h_, kernel_size_w_}; }
     auto get_stride()      const -> std::array<int64_t, 2> { return {stride_h_,      stride_w_}; }
     auto get_padding()     const -> std::array<int64_t, 2> { return {padding_h_,     padding_w_}; }
+    auto get_count_include_pad() const -> bool { return count_include_pad_; }
 
 private:
     int64_t kernel_size_h_, kernel_size_w_;
     int64_t stride_h_,      stride_w_;
     int64_t padding_h_,     padding_w_;
     int64_t kernel_size_, stride_, padding_;
+    bool count_include_pad_;
 };
 
 /**
@@ -297,24 +302,28 @@ public:
     /// Scalar (symmetric) ctor.
     AvgPool3d(int64_t kernel_size,
              int64_t stride = -1,
-             int64_t padding = 0);
+             int64_t padding = 0,
+             bool count_include_pad = true);
 
     /// Per-axis ctor accepting (kernel_d, kernel_h, kernel_w) tuples.
     AvgPool3d(std::array<int64_t, 3> kernel_size,
              std::array<int64_t, 3> stride = {-1, -1, -1},
-             std::array<int64_t, 3> padding = {0, 0, 0});
+             std::array<int64_t, 3> padding = {0, 0, 0},
+             bool count_include_pad = true);
 
     auto forward_impl(const Variable& input) -> Variable override;
 
     auto get_kernel_size() const -> std::array<int64_t, 3> { return {kernel_size_d_, kernel_size_h_, kernel_size_w_}; }
     auto get_stride()      const -> std::array<int64_t, 3> { return {stride_d_,      stride_h_,      stride_w_}; }
     auto get_padding()     const -> std::array<int64_t, 3> { return {padding_d_,     padding_h_,     padding_w_}; }
+    auto get_count_include_pad() const -> bool { return count_include_pad_; }
 
 private:
     int64_t kernel_size_d_, kernel_size_h_, kernel_size_w_;
     int64_t stride_d_,      stride_h_,      stride_w_;
     int64_t padding_d_,     padding_h_,     padding_w_;
     int64_t kernel_size_, stride_, padding_;
+    bool count_include_pad_;
 };
 
 /**
@@ -351,17 +360,20 @@ private:
  */
 class AvgPool1d : public Module {
 public:
-    AvgPool1d(int64_t kernel_size, int64_t stride = -1, int64_t padding = 0);
+    AvgPool1d(int64_t kernel_size, int64_t stride = -1, int64_t padding = 0,
+              bool count_include_pad = true);
     auto forward_impl(const Variable& input) -> Variable override;
 
     auto get_kernel_size() const -> int64_t { return kernel_size_; }
     auto get_stride()      const -> int64_t { return stride_; }
     auto get_padding()     const -> int64_t { return padding_; }
+    auto get_count_include_pad() const -> bool { return count_include_pad_; }
 
 private:
     int64_t kernel_size_;
     int64_t stride_;
     int64_t padding_;
+    bool count_include_pad_;
 };
 
 /**

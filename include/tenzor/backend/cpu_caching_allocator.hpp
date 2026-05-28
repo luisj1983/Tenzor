@@ -49,6 +49,9 @@ public:
         size_t num_splits{0};           ///< Number of block splits
         size_t num_backend_allocs{0};   ///< Calls to posix_memalign
         size_t num_backend_frees{0};    ///< Calls to free()
+        size_t tracking_inconsistencies{0}; ///< Root.size vs reclaimed-bytes mismatches (S16/A2)
+        size_t partial_evictions{0};        ///< Partially-free ranges evicted under pressure (S16/A1)
+        size_t partial_evicted_bytes{0};    ///< Bytes reclaimed via partial evictions (S16/A1)
     };
 
     /**
@@ -266,14 +269,42 @@ private:
                                    std::multimap<size_t, Block>& free_blocks) -> bool;
 
     /**
-     * @brief Migrate blocks from local to global pool
+     * @brief Migrate blocks from local to global pool.
+     * @param migrate_all When true, move every free block (used under memory
+     *        pressure so the global-pool eviction passes can reclaim them);
+     *        when false (default), move ~half (routine local-cache trimming).
      */
-    void migrate_to_global(ThreadLocalPool& local);
+    void migrate_to_global(ThreadLocalPool& local, bool migrate_all = false);
 
     /**
      * @brief Check and handle memory pressure
      */
     void check_memory_pressure();
+
+    /**
+     * @brief Evict maximal contiguous free runs from partially-allocated roots (S16/A1)
+     *
+     * When @c check_memory_pressure() cannot find a fully-coalesced root to free,
+     * this helper walks every root, identifies the largest contiguous free
+     * sub-range (across global+local pools), and releases it back to the OS by
+     * splitting the root in-place. Updates root-allocation bookkeeping so the
+     * remaining live blocks continue to deallocate correctly.
+     *
+     * @param required_bytes how many bytes the caller needs to reclaim
+     * @return number of bytes actually evicted
+     *
+     * Must be called with global_mutex_ held by the caller.
+     */
+    size_t evict_partial_free_ranges(size_t required_bytes);
+
+    /**
+     * @brief Apply TENZOR_CACHED_* env-var overrides (S16/A4)
+     *
+     * Reads TENZOR_CACHED_BYTES_MAX, TENZOR_CACHED_LOCAL_BYTES_MAX, and
+     * TENZOR_CACHED_MIN_SPLIT once at construction. Invalid / absent values
+     * leave the defaults untouched.
+     */
+    void apply_env_overrides();
 
     /**
      * @brief Free a block back to the system

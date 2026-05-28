@@ -14,8 +14,14 @@ namespace tenzor::backends::cpu {
 /**
  * @brief Configure OMP thread count once process-wide.
  *
- * Reads OMP_NUM_THREADS env var if set; otherwise defaults to
- * hardware_concurrency() / 2 (physical cores on HT systems), minimum 1.
+ * Precedence (highest wins):
+ *   1. OMP_NUM_THREADS  — standard OpenMP env var, observed explicitly so
+ *      get_configured_threads() agrees with the runtime.
+ *   2. TENZOR_NUM_THREADS — Tenzor-specific override.
+ *   3. Auto default — total online cores via sysconf(_SC_NPROCESSORS_ONLN),
+ *      falling back to std::thread::hardware_concurrency(). We do not divide
+ *      by 2 — that is wrong on non-SMT and hybrid hardware.
+ *
  * Idempotent — safe to call from multiple translation units.
  */
 void configure_omp_threads();

@@ -712,13 +712,18 @@ install(TARGETS tenzor_core
 
 install(DIRECTORY include/tenzor DESTINATION include)
 
-# Install backend shared libraries (only non-imported targets that were built)
+# Install backend shared libraries (only non-imported targets that were built).
+# Fix 2: include backends in TenzorTargets so downstream find_package(Tenzor)
+# resolves Tenzor::tenzor_backend_cpu etc. via the exported config.
 foreach(backend cpu cuda rocm oneapi vulkan)
     if(TARGET tenzor_backend_${backend})
         get_target_property(_imported tenzor_backend_${backend} IMPORTED)
         if(NOT _imported)
             install(TARGETS tenzor_backend_${backend}
-                LIBRARY DESTINATION lib/tenzor/backends)
+                EXPORT TenzorTargets
+                LIBRARY DESTINATION lib/tenzor/backends
+                ARCHIVE DESTINATION lib/tenzor/backends
+                RUNTIME DESTINATION bin)
         endif()
     endif()
 endforeach()

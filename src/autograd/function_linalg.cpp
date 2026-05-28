@@ -17,6 +17,7 @@
 #include "tenzor/utils/safe_math.hpp"
 #include <cmath>
 #include <iostream>
+#include <limits>
 #include <string>
 #include <typeinfo>
 #include <unordered_set>
@@ -258,36 +259,91 @@ auto NormBackward_Linalg::forward(std::vector<Variable>) -> std::vector<Variable
 }
 
 auto NormBackward_Linalg::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> {
-    const auto& grad = grad_outputs[0];       // dL/dy, scalar
+    const auto& grad = grad_outputs[0];       // dL/dy
     const auto& input = saved_tensors_[0];    // A
-    const auto& norm_val = saved_tensors_[1]; // norm(A), scalar
+    const auto& norm_val = saved_tensors_[1]; // norm(A)
 
     if (ord_ == "fro") {
         // dL/dA = dL/dy * A / norm(A)
-        // Reshape grad and norm_val to broadcast with A
         auto input_shape = std::vector<int64_t>(input.shape().begin(), input.shape().end());
-
-        // grad / norm_val is a scalar ratio
         auto scale = div(grad, norm_val);
-
-        // Expand scale to match input shape
         auto scale_shape = std::vector<int64_t>(scale.shape().begin(), scale.shape().end());
         while (scale_shape.size() < input_shape.size()) {
             scale_shape.push_back(1);
         }
         auto scale_expanded = reshape(scale, scale_shape);
-
-        auto grad_A = mul(scale_expanded, input);
-        return {grad_A};
+        return {mul(scale_expanded, input)};
     }
 
-    // Forward (src/ops/linalg.cpp:618) only accepts ord == "fro" today; any other
-    // value must have come from a silent forward-vs-backward contract drift. Raise
-    // loudly instead of silently emitting a zero gradient.
+    if (ord_ == "nuc") {
+        // Nuclear norm: y = sum_i σ_i(A). Gradient is U @ V^H (∂/∂A Σ σ_i).
+        auto [U, S, Vh] = tenzor::linalg::svd(input, /*full_matrices=*/false);
+        auto outer = matmul(U, Vh);  // (..., M, N)
+        auto grad_shape = std::vector<int64_t>(grad.shape().begin(), grad.shape().end());
+        while (grad_shape.size() < static_cast<size_t>(outer.ndim())) {
+            grad_shape.push_back(1);
+        }
+        auto grad_reshaped = reshape(grad, grad_shape);
+        return {mul(grad_reshaped, outer)};
+    }
+
+    // Induced / spectral norms — same math as LinalgMatrixNormBackward, kept
+    // inline here so this node owns its full backward and doesn't depend on
+    // a separate function's saved-tensors layout.
+    auto induced_grad = [&](double ord_d) -> Tensor {
+        if (std::abs(ord_d - 2.0) < 1e-10 || std::abs(ord_d + 2.0) < 1e-10) {
+            // Spectral norm (ord = ±2): grad = u_k v_k^H.
+            auto [U, S, Vh] = tenzor::linalg::svd(input, /*full_matrices=*/false);
+            const int64_t U_ndim  = U.ndim();
+            const int64_t Vh_ndim = Vh.ndim();
+            const int64_t K = U.size(U_ndim - 1);
+            const bool use_smallest = (ord_d < 0.0);
+            const int64_t sv_idx = use_smallest ? K - 1 : 0;
+
+            auto uk  = tenzor::slice(U,  /*dim=*/U_ndim - 1,  /*start=*/sv_idx, /*end=*/sv_idx + 1);
+            auto vkh = tenzor::slice(Vh, /*dim=*/Vh_ndim - 2, /*start=*/sv_idx, /*end=*/sv_idx + 1);
+            auto outer = matmul(uk, vkh);
+
+            auto gs = std::vector<int64_t>(grad.shape().begin(), grad.shape().end());
+            while (gs.size() < static_cast<size_t>(outer.ndim())) gs.push_back(1);
+            auto grad_reshaped = reshape(grad, gs);
+            return mul(grad_reshaped, outer);
+        }
+
+        // Induced 1 / inf norms (and their negatives): argmax/argmin of
+        // column / row absolute sums, then sign mask.
+        const int64_t ndim    = input.ndim();
+        const int64_t M       = input.size(ndim - 2);
+        const int64_t N       = input.size(ndim - 1);
+        const bool col_norm   = (std::abs(ord_d) == 1.0);
+        const int64_t reduce_dim  = col_norm ? ndim - 2 : ndim - 1;
+        const int64_t num_classes = col_norm ? N : M;
+        const bool use_min    = (ord_d < 0.0);
+        (void)M;
+
+        auto abs_A = tenzor::abs(input);
+        auto sums  = tenzor::sum(abs_A, /*dim=*/reduce_dim, /*keepdim=*/false);
+        auto idx = use_min ? tenzor::argmin(sums, /*dim=*/-1, /*keepdim=*/false)
+                           : tenzor::argmax(sums, /*dim=*/-1, /*keepdim=*/false);
+        auto mask = tenzor::one_hot(idx, num_classes).to(input.dtype());
+        mask = mask.unsqueeze(col_norm ? ndim - 2 : ndim - 1);
+
+        auto gs = std::vector<int64_t>(grad.shape().begin(), grad.shape().end());
+        while (gs.size() < static_cast<size_t>(ndim)) gs.push_back(1);
+        auto grad_reshaped = reshape(grad, gs);
+        return mul(mul(grad_reshaped, mask), tenzor::sign(input));
+    };
+
+    if (ord_ == "1")    return {induced_grad(1.0)};
+    if (ord_ == "-1")   return {induced_grad(-1.0)};
+    if (ord_ == "2")    return {induced_grad(2.0)};
+    if (ord_ == "-2")   return {induced_grad(-2.0)};
+    if (ord_ == "inf")  return {induced_grad(std::numeric_limits<double>::infinity())};
+    if (ord_ == "-inf") return {induced_grad(-std::numeric_limits<double>::infinity())};
+
     throw std::runtime_error(
         "NormBackward_Linalg::backward: unsupported norm order '" + ord_ +
-        "'. Forward `linalg::norm` only accepts 'fro'; add the explicit backward "
-        "formula before extending forward.");
+        "'. Supported: 'fro', 'nuc', '1', '-1', '2', '-2', 'inf', '-inf'.");
 }
 
 // SlogdetBackward implementation
@@ -763,37 +819,47 @@ auto SolveBackward::backward_with_variables(std::vector<Variable> grad_outputs) 
 }
 
 auto NormBackward_Linalg::backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> {
-    // Frobenius: dL/dA = dL/dy * A / norm(A)
-    Variable input, norm_val;
-    if (has_saved_variables()) {
-        require_saved_variables(2);
-        input = saved_variables_[0];
-        norm_val = saved_variables_[1];
-    } else {
-        require_saved_tensors(2);
-        input = Variable(saved_tensors_[0], false);
-        norm_val = Variable(saved_tensors_[1], false);
-    }
+    require_saved_tensors(2);
+    const Tensor& input = saved_tensors_[0];
+    const Tensor& norm_val = saved_tensors_[1];
 
     if (ord_ == "fro") {
-        auto scale = grad_outputs[0] * tenzor::reciprocal(norm_val);
+        // Frobenius: dL/dA = dL/dy * A / norm(A) — graph-preserving form so
+        // `create_graph=true` works (audit-9 R.q).
+        auto scale = grad_outputs[0] * tenzor::reciprocal(Variable(norm_val, false));
         auto input_shape = std::vector<int64_t>(input.shape().begin(), input.shape().end());
         auto scale_shape = std::vector<int64_t>(scale.shape().begin(), scale.shape().end());
         while (scale_shape.size() < input_shape.size()) {
             scale_shape.push_back(1);
         }
         auto scale_expanded = tenzor::reshape(scale, scale_shape);
-        return {scale_expanded * input};
+        return {scale_expanded * Variable(input, false)};
     }
 
-    // Forward (src/ops/linalg.cpp:618) only accepts ord == "fro" today. Any other
-    // value means the forward contract was extended without a matching backward
-    // formula. Raise loudly rather than silently emitting a zero gradient.
-    throw std::runtime_error(
-        "NormBackward_Linalg::backward_with_variables: unsupported norm order '" +
-        ord_ +
-        "'. Forward `linalg::norm` only accepts 'fro'; add the explicit backward "
-        "formula before extending forward.");
+    // For the remaining ords the closed-form gradient factors as
+    //   grad_input = grad_lifted * deriv(A, ord)
+    // where `deriv` depends only on saved tensors. Compute `deriv` at tensor
+    // level by feeding a ones-grad through the tensor backward (same trick
+    // as LinalgMatrixNormBackward::backward_with_variables), then compose the
+    // final multiply at Variable level so grad_fn flows through grad_outputs.
+    auto input_shape = std::vector<int64_t>(input.shape().begin(), input.shape().end());
+
+    // The norm result shape == norm_val.shape() (whatever batch dims exist).
+    auto norm_shape = std::vector<int64_t>(norm_val.shape().begin(), norm_val.shape().end());
+    Tensor ones_grad = tenzor::ones(norm_shape, input.dtype(), input.device());
+    Tensor deriv = backward({ones_grad})[0];  // shape == input.shape()
+    Variable deriv_var(deriv, /*requires_grad=*/false);
+
+    // Lift grad_outputs[0] (shape norm_shape) to input.shape() by appending
+    // trailing 1s then broadcasting; both ops preserve grad_fn.
+    auto grad_lifted_shape = norm_shape;
+    while (grad_lifted_shape.size() < input_shape.size()) {
+        grad_lifted_shape.push_back(1);
+    }
+    Variable grad_reshaped = tenzor::reshape(grad_outputs[0], grad_lifted_shape);
+    Variable grad_expanded = tenzor::expand(grad_reshaped, input_shape);
+
+    return {grad_expanded * deriv_var};
 }
 
 auto SlogdetBackward::backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> {

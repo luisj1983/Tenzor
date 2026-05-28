@@ -227,7 +227,12 @@ auto HistogramObserver::update_histogram(const Tensor& tensor) -> void {
     const float* data = tensor_f32.data<const float>();
     int64_t n = tensor_f32.numel();
 
-    // Update histogram
+    // Update histogram. When a value falls outside [min_val_, max_val_] we
+    // must expand the histogram range AND re-bin the existing counts: each
+    // old bin's midpoint maps into the new range. Without this redistribution
+    // step (the previous "simplified" behaviour), old counts stay stuck at
+    // their old indices and silently corrupt the calibration distribution
+    // for any non-stationary input.
     float bin_width = (max_val_ - min_val_) / num_bins_;
 
     for (int64_t i = 0; i < n; ++i) {
@@ -235,23 +240,54 @@ auto HistogramObserver::update_histogram(const Tensor& tensor) -> void {
 
         // Update range if needed
         if (val < min_val_ || val > max_val_) {
-            // Need to rebuild histogram with new range
+            // Compute expanded range with a small slack so future values
+            // close to the new boundary still bin cleanly.
             float new_min = std::min(min_val_, val);
             float new_max = std::max(max_val_, val);
             float range = new_max - new_min;
             new_min -= range * 0.01f;
             new_max += range * 0.01f;
+            float new_bin_width = (new_max - new_min) / num_bins_;
 
-            // Rebuild histogram (simplified - in production, would redistribute existing bins)
+            // Re-bin existing histogram counts using each old bin's midpoint.
+            // The midpoint of old bin k is old_min + (k + 0.5) * old_bin_width;
+            // route that count into whatever bin index it falls into under
+            // the new (wider) range. This is the standard streaming-histogram
+            // resize step and preserves total_count exactly.
+            std::vector<int64_t> new_histogram(num_bins_, 0);
+            const float old_min = min_val_;
+            const float old_bin_width = bin_width;
+            if (new_bin_width > 0.0f) {
+                for (int64_t k = 0; k < num_bins_; ++k) {
+                    int64_t count = histogram_[k];
+                    if (count == 0) continue;
+                    float midpoint = old_min + (static_cast<float>(k) + 0.5f) * old_bin_width;
+                    int64_t new_bin = static_cast<int64_t>((midpoint - new_min) / new_bin_width);
+                    new_bin = std::clamp(new_bin, int64_t(0), num_bins_ - 1);
+                    new_histogram[new_bin] += count;
+                }
+            } else {
+                // Degenerate range (all values identical so far); funnel all
+                // existing counts into bin 0 of the new histogram.
+                int64_t carry = 0;
+                for (int64_t k = 0; k < num_bins_; ++k) carry += histogram_[k];
+                new_histogram[0] = carry;
+            }
+
+            histogram_.swap(new_histogram);
             min_val_ = new_min;
             max_val_ = new_max;
-            bin_width = (max_val_ - min_val_) / num_bins_;
+            bin_width = new_bin_width;
         }
 
         // Add to histogram
-        int64_t bin = static_cast<int64_t>((val - min_val_) / bin_width);
-        bin = std::clamp(bin, int64_t(0), num_bins_ - 1);
-        histogram_[bin]++;
+        if (bin_width > 0.0f) {
+            int64_t bin = static_cast<int64_t>((val - min_val_) / bin_width);
+            bin = std::clamp(bin, int64_t(0), num_bins_ - 1);
+            histogram_[bin]++;
+        } else {
+            histogram_[0]++;
+        }
     }
 
     total_count_ += n;

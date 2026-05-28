@@ -28,6 +28,11 @@ add_executable(test_gradcheck_multibackend test_gradcheck_multibackend.cpp)
 target_link_libraries(test_gradcheck_multibackend PRIVATE tenzor_core GTest::gtest_main)
 tenzor_discover_tests(test_gradcheck_multibackend LABELS "autograd" DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
 
+# S12: RNN Float64 native-precision regression tests.
+add_executable(test_gradcheck_rnn_f64 test_gradcheck_rnn_f64.cpp)
+target_link_libraries(test_gradcheck_rnn_f64 PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_gradcheck_rnn_f64 LABELS "autograd" DISCOVERY_TIMEOUT 60 BACKENDS cpu)
+
 # Phase P0 / Fix 2 — LinalgMatrixNormBackward subgradient correctness for
 # ord ∈ {1, -1, ±inf}. Old code returned zeros; now returns proper
 # argmax/argmin + one_hot + sign subgradient.
@@ -224,6 +229,12 @@ tenzor_discover_tests(test_graph_optimizer LABELS "autograd" DISCOVERY_TIMEOUT 6
 add_executable(test_jvp_rules test_jvp_rules.cpp)
 target_link_libraries(test_jvp_rules PRIVATE tenzor_core GTest::gtest_main)
 tenzor_discover_tests(test_jvp_rules LABELS "autograd" DISCOVERY_TIMEOUT 60)
+
+# S15: typed-stub Backward classes (ROIAlign / DeformableConv2d / MelScale /
+# DCT / MFCC) — verifies forward + backward paths against runtime errors.
+add_executable(test_typed_stub_backwards test_typed_stub_backwards.cpp)
+target_link_libraries(test_typed_stub_backwards PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_typed_stub_backwards LABELS "autograd" DISCOVERY_TIMEOUT 60)
 
 # HigherOrderGradMode::Warn disconnection counter and is_higher_order_stub() tests
 add_executable(test_warn_mode_counter test_warn_mode_counter.cpp)

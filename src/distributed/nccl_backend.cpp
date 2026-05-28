@@ -4,10 +4,10 @@
  */
 
 #include "tenzor/distributed/nccl_backend.hpp"
+#include "tenzor/utils/error.hpp"  // NotImplementedError (S25 / audit-12) — needed in both branches
 
 #if defined(TENZOR_HAS_NCCL)
 
-#include "tenzor/utils/error.hpp"
 #include "tenzor/utils/log.hpp"
 #include "tenzor/ops/creation.hpp"
 #include "tenzor/ops/transform.hpp"
@@ -124,7 +124,7 @@ auto NCCLBackend::broadcast(Tensor& tensor, int src_rank) -> void {
     // Synchronize to ensure completion
     GPU_CHECK(cudaDeviceSynchronize());
 #else
-    throw std::runtime_error("NCCLBackend: NCCL not available");
+    throw NotImplementedError("NCCLBackend: NCCL not available");
 #endif
 }
 
@@ -155,7 +155,7 @@ auto NCCLBackend::all_reduce(Tensor& tensor, ReduceOp op) -> void {
         tensor = tensor / static_cast<float>(world_size_);
     }
 #else
-    throw std::runtime_error("NCCLBackend: NCCL not available");
+    throw NotImplementedError("NCCLBackend: NCCL not available");
 #endif
 }
 
@@ -189,7 +189,7 @@ auto NCCLBackend::all_reduce_async(Tensor& tensor, ReduceOp op,
     // stream without additional synchronization.
 #else
     (void)stream;
-    throw std::runtime_error("NCCLBackend: NCCL not available");
+    throw NotImplementedError("NCCLBackend: NCCL not available");
 #endif
 }
 
@@ -215,7 +215,7 @@ auto NCCLBackend::reduce(Tensor& tensor, int dst_rank, ReduceOp op) -> void {
 
     GPU_CHECK(cudaDeviceSynchronize());
 #else
-    throw std::runtime_error("NCCLBackend: NCCL not available");
+    throw NotImplementedError("NCCLBackend: NCCL not available");
 #endif
 }
 
@@ -259,7 +259,7 @@ auto NCCLBackend::all_gather(const Tensor& tensor, std::vector<Tensor>& output) 
         output[i] = gathered.slice(0, i * tensor.numel(), (i + 1) * tensor.numel());
     }
 #else
-    throw std::runtime_error("NCCLBackend: NCCL not available");
+    throw NotImplementedError("NCCLBackend: NCCL not available");
 #endif
 }
 
@@ -334,7 +334,7 @@ auto NCCLBackend::gather(const Tensor& tensor, std::vector<Tensor>& output, int 
     (void)tensor;
     (void)output;
     (void)dst_rank;
-    throw std::runtime_error("NCCLBackend: NCCL not available");
+    throw NotImplementedError("NCCLBackend: NCCL not available");
 #endif
 }
 
@@ -410,7 +410,7 @@ auto NCCLBackend::scatter(const std::vector<Tensor>& tensors, Tensor& output, in
     (void)tensors;
     (void)output;
     (void)src_rank;
-    throw std::runtime_error("NCCLBackend: NCCL not available");
+    throw NotImplementedError("NCCLBackend: NCCL not available");
 #endif
 }
 
@@ -443,7 +443,7 @@ auto NCCLBackend::reduce_scatter(const std::vector<Tensor>& tensors, Tensor& out
 
     GPU_CHECK(cudaDeviceSynchronize());
 #else
-    throw std::runtime_error("NCCLBackend: NCCL not available");
+    throw NotImplementedError("NCCLBackend: NCCL not available");
 #endif
 }
 
@@ -483,7 +483,7 @@ auto NCCLBackend::reduce_scatter_async(const std::vector<Tensor>& tensors, Tenso
     (void)tensors;
     (void)output;
     (void)op;
-    throw std::runtime_error("NCCLBackend: NCCL not available");
+    throw NotImplementedError("NCCLBackend: NCCL not available");
 #endif
 }
 
@@ -565,7 +565,7 @@ auto NCCLBackend::send(const Tensor& tensor, int dst_rank) -> void {
 #else
     (void)tensor;
     (void)dst_rank;
-    throw std::runtime_error("NCCLBackend: NCCL not available");
+    throw NotImplementedError("NCCLBackend: NCCL not available");
 #endif
 }
 
@@ -602,7 +602,7 @@ auto NCCLBackend::recv(Tensor& tensor, int src_rank) -> void {
 #else
     (void)tensor;
     (void)src_rank;
-    throw std::runtime_error("NCCLBackend: NCCL not available");
+    throw NotImplementedError("NCCLBackend: NCCL not available");
 #endif
 }
 
@@ -669,7 +669,7 @@ auto NCCLBackend::all_to_all_single(Tensor& output, const Tensor& input) -> void
 #else
     (void)output;
     (void)input;
-    throw std::runtime_error("NCCLBackend: NCCL not available");
+    throw NotImplementedError("NCCLBackend: NCCL not available");
 #endif
 }
 
@@ -682,7 +682,7 @@ auto NCCLBackend::barrier() -> void {
     Tensor dummy = zeros({1}, DType::Float32, Device::cuda(device_id));
     all_reduce(dummy, ReduceOp::SUM);
 #else
-    throw std::runtime_error("NCCLBackend: NCCL not available");
+    throw NotImplementedError("NCCLBackend: NCCL not available");
 #endif
 }
 
@@ -713,7 +713,7 @@ auto NCCLBackend::get_communicator(int device_id) -> ncclComm_t {
     init_communicator(device_id);
     return communicators_[device_id];
 #else
-    throw std::runtime_error("NCCLBackend: NCCL not available");
+    throw NotImplementedError("NCCLBackend: NCCL not available");
 #endif
 }
 

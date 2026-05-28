@@ -14,6 +14,7 @@
 #include "tenzor/ops/transform.hpp"
 #include <atomic>
 #include <stdexcept>
+#include "tenzor/utils/error.hpp"  // NotImplementedError (S25 / audit-12)
 #include <memory>
 #include <cstdlib>
 #include <cstring>
@@ -716,7 +717,7 @@ auto NCCLProcessGroup::all_reduce(Tensor& tensor, ReduceOp op) -> void {
 #else
     (void)tensor;
     (void)op;
-    throw std::runtime_error("NCCLProcessGroup: NCCL not available");
+    throw NotImplementedError("NCCLProcessGroup: NCCL not available");
 #endif
 }
 
@@ -751,7 +752,7 @@ auto NCCLProcessGroup::all_reduce_async(Tensor& tensor, ReduceOp op,
     (void)tensor;
     (void)op;
     (void)stream;
-    throw std::runtime_error("NCCLProcessGroup: NCCL not available");
+    throw NotImplementedError("NCCLProcessGroup: NCCL not available");
 #endif
 }
 
@@ -776,7 +777,7 @@ auto NCCLProcessGroup::broadcast(Tensor& tensor, int src_rank) -> void {
 #else
     (void)tensor;
     (void)src_rank;
-    throw std::runtime_error("NCCLProcessGroup: NCCL not available");
+    throw NotImplementedError("NCCLProcessGroup: NCCL not available");
 #endif
 }
 
@@ -826,7 +827,7 @@ auto NCCLProcessGroup::all_gather(std::vector<Tensor>& output,
 #else
     (void)output;
     (void)input;
-    throw std::runtime_error("NCCLProcessGroup: NCCL not available");
+    throw NotImplementedError("NCCLProcessGroup: NCCL not available");
 #endif
 }
 
@@ -862,7 +863,7 @@ auto NCCLProcessGroup::reduce_scatter(Tensor& output,
 #else
     (void)output;
     (void)input;
-    throw std::runtime_error("NCCLProcessGroup: NCCL not available");
+    throw NotImplementedError("NCCLProcessGroup: NCCL not available");
 #endif
 }
 
@@ -879,7 +880,7 @@ auto NCCLProcessGroup::barrier() -> void {
     }
     all_reduce(*barrier_dummy_, ReduceOp::SUM);
 #else
-    throw std::runtime_error("NCCLProcessGroup: NCCL not available");
+    throw NotImplementedError("NCCLProcessGroup: NCCL not available");
 #endif
 }
 
@@ -946,7 +947,7 @@ auto NCCLProcessGroup::all_to_all_single(Tensor& output, const Tensor& input) ->
 #else
     (void)output;
     (void)input;
-    throw std::runtime_error("NCCLProcessGroup: NCCL not available");
+    throw NotImplementedError("NCCLProcessGroup: NCCL not available");
 #endif
 }
 
@@ -984,7 +985,7 @@ auto NCCLProcessGroup::split(int color, int key)
         new NCCLProcessGroup(new_rank, new_size, new_comm));
 #else
     (void)color; (void)key;
-    throw std::runtime_error("NCCLProcessGroup::split: NCCL not available");
+    throw NotImplementedError("NCCLProcessGroup::split: NCCL not available");
 #endif
 }
 

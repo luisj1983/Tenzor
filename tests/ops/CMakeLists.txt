@@ -21,6 +21,12 @@ target_link_libraries(test_fp8_ops PRIVATE tenzor_core GTest::gtest_main)
 add_executable(test_linalg_lu test_linalg_lu.cpp)
 target_link_libraries(test_linalg_lu PRIVATE tenzor_core GTest::gtest_main)
 
+# linalg::norm string-ord variants ("1", "-1", "2", "-2", "inf", "-inf",
+# "nuc") + vector_norm(ord=0) exact L0 count. Release-prep S6.
+add_executable(test_linalg_norm_ords test_linalg_norm_ords.cpp)
+target_link_libraries(test_linalg_norm_ords PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_linalg_norm_ords LABELS "ops" DISCOVERY_TIMEOUT 60)
+
 # Edge case tests (NaN, Inf, empty tensors, size-1 tensors, dtype precision)
 add_executable(test_ops_edge_cases test_edge_cases.cpp)
 target_link_libraries(test_ops_edge_cases PRIVATE tenzor_core GTest::gtest_main)
@@ -234,3 +240,8 @@ tenzor_discover_tests(test_scatter_reduce_multidtype LABELS "ops" DISCOVERY_TIME
 add_executable(test_transform_new_multidtype test_transform_new_multidtype.cpp)
 target_link_libraries(test_transform_new_multidtype PRIVATE tenzor_core GTest::gtest_main)
 tenzor_discover_tests(test_transform_new_multidtype LABELS "ops" DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST BACKENDS multi)
+
+# Griffin-Lim phase reconstruction (Fast Griffin-Lim algorithm). Release-prep S7.
+add_executable(test_griffin_lim test_griffin_lim.cpp)
+target_link_libraries(test_griffin_lim PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_griffin_lim LABELS "ops" DISCOVERY_TIMEOUT 60 BACKENDS cpu)

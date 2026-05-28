@@ -20,7 +20,6 @@ set(CPU_BACKEND_SOURCES
     cpu_caching_allocator.cpp
     cpu_thread_config.cpp
     cpu_kernel_registry.cpp
-    simd.cpp
     kernels/math.cpp
     kernels/math_simd.cpp
     kernels/math_simd_avx512.cpp
@@ -35,6 +34,8 @@ set(CPU_BACKEND_SOURCES
     kernels/creation.cpp
     kernels/conv2d.cpp
     kernels/conv3d.cpp
+    kernels/depthwise_conv1d.cpp
+    kernels/depthwise_conv3d.cpp
     kernels/fused_ops.cpp
     kernels/simd_dispatch.cpp
     kernels/simd_kernels_avx512_f64.cpp
@@ -122,7 +123,8 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
 
         # AVX-512 implementations are in separate translation units so they
         # can be compiled with -mavx512f even in portable mode. Runtime
-        # dispatch (CPUInfo::has_avx512()) selects them only on capable hardware.
+        # dispatch (tenzor::backend::get_simd_features().avx512f) selects them
+        # only on capable hardware.
         set_source_files_properties(
             kernels/math_simd_avx512.cpp
             kernels/activations_simd_avx512.cpp
@@ -143,6 +145,36 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
             kernels/simd_kernels_avx512_f64.cpp
             PROPERTIES COMPILE_DEFINITIONS "TENZOR_HAS_F16C;TENZOR_HAS_FMA"
         )
+
+        # Fix 3: AVX-512 capability check in PORTABLE mode.
+        # The native branch below probes the compiler for AVX-512 intrinsics
+        # and sets the TENZOR_HAS_AVX512 compile definition target-wide so
+        # `#ifdef TENZOR_HAS_AVX512` in headers / non-AVX512 TUs can see it.
+        # Without this same check in portable mode, those headers always
+        # think AVX-512 is off — even though the per-file -mavx512f flag
+        # above does generate real AVX-512 code in math_simd_avx512.cpp and
+        # friends. Probe with -mavx512f directly so the result reflects
+        # compiler capability (not build-host CPU); the runtime dispatcher
+        # gates actual execution on the running CPU's features.
+        include(CheckCXXSourceCompiles)
+        set(CMAKE_REQUIRED_FLAGS "-mavx512f")
+        check_cxx_source_compiles("
+            #include <immintrin.h>
+            int main() {
+                __m512 a = _mm512_setzero_ps();
+                __m512 b = _mm512_add_ps(a, a);
+                (void)b;
+                return 0;
+            }
+        " TENZOR_HAS_AVX512_PORTABLE)
+        unset(CMAKE_REQUIRED_FLAGS)
+
+        if(TENZOR_HAS_AVX512_PORTABLE)
+            target_compile_definitions(tenzor_backend_cpu PRIVATE TENZOR_HAS_AVX512)
+            message(STATUS "CPU Backend: AVX-512 codegen available in PORTABLE mode (runtime-dispatched)")
+        else()
+            message(STATUS "CPU Backend: PORTABLE mode - compiler does not support -mavx512f, AVX-512 kernels disabled")
+        endif()
 
     else()
         # ============================================================
@@ -263,6 +295,28 @@ elseif(CMAKE_CXX_COMPILER_ID MATCHES "MSVC")
             kernels/pooling_avx512.cpp
             PROPERTIES COMPILE_OPTIONS "/arch:AVX512"
         )
+
+        # Fix 3 (MSVC portable): mirror native-branch AVX-512 capability check
+        # so TENZOR_HAS_AVX512 is visible to non-AVX512 TUs in portable mode.
+        include(CheckCXXSourceCompiles)
+        set(CMAKE_REQUIRED_FLAGS "/arch:AVX512")
+        check_cxx_source_compiles("
+            #include <immintrin.h>
+            int main() {
+                __m512 a = _mm512_setzero_ps();
+                __m512 b = _mm512_add_ps(a, a);
+                (void)b;
+                return 0;
+            }
+        " TENZOR_HAS_AVX512_PORTABLE_MSVC)
+        unset(CMAKE_REQUIRED_FLAGS)
+
+        if(TENZOR_HAS_AVX512_PORTABLE_MSVC)
+            target_compile_definitions(tenzor_backend_cpu PRIVATE TENZOR_HAS_AVX512)
+            message(STATUS "CPU Backend: AVX-512 codegen available in PORTABLE mode (MSVC, runtime-dispatched)")
+        else()
+            message(STATUS "CPU Backend: PORTABLE mode (MSVC) - /arch:AVX512 not supported, AVX-512 kernels disabled")
+        endif()
     else()
         message(STATUS "CPU Backend: NATIVE mode (MSVC) - using /arch:AVX2")
         target_compile_options(tenzor_backend_cpu PRIVATE
@@ -366,19 +420,39 @@ if(ONEDNN_MODULE_FOUND AND ONEDNN_FOUND)
     # provides scalable_free) is loaded and initialized BEFORE libtbb.so.12.
     # Directly linking both libraries before dnnl puts them in the NEEDED list
     # ahead of dnnl's transitive dependencies.
+    # Search for TBB libs via env-controlled HINTS only. The previous version
+    # had a hard-coded "/opt/intel/oneapi/2025.3/lib" path that pinned the
+    # build to a specific oneAPI point release and broke on every bump.
+    # Users / CI should set TBBROOT or ONEAPI_ROOT (oneAPI's setvars.sh does
+    # both). System TBB (e.g. apt's libtbb-dev) is picked up via the default
+    # search path.
     find_library(_tbb_release NAMES tbb
         HINTS "${TBBROOT}/lib" "$ENV{TBBROOT}/lib"
               "${ONEAPI_ROOT}/lib" "$ENV{ONEAPI_ROOT}/lib"
-              "/opt/intel/oneapi/2025.3/lib")
+              "${ONEAPI_ROOT}/tbb/latest/lib" "$ENV{ONEAPI_ROOT}/tbb/latest/lib")
     find_library(_tbbmalloc_release NAMES tbbmalloc
         HINTS "${TBBROOT}/lib" "$ENV{TBBROOT}/lib"
               "${ONEAPI_ROOT}/lib" "$ENV{ONEAPI_ROOT}/lib"
-              "/opt/intel/oneapi/2025.3/lib")
+              "${ONEAPI_ROOT}/tbb/latest/lib" "$ENV{ONEAPI_ROOT}/tbb/latest/lib")
     if(_tbbmalloc_release AND _tbb_release)
         # Link tbbmalloc FIRST, then tbb — ensures tbbmalloc inits before tbb
         target_link_libraries(tenzor_backend_cpu PRIVATE
             ${_tbbmalloc_release} ${_tbb_release})
         message(STATUS "CPU Backend: Linked release TBB libs for init order fix")
+    else()
+        # Fix 4: oneDNN is enabled, but TBB libs were not located. oneDNN's
+        # libdnnl.so has libtbb.so.12 in its NEEDED list and the load-order
+        # workaround above relies on linking libtbbmalloc.so.2 ahead of
+        # libdnnl. Silently skipping would yield a binary that segfaults at
+        # process exit (or worse, mid-run on Debug builds where libtbb_debug
+        # is selected). Fail the configure so the user installs TBB or
+        # sources oneAPI's setvars.sh first.
+        message(FATAL_ERROR
+            "CPU Backend: Intel oneDNN is enabled but TBB (libtbb / libtbbmalloc) "
+            "was not found. Install libtbb-dev (Debian/Ubuntu) or set TBBROOT / "
+            "ONEAPI_ROOT to a oneAPI tree before re-running cmake. To disable "
+            "oneDNN entirely, configure with -DTENZOR_USE_ONEDNN=OFF (or remove "
+            "the oneDNN install from CMAKE_PREFIX_PATH).")
     endif()
 
     target_link_libraries(tenzor_backend_cpu PRIVATE ${ONEDNN_LIBRARIES})

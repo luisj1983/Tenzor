@@ -1,72 +1,92 @@
-"""LogNormal distribution."""
+"""LogNormal distribution — Tensor-native.
+
+Reparameterisation: if ``X ~ Normal(loc, scale)`` then ``exp(X) ~
+LogNormal(loc, scale)``.  ``tz.exp`` lacks a Variable overload, so the
+reparam path cannot be expressed in Variable arithmetic alone.  We
+sample at Tensor level only and disable ``rsample``.
+"""
+from __future__ import annotations
+
 import math
+
 import numpy as np
-# V.39: scipy is lazy (see distribution.py).
-from .distribution import Distribution, _to_numpy, _require_scipy_special
+
+import tenzor as _tz
+from tenzor.tenzor_core import Tensor, Variable  # type: ignore
+
+from .distribution import (
+    Distribution,
+    _broadcast_shape,
+    _shape_of,
+    _to_variable,
+    _wrap_numpy,
+    _require_scipy_special,
+)
+from ._reparam import standard_normal
 
 
 class LogNormal(Distribution):
-    """LogNormal(loc, scale) distribution.
+    """``LogNormal(loc, scale)``."""
 
-    If X ~ Normal(loc, scale), then exp(X) ~ LogNormal(loc, scale).
-
-    Args:
-        loc: Mean of the underlying normal (scalar or array).
-        scale: Standard deviation of the underlying normal (scalar or array, > 0).
-    """
-
-    has_rsample = True
+    has_rsample = False
 
     def __init__(self, loc, scale):
-        self.loc = _to_numpy(loc)
-        self.scale = _to_numpy(scale)
-        super().__init__(np.broadcast_shapes(self.loc.shape, self.scale.shape))
+        self.loc = _to_variable(loc)
+        self.scale = _to_variable(scale)
+        super().__init__(_broadcast_shape(_shape_of(self.loc), _shape_of(self.scale)))
 
     @property
     def mean(self):
-        return np.exp(self.loc + 0.5 * self.scale ** 2)
+        loc_np = np.asarray(self.loc.tensor(), dtype=np.float64)
+        scale_np = np.asarray(self.scale.tensor(), dtype=np.float64)
+        return _wrap_numpy(np.exp(loc_np + 0.5 * scale_np ** 2))
 
     @property
     def variance(self):
-        s2 = self.scale ** 2
-        return (np.exp(s2) - 1.0) * np.exp(2.0 * self.loc + s2)
+        loc_np = np.asarray(self.loc.tensor(), dtype=np.float64)
+        scale_np = np.asarray(self.scale.tensor(), dtype=np.float64)
+        s2 = scale_np ** 2
+        return _wrap_numpy((np.exp(s2) - 1.0) * np.exp(2.0 * loc_np + s2))
 
     def sample(self, sample_shape=()):
-        shape = tuple(sample_shape) + self._batch_shape
-        return np.random.lognormal(self.loc, self.scale, size=shape or None)
-
-    def rsample(self, sample_shape=()):
-        return self.sample(sample_shape)
+        out_shape = tuple(sample_shape) + self._batch_shape
+        z = np.asarray(standard_normal(out_shape if out_shape else []), dtype=np.float32)
+        loc_np = np.asarray(self.loc.tensor(), dtype=np.float32)
+        scale_np = np.asarray(self.scale.tensor(), dtype=np.float32)
+        return _wrap_numpy(np.exp(loc_np + scale_np * z))
 
     def log_prob(self, value):
-        value = _to_numpy(value)
-        z = (np.log(value) - self.loc) / self.scale
-        return (-0.5 * (math.log(2 * math.pi) + z * z)
-                - np.log(self.scale) - np.log(value))
+        v_np = np.asarray(_to_variable(value).tensor(), dtype=np.float64)
+        loc_np = np.asarray(self.loc.tensor(), dtype=np.float64)
+        scale_np = np.asarray(self.scale.tensor(), dtype=np.float64)
+        z = (np.log(v_np) - loc_np) / scale_np
+        out = (-0.5 * (math.log(2.0 * math.pi) + z * z)
+               - np.log(scale_np) - np.log(v_np))
+        return _wrap_numpy(out)
 
     def cdf(self, value):
         scipy_special = _require_scipy_special()
-        value = _to_numpy(value)
-        return 0.5 * (1.0 + scipy_special.erf(
-            (np.log(value) - self.loc) / (self.scale * math.sqrt(2.0))
-        ))
-
-    def entropy(self):
-        # H = log(scale * exp(loc + 0.5) * sqrt(2*pi))
-        return self.loc + np.log(self.scale) + 0.5 * (1.0 + math.log(2 * math.pi))
+        v_np = np.asarray(_to_variable(value).tensor(), dtype=np.float64)
+        loc_np = np.asarray(self.loc.tensor(), dtype=np.float64)
+        scale_np = np.asarray(self.scale.tensor(), dtype=np.float64)
+        out = 0.5 * (1.0 + scipy_special.erf((np.log(v_np) - loc_np) /
+                                             (scale_np * math.sqrt(2.0))))
+        return _wrap_numpy(out)
 
     def icdf(self, q):
-        """Inverse CDF of LogNormal (audit item E.5).
-
-        Q(q) = exp(loc + scale * Phi^{-1}(q))   where Phi^{-1} is the
-        inverse standard normal CDF (scipy.special.ndtri).
-        """
         ndtri = _require_scipy_special().ndtri
-        q = np.asarray(q, dtype=np.float64)
-        # Clip away the 0/1 endpoints so ndtri does not return ±inf.
+        q_np = np.asarray(_to_variable(q).tensor(), dtype=np.float64)
+        loc_np = np.asarray(self.loc.tensor(), dtype=np.float64)
+        scale_np = np.asarray(self.scale.tensor(), dtype=np.float64)
         eps = 1e-12
-        q_clip = np.clip(q, eps, 1.0 - eps)
-        return np.exp(self.loc + self.scale * ndtri(q_clip))
+        q_clip = np.clip(q_np, eps, 1.0 - eps)
+        return _wrap_numpy(np.exp(loc_np + scale_np * ndtri(q_clip)))
+
+    def entropy(self):
+        loc_np = np.asarray(self.loc.tensor(), dtype=np.float64)
+        scale_np = np.asarray(self.scale.tensor(), dtype=np.float64)
+        return _wrap_numpy(loc_np + np.log(scale_np)
+                           + 0.5 * (1.0 + math.log(2.0 * math.pi)))
 
     def support(self):
         return "(0, inf)"

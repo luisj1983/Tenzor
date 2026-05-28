@@ -380,8 +380,255 @@ class MultiplicativeLR(LRScheduler):
         verbose: bool = False
     ) -> None: ...
 
+# Stream S10: extra schedulers, additional optimizers, and config types.
+# All of these are registered by ``python/bindings/bindings_optim.cpp`` but
+# were previously absent from the stub, so static type-checkers reported
+# "undefined attribute" on legitimate ``tz.optim.SAM(...)`` calls etc.
+# Constructor signatures are extracted from the binding's ``py::init`` /
+# ``py::class_`` declarations where straightforward; opaque or heavily
+# overloaded classes use the minimal ``def __init__(self, *args, **kwargs)``
+# escape hatch to surface the name without lying about parameters.
+
+
+class ConstantLR(LRScheduler):
+    """Multiplies the learning rate by a constant ``factor`` until ``total_iters``."""
+
+    def __init__(
+        self,
+        optimizer: Optimizer,
+        factor: float = 1.0 / 3.0,
+        total_iters: int = 5,
+    ) -> None: ...
+
+
+class LinearLR(LRScheduler):
+    """Linearly interpolates the learning rate from ``start_factor`` to ``end_factor``."""
+
+    def __init__(
+        self,
+        optimizer: Optimizer,
+        start_factor: float = 1.0 / 3.0,
+        end_factor: float = 1.0,
+        total_iters: int = 5,
+    ) -> None: ...
+
+
+class SequentialLR(LRScheduler):
+    """Switches between a list of schedulers at the given milestone steps."""
+
+    def __init__(
+        self,
+        optimizer: Optimizer,
+        schedulers: List[LRScheduler],
+        milestones: List[int],
+    ) -> None: ...
+
+
+class ChainedScheduler(LRScheduler):
+    """Composes multiple schedulers, applying each in turn at every step."""
+
+    def __init__(self, schedulers: List[LRScheduler]) -> None: ...
+
+
+class SWALR(LRScheduler):
+    """SWA learning-rate schedule (constant after the swa_lr ramp)."""
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None: ...
+
+
+# Additional optimizers exposed by the C++ bindings but previously missing
+# from the stub.
+
+class ASGD(Optimizer):
+    """Averaged Stochastic Gradient Descent."""
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None: ...
+
+
+class LAMB(Optimizer):
+    """Layer-wise Adaptive Moments (LAMB) optimizer."""
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None: ...
+
+
+class SparseAdam(Optimizer):
+    """Adam optimizer specialised for sparse gradients."""
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None: ...
+
+
+class Rprop(Optimizer):
+    """Resilient backpropagation optimizer."""
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None: ...
+
+
+class SAM(Optimizer):
+    """Sharpness-Aware Minimization wrapper around a base optimizer."""
+
+    def __init__(
+        self,
+        base_optimizer: Optimizer,
+        rho: float = 0.05,
+    ) -> None: ...
+
+    def first_step(self) -> None: ...
+    def second_step(self) -> None: ...
+    def set_lr(self, lr: float) -> None: ...
+    def get_lr(self) -> float: ...
+    def get_rho(self) -> float: ...
+    def set_rho(self, rho: float) -> None: ...
+    def base_optimizer(self) -> Optimizer: ...
+
+
+class AveragedModel:
+    """Maintains a running average of model parameters (SWA/EMA)."""
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None: ...
+
+
+class AdamAtan2(Optimizer):
+    """Adam variant using atan2 normalisation (epsilon-free)."""
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None: ...
+
+
+# Gradient-clipping configuration types.
+
+class ClipMode:
+    """Enum: gradient-clipping mode (NONE / NORM / VALUE)."""
+
+    NONE: ClipMode
+    NORM: ClipMode
+    VALUE: ClipMode
+
+    @property
+    def name(self) -> str: ...
+    @property
+    def value(self) -> int: ...
+
+
+class ClipConfig:
+    """Configuration for per-step gradient clipping inside an Optimizer."""
+
+    def __init__(
+        self,
+        mode: ClipMode = ...,
+        max_norm: float = 1.0,
+        norm_type: float = 2.0,
+    ) -> None: ...
+
+
+class LBFGSLineSearch:
+    """Enum: line-search strategy for LBFGS (Armijo / StrongWolfe)."""
+
+    Armijo: LBFGSLineSearch
+    StrongWolfe: LBFGSLineSearch
+
+
+# ZeRO partitioned-optimizer configs and optimizers.
+
+class ZeROStage1Config:
+    """Configuration for ZeROStage1Optimizer (optimizer-state partitioning)."""
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None: ...
+
+
+class ZeROStage2Config(ZeROStage1Config):
+    """Configuration for ZeROStage2Optimizer (Stage1 + gradient partitioning)."""
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None: ...
+
+
+class ZeROStage3Config(ZeROStage2Config):
+    """Configuration for ZeROStage3Optimizer (Stage2 + parameter partitioning)."""
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None: ...
+
+
+class ZeROStage1Optimizer:
+    """ZeRO Stage 1: partition optimizer state across ranks."""
+
+    def __init__(
+        self,
+        base_optimizer: Optimizer,
+        config: ZeROStage1Config,
+    ) -> None: ...
+
+    def step(self) -> None: ...
+    def zero_grad(self, set_to_none: bool = True) -> None: ...
+    def state_dict(self) -> Dict[str, Any]: ...
+    def load_state_dict(self, state: Dict[str, Any]) -> None: ...
+
+
+class ZeROStage2Optimizer(ZeROStage1Optimizer):
+    """ZeRO Stage 2: Stage 1 plus gradient partitioning."""
+
+    def __init__(
+        self,
+        base_optimizer: Optimizer,
+        config: ZeROStage2Config,
+    ) -> None: ...
+
+
+class ZeROStage3Optimizer(ZeROStage2Optimizer):
+    """ZeRO Stage 3: Stage 2 plus parameter partitioning."""
+
+    def __init__(
+        self,
+        base_optimizer: Optimizer,
+        config: ZeROStage3Config,
+    ) -> None: ...
+
+
+# ---------------------------------------------------------------------------
+# Submodule re-export: ``tenzor.optim.lr_scheduler``.
+#
+# C++ bindings register every LR scheduler under ``tenzor.optim.lr_scheduler``
+# for PyTorch parity (``torch.optim.lr_scheduler.StepLR`` etc.). ``__init__.py``
+# also hoists those classes to the top-level ``tenzor.optim`` namespace so the
+# top-level declarations above remain accurate. The submodule alias here lets
+# ``from tenzor.optim.lr_scheduler import StepLR`` typecheck cleanly.
+# ---------------------------------------------------------------------------
+
+
+class lr_scheduler:
+    """``tenzor.optim.lr_scheduler`` submodule (PyTorch-style alias).
+
+    Every scheduler registered on this submodule is also re-exported at the
+    top of ``tenzor.optim``; the two names resolve to the same class object.
+    """
+
+    LRScheduler = LRScheduler
+    StepLR = StepLR
+    MultiStepLR = MultiStepLR
+    ExponentialLR = ExponentialLR
+    CosineAnnealingLR = CosineAnnealingLR
+    CosineAnnealingWarmRestarts = CosineAnnealingWarmRestarts
+    ReduceLROnPlateau = ReduceLROnPlateau
+    CyclicLR = CyclicLR
+    OneCycleLR = OneCycleLR
+    LambdaLR = LambdaLR
+    MultiplicativeLR = MultiplicativeLR
+    ConstantLR = ConstantLR
+    LinearLR = LinearLR
+    SequentialLR = SequentialLR
+    ChainedScheduler = ChainedScheduler
+    SWALR = SWALR
+
+
 # Audit E.10: clip_grad_norm_ / clip_grad_value_ live in tenzor.nn.functional
 # (and are re-exported through tenzor.nn). The previous declarations here
 # never existed in `tenzor.optim` at runtime and drove typecheckers to
 # "undefined attribute" on legitimate `tz.nn.functional.clip_grad_norm_`
 # calls. The canonical declarations are in functional.pyi / nn.pyi.
+
+# Stream S23: pybind11 hoists ``ClipMode`` and ``LBFGSLineSearch`` enum
+# members to the parent ``tenzor.optim`` namespace (so users can write
+# ``tz.optim.NORM`` as shorthand for ``tz.optim.ClipMode.NORM``). Declare
+# them at module scope so static checkers see the shortcuts.
+NONE: ClipMode
+NORM: ClipMode
+VALUE: ClipMode
+Armijo: LBFGSLineSearch
+StrongWolfe: LBFGSLineSearch

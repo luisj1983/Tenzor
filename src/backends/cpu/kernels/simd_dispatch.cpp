@@ -11,6 +11,7 @@
  */
 
 #include "simd_dispatch.hpp"
+#include "tenzor/backend/runtime_simd.hpp"
 #include "simd_fast_math.hpp"
 #include <cmath>
 #include <cstdlib>
@@ -460,9 +461,9 @@ static const char* resolve_simd_level() {
         if (std::strcmp(env, "avx512") == 0) return "avx512";
     }
     // Auto-detect
-    const auto& cpu = CPUInfo::get();
-    if (cpu.has_avx512()) return "avx512";
-    if (cpu.has_avx2())   return "avx2";
+    const auto& cpu = ::tenzor::backend::get_simd_features();
+    if (cpu.avx512f) return "avx512";
+    if (cpu.avx2)    return "avx2";
     return "scalar";
 }
 
@@ -473,14 +474,14 @@ static const char* resolve_simd_level() {
 static void do_init() {
     const char* level = resolve_simd_level();
 
-    if (std::strcmp(level, "avx512") == 0 && CPUInfo::get().has_avx512()) {
+    if (std::strcmp(level, "avx512") == 0 && ::tenzor::backend::get_simd_features().avx512f) {
         populate_avx512();
         return;
     }
 
 #if defined(__AVX2__)
     if ((std::strcmp(level, "avx2") == 0 || std::strcmp(level, "avx512") == 0)
-            && CPUInfo::get().has_avx2()) {
+            && ::tenzor::backend::get_simd_features().avx2) {
         populate_avx2();
         return;
     }

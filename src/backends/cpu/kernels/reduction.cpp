@@ -1122,6 +1122,141 @@ auto sum_kernel(const Tensor& input_raw, int64_t dim, bool keepdim) -> Tensor {
             }
             break;
         }
+        // S14: small integer types are routed through the generic sum_impl<T>
+        // and sum_along_dim<T> templates. The public `tenzor::sum()` op
+        // promotes Int8/UInt8/Int16/UInt16/Int32/UInt32/Bool to Int64
+        // *before* dispatching here, so these branches only fire on
+        // direct kernel calls / backend-parity probes. Output dtype
+        // matches input dtype for kernel-level consistency with the
+        // existing Int32 / Int64 contract; overflow safety is the
+        // responsibility of the public-op promotion layer.
+        case DType::Int8: {
+            auto* input_data = input.data<int8_t>();
+            auto* output_data = output.data<int8_t>();
+            if (dim == REDUCE_ALL) {
+                output_data[0] = sum_impl(input_data, input.numel());
+            } else {
+                sum_along_dim(input_data, output_data,
+                            std::vector<int64_t>(input_shape.begin(), input_shape.end()),
+                            std::vector<int64_t>(input_strides.begin(), input_strides.end()),
+                            dim);
+            }
+            break;
+        }
+        case DType::UInt8: {
+            auto* input_data = input.data<uint8_t>();
+            auto* output_data = output.data<uint8_t>();
+            if (dim == REDUCE_ALL) {
+                output_data[0] = sum_impl(input_data, input.numel());
+            } else {
+                sum_along_dim(input_data, output_data,
+                            std::vector<int64_t>(input_shape.begin(), input_shape.end()),
+                            std::vector<int64_t>(input_strides.begin(), input_strides.end()),
+                            dim);
+            }
+            break;
+        }
+        case DType::Int16: {
+            auto* input_data = input.data<int16_t>();
+            auto* output_data = output.data<int16_t>();
+            if (dim == REDUCE_ALL) {
+                output_data[0] = sum_impl(input_data, input.numel());
+            } else {
+                sum_along_dim(input_data, output_data,
+                            std::vector<int64_t>(input_shape.begin(), input_shape.end()),
+                            std::vector<int64_t>(input_strides.begin(), input_strides.end()),
+                            dim);
+            }
+            break;
+        }
+        case DType::UInt16: {
+            auto* input_data = input.data<uint16_t>();
+            auto* output_data = output.data<uint16_t>();
+            if (dim == REDUCE_ALL) {
+                output_data[0] = sum_impl(input_data, input.numel());
+            } else {
+                sum_along_dim(input_data, output_data,
+                            std::vector<int64_t>(input_shape.begin(), input_shape.end()),
+                            std::vector<int64_t>(input_strides.begin(), input_strides.end()),
+                            dim);
+            }
+            break;
+        }
+        case DType::UInt32: {
+            auto* input_data = input.data<uint32_t>();
+            auto* output_data = output.data<uint32_t>();
+            if (dim == REDUCE_ALL) {
+                output_data[0] = sum_impl(input_data, input.numel());
+            } else {
+                sum_along_dim(input_data, output_data,
+                            std::vector<int64_t>(input_shape.begin(), input_shape.end()),
+                            std::vector<int64_t>(input_strides.begin(), input_strides.end()),
+                            dim);
+            }
+            break;
+        }
+        case DType::UInt64: {
+            auto* input_data = input.data<uint64_t>();
+            auto* output_data = output.data<uint64_t>();
+            if (dim == REDUCE_ALL) {
+                output_data[0] = sum_impl(input_data, input.numel());
+            } else {
+                sum_along_dim(input_data, output_data,
+                            std::vector<int64_t>(input_shape.begin(), input_shape.end()),
+                            std::vector<int64_t>(input_strides.begin(), input_strides.end()),
+                            dim);
+            }
+            break;
+        }
+        case DType::Bool: {
+            // For Bool input, `bool` accumulators are semantically broken
+            // (`bool sum=0; sum += bool[i]` collapses to logical-or).
+            // Use a wider int64_t accumulator internally but write back
+            // as bool (output = any non-zero contribution), preserving
+            // the input-dtype-equals-output-dtype contract. The public
+            // `tenzor::sum()` op promotes Bool→Int64 before dispatch,
+            // so kernel-level Bool sum is only reached via direct calls
+            // and yields a numerically-defensible "any" semantics.
+            auto* input_data = input.data<bool>();
+            auto* output_data = output.data<bool>();
+            const int64_t shape_ndim = static_cast<int64_t>(input_shape.size());
+            if (dim == REDUCE_ALL) {
+                int64_t count = 0;
+                const int64_t n = input.numel();
+                for (int64_t i = 0; i < n; ++i) {
+                    count += input_data[i] ? 1 : 0;
+                }
+                output_data[0] = (count != 0);
+            } else {
+                const int64_t dim_size = input_shape[dim];
+                int64_t output_size = 1;
+                for (int64_t i = 0; i < shape_ndim; i++) {
+                    if (i != dim) output_size *= input_shape[i];
+                }
+                const int64_t total_work = output_size * dim_size;
+                #pragma omp parallel for if(total_work > REDUCTION_OMP_THRESHOLD)
+                for (int64_t out_idx = 0; out_idx < output_size; out_idx++) {
+                    std::vector<int64_t> indices(shape_ndim, 0);
+                    int64_t tmp = out_idx;
+                    for (int64_t d = shape_ndim - 1; d >= 0; --d) {
+                        if (d == dim) continue;
+                        indices[d] = tmp % input_shape[d];
+                        tmp /= input_shape[d];
+                    }
+                    int64_t count = 0;
+                    for (int64_t i = 0; i < dim_size; i++) {
+                        indices[dim] = i;
+                        int64_t in_idx = 0;
+                        for (int64_t d = 0; d < shape_ndim; d++) {
+                            in_idx += indices[d] * input_strides[d];
+                        }
+                        count += input_data[in_idx] ? 1 : 0;
+                    }
+                    output_data[out_idx] = (count != 0);
+                }
+            }
+            break;
+        }
         default:
             throw std::runtime_error("sum: unsupported dtype");
     }

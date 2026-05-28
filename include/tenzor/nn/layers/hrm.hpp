@@ -575,6 +575,15 @@ public:
     auto last_forward_stats() const -> const ForwardStats& { return stats_; }
 
     /**
+     * @brief Compute the activation participation ratio for an arbitrary
+     *        activation tensor. Public for diagnostics / regression tests
+     *        (S27 audit verified the underlying metric is now rank-aware).
+     */
+    auto participation_ratio_for(const Variable& state) -> double {
+        return compute_participation_ratio(state);
+    }
+
+    /**
      * @brief Get Q-Learning ACT module (for external training/monitoring)
      */
     auto get_qlearning_act() -> std::shared_ptr<QLearningACT> { return qlearning_act_; }

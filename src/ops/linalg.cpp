@@ -615,7 +615,34 @@ auto norm(const Tensor& A, const std::string& ord) -> Tensor {
         return tenzor::sqrt(s);
     }
 
-    throw std::runtime_error("linalg::norm: unsupported norm order '" + ord + "' (supported: 'fro')");
+    if (ord == "nuc") {
+        // Nuclear norm: sum of singular values. Requires SVD which currently
+        // dispatches to LAPACKE on CPU (Float32/Float64). svdvals() already
+        // validates the at-least-2-D requirement.
+        auto S = svdvals(A);
+        // Reduce over the singular-value axis (last); leave any leading batch
+        // dims intact so the result shape matches matrix_norm's contract.
+        return tenzor::sum(S, /*dim=*/-1, /*keepdim=*/false);
+    }
+
+    // Induced p-norms: parse and delegate to matrix_norm, which already
+    // handles all of ±1 / ±2 / ±inf.
+    double ord_double = 0.0;
+    bool parsed = false;
+    if (ord == "1") { ord_double = 1.0;  parsed = true; }
+    else if (ord == "-1")   { ord_double = -1.0; parsed = true; }
+    else if (ord == "2")    { ord_double = 2.0;  parsed = true; }
+    else if (ord == "-2")   { ord_double = -2.0; parsed = true; }
+    else if (ord == "inf")  { ord_double = std::numeric_limits<double>::infinity();  parsed = true; }
+    else if (ord == "-inf") { ord_double = -std::numeric_limits<double>::infinity(); parsed = true; }
+
+    if (parsed) {
+        return matrix_norm(A, ord_double);
+    }
+
+    throw std::runtime_error(
+        "linalg::norm: unsupported norm order '" + ord +
+        "' (supported: 'fro', 'nuc', '1', '-1', '2', '-2', 'inf', '-inf')");
 }
 
 auto slogdet(const Tensor& A) -> std::tuple<Tensor, Tensor> {
@@ -2246,36 +2273,17 @@ auto vector_norm(const Tensor& input, double ord,
         // ord = -inf: min(abs(x))
         return reduce_min(tenzor::abs(x), dim, keepdim);
     } else if (ord == 0.0) {
-        // ord = 0: count of nonzero elements (L0 "norm")
-        // nonzero: cast abs(x) > 0 to float, then sum
-        auto nonzero = tenzor::abs(x);
-        // Clamp to 0/1: sign of abs gives 0 for zero, 1 for positive
-        // Use pow(abs(x), 0) but that gives 1 for 0 too... use comparison instead
-        // abs(x) != 0 -> we can use: min(abs(x), 1) via pow then sum
-        // Simpler: sum(abs(x) > 0) — but we don't have a > operator returning float.
-        // Use: sum(sign(abs(x)))  — sign(0) = 0, sign(positive) = 1
-        auto signs = tenzor::abs(nonzero);  // already abs
-        // Actually: use pow(abs(x), tiny_exponent) and floor, or just:
-        // sign(abs(x)) works because abs(x) >= 0, and sign(0) = 0, sign(pos) = 1
-        auto indicator = tenzor::pow(tenzor::abs(x), 0.0f);
-        // pow(0, 0) = 1 in most implementations, so this doesn't work either.
-        // Correct approach: (abs(x) > 0) as float. We can approximate:
-        // clamp(abs(x), 0, 1) then ceil. Or simply: abs(x) / (abs(x) + epsilon)
-        // rounded. Simplest correct: use the fact that sign returns -1,0,1 and
-        // abs of that gives 0 or 1 for the abs'd input.
-        // sign(abs(x)) = 0 if x==0, 1 if x!=0 (since abs(x) >= 0).
-        // But we don't have sign()... Let's use: min(abs(x) * huge, 1.0).
-        // Actually let's just do: abs(x) != 0 via (abs(x) > 0) which is mul with 0 < check.
-        // Simplest working approach for L0: sum(pow(abs(x), epsilon)) won't work.
-        // Let's just count: treat as sum of (x != 0) using the expression:
-        // 1 - pow(1 - min(abs(x), 1), huge). Or just keep it simple:
-        auto ax = tenzor::abs(x);
-        // For a clean implementation: create a ones_like, then zero where ax == 0.
-        // Since we don't have element-wise comparison yielding float, use:
-        // ax / (ax + 1e-38) which is ~1 for nonzero, ~0 for zero (in float32)
-        auto eps_tensor = tenzor::mul(tenzor::ones_like(ax), 1e-38);
-        auto counts = tenzor::mul(ax, tenzor::pow(tenzor::add(ax, eps_tensor), -1.0f));
-        return reduce_sum(counts, dim, keepdim);
+        // ord = 0: count of nonzero entries (the L0 "norm", which isn't a
+        // norm but is universally documented under this name).
+        // Build an exact 0/1 indicator via element-wise inequality with 0
+        // (returns Bool), cast to the input dtype, then sum-reduce. This
+        // replaces the older `ax / (ax + 1e-38)` trick whose asymptote was
+        // never exactly 1 — it biased every nonzero entry slightly low and
+        // could even mis-count finite-but-tiny values as fractional.
+        auto zero_tensor = tenzor::full({}, 0.0, x.dtype(), x.device());
+        auto nz_mask = tenzor::ne(x, zero_tensor);              // Bool
+        auto nz_count = nz_mask.to(x.dtype());                  // 0/1 in input dtype
+        return reduce_sum(nz_count, dim, keepdim);
     } else if (ord == 1.0) {
         return reduce_sum(tenzor::abs(x), dim, keepdim);
     } else if (ord == 2.0) {

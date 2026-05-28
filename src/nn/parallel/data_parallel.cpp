@@ -7,6 +7,8 @@
 #include "tenzor/core/device.hpp"
 #include "tenzor/ops/transform.hpp"
 #include "tenzor/utils/error.hpp"
+#include "tenzor/utils/autograd_wrap.hpp"
+#include "tenzor/autograd/ops.hpp"  // autograd-aware tenzor::cat for gather()
 #include "tenzor/distributed/process_group.hpp"  // A1/B5: PG-aware grad all_reduce
 #include "tenzor/distributed/distributed.hpp"     // ReduceOp enum
 #include <stdexcept>
@@ -449,23 +451,37 @@ auto DataParallel::gather(const std::vector<Variable>& outputs) -> Variable {
         return outputs[0];
     }
 
-    // Move all outputs to master device
-    std::vector<Tensor> tensors_on_master;
-    tensors_on_master.reserve(outputs.size());
+    // Move each replica output to the master device WITHOUT severing the
+    // grad_fn chain. The previous implementation extracted .tensor() and
+    // wrapped the cat result with the leaf Variable(Tensor) ctor — that
+    // discards every replica's forward graph and makes backward dead-end
+    // at the gather, silently zeroing all upstream gradients.
+    //
+    // Variables are kept in-place: we only swap the underlying data tensor
+    // when a cross-device transfer is required (using wrap_preserving_grad
+    // so grad_fn is preserved across the move). The autograd-aware
+    // tenzor::cat(vector<Variable>, dim) then registers a CatBackward node
+    // whose inputs are these per-replica Variables, chaining the gather
+    // through each replica's forward pass exactly as PyTorch's gather does.
+    std::vector<Variable> outputs_on_master;
+    outputs_on_master.reserve(outputs.size());
 
     for (size_t i = 0; i < outputs.size(); ++i) {
-        auto tensor = outputs[i].tensor();
-        const auto& dev = tensor.device();
+        Variable v = outputs[i];
+        const auto& dev = v.tensor().device();
         if (dev.type != Device::Type::CUDA || dev.index != output_device_) {
-            tensor = tensor.cuda(output_device_);
+            // Transfer the underlying tensor to the master device but keep
+            // this Variable's grad_fn/requires_grad/hooks intact so the
+            // replica's forward graph remains reachable from cat's backward.
+            utils::wrap_preserving_grad(v, v.tensor().cuda(output_device_));
         }
-        tensors_on_master.push_back(tensor);
+        outputs_on_master.push_back(std::move(v));
     }
 
-    // Concatenate along batch dimension
-    auto concatenated = tenzor::cat(tensors_on_master, dim_);
-
-    return Variable(concatenated);
+    // Concatenate along batch dimension via the autograd-aware variant.
+    // Returns a Variable with grad_fn = CatBackward whose saved inputs are
+    // outputs_on_master — backward propagates per-replica gradients.
+    return tenzor::cat(outputs_on_master, dim_);
 }
 
 auto DataParallel::synchronize_gradients() -> void {

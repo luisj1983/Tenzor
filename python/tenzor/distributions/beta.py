@@ -1,25 +1,35 @@
-"""Beta distribution."""
+"""Beta distribution — Tensor-native (sample only)."""
+from __future__ import annotations
+
 import numpy as np
-# V.39: scipy is lazy (see distribution.py).
-from .distribution import Distribution, _to_numpy, _require_scipy_special
+
+from tenzor.tenzor_core import Tensor, Variable  # type: ignore
+
+from .distribution import (
+    Distribution,
+    _broadcast_shape,
+    _shape_of,
+    _to_variable,
+    _wrap_numpy,
+    _require_scipy_special,
+)
 
 
 class Beta(Distribution):
-    """Beta(concentration1, concentration0) distribution on (0, 1).
+    """``Beta(concentration1, concentration0)`` distribution on ``(0, 1)``.
 
-    Args:
-        concentration1: Alpha (scalar or array, > 0).
-        concentration0: Beta (scalar or array, > 0).
+    Gamma-derived reparameterisation is possible in principle but
+    relies on a reparameterisable Gamma sampler, which Tenzor does not
+    yet provide.  ``has_rsample = False``.
     """
 
-    has_rsample = True
+    has_rsample = False
 
     def __init__(self, concentration1, concentration0):
-        self.concentration1 = _to_numpy(concentration1)  # alpha
-        self.concentration0 = _to_numpy(concentration0)  # beta
-        super().__init__(
-            np.broadcast_shapes(self.concentration1.shape, self.concentration0.shape)
-        )
+        self.concentration1 = _to_variable(concentration1)
+        self.concentration0 = _to_variable(concentration0)
+        super().__init__(_broadcast_shape(_shape_of(self.concentration1),
+                                          _shape_of(self.concentration0)))
 
     @property
     def mean(self):
@@ -31,53 +41,49 @@ class Beta(Distribution):
     def variance(self):
         a = self.concentration1
         b = self.concentration0
-        return a * b / ((a + b) ** 2 * (a + b + 1.0))
+        s = a + b
+        return (a * b) / (s * s * (s + 1.0))
 
     def sample(self, sample_shape=()):
-        shape = tuple(sample_shape) + self._batch_shape
-        return np.random.beta(self.concentration1, self.concentration0,
-                              size=shape or None)
-
-    def rsample(self, sample_shape=()):
-        return self.sample(sample_shape)
+        out_shape = tuple(sample_shape) + self._batch_shape
+        a_np = np.asarray(self.concentration1.tensor(), dtype=np.float64)
+        b_np = np.asarray(self.concentration0.tensor(), dtype=np.float64)
+        s = np.random.beta(a_np, b_np, size=out_shape or None)
+        return _wrap_numpy(np.asarray(s, dtype=np.float32))
 
     def log_prob(self, value):
         scipy_special = _require_scipy_special()
-        betaln = scipy_special.betaln
-        value = _to_numpy(value)
-        a = self.concentration1
-        b = self.concentration0
-        # log Beta(x; a, b) = (a-1)*log(x) + (b-1)*log(1-x) - log B(a, b)
-        return ((a - 1.0) * np.log(value)
-                + (b - 1.0) * np.log(1.0 - value)
-                - betaln(a, b))
+        v_np = np.asarray(_to_variable(value).tensor(), dtype=np.float64)
+        a_np = np.asarray(self.concentration1.tensor(), dtype=np.float64)
+        b_np = np.asarray(self.concentration0.tensor(), dtype=np.float64)
+        out = ((a_np - 1.0) * np.log(v_np)
+               + (b_np - 1.0) * np.log(1.0 - v_np)
+               - scipy_special.betaln(a_np, b_np))
+        return _wrap_numpy(out)
 
     def cdf(self, value):
         scipy_special = _require_scipy_special()
-        value = _to_numpy(value)
-        return scipy_special.betainc(self.concentration1, self.concentration0, value)
+        v_np = np.asarray(_to_variable(value).tensor(), dtype=np.float64)
+        a_np = np.asarray(self.concentration1.tensor(), dtype=np.float64)
+        b_np = np.asarray(self.concentration0.tensor(), dtype=np.float64)
+        return _wrap_numpy(scipy_special.betainc(a_np, b_np, v_np))
+
+    def icdf(self, q):
+        scipy_special = _require_scipy_special()
+        q_np = np.asarray(_to_variable(q).tensor(), dtype=np.float64)
+        a_np = np.asarray(self.concentration1.tensor(), dtype=np.float64)
+        b_np = np.asarray(self.concentration0.tensor(), dtype=np.float64)
+        return _wrap_numpy(scipy_special.betaincinv(a_np, b_np, q_np))
 
     def entropy(self):
         scipy_special = _require_scipy_special()
-        betaln = scipy_special.betaln
-        digamma = scipy_special.digamma
-        a = self.concentration1
-        b = self.concentration0
-        # H = log B(a, b) - (a-1)*psi(a) - (b-1)*psi(b) + (a+b-2)*psi(a+b)
-        return (betaln(a, b)
-                - (a - 1.0) * digamma(a)
-                - (b - 1.0) * digamma(b)
-                + (a + b - 2.0) * digamma(a + b))
-
-    def icdf(self, q):
-        """Inverse CDF of Beta(a, b) (audit item E.5).
-
-        Inverts the regularised incomplete beta function via
-        scipy.special.betaincinv.
-        """
-        scipy_special = _require_scipy_special()
-        q = np.asarray(q, dtype=np.float64)
-        return scipy_special.betaincinv(self.concentration1, self.concentration0, q)
+        a_np = np.asarray(self.concentration1.tensor(), dtype=np.float64)
+        b_np = np.asarray(self.concentration0.tensor(), dtype=np.float64)
+        out = (scipy_special.betaln(a_np, b_np)
+               - (a_np - 1.0) * scipy_special.digamma(a_np)
+               - (b_np - 1.0) * scipy_special.digamma(b_np)
+               + (a_np + b_np - 2.0) * scipy_special.digamma(a_np + b_np))
+        return _wrap_numpy(out)
 
     def support(self):
         return "(0, 1)"

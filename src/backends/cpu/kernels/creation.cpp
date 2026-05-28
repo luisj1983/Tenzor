@@ -740,14 +740,21 @@ auto multinomial_kernel(const Tensor& probs, int64_t num_samples, bool replaceme
 
 auto bernoulli_kernel(const Tensor& probs) -> Tensor {
     // probs: any shape tensor of probabilities in [0, 1]
-    // Returns: same shape tensor of 0.0 or 1.0 (Float32)
-    Tensor probs_f32 = (probs.dtype() != DType::Float32) ? probs.to(DType::Float32) : probs;
+    // Returns: same shape tensor of 0.0 or 1.0 with the SAME dtype as `probs`
+    // (S13 fix — dtype-preservation: previously hard-wired to Float32, which
+    // silently downcast Float64 probability tensors).
+    //
+    // Sampling itself runs at Float32 (the RNG distributions are Float32);
+    // the {0,1} output values are exactly representable in every supported
+    // float dtype, so the final cast is lossless.
+    const DType out_dtype = probs.dtype();
+    Tensor probs_f32 = (out_dtype != DType::Float32) ? probs.to(DType::Float32) : probs;
     int64_t n = probs_f32.numel();
 
-    Tensor result(std::vector<int64_t>(probs.shape().begin(), probs.shape().end()),
-                  DType::Float32, probs.device());
+    Tensor result_f32(std::vector<int64_t>(probs.shape().begin(), probs.shape().end()),
+                      DType::Float32, probs.device());
     const float* p_data = probs_f32.data<float>();
-    float* out_data = result.data<float>();
+    float* out_data = result_f32.data<float>();
 
     if (n > static_cast<int64_t>(OMP_THRESHOLD)) {
         unsigned int base_seed = detail::get_base_seed();
@@ -773,19 +780,28 @@ auto bernoulli_kernel(const Tensor& probs) -> Tensor {
         }
     }
 
-    return result;
+    if (out_dtype == DType::Float32) {
+        return result_f32;
+    }
+    return result_f32.to(out_dtype);
 }
 
 auto normal_sample_kernel(const Tensor& mean, const Tensor& std) -> Tensor {
+    // S13 fix — dtype-preservation: output dtype tracks `mean.dtype()` rather
+    // than being hard-wired to Float32. Internal compute stays in Float32
+    // (std::normal_distribution<float> is the supported path); we cast back.
+    // If `mean` and `std` disagree (e.g. promoted), `mean.dtype()` wins —
+    // the lower-rank parameter has already been broadcast/promoted upstream.
+    const DType out_dtype = mean.dtype();
     Tensor mean_f32 = (mean.dtype() != DType::Float32) ? mean.to(DType::Float32) : mean;
     Tensor std_f32 = (std.dtype() != DType::Float32) ? std.to(DType::Float32) : std;
     int64_t n = mean_f32.numel();
 
-    Tensor result(std::vector<int64_t>(mean.shape().begin(), mean.shape().end()),
-                  DType::Float32, mean.device());
+    Tensor result_f32(std::vector<int64_t>(mean.shape().begin(), mean.shape().end()),
+                      DType::Float32, mean.device());
     const float* m_data = mean_f32.data<float>();
     const float* s_data = std_f32.data<float>();
-    float* out_data = result.data<float>();
+    float* out_data = result_f32.data<float>();
 
     if (n > static_cast<int64_t>(OMP_THRESHOLD)) {
         unsigned int base_seed = detail::get_base_seed();
@@ -811,7 +827,10 @@ auto normal_sample_kernel(const Tensor& mean, const Tensor& std) -> Tensor {
         }
     }
 
-    return result;
+    if (out_dtype == DType::Float32) {
+        return result_f32;
+    }
+    return result_f32.to(out_dtype);
 }
 
 auto poisson_sample_kernel(const Tensor& rates) -> Tensor {

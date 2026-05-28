@@ -2,6 +2,7 @@
 #include "tenzor/core/shape.hpp"
 #include "tenzor/backend/dtype_dispatch.hpp"
 #include "tenzor/utils/error.hpp"
+#include "tenzor/utils/widen_narrow.hpp"  // S2: Float16/BFloat16 widen-narrow helper
 #include "tenzor/utils/log.hpp"   // TENZOR_LOG_WARN (F.4)
 #include "broadcast.hpp"
 #include <cstdlib>  // std::getenv for TENZOR_STRICT_BACKEND
@@ -4400,201 +4401,186 @@ auto tan_kernel(const Tensor& input) -> Tensor {
 }
 
 auto asin_kernel(const Tensor& input) -> Tensor {
-    std::vector<int64_t> shape_vec(input.shape().begin(), input.shape().end());
-    auto output = Tensor::empty_uninitialized(shape_vec, input.dtype(), input.device());
-    int64_t n = input.numel();
+    return tenzor::utils::widen_narrow_compute(input, [&](const Tensor& x_wide) -> Tensor {
+        std::vector<int64_t> shape_vec(x_wide.shape().begin(), x_wide.shape().end());
+        auto output = Tensor::empty_uninitialized(shape_vec, x_wide.dtype(), x_wide.device());
+        int64_t n = x_wide.numel();
 
-    TENZOR_DISPATCH_FLOATING_TYPES(input.dtype(), "asin", [&]() {
-        const scalar_t* in_data = input.data<scalar_t>();
-        scalar_t* out_data = output.data<scalar_t>();
-        _Pragma("omp parallel for if(n > 10000)")
-        for (int64_t i = 0; i < n; i++) {
-            out_data[i] = std::asin(in_data[i]);
-        }
+        TENZOR_DISPATCH_FLOATING_TYPES(x_wide.dtype(), "asin", [&]() {
+            const scalar_t* in_data = x_wide.data<scalar_t>();
+            scalar_t* out_data = output.data<scalar_t>();
+            _Pragma("omp parallel for if(n > 10000)")
+            for (int64_t i = 0; i < n; i++) {
+                out_data[i] = std::asin(in_data[i]);
+            }
+        });
+        return output;
     });
-    return output;
 }
 
 auto acos_kernel(const Tensor& input) -> Tensor {
-    std::vector<int64_t> shape_vec(input.shape().begin(), input.shape().end());
-    auto output = Tensor::empty_uninitialized(shape_vec, input.dtype(), input.device());
-    int64_t n = input.numel();
+    return tenzor::utils::widen_narrow_compute(input, [&](const Tensor& x_wide) -> Tensor {
+        std::vector<int64_t> shape_vec(x_wide.shape().begin(), x_wide.shape().end());
+        auto output = Tensor::empty_uninitialized(shape_vec, x_wide.dtype(), x_wide.device());
+        int64_t n = x_wide.numel();
 
-    TENZOR_DISPATCH_FLOATING_TYPES(input.dtype(), "acos", [&]() {
-        const scalar_t* in_data = input.data<scalar_t>();
-        scalar_t* out_data = output.data<scalar_t>();
-        _Pragma("omp parallel for if(n > 10000)")
-        for (int64_t i = 0; i < n; i++) {
-            out_data[i] = std::acos(in_data[i]);
-        }
+        TENZOR_DISPATCH_FLOATING_TYPES(x_wide.dtype(), "acos", [&]() {
+            const scalar_t* in_data = x_wide.data<scalar_t>();
+            scalar_t* out_data = output.data<scalar_t>();
+            _Pragma("omp parallel for if(n > 10000)")
+            for (int64_t i = 0; i < n; i++) {
+                out_data[i] = std::acos(in_data[i]);
+            }
+        });
+        return output;
     });
-    return output;
 }
 
 auto atan_kernel(const Tensor& input) -> Tensor {
-    // Float16/BFloat16: up-cast to Float32, compute, down-cast back.
-    if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) {
-        auto f32 = input.to(DType::Float32);
-        return atan_kernel(f32).to(input.dtype());
-    }
+    return tenzor::utils::widen_narrow_compute(input, [&](const Tensor& x_wide) -> Tensor {
+        std::vector<int64_t> shape_vec(x_wide.shape().begin(), x_wide.shape().end());
+        auto output = Tensor::empty_uninitialized(shape_vec, x_wide.dtype(), x_wide.device());
+        int64_t n = x_wide.numel();
 
-    std::vector<int64_t> shape_vec(input.shape().begin(), input.shape().end());
-    auto output = Tensor::empty_uninitialized(shape_vec, input.dtype(), input.device());
-    int64_t n = input.numel();
-
-    TENZOR_DISPATCH_FLOATING_TYPES(input.dtype(), "atan", [&]() {
-        const scalar_t* in_data = input.data<scalar_t>();
-        scalar_t* out_data = output.data<scalar_t>();
-        _Pragma("omp parallel for if(n > 10000)")
-        for (int64_t i = 0; i < n; i++) {
-            out_data[i] = std::atan(in_data[i]);
-        }
+        TENZOR_DISPATCH_FLOATING_TYPES(x_wide.dtype(), "atan", [&]() {
+            const scalar_t* in_data = x_wide.data<scalar_t>();
+            scalar_t* out_data = output.data<scalar_t>();
+            _Pragma("omp parallel for if(n > 10000)")
+            for (int64_t i = 0; i < n; i++) {
+                out_data[i] = std::atan(in_data[i]);
+            }
+        });
+        return output;
     });
-    return output;
 }
 
 // Hyperbolic functions
 auto sinh_kernel(const Tensor& input) -> Tensor {
-    std::vector<int64_t> shape_vec(input.shape().begin(), input.shape().end());
-    auto output = Tensor::empty_uninitialized(shape_vec, input.dtype(), input.device());
-    int64_t n = input.numel();
+    return tenzor::utils::widen_narrow_compute(input, [&](const Tensor& x_wide) -> Tensor {
+        std::vector<int64_t> shape_vec(x_wide.shape().begin(), x_wide.shape().end());
+        auto output = Tensor::empty_uninitialized(shape_vec, x_wide.dtype(), x_wide.device());
+        int64_t n = x_wide.numel();
 
-    TENZOR_DISPATCH_FLOATING_TYPES(input.dtype(), "sinh", [&]() {
-        const scalar_t* in_data = input.data<scalar_t>();
-        scalar_t* out_data = output.data<scalar_t>();
-        _Pragma("omp parallel for if(n > 10000)")
-        for (int64_t i = 0; i < n; i++) {
-            out_data[i] = std::sinh(in_data[i]);
-        }
+        TENZOR_DISPATCH_FLOATING_TYPES(x_wide.dtype(), "sinh", [&]() {
+            const scalar_t* in_data = x_wide.data<scalar_t>();
+            scalar_t* out_data = output.data<scalar_t>();
+            _Pragma("omp parallel for if(n > 10000)")
+            for (int64_t i = 0; i < n; i++) {
+                out_data[i] = std::sinh(in_data[i]);
+            }
+        });
+        return output;
     });
-    return output;
 }
 
 auto cosh_kernel(const Tensor& input) -> Tensor {
-    std::vector<int64_t> shape_vec(input.shape().begin(), input.shape().end());
-    auto output = Tensor::empty_uninitialized(shape_vec, input.dtype(), input.device());
-    int64_t n = input.numel();
+    return tenzor::utils::widen_narrow_compute(input, [&](const Tensor& x_wide) -> Tensor {
+        std::vector<int64_t> shape_vec(x_wide.shape().begin(), x_wide.shape().end());
+        auto output = Tensor::empty_uninitialized(shape_vec, x_wide.dtype(), x_wide.device());
+        int64_t n = x_wide.numel();
 
-    TENZOR_DISPATCH_FLOATING_TYPES(input.dtype(), "cosh", [&]() {
-        const scalar_t* in_data = input.data<scalar_t>();
-        scalar_t* out_data = output.data<scalar_t>();
-        _Pragma("omp parallel for if(n > 10000)")
-        for (int64_t i = 0; i < n; i++) {
-            out_data[i] = std::cosh(in_data[i]);
-        }
+        TENZOR_DISPATCH_FLOATING_TYPES(x_wide.dtype(), "cosh", [&]() {
+            const scalar_t* in_data = x_wide.data<scalar_t>();
+            scalar_t* out_data = output.data<scalar_t>();
+            _Pragma("omp parallel for if(n > 10000)")
+            for (int64_t i = 0; i < n; i++) {
+                out_data[i] = std::cosh(in_data[i]);
+            }
+        });
+        return output;
     });
-    return output;
 }
 
 // Rounding functions
 auto round_kernel(const Tensor& input) -> Tensor {
-    // Float16/BFloat16: convert to Float32, round, convert back
-    if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) {
-        auto f32 = input.to(DType::Float32);
-        auto result = round_kernel(f32);
-        return result.to(input.dtype());
-    }
+    return tenzor::utils::widen_narrow_compute(input, [&](const Tensor& x_wide) -> Tensor {
+        std::vector<int64_t> shape_vec(x_wide.shape().begin(), x_wide.shape().end());
+        auto output = Tensor::empty_uninitialized(shape_vec, x_wide.dtype(), x_wide.device());
+        int64_t n = x_wide.numel();
 
-    std::vector<int64_t> shape_vec(input.shape().begin(), input.shape().end());
-    auto output = Tensor::empty_uninitialized(shape_vec, input.dtype(), input.device());
-    int64_t n = input.numel();
-
-    TENZOR_DISPATCH_FLOATING_TYPES(input.dtype(), "round", [&]() {
-        const scalar_t* in_data = input.data<scalar_t>();
-        scalar_t* out_data = output.data<scalar_t>();
-        _Pragma("omp parallel for if(n > 10000)")
-        for (int64_t i = 0; i < n; i++) {
-            out_data[i] = std::round(in_data[i]);
-        }
+        TENZOR_DISPATCH_FLOATING_TYPES(x_wide.dtype(), "round", [&]() {
+            const scalar_t* in_data = x_wide.data<scalar_t>();
+            scalar_t* out_data = output.data<scalar_t>();
+            _Pragma("omp parallel for if(n > 10000)")
+            for (int64_t i = 0; i < n; i++) {
+                out_data[i] = std::round(in_data[i]);
+            }
+        });
+        return output;
     });
-    return output;
 }
 
 auto floor_kernel(const Tensor& input) -> Tensor {
-    if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) {
-        auto f32 = input.to(DType::Float32);
-        auto result = floor_kernel(f32);
-        return result.to(input.dtype());
-    }
+    return tenzor::utils::widen_narrow_compute(input, [&](const Tensor& x_wide) -> Tensor {
+        std::vector<int64_t> shape_vec(x_wide.shape().begin(), x_wide.shape().end());
+        auto output = Tensor::empty_uninitialized(shape_vec, x_wide.dtype(), x_wide.device());
+        int64_t n = x_wide.numel();
 
-    std::vector<int64_t> shape_vec(input.shape().begin(), input.shape().end());
-    auto output = Tensor::empty_uninitialized(shape_vec, input.dtype(), input.device());
-    int64_t n = input.numel();
-
-    TENZOR_DISPATCH_FLOATING_TYPES(input.dtype(), "floor", [&]() {
-        const scalar_t* in_data = input.data<scalar_t>();
-        scalar_t* out_data = output.data<scalar_t>();
-        _Pragma("omp parallel for if(n > 10000)")
-        for (int64_t i = 0; i < n; i++) {
-            out_data[i] = std::floor(in_data[i]);
-        }
+        TENZOR_DISPATCH_FLOATING_TYPES(x_wide.dtype(), "floor", [&]() {
+            const scalar_t* in_data = x_wide.data<scalar_t>();
+            scalar_t* out_data = output.data<scalar_t>();
+            _Pragma("omp parallel for if(n > 10000)")
+            for (int64_t i = 0; i < n; i++) {
+                out_data[i] = std::floor(in_data[i]);
+            }
+        });
+        return output;
     });
-    return output;
 }
 
 auto ceil_kernel(const Tensor& input) -> Tensor {
-    if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) {
-        auto f32 = input.to(DType::Float32);
-        auto result = ceil_kernel(f32);
-        return result.to(input.dtype());
-    }
+    return tenzor::utils::widen_narrow_compute(input, [&](const Tensor& x_wide) -> Tensor {
+        std::vector<int64_t> shape_vec(x_wide.shape().begin(), x_wide.shape().end());
+        auto output = Tensor::empty_uninitialized(shape_vec, x_wide.dtype(), x_wide.device());
+        int64_t n = x_wide.numel();
 
-    std::vector<int64_t> shape_vec(input.shape().begin(), input.shape().end());
-    auto output = Tensor::empty_uninitialized(shape_vec, input.dtype(), input.device());
-    int64_t n = input.numel();
-
-    TENZOR_DISPATCH_FLOATING_TYPES(input.dtype(), "ceil", [&]() {
-        const scalar_t* in_data = input.data<scalar_t>();
-        scalar_t* out_data = output.data<scalar_t>();
-        _Pragma("omp parallel for if(n > 10000)")
-        for (int64_t i = 0; i < n; i++) {
-            out_data[i] = std::ceil(in_data[i]);
-        }
+        TENZOR_DISPATCH_FLOATING_TYPES(x_wide.dtype(), "ceil", [&]() {
+            const scalar_t* in_data = x_wide.data<scalar_t>();
+            scalar_t* out_data = output.data<scalar_t>();
+            _Pragma("omp parallel for if(n > 10000)")
+            for (int64_t i = 0; i < n; i++) {
+                out_data[i] = std::ceil(in_data[i]);
+            }
+        });
+        return output;
     });
-    return output;
 }
 
 auto trunc_kernel(const Tensor& input) -> Tensor {
-    if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) {
-        auto f32 = input.to(DType::Float32);
-        auto result = trunc_kernel(f32);
-        return result.to(input.dtype());
-    }
+    return tenzor::utils::widen_narrow_compute(input, [&](const Tensor& x_wide) -> Tensor {
+        std::vector<int64_t> shape_vec(x_wide.shape().begin(), x_wide.shape().end());
+        auto output = Tensor::empty_uninitialized(shape_vec, x_wide.dtype(), x_wide.device());
+        int64_t n = x_wide.numel();
 
-    std::vector<int64_t> shape_vec(input.shape().begin(), input.shape().end());
-    auto output = Tensor::empty_uninitialized(shape_vec, input.dtype(), input.device());
-    int64_t n = input.numel();
-
-    TENZOR_DISPATCH_FLOATING_TYPES(input.dtype(), "trunc", [&]() {
-        const scalar_t* in_data = input.data<scalar_t>();
-        scalar_t* out_data = output.data<scalar_t>();
-        _Pragma("omp parallel for if(n > 10000)")
-        for (int64_t i = 0; i < n; i++) {
-            out_data[i] = std::trunc(in_data[i]);
-        }
+        TENZOR_DISPATCH_FLOATING_TYPES(x_wide.dtype(), "trunc", [&]() {
+            const scalar_t* in_data = x_wide.data<scalar_t>();
+            scalar_t* out_data = output.data<scalar_t>();
+            _Pragma("omp parallel for if(n > 10000)")
+            for (int64_t i = 0; i < n; i++) {
+                out_data[i] = std::trunc(in_data[i]);
+            }
+        });
+        return output;
     });
-    return output;
 }
 
 // Reciprocal
 auto reciprocal_kernel(const Tensor& input) -> Tensor {
-    if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) {
-        auto orig = input.dtype();
-        return reciprocal_kernel(input.to(DType::Float32)).to(orig);
-    }
-    std::vector<int64_t> shape_vec(input.shape().begin(), input.shape().end());
-    auto output = Tensor::empty_uninitialized(shape_vec, input.dtype(), input.device());
-    int64_t n = input.numel();
+    return tenzor::utils::widen_narrow_compute(input, [&](const Tensor& x_wide) -> Tensor {
+        std::vector<int64_t> shape_vec(x_wide.shape().begin(), x_wide.shape().end());
+        auto output = Tensor::empty_uninitialized(shape_vec, x_wide.dtype(), x_wide.device());
+        int64_t n = x_wide.numel();
 
-    TENZOR_DISPATCH_FLOATING_TYPES(input.dtype(), "reciprocal", [&]() {
-        const scalar_t* in_data = input.data<scalar_t>();
-        scalar_t* out_data = output.data<scalar_t>();
-        _Pragma("omp parallel for if(n > 10000)")
-        for (int64_t i = 0; i < n; i++) {
-            out_data[i] = scalar_t(1) / in_data[i];
-        }
+        TENZOR_DISPATCH_FLOATING_TYPES(x_wide.dtype(), "reciprocal", [&]() {
+            const scalar_t* in_data = x_wide.data<scalar_t>();
+            scalar_t* out_data = output.data<scalar_t>();
+            _Pragma("omp parallel for if(n > 10000)")
+            for (int64_t i = 0; i < n; i++) {
+                out_data[i] = scalar_t(1) / in_data[i];
+            }
+        });
+        return output;
     });
-    return output;
 }
 
 // In-place operations
@@ -8194,6 +8180,17 @@ auto nanstd_kernel(const Tensor& input, int64_t dim, bool keepdim, int64_t corre
 
 auto trapezoid_kernel(const Tensor& y, int64_t dim, double dx,
                       const Tensor* x_ptr) -> Tensor {
+    // Half-precision: widen y (and x if provided) to Float32, recurse, narrow back.
+    if (tenzor::utils::is_half_precision(y.dtype())) {
+        DType orig = y.dtype();
+        Tensor y32 = y.to(DType::Float32);
+        if (x_ptr) {
+            Tensor x32 = x_ptr->to(DType::Float32);
+            return trapezoid_kernel(y32, dim, dx, &x32).to(orig);
+        }
+        return trapezoid_kernel(y32, dim, dx, nullptr).to(orig);
+    }
+
     auto shape = y.shape();
     int64_t ndim = static_cast<int64_t>(shape.size());
     if (dim < 0) dim += ndim;
@@ -8260,6 +8257,17 @@ auto trapezoid_kernel(const Tensor& y, int64_t dim, double dx,
 
 auto cumulative_trapezoid_kernel(const Tensor& y, int64_t dim, double dx,
                                   const Tensor* x_ptr) -> Tensor {
+    // Half-precision: widen y (and x if provided) to Float32, recurse, narrow back.
+    if (tenzor::utils::is_half_precision(y.dtype())) {
+        DType orig = y.dtype();
+        Tensor y32 = y.to(DType::Float32);
+        if (x_ptr) {
+            Tensor x32 = x_ptr->to(DType::Float32);
+            return cumulative_trapezoid_kernel(y32, dim, dx, &x32).to(orig);
+        }
+        return cumulative_trapezoid_kernel(y32, dim, dx, nullptr).to(orig);
+    }
+
     auto shape = y.shape();
     int64_t ndim = static_cast<int64_t>(shape.size());
     if (dim < 0) dim += ndim;
@@ -8319,55 +8327,57 @@ auto cumulative_trapezoid_kernel(const Tensor& y, int64_t dim, double dx,
 // ============================================================================
 
 auto gradient_kernel(const Tensor& input, int64_t dim, double spacing) -> Tensor {
-    auto shape = input.shape();
-    int64_t ndim = static_cast<int64_t>(shape.size());
-    if (dim < 0) dim += ndim;
-    if (dim < 0 || dim >= ndim) {
-        throw std::runtime_error("gradient: dim out of range");
-    }
-    int64_t n = shape[dim];
-    if (n < 2) {
-        // For size 1, gradient is zero
-        return Tensor(std::vector<int64_t>(shape.begin(), shape.end()), input.dtype(), input.device());
-    }
-
-    int64_t outer = 1, inner = 1;
-    for (int64_t d = 0; d < dim; d++) outer *= shape[d];
-    for (int64_t d = dim + 1; d < ndim; d++) inner *= shape[d];
-
-    Tensor result(std::vector<int64_t>(shape.begin(), shape.end()), input.dtype(), input.device());
-
-    TENZOR_DISPATCH_FLOATING_TYPES(input.dtype(), "gradient", [&]() {
-        const scalar_t* in_data = input.data<scalar_t>();
-        scalar_t* out_data = result.data<scalar_t>();
-        scalar_t h = static_cast<scalar_t>(spacing);
-
-        int64_t out_n = outer * inner;
-        _Pragma("omp parallel for if(out_n > 1000)")
-        for (int64_t idx = 0; idx < out_n; idx++) {
-            int64_t o = idx / inner;
-            int64_t i_inner = idx % inner;
-
-            auto at = [&](int64_t k) -> scalar_t {
-                return in_data[(o * n + k) * inner + i_inner];
-            };
-            auto out_at = [&](int64_t k) -> scalar_t& {
-                return out_data[(o * n + k) * inner + i_inner];
-            };
-
-            // Forward difference at left boundary
-            out_at(0) = (at(1) - at(0)) / h;
-
-            // Central differences for interior
-            for (int64_t k = 1; k < n - 1; k++) {
-                out_at(k) = (at(k + 1) - at(k - 1)) / (scalar_t(2) * h);
-            }
-
-            // Backward difference at right boundary
-            out_at(n - 1) = (at(n - 1) - at(n - 2)) / h;
+    return tenzor::utils::widen_narrow_compute(input, [&](const Tensor& x_wide) -> Tensor {
+        auto shape = x_wide.shape();
+        int64_t ndim = static_cast<int64_t>(shape.size());
+        if (dim < 0) dim += ndim;
+        if (dim < 0 || dim >= ndim) {
+            throw std::runtime_error("gradient: dim out of range");
         }
+        int64_t n = shape[dim];
+        if (n < 2) {
+            // For size 1, gradient is zero
+            return Tensor(std::vector<int64_t>(shape.begin(), shape.end()), x_wide.dtype(), x_wide.device());
+        }
+
+        int64_t outer = 1, inner = 1;
+        for (int64_t d = 0; d < dim; d++) outer *= shape[d];
+        for (int64_t d = dim + 1; d < ndim; d++) inner *= shape[d];
+
+        Tensor result(std::vector<int64_t>(shape.begin(), shape.end()), x_wide.dtype(), x_wide.device());
+
+        TENZOR_DISPATCH_FLOATING_TYPES(x_wide.dtype(), "gradient", [&]() {
+            const scalar_t* in_data = x_wide.data<scalar_t>();
+            scalar_t* out_data = result.data<scalar_t>();
+            scalar_t h = static_cast<scalar_t>(spacing);
+
+            int64_t out_n = outer * inner;
+            _Pragma("omp parallel for if(out_n > 1000)")
+            for (int64_t idx = 0; idx < out_n; idx++) {
+                int64_t o = idx / inner;
+                int64_t i_inner = idx % inner;
+
+                auto at = [&](int64_t k) -> scalar_t {
+                    return in_data[(o * n + k) * inner + i_inner];
+                };
+                auto out_at = [&](int64_t k) -> scalar_t& {
+                    return out_data[(o * n + k) * inner + i_inner];
+                };
+
+                // Forward difference at left boundary
+                out_at(0) = (at(1) - at(0)) / h;
+
+                // Central differences for interior
+                for (int64_t k = 1; k < n - 1; k++) {
+                    out_at(k) = (at(k + 1) - at(k - 1)) / (scalar_t(2) * h);
+                }
+
+                // Backward difference at right boundary
+                out_at(n - 1) = (at(n - 1) - at(n - 2)) / h;
+            }
+        });
+        return result;
     });
-    return result;
 }
 
 // ============================================================================
@@ -8375,58 +8385,60 @@ auto gradient_kernel(const Tensor& input, int64_t dim, double spacing) -> Tensor
 // ============================================================================
 
 auto pairwise_distance_kernel(const Tensor& x1, const Tensor& x2, double p) -> Tensor {
-    int64_t N = x1.shape()[0];
-    int64_t D = x1.shape()[1];
+    return tenzor::utils::widen_narrow_compute(x1, x2, [&](const Tensor& a_wide, const Tensor& b_wide) -> Tensor {
+        int64_t N = a_wide.shape()[0];
+        int64_t D = a_wide.shape()[1];
 
-    Tensor result({N}, x1.dtype(), x1.device());
+        Tensor result({N}, a_wide.dtype(), a_wide.device());
 
-    TENZOR_DISPATCH_FLOATING_TYPES(x1.dtype(), "pairwise_distance", [&]() {
-        const scalar_t* a = x1.data<scalar_t>();
-        const scalar_t* b = x2.data<scalar_t>();
-        scalar_t* out = result.data<scalar_t>();
+        TENZOR_DISPATCH_FLOATING_TYPES(a_wide.dtype(), "pairwise_distance", [&]() {
+            const scalar_t* a = a_wide.data<scalar_t>();
+            const scalar_t* b = b_wide.data<scalar_t>();
+            scalar_t* out = result.data<scalar_t>();
 
-        if (p == 2.0) {
-            _Pragma("omp parallel for if(N > 1000)")
-            for (int64_t i = 0; i < N; i++) {
-                scalar_t sum_sq = 0;
-                for (int64_t j = 0; j < D; j++) {
-                    scalar_t diff = a[i * D + j] - b[i * D + j];
-                    sum_sq += diff * diff;
+            if (p == 2.0) {
+                _Pragma("omp parallel for if(N > 1000)")
+                for (int64_t i = 0; i < N; i++) {
+                    scalar_t sum_sq = 0;
+                    for (int64_t j = 0; j < D; j++) {
+                        scalar_t diff = a[i * D + j] - b[i * D + j];
+                        sum_sq += diff * diff;
+                    }
+                    out[i] = std::sqrt(sum_sq);
                 }
-                out[i] = std::sqrt(sum_sq);
-            }
-        } else if (p == 1.0) {
-            _Pragma("omp parallel for if(N > 1000)")
-            for (int64_t i = 0; i < N; i++) {
-                scalar_t sum_abs = 0;
-                for (int64_t j = 0; j < D; j++) {
-                    sum_abs += std::abs(a[i * D + j] - b[i * D + j]);
+            } else if (p == 1.0) {
+                _Pragma("omp parallel for if(N > 1000)")
+                for (int64_t i = 0; i < N; i++) {
+                    scalar_t sum_abs = 0;
+                    for (int64_t j = 0; j < D; j++) {
+                        sum_abs += std::abs(a[i * D + j] - b[i * D + j]);
+                    }
+                    out[i] = sum_abs;
                 }
-                out[i] = sum_abs;
-            }
-        } else if (std::isinf(p)) {
-            _Pragma("omp parallel for if(N > 1000)")
-            for (int64_t i = 0; i < N; i++) {
-                scalar_t max_abs = 0;
-                for (int64_t j = 0; j < D; j++) {
-                    max_abs = std::max(max_abs, std::abs(a[i * D + j] - b[i * D + j]));
+            } else if (std::isinf(p)) {
+                _Pragma("omp parallel for if(N > 1000)")
+                for (int64_t i = 0; i < N; i++) {
+                    scalar_t max_abs = 0;
+                    for (int64_t j = 0; j < D; j++) {
+                        max_abs = std::max(max_abs, std::abs(a[i * D + j] - b[i * D + j]));
+                    }
+                    out[i] = max_abs;
                 }
-                out[i] = max_abs;
-            }
-        } else {
-            scalar_t p_val = static_cast<scalar_t>(p);
-            scalar_t inv_p = scalar_t(1) / p_val;
-            _Pragma("omp parallel for if(N > 1000)")
-            for (int64_t i = 0; i < N; i++) {
-                scalar_t sum_pow = 0;
-                for (int64_t j = 0; j < D; j++) {
-                    sum_pow += std::pow(std::abs(a[i * D + j] - b[i * D + j]), p_val);
+            } else {
+                scalar_t p_val = static_cast<scalar_t>(p);
+                scalar_t inv_p = scalar_t(1) / p_val;
+                _Pragma("omp parallel for if(N > 1000)")
+                for (int64_t i = 0; i < N; i++) {
+                    scalar_t sum_pow = 0;
+                    for (int64_t j = 0; j < D; j++) {
+                        sum_pow += std::pow(std::abs(a[i * D + j] - b[i * D + j]), p_val);
+                    }
+                    out[i] = std::pow(sum_pow, inv_p);
                 }
-                out[i] = std::pow(sum_pow, inv_p);
             }
-        }
+        });
+        return result;
     });
-    return result;
 }
 
 // ============================================================================
@@ -8434,89 +8446,91 @@ auto pairwise_distance_kernel(const Tensor& x1, const Tensor& x2, double p) -> T
 // ============================================================================
 
 auto pdist_kernel(const Tensor& input, double p) -> Tensor {
-    int64_t N = input.shape()[0];
-    int64_t D = input.shape()[1];
-    int64_t num_pairs = N * (N - 1) / 2;
+    return tenzor::utils::widen_narrow_compute(input, [&](const Tensor& x_wide) -> Tensor {
+        int64_t N = x_wide.shape()[0];
+        int64_t D = x_wide.shape()[1];
+        int64_t num_pairs = N * (N - 1) / 2;
 
-    Tensor result({num_pairs}, input.dtype(), input.device());
+        Tensor result({num_pairs}, x_wide.dtype(), x_wide.device());
 
-    TENZOR_DISPATCH_FLOATING_TYPES(input.dtype(), "pdist", [&]() {
-        const scalar_t* data = input.data<scalar_t>();
-        scalar_t* out = result.data<scalar_t>();
+        TENZOR_DISPATCH_FLOATING_TYPES(x_wide.dtype(), "pdist", [&]() {
+            const scalar_t* data = x_wide.data<scalar_t>();
+            scalar_t* out = result.data<scalar_t>();
 
-        if (p == 2.0) {
-            _Pragma("omp parallel for if(num_pairs > 1000)")
-            for (int64_t idx = 0; idx < num_pairs; idx++) {
-                // Map flat index to (i, j) pair where i < j
-                // Using the formula: idx = i * N - i*(i+1)/2 + j - i - 1
-                // We solve for i iteratively for correctness
-                int64_t i = 0, offset = 0;
-                while (offset + (N - 1 - i) <= idx) {
-                    offset += (N - 1 - i);
-                    i++;
+            if (p == 2.0) {
+                _Pragma("omp parallel for if(num_pairs > 1000)")
+                for (int64_t idx = 0; idx < num_pairs; idx++) {
+                    // Map flat index to (i, j) pair where i < j
+                    // Using the formula: idx = i * N - i*(i+1)/2 + j - i - 1
+                    // We solve for i iteratively for correctness
+                    int64_t i = 0, offset = 0;
+                    while (offset + (N - 1 - i) <= idx) {
+                        offset += (N - 1 - i);
+                        i++;
+                    }
+                    int64_t j = idx - offset + i + 1;
+
+                    scalar_t sum_sq = 0;
+                    for (int64_t d = 0; d < D; d++) {
+                        scalar_t diff = data[i * D + d] - data[j * D + d];
+                        sum_sq += diff * diff;
+                    }
+                    out[idx] = std::sqrt(sum_sq);
                 }
-                int64_t j = idx - offset + i + 1;
+            } else if (p == 1.0) {
+                _Pragma("omp parallel for if(num_pairs > 1000)")
+                for (int64_t idx = 0; idx < num_pairs; idx++) {
+                    int64_t i = 0, offset = 0;
+                    while (offset + (N - 1 - i) <= idx) {
+                        offset += (N - 1 - i);
+                        i++;
+                    }
+                    int64_t j = idx - offset + i + 1;
 
-                scalar_t sum_sq = 0;
-                for (int64_t d = 0; d < D; d++) {
-                    scalar_t diff = data[i * D + d] - data[j * D + d];
-                    sum_sq += diff * diff;
+                    scalar_t sum_abs = 0;
+                    for (int64_t d = 0; d < D; d++) {
+                        sum_abs += std::abs(data[i * D + d] - data[j * D + d]);
+                    }
+                    out[idx] = sum_abs;
                 }
-                out[idx] = std::sqrt(sum_sq);
+            } else if (std::isinf(p)) {
+                _Pragma("omp parallel for if(num_pairs > 1000)")
+                for (int64_t idx = 0; idx < num_pairs; idx++) {
+                    int64_t i = 0, offset = 0;
+                    while (offset + (N - 1 - i) <= idx) {
+                        offset += (N - 1 - i);
+                        i++;
+                    }
+                    int64_t j = idx - offset + i + 1;
+
+                    scalar_t max_abs = 0;
+                    for (int64_t d = 0; d < D; d++) {
+                        max_abs = std::max(max_abs, std::abs(data[i * D + d] - data[j * D + d]));
+                    }
+                    out[idx] = max_abs;
+                }
+            } else {
+                scalar_t p_val = static_cast<scalar_t>(p);
+                scalar_t inv_p = scalar_t(1) / p_val;
+                _Pragma("omp parallel for if(num_pairs > 1000)")
+                for (int64_t idx = 0; idx < num_pairs; idx++) {
+                    int64_t i = 0, offset = 0;
+                    while (offset + (N - 1 - i) <= idx) {
+                        offset += (N - 1 - i);
+                        i++;
+                    }
+                    int64_t j = idx - offset + i + 1;
+
+                    scalar_t sum_pow = 0;
+                    for (int64_t d = 0; d < D; d++) {
+                        sum_pow += std::pow(std::abs(data[i * D + d] - data[j * D + d]), p_val);
+                    }
+                    out[idx] = std::pow(sum_pow, inv_p);
+                }
             }
-        } else if (p == 1.0) {
-            _Pragma("omp parallel for if(num_pairs > 1000)")
-            for (int64_t idx = 0; idx < num_pairs; idx++) {
-                int64_t i = 0, offset = 0;
-                while (offset + (N - 1 - i) <= idx) {
-                    offset += (N - 1 - i);
-                    i++;
-                }
-                int64_t j = idx - offset + i + 1;
-
-                scalar_t sum_abs = 0;
-                for (int64_t d = 0; d < D; d++) {
-                    sum_abs += std::abs(data[i * D + d] - data[j * D + d]);
-                }
-                out[idx] = sum_abs;
-            }
-        } else if (std::isinf(p)) {
-            _Pragma("omp parallel for if(num_pairs > 1000)")
-            for (int64_t idx = 0; idx < num_pairs; idx++) {
-                int64_t i = 0, offset = 0;
-                while (offset + (N - 1 - i) <= idx) {
-                    offset += (N - 1 - i);
-                    i++;
-                }
-                int64_t j = idx - offset + i + 1;
-
-                scalar_t max_abs = 0;
-                for (int64_t d = 0; d < D; d++) {
-                    max_abs = std::max(max_abs, std::abs(data[i * D + d] - data[j * D + d]));
-                }
-                out[idx] = max_abs;
-            }
-        } else {
-            scalar_t p_val = static_cast<scalar_t>(p);
-            scalar_t inv_p = scalar_t(1) / p_val;
-            _Pragma("omp parallel for if(num_pairs > 1000)")
-            for (int64_t idx = 0; idx < num_pairs; idx++) {
-                int64_t i = 0, offset = 0;
-                while (offset + (N - 1 - i) <= idx) {
-                    offset += (N - 1 - i);
-                    i++;
-                }
-                int64_t j = idx - offset + i + 1;
-
-                scalar_t sum_pow = 0;
-                for (int64_t d = 0; d < D; d++) {
-                    sum_pow += std::pow(std::abs(data[i * D + d] - data[j * D + d]), p_val);
-                }
-                out[idx] = std::pow(sum_pow, inv_p);
-            }
-        }
+        });
+        return result;
     });
-    return result;
 }
 
 // ============================================================================

@@ -1,66 +1,79 @@
-"""HalfNormal distribution."""
+"""HalfNormal distribution — Tensor-native (sample only).
+
+Reparameterisation ``|σ z|`` is well-defined in principle, but ``abs``
+has no Variable overload and the underlying operator is non-smooth at
+0, so we expose ``has_rsample = False``.
+"""
+from __future__ import annotations
+
 import math
+
 import numpy as np
-# V.39: scipy is lazy (see distribution.py).
-from .distribution import Distribution, _to_numpy, _require_scipy_special
+
+from tenzor.tenzor_core import Tensor, Variable  # type: ignore
+
+from .distribution import (
+    Distribution,
+    _shape_of,
+    _to_variable,
+    _wrap_numpy,
+    _require_scipy_special,
+)
+from ._reparam import standard_normal
 
 
 class HalfNormal(Distribution):
-    """HalfNormal(scale) — half-normal distribution (non-negative side of N(0, scale)).
+    """``HalfNormal(scale)``."""
 
-    Args:
-        scale: Scale parameter (scalar or array, > 0).
-    """
-
-    has_rsample = True
+    has_rsample = False
 
     def __init__(self, scale):
-        self.scale = _to_numpy(scale)
-        super().__init__(self.scale.shape)
+        self.scale = _to_variable(scale)
+        super().__init__(_shape_of(self.scale))
 
     @property
     def mean(self):
-        # E[X] = scale * sqrt(2/pi)
-        return self.scale * math.sqrt(2.0 / math.pi)
+        scale_np = np.asarray(self.scale.tensor(), dtype=np.float32)
+        return _wrap_numpy(scale_np * math.sqrt(2.0 / math.pi))
 
     @property
     def variance(self):
-        # Var[X] = scale^2 * (1 - 2/pi)
-        return self.scale ** 2 * (1.0 - 2.0 / math.pi)
+        scale_np = np.asarray(self.scale.tensor(), dtype=np.float32)
+        return _wrap_numpy(scale_np ** 2 * (1.0 - 2.0 / math.pi))
 
     def sample(self, sample_shape=()):
-        shape = tuple(sample_shape) + self._batch_shape
-        return np.abs(np.random.normal(0.0, self.scale, size=shape or None))
-
-    def rsample(self, sample_shape=()):
-        return self.sample(sample_shape)
+        out_shape = tuple(sample_shape) + self._batch_shape
+        z = np.asarray(standard_normal(out_shape if out_shape else []), dtype=np.float32)
+        scale_np = np.asarray(self.scale.tensor(), dtype=np.float32)
+        return _wrap_numpy(np.abs(scale_np * z))
 
     def log_prob(self, value):
-        value = _to_numpy(value)
-        in_support = value >= 0
-        # log p(x) = log(2) + Normal(0, scale).log_prob(x) for x >= 0
-        z = value / self.scale
-        lp = (math.log(2.0) - 0.5 * math.log(2 * math.pi)
-              - np.log(self.scale) - 0.5 * z * z)
-        return np.where(in_support, lp, -np.inf)
+        v_np = np.asarray(_to_variable(value).tensor(), dtype=np.float64)
+        scale_np = np.asarray(self.scale.tensor(), dtype=np.float64)
+        in_support = v_np >= 0
+        z = v_np / scale_np
+        lp = (math.log(2.0) - 0.5 * math.log(2.0 * math.pi)
+              - np.log(scale_np) - 0.5 * z * z)
+        return _wrap_numpy(np.where(in_support, lp, -np.inf))
 
     def cdf(self, value):
         scipy_special = _require_scipy_special()
-        value = _to_numpy(value)
-        return np.where(
-            value >= 0,
-            scipy_special.erf(value / (self.scale * math.sqrt(2.0))),
-            0.0
-        )
+        v_np = np.asarray(_to_variable(value).tensor(), dtype=np.float64)
+        scale_np = np.asarray(self.scale.tensor(), dtype=np.float64)
+        out = np.where(v_np >= 0,
+                       scipy_special.erf(v_np / (scale_np * math.sqrt(2.0))),
+                       0.0)
+        return _wrap_numpy(out)
 
     def icdf(self, p):
         scipy_special = _require_scipy_special()
-        p = _to_numpy(p)
-        return self.scale * math.sqrt(2.0) * scipy_special.erfinv(p)
+        p_np = np.asarray(_to_variable(p).tensor(), dtype=np.float64)
+        scale_np = np.asarray(self.scale.tensor(), dtype=np.float64)
+        return _wrap_numpy(scale_np * math.sqrt(2.0) * scipy_special.erfinv(p_np))
 
     def entropy(self):
-        # H = 0.5 * log(pi * scale^2 / 2) + 0.5
-        return 0.5 * np.log(math.pi * self.scale ** 2 / 2.0) + 0.5
+        scale_np = np.asarray(self.scale.tensor(), dtype=np.float64)
+        return _wrap_numpy(0.5 * np.log(math.pi * scale_np ** 2 / 2.0) + 0.5)
 
     def support(self):
         return "[0, inf)"

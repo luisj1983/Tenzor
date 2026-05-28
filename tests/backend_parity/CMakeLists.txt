@@ -338,6 +338,23 @@ add_parity_test(test_cpu_fft_fallback test_cpu_fft_fallback.cpp)
 # Wave Inf-B: distribution entropy/mean/variance closed-form additions.
 add_parity_test(test_distributions_closed_forms test_distributions_closed_forms.cpp)
 
+# Stream S18: CPU DepthwiseConv1d / DepthwiseConv3d native fast paths.
+# CPU-only fixture (TEST_F not TEST_P) — the new OpIds are registered on the
+# CPU backend in this stream; other backends still have throw-stubs. We use
+# a bespoke target rather than add_parity_test so test names aren't prefixed
+# with backend labels (the test fixture itself pins Device::cpu()).
+add_executable(test_depthwise_conv test_depthwise_conv.cpp)
+target_link_libraries(test_depthwise_conv PRIVATE
+    tenzor_core
+    GTest::gtest
+    GTest::gtest_main
+    ${CMAKE_THREAD_LIBS_INIT}
+)
+tenzor_discover_tests(test_depthwise_conv
+    DISCOVERY_TIMEOUT 60
+    LABELS "backend_parity"
+    BACKENDS cpu)
+
 # ==============================================================================
 # Test Groups
 # ==============================================================================

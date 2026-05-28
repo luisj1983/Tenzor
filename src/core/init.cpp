@@ -2,6 +2,7 @@
 #include "tenzor/backend/loader.hpp"
 #include "tenzor/backend/dispatch_table.hpp"
 #include "tenzor/utils/log.hpp"  // TENZOR_LOG_INFO / WARN / ERROR (audit I.4)
+#include "tenzor/utils/logging.hpp"  // TENZOR_WARN_ONCE (S26 OCL-ICD workaround)
 #include <iostream>
 #include <fstream>
 #include <filesystem>
@@ -9,6 +10,10 @@
 #include <thread>
 #include <atomic>
 #include <mutex>
+#include <string>
+#include <system_error>
+#include <vector>
+#include <unistd.h>  // getpid(), for per-process OCL ICD vendor dir
 
 #ifdef _OPENMP
 #include <omp.h>
@@ -23,6 +28,10 @@ namespace tenzor {
 // Flag to track initialization state (used by finalize() guard)
 static std::atomic<bool> g_initialized{false};
 static std::mutex g_init_mutex;
+
+// Per-process OCL ICD vendor dir created by the AMD-OCL probe workaround.
+// Tracked here so finalize() can clean it up. Empty if workaround was skipped.
+static std::string g_ocl_icd_vendor_dir;
 
 auto initialize() -> void {
     std::lock_guard<std::mutex> lock(g_init_mutex);
@@ -300,18 +309,137 @@ auto initialize() -> void {
 
     // SYCL's platform::get_platforms() probes ALL OpenCL ICDs, including AMD's
     // which can hang if the ROCm/HSA runtime is broken (same bug as hipGetDeviceCount).
-    // Create a filtered ICD directory with only Intel's OpenCL to prevent the hang.
+    // Create a per-process filtered ICD directory containing only Intel's OpenCL ICD
+    // entry to prevent the hang.
+    //
+    // Discovery of libintelocl.so (in priority order):
+    //   1. TENZOR_OCL_ICD_PATH         — explicit user override, full path to libintelocl.so
+    //   2. INTEL_OPENCL_ICD_PATH       — Intel-conventional env var
+    //   3. ${ONEAPI_ROOT}/compiler/<version>/lib/libintelocl.so (newest version)
+    //   4. /opt/intel/oneapi/compiler/<version>/lib/libintelocl.so (newest version,
+    //      skipping the `latest` symlink so we resolve to a real versioned dir)
+    //
+    // Failure paths (all silent skip + TENZOR_WARN_ONCE):
+    //   - No libintelocl.so found in any of the locations above
+    //   - TENZOR_OCL_ICD_PATH / INTEL_OPENCL_ICD_PATH points at a nonexistent file
+    //   - Per-process temp directory cannot be created or written
+    //
+    // The workaround is a no-op when OCL_ICD_VENDORS is already set by the user.
+    // Upstream bug tracking: the underlying AMD-OCL ICD probe hang has no public
+    // fix yet; once it's resolved we can drop this entirely.
     bool oneapi_skip_probe = false;
     if (!std::getenv("OCL_ICD_VENDORS")) {
-        // Create a temp directory with only Intel's ICD to avoid loading amdocl64
-        std::string icd_dir = "/tmp/tenzor_ocl_vendors";
-        std::filesystem::create_directories(icd_dir);
-        std::string intel_icd = icd_dir + "/intel64.icd";
-        if (!std::filesystem::exists(intel_icd)) {
-            std::ofstream(intel_icd) << "/opt/intel/oneapi/compiler/latest/lib/libintelocl.so\n";
+        auto find_intel_ocl_icd = []() -> std::filesystem::path {
+            namespace fs = std::filesystem;
+            std::error_code ec;
+
+            // Priority 1 & 2: explicit env var overrides.
+            for (const char* var : {"TENZOR_OCL_ICD_PATH", "INTEL_OPENCL_ICD_PATH"}) {
+                const char* val = std::getenv(var);
+                if (val && *val) {
+                    fs::path p(val);
+                    if (fs::exists(p, ec) && !ec) {
+                        return p;
+                    }
+                    TENZOR_WARN_ONCE(
+                        "tenzor: OpenCL ICD override env var points at nonexistent file; "
+                        "skipping AMD-OCL probe workaround. See src/core/init.cpp.");
+                    return {};
+                }
+            }
+
+            // Build candidate compiler root directories.
+            std::vector<fs::path> roots;
+            if (const char* oneapi_root = std::getenv("ONEAPI_ROOT")) {
+                if (*oneapi_root) {
+                    roots.emplace_back(fs::path(oneapi_root) / "compiler");
+                }
+            }
+            roots.emplace_back("/opt/intel/oneapi/compiler");
+
+            // Pick the newest *versioned* subdirectory under each root.
+            // We intentionally skip the "latest" symlink so the resolution is
+            // stable across oneAPI upgrades and doesn't depend on packaging.
+            fs::path best;
+            for (const auto& root : roots) {
+                if (!fs::is_directory(root, ec) || ec) {
+                    continue;
+                }
+                fs::path best_in_root;
+                for (auto it = fs::directory_iterator(root, ec);
+                     !ec && it != fs::directory_iterator();
+                     it.increment(ec)) {
+                    if (!it->is_directory(ec) || ec) {
+                        continue;
+                    }
+                    const auto name = it->path().filename().string();
+                    if (name == "latest" || name.empty() || name[0] == '.') {
+                        continue;
+                    }
+                    fs::path candidate = it->path() / "lib" / "libintelocl.so";
+                    if (!fs::exists(candidate, ec) || ec) {
+                        continue;
+                    }
+                    if (best_in_root.empty() || name > best_in_root.filename().string()) {
+                        best_in_root = it->path();
+                    }
+                }
+                if (!best_in_root.empty()) {
+                    best = best_in_root / "lib" / "libintelocl.so";
+                    break;
+                }
+            }
+            return best;
+        };
+
+        std::filesystem::path intel_icd_so = find_intel_ocl_icd();
+        if (intel_icd_so.empty()) {
+            // No Intel OpenCL ICD on this system — workaround is impossible.
+            // Silently skip; oneAPI backend will probably also fail to find a
+            // device, which is fine on non-Intel systems.
+            TENZOR_WARN_ONCE(
+                "tenzor: libintelocl.so not found via TENZOR_OCL_ICD_PATH, "
+                "INTEL_OPENCL_ICD_PATH, ONEAPI_ROOT, or /opt/intel/oneapi; "
+                "skipping AMD-OCL ICD probe workaround. Set TENZOR_OCL_ICD_PATH "
+                "if your Intel OpenCL ICD lives in a non-standard location.");
+        } else {
+            // Per-process temp dir keeps users from clobbering each other and
+            // sidesteps stale content from prior runs.
+            std::error_code ec;
+            const char* tmpdir_env = std::getenv("TMPDIR");
+            std::filesystem::path tmp_root =
+                (tmpdir_env && *tmpdir_env) ? std::filesystem::path(tmpdir_env)
+                                            : std::filesystem::path("/tmp");
+            std::filesystem::path icd_dir =
+                tmp_root / ("tenzor_ocl_vendors_" + std::to_string(::getpid()));
+            std::filesystem::create_directories(icd_dir, ec);
+            if (ec || !std::filesystem::is_directory(icd_dir)) {
+                TENZOR_WARN_ONCE(
+                    "tenzor: could not create per-process OCL ICD vendor dir "
+                    "(TMPDIR not writable?); skipping AMD-OCL probe workaround.");
+            } else {
+                std::filesystem::path intel_icd = icd_dir / "intel64.icd";
+                std::ofstream icd_file(intel_icd);
+                if (!icd_file) {
+                    TENZOR_WARN_ONCE(
+                        "tenzor: could not write OCL ICD vendor file in TMPDIR; "
+                        "skipping AMD-OCL probe workaround.");
+                } else {
+                    icd_file << intel_icd_so.string() << "\n";
+                    icd_file.close();
+                    if (icd_file.fail()) {
+                        TENZOR_WARN_ONCE(
+                            "tenzor: failed flushing OCL ICD vendor file; "
+                            "skipping AMD-OCL probe workaround.");
+                    } else {
+                        setenv("OCL_ICD_VENDORS", icd_dir.c_str(), 0);
+                        // Record path so finalize() can clean it up.
+                        g_ocl_icd_vendor_dir = icd_dir.string();
+                        oneapi_skip_probe = true;
+                    }
+                }
+            }
         }
-        setenv("OCL_ICD_VENDORS", icd_dir.c_str(), 0);
-        oneapi_skip_probe = true;
     }
     if (!std::getenv("ONEAPI_DEVICE_SELECTOR")) {
         setenv("ONEAPI_DEVICE_SELECTOR", "*:cpu", 0);
@@ -478,6 +606,15 @@ auto finalize() -> void {
 
     // 2. Ordered backend shutdown — destroys backends, dlcloses libraries
     backend_registry().shutdown();
+
+    // 3. Best-effort cleanup of the per-process OCL ICD vendor dir created by
+    //    the AMD-OCL probe workaround. Failures are silent — /tmp gets reaped
+    //    on reboot and the path has the PID baked in so collisions are unlikely.
+    if (!g_ocl_icd_vendor_dir.empty()) {
+        std::error_code ec;
+        std::filesystem::remove_all(g_ocl_icd_vendor_dir, ec);
+        g_ocl_icd_vendor_dir.clear();
+    }
 
     g_initialized.store(false, std::memory_order_release);
 }

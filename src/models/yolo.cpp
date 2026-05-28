@@ -12,6 +12,7 @@
 #include "../../include/tenzor/ops/transform.hpp"
 #include "../../include/tenzor/ops/math.hpp"
 #include "../../include/tenzor/ops/vision.hpp"
+#include "../../include/tenzor/utils/error.hpp"  // TENZOR_CHECK
 #include <cmath>
 #include <stdexcept>
 #include <algorithm>
@@ -796,12 +797,18 @@ PANet::PANet(const std::vector<int64_t>& channels) {
 }
 
 auto PANet::forward_impl(const Variable& input) -> Variable {
-    // PANet is designed for multi-scale feature fusion
-    // Single input forward is not the typical use case
-    // This forwards to forward_multi with single feature
-    std::vector<Variable> features = {input};
-    auto fused = forward_multi(features);
-    return fused.empty() ? input : fused[0];
+    // PANet is a feature-pyramid fusion network and operates on multi-scale
+    // features (typically P3/P4/P5 from the backbone). The previous
+    // single-input pass-through constructed a 1-element vector and then
+    // dereferenced indices [1] and [2] inside forward_multi → OOB read.
+    //
+    // A single-input forward is semantically ill-defined for PANet; callers
+    // must use forward_multi(features) with at least 3 pyramid levels.
+    TENZOR_CHECK(false,
+                 "PANet::forward_impl single-input variant is not supported; "
+                 "call forward_multi(features) with at least 3 pyramid "
+                 "levels (P3, P4, P5) from the backbone.");
+    return input;  // unreachable — TENZOR_CHECK throws on false condition.
 }
 
 auto PANet::forward_multi(const std::vector<Variable>& features) -> std::vector<Variable> {

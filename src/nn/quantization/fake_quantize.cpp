@@ -419,6 +419,13 @@ auto fake_quantize_with_grad(
     auto fn = std::make_shared<FakeQuantizeFunction>(scale, zero_point, quant_min, quant_max);
     auto outputs = fn->forward({input});
     if (input.requires_grad()) {
+        // Wire the autograd graph edges so the engine can route the STE
+        // gradient back to `input`. Setting grad_fn alone is insufficient:
+        // without next_functions + input_variables the backward engine has
+        // no input edge to accumulate into, so input.grad() stays empty.
+        // (Mirrors the standard pattern in nested_autograd_ops.cpp.)
+        fn->set_next_functions({input.grad_fn()});
+        fn->set_input_variables({input});
         outputs[0].set_grad_fn(fn);
     }
     return outputs[0];

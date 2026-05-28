@@ -867,6 +867,12 @@ target_include_directories(test_caching_allocator_coalesce PRIVATE ${CMAKE_SOURC
 target_link_libraries(test_caching_allocator_coalesce PRIVATE tenzor_backend_cpu tenzor_core GTest::gtest_main)
 tenzor_discover_tests(test_caching_allocator_coalesce DISCOVERY_TIMEOUT 60 BACKENDS cpu LABELS "cpu;allocator")
 
+# S16: pressure / partial-eviction / env-var hardening
+add_executable(test_caching_allocator_pressure test_caching_allocator_pressure.cpp)
+target_include_directories(test_caching_allocator_pressure PRIVATE ${CMAKE_SOURCE_DIR}/include)
+target_link_libraries(test_caching_allocator_pressure PRIVATE tenzor_backend_cpu tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_caching_allocator_pressure DISCOVERY_TIMEOUT 60 BACKENDS cpu LABELS "cpu;allocator")
+
 # Hardtanh activation
 add_executable(test_hardtanh test_hardtanh.cpp)
 target_link_libraries(test_hardtanh PRIVATE tenzor_core GTest::gtest_main)

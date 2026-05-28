@@ -911,11 +911,10 @@ def avg_pool2d(input: Variable, kernel_size: int, stride: Optional[int] = None, 
         Implicit zero padding on both sides.  Default: ``0``.
     count_include_pad : bool, optional
         Whether to include the zero-padding in the averaging calculation.
-        Audit-6 CC.23: accepted for PyTorch API parity (mirrors the 1D/3D
-        Z.21 contract).  The backend layer implements the include-pad
-        behaviour by default; the ``False`` variant is not yet supported
-        and raises ``NotImplementedError`` rather than silently changing
-        the average.
+        S22: the ``False`` path is now wired all the way through to the
+        CPU kernel — the divisor for each output position becomes the
+        count of in-bounds (non-padded) elements rather than the full
+        ``kernel_size * kernel_size``.
 
     Returns
     -------
@@ -926,12 +925,10 @@ def avg_pool2d(input: Variable, kernel_size: int, stride: Optional[int] = None, 
     -------
     >>> y = F.avg_pool2d(x, kernel_size=2, stride=2)
     """
-    if not count_include_pad:
-        raise NotImplementedError(
-            "avg_pool2d(count_include_pad=False) is not yet supported")
     if stride is None:
         stride = kernel_size
-    return _nn.functional_avg_pool2d(input, kernel_size, stride, padding)
+    return _nn.functional_avg_pool2d(input, kernel_size, stride, padding,
+                                     count_include_pad)
 
 
 def adaptive_avg_pool2d(input: Variable, output_size: Union[int, tuple[int, int]]) -> Variable:
@@ -982,32 +979,44 @@ def adaptive_max_pool2d(input: Variable, output_size: Union[int, tuple[int, int]
     return _nn.functional_adaptive_max_pool2d(input, output_size)
 
 
-def batch_norm(input: Variable, num_features: int, training: bool = True, momentum: float = 0.1, eps: float = 1e-5, weight: Optional[Variable] = None, bias: Optional[Variable] = None) -> Variable:
-    """Apply batch normalization over a mini-batch of inputs.
+def batch_norm(input: Variable,
+               running_mean: Optional["Tensor"] = None,
+               running_var: Optional["Tensor"] = None,
+               weight: Optional[Variable] = None,
+               bias: Optional[Variable] = None,
+               training: bool = True,
+               momentum: float = 0.1,
+               eps: float = 1e-5) -> Variable:
+    """Apply batch normalization (PyTorch-compatible functional form).
 
-    Creates a transient BatchNorm layer with fresh running statistics.
-    For stateful batch normalization with persistent running stats, use
-    ``tz.nn.BatchNorm2d`` as a module instead.
+    Mirrors ``torch.nn.functional.batch_norm``. ``num_features`` is inferred
+    from the inputs (``weight.shape[0]`` if provided, else
+    ``running_mean.shape[0]``, else ``input.shape[1]``).
 
     Parameters
     ----------
     input : Variable
         Input of shape ``(N, C, ...)`` where *C* is the channel dimension.
-    num_features : int
-        Number of channels *C*.
+    running_mean : Tensor, optional
+        Running mean of shape ``[C]``. In training mode it is updated
+        in-place using ``momentum``. In eval mode it (and
+        ``running_var``) MUST be provided. Default: ``None``.
+    running_var : Tensor, optional
+        Running variance of shape ``[C]``. Same semantics as
+        ``running_mean``. Default: ``None``.
+    weight : Variable, optional
+        Affine weight (gamma) of shape ``[C]``. When provided, its
+        gradient flows. Default: ``None`` (no scaling).
+    bias : Variable, optional
+        Affine bias (beta) of shape ``[C]``. When provided, its
+        gradient flows. Default: ``None`` (no offset).
     training : bool, optional
         Use mini-batch statistics when ``True``, running stats when
-        ``False``.  Default: ``True``.
+        ``False``. Default: ``True``.
     momentum : float, optional
-        Value used for running mean/var update.  Default: ``0.1``.
+        Value used for running mean/var update. Default: ``0.1``.
     eps : float, optional
-        Added to denominator for numerical stability.  Default: ``1e-5``.
-    weight : Variable, optional
-        Optional affine weight (gamma) Variable of shape ``[C]``. When
-        provided, its gradient flows.  Default: ``None`` (no scaling).
-    bias : Variable, optional
-        Optional affine bias (beta) Variable of shape ``[C]``. When
-        provided, its gradient flows.  Default: ``None`` (no offset).
+        Added to denominator for numerical stability. Default: ``1e-5``.
 
     Returns
     -------
@@ -1016,10 +1025,17 @@ def batch_norm(input: Variable, num_features: int, training: bool = True, moment
 
     Example
     -------
-    >>> y = F.batch_norm(x, num_features=64, training=True)
-    >>> y = F.batch_norm(x, 64, weight=w, bias=b)
+    >>> # Training: batch stats only, no running-stats maintenance.
+    >>> y = F.batch_norm(x, training=True)
+    >>> # Training with running-stats updated in place.
+    >>> y = F.batch_norm(x, running_mean, running_var, weight=w, bias=b)
+    >>> # Eval mode: running stats are required.
+    >>> y = F.batch_norm(x, running_mean, running_var,
+    ...                  weight=w, bias=b, training=False)
     """
-    return _nn.functional_batch_norm(input, num_features, training, momentum, eps, weight, bias)
+    return _nn.functional_batch_norm(
+        input, running_mean, running_var, weight, bias,
+        training, momentum, eps)
 
 
 def layer_norm(input: Variable, normalized_shape: Sequence[int], eps: float = 1e-5, weight: Optional[Variable] = None, bias: Optional[Variable] = None) -> Variable:
@@ -2160,18 +2176,16 @@ def avg_pool1d(input: Variable, kernel_size: int,
                count_include_pad: bool = True) -> Variable:
     """Functional 1-D average pooling.
 
-    Audit-5 Z.21: routes through the C++ ``functional_avg_pool1d`` binding.
-    The ``count_include_pad`` flag is accepted for PyTorch API parity; the
-    backend layer implements the include-pad behaviour by default and the
-    ``False`` variant is not yet supported (would silently change averages).
+    Routes through the C++ ``functional_avg_pool1d`` binding. S22 wires
+    ``count_include_pad`` through to the CPU kernel: when ``False`` the
+    divisor for each output position is the number of in-bounds (non-
+    padded) elements that contributed, rather than the full kernel size.
     """
-    if not count_include_pad:
-        raise NotImplementedError(
-            "avg_pool1d(count_include_pad=False) is not yet supported")
     if stride is None:
         stride = -1
     return _nn.functional_avg_pool1d(input, int(kernel_size),
-                                     int(stride), int(padding))
+                                     int(stride), int(padding),
+                                     bool(count_include_pad))
 
 
 def avg_pool3d(input: Variable, kernel_size,
@@ -2179,16 +2193,15 @@ def avg_pool3d(input: Variable, kernel_size,
                count_include_pad: bool = True) -> Variable:
     """Functional 3-D average pooling.
 
-    Audit-5 Z.21: routes through the C++ ``functional_avg_pool3d`` binding.
-    See ``avg_pool1d`` for the ``count_include_pad`` caveat.
+    Routes through the C++ ``functional_avg_pool3d`` binding. See
+    ``avg_pool1d`` for the ``count_include_pad`` semantics — wired through
+    end-to-end as of S22.
     """
-    if not count_include_pad:
-        raise NotImplementedError(
-            "avg_pool3d(count_include_pad=False) is not yet supported")
     ks = _triple(kernel_size)
     st = (-1, -1, -1) if stride is None else _triple(stride)
     pd = _triple(padding)
-    return _nn.functional_avg_pool3d(input, ks, st, pd)
+    return _nn.functional_avg_pool3d(input, ks, st, pd,
+                                     bool(count_include_pad))
 
 
 def adaptive_avg_pool1d(input: Variable, output_size: int) -> Variable:

@@ -1338,24 +1338,126 @@ Returns:
         // decisions without touching the payload.
         // ---------------------------------------------------------------
         .def("__dlpack__", [](const tenzor::Tensor& self,
-                              py::object /*stream*/,
-                              py::object /*max_version*/,
-                              py::object /*dl_device*/,
-                              py::object /*copy*/) -> py::capsule {
-                // HH.22: DLPack v0.8 negotiation. We accept ``stream``,
-                // ``max_version``, ``dl_device``, ``copy`` for protocol
-                // compatibility but don't currently synchronize / negotiate
-                // on them — producers that need stream ordering should
-                // synchronize their own work before handing out the tensor.
-                // TODO: thread ``stream`` through to backend event-wait once
-                // CUDA/ROCm stream APIs are exposed on the Device hooks; for
-                // ``max_version`` we always emit the legacy v0.7 capsule
-                // ("dltensor"), which the spec lets us advertise regardless
-                // of the caller's ``max_version``. ``copy=True`` and
-                // ``dl_device`` cross-device export are similarly accepted
-                // and ignored. Rejecting them outright is what breaks the
-                // NumPy 2.0 / JAX consumers that always pass these kwargs.
-                DLManagedTensor* managed = tenzor::to_dlpack(self);
+                              py::object stream,
+                              py::object max_version,
+                              py::object dl_device,
+                              py::object copy) -> py::capsule {
+                // S22: DLPack v0.8 / v1.0 negotiation.
+                //
+                // ``stream`` — consumer's stream (int, or None / -1 sentinel).
+                //   The producer must ensure all of its outstanding work on
+                //   this tensor has completed (or been ordered) before the
+                //   consumer's stream uses the payload. We don't have a
+                //   stream-aware event API yet, so we conservatively call
+                //   ``Device::synchronize()`` on the tensor's device whenever
+                //   a non-default, non-None stream is requested. On CPU this
+                //   is a no-op; on CUDA/ROCm it's a full device sync. This
+                //   is correct (consumer never sees torn data) and only
+                //   slightly pessimistic. ``stream == 0`` (legacy/default
+                //   stream) and ``stream is None`` are treated as "caller
+                //   does not need sync ordering". ``stream == -1`` per spec
+                //   means "no synchronization" and is also a no-op.
+                //
+                // ``dl_device`` — optional ``(device_type, device_id)`` pair
+                //   the consumer wants the tensor materialised on. If
+                //   provided and different from the source device, we issue
+                //   ``tensor.to(target_device)`` so the consumer receives a
+                //   tensor on the requested device.
+                //
+                // ``copy`` — tri-state. ``True`` forces a fresh copy via
+                //   ``tensor.to(same_device)`` so the consumer can mutate
+                //   freely. ``False`` would require a guaranteed view; we
+                //   honour ``False`` by exporting the underlying storage
+                //   directly (no copy). ``None`` (default) means "copy only
+                //   if needed", which equals "no copy" for our purposes.
+                //
+                // ``max_version`` — highest DLPack protocol version the
+                //   consumer supports. We always emit the legacy v0.7
+                //   capsule (``"dltensor"``); the spec allows producers to
+                //   advertise a lower version than the consumer's ceiling.
+                //   We clip ``max_version`` to our supported max of (1, 0)
+                //   but otherwise have no behavioural switch yet.
+
+                // ---- Resolve the source tensor (may be replaced below). ----
+                tenzor::Tensor src = self;
+
+                // ---- ``dl_device`` transfer ----
+                if (!dl_device.is_none()) {
+                    // Expected shape: (device_type_code:int, device_id:int)
+                    py::tuple dl = py::reinterpret_borrow<py::tuple>(dl_device);
+                    if (dl.size() != 2) {
+                        throw std::runtime_error(
+                            "__dlpack__: dl_device must be a (type, id) tuple");
+                    }
+                    int dl_type = dl[0].cast<int>();
+                    int dl_id   = dl[1].cast<int>();
+                    tenzor::Device target = tenzor::Device::cpu();
+                    switch (dl_type) {
+                        case kDLCPU:    target = tenzor::Device::cpu(); break;
+                        case kDLCUDA:   target = tenzor::Device::cuda(dl_id); break;
+                        case kDLROCM:   target = tenzor::Device::rocm(dl_id); break;
+                        case kDLVulkan: target = tenzor::Device::vulkan(dl_id); break;
+                        case kDLOneAPI: target = tenzor::Device::oneapi(dl_id); break;
+                        case kDLMetal:  target = tenzor::Device::mps(dl_id); break;
+                        default:
+                            throw std::runtime_error(
+                                "__dlpack__: unsupported dl_device type code " +
+                                std::to_string(dl_type));
+                    }
+                    if (target.type != src.device().type ||
+                        target.index != src.device().index) {
+                        src = src.to(target);
+                    }
+                }
+
+                // ---- ``copy`` semantics ----
+                // True  -> force a copy onto the (possibly new) device so the
+                //          consumer owns the data.
+                // False -> producer must guarantee no copy; we already export
+                //          a view of the underlying storage, so this is a no-op.
+                // None  -> "copy only if needed", which is also a no-op here.
+                if (!copy.is_none() && py::cast<bool>(copy)) {
+                    // .clone() always allocates a fresh, independent copy that
+                    // shares no storage with the source. This is what
+                    // DLPack ``copy=True`` requires: the consumer must be able
+                    // to mutate the payload without aliasing the producer's
+                    // tensor.
+                    src = src.clone();
+                }
+
+                // ---- ``stream`` synchronisation ----
+                // DLPack semantics: a non-None, non-(-1) stream value means the
+                // consumer wants ordering relative to its stream. Without a
+                // per-stream event API we fall back to a full device sync.
+                // ``stream == 0`` and ``stream == 1`` (CUDA per-thread default)
+                // are also valid stream handles; ``stream is None`` skips sync.
+                if (!stream.is_none()) {
+                    int64_t stream_val = 0;
+                    try {
+                        stream_val = py::cast<int64_t>(stream);
+                    } catch (const py::cast_error&) {
+                        // Non-int stream handle (e.g. torch.cuda.Stream object).
+                        // Treat as "needs sync".
+                        stream_val = 0;
+                    }
+                    // -1 explicitly means "no synchronization required" per spec.
+                    if (stream_val != -1) {
+                        // No-op on CPU; full device sync on CUDA/ROCm/etc.
+                        if (src.device().type != tenzor::Device::Type::CPU) {
+                            src.device().synchronize();
+                        }
+                    }
+                }
+
+                // ---- ``max_version`` clipping ----
+                // We currently emit the v0.7 "dltensor" capsule (legacy
+                // unversioned DLManagedTensor). Even when the consumer
+                // advertises v1.0+, the spec lets us downgrade. We accept
+                // the kwarg and otherwise ignore it; the consumer is
+                // responsible for handling our v0.7 capsule.
+                (void)max_version;
+
+                DLManagedTensor* managed = tenzor::to_dlpack(src);
                 // Capsule destructor: if the consumer never renamed the
                 // capsule to "used_dltensor", call the DLPack deleter
                 // exactly once to release our storage reference.
@@ -1385,9 +1487,10 @@ Returns:
             "DLPack producer hook: return a PyCapsule wrapping a "
             "DLManagedTensor. Enables zero-copy interop with NumPy, JAX, "
             "CuPy, PyTorch, and TVM via their respective from_dlpack() "
-            "entry points. Accepts the DLPack v0.8 kwargs (stream, "
-            "max_version, dl_device, copy) for protocol compatibility; "
-            "they are currently ignored.")
+            "entry points. Honors DLPack v0.8/v1.0 kwargs: ``stream`` (sync "
+            "the source device when set), ``dl_device`` (cross-device "
+            "transfer via tensor.to), ``copy`` (force-copy when True), "
+            "``max_version`` (clipped to our v0.7 capsule).")
         .def("__dlpack_device__", [](const tenzor::Tensor& self) -> py::tuple {
                 // Return (device_type_code, device_id) as int pair.
                 // device_type_code matches the DLDeviceType enum values:
@@ -2477,27 +2580,69 @@ Returns:
                             continue;
                         }
                         if (entry.kind == TupleKind::BoolMask) {
-                            // Apply bool-mask via masked_select on the cursor dim.
-                            // For now we only support 1-D mask matching the full
-                            // remaining shape (PyTorch semantics for `x[mask]`).
-                            // A per-dim 1-D mask uses `index_select` over nonzero.
+                            // S22: Apply bool-mask via masked_select on the
+                            // cursor dim(s).  A rank-K mask at position ``i``
+                            // in the tuple consumes K consecutive dims of the
+                            // indexed tensor; PyTorch semantics: the True
+                            // positions contribute one "row" each to the
+                            // result's flattened-mask dim.
                             auto shape = result.shape();
-                            if (dim_cursor >= shape.size()) {
-                                throw std::out_of_range("Bool mask: too many indices");
+                            int64_t mask_rank = static_cast<int64_t>(entry.mask.shape().size());
+                            if (mask_rank == 0) {
+                                throw std::runtime_error("Bool tuple-mask must have rank >= 1");
                             }
-                            if (entry.mask.shape().size() != 1) {
-                                throw std::runtime_error(
-                                    "Bool tuple-mask must be 1-D; multi-D masks not yet supported in tuple path");
+                            if (dim_cursor + static_cast<size_t>(mask_rank) > shape.size()) {
+                                throw std::out_of_range(
+                                    "Bool mask: rank exceeds remaining tensor dims at this position");
                             }
-                            if (entry.mask.shape()[0] != shape[dim_cursor]) {
-                                throw std::runtime_error(
-                                    "Bool mask length does not match tensor dim at this position");
+                            // Validate each mask dim matches the corresponding
+                            // tensor dim.
+                            for (int64_t d = 0; d < mask_rank; ++d) {
+                                if (entry.mask.shape()[d] != shape[dim_cursor + static_cast<size_t>(d)]) {
+                                    throw std::runtime_error(
+                                        "Bool mask shape does not match tensor dims at this position");
+                                }
                             }
-                            // Equivalent to torch: gather indices where mask is true on this dim.
-                            auto nz = tenzor::nonzero(entry.mask).squeeze(1);
-                            result = tenzor::index_select(result, static_cast<int64_t>(dim_cursor), nz);
-                            dim_cursor++;
-                            remaining_consuming--;  // NN.22
+                            if (mask_rank == 1) {
+                                // Fast 1-D path (unchanged behaviour).
+                                auto nz = tenzor::nonzero(entry.mask).squeeze(1);
+                                result = tenzor::index_select(result, static_cast<int64_t>(dim_cursor), nz);
+                                dim_cursor++;
+                                remaining_consuming--;
+                                continue;
+                            }
+                            // N-D mask path: flatten the K consumed dims into
+                            // one, do the 1-D index_select, then leave the
+                            // result with one flattened dim (PyTorch returns
+                            // a tensor with shape [num_true, ...trailing] —
+                            // i.e. one dim per N-D mask, not K-1 unflattened
+                            // dims).
+                            //
+                            // Step 1: flatten dims [dim_cursor, dim_cursor + mask_rank)
+                            // of ``result`` into a single dim.
+                            std::vector<int64_t> new_shape;
+                            new_shape.reserve(shape.size() - static_cast<size_t>(mask_rank) + 1);
+                            for (size_t d = 0; d < dim_cursor; ++d) {
+                                new_shape.push_back(shape[d]);
+                            }
+                            int64_t flat_dim = 1;
+                            for (int64_t d = 0; d < mask_rank; ++d) {
+                                flat_dim *= shape[dim_cursor + static_cast<size_t>(d)];
+                            }
+                            new_shape.push_back(flat_dim);
+                            for (size_t d = dim_cursor + static_cast<size_t>(mask_rank); d < shape.size(); ++d) {
+                                new_shape.push_back(shape[d]);
+                            }
+                            auto flat_result = result.contiguous().reshape(new_shape);
+                            // Step 2: flatten the mask itself to 1-D and run
+                            // nonzero() to obtain a [num_true, 1] index tensor.
+                            auto flat_mask = entry.mask.contiguous().reshape({flat_dim});
+                            auto nz = tenzor::nonzero(flat_mask).squeeze(1);
+                            // Step 3: index_select on the flattened dim.
+                            result = tenzor::index_select(flat_result,
+                                                          static_cast<int64_t>(dim_cursor), nz);
+                            dim_cursor++;  // consumed K dims, produced 1 dim
+                            remaining_consuming--;
                             continue;
                         }
                         if (entry.kind == TupleKind::Int) {
@@ -5020,23 +5165,23 @@ Returns:
                     "in-place operation (Variable.__setitem__). Detach the "
                     "Variable first or wrap the write in a no_grad() block.");
             }
-            // FF.22: warn on non-leaf Variable.__setitem__. AA.9 closed
-            // the leaf-with-grad path above; the non-leaf path still
-            // silently mutates ``self.tensor()`` without registering a
-            // ``CopySlices`` autograd node, so saved-for-backward
-            // tensors that alias this storage observe the post-mutation
-            // values and the gradient is computed against the wrong
-            // forward state. The full fix is a proper CopySlices node;
-            // until then, emit a UserWarning so the user can either
-            // suppress (via warnings.filterwarnings) or refactor the
-            // code into a functional form (index_put, scatter, ...).
-            if (!self.is_leaf()) {
-                PyErr_WarnEx(PyExc_UserWarning,
-                    "Variable.__setitem__ on a non-leaf Variable does not "
-                    "track in-place semantics in autograd; saved tensors "
-                    "may see post-mutation values. CopySlices implementation "
-                    "is a known follow-up.",
-                    1);
+            // S8 (audit follow-up to FF.22): the non-leaf + requires_grad
+            // path was previously a UserWarning followed by an unchecked
+            // mutation of ``self.tensor()``. No CopySlices autograd Function
+            // is registered, so saved-for-backward tensors that alias this
+            // storage observe the post-mutation values during backward and
+            // the gradient is silently computed against the wrong forward
+            // state. The audit (P0) committed to either implementing
+            // CopySlices or raising; the simpler correct-now fix is to
+            // raise. Non-leaf Variables without requires_grad have no graph
+            // to corrupt and continue to flow through the mutation path.
+            if (!self.is_leaf() && self.requires_grad()) {
+                throw std::runtime_error(
+                    "in-place modification of a non-leaf Variable with "
+                    "autograd is not yet supported in Tenzor (would require "
+                    "CopySlices). Detach the Variable first via `v.detach()` "
+                    "or rebuild the computation graph without in-place "
+                    "setitem.");
             }
             // Delegate to Tensor.__setitem__ semantics by reusing the
             // underlying tensor reference. Unwrap a Variable value to its
@@ -5070,7 +5215,9 @@ Returns:
             py_dst.attr("__setitem__")(key, inner_value);
         }, py::arg("key"), py::arg("value"),
            "Assign to variable slice/element (in-place; not differentiable through the write). "
-           "Raises ValueError on a leaf Variable with requires_grad=True (PyTorch contract).")
+           "Raises ValueError on a leaf Variable with requires_grad=True (PyTorch contract). "
+           "Raises RuntimeError on a non-leaf Variable with requires_grad=True (S8: would "
+           "require CopySlices to be correct; raise until then to avoid silent wrong gradients).")
         .def_property_readonly("strides", [](const tenzor::Variable& v) {
             auto s = v.tensor().strides();
             py::tuple result(s.size());

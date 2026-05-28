@@ -18,17 +18,30 @@ namespace nn {
 namespace quantization {
 namespace kernels {
 
-// AVX512-VNNI inner product: uses _mm512_dpbusd_epi32 for 4x throughput
-#if defined(__AVX512VNNI__)
-static inline int32_t dot_int8_vnni(const int8_t* a, const int8_t* b, int64_t len) {
+// AVX-512 signed-INT8 inner product.
+//
+// NOTE: We deliberately do NOT use _mm512_dpbusd_epi32 here. That VNNI
+// intrinsic treats its first operand as *unsigned* 8-bit, which silently
+// reinterprets any negative input byte (e.g. -1 -> 255) and produces wrong
+// dot products for signed activations. The signed×signed VNNI variant
+// (_mm512_dpbssd_epi32) only exists on AVX10 / AVX-VNNI-INT8, which we do
+// not require. The portable signed-safe path widens int8 -> int16 via
+// _mm512_cvtepi8_epi16 and uses _mm512_madd_epi16, mirroring the pattern
+// in quantized_linear_int4.cpp. Throughput is lower than VNNI but
+// correctness on negative activations is non-negotiable.
+#if defined(__AVX512BW__)
+static inline int32_t dot_int8_signed_avx512(const int8_t* a, const int8_t* b, int64_t len) {
     __m512i acc_vec = _mm512_setzero_si512();
     int64_t i = 0;
 
-    // Process 64 elements at a time with VNNI
-    for (; i + 64 <= len; i += 64) {
-        __m512i va = _mm512_loadu_si512(reinterpret_cast<const __m512i*>(a + i));
-        __m512i vb = _mm512_loadu_si512(reinterpret_cast<const __m512i*>(b + i));
-        acc_vec = _mm512_dpbusd_epi32(acc_vec, va, vb);
+    // Process 32 INT8 elements at a time: widen to INT16 (512-bit), then
+    // _mm512_madd_epi16 (signed×signed -> int32 with horizontal pair-add).
+    for (; i + 32 <= len; i += 32) {
+        __m256i va8 = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(a + i));
+        __m256i vb8 = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(b + i));
+        __m512i va16 = _mm512_cvtepi8_epi16(va8);
+        __m512i vb16 = _mm512_cvtepi8_epi16(vb8);
+        acc_vec = _mm512_add_epi32(acc_vec, _mm512_madd_epi16(va16, vb16));
     }
 
     int32_t acc = _mm512_reduce_add_epi32(acc_vec);
@@ -98,25 +111,44 @@ auto quantized_linear_kernel(
             const int8_t* input_row = input + b * in_features;
             const int8_t* weight_row = weight + o * in_features;
 
-#if defined(__AVX512VNNI__)
-            // AVX512-VNNI path: ~4x throughput over AVX2
-            acc = dot_int8_vnni(input_row, weight_row, in_features);
+#if defined(__AVX512BW__)
+            // AVX-512 signed-safe path. Uses int8->int16 widening +
+            // _mm512_madd_epi16 instead of VNNI _mm512_dpbusd_epi32
+            // (the latter treats input as unsigned and corrupts negative
+            // activations).
+            acc = dot_int8_signed_avx512(input_row, weight_row, in_features);
 #elif defined(__AVX2__)
-            // SIMD-optimized path for x86 with AVX2
+            // SIMD-optimized path for x86 with AVX2.
+            //
+            // NOTE: We previously used _mm256_maddubs_epi16, which treats its
+            // first operand as *unsigned* INT8. Since `input` is signed int8_t,
+            // any negative byte (e.g. -1) aliased to 255 and silently produced
+            // wrong accumulations. We now widen signed INT8 -> INT16 via
+            // _mm256_cvtepi8_epi16 and use _mm256_madd_epi16 (signed*signed).
+            // This mirrors quantized_linear_int4.cpp's signed-safe path.
             __m256i acc_vec = _mm256_setzero_si256();
             int64_t i = 0;
 
             // Process 32 elements at a time
             for (; i + 32 <= in_features; i += 32) {
-                // Load 32 INT8 values
+                // Load 32 signed INT8 values
                 __m256i input_vec = _mm256_loadu_si256((__m256i*)(input_row + i));
                 __m256i weight_vec = _mm256_loadu_si256((__m256i*)(weight_row + i));
 
-                // Multiply and accumulate (INT8 -> INT16 -> INT32)
-                __m256i prod_lo = _mm256_maddubs_epi16(input_vec, weight_vec);
-                __m256i prod_hi = _mm256_madd_epi16(prod_lo, _mm256_set1_epi16(1));
+                // Split into low/high 128-bit halves and sign-extend to INT16
+                __m128i in_lo = _mm256_castsi256_si128(input_vec);
+                __m128i in_hi = _mm256_extracti128_si256(input_vec, 1);
+                __m128i wt_lo = _mm256_castsi256_si128(weight_vec);
+                __m128i wt_hi = _mm256_extracti128_si256(weight_vec, 1);
 
-                acc_vec = _mm256_add_epi32(acc_vec, prod_hi);
+                __m256i in16_lo = _mm256_cvtepi8_epi16(in_lo);
+                __m256i wt16_lo = _mm256_cvtepi8_epi16(wt_lo);
+                __m256i in16_hi = _mm256_cvtepi8_epi16(in_hi);
+                __m256i wt16_hi = _mm256_cvtepi8_epi16(wt_hi);
+
+                // signed*signed -> int32 with horizontal pair-add
+                acc_vec = _mm256_add_epi32(acc_vec, _mm256_madd_epi16(in16_lo, wt16_lo));
+                acc_vec = _mm256_add_epi32(acc_vec, _mm256_madd_epi16(in16_hi, wt16_hi));
             }
 
             // Horizontal sum of accumulator
@@ -184,18 +216,33 @@ auto quantized_linear_per_channel_kernel(
             const int8_t* input_row = input + b * in_features;
             const int8_t* weight_row = weight + o * in_features;
 
-#if defined(__AVX512VNNI__)
-            acc = dot_int8_vnni(input_row, weight_row, in_features);
+#if defined(__AVX512BW__)
+            // Signed-safe AVX-512 path (see comment on dot_int8_signed_avx512
+            // above re: why we avoid VNNI _mm512_dpbusd_epi32).
+            acc = dot_int8_signed_avx512(input_row, weight_row, in_features);
 #elif defined(__AVX2__)
+            // Signed-safe AVX2 path: widen int8 -> int16, then madd_epi16
+            // (signed*signed). _mm256_maddubs_epi16 is *not* safe here because
+            // its first operand is treated as unsigned.
             __m256i acc_vec = _mm256_setzero_si256();
             int64_t i = 0;
 
             for (; i + 32 <= in_features; i += 32) {
                 __m256i input_vec = _mm256_loadu_si256((__m256i*)(input_row + i));
                 __m256i weight_vec = _mm256_loadu_si256((__m256i*)(weight_row + i));
-                __m256i prod_lo = _mm256_maddubs_epi16(input_vec, weight_vec);
-                __m256i prod_hi = _mm256_madd_epi16(prod_lo, _mm256_set1_epi16(1));
-                acc_vec = _mm256_add_epi32(acc_vec, prod_hi);
+
+                __m128i in_lo = _mm256_castsi256_si128(input_vec);
+                __m128i in_hi = _mm256_extracti128_si256(input_vec, 1);
+                __m128i wt_lo = _mm256_castsi256_si128(weight_vec);
+                __m128i wt_hi = _mm256_extracti128_si256(weight_vec, 1);
+
+                __m256i in16_lo = _mm256_cvtepi8_epi16(in_lo);
+                __m256i wt16_lo = _mm256_cvtepi8_epi16(wt_lo);
+                __m256i in16_hi = _mm256_cvtepi8_epi16(in_hi);
+                __m256i wt16_hi = _mm256_cvtepi8_epi16(wt_hi);
+
+                acc_vec = _mm256_add_epi32(acc_vec, _mm256_madd_epi16(in16_lo, wt16_lo));
+                acc_vec = _mm256_add_epi32(acc_vec, _mm256_madd_epi16(in16_hi, wt16_hi));
             }
 
             __m128i sum128 = _mm_add_epi32(

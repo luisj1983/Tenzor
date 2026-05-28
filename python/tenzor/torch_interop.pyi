@@ -1,10 +1,25 @@
-"""Type stubs for tenzor.torch_interop module (PyTorch tensor interoperability)."""
+"""Type stubs for tenzor.torch_interop module (PyTorch tensor interoperability).
+
+S23: this stub is *conditional* — the underlying C++ binding is only
+registered when the extension was built with ``TENZOR_HAS_TORCH``
+defined (PyTorch headers available at configure time). When the
+extension is built WITHOUT torch support, ``import tenzor.torch_interop``
+raises ``ModuleNotFoundError`` at runtime. The drift checker
+(``tools/check_pyi_parity.py``) skips this stub in that case via its
+OPTIONAL_RUNTIME_STUBS list, so type-checking-only consumers can still
+see the signatures.
+
+If you depend on this module, gate your import:
+
+    if TYPE_CHECKING:
+        from tenzor import torch_interop  # type-checker sees stub
+    else:
+        torch_interop = None  # runtime fallback
+"""
 
 from __future__ import annotations
-from typing import Optional
+from typing import Any, Optional, TYPE_CHECKING
 from tenzor import Tensor, Device
-
-# Note: This module requires PyTorch to be installed and TENZOR_HAS_TORCH to be defined
 
 def can_zero_copy_to_torch(tensor: Tensor) -> bool:
     """

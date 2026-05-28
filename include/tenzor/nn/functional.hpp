@@ -319,7 +319,8 @@ auto max_pool2d(const Variable& input,
 auto avg_pool2d(const Variable& input,
                 std::pair<int64_t, int64_t> kernel_size,
                 std::pair<int64_t, int64_t> stride = {-1, -1},
-                std::pair<int64_t, int64_t> padding = {0, 0}) -> Variable;
+                std::pair<int64_t, int64_t> padding = {0, 0},
+                bool count_include_pad = true) -> Variable;
 
 /**
  * @brief Functional adaptive 2D average pooling
@@ -352,7 +353,8 @@ auto max_pool1d(const Variable& input,
 auto avg_pool1d(const Variable& input,
                 int64_t kernel_size,
                 int64_t stride = -1,
-                int64_t padding = 0) -> Variable;
+                int64_t padding = 0,
+                bool count_include_pad = true) -> Variable;
 
 /** @brief Functional 3D max pooling. Mirrors nn.MaxPool3d.forward_impl. */
 auto max_pool3d(const Variable& input,
@@ -364,7 +366,8 @@ auto max_pool3d(const Variable& input,
 auto avg_pool3d(const Variable& input,
                 std::array<int64_t, 3> kernel_size,
                 std::array<int64_t, 3> stride = {-1, -1, -1},
-                std::array<int64_t, 3> padding = {0, 0, 0}) -> Variable;
+                std::array<int64_t, 3> padding = {0, 0, 0},
+                bool count_include_pad = true) -> Variable;
 
 /** @brief Functional 1D adaptive max pooling. */
 auto adaptive_max_pool1d(const Variable& input, int64_t output_size) -> Variable;

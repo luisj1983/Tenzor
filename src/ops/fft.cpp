@@ -6,6 +6,7 @@
 #include "tenzor/ops/math.hpp"
 #include "tenzor/ops/transform.hpp"
 #include "tenzor/ops/indexing.hpp"
+#include "tenzor/utils/widen_narrow.hpp"
 #include <cmath>
 #include <stdexcept>
 
@@ -323,57 +324,105 @@ auto griffin_lim(const Tensor& magnitude,
                 const Tensor& window,
                 int64_t n_iter,
                 double momentum) -> Tensor {
+    // Canonical (Fast) Griffin-Lim phase reconstruction.
+    //
+    // Given a non-negative magnitude spectrogram |S|, recover a time-domain
+    // signal whose STFT magnitude approximates |S|.  We use the complex-dtype
+    // STFT/ISTFT (Complex64) directly rather than a real/imag last-axis
+    // convention, since both round-trip ops here return / consume Complex64.
+    //
+    // Fast Griffin-Lim recurrence (Perraudin et al., 2013) - two-buffer form:
+    //     T(s)    = STFT(ISTFT(s))                    // consistency projection
+    //     P_C(s)  = polar(|S|, angle(s))              // magnitude projection
+    //
+    //     t_0   = polar(|S|, random_phase)
+    //     y_{-1} = (unset; first iter uses momentum delta of 0)
+    //     for n = 0..n_iter-1:
+    //         y_n = P_C(T(t_n))
+    //         if n == 0:
+    //             t_{n+1} = y_n
+    //         else:
+    //             t_{n+1} = y_n + momentum * (y_n - y_{n-1})
+    //         y_{n-1} <- y_n
+    //     return ISTFT(t_{n_iter})
+    //
+    // momentum = 0 recovers original Griffin-Lim (1984):
+    //     t_{n+1} = y_n = P_C(T(t_n)),
+    // then x = ISTFT(t_{n_iter}).
+    // momentum = 0.99 is the Fast Griffin-Lim default and typically converges
+    // faster while remaining stable.
     if (hop_length < 0) hop_length = n_fft / 4;
     if (win_length < 0) win_length = n_fft;
-
-    // Initialize with random phases
-    auto phase = ::tenzor::rand(
-        std::vector<int64_t>(magnitude.shape().begin(), magnitude.shape().end()),
-        magnitude.dtype(), magnitude.device());
-    // Scale to [0, 2*pi)
-    phase = phase * 6.2831853f;  // 2 * pi
-
-    auto cos_phase = ::tenzor::cos(phase);
-    auto sin_phase = ::tenzor::sin(phase);
-
-    Tensor prev_rebuilt;
-    for (int64_t iter = 0; iter < n_iter; ++iter) {
-        // Construct complex spectrogram: real = mag * cos(phase), imag = mag * sin(phase)
-        auto real_part = magnitude * cos_phase;
-        auto imag_part = magnitude * sin_phase;
-
-        // ISTFT to get time-domain signal
-        // Note: This requires the STFT/ISTFT to handle real+imag pairs
-        // For now, use only the real part as approximation
-        auto signal = istft(real_part, n_fft, hop_length, win_length,
-                           window, true, false, true, std::nullopt);
-
-        // STFT to get new phases
-        auto complex_out = stft(signal, n_fft, hop_length, win_length,
-                               window, true, false, true);
-
-        // Extract phase from the new STFT
-        // phase = atan2(imag, real)
-        // Since our STFT returns complex representation,
-        // we approximate by using the output directly
-        auto norm = ::tenzor::sqrt(complex_out * complex_out + 1e-8f);
-        cos_phase = complex_out / norm;
-        sin_phase = ::tenzor::zeros(
-            std::vector<int64_t>(cos_phase.shape().begin(), cos_phase.shape().end()),
-            cos_phase.dtype(), cos_phase.device());
-
-        // Apply momentum
-        if (iter > 0 && momentum > 0.0 && prev_rebuilt.numel() > 0) {
-            cos_phase = cos_phase * static_cast<float>(1.0 - momentum)
-                      + prev_rebuilt * static_cast<float>(momentum);
-        }
-        prev_rebuilt = cos_phase;
+    if (momentum < 0.0 || momentum >= 1.0) {
+        throw std::runtime_error("griffin_lim: momentum must be in [0, 1)");
+    }
+    if (n_iter < 0) {
+        throw std::runtime_error("griffin_lim: n_iter must be >= 0");
     }
 
-    // Final reconstruction
-    auto final_real = magnitude * cos_phase;
-    return istft(final_real, n_fft, hop_length, win_length,
-                window, true, false, true, std::nullopt);
+    // Work in Float32 for the magnitude side; STFT/ISTFT operate on Float32 /
+    // Complex64.  Higher-precision magnitudes are widened-narrowed.
+    const DType mag_dtype = magnitude.dtype();
+    Tensor mag = magnitude;
+    if (mag.dtype() != DType::Float32) {
+        mag = mag.to(DType::Float32);
+    }
+    mag = mag.contiguous();
+
+    auto mag_shape = std::vector<int64_t>(mag.shape().begin(), mag.shape().end());
+
+    // n_iter == 0 path: PyTorch returns ISTFT of |S| with zero phase.
+    if (n_iter == 0) {
+        auto zero_phase = ::tenzor::zeros(mag_shape, DType::Float32, mag.device());
+        auto S0 = ::tenzor::polar(mag, zero_phase);
+        auto out = istft(S0, n_fft, hop_length, win_length,
+                         window, /*center=*/true, /*normalized=*/false,
+                         /*onesided=*/true, std::nullopt);
+        return (mag_dtype == DType::Float32) ? out : out.to(mag_dtype);
+    }
+
+    // Initial phase: uniform in [-pi, pi). Use the global generator so callers
+    // that previously called manual_seed() get deterministic results.
+    constexpr float k_two_pi = 6.283185307179586476925286766559f;
+    constexpr float k_pi     = 3.141592653589793238462643383279f;
+    auto phase0 = ::tenzor::rand(mag_shape, DType::Float32, mag.device());
+    phase0 = phase0 * k_two_pi - k_pi;
+
+    // Initial iterate t_0 = |S| * exp(i * phase0).
+    Tensor t = ::tenzor::polar(mag, phase0);
+
+    // Previous magnitude-projected spectrogram y_{n-1}.  Lazily set after the
+    // first iteration so the first momentum delta is exactly zero.
+    Tensor y_prev;
+    bool have_y_prev = false;
+
+    for (int64_t iter = 0; iter < n_iter; ++iter) {
+        // T(t) = STFT(ISTFT(t)): project onto consistency manifold.
+        auto x_hat = istft(t, n_fft, hop_length, win_length,
+                           window, /*center=*/true, /*normalized=*/false,
+                           /*onesided=*/true, std::nullopt);
+        auto S_hat = stft(x_hat, n_fft, hop_length, win_length,
+                          window, /*center=*/true, /*normalized=*/false,
+                          /*onesided=*/true);
+        // P_C(T(t)) = |S| * exp(i * angle(S_hat)).
+        auto y = ::tenzor::polar(mag, ::tenzor::angle(S_hat));
+
+        // Momentum update: t_{n+1} = y_n + momentum * (y_n - y_{n-1}).
+        // First iteration has no y_{n-1}, so delta is zero -> t = y.
+        if (!have_y_prev || momentum == 0.0) {
+            t = y;
+        } else {
+            t = y + (y - y_prev) * momentum;
+        }
+        y_prev = y;
+        have_y_prev = true;
+    }
+
+    // Final ISTFT of the last iterate.
+    auto out = istft(t, n_fft, hop_length, win_length,
+                     window, /*center=*/true, /*normalized=*/false,
+                     /*onesided=*/true, std::nullopt);
+    return (mag_dtype == DType::Float32) ? out : out.to(mag_dtype);
 }
 
 // ============================================================================
@@ -1076,7 +1125,18 @@ auto mfcc(const Tensor& waveform, int64_t sample_rate,
     auto mel_spec = fft::mel_scale(power_spec, n_mels, f_min, f_max, sample_rate);
 
     // Step 3: Log mel spectrogram (add epsilon for numerical stability)
-    auto log_mel = tenzor::log(tenzor::add(mel_spec, 1e-10));
+    //
+    // S13 dtype-preservation fix: for half-precision (Float16/BFloat16)
+    // `mel_spec`, the epsilon constant 1e-10 rounds to zero in the input
+    // dtype, so `mel_spec + 1e-10` is a no-op and `log(0)` becomes -inf
+    // at frequency bins where the power is zero. Widen to Float32 around
+    // the epsilon-shift + log so the constant remains representable,
+    // then narrow the result back to the original dtype for the DCT step.
+    auto log_mel = utils::widen_narrow_compute(
+        mel_spec,
+        [](const Tensor& ms) {
+            return tenzor::log(tenzor::add(ms, 1e-10));
+        });
 
     // Step 4: DCT (type 2, ortho normalization) along the mel dimension
     // log_mel shape: (..., n_mels, time_frames)

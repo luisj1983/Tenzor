@@ -1,29 +1,55 @@
-"""Probability distributions — mirrors torch.distributions.
+"""Probability distributions — Tensor / Variable native.
 
-All distributions use numpy for computation and accept Python scalars
-or numpy arrays as parameters.
+Distributions in this namespace return Tenzor ``Tensor`` or ``Variable``
+objects from every sampling and density operation; parameters can be
+plain Python scalars, numpy arrays, or autograd Variables.
+
+Reparameterised sampling
+------------------------
+
+The location-scale families implement a genuine ``rsample`` whose
+gradient flows into the distribution parameters:
+
+* ``Normal``, ``Uniform``, ``Laplace``, ``Exponential``, ``Cauchy``,
+  ``Gumbel``.
+
+For these classes ``has_rsample = True``.  Every other distribution
+sets ``has_rsample = False`` and ``rsample`` raises
+``NotImplementedError`` (never silently falls back to ``sample``).
+
+Discrete distributions (``Bernoulli``, ``Categorical``, ``Binomial``,
+``Multinomial``, ``Poisson``, ``Geometric``, ``NegativeBinomial``) draw
+samples via numpy and wrap the result as a Tenzor Tensor.
+
+Compatibility
+-------------
+
+The API is loosely modelled on ``torch.distributions`` but is not a
+drop-in replacement:
+
+* Distribution parameters are coerced to Tenzor objects on
+  construction; do **not** assume ``dist.loc`` is still a numpy array.
+* ``sample(()), sample(())`` and ``rsample`` return Tenzor objects, not
+  numpy arrays.
+* Reparameterisation for ``Gamma`` / ``Beta`` / ``Dirichlet`` /
+  ``StudentT`` / ``Chi2`` is not implemented yet — those distributions
+  have ``has_rsample = False``.
 
 Example::
 
-    import numpy as np
-    from tenzor.distributions import Normal, Gamma, Dirichlet
+    import tenzor as tz
+    from tenzor.distributions import Normal
 
-    # Normal distribution
-    n = Normal(loc=0.0, scale=1.0)
-    samples = n.sample((1000,))    # shape (1000,)
-    lp = n.log_prob(0.0)           # ~ -0.9189
-    print(n.entropy())             # ~ 1.4189
+    loc   = tz.tenzor_core.Variable(tz.zeros([4]), True)
+    scale = tz.tenzor_core.Variable(tz.ones([4]),  True)
+    dist  = Normal(loc, scale)
 
-    # Gamma distribution
-    g = Gamma(concentration=2.0, rate=1.0)
-    print(g.mean)    # 2.0
-    print(g.variance) # 2.0
-
-    # Dirichlet distribution
-    d = Dirichlet(np.array([1.0, 2.0, 3.0]))
-    s = d.sample()   # sum to 1
+    z = dist.rsample()       # autograd-aware Tenzor Variable
+    loss = tz.sum(z)
+    loss.backward()
+    assert loc.grad   is not None
+    assert scale.grad is not None
 """
-
 from .distribution import Distribution
 from .normal import Normal
 from .bernoulli import Bernoulli
@@ -37,6 +63,7 @@ from .beta import Beta
 from .studentT import StudentT
 from .cauchy import Cauchy
 from .laplace import Laplace
+from .gumbel import Gumbel
 from .weibull import Weibull
 from .exponential import Exponential
 from .geometric import Geometric
@@ -61,6 +88,7 @@ __all__ = [
     "StudentT",
     "Cauchy",
     "Laplace",
+    "Gumbel",
     "Weibull",
     "Exponential",
     "Geometric",

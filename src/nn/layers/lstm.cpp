@@ -352,10 +352,23 @@ auto LSTM::forward(const Variable& input, const std::pair<Variable, Variable>& h
     // perf cliff but produces correct math; the fused path with projection
     // is tracked as G1-followup (cuDNN/oneDNN both support projection in
     // their LSTM primitives).
+    // F.D (S11): widen the fused-path guard from `!is_training()` to mirror
+    // GRU's check. The fused kernels return grad-free outputs (leaf Variables
+    // with `requires_grad=false`); if any param OR the input requires grad,
+    // backward would silently dead-end at the rewrap. The previous guard let
+    // `eval()` + non-leaf input fall through to the severing fast path.
     bool can_use_fused = is_op_supported(OpId::LSTMForward, input.device().type) &&
                          input.dtype() == DType::Float32 &&
                          !is_training() &&
-                         proj_size_ == 0;
+                         proj_size_ == 0 &&
+                         !input.requires_grad() &&
+                         !tenzor::is_grad_enabled();
+    if (can_use_fused) {
+        for (const auto& [name, p] : named_parameters()) {
+            (void)name;
+            if (p->requires_grad()) { can_use_fused = false; break; }
+        }
+    }
 
     // Special fast path for single-layer bidirectional LSTM
     if (can_use_fused && bidirectional_ && num_layers_ == 1) {
@@ -401,6 +414,10 @@ auto LSTM::forward(const Variable& input, const std::pair<Variable, Variable>& h
 
         auto outputs = dispatch<OpId::BiLSTMForward>(inputs);
 
+        // S11 Pattern D: this batch_first rewrap is inside `can_use_fused`,
+        // which now requires `!input.requires_grad() && !is_grad_enabled()`
+        // and no requires_grad params. The output here is grad-free by
+        // construction; the leaf-Variable rewrap is intentional.
         Variable output(outputs[0], false);
         if (batch_first_) {
             output = Variable(output.tensor().transpose(0, 1), false);

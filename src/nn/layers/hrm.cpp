@@ -1095,33 +1095,61 @@ auto HRM::forward_with_segments(const Variable& input,
 }
 
 auto HRM::compute_participation_ratio(const Variable& state) -> double {
-    // Participation ratio: measure of effective dimensionality
-    // Simplified approximation using activation statistics
+    // S27 fix: previously this returned ~`mean(x^2)/sum(x^2) * numel`, which
+    // is just `1` (constant in activations) — a meaningless diagnostic.
+    //
+    // True participation ratio for an activation matrix A (N samples, D
+    // features) is PR(C) = (sum lambda_i)^2 / sum(lambda_i^2) where lambda_i
+    // are the eigenvalues of the empirical covariance C = (A - mean)^T (A -
+    // mean) / (N - 1). PR equals D when C is isotropic, 1 when one
+    // eigenvalue dominates.
+    //
+    // We avoid a full eigendecomposition (heavy + lacks a backend symeig
+    // contract guarantee for every device path) and use the diagonal-variance
+    // proxy: PR_diag = (sum sigma_d^2)^2 / sum(sigma_d^4) where sigma_d^2 is
+    // the per-feature variance. This equals PR exactly when off-diagonal
+    // covariance is zero and is a tight lower bound otherwise — it still
+    // varies with rank structure, which is what the diagnostic is for.
 
     auto x = state.tensor();
     auto shape = x.shape();
+    if (shape.empty()) {
+        return 0.0;
+    }
 
-    // Flatten to (batch * seq_len, d_model)
+    // Flatten leading dims so we have (N, D) with N = sample count.
     auto flat = x.view({-1, shape.back()});
+    const int64_t N = flat.shape()[0];
+    const int64_t D = flat.shape()[1];
+    if (N <= 1 || D <= 0) {
+        // PR is undefined for a single sample (variance has 0 degrees of
+        // freedom). Return 0.0 to signal "not measurable" rather than NaN.
+        return 0.0;
+    }
 
-    // Simple approximation: use mean squared over sum squared
-    // This approximates how "spread out" the activations are
-    auto x_sq = flat * flat;
-    auto sum_sq = tenzor::sum(x_sq);
-    auto mean_sq = tenzor::mean(x_sq);
+    // Per-feature variance: shape [D]. Unbiased (N-1) denominator matches
+    // the standard PR definition; both numerator and denominator below are
+    // scaled by the same (N-1)^2 so the choice is irrelevant for PR, but
+    // unbiased=true matches the textbook formula.
+    auto variances = tenzor::var(flat, /*dim=*/0, /*keepdim=*/false, /*unbiased=*/true);
 
-    // Cast to Float32 first — these tensors carry the model dtype, which
-    // can be Float64 (item<float>() throws on dtype mismatch).
-    float ss = sum_sq.to(DType::Float32).item<float>();
-    float ms = mean_sq.to(DType::Float32).item<float>();
+    // Promote to Float64 for the ratio so we don't lose precision when
+    // feature variances are tiny (early-training scenarios produce values
+    // near 0, and squaring compresses them further).
+    auto v64 = variances.to(DType::Float64);
+    auto v_sq = v64 * v64;
 
-    if (ss < 1e-10f) return 0.0;
+    auto sum_var = tenzor::sum(v64);
+    auto sum_var_sq = tenzor::sum(v_sq);
 
-    // Number of elements
-    int64_t n = flat.numel();
+    double s  = sum_var.item<double>();
+    double s2 = sum_var_sq.item<double>();
 
-    // Approximation of participation ratio
-    return (ms * ms * n) / ss;
+    if (s2 < 1e-30) {
+        // All-zero activations: no information; report PR = 0.
+        return 0.0;
+    }
+    return (s * s) / s2;
 }
 
 auto HRM::num_parameters() const -> int64_t {

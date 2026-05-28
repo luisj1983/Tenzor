@@ -11,12 +11,34 @@
 #include "tenzor/backend/fast_dispatch.hpp"
 #include "tenzor/backend/op_attributes.hpp"
 #include "tenzor/ops/op_id.hpp"
+#include "tenzor/optim/sparse_helpers.hpp"
+#include "tenzor/utils/logging.hpp"
 #include <cmath>
 #include <cstring>
 #include <stdexcept>
 
 namespace tenzor {
 namespace optim {
+
+namespace {
+// S27 wiring: same fallback pattern as Adam — see adam.cpp for the
+// rationale. Adagrad has no sparse-aware path yet, so we densify any
+// producer-supplied sparse grad and the caller emits a one-shot warning.
+inline auto adagrad_densify_sparse_grad(tenzor::Variable& param) -> bool {
+    auto sparse_opt = tenzor::optim::detail::extract_sparse_grad(param);
+    if (!sparse_opt.has_value()) return false;
+
+    tenzor::Tensor dense = sparse_opt->to_dense();
+    if (param.has_grad()) {
+        const tenzor::Tensor& existing = param.grad().value();
+        param.set_grad(existing + dense);
+    } else {
+        param.set_grad(std::move(dense));
+    }
+    param.clear_sparse_grad();
+    return true;
+}
+}  // namespace
 
 Adagrad::Adagrad(std::vector<std::shared_ptr<Variable>> params,
                  double lr, double lr_decay, double weight_decay,
@@ -160,7 +182,17 @@ auto Adagrad::step_impl() -> void {
     for (size_t i = 0; i < parameters_.size(); ++i) {
         auto& param = parameters_[i];
 
-        if (!param || !param->has_grad()) {
+        if (!param) continue;
+        // S27: detect producer-supplied sparse grads and densify; emit a
+        // one-shot warning. Adagrad has no sparse-aware fast path yet.
+        if (adagrad_densify_sparse_grad(*param)) {
+            TENZOR_WARN_ONCE(
+                "Adagrad: parameter received a sparse gradient but this "
+                "optimiser does not yet implement a sparse-aware update; "
+                "densifying and running the standard dense step. Use "
+                "SparseAdam for memory/perf-optimal sparse updates.");
+        }
+        if (!param->has_grad()) {
             continue;  // Skip parameters without gradients
         }
 

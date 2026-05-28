@@ -1,73 +1,91 @@
-"""Weibull distribution."""
-import math
+"""Weibull distribution — Tensor-native (sample only)."""
+from __future__ import annotations
+
 import numpy as np
-# V.39: scipy is lazy (see distribution.py).
-from .distribution import Distribution, _to_numpy, _require_scipy_special
+
+from tenzor.tenzor_core import Tensor, Variable  # type: ignore
+
+from .distribution import (
+    Distribution,
+    _broadcast_shape,
+    _shape_of,
+    _to_variable,
+    _wrap_numpy,
+    _require_scipy_special,
+)
+from ._reparam import standard_uniform
 
 
 class Weibull(Distribution):
-    """Weibull(scale, concentration) distribution.
+    """``Weibull(scale, concentration)`` distribution.
 
-    Args:
-        scale: Scale parameter lambda (scalar or array, > 0).
-        concentration: Shape parameter k (scalar or array, > 0).
+    Reparameterisation ``scale * (-log(1 - U))^(1/k)`` is plausible but
+    requires generic ``pow`` with a Variable exponent (not supported
+    here in the autograd path), so ``has_rsample = False``.
     """
 
-    has_rsample = True
+    has_rsample = False
 
     def __init__(self, scale, concentration):
-        self.scale = _to_numpy(scale)
-        self.concentration = _to_numpy(concentration)
-        super().__init__(np.broadcast_shapes(self.scale.shape, self.concentration.shape))
+        self.scale = _to_variable(scale)
+        self.concentration = _to_variable(concentration)
+        super().__init__(_broadcast_shape(_shape_of(self.scale),
+                                          _shape_of(self.concentration)))
 
     @property
     def mean(self):
-        # E[X] = lambda * Gamma(1 + 1/k)
         gamma_fn = _require_scipy_special().gamma
-        return self.scale * gamma_fn(1.0 + 1.0 / self.concentration)
+        scale_np = np.asarray(self.scale.tensor(), dtype=np.float64)
+        k_np = np.asarray(self.concentration.tensor(), dtype=np.float64)
+        return _wrap_numpy(scale_np * gamma_fn(1.0 + 1.0 / k_np))
 
     @property
     def variance(self):
         gamma_fn = _require_scipy_special().gamma
-        k = self.concentration
-        lam = self.scale
-        g1 = gamma_fn(1.0 + 1.0 / k)
-        g2 = gamma_fn(1.0 + 2.0 / k)
-        return lam ** 2 * (g2 - g1 ** 2)
+        scale_np = np.asarray(self.scale.tensor(), dtype=np.float64)
+        k_np = np.asarray(self.concentration.tensor(), dtype=np.float64)
+        g1 = gamma_fn(1.0 + 1.0 / k_np)
+        g2 = gamma_fn(1.0 + 2.0 / k_np)
+        return _wrap_numpy(scale_np ** 2 * (g2 - g1 ** 2))
 
     def sample(self, sample_shape=()):
-        shape = tuple(sample_shape) + self._batch_shape
-        # Inverse-CDF: lambda * (-log(1 - U))^(1/k)
-        u = np.random.uniform(size=shape or None)
-        u = np.clip(u, 1e-7, 1.0 - 1e-7)
-        return self.scale * (-np.log(1.0 - u)) ** (1.0 / self.concentration)
-
-    def rsample(self, sample_shape=()):
-        return self.sample(sample_shape)
+        out_shape = tuple(sample_shape) + self._batch_shape
+        u = np.asarray(standard_uniform(out_shape if out_shape else [], eps=1e-7),
+                       dtype=np.float64)
+        scale_np = np.asarray(self.scale.tensor(), dtype=np.float64)
+        k_np = np.asarray(self.concentration.tensor(), dtype=np.float64)
+        out = scale_np * (-np.log(1.0 - u)) ** (1.0 / k_np)
+        return _wrap_numpy(np.asarray(out, dtype=np.float32))
 
     def log_prob(self, value):
-        value = _to_numpy(value)
-        k = self.concentration
-        lam = self.scale
-        x_over_l = value / lam
-        return (np.log(k / lam)
-                + (k - 1.0) * np.log(x_over_l)
-                - x_over_l ** k)
+        v_np = np.asarray(_to_variable(value).tensor(), dtype=np.float64)
+        scale_np = np.asarray(self.scale.tensor(), dtype=np.float64)
+        k_np = np.asarray(self.concentration.tensor(), dtype=np.float64)
+        x_over_l = v_np / scale_np
+        out = (np.log(k_np / scale_np)
+               + (k_np - 1.0) * np.log(x_over_l)
+               - x_over_l ** k_np)
+        return _wrap_numpy(out)
 
     def cdf(self, value):
-        value = _to_numpy(value)
-        return 1.0 - np.exp(-(value / self.scale) ** self.concentration)
+        v_np = np.asarray(_to_variable(value).tensor(), dtype=np.float64)
+        scale_np = np.asarray(self.scale.tensor(), dtype=np.float64)
+        k_np = np.asarray(self.concentration.tensor(), dtype=np.float64)
+        return _wrap_numpy(1.0 - np.exp(-(v_np / scale_np) ** k_np))
 
     def icdf(self, p):
-        p = _to_numpy(p)
-        return self.scale * (-np.log(1.0 - p)) ** (1.0 / self.concentration)
+        p_np = np.asarray(_to_variable(p).tensor(), dtype=np.float64)
+        scale_np = np.asarray(self.scale.tensor(), dtype=np.float64)
+        k_np = np.asarray(self.concentration.tensor(), dtype=np.float64)
+        return _wrap_numpy(scale_np * (-np.log(1.0 - p_np)) ** (1.0 / k_np))
 
     def entropy(self):
-        # H = euler_mascheroni * (1 - 1/k) + log(lambda/k) + 1
         euler_mascheroni = 0.5772156649015328
-        k = self.concentration
-        return (euler_mascheroni * (1.0 - 1.0 / k)
-                + np.log(self.scale / k) + 1.0)
+        scale_np = np.asarray(self.scale.tensor(), dtype=np.float64)
+        k_np = np.asarray(self.concentration.tensor(), dtype=np.float64)
+        out = (euler_mascheroni * (1.0 - 1.0 / k_np)
+               + np.log(scale_np / k_np) + 1.0)
+        return _wrap_numpy(out)
 
     def support(self):
         return "(0, inf)"

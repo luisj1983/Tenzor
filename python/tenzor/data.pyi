@@ -143,3 +143,12 @@ def random_split(
     lengths: Sequence[int],
     generator: Optional[Any] = None,
 ) -> List[Subset]: ...
+
+
+# Stream S23: C++ submodules re-attached to ``tenzor.data`` by
+# ``python/tenzor/__init__.py``. These are pybind11 modules registered
+# under ``tenzor_core.data`` (transforms, datasets); their full content
+# is not stub-documented yet but the names are surfaced so static
+# checkers see ``tz.data.transforms.*`` / ``tz.data.datasets.*``.
+datasets: Any
+transforms: Any

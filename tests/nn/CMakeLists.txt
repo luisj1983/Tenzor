@@ -159,6 +159,11 @@ target_link_libraries(test_channel_shuffle PRIVATE tenzor_core GTest::gtest_main
 add_executable(test_quantized_inference test_quantized_inference.cpp)
 target_link_libraries(test_quantized_inference PRIVATE tenzor_core GTest::gtest_main)
 
+# Quantization S20: HistogramObserver re-bin, QuantizedConv1d real INT8,
+# QuantStub real Q/DQ + STE.
+add_executable(test_quantization_s20 test_quantization_s20.cpp)
+target_link_libraries(test_quantization_s20 PRIVATE tenzor_core GTest::gtest_main)
+
 # Segmentation operations multi-dtype tests
 add_executable(test_segmentation_multidtype layers/test_segmentation_multidtype.cpp)
 target_link_libraries(test_segmentation_multidtype PRIVATE tenzor_core GTest::gtest_main)
@@ -218,6 +223,7 @@ tenzor_discover_tests(test_normalization_multidtype LABELS "nn" DISCOVERY_TIMEOU
 tenzor_discover_tests(test_flatten_multidtype LABELS "nn" DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST BACKENDS multi)
 tenzor_discover_tests(test_channel_shuffle LABELS "nn" DISCOVERY_TIMEOUT 60)
 tenzor_discover_tests(test_quantized_inference LABELS "nn" DISCOVERY_TIMEOUT 60)
+tenzor_discover_tests(test_quantization_s20 LABELS "nn" DISCOVERY_TIMEOUT 60 BACKENDS cpu)
 tenzor_discover_tests(test_segmentation_multidtype LABELS "nn" DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST BACKENDS multi)
 # PyTorch loader tests
 add_executable(test_pytorch_loader test_pytorch_loader.cpp)
@@ -278,6 +284,10 @@ tenzor_discover_tests(test_safetensors LABELS "nn" DISCOVERY_TIMEOUT 120)
 add_executable(test_parametrize test_parametrize.cpp)
 target_link_libraries(test_parametrize PRIVATE tenzor_core GTest::gtest_main)
 tenzor_discover_tests(test_parametrize LABELS "nn" DISCOVERY_TIMEOUT 60)
+
+add_executable(test_parametrize_lifetime test_parametrize_lifetime.cpp)
+target_link_libraries(test_parametrize_lifetime PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_parametrize_lifetime LABELS "nn" DISCOVERY_TIMEOUT 60 BACKENDS cpu)
 
 # ============================================================================
 # New module tests (Phase 2)
@@ -710,3 +720,27 @@ tenzor_discover_tests(test_transformer_containers_multidtype LABELS "nn" DISCOVE
 add_executable(test_optim_grad_flow optim/test_optim_grad_flow.cpp)
 target_link_libraries(test_optim_grad_flow PRIVATE tenzor_core GTest::gtest_main)
 tenzor_discover_tests(test_optim_grad_flow LABELS "nn" DISCOVERY_TIMEOUT 60)
+
+# Stream-5 P0 surgical fixes: DataParallel::gather grad chain,
+# PANet::forward_impl OOB rejection, DeepLabV3PlusDecoder::forward_impl
+# real-work (not identity stub).
+add_executable(test_s5_surgical_fixes test_s5_surgical_fixes.cpp)
+target_link_libraries(test_s5_surgical_fixes PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_s5_surgical_fixes LABELS "nn" DISCOVERY_TIMEOUT 60 BACKENDS cpu)
+
+# Stream-11 (S11) severance sweep — regression coverage for the
+# raw-tensor-op-inside-forward grad_fn-severance pattern across MaxPool2d,
+# AvgPool2d, LayerNorm, Conv2d, BatchNorm2d, LSTM (eval-mode), GRU
+# (eval-mode), LazyLinear, MultiheadAttention.
+add_executable(test_severance_sweep test_severance_sweep.cpp)
+target_link_libraries(test_severance_sweep PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_severance_sweep LABELS "nn" DISCOVERY_TIMEOUT 60 BACKENDS cpu)
+
+# Stream-27 (S27) optimizer-hole regression coverage:
+#   - LBFGS::load_state_dict missing-key throw
+#   - LazyLinear::materialize honours pre-materialisation .to(device)
+#   - HRM::compute_participation_ratio reflects activation rank structure
+#   - Adam sparse-grad dense fallback path
+add_executable(test_optimizer_holes test_optimizer_holes.cpp)
+target_link_libraries(test_optimizer_holes PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_optimizer_holes LABELS "nn" DISCOVERY_TIMEOUT 60 BACKENDS cpu)

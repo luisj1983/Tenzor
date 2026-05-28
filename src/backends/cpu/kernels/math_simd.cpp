@@ -7,6 +7,7 @@
  */
 
 #include "tenzor/backends/cpu/simd.hpp"
+#include "tenzor/backend/runtime_simd.hpp"
 #include "simd_fast_math.hpp"
 #include <cmath>
 
@@ -210,10 +211,10 @@ auto fma(const float* a, const float* b, const float* c, float* out, size_t size
 namespace simd {
 
 auto add(const float* a, const float* b, float* out, size_t size) -> void {
-    const auto& cpu = CPUInfo::get();
-    if (cpu.has_avx512()) {
+    const auto& cpu = ::tenzor::backend::get_simd_features();
+    if (cpu.avx512f) {
         avx512::add(a, b, out, size);
-    } else if (cpu.has_avx2()) {
+    } else if (cpu.avx2) {
         avx2::add(a, b, out, size);
     } else {
         scalar::add(a, b, out, size);
@@ -221,10 +222,10 @@ auto add(const float* a, const float* b, float* out, size_t size) -> void {
 }
 
 auto sub(const float* a, const float* b, float* out, size_t size) -> void {
-    const auto& cpu = CPUInfo::get();
-    if (cpu.has_avx512()) {
+    const auto& cpu = ::tenzor::backend::get_simd_features();
+    if (cpu.avx512f) {
         avx512::sub(a, b, out, size);
-    } else if (cpu.has_avx2()) {
+    } else if (cpu.avx2) {
         avx2::sub(a, b, out, size);
     } else {
         scalar::sub(a, b, out, size);
@@ -232,10 +233,10 @@ auto sub(const float* a, const float* b, float* out, size_t size) -> void {
 }
 
 auto mul(const float* a, const float* b, float* out, size_t size) -> void {
-    const auto& cpu = CPUInfo::get();
-    if (cpu.has_avx512()) {
+    const auto& cpu = ::tenzor::backend::get_simd_features();
+    if (cpu.avx512f) {
         avx512::mul(a, b, out, size);
-    } else if (cpu.has_avx2()) {
+    } else if (cpu.avx2) {
         avx2::mul(a, b, out, size);
     } else {
         scalar::mul(a, b, out, size);
@@ -243,10 +244,10 @@ auto mul(const float* a, const float* b, float* out, size_t size) -> void {
 }
 
 auto div(const float* a, const float* b, float* out, size_t size) -> void {
-    const auto& cpu = CPUInfo::get();
-    if (cpu.has_avx512()) {
+    const auto& cpu = ::tenzor::backend::get_simd_features();
+    if (cpu.avx512f) {
         avx512::div(a, b, out, size);
-    } else if (cpu.has_avx2()) {
+    } else if (cpu.avx2) {
         avx2::div(a, b, out, size);
     } else {
         scalar::div(a, b, out, size);
@@ -254,10 +255,10 @@ auto div(const float* a, const float* b, float* out, size_t size) -> void {
 }
 
 auto sqrt(const float* a, float* out, size_t size) -> void {
-    const auto& cpu = CPUInfo::get();
-    if (cpu.has_avx512()) {
+    const auto& cpu = ::tenzor::backend::get_simd_features();
+    if (cpu.avx512f) {
         avx512::sqrt(a, out, size);
-    } else if (cpu.has_avx2()) {
+    } else if (cpu.avx2) {
         avx2::sqrt(a, out, size);
     } else {
         scalar::sqrt(a, out, size);
@@ -265,10 +266,10 @@ auto sqrt(const float* a, float* out, size_t size) -> void {
 }
 
 auto exp(const float* a, float* out, size_t size) -> void {
-    const auto& cpu = CPUInfo::get();
-    if (cpu.has_avx512()) {
+    const auto& cpu = ::tenzor::backend::get_simd_features();
+    if (cpu.avx512f) {
         avx512::exp(a, out, size);
-    } else if (cpu.has_avx2()) {
+    } else if (cpu.avx2) {
         avx2::exp(a, out, size);
     } else {
         scalar::exp(a, out, size);
@@ -276,10 +277,10 @@ auto exp(const float* a, float* out, size_t size) -> void {
 }
 
 auto log(const float* a, float* out, size_t size) -> void {
-    const auto& cpu = CPUInfo::get();
-    if (cpu.has_avx512()) {
+    const auto& cpu = ::tenzor::backend::get_simd_features();
+    if (cpu.avx512f) {
         avx512::log(a, out, size);
-    } else if (cpu.has_avx2()) {
+    } else if (cpu.avx2) {
         avx2::log(a, out, size);
     } else {
         scalar::log(a, out, size);
@@ -287,10 +288,10 @@ auto log(const float* a, float* out, size_t size) -> void {
 }
 
 auto fma(const float* a, const float* b, const float* c, float* out, size_t size) -> void {
-    const auto& cpu = CPUInfo::get();
-    if (cpu.has_avx512()) {
+    const auto& cpu = ::tenzor::backend::get_simd_features();
+    if (cpu.avx512f) {
         avx512::fma(a, b, c, out, size);
-    } else if (cpu.has_avx2()) {
+    } else if (cpu.avx2) {
         avx2::fma(a, b, c, out, size);
     } else {
         scalar::fma(a, b, c, out, size);

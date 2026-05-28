@@ -55,9 +55,21 @@ auto cholesky(const Tensor& A, bool upper = false) -> Tensor;
 /**
  * @brief Compute matrix norm.
  *
- * @param A Input tensor
- * @param ord Norm order ("fro" for Frobenius, "1", "2", "inf", or "nuc")
- * @return Norm value
+ * @param A Input tensor (..., M, N). Must be at least 2-D for induced and
+ *          spectral norms; Frobenius accepts any shape.
+ * @param ord Norm order. Supported values:
+ *            - "fro" (default) — Frobenius norm, sqrt(sum(|A|^2)).
+ *            - "nuc"           — nuclear norm, sum of singular values.
+ *            - "1"  / "-1"     — max / min absolute column sum.
+ *            - "inf"/ "-inf"   — max / min absolute row sum.
+ *            - "2"  / "-2"     — largest / smallest singular value.
+ *
+ *            "nuc", "2", "-2" require an SVD, which currently supports
+ *            Float32, Float64, Complex64, Complex128 (Float16/BFloat16 are
+ *            upcast to Float32 internally by `svd`). All other ords work
+ *            for every backend that implements `abs`, `sum`, `max`, `min`.
+ * @return Norm value. Shape is `A.shape[:-2]` for induced/spectral/nuclear
+ *         ords, or a scalar for "fro".
  */
 auto norm(const Tensor& A, const std::string& ord = "fro") -> Tensor;
 
@@ -359,6 +371,15 @@ auto ldl_solve(const Tensor& LD, const Tensor& pivots, const Tensor& B) -> Tenso
  * - ord=-inf: min(abs(x))
  * - ord=0: count of nonzero elements
  * - ord=p: sum(abs(x)^p)^(1/p)
+ *
+ * Special values for `ord`:
+ *   - 0          → L0 "norm" — exact count of nonzero entries along `dim`.
+ *                  Implemented as `sum(ne(input, 0).to(input.dtype()), dim)`.
+ *   - 1          → sum of absolute values.
+ *   - 2          → Euclidean norm sqrt(sum(x^2)).
+ *   - +inf       → max(abs(x)).
+ *   - -inf       → min(abs(x)).
+ *   - other p    → (sum(|x|^p))^(1/p).
  *
  * @param input Input tensor
  * @param ord Norm order (default 2.0)

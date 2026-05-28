@@ -7,6 +7,7 @@
 #include "tenzor/ops/creation.hpp"
 #include "tenzor/ops/math.hpp"
 #include "tenzor/jit/tracer.hpp"
+#include "tenzor/utils/autograd_wrap.hpp"
 #include <cmath>
 #include <stdexcept>
 #include <limits>
@@ -148,7 +149,7 @@ auto MaxPool2d::forward_impl(const Variable& input) -> Variable {
     // Contiguous on entry — pool kernels expect NCHW contiguous layout.
     Variable contig_input = input;
     if (!input.tensor().is_contiguous()) {
-        contig_input = Variable(input.tensor().contiguous(), input.requires_grad());
+        tenzor::utils::wrap_preserving_grad(contig_input, input.tensor().contiguous());
     }
 
     // Always route through OpId dispatch — the kernel registry handles every
@@ -217,9 +218,11 @@ class AvgPool2dBackward : public Function {
 public:
     AvgPool2dBackward(int64_t kernel_size, int64_t stride, int64_t padding,
                      int64_t H_in, int64_t W_in,
+                     bool count_include_pad,
                      std::vector<Tensor> tensors_to_save)
         : kernel_size_(kernel_size), stride_(stride), padding_(padding),
-          H_in_(H_in), W_in_(W_in) {
+          H_in_(H_in), W_in_(W_in),
+          count_include_pad_(count_include_pad) {
         save_for_backward(std::move(tensors_to_save));
     }
 
@@ -247,6 +250,7 @@ public:
             bwd_attrs.set(AttrKey::KernelSize, kernel_size_);
             bwd_attrs.set(AttrKey::Stride, stride_);
             bwd_attrs.set(AttrKey::Padding, padding_);
+            bwd_attrs.set(AttrKey::CountIncludePad, count_include_pad_ ? int64_t{1} : int64_t{0});
             auto result = dispatch_to_device(OpId::AvgPool2dBackward, grad_output.device().type,
                 inputs, bwd_attrs);
             return {result[0]};
@@ -270,17 +274,21 @@ public:
                             int64_t h_end = h_start + kernel_size_;
                             int64_t w_end = w_start + kernel_size_;
 
-                            int64_t count = 0;
+                            int64_t valid_count = 0;
                             for (int64_t h = h_start; h < h_end; ++h) {
                                 for (int64_t w = w_start; w < w_end; ++w) {
                                     if (h >= 0 && h < H_in_ && w >= 0 && w < W_in_) {
-                                        count++;
+                                        valid_count++;
                                     }
                                 }
                             }
+                            int64_t divisor = count_include_pad_
+                                ? (kernel_size_ * kernel_size_)
+                                : valid_count;
+                            if (divisor <= 0) continue;
 
                             int64_t out_idx = ((n * C + c) * H_out + h_out) * W_out + w_out;
-                            float grad_val = grad_output_data[out_idx] / static_cast<float>(count);
+                            float grad_val = grad_output_data[out_idx] / static_cast<float>(divisor);
 
                             for (int64_t h = h_start; h < h_end; ++h) {
                                 for (int64_t w = w_start; w < w_end; ++w) {
@@ -307,17 +315,21 @@ public:
                             int64_t h_end = h_start + kernel_size_;
                             int64_t w_end = w_start + kernel_size_;
 
-                            int64_t count = 0;
+                            int64_t valid_count = 0;
                             for (int64_t h = h_start; h < h_end; ++h) {
                                 for (int64_t w = w_start; w < w_end; ++w) {
                                     if (h >= 0 && h < H_in_ && w >= 0 && w < W_in_) {
-                                        count++;
+                                        valid_count++;
                                     }
                                 }
                             }
+                            int64_t divisor = count_include_pad_
+                                ? (kernel_size_ * kernel_size_)
+                                : valid_count;
+                            if (divisor <= 0) continue;
 
                             int64_t out_idx = ((n * C + c) * H_out + h_out) * W_out + w_out;
-                            double grad_val = grad_output_data[out_idx] / static_cast<double>(count);
+                            double grad_val = grad_output_data[out_idx] / static_cast<double>(divisor);
 
                             for (int64_t h = h_start; h < h_end; ++h) {
                                 for (int64_t w = w_start; w < w_end; ++w) {
@@ -344,17 +356,21 @@ public:
                             int64_t h_end = h_start + kernel_size_;
                             int64_t w_end = w_start + kernel_size_;
 
-                            int64_t count = 0;
+                            int64_t valid_count = 0;
                             for (int64_t h = h_start; h < h_end; ++h) {
                                 for (int64_t w = w_start; w < w_end; ++w) {
                                     if (h >= 0 && h < H_in_ && w >= 0 && w < W_in_) {
-                                        count++;
+                                        valid_count++;
                                     }
                                 }
                             }
+                            int64_t divisor = count_include_pad_
+                                ? (kernel_size_ * kernel_size_)
+                                : valid_count;
+                            if (divisor <= 0) continue;
 
                             int64_t out_idx = ((n * C + c) * H_out + h_out) * W_out + w_out;
-                            float grad_val = static_cast<float>(grad_output_data[out_idx]) / static_cast<float>(count);
+                            float grad_val = static_cast<float>(grad_output_data[out_idx]) / static_cast<float>(divisor);
 
                             for (int64_t h = h_start; h < h_end; ++h) {
                                 for (int64_t w = w_start; w < w_end; ++w) {
@@ -396,23 +412,28 @@ private:
     int64_t padding_;
     int64_t H_in_;
     int64_t W_in_;
+    bool count_include_pad_;
 };
 
-AvgPool2d::AvgPool2d(int64_t kernel_size, int64_t stride, int64_t padding)
+AvgPool2d::AvgPool2d(int64_t kernel_size, int64_t stride, int64_t padding,
+                     bool count_include_pad)
     : AvgPool2d(std::array<int64_t, 2>{kernel_size, kernel_size},
                 std::array<int64_t, 2>{stride, stride},
-                std::array<int64_t, 2>{padding, padding}) {}
+                std::array<int64_t, 2>{padding, padding},
+                count_include_pad) {}
 
 AvgPool2d::AvgPool2d(std::array<int64_t, 2> kernel_size,
                      std::array<int64_t, 2> stride,
-                     std::array<int64_t, 2> padding)
+                     std::array<int64_t, 2> padding,
+                     bool count_include_pad)
     : kernel_size_h_(kernel_size[0]), kernel_size_w_(kernel_size[1]),
       stride_h_(stride[0] < 0 ? kernel_size[0] : stride[0]),
       stride_w_(stride[1] < 0 ? kernel_size[1] : stride[1]),
       padding_h_(padding[0]), padding_w_(padding[1]),
       kernel_size_(kernel_size[0]),
       stride_(stride[0] < 0 ? kernel_size[0] : stride[0]),
-      padding_(padding[0]) {
+      padding_(padding[0]),
+      count_include_pad_(count_include_pad) {
     for (int i = 0; i < 2; ++i) {
         if (kernel_size[i] <= 0) {
             throw std::runtime_error("AvgPool2d: kernel_size must be positive (axis " +
@@ -433,7 +454,7 @@ auto AvgPool2d::forward_impl(const Variable& input) -> Variable {
 
     Variable contig_input = input;
     if (!input.tensor().is_contiguous()) {
-        contig_input = Variable(input.tensor().contiguous(), input.requires_grad());
+        tenzor::utils::wrap_preserving_grad(contig_input, input.tensor().contiguous());
     }
 
     int64_t N    = input_shape[0];
@@ -452,6 +473,8 @@ auto AvgPool2d::forward_impl(const Variable& input) -> Variable {
     fwd_attrs.set(AttrKey::Padding,  padding_h_);
     fwd_attrs.set(AttrKey::PaddingH, padding_h_);
     fwd_attrs.set(AttrKey::PaddingW, padding_w_);
+    // S22: route count_include_pad through to the kernel.
+    fwd_attrs.set(AttrKey::CountIncludePad, count_include_pad_ ? int64_t{1} : int64_t{0});
 
     auto dispatch_result = dispatch_to_device(OpId::AvgPool2dForward,
         contig_input.tensor().device().type, inputs, fwd_attrs);
@@ -476,6 +499,7 @@ auto AvgPool2d::forward_impl(const Variable& input) -> Variable {
         std::vector<Tensor> tensors_to_save = {contig_input.tensor()};
         auto backward_fn = std::make_shared<AvgPool2dBackward>(
             kernel_size_h_, stride_h_, padding_h_, H_in, W_in,
+            count_include_pad_,
             std::move(tensors_to_save));
         result.set_grad_fn(backward_fn);
         std::vector<Variable> input_vars;
@@ -896,9 +920,11 @@ template <OpId BackwardOp>
 class AvgPoolNdBackward : public Function {
 public:
     AvgPoolNdBackward(std::vector<int64_t> input_shape,
-                      int64_t kernel_size, int64_t stride, int64_t padding)
+                      int64_t kernel_size, int64_t stride, int64_t padding,
+                      bool count_include_pad = true)
         : input_shape_(std::move(input_shape)),
-          kernel_size_(kernel_size), stride_(stride), padding_(padding) {}
+          kernel_size_(kernel_size), stride_(stride), padding_(padding),
+          count_include_pad_(count_include_pad) {}
 
     auto forward(std::vector<Variable> /*inputs*/) -> std::vector<Variable> override {
         throw std::runtime_error("AvgPoolNdBackward::forward should not be called");
@@ -910,6 +936,10 @@ public:
         attrs.set(AttrKey::KernelSize, kernel_size_);
         attrs.set(AttrKey::Stride, stride_);
         attrs.set(AttrKey::Padding, padding_);
+        // S22: forward kernel divisor depends on this flag; the backward
+        // must use the same divisor or grads will be off-scale at the
+        // padding borders.
+        attrs.set(AttrKey::CountIncludePad, count_include_pad_ ? int64_t{1} : int64_t{0});
         std::vector<Tensor> inputs = {grad_outputs[0]};
         auto result = dispatch_to_device(BackwardOp, grad_outputs[0].device().type, inputs, attrs);
         return {result[0]};
@@ -936,6 +966,7 @@ private:
     int64_t kernel_size_;
     int64_t stride_;
     int64_t padding_;
+    bool count_include_pad_;
 };
 
 // Generic backward Function for max-pool variants (needs saved indices).
@@ -1072,14 +1103,17 @@ auto MaxPool3d::forward_impl(const Variable& input) -> Variable {
 // AvgPool3d Implementation
 // ============================================================================
 
-AvgPool3d::AvgPool3d(int64_t kernel_size, int64_t stride, int64_t padding)
+AvgPool3d::AvgPool3d(int64_t kernel_size, int64_t stride, int64_t padding,
+                     bool count_include_pad)
     : AvgPool3d(std::array<int64_t, 3>{kernel_size, kernel_size, kernel_size},
                 std::array<int64_t, 3>{stride, stride, stride},
-                std::array<int64_t, 3>{padding, padding, padding}) {}
+                std::array<int64_t, 3>{padding, padding, padding},
+                count_include_pad) {}
 
 AvgPool3d::AvgPool3d(std::array<int64_t, 3> kernel_size,
                      std::array<int64_t, 3> stride,
-                     std::array<int64_t, 3> padding)
+                     std::array<int64_t, 3> padding,
+                     bool count_include_pad)
     : kernel_size_d_(kernel_size[0]), kernel_size_h_(kernel_size[1]), kernel_size_w_(kernel_size[2]),
       stride_d_(stride[0] < 0 ? kernel_size[0] : stride[0]),
       stride_h_(stride[1] < 0 ? kernel_size[1] : stride[1]),
@@ -1087,7 +1121,8 @@ AvgPool3d::AvgPool3d(std::array<int64_t, 3> kernel_size,
       padding_d_(padding[0]), padding_h_(padding[1]), padding_w_(padding[2]),
       kernel_size_(kernel_size[0]),
       stride_(stride[0] < 0 ? kernel_size[0] : stride[0]),
-      padding_(padding[0]) {
+      padding_(padding[0]),
+      count_include_pad_(count_include_pad) {
     for (int i = 0; i < 3; ++i) {
         if (kernel_size[i] <= 0) {
             throw std::runtime_error("AvgPool3d: kernel_size must be positive (axis " +
@@ -1122,6 +1157,8 @@ auto AvgPool3d::forward_impl(const Variable& input) -> Variable {
     fwd_attrs.set(AttrKey::PaddingD, padding_d_);
     fwd_attrs.set(AttrKey::PaddingH, padding_h_);
     fwd_attrs.set(AttrKey::PaddingW, padding_w_);
+    // S22: route count_include_pad through to the kernel.
+    fwd_attrs.set(AttrKey::CountIncludePad, count_include_pad_ ? int64_t{1} : int64_t{0});
 
     std::vector<Tensor> inputs = {input.tensor()};
     auto fwd_result = dispatch_to_device(OpId::AvgPool3dForward, device.type, inputs, fwd_attrs);
@@ -1131,7 +1168,8 @@ auto AvgPool3d::forward_impl(const Variable& input) -> Variable {
 
     if (input.requires_grad()) {
         auto backward_fn = std::make_shared<AvgPoolNdBackward<OpId::AvgPool3dBackward>>(
-            in_shape_vec, kernel_size_d_, stride_d_, padding_d_);
+            in_shape_vec, kernel_size_d_, stride_d_, padding_d_,
+            count_include_pad_);
         wire_grad_fn(result, input, backward_fn);
     }
 
@@ -1184,9 +1222,11 @@ auto MaxPool1d::forward_impl(const Variable& input) -> Variable {
 // AvgPool1d implementation
 // ============================================================================
 
-AvgPool1d::AvgPool1d(int64_t kernel_size, int64_t stride, int64_t padding)
+AvgPool1d::AvgPool1d(int64_t kernel_size, int64_t stride, int64_t padding,
+                     bool count_include_pad)
     : kernel_size_(kernel_size), stride_(stride < 0 ? kernel_size : stride),
-      padding_(padding) {
+      padding_(padding),
+      count_include_pad_(count_include_pad) {
     if (kernel_size <= 0) throw std::runtime_error("AvgPool1d: kernel_size must be positive");
     if (padding < 0) throw std::runtime_error("AvgPool1d: padding must be non-negative");
 }
@@ -1204,6 +1244,8 @@ auto AvgPool1d::forward_impl(const Variable& input) -> Variable {
     fwd_attrs.set(AttrKey::KernelSize, kernel_size_);
     fwd_attrs.set(AttrKey::Stride, stride_);
     fwd_attrs.set(AttrKey::Padding, padding_);
+    // S22: route count_include_pad through to the kernel.
+    fwd_attrs.set(AttrKey::CountIncludePad, count_include_pad_ ? int64_t{1} : int64_t{0});
 
     std::vector<Tensor> inputs = {input.tensor()};
     auto fwd_result = dispatch_to_device(OpId::AvgPool1dForward, device.type, inputs, fwd_attrs);
@@ -1213,7 +1255,8 @@ auto AvgPool1d::forward_impl(const Variable& input) -> Variable {
 
     if (input.requires_grad()) {
         auto backward_fn = std::make_shared<AvgPoolNdBackward<OpId::AvgPool1dBackward>>(
-            in_shape_vec, kernel_size_, stride_, padding_);
+            in_shape_vec, kernel_size_, stride_, padding_,
+            count_include_pad_);
         wire_grad_fn(result, input, backward_fn);
     }
 

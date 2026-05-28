@@ -328,6 +328,13 @@ namespace cpu {
                                  int64_t stride_h, int64_t stride_w,
                                  int64_t padding_h, int64_t padding_w,
                                  int64_t dilation_h, int64_t dilation_w) -> Tensor;
+    // S18: depthwise Conv1d and Conv3d
+    auto depthwise_conv1d_kernel(const Tensor& input, const Tensor& weight, const Tensor* bias,
+                                 int64_t stride, int64_t padding, int64_t dilation) -> Tensor;
+    auto depthwise_conv3d_kernel(const Tensor& input, const Tensor& weight, const Tensor* bias,
+                                 int64_t sD, int64_t sH, int64_t sW,
+                                 int64_t pD, int64_t pH, int64_t pW,
+                                 int64_t dD, int64_t dH, int64_t dW) -> Tensor;
 
     // Deformable Conv2d (DCNv2)
     auto deformable_conv2d_forward_kernel(const Tensor& input, const Tensor& offset, const Tensor& weight, const Tensor& bias, const Tensor& mask, int64_t stride_h, int64_t stride_w, int64_t pad_h, int64_t pad_w, int64_t dil_h, int64_t dil_w, int64_t groups, int64_t offset_groups) -> Tensor;
@@ -361,12 +368,14 @@ namespace cpu {
     auto avgpool2d_forward_kernel(const Tensor& input,
                                    std::array<int64_t, 2> kernel_size,
                                    std::array<int64_t, 2> stride,
-                                   std::array<int64_t, 2> padding) -> Tensor;
+                                   std::array<int64_t, 2> padding,
+                                   bool count_include_pad) -> Tensor;
     auto avgpool2d_backward_kernel(const Tensor& grad_output,
                                     const std::vector<int64_t>& input_shape,
                                     std::array<int64_t, 2> kernel_size,
                                     std::array<int64_t, 2> stride,
-                                    std::array<int64_t, 2> padding) -> Tensor;
+                                    std::array<int64_t, 2> padding,
+                                    bool count_include_pad) -> Tensor;
     auto adaptive_avgpool2d_kernel(const Tensor& input, int64_t output_h, int64_t output_w) -> Tensor;
     auto adaptive_avgpool2d_backward_kernel(const Tensor& grad_output, const std::vector<int64_t>& input_shape) -> Tensor;
     auto adaptive_maxpool2d_kernel(const Tensor& input, int64_t output_h, int64_t output_w) -> std::pair<Tensor, Tensor>;
@@ -375,8 +384,8 @@ namespace cpu {
     // 1D Pooling
     auto maxpool1d_forward_kernel(const Tensor& input, int64_t kernel_size, int64_t stride, int64_t padding, int64_t dilation = 1) -> std::pair<Tensor, Tensor>;
     auto maxpool1d_backward_kernel(const Tensor& grad_output, const Tensor& indices, const std::vector<int64_t>& input_shape) -> Tensor;
-    auto avgpool1d_forward_kernel(const Tensor& input, int64_t kernel_size, int64_t stride, int64_t padding) -> Tensor;
-    auto avgpool1d_backward_kernel(const Tensor& grad_output, const std::vector<int64_t>& input_shape, int64_t kernel_size, int64_t stride, int64_t padding) -> Tensor;
+    auto avgpool1d_forward_kernel(const Tensor& input, int64_t kernel_size, int64_t stride, int64_t padding, bool count_include_pad) -> Tensor;
+    auto avgpool1d_backward_kernel(const Tensor& grad_output, const std::vector<int64_t>& input_shape, int64_t kernel_size, int64_t stride, int64_t padding, bool count_include_pad) -> Tensor;
     auto adaptive_avgpool1d_kernel(const Tensor& input, int64_t output_size) -> Tensor;
     auto adaptive_avgpool1d_backward_kernel(const Tensor& grad_output, const std::vector<int64_t>& input_shape) -> Tensor;
     auto adaptive_maxpool1d_kernel(const Tensor& input, int64_t output_size) -> std::pair<Tensor, Tensor>;
@@ -392,12 +401,14 @@ namespace cpu {
     auto avgpool3d_forward_kernel(const Tensor& input,
                                    std::array<int64_t, 3> kernel_size,
                                    std::array<int64_t, 3> stride,
-                                   std::array<int64_t, 3> padding) -> Tensor;
+                                   std::array<int64_t, 3> padding,
+                                   bool count_include_pad) -> Tensor;
     auto avgpool3d_backward_kernel(const Tensor& grad_output,
                                     const std::vector<int64_t>& input_shape,
                                     std::array<int64_t, 3> kernel_size,
                                     std::array<int64_t, 3> stride,
-                                    std::array<int64_t, 3> padding) -> Tensor;
+                                    std::array<int64_t, 3> padding,
+                                    bool count_include_pad) -> Tensor;
     auto adaptive_maxpool3d_kernel(const Tensor& input, int64_t output_d, int64_t output_h, int64_t output_w) -> std::pair<Tensor, Tensor>;
     auto adaptive_maxpool3d_backward_kernel(const Tensor& grad_output, const Tensor& indices, const std::vector<int64_t>& input_shape) -> Tensor;
     auto adaptive_avgpool3d_kernel(const Tensor& input, int64_t output_d, int64_t output_h, int64_t output_w) -> Tensor;
@@ -779,12 +790,13 @@ namespace nn::quantization::kernels {
 } // namespace nn::quantization::kernels
 
 /**
- * @brief Register all CPU kernels with the dispatch table.
+ * @brief Register CPU kernels for the "arithmetic" category.
  *
- * This function is called during initialization to populate the CPU
- * dispatch table with direct function pointers to kernel implementations.
+ * Stream 25 / Audit-12 split: this used to live inline inside
+ * `register_cpu_kernels` (a single ~4070-line function). The body is
+ * unchanged; only the enclosing function boundary moved.
  */
-void register_cpu_kernels(BackendDispatchTable& table) {
+static void register_cpu_kernels_arithmetic(BackendDispatchTable& table) {
     // =========================================================================
     // Arithmetic Operations
     // =========================================================================
@@ -829,6 +841,16 @@ void register_cpu_kernels(BackendDispatchTable& table) {
         return target;
     });
 
+} // register_cpu_kernels_arithmetic
+
+/**
+ * @brief Register CPU kernels for the "reduction" category.
+ *
+ * Stream 25 / Audit-12 split: this used to live inline inside
+ * `register_cpu_kernels` (a single ~4070-line function). The body is
+ * unchanged; only the enclosing function boundary moved.
+ */
+static void register_cpu_kernels_reduction(BackendDispatchTable& table) {
     // =========================================================================
     // Reduction Operations
     // =========================================================================
@@ -884,6 +906,16 @@ void register_cpu_kernels(BackendDispatchTable& table) {
         return cpu::argsort_kernel(inputs[0], dim, descending);
     });
 
+} // register_cpu_kernels_reduction
+
+/**
+ * @brief Register CPU kernels for the "elementwise_math" category.
+ *
+ * Stream 25 / Audit-12 split: this used to live inline inside
+ * `register_cpu_kernels` (a single ~4070-line function). The body is
+ * unchanged; only the enclosing function boundary moved.
+ */
+static void register_cpu_kernels_elementwise_math(BackendDispatchTable& table) {
     // =========================================================================
     // Element-wise Math Operations
     // =========================================================================
@@ -1191,6 +1223,16 @@ void register_cpu_kernels(BackendDispatchTable& table) {
         return cpu::clamp_max_kernel(inputs[0], max_val);
     });
 
+} // register_cpu_kernels_elementwise_math
+
+/**
+ * @brief Register CPU kernels for the "trigonometric" category.
+ *
+ * Stream 25 / Audit-12 split: this used to live inline inside
+ * `register_cpu_kernels` (a single ~4070-line function). The body is
+ * unchanged; only the enclosing function boundary moved.
+ */
+static void register_cpu_kernels_trigonometric(BackendDispatchTable& table) {
     // =========================================================================
     // Trigonometric Operations
     // =========================================================================
@@ -1204,6 +1246,16 @@ void register_cpu_kernels(BackendDispatchTable& table) {
     TENZOR_REGISTER_UNARY_SINGLE_KERNEL(table, Cosh, cpu::cosh_kernel);
     TENZOR_REGISTER_UNARY_SINGLE_KERNEL(table, Tanh, cpu::tanh_kernel);
 
+} // register_cpu_kernels_trigonometric
+
+/**
+ * @brief Register CPU kernels for the "extended_math" category.
+ *
+ * Stream 25 / Audit-12 split: this used to live inline inside
+ * `register_cpu_kernels` (a single ~4070-line function). The body is
+ * unchanged; only the enclosing function boundary moved.
+ */
+static void register_cpu_kernels_extended_math(BackendDispatchTable& table) {
     // =========================================================================
     // Extended Math Operations
     // =========================================================================
@@ -1322,6 +1374,16 @@ void register_cpu_kernels(BackendDispatchTable& table) {
             return cpu::addcdiv_kernel(inputs[0], inputs[1], inputs[2], alpha);
         });
 
+} // register_cpu_kernels_extended_math
+
+/**
+ * @brief Register CPU kernels for the "logical" category.
+ *
+ * Stream 25 / Audit-12 split: this used to live inline inside
+ * `register_cpu_kernels` (a single ~4070-line function). The body is
+ * unchanged; only the enclosing function boundary moved.
+ */
+static void register_cpu_kernels_logical(BackendDispatchTable& table) {
     // =========================================================================
     // Logical Operations
     // =========================================================================
@@ -1337,6 +1399,16 @@ void register_cpu_kernels(BackendDispatchTable& table) {
         return cpu::cross_kernel(inputs[0], inputs[1], dim);
     });
 
+} // register_cpu_kernels_logical
+
+/**
+ * @brief Register CPU kernels for the "comparison" category.
+ *
+ * Stream 25 / Audit-12 split: this used to live inline inside
+ * `register_cpu_kernels` (a single ~4070-line function). The body is
+ * unchanged; only the enclosing function boundary moved.
+ */
+static void register_cpu_kernels_comparison(BackendDispatchTable& table) {
     // =========================================================================
     // Comparison Operations
     // =========================================================================
@@ -1424,6 +1496,16 @@ void register_cpu_kernels(BackendDispatchTable& table) {
         return cpu::log_softmax_backward_kernel(inputs[0], inputs[1], dim);
     });
 
+} // register_cpu_kernels_comparison
+
+/**
+ * @brief Register CPU kernels for the "shape" category.
+ *
+ * Stream 25 / Audit-12 split: this used to live inline inside
+ * `register_cpu_kernels` (a single ~4070-line function). The body is
+ * unchanged; only the enclosing function boundary moved.
+ */
+static void register_cpu_kernels_shape(BackendDispatchTable& table) {
     // =========================================================================
     // Shape/View Operations
     // =========================================================================
@@ -1467,6 +1549,16 @@ void register_cpu_kernels(BackendDispatchTable& table) {
         return cpu::fill_kernel(inputs[0], value);
     });
 
+} // register_cpu_kernels_shape
+
+/**
+ * @brief Register CPU kernels for the "indexing" category.
+ *
+ * Stream 25 / Audit-12 split: this used to live inline inside
+ * `register_cpu_kernels` (a single ~4070-line function). The body is
+ * unchanged; only the enclosing function boundary moved.
+ */
+static void register_cpu_kernels_indexing(BackendDispatchTable& table) {
     // =========================================================================
     // Indexing Operations
     // =========================================================================
@@ -1549,6 +1641,16 @@ void register_cpu_kernels(BackendDispatchTable& table) {
         }
     });
 
+} // register_cpu_kernels_indexing
+
+/**
+ * @brief Register CPU kernels for the "normalization" category.
+ *
+ * Stream 25 / Audit-12 split: this used to live inline inside
+ * `register_cpu_kernels` (a single ~4070-line function). The body is
+ * unchanged; only the enclosing function boundary moved.
+ */
+static void register_cpu_kernels_normalization(BackendDispatchTable& table) {
     // =========================================================================
     // Normalization Operations
     // =========================================================================
@@ -1624,6 +1726,16 @@ void register_cpu_kernels(BackendDispatchTable& table) {
         return cpu::instance_norm_backward_kernel(inputs[0], inputs[1], inputs[3], inputs[4], inputs[2]);
     });
 
+} // register_cpu_kernels_normalization
+
+/**
+ * @brief Register CPU kernels for the "convolution" category.
+ *
+ * Stream 25 / Audit-12 split: this used to live inline inside
+ * `register_cpu_kernels` (a single ~4070-line function). The body is
+ * unchanged; only the enclosing function boundary moved.
+ */
+static void register_cpu_kernels_convolution(BackendDispatchTable& table) {
     // =========================================================================
     // Convolution Operations
     // =========================================================================
@@ -1886,33 +1998,47 @@ void register_cpu_kernels(BackendDispatchTable& table) {
             inputs[0], inputs[1], bias, sh, sw, ph, pw, dh, dw)};
     });
 
-    // CC.5: 1D / 3D depthwise dispatch surface. The actual fast-path kernel
-    // implementations are a follow-up; today the NN layer's `Conv{1,3}d`
-    // shortcut only dispatches these OpIds when a real kernel is registered
-    // (via `is_op_supported`) and otherwise falls through to standard
-    // Conv{1,3}d. Registering an explicit throw-not-implemented handler
-    // guarantees that any direct `dispatch(OpId::DepthwiseConv1d, ...)` call
-    // — bypassing the NN-layer guard — fails loudly with a clear routing
-    // hint, rather than landing on a missing-kernel error or silently
-    // miscomputing.
+    // S18: real DepthwiseConv1d and DepthwiseConv3d kernels.
     table.register_kernel(OpId::DepthwiseConv1d,
-        [](std::span<const Tensor>, const OpAttributes&) -> std::vector<Tensor> {
-            throw std::runtime_error(
-                "DepthwiseConv1d (CPU): not yet implemented; route through "
-                "generic Conv1dForward (Conv1d::forward_impl falls back "
-                "automatically when this OpId is unregistered).");
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+            int64_t stride   = attrs.get_int(AttrKey::Stride, 1);
+            int64_t padding  = attrs.get_int(AttrKey::Padding, 0);
+            int64_t dilation = attrs.get_int(AttrKey::Dilation, 1);
+            const Tensor* bias = inputs.size() > 2 ? &inputs[2] : nullptr;
+            return std::vector<Tensor>{cpu::depthwise_conv1d_kernel(
+                inputs[0], inputs[1], bias, stride, padding, dilation)};
         });
     table.register_kernel(OpId::DepthwiseConv3d,
-        [](std::span<const Tensor>, const OpAttributes&) -> std::vector<Tensor> {
-            throw std::runtime_error(
-                "DepthwiseConv3d (CPU): not yet implemented; route through "
-                "generic Conv3dForward (Conv3d::forward_impl falls back "
-                "automatically when this OpId is unregistered).");
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+            int64_t s = attrs.get_int(AttrKey::Stride, 1);
+            int64_t p = attrs.get_int(AttrKey::Padding, 0);
+            int64_t d = attrs.get_int(AttrKey::Dilation, 1);
+            int64_t sD = attrs.has(AttrKey::StrideD) ? attrs.get_int(AttrKey::StrideD) : s;
+            int64_t sH = attrs.has(AttrKey::StrideH) ? attrs.get_int(AttrKey::StrideH) : s;
+            int64_t sW = attrs.has(AttrKey::StrideW) ? attrs.get_int(AttrKey::StrideW) : s;
+            int64_t pD = attrs.has(AttrKey::PaddingD) ? attrs.get_int(AttrKey::PaddingD) : p;
+            int64_t pH = attrs.has(AttrKey::PaddingH) ? attrs.get_int(AttrKey::PaddingH) : p;
+            int64_t pW = attrs.has(AttrKey::PaddingW) ? attrs.get_int(AttrKey::PaddingW) : p;
+            int64_t dD = attrs.has(AttrKey::DilationD) ? attrs.get_int(AttrKey::DilationD) : d;
+            int64_t dH = attrs.has(AttrKey::DilationH) ? attrs.get_int(AttrKey::DilationH) : d;
+            int64_t dW = attrs.has(AttrKey::DilationW) ? attrs.get_int(AttrKey::DilationW) : d;
+            const Tensor* bias = inputs.size() > 2 ? &inputs[2] : nullptr;
+            return std::vector<Tensor>{cpu::depthwise_conv3d_kernel(
+                inputs[0], inputs[1], bias, sD, sH, sW, pD, pH, pW, dD, dH, dW)};
         });
 
     // DeformableConv2d (DCNv2)
     table.register_kernel(OpId::DeformableConv2dForward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        // inputs: {input, offset, weight, bias, mask}
+        // inputs: {input, offset, weight, [bias], [mask]} — bias and mask are
+        // optional. std::span performs NO bounds checking, so a caller that
+        // omits bias/mask (e.g. DeformableConv2dBackward::forward with
+        // use_mask=false) must not be indexed at [3]/[4] directly. Substitute
+        // a valid 0-element tensor for any absent trailing input; the kernel
+        // treats numel()==0 bias/mask as "not present".
+        if (inputs.size() < 3) {
+            throw std::runtime_error(
+                "DeformableConv2dForward: requires at least {input, offset, weight}");
+        }
         int64_t stride_h = attrs.get_int(AttrKey::StrideH, 1);
         int64_t stride_w = attrs.get_int(AttrKey::StrideW, 1);
         int64_t pad_h = attrs.get_int(AttrKey::PaddingH, 0);
@@ -1921,13 +2047,21 @@ void register_cpu_kernels(BackendDispatchTable& table) {
         int64_t dil_w = attrs.get_int(AttrKey::DilationW, 1);
         int64_t groups = attrs.get_int(AttrKey::Groups, 1);
         int64_t offset_groups = attrs.get_int(AttrKey::OffsetGroups, 1);
+        Tensor empty_t = Tensor({0}, inputs[0].dtype(), inputs[0].device());
+        const Tensor& bias = inputs.size() > 3 ? inputs[3] : empty_t;
+        const Tensor& mask = inputs.size() > 4 ? inputs[4] : empty_t;
         return std::vector<Tensor>{cpu::deformable_conv2d_forward_kernel(
-            inputs[0], inputs[1], inputs[2], inputs[3], inputs[4],
+            inputs[0], inputs[1], inputs[2], bias, mask,
             stride_h, stride_w, pad_h, pad_w, dil_h, dil_w, groups, offset_groups)};
     });
 
     table.register_kernel(OpId::DeformableConv2dBackwardInput, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        // inputs: {grad_output, input, offset, weight, mask}
+        // inputs: {grad_output, input, offset, weight, [mask]} — mask optional.
+        // span has no bounds checking; substitute an empty tensor when absent.
+        if (inputs.size() < 4) {
+            throw std::runtime_error(
+                "DeformableConv2dBackwardInput: requires {grad_output, input, offset, weight}");
+        }
         int64_t stride_h = attrs.get_int(AttrKey::StrideH, 1);
         int64_t stride_w = attrs.get_int(AttrKey::StrideW, 1);
         int64_t pad_h = attrs.get_int(AttrKey::PaddingH, 0);
@@ -1936,13 +2070,20 @@ void register_cpu_kernels(BackendDispatchTable& table) {
         int64_t dil_w = attrs.get_int(AttrKey::DilationW, 1);
         int64_t groups = attrs.get_int(AttrKey::Groups, 1);
         int64_t offset_groups = attrs.get_int(AttrKey::OffsetGroups, 1);
+        Tensor empty_t = Tensor({0}, inputs[1].dtype(), inputs[1].device());
+        const Tensor& mask = inputs.size() > 4 ? inputs[4] : empty_t;
         return cpu::deformable_conv2d_backward_input_kernel(
-            inputs[0], inputs[1], inputs[2], inputs[3], inputs[4],
+            inputs[0], inputs[1], inputs[2], inputs[3], mask,
             stride_h, stride_w, pad_h, pad_w, dil_h, dil_w, groups, offset_groups);
     });
 
     table.register_kernel(OpId::DeformableConv2dBackwardWeight, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        // inputs: {grad_output, input, offset, mask}
+        // inputs: {grad_output, input, offset, [mask]} — mask optional.
+        // span has no bounds checking; substitute an empty tensor when absent.
+        if (inputs.size() < 3) {
+            throw std::runtime_error(
+                "DeformableConv2dBackwardWeight: requires {grad_output, input, offset}");
+        }
         int64_t stride_h = attrs.get_int(AttrKey::StrideH, 1);
         int64_t stride_w = attrs.get_int(AttrKey::StrideW, 1);
         int64_t pad_h = attrs.get_int(AttrKey::PaddingH, 0);
@@ -1952,8 +2093,10 @@ void register_cpu_kernels(BackendDispatchTable& table) {
         int64_t groups = attrs.get_int(AttrKey::Groups, 1);
         int64_t offset_groups = attrs.get_int(AttrKey::OffsetGroups, 1);
         auto weight_shape = attrs.get_int_list(AttrKey::WeightShape);
+        Tensor empty_t = Tensor({0}, inputs[1].dtype(), inputs[1].device());
+        const Tensor& mask = inputs.size() > 3 ? inputs[3] : empty_t;
         return std::vector<Tensor>{cpu::deformable_conv2d_backward_weight_kernel(
-            inputs[0], inputs[1], inputs[2], inputs[3],
+            inputs[0], inputs[1], inputs[2], mask,
             stride_h, stride_w, pad_h, pad_w, dil_h, dil_w,
             groups, offset_groups, weight_shape)};
     });
@@ -1963,6 +2106,16 @@ void register_cpu_kernels(BackendDispatchTable& table) {
         return std::vector<Tensor>{cpu::conv2d_backward_bias_kernel(inputs[0])};
     });
 
+} // register_cpu_kernels_convolution
+
+/**
+ * @brief Register CPU kernels for the "pooling" category.
+ *
+ * Stream 25 / Audit-12 split: this used to live inline inside
+ * `register_cpu_kernels` (a single ~4070-line function). The body is
+ * unchanged; only the enclosing function boundary moved.
+ */
+static void register_cpu_kernels_pooling(BackendDispatchTable& table) {
     // =========================================================================
     // Pooling Operations
     // =========================================================================
@@ -1986,7 +2139,8 @@ void register_cpu_kernels(BackendDispatchTable& table) {
         const auto stride      = ::tenzor::backend::attrs::read_2d(attrs,
             AttrKey::Stride, AttrKey::StrideH, AttrKey::StrideW, /*default*/ kernel_size[0]);
         const auto padding     = ::tenzor::backend::attrs::padding_2d(attrs);
-        return cpu::avgpool2d_forward_kernel(inputs[0], kernel_size, stride, padding);
+        const bool count_include_pad = attrs.get_int(AttrKey::CountIncludePad, 1) != 0;
+        return cpu::avgpool2d_forward_kernel(inputs[0], kernel_size, stride, padding, count_include_pad);
     });
 
     table.register_single_output_kernel(OpId::AvgPool2dBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
@@ -1995,7 +2149,8 @@ void register_cpu_kernels(BackendDispatchTable& table) {
         const auto stride      = ::tenzor::backend::attrs::read_2d(attrs,
             AttrKey::Stride, AttrKey::StrideH, AttrKey::StrideW, /*default*/ kernel_size[0]);
         const auto padding     = ::tenzor::backend::attrs::padding_2d(attrs);
-        return cpu::avgpool2d_backward_kernel(inputs[0], input_shape, kernel_size, stride, padding);
+        const bool count_include_pad = attrs.get_int(AttrKey::CountIncludePad, 1) != 0;
+        return cpu::avgpool2d_backward_kernel(inputs[0], input_shape, kernel_size, stride, padding, count_include_pad);
     });
 
     table.register_single_output_kernel(OpId::AdaptiveAvgPool2d, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
@@ -2042,7 +2197,8 @@ void register_cpu_kernels(BackendDispatchTable& table) {
         int64_t kernel_size = attrs.get_int(AttrKey::KernelSize, 2);
         int64_t stride = attrs.get_int(AttrKey::Stride, kernel_size);
         int64_t padding = attrs.get_int(AttrKey::Padding, 0);
-        return cpu::avgpool1d_forward_kernel(inputs[0], kernel_size, stride, padding);
+        const bool count_include_pad = attrs.get_int(AttrKey::CountIncludePad, 1) != 0;
+        return cpu::avgpool1d_forward_kernel(inputs[0], kernel_size, stride, padding, count_include_pad);
     });
 
     table.register_single_output_kernel(OpId::AvgPool1dBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
@@ -2050,7 +2206,8 @@ void register_cpu_kernels(BackendDispatchTable& table) {
         int64_t kernel_size = attrs.get_int(AttrKey::KernelSize, 2);
         int64_t stride = attrs.get_int(AttrKey::Stride, kernel_size);
         int64_t padding = attrs.get_int(AttrKey::Padding, 0);
-        return cpu::avgpool1d_backward_kernel(inputs[0], input_shape, kernel_size, stride, padding);
+        const bool count_include_pad = attrs.get_int(AttrKey::CountIncludePad, 1) != 0;
+        return cpu::avgpool1d_backward_kernel(inputs[0], input_shape, kernel_size, stride, padding, count_include_pad);
     });
 
     table.register_single_output_kernel(OpId::AdaptiveAvgPool1d, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
@@ -2097,7 +2254,8 @@ void register_cpu_kernels(BackendDispatchTable& table) {
         const auto stride      = ::tenzor::backend::attrs::read_3d(attrs,
             AttrKey::Stride, AttrKey::StrideD, AttrKey::StrideH, AttrKey::StrideW, /*default*/ kernel_size[0]);
         const auto padding     = ::tenzor::backend::attrs::padding_3d(attrs);
-        return cpu::avgpool3d_forward_kernel(inputs[0], kernel_size, stride, padding);
+        const bool count_include_pad = attrs.get_int(AttrKey::CountIncludePad, 1) != 0;
+        return cpu::avgpool3d_forward_kernel(inputs[0], kernel_size, stride, padding, count_include_pad);
     });
 
     table.register_single_output_kernel(OpId::AvgPool3dBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
@@ -2106,7 +2264,8 @@ void register_cpu_kernels(BackendDispatchTable& table) {
         const auto stride      = ::tenzor::backend::attrs::read_3d(attrs,
             AttrKey::Stride, AttrKey::StrideD, AttrKey::StrideH, AttrKey::StrideW, /*default*/ kernel_size[0]);
         const auto padding     = ::tenzor::backend::attrs::padding_3d(attrs);
-        return cpu::avgpool3d_backward_kernel(inputs[0], input_shape, kernel_size, stride, padding);
+        const bool count_include_pad = attrs.get_int(AttrKey::CountIncludePad, 1) != 0;
+        return cpu::avgpool3d_backward_kernel(inputs[0], input_shape, kernel_size, stride, padding, count_include_pad);
     });
 
     table.register_kernel(OpId::AdaptiveMaxPool3d, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
@@ -2200,6 +2359,16 @@ void register_cpu_kernels(BackendDispatchTable& table) {
             bn_momentum, bn_eps, training);
     });
 
+} // register_cpu_kernels_pooling
+
+/**
+ * @brief Register CPU kernels for the "linear_fc" category.
+ *
+ * Stream 25 / Audit-12 split: this used to live inline inside
+ * `register_cpu_kernels` (a single ~4070-line function). The body is
+ * unchanged; only the enclosing function boundary moved.
+ */
+static void register_cpu_kernels_linear_fc(BackendDispatchTable& table) {
     // =========================================================================
     // Linear/FC Operations
     // =========================================================================
@@ -2213,6 +2382,16 @@ void register_cpu_kernels(BackendDispatchTable& table) {
         return cpu::linear_backward_kernel(inputs[0], inputs[1], inputs[2]);
     });
 
+} // register_cpu_kernels_linear_fc
+
+/**
+ * @brief Register CPU kernels for the "embedding_dropout" category.
+ *
+ * Stream 25 / Audit-12 split: this used to live inline inside
+ * `register_cpu_kernels` (a single ~4070-line function). The body is
+ * unchanged; only the enclosing function boundary moved.
+ */
+static void register_cpu_kernels_embedding_dropout(BackendDispatchTable& table) {
     // =========================================================================
     // Embedding Operations
     // =========================================================================
@@ -2394,6 +2573,16 @@ void register_cpu_kernels(BackendDispatchTable& table) {
         );
     });
 
+} // register_cpu_kernels_embedding_dropout
+
+/**
+ * @brief Register CPU kernels for the "vision_pool_misc" category.
+ *
+ * Stream 25 / Audit-12 split: this used to live inline inside
+ * `register_cpu_kernels` (a single ~4070-line function). The body is
+ * unchanged; only the enclosing function boundary moved.
+ */
+static void register_cpu_kernels_vision_pool_misc(BackendDispatchTable& table) {
     // =========================================================================
     // Vision Operations
     // =========================================================================
@@ -2837,6 +3026,16 @@ void register_cpu_kernels(BackendDispatchTable& table) {
         return result_contig;
     });
 
+} // register_cpu_kernels_vision_pool_misc
+
+/**
+ * @brief Register CPU kernels for the "advanced" category.
+ *
+ * Stream 25 / Audit-12 split: this used to live inline inside
+ * `register_cpu_kernels` (a single ~4070-line function). The body is
+ * unchanged; only the enclosing function boundary moved.
+ */
+static void register_cpu_kernels_advanced(BackendDispatchTable& table) {
     // =========================================================================
     // Advanced Operations (TopK, Sort, CumSum, CumProd, Unique)
     // =========================================================================
@@ -2945,6 +3144,16 @@ void register_cpu_kernels(BackendDispatchTable& table) {
         return cpu::segment_reduce_kernel(inputs[0], inputs[1], reduce, axis);
     });
 
+} // register_cpu_kernels_advanced
+
+/**
+ * @brief Register CPU kernels for the "rmsnorm_etc" category.
+ *
+ * Stream 25 / Audit-12 split: this used to live inline inside
+ * `register_cpu_kernels` (a single ~4070-line function). The body is
+ * unchanged; only the enclosing function boundary moved.
+ */
+static void register_cpu_kernels_rmsnorm_etc(BackendDispatchTable& table) {
     // =========================================================================
     // RMSNorm Operations
     // =========================================================================
@@ -3549,6 +3758,16 @@ void register_cpu_kernels(BackendDispatchTable& table) {
         return std::vector<Tensor>{param};
     });
 
+} // register_cpu_kernels_rmsnorm_etc
+
+/**
+ * @brief Register CPU kernels for the "creation" category.
+ *
+ * Stream 25 / Audit-12 split: this used to live inline inside
+ * `register_cpu_kernels` (a single ~4070-line function). The body is
+ * unchanged; only the enclosing function boundary moved.
+ */
+static void register_cpu_kernels_creation(BackendDispatchTable& table) {
     // =========================================================================
     // Creation Operations
     // =========================================================================
@@ -3767,6 +3986,16 @@ void register_cpu_kernels(BackendDispatchTable& table) {
         return self;
     });
 
+} // register_cpu_kernels_creation
+
+/**
+ * @brief Register CPU kernels for the "fft" category.
+ *
+ * Stream 25 / Audit-12 split: this used to live inline inside
+ * `register_cpu_kernels` (a single ~4070-line function). The body is
+ * unchanged; only the enclosing function boundary moved.
+ */
+static void register_cpu_kernels_fft(BackendDispatchTable& table) {
     // =========================================================================
     // FFT Operations (MKL DFTI)
     // =========================================================================
@@ -4048,6 +4277,16 @@ void register_cpu_kernels(BackendDispatchTable& table) {
         return cpu::bucketize_kernel(inputs[0], inputs[1], right);
     });
 
+} // register_cpu_kernels_fft
+
+/**
+ * @brief Register CPU kernels for the "quantization" category.
+ *
+ * Stream 25 / Audit-12 split: this used to live inline inside
+ * `register_cpu_kernels` (a single ~4070-line function). The body is
+ * unchanged; only the enclosing function boundary moved.
+ */
+static void register_cpu_kernels_quantization(BackendDispatchTable& table) {
     // =========================================================================
     // Quantized Operations
     // =========================================================================
@@ -4224,6 +4463,16 @@ void register_cpu_kernels(BackendDispatchTable& table) {
             return add(sub(y_hard, y_soft.detach()), y_soft);
         });
 
+} // register_cpu_kernels_quantization
+
+/**
+ * @brief Register CPU kernels for the "complex" category.
+ *
+ * Stream 25 / Audit-12 split: this used to live inline inside
+ * `register_cpu_kernels` (a single ~4070-line function). The body is
+ * unchanged; only the enclosing function boundary moved.
+ */
+static void register_cpu_kernels_complex(BackendDispatchTable& table) {
     // =========================================================================
     // Complex Number Operations
     // =========================================================================
@@ -4233,6 +4482,16 @@ void register_cpu_kernels(BackendDispatchTable& table) {
     TENZOR_REGISTER_UNARY_SINGLE_KERNEL(table, Angle, cpu::angle_kernel);
     TENZOR_REGISTER_BINARY_SINGLE_KERNEL(table, Polar, cpu::polar_kernel);
 
+} // register_cpu_kernels_complex
+
+/**
+ * @brief Register CPU kernels for the "linalg" category.
+ *
+ * Stream 25 / Audit-12 split: this used to live inline inside
+ * `register_cpu_kernels` (a single ~4070-line function). The body is
+ * unchanged; only the enclosing function boundary moved.
+ */
+static void register_cpu_kernels_linalg(BackendDispatchTable& table) {
     // =========================================================================
     // Linear Algebra Operations (CPU LAPACKE)
     // =========================================================================
@@ -4298,6 +4557,16 @@ void register_cpu_kernels(BackendDispatchTable& table) {
         return linalg::lu_solve(inputs[0], inputs[1], inputs[2]);
     });
 
+} // register_cpu_kernels_linalg
+
+/**
+ * @brief Register CPU kernels for the "sparse" category.
+ *
+ * Stream 25 / Audit-12 split: this used to live inline inside
+ * `register_cpu_kernels` (a single ~4070-line function). The body is
+ * unchanged; only the enclosing function boundary moved.
+ */
+static void register_cpu_kernels_sparse(BackendDispatchTable& table) {
     // =========================================================================
     // Sparse Tensor Operations (OpIds 460-464)
     //
@@ -4432,6 +4701,16 @@ void register_cpu_kernels(BackendDispatchTable& table) {
             return result.values();
         });
 
+} // register_cpu_kernels_sparse
+
+/**
+ * @brief Register CPU kernels for the "fused_gemm" category.
+ *
+ * Stream 25 / Audit-12 split: this used to live inline inside
+ * `register_cpu_kernels` (a single ~4070-line function). The body is
+ * unchanged; only the enclosing function boundary moved.
+ */
+static void register_cpu_kernels_fused_gemm(BackendDispatchTable& table) {
     // =========================================================================
     // Fused GEMM Operations
     // =========================================================================
@@ -4653,6 +4932,16 @@ void register_cpu_kernels(BackendDispatchTable& table) {
         return cpu::nanstd_kernel(inputs[0], dim, keepdim, correction);
     });
 
+} // register_cpu_kernels_fused_gemm
+
+/**
+ * @brief Register CPU kernels for the "nested_misc" category.
+ *
+ * Stream 25 / Audit-12 split: this used to live inline inside
+ * `register_cpu_kernels` (a single ~4070-line function). The body is
+ * unchanged; only the enclosing function boundary moved.
+ */
+static void register_cpu_kernels_nested_misc(BackendDispatchTable& table) {
     // =========================================================================
     // Nested Tensor Operations (OpIds 670-679)
     //
@@ -4853,6 +5142,43 @@ void register_cpu_kernels(BackendDispatchTable& table) {
                 inputs[0], inputs[1], inputs[2], inputs[3], inputs[4],
                 inputs[5], inputs[6], scale, causal);
         });
+} // register_cpu_kernels_nested_misc
+
+/**
+ * @brief Register all CPU kernels with the dispatch table.
+ *
+ * This function is called during initialization to populate the CPU
+ * dispatch table with direct function pointers to kernel implementations.
+ */
+void register_cpu_kernels(BackendDispatchTable& table) {
+    // Stream 25 / Audit-12: this dispatcher used to inline ~4070 lines of
+    // register calls. Each per-category helper below contains the original
+    // section verbatim — only the enclosing function boundary changed.
+    register_cpu_kernels_arithmetic(table);
+    register_cpu_kernels_reduction(table);
+    register_cpu_kernels_elementwise_math(table);
+    register_cpu_kernels_trigonometric(table);
+    register_cpu_kernels_extended_math(table);
+    register_cpu_kernels_logical(table);
+    register_cpu_kernels_comparison(table);
+    register_cpu_kernels_shape(table);
+    register_cpu_kernels_indexing(table);
+    register_cpu_kernels_normalization(table);
+    register_cpu_kernels_convolution(table);
+    register_cpu_kernels_pooling(table);
+    register_cpu_kernels_linear_fc(table);
+    register_cpu_kernels_embedding_dropout(table);
+    register_cpu_kernels_vision_pool_misc(table);
+    register_cpu_kernels_advanced(table);
+    register_cpu_kernels_rmsnorm_etc(table);
+    register_cpu_kernels_creation(table);
+    register_cpu_kernels_fft(table);
+    register_cpu_kernels_quantization(table);
+    register_cpu_kernels_complex(table);
+    register_cpu_kernels_linalg(table);
+    register_cpu_kernels_sparse(table);
+    register_cpu_kernels_fused_gemm(table);
+    register_cpu_kernels_nested_misc(table);
 }
 
 } // namespace tenzor

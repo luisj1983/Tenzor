@@ -5,6 +5,7 @@
 
 #include "tenzor/utils/benchmark.hpp"
 #include "tenzor/backends/cpu/simd.hpp"
+#include "tenzor/backend/runtime_simd.hpp"
 #include <iostream>
 #include <vector>
 #include <random>
@@ -359,12 +360,10 @@ int main(int argc, char** argv) {
     std::cout << "  Tenzor Benchmark Suite\n";
     std::cout << "========================================\n";
 
-    // Print CPU info
-    const auto& cpu = CPUInfo::get();
-    std::cout << "\nCPU Information:\n";
-    std::cout << "  Vendor:   " << cpu.vendor() << "\n";
-    std::cout << "  Brand:    " << cpu.brand() << "\n";
-    std::cout << "  Features: " << cpu.feature_string() << "\n";
+    // Print CPU SIMD features (runtime_simd canonical API).
+    const auto& cpu = ::tenzor::backend::get_simd_features();
+    std::cout << "\nCPU SIMD Information:\n";
+    std::cout << "  Features: " << cpu.to_string() << "\n";
 
     // Run benchmarks
     benchmark_elementwise_ops();

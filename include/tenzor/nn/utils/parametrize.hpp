@@ -157,11 +157,24 @@ auto is_parametrized(const Module& module,
                      const std::string& param_name = "") -> bool;
 
 /**
- * @brief Clear the entire parametrization registry. Test-only helper —
- *        the registry keys on raw Module* and stale entries can survive
- *        Module destruction and pollute later modules that reuse the same
- *        address. Call between test cases.
+ * @brief Clear the entire parametrization registry. Test-only helper.
+ *
+ * The registry is now keyed by Module::id() (a stable per-instance UID
+ * assigned at construction time), so stale-entry-on-address-reuse is no
+ * longer a correctness concern. Stale entries are also pruned from
+ * ~Module() via unregister_parametrization_for_module(). This helper is
+ * retained for tests that want to start from a known-empty registry.
  */
 void clear_parametrization_registry();
+
+/**
+ * @brief Remove all registry entries owned by the Module with the given
+ *        UID. Called from ~Module() so the registry tracks Module
+ *        lifetime exactly. Not part of the public API for normal use —
+ *        use remove_parametrizations() instead.
+ *
+ * @param module_id The Module::id() of the destroyed module.
+ */
+void unregister_parametrization_for_module(uint64_t module_id);
 
 } // namespace tenzor::nn::utils

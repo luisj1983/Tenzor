@@ -1,29 +1,36 @@
 /**
  * @file logging.hpp
- * @brief Logging system for debugging and diagnostics
+ * @brief Compatibility shim over the unified spdlog facade (`log.hpp`).
  *
- * Provides structured logging with multiple severity levels,
- * automatic source location tracking, and configurable outputs.
+ * Stream 25 / Audit-12 deduplicated the two parallel logging stacks that
+ * historically coexisted in Tenzor:
+ *
+ *   - `tenzor/utils/log.hpp`     (modern, spdlog-based, `TENZOR_LOG_WARN` etc.)
+ *   - `tenzor/utils/logging.hpp` (legacy, custom Logger class)
+ *
+ * The legacy `Logger` class still exists for source-compatibility with the
+ * 22 callers that use `TENZOR_LOG_WARNING`, `TENZOR_LOG_FATAL`, and
+ * `TENZOR_WARN_ONCE` (none of which `log.hpp` provides). Its methods are
+ * routed through the unified spdlog logger — see `src/utils/logging.cpp`.
+ *
+ * The legacy macro names that overlap with `log.hpp` (TENZOR_LOG_DEBUG /
+ * INFO / ERROR) now forward directly to the spdlog facade so there is only
+ * one definition site each.
  */
 
 #pragma once
+
+#include "tenzor/utils/log.hpp"
 
 #include <mutex>
 #include <string>
 #include <string_view>
 #include <source_location>
-#include <format>
 
 namespace tenzor {
 
 /**
- * @brief Logging severity levels
- *
- * - Debug: Detailed debugging information
- * - Info: General informational messages
- * - Warning: Warning messages (non-critical issues)
- * - Error: Error messages (recoverable errors)
- * - Fatal: Fatal errors (program termination)
+ * @brief Logging severity levels (compat with the legacy Logger API).
  */
 enum class LogLevel {
     Debug,    ///< Detailed debugging information
@@ -34,27 +41,12 @@ enum class LogLevel {
 };
 
 /**
- * @brief Singleton logger for library diagnostics
+ * @brief Singleton logger — compat facade over `tenzor::utils::logger()`.
  *
- * Provides structured logging with automatic source location tracking.
- * Supports console and file output with configurable log levels.
- *
- * **Default Behavior:**
- * - Log level: Info (Debug messages filtered)
- * - Console output: Enabled
- * - File output: Disabled
- *
- * @par Thread Safety
- * Thread-safe for concurrent logging from multiple threads
- *
- * @code
- * auto& logger = Logger::instance();
- * logger.set_level(LogLevel::Debug);
- * logger.set_output_file("tenzor.log");
- *
- * TENZOR_LOG_INFO("Model loaded successfully");
- * TENZOR_LOG_WARNING("Using CPU fallback");
- * @endcode
+ * Stream 25: the implementation forwards to spdlog; this class exists for
+ * source-compat with callers that took a reference to `Logger::instance()`
+ * and called `set_level`, `set_output_file`, `enable_console`, or the
+ * per-severity methods (`warning(msg)`, `fatal(msg)`, ...).
  */
 class Logger {
 public:
@@ -95,12 +87,19 @@ private:
     std::string output_file_;
 };
 
-// Convenience macros
-#define TENZOR_LOG_DEBUG(msg) ::tenzor::Logger::instance().debug(msg)
-#define TENZOR_LOG_INFO(msg) ::tenzor::Logger::instance().info(msg)
+// ---------------------------------------------------------------------------
+// Macros.
+//
+// The overlapping severities (DEBUG/INFO/ERROR) are now defined exclusively
+// in `log.hpp` — including this header (which #includes log.hpp at the top)
+// already brings them in. We only define the legacy-only macros here:
+// WARNING, FATAL, and WARN_ONCE. They are routed through `tenzor::Logger`
+// so the existing legacy callers keep working unchanged.
+// ---------------------------------------------------------------------------
+
+// String-only severity macros that the unified facade does not provide.
 #define TENZOR_LOG_WARNING(msg) ::tenzor::Logger::instance().warning(msg)
-#define TENZOR_LOG_ERROR(msg) ::tenzor::Logger::instance().error(msg)
-#define TENZOR_LOG_FATAL(msg) ::tenzor::Logger::instance().fatal(msg)
+#define TENZOR_LOG_FATAL(msg)   ::tenzor::Logger::instance().fatal(msg)
 
 // Emit a warning at most once for a given call site over the lifetime of
 // the process. Safe under concurrent calls (std::call_once is thread-safe).

@@ -22,22 +22,35 @@ protected:
     }
 };
 
-// CPU events are no-ops but should not crash
-TEST_F(EventAPITest, CPUEventNoOp) {
+// CPU events are real wall-clock timestamps (Stream 17). Same-event elapsed
+// must be 0.0f, distinct events with a sleep between them must report a
+// positive elapsed millisecond delta.
+TEST_F(EventAPITest, CPUEventTiming) {
     auto& loader = backend_registry();
     auto* cpu = loader.get_backend("cpu");
     ASSERT_NE(cpu, nullptr);
 
-    auto event = cpu->create_event(0, true);
-    // CPU returns nullptr — all operations should be no-ops
-    EXPECT_EQ(event, nullptr);
+    auto start = cpu->create_event(0, true);
+    auto end = cpu->create_event(0, true);
+    ASSERT_NE(start, nullptr);
+    ASSERT_NE(end, nullptr);
 
     auto stream = cpu->create_stream(0);
-    cpu->record_event(event, stream);
-    cpu->wait_event(event, stream);
-    EXPECT_FLOAT_EQ(cpu->event_elapsed_ms(event, event), 0.0f);
+    cpu->record_event(start, stream);
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    cpu->record_event(end, stream);
+    cpu->wait_event(end, stream);
 
-    cpu->destroy_event(event);
+    float elapsed = cpu->event_elapsed_ms(start, end);
+    EXPECT_GE(elapsed, 0.0f);
+    EXPECT_GT(elapsed, 1.0f);   // Sleep of 5 ms — give generous lower bound.
+    EXPECT_LT(elapsed, 5000.0f); // Sanity ceiling.
+
+    // Same event used as both endpoints must produce exactly 0.
+    EXPECT_FLOAT_EQ(cpu->event_elapsed_ms(start, start), 0.0f);
+
+    cpu->destroy_event(start);
+    cpu->destroy_event(end);
     cpu->destroy_stream(stream);
 }
 

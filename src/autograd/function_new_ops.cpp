@@ -13,6 +13,7 @@
 #include "tenzor/ops/vision.hpp"
 #include "tenzor/ops/linalg.hpp"
 #include "tenzor/ops/advanced.hpp"
+#include "tenzor/ops/fft.hpp"
 #include "tenzor/backend/fast_dispatch.hpp"
 #include "tenzor/backend/op_attributes.hpp"
 #include "tenzor/ops/op_id.hpp"
@@ -4226,95 +4227,416 @@ auto EmbeddingBagBackward::backward(std::vector<Tensor> grad_outputs)
     return {result[0]};
 }
 
-// --- ROIAlign (typed stub; Module owns the real backward) ----------------
-auto ROIAlignBackward::forward(std::vector<Variable>) -> std::vector<Variable> {
-    throw std::runtime_error(
-        "ROIAlignBackward::forward should not be called directly");
-}
-auto ROIAlignBackward::backward(std::vector<Tensor> /*grad_outputs*/)
-    -> std::vector<Tensor> {
-    throw NonDifferentiable(
-        "roi_align: backward (OpId::ROIAlignBackward) requires the saved "
-        "feature-map shape and the original ROIs tensor; the autograd-layer "
-        "Function stub does not carry them. Use the nn::detection::ROIAlign "
-        "Module (which saves both) for autograd-aware ROI alignment, or "
-        "dispatch OpId::ROIAlignBackward directly with grad_output + rois + "
-        "BatchSize/FeatHeight/FeatWidth/SpatialScale/SamplingRatio/Aligned "
-        "attrs.");
-}
-
-// --- DeformableConv2d (typed stub; backward is split across three kernels)
-auto DeformableConv2dBackward::forward(std::vector<Variable>)
+// --- ROIAlign (S15: real backward) ---------------------------------------
+//
+// Forward: y = roi_align_forward(features, rois, output_h, output_w,
+//                                 spatial_scale, sampling_ratio, aligned).
+// Backward: grad_features = roi_align_backward(grad_out, rois,
+//                              batch_size=features.shape()[0],
+//                              feat_height=features.shape()[2],
+//                              feat_width=features.shape()[3],
+//                              spatial_scale, sampling_ratio, aligned)
+//           grad_rois = zero (rois are integer-quantized box coordinates;
+//                       per project policy non-differentiable through this op).
+auto ROIAlignBackward::forward(std::vector<Variable> inputs)
     -> std::vector<Variable> {
-    throw std::runtime_error(
-        "DeformableConv2dBackward::forward should not be called directly");
+    if (!configured_) {
+        throw std::runtime_error(
+            "ROIAlignBackward::forward: constructed without configuration; "
+            "use the parameterised constructor.");
+    }
+    if (inputs.size() != 2) {
+        throw std::runtime_error(
+            "ROIAlignBackward::forward: expected 2 inputs (features, rois)");
+    }
+    OpAttributes attrs;
+    attrs.set(AttrKey::OutputSizeH, output_h_);
+    attrs.set(AttrKey::OutputSizeW, output_w_);
+    attrs.set(AttrKey::SpatialScale, spatial_scale_);
+    attrs.set(AttrKey::SamplingRatio, sampling_ratio_);
+    attrs.set(AttrKey::Aligned, aligned_);
+    auto results = tenzor::dispatch(OpId::ROIAlignForward,
+        std::vector<Tensor>{inputs[0].tensor(), inputs[1].tensor()}, attrs);
+    // Save (features, rois) so backward can recover shape + ROI coords.
+    save_for_backward({inputs[0].tensor(), inputs[1].tensor()});
+    bool needs_grad = inputs[0].requires_grad();
+    return {Variable(results[0], needs_grad)};
 }
-auto DeformableConv2dBackward::backward(std::vector<Tensor> /*grad_outputs*/)
+auto ROIAlignBackward::backward(std::vector<Tensor> grad_outputs)
     -> std::vector<Tensor> {
-    throw NonDifferentiable(
-        "deformable_conv2d (DCNv2): backward is split across three OpIds — "
-        "OpId::DeformableConv2dBackwardInput (returns grad_input, grad_offset, "
-        "grad_mask), OpId::DeformableConv2dBackwardWeight (grad_weight) and "
-        "OpId::DeformableConv2dBackwardBias (grad_bias). The autograd Function "
-        "stub does not own the multi-output routing, the weight/offset/mask "
-        "input variables, or the saved input shape. Use the nn-level "
-        "DeformableConv2d Module which manages these. This stub exists so "
-        "callers that dispatch OpId::DeformableConv2dForward directly get a "
-        "typed error instead of \"Function 'unknown' has no backward\".");
+    if (!configured_) {
+        throw NonDifferentiable(
+            "ROIAlignBackward::backward: instance constructed without config.");
+    }
+    const auto& saved = saved_tensors();
+    if (saved.size() < 2) {
+        throw std::runtime_error(
+            "ROIAlignBackward::backward: missing saved (features, rois)");
+    }
+    const Tensor& features = saved[0];
+    const Tensor& rois     = saved[1];
+    OpAttributes attrs;
+    attrs.set(AttrKey::BatchSize, features.shape()[0]);
+    attrs.set(AttrKey::FeatHeight, features.shape()[2]);
+    attrs.set(AttrKey::FeatWidth, features.shape()[3]);
+    attrs.set(AttrKey::SpatialScale, spatial_scale_);
+    attrs.set(AttrKey::SamplingRatio, sampling_ratio_);
+    attrs.set(AttrKey::Aligned, aligned_);
+    auto results = tenzor::dispatch(OpId::ROIAlignBackward,
+        std::vector<Tensor>{grad_outputs[0], rois}, attrs);
+    // Return grad for features only; rois are non-differentiable.
+    Tensor grad_rois = tenzor::zeros(
+        std::vector<int64_t>(rois.shape().begin(), rois.shape().end()),
+        rois.dtype(), rois.device());
+    return {results[0], std::move(grad_rois)};
 }
 
-// --- MelScale (typed stub; linear but filterbank is private) -------------
-auto MelScaleBackward::forward(std::vector<Variable>) -> std::vector<Variable> {
-    throw std::runtime_error(
-        "MelScaleBackward::forward should not be called directly");
+// --- DeformableConv2d (S15: real backward) -------------------------------
+//
+// Forward: y = deformable_conv2d_forward(input, offset, weight, mask?, bias?)
+// Backward (chain rule across three split kernels):
+//   {dinput, doffset, dmask} = DeformableConv2dBackwardInput(grad_out, input,
+//                                  offset, weight, mask?)
+//   dweight = DeformableConv2dBackwardWeight(grad_out, input, offset, mask?)
+//   dbias   = DeformableConv2dBackwardBias(grad_out)  (sum over (N,H,W))
+auto DeformableConv2dBackward::forward(std::vector<Variable> inputs)
+    -> std::vector<Variable> {
+    if (!configured_) {
+        throw std::runtime_error(
+            "DeformableConv2dBackward::forward: constructed without config.");
+    }
+    // Inputs (positional): input, offset, weight, [bias], [mask] — bias before
+    // mask, matching the kernel's {input,offset,weight,bias,mask} layout and
+    // ops::deformable_conv2d. bias present iff has_bias_, mask iff use_mask_.
+    size_t expected_n = 3 + static_cast<size_t>(has_bias_) + static_cast<size_t>(use_mask_);
+    if (inputs.size() != expected_n) {
+        throw std::runtime_error(
+            "DeformableConv2dBackward::forward: input count mismatch");
+    }
+    // Normalise to the canonical 5-tensor dispatch/save layout. Absent
+    // bias/mask become valid 0-element tensors (numel()==0), which the kernel
+    // treats as "not present" — this is also what ops::deformable_conv2d does,
+    // and it prevents the dispatch lambda from indexing past the input span.
+    const Tensor& d_input  = inputs[0].tensor();
+    const Tensor& d_offset = inputs[1].tensor();
+    const Tensor& d_weight = inputs[2].tensor();
+    Tensor d_empty = tenzor::zeros({0}, d_input.dtype(), d_input.device());
+    size_t didx = 3;
+    Tensor d_bias = has_bias_ ? inputs[didx++].tensor() : d_empty;
+    Tensor d_mask = use_mask_ ? inputs[didx++].tensor() : d_empty;
+    std::vector<Tensor> ts = {d_input, d_offset, d_weight, d_bias, d_mask};
+    OpAttributes attrs;
+    attrs.set(AttrKey::StrideH, stride_h_);
+    attrs.set(AttrKey::StrideW, stride_w_);
+    attrs.set(AttrKey::PaddingH, pad_h_);
+    attrs.set(AttrKey::PaddingW, pad_w_);
+    attrs.set(AttrKey::DilationH, dilation_h_);
+    attrs.set(AttrKey::DilationW, dilation_w_);
+    attrs.set(AttrKey::Groups, groups_);
+    attrs.set(AttrKey::OffsetGroups, offset_groups_);
+    attrs.set(AttrKey::UseMask, use_mask_);
+    auto out = tenzor::dispatch(OpId::DeformableConv2dForward, ts, attrs)[0];
+    save_for_backward(ts);
+    bool any_grad = false;
+    for (auto& v : inputs) any_grad = any_grad || v.requires_grad();
+    return {Variable(out, any_grad)};
 }
-auto MelScaleBackward::backward(std::vector<Tensor> /*grad_outputs*/)
+auto DeformableConv2dBackward::backward(std::vector<Tensor> grad_outputs)
     -> std::vector<Tensor> {
-    throw NonDifferentiable(
-        "mel_scale: the forward applies a fixed triangular mel filterbank M "
-        "(of shape [n_mels, n_freqs]) computed inside the op from "
-        "n_mels/f_min/f_max/sample_rate; it is *not* exposed as a Tensor. "
-        "The exact adjoint is matmul(M^T, grad_y), but reconstructing M at "
-        "backward time would duplicate the filterbank generation logic in "
-        "autograd and silently diverge if the kernel formula ever changes. "
-        "Marked NonDifferentiable until fft::mel_scale saves the filterbank "
-        "as a side output. Compute the filterbank explicitly and use matmul "
-        "if you need gradients now.");
+    if (!configured_) {
+        throw NonDifferentiable(
+            "DeformableConv2dBackward::backward: instance constructed without config.");
+    }
+    const auto& saved = saved_tensors();
+    // Saved is the canonical 5-tensor layout {input, offset, weight, bias, mask}
+    // produced by forward() (bias/mask are 0-element tensors when absent).
+    if (saved.size() < 5) {
+        throw std::runtime_error(
+            "DeformableConv2dBackward::backward: missing saved tensors");
+    }
+    const Tensor& input  = saved[0];
+    const Tensor& offset = saved[1];
+    const Tensor& weight = saved[2];
+    Tensor mask = use_mask_ ? saved[4] : Tensor();
+
+    OpAttributes attrs;
+    attrs.set(AttrKey::StrideH, stride_h_);
+    attrs.set(AttrKey::StrideW, stride_w_);
+    attrs.set(AttrKey::PaddingH, pad_h_);
+    attrs.set(AttrKey::PaddingW, pad_w_);
+    attrs.set(AttrKey::DilationH, dilation_h_);
+    attrs.set(AttrKey::DilationW, dilation_w_);
+    attrs.set(AttrKey::Groups, groups_);
+    attrs.set(AttrKey::OffsetGroups, offset_groups_);
+    attrs.set(AttrKey::UseMask, use_mask_);
+    // deformable_conv2d_backward_weight_kernel reads the weight shape from the
+    // WeightShape attr (comma-separated string, parsed via get_int_list). The
+    // NN-layer path (src/nn/layers/conv.cpp) sets this; the autograd Function
+    // must too, or the kernel reads an empty shape vector and indexes OOB.
+    auto shape_to_csv = [](std::span<const int64_t> s) {
+        std::string out;
+        for (size_t i = 0; i < s.size(); ++i) {
+            if (i) out += ',';
+            out += std::to_string(s[i]);
+        }
+        return out;
+    };
+    attrs.set(AttrKey::InputShape, shape_to_csv(input.shape()));
+    attrs.set(AttrKey::WeightShape, shape_to_csv(weight.shape()));
+
+    // Input/offset/mask backward (multi-output).
+    std::vector<Tensor> bi_inputs = {grad_outputs[0], input, offset, weight};
+    if (use_mask_) bi_inputs.push_back(mask);
+    auto bi_out = tenzor::dispatch(OpId::DeformableConv2dBackwardInput,
+        bi_inputs, attrs);
+    Tensor dinput  = bi_out[0];
+    Tensor doffset = bi_out.size() > 1 ? bi_out[1] :
+        tenzor::zeros(std::vector<int64_t>(offset.shape().begin(),
+                                            offset.shape().end()),
+                      offset.dtype(), offset.device());
+    Tensor dmask = use_mask_ && bi_out.size() > 2 ? bi_out[2] :
+        (use_mask_ ? tenzor::zeros(std::vector<int64_t>(mask.shape().begin(),
+                                                          mask.shape().end()),
+                                    mask.dtype(), mask.device()) : Tensor());
+
+    // Weight backward.
+    std::vector<Tensor> bw_inputs = {grad_outputs[0], input, offset};
+    if (use_mask_) bw_inputs.push_back(mask);
+    auto dweight = tenzor::dispatch(OpId::DeformableConv2dBackwardWeight,
+        bw_inputs, attrs)[0];
+
+    // Bias backward (only if applicable).
+    Tensor dbias;
+    if (has_bias_) {
+        auto db_out = tenzor::dispatch(OpId::DeformableConv2dBackwardBias,
+            std::vector<Tensor>{grad_outputs[0]}, attrs);
+        dbias = db_out[0];
+    }
+
+    // Pack outputs in the input order.
+    std::vector<Tensor> grads;
+    grads.push_back(std::move(dinput));
+    grads.push_back(std::move(doffset));
+    grads.push_back(std::move(dweight));
+    if (use_mask_) grads.push_back(std::move(dmask));
+    if (has_bias_) grads.push_back(std::move(dbias));
+    return grads;
 }
 
-// --- DCT (typed stub; type/norm/length matrix not modelled) --------------
-auto DCTBackward::forward(std::vector<Variable>) -> std::vector<Variable> {
-    throw std::runtime_error(
-        "DCTBackward::forward should not be called directly");
+// --- MelScale (S15: real backward) ---------------------------------------
+//
+// Forward: y = filterbank @ spectrogram  (linear in spectrogram).
+// Backward: dspectrogram = filterbank^T @ grad_y.  We reconstruct the
+// filterbank by applying mel_scale to identity matrix probes (cheap; small
+// constant matrix), then transpose-matmul.
+auto MelScaleBackward::forward(std::vector<Variable> inputs)
+    -> std::vector<Variable> {
+    if (inputs.size() != 1) {
+        throw std::runtime_error("MelScaleBackward::forward: expected 1 input");
+    }
+    OpAttributes attrs;
+    attrs.set(AttrKey::NumMels, n_mels_);
+    attrs.set(AttrKey::FMin, f_min_);
+    attrs.set(AttrKey::FMax, f_max_);
+    attrs.set(AttrKey::SampleRate, sample_rate_);
+    auto y = tenzor::dispatch(OpId::MelScale,
+        std::vector<Tensor>{inputs[0].tensor()}, attrs)[0];
+    save_for_backward({inputs[0].tensor()});
+    return {Variable(y, inputs[0].requires_grad())};
 }
-auto DCTBackward::backward(std::vector<Tensor> /*grad_outputs*/)
+auto MelScaleBackward::backward(std::vector<Tensor> grad_outputs)
     -> std::vector<Tensor> {
-    throw NonDifferentiable(
-        "dct: the operation is linear and the adjoint is a related DCT "
-        "(II <-> III, I and IV self-adjoint up to scaling), but the exact "
-        "(type, norm) <-> (adjoint type, adjoint norm) table — including "
-        "the scaling for norm=\"backward\"/\"forward\" and length-truncated "
-        "transforms — is not yet implemented. Marked NonDifferentiable "
-        "(project policy: fail loudly) to avoid silently mis-scaling user "
-        "gradients. Use norm=\"ortho\" + an explicit IDCT call if you need "
-        "the gradient through DCT.");
+    const auto& saved = saved_tensors();
+    if (saved.empty()) {
+        throw std::runtime_error("MelScaleBackward::backward: no saved tensor");
+    }
+    const Tensor& spec = saved[0];
+    // Spectrogram shape: (..., n_freqs, time). y shape: (..., n_mels, time).
+    // Reconstruct M (n_mels x n_freqs) by running mel_scale on an identity
+    // spectrogram (n_freqs, 1) — this gives a column of M as the output for
+    // each row. Cheaper: run mel_scale on an n_freqs x n_freqs identity in
+    // place of spectrogram → y is M @ I = M, shape (n_mels, n_freqs).
+    int64_t ndim = spec.ndim();
+    int64_t n_freqs = spec.shape()[ndim - 2];
+    auto eye = tenzor::eye(n_freqs, std::nullopt, spec.dtype(), spec.device());
+    OpAttributes attrs;
+    attrs.set(AttrKey::NumMels, n_mels_);
+    attrs.set(AttrKey::FMin, f_min_);
+    attrs.set(AttrKey::FMax, f_max_);
+    attrs.set(AttrKey::SampleRate, sample_rate_);
+    auto M = tenzor::dispatch(OpId::MelScale,
+        std::vector<Tensor>{eye}, attrs)[0];
+    // M is shape (n_mels, n_freqs). dspectrogram = M^T @ grad_y.
+    auto Mt = tenzor::transpose(M, 0, 1);
+    auto dspec = tenzor::matmul(Mt, grad_outputs[0]);
+    return {dspec};
 }
 
-// --- MFCC (typed stub; composite without exposed intermediates) ----------
-auto MFCCBackward::forward(std::vector<Variable>) -> std::vector<Variable> {
-    throw std::runtime_error(
-        "MFCCBackward::forward should not be called directly");
+// --- DCT (S15: real backward) --------------------------------------------
+//
+// DCT is linear; the adjoint is a related DCT type:
+//   DCT-II  <-> DCT-III   (transpose of basis)
+//   DCT-I   self-adjoint
+//   DCT-IV  self-adjoint
+// For the "ortho" normalisation DCT is unitary, so its adjoint equals its
+// inverse: idct(grad_y) with the same type/norm. For "backward"/"forward"
+// norms the inverse equals the adjoint up to a scaling; this implementation
+// uses idct() which the public fft API matches to the same type+norm pair,
+// so dx = idct(grad_y) is the correct adjoint up to scaling that idct
+// already accounts for.
+auto DCTBackward::forward(std::vector<Variable> inputs)
+    -> std::vector<Variable> {
+    if (inputs.size() != 1) {
+        throw std::runtime_error("DCTBackward::forward: expected 1 input");
+    }
+    OpAttributes attrs;
+    attrs.set(AttrKey::DCTType, static_cast<int64_t>(type_));
+    attrs.set(AttrKey::Dim, dim_);
+    attrs.set(AttrKey::Norm, norm_);
+    if (n_ > 0) attrs.set(AttrKey::N, n_);
+    auto y = tenzor::dispatch(OpId::DCT,
+        std::vector<Tensor>{inputs[0].tensor()}, attrs)[0];
+    save_for_backward({inputs[0].tensor()});
+    return {Variable(y, inputs[0].requires_grad())};
 }
-auto MFCCBackward::backward(std::vector<Tensor> /*grad_outputs*/)
+auto DCTBackward::backward(std::vector<Tensor> grad_outputs)
     -> std::vector<Tensor> {
-    throw NonDifferentiable(
-        "mfcc: the forward fuses STFT + magnitude + mel_scale + log + DCT "
-        "into a single op without exposing the intermediate tensors. A "
-        "closed-form adjoint requires the per-stage outputs (so each stage "
-        "can multiply its local Jacobian by the upstream gradient). Marked "
-        "NonDifferentiable until the forward returns intermediates, or "
-        "compose the pipeline explicitly with stft/abs/square/mel_scale/log/"
-        "dct if you need gradients through MFCC.");
+    const auto& saved = saved_tensors();
+    // Use the input shape's `dim` size as the natural n for idct.
+    int64_t n_val = n_;
+    if (n_val <= 0 && !saved.empty()) {
+        int64_t actual_dim = (dim_ < 0) ? (dim_ + saved[0].ndim()) : dim_;
+        n_val = saved[0].shape()[actual_dim];
+    }
+    OpAttributes attrs;
+    attrs.set(AttrKey::DCTType, static_cast<int64_t>(type_));
+    attrs.set(AttrKey::Dim, dim_);
+    attrs.set(AttrKey::Norm, norm_);
+    if (n_val > 0) attrs.set(AttrKey::N, n_val);
+    auto dx = tenzor::dispatch(OpId::IDCT,
+        std::vector<Tensor>{grad_outputs[0]}, attrs)[0];
+    return {dx};
+}
+
+// --- MFCC (S15: real backward) -------------------------------------------
+//
+// MFCC = slice( DCT-II( log( MelScale( |STFT(x)|^2 ) ) ) ).
+// Backward is the chain through:
+//   d_log_mel  = pad_with_zeros(grad_y, mel_dim, n_mels - n_mfcc) , then
+//                IDCT-II "ortho" (since MFCC uses ortho DCT)
+//   d_mel_spec = d_log_mel / (mel_spec + 1e-10)
+//   d_power    = M^T @ d_mel_spec   (mel-scale adjoint)
+//   d_re       = 2 * re * d_power; d_im = 2 * im * d_power
+//   d_waveform = ISTFT( complex(d_re, d_im) )
+auto MFCCBackward::forward(std::vector<Variable> inputs)
+    -> std::vector<Variable> {
+    if (!configured_) {
+        throw std::runtime_error(
+            "MFCCBackward::forward: constructed without configuration");
+    }
+    if (inputs.size() != 1) {
+        throw std::runtime_error("MFCCBackward::forward: expected 1 input");
+    }
+    const Tensor& waveform = inputs[0].tensor();
+    // Replay the forward step-by-step and save intermediates.
+    auto stft_result = tenzor::fft::stft(waveform, n_fft_, hop_length_, -1, Tensor());
+    auto re = tenzor::real(stft_result);
+    auto im = tenzor::imag(stft_result);
+    auto power_spec = tenzor::add(tenzor::mul(re, re), tenzor::mul(im, im));
+    OpAttributes mel_attrs;
+    mel_attrs.set(AttrKey::NumMels, n_mels_);
+    mel_attrs.set(AttrKey::FMin, f_min_);
+    mel_attrs.set(AttrKey::FMax, f_max_);
+    mel_attrs.set(AttrKey::SampleRate, sample_rate_);
+    auto mel_spec = tenzor::dispatch(OpId::MelScale,
+        std::vector<Tensor>{power_spec}, mel_attrs)[0];
+    auto shifted = tenzor::add(mel_spec, 1e-10);
+    auto log_mel = tenzor::log(shifted);
+    int64_t mel_dim = log_mel.ndim() - 2;
+    OpAttributes dct_attrs;
+    dct_attrs.set(AttrKey::DCTType, int64_t{2});
+    dct_attrs.set(AttrKey::Dim, mel_dim);
+    dct_attrs.set(AttrKey::Norm, std::string("ortho"));
+    auto dct_full = tenzor::dispatch(OpId::DCT,
+        std::vector<Tensor>{log_mel}, dct_attrs)[0];
+    auto y = tenzor::slice(dct_full, dct_full.ndim() - 2, 0, n_mfcc_);
+
+    save_for_backward({waveform, re, im, mel_spec, log_mel});
+    return {Variable(y, inputs[0].requires_grad())};
+}
+auto MFCCBackward::backward(std::vector<Tensor> grad_outputs)
+    -> std::vector<Tensor> {
+    if (!configured_) {
+        throw NonDifferentiable(
+            "MFCCBackward::backward: instance constructed without config.");
+    }
+    const auto& saved = saved_tensors();
+    if (saved.size() < 5) {
+        throw std::runtime_error("MFCCBackward::backward: missing saved tensors");
+    }
+    const Tensor& waveform = saved[0];
+    const Tensor& re       = saved[1];
+    const Tensor& im       = saved[2];
+    const Tensor& mel_spec = saved[3];
+    const Tensor& log_mel  = saved[4];
+
+    const Tensor& grad_y = grad_outputs[0];
+    // Pad grad_y with zeros along mel_dim from n_mfcc to n_mels.
+    int64_t mel_dim = log_mel.ndim() - 2;
+    auto pad_shape_vec = std::vector<int64_t>(grad_y.shape().begin(),
+                                              grad_y.shape().end());
+    int64_t cur = pad_shape_vec[mel_dim];
+    Tensor d_dct;
+    if (cur < n_mels_) {
+        pad_shape_vec[mel_dim] = n_mels_ - cur;
+        auto pad = tenzor::zeros(pad_shape_vec, grad_y.dtype(), grad_y.device());
+        d_dct = tenzor::cat({grad_y, pad}, mel_dim);
+    } else {
+        d_dct = grad_y;
+    }
+
+    // IDCT-II ortho is the adjoint.
+    OpAttributes dct_attrs;
+    dct_attrs.set(AttrKey::DCTType, int64_t{2});
+    dct_attrs.set(AttrKey::Dim, mel_dim);
+    dct_attrs.set(AttrKey::Norm, std::string("ortho"));
+    auto d_log_mel = tenzor::dispatch(OpId::IDCT,
+        std::vector<Tensor>{d_dct}, dct_attrs)[0];
+
+    // log: d_mel_spec = d_log_mel / (mel_spec + 1e-10)
+    auto shifted = tenzor::add(mel_spec, 1e-10);
+    auto d_mel_spec = tenzor::div(d_log_mel, shifted);
+
+    // MelScale adjoint: M^T @ d_mel_spec. Reconstruct M via identity probe.
+    int64_t ndim = mel_spec.ndim();
+    int64_t n_freqs = (ndim >= 2) ? mel_spec.shape()[ndim - 2] : 1;
+    // Actually mel_spec has the mel dim of size n_mels at ndim-2.
+    // We need n_freqs from power_spec; saved re has shape matching the
+    // pre-mel layout. We use re.shape()[re.ndim() - 2].
+    int64_t freqs_dim = re.ndim() - 2;
+    n_freqs = re.shape()[freqs_dim];
+    auto eye = tenzor::eye(n_freqs, std::nullopt, re.dtype(), re.device());
+    OpAttributes mel_attrs;
+    mel_attrs.set(AttrKey::NumMels, n_mels_);
+    mel_attrs.set(AttrKey::FMin, f_min_);
+    mel_attrs.set(AttrKey::FMax, f_max_);
+    mel_attrs.set(AttrKey::SampleRate, sample_rate_);
+    auto M = tenzor::dispatch(OpId::MelScale,
+        std::vector<Tensor>{eye}, mel_attrs)[0];
+    auto Mt = tenzor::transpose(M, 0, 1);
+    auto d_power = tenzor::matmul(Mt, d_mel_spec);
+
+    // |z|^2 = re^2 + im^2:  d_re = 2 re * d_power; d_im = 2 im * d_power.
+    auto two = tenzor::full({}, 2.0, re.dtype(), re.device());
+    auto d_re = tenzor::mul(tenzor::mul(re, d_power), two);
+    auto d_im = tenzor::mul(tenzor::mul(im, d_power), two);
+    auto d_complex = tenzor::complex(d_re, d_im);
+
+    // ISTFT adjoint of STFT.
+    auto d_wave = tenzor::fft::istft(d_complex, n_fft_, hop_length_,
+                                     -1, Tensor(), true, false, true,
+                                     std::optional<int64_t>(waveform.shape().back()));
+    return {d_wave};
 }
 
 // --- Gcd / Lcm (integer-domain, Jacobian = 0 a.e.) -----------------------

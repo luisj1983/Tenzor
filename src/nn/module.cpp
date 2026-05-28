@@ -1,10 +1,40 @@
 #include "tenzor/nn/module.hpp"
 #include "tenzor/nn/serialize.hpp"
 #include "tenzor/ops/math.hpp"
+#include "tenzor/utils/error.hpp"  // NotImplementedError (S25 / audit-12)
 #include <algorithm>
 #include <unordered_set>
 
 namespace tenzor::nn {
+
+// Forward declaration — defined in src/nn/utils/parametrize.cpp. Called
+// from ~Module() so that the parametrize registry doesn't accumulate stale
+// entries for Modules that have been destroyed. Pulling this in via a
+// forward decl (rather than including parametrize.hpp) keeps the dependency
+// inverted: Module doesn't depend on the utils header.
+namespace utils {
+void unregister_parametrization_for_module(uint64_t module_id);
+}
+
+namespace {
+// Process-monotonic counter. Starts at 1 so that id 0 is reserved for
+// "no module" / sentinel use. memory_order_relaxed is sufficient — we only
+// require uniqueness, not happens-before across threads observing the id.
+auto next_module_id() -> uint64_t {
+    static std::atomic<uint64_t> counter{0};
+    return counter.fetch_add(1, std::memory_order_relaxed) + 1;
+}
+}
+
+Module::Module() : id_(next_module_id()) {}
+
+Module::~Module() {
+    // Tear down any external registrations keyed by this Module's UID.
+    // We *must* do this here rather than relying on the user to call
+    // remove_parametrizations() because the registry's lifetime is global
+    // and otherwise outlives every Module that ever registered into it.
+    utils::unregister_parametrization_for_module(id_);
+}
 
 auto Module::parameters() -> std::vector<std::shared_ptr<Variable>> {
     std::vector<std::shared_ptr<Variable>> params;
@@ -500,8 +530,8 @@ auto ModuleList::at(size_t idx) const -> std::shared_ptr<Module> {
 }
 
 auto ModuleList::forward_impl(const Variable& /*input*/) -> Variable {
-    throw std::runtime_error("ModuleList does not implement forward(). "
-                             "Use it to store modules and iterate over them manually.");
+    throw NotImplementedError("ModuleList does not implement forward(). "
+                              "Use it to store modules and iterate over them manually.");
 }
 
 auto ModuleList::parameters() -> std::vector<std::shared_ptr<Variable>> {
@@ -609,7 +639,7 @@ auto ModuleDict::items() const -> std::vector<std::pair<std::string, std::shared
 }
 
 auto ModuleDict::forward_impl(const Variable& /*input*/) -> Variable {
-    throw std::runtime_error("ModuleDict does not implement forward(). "
+    throw NotImplementedError("ModuleDict does not implement forward(). "
                              "Use it to store modules and access them by key.");
 }
 
@@ -755,7 +785,7 @@ auto ParameterList::at(size_t idx) const -> std::shared_ptr<Variable> {
 }
 
 auto ParameterList::forward_impl(const Variable& /*input*/) -> Variable {
-    throw std::runtime_error("ParameterList does not implement forward(). "
+    throw NotImplementedError("ParameterList does not implement forward(). "
                              "Use it to store parameters and access them by index.");
 }
 
@@ -829,7 +859,7 @@ auto ParameterDict::erase(const std::string& key) -> void {
 }
 
 auto ParameterDict::forward_impl(const Variable& /*input*/) -> Variable {
-    throw std::runtime_error("ParameterDict does not implement forward(). "
+    throw NotImplementedError("ParameterDict does not implement forward(). "
                              "Use it to store parameters and access them by key.");
 }
 

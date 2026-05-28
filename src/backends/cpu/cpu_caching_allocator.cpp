@@ -5,7 +5,11 @@
 
 #include "tenzor/backend/cpu_caching_allocator.hpp"
 #include "tenzor/backend/loader.hpp"
+#include "tenzor/utils/logging.hpp"
+#include <cerrno>
 #include <cstdlib>
+#include <cstring>
+#include <exception>
 #include <stdexcept>
 #include <algorithm>
 #include <vector>
@@ -16,6 +20,10 @@
 
 #ifdef _WIN32
 #include <malloc.h>
+#endif
+
+#if defined(__linux__) || defined(__APPLE__)
+#include <sys/mman.h>  // madvise / MADV_DONTNEED (S16/A1 partial-range eviction)
 #endif
 
 namespace tenzor {
@@ -167,18 +175,30 @@ auto CPUCachingAllocator::instance() -> CPUCachingAllocator& {
     return instance;
 }
 
-CPUCachingAllocator::CPUCachingAllocator() = default;
+CPUCachingAllocator::CPUCachingAllocator() {
+    apply_env_overrides();
+}
 
 CPUCachingAllocator::~CPUCachingAllocator() {
-    // If the backend registry has already been shut down (finalize() ran),
-    // skip freeing — the OS reclaims all memory at process exit anyway.
-    // This prevents use-after-free if this static outlives other statics
-    // during unordered static destruction.
-    if (!is_backend_registry_alive()) {
+    // S16/A3: only short-circuit on the pure-shutdown path.
+    //
+    // If the backend registry has already been torn down (finalize() ran),
+    // the static-destruction phase is running and the OS will reclaim all
+    // memory at process exit anyway.  We avoid touching arbitrary other
+    // statics here (use-after-free during unordered static destruction).
+    //
+    // BUT if a destructor higher up in the stack is unwinding from an
+    // exception (uncaught_exceptions() > 0), e.g. a test fixture catching a
+    // teardown bug, we must NOT swallow the leak — the test harness needs
+    // to see the corrupted state. In embed / test scenarios where the
+    // process keeps running after this destructor (e.g. a re-init) we'd
+    // otherwise mask a real bug.
+    const bool registry_static_dying = !is_backend_registry_alive();
+    if (registry_static_dying && std::uncaught_exceptions() == 0) {
         return;
     }
 
-    // During normal shutdown, free all roots.
+    // Normal shutdown (or shutdown-during-exception): free all roots.
     std::lock_guard<std::mutex> lock(global_mutex_);
     for (auto& [root_ptr, root] : global_root_allocations_) {
         free_to_system(root.ptr);
@@ -454,6 +474,36 @@ void CPUCachingAllocator::set_max_local_cached_bytes(size_t bytes) {
 
 void CPUCachingAllocator::set_min_split_size(size_t bytes) {
     min_split_size_.store(bytes);
+}
+
+
+// S16/A4: parse a TENZOR_CACHED_* env var as size_t, or return fallback.
+namespace {
+size_t parse_env_size_t(const char* name, size_t fallback) {
+    const char* raw = std::getenv(name);
+    if (!raw || raw[0] == '\0') {
+        return fallback;
+    }
+    // strtoull tolerates leading whitespace; reject empty / non-numeric.
+    char* end = nullptr;
+    errno = 0;
+    unsigned long long v = std::strtoull(raw, &end, 10);
+    if (errno != 0 || end == raw || v == 0) {
+        // Unparseable or explicit zero: ignore (zero would disable the cache).
+        return fallback;
+    }
+    return static_cast<size_t>(v);
+}
+}  // namespace
+
+void CPUCachingAllocator::apply_env_overrides() {
+    const size_t cur_max       = max_cached_bytes_.load();
+    const size_t cur_local_max = max_local_cached_bytes_.load();
+    const size_t cur_split     = min_split_size_.load();
+
+    max_cached_bytes_.store(parse_env_size_t("TENZOR_CACHED_BYTES_MAX", cur_max));
+    max_local_cached_bytes_.store(parse_env_size_t("TENZOR_CACHED_LOCAL_BYTES_MAX", cur_local_max));
+    min_split_size_.store(parse_env_size_t("TENZOR_CACHED_MIN_SPLIT", cur_split));
 }
 
 auto CPUCachingAllocator::get_stats() const -> Stats {
@@ -737,11 +787,13 @@ auto CPUCachingAllocator::maybe_split_block_global(Block& block, size_t requeste
     return false;
 }
 
-void CPUCachingAllocator::migrate_to_global(ThreadLocalPool& local) {
+void CPUCachingAllocator::migrate_to_global(ThreadLocalPool& local, bool migrate_all) {
     std::lock_guard<std::mutex> lock(global_mutex_);
 
-    // Move half of the cached blocks to global pool
-    size_t target = local.cached_bytes / 2;
+    // Move cached blocks to the global pool. Under memory pressure we move
+    // everything (migrate_all) so the global-pool eviction passes can reclaim
+    // them; for routine trimming we move ~half.
+    size_t target = migrate_all ? local.cached_bytes : (local.cached_bytes / 2);
     size_t moved = 0;
 
     auto it = local.free_blocks.begin();
@@ -767,8 +819,20 @@ void CPUCachingAllocator::check_memory_pressure() {
         total_cached = global_stats_.cached_bytes;
     }
 
-    if (total_cached <= max_cached_bytes_.load()) {
+    const size_t limit = max_cached_bytes_.load();
+    if (total_cached <= limit) {
         return;  // Under limit, nothing to do
+    }
+    const size_t pressure = total_cached - limit;
+
+    // Thread-local free blocks count toward cached_bytes (see deallocate) but
+    // live in the per-thread pool, which the eviction passes below — operating
+    // on global_free_blocks_ — cannot see. Promote the CURRENT thread's local
+    // free blocks to the global pool so they become reclaimable. We can only
+    // safely touch the calling thread's pool, not other threads'. This must
+    // run BEFORE we take global_mutex_ (migrate_to_global acquires it too).
+    if (tl_pool_wrapper_.valid) {
+        migrate_to_global(get_local_pool(), /*migrate_all=*/true);
     }
 
     // We can only safely free roots if ALL their blocks are in the global pool.
@@ -819,9 +883,7 @@ void CPUCachingAllocator::check_memory_pressure() {
         }
     }
 
-    if (roots_to_free.empty()) {
-        return;  // No roots that can be safely freed
-    }
+    size_t reclaimed_bytes = 0;
 
     // Free roots and remove their blocks from global free pool
     for (void* root_ptr : roots_to_free) {
@@ -856,11 +918,21 @@ void CPUCachingAllocator::check_memory_pressure() {
         }
 
         // CRITICAL: Verify freed_bytes matches root size before freeing
-        // If they don't match, there's a tracking bug - skip this root
+        // If they don't match, there's a tracking bug — surface it loudly
+        // (S16/A2) instead of silently leaking.
         if (freed_bytes != root_it->second.size) {
-            // Tracking inconsistency detected - don't free, just continue
-            // The blocks have been removed from free pool but we won't free the root
-            // This leaks memory but avoids corruption
+            {
+                std::lock_guard<std::mutex> slock(stats_mutex_);
+                global_stats_.tracking_inconsistencies++;
+            }
+            // One-shot warning so logs aren't flooded if this happens every cycle.
+            // The leaked bytes are NOT subtracted from cached_bytes — they stay
+            // counted (visible in memory_summary) so the symptom remains observable.
+            TENZOR_WARN_ONCE(
+                "CPUCachingAllocator: root-size tracking inconsistency detected — "
+                "the reclaimed free-pool bytes for a root did not match its recorded "
+                "size; root leaked to avoid potential corruption. "
+                "See Stats::tracking_inconsistencies for the cumulative count.");
             continue;
         }
 
@@ -873,15 +945,174 @@ void CPUCachingAllocator::check_memory_pressure() {
             std::lock_guard<std::mutex> slock(stats_mutex_);
             global_stats_.cached_bytes -= freed_bytes;
         }
+        reclaimed_bytes += freed_bytes;
 
         // Check if we've freed enough
         {
             std::lock_guard<std::mutex> slock(stats_mutex_);
             if (global_stats_.cached_bytes <= max_cached_bytes_.load()) {
-                break;
+                return;
             }
         }
     }
+
+    // S16/A1: still over budget after the fully-coalesced-root pass.
+    // Attempt to evict the largest contiguous free sub-range from each
+    // partially-allocated root (in-place split of the root).
+    size_t remaining = (reclaimed_bytes >= pressure) ? 0 : (pressure - reclaimed_bytes);
+    if (remaining > 0) {
+        size_t partial = evict_partial_free_ranges(remaining);
+        reclaimed_bytes += partial;
+    }
+
+    // If we still couldn't move under the limit, emit a one-shot warning so
+    // the operator can raise TENZOR_CACHED_BYTES_MAX or reduce working set.
+    // The next allocation will fail naturally with std::bad_alloc — we don't
+    // silently bloat past the configured limit.
+    size_t after_total = 0;
+    {
+        std::lock_guard<std::mutex> slock(stats_mutex_);
+        after_total = global_stats_.cached_bytes;
+    }
+    if (after_total > limit) {
+        TENZOR_WARN_ONCE(
+            "CPUCachingAllocator: cached_bytes still exceeds max_cached_bytes "
+            "after fully-coalesced-root eviction and partial-range eviction. "
+            "Set TENZOR_CACHED_BYTES_MAX higher, reduce working set, or call "
+            "release_cached_memory() to flush. Subsequent allocations may "
+            "throw std::bad_alloc rather than silently overrun.");
+    }
+}
+
+
+// S16/A1: evict the largest contiguous free sub-range from each
+// partially-allocated root.  Returns total bytes evicted.
+//
+// Caller MUST hold global_mutex_.
+//
+// Strategy:
+//   1. Group free blocks by root_ptr (only roots that have at least one
+//      live allocation are eligible — fully-free roots were already handled
+//      by the caller).
+//   2. Sort each root's free blocks by ptr and find the maximal contiguous run.
+//   3. Call madvise(MADV_DONTNEED) on the run to release physical pages,
+//      remove the blocks from global_free_blocks_, and shrink the root's
+//      bookkeeping (size, freed_size) by the run's bytes.  The original
+//      free(root.ptr) at root teardown returns the full virtual range to
+//      the OS; the evicted pages are simply not faulted back in.
+//   4. Continue until we've reclaimed >= required_bytes OR every root has
+//      been visited.
+size_t CPUCachingAllocator::evict_partial_free_ranges(size_t required_bytes) {
+    if (required_bytes == 0) {
+        return 0;
+    }
+
+    // Group free blocks by root_ptr.
+    std::unordered_map<void*, std::vector<std::multimap<size_t, Block>::iterator>> free_by_root;
+    for (auto it = global_free_blocks_.begin(); it != global_free_blocks_.end(); ++it) {
+        free_by_root[it->second.root_ptr].push_back(it);
+    }
+
+    // Identify which roots have live allocations (target of partial eviction).
+    std::unordered_set<void*> roots_with_live;
+    for (auto& [ptr, block] : global_allocated_blocks_) {
+        roots_with_live.insert(block.root_ptr);
+    }
+
+    size_t evicted_total = 0;
+
+    for (auto& [root_ptr, iters] : free_by_root) {
+        if (evicted_total >= required_bytes) {
+            break;
+        }
+        // Only target partially-allocated roots — fully-free roots are
+        // the caller's responsibility (and yield more by full-root free).
+        if (roots_with_live.count(root_ptr) == 0) {
+            continue;
+        }
+
+        auto root_it = global_root_allocations_.find(root_ptr);
+        if (root_it == global_root_allocations_.end()) {
+            continue;
+        }
+
+        // Sort free blocks for this root by ptr.
+        std::sort(iters.begin(), iters.end(),
+            [](const auto& a, const auto& b) {
+                return a->second.ptr < b->second.ptr;
+            });
+
+        // Find maximal contiguous run.
+        size_t best_size = 0;
+        size_t best_start_idx = 0;
+        size_t best_end_idx = 0;  // exclusive
+
+        size_t cur_size = iters.empty() ? 0 : iters[0]->second.size;
+        size_t cur_start = 0;
+        for (size_t i = 1; i < iters.size(); ++i) {
+            char* prev_end = static_cast<char*>(iters[i - 1]->second.ptr)
+                             + iters[i - 1]->second.size;
+            char* cur_ptr  = static_cast<char*>(iters[i]->second.ptr);
+            if (prev_end == cur_ptr) {
+                cur_size += iters[i]->second.size;
+            } else {
+                if (cur_size > best_size) {
+                    best_size = cur_size;
+                    best_start_idx = cur_start;
+                    best_end_idx = i;
+                }
+                cur_size = iters[i]->second.size;
+                cur_start = i;
+            }
+        }
+        if (!iters.empty() && cur_size > best_size) {
+            best_size = cur_size;
+            best_start_idx = cur_start;
+            best_end_idx = iters.size();
+        }
+
+        if (best_size == 0) {
+            continue;
+        }
+
+        // Release physical pages back to OS.  On Linux MADV_DONTNEED is the
+        // canonical primitive; on macOS MADV_FREE has similar semantics.
+        // Other platforms: skip the syscall (still update bookkeeping so the
+        // virtual range stops servicing allocs).
+#if defined(__linux__) || defined(__APPLE__)
+        void* run_ptr = iters[best_start_idx]->second.ptr;
+        // sys/mman.h is included below to avoid dragging it into the header.
+        ::madvise(run_ptr, best_size, MADV_DONTNEED);
+#endif
+
+        // Remove the run's blocks from global_free_blocks_.
+        for (size_t i = best_start_idx; i < best_end_idx; ++i) {
+            global_free_blocks_.erase(iters[i]);
+        }
+
+        // Shrink root bookkeeping by the evicted bytes.  Both size and
+        // freed_size go down equally so the is_fully_coalesced() invariant
+        // (freed_size == size) is still attainable when remaining live
+        // blocks are freed.  free(root_ptr) at the eventual teardown returns
+        // the entire original virtual allocation to the OS; the OS already
+        // released the evicted pages thanks to MADV_DONTNEED.
+        root_it->second.size       -= best_size;
+        root_it->second.freed_size -= best_size;
+        root_it->second.fragment_count = std::max(
+            1, root_it->second.fragment_count - static_cast<int>(best_end_idx - best_start_idx));
+
+        // Update stats.
+        {
+            std::lock_guard<std::mutex> slock(stats_mutex_);
+            global_stats_.cached_bytes      -= best_size;
+            global_stats_.partial_evictions += 1;
+            global_stats_.partial_evicted_bytes += best_size;
+        }
+
+        evicted_total += best_size;
+    }
+
+    return evicted_total;
 }
 
 void CPUCachingAllocator::free_to_system(void* ptr) {

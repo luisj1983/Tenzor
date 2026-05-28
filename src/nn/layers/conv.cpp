@@ -12,6 +12,7 @@
 #include "tenzor/ops/math.hpp"
 #include "tenzor/ops/reduction.hpp"
 #include "tenzor/ops/transform.hpp"
+#include "tenzor/utils/autograd_wrap.hpp"
 #include <algorithm>
 #include <cmath>
 #include <stdexcept>
@@ -305,7 +306,7 @@ auto Conv2d::forward_impl(const Variable& input_orig) -> Variable {
     // Handle dtype and device mismatch: convert weight and bias to input's dtype and device if needed
     Variable weight_matched = variable_cast(weight, input.dtype());
     if (input.tensor().device().type != weight.tensor().device().type) {
-        weight_matched = Variable(weight_matched.tensor().to(original_device), weight_matched.requires_grad());
+        tenzor::utils::wrap_preserving_grad(weight_matched, weight_matched.tensor().to(original_device));
     }
 
     const Tensor* bias_ptr = nullptr;
@@ -314,7 +315,7 @@ auto Conv2d::forward_impl(const Variable& input_orig) -> Variable {
         auto& bias = *bias_it->second;
         bias_matched = variable_cast(bias, input.dtype());
         if (input.tensor().device().type != bias.tensor().device().type) {
-            bias_matched = Variable(bias_matched.tensor().to(original_device), bias_matched.requires_grad());
+            tenzor::utils::wrap_preserving_grad(bias_matched, bias_matched.tensor().to(original_device));
         }
         bias_ptr = &bias_matched.tensor();
     }
@@ -946,7 +947,7 @@ auto ConvTranspose2d::forward_impl(const Variable& input) -> Variable {
     // Handle dtype and device mismatch
     Variable weight_matched = variable_cast(weight, input.dtype());
     if (input.tensor().device().type != weight.tensor().device().type) {
-        weight_matched = Variable(weight_matched.tensor().to(original_device), weight_matched.requires_grad());
+        tenzor::utils::wrap_preserving_grad(weight_matched, weight_matched.tensor().to(original_device));
     }
 
     const Tensor* bias_ptr = nullptr;
@@ -955,7 +956,7 @@ auto ConvTranspose2d::forward_impl(const Variable& input) -> Variable {
         auto& bias = *bias_it->second;
         bias_matched = variable_cast(bias, input.dtype());
         if (input.tensor().device().type != bias.tensor().device().type) {
-            bias_matched = Variable(bias_matched.tensor().to(original_device), bias_matched.requires_grad());
+            tenzor::utils::wrap_preserving_grad(bias_matched, bias_matched.tensor().to(original_device));
         }
         bias_ptr = &bias_matched.tensor();
     }
@@ -1302,7 +1303,7 @@ auto Conv3d::forward_impl(const Variable& input) -> Variable {
 
     Variable weight_matched = variable_cast(weight, input.dtype());
     if (input.tensor().device().type != weight.tensor().device().type) {
-        weight_matched = Variable(weight_matched.tensor().to(original_device), weight_matched.requires_grad());
+        tenzor::utils::wrap_preserving_grad(weight_matched, weight_matched.tensor().to(original_device));
     }
 
     const Tensor* bias_ptr = nullptr;
@@ -1311,7 +1312,7 @@ auto Conv3d::forward_impl(const Variable& input) -> Variable {
         auto& bias = *bias_it->second;
         bias_matched = variable_cast(bias, input.dtype());
         if (input.tensor().device().type != bias.tensor().device().type) {
-            bias_matched = Variable(bias_matched.tensor().to(original_device), bias_matched.requires_grad());
+            tenzor::utils::wrap_preserving_grad(bias_matched, bias_matched.tensor().to(original_device));
         }
         bias_ptr = &bias_matched.tensor();
     }
@@ -1636,7 +1637,7 @@ auto ConvTranspose3d::forward_impl(const Variable& input) -> Variable {
     // Handle dtype and device mismatch
     Variable weight_matched = variable_cast(weight, input.dtype());
     if (input.tensor().device().type != weight.tensor().device().type) {
-        weight_matched = Variable(weight_matched.tensor().to(original_device), weight_matched.requires_grad());
+        tenzor::utils::wrap_preserving_grad(weight_matched, weight_matched.tensor().to(original_device));
     }
 
     const Tensor* bias_ptr = nullptr;
@@ -1645,7 +1646,7 @@ auto ConvTranspose3d::forward_impl(const Variable& input) -> Variable {
         auto& bias = *bias_it->second;
         bias_matched = variable_cast(bias, input.dtype());
         if (input.tensor().device().type != bias.tensor().device().type) {
-            bias_matched = Variable(bias_matched.tensor().to(original_device), bias_matched.requires_grad());
+            tenzor::utils::wrap_preserving_grad(bias_matched, bias_matched.tensor().to(original_device));
         }
         bias_ptr = &bias_matched.tensor();
     }
@@ -1963,7 +1964,7 @@ auto ConvTranspose1d::forward_impl(const Variable& input) -> Variable {
     // Handle dtype and device mismatch
     Variable weight_matched = variable_cast(weight, input.dtype());
     if (input.tensor().device().type != weight.tensor().device().type) {
-        weight_matched = Variable(weight_matched.tensor().to(original_device), weight_matched.requires_grad());
+        tenzor::utils::wrap_preserving_grad(weight_matched, weight_matched.tensor().to(original_device));
     }
 
     const Tensor* bias_ptr = nullptr;
@@ -1972,7 +1973,7 @@ auto ConvTranspose1d::forward_impl(const Variable& input) -> Variable {
         auto& bias = *bias_it->second;
         bias_matched = variable_cast(bias, input.dtype());
         if (input.tensor().device().type != bias.tensor().device().type) {
-            bias_matched = Variable(bias_matched.tensor().to(original_device), bias_matched.requires_grad());
+            tenzor::utils::wrap_preserving_grad(bias_matched, bias_matched.tensor().to(original_device));
         }
         bias_ptr = &bias_matched.tensor();
     }

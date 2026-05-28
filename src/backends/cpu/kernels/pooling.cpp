@@ -7,6 +7,7 @@
 #include "tenzor/ops/creation.hpp"
 #include "tenzor/utils/log.hpp"   // TENZOR_LOG_WARN (F.4)
 #include "tenzor/backends/cpu/simd.hpp"
+#include "tenzor/backend/runtime_simd.hpp"
 #include <algorithm>
 #include <array>
 #include <cstdlib>
@@ -360,8 +361,13 @@ void avgpool2d_forward_impl(const T* in_data, T* out_data,
                              int64_t H_out, int64_t W_out,
                              int64_t kernel_h, int64_t kernel_w,
                              int64_t stride_h, int64_t stride_w,
-                             int64_t padding_h, int64_t padding_w) {
+                             int64_t padding_h, int64_t padding_w,
+                             bool count_include_pad) {
     using Compute = std::conditional_t<std::is_same_v<T, double>, double, float>;
+    // S22: PyTorch semantics — when count_include_pad=true, the divisor is
+    // the full window size (kernel_h * kernel_w); when false, it's the count
+    // of in-bounds positions only. The previous CPU kernel always used the
+    // in-bounds count, which silently implemented ``count_include_pad=False``.
     #pragma omp parallel for collapse(4)
     for (int64_t n = 0; n < N; ++n) {
         for (int64_t c = 0; c < C; ++c) {
@@ -371,7 +377,7 @@ void avgpool2d_forward_impl(const T* in_data, T* out_data,
                     int64_t w_start = ow * stride_w - padding_w;
 
                     Compute sum = Compute(0);
-                    int64_t count = 0;
+                    int64_t valid_count = 0;
 
                     for (int64_t kh = 0; kh < kernel_h; ++kh) {
                         for (int64_t kw = 0; kw < kernel_w; ++kw) {
@@ -380,12 +386,18 @@ void avgpool2d_forward_impl(const T* in_data, T* out_data,
 
                             if (h >= 0 && h < H && w >= 0 && w < W) {
                                 sum += static_cast<Compute>(in_data[((n * C + c) * H + h) * W + w]);
-                                count++;
+                                valid_count++;
                             }
                         }
                     }
 
-                    out_data[((n * C + c) * H_out + oh) * W_out + ow] = static_cast<T>(sum / count);
+                    int64_t divisor = count_include_pad
+                        ? (kernel_h * kernel_w)
+                        : valid_count;
+                    out_data[((n * C + c) * H_out + oh) * W_out + ow] =
+                        (divisor > 0)
+                            ? static_cast<T>(sum / static_cast<Compute>(divisor))
+                            : static_cast<T>(Compute(0));
                 }
             }
         }
@@ -395,7 +407,8 @@ void avgpool2d_forward_impl(const T* in_data, T* out_data,
 auto avgpool2d_forward_kernel(const Tensor& input,
                                std::array<int64_t, 2> kernel_size,
                                std::array<int64_t, 2> stride,
-                               std::array<int64_t, 2> padding) -> Tensor {
+                               std::array<int64_t, 2> padding,
+                               bool count_include_pad) -> Tensor {
     auto shape = input.shape();
     int64_t N = shape[0];
     int64_t C = shape[1];
@@ -413,7 +426,13 @@ auto avgpool2d_forward_kernel(const Tensor& input,
         padding[0]     == padding[1];
 
 #ifdef TENZOR_USE_ONEDNN
-    if (symmetric && input.dtype() == DType::Float32) {
+    // S22: the cached oneDNN primitive uses ``pooling_avg_exclude_padding``
+    // (i.e. count_include_pad=False semantics). It only matches the
+    // requested mode when padding is zero (then both modes coincide) or when
+    // the caller explicitly asked for the exclude-padding divisor.
+    const bool onednn_matches_mode =
+        (padding[0] == 0 && padding[1] == 0) || !count_include_pad;
+    if (onednn_matches_mode && symmetric && input.dtype() == DType::Float32) {
         if (onednn_avgpool2d_forward(input.data<float>(), output.data<float>(),
                                      N, C, H, W, H_out, W_out,
                                      kernel_size[0], stride[0], padding[0])) {
@@ -422,7 +441,15 @@ auto avgpool2d_forward_kernel(const Tensor& input,
     }
 #endif
 
-    if (symmetric && input.dtype() == DType::Float32 && CPUInfo::get().has_avx512()) {
+    // The AVX-512 fast path only matches both count_include_pad modes when
+    // there is no padding (then the in-bounds count always equals
+    // kernel*kernel). For non-zero padding the AVX-512 routine's scalar
+    // fallback uses the valid-count divisor (count_include_pad=False
+    // semantics) and would silently disagree with the requested mode, so
+    // we route through the scalar template instead.
+    if (symmetric && padding[0] == 0 && padding[1] == 0 &&
+        input.dtype() == DType::Float32 &&
+        ::tenzor::backend::get_simd_features().avx512f) {
         avx512::avgpool2d_forward_f32(input.data<float>(), output.data<float>(),
                                       N, C, H, W, H_out, W_out,
                                       kernel_size[0], stride[0], padding[0]);
@@ -435,7 +462,8 @@ auto avgpool2d_forward_kernel(const Tensor& input,
                                   N, C, H, W, H_out, W_out,
                                   kernel_size[0], kernel_size[1],
                                   stride[0],      stride[1],
-                                  padding[0],     padding[1]);
+                                  padding[0],     padding[1],
+                                  count_include_pad);
     };
 
     switch (input.dtype()) {
@@ -456,7 +484,8 @@ void avgpool2d_backward_impl(const T* grad_out_data, T* grad_in_data,
                               int64_t H_out, int64_t W_out,
                               int64_t kernel_h, int64_t kernel_w,
                               int64_t stride_h, int64_t stride_w,
-                              int64_t padding_h, int64_t padding_w) {
+                              int64_t padding_h, int64_t padding_w,
+                              bool count_include_pad) {
     using Compute = std::conditional_t<std::is_same_v<T, double>, double, float>;
     #pragma omp parallel for collapse(2) if(N * C > 4)
     for (int64_t n = 0; n < N; ++n) {
@@ -466,18 +495,24 @@ void avgpool2d_backward_impl(const T* grad_out_data, T* grad_in_data,
                     int64_t h_start = oh * stride_h - padding_h;
                     int64_t w_start = ow * stride_w - padding_w;
 
-                    int64_t count = 0;
+                    int64_t valid_count = 0;
                     for (int64_t kh = 0; kh < kernel_h; ++kh) {
                         for (int64_t kw = 0; kw < kernel_w; ++kw) {
                             int64_t h = h_start + kh;
                             int64_t w = w_start + kw;
-                            if (h >= 0 && h < H && w >= 0 && w < W) count++;
+                            if (h >= 0 && h < H && w >= 0 && w < W) valid_count++;
                         }
                     }
 
+                    // S22: divisor must match the forward kernel.
+                    int64_t divisor = count_include_pad
+                        ? (kernel_h * kernel_w)
+                        : valid_count;
+                    if (divisor <= 0) continue;
+
                     Compute grad_val =
                         static_cast<Compute>(grad_out_data[((n * C + c) * H_out + oh) * W_out + ow]) /
-                        static_cast<Compute>(count);
+                        static_cast<Compute>(divisor);
 
                     for (int64_t kh = 0; kh < kernel_h; ++kh) {
                         for (int64_t kw = 0; kw < kernel_w; ++kw) {
@@ -500,7 +535,8 @@ auto avgpool2d_backward_kernel(const Tensor& grad_output,
                                 const std::vector<int64_t>& input_shape,
                                 std::array<int64_t, 2> kernel_size,
                                 std::array<int64_t, 2> stride,
-                                std::array<int64_t, 2> padding) -> Tensor {
+                                std::array<int64_t, 2> padding,
+                                bool count_include_pad) -> Tensor {
     int64_t N = input_shape[0];
     int64_t C = input_shape[1];
     int64_t H = input_shape[2];
@@ -518,7 +554,8 @@ auto avgpool2d_backward_kernel(const Tensor& grad_output,
                                    N, C, H, W, H_out, W_out,
                                    kernel_size[0], kernel_size[1],
                                    stride[0],      stride[1],
-                                   padding[0],     padding[1]);
+                                   padding[0],     padding[1],
+                                   count_include_pad);
     };
 
     switch (grad_output.dtype()) {
@@ -576,7 +613,7 @@ auto adaptive_avgpool2d_kernel(const Tensor& input, int64_t output_h,
     auto output = Tensor::empty_uninitialized({N, C, output_h, output_w}, input.dtype(), input.device());
 
     if (input.dtype() == DType::Float32) {
-        if (CPUInfo::get().has_avx512()) {
+        if (::tenzor::backend::get_simd_features().avx512f) {
             avx512::adaptive_avgpool2d_forward_f32(input.data<float>(), output.data<float>(),
                                                     N, C, H, W, output_h, output_w);
         } else {
@@ -907,7 +944,8 @@ template<typename T>
 void avgpool1d_forward_impl(const T* in_data, T* out_data,
                              int64_t N, int64_t C, int64_t L,
                              int64_t L_out,
-                             int64_t kernel_size, int64_t stride, int64_t padding) {
+                             int64_t kernel_size, int64_t stride, int64_t padding,
+                             bool count_include_pad) {
     using Compute = std::conditional_t<std::is_same_v<T, double>, double, float>;
     #pragma omp parallel for collapse(3)
     for (int64_t n = 0; n < N; ++n) {
@@ -916,24 +954,29 @@ void avgpool1d_forward_impl(const T* in_data, T* out_data,
                 int64_t l_start = ol * stride - padding;
 
                 Compute sum = Compute(0);
-                int64_t count = 0;
+                int64_t valid_count = 0;
 
                 for (int64_t k = 0; k < kernel_size; ++k) {
                     int64_t l = l_start + k;
                     if (l >= 0 && l < L) {
                         sum += static_cast<Compute>(in_data[(n * C + c) * L + l]);
-                        count++;
+                        valid_count++;
                     }
                 }
 
-                out_data[(n * C + c) * L_out + ol] = static_cast<T>(sum / count);
+                int64_t divisor = count_include_pad ? kernel_size : valid_count;
+                out_data[(n * C + c) * L_out + ol] =
+                    (divisor > 0)
+                        ? static_cast<T>(sum / static_cast<Compute>(divisor))
+                        : static_cast<T>(Compute(0));
             }
         }
     }
 }
 
 auto avgpool1d_forward_kernel(const Tensor& input, int64_t kernel_size,
-                               int64_t stride, int64_t padding) -> Tensor {
+                               int64_t stride, int64_t padding,
+                               bool count_include_pad) -> Tensor {
     auto shape = input.shape();
     int64_t N = shape[0];
     int64_t C = shape[1];
@@ -945,16 +988,20 @@ auto avgpool1d_forward_kernel(const Tensor& input, int64_t kernel_size,
 
     if (input.dtype() == DType::Float32) {
         avgpool1d_forward_impl<float>(input.data<float>(), output.data<float>(),
-                                      N, C, L, L_out, kernel_size, stride, padding);
+                                      N, C, L, L_out, kernel_size, stride, padding,
+                                      count_include_pad);
     } else if (input.dtype() == DType::Float64) {
         avgpool1d_forward_impl<double>(input.data<double>(), output.data<double>(),
-                                       N, C, L, L_out, kernel_size, stride, padding);
+                                       N, C, L, L_out, kernel_size, stride, padding,
+                                       count_include_pad);
     } else if (input.dtype() == DType::Float16) {
         avgpool1d_forward_impl<Float16>(input.data<Float16>(), output.data<Float16>(),
-                                        N, C, L, L_out, kernel_size, stride, padding);
+                                        N, C, L, L_out, kernel_size, stride, padding,
+                                        count_include_pad);
     } else if (input.dtype() == DType::BFloat16) {
         avgpool1d_forward_impl<BFloat16>(input.data<BFloat16>(), output.data<BFloat16>(),
-                                         N, C, L, L_out, kernel_size, stride, padding);
+                                         N, C, L, L_out, kernel_size, stride, padding,
+                                         count_include_pad);
     } else {
         throw std::runtime_error("Unsupported dtype for avgpool1d_forward");
     }
@@ -966,20 +1013,24 @@ template<typename T>
 void avgpool1d_backward_impl(const T* grad_out_data, T* grad_in_data,
                               int64_t N, int64_t C, int64_t L,
                               int64_t L_out,
-                              int64_t kernel_size, int64_t stride, int64_t padding) {
+                              int64_t kernel_size, int64_t stride, int64_t padding,
+                              bool count_include_pad) {
     #pragma omp parallel for collapse(2) if(N * C > 4)
     for (int64_t n = 0; n < N; ++n) {
         for (int64_t c = 0; c < C; ++c) {
             for (int64_t ol = 0; ol < L_out; ++ol) {
                 int64_t l_start = ol * stride - padding;
 
-                int64_t count = 0;
+                int64_t valid_count = 0;
                 for (int64_t k = 0; k < kernel_size; ++k) {
                     int64_t l = l_start + k;
-                    if (l >= 0 && l < L) count++;
+                    if (l >= 0 && l < L) valid_count++;
                 }
 
-                float grad_val = static_cast<float>(grad_out_data[(n * C + c) * L_out + ol]) / count;
+                int64_t divisor = count_include_pad ? kernel_size : valid_count;
+                if (divisor <= 0) continue;
+                float grad_val = static_cast<float>(grad_out_data[(n * C + c) * L_out + ol])
+                                 / static_cast<float>(divisor);
 
                 for (int64_t k = 0; k < kernel_size; ++k) {
                     int64_t l = l_start + k;
@@ -997,7 +1048,8 @@ void avgpool1d_backward_impl(const T* grad_out_data, T* grad_in_data,
 auto avgpool1d_backward_kernel(const Tensor& grad_output,
                                 const std::vector<int64_t>& input_shape,
                                 int64_t kernel_size, int64_t stride,
-                                int64_t padding) -> Tensor {
+                                int64_t padding,
+                                bool count_include_pad) -> Tensor {
     int64_t N = input_shape[0];
     int64_t C = input_shape[1];
     int64_t L = input_shape[2];
@@ -1009,16 +1061,20 @@ auto avgpool1d_backward_kernel(const Tensor& grad_output,
 
     if (grad_output.dtype() == DType::Float32) {
         avgpool1d_backward_impl<float>(grad_output.data<float>(), grad_input.data<float>(),
-                                       N, C, L, L_out, kernel_size, stride, padding);
+                                       N, C, L, L_out, kernel_size, stride, padding,
+                                       count_include_pad);
     } else if (grad_output.dtype() == DType::Float64) {
         avgpool1d_backward_impl<double>(grad_output.data<double>(), grad_input.data<double>(),
-                                        N, C, L, L_out, kernel_size, stride, padding);
+                                        N, C, L, L_out, kernel_size, stride, padding,
+                                        count_include_pad);
     } else if (grad_output.dtype() == DType::Float16) {
         avgpool1d_backward_impl<Float16>(grad_output.data<Float16>(), grad_input.data<Float16>(),
-                                         N, C, L, L_out, kernel_size, stride, padding);
+                                         N, C, L, L_out, kernel_size, stride, padding,
+                                         count_include_pad);
     } else if (grad_output.dtype() == DType::BFloat16) {
         avgpool1d_backward_impl<BFloat16>(grad_output.data<BFloat16>(), grad_input.data<BFloat16>(),
-                                          N, C, L, L_out, kernel_size, stride, padding);
+                                          N, C, L, L_out, kernel_size, stride, padding,
+                                          count_include_pad);
     } else {
         throw std::runtime_error("Unsupported dtype for avgpool1d_backward");
     }
@@ -1407,7 +1463,8 @@ void avgpool3d_forward_impl(const T* in_data, T* out_data,
                              int64_t D_out, int64_t H_out, int64_t W_out,
                              int64_t kernel_d, int64_t kernel_h, int64_t kernel_w,
                              int64_t stride_d, int64_t stride_h, int64_t stride_w,
-                             int64_t padding_d, int64_t padding_h, int64_t padding_w) {
+                             int64_t padding_d, int64_t padding_h, int64_t padding_w,
+                             bool count_include_pad) {
     // audit-2026-05-03 — accumulate at native precision when T is Float64,
     // otherwise widen Float16/BFloat16 to Float32.
     using Compute = std::conditional_t<std::is_same_v<T, double>, double, float>;
@@ -1422,7 +1479,7 @@ void avgpool3d_forward_impl(const T* in_data, T* out_data,
                         int64_t w_start = ow * stride_w - padding_w;
 
                         Compute sum = Compute(0);
-                        int64_t count = 0;
+                        int64_t valid_count = 0;
 
                         for (int64_t kd = 0; kd < kernel_d; ++kd) {
                             for (int64_t kh = 0; kh < kernel_h; ++kh) {
@@ -1432,14 +1489,18 @@ void avgpool3d_forward_impl(const T* in_data, T* out_data,
                                     int64_t w = w_start + kw;
                                     if (d >= 0 && d < D && h >= 0 && h < H && w >= 0 && w < W) {
                                         sum += static_cast<Compute>(in_data[((n * C + c) * D + d) * H * W + h * W + w]);
-                                        count++;
+                                        valid_count++;
                                     }
                                 }
                             }
                         }
 
+                        int64_t divisor = count_include_pad
+                            ? (kernel_d * kernel_h * kernel_w)
+                            : valid_count;
                         int64_t out_idx = ((n * C + c) * D_out + od) * H_out * W_out + oh * W_out + ow;
-                        out_data[out_idx] = static_cast<T>(count > 0 ? sum / static_cast<Compute>(count) : Compute(0));
+                        out_data[out_idx] = static_cast<T>(
+                            divisor > 0 ? sum / static_cast<Compute>(divisor) : Compute(0));
                     }
                 }
             }
@@ -1450,7 +1511,8 @@ void avgpool3d_forward_impl(const T* in_data, T* out_data,
 auto avgpool3d_forward_kernel(const Tensor& input,
                                std::array<int64_t, 3> kernel_size,
                                std::array<int64_t, 3> stride,
-                               std::array<int64_t, 3> padding) -> Tensor {
+                               std::array<int64_t, 3> padding,
+                               bool count_include_pad) -> Tensor {
     auto shape = input.shape();
     int64_t N = shape[0];
     int64_t C = shape[1];
@@ -1470,7 +1532,8 @@ auto avgpool3d_forward_kernel(const Tensor& input,
                                   N, C, D, H, W, D_out, H_out, W_out,
                                   kernel_size[0], kernel_size[1], kernel_size[2],
                                   stride[0],      stride[1],      stride[2],
-                                  padding[0],     padding[1],     padding[2]);
+                                  padding[0],     padding[1],     padding[2],
+                                  count_include_pad);
     };
 
     switch (input.dtype()) {
@@ -1492,7 +1555,8 @@ void avgpool3d_backward_impl(const T* grad_out_data, T* grad_in_data,
                               int64_t D_out, int64_t H_out, int64_t W_out,
                               int64_t kernel_d, int64_t kernel_h, int64_t kernel_w,
                               int64_t stride_d, int64_t stride_h, int64_t stride_w,
-                              int64_t padding_d, int64_t padding_h, int64_t padding_w) {
+                              int64_t padding_d, int64_t padding_h, int64_t padding_w,
+                              bool count_include_pad) {
     using Compute = std::conditional_t<std::is_same_v<T, double>, double, float>;
     #pragma omp parallel for collapse(2) if(N * C > 4)
     for (int64_t n = 0; n < N; ++n) {
@@ -1504,20 +1568,26 @@ void avgpool3d_backward_impl(const T* grad_out_data, T* grad_in_data,
                         int64_t h_start = oh * stride_h - padding_h;
                         int64_t w_start = ow * stride_w - padding_w;
 
-                        int64_t count = 0;
+                        int64_t valid_count = 0;
                         for (int64_t kd = 0; kd < kernel_d; ++kd) {
                             for (int64_t kh = 0; kh < kernel_h; ++kh) {
                                 for (int64_t kw = 0; kw < kernel_w; ++kw) {
                                     int64_t d = d_start + kd;
                                     int64_t h = h_start + kh;
                                     int64_t w = w_start + kw;
-                                    if (d >= 0 && d < D && h >= 0 && h < H && w >= 0 && w < W) count++;
+                                    if (d >= 0 && d < D && h >= 0 && h < H && w >= 0 && w < W) valid_count++;
                                 }
                             }
                         }
 
+                        int64_t divisor = count_include_pad
+                            ? (kernel_d * kernel_h * kernel_w)
+                            : valid_count;
+                        if (divisor <= 0) continue;
+
                         int64_t out_idx = ((n * C + c) * D_out + od) * H_out * W_out + oh * W_out + ow;
-                        Compute grad_val = static_cast<Compute>(grad_out_data[out_idx]) / static_cast<Compute>(count);
+                        Compute grad_val = static_cast<Compute>(grad_out_data[out_idx])
+                                           / static_cast<Compute>(divisor);
 
                         for (int64_t kd = 0; kd < kernel_d; ++kd) {
                             for (int64_t kh = 0; kh < kernel_h; ++kh) {
@@ -1544,7 +1614,8 @@ auto avgpool3d_backward_kernel(const Tensor& grad_output,
                                 const std::vector<int64_t>& input_shape,
                                 std::array<int64_t, 3> kernel_size,
                                 std::array<int64_t, 3> stride,
-                                std::array<int64_t, 3> padding) -> Tensor {
+                                std::array<int64_t, 3> padding,
+                                bool count_include_pad) -> Tensor {
     int64_t N = input_shape[0];
     int64_t C = input_shape[1];
     int64_t D = input_shape[2];
@@ -1564,7 +1635,8 @@ auto avgpool3d_backward_kernel(const Tensor& grad_output,
                                    N, C, D, H, W, D_out, H_out, W_out,
                                    kernel_size[0], kernel_size[1], kernel_size[2],
                                    stride[0],      stride[1],      stride[2],
-                                   padding[0],     padding[1],     padding[2]);
+                                   padding[0],     padding[1],     padding[2],
+                                   count_include_pad);
     };
 
     switch (grad_output.dtype()) {

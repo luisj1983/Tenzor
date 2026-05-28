@@ -10,11 +10,19 @@
 
 namespace tenzor::nn::utils {
 
-// Global map from module pointer to its parametrization lists
-// Using raw pointer as key (modules are always accessed via shared_ptr)
-static std::unordered_map<Module*, std::unordered_map<std::string, ParametrizationList>>&
+// Global map from module UID to its parametrization lists.
+//
+// Keyed by uint64_t (Module::id()) rather than raw Module* — see Stream 21
+// audit. With a raw-pointer key, when a Module is destroyed and a new one
+// is constructed at the same heap address (typical std::allocator reuse
+// during long NAS/sweep loops), stale entries from the dead Module pollute
+// is_parametrized() / register_parametrization() lookups for the *new*
+// Module at that address. A monotonic per-instance UID sidesteps that
+// failure mode entirely. Stale entries from destroyed Modules are also
+// proactively cleaned up by ~Module() → unregister_parametrization_for_module().
+static std::unordered_map<uint64_t, std::unordered_map<std::string, ParametrizationList>>&
 parametrization_registry() {
-    static std::unordered_map<Module*, std::unordered_map<std::string, ParametrizationList>> reg;
+    static std::unordered_map<uint64_t, std::unordered_map<std::string, ParametrizationList>> reg;
     return reg;
 }
 
@@ -29,7 +37,8 @@ void register_parametrization(std::shared_ptr<Module> module,
     }
 
     auto* mod_ptr = module.get();
-    auto& mod_params = parametrization_registry()[mod_ptr];
+    const uint64_t mod_id = module->id();
+    auto& mod_params = parametrization_registry()[mod_id];
 
     if (mod_params.find(param_name) == mod_params.end()) {
         // First parametrization on this parameter — save original.
@@ -56,10 +65,16 @@ void register_parametrization(std::shared_ptr<Module> module,
         // backpropagate through the chain into original_var (and into
         // any internal parameters owned by the parametrization modules
         // themselves, e.g. WeightNorm's weight_g / weight_v).
+        //
+        // The hook captures the UID (not a raw Module*) so we look up
+        // the registry entry by stable identity. mod_ptr is also captured
+        // because the hook needs a live Module pointer to mutate its
+        // parameter slot; this is safe because the hook is owned by the
+        // Module itself and torn down on Module destruction.
         auto hook_id = module->register_forward_pre_hook(
-            [mod_ptr, param_name](Module* /*self*/, const Variable& /*input*/) {
+            [mod_ptr, mod_id, param_name](Module* /*self*/, const Variable& /*input*/) {
                 auto& reg = parametrization_registry();
-                auto mod_it = reg.find(mod_ptr);
+                auto mod_it = reg.find(mod_id);
                 if (mod_it == reg.end()) return;
                 auto param_it = mod_it->second.find(param_name);
                 if (param_it == mod_it->second.end()) return;
@@ -107,9 +122,9 @@ void remove_parametrizations(std::shared_ptr<Module> module,
                              bool leave_parametrized) {
     if (!module) return;
 
-    auto* mod_ptr = module.get();
+    const uint64_t mod_id = module->id();
     auto& reg = parametrization_registry();
-    auto mod_it = reg.find(mod_ptr);
+    auto mod_it = reg.find(mod_id);
     if (mod_it == reg.end()) return;
 
     auto param_it = mod_it->second.find(param_name);
@@ -151,7 +166,7 @@ void remove_parametrizations(std::shared_ptr<Module> module,
 
 auto is_parametrized(const Module& module, const std::string& param_name) -> bool {
     auto& reg = parametrization_registry();
-    auto mod_it = reg.find(const_cast<Module*>(&module));
+    auto mod_it = reg.find(module.id());
     if (mod_it == reg.end()) return false;
 
     if (param_name.empty()) {
@@ -160,13 +175,24 @@ auto is_parametrized(const Module& module, const std::string& param_name) -> boo
     return mod_it->second.find(param_name) != mod_it->second.end();
 }
 
-// Test/teardown helper: clear the entire registry. Needed because the
-// registry keys on raw Module* — when a Module is destroyed and a new one
-// later gets the same address (typical std::allocator reuse), stale entries
-// cause is_parametrized() to return true for what should be a fresh module.
-// Call between TEST_P iterations.
+// Test/teardown helper: clear the entire registry. With UID-keyed storage
+// this is no longer strictly needed to avoid Module*-reuse heisenbugs, but
+// it remains useful for tests that want a known-empty starting state.
 void clear_parametrization_registry() {
     parametrization_registry().clear();
+}
+
+// Called from ~Module(). Removes any entries this Module had registered so
+// the registry tracks Module lifetime exactly — no stale entries survive a
+// destroyed Module, even if the user never explicitly called
+// remove_parametrizations().
+//
+// Important: we cannot call back into the Module here (it's mid-destruction),
+// so we only touch the registry; the forward pre-hook the Module owns is
+// torn down by the Module's own hook-storage destruction anyway.
+void unregister_parametrization_for_module(uint64_t module_id) {
+    auto& reg = parametrization_registry();
+    reg.erase(module_id);
 }
 
 } // namespace tenzor::nn::utils

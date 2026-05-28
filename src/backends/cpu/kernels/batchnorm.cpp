@@ -1,6 +1,7 @@
 #include "tenzor/core/tensor.hpp"
 #include "tenzor/core/dtype.hpp"
 #include "tenzor/backends/cpu/simd.hpp"
+#include "tenzor/backend/runtime_simd.hpp"
 #include "half_operators.hpp"
 #include <bit>
 #include <cmath>
@@ -323,7 +324,7 @@ auto batchnorm2d_mean_var_kernel(const Tensor& input) -> std::vector<Tensor> {
     Tensor variance({C}, input.dtype(), input.device());
 
     if (input.dtype() == DType::Float32) {
-        if (CPUInfo::get().has_avx512()) {
+        if (::tenzor::backend::get_simd_features().avx512f) {
             avx512::batchnorm_mean_var_f32(
                 input.data<float>(), mean.data<float>(), variance.data<float>(),
                 N, C, H, W);
@@ -775,7 +776,7 @@ auto batchnorm2d_forward_affine_kernel(const Tensor& input,
 #endif
 
     if (input.dtype() == DType::Float32) {
-        if (CPUInfo::get().has_avx512()) {
+        if (::tenzor::backend::get_simd_features().avx512f) {
             avx512::batchnorm_forward_affine_f32(
                 input.data<float>(), output.data<float>(),
                 mean.data<float>(), variance.data<float>(),
