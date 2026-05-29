@@ -158,13 +158,36 @@ inline dnnl::stream& get_onednn_stream() {
 // hold onto the underlying dnnl primitives + reordered weight buffers for
 // the process lifetime. `clear_dnnl_cache()` walks every registered cache
 // on the calling thread and clears it.
+//
+// THREADING CONTRACT (important — read before relying on this for memory
+// reclamation across a thread pool):
+//   The per-op caches are `thread_local`. They are deliberately lock-free:
+//   each thread reads/writes only its own instance with no synchronisation.
+//   Consequently `clear_dnnl_cache()` clears ONLY the calling thread's
+//   caches. It does NOT (and must not) reach into other threads' instances —
+//   mutating a `thread_local` cache that another thread may be concurrently
+//   reading is a data race / undefined behaviour, and a "registry of live
+//   caches" that did so would be incorrect, not merely slow.
+//
+//   Other threads' caches are still reclaimed deterministically: each
+//   thread_local instance is destroyed (freeing its dnnl primitives and
+//   reordered-weight buffers) when that thread exits. For an OpenMP / fixed
+//   worker pool the recommended pattern under memory pressure is to call
+//   `clear_dnnl_cache()` from inside a parallel region (e.g.
+//   `#pragma omp parallel { clear_dnnl_cache(); }`) so every worker clears
+//   its own cache on its own thread — the only data-race-free way to achieve
+//   a synchronous global clear.
 
 /// Register a thread-local cache clear callback. Each per-op cpp registers
-/// its cache via a static initializer; clear_dnnl_cache() invokes them all.
+/// its cache via a static initializer; clear_dnnl_cache() invokes them all
+/// on whatever thread calls clear_dnnl_cache().
 void register_dnnl_cache_clear_callback(void (*cb)());
 
-/// Clear all thread-local oneDNN primitive caches on the current thread.
-/// Idle entries are destroyed; subsequent calls lazily rebuild.
+/// Clear the calling thread's oneDNN primitive caches. Idle entries are
+/// destroyed; subsequent lookups lazily rebuild. Per the threading contract
+/// above this affects only the current thread; other threads' caches are
+/// freed on their own thread exit. To clear a worker pool synchronously,
+/// invoke this once per worker from within a parallel region.
 void clear_dnnl_cache();
 
 } // namespace cpu

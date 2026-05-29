@@ -119,6 +119,28 @@ set_target_properties(test_quantized_linear_signed PROPERTIES
 tenzor_discover_tests(test_quantized_linear_signed
     LABELS "backends" DISCOVERY_TIMEOUT 60 BACKENDS cpu)
 
+# Signed + asymmetric zero-point correctness for the CPU quantized_conv2d
+# kernels (release-prep A3/A4): signed-safe dot_int8, full (q-zp) expansion,
+# and input_zp padding in im2col. Ground-truth reference dequantizes by
+# definition so it is independent of the kernel's internal decomposition.
+add_executable(test_quantized_conv2d_signed_zp test_quantized_conv2d_signed_zp.cpp)
+target_link_libraries(test_quantized_conv2d_signed_zp PRIVATE
+    tenzor_core tenzor_backend_cpu GTest::gtest_main)
+set_target_properties(test_quantized_conv2d_signed_zp PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/bin")
+tenzor_discover_tests(test_quantized_conv2d_signed_zp
+    LABELS "backends" DISCOVERY_TIMEOUT 60 BACKENDS cpu)
+
+# Consolidated CPU correctness regressions from the release audit (isin native
+# bit-width, index_select non-contiguous, norm overflow scaling, ...).
+add_executable(test_release_audit_cpu test_release_audit_cpu.cpp)
+target_link_libraries(test_release_audit_cpu PRIVATE
+    tenzor_core tenzor_backend_cpu GTest::gtest_main)
+set_target_properties(test_release_audit_cpu PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/bin")
+tenzor_discover_tests(test_release_audit_cpu
+    LABELS "backends" DISCOVERY_TIMEOUT 60 BACKENDS cpu)
+
 # S13 dtype-preservation regressions: sampler/loss/FFT kernels that used to
 # silently change output dtype away from input dtype.
 add_executable(test_dtype_preservation test_dtype_preservation.cpp)

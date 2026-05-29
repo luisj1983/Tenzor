@@ -167,6 +167,91 @@ def test_full_backward_hook_registration():
     handle.remove()
 
 
+def test_inline_lambda_hook_fires():
+    """An inline lambda (no external reference) must still fire.
+
+    Previously the hook registry weakref'd every callable, so a lambda with
+    no other strong reference was GC'd before the forward pass and silently
+    never fired. Lambdas/functions don't implicitly reference the module, so
+    they are now held strongly (PyTorch _forward_hooks semantics).
+    """
+    _init()
+    model = tz.nn.Linear(4, 2)
+    calls = [0]
+    model.register_forward_hook(lambda m, i, o: calls.__setitem__(0, calls[0] + 1))
+    _ = model(tz.Variable(tz.randn([2, 4]), False))
+    assert calls[0] == 1, "inline lambda hook must fire"
+
+
+def test_free_function_hook_fires_without_external_ref():
+    """A module-level function passed without keeping a reference must fire."""
+    _init()
+    model = tz.nn.Linear(4, 2)
+    seen = []
+
+    def make_and_register():
+        # The local `fn` goes out of scope after this returns; the registry
+        # must keep it alive (strong ref) for it to fire later.
+        def fn(m, i, o):
+            seen.append(1)
+        model.register_forward_hook(fn)
+
+    make_and_register()
+    _ = model(tz.Variable(tz.randn([2, 4]), False))
+    assert seen == [1], "free-function hook must fire after its local scope exits"
+
+
+def test_bound_method_hook_fires_while_module_alive():
+    """Bound-method hooks (cycle-prone) still fire while the owner is alive.
+
+    Bound methods are wrapped in weakref.WeakMethod to break the
+    owner<->hook reference cycle, but must resolve and fire as long as the
+    owning object lives.
+    """
+    _init()
+    model = tz.nn.Linear(4, 2)
+
+    class Recorder:
+        def __init__(self):
+            self.count = 0
+
+        def on_forward(self, m, i, o):
+            self.count += 1
+
+    rec = Recorder()                       # kept alive in this scope
+    model.register_forward_hook(rec.on_forward)  # bound method -> WeakMethod
+    _ = model(tz.Variable(tz.randn([2, 4]), False))
+    assert rec.count == 1, "bound-method hook must fire while owner is alive"
+
+
+def test_subclass_register_hook_returns_usable_handle():
+    """Registering a hook on a Python Module subclass must return a single
+    RemovableHandle (the Python wrapper used to double-wrap the C++ handle,
+    raising TypeError) and the hook must fire and be removable."""
+    _init()
+
+    class M(tz.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.lin = tz.nn.Linear(4, 2)
+            self.count = 0
+            self.handle = self.register_forward_hook(self._on)
+
+        def _on(self, m, i, o):
+            self.count += 1
+
+        def forward(self, x):
+            return self.lin(x)
+
+    m = M()
+    assert type(m.handle).__name__ == "RemovableHandle"
+    _ = m(tz.Variable(tz.randn([2, 4]), False))
+    assert m.count == 1, "subclass-registered hook must fire"
+    m.handle.remove()
+    _ = m(tz.Variable(tz.randn([2, 4]), False))
+    assert m.count == 1, "hook must not fire after remove()"
+
+
 if __name__ == "__main__":
     test_forward_hook_called()
     test_forward_pre_hook_called()
@@ -177,4 +262,8 @@ if __name__ == "__main__":
     test_handle_remove_is_idempotent()
     test_handle_survives_module_outliving()
     test_full_backward_hook_registration()
+    test_inline_lambda_hook_fires()
+    test_free_function_hook_fires_without_external_ref()
+    test_bound_method_hook_fires_while_module_alive()
+    test_subclass_register_hook_returns_usable_handle()
     print("All hook tests passed!")

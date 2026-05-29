@@ -175,6 +175,53 @@ TEST_P(EmbeddingBagMultiDTypeTest, SumModeMatchesManualSum) {
 }
 
 // ============================================================================
+// Max-mode backward (release-prep A5): gradient must route ONLY to the
+// per-feature argmax row, never scatter-add across the whole bag. CPU-only,
+// deterministic distinct weights so the argmax is unambiguous.
+// ============================================================================
+
+TEST(EmbeddingBagMaxBackward, RoutesGradOnlyToArgmaxRow) {
+    tenzor::initialize();
+    // num_embeddings=5, dim=3, max_norm disabled, mode="max".
+    nn::EmbeddingBag emb(5, 3, /*max_norm=*/0.0, /*norm_type=*/2.0,
+                         /*scale_grad_by_freq=*/false, /*mode=*/"max");
+
+    // Distinct, row-monotone weights: weight[r][j] = r*10 + j. Within any
+    // contiguous bag the largest row index wins every feature.
+    {
+        auto& w = emb.weight();
+        auto* wp = w.tensor().data<float>();
+        for (int64_t r = 0; r < 5; ++r)
+            for (int64_t j = 0; j < 3; ++j)
+                wp[r * 3 + j] = static_cast<float>(r * 10 + j);
+    }
+
+    // indices [0,1,2,3,4], offsets [0,3] -> bag0={rows 0,1,2}, bag1={rows 3,4}.
+    auto mk = [](std::initializer_list<int64_t> v) {
+        auto t = tenzor::zeros({static_cast<int64_t>(v.size())}, DType::Int64, Device::cpu());
+        auto* p = t.data<int64_t>(); int64_t i = 0; for (auto x : v) p[i++] = x; return t;
+    };
+    auto input = Variable(mk({0, 1, 2, 3, 4}), false);
+    auto offsets = Variable(mk({0, 3}), false);
+
+    auto output = emb.forward(input, offsets);  // [2, 3]
+    output.backward(tenzor::ones({2, 3}, DType::Float32, Device::cpu()));
+
+    ASSERT_TRUE(emb.weight().grad().has_value());
+    const auto* g = emb.weight().grad()->data<float>();
+
+    // Argmax of bag0 is row 2; of bag1 is row 4. Each winning element gets the
+    // upstream grad (1.0); every other row stays exactly 0.
+    for (int64_t r = 0; r < 5; ++r) {
+        float expected = (r == 2 || r == 4) ? 1.0f : 0.0f;
+        for (int64_t j = 0; j < 3; ++j) {
+            EXPECT_FLOAT_EQ(g[r * 3 + j], expected)
+                << "row " << r << " col " << j;
+        }
+    }
+}
+
+// ============================================================================
 // Instantiation
 // ============================================================================
 

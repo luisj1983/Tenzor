@@ -1436,13 +1436,17 @@ auto softmax_kernel(const Tensor& input, int64_t dim) -> Tensor {
                     max_val = std::max(max_val, static_cast<float>(in_data[idx]));
                 }
 
-                // Compute exp and sum (Float32 accumulation)
-                float sum = 0.0f;
+                // Compute exp and Kahan-compensated sum (matches logsumexp's
+                // rigor; plain float summation lost precision over long dims).
+                float sum = 0.0f, comp = 0.0f;
                 for (int64_t j = 0; j < dim_size; ++j) {
                     int64_t idx = (i * dim_size + j) * inner_size + k;
                     float exp_val = std::exp(static_cast<float>(in_data[idx]) - max_val);
                     out_data[idx] = Float16(exp_val);
-                    sum += exp_val;
+                    float y = exp_val - comp;
+                    float t = sum + y;
+                    comp = (t - sum) - y;
+                    sum = t;
                 }
 
                 // Normalize (convert back to Float16)
@@ -1583,12 +1587,15 @@ auto softmax_kernel(const Tensor& input, int64_t dim) -> Tensor {
                     max_val = std::max(max_val, static_cast<float>(in_data[idx]));
                 }
 
-                float sum = 0.0f;
+                float sum = 0.0f, comp = 0.0f;  // Kahan-compensated
                 for (int64_t j = 0; j < dim_size; ++j) {
                     int64_t idx = (i * dim_size + j) * inner_size + k;
                     float exp_val = std::exp(static_cast<float>(in_data[idx]) - max_val);
                     out_data[idx] = BFloat16(exp_val);
-                    sum += exp_val;
+                    float y = exp_val - comp;
+                    float t = sum + y;
+                    comp = (t - sum) - y;
+                    sum = t;
                 }
 
                 for (int64_t j = 0; j < dim_size; ++j) {
@@ -1821,11 +1828,15 @@ auto log_softmax_kernel(const Tensor& input, int64_t dim) -> Tensor {
                     max_val = std::max(max_val, static_cast<float>(in_data[idx]));
                 }
 
-                // Compute log(sum(exp(x - max))) (Float32 accumulation)
-                float sum_exp = 0.0f;
+                // Compute log(sum(exp(x - max))) — Kahan-compensated sum.
+                float sum_exp = 0.0f, comp = 0.0f;
                 for (int64_t j = 0; j < dim_size; ++j) {
                     int64_t idx = (i * dim_size + j) * inner_size + k;
-                    sum_exp += std::exp(static_cast<float>(in_data[idx]) - max_val);
+                    float e = std::exp(static_cast<float>(in_data[idx]) - max_val);
+                    float y = e - comp;
+                    float t = sum_exp + y;
+                    comp = (t - sum_exp) - y;
+                    sum_exp = t;
                 }
                 float log_sum_exp = std::log(sum_exp);
 
@@ -1959,10 +1970,14 @@ auto log_softmax_kernel(const Tensor& input, int64_t dim) -> Tensor {
                     max_val = std::max(max_val, static_cast<float>(in_data[idx]));
                 }
 
-                float sum_exp = 0.0f;
+                float sum_exp = 0.0f, comp = 0.0f;  // Kahan-compensated
                 for (int64_t j = 0; j < dim_size; ++j) {
                     int64_t idx = (i * dim_size + j) * inner_size + k;
-                    sum_exp += std::exp(static_cast<float>(in_data[idx]) - max_val);
+                    float e = std::exp(static_cast<float>(in_data[idx]) - max_val);
+                    float y = e - comp;
+                    float t = sum_exp + y;
+                    comp = (t - sum_exp) - y;
+                    sum_exp = t;
                 }
                 float log_sum_exp = std::log(sum_exp);
 
@@ -2896,7 +2911,7 @@ auto leaky_relu_inplace_kernel(Tensor& input, double alpha) -> void {
 }
 
 auto gelu_inplace_kernel(Tensor& input) -> void {
-    constexpr float sqrt_2_over_pi = 0.7978845608028654f;
+    constexpr float sqrt_2_over_pi = 0.7978845608f;
     constexpr float coeff = 0.044715f;
 
     if (input.dtype() == DType::Float32) {

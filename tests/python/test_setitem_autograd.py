@@ -1,22 +1,17 @@
 """
-S8: Variable.__setitem__ autograd-safety guard tests.
+B7: differentiable Variable.__setitem__.
 
-Background
-----------
-``Variable.__setitem__`` cannot register a ``CopySlices`` autograd Function
-yet, so an in-place mutation on a Variable that participates in an autograd
-graph would silently corrupt saved-for-backward tensors that alias its
-storage. The bindings refuse the unsafe cases up front:
+``var[key] = value`` participates in autograd: gradient flows to ``value`` at
+the written positions and to ``var``'s pre-write upstream graph at the
+non-written positions. The write is routed through a functional
+masked_scatter / masked_fill against a pre-write *snapshot* of ``var`` (so the
+graph contains no cycle), and ``var`` is rebound to the result.
 
-  * leaf  + requires_grad=True  -> ValueError  (PyTorch parity)
-  * non-leaf + requires_grad=True -> RuntimeError (S8 fix; was a
-                                                   UserWarning)
-  * leaf  + requires_grad=False -> mutation succeeds
-  * non-leaf + requires_grad=False -> mutation succeeds (no graph to
-                                                         corrupt)
-
-These tests pin down all four routes so the bindings cannot regress back to
-the silently-wrong-gradient behavior.
+Routing contract:
+  * leaf  + requires_grad=True   -> ValueError  (PyTorch in-place parity)
+  * non-leaf + requires_grad=True -> differentiable scatter (B7)
+  * requires_grad=False value into a no-grad var -> plain in-place mutation
+  * requires_grad=True value into a no-grad var  -> var becomes grad-tracked
 """
 
 import os
@@ -24,11 +19,11 @@ import sys
 
 import pytest
 
-# Match the conftest.py convention used by every other test in this dir.
 build_python_dir = os.path.join(os.path.dirname(__file__), "..", "..", "build", "python")
 sys.path.insert(0, build_python_dir)
 
 tz = pytest.importorskip("tenzor.tenzor_core", reason="Tenzor Python module not built")
+np = pytest.importorskip("numpy")
 
 
 @pytest.fixture(scope="module", autouse=True)
@@ -37,105 +32,115 @@ def _init_tenzor():
     tz.manual_seed(0)
 
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
+def _np(v):
+    t = v.tensor() if hasattr(v, "tensor") else v
+    return np.asarray(t)
+
 
 def _zeros4_var(requires_grad: bool) -> "tz.Variable":
-    """Construct a 1D length-4 Float32 zero Variable."""
     return tz.Variable(tz.zeros([4], tz.dtype.float32), requires_grad)
 
 
+def _bool_mask(values):
+    return tz.Tensor.from_numpy(np.array(values, dtype=bool))
+
+
 # ---------------------------------------------------------------------------
-# Case 1: leaf + requires_grad=False -- must succeed
+# Routing guards (unchanged behaviour)
 # ---------------------------------------------------------------------------
 
 def test_setitem_leaf_no_grad_succeeds():
     x = _zeros4_var(requires_grad=False)
     assert x.is_leaf
     x[0] = 1.0  # must NOT raise
-    val = float(x.tensor().numpy()[0])
-    assert val == 1.0, f"expected 1.0 at index 0, got {val}"
+    assert float(x.tensor().numpy()[0]) == 1.0
 
-
-# ---------------------------------------------------------------------------
-# Case 2: leaf + requires_grad=True -- existing AA.9 guard, must raise
-# (Included so the four-case routing is exhaustively pinned.)
-# ---------------------------------------------------------------------------
 
 def test_setitem_leaf_with_grad_raises():
     x = _zeros4_var(requires_grad=True)
-    assert x.is_leaf
-    assert x.requires_grad
+    assert x.is_leaf and x.requires_grad
     with pytest.raises((ValueError, RuntimeError)) as excinfo:
         x[0] = 1.0
-    # AA.9 message includes 'leaf' and 'in-place'.
-    msg = str(excinfo.value)
-    assert "leaf" in msg.lower()
-    assert "in-place" in msg.lower() or "in place" in msg.lower()
+    msg = str(excinfo.value).lower()
+    assert "leaf" in msg
+    assert "in-place" in msg or "in place" in msg
 
-
-# ---------------------------------------------------------------------------
-# Case 3: non-leaf + requires_grad=False -- must succeed
-# ---------------------------------------------------------------------------
 
 def test_setitem_nonleaf_no_grad_succeeds():
-    # Build a non-leaf with requires_grad=False: take a graph-free input,
-    # produce a result via an op, then assign. ``x + 1`` on a no-grad
-    # Variable yields a no-grad Variable; is_leaf may still be True because
-    # there is no grad_fn to attach. We verify the actual routing properties
-    # rather than asserting is_leaf semantics that PyTorch and Tenzor define
-    # slightly differently for no-grad inputs.
     x = _zeros4_var(requires_grad=False)
     y = x + 1.0
-    # Whatever leaf/non-leaf status y has, requires_grad is False here, so
-    # the binding must permit the mutation either way (case 3 OR case 1).
     assert not y.requires_grad
     y[0] = 7.0  # must NOT raise
-    val = float(y.tensor().numpy()[0])
-    assert val == 7.0, f"expected 7.0 at index 0, got {val}"
+    assert float(y.tensor().numpy()[0]) == 7.0
 
-
-# ---------------------------------------------------------------------------
-# Case 4: non-leaf + requires_grad=True -- the bug case, must raise
-# ---------------------------------------------------------------------------
-
-def test_setitem_nonleaf_with_grad_raises():
-    x = _zeros4_var(requires_grad=True)
-    y = x + 1.0  # non-leaf, inherits requires_grad
-    assert y.requires_grad, "y should require grad (inherits from x)"
-    assert not y.is_leaf, "y should be a non-leaf (has grad_fn)"
-    with pytest.raises(RuntimeError) as excinfo:
-        y[0] = 1.0
-    msg = str(excinfo.value)
-    # S8 diagnostic must mention non-leaf and CopySlices / detach guidance.
-    assert "non-leaf" in msg.lower()
-    assert ("copyslices" in msg.lower()) or ("detach" in msg.lower())
-
-
-# ---------------------------------------------------------------------------
-# Workaround: detach to bypass the guard
-# ---------------------------------------------------------------------------
 
 def test_setitem_rebuild_as_leaf_workaround_succeeds():
     x = _zeros4_var(requires_grad=True)
     y = x + 1.0
-    # Workaround: re-wrap the computed tensor as a fresh leaf without grad.
-    # This is the documented escape hatch when the user wants in-place
-    # mutation on a value derived from an autograd graph.
     z = tz.Variable(y.tensor(), requires_grad=False)
-    assert not z.requires_grad, "rebuilt Variable must have requires_grad=False"
-    assert z.is_leaf, "rebuilt Variable must be a leaf"
+    assert not z.requires_grad and z.is_leaf
     z[0] = 1.0  # must NOT raise
-    val = float(z.tensor().numpy()[0])
-    assert val == 1.0, f"expected 1.0 at index 0, got {val}"
+    assert float(z.tensor().numpy()[0]) == 1.0
 
 
 # ---------------------------------------------------------------------------
-# Direct-execution shim: the ctest harness runs this file as
-# ``python3 test_setitem_autograd.py``. Without ``pytest.main`` the test
-# functions defined above would never execute.
+# B7: differentiable scatter (the case that previously raised)
 # ---------------------------------------------------------------------------
+
+def test_setitem_nonleaf_scalar_is_differentiable():
+    # Previously raised "CopySlices not supported"; now does masked_fill.
+    x = _zeros4_var(requires_grad=True)
+    y = x + 1.0                                    # non-leaf, [1,1,1,1]
+    y[0] = 5.0                                     # masked_fill at index 0
+    assert float(y.tensor().numpy()[0]) == 5.0
+    tz.sum(y).backward()
+    # index 0 overwritten -> no grad to x there; others -> grad 1
+    assert np.array_equal(_np(x.grad), np.array([0, 1, 1, 1], dtype=np.float32))
+
+
+def test_setitem_boolmask_grad_to_both_sides():
+    x = tz.Variable(tz.full([4], 2.0), True)       # leaf param
+    y = x * 1.0                                    # non-leaf (writable)
+    w = tz.Variable(tz.full([2], 7.0), True)       # value for the 2 masked slots
+    mask = _bool_mask([True, False, True, False])
+
+    y[mask] = w                                    # y -> [7, 2, 7, 2]
+    assert np.array_equal(_np(y), np.array([7, 2, 7, 2], dtype=np.float32))
+
+    tz.sum(y).backward()
+    assert np.array_equal(_np(x.grad), np.array([0, 1, 0, 1], dtype=np.float32))
+    assert np.array_equal(_np(w.grad), np.array([1, 1], dtype=np.float32))
+
+
+def test_setitem_slice_grad_to_both_sides():
+    x = tz.Variable(tz.full([4], 2.0), True)
+    y = x * 1.0
+    w = tz.Variable(tz.full([2], 9.0), True)
+    y[1:3] = w                                     # y -> [2, 9, 9, 2]
+    assert np.array_equal(_np(y), np.array([2, 9, 9, 2], dtype=np.float32))
+
+    tz.sum(y).backward()
+    assert np.array_equal(_np(x.grad), np.array([1, 0, 0, 1], dtype=np.float32))
+    assert np.array_equal(_np(w.grad), np.array([1, 1], dtype=np.float32))
+
+
+def test_setitem_into_nongrad_buffer_flows_to_value():
+    buf = tz.Variable(tz.zeros([3], tz.dtype.float32), False)
+    w = tz.Variable(tz.full([3], 4.0), True)
+    buf[:] = w
+    assert buf.requires_grad
+    tz.sum(buf).backward()
+    assert np.array_equal(_np(w.grad), np.array([1, 1, 1], dtype=np.float32))
+
+
+def test_setitem_no_grad_context_is_plain_inplace():
+    x = tz.Variable(tz.full([4], 2.0), False)
+    y = x * 1.0
+    w = tz.Variable(tz.full([2], 3.0), False)
+    mask = _bool_mask([True, False, True, False])
+    y[mask] = w
+    assert np.array_equal(_np(y), np.array([3, 2, 3, 2], dtype=np.float32))
+
 
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))

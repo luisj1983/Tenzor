@@ -176,22 +176,29 @@ public:
             return ALIGNED_ALLOC(BUFFER_ALIGNMENT, aligned_size);
         }
 
+        // Bucket by the ALLOCATED size, identically to release(), so a buffer
+        // is filed into and looked up from the same bucket. Previously acquire
+        // keyed on the requested size while release keyed on the allocated
+        // size, so any size landing in a higher allocated-size class silently
+        // missed the cache (and could even return an undersized buffer).
         size_t class_idx = get_size_class(size);
-        auto& bucket = buckets_[class_idx];
+        size_t alloc_size = std::max(size, get_class_size(class_idx));
+        size_t bucket_idx = get_size_class(alloc_size);
+        auto& bucket = buckets_[bucket_idx];
 
-        // Try to reuse a cached buffer
+        // Reuse a cached buffer only if it is at least the requested size.
         if (!bucket.empty()) {
             void* ptr = bucket.back();
             bucket.pop_back();
-            // buffer_sizes_ already has this pointer's allocated size from
-            // the original acquire or from release caching it back
-            return ptr;
+            auto szit = buffer_sizes_.find(ptr);
+            if (szit != buffer_sizes_.end() && szit->second >= size) {
+                return ptr;
+            }
+            // Defensive: stale/undersized entry — drop it and allocate fresh.
+            if (szit != buffer_sizes_.end()) buffer_sizes_.erase(szit);
+            ALIGNED_FREE(ptr);
         }
 
-        // Allocate new buffer - must be at least the requested size
-        // get_class_size may return less than requested for sizes between
-        // class boundaries, so we take the max to ensure sufficient allocation
-        size_t alloc_size = std::max(size, get_class_size(class_idx));
         void* ptr = ALIGNED_ALLOC(BUFFER_ALIGNMENT, alloc_size);
         if (ptr) {
             buffer_sizes_[ptr] = alloc_size;

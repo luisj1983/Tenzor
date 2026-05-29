@@ -3385,17 +3385,29 @@ static auto norm_kernel_dim(const Tensor& input, float p,
             }
             return static_cast<T>(acc);
         }
+        // p >= 2 / general: max-normalize the slice so squaring/powering large
+        // magnitudes cannot overflow even the double accumulator (matters for
+        // Float64 inputs with |x| > ~1e154; the double accumulator already
+        // covers Float32). norm = max * (sum (|x|/max)^p)^(1/p).
+        double m = 0.0;
+        for (int64_t k = 0; k < reduce_sz; ++k) {
+            double v = std::abs(static_cast<double>(in_data[(o * reduce_sz + k) * inner + i]));
+            if (v > m) m = v;
+        }
+        if (m <= 0.0) return static_cast<T>(0);
+        const double inv = 1.0 / m;
         if (p == 2.0f) {
             for (int64_t k = 0; k < reduce_sz; ++k) {
-                double v = static_cast<double>(in_data[(o * reduce_sz + k) * inner + i]);
-                acc += v * v;
+                double r = std::abs(static_cast<double>(in_data[(o * reduce_sz + k) * inner + i])) * inv;
+                acc += r * r;
             }
-            return static_cast<T>(std::sqrt(acc));
+            return static_cast<T>(m * std::sqrt(acc));
         }
         for (int64_t k = 0; k < reduce_sz; ++k) {
-            acc += std::pow(std::abs(static_cast<double>(in_data[(o * reduce_sz + k) * inner + i])), static_cast<double>(p));
+            double r = std::abs(static_cast<double>(in_data[(o * reduce_sz + k) * inner + i])) * inv;
+            acc += std::pow(r, static_cast<double>(p));
         }
-        return static_cast<T>(std::pow(acc, 1.0 / static_cast<double>(p)));
+        return static_cast<T>(m * std::pow(acc, 1.0 / static_cast<double>(p)));
     };
 
     const int64_t slices = outer * inner;
@@ -3457,199 +3469,108 @@ auto norm_kernel(const Tensor& input, float p, int64_t dim, bool keepdim) -> Ten
         throw std::runtime_error("norm: input tensor is empty");
     }
 
+    // Lp norm for p >= 2 (and general p) is computed with max-normalization
+    // (norm = max * (sum (|x|/max)^p)^(1/p)) so that squaring/powering large
+    // magnitudes cannot overflow the accumulator to +inf. L1 and L-inf need no
+    // scaling. This lambda is templated on the accumulator type (float for
+    // F32/F16/BF16, double for F64) and a per-element |x| reader.
+    auto scaled_lp = [&](auto zero, auto&& abs_at) {
+        using Acc = decltype(zero);
+        Acc max_val = zero;
+        #pragma omp parallel for reduction(max:max_val) if(n > ::tenzor::OmpThresholds::medium())
+        for (int64_t i = 0; i < n; i++) {
+            Acc a = abs_at(i);
+            if (a > max_val) max_val = a;
+        }
+        if (max_val <= zero) return zero;  // all-zero input
+        Acc inv_max = Acc(1) / max_val;
+        Acc acc = zero;
+        const bool is_l2 = (p == static_cast<float>(2));
+        #pragma omp parallel for reduction(+:acc) if(n > ::tenzor::OmpThresholds::medium())
+        for (int64_t i = 0; i < n; i++) {
+            Acc r = abs_at(i) * inv_max;
+            acc += is_l2 ? (r * r) : std::pow(r, static_cast<Acc>(p));
+        }
+        return is_l2 ? (max_val * std::sqrt(acc))
+                     : (max_val * std::pow(acc, Acc(1) / static_cast<Acc>(p)));
+    };
+
     switch (input.dtype()) {
         case DType::Float32: {
             auto* input_data = input.data<float>();
             auto* output_data = output.data<float>();
-
             float norm_value = 0.0f;
-
             if (p == 1.0f) {
-                // L1 norm: sum of absolute values
                 #pragma omp parallel for reduction(+:norm_value) if(n > ::tenzor::OmpThresholds::medium())
-                for (int64_t i = 0; i < n; i++) {
-                    norm_value += std::abs(input_data[i]);
-                }
-            } else if (p == 2.0f) {
-                // L2 norm: sqrt of sum of squares
-                #pragma omp parallel for reduction(+:norm_value) if(n > ::tenzor::OmpThresholds::medium())
-                for (int64_t i = 0; i < n; i++) {
-                    norm_value += input_data[i] * input_data[i];
-                }
-                norm_value = std::sqrt(norm_value);
+                for (int64_t i = 0; i < n; i++) norm_value += std::abs(input_data[i]);
             } else if (std::isinf(p)) {
-                // L-inf norm: max absolute value (parallelized)
                 #pragma omp parallel for reduction(max:norm_value) if(n > ::tenzor::OmpThresholds::medium())
                 for (int64_t i = 0; i < n; i++) {
                     float abs_val = std::abs(input_data[i]);
-                    if (abs_val > norm_value) {
-                        norm_value = abs_val;
-                    }
+                    if (abs_val > norm_value) norm_value = abs_val;
                 }
             } else {
-                // General Lp norm: (sum(|x|^p))^(1/p)
-                // For large p, use log-space computation to avoid overflow:
-                // norm = max_val * (sum(|x/max_val|^p))^(1/p)
-                if (p > 10.0f) {
-                    float max_val = 0.0f;
-                    #pragma omp parallel for reduction(max:max_val) if(n > ::tenzor::OmpThresholds::medium())
-                    for (int64_t i = 0; i < n; i++) {
-                        float abs_val = std::abs(input_data[i]);
-                        if (abs_val > max_val) max_val = abs_val;
-                    }
-                    if (max_val > 0.0f) {
-                        float inv_max = 1.0f / max_val;
-                        #pragma omp parallel for reduction(+:norm_value) if(n > ::tenzor::OmpThresholds::medium())
-                        for (int64_t i = 0; i < n; i++) {
-                            norm_value += std::pow(std::abs(input_data[i]) * inv_max, p);
-                        }
-                        norm_value = max_val * std::pow(norm_value, 1.0f / p);
-                    }
-                } else {
-                    #pragma omp parallel for reduction(+:norm_value) if(n > ::tenzor::OmpThresholds::medium())
-                    for (int64_t i = 0; i < n; i++) {
-                        norm_value += std::pow(std::abs(input_data[i]), p);
-                    }
-                    norm_value = std::pow(norm_value, 1.0f / p);
-                }
+                norm_value = scaled_lp(0.0f, [&](int64_t i) { return std::abs(input_data[i]); });
             }
-
             output_data[0] = norm_value;
             break;
         }
         case DType::Float64: {
             auto* input_data = input.data<double>();
             auto* output_data = output.data<double>();
-
             double norm_value = 0.0;
-
-            if (p == 1.0) {
-                // L1 norm: sum of absolute values
+            if (p == 1.0f) {
                 #pragma omp parallel for reduction(+:norm_value) if(n > ::tenzor::OmpThresholds::medium())
-                for (int64_t i = 0; i < n; i++) {
-                    norm_value += std::abs(input_data[i]);
-                }
-            } else if (p == 2.0) {
-                // L2 norm: sqrt of sum of squares
-                #pragma omp parallel for reduction(+:norm_value) if(n > ::tenzor::OmpThresholds::medium())
-                for (int64_t i = 0; i < n; i++) {
-                    norm_value += input_data[i] * input_data[i];
-                }
-                norm_value = std::sqrt(norm_value);
+                for (int64_t i = 0; i < n; i++) norm_value += std::abs(input_data[i]);
             } else if (std::isinf(p)) {
-                // L-inf norm: max absolute value (parallelized)
                 #pragma omp parallel for reduction(max:norm_value) if(n > ::tenzor::OmpThresholds::medium())
                 for (int64_t i = 0; i < n; i++) {
                     double abs_val = std::abs(input_data[i]);
-                    if (abs_val > norm_value) {
-                        norm_value = abs_val;
-                    }
+                    if (abs_val > norm_value) norm_value = abs_val;
                 }
             } else {
-                // General Lp norm: (sum(|x|^p))^(1/p)
-                // For large p, use max-normalization to avoid overflow
-                if (p > 10.0) {
-                    double max_val = 0.0;
-                    #pragma omp parallel for reduction(max:max_val) if(n > ::tenzor::OmpThresholds::medium())
-                    for (int64_t i = 0; i < n; i++) {
-                        double abs_val = std::abs(input_data[i]);
-                        if (abs_val > max_val) max_val = abs_val;
-                    }
-                    if (max_val > 0.0) {
-                        double inv_max = 1.0 / max_val;
-                        #pragma omp parallel for reduction(+:norm_value) if(n > ::tenzor::OmpThresholds::medium())
-                        for (int64_t i = 0; i < n; i++) {
-                            norm_value += std::pow(std::abs(input_data[i]) * inv_max, p);
-                        }
-                        norm_value = max_val * std::pow(norm_value, 1.0 / p);
-                    }
-                } else {
-                    #pragma omp parallel for reduction(+:norm_value) if(n > ::tenzor::OmpThresholds::medium())
-                    for (int64_t i = 0; i < n; i++) {
-                        norm_value += std::pow(std::abs(input_data[i]), p);
-                    }
-                    norm_value = std::pow(norm_value, 1.0 / p);
-                }
+                norm_value = scaled_lp(0.0, [&](int64_t i) { return std::abs(input_data[i]); });
             }
-
             output_data[0] = norm_value;
             break;
         }
         case DType::Float16: {
-            // Compute norm in Float32
             auto* input_data = input.data<Float16>();
             output = Tensor(output_shape, DType::Float32, input.device());
             auto* output_data = output.data<float>();
-
             float norm_value = 0.0f;
-
             if (p == 1.0f) {
                 #pragma omp parallel for reduction(+:norm_value) if(n > ::tenzor::OmpThresholds::medium())
-                for (int64_t i = 0; i < n; i++) {
-                    norm_value += std::abs(static_cast<float>(input_data[i]));
-                }
-            } else if (p == 2.0f) {
-                #pragma omp parallel for reduction(+:norm_value) if(n > ::tenzor::OmpThresholds::medium())
-                for (int64_t i = 0; i < n; i++) {
-                    float v = static_cast<float>(input_data[i]);
-                    norm_value += v * v;
-                }
-                norm_value = std::sqrt(norm_value);
+                for (int64_t i = 0; i < n; i++) norm_value += std::abs(static_cast<float>(input_data[i]));
             } else if (std::isinf(p)) {
                 #pragma omp parallel for reduction(max:norm_value) if(n > ::tenzor::OmpThresholds::medium())
                 for (int64_t i = 0; i < n; i++) {
                     float abs_val = std::abs(static_cast<float>(input_data[i]));
-                    if (abs_val > norm_value) {
-                        norm_value = abs_val;
-                    }
+                    if (abs_val > norm_value) norm_value = abs_val;
                 }
             } else {
-                #pragma omp parallel for reduction(+:norm_value) if(n > ::tenzor::OmpThresholds::medium())
-                for (int64_t i = 0; i < n; i++) {
-                    norm_value += std::pow(std::abs(static_cast<float>(input_data[i])), p);
-                }
-                norm_value = std::pow(norm_value, 1.0f / p);
+                norm_value = scaled_lp(0.0f, [&](int64_t i) { return std::abs(static_cast<float>(input_data[i])); });
             }
-
             output_data[0] = norm_value;
             break;
         }
         case DType::BFloat16: {
-            // Compute norm in Float32
             auto* input_data = input.data<BFloat16>();
             output = Tensor(output_shape, DType::Float32, input.device());
             auto* output_data = output.data<float>();
-
             float norm_value = 0.0f;
-
             if (p == 1.0f) {
                 #pragma omp parallel for reduction(+:norm_value) if(n > ::tenzor::OmpThresholds::medium())
-                for (int64_t i = 0; i < n; i++) {
-                    norm_value += std::abs(static_cast<float>(input_data[i]));
-                }
-            } else if (p == 2.0f) {
-                #pragma omp parallel for reduction(+:norm_value) if(n > ::tenzor::OmpThresholds::medium())
-                for (int64_t i = 0; i < n; i++) {
-                    float v = static_cast<float>(input_data[i]);
-                    norm_value += v * v;
-                }
-                norm_value = std::sqrt(norm_value);
+                for (int64_t i = 0; i < n; i++) norm_value += std::abs(static_cast<float>(input_data[i]));
             } else if (std::isinf(p)) {
                 #pragma omp parallel for reduction(max:norm_value) if(n > ::tenzor::OmpThresholds::medium())
                 for (int64_t i = 0; i < n; i++) {
                     float abs_val = std::abs(static_cast<float>(input_data[i]));
-                    if (abs_val > norm_value) {
-                        norm_value = abs_val;
-                    }
+                    if (abs_val > norm_value) norm_value = abs_val;
                 }
             } else {
-                #pragma omp parallel for reduction(+:norm_value) if(n > ::tenzor::OmpThresholds::medium())
-                for (int64_t i = 0; i < n; i++) {
-                    norm_value += std::pow(std::abs(static_cast<float>(input_data[i])), p);
-                }
-                norm_value = std::pow(norm_value, 1.0f / p);
+                norm_value = scaled_lp(0.0f, [&](int64_t i) { return std::abs(static_cast<float>(input_data[i])); });
             }
-
             output_data[0] = norm_value;
             break;
         }
@@ -4416,54 +4337,52 @@ auto histogram_kernel(const Tensor& input, int64_t bins, double min_val, double 
         throw std::runtime_error("histogram: bins must be > 0");
     }
 
-    Tensor input_f32 = (input.dtype() != DType::Float32) ? input.to(DType::Float32) : input;
-    const float* data = input_f32.data<float>();
-    int64_t n = input_f32.numel();
+    // Compute at the input's native float precision. Previously everything was
+    // forced to Float32, which truncated bin assignment for Float64 tensors
+    // (histogramdd already keeps Float64 — this makes histogram consistent).
+    const DType ctype = (input.dtype() == DType::Float64) ? DType::Float64 : DType::Float32;
+    Tensor in_c = (input.dtype() == ctype) ? input : input.to(ctype);
+    const int64_t n = in_c.numel();
 
-    // Auto-detect range if min == max
-    float fmin = static_cast<float>(min_val);
-    float fmax = static_cast<float>(max_val);
-    if (fmin >= fmax) {
-        if (n == 0) {
-            fmin = 0.0f;
-            fmax = 1.0f;
-        } else {
-            fmin = data[0];
-            fmax = data[0];
-            for (int64_t i = 1; i < n; ++i) {
-                if (data[i] < fmin) fmin = data[i];
-                if (data[i] > fmax) fmax = data[i];
-            }
-            if (fmin == fmax) {
-                fmin -= 0.5f;
-                fmax += 0.5f;
-            }
-        }
-    }
-
-    // Compute bin edges (bins + 1 edges)
-    Tensor edges({bins + 1}, DType::Float32, input.device());
-    float* edge_data = edges.data<float>();
-    float step = (fmax - fmin) / static_cast<float>(bins);
-    for (int64_t i = 0; i <= bins; ++i) {
-        edge_data[i] = fmin + static_cast<float>(i) * step;
-    }
-
-    // Count elements per bin
+    Tensor edges({bins + 1}, ctype, input.device());
     Tensor counts({bins}, DType::Int64, input.device());
     int64_t* count_data = counts.data<int64_t>();
     std::memset(count_data, 0, static_cast<size_t>(bins) * sizeof(int64_t));
 
-    for (int64_t i = 0; i < n; ++i) {
-        float v = data[i];
-        if (v < fmin || v > fmax) continue;
-
-        int64_t bin = static_cast<int64_t>((v - fmin) / step);
-        // Last bin is closed on the right: [edge[bins-1], edge[bins]]
-        if (bin >= bins) bin = bins - 1;
-        if (bin < 0) bin = 0;
-        count_data[bin]++;
-    }
+    auto run = [&](auto* tag) {
+        using T = std::remove_pointer_t<decltype(tag)>;
+        const T* data = in_c.data<T>();
+        T tmin = static_cast<T>(min_val);
+        T tmax = static_cast<T>(max_val);
+        if (tmin >= tmax) {  // auto-detect range
+            if (n == 0) {
+                tmin = T(0); tmax = T(1);
+            } else {
+                tmin = data[0]; tmax = data[0];
+                for (int64_t i = 1; i < n; ++i) {
+                    if (data[i] < tmin) tmin = data[i];
+                    if (data[i] > tmax) tmax = data[i];
+                }
+                if (tmin == tmax) { tmin -= T(0.5); tmax += T(0.5); }
+            }
+        }
+        T* edge_data = edges.data<T>();
+        T step = (tmax - tmin) / static_cast<T>(bins);
+        for (int64_t i = 0; i <= bins; ++i) {
+            edge_data[i] = tmin + static_cast<T>(i) * step;
+        }
+        for (int64_t i = 0; i < n; ++i) {
+            T v = data[i];
+            if (v < tmin || v > tmax) continue;
+            int64_t bin = static_cast<int64_t>((v - tmin) / step);
+            // Last bin is closed on the right: [edge[bins-1], edge[bins]].
+            if (bin >= bins) bin = bins - 1;
+            if (bin < 0) bin = 0;
+            count_data[bin]++;
+        }
+    };
+    if (ctype == DType::Float64) run(static_cast<double*>(nullptr));
+    else                        run(static_cast<float*>(nullptr));
 
     return {counts, edges};
 }

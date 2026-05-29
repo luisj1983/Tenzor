@@ -1006,7 +1006,8 @@ auto instance_norm(const Variable& input,
 // Embedding
 // ============================================================================
 
-auto embedding(const Tensor& input, const Variable& weight) -> Variable {
+auto embedding(const Tensor& input, const Variable& weight,
+               int64_t padding_idx) -> Variable {
     std::vector<Tensor> inputs_vec = {weight.tensor(), input};
     auto result = dispatch(OpId::Embedding, inputs_vec, {});
     Tensor output_t = result[0];
@@ -1019,10 +1020,11 @@ auto embedding(const Tensor& input, const Variable& weight) -> Variable {
     int64_t num_embeddings = weight_shape.size() >= 1 ? weight_shape[0] : 0;
     int64_t embedding_dim = weight_shape.size() >= 2 ? weight_shape[1] : 0;
 
-    // Defaults match PyTorch F.embedding when extra kwargs aren't provided.
+    // padding_idx (when >= 0) zeroes the gradient for that embedding row,
+    // matching PyTorch F.embedding. Other kwargs keep their defaults.
     auto grad_fn = internal::make_embedding_backward(
         input, num_embeddings, embedding_dim,
-        /*padding_idx=*/-1,
+        padding_idx,
         /*scale_grad_by_freq=*/false,
         /*sparse=*/false);
 

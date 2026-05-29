@@ -10,6 +10,7 @@ import math
 
 import numpy as np
 
+import tenzor as _tz
 from tenzor.tenzor_core import Tensor, Variable  # type: ignore
 
 from .distribution import (
@@ -26,7 +27,7 @@ from .distribution import (
 class StudentT(Distribution):
     """``StudentT(df, loc=0, scale=1)`` — Student's t distribution."""
 
-    has_rsample = False
+    has_rsample = True
 
     def __init__(self, df, loc=0.0, scale=1.0):
         self.df = _to_variable(df)
@@ -59,16 +60,29 @@ class StudentT(Distribution):
         z = np.random.standard_t(df_np, size=out_shape or None)
         return _wrap_numpy(np.asarray(loc_np + scale_np * z, dtype=np.float32))
 
+    def rsample(self, sample_shape=()):
+        # T = loc + scale * Z / sqrt(V/df), Z ~ N(0,1) (noise), V ~ Chi2(df).
+        # 1/sqrt(x) is written exp(-0.5 log x) to stay autograd-aware; df flows
+        # through V (reparameterised Chi2) and the explicit /df.
+        from .chi2 import Chi2
+        out_shape = tuple(sample_shape) + self._batch_shape
+        z_np = np.random.standard_normal(out_shape if out_shape else 1).astype(np.float32)
+        z = Variable(Tensor.from_numpy(np.ascontiguousarray(z_np)), False)
+        v = Chi2(self.df).rsample(sample_shape)
+        inv_sqrt = _tz.exp(-0.5 * _tz.log(v / self.df))
+        return self.loc + self.scale * z * inv_sqrt
+
     def log_prob(self, value):
-        gammaln = _require_scipy_special().gammaln
-        v_np = np.asarray(_to_variable(value).tensor(), dtype=np.float64)
-        nu = np.asarray(self.df.tensor(), dtype=np.float64)
-        loc_np = np.asarray(self.loc.tensor(), dtype=np.float64)
-        scale_np = np.asarray(self.scale.tensor(), dtype=np.float64)
-        y = (v_np - loc_np) / scale_np
-        log_unnorm = gammaln((nu + 1.0) / 2.0) - 0.5 * np.log(nu * math.pi) - gammaln(nu / 2.0)
-        log_kernel = -0.5 * (nu + 1.0) * np.log(1.0 + y * y / nu)
-        return _wrap_numpy(log_unnorm + log_kernel - np.log(scale_np))
+        # Autograd-aware (lgamma/log Variable overloads): gradient flows to df,
+        # loc, scale and value.
+        value = _to_variable(value)
+        nu = self.df
+        y = (value - self.loc) / self.scale
+        log_unnorm = (_tz.lgamma((nu + 1.0) * 0.5)
+                      - 0.5 * _tz.log(nu * math.pi)
+                      - _tz.lgamma(nu * 0.5))
+        log_kernel = -0.5 * (nu + 1.0) * _tz.log(1.0 + (y * y) / nu)
+        return log_unnorm + log_kernel - _tz.log(self.scale)
 
     def cdf(self, value):
         scipy_t = _require_scipy_stats().t
@@ -87,15 +101,16 @@ class StudentT(Distribution):
         return _wrap_numpy(loc_np + scale_np * scipy_t.ppf(p_np, df=df_np))
 
     def entropy(self):
-        scipy_special = _require_scipy_special()
-        digamma = scipy_special.digamma
-        betaln = scipy_special.betaln
-        nu = np.asarray(self.df.tensor(), dtype=np.float64)
-        scale_np = np.asarray(self.scale.tensor(), dtype=np.float64)
-        out = (np.log(scale_np)
-               + 0.5 * (nu + 1.0) * (digamma((nu + 1.0) / 2.0) - digamma(nu / 2.0))
-               + 0.5 * np.log(nu) + betaln(nu / 2.0, 0.5))
-        return _wrap_numpy(out)
+        # H = log(scale) + 0.5(ν+1)[ψ((ν+1)/2) - ψ(ν/2)] + 0.5 log ν + B(ν/2, 1/2)
+        # with B(ν/2,1/2) = lgamma(ν/2) + lgamma(1/2) - lgamma(ν/2 + 1/2).
+        # Autograd-aware in df and scale.
+        nu = self.df
+        half_nu = nu * 0.5
+        betaln = (_tz.lgamma(half_nu) + math.lgamma(0.5)
+                  - _tz.lgamma(half_nu + 0.5))
+        return (_tz.log(self.scale)
+                + 0.5 * (nu + 1.0) * (_tz.digamma((nu + 1.0) * 0.5) - _tz.digamma(half_nu))
+                + 0.5 * _tz.log(nu) + betaln)
 
     def support(self):
         return "(-inf, inf)"

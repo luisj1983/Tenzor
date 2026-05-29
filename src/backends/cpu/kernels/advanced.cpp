@@ -806,32 +806,61 @@ auto cummin_kernel(const Tensor& input, int64_t dim) -> std::pair<Tensor, Tensor
 // ============================================================================
 
 auto isin_kernel(const Tensor& elements, const Tensor& test_elements) -> Tensor {
-    Tensor elem_f32 = (elements.dtype() != DType::Float32) ? elements.to(DType::Float32) : elements;
-    Tensor test_f32 = (test_elements.dtype() != DType::Float32) ? test_elements.to(DType::Float32) : test_elements;
-
-    const float* elem_data = elem_f32.data<float>();
-    const float* test_data = test_f32.data<float>();
-    int64_t n_elem = elem_f32.numel();
-    int64_t n_test = test_f32.numel();
-
-    // Build hash set of test elements for O(1) lookup
-    std::unordered_set<uint32_t> test_set;
-    test_set.reserve(static_cast<size_t>(n_test));
-    for (int64_t i = 0; i < n_test; ++i) {
-        uint32_t bits;
-        std::memcpy(&bits, &test_data[i], sizeof(uint32_t));
-        test_set.insert(bits);
-    }
+    // Hash/compare at the native bit-width. The previous implementation widened
+    // everything to Float32 and hashed 32 bits, which collides distinct Int64
+    // values beyond 2^24 and loses Float64 precision (wrong membership).
+    auto is_integral = [](DType d) {
+        return d == DType::Int8 || d == DType::Int16 || d == DType::Int32 ||
+               d == DType::Int64 || d == DType::UInt8 || d == DType::UInt16 ||
+               d == DType::UInt32 || d == DType::UInt64 || d == DType::Bool;
+    };
+    const bool integral =
+        is_integral(elements.dtype()) && is_integral(test_elements.dtype());
 
     auto out_shape = std::vector<int64_t>(elements.shape().begin(), elements.shape().end());
     Tensor output(out_shape, DType::Bool, elements.device());
     bool* out_data = output.data<bool>();
+    const int64_t n_elem = elements.numel();
 
-    #pragma omp parallel for schedule(static) if(n_elem > ::tenzor::OmpThresholds::simple())
-    for (int64_t i = 0; i < n_elem; ++i) {
-        uint32_t bits;
-        std::memcpy(&bits, &elem_data[i], sizeof(uint32_t));
-        out_data[i] = test_set.count(bits) > 0;
+    if (integral) {
+        // Exact integer comparison (covers all int widths and Bool).
+        Tensor e = (elements.dtype() == DType::Int64) ? elements : elements.to(DType::Int64);
+        Tensor t = (test_elements.dtype() == DType::Int64) ? test_elements : test_elements.to(DType::Int64);
+        const int64_t* ed = e.data<int64_t>();
+        const int64_t* td = t.data<int64_t>();
+        const int64_t n_test = t.numel();
+
+        std::unordered_set<int64_t> test_set;
+        test_set.reserve(static_cast<size_t>(n_test));
+        for (int64_t i = 0; i < n_test; ++i) test_set.insert(td[i]);
+
+        #pragma omp parallel for schedule(static) if(n_elem > ::tenzor::OmpThresholds::simple())
+        for (int64_t i = 0; i < n_elem; ++i) {
+            out_data[i] = test_set.count(ed[i]) > 0;
+        }
+    } else {
+        // Floating comparison via 64-bit bit pattern (exact for Float64/Float32/
+        // Float16/BFloat16 since all widen losslessly to double).
+        Tensor e = (elements.dtype() == DType::Float64) ? elements : elements.to(DType::Float64);
+        Tensor t = (test_elements.dtype() == DType::Float64) ? test_elements : test_elements.to(DType::Float64);
+        const double* ed = e.data<double>();
+        const double* td = t.data<double>();
+        const int64_t n_test = t.numel();
+
+        std::unordered_set<uint64_t> test_set;
+        test_set.reserve(static_cast<size_t>(n_test));
+        for (int64_t i = 0; i < n_test; ++i) {
+            uint64_t bits;
+            std::memcpy(&bits, &td[i], sizeof(uint64_t));
+            test_set.insert(bits);
+        }
+
+        #pragma omp parallel for schedule(static) if(n_elem > ::tenzor::OmpThresholds::simple())
+        for (int64_t i = 0; i < n_elem; ++i) {
+            uint64_t bits;
+            std::memcpy(&bits, &ed[i], sizeof(uint64_t));
+            out_data[i] = test_set.count(bits) > 0;
+        }
     }
 
     return output;

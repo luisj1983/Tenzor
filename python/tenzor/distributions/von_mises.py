@@ -5,6 +5,7 @@ import math
 
 import numpy as np
 
+import tenzor as _tz
 from tenzor.tenzor_core import Tensor, Variable  # type: ignore
 
 from .distribution import (
@@ -49,15 +50,14 @@ class VonMises(Distribution):
         ))
 
     def log_prob(self, value):
-        scipy_special = _require_scipy_special()
-        v_np = np.asarray(_to_variable(value).tensor(), dtype=np.float64)
-        loc_np = np.asarray(self.loc.tensor(), dtype=np.float64)
-        k_np = np.asarray(self.concentration.tensor(), dtype=np.float64)
-        # log p(x) = k cos(x - loc) - log(2π I0(k))
-        out = (k_np * np.cos(v_np - loc_np)
-               - math.log(2.0 * math.pi)
-               - np.log(scipy_special.i0(k_np)))
-        return _wrap_numpy(out)
+        # log p(x) = k·cos(x - loc) - log(2π) - log(I0(k)). Autograd-aware via
+        # the cos / bessel_i0 / log Variable overloads: gradient flows to
+        # concentration, loc and value (no scipy detachment).
+        value = _to_variable(value)
+        k = self.concentration
+        return (k * _tz.cos(value - self.loc)
+                - math.log(2.0 * math.pi)
+                - _tz.log(_tz.bessel_i0(k)))
 
     def entropy(self):
         scipy_special = _require_scipy_special()

@@ -1115,6 +1115,20 @@ auto embedding_bag_backward_kernel(const Tensor& grad_output,
             std::string(dtype_name(indices.dtype())));
     }
 
+    // Exact max-mode backward needs the per-feature argmax over each bag, which
+    // depends on the embedding VALUES — not available from (grad_output,
+    // indices, offsets) alone. Routing the bag gradient to every row (the old
+    // behaviour) is silently wrong. nn::EmbeddingBag's autograd node computes
+    // the correct max gradient by recomputing the argmax from saved embeddings;
+    // callers needing max-mode must use that path.
+    if (mode == "max") {
+        throw std::runtime_error(
+            "embedding_bag_backward (OpId dispatch) does not support mode=\"max\": "
+            "exact max-mode gradient requires the per-feature argmax computed "
+            "from the embedding values. Use the nn::EmbeddingBag layer, whose "
+            "autograd node handles max-mode correctly.");
+    }
+
     int64_t total_elements = indices.numel();
     int64_t num_bags = offsets.numel();
     const int64_t* offsets_ptr = offsets.data<int64_t>();
@@ -1263,6 +1277,71 @@ static bool layer_norm_onednn(
 
 // SIMD-optimized LayerNorm with statistics output for backward pass
 // This version outputs mean and rstd for use in autograd
+// ---------------------------------------------------------------------------
+// Double-precision SIMD reductions over a Float32 array (release-prep C6).
+//
+// LayerNorm's mean/variance must accumulate in double — its own comment and
+// the Float64/Float16 scalar paths promise this. Summing in float SIMD
+// registers and casting only the reduced scalar to double loses ~log2(N)
+// mantissa bits and, for large-mean rows, drifts the mean by O(1). Widen each
+// f32 lane to f64 and accumulate in double lanes. AVX512F / AVX2+FMA only
+// (no AVX512DQ): convert 8 (AVX512) / 4 (AVX2) floats per step via
+// _mm512_cvtps_pd / _mm256_cvtps_pd.
+static double layer_norm_simd_sum_f64(const float* p, int64_t n) {
+    double total = 0.0;
+    int64_t i = 0;
+#ifdef HAS_AVX512
+    __m512d acc = _mm512_setzero_pd();
+    for (; i + 8 <= n; i += 8) {
+        acc = _mm512_add_pd(acc, _mm512_cvtps_pd(_mm256_loadu_ps(p + i)));
+    }
+    total = _mm512_reduce_add_pd(acc);
+#elif defined(HAS_AVX2)
+    __m256d acc = _mm256_setzero_pd();
+    for (; i + 4 <= n; i += 4) {
+        acc = _mm256_add_pd(acc, _mm256_cvtps_pd(_mm_loadu_ps(p + i)));
+    }
+    __m128d hi = _mm256_extractf128_pd(acc, 1);
+    __m128d lo = _mm256_castpd256_pd128(acc);
+    __m128d s = _mm_add_pd(lo, hi);
+    s = _mm_hadd_pd(s, s);
+    total = _mm_cvtsd_f64(s);
+#endif
+    for (; i < n; ++i) total += static_cast<double>(p[i]);
+    return total;
+}
+
+static double layer_norm_simd_sumsq_f64(const float* p, int64_t n, double mean) {
+    double total = 0.0;
+    int64_t i = 0;
+#ifdef HAS_AVX512
+    const __m512d vmean = _mm512_set1_pd(mean);
+    __m512d acc = _mm512_setzero_pd();
+    for (; i + 8 <= n; i += 8) {
+        __m512d d = _mm512_sub_pd(_mm512_cvtps_pd(_mm256_loadu_ps(p + i)), vmean);
+        acc = _mm512_fmadd_pd(d, d, acc);
+    }
+    total = _mm512_reduce_add_pd(acc);
+#elif defined(HAS_AVX2)
+    const __m256d vmean = _mm256_set1_pd(mean);
+    __m256d acc = _mm256_setzero_pd();
+    for (; i + 4 <= n; i += 4) {
+        __m256d d = _mm256_sub_pd(_mm256_cvtps_pd(_mm_loadu_ps(p + i)), vmean);
+        acc = _mm256_fmadd_pd(d, d, acc);
+    }
+    __m128d hi = _mm256_extractf128_pd(acc, 1);
+    __m128d lo = _mm256_castpd256_pd128(acc);
+    __m128d s = _mm_add_pd(lo, hi);
+    s = _mm_hadd_pd(s, s);
+    total = _mm_cvtsd_f64(s);
+#endif
+    for (; i < n; ++i) {
+        const double d = static_cast<double>(p[i]) - mean;
+        total += d * d;
+    }
+    return total;
+}
+
 static void layer_norm_simd_with_stats(
     const float* input, float* output,
     const float* weight, const float* bias,
@@ -1290,87 +1369,13 @@ static void layer_norm_simd_with_stats(
         // Accumulators are double for precision; final mean / inv_std are
         // float (matches the saved-stats Float32 contract).
 
-        // -------- Pass 1: sum -> mean --------
-        double sum_d = 0.0;
-#ifdef HAS_AVX512
-        int64_t simd_size = 16;
-        __m512 vsum = _mm512_setzero_ps();
-        int64_t i = 0;
-        for (; i + simd_size <= norm_size; i += simd_size) {
-            if (i + PREFETCH_DISTANCE < norm_size) {
-                _mm_prefetch(reinterpret_cast<const char*>(in_ptr + i + PREFETCH_DISTANCE), _MM_HINT_T0);
-            }
-            __m512 v = _mm512_loadu_ps(in_ptr + i);
-            vsum = _mm512_add_ps(vsum, v);
-        }
-        sum_d = static_cast<double>(_mm512_reduce_add_ps(vsum));
-        for (; i < norm_size; ++i) sum_d += static_cast<double>(in_ptr[i]);
-#elif defined(HAS_AVX2)
-        int64_t simd_size = 8;
-        __m256 vsum = _mm256_setzero_ps();
-        int64_t i = 0;
-        for (; i + simd_size <= norm_size; i += simd_size) {
-            if (i + PREFETCH_DISTANCE < norm_size) {
-                _mm_prefetch(reinterpret_cast<const char*>(in_ptr + i + PREFETCH_DISTANCE), _MM_HINT_T0);
-            }
-            __m256 v = _mm256_loadu_ps(in_ptr + i);
-            vsum = _mm256_add_ps(vsum, v);
-        }
-        __m128 lo = _mm256_castps256_ps128(vsum);
-        __m128 hi = _mm256_extractf128_ps(vsum, 1);
-        lo = _mm_add_ps(lo, hi);
-        lo = _mm_hadd_ps(lo, lo);
-        lo = _mm_hadd_ps(lo, lo);
-        sum_d = static_cast<double>(_mm_cvtss_f32(lo));
-        for (; i < norm_size; ++i) sum_d += static_cast<double>(in_ptr[i]);
-#else
-        for (int64_t i = 0; i < norm_size; ++i) sum_d += static_cast<double>(in_ptr[i]);
-#endif
+        // -------- Pass 1: sum -> mean (double-accumulated SIMD) --------
+        const double sum_d = layer_norm_simd_sum_f64(in_ptr, norm_size);
         const double mean_d = sum_d / static_cast<double>(norm_size);
 
-        // -------- Pass 2: sum((x - mean)^2) -> var --------
-        double sum_sq_d = 0.0;
-#ifdef HAS_AVX512
-        const __m512 vmean512 = _mm512_set1_ps(static_cast<float>(mean_d));
-        __m512 vss = _mm512_setzero_ps();
-        int64_t j = 0;
-        for (; j + simd_size <= norm_size; j += simd_size) {
-            __m512 v = _mm512_loadu_ps(in_ptr + j);
-            __m512 d = _mm512_sub_ps(v, vmean512);
-            vss = _mm512_fmadd_ps(d, d, vss);
-        }
-        sum_sq_d = static_cast<double>(_mm512_reduce_add_ps(vss));
-        for (; j < norm_size; ++j) {
-            const double d = static_cast<double>(in_ptr[j]) - mean_d;
-            sum_sq_d += d * d;
-        }
-#elif defined(HAS_AVX2)
-        const __m256 vmean256 = _mm256_set1_ps(static_cast<float>(mean_d));
-        __m256 vss = _mm256_setzero_ps();
-        int64_t j = 0;
-        for (; j + simd_size <= norm_size; j += simd_size) {
-            __m256 v = _mm256_loadu_ps(in_ptr + j);
-            __m256 d = _mm256_sub_ps(v, vmean256);
-            vss = _mm256_fmadd_ps(d, d, vss);
-        }
-        {
-            __m128 lo2 = _mm256_castps256_ps128(vss);
-            __m128 hi2 = _mm256_extractf128_ps(vss, 1);
-            lo2 = _mm_add_ps(lo2, hi2);
-            lo2 = _mm_hadd_ps(lo2, lo2);
-            lo2 = _mm_hadd_ps(lo2, lo2);
-            sum_sq_d = static_cast<double>(_mm_cvtss_f32(lo2));
-        }
-        for (; j < norm_size; ++j) {
-            const double d = static_cast<double>(in_ptr[j]) - mean_d;
-            sum_sq_d += d * d;
-        }
-#else
-        for (int64_t j = 0; j < norm_size; ++j) {
-            const double d = static_cast<double>(in_ptr[j]) - mean_d;
-            sum_sq_d += d * d;
-        }
-#endif
+        // -------- Pass 2: sum((x - mean)^2) -> var (double-accumulated) --------
+        const double sum_sq_d = layer_norm_simd_sumsq_f64(in_ptr, norm_size, mean_d);
+        [[maybe_unused]] int64_t i = 0;  // index reused by the SIMD normalize loop below
 
         const double var_d = sum_sq_d / static_cast<double>(norm_size);
         const float mean = static_cast<float>(mean_d);
@@ -1456,87 +1461,13 @@ static void layer_norm_simd(
         // `sum_sq/n - mean*mean` catastrophically cancels for inputs with
         // large mean. Two-pass `E[(x-mean)^2]` is unconditionally stable.
 
-        // -------- Pass 1: sum -> mean --------
-        double sum_d = 0.0;
-#ifdef HAS_AVX512
-        int64_t simd_size = 16;
-        __m512 vsum = _mm512_setzero_ps();
-        int64_t i = 0;
-        for (; i + simd_size <= norm_size; i += simd_size) {
-            if (i + PREFETCH_DISTANCE < norm_size) {
-                _mm_prefetch(reinterpret_cast<const char*>(in_ptr + i + PREFETCH_DISTANCE), _MM_HINT_T0);
-            }
-            __m512 v = _mm512_loadu_ps(in_ptr + i);
-            vsum = _mm512_add_ps(vsum, v);
-        }
-        sum_d = static_cast<double>(_mm512_reduce_add_ps(vsum));
-        for (; i < norm_size; ++i) sum_d += static_cast<double>(in_ptr[i]);
-#elif defined(HAS_AVX2)
-        int64_t simd_size = 8;
-        __m256 vsum = _mm256_setzero_ps();
-        int64_t i = 0;
-        for (; i + simd_size <= norm_size; i += simd_size) {
-            if (i + PREFETCH_DISTANCE < norm_size) {
-                _mm_prefetch(reinterpret_cast<const char*>(in_ptr + i + PREFETCH_DISTANCE), _MM_HINT_T0);
-            }
-            __m256 v = _mm256_loadu_ps(in_ptr + i);
-            vsum = _mm256_add_ps(vsum, v);
-        }
-        __m128 lo = _mm256_castps256_ps128(vsum);
-        __m128 hi = _mm256_extractf128_ps(vsum, 1);
-        lo = _mm_add_ps(lo, hi);
-        lo = _mm_hadd_ps(lo, lo);
-        lo = _mm_hadd_ps(lo, lo);
-        sum_d = static_cast<double>(_mm_cvtss_f32(lo));
-        for (; i < norm_size; ++i) sum_d += static_cast<double>(in_ptr[i]);
-#else
-        for (int64_t i = 0; i < norm_size; ++i) sum_d += static_cast<double>(in_ptr[i]);
-#endif
+        // -------- Pass 1: sum -> mean (double-accumulated SIMD) --------
+        const double sum_d = layer_norm_simd_sum_f64(in_ptr, norm_size);
         const double mean_d = sum_d / static_cast<double>(norm_size);
 
-        // -------- Pass 2: sum((x - mean)^2) -> var --------
-        double sum_sq_d = 0.0;
-#ifdef HAS_AVX512
-        const __m512 vmean512 = _mm512_set1_ps(static_cast<float>(mean_d));
-        __m512 vss = _mm512_setzero_ps();
-        int64_t j = 0;
-        for (; j + simd_size <= norm_size; j += simd_size) {
-            __m512 v = _mm512_loadu_ps(in_ptr + j);
-            __m512 d = _mm512_sub_ps(v, vmean512);
-            vss = _mm512_fmadd_ps(d, d, vss);
-        }
-        sum_sq_d = static_cast<double>(_mm512_reduce_add_ps(vss));
-        for (; j < norm_size; ++j) {
-            const double d = static_cast<double>(in_ptr[j]) - mean_d;
-            sum_sq_d += d * d;
-        }
-#elif defined(HAS_AVX2)
-        const __m256 vmean256 = _mm256_set1_ps(static_cast<float>(mean_d));
-        __m256 vss = _mm256_setzero_ps();
-        int64_t j = 0;
-        for (; j + simd_size <= norm_size; j += simd_size) {
-            __m256 v = _mm256_loadu_ps(in_ptr + j);
-            __m256 d = _mm256_sub_ps(v, vmean256);
-            vss = _mm256_fmadd_ps(d, d, vss);
-        }
-        {
-            __m128 lo2 = _mm256_castps256_ps128(vss);
-            __m128 hi2 = _mm256_extractf128_ps(vss, 1);
-            lo2 = _mm_add_ps(lo2, hi2);
-            lo2 = _mm_hadd_ps(lo2, lo2);
-            lo2 = _mm_hadd_ps(lo2, lo2);
-            sum_sq_d = static_cast<double>(_mm_cvtss_f32(lo2));
-        }
-        for (; j < norm_size; ++j) {
-            const double d = static_cast<double>(in_ptr[j]) - mean_d;
-            sum_sq_d += d * d;
-        }
-#else
-        for (int64_t j = 0; j < norm_size; ++j) {
-            const double d = static_cast<double>(in_ptr[j]) - mean_d;
-            sum_sq_d += d * d;
-        }
-#endif
+        // -------- Pass 2: sum((x - mean)^2) -> var (double-accumulated) --------
+        const double sum_sq_d = layer_norm_simd_sumsq_f64(in_ptr, norm_size, mean_d);
+        [[maybe_unused]] int64_t i = 0;  // index reused by the SIMD normalize loop below
 
         const double var_d = sum_sq_d / static_cast<double>(norm_size);
         const float mean = static_cast<float>(mean_d);

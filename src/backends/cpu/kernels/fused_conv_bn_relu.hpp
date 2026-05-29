@@ -103,8 +103,12 @@ inline void fold_bn_params(
         if (bias != nullptr) {
             bias[oc] = bias[oc] * scale + bias_fold;
         } else {
-            // If no original bias, this should be stored somewhere
-            // Caller must provide a bias buffer
+            // PRECONDITION: `bias` must be non-null. BN folding always yields a
+            // folded bias (beta - gamma*mean/std) that must be stored, so the
+            // caller must pass a buffer (zero-initialised when the conv had no
+            // bias) — the sole caller (fused_ops.cpp) does exactly that, making
+            // this branch unreachable. Left as a defensive no-op; we cannot
+            // throw here because this loop runs inside an OpenMP parallel region.
         }
     }
 }
@@ -445,86 +449,11 @@ inline void conv_bn_relu_training(
     }
 }
 
-// ============================================================================
-// Fused Conv2d + ReLU (no BatchNorm)
-// ============================================================================
-
-/**
- * @brief Fused Conv2d + ReLU using optimized GEMM
- */
-inline void conv_relu(
-    const float* input,
-    const float* weight,
-    const float* bias,
-    float* output,
-    int64_t batch,
-    int64_t in_channels,
-    int64_t height,
-    int64_t width,
-    int64_t out_channels,
-    int64_t kernel_h,
-    int64_t kernel_w,
-    int64_t stride,
-    int64_t padding,
-    int64_t out_h,
-    int64_t out_w
-) {
-    const int64_t col_rows = batch * out_h * out_w;
-    const int64_t col_cols = in_channels * kernel_h * kernel_w;
-    const int64_t spatial_size = out_h * out_w;
-
-    auto col_buffer = acquire_buffer<float>(col_rows * col_cols);
-    float* col = col_buffer.data();
-
-    im2col_optimized(
-        input, col,
-        batch, in_channels, height, width,
-        kernel_h, kernel_w,
-        stride, stride, padding, padding, /*dilation_h=*/1, /*dilation_w=*/1,
-        out_h, out_w
-    );
-
-    std::memset(output, 0, batch * out_channels * out_h * out_w * sizeof(float));
-
-    gemm::gemm_transB_optimized(
-        col, weight, output,
-        col_rows, out_channels, col_cols
-    );
-
-    // Add bias + ReLU
-#ifdef TENZOR_FUSED_AVX2
-    #pragma omp parallel for collapse(2) if(batch * out_channels > 32)
-    for (int64_t b = 0; b < batch; ++b) {
-        for (int64_t oc = 0; oc < out_channels; ++oc) {
-            float* out_ptr = output + b * out_channels * spatial_size + oc * spatial_size;
-            __m256 vbias = _mm256_set1_ps(bias ? bias[oc] : 0.0f);
-            __m256 vzero = _mm256_setzero_ps();
-
-            int64_t s = 0;
-            for (; s + 8 <= spatial_size; s += 8) {
-                __m256 v = _mm256_loadu_ps(out_ptr + s);
-                v = _mm256_add_ps(v, vbias);
-                v = _mm256_max_ps(v, vzero);
-                _mm256_storeu_ps(out_ptr + s, v);
-            }
-            for (; s < spatial_size; ++s) {
-                out_ptr[s] = std::max(0.0f, out_ptr[s] + (bias ? bias[oc] : 0.0f));
-            }
-        }
-    }
-#else
-    #pragma omp parallel for collapse(2)
-    for (int64_t b = 0; b < batch; ++b) {
-        for (int64_t oc = 0; oc < out_channels; ++oc) {
-            float b_val = bias ? bias[oc] : 0.0f;
-            for (int64_t s = 0; s < spatial_size; ++s) {
-                int64_t idx = b * out_channels * spatial_size + oc * spatial_size + s;
-                output[idx] = std::max(0.0f, output[idx] + b_val);
-            }
-        }
-    }
-#endif
-}
+// NOTE (audit E): the standalone `conv_relu` helper was removed. It was never
+// wired into any dispatch path (only conv_bn_relu_folded / conv_bn_relu_training
+// are used) and was broken — it ran gemm_transB into an [N*out_h*out_w,
+// out_channels] (NHWC-flat) buffer, then applied bias/ReLU with NCHW indexing,
+// the exact layout mismatch the two live functions were fixed for.
 
 } // namespace fused
 } // namespace cpu

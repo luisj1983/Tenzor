@@ -94,8 +94,6 @@ auto grid_sample_kernel(const Tensor& input, const Tensor& grid,
     int64_t H_out = grid_shape[1];
     int64_t W_out = grid_shape[2];
 
-    Tensor output({N, C, H_out, W_out}, input.dtype(), input.device());
-
     // Convert to Float32 for computation
     Tensor input_f32 = input.to(DType::Float32);
     Tensor grid_f32 = grid.to(DType::Float32);

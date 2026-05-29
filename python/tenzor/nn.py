@@ -421,7 +421,10 @@ class Module(_CppModule):
             ...
             handle.remove()
         """
-        return RemovableHandle(self, _CppModule.register_forward_hook(self, hook))
+        # _CppModule already constructs and returns a tenzor.nn.RemovableHandle;
+        # re-wrapping it here would pass a RemovableHandle where an int hook_id
+        # is expected (TypeError). Return the C++ handle directly.
+        return _CppModule.register_forward_hook(self, hook)
 
     def register_forward_pre_hook(self, hook: Callable) -> RemovableHandle:
         """Register a hook called before each forward call.
@@ -432,7 +435,7 @@ class Module(_CppModule):
         Returns:
             :class:`RemovableHandle` — call ``handle.remove()`` to detach.
         """
-        return RemovableHandle(self, _CppModule.register_forward_pre_hook(self, hook))
+        return _CppModule.register_forward_pre_hook(self, hook)
 
     def register_full_backward_hook(self, hook: Callable) -> RemovableHandle:
         """Register a backward hook on the module.
@@ -453,7 +456,7 @@ class Module(_CppModule):
 
             handle = model.fc1.register_full_backward_hook(clip_grad)
         """
-        return RemovableHandle(self, _CppModule.register_full_backward_hook(self, hook))
+        return _CppModule.register_full_backward_hook(self, hook)
 
     def register_full_backward_pre_hook(self, hook: Callable) -> RemovableHandle:
         """Register a hook called before the backward pass.
@@ -464,7 +467,7 @@ class Module(_CppModule):
         Returns:
             :class:`RemovableHandle` — call ``handle.remove()`` to detach.
         """
-        return RemovableHandle(self, _CppModule.register_full_backward_pre_hook(self, hook))
+        return _CppModule.register_full_backward_pre_hook(self, hook)
 
     def remove_hook(self, hook_id: int) -> None:
         """Remove a previously registered hook.
@@ -555,15 +558,16 @@ class Sequential(_CppSequential):
 
 # X.9: `Loss` is referenced as the base class of every loss in nn.pyi but had
 # no runtime counterpart, so it appeared as an EXTRA-in-stub drift. Provide a
-# thin Python alias of Module so isinstance(MSELoss(...), Loss) works and so
-# .pyi declarations like `class MSELoss(Loss)` resolve at static-check time.
+# Thin Python alias of Module so .pyi declarations like `class MSELoss(Loss)`
+# resolve at static-check time.
 class Loss(Module):
-    """Base class marker for loss-function modules.
+    """Base class marker for loss-function modules (static-typing only).
 
-    All concrete loss classes (``MSELoss``, ``CrossEntropyLoss``, ...) are
-    bound from C++ and inherit from the C++ ``Module``; this Python-side
-    alias exists purely so type stubs and isinstance() checks against
-    ``tz.nn.Loss`` resolve to a real class.
+    NOTE: concrete loss classes (``MSELoss``, ``CrossEntropyLoss``, ...) are
+    bound from C++ and inherit the C++ ``Module``, NOT this Python alias, so
+    ``isinstance(MSELoss(...), Loss)`` is ``False`` at runtime. This class
+    exists purely so the type stubs' ``class MSELoss(Loss)`` declarations
+    resolve for static checkers; do not rely on it for runtime isinstance.
     """
 
     reduction: str

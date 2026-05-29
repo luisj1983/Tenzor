@@ -148,6 +148,25 @@ void export_deleter(DLManagedTensor* self) {
     delete self;
 }
 
+void export_deleter_versioned(DLManagedTensorVersioned* self) {
+    if (!self) return;
+    delete static_cast<ExportCtx*>(self->manager_ctx);
+    delete self;
+}
+
+// Populate a DLTensor view (data/device/shape/strides/dtype) from a Tenzor,
+// borrowing the shape/stride storage held by `ctx`. Shared by both the
+// unversioned and versioned exporters so they cannot drift.
+void fill_dl_tensor(DLTensor& dl, const Tensor& tensor, ExportCtx& ctx) {
+    dl.data = const_cast<void*>(tensor.data_ptr());
+    dl.device = device_to_dlpack(tensor.device());
+    dl.ndim = static_cast<int32_t>(ctx.shape.size());
+    dl.dtype = dtype_to_dlpack(tensor.dtype());
+    dl.shape = ctx.shape.data();
+    dl.strides = ctx.strides.empty() ? nullptr : ctx.strides.data();
+    dl.byte_offset = 0;  // tensor.data_ptr() already includes the offset
+}
+
 } // namespace
 
 auto to_dlpack(const Tensor& tensor) -> DLManagedTensor* {
@@ -159,15 +178,31 @@ auto to_dlpack(const Tensor& tensor) -> DLManagedTensor* {
                                                    tensor.strides().end())};
 
     try {
-        managed->dl_tensor.data = const_cast<void*>(tensor.data_ptr());
-        managed->dl_tensor.device = device_to_dlpack(tensor.device());
-        managed->dl_tensor.ndim = static_cast<int32_t>(ctx->shape.size());
-        managed->dl_tensor.dtype = dtype_to_dlpack(tensor.dtype());
-        managed->dl_tensor.shape = ctx->shape.data();
-        managed->dl_tensor.strides = ctx->strides.empty() ? nullptr : ctx->strides.data();
-        managed->dl_tensor.byte_offset = 0;  // tensor.data_ptr() already includes offset
+        fill_dl_tensor(managed->dl_tensor, tensor, *ctx);
         managed->manager_ctx = ctx;
         managed->deleter = &export_deleter;
+    } catch (...) {
+        delete ctx;
+        delete managed;
+        throw;
+    }
+    return managed;
+}
+
+auto to_dlpack_versioned(const Tensor& tensor) -> DLManagedTensorVersioned* {
+    auto* managed = new DLManagedTensorVersioned{};
+    auto* ctx = new ExportCtx{tensor,
+                              std::vector<int64_t>(tensor.shape().begin(),
+                                                   tensor.shape().end()),
+                              std::vector<int64_t>(tensor.strides().begin(),
+                                                   tensor.strides().end())};
+    try {
+        managed->version.major = DLPACK_MAJOR_VERSION;
+        managed->version.minor = DLPACK_MINOR_VERSION;
+        managed->flags = 0;  // writable view, not a copy
+        fill_dl_tensor(managed->dl_tensor, tensor, *ctx);
+        managed->manager_ctx = ctx;
+        managed->deleter = &export_deleter_versioned;
     } catch (...) {
         delete ctx;
         delete managed;

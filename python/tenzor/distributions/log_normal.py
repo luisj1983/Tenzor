@@ -1,9 +1,8 @@
-"""LogNormal distribution — Tensor-native.
+"""LogNormal distribution — Tensor/Variable native.
 
-Reparameterisation: if ``X ~ Normal(loc, scale)`` then ``exp(X) ~
-LogNormal(loc, scale)``.  ``tz.exp`` lacks a Variable overload, so the
-reparam path cannot be expressed in Variable arithmetic alone.  We
-sample at Tensor level only and disable ``rsample``.
+Reparameterised: if ``X ~ Normal(loc, scale)`` then ``exp(X) ~
+LogNormal(loc, scale)``. With the autograd-aware ``exp`` Variable overload
+this is fully differentiable, so ``rsample`` flows gradients to loc/scale.
 """
 from __future__ import annotations
 
@@ -28,7 +27,7 @@ from ._reparam import standard_normal
 class LogNormal(Distribution):
     """``LogNormal(loc, scale)``."""
 
-    has_rsample = False
+    has_rsample = True
 
     def __init__(self, loc, scale):
         self.loc = _to_variable(loc)
@@ -55,14 +54,20 @@ class LogNormal(Distribution):
         scale_np = np.asarray(self.scale.tensor(), dtype=np.float32)
         return _wrap_numpy(np.exp(loc_np + scale_np * z))
 
+    def rsample(self, sample_shape=()):
+        # Reparameterised: exp(loc + scale * z), z ~ N(0,1). Autograd flows to
+        # loc and scale through exp's Variable overload.
+        out_shape = tuple(sample_shape) + self._batch_shape
+        z = Variable(standard_normal(out_shape if out_shape else []), False)
+        return _tz.exp(self.loc + self.scale * z)
+
     def log_prob(self, value):
-        v_np = np.asarray(_to_variable(value).tensor(), dtype=np.float64)
-        loc_np = np.asarray(self.loc.tensor(), dtype=np.float64)
-        scale_np = np.asarray(self.scale.tensor(), dtype=np.float64)
-        z = (np.log(v_np) - loc_np) / scale_np
-        out = (-0.5 * (math.log(2.0 * math.pi) + z * z)
-               - np.log(scale_np) - np.log(v_np))
-        return _wrap_numpy(out)
+        # Autograd-aware (log Variable overload): grad flows to loc, scale, value.
+        value = _to_variable(value)
+        log_v = _tz.log(value)
+        z = (log_v - self.loc) / self.scale
+        return (-0.5 * (math.log(2.0 * math.pi) + z * z)
+                - _tz.log(self.scale) - log_v)
 
     def cdf(self, value):
         scipy_special = _require_scipy_special()
@@ -83,10 +88,9 @@ class LogNormal(Distribution):
         return _wrap_numpy(np.exp(loc_np + scale_np * ndtri(q_clip)))
 
     def entropy(self):
-        loc_np = np.asarray(self.loc.tensor(), dtype=np.float64)
-        scale_np = np.asarray(self.scale.tensor(), dtype=np.float64)
-        return _wrap_numpy(loc_np + np.log(scale_np)
-                           + 0.5 * (1.0 + math.log(2.0 * math.pi)))
+        # H = loc + log(scale) + 0.5(1 + log 2π) — autograd-aware in loc, scale.
+        return (self.loc + _tz.log(self.scale)
+                + 0.5 * (1.0 + math.log(2.0 * math.pi)))
 
     def support(self):
         return "(0, inf)"

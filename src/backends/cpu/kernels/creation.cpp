@@ -254,60 +254,27 @@ auto randint_kernel(int64_t low, int64_t high, const std::vector<int64_t>& shape
 
     Tensor result(shape, dtype, device);
     int64_t n = result.numel();
+    const uint64_t seed = static_cast<uint64_t>(detail::get_base_seed());
+    const double range = static_cast<double>(high - low);
 
+    // Philox keyed by (seed, element_index): output is identical regardless of
+    // OMP_NUM_THREADS, matching the rand/randn reproducibility guarantee. The
+    // previous per-thread mt19937 seeding made results depend on thread count.
     if (dtype == DType::Int32) {
         int32_t* data = result.data<int32_t>();
-        std::uniform_int_distribution<int32_t> dist(
-            static_cast<int32_t>(low), static_cast<int32_t>(high - 1));
-
-        if (n > static_cast<int64_t>(OMP_THRESHOLD)) {
-            unsigned int base_seed = detail::get_base_seed();
-            #pragma omp parallel
-            {
-#ifdef _OPENMP
-                int tid = omp_get_thread_num();
-#else
-                int tid = 0;
-#endif
-                std::mt19937 local_rng(base_seed + static_cast<unsigned int>(tid));
-                std::uniform_int_distribution<int32_t> local_dist(
-                    static_cast<int32_t>(low), static_cast<int32_t>(high - 1));
-                #pragma omp for schedule(static)
-                for (int64_t i = 0; i < n; ++i) {
-                    data[i] = local_dist(local_rng);
-                }
-            }
-        } else {
-            std::mt19937 rng(detail::get_base_seed());
-            for (int64_t i = 0; i < n; ++i) {
-                data[i] = dist(rng);
-            }
+        #pragma omp parallel for schedule(static)
+        for (int64_t i = 0; i < n; ++i) {
+            int64_t v = low + static_cast<int64_t>(philox::philox_uniform_f64(seed, i) * range);
+            if (v >= high) v = high - 1;  // guard against u -> 1-eps rounding up
+            data[i] = static_cast<int32_t>(v);
         }
     } else {  // Int64
         int64_t* data = result.data<int64_t>();
-        std::uniform_int_distribution<int64_t> dist(low, high - 1);
-
-        if (n > static_cast<int64_t>(OMP_THRESHOLD)) {
-            unsigned int base_seed = detail::get_base_seed();
-            #pragma omp parallel
-            {
-#ifdef _OPENMP
-                int tid = omp_get_thread_num();
-#else
-                int tid = 0;
-#endif
-                std::mt19937 local_rng(base_seed + static_cast<unsigned int>(tid));
-                std::uniform_int_distribution<int64_t> local_dist(low, high - 1);
-                #pragma omp for schedule(static)
-                for (int64_t i = 0; i < n; ++i) {
-                    data[i] = local_dist(local_rng);
-                }
-            }
-        } else {
-            std::mt19937 rng(detail::get_base_seed());
-            for (int64_t i = 0; i < n; ++i) {
-                data[i] = dist(rng);
-            }
+        #pragma omp parallel for schedule(static)
+        for (int64_t i = 0; i < n; ++i) {
+            int64_t v = low + static_cast<int64_t>(philox::philox_uniform_f64(seed, i) * range);
+            if (v >= high) v = high - 1;
+            data[i] = v;
         }
     }
 
@@ -756,28 +723,10 @@ auto bernoulli_kernel(const Tensor& probs) -> Tensor {
     const float* p_data = probs_f32.data<float>();
     float* out_data = result_f32.data<float>();
 
-    if (n > static_cast<int64_t>(OMP_THRESHOLD)) {
-        unsigned int base_seed = detail::get_base_seed();
-        #pragma omp parallel
-        {
-#ifdef _OPENMP
-            int tid = omp_get_thread_num();
-#else
-            int tid = 0;
-#endif
-            std::mt19937 local_rng(base_seed + static_cast<unsigned int>(tid));
-            std::uniform_real_distribution<float> dist(0.0f, 1.0f);
-            #pragma omp for schedule(static)
-            for (int64_t i = 0; i < n; ++i) {
-                out_data[i] = (dist(local_rng) < p_data[i]) ? 1.0f : 0.0f;
-            }
-        }
-    } else {
-        std::mt19937 rng(detail::get_base_seed());
-        std::uniform_real_distribution<float> dist(0.0f, 1.0f);
-        for (int64_t i = 0; i < n; ++i) {
-            out_data[i] = (dist(rng) < p_data[i]) ? 1.0f : 0.0f;
-        }
+    const uint64_t seed = static_cast<uint64_t>(detail::get_base_seed());
+    #pragma omp parallel for schedule(static)
+    for (int64_t i = 0; i < n; ++i) {
+        out_data[i] = (philox::philox_uniform_f32(seed, i) < p_data[i]) ? 1.0f : 0.0f;
     }
 
     if (out_dtype == DType::Float32) {
@@ -803,28 +752,10 @@ auto normal_sample_kernel(const Tensor& mean, const Tensor& std) -> Tensor {
     const float* s_data = std_f32.data<float>();
     float* out_data = result_f32.data<float>();
 
-    if (n > static_cast<int64_t>(OMP_THRESHOLD)) {
-        unsigned int base_seed = detail::get_base_seed();
-        #pragma omp parallel
-        {
-#ifdef _OPENMP
-            int tid = omp_get_thread_num();
-#else
-            int tid = 0;
-#endif
-            std::mt19937 local_rng(base_seed + static_cast<unsigned int>(tid));
-            std::normal_distribution<float> dist(0.0f, 1.0f);
-            #pragma omp for schedule(static)
-            for (int64_t i = 0; i < n; ++i) {
-                out_data[i] = m_data[i] + s_data[i] * dist(local_rng);
-            }
-        }
-    } else {
-        std::mt19937 rng(detail::get_base_seed());
-        std::normal_distribution<float> dist(0.0f, 1.0f);
-        for (int64_t i = 0; i < n; ++i) {
-            out_data[i] = m_data[i] + s_data[i] * dist(rng);
-        }
+    const uint64_t seed = static_cast<uint64_t>(detail::get_base_seed());
+    #pragma omp parallel for schedule(static)
+    for (int64_t i = 0; i < n; ++i) {
+        out_data[i] = m_data[i] + s_data[i] * philox::philox_normal_f32(seed, i);
     }
 
     if (out_dtype == DType::Float32) {
@@ -842,28 +773,22 @@ auto poisson_sample_kernel(const Tensor& rates) -> Tensor {
     const float* r_data = rates_f32.data<float>();
     int64_t* out_data = result.data<int64_t>();
 
-    if (n > static_cast<int64_t>(OMP_THRESHOLD)) {
-        unsigned int base_seed = detail::get_base_seed();
-        #pragma omp parallel
-        {
-#ifdef _OPENMP
-            int tid = omp_get_thread_num();
-#else
-            int tid = 0;
-#endif
-            std::mt19937 local_rng(base_seed + static_cast<unsigned int>(tid));
-            #pragma omp for schedule(static)
-            for (int64_t i = 0; i < n; ++i) {
-                std::poisson_distribution<int64_t> dist(static_cast<double>(r_data[i]));
-                out_data[i] = dist(local_rng);
-            }
-        }
-    } else {
-        std::mt19937 rng(detail::get_base_seed());
-        for (int64_t i = 0; i < n; ++i) {
-            std::poisson_distribution<int64_t> dist(static_cast<double>(r_data[i]));
-            out_data[i] = dist(rng);
-        }
+    const uint64_t seed = static_cast<uint64_t>(detail::get_base_seed());
+    // Poisson draws a variable number of uniforms per element, so a single
+    // philox(seed,i) value is insufficient. Seed a per-element RNG stream
+    // deterministically from (seed, i) via splitmix64 — thread-count
+    // independent, unlike the previous base_seed+tid scheme.
+    auto mix64 = [](uint64_t z) {
+        z += 0x9E3779B97F4A7C15ULL;
+        z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ULL;
+        z = (z ^ (z >> 27)) * 0x94D049BB133111EBULL;
+        return z ^ (z >> 31);
+    };
+    #pragma omp parallel for schedule(static)
+    for (int64_t i = 0; i < n; ++i) {
+        std::mt19937_64 local(mix64(seed ^ (static_cast<uint64_t>(i) * 0x9E3779B97F4A7C15ULL)));
+        std::poisson_distribution<int64_t> dist(static_cast<double>(r_data[i]));
+        out_data[i] = dist(local);
     }
 
     return result;
@@ -878,31 +803,13 @@ auto exponential_sample_kernel(const Tensor& rate) -> Tensor {
     const float* r_data = rate_f32.data<float>();
     float* out_data = result.data<float>();
 
-    if (n > static_cast<int64_t>(OMP_THRESHOLD)) {
-        unsigned int base_seed = detail::get_base_seed();
-        #pragma omp parallel
-        {
-#ifdef _OPENMP
-            int tid = omp_get_thread_num();
-#else
-            int tid = 0;
-#endif
-            std::mt19937 local_rng(base_seed + static_cast<unsigned int>(tid));
-            std::uniform_real_distribution<float> dist(0.0f, 1.0f);
-            #pragma omp for schedule(static)
-            for (int64_t i = 0; i < n; ++i) {
-                // Inverse CDF: -ln(1-U) / rate
-                float u = dist(local_rng);
-                out_data[i] = -std::log(1.0f - u) / r_data[i];
-            }
-        }
-    } else {
-        std::mt19937 rng(detail::get_base_seed());
-        std::uniform_real_distribution<float> dist(0.0f, 1.0f);
-        for (int64_t i = 0; i < n; ++i) {
-            float u = dist(rng);
-            out_data[i] = -std::log(1.0f - u) / r_data[i];
-        }
+    const uint64_t seed = static_cast<uint64_t>(detail::get_base_seed());
+    #pragma omp parallel for schedule(static)
+    for (int64_t i = 0; i < n; ++i) {
+        // Inverse CDF: -ln(1-U) / rate. philox_uniform_f32 is in [0,1) so
+        // (1-u) is in (0,1] and the log is finite.
+        float u = philox::philox_uniform_f32(seed, i);
+        out_data[i] = -std::log(1.0f - u) / r_data[i];
     }
 
     return result;

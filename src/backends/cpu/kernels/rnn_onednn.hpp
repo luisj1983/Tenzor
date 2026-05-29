@@ -103,6 +103,11 @@ struct LSTMCachedPrimitive {
     bool has_bias;
     const void* w_ih_ptr;
     const void* w_hh_ptr;
+    // Content fingerprint of the weights at the time the reordered primitive
+    // was built. Pointer identity alone is unsafe: an in-place optimizer update
+    // (same storage, new values) or a realloc at the same address would reuse
+    // STALE reordered weights (reordering happens only on rebuild).
+    uint64_t weight_fp{0};
 
     // Full matching including weight pointers (like GRU)
     bool matches(int64_t s, int64_t b, int64_t i, int64_t h, bool bias,
@@ -208,10 +213,17 @@ inline bool lstm_forward_onednn(
 
         bool has_bias = (bias != nullptr);
 
-        // Check if we can reuse cached primitive (dimensions + weight pointers must match)
+        // LSTM has 4 gates: W_ih is (4*hidden, input), W_hh is (4*hidden, hidden).
+        const uint64_t weight_fp = compute_weight_fingerprint(
+            W_ih, W_hh, 4 * hidden_size * input_size, 4 * hidden_size * hidden_size);
+
+        // Reuse the cached primitive only if dims AND weight content match;
+        // pointer-only matching would serve stale reordered weights after an
+        // in-place update or realloc-at-same-address (audit B6).
         bool need_rebuild = !cached ||
                            !cached->matches(seq_len, batch, input_size, hidden_size,
-                                           has_bias, W_ih, W_hh);
+                                           has_bias, W_ih, W_hh) ||
+                           cached->weight_fp != weight_fp;
 
         if (need_rebuild) {
             cached = std::make_shared<LSTMCachedPrimitive>();
@@ -222,6 +234,7 @@ inline bool lstm_forward_onednn(
             cached->has_bias = has_bias;
             cached->w_ih_ptr = W_ih;
             cached->w_hh_ptr = W_hh;
+            cached->weight_fp = weight_fp;
 
             // Define dimensions
             dnnl::memory::dims src_layer_dims = {seq_len, batch, input_size};
@@ -407,9 +420,13 @@ inline bool lstm_forward_onednn_with_cache(
 
         bool has_bias = (bias != nullptr);
 
+        const uint64_t weight_fp = compute_weight_fingerprint(
+            W_ih, W_hh, 4 * hidden_size * input_size, 4 * hidden_size * hidden_size);
+
         bool need_rebuild = !cached ||
                            !cached->matches(seq_len, batch, input_size, hidden_size,
-                                           has_bias, W_ih, W_hh);
+                                           has_bias, W_ih, W_hh) ||
+                           cached->weight_fp != weight_fp;
 
         if (need_rebuild) {
             cached = std::make_shared<LSTMCachedPrimitive>();
@@ -418,6 +435,7 @@ inline bool lstm_forward_onednn_with_cache(
             cached->input_size = input_size;
             cached->hidden_size = hidden_size;
             cached->has_bias = has_bias;
+            cached->weight_fp = weight_fp;
             cached->w_ih_ptr = W_ih;
             cached->w_hh_ptr = W_hh;
 
@@ -703,6 +721,7 @@ struct GRUCachedPrimitive {
     bool has_bias;
     const void* w_ih_ptr;
     const void* w_hh_ptr;
+    uint64_t weight_fp{0};  // content fingerprint (audit B6: in-place update / realloc)
 
     bool matches(int64_t s, int64_t b, int64_t i, int64_t h, bool bias,
                  const void* wih, const void* whh) const {
@@ -764,12 +783,18 @@ inline bool gru_forward_onednn(
 
         bool has_bias = (bias != nullptr);
 
+        // GRU has 3 gates: W_ih is (3*hidden, input), W_hh is (3*hidden, hidden).
+        const uint64_t weight_fp = compute_weight_fingerprint(
+            W_ih, W_hh, 3 * hidden_size * input_size, 3 * hidden_size * hidden_size);
+
         bool need_rebuild = !cached ||
                            !cached->matches(seq_len, batch, input_size, hidden_size,
-                                           has_bias, W_ih, W_hh);
+                                           has_bias, W_ih, W_hh) ||
+                           cached->weight_fp != weight_fp;
 
         if (need_rebuild) {
             cached = std::make_shared<GRUCachedPrimitive>();
+            cached->weight_fp = weight_fp;
             cached->seq_len = seq_len;
             cached->batch = batch;
             cached->input_size = input_size;

@@ -2704,8 +2704,28 @@ auto abs_kernel(const Tensor& input) -> Tensor {
             out_data[i] = std::abs(in_data[i]);
         }
 
+    } else if (input.dtype() == DType::Int8) {
+        const int8_t* in_data = input.data<int8_t>();
+        int8_t* out_data = result.data<int8_t>();
+        for (size_t i = 0; i < n; ++i)
+            out_data[i] = static_cast<int8_t>(std::abs(static_cast<int>(in_data[i])));
+    } else if (input.dtype() == DType::Int16) {
+        const int16_t* in_data = input.data<int16_t>();
+        int16_t* out_data = result.data<int16_t>();
+        for (size_t i = 0; i < n; ++i)
+            out_data[i] = static_cast<int16_t>(std::abs(static_cast<int>(in_data[i])));
+    } else if (input.dtype() == DType::Int64) {
+        const int64_t* in_data = input.data<int64_t>();
+        int64_t* out_data = result.data<int64_t>();
+        for (size_t i = 0; i < n; ++i)
+            out_data[i] = std::abs(in_data[i]);
+    } else if (input.dtype() == DType::BFloat16) {
+        const BFloat16* in_data = input.data<BFloat16>();
+        BFloat16* out_data = result.data<BFloat16>();
+        for (size_t i = 0; i < n; ++i)
+            out_data[i] = BFloat16(std::abs(static_cast<float>(in_data[i])));
     } else {
-        throw std::runtime_error("abs operation only supports Float32, Float64, Float16, Int32, Complex64, and Complex128 dtypes");
+        throw std::runtime_error("abs operation only supports Float32, Float64, Float16, BFloat16, Int8, Int16, Int32, Int64, Complex64, and Complex128 dtypes");
     }
 
     return result;
@@ -2735,6 +2755,11 @@ auto clamp_kernel(const Tensor& input, double min_val, double max_val) -> Tensor
             __m256 v = _mm256_loadu_ps(&in_data[i]);
             // Clamp: max(min(v, max), min)
             __m256 clamped = _mm256_max_ps(_mm256_min_ps(v, max_vec), min_vec);
+            // NaN parity: Intel min/max return the non-NaN operand, so a NaN
+            // input would become max_f. The scalar tail and PyTorch propagate
+            // NaN, so blend the original value back wherever v is NaN.
+            __m256 nan_mask = _mm256_cmp_ps(v, v, _CMP_UNORD_Q);
+            clamped = _mm256_blendv_ps(clamped, v, nan_mask);
             _mm256_storeu_ps(&out_data[i], clamped);
         }
         // Handle remainder
@@ -2766,6 +2791,9 @@ auto clamp_kernel(const Tensor& input, double min_val, double max_val) -> Tensor
             __m256d v = _mm256_loadu_pd(&in_data[i]);
             // Clamp: max(min(v, max), min)
             __m256d clamped = _mm256_max_pd(_mm256_min_pd(v, max_vec), min_vec);
+            // NaN parity with the scalar path / PyTorch (propagate NaN).
+            __m256d nan_mask = _mm256_cmp_pd(v, v, _CMP_UNORD_Q);
+            clamped = _mm256_blendv_pd(clamped, v, nan_mask);
             _mm256_storeu_pd(&out_data[i], clamped);
         }
         // Handle remainder
@@ -2971,40 +2999,12 @@ auto log_kernel(const Tensor& input) -> Tensor {
         // MKL VML vsLn: IEEE log, internally vectorized + threaded
         vsLn(static_cast<int>(n), in_data, out_data);
 #else
-        // For small arrays, use single-threaded SIMD
-        if (n < OMP_THRESHOLD_MEDIUM) {
-#ifdef TENZOR_HAS_AVX512
-            fast_math::log_batch_avx512(in_data, out_data, n);
-#elif defined(TENZOR_HAS_AVX2)
-            fast_math::log_batch_avx2(in_data, out_data, n);
-#else
-            for (size_t i = 0; i < n; ++i) {
-                out_data[i] = std::log(in_data[i]);
-            }
-#endif
-        } else {
-            // For large arrays, use OpenMP with thread-local SIMD
-            #pragma omp parallel
-            {
-                int tid = omp_get_thread_num();
-                int nthreads = omp_get_num_threads();
-
-                size_t chunk_size = (n + nthreads - 1) / nthreads;
-                size_t start = tid * chunk_size;
-                size_t end = std::min(start + chunk_size, n);
-
-                if (start < end) {
-#ifdef TENZOR_HAS_AVX512
-                    fast_math::log_batch_avx512(in_data + start, out_data + start, end - start);
-#elif defined(TENZOR_HAS_AVX2)
-                    fast_math::log_batch_avx2(in_data + start, out_data + start, end - start);
-#else
-                    for (size_t i = start; i < end; ++i) {
-                        out_data[i] = std::log(in_data[i]);
-                    }
-#endif
-                }
-            }
+        // Full-exact path (audit C1): route Float32 through libm. The SIMD
+        // polynomial log was ~10-20 ULP and returned finite garbage for +Inf /
+        // NaN inputs; libm matches the Float64 path. MKL uses VML above.
+        #pragma omp parallel for if(n > OMP_THRESHOLD_MEDIUM)
+        for (size_t i = 0; i < n; ++i) {
+            out_data[i] = std::log(in_data[i]);
         }
 #endif // TENZOR_USE_MKL
 
@@ -3108,40 +3108,13 @@ auto exp_kernel(const Tensor& input) -> Tensor {
         // MKL VML vsExp: internally vectorized + threaded, beats AVX2 polynomial
         vsExp(static_cast<int>(n), in_data, out_data);
 #else
-        // For small arrays, use single-threaded SIMD
-        if (n < OMP_THRESHOLD_MEDIUM) {
-#ifdef TENZOR_HAS_AVX512
-            fast_math::exp_batch_avx512(in_data, out_data, n);
-#elif defined(TENZOR_HAS_AVX2)
-            fast_math::exp_batch_avx2(in_data, out_data, n);
-#else
-            for (size_t i = 0; i < n; ++i) {
-                out_data[i] = std::exp(in_data[i]);
-            }
-#endif
-        } else {
-            // For large arrays, use OpenMP with thread-local SIMD
-            #pragma omp parallel
-            {
-                int tid = omp_get_thread_num();
-                int nthreads = omp_get_num_threads();
-
-                size_t chunk_size = (n + nthreads - 1) / nthreads;
-                size_t start = tid * chunk_size;
-                size_t end = std::min(start + chunk_size, n);
-
-                if (start < end) {
-#ifdef TENZOR_HAS_AVX512
-                    fast_math::exp_batch_avx512(in_data + start, out_data + start, end - start);
-#elif defined(TENZOR_HAS_AVX2)
-                    fast_math::exp_batch_avx2(in_data + start, out_data + start, end - start);
-#else
-                    for (size_t i = start; i < end; ++i) {
-                        out_data[i] = std::exp(in_data[i]);
-                    }
-#endif
-                }
-            }
+        // Full-exact path (audit C1): route Float32 through libm so accuracy
+        // and Inf/NaN handling match the Float64 path. The SIMD polynomial in
+        // simd_fast_math.hpp was ~2 ULP and mishandled Inf/NaN (e.g. exp(NaN)
+        // returned a finite value); MKL builds use the exact VML path above.
+        #pragma omp parallel for if(n > OMP_THRESHOLD_MEDIUM)
+        for (size_t i = 0; i < n; ++i) {
+            out_data[i] = std::exp(in_data[i]);
         }
 #endif // TENZOR_USE_MKL
 
@@ -3262,16 +3235,13 @@ auto pow_kernel(const Tensor& input, double exponent) -> Tensor {
         float* out_data = result.data<float>();
         float exponent_f = static_cast<float>(exponent);
 
-#if defined(TENZOR_HAS_AVX512) || defined(__AVX512F__)
-        fast_math::pow_batch_avx512(in_data, out_data, n, exponent_f);
-#elif defined(TENZOR_HAS_AVX2) || defined(__AVX2__)
-        fast_math::pow_batch_avx2(in_data, out_data, n, exponent_f);
-#else
+        // Full-exact path (audit C1): libm pow. The SIMD `pow_batch` computed
+        // exp(y·log(max(x,1e-30))), silently clamping negative bases to ~0
+        // (e.g. pow(-2,3) returned ~0 instead of -8). std::pow is correct.
         #pragma omp parallel for if(n > OMP_THRESHOLD_MEDIUM)
         for (size_t i = 0; i < n; ++i) {
             out_data[i] = std::pow(in_data[i], exponent_f);
         }
-#endif
 
     } else if (input.dtype() == DType::Float64) {
         const double* in_data = input.data<double>();
@@ -3288,27 +3258,28 @@ auto pow_kernel(const Tensor& input, double exponent) -> Tensor {
         Float16* out_data = result.data<Float16>();
         float exponent_f = static_cast<float>(exponent);
 
-        // Use temporary float buffer for SIMD
+        // Full-exact libm path (audit C1): no negative-base clamping.
         std::vector<float> in_f32(n), out_f32(n);
         for (size_t i = 0; i < n; ++i) {
             in_f32[i] = static_cast<float>(in_data[i]);
         }
-
-#if defined(TENZOR_HAS_AVX512) || defined(__AVX512F__)
-        fast_math::pow_batch_avx512(in_f32.data(), out_f32.data(), n, exponent_f);
-#elif defined(TENZOR_HAS_AVX2) || defined(__AVX2__)
-        fast_math::pow_batch_avx2(in_f32.data(), out_f32.data(), n, exponent_f);
-#else
         for (size_t i = 0; i < n; ++i) {
             out_f32[i] = std::pow(in_f32[i], exponent_f);
         }
-#endif
         for (size_t i = 0; i < n; ++i) {
             out_data[i] = Float16(out_f32[i]);
         }
 
+    } else if (input.dtype() == DType::BFloat16) {
+        const BFloat16* in_data = input.data<BFloat16>();
+        BFloat16* out_data = result.data<BFloat16>();
+        float exponent_f = static_cast<float>(exponent);
+        for (size_t i = 0; i < n; ++i) {
+            out_data[i] = BFloat16(std::pow(static_cast<float>(in_data[i]), exponent_f));
+        }
+
     } else {
-        throw std::runtime_error("pow operation only supports Float32, Float64, and Float16 dtypes");
+        throw std::runtime_error("pow operation only supports Float32, Float64, Float16, and BFloat16 dtypes");
     }
 
     return result;
@@ -4276,11 +4247,10 @@ auto sin_kernel(const Tensor& input) -> Tensor {
             float* out_data = output.data<float>();
 #if defined(TENZOR_USE_MKL)
             vsSin(static_cast<int>(n), in_data, out_data);
-#elif defined(TENZOR_HAS_AVX512) || defined(__AVX512F__)
-            fast_math::sin_batch_avx512(in_data, out_data, static_cast<size_t>(n));
-#elif defined(TENZOR_HAS_AVX2) || defined(__AVX2__)
-            fast_math::sin_batch_avx2(in_data, out_data, static_cast<size_t>(n));
 #else
+            // Full-exact path (audit C1): the SIMD polynomial used single-
+            // precision range reduction that lost all significance for large
+            // |x| (e.g. sin(1e6)); libm matches the Float64 path.
             #pragma omp parallel for if(n > ::tenzor::OmpThresholds::medium())
             for (int64_t i = 0; i < n; i++) {
                 out_data[i] = std::sin(in_data[i]);
@@ -4338,11 +4308,9 @@ auto cos_kernel(const Tensor& input) -> Tensor {
             float* out_data = output.data<float>();
 #if defined(TENZOR_USE_MKL)
             vsCos(static_cast<int>(n), in_data, out_data);
-#elif defined(TENZOR_HAS_AVX512) || defined(__AVX512F__)
-            fast_math::cos_batch_avx512(in_data, out_data, static_cast<size_t>(n));
-#elif defined(TENZOR_HAS_AVX2) || defined(__AVX2__)
-            fast_math::cos_batch_avx2(in_data, out_data, static_cast<size_t>(n));
 #else
+            // Full-exact path (audit C1): libm cos (the SIMD polynomial lost
+            // significance for large |x|). Matches the Float64 path.
             #pragma omp parallel for if(n > ::tenzor::OmpThresholds::medium())
             for (int64_t i = 0; i < n; i++) {
                 out_data[i] = std::cos(in_data[i]);
@@ -6324,30 +6292,32 @@ auto sinc_kernel(const Tensor& input) -> Tensor {
 auto zeta_kernel(const Tensor& x, const Tensor& q) -> Tensor {
     // Hurwitz zeta: ζ(s,q) = Σ_{n=0}^∞ 1/(q+n)^s
     // Uses Euler-Maclaurin summation for convergence
+    // Euler-Maclaurin with the leading Bernoulli correction terms (B2,B4,B6).
+    // Without them the truncated sum carries an O(s·(a+N)^(-s-1)) error
+    // (~7.6e-5 for ζ(2,1)); the correction block drops it below ~1e-9.
+    auto hurwitz_zeta = [](double s, double a) -> double {
+        double result = 0.0;
+        for (int n = 0; n < 12; ++n) {
+            result += std::pow(a + n, -s);
+        }
+        const double aN = a + 12.0;
+        if (s != 1.0) result += std::pow(aN, 1.0 - s) / (s - 1.0);
+        result += 0.5 * std::pow(aN, -s);
+        // Σ_k B_{2k}/(2k)! · (s)_{2k-1} · (a+N)^(-s-2k+1):
+        //   B2/2! = 1/12, B4/4! = -1/720, B6/6! = 1/30240.
+        result += (s) * std::pow(aN, -s - 1.0) / 12.0;
+        result -= (s * (s + 1.0) * (s + 2.0)) * std::pow(aN, -s - 3.0) / 720.0;
+        result += (s * (s + 1.0) * (s + 2.0) * (s + 3.0) * (s + 4.0))
+                  * std::pow(aN, -s - 5.0) / 30240.0;
+        return result;
+    };
     return binary_math_kernel(x, q,
-        [](float s, float a) -> float {
-            double sd = s, ad = a;
-            double result = 0.0;
-            // Direct summation for first N terms
-            for (int n = 0; n < 12; ++n) {
-                result += std::pow(ad + n, -sd);
-            }
-            // Integral remainder: (a+N)^(1-s)/(s-1)
-            double aN = ad + 12.0;
-            if (sd != 1.0) result += std::pow(aN, 1.0 - sd) / (sd - 1.0);
-            // Euler-Maclaurin correction
-            result += 0.5 * std::pow(aN, -sd);
-            return static_cast<float>(result);
+        [hurwitz_zeta](float s, float a) -> float {
+            return static_cast<float>(hurwitz_zeta(static_cast<double>(s),
+                                                   static_cast<double>(a)));
         },
-        [](double s, double a) -> double {
-            double result = 0.0;
-            for (int n = 0; n < 12; ++n) {
-                result += std::pow(a + n, -s);
-            }
-            double aN = a + 12.0;
-            if (s != 1.0) result += std::pow(aN, 1.0 - s) / (s - 1.0);
-            result += 0.5 * std::pow(aN, -s);
-            return result;
+        [hurwitz_zeta](double s, double a) -> double {
+            return hurwitz_zeta(s, a);
         }, "zeta");
 }
 
@@ -7883,15 +7853,16 @@ auto rad2deg_kernel(const Tensor& input) -> Tensor {
 }
 
 auto logit_kernel(const Tensor& input) -> Tensor {
+    // logit(x) = log(x / (1-x)). This raw kernel takes no eps and therefore
+    // must match the canonical eps=None contract of tenzor::logit: do NOT
+    // silently clamp -- let inputs outside (0,1) propagate NaN/Inf so callers
+    // see the invalid region. Eps-clamping is applied by the composed op
+    // (src/ops/math.cpp) before it ever reaches a kernel.
     return unary_math_kernel(input,
         [](float x) {
-            float eps = 1e-6f;
-            x = std::clamp(x, eps, 1.0f - eps);
             return std::log(x / (1.0f - x));
         },
         [](double x) {
-            double eps = 1e-15;
-            x = std::clamp(x, eps, 1.0 - eps);
             return std::log(x / (1.0 - x));
         }, "logit");
 }

@@ -221,7 +221,9 @@ void register_autograd(py::module_& m) {
             return tenzor::Variable(J, false);
         });
     }, py::arg("f"),
-    "Return a function that computes the reverse-mode Jacobian of f.");
+    "Return a function that computes the Jacobian of f. NOTE: mode is selected "
+    "automatically by tenzor::jacobian (forward-mode when outputs <= inputs, "
+    "reverse otherwise); this does not force reverse-mode.");
 
     func_mod.def("jacfwd", [](py::function f) {
         return py::cpp_function([f](const tenzor::Variable& x) -> tenzor::Variable {
@@ -239,7 +241,9 @@ void register_autograd(py::module_& m) {
             return tenzor::Variable(J, false);
         });
     }, py::arg("f"),
-    "Return a function that computes the forward-mode Jacobian of f.");
+    "Return a function that computes the Jacobian of f. NOTE: mode is selected "
+    "automatically by tenzor::jacobian (forward-mode when outputs <= inputs, "
+    "reverse otherwise); this does not force forward-mode.");
 
     func_mod.def("hessian", [](py::function f) {
         return py::cpp_function([f](const tenzor::Variable& x) -> tenzor::Variable {

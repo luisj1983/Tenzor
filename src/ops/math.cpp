@@ -946,7 +946,10 @@ auto logit(const Tensor& input, double eps) -> Tensor {
     // With eps > 0: clamp x to [eps, 1-eps] first
     Tensor x = input;
     if (eps > 0) {
-        x = clamp(x, static_cast<float>(eps), static_cast<float>(1.0 - eps));
+        // clamp takes double bounds; casting to float here corrupted the
+        // [eps, 1-eps] window for Float64 inputs (1-1e-6 is not representable
+        // in float, shifting the result near the boundary by ~1e-2).
+        x = clamp(x, eps, 1.0 - eps);
     }
     Tensor one = ones_like(x);
     return log(x / (one - x));

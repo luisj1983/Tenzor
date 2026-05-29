@@ -7,6 +7,7 @@
 #include <cstdio>
 #include <algorithm>
 #include <mutex>
+#include <vector>
 #include <immintrin.h>  // For SIMD operations
 
 #ifdef _OPENMP
@@ -101,6 +102,27 @@ auto quantized_linear_kernel(
         }
     }
 
+    // Precompute per-row sums for the asymmetric zero-point correction.
+    // The dequantized dot product is sum_k (q_x - input_zp)(q_w - weight_zp)
+    //   = raw_dot - input_zp*sum_w[o] - weight_zp*sum_x[b] + input_zp*weight_zp*K
+    // so we need the per-output-row weight sum and per-batch-row input sum.
+    std::vector<int32_t> sum_w(out_features, 0);
+    std::vector<int32_t> sum_x(batch_size, 0);
+    #pragma omp parallel for
+    for (int64_t o = 0; o < out_features; ++o) {
+        int32_t s = 0;
+        const int8_t* wrow = weight + o * in_features;
+        for (int64_t k = 0; k < in_features; ++k) s += static_cast<int32_t>(wrow[k]);
+        sum_w[o] = s;
+    }
+    #pragma omp parallel for
+    for (int64_t b = 0; b < batch_size; ++b) {
+        int32_t s = 0;
+        const int8_t* xrow = input + b * in_features;
+        for (int64_t k = 0; k < in_features; ++k) s += static_cast<int32_t>(xrow[k]);
+        sum_x[b] = s;
+    }
+
     // Parallel over batch and output features
     #pragma omp parallel for collapse(2)
     for (int64_t b = 0; b < batch_size; ++b) {
@@ -171,8 +193,10 @@ auto quantized_linear_kernel(
             }
 #endif
 
-            // Zero point correction
-            acc -= input_zp * weight_zp * in_features;
+            // Asymmetric zero-point correction (full expansion).
+            acc -= input_zp * sum_w[o];
+            acc -= weight_zp * sum_x[b];
+            acc += input_zp * weight_zp * static_cast<int32_t>(in_features);
 
             // Dequantize and add bias
             float result = static_cast<float>(acc) * combined_scale;
@@ -207,6 +231,25 @@ auto quantized_linear_per_channel_kernel(
     int32_t input_zp,
     const int32_t* weight_zps       // [out_features] per-channel zero points
 ) -> void {
+
+    // Per-row sums for the asymmetric zero-point correction (see notes in
+    // quantized_linear_kernel above).
+    std::vector<int32_t> sum_w(out_features, 0);
+    std::vector<int32_t> sum_x(batch_size, 0);
+    #pragma omp parallel for
+    for (int64_t o = 0; o < out_features; ++o) {
+        int32_t s = 0;
+        const int8_t* wrow = weight + o * in_features;
+        for (int64_t k = 0; k < in_features; ++k) s += static_cast<int32_t>(wrow[k]);
+        sum_w[o] = s;
+    }
+    #pragma omp parallel for
+    for (int64_t b = 0; b < batch_size; ++b) {
+        int32_t s = 0;
+        const int8_t* xrow = input + b * in_features;
+        for (int64_t k = 0; k < in_features; ++k) s += static_cast<int32_t>(xrow[k]);
+        sum_x[b] = s;
+    }
 
     #pragma omp parallel for collapse(2)
     for (int64_t b = 0; b < batch_size; ++b) {
@@ -262,9 +305,11 @@ auto quantized_linear_per_channel_kernel(
             }
 #endif
 
-            // Per-channel zero point correction and dequantization
+            // Per-channel asymmetric zero-point correction (full expansion).
             int32_t w_zp = weight_zps ? weight_zps[o] : 0;
-            acc -= input_zp * w_zp * in_features;
+            acc -= input_zp * sum_w[o];
+            acc -= w_zp * sum_x[b];
+            acc += input_zp * w_zp * static_cast<int32_t>(in_features);
 
             float combined_scale = input_scale * weight_scales[o] / output_scale;
             float result = static_cast<float>(acc) * combined_scale;

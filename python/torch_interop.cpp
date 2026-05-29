@@ -337,22 +337,44 @@ auto tensor_from_torch(const torch::Tensor& torch_tensor,
         }
     }
 
-    // Fallback copy path (used for target_device != source, non-contiguous
-    // inputs, or DLPack-rejected dtypes).
-    Tensor tensor(shape, dtype, device);
+    // Fallback copy path (target_device != source, non-contiguous inputs, or
+    // DLPack-rejected dtypes). Select the transfer route from the actual
+    // {source (PyTorch), destination (Tenzor)} device pair. The previous code
+    // hardcoded cudaMemcpyDeviceToDevice for every non-CPU destination, which
+    // crashed for ROCm/OneAPI/Vulkan targets and mis-copied CPU<->CUDA pairs.
     auto contiguous_torch = torch_tensor.contiguous();
+    const bool src_is_cuda = contiguous_torch.is_cuda();
+    int64_t n = 1;
+    for (int64_t s : shape) n *= s;
+    const size_t bytes = static_cast<size_t>(n) * dtype_size(dtype);
+
     if (device.type == Device::Type::CPU) {
-        std::memcpy(tensor.data<void>(),
-                   contiguous_torch.data_ptr(),
-                   tensor.numel() * dtype_size(dtype));
-    } else if (device.type == Device::Type::CUDA) {
-        cudaMemcpy(tensor.data<void>(),
-                  contiguous_torch.data_ptr(),
-                  tensor.numel() * dtype_size(dtype),
-                  cudaMemcpyDeviceToDevice);
+        Tensor tensor(shape, dtype, Device::cpu());
+        if (src_is_cuda) {
+            cudaMemcpy(tensor.data<void>(), contiguous_torch.data_ptr(),
+                       bytes, cudaMemcpyDeviceToHost);
+        } else {
+            std::memcpy(tensor.data<void>(), contiguous_torch.data_ptr(), bytes);
+        }
+        return tensor;
     }
 
-    return tensor;
+    if (device.type == Device::Type::CUDA) {
+        Tensor tensor(shape, dtype, device);
+        cudaMemcpy(tensor.data<void>(), contiguous_torch.data_ptr(), bytes,
+                   src_is_cuda ? cudaMemcpyDeviceToDevice : cudaMemcpyHostToDevice);
+        return tensor;
+    }
+
+    // ROCm / MPS / OneAPI / Vulkan destination: there is no CUDA-API route to
+    // this memory. Bring the source to host (PyTorch handles any D2H), build a
+    // CPU Tenzor tensor, then upload via Tenzor's own transfer engine (.to()).
+    // This is data interop between two libraries that don't share an allocator,
+    // not a compute fallback.
+    auto host_torch = src_is_cuda ? contiguous_torch.to(torch::kCPU) : contiguous_torch;
+    Tensor host_tensor(shape, dtype, Device::cpu());
+    std::memcpy(host_tensor.data<void>(), host_torch.data_ptr(), bytes);
+    return host_tensor.to(device);
 }
 
 auto variable_to_torch(const Variable& variable) -> torch::autograd::Variable {
@@ -372,11 +394,11 @@ auto variable_from_torch(const torch::autograd::Variable& torch_variable) -> Var
     // Create Variable with gradient tracking
     Variable variable(data, torch_variable.requires_grad());
 
-    // Copy gradient if it exists
+    // Copy gradient if it exists so a grad-bearing PyTorch Variable round-trips
+    // with its gradient intact (previously the converted grad was discarded).
     if (torch_variable.grad().defined()) {
         Tensor grad = tensor_from_torch(torch_variable.grad());
-        // Set gradient (assuming Variable has a method to set grad)
-        // variable.set_grad(grad);
+        variable.set_grad(grad);
     }
 
     return variable;
@@ -392,11 +414,11 @@ auto sync_gradients(Variable& tenzor_var,
             torch_var.mutable_grad() = grad_tensor;
         }
     } else {
-        // Copy PyTorch gradient to Tenzor
+        // Copy PyTorch gradient to Tenzor (previously a silent no-op, so
+        // sync_gradients(..., tenzor_to_torch=false) did nothing).
         if (torch_var.grad().defined()) {
             auto grad_tensor = tensor_from_torch(torch_var.grad());
-            // Set Tenzor gradient
-            // tenzor_var.set_grad(grad_tensor);
+            tenzor_var.set_grad(grad_tensor);
         }
     }
 }

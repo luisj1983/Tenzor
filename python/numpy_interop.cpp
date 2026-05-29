@@ -270,9 +270,13 @@ auto can_zero_copy_tensor_to_numpy(const Tensor& tensor) -> bool {
 }
 
 auto can_zero_copy_numpy_to_tensor(const py::array& arr) -> bool {
-    // Zero-copy only if contiguous and C-style (row-major).
+    // Zero-copy only if C-contiguous (row-major). NOTE: do not also reject
+    // F-contiguous — numpy flags every 1-D (and degenerate multi-D) array as
+    // BOTH C- and F-contiguous, and C-order handling is correct for those. A
+    // genuine column-major multi-D array is simply not c_style and is rejected
+    // here. (The old `|| f_style` clause wrongly rejected all 1-D arrays.)
     auto flags = arr.flags();
-    if (!(flags & py::array::c_style) || (flags & py::array::f_style)) {
+    if (!(flags & py::array::c_style)) {
         return false;
     }
     // 5th-audit B5: explicitly reject negative-stride (reversed slice) and
@@ -441,20 +445,31 @@ auto numpy_to_tensor(py::array arr, Device device) -> Tensor {
         numel *= dim;
     }
 
-    // Create tensor with requested device
+    // True zero-copy fast path: for a CPU destination with a C-contiguous
+    // source, wrap the NumPy buffer directly and keep the array alive via the
+    // storage deleter (the array and the Tensor then SHARE memory — mutations
+    // are visible both ways, matching torch.from_numpy semantics). The deleter
+    // acquires the GIL before dropping the reference so a Tensor freed during a
+    // GIL-released backward cannot corrupt CPython refcounts.
+    if (device.type == Device::Type::CPU && can_zero_copy_numpy_to_tensor(arr)) {
+        auto keepalive = std::make_shared<py::object>(arr);
+        void* data_ptr = const_cast<void*>(arr.data());
+        return Tensor::from_blob(
+            data_ptr, shape, dtype, device,
+            [keepalive](void*) mutable {
+                py::gil_scoped_acquire gil;
+                keepalive.reset();
+            });
+    }
+
+    // Copy path (non-CPU destination, or non-contiguous source). NumPy and the
+    // Tensor then have independent lifetimes.
     Tensor tensor(shape, dtype, device);
-
-    // Always copy data from NumPy to Tensor for memory safety
-    // (NumPy and Tensor have independent lifetime management)
     void* tensor_data = tensor.storage()->data();
-
-    if (can_zero_copy_numpy_to_tensor(arr)) {
-        // C-contiguous array — direct memcpy
-        size_t size_bytes = numel * dtype_size(dtype);
-        std::memcpy(tensor_data, arr.data(), size_bytes);
-    } else {
-        // Non-contiguous array — make contiguous copy first
-        py::array contiguous = py::array::ensure(arr, py::array::c_style);
+    {
+        py::array contiguous = can_zero_copy_numpy_to_tensor(arr)
+            ? arr
+            : py::array::ensure(arr, py::array::c_style);
         py::buffer_info contiguous_buf = contiguous.request();
         size_t size_bytes = numel * dtype_size(dtype);
         std::memcpy(tensor_data, contiguous_buf.ptr, size_bytes);

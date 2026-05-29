@@ -196,7 +196,13 @@ void nonzero_impl(const T* data, int64_t numel, std::vector<int64_t>& nz_indices
  * @param index Index tensor (must be Int64)
  * @return Tensor with selected elements
  */
-auto index_select_kernel(const Tensor& input, int64_t dim, const Tensor& index) -> Tensor {
+auto index_select_kernel(const Tensor& input_arg, int64_t dim, const Tensor& index) -> Tensor {
+    // index_select_impl computes inner offsets as flat (contiguous) positions,
+    // so a non-contiguous input (transposed/permuted view) would be read with
+    // the wrong memory layout. Materialise contiguous first — gather/scatter do
+    // the same. contiguous() is a shallow no-op when already contiguous.
+    const Tensor input = input_arg.contiguous();
+
     // Validate index tensor
     if (index.dtype() != DType::Int64) {
         throw std::invalid_argument("index_select: index tensor must have dtype Int64");

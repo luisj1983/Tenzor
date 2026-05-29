@@ -245,13 +245,10 @@ auto nested_layer_norm_kernel(const Tensor& values, const Tensor& offsets,
     // Layer norm normalizes over the last dimension(s).
     // For nested tensors with values [total_len, D], this normalizes each
     // row independently, which doesn't need segment awareness.
-    // However, we register this for API completeness and potential future
-    // segment-level normalization.
 
     auto offsets_cpu = (offsets.device().type != Device::Type::CPU)
         ? offsets.to(Device::cpu()) : offsets;
-    const auto* off_ptr = offsets_cpu.data<int64_t>();
-    int64_t B = offsets_cpu.numel() - 1;
+    (void)offsets_cpu;  // reserved for future segment-level normalization
 
     auto result = tenzor::zeros(shape_vec(values), values.dtype(), values.device());
 
@@ -262,7 +259,6 @@ auto nested_layer_norm_kernel(const Tensor& values, const Tensor& offsets,
         const auto* b_ptr = bias.data<float>();
 
         int64_t D = values.shape().back();
-
         int64_t total_rows = values.shape()[0];
         #ifdef _OPENMP
         #pragma omp parallel for if(total_rows > 64) schedule(static)
@@ -271,23 +267,20 @@ auto nested_layer_norm_kernel(const Tensor& values, const Tensor& offsets,
             const float* in = val_ptr + row * D;
             float* out = res_ptr + row * D;
 
-            // Compute mean
-            float mean = 0.0f;
-            for (int64_t j = 0; j < D; ++j) {
-                mean += in[j];
-            }
-            mean /= static_cast<float>(D);
+            // Accumulate mean/variance in double to avoid the Float32-accumulator
+            // precision loss for large D or large-magnitude rows.
+            double mean_acc = 0.0;
+            for (int64_t j = 0; j < D; ++j) mean_acc += in[j];
+            const float mean = static_cast<float>(mean_acc / static_cast<double>(D));
 
-            // Compute variance
-            float var = 0.0f;
+            double var_acc = 0.0;
             for (int64_t j = 0; j < D; ++j) {
-                float diff = in[j] - mean;
-                var += diff * diff;
+                double diff = static_cast<double>(in[j]) - static_cast<double>(mean);
+                var_acc += diff * diff;
             }
-            var /= static_cast<float>(D);
+            const float inv_std = static_cast<float>(
+                1.0 / std::sqrt(var_acc / static_cast<double>(D) + eps));
 
-            // Normalize and scale
-            float inv_std = 1.0f / std::sqrt(var + static_cast<float>(eps));
             for (int64_t j = 0; j < D; ++j) {
                 out[j] = (in[j] - mean) * inv_std * w_ptr[j] + b_ptr[j];
             }
@@ -324,9 +317,19 @@ auto nested_layer_norm_kernel(const Tensor& values, const Tensor& offsets,
                 out[j] = (in[j] - mean) * inv_std * w_ptr[j] + b_ptr[j];
             }
         }
+    } else if (values.dtype() == DType::Float16 || values.dtype() == DType::BFloat16) {
+        // Half precision: widen to Float32, compute, narrow back (the standard
+        // feedback_float16_widen_narrow pattern). Previously this threw.
+        const DType orig = values.dtype();
+        Tensor v32 = values.to(DType::Float32);
+        Tensor w32 = weight.to(DType::Float32);
+        Tensor b32 = bias.to(DType::Float32);
+        Tensor out32 = nested_layer_norm_kernel(v32, offsets, w32, b32, eps);
+        return out32.to(orig);
     } else {
         throw std::runtime_error(
-            "nested_layer_norm_kernel: unsupported dtype (only Float32/Float64)");
+            "nested_layer_norm_kernel: unsupported dtype (only "
+            "Float32/Float64/Float16/BFloat16)");
     }
 
     return result;

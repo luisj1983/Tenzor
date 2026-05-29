@@ -1431,17 +1431,19 @@ auto box_iou_kernel(const Tensor& boxes1, const Tensor& boxes2, int iou_type) ->
 // Unfold / Fold (im2col / col2im style)
 // =========================================================================
 
-auto unfold_kernel(const Tensor& input, int64_t kernel_size,
-                   int64_t stride, int64_t padding, int64_t dilation) -> Tensor {
-    // input: (N, C, H, W)
-    // output: (N, C * kernel_size * kernel_size, L) where L = output spatial locations
+// Per-axis unfold (im2col). Supports asymmetric kernel/stride/padding/dilation
+// (kh!=kw etc.), matching the dispatcher's per-axis attrs and nn.Unfold.
+auto unfold_kernel(const Tensor& input,
+                   int64_t kh, int64_t kw, int64_t sh, int64_t sw,
+                   int64_t ph, int64_t pw, int64_t dh, int64_t dw) -> Tensor {
+    // input: (N, C, H, W); output: (N, C * kh * kw, L), L = H_out * W_out.
     const auto& shape = input.shape();
     int64_t N = shape[0], C = shape[1], H = shape[2], W = shape[3];
 
-    int64_t H_out = (H + 2 * padding - dilation * (kernel_size - 1) - 1) / stride + 1;
-    int64_t W_out = (W + 2 * padding - dilation * (kernel_size - 1) - 1) / stride + 1;
+    int64_t H_out = (H + 2 * ph - dh * (kh - 1) - 1) / sh + 1;
+    int64_t W_out = (W + 2 * pw - dw * (kw - 1) - 1) / sw + 1;
     int64_t L = H_out * W_out;
-    int64_t cols_per_channel = kernel_size * kernel_size;
+    int64_t cols_per_channel = kh * kw;
 
     Tensor output({N, C * cols_per_channel, L}, input.dtype(), input.device());
 
@@ -1450,15 +1452,15 @@ auto unfold_kernel(const Tensor& input, int64_t kernel_size,
         for (int64_t n = 0; n < N; ++n) {
             for (int64_t c = 0; c < C; ++c) {
                 const T* channel = in_data + (n * C + c) * H * W;
-                for (int64_t kh = 0; kh < kernel_size; ++kh) {
-                    for (int64_t kw = 0; kw < kernel_size; ++kw) {
-                        int64_t col_idx = (c * cols_per_channel + kh * kernel_size + kw);
+                for (int64_t i = 0; i < kh; ++i) {
+                    for (int64_t j = 0; j < kw; ++j) {
+                        int64_t col_idx = (c * cols_per_channel + i * kw + j);
                         T* col = out_data + (n * C * cols_per_channel + col_idx) * L;
 
                         for (int64_t h_out = 0; h_out < H_out; ++h_out) {
                             for (int64_t w_out = 0; w_out < W_out; ++w_out) {
-                                int64_t h_in = h_out * stride - padding + kh * dilation;
-                                int64_t w_in = w_out * stride - padding + kw * dilation;
+                                int64_t h_in = h_out * sh - ph + i * dh;
+                                int64_t w_in = w_out * sw - pw + j * dw;
                                 int64_t l_idx = h_out * W_out + w_out;
 
                                 if (h_in >= 0 && h_in < H && w_in >= 0 && w_in < W) {
@@ -1490,19 +1492,26 @@ auto unfold_kernel(const Tensor& input, int64_t kernel_size,
     return output;
 }
 
+// Symmetric convenience wrapper (preserves the original API).
+auto unfold_kernel(const Tensor& input, int64_t kernel_size,
+                   int64_t stride, int64_t padding, int64_t dilation) -> Tensor {
+    return unfold_kernel(input, kernel_size, kernel_size, stride, stride,
+                         padding, padding, dilation, dilation);
+}
+
+// Per-axis fold (col2im). Supports asymmetric kernel/stride/padding/dilation.
 auto fold_kernel(const Tensor& input, const std::vector<int64_t>& output_size,
-                 int64_t kernel_size, int64_t stride, int64_t padding,
-                 int64_t dilation) -> Tensor {
-    // input: (N, C * kernel_size * kernel_size, L)
-    // output: (N, C, output_size[0], output_size[1])
+                 int64_t kh, int64_t kw, int64_t sh, int64_t sw,
+                 int64_t ph, int64_t pw, int64_t dh, int64_t dw) -> Tensor {
+    // input: (N, C * kh * kw, L); output: (N, C, output_size[0], output_size[1])
     const auto& shape = input.shape();
     int64_t N = shape[0];
     int64_t H_out = output_size[0], W_out = output_size[1];
-    int64_t cols_per_channel = kernel_size * kernel_size;
+    int64_t cols_per_channel = kh * kw;
     int64_t C = shape[1] / cols_per_channel;
 
-    int64_t H_col = (H_out + 2 * padding - dilation * (kernel_size - 1) - 1) / stride + 1;
-    int64_t W_col = (W_out + 2 * padding - dilation * (kernel_size - 1) - 1) / stride + 1;
+    int64_t H_col = (H_out + 2 * ph - dh * (kh - 1) - 1) / sh + 1;
+    int64_t W_col = (W_out + 2 * pw - dw * (kw - 1) - 1) / sw + 1;
 
     Tensor output({N, C, H_out, W_out}, input.dtype(), input.device());
     std::memset(output.data<uint8_t>(), 0, output.numel() * dtype_size(output.dtype()));
@@ -1512,15 +1521,15 @@ auto fold_kernel(const Tensor& input, const std::vector<int64_t>& output_size,
         for (int64_t n = 0; n < N; ++n) {
             for (int64_t c = 0; c < C; ++c) {
                 T* channel = out_data + (n * C + c) * H_out * W_out;
-                for (int64_t kh = 0; kh < kernel_size; ++kh) {
-                    for (int64_t kw = 0; kw < kernel_size; ++kw) {
-                        int64_t col_idx = c * cols_per_channel + kh * kernel_size + kw;
+                for (int64_t i = 0; i < kh; ++i) {
+                    for (int64_t j = 0; j < kw; ++j) {
+                        int64_t col_idx = c * cols_per_channel + i * kw + j;
                         const T* col = in_data + (n * C * cols_per_channel + col_idx) * (H_col * W_col);
 
                         for (int64_t h_col = 0; h_col < H_col; ++h_col) {
                             for (int64_t w_col = 0; w_col < W_col; ++w_col) {
-                                int64_t h_in = h_col * stride - padding + kh * dilation;
-                                int64_t w_in = w_col * stride - padding + kw * dilation;
+                                int64_t h_in = h_col * sh - ph + i * dh;
+                                int64_t w_in = w_col * sw - pw + j * dw;
 
                                 if (h_in >= 0 && h_in < H_out && w_in >= 0 && w_in < W_out) {
                                     channel[h_in * W_out + w_in] += col[h_col * W_col + w_col];
@@ -1548,6 +1557,14 @@ auto fold_kernel(const Tensor& input, const std::vector<int64_t>& output_size,
     }
 
     return output;
+}
+
+// Symmetric convenience wrapper (preserves the original API).
+auto fold_kernel(const Tensor& input, const std::vector<int64_t>& output_size,
+                 int64_t kernel_size, int64_t stride, int64_t padding,
+                 int64_t dilation) -> Tensor {
+    return fold_kernel(input, output_size, kernel_size, kernel_size,
+                       stride, stride, padding, padding, dilation, dilation);
 }
 
 auto gather_relative_position_bias_kernel(const Tensor& bias_table, const Tensor& rel_pos_index,

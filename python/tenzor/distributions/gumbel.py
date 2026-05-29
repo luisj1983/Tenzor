@@ -60,21 +60,11 @@ class Gumbel(Distribution):
 
     def log_prob(self, value):
         # log p(x) = -log(scale) - (z + exp(-z))   where z = (x-loc)/scale
+        # exp() now has an autograd-aware Variable overload, so the gradient
+        # flows correctly through value, loc and scale (no detachment).
         value = _to_variable(value)
         z = (value - self.loc) / self.scale
-        # exp(-z) lacks Variable overload at module level; route through a
-        # detached numpy buffer for the exponential bit.  This is exact
-        # but breaks gradients through `value`; gradient through loc/scale
-        # via `z` itself is preserved.
-        # For full autograd, an autograd.Function wrapping exp(z) would
-        # be needed.  Mark this as a known limitation.
-        # Strict autograd path: compute exp(-z) at Tensor level (detached).
-        neg_z_t = (0.0 - z).tensor() if isinstance(z, Variable) else (0.0 - z)
-        exp_neg_z_t = _tz.exp(neg_z_t) if not isinstance(neg_z_t, Variable) else None
-        # In practice z is a Variable (since loc/scale are), so the path
-        # above gives a Tensor.  Re-wrap as a detached Variable so the
-        # Variable arithmetic continues to work.
-        exp_neg_z = Variable(exp_neg_z_t, False)
+        exp_neg_z = _tz.exp(0.0 - z)
         return -_tz.log(self.scale) - z - exp_neg_z
 
     def cdf(self, value):

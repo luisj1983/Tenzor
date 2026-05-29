@@ -1,8 +1,8 @@
-"""HalfNormal distribution — Tensor-native (sample only).
+"""HalfNormal distribution — Tensor/Variable native.
 
-Reparameterisation ``|σ z|`` is well-defined in principle, but ``abs``
-has no Variable overload and the underlying operator is non-smooth at
-0, so we expose ``has_rsample = False``.
+Reparameterised: ``|σ z|`` with ``z ~ N(0,1)``. The ``|z|`` factor is
+detached noise, so multiplying by the scale Variable yields a correct,
+differentiable rsample (non-smoothness at 0 is measure-zero).
 """
 from __future__ import annotations
 
@@ -10,6 +10,7 @@ import math
 
 import numpy as np
 
+import tenzor as _tz  # noqa: F401  (kept for parity; scale*noise uses Variable mul)
 from tenzor.tenzor_core import Tensor, Variable  # type: ignore
 
 from .distribution import (
@@ -25,7 +26,7 @@ from ._reparam import standard_normal
 class HalfNormal(Distribution):
     """``HalfNormal(scale)``."""
 
-    has_rsample = False
+    has_rsample = True
 
     def __init__(self, scale):
         self.scale = _to_variable(scale)
@@ -47,14 +48,30 @@ class HalfNormal(Distribution):
         scale_np = np.asarray(self.scale.tensor(), dtype=np.float32)
         return _wrap_numpy(np.abs(scale_np * z))
 
+    def rsample(self, sample_shape=()):
+        # scale * |z|, z ~ N(0,1). |z| is detached noise; the scale Variable
+        # multiply carries the gradient.
+        out_shape = tuple(sample_shape) + self._batch_shape
+        z = np.asarray(standard_normal(out_shape if out_shape else []), dtype=np.float32)
+        abs_z = Variable(Tensor.from_numpy(np.ascontiguousarray(np.abs(z))), False)
+        return self.scale * abs_z
+
     def log_prob(self, value):
-        v_np = np.asarray(_to_variable(value).tensor(), dtype=np.float64)
-        scale_np = np.asarray(self.scale.tensor(), dtype=np.float64)
-        in_support = v_np >= 0
-        z = v_np / scale_np
-        lp = (math.log(2.0) - 0.5 * math.log(2.0 * math.pi)
-              - np.log(scale_np) - 0.5 * z * z)
-        return _wrap_numpy(np.where(in_support, lp, -np.inf))
+        # log p(v) = log2 - 0.5 log(2pi) - log(scale) - 0.5 (v/scale)^2 for v>=0,
+        # -inf otherwise. Built from Variable ops so the gradient flows to
+        # scale; the support mask uses the autograd-aware where (gradient only
+        # on the selected in-support branch, never the constant -inf branch).
+        value = _to_variable(value)
+        z = value / self.scale
+        smooth = (math.log(2.0) - 0.5 * math.log(2.0 * math.pi)
+                  - _tz.log(self.scale) - 0.5 * z * z)
+        cond = Variable(value >= 0, False)  # bool mask Tensor -> Variable
+        sm_shape = tuple(smooth.shape)
+        neg_inf = Variable(
+            Tensor.from_numpy(np.full(sm_shape if sm_shape else (1,),
+                                      -np.inf, dtype=np.float32)),
+            False)
+        return _tz.where(cond, smooth, neg_inf)
 
     def cdf(self, value):
         scipy_special = _require_scipy_special()

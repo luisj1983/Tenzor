@@ -715,11 +715,15 @@ auto fused_gelu_kernel(const Tensor& input) -> Tensor {
         double* out_data = result.data<double>();
         size_t n = static_cast<size_t>(input.numel());
 
+        // Full double-precision constants; the float `sqrt_2_over_pi`/`coeff`
+        // above carry only ~7 digits and would truncate the f64 result.
+        constexpr double sqrt_2_over_pi_d = 0.7978845608028654;
+        constexpr double coeff_d = 0.044715;
         #pragma omp parallel for if(n > ::tenzor::OmpThresholds::simple())
         for (size_t i = 0; i < n; ++i) {
             double x = in_data[i];
             double x_cubed = x * x * x;
-            double inner = sqrt_2_over_pi * (x + coeff * x_cubed);
+            double inner = sqrt_2_over_pi_d * (x + coeff_d * x_cubed);
             double tanh_val = std::tanh(inner);
             out_data[i] = 0.5 * x * (1.0 + tanh_val);
         }

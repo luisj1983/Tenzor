@@ -520,6 +520,15 @@ public:
         original_device_ = original_device;
         original_dtype_ = original_dtype;
 
+        // Max-mode backward must route gradient to the per-feature argmax row.
+        // Save a CPU Float32 view of the embeddings so backward can recompute
+        // the argmax (matching this forward's strict '>' tie-break exactly).
+        if (mode_ == "max" && original_device == Device::cpu()) {
+            max_emb_ = (emb_tensor.dtype() == DType::Float32)
+                ? emb_tensor
+                : emb_tensor.to(DType::Float32);
+        }
+
         // Dispatch to backend kernel if available (avoids CPU roundtrip on GPU)
         if (is_op_supported(OpId::EmbeddingBagForward, original_device.type)) {
             OpAttributes bag_attrs;
@@ -633,21 +642,47 @@ public:
         auto grad_emb = zeros({total_elements_, embedding_dim_}, DType::Float32, Device::cpu());
         auto grad_emb_ptr = grad_emb.data<float>();
 
-        for (int64_t bag = 0; bag < num_bags_; ++bag) {
-            int64_t start_idx = bag_starts_[bag];
-            int64_t end_idx = bag_ends_[bag];
-            int64_t bag_size = end_idx - start_idx;
-
-            if (bag_size <= 0) continue;
-
-            for (int64_t i = start_idx; i < end_idx; ++i) {
+        if (mode_ == "max") {
+            // Exact max backward: gradient flows only to the row that achieved
+            // the maximum for each feature within the bag.
+            if (!max_emb_.is_valid()) {
+                throw std::runtime_error(
+                    "EmbeddingBag(mode=\"max\") backward requires CPU embeddings; "
+                    "on-device max-mode backward is not implemented for non-CPU "
+                    "devices.");
+            }
+            const float* emb_ptr = max_emb_.data<float>();
+            for (int64_t bag = 0; bag < num_bags_; ++bag) {
+                int64_t start_idx = bag_starts_[bag];
+                int64_t end_idx = bag_ends_[bag];
+                if (end_idx - start_idx <= 0) continue;
                 for (int64_t j = 0; j < embedding_dim_; ++j) {
-                    float g = grad_ptr[bag * embedding_dim_ + j];
-                    if (mode_ == "mean") {
-                        g /= bag_size;
+                    int64_t arg = start_idx;
+                    float best = emb_ptr[start_idx * embedding_dim_ + j];
+                    for (int64_t i = start_idx + 1; i < end_idx; ++i) {
+                        float v = emb_ptr[i * embedding_dim_ + j];
+                        if (v > best) { best = v; arg = i; }
                     }
-                    // For "sum" and "max" (approximation), pass gradient through directly
-                    grad_emb_ptr[i * embedding_dim_ + j] = g;
+                    grad_emb_ptr[arg * embedding_dim_ + j] =
+                        grad_ptr[bag * embedding_dim_ + j];
+                }
+            }
+        } else {
+            for (int64_t bag = 0; bag < num_bags_; ++bag) {
+                int64_t start_idx = bag_starts_[bag];
+                int64_t end_idx = bag_ends_[bag];
+                int64_t bag_size = end_idx - start_idx;
+
+                if (bag_size <= 0) continue;
+
+                for (int64_t i = start_idx; i < end_idx; ++i) {
+                    for (int64_t j = 0; j < embedding_dim_; ++j) {
+                        float g = grad_ptr[bag * embedding_dim_ + j];
+                        if (mode_ == "mean") {
+                            g /= bag_size;
+                        }
+                        grad_emb_ptr[i * embedding_dim_ + j] = g;
+                    }
                 }
             }
         }
@@ -695,6 +730,7 @@ private:
     int64_t num_bags_ = 0;
     Device original_device_{Device::cpu()};
     DType original_dtype_ = DType::Float32;
+    Tensor max_emb_;  ///< CPU Float32 embeddings saved for exact max-mode argmax backward.
 };
 
 // ============================================================================

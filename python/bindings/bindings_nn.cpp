@@ -75,19 +75,28 @@ inline py::object _make_hook_ref(py::object hook) {
     if (PyWeakref_Check(hook.ptr())) {
         return hook;
     }
+    // Only BOUND METHODS get weak-ref'd. `self.register_forward_hook(self.m)`
+    // forms an owner<->hook cycle that Python's GC can't see (the strong ref
+    // lives C++-side), so we wrap the bound method in weakref.WeakMethod: the
+    // hook auto-detaches when the owner dies, breaking the cycle (audit-5 Z.17).
+    //
+    // Plain functions and lambdas do NOT implicitly reference the module, so
+    // weak-ref'ing them served no cycle-safety purpose and instead silently
+    // dropped the extremely common `register_forward_hook(lambda ...)` /
+    // `register_forward_hook(free_fn)` pattern: a callable with no other
+    // strong reference was GC'd before the next forward and never fired. Hold
+    // those STRONGLY, matching PyTorch's `_forward_hooks` OrderedDict, so they
+    // actually run. (A lambda that explicitly closes over the module is the
+    // user's own cycle to manage via handle.remove(), exactly as in PyTorch.)
     try {
-        py::module_ weakref_mod = py::module_::import("weakref");
-        // Bound method: WeakMethod is the only safe wrapper since the
-        // transient method object would otherwise be GC'd immediately
-        // after binding.
         if (py::hasattr(hook, "__self__") && py::hasattr(hook, "__func__")) {
+            py::module_ weakref_mod = py::module_::import("weakref");
             return weakref_mod.attr("WeakMethod")(hook);
         }
-        return weakref_mod.attr("ref")(hook);
     } catch (const py::error_already_set&) {
         PyErr_Clear();
-        return hook;  // strong reference fallback
     }
+    return hook;  // strong reference (functions, lambdas, builtins)
 }
 
 // Audit-5 Z.17: dereference a hook reference. If the referent is gone,
@@ -395,8 +404,8 @@ void register_nn(py::module_& m) {
         }, py::arg("hook"),
            "Register hook called after forward pass (PyTorch-compatible). "
            "Returns a RemovableHandle; call handle.remove() to detach. "
-           "The hook is held weakly when possible (audit-5 Z.17) to avoid "
-           "creating a reference cycle with the owning module.")
+           "Bound-method hooks are held weakly (cycle-safe, audit-5 Z.17); "
+           "function/lambda hooks are held strongly so they fire.")
         .def("register_forward_pre_hook", [](py::object self, py::object hook) -> py::object {
             auto& mod = self.cast<tenzor::nn::Module&>();
             py::object hook_ref = _make_hook_ref(hook);
@@ -410,7 +419,8 @@ void register_nn(py::module_& m) {
             return py::module_::import("tenzor.nn").attr("RemovableHandle")(self, hook_id);
         }, py::arg("hook"),
            "Register hook called before forward pass. Returns a "
-           "RemovableHandle. Held weakly when possible (audit-5 Z.17).")
+           "RemovableHandle. Bound-method hooks are held weakly (cycle-safe, "
+           "audit-5 Z.17); function/lambda hooks are held strongly.")
         .def("register_full_backward_hook", [](py::object self, py::object hook) -> py::object {
             auto& mod = self.cast<tenzor::nn::Module&>();
             py::object hook_ref = _make_hook_ref(hook);
@@ -424,8 +434,9 @@ void register_nn(py::module_& m) {
             return py::module_::import("tenzor.nn").attr("RemovableHandle")(self, hook_id);
         }, py::arg("hook"),
            "Register hook called after backward pass with full gradients. "
-           "Returns a RemovableHandle. Held weakly when possible "
-           "(audit-5 Z.17).")
+           "Returns a RemovableHandle. Bound-method hooks are "
+           "held weakly (cycle-safe, audit-5 Z.17); function/lambda hooks "
+           "are held strongly so they fire.")
         .def("register_full_backward_pre_hook", [](py::object self, py::object hook) -> py::object {
             auto& mod = self.cast<tenzor::nn::Module&>();
             py::object hook_ref = _make_hook_ref(hook);
@@ -439,7 +450,8 @@ void register_nn(py::module_& m) {
             return py::module_::import("tenzor.nn").attr("RemovableHandle")(self, hook_id);
         }, py::arg("hook"),
            "Register hook called before backward pass. Returns a "
-           "RemovableHandle. Held weakly when possible (audit-5 Z.17).")
+           "RemovableHandle. Bound-method hooks are held weakly (cycle-safe, "
+           "audit-5 Z.17); function/lambda hooks are held strongly.")
         .def("register_forward_post_hook", [](py::object self, py::object hook) -> py::object {
             auto& mod = self.cast<tenzor::nn::Module&>();
             py::object hook_ref = _make_hook_ref(hook);
@@ -453,7 +465,8 @@ void register_nn(py::module_& m) {
             return py::module_::import("tenzor.nn").attr("RemovableHandle")(self, hook_id);
         }, py::arg("hook"),
            "Register hook called after forward pass. Returns a "
-           "RemovableHandle. Held weakly when possible (audit-5 Z.17).")
+           "RemovableHandle. Bound-method hooks are held weakly (cycle-safe, "
+           "audit-5 Z.17); function/lambda hooks are held strongly.")
         .def("remove_hook", &tenzor::nn::Module::remove_hook,
              py::arg("hook_id"),
              "Remove a registered hook by ID")
@@ -2780,12 +2793,10 @@ void register_nn(py::module_& m) {
     nn.def("functional_embedding", [](const tenzor::Variable& input,
                                        const tenzor::Variable& weight,
                                        int64_t padding_idx) -> tenzor::Variable {
-        // Create embedding layer with weight's dimensions
-        auto weight_shape = weight.shape();
-        tenzor::nn::Embedding layer(weight_shape[0], weight_shape[1], padding_idx);
-        // Copy weight into embedding
-        // Note: functional embedding creates a new Embedding layer each call
-        return layer.forward_impl(input);
+        // Look up against the SUPPLIED weight, preserving the autograd graph
+        // back to it. The functional free function builds the EmbeddingBackward
+        // node (honouring padding_idx) wired to the caller's weight Variable.
+        return tenzor::nn::functional::embedding(input.tensor(), weight, padding_idx);
     }, py::arg("input"), py::arg("weight"), py::arg("padding_idx") = -1,
        "Lookup embeddings from weight matrix",
        py::call_guard<py::gil_scoped_release>());

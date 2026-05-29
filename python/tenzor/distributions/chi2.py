@@ -5,6 +5,7 @@ import math
 
 import numpy as np
 
+import tenzor as _tz
 from tenzor.tenzor_core import Tensor, Variable  # type: ignore
 
 from .distribution import (
@@ -24,7 +25,7 @@ class Chi2(Distribution):
     ``has_rsample = False``.
     """
 
-    has_rsample = False
+    has_rsample = True
 
     def __init__(self, df):
         self.df = _to_variable(df)
@@ -46,22 +47,27 @@ class Chi2(Distribution):
             dtype=np.float32,
         ))
 
+    def rsample(self, sample_shape=()):
+        # Chi2(df) = Gamma(df/2, 1/2); reparameterised via Gamma.rsample so the
+        # gradient flows to df.
+        from .gamma import Gamma
+        return Gamma(self.df * 0.5, 0.5).rsample(sample_shape)
+
     def log_prob(self, value):
-        gammaln = _require_scipy_special().gammaln
-        v_np = np.asarray(_to_variable(value).tensor(), dtype=np.float64)
-        k = np.asarray(self.df.tensor(), dtype=np.float64)
-        out = ((k / 2.0 - 1.0) * np.log(v_np)
-               - v_np / 2.0
-               - (k / 2.0) * math.log(2.0)
-               - gammaln(k / 2.0))
-        return _wrap_numpy(out)
+        # Chi2(k) = Gamma(k/2, 1/2). Autograd-aware (lgamma/log Variable
+        # overloads): gradient flows to df and value.
+        value = _to_variable(value)
+        half_k = self.df * 0.5
+        return ((half_k - 1.0) * _tz.log(value)
+                - value * 0.5
+                - half_k * math.log(2.0)
+                - _tz.lgamma(half_k))
 
     def entropy(self):
-        scipy_special = _require_scipy_special()
-        k = np.asarray(self.df.tensor(), dtype=np.float64)
-        out = (k / 2.0 + math.log(2.0) + scipy_special.gammaln(k / 2.0)
-               + (1.0 - k / 2.0) * scipy_special.digamma(k / 2.0))
-        return _wrap_numpy(out)
+        # H = k/2 + log 2 + lgamma(k/2) + (1 - k/2) ψ(k/2) — autograd-aware in df.
+        half_k = self.df * 0.5
+        return (half_k + math.log(2.0) + _tz.lgamma(half_k)
+                + (1.0 - half_k) * _tz.digamma(half_k))
 
     def cdf(self, value):
         gammainc = _require_scipy_special().gammainc

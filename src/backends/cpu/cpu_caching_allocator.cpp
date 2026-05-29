@@ -24,6 +24,8 @@
 
 #if defined(__linux__) || defined(__APPLE__)
 #include <sys/mman.h>  // madvise / MADV_DONTNEED (S16/A1 partial-range eviction)
+#include <unistd.h>    // sysconf(_SC_PAGESIZE) for page-aligned madvise
+#include <cstdint>     // uintptr_t
 #endif
 
 namespace tenzor {
@@ -1081,8 +1083,23 @@ size_t CPUCachingAllocator::evict_partial_free_ranges(size_t required_bytes) {
         // virtual range stops servicing allocs).
 #if defined(__linux__) || defined(__APPLE__)
         void* run_ptr = iters[best_start_idx]->second.ptr;
-        // sys/mman.h is included below to avoid dragging it into the header.
-        ::madvise(run_ptr, best_size, MADV_DONTNEED);
+        // MADV_DONTNEED requires a PAGE-aligned start and length. run_ptr is
+        // only ALIGNMENT(64)-byte aligned, so the previous raw call returned
+        // EINVAL and released no physical pages (cached_bytes shrank while RSS
+        // stayed put). Advise only the fully-contained interior pages.
+        const long page_sz = ::sysconf(_SC_PAGESIZE);
+        if (page_sz > 0) {
+            const uintptr_t pg = static_cast<uintptr_t>(page_sz);
+            const uintptr_t base = reinterpret_cast<uintptr_t>(run_ptr);
+            const uintptr_t aligned_start = (base + pg - 1) & ~(pg - 1);
+            const uintptr_t aligned_end =
+                (base + static_cast<uintptr_t>(best_size)) & ~(pg - 1);
+            if (aligned_end > aligned_start) {
+                ::madvise(reinterpret_cast<void*>(aligned_start),
+                          static_cast<size_t>(aligned_end - aligned_start),
+                          MADV_DONTNEED);
+            }
+        }
 #endif
 
         // Remove the run's blocks from global_free_blocks_.

@@ -146,6 +146,89 @@ auto make_stop_gradient_variable(tenzor::Tensor result, const Inputs&... inputs)
     return out;
 }
 
+// ----------------------------------------------------------------------------
+// B7: differentiable Variable.__setitem__.
+//
+// `self[key] = value` is inherently in-place, but Tenzor's autograd is
+// functional. To make the write differentiable WITHOUT a version-counter /
+// true-in-place engine, we:
+//   1. snapshot self's pre-write identity into a *distinct* Variable `base`
+//      that adopts self's current tensor + grad_fn (so it still connects to
+//      the upstream graph);
+//   2. compute the write functionally: masked_fill(base, M, scalar) or
+//      masked_scatter(base, M, value) where M is the boolean mask of the
+//      positions `key` selects;
+//   3. rebind self to that result (self's grad_fn becomes the scatter node).
+// Because `base != self`, the scatter's input edge points at `base`, not the
+// rebound `self`, so there is no graph cycle. Gradient then flows to self's
+// pre-write upstream (non-written positions) and to `value` (written ones) —
+// matching PyTorch's CopySlices semantics.
+//
+// Returns true if it performed a differentiable write; false when no live
+// autograd graph is involved (caller does a plain in-place mutation).
+bool variable_setitem_autograd(tenzor::Variable& self,
+                               py::object key, py::object value) {
+    if (!tenzor::is_grad_enabled()) {
+        return false;
+    }
+    bool value_needs_grad = py::isinstance<tenzor::Variable>(value) &&
+                            value.cast<tenzor::Variable>().requires_grad();
+    if (!self.requires_grad() && !value_needs_grad) {
+        return false;  // nothing to differentiate — plain in-place is correct
+    }
+
+    // (1) Build a full-shape boolean mask of the selected positions by reusing
+    //     the (non-differentiable) Tensor.__setitem__ machinery on a scratch
+    //     tensor. This transparently handles every key form Tensor indexing
+    //     supports (int / slice / stepped / bool-mask / tuple / ellipsis).
+    auto self_shape = std::vector<int64_t>(self.tensor().shape().begin(),
+                                           self.tensor().shape().end());
+    tenzor::Tensor mask_scratch =
+        tenzor::zeros(self_shape, tenzor::DType::Float32, self.tensor().device());
+    {
+        py::object mask_py =
+            py::cast(mask_scratch, py::return_value_policy::reference);
+        mask_py.attr("__setitem__")(key, py::float_(1.0));
+    }
+    tenzor::Tensor mask = mask_scratch.to(tenzor::DType::Bool);
+
+    // (2) Snapshot self into a distinct node so the scatter references the
+    //     pre-write state rather than the post-rebind self (no cycle).
+    tenzor::Variable base(self.tensor(), self.requires_grad());
+    base.set_grad_fn(self.grad_fn());
+
+    tenzor::Variable result;
+    if (py::isinstance<py::int_>(value) || py::isinstance<py::float_>(value)) {
+        // Scalar RHS: value is a non-differentiable constant.
+        result = tenzor::masked_fill(base, mask, value.cast<float>());
+    } else {
+        tenzor::Variable value_var =
+            py::isinstance<tenzor::Variable>(value)
+                ? value.cast<tenzor::Variable>()
+                : tenzor::Variable(value.cast<tenzor::Tensor>(), false);
+        // Broadcast value to the selected-region shape via an autograd add
+        // with zeros, so its flattened elements line up with the masked
+        // positions (row-major) and its graph is preserved through the write.
+        py::object self_t_py =
+            py::cast(self.tensor(), py::return_value_policy::reference);
+        tenzor::Tensor region =
+            self_t_py.attr("__getitem__")(key).cast<tenzor::Tensor>();
+        auto region_shape =
+            std::vector<int64_t>(region.shape().begin(), region.shape().end());
+        tenzor::Tensor zeros_region = tenzor::zeros(
+            region_shape, self.tensor().dtype(), self.tensor().device());
+        tenzor::Variable value_exp =
+            value_var + tenzor::Variable(zeros_region, false);
+        result = tenzor::masked_scatter(base, mask, value_exp);
+    }
+
+    // (3) Rebind self to the functional result.
+    self.set_data_view(result.tensor());
+    self.set_grad_fn(result.grad_fn());
+    self.set_requires_grad(result.requires_grad());
+    return true;
+}
+
 } // namespace
 
 void register_core(py::module_& m) {
@@ -1449,13 +1532,52 @@ Returns:
                     }
                 }
 
-                // ---- ``max_version`` clipping ----
-                // We currently emit the v0.7 "dltensor" capsule (legacy
-                // unversioned DLManagedTensor). Even when the consumer
-                // advertises v1.0+, the spec lets us downgrade. We accept
-                // the kwarg and otherwise ignore it; the consumer is
-                // responsible for handling our v0.7 capsule.
-                (void)max_version;
+                // ---- ``max_version`` negotiation ----
+                // DLPack 1.0 introduced the *versioned* container
+                // (``DLManagedTensorVersioned``) carried in a
+                // ``"dltensor_versioned"`` capsule. A consumer signals support
+                // by passing ``max_version=(major, minor)``. If it advertises
+                // major >= 1 we emit the versioned capsule (advertising our
+                // own DLPACK_MAJOR/MINOR and the IS_COPIED flag when ``copy``
+                // forced a clone); otherwise we emit the legacy unversioned
+                // ``"dltensor"`` capsule, which every consumer still accepts.
+                bool use_versioned = false;
+                if (!max_version.is_none()) {
+                    try {
+                        py::tuple mv = py::reinterpret_borrow<py::tuple>(max_version);
+                        if (mv.size() >= 1 && mv[0].cast<int>() >= 1) {
+                            use_versioned = true;
+                        }
+                    } catch (const std::exception&) {
+                        // Non-tuple / unparsable max_version: fall back to the
+                        // legacy capsule rather than failing the export.
+                    }
+                }
+
+                const bool forced_copy = (!copy.is_none() && py::cast<bool>(copy));
+
+                if (use_versioned) {
+                    DLManagedTensorVersioned* managed =
+                        tenzor::to_dlpack_versioned(src);
+                    if (forced_copy) {
+                        managed->flags |= DLPACK_FLAG_BITMASK_IS_COPIED;
+                    }
+                    // Destructor: only release if the consumer did NOT rename
+                    // the capsule to "used_dltensor_versioned" (i.e. it never
+                    // took ownership).
+                    auto destructor = [](PyObject* capsule) {
+                        if (PyCapsule_IsValid(capsule, "used_dltensor_versioned")) {
+                            return;
+                        }
+                        auto* m = static_cast<DLManagedTensorVersioned*>(
+                            PyCapsule_GetPointer(capsule, "dltensor_versioned"));
+                        if (m && m->deleter) {
+                            m->deleter(m);
+                        }
+                        if (PyErr_Occurred()) PyErr_Clear();
+                    };
+                    return py::capsule(managed, "dltensor_versioned", destructor);
+                }
 
                 DLManagedTensor* managed = tenzor::to_dlpack(src);
                 // Capsule destructor: if the consumer never renamed the
@@ -1490,7 +1612,8 @@ Returns:
             "entry points. Honors DLPack v0.8/v1.0 kwargs: ``stream`` (sync "
             "the source device when set), ``dl_device`` (cross-device "
             "transfer via tensor.to), ``copy`` (force-copy when True), "
-            "``max_version`` (clipped to our v0.7 capsule).")
+            "``max_version`` (emit the DLPack 1.0 versioned capsule when the "
+            "consumer advertises major >= 1, else the legacy capsule).")
         .def("__dlpack_device__", [](const tenzor::Tensor& self) -> py::tuple {
                 // Return (device_type_code, device_id) as int pair.
                 // device_type_code matches the DLDeviceType enum values:
@@ -1906,16 +2029,23 @@ Returns:
              if (t.numel() != 1) {
                  throw py::value_error("only single-element tensors can be converted to Python scalars");
              }
+             // Python's __index__ contract is integer-only: float (and complex)
+             // scalars are NOT valid indices and must raise TypeError, not be
+             // silently truncated. Cover all integer widths exactly.
              switch (t.dtype()) {
-                 case tenzor::DType::Float64: return static_cast<int64_t>(t.item<double>());
-                 case tenzor::DType::Float32: return static_cast<int64_t>(t.item<float>());
                  case tenzor::DType::Int64: return t.item<int64_t>();
                  case tenzor::DType::Int32: return static_cast<int64_t>(t.item<int32_t>());
                  case tenzor::DType::Int16: return static_cast<int64_t>(t.item<int16_t>());
-                 case tenzor::DType::Int8: return static_cast<int64_t>(t.item<int8_t>());
-                 case tenzor::DType::UInt8: return static_cast<int64_t>(t.item<uint8_t>());
-                 case tenzor::DType::Bool: return static_cast<int64_t>(t.item<bool>());
-                 default: return static_cast<int64_t>(t.item<float>());
+                 case tenzor::DType::Int8:  return static_cast<int64_t>(t.item<int8_t>());
+                 case tenzor::DType::UInt8:  return static_cast<int64_t>(t.item<uint8_t>());
+                 case tenzor::DType::UInt16: return static_cast<int64_t>(t.item<uint16_t>());
+                 case tenzor::DType::UInt32: return static_cast<int64_t>(t.item<uint32_t>());
+                 case tenzor::DType::UInt64: return static_cast<int64_t>(t.item<uint64_t>());
+                 case tenzor::DType::Bool:  return static_cast<int64_t>(t.item<bool>());
+                 default:
+                     throw py::type_error(
+                         "only integer tensors can be used as indices (__index__); "
+                         "got dtype " + std::string(tenzor::dtype_name(t.dtype())));
              }
              })
         // Lazy iteration: __len__ + __getitem__ protocol.
@@ -1956,21 +2086,34 @@ Returns:
         .def("__ge__", [](const tenzor::Tensor& a, double b) {
             return tenzor::ge(a, tenzor::full(std::vector<int64_t>{}, b, a.dtype(), a.device()));
         }, py::is_operator(), py::call_guard<py::gil_scoped_release>())
-        // Container protocol
-        .def("__len__", [](const tenzor::Tensor& t) -> int64_t {
-             if (t.ndim() == 0) throw py::value_error("len() of a 0-d tensor");
-             return t.shape()[0];
-             })
+        // Container protocol. (__len__ is registered once, above, raising
+        // TypeError for 0-d tensors to match NumPy/PyTorch — the duplicate that
+        // raised ValueError here was removed.)
         .def("__bool__", [](const tenzor::Tensor& t) -> bool {
              if (t.numel() != 1) throw py::value_error(
                  "The truth value of a Tensor with more than one element is ambiguous");
              switch (t.dtype()) {
                  case tenzor::DType::Float32: return t.item<float>() != 0.0f;
                  case tenzor::DType::Float64: return t.item<double>() != 0.0;
+                 case tenzor::DType::Float16:
+                 case tenzor::DType::BFloat16:
+                     return t.to(tenzor::DType::Float32).item<float>() != 0.0f;
+                 case tenzor::DType::Int8:  return t.item<int8_t>() != 0;
+                 case tenzor::DType::Int16: return t.item<int16_t>() != 0;
                  case tenzor::DType::Int32: return t.item<int32_t>() != 0;
                  case tenzor::DType::Int64: return t.item<int64_t>() != 0;
+                 case tenzor::DType::UInt8:  return t.item<uint8_t>() != 0;
+                 case tenzor::DType::UInt16: return t.item<uint16_t>() != 0;
+                 case tenzor::DType::UInt32: return t.item<uint32_t>() != 0;
+                 case tenzor::DType::UInt64: return t.item<uint64_t>() != 0;
                  case tenzor::DType::Bool: return t.item<bool>();
-                 default: return t.item<float>() != 0.0f;
+                 case tenzor::DType::Complex64:
+                     return t.item<std::complex<float>>() != std::complex<float>(0.0f, 0.0f);
+                 case tenzor::DType::Complex128:
+                     return t.item<std::complex<double>>() != std::complex<double>(0.0, 0.0);
+                 default:
+                     throw py::type_error(
+                         "bool(): unsupported dtype for scalar truth value");
              }
              })
         .def("__str__", [](const tenzor::Tensor& t) {
@@ -2857,6 +3000,47 @@ Returns:
                             ? (int_scalar_value != 0)
                             : (scalar_value != 0.0);
                         break;
+                    case tenzor::DType::Int8:
+                        *t.data<int8_t>() = is_integer_scalar
+                            ? static_cast<int8_t>(int_scalar_value)
+                            : static_cast<int8_t>(scalar_value);
+                        break;
+                    case tenzor::DType::Int16:
+                        *t.data<int16_t>() = is_integer_scalar
+                            ? static_cast<int16_t>(int_scalar_value)
+                            : static_cast<int16_t>(scalar_value);
+                        break;
+                    case tenzor::DType::UInt16:
+                        *t.data<uint16_t>() = is_integer_scalar
+                            ? static_cast<uint16_t>(int_scalar_value)
+                            : static_cast<uint16_t>(scalar_value);
+                        break;
+                    case tenzor::DType::UInt32:
+                        *t.data<uint32_t>() = is_integer_scalar
+                            ? static_cast<uint32_t>(int_scalar_value)
+                            : static_cast<uint32_t>(scalar_value);
+                        break;
+                    case tenzor::DType::UInt64:
+                        *t.data<uint64_t>() = is_integer_scalar
+                            ? static_cast<uint64_t>(int_scalar_value)
+                            : static_cast<uint64_t>(scalar_value);
+                        break;
+                    case tenzor::DType::Float16:
+                        *t.data<tenzor::Float16>() =
+                            tenzor::Float16(static_cast<float>(scalar_value));
+                        break;
+                    case tenzor::DType::BFloat16:
+                        *t.data<tenzor::BFloat16>() =
+                            tenzor::BFloat16(static_cast<float>(scalar_value));
+                        break;
+                    case tenzor::DType::Complex64:
+                        *t.data<std::complex<float>>() =
+                            std::complex<float>(static_cast<float>(scalar_value), 0.0f);
+                        break;
+                    case tenzor::DType::Complex128:
+                        *t.data<std::complex<double>>() =
+                            std::complex<double>(scalar_value, 0.0);
+                        break;
                     default:
                         throw std::runtime_error("Unsupported dtype for scalar assignment");
                 }
@@ -3613,6 +3797,11 @@ Returns:
     // GIL released for compute-heavy operations
     m.def("exp", [](const tenzor::Tensor& t) { return tenzor::exp(t); },
          "Element-wise exponential", py::call_guard<py::gil_scoped_release>());
+    // Variable overload — preserves autograd graph (mirrors log below) so
+    // distributions/losses can compose exp() without hand-wiring a Function.
+    m.def("exp", [](const tenzor::Variable& v) { return tenzor::exp(v); },
+         "Element-wise exponential (autograd-aware Variable overload)",
+         py::arg("input"));
     m.def("log", [](const tenzor::Tensor& t) { return tenzor::log(t); },
          "Element-wise natural logarithm", py::call_guard<py::gil_scoped_release>());
     // Audit J.3: Variable overload — preserves autograd graph so callers
@@ -3638,6 +3827,8 @@ Returns:
          "Element-wise sine", py::call_guard<py::gil_scoped_release>());
     m.def("cos", [](const tenzor::Tensor& t) { return tenzor::cos(t); },
          "Element-wise cosine", py::call_guard<py::gil_scoped_release>());
+    m.def("cos", [](const tenzor::Variable& v) { return tenzor::cos(v); },
+         "Element-wise cosine (autograd-aware Variable overload)", py::arg("input"));
     m.def("tanh", [](const tenzor::Tensor& t) { return tenzor::tanh(t); },
          "Element-wise hyperbolic tangent", py::call_guard<py::gil_scoped_release>());
     // Extended math operations
@@ -3663,8 +3854,17 @@ Returns:
          "Element-wise gamma function", py::call_guard<py::gil_scoped_release>());
     m.def("lgamma", [](const tenzor::Tensor& t) { return tenzor::lgamma(t); },
          "Element-wise log-gamma function", py::call_guard<py::gil_scoped_release>());
+    // Autograd-aware Variable overloads (derivative of lgamma is digamma) so
+    // distribution densities can flow gradients to their parameters without
+    // detaching through scipy/numpy.
+    m.def("lgamma", [](const tenzor::Variable& v) { return tenzor::lgamma(v); },
+         "Element-wise log-gamma (autograd-aware Variable overload)",
+         py::arg("input"));
     m.def("digamma", [](const tenzor::Tensor& t) { return tenzor::digamma(t); },
          "Element-wise digamma (psi) function", py::call_guard<py::gil_scoped_release>());
+    m.def("digamma", [](const tenzor::Variable& v) { return tenzor::digamma(v); },
+         "Element-wise digamma (autograd-aware Variable overload)",
+         py::arg("input"));
     m.def("polygamma", [](int64_t n, const tenzor::Tensor& t) { return tenzor::polygamma(n, t); },
          "Element-wise polygamma function", py::arg("n"), py::arg("input"),
          py::call_guard<py::gil_scoped_release>());
@@ -3683,6 +3883,8 @@ Returns:
          "Bessel function of second kind, order 1", py::call_guard<py::gil_scoped_release>());
     m.def("bessel_i0", [](const tenzor::Tensor& t) { return tenzor::bessel_i0(t); },
          "Modified Bessel function of first kind, order 0", py::call_guard<py::gil_scoped_release>());
+    m.def("bessel_i0", [](const tenzor::Variable& v) { return tenzor::bessel_i0(v); },
+         "Modified Bessel I0 (autograd-aware Variable overload)", py::arg("input"));
     m.def("bessel_i1", [](const tenzor::Tensor& t) { return tenzor::bessel_i1(t); },
          "Modified Bessel function of first kind, order 1", py::call_guard<py::gil_scoped_release>());
     m.def("sinc", [](const tenzor::Tensor& t) { return tenzor::sinc(t); },
@@ -4375,6 +4577,12 @@ Returns:
     m.def("where", [](const tenzor::Tensor& condition, const tenzor::Tensor& x, const tenzor::Tensor& y) {
          return tenzor::where(condition, x, y);
          }, "Conditional element selection",
+         py::arg("condition"), py::arg("x"), py::arg("y"),
+         py::call_guard<py::gil_scoped_release>());
+    // Autograd-aware overload: grad flows to whichever of x / y is selected.
+    m.def("where", [](const tenzor::Variable& condition, const tenzor::Variable& x, const tenzor::Variable& y) {
+         return tenzor::where(condition, x, y);
+         }, "Conditional element selection (differentiable)",
          py::arg("condition"), py::arg("x"), py::arg("y"),
          py::call_guard<py::gil_scoped_release>());
     m.def("take", &tenzor::take, "Take elements from flattened tensor",
@@ -5148,67 +5356,30 @@ Returns:
         // it is the same contract Tensor has had since R.18, and matches
         // PyTorch's behaviour for the in-place index_put_ pattern.
         .def("__setitem__", [](tenzor::Variable& self, py::object key, py::object value) {
-            // Audit-6 AA.9: PyTorch's contract — a leaf Variable that
-            // `requires_grad` cannot be the target of an in-place op because
-            // the write would silently discard the leaf invariant
-            // (`leaf.grad_fn == None`, `leaf.version_counter` unchanged).
-            // Previously Tenzor wrote through `self.tensor()` with no guard;
-            // saved-for-backward tensors then observed stale values without
-            // any version-counter trip, producing wrong gradients with no
-            // diagnostic. The long-term fix is to wire __setitem__ through
-            // an autograd `CopySlices` node with a version bump; the
-            // immediate fix is to refuse the write so the bug stops being
-            // silent.
+            // Leaf Variables that require grad cannot be modified in place: the
+            // write would break the leaf invariant (leaf.grad_fn == None and
+            // the leaf accumulates grad directly). PyTorch raises here, and so
+            // do we — detach or use a no_grad() block.
             if (self.requires_grad() && self.is_leaf()) {
                 throw py::value_error(
                     "a leaf Variable that requires grad is being used in an "
                     "in-place operation (Variable.__setitem__). Detach the "
                     "Variable first or wrap the write in a no_grad() block.");
             }
-            // S8 (audit follow-up to FF.22): the non-leaf + requires_grad
-            // path was previously a UserWarning followed by an unchecked
-            // mutation of ``self.tensor()``. No CopySlices autograd Function
-            // is registered, so saved-for-backward tensors that alias this
-            // storage observe the post-mutation values during backward and
-            // the gradient is silently computed against the wrong forward
-            // state. The audit (P0) committed to either implementing
-            // CopySlices or raising; the simpler correct-now fix is to
-            // raise. Non-leaf Variables without requires_grad have no graph
-            // to corrupt and continue to flow through the mutation path.
-            if (!self.is_leaf() && self.requires_grad()) {
-                throw std::runtime_error(
-                    "in-place modification of a non-leaf Variable with "
-                    "autograd is not yet supported in Tenzor (would require "
-                    "CopySlices). Detach the Variable first via `v.detach()` "
-                    "or rebuild the computation graph without in-place "
-                    "setitem.");
+            // B7: when a live autograd graph is involved (self and/or the
+            // value requires grad under an enabled grad context), perform a
+            // differentiable scatter (masked_scatter / masked_fill against a
+            // pre-write snapshot) and rebind self to the result so the write
+            // contributes to backward(). Returns false when there is no graph
+            // to preserve, in which case we fall through to plain in-place.
+            if (variable_setitem_autograd(self, key, value)) {
+                return;
             }
-            // Delegate to Tensor.__setitem__ semantics by reusing the
-            // underlying tensor reference. Unwrap a Variable value to its
-            // tensor first so the broadcast path sees a Tensor as expected.
-            //
-            // Audit-11 QQ.18: if the value-side Variable carries a live
-            // autograd graph (requires_grad=True under an enabled grad
-            // context), the unwrap to `.tensor()` would silently sever
-            // its grad_fn — the scatter-write would then not contribute
-            // to backward, returning zero gradients with no diagnostic.
-            // Raise loudly until IndexPut/CopySlices is implemented.
+            // No live graph: plain in-place mutation. Unwrap a Variable value
+            // to its tensor so the Tensor broadcast path sees a Tensor.
             py::object inner_value = value;
             if (py::isinstance<tenzor::Variable>(value)) {
-                auto value_var = value.cast<tenzor::Variable>();
-                if (value_var.requires_grad() && tenzor::is_grad_enabled()) {
-                    throw std::runtime_error(
-                        "Variable.__setitem__ does not yet preserve autograd "
-                        "through the value side; assigning a Variable with "
-                        "requires_grad=True would silently sever its graph "
-                        "and the scatter-write would not contribute to "
-                        "backward(). Detach the value (`.detach()`) or wrap "
-                        "the scatter as an explicit functional op (e.g. "
-                        "index_put, scatter). Tracked in audit-11 QQ.18 — "
-                        "full IndexPut/CopySlices implementation is a "
-                        "follow-up.");
-                }
-                inner_value = py::cast(value_var.tensor());
+                inner_value = py::cast(value.cast<tenzor::Variable>().tensor());
             }
             auto& dst = self.tensor();
             py::object py_dst = py::cast(&dst, py::return_value_policy::reference);

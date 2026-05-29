@@ -529,8 +529,11 @@ auto instance_norm(const Variable& input,
  *
  * @param input Index tensor (LongTensor)
  * @param weight Embedding weight matrix [num_embeddings, embedding_dim]
+ * @param padding_idx If >= 0, gradients for this embedding row are zeroed
+ *        (matches PyTorch F.embedding). Default -1 (no padding row).
  */
-auto embedding(const Tensor& input, const Variable& weight) -> Variable;
+auto embedding(const Tensor& input, const Variable& weight,
+               int64_t padding_idx = -1) -> Variable;
 
 // ============================================================================
 // Spatial (implemented in functional.cpp)

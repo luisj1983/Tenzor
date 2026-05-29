@@ -56,6 +56,20 @@ auto quantized_linear_kernel(
     int32_t input_zp,
     int32_t weight_zp
 ) -> void;
+auto quantized_linear_per_channel_kernel(
+    const int8_t* input,
+    const int8_t* weight,
+    const float* bias,
+    float* output,
+    int64_t batch_size,
+    int64_t in_features,
+    int64_t out_features,
+    float input_scale,
+    const float* weight_scales,
+    float output_scale,
+    int32_t input_zp,
+    const int32_t* weight_zps
+) -> void;
 } // namespace kernels
 } // namespace quantization
 } // namespace nn
@@ -73,10 +87,15 @@ public:
 static auto* const env =
     ::testing::AddGlobalTestEnvironment(new QuantizedLinearSignedEnv);
 
-// Hand-written int32 reference matching the kernel's math exactly.
-// output[b][o] = (sum_k int32(input[b][k]) * int32(weight[o][k])
-//                 - input_zp * weight_zp * K) * (input_scale * weight_scale / output_scale)
-//                + bias[o]
+// Hand-written int32 GROUND-TRUTH reference for asymmetric quantization.
+// The quantized dot product is defined by the dequantized values:
+//   x_real = input_scale  * (q_x - input_zp)
+//   w_real = weight_scale * (q_w - weight_zp)
+//   output[b][o] = (1/output_scale) * sum_k x_real * w_real + bias[o]
+//               = combined_scale * sum_k (q_x - input_zp)(q_w - weight_zp) + bias[o]
+// We expand the per-element (q_x - input_zp)(q_w - weight_zp) directly so this
+// reference is independent of however the kernel decomposes the zero-point
+// correction (raw dot minus cross terms). This is the true definition.
 void scalar_reference(
     const int8_t* input,
     const int8_t* weight,
@@ -98,10 +117,9 @@ void scalar_reference(
             const int8_t* in_row = input + b * in_features;
             const int8_t* wt_row = weight + o * in_features;
             for (int64_t k = 0; k < in_features; ++k) {
-                acc += static_cast<int32_t>(in_row[k]) *
-                       static_cast<int32_t>(wt_row[k]);
+                acc += (static_cast<int32_t>(in_row[k]) - input_zp) *
+                       (static_cast<int32_t>(wt_row[k]) - weight_zp);
             }
-            acc -= input_zp * weight_zp * static_cast<int32_t>(in_features);
             float v = static_cast<float>(acc) * combined_scale;
             if (bias != nullptr) v += bias[o];
             output[b * out_features + o] = v;
@@ -272,4 +290,61 @@ TEST(QuantizedLinearSigned, NonZeroZeroPointsMatchScalarReference) {
                            0.02f, 0.02f, 0.02f,
                            /*input_zp=*/5,
                            /*weight_zp=*/-3);
+}
+
+// ---------------------------------------------------------------------------
+// Per-channel asymmetric quantization: each output channel has its own
+// weight_scale and weight_zp. Ground-truth uses the full (q - zp) expansion.
+// This exercises quantized_linear_per_channel_kernel's zero-point correction.
+// ---------------------------------------------------------------------------
+TEST(QuantizedLinearSigned, PerChannelNonZeroZeroPointsMatchGroundTruth) {
+    std::vector<int8_t> input(kBatch * kIn);
+    std::vector<int8_t> weight(kOut * kIn);
+    std::vector<float> bias(kOut);
+    std::vector<float> weight_scales(kOut);
+    std::vector<int32_t> weight_zps(kOut);
+
+    std::mt19937 rng(0x12345678);
+    std::uniform_int_distribution<int> idist(-128, 127);
+    std::uniform_int_distribution<int> wdist(-127, 127);
+    std::uniform_int_distribution<int> wzpdist(-8, 8);
+    std::uniform_real_distribution<float> sdist(0.005f, 0.05f);
+    std::uniform_real_distribution<float> bdist(-0.5f, 0.5f);
+    for (auto& v : input) v = static_cast<int8_t>(idist(rng));
+    for (auto& v : weight) v = static_cast<int8_t>(wdist(rng));
+    for (auto& v : bias) v = bdist(rng);
+    for (auto& v : weight_scales) v = sdist(rng);
+    for (auto& v : weight_zps) v = wzpdist(rng);
+
+    const float input_scale = 0.0125f;
+    const float output_scale = 0.03f;
+    const int32_t input_zp = 7;
+
+    std::vector<float> simd_out(kBatch * kOut, 0.0f);
+    std::vector<float> ref_out(kBatch * kOut, 0.0f);
+
+    tenzor::nn::quantization::kernels::quantized_linear_per_channel_kernel(
+        input.data(), weight.data(), bias.data(), simd_out.data(),
+        kBatch, kIn, kOut,
+        input_scale, weight_scales.data(), output_scale,
+        input_zp, weight_zps.data());
+
+    for (int64_t b = 0; b < kBatch; ++b) {
+        for (int64_t o = 0; o < kOut; ++o) {
+            int32_t acc = 0;
+            const int8_t* in_row = input.data() + b * kIn;
+            const int8_t* wt_row = weight.data() + o * kIn;
+            for (int64_t k = 0; k < kIn; ++k) {
+                acc += (static_cast<int32_t>(in_row[k]) - input_zp) *
+                       (static_cast<int32_t>(wt_row[k]) - weight_zps[o]);
+            }
+            float combined = input_scale * weight_scales[o] / output_scale;
+            ref_out[b * kOut + o] = static_cast<float>(acc) * combined + bias[o];
+        }
+    }
+
+    for (int64_t i = 0; i < kBatch * kOut; ++i) {
+        ASSERT_FLOAT_EQ(simd_out[i], ref_out[i])
+            << "per-channel mismatch at i=" << i;
+    }
 }
