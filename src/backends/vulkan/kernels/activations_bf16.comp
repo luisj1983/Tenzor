@@ -66,6 +66,14 @@ float swish(float x) {
     return x / (1.0 + exp(-x));
 }
 
+float hardswish(float x) {
+    return x * clamp(x + 3.0, 0.0, 6.0) * (1.0 / 6.0);
+}
+
+float hardsigmoid(float x) {
+    return clamp(x + 3.0, 0.0, 6.0) * (1.0 / 6.0);
+}
+
 float apply_activation(float x) {
     switch (params.activation) {
         case 0: return relu(x);
@@ -74,6 +82,8 @@ float apply_activation(float x) {
         case 3: return gelu(x);
         case 4: return leaky_relu(x, params.alpha);
         case 5: return swish(x);
+        case 10: return hardswish(x);
+        case 11: return hardsigmoid(x);
         default: return x;
     }
 }

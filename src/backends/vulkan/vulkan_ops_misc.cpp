@@ -2951,6 +2951,147 @@ auto VulkanBackend::dispatchDepthwiseConv2d(const Tensor& input, const Tensor& w
     return output;
 }
 
+// Depthwise Conv1d (groups == channels). Contract: input [N,C,1,L],
+// weight [C,1,1,kL], output [N,C,1,L_out]. Float32/Float64 native; Float16/
+// BFloat16 widen to Float32 (each cast is the natural per-element conversion).
+auto VulkanBackend::dispatchDepthwiseConv1d(const Tensor& input, const Tensor& weight,
+                                            const Tensor* bias, int64_t stride,
+                                            int64_t padding, int64_t dilation) -> Tensor {
+    DType in_dt = input.dtype();
+    if (in_dt == DType::Float16 || in_dt == DType::BFloat16) {
+        Tensor in32 = input.to(DType::Float32);
+        Tensor w32  = weight.to(DType::Float32);
+        Tensor b32; const Tensor* bp = nullptr;
+        if (bias && bias->numel() > 0) { b32 = bias->to(DType::Float32); bp = &b32; }
+        return dispatchDepthwiseConv1d(in32, w32, bp, stride, padding, dilation).to(in_dt);
+    }
+
+    auto is = input.shape();   // [N,C,1,L]
+    auto ws = weight.shape();  // [C,1,1,kL]
+    int64_t N = is[0], C = is[1], L = is[3], kL = ws[3];
+    int64_t Lo = (L + 2 * padding - dilation * (kL - 1) - 1) / stride + 1;
+    int64_t out_elements = N * C * Lo;
+
+    int32_t device_id = input.device().index;
+    bool is_f64 = (in_dt == DType::Float64);
+    std::string shader = is_f64 ? "depthwise_conv1d_f64" : "depthwise_conv1d";
+    auto* pipeline = getPipeline(shader, device_id);
+
+    Tensor output({N, C, 1, Lo}, in_dt, input.device());
+
+    Tensor bias_tensor;
+    bool has_bias = (bias && bias->numel() > 0);
+    if (has_bias) bias_tensor = *bias;
+    else { bias_tensor = Tensor({1}, in_dt, input.device()); bias_tensor = dispatchFill(bias_tensor, 0.0f); }
+
+    struct {
+        uint32_t n_elements; uint32_t N; uint32_t C; uint32_t L; uint32_t kL;
+        uint32_t stride; uint32_t pad; uint32_t dil; uint32_t Lo; uint32_t has_bias;
+    } pc;
+    pc.n_elements = (uint32_t)out_elements; pc.N = (uint32_t)N; pc.C = (uint32_t)C;
+    pc.L = (uint32_t)L; pc.kL = (uint32_t)kL; pc.stride = (uint32_t)stride;
+    pc.pad = (uint32_t)padding; pc.dil = (uint32_t)dilation; pc.Lo = (uint32_t)Lo;
+    pc.has_bias = has_bias ? 1u : 0u;
+
+    size_t elem = input.dtype_size();
+    std::vector<std::pair<uint32_t, const void*>> bindings = {
+        {0, input.data_ptr()}, {1, weight.data_ptr()},
+        {2, bias_tensor.data_ptr()}, {3, output.data_ptr()}
+    };
+    std::vector<size_t> sizes = {
+        (size_t)(N * C * L) * elem, (size_t)(C * kL) * elem,
+        (size_t)bias_tensor.numel() * elem, (size_t)out_elements * elem
+    };
+    VkDescriptorSet ds = allocateAndWriteDescriptorSet(device_id, pipeline, bindings, sizes);
+
+    VkCommandBuffer cmd = beginSingleTimeCommands(device_id);
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->layout(), 0, 1, &ds, 0, nullptr);
+    vkCmdPushConstants(cmd, pipeline->layout(), VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), &pc);
+    vkCmdDispatch(cmd, div_wg(out_elements, devices_[device_id].workgroupSize), 1, 1);
+    insertComputeOnlyBarrier(cmd);
+    endSingleTimeCommands(cmd, device_id);
+    return output;
+}
+
+// Depthwise Conv3d (groups == channels). Contract: input [N,C,D,H,W],
+// weight [C,1,kD,kH,kW], output [N,C,Do,Ho,Wo]. Float32/Float64 native;
+// Float16/BFloat16 widen to Float32.
+auto VulkanBackend::dispatchDepthwiseConv3d(const Tensor& input, const Tensor& weight,
+                                            const Tensor* bias,
+                                            int64_t sD, int64_t sH, int64_t sW,
+                                            int64_t pD, int64_t pH, int64_t pW,
+                                            int64_t dD, int64_t dH, int64_t dW) -> Tensor {
+    DType in_dt = input.dtype();
+    if (in_dt == DType::Float16 || in_dt == DType::BFloat16) {
+        Tensor in32 = input.to(DType::Float32);
+        Tensor w32  = weight.to(DType::Float32);
+        Tensor b32; const Tensor* bp = nullptr;
+        if (bias && bias->numel() > 0) { b32 = bias->to(DType::Float32); bp = &b32; }
+        return dispatchDepthwiseConv3d(in32, w32, bp, sD, sH, sW, pD, pH, pW, dD, dH, dW).to(in_dt);
+    }
+
+    auto is = input.shape();   // [N,C,D,H,W]
+    auto ws = weight.shape();  // [C,1,kD,kH,kW]
+    int64_t N = is[0], C = is[1], Di = is[2], Hi = is[3], Wi = is[4];
+    int64_t kD = ws[2], kH = ws[3], kW = ws[4];
+    int64_t Do = (Di + 2 * pD - dD * (kD - 1) - 1) / sD + 1;
+    int64_t Ho = (Hi + 2 * pH - dH * (kH - 1) - 1) / sH + 1;
+    int64_t Wo = (Wi + 2 * pW - dW * (kW - 1) - 1) / sW + 1;
+    int64_t out_elements = N * C * Do * Ho * Wo;
+
+    int32_t device_id = input.device().index;
+    bool is_f64 = (in_dt == DType::Float64);
+    std::string shader = is_f64 ? "depthwise_conv3d_f64" : "depthwise_conv3d";
+    auto* pipeline = getPipeline(shader, device_id);
+
+    Tensor output({N, C, Do, Ho, Wo}, in_dt, input.device());
+
+    Tensor bias_tensor;
+    bool has_bias = (bias && bias->numel() > 0);
+    if (has_bias) bias_tensor = *bias;
+    else { bias_tensor = Tensor({1}, in_dt, input.device()); bias_tensor = dispatchFill(bias_tensor, 0.0f); }
+
+    struct {
+        uint32_t n_elements; uint32_t N; uint32_t C;
+        uint32_t Di; uint32_t Hi; uint32_t Wi;
+        uint32_t kD; uint32_t kH; uint32_t kW;
+        uint32_t Do; uint32_t Ho; uint32_t Wo;
+        uint32_t sD; uint32_t sH; uint32_t sW;
+        uint32_t pD; uint32_t pH; uint32_t pW;
+        uint32_t dD; uint32_t dH; uint32_t dW;
+        uint32_t has_bias;
+    } pc;
+    pc.n_elements = (uint32_t)out_elements; pc.N = (uint32_t)N; pc.C = (uint32_t)C;
+    pc.Di = (uint32_t)Di; pc.Hi = (uint32_t)Hi; pc.Wi = (uint32_t)Wi;
+    pc.kD = (uint32_t)kD; pc.kH = (uint32_t)kH; pc.kW = (uint32_t)kW;
+    pc.Do = (uint32_t)Do; pc.Ho = (uint32_t)Ho; pc.Wo = (uint32_t)Wo;
+    pc.sD = (uint32_t)sD; pc.sH = (uint32_t)sH; pc.sW = (uint32_t)sW;
+    pc.pD = (uint32_t)pD; pc.pH = (uint32_t)pH; pc.pW = (uint32_t)pW;
+    pc.dD = (uint32_t)dD; pc.dH = (uint32_t)dH; pc.dW = (uint32_t)dW;
+    pc.has_bias = has_bias ? 1u : 0u;
+
+    size_t elem = input.dtype_size();
+    std::vector<std::pair<uint32_t, const void*>> bindings = {
+        {0, input.data_ptr()}, {1, weight.data_ptr()},
+        {2, bias_tensor.data_ptr()}, {3, output.data_ptr()}
+    };
+    std::vector<size_t> sizes = {
+        (size_t)(N * C * Di * Hi * Wi) * elem, (size_t)(C * kD * kH * kW) * elem,
+        (size_t)bias_tensor.numel() * elem, (size_t)out_elements * elem
+    };
+    VkDescriptorSet ds = allocateAndWriteDescriptorSet(device_id, pipeline, bindings, sizes);
+
+    VkCommandBuffer cmd = beginSingleTimeCommands(device_id);
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->layout(), 0, 1, &ds, 0, nullptr);
+    vkCmdPushConstants(cmd, pipeline->layout(), VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), &pc);
+    vkCmdDispatch(cmd, div_wg(out_elements, devices_[device_id].workgroupSize), 1, 1);
+    insertComputeOnlyBarrier(cmd);
+    endSingleTimeCommands(cmd, device_id);
+    return output;
+}
+
 /**
  * @brief Adaptive max pool 2D backward — routes gradients via saved indices.
  */

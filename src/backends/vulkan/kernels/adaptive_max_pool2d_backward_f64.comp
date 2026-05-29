@@ -1,14 +1,21 @@
 #version 450
 #extension GL_EXT_shader_explicit_arithmetic_types_float64 : require
-#extension GL_EXT_shader_atomic_float : enable
+#extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
+#extension GL_EXT_shader_atomic_int64 : require
 
-// Adaptive Max Pool 2D Backward Pass — Float64 variant
-// Note: atomicAdd for double requires GL_EXT_shader_atomic_float or CAS loop fallback
+// Adaptive Max Pool 2D Backward Pass — Float64 variant.
+//
+// Adaptive pooling routinely produces OVERLAPPING receptive fields, so multiple
+// output gradients can target the same grad_input element. Accumulation must be
+// atomic; a plain `+=` (the previous "last write wins" approximation) silently
+// drops gradient contributions. Doubles are accumulated via a 64-bit CAS loop
+// (matching the f16/bf16 siblings and max_pool2d_backward_f64.comp); grad_input
+// is therefore typed uint64_t over a zero-initialised Float64 host buffer.
 layout(local_size_x_id = 0) in;
 
-layout(binding = 0) buffer GradOutput { double grad_output[]; };
+layout(binding = 0) buffer GradOutput { float64_t grad_output[]; };
 layout(binding = 1) buffer Indices { int indices[]; };
-layout(binding = 2) buffer GradInput { double grad_input[]; };
+layout(binding = 2) buffer GradInput { uint64_t grad_input[]; };
 
 layout(push_constant) uniform PushConstants {
     uint n_elements;
@@ -18,18 +25,37 @@ layout(push_constant) uniform PushConstants {
     uint in_w;
 } params;
 
+// Bit-cast helpers
+float64_t bitsToF64(uint64_t bits) {
+    return float64_t(packDouble2x32(uvec2(uint(bits), uint(bits >> 32u))));
+}
+
+uint64_t f64ToBits(float64_t val) {
+    uvec2 v = unpackDouble2x32(double(val));
+    return uint64_t(v.x) | (uint64_t(v.y) << 32u);
+}
+
+void atomicAddF64(uint idx, float64_t val) {
+    uint64_t old_bits = grad_input[idx];
+    uint64_t new_bits;
+    for (int attempt = 0; attempt < 65536; ++attempt) {
+        float64_t old_val = bitsToF64(old_bits);
+        new_bits = f64ToBits(old_val + val);
+        uint64_t result = atomicCompSwap(grad_input[idx], old_bits, new_bits);
+        if (result == old_bits) return;
+        old_bits = result;
+    }
+    grad_input[idx] = new_bits;
+}
+
 void main() {
     uint idx = gl_GlobalInvocationID.x;
     if (idx >= params.n_elements) return;
 
-    double grad = grad_output[idx];
+    float64_t grad = grad_output[idx];
     int target_idx = indices[idx];
 
-    // For Float64, we use a simple non-atomic write since adaptive max pool
-    // forward pass produces non-overlapping indices in typical usage.
-    // If overlap occurs, the last write wins (acceptable approximation for F64
-    // where atomicAdd for double is not widely supported).
     if (target_idx >= 0 && target_idx < int(params.grad_input_size)) {
-        grad_input[target_idx] += grad;
+        atomicAddF64(uint(target_idx), grad);
     }
 }

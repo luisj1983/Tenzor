@@ -440,6 +440,15 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
         return std::vector<Tensor>{get_vulkan_backend()->dispatchActivation("softplus", inputs[0], 9, attrs.get_float(AttrKey::Beta, 1.0))};
     });
 
+    // Forward-only (backward autograd-composed via clamp+mul, matching CPU).
+    // Opcodes 10/11 match the activation switch in activations*.comp.
+    table.register_kernel(OpId::Hardswish, [](std::span<const Tensor> inputs, const OpAttributes&) {
+        return std::vector<Tensor>{get_vulkan_backend()->dispatchActivation("hardswish", inputs[0], 10, 0.0f)};
+    });
+    table.register_kernel(OpId::Hardsigmoid, [](std::span<const Tensor> inputs, const OpAttributes&) {
+        return std::vector<Tensor>{get_vulkan_backend()->dispatchActivation("hardsigmoid", inputs[0], 11, 0.0f)};
+    });
+
     table.register_kernel(OpId::SoftplusBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
         return std::vector<Tensor>{get_vulkan_backend()->dispatchActivationBackward("softplus_backward", inputs[0], inputs[1], 8, attrs.get_float(AttrKey::Beta, 1.0))};
     });
@@ -1618,23 +1627,32 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
         return get_vulkan_backend()->dispatchDepthwiseConv2d(inputs[0], inputs[1], bias, stride[0], padding[0], dilation[0]);
     });
 
-    // CC.5: 1D / 3D depthwise dispatch surface. See cpu_kernel_registry.cpp
-    // for the full rationale — these handlers exist to make accidental
-    // dispatch (bypassing the NN-layer fallback) fail loudly instead of
-    // silently miscomputing. Real Vulkan shaders are a follow-up.
+    // Real native depthwise 1D/3D shaders (forward; backward autograd-composed).
     table.register_kernel(OpId::DepthwiseConv1d,
-        [](std::span<const Tensor>, const OpAttributes&) -> std::vector<Tensor> {
-            throw std::runtime_error(
-                "DepthwiseConv1d (Vulkan): not yet implemented; route through "
-                "generic Conv1dForward (Conv1d::forward_impl falls back "
-                "automatically when this OpId is unregistered).");
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            int64_t s = attrs.get_int(AttrKey::Stride, 1);
+            int64_t p = attrs.get_int(AttrKey::Padding, 0);
+            int64_t d = attrs.get_int(AttrKey::Dilation, 1);
+            const Tensor* bias = inputs.size() > 2 ? &inputs[2] : nullptr;
+            return {get_vulkan_backend()->dispatchDepthwiseConv1d(inputs[0], inputs[1], bias, s, p, d)};
         });
     table.register_kernel(OpId::DepthwiseConv3d,
-        [](std::span<const Tensor>, const OpAttributes&) -> std::vector<Tensor> {
-            throw std::runtime_error(
-                "DepthwiseConv3d (Vulkan): not yet implemented; route through "
-                "generic Conv3dForward (Conv3d::forward_impl falls back "
-                "automatically when this OpId is unregistered).");
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            int64_t s = attrs.get_int(AttrKey::Stride, 1);
+            int64_t p = attrs.get_int(AttrKey::Padding, 0);
+            int64_t d = attrs.get_int(AttrKey::Dilation, 1);
+            int64_t sD = attrs.has(AttrKey::StrideD) ? attrs.get_int(AttrKey::StrideD) : s;
+            int64_t sH = attrs.has(AttrKey::StrideH) ? attrs.get_int(AttrKey::StrideH) : s;
+            int64_t sW = attrs.has(AttrKey::StrideW) ? attrs.get_int(AttrKey::StrideW) : s;
+            int64_t pD = attrs.has(AttrKey::PaddingD) ? attrs.get_int(AttrKey::PaddingD) : p;
+            int64_t pH = attrs.has(AttrKey::PaddingH) ? attrs.get_int(AttrKey::PaddingH) : p;
+            int64_t pW = attrs.has(AttrKey::PaddingW) ? attrs.get_int(AttrKey::PaddingW) : p;
+            int64_t dD = attrs.has(AttrKey::DilationD) ? attrs.get_int(AttrKey::DilationD) : d;
+            int64_t dH = attrs.has(AttrKey::DilationH) ? attrs.get_int(AttrKey::DilationH) : d;
+            int64_t dW = attrs.has(AttrKey::DilationW) ? attrs.get_int(AttrKey::DilationW) : d;
+            const Tensor* bias = inputs.size() > 2 ? &inputs[2] : nullptr;
+            return {get_vulkan_backend()->dispatchDepthwiseConv3d(inputs[0], inputs[1], bias,
+                                                                  sD, sH, sW, pD, pH, pW, dD, dH, dW)};
         });
 
     // DeformableConv2d (DCNv2) — inputs: {input, offset, weight, bias, mask}

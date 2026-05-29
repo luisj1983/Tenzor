@@ -10,6 +10,9 @@
 #include <gtest/gtest.h>
 #include <iostream>
 #include <tenzor/tenzor.hpp>
+#include <tenzor/backend/fast_dispatch.hpp>
+#include <tenzor/backend/op_attributes.hpp>
+#include <tenzor/ops/op_id.hpp>
 #include "../backend_test_fixture.hpp"
 #include "parity_test_utils.hpp"
 
@@ -96,6 +99,33 @@ TEST_P(NNActivationParity, Hardswish) {
         auto x = Variable(inputs[0], false);
         return nn::hardswish(x).tensor();
     }, {input}, 1e-5f, 1e-7f, "Hardswish");
+}
+
+// Direct-OpId parity: exercises the registered OpId::Hardswish / Hardsigmoid
+// kernels on every backend. The nn::hardswish/hardsigmoid path above composes
+// from clamp/mul and never reaches these kernels; these OpIds were previously
+// unregistered on all GPU backends (Lite models with these layers failed to
+// load). Regression guard for that parity gap.
+TEST_P(NNActivationParity, HardswishOpDirect) {
+    auto backends = get_available_backends();
+    REQUIRE_MULTI_BACKEND_OR_SKIP("nn activation parity");
+
+    auto input = randn({32, 64}, DType::Float32, Device::cpu());
+
+    test_operation_parity([](const std::vector<Tensor>& inputs) {
+        return dispatch(OpId::Hardswish, inputs, OpAttributes{})[0];
+    }, {input}, 1e-5f, 1e-7f, "HardswishOp");
+}
+
+TEST_P(NNActivationParity, HardsigmoidOpDirect) {
+    auto backends = get_available_backends();
+    REQUIRE_MULTI_BACKEND_OR_SKIP("nn activation parity");
+
+    auto input = randn({32, 64}, DType::Float32, Device::cpu());
+
+    test_operation_parity([](const std::vector<Tensor>& inputs) {
+        return dispatch(OpId::Hardsigmoid, inputs, OpAttributes{})[0];
+    }, {input}, 1e-5f, 1e-7f, "HardsigmoidOp");
 }
 
 TEST_P(NNActivationParity, Hardtanh) {

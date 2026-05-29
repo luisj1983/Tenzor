@@ -378,7 +378,7 @@ public:
 class FakeQuantizeFunction : public tenzor::Function {
 public:
     /**
-     * @brief Construct with quantization parameters.
+     * @brief Construct with per-tensor quantization parameters.
      *
      * @param scale Quantization scale factor
      * @param zero_point Quantization zero point
@@ -387,6 +387,18 @@ public:
      */
     FakeQuantizeFunction(float scale, float zero_point,
                          float quant_min, float quant_max);
+
+    /**
+     * @brief Construct with per-channel quantization parameters.
+     *
+     * @param scale 1-D scale tensor (one entry per channel along @p axis)
+     * @param zero_point 1-D zero-point tensor (per channel)
+     * @param quant_min Minimum quantized value
+     * @param quant_max Maximum quantized value
+     * @param axis Channel axis the per-channel params index into
+     */
+    FakeQuantizeFunction(Tensor scale, Tensor zero_point,
+                         float quant_min, float quant_max, int64_t axis);
 
     /**
      * @brief Forward: quantize then dequantize, saving input for backward.
@@ -399,10 +411,19 @@ public:
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
 
 private:
+    // Per-tensor (scalar) parameters; used when per_channel_ == false.
     float scale_;
     float zero_point_;
     float quant_min_;
     float quant_max_;
+
+    // Per-channel parameters; used when per_channel_ == true. scale_t_/
+    // zero_point_t_ are 1-D (length = channels along axis_) and are broadcast
+    // along axis_ in forward/backward.
+    bool per_channel_ = false;
+    Tensor scale_t_;
+    Tensor zero_point_t_;
+    int64_t axis_ = 0;
 };
 
 /**
@@ -424,6 +445,32 @@ auto fake_quantize_with_grad(
     float zero_point,
     float quant_min,
     float quant_max
+) -> Variable;
+
+
+/**
+ * @brief Per-channel straight-through fake quantization with autograd.
+ *
+ * Like fake_quantize_with_grad but @p scale / @p zero_point are 1-D tensors
+ * with one entry per channel along @p axis, broadcast across the other dims.
+ * Wires the STE so QAT gradients flow back to @p input for the in-range
+ * elements (per channel) and are zeroed for clamped elements.
+ *
+ * @param input Variable to fake-quantize
+ * @param scale 1-D per-channel scale tensor
+ * @param zero_point 1-D per-channel zero-point tensor
+ * @param quant_min Minimum quantized value
+ * @param quant_max Maximum quantized value
+ * @param axis Channel axis indexed by the per-channel params
+ * @return Fake-quantized Variable with an STE backward
+ */
+auto fake_quantize_per_channel_with_grad(
+    const Variable& input,
+    const Tensor& scale,
+    const Tensor& zero_point,
+    float quant_min,
+    float quant_max,
+    int64_t axis
 ) -> Variable;
 
 /**

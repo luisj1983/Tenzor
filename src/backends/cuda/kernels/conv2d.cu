@@ -3083,5 +3083,147 @@ auto deformable_conv2d_backward_weight_kernel(
     return grad_weight;
 }
 
+// ============================================================================
+// Depthwise Conv1d / Conv3d (forward, groups == channels).
+//   Conv1d contract: input [N,C,1,L], weight [C,1,1,kL], output [N,C,1,L_out].
+//   Conv3d contract: input [N,C,D,H,W], weight [C,1,kD,kH,kW], output [N,C,Do,Ho,Wo].
+// Float32/Float64 native; Float16/BFloat16 widen to Float32. Backward is
+// autograd-composed in the NN layer (no dedicated *Backward OpId).
+// ============================================================================
+template <typename T>
+__global__ void depthwise_conv1d_fwd_kernel(
+    const T* __restrict__ in, const T* __restrict__ w, const T* __restrict__ bias,
+    T* __restrict__ out, int N, int C, int L, int kL, int Lo,
+    int stride, int pad, int dil) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int total = N * C * Lo;
+    if (idx >= total) return;
+    int ol = idx % Lo;
+    int c  = (idx / Lo) % C;
+    int n  = idx / (C * Lo);
+    const T* in_nc = in + (n * C + c) * L;
+    const T* w_c   = w + c * kL;
+    T acc = bias ? bias[c] : T(0);
+    for (int k = 0; k < kL; ++k) {
+        int il = ol * stride - pad + k * dil;
+        if (il >= 0 && il < L) acc += in_nc[il] * w_c[k];
+    }
+    out[(n * C + c) * Lo + ol] = acc;
+}
+
+template <typename T>
+__global__ void depthwise_conv3d_fwd_kernel(
+    const T* __restrict__ in, const T* __restrict__ w, const T* __restrict__ bias,
+    T* __restrict__ out, int N, int C, int Di, int Hi, int Wi,
+    int kD, int kH, int kW, int Do, int Ho, int Wo,
+    int sD, int sH, int sW, int pD, int pH, int pW, int dD, int dH, int dW) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int total = N * C * Do * Ho * Wo;
+    if (idx >= total) return;
+    int ow = idx % Wo;
+    int oh = (idx / Wo) % Ho;
+    int od = (idx / (Wo * Ho)) % Do;
+    int c  = (idx / (Wo * Ho * Do)) % C;
+    int n  = idx / (C * Do * Ho * Wo);
+    const T* in_nc = in + (n * C + c) * Di * Hi * Wi;
+    const T* w_c   = w + c * kD * kH * kW;
+    T acc = bias ? bias[c] : T(0);
+    for (int kd = 0; kd < kD; ++kd) {
+        int id = od * sD - pD + kd * dD;
+        if (id < 0 || id >= Di) continue;
+        for (int kh = 0; kh < kH; ++kh) {
+            int ih = oh * sH - pH + kh * dH;
+            if (ih < 0 || ih >= Hi) continue;
+            for (int kw = 0; kw < kW; ++kw) {
+                int iw = ow * sW - pW + kw * dW;
+                if (iw < 0 || iw >= Wi) continue;
+                acc += in_nc[(id * Hi + ih) * Wi + iw] * w_c[(kd * kH + kh) * kW + kw];
+            }
+        }
+    }
+    out[(((n * C + c) * Do + od) * Ho + oh) * Wo + ow] = acc;
+}
+
+auto depthwise_conv1d_kernel(const Tensor& input, const Tensor& weight, const Tensor* bias,
+                             int64_t stride, int64_t padding, int64_t dilation,
+                             cudaStream_t stream) -> Tensor {
+    auto is = input.shape();   // [N,C,1,L]
+    auto ws = weight.shape();  // [C,1,1,kL]
+    int N = (int)is[0], C = (int)is[1], L = (int)is[3], kL = (int)ws[3];
+    int Lo = (int)((L + 2 * padding - dilation * (kL - 1) - 1) / stride + 1);
+    if (Lo <= 0) throw std::runtime_error("depthwise_conv1d (CUDA): non-positive output length");
+
+    auto run = [&](DType dt) {
+        Tensor in = input.dtype() == dt ? input.contiguous() : input.to(dt);
+        Tensor w  = weight.dtype() == dt ? weight.contiguous() : weight.to(dt);
+        Tensor b; const void* bptr = nullptr;
+        if (bias) { b = bias->dtype() == dt ? bias->contiguous() : bias->to(dt); bptr = b.data_ptr(); }
+        Tensor out({(int64_t)N, (int64_t)C, 1, (int64_t)Lo}, dt, input.device());
+        int total = N * C * Lo;
+        int blocks = (total + 255) / 256;
+        if (dt == DType::Float64) {
+            depthwise_conv1d_fwd_kernel<double><<<blocks, 256, 0, stream>>>(
+                in.data<double>(), w.data<double>(), (const double*)bptr, out.data<double>(),
+                N, C, L, kL, Lo, (int)stride, (int)padding, (int)dilation);
+        } else {
+            depthwise_conv1d_fwd_kernel<float><<<blocks, 256, 0, stream>>>(
+                in.data<float>(), w.data<float>(), (const float*)bptr, out.data<float>(),
+                N, C, L, kL, Lo, (int)stride, (int)padding, (int)dilation);
+        }
+        TENZOR_CUDA_POST_LAUNCH_CHECK();
+        return out;
+    };
+
+    DType in_dt = input.dtype();
+    if (in_dt == DType::Float64) return run(DType::Float64);
+    if (in_dt == DType::Float32) return run(DType::Float32);
+    if (in_dt == DType::Float16 || in_dt == DType::BFloat16) return run(DType::Float32).to(in_dt);
+    throw std::runtime_error("depthwise_conv1d (CUDA): unsupported dtype");
+}
+
+auto depthwise_conv3d_kernel(const Tensor& input, const Tensor& weight, const Tensor* bias,
+                             int64_t sD, int64_t sH, int64_t sW,
+                             int64_t pD, int64_t pH, int64_t pW,
+                             int64_t dD, int64_t dH, int64_t dW,
+                             cudaStream_t stream) -> Tensor {
+    auto is = input.shape();   // [N,C,D,H,W]
+    auto ws = weight.shape();  // [C,1,kD,kH,kW]
+    int N = (int)is[0], C = (int)is[1], Di = (int)is[2], Hi = (int)is[3], Wi = (int)is[4];
+    int kD = (int)ws[2], kH = (int)ws[3], kW = (int)ws[4];
+    int Do = (int)((Di + 2 * pD - dD * (kD - 1) - 1) / sD + 1);
+    int Ho = (int)((Hi + 2 * pH - dH * (kH - 1) - 1) / sH + 1);
+    int Wo = (int)((Wi + 2 * pW - dW * (kW - 1) - 1) / sW + 1);
+    if (Do <= 0 || Ho <= 0 || Wo <= 0) throw std::runtime_error("depthwise_conv3d (CUDA): non-positive output size");
+
+    auto run = [&](DType dt) {
+        Tensor in = input.dtype() == dt ? input.contiguous() : input.to(dt);
+        Tensor w  = weight.dtype() == dt ? weight.contiguous() : weight.to(dt);
+        Tensor b; const void* bptr = nullptr;
+        if (bias) { b = bias->dtype() == dt ? bias->contiguous() : bias->to(dt); bptr = b.data_ptr(); }
+        Tensor out({(int64_t)N, (int64_t)C, (int64_t)Do, (int64_t)Ho, (int64_t)Wo}, dt, input.device());
+        int total = N * C * Do * Ho * Wo;
+        int blocks = (total + 255) / 256;
+        if (dt == DType::Float64) {
+            depthwise_conv3d_fwd_kernel<double><<<blocks, 256, 0, stream>>>(
+                in.data<double>(), w.data<double>(), (const double*)bptr, out.data<double>(),
+                N, C, Di, Hi, Wi, kD, kH, kW, Do, Ho, Wo,
+                (int)sD,(int)sH,(int)sW,(int)pD,(int)pH,(int)pW,(int)dD,(int)dH,(int)dW);
+        } else {
+            depthwise_conv3d_fwd_kernel<float><<<blocks, 256, 0, stream>>>(
+                in.data<float>(), w.data<float>(), (const float*)bptr, out.data<float>(),
+                N, C, Di, Hi, Wi, kD, kH, kW, Do, Ho, Wo,
+                (int)sD,(int)sH,(int)sW,(int)pD,(int)pH,(int)pW,(int)dD,(int)dH,(int)dW);
+        }
+        TENZOR_CUDA_POST_LAUNCH_CHECK();
+        return out;
+    };
+
+    DType in_dt = input.dtype();
+    if (in_dt == DType::Float64) return run(DType::Float64);
+    if (in_dt == DType::Float32) return run(DType::Float32);
+    if (in_dt == DType::Float16 || in_dt == DType::BFloat16) return run(DType::Float32).to(in_dt);
+    throw std::runtime_error("depthwise_conv3d (CUDA): unsupported dtype");
+}
+
 } // namespace cuda
 } // namespace tenzor

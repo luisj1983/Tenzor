@@ -1,8 +1,10 @@
-"""Student's t distribution — Tensor-native (sample only).
+"""Student's t distribution — Tensor-native, reparameterisable.
 
-Proper reparameterisation for StudentT(df) routes through a Chi-square
-sample (``z / sqrt(chi2/df)``); since Chi2/Gamma have no reparam path
-in this implementation, StudentT.rsample is also unavailable.
+StudentT(df, loc, scale) is reparameterised as ``loc + scale * Z / sqrt(V / df)``
+where ``Z ~ Normal(0, 1)`` and ``V ~ Chi2(df)``. Chi2/Gamma provide a real
+reparameterised sampler (implicit reparameterisation, Figurnov et al. 2018), so
+``has_rsample = True`` and ``rsample`` flows gradients to ``df``, ``loc`` and
+``scale``.
 """
 from __future__ import annotations
 

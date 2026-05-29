@@ -73,6 +73,10 @@ private:
     };
 
     std::unordered_map<Device, DeviceStreams> device_streams_;
+    // Maps each live stream back to the backend that created it, so
+    // synchronize_stream()/destroy_stream() can route to the right backend
+    // (streams are opaque void* handles with no device tag of their own).
+    std::unordered_map<StreamHandle, Backend*> stream_owner_;
     std::mutex global_mutex_;
 
     // Number of streams to create per device
@@ -336,27 +340,28 @@ auto async_cpu_op(Op&& op) -> Future<Tensor> {
     return future;
 }
 
-#ifdef TENZOR_CUDA_ENABLED
 /**
- * @brief Internal helper for GPU async operations using CUDA streams
+ * @brief Internal helper for GPU async operations using per-device streams.
+ *
+ * Backend-agnostic: StreamManager hands out a real device stream/queue for the
+ * device (CUDA streams, ROCm hipStreams, OneAPI in-order queues, Vulkan
+ * timeline contexts) via the backend's stream interface; for backends/devices
+ * that have no stream the handle is null and the op simply runs on a worker
+ * thread. The op receives the StreamHandle and the stream is synchronized
+ * before the future resolves, so the result is always complete on return.
  */
 template<typename Op>
 auto async_gpu_op(const Device& device, Op&& op) -> Future<Tensor> {
     auto promise = std::make_shared<Promise<Tensor>>();
     auto future = Future<Tensor>(promise->get_state());
 
-    // Get stream for this device
+    // Get stream for this device (null if the backend has no stream support).
     StreamHandle stream = StreamManager::instance().get_stream(device);
 
-    // Submit operation on stream
     thread_pool().submit([promise, stream, device, op = std::forward<Op>(op)]() mutable {
         try {
-            // Execute on stream
             Tensor result = op(stream);
-
-            // Synchronize stream to ensure completion
             StreamManager::instance().synchronize_stream(stream);
-
             promise->set_value(std::move(result));
         } catch (...) {
             promise->set_exception(std::current_exception());
@@ -365,7 +370,6 @@ auto async_gpu_op(const Device& device, Op&& op) -> Future<Tensor> {
 
     return future;
 }
-#endif
 
 } // namespace detail
 

@@ -1455,85 +1455,49 @@ auto linalg_det_kernel(const Tensor& A, sycl::queue& queue) -> Tensor {
 
     auto launch_det = [&](auto* work_ptr, auto* res_ptr, auto dummy) {
         using T = std::remove_pointer_t<decltype(work_ptr)>;
-        check_size_limit<T>(n, "det");
-        size_t smem_lu = n * n * sizeof(T) + 4 * sizeof(T);
-        int threads = std::min(static_cast<int>(n), 128);
-        if (threads < 1) threads = 1;
 
-        // LU kernel: one work-group per batch element
+        // Global-memory LU with partial pivoting, one work-item per batch
+        // element. Operates directly on the global `work` buffer so there is
+        // no local-memory size cap — arbitrary N is supported.
         queue.submit([&](sycl::handler& h) {
-            sycl::local_accessor<char, 1> smem(sycl::range<1>(smem_lu), h);
             auto* data = work_ptr;
             auto* pivots = d_pivots.ptr;
             auto* info = d_info.ptr;
             int n_ = static_cast<int>(n);
-            h.parallel_for(sycl::nd_range<1>(nbatch * threads, threads),
-                [=](sycl::nd_item<1> item) {
-                    int batch_idx = item.get_group_linear_id();
-                    int tid = item.get_local_linear_id();
-                    int num_threads = item.get_local_range(0);
-
-                    char* smem_raw = smem.get_pointer();
-                    T* A = reinterpret_cast<T*>(smem_raw);
-                    T* scratch = A + n_ * n_;
-
-                    T* batch_data = data + batch_idx * n_ * n_;
-                    int* batch_pivots = pivots + batch_idx * n_;
-
-                    for (int idx = tid; idx < n_ * n_; idx += num_threads)
-                        A[idx] = batch_data[idx];
-                    sycl::group_barrier(item.get_group());
-
-                    int sign = 1;
-                    for (int k = 0; k < n_; k++) {
-                        if (tid == 0) {
-                            T max_val = sycl::fabs(A[k * n_ + k]);
-                            int max_row = k;
-                            for (int i = k + 1; i < n_; i++) {
-                                T val = sycl::fabs(A[i * n_ + k]);
-                                if (val > max_val) { max_val = val; max_row = i; }
-                            }
-                            batch_pivots[k] = max_row + 1;
-                            scratch[0] = static_cast<T>(max_row);
-                            if (max_val == T(0) && info)
-                                info[batch_idx] = k + 1;
+            h.parallel_for(sycl::range<1>(nbatch), [=](sycl::id<1> id) {
+                int batch_idx = static_cast<int>(id[0]);
+                T* A = data + batch_idx * n_ * n_;
+                int* batch_pivots = pivots + batch_idx * n_;
+                int sign = 1;
+                for (int k = 0; k < n_; k++) {
+                    T max_val = sycl::fabs(A[k * n_ + k]);
+                    int max_row = k;
+                    for (int i = k + 1; i < n_; i++) {
+                        T val = sycl::fabs(A[i * n_ + k]);
+                        if (val > max_val) { max_val = val; max_row = i; }
+                    }
+                    batch_pivots[k] = max_row + 1;
+                    if (max_val == T(0) && info) info[batch_idx] = k + 1;
+                    if (max_row != k) {
+                        for (int j = 0; j < n_; j++) {
+                            T tmp = A[k * n_ + j];
+                            A[k * n_ + j] = A[max_row * n_ + j];
+                            A[max_row * n_ + j] = tmp;
                         }
-                        sycl::group_barrier(item.get_group());
-
-                        int pivot_row = static_cast<int>(scratch[0]);
-                        if (pivot_row != k) {
-                            for (int j = tid; j < n_; j += num_threads) {
-                                T tmp = A[k * n_ + j];
-                                A[k * n_ + j] = A[pivot_row * n_ + j];
-                                A[pivot_row * n_ + j] = tmp;
-                            }
-                            if (tid == 0) sign = -sign;
-                            sycl::group_barrier(item.get_group());
-                        }
-
-                        T diag = A[k * n_ + k];
-                        if (diag != T(0)) {
-                            if (tid == 0) {
-                                for (int i = k + 1; i < n_; i++)
-                                    A[i * n_ + k] /= diag;
-                            }
-                            sycl::group_barrier(item.get_group());
-                            for (int i = k + 1 + tid; i < n_; i += num_threads) {
-                                T mult = A[i * n_ + k];
-                                for (int j = k + 1; j < n_; j++)
-                                    A[i * n_ + j] -= mult * A[k * n_ + j];
-                            }
-                            sycl::group_barrier(item.get_group());
+                        sign = -sign;
+                    }
+                    T diag = A[k * n_ + k];
+                    if (diag != T(0)) {
+                        for (int i = k + 1; i < n_; i++) {
+                            A[i * n_ + k] /= diag;
+                            T mult = A[i * n_ + k];
+                            for (int j = k + 1; j < n_; j++)
+                                A[i * n_ + j] -= mult * A[k * n_ + j];
                         }
                     }
-
-                    for (int idx = tid; idx < n_ * n_; idx += num_threads)
-                        batch_data[idx] = A[idx];
-                    if (tid == 0 && info) {
-                        if (info[batch_idx] == 0)
-                            info[batch_idx] = sign > 0 ? 0 : -1;
-                    }
-                });
+                }
+                if (info && info[batch_idx] == 0) info[batch_idx] = sign > 0 ? 0 : -1;
+            });
         }).wait();
 
         // Det kernel: product of diagonal * pivot sign
@@ -1588,127 +1552,72 @@ auto linalg_inv_kernel(const Tensor& A, sycl::queue& queue) -> Tensor {
 
     auto launch_inv = [&](auto* work_ptr, auto* res_ptr) {
         using T = std::remove_pointer_t<decltype(work_ptr)>;
-        check_size_limit<T>(n, "inv");
-        int threads = std::min(static_cast<int>(n), 128);
-        if (threads < 1) threads = 1;
-
-        // LU factorize
-        size_t smem_lu = n * n * sizeof(T) + 4 * sizeof(T);
+        // Global-memory LU with partial pivoting (one work-item per batch) —
+        // operates directly on the global buffer, so arbitrary N is supported.
         queue.submit([&](sycl::handler& h) {
-            sycl::local_accessor<char, 1> smem(sycl::range<1>(smem_lu), h);
             auto* data = work_ptr;
             auto* pivots = d_pivots.ptr;
-            auto* info = d_info.ptr;
             int n_ = static_cast<int>(n);
-            h.parallel_for(sycl::nd_range<1>(nbatch * threads, threads),
-                [=](sycl::nd_item<1> item) {
-                    int batch_idx = item.get_group_linear_id();
-                    int tid = item.get_local_linear_id();
-                    int num_threads = item.get_local_range(0);
-                    char* smem_raw = smem.get_pointer();
-                    T* A = reinterpret_cast<T*>(smem_raw);
-                    T* scratch = A + n_ * n_;
-                    T* batch_data = data + batch_idx * n_ * n_;
-                    int* batch_pivots = pivots + batch_idx * n_;
-
-                    for (int idx = tid; idx < n_ * n_; idx += num_threads)
-                        A[idx] = batch_data[idx];
-                    sycl::group_barrier(item.get_group());
-
-                    for (int k = 0; k < n_; k++) {
-                        if (tid == 0) {
-                            T max_val = sycl::fabs(A[k * n_ + k]);
-                            int max_row = k;
-                            for (int i = k + 1; i < n_; i++) {
-                                T val = sycl::fabs(A[i * n_ + k]);
-                                if (val > max_val) { max_val = val; max_row = i; }
-                            }
-                            batch_pivots[k] = max_row + 1;
-                            scratch[0] = static_cast<T>(max_row);
-                        }
-                        sycl::group_barrier(item.get_group());
-                        int pivot_row = static_cast<int>(scratch[0]);
-                        if (pivot_row != k) {
-                            for (int j = tid; j < n_; j += num_threads) {
-                                T tmp = A[k * n_ + j];
-                                A[k * n_ + j] = A[pivot_row * n_ + j];
-                                A[pivot_row * n_ + j] = tmp;
-                            }
-                            sycl::group_barrier(item.get_group());
-                        }
-                        T diag = A[k * n_ + k];
-                        if (diag != T(0)) {
-                            if (tid == 0)
-                                for (int i = k + 1; i < n_; i++) A[i * n_ + k] /= diag;
-                            sycl::group_barrier(item.get_group());
-                            for (int i = k + 1 + tid; i < n_; i += num_threads) {
-                                T mult = A[i * n_ + k];
-                                for (int j = k + 1; j < n_; j++)
-                                    A[i * n_ + j] -= mult * A[k * n_ + j];
-                            }
-                            sycl::group_barrier(item.get_group());
-                        }
+            h.parallel_for(sycl::range<1>(nbatch), [=](sycl::id<1> id) {
+                int b = static_cast<int>(id[0]);
+                T* A = data + b * n_ * n_;
+                int* piv = pivots + b * n_;
+                for (int k = 0; k < n_; k++) {
+                    T max_val = sycl::fabs(A[k * n_ + k]);
+                    int max_row = k;
+                    for (int i = k + 1; i < n_; i++) {
+                        T v = sycl::fabs(A[i * n_ + k]);
+                        if (v > max_val) { max_val = v; max_row = i; }
                     }
-                    for (int idx = tid; idx < n_ * n_; idx += num_threads)
-                        batch_data[idx] = A[idx];
-                });
+                    piv[k] = max_row + 1;
+                    if (max_row != k)
+                        for (int j = 0; j < n_; j++) {
+                            T t = A[k * n_ + j]; A[k * n_ + j] = A[max_row * n_ + j]; A[max_row * n_ + j] = t;
+                        }
+                    T diag = A[k * n_ + k];
+                    if (diag != T(0))
+                        for (int i = k + 1; i < n_; i++) {
+                            A[i * n_ + k] /= diag;
+                            T m = A[i * n_ + k];
+                            for (int j = k + 1; j < n_; j++) A[i * n_ + j] -= m * A[k * n_ + j];
+                        }
+                }
+            });
         }).wait();
 
-        // Invert via LU solve with identity
-        size_t smem_inv = 2 * n * n * sizeof(T);
+        // Invert via LU solve against identity, in global memory (per batch).
+        // The identity columns are built directly into the output buffer X.
         queue.submit([&](sycl::handler& h) {
-            sycl::local_accessor<char, 1> smem(sycl::range<1>(smem_inv), h);
             auto* lu_data = work_ptr;
             auto* pivots = d_pivots.ptr;
             auto* inv_out = res_ptr;
             int n_ = static_cast<int>(n);
-            h.parallel_for(sycl::nd_range<1>(nbatch * threads, threads),
-                [=](sycl::nd_item<1> item) {
-                    int batch_idx = item.get_group_linear_id();
-                    int tid = item.get_local_linear_id();
-                    int num_threads = item.get_local_range(0);
-                    char* smem_raw = smem.get_pointer();
-                    T* LU = reinterpret_cast<T*>(smem_raw);
-                    T* X = LU + n_ * n_;
-                    const T* batch_lu = lu_data + batch_idx * n_ * n_;
-                    const int* batch_piv = pivots + batch_idx * n_;
-                    T* batch_inv = inv_out + batch_idx * n_ * n_;
-
-                    for (int idx = tid; idx < n_ * n_; idx += num_threads)
-                        LU[idx] = batch_lu[idx];
-                    for (int idx = tid; idx < n_ * n_; idx += num_threads) {
-                        int row = idx / n_, col = idx % n_;
-                        X[idx] = (row == col) ? T(1) : T(0);
+            h.parallel_for(sycl::range<1>(nbatch), [=](sycl::id<1> id) {
+                int b = static_cast<int>(id[0]);
+                const T* LU = lu_data + b * n_ * n_;
+                const int* piv = pivots + b * n_;
+                T* X = inv_out + b * n_ * n_;
+                for (int i = 0; i < n_ * n_; i++) X[i] = T(0);
+                for (int i = 0; i < n_; i++) X[i * n_ + i] = T(1);
+                for (int i = 0; i < n_; i++) {
+                    int pr = piv[i] - 1;
+                    if (pr != i)
+                        for (int j = 0; j < n_; j++) { T t = X[i * n_ + j]; X[i * n_ + j] = X[pr * n_ + j]; X[pr * n_ + j] = t; }
+                }
+                for (int k = 0; k < n_; k++)
+                    for (int i = k + 1; i < n_; i++) {
+                        T m = LU[i * n_ + k];
+                        for (int j = 0; j < n_; j++) X[i * n_ + j] -= m * X[k * n_ + j];
                     }
-                    sycl::group_barrier(item.get_group());
-
-                    if (tid == 0) {
-                        for (int i = 0; i < n_; i++) {
-                            int piv_row = batch_piv[i] - 1;
-                            if (piv_row != i)
-                                for (int j = 0; j < n_; j++) {
-                                    T tmp = X[i * n_ + j]; X[i * n_ + j] = X[piv_row * n_ + j]; X[piv_row * n_ + j] = tmp;
-                                }
-                        }
-                        for (int k = 0; k < n_; k++)
-                            for (int i = k + 1; i < n_; i++) {
-                                T mult = LU[i * n_ + k];
-                                for (int j = 0; j < n_; j++) X[i * n_ + j] -= mult * X[k * n_ + j];
-                            }
-                        for (int k = n_ - 1; k >= 0; k--) {
-                            T diag = LU[k * n_ + k];
-                            for (int j = 0; j < n_; j++) X[k * n_ + j] /= diag;
-                            for (int i = 0; i < k; i++) {
-                                T mult = LU[i * n_ + k];
-                                for (int j = 0; j < n_; j++) X[i * n_ + j] -= mult * X[k * n_ + j];
-                            }
-                        }
+                for (int k = n_ - 1; k >= 0; k--) {
+                    T diag = LU[k * n_ + k];
+                    for (int j = 0; j < n_; j++) X[k * n_ + j] /= diag;
+                    for (int i = 0; i < k; i++) {
+                        T m = LU[i * n_ + k];
+                        for (int j = 0; j < n_; j++) X[i * n_ + j] -= m * X[k * n_ + j];
                     }
-                    sycl::group_barrier(item.get_group());
-
-                    for (int idx = tid; idx < n_ * n_; idx += num_threads)
-                        batch_inv[idx] = X[idx];
-                });
+                }
+            });
         }).wait();
     };
 
@@ -1746,120 +1655,69 @@ auto linalg_solve_kernel(const Tensor& A, const Tensor& B, sycl::queue& queue) -
 
     auto launch_solve = [&](auto* a_ptr, auto* b_ptr) {
         using T = std::remove_pointer_t<decltype(a_ptr)>;
-        check_size_limit<T>(n, "solve");
-        int threads = std::min(static_cast<int>(n), 128);
-        if (threads < 1) threads = 1;
-
-        // LU factorize
-        size_t smem_lu = n * n * sizeof(T) + 4 * sizeof(T);
+        // Global-memory LU + forward/back substitution (one work-item per
+        // batch). No local memory -> arbitrary N. LU is done in-place in the
+        // global `a` buffer; the substitution reads it and writes the RHS in
+        // place in the global `b` buffer.
         queue.submit([&](sycl::handler& h) {
-            sycl::local_accessor<char, 1> smem(sycl::range<1>(smem_lu), h);
             auto* data = a_ptr;
             auto* pivots = d_pivots.ptr;
             int n_ = static_cast<int>(n);
-            h.parallel_for(sycl::nd_range<1>(nbatch * threads, threads),
-                [=](sycl::nd_item<1> item) {
-                    int batch_idx = item.get_group_linear_id();
-                    int tid = item.get_local_linear_id();
-                    int num_threads = item.get_local_range(0);
-                    char* smem_raw = smem.get_pointer();
-                    T* A = reinterpret_cast<T*>(smem_raw);
-                    T* scratch = A + n_ * n_;
-                    T* batch_data = data + batch_idx * n_ * n_;
-                    int* batch_pivots = pivots + batch_idx * n_;
-
-                    for (int idx = tid; idx < n_ * n_; idx += num_threads)
-                        A[idx] = batch_data[idx];
-                    sycl::group_barrier(item.get_group());
-                    for (int k = 0; k < n_; k++) {
-                        if (tid == 0) {
-                            T max_val = sycl::fabs(A[k * n_ + k]);
-                            int max_row = k;
-                            for (int i = k + 1; i < n_; i++) {
-                                T val = sycl::fabs(A[i * n_ + k]);
-                                if (val > max_val) { max_val = val; max_row = i; }
-                            }
-                            batch_pivots[k] = max_row + 1;
-                            scratch[0] = static_cast<T>(max_row);
-                        }
-                        sycl::group_barrier(item.get_group());
-                        int pivot_row = static_cast<int>(scratch[0]);
-                        if (pivot_row != k) {
-                            for (int j = tid; j < n_; j += num_threads) {
-                                T tmp = A[k * n_ + j]; A[k * n_ + j] = A[pivot_row * n_ + j]; A[pivot_row * n_ + j] = tmp;
-                            }
-                            sycl::group_barrier(item.get_group());
-                        }
-                        T diag = A[k * n_ + k];
-                        if (diag != T(0)) {
-                            if (tid == 0) for (int i = k + 1; i < n_; i++) A[i * n_ + k] /= diag;
-                            sycl::group_barrier(item.get_group());
-                            for (int i = k + 1 + tid; i < n_; i += num_threads) {
-                                T mult = A[i * n_ + k];
-                                for (int j = k + 1; j < n_; j++) A[i * n_ + j] -= mult * A[k * n_ + j];
-                            }
-                            sycl::group_barrier(item.get_group());
-                        }
+            h.parallel_for(sycl::range<1>(nbatch), [=](sycl::id<1> id) {
+                int b = static_cast<int>(id[0]);
+                T* A = data + b * n_ * n_;
+                int* piv = pivots + b * n_;
+                for (int k = 0; k < n_; k++) {
+                    T max_val = sycl::fabs(A[k * n_ + k]);
+                    int max_row = k;
+                    for (int i = k + 1; i < n_; i++) {
+                        T v = sycl::fabs(A[i * n_ + k]);
+                        if (v > max_val) { max_val = v; max_row = i; }
                     }
-                    for (int idx = tid; idx < n_ * n_; idx += num_threads)
-                        batch_data[idx] = A[idx];
-                });
+                    piv[k] = max_row + 1;
+                    if (max_row != k)
+                        for (int j = 0; j < n_; j++) { T t = A[k * n_ + j]; A[k * n_ + j] = A[max_row * n_ + j]; A[max_row * n_ + j] = t; }
+                    T diag = A[k * n_ + k];
+                    if (diag != T(0))
+                        for (int i = k + 1; i < n_; i++) {
+                            A[i * n_ + k] /= diag;
+                            T m = A[i * n_ + k];
+                            for (int j = k + 1; j < n_; j++) A[i * n_ + j] -= m * A[k * n_ + j];
+                        }
+                }
+            });
         }).wait();
 
-        // Solve via forward/back substitution
-        size_t smem_solve = (n * n + n * nrhs) * sizeof(T);
         queue.submit([&](sycl::handler& h) {
-            sycl::local_accessor<char, 1> smem(sycl::range<1>(smem_solve), h);
             auto* lu_data = a_ptr;
             auto* pivots = d_pivots.ptr;
             auto* b_data = b_ptr;
             int n_ = static_cast<int>(n);
             int nrhs_ = static_cast<int>(nrhs);
-            h.parallel_for(sycl::nd_range<1>(nbatch * threads, threads),
-                [=](sycl::nd_item<1> item) {
-                    int batch_idx = item.get_group_linear_id();
-                    int tid = item.get_local_linear_id();
-                    int num_threads = item.get_local_range(0);
-                    char* smem_raw = smem.get_pointer();
-                    T* LU = reinterpret_cast<T*>(smem_raw);
-                    T* B = LU + n_ * n_;
-                    const T* batch_lu = lu_data + batch_idx * n_ * n_;
-                    const int* batch_piv = pivots + batch_idx * n_;
-                    T* batch_b = b_data + batch_idx * n_ * nrhs_;
-
-                    for (int idx = tid; idx < n_ * n_; idx += num_threads)
-                        LU[idx] = batch_lu[idx];
-                    for (int idx = tid; idx < n_ * nrhs_; idx += num_threads)
-                        B[idx] = batch_b[idx];
-                    sycl::group_barrier(item.get_group());
-
-                    if (tid == 0) {
-                        for (int i = 0; i < n_; i++) {
-                            int piv_row = batch_piv[i] - 1;
-                            if (piv_row != i)
-                                for (int j = 0; j < nrhs_; j++) {
-                                    T tmp = B[i * nrhs_ + j]; B[i * nrhs_ + j] = B[piv_row * nrhs_ + j]; B[piv_row * nrhs_ + j] = tmp;
-                                }
-                        }
-                        for (int k = 0; k < n_; k++)
-                            for (int i = k + 1; i < n_; i++) {
-                                T mult = LU[i * n_ + k];
-                                for (int j = 0; j < nrhs_; j++) B[i * nrhs_ + j] -= mult * B[k * nrhs_ + j];
-                            }
-                        for (int k = n_ - 1; k >= 0; k--) {
-                            T diag = LU[k * n_ + k];
-                            for (int j = 0; j < nrhs_; j++) B[k * nrhs_ + j] /= diag;
-                            for (int i = 0; i < k; i++) {
-                                T mult = LU[i * n_ + k];
-                                for (int j = 0; j < nrhs_; j++) B[i * nrhs_ + j] -= mult * B[k * nrhs_ + j];
-                            }
-                        }
+            h.parallel_for(sycl::range<1>(nbatch), [=](sycl::id<1> id) {
+                int b = static_cast<int>(id[0]);
+                const T* LU = lu_data + b * n_ * n_;
+                const int* piv = pivots + b * n_;
+                T* B = b_data + b * n_ * nrhs_;
+                for (int i = 0; i < n_; i++) {
+                    int pr = piv[i] - 1;
+                    if (pr != i)
+                        for (int j = 0; j < nrhs_; j++) { T t = B[i * nrhs_ + j]; B[i * nrhs_ + j] = B[pr * nrhs_ + j]; B[pr * nrhs_ + j] = t; }
+                }
+                for (int k = 0; k < n_; k++)
+                    for (int i = k + 1; i < n_; i++) {
+                        T m = LU[i * n_ + k];
+                        for (int j = 0; j < nrhs_; j++) B[i * nrhs_ + j] -= m * B[k * nrhs_ + j];
                     }
-                    sycl::group_barrier(item.get_group());
-
-                    for (int idx = tid; idx < n_ * nrhs_; idx += num_threads)
-                        batch_b[idx] = B[idx];
-                });
+                for (int k = n_ - 1; k >= 0; k--) {
+                    T diag = LU[k * n_ + k];
+                    for (int j = 0; j < nrhs_; j++) B[k * nrhs_ + j] /= diag;
+                    for (int i = 0; i < k; i++) {
+                        T m = LU[i * n_ + k];
+                        for (int j = 0; j < nrhs_; j++) B[i * nrhs_ + j] -= m * B[k * nrhs_ + j];
+                    }
+                }
+            });
         }).wait();
     };
 
@@ -1888,54 +1746,55 @@ auto linalg_cholesky_kernel(const Tensor& A, bool upper, sycl::queue& queue) -> 
 
     auto launch_cholesky = [&](auto* data_ptr) {
         using T = std::remove_pointer_t<decltype(data_ptr)>;
-        check_size_limit<T>(n, "cholesky");
-        size_t smem_bytes = n * n * sizeof(T);
-        int threads = std::min(static_cast<int>(n), 128);
-        if (threads < 1) threads = 1;
-
+        // Global-memory Cholesky (one work-item per batch). In-place
+        // Cholesky-Crout into the lower triangle of the global buffer, then
+        // mask to the requested triangle. No local memory -> arbitrary N.
         queue.submit([&](sycl::handler& h) {
-            sycl::local_accessor<char, 1> smem(sycl::range<1>(smem_bytes), h);
             auto* data = data_ptr;
             int n_ = static_cast<int>(n);
             bool upper_ = upper;
-            h.parallel_for(sycl::nd_range<1>(nbatch * threads, threads),
-                [=](sycl::nd_item<1> item) {
-                    int batch_idx = item.get_group_linear_id();
-                    int tid = item.get_local_linear_id();
-                    int num_threads = item.get_local_range(0);
-                    char* smem_raw = smem.get_pointer();
-                    T* A = reinterpret_cast<T*>(smem_raw);
-                    T* batch_data = data + batch_idx * n_ * n_;
-
-                    for (int idx = tid; idx < n_ * n_; idx += num_threads)
-                        A[idx] = batch_data[idx];
-                    sycl::group_barrier(item.get_group());
-
-                    if (tid == 0) {
-                        for (int j = 0; j < n_; j++) {
-                            T sum = A[j * n_ + j];
-                            for (int k = 0; k < j; k++) sum -= A[j * n_ + k] * A[j * n_ + k];
-                            if (sum <= T(0)) { A[j * n_ + j] = T(0); continue; }
-                            A[j * n_ + j] = sycl::sqrt(sum);
-                            T diag = A[j * n_ + j];
-                            for (int i = j + 1; i < n_; i++) {
-                                T s = A[i * n_ + j];
-                                for (int k = 0; k < j; k++) s -= A[i * n_ + k] * A[j * n_ + k];
-                                A[i * n_ + j] = s / diag;
-                            }
-                        }
+            h.parallel_for(sycl::range<1>(nbatch), [=](sycl::id<1> id) {
+                int b = static_cast<int>(id[0]);
+                T* A = data + b * n_ * n_;
+                // Compute the lower factor L in the strict-lower + diagonal of a
+                // scratch held in registers via direct A reads: we overwrite the
+                // lower triangle in place (column j only depends on already-
+                // computed columns < j of the lower triangle, which are intact).
+                for (int j = 0; j < n_; j++) {
+                    T sum = A[j * n_ + j];
+                    for (int k = 0; k < j; k++) sum -= A[j * n_ + k] * A[j * n_ + k];
+                    if (sum <= T(0)) { A[j * n_ + j] = T(0); continue; }
+                    A[j * n_ + j] = sycl::sqrt(sum);
+                    T diag = A[j * n_ + j];
+                    for (int i = j + 1; i < n_; i++) {
+                        T s = A[i * n_ + j];
+                        for (int k = 0; k < j; k++) s -= A[i * n_ + k] * A[j * n_ + k];
+                        A[i * n_ + j] = s / diag;
                     }
-                    sycl::group_barrier(item.get_group());
-
-                    for (int idx = tid; idx < n_ * n_; idx += num_threads) {
-                        int row = idx / n_, col = idx % n_;
-                        if (upper_) {
-                            batch_data[row * n_ + col] = (row <= col) ? A[col * n_ + row] : T(0);
-                        } else {
-                            batch_data[row * n_ + col] = (row >= col) ? A[row * n_ + col] : T(0);
-                        }
-                    }
-                });
+                }
+                // Mask to the requested triangle. For 'upper', element (row,col)
+                // = L(col,row) for row<=col; the lower factor is still intact
+                // (we only wrote the lower triangle + diagonal), so read L(col,row).
+                if (upper_) {
+                    // Walk from the last element backwards so we never read a
+                    // lower-triangle source after it has been overwritten by an
+                    // upper-triangle store. Upper store targets (row<=col) read
+                    // sources (col,row) with col>=row, i.e. lower indices, which
+                    // are only written when processing that source's own cell.
+                    // Build into a separate pass over the strict-upper using the
+                    // symmetric lower value before zeroing the strict-lower.
+                    for (int row = 0; row < n_; row++)
+                        for (int col = row + 1; col < n_; col++)
+                            A[row * n_ + col] = A[col * n_ + row];  // L(col,row)
+                    for (int row = 0; row < n_; row++)
+                        for (int col = 0; col < row; col++)
+                            A[row * n_ + col] = T(0);
+                } else {
+                    for (int row = 0; row < n_; row++)
+                        for (int col = row + 1; col < n_; col++)
+                            A[row * n_ + col] = T(0);
+                }
+            });
         }).wait();
     };
 
@@ -1985,93 +1844,64 @@ auto linalg_qr_kernel(const Tensor& A, sycl::queue& queue) -> std::pair<Tensor, 
 
     auto launch_qr = [&](auto* work_ptr, auto* q_ptr, auto* r_ptr) {
         using T = std::remove_pointer_t<decltype(work_ptr)>;
-        check_size_limit<T>(std::max(m, n_cols), "qr");
-        size_t smem_bytes = (m * n_cols + m * m + 4) * sizeof(T);
-        int threads = std::min(static_cast<int>(std::max(m, n_cols)), 128);
-        if (threads < 1) threads = 1;
-
+        // Global-memory Householder QR (one work-item per batch). R is built in
+        // place in the global `work` buffer; the full m×m Q accumulates in a
+        // global scratch buffer. No local memory -> arbitrary m, n. Each
+        // reflector is applied to columns > j using the intact sub-diagonal
+        // (the reflector tail), then column j is finalised — avoiding the
+        // tail-overwrite-before-use hazard of a naive serial loop.
+        SyclDeviceBuffer<T> d_qfull(static_cast<size_t>(nbatch) * m * m, queue);
         queue.submit([&](sycl::handler& h) {
-            sycl::local_accessor<char, 1> smem(sycl::range<1>(smem_bytes), h);
             int m_ = static_cast<int>(m), nc_ = static_cast<int>(n_cols), k_ = static_cast<int>(k);
-            h.parallel_for(sycl::nd_range<1>(nbatch * threads, threads),
-                [=](sycl::nd_item<1> item) {
-                    int batch_idx = item.get_group_linear_id();
-                    int tid = item.get_local_linear_id();
-                    int num_threads = item.get_local_range(0);
-                    char* smem_raw = smem.get_pointer();
-                    T* R_s = reinterpret_cast<T*>(smem_raw);
-                    T* Q_s = R_s + m_ * nc_;
-                    T* scratch = Q_s + m_ * m_;
+            auto* work_g = work_ptr;
+            auto* q_g = q_ptr;
+            auto* r_g = r_ptr;
+            auto* qfull = d_qfull.ptr;
+            h.parallel_for(sycl::range<1>(nbatch), [=](sycl::id<1> id) {
+                int b = static_cast<int>(id[0]);
+                T* R_s = work_g + static_cast<size_t>(b) * m_ * nc_;
+                T* Q_s = qfull + static_cast<size_t>(b) * m_ * m_;
+                for (int i = 0; i < m_ * m_; i++) Q_s[i] = T(0);
+                for (int i = 0; i < m_; i++) Q_s[i * m_ + i] = T(1);
 
-                    const T* A = work_ptr + batch_idx * m_ * nc_;
-                    T* Q_batch = q_ptr + batch_idx * m_ * k_;
-                    T* R_batch = r_ptr + batch_idx * k_ * nc_;
+                constexpr T zero_tol = std::is_same_v<T, float> ? T(1e-30) : T(1e-60);
+                for (int j = 0; j < k_; j++) {
+                    T sigma = T(0);
+                    for (int i = j + 1; i < m_; i++) sigma += R_s[i * nc_ + j] * R_s[i * nc_ + j];
+                    T x0 = R_s[j * nc_ + j];
+                    T norm_x = sycl::sqrt(x0 * x0 + sigma);
+                    if (norm_x < zero_tol || sigma < zero_tol) continue;
+                    T alpha = -sycl::copysign(norm_x, x0);
+                    T v0 = x0 - alpha;
+                    T tau = T(2) / (v0 * v0 + sigma);
 
-                    for (int idx = tid; idx < m_ * nc_; idx += num_threads) R_s[idx] = A[idx];
-                    for (int idx = tid; idx < m_ * m_; idx += num_threads) {
-                        int row = idx / m_, col = idx % m_;
-                        Q_s[idx] = (row == col) ? T(1) : T(0);
+                    // Apply H to columns > j (tail R_s[i,j], i>j, still intact).
+                    for (int col = j + 1; col < nc_; col++) {
+                        T dot = v0 * R_s[j * nc_ + col];
+                        for (int i = j + 1; i < m_; i++) dot += R_s[i * nc_ + j] * R_s[i * nc_ + col];
+                        dot *= tau;
+                        R_s[j * nc_ + col] -= v0 * dot;
+                        for (int i = j + 1; i < m_; i++) R_s[i * nc_ + col] -= R_s[i * nc_ + j] * dot;
                     }
-                    sycl::group_barrier(item.get_group());
-
-                    constexpr T zero_tol = std::is_same_v<T, float> ? T(1e-30) : T(1e-60);
-
-                    for (int j = 0; j < k_; j++) {
-                        if (tid == 0) {
-                            T sigma = T(0);
-                            for (int i = j + 1; i < m_; i++) sigma += R_s[i * nc_ + j] * R_s[i * nc_ + j];
-                            T x0 = R_s[j * nc_ + j];
-                            T norm_x = sycl::sqrt(x0 * x0 + sigma);
-                            if (norm_x < zero_tol || sigma < zero_tol) {
-                                scratch[1] = T(0);
-                            } else {
-                                T alpha = -sycl::copysign(norm_x, x0);
-                                T v0 = x0 - alpha;
-                                T v_norm_sq = v0 * v0 + sigma;
-                                scratch[0] = v0;
-                                scratch[1] = T(2) / v_norm_sq;
-                                scratch[2] = alpha;
-                            }
-                        }
-                        sycl::group_barrier(item.get_group());
-
-                        T tau = scratch[1];
-                        if (tau == T(0)) { sycl::group_barrier(item.get_group()); continue; }
-                        T v0 = scratch[0];
-                        T alpha = scratch[2];
-
-                        for (int col = j + tid; col < nc_; col += num_threads) {
-                            T dot = v0 * R_s[j * nc_ + col];
-                            for (int i = j + 1; i < m_; i++) dot += R_s[i * nc_ + j] * R_s[i * nc_ + col];
-                            dot *= tau;
-                            R_s[j * nc_ + col] -= v0 * dot;
-                            for (int i = j + 1; i < m_; i++) R_s[i * nc_ + col] -= R_s[i * nc_ + j] * dot;
-                        }
-                        sycl::group_barrier(item.get_group());
-
-                        for (int row = tid; row < m_; row += num_threads) {
-                            T dot = v0 * Q_s[row * m_ + j];
-                            for (int i = j + 1; i < m_; i++) dot += R_s[i * nc_ + j] * Q_s[row * m_ + i];
-                            dot *= tau;
-                            Q_s[row * m_ + j] -= v0 * dot;
-                            for (int i = j + 1; i < m_; i++) Q_s[row * m_ + i] -= R_s[i * nc_ + j] * dot;
-                        }
-                        sycl::group_barrier(item.get_group());
-
-                        if (tid == 0) {
-                            R_s[j * nc_ + j] = alpha;
-                            for (int i = j + 1; i < m_; i++) R_s[i * nc_ + j] = T(0);
-                        }
-                        sycl::group_barrier(item.get_group());
+                    // Accumulate Q = Q * H.
+                    for (int row = 0; row < m_; row++) {
+                        T dot = v0 * Q_s[row * m_ + j];
+                        for (int i = j + 1; i < m_; i++) dot += R_s[i * nc_ + j] * Q_s[row * m_ + i];
+                        dot *= tau;
+                        Q_s[row * m_ + j] -= v0 * dot;
+                        for (int i = j + 1; i < m_; i++) Q_s[row * m_ + i] -= R_s[i * nc_ + j] * dot;
                     }
+                    // Finalise column j (diagonal = alpha, sub-diagonal = 0).
+                    R_s[j * nc_ + j] = alpha;
+                    for (int i = j + 1; i < m_; i++) R_s[i * nc_ + j] = T(0);
+                }
 
-                    for (int idx = tid; idx < m_ * k_; idx += num_threads) {
-                        int row = idx / k_, col = idx % k_;
-                        Q_batch[idx] = Q_s[row * m_ + col];
-                    }
-                    for (int idx = tid; idx < k_ * nc_; idx += num_threads)
-                        R_batch[idx] = R_s[idx];
-                });
+                for (int row = 0; row < m_; row++)
+                    for (int col = 0; col < k_; col++)
+                        q_g[static_cast<size_t>(b) * m_ * k_ + row * k_ + col] = Q_s[row * m_ + col];
+                for (int i = 0; i < k_ * nc_; i++)
+                    r_g[static_cast<size_t>(b) * k_ * nc_ + i] = R_s[i];
+            });
         }).wait();
     };
 
@@ -2535,7 +2365,7 @@ auto linalg_lu_kernel(const Tensor& A, sycl::queue& queue)
         if (threads < 1) threads = 1;
         size_t smem_lu = n * n * sizeof(T) + 4 * sizeof(T);
 
-        const int32_t* piv_ptr = pivots.template data<int32_t>();
+        int32_t* piv_ptr = pivots.template data<int32_t>();
         int64_t  n_      = n;
 
         queue.submit([&](sycl::handler& h) {
@@ -2746,7 +2576,10 @@ auto linalg_solve_triangular_kernel(const Tensor& A, const Tensor& B,
         bool unit_ = unitriangular;
 
         queue.submit([&](sycl::handler& h) {
-            h.parallel_for<class SyclTriSolveKernel>(
+            // No explicit kernel name: the enclosing launcher is templated on T,
+            // so SYCL auto-generates a distinct kernel name per instantiation
+            // (a fixed name would collide between the float and double builds).
+            h.parallel_for(
                 sycl::nd_range<1>(nbatch * 256, 256),
                 [=](sycl::nd_item<1> item) {
                     int batch = item.get_group(0);
@@ -2956,7 +2789,8 @@ auto linalg_ormqr_kernel(const Tensor& reflectors, const Tensor& tau,
                     int batch_idx = item.get_group_linear_id();
                     int tid = item.get_local_linear_id();
                     int num_threads = item.get_local_range(0);
-                    T* C = reinterpret_cast<T*>(smem.get_pointer());
+                    char* smem_raw = smem.get_pointer();
+                    T* C = reinterpret_cast<T*>(smem_raw);
 
                     const T* refl = refl_ptr + batch_idx * rm_ * rn_;
                     const T* tau = tau_ptr + batch_idx * kr_;

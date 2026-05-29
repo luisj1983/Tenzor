@@ -3496,6 +3496,108 @@ Tensor mish_backward_dispatch(std::span<const Tensor> inputs, const OpAttributes
     return mish_backward_kernel(inputs[0], inputs[1], get_stream(attrs));
 }
 
+// ============================================================================
+// Hardswish / Hardsigmoid — forward-only single-output kernels.
+//   hardswish(x)   = x * clamp(x+3, 0, 6) / 6
+//   hardsigmoid(x) = clamp(x+3, 0, 6) / 6
+// Backward is autograd-composed (clamp + mul chain), matching the CPU backend;
+// there is no dedicated *Backward OpId. Float32/Float64 native; Float16/BF16
+// widen to Float32 for the math then narrow on store.
+// ============================================================================
+template<typename T>
+__global__ void hardswish_forward_kernel(const T* input, T* output, int64_t n) {
+    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < n) {
+        if constexpr (std::is_same_v<T, double>) {
+            double x = static_cast<double>(input[idx]);
+            double t = fmin(fmax(x + 3.0, 0.0), 6.0);
+            output[idx] = x * t * (1.0 / 6.0);
+        } else {
+            float x = float(input[idx]);
+            float t = fminf(fmaxf(x + 3.0f, 0.0f), 6.0f);
+            output[idx] = T(x * t * (1.0f / 6.0f));
+        }
+    }
+}
+
+template<typename T>
+__global__ void hardsigmoid_forward_kernel(const T* input, T* output, int64_t n) {
+    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < n) {
+        if constexpr (std::is_same_v<T, double>) {
+            double x = static_cast<double>(input[idx]);
+            double t = fmin(fmax(x + 3.0, 0.0), 6.0);
+            output[idx] = t * (1.0 / 6.0);
+        } else {
+            float x = float(input[idx]);
+            float t = fminf(fmaxf(x + 3.0f, 0.0f), 6.0f);
+            output[idx] = T(t * (1.0f / 6.0f));
+        }
+    }
+}
+
+auto hardswish_kernel(const Tensor& input, cudaStream_t stream) -> Tensor {
+    int64_t n = input.numel();
+    std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
+    Tensor result(shape, input.dtype(), input.device());
+    if (n == 0) return result;
+    int num_blocks = get_num_blocks(n);
+    if (input.dtype() == DType::Float32) {
+        hardswish_forward_kernel<float><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
+            input.data<float>(), result.data<float>(), n);
+    } else if (input.dtype() == DType::Float64) {
+        hardswish_forward_kernel<double><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
+            input.data<double>(), result.data<double>(), n);
+    } else if (input.dtype() == DType::Float16) {
+        hardswish_forward_kernel<__half><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
+            reinterpret_cast<const __half*>(input.data_ptr()),
+            reinterpret_cast<__half*>(result.data_ptr()), n);
+    } else if (input.dtype() == DType::BFloat16) {
+        hardswish_forward_kernel<__nv_bfloat16><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
+            reinterpret_cast<const __nv_bfloat16*>(input.data_ptr()),
+            reinterpret_cast<__nv_bfloat16*>(result.data_ptr()), n);
+    } else {
+        throw std::runtime_error("Hardswish only supports Float32, Float64, Float16, and BFloat16 dtypes");
+    }
+    CUDA_CHECK(cudaGetLastError());
+    return result;
+}
+
+auto hardsigmoid_kernel(const Tensor& input, cudaStream_t stream) -> Tensor {
+    int64_t n = input.numel();
+    std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
+    Tensor result(shape, input.dtype(), input.device());
+    if (n == 0) return result;
+    int num_blocks = get_num_blocks(n);
+    if (input.dtype() == DType::Float32) {
+        hardsigmoid_forward_kernel<float><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
+            input.data<float>(), result.data<float>(), n);
+    } else if (input.dtype() == DType::Float64) {
+        hardsigmoid_forward_kernel<double><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
+            input.data<double>(), result.data<double>(), n);
+    } else if (input.dtype() == DType::Float16) {
+        hardsigmoid_forward_kernel<__half><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
+            reinterpret_cast<const __half*>(input.data_ptr()),
+            reinterpret_cast<__half*>(result.data_ptr()), n);
+    } else if (input.dtype() == DType::BFloat16) {
+        hardsigmoid_forward_kernel<__nv_bfloat16><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
+            reinterpret_cast<const __nv_bfloat16*>(input.data_ptr()),
+            reinterpret_cast<__nv_bfloat16*>(result.data_ptr()), n);
+    } else {
+        throw std::runtime_error("Hardsigmoid only supports Float32, Float64, Float16, and BFloat16 dtypes");
+    }
+    CUDA_CHECK(cudaGetLastError());
+    return result;
+}
+
+Tensor hardswish_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs) {
+    return hardswish_kernel(inputs[0], get_stream(attrs));
+}
+
+Tensor hardsigmoid_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs) {
+    return hardsigmoid_kernel(inputs[0], get_stream(attrs));
+}
+
 
 // ============================================================================
 // Dropout Forward/Backward CUDA Kernels

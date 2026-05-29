@@ -1960,6 +1960,110 @@ auto mish_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
     return output;
 }
 
+// ============================================================================
+// Hardswish / Hardsigmoid — forward-only single-output kernels.
+//   hardswish(x)   = x * clamp(x+3, 0, 6) / 6
+//   hardsigmoid(x) = clamp(x+3, 0, 6) / 6
+// Backward is autograd-composed (clamp + mul chain), matching the CPU backend.
+// Float32/Float64 native, Float16 native, BFloat16 via widen-narrow.
+// ============================================================================
+class HardswishKernelFloat32;
+class HardswishKernelFloat64;
+class HardswishKernelFloat16;
+class HardswishKernelBFloat16;
+class HardsigmoidKernelFloat32;
+class HardsigmoidKernelFloat64;
+class HardsigmoidKernelFloat16;
+class HardsigmoidKernelBFloat16;
+
+auto hardswish_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
+    Tensor in_cont = input.is_contiguous() ? input : contiguous_kernel(input, queue);
+    Tensor output(std::vector<int64_t>(in_cont.shape().begin(), in_cont.shape().end()),
+                  in_cont.dtype(), in_cont.device());
+    const int64_t numel = in_cont.numel();
+
+    if (in_cont.dtype() == DType::Float32) {
+        const float* in_ptr = get_data_ptr<const float>(in_cont);
+        float* out_ptr = get_data_ptr<float>(output);
+        queue.parallel_for<HardswishKernelFloat32>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+            float x = in_ptr[idx];
+            out_ptr[idx] = x * sycl::clamp(x + 3.0f, 0.0f, 6.0f) * (1.0f / 6.0f);
+        });
+    }
+    else if (in_cont.dtype() == DType::Float64) {
+        const double* in_ptr = get_data_ptr<const double>(in_cont);
+        double* out_ptr = get_data_ptr<double>(output);
+        queue.parallel_for<HardswishKernelFloat64>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+            double x = in_ptr[idx];
+            out_ptr[idx] = x * sycl::clamp(x + 3.0, 0.0, 6.0) * (1.0 / 6.0);
+        });
+    }
+    else if (in_cont.dtype() == DType::Float16) {
+        const sycl::half* in_ptr = get_data_ptr<const sycl::half>(in_cont);
+        sycl::half* out_ptr = get_data_ptr<sycl::half>(output);
+        queue.parallel_for<HardswishKernelFloat16>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+            float x = static_cast<float>(in_ptr[idx]);
+            out_ptr[idx] = sycl::half(x * sycl::clamp(x + 3.0f, 0.0f, 6.0f) * (1.0f / 6.0f));
+        });
+    }
+    else if (in_cont.dtype() == DType::BFloat16) {
+        const uint16_t* in_ptr = get_data_ptr<const uint16_t>(in_cont);
+        uint16_t* out_ptr = get_data_ptr<uint16_t>(output);
+        queue.parallel_for<HardswishKernelBFloat16>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+            float x = bf16_to_f32(in_ptr[idx]);
+            out_ptr[idx] = f32_to_bf16(x * sycl::clamp(x + 3.0f, 0.0f, 6.0f) * (1.0f / 6.0f));
+        });
+    }
+    else {
+        throw std::runtime_error("Unsupported dtype for hardswish");
+    }
+    return output;
+}
+
+auto hardsigmoid_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
+    Tensor in_cont = input.is_contiguous() ? input : contiguous_kernel(input, queue);
+    Tensor output(std::vector<int64_t>(in_cont.shape().begin(), in_cont.shape().end()),
+                  in_cont.dtype(), in_cont.device());
+    const int64_t numel = in_cont.numel();
+
+    if (in_cont.dtype() == DType::Float32) {
+        const float* in_ptr = get_data_ptr<const float>(in_cont);
+        float* out_ptr = get_data_ptr<float>(output);
+        queue.parallel_for<HardsigmoidKernelFloat32>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+            float x = in_ptr[idx];
+            out_ptr[idx] = sycl::clamp(x + 3.0f, 0.0f, 6.0f) * (1.0f / 6.0f);
+        });
+    }
+    else if (in_cont.dtype() == DType::Float64) {
+        const double* in_ptr = get_data_ptr<const double>(in_cont);
+        double* out_ptr = get_data_ptr<double>(output);
+        queue.parallel_for<HardsigmoidKernelFloat64>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+            double x = in_ptr[idx];
+            out_ptr[idx] = sycl::clamp(x + 3.0, 0.0, 6.0) * (1.0 / 6.0);
+        });
+    }
+    else if (in_cont.dtype() == DType::Float16) {
+        const sycl::half* in_ptr = get_data_ptr<const sycl::half>(in_cont);
+        sycl::half* out_ptr = get_data_ptr<sycl::half>(output);
+        queue.parallel_for<HardsigmoidKernelFloat16>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+            float x = static_cast<float>(in_ptr[idx]);
+            out_ptr[idx] = sycl::half(sycl::clamp(x + 3.0f, 0.0f, 6.0f) * (1.0f / 6.0f));
+        });
+    }
+    else if (in_cont.dtype() == DType::BFloat16) {
+        const uint16_t* in_ptr = get_data_ptr<const uint16_t>(in_cont);
+        uint16_t* out_ptr = get_data_ptr<uint16_t>(output);
+        queue.parallel_for<HardsigmoidKernelBFloat16>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+            float x = bf16_to_f32(in_ptr[idx]);
+            out_ptr[idx] = f32_to_bf16(sycl::clamp(x + 3.0f, 0.0f, 6.0f) * (1.0f / 6.0f));
+        });
+    }
+    else {
+        throw std::runtime_error("Unsupported dtype for hardsigmoid");
+    }
+    return output;
+}
+
 auto mish_backward_kernel(const Tensor& grad_output, const Tensor& input, sycl::queue& queue) -> Tensor {
     Tensor grad_cont = grad_output.is_contiguous() ? grad_output : contiguous_kernel(grad_output, queue);
     Tensor in_cont = input.is_contiguous() ? input : contiguous_kernel(input, queue);

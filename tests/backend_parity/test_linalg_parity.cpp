@@ -467,6 +467,54 @@ TEST_P(LinalgParity, SolveTriangular) {
 
 // Pinv, LstSq, MatrixExp moved to test_linalg_extended_parity.cpp (plan 3.6).
 
+// Release audit (#15): the OneAPI non-oneMKL SYCL fallback previously capped
+// matrix size at N=90 (f32) / N=64 (f64). The arbitrary-N global-memory kernels
+// must handle N above that cap. Validate inv / solve / qr / cholesky by
+// reconstruction at N=128 on every backend. On a non-oneMKL OneAPI build this
+// exercises the new global-memory fallback end-to-end; on oneMKL builds it
+// confirms the oneMKL path at the same size.
+TEST_P(LinalgParity, LargeN_ArbitrarySize) {
+    if (device.type == Device::Type::CPU) {
+        GTEST_SKIP() << "CPU is the reference backend";
+    }
+    const int64_t N = 128;  // > 90 (f32 cap) and > 64 (f64 cap)
+
+    auto A    = make_well_conditioned({N, N}, static_cast<float>(N), 555);
+    auto I    = eye(N, std::nullopt, DType::Float32, Device::cpu());
+    auto spd  = make_spd(N, static_cast<float>(N), 556);
+    auto bvec = generate_test_tensor({N, 1}, DType::Float32, Device::cpu(), 557);
+    const std::string name = backend_name(device);
+
+    // inv: A @ inv(A) ~= I
+    {
+        auto Adev = A.to(device);
+        auto invd = linalg::inv(Adev);
+        auto prod = matmul(Adev, invd).to(Device::cpu());
+        EXPECT_TRUE(tensors_close(prod, I, 1e-2f, 1e-2f)) << "inv N=" << N << " on " << name;
+    }
+    // solve: A @ x ~= b
+    {
+        auto Adev = A.to(device);
+        auto x = linalg::solve(Adev, bvec.to(device));
+        auto recon = matmul(Adev, x).to(Device::cpu());
+        EXPECT_TRUE(tensors_close(recon, bvec, 1e-2f, 1e-2f)) << "solve N=" << N << " on " << name;
+    }
+    // qr: Q @ R ~= A
+    {
+        auto Adev = A.to(device);
+        auto [Q, R] = linalg::qr(Adev);
+        auto qr_recon = matmul(Q, R).to(Device::cpu());
+        EXPECT_TRUE(tensors_close(qr_recon, A, 1e-2f, 1e-2f)) << "qr N=" << N << " on " << name;
+    }
+    // cholesky (SPD): L @ L^T ~= A
+    {
+        auto Sdev = spd.to(device);
+        auto L = linalg::cholesky(Sdev);
+        auto LLt = matmul(L, transpose(L, 0, 1)).to(Device::cpu());
+        EXPECT_TRUE(tensors_close(LLt, spd, 1e-1f, 1e-2f)) << "cholesky N=" << N << " on " << name;
+    }
+}
+
 INSTANTIATE_BACKEND_TESTS(LinalgParity);
 
 

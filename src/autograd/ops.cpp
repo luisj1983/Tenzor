@@ -3082,9 +3082,10 @@ auto ldl_factor(const Variable& input) -> std::tuple<Variable, Variable> {
     }
 
     auto grad_fn = std::make_shared<LinalgLDLFactorBackward>();
-    // audit-2026-05-03 Phase 12 — save A and LD so backward can run the
-    // structural-symmetric backprop derived from A = L D L^T.
-    grad_fn->save_for_backward({input.tensor(), LD_tensor});
+    // Save A and LD for the structural-symmetric backprop derived from
+    // A = L D L^T, plus the pivots so backward can detect Bunch-Kaufman
+    // pivoting (the no-pivoting adjoint is invalid for permuted factors).
+    grad_fn->save_for_backward({input.tensor(), LD_tensor, pivots_tensor});
     grad_fn->set_next_functions({input.grad_fn()});
     grad_fn->set_input_variables({input});
 

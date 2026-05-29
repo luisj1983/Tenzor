@@ -2358,6 +2358,113 @@ auto mish_kernel(const Tensor& input, hipStream_t stream) -> Tensor {
     return result;
 }
 
+// ============================================================================
+// Hardswish / Hardsigmoid — forward-only single-output kernels.
+//   hardswish(x)   = x * clamp(x+3, 0, 6) / 6
+//   hardsigmoid(x) = clamp(x+3, 0, 6) / 6
+// Backward is autograd-composed (clamp + mul chain), matching the CPU backend.
+// Float32/Float64 native, Float16 native (widen helpers), BFloat16 via widen.
+// ============================================================================
+template<typename T>
+__global__ void hardswish_forward_kernel(const T* input, T* output, int64_t n) {
+    HIP_GRID_STRIDE_LOOP(idx, n) {
+        T x = input[idx];
+        T t = x + T(3);
+        t = t < T(0) ? T(0) : (t > T(6) ? T(6) : t);
+        output[idx] = x * t * (T(1) / T(6));
+    }
+}
+
+template<typename T>
+__global__ void hardsigmoid_forward_kernel(const T* input, T* output, int64_t n) {
+    HIP_GRID_STRIDE_LOOP(idx, n) {
+        T x = input[idx];
+        T t = x + T(3);
+        t = t < T(0) ? T(0) : (t > T(6) ? T(6) : t);
+        output[idx] = t * (T(1) / T(6));
+    }
+}
+
+__global__ void hardswish_forward_kernel_fp16(const __half* input, __half* output, int64_t n) {
+    HIP_GRID_STRIDE_LOOP(idx, n) {
+        float x = tenzor::rocm::safe_h2f(input[idx]);
+        float t = x + 3.0f;
+        t = t < 0.0f ? 0.0f : (t > 6.0f ? 6.0f : t);
+        output[idx] = tenzor::rocm::safe_f2h(x * t * (1.0f / 6.0f));
+    }
+}
+
+__global__ void hardsigmoid_forward_kernel_fp16(const __half* input, __half* output, int64_t n) {
+    HIP_GRID_STRIDE_LOOP(idx, n) {
+        float x = tenzor::rocm::safe_h2f(input[idx]);
+        float t = x + 3.0f;
+        t = t < 0.0f ? 0.0f : (t > 6.0f ? 6.0f : t);
+        output[idx] = tenzor::rocm::safe_f2h(t * (1.0f / 6.0f));
+    }
+}
+
+auto hardswish_kernel(const Tensor& input, hipStream_t stream) -> Tensor {
+    std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
+    Tensor result(shape, input.dtype(), input.device());
+    int64_t n = input.numel();
+    if (n == 0) return result;
+    int num_blocks = get_num_blocks(n);
+
+    if (input.dtype() == DType::Float32) {
+        hipLaunchKernelGGL(hardswish_forward_kernel<float>, dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
+                          input.data<float>(), result.data<float>(), n);
+    } else if (input.dtype() == DType::Float64) {
+        hipLaunchKernelGGL(hardswish_forward_kernel<double>, dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
+                          input.data<double>(), result.data<double>(), n);
+    } else if (input.dtype() == DType::Float16) {
+        hipLaunchKernelGGL(hardswish_forward_kernel_fp16, dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
+                          reinterpret_cast<const __half*>(input.data<Float16>()), reinterpret_cast<__half*>(result.data<Float16>()), n);
+    } else if (input.dtype() == DType::BFloat16) {
+        auto input_f32 = input.to(DType::Float32);
+        auto result_f32 = hardswish_kernel(input_f32, stream);
+        return result_f32.to(DType::BFloat16);
+    } else {
+        throw std::runtime_error("Hardswish only supports Float32, Float64, Float16, and BFloat16 dtypes");
+    }
+
+    hipError_t err = hipGetLastError();
+    if (err != hipSuccess) {
+        throw std::runtime_error(std::string("HIP error in hardswish_kernel: ") + hipGetErrorString(err));
+    }
+    return result;
+}
+
+auto hardsigmoid_kernel(const Tensor& input, hipStream_t stream) -> Tensor {
+    std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
+    Tensor result(shape, input.dtype(), input.device());
+    int64_t n = input.numel();
+    if (n == 0) return result;
+    int num_blocks = get_num_blocks(n);
+
+    if (input.dtype() == DType::Float32) {
+        hipLaunchKernelGGL(hardsigmoid_forward_kernel<float>, dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
+                          input.data<float>(), result.data<float>(), n);
+    } else if (input.dtype() == DType::Float64) {
+        hipLaunchKernelGGL(hardsigmoid_forward_kernel<double>, dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
+                          input.data<double>(), result.data<double>(), n);
+    } else if (input.dtype() == DType::Float16) {
+        hipLaunchKernelGGL(hardsigmoid_forward_kernel_fp16, dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
+                          reinterpret_cast<const __half*>(input.data<Float16>()), reinterpret_cast<__half*>(result.data<Float16>()), n);
+    } else if (input.dtype() == DType::BFloat16) {
+        auto input_f32 = input.to(DType::Float32);
+        auto result_f32 = hardsigmoid_kernel(input_f32, stream);
+        return result_f32.to(DType::BFloat16);
+    } else {
+        throw std::runtime_error("Hardsigmoid only supports Float32, Float64, Float16, and BFloat16 dtypes");
+    }
+
+    hipError_t err = hipGetLastError();
+    if (err != hipSuccess) {
+        throw std::runtime_error(std::string("HIP error in hardsigmoid_kernel: ") + hipGetErrorString(err));
+    }
+    return result;
+}
+
 // Mish backward wrapper
 auto mish_backward_kernel(const Tensor& grad_output, const Tensor& input, hipStream_t stream) -> Tensor {
     std::vector<int64_t> shape(input.shape().begin(), input.shape().end());

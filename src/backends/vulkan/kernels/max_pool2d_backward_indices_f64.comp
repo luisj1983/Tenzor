@@ -1,22 +1,50 @@
 #version 450
-#extension GL_ARB_gpu_shader_fp64 : enable
+#extension GL_EXT_shader_explicit_arithmetic_types_float64 : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
+#extension GL_EXT_shader_atomic_int64 : require
 
-// Max Pooling 2D Backward Pass for Float64 using pre-computed indices
-// Note: Since 64-bit atomics aren't universally supported, we use a serialization
-// approach for overlapping indices. For most pooling configurations, overlaps are rare.
+// Max Pooling 2D Backward Pass for Float64 using pre-computed indices.
+//
+// Overlapping pooling windows (stride < kernel size) route multiple output
+// gradients to the same grad_input element, so accumulation MUST be atomic;
+// a plain `+=` races and silently produces wrong/non-deterministic gradients.
+// 64-bit atomics aren't guaranteed in core Vulkan, so we accumulate doubles
+// via a 64-bit CAS loop (the same pattern used by max_pool2d_backward_f64.comp
+// and scatter_add_f64.comp). grad_input is therefore typed as uint64_t (the
+// host buffer is a Float64 tensor zero-initialised to 0.0 == 0 bits).
 layout(local_size_x_id = 0) in;
 
-layout(binding = 0) buffer GradOutput { double grad_output[]; };
-layout(binding = 1) buffer Indices { double indices[]; };
-layout(binding = 2) buffer GradInput { double grad_input[]; };
+layout(binding = 0) buffer GradOutput { float64_t grad_output[]; };
+layout(binding = 1) buffer Indices { float64_t indices[]; };
+layout(binding = 2) buffer GradInput { uint64_t grad_input[]; };
 
 layout(push_constant) uniform PushConstants {
     uint n_elements;
     uint grad_input_size;
 } params;
 
-// Use shared memory for local accumulation within workgroup
-shared uint local_lock;
+// Bit-cast helpers
+float64_t bitsToF64(uint64_t bits) {
+    return float64_t(packDouble2x32(uvec2(uint(bits), uint(bits >> 32u))));
+}
+
+uint64_t f64ToBits(float64_t val) {
+    uvec2 v = unpackDouble2x32(double(val));
+    return uint64_t(v.x) | (uint64_t(v.y) << 32u);
+}
+
+void atomicAddF64(uint idx, float64_t val) {
+    uint64_t old_bits = grad_input[idx];
+    uint64_t new_bits;
+    for (int attempt = 0; attempt < 65536; ++attempt) {
+        float64_t old_val = bitsToF64(old_bits);
+        new_bits = f64ToBits(old_val + val);
+        uint64_t result = atomicCompSwap(grad_input[idx], old_bits, new_bits);
+        if (result == old_bits) return;
+        old_bits = result;
+    }
+    grad_input[idx] = new_bits;
+}
 
 void main() {
     uint idx = gl_GlobalInvocationID.x;
@@ -25,13 +53,10 @@ void main() {
         return;
     }
 
-    double grad = grad_output[idx];
+    float64_t grad = grad_output[idx];
     int target_idx = int(indices[idx]);
 
     if (target_idx >= 0 && target_idx < int(params.grad_input_size)) {
-        // Simple non-atomic add - acceptable for non-overlapping pools
-        // For overlapping windows, this may have race conditions but provides
-        // approximate gradients that work for training
-        grad_input[target_idx] += grad;
+        atomicAddF64(uint(target_idx), grad);
     }
 }

@@ -2546,5 +2546,147 @@ auto deformable_conv2d_backward_weight_kernel(
     return grad_weight;
 }
 
+// ============================================================================
+// Depthwise Conv1d / Conv3d (forward, groups == channels).
+//   Conv1d: input [N,C,1,L], weight [C,1,1,kL], output [N,C,1,L_out].
+//   Conv3d: input [N,C,D,H,W], weight [C,1,kD,kH,kW], output [N,C,Do,Ho,Wo].
+// Float32/Float64 native; Float16/BFloat16 widen to Float32. Backward is
+// autograd-composed in the NN layer.
+// ============================================================================
+namespace {
+template <typename T> struct DWConv1dK {};
+template <typename T> struct DWConv3dK {};
+
+template <typename T>
+void run_dwconv1d(sycl::queue& q, const T* in, const T* w, const T* bias, T* out,
+                  int N, int C, int L, int kL, int Lo, int S, int P, int D) {
+    int total = N * C * Lo;
+    if (total == 0) return;
+    q.parallel_for<DWConv1dK<T>>(sycl::range<1>(total), [=](sycl::id<1> i_) {
+        int idx = (int)i_;
+        int ol = idx % Lo;
+        int c  = (idx / Lo) % C;
+        int n  = idx / (C * Lo);
+        const T* in_nc = in + (n * C + c) * L;
+        const T* w_c   = w + c * kL;
+        T acc = bias ? bias[c] : T(0);
+        for (int k = 0; k < kL; ++k) {
+            int il = ol * S - P + k * D;
+            if (il >= 0 && il < L) acc += in_nc[il] * w_c[k];
+        }
+        out[(n * C + c) * Lo + ol] = acc;
+    });
+    q.wait_and_throw();
+}
+
+template <typename T>
+void run_dwconv3d(sycl::queue& q, const T* in, const T* w, const T* bias, T* out,
+                  int N, int C, int Di, int Hi, int Wi, int kD, int kH, int kW,
+                  int Do, int Ho, int Wo,
+                  int sD, int sH, int sW, int pD, int pH, int pW, int dD, int dH, int dW) {
+    int total = N * C * Do * Ho * Wo;
+    if (total == 0) return;
+    q.parallel_for<DWConv3dK<T>>(sycl::range<1>(total), [=](sycl::id<1> i_) {
+        int idx = (int)i_;
+        int ow = idx % Wo;
+        int oh = (idx / Wo) % Ho;
+        int od = (idx / (Wo * Ho)) % Do;
+        int c  = (idx / (Wo * Ho * Do)) % C;
+        int n  = idx / (C * Do * Ho * Wo);
+        const T* in_nc = in + (n * C + c) * Di * Hi * Wi;
+        const T* w_c   = w + c * kD * kH * kW;
+        T acc = bias ? bias[c] : T(0);
+        for (int kd = 0; kd < kD; ++kd) {
+            int id = od * sD - pD + kd * dD;
+            if (id < 0 || id >= Di) continue;
+            for (int kh = 0; kh < kH; ++kh) {
+                int ih = oh * sH - pH + kh * dH;
+                if (ih < 0 || ih >= Hi) continue;
+                for (int kw = 0; kw < kW; ++kw) {
+                    int iw = ow * sW - pW + kw * dW;
+                    if (iw < 0 || iw >= Wi) continue;
+                    acc += in_nc[(id * Hi + ih) * Wi + iw] * w_c[(kd * kH + kh) * kW + kw];
+                }
+            }
+        }
+        out[(((n * C + c) * Do + od) * Ho + oh) * Wo + ow] = acc;
+    });
+    q.wait_and_throw();
+}
+}  // namespace
+
+auto depthwise_conv1d_kernel(const Tensor& input, const Tensor& weight, const Tensor* bias,
+                             int64_t stride, int64_t padding, int64_t dilation,
+                             sycl::queue& queue) -> Tensor {
+    auto is = input.shape();
+    auto ws = weight.shape();
+    int N = (int)is[0], C = (int)is[1], L = (int)is[3], kL = (int)ws[3];
+    int Lo = (int)((L + 2 * padding - dilation * (kL - 1) - 1) / stride + 1);
+    if (Lo <= 0) throw std::runtime_error("depthwise_conv1d (OneAPI): non-positive output length");
+
+    auto run = [&](DType dt) {
+        Tensor in = input.dtype() == dt ? input.contiguous() : input.to(dt);
+        Tensor w  = weight.dtype() == dt ? weight.contiguous() : weight.to(dt);
+        Tensor b; const void* bptr = nullptr;
+        if (bias) { b = bias->dtype() == dt ? bias->contiguous() : bias->to(dt); bptr = b.data_ptr(); }
+        Tensor out(std::vector<int64_t>{(int64_t)N, (int64_t)C, 1, (int64_t)Lo}, dt, input.device());
+        if (dt == DType::Float64) {
+            run_dwconv1d<double>(queue, get_data_ptr<const double>(in), get_data_ptr<const double>(w),
+                (const double*)bptr, get_data_ptr<double>(out), N, C, L, kL, Lo,
+                (int)stride, (int)padding, (int)dilation);
+        } else {
+            run_dwconv1d<float>(queue, get_data_ptr<const float>(in), get_data_ptr<const float>(w),
+                (const float*)bptr, get_data_ptr<float>(out), N, C, L, kL, Lo,
+                (int)stride, (int)padding, (int)dilation);
+        }
+        return out;
+    };
+
+    DType in_dt = input.dtype();
+    if (in_dt == DType::Float64) return run(DType::Float64);
+    if (in_dt == DType::Float32) return run(DType::Float32);
+    if (in_dt == DType::Float16 || in_dt == DType::BFloat16) return run(DType::Float32).to(in_dt);
+    throw std::runtime_error("depthwise_conv1d (OneAPI): unsupported dtype");
+}
+
+auto depthwise_conv3d_kernel(const Tensor& input, const Tensor& weight, const Tensor* bias,
+                             int64_t sD, int64_t sH, int64_t sW,
+                             int64_t pD, int64_t pH, int64_t pW,
+                             int64_t dD, int64_t dH, int64_t dW,
+                             sycl::queue& queue) -> Tensor {
+    auto is = input.shape();
+    auto ws = weight.shape();
+    int N = (int)is[0], C = (int)is[1], Di = (int)is[2], Hi = (int)is[3], Wi = (int)is[4];
+    int kD = (int)ws[2], kH = (int)ws[3], kW = (int)ws[4];
+    int Do = (int)((Di + 2 * pD - dD * (kD - 1) - 1) / sD + 1);
+    int Ho = (int)((Hi + 2 * pH - dH * (kH - 1) - 1) / sH + 1);
+    int Wo = (int)((Wi + 2 * pW - dW * (kW - 1) - 1) / sW + 1);
+    if (Do <= 0 || Ho <= 0 || Wo <= 0) throw std::runtime_error("depthwise_conv3d (OneAPI): non-positive output size");
+
+    auto run = [&](DType dt) {
+        Tensor in = input.dtype() == dt ? input.contiguous() : input.to(dt);
+        Tensor w  = weight.dtype() == dt ? weight.contiguous() : weight.to(dt);
+        Tensor b; const void* bptr = nullptr;
+        if (bias) { b = bias->dtype() == dt ? bias->contiguous() : bias->to(dt); bptr = b.data_ptr(); }
+        Tensor out(std::vector<int64_t>{(int64_t)N, (int64_t)C, (int64_t)Do, (int64_t)Ho, (int64_t)Wo}, dt, input.device());
+        if (dt == DType::Float64) {
+            run_dwconv3d<double>(queue, get_data_ptr<const double>(in), get_data_ptr<const double>(w),
+                (const double*)bptr, get_data_ptr<double>(out), N, C, Di, Hi, Wi, kD, kH, kW, Do, Ho, Wo,
+                (int)sD,(int)sH,(int)sW,(int)pD,(int)pH,(int)pW,(int)dD,(int)dH,(int)dW);
+        } else {
+            run_dwconv3d<float>(queue, get_data_ptr<const float>(in), get_data_ptr<const float>(w),
+                (const float*)bptr, get_data_ptr<float>(out), N, C, Di, Hi, Wi, kD, kH, kW, Do, Ho, Wo,
+                (int)sD,(int)sH,(int)sW,(int)pD,(int)pH,(int)pW,(int)dD,(int)dH,(int)dW);
+        }
+        return out;
+    };
+
+    DType in_dt = input.dtype();
+    if (in_dt == DType::Float64) return run(DType::Float64);
+    if (in_dt == DType::Float32) return run(DType::Float32);
+    if (in_dt == DType::Float16 || in_dt == DType::BFloat16) return run(DType::Float32).to(in_dt);
+    throw std::runtime_error("depthwise_conv3d (OneAPI): unsupported dtype");
+}
+
 } // namespace oneapi
 } // namespace tenzor

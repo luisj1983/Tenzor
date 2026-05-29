@@ -123,4 +123,24 @@ TEST(QuantizedLinearInt4, WideFeaturesCrossSimdBlock) {
     check_case(batch, in, out, input, weights);
 }
 
+// batch_size == 1 with in_features >= 32 exercises the single-row SIMD inner
+// loop across the 32-wide unrolled block. This combination was previously
+// uncovered (the batch==1 case only ran with in=8, and the wide-feature case
+// only ran with batch>1), which let a lane-mispairing bug in the old
+// hand-rolled batch==1 AVX2 path ship silently. Regression guard for that bug.
+TEST(QuantizedLinearInt4, Batch1WideFeatures) {
+    const int64_t out = 2;
+    for (int64_t in : {int64_t{32}, int64_t{40}, int64_t{64}}) {
+        std::vector<int8_t> input(static_cast<size_t>(in));
+        for (size_t i = 0; i < input.size(); ++i) {
+            input[i] = static_cast<int8_t>((static_cast<int>(i * 5) % 13) - 6);  // [-6, 6]
+        }
+        std::vector<int8_t> weights(static_cast<size_t>(out * in));
+        for (size_t i = 0; i < weights.size(); ++i) {
+            weights[i] = static_cast<int8_t>((static_cast<int>(i * 7) % 16) - 8);  // [-8, 7]
+        }
+        check_case(/*batch=*/1, in, out, input, weights);
+    }
+}
+
 }  // namespace

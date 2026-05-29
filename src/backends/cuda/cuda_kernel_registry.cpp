@@ -163,6 +163,8 @@ namespace cuda {
     auto selu_backward_kernel(const Tensor& grad_output, const Tensor& input, cudaStream_t stream) -> Tensor;
     auto mish_kernel(const Tensor& input, cudaStream_t stream) -> Tensor;
     auto mish_backward_kernel(const Tensor& grad_output, const Tensor& input, cudaStream_t stream) -> Tensor;
+    auto hardswish_kernel(const Tensor& input, cudaStream_t stream) -> Tensor;
+    auto hardsigmoid_kernel(const Tensor& input, cudaStream_t stream) -> Tensor;
     auto softplus_kernel(const Tensor& input, float beta, float threshold, cudaStream_t stream) -> Tensor;
     auto softplus_backward_kernel(const Tensor& grad_output, const Tensor& input, float beta, float threshold, cudaStream_t stream) -> Tensor;
 
@@ -596,6 +598,8 @@ namespace cuda {
     auto depthwise_conv2d_forward_kernel(const Tensor& input, const Tensor& weight, const Tensor* bias, int64_t stride, int64_t padding, int64_t dilation, cudaStream_t stream) -> Tensor;
     // Phase 2.1: per-axis overload.
     auto depthwise_conv2d_forward_kernel(const Tensor& input, const Tensor& weight, const Tensor* bias, int64_t stride_h, int64_t stride_w, int64_t pad_h, int64_t pad_w, int64_t dil_h, int64_t dil_w, cudaStream_t stream) -> Tensor;
+    auto depthwise_conv1d_kernel(const Tensor& input, const Tensor& weight, const Tensor* bias, int64_t stride, int64_t padding, int64_t dilation, cudaStream_t stream) -> Tensor;
+    auto depthwise_conv3d_kernel(const Tensor& input, const Tensor& weight, const Tensor* bias, int64_t sD, int64_t sH, int64_t sW, int64_t pD, int64_t pH, int64_t pW, int64_t dD, int64_t dH, int64_t dW, cudaStream_t stream) -> Tensor;
 
     // Deformable Conv2d (DCNv2) operations
     auto deformable_conv2d_forward_kernel(
@@ -834,6 +838,8 @@ namespace cuda {
     Tensor selu_backward_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs);
     Tensor mish_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs);
     Tensor mish_backward_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs);
+    Tensor hardswish_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs);
+    Tensor hardsigmoid_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs);
 
     // Cast (dtype conversion) dispatch wrapper
     Tensor cast_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs);
@@ -1332,6 +1338,9 @@ void register_cuda_kernels(BackendDispatchTable& table) {
     table.register_single_output_kernel(OpId::SeluBackward, cuda::selu_backward_dispatch);
     table.register_single_output_kernel(OpId::Mish, cuda::mish_dispatch);
     table.register_single_output_kernel(OpId::MishBackward, cuda::mish_backward_dispatch);
+    // Forward-only (backward autograd-composed via clamp+mul, matching CPU).
+    table.register_single_output_kernel(OpId::Hardswish, cuda::hardswish_dispatch);
+    table.register_single_output_kernel(OpId::Hardsigmoid, cuda::hardsigmoid_dispatch);
 
     // Parameterized activations (keep lambdas for attribute parsing)
     table.register_single_output_kernel(OpId::LeakyReLU, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
@@ -2886,23 +2895,34 @@ void register_cuda_kernels(BackendDispatchTable& table) {
             get_cuda_stream(attrs));
     });
 
-    // CC.5: 1D / 3D depthwise dispatch surface. See cpu_kernel_registry.cpp
-    // for the full rationale — these handlers exist to make accidental
-    // dispatch (bypassing the NN-layer fallback) fail loudly instead of
-    // silently miscomputing. Real CUDA kernels are a follow-up.
+    // Real native depthwise 1D/3D kernels (forward; backward autograd-composed).
     table.register_kernel(OpId::DepthwiseConv1d,
-        [](std::span<const Tensor>, const OpAttributes&) -> std::vector<Tensor> {
-            throw std::runtime_error(
-                "DepthwiseConv1d (CUDA): not yet implemented; route through "
-                "generic Conv1dForward (Conv1d::forward_impl falls back "
-                "automatically when this OpId is unregistered).");
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            int64_t s = attrs.get_int(AttrKey::Stride, 1);
+            int64_t p = attrs.get_int(AttrKey::Padding, 0);
+            int64_t d = attrs.get_int(AttrKey::Dilation, 1);
+            const Tensor* bias = inputs.size() > 2 ? &inputs[2] : nullptr;
+            return {cuda::depthwise_conv1d_kernel(inputs[0], inputs[1], bias, s, p, d,
+                                                  get_cuda_stream(attrs))};
         });
     table.register_kernel(OpId::DepthwiseConv3d,
-        [](std::span<const Tensor>, const OpAttributes&) -> std::vector<Tensor> {
-            throw std::runtime_error(
-                "DepthwiseConv3d (CUDA): not yet implemented; route through "
-                "generic Conv3dForward (Conv3d::forward_impl falls back "
-                "automatically when this OpId is unregistered).");
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            int64_t s = attrs.get_int(AttrKey::Stride, 1);
+            int64_t p = attrs.get_int(AttrKey::Padding, 0);
+            int64_t d = attrs.get_int(AttrKey::Dilation, 1);
+            int64_t sD = attrs.has(AttrKey::StrideD) ? attrs.get_int(AttrKey::StrideD) : s;
+            int64_t sH = attrs.has(AttrKey::StrideH) ? attrs.get_int(AttrKey::StrideH) : s;
+            int64_t sW = attrs.has(AttrKey::StrideW) ? attrs.get_int(AttrKey::StrideW) : s;
+            int64_t pD = attrs.has(AttrKey::PaddingD) ? attrs.get_int(AttrKey::PaddingD) : p;
+            int64_t pH = attrs.has(AttrKey::PaddingH) ? attrs.get_int(AttrKey::PaddingH) : p;
+            int64_t pW = attrs.has(AttrKey::PaddingW) ? attrs.get_int(AttrKey::PaddingW) : p;
+            int64_t dD = attrs.has(AttrKey::DilationD) ? attrs.get_int(AttrKey::DilationD) : d;
+            int64_t dH = attrs.has(AttrKey::DilationH) ? attrs.get_int(AttrKey::DilationH) : d;
+            int64_t dW = attrs.has(AttrKey::DilationW) ? attrs.get_int(AttrKey::DilationW) : d;
+            const Tensor* bias = inputs.size() > 2 ? &inputs[2] : nullptr;
+            return {cuda::depthwise_conv3d_kernel(inputs[0], inputs[1], bias,
+                                                  sD, sH, sW, pD, pH, pW, dD, dH, dW,
+                                                  get_cuda_stream(attrs))};
         });
 
     // =========================================================================

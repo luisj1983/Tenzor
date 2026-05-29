@@ -753,6 +753,14 @@ public:
     auto dispatchDepthwiseConv2d(const Tensor& input, const Tensor& weight,
                                   const Tensor* bias, int64_t stride,
                                   int64_t padding, int64_t dilation) -> Tensor;
+    auto dispatchDepthwiseConv1d(const Tensor& input, const Tensor& weight,
+                                  const Tensor* bias, int64_t stride,
+                                  int64_t padding, int64_t dilation) -> Tensor;
+    auto dispatchDepthwiseConv3d(const Tensor& input, const Tensor& weight,
+                                  const Tensor* bias,
+                                  int64_t sD, int64_t sH, int64_t sW,
+                                  int64_t pD, int64_t pH, int64_t pW,
+                                  int64_t dD, int64_t dH, int64_t dW) -> Tensor;
     auto dispatchCumSum(const Tensor& input, int64_t dim) -> Tensor;
     auto dispatchCumProd(const Tensor& input, int64_t dim) -> Tensor;
     auto dispatchAdaptiveMaxPool2dBackward(const Tensor& grad_output, const Tensor& indices,

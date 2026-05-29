@@ -56,6 +56,16 @@ if(MKL_FOUND)
     endif()
 endif()
 
+# Opt-in override to build the native (non-oneMKL) SYCL linalg kernels even when
+# oneMKL is installed. Lets the arbitrary-N global-memory fallback be built and
+# tested on machines that have oneMKL, and supports MKL-free deployments.
+option(TENZOR_ONEAPI_FORCE_NATIVE_LINALG
+       "Force the native SYCL linalg fallback (ignore oneMKL) for the OneAPI backend" OFF)
+if(TENZOR_ONEAPI_FORCE_NATIVE_LINALG)
+    set(ONEMKL_SYCL_FOUND FALSE)
+    message(STATUS "OneAPI Backend: TENZOR_ONEAPI_FORCE_NATIVE_LINALG=ON - using native SYCL linalg")
+endif()
+
 # Check for oneDPL (Intel DPC++ Library)
 set(ONEDPL_FOUND FALSE)
 find_path(ONEDPL_INCLUDE_DIR

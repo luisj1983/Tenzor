@@ -281,10 +281,10 @@ LRSchedulerCallback::LRSchedulerCallback(
 }
 
 auto LRSchedulerCallback::on_train_begin() -> void {
-    // Store initial learning rate
-    // Note: This assumes optimizer has a method to get current LR
-    // For now, we'll track it internally
-    initial_lr_ = 0.01f;  // Default value
+    // Seed the schedule from the optimizer's actual learning rate so cosine
+    // annealing (which interpolates from initial_lr_) and the first decay step
+    // operate on the real starting LR rather than a hardcoded guess.
+    initial_lr_ = static_cast<float>(optimizer_->get_lr());
     current_lr_ = initial_lr_;
 
     std::cout << "[LRScheduler] Initial learning rate: "
@@ -299,9 +299,9 @@ auto LRSchedulerCallback::update_lr(float new_lr) -> void {
     if (new_lr != current_lr_) {
         current_lr_ = new_lr;
 
-        // Update optimizer learning rate
-        // Note: This requires extending Optimizer base class with set_lr method
-        // For now, we just track it
+        // Apply the new rate to the optimizer. Optimizer::set_lr writes the LR
+        // into every parameter group (overridable per optimizer).
+        optimizer_->set_lr(static_cast<double>(current_lr_));
 
         std::cout << "[LRScheduler] Learning rate adjusted to: "
                   << std::scientific << std::setprecision(2) << current_lr_

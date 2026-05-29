@@ -155,6 +155,14 @@ double mish(double x) {
     return x * tanh_d(sp);
 }
 
+double hardswish(double x) {
+    return x * clamp(x + 3.0LF, 0.0LF, 6.0LF) * (1.0LF / 6.0LF);
+}
+
+double hardsigmoid(double x) {
+    return clamp(x + 3.0LF, 0.0LF, 6.0LF) * (1.0LF / 6.0LF);
+}
+
 void main() {
     uint idx = gl_GlobalInvocationID.x;
 
@@ -195,6 +203,12 @@ void main() {
             break;
         case 9: // Softplus
             result = softplus_d(x, params.alpha);
+            break;
+        case 10: // Hardswish
+            result = hardswish(x);
+            break;
+        case 11: // Hardsigmoid
+            result = hardsigmoid(x);
             break;
         default:
             result = x;

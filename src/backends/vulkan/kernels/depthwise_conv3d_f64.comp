@@ -1,0 +1,55 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_float64 : require
+
+// Depthwise Conv3d forward (groups == channels), native Float64.
+// Contract: input [N,C,D,H,W], weight [C,1,kD,kH,kW], output [N,C,Do,Ho,Wo].
+layout(local_size_x_id = 0) in;
+
+layout(binding = 0) buffer InBuf  { float64_t input_data[]; };
+layout(binding = 1) buffer WBuf   { float64_t weight_data[]; };
+layout(binding = 2) buffer BBuf   { float64_t bias_data[]; };
+layout(binding = 3) buffer OutBuf { float64_t output_data[]; };
+
+layout(push_constant) uniform PC {
+    uint n_elements;
+    uint N; uint C;
+    uint Di; uint Hi; uint Wi;
+    uint kD; uint kH; uint kW;
+    uint Do; uint Ho; uint Wo;
+    uint sD; uint sH; uint sW;
+    uint pD; uint pH; uint pW;
+    uint dD; uint dH; uint dW;
+    uint has_bias;
+} p;
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= p.n_elements) return;
+
+    uint ow = idx % p.Wo;
+    uint oh = (idx / p.Wo) % p.Ho;
+    uint od = (idx / (p.Wo * p.Ho)) % p.Do;
+    uint c  = (idx / (p.Wo * p.Ho * p.Do)) % p.C;
+    uint n  = idx / (p.C * p.Do * p.Ho * p.Wo);
+
+    uint in_base = (n * p.C + c) * p.Di * p.Hi * p.Wi;
+    uint w_base  = c * p.kD * p.kH * p.kW;
+
+    float64_t acc = (p.has_bias != 0u) ? bias_data[c] : 0.0LF;
+    for (uint kd = 0u; kd < p.kD; ++kd) {
+        int id = int(od) * int(p.sD) - int(p.pD) + int(kd) * int(p.dD);
+        if (id < 0 || id >= int(p.Di)) continue;
+        for (uint kh = 0u; kh < p.kH; ++kh) {
+            int ih = int(oh) * int(p.sH) - int(p.pH) + int(kh) * int(p.dH);
+            if (ih < 0 || ih >= int(p.Hi)) continue;
+            for (uint kw = 0u; kw < p.kW; ++kw) {
+                int iw = int(ow) * int(p.sW) - int(p.pW) + int(kw) * int(p.dW);
+                if (iw < 0 || iw >= int(p.Wi)) continue;
+                uint in_idx = in_base + (uint(id) * p.Hi + uint(ih)) * p.Wi + uint(iw);
+                uint w_idx  = w_base + (kd * p.kH + kh) * p.kW + kw;
+                acc += input_data[in_idx] * weight_data[w_idx];
+            }
+        }
+    }
+    output_data[(((n * p.C + c) * p.Do + od) * p.Ho + oh) * p.Wo + ow] = acc;
+}

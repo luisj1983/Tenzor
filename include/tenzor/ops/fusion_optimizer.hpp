@@ -127,6 +127,11 @@ public:
         std::vector<size_t> matched_nodes;      ///< Matched node IDs
         float confidence{0.0f};                  ///< Match confidence [0,1]
         std::string pattern_name;                ///< Name of matched pattern
+        /// Per-fusion parameters extracted from the matched nodes that the
+        /// executor needs (e.g. an absorbed Dropout node's probability/seed).
+        /// Forwarded into execute_fused_op's attribute map so the fused op
+        /// reproduces the unfused numerics.
+        std::unordered_map<std::string, std::string> attributes;
 
         explicit operator bool() const { return !matched_nodes.empty(); }
     };

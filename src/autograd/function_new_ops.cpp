@@ -780,24 +780,22 @@ auto CholeskyInverseBackward::backward_with_variables(std::vector<Variable> grad
     return {grad_L};
 }
 
-// LinalgLDLFactorBackward: complex structured backprop
+// LinalgLDLFactorBackward: structured backprop through A = L D L^T.
 //
-// Mathematical status: the closed-form backward through LDL = P L D L^T P^T
-// (with pivoting from Bunch-Kaufman) is tractable but involves multiple
-// triangular-projection operations; see Giles "Extended Matrix Backward"
-// (2008) and Walter "Structured Matrix Differentiation" (2010). A correct
-// implementation is multi-file work that needs its own dedicated test
-// suite against SciPy/PyTorch references and is out of scope for this
-// autograd completeness pass.
+// We implement the exact closed-form adjoint for the NO-PIVOTING case (the
+// factorization LAPACK *sytrf produces when no row/column interchanges and no
+// 2x2 pivot blocks are needed, i.e. the SPD-equivalent path). The derivation
+// is in backward() below.
 //
-// Current behavior: returns zero gradient. Silent zeros are dangerous when
-// users plug LDL into a loss that's downstream of other differentiable ops
-// — they'll see "training proceeds" but gradients through the factorization
-// are missing. Set `TENZOR_STRICT_LINALG_GRAD=1` to surface this as a
-// runtime error instead, so CI catches accidental use of LDL in a gradient
-// chain. Users needing gradients should use `ldl_solve` which has a proper
-// backward, or compute through `cholesky` for symmetric positive definite
-// matrices.
+// Bunch-Kaufman pivoting (the reason LDL is used for INDEFINITE matrices)
+// permutes the matrix as P A P^T = L D L^T, so tril(LD,-1)+I is the factor of
+// the permuted matrix, not of A. Rather than return a silently-wrong gradient
+// in that case, backward() inspects the saved pivots and throws
+// NonDifferentiable when any pivoting occurred (matching PyTorch's
+// linalg_ldl_factor, which only supports the pivot-free adjoint). Setting
+// TENZOR_STRICT_LINALG_GRAD=1 additionally hardens the diagnostic. Users needing
+// gradients through an indefinite factorization should use `ldl_solve` (which
+// has a proper pivot-aware backward) or `cholesky` for SPD inputs.
 auto LinalgLDLFactorBackward::forward(std::vector<Variable>) -> std::vector<Variable> {
     throw std::runtime_error("LinalgLDLFactorBackward::forward should not be called directly");
 }
@@ -807,13 +805,48 @@ inline bool strict_linalg_grad_mode() {
     const char* v = std::getenv("TENZOR_STRICT_LINALG_GRAD");
     return v && *v && std::string(v) != "0" && std::string(v) != "false";
 }
+
+// The closed-form LDL backward below is derived for the no-pivoting case
+// (A = L D L^T with L unit-lower). LAPACK *sytrf (Bunch-Kaufman) pivots for
+// indefinite matrices: ipiv is 1-based, a 1x1 block with no interchange has
+// ipiv[i] == i+1, an interchange gives a different positive value, and a 2x2
+// pivot block gives negative entries. When any pivoting occurred, tril(LD,-1)+I
+// is the factor of a PERMUTED matrix, so the closed form would be silently
+// wrong. Treat the pivots as trivial only when every entry is its own 1-based
+// index.
+inline bool ldl_pivots_are_trivial(const Tensor& pivots) {
+    Tensor p = (pivots.device() == Device::cpu()) ? pivots : pivots.to(Device::cpu());
+    if (p.dtype() != DType::Int32) p = p.to(DType::Int32);
+    const int32_t* d = p.data<int32_t>();
+    const int64_t n = p.shape().empty() ? 0 : p.shape().back();
+    const int64_t total = p.numel();
+    if (n == 0) return true;
+    for (int64_t f = 0; f < total; ++f) {
+        if (d[f] != static_cast<int32_t>((f % n) + 1)) return false;
+    }
+    return true;
+}
 }
 
 auto LinalgLDLFactorBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> {
-    require_saved_tensors(2);
+    require_saved_tensors(3);
     const auto& A = saved_tensors_[0];
     const auto& LD = saved_tensors_[1];
+    const auto& pivots = saved_tensors_[2];
     const auto& grad_LD = grad_outputs[0];
+
+    // The closed form below is only valid without pivoting. If Bunch-Kaufman
+    // interchanged rows/cols or used a 2x2 block, LD factors the permuted
+    // matrix and this adjoint would be silently wrong — fail loud instead.
+    if (!ldl_pivots_are_trivial(pivots)) {
+        throw NonDifferentiable(
+            "linalg.ldl_factor: gradients are only supported for the "
+            "no-pivoting (positive-definite-equivalent) case. The input "
+            "required Bunch-Kaufman pivoting (it is indefinite), for which the "
+            "factor backward is not implemented. Differentiate through "
+            "`ldl_solve` (pivot-aware), or use `cholesky` for SPD inputs.");
+    }
+    (void)strict_linalg_grad_mode();
 
     // audit-2026-05-03 Phase 12 — implement closed-form LDL backward for
     // the no-pivoting (SPD-equivalent) path. LAPACK's *sytrf with UPLO='L'
@@ -901,7 +934,16 @@ auto LinalgLDLFactorBackward::backward(std::vector<Tensor> grad_outputs) -> std:
 // produces correct second-order gradients.
 auto LinalgLDLFactorBackward::backward_with_variables(std::vector<Variable> grad_outputs)
     -> std::vector<Variable> {
-    require_saved_tensors(2);
+    require_saved_tensors(3);
+    // Same pivot restriction as the Tensor-level backward (see note above).
+    if (!ldl_pivots_are_trivial(saved_tensors_[2])) {
+        throw NonDifferentiable(
+            "linalg.ldl_factor: gradients are only supported for the "
+            "no-pivoting (positive-definite-equivalent) case. The input "
+            "required Bunch-Kaufman pivoting (it is indefinite), for which the "
+            "factor backward is not implemented. Differentiate through "
+            "`ldl_solve` (pivot-aware), or use `cholesky` for SPD inputs.");
+    }
     auto grad_LD = grad_outputs[0];
     auto A_var = Variable(saved_tensors_[0], false);
     auto LD_var = Variable(saved_tensors_[1], false);

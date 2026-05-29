@@ -19,6 +19,7 @@
 #include <tenzor/ops/math.hpp>
 #include <tenzor/ops/reduction.hpp>
 #include <tenzor/tenzor.hpp>
+#include <tenzor/utils/error.hpp>
 
 #include "../grad_flow_helpers.hpp"
 
@@ -41,11 +42,26 @@ protected:
     }
     std::string saved_strict_;
 
-    // Build an SPD-ish matrix so ldl_factor succeeds.
+    // Build a STRONGLY diagonally-dominant SPD matrix. The closed-form LDL
+    // backward is only valid for the no-pivoting case; diagonal dominance
+    // guarantees Bunch-Kaufman (*sytrf) selects 1x1 pivots with no interchange
+    // (trivial ipiv), so these gradient tests exercise the supported path
+    // deterministically rather than relying on a random draw not pivoting.
     Tensor make_spd(int64_t n) {
         auto x = randn({n, n}, DType::Float64, Device::cpu());
         auto eye_n = eye(n, std::nullopt, DType::Float64, Device::cpu());
-        return matmul(x, transpose(x, 0, 1)) + eye_n;
+        return matmul(x, transpose(x, 0, 1)) + eye_n * 100.0;
+    }
+
+    // A symmetric INDEFINITE matrix that forces Bunch-Kaufman pivoting:
+    // [[0, 1], [1, 0]] has eigenvalues +/-1 and a zero diagonal, so *sytrf must
+    // interchange / use a 2x2 block (non-trivial ipiv).
+    Tensor make_indefinite_pivoting() {
+        auto A = zeros({2, 2}, DType::Float64, Device::cpu());
+        double* d = A.data<double>();
+        d[1] = 1.0;  // (0,1)
+        d[2] = 1.0;  // (1,0)
+        return A;
     }
 };
 
@@ -106,6 +122,19 @@ TEST_F(StrictLinalgGradTest, LDLFactor_StrictModeFalseEquivalentToUnset) {
     EXPECT_TRUE(any_nonzero)
         << "TENZOR_STRICT_LINALG_GRAD=0 should produce the same real "
            "gradient as the unset default";
+}
+
+// The closed-form adjoint is invalid once Bunch-Kaufman pivots, so backward
+// through an indefinite (pivoting) factorization must fail loud rather than
+// return a silently-wrong gradient. (Mirrors PyTorch, which has no pivoted
+// ldl_factor backward.)
+TEST_F(StrictLinalgGradTest, LDLFactor_PivotingThrowsNonDifferentiable) {
+    unsetenv("TENZOR_STRICT_LINALG_GRAD");
+
+    Variable A(make_indefinite_pivoting(), /*requires_grad=*/true);
+    auto [LD, pivots] = ldl_factor(A);
+    auto loss = tenzor::sum(LD);
+    EXPECT_THROW(loss.backward(), tenzor::NonDifferentiable);
 }
 
 }  // namespace

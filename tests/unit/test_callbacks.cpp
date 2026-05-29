@@ -350,6 +350,32 @@ TEST(CallbackTest, LRSchedulerCosineAnnealing) {
     EXPECT_GT(scheduler->current_lr(), 0.0f);
 }
 
+// Regression (release audit): the scheduler must APPLY the new LR to the
+// optimizer, not merely track it internally. Previously update_lr() only
+// printed the value and on_train_begin() hardcoded 0.01, so every schedule was
+// a no-op on real training.
+TEST(CallbackTest, LRSchedulerAppliesToOptimizer) {
+    auto model = std::make_shared<Linear>(10, 5);
+    auto optimizer = std::make_shared<optim::SGD>(model->parameters(), 0.1);
+
+    auto scheduler = std::make_shared<LRSchedulerCallback>(
+        optimizer,
+        "step",
+        0.5f,   // halve LR
+        1       // every epoch
+    );
+
+    scheduler->on_train_begin();
+    // Seeded from the optimizer's real LR (0.1), not a hardcoded 0.01.
+    EXPECT_FLOAT_EQ(scheduler->current_lr(), 0.1f);
+    EXPECT_NEAR(optimizer->get_lr(), 0.1, 1e-9);
+
+    scheduler->on_epoch_end(0, 1.0f, 0.9f);  // triggers a decay step
+    // Both the tracked LR and the optimizer's LR must drop to 0.05.
+    EXPECT_NEAR(scheduler->current_lr(), 0.05f, 1e-6);
+    EXPECT_NEAR(optimizer->get_lr(), 0.05, 1e-6);
+}
+
 // ============================================================================
 // CallbackList Tests
 // ============================================================================

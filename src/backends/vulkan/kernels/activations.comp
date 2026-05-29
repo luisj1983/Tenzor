@@ -112,6 +112,16 @@ float mish(float x) {
     return x * tanh_stable(sp);
 }
 
+float hardswish(float x) {
+    // x * clamp(x + 3, 0, 6) / 6
+    return x * clamp(x + 3.0, 0.0, 6.0) * (1.0 / 6.0);
+}
+
+float hardsigmoid(float x) {
+    // clamp(x + 3, 0, 6) / 6
+    return clamp(x + 3.0, 0.0, 6.0) * (1.0 / 6.0);
+}
+
 void main() {
     uint idx = gl_GlobalInvocationID.x;
 
@@ -152,6 +162,12 @@ void main() {
             break;
         case 9: // Softplus
             result = softplus(x, params.alpha);
+            break;
+        case 10: // Hardswish
+            result = hardswish(x);
+            break;
+        case 11: // Hardsigmoid
+            result = hardsigmoid(x);
             break;
         default:
             result = x;

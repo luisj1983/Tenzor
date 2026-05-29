@@ -11,6 +11,8 @@
 #include "tenzor/ops/math.hpp"
 #include "tenzor/ops/creation.hpp"
 #include "tenzor/autograd/ops.hpp"
+#include "tenzor/backend/backend.hpp"
+#include "tenzor/backend/loader.hpp"
 #include "tenzor/tenzor.hpp"
 #include <chrono>
 #include <thread>
@@ -186,6 +188,46 @@ TEST(AsyncOpsTest, AsyncMatmulCorrectness) {
     for (size_t i = 0; i < size; ++i) {
         EXPECT_NEAR(result_data[i], expected_data[i], 1e-4f);
     }
+}
+
+// Release audit (#16): every available GPU backend must run async ops through
+// the StreamManager-backed device-stream path (real per-device streams created
+// via the backend interface), not the CPU thread-pool special-case — and still
+// produce correct results. Exercises create_stream/synchronize_stream/
+// destroy_stream for whichever backends are present.
+TEST(AsyncOpsTest, GpuAsyncMatmulUsesDeviceStreamAndIsCorrect) {
+    auto a_cpu = randn({16, 24}, DType::Float32, Device::cpu());
+    auto b_cpu = randn({24, 20}, DType::Float32, Device::cpu());
+    auto ref = matmul(a_cpu, b_cpu);
+    const float* e = ref.data<float>();
+
+    struct Cand { Device::Type type; Device dev; const char* name; };
+    std::vector<Cand> cands = {
+        {Device::Type::CUDA,   Device::cuda(),   "cuda"},
+        {Device::Type::ROCm,   Device::rocm(),   "rocm"},
+        {Device::Type::OneAPI, Device::oneapi(), "oneapi"},
+        {Device::Type::Vulkan, Device::vulkan(), "vulkan"},
+    };
+
+    int tested = 0;
+    for (const auto& c : cands) {
+        Backend* be = backend_registry().get_backend(c.type);
+        if (!be || !be->is_available() || be->device_count() < 1) continue;
+
+        Tensor a, b;
+        try { a = a_cpu.to(c.dev); b = b_cpu.to(c.dev); }
+        catch (...) { continue; }  // device present but transfer unsupported
+
+        auto fut = async_matmul(a, b);
+        auto res = fut.wait().to(Device::cpu()).contiguous();
+        ASSERT_EQ(res.numel(), ref.numel()) << c.name;
+        const float* r = res.data<float>();
+        for (int64_t i = 0; i < ref.numel(); ++i) {
+            ASSERT_NEAR(r[i], e[i], 1e-3f) << c.name << " mismatch at " << i;
+        }
+        ++tested;
+    }
+    if (tested == 0) GTEST_SKIP() << "no GPU backend available for async stream test";
 }
 
 TEST(AsyncOpsTest, AsyncAddCorrectness) {

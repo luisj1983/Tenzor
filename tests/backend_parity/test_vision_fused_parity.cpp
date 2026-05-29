@@ -14,6 +14,9 @@
 #include <tenzor/ops/fused_ops.hpp>
 #include <tenzor/ops/detection.hpp>
 #include <tenzor/nn/detection/roi_ops.hpp>
+#include <tenzor/backend/fast_dispatch.hpp>
+#include <tenzor/backend/op_attributes.hpp>
+#include <tenzor/ops/op_id.hpp>
 #include "../backend_test_fixture.hpp"
 #include "parity_test_utils.hpp"
 
@@ -88,6 +91,38 @@ TEST_P(VisionFusedParity, GridSample_Bilinear) {
             return ops::grid_sample(ins[0], grid, "bilinear", "zeros", false);
         },
         {input}, 1e-4f, 1e-6f, "grid_sample");
+}
+
+// Release audit: bicubic forward must match CPU on every backend. ROCm/OneAPI
+// previously silently computed bilinear for mode='bicubic'.
+TEST_P(VisionFusedParity, GridSample_Bicubic) {
+    auto input = randn({1, 3, 8, 8}, DType::Float32, Device::cpu());
+    auto theta = zeros({1, 2, 3}, DType::Float32, Device::cpu());
+    auto* t = theta.data<float>();
+    t[0] = 1.0f; t[4] = 1.0f;
+    auto grid = ops::affine_grid(theta, {1, 3, 8, 8}, false);
+
+    test_operation_parity(
+        [&grid](const std::vector<Tensor>& ins) {
+            return ops::grid_sample(ins[0], grid.to(ins[0].device()), "bicubic", "zeros", false);
+        },
+        {input}, 1e-4f, 1e-6f, "grid_sample_bicubic");
+}
+
+// Release audit: native Float64 grid_sample must match CPU on every backend.
+// ROCm/OneAPI previously force-downcast Float64 inputs to Float32.
+TEST_P(VisionFusedParity, GridSample_Bicubic_Float64) {
+    auto input = randn({1, 3, 8, 8}, DType::Float64, Device::cpu());
+    auto theta = zeros({1, 2, 3}, DType::Float32, Device::cpu());
+    auto* t = theta.data<float>();
+    t[0] = 1.0f; t[4] = 1.0f;
+    auto grid = ops::affine_grid(theta, {1, 3, 8, 8}, false);
+
+    test_operation_parity(
+        [&grid](const std::vector<Tensor>& ins) {
+            return ops::grid_sample(ins[0], grid.to(ins[0].device()), "bicubic", "zeros", false);
+        },
+        {input}, 1e-5f, 1e-7f, "grid_sample_bicubic_f64");
 }
 
 TEST_P(VisionFusedParity, AffineGrid) {
@@ -364,6 +399,42 @@ TEST_P(VisionFusedParity, FusedLayerNorm) {
 // through the dispatch layer directly — out of scope for this task.
 // Similarly, fused_sgd_step / fused_adam_step are CUDA-only backend APIs
 // (include/tenzor/backend/fused_ops.hpp) without general dispatch wrappers.
+
+// Release audit: dedicated depthwise Conv1d/Conv3d kernels on every GPU backend
+// (previously throw-stubs, so depthwise-separable models hard-failed on GPU).
+// Contract: Conv1d input [N,C,1,L], weight [C,1,1,kL]; Conv3d input [N,C,D,H,W],
+// weight [C,1,kD,kH,kW]. Compared against the CPU reference kernel.
+TEST_P(VisionFusedParity, DepthwiseConv1d) {
+    const int64_t C = 4, L = 12, kL = 3;
+    auto input  = randn({1, C, 1, L}, DType::Float32, Device::cpu());
+    auto weight = randn({C, 1, 1, kL}, DType::Float32, Device::cpu());
+    auto bias   = randn({C}, DType::Float32, Device::cpu());
+    test_operation_parity(
+        [](const std::vector<Tensor>& ins) {
+            OpAttributes a;
+            a.set(AttrKey::Stride, (int64_t)2);
+            a.set(AttrKey::Padding, (int64_t)1);
+            a.set(AttrKey::Dilation, (int64_t)1);
+            return dispatch(OpId::DepthwiseConv1d, ins, a)[0];
+        },
+        {input, weight, bias}, 1e-4f, 1e-6f, "depthwise_conv1d");
+}
+
+TEST_P(VisionFusedParity, DepthwiseConv3d) {
+    const int64_t C = 3, D = 6, H = 6, W = 6, kD = 3, kH = 3, kW = 3;
+    auto input  = randn({1, C, D, H, W}, DType::Float32, Device::cpu());
+    auto weight = randn({C, 1, kD, kH, kW}, DType::Float32, Device::cpu());
+    auto bias   = randn({C}, DType::Float32, Device::cpu());
+    test_operation_parity(
+        [](const std::vector<Tensor>& ins) {
+            OpAttributes a;
+            a.set(AttrKey::Stride, (int64_t)1);
+            a.set(AttrKey::Padding, (int64_t)1);
+            a.set(AttrKey::Dilation, (int64_t)1);
+            return dispatch(OpId::DepthwiseConv3d, ins, a)[0];
+        },
+        {input, weight, bias}, 1e-4f, 1e-6f, "depthwise_conv3d");
+}
 
 INSTANTIATE_BACKEND_TESTS(VisionFusedParity);
 

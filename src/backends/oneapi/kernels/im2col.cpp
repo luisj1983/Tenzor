@@ -391,8 +391,28 @@ auto col2im_kernel(const Tensor& input, const OpAttributes& attrs, sycl::queue& 
             );
         }
     }
+    else if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) {
+        // Widen to Float32, run the f32 path, narrow back — matches im2col's
+        // dtype coverage (and CUDA's col2im_kernel_f16). Used by the no-oneDNN
+        // conv-backward fallback for half-precision.
+        const DType in_dt = input.dtype();
+        Tensor input_f32 = input.to(DType::Float32);
+        Tensor output_f32({N, C, H, W}, DType::Float32, input.device());
+        const float* input_ptr = get_data_ptr<const float>(input_f32);
+        float* output_ptr = get_data_ptr<float>(output_f32);
+        for (int64_t n = 0; n < N; ++n) {
+            col2im_kernel_impl<float>(
+                input_ptr + n * C * K_h * K_w * H_out * W_out,
+                C, H, W, K_h, K_w, P_h, P_w, S_h, S_w, D_h, D_w,
+                output_ptr + n * C * H * W,
+                queue
+            );
+        }
+        output = output_f32.to(in_dt);
+    }
     else {
-        throw std::runtime_error("col2im: Unsupported data type (only Float32 and Float64 supported)");
+        throw std::runtime_error("col2im: Unsupported data type "
+            "(supports Float32, Float64, Float16, BFloat16)");
     }
 
     return output;

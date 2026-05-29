@@ -9,6 +9,7 @@
 #include "tenzor/ops/transform.hpp"
 #include "tenzor/ops/creation.hpp"
 #include "tenzor/ops/op_id.hpp"
+#include "tenzor/ops/philox_dropout.hpp"
 #include "tenzor/nn/activations/activations.hpp"
 #include "tenzor/autograd/variable.hpp"
 #include "tenzor/backend/fast_dispatch.hpp"
@@ -511,6 +512,19 @@ auto FusionPattern::match_attention(const FusionGraph& graph, size_t start) cons
         match.matched_nodes = {start, softmax_node.id, matmul_v_id};
         if (dropout_id > 0) {
             match.matched_nodes.insert(match.matched_nodes.begin() + 2, dropout_id);
+            // Propagate the absorbed Dropout node's parameters so the executor
+            // reproduces dropout instead of silently eliding it. Accept the
+            // common attribute spellings produced by graph builders.
+            const auto& drop_node = graph.get_node(dropout_id);
+            const auto& da = drop_node.attributes;
+            for (const char* key : {"p", "rate", "dropout_p", "probability"}) {
+                auto it = da.find(key);
+                if (it != da.end()) { match.attributes["dropout_p"] = it->second; break; }
+            }
+            for (const char* key : {"seed", "dropout_seed"}) {
+                auto it = da.find(key);
+                if (it != da.end()) { match.attributes["dropout_seed"] = it->second; break; }
+            }
         }
         match.confidence = 0.95f;
         match.pattern_name = "attention";
@@ -1138,6 +1152,41 @@ auto execute_fused_op(
             scale = 1.0f / std::sqrt(static_cast<float>(d_k));
         }
 
+        // Parse causal flag and dropout parameters.
+        bool causal = false;
+        if (auto it = attributes.find("causal"); it != attributes.end()) {
+            causal = (it->second == "1" || it->second == "true" || it->second == "True");
+        }
+        double dropout_p = 0.0;
+        if (auto it = attributes.find("dropout_p"); it != attributes.end()) {
+            dropout_p = std::stod(it->second);
+        }
+        uint64_t dropout_seed = 0;
+        if (auto it = attributes.find("dropout_seed"); it != attributes.end()) {
+            dropout_seed = static_cast<uint64_t>(std::stoll(it->second));
+        }
+
+        const bool has_mask = inputs.size() >= 4;
+
+        // Fast path: with no additive mask and no dropout, run the real fused
+        // attention kernel (single-pass, memory-efficient) on whatever device
+        // the tensors live on — this is the whole point of the fusion. The
+        // kernel handles scale and causal masking internally.
+        if (!has_mask && dropout_p == 0.0 &&
+            is_op_supported(OpId::FusedAttention, inputs[0].device().type)) {
+            OpAttributes fa;
+            fa.set(AttrKey::Scale, static_cast<double>(scale));
+            fa.set(AttrKey::Causal, causal);
+            std::vector<Tensor> qkv = {inputs[0], inputs[1], inputs[2]};
+            return {dispatch(OpId::FusedAttention, qkv, fa)[0]};
+        }
+
+        // Composed path: used when an additive mask is supplied, when dropout
+        // is requested (no backend fused kernel applies training dropout), or
+        // when the fused kernel is unavailable for this device. It reproduces
+        // the unfused numerics exactly, INCLUDING dropout — previously this
+        // branch silently dropped the matched Dropout node.
+
         // Q @ K.T
         Tensor scores = matmul(inputs[0], inputs[1].transpose(-1, -2));
 
@@ -1149,10 +1198,21 @@ auto execute_fused_op(
             scores = mul(scores, scale_tensor);
         }
 
+        // Causal mask (strict-upper -> large negative so future keys vanish
+        // after softmax). Built on-device to keep the op device-local.
+        if (causal) {
+            auto shp = scores.shape();
+            int64_t sq = shp[shp.size() - 2];
+            int64_t sk = shp[shp.size() - 1];
+            Tensor neg = full({sq, sk}, -1e30f, scores.dtype(), scores.device());
+            Tensor causal_add = tenzor::triu(neg, 1);  // 0 on/below diag, -1e30 above
+            scores = add(scores, causal_add);
+        }
+
         // Additive mask BEFORE softmax — this is the contract that lets
         // masked positions reach zero probability while preserving
         // normalisation across the kept positions.
-        if (inputs.size() >= 4) {
+        if (has_mask) {
             scores = add(scores, inputs[3]);
         }
 
@@ -1160,6 +1220,21 @@ auto execute_fused_op(
         Variable scores_var(scores);
         Variable attention_weights_var = nn::softmax(scores_var, -1);
         Tensor attention_weights = attention_weights_var.tensor();
+
+        // Dropout on the attention weights (matches the unfused
+        // Q@K.T -> softmax -> dropout -> @V graph). philox_dropout_mask returns
+        // a pre-scaled (inverted) Bernoulli mask, so a plain multiply applies
+        // the inverted-dropout scaling.
+        if (dropout_p > 0.0) {
+            auto shp = attention_weights.shape();
+            std::vector<int64_t> shape_vec(shp.begin(), shp.end());
+            Tensor mask = philox_dropout_mask(shape_vec, dropout_p, dropout_seed,
+                                              /*offset=*/0, attention_weights.dtype());
+            if (mask.device() != attention_weights.device()) {
+                mask = mask.to(attention_weights.device());
+            }
+            attention_weights = mul(attention_weights, mask);
+        }
 
         // attention_weights @ V
         Tensor output = matmul(attention_weights, inputs[2]);

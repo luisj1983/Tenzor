@@ -2102,9 +2102,12 @@ TEST_P(GradCheckMultiBackendTest, LinalgLDLFactor) {
     auto x = Variable(randn({n, n}, dtype(), device()), true);
     auto f = [n](const Variable& v) -> Variable {
         auto vt = ::tenzor::transpose(v, -2, -1);
+        // Strong diagonal dominance keeps Bunch-Kaufman in the no-pivoting
+        // regime (trivial ipiv), which is the case the LDL factor backward
+        // supports; otherwise backward throws NonDifferentiable by design.
         auto A = ::tenzor::matmul(v, vt) +
                  Variable(::tenzor::eye(n, std::nullopt, v.dtype(), v.device())
-                          * static_cast<float>(n), false);
+                          * 100.0f, false);
         auto [LD, pivots] = ::tenzor::ldl_factor(A);
         // Restrict to lower + diagonal (the actual factorization output).
         auto LD_lower = ::tenzor::tril(LD, 0);

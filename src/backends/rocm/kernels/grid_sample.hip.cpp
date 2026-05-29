@@ -2,8 +2,10 @@
  * @file grid_sample.hip.cpp
  * @brief HIP/ROCm port of grid_sample and affine_grid kernels.
  *
- * Mirrors src/backends/cuda/kernels/grid_sample.cu line-for-line; replaces the
- * previous CPU-roundtrip fallback in rocm_kernel_registry.cpp.
+ * Mirrors src/backends/cuda/kernels/grid_sample.cu: templated on the scalar
+ * type so Float32 and Float64 both run natively (no widen-narrow), with
+ * bilinear / nearest / bicubic sampling and zeros/border/reflection padding.
+ * Float16/BFloat16 promote to Float32 (each load/store is the natural cast).
  */
 
 #include "tenzor/core/tensor.hpp"
@@ -13,12 +15,12 @@
 #include <cmath>
 #include <stdexcept>
 #include <string>
+#include <type_traits>
 #include <vector>
 
 namespace tenzor {
 namespace rocm {
 
-// Forward decls (defined in math.hip.cpp)
 #ifndef HIP_CHECK
 #define HIP_CHECK(call) do { \
     hipError_t err = call; \
@@ -29,35 +31,77 @@ namespace rocm {
 #endif
 
 // =========================================================================
-// Device helpers
+// Device helpers (templated for native FP32 / FP64)
 // =========================================================================
 
-__device__ __forceinline__ float gs_denormalize_dev(float coord, int size, bool align_corners) {
+template <typename T>
+__device__ __forceinline__ T gs_denormalize_dev(T coord, int size, bool align_corners) {
     if (align_corners) {
-        return (coord + 1.0f) * 0.5f * static_cast<float>(size - 1);
+        return (coord + T(1)) * T(0.5) * static_cast<T>(size - 1);
     } else {
-        return ((coord + 1.0f) * static_cast<float>(size) - 1.0f) * 0.5f;
+        return ((coord + T(1)) * static_cast<T>(size) - T(1)) * T(0.5);
     }
 }
 
-__device__ __forceinline__ float gs_reflect_coord(float coord, int size) {
-    if (size <= 1) return 0.0f;
-    float max_val = static_cast<float>(size - 1);
-    coord = fabsf(coord);
-    float period = 2.0f * max_val;
-    coord = fmodf(coord, period);
+template <typename T>
+__device__ __forceinline__ T gs_reflect_coord(T coord, int size) {
+    if (size <= 1) return T(0);
+    T max_val = static_cast<T>(size - 1);
+    if constexpr (std::is_same_v<T, float>) coord = fabsf(coord);
+    else                                    coord = fabs(coord);
+    T period = T(2) * max_val;
+    if constexpr (std::is_same_v<T, float>) coord = fmodf(coord, period);
+    else                                    coord = fmod(coord, period);
     if (coord > max_val) coord = period - coord;
     return coord;
 }
 
+template <typename T>
+__device__ __forceinline__ int gs_floor_int(T v) {
+    if constexpr (std::is_same_v<T, float>) return static_cast<int>(floorf(v));
+    else                                    return static_cast<int>(floor(v));
+}
+
+template <typename T>
+__device__ __forceinline__ T gs_clamp_coord(T v, int size) {
+    if constexpr (std::is_same_v<T, float>) return fminf(fmaxf(v, 0.0f), static_cast<float>(size - 1));
+    else                                    return fmin(fmax(v, 0.0), static_cast<double>(size - 1));
+}
+
+// cubic convolution weights (Catmull-Rom, a = -0.5)
+template <typename T>
+__device__ inline void cubic_weights_dev(T t, T w[4]) {
+    constexpr T a = T(-0.5);
+    const T t2 = t * t;
+    const T t3 = t2 * t;
+    w[0] = ((a * t - T(2) * a) * t + a) * t;
+    w[1] = ((a + T(2)) * t3 - (a + T(3)) * t2 + T(1));
+    const T u = T(1) - t;
+    const T u2 = u * u;
+    const T u3 = u2 * u;
+    w[2] = ((a + T(2)) * u3 - (a + T(3)) * u2 + T(1));
+    w[3] = ((a * u - T(2) * a) * u + a) * u;
+}
+
+template <typename T>
+__device__ inline void cubic_dweights_dev(T t, T dw[4]) {
+    constexpr T a = T(-0.5);
+    const T u = T(1) - t;
+    dw[0] = (T(3) * a * t * t - T(4) * a * t + a);
+    dw[1] = (T(3) * (a + T(2)) * t * t - T(2) * (a + T(3)) * t);
+    dw[2] = -(T(3) * (a + T(2)) * u * u - T(2) * (a + T(3)) * u);
+    dw[3] = -(T(3) * a * u * u - T(4) * a * u + a);
+}
+
 // =========================================================================
-// Bilinear grid_sample kernel
+// Forward kernels
 // =========================================================================
 
+template <typename T>
 __global__ void grid_sample_bilinear_kernel(
-    const float* __restrict__ input,
-    const float* __restrict__ grid,
-    float* __restrict__ output,
+    const T* __restrict__ input,
+    const T* __restrict__ grid,
+    T* __restrict__ output,
     int N, int C, int H_in, int W_in, int H_out, int W_out,
     int padding_mode, bool align_corners
 ) {
@@ -71,52 +115,46 @@ __global__ void grid_sample_bilinear_kernel(
     int n = idx / (C * H_out * W_out);
 
     int grid_idx = ((n * H_out + h) * W_out + w) * 2;
-    float gx = grid[grid_idx];
-    float gy = grid[grid_idx + 1];
-
-    float ix = gs_denormalize_dev(gx, W_in, align_corners);
-    float iy = gs_denormalize_dev(gy, H_in, align_corners);
+    T ix = gs_denormalize_dev<T>(grid[grid_idx], W_in, align_corners);
+    T iy = gs_denormalize_dev<T>(grid[grid_idx + 1], H_in, align_corners);
 
     if (padding_mode == 1) {
-        ix = fminf(fmaxf(ix, 0.0f), static_cast<float>(W_in - 1));
-        iy = fminf(fmaxf(iy, 0.0f), static_cast<float>(H_in - 1));
+        ix = gs_clamp_coord<T>(ix, W_in);
+        iy = gs_clamp_coord<T>(iy, H_in);
     } else if (padding_mode == 2) {
-        ix = gs_reflect_coord(ix, W_in);
-        iy = gs_reflect_coord(iy, H_in);
+        ix = gs_reflect_coord<T>(ix, W_in);
+        iy = gs_reflect_coord<T>(iy, H_in);
     }
 
-    int x0 = static_cast<int>(floorf(ix));
-    int y0 = static_cast<int>(floorf(iy));
+    int x0 = gs_floor_int<T>(ix);
+    int y0 = gs_floor_int<T>(iy);
     int x1 = x0 + 1;
     int y1 = y0 + 1;
 
-    float wx1 = ix - static_cast<float>(x0);
-    float wy1 = iy - static_cast<float>(y0);
-    float wx0 = 1.0f - wx1;
-    float wy0 = 1.0f - wy1;
+    T wx1 = ix - static_cast<T>(x0);
+    T wy1 = iy - static_cast<T>(y0);
+    T wx0 = T(1) - wx1;
+    T wy0 = T(1) - wy1;
 
-    auto safe_get = [&](int y, int x) -> float {
+    auto safe_get = [&](int y, int x) -> T {
         if (y >= 0 && y < H_in && x >= 0 && x < W_in)
             return input[((n * C + c) * H_in + y) * W_in + x];
-        return 0.0f;
+        return T(0);
     };
 
-    float val = wy0 * wx0 * safe_get(y0, x0) +
-                wy0 * wx1 * safe_get(y0, x1) +
-                wy1 * wx0 * safe_get(y1, x0) +
-                wy1 * wx1 * safe_get(y1, x1);
+    T val = wy0 * wx0 * safe_get(y0, x0) +
+            wy0 * wx1 * safe_get(y0, x1) +
+            wy1 * wx0 * safe_get(y1, x0) +
+            wy1 * wx1 * safe_get(y1, x1);
 
     output[((n * C + c) * H_out + h) * W_out + w] = val;
 }
 
-// =========================================================================
-// Nearest grid_sample kernel
-// =========================================================================
-
+template <typename T>
 __global__ void grid_sample_nearest_kernel(
-    const float* __restrict__ input,
-    const float* __restrict__ grid,
-    float* __restrict__ output,
+    const T* __restrict__ input,
+    const T* __restrict__ grid,
+    T* __restrict__ output,
     int N, int C, int H_in, int W_in, int H_out, int W_out,
     int padding_mode, bool align_corners
 ) {
@@ -130,33 +168,88 @@ __global__ void grid_sample_nearest_kernel(
     int n = idx / (C * H_out * W_out);
 
     int grid_idx = ((n * H_out + h) * W_out + w) * 2;
-    float gx = grid[grid_idx];
-    float gy = grid[grid_idx + 1];
-
-    float ix = gs_denormalize_dev(gx, W_in, align_corners);
-    float iy = gs_denormalize_dev(gy, H_in, align_corners);
+    T ix = gs_denormalize_dev<T>(grid[grid_idx], W_in, align_corners);
+    T iy = gs_denormalize_dev<T>(grid[grid_idx + 1], H_in, align_corners);
 
     if (padding_mode == 1) {
-        ix = fminf(fmaxf(ix, 0.0f), static_cast<float>(W_in - 1));
-        iy = fminf(fmaxf(iy, 0.0f), static_cast<float>(H_in - 1));
+        ix = gs_clamp_coord<T>(ix, W_in);
+        iy = gs_clamp_coord<T>(iy, H_in);
     } else if (padding_mode == 2) {
-        ix = gs_reflect_coord(ix, W_in);
-        iy = gs_reflect_coord(iy, H_in);
+        ix = gs_reflect_coord<T>(ix, W_in);
+        iy = gs_reflect_coord<T>(iy, H_in);
     }
 
-    int nx = static_cast<int>(roundf(ix));
-    int ny = static_cast<int>(roundf(iy));
+    int nx, ny;
+    if constexpr (std::is_same_v<T, float>) { nx = static_cast<int>(roundf(ix)); ny = static_cast<int>(roundf(iy)); }
+    else                                    { nx = static_cast<int>(round(ix));  ny = static_cast<int>(round(iy)); }
 
-    float val = 0.0f;
+    T val = T(0);
     if (ny >= 0 && ny < H_in && nx >= 0 && nx < W_in) {
         val = input[((n * C + c) * H_in + ny) * W_in + nx];
     }
+    output[((n * C + c) * H_out + h) * W_out + w] = val;
+}
 
+template <typename T>
+__global__ void grid_sample_bicubic_kernel(
+    const T* __restrict__ input,
+    const T* __restrict__ grid,
+    T* __restrict__ output,
+    int N, int C, int H_in, int W_in, int H_out, int W_out,
+    int padding_mode, bool align_corners
+) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int total = N * C * H_out * W_out;
+    if (idx >= total) return;
+
+    int w = idx % W_out;
+    int h = (idx / W_out) % H_out;
+    int c = (idx / (W_out * H_out)) % C;
+    int n = idx / (C * H_out * W_out);
+
+    int grid_idx = ((n * H_out + h) * W_out + w) * 2;
+    T ix = gs_denormalize_dev<T>(grid[grid_idx], W_in, align_corners);
+    T iy = gs_denormalize_dev<T>(grid[grid_idx + 1], H_in, align_corners);
+
+    if (padding_mode == 1) {
+        ix = gs_clamp_coord<T>(ix, W_in);
+        iy = gs_clamp_coord<T>(iy, H_in);
+    } else if (padding_mode == 2) {
+        ix = gs_reflect_coord<T>(ix, W_in);
+        iy = gs_reflect_coord<T>(iy, H_in);
+    }
+
+    int ix_floor = gs_floor_int<T>(ix);
+    int iy_floor = gs_floor_int<T>(iy);
+    const T tx = ix - static_cast<T>(ix_floor);
+    const T ty = iy - static_cast<T>(iy_floor);
+    T wx[4], wy[4];
+    cubic_weights_dev<T>(tx, wx);
+    cubic_weights_dev<T>(ty, wy);
+
+    auto safe_get = [&](int y, int x) -> T {
+        if (padding_mode == 0) {
+            if (y < 0 || y >= H_in || x < 0 || x >= W_in) return T(0);
+            return input[((n * C + c) * H_in + y) * W_in + x];
+        }
+        y = max(0, min(y, H_in - 1));
+        x = max(0, min(x, W_in - 1));
+        return input[((n * C + c) * H_in + y) * W_in + x];
+    };
+
+    T val = T(0);
+    #pragma unroll
+    for (int dy = -1; dy <= 2; ++dy) {
+        #pragma unroll
+        for (int dx = -1; dx <= 2; ++dx) {
+            val += wy[dy + 1] * wx[dx + 1] * safe_get(iy_floor + dy, ix_floor + dx);
+        }
+    }
     output[((n * C + c) * H_out + h) * W_out + w] = val;
 }
 
 // =========================================================================
-// Affine grid kernel
+// Affine grid kernel (Float32 only — unchanged)
 // =========================================================================
 
 __global__ void affine_grid_kernel(
@@ -191,8 +284,32 @@ __global__ void affine_grid_kernel(
 }
 
 // =========================================================================
-// Host API
+// Forward host API
 // =========================================================================
+
+namespace {
+template <typename T>
+void launch_grid_sample_forward(const std::string& mode, int grid_size, int block_size,
+                                hipStream_t stream,
+                                const T* in, const T* grid, T* out,
+                                int N, int C, int H_in, int W_in, int H_out, int W_out,
+                                int pad_mode, bool align_corners) {
+    if (mode == "nearest") {
+        hipLaunchKernelGGL(grid_sample_nearest_kernel<T>, dim3(grid_size), dim3(block_size), 0, stream,
+            in, grid, out, N, C, H_in, W_in, H_out, W_out, pad_mode, align_corners);
+    } else if (mode == "bilinear") {
+        hipLaunchKernelGGL(grid_sample_bilinear_kernel<T>, dim3(grid_size), dim3(block_size), 0, stream,
+            in, grid, out, N, C, H_in, W_in, H_out, W_out, pad_mode, align_corners);
+    } else if (mode == "bicubic") {
+        hipLaunchKernelGGL(grid_sample_bicubic_kernel<T>, dim3(grid_size), dim3(block_size), 0, stream,
+            in, grid, out, N, C, H_in, W_in, H_out, W_out, pad_mode, align_corners);
+    } else {
+        throw std::invalid_argument(
+            "grid_sample (ROCm): unknown mode '" + mode +
+            "'. Supported: bilinear, nearest, bicubic.");
+    }
+}
+}  // namespace
 
 auto grid_sample_kernel(const Tensor& input, const Tensor& grid,
                         const std::string& mode, const std::string& padding_mode,
@@ -207,11 +324,6 @@ auto grid_sample_kernel(const Tensor& input, const Tensor& grid,
     int H_out = static_cast<int>(grid_shape[1]);
     int W_out = static_cast<int>(grid_shape[2]);
 
-    Tensor input_f32 = input.to(DType::Float32);
-    Tensor grid_f32 = grid.to(DType::Float32);
-
-    Tensor output_f32({N, C, H_out, W_out}, DType::Float32, input.device());
-
     int pad_mode = 0;
     if (padding_mode == "border") pad_mode = 1;
     else if (padding_mode == "reflection") pad_mode = 2;
@@ -220,22 +332,25 @@ auto grid_sample_kernel(const Tensor& input, const Tensor& grid,
     int block_size = 256;
     int grid_size = (total + block_size - 1) / block_size;
 
-    if (mode == "nearest") {
-        hipLaunchKernelGGL(grid_sample_nearest_kernel,
-            dim3(grid_size), dim3(block_size), 0, stream,
-            input_f32.data<float>(), grid_f32.data<float>(),
-            output_f32.data<float>(),
-            N, C, H_in, W_in, H_out, W_out,
-            pad_mode, align_corners);
-    } else {
-        hipLaunchKernelGGL(grid_sample_bilinear_kernel,
-            dim3(grid_size), dim3(block_size), 0, stream,
-            input_f32.data<float>(), grid_f32.data<float>(),
-            output_f32.data<float>(),
-            N, C, H_in, W_in, H_out, W_out,
-            pad_mode, align_corners);
+    // Native FP64 path for all modes (no widen-narrow).
+    if (input.dtype() == DType::Float64) {
+        Tensor input_f64 = input.contiguous();
+        Tensor grid_f64  = grid.to(DType::Float64).contiguous();
+        Tensor output_f64({N, C, H_out, W_out}, DType::Float64, input.device());
+        launch_grid_sample_forward<double>(mode, grid_size, block_size, stream,
+            input_f64.data<double>(), grid_f64.data<double>(), output_f64.data<double>(),
+            N, C, H_in, W_in, H_out, W_out, pad_mode, align_corners);
+        HIP_CHECK(hipGetLastError());
+        return output_f64;
     }
 
+    // Float32 path (Float16/BFloat16 promote losslessly per element).
+    Tensor input_f32 = input.to(DType::Float32);
+    Tensor grid_f32  = grid.to(DType::Float32);
+    Tensor output_f32({N, C, H_out, W_out}, DType::Float32, input.device());
+    launch_grid_sample_forward<float>(mode, grid_size, block_size, stream,
+        input_f32.data<float>(), grid_f32.data<float>(), output_f32.data<float>(),
+        N, C, H_in, W_in, H_out, W_out, pad_mode, align_corners);
     HIP_CHECK(hipGetLastError());
     return output_f32.to(input.dtype());
 }
@@ -263,15 +378,16 @@ auto affine_grid_kernel_host(const Tensor& theta, const std::vector<int64_t>& si
 }
 
 // =========================================================================
-// Backward kernels (audit Q.4) — F32 only, matching forward dtype coverage.
+// Backward kernels (templated FP32/FP64)
 // =========================================================================
 
+template <typename T>
 __global__ void grid_sample_bilinear_backward_kernel(
-    const float* __restrict__ input,
-    const float* __restrict__ grid,
-    const float* __restrict__ grad_output,
-    float* __restrict__ grad_input,
-    float* __restrict__ grad_grid,
+    const T* __restrict__ input,
+    const T* __restrict__ grid,
+    const T* __restrict__ grad_output,
+    T* __restrict__ grad_input,
+    T* __restrict__ grad_grid,
     int N, int C, int H_in, int W_in, int H_out, int W_out,
     int padding_mode, bool align_corners)
 {
@@ -284,56 +400,52 @@ __global__ void grid_sample_bilinear_backward_kernel(
     int n = idx / (H_out * W_out);
 
     int grid_idx = ((n * H_out + h) * W_out + w) * 2;
-    float gx = grid[grid_idx];
-    float gy = grid[grid_idx + 1];
-    float ix = gs_denormalize_dev(gx, W_in, align_corners);
-    float iy = gs_denormalize_dev(gy, H_in, align_corners);
+    T ix = gs_denormalize_dev<T>(grid[grid_idx], W_in, align_corners);
+    T iy = gs_denormalize_dev<T>(grid[grid_idx + 1], H_in, align_corners);
 
-    bool in_bounds_ix = (ix >= 0.0f && ix <= static_cast<float>(W_in - 1));
-    bool in_bounds_iy = (iy >= 0.0f && iy <= static_cast<float>(H_in - 1));
+    bool in_bounds_ix = (ix >= T(0) && ix <= static_cast<T>(W_in - 1));
+    bool in_bounds_iy = (iy >= T(0) && iy <= static_cast<T>(H_in - 1));
 
     if (padding_mode == 1) {
-        ix = fminf(fmaxf(ix, 0.0f), static_cast<float>(W_in - 1));
-        iy = fminf(fmaxf(iy, 0.0f), static_cast<float>(H_in - 1));
+        ix = gs_clamp_coord<T>(ix, W_in);
+        iy = gs_clamp_coord<T>(iy, H_in);
     } else if (padding_mode == 2) {
-        ix = gs_reflect_coord(ix, W_in);
-        iy = gs_reflect_coord(iy, H_in);
+        ix = gs_reflect_coord<T>(ix, W_in);
+        iy = gs_reflect_coord<T>(iy, H_in);
     }
 
-    float dix_dgx, diy_dgy;
+    T dix_dgx, diy_dgy;
     if (align_corners) {
-        dix_dgx = 0.5f * static_cast<float>(W_in - 1);
-        diy_dgy = 0.5f * static_cast<float>(H_in - 1);
+        dix_dgx = T(0.5) * static_cast<T>(W_in - 1);
+        diy_dgy = T(0.5) * static_cast<T>(H_in - 1);
     } else {
-        dix_dgx = 0.5f * static_cast<float>(W_in);
-        diy_dgy = 0.5f * static_cast<float>(H_in);
+        dix_dgx = T(0.5) * static_cast<T>(W_in);
+        diy_dgy = T(0.5) * static_cast<T>(H_in);
     }
 
-    int x0 = static_cast<int>(floorf(ix));
-    int y0 = static_cast<int>(floorf(iy));
+    int x0 = gs_floor_int<T>(ix);
+    int y0 = gs_floor_int<T>(iy);
     int x1 = x0 + 1;
     int y1 = y0 + 1;
-    float wx1 = ix - static_cast<float>(x0);
-    float wy1 = iy - static_cast<float>(y0);
-    float wx0 = 1.0f - wx1;
-    float wy0 = 1.0f - wy1;
+    T wx1 = ix - static_cast<T>(x0);
+    T wy1 = iy - static_cast<T>(y0);
+    T wx0 = T(1) - wx1;
+    T wy0 = T(1) - wy1;
 
-    float sum_dx = 0.0f, sum_dy = 0.0f;
+    T sum_dx = T(0), sum_dy = T(0);
     for (int c = 0; c < C; ++c) {
-        const float go = grad_output[((n * C + c) * H_out + h) * W_out + w];
-        float* ch_gi = grad_input + (n * C + c) * H_in * W_in;
-        const float* ch_in = input + (n * C + c) * H_in * W_in;
+        const T go = grad_output[((n * C + c) * H_out + h) * W_out + w];
+        T* ch_gi = grad_input + (n * C + c) * H_in * W_in;
+        const T* ch_in = input + (n * C + c) * H_in * W_in;
 
-        auto safe_scatter = [&](int y, int x, float weight) {
+        auto safe_scatter = [&](int y, int x, T weight) {
             if (y >= 0 && y < H_in && x >= 0 && x < W_in) {
                 atomicAdd(&ch_gi[y * W_in + x], go * weight);
             }
         };
-        auto safe_get = [&](int y, int x) -> float {
-            if (y >= 0 && y < H_in && x >= 0 && x < W_in) {
-                return ch_in[y * W_in + x];
-            }
-            return 0.0f;
+        auto safe_get = [&](int y, int x) -> T {
+            if (y >= 0 && y < H_in && x >= 0 && x < W_in) return ch_in[y * W_in + x];
+            return T(0);
         };
         safe_scatter(y0, x0, wy0 * wx0);
         safe_scatter(y0, x1, wy0 * wx1);
@@ -345,18 +457,19 @@ __global__ void grid_sample_bilinear_backward_kernel(
         sum_dy += go * (wx0 * (-safe_get(y0, x0) + safe_get(y1, x0)) +
                         wx1 * (-safe_get(y0, x1) + safe_get(y1, x1)));
     }
-    float scale_x = (padding_mode == 0 && !in_bounds_ix) ? 0.0f : dix_dgx;
-    float scale_y = (padding_mode == 0 && !in_bounds_iy) ? 0.0f : diy_dgy;
+    T scale_x = (padding_mode == 0 && !in_bounds_ix) ? T(0) : dix_dgx;
+    T scale_y = (padding_mode == 0 && !in_bounds_iy) ? T(0) : diy_dgy;
     grad_grid[grid_idx]     = sum_dx * scale_x;
     grad_grid[grid_idx + 1] = sum_dy * scale_y;
 }
 
+template <typename T>
 __global__ void grid_sample_nearest_backward_kernel(
-    const float* __restrict__ /*input*/,
-    const float* __restrict__ grid,
-    const float* __restrict__ grad_output,
-    float* __restrict__ grad_input,
-    float* __restrict__ grad_grid,
+    const T* __restrict__ /*input*/,
+    const T* __restrict__ grid,
+    const T* __restrict__ grad_output,
+    T* __restrict__ grad_input,
+    T* __restrict__ grad_grid,
     int N, int C, int H_in, int W_in, int H_out, int W_out,
     int padding_mode, bool align_corners)
 {
@@ -369,31 +482,125 @@ __global__ void grid_sample_nearest_backward_kernel(
     int n = idx / (H_out * W_out);
 
     int grid_idx = ((n * H_out + h) * W_out + w) * 2;
-    float gx = grid[grid_idx];
-    float gy = grid[grid_idx + 1];
-    float ix = gs_denormalize_dev(gx, W_in, align_corners);
-    float iy = gs_denormalize_dev(gy, H_in, align_corners);
+    T ix = gs_denormalize_dev<T>(grid[grid_idx], W_in, align_corners);
+    T iy = gs_denormalize_dev<T>(grid[grid_idx + 1], H_in, align_corners);
 
     if (padding_mode == 1) {
-        ix = fminf(fmaxf(ix, 0.0f), static_cast<float>(W_in - 1));
-        iy = fminf(fmaxf(iy, 0.0f), static_cast<float>(H_in - 1));
+        ix = gs_clamp_coord<T>(ix, W_in);
+        iy = gs_clamp_coord<T>(iy, H_in);
     } else if (padding_mode == 2) {
-        ix = gs_reflect_coord(ix, W_in);
-        iy = gs_reflect_coord(iy, H_in);
+        ix = gs_reflect_coord<T>(ix, W_in);
+        iy = gs_reflect_coord<T>(iy, H_in);
     }
 
-    int nx = static_cast<int>(roundf(ix));
-    int ny = static_cast<int>(roundf(iy));
+    int nx, ny;
+    if constexpr (std::is_same_v<T, float>) { nx = static_cast<int>(roundf(ix)); ny = static_cast<int>(roundf(iy)); }
+    else                                    { nx = static_cast<int>(round(ix));  ny = static_cast<int>(round(iy)); }
 
-    grad_grid[grid_idx]     = 0.0f;
-    grad_grid[grid_idx + 1] = 0.0f;
+    grad_grid[grid_idx]     = T(0);
+    grad_grid[grid_idx + 1] = T(0);
 
     if (ny >= 0 && ny < H_in && nx >= 0 && nx < W_in) {
         for (int c = 0; c < C; ++c) {
-            const float go = grad_output[((n * C + c) * H_out + h) * W_out + w];
+            const T go = grad_output[((n * C + c) * H_out + h) * W_out + w];
             atomicAdd(&grad_input[((n * C + c) * H_in + ny) * W_in + nx], go);
         }
     }
+}
+
+template <typename T>
+__global__ void grid_sample_bicubic_backward_kernel(
+    const T* __restrict__ input,
+    const T* __restrict__ grid,
+    const T* __restrict__ grad_output,
+    T* __restrict__ grad_input,
+    T* __restrict__ grad_grid,
+    int N, int C, int H_in, int W_in, int H_out, int W_out,
+    int padding_mode, bool align_corners)
+{
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int total = N * H_out * W_out;
+    if (idx >= total) return;
+
+    int w = idx % W_out;
+    int h = (idx / W_out) % H_out;
+    int n = idx / (H_out * W_out);
+
+    int grid_idx = ((n * H_out + h) * W_out + w) * 2;
+    T ix = gs_denormalize_dev<T>(grid[grid_idx], W_in, align_corners);
+    T iy = gs_denormalize_dev<T>(grid[grid_idx + 1], H_in, align_corners);
+
+    if (padding_mode == 1) {
+        ix = gs_clamp_coord<T>(ix, W_in);
+        iy = gs_clamp_coord<T>(iy, H_in);
+    } else if (padding_mode == 2) {
+        ix = gs_reflect_coord<T>(ix, W_in);
+        iy = gs_reflect_coord<T>(iy, H_in);
+    }
+
+    T dix_dgx, diy_dgy;
+    if (align_corners) {
+        dix_dgx = T(0.5) * static_cast<T>(W_in - 1);
+        diy_dgy = T(0.5) * static_cast<T>(H_in - 1);
+    } else {
+        dix_dgx = T(0.5) * static_cast<T>(W_in);
+        diy_dgy = T(0.5) * static_cast<T>(H_in);
+    }
+
+    int ix_floor = gs_floor_int<T>(ix);
+    int iy_floor = gs_floor_int<T>(iy);
+    T tx = ix - static_cast<T>(ix_floor);
+    T ty = iy - static_cast<T>(iy_floor);
+    T wx[4], wy[4], dwx[4], dwy[4];
+    cubic_weights_dev<T>(tx, wx);
+    cubic_weights_dev<T>(ty, wy);
+    cubic_dweights_dev<T>(tx, dwx);
+    cubic_dweights_dev<T>(ty, dwy);
+
+    T sum_dx = T(0), sum_dy = T(0);
+    for (int c = 0; c < C; ++c) {
+        const T go = grad_output[((n * C + c) * H_out + h) * W_out + w];
+        T dval_dix = T(0), dval_diy = T(0);
+        #pragma unroll
+        for (int dy = -1; dy <= 2; ++dy) {
+            #pragma unroll
+            for (int dx = -1; dx <= 2; ++dx) {
+                const int yy = iy_floor + dy;
+                const int xx = ix_floor + dx;
+                const T weight = wy[dy + 1] * wx[dx + 1];
+
+                int yy_s = yy, xx_s = xx;
+                bool valid_s = true;
+                if (padding_mode == 0) {
+                    if (yy < 0 || yy >= H_in || xx < 0 || xx >= W_in) valid_s = false;
+                } else {
+                    yy_s = max(0, min(yy, H_in - 1));
+                    xx_s = max(0, min(xx, W_in - 1));
+                }
+                if (valid_s) {
+                    atomicAdd(&grad_input[((n * C + c) * H_in + yy_s) * W_in + xx_s], go * weight);
+                }
+
+                T v = T(0);
+                if (padding_mode == 0) {
+                    if (yy >= 0 && yy < H_in && xx >= 0 && xx < W_in) {
+                        v = input[((n * C + c) * H_in + yy) * W_in + xx];
+                    }
+                } else {
+                    int yy_f = max(0, min(yy, H_in - 1));
+                    int xx_f = max(0, min(xx, W_in - 1));
+                    v = input[((n * C + c) * H_in + yy_f) * W_in + xx_f];
+                }
+                dval_dix += wy[dy + 1] * dwx[dx + 1] * v;
+                dval_diy += dwy[dy + 1] * wx[dx + 1] * v;
+            }
+        }
+        sum_dx += go * dval_dix;
+        sum_dy += go * dval_diy;
+    }
+
+    grad_grid[grid_idx]     = sum_dx * dix_dgx;
+    grad_grid[grid_idx + 1] = sum_dy * diy_dgy;
 }
 
 __global__ void affine_grid_backward_kernel_dev(
@@ -431,6 +638,30 @@ __global__ void affine_grid_backward_kernel_dev(
     atomicAdd(&t[5], dg_y);
 }
 
+namespace {
+template <typename T>
+void launch_grid_sample_backward(const std::string& mode, int gs, int block_size,
+                                 hipStream_t stream,
+                                 const T* in, const T* grid, const T* go,
+                                 T* gi, T* gg,
+                                 int N, int C, int H_in, int W_in, int H_out, int W_out,
+                                 int pad_mode, bool align_corners) {
+    if (mode == "bilinear") {
+        hipLaunchKernelGGL(grid_sample_bilinear_backward_kernel<T>, dim3(gs), dim3(block_size), 0, stream,
+            in, grid, go, gi, gg, N, C, H_in, W_in, H_out, W_out, pad_mode, align_corners);
+    } else if (mode == "nearest") {
+        hipLaunchKernelGGL(grid_sample_nearest_backward_kernel<T>, dim3(gs), dim3(block_size), 0, stream,
+            in, grid, go, gi, gg, N, C, H_in, W_in, H_out, W_out, pad_mode, align_corners);
+    } else if (mode == "bicubic") {
+        hipLaunchKernelGGL(grid_sample_bicubic_backward_kernel<T>, dim3(gs), dim3(block_size), 0, stream,
+            in, grid, go, gi, gg, N, C, H_in, W_in, H_out, W_out, pad_mode, align_corners);
+    } else {
+        throw std::invalid_argument(
+            "grid_sample_backward (ROCm): unknown mode '" + mode + "'");
+    }
+}
+}  // namespace
+
 auto grid_sample_backward_kernel_host(const Tensor& grad_output,
                                       const Tensor& input, const Tensor& grid,
                                       const std::string& mode,
@@ -438,12 +669,6 @@ auto grid_sample_backward_kernel_host(const Tensor& grad_output,
                                       bool align_corners, hipStream_t stream)
     -> std::pair<Tensor, Tensor>
 {
-    if (mode == "bicubic") {
-        throw std::runtime_error(
-            "grid_sample_backward (ROCm): mode='bicubic' is not implemented on "
-            "this backend because the forward kernel only covers 'bilinear' and "
-            "'nearest'. Move the tensor to CPU/CUDA, or open a backend ticket.");
-    }
     auto in_shape = input.shape();
     auto grid_shape = grid.shape();
     int N = static_cast<int>(in_shape[0]);
@@ -457,38 +682,39 @@ auto grid_sample_backward_kernel_host(const Tensor& grad_output,
     if (padding_mode == "border") pad_mode = 1;
     else if (padding_mode == "reflection") pad_mode = 2;
 
-    DType in_dt = input.dtype();
-    DType gr_dt = grid.dtype();
-
-    Tensor input_f32 = input.to(DType::Float32);
-    Tensor grid_f32  = grid.to(DType::Float32);
-    Tensor go_f32    = grad_output.to(DType::Float32);
-
-    Tensor gi_f32({N, C, H_in, W_in},  DType::Float32, input.device());
-    Tensor gg_f32({N, H_out, W_out, 2}, DType::Float32, grid.device());
-    HIP_CHECK(hipMemsetAsync(gi_f32.data_ptr(), 0,
-        gi_f32.numel() * sizeof(float), stream));
-
     int total = N * H_out * W_out;
     int block_size = 256;
     int gs = (total + block_size - 1) / block_size;
 
-    if (mode == "bilinear") {
-        hipLaunchKernelGGL(grid_sample_bilinear_backward_kernel,
-            dim3(gs), dim3(block_size), 0, stream,
-            input_f32.data<float>(), grid_f32.data<float>(), go_f32.data<float>(),
-            gi_f32.data<float>(), gg_f32.data<float>(),
+    // Native FP64 path (no widen-narrow).
+    if (input.dtype() == DType::Float64) {
+        Tensor input_f64 = input.contiguous();
+        Tensor grid_f64  = grid.to(DType::Float64).contiguous();
+        Tensor go_f64    = grad_output.to(DType::Float64).contiguous();
+        Tensor gi_f64({N, C, H_in, W_in},  DType::Float64, input.device());
+        Tensor gg_f64({N, H_out, W_out, 2}, DType::Float64, grid.device());
+        HIP_CHECK(hipMemsetAsync(gi_f64.data_ptr(), 0, gi_f64.numel() * sizeof(double), stream));
+        launch_grid_sample_backward<double>(mode, gs, block_size, stream,
+            input_f64.data<double>(), grid_f64.data<double>(), go_f64.data<double>(),
+            gi_f64.data<double>(), gg_f64.data<double>(),
             N, C, H_in, W_in, H_out, W_out, pad_mode, align_corners);
-    } else if (mode == "nearest") {
-        hipLaunchKernelGGL(grid_sample_nearest_backward_kernel,
-            dim3(gs), dim3(block_size), 0, stream,
-            input_f32.data<float>(), grid_f32.data<float>(), go_f32.data<float>(),
-            gi_f32.data<float>(), gg_f32.data<float>(),
-            N, C, H_in, W_in, H_out, W_out, pad_mode, align_corners);
-    } else {
-        throw std::invalid_argument(
-            "grid_sample_backward (ROCm): unknown mode '" + mode + "'");
+        HIP_CHECK(hipGetLastError());
+        return {gi_f64, gg_f64.to(grid.dtype())};
     }
+
+    DType in_dt = input.dtype();
+    DType gr_dt = grid.dtype();
+    Tensor input_f32 = input.to(DType::Float32);
+    Tensor grid_f32  = grid.to(DType::Float32);
+    Tensor go_f32    = grad_output.to(DType::Float32);
+    Tensor gi_f32({N, C, H_in, W_in},  DType::Float32, input.device());
+    Tensor gg_f32({N, H_out, W_out, 2}, DType::Float32, grid.device());
+    HIP_CHECK(hipMemsetAsync(gi_f32.data_ptr(), 0, gi_f32.numel() * sizeof(float), stream));
+
+    launch_grid_sample_backward<float>(mode, gs, block_size, stream,
+        input_f32.data<float>(), grid_f32.data<float>(), go_f32.data<float>(),
+        gi_f32.data<float>(), gg_f32.data<float>(),
+        N, C, H_in, W_in, H_out, W_out, pad_mode, align_corners);
     HIP_CHECK(hipGetLastError());
     return {gi_f32.to(in_dt), gg_f32.to(gr_dt)};
 }

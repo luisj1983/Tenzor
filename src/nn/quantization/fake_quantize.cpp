@@ -77,20 +77,13 @@ auto FakeQuantize::forward_impl(const Variable& input) -> Variable {
         }
     }
 
-    // Per-tensor schemes can use the autograd-enabled straight-through
-    // estimator so QAT gradients thread through quantize→dequantize correctly.
-    // Per-channel schemes fall back to the bare Tensor path (no backward
-    // support yet for per-channel STE — tracked as a follow-up).
-    bool per_tensor = (scheme_ == QuantizationScheme::PerTensorSymmetric ||
-                       scheme_ == QuantizationScheme::PerTensorAsymmetric);
-    if (per_tensor && input.requires_grad()) {
-        Tensor scale_cpu = (qparams_->scale.device() == Device::cpu())
-            ? qparams_->scale : qparams_->scale.to(Device::cpu());
-        Tensor zp_cpu = (qparams_->zero_point.device() == Device::cpu())
-            ? qparams_->zero_point : qparams_->zero_point.to(Device::cpu());
-        float scale = scale_cpu.data<float>()[0];
-        float zero_point = static_cast<float>(zp_cpu.data<int32_t>()[0]);
-
+    // Both per-tensor and per-channel schemes use the autograd-enabled
+    // straight-through estimator so QAT gradients thread through the
+    // quantize→dequantize correctly. (Previously per-channel fell through to a
+    // bare Tensor path that severed the graph and silently zeroed weight
+    // gradients — QATHelper defaults weights to per-channel, so that was the
+    // common QAT case.)
+    if (input.requires_grad()) {
         float quant_min = 0.0f, quant_max = 0.0f;
         switch (dtype_) {
             case QuantDType::INT8:  quant_min = -128.0f; quant_max = 127.0f; break;
@@ -98,11 +91,27 @@ auto FakeQuantize::forward_impl(const Variable& input) -> Variable {
             case QuantDType::INT4:  quant_min =   -8.0f; quant_max =   7.0f; break;
             case QuantDType::UINT4: quant_min =    0.0f; quant_max =  15.0f; break;
         }
-        return fake_quantize_with_grad(input, scale, zero_point, quant_min, quant_max);
+
+        bool per_tensor = (scheme_ == QuantizationScheme::PerTensorSymmetric ||
+                           scheme_ == QuantizationScheme::PerTensorAsymmetric);
+        if (per_tensor) {
+            Tensor scale_cpu = (qparams_->scale.device() == Device::cpu())
+                ? qparams_->scale : qparams_->scale.to(Device::cpu());
+            Tensor zp_cpu = (qparams_->zero_point.device() == Device::cpu())
+                ? qparams_->zero_point : qparams_->zero_point.to(Device::cpu());
+            float scale = scale_cpu.data<float>()[0];
+            float zero_point = static_cast<float>(zp_cpu.data<int32_t>()[0]);
+            return fake_quantize_with_grad(input, scale, zero_point, quant_min, quant_max);
+        }
+
+        // Per-channel STE: scale/zero_point are per-channel tensors broadcast
+        // along axis_.
+        return fake_quantize_per_channel_with_grad(
+            input, qparams_->scale, qparams_->zero_point, quant_min, quant_max, axis_);
     }
 
-    // Fall-through: non-autograd path (eval calibration, per-channel,
-    // or input.requires_grad() == false).
+    // Fall-through: non-autograd path (eval calibration or
+    // input.requires_grad() == false).
     Tensor quantized = apply_fake_quantization(input.tensor());
     return Variable(quantized, input.requires_grad());
 }
@@ -358,10 +367,36 @@ auto StraightThroughEstimator::backward(
 // FakeQuantizeFunction (Autograd)
 // ============================================================================
 
+namespace {
+// Reshape a per-channel parameter (1-D, one entry per channel) so it
+// broadcasts against a rank-`ndim` tensor along `axis`, converting to the
+// target dtype/device. A scalar (numel == 1) parameter broadcasts across all
+// channels (used before the observer has produced per-channel scales).
+Tensor broadcast_channel_param(const Tensor& p, int64_t ndim, int64_t axis,
+                               int64_t channels, DType dtype, const Device& device) {
+    Tensor q = p;
+    if (q.device() != device) q = q.to(device);
+    if (q.dtype() != dtype) q = q.to(dtype);
+    std::vector<int64_t> view_shape(static_cast<size_t>(std::max<int64_t>(ndim, 1)), 1);
+    if (ndim > 0 && q.numel() == channels) {
+        view_shape[static_cast<size_t>(axis)] = channels;
+    }
+    return q.reshape(view_shape);
+}
+}  // namespace
+
 FakeQuantizeFunction::FakeQuantizeFunction(float scale, float zero_point,
                                            float quant_min, float quant_max)
     : scale_(scale), zero_point_(zero_point),
       quant_min_(quant_min), quant_max_(quant_max) {}
+
+FakeQuantizeFunction::FakeQuantizeFunction(Tensor scale, Tensor zero_point,
+                                           float quant_min, float quant_max,
+                                           int64_t axis)
+    : scale_(1.0f), zero_point_(0.0f),
+      quant_min_(quant_min), quant_max_(quant_max),
+      per_channel_(true), scale_t_(std::move(scale)),
+      zero_point_t_(std::move(zero_point)), axis_(axis) {}
 
 auto FakeQuantizeFunction::forward(std::vector<Variable> inputs) -> std::vector<Variable> {
     auto& input = inputs[0];
@@ -371,16 +406,29 @@ auto FakeQuantizeFunction::forward(std::vector<Variable> inputs) -> std::vector<
     save_for_backward({x});
 
     // Fake quantize: quantize then immediately dequantize
-    // scaled = x / scale + zero_point
-    // clamped = clamp(round(scaled), quant_min, quant_max)
-    // output = (clamped - zero_point) * scale
-    Tensor inv_scale = full({1}, 1.0f / scale_, x.dtype(), x.device());
-    Tensor zp = full({1}, zero_point_, x.dtype(), x.device());
+    //   scaled  = x / scale + zero_point
+    //   clamped = clamp(round(scaled), quant_min, quant_max)
+    //   output  = (clamped - zero_point) * scale
+    // scale/zero_point are scalars per-tensor, or per-channel tensors broadcast
+    // along axis_ in the per-channel case.
+    Tensor scaled, zp_use, scale_use;
+    if (per_channel_) {
+        int64_t ndim = x.ndim();
+        int64_t axis = axis_ < 0 ? axis_ + ndim : axis_;
+        int64_t channels = ndim > 0 ? x.shape()[static_cast<size_t>(axis)] : 1;
+        scale_use = broadcast_channel_param(scale_t_, ndim, axis, channels, x.dtype(), x.device());
+        zp_use = broadcast_channel_param(zero_point_t_, ndim, axis, channels, x.dtype(), x.device());
+        scaled = x / scale_use + zp_use;
+    } else {
+        Tensor inv_scale = full({1}, 1.0f / scale_, x.dtype(), x.device());
+        zp_use = full({1}, zero_point_, x.dtype(), x.device());
+        scale_use = full({1}, scale_, x.dtype(), x.device());
+        scaled = x * inv_scale + zp_use;
+    }
 
-    Tensor scaled = x * inv_scale + zp;
     Tensor rounded = tenzor::round(scaled);
     Tensor clamped = tenzor::clamp(rounded, quant_min_, quant_max_);
-    Tensor output = (clamped - zp) * full({1}, scale_, x.dtype(), x.device());
+    Tensor output = (clamped - zp_use) * scale_use;
 
     return {Variable(output, input.requires_grad())};
 }
@@ -392,12 +440,26 @@ auto FakeQuantizeFunction::backward(std::vector<Tensor> grad_outputs) -> std::ve
     // STE: pass gradients through for values within the quantizable range,
     // zero gradients for values that would be clamped by quantization.
     // The quantizable range in float space is:
-    //   [quant_min - zero_point) * scale, (quant_max - zero_point) * scale]
-    float range_min = (quant_min_ - zero_point_) * scale_;
-    float range_max = (quant_max_ - zero_point_) * scale_;
-
-    Tensor min_t = full({1}, range_min, input.dtype(), input.device());
-    Tensor max_t = full({1}, range_max, input.dtype(), input.device());
+    //   [(quant_min - zero_point) * scale, (quant_max - zero_point) * scale]
+    // For per-channel quant the bounds are per-channel tensors broadcast
+    // along axis_; otherwise they are scalars.
+    Tensor min_t, max_t;
+    if (per_channel_) {
+        int64_t ndim = input.ndim();
+        int64_t axis = axis_ < 0 ? axis_ + ndim : axis_;
+        int64_t channels = ndim > 0 ? input.shape()[static_cast<size_t>(axis)] : 1;
+        Tensor scale_bc = broadcast_channel_param(scale_t_, ndim, axis, channels, input.dtype(), input.device());
+        Tensor zp_bc = broadcast_channel_param(zero_point_t_, ndim, axis, channels, input.dtype(), input.device());
+        Tensor qmin = full({1}, quant_min_, input.dtype(), input.device());
+        Tensor qmax = full({1}, quant_max_, input.dtype(), input.device());
+        min_t = (qmin - zp_bc) * scale_bc;
+        max_t = (qmax - zp_bc) * scale_bc;
+    } else {
+        float range_min = (quant_min_ - zero_point_) * scale_;
+        float range_max = (quant_max_ - zero_point_) * scale_;
+        min_t = full({1}, range_min, input.dtype(), input.device());
+        max_t = full({1}, range_max, input.dtype(), input.device());
+    }
 
     // Mask: true where input is within quantizable range
     Tensor mask = ge(input, min_t) * le(input, max_t);
@@ -424,6 +486,27 @@ auto fake_quantize_with_grad(
         // without next_functions + input_variables the backward engine has
         // no input edge to accumulate into, so input.grad() stays empty.
         // (Mirrors the standard pattern in nested_autograd_ops.cpp.)
+        fn->set_next_functions({input.grad_fn()});
+        fn->set_input_variables({input});
+        outputs[0].set_grad_fn(fn);
+    }
+    return outputs[0];
+}
+
+auto fake_quantize_per_channel_with_grad(
+    const Variable& input,
+    const Tensor& scale,
+    const Tensor& zero_point,
+    float quant_min,
+    float quant_max,
+    int64_t axis
+) -> Variable {
+    auto fn = std::make_shared<FakeQuantizeFunction>(scale, zero_point, quant_min, quant_max, axis);
+    auto outputs = fn->forward({input});
+    if (input.requires_grad()) {
+        // Same STE graph wiring as the per-tensor path: attach next_functions
+        // + input_variables so the engine routes the per-channel STE gradient
+        // back into `input`.
         fn->set_next_functions({input.grad_fn()});
         fn->set_input_variables({input});
         outputs[0].set_grad_fn(fn);

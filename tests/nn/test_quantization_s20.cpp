@@ -9,6 +9,7 @@
 #include <tenzor/nn/quantization/observer.hpp>
 #include <tenzor/nn/quantization/quantized_layers.hpp>
 #include <tenzor/nn/quantization/quantize.hpp>
+#include <tenzor/nn/quantization/fake_quantize.hpp>
 
 #include <algorithm>
 #include <cmath>
@@ -345,6 +346,62 @@ TEST_F(QuantizationS20Test, QuantStubSteBackwardPassesGradThrough) {
     for (int64_t i = 0; i < g.numel(); ++i) {
         EXPECT_NEAR(gd[i], od[i], 1e-5f)
             << "STE backward must pass grad_output through (i=" << i << ")";
+    }
+}
+
+// Per-channel FakeQuantize STE grad flow (release audit). Per-channel schemes
+// previously fell through to a leaf Variable with no grad_fn, silently zeroing
+// the input gradient — and QATHelper defaults WEIGHTS to per-channel, so the
+// primary QAT path mis-trained. The per-channel STE must now route grad back to
+// the input (pass-through for in-range elements, per channel).
+TEST_F(QuantizationS20Test, FakeQuantizePerChannelSteGradFlows) {
+    const int64_t C = 3, K = 4;  // weight [C, K], per-channel along axis 0
+
+    // Distinct per-channel scales.
+    Tensor scale = full({C}, 0.0f, DType::Float32, Device::cpu());
+    {
+        float* s = scale.data<float>();
+        s[0] = 0.01f; s[1] = 0.02f; s[2] = 0.005f;
+    }
+    Tensor zp = zeros({C}, DType::Int32, Device::cpu());
+    QuantizationParams qp(scale, zp, QuantDType::INT8,
+                          QuantizationScheme::PerChannelSymmetric, /*axis=*/0);
+
+    FakeQuantize fq(QuantDType::INT8, QuantizationScheme::PerChannelSymmetric,
+                    /*learnable=*/false, /*observer_enabled=*/false, /*axis=*/0);
+    fq.set_qparams(qp);
+    fq.enable_fake_quant(true);
+
+    // Keep |x| < 0.5 so every element is within each channel's representable
+    // range (min range is channel 2: +-0.635), giving full STE pass-through.
+    Tensor x({C, K}, DType::Float32, Device::cpu());
+    {
+        float* d = x.data<float>();
+        for (int64_t i = 0; i < x.numel(); ++i) {
+            d[i] = -0.3f + 0.05f * static_cast<float>(i % 7);
+        }
+    }
+    Variable v_in(x, /*requires_grad=*/true);
+
+    set_grad_enabled(true);
+    Variable v_out = fq.forward(v_in);
+    ASSERT_TRUE(v_out.requires_grad())
+        << "per-channel QAT path must return requires_grad=true";
+
+    std::vector<int64_t> x_shape(x.shape().begin(), x.shape().end());
+    Tensor go = ones(x_shape, DType::Float32, Device::cpu());
+    v_out.backward(go);
+
+    ASSERT_TRUE(v_in.grad().has_value())
+        << "per-channel STE must produce an input gradient (graph not severed)";
+    Tensor g = *v_in.grad();
+    ASSERT_EQ(g.numel(), x.numel());
+
+    const float* gd = g.data<float>();
+    const float* od = go.data<float>();
+    for (int64_t i = 0; i < g.numel(); ++i) {
+        EXPECT_NEAR(gd[i], od[i], 1e-5f)
+            << "per-channel STE must pass grad_output through in-range (i=" << i << ")";
     }
 }
 

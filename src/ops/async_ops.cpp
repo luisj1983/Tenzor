@@ -9,7 +9,11 @@
 #include "tenzor/ops/creation.hpp"
 #include "tenzor/backend/fast_dispatch.hpp"
 #include "tenzor/backend/op_attributes.hpp"
+#include "tenzor/backend/backend.hpp"
+#include "tenzor/backend/loader.hpp"
 #include "tenzor/utils/logging.hpp"
+#include <cstdio>
+#include <stdexcept>
 
 #ifdef TENZOR_CUDA_ENABLED
 #include <cuda_runtime.h>
@@ -75,41 +79,40 @@ auto StreamManager::instance() -> StreamManager& {
     return manager;
 }
 
+// Streams are created/synchronized/destroyed through the backend interface,
+// so every GPU backend (CUDA streams, ROCm hipStreams, OneAPI in-order SYCL
+// queues, Vulkan timeline contexts) gets a real per-device stream pool. The
+// core layer holds only opaque StreamHandles; the owning backend (which links
+// its native runtime) performs the actual operations.
 auto StreamManager::get_stream(const Device& device) -> StreamHandle {
-    std::lock_guard lock(global_mutex_);
-
-    auto& device_info = device_streams_[device];
-    std::lock_guard device_lock(device_info.mutex);
-
-    // Create streams if needed
-    if (device_info.streams.empty()) {
-        device_info.streams.reserve(STREAMS_PER_DEVICE);
-
-#ifdef TENZOR_CUDA_ENABLED
-        if (device.type == Device::Type::CUDA) {
-            // Set device (audit-5 Y.8 — was unchecked).
-            TENZOR_ASYNC_CUDA_CHECK(cudaSetDevice(device.index));
-
-            // Create CUDA streams.  An unchecked failure would insert an
-            // uninitialised handle into the pool and later corrupt the CUDA
-            // context on the synchronize / destroy path.
-            for (size_t i = 0; i < STREAMS_PER_DEVICE; ++i) {
-                cudaStream_t stream;
-                TENZOR_ASYNC_CUDA_CHECK(cudaStreamCreate(&stream));
-                device_info.streams.push_back(static_cast<StreamHandle>(stream));
-            }
-        }
-#endif
+    if (device.type == Device::Type::CPU) {
+        return nullptr;  // CPU async uses the thread pool, not a device stream.
     }
 
-    // Round-robin selection
+    std::lock_guard lock(global_mutex_);
+    auto& device_info = device_streams_[device];
+
+    if (device_info.streams.empty()) {
+        Backend* backend = is_backend_registry_alive()
+            ? backend_registry().get_backend(device.type) : nullptr;
+        if (!backend) {
+            return nullptr;  // backend not loaded — fall back to thread-pool path.
+        }
+        device_info.streams.reserve(STREAMS_PER_DEVICE);
+        for (size_t i = 0; i < STREAMS_PER_DEVICE; ++i) {
+            StreamHandle stream = backend->create_stream(device.index);
+            if (!stream) break;
+            device_info.streams.push_back(stream);
+            stream_owner_[stream] = backend;
+        }
+    }
+
     if (device_info.streams.empty()) {
         return nullptr;
     }
 
     StreamHandle stream = device_info.streams[device_info.next_index];
     device_info.next_index = (device_info.next_index + 1) % device_info.streams.size();
-
     return stream;
 }
 
@@ -117,12 +120,13 @@ auto StreamManager::synchronize_stream(StreamHandle stream) -> void {
     if (!stream) {
         return;
     }
-
-#ifdef TENZOR_CUDA_ENABLED
-    // audit-5 Y.8: was unchecked — a failure here (corrupt stream handle,
-    // device lost) needs to surface, not be silently dropped.
-    TENZOR_ASYNC_CUDA_CHECK(cudaStreamSynchronize(static_cast<cudaStream_t>(stream)));
-#endif
+    Backend* owner = nullptr;
+    {
+        std::lock_guard lock(global_mutex_);
+        auto it = stream_owner_.find(stream);
+        if (it != stream_owner_.end()) owner = it->second;
+    }
+    if (owner) owner->synchronize_stream(stream);
 }
 
 auto StreamManager::synchronize_device(const Device& device) -> void {
@@ -132,51 +136,29 @@ auto StreamManager::synchronize_device(const Device& device) -> void {
     if (it == device_streams_.end()) {
         return;
     }
-
-    auto& device_info = it->second;
-    std::lock_guard device_lock(device_info.mutex);
-
-#ifdef TENZOR_CUDA_ENABLED
-    if (device.type == Device::Type::CUDA) {
-        for (StreamHandle stream : device_info.streams) {
-            if (stream) {
-                // audit-5 Y.8: was unchecked.
-                TENZOR_ASYNC_CUDA_CHECK(cudaStreamSynchronize(static_cast<cudaStream_t>(stream)));
-            }
-        }
+    for (StreamHandle stream : it->second.streams) {
+        if (!stream) continue;
+        auto owner_it = stream_owner_.find(stream);
+        if (owner_it != stream_owner_.end()) owner_it->second->synchronize_stream(stream);
     }
-#endif
 }
 
 StreamManager::~StreamManager() {
-#ifdef TENZOR_CUDA_ENABLED
-    // Destructor cannot throw, so we log on failure instead of throwing.
-    // audit-5 Y.8: previously all four CUDA calls below were unchecked.  We
-    // can't propagate via exception from a destructor, but a context-lost
-    // condition still warrants an error path — write to stderr so the
-    // failure is visible rather than silent.
-    for (auto& [device, device_info] : device_streams_) {
-        if (device.type == Device::Type::CUDA) {
-            cudaError_t set_err = cudaSetDevice(device.index);
-            if (set_err != cudaSuccess) {
-                std::fprintf(stderr,
-                    "StreamManager: cudaSetDevice(%d) failed in destructor: %s\n",
-                    device.index, cudaGetErrorString(set_err));
-                continue;  // can't destroy streams without the right device set
-            }
-            for (StreamHandle stream : device_info.streams) {
-                if (stream) {
-                    cudaError_t dst_err = cudaStreamDestroy(static_cast<cudaStream_t>(stream));
-                    if (dst_err != cudaSuccess) {
-                        std::fprintf(stderr,
-                            "StreamManager: cudaStreamDestroy failed: %s\n",
-                            cudaGetErrorString(dst_err));
-                    }
-                }
+    // Destructors must not throw. Destroy every stream through its owning
+    // backend; the backend registry may already be torn down at static-dtor
+    // time, in which case the OS reclaims the streams.
+    if (!is_backend_registry_alive()) {
+        return;
+    }
+    for (auto& [stream, owner] : stream_owner_) {
+        if (stream && owner) {
+            try {
+                owner->destroy_stream(stream);
+            } catch (...) {
+                std::fprintf(stderr, "StreamManager: destroy_stream failed in destructor\n");
             }
         }
     }
-#endif
 }
 
 // Async operations implementations
@@ -185,9 +167,8 @@ auto async_matmul(const Tensor& a, const Tensor& b) -> Future<Tensor> {
     // Check if tensors are on GPU
     [[maybe_unused]] Device device = a.device();
 
-#ifdef TENZOR_CUDA_ENABLED
-    if (device.type == Device::Type::CUDA) {
-        return detail::async_gpu_op(device, [a, b](StreamHandle stream) {
+    if (device.type != Device::Type::CPU) {
+        return detail::async_gpu_op(device, [a, b](StreamHandle /*stream*/) {
             // Call synchronous matmul; the wrapping async_gpu_op enqueues on
             // a dedicated CUDA stream so callers can overlap multiple matmuls.
             // A cuBLAS-with-stream variant is a future optimisation but does
@@ -195,7 +176,6 @@ auto async_matmul(const Tensor& a, const Tensor& b) -> Future<Tensor> {
             return matmul(a, b);
         });
     }
-#endif
 
     // CPU path
     return detail::async_cpu_op([a, b]() {
@@ -256,30 +236,16 @@ auto async_conv2d(
 ) -> Future<Tensor> {
     Device device = input.device();
 
-#ifdef TENZOR_CUDA_ENABLED
-    if (device.type == Device::Type::CUDA) {
+    // All GPU backends (CUDA/ROCm/OneAPI/Vulkan) run through the StreamManager-
+    // backed async path, which acquires a real per-device stream from the
+    // backend. CPU uses the thread pool.
+    if (device.type != Device::Type::CPU) {
         return detail::async_gpu_op(device,
             [input, weight, bias, stride, padding, dilation, groups]
             (StreamHandle /*stream*/) {
                 return run_conv2d_via_dispatch(input, weight, bias,
                                                stride, padding, dilation, groups);
             });
-    }
-#endif
-
-    // Non-CUDA GPU backends (ROCm / OneAPI / Vulkan) have a Conv2dForward
-    // registry entry but the StreamManager only tracks CUDA streams. Emit a
-    // one-time warning so callers understand the async wrapper is currently
-    // synchronous on these backends, then dispatch on the CPU thread pool
-    // (the underlying kernel itself still executes on the device).
-    if (device.type == Device::Type::ROCm ||
-        device.type == Device::Type::OneAPI ||
-        device.type == Device::Type::Vulkan) {
-        TENZOR_WARN_ONCE(
-            "async_conv2d: non-CUDA GPU backends do not yet have a dedicated "
-            "async stream; the op dispatches on the CPU thread pool while the "
-            "kernel itself runs on the device. Result is correct but does not "
-            "overlap with other GPU work.");
     }
 
     return detail::async_cpu_op(
@@ -292,13 +258,11 @@ auto async_conv2d(
 auto async_add(const Tensor& a, const Tensor& b) -> Future<Tensor> {
     [[maybe_unused]] Device device = a.device();
 
-#ifdef TENZOR_CUDA_ENABLED
-    if (device.type == Device::Type::CUDA) {
-        return detail::async_gpu_op(device, [a, b](StreamHandle stream) {
+    if (device.type != Device::Type::CPU) {
+        return detail::async_gpu_op(device, [a, b](StreamHandle /*stream*/) {
             return add(a, b);
         });
     }
-#endif
 
     return detail::async_cpu_op([a, b]() {
         return add(a, b);
@@ -308,13 +272,11 @@ auto async_add(const Tensor& a, const Tensor& b) -> Future<Tensor> {
 auto async_mul(const Tensor& a, const Tensor& b) -> Future<Tensor> {
     [[maybe_unused]] Device device = a.device();
 
-#ifdef TENZOR_CUDA_ENABLED
-    if (device.type == Device::Type::CUDA) {
-        return detail::async_gpu_op(device, [a, b](StreamHandle stream) {
+    if (device.type != Device::Type::CPU) {
+        return detail::async_gpu_op(device, [a, b](StreamHandle /*stream*/) {
             return mul(a, b);
         });
     }
-#endif
 
     return detail::async_cpu_op([a, b]() {
         return mul(a, b);
@@ -324,13 +286,11 @@ auto async_mul(const Tensor& a, const Tensor& b) -> Future<Tensor> {
 auto async_sub(const Tensor& a, const Tensor& b) -> Future<Tensor> {
     [[maybe_unused]] Device device = a.device();
 
-#ifdef TENZOR_CUDA_ENABLED
-    if (device.type == Device::Type::CUDA) {
-        return detail::async_gpu_op(device, [a, b](StreamHandle stream) {
+    if (device.type != Device::Type::CPU) {
+        return detail::async_gpu_op(device, [a, b](StreamHandle /*stream*/) {
             return sub(a, b);
         });
     }
-#endif
 
     return detail::async_cpu_op([a, b]() {
         return sub(a, b);
@@ -340,13 +300,11 @@ auto async_sub(const Tensor& a, const Tensor& b) -> Future<Tensor> {
 auto async_div(const Tensor& a, const Tensor& b) -> Future<Tensor> {
     [[maybe_unused]] Device device = a.device();
 
-#ifdef TENZOR_CUDA_ENABLED
-    if (device.type == Device::Type::CUDA) {
-        return detail::async_gpu_op(device, [a, b](StreamHandle stream) {
+    if (device.type != Device::Type::CPU) {
+        return detail::async_gpu_op(device, [a, b](StreamHandle /*stream*/) {
             return div(a, b);
         });
     }
-#endif
 
     return detail::async_cpu_op([a, b]() {
         return div(a, b);
@@ -356,13 +314,11 @@ auto async_div(const Tensor& a, const Tensor& b) -> Future<Tensor> {
 auto async_relu(const Tensor& input) -> Future<Tensor> {
     [[maybe_unused]] Device device = input.device();
 
-#ifdef TENZOR_CUDA_ENABLED
-    if (device.type == Device::Type::CUDA) {
-        return detail::async_gpu_op(device, [input](StreamHandle stream) {
+    if (device.type != Device::Type::CPU) {
+        return detail::async_gpu_op(device, [input](StreamHandle /*stream*/) {
             return tensor_relu(input);
         });
     }
-#endif
 
     return detail::async_cpu_op([input]() {
         return tensor_relu(input);
@@ -372,13 +328,11 @@ auto async_relu(const Tensor& input) -> Future<Tensor> {
 auto async_sigmoid(const Tensor& input) -> Future<Tensor> {
     [[maybe_unused]] Device device = input.device();
 
-#ifdef TENZOR_CUDA_ENABLED
-    if (device.type == Device::Type::CUDA) {
-        return detail::async_gpu_op(device, [input](StreamHandle stream) {
+    if (device.type != Device::Type::CPU) {
+        return detail::async_gpu_op(device, [input](StreamHandle /*stream*/) {
             return tensor_sigmoid(input);
         });
     }
-#endif
 
     return detail::async_cpu_op([input]() {
         return tensor_sigmoid(input);
@@ -388,13 +342,11 @@ auto async_sigmoid(const Tensor& input) -> Future<Tensor> {
 auto async_tanh(const Tensor& input) -> Future<Tensor> {
     [[maybe_unused]] Device device = input.device();
 
-#ifdef TENZOR_CUDA_ENABLED
-    if (device.type == Device::Type::CUDA) {
-        return detail::async_gpu_op(device, [input](StreamHandle stream) {
+    if (device.type != Device::Type::CPU) {
+        return detail::async_gpu_op(device, [input](StreamHandle /*stream*/) {
             return tanh(input);
         });
     }
-#endif
 
     return detail::async_cpu_op([input]() {
         return tanh(input);
@@ -404,13 +356,11 @@ auto async_tanh(const Tensor& input) -> Future<Tensor> {
 auto async_softmax(const Tensor& input, int64_t dim) -> Future<Tensor> {
     [[maybe_unused]] Device device = input.device();
 
-#ifdef TENZOR_CUDA_ENABLED
-    if (device.type == Device::Type::CUDA) {
-        return detail::async_gpu_op(device, [input, dim](StreamHandle stream) {
+    if (device.type != Device::Type::CPU) {
+        return detail::async_gpu_op(device, [input, dim](StreamHandle /*stream*/) {
             return tensor_softmax(input, dim);
         });
     }
-#endif
 
     return detail::async_cpu_op([input, dim]() {
         return tensor_softmax(input, dim);

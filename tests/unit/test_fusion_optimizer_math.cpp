@@ -36,6 +36,8 @@
 #include "tenzor/ops/fusion_optimizer.hpp"
 #include "tenzor/ops/math.hpp"
 #include "tenzor/ops/op_id.hpp"
+#include "tenzor/ops/philox_dropout.hpp"
+#include "tenzor/ops/transform.hpp"
 #include "tenzor/tenzor.hpp"
 
 using namespace tenzor;
@@ -283,6 +285,82 @@ TEST_F(FusionOptimizerMathTest, AttentionMaskAddedBeforeSoftmax) {
 
     ASSERT_EQ(fused_outputs.size(), 1u);
     expect_close(fused_outputs[0], reference, 1e-5, "attention(masked)");
+}
+
+// Release audit: the unmasked/no-dropout "attention" fusion must dispatch the
+// real FusedAttention kernel and match softmax(scale*Q@K^T) @ V. Previously the
+// executor replayed the unfused composition (advertised fusion, performed none).
+TEST_F(FusionOptimizerMathTest, AttentionDispatchesFusedKernelAndMatchesReference) {
+    const int64_t B = 2, Sq = 3, Sk = 3, D = 4;
+    const float scale = 1.0f / std::sqrt(static_cast<float>(D));
+
+    auto Q = randn({B, Sq, D}, DType::Float32, Device::cpu());
+    auto K = randn({B, Sk, D}, DType::Float32, Device::cpu());
+    auto V = randn({B, Sk, D}, DType::Float32, Device::cpu());
+
+    // Reference: softmax(scale * Q @ K^T) @ V (no causal, no mask).
+    Tensor scores = mul(matmul(Q, K.transpose(-1, -2)),
+                        full({B, Sq, Sk}, scale, DType::Float32, Device::cpu()));
+    Variable sv(scores);
+    Tensor weights = nn::softmax(sv, -1).tensor();
+    Tensor reference = matmul(weights, V);
+
+    std::vector<Tensor> fused_inputs = {Q, K, V};
+    std::unordered_map<std::string, std::string> attrs = {
+        {"scale", std::to_string(scale)},
+    };
+    FusedOp fused_op("attention", {});
+    auto fused_outputs = execute_fused_op(fused_op, fused_inputs, attrs);
+
+    ASSERT_EQ(fused_outputs.size(), 1u);
+    expect_close(fused_outputs[0], reference, 1e-4, "attention(fused-dispatch)");
+}
+
+// Release audit: a matched Dropout node must NOT be silently dropped. With a
+// dropout_p attribute the executor takes the composed path and applies the
+// exact philox dropout mask, so the result equals
+// (softmax(scale*Q@K^T) * mask) @ V for the same seed — and differs from the
+// no-dropout output.
+TEST_F(FusionOptimizerMathTest, AttentionAppliesDropoutNotSilentlyDropped) {
+    const int64_t B = 1, Sq = 4, Sk = 4, D = 4;
+    const float scale = 1.0f / std::sqrt(static_cast<float>(D));
+    const double p = 0.5;
+    const int64_t seed = 1234;
+
+    auto Q = randn({B, Sq, D}, DType::Float32, Device::cpu());
+    auto K = randn({B, Sk, D}, DType::Float32, Device::cpu());
+    auto V = randn({B, Sk, D}, DType::Float32, Device::cpu());
+
+    Tensor scores = mul(matmul(Q, K.transpose(-1, -2)),
+                        full({B, Sq, Sk}, scale, DType::Float32, Device::cpu()));
+    Variable sv(scores);
+    Tensor weights = nn::softmax(sv, -1).tensor();
+
+    // Reference with the same philox stream the executor uses.
+    Tensor mask = philox_dropout_mask({B, Sq, Sk}, p, static_cast<uint64_t>(seed),
+                                      /*offset=*/0, DType::Float32);
+    Tensor reference = matmul(mul(weights, mask), V);
+    Tensor no_dropout = matmul(weights, V);
+
+    std::unordered_map<std::string, std::string> attrs = {
+        {"scale", std::to_string(scale)},
+        {"dropout_p", std::to_string(p)},
+        {"dropout_seed", std::to_string(seed)},
+    };
+    FusedOp fused_op("attention", {});
+    auto out = execute_fused_op(fused_op, {Q, K, V}, attrs);
+
+    ASSERT_EQ(out.size(), 1u);
+    expect_close(out[0], reference, 1e-5, "attention(dropout-applied)");
+
+    // Sanity: dropout actually changed the output (not silently elided).
+    const float* a = out[0].data<float>();
+    const float* b = no_dropout.data<float>();
+    bool differs = false;
+    for (int64_t i = 0; i < out[0].numel(); ++i) {
+        if (std::abs(a[i] - b[i]) > 1e-4f) { differs = true; break; }
+    }
+    EXPECT_TRUE(differs) << "dropout must change the attention output";
 }
 
 }  // namespace

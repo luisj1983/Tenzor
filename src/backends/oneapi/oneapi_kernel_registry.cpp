@@ -337,6 +337,8 @@ namespace oneapi {
     auto selu_backward_kernel(const Tensor& grad_output, const Tensor& input, sycl::queue& queue) -> Tensor;
     auto mish_kernel(const Tensor& input, sycl::queue& queue) -> Tensor;
     auto mish_backward_kernel(const Tensor& grad_output, const Tensor& input, sycl::queue& queue) -> Tensor;
+    auto hardswish_kernel(const Tensor& input, sycl::queue& queue) -> Tensor;
+    auto hardsigmoid_kernel(const Tensor& input, sycl::queue& queue) -> Tensor;
     auto softplus_kernel(const Tensor& input, float beta, float threshold, sycl::queue& queue) -> Tensor;
     auto softplus_backward_kernel(const Tensor& grad_output, const Tensor& input, float beta, float threshold, sycl::queue& queue) -> Tensor;
     auto tanh_activation_kernel(const Tensor& input, sycl::queue& queue) -> Tensor;
@@ -883,6 +885,12 @@ namespace oneapi {
     auto depthwise_conv2d_kernel(const Tensor& input, const Tensor& weight, const Tensor* bias,
                                   int64_t stride, int64_t padding, int64_t dilation,
                                   sycl::queue& queue) -> Tensor;
+    auto depthwise_conv1d_kernel(const Tensor& input, const Tensor& weight, const Tensor* bias,
+                                  int64_t stride, int64_t padding, int64_t dilation,
+                                  sycl::queue& queue) -> Tensor;
+    auto depthwise_conv3d_kernel(const Tensor& input, const Tensor& weight, const Tensor* bias,
+                                  int64_t sD, int64_t sH, int64_t sW, int64_t pD, int64_t pH, int64_t pW,
+                                  int64_t dD, int64_t dH, int64_t dW, sycl::queue& queue) -> Tensor;
 
     // ---- DeformableConv2d / DCNv2 (kernels/conv2d.cpp) ----
     auto deformable_conv2d_forward_kernel(
@@ -914,7 +922,9 @@ namespace oneapi {
         sycl::queue& queue) -> Tensor;
 
     // ---- Linalg operations (kernels/linalg.cpp) ----
-#ifdef TENZOR_HAS_ONEMKL
+    // Declared unconditionally: every kernel below is defined by linalg.cpp /
+    // fft.cpp in BOTH the oneMKL and the native-SYCL (non-oneMKL) builds, and
+    // the non-oneMKL registration branch needs these declarations too.
     auto linalg_det_kernel(const Tensor& input, sycl::queue& queue) -> Tensor;
     auto linalg_inv_kernel(const Tensor& input, sycl::queue& queue) -> Tensor;
     auto linalg_solve_kernel(const Tensor& A, const Tensor& B, sycl::queue& queue) -> Tensor;
@@ -965,7 +975,6 @@ namespace oneapi {
     auto ifftn_kernel(const Tensor& input, const std::vector<int64_t>& dims,
                       const std::vector<int64_t>& signal_lengths,
                       const std::string& norm, sycl::queue& queue) -> Tensor;
-#endif // TENZOR_HAS_ONEMKL
 
     // CTC loss
     auto ctc_loss_forward_kernel(const Tensor& log_probs, const Tensor& targets,
@@ -3977,6 +3986,16 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
             return oneapi::mish_backward_kernel(inputs[0], inputs[1], get_q(inputs));
         });
 
+    // Forward-only (backward autograd-composed via clamp+mul, matching CPU).
+    table.register_single_output_kernel(OpId::Hardswish,
+        [](std::span<const Tensor> inputs, const OpAttributes&) -> Tensor {
+            return oneapi::hardswish_kernel(inputs[0], get_q(inputs));
+        });
+    table.register_single_output_kernel(OpId::Hardsigmoid,
+        [](std::span<const Tensor> inputs, const OpAttributes&) -> Tensor {
+            return oneapi::hardsigmoid_kernel(inputs[0], get_q(inputs));
+        });
+
     table.register_single_output_kernel(OpId::Softplus,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
             float beta = static_cast<float>(attrs.get_float(AttrKey::Beta, 1.0));
@@ -4298,19 +4317,32 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
     // for the full rationale — these handlers exist to make accidental
     // dispatch (bypassing the NN-layer fallback) fail loudly instead of
     // silently miscomputing. Real OneAPI kernels are a follow-up.
+    // Real native depthwise 1D/3D kernels (forward; backward autograd-composed).
     table.register_kernel(OpId::DepthwiseConv1d,
-        [](std::span<const Tensor>, const OpAttributes&) -> std::vector<Tensor> {
-            throw std::runtime_error(
-                "DepthwiseConv1d (OneAPI): not yet implemented; route through "
-                "generic Conv1dForward (Conv1d::forward_impl falls back "
-                "automatically when this OpId is unregistered).");
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            int64_t s = attrs.get_int(AttrKey::Stride, 1);
+            int64_t p = attrs.get_int(AttrKey::Padding, 0);
+            int64_t d = attrs.get_int(AttrKey::Dilation, 1);
+            const Tensor* bias = inputs.size() > 2 ? &inputs[2] : nullptr;
+            return {oneapi::depthwise_conv1d_kernel(inputs[0], inputs[1], bias, s, p, d, get_q(inputs))};
         });
     table.register_kernel(OpId::DepthwiseConv3d,
-        [](std::span<const Tensor>, const OpAttributes&) -> std::vector<Tensor> {
-            throw std::runtime_error(
-                "DepthwiseConv3d (OneAPI): not yet implemented; route through "
-                "generic Conv3dForward (Conv3d::forward_impl falls back "
-                "automatically when this OpId is unregistered).");
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            int64_t s = attrs.get_int(AttrKey::Stride, 1);
+            int64_t p = attrs.get_int(AttrKey::Padding, 0);
+            int64_t d = attrs.get_int(AttrKey::Dilation, 1);
+            int64_t sD = attrs.has(AttrKey::StrideD) ? attrs.get_int(AttrKey::StrideD) : s;
+            int64_t sH = attrs.has(AttrKey::StrideH) ? attrs.get_int(AttrKey::StrideH) : s;
+            int64_t sW = attrs.has(AttrKey::StrideW) ? attrs.get_int(AttrKey::StrideW) : s;
+            int64_t pD = attrs.has(AttrKey::PaddingD) ? attrs.get_int(AttrKey::PaddingD) : p;
+            int64_t pH = attrs.has(AttrKey::PaddingH) ? attrs.get_int(AttrKey::PaddingH) : p;
+            int64_t pW = attrs.has(AttrKey::PaddingW) ? attrs.get_int(AttrKey::PaddingW) : p;
+            int64_t dD = attrs.has(AttrKey::DilationD) ? attrs.get_int(AttrKey::DilationD) : d;
+            int64_t dH = attrs.has(AttrKey::DilationH) ? attrs.get_int(AttrKey::DilationH) : d;
+            int64_t dW = attrs.has(AttrKey::DilationW) ? attrs.get_int(AttrKey::DilationW) : d;
+            const Tensor* bias = inputs.size() > 2 ? &inputs[2] : nullptr;
+            return {oneapi::depthwise_conv3d_kernel(inputs[0], inputs[1], bias,
+                                                    sD, sH, sW, pD, pH, pW, dD, dH, dW, get_q(inputs))};
         });
 
     // DeformableConv2d (DCNv2) — F.11: per-axis with scalar fallback so callers
