@@ -163,59 +163,44 @@ auto fused_gelu_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
         const float* in_ptr = get_data_ptr<const float>(input);
         float* out_ptr = get_data_ptr<float>(output);
 
-        constexpr float sqrt_2_over_pi = 0.7978845608f;
-        constexpr float coeff = 0.044715f;
+        constexpr float inv_sqrt2 = 0.70710678f;
 
         queue.parallel_for<FusedGeluKernelFloat32>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
             float x = in_ptr[idx];
-            float x_cubed = x * x * x;
-            float inner = sqrt_2_over_pi * (x + coeff * x_cubed);
-            float tanh_val = sycl::tanh(inner);
-            out_ptr[idx] = 0.5f * x * (1.0f + tanh_val);
+            out_ptr[idx] = 0.5f * x * (1.0f + sycl::erf(x * inv_sqrt2));
         });
     }
     else if (input.dtype() == DType::Float64) {
         const double* in_ptr = get_data_ptr<const double>(input);
         double* out_ptr = get_data_ptr<double>(output);
 
-        constexpr double sqrt_2_over_pi = 0.7978845608028654;
-        constexpr double coeff = 0.044715;
+        constexpr double inv_sqrt2 = 0.70710678118654752;
 
         queue.parallel_for<FusedGeluKernelFloat64>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
             double x = in_ptr[idx];
-            double x_cubed = x * x * x;
-            double inner = sqrt_2_over_pi * (x + coeff * x_cubed);
-            double tanh_val = sycl::tanh(inner);
-            out_ptr[idx] = 0.5 * x * (1.0 + tanh_val);
+            out_ptr[idx] = 0.5 * x * (1.0 + sycl::erf(x * inv_sqrt2));
         });
     }
     else if (input.dtype() == DType::Float16) {
         const sycl::half* in_ptr = get_data_ptr<const sycl::half>(input);
         sycl::half* out_ptr = get_data_ptr<sycl::half>(output);
 
-        constexpr float sqrt_2_over_pi_f = 0.7978845608f;
-        constexpr float coeff_f = 0.044715f;
+        constexpr float inv_sqrt2 = 0.70710678f;
 
         queue.parallel_for<FusedGeluKernelFloat16>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
             float x = static_cast<float>(in_ptr[idx]);
-            float x_cubed = x * x * x;
-            float inner = sqrt_2_over_pi_f * (x + coeff_f * x_cubed);
-            float tanh_val = sycl::tanh(inner);
-            out_ptr[idx] = sycl::half(0.5f * x * (1.0f + tanh_val));
+            out_ptr[idx] = sycl::half(0.5f * x * (1.0f + sycl::erf(x * inv_sqrt2)));
         });
     }
     else if (input.dtype() == DType::BFloat16) {
         const uint16_t* in_ptr = get_data_ptr<const uint16_t>(input);
         uint16_t* out_ptr = get_data_ptr<uint16_t>(output);
 
-        const float sqrt_2_over_pi = 0.7978845608f;
-        const float coeff = 0.044715f;
+        const float inv_sqrt2 = 0.70710678f;
 
         queue.parallel_for<FusedGeluKernelBFloat16>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
             float x = bf16_to_f32(in_ptr[idx]);
-            float x_cubed = x * x * x;
-            float inner = sqrt_2_over_pi * (x + coeff * x_cubed);
-            out_ptr[idx] = f32_to_bf16(0.5f * x * (1.0f + sycl::tanh(inner)));
+            out_ptr[idx] = f32_to_bf16(0.5f * x * (1.0f + sycl::erf(x * inv_sqrt2)));
         });
     }
     else {

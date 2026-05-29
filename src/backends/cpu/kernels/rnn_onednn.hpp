@@ -1481,6 +1481,16 @@ inline bool gru_multilayer_forward_onednn(
     }
 }
 
+// audit C1: reset every thread-local RNN primitive cache so clear_dnnl_cache()
+// reclaims them.  All RNN caches are exposed via get_*_cached() accessors.
+inline void clear_rnn_onednn_caches() {
+    get_lstm_cached().reset();
+    get_lstm_backward_cached().reset();
+    get_gru_cached().reset();
+    get_lstm_multilayer_cached().reset();
+    get_gru_multilayer_cached().reset();
+}
+
 } // namespace rnn_onednn
 } // namespace cpu
 } // namespace tenzor

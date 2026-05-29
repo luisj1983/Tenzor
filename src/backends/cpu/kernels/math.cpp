@@ -646,6 +646,20 @@ using Int8MatMulPrimitiveCache =
                           Int8MatMulCacheKeyHash, MATMUL_CACHE_SIZE>;
 static thread_local Int8MatMulPrimitiveCache g_matmul_int8_cache;
 
+// audit C1: register thread-local clear-callbacks for clear_dnnl_cache() so the
+// matmul primitive caches are reclaimable (g_matmul_cache is declared above).
+namespace {
+void clear_local_matmul_cache() { g_matmul_cache.clear(); }
+void clear_local_matmul_int8_cache() { g_matmul_int8_cache.clear(); }
+struct MatMulCacheClearRegistrar {
+    MatMulCacheClearRegistrar() {
+        ::tenzor::cpu::register_dnnl_cache_clear_callback(&clear_local_matmul_cache);
+        ::tenzor::cpu::register_dnnl_cache_clear_callback(&clear_local_matmul_int8_cache);
+    }
+};
+static MatMulCacheClearRegistrar g_matmul_cache_clear_registrar;
+}
+
 static bool onednn_matmul_int8(
     const int8_t* A, const int8_t* B, int32_t* C,
     int64_t M, int64_t N, int64_t K) {

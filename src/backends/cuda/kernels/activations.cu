@@ -325,13 +325,12 @@ __global__ void tanh_forward_remainder_kernel(const float* input, float* output,
     }
 }
 
-// Helper device function for GELU computation
+// Helper device function for GELU computation — exact erf form
+// (0.5 * x * (1 + erf(x / sqrt(2)))), matching PyTorch's default and the CPU
+// backend (approximate='none').
 __device__ __forceinline__ float gelu_scalar(float x) {
-    constexpr float sqrt_2_over_pi = 0.7978845608f;
-    constexpr float coeff = 0.044715f;
-    float x_cubed = x * x * x;
-    float tanh_arg = sqrt_2_over_pi * (x + coeff * x_cubed);
-    return x * 0.5f * (1.0f + tanhf(tanh_arg));
+    constexpr float inv_sqrt2 = 0.70710678f;
+    return x * 0.5f * (1.0f + erff(x * inv_sqrt2));
 }
 
 // Vectorized GELU forward using float4
@@ -468,8 +467,9 @@ __global__ void tanh_backward_vectorized_kernel(const float4* __restrict__ grad_
 __global__ void gelu_backward_vectorized_kernel(const float4* __restrict__ grad_output,
                                                  const float4* __restrict__ input,
                                                  float4* __restrict__ grad_input, int64_t n4) {
-    constexpr float sqrt_2_over_pi = 0.7978845608f;
-    constexpr float coeff = 0.044715f;
+    // Exact erf GELU derivative: 0.5*(1+erf(x/sqrt(2))) + x*(1/sqrt(2*pi))*exp(-x^2/2)
+    constexpr float inv_sqrt2 = 0.70710678f;
+    constexpr float pdf_coeff = 0.39894228f;  // 1/sqrt(2*pi)
 
     TENZOR_CUDA_KERNEL_LOOP(idx, n4) {
         float4 g = __ldg(&grad_output[idx]);
@@ -478,13 +478,9 @@ __global__ void gelu_backward_vectorized_kernel(const float4* __restrict__ grad_
 
         #define GELU_BACKWARD(comp) \
             { \
-                float x_sq = x.comp * x.comp; \
-                float x_cubed = x_sq * x.comp; \
-                float z = sqrt_2_over_pi * (x.comp + coeff * x_cubed); \
-                float tanh_z = tanhf(z); \
-                float dz_dx = sqrt_2_over_pi * (1.0f + 3.0f * coeff * x_sq); \
-                float sech2_z = 1.0f - tanh_z * tanh_z; \
-                result.comp = g.comp * (0.5f * (1.0f + tanh_z) + 0.5f * x.comp * sech2_z * dz_dx); \
+                float cdf = 0.5f * (1.0f + erff(x.comp * inv_sqrt2)); \
+                float pdf = pdf_coeff * expf(-0.5f * x.comp * x.comp); \
+                result.comp = g.comp * (cdf + x.comp * pdf); \
             }
 
         GELU_BACKWARD(x)
@@ -770,13 +766,13 @@ extern "C" {
 // ============================================================================
 
 // Forward: x * 0.5 * (1 + tanh(sqrt(2/π) * (x + 0.044715 * x³)))
+// Exact erf GELU: 0.5 * x * (1 + erf(x / sqrt(2))) — matches PyTorch default
+// (approximate='none') and the CPU backend.
 template<typename T>
 __global__ void gelu_forward_kernel(const T* input, T* output, int64_t n) {
     TENZOR_CUDA_KERNEL_LOOP(idx, n) {
         T x = input[idx];
-        T x_cubed = x * x * x;
-        T tanh_arg = T(0.7978845608) * (x + T(0.044715) * x_cubed);
-        output[idx] = x * T(0.5) * (T(1.0) + tanh(tanh_arg));
+        output[idx] = x * T(0.5) * (T(1.0) + erf(x * T(0.70710678118654752)));
     }
 }
 
@@ -785,9 +781,7 @@ template<>
 __global__ void gelu_forward_kernel<__half>(const __half* input, __half* output, int64_t n) {
     TENZOR_CUDA_KERNEL_LOOP(idx, n) {
         float x = __half2float(input[idx]);
-        float x_cubed = x * x * x;
-        float tanh_arg = 0.7978845608f * (x + 0.044715f * x_cubed);
-        output[idx] = __float2half(x * 0.5f * (1.0f + tanhf(tanh_arg)));
+        output[idx] = __float2half(x * 0.5f * (1.0f + erff(x * 0.70710678f)));
     }
 }
 
@@ -796,43 +790,22 @@ template<>
 __global__ void gelu_forward_kernel<__nv_bfloat16>(const __nv_bfloat16* input, __nv_bfloat16* output, int64_t n) {
     TENZOR_CUDA_KERNEL_LOOP(idx, n) {
         float x = __bfloat162float(input[idx]);
-        float x_cubed = x * x * x;
-        float tanh_arg = 0.7978845608f * (x + 0.044715f * x_cubed);
-        output[idx] = __float2bfloat16(x * 0.5f * (1.0f + tanhf(tanh_arg)));
+        output[idx] = __float2bfloat16(x * 0.5f * (1.0f + erff(x * 0.70710678f)));
     }
 }
 
-// Backward: grad_out * df/dx
-// where df/dx = 0.5 * (1 + tanh(z)) + 0.5 * x * sech²(z) * dz/dx
-// z = sqrt(2/π) * (x + 0.044715 * x³)
-// dz/dx = sqrt(2/π) * (1 + 0.134145 * x²)
-// sech²(z) = 1 - tanh²(z)
+// Backward: grad_out * gelu'(x), exact erf derivative:
+//   gelu'(x) = 0.5*(1 + erf(x/sqrt(2))) + x * (1/sqrt(2*pi)) * exp(-x^2/2)
 template<typename T>
 __global__ void gelu_backward_kernel(const T* grad_output, const T* input,
                                      T* grad_input, int64_t n) {
     TENZOR_CUDA_KERNEL_LOOP(idx, n) {
         T x = input[idx];
-        T x_squared = x * x;
-        T x_cubed = x_squared * x;
-
-        // Constants
-        constexpr T sqrt_2_over_pi = T(0.7978845608);
-        constexpr T coeff = T(0.044715);
-
-        // Compute z and tanh(z)
-        T z = sqrt_2_over_pi * (x + coeff * x_cubed);
-        T tanh_z = tanh(z);
-
-        // Compute dz/dx
-        T dz_dx = sqrt_2_over_pi * (T(1.0) + T(3.0) * coeff * x_squared);
-
-        // Compute sech²(z) = 1 - tanh²(z)
-        T sech2_z = T(1.0) - tanh_z * tanh_z;
-
-        // Compute df/dx
-        T df_dx = T(0.5) * (T(1.0) + tanh_z) + T(0.5) * x * sech2_z * dz_dx;
-
-        grad_input[idx] = grad_output[idx] * df_dx;
+        constexpr T inv_sqrt2 = T(0.70710678118654752);
+        constexpr T pdf_coeff = T(0.39894228040143268);  // 1/sqrt(2*pi)
+        T cdf = T(0.5) * (T(1.0) + erf(x * inv_sqrt2));
+        T pdf = pdf_coeff * exp(T(-0.5) * x * x);
+        grad_input[idx] = grad_output[idx] * (cdf + x * pdf);
     }
 }
 
@@ -842,27 +815,9 @@ __global__ void gelu_backward_kernel<__half>(const __half* grad_output, const __
                                               __half* grad_input, int64_t n) {
     TENZOR_CUDA_KERNEL_LOOP(idx, n) {
         float x = __half2float(input[idx]);
-        float x_squared = x * x;
-        float x_cubed = x_squared * x;
-
-        // Constants
-        constexpr float sqrt_2_over_pi = 0.7978845608f;
-        constexpr float coeff = 0.044715f;
-
-        // Compute z and tanh(z)
-        float z = sqrt_2_over_pi * (x + coeff * x_cubed);
-        float tanh_z = tanhf(z);
-
-        // Compute dz/dx
-        float dz_dx = sqrt_2_over_pi * (1.0f + 3.0f * coeff * x_squared);
-
-        // Compute sech²(z) = 1 - tanh²(z)
-        float sech2_z = 1.0f - tanh_z * tanh_z;
-
-        // Compute df/dx
-        float df_dx = 0.5f * (1.0f + tanh_z) + 0.5f * x * sech2_z * dz_dx;
-
-        grad_input[idx] = float2half_sat(__half2float(grad_output[idx]) * df_dx);
+        float cdf = 0.5f * (1.0f + erff(x * 0.70710678f));
+        float pdf = 0.39894228f * expf(-0.5f * x * x);
+        grad_input[idx] = float2half_sat(__half2float(grad_output[idx]) * (cdf + x * pdf));
     }
 }
 
@@ -872,27 +827,9 @@ __global__ void gelu_backward_kernel<__nv_bfloat16>(const __nv_bfloat16* grad_ou
                                                     __nv_bfloat16* grad_input, int64_t n) {
     TENZOR_CUDA_KERNEL_LOOP(idx, n) {
         float x = __bfloat162float(input[idx]);
-        float x_squared = x * x;
-        float x_cubed = x_squared * x;
-
-        // Constants
-        constexpr float sqrt_2_over_pi = 0.7978845608f;
-        constexpr float coeff = 0.044715f;
-
-        // Compute z and tanh(z)
-        float z = sqrt_2_over_pi * (x + coeff * x_cubed);
-        float tanh_z = tanhf(z);
-
-        // Compute dz/dx
-        float dz_dx = sqrt_2_over_pi * (1.0f + 3.0f * coeff * x_squared);
-
-        // Compute sech²(z) = 1 - tanh²(z)
-        float sech2_z = 1.0f - tanh_z * tanh_z;
-
-        // Compute df/dx
-        float df_dx = 0.5f * (1.0f + tanh_z) + 0.5f * x * sech2_z * dz_dx;
-
-        grad_input[idx] = __float2bfloat16(__bfloat162float(grad_output[idx]) * df_dx);
+        float cdf = 0.5f * (1.0f + erff(x * 0.70710678f));
+        float pdf = 0.39894228f * expf(-0.5f * x * x);
+        grad_input[idx] = __float2bfloat16(__bfloat162float(grad_output[idx]) * (cdf + x * pdf));
     }
 }
 

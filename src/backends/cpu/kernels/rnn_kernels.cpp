@@ -35,6 +35,15 @@ inline float sigmoid(float x) {
 // what the Float32 path uses.
 namespace {
 
+// audit C1: register the RNN oneDNN cache clear-callback for clear_dnnl_cache().
+struct RnnOneDnnCacheClearRegistrar {
+    RnnOneDnnCacheClearRegistrar() {
+        ::tenzor::cpu::register_dnnl_cache_clear_callback(
+            &::tenzor::cpu::rnn_onednn::clear_rnn_onednn_caches);
+    }
+};
+static RnnOneDnnCacheClearRegistrar g_rnn_onednn_cache_clear_registrar;
+
 inline double sigmoid_d(double x) { return 1.0 / (1.0 + std::exp(-x)); }
 
 // LSTM single-direction forward, Float64. Same semantics as
@@ -531,8 +540,8 @@ auto gru_cell_forward_kernel(const Tensor& input, const Tensor& hx,
         const T* hx_data = hx.data<T>();
         const T* w_ih_data = weight_ih.data<T>();
         const T* w_hh_data = weight_hh.data<T>();
-        const T* b_ih_data = bias_ih.data<T>();
-        const T* b_hh_data = bias_hh.data<T>();
+        const T* b_ih_data = bias_ih.numel() > 0 ? bias_ih.data<T>() : nullptr;
+        const T* b_hh_data = bias_hh.numel() > 0 ? bias_hh.data<T>() : nullptr;
         T* hy_data = hy.data<T>();
 
         auto sigmoid_t = [](T x) -> T { return T(1) / (T(1) + std::exp(-x)); };
@@ -541,7 +550,8 @@ auto gru_cell_forward_kernel(const Tensor& input, const Tensor& hx,
         for (int64_t b = 0; b < batch_size; ++b) {
             std::vector<T> gates_rz(2 * hidden_size);
             for (int64_t g = 0; g < 2 * hidden_size; ++g) {
-                T sum = b_ih_data[g] + b_hh_data[g];
+                T sum = (b_ih_data ? b_ih_data[g] : T(0)) +
+                        (b_hh_data ? b_hh_data[g] : T(0));
                 for (int64_t i = 0; i < input_size; ++i) {
                     sum += in_data[b * input_size + i] * w_ih_data[g * input_size + i];
                 }
@@ -555,8 +565,8 @@ auto gru_cell_forward_kernel(const Tensor& input, const Tensor& hx,
                 T r = gates_rz[h];
                 T z = gates_rz[hidden_size + h];
 
-                T n_ih = b_ih_data[2 * hidden_size + h];
-                T n_hh = b_hh_data[2 * hidden_size + h];
+                T n_ih = b_ih_data ? b_ih_data[2 * hidden_size + h] : T(0);
+                T n_hh = b_hh_data ? b_hh_data[2 * hidden_size + h] : T(0);
 
                 for (int64_t i = 0; i < input_size; ++i) {
                     n_ih += in_data[b * input_size + i] * w_ih_data[(2 * hidden_size + h) * input_size + i];

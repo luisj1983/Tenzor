@@ -766,7 +766,19 @@ def _default_collate_impl(batch: list, _current_depth: int) -> Any:
     if isinstance(elem, (_core.Tensor, _core.Variable)):
         return _core.stack(batch, 0)
 
-    # Fallback for scalars / strings / other Python objects.
+    # Numeric scalars: stack into a 1-D tensor matching PyTorch's default
+    # collate (int/bool -> int64, float -> float32).  Without this, the common
+    # ``Dataset.__getitem__ -> (tensor, int_label)`` pattern left the labels as
+    # a raw Python list, breaking downstream loss/metric calls.  `bool` is a
+    # subclass of `int`, so the int branch covers it (cast to int64).
+    if isinstance(elem, int):
+        import numpy as _np
+        return _core.Tensor.from_numpy(_np.asarray(batch, dtype=_np.int64))
+    if isinstance(elem, float):
+        import numpy as _np
+        return _core.Tensor.from_numpy(_np.asarray(batch, dtype=_np.float32))
+
+    # Fallback for strings / other Python objects.
     return batch
 
 
@@ -962,30 +974,37 @@ def _worker_loop(
                 # item, so multi-worker iterable loaders ignored batch_size
                 # entirely and the collate_fn saw size-1 batches).
                 if len(batch) >= batch_size:
-                    output_queue.put((worker_id, collate_fn(batch)))
+                    # seq_id is None for IterableDataset (order is inherently
+                    # per-worker; the consumer yields these as they arrive).
+                    output_queue.put((worker_id, None, collate_fn(batch)))
                     batch = []
             # Trailing remainder flush (e.g. dataset length not divisible
             # by batch_size).
             if batch:
-                output_queue.put((worker_id, collate_fn(batch)))
+                # seq_id is None for IterableDataset (order is inherently
+                # per-worker; the consumer yields these as they arrive).
+                output_queue.put((worker_id, None, collate_fn(batch)))
         else:
             # For map-style datasets, receive index batches and produce results
             while True:
                 msg = index_queue.get()
                 if msg is None:  # Poison pill
                     break
-                batch_indices = msg
+                # Map-style index batches are tagged with a monotonic seq_id by
+                # the dispatcher so the consumer can yield in submission order
+                # regardless of which worker finishes first.
+                seq_id, batch_indices = msg
                 batch = [dataset[i] for i in batch_indices]
-                output_queue.put((worker_id, collate_fn(batch)))
+                output_queue.put((worker_id, seq_id, collate_fn(batch)))
     except KeyboardInterrupt:
         # OO.13: SIGTERM-triggered shutdown — fall through to the sentinel
         # emit in `finally` so the parent's output_queue.get() never blocks.
         pass
     except Exception as e:
-        output_queue.put((worker_id, e))
+        output_queue.put((worker_id, None, e))
     finally:
         try:
-            output_queue.put((worker_id, _WORKER_SENTINEL))
+            output_queue.put((worker_id, None, _WORKER_SENTINEL))
         except (ValueError, OSError):
             # OO.13: parent may have already closed the queue (post _stop_workers
             # → cancel_join_thread/close).  Nothing to do — the parent's
@@ -1209,7 +1228,7 @@ class _MultiProcessLoader:
             done_count = 0
             while done_count < self._num_workers:
                 try:
-                    wid, result = self._output_queue.get(timeout=self._timeout)
+                    wid, _seq, result = self._output_queue.get(timeout=self._timeout)
                 except Empty:
                     raise RuntimeError("DataLoader worker timed out")
                 if result is _WORKER_SENTINEL:
@@ -1226,20 +1245,28 @@ class _MultiProcessLoader:
             sent = 0
             received = 0
 
-            # Pre-fill queues
+            # Pre-fill queues. Each batch carries a monotonic seq_id (== the
+            # order it was submitted) so the consumer can restore submission
+            # order below even when workers finish out of order.
             for wid in range(self._num_workers):
                 for _ in range(self._prefetch_factor):
                     try:
                         indices = next(batches_iter)
-                        self._index_queues[wid].put(indices)
+                        self._index_queues[wid].put((sent, indices))
                         sent += 1
                     except StopIteration:
                         break
 
             done_workers = 0
+            # Reorder buffer: results may arrive out of submission order across
+            # workers. Buffer by seq_id and yield strictly in increasing order
+            # (PyTorch _rcvd_idx / _task_info semantics) so a shuffle=False
+            # loader produces deterministic, submission-ordered batches.
+            reorder_buffer = {}
+            next_to_yield = 0
             while received < total_batches:
                 try:
-                    wid, result = self._output_queue.get(timeout=self._timeout)
+                    wid, seq_id, result = self._output_queue.get(timeout=self._timeout)
                 except Empty:
                     raise RuntimeError("DataLoader worker timed out")
 
@@ -1251,13 +1278,17 @@ class _MultiProcessLoader:
                     raise result
 
                 received += 1
-                yield result
+
+                reorder_buffer[seq_id] = result
+                while next_to_yield in reorder_buffer:
+                    yield reorder_buffer.pop(next_to_yield)
+                    next_to_yield += 1
 
                 # Send more work to keep workers busy
                 if sent < total_batches:
                     try:
                         indices = next(batches_iter)
-                        self._index_queues[wid].put(indices)
+                        self._index_queues[wid].put((sent, indices))
                         sent += 1
                     except StopIteration:
                         pass
@@ -1582,7 +1613,20 @@ def random_split(dataset: Dataset, lengths: Sequence[int],
     Example
     -------
     >>> train, val = random_split(dataset, [800, 200])
+    >>> train, val = random_split(dataset, [0.8, 0.2])  # fractions also work
     """
+    # PyTorch-style fractional lengths: if every entry is a float and they sum
+    # to ~1, convert to integer counts (floor each, then distribute the
+    # remainder one item at a time, in order) so the splits cover the dataset.
+    if len(lengths) > 0 and all(isinstance(length, float) for length in lengths) \
+            and math.isclose(sum(lengths), 1.0, abs_tol=1e-9):
+        n = len(dataset)
+        int_lengths = [int(math.floor(n * frac)) for frac in lengths]
+        remainder = n - sum(int_lengths)
+        for i in range(remainder):
+            int_lengths[i % len(int_lengths)] += 1
+        lengths = int_lengths
+
     total = sum(lengths)
     if total != len(dataset):
         raise ValueError(

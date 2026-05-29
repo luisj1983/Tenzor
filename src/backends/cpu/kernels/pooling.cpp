@@ -98,6 +98,17 @@ using PoolingPrimitiveCache = OneDNNPrimitiveCache<PoolingCacheKey, PoolingCache
 
 static thread_local PoolingPrimitiveCache g_pooling_cache;
 
+// audit C1: register a thread-local clear-callback for clear_dnnl_cache().
+namespace {
+void clear_local_pooling_cache() { g_pooling_cache.clear(); }
+struct PoolingCacheClearRegistrar {
+    PoolingCacheClearRegistrar() {
+        ::tenzor::cpu::register_dnnl_cache_clear_callback(&clear_local_pooling_cache);
+    }
+};
+static PoolingCacheClearRegistrar g_pooling_cache_clear_registrar;
+}
+
 // oneDNN average pooling forward with caching
 static bool onednn_avgpool2d_forward(
     const float* input, float* output,

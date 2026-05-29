@@ -41,10 +41,20 @@ float sigmoid(float x) {
     return 1.0 / (1.0 + exp(-x));
 }
 
+// erf via Abramowitz & Stegun 7.1.26 (max abs error ~1.5e-7). Exact erf GELU
+// matches PyTorch's default (approximate='none') and the other backends.
+float erf_approx(float x) {
+    float s = sign(x);
+    float ax = abs(x);
+    float t = 1.0 / (1.0 + 0.3275911 * ax);
+    float y = 1.0 - (((((1.061405429 * t - 1.453152027) * t) + 1.421413741) * t
+                      - 0.284496736) * t + 0.254829592) * t * exp(-ax * ax);
+    return s * y;
+}
+
 float gelu(float x) {
-    // Approximation: 0.5 * x * (1 + tanh(sqrt(2/pi) * (x + 0.044715 * x^3)))
-    float cdf = 0.5 * (1.0 + tanh(sqrt(2.0 / PI) * (x + 0.044715 * x * x * x)));
-    return x * cdf;
+    // Exact GELU: 0.5 * x * (1 + erf(x / sqrt(2)))
+    return 0.5 * x * (1.0 + erf_approx(x * 0.70710678));
 }
 
 float leaky_relu(float x, float alpha) {

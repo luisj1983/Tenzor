@@ -4616,6 +4616,11 @@ static void register_cpu_kernels_sparse(BackendDispatchTable& table) {
     // attrs: M, K (shape of the sparse matrix)
     table.register_single_output_kernel(OpId::SparseToDense,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+            // Audit 8.4: M and K are required; default-0 silently produced wrong shapes.
+            if (!attrs.has(AttrKey::M) || !attrs.has(AttrKey::K)) {
+                throw std::runtime_error(
+                    "SparseToDense: required attributes M and K not provided.");
+            }
             int64_t M = attrs.get_int(AttrKey::M);
             int64_t K = attrs.get_int(AttrKey::K);
             auto sp = SparseTensor::sparse_csr(inputs[0], inputs[1], inputs[2], {M, K});
@@ -4634,6 +4639,11 @@ static void register_cpu_kernels_sparse(BackendDispatchTable& table) {
     // inputs: [0]=crow_indices, [1]=col_indices, [2]=values, [3]=dense
     table.register_single_output_kernel(OpId::SparseAdd,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+            // Audit 8.4: M and K are required; default-0 silently produced wrong shapes.
+            if (!attrs.has(AttrKey::M) || !attrs.has(AttrKey::K)) {
+                throw std::runtime_error(
+                    "SparseAdd: required attributes M and K not provided.");
+            }
             int64_t M = attrs.get_int(AttrKey::M);
             int64_t K = attrs.get_int(AttrKey::K);
             auto sp = SparseTensor::sparse_csr(inputs[0], inputs[1], inputs[2], {M, K});
@@ -4649,6 +4659,11 @@ static void register_cpu_kernels_sparse(BackendDispatchTable& table) {
     // src/sparse/sparse_ops.cpp (already exists for Float32 and Float64).
     table.register_kernel(OpId::SparseSpGEMM,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            // Audit 8.4: M, K, N are required; default-0 silently produced wrong shapes.
+            if (!attrs.has(AttrKey::M) || !attrs.has(AttrKey::K) || !attrs.has(AttrKey::N)) {
+                throw std::runtime_error(
+                    "SparseSpGEMM: required attributes M, K and N not provided.");
+            }
             int64_t M = attrs.get_int(AttrKey::M);
             int64_t K = attrs.get_int(AttrKey::K);
             int64_t N = attrs.get_int(AttrKey::N);
@@ -4663,6 +4678,11 @@ static void register_cpu_kernels_sparse(BackendDispatchTable& table) {
     // attrs: N, Upper. Returns x (N,).
     table.register_single_output_kernel(OpId::SparseTrsv,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+            // Audit 8.4: N is required; default-0 silently produced a wrong shape.
+            if (!attrs.has(AttrKey::N)) {
+                throw std::runtime_error(
+                    "SparseTriangularSolve: required attribute N not provided.");
+            }
             int64_t N = attrs.get_int(AttrKey::N);
             bool upper = attrs.get_bool(AttrKey::Upper, false);
             auto L = SparseTensor::sparse_csr(inputs[0], inputs[1], inputs[2], {N, N});
@@ -4674,6 +4694,11 @@ static void register_cpu_kernels_sparse(BackendDispatchTable& table) {
     // cpu_sparse_trsm for 2D b.
     table.register_single_output_kernel(OpId::SparseTrsm,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+            // Audit 8.4: N is required; default-0 silently produced a wrong shape.
+            if (!attrs.has(AttrKey::N)) {
+                throw std::runtime_error(
+                    "SparseTriangularSolve: required attribute N not provided.");
+            }
             int64_t N = attrs.get_int(AttrKey::N);
             bool upper = attrs.get_bool(AttrKey::Upper, false);
             auto L = SparseTensor::sparse_csr(inputs[0], inputs[1], inputs[2], {N, N});

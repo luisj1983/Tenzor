@@ -592,18 +592,16 @@ __global__ void fused_gelu_kernel(
     T* output,
     int64_t n
 ) {
-    constexpr T sqrt_2_over_pi = 0.7978845608f;
-    constexpr T coeff = 0.044715f;
+    // Exact erf GELU: 0.5 * x * (1 + erf(x / sqrt(2))) — matches the canonical
+    // GELU and PyTorch default (approximate='none').
+    constexpr T inv_sqrt2 = T(0.70710678118654752);
 
     int64_t tid = blockIdx.x * blockDim.x + threadIdx.x;
     int64_t stride = blockDim.x * gridDim.x;
 
     for (int64_t i = tid; i < n; i += stride) {
         T x = input[i];
-        T x_cubed = x * x * x;
-        T inner = sqrt_2_over_pi * (x + coeff * x_cubed);
-        T tanh_val = tanhf(inner);
-        output[i] = T(0.5) * x * (T(1.0) + tanh_val);
+        output[i] = T(0.5) * x * (T(1.0) + erf(x * inv_sqrt2));
     }
 }
 

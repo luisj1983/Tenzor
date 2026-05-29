@@ -55,7 +55,6 @@ constexpr size_t BUFFER_ALIGNMENT = 64;  // AVX-512 cache line
 constexpr size_t NUM_SIZE_CLASSES = 16;  // Log2-based size buckets
 constexpr size_t MIN_BUFFER_SIZE = 1024; // 1KB minimum
 constexpr size_t MAX_BUFFER_SIZE = 256 * 1024 * 1024; // 256MB maximum
-constexpr size_t MAX_CACHED_BUFFERS = 4; // Max buffers per size class
 constexpr size_t MAX_CACHED_PER_CLASS = 32; // Max raw pointers cached per bucket
 
 // ============================================================================
@@ -252,9 +251,18 @@ public:
      * @brief Get total cached memory
      */
     size_t cached_bytes() const {
+        // Sum the actual allocated size of each currently-cached pointer.
+        // acquire() rounds an allocation up to max(requested, class size), so a
+        // buffer can exceed its bucket's nominal class size; multiplying bucket
+        // counts by get_class_size() undercounts the resident bytes.
         size_t total = 0;
-        for (size_t i = 0; i < NUM_SIZE_CLASSES; ++i) {
-            total += buckets_[i].size() * get_class_size(i);
+        for (const auto& bucket : buckets_) {
+            for (void* ptr : bucket) {
+                auto it = buffer_sizes_.find(ptr);
+                if (it != buffer_sizes_.end()) {
+                    total += it->second;
+                }
+            }
         }
         return total;
     }

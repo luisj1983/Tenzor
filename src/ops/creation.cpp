@@ -802,6 +802,22 @@ auto linspace(double start, double end, int64_t steps, DType dtype, Device devic
             if (steps > 1) ptr[steps - 1] = static_cast<int64_t>(end);
             break;
         }
+        case DType::Complex64: {
+            auto* ptr = static_cast<std::complex<float>*>(data);
+            for (int64_t i = 0; i < steps; ++i) {
+                ptr[i] = std::complex<float>(static_cast<float>(start + i * step_size), 0.0f);
+            }
+            if (steps > 1) ptr[steps - 1] = std::complex<float>(static_cast<float>(end), 0.0f);
+            break;
+        }
+        case DType::Complex128: {
+            auto* ptr = static_cast<std::complex<double>*>(data);
+            for (int64_t i = 0; i < steps; ++i) {
+                ptr[i] = std::complex<double>(start + i * step_size, 0.0);
+            }
+            if (steps > 1) ptr[steps - 1] = std::complex<double>(end, 0.0);
+            break;
+        }
         default:
             throw std::runtime_error("Unsupported dtype for linspace()");
     }
@@ -886,6 +902,42 @@ auto eye(int64_t n, std::optional<int64_t> m, DType dtype, Device device) -> Ten
             for (int64_t i = 0; i < min_dim; ++i) {
                 ptr[i * cols + i] = 1;
             }
+            break;
+        }
+        case DType::Int16: {
+            int16_t* ptr = static_cast<int16_t*>(data);
+            for (int64_t i = 0; i < min_dim; ++i) ptr[i * cols + i] = 1;
+            break;
+        }
+        case DType::UInt16: {
+            uint16_t* ptr = static_cast<uint16_t*>(data);
+            for (int64_t i = 0; i < min_dim; ++i) ptr[i * cols + i] = 1;
+            break;
+        }
+        case DType::UInt32: {
+            uint32_t* ptr = static_cast<uint32_t*>(data);
+            for (int64_t i = 0; i < min_dim; ++i) ptr[i * cols + i] = 1;
+            break;
+        }
+        case DType::UInt64: {
+            uint64_t* ptr = static_cast<uint64_t*>(data);
+            for (int64_t i = 0; i < min_dim; ++i) ptr[i * cols + i] = 1;
+            break;
+        }
+        case DType::BFloat16: {
+            BFloat16* ptr = static_cast<BFloat16*>(data);
+            BFloat16 one(1.0f);
+            for (int64_t i = 0; i < min_dim; ++i) ptr[i * cols + i] = one;
+            break;
+        }
+        case DType::Complex64: {
+            auto* ptr = static_cast<std::complex<float>*>(data);
+            for (int64_t i = 0; i < min_dim; ++i) ptr[i * cols + i] = std::complex<float>(1.0f, 0.0f);
+            break;
+        }
+        case DType::Complex128: {
+            auto* ptr = static_cast<std::complex<double>*>(data);
+            for (int64_t i = 0; i < min_dim; ++i) ptr[i * cols + i] = std::complex<double>(1.0, 0.0);
             break;
         }
         default:

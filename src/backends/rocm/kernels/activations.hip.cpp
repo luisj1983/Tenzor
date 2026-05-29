@@ -290,30 +290,23 @@ extern "C" {
 // GELU Activation (Gaussian Error Linear Unit)
 // ============================================================================
 
-// GELU: x * 0.5 * (1 + tanh(sqrt(2/pi) * (x + 0.044715 * x^3)))
-// Approximation commonly used in transformers
+// GELU: exact erf form 0.5 * x * (1 + erf(x / sqrt(2))) — matches PyTorch's
+// default (approximate='none') and the CPU backend.
 template<typename T>
 __device__ __forceinline__ T gelu_forward_impl(T x) {
-    const T sqrt_2_over_pi = T(0.7978845608028654); // sqrt(2/pi)
-    const T coeff = T(0.044715);
-    T x_cubed = x * x * x;
-    T inner = sqrt_2_over_pi * (x + coeff * x_cubed);
-    return T(0.5) * x * (T(1) + tanh(inner));
+    const T inv_sqrt2 = T(0.70710678118654752);
+    return T(0.5) * x * (T(1) + erf(x * inv_sqrt2));
 }
 
-// GELU backward derivative
+// GELU backward derivative (exact):
+//   gelu'(x) = 0.5*(1 + erf(x/sqrt(2))) + x * (1/sqrt(2*pi)) * exp(-x^2/2)
 template<typename T>
 __device__ __forceinline__ T gelu_backward_impl(T x) {
-    const T sqrt_2_over_pi = T(0.7978845608028654);
-    const T coeff = T(0.044715);
-    T x_squared = x * x;
-    T x_cubed = x_squared * x;
-    T inner = sqrt_2_over_pi * (x + coeff * x_cubed);
-    T tanh_inner = tanh(inner);
-    T sech_inner_squared = T(1) - tanh_inner * tanh_inner;
-
-    T d_inner_dx = sqrt_2_over_pi * (T(1) + T(3) * coeff * x_squared);
-    return T(0.5) * (T(1) + tanh_inner) + T(0.5) * x * sech_inner_squared * d_inner_dx;
+    const T inv_sqrt2 = T(0.70710678118654752);
+    const T pdf_coeff = T(0.39894228040143268);  // 1/sqrt(2*pi)
+    T cdf = T(0.5) * (T(1) + erf(x * inv_sqrt2));
+    T pdf = pdf_coeff * exp(T(-0.5) * x * x);
+    return cdf + x * pdf;
 }
 
 template<typename T>

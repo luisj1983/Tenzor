@@ -129,6 +129,20 @@ using SoftmaxPrimitiveCache = OneDNNPrimitiveCache<SoftmaxCacheKey, SoftmaxCache
 
 static thread_local SoftmaxPrimitiveCache g_softmax_cache;
 
+// Register thread-local clear-callbacks so clear_dnnl_cache() actually reclaims
+// these primitive caches (audit C1 — previously only conv2d/batchnorm did).
+namespace {
+void clear_local_eltwise_cache() { g_eltwise_cache.clear(); }
+void clear_local_softmax_cache() { g_softmax_cache.clear(); }
+struct ActivationsCacheClearRegistrar {
+    ActivationsCacheClearRegistrar() {
+        ::tenzor::cpu::register_dnnl_cache_clear_callback(&clear_local_eltwise_cache);
+        ::tenzor::cpu::register_dnnl_cache_clear_callback(&clear_local_softmax_cache);
+    }
+};
+static ActivationsCacheClearRegistrar g_activations_cache_clear_registrar;
+}
+
 // Helper: Execute oneDNN eltwise forward operation with caching
 // Returns true if successful, false if should fall back to SIMD
 static bool onednn_eltwise_forward(
@@ -843,113 +857,57 @@ auto tanh_backward_kernel(const Tensor& grad_output, const Tensor& input) -> Ten
 auto gelu_kernel(const Tensor& input) -> Tensor {
     Tensor output(std::vector<int64_t>(input.shape().begin(), input.shape().end()), input.dtype(), input.device());
 
+    // Exact GELU: 0.5 * x * (1 + erf(x / sqrt(2))) — matches PyTorch's default
+    // (approximate='none'). The previous tanh approximation is ~1e-3 off and
+    // diverged between dtypes; erf is exact and consistent across all dtypes.
+    constexpr double INV_SQRT2_D = 0.7071067811865475244;
+    constexpr float  INV_SQRT2_F = 0.70710678f;
+
     if (input.dtype() == DType::Float32) {
         const float* in_data = input.data<float>();
         float* out_data = output.data<float>();
         size_t n = input.numel();
 
 #ifdef TENZOR_USE_ONEDNN
-        // Try oneDNN for large tensors (uses tanh approximation, same as our SIMD)
-        if (onednn_eltwise_forward(in_data, out_data, n, dnnl::algorithm::eltwise_gelu_tanh)) {
+        // oneDNN exact-erf GELU for large tensors (matches the scalar path).
+        if (onednn_eltwise_forward(in_data, out_data, n, dnnl::algorithm::eltwise_gelu_erf)) {
             return output;
         }
 #endif
-        // Fall back to SIMD implementation with OpenMP for large tensors
-        if (n >= ACTIVATION_OMP_THRESHOLD) {
-#ifdef TENZOR_HAS_AVX512
-            #pragma omp parallel
-            {
-                int tid = omp_get_thread_num();
-                int nthreads = omp_get_num_threads();
-                size_t chunk_size = (n + nthreads - 1) / nthreads;
-                size_t start = tid * chunk_size;
-                size_t end = std::min(start + chunk_size, n);
-                if (start < end) {
-                    fast_math::gelu_batch_avx512(in_data + start, out_data + start, end - start);
-                }
-            }
-#elif defined(TENZOR_HAS_AVX2)
-            #pragma omp parallel
-            {
-                int tid = omp_get_thread_num();
-                int nthreads = omp_get_num_threads();
-                size_t chunk_size = (n + nthreads - 1) / nthreads;
-                size_t start = tid * chunk_size;
-                size_t end = std::min(start + chunk_size, n);
-                if (start < end) {
-                    fast_math::gelu_batch_avx2(in_data + start, out_data + start, end - start);
-                }
-            }
-#else
-            constexpr float sqrt_2_over_pi = 0.7978845608f;
-            constexpr float coeff = 0.044715f;
-            #pragma omp parallel for schedule(static)
-            for (size_t i = 0; i < n; ++i) {
-                float x = in_data[i];
-                float x3 = x * x * x;
-                float inner = sqrt_2_over_pi * (x + coeff * x3);
-                out_data[i] = 0.5f * x * (1.0f + std::tanh(inner));
-            }
-#endif
-        } else {
-            // Small tensor: single-threaded SIMD
-#ifdef TENZOR_HAS_AVX512
-            fast_math::gelu_batch_avx512(in_data, out_data, n);
-#elif defined(TENZOR_HAS_AVX2)
-            fast_math::gelu_batch_avx2(in_data, out_data, n);
-#else
-            constexpr float sqrt_2_over_pi = 0.7978845608f;
-            constexpr float coeff = 0.044715f;
-            for (size_t i = 0; i < n; ++i) {
-                float x = in_data[i];
-                float x3 = x * x * x;
-                float inner = sqrt_2_over_pi * (x + coeff * x3);
-                out_data[i] = 0.5f * x * (1.0f + std::tanh(inner));
-            }
-#endif
+        #pragma omp parallel for schedule(static) if(n > ACTIVATION_OMP_THRESHOLD)
+        for (size_t i = 0; i < n; ++i) {
+            float x = in_data[i];
+            out_data[i] = 0.5f * x * (1.0f + std::erf(x * INV_SQRT2_F));
         }
     } else if (input.dtype() == DType::Float64) {
         const double* in_data = input.data<double>();
         double* out_data = output.data<double>();
         size_t n = input.numel();
 
-        // Double precision uses tanh approximation (faster than erf)
-        constexpr double sqrt_2_over_pi = 0.7978845608028654;
-        constexpr double coeff = 0.044715;
+        #pragma omp parallel for schedule(static) if(n > ACTIVATION_OMP_THRESHOLD)
         for (size_t i = 0; i < n; ++i) {
             double x = in_data[i];
-            double x3 = x * x * x;
-            double inner = sqrt_2_over_pi * (x + coeff * x3);
-            out_data[i] = 0.5 * x * (1.0 + std::tanh(inner));
+            out_data[i] = 0.5 * x * (1.0 + std::erf(x * INV_SQRT2_D));
         }
     } else if (input.dtype() == DType::Float16) {
         const Float16* in_data = input.data<Float16>();
         Float16* out_data = output.data<Float16>();
         size_t n = input.numel();
 
-        // Convert to float, compute, convert back
-        constexpr float sqrt_2_over_pi = 0.7978845608f;
-        constexpr float coeff = 0.044715f;
         #pragma omp parallel for schedule(static) if(n > ACTIVATION_OMP_THRESHOLD)
         for (size_t i = 0; i < n; ++i) {
             float x = static_cast<float>(in_data[i]);
-            float x3 = x * x * x;
-            float inner = sqrt_2_over_pi * (x + coeff * x3);
-            out_data[i] = Float16(0.5f * x * (1.0f + std::tanh(inner)));
+            out_data[i] = Float16(0.5f * x * (1.0f + std::erf(x * INV_SQRT2_F)));
         }
     } else if (input.dtype() == DType::BFloat16) {
         const BFloat16* in_data = input.data<BFloat16>();
         BFloat16* out_data = output.data<BFloat16>();
         size_t n = input.numel();
 
-        constexpr float sqrt_2_over_pi = 0.7978845608f;
-        constexpr float coeff = 0.044715f;
         #pragma omp parallel for schedule(static) if(n > ACTIVATION_OMP_THRESHOLD)
         for (size_t i = 0; i < n; ++i) {
             float x = static_cast<float>(in_data[i]);
-            float x3 = x * x * x;
-            float inner = sqrt_2_over_pi * (x + coeff * x3);
-            out_data[i] = BFloat16(0.5f * x * (1.0f + std::tanh(inner)));
+            out_data[i] = BFloat16(0.5f * x * (1.0f + std::erf(x * INV_SQRT2_F)));
         }
     } else {
         throw std::runtime_error("GELU only supports Float32/Float64/Float16/BFloat16");
@@ -965,77 +923,65 @@ auto gelu_kernel(const Tensor& input) -> Tensor {
 auto gelu_backward_kernel(const Tensor& grad_output, const Tensor& input) -> Tensor {
     auto grad_input = zeros_like(input);
 
+    // Exact GELU derivative (matches the erf forward):
+    //   gelu(x)  = 0.5 * x * (1 + erf(x / sqrt(2)))
+    //   gelu'(x) = 0.5 * (1 + erf(x / sqrt(2))) + x * (1/sqrt(2*pi)) * exp(-x^2/2)
+    constexpr double INV_SQRT2_D   = 0.7071067811865475244;
+    constexpr double PDF_COEF_D    = 0.3989422804014326779;  // 1/sqrt(2*pi)
+    constexpr float  INV_SQRT2_F   = 0.70710678f;
+    constexpr float  PDF_COEF_F    = 0.39894228f;
+
     if (input.dtype() == DType::Float32) {
         const float* grad_out_data = grad_output.data<float>();
         const float* in_data = input.data<float>();
         float* grad_in_data = grad_input.data<float>();
         size_t n = input.numel();
-        constexpr float sqrt_2_over_pi = 0.7978845608f;
-        constexpr float coeff = 0.044715f;
 
         #pragma omp parallel for schedule(static) if(n > ACTIVATION_OMP_THRESHOLD)
         for (size_t i = 0; i < n; ++i) {
             float x = in_data[i];
-            float x2 = x * x;
-            float u = sqrt_2_over_pi * (x + coeff * x * x2);
-            float tanh_u = std::tanh(u);
-            float du_dx = sqrt_2_over_pi * (1.0f + 3.0f * coeff * x2);
-            float grad = 0.5f * (1.0f + tanh_u) + 0.5f * x * (1.0f - tanh_u * tanh_u) * du_dx;
-            grad_in_data[i] = grad_out_data[i] * grad;
+            float cdf = 0.5f * (1.0f + std::erf(x * INV_SQRT2_F));
+            float pdf = PDF_COEF_F * std::exp(-0.5f * x * x);
+            grad_in_data[i] = grad_out_data[i] * (cdf + x * pdf);
         }
     } else if (input.dtype() == DType::Float64) {
         const double* grad_out_data = grad_output.data<double>();
         const double* in_data = input.data<double>();
         double* grad_in_data = grad_input.data<double>();
         size_t n = input.numel();
-        constexpr double sqrt_2_over_pi = 0.7978845608028654;
-        constexpr double coeff = 0.044715;
 
         #pragma omp parallel for schedule(static) if(n > ACTIVATION_OMP_THRESHOLD)
         for (size_t i = 0; i < n; ++i) {
             double x = in_data[i];
-            double x2 = x * x;
-            double u = sqrt_2_over_pi * (x + coeff * x * x2);
-            double tanh_u = std::tanh(u);
-            double du_dx = sqrt_2_over_pi * (1.0 + 3.0 * coeff * x2);
-            double grad = 0.5 * (1.0 + tanh_u) + 0.5 * x * (1.0 - tanh_u * tanh_u) * du_dx;
-            grad_in_data[i] = grad_out_data[i] * grad;
+            double cdf = 0.5 * (1.0 + std::erf(x * INV_SQRT2_D));
+            double pdf = PDF_COEF_D * std::exp(-0.5 * x * x);
+            grad_in_data[i] = grad_out_data[i] * (cdf + x * pdf);
         }
     } else if (input.dtype() == DType::Float16) {
         const Float16* grad_out_data = grad_output.data<Float16>();
         const Float16* in_data = input.data<Float16>();
         Float16* grad_in_data = grad_input.data<Float16>();
         size_t n = input.numel();
-        constexpr float sqrt_2_over_pi = 0.7978845608f;
-        constexpr float coeff = 0.044715f;
 
         #pragma omp parallel for schedule(static) if(n > ACTIVATION_OMP_THRESHOLD)
         for (size_t i = 0; i < n; ++i) {
             float x = static_cast<float>(in_data[i]);
-            float x2 = x * x;
-            float u = sqrt_2_over_pi * (x + coeff * x * x2);
-            float tanh_u = std::tanh(u);
-            float du_dx = sqrt_2_over_pi * (1.0f + 3.0f * coeff * x2);
-            float grad = 0.5f * (1.0f + tanh_u) + 0.5f * x * (1.0f - tanh_u * tanh_u) * du_dx;
-            grad_in_data[i] = Float16(static_cast<float>(grad_out_data[i]) * grad);
+            float cdf = 0.5f * (1.0f + std::erf(x * INV_SQRT2_F));
+            float pdf = PDF_COEF_F * std::exp(-0.5f * x * x);
+            grad_in_data[i] = Float16(static_cast<float>(grad_out_data[i]) * (cdf + x * pdf));
         }
     } else if (input.dtype() == DType::BFloat16) {
         const BFloat16* grad_out_data = grad_output.data<BFloat16>();
         const BFloat16* in_data = input.data<BFloat16>();
         BFloat16* grad_in_data = grad_input.data<BFloat16>();
         size_t n = input.numel();
-        constexpr float sqrt_2_over_pi = 0.7978845608f;
-        constexpr float coeff = 0.044715f;
 
         #pragma omp parallel for schedule(static) if(n > ACTIVATION_OMP_THRESHOLD)
         for (size_t i = 0; i < n; ++i) {
             float x = static_cast<float>(in_data[i]);
-            float x2 = x * x;
-            float u = sqrt_2_over_pi * (x + coeff * x * x2);
-            float tanh_u = std::tanh(u);
-            float du_dx = sqrt_2_over_pi * (1.0f + 3.0f * coeff * x2);
-            float grad = 0.5f * (1.0f + tanh_u) + 0.5f * x * (1.0f - tanh_u * tanh_u) * du_dx;
-            grad_in_data[i] = BFloat16(static_cast<float>(grad_out_data[i]) * grad);
+            float cdf = 0.5f * (1.0f + std::erf(x * INV_SQRT2_F));
+            float pdf = PDF_COEF_F * std::exp(-0.5f * x * x);
+            grad_in_data[i] = BFloat16(static_cast<float>(grad_out_data[i]) * (cdf + x * pdf));
         }
     } else {
         throw std::runtime_error("GELU backward only supports Float32/Float64/Float16/BFloat16");
@@ -2911,8 +2857,10 @@ auto leaky_relu_inplace_kernel(Tensor& input, double alpha) -> void {
 }
 
 auto gelu_inplace_kernel(Tensor& input) -> void {
-    constexpr float sqrt_2_over_pi = 0.7978845608f;
-    constexpr float coeff = 0.044715f;
+    // Exact GELU: 0.5 * x * (1 + erf(x / sqrt(2))) — matches PyTorch default
+    // and the (non-inplace) gelu_kernel.
+    constexpr double INV_SQRT2_D = 0.7071067811865475244;
+    constexpr float  INV_SQRT2_F = 0.70710678f;
 
     if (input.dtype() == DType::Float32) {
         float* data = input.data<float>();
@@ -2920,21 +2868,15 @@ auto gelu_inplace_kernel(Tensor& input) -> void {
         #pragma omp parallel for schedule(static) if(n > ACTIVATION_OMP_THRESHOLD)
         for (size_t i = 0; i < n; ++i) {
             float x = data[i];
-            float x_cubed = x * x * x;
-            float inner = sqrt_2_over_pi * (x + coeff * x_cubed);
-            data[i] = 0.5f * x * (1.0f + std::tanh(inner));
+            data[i] = 0.5f * x * (1.0f + std::erf(x * INV_SQRT2_F));
         }
     } else if (input.dtype() == DType::Float64) {
         double* data = input.data<double>();
         size_t n = input.numel();
-        constexpr double sqrt_2_over_pi_d = 0.7978845608028654;
-        constexpr double coeff_d = 0.044715;
         #pragma omp parallel for schedule(static) if(n > ACTIVATION_OMP_THRESHOLD)
         for (size_t i = 0; i < n; ++i) {
             double x = data[i];
-            double x_cubed = x * x * x;
-            double inner = sqrt_2_over_pi_d * (x + coeff_d * x_cubed);
-            data[i] = 0.5 * x * (1.0 + std::tanh(inner));
+            data[i] = 0.5 * x * (1.0 + std::erf(x * INV_SQRT2_D));
         }
     } else if (input.dtype() == DType::Float16) {
         Float16* data = input.data<Float16>();
@@ -2942,9 +2884,7 @@ auto gelu_inplace_kernel(Tensor& input) -> void {
         #pragma omp parallel for schedule(static) if(n > ACTIVATION_OMP_THRESHOLD)
         for (size_t i = 0; i < n; ++i) {
             float x = static_cast<float>(data[i]);
-            float x_cubed = x * x * x;
-            float inner = sqrt_2_over_pi * (x + coeff * x_cubed);
-            data[i] = Float16(0.5f * x * (1.0f + std::tanh(inner)));
+            data[i] = Float16(0.5f * x * (1.0f + std::erf(x * INV_SQRT2_F)));
         }
     } else if (input.dtype() == DType::BFloat16) {
         BFloat16* data = input.data<BFloat16>();
@@ -2952,9 +2892,7 @@ auto gelu_inplace_kernel(Tensor& input) -> void {
         #pragma omp parallel for schedule(static) if(n > ACTIVATION_OMP_THRESHOLD)
         for (size_t i = 0; i < n; ++i) {
             float x = static_cast<float>(data[i]);
-            float x_cubed = x * x * x;
-            float inner = sqrt_2_over_pi * (x + coeff * x_cubed);
-            data[i] = BFloat16(0.5f * x * (1.0f + std::tanh(inner)));
+            data[i] = BFloat16(0.5f * x * (1.0f + std::erf(x * INV_SQRT2_F)));
         }
     } else {
         throw std::runtime_error("gelu_inplace: Unsupported dtype");

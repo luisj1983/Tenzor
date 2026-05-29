@@ -143,6 +143,17 @@ static constexpr size_t LAYERNORM_CACHE_SIZE = 32;
 using LayerNormPrimitiveCache = OneDNNPrimitiveCache<LayerNormCacheKey, LayerNormCachedPrimitive, LayerNormCacheKeyHash, LAYERNORM_CACHE_SIZE>;
 
 static thread_local LayerNormPrimitiveCache g_layernorm_cache;
+
+// audit C1: register a thread-local clear-callback for clear_dnnl_cache().
+namespace {
+void clear_local_layernorm_cache() { g_layernorm_cache.clear(); }
+struct LayerNormCacheClearRegistrar {
+    LayerNormCacheClearRegistrar() {
+        ::tenzor::cpu::register_dnnl_cache_clear_callback(&clear_local_layernorm_cache);
+    }
+};
+static LayerNormCacheClearRegistrar g_layernorm_cache_clear_registrar;
+}
 #endif
 
 #ifdef TENZOR_USE_ONEDNN

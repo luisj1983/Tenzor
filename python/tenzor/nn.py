@@ -560,14 +560,39 @@ class Sequential(_CppSequential):
 # no runtime counterpart, so it appeared as an EXTRA-in-stub drift. Provide a
 # Thin Python alias of Module so .pyi declarations like `class MSELoss(Loss)`
 # resolve at static-check time.
-class Loss(Module):
-    """Base class marker for loss-function modules (static-typing only).
+# Concrete loss classes are bound from C++ and inherit the C++ ``Module`` (not
+# this Python ``Loss`` alias).  Collect them by their ``*Loss`` naming so that
+# ``isinstance(x, nn.Loss)`` works at runtime, matching the ``class MSELoss(Loss)``
+# declarations in the type stubs.
+_LOSS_TYPES = tuple(
+    obj for name in dir(_core.nn)
+    if name.endswith("Loss")
+    and isinstance(obj := getattr(_core.nn, name, None), type)
+)
 
-    NOTE: concrete loss classes (``MSELoss``, ``CrossEntropyLoss``, ...) are
-    bound from C++ and inherit the C++ ``Module``, NOT this Python alias, so
-    ``isinstance(MSELoss(...), Loss)`` is ``False`` at runtime. This class
-    exists purely so the type stubs' ``class MSELoss(Loss)`` declarations
-    resolve for static checkers; do not rely on it for runtime isinstance.
+
+class _LossMeta(type(Module)):
+    """Metaclass enabling ``isinstance(<C++ loss>, Loss)``.
+
+    Concrete losses inherit the C++ ``Module`` rather than this Python ``Loss``
+    alias, so a plain MRO check would return ``False``.  We additionally treat
+    any C++ ``*Loss`` instance (and any normal subclass of ``Loss``) as a
+    ``Loss``.  Derives from ``type(Module)`` to compose with pybind11's
+    metaclass without conflict.
+    """
+
+    def __instancecheck__(cls, instance):
+        return isinstance(instance, _LOSS_TYPES) or super().__instancecheck__(instance)
+
+
+class Loss(Module, metaclass=_LossMeta):
+    """Base class for loss-function modules.
+
+    Concrete loss classes (``MSELoss``, ``CrossEntropyLoss``, ...) are bound
+    from C++ and inherit the C++ ``Module``; ``Loss`` overrides
+    ``__instancecheck__`` (via :class:`_LossMeta`) so that
+    ``isinstance(MSELoss(...), nn.Loss)`` is ``True`` at runtime, matching the
+    type stubs' ``class MSELoss(Loss)`` declarations.
     """
 
     reduction: str

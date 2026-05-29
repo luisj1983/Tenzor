@@ -666,66 +666,31 @@ auto fused_gelu_kernel(const Tensor& input) -> Tensor {
     std::vector<int64_t> shape_vec(input.shape().begin(), input.shape().end());
     Tensor result = zeros(shape_vec, input.dtype(), input.device());
 
-    constexpr float sqrt_2_over_pi = 0.7978845608f;  // sqrt(2/pi)
-    constexpr float coeff = 0.044715f;
+    // Exact GELU: 0.5 * x * (1 + erf(x / sqrt(2))) — matches PyTorch default and
+    // the canonical gelu_kernel, so the fused inference path agrees with the
+    // (autograd) training path.
+    constexpr float  INV_SQRT2_F = 0.70710678f;
+    constexpr double INV_SQRT2_D = 0.7071067811865475244;
 
     if (input.dtype() == DType::Float32) {
         const float* in_data = input.data<float>();
         float* out_data = result.data<float>();
         size_t n = static_cast<size_t>(input.numel());
 
-#if defined(TENZOR_ATTN_AVX512)
-        size_t vec_end = n - (n % 16);
-        #pragma omp parallel for if(n > ::tenzor::OmpThresholds::simple())
-        for (size_t i = 0; i < vec_end; i += 16) {
-            __m512 x = _mm512_loadu_ps(in_data + i);
-            _mm512_storeu_ps(out_data + i, fast_math::gelu_avx512(x));
-        }
-        for (size_t i = vec_end; i < n; ++i) {
-            float x = in_data[i];
-            float x_cubed = x * x * x;
-            float inner = sqrt_2_over_pi * (x + coeff * x_cubed);
-            out_data[i] = 0.5f * x * (1.0f + std::tanh(inner));
-        }
-#elif defined(TENZOR_ATTN_AVX2)
-        size_t vec_end = n - (n % 8);
-        #pragma omp parallel for if(n > ::tenzor::OmpThresholds::simple())
-        for (size_t i = 0; i < vec_end; i += 8) {
-            __m256 x = _mm256_loadu_ps(in_data + i);
-            _mm256_storeu_ps(out_data + i, fast_math::gelu_avx2(x));
-        }
-        for (size_t i = vec_end; i < n; ++i) {
-            float x = in_data[i];
-            float x_cubed = x * x * x;
-            float inner = sqrt_2_over_pi * (x + coeff * x_cubed);
-            out_data[i] = 0.5f * x * (1.0f + std::tanh(inner));
-        }
-#else
         #pragma omp parallel for if(n > ::tenzor::OmpThresholds::simple())
         for (size_t i = 0; i < n; ++i) {
             float x = in_data[i];
-            float x_cubed = x * x * x;
-            float inner = sqrt_2_over_pi * (x + coeff * x_cubed);
-            float tanh_val = std::tanh(inner);
-            out_data[i] = 0.5f * x * (1.0f + tanh_val);
+            out_data[i] = 0.5f * x * (1.0f + std::erf(x * INV_SQRT2_F));
         }
-#endif
     } else if (input.dtype() == DType::Float64) {
         const double* in_data = input.data<double>();
         double* out_data = result.data<double>();
         size_t n = static_cast<size_t>(input.numel());
 
-        // Full double-precision constants; the float `sqrt_2_over_pi`/`coeff`
-        // above carry only ~7 digits and would truncate the f64 result.
-        constexpr double sqrt_2_over_pi_d = 0.7978845608028654;
-        constexpr double coeff_d = 0.044715;
         #pragma omp parallel for if(n > ::tenzor::OmpThresholds::simple())
         for (size_t i = 0; i < n; ++i) {
             double x = in_data[i];
-            double x_cubed = x * x * x;
-            double inner = sqrt_2_over_pi_d * (x + coeff_d * x_cubed);
-            double tanh_val = std::tanh(inner);
-            out_data[i] = 0.5 * x * (1.0 + tanh_val);
+            out_data[i] = 0.5 * x * (1.0 + std::erf(x * INV_SQRT2_D));
         }
     } else if (input.dtype() == DType::Float16) {
         const Float16* in_data = input.data<Float16>();
@@ -735,10 +700,7 @@ auto fused_gelu_kernel(const Tensor& input) -> Tensor {
         #pragma omp parallel for if(n > ::tenzor::OmpThresholds::simple())
         for (size_t i = 0; i < n; ++i) {
             float x = static_cast<float>(in_data[i]);
-            float x_cubed = x * x * x;
-            float inner = sqrt_2_over_pi * (x + coeff * x_cubed);
-            float tanh_val = std::tanh(inner);
-            out_data[i] = Float16(0.5f * x * (1.0f + tanh_val));
+            out_data[i] = Float16(0.5f * x * (1.0f + std::erf(x * INV_SQRT2_F)));
         }
     } else if (input.dtype() == DType::BFloat16) {
         const BFloat16* in_data = input.data<BFloat16>();
@@ -748,10 +710,7 @@ auto fused_gelu_kernel(const Tensor& input) -> Tensor {
         #pragma omp parallel for if(n > ::tenzor::OmpThresholds::simple())
         for (size_t i = 0; i < n; ++i) {
             float x = static_cast<float>(in_data[i]);
-            float x_cubed = x * x * x;
-            float inner = sqrt_2_over_pi * (x + coeff * x_cubed);
-            float tanh_val = std::tanh(inner);
-            out_data[i] = BFloat16(0.5f * x * (1.0f + tanh_val));
+            out_data[i] = BFloat16(0.5f * x * (1.0f + std::erf(x * INV_SQRT2_F)));
         }
     } else {
         throw std::runtime_error("fused_gelu: Only Float32/Float64/Float16/BFloat16 supported");
@@ -766,6 +725,50 @@ auto fused_gelu_kernel(const Tensor& input) -> Tensor {
  * Single-pass computation of mean, variance, and normalization.
  * Returns {output, mean, inv_std} to match CUDA backend for backward pass support.
  */
+// Double-precision reductions for LayerNorm stats (widen f32 lanes to f64).
+// Mirrors the hardened accumulation in nn_kernels.cpp's layer_norm path so the
+// fused kernel does not catastrophically cancel for large-magnitude rows.
+static double fused_ln_sum_f64(const float* p, int64_t n) {
+    double total = 0.0;
+    int64_t i = 0;
+#ifdef TENZOR_ATTN_AVX2
+    __m256d acc = _mm256_setzero_pd();
+    for (; i + 4 <= n; i += 4) {
+        acc = _mm256_add_pd(acc, _mm256_cvtps_pd(_mm_loadu_ps(p + i)));
+    }
+    __m128d hi = _mm256_extractf128_pd(acc, 1);
+    __m128d lo = _mm256_castpd256_pd128(acc);
+    __m128d s = _mm_add_pd(lo, hi);
+    s = _mm_hadd_pd(s, s);
+    total = _mm_cvtsd_f64(s);
+#endif
+    for (; i < n; ++i) total += static_cast<double>(p[i]);
+    return total;
+}
+
+static double fused_ln_sumsq_f64(const float* p, int64_t n, double mean) {
+    double total = 0.0;
+    int64_t i = 0;
+#ifdef TENZOR_ATTN_AVX2
+    const __m256d vmean = _mm256_set1_pd(mean);
+    __m256d acc = _mm256_setzero_pd();
+    for (; i + 4 <= n; i += 4) {
+        __m256d d = _mm256_sub_pd(_mm256_cvtps_pd(_mm_loadu_ps(p + i)), vmean);
+        acc = _mm256_fmadd_pd(d, d, acc);
+    }
+    __m128d hi = _mm256_extractf128_pd(acc, 1);
+    __m128d lo = _mm256_castpd256_pd128(acc);
+    __m128d s = _mm_add_pd(lo, hi);
+    s = _mm_hadd_pd(s, s);
+    total = _mm_cvtsd_f64(s);
+#endif
+    for (; i < n; ++i) {
+        const double d = static_cast<double>(p[i]) - mean;
+        total += d * d;
+    }
+    return total;
+}
+
 auto fused_layer_norm_kernel(
     const Tensor& input,
     const std::vector<int64_t>& normalized_shape,
@@ -783,9 +786,16 @@ auto fused_layer_norm_kernel(
 
     std::vector<int64_t> shape_vec(input.shape().begin(), input.shape().end());
     Tensor result = zeros(shape_vec, input.dtype(), input.device());
-    // Store per-batch-element mean and inv_std for backward pass
-    Tensor mean_out({batch_size}, input.dtype(), input.device());
-    Tensor inv_std_out({batch_size}, input.dtype(), input.device());
+
+    // Per-row mean and inv_std for the backward pass.  These must NOT be stored
+    // in a half dtype: the backward consumes them and half-precision stats
+    // degrade the gradient.  Use full Float64 for Float64 input (the fused
+    // backward reads them directly) and Float32 otherwise.  Stats are always
+    // accumulated in double to avoid catastrophic cancellation.
+    const DType stats_dtype =
+        (input.dtype() == DType::Float64) ? DType::Float64 : DType::Float32;
+    Tensor mean_out({batch_size}, stats_dtype, input.device());
+    Tensor inv_std_out({batch_size}, stats_dtype, input.device());
 
     if (input.dtype() == DType::Float32) {
         const float* in_data = input.data<float>();
@@ -800,67 +810,14 @@ auto fused_layer_norm_kernel(
             const float* batch_in = in_data + b * norm_size;
             float* batch_out = out_data + b * norm_size;
 
-            // Compute mean with AVX2
-            float mean = 0.0f;
-#ifdef TENZOR_ATTN_AVX2
-            {
-                __m256 vsum = _mm256_setzero_ps();
-                int64_t i = 0;
-                for (; i + 8 <= norm_size; i += 8) {
-                    __m256 v = _mm256_loadu_ps(batch_in + i);
-                    vsum = _mm256_add_ps(vsum, v);
-                }
-                // Horizontal sum
-                __m128 hi = _mm256_extractf128_ps(vsum, 1);
-                __m128 lo = _mm256_castps256_ps128(vsum);
-                __m128 sum4 = _mm_add_ps(lo, hi);
-                sum4 = _mm_hadd_ps(sum4, sum4);
-                sum4 = _mm_hadd_ps(sum4, sum4);
-                mean = _mm_cvtss_f32(sum4);
-                // Scalar remainder
-                for (; i < norm_size; ++i) {
-                    mean += batch_in[i];
-                }
-            }
-#else
-            for (int64_t i = 0; i < norm_size; ++i) {
-                mean += batch_in[i];
-            }
-#endif
-            mean /= norm_size;
+            const double mean_d =
+                fused_ln_sum_f64(batch_in, norm_size) / static_cast<double>(norm_size);
+            const double var_d =
+                fused_ln_sumsq_f64(batch_in, norm_size, mean_d) / static_cast<double>(norm_size);
+            const double inv_std_d = 1.0 / std::sqrt(var_d + static_cast<double>(eps));
 
-            // Compute variance with AVX2
-            float variance = 0.0f;
-#ifdef TENZOR_ATTN_AVX2
-            {
-                __m256 vmean = _mm256_set1_ps(mean);
-                __m256 vvar = _mm256_setzero_ps();
-                int64_t i = 0;
-                for (; i + 8 <= norm_size; i += 8) {
-                    __m256 v = _mm256_loadu_ps(batch_in + i);
-                    __m256 diff = _mm256_sub_ps(v, vmean);
-                    vvar = _mm256_fmadd_ps(diff, diff, vvar);
-                }
-                __m128 hi = _mm256_extractf128_ps(vvar, 1);
-                __m128 lo = _mm256_castps256_ps128(vvar);
-                __m128 sum4 = _mm_add_ps(lo, hi);
-                sum4 = _mm_hadd_ps(sum4, sum4);
-                sum4 = _mm_hadd_ps(sum4, sum4);
-                variance = _mm_cvtss_f32(sum4);
-                for (; i < norm_size; ++i) {
-                    float diff = batch_in[i] - mean;
-                    variance += diff * diff;
-                }
-            }
-#else
-            for (int64_t i = 0; i < norm_size; ++i) {
-                float diff = batch_in[i] - mean;
-                variance += diff * diff;
-            }
-#endif
-            variance /= norm_size;
-
-            float inv_std = 1.0f / std::sqrt(variance + eps);
+            const float mean = static_cast<float>(mean_d);
+            const float inv_std = static_cast<float>(inv_std_d);
             mean_data[b] = mean;
             inv_std_data[b] = inv_std;
 
@@ -907,16 +864,16 @@ auto fused_layer_norm_kernel(
             for (int64_t i = 0; i < norm_size; ++i) {
                 mean += batch_in[i];
             }
-            mean /= norm_size;
+            mean /= static_cast<double>(norm_size);
 
             double variance = 0.0;
             for (int64_t i = 0; i < norm_size; ++i) {
                 double diff = batch_in[i] - mean;
                 variance += diff * diff;
             }
-            variance /= norm_size;
+            variance /= static_cast<double>(norm_size);
 
-            double inv_std = 1.0 / std::sqrt(variance + eps);
+            double inv_std = 1.0 / std::sqrt(variance + static_cast<double>(eps));
             mean_data[b] = mean;
             inv_std_data[b] = inv_std;
 
@@ -930,67 +887,73 @@ auto fused_layer_norm_kernel(
         const Float16* weight_data = weight.data<Float16>();
         const Float16* bias_data = bias.data<Float16>();
         Float16* out_data = result.data<Float16>();
-        Float16* mean_data = mean_out.data<Float16>();
-        Float16* inv_std_data = inv_std_out.data<Float16>();
+        float* mean_data = mean_out.data<float>();
+        float* inv_std_data = inv_std_out.data<float>();
 
+        #pragma omp parallel for if(batch_size > 64)
         for (int64_t b = 0; b < batch_size; ++b) {
             const Float16* batch_in = in_data + b * norm_size;
             Float16* batch_out = out_data + b * norm_size;
 
-            float mean = 0.0f;
+            double mean = 0.0;
             for (int64_t i = 0; i < norm_size; ++i) {
-                mean += static_cast<float>(batch_in[i]);
+                mean += static_cast<double>(static_cast<float>(batch_in[i]));
             }
-            mean /= static_cast<float>(norm_size);
+            mean /= static_cast<double>(norm_size);
 
-            float variance = 0.0f;
+            double variance = 0.0;
             for (int64_t i = 0; i < norm_size; ++i) {
-                float diff = static_cast<float>(batch_in[i]) - mean;
+                double diff = static_cast<double>(static_cast<float>(batch_in[i])) - mean;
                 variance += diff * diff;
             }
-            variance /= static_cast<float>(norm_size);
+            variance /= static_cast<double>(norm_size);
 
-            float inv_std = 1.0f / std::sqrt(variance + eps);
-            mean_data[b] = Float16(mean);
-            inv_std_data[b] = Float16(inv_std);
+            double inv_std = 1.0 / std::sqrt(variance + static_cast<double>(eps));
+            mean_data[b] = static_cast<float>(mean);
+            inv_std_data[b] = static_cast<float>(inv_std);
 
             for (int64_t i = 0; i < norm_size; ++i) {
-                float normalized = (static_cast<float>(batch_in[i]) - mean) * inv_std;
-                batch_out[i] = Float16(normalized * static_cast<float>(weight_data[i]) + static_cast<float>(bias_data[i]));
+                double normalized = (static_cast<double>(static_cast<float>(batch_in[i])) - mean) * inv_std;
+                double scaled = normalized * static_cast<double>(static_cast<float>(weight_data[i]))
+                              + static_cast<double>(static_cast<float>(bias_data[i]));
+                batch_out[i] = Float16(static_cast<float>(scaled));
             }
         }
     } else if (input.dtype() == DType::BFloat16) {
         const BFloat16* in_data = input.data<BFloat16>();
-        BFloat16* out_data = result.data<BFloat16>();
         const BFloat16* weight_data = weight.data<BFloat16>();
         const BFloat16* bias_data = bias.data<BFloat16>();
-        BFloat16* mean_data = mean_out.data<BFloat16>();
-        BFloat16* inv_std_data = inv_std_out.data<BFloat16>();
+        BFloat16* out_data = result.data<BFloat16>();
+        float* mean_data = mean_out.data<float>();
+        float* inv_std_data = inv_std_out.data<float>();
 
+        #pragma omp parallel for if(batch_size > 64)
         for (int64_t b = 0; b < batch_size; ++b) {
             const BFloat16* batch_in = in_data + b * norm_size;
             BFloat16* batch_out = out_data + b * norm_size;
 
-            float mean = 0.0f;
+            double mean = 0.0;
             for (int64_t i = 0; i < norm_size; ++i) {
-                mean += static_cast<float>(batch_in[i]);
+                mean += static_cast<double>(static_cast<float>(batch_in[i]));
             }
-            mean /= static_cast<float>(norm_size);
+            mean /= static_cast<double>(norm_size);
 
-            float variance = 0.0f;
+            double variance = 0.0;
             for (int64_t i = 0; i < norm_size; ++i) {
-                float diff = static_cast<float>(batch_in[i]) - mean;
+                double diff = static_cast<double>(static_cast<float>(batch_in[i])) - mean;
                 variance += diff * diff;
             }
-            variance /= static_cast<float>(norm_size);
+            variance /= static_cast<double>(norm_size);
 
-            float inv_std = 1.0f / std::sqrt(variance + eps);
-            mean_data[b] = BFloat16(mean);
-            inv_std_data[b] = BFloat16(inv_std);
+            double inv_std = 1.0 / std::sqrt(variance + static_cast<double>(eps));
+            mean_data[b] = static_cast<float>(mean);
+            inv_std_data[b] = static_cast<float>(inv_std);
 
             for (int64_t i = 0; i < norm_size; ++i) {
-                float normalized = (static_cast<float>(batch_in[i]) - mean) * inv_std;
-                batch_out[i] = BFloat16(normalized * static_cast<float>(weight_data[i]) + static_cast<float>(bias_data[i]));
+                double normalized = (static_cast<double>(static_cast<float>(batch_in[i])) - mean) * inv_std;
+                double scaled = normalized * static_cast<double>(static_cast<float>(weight_data[i]))
+                              + static_cast<double>(static_cast<float>(bias_data[i]));
+                batch_out[i] = BFloat16(static_cast<float>(scaled));
             }
         }
     } else {
@@ -1029,33 +992,12 @@ auto fused_rms_norm_kernel(const Tensor& input, const Tensor& weight, float eps)
             const float* x = in_data + b * norm_size;
             float* y = out_data + b * norm_size;
 
-            // Compute mean(x^2) with AVX2 FMA
-            float sum_sq = 0.0f;
-#ifdef TENZOR_ATTN_AVX2
-            {
-                __m256 vsum = _mm256_setzero_ps();
-                int64_t i = 0;
-                for (; i + 8 <= norm_size; i += 8) {
-                    __m256 v = _mm256_loadu_ps(x + i);
-                    vsum = _mm256_fmadd_ps(v, v, vsum);
-                }
-                __m128 hi = _mm256_extractf128_ps(vsum, 1);
-                __m128 lo = _mm256_castps256_ps128(vsum);
-                __m128 sum4 = _mm_add_ps(lo, hi);
-                sum4 = _mm_hadd_ps(sum4, sum4);
-                sum4 = _mm_hadd_ps(sum4, sum4);
-                sum_sq = _mm_cvtss_f32(sum4);
-                for (; i < norm_size; ++i) {
-                    sum_sq += x[i] * x[i];
-                }
-            }
-#else
-            for (int64_t i = 0; i < norm_size; ++i) {
-                sum_sq += x[i] * x[i];
-            }
-#endif
-            float mean_sq = sum_sq / static_cast<float>(norm_size);
-            float inv_rms = 1.0f / std::sqrt(mean_sq + eps);
+            // Sum of squares accumulated in double (widen f32 lanes) to avoid
+            // mantissa loss in the RMS denominator for long hidden dims.
+            const double sum_sq = fused_ln_sumsq_f64(x, norm_size, 0.0);
+            const double mean_sq = sum_sq / static_cast<double>(norm_size);
+            const float inv_rms =
+                static_cast<float>(1.0 / std::sqrt(mean_sq + static_cast<double>(eps)));
             rrms_data[b] = inv_rms;
 
             // Apply normalization and weight with AVX2

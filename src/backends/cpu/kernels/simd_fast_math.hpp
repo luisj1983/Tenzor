@@ -816,33 +816,14 @@ inline void sigmoid_batch_avx2(const float* input, float* output, size_t n) {
  * @brief Process array with GELU using loop unrolling
  */
 inline void gelu_batch_avx2(const float* input, float* output, size_t n) {
-    size_t i = 0;
-
-    for (; i + 16 <= n; i += 16) {
-        __m256 v0 = _mm256_loadu_ps(input + i);
-        __m256 v1 = _mm256_loadu_ps(input + i + 8);
-
-        __m256 r0 = gelu_avx2(v0);
-        __m256 r1 = gelu_avx2(v1);
-
-        _mm256_storeu_ps(output + i, r0);
-        _mm256_storeu_ps(output + i + 8, r1);
-    }
-
-    for (; i + 8 <= n; i += 8) {
-        __m256 v = _mm256_loadu_ps(input + i);
-        __m256 r = gelu_avx2(v);
-        _mm256_storeu_ps(output + i, r);
-    }
-
-    // Scalar remainder
-    constexpr float sqrt_2_over_pi = 0.7978845608f;
-    constexpr float coeff = 0.044715f;
-    for (; i < n; ++i) {
+    // Exact GELU: 0.5 * x * (1 + erf(x / sqrt(2))) — matches the canonical
+    // gelu_kernel and PyTorch's default (approximate='none').  erf has no AVX2
+    // intrinsic, so this is a scalar loop (the prior tanh approximation was
+    // ~1e-3 off and inconsistent with the op-level GELU).
+    constexpr float inv_sqrt2 = 0.70710678f;
+    for (size_t i = 0; i < n; ++i) {
         float x = input[i];
-        float x3 = x * x * x;
-        float inner = sqrt_2_over_pi * (x + coeff * x3);
-        output[i] = 0.5f * x * (1.0f + std::tanh(inner));
+        output[i] = 0.5f * x * (1.0f + std::erf(x * inv_sqrt2));
     }
 }
 
@@ -1384,37 +1365,14 @@ inline void sigmoid_batch_avx512(const float* input, float* output, size_t n) {
  * @brief Process array with GELU using AVX-512
  */
 inline void gelu_batch_avx512(const float* input, float* output, size_t n) {
-    size_t i = 0;
-
-    for (; i + 32 <= n; i += 32) {
-        __m512 v0 = _mm512_loadu_ps(input + i);
-        __m512 v1 = _mm512_loadu_ps(input + i + 16);
-
-        __m512 r0 = gelu_avx512(v0);
-        __m512 r1 = gelu_avx512(v1);
-
-        _mm512_storeu_ps(output + i, r0);
-        _mm512_storeu_ps(output + i + 16, r1);
-    }
-
-    for (; i + 16 <= n; i += 16) {
-        __m512 v = _mm512_loadu_ps(input + i);
-        __m512 r = gelu_avx512(v);
-        _mm512_storeu_ps(output + i, r);
-    }
-
-#ifdef TENZOR_FAST_MATH_AVX2
-    gelu_batch_avx2(input + i, output + i, n - i);
-#else
-    constexpr float sqrt_2_over_pi = 0.7978845608f;
-    constexpr float coeff = 0.044715f;
-    for (; i < n; ++i) {
+    // Exact GELU: 0.5 * x * (1 + erf(x / sqrt(2))) — matches the canonical
+    // gelu_kernel and PyTorch's default (approximate='none').  erf has no
+    // AVX-512 intrinsic, so this is a scalar loop.
+    constexpr float inv_sqrt2 = 0.70710678f;
+    for (size_t i = 0; i < n; ++i) {
         float x = input[i];
-        float x3 = x * x * x;
-        float inner = sqrt_2_over_pi * (x + coeff * x3);
-        output[i] = 0.5f * x * (1.0f + std::tanh(inner));
+        output[i] = 0.5f * x * (1.0f + std::erf(x * inv_sqrt2));
     }
-#endif
 }
 
 #endif // TENZOR_FAST_MATH_AVX512

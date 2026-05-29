@@ -97,13 +97,12 @@ void tanh(const float* a, float* out, size_t size) {
 }
 
 void gelu(const float* a, float* out, size_t size) {
-    constexpr float sqrt_2_over_pi = 0.7978845608f;
-    constexpr float coeff = 0.044715f;
+    // Exact GELU: 0.5 * x * (1 + erf(x / sqrt(2))) — matches the canonical
+    // gelu_kernel and PyTorch default (approximate='none').
+    constexpr float inv_sqrt2 = 0.70710678f;
     for (size_t i = 0; i < size; ++i) {
         float x = a[i];
-        float x3 = x * x * x;
-        float inner = sqrt_2_over_pi * (x + coeff * x3);
-        out[i] = 0.5f * x * (1.0f + std::tanh(inner));
+        out[i] = 0.5f * x * (1.0f + std::erf(x * inv_sqrt2));
     }
 }
 

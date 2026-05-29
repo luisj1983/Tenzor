@@ -718,8 +718,14 @@ auto scatter_reduce_kernel(const Tensor& input, int64_t dim, const Tensor& index
 
     if (input_c.dtype() == DType::Float32) { do_scatter_reduce.template operator()<float>(); }
     else if (input_c.dtype() == DType::Float64) { do_scatter_reduce.template operator()<double>(); }
+    else if (input_c.dtype() == DType::Int8) { do_scatter_reduce.template operator()<int8_t>(); }
+    else if (input_c.dtype() == DType::Int16) { do_scatter_reduce.template operator()<int16_t>(); }
     else if (input_c.dtype() == DType::Int32) { do_scatter_reduce.template operator()<int32_t>(); }
     else if (input_c.dtype() == DType::Int64) { do_scatter_reduce.template operator()<int64_t>(); }
+    else if (input_c.dtype() == DType::UInt8) { do_scatter_reduce.template operator()<uint8_t>(); }
+    else if (input_c.dtype() == DType::UInt16) { do_scatter_reduce.template operator()<uint16_t>(); }
+    else if (input_c.dtype() == DType::UInt32) { do_scatter_reduce.template operator()<uint32_t>(); }
+    else if (input_c.dtype() == DType::UInt64) { do_scatter_reduce.template operator()<uint64_t>(); }
     else {
         throw std::runtime_error("scatter_reduce: unsupported dtype " +
             std::string(dtype_name(input_c.dtype())));
@@ -794,6 +800,8 @@ auto masked_select_kernel(const Tensor& input, const Tensor& mask) -> Tensor {
     else MASKED_SELECT_DISPATCH(DType::Int8, int8_t)
     else MASKED_SELECT_DISPATCH(DType::UInt8, uint8_t)
     else MASKED_SELECT_DISPATCH(DType::Bool, bool)
+    else MASKED_SELECT_DISPATCH(DType::Complex64, std::complex<float>)
+    else MASKED_SELECT_DISPATCH(DType::Complex128, std::complex<double>)
     else {
         throw std::runtime_error("masked_select: unsupported dtype");
     }
@@ -910,6 +918,22 @@ auto masked_fill_kernel(const Tensor& input, const Tensor& mask_in, float value)
         for (int64_t i = 0; i < numel; ++i) {
             output_ptr[i] = is_mask_true(i) ? fill_value : input_ptr[i];
         }
+    } else if (input.dtype() == DType::Complex64) {
+        const std::complex<float>* input_ptr = input.data<std::complex<float>>();
+        std::complex<float>* output_ptr = output.data<std::complex<float>>();
+        const std::complex<float> fill_value(value, 0.0f);
+
+        for (int64_t i = 0; i < numel; ++i) {
+            output_ptr[i] = is_mask_true(i) ? fill_value : input_ptr[i];
+        }
+    } else if (input.dtype() == DType::Complex128) {
+        const std::complex<double>* input_ptr = input.data<std::complex<double>>();
+        std::complex<double>* output_ptr = output.data<std::complex<double>>();
+        const std::complex<double> fill_value(static_cast<double>(value), 0.0);
+
+        for (int64_t i = 0; i < numel; ++i) {
+            output_ptr[i] = is_mask_true(i) ? fill_value : input_ptr[i];
+        }
     } else {
         throw std::runtime_error("masked_fill: unsupported dtype");
     }
@@ -1003,6 +1027,8 @@ auto where_kernel(const Tensor& condition, const Tensor& x, const Tensor& y) -> 
         else WHERE_DISPATCH(DType::Int8, int8_t)
         else WHERE_DISPATCH(DType::UInt8, uint8_t)
         else WHERE_DISPATCH(DType::Bool, bool)
+        else WHERE_DISPATCH(DType::Complex64, std::complex<float>)
+        else WHERE_DISPATCH(DType::Complex128, std::complex<double>)
         else {
             throw std::runtime_error("where: unsupported dtype");
         }

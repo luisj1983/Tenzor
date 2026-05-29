@@ -125,26 +125,31 @@ auto ctc_single(
     }
 
     std::vector<Scalar> grad(T * C, static_cast<Scalar>(0));
+    // `seen` marks (t, c) slots that received a log-posterior contribution.
+    // Using a dedicated flag (rather than overloading grad == 0.0 as a
+    // sentinel) keeps the gradient correct when an accumulated log-posterior
+    // is legitimately exactly 0.0 (posterior probability == 1).
+    std::vector<char> seen(static_cast<size_t>(T) * static_cast<size_t>(C), 0);
 
     for (int64_t t = 0; t < T; ++t) {
         // Accumulate log-posterior per class via log-add over ext label
-        // positions mapping to each c. We use the grad buffer as scratch
-        // for log-space accumulation; mark "no contribution" by leaving
-        // it at 0.0 then converting in the second pass.
+        // positions mapping to each c, tracking contributions in `seen`.
         for (int64_t s = 0; s < L; ++s) {
             Scalar posterior = alpha[t * L + s] + beta[t * L + s];
             if (posterior > NEG_INF_S + static_cast<Scalar>(1)) {
                 int32_t c = ext_label[s];
-                Scalar old = grad[t * C + c];
-                grad[t * C + c] = (old == static_cast<Scalar>(0))
-                    ? posterior
-                    : log_add_s(old, posterior);
+                const size_t idx = static_cast<size_t>(t) * C + c;
+                grad[t * C + c] = seen[idx]
+                    ? log_add_s(grad[t * C + c], posterior)
+                    : posterior;
+                seen[idx] = 1;
             }
         }
         for (int64_t c = 0; c < C; ++c) {
             Scalar lp = log_probs[t * lp_t_stride + c];
             Scalar& slot = grad[t * C + c];
-            if (slot != static_cast<Scalar>(0)) {
+            const size_t idx = static_cast<size_t>(t) * C + c;
+            if (seen[idx]) {
                 slot = std::exp(lp) - std::exp(slot - logZ);
             } else {
                 slot = std::exp(lp);

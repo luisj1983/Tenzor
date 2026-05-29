@@ -554,6 +554,14 @@ auto linspace_kernel(double start, double end, int64_t steps, DType dtype, const
         case DType::Int64:
             fill(result.data<int64_t>(), [](double v) { return static_cast<int64_t>(v); });
             break;
+        case DType::Complex64:
+            fill(result.data<std::complex<float>>(),
+                 [](double v) { return std::complex<float>(static_cast<float>(v), 0.0f); });
+            break;
+        case DType::Complex128:
+            fill(result.data<std::complex<double>>(),
+                 [](double v) { return std::complex<double>(v, 0.0); });
+            break;
         default:
             throw std::runtime_error("linspace operation: dtype not supported " +
                 std::to_string(static_cast<int>(dtype)));
@@ -566,44 +574,46 @@ auto linspace_kernel(double start, double end, int64_t steps, DType dtype, const
 // Eye Kernel - Create identity matrix
 // ============================================================================
 
+// Zero-fill an (n x m) buffer and set its main diagonal to `one`.  T{} is the
+// additive zero for every supported dtype (int 0, +0.0 float/half/fp8 bit
+// pattern, (0,0) complex, false bool), so this works across the full matrix.
+template <typename T>
+static void fill_eye(Tensor& result, int64_t n, int64_t m, T one) {
+    T* data = result.data<T>();
+    const size_t total = static_cast<size_t>(n) * static_cast<size_t>(m);
+    parallel_fill_n(data, total, T{});
+    const int64_t diag_len = std::min(n, m);
+    for (int64_t i = 0; i < diag_len; ++i) {
+        data[i * m + i] = one;
+    }
+}
+
 auto eye_kernel(int64_t n, int64_t m, DType dtype, const Device& device) -> Tensor {
     if (m < 0) m = n;  // Square matrix by default
 
     Tensor result({n, m}, dtype, device);
 
-    // Zero-initialize first
-    size_t total = static_cast<size_t>(n * m);
-
-    if (dtype == DType::Float32) {
-        float* data = result.data<float>();
-        std::fill_n(data, total, 0.0f);
-        int64_t diag_len = std::min(n, m);
-        for (int64_t i = 0; i < diag_len; ++i) {
-            data[i * m + i] = 1.0f;
-        }
-    } else if (dtype == DType::Float64) {
-        double* data = result.data<double>();
-        std::fill_n(data, total, 0.0);
-        int64_t diag_len = std::min(n, m);
-        for (int64_t i = 0; i < diag_len; ++i) {
-            data[i * m + i] = 1.0;
-        }
-    } else if (dtype == DType::Int32) {
-        int32_t* data = result.data<int32_t>();
-        std::fill_n(data, total, 0);
-        int64_t diag_len = std::min(n, m);
-        for (int64_t i = 0; i < diag_len; ++i) {
-            data[i * m + i] = 1;
-        }
-    } else if (dtype == DType::Int64) {
-        int64_t* data = result.data<int64_t>();
-        std::fill_n(data, total, static_cast<int64_t>(0));
-        int64_t diag_len = std::min(n, m);
-        for (int64_t i = 0; i < diag_len; ++i) {
-            data[i * m + i] = 1;
-        }
-    } else {
-        throw std::runtime_error("eye operation: unsupported dtype");
+    switch (dtype) {
+        case DType::Float16:    fill_eye<Float16>(result, n, m, Float16(1.0f)); break;
+        case DType::BFloat16:   fill_eye<BFloat16>(result, n, m, BFloat16(1.0f)); break;
+        case DType::Float32:    fill_eye<float>(result, n, m, 1.0f); break;
+        case DType::Float64:    fill_eye<double>(result, n, m, 1.0); break;
+        case DType::Int8:       fill_eye<int8_t>(result, n, m, static_cast<int8_t>(1)); break;
+        case DType::Int16:      fill_eye<int16_t>(result, n, m, static_cast<int16_t>(1)); break;
+        case DType::Int32:      fill_eye<int32_t>(result, n, m, static_cast<int32_t>(1)); break;
+        case DType::Int64:      fill_eye<int64_t>(result, n, m, static_cast<int64_t>(1)); break;
+        case DType::UInt8:      fill_eye<uint8_t>(result, n, m, static_cast<uint8_t>(1)); break;
+        case DType::UInt16:     fill_eye<uint16_t>(result, n, m, static_cast<uint16_t>(1)); break;
+        case DType::UInt32:     fill_eye<uint32_t>(result, n, m, static_cast<uint32_t>(1)); break;
+        case DType::UInt64:     fill_eye<uint64_t>(result, n, m, static_cast<uint64_t>(1)); break;
+        case DType::Bool:       fill_eye<bool>(result, n, m, true); break;
+        case DType::Complex64:  fill_eye<std::complex<float>>(result, n, m, std::complex<float>(1.0f, 0.0f)); break;
+        case DType::Complex128: fill_eye<std::complex<double>>(result, n, m, std::complex<double>(1.0, 0.0)); break;
+        case DType::FP8_E4M3:   fill_eye<FP8_E4M3>(result, n, m, FP8_E4M3(1.0f)); break;
+        case DType::FP8_E5M2:   fill_eye<FP8_E5M2>(result, n, m, FP8_E5M2(1.0f)); break;
+        default:
+            throw std::runtime_error("eye operation: unsupported dtype " +
+                std::to_string(static_cast<int>(dtype)));
     }
 
     return result;

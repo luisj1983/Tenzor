@@ -72,7 +72,25 @@ auto scatter_reduce(const Tensor& input, int64_t dim, const Tensor& index,
 }
 
 auto masked_select(const Tensor& input, const Tensor& mask) -> Tensor {
-    std::vector<Tensor> inputs = {input, mask};
+    // PyTorch broadcasts input and mask to a common shape before selecting.
+    // Do it once here at the op layer so every backend kernel receives
+    // equal-shaped, contiguous operands (the kernels assume matching shapes).
+    std::vector<int64_t> input_shape(input.shape().begin(), input.shape().end());
+    std::vector<int64_t> mask_shape(mask.shape().begin(), mask.shape().end());
+
+    Tensor input_b = input;
+    Tensor mask_b = mask;
+    if (input_shape != mask_shape) {
+        std::vector<int64_t> common = broadcast_shapes(input.shape(), mask.shape());
+        if (input_shape != common) {
+            input_b = broadcast_to(input, common).contiguous();
+        }
+        if (mask_shape != common) {
+            mask_b = broadcast_to(mask, common).contiguous();
+        }
+    }
+
+    std::vector<Tensor> inputs = {input_b, mask_b};
     return dispatch(OpId::MaskedSelect, inputs)[0];
 }
 

@@ -119,6 +119,21 @@ set_target_properties(test_quantized_linear_signed PROPERTIES
 tenzor_discover_tests(test_quantized_linear_signed
     LABELS "backends" DISCOVERY_TIMEOUT 60 BACKENDS cpu)
 
+# INT4 codec regression (release-prep C2): unpack_int4 must sign-extend signed
+# two's-complement nibbles, not apply an offset-8 (zero-point) decode.
+# The INT4 linear kernel is not yet wired into any dispatch table (no callers),
+# so its translation unit is not part of any library.  Compile it directly into
+# the test to exercise the real kernel (scalar + AVX2 unpack paths).
+add_executable(test_quantized_linear_int4
+    test_quantized_linear_int4.cpp
+    ${CMAKE_SOURCE_DIR}/src/backends/cpu/kernels/quantization/quantized_linear_int4.cpp)
+target_link_libraries(test_quantized_linear_int4 PRIVATE
+    tenzor_core tenzor_backend_cpu GTest::gtest_main)
+set_target_properties(test_quantized_linear_int4 PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/bin")
+tenzor_discover_tests(test_quantized_linear_int4
+    LABELS "backends" DISCOVERY_TIMEOUT 60 BACKENDS cpu)
+
 # Signed + asymmetric zero-point correctness for the CPU quantized_conv2d
 # kernels (release-prep A3/A4): signed-safe dot_int8, full (q-zp) expansion,
 # and input_zp padding in im2col. Ground-truth reference dequantizes by

@@ -45,13 +45,16 @@ def _gamma_reparam():
             # fixed (the gradient comes from the implicit-reparam formula).
             z_unit = np.random.gamma(shape=np.maximum(a64, 1e-300), size=a64.shape)
             z = (z_unit / r64).astype(np.float32)
+            # NOTE: np.ascontiguousarray promotes 0-d arrays to shape (1,); the
+            # trailing .reshape(<orig>.shape) preserves scalar () shapes so the
+            # reparam matches PyTorch / Normal for scalar parameters.
             ctx.save_for_backward(
-                Tensor.from_numpy(np.ascontiguousarray(a64)),
-                Tensor.from_numpy(np.ascontiguousarray(z_unit)),
-                Tensor.from_numpy(np.ascontiguousarray(r64)),
+                Tensor.from_numpy(np.ascontiguousarray(a64).reshape(a64.shape)),
+                Tensor.from_numpy(np.ascontiguousarray(z_unit).reshape(z_unit.shape)),
+                Tensor.from_numpy(np.ascontiguousarray(r64).reshape(r64.shape)),
             )
             # forward must return a Tensor (apply wraps it into a Variable).
-            return Tensor.from_numpy(np.ascontiguousarray(z))
+            return Tensor.from_numpy(np.ascontiguousarray(z).reshape(z.shape))
 
         @staticmethod
         def backward(ctx, grad_z):
@@ -84,8 +87,8 @@ def _gamma_reparam():
 
             grad_alpha = (g * (dzu_da / r)).astype(np.float32)
             grad_rate = (g * (-zu / (r * r))).astype(np.float32)
-            return (Tensor.from_numpy(np.ascontiguousarray(grad_alpha)),
-                    Tensor.from_numpy(np.ascontiguousarray(grad_rate)))
+            return (Tensor.from_numpy(np.ascontiguousarray(grad_alpha).reshape(grad_alpha.shape)),
+                    Tensor.from_numpy(np.ascontiguousarray(grad_rate).reshape(grad_rate.shape)))
 
     _GAMMA_REPARAM = _GammaReparam
     return _GAMMA_REPARAM
@@ -130,7 +133,11 @@ class Gamma(Distribution):
         # shape so each draw carries its own (alpha, rate) for the gradient.
         out_shape = list(tuple(sample_shape) + self._batch_shape)
         if not out_shape:
-            out_shape = [1]
+            # Scalar parameters with no sample dims → a single scalar draw of
+            # shape () (matches PyTorch and sample()). The concentration/rate
+            # are already scalar-shaped, so pass them through directly rather
+            # than forcing a spurious leading dim of 1.
+            return _gamma_reparam().apply(self.concentration, self.rate)
         ones = Variable(_tz.ones(out_shape), False)
         a_exp = self.concentration * ones
         r_exp = self.rate * ones

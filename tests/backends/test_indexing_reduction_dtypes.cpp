@@ -460,3 +460,137 @@ TEST(SumDtypeGap, UInt8_NoOverflow_300x250) {
     EXPECT_EQ(out.dtype(), DType::Int64);
     EXPECT_EQ(out.data<int64_t>()[0], static_cast<int64_t>(N) * V);  // 75000
 }
+
+// ---------------------------------------------------------------------------
+// masked_select — mask broadcasting (release audit D) + complex (audit B3)
+// ---------------------------------------------------------------------------
+
+TEST(MaskedSelectBroadcast, MaskRankLessThanInput) {
+    // input (2,3), mask (3,) -> broadcast to (2,3): pick cols 0 and 2 per row.
+    Tensor input = empty({2, 3}, DType::Float32, Device::cpu());
+    float* ip = input.data<float>();
+    for (int i = 0; i < 6; ++i) ip[i] = static_cast<float>(i);  // [[0,1,2],[3,4,5]]
+
+    Tensor mask = empty({3}, DType::Bool, Device::cpu());
+    bool* mp = mask.data<bool>();
+    mp[0] = true; mp[1] = false; mp[2] = true;
+
+    Tensor out = masked_select(input, mask);
+    ASSERT_EQ(out.numel(), 4);
+    const float* op = out.data<float>();
+    EXPECT_FLOAT_EQ(op[0], 0.0f);
+    EXPECT_FLOAT_EQ(op[1], 2.0f);
+    EXPECT_FLOAT_EQ(op[2], 3.0f);
+    EXPECT_FLOAT_EQ(op[3], 5.0f);
+}
+
+TEST(MaskedSelectDtypeGap, Complex64) {
+    using C = std::complex<float>;
+    Tensor input = empty({3}, DType::Complex64, Device::cpu());
+    C* ip = input.data<C>();
+    ip[0] = C(1.0f, 2.0f); ip[1] = C(3.0f, 4.0f); ip[2] = C(5.0f, 6.0f);
+
+    Tensor mask = empty({3}, DType::Bool, Device::cpu());
+    bool* mp = mask.data<bool>();
+    mp[0] = true; mp[1] = false; mp[2] = true;
+
+    Tensor out = masked_select(input, mask);
+    ASSERT_EQ(out.dtype(), DType::Complex64);
+    ASSERT_EQ(out.numel(), 2);
+    const C* op = out.data<C>();
+    EXPECT_EQ(op[0], C(1.0f, 2.0f));
+    EXPECT_EQ(op[1], C(5.0f, 6.0f));
+}
+
+TEST(MaskedFillDtypeGap, Complex64) {
+    using C = std::complex<float>;
+    Tensor input = empty({3}, DType::Complex64, Device::cpu());
+    C* ip = input.data<C>();
+    ip[0] = C(1.0f, 1.0f); ip[1] = C(2.0f, 2.0f); ip[2] = C(3.0f, 3.0f);
+
+    Tensor mask = empty({3}, DType::Bool, Device::cpu());
+    bool* mp = mask.data<bool>();
+    mp[0] = false; mp[1] = true; mp[2] = false;
+
+    Tensor out = masked_fill(input, mask, 9.0);
+    ASSERT_EQ(out.dtype(), DType::Complex64);
+    const C* op = out.data<C>();
+    EXPECT_EQ(op[0], C(1.0f, 1.0f));
+    EXPECT_EQ(op[1], C(9.0f, 0.0f));
+    EXPECT_EQ(op[2], C(3.0f, 3.0f));
+}
+
+TEST(WhereDtypeGap, Complex64) {
+    using C = std::complex<float>;
+    Tensor cond = empty({3}, DType::Bool, Device::cpu());
+    bool* cp = cond.data<bool>();
+    cp[0] = true; cp[1] = false; cp[2] = true;
+
+    Tensor x = empty({3}, DType::Complex64, Device::cpu());
+    Tensor y = empty({3}, DType::Complex64, Device::cpu());
+    C* xp = x.data<C>(); C* yp = y.data<C>();
+    for (int i = 0; i < 3; ++i) { xp[i] = C(static_cast<float>(i), 1.0f); yp[i] = C(-1.0f, static_cast<float>(i)); }
+
+    Tensor out = where(cond, x, y);
+    ASSERT_EQ(out.dtype(), DType::Complex64);
+    const C* op = out.data<C>();
+    EXPECT_EQ(op[0], C(0.0f, 1.0f));
+    EXPECT_EQ(op[1], C(-1.0f, 1.0f));
+    EXPECT_EQ(op[2], C(2.0f, 1.0f));
+}
+
+// ---------------------------------------------------------------------------
+// scatter_reduce — newly supported integer dtypes (audit B3)
+// ---------------------------------------------------------------------------
+
+TEST(ScatterReduceDtypeGap, Int16Sum) {
+    Tensor input = empty({4}, DType::Int16, Device::cpu());
+    int16_t* ip = input.data<int16_t>();
+    for (int i = 0; i < 4; ++i) ip[i] = 0;
+
+    Tensor idx = make_idx({0, 0, 3});
+    Tensor src = empty({3}, DType::Int16, Device::cpu());
+    int16_t* sp = src.data<int16_t>();
+    sp[0] = 5; sp[1] = 7; sp[2] = 9;
+
+    Tensor out = scatter_reduce(input, /*dim=*/0, idx, src, "sum", /*include_self=*/true);
+    ASSERT_EQ(out.dtype(), DType::Int16);
+    const int16_t* op = out.data<int16_t>();
+    EXPECT_EQ(op[0], 12);  // 0 + 5 + 7
+    EXPECT_EQ(op[3], 9);   // 0 + 9
+}
+
+// ---------------------------------------------------------------------------
+// eye / linspace — newly supported dtypes (audit B1 / B2)
+// ---------------------------------------------------------------------------
+
+TEST(EyeDtypeGap, Complex64) {
+    using C = std::complex<float>;
+    Tensor e = eye(3, std::nullopt, DType::Complex64, Device::cpu());
+    ASSERT_EQ(e.dtype(), DType::Complex64);
+    const C* p = e.data<C>();
+    EXPECT_EQ(p[0], C(1.0f, 0.0f));
+    EXPECT_EQ(p[4], C(1.0f, 0.0f));
+    EXPECT_EQ(p[8], C(1.0f, 0.0f));
+    EXPECT_EQ(p[1], C(0.0f, 0.0f));
+}
+
+TEST(EyeDtypeGap, Float16) {
+    Tensor e = eye(2, std::nullopt, DType::Float16, Device::cpu());
+    ASSERT_EQ(e.dtype(), DType::Float16);
+    const Float16* p = e.data<Float16>();
+    EXPECT_FLOAT_EQ(static_cast<float>(p[0]), 1.0f);
+    EXPECT_FLOAT_EQ(static_cast<float>(p[1]), 0.0f);
+    EXPECT_FLOAT_EQ(static_cast<float>(p[3]), 1.0f);
+}
+
+TEST(LinspaceDtypeGap, Complex64) {
+    using C = std::complex<float>;
+    Tensor t = linspace(0.0, 3.0, 4, DType::Complex64, Device::cpu());
+    ASSERT_EQ(t.dtype(), DType::Complex64);
+    const C* p = t.data<C>();
+    EXPECT_EQ(p[0], C(0.0f, 0.0f));
+    EXPECT_EQ(p[1], C(1.0f, 0.0f));
+    EXPECT_EQ(p[2], C(2.0f, 0.0f));
+    EXPECT_EQ(p[3], C(3.0f, 0.0f));
+}

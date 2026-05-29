@@ -9,7 +9,6 @@ from tenzor.tenzor_core import Tensor, Variable  # type: ignore
 from .distribution import (
     Distribution,
     _to_variable,
-    _wrap_numpy,
     _wrap_numpy_int,
 )
 
@@ -33,15 +32,17 @@ class Categorical(Distribution):
 
     def __init__(self, probs):
         probs = _to_variable(probs)
-        probs_np = np.asarray(probs.tensor(), dtype=np.float64)
-        total = probs_np.sum(axis=-1, keepdims=True)
-        norm_np = (probs_np / total).astype(np.float32, copy=False)
-        # Store the normalised probs as a (detached) Variable so callers
-        # who feed unnormalised inputs still see a clean parameter
-        # surface.  Tensor/Variable arithmetic over `probs` is used in
-        # `log_prob` / `entropy`.
-        self.probs = Variable(Tensor.from_numpy(np.ascontiguousarray(norm_np)), False)
-        self._probs_np = norm_np
+        # Normalise over the event (last) axis with autograd-aware ops so the
+        # gradient flows back to the caller's `probs` through log_prob/entropy
+        # (the previous numpy round-trip + detached Variable severed the graph,
+        # breaking REINFORCE / policy-gradient — the main use of Categorical).
+        self.probs = probs / _tz.sum(probs, -1, True)
+        # Detached numpy copy for the (inherently non-differentiable) sampler
+        # and for shape bookkeeping.
+        probs_np = np.asarray(
+            self.probs.tensor() if isinstance(self.probs, Variable) else self.probs,
+            dtype=np.float64)
+        self._probs_np = probs_np.astype(np.float32, copy=False)
         self._num_events = int(probs_np.shape[-1])
         super().__init__(tuple(int(s) for s in probs_np.shape[:-1]))
 
@@ -73,41 +74,27 @@ class Categorical(Distribution):
         return _wrap_numpy_int(out.reshape(()))
 
     def log_prob(self, value):
-        # value: integer indices.  We use take_along_axis on numpy buffers
-        # because Tenzor lacks a Variable-aware gather along the last axis
-        # at module level; gradient through log_prob therefore flows only
-        # through `probs` via the closed-form expression below.
-        value_np = np.asarray(_to_variable(value).tensor()
-                              if isinstance(value, Variable)
-                              else np.asarray(value, dtype=np.int64),
-                              dtype=np.int64)
+        # log p(value) = log_probs[..., value].  Implemented as a one-hot dot
+        # product over the event axis so the whole computation stays in
+        # Variable space and the gradient flows to `probs` — gather/select via
+        # numpy would detach it.  The one-hot selector is a constant (no grad).
         eps = 1e-12
-        # Compute log-probs autograd-aware on the full probs tensor, then
-        # gather via numpy.  Gradient flows up to the gather point.
-        log_probs_var = _tz.log(self.probs + eps)
-        log_probs_np = np.asarray(log_probs_var.tensor()
-                                  if isinstance(log_probs_var, Variable)
-                                  else log_probs_var, dtype=np.float64)
-        if value_np.ndim == 0:
-            out = log_probs_np[..., int(value_np)]
-        elif log_probs_np.ndim == 1:
-            out = log_probs_np[value_np]
-        else:
-            out = np.take_along_axis(log_probs_np,
-                                     value_np[..., np.newaxis],
-                                     axis=-1).squeeze(-1)
-        return _wrap_numpy(out.astype(np.float32, copy=False))
+        log_probs = _tz.log(self.probs + eps)            # Variable (..., K)
+
+        value_np = np.asarray(
+            value.tensor() if isinstance(value, Variable) else value,
+            dtype=np.int64)
+        onehot_np = np.zeros(value_np.shape + (self._num_events,), dtype=np.float32)
+        np.put_along_axis(onehot_np, np.expand_dims(value_np, -1), 1.0, axis=-1)
+        onehot = Variable(Tensor.from_numpy(np.ascontiguousarray(onehot_np)), False)
+
+        return _tz.sum(log_probs * onehot, -1)
 
     def entropy(self):
-        # H = -sum p * log p along last axis.  Autograd-aware on probs.
+        # H = -sum_k p_k * log p_k along the event axis, autograd-aware on probs.
         eps = 1e-12
         log_p = _tz.log(self.probs + eps)
-        # tz.sum supports axis when passed as positional? Use Tensor route
-        # to keep the codepath simple.
-        prod = self.probs * log_p
-        prod_np = np.asarray(prod.tensor() if isinstance(prod, Variable) else prod,
-                             dtype=np.float32)
-        return _wrap_numpy(-prod_np.sum(axis=-1))
+        return _tz.sum(self.probs * log_p, -1) * (-1.0)
 
     def support(self):
         return f"{{0, 1, ..., {self._num_events - 1}}}"

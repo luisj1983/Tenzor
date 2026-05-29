@@ -6,10 +6,11 @@
  * to INT8 before inner product computation, enabling 2x memory savings
  * over INT8 quantization.
  *
- * Storage format: two INT4 values packed per uint8_t
- *   byte = (high_nibble << 4) | (low_nibble & 0x0F)
- *   low_nibble  = byte & 0x0F  (values 0-15, offset by 8 for signed: -8 to 7)
- *   high_nibble = byte >> 4     (values 0-15, offset by 8 for signed: -8 to 7)
+ * Storage format: two signed INT4 values (two's-complement, range [-8, 7])
+ * packed per uint8_t, each masked to a nibble:
+ *   byte = ((high & 0x0F) << 4) | (low & 0x0F)
+ * Unpacking sign-extends bit 3 of each nibble (see unpack_int4), matching the
+ * packers in tensor.cpp / gptq.cpp / awq.cpp and int4_utils.hpp.
  */
 
 #include <cstdint>
@@ -29,11 +30,18 @@ namespace nn {
 namespace quantization {
 namespace kernels {
 
-/// Unpack INT4 weight byte to two signed int8 values.
-/// INT4 range is [0, 15]; subtract 8 for signed range [-8, 7].
+/// Unpack an INT4 weight byte into two signed int8 values.
+/// Tenzor stores signed INT4 in two's-complement form masked to a nibble
+/// (range [-8, 7], `value & 0xF`), matching every INT4 packer in the codebase
+/// (tensor.cpp, gptq.cpp, awq.cpp) and int4_utils.hpp.  Recover the sign by
+/// extending bit 3 into the high nibble — NOT an offset-8 (zero-point) decode.
 static inline void unpack_int4(uint8_t packed, int8_t& low, int8_t& high) {
-    low  = static_cast<int8_t>((packed & 0x0F)) - 8;
-    high = static_cast<int8_t>((packed >> 4)) - 8;
+    int8_t lo = static_cast<int8_t>(packed & 0x0F);
+    if (lo & 0x08) lo |= static_cast<int8_t>(0xF0);  // sign-extend
+    int8_t hi = static_cast<int8_t>((packed >> 4) & 0x0F);
+    if (hi & 0x08) hi |= static_cast<int8_t>(0xF0);  // sign-extend
+    low  = lo;
+    high = hi;
 }
 
 /**
@@ -163,8 +171,11 @@ auto quantized_linear_int4_kernel(
                 __m256i w_high = _mm256_srli_epi16(packed256, 4);
                 w_high = _mm256_and_si256(w_high, _mm256_set1_epi16(0x0F));
 
-                w_low = _mm256_sub_epi16(w_low, _mm256_set1_epi16(8));
-                w_high = _mm256_sub_epi16(w_high, _mm256_set1_epi16(8));
+                // Sign-extend 4-bit two's-complement nibbles in [0,15] to
+                // [-8,7] via (v ^ 0x08) - 0x08 (matches the scalar unpack_int4).
+                const __m256i sign_bit = _mm256_set1_epi16(0x08);
+                w_low  = _mm256_sub_epi16(_mm256_xor_si256(w_low, sign_bit), sign_bit);
+                w_high = _mm256_sub_epi16(_mm256_xor_si256(w_high, sign_bit), sign_bit);
 
                 __m256i in_low = _mm256_cvtepi8_epi16(
                     _mm_loadu_si128(reinterpret_cast<const __m128i*>(input_row + p * 2)));
