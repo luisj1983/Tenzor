@@ -97,14 +97,15 @@ void register_distributed(py::module_& m) {
             py::arg("tensor"), py::arg("dst_rank"),
             py::arg("op") = tenzor::distributed::ReduceOp::SUM,
             py::call_guard<py::gil_scoped_release>())
-        // gather / all_gather / reduce_scatter: the underlying C++ signatures
-        // take `std::vector<Tensor>&` for the output. pybind11's default STL
-        // caster copies that list at entry and does NOT propagate C++-side
-        // reassignments back to Python. Gloo's implementations reassign output
-        // slots (e.g. `output[src] = zeros_like(tensor); recv into it`), so
-        // the Python list never observed the received data. Wrap these to
-        // take the output by value and return the filled vector — Python
-        // callers then assign the return value back.
+        // gather / all_gather take `std::vector<Tensor>&` for the output.
+        // pybind11's default STL caster copies that list at entry and does NOT
+        // propagate C++-side reassignments back to Python. Gloo's implementations
+        // reassign output slots (e.g. `output[src] = zeros_like(tensor); recv into
+        // it`), so the Python list never observed the received data. These two are
+        // wrapped below to mutate the supplied Python list in place.
+        // (scatter / reduce_scatter take a single `Tensor& output` whose
+        // intrusive_ptr holder propagates the backend's reassignment back to the
+        // caller, so they are bound directly without a wrapper.)
         .def("gather", [](tenzor::distributed::ProcessGroup& self,
                            const tenzor::Tensor& tensor,
                            py::list output_list,

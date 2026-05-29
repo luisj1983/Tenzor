@@ -1,5 +1,6 @@
 #version 450
 #extension GL_EXT_shader_explicit_arithmetic_types_float64 : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
 
 // EmbeddingBag for Float64
 layout(local_size_x_id = 0) in;
@@ -7,6 +8,7 @@ layout(local_size_x_id = 0) in;
 layout(binding = 0) buffer Embeddings { float64_t emb_data[]; };
 layout(binding = 1) buffer Offsets { int offset_data[]; };
 layout(binding = 2) buffer Output { float64_t out_data[]; };
+layout(binding = 3) buffer MaxIndices { int64_t idx_data[]; };
 
 layout(push_constant) uniform PushConstants {
     uint num_bags;
@@ -36,16 +38,19 @@ void main() {
     int bag_size = end_val - start;
     if (bag_size <= 0) {
         out_data[gid] = float64_t(0.0);
+        idx_data[gid] = int64_t(-1);
         return;
     }
 
     if (params.mode == 2) {
         float64_t max_val = emb_data[uint(start) * params.embedding_dim + j];
+        int arg = start;
         for (int i = start + 1; i < end_val; ++i) {
             float64_t v = emb_data[uint(i) * params.embedding_dim + j];
-            if (v > max_val) max_val = v;
+            if (v > max_val) { max_val = v; arg = i; }
         }
         out_data[gid] = max_val;
+        idx_data[gid] = int64_t(arg);
     } else {
         float64_t acc = float64_t(0.0);
         for (int i = start; i < end_val; ++i) {

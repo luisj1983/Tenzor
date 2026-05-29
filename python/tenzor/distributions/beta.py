@@ -19,9 +19,10 @@ from .distribution import (
 class Beta(Distribution):
     """``Beta(concentration1, concentration0)`` distribution on ``(0, 1)``.
 
-    Gamma-derived reparameterisation is possible in principle but
-    relies on a reparameterisable Gamma sampler, which Tenzor does not
-    yet provide.  ``has_rsample = False``.
+    ``rsample`` is reparameterised: ``Beta(c1, c0) = X / (X + Y)`` with
+    ``X ~ Gamma(c1, 1)``, ``Y ~ Gamma(c0, 1)`` drawn via the reparameterised
+    Gamma sampler, so gradients flow to both concentrations.
+    ``has_rsample = True``.
     """
 
     has_rsample = True

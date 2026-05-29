@@ -2176,6 +2176,7 @@ __global__ void embedding_bag_max_kernel(
     const T* embeddings,
     const int64_t* offsets,
     T* output,
+    int64_t* max_indices,   // [num_bags, embedding_dim] global argmax element index
     int64_t num_bags,
     int64_t total_elements,
     int64_t embedding_dim,
@@ -2187,43 +2188,55 @@ __global__ void embedding_bag_max_kernel(
     int64_t start = offsets[bag];
     int64_t end = (bag + 1 < offsets_size) ? offsets[bag + 1] : total_elements;
 
-    if (start >= end) return;
+    if (start >= end) return;  // empty bag: max_indices stays at its -1 prefill
 
     for (int64_t j = threadIdx.x; j < embedding_dim; j += blockDim.x) {
         T max_val = embeddings[start * embedding_dim + j];
+        int64_t arg = start;
         for (int64_t i = start + 1; i < end; ++i) {
             T val = embeddings[i * embedding_dim + j];
-            if (val > max_val) max_val = val;
+            if (val > max_val) { max_val = val; arg = i; }  // strict '>': first wins
         }
         output[bag * embedding_dim + j] = max_val;
+        if (max_indices != nullptr) max_indices[bag * embedding_dim + j] = arg;
     }
 }
 
 auto embedding_bag_forward_kernel(const Tensor& embeddings, const Tensor& offsets,
                                    const std::string& mode, int64_t embedding_dim,
-                                   bool include_last_offset, cudaStream_t stream) -> Tensor {
+                                   bool include_last_offset, cudaStream_t stream) -> std::vector<Tensor> {
     int64_t total_elements = embeddings.shape()[0];
     int64_t offsets_size = offsets.numel();
     int64_t num_bags = include_last_offset ? (offsets_size - 1) : offsets_size;
 
+    bool is_mean = (mode == "mean");
+    bool is_max = (mode == "max");
+
     if (num_bags <= 0) {
-        return tenzor::zeros({0, embedding_dim}, embeddings.dtype(), embeddings.device());
+        return {tenzor::zeros({0, embedding_dim}, embeddings.dtype(), embeddings.device()),
+                tenzor::zeros({0}, DType::Int64, embeddings.device())};
     }
 
     auto output = tenzor::zeros({num_bags, embedding_dim}, embeddings.dtype(), embeddings.device());
 
+    // For max mode also emit the per-(bag,feature) global argmax element index
+    // (-1 for empty bags), so the autograd node can route the gradient exactly
+    // on-device. Empty / unused otherwise.
+    Tensor max_indices = is_max
+        ? tenzor::full({num_bags, embedding_dim}, static_cast<double>(-1),
+                       DType::Int64, embeddings.device())
+        : tenzor::zeros({0}, DType::Int64, embeddings.device());
+    int64_t* argmax_ptr = is_max ? max_indices.data<int64_t>() : nullptr;
+
     int threads = std::min(static_cast<int>(embedding_dim), 256);
     int blocks = static_cast<int>(num_bags);
-
-    bool is_mean = (mode == "mean");
-    bool is_max = (mode == "max");
 
     switch (embeddings.dtype()) {
         case DType::Float32:
             if (is_max) {
                 embedding_bag_max_kernel<float><<<blocks, threads, 0, stream>>>(
                     embeddings.data<float>(), offsets.data<int64_t>(),
-                    output.data<float>(), num_bags, total_elements,
+                    output.data<float>(), argmax_ptr, num_bags, total_elements,
                     embedding_dim, offsets_size);
             } else {
                 embedding_bag_sum_kernel<float><<<blocks, threads, 0, stream>>>(
@@ -2236,7 +2249,7 @@ auto embedding_bag_forward_kernel(const Tensor& embeddings, const Tensor& offset
             if (is_max) {
                 embedding_bag_max_kernel<double><<<blocks, threads, 0, stream>>>(
                     embeddings.data<double>(), offsets.data<int64_t>(),
-                    output.data<double>(), num_bags, total_elements,
+                    output.data<double>(), argmax_ptr, num_bags, total_elements,
                     embedding_dim, offsets_size);
             } else {
                 embedding_bag_sum_kernel<double><<<blocks, threads, 0, stream>>>(
@@ -2251,7 +2264,7 @@ auto embedding_bag_forward_kernel(const Tensor& embeddings, const Tensor& offset
                     reinterpret_cast<const __half*>(embeddings.data_ptr()),
                     offsets.data<int64_t>(),
                     reinterpret_cast<__half*>(output.data_ptr()),
-                    num_bags, total_elements, embedding_dim, offsets_size);
+                    argmax_ptr, num_bags, total_elements, embedding_dim, offsets_size);
             } else {
                 embedding_bag_sum_kernel<__half><<<blocks, threads, 0, stream>>>(
                     reinterpret_cast<const __half*>(embeddings.data_ptr()),
@@ -2266,7 +2279,7 @@ auto embedding_bag_forward_kernel(const Tensor& embeddings, const Tensor& offset
                     reinterpret_cast<const __nv_bfloat16*>(embeddings.data_ptr()),
                     offsets.data<int64_t>(),
                     reinterpret_cast<__nv_bfloat16*>(output.data_ptr()),
-                    num_bags, total_elements, embedding_dim, offsets_size);
+                    argmax_ptr, num_bags, total_elements, embedding_dim, offsets_size);
             } else {
                 embedding_bag_sum_kernel<__nv_bfloat16><<<blocks, threads, 0, stream>>>(
                     reinterpret_cast<const __nv_bfloat16*>(embeddings.data_ptr()),
@@ -2280,7 +2293,7 @@ auto embedding_bag_forward_kernel(const Tensor& embeddings, const Tensor& offset
     }
 
     CUDA_CHECK(cudaGetLastError());
-    return output;
+    return {output, max_indices};
 }
 
 // ============================================================================

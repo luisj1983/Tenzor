@@ -285,12 +285,13 @@ auto OffloadEngine::prefetch_to_gpu(Tensor* tensor) -> void {
 // ============================================================================
 
 auto OffloadEngine::get_pinned_memory_stats() -> core::PinnedMemoryStats {
-    // Phase C (C1): the stand-alone PinnedMemoryAllocator was removed (it was unused
-    // dead memory). TransferEngine has its own pinned pool but does not currently
-    // expose detailed pinned-pool stats through its public Statistics struct -- only
-    // transfer counters. Return a best-effort populated stats struct with the
-    // configured pool size; runtime counters are zero until the TransferEngine
-    // exposes pinned-pool telemetry.
+    // The TransferEngine owns the host-pinned buffer pool and reports real
+    // occupancy (allocated/free bytes, block counts, fragmentation, peak).
+    if (transfer_engine_) {
+        return transfer_engine_->get_pinned_memory_stats();
+    }
+    // No transfer engine (shouldn't happen post-construction): report only the
+    // configured capacity, with zero live usage.
     core::PinnedMemoryStats stats{};
     stats.total_size = config_.pinned_memory_size;
     stats.free_size = config_.pinned_memory_size;

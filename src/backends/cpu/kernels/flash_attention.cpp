@@ -522,7 +522,8 @@ auto flash_attention_forward(const Tensor& Q, const Tensor& K, const Tensor& V,
 }
 
 // ============================================================================
-// Flash Attention Backward (materialized attention matrix, no dropout)
+// Flash Attention Backward (materialized attention matrix; dropout supported
+// via dropout_p / philox_seed, reconstructing the same mask as the forward)
 // ============================================================================
 // Inputs:
 //   dO [B, H, N, D]  - gradient of output

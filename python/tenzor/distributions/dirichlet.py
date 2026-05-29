@@ -18,8 +18,9 @@ class Dirichlet(Distribution):
     """``Dirichlet(concentration)`` distribution over the simplex.
 
     The trailing dimension of ``concentration`` is the event axis.
-    Dirichlet reparameterisation routes through Gamma, which Tenzor's
-    sampler does not yet expose — ``has_rsample = False``.
+    ``rsample`` is reparameterised via the Gamma sampler
+    (``Dirichlet(a) = G / sum(G)``, ``G_i ~ Gamma(a_i, 1)``), so gradients
+    flow to the concentration. ``has_rsample = True``.
     """
 
     has_rsample = True

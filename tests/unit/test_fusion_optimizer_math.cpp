@@ -182,6 +182,57 @@ TEST_F(FusionOptimizerMathTest, ElementwiseChainAddMulReluMatchesReference) {
 }
 
 // ---------------------------------------------------------------------------
+// Long-chain regression: a chain of >3 tensors mixing mul/sub/div must honor
+// the op_sequence, not silently fold with add.  Previously the >3-input path
+// computed sum(inputs) regardless of the matched ops.
+// ---------------------------------------------------------------------------
+TEST_F(FusionOptimizerMathTest, ElementwiseChainOpSequenceMatchesReference) {
+    auto a = full({2, 3}, 8.0f, DType::Float32, Device::cpu());
+    auto b = full({2, 3}, 2.0f, DType::Float32, Device::cpu());
+    auto c = full({2, 3}, 3.0f, DType::Float32, Device::cpu());
+    auto d = full({2, 3}, 4.0f, DType::Float32, Device::cpu());
+
+    FusedOp fused_op("elementwise_chain", {});
+
+    // 4-tensor: ((a / b) * c) - d = ((8/2)*3) - 4 = 8.  A plain add-fold would
+    // give 8+2+3+4 = 17, so this distinguishes the fixed path from the bug.
+    {
+        std::vector<Tensor> inputs = {a, b, c, d};
+        std::unordered_map<std::string, std::string> attrs = {
+            {"op_sequence", "div,mul,sub"}};
+        auto reference = sub(mul(div(a, b), c), d);
+        auto out = execute_fused_op(fused_op, inputs, attrs);
+        ASSERT_EQ(out.size(), 1u);
+        expect_close(out[0], reference, 1e-5, "elementwise_chain(op_sequence div,mul,sub)");
+    }
+
+    // 5-tensor with trailing relu activation: relu(((a - b) - c) - d) where
+    // the running value goes negative, exercising both a length-4 op_sequence
+    // and the activation hook.
+    {
+        auto e = full({2, 3}, 1.0f, DType::Float32, Device::cpu());
+        std::vector<Tensor> inputs = {a, b, c, d, e};  // 8,2,3,4,1
+        std::unordered_map<std::string, std::string> attrs = {
+            {"op_sequence", "sub,sub,sub,sub"}, {"activation", "relu"}};
+        // 8-2-3-4-1 = -2 ⇒ relu ⇒ 0
+        auto chain = sub(sub(sub(sub(a, b), c), d), e);
+        std::vector<Tensor> relu_in = {chain};
+        auto reference = dispatch(OpId::ReLU, relu_in)[0];
+        auto out = execute_fused_op(fused_op, inputs, attrs);
+        ASSERT_EQ(out.size(), 1u);
+        expect_close(out[0], reference, 1e-5, "elementwise_chain(op_sequence sub x4 + relu)");
+    }
+
+    // Guard: a >3 chain with no op_sequence must throw (cannot guess the ops),
+    // rather than silently summing.
+    {
+        std::vector<Tensor> inputs = {a, b, c, d};
+        std::unordered_map<std::string, std::string> attrs;
+        EXPECT_THROW(execute_fused_op(fused_op, inputs, attrs), std::runtime_error);
+    }
+}
+
+// ---------------------------------------------------------------------------
 // A.1 — attention must compute softmax(scores + mask) @ V, where the mask
 //       is additive (-inf at masked positions, 0 at kept positions).  The
 //       previous code applied softmax first then multiplied the mask,

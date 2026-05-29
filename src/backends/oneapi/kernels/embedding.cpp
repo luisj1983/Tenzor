@@ -1,4 +1,5 @@
 #include "tenzor/core/tensor.hpp"
+#include "tenzor/ops/creation.hpp"
 #include "tenzor/backend/backend.hpp"
 #include "../sycl_prefix_sum.hpp"
 #include <sycl/sycl.hpp>
@@ -339,7 +340,7 @@ inline uint16_t embag_f32_to_bf16(float f32) {
  */
 auto embedding_bag_forward_kernel(const Tensor& embeddings, const Tensor& offsets,
                                   const std::string& mode, bool include_last_offset,
-                                  sycl::queue& queue) -> Tensor {
+                                  sycl::queue& queue) -> std::vector<Tensor> {
     auto embeddings_shape = embeddings.shape();
     int64_t total_elements = embeddings_shape[0];
     int64_t embedding_dim = embeddings_shape[1];
@@ -361,6 +362,15 @@ auto embedding_bag_forward_kernel(const Tensor& embeddings, const Tensor& offset
     else if (mode == "mean") mode_enum = 1;
     else if (mode == "max") mode_enum = 2;
 
+    // For max mode, also emit the per-(bag,feature) GLOBAL argmax element index
+    // (-1 for empty bags), letting the autograd node route the gradient exactly
+    // on-device. Empty/unused otherwise.
+    Tensor max_indices = (mode_enum == 2)
+        ? tenzor::full({num_bags, embedding_dim}, static_cast<double>(-1),
+                       DType::Int64, embeddings.device())
+        : tenzor::zeros({0}, DType::Int64, embeddings.device());
+    int64_t* max_idx_ptr = (mode_enum == 2) ? get_data_ptr<int64_t>(max_indices) : nullptr;
+
     if (embeddings.dtype() == DType::Float32) {
         const float* embeddings_ptr = get_data_ptr<const float>(embeddings);
         float* output_ptr = get_data_ptr<float>(output);
@@ -378,12 +388,14 @@ auto embedding_bag_forward_kernel(const Tensor& embeddings, const Tensor& offset
 
                 float result = 0.0f;
                 bool first = true;
+                int64_t arg = start_idx;
                 for (int64_t i = start_idx; i < end_idx; ++i) {
                     float val = embeddings_ptr[i * embedding_dim + emb_dim_idx];
                     if (mode_enum == 0 || mode_enum == 1) { result += val; }
-                    else if (mode_enum == 2) { if (first || val > result) { result = val; first = false; } }
+                    else if (mode_enum == 2) { if (first || val > result) { result = val; arg = i; first = false; } }
                 }
                 if (mode_enum == 1 && bag_size > 0) { result /= bag_size; }
+                if (mode_enum == 2 && max_idx_ptr != nullptr) { max_idx_ptr[bag_idx * embedding_dim + emb_dim_idx] = arg; }
                 output_ptr[bag_idx * embedding_dim + emb_dim_idx] = result;
             }
         ).wait();
@@ -405,12 +417,14 @@ auto embedding_bag_forward_kernel(const Tensor& embeddings, const Tensor& offset
 
                 double result = 0.0;
                 bool first = true;
+                int64_t arg = start_idx;
                 for (int64_t i = start_idx; i < end_idx; ++i) {
                     double val = embeddings_ptr[i * embedding_dim + emb_dim_idx];
                     if (mode_enum == 0 || mode_enum == 1) { result += val; }
-                    else if (mode_enum == 2) { if (first || val > result) { result = val; first = false; } }
+                    else if (mode_enum == 2) { if (first || val > result) { result = val; arg = i; first = false; } }
                 }
                 if (mode_enum == 1 && bag_size > 0) { result /= bag_size; }
+                if (mode_enum == 2 && max_idx_ptr != nullptr) { max_idx_ptr[bag_idx * embedding_dim + emb_dim_idx] = arg; }
                 output_ptr[bag_idx * embedding_dim + emb_dim_idx] = result;
             }
         ).wait();
@@ -433,12 +447,14 @@ auto embedding_bag_forward_kernel(const Tensor& embeddings, const Tensor& offset
                 // Use float accumulator for precision
                 float result = 0.0f;
                 bool first = true;
+                int64_t arg = start_idx;
                 for (int64_t i = start_idx; i < end_idx; ++i) {
                     float val = static_cast<float>(embeddings_ptr[i * embedding_dim + emb_dim_idx]);
                     if (mode_enum == 0 || mode_enum == 1) { result += val; }
-                    else if (mode_enum == 2) { if (first || val > result) { result = val; first = false; } }
+                    else if (mode_enum == 2) { if (first || val > result) { result = val; arg = i; first = false; } }
                 }
                 if (mode_enum == 1 && bag_size > 0) { result /= bag_size; }
+                if (mode_enum == 2 && max_idx_ptr != nullptr) { max_idx_ptr[bag_idx * embedding_dim + emb_dim_idx] = arg; }
                 output_ptr[bag_idx * embedding_dim + emb_dim_idx] = sycl::half(result);
             }
         ).wait();
@@ -461,12 +477,14 @@ auto embedding_bag_forward_kernel(const Tensor& embeddings, const Tensor& offset
                 // Use float accumulator for precision
                 float result = 0.0f;
                 bool first = true;
+                int64_t arg = start_idx;
                 for (int64_t i = start_idx; i < end_idx; ++i) {
                     float val = embag_bf16_to_f32(embeddings_ptr[i * embedding_dim + emb_dim_idx]);
                     if (mode_enum == 0 || mode_enum == 1) { result += val; }
-                    else if (mode_enum == 2) { if (first || val > result) { result = val; first = false; } }
+                    else if (mode_enum == 2) { if (first || val > result) { result = val; arg = i; first = false; } }
                 }
                 if (mode_enum == 1 && bag_size > 0) { result /= bag_size; }
+                if (mode_enum == 2 && max_idx_ptr != nullptr) { max_idx_ptr[bag_idx * embedding_dim + emb_dim_idx] = arg; }
                 output_ptr[bag_idx * embedding_dim + emb_dim_idx] = embag_f32_to_bf16(result);
             }
         ).wait();
@@ -475,7 +493,7 @@ auto embedding_bag_forward_kernel(const Tensor& embeddings, const Tensor& offset
         throw std::runtime_error("Unsupported dtype for embedding_bag_forward_kernel");
     }
 
-    return output;
+    return {output, max_indices};
 }
 
 /**

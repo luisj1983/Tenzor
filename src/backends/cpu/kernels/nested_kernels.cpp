@@ -491,6 +491,15 @@ auto nested_mean_kernel(const Tensor& values, const Tensor& offsets,
 auto nested_attention_kernel(const Tensor& Q, const Tensor& K, const Tensor& V,
                               const Tensor& q_offsets, const Tensor& kv_offsets,
                               float scale, bool causal) -> Tensor {
+    // Float16 / BFloat16: widen to Float32, compute, narrow back.
+    if (Q.dtype() == DType::Float16 || Q.dtype() == DType::BFloat16) {
+        const DType orig = Q.dtype();
+        auto out = nested_attention_kernel(
+            Q.to(DType::Float32), K.to(DType::Float32), V.to(DType::Float32),
+            q_offsets, kv_offsets, scale, causal);
+        return out.to(orig);
+    }
+
     auto q_off_cpu = (q_offsets.device().type != Device::Type::CPU)
         ? q_offsets.to(Device::cpu()) : q_offsets;
     auto kv_off_cpu = (kv_offsets.device().type != Device::Type::CPU)
@@ -503,11 +512,12 @@ auto nested_attention_kernel(const Tensor& Q, const Tensor& K, const Tensor& V,
 
     auto output = tenzor::zeros({total_q, hd}, Q.dtype(), Q.device());
 
-    if (Q.dtype() == DType::Float32) {
-        const auto* q_ptr = Q.data<float>();
-        const auto* k_ptr = K.data<float>();
-        const auto* v_ptr = V.data<float>();
-        auto* o_ptr = output.data<float>();
+    auto run = [&]<typename T>(T*) {
+        const T sc = static_cast<T>(scale);
+        const auto* q_ptr = Q.data<T>();
+        const auto* k_ptr = K.data<T>();
+        const auto* v_ptr = V.data<T>();
+        auto* o_ptr = output.data<T>();
 
         #ifdef _OPENMP
         #pragma omp parallel for if(B > 2) schedule(dynamic)
@@ -520,36 +530,36 @@ auto nested_attention_kernel(const Tensor& Q, const Tensor& K, const Tensor& V,
             if (Lq <= 0 || Lkv <= 0) continue;
 
             for (int64_t qi = 0; qi < Lq; ++qi) {
-                const float* q_row = q_ptr + (qs + qi) * hd;
-                float* out_row = o_ptr + (qs + qi) * hd;
+                const T* q_row = q_ptr + (qs + qi) * hd;
+                T* out_row = o_ptr + (qs + qi) * hd;
 
                 // Online softmax attention
-                float max_score = -std::numeric_limits<float>::infinity();
-                float sum_exp = 0.0f;
+                T max_score = -std::numeric_limits<T>::infinity();
+                T sum_exp = T(0);
 
-                for (int64_t d = 0; d < hd; ++d) out_row[d] = 0.0f;
+                for (int64_t d = 0; d < hd; ++d) out_row[d] = T(0);
 
                 for (int64_t ki = 0; ki < Lkv; ++ki) {
                     if (causal && ki > qi) break;
 
-                    const float* k_row = k_ptr + (kvs + ki) * hd;
-                    const float* v_row = v_ptr + (kvs + ki) * hd;
+                    const T* k_row = k_ptr + (kvs + ki) * hd;
+                    const T* v_row = v_ptr + (kvs + ki) * hd;
 
-                    float score = 0.0f;
+                    T score = T(0);
                     for (int64_t d = 0; d < hd; ++d) {
                         score += q_row[d] * k_row[d];
                     }
-                    score *= scale;
+                    score *= sc;
 
                     if (score > max_score) {
-                        float correction = std::exp(max_score - score);
-                        sum_exp = sum_exp * correction + 1.0f;
+                        T correction = std::exp(max_score - score);
+                        sum_exp = sum_exp * correction + T(1);
                         for (int64_t d = 0; d < hd; ++d) {
                             out_row[d] = out_row[d] * correction + v_row[d];
                         }
                         max_score = score;
                     } else {
-                        float w = std::exp(score - max_score);
+                        T w = std::exp(score - max_score);
                         sum_exp += w;
                         for (int64_t d = 0; d < hd; ++d) {
                             out_row[d] += w * v_row[d];
@@ -557,17 +567,27 @@ auto nested_attention_kernel(const Tensor& Q, const Tensor& K, const Tensor& V,
                     }
                 }
 
-                if (sum_exp > 0.0f) {
-                    float inv = 1.0f / sum_exp;
+                if (sum_exp > T(0)) {
+                    T inv = T(1) / sum_exp;
                     for (int64_t d = 0; d < hd; ++d) {
                         out_row[d] *= inv;
                     }
                 }
             }
         }
-    } else {
-        throw std::runtime_error(
-            "nested_attention_kernel: only Float32 supported");
+    };
+
+    switch (Q.dtype()) {
+        case DType::Float32:
+            run(static_cast<float*>(nullptr));
+            break;
+        case DType::Float64:
+            run(static_cast<double*>(nullptr));
+            break;
+        default:
+            throw std::runtime_error(
+                "nested_attention_kernel: unsupported dtype "
+                "(only Float32/Float64/Float16/BFloat16)");
     }
 
     return output;

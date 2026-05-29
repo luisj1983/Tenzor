@@ -1012,8 +1012,15 @@ auto execute_fused_op(
         }
 
     } else if (fused_op.fused_op_name == "elementwise_chain") {
-        // Expected inputs: variable length, at least 2 tensors
-        // Attributes should contain "op_sequence" describing the chain
+        // Expected inputs: variable length, at least 2 tensors.
+        //
+        // The chain may be specified two ways:
+        //   (a) "op_sequence": comma-separated binary ops applied left-to-right,
+        //       exactly one per gap between inputs (length == inputs.size()-1).
+        //       Valid ops: add, mul, sub, div.  Correct for any chain length.
+        //   (b) "op_type" (legacy, 3-input only): 0 => (a+b)*c, 1 => (a*b)+c,
+        //       each followed by an implicit ReLU.
+        // An optional "activation" (relu/gelu/sigmoid/tanh) is applied last.
         if (inputs.size() < 2) {
             throw std::runtime_error(
                 "execute_fused_op: elementwise_chain requires at least 2 inputs, got " +
@@ -1021,15 +1028,65 @@ auto execute_fused_op(
             );
         }
 
-        // Parse operation type from attributes
-        int op_type = 0;  // Default: (a + b) * c with relu
-        auto op_type_it = attributes.find("op_type");
-        if (op_type_it != attributes.end()) {
-            op_type = std::stoi(op_type_it->second);
+        auto apply_binary = [](const std::string& op,
+                               const Tensor& a, const Tensor& b) -> Tensor {
+            if (op == "add") return add(a, b);
+            if (op == "mul") return mul(a, b);
+            if (op == "sub") return sub(a, b);
+            if (op == "div") return div(a, b);
+            throw std::runtime_error(
+                "execute_fused_op: elementwise_chain unsupported op '" + op +
+                "' in op_sequence (valid: add, mul, sub, div)");
+        };
+
+        auto apply_activation = [](const std::string& act, const Tensor& x) -> Tensor {
+            std::vector<Tensor> in = {x};
+            if (act == "relu")    return dispatch(OpId::ReLU, in)[0];
+            if (act == "gelu")    return dispatch(OpId::Gelu, in)[0];
+            if (act == "sigmoid") return dispatch(OpId::Sigmoid, in)[0];
+            if (act == "tanh")    return dispatch(OpId::TanhActivation, in)[0];
+            throw std::runtime_error(
+                "execute_fused_op: elementwise_chain unsupported activation '" +
+                act + "' (valid: relu, gelu, sigmoid, tanh)");
+        };
+
+        const auto activation_it = attributes.find("activation");
+
+        // (a) Explicit op_sequence — honors the matched op kinds at any length.
+        if (auto seq_it = attributes.find("op_sequence"); seq_it != attributes.end()) {
+            std::vector<std::string> ops;
+            std::stringstream ss(seq_it->second);
+            std::string token;
+            while (std::getline(ss, token, ',')) {
+                const size_t b = token.find_first_not_of(" \t");
+                if (b == std::string::npos) continue;
+                const size_t e = token.find_last_not_of(" \t");
+                ops.push_back(token.substr(b, e - b + 1));
+            }
+            if (ops.size() != inputs.size() - 1) {
+                throw std::runtime_error(
+                    "execute_fused_op: elementwise_chain op_sequence length (" +
+                    std::to_string(ops.size()) + ") must equal inputs-1 (" +
+                    std::to_string(inputs.size() - 1) + ")"
+                );
+            }
+            Tensor result = inputs[0];
+            for (size_t i = 0; i < ops.size(); ++i) {
+                result = apply_binary(ops[i], result, inputs[i + 1]);
+            }
+            if (activation_it != attributes.end()) {
+                result = apply_activation(activation_it->second, result);
+            }
+            return {result};
         }
 
-        // For 3-tensor chains, use optimized fusion
+        // (b) Legacy op_type fast path (3 inputs only) with implicit trailing ReLU.
         if (inputs.size() == 3) {
+            int op_type = 0;  // Default: ReLU((a + b) * c)
+            if (auto op_type_it = attributes.find("op_type");
+                op_type_it != attributes.end()) {
+                op_type = std::stoi(op_type_it->second);
+            }
             Tensor result;
             switch (op_type) {
                 case 0:  // ReLU((a + b) * c)
@@ -1048,20 +1105,14 @@ auto execute_fused_op(
             return {dispatch(OpId::ReLU, relu_inputs)[0]};
         }
 
-        // For longer chains, compose element-wise add sequentially.
-        Tensor result = inputs[0];
-        for (size_t i = 1; i < inputs.size(); ++i) {
-            result = add(result, inputs[i]);
-        }
-
-        // Apply final activation if specified
-        auto activation_it = attributes.find("activation");
-        if (activation_it != attributes.end() && activation_it->second == "relu") {
-            std::vector<Tensor> relu_inputs = {result};
-            return {dispatch(OpId::ReLU, relu_inputs)[0]};
-        }
-
-        return {result};
+        // No op_sequence and not the legacy 3-input form: the per-step op kinds
+        // are unknown, so folding with a single op would be silently wrong.
+        // Require the caller to specify the chain explicitly.
+        throw std::runtime_error(
+            "execute_fused_op: elementwise_chain with " + std::to_string(inputs.size()) +
+            " inputs requires an \"op_sequence\" attribute (comma-separated "
+            "add/mul/sub/div, one per gap between inputs)"
+        );
 
     } else if (fused_op.fused_op_name == "attention") {
         // Expected inputs: [Q, K, V] or [Q, K, V, mask].

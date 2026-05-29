@@ -2756,8 +2756,10 @@ void register_nn(py::module_& m) {
     }, py::arg("input"), py::arg("num_features"),
        py::arg("eps") = 1e-5, py::arg("affine") = false,
        py::arg("weight") = py::none(), py::arg("bias") = py::none(),
-       "Apply instance normalization. weight/bias are optional Variables "
-       "([C]); when provided their gradients flow.",
+       "Apply instance normalization. The ``affine`` argument is a legacy no-op "
+       "kept for signature compatibility — affine behaviour is controlled "
+       "entirely by supplying ``weight``/``bias`` (optional Variables of shape "
+       "[C]); when provided their gradients flow.",
        py::call_guard<py::gil_scoped_release>());
 
     nn.def("functional_rms_norm", [apply_affine_trailing](

@@ -31,9 +31,11 @@ drop-in replacement:
   construction; do **not** assume ``dist.loc`` is still a numpy array.
 * ``sample(()), sample(())`` and ``rsample`` return Tenzor objects, not
   numpy arrays.
-* Reparameterisation for ``Gamma`` / ``Beta`` / ``Dirichlet`` /
-  ``StudentT`` / ``Chi2`` is not implemented yet — those distributions
-  have ``has_rsample = False``.
+* Reparameterised sampling is implemented for ``Gamma`` / ``Beta`` /
+  ``Dirichlet`` / ``StudentT`` / ``Chi2`` (``has_rsample = True``): ``Gamma``
+  uses implicit reparameterisation gradients (Figurnov et al. 2018) and the
+  others compose it, so gradients flow through ``rsample`` to the
+  distribution parameters.
 
 Example::
 

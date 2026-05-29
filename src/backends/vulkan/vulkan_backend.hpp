@@ -840,7 +840,7 @@ public:
     // EmbeddingBag operation
     auto dispatchEmbeddingBag(const Tensor& embeddings, const Tensor& offsets,
                                int64_t embedding_dim, const std::string& mode,
-                               bool include_last_offset) -> Tensor;
+                               bool include_last_offset) -> std::vector<Tensor>;
     auto dispatchEmbeddingBagBackward(const Tensor& grad_output, const Tensor& indices,
                                        const Tensor& offsets, int64_t num_embeddings,
                                        int64_t embedding_dim, const std::string& mode,

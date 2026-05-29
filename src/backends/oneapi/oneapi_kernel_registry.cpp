@@ -649,7 +649,7 @@ namespace oneapi {
                                    sycl::queue& queue) -> Tensor;
     auto embedding_bag_forward_kernel(const Tensor& embeddings, const Tensor& offsets,
                                       const std::string& mode, bool include_last_offset,
-                                      sycl::queue& queue) -> Tensor;
+                                      sycl::queue& queue) -> std::vector<Tensor>;
     auto embedding_bag_backward_kernel(const Tensor& grad_output, const Tensor& indices,
                                        const Tensor& offsets, const OpAttributes& attrs,
                                        sycl::queue& queue) -> Tensor;
@@ -4264,8 +4264,9 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
             std::string mode = std::string(attrs.get_string(AttrKey::Mode, "mean"));
             bool include_last_offset = attrs.get_bool(AttrKey::IncludeLastOffset, false);
-            return {oneapi::embedding_bag_forward_kernel(inputs[0], inputs[1], mode,
-                                                         include_last_offset, get_q(inputs))};
+            // Returns {output, max_indices} (max_indices used by max-mode backward).
+            return oneapi::embedding_bag_forward_kernel(inputs[0], inputs[1], mode,
+                                                        include_last_offset, get_q(inputs));
         });
 
     table.register_kernel(OpId::EmbeddingBagBackward,

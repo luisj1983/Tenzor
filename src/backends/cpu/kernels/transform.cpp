@@ -827,6 +827,43 @@ auto to_memory_format_kernel(const Tensor& input, MemoryFormat format) -> Tensor
         return output;
     }
 
+    if (format == MemoryFormat::ChannelsLast3d && ndim == 5) {
+        // NCDHW -> NDHWC: reorder data and set channels-last-3d strides so the
+        // result actually carries the requested layout (previously this fell
+        // through to a plain row-major contiguous tensor — a silent wrong layout).
+        int64_t N = shape[0], C = shape[1], D = shape[2], H = shape[3], W = shape[4];
+        std::vector<int64_t> out_shape = {N, C, D, H, W};
+        // NDHWC strides: stride order N>D>H>W>C.
+        std::vector<int64_t> ndhwc_strides = {C * D * H * W, 1, H * W * C, W * C, C};
+
+        Tensor output(out_shape, input.dtype(), input.device());
+        const size_t elem_size = dtype_size(input.dtype());
+
+        Tensor cont = input.is_contiguous() ? input : contiguous_kernel(input);
+        const auto* src = static_cast<const uint8_t*>(cont.storage()->data());
+        auto* dst = static_cast<uint8_t*>(output.storage()->data());
+
+        // Reorder data from NCDHW to NDHWC
+        #pragma omp parallel for collapse(2) if(N * C * D * H * W > ::tenzor::OmpThresholds::simple())
+        for (int64_t n = 0; n < N; ++n) {
+            for (int64_t c = 0; c < C; ++c) {
+                for (int64_t d = 0; d < D; ++d) {
+                    for (int64_t h = 0; h < H; ++h) {
+                        for (int64_t w = 0; w < W; ++w) {
+                            int64_t src_idx = (((n * C + c) * D + d) * H + h) * W + w;
+                            int64_t dst_idx = (((n * D + d) * H + h) * W + w) * C + c;
+                            std::memcpy(dst + dst_idx * elem_size,
+                                        src + src_idx * elem_size, elem_size);
+                        }
+                    }
+                }
+            }
+        }
+
+        output.mutable_strides() = ndhwc_strides;
+        return output;
+    }
+
     // Fallback: just make contiguous
     return contiguous_kernel(input);
 }

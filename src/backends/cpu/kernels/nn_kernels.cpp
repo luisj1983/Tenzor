@@ -979,7 +979,7 @@ auto embedding_backward_kernel(const Tensor& grad_output, const Tensor& indices,
 // inputs[1] = offsets tensor [num_bags] (int64_t)
 // attrs: Mode ("sum"/"mean"/"max"), EmbeddingDim, IncludeLastOffset
 auto embedding_bag_forward_kernel(std::span<const Tensor> inputs,
-                                   const OpAttributes& attrs) -> Tensor {
+                                   const OpAttributes& attrs) -> std::vector<Tensor> {
     const auto& embeddings = inputs[0];
     const auto& offsets = inputs[1];
 
@@ -998,52 +998,31 @@ auto embedding_bag_forward_kernel(std::span<const Tensor> inputs,
 
     auto output = zeros({num_bags, embedding_dim}, embeddings.dtype(), embeddings.device());
 
-    if (embeddings.dtype() == DType::Float32) {
-        const float* emb_ptr = embeddings.data<float>();
-        float* out_ptr = output.data<float>();
+    // For max mode we also produce, per (bag, feature), the GLOBAL element index
+    // in [0, total_elements) that achieved the maximum (-1 for empty bags). The
+    // backward routes the gradient to exactly that element using a strict '>'
+    // first-wins tie-break, which makes max-mode backward exact on every device
+    // (the autograd node scatters by these indices — no CPU round-trip).
+    const bool produce_argmax = (mode == "max");
+    Tensor max_indices = produce_argmax
+        ? full({num_bags, embedding_dim}, static_cast<int64_t>(-1),
+               DType::Int64, embeddings.device())
+        : zeros({0}, DType::Int64, embeddings.device());
+    int64_t* max_idx_ptr = produce_argmax ? max_indices.data<int64_t>() : nullptr;
 
-        #pragma omp parallel for if(num_bags > 16)
-        for (int64_t bag = 0; bag < num_bags; ++bag) {
-            int64_t start = offsets_ptr[bag];
-            int64_t end;
-            if (bag + 1 < offsets.numel()) {
-                end = offsets_ptr[bag + 1];
-            } else {
-                end = total_elements;
-            }
-            int64_t bag_size = end - start;
-            if (bag_size <= 0) continue;
+    // Float16/BFloat16: upcast to Float32, compute, downcast the output. The
+    // Int64 argmax indices are dtype-independent and pass through unchanged.
+    if (embeddings.dtype() == DType::Float16 || embeddings.dtype() == DType::BFloat16) {
+        const DType orig = embeddings.dtype();
+        auto emb_f32 = embeddings.to(DType::Float32);
+        std::array<Tensor, 2> f32_inputs = {emb_f32, offsets};
+        auto result = embedding_bag_forward_kernel(f32_inputs, attrs);
+        return {result[0].to(orig), result[1]};
+    }
 
-            float* bag_out = out_ptr + bag * embedding_dim;
-
-            if (mode == "sum" || mode == "mean") {
-                for (int64_t i = start; i < end; ++i) {
-                    const float* row = emb_ptr + i * embedding_dim;
-                    for (int64_t j = 0; j < embedding_dim; ++j) {
-                        bag_out[j] += row[j];
-                    }
-                }
-                if (mode == "mean") {
-                    for (int64_t j = 0; j < embedding_dim; ++j) {
-                        bag_out[j] /= bag_size;
-                    }
-                }
-            } else { // max
-                const float* first = emb_ptr + start * embedding_dim;
-                for (int64_t j = 0; j < embedding_dim; ++j) {
-                    bag_out[j] = first[j];
-                }
-                for (int64_t i = start + 1; i < end; ++i) {
-                    const float* row = emb_ptr + i * embedding_dim;
-                    for (int64_t j = 0; j < embedding_dim; ++j) {
-                        if (row[j] > bag_out[j]) bag_out[j] = row[j];
-                    }
-                }
-            }
-        }
-    } else if (embeddings.dtype() == DType::Float64) {
-        const double* emb_ptr = embeddings.data<double>();
-        double* out_ptr = output.data<double>();
+    auto run = [&]<typename T>(T*) {
+        const T* emb_ptr = embeddings.data<T>();
+        T* out_ptr = output.data<T>();
 
         #pragma omp parallel for if(num_bags > 16)
         for (int64_t bag = 0; bag < num_bags; ++bag) {
@@ -1052,39 +1031,54 @@ auto embedding_bag_forward_kernel(std::span<const Tensor> inputs,
             int64_t bag_size = end - start;
             if (bag_size <= 0) continue;
 
-            double* bag_out = out_ptr + bag * embedding_dim;
+            T* bag_out = out_ptr + bag * embedding_dim;
+
             if (mode == "sum" || mode == "mean") {
                 for (int64_t i = start; i < end; ++i) {
-                    const double* row = emb_ptr + i * embedding_dim;
+                    const T* row = emb_ptr + i * embedding_dim;
                     for (int64_t j = 0; j < embedding_dim; ++j) {
                         bag_out[j] += row[j];
                     }
                 }
                 if (mode == "mean") {
                     for (int64_t j = 0; j < embedding_dim; ++j) {
-                        bag_out[j] /= bag_size;
+                        bag_out[j] /= static_cast<T>(bag_size);
                     }
                 }
-            } else {
-                const double* first = emb_ptr + start * embedding_dim;
-                for (int64_t j = 0; j < embedding_dim; ++j) bag_out[j] = first[j];
+            } else { // max
+                int64_t* bag_arg = max_idx_ptr + bag * embedding_dim;
+                const T* first = emb_ptr + start * embedding_dim;
+                for (int64_t j = 0; j < embedding_dim; ++j) {
+                    bag_out[j] = first[j];
+                    bag_arg[j] = start;
+                }
                 for (int64_t i = start + 1; i < end; ++i) {
-                    const double* row = emb_ptr + i * embedding_dim;
+                    const T* row = emb_ptr + i * embedding_dim;
                     for (int64_t j = 0; j < embedding_dim; ++j) {
-                        if (row[j] > bag_out[j]) bag_out[j] = row[j];
+                        if (row[j] > bag_out[j]) {
+                            bag_out[j] = row[j];
+                            bag_arg[j] = i;
+                        }
                     }
                 }
             }
         }
-    } else {
-        // Float16/BFloat16: upcast to Float32, compute, downcast
-        auto emb_f32 = embeddings.to(DType::Float32);
-        std::array<Tensor, 2> f32_inputs = {emb_f32, offsets};
-        auto result = embedding_bag_forward_kernel(f32_inputs, attrs);
-        return result.to(embeddings.dtype());
+    };
+
+    switch (embeddings.dtype()) {
+        case DType::Float32:
+            run(static_cast<float*>(nullptr));
+            break;
+        case DType::Float64:
+            run(static_cast<double*>(nullptr));
+            break;
+        default:
+            throw std::runtime_error(
+                "embedding_bag_forward: unsupported dtype " +
+                std::string(dtype_name(embeddings.dtype())));
     }
 
-    return output;
+    return {output, max_indices};
 }
 
 // ============================================================================
@@ -1103,6 +1097,7 @@ auto embedding_bag_forward_kernel(std::span<const Tensor> inputs,
 auto embedding_bag_backward_kernel(const Tensor& grad_output,
                                    const Tensor& indices,
                                    const Tensor& offsets,
+                                   const Tensor& max_indices,
                                    const OpAttributes& attrs) -> Tensor {
     int64_t num_embeddings = attrs.get_int(AttrKey::NumEmbeddings, 0);
     int64_t embedding_dim = attrs.get_int(AttrKey::EmbeddingDim, 0);
@@ -1115,20 +1110,6 @@ auto embedding_bag_backward_kernel(const Tensor& grad_output,
             std::string(dtype_name(indices.dtype())));
     }
 
-    // Exact max-mode backward needs the per-feature argmax over each bag, which
-    // depends on the embedding VALUES — not available from (grad_output,
-    // indices, offsets) alone. Routing the bag gradient to every row (the old
-    // behaviour) is silently wrong. nn::EmbeddingBag's autograd node computes
-    // the correct max gradient by recomputing the argmax from saved embeddings;
-    // callers needing max-mode must use that path.
-    if (mode == "max") {
-        throw std::runtime_error(
-            "embedding_bag_backward (OpId dispatch) does not support mode=\"max\": "
-            "exact max-mode gradient requires the per-feature argmax computed "
-            "from the embedding values. Use the nn::EmbeddingBag layer, whose "
-            "autograd node handles max-mode correctly.");
-    }
-
     int64_t total_elements = indices.numel();
     int64_t num_bags = offsets.numel();
     const int64_t* offsets_ptr = offsets.data<int64_t>();
@@ -1136,6 +1117,62 @@ auto embedding_bag_backward_kernel(const Tensor& grad_output,
 
     if (include_last_offset && num_bags > 0) {
         num_bags -= 1;
+    }
+
+    // Exact max-mode backward: the forward kernel emits, per (bag, feature), the
+    // GLOBAL element index that achieved the maximum (`max_indices`). The
+    // gradient routes only to that element's vocabulary row. This is exact on
+    // any device (no embedding-value recomputation needed here).
+    if (mode == "max") {
+        if (grad_output.dtype() == DType::Float16 ||
+            grad_output.dtype() == DType::BFloat16) {
+            auto go_f32 = grad_output.to(DType::Float32);
+            auto result = embedding_bag_backward_kernel(
+                go_f32, indices, offsets, max_indices, attrs);
+            return result.to(grad_output.dtype());
+        }
+        if (!max_indices.is_valid() || max_indices.numel() == 0) {
+            throw std::runtime_error(
+                "embedding_bag_backward: mode=\"max\" requires the per-feature "
+                "argmax indices (4th input) produced by EmbeddingBagForward.");
+        }
+        if (max_indices.dtype() != DType::Int64) {
+            throw std::runtime_error(
+                "embedding_bag_backward: max_indices must be Int64");
+        }
+        const int64_t* argmax_ptr = max_indices.data<int64_t>();
+        auto grad_weight = zeros({num_embeddings, embedding_dim},
+                                 grad_output.dtype(), grad_output.device());
+
+        auto scatter_max = [&](auto* gw_data, const auto* go_data) {
+            for (int64_t bag = 0; bag < num_bags; ++bag) {
+                for (int64_t j = 0; j < embedding_dim; ++j) {
+                    int64_t elem = argmax_ptr[bag * embedding_dim + j];
+                    if (elem < 0) continue;  // empty bag — no contribution
+                    if (elem >= total_elements) {
+                        throw std::runtime_error(
+                            "embedding_bag_backward: max index out of range");
+                    }
+                    int64_t row = indices_ptr[elem];
+                    if (row < 0 || row >= num_embeddings) {
+                        throw std::runtime_error(
+                            "embedding_bag_backward: index " + std::to_string(row) +
+                            " out of range [0, " + std::to_string(num_embeddings) + ")");
+                    }
+                    gw_data[row * embedding_dim + j] += go_data[bag * embedding_dim + j];
+                }
+            }
+        };
+        if (grad_output.dtype() == DType::Float32) {
+            scatter_max(grad_weight.data<float>(), grad_output.data<float>());
+        } else if (grad_output.dtype() == DType::Float64) {
+            scatter_max(grad_weight.data<double>(), grad_output.data<double>());
+        } else {
+            throw std::runtime_error(
+                "embedding_bag_backward: unsupported grad_output dtype " +
+                std::string(dtype_name(grad_output.dtype())));
+        }
+        return grad_weight;
     }
 
     // grad_output: [num_bags, embedding_dim]
@@ -1184,7 +1221,7 @@ auto embedding_bag_backward_kernel(const Tensor& grad_output,
                grad_output.dtype() == DType::BFloat16) {
         // Float16/BFloat16: upcast to Float32 (indices stays Int64)
         auto go_f32 = grad_output.to(DType::Float32);
-        auto result = embedding_bag_backward_kernel(go_f32, indices, offsets, attrs);
+        auto result = embedding_bag_backward_kernel(go_f32, indices, offsets, max_indices, attrs);
         return result.to(grad_output.dtype());
     } else {
         throw std::runtime_error(
