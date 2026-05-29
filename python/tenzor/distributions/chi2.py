@@ -20,9 +20,8 @@ from .distribution import (
 class Chi2(Distribution):
     """``Chi2(df)`` — chi-squared distribution.
 
-    ``Chi2(df) = Gamma(df/2, 1/2)``.  Reparameterisation routes through
-    Gamma, which Tenzor does not yet expose with autograd; therefore
-    ``has_rsample = False``.
+    ``Chi2(df) = Gamma(df/2, 1/2)``.  ``rsample`` is reparameterised via the
+    Gamma sampler, so gradients flow to ``df``. ``has_rsample = True``.
     """
 
     has_rsample = True

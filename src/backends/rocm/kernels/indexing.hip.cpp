@@ -2282,6 +2282,7 @@ __global__ void embedding_bag_max_kernel_hip(
     const T* embeddings,
     const int64_t* offsets,
     T* output,
+    int64_t* max_indices,   // [num_bags, embedding_dim] global argmax element index
     int64_t num_bags,
     int64_t total_elements,
     int64_t embedding_dim,
@@ -2293,15 +2294,17 @@ __global__ void embedding_bag_max_kernel_hip(
     int64_t start = offsets[bag];
     int64_t end = (bag + 1 < offsets_size) ? offsets[bag + 1] : total_elements;
 
-    if (start >= end) return;
+    if (start >= end) return;  // empty bag: max_indices stays at its -1 prefill
 
     for (int64_t j = threadIdx.x; j < embedding_dim; j += blockDim.x) {
         T max_val = embeddings[start * embedding_dim + j];
+        int64_t arg = start;
         for (int64_t i = start + 1; i < end; ++i) {
             T val = embeddings[i * embedding_dim + j];
-            if (val > max_val) max_val = val;
+            if (val > max_val) { max_val = val; arg = i; }  // strict '>': first wins
         }
         output[bag * embedding_dim + j] = max_val;
+        if (max_indices != nullptr) max_indices[bag * embedding_dim + j] = arg;
     }
 }
 
@@ -2344,6 +2347,7 @@ __global__ void embedding_bag_max_kernel_hip_bf16(
     const hip_bfloat16* embeddings,
     const int64_t* offsets,
     hip_bfloat16* output,
+    int64_t* max_indices,   // [num_bags, embedding_dim] global argmax element index
     int64_t num_bags,
     int64_t total_elements,
     int64_t embedding_dim,
@@ -2354,30 +2358,36 @@ __global__ void embedding_bag_max_kernel_hip_bf16(
 
     int64_t start = offsets[bag];
     int64_t end = (bag + 1 < offsets_size) ? offsets[bag + 1] : total_elements;
-    if (start >= end) return;
+    if (start >= end) return;  // empty bag: max_indices stays at its -1 prefill
 
     for (int64_t j = threadIdx.x; j < embedding_dim; j += blockDim.x) {
         float max_val = static_cast<float>(embeddings[start * embedding_dim + j]);
+        int64_t arg = start;
         for (int64_t i = start + 1; i < end; ++i) {
             float val = static_cast<float>(embeddings[i * embedding_dim + j]);
-            if (val > max_val) max_val = val;
+            if (val > max_val) { max_val = val; arg = i; }  // strict '>': first wins
         }
         // S.10: max over a bag is exact in float32 but the back-cast still
         // needs RNE rounding to avoid the truncating-ctor bias documented
         // in R.11.
         output[bag * embedding_dim + j] = tenzor::rocm::f32_to_bf16_rne(max_val);
+        if (max_indices != nullptr) max_indices[bag * embedding_dim + j] = arg;
     }
 }
 
 auto embedding_bag_forward_kernel(const Tensor& embeddings, const Tensor& offsets,
                                    const std::string& mode, int64_t embedding_dim,
-                                   bool include_last_offset, hipStream_t stream) -> Tensor {
+                                   bool include_last_offset, hipStream_t stream) -> std::vector<Tensor> {
     int64_t total_elements = embeddings.shape()[0];
     int64_t offsets_size = offsets.numel();
     int64_t num_bags = include_last_offset ? (offsets_size - 1) : offsets_size;
 
+    bool is_mean = (mode == "mean");
+    bool is_max = (mode == "max");
+
     if (num_bags <= 0) {
-        return Tensor({0, embedding_dim}, embeddings.dtype(), embeddings.device());
+        return {Tensor({0, embedding_dim}, embeddings.dtype(), embeddings.device()),
+                tenzor::zeros({0}, DType::Int64, embeddings.device())};
     }
 
     // Create zero-initialized output
@@ -2385,11 +2395,17 @@ auto embedding_bag_forward_kernel(const Tensor& embeddings, const Tensor& offset
     HIP_CHECK(hipMemsetAsync(output.data_ptr(), 0,
                              num_bags * embedding_dim * dtype_size(embeddings.dtype()), stream));
 
+    // For max mode, also emit the per-(bag,feature) GLOBAL argmax element index
+    // (-1 for empty bags), so the autograd node routes the gradient exactly
+    // on-device. Empty/unused otherwise.
+    Tensor max_indices = is_max
+        ? tenzor::full({num_bags, embedding_dim}, static_cast<double>(-1),
+                       DType::Int64, embeddings.device())
+        : tenzor::zeros({0}, DType::Int64, embeddings.device());
+    int64_t* argmax_ptr = is_max ? max_indices.data<int64_t>() : nullptr;
+
     int threads = std::min(static_cast<int>(embedding_dim), 256);
     int blocks = static_cast<int>(num_bags);
-
-    bool is_mean = (mode == "mean");
-    bool is_max = (mode == "max");
 
     switch (embeddings.dtype()) {
         case DType::Float32:
@@ -2397,7 +2413,7 @@ auto embedding_bag_forward_kernel(const Tensor& embeddings, const Tensor& offset
                 hipLaunchKernelGGL(embedding_bag_max_kernel_hip<float>,
                     dim3(blocks), dim3(threads), 0, stream,
                     embeddings.data<float>(), offsets.data<int64_t>(),
-                    output.data<float>(), num_bags, total_elements,
+                    output.data<float>(), argmax_ptr, num_bags, total_elements,
                     embedding_dim, offsets_size);
                 HIP_POST_LAUNCH_CHECK();
             } else {
@@ -2414,7 +2430,7 @@ auto embedding_bag_forward_kernel(const Tensor& embeddings, const Tensor& offset
                 hipLaunchKernelGGL(embedding_bag_max_kernel_hip<double>,
                     dim3(blocks), dim3(threads), 0, stream,
                     embeddings.data<double>(), offsets.data<int64_t>(),
-                    output.data<double>(), num_bags, total_elements,
+                    output.data<double>(), argmax_ptr, num_bags, total_elements,
                     embedding_dim, offsets_size);
                 HIP_POST_LAUNCH_CHECK();
             } else {
@@ -2433,7 +2449,7 @@ auto embedding_bag_forward_kernel(const Tensor& embeddings, const Tensor& offset
                     reinterpret_cast<const __half*>(embeddings.data_ptr()),
                     offsets.data<int64_t>(),
                     reinterpret_cast<__half*>(output.data_ptr()),
-                    num_bags, total_elements, embedding_dim, offsets_size);
+                    argmax_ptr, num_bags, total_elements, embedding_dim, offsets_size);
                 HIP_POST_LAUNCH_CHECK();
             } else {
                 hipLaunchKernelGGL(embedding_bag_sum_kernel_hip<__half>,
@@ -2452,7 +2468,7 @@ auto embedding_bag_forward_kernel(const Tensor& embeddings, const Tensor& offset
                     reinterpret_cast<const hip_bfloat16*>(embeddings.data_ptr()),
                     offsets.data<int64_t>(),
                     reinterpret_cast<hip_bfloat16*>(output.data_ptr()),
-                    num_bags, total_elements, embedding_dim, offsets_size);
+                    argmax_ptr, num_bags, total_elements, embedding_dim, offsets_size);
                 HIP_POST_LAUNCH_CHECK();
             } else {
                 hipLaunchKernelGGL(embedding_bag_sum_kernel_hip_bf16,
@@ -2469,7 +2485,7 @@ auto embedding_bag_forward_kernel(const Tensor& embeddings, const Tensor& offset
     }
 
     HIP_POST_LAUNCH_CHECK();
-    return output;
+    return {output, max_indices};
 }
 
 // ==============================================================================

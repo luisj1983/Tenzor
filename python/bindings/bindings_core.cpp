@@ -5273,26 +5273,57 @@ Returns:
                             continue;
                         }
                         if (entry.kind == TupleKind::BoolMask) {
+                            // Mirrors the Tensor-path semantics (S22): a rank-K
+                            // bool mask at this tuple position consumes K
+                            // consecutive dims and contributes its True positions
+                            // as one flattened result dim. All ops have Variable
+                            // overloads so grad_fn back to ``self`` survives.
                             auto shape = result.tensor().shape();
-                            if (dim_cursor >= shape.size()) {
-                                throw std::out_of_range("Bool mask: too many indices");
+                            int64_t mask_rank = static_cast<int64_t>(entry.mask.shape().size());
+                            if (mask_rank == 0) {
+                                throw std::runtime_error("Bool tuple-mask must have rank >= 1");
                             }
-                            if (entry.mask.shape().size() != 1) {
-                                throw std::runtime_error(
-                                    "Bool tuple-mask must be 1-D; multi-D masks not yet supported in tuple path");
+                            if (dim_cursor + static_cast<size_t>(mask_rank) > shape.size()) {
+                                throw std::out_of_range(
+                                    "Bool mask: rank exceeds remaining tensor dims at this position");
                             }
-                            if (entry.mask.shape()[0] != shape[dim_cursor]) {
-                                throw std::runtime_error(
-                                    "Bool mask length does not match tensor dim at this position");
+                            for (int64_t d = 0; d < mask_rank; ++d) {
+                                if (entry.mask.shape()[d] != shape[dim_cursor + static_cast<size_t>(d)]) {
+                                    throw std::runtime_error(
+                                        "Bool mask shape does not match tensor dims at this position");
+                                }
                             }
-                            // Equivalent to torch's per-dim bool select:
-                            // index_select(result, dim, nonzero(mask).squeeze(1)).
-                            // index_select has a Variable overload so grad_fn
-                            // back to ``self`` survives.
-                            auto nz = ::tenzor::nonzero(entry.mask).squeeze(1);
-                            result = ::tenzor::index_select(result, static_cast<int64_t>(dim_cursor), nz);
-                            dim_cursor++;
-                            remaining_consuming--;  // NN.22
+                            if (mask_rank == 1) {
+                                auto nz = ::tenzor::nonzero(entry.mask).squeeze(1);
+                                result = ::tenzor::index_select(result, static_cast<int64_t>(dim_cursor), nz);
+                                dim_cursor++;
+                                remaining_consuming--;  // NN.22
+                                continue;
+                            }
+                            // N-D mask: flatten the K consumed dims into one, run a
+                            // 1-D index_select on the flattened dim (reshape on a
+                            // Variable copies when non-contiguous and preserves the
+                            // grad graph via ReshapeBackward).
+                            std::vector<int64_t> new_shape;
+                            new_shape.reserve(shape.size() - static_cast<size_t>(mask_rank) + 1);
+                            for (size_t d = 0; d < dim_cursor; ++d) {
+                                new_shape.push_back(shape[d]);
+                            }
+                            int64_t flat_dim = 1;
+                            for (int64_t d = 0; d < mask_rank; ++d) {
+                                flat_dim *= shape[dim_cursor + static_cast<size_t>(d)];
+                            }
+                            new_shape.push_back(flat_dim);
+                            for (size_t d = dim_cursor + static_cast<size_t>(mask_rank); d < shape.size(); ++d) {
+                                new_shape.push_back(shape[d]);
+                            }
+                            auto flat_result = ::tenzor::reshape(result, new_shape);
+                            auto flat_mask = entry.mask.contiguous().reshape({flat_dim});
+                            auto nz = ::tenzor::nonzero(flat_mask).squeeze(1);
+                            result = ::tenzor::index_select(flat_result,
+                                                            static_cast<int64_t>(dim_cursor), nz);
+                            dim_cursor++;  // consumed K dims, produced 1 dim
+                            remaining_consuming--;
                             continue;
                         }
                         if (entry.kind == TupleKind::Int) {

@@ -170,7 +170,7 @@ namespace oneapi {
                                   sycl::queue& queue) -> Tensor;
     auto embedding_bag_forward_kernel(const Tensor& embeddings, const Tensor& offsets,
                                      const std::string& mode, bool include_last_offset,
-                                     sycl::queue& queue) -> Tensor;
+                                     sycl::queue& queue) -> std::vector<Tensor>;
     auto embedding_renorm_kernel(Tensor& weights, const Tensor& indices,
                                 double max_norm, double norm_type,
                                 sycl::queue& queue) -> void;

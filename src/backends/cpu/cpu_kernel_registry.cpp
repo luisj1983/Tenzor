@@ -495,9 +495,10 @@ namespace cpu {
     // Embedding
     auto embedding_kernel(const Tensor& weight, const Tensor& indices, int64_t padding_idx = -1) -> Tensor;
     auto embedding_backward_kernel(const Tensor& grad_output, const Tensor& indices, int64_t num_embeddings) -> Tensor;
-    auto embedding_bag_forward_kernel(std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor;
+    auto embedding_bag_forward_kernel(std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor>;
     auto embedding_bag_backward_kernel(const Tensor& grad_output, const Tensor& indices,
-                                       const Tensor& offsets, const OpAttributes& attrs) -> Tensor;
+                                       const Tensor& offsets, const Tensor& max_indices,
+                                       const OpAttributes& attrs) -> Tensor;
 
     // Linear
     auto linear_kernel(const Tensor& input, const Tensor& weight, const Tensor* bias) -> Tensor;
@@ -2424,15 +2425,22 @@ static void register_cpu_kernels_embedding_dropout(BackendDispatchTable& table) 
         return std::vector<Tensor>{cpu::embedding_backward_kernel(inputs[0], inputs[1], num_embeddings)};
     });
 
-    table.register_single_output_kernel(OpId::EmbeddingBagForward,
-        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+    // Forward returns {output, max_indices}. max_indices is the per-(bag,feature)
+    // global argmax element index for mode="max" (empty for sum/mean), used by
+    // the backward to route the max gradient exactly.
+    table.register_kernel(OpId::EmbeddingBagForward,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
             return cpu::embedding_bag_forward_kernel(inputs, attrs);
         });
 
     table.register_single_output_kernel(OpId::EmbeddingBagBackward,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
-            // inputs[0] = grad_output, inputs[1] = indices (Int64), inputs[2] = offsets
-            return cpu::embedding_bag_backward_kernel(inputs[0], inputs[1], inputs[2], attrs);
+            // inputs[0] = grad_output, inputs[1] = indices (Int64), inputs[2] = offsets,
+            // inputs[3] = max_indices (Int64, max mode only; optional otherwise)
+            const Tensor empty;
+            const Tensor& max_indices = inputs.size() > 3 ? inputs[3] : empty;
+            return cpu::embedding_bag_backward_kernel(inputs[0], inputs[1], inputs[2],
+                                                      max_indices, attrs);
         });
 
     // CTC loss (audit Phase 3.7): outputs [loss_per_sample, raw_grad].

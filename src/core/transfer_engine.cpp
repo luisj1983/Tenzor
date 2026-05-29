@@ -677,30 +677,82 @@ auto TransferEngine::return_hip_event(hipEvent_t event) -> void {
 auto TransferEngine::get_pinned_buffer(size_t size) -> void* {
     std::lock_guard lock(pinned_mutex_);
 
+    void* result = nullptr;
     for (auto& buffer : pinned_buffers_) {
         if (!buffer.in_use && buffer.size >= size) {
             buffer.in_use = true;
-            return buffer.ptr;
+            result = buffer.ptr;
+            break;
         }
     }
 
+    if (!result) {
 #ifdef TENZOR_USE_CUDA
-    void* ptr = nullptr;
-    cudaError_t err = cudaMallocHost(&ptr, size);
-    if (err == cudaSuccess) {
-        pinned_buffers_.push_back({ptr, size, true});
-        return ptr;
-    }
+        cudaError_t err = cudaMallocHost(&result, size);
+        if (err == cudaSuccess) {
+            pinned_buffers_.push_back({result, size, true});
+        } else {
+            result = nullptr;
+        }
 #elif defined(TENZOR_USE_ROCM)
-    void* ptr = nullptr;
-    hipError_t err = hipHostMalloc(&ptr, size, hipHostMallocDefault);
-    if (err == hipSuccess) {
-        pinned_buffers_.push_back({ptr, size, true});
-        return ptr;
-    }
+        hipError_t err = hipHostMalloc(&result, size, hipHostMallocDefault);
+        if (err == hipSuccess) {
+            pinned_buffers_.push_back({result, size, true});
+        } else {
+            result = nullptr;
+        }
 #endif
+    }
 
-    return nullptr;
+    if (result) {
+        // Update the high-water in-use mark for pinned-pool telemetry.
+        size_t cur = 0;
+        for (const auto& b : pinned_buffers_) {
+            if (b.in_use) cur += b.size;
+        }
+        if (cur > pinned_peak_allocated_) pinned_peak_allocated_ = cur;
+    }
+
+    return result;
+}
+
+auto TransferEngine::get_pinned_memory_stats() -> core::PinnedMemoryStats {
+    std::lock_guard lock(pinned_mutex_);
+
+    core::PinnedMemoryStats stats{};
+    size_t allocated = 0;
+    size_t reserved = 0;
+    size_t in_use_blocks = 0;
+    size_t free_blocks = 0;
+    size_t largest_free = 0;
+    for (const auto& b : pinned_buffers_) {
+        reserved += b.size;
+        if (b.in_use) {
+            allocated += b.size;
+            ++in_use_blocks;
+        } else {
+            ++free_blocks;
+            if (b.size > largest_free) largest_free = b.size;
+        }
+    }
+
+    stats.total_size = config_.pinned_pool_size;  // configured capacity
+    stats.allocated_size = allocated;
+    stats.free_size = (stats.total_size > allocated) ? (stats.total_size - allocated) : 0;
+    stats.num_allocations = in_use_blocks;
+    stats.num_blocks = pinned_buffers_.size();
+    stats.num_free_blocks = free_blocks;
+    stats.peak_allocated = pinned_peak_allocated_;
+    stats.num_defragmentations = 0;  // pool never defragments
+
+    // Fragmentation of the already-reserved free space: 0 when a single free
+    // block holds all of it, →1 as it splinters across many small blocks.
+    const size_t free_reserved = reserved - allocated;
+    stats.fragmentation_ratio = (free_reserved > 0)
+        ? static_cast<float>(free_reserved - largest_free) / static_cast<float>(free_reserved)
+        : 0.0f;
+
+    return stats;
 }
 
 auto TransferEngine::return_pinned_buffer(void* ptr) -> void {

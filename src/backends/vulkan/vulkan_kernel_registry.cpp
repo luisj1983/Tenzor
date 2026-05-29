@@ -1164,8 +1164,10 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
     // ========================================================================
     // EmbeddingBag
     // ========================================================================
-    table.register_single_output_kernel(OpId::EmbeddingBagForward,
-        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+    // Returns {output, max_indices}; max_indices is the per-(bag,feature) global
+    // argmax element index for mode="max" (empty otherwise).
+    table.register_kernel(OpId::EmbeddingBagForward,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
             int64_t embedding_dim = attrs.get_int(AttrKey::EmbeddingDim, 0);
             std::string mode{attrs.get_string(AttrKey::Mode, "sum")};
             bool include_last_offset = attrs.get_bool(AttrKey::IncludeLastOffset, false);

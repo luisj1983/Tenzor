@@ -10,6 +10,7 @@
 
 #include "tenzor/core/tensor.hpp"
 #include "tenzor/core/device.hpp"
+#include "tenzor/core/pinned_allocator.hpp"
 #include <memory>
 #include <atomic>
 #include <thread>
@@ -267,6 +268,16 @@ public:
     auto get_statistics() const -> Statistics;
 
     /**
+     * @brief Snapshot of the host-pinned transfer buffer pool.
+     *
+     * Reports the configured pool capacity plus the live occupancy derived
+     * from the actual pinned buffers (allocated/free bytes, block counts,
+     * fragmentation, and the high-water allocated mark). The pool does not
+     * defragment, so num_defragmentations is always 0.
+     */
+    auto get_pinned_memory_stats() -> core::PinnedMemoryStats;
+
+    /**
      * @brief Reset transfer statistics
      */
     auto reset_statistics() -> void;
@@ -324,6 +335,7 @@ private:
     };
     std::vector<PinnedBuffer> pinned_buffers_;
     std::mutex pinned_mutex_;
+    size_t pinned_peak_allocated_{0};  ///< High-water in-use pinned bytes (under pinned_mutex_)
 
     // Get pinned buffer of at least 'size' bytes
     auto get_pinned_buffer(size_t size) -> void*;

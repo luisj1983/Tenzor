@@ -1,4 +1,5 @@
 #version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
 
 // EmbeddingBag: look up multiple embedding rows and reduce (sum/mean/max).
 // Input embeddings are pre-indexed (already selected rows stacked contiguously).
@@ -9,6 +10,7 @@ layout(local_size_x_id = 0) in;
 layout(binding = 0) buffer Embeddings { float emb_data[]; };   // (total_rows, embedding_dim)
 layout(binding = 1) buffer Offsets { int offset_data[]; };       // (num_bags) or (num_bags+1) if include_last
 layout(binding = 2) buffer Output { float out_data[]; };         // (num_bags, embedding_dim)
+layout(binding = 3) buffer MaxIndices { int64_t idx_data[]; };    // (num_bags, embedding_dim) argmax element idx (max mode)
 
 layout(push_constant) uniform PushConstants {
     uint num_bags;
@@ -39,17 +41,20 @@ void main() {
     int bag_size = end_val - start;
     if (bag_size <= 0) {
         out_data[gid] = 0.0;
+        idx_data[gid] = int64_t(-1);
         return;
     }
 
     if (params.mode == 2) {
-        // Max mode
+        // Max mode — also record the global argmax element index (strict '>': first wins).
         float max_val = emb_data[uint(start) * params.embedding_dim + j];
+        int arg = start;
         for (int i = start + 1; i < end_val; ++i) {
             float v = emb_data[uint(i) * params.embedding_dim + j];
-            if (v > max_val) max_val = v;
+            if (v > max_val) { max_val = v; arg = i; }
         }
         out_data[gid] = max_val;
+        idx_data[gid] = int64_t(arg);
     } else {
         // Sum or Mean mode
         float acc = 0.0;

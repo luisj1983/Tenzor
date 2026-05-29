@@ -196,6 +196,16 @@ auto sort(const Tensor& input,
         throw std::runtime_error("Dimension out of range for sort");
     }
 
+    // Float16 / BFloat16: widen to Float32, sort, then narrow the values
+    // tensor back. Indices are Int64 and pass through unchanged. Half-precision
+    // comparisons are exactly order-preserving when widened to Float32, so the
+    // ordering is identical to a native half sort.
+    if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) {
+        const DType orig = input.dtype();
+        auto [values_f32, indices] = sort(input.to(DType::Float32), dim, descending);
+        return {values_f32.to(orig), indices};
+    }
+
     // For non-CPU tensors, dispatch to backend kernel
     if (input.device().type != Device::Type::CPU) {
         OpAttributes attrs;
@@ -413,6 +423,13 @@ auto cumsum(const Tensor& input, int64_t dim) -> Tensor {
         throw std::runtime_error("Dimension out of range for cumsum");
     }
 
+    // Float16 / BFloat16: accumulate in Float32 for numerical stability, then
+    // narrow back to the original dtype.
+    if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) {
+        const DType orig = input.dtype();
+        return cumsum(input.to(DType::Float32), dim).to(orig);
+    }
+
     // For non-CPU tensors, dispatch to backend kernel
     if (input.device().type != Device::Type::CPU) {
         NewOpAttributes attrs;
@@ -492,6 +509,13 @@ auto cumprod(const Tensor& input, int64_t dim) -> Tensor {
     }
     if (dim < 0 || dim >= ndim) {
         throw std::runtime_error("Dimension out of range for cumprod");
+    }
+
+    // Float16 / BFloat16: accumulate in Float32 for numerical stability, then
+    // narrow back to the original dtype.
+    if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) {
+        const DType orig = input.dtype();
+        return cumprod(input.to(DType::Float32), dim).to(orig);
     }
 
     // For non-CPU tensors, dispatch to backend kernel

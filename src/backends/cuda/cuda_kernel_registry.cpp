@@ -233,7 +233,7 @@ namespace cuda {
     // Embedding operations
     auto embedding_kernel(const Tensor& weight, const Tensor& indices, cudaStream_t stream) -> Tensor;
     auto embedding_backward_kernel(const Tensor& grad_output, const Tensor& indices, int64_t num_embeddings, cudaStream_t stream) -> Tensor;
-    auto embedding_bag_forward_kernel(const Tensor& embeddings, const Tensor& offsets, const std::string& mode, int64_t embedding_dim, bool include_last_offset, cudaStream_t stream) -> Tensor;
+    auto embedding_bag_forward_kernel(const Tensor& embeddings, const Tensor& offsets, const std::string& mode, int64_t embedding_dim, bool include_last_offset, cudaStream_t stream) -> std::vector<Tensor>;
     auto embedding_bag_backward_kernel(const Tensor& grad_output, const Tensor& indices, const Tensor& offsets, const OpAttributes& attrs, cudaStream_t stream) -> Tensor;
 
     // Linear algebra operations (cuSOLVER or native CUDA fallback)
@@ -2446,7 +2446,9 @@ void register_cuda_kernels(BackendDispatchTable& table) {
         return cuda::embedding_backward_kernel(inputs[0], inputs[1], num_embeddings, get_cuda_stream(attrs));
     });
 
-    table.register_single_output_kernel(OpId::EmbeddingBagForward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+    // Returns {output, max_indices}; max_indices is the per-(bag,feature) global
+    // argmax element index for mode="max" (empty otherwise).
+    table.register_kernel(OpId::EmbeddingBagForward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
         // inputs: [embeddings, offsets]
         // attrs: Mode, EmbeddingDim, IncludeLastOffset
         std::string mode{attrs.get_string(AttrKey::Mode, "sum")};

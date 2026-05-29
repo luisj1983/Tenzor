@@ -234,7 +234,7 @@ auto VulkanBackend::dispatchInstanceNormBackward(const Tensor& grad_output, cons
 
 auto VulkanBackend::dispatchEmbeddingBag(const Tensor& embeddings, const Tensor& offsets,
                                           int64_t embedding_dim, const std::string& mode,
-                                          bool include_last_offset) -> Tensor {
+                                          bool include_last_offset) -> std::vector<Tensor> {
     int32_t device_id = embeddings.device().index;
 
     // Select shader based on dtype
@@ -252,14 +252,15 @@ auto VulkanBackend::dispatchEmbeddingBag(const Tensor& embeddings, const Tensor&
     int64_t num_offsets_raw = offsets.numel();
     int64_t num_bags = include_last_offset ? (num_offsets_raw - 1) : num_offsets_raw;
 
-    if (num_bags <= 0) {
-        return Tensor({0, embedding_dim}, embeddings.dtype(), embeddings.device());
-    }
-
     // Convert mode string to int
     uint32_t mode_int = 0;  // sum
     if (mode == "mean") mode_int = 1;
     else if (mode == "max") mode_int = 2;
+
+    if (num_bags <= 0) {
+        return {Tensor({0, embedding_dim}, embeddings.dtype(), embeddings.device()),
+                Tensor({0}, DType::Int64, embeddings.device())};
+    }
 
     // Offsets must be Int32 for the shader
     Tensor offsets_i32 = offsets;
@@ -294,17 +295,24 @@ auto VulkanBackend::dispatchEmbeddingBag(const Tensor& embeddings, const Tensor&
 
     Tensor output({num_bags, embedding_dim}, embeddings.dtype(), embeddings.device());
 
+    // Always bound at binding 3 (the shader declares it for every mode). Written
+    // with the per-(bag,feature) global argmax element index for max mode; for
+    // sum/mean it is left undefined and discarded below.
+    Tensor max_indices({num_bags, embedding_dim}, DType::Int64, embeddings.device());
+
     size_t elem_size = embeddings.dtype_size();
     size_t emb_buf_size = embeddings.numel() * elem_size;
     size_t offs_buf_size = offsets_i32.numel() * sizeof(int32_t);
     size_t out_buf_size = output.numel() * elem_size;
+    size_t idx_buf_size = max_indices.numel() * sizeof(int64_t);
 
     std::vector<std::pair<uint32_t, const void*>> bindings = {
         {0, embeddings.data_ptr()},
         {1, offsets_i32.data_ptr()},
         {2, output.data_ptr()},
+        {3, max_indices.data_ptr()},
     };
-    std::vector<size_t> sizes = {emb_buf_size, offs_buf_size, out_buf_size};
+    std::vector<size_t> sizes = {emb_buf_size, offs_buf_size, out_buf_size, idx_buf_size};
 
     VkDescriptorSet descriptorSet = allocateAndWriteDescriptorSet(device_id, pipeline, bindings, sizes);
 
@@ -337,7 +345,10 @@ auto VulkanBackend::dispatchEmbeddingBag(const Tensor& embeddings, const Tensor&
     insertComputeOnlyBarrier(cmdBuffer);
     endSingleTimeCommands(cmdBuffer, device_id);
 
-    return output;
+    if (mode_int == 2) {
+        return {output, max_indices};
+    }
+    return {output, Tensor({0}, DType::Int64, embeddings.device())};
 }
 
 // ============================================================================
