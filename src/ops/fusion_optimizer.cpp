@@ -643,6 +643,10 @@ auto FusionOptimizer::detect_patterns(const FusionGraph& graph)
                     // Create fused operation
                     FusedOp fused_op(match.pattern_name, match.matched_nodes);
                     fused_op.estimated_speedup = pattern->get_speedup();
+                    // Carry the matched-node parameters (dropout p/seed, scale,
+                    // causal, ...) so the executor can reproduce them — otherwise
+                    // an absorbed Dropout node would be silently elided.
+                    fused_op.attributes = match.attributes;
 
                     // Mark nodes as fused
                     for (size_t matched_id : match.matched_nodes) {
@@ -700,8 +704,10 @@ auto FusionOptimizer::rewrite_graph(
             fused_inputs.end()
         );
 
-        // Create fused node
-        std::unordered_map<std::string, std::string> attrs;
+        // Create fused node — seed with the parameters captured from the matched
+        // nodes (dropout p/seed, scale, causal, ...) so execute_fused_op sees
+        // them, then tag the fusion type.
+        std::unordered_map<std::string, std::string> attrs = fusion.attributes;
         attrs["fusion_type"] = fusion.fused_op_name;
 
         size_t new_id = optimized.add_node(
@@ -1205,7 +1211,10 @@ auto execute_fused_op(
             int64_t sq = shp[shp.size() - 2];
             int64_t sk = shp[shp.size() - 1];
             Tensor neg = full({sq, sk}, -1e30f, scores.dtype(), scores.device());
-            Tensor causal_add = tenzor::triu(neg, 1);  // 0 on/below diag, -1e30 above
+            // Bottom-right-aligned causal: offset 1 + (sk - sq) matches the
+            // reference attention (function_attention.cpp) for Sq != Sk
+            // (cross-attention / KV-cache decode); reduces to offset 1 when Sq==Sk.
+            Tensor causal_add = tenzor::triu(neg, 1 + (sk - sq));
             scores = add(scores, causal_add);
         }
 
@@ -1225,7 +1234,7 @@ auto execute_fused_op(
         // Q@K.T -> softmax -> dropout -> @V graph). philox_dropout_mask returns
         // a pre-scaled (inverted) Bernoulli mask, so a plain multiply applies
         // the inverted-dropout scaling.
-        if (dropout_p > 0.0) {
+        if (dropout_p > 0.0 && dropout_seed != 0) {
             auto shp = attention_weights.shape();
             std::vector<int64_t> shape_vec(shp.begin(), shp.end());
             Tensor mask = philox_dropout_mask(shape_vec, dropout_p, dropout_seed,

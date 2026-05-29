@@ -1442,10 +1442,12 @@ auto linalg_det_kernel(const Tensor& A, sycl::queue& queue) -> Tensor {
     auto [n, ndim] = check_square(work);
     int64_t nbatch = batch_size(work);
 
+    // det of a single 2D matrix is a 0-D scalar (shape {}); only batched inputs
+    // carry leading batch dims. Matches the oneMKL path, CUDA, and CPU — do NOT
+    // append a dummy 1 (that produced a wrong rank-1 [1] result).
     std::vector<int64_t> out_shape;
     auto shape = A.shape();
     for (size_t i = 0; i + 2 < shape.size(); i++) out_shape.push_back(shape[i]);
-    if (out_shape.empty()) out_shape.push_back(1);
 
     auto result = zeros(out_shape, A.dtype(), A.device());
 

@@ -46,6 +46,32 @@ float safe_get(int n, int c, int y, int x) {
     return 0.0;
 }
 
+// Bicubic neighbour fetch: zeros padding returns 0 out of range; border /
+// reflection clamp the neighbour to the edge (matches CUDA/CPU bicubic).
+float bicubic_get(int n, int c, int y, int x) {
+    if (params.padding_mode == 0) {
+        if (y < 0 || y >= params.H_in || x < 0 || x >= params.W_in) return 0.0;
+    } else {
+        y = clamp(y, 0, params.H_in - 1);
+        x = clamp(x, 0, params.W_in - 1);
+    }
+    return input_data[((n * params.C + c) * params.H_in + y) * params.W_in + x];
+}
+
+// Catmull-Rom cubic convolution weights (a = -0.5), matching the other backends.
+void cubic_weights(float t, out float w[4]) {
+    float a = -0.5;
+    float t2 = t * t;
+    float t3 = t2 * t;
+    w[0] = ((a * t - 2.0 * a) * t + a) * t;
+    w[1] = ((a + 2.0) * t3 - (a + 3.0) * t2 + 1.0);
+    float u = 1.0 - t;
+    float u2 = u * u;
+    float u3 = u2 * u;
+    w[2] = ((a + 2.0) * u3 - (a + 3.0) * u2 + 1.0);
+    w[3] = ((a * u - 2.0 * a) * u + a) * u;
+}
+
 void main() {
     int idx = int(gl_GlobalInvocationID.x);
     if (idx >= params.total) return;
@@ -77,6 +103,22 @@ void main() {
         int ny = int(round(iy));
         if (ny >= 0 && ny < params.H_in && nx >= 0 && nx < params.W_in) {
             val = input_data[((n * params.C + c) * params.H_in + ny) * params.W_in + nx];
+        }
+    } else if (params.mode == 2) {
+        // bicubic (Catmull-Rom 4x4 neighbourhood)
+        int ix_floor = int(floor(ix));
+        int iy_floor = int(floor(iy));
+        float tx = ix - float(ix_floor);
+        float ty = iy - float(iy_floor);
+        float wx[4];
+        float wy[4];
+        cubic_weights(tx, wx);
+        cubic_weights(ty, wy);
+        for (int dy = -1; dy <= 2; ++dy) {
+            for (int dx = -1; dx <= 2; ++dx) {
+                val += wy[dy + 1] * wx[dx + 1] *
+                       bicubic_get(n, c, iy_floor + dy, ix_floor + dx);
+            }
         }
     } else {
         // bilinear

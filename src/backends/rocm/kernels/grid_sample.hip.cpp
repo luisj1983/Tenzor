@@ -686,9 +686,10 @@ auto grid_sample_backward_kernel_host(const Tensor& grad_output,
     int block_size = 256;
     int gs = (total + block_size - 1) / block_size;
 
-    // Native FP64 path (no widen-narrow).
-    if (input.dtype() == DType::Float64) {
-        Tensor input_f64 = input.contiguous();
+    // Native FP64 path when EITHER input or grid is Float64 (matches CUDA/CPU),
+    // so grad_grid is computed in double whenever the grid is double.
+    if (input.dtype() == DType::Float64 || grid.dtype() == DType::Float64) {
+        Tensor input_f64 = input.to(DType::Float64).contiguous();
         Tensor grid_f64  = grid.to(DType::Float64).contiguous();
         Tensor go_f64    = grad_output.to(DType::Float64).contiguous();
         Tensor gi_f64({N, C, H_in, W_in},  DType::Float64, input.device());
@@ -699,7 +700,7 @@ auto grid_sample_backward_kernel_host(const Tensor& grad_output,
             gi_f64.data<double>(), gg_f64.data<double>(),
             N, C, H_in, W_in, H_out, W_out, pad_mode, align_corners);
         HIP_CHECK(hipGetLastError());
-        return {gi_f64, gg_f64.to(grid.dtype())};
+        return {gi_f64.to(input.dtype()), gg_f64.to(grid.dtype())};
     }
 
     DType in_dt = input.dtype();

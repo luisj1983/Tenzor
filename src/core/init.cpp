@@ -1,6 +1,7 @@
 #include "tenzor/tenzor.hpp"
 #include "tenzor/backend/loader.hpp"
 #include "tenzor/backend/dispatch_table.hpp"
+#include "tenzor/ops/async_ops.hpp"  // StreamManager::reset() on finalize
 #include "tenzor/utils/log.hpp"  // TENZOR_LOG_INFO / WARN / ERROR (audit I.4)
 #include "tenzor/utils/logging.hpp"  // TENZOR_WARN_ONCE (S26 OCL-ICD workaround)
 #include <iostream>
@@ -603,6 +604,11 @@ auto finalize() -> void {
 
     // 1. Clear dispatch tables — removes all function pointers into backend .so files
     DispatchTableRegistry::clear();
+
+    // 1b. Destroy pooled async streams while backends are still alive, and clear
+    //     the StreamManager pool so a later re-initialize() rebuilds it against
+    //     live backends (prevents dangling Backend*/stale stream handles).
+    StreamManager::instance().reset();
 
     // 2. Ordered backend shutdown — destroys backends, dlcloses libraries
     backend_registry().shutdown();

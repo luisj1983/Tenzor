@@ -59,6 +59,16 @@ public:
     auto synchronize_device(const Device& device) -> void;
 
     /**
+     * @brief Destroy all pooled streams and clear state.
+     *
+     * Must be called while the backend registry is still alive (e.g. from
+     * finalize()/shutdown(), before backends are destroyed) so the cached
+     * Backend* used to destroy each stream is valid and a later re-init
+     * rebuilds the pool against live backends.
+     */
+    auto reset() -> void;
+
+    /**
      * @brief Destructor - cleanup all streams
      */
     ~StreamManager();

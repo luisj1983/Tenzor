@@ -1159,6 +1159,10 @@ auto VulkanBackend::dispatchMaxPool2dBackwardWithIndices(const Tensor& grad_outp
     // Select shader based on dtype
     std::string shader_name = "max_pool2d_backward_indices";
     if (grad_output.dtype() == DType::Float64) {
+        // The F64 shader accumulates via uint64 CAS (GL_EXT_shader_atomic_int64);
+        // fail fast with a clear error on devices lacking the extension, matching
+        // the non-indices F64 maxpool path.
+        vulkan::ensure_atomic_int64_supported(device_id, "MaxPool2dBackward");
         shader_name = "max_pool2d_backward_indices_f64";
     } else if (grad_output.dtype() == DType::Float16) {
         shader_name = "max_pool2d_backward_indices_f16";

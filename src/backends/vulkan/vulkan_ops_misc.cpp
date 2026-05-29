@@ -3111,6 +3111,12 @@ auto VulkanBackend::dispatchAdaptiveMaxPool2dBackward(const Tensor& grad_output,
     std::string shader = is_f64 ? "adaptive_max_pool2d_backward_f64" :
                           (is_f16 ? "adaptive_max_pool2d_backward_f16" :
                           (is_bf16 ? "adaptive_max_pool2d_backward_bf16" : "adaptive_max_pool2d_backward"));
+    if (is_f64) {
+        // F64 shader accumulates via uint64 CAS (GL_EXT_shader_atomic_int64);
+        // fail fast on devices without the extension, like the other F64 backward
+        // pooling dispatchers.
+        vulkan::ensure_atomic_int64_supported(device_id, "AdaptiveMaxPool2dBackward");
+    }
     auto* pipeline = getPipeline(shader, device_id);
 
     int64_t grad_input_size = N * C * H_in * W_in;

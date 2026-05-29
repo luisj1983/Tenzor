@@ -83,7 +83,7 @@ auto VulkanBackend::dispatchGridSample(const Tensor& input, const Tensor& grid,
     int32_t pad_mode = 0;
     if (padding_mode_str == "border") pad_mode = 1;
     else if (padding_mode_str == "reflection") pad_mode = 2;
-    int32_t mode_int = (mode_str == "nearest") ? 1 : 0;
+    int32_t mode_int = (mode_str == "nearest") ? 1 : (mode_str == "bicubic") ? 2 : 0;
 
     int32_t device_id = input.device().index;
     auto* pipeline = getPipeline("grid_sample", device_id);
@@ -119,8 +119,7 @@ auto VulkanBackend::dispatchGridSample(const Tensor& input, const Tensor& grid,
 }
 
 // audit Q.4: grid_sample backward. F32 only on GPU; promote/demote via
-// dispatchCast as in the forward. Modes: bilinear and nearest only (matches
-// forward coverage; bicubic forward isn't on Vulkan either).
+// dispatchCast as in the forward. Modes: bilinear, nearest, bicubic.
 auto VulkanBackend::dispatchGridSampleBackward(const Tensor& grad_output,
                                                const Tensor& input, const Tensor& grid,
                                                const std::string& mode_str,
@@ -128,10 +127,10 @@ auto VulkanBackend::dispatchGridSampleBackward(const Tensor& grad_output,
                                                bool align_corners)
     -> std::pair<Tensor, Tensor>
 {
-    if (mode_str != "bilinear" && mode_str != "nearest") {
+    if (mode_str != "bilinear" && mode_str != "nearest" && mode_str != "bicubic") {
         throw std::runtime_error(
             "dispatchGridSampleBackward (Vulkan): mode '" + mode_str +
-            "' not supported. Supported: 'bilinear', 'nearest'.");
+            "' not supported. Supported: 'bilinear', 'nearest', 'bicubic'.");
     }
     // U.5: grid_sample_backward.comp uses atomicAdd(float) on grad_input
     // (VK_EXT_shader_atomic_float). Fail fast on devices that don't advertise it.
@@ -211,7 +210,7 @@ auto VulkanBackend::dispatchGridSampleBackward(const Tensor& grad_output,
     int32_t pad_mode = 0;
     if (padding_mode_str == "border") pad_mode = 1;
     else if (padding_mode_str == "reflection") pad_mode = 2;
-    int32_t mode_int = (mode_str == "nearest") ? 1 : 0;
+    int32_t mode_int = (mode_str == "nearest") ? 1 : (mode_str == "bicubic") ? 2 : 0;
 
     auto* pipeline = getPipeline("grid_sample_backward", device_id);
     GridSampleBackwardPushConstants pc{N, C, H_in, W_in, H_out, W_out,

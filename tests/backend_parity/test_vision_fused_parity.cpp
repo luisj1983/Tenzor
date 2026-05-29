@@ -97,9 +97,13 @@ TEST_P(VisionFusedParity, GridSample_Bilinear) {
 // previously silently computed bilinear for mode='bicubic'.
 TEST_P(VisionFusedParity, GridSample_Bicubic) {
     auto input = randn({1, 3, 8, 8}, DType::Float32, Device::cpu());
+    // Use a SCALED (fractional) sampling grid, not identity: at integer sample
+    // positions bilinear and bicubic coincide, which would mask a backend that
+    // silently computes bilinear. Scale 0.5 + small shift -> sub-pixel samples
+    // where bicubic genuinely differs from bilinear.
     auto theta = zeros({1, 2, 3}, DType::Float32, Device::cpu());
     auto* t = theta.data<float>();
-    t[0] = 1.0f; t[4] = 1.0f;
+    t[0] = 0.5f; t[2] = 0.1f; t[4] = 0.5f; t[5] = -0.1f;
     auto grid = ops::affine_grid(theta, {1, 3, 8, 8}, false);
 
     test_operation_parity(
@@ -112,17 +116,41 @@ TEST_P(VisionFusedParity, GridSample_Bicubic) {
 // Release audit: native Float64 grid_sample must match CPU on every backend.
 // ROCm/OneAPI previously force-downcast Float64 inputs to Float32.
 TEST_P(VisionFusedParity, GridSample_Bicubic_Float64) {
-    auto input = randn({1, 3, 8, 8}, DType::Float64, Device::cpu());
-    auto theta = zeros({1, 2, 3}, DType::Float32, Device::cpu());
-    auto* t = theta.data<float>();
-    t[0] = 1.0f; t[4] = 1.0f;
-    auto grid = ops::affine_grid(theta, {1, 3, 8, 8}, false);
+    // Native Float64 grid_sample is provided by CPU/CUDA/ROCm/OneAPI. The Vulkan
+    // grid_sample kernel computes in Float32 by design (it casts other dtypes via
+    // dispatchCast), so it cannot meet a tight f64 tolerance and is excluded from
+    // this native-f64 parity check; its bicubic correctness is covered by the
+    // Float32 test above. (The parity helper loops backends internally, so we
+    // pass an explicit Vulkan-excluded list rather than skipping per-param.)
+    std::vector<Device> backends;
+    for (const auto& d : get_available_backends()) {
+        if (d.type != Device::Type::Vulkan) backends.push_back(d);
+    }
+    if (backends.size() < 2) {
+        GTEST_SKIP() << "need >=2 non-Vulkan backends for native-f64 grid_sample parity";
+    }
 
-    test_operation_parity(
+    // Hand-built pure-Float64 grid (no affine_grid, which may downcast) so the
+    // whole path is native f64 and sample positions are fractional (bicubic !=
+    // bilinear). Values in (-1,1) map to sub-pixel input coordinates.
+    const int64_t H = 8, W = 8;
+    auto input = randn({1, 3, H, W}, DType::Float64, Device::cpu());
+    auto grid = zeros({1, H, W, 2}, DType::Float64, Device::cpu());
+    {
+        double* g = grid.data<double>();
+        for (int64_t h = 0; h < H; ++h)
+            for (int64_t w = 0; w < W; ++w) {
+                int64_t k = (h * W + w) * 2;
+                g[k]     = -0.85 + 1.7 * (double(w) + 0.37) / double(W);  // x in (-0.85,0.85)
+                g[k + 1] = -0.85 + 1.7 * (double(h) + 0.62) / double(H);  // y
+            }
+    }
+
+    test_operation_parity_backends(
         [&grid](const std::vector<Tensor>& ins) {
             return ops::grid_sample(ins[0], grid.to(ins[0].device()), "bicubic", "zeros", false);
         },
-        {input}, 1e-5f, 1e-7f, "grid_sample_bicubic_f64");
+        {input}, backends, 1e-5f, 1e-7f, "grid_sample_bicubic_f64");
 }
 
 TEST_P(VisionFusedParity, AffineGrid) {

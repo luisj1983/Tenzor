@@ -120,6 +120,13 @@ auto StreamManager::synchronize_stream(StreamHandle stream) -> void {
     if (!stream) {
         return;
     }
+    // The owning Backend* is only valid while the backend registry is alive;
+    // after finalize()/shutdown() the cached pointer dangles. Guard before use
+    // (mirrors the destructor) so a late async continuation can't deref a freed
+    // backend.
+    if (!is_backend_registry_alive()) {
+        return;
+    }
     Backend* owner = nullptr;
     {
         std::lock_guard lock(global_mutex_);
@@ -130,6 +137,9 @@ auto StreamManager::synchronize_stream(StreamHandle stream) -> void {
 }
 
 auto StreamManager::synchronize_device(const Device& device) -> void {
+    if (!is_backend_registry_alive()) {
+        return;
+    }
     std::lock_guard lock(global_mutex_);
 
     auto it = device_streams_.find(device);
@@ -141,6 +151,24 @@ auto StreamManager::synchronize_device(const Device& device) -> void {
         auto owner_it = stream_owner_.find(stream);
         if (owner_it != stream_owner_.end()) owner_it->second->synchronize_stream(stream);
     }
+}
+
+auto StreamManager::reset() -> void {
+    // Destroy all pooled streams through their owning backends and clear the
+    // pool. Called from finalize()/shutdown() BEFORE backends are torn down so
+    // a subsequent re-initialize() rebuilds streams against live backends
+    // (otherwise get_stream would hand out handles from a freed backend).
+    std::lock_guard lock(global_mutex_);
+    if (is_backend_registry_alive()) {
+        for (auto& [stream, owner] : stream_owner_) {
+            if (stream && owner) {
+                try { owner->destroy_stream(stream); }
+                catch (...) { std::fprintf(stderr, "StreamManager::reset: destroy_stream failed\n"); }
+            }
+        }
+    }
+    stream_owner_.clear();
+    device_streams_.clear();
 }
 
 StreamManager::~StreamManager() {

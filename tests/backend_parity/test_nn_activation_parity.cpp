@@ -77,6 +77,23 @@ TEST_P(NNActivationParity, LogSigmoid) {
     }, {input}, 1e-5f, 1e-7f, "LogSigmoid");
 }
 
+// Release audit (re-audit P3): exact-erf GELU at Float64 must agree across all
+// backends. The Vulkan f64 path previously used a ~1.5e-7 Abramowitz&Stegun erf
+// (single-precision grade); it now uses the fdlibm erf (~1e-16). A tight f64
+// tolerance here would FAIL on Vulkan with the old approximation.
+TEST_P(NNActivationParity, GELU_Float64) {
+    auto backends = get_available_backends();
+    REQUIRE_MULTI_BACKEND_OR_SKIP("nn activation parity");
+
+    // Spread of magnitudes incl. the |x|~0.84/1.25/2.86 fdlibm branch boundaries.
+    auto input = randn({32, 64}, DType::Float64, Device::cpu());
+
+    test_operation_parity([](const std::vector<Tensor>& inputs) {
+        auto x = Variable(inputs[0], false);
+        return nn::gelu(x, "none").tensor();
+    }, {input}, 1e-9f, 1e-11f, "GELU_f64");
+}
+
 TEST_P(NNActivationParity, Hardshrink) {
     auto backends = get_available_backends();
     REQUIRE_MULTI_BACKEND_OR_SKIP("nn activation parity");

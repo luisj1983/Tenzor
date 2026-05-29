@@ -104,6 +104,11 @@ struct FusedOp {
     std::vector<size_t> input_ids;              ///< External inputs to fusion
     std::vector<size_t> output_ids;             ///< External outputs from fusion
     float estimated_speedup{1.0f};              ///< Expected speedup factor
+    /// Parameters extracted from the matched nodes (e.g. an absorbed Dropout's
+    /// probability/seed, the softmax scale, the causal flag) that the executor
+    /// needs. Propagated from Match::attributes into the rewritten node's attrs
+    /// so execute_fused_op reproduces the unfused numerics.
+    std::unordered_map<std::string, std::string> attributes;
 
     /**
      * @brief Construct fused operation
