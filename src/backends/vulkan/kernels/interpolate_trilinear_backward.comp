@@ -1,0 +1,69 @@
+#version 450
+#extension GL_EXT_shader_atomic_float : enable
+
+// Trilinear backward (5D) via VK_EXT_shader_atomic_float fetch_add scatter.
+// Mirrors the CUDA/ROCm/OneAPI trilinear backward kernels: one work-item per
+// output element scatters into 8 input corners; out-of-bounds corners are
+// skipped (their weight is dropped) to match the CPU reference semantics.
+
+layout(local_size_x_id = 0) in;
+
+layout(binding = 0) buffer GradOutput { float grad_output[]; };  // (N, C, out_d, out_h, out_w)
+layout(binding = 1) buffer GradInput  { float grad_input[]; };   // (N, C, in_d, in_h, in_w)
+
+layout(push_constant) uniform PushConstants {
+    uint n_elements;
+    uint batch;
+    uint channels;
+    uint in_d;
+    uint in_h;
+    uint in_w;
+    uint out_d;
+    uint out_h;
+    uint out_w;
+    uint align_corners;
+} params;
+
+void tri_add(uint base, int dd, int hh, int ww, float val) {
+    if (dd < 0 || dd >= int(params.in_d) ||
+        hh < 0 || hh >= int(params.in_h) ||
+        ww < 0 || ww >= int(params.in_w)) return;
+    atomicAdd(grad_input[base + uint(dd) * params.in_h * params.in_w + uint(hh) * params.in_w + uint(ww)], val);
+}
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= params.n_elements) return;
+
+    uint temp = idx;
+    uint ow = temp % params.out_w; temp /= params.out_w;
+    uint oh = temp % params.out_h; temp /= params.out_h;
+    uint od = temp % params.out_d; temp /= params.out_d;
+    uint c  = temp % params.channels; temp /= params.channels;
+    uint b  = temp;
+
+    float scd = (params.align_corners != 0u && params.out_d > 1u)
+        ? float(params.in_d - 1u) / float(params.out_d - 1u) : float(params.in_d) / float(params.out_d);
+    float sch = (params.align_corners != 0u && params.out_h > 1u)
+        ? float(params.in_h - 1u) / float(params.out_h - 1u) : float(params.in_h) / float(params.out_h);
+    float scw = (params.align_corners != 0u && params.out_w > 1u)
+        ? float(params.in_w - 1u) / float(params.out_w - 1u) : float(params.in_w) / float(params.out_w);
+    float sd = (params.align_corners != 0u) ? float(od) * scd : (float(od) + 0.5) * scd - 0.5;
+    float sh = (params.align_corners != 0u) ? float(oh) * sch : (float(oh) + 0.5) * sch - 0.5;
+    float sw = (params.align_corners != 0u) ? float(ow) * scw : (float(ow) + 0.5) * scw - 0.5;
+    int d0 = int(floor(sd)), h0 = int(floor(sh)), w0 = int(floor(sw));
+    int d1 = d0 + 1, h1 = h0 + 1, w1 = w0 + 1;
+    float fd = sd - float(d0), fh = sh - float(h0), fw = sw - float(w0);
+
+    float g = grad_output[idx];
+    uint base = b * (params.channels * params.in_d * params.in_h * params.in_w)
+              + c * (params.in_d * params.in_h * params.in_w);
+    tri_add(base, d0, h0, w0, (1.0 - fd) * (1.0 - fh) * (1.0 - fw) * g);
+    tri_add(base, d0, h0, w1, (1.0 - fd) * (1.0 - fh) * fw * g);
+    tri_add(base, d0, h1, w0, (1.0 - fd) * fh * (1.0 - fw) * g);
+    tri_add(base, d0, h1, w1, (1.0 - fd) * fh * fw * g);
+    tri_add(base, d1, h0, w0, fd * (1.0 - fh) * (1.0 - fw) * g);
+    tri_add(base, d1, h0, w1, fd * (1.0 - fh) * fw * g);
+    tri_add(base, d1, h1, w0, fd * fh * (1.0 - fw) * g);
+    tri_add(base, d1, h1, w1, fd * fh * fw * g);
+}

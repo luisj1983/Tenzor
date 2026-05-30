@@ -1,0 +1,108 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_float64 : require
+
+// One-sided Jacobi SVD for m >= n, arbitrary size, Float64.
+// See linalg_svd_global.comp for the algorithm.
+layout(local_size_x = 32) in;
+
+layout(set = 0, binding = 0) buffer InputBuf { float64_t data_in[]; };
+layout(set = 0, binding = 1) buffer UBuf     { float64_t data_u[];  };
+layout(set = 0, binding = 2) buffer SBuf     { float64_t data_s[];  };
+layout(set = 0, binding = 3) buffer VBuf     { float64_t data_v[];  };
+
+layout(push_constant) uniform PushConstants {
+    uint m;
+    uint n;
+    uint batch;
+};
+
+shared float64_t sh_c;
+shared float64_t sh_s;
+shared uint  sh_rot;
+shared uint  converged;
+
+void main() {
+    uint batch_idx = gl_WorkGroupID.x;
+    uint tid = gl_LocalInvocationID.x;
+    if (batch_idx >= batch) return;
+
+    uint u_off = batch_idx * m * n;
+    uint v_off = batch_idx * n * n;
+
+    for (uint idx = tid; idx < m * n; idx += gl_WorkGroupSize.x) {
+        data_u[u_off + idx] = data_in[u_off + idx];
+    }
+    for (uint idx = tid; idx < n * n; idx += gl_WorkGroupSize.x) {
+        uint r = idx / n;
+        uint c = idx - r * n;
+        data_v[v_off + idx] = (r == c) ? 1.0lf : 0.0lf;
+    }
+    barrier();
+
+    for (uint sweep = 0; sweep < 60u; sweep++) {
+        if (tid == 0u) converged = 1u;
+        barrier();
+
+        for (uint i = 0; i < n; i++) {
+            for (uint j = i + 1u; j < n; j++) {
+                if (tid == 0u) {
+                    float64_t a = 0.0lf, b = 0.0lf, c = 0.0lf;
+                    for (uint r = 0; r < m; r++) {
+                        float64_t ui = data_u[u_off + r * n + i];
+                        float64_t uj = data_u[u_off + r * n + j];
+                        a += ui * ui;
+                        b += uj * uj;
+                        c += ui * uj;
+                    }
+                    if (abs(c) > 1e-30lf * sqrt(a * b) && a > 0.0lf && b > 0.0lf) {
+                        converged = 0u;
+                        float64_t zeta = (b - a) / (2.0lf * c);
+                        float64_t sgn = (zeta >= 0.0lf) ? 1.0lf : -1.0lf;
+                        float64_t t = sgn / (abs(zeta) + sqrt(1.0lf + zeta * zeta));
+                        float64_t cs = 1.0lf / sqrt(1.0lf + t * t);
+                        sh_c = cs;
+                        sh_s = cs * t;
+                        sh_rot = 1u;
+                    } else {
+                        sh_rot = 0u;
+                    }
+                }
+                barrier();
+
+                if (sh_rot == 1u) {
+                    float64_t cs = sh_c;
+                    float64_t sn = sh_s;
+                    for (uint r = tid; r < m; r += gl_WorkGroupSize.x) {
+                        float64_t ui = data_u[u_off + r * n + i];
+                        float64_t uj = data_u[u_off + r * n + j];
+                        data_u[u_off + r * n + i] = cs * ui - sn * uj;
+                        data_u[u_off + r * n + j] = sn * ui + cs * uj;
+                    }
+                    for (uint r = tid; r < n; r += gl_WorkGroupSize.x) {
+                        float64_t vi = data_v[v_off + r * n + i];
+                        float64_t vj = data_v[v_off + r * n + j];
+                        data_v[v_off + r * n + i] = cs * vi - sn * vj;
+                        data_v[v_off + r * n + j] = sn * vi + cs * vj;
+                    }
+                }
+                barrier();
+            }
+        }
+        if (converged > 0u) break;
+        barrier();
+    }
+
+    for (uint j = tid; j < n; j += gl_WorkGroupSize.x) {
+        float64_t s = 0.0lf;
+        for (uint r = 0; r < m; r++) {
+            float64_t uj = data_u[u_off + r * n + j];
+            s += uj * uj;
+        }
+        float64_t sigma = sqrt(s);
+        data_s[batch_idx * n + j] = sigma;
+        float64_t inv = (sigma > 1e-300lf) ? 1.0lf / sigma : 0.0lf;
+        for (uint r = 0; r < m; r++) {
+            data_u[u_off + r * n + j] *= inv;
+        }
+    }
+}

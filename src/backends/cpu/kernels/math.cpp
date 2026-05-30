@@ -2919,8 +2919,19 @@ auto clamp_min_kernel(const Tensor& input, double min_val) -> Tensor {
             out_data[i] = Float16(val);
         }
 
+    } else if (input.dtype() == DType::BFloat16) {
+        const BFloat16* in_data = input.data<BFloat16>();
+        BFloat16* out_data = result.data<BFloat16>();
+        float min_f = static_cast<float>(min_val);
+
+        for (size_t i = 0; i < n; ++i) {
+            float val = static_cast<float>(in_data[i]);
+            val = std::max(val, min_f);
+            out_data[i] = BFloat16(val);
+        }
+
     } else {
-        throw std::runtime_error("clamp_min operation only supports Float16, Float32 and Float64 dtypes");
+        throw std::runtime_error("clamp_min operation only supports Float16, BFloat16, Float32 and Float64 dtypes");
     }
 
     return result;
@@ -2992,8 +3003,19 @@ auto clamp_max_kernel(const Tensor& input, double max_val) -> Tensor {
             out_data[i] = Float16(val);
         }
 
+    } else if (input.dtype() == DType::BFloat16) {
+        const BFloat16* in_data = input.data<BFloat16>();
+        BFloat16* out_data = result.data<BFloat16>();
+        float max_f = static_cast<float>(max_val);
+
+        for (size_t i = 0; i < n; ++i) {
+            float val = static_cast<float>(in_data[i]);
+            val = std::min(val, max_f);
+            out_data[i] = BFloat16(val);
+        }
+
     } else {
-        throw std::runtime_error("clamp_max operation only supports Float16, Float32 and Float64 dtypes");
+        throw std::runtime_error("clamp_max operation only supports Float16, BFloat16, Float32 and Float64 dtypes");
     }
 
     return result;
@@ -3334,8 +3356,18 @@ auto sign_kernel(const Tensor& input) -> Tensor {
             out_data[i] = Float16(sign_val);
         }
 
+    } else if (input.dtype() == DType::BFloat16) {
+        const BFloat16* in_data = input.data<BFloat16>();
+        BFloat16* out_data = result.data<BFloat16>();
+
+        for (size_t i = 0; i < n; ++i) {
+            float val = static_cast<float>(in_data[i]);
+            float sign_val = static_cast<float>((val > 0.0f) - (val < 0.0f));
+            out_data[i] = BFloat16(sign_val);
+        }
+
     } else {
-        throw std::runtime_error("sign operation only supports Float32, Float64, and Float16 dtypes");
+        throw std::runtime_error("sign operation only supports Float32, Float64, Float16, and BFloat16 dtypes");
     }
 
     return result;

@@ -1021,6 +1021,256 @@ auto linalg_eigh_kernel(const Tensor& A, hipStream_t stream)
 // distributes Householder reflections across threads, and processes batches in parallel.
 // Max matrix size is bounded by device shared memory (typically ~90 for float, ~64 for double).
 
+// Complex divide (cr+ci*i)/(dr+di*i) — robust scaling.
+template<typename T>
+__device__ inline void eig_cdiv(T cr, T ci, T dr, T di, T& zr, T& zi) {
+    if (fabs(dr) > fabs(di)) {
+        T r = di / dr, d = dr + di * r;
+        zr = (cr + ci * r) / d; zi = (ci - cr * r) / d;
+    } else {
+        T r = dr / di, d = di + dr * r;
+        zr = (cr * r + ci) / d; zi = (ci * r - cr) / d;
+    }
+}
+
+// Non-symmetric real eigendecomposition — one work-item per batch element,
+// operating on global-memory scratch (no shared-memory size cap, no barriers).
+// Faithful EISPACK hqr2: orthogonal Hessenberg reduction (Householder, Z
+// accumulated) -> real Schur form via Francis double-shift QR with deflation
+// + exceptional shifts at iters 10/20 -> eigenvector back-substitution (hqr2
+// "form vectors", with overflow control) -> map to original basis (Z<-Z*H) ->
+// unit 2-norm. Output packing matches LAPACK geev: real eigenvalue k -> column
+// k; complex pair (wi[k]>0) -> column k = Re, column k+1 = Im (conjugate next).
+//   Hg : input copy, overwritten with the Schur form then eigenvectors.
+//   Zg : eigenvector output (kernel initialises to identity).
+//   vg : per-batch Householder scratch, length n.
+template<typename T>
+__global__ void eig_hqr2_kernel(
+    T* __restrict__ Hg, T* __restrict__ Zg,
+    T* __restrict__ wr_g, T* __restrict__ wi_g,
+    T* __restrict__ vg, int n, long long nbatch)
+{
+    long long b = static_cast<long long>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (b >= nbatch) return;
+
+    T* H = Hg + b * n * n;
+    T* Z = Zg + b * n * n;
+    T* wr = wr_g + b * n;
+    T* wi = wi_g + b * n;
+    T* v = vg + b * n;
+    const T eps = std::is_same_v<T, float> ? T(1.19e-7) : T(2.22e-16);
+
+    for (int i = 0; i < n; ++i) { for (int j = 0; j < n; ++j) Z[i*n+j] = T(0); Z[i*n+i] = T(1); }
+
+    // ---- orthogonal Hessenberg reduction (Householder), accumulate Z ----
+    for (int k = 0; k + 2 < n; ++k) {
+        T sigma = T(0);
+        for (int i = k+1; i < n; ++i) sigma += H[i*n+k]*H[i*n+k];
+        if (sigma == T(0)) continue;
+        T nx = sqrt(sigma);
+        T a = -copysign(nx, H[(k+1)*n+k]);
+        v[k+1] = H[(k+1)*n+k] - a;
+        for (int i = k+2; i < n; ++i) v[i] = H[i*n+k];
+        T vn2 = T(0);
+        for (int i = k+1; i < n; ++i) vn2 += v[i]*v[i];
+        if (vn2 == T(0)) continue;
+        T tau = T(2)/vn2;
+        for (int j = 0; j < n; ++j) { T d=T(0); for(int i=k+1;i<n;++i) d+=v[i]*H[i*n+j]; d*=tau; for(int i=k+1;i<n;++i) H[i*n+j]-=v[i]*d; }
+        for (int i = 0; i < n; ++i) { T d=T(0); for(int j=k+1;j<n;++j) d+=H[i*n+j]*v[j]; d*=tau; for(int j=k+1;j<n;++j) H[i*n+j]-=d*v[j]; }
+        for (int i = 0; i < n; ++i) { T d=T(0); for(int j=k+1;j<n;++j) d+=Z[i*n+j]*v[j]; d*=tau; for(int j=k+1;j<n;++j) Z[i*n+j]-=d*v[j]; }
+        H[(k+1)*n+k] = a;
+        for (int i = k+2; i < n; ++i) H[i*n+k] = T(0);
+    }
+
+    // ---- hqr2: real Schur form + eigenvalues ----
+    T norm = T(0);
+    for (int i = 0; i < n; ++i) { int j0 = i-1 > 0 ? i-1 : 0; for (int j = j0; j < n; ++j) norm += fabs(H[i*n+j]); }
+    T t = T(0);
+    int en = n - 1;
+    while (en >= 0) {
+        int its = 0, na = en - 1;
+        for (;;) {
+            int l;
+            for (l = en; l >= 1; --l) {
+                T s = fabs(H[(l-1)*n+(l-1)]) + fabs(H[l*n+l]);
+                if (s == T(0)) s = norm;
+                if (fabs(H[l*n+(l-1)]) <= eps*s) break;
+            }
+            T x = H[en*n+en];
+            if (l == en) { H[en*n+en] = x + t; wr[en] = H[en*n+en]; wi[en] = T(0); en -= 1; break; }
+            T y = H[na*n+na];
+            T w = H[en*n+na]*H[na*n+en];
+            if (l == na) {
+                T p = T(0.5)*(y - x);
+                T q = p*p + w;
+                T zz = sqrt(fabs(q));
+                x = H[en*n+en] = x + t; H[na*n+na] = y + t;
+                if (q >= T(0)) {
+                    zz = p + copysign(zz, p);
+                    wr[na] = wr[en] = x + zz;
+                    if (zz != T(0)) wr[en] = x - w/zz;
+                    wi[na] = wi[en] = T(0);
+                    x = H[en*n+na];
+                    T s = fabs(x) + fabs(zz);
+                    T p2 = x/s, q2 = zz/s;
+                    T r = sqrt(p2*p2 + q2*q2);
+                    p2 /= r; q2 /= r;
+                    for (int j = na; j < n; ++j) { T t1=H[na*n+j]; H[na*n+j]=q2*t1+p2*H[en*n+j]; H[en*n+j]=q2*H[en*n+j]-p2*t1; }
+                    for (int i = 0; i <= en; ++i) { T t1=H[i*n+na]; H[i*n+na]=q2*t1+p2*H[i*n+en]; H[i*n+en]=q2*H[i*n+en]-p2*t1; }
+                    for (int i = 0; i < n; ++i)  { T t1=Z[i*n+na]; Z[i*n+na]=q2*t1+p2*Z[i*n+en]; Z[i*n+en]=q2*Z[i*n+en]-p2*t1; }
+                } else { wr[na] = wr[en] = x + p; wi[na] = zz; wi[en] = -zz; }
+                en -= 2; break;
+            }
+            if (its == 30) { en = -1; break; }
+            if (its == 10 || its == 20) {
+                t += x;
+                for (int i = 0; i <= en; ++i) H[i*n+i] -= x;
+                T s = fabs(H[en*n+na]) + fabs(H[na*n+(na-1)]);
+                y = x = T(0.75)*s; w = T(-0.4375)*s*s;
+            }
+            its += 1;
+            T p,q,r; int m;
+            for (m = en-2; m >= l; --m) {
+                T zz = H[m*n+m];
+                r = x - zz; T s = y - zz;
+                p = (r*s - w)/H[(m+1)*n+m] + H[m*n+(m+1)];
+                q = H[(m+1)*n+(m+1)] - zz - r - s;
+                r = H[(m+2)*n+(m+1)];
+                T sc = fabs(p)+fabs(q)+fabs(r);
+                p /= sc; q /= sc; r /= sc;
+                if (m == l) break;
+                T tst1 = fabs(p)*(fabs(H[(m-1)*n+(m-1)])+fabs(zz)+fabs(H[(m+1)*n+(m+1)]));
+                T tst2 = fabs(H[m*n+(m-1)])*(fabs(q)+fabs(r));
+                if (tst2 <= eps*tst1) break;
+            }
+            for (int i = m+2; i <= en; ++i) { H[i*n+(i-2)]=T(0); if (i != m+2) H[i*n+(i-3)]=T(0); }
+            for (int k = m; k <= na; ++k) {
+                bool notlast = (k != na);
+                if (k != m) {
+                    p = H[k*n+(k-1)]; q = H[(k+1)*n+(k-1)]; r = notlast ? H[(k+2)*n+(k-1)] : T(0);
+                    x = fabs(p)+fabs(q)+fabs(r);
+                    if (x == T(0)) continue;
+                    p /= x; q /= x; r /= x;
+                }
+                T s = copysign(sqrt(p*p+q*q+r*r), p);
+                if (k == m) { if (l != m) H[k*n+(k-1)] = -H[k*n+(k-1)]; }
+                else H[k*n+(k-1)] = -s*x;
+                p += s;
+                T xx = p/s, yy = q/s, zz = r/s;
+                q /= p; r /= p;
+                for (int j = k; j < n; ++j) {
+                    p = H[k*n+j] + q*H[(k+1)*n+j];
+                    if (notlast) { p += r*H[(k+2)*n+j]; H[(k+2)*n+j] -= p*zz; }
+                    H[(k+1)*n+j] -= p*yy; H[k*n+j] -= p*xx;
+                }
+                int jmax = en < k+3 ? en : k+3;
+                for (int i = 0; i <= jmax; ++i) {
+                    p = xx*H[i*n+k] + yy*H[i*n+(k+1)];
+                    if (notlast) { p += zz*H[i*n+(k+2)]; H[i*n+(k+2)] -= p*r; }
+                    H[i*n+(k+1)] -= p*q; H[i*n+k] -= p;
+                }
+                for (int i = 0; i < n; ++i) {
+                    p = xx*Z[i*n+k] + yy*Z[i*n+(k+1)];
+                    if (notlast) { p += zz*Z[i*n+(k+2)]; Z[i*n+(k+2)] -= p*r; }
+                    Z[i*n+(k+1)] -= p*q; Z[i*n+k] -= p;
+                }
+            }
+        }
+    }
+
+    // ---- eigenvector back-substitution on the Schur form ----
+    if (norm != T(0)) {
+        for (int e = n-1; e >= 0; --e) {
+            T p = wr[e], q = wi[e];
+            int na2 = e - 1;
+            if (q == T(0)) {
+                int m = e; H[e*n+e] = T(1);
+                T zz_s = T(0), s_s = T(0);
+                for (int i = e-1; i >= 0; --i) {
+                    T w = H[i*n+i] - p;
+                    T r = T(0);
+                    for (int j = m; j <= e; ++j) r += H[i*n+j]*H[j*n+e];
+                    if (wi[i] < T(0)) { zz_s = w; s_s = r; continue; }
+                    m = i;
+                    if (wi[i] == T(0)) {
+                        T tt = (w == T(0)) ? eps*norm : w;
+                        H[i*n+e] = -r/tt;
+                    } else {
+                        T xx = H[i*n+(i+1)], yv = H[(i+1)*n+i];
+                        T qd = (wr[i]-p)*(wr[i]-p) + wi[i]*wi[i];
+                        T tt = (xx*s_s - zz_s*r)/qd;
+                        H[i*n+e] = tt;
+                        if (fabs(xx) > fabs(zz_s)) H[(i+1)*n+e] = (-r - w*tt)/xx;
+                        else                       H[(i+1)*n+e] = (-s_s - yv*tt)/zz_s;
+                    }
+                    T tmag = fabs(H[i*n+e]);
+                    if ((eps*tmag)*tmag > T(1)) for (int j = i; j <= e; ++j) H[j*n+e] /= tmag;
+                }
+            } else if (q < T(0)) {
+                int m = na2;
+                if (fabs(H[e*n+na2]) > fabs(H[na2*n+e])) {
+                    H[na2*n+na2] = q/H[e*n+na2];
+                    H[na2*n+e]   = -(H[e*n+e]-p)/H[e*n+na2];
+                } else {
+                    T zr, zi; eig_cdiv<T>(T(0), -H[na2*n+e], H[na2*n+na2]-p, q, zr, zi);
+                    H[na2*n+na2] = zr; H[na2*n+e] = zi;
+                }
+                H[e*n+na2] = T(0); H[e*n+e] = T(1);
+                T zz_s = T(0), ra_s = T(0), sa_s = T(0);
+                for (int i = e-2; i >= 0; --i) {
+                    T w = H[i*n+i] - p;
+                    T ra = T(0), sa = T(0);
+                    for (int j = m; j <= e; ++j) { ra += H[i*n+j]*H[j*n+na2]; sa += H[i*n+j]*H[j*n+e]; }
+                    if (wi[i] < T(0)) { zz_s = w; ra_s = ra; sa_s = sa; continue; }
+                    m = i;
+                    if (wi[i] == T(0)) {
+                        T zr, zi; eig_cdiv<T>(-ra, -sa, w, q, zr, zi);
+                        H[i*n+na2] = zr; H[i*n+e] = zi;
+                    } else {
+                        T xx = H[i*n+(i+1)], yv = H[(i+1)*n+i];
+                        T vr = (wr[i]-p)*(wr[i]-p) + wi[i]*wi[i] - q*q;
+                        T vi = (wr[i]-p)*T(2)*q;
+                        if (vr == T(0) && vi == T(0))
+                            vr = eps*norm*(fabs(w)+fabs(q)+fabs(xx)+fabs(yv)+fabs(zz_s));
+                        T zr, zi;
+                        eig_cdiv<T>(xx*ra_s - zz_s*ra + q*sa, xx*sa_s - zz_s*sa - q*ra, vr, vi, zr, zi);
+                        H[i*n+na2] = zr; H[i*n+e] = zi;
+                        if (fabs(xx) > fabs(zz_s) + fabs(q)) {
+                            H[(i+1)*n+na2] = (-ra - w*H[i*n+na2] + q*H[i*n+e])/xx;
+                            H[(i+1)*n+e]   = (-sa - w*H[i*n+e] - q*H[i*n+na2])/xx;
+                        } else {
+                            T z2r, z2i; eig_cdiv<T>(-ra_s - yv*H[i*n+na2], -sa_s - yv*H[i*n+e], zz_s, q, z2r, z2i);
+                            H[(i+1)*n+na2] = z2r; H[(i+1)*n+e] = z2i;
+                        }
+                    }
+                    T tmag = fabs(H[i*n+na2]); { T tm2 = fabs(H[i*n+e]); if (tm2 > tmag) tmag = tm2; }
+                    if ((eps*tmag)*tmag > T(1)) for (int j = i; j <= e; ++j) { H[j*n+na2] /= tmag; H[j*n+e] /= tmag; }
+                }
+            }
+        }
+        for (int j = n-1; j >= 0; --j)
+            for (int i = 0; i < n; ++i) {
+                T s = T(0);
+                for (int k = 0; k <= j; ++k) s += Z[i*n+k]*H[k*n+j];
+                Z[i*n+j] = s;
+            }
+    }
+
+    // ---- normalize each (complex) eigenvector to unit 2-norm ----
+    for (int k = 0; k < n; ++k) {
+        if (wi[k] > T(0)) {
+            T nrm = T(0); for (int i=0;i<n;++i) nrm += Z[i*n+k]*Z[i*n+k]+Z[i*n+(k+1)]*Z[i*n+(k+1)];
+            nrm = sqrt(nrm); if (nrm>T(0)) for(int i=0;i<n;++i){ Z[i*n+k]/=nrm; Z[i*n+(k+1)]/=nrm; }
+            ++k;
+        } else if (wi[k] == T(0)) {
+            T nrm = T(0); for (int i=0;i<n;++i) nrm += Z[i*n+k]*Z[i*n+k];
+            nrm = sqrt(nrm); if (nrm>T(0)) for(int i=0;i<n;++i) Z[i*n+k]/=nrm;
+        }
+    }
+}
+
+// Legacy shared-memory QR fallback (kept for reference; superseded by
+// eig_hqr2_kernel, which computes correct non-symmetric eigenvectors).
 template<typename T>
 __global__ void qr_eig_fallback_kernel(
     const T* __restrict__ A_in,
@@ -1638,50 +1888,22 @@ auto linalg_eig_kernel(const Tensor& A, hipStream_t stream)
     HIP_CHECK_LINALG(hipStreamSynchronize(stream ? stream : nullptr));
     return {WR, WI, V};
 #else
-    // QR iteration fallback for rocSOLVER < 6.0 with dynamic shared memory.
-    // Shared memory layout: H[n*n] + Q[n*n] + scratch[4]
-    // Max n is bounded by device shared memory (typically ~90 for float, ~64 for double).
-    int device_id = 0;
-    HIP_CHECK_LINALG(hipGetDevice(&device_id));
-    int max_smem = 0;
-    HIP_CHECK_LINALG(hipDeviceGetAttribute(&max_smem,
-        hipDeviceAttributeMaxSharedMemoryPerBlock, device_id));
-
-    constexpr int max_qr_iters = 200;
-    constexpr int block_size = 128;
-
+    // No vendor geev in this rocSOLVER. Native EISPACK-hqr2 eigensolver:
+    // one work-item per batch element over global-memory scratch (correct
+    // non-symmetric eigenvalues AND eigenvectors; no shared-memory size cap).
+    auto vbuf = zeros({nbatch, n}, A.dtype(), A.device());
+    int eblock = 256;
+    int egrid = static_cast<int>((nbatch + eblock - 1) / eblock);
     if (A.dtype() == DType::Float32) {
-        size_t smem_needed = 2 * n * n * sizeof(float) + 4 * sizeof(float);
-        if (static_cast<int64_t>(smem_needed) > max_smem) {
-            int max_n = static_cast<int>(sqrt(static_cast<double>(max_smem) / (2.0 * sizeof(float))));
-            throw std::runtime_error(
-                "linalg.eig: matrix " + std::to_string(n) + "x" + std::to_string(n) +
-                " exceeds device shared memory for QR fallback (max ~" +
-                std::to_string(max_n) + "). Upgrade to rocSOLVER >= 6.0.");
-        }
-        qr_eig_fallback_kernel<float><<<static_cast<int>(nbatch), block_size, smem_needed, stream>>>(
-            work.data<float>(),
-            WR.data<float>(),
-            WI.data<float>(),
-            V.data<float>(),
-            static_cast<int>(n), max_qr_iters);
+        eig_hqr2_kernel<float><<<egrid, eblock, 0, stream>>>(
+            work.data<float>(), V.data<float>(), WR.data<float>(), WI.data<float>(),
+            vbuf.data<float>(), static_cast<int>(n), static_cast<long long>(nbatch));
     } else {
-        size_t smem_needed = 2 * n * n * sizeof(double) + 4 * sizeof(double);
-        if (static_cast<int64_t>(smem_needed) > max_smem) {
-            int max_n = static_cast<int>(sqrt(static_cast<double>(max_smem) / (2.0 * sizeof(double))));
-            throw std::runtime_error(
-                "linalg.eig: matrix " + std::to_string(n) + "x" + std::to_string(n) +
-                " exceeds device shared memory for QR fallback (max ~" +
-                std::to_string(max_n) + "). Upgrade to rocSOLVER >= 6.0.");
-        }
-        qr_eig_fallback_kernel<double><<<static_cast<int>(nbatch), block_size, smem_needed, stream>>>(
-            work.data<double>(),
-            WR.data<double>(),
-            WI.data<double>(),
-            V.data<double>(),
-            static_cast<int>(n), max_qr_iters);
+        eig_hqr2_kernel<double><<<egrid, eblock, 0, stream>>>(
+            work.data<double>(), V.data<double>(), WR.data<double>(), WI.data<double>(),
+            vbuf.data<double>(), static_cast<int>(n), static_cast<long long>(nbatch));
     }
-
+    HIP_CHECK_LINALG(hipGetLastError());
     HIP_CHECK_LINALG(hipStreamSynchronize(stream ? stream : nullptr));
     return {WR, WI, V};
 #endif
@@ -3488,6 +3710,236 @@ __global__ void svd_kernel(
 // ============================================================================
 
 template<typename T>
+__device__ inline void eig_cdiv(T cr, T ci, T dr, T di, T& zr, T& zi) {
+    if (fabs(dr) > fabs(di)) {
+        T r = di / dr, d = dr + di * r;
+        zr = (cr + ci * r) / d; zi = (ci - cr * r) / d;
+    } else {
+        T r = dr / di, d = di + dr * r;
+        zr = (cr * r + ci) / d; zi = (ci * r - cr) / d;
+    }
+}
+
+// Native EISPACK-hqr2 non-symmetric eigensolver (correct eigenvalues AND
+// eigenvectors). One work-item per batch element over global-memory scratch.
+// See the rocSOLVER-branch copy for the full algorithm description.
+template<typename T>
+__global__ void eig_hqr2_kernel(
+    T* __restrict__ Hg, T* __restrict__ Zg,
+    T* __restrict__ wr_g, T* __restrict__ wi_g,
+    T* __restrict__ vg, int n, long long nbatch)
+{
+    long long b = static_cast<long long>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (b >= nbatch) return;
+    T* H = Hg + b * n * n;
+    T* Z = Zg + b * n * n;
+    T* wr = wr_g + b * n;
+    T* wi = wi_g + b * n;
+    T* v = vg + b * n;
+    const T eps = std::is_same_v<T, float> ? T(1.19e-7) : T(2.22e-16);
+
+    for (int i = 0; i < n; ++i) { for (int j = 0; j < n; ++j) Z[i*n+j] = T(0); Z[i*n+i] = T(1); }
+    for (int k = 0; k + 2 < n; ++k) {
+        T sigma = T(0);
+        for (int i = k+1; i < n; ++i) sigma += H[i*n+k]*H[i*n+k];
+        if (sigma == T(0)) continue;
+        T nx = sqrt(sigma);
+        T a = -copysign(nx, H[(k+1)*n+k]);
+        v[k+1] = H[(k+1)*n+k] - a;
+        for (int i = k+2; i < n; ++i) v[i] = H[i*n+k];
+        T vn2 = T(0);
+        for (int i = k+1; i < n; ++i) vn2 += v[i]*v[i];
+        if (vn2 == T(0)) continue;
+        T tau = T(2)/vn2;
+        for (int j = 0; j < n; ++j) { T d=T(0); for(int i=k+1;i<n;++i) d+=v[i]*H[i*n+j]; d*=tau; for(int i=k+1;i<n;++i) H[i*n+j]-=v[i]*d; }
+        for (int i = 0; i < n; ++i) { T d=T(0); for(int j=k+1;j<n;++j) d+=H[i*n+j]*v[j]; d*=tau; for(int j=k+1;j<n;++j) H[i*n+j]-=d*v[j]; }
+        for (int i = 0; i < n; ++i) { T d=T(0); for(int j=k+1;j<n;++j) d+=Z[i*n+j]*v[j]; d*=tau; for(int j=k+1;j<n;++j) Z[i*n+j]-=d*v[j]; }
+        H[(k+1)*n+k] = a;
+        for (int i = k+2; i < n; ++i) H[i*n+k] = T(0);
+    }
+    T norm = T(0);
+    for (int i = 0; i < n; ++i) { int j0 = i-1 > 0 ? i-1 : 0; for (int j = j0; j < n; ++j) norm += fabs(H[i*n+j]); }
+    T t = T(0);
+    int en = n - 1;
+    while (en >= 0) {
+        int its = 0, na = en - 1;
+        for (;;) {
+            int l;
+            for (l = en; l >= 1; --l) {
+                T s = fabs(H[(l-1)*n+(l-1)]) + fabs(H[l*n+l]);
+                if (s == T(0)) s = norm;
+                if (fabs(H[l*n+(l-1)]) <= eps*s) break;
+            }
+            T x = H[en*n+en];
+            if (l == en) { H[en*n+en] = x + t; wr[en] = H[en*n+en]; wi[en] = T(0); en -= 1; break; }
+            T y = H[na*n+na];
+            T w = H[en*n+na]*H[na*n+en];
+            if (l == na) {
+                T p = T(0.5)*(y - x);
+                T q = p*p + w;
+                T zz = sqrt(fabs(q));
+                x = H[en*n+en] = x + t; H[na*n+na] = y + t;
+                if (q >= T(0)) {
+                    zz = p + copysign(zz, p);
+                    wr[na] = wr[en] = x + zz;
+                    if (zz != T(0)) wr[en] = x - w/zz;
+                    wi[na] = wi[en] = T(0);
+                    x = H[en*n+na];
+                    T s = fabs(x) + fabs(zz);
+                    T p2 = x/s, q2 = zz/s;
+                    T r = sqrt(p2*p2 + q2*q2);
+                    p2 /= r; q2 /= r;
+                    for (int j = na; j < n; ++j) { T t1=H[na*n+j]; H[na*n+j]=q2*t1+p2*H[en*n+j]; H[en*n+j]=q2*H[en*n+j]-p2*t1; }
+                    for (int i = 0; i <= en; ++i) { T t1=H[i*n+na]; H[i*n+na]=q2*t1+p2*H[i*n+en]; H[i*n+en]=q2*H[i*n+en]-p2*t1; }
+                    for (int i = 0; i < n; ++i)  { T t1=Z[i*n+na]; Z[i*n+na]=q2*t1+p2*Z[i*n+en]; Z[i*n+en]=q2*Z[i*n+en]-p2*t1; }
+                } else { wr[na] = wr[en] = x + p; wi[na] = zz; wi[en] = -zz; }
+                en -= 2; break;
+            }
+            if (its == 30) { en = -1; break; }
+            if (its == 10 || its == 20) {
+                t += x;
+                for (int i = 0; i <= en; ++i) H[i*n+i] -= x;
+                T s = fabs(H[en*n+na]) + fabs(H[na*n+(na-1)]);
+                y = x = T(0.75)*s; w = T(-0.4375)*s*s;
+            }
+            its += 1;
+            T p,q,r; int m;
+            for (m = en-2; m >= l; --m) {
+                T zz = H[m*n+m];
+                r = x - zz; T s = y - zz;
+                p = (r*s - w)/H[(m+1)*n+m] + H[m*n+(m+1)];
+                q = H[(m+1)*n+(m+1)] - zz - r - s;
+                r = H[(m+2)*n+(m+1)];
+                T sc = fabs(p)+fabs(q)+fabs(r);
+                p /= sc; q /= sc; r /= sc;
+                if (m == l) break;
+                T tst1 = fabs(p)*(fabs(H[(m-1)*n+(m-1)])+fabs(zz)+fabs(H[(m+1)*n+(m+1)]));
+                T tst2 = fabs(H[m*n+(m-1)])*(fabs(q)+fabs(r));
+                if (tst2 <= eps*tst1) break;
+            }
+            for (int i = m+2; i <= en; ++i) { H[i*n+(i-2)]=T(0); if (i != m+2) H[i*n+(i-3)]=T(0); }
+            for (int k = m; k <= na; ++k) {
+                bool notlast = (k != na);
+                if (k != m) {
+                    p = H[k*n+(k-1)]; q = H[(k+1)*n+(k-1)]; r = notlast ? H[(k+2)*n+(k-1)] : T(0);
+                    x = fabs(p)+fabs(q)+fabs(r);
+                    if (x == T(0)) continue;
+                    p /= x; q /= x; r /= x;
+                }
+                T s = copysign(sqrt(p*p+q*q+r*r), p);
+                if (k == m) { if (l != m) H[k*n+(k-1)] = -H[k*n+(k-1)]; }
+                else H[k*n+(k-1)] = -s*x;
+                p += s;
+                T xx = p/s, yy = q/s, zz = r/s;
+                q /= p; r /= p;
+                for (int j = k; j < n; ++j) {
+                    p = H[k*n+j] + q*H[(k+1)*n+j];
+                    if (notlast) { p += r*H[(k+2)*n+j]; H[(k+2)*n+j] -= p*zz; }
+                    H[(k+1)*n+j] -= p*yy; H[k*n+j] -= p*xx;
+                }
+                int jmax = en < k+3 ? en : k+3;
+                for (int i = 0; i <= jmax; ++i) {
+                    p = xx*H[i*n+k] + yy*H[i*n+(k+1)];
+                    if (notlast) { p += zz*H[i*n+(k+2)]; H[i*n+(k+2)] -= p*r; }
+                    H[i*n+(k+1)] -= p*q; H[i*n+k] -= p;
+                }
+                for (int i = 0; i < n; ++i) {
+                    p = xx*Z[i*n+k] + yy*Z[i*n+(k+1)];
+                    if (notlast) { p += zz*Z[i*n+(k+2)]; Z[i*n+(k+2)] -= p*r; }
+                    Z[i*n+(k+1)] -= p*q; Z[i*n+k] -= p;
+                }
+            }
+        }
+    }
+    if (norm != T(0)) {
+        for (int e = n-1; e >= 0; --e) {
+            T p = wr[e], q = wi[e];
+            int na2 = e - 1;
+            if (q == T(0)) {
+                int m = e; H[e*n+e] = T(1);
+                T zz_s = T(0), s_s = T(0);
+                for (int i = e-1; i >= 0; --i) {
+                    T w = H[i*n+i] - p;
+                    T r = T(0);
+                    for (int j = m; j <= e; ++j) r += H[i*n+j]*H[j*n+e];
+                    if (wi[i] < T(0)) { zz_s = w; s_s = r; continue; }
+                    m = i;
+                    if (wi[i] == T(0)) {
+                        T tt = (w == T(0)) ? eps*norm : w;
+                        H[i*n+e] = -r/tt;
+                    } else {
+                        T xx = H[i*n+(i+1)], yv = H[(i+1)*n+i];
+                        T qd = (wr[i]-p)*(wr[i]-p) + wi[i]*wi[i];
+                        T tt = (xx*s_s - zz_s*r)/qd;
+                        H[i*n+e] = tt;
+                        if (fabs(xx) > fabs(zz_s)) H[(i+1)*n+e] = (-r - w*tt)/xx;
+                        else                       H[(i+1)*n+e] = (-s_s - yv*tt)/zz_s;
+                    }
+                    T tmag = fabs(H[i*n+e]);
+                    if ((eps*tmag)*tmag > T(1)) for (int j = i; j <= e; ++j) H[j*n+e] /= tmag;
+                }
+            } else if (q < T(0)) {
+                int m = na2;
+                if (fabs(H[e*n+na2]) > fabs(H[na2*n+e])) {
+                    H[na2*n+na2] = q/H[e*n+na2];
+                    H[na2*n+e]   = -(H[e*n+e]-p)/H[e*n+na2];
+                } else {
+                    T zr, zi; eig_cdiv<T>(T(0), -H[na2*n+e], H[na2*n+na2]-p, q, zr, zi);
+                    H[na2*n+na2] = zr; H[na2*n+e] = zi;
+                }
+                H[e*n+na2] = T(0); H[e*n+e] = T(1);
+                T zz_s = T(0), ra_s = T(0), sa_s = T(0);
+                for (int i = e-2; i >= 0; --i) {
+                    T w = H[i*n+i] - p;
+                    T ra = T(0), sa = T(0);
+                    for (int j = m; j <= e; ++j) { ra += H[i*n+j]*H[j*n+na2]; sa += H[i*n+j]*H[j*n+e]; }
+                    if (wi[i] < T(0)) { zz_s = w; ra_s = ra; sa_s = sa; continue; }
+                    m = i;
+                    if (wi[i] == T(0)) {
+                        T zr, zi; eig_cdiv<T>(-ra, -sa, w, q, zr, zi);
+                        H[i*n+na2] = zr; H[i*n+e] = zi;
+                    } else {
+                        T xx = H[i*n+(i+1)], yv = H[(i+1)*n+i];
+                        T vr = (wr[i]-p)*(wr[i]-p) + wi[i]*wi[i] - q*q;
+                        T vi = (wr[i]-p)*T(2)*q;
+                        if (vr == T(0) && vi == T(0))
+                            vr = eps*norm*(fabs(w)+fabs(q)+fabs(xx)+fabs(yv)+fabs(zz_s));
+                        T zr, zi;
+                        eig_cdiv<T>(xx*ra_s - zz_s*ra + q*sa, xx*sa_s - zz_s*sa - q*ra, vr, vi, zr, zi);
+                        H[i*n+na2] = zr; H[i*n+e] = zi;
+                        if (fabs(xx) > fabs(zz_s) + fabs(q)) {
+                            H[(i+1)*n+na2] = (-ra - w*H[i*n+na2] + q*H[i*n+e])/xx;
+                            H[(i+1)*n+e]   = (-sa - w*H[i*n+e] - q*H[i*n+na2])/xx;
+                        } else {
+                            T z2r, z2i; eig_cdiv<T>(-ra_s - yv*H[i*n+na2], -sa_s - yv*H[i*n+e], zz_s, q, z2r, z2i);
+                            H[(i+1)*n+na2] = z2r; H[(i+1)*n+e] = z2i;
+                        }
+                    }
+                    T tmag = fabs(H[i*n+na2]); { T tm2 = fabs(H[i*n+e]); if (tm2 > tmag) tmag = tm2; }
+                    if ((eps*tmag)*tmag > T(1)) for (int j = i; j <= e; ++j) { H[j*n+na2] /= tmag; H[j*n+e] /= tmag; }
+                }
+            }
+        }
+        for (int j = n-1; j >= 0; --j)
+            for (int i = 0; i < n; ++i) {
+                T s = T(0);
+                for (int k = 0; k <= j; ++k) s += Z[i*n+k]*H[k*n+j];
+                Z[i*n+j] = s;
+            }
+    }
+    for (int k = 0; k < n; ++k) {
+        if (wi[k] > T(0)) {
+            T nrm = T(0); for (int i=0;i<n;++i) nrm += Z[i*n+k]*Z[i*n+k]+Z[i*n+(k+1)]*Z[i*n+(k+1)];
+            nrm = sqrt(nrm); if (nrm>T(0)) for(int i=0;i<n;++i){ Z[i*n+k]/=nrm; Z[i*n+(k+1)]/=nrm; }
+            ++k;
+        } else if (wi[k] == T(0)) {
+            T nrm = T(0); for (int i=0;i<n;++i) nrm += Z[i*n+k]*Z[i*n+k];
+            nrm = sqrt(nrm); if (nrm>T(0)) for(int i=0;i<n;++i) Z[i*n+k]/=nrm;
+        }
+    }
+}
+
+template<typename T>
 __global__ void qr_eig_fallback_kernel(
     const T* __restrict__ A_in,
     T* __restrict__ wr_out,
@@ -4250,24 +4702,18 @@ auto linalg_eig_kernel(const Tensor& A, hipStream_t stream)
     v_shape.push_back(n);
     auto V = zeros(v_shape, A.dtype(), A.device());
 
+    auto vbuf = zeros({nbatch, n}, A.dtype(), A.device());
+    int eblock = 256;
+    int egrid = static_cast<int>((nbatch + eblock - 1) / eblock);
     if (A.dtype() == DType::Float32) {
-        check_size_limit<float>(n, "eig");
-        // Shared memory: H[n*n] + Q[n*n] + scratch[4]
-        size_t smem = (2 * n * n + 4) * sizeof(float);
-        int threads = min(static_cast<int>(n), 128);
-        if (threads < 1) threads = 1;
-        qr_eig_fallback_kernel<float><<<nbatch, threads, smem, stream>>>(
-            work.data<float>(), WR.data<float>(), WI.data<float>(),
-            V.data<float>(), n, 30 * n);
+        eig_hqr2_kernel<float><<<egrid, eblock, 0, stream>>>(
+            work.data<float>(), V.data<float>(), WR.data<float>(), WI.data<float>(),
+            vbuf.data<float>(), static_cast<int>(n), static_cast<long long>(nbatch));
         HIP_CHECK_LINALG(hipGetLastError());
     } else {
-        check_size_limit<double>(n, "eig");
-        size_t smem = (2 * n * n + 4) * sizeof(double);
-        int threads = min(static_cast<int>(n), 128);
-        if (threads < 1) threads = 1;
-        qr_eig_fallback_kernel<double><<<nbatch, threads, smem, stream>>>(
-            work.data<double>(), WR.data<double>(), WI.data<double>(),
-            V.data<double>(), n, 30 * n);
+        eig_hqr2_kernel<double><<<egrid, eblock, 0, stream>>>(
+            work.data<double>(), V.data<double>(), WR.data<double>(), WI.data<double>(),
+            vbuf.data<double>(), static_cast<int>(n), static_cast<long long>(nbatch));
         HIP_CHECK_LINALG(hipGetLastError());
     }
 

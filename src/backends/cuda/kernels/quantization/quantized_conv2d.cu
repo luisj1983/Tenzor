@@ -31,9 +31,11 @@ __global__ void quantized_conv2d_cuda_kernel(
     int64_t w_in,
     int64_t h_out,
     int64_t w_out,
-    int64_t kernel_size,
-    int64_t stride,
-    int64_t padding,
+    int64_t kh_size,
+    int64_t kw_size,
+    int64_t sH, int64_t sW,
+    int64_t pH, int64_t pW,
+    int64_t dH, int64_t dW,
     float combined_scale,
     int32_t input_zp,
     int32_t weight_zp
@@ -48,17 +50,17 @@ __global__ void quantized_conv2d_cuda_kernel(
 
     int32_t acc = 0;
 
-    // Convolution over input channels and kernel
+    // Convolution over input channels and kernel (per-axis stride/padding/dilation).
     for (int64_t ic = 0; ic < in_channels; ++ic) {
-        for (int64_t kh = 0; kh < kernel_size; ++kh) {
-            for (int64_t kw = 0; kw < kernel_size; ++kw) {
-                int64_t ih = oh * stride + kh - padding;
-                int64_t iw = ow * stride + kw - padding;
+        for (int64_t kh = 0; kh < kh_size; ++kh) {
+            for (int64_t kw = 0; kw < kw_size; ++kw) {
+                int64_t ih = oh * sH + kh * dH - pH;
+                int64_t iw = ow * sW + kw * dW - pW;
 
                 // Check bounds
                 if (ih >= 0 && ih < h_in && iw >= 0 && iw < w_in) {
                     int64_t input_idx = ((b * in_channels + ic) * h_in + ih) * w_in + iw;
-                    int64_t weight_idx = ((oc * in_channels + ic) * kernel_size + kh) * kernel_size + kw;
+                    int64_t weight_idx = ((oc * in_channels + ic) * kh_size + kh) * kw_size + kw;
 
                     int32_t input_val = static_cast<int32_t>(input[input_idx]);
                     int32_t weight_val = static_cast<int32_t>(weight[weight_idx]);
@@ -70,7 +72,7 @@ __global__ void quantized_conv2d_cuda_kernel(
     }
 
     // Zero point correction
-    int64_t kernel_elements = in_channels * kernel_size * kernel_size;
+    int64_t kernel_elements = in_channels * kh_size * kw_size;
     acc -= input_zp * weight_zp * kernel_elements;
 
     // Dequantize and add bias
@@ -98,9 +100,10 @@ auto quantized_conv2d_cuda(
     int64_t w_in,
     int64_t h_out,
     int64_t w_out,
-    int64_t kernel_size,
-    int64_t stride,
-    int64_t padding,
+    int64_t kh_size, int64_t kw_size,
+    int64_t sH, int64_t sW,
+    int64_t pH, int64_t pW,
+    int64_t dH, int64_t dW,
     float input_scale,
     float weight_scale,
     int32_t input_zp,
@@ -121,7 +124,7 @@ auto quantized_conv2d_cuda(
         input, weight, bias, output,
         batch, in_channels, out_channels,
         h_in, w_in, h_out, w_out,
-        kernel_size, stride, padding,
+        kh_size, kw_size, sH, sW, pH, pW, dH, dW,
         combined_scale, input_zp, weight_zp
     );
     TENZOR_CUDA_POST_LAUNCH_CHECK();

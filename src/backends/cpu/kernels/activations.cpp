@@ -853,7 +853,7 @@ auto tanh_backward_kernel(const Tensor& grad_output, const Tensor& input) -> Ten
 // ============================================================================
 
 // Forward: 0.5 * x * (1 + tanh(sqrt(2/pi) * (x + 0.044715 * x^3)))
-// GELU (Gaussian Error Linear Unit) - using fast tanh approximation
+// GELU (Gaussian Error Linear Unit) - exact erf form: 0.5*x*(1+erf(x/sqrt(2)))
 auto gelu_kernel(const Tensor& input) -> Tensor {
     Tensor output(std::vector<int64_t>(input.shape().begin(), input.shape().end()), input.dtype(), input.device());
 
@@ -916,7 +916,7 @@ auto gelu_kernel(const Tensor& input) -> Tensor {
     return output;
 }
 
-// Backward: derivative of tanh-approximation GELU
+// Backward: derivative of exact erf GELU: 0.5*(1+erf(x/sqrt2)) + x*(1/sqrt(2pi))*e^(-x^2/2)
 // gelu(x) = 0.5 * x * (1 + tanh(u)), where u = sqrt(2/pi) * (x + 0.044715 * x^3)
 // gelu'(x) = 0.5 * (1 + tanh(u)) + 0.5 * x * sech^2(u) * du/dx
 //          = 0.5 * (1 + tanh(u)) + 0.5 * x * (1 - tanh(u)^2) * sqrt(2/pi) * (1 + 3*0.044715*x^2)

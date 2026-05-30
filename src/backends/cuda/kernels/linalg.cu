@@ -324,12 +324,343 @@ __global__ void extract_lu_kernel(const T* packed, T* L, T* U,
 // `!TENZOR_HAS_CUSOLVER` branch uses. One block per batch, row-major.
 // ============================================================================
 
+// Complex divide (cr+ci*i)/(dr+di*i) — robust scaling.
 template<typename T>
+__device__ inline void eig_cdiv(T cr, T ci, T dr, T di, T& zr, T& zi) {
+    if (::fabs(dr) > ::fabs(di)) {
+        T r = di / dr, d = dr + di * r;
+        zr = (cr + ci * r) / d; zi = (ci - cr * r) / d;
+    } else {
+        T r = dr / di, d = di + dr * r;
+        zr = (cr * r + ci) / d; zi = (ci * r - cr) / d;
+    }
+}
+
+// Non-symmetric real eigendecomposition — one work-item per batch element,
+// operating on global-memory scratch (no shared-memory size cap, no barriers).
+// Faithful EISPACK hqr2: orthogonal Hessenberg reduction (Householder, Z
+// accumulated) -> real Schur form via Francis double-shift QR with deflation
+// + exceptional shifts at iters 10/20 -> eigenvector back-substitution (hqr2
+// "form vectors", with overflow control) -> map to original basis (Z<-Z*H) ->
+// unit 2-norm. Output packing matches LAPACK geev: real eigenvalue k -> column
+// k; complex pair (wi[k]>0) -> column k = Re, column k+1 = Im (conjugate next).
+//   Hg : input copy, overwritten with the Schur form then eigenvectors.
+//   Zg : eigenvector output (kernel initialises to identity).
+//   vg : per-batch Householder scratch, length n.
+template<typename T>
+__global__ void eig_hqr2_kernel(
+    T* __restrict__ Hg, T* __restrict__ Zg,
+    T* __restrict__ wr_g, T* __restrict__ wi_g,
+    T* __restrict__ vg, int n, long long nbatch)
+{
+    long long b = static_cast<long long>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (b >= nbatch) return;
+    T* H = Hg + b * n * n;
+    T* Z = Zg + b * n * n;
+    T* wr = wr_g + b * n;
+    T* wi = wi_g + b * n;
+    T* v = vg + b * n;
+    const T eps = std::is_same_v<T, float> ? T(1.19e-7) : T(2.22e-16);
+
+    for (int i = 0; i < n; ++i) { for (int j = 0; j < n; ++j) Z[i*n+j] = T(0); Z[i*n+i] = T(1); }
+    for (int k = 0; k + 2 < n; ++k) {
+        T sigma = T(0);
+        for (int i = k+1; i < n; ++i) sigma += H[i*n+k]*H[i*n+k];
+        if (sigma == T(0)) continue;
+        T nx = ::sqrt(sigma);
+        T a = -::copysign(nx, H[(k+1)*n+k]);
+        v[k+1] = H[(k+1)*n+k] - a;
+        for (int i = k+2; i < n; ++i) v[i] = H[i*n+k];
+        T vn2 = T(0);
+        for (int i = k+1; i < n; ++i) vn2 += v[i]*v[i];
+        if (vn2 == T(0)) continue;
+        T tau = T(2)/vn2;
+        for (int j = 0; j < n; ++j) { T d=T(0); for(int i=k+1;i<n;++i) d+=v[i]*H[i*n+j]; d*=tau; for(int i=k+1;i<n;++i) H[i*n+j]-=v[i]*d; }
+        for (int i = 0; i < n; ++i) { T d=T(0); for(int j=k+1;j<n;++j) d+=H[i*n+j]*v[j]; d*=tau; for(int j=k+1;j<n;++j) H[i*n+j]-=d*v[j]; }
+        for (int i = 0; i < n; ++i) { T d=T(0); for(int j=k+1;j<n;++j) d+=Z[i*n+j]*v[j]; d*=tau; for(int j=k+1;j<n;++j) Z[i*n+j]-=d*v[j]; }
+        H[(k+1)*n+k] = a;
+        for (int i = k+2; i < n; ++i) H[i*n+k] = T(0);
+    }
+    T norm = T(0);
+    for (int i = 0; i < n; ++i) { int j0 = i-1 > 0 ? i-1 : 0; for (int j = j0; j < n; ++j) norm += ::fabs(H[i*n+j]); }
+    T t = T(0);
+    int en = n - 1;
+    while (en >= 0) {
+        int its = 0, na = en - 1;
+        for (;;) {
+            int l;
+            for (l = en; l >= 1; --l) {
+                T s = ::fabs(H[(l-1)*n+(l-1)]) + ::fabs(H[l*n+l]);
+                if (s == T(0)) s = norm;
+                if (::fabs(H[l*n+(l-1)]) <= eps*s) break;
+            }
+            T x = H[en*n+en];
+            if (l == en) { H[en*n+en] = x + t; wr[en] = H[en*n+en]; wi[en] = T(0); en -= 1; break; }
+            T y = H[na*n+na];
+            T w = H[en*n+na]*H[na*n+en];
+            if (l == na) {
+                T p = T(0.5)*(y - x);
+                T q = p*p + w;
+                T zz = ::sqrt(::fabs(q));
+                x = H[en*n+en] = x + t; H[na*n+na] = y + t;
+                if (q >= T(0)) {
+                    zz = p + ::copysign(zz, p);
+                    wr[na] = wr[en] = x + zz;
+                    if (zz != T(0)) wr[en] = x - w/zz;
+                    wi[na] = wi[en] = T(0);
+                    x = H[en*n+na];
+                    T s = ::fabs(x) + ::fabs(zz);
+                    T p2 = x/s, q2 = zz/s;
+                    T r = ::sqrt(p2*p2 + q2*q2);
+                    p2 /= r; q2 /= r;
+                    for (int j = na; j < n; ++j) { T t1=H[na*n+j]; H[na*n+j]=q2*t1+p2*H[en*n+j]; H[en*n+j]=q2*H[en*n+j]-p2*t1; }
+                    for (int i = 0; i <= en; ++i) { T t1=H[i*n+na]; H[i*n+na]=q2*t1+p2*H[i*n+en]; H[i*n+en]=q2*H[i*n+en]-p2*t1; }
+                    for (int i = 0; i < n; ++i)  { T t1=Z[i*n+na]; Z[i*n+na]=q2*t1+p2*Z[i*n+en]; Z[i*n+en]=q2*Z[i*n+en]-p2*t1; }
+                } else { wr[na] = wr[en] = x + p; wi[na] = zz; wi[en] = -zz; }
+                en -= 2; break;
+            }
+            if (its == 30) { en = -1; break; }
+            if (its == 10 || its == 20) {
+                t += x;
+                for (int i = 0; i <= en; ++i) H[i*n+i] -= x;
+                T s = ::fabs(H[en*n+na]) + ::fabs(H[na*n+(na-1)]);
+                y = x = T(0.75)*s; w = T(-0.4375)*s*s;
+            }
+            its += 1;
+            T p,q,r; int m;
+            for (m = en-2; m >= l; --m) {
+                T zz = H[m*n+m];
+                r = x - zz; T s = y - zz;
+                p = (r*s - w)/H[(m+1)*n+m] + H[m*n+(m+1)];
+                q = H[(m+1)*n+(m+1)] - zz - r - s;
+                r = H[(m+2)*n+(m+1)];
+                T sc = ::fabs(p)+::fabs(q)+::fabs(r);
+                p /= sc; q /= sc; r /= sc;
+                if (m == l) break;
+                T tst1 = ::fabs(p)*(::fabs(H[(m-1)*n+(m-1)])+::fabs(zz)+::fabs(H[(m+1)*n+(m+1)]));
+                T tst2 = ::fabs(H[m*n+(m-1)])*(::fabs(q)+::fabs(r));
+                if (tst2 <= eps*tst1) break;
+            }
+            for (int i = m+2; i <= en; ++i) { H[i*n+(i-2)]=T(0); if (i != m+2) H[i*n+(i-3)]=T(0); }
+            for (int k = m; k <= na; ++k) {
+                bool notlast = (k != na);
+                if (k != m) {
+                    p = H[k*n+(k-1)]; q = H[(k+1)*n+(k-1)]; r = notlast ? H[(k+2)*n+(k-1)] : T(0);
+                    x = ::fabs(p)+::fabs(q)+::fabs(r);
+                    if (x == T(0)) continue;
+                    p /= x; q /= x; r /= x;
+                }
+                T s = ::copysign(::sqrt(p*p+q*q+r*r), p);
+                if (k == m) { if (l != m) H[k*n+(k-1)] = -H[k*n+(k-1)]; }
+                else H[k*n+(k-1)] = -s*x;
+                p += s;
+                T xx = p/s, yy = q/s, zz = r/s;
+                q /= p; r /= p;
+                for (int j = k; j < n; ++j) {
+                    p = H[k*n+j] + q*H[(k+1)*n+j];
+                    if (notlast) { p += r*H[(k+2)*n+j]; H[(k+2)*n+j] -= p*zz; }
+                    H[(k+1)*n+j] -= p*yy; H[k*n+j] -= p*xx;
+                }
+                int jmax = en < k+3 ? en : k+3;
+                for (int i = 0; i <= jmax; ++i) {
+                    p = xx*H[i*n+k] + yy*H[i*n+(k+1)];
+                    if (notlast) { p += zz*H[i*n+(k+2)]; H[i*n+(k+2)] -= p*r; }
+                    H[i*n+(k+1)] -= p*q; H[i*n+k] -= p;
+                }
+                for (int i = 0; i < n; ++i) {
+                    p = xx*Z[i*n+k] + yy*Z[i*n+(k+1)];
+                    if (notlast) { p += zz*Z[i*n+(k+2)]; Z[i*n+(k+2)] -= p*r; }
+                    Z[i*n+(k+1)] -= p*q; Z[i*n+k] -= p;
+                }
+            }
+        }
+    }
+    if (norm != T(0)) {
+        for (int e = n-1; e >= 0; --e) {
+            T p = wr[e], q = wi[e];
+            int na2 = e - 1;
+            if (q == T(0)) {
+                int m = e; H[e*n+e] = T(1);
+                T zz_s = T(0), s_s = T(0);
+                for (int i = e-1; i >= 0; --i) {
+                    T w = H[i*n+i] - p;
+                    T r = T(0);
+                    for (int j = m; j <= e; ++j) r += H[i*n+j]*H[j*n+e];
+                    if (wi[i] < T(0)) { zz_s = w; s_s = r; continue; }
+                    m = i;
+                    if (wi[i] == T(0)) {
+                        T tt = (w == T(0)) ? eps*norm : w;
+                        H[i*n+e] = -r/tt;
+                    } else {
+                        T xx = H[i*n+(i+1)], yv = H[(i+1)*n+i];
+                        T qd = (wr[i]-p)*(wr[i]-p) + wi[i]*wi[i];
+                        T tt = (xx*s_s - zz_s*r)/qd;
+                        H[i*n+e] = tt;
+                        if (::fabs(xx) > ::fabs(zz_s)) H[(i+1)*n+e] = (-r - w*tt)/xx;
+                        else                       H[(i+1)*n+e] = (-s_s - yv*tt)/zz_s;
+                    }
+                    T tmag = ::fabs(H[i*n+e]);
+                    if ((eps*tmag)*tmag > T(1)) for (int j = i; j <= e; ++j) H[j*n+e] /= tmag;
+                }
+            } else if (q < T(0)) {
+                int m = na2;
+                if (::fabs(H[e*n+na2]) > ::fabs(H[na2*n+e])) {
+                    H[na2*n+na2] = q/H[e*n+na2];
+                    H[na2*n+e]   = -(H[e*n+e]-p)/H[e*n+na2];
+                } else {
+                    T zr, zi; eig_cdiv<T>(T(0), -H[na2*n+e], H[na2*n+na2]-p, q, zr, zi);
+                    H[na2*n+na2] = zr; H[na2*n+e] = zi;
+                }
+                H[e*n+na2] = T(0); H[e*n+e] = T(1);
+                T zz_s = T(0), ra_s = T(0), sa_s = T(0);
+                for (int i = e-2; i >= 0; --i) {
+                    T w = H[i*n+i] - p;
+                    T ra = T(0), sa = T(0);
+                    for (int j = m; j <= e; ++j) { ra += H[i*n+j]*H[j*n+na2]; sa += H[i*n+j]*H[j*n+e]; }
+                    if (wi[i] < T(0)) { zz_s = w; ra_s = ra; sa_s = sa; continue; }
+                    m = i;
+                    if (wi[i] == T(0)) {
+                        T zr, zi; eig_cdiv<T>(-ra, -sa, w, q, zr, zi);
+                        H[i*n+na2] = zr; H[i*n+e] = zi;
+                    } else {
+                        T xx = H[i*n+(i+1)], yv = H[(i+1)*n+i];
+                        T vr = (wr[i]-p)*(wr[i]-p) + wi[i]*wi[i] - q*q;
+                        T vi = (wr[i]-p)*T(2)*q;
+                        if (vr == T(0) && vi == T(0))
+                            vr = eps*norm*(::fabs(w)+::fabs(q)+::fabs(xx)+::fabs(yv)+::fabs(zz_s));
+                        T zr, zi;
+                        eig_cdiv<T>(xx*ra_s - zz_s*ra + q*sa, xx*sa_s - zz_s*sa - q*ra, vr, vi, zr, zi);
+                        H[i*n+na2] = zr; H[i*n+e] = zi;
+                        if (::fabs(xx) > ::fabs(zz_s) + ::fabs(q)) {
+                            H[(i+1)*n+na2] = (-ra - w*H[i*n+na2] + q*H[i*n+e])/xx;
+                            H[(i+1)*n+e]   = (-sa - w*H[i*n+e] - q*H[i*n+na2])/xx;
+                        } else {
+                            T z2r, z2i; eig_cdiv<T>(-ra_s - yv*H[i*n+na2], -sa_s - yv*H[i*n+e], zz_s, q, z2r, z2i);
+                            H[(i+1)*n+na2] = z2r; H[(i+1)*n+e] = z2i;
+                        }
+                    }
+                    T tmag = ::fabs(H[i*n+na2]); { T tm2 = ::fabs(H[i*n+e]); if (tm2 > tmag) tmag = tm2; }
+                    if ((eps*tmag)*tmag > T(1)) for (int j = i; j <= e; ++j) { H[j*n+na2] /= tmag; H[j*n+e] /= tmag; }
+                }
+            }
+        }
+        for (int j = n-1; j >= 0; --j)
+            for (int i = 0; i < n; ++i) {
+                T s = T(0);
+                for (int k = 0; k <= j; ++k) s += Z[i*n+k]*H[k*n+j];
+                Z[i*n+j] = s;
+            }
+    }
+    for (int k = 0; k < n; ++k) {
+        if (wi[k] > T(0)) {
+            T nrm = T(0); for (int i=0;i<n;++i) nrm += Z[i*n+k]*Z[i*n+k]+Z[i*n+(k+1)]*Z[i*n+(k+1)];
+            nrm = ::sqrt(nrm); if (nrm>T(0)) for(int i=0;i<n;++i){ Z[i*n+k]/=nrm; Z[i*n+(k+1)]/=nrm; }
+            ++k;
+        } else if (wi[k] == T(0)) {
+            T nrm = T(0); for (int i=0;i<n;++i) nrm += Z[i*n+k]*Z[i*n+k];
+            nrm = ::sqrt(nrm); if (nrm>T(0)) for(int i=0;i<n;++i) Z[i*n+k]/=nrm;
+        }
+    }
+}
+
+// Right-eigenvector back-substitution from a real Schur form (LAPACK strevc-style).
+// Tm: quasi-upper-triangular Schur form (shared, n x n, row-major). For the eigenvalue
+// at column k with value (lr + li*i), writes the Schur-basis eigenvector into the
+// columns of the global Yr/Yi matrices (Yr[j*n+k], Yi[j*n+k]). Real eigenvalues set
+// li==0 and leave Yi zero. Solves (T - lambda I) y = 0 by back substitution, handling
+// 2x2 diagonal blocks (complex conjugate pairs) in both the target and trailing rows.
+template <typename T>
+__device__ void schur_eigvec_backsub(const T* __restrict__ Tm, int n, int k,
+                                     T lr, T li, T* __restrict__ Yr, T* __restrict__ Yi) {
+    constexpr T tiny = std::is_same_v<T, float> ? T(1e-30) : T(1e-300);
+    for (int j = 0; j < n; ++j) { Yr[j * n + k] = T(0); Yi[j * n + k] = T(0); }
+
+    if (li == T(0)) {
+        // Real eigenvalue.
+        Yr[k * n + k] = T(1);
+        int i = k - 1;
+        while (i >= 0) {
+            bool twoBlock = (i >= 1) && (Tm[i * n + (i - 1)] != T(0));
+            if (!twoBlock) {
+                T s = T(0);
+                for (int j = i + 1; j <= k; ++j) s += Tm[i * n + j] * Yr[j * n + k];
+                T denom = Tm[i * n + i] - lr;
+                if (::fabs(denom) < tiny) denom = (denom < T(0)) ? -tiny : tiny;
+                Yr[i * n + k] = -s / denom;
+                i -= 1;
+            } else {
+                T s0 = T(0), s1 = T(0);
+                for (int j = i + 1; j <= k; ++j) {
+                    s0 += Tm[(i - 1) * n + j] * Yr[j * n + k];
+                    s1 += Tm[i * n + j] * Yr[j * n + k];
+                }
+                T a11 = Tm[(i - 1) * n + (i - 1)] - lr, a12 = Tm[(i - 1) * n + i];
+                T a21 = Tm[i * n + (i - 1)], a22 = Tm[i * n + i] - lr;
+                T det = a11 * a22 - a12 * a21;
+                if (::fabs(det) < tiny) det = (det < T(0)) ? -tiny : tiny;
+                T b0 = -s0, b1 = -s1;
+                Yr[(i - 1) * n + k] = (b0 * a22 - a12 * b1) / det;
+                Yr[i * n + k]       = (a11 * b1 - a21 * b0) / det;
+                i -= 2;
+            }
+        }
+    } else {
+        // Complex eigenvalue lr + li*i (li > 0); 2x2 block at (k, k+1).
+        T a = Tm[k * n + k], b = Tm[k * n + (k + 1)];
+        Yr[k * n + k] = b;          Yi[k * n + k] = T(0);
+        Yr[(k + 1) * n + k] = lr - a; Yi[(k + 1) * n + k] = li;
+        int i = k - 1;
+        while (i >= 0) {
+            bool twoBlock = (i >= 1) && (Tm[i * n + (i - 1)] != T(0));
+            if (!twoBlock) {
+                T sr = T(0), si = T(0);
+                for (int j = i + 1; j <= k + 1; ++j) {
+                    sr += Tm[i * n + j] * Yr[j * n + k];
+                    si += Tm[i * n + j] * Yi[j * n + k];
+                }
+                T dr = Tm[i * n + i] - lr, di = -li;
+                T denom = dr * dr + di * di; if (denom < tiny) denom = tiny;
+                T nr = -sr, ni = -si;
+                Yr[i * n + k] = (nr * dr + ni * di) / denom;
+                Yi[i * n + k] = (ni * dr - nr * di) / denom;
+                i -= 1;
+            } else {
+                T s0r = T(0), s0i = T(0), s1r = T(0), s1i = T(0);
+                for (int j = i + 1; j <= k + 1; ++j) {
+                    s0r += Tm[(i - 1) * n + j] * Yr[j * n + k];
+                    s0i += Tm[(i - 1) * n + j] * Yi[j * n + k];
+                    s1r += Tm[i * n + j] * Yr[j * n + k];
+                    s1i += Tm[i * n + j] * Yi[j * n + k];
+                }
+                T m11r = Tm[(i - 1) * n + (i - 1)] - lr, m11i = -li;
+                T m22r = Tm[i * n + i] - lr,             m22i = -li;
+                T m12 = Tm[(i - 1) * n + i], m21 = Tm[i * n + (i - 1)];
+                T detr = m11r * m22r - m11i * m22i - m12 * m21;
+                T deti = m11r * m22i + m11i * m22r;
+                T bd = detr * detr + deti * deti; if (bd < tiny) bd = tiny;
+                T b0r = -s0r, b0i = -s0i, b1r = -s1r, b1i = -s1i;
+                T t0r = b0r * m22r - b0i * m22i - m12 * b1r;
+                T t0i = b0r * m22i + b0i * m22r - m12 * b1i;
+                Yr[(i - 1) * n + k] = (t0r * detr + t0i * deti) / bd;
+                Yi[(i - 1) * n + k] = (t0i * detr - t0r * deti) / bd;
+                T t1r = m11r * b1r - m11i * b1i - m21 * b0r;
+                T t1i = m11r * b1i + m11i * b1r - m21 * b0i;
+                Yr[i * n + k] = (t1r * detr + t1i * deti) / bd;
+                Yi[i * n + k] = (t1i * detr - t1r * deti) / bd;
+                i -= 2;
+            }
+        }
+    }
+}
+
+template <typename T>
 __global__ void qr_eig_fallback_kernel_cs(
     const T* __restrict__ A_in,
     T* __restrict__ wr_out,
     T* __restrict__ wi_out,
     T* __restrict__ V_out,
+    T* __restrict__ Yr_out,
+    T* __restrict__ Yi_out,
     int n, int max_iterations)
 {
     constexpr T eps = std::is_same_v<T, float> ? T(1e-7) : T(1e-14);
@@ -348,6 +679,8 @@ __global__ void qr_eig_fallback_kernel_cs(
     T* wr = wr_out + batch_idx * n;
     T* wi = wi_out + batch_idx * n;
     T* V = V_out + batch_idx * n * n;
+    T* Yr = Yr_out + batch_idx * n * n;
+    T* Yi = Yi_out + batch_idx * n * n;
 
     for (int idx = static_cast<int>(tid); idx < n * n; idx += static_cast<int>(num_threads)) {
         H[idx] = A[idx];
@@ -654,8 +987,95 @@ __global__ void qr_eig_fallback_kernel_cs(
     }
     __syncthreads();
 
+    // Eigenvectors. H now holds the quasi-triangular Schur form T and Q the
+    // orthogonal Schur basis (A = Q T Q^T). The Schur basis is NOT the
+    // eigenvectors for a non-symmetric matrix; recover the true right
+    // eigenvectors y of T by back substitution, then map to the original
+    // basis via V = Q y. Real eigenvalues give a real column; complex
+    // conjugate pairs store the real part in column k and the imaginary part
+    // in column k+1 (LAPACK geev packing).
+    //
+    // Phase 1: per-eigenvalue back substitution (columns are independent).
+    for (int col = static_cast<int>(tid); col < n; col += static_cast<int>(num_threads)) {
+        if (wi[col] < T(0)) continue;  // second column of a complex pair: handled with col-1
+        schur_eigvec_backsub<T>(H, n, col, wr[col], wi[col], Yr, Yi);
+    }
+    __syncthreads();
+
+    // Phase 2: map Schur-basis eigenvectors to the original basis, V = Q * Y.
+    // For a complex pair (wi[k] > 0): V[:,k] = Q * Re(y), V[:,k+1] = Q * Im(y).
     for (int idx = static_cast<int>(tid); idx < n * n; idx += static_cast<int>(num_threads)) {
-        V[idx] = Q[idx];
+        int i = idx / n;
+        int col = idx % n;
+        bool second = (wi[col] < T(0));      // imaginary-part column of a pair
+        int srcCol = second ? col - 1 : col;
+        T acc = T(0);
+        if (second) {
+            for (int j = 0; j < n; ++j) acc += Q[i * n + j] * Yi[j * n + srcCol];
+        } else {
+            for (int j = 0; j < n; ++j) acc += Q[i * n + j] * Yr[j * n + srcCol];
+        }
+        V[idx] = acc;
+    }
+    __syncthreads();
+
+    // Phase 3: normalize each eigenvector to unit Euclidean norm (matches LAPACK
+    // geev). A complex pair (columns k, k+1) is scaled jointly by 1/::sqrt(sum of
+    // both columns squared) so the complex vector has unit norm.
+    for (int col = static_cast<int>(tid); col < n; col += static_cast<int>(num_threads)) {
+        if (wi[col] < T(0)) continue;
+        bool pair = (wi[col] > T(0));
+        T nrm = T(0);
+        for (int i = 0; i < n; ++i) {
+            T re = V[i * n + col];
+            nrm += re * re;
+            if (pair) { T im = V[i * n + (col + 1)]; nrm += im * im; }
+        }
+        nrm = ::sqrt(nrm);
+        if (nrm > zero_tol) {
+            T inv = T(1) / nrm;
+            for (int i = 0; i < n; ++i) {
+                V[i * n + col] *= inv;
+                if (pair) V[i * n + (col + 1)] *= inv;
+            }
+        }
+    }
+}
+
+// ----------------------------------------------------------------------------
+// Unpack cuSOLVER Xgeev complex outputs into Tenzor's real-packed eig contract.
+// W (complex, length n per batch) -> WR/WI. VR (complex, column-major n x n,
+// eigenvector k in column k) -> real V (row-major, eigenvector k in column k):
+//   real eigenvalue          -> V[:,k]   = Re(VR[:,k])
+//   complex pair (WI[k] > 0)  -> V[:,k]   = Re(VR[:,k]), V[:,k+1] = Im(VR[:,k])
+//   conjugate    (WI[k] < 0)  -> V[:,k]   = Im(VR[:,k-1])
+// Matches LAPACK real-geev / CPU packing. One block per batch.
+// ----------------------------------------------------------------------------
+template <typename T, typename C>
+__global__ void eig_unpack_geev_kernel(const C* __restrict__ W, const C* __restrict__ VR,
+                                       T* __restrict__ WR, T* __restrict__ WI,
+                                       T* __restrict__ V, int n) {
+    int batch = blockIdx.x;
+    const C* Wb  = W  + static_cast<size_t>(batch) * n;
+    const C* VRb = VR + static_cast<size_t>(batch) * n * n;   // column-major
+    T* WRb = WR + static_cast<size_t>(batch) * n;
+    T* WIb = WI + static_cast<size_t>(batch) * n;
+    T* Vb  = V  + static_cast<size_t>(batch) * n * n;         // row-major
+
+    for (int k = static_cast<int>(threadIdx.x); k < n; k += static_cast<int>(blockDim.x)) {
+        WRb[k] = Wb[k].x;
+        WIb[k] = Wb[k].y;
+    }
+    __syncthreads();
+
+    for (int idx = static_cast<int>(threadIdx.x); idx < n * n; idx += static_cast<int>(blockDim.x)) {
+        int i = idx / n, k = idx % n;
+        T wi_k = Wb[k].y;
+        if (wi_k < T(0)) {
+            Vb[i * n + k] = VRb[i + (k - 1) * n].y;   // Im of conjugate pair's eigenvector
+        } else {
+            Vb[i * n + k] = VRb[i + k * n].x;         // real part
+        }
     }
 }
 
@@ -1398,71 +1818,72 @@ auto linalg_eig_kernel(const Tensor& A, cudaStream_t stream)
     // and routed through `eigh` on the SYMMETRIZED matrix. Sum-of-
     // -eigenvalues equals trace, which is preserved by symmetrization,
     // so the numerical gradient matches the analytical one.
-    bool is_near_symmetric = true;
+    // eigh fast-path ONLY for an exactly symmetric matrix, where eigh returns
+    // identical eigenpairs (real eigenvalues, orthonormal eigenvectors) more
+    // accurately. This is NOT the old "symmetrize a near-symmetric matrix"
+    // shortcut, which silently altered the eigenvectors (and the eigenvalues)
+    // of genuinely non-symmetric inputs — a correctness bug. Everything else
+    // goes through the Hessenberg + Francis QR path with strevc-style
+    // eigenvector back substitution below.
+    bool is_exactly_symmetric = true;
     {
         int64_t nbatch_check = batch_size(A);
         auto A_cont = A.contiguous();
         if (A.dtype() == DType::Float32) {
             auto [a_max, diff_max] = eig_symmetry_metrics<float>(
                 A_cont.data<float>(), nbatch_check, n, stream);
-            is_near_symmetric = (diff_max < 1e-2 * std::max(a_max, 1.0));
+            (void)a_max;
+            is_exactly_symmetric = (diff_max == 0.0);
         } else {
             auto [a_max, diff_max] = eig_symmetry_metrics<double>(
                 A_cont.data<double>(), nbatch_check, n, stream);
-            is_near_symmetric = (diff_max < 1e-3 * std::max(a_max, 1.0));
+            (void)a_max;
+            is_exactly_symmetric = (diff_max == 0.0);
         }
     }
 
-    if (is_near_symmetric) {
-        // Symmetrize: A_sym = (A + A^T)/2. Trace is preserved, so
-        // sum(eigvals(A_sym)) == sum(eigvals(A)) for any near-symmetric A
-        // (eigvals are continuous in A). Dispatch eigh on the symmetric
-        // matrix, returning (W, V) with V columns as right eigenvectors
-        // and a zero-filled WI vector to match eig's tuple contract.
-        auto At = ::tenzor::transpose(A, ndim - 2, ndim - 1).contiguous();
-        auto A_sym = ::tenzor::mul(::tenzor::add(A, At), 0.5);
-        auto [W, V] = linalg_eigh_kernel(A_sym.contiguous(), stream);
+    if (is_exactly_symmetric) {
+        auto [W, V] = linalg_eigh_kernel(A.contiguous(), stream);
         std::vector<int64_t> w_shape_v(W.shape().begin(), W.shape().end());
         auto WI = zeros(w_shape_v, A.dtype(), A.device());
         return {W, WI, V};
     }
 
-    // Non-symmetric path: QR fallback kernel.
-    auto work = A.contiguous().clone();
-    int64_t nbatch = batch_size(work);
-
+    // Non-symmetric path: native EISPACK-hqr2 eigensolver (one work-item per
+    // batch element over global-memory scratch). This is the SAME validated
+    // algorithm used by every other GPU backend (ROCm/OneAPI/Vulkan), so the
+    // library behaves identically regardless of backend. It replaces the
+    // earlier cuSOLVER Xgeev approach, which cast the real matrix to complex
+    // and then assumed LAPACK adjacent-conjugate-pair output ordering — an
+    // assumption the complex solver does not honour, misclassifying real vs
+    // complex eigenvalues for general matrices. Output packing matches LAPACK
+    // geev: real eigenvalue k -> column k; complex pair (WI[k]>0) -> column k =
+    // Re, column k+1 = Im (conjugate in column k+1).
     std::vector<int64_t> batch_dims;
     auto shape = A.shape();
     for (size_t i = 0; i + 2 < shape.size(); i++) batch_dims.push_back(shape[i]);
+    int64_t nbatch = batch_size(A);
 
-    std::vector<int64_t> w_shape = batch_dims;
-    w_shape.push_back(n);
+    std::vector<int64_t> w_shape = batch_dims; w_shape.push_back(n);
+    std::vector<int64_t> v_shape = batch_dims; v_shape.push_back(n); v_shape.push_back(n);
     auto WR = zeros(w_shape, A.dtype(), A.device());
     auto WI = zeros(w_shape, A.dtype(), A.device());
+    auto V  = zeros(v_shape, A.dtype(), A.device());
 
-    std::vector<int64_t> v_shape = batch_dims;
-    v_shape.push_back(n);
-    v_shape.push_back(n);
-    auto V = zeros(v_shape, A.dtype(), A.device());
-
+    auto work = A.contiguous().clone();
+    auto vbuf = zeros({nbatch, n}, A.dtype(), A.device());
+    int eblock = 256;
+    int egrid = static_cast<int>((nbatch + eblock - 1) / eblock);
     if (A.dtype() == DType::Float32) {
-        size_t smem = (2 * n * n + 4) * sizeof(float);
-        int threads = std::min(static_cast<int>(n), 128);
-        if (threads < 1) threads = 1;
-        qr_eig_fallback_kernel_cs<float><<<nbatch, threads, smem, stream>>>(
-            work.data<float>(), WR.data<float>(), WI.data<float>(),
-            V.data<float>(), n, 60 * n);
-        CUDA_CHECK_LINALG(cudaGetLastError());
+        eig_hqr2_kernel<float><<<egrid, eblock, 0, stream>>>(
+            work.data<float>(), V.data<float>(), WR.data<float>(), WI.data<float>(),
+            vbuf.data<float>(), static_cast<int>(n), static_cast<long long>(nbatch));
     } else {
-        size_t smem = (2 * n * n + 4) * sizeof(double);
-        int threads = std::min(static_cast<int>(n), 128);
-        if (threads < 1) threads = 1;
-        qr_eig_fallback_kernel_cs<double><<<nbatch, threads, smem, stream>>>(
-            work.data<double>(), WR.data<double>(), WI.data<double>(),
-            V.data<double>(), n, 60 * n);
-        CUDA_CHECK_LINALG(cudaGetLastError());
+        eig_hqr2_kernel<double><<<egrid, eblock, 0, stream>>>(
+            work.data<double>(), V.data<double>(), WR.data<double>(), WI.data<double>(),
+            vbuf.data<double>(), static_cast<int>(n), static_cast<long long>(nbatch));
     }
-
+    CUDA_CHECK_LINALG(cudaGetLastError());
     CUDA_CHECK_LINALG(cudaStreamSynchronize(stream ? stream : 0));
     return {WR, WI, V};
 }
@@ -2491,10 +2912,10 @@ __global__ void lu_kernel(
     for (int k = 0; k < n; k++) {
         // Thread 0: find pivot (max abs in column k, rows k..n-1)
         if (tid == 0) {
-            T max_val = fabs(A[k * n + k]);
+            T max_val = ::fabs(A[k * n + k]);
             int max_row = k;
             for (int i = k + 1; i < n; i++) {
-                T val = fabs(A[i * n + k]);
+                T val = ::fabs(A[i * n + k]);
                 if (val > max_val) {
                     max_val = val;
                     max_row = i;
@@ -2783,7 +3204,7 @@ __global__ void cholesky_kernel(
                 A[j * n + j] = T(0);
                 continue;
             }
-            A[j * n + j] = sqrt(sum);
+            A[j * n + j] = ::sqrt(sum);
             T diag = A[j * n + j];
 
             for (int i = j + 1; i < n; i++) {
@@ -2868,11 +3289,11 @@ __global__ void householder_qr_kernel(
                 sigma += R[i * n_cols + j] * R[i * n_cols + j];
             }
             T x0 = R[j * n_cols + j];
-            T norm_x = sqrt(x0 * x0 + sigma);
+            T norm_x = ::sqrt(x0 * x0 + sigma);
             if (norm_x < zero_tol || sigma < zero_tol) {
                 scratch[1] = T(0);  // tau = 0, skip
             } else {
-                T alpha = -copysign(norm_x, x0);
+                T alpha = -::copysign(norm_x, x0);
                 T v0 = x0 - alpha;
                 T v_norm_sq = v0 * v0 + sigma;
                 scratch[0] = v0;
@@ -2985,11 +3406,11 @@ __global__ void eigh_kernel(
             for (int i = k + 1; i < n; i++) {
                 sigma += A[i * n + k] * A[i * n + k];
             }
-            T norm_x = sqrt(sigma);
+            T norm_x = ::sqrt(sigma);
             if (norm_x < zero_tol) {
                 scratch[1] = T(0);
             } else {
-                T a = -copysign(norm_x, A[(k + 1) * n + k]);
+                T a = -::copysign(norm_x, A[(k + 1) * n + k]);
                 T v0_val = A[(k + 1) * n + k] - a;
                 T v_norm_sq = v0_val * v0_val;
                 for (int i = k + 2; i < n; i++) {
@@ -3086,9 +3507,9 @@ __global__ void eigh_kernel(
                 // Find small subdiagonal element
                 int m_idx = l;
                 for (int i = l; i < n - 1; i++) {
-                    T tst = fabs(d[i]) + fabs(d[i + 1]);
+                    T tst = ::fabs(d[i]) + ::fabs(d[i + 1]);
                     if (tst == T(0)) tst = T(1);
-                    if (fabs(e[i]) < eps * tst) {
+                    if (::fabs(e[i]) < eps * tst) {
                         break;
                     }
                     m_idx = i + 1;
@@ -3097,8 +3518,8 @@ __global__ void eigh_kernel(
 
                 // Wilkinson shift
                 T g = (d[l + 1] - d[l]) / (T(2) * e[l]);
-                T r = sqrt(g * g + T(1));
-                T shift = d[m_idx] - d[l] + e[l] / (g + copysign(r, g));
+                T r = ::sqrt(g * g + T(1));
+                T shift = d[m_idx] - d[l] + e[l] / (g + ::copysign(r, g));
 
                 T s_val = T(1), c_val = T(1), p = T(0);
 
@@ -3106,15 +3527,15 @@ __global__ void eigh_kernel(
                     T f = s_val * e[i];
                     T b = c_val * e[i];
 
-                    if (fabs(f) >= fabs(shift)) {
+                    if (::fabs(f) >= ::fabs(shift)) {
                         c_val = shift / f;
-                        r = sqrt(c_val * c_val + T(1));
+                        r = ::sqrt(c_val * c_val + T(1));
                         e[i + 1] = f * r;
                         s_val = T(1) / r;
                         c_val *= s_val;
                     } else {
                         s_val = f / shift;
-                        r = sqrt(s_val * s_val + T(1));
+                        r = ::sqrt(s_val * s_val + T(1));
                         e[i + 1] = shift * r;
                         c_val = T(1) / r;
                         s_val *= c_val;
@@ -3214,11 +3635,11 @@ __global__ void svd_kernel(
                 sigma += A[i * n_cols + j] * A[i * n_cols + j];
             }
             T x0 = A[j * n_cols + j];
-            T norm_x = sqrt(x0 * x0 + sigma);
+            T norm_x = ::sqrt(x0 * x0 + sigma);
             if (norm_x < zero_tol || sigma < zero_tol) {
                 scratch[1] = T(0);
             } else {
-                T alpha = -copysign(norm_x, x0);
+                T alpha = -::copysign(norm_x, x0);
                 T v0 = x0 - alpha;
                 T v_sq = v0 * v0 + sigma;
                 scratch[0] = v0;
@@ -3276,11 +3697,11 @@ __global__ void svd_kernel(
                     sigma += A[j * n_cols + i] * A[j * n_cols + i];
                 }
                 T x0 = A[j * n_cols + (j + 1)];
-                T norm_x = sqrt(x0 * x0 + sigma);
+                T norm_x = ::sqrt(x0 * x0 + sigma);
                 if (norm_x < zero_tol || sigma < zero_tol) {
                     scratch[1] = T(0);
                 } else {
-                    T alpha = -copysign(norm_x, x0);
+                    T alpha = -::copysign(norm_x, x0);
                     T v0 = x0 - alpha;
                     T v_sq = v0 * v0 + sigma;
                     scratch[0] = v0;
@@ -3340,13 +3761,13 @@ __global__ void svd_kernel(
         for (int iter = 0; iter < max_iterations * k; iter++) {
             // Find active range [p, q] where e[i] != 0
             int q = k - 1;
-            while (q > 0 && fabs(A[(q - 1) * n_cols + q]) < eps * (fabs(A[(q - 1) * n_cols + (q - 1)]) + fabs(A[q * n_cols + q]))) {
+            while (q > 0 && ::fabs(A[(q - 1) * n_cols + q]) < eps * (::fabs(A[(q - 1) * n_cols + (q - 1)]) + ::fabs(A[q * n_cols + q]))) {
                 q--;
             }
             if (q == 0) break;  // all converged
 
             int p = q - 1;
-            while (p > 0 && fabs(A[(p - 1) * n_cols + p]) >= eps * (fabs(A[(p - 1) * n_cols + (p - 1)]) + fabs(A[p * n_cols + p]))) {
+            while (p > 0 && ::fabs(A[(p - 1) * n_cols + p]) >= eps * (::fabs(A[(p - 1) * n_cols + (p - 1)]) + ::fabs(A[p * n_cols + p]))) {
                 p--;
             }
 
@@ -3364,10 +3785,10 @@ __global__ void svd_kernel(
                 T det = t11 * t22 - t12 * t12;
                 T disc = trace * trace - T(4) * det;
                 if (disc < T(0)) disc = T(0);
-                T sq = sqrt(disc);
+                T sq = ::sqrt(disc);
                 T l1 = T(0.5) * (trace + sq);
                 T l2 = T(0.5) * (trace - sq);
-                mu = (fabs(l1 - t22) < fabs(l2 - t22)) ? l1 : l2;
+                mu = (::fabs(l1 - t22) < ::fabs(l2 - t22)) ? l1 : l2;
             }
 
             // Chase the bulge
@@ -3377,7 +3798,7 @@ __global__ void svd_kernel(
 
             for (int i = p; i < q; i++) {
                 // Right Givens rotation to zero z (acts on columns i, i+1)
-                T r = sqrt(y * y + z * z);
+                T r = ::sqrt(y * y + z * z);
                 T c_val = y / r;
                 T s_val = -z / r;
 
@@ -3401,7 +3822,7 @@ __global__ void svd_kernel(
                 // Left Givens rotation to re-zero the sub-subdiagonal
                 y = A[i * n_cols + i];
                 z = A[(i + 1) * n_cols + i];
-                r = sqrt(y * y + z * z);
+                r = ::sqrt(y * y + z * z);
                 c_val = y / r;
                 s_val = -z / r;
 
@@ -3493,6 +3914,245 @@ __global__ void svd_kernel(
 
 // ============================================================================
 // Non-symmetric eigendecomposition: Hessenberg + Francis QR
+// Complex divide (cr+ci*i)/(dr+di*i) — robust scaling.
+template<typename T>
+__device__ inline void eig_cdiv(T cr, T ci, T dr, T di, T& zr, T& zi) {
+    if (::fabs(dr) > ::fabs(di)) {
+        T r = di / dr, d = dr + di * r;
+        zr = (cr + ci * r) / d; zi = (ci - cr * r) / d;
+    } else {
+        T r = dr / di, d = di + dr * r;
+        zr = (cr * r + ci) / d; zi = (ci * r - cr) / d;
+    }
+}
+
+// Non-symmetric real eigendecomposition — one work-item per batch element,
+// operating on global-memory scratch (no shared-memory size cap, no barriers).
+// Faithful EISPACK hqr2: orthogonal Hessenberg reduction (Householder, Z
+// accumulated) -> real Schur form via Francis double-shift QR with deflation
+// + exceptional shifts at iters 10/20 -> eigenvector back-substitution (hqr2
+// "form vectors", with overflow control) -> map to original basis (Z<-Z*H) ->
+// unit 2-norm. Output packing matches LAPACK geev: real eigenvalue k -> column
+// k; complex pair (wi[k]>0) -> column k = Re, column k+1 = Im (conjugate next).
+//   Hg : input copy, overwritten with the Schur form then eigenvectors.
+//   Zg : eigenvector output (kernel initialises to identity).
+//   vg : per-batch Householder scratch, length n.
+template<typename T>
+__global__ void eig_hqr2_kernel(
+    T* __restrict__ Hg, T* __restrict__ Zg,
+    T* __restrict__ wr_g, T* __restrict__ wi_g,
+    T* __restrict__ vg, int n, long long nbatch)
+{
+    long long b = static_cast<long long>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (b >= nbatch) return;
+    T* H = Hg + b * n * n;
+    T* Z = Zg + b * n * n;
+    T* wr = wr_g + b * n;
+    T* wi = wi_g + b * n;
+    T* v = vg + b * n;
+    const T eps = std::is_same_v<T, float> ? T(1.19e-7) : T(2.22e-16);
+
+    for (int i = 0; i < n; ++i) { for (int j = 0; j < n; ++j) Z[i*n+j] = T(0); Z[i*n+i] = T(1); }
+    for (int k = 0; k + 2 < n; ++k) {
+        T sigma = T(0);
+        for (int i = k+1; i < n; ++i) sigma += H[i*n+k]*H[i*n+k];
+        if (sigma == T(0)) continue;
+        T nx = ::sqrt(sigma);
+        T a = -::copysign(nx, H[(k+1)*n+k]);
+        v[k+1] = H[(k+1)*n+k] - a;
+        for (int i = k+2; i < n; ++i) v[i] = H[i*n+k];
+        T vn2 = T(0);
+        for (int i = k+1; i < n; ++i) vn2 += v[i]*v[i];
+        if (vn2 == T(0)) continue;
+        T tau = T(2)/vn2;
+        for (int j = 0; j < n; ++j) { T d=T(0); for(int i=k+1;i<n;++i) d+=v[i]*H[i*n+j]; d*=tau; for(int i=k+1;i<n;++i) H[i*n+j]-=v[i]*d; }
+        for (int i = 0; i < n; ++i) { T d=T(0); for(int j=k+1;j<n;++j) d+=H[i*n+j]*v[j]; d*=tau; for(int j=k+1;j<n;++j) H[i*n+j]-=d*v[j]; }
+        for (int i = 0; i < n; ++i) { T d=T(0); for(int j=k+1;j<n;++j) d+=Z[i*n+j]*v[j]; d*=tau; for(int j=k+1;j<n;++j) Z[i*n+j]-=d*v[j]; }
+        H[(k+1)*n+k] = a;
+        for (int i = k+2; i < n; ++i) H[i*n+k] = T(0);
+    }
+    T norm = T(0);
+    for (int i = 0; i < n; ++i) { int j0 = i-1 > 0 ? i-1 : 0; for (int j = j0; j < n; ++j) norm += ::fabs(H[i*n+j]); }
+    T t = T(0);
+    int en = n - 1;
+    while (en >= 0) {
+        int its = 0, na = en - 1;
+        for (;;) {
+            int l;
+            for (l = en; l >= 1; --l) {
+                T s = ::fabs(H[(l-1)*n+(l-1)]) + ::fabs(H[l*n+l]);
+                if (s == T(0)) s = norm;
+                if (::fabs(H[l*n+(l-1)]) <= eps*s) break;
+            }
+            T x = H[en*n+en];
+            if (l == en) { H[en*n+en] = x + t; wr[en] = H[en*n+en]; wi[en] = T(0); en -= 1; break; }
+            T y = H[na*n+na];
+            T w = H[en*n+na]*H[na*n+en];
+            if (l == na) {
+                T p = T(0.5)*(y - x);
+                T q = p*p + w;
+                T zz = ::sqrt(::fabs(q));
+                x = H[en*n+en] = x + t; H[na*n+na] = y + t;
+                if (q >= T(0)) {
+                    zz = p + ::copysign(zz, p);
+                    wr[na] = wr[en] = x + zz;
+                    if (zz != T(0)) wr[en] = x - w/zz;
+                    wi[na] = wi[en] = T(0);
+                    x = H[en*n+na];
+                    T s = ::fabs(x) + ::fabs(zz);
+                    T p2 = x/s, q2 = zz/s;
+                    T r = ::sqrt(p2*p2 + q2*q2);
+                    p2 /= r; q2 /= r;
+                    for (int j = na; j < n; ++j) { T t1=H[na*n+j]; H[na*n+j]=q2*t1+p2*H[en*n+j]; H[en*n+j]=q2*H[en*n+j]-p2*t1; }
+                    for (int i = 0; i <= en; ++i) { T t1=H[i*n+na]; H[i*n+na]=q2*t1+p2*H[i*n+en]; H[i*n+en]=q2*H[i*n+en]-p2*t1; }
+                    for (int i = 0; i < n; ++i)  { T t1=Z[i*n+na]; Z[i*n+na]=q2*t1+p2*Z[i*n+en]; Z[i*n+en]=q2*Z[i*n+en]-p2*t1; }
+                } else { wr[na] = wr[en] = x + p; wi[na] = zz; wi[en] = -zz; }
+                en -= 2; break;
+            }
+            if (its == 30) { en = -1; break; }
+            if (its == 10 || its == 20) {
+                t += x;
+                for (int i = 0; i <= en; ++i) H[i*n+i] -= x;
+                T s = ::fabs(H[en*n+na]) + ::fabs(H[na*n+(na-1)]);
+                y = x = T(0.75)*s; w = T(-0.4375)*s*s;
+            }
+            its += 1;
+            T p,q,r; int m;
+            for (m = en-2; m >= l; --m) {
+                T zz = H[m*n+m];
+                r = x - zz; T s = y - zz;
+                p = (r*s - w)/H[(m+1)*n+m] + H[m*n+(m+1)];
+                q = H[(m+1)*n+(m+1)] - zz - r - s;
+                r = H[(m+2)*n+(m+1)];
+                T sc = ::fabs(p)+::fabs(q)+::fabs(r);
+                p /= sc; q /= sc; r /= sc;
+                if (m == l) break;
+                T tst1 = ::fabs(p)*(::fabs(H[(m-1)*n+(m-1)])+::fabs(zz)+::fabs(H[(m+1)*n+(m+1)]));
+                T tst2 = ::fabs(H[m*n+(m-1)])*(::fabs(q)+::fabs(r));
+                if (tst2 <= eps*tst1) break;
+            }
+            for (int i = m+2; i <= en; ++i) { H[i*n+(i-2)]=T(0); if (i != m+2) H[i*n+(i-3)]=T(0); }
+            for (int k = m; k <= na; ++k) {
+                bool notlast = (k != na);
+                if (k != m) {
+                    p = H[k*n+(k-1)]; q = H[(k+1)*n+(k-1)]; r = notlast ? H[(k+2)*n+(k-1)] : T(0);
+                    x = ::fabs(p)+::fabs(q)+::fabs(r);
+                    if (x == T(0)) continue;
+                    p /= x; q /= x; r /= x;
+                }
+                T s = ::copysign(::sqrt(p*p+q*q+r*r), p);
+                if (k == m) { if (l != m) H[k*n+(k-1)] = -H[k*n+(k-1)]; }
+                else H[k*n+(k-1)] = -s*x;
+                p += s;
+                T xx = p/s, yy = q/s, zz = r/s;
+                q /= p; r /= p;
+                for (int j = k; j < n; ++j) {
+                    p = H[k*n+j] + q*H[(k+1)*n+j];
+                    if (notlast) { p += r*H[(k+2)*n+j]; H[(k+2)*n+j] -= p*zz; }
+                    H[(k+1)*n+j] -= p*yy; H[k*n+j] -= p*xx;
+                }
+                int jmax = en < k+3 ? en : k+3;
+                for (int i = 0; i <= jmax; ++i) {
+                    p = xx*H[i*n+k] + yy*H[i*n+(k+1)];
+                    if (notlast) { p += zz*H[i*n+(k+2)]; H[i*n+(k+2)] -= p*r; }
+                    H[i*n+(k+1)] -= p*q; H[i*n+k] -= p;
+                }
+                for (int i = 0; i < n; ++i) {
+                    p = xx*Z[i*n+k] + yy*Z[i*n+(k+1)];
+                    if (notlast) { p += zz*Z[i*n+(k+2)]; Z[i*n+(k+2)] -= p*r; }
+                    Z[i*n+(k+1)] -= p*q; Z[i*n+k] -= p;
+                }
+            }
+        }
+    }
+    if (norm != T(0)) {
+        for (int e = n-1; e >= 0; --e) {
+            T p = wr[e], q = wi[e];
+            int na2 = e - 1;
+            if (q == T(0)) {
+                int m = e; H[e*n+e] = T(1);
+                T zz_s = T(0), s_s = T(0);
+                for (int i = e-1; i >= 0; --i) {
+                    T w = H[i*n+i] - p;
+                    T r = T(0);
+                    for (int j = m; j <= e; ++j) r += H[i*n+j]*H[j*n+e];
+                    if (wi[i] < T(0)) { zz_s = w; s_s = r; continue; }
+                    m = i;
+                    if (wi[i] == T(0)) {
+                        T tt = (w == T(0)) ? eps*norm : w;
+                        H[i*n+e] = -r/tt;
+                    } else {
+                        T xx = H[i*n+(i+1)], yv = H[(i+1)*n+i];
+                        T qd = (wr[i]-p)*(wr[i]-p) + wi[i]*wi[i];
+                        T tt = (xx*s_s - zz_s*r)/qd;
+                        H[i*n+e] = tt;
+                        if (::fabs(xx) > ::fabs(zz_s)) H[(i+1)*n+e] = (-r - w*tt)/xx;
+                        else                       H[(i+1)*n+e] = (-s_s - yv*tt)/zz_s;
+                    }
+                    T tmag = ::fabs(H[i*n+e]);
+                    if ((eps*tmag)*tmag > T(1)) for (int j = i; j <= e; ++j) H[j*n+e] /= tmag;
+                }
+            } else if (q < T(0)) {
+                int m = na2;
+                if (::fabs(H[e*n+na2]) > ::fabs(H[na2*n+e])) {
+                    H[na2*n+na2] = q/H[e*n+na2];
+                    H[na2*n+e]   = -(H[e*n+e]-p)/H[e*n+na2];
+                } else {
+                    T zr, zi; eig_cdiv<T>(T(0), -H[na2*n+e], H[na2*n+na2]-p, q, zr, zi);
+                    H[na2*n+na2] = zr; H[na2*n+e] = zi;
+                }
+                H[e*n+na2] = T(0); H[e*n+e] = T(1);
+                T zz_s = T(0), ra_s = T(0), sa_s = T(0);
+                for (int i = e-2; i >= 0; --i) {
+                    T w = H[i*n+i] - p;
+                    T ra = T(0), sa = T(0);
+                    for (int j = m; j <= e; ++j) { ra += H[i*n+j]*H[j*n+na2]; sa += H[i*n+j]*H[j*n+e]; }
+                    if (wi[i] < T(0)) { zz_s = w; ra_s = ra; sa_s = sa; continue; }
+                    m = i;
+                    if (wi[i] == T(0)) {
+                        T zr, zi; eig_cdiv<T>(-ra, -sa, w, q, zr, zi);
+                        H[i*n+na2] = zr; H[i*n+e] = zi;
+                    } else {
+                        T xx = H[i*n+(i+1)], yv = H[(i+1)*n+i];
+                        T vr = (wr[i]-p)*(wr[i]-p) + wi[i]*wi[i] - q*q;
+                        T vi = (wr[i]-p)*T(2)*q;
+                        if (vr == T(0) && vi == T(0))
+                            vr = eps*norm*(::fabs(w)+::fabs(q)+::fabs(xx)+::fabs(yv)+::fabs(zz_s));
+                        T zr, zi;
+                        eig_cdiv<T>(xx*ra_s - zz_s*ra + q*sa, xx*sa_s - zz_s*sa - q*ra, vr, vi, zr, zi);
+                        H[i*n+na2] = zr; H[i*n+e] = zi;
+                        if (::fabs(xx) > ::fabs(zz_s) + ::fabs(q)) {
+                            H[(i+1)*n+na2] = (-ra - w*H[i*n+na2] + q*H[i*n+e])/xx;
+                            H[(i+1)*n+e]   = (-sa - w*H[i*n+e] - q*H[i*n+na2])/xx;
+                        } else {
+                            T z2r, z2i; eig_cdiv<T>(-ra_s - yv*H[i*n+na2], -sa_s - yv*H[i*n+e], zz_s, q, z2r, z2i);
+                            H[(i+1)*n+na2] = z2r; H[(i+1)*n+e] = z2i;
+                        }
+                    }
+                    T tmag = ::fabs(H[i*n+na2]); { T tm2 = ::fabs(H[i*n+e]); if (tm2 > tmag) tmag = tm2; }
+                    if ((eps*tmag)*tmag > T(1)) for (int j = i; j <= e; ++j) { H[j*n+na2] /= tmag; H[j*n+e] /= tmag; }
+                }
+            }
+        }
+        for (int j = n-1; j >= 0; --j)
+            for (int i = 0; i < n; ++i) {
+                T s = T(0);
+                for (int k = 0; k <= j; ++k) s += Z[i*n+k]*H[k*n+j];
+                Z[i*n+j] = s;
+            }
+    }
+    for (int k = 0; k < n; ++k) {
+        if (wi[k] > T(0)) {
+            T nrm = T(0); for (int i=0;i<n;++i) nrm += Z[i*n+k]*Z[i*n+k]+Z[i*n+(k+1)]*Z[i*n+(k+1)];
+            nrm = ::sqrt(nrm); if (nrm>T(0)) for(int i=0;i<n;++i){ Z[i*n+k]/=nrm; Z[i*n+(k+1)]/=nrm; }
+            ++k;
+        } else if (wi[k] == T(0)) {
+            T nrm = T(0); for (int i=0;i<n;++i) nrm += Z[i*n+k]*Z[i*n+k];
+            nrm = ::sqrt(nrm); if (nrm>T(0)) for(int i=0;i<n;++i) Z[i*n+k]/=nrm;
+        }
+    }
+}
+
 // Ported from the ROCm qr_eig_fallback_kernel.
 // One block per batch element.
 // ============================================================================
@@ -3538,11 +4198,11 @@ __global__ void qr_eig_fallback_kernel(
             for (int i = k + 1; i < n; i++) {
                 sigma += H[i * n + k] * H[i * n + k];
             }
-            T norm_x = sqrt(sigma);
+            T norm_x = ::sqrt(sigma);
             if (norm_x < zero_tol) {
                 scratch[1] = T(0);
             } else {
-                T a = -copysign(norm_x, H[(k + 1) * n + k]);
+                T a = -::copysign(norm_x, H[(k + 1) * n + k]);
                 T v0_val = H[(k + 1) * n + k] - a;
                 T v_norm_sq = v0_val * v0_val;
                 for (int i = k + 2; i < n; i++) {
@@ -3630,9 +4290,9 @@ __global__ void qr_eig_fallback_kernel(
             bool deflated = false;
 
             if (nn >= 2) {
-                T tst = fabs(H[(nn - 2) * n + (nn - 2)]) + fabs(H[(nn - 1) * n + (nn - 1)]);
+                T tst = ::fabs(H[(nn - 2) * n + (nn - 2)]) + ::fabs(H[(nn - 1) * n + (nn - 1)]);
                 if (tst == T(0)) tst = T(1);
-                if (fabs(H[(nn - 1) * n + (nn - 2)]) < eps * tst) {
+                if (::fabs(H[(nn - 1) * n + (nn - 2)]) < eps * tst) {
                     wr[nn - 1] = H[(nn - 1) * n + (nn - 1)];
                     wi[nn - 1] = T(0);
                     H[(nn - 1) * n + (nn - 2)] = T(0);
@@ -3642,9 +4302,9 @@ __global__ void qr_eig_fallback_kernel(
             }
 
             if (!deflated && nn >= 3) {
-                T tst = fabs(H[(nn - 3) * n + (nn - 3)]) + fabs(H[(nn - 2) * n + (nn - 2)]);
+                T tst = ::fabs(H[(nn - 3) * n + (nn - 3)]) + ::fabs(H[(nn - 2) * n + (nn - 2)]);
                 if (tst == T(0)) tst = T(1);
-                if (fabs(H[(nn - 2) * n + (nn - 3)]) < eps * tst) {
+                if (::fabs(H[(nn - 2) * n + (nn - 3)]) < eps * tst) {
                     T a = H[(nn - 2) * n + (nn - 2)], b = H[(nn - 2) * n + (nn - 1)];
                     T c = H[(nn - 1) * n + (nn - 2)], d = H[(nn - 1) * n + (nn - 1)];
                     T trace = a + d;
@@ -3652,13 +4312,13 @@ __global__ void qr_eig_fallback_kernel(
                     T disc = trace * trace - T(4) * det;
 
                     if (disc >= T(0)) {
-                        T sq = sqrt(disc);
+                        T sq = ::sqrt(disc);
                         wr[nn - 2] = T(0.5) * (trace + sq);
                         wi[nn - 2] = T(0);
                         wr[nn - 1] = T(0.5) * (trace - sq);
                         wi[nn - 1] = T(0);
                     } else {
-                        T sq = sqrt(-disc);
+                        T sq = ::sqrt(-disc);
                         wr[nn - 2] = T(0.5) * trace;
                         wi[nn - 2] = T(0.5) * sq;
                         wr[nn - 1] = T(0.5) * trace;
@@ -3701,7 +4361,7 @@ __global__ void qr_eig_fallback_kernel(
         x = scratch[0]; y = scratch[1]; z = scratch[2];
 
         for (int k = 0; k + 2 < nn; k++) {
-            T norm_v = sqrt(x * x + y * y + z * z);
+            T norm_v = ::sqrt(x * x + y * y + z * z);
             if (norm_v < zero_tol) {
                 if (tid == 0) {
                     x = H[(k + 1) * n + k];
@@ -3714,7 +4374,7 @@ __global__ void qr_eig_fallback_kernel(
                 continue;
             }
 
-            T alpha_h = -copysign(norm_v, x);
+            T alpha_h = -::copysign(norm_v, x);
             T v0 = x - alpha_h;
             T v1 = y;
             T v2 = z;
@@ -3782,7 +4442,7 @@ __global__ void qr_eig_fallback_kernel(
 
         // Final 2x2 Givens rotation
         if (nn >= 2) {
-            T norm_v = sqrt(x * x + y * y);
+            T norm_v = ::sqrt(x * x + y * y);
             if (norm_v > zero_tol) {
                 int k = nn - 2;
                 T c_val = x / norm_v;
@@ -3824,13 +4484,13 @@ __global__ void qr_eig_fallback_kernel(
             T det = a * d - b * c;
             T disc = trace * trace - T(4) * det;
             if (disc >= T(0)) {
-                T sq = sqrt(disc);
+                T sq = ::sqrt(disc);
                 wr[0] = T(0.5) * (trace + sq);
                 wi[0] = T(0);
                 wr[1] = T(0.5) * (trace - sq);
                 wi[1] = T(0);
             } else {
-                T sq = sqrt(-disc);
+                T sq = ::sqrt(-disc);
                 wr[0] = T(0.5) * trace;
                 wi[0] = T(0.5) * sq;
                 wr[1] = T(0.5) * trace;
@@ -4256,24 +4916,18 @@ auto linalg_eig_kernel(const Tensor& A, cudaStream_t stream)
     v_shape.push_back(n);
     auto V = zeros(v_shape, A.dtype(), A.device());
 
+    auto vbuf = zeros({nbatch, n}, A.dtype(), A.device());
+    int eblock = 256;
+    int egrid = static_cast<int>((nbatch + eblock - 1) / eblock);
     if (A.dtype() == DType::Float32) {
-        check_size_limit<float>(n, "eig");
-        // Shared memory: H[n*n] + Q[n*n] + scratch[4]
-        size_t smem = (2 * n * n + 4) * sizeof(float);
-        int threads = min(static_cast<int>(n), 128);
-        if (threads < 1) threads = 1;
-        qr_eig_fallback_kernel<float><<<nbatch, threads, smem, stream>>>(
-            work.data<float>(), WR.data<float>(), WI.data<float>(),
-            V.data<float>(), n, 30 * n);
+        eig_hqr2_kernel<float><<<egrid, eblock, 0, stream>>>(
+            work.data<float>(), V.data<float>(), WR.data<float>(), WI.data<float>(),
+            vbuf.data<float>(), static_cast<int>(n), static_cast<long long>(nbatch));
         CUDA_CHECK_LINALG(cudaGetLastError());
     } else {
-        check_size_limit<double>(n, "eig");
-        size_t smem = (2 * n * n + 4) * sizeof(double);
-        int threads = min(static_cast<int>(n), 128);
-        if (threads < 1) threads = 1;
-        qr_eig_fallback_kernel<double><<<nbatch, threads, smem, stream>>>(
-            work.data<double>(), WR.data<double>(), WI.data<double>(),
-            V.data<double>(), n, 30 * n);
+        eig_hqr2_kernel<double><<<egrid, eblock, 0, stream>>>(
+            work.data<double>(), V.data<double>(), WR.data<double>(), WI.data<double>(),
+            vbuf.data<double>(), static_cast<int>(n), static_cast<long long>(nbatch));
         CUDA_CHECK_LINALG(cudaGetLastError());
     }
 
@@ -4574,12 +5228,12 @@ __global__ void householder_geqrf_kernel(
                 sigma += R[i * n_cols + j] * R[i * n_cols + j];
             }
             T x0 = R[j * n_cols + j];
-            T norm_x = sqrt(x0 * x0 + sigma);
+            T norm_x = ::sqrt(x0 * x0 + sigma);
             if (norm_x < zero_tol || sigma < zero_tol) {
                 scratch[1] = T(0);  // tau = 0
                 tau[j] = T(0);
             } else {
-                T alpha = -copysign(norm_x, x0);
+                T alpha = -::copysign(norm_x, x0);
                 T v0 = x0 - alpha;
                 T v_norm_sq = v0 * v0 + sigma;
                 T tau_val = T(2) / v_norm_sq;
@@ -4866,7 +5520,7 @@ __global__ void ldl_bk_factor_kernel(
         A[idx] = batch_data[idx];
     __syncthreads();
 
-    // Bunch-Kaufman factorization with alpha = (1 + sqrt(17)) / 8
+    // Bunch-Kaufman factorization with alpha = (1 + ::sqrt(17)) / 8
     constexpr T alpha = static_cast<T>(0.6404);
 
     int k = 0;
@@ -4876,11 +5530,11 @@ __global__ void ldl_bk_factor_kernel(
             T col_max = T(0);
             int col_max_row = k;
             for (int i = k + 1; i < n; i++) {
-                T v = fabs(A[i * n + k]);
+                T v = ::fabs(A[i * n + k]);
                 if (v > col_max) { col_max = v; col_max_row = i; }
             }
 
-            T abs_akk = fabs(A[k * n + k]);
+            T abs_akk = ::fabs(A[k * n + k]);
 
             if (abs_akk == T(0) && col_max == T(0)) {
                 // Zero column — 1x1 pivot with zero diagonal
@@ -4898,11 +5552,11 @@ __global__ void ldl_bk_factor_kernel(
                 T row_max = T(0);
                 for (int j = k; j < n; j++) {
                     if (j == r) continue;
-                    T v = fabs(A[r * n + j]);
+                    T v = ::fabs(A[r * n + j]);
                     if (v > row_max) row_max = v;
                 }
 
-                T abs_arr = fabs(A[r * n + r]);
+                T abs_arr = ::fabs(A[r * n + r]);
 
                 if (abs_akk * row_max >= alpha * col_max * col_max) {
                     // 1x1 pivot, no interchange

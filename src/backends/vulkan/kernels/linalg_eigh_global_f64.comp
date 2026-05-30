@@ -1,0 +1,109 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_float64 : require
+
+// Symmetric eigenvalue decomposition (cyclic Jacobi), Float64, arbitrary n.
+// Global-memory working set (D) + eigenvector matrix (V); one workgroup per batch.
+// See linalg_eigh_global.comp for the algorithm; this is the double-precision port.
+layout(local_size_x = 32) in;
+
+layout(set = 0, binding = 0) buffer InputBuf { float64_t data_in[]; };
+layout(set = 0, binding = 1) buffer WBuf     { float64_t data_w[];  };
+layout(set = 0, binding = 2) buffer VBuf     { float64_t data_v[];  };
+layout(set = 0, binding = 3) buffer DBuf     { float64_t data_d[];  };
+
+layout(push_constant) uniform PushConstants {
+    uint n;
+    uint batch;
+};
+
+shared float64_t sh_c;
+shared float64_t sh_s;
+shared uint  sh_rot;
+shared uint  converged;
+
+void main() {
+    uint batch_idx = gl_WorkGroupID.x;
+    uint tid = gl_LocalInvocationID.x;
+    if (batch_idx >= batch) return;
+
+    uint base = batch_idx * n * n;
+
+    for (uint idx = tid; idx < n * n; idx += gl_WorkGroupSize.x) {
+        uint r = idx / n;
+        uint c = idx - r * n;
+        data_d[base + idx] = data_in[base + idx];
+        data_v[base + idx] = (r == c) ? 1.0lf : 0.0lf;
+    }
+    barrier();
+
+    for (uint sweep = 0; sweep < 60u; sweep++) {
+        if (tid == 0u) converged = 1u;
+        barrier();
+
+        for (uint p = 0; p < n; p++) {
+            for (uint q = p + 1u; q < n; q++) {
+                if (tid == 0u) {
+                    float64_t app = data_d[base + p * n + p];
+                    float64_t aqq = data_d[base + q * n + q];
+                    float64_t apq = data_d[base + p * n + q];
+
+                    if (abs(apq) > 1e-15lf * sqrt(abs(app * aqq))) {
+                        converged = 0u;
+                        float64_t t;
+                        if (app == aqq) {
+                            t = 1.0lf;
+                        } else {
+                            float64_t tau_val = (aqq - app) / (2.0lf * apq);
+                            float64_t s_t = (tau_val >= 0.0lf) ? 1.0lf : -1.0lf;
+                            t = s_t / (abs(tau_val) + sqrt(1.0lf + tau_val * tau_val));
+                        }
+                        float64_t c = 1.0lf / sqrt(1.0lf + t * t);
+                        float64_t s = t * c;
+                        sh_c = c;
+                        sh_s = s;
+                        sh_rot = 1u;
+
+                        data_d[base + p * n + p] = c*c*app - 2.0lf*s*c*apq + s*s*aqq;
+                        data_d[base + q * n + q] = s*s*app + 2.0lf*s*c*apq + c*c*aqq;
+                        data_d[base + p * n + q] = 0.0lf;
+                        data_d[base + q * n + p] = 0.0lf;
+                    } else {
+                        sh_rot = 0u;
+                    }
+                }
+                barrier();
+
+                if (sh_rot == 1u) {
+                    float64_t c = sh_c;
+                    float64_t s = sh_s;
+                    for (uint i = tid; i < n; i += gl_WorkGroupSize.x) {
+                        if (i != p && i != q) {
+                            float64_t dip = data_d[base + i * n + p];
+                            float64_t diq = data_d[base + i * n + q];
+                            float64_t nip = c * dip - s * diq;
+                            float64_t niq = s * dip + c * diq;
+                            data_d[base + i * n + p] = nip;
+                            data_d[base + p * n + i] = nip;
+                            data_d[base + i * n + q] = niq;
+                            data_d[base + q * n + i] = niq;
+                        }
+                    }
+                    for (uint i = tid; i < n; i += gl_WorkGroupSize.x) {
+                        float64_t vip = data_v[base + i * n + p];
+                        float64_t viq = data_v[base + i * n + q];
+                        data_v[base + i * n + p] = c * vip - s * viq;
+                        data_v[base + i * n + q] = s * vip + c * viq;
+                    }
+                }
+                barrier();
+            }
+        }
+
+        if (converged > 0u) break;
+        barrier();
+    }
+
+    for (uint i = tid; i < n; i += gl_WorkGroupSize.x) {
+        data_w[batch_idx * n + i] = data_d[base + i * n + i];
+    }
+}

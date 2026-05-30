@@ -854,6 +854,97 @@ __global__ void interpolate_bilinear_backward_kernel(
     }
 }
 
+// Catmull-Rom cubic convolution kernel weight (a = -0.5), matches CPU cubic_interp_coeff.
+__device__ __forceinline__ float tz_bicubic_coeff(float x) {
+    float a = fabsf(x);
+    if (a <= 1.0f) return 1.5f * a * a * a - 2.5f * a * a + 1.0f;
+    if (a < 2.0f)  return -0.5f * a * a * a + 2.5f * a * a - 4.0f * a + 2.0f;
+    return 0.0f;
+}
+
+// Bicubic backward (4D): scatter each output gradient to its 4x4 input neighborhood.
+template <typename T>
+__global__ void interpolate_bicubic_backward_kernel(
+    const T* grad_out, T* grad_in,
+    int64_t batch, int64_t channels, int64_t in_h, int64_t in_w,
+    int64_t out_h, int64_t out_w, bool align_corners)
+{
+    int64_t total = batch * channels * out_h * out_w;
+    TENZOR_CUDA_KERNEL_LOOP(idx, total) {
+        int64_t temp = idx;
+        int64_t ow = temp % out_w; temp /= out_w;
+        int64_t oh = temp % out_h; temp /= out_h;
+        int64_t c  = temp % channels; temp /= channels;
+        int64_t b  = temp;
+
+        float scale_h = (align_corners && out_h > 1) ? static_cast<float>(in_h - 1) / (out_h - 1)
+                                                     : static_cast<float>(in_h) / out_h;
+        float scale_w = (align_corners && out_w > 1) ? static_cast<float>(in_w - 1) / (out_w - 1)
+                                                     : static_cast<float>(in_w) / out_w;
+        float src_h = align_corners ? oh * scale_h : (oh + 0.5f) * scale_h - 0.5f;
+        float src_w = align_corners ? ow * scale_w : (ow + 0.5f) * scale_w - 0.5f;
+        int64_t hi = static_cast<int64_t>(floorf(src_h));
+        int64_t wi = static_cast<int64_t>(floorf(src_w));
+
+        float g = static_cast<float>(grad_out[idx]);
+        int64_t base = b * (channels * in_h * in_w) + c * (in_h * in_w);
+        for (int dy = -1; dy <= 2; ++dy) {
+            int64_t iy = min(max(static_cast<int64_t>(0), hi + dy), in_h - 1);
+            float wy = tz_bicubic_coeff(src_h - static_cast<float>(hi + dy));
+            for (int dx = -1; dx <= 2; ++dx) {
+                int64_t ix = min(max(static_cast<int64_t>(0), wi + dx), in_w - 1);
+                float wx = tz_bicubic_coeff(src_w - static_cast<float>(wi + dx));
+                atomicAdd(&grad_in[base + iy * in_w + ix], static_cast<T>(wy * wx * g));
+            }
+        }
+    }
+}
+
+// Trilinear backward (5D): scatter each output gradient to its 8 input corners.
+template <typename T>
+__global__ void interpolate_trilinear_backward_kernel(
+    const T* grad_out, T* grad_in,
+    int64_t batch, int64_t channels, int64_t in_d, int64_t in_h, int64_t in_w,
+    int64_t out_d, int64_t out_h, int64_t out_w, bool align_corners)
+{
+    int64_t total = batch * channels * out_d * out_h * out_w;
+    TENZOR_CUDA_KERNEL_LOOP(idx, total) {
+        int64_t temp = idx;
+        int64_t ow = temp % out_w; temp /= out_w;
+        int64_t oh = temp % out_h; temp /= out_h;
+        int64_t od = temp % out_d; temp /= out_d;
+        int64_t c  = temp % channels; temp /= channels;
+        int64_t b  = temp;
+
+        float scd = (align_corners && out_d > 1) ? static_cast<float>(in_d - 1) / (out_d - 1) : static_cast<float>(in_d) / out_d;
+        float sch = (align_corners && out_h > 1) ? static_cast<float>(in_h - 1) / (out_h - 1) : static_cast<float>(in_h) / out_h;
+        float scw = (align_corners && out_w > 1) ? static_cast<float>(in_w - 1) / (out_w - 1) : static_cast<float>(in_w) / out_w;
+        // Match CPU: src is NOT clamped; out-of-bounds corners are skipped (their
+        // weight is dropped), rather than clamped-and-accumulated to the boundary.
+        float sd = align_corners ? od * scd : (od + 0.5f) * scd - 0.5f;
+        float sh = align_corners ? oh * sch : (oh + 0.5f) * sch - 0.5f;
+        float sw = align_corners ? ow * scw : (ow + 0.5f) * scw - 0.5f;
+        int64_t d0 = static_cast<int64_t>(floorf(sd)), h0 = static_cast<int64_t>(floorf(sh)), w0 = static_cast<int64_t>(floorf(sw));
+        int64_t d1 = d0 + 1, h1 = h0 + 1, w1 = w0 + 1;
+        float fd = sd - d0, fh = sh - h0, fw = sw - w0;
+        float g = static_cast<float>(grad_out[idx]);
+        int64_t base = b * (channels * in_d * in_h * in_w) + c * (in_d * in_h * in_w);
+#define TZ_TRI_ADD(dd, hh, ww, wgt) do { \
+        if ((dd) >= 0 && (dd) < in_d && (hh) >= 0 && (hh) < in_h && (ww) >= 0 && (ww) < in_w) \
+            atomicAdd(&grad_in[base + (dd) * in_h * in_w + (hh) * in_w + (ww)], static_cast<T>((wgt) * g)); \
+    } while (0)
+        TZ_TRI_ADD(d0, h0, w0, (1.0f - fd) * (1.0f - fh) * (1.0f - fw));
+        TZ_TRI_ADD(d0, h0, w1, (1.0f - fd) * (1.0f - fh) * fw);
+        TZ_TRI_ADD(d0, h1, w0, (1.0f - fd) * fh * (1.0f - fw));
+        TZ_TRI_ADD(d0, h1, w1, (1.0f - fd) * fh * fw);
+        TZ_TRI_ADD(d1, h0, w0, fd * (1.0f - fh) * (1.0f - fw));
+        TZ_TRI_ADD(d1, h0, w1, fd * (1.0f - fh) * fw);
+        TZ_TRI_ADD(d1, h1, w0, fd * fh * (1.0f - fw));
+        TZ_TRI_ADD(d1, h1, w1, fd * fh * fw);
+#undef TZ_TRI_ADD
+    }
+}
+
 // Interpolate host function
 auto interpolate_cuda(const Tensor& input,
                       const std::vector<int64_t>& size,
@@ -1027,22 +1118,37 @@ auto interpolate_backward_cuda(const Tensor& grad_output,
                                 const std::vector<int64_t>& input_size,
                                 const std::string& mode,
                                 bool align_corners) -> Tensor {
-    if (mode == "nearest") {
-        // Nearest-neighbor backward: each output pixel scatters its grad to
-        // its single source input pixel. Implement inline via a small
-        // dedicated kernel — simpler than the bilinear case.
-        // (Pragmatic short-form: compose via existing index_put_; here we
-        //  fall through to bilinear-with-zero-fractions for shape simplicity.)
-        // Pure bilinear works for nearest in the degenerate (integer-only)
-        // case but we want exact match: route to a dedicated path.
-    }
-    if (mode != "bilinear" && mode != "nearest") {
-        throw std::runtime_error("interpolate_backward_cuda: mode '" + mode +
-                                  "' not supported on CUDA. Use 'bilinear' or 'nearest'.");
-    }
     auto shape = grad_output.shape();
+
+    // Trilinear backward operates on 5D (N, C, D, H, W).
+    if (mode == "trilinear") {
+        if (shape.size() != 5)
+            throw std::runtime_error("interpolate_backward_cuda: trilinear requires 5D (N,C,D,H,W).");
+        if (input_size.size() != 3)
+            throw std::runtime_error("interpolate_backward_cuda: trilinear input_size must be [in_d, in_h, in_w].");
+        const int64_t N = shape[0], C = shape[1], out_d = shape[2], out_h = shape[3], out_w = shape[4];
+        const int64_t in_d = input_size[0], in_h = input_size[1], in_w = input_size[2];
+        Tensor grad_input({N, C, in_d, in_h, in_w}, grad_output.dtype(), grad_output.device());
+        TENZOR_CUDA_CHECK(cudaMemset(grad_input.data_ptr(), 0,
+                                      static_cast<size_t>(grad_input.numel()) * dtype_size(grad_input.dtype())));
+        int64_t total = N * C * out_d * out_h * out_w;
+        int threads = 256;
+        int blocks  = static_cast<int>((total + threads - 1) / threads);
+        TENZOR_DISPATCH_FLOATING_TYPES(grad_output.dtype(), "interpolate_trilinear_backward", [&]() {
+            interpolate_trilinear_backward_kernel<scalar_t><<<blocks, threads>>>(
+                grad_output.data<scalar_t>(), grad_input.data<scalar_t>(),
+                N, C, in_d, in_h, in_w, out_d, out_h, out_w, align_corners);
+        });
+        TENZOR_CUDA_POST_LAUNCH_CHECK();
+        return grad_input;
+    }
+
+    if (mode != "bilinear" && mode != "nearest" && mode != "bicubic") {
+        throw std::runtime_error("interpolate_backward_cuda: mode '" + mode +
+            "' not supported. Use 'bilinear'/'nearest'/'bicubic' (4D) or 'trilinear' (5D).");
+    }
     if (shape.size() != 4) {
-        throw std::runtime_error("interpolate_backward_cuda: only 4D (N,C,H,W) supported.");
+        throw std::runtime_error("interpolate_backward_cuda: bilinear/nearest/bicubic require 4D (N,C,H,W).");
     }
     if (input_size.size() != 2) {
         throw std::runtime_error("interpolate_backward_cuda: input_size must be [in_h, in_w].");
@@ -1065,19 +1171,21 @@ auto interpolate_backward_cuda(const Tensor& grad_output,
     if (mode == "bilinear") {
         TENZOR_DISPATCH_FLOATING_TYPES(grad_output.dtype(), "interpolate_bilinear_backward", [&]() {
             interpolate_bilinear_backward_kernel<scalar_t><<<blocks, threads>>>(
-                grad_output.data<scalar_t>(),
-                grad_input.data<scalar_t>(),
+                grad_output.data<scalar_t>(), grad_input.data<scalar_t>(),
+                N, C, in_h, in_w, out_h, out_w, align_corners);
+        });
+    } else if (mode == "bicubic") {
+        TENZOR_DISPATCH_FLOATING_TYPES(grad_output.dtype(), "interpolate_bicubic_backward", [&]() {
+            interpolate_bicubic_backward_kernel<scalar_t><<<blocks, threads>>>(
+                grad_output.data<scalar_t>(), grad_input.data<scalar_t>(),
                 N, C, in_h, in_w, out_h, out_w, align_corners);
         });
     } else {
-        // M11 fix: native nearest-mode backward via atomicAdd scatter.
-        // Mirrors the ROCm pattern from Wave H4. Each output pixel writes
-        // its gradient to the single nearest input pixel; atomicAdd
-        // handles the (out_h × out_w) → (in_h × in_w) overlap.
+        // Native nearest-mode backward via atomicAdd scatter (each output pixel
+        // writes its gradient to the single nearest input pixel).
         TENZOR_DISPATCH_FLOATING_TYPES(grad_output.dtype(), "interpolate_nearest_backward", [&]() {
             interpolate_nearest_backward_kernel<scalar_t><<<blocks, threads>>>(
-                grad_output.data<scalar_t>(),
-                grad_input.data<scalar_t>(),
+                grad_output.data<scalar_t>(), grad_input.data<scalar_t>(),
                 N, C, in_h, in_w, out_h, out_w);
         });
     }

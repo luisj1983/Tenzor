@@ -1,0 +1,99 @@
+#version 450
+
+// Householder QR for matrices of ANY size (global-memory working set).
+// linalg_qr.comp holds R/Q in shared [32][32] and is capped at 32x32; this
+// variant keeps the working matrix R (= A), the orthogonal accumulator Q, and the
+// Householder vector v in global memory, so it works for arbitrary m,n.
+// One workgroup per batch element. Output: Q (m x m, binding 1), R (m x n, binding 2).
+layout(local_size_x = 32) in;
+
+layout(set = 0, binding = 0) buffer InputBuf { float data_in[]; };  // A (m*n per batch)
+layout(set = 0, binding = 1) buffer QBuf     { float data_q[];  };  // Q (m*m per batch)
+layout(set = 0, binding = 2) buffer RBuf     { float data_r[];  };  // R (m*n per batch), also working matrix
+layout(set = 0, binding = 3) buffer VBuf     { float data_v[];  };  // Householder scratch (m per batch)
+
+layout(push_constant) uniform PushConstants {
+    uint m;       // rows
+    uint n_cols;  // columns
+    uint batch;
+};
+
+shared float norm_val;
+shared float tau;
+
+void main() {
+    uint batch_idx = gl_WorkGroupID.x;
+    uint tid = gl_LocalInvocationID.x;
+    if (batch_idx >= batch) return;
+
+    uint r_off = batch_idx * m * n_cols;   // R / A
+    uint q_off = batch_idx * m * m;        // Q
+    uint v_off = batch_idx * m;            // v scratch
+
+    // R = A
+    for (uint idx = tid; idx < m * n_cols; idx += gl_WorkGroupSize.x) {
+        data_r[r_off + idx] = data_in[r_off + idx];
+    }
+    // Q = I
+    for (uint idx = tid; idx < m * m; idx += gl_WorkGroupSize.x) {
+        uint rr = idx / m;
+        uint cc = idx - rr * m;
+        data_q[q_off + idx] = (rr == cc) ? 1.0 : 0.0;
+    }
+    barrier();
+
+    uint min_mn = min(m, n_cols);
+
+    for (uint col = 0; col < min_mn; col++) {
+        if (tid == 0u) {
+            float sigma = 0.0;
+            for (uint i = col; i < m; i++) {
+                float val = data_r[r_off + i * n_cols + col];
+                data_v[v_off + i] = val;
+                sigma += val * val;
+            }
+            float norm = sqrt(sigma);
+            float sign_val = (data_v[v_off + col] >= 0.0) ? 1.0 : -1.0;
+            data_v[v_off + col] += sign_val * norm;
+
+            float v_norm_sq = 0.0;
+            for (uint i = col; i < m; i++) {
+                float vi = data_v[v_off + i];
+                v_norm_sq += vi * vi;
+            }
+            norm_val = v_norm_sq;
+            tau = (v_norm_sq > 1e-30) ? 2.0 / v_norm_sq : 0.0;
+        }
+        barrier();
+
+        if (norm_val >= 1e-30) {
+            // Apply H = I - tau v v^T to R columns >= col (independent across columns).
+            for (uint c = tid; c < n_cols; c += gl_WorkGroupSize.x) {
+                if (c >= col) {
+                    float dot = 0.0;
+                    for (uint i = col; i < m; i++) {
+                        dot += data_v[v_off + i] * data_r[r_off + i * n_cols + c];
+                    }
+                    dot *= tau;
+                    for (uint i = col; i < m; i++) {
+                        data_r[r_off + i * n_cols + c] -= dot * data_v[v_off + i];
+                    }
+                }
+            }
+            barrier();
+
+            // Q = Q * H (independent across rows of Q).
+            for (uint rr = tid; rr < m; rr += gl_WorkGroupSize.x) {
+                float dot = 0.0;
+                for (uint i = col; i < m; i++) {
+                    dot += data_q[q_off + rr * m + i] * data_v[v_off + i];
+                }
+                dot *= tau;
+                for (uint i = col; i < m; i++) {
+                    data_q[q_off + rr * m + i] -= dot * data_v[v_off + i];
+                }
+            }
+            barrier();
+        }
+    }
+}

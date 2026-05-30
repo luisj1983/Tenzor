@@ -1,0 +1,93 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_float64 : require
+
+// Householder QR, Float64, arbitrary size (global-memory working set).
+// See linalg_qr_global.comp for the algorithm.
+layout(local_size_x = 32) in;
+
+layout(set = 0, binding = 0) buffer InputBuf { float64_t data_in[]; };
+layout(set = 0, binding = 1) buffer QBuf     { float64_t data_q[];  };
+layout(set = 0, binding = 2) buffer RBuf     { float64_t data_r[];  };
+layout(set = 0, binding = 3) buffer VBuf     { float64_t data_v[];  };
+
+layout(push_constant) uniform PushConstants {
+    uint m;
+    uint n_cols;
+    uint batch;
+};
+
+shared float64_t norm_val;
+shared float64_t tau;
+
+void main() {
+    uint batch_idx = gl_WorkGroupID.x;
+    uint tid = gl_LocalInvocationID.x;
+    if (batch_idx >= batch) return;
+
+    uint r_off = batch_idx * m * n_cols;
+    uint q_off = batch_idx * m * m;
+    uint v_off = batch_idx * m;
+
+    for (uint idx = tid; idx < m * n_cols; idx += gl_WorkGroupSize.x) {
+        data_r[r_off + idx] = data_in[r_off + idx];
+    }
+    for (uint idx = tid; idx < m * m; idx += gl_WorkGroupSize.x) {
+        uint rr = idx / m;
+        uint cc = idx - rr * m;
+        data_q[q_off + idx] = (rr == cc) ? 1.0lf : 0.0lf;
+    }
+    barrier();
+
+    uint min_mn = min(m, n_cols);
+
+    for (uint col = 0; col < min_mn; col++) {
+        if (tid == 0u) {
+            float64_t sigma = 0.0lf;
+            for (uint i = col; i < m; i++) {
+                float64_t val = data_r[r_off + i * n_cols + col];
+                data_v[v_off + i] = val;
+                sigma += val * val;
+            }
+            float64_t norm = sqrt(sigma);
+            float64_t sign_val = (data_v[v_off + col] >= 0.0lf) ? 1.0lf : -1.0lf;
+            data_v[v_off + col] += sign_val * norm;
+
+            float64_t v_norm_sq = 0.0lf;
+            for (uint i = col; i < m; i++) {
+                float64_t vi = data_v[v_off + i];
+                v_norm_sq += vi * vi;
+            }
+            norm_val = v_norm_sq;
+            tau = (v_norm_sq > 1e-300lf) ? 2.0lf / v_norm_sq : 0.0lf;
+        }
+        barrier();
+
+        if (norm_val >= 1e-300lf) {
+            for (uint c = tid; c < n_cols; c += gl_WorkGroupSize.x) {
+                if (c >= col) {
+                    float64_t dot = 0.0lf;
+                    for (uint i = col; i < m; i++) {
+                        dot += data_v[v_off + i] * data_r[r_off + i * n_cols + c];
+                    }
+                    dot *= tau;
+                    for (uint i = col; i < m; i++) {
+                        data_r[r_off + i * n_cols + c] -= dot * data_v[v_off + i];
+                    }
+                }
+            }
+            barrier();
+
+            for (uint rr = tid; rr < m; rr += gl_WorkGroupSize.x) {
+                float64_t dot = 0.0lf;
+                for (uint i = col; i < m; i++) {
+                    dot += data_q[q_off + rr * m + i] * data_v[v_off + i];
+                }
+                dot *= tau;
+                for (uint i = col; i < m; i++) {
+                    data_q[q_off + rr * m + i] -= dot * data_v[v_off + i];
+                }
+            }
+            barrier();
+        }
+    }
+}

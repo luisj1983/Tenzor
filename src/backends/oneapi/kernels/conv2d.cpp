@@ -1541,8 +1541,8 @@ struct ConvTranspose2dBiasKernelFloat16 {};
  */
 auto conv_transpose2d_forward(
     const Tensor& input, const Tensor& weight, const Tensor* bias,
-    int64_t stride, int64_t padding, int64_t output_padding,
-    int64_t dilation, int64_t groups,
+    int64_t sH, int64_t sW, int64_t pH, int64_t pW,
+    int64_t opH, int64_t opW, int64_t dH, int64_t dW, int64_t groups,
     sycl::queue& queue
 ) -> Tensor {
     auto input_shape = input.shape();
@@ -1560,8 +1560,8 @@ auto conv_transpose2d_forward(
     int64_t kernel_w = weight_shape[3];
 
     // Calculate output dimensions
-    int64_t out_h = (in_h - 1) * stride - 2 * padding + dilation * (kernel_h - 1) + output_padding + 1;
-    int64_t out_w = (in_w - 1) * stride - 2 * padding + dilation * (kernel_w - 1) + output_padding + 1;
+    int64_t out_h = (in_h - 1) * sH - 2 * pH + dH * (kernel_h - 1) + opH + 1;
+    int64_t out_w = (in_w - 1) * sW - 2 * pW + dW * (kernel_w - 1) + opW + 1;
 
     if (out_h <= 0 || out_w <= 0) {
         throw std::invalid_argument(
@@ -1595,13 +1595,13 @@ auto conv_transpose2d_forward(
                 for (int64_t ic = 0; ic < in_channels_per_group; ++ic) {
                     for (int64_t kh = 0; kh < kernel_h; ++kh) {
                         for (int64_t kw = 0; kw < kernel_w; ++kw) {
-                            int64_t h_shifted = h + padding - kh * dilation;
-                            int64_t w_shifted = w + padding - kw * dilation;
+                            int64_t h_shifted = h + pH - kh * dH;
+                            int64_t w_shifted = w + pW - kw * dW;
 
-                            if (h_shifted >= 0 && h_shifted % stride == 0 &&
-                                w_shifted >= 0 && w_shifted % stride == 0) {
-                                int64_t ih = h_shifted / stride;
-                                int64_t iw = w_shifted / stride;
+                            if (h_shifted >= 0 && h_shifted % sH == 0 &&
+                                w_shifted >= 0 && w_shifted % sW == 0) {
+                                int64_t ih = h_shifted / sH;
+                                int64_t iw = w_shifted / sW;
 
                                 if (ih >= 0 && ih < in_h && iw >= 0 && iw < in_w) {
                                     int64_t input_idx = b * (in_channels * in_h * in_w) +
@@ -1655,13 +1655,13 @@ auto conv_transpose2d_forward(
                 for (int64_t ic = 0; ic < in_channels_per_group; ++ic) {
                     for (int64_t kh = 0; kh < kernel_h; ++kh) {
                         for (int64_t kw = 0; kw < kernel_w; ++kw) {
-                            int64_t h_shifted = h + padding - kh * dilation;
-                            int64_t w_shifted = w + padding - kw * dilation;
+                            int64_t h_shifted = h + pH - kh * dH;
+                            int64_t w_shifted = w + pW - kw * dW;
 
-                            if (h_shifted >= 0 && h_shifted % stride == 0 &&
-                                w_shifted >= 0 && w_shifted % stride == 0) {
-                                int64_t ih = h_shifted / stride;
-                                int64_t iw = w_shifted / stride;
+                            if (h_shifted >= 0 && h_shifted % sH == 0 &&
+                                w_shifted >= 0 && w_shifted % sW == 0) {
+                                int64_t ih = h_shifted / sH;
+                                int64_t iw = w_shifted / sW;
 
                                 if (ih >= 0 && ih < in_h && iw >= 0 && iw < in_w) {
                                     int64_t input_idx = b * (in_channels * in_h * in_w) +
@@ -1714,13 +1714,13 @@ auto conv_transpose2d_forward(
                 for (int64_t ic = 0; ic < in_channels_per_group; ++ic) {
                     for (int64_t kh = 0; kh < kernel_h; ++kh) {
                         for (int64_t kw = 0; kw < kernel_w; ++kw) {
-                            int64_t h_shifted = h + padding - kh * dilation;
-                            int64_t w_shifted = w + padding - kw * dilation;
+                            int64_t h_shifted = h + pH - kh * dH;
+                            int64_t w_shifted = w + pW - kw * dW;
 
-                            if (h_shifted >= 0 && h_shifted % stride == 0 &&
-                                w_shifted >= 0 && w_shifted % stride == 0) {
-                                int64_t ih = h_shifted / stride;
-                                int64_t iw = w_shifted / stride;
+                            if (h_shifted >= 0 && h_shifted % sH == 0 &&
+                                w_shifted >= 0 && w_shifted % sW == 0) {
+                                int64_t ih = h_shifted / sH;
+                                int64_t iw = w_shifted / sW;
 
                                 if (ih >= 0 && ih < in_h && iw >= 0 && iw < in_w) {
                                     int64_t input_idx = b * (in_channels * in_h * in_w) +
@@ -1767,7 +1767,8 @@ class DepthwiseConv2dKernelF32;
 class DepthwiseConv2dKernelF64;
 
 auto depthwise_conv2d_kernel(const Tensor& input, const Tensor& weight, const Tensor* bias,
-                              int64_t stride, int64_t padding, int64_t dilation,
+                              int64_t sH, int64_t sW, int64_t pH, int64_t pW,
+                              int64_t dH, int64_t dW,
                               sycl::queue& queue) -> Tensor {
     auto in_shape = input.shape();
     auto w_shape = weight.shape();
@@ -1779,8 +1780,8 @@ auto depthwise_conv2d_kernel(const Tensor& input, const Tensor& weight, const Te
     int64_t kH = w_shape[2];
     int64_t kW = w_shape[3];
 
-    int64_t H_out = (H_in + 2 * padding - dilation * (kH - 1) - 1) / stride + 1;
-    int64_t W_out = (W_in + 2 * padding - dilation * (kW - 1) - 1) / stride + 1;
+    int64_t H_out = (H_in + 2 * pH - dH * (kH - 1) - 1) / sH + 1;
+    int64_t W_out = (W_in + 2 * pW - dW * (kW - 1) - 1) / sW + 1;
 
     Tensor output({N, C, H_out, W_out}, input.dtype(), input.device());
     int64_t total = N * C * H_out * W_out;
@@ -1801,8 +1802,8 @@ auto depthwise_conv2d_kernel(const Tensor& input, const Tensor& weight, const Te
             float sum = 0.0f;
             for (int64_t kh = 0; kh < kH; ++kh) {
                 for (int64_t kw = 0; kw < kW; ++kw) {
-                    int64_t h_in = h_out * stride - padding + kh * dilation;
-                    int64_t w_in = w_out * stride - padding + kw * dilation;
+                    int64_t h_in = h_out * sH - pH + kh * dH;
+                    int64_t w_in = w_out * sW - pW + kw * dW;
                     if (h_in >= 0 && h_in < H_in && w_in >= 0 && w_in < W_in) {
                         float in_val = in_ptr[n * C * H_in * W_in + c * H_in * W_in + h_in * W_in + w_in];
                         float w_val = w_ptr[c * kH * kW + kh * kW + kw];
@@ -1829,8 +1830,8 @@ auto depthwise_conv2d_kernel(const Tensor& input, const Tensor& weight, const Te
             double sum = 0.0;
             for (int64_t kh = 0; kh < kH; ++kh) {
                 for (int64_t kw = 0; kw < kW; ++kw) {
-                    int64_t h_in = h_out * stride - padding + kh * dilation;
-                    int64_t w_in = w_out * stride - padding + kw * dilation;
+                    int64_t h_in = h_out * sH - pH + kh * dH;
+                    int64_t w_in = w_out * sW - pW + kw * dW;
                     if (h_in >= 0 && h_in < H_in && w_in >= 0 && w_in < W_in) {
                         double in_val = in_ptr[n * C * H_in * W_in + c * H_in * W_in + h_in * W_in + w_in];
                         double w_val = w_ptr[c * kH * kW + kh * kW + kw];

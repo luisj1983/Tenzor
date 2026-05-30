@@ -7,7 +7,7 @@
 
 namespace tenzor {
 
-static constexpr int64_t MAX_SMALL_LINALG_SIZE = 128;  // single-workgroup shader limit
+static constexpr int64_t MAX_SMALL_LINALG_SIZE = 32;  // single-workgroup (shared-mem [32][32]) shader limit; larger N uses the tiled path
 static constexpr int64_t TILED_BLOCK_SIZE = 32;        // panel width for blocked algorithms
 
 // =============================================================================
@@ -840,22 +840,32 @@ auto VulkanBackend::dispatchLinalgQR(const Tensor& input) -> std::vector<Tensor>
 
     auto f16_buf = [&](size_t numel) -> size_t { return ((numel + 1) / 2) * 4; };
 
-    if (m <= MAX_SMALL_LINALG_SIZE && n <= MAX_SMALL_LINALG_SIZE) {
-        // Small matrix path: single-workgroup shader writes full Q (m×m)
-        // and full R (m×n). The host-facing API returns *reduced* QR to
-        // match the CPU/LAPACK path: Q is (m, k) and R is (k, n) where
-        // k = min(m, n). Without this, lobpcg's orthonormalize() produced
-        // an m×m Q that broke every downstream shape assumption.
+    // Float16: compute in Float32 and narrow (the global QR shader is f32/f64 only).
+    if (is_f16) {
+        auto res = dispatchLinalgQR(dispatchCast(input.contiguous(), DType::Float32));
+        return { dispatchCast(res[0], DType::Float16), dispatchCast(res[1], DType::Float16) };
+    }
+
+    // Householder QR via a global-memory shader correct for any m,n. The old
+    // shared-memory shader was capped at 32x32 but dispatched up to 128 (corrupting
+    // 32<N<=128), and the blocked path produced NaNs. Returns full Q (m×m), R (m×n),
+    // then reduces to (m,k)/(k,n) to match CPU/LAPACK reduced-QR semantics.
+    {
         int64_t k = std::min(m, n);
+        const size_t esz = is_f64 ? 8u : 4u;
 
         std::vector<int64_t> q_full_shape(shape.begin(), shape.end() - 2);
         q_full_shape.push_back(m); q_full_shape.push_back(m);
         std::vector<int64_t> r_full_shape(shape.begin(), shape.end());
+        std::vector<int64_t> v_shape(shape.begin(), shape.end() - 2);
+        v_shape.push_back(m);
 
         Tensor Q_full(q_full_shape, input.dtype(), input.device());
         Tensor R_full(r_full_shape, input.dtype(), input.device());
+        Tensor Vscratch(v_shape, input.dtype(), input.device());
 
-        std::string shader = is_f64 ? "linalg_qr_f64" : is_f16 ? "linalg_qr_f16" : "linalg_qr";
+        auto cont = input.contiguous();
+        std::string shader = is_f64 ? "linalg_qr_global_f64" : "linalg_qr_global";
         auto* pipeline = getPipeline(shader, device_id);
 
         struct PushConstants { uint32_t m; uint32_t n_cols; uint32_t batch; } pc;
@@ -863,112 +873,28 @@ auto VulkanBackend::dispatchLinalgQR(const Tensor& input) -> std::vector<Tensor>
         pc.n_cols = static_cast<uint32_t>(n);
         pc.batch = static_cast<uint32_t>(batch_size);
 
-        auto cont = input.contiguous();
-        size_t elem_size = is_f64 ? 8 : is_f16 ? 2 : 4;
-        size_t in_numel = batch_size * m * n;
-        size_t q_numel = batch_size * m * m;
-        size_t in_size = is_f16 ? f16_buf(in_numel) : in_numel * elem_size;
-        size_t q_size = is_f16 ? f16_buf(q_numel) : q_numel * elem_size;
-        size_t r_size = in_size;
+        size_t in_bytes = static_cast<size_t>(batch_size) * m * n * esz;
+        size_t q_bytes  = static_cast<size_t>(batch_size) * m * m * esz;
+        size_t v_bytes  = static_cast<size_t>(batch_size) * m * esz;
 
         std::vector<std::pair<uint32_t, const void*>> bindings = {
-            {0, cont.data_ptr()}, {1, Q_full.data_ptr()}, {2, R_full.data_ptr()}
+            {0, cont.data_ptr()}, {1, Q_full.data_ptr()}, {2, R_full.data_ptr()}, {3, Vscratch.data_ptr()}
         };
-        std::vector<size_t> sizes = {in_size, q_size, r_size};
+        std::vector<size_t> sizes = {in_bytes, q_bytes, in_bytes, v_bytes};
         VkDescriptorSet ds = allocateAndWriteDescriptorSet(device_id, pipeline, bindings, sizes);
 
         VkCommandBuffer cmd = beginSingleTimeCommands(device_id);
         vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
-        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
-                               pipeline->layout(), 0, 1, &ds, 0, nullptr);
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->layout(), 0, 1, &ds, 0, nullptr);
         vkCmdPushConstants(cmd, pipeline->layout(), VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), &pc);
         vkCmdDispatch(cmd, static_cast<uint32_t>(batch_size), 1, 1);
         insertComputeOnlyBarrier(cmd);
         endSingleTimeCommands(cmd, device_id);
 
-        // Reduce to Q (m,k) and R (k,n) via slicing along trailing axes.
-        Tensor Q = (k == m)
-            ? Q_full
-            : dispatchContiguous(Q_full.slice(ndim - 1, 0, k, 1));
-        Tensor R = (k == m)
-            ? R_full
-            : dispatchContiguous(R_full.slice(ndim - 2, 0, k, 1));
-
+        Tensor Q = (k == m) ? Q_full : dispatchContiguous(Q_full.slice(ndim - 1, 0, k, 1));
+        Tensor R = (k == m) ? R_full : dispatchContiguous(R_full.slice(ndim - 2, 0, k, 1));
         return {Q, R};
     }
-
-    // Tiled path (m,n > 128): blocked QR via Householder reflections
-    // After blocked QR, A contains R on/above diagonal and Householder vectors below.
-    // Reconstruct Q on GPU via dedicated Q-reconstruction shader.
-    int64_t k = std::min(m, n);
-
-    Tensor A = dispatchClone(input.contiguous());
-
-    // tau stores Householder scalars: one per column factorized
-    std::vector<int64_t> tau_shape(shape.begin(), shape.end() - 2);
-    tau_shape.push_back(n);
-    Tensor tau(tau_shape, input.dtype(), input.device());
-
-    runBlockedQR(A, tau, m, n, batch_size, device_id, is_f64, is_f16);
-
-    // Extract R from the upper triangle of A (on GPU)
-    std::vector<int64_t> r_shape(shape.begin(), shape.end());
-    Tensor R = dispatchTriuTril("triu", A, 0);
-
-    // Reconstruct Q from Householder vectors and tau entirely on GPU
-    std::vector<int64_t> q_shape(shape.begin(), shape.end() - 2);
-    q_shape.push_back(m); q_shape.push_back(m);
-    Tensor Q(q_shape, input.dtype(), input.device());
-
-    std::string qr_recon_shader = is_f64 ? "linalg_q_reconstruct_f64" : is_f16 ? "linalg_q_reconstruct_f16" : "linalg_q_reconstruct";
-    auto* qr_pipeline = getPipeline(qr_recon_shader, device_id);
-
-    struct QReconPC {
-        uint32_t m_rows;
-        uint32_t n_cols;
-        uint32_t k_refl;
-        uint32_t ldq;
-        uint32_t batch_cnt;
-    } qr_pc;
-    qr_pc.m_rows = static_cast<uint32_t>(m);
-    qr_pc.n_cols = static_cast<uint32_t>(n);
-    qr_pc.k_refl = static_cast<uint32_t>(k);
-    qr_pc.ldq = static_cast<uint32_t>(m);
-    qr_pc.batch_cnt = static_cast<uint32_t>(batch_size);
-
-    size_t elem_size = is_f64 ? 8 : is_f16 ? 2 : 4;
-    size_t qr_numel = batch_size * m * n;
-    size_t tau_numel = batch_size * n;
-    size_t q_numel = batch_size * m * m;
-    size_t qr_buf_size = is_f16 ? f16_buf(qr_numel) : qr_numel * elem_size;
-    size_t tau_buf_size = is_f16 ? f16_buf(tau_numel) : tau_numel * elem_size;
-    size_t q_buf_size = is_f16 ? f16_buf(q_numel) : q_numel * elem_size;
-
-    std::vector<std::pair<uint32_t, const void*>> qr_bindings = {
-        {0, A.data_ptr()}, {1, tau.data_ptr()}, {2, Q.data_ptr()}
-    };
-    std::vector<size_t> qr_sizes = {qr_buf_size, tau_buf_size, q_buf_size};
-    VkDescriptorSet qr_ds = allocateAndWriteDescriptorSet(device_id, qr_pipeline, qr_bindings, qr_sizes);
-
-    VkCommandBuffer qr_cmd = beginSingleTimeCommands(device_id);
-    vkCmdBindPipeline(qr_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, qr_pipeline->pipeline());
-    vkCmdBindDescriptorSets(qr_cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
-                           qr_pipeline->layout(), 0, 1, &qr_ds, 0, nullptr);
-    vkCmdPushConstants(qr_cmd, qr_pipeline->layout(), VK_SHADER_STAGE_COMPUTE_BIT,
-                      0, sizeof(qr_pc), &qr_pc);
-    vkCmdDispatch(qr_cmd, static_cast<uint32_t>(batch_size), 1, 1);
-    insertComputeOnlyBarrier(qr_cmd);
-    endSingleTimeCommands(qr_cmd, device_id);
-
-    // Reduce to Q (m,k) and R (k,n) — match CPU/LAPACK reduced-QR semantics.
-    Tensor Q_red = (k == m)
-        ? Q
-        : dispatchContiguous(Q.slice(ndim - 1, 0, k, 1));
-    Tensor R_red = (k == m)
-        ? R
-        : dispatchContiguous(R.slice(ndim - 2, 0, k, 1));
-
-    return {Q_red, R_red};
 }
 
 // ============================================================================
@@ -989,6 +915,14 @@ auto VulkanBackend::dispatchLinalgSVD(const Tensor& input, bool full_matrices) -
     int64_t batch_size = 1;
     for (int64_t i = 0; i < ndim - 2; ++i) batch_size *= shape[i];
     int64_t k = std::min(m, n);
+
+    // Float16 above the small-matrix limit: compute in Float32, narrow back.
+    if (is_f16 && (m > MAX_SMALL_LINALG_SIZE || n > MAX_SMALL_LINALG_SIZE)) {
+        auto res = dispatchLinalgSVD(dispatchCast(input.contiguous(), DType::Float32), full_matrices);
+        return { dispatchCast(res[0], DType::Float16),
+                 dispatchCast(res[1], DType::Float16),
+                 dispatchCast(res[2], DType::Float16) };
+    }
 
     auto f16_buf = [&](size_t numel) -> size_t { return ((numel + 1) / 2) * 4; };
 
@@ -1048,272 +982,50 @@ auto VulkanBackend::dispatchLinalgSVD(const Tensor& input, bool full_matrices) -
         insertComputeOnlyBarrier(cmd);
         endSingleTimeCommands(cmd, device_id);
     } else {
-        // ---- Tiled path: Bidiagonal reduction → Bidiagonal SVD → Accumulate ----
-        // Currently requires square matrices for the tiled bidiag reduction.
-        if (m != n) {
+        // Larger matrices: one-sided Jacobi SVD (global-memory, correct for any size).
+        // Handles m >= n (square + tall). Large m < n is not yet supported and throws
+        // loudly rather than returning garbage — the old bidiagonal tiled path required
+        // m == n and produced NaNs above the 32x32 single-workgroup limit.
+        if (m < n) {
             throw std::runtime_error(std::format(
-                "Vulkan linalg.svd: tiled SVD currently requires square matrices. "
-                "Got {}x{}. Rectangular support is planned.", m, n));
+                "Vulkan linalg.svd: SVD above the small-matrix limit requires m >= n "
+                "(got {}x{}). Wide matrices (m < n) at this size are not yet supported.", m, n));
         }
-        if (is_f16) {
-            throw std::runtime_error(
-                "Vulkan linalg.svd: tiled SVD does not support Float16 due to "
-                "insufficient precision. Use Float32 or Float64 for large matrices.");
-        }
-
         auto cont = input.contiguous();
-        size_t mat_numel = static_cast<size_t>(batch_size) * n * n;
-        size_t tau_numel = static_cast<size_t>(batch_size) * n;
-        size_t mat_size = is_f16 ? f16_buf(mat_numel) : mat_numel * elem_size;
-        size_t tau_size = is_f16 ? f16_buf(tau_numel) : tau_numel * elem_size;
+        std::string shader = is_f64 ? "linalg_svd_global_f64" : "linalg_svd_global";
+        auto* pipeline = getPipeline(shader, device_id);
 
-        // Copy input to working matrix (will be modified in place)
-        std::vector<int64_t> mat_shape(shape.begin(), shape.end());
-        Tensor A(mat_shape, input.dtype(), input.device());
-        {
-            // Copy cont -> A (device-to-device)
-            auto [src_buf, src_off] = getVulkanBufferAndOffset(cont.data_ptr());
-            auto [dst_buf, dst_off] = getVulkanBufferAndOffset(A.data_ptr());
-            VkCommandBuffer cmd = beginSingleTimeCommands(device_id);
-            VkBufferCopy region{};
-            region.srcOffset = src_off;
-            region.dstOffset = dst_off;
-            region.size = mat_size;
-            vkCmdCopyBuffer(cmd, src_buf, dst_buf, 1, &region);
-            insertTransferToComputeBarrier(cmd);
-            endSingleTimeCommands(cmd, device_id);
-        }
+        struct PushConstants { uint32_t m; uint32_t n; uint32_t batch; } pc;
+        pc.m = static_cast<uint32_t>(m);
+        pc.n = static_cast<uint32_t>(n);
+        pc.batch = static_cast<uint32_t>(batch_size);
 
-        // Allocate tau vectors for left and right Householder reflections
-        std::vector<int64_t> tau_shape(shape.begin(), shape.end() - 2);
-        tau_shape.push_back(n);
-        // Bidiag SVD shader needs f32 precision even for f16 input, so tau_l/tau_r
-        // match input dtype for the bidiag phase, then we use f32 for the QR phase
-        Tensor tau_l(tau_shape, input.dtype(), input.device());
-        Tensor tau_r(tau_shape, input.dtype(), input.device());
+        size_t esz = is_f64 ? 8u : 4u;
+        size_t mn_bytes = static_cast<size_t>(batch_size) * m * n * esz;
+        size_t s_bytes  = static_cast<size_t>(batch_size) * n * esz;
+        size_t v_bytes  = static_cast<size_t>(batch_size) * n * n * esz;
 
-        // Step 1: Blocked bidiagonal reduction
-        runBlockedBidiag(A, tau_l, tau_r, n, batch_size, device_id, is_f64, is_f16);
+        // V (n x n) accumulates the right rotations; Vt is its transpose.
+        std::vector<int64_t> v_shape(shape.begin(), shape.end() - 2);
+        v_shape.push_back(n); v_shape.push_back(n);
+        Tensor Vmat(v_shape, s_dtype, input.device());
 
-        // Step 2: Extract diagonal and superdiagonal from bidiagonalized A
-        std::vector<int64_t> diag_shape(shape.begin(), shape.end() - 2);
-        diag_shape.push_back(n);
-        std::vector<int64_t> sdiag_shape(shape.begin(), shape.end() - 2);
-        sdiag_shape.push_back(n - 1);
+        std::vector<std::pair<uint32_t, const void*>> bindings = {
+            {0, cont.data_ptr()}, {1, U.data_ptr()}, {2, S.data_ptr()}, {3, Vmat.data_ptr()}
+        };
+        std::vector<size_t> sizes = {mn_bytes, mn_bytes, s_bytes, v_bytes};
+        VkDescriptorSet ds = allocateAndWriteDescriptorSet(device_id, pipeline, bindings, sizes);
 
-        // For bidiag SVD we always use f32 or f64 (not f16) for numerical stability
-        DType svd_dtype = is_f64 ? DType::Float64 : DType::Float32;
-        size_t svd_elem = is_f64 ? 8 : 4;
+        VkCommandBuffer cmd = beginSingleTimeCommands(device_id);
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->layout(), 0, 1, &ds, 0, nullptr);
+        vkCmdPushConstants(cmd, pipeline->layout(), VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), &pc);
+        vkCmdDispatch(cmd, static_cast<uint32_t>(batch_size), 1, 1);
+        insertComputeOnlyBarrier(cmd);
+        endSingleTimeCommands(cmd, device_id);
 
-        Tensor diag_t(diag_shape, svd_dtype, input.device());
-        Tensor sdiag_t(sdiag_shape, svd_dtype, input.device());
-        size_t diag_numel = static_cast<size_t>(batch_size) * n;
-        size_t sdiag_numel = static_cast<size_t>(batch_size) * (n - 1);
-        size_t diag_size = diag_numel * svd_elem;
-        size_t sdiag_size = sdiag_numel * svd_elem;
-
-        // Dispatch extract shader
-        for (int64_t b = 0; b < batch_size; ++b) {
-            std::string shader = is_f64 ? "linalg_bidiag_extract_f64"
-                               : is_f16 ? "linalg_bidiag_extract_f16"
-                                         : "linalg_bidiag_extract";
-            auto* pipeline = getPipeline(shader, device_id);
-
-            struct ExtractPC { uint32_t n; uint32_t batch_idx; } epc;
-            epc.n = static_cast<uint32_t>(n);
-            epc.batch_idx = static_cast<uint32_t>(b);
-
-            size_t extract_mat_size = is_f16 ? f16_buf(mat_numel) : mat_numel * elem_size;
-            size_t extract_diag_size = is_f16 ? f16_buf(diag_numel) : diag_size;
-            size_t extract_sdiag_size = is_f16 ? f16_buf(sdiag_numel) : sdiag_size;
-
-            std::vector<std::pair<uint32_t, const void*>> bindings = {
-                {0, A.data_ptr()}, {1, diag_t.data_ptr()}, {2, sdiag_t.data_ptr()}
-            };
-            std::vector<size_t> sizes = {extract_mat_size, extract_diag_size, extract_sdiag_size};
-            VkDescriptorSet ds = allocateAndWriteDescriptorSet(device_id, pipeline, bindings, sizes);
-
-            uint32_t num_groups = (static_cast<uint32_t>(n) + 255) / 256;
-            VkCommandBuffer cmd = beginSingleTimeCommands(device_id);
-            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
-            vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
-                                   pipeline->layout(), 0, 1, &ds, 0, nullptr);
-            vkCmdPushConstants(cmd, pipeline->layout(), VK_SHADER_STAGE_COMPUTE_BIT,
-                              0, sizeof(epc), &epc);
-            vkCmdDispatch(cmd, num_groups, 1, 1);
-            insertComputeOnlyBarrier(cmd);
-            endSingleTimeCommands(cmd, device_id);
-        }
-
-        // Step 3: Bidiagonal SVD (Golub-Kahan QR iteration)
-        // Allocate rotation parameter buffers — generous size for accumulated rotations
-        // Max rotations per batch: ~30 * n * 2 (left + right per step) + n (sign flips) + n (sorts)
-        size_t max_rots = static_cast<size_t>(n) * 64;  // generous upper bound
-        size_t rot_stride = max_rots * 2 + 2;  // pairs of (cos, sin) + metadata
-        std::vector<int64_t> rot_shape = {static_cast<int64_t>(batch_size), static_cast<int64_t>(rot_stride)};
-        Tensor u_rot(rot_shape, svd_dtype, input.device());
-        Tensor v_rot(rot_shape, svd_dtype, input.device());
-        size_t rot_size = batch_size * rot_stride * svd_elem;
-
-        for (int64_t b = 0; b < batch_size; ++b) {
-            std::string shader = is_f64 ? "linalg_bidiag_svd_f64" : "linalg_bidiag_svd";
-            auto* pipeline = getPipeline(shader, device_id);
-
-            struct BidiagSvdPC {
-                uint32_t n;
-                uint32_t max_iterations;
-                uint32_t batch_idx;
-                uint32_t rot_stride;
-            } bpc;
-            bpc.n = static_cast<uint32_t>(n);
-            bpc.max_iterations = static_cast<uint32_t>(n * 30);
-            bpc.batch_idx = static_cast<uint32_t>(b);
-            bpc.rot_stride = static_cast<uint32_t>(rot_stride);
-
-            std::vector<std::pair<uint32_t, const void*>> bindings = {
-                {0, diag_t.data_ptr()}, {1, sdiag_t.data_ptr()},
-                {2, u_rot.data_ptr()}, {3, v_rot.data_ptr()}
-            };
-            std::vector<size_t> sizes = {diag_size, sdiag_size, rot_size, rot_size};
-            VkDescriptorSet ds = allocateAndWriteDescriptorSet(device_id, pipeline, bindings, sizes);
-
-            VkCommandBuffer cmd = beginSingleTimeCommands(device_id);
-            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
-            vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
-                                   pipeline->layout(), 0, 1, &ds, 0, nullptr);
-            vkCmdPushConstants(cmd, pipeline->layout(), VK_SHADER_STAGE_COMPUTE_BIT,
-                              0, sizeof(bpc), &bpc);
-            vkCmdDispatch(cmd, static_cast<uint32_t>(batch_size), 1, 1);
-            insertComputeOnlyBarrier(cmd);
-            endSingleTimeCommands(cmd, device_id);
-        }
-
-        // Step 4: Reconstruct U and Vt from Householder vectors
-        // The accumulate shader builds U and Vt from the bidiag Householder vectors.
-        // Full n x n U and Vt are built, then the bidiag SVD Givens rotations are
-        // applied separately (or folded in as a matmul).
-
-        // Allocate full n x n U and Vt workspace
-        std::vector<int64_t> full_shape(shape.begin(), shape.end() - 2);
-        full_shape.push_back(n); full_shape.push_back(n);
-        Tensor U_full(full_shape, input.dtype(), input.device());
-        Tensor Vt_full(full_shape, input.dtype(), input.device());
-        size_t full_numel = static_cast<size_t>(batch_size) * n * n;
-        size_t full_size = is_f16 ? f16_buf(full_numel) : full_numel * elem_size;
-
-        for (int64_t b = 0; b < batch_size; ++b) {
-            // Build U (mode=0)
-            {
-                std::string shader = is_f64 ? "linalg_svd_accumulate_f64"
-                                   : is_f16 ? "linalg_svd_accumulate_f16"
-                                             : "linalg_svd_accumulate";
-                auto* pipeline = getPipeline(shader, device_id);
-
-                struct AccumPC { uint32_t n; uint32_t batch_idx; uint32_t mode; } apc;
-                apc.n = static_cast<uint32_t>(n);
-                apc.batch_idx = static_cast<uint32_t>(b);
-                apc.mode = 0;  // build U
-
-                std::vector<std::pair<uint32_t, const void*>> bindings = {
-                    {0, A.data_ptr()}, {1, tau_l.data_ptr()}, {2, tau_r.data_ptr()},
-                    {3, U_full.data_ptr()}, {4, Vt_full.data_ptr()}
-                };
-                std::vector<size_t> sizes = {mat_size, tau_size, tau_size, full_size, full_size};
-                VkDescriptorSet ds = allocateAndWriteDescriptorSet(device_id, pipeline, bindings, sizes);
-
-                VkCommandBuffer cmd = beginSingleTimeCommands(device_id);
-                vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
-                vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
-                                       pipeline->layout(), 0, 1, &ds, 0, nullptr);
-                vkCmdPushConstants(cmd, pipeline->layout(), VK_SHADER_STAGE_COMPUTE_BIT,
-                                  0, sizeof(apc), &apc);
-                // One workgroup per column of U
-                vkCmdDispatch(cmd, static_cast<uint32_t>(n), 1, 1);
-                insertComputeOnlyBarrier(cmd);
-                endSingleTimeCommands(cmd, device_id);
-            }
-
-            // Build Vt (mode=1)
-            {
-                std::string shader = is_f64 ? "linalg_svd_accumulate_f64"
-                                   : is_f16 ? "linalg_svd_accumulate_f16"
-                                             : "linalg_svd_accumulate";
-                auto* pipeline = getPipeline(shader, device_id);
-
-                struct AccumPC { uint32_t n; uint32_t batch_idx; uint32_t mode; } apc;
-                apc.n = static_cast<uint32_t>(n);
-                apc.batch_idx = static_cast<uint32_t>(b);
-                apc.mode = 1;  // build Vt
-
-                std::vector<std::pair<uint32_t, const void*>> bindings = {
-                    {0, A.data_ptr()}, {1, tau_l.data_ptr()}, {2, tau_r.data_ptr()},
-                    {3, U_full.data_ptr()}, {4, Vt_full.data_ptr()}
-                };
-                std::vector<size_t> sizes = {mat_size, tau_size, tau_size, full_size, full_size};
-                VkDescriptorSet ds = allocateAndWriteDescriptorSet(device_id, pipeline, bindings, sizes);
-
-                VkCommandBuffer cmd = beginSingleTimeCommands(device_id);
-                vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
-                vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
-                                       pipeline->layout(), 0, 1, &ds, 0, nullptr);
-                vkCmdPushConstants(cmd, pipeline->layout(), VK_SHADER_STAGE_COMPUTE_BIT,
-                                  0, sizeof(apc), &apc);
-                // One workgroup per row of Vt
-                vkCmdDispatch(cmd, static_cast<uint32_t>(n), 1, 1);
-                insertComputeOnlyBarrier(cmd);
-                endSingleTimeCommands(cmd, device_id);
-            }
-        }
-
-        // Copy singular values from diag_t to S
-        // diag_t contains the singular values after bidiag SVD
-        {
-            size_t s_numel_copy = static_cast<size_t>(batch_size) * k;
-            size_t s_size_bytes = s_numel_copy * svd_elem;
-            auto [src_buf, src_off] = getVulkanBufferAndOffset(diag_t.data_ptr());
-            auto [dst_buf, dst_off] = getVulkanBufferAndOffset(S.data_ptr());
-            VkCommandBuffer cmd = beginSingleTimeCommands(device_id);
-            VkBufferCopy region{};
-            region.srcOffset = src_off;
-            region.dstOffset = dst_off;
-            region.size = s_size_bytes;
-            vkCmdCopyBuffer(cmd, src_buf, dst_buf, 1, &region);
-            insertTransferToComputeBarrier(cmd);
-            endSingleTimeCommands(cmd, device_id);
-        }
-
-        // Copy U_full -> U (may be a subset of columns if reduced SVD)
-        // For square matrices with reduced=false, U is n x n = U_full
-        {
-            size_t u_numel_copy = static_cast<size_t>(batch_size) * m * k;
-            size_t u_size_bytes = is_f16 ? f16_buf(u_numel_copy) : u_numel_copy * elem_size;
-            auto [src_buf, src_off] = getVulkanBufferAndOffset(U_full.data_ptr());
-            auto [dst_buf, dst_off] = getVulkanBufferAndOffset(U.data_ptr());
-            VkCommandBuffer cmd = beginSingleTimeCommands(device_id);
-            VkBufferCopy region{};
-            region.srcOffset = src_off;
-            region.dstOffset = dst_off;
-            region.size = u_size_bytes;
-            vkCmdCopyBuffer(cmd, src_buf, dst_buf, 1, &region);
-            insertTransferToComputeBarrier(cmd);
-            endSingleTimeCommands(cmd, device_id);
-        }
-
-        // Copy Vt_full -> Vt
-        {
-            size_t vt_numel_copy = static_cast<size_t>(batch_size) * n * n;
-            size_t vt_size_bytes = is_f16 ? f16_buf(vt_numel_copy) : vt_numel_copy * elem_size;
-            auto [src_buf, src_off] = getVulkanBufferAndOffset(Vt_full.data_ptr());
-            auto [dst_buf, dst_off] = getVulkanBufferAndOffset(Vt.data_ptr());
-            VkCommandBuffer cmd = beginSingleTimeCommands(device_id);
-            VkBufferCopy region{};
-            region.srcOffset = src_off;
-            region.dstOffset = dst_off;
-            region.size = vt_size_bytes;
-            vkCmdCopyBuffer(cmd, src_buf, dst_buf, 1, &region);
-            insertTransferToComputeBarrier(cmd);
-            endSingleTimeCommands(cmd, device_id);
-        }
+        // Vt = V^T  (n x n)
+        Vt = dispatchTranspose(Vmat, ndim - 2, ndim - 1).contiguous();
     }
 
     // Sort singular values descending and permute the corresponding columns
@@ -1562,6 +1274,15 @@ auto VulkanBackend::dispatchLinalgEigh(const Tensor& input) -> std::vector<Tenso
     int64_t n = shape[ndim - 1];
     if (shape[ndim - 2] != n) throw std::runtime_error("linalg.eigh: input must be square");
 
+    // Float16: compute in Float32 (the proven path) and narrow the results. Handling the
+    // f16 widen/narrow at the function boundary — rather than with extra in-flight scratch
+    // tensors inside the dispatch — keeps the allocation pattern identical to the f32 path
+    // and avoids a buffer-recycling corner case that corrupted eigenvalues for some n.
+    if (input.dtype() == DType::Float16) {
+        auto res = dispatchLinalgEigh(dispatchCast(input.contiguous(), DType::Float32));
+        return { dispatchCast(res[0], DType::Float16), dispatchCast(res[1], DType::Float16) };
+    }
+
     int32_t device_id = input.device().index;
     bool is_f64 = (input.dtype() == DType::Float64);
     bool is_f16 = (input.dtype() == DType::Float16);
@@ -1577,26 +1298,33 @@ auto VulkanBackend::dispatchLinalgEigh(const Tensor& input) -> std::vector<Tenso
     Tensor W(w_shape, input.dtype(), input.device());
     Tensor V(std::vector<int64_t>(shape.begin(), shape.end()), input.dtype(), input.device());
 
-    if (n <= MAX_SMALL_LINALG_SIZE) {
-        // Small matrix path: single-workgroup Jacobi shader
-        std::string shader = is_f64 ? "linalg_eigh_f64" : is_f16 ? "linalg_eigh_f16" : "linalg_eigh";
+    // Symmetric eigendecomposition via global-memory cyclic Jacobi. Unlike the old
+    // shared-memory shader (hard-capped at 32x32 but dispatched up to n=128, which
+    // corrupted results for 32 < n <= 128) and the tiled tridiagonal path (which threw
+    // on batched 3D diagonal extraction), this single path is correct for ANY n and is
+    // batched (one workgroup per batch element). Float16 widens to Float32 then narrows.
+    // Eigenvalues/eigenvectors come back unordered; the sort step below restores order.
+    {
+        const bool d64 = is_f64;
+        const size_t esz = d64 ? 8u : 4u;
+
+        Tensor src = input.contiguous();
+        Tensor Dscratch(std::vector<int64_t>(shape.begin(), shape.end()), input.dtype(), input.device());
+
+        const std::string shader = d64 ? "linalg_eigh_global_f64" : "linalg_eigh_global";
         auto* pipeline = getPipeline(shader, device_id);
 
         struct PushConstants { uint32_t n; uint32_t batch; } pc;
         pc.n = static_cast<uint32_t>(n);
         pc.batch = static_cast<uint32_t>(batch_size);
 
-        auto cont = input.contiguous();
-        size_t elem_size = is_f64 ? 8 : is_f16 ? 2 : 4;
-        size_t mat_numel = batch_size * n * n;
-        size_t w_numel = batch_size * n;
-        size_t mat_size = is_f16 ? f16_buf(mat_numel) : mat_numel * elem_size;
-        size_t w_size = is_f16 ? f16_buf(w_numel) : w_numel * elem_size;
+        const size_t mat_bytes = static_cast<size_t>(batch_size) * n * n * esz;
+        const size_t w_bytes   = static_cast<size_t>(batch_size) * n * esz;
 
         std::vector<std::pair<uint32_t, const void*>> bindings = {
-            {0, cont.data_ptr()}, {1, W.data_ptr()}, {2, V.data_ptr()}
+            {0, src.data_ptr()}, {1, W.data_ptr()}, {2, V.data_ptr()}, {3, Dscratch.data_ptr()}
         };
-        std::vector<size_t> sizes = {mat_size, w_size, mat_size};
+        std::vector<size_t> sizes = {mat_bytes, w_bytes, mat_bytes, mat_bytes};
         VkDescriptorSet ds = allocateAndWriteDescriptorSet(device_id, pipeline, bindings, sizes);
 
         VkCommandBuffer cmd = beginSingleTimeCommands(device_id);
@@ -1607,109 +1335,6 @@ auto VulkanBackend::dispatchLinalgEigh(const Tensor& input) -> std::vector<Tenso
         vkCmdDispatch(cmd, static_cast<uint32_t>(batch_size), 1, 1);
         insertComputeOnlyBarrier(cmd);
         endSingleTimeCommands(cmd, device_id);
-    } else {
-        // Tiled path (n > MAX_SMALL_LINALG_SIZE): blocked tridiagonal reduction +
-        // tridiagonal QR eigendecomposition + eigenvector back-transformation.
-        size_t elem_size = is_f64 ? 8 : is_f16 ? 2 : 4;
-
-        // Step 1: Tridiagonal reduction via blocked Householder reflections.
-        // After this, A contains tridiagonal form with Householder vectors stored
-        // below the sub-diagonal for eigenvector reconstruction.
-        Tensor A = dispatchClone(input.contiguous());
-        std::vector<int64_t> tau_shape(shape.begin(), shape.end() - 2);
-        tau_shape.push_back(n);
-        Tensor tau(tau_shape, input.dtype(), input.device());
-
-        runBlockedTridiag(A, tau, n, batch_size, device_id, is_f64, is_f16);
-
-        // Step 2: Extract diagonal and subdiagonal from tridiagonalized A.
-        // A[i,i] = diagonal, A[i+1,i] = subdiagonal (symmetric tridiagonal).
-        // Use existing GPU diagonal-extraction shader (no CPU readback).
-        Tensor A_batched = A.view({batch_size, n, n});
-        Tensor diag = dispatchDiag(A_batched, 0);       // main diagonal: shape (batch, n)
-        Tensor sdiag = dispatchDiag(A_batched, -1);      // sub-diagonal: shape (batch, n-1)
-
-        // Step 3: Tridiagonal eigendecomposition via implicit QR with Wilkinson shift
-        uint32_t max_iters = static_cast<uint32_t>(n * 30);
-        uint32_t rot_budget = std::min(max_iters, static_cast<uint32_t>(256));
-        Tensor rots({batch_size, static_cast<int64_t>(3 * n * rot_budget)},
-                    input.dtype(), input.device());
-
-        size_t diag_buf_size = is_f16 ? f16_buf(batch_size * n) : batch_size * n * elem_size;
-        size_t sdiag_buf_size = is_f16 ? f16_buf(batch_size * (n - 1)) : batch_size * (n > 1 ? n - 1 : 1) * elem_size;
-        size_t w_buf_size = is_f16 ? f16_buf(batch_size * n) : batch_size * n * elem_size;
-        size_t rots_buf_size = static_cast<size_t>(batch_size) * 3 * n * rot_budget * elem_size;
-
-        for (int64_t b = 0; b < batch_size; ++b) {
-            std::string shader = is_f64 ? "linalg_tridiag_eig_f64" : "linalg_tridiag_eig";
-            auto* pipeline = getPipeline(shader, device_id);
-
-            struct PushConstants {
-                uint32_t n;
-                uint32_t max_iterations;
-                uint32_t batch_idx;
-            } pc;
-            pc.n = static_cast<uint32_t>(n);
-            pc.max_iterations = max_iters;
-            pc.batch_idx = static_cast<uint32_t>(b);
-
-            std::vector<std::pair<uint32_t, const void*>> bindings = {
-                {0, diag.data_ptr()}, {1, sdiag.data_ptr()},
-                {2, W.data_ptr()}, {3, rots.data_ptr()}
-            };
-            std::vector<size_t> sizes = {diag_buf_size, sdiag_buf_size, w_buf_size, rots_buf_size};
-            VkDescriptorSet ds = allocateAndWriteDescriptorSet(device_id, pipeline, bindings, sizes);
-
-            VkCommandBuffer cmd = beginSingleTimeCommands(device_id);
-            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
-            vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
-                                   pipeline->layout(), 0, 1, &ds, 0, nullptr);
-            vkCmdPushConstants(cmd, pipeline->layout(), VK_SHADER_STAGE_COMPUTE_BIT,
-                              0, sizeof(pc), &pc);
-            vkCmdDispatch(cmd, 1, 1, 1);
-            insertComputeOnlyBarrier(cmd);
-            endSingleTimeCommands(cmd, device_id);
-        }
-
-        // Step 4: Eigenvector reconstruction.
-        // V = Q_tridiag^T * Q_givens, where Q_tridiag accumulates the Householder
-        // reflections from the tridiagonalization, and Q_givens accumulates the
-        // Givens rotations from the tridiagonal QR iteration.
-        size_t mat_size = static_cast<size_t>(batch_size) * n * n * elem_size;
-        size_t tau_buf_size = static_cast<size_t>(batch_size) * n * elem_size;
-        size_t v_buf_size = mat_size;
-        uint32_t num_rots = static_cast<uint32_t>(n * rot_budget);
-
-        for (int64_t b = 0; b < batch_size; ++b) {
-            std::string shader = is_f64 ? "linalg_eigh_backtransform_f64" : "linalg_eigh_backtransform";
-            auto* pipeline = getPipeline(shader, device_id);
-
-            struct PushConstants {
-                uint32_t n;
-                uint32_t num_rotations;
-                uint32_t batch_idx;
-            } pc;
-            pc.n = static_cast<uint32_t>(n);
-            pc.num_rotations = num_rots;
-            pc.batch_idx = static_cast<uint32_t>(b);
-
-            std::vector<std::pair<uint32_t, const void*>> bindings = {
-                {0, A.data_ptr()}, {1, tau.data_ptr()},
-                {2, rots.data_ptr()}, {3, V.data_ptr()}
-            };
-            std::vector<size_t> sizes = {mat_size, tau_buf_size, rots_buf_size, v_buf_size};
-            VkDescriptorSet ds = allocateAndWriteDescriptorSet(device_id, pipeline, bindings, sizes);
-
-            VkCommandBuffer cmd = beginSingleTimeCommands(device_id);
-            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
-            vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
-                                   pipeline->layout(), 0, 1, &ds, 0, nullptr);
-            vkCmdPushConstants(cmd, pipeline->layout(), VK_SHADER_STAGE_COMPUTE_BIT,
-                              0, sizeof(pc), &pc);
-            vkCmdDispatch(cmd, 1, 1, 1);
-            insertComputeOnlyBarrier(cmd);
-            endSingleTimeCommands(cmd, device_id);
-        }
     }
 
     // Sort eigenvalues ascending and permute the eigenvector columns to match.
@@ -1722,12 +1347,16 @@ auto VulkanBackend::dispatchLinalgEigh(const Tensor& input) -> std::vector<Tenso
     if (n > 1) {
         auto [sorted_W, sort_indices] = dispatchSort(W, /*dim=*/-1, /*descending=*/false);
 
-        // Gather V columns according to sort_indices along the last axis.
-        // index_select gathers rows, so transpose last two axes, gather, then
-        // transpose back to restore (…, n, n) with permuted columns.
-        Tensor V_cols_rows = dispatchTranspose(V, ndim - 2, ndim - 1);
-        Tensor sorted_V_rows = dispatchIndexSelect(V_cols_rows.contiguous(), ndim - 2, sort_indices);
-        Tensor sorted_V = dispatchTranspose(sorted_V_rows, ndim - 2, ndim - 1).contiguous();
+        // Permute eigenvector columns to match the sorted eigenvalues, batch-aware:
+        //   sorted_V[..., i, j] = V[..., i, sort_indices[..., j]].
+        // Broadcast the per-row index (..., n) over the row axis to (..., n, n) and
+        // gather along the last dim. The previous transpose + index_select approach
+        // silently produced wrong shapes for batched inputs (index_select takes a
+        // 1-D index), so batched eigh returned mis-shaped eigenvectors.
+        Tensor idx_full = dispatchExpand(
+            dispatchUnsqueeze(sort_indices, ndim - 2),
+            std::vector<int64_t>(shape.begin(), shape.end()));
+        Tensor sorted_V = dispatchGather(V, ndim - 1, idx_full.contiguous());
 
         return {sorted_W, sorted_V};
     }
@@ -1819,201 +1448,52 @@ auto VulkanBackend::dispatchLinalgEig(const Tensor& input) -> std::vector<Tensor
         }
     }
 
-    // Output: eigenvalues_real (batch, n), eigenvalues_imag (batch, n)
+    // Non-symmetric eigendecomposition — native EISPACK-hqr2 shader. One
+    // invocation per batch element over global-memory scratch; computes
+    // eigenvalues (WR, WI) AND right eigenvectors (V) in one dispatch. Output
+    // packing matches LAPACK geev: real eigenvalue k -> column k; complex pair
+    // (WI[k]>0) -> column k = Re, column k+1 = Im (conjugate in column k+1).
     std::vector<int64_t> w_shape(shape.begin(), shape.end() - 2);
     w_shape.push_back(n);
+    std::vector<int64_t> v_shape(shape.begin(), shape.end());
 
     Tensor WR(w_shape, input.dtype(), input.device());
     Tensor WI(w_shape, input.dtype(), input.device());
+    Tensor V(v_shape, input.dtype(), input.device());
 
-    if (n <= MAX_SMALL_LINALG_SIZE) {
-        // Small matrix path: single-workgroup QR iteration shader
-        std::string shader = is_f64 ? "linalg_eig_f64" : "linalg_eig";
-        auto* pipeline = getPipeline(shader, device_id);
+    // Working copy (overwritten with Schur form then eigenvectors) + Householder scratch.
+    Tensor H = dispatchClone(input.contiguous());
+    Tensor vscratch(w_shape, input.dtype(), input.device());
 
-        struct PushConstants { uint32_t n; uint32_t batch; uint32_t max_iterations; } pc;
-        pc.n = static_cast<uint32_t>(n);
-        pc.batch = static_cast<uint32_t>(batch_size);
-        pc.max_iterations = static_cast<uint32_t>(n * 30);
+    size_t elem_size = is_f64 ? 8 : 4;
+    size_t mat_size = static_cast<size_t>(batch_size) * n * n * elem_size;
+    size_t w_size   = static_cast<size_t>(batch_size) * n * elem_size;
 
-        auto cont = input.contiguous();
-        size_t elem_size = is_f64 ? 8 : 4;
-        size_t mat_size = batch_size * n * n * elem_size;
-        size_t w_size = batch_size * n * elem_size;
+    std::string shader = is_f64 ? "linalg_eig_hqr2_f64" : "linalg_eig_hqr2";
+    auto* pipeline = getPipeline(shader, device_id);
 
-        std::vector<std::pair<uint32_t, const void*>> bindings = {
-            {0, cont.data_ptr()}, {1, WR.data_ptr()}, {2, WI.data_ptr()}
-        };
-        std::vector<size_t> sizes = {mat_size, w_size, w_size};
-        VkDescriptorSet ds = allocateAndWriteDescriptorSet(device_id, pipeline, bindings, sizes);
+    struct PushConstants { uint32_t n; uint32_t nbatch; } pc;
+    pc.n = static_cast<uint32_t>(n);
+    pc.nbatch = static_cast<uint32_t>(batch_size);
 
-        VkCommandBuffer cmd = beginSingleTimeCommands(device_id);
-        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
-        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
-                               pipeline->layout(), 0, 1, &ds, 0, nullptr);
-        vkCmdPushConstants(cmd, pipeline->layout(), VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), &pc);
-        vkCmdDispatch(cmd, static_cast<uint32_t>(batch_size), 1, 1);
-        insertComputeOnlyBarrier(cmd);
-        endSingleTimeCommands(cmd, device_id);
-    } else {
-        // Tiled path (n > MAX_SMALL_LINALG_SIZE): blocked Hessenberg reduction +
-        // iterative Francis double-shift QR + eigenvalue extraction from Schur form.
-        size_t elem_size = is_f64 ? 8 : 4;
+    std::vector<std::pair<uint32_t, const void*>> bindings = {
+        {0, H.data_ptr()}, {1, V.data_ptr()}, {2, WR.data_ptr()},
+        {3, WI.data_ptr()}, {4, vscratch.data_ptr()}
+    };
+    std::vector<size_t> sizes = {mat_size, mat_size, w_size, w_size, w_size};
+    VkDescriptorSet ds = allocateAndWriteDescriptorSet(device_id, pipeline, bindings, sizes);
 
-        // Step 1: Reduce to upper Hessenberg form via blocked Householder reflections
-        Tensor H = dispatchClone(input.contiguous());
-        std::vector<int64_t> tau_shape(shape.begin(), shape.end() - 2);
-        tau_shape.push_back(n);
-        Tensor tau(tau_shape, input.dtype(), input.device());
+    VkCommandBuffer cmd = beginSingleTimeCommands(device_id);
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
+                           pipeline->layout(), 0, 1, &ds, 0, nullptr);
+    vkCmdPushConstants(cmd, pipeline->layout(), VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), &pc);
+    uint32_t groups = (static_cast<uint32_t>(batch_size) + 63u) / 64u;
+    vkCmdDispatch(cmd, groups, 1, 1);
+    insertComputeOnlyBarrier(cmd);
+    endSingleTimeCommands(cmd, device_id);
 
-        runBlockedHessenberg(H, tau, n, batch_size, device_id, is_f64);
-
-        // Step 2: Iterative Francis double-shift QR on the Hessenberg matrix.
-        // Run QR steps until all subdiagonal entries are negligible (real Schur form).
-        size_t mat_size = batch_size * n * n * elem_size;
-        uint32_t max_qr_iterations = static_cast<uint32_t>(n * 30);
-
-        // Shift/deflation buffer: 4 elements per batch (deflation index, lo, hi, unused)
-        Tensor shifts({batch_size, 4}, input.dtype(), input.device());
-        size_t shift_size = batch_size * 4 * elem_size;
-
-        // Active block boundaries tracked entirely on GPU (no host-side vectors)
-
-        // GPU buffers for convergence check shader
-        Tensor gpu_active_end({batch_size}, DType::Int32, input.device());
-        Tensor gpu_active_start({batch_size}, DType::Int32, input.device());
-        Tensor gpu_converged({batch_size}, DType::Int32, input.device());
-        Tensor gpu_all_converged({1}, DType::Int32, input.device());
-
-        // Initialize GPU buffers
-        {
-            auto ae_cpu = Tensor({batch_size}, DType::Int32, Device::cpu());
-            auto as_cpu = Tensor({batch_size}, DType::Int32, Device::cpu());
-            auto conv_cpu = Tensor({batch_size}, DType::Int32, Device::cpu());
-            for (int64_t b = 0; b < batch_size; ++b) {
-                as_cpu.data<int32_t>()[b] = 0;
-                ae_cpu.data<int32_t>()[b] = static_cast<int32_t>(n - 1);
-                conv_cpu.data<int32_t>()[b] = 0;
-            }
-            gpu_active_start = as_cpu.to(input.device());
-            gpu_active_end = ae_cpu.to(input.device());
-            gpu_converged = conv_cpu.to(input.device());
-        }
-
-        size_t uint_buf_size = batch_size * sizeof(uint32_t);
-
-        for (uint32_t iter = 0; iter < max_qr_iterations; ++iter) {
-            // Dispatch QR step for ALL batches in one command; converged batches
-            // early-exit inside the shader (active_end <= active_start read from SSBOs).
-            {
-                std::string shader = is_f64 ? "linalg_hessenberg_qr_f64" : "linalg_hessenberg_qr";
-                auto* pipeline = getPipeline(shader, device_id);
-
-                struct PushConstants {
-                    uint32_t n;
-                } pc;
-                pc.n = static_cast<uint32_t>(n);
-
-                std::vector<std::pair<uint32_t, const void*>> bindings = {
-                    {0, H.data_ptr()}, {1, shifts.data_ptr()},
-                    {2, gpu_active_start.data_ptr()}, {3, gpu_active_end.data_ptr()}
-                };
-                std::vector<size_t> sizes = {mat_size, shift_size, uint_buf_size, uint_buf_size};
-                VkDescriptorSet ds = allocateAndWriteDescriptorSet(device_id, pipeline, bindings, sizes);
-
-                VkCommandBuffer cmd = beginSingleTimeCommands(device_id);
-                vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
-                vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
-                                       pipeline->layout(), 0, 1, &ds, 0, nullptr);
-                vkCmdPushConstants(cmd, pipeline->layout(), VK_SHADER_STAGE_COMPUTE_BIT,
-                                  0, sizeof(pc), &pc);
-                vkCmdDispatch(cmd, static_cast<uint32_t>(batch_size), 1, 1);
-                insertComputeOnlyBarrier(cmd);
-                endSingleTimeCommands(cmd, device_id);
-            }
-
-            // GPU-side convergence check: updates active_end and batch_converged on device,
-            // produces a single all_converged flag to minimize readback.
-            {
-                // Initialize all_converged = 1 (will be AND-ed to 0 if any batch not done)
-                gpu_all_converged = dispatchFull({1}, 1.0f, DType::Int32);
-
-                std::string conv_shader = is_f64 ? "eig_convergence_check_f64" : "eig_convergence_check";
-                auto* conv_pipeline = getPipeline(conv_shader, device_id);
-
-                struct ConvPC { uint32_t batch_size; } conv_pc;
-                conv_pc.batch_size = static_cast<uint32_t>(batch_size);
-
-                std::vector<std::pair<uint32_t, const void*>> conv_bindings = {
-                    {0, shifts.data_ptr()},
-                    {1, gpu_active_end.data_ptr()},
-                    {2, gpu_active_start.data_ptr()},
-                    {3, gpu_converged.data_ptr()},
-                    {4, gpu_all_converged.data_ptr()}
-                };
-                std::vector<size_t> conv_sizes = {
-                    shift_size, uint_buf_size, uint_buf_size,
-                    uint_buf_size, sizeof(uint32_t)
-                };
-                VkDescriptorSet conv_ds = allocateAndWriteDescriptorSet(
-                    device_id, conv_pipeline, conv_bindings, conv_sizes);
-
-                VkCommandBuffer cmd = beginSingleTimeCommands(device_id);
-                vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, conv_pipeline->pipeline());
-                vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
-                                       conv_pipeline->layout(), 0, 1, &conv_ds, 0, nullptr);
-                vkCmdPushConstants(cmd, conv_pipeline->layout(), VK_SHADER_STAGE_COMPUTE_BIT,
-                                  0, sizeof(conv_pc), &conv_pc);
-                uint32_t num_groups = (static_cast<uint32_t>(batch_size) + 63u) / 64u;
-                vkCmdDispatch(cmd, num_groups, 1, 1);
-                insertComputeOnlyBarrier(cmd);
-                endSingleTimeCommands(cmd, device_id);
-            }
-
-            // Phase 8.4: removed host readback of `gpu_all_converged`. The
-            // per-batch GPU convergence flag still drives the QR shader's
-            // per-batch early-exit (converged batches no-op cheaply), so the
-            // only behavior change is that we always run the full
-            // `max_qr_iterations` outer-loop count instead of breaking when
-            // every batch has converged. For typical eigh problems
-            // (n ≤ 64, max_iters = 30·n ≈ 2k) the wasted iterations cost
-            // microseconds on-device and remove the only D2H sync in the
-            // entire eigh path.
-        }
-
-        // Step 3: Extract eigenvalues from quasi-upper-triangular (real Schur) form
-        size_t w_size = batch_size * n * elem_size;
-
-        for (int64_t b = 0; b < batch_size; ++b) {
-            std::string shader = is_f64 ? "linalg_extract_eigenvalues_f64" : "linalg_extract_eigenvalues";
-            auto* pipeline = getPipeline(shader, device_id);
-
-            struct PushConstants {
-                uint32_t n;
-                uint32_t batch_idx;
-            } pc;
-            pc.n = static_cast<uint32_t>(n);
-            pc.batch_idx = static_cast<uint32_t>(b);
-
-            std::vector<std::pair<uint32_t, const void*>> bindings = {
-                {0, H.data_ptr()}, {1, WR.data_ptr()}, {2, WI.data_ptr()}
-            };
-            std::vector<size_t> sizes = {mat_size, w_size, w_size};
-            VkDescriptorSet ds = allocateAndWriteDescriptorSet(device_id, pipeline, bindings, sizes);
-
-            VkCommandBuffer cmd = beginSingleTimeCommands(device_id);
-            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
-            vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
-                                   pipeline->layout(), 0, 1, &ds, 0, nullptr);
-            vkCmdPushConstants(cmd, pipeline->layout(), VK_SHADER_STAGE_COMPUTE_BIT,
-                              0, sizeof(pc), &pc);
-            vkCmdDispatch(cmd, 1, 1, 1);
-            insertComputeOnlyBarrier(cmd);
-            endSingleTimeCommands(cmd, device_id);
-        }
-    }
-
-    return {WR, WI};
+    return {WR, WI, V};
 }
 
 // ============================================================================

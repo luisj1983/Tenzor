@@ -2067,7 +2067,10 @@ TEST_P(GradCheckMultiBackendTest, LinalgEig_GradVIsNotDropped) {
     loss.backward();
 
     ASSERT_TRUE(x.has_grad()) << "no gradient on x after backward(sum(V))";
-    auto g = *x.grad();
+    // Bring the gradient to host before raw-pointer access: on GPU backends
+    // x.grad() lives in device memory, so g.data<T>() returns a device pointer
+    // that must not be dereferenced from the host.
+    auto g = x.grad()->to(Device::cpu()).contiguous();
     double max_abs = 0.0;
     if (g.dtype() == DType::Float64) {
         const auto* p = g.data<double>();

@@ -10,12 +10,13 @@ layout(local_size_x_id = 0) in;
 layout(set = 0, binding = 0) buffer DiagBuf    { float diag[]; };     // n diagonal elements
 layout(set = 0, binding = 1) buffer SubDiagBuf { float sdiag[]; };    // n-1 subdiagonal elements
 layout(set = 0, binding = 2) buffer EvalsBuf   { float evals[]; };    // Output eigenvalues (n)
-layout(set = 0, binding = 3) buffer RotsBuf    { float rots[]; };     // Givens rotation params: 3*n*max_iterations (row_i, c, s)
+layout(set = 0, binding = 3) buffer RotsBuf    { float rots[]; };     // Givens rotation params: 3*num_rotations (row_i, c, s)
 
 layout(push_constant) uniform PushConstants {
     uint n;
-    uint max_iterations;
+    uint max_iterations;   // QR convergence sweep cap (loop bound only)
     uint batch_idx;
+    uint num_rotations;    // rotation-buffer capacity per batch (= n * rot_budget); MUST match the host allocation and the back-transform reader
 };
 
 // Work arrays in global memory (shared memory too small for large n)
@@ -27,7 +28,7 @@ void main() {
 
     uint d_base = batch_idx * n;
     uint s_base = batch_idx * (n - 1);
-    uint r_base = batch_idx * 3 * n * max_iterations;
+    uint r_base = batch_idx * 3 * num_rotations;
 
     // Copy to local references
     uint rot_idx = 0;
@@ -112,7 +113,7 @@ void main() {
             }
 
             // Store rotation parameters for eigenvector reconstruction
-            if (rot_idx < n * max_iterations) {
+            if (rot_idx < num_rotations) {
                 rots[r_base + 3 * rot_idx] = float(i);
                 rots[r_base + 3 * rot_idx + 1] = c_val;
                 rots[r_base + 3 * rot_idx + 2] = s_val;
@@ -140,5 +141,13 @@ void main() {
     // Copy any remaining eigenvalues
     for (int i = lo; i <= hi; i++) {
         evals[d_base + uint(i)] = diag[d_base + uint(i)];
+    }
+
+    // Terminating sentinel (c==0 && s==0): the back-transform reader stops here
+    // instead of relying on the rotation buffer being pre-zeroed.
+    if (rot_idx < num_rotations) {
+        rots[r_base + 3 * rot_idx]     = 0.0;
+        rots[r_base + 3 * rot_idx + 1] = 0.0;
+        rots[r_base + 3 * rot_idx + 2] = 0.0;
     }
 }

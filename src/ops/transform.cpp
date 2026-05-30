@@ -376,43 +376,27 @@ auto repeat(const Tensor& input, std::vector<int64_t> repeats) -> Tensor {
         in_stride *= shape[i];
     }
 
-    // Helper lambda to perform the copy for any dtype
-    auto do_repeat = [&]<typename T>() {
-        const T* input_data = input_cont.data<T>();
-        T* output_data = output.data<T>();
+    // repeat is a pure element-wise memory remap, so it is dtype-agnostic: copy each
+    // element by its byte size. This supports every dtype (including unsigned ints,
+    // bool, and complex) without enumerating them.
+    const size_t esz = dtype_size(input.dtype());
+    const char* in_base = static_cast<const char*>(input_cont.data_ptr());
+    char* out_base = static_cast<char*>(output.data_ptr());
 
-        for (int64_t out_idx = 0; out_idx < total_out; ++out_idx) {
-            // Calculate output coordinates
-            int64_t temp = out_idx;
-            std::vector<int64_t> out_coords(ndim);
-            for (int64_t i = ndim - 1; i >= 0; --i) {
-                out_coords[i] = temp % out_shape[i];
-                temp /= out_shape[i];
-            }
-
-            // Map to input coordinates (divide by repeat factor)
-            int64_t in_idx = 0;
-            for (int64_t i = 0; i < ndim; ++i) {
-                int64_t in_coord = out_coords[i] / repeats[i];
-                in_idx += in_coord * in_strides[i];
-            }
-
-            output_data[out_idx] = input_data[in_idx];
+    for (int64_t out_idx = 0; out_idx < total_out; ++out_idx) {
+        int64_t temp = out_idx;
+        std::vector<int64_t> out_coords(ndim);
+        for (int64_t i = ndim - 1; i >= 0; --i) {
+            out_coords[i] = temp % out_shape[i];
+            temp /= out_shape[i];
         }
-    };
-
-    // Dispatch based on dtype
-    switch (input.dtype()) {
-        case DType::Float32: do_repeat.template operator()<float>(); break;
-        case DType::Float64: do_repeat.template operator()<double>(); break;
-        case DType::Float16: do_repeat.template operator()<Float16>(); break;
-        case DType::BFloat16: do_repeat.template operator()<BFloat16>(); break;
-        case DType::Int8: do_repeat.template operator()<int8_t>(); break;
-        case DType::Int16: do_repeat.template operator()<int16_t>(); break;
-        case DType::Int32: do_repeat.template operator()<int32_t>(); break;
-        case DType::Int64: do_repeat.template operator()<int64_t>(); break;
-        default:
-            throw std::runtime_error("Unsupported dtype for repeat operation");
+        int64_t in_idx = 0;
+        for (int64_t i = 0; i < ndim; ++i) {
+            int64_t in_coord = out_coords[i] / repeats[i];
+            in_idx += in_coord * in_strides[i];
+        }
+        std::memcpy(out_base + static_cast<size_t>(out_idx) * esz,
+                    in_base + static_cast<size_t>(in_idx) * esz, esz);
     }
 
     return output;

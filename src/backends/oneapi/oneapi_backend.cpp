@@ -156,8 +156,9 @@ namespace oneapi {
 
     // ConvTranspose2d operations
     auto conv_transpose2d_forward(const Tensor& input, const Tensor& weight, const Tensor* bias,
-                                   int64_t stride, int64_t padding, int64_t output_padding,
-                                   int64_t dilation, int64_t groups, sycl::queue& queue) -> Tensor;
+                                   int64_t sH, int64_t sW, int64_t pH, int64_t pW,
+                                   int64_t opH, int64_t opW, int64_t dH, int64_t dW,
+                                   int64_t groups, sycl::queue& queue) -> Tensor;
 
     // Argsort operation
     auto argsort_kernel(const Tensor& input, int64_t dim, bool descending, sycl::queue& queue) -> Tensor;

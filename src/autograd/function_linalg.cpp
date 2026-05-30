@@ -1647,13 +1647,31 @@ auto EigBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tens
 
         auto ones_n = tenzor::full({n}, 1.0, W_real.dtype(), W_real.device());
         auto eye_n = tenzor::diag(ones_n);
-        auto safe_diff = tenzor::add(diff, eye_n);
-        auto F = tenzor::div(
-            tenzor::full({1}, 1.0, W_real.dtype(), W_real.device()),
-            safe_diff);
         auto ones_nn = tenzor::full({n, n}, 1.0, W_real.dtype(), W_real.device());
         auto off_diag_mask = tenzor::sub(ones_nn, eye_n);
-        F = tenzor::mul(F, off_diag_mask);
+
+        // Lorentzian-broadened reciprocal of eigenvalue gaps:
+        //   F_ij = (W_j - W_i) / ((W_j - W_i)^2 + eps^2)   (i != j),   F_ii = 0.
+        // Equals the exact 1/(W_j - W_i) for well-separated eigenvalues but stays
+        // bounded by 1/(2 eps) at (near-)degenerate roots — where the eigenvector
+        // derivative is genuinely singular. This prevents the Inf/NaN that the
+        // naive reciprocal produced from reaching the downstream linalg::solve
+        // (which hard-aborts on non-finite input), and matches the regularized
+        // eig/eigh backward used by PyTorch/JAX for repeated eigenvalues. eps is
+        // scaled to the spectrum so the exact gradient is recovered whenever the
+        // gaps are resolvable in the working precision.
+        const double mach = (W_real.dtype() == DType::Float64)
+            ? 2.220446049250313e-16 : 1.1920929e-7;
+        double w_scale = 0.0;
+        {
+            auto wmax = tenzor::max(tenzor::abs(W_real));
+            w_scale = (wmax.dtype() == DType::Float64)
+                ? wmax.item<double>() : static_cast<double>(wmax.item<float>());
+        }
+        const double eps_value = std::sqrt(mach) * (1.0 + std::abs(w_scale));
+        auto eps_t = tenzor::full({1}, eps_value, W_real.dtype(), W_real.device());
+        auto denom = tenzor::add(tenzor::mul(diff, diff), tenzor::mul(eps_t, eps_t));
+        auto F = tenzor::mul(tenzor::div(diff, denom), off_diag_mask);
 
         auto Vt = transpose(V, ndim - 2, ndim - 1);
 
@@ -1742,21 +1760,43 @@ auto EigBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tens
     auto W_row = unsqueeze(W_complex, 0);  // (1, n)
     auto diff = sub(W_row, W_col);         // (n, n) complex
 
+    // Lorentzian-broadened complex reciprocal of eigenvalue gaps:
+    //   F_ij = conj(W_j - W_i) / (|W_j - W_i|^2 + eps^2)   (i != j),   F_ii = 0.
+    // This is the exact 1/(W_j - W_i) for well-separated eigenvalues but stays
+    // bounded by 1/(2 eps) at (near-)degenerate roots, preventing the Inf/NaN
+    // that the naive reciprocal would push into the downstream complex
+    // linalg::solve (which hard-aborts on non-finite input). Mirrors the
+    // real-eigenvalue path's regularization.
+    auto diff_re = tenzor::real(diff);
+    auto diff_im = tenzor::imag(diff);
+    auto mag2 = tenzor::add(tenzor::mul(diff_re, diff_re),
+                            tenzor::mul(diff_im, diff_im));   // (n, n) real |diff|^2
+    double w_scale_c = 0.0;
+    {
+        auto wr_max = tenzor::max(tenzor::abs(W_real_cpu));
+        auto wi_max = tenzor::max(tenzor::abs(W_imag_cpu));
+        auto scal = [](const Tensor& t) -> double {
+            return (t.dtype() == DType::Float64) ? t.item<double>()
+                                                 : static_cast<double>(t.item<float>());
+        };
+        w_scale_c = scal(wr_max) + scal(wi_max);
+    }
+    const double mach_c = (real_dtype == DType::Float64)
+        ? 2.220446049250313e-16 : 1.1920929e-7;
+    const double eps_c = std::sqrt(mach_c) * (1.0 + std::abs(w_scale_c));
+    auto denom_c = tenzor::add(mag2,
+        tenzor::full({1}, eps_c * eps_c, real_dtype, Device::cpu()));
+    // F = conj(diff) / denom_c  (complex / real).  Build as complex(re/denom, im_conj/denom).
+    auto inv_denom = tenzor::div(
+        tenzor::full({1}, 1.0, real_dtype, Device::cpu()), denom_c);   // (n, n) real
+    auto F_re = tenzor::mul(diff_re, inv_denom);
+    auto F_im = tenzor::mul(tenzor::neg(diff_im), inv_denom);
+    auto F = tenzor::complex(F_re, F_im);
+
+    // Zero the diagonal of F (eigenvalue self-gap is identically zero).
     auto ones_n = tenzor::full({n}, 1.0, real_dtype, Device::cpu());
     auto zeros_n = tenzor::full({n}, 0.0, real_dtype, Device::cpu());
-    auto eye_n_real = tenzor::diag(ones_n);                        // (n, n) real
-    auto eye_n_imag = tenzor::diag(zeros_n);                       // (n, n) real
-    auto eye_n_complex = tenzor::complex(eye_n_real, eye_n_imag);  // (n, n) complex
-
-    // Avoid div-by-zero on the diagonal by adding I; we'll zero the
-    // diagonal of F afterwards.
-    auto safe_diff = tenzor::add(diff, eye_n_complex);
-    auto one_complex_scalar = tenzor::complex(
-        tenzor::full({1}, 1.0, real_dtype, Device::cpu()),
-        tenzor::full({1}, 0.0, real_dtype, Device::cpu()));
-    auto F = tenzor::div(one_complex_scalar, safe_diff);
-
-    // Zero the diagonal of F.
+    auto eye_n_complex = tenzor::complex(tenzor::diag(ones_n), tenzor::diag(zeros_n));
     auto ones_nn_real = tenzor::full({n, n}, 1.0, real_dtype, Device::cpu());
     auto zeros_nn_real = tenzor::full({n, n}, 0.0, real_dtype, Device::cpu());
     auto ones_nn_complex = tenzor::complex(ones_nn_real, zeros_nn_real);

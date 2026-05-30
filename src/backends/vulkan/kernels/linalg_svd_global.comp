@@ -1,0 +1,114 @@
+#version 450
+
+// One-sided Jacobi SVD for m >= n, arbitrary size (global-memory working set).
+// Orthogonalizes the n columns of A by Jacobi rotations applied on the right;
+// V (n x n) accumulates the rotations. After convergence the singular values are
+// the column norms, and U = A_columns / sigma. One workgroup per batch element.
+// Outputs: U (m x n, binding 1), S (n, binding 2), V (n x n, binding 3).
+layout(local_size_x = 32) in;
+
+layout(set = 0, binding = 0) buffer InputBuf { float data_in[]; };  // A (m*n per batch)
+layout(set = 0, binding = 1) buffer UBuf     { float data_u[];  };  // U (m*n), working columns
+layout(set = 0, binding = 2) buffer SBuf     { float data_s[];  };  // S (n)
+layout(set = 0, binding = 3) buffer VBuf     { float data_v[];  };  // V (n*n)
+
+layout(push_constant) uniform PushConstants {
+    uint m;
+    uint n;
+    uint batch;
+};
+
+shared float sh_c;
+shared float sh_s;
+shared uint  sh_rot;
+shared uint  converged;
+
+void main() {
+    uint batch_idx = gl_WorkGroupID.x;
+    uint tid = gl_LocalInvocationID.x;
+    if (batch_idx >= batch) return;
+
+    uint u_off = batch_idx * m * n;
+    uint v_off = batch_idx * n * n;
+
+    // U = A, V = I
+    for (uint idx = tid; idx < m * n; idx += gl_WorkGroupSize.x) {
+        data_u[u_off + idx] = data_in[u_off + idx];
+    }
+    for (uint idx = tid; idx < n * n; idx += gl_WorkGroupSize.x) {
+        uint r = idx / n;
+        uint c = idx - r * n;
+        data_v[v_off + idx] = (r == c) ? 1.0 : 0.0;
+    }
+    barrier();
+
+    for (uint sweep = 0; sweep < 60u; sweep++) {
+        if (tid == 0u) converged = 1u;
+        barrier();
+
+        for (uint i = 0; i < n; i++) {
+            for (uint j = i + 1u; j < n; j++) {
+                if (tid == 0u) {
+                    float a = 0.0, b = 0.0, c = 0.0;
+                    for (uint r = 0; r < m; r++) {
+                        float ui = data_u[u_off + r * n + i];
+                        float uj = data_u[u_off + r * n + j];
+                        a += ui * ui;
+                        b += uj * uj;
+                        c += ui * uj;
+                    }
+                    if (abs(c) > 1e-12 * sqrt(a * b) && a > 0.0 && b > 0.0) {
+                        converged = 0u;
+                        float zeta = (b - a) / (2.0 * c);
+                        float sgn = (zeta >= 0.0) ? 1.0 : -1.0;
+                        float t = sgn / (abs(zeta) + sqrt(1.0 + zeta * zeta));
+                        float cs = 1.0 / sqrt(1.0 + t * t);
+                        sh_c = cs;
+                        sh_s = cs * t;
+                        sh_rot = 1u;
+                    } else {
+                        sh_rot = 0u;
+                    }
+                }
+                barrier();
+
+                if (sh_rot == 1u) {
+                    float cs = sh_c;
+                    float sn = sh_s;
+                    // Rotate columns i,j of U (independent across rows).
+                    for (uint r = tid; r < m; r += gl_WorkGroupSize.x) {
+                        float ui = data_u[u_off + r * n + i];
+                        float uj = data_u[u_off + r * n + j];
+                        data_u[u_off + r * n + i] = cs * ui - sn * uj;
+                        data_u[u_off + r * n + j] = sn * ui + cs * uj;
+                    }
+                    // Rotate columns i,j of V.
+                    for (uint r = tid; r < n; r += gl_WorkGroupSize.x) {
+                        float vi = data_v[v_off + r * n + i];
+                        float vj = data_v[v_off + r * n + j];
+                        data_v[v_off + r * n + i] = cs * vi - sn * vj;
+                        data_v[v_off + r * n + j] = sn * vi + cs * vj;
+                    }
+                }
+                barrier();
+            }
+        }
+        if (converged > 0u) break;
+        barrier();
+    }
+
+    // Singular values = column norms; normalize U columns (parallel over columns).
+    for (uint j = tid; j < n; j += gl_WorkGroupSize.x) {
+        float s = 0.0;
+        for (uint r = 0; r < m; r++) {
+            float uj = data_u[u_off + r * n + j];
+            s += uj * uj;
+        }
+        float sigma = sqrt(s);
+        data_s[batch_idx * n + j] = sigma;
+        float inv = (sigma > 1e-30) ? 1.0 / sigma : 0.0;
+        for (uint r = 0; r < m; r++) {
+            data_u[u_off + r * n + j] *= inv;
+        }
+    }
+}

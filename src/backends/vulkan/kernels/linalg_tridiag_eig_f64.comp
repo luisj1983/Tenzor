@@ -11,8 +11,9 @@ layout(set = 0, binding = 3) buffer RotsBuf    { float64_t rots[]; };
 
 layout(push_constant) uniform PushConstants {
     uint n;
-    uint max_iterations;
+    uint max_iterations;   // QR convergence sweep cap (loop bound only)
     uint batch_idx;
+    uint num_rotations;    // rotation-buffer capacity per batch (= n * rot_budget); MUST match host allocation and back-transform reader
 };
 
 void main() {
@@ -21,7 +22,7 @@ void main() {
 
     uint d_base = batch_idx * n;
     uint s_base = batch_idx * (n - 1);
-    uint r_base = batch_idx * 3 * n * max_iterations;
+    uint r_base = batch_idx * 3 * num_rotations;
     uint rot_idx = 0;
 
     int lo = 0;
@@ -93,7 +94,7 @@ void main() {
                 s_val *= c_val;
             }
 
-            if (rot_idx < n * max_iterations) {
+            if (rot_idx < num_rotations) {
                 rots[r_base + 3 * rot_idx] = float64_t(i);
                 rots[r_base + 3 * rot_idx + 1] = c_val;
                 rots[r_base + 3 * rot_idx + 2] = s_val;
@@ -119,5 +120,12 @@ void main() {
 
     for (int i = lo; i <= hi; i++) {
         evals[d_base + uint(i)] = diag[d_base + uint(i)];
+    }
+
+    // Terminating sentinel (c==0 && s==0): back-transform reader stops here.
+    if (rot_idx < num_rotations) {
+        rots[r_base + 3 * rot_idx]     = 0.0lf;
+        rots[r_base + 3 * rot_idx + 1] = 0.0lf;
+        rots[r_base + 3 * rot_idx + 2] = 0.0lf;
     }
 }

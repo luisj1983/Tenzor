@@ -77,6 +77,34 @@ TEST_P(VisionFusedParity, Interpolate_Bilinear) {
         {input}, 1e-4f, 1e-6f, "interpolate bilinear");
 }
 
+// interpolate_backward bicubic (4D) parity — newly added on all GPU backends (W4).
+TEST_P(VisionFusedParity, InterpolateBackward_Bicubic) {
+    auto grad_out = randn({1, 3, 16, 16}, DType::Float32, Device::cpu());
+    test_operation_parity(
+        [](const std::vector<Tensor>& ins) {
+            OpAttributes a;
+            a.set(AttrKey::InputShape, std::string("8,8"));
+            a.set(AttrKey::Mode, std::string("bicubic"));
+            a.set(AttrKey::AlignCorners, false);
+            return dispatch(OpId::InterpolateBackward, ins, a)[0];
+        },
+        {grad_out}, 1e-3f, 1e-4f, "interpolate bicubic backward");
+}
+
+// interpolate_backward trilinear (5D) parity — newly added on all GPU backends (W4).
+TEST_P(VisionFusedParity, InterpolateBackward_Trilinear) {
+    auto grad_out = randn({1, 2, 6, 7, 9}, DType::Float32, Device::cpu());
+    test_operation_parity(
+        [](const std::vector<Tensor>& ins) {
+            OpAttributes a;
+            a.set(AttrKey::InputShape, std::string("3,4,5"));
+            a.set(AttrKey::Mode, std::string("trilinear"));
+            a.set(AttrKey::AlignCorners, false);
+            return dispatch(OpId::InterpolateBackward, ins, a)[0];
+        },
+        {grad_out}, 1e-3f, 1e-4f, "interpolate trilinear backward");
+}
+
 TEST_P(VisionFusedParity, GridSample_Bilinear) {
     // Input (N=1, C=3, H=8, W=8), grid (N=1, H_out=8, W_out=8, 2)
     auto input = randn({1, 3, 8, 8}, DType::Float32, Device::cpu());

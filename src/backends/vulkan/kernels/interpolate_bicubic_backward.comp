@@ -1,0 +1,62 @@
+#version 450
+#extension GL_EXT_shader_atomic_float : enable
+
+// Bicubic backward (4D) via VK_EXT_shader_atomic_float fetch_add scatter.
+// Mirrors the CUDA/ROCm/OneAPI interpolate bicubic backward kernels: one work-item
+// per output element scatters into the 4x4 (clamped) input neighborhood with
+// Catmull-Rom cubic weights (a = -0.5).
+
+layout(local_size_x_id = 0) in;
+
+layout(binding = 0) buffer GradOutput { float grad_output[]; };  // (N, C, out_h, out_w)
+layout(binding = 1) buffer GradInput  { float grad_input[]; };   // (N, C, in_h, in_w)
+
+layout(push_constant) uniform PushConstants {
+    uint n_elements;
+    uint batch;
+    uint channels;
+    uint in_h;
+    uint in_w;
+    uint out_h;
+    uint out_w;
+    uint align_corners;
+} params;
+
+float cubic_w(float x) {
+    float a = abs(x);
+    if (a <= 1.0) return 1.5 * a * a * a - 2.5 * a * a + 1.0;
+    if (a < 2.0)  return -0.5 * a * a * a + 2.5 * a * a - 4.0 * a + 2.0;
+    return 0.0;
+}
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= params.n_elements) return;
+
+    uint temp = idx;
+    uint ow = temp % params.out_w; temp /= params.out_w;
+    uint oh = temp % params.out_h; temp /= params.out_h;
+    uint c  = temp % params.channels; temp /= params.channels;
+    uint b  = temp;
+
+    float scale_h = (params.align_corners != 0u && params.out_h > 1u)
+        ? float(params.in_h - 1u) / float(params.out_h - 1u) : float(params.in_h) / float(params.out_h);
+    float scale_w = (params.align_corners != 0u && params.out_w > 1u)
+        ? float(params.in_w - 1u) / float(params.out_w - 1u) : float(params.in_w) / float(params.out_w);
+    float src_h = (params.align_corners != 0u) ? float(oh) * scale_h : (float(oh) + 0.5) * scale_h - 0.5;
+    float src_w = (params.align_corners != 0u) ? float(ow) * scale_w : (float(ow) + 0.5) * scale_w - 0.5;
+    int hi = int(floor(src_h));
+    int wi = int(floor(src_w));
+
+    float g = grad_output[idx];
+    uint base = b * (params.channels * params.in_h * params.in_w) + c * (params.in_h * params.in_w);
+    for (int dy = -1; dy <= 2; ++dy) {
+        int iy = clamp(hi + dy, 0, int(params.in_h) - 1);
+        float wy = cubic_w(src_h - float(hi + dy));
+        for (int dx = -1; dx <= 2; ++dx) {
+            int ix = clamp(wi + dx, 0, int(params.in_w) - 1);
+            float wx = cubic_w(src_w - float(wi + dx));
+            atomicAdd(grad_input[base + uint(iy) * params.in_w + uint(ix)], wy * wx * g);
+        }
+    }
+}

@@ -650,8 +650,87 @@ auto repeat_kernel(const Tensor& input_in, const std::vector<int64_t>& repeats, 
             input.data<Float16>(), output.data<Float16>(),
             d_input_shape, d_input_strides, d_repeats, ndim, n);
             CUDA_CHECK(cudaGetLastError());
+    } else if (input.dtype() == DType::BFloat16) {
+        auto [grid, block] = optimal_launch_config(repeat_kernel_device<__nv_bfloat16>, n);
+        repeat_kernel_device<<<grid, block, 0, stream>>>(
+            reinterpret_cast<const __nv_bfloat16*>(input.data_ptr()),
+            reinterpret_cast<__nv_bfloat16*>(output.data_ptr()),
+            d_input_shape, d_input_strides, d_repeats, ndim, n);
+            CUDA_CHECK(cudaGetLastError());
+    } else if (input.dtype() == DType::Int32) {
+        auto [grid, block] = optimal_launch_config(repeat_kernel_device<int32_t>, n);
+        repeat_kernel_device<<<grid, block, 0, stream>>>(
+            input.data<int32_t>(), output.data<int32_t>(),
+            d_input_shape, d_input_strides, d_repeats, ndim, n);
+            CUDA_CHECK(cudaGetLastError());
+    } else if (input.dtype() == DType::Int64) {
+        auto [grid, block] = optimal_launch_config(repeat_kernel_device<int64_t>, n);
+        repeat_kernel_device<<<grid, block, 0, stream>>>(
+            input.data<int64_t>(), output.data<int64_t>(),
+            d_input_shape, d_input_strides, d_repeats, ndim, n);
+            CUDA_CHECK(cudaGetLastError());
+    } else if (input.dtype() == DType::Int16) {
+        auto [grid, block] = optimal_launch_config(repeat_kernel_device<int16_t>, n);
+        repeat_kernel_device<<<grid, block, 0, stream>>>(
+            input.data<int16_t>(), output.data<int16_t>(),
+            d_input_shape, d_input_strides, d_repeats, ndim, n);
+            CUDA_CHECK(cudaGetLastError());
+    } else if (input.dtype() == DType::Int8) {
+        auto [grid, block] = optimal_launch_config(repeat_kernel_device<int8_t>, n);
+        repeat_kernel_device<<<grid, block, 0, stream>>>(
+            input.data<int8_t>(), output.data<int8_t>(),
+            d_input_shape, d_input_strides, d_repeats, ndim, n);
+            CUDA_CHECK(cudaGetLastError());
+    } else if (input.dtype() == DType::UInt8) {
+        auto [grid, block] = optimal_launch_config(repeat_kernel_device<uint8_t>, n);
+        repeat_kernel_device<<<grid, block, 0, stream>>>(
+            input.data<uint8_t>(), output.data<uint8_t>(),
+            d_input_shape, d_input_strides, d_repeats, ndim, n);
+            CUDA_CHECK(cudaGetLastError());
+    } else if (input.dtype() == DType::UInt16) {
+        auto [grid, block] = optimal_launch_config(repeat_kernel_device<uint16_t>, n);
+        repeat_kernel_device<<<grid, block, 0, stream>>>(
+            reinterpret_cast<const uint16_t*>(input.data_ptr()),
+            reinterpret_cast<uint16_t*>(output.data_ptr()),
+            d_input_shape, d_input_strides, d_repeats, ndim, n);
+            CUDA_CHECK(cudaGetLastError());
+    } else if (input.dtype() == DType::UInt32) {
+        auto [grid, block] = optimal_launch_config(repeat_kernel_device<uint32_t>, n);
+        repeat_kernel_device<<<grid, block, 0, stream>>>(
+            reinterpret_cast<const uint32_t*>(input.data_ptr()),
+            reinterpret_cast<uint32_t*>(output.data_ptr()),
+            d_input_shape, d_input_strides, d_repeats, ndim, n);
+            CUDA_CHECK(cudaGetLastError());
+    } else if (input.dtype() == DType::UInt64) {
+        auto [grid, block] = optimal_launch_config(repeat_kernel_device<uint64_t>, n);
+        repeat_kernel_device<<<grid, block, 0, stream>>>(
+            reinterpret_cast<const uint64_t*>(input.data_ptr()),
+            reinterpret_cast<uint64_t*>(output.data_ptr()),
+            d_input_shape, d_input_strides, d_repeats, ndim, n);
+            CUDA_CHECK(cudaGetLastError());
+    } else if (input.dtype() == DType::Bool) {
+        auto [grid, block] = optimal_launch_config(repeat_kernel_device<bool>, n);
+        repeat_kernel_device<<<grid, block, 0, stream>>>(
+            reinterpret_cast<const bool*>(input.data_ptr()),
+            reinterpret_cast<bool*>(output.data_ptr()),
+            d_input_shape, d_input_strides, d_repeats, ndim, n);
+            CUDA_CHECK(cudaGetLastError());
+    } else if (input.dtype() == DType::Complex64) {
+        auto [grid, block] = optimal_launch_config(repeat_kernel_device<float2>, n);
+        repeat_kernel_device<<<grid, block, 0, stream>>>(
+            reinterpret_cast<const float2*>(input.data_ptr()),
+            reinterpret_cast<float2*>(output.data_ptr()),
+            d_input_shape, d_input_strides, d_repeats, ndim, n);
+            CUDA_CHECK(cudaGetLastError());
+    } else if (input.dtype() == DType::Complex128) {
+        auto [grid, block] = optimal_launch_config(repeat_kernel_device<double2>, n);
+        repeat_kernel_device<<<grid, block, 0, stream>>>(
+            reinterpret_cast<const double2*>(input.data_ptr()),
+            reinterpret_cast<double2*>(output.data_ptr()),
+            d_input_shape, d_input_strides, d_repeats, ndim, n);
+            CUDA_CHECK(cudaGetLastError());
     } else {
-        throw std::runtime_error("repeat operation only supports Float32, Float64, and Float16 dtypes");
+        throw std::runtime_error("repeat operation: unsupported dtype");
     }
 
     cudaError_t err = cudaGetLastError();

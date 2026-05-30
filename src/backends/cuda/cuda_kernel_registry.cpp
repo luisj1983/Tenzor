@@ -1031,7 +1031,8 @@ namespace nn::quantization::kernels {
         const int8_t* input, const int8_t* weight, const float* bias,
         float* output, int64_t batch, int64_t in_channels, int64_t out_channels,
         int64_t h_in, int64_t w_in, int64_t h_out, int64_t w_out,
-        int64_t kernel_size, int64_t stride, int64_t padding,
+        int64_t kh_size, int64_t kw_size, int64_t sH, int64_t sW,
+        int64_t pH, int64_t pW, int64_t dH, int64_t dW,
         float input_scale, float weight_scale,
         int32_t input_zp, int32_t weight_zp, cudaStream_t stream
     ) -> void;
@@ -4322,25 +4323,18 @@ void register_cuda_kernels(BackendDispatchTable& table) {
 
         auto weight_shape = weight.shape();
         int64_t out_channels = weight_shape[0];
-        int64_t kernel_size = weight_shape[2];
+        int64_t kh_size = weight_shape[2];
+        int64_t kw_size = weight_shape[3];
 
-        // F.11: per-axis read with scalar fallback; the QuantizedConv2d cuda
-        // kernel is scalar-only — fail loudly rather than silently collapse.
+        // Per-axis (asymmetric) stride/padding/dilation, supported natively.
         const auto stride_arr   = ::tenzor::backend::attrs::stride_2d(attrs);
         const auto padding_arr  = ::tenzor::backend::attrs::padding_2d(attrs);
         const auto dilation_arr = ::tenzor::backend::attrs::dilation_2d(attrs);
-        if (stride_arr[0] != stride_arr[1] || padding_arr[0] != padding_arr[1] ||
-            dilation_arr[0] != dilation_arr[1]) {
-            throw std::invalid_argument(
-                "QuantizedConv2d (CUDA): backend kernel only supports symmetric "
-                "stride/padding/dilation; got stride=" + std::to_string(stride_arr[0]) + "x" + std::to_string(stride_arr[1]) +
-                ", padding=" + std::to_string(padding_arr[0]) + "x" + std::to_string(padding_arr[1]) +
-                ", dilation=" + std::to_string(dilation_arr[0]) + "x" + std::to_string(dilation_arr[1]));
-        }
-        int64_t stride = stride_arr[0];
-        int64_t padding = padding_arr[0];
-        int64_t dilation = dilation_arr[0];
+        int64_t sH = stride_arr[0], sW = stride_arr[1];
+        int64_t pH = padding_arr[0], pW = padding_arr[1];
+        int64_t dH = dilation_arr[0], dW = dilation_arr[1];
         int64_t groups = attrs.get_int(AttrKey::Groups, 1);
+        (void)groups;  // grouping not modeled by this kernel (pre-existing)
 
         float input_scale = static_cast<float>(attrs.get_float(AttrKey::InputScale, 1.0));
         float weight_scale = static_cast<float>(attrs.get_float(AttrKey::WeightScaleQ, 1.0));
@@ -4348,8 +4342,8 @@ void register_cuda_kernels(BackendDispatchTable& table) {
         int32_t weight_zp = static_cast<int32_t>(attrs.get_int(AttrKey::WeightZeroPoint, 0));
         auto stream = get_cuda_stream(attrs);
 
-        int64_t h_out = (h_in + 2 * padding - dilation * (kernel_size - 1) - 1) / stride + 1;
-        int64_t w_out = (w_in + 2 * padding - dilation * (kernel_size - 1) - 1) / stride + 1;
+        int64_t h_out = (h_in + 2 * pH - dH * (kh_size - 1) - 1) / sH + 1;
+        int64_t w_out = (w_in + 2 * pW - dW * (kw_size - 1) - 1) / sW + 1;
 
         Tensor output({batch, out_channels, h_out, w_out}, DType::Float32, input.device());
 
@@ -4365,7 +4359,7 @@ void register_cuda_kernels(BackendDispatchTable& table) {
             input_data, weight_data, bias_data, output_data,
             batch, in_channels, out_channels,
             h_in, w_in, h_out, w_out,
-            kernel_size, stride, padding,
+            kh_size, kw_size, sH, sW, pH, pW, dH, dW,
             input_scale, weight_scale,
             input_zp, weight_zp, stream
         );

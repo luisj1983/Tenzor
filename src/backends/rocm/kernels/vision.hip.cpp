@@ -709,18 +709,130 @@ auto interpolate_kernel(const Tensor& input,
 // the bilinear path with integer fractional parts (the same shape simplification
 // the CUDA host function makes).
 // ============================================================================
+// Catmull-Rom cubic convolution weight (a=-0.5); matches CPU cubic_interp_coeff.
+__device__ __forceinline__ float tz_bicubic_coeff_hip(float x) {
+    float a = fabsf(x);
+    if (a <= 1.0f) return 1.5f * a * a * a - 2.5f * a * a + 1.0f;
+    if (a < 2.0f)  return -0.5f * a * a * a + 2.5f * a * a - 4.0f * a + 2.0f;
+    return 0.0f;
+}
+
+// Bicubic backward (4D): scatter each output gradient to its 4x4 neighborhood (clamped).
+template<typename T>
+__global__ void interpolate_bicubic_backward_kernel_hip(
+    const T* __restrict__ grad_out, T* __restrict__ grad_in,
+    int64_t batch, int64_t channels, int64_t in_h, int64_t in_w,
+    int64_t out_h, int64_t out_w, bool align_corners)
+{
+    int64_t total = batch * channels * out_h * out_w;
+    HIP_KERNEL_LOOP(idx, total) {
+        int64_t temp = idx;
+        int64_t ow = temp % out_w; temp /= out_w;
+        int64_t oh = temp % out_h; temp /= out_h;
+        int64_t c  = temp % channels; temp /= channels;
+        int64_t b  = temp;
+        float scale_h = (align_corners && out_h > 1) ? static_cast<float>(in_h - 1) / (out_h - 1) : static_cast<float>(in_h) / out_h;
+        float scale_w = (align_corners && out_w > 1) ? static_cast<float>(in_w - 1) / (out_w - 1) : static_cast<float>(in_w) / out_w;
+        float src_h = align_corners ? oh * scale_h : (oh + 0.5f) * scale_h - 0.5f;
+        float src_w = align_corners ? ow * scale_w : (ow + 0.5f) * scale_w - 0.5f;
+        int64_t hi = static_cast<int64_t>(floorf(src_h));
+        int64_t wi = static_cast<int64_t>(floorf(src_w));
+        float g = static_cast<float>(grad_out[idx]);
+        int64_t base = b * (channels * in_h * in_w) + c * (in_h * in_w);
+        for (int dy = -1; dy <= 2; ++dy) {
+            int64_t iy = min(max(static_cast<int64_t>(0), hi + dy), in_h - 1);
+            float wy = tz_bicubic_coeff_hip(src_h - static_cast<float>(hi + dy));
+            for (int dx = -1; dx <= 2; ++dx) {
+                int64_t ix = min(max(static_cast<int64_t>(0), wi + dx), in_w - 1);
+                float wx = tz_bicubic_coeff_hip(src_w - static_cast<float>(wi + dx));
+                atomicAdd(&grad_in[base + iy * in_w + ix], static_cast<T>(wy * wx * g));
+            }
+        }
+    }
+}
+
+// Trilinear backward (5D): scatter to 8 corners; out-of-bounds corners skipped (CPU semantics).
+template<typename T>
+__global__ void interpolate_trilinear_backward_kernel_hip(
+    const T* __restrict__ grad_out, T* __restrict__ grad_in,
+    int64_t batch, int64_t channels, int64_t in_d, int64_t in_h, int64_t in_w,
+    int64_t out_d, int64_t out_h, int64_t out_w, bool align_corners)
+{
+    int64_t total = batch * channels * out_d * out_h * out_w;
+    HIP_KERNEL_LOOP(idx, total) {
+        int64_t temp = idx;
+        int64_t ow = temp % out_w; temp /= out_w;
+        int64_t oh = temp % out_h; temp /= out_h;
+        int64_t od = temp % out_d; temp /= out_d;
+        int64_t c  = temp % channels; temp /= channels;
+        int64_t b  = temp;
+        float scd = (align_corners && out_d > 1) ? static_cast<float>(in_d - 1) / (out_d - 1) : static_cast<float>(in_d) / out_d;
+        float sch = (align_corners && out_h > 1) ? static_cast<float>(in_h - 1) / (out_h - 1) : static_cast<float>(in_h) / out_h;
+        float scw = (align_corners && out_w > 1) ? static_cast<float>(in_w - 1) / (out_w - 1) : static_cast<float>(in_w) / out_w;
+        float sd = align_corners ? od * scd : (od + 0.5f) * scd - 0.5f;
+        float sh = align_corners ? oh * sch : (oh + 0.5f) * sch - 0.5f;
+        float sw = align_corners ? ow * scw : (ow + 0.5f) * scw - 0.5f;
+        int64_t d0 = static_cast<int64_t>(floorf(sd)), h0 = static_cast<int64_t>(floorf(sh)), w0 = static_cast<int64_t>(floorf(sw));
+        int64_t d1 = d0 + 1, h1 = h0 + 1, w1 = w0 + 1;
+        float fd = sd - d0, fh = sh - h0, fw = sw - w0;
+        float g = static_cast<float>(grad_out[idx]);
+        int64_t base = b * (channels * in_d * in_h * in_w) + c * (in_d * in_h * in_w);
+#define TZ_TRI_ADD_HIP(dd, hh, ww, wgt) do { \
+        if ((dd) >= 0 && (dd) < in_d && (hh) >= 0 && (hh) < in_h && (ww) >= 0 && (ww) < in_w) \
+            atomicAdd(&grad_in[base + (dd) * in_h * in_w + (hh) * in_w + (ww)], static_cast<T>((wgt) * g)); \
+    } while (0)
+        TZ_TRI_ADD_HIP(d0, h0, w0, (1.0f - fd) * (1.0f - fh) * (1.0f - fw));
+        TZ_TRI_ADD_HIP(d0, h0, w1, (1.0f - fd) * (1.0f - fh) * fw);
+        TZ_TRI_ADD_HIP(d0, h1, w0, (1.0f - fd) * fh * (1.0f - fw));
+        TZ_TRI_ADD_HIP(d0, h1, w1, (1.0f - fd) * fh * fw);
+        TZ_TRI_ADD_HIP(d1, h0, w0, fd * (1.0f - fh) * (1.0f - fw));
+        TZ_TRI_ADD_HIP(d1, h0, w1, fd * (1.0f - fh) * fw);
+        TZ_TRI_ADD_HIP(d1, h1, w0, fd * fh * (1.0f - fw));
+        TZ_TRI_ADD_HIP(d1, h1, w1, fd * fh * fw);
+#undef TZ_TRI_ADD_HIP
+    }
+}
+
 auto interpolate_backward_kernel(const Tensor& grad_output,
                                   const std::vector<int64_t>& input_size,
                                   const std::string& mode,
                                   bool align_corners,
                                   hipStream_t stream) -> Tensor {
-    if (mode != "bilinear" && mode != "nearest") {
-        throw std::runtime_error("interpolate_backward (ROCm): mode '" + mode +
-                                  "' not supported. Use 'bilinear' or 'nearest'.");
-    }
     auto shape = grad_output.shape();
+
+    // Trilinear backward operates on 5D (N, C, D, H, W).
+    if (mode == "trilinear") {
+        if (shape.size() != 5)
+            throw std::runtime_error("interpolate_backward (ROCm): trilinear requires 5D (N,C,D,H,W).");
+        if (input_size.size() != 3)
+            throw std::runtime_error("interpolate_backward (ROCm): trilinear input_size must be [in_d,in_h,in_w].");
+        const int64_t N = shape[0], C = shape[1], out_d = shape[2], out_h = shape[3], out_w = shape[4];
+        const int64_t in_d = input_size[0], in_h = input_size[1], in_w = input_size[2];
+        Tensor grad_input({N, C, in_d, in_h, in_w}, grad_output.dtype(), grad_output.device());
+        HIP_CHECK(hipMemsetAsync(grad_input.data_ptr(), 0,
+                                  static_cast<size_t>(grad_input.numel()) * dtype_size(grad_input.dtype()), stream));
+        const int64_t total = N * C * out_d * out_h * out_w;
+        const int threads = 256;
+        const int blocks = static_cast<int>((total + threads - 1) / threads);
+        if (grad_output.dtype() == DType::Float32) {
+            hipLaunchKernelGGL(interpolate_trilinear_backward_kernel_hip<float>, dim3(blocks), dim3(threads), 0, stream,
+                grad_output.data<float>(), grad_input.data<float>(), N, C, in_d, in_h, in_w, out_d, out_h, out_w, align_corners);
+        } else if (grad_output.dtype() == DType::Float64) {
+            hipLaunchKernelGGL(interpolate_trilinear_backward_kernel_hip<double>, dim3(blocks), dim3(threads), 0, stream,
+                grad_output.data<double>(), grad_input.data<double>(), N, C, in_d, in_h, in_w, out_d, out_h, out_w, align_corners);
+        } else {
+            throw std::runtime_error("interpolate_backward trilinear (ROCm): only Float32/Float64 supported.");
+        }
+        HIP_CHECK(hipGetLastError());
+        return grad_input;
+    }
+
+    if (mode != "bilinear" && mode != "nearest" && mode != "bicubic") {
+        throw std::runtime_error("interpolate_backward (ROCm): mode '" + mode +
+                                  "' not supported. Use 'bilinear'/'nearest'/'bicubic' (4D) or 'trilinear' (5D).");
+    }
     if (shape.size() != 4) {
-        throw std::runtime_error("interpolate_backward (ROCm): only 4D (N,C,H,W) supported.");
+        throw std::runtime_error("interpolate_backward (ROCm): bilinear/nearest/bicubic require 4D (N,C,H,W).");
     }
     if (input_size.size() != 2) {
         throw std::runtime_error("interpolate_backward (ROCm): input_size must be [in_h, in_w].");
@@ -759,6 +871,20 @@ auto interpolate_backward_kernel(const Tensor& grad_output,
                 "interpolate_backward bilinear (ROCm): unsupported dtype " +
                 std::string(dtype_name(grad_output.dtype())) +
                 ". Only Float32 and Float64 are supported (HIP atomicAdd availability).");
+        }
+    } else if (mode == "bicubic") {
+        if (grad_output.dtype() == DType::Float32) {
+            hipLaunchKernelGGL(interpolate_bicubic_backward_kernel_hip<float>,
+                dim3(blocks), dim3(threads), 0, stream,
+                grad_output.data<float>(), grad_input.data<float>(),
+                N, C, in_h, in_w, out_h, out_w, align_corners);
+        } else if (grad_output.dtype() == DType::Float64) {
+            hipLaunchKernelGGL(interpolate_bicubic_backward_kernel_hip<double>,
+                dim3(blocks), dim3(threads), 0, stream,
+                grad_output.data<double>(), grad_input.data<double>(),
+                N, C, in_h, in_w, out_h, out_w, align_corners);
+        } else {
+            throw std::runtime_error("interpolate_backward bicubic (ROCm): only Float32/Float64 supported.");
         }
     } else {  // "nearest"
         if (grad_output.dtype() == DType::Float32) {

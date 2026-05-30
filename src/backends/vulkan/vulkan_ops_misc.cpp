@@ -6389,11 +6389,6 @@ auto VulkanBackend::dispatchInterpolateBackward(const Tensor& grad_output,
     // M14 fix: nearest mode wired via interpolate_nearest_backward.comp.
     // Same atomic-float scatter shape as bilinear but one source pixel
     // per output element (no weights, no align_corners).
-    if (mode != "bilinear" && mode != "nearest") {
-        throw std::runtime_error(
-            "dispatchInterpolateBackward (Vulkan): mode '" + mode +
-            "' not supported. Supported: 'bilinear', 'nearest'.");
-    }
     if (grad_output.dtype() != DType::Float32) {
         throw std::runtime_error(
             "dispatchInterpolateBackward (Vulkan): only Float32 supported "
@@ -6401,9 +6396,62 @@ auto VulkanBackend::dispatchInterpolateBackward(const Tensor& grad_output,
             "GL_EXT_shader_atomic_float2 which is a separate extension).");
     }
     auto gshape = grad_output.shape();
+
+    // Trilinear backward operates on 5D (N, C, D, H, W) with its own push layout.
+    if (mode == "trilinear") {
+        if (gshape.size() != 5)
+            throw std::runtime_error("dispatchInterpolateBackward (Vulkan): trilinear requires 5D (N,C,D,H,W).");
+        if (input_size.size() != 3)
+            throw std::runtime_error("dispatchInterpolateBackward (Vulkan): trilinear input_size must be [in_d,in_h,in_w].");
+        auto cg = grad_output.contiguous();
+        int32_t dev = cg.device().index;
+        const int64_t N = gshape[0], C = gshape[1], od = gshape[2], oh = gshape[3], ow = gshape[4];
+        const int64_t id_ = input_size[0], ih = input_size[1], iw = input_size[2];
+        Tensor gin(std::vector<int64_t>{N, C, id_, ih, iw}, cg.dtype(), cg.device());
+        {  // zero-init via the fill shader
+            auto* fp = getPipeline("fill", dev);
+            struct FPC { uint32_t n; uint32_t v; } fpc; fpc.n = static_cast<uint32_t>(gin.numel()); fpc.v = 0u;
+            std::vector<std::pair<uint32_t, const void*>> fb = {{0, gin.data_ptr()}};
+            std::vector<size_t> fs = {gin.numel() * gin.dtype_size()};
+            auto ds = allocateAndWriteDescriptorSet(dev, fp, fb, fs);
+            auto cmd = beginSingleTimeCommands(dev);
+            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, fp->pipeline());
+            vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, fp->layout(), 0, 1, &ds, 0, nullptr);
+            vkCmdPushConstants(cmd, fp->layout(), VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(FPC), &fpc);
+            vkCmdDispatch(cmd, div_wg(fpc.n, devices_[dev].workgroupSize), 1, 1);
+            insertComputeOnlyBarrier(cmd);
+            endSingleTimeCommands(cmd, dev);
+        }
+        auto* pipe = getPipeline("interpolate_trilinear_backward", dev);
+        struct TriPC {
+            uint32_t n_elements, batch, channels, in_d, in_h, in_w, out_d, out_h, out_w, align_corners;
+        } pc;
+        pc.n_elements = static_cast<uint32_t>(N * C * od * oh * ow);
+        pc.batch = static_cast<uint32_t>(N); pc.channels = static_cast<uint32_t>(C);
+        pc.in_d = static_cast<uint32_t>(id_); pc.in_h = static_cast<uint32_t>(ih); pc.in_w = static_cast<uint32_t>(iw);
+        pc.out_d = static_cast<uint32_t>(od); pc.out_h = static_cast<uint32_t>(oh); pc.out_w = static_cast<uint32_t>(ow);
+        pc.align_corners = align_corners ? 1u : 0u;
+        std::vector<std::pair<uint32_t, const void*>> bnd = {{0, cg.data_ptr()}, {1, gin.data_ptr()}};
+        std::vector<size_t> szs = {cg.numel() * cg.dtype_size(), gin.numel() * gin.dtype_size()};
+        auto ds = allocateAndWriteDescriptorSet(dev, pipe, bnd, szs);
+        auto cmd = beginSingleTimeCommands(dev);
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipe->pipeline());
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipe->layout(), 0, 1, &ds, 0, nullptr);
+        vkCmdPushConstants(cmd, pipe->layout(), VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(TriPC), &pc);
+        vkCmdDispatch(cmd, div_wg(pc.n_elements, devices_[dev].workgroupSize), 1, 1);
+        insertComputeOnlyBarrier(cmd);
+        endSingleTimeCommands(cmd, dev);
+        return gin;
+    }
+
+    if (mode != "bilinear" && mode != "nearest" && mode != "bicubic") {
+        throw std::runtime_error(
+            "dispatchInterpolateBackward (Vulkan): mode '" + mode +
+            "' not supported. Supported: 'bilinear'/'nearest'/'bicubic' (4D), 'trilinear' (5D).");
+    }
     if (gshape.size() != 4) {
         throw std::runtime_error(
-            "dispatchInterpolateBackward (Vulkan): only 4D (N,C,H,W) supported.");
+            "dispatchInterpolateBackward (Vulkan): bilinear/nearest/bicubic require 4D (N,C,H,W).");
     }
     if (input_size.size() != 2) {
         throw std::runtime_error(
@@ -6422,9 +6470,9 @@ auto VulkanBackend::dispatchInterpolateBackward(const Tensor& grad_output,
 
     // M14: select shader by mode. Nearest has no align_corners parameter
     // (PyTorch nearest ignores it); the push constant struct differs by 1 uint.
-    const std::string shader_name = (mode == "nearest")
-        ? "interpolate_nearest_backward"
-        : "interpolate_bilinear_backward";
+    const std::string shader_name = (mode == "nearest")  ? "interpolate_nearest_backward"
+                                  : (mode == "bicubic") ? "interpolate_bicubic_backward"
+                                                        : "interpolate_bilinear_backward";
     auto* pipeline = getPipeline(shader_name, device_id);
 
     Tensor grad_input(std::vector<int64_t>{N, C, in_h, in_w}, cont_grad.dtype(), cont_grad.device());

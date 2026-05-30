@@ -979,49 +979,55 @@ inline std::pair<double, double> linalg_eig_symmetry_metrics(
 // ============================================================================
 auto linalg_eigh_kernel(const Tensor& input, sycl::queue& queue) -> std::pair<Tensor, Tensor> {
     auto shape = input.shape();
-    int64_t n = shape[shape.size() - 1];
+    int64_t ndim = static_cast<int64_t>(shape.size());
+    int64_t n = shape[ndim - 1];
+    int64_t batch = 1;
+    for (int64_t i = 0; i + 2 < ndim; ++i) batch *= shape[i];
+
+    // Output W = (..., n), V = (..., n, n). Process each (n, n) matrix independently
+    // (oneMKL syevd is per-matrix); the previous version handled only the last matrix
+    // and silently collapsed the batch dimension.
+    std::vector<int64_t> w_shape(shape.begin(), shape.end() - 1);
+    Tensor W(w_shape, input.dtype(), input.device());
+    Tensor V(std::vector<int64_t>(shape.begin(), shape.end()), input.dtype(), input.device());
 
     if (input.dtype() == DType::Float32) {
         SyclDeviceBuffer<float> d_a(n * n, queue);
         SyclDeviceBuffer<float> d_w(n, queue);
-
-        row_to_col_major<float, SyclTransposeEighF32>(
-            d_a.get(), get_data_ptr<const float>(input), n, n, queue);
-
         auto sp = ::oneapi::mkl::lapack::syevd_scratchpad_size<float>(
             queue, ::oneapi::mkl::job::vec, ::oneapi::mkl::uplo::lower, n, n);
         SyclDeviceBuffer<float> scratch(sp, queue);
-        ::oneapi::mkl::lapack::syevd(queue, ::oneapi::mkl::job::vec, ::oneapi::mkl::uplo::lower,
-                                   n, d_a.get(), n, d_w.get(), scratch.get(), sp).wait();
-
-        Tensor W({n}, input.dtype(), input.device());
-        queue.memcpy(const_cast<void*>(W.data_ptr()), d_w.get(), n * sizeof(float)).wait();
-
-        Tensor V({n, n}, input.dtype(), input.device());
-        col_to_row_major<float, SyclTransposeEighBackF32>(
-            get_data_ptr<float>(V), d_a.get(), n, n, queue);
-
+        const float* in_ptr = get_data_ptr<const float>(input);
+        float* w_ptr = get_data_ptr<float>(W);
+        float* v_ptr = get_data_ptr<float>(V);
+        for (int64_t b = 0; b < batch; ++b) {
+            row_to_col_major<float, SyclTransposeEighF32>(
+                d_a.get(), in_ptr + b * n * n, n, n, queue);
+            ::oneapi::mkl::lapack::syevd(queue, ::oneapi::mkl::job::vec, ::oneapi::mkl::uplo::lower,
+                                       n, d_a.get(), n, d_w.get(), scratch.get(), sp).wait();
+            queue.memcpy(w_ptr + b * n, d_w.get(), n * sizeof(float)).wait();
+            col_to_row_major<float, SyclTransposeEighBackF32>(
+                v_ptr + b * n * n, d_a.get(), n, n, queue);
+        }
         return {W, V};
     } else if (input.dtype() == DType::Float64) {
         SyclDeviceBuffer<double> d_a(n * n, queue);
         SyclDeviceBuffer<double> d_w(n, queue);
-
-        row_to_col_major<double, SyclTransposeEighF64>(
-            d_a.get(), get_data_ptr<const double>(input), n, n, queue);
-
         auto sp = ::oneapi::mkl::lapack::syevd_scratchpad_size<double>(
             queue, ::oneapi::mkl::job::vec, ::oneapi::mkl::uplo::lower, n, n);
         SyclDeviceBuffer<double> scratch(sp, queue);
-        ::oneapi::mkl::lapack::syevd(queue, ::oneapi::mkl::job::vec, ::oneapi::mkl::uplo::lower,
-                                   n, d_a.get(), n, d_w.get(), scratch.get(), sp).wait();
-
-        Tensor W({n}, input.dtype(), input.device());
-        queue.memcpy(const_cast<void*>(W.data_ptr()), d_w.get(), n * sizeof(double)).wait();
-
-        Tensor V({n, n}, input.dtype(), input.device());
-        col_to_row_major<double, SyclTransposeEighBackF64>(
-            get_data_ptr<double>(V), d_a.get(), n, n, queue);
-
+        const double* in_ptr = get_data_ptr<const double>(input);
+        double* w_ptr = get_data_ptr<double>(W);
+        double* v_ptr = get_data_ptr<double>(V);
+        for (int64_t b = 0; b < batch; ++b) {
+            row_to_col_major<double, SyclTransposeEighF64>(
+                d_a.get(), in_ptr + b * n * n, n, n, queue);
+            ::oneapi::mkl::lapack::syevd(queue, ::oneapi::mkl::job::vec, ::oneapi::mkl::uplo::lower,
+                                       n, d_a.get(), n, d_w.get(), scratch.get(), sp).wait();
+            queue.memcpy(w_ptr + b * n, d_w.get(), n * sizeof(double)).wait();
+            col_to_row_major<double, SyclTransposeEighBackF64>(
+                v_ptr + b * n * n, d_a.get(), n, n, queue);
+        }
         return {W, V};
     } else {
         throw std::runtime_error("linalg_eigh: only Float32 and Float64 supported");
@@ -2881,257 +2887,250 @@ auto linalg_eig_qr_kernel(const Tensor& A, sycl::queue& queue) -> std::tuple<Ten
     std::vector<int64_t> v_shape = batch_dims; v_shape.push_back(n); v_shape.push_back(n);
     auto V = zeros(v_shape, A.dtype(), A.device());
 
-    auto launch_eig = [&](auto* work_ptr, auto* wr_ptr, auto* wi_ptr, auto* v_ptr) {
+    // Native EISPACK-hqr2 non-symmetric eigensolver: one work-item per batch
+    // element over global-memory scratch (correct eigenvalues AND eigenvectors;
+    // no shared-memory size cap, no barriers). Output packing matches LAPACK
+    // geev: real eigenvalue k -> column k; complex pair (wi[k]>0) -> column k =
+    // Re, column k+1 = Im (conjugate in column k+1).
+    auto vbuf = zeros({nbatch, n}, A.dtype(), A.device());
+    auto launch_eig = [&](auto* work_ptr, auto* wr_ptr, auto* wi_ptr, auto* v_ptr, auto* vbuf_ptr) {
         using T = std::remove_pointer_t<decltype(work_ptr)>;
-        check_size_limit<T>(n, "eig");
-        size_t smem_bytes = (2 * n * n + 4) * sizeof(T);
-        int threads = std::min(static_cast<int>(n), 128);
-        if (threads < 1) threads = 1;
-        int max_iter = 30 * static_cast<int>(n);
-
+        int n_ = static_cast<int>(n);
+        long long nb = static_cast<long long>(nbatch);
         queue.submit([&](sycl::handler& h) {
-            sycl::local_accessor<char, 1> smem(sycl::range<1>(smem_bytes), h);
-            int n_ = static_cast<int>(n);
-            h.parallel_for(sycl::nd_range<1>(nbatch * threads, threads),
-                [=](sycl::nd_item<1> item) {
-                    constexpr T eps = std::is_same_v<T, float> ? T(1e-7) : T(1e-14);
-                    constexpr T zero_tol = std::is_same_v<T, float> ? T(1e-30) : T(1e-60);
-                    int batch_idx = item.get_group_linear_id();
-                    int tid = item.get_local_linear_id();
-                    int num_threads = item.get_local_range(0);
-                    char* smem_raw = smem.get_pointer();
-                    T* H = reinterpret_cast<T*>(smem_raw);
-                    T* Q = H + n_ * n_;
-                    T* scratch = Q + n_ * n_;
+            h.parallel_for(sycl::range<1>(static_cast<size_t>(nbatch)),
+                [=](sycl::id<1> id) {
+                    long long b = static_cast<long long>(id[0]);
+                    if (b >= nb) return;
+                    T* H = work_ptr + b * n_ * n_;
+                    T* Z = v_ptr + b * n_ * n_;
+                    T* wr = wr_ptr + b * n_;
+                    T* wi = wi_ptr + b * n_;
+                    T* v = vbuf_ptr + b * n_;
+                    const T eps = std::is_same_v<T, float> ? T(1.19e-7) : T(2.22e-16);
+                    auto cdiv = [](T cr, T ci, T dr, T di, T& zr, T& zi) {
+                        if (sycl::fabs(dr) > sycl::fabs(di)) {
+                            T r = di / dr, d = dr + di * r;
+                            zr = (cr + ci * r) / d; zi = (ci - cr * r) / d;
+                        } else {
+                            T r = dr / di, d = di + dr * r;
+                            zr = (cr * r + ci) / d; zi = (ci * r - cr) / d;
+                        }
+                    };
 
-                    const T* As = work_ptr + batch_idx * n_ * n_;
-                    T* wr = wr_ptr + batch_idx * n_;
-                    T* wi = wi_ptr + batch_idx * n_;
-                    T* Vs = v_ptr + batch_idx * n_ * n_;
+                    for (int i = 0; i < n_; ++i) { for (int j = 0; j < n_; ++j) Z[i*n_+j] = T(0); Z[i*n_+i] = T(1); }
 
-                    for (int idx = tid; idx < n_ * n_; idx += num_threads) {
-                        H[idx] = As[idx];
-                        int row = idx/n_, col = idx%n_;
-                        Q[idx] = (row==col) ? T(1) : T(0);
+                    // orthogonal Hessenberg reduction (Householder), accumulate Z
+                    for (int k = 0; k + 2 < n_; ++k) {
+                        T sigma = T(0);
+                        for (int i = k+1; i < n_; ++i) sigma += H[i*n_+k]*H[i*n_+k];
+                        if (sigma == T(0)) continue;
+                        T nx = sycl::sqrt(sigma);
+                        T a = -sycl::copysign(nx, H[(k+1)*n_+k]);
+                        v[k+1] = H[(k+1)*n_+k] - a;
+                        for (int i = k+2; i < n_; ++i) v[i] = H[i*n_+k];
+                        T vn2 = T(0);
+                        for (int i = k+1; i < n_; ++i) vn2 += v[i]*v[i];
+                        if (vn2 == T(0)) continue;
+                        T tau = T(2)/vn2;
+                        for (int j = 0; j < n_; ++j) { T d=T(0); for(int i=k+1;i<n_;++i) d+=v[i]*H[i*n_+j]; d*=tau; for(int i=k+1;i<n_;++i) H[i*n_+j]-=v[i]*d; }
+                        for (int i = 0; i < n_; ++i) { T d=T(0); for(int j=k+1;j<n_;++j) d+=H[i*n_+j]*v[j]; d*=tau; for(int j=k+1;j<n_;++j) H[i*n_+j]-=d*v[j]; }
+                        for (int i = 0; i < n_; ++i) { T d=T(0); for(int j=k+1;j<n_;++j) d+=Z[i*n_+j]*v[j]; d*=tau; for(int j=k+1;j<n_;++j) Z[i*n_+j]-=d*v[j]; }
+                        H[(k+1)*n_+k] = a;
+                        for (int i = k+2; i < n_; ++i) H[i*n_+k] = T(0);
                     }
-                    sycl::group_barrier(item.get_group());
 
-                    // Hessenberg reduction
-                    for (int k = 0; k + 2 < n_; k++) {
-                        if (tid == 0) {
-                            T sigma = T(0);
-                            for (int i = k+1; i < n_; i++) sigma += H[i*n_+k]*H[i*n_+k];
-                            T norm_x = sycl::sqrt(sigma);
-                            if (norm_x < zero_tol) scratch[1]=T(0);
-                            else {
-                                T a = -sycl::copysign(norm_x, H[(k+1)*n_+k]);
-                                T v0_val = H[(k+1)*n_+k]-a;
-                                T v_norm_sq = v0_val*v0_val;
-                                for (int i = k+2; i < n_; i++) v_norm_sq += H[i*n_+k]*H[i*n_+k];
-                                if (v_norm_sq < zero_tol) scratch[1]=T(0);
-                                else { scratch[0]=v0_val; scratch[1]=T(2)/v_norm_sq; scratch[2]=a; }
+                    // hqr2: real Schur form + eigenvalues
+                    T norm = T(0);
+                    for (int i = 0; i < n_; ++i) { int j0 = i-1 > 0 ? i-1 : 0; for (int j = j0; j < n_; ++j) norm += sycl::fabs(H[i*n_+j]); }
+                    T t = T(0);
+                    int en = n_ - 1;
+                    while (en >= 0) {
+                        int its = 0, na = en - 1;
+                        for (;;) {
+                            int l;
+                            for (l = en; l >= 1; --l) {
+                                T s = sycl::fabs(H[(l-1)*n_+(l-1)]) + sycl::fabs(H[l*n_+l]);
+                                if (s == T(0)) s = norm;
+                                if (sycl::fabs(H[l*n_+(l-1)]) <= eps*s) break;
                             }
-                        }
-                        sycl::group_barrier(item.get_group());
-                        T tau = scratch[1];
-                        if (tau == T(0)) { sycl::group_barrier(item.get_group()); continue; }
-                        T v0 = scratch[0]; T alpha = scratch[2];
-
-                        for (int j = k+tid; j < n_; j += num_threads) {
-                            T dot = v0 * H[(k+1)*n_+j];
-                            for (int i = k+2; i < n_; i++) dot += H[i*n_+k]*H[i*n_+j];
-                            dot *= tau;
-                            H[(k+1)*n_+j] -= v0*dot;
-                            for (int i = k+2; i < n_; i++) H[i*n_+j] -= H[i*n_+k]*dot;
-                        }
-                        sycl::group_barrier(item.get_group());
-                        for (int i = tid; i < n_; i += num_threads) {
-                            T dot = v0 * H[i*n_+(k+1)];
-                            for (int j = k+2; j < n_; j++) dot += H[j*n_+k]*H[i*n_+j];
-                            dot *= tau;
-                            H[i*n_+(k+1)] -= v0*dot;
-                            for (int j = k+2; j < n_; j++) H[i*n_+j] -= H[j*n_+k]*dot;
-                        }
-                        sycl::group_barrier(item.get_group());
-                        for (int i = tid; i < n_; i += num_threads) {
-                            T dot = v0 * Q[i*n_+(k+1)];
-                            for (int j = k+2; j < n_; j++) dot += H[j*n_+k]*Q[i*n_+j];
-                            dot *= tau;
-                            Q[i*n_+(k+1)] -= v0*dot;
-                            for (int j = k+2; j < n_; j++) Q[i*n_+j] -= H[j*n_+k]*dot;
-                        }
-                        sycl::group_barrier(item.get_group());
-                        if (tid == 0) { H[(k+1)*n_+k]=alpha; for (int i=k+2;i<n_;i++) H[i*n_+k]=T(0); }
-                        sycl::group_barrier(item.get_group());
-                    }
-
-                    // QR iteration with implicit double shifts
-                    if (tid == 0) { scratch[3] = static_cast<T>(n_); }
-                    sycl::group_barrier(item.get_group());
-
-                    for (int iter = 0; iter < max_iter; iter++) {
-                        int nn = static_cast<int>(scratch[3]);
-                        if (nn <= 0) break;
-
-                        if (tid == 0) {
-                            bool deflated = false;
-                            if (nn >= 2) {
-                                T tst = sycl::fabs(H[(nn-2)*n_+(nn-2)])+sycl::fabs(H[(nn-1)*n_+(nn-1)]);
-                                if (tst == T(0)) tst = T(1);
-                                if (sycl::fabs(H[(nn-1)*n_+(nn-2)]) < eps*tst) {
-                                    wr[nn-1]=H[(nn-1)*n_+(nn-1)]; wi[nn-1]=T(0);
-                                    H[(nn-1)*n_+(nn-2)]=T(0); scratch[3]=static_cast<T>(nn-1); deflated=true;
+                            T x = H[en*n_+en];
+                            if (l == en) { H[en*n_+en] = x + t; wr[en] = H[en*n_+en]; wi[en] = T(0); en -= 1; break; }
+                            T y = H[na*n_+na];
+                            T w = H[en*n_+na]*H[na*n_+en];
+                            if (l == na) {
+                                T p = T(0.5)*(y - x);
+                                T q = p*p + w;
+                                T zz = sycl::sqrt(sycl::fabs(q));
+                                x = H[en*n_+en] = x + t; H[na*n_+na] = y + t;
+                                if (q >= T(0)) {
+                                    zz = p + sycl::copysign(zz, p);
+                                    wr[na] = wr[en] = x + zz;
+                                    if (zz != T(0)) wr[en] = x - w/zz;
+                                    wi[na] = wi[en] = T(0);
+                                    x = H[en*n_+na];
+                                    T s = sycl::fabs(x) + sycl::fabs(zz);
+                                    T p2 = x/s, q2 = zz/s;
+                                    T r = sycl::sqrt(p2*p2 + q2*q2);
+                                    p2 /= r; q2 /= r;
+                                    for (int j = na; j < n_; ++j) { T t1=H[na*n_+j]; H[na*n_+j]=q2*t1+p2*H[en*n_+j]; H[en*n_+j]=q2*H[en*n_+j]-p2*t1; }
+                                    for (int i = 0; i <= en; ++i) { T t1=H[i*n_+na]; H[i*n_+na]=q2*t1+p2*H[i*n_+en]; H[i*n_+en]=q2*H[i*n_+en]-p2*t1; }
+                                    for (int i = 0; i < n_; ++i)  { T t1=Z[i*n_+na]; Z[i*n_+na]=q2*t1+p2*Z[i*n_+en]; Z[i*n_+en]=q2*Z[i*n_+en]-p2*t1; }
+                                } else { wr[na] = wr[en] = x + p; wi[na] = zz; wi[en] = -zz; }
+                                en -= 2; break;
+                            }
+                            if (its == 30) { en = -1; break; }
+                            if (its == 10 || its == 20) {
+                                t += x;
+                                for (int i = 0; i <= en; ++i) H[i*n_+i] -= x;
+                                T s = sycl::fabs(H[en*n_+na]) + sycl::fabs(H[na*n_+(na-1)]);
+                                y = x = T(0.75)*s; w = T(-0.4375)*s*s;
+                            }
+                            its += 1;
+                            T p,q,r; int m;
+                            for (m = en-2; m >= l; --m) {
+                                T zz = H[m*n_+m];
+                                r = x - zz; T s = y - zz;
+                                p = (r*s - w)/H[(m+1)*n_+m] + H[m*n_+(m+1)];
+                                q = H[(m+1)*n_+(m+1)] - zz - r - s;
+                                r = H[(m+2)*n_+(m+1)];
+                                T sc = sycl::fabs(p)+sycl::fabs(q)+sycl::fabs(r);
+                                p /= sc; q /= sc; r /= sc;
+                                if (m == l) break;
+                                T tst1 = sycl::fabs(p)*(sycl::fabs(H[(m-1)*n_+(m-1)])+sycl::fabs(zz)+sycl::fabs(H[(m+1)*n_+(m+1)]));
+                                T tst2 = sycl::fabs(H[m*n_+(m-1)])*(sycl::fabs(q)+sycl::fabs(r));
+                                if (tst2 <= eps*tst1) break;
+                            }
+                            for (int i = m+2; i <= en; ++i) { H[i*n_+(i-2)]=T(0); if (i != m+2) H[i*n_+(i-3)]=T(0); }
+                            for (int k = m; k <= na; ++k) {
+                                bool notlast = (k != na);
+                                if (k != m) {
+                                    p = H[k*n_+(k-1)]; q = H[(k+1)*n_+(k-1)]; r = notlast ? H[(k+2)*n_+(k-1)] : T(0);
+                                    x = sycl::fabs(p)+sycl::fabs(q)+sycl::fabs(r);
+                                    if (x == T(0)) continue;
+                                    p /= x; q /= x; r /= x;
+                                }
+                                T s = sycl::copysign(sycl::sqrt(p*p+q*q+r*r), p);
+                                if (k == m) { if (l != m) H[k*n_+(k-1)] = -H[k*n_+(k-1)]; }
+                                else H[k*n_+(k-1)] = -s*x;
+                                p += s;
+                                T xx = p/s, yy = q/s, zz = r/s;
+                                q /= p; r /= p;
+                                for (int j = k; j < n_; ++j) {
+                                    p = H[k*n_+j] + q*H[(k+1)*n_+j];
+                                    if (notlast) { p += r*H[(k+2)*n_+j]; H[(k+2)*n_+j] -= p*zz; }
+                                    H[(k+1)*n_+j] -= p*yy; H[k*n_+j] -= p*xx;
+                                }
+                                int jmax = en < k+3 ? en : k+3;
+                                for (int i = 0; i <= jmax; ++i) {
+                                    p = xx*H[i*n_+k] + yy*H[i*n_+(k+1)];
+                                    if (notlast) { p += zz*H[i*n_+(k+2)]; H[i*n_+(k+2)] -= p*r; }
+                                    H[i*n_+(k+1)] -= p*q; H[i*n_+k] -= p;
+                                }
+                                for (int i = 0; i < n_; ++i) {
+                                    p = xx*Z[i*n_+k] + yy*Z[i*n_+(k+1)];
+                                    if (notlast) { p += zz*Z[i*n_+(k+2)]; Z[i*n_+(k+2)] -= p*r; }
+                                    Z[i*n_+(k+1)] -= p*q; Z[i*n_+k] -= p;
                                 }
                             }
-                            if (!deflated && nn >= 3) {
-                                T tst = sycl::fabs(H[(nn-3)*n_+(nn-3)])+sycl::fabs(H[(nn-2)*n_+(nn-2)]);
-                                if (tst == T(0)) tst = T(1);
-                                if (sycl::fabs(H[(nn-2)*n_+(nn-3)]) < eps*tst) {
-                                    T a=H[(nn-2)*n_+(nn-2)], b=H[(nn-2)*n_+(nn-1)];
-                                    T c=H[(nn-1)*n_+(nn-2)], dd=H[(nn-1)*n_+(nn-1)];
-                                    T trace=a+dd, det=a*dd-b*c, disc=trace*trace-T(4)*det;
-                                    if (disc>=T(0)) {
-                                        T sq=sycl::sqrt(disc);
-                                        wr[nn-2]=T(0.5)*(trace+sq); wi[nn-2]=T(0);
-                                        wr[nn-1]=T(0.5)*(trace-sq); wi[nn-1]=T(0);
+                        }
+                    }
+
+                    // eigenvector back-substitution on the Schur form
+                    if (norm != T(0)) {
+                        for (int e = n_-1; e >= 0; --e) {
+                            T p = wr[e], q = wi[e];
+                            int na2 = e - 1;
+                            if (q == T(0)) {
+                                int m = e; H[e*n_+e] = T(1);
+                                T zz_s = T(0), s_s = T(0);
+                                for (int i = e-1; i >= 0; --i) {
+                                    T w = H[i*n_+i] - p;
+                                    T r = T(0);
+                                    for (int j = m; j <= e; ++j) r += H[i*n_+j]*H[j*n_+e];
+                                    if (wi[i] < T(0)) { zz_s = w; s_s = r; continue; }
+                                    m = i;
+                                    if (wi[i] == T(0)) {
+                                        T tt = (w == T(0)) ? eps*norm : w;
+                                        H[i*n_+e] = -r/tt;
                                     } else {
-                                        T sq=sycl::sqrt(-disc);
-                                        wr[nn-2]=T(0.5)*trace; wi[nn-2]=T(0.5)*sq;
-                                        wr[nn-1]=T(0.5)*trace; wi[nn-1]=T(-0.5)*sq;
+                                        T xx = H[i*n_+(i+1)], yv = H[(i+1)*n_+i];
+                                        T qd = (wr[i]-p)*(wr[i]-p) + wi[i]*wi[i];
+                                        T tt = (xx*s_s - zz_s*r)/qd;
+                                        H[i*n_+e] = tt;
+                                        if (sycl::fabs(xx) > sycl::fabs(zz_s)) H[(i+1)*n_+e] = (-r - w*tt)/xx;
+                                        else                                   H[(i+1)*n_+e] = (-s_s - yv*tt)/zz_s;
                                     }
-                                    H[(nn-2)*n_+(nn-3)]=T(0); scratch[3]=static_cast<T>(nn-2); deflated=true;
+                                    T tmag = sycl::fabs(H[i*n_+e]);
+                                    if ((eps*tmag)*tmag > T(1)) for (int j = i; j <= e; ++j) H[j*n_+e] /= tmag;
                                 }
-                            }
-                            if (!deflated && nn == 1) { wr[0]=H[0]; wi[0]=T(0); scratch[3]=T(0); deflated=true; }
-                            scratch[2] = deflated ? T(1) : T(0);
-                        }
-                        sycl::group_barrier(item.get_group());
-                        if (scratch[2] != T(0)) continue;
-
-                        nn = static_cast<int>(scratch[3]);
-                        T x, y, z;
-                        if (tid == 0) {
-                            T s = H[(nn-2)*n_+(nn-2)]+H[(nn-1)*n_+(nn-1)];
-                            T t = H[(nn-2)*n_+(nn-2)]*H[(nn-1)*n_+(nn-1)]-H[(nn-2)*n_+(nn-1)]*H[(nn-1)*n_+(nn-2)];
-                            scratch[0] = H[0]*H[0]+H[1]*H[n_]-s*H[0]+t;
-                            scratch[1] = H[n_]*(H[0]+H[n_+1]-s);
-                            scratch[2] = (nn>2) ? H[n_]*H[2*n_+1] : T(0);
-                        }
-                        sycl::group_barrier(item.get_group());
-                        x=scratch[0]; y=scratch[1]; z=scratch[2];
-
-                        for (int k = 0; k+2 < nn; k++) {
-                            T norm_v = sycl::sqrt(x*x+y*y+z*z);
-                            if (norm_v < zero_tol) {
-                                if (tid == 0) {
-                                    x=H[(k+1)*n_+k]; y=(k+2<nn)?H[(k+2)*n_+k]:T(0); z=(k+3<nn)?H[(k+3)*n_+k]:T(0);
-                                    scratch[0]=x; scratch[1]=y; scratch[2]=z;
+                            } else if (q < T(0)) {
+                                int m = na2;
+                                if (sycl::fabs(H[e*n_+na2]) > sycl::fabs(H[na2*n_+e])) {
+                                    H[na2*n_+na2] = q/H[e*n_+na2];
+                                    H[na2*n_+e]   = -(H[e*n_+e]-p)/H[e*n_+na2];
+                                } else {
+                                    T zr, zi; cdiv(T(0), -H[na2*n_+e], H[na2*n_+na2]-p, q, zr, zi);
+                                    H[na2*n_+na2] = zr; H[na2*n_+e] = zi;
                                 }
-                                sycl::group_barrier(item.get_group());
-                                x=scratch[0]; y=scratch[1]; z=scratch[2]; continue;
-                            }
-                            T alpha_h = -sycl::copysign(norm_v, x);
-                            T v0h=x-alpha_h, v1h=y, v2h=z;
-                            T v_sq = v0h*v0h+v1h*v1h+v2h*v2h;
-                            if (v_sq < zero_tol) {
-                                if (tid == 0) {
-                                    x=H[(k+1)*n_+k]; y=(k+2<nn)?H[(k+2)*n_+k]:T(0); z=(k+3<nn)?H[(k+3)*n_+k]:T(0);
-                                    scratch[0]=x; scratch[1]=y; scratch[2]=z;
+                                H[e*n_+na2] = T(0); H[e*n_+e] = T(1);
+                                T zz_s = T(0), ra_s = T(0), sa_s = T(0);
+                                for (int i = e-2; i >= 0; --i) {
+                                    T w = H[i*n_+i] - p;
+                                    T ra = T(0), sa = T(0);
+                                    for (int j = m; j <= e; ++j) { ra += H[i*n_+j]*H[j*n_+na2]; sa += H[i*n_+j]*H[j*n_+e]; }
+                                    if (wi[i] < T(0)) { zz_s = w; ra_s = ra; sa_s = sa; continue; }
+                                    m = i;
+                                    if (wi[i] == T(0)) {
+                                        T zr, zi; cdiv(-ra, -sa, w, q, zr, zi);
+                                        H[i*n_+na2] = zr; H[i*n_+e] = zi;
+                                    } else {
+                                        T xx = H[i*n_+(i+1)], yv = H[(i+1)*n_+i];
+                                        T vr = (wr[i]-p)*(wr[i]-p) + wi[i]*wi[i] - q*q;
+                                        T vi = (wr[i]-p)*T(2)*q;
+                                        if (vr == T(0) && vi == T(0))
+                                            vr = eps*norm*(sycl::fabs(w)+sycl::fabs(q)+sycl::fabs(xx)+sycl::fabs(yv)+sycl::fabs(zz_s));
+                                        T zr, zi;
+                                        cdiv(xx*ra_s - zz_s*ra + q*sa, xx*sa_s - zz_s*sa - q*ra, vr, vi, zr, zi);
+                                        H[i*n_+na2] = zr; H[i*n_+e] = zi;
+                                        if (sycl::fabs(xx) > sycl::fabs(zz_s) + sycl::fabs(q)) {
+                                            H[(i+1)*n_+na2] = (-ra - w*H[i*n_+na2] + q*H[i*n_+e])/xx;
+                                            H[(i+1)*n_+e]   = (-sa - w*H[i*n_+e] - q*H[i*n_+na2])/xx;
+                                        } else {
+                                            T z2r, z2i; cdiv(-ra_s - yv*H[i*n_+na2], -sa_s - yv*H[i*n_+e], zz_s, q, z2r, z2i);
+                                            H[(i+1)*n_+na2] = z2r; H[(i+1)*n_+e] = z2i;
+                                        }
+                                    }
+                                    T tmag = sycl::fabs(H[i*n_+na2]); { T tm2 = sycl::fabs(H[i*n_+e]); if (tm2 > tmag) tmag = tm2; }
+                                    if ((eps*tmag)*tmag > T(1)) for (int j = i; j <= e; ++j) { H[j*n_+na2] /= tmag; H[j*n_+e] /= tmag; }
                                 }
-                                sycl::group_barrier(item.get_group());
-                                x=scratch[0]; y=scratch[1]; z=scratch[2]; continue;
-                            }
-                            T tau_h = T(2)/v_sq;
-                            int m_lim = (k+4<nn) ? k+4 : nn;
-
-                            for (int j = k+tid; j < nn; j += num_threads) {
-                                T dot = v0h*H[k*n_+j]+v1h*H[(k+1)*n_+j];
-                                if (k+2<nn) dot += v2h*H[(k+2)*n_+j];
-                                dot *= tau_h;
-                                H[k*n_+j]-=v0h*dot; H[(k+1)*n_+j]-=v1h*dot;
-                                if (k+2<nn) H[(k+2)*n_+j]-=v2h*dot;
-                            }
-                            sycl::group_barrier(item.get_group());
-                            for (int i = tid; i < m_lim; i += num_threads) {
-                                T dot = v0h*H[i*n_+k]+v1h*H[i*n_+(k+1)];
-                                if (k+2<nn) dot += v2h*H[i*n_+(k+2)];
-                                dot *= tau_h;
-                                H[i*n_+k]-=v0h*dot; H[i*n_+(k+1)]-=v1h*dot;
-                                if (k+2<nn) H[i*n_+(k+2)]-=v2h*dot;
-                            }
-                            sycl::group_barrier(item.get_group());
-                            for (int i = tid; i < n_; i += num_threads) {
-                                T dot = v0h*Q[i*n_+k]+v1h*Q[i*n_+(k+1)];
-                                if (k+2<nn) dot += v2h*Q[i*n_+(k+2)];
-                                dot *= tau_h;
-                                Q[i*n_+k]-=v0h*dot; Q[i*n_+(k+1)]-=v1h*dot;
-                                if (k+2<nn) Q[i*n_+(k+2)]-=v2h*dot;
-                            }
-                            sycl::group_barrier(item.get_group());
-                            if (tid == 0) {
-                                if (k>0) H[k*n_+(k-1)]=alpha_h;
-                                if (k+2<nn) H[(k+2)*n_+k]=T(0);
-                                if (k+3<nn) H[(k+3)*n_+k]=T(0);
-                                x=H[(k+1)*n_+k]; y=(k+2<nn)?H[(k+2)*n_+k]:T(0); z=(k+3<nn)?H[(k+3)*n_+k]:T(0);
-                                scratch[0]=x; scratch[1]=y; scratch[2]=z;
-                            }
-                            sycl::group_barrier(item.get_group());
-                            x=scratch[0]; y=scratch[1]; z=scratch[2];
-                        }
-
-                        if (nn >= 2) {
-                            T norm_v = sycl::sqrt(x*x+y*y);
-                            if (norm_v > zero_tol) {
-                                int kk = nn-2;
-                                T c_v=x/norm_v, s_v=-y/norm_v;
-                                for (int j = kk+tid; j < nn; j += num_threads) {
-                                    T tmp = c_v*H[kk*n_+j]-s_v*H[(kk+1)*n_+j];
-                                    H[(kk+1)*n_+j] = s_v*H[kk*n_+j]+c_v*H[(kk+1)*n_+j];
-                                    H[kk*n_+j] = tmp;
-                                }
-                                sycl::group_barrier(item.get_group());
-                                for (int i = tid; i < nn; i += num_threads) {
-                                    T tmp = c_v*H[i*n_+kk]-s_v*H[i*n_+(kk+1)];
-                                    H[i*n_+(kk+1)] = s_v*H[i*n_+kk]+c_v*H[i*n_+(kk+1)];
-                                    H[i*n_+kk] = tmp;
-                                }
-                                sycl::group_barrier(item.get_group());
-                                for (int i = tid; i < n_; i += num_threads) {
-                                    T tmp = c_v*Q[i*n_+kk]-s_v*Q[i*n_+(kk+1)];
-                                    Q[i*n_+(kk+1)] = s_v*Q[i*n_+kk]+c_v*Q[i*n_+(kk+1)];
-                                    Q[i*n_+kk] = tmp;
-                                }
-                                sycl::group_barrier(item.get_group());
                             }
                         }
+                        for (int j = n_-1; j >= 0; --j)
+                            for (int i = 0; i < n_; ++i) {
+                                T s = T(0);
+                                for (int k = 0; k <= j; ++k) s += Z[i*n_+k]*H[k*n_+j];
+                                Z[i*n_+j] = s;
+                            }
                     }
 
-                    if (tid == 0) {
-                        int nn = static_cast<int>(scratch[3]);
-                        if (nn == 1) { wr[0]=H[0]; wi[0]=T(0); }
-                        else if (nn == 2) {
-                            T a=H[0], b=H[1], c=H[n_], dd=H[n_+1];
-                            T trace=a+dd, det=a*dd-b*c, disc=trace*trace-T(4)*det;
-                            if (disc>=T(0)) {
-                                T sq=sycl::sqrt(disc);
-                                wr[0]=T(0.5)*(trace+sq); wi[0]=T(0);
-                                wr[1]=T(0.5)*(trace-sq); wi[1]=T(0);
-                            } else {
-                                T sq=sycl::sqrt(-disc);
-                                wr[0]=T(0.5)*trace; wi[0]=T(0.5)*sq;
-                                wr[1]=T(0.5)*trace; wi[1]=T(-0.5)*sq;
-                            }
+                    // normalize each (complex) eigenvector to unit 2-norm
+                    for (int k = 0; k < n_; ++k) {
+                        if (wi[k] > T(0)) {
+                            T nrm = T(0); for (int i=0;i<n_;++i) nrm += Z[i*n_+k]*Z[i*n_+k]+Z[i*n_+(k+1)]*Z[i*n_+(k+1)];
+                            nrm = sycl::sqrt(nrm); if (nrm>T(0)) for(int i=0;i<n_;++i){ Z[i*n_+k]/=nrm; Z[i*n_+(k+1)]/=nrm; }
+                            ++k;
+                        } else if (wi[k] == T(0)) {
+                            T nrm = T(0); for (int i=0;i<n_;++i) nrm += Z[i*n_+k]*Z[i*n_+k];
+                            nrm = sycl::sqrt(nrm); if (nrm>T(0)) for(int i=0;i<n_;++i) Z[i*n_+k]/=nrm;
                         }
                     }
-                    sycl::group_barrier(item.get_group());
-
-                    for (int idx = tid; idx < n_ * n_; idx += num_threads) Vs[idx] = Q[idx];
                 });
         }).wait();
     };
 
-    if (A.dtype() == DType::Float32) launch_eig(work.data<float>(), WR.data<float>(), WI.data<float>(), V.data<float>());
-    else launch_eig(work.data<double>(), WR.data<double>(), WI.data<double>(), V.data<double>());
+    if (A.dtype() == DType::Float32) launch_eig(work.data<float>(), WR.data<float>(), WI.data<float>(), V.data<float>(), vbuf.data<float>());
+    else launch_eig(work.data<double>(), WR.data<double>(), WI.data<double>(), V.data<double>(), vbuf.data<double>());
 
     return {WR, WI, V};
 }

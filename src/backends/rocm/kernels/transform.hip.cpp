@@ -664,6 +664,37 @@ auto repeat_kernel(const Tensor& input_in, const std::vector<int64_t>& repeats, 
             reinterpret_cast<const hip_bfloat16*>(input.data<BFloat16>()),
             reinterpret_cast<hip_bfloat16*>(output.data<BFloat16>()),
             d_input_shape, d_output_shape, d_repeats, ndim, total_elements);
+    } else if (input.dtype() == DType::Int16 || input.dtype() == DType::UInt16) {
+        hipLaunchKernelGGL(repeat_kernel_impl<uint16_t>,
+            dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
+            reinterpret_cast<const uint16_t*>(input.data_ptr()),
+            reinterpret_cast<uint16_t*>(output.data_ptr()),
+            d_input_shape, d_output_shape, d_repeats, ndim, total_elements);
+    } else if (input.dtype() == DType::UInt32) {
+        hipLaunchKernelGGL(repeat_kernel_impl<uint32_t>,
+            dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
+            reinterpret_cast<const uint32_t*>(input.data_ptr()),
+            reinterpret_cast<uint32_t*>(output.data_ptr()),
+            d_input_shape, d_output_shape, d_repeats, ndim, total_elements);
+    } else if (input.dtype() == DType::Int8 || input.dtype() == DType::UInt8 ||
+               input.dtype() == DType::Bool) {
+        hipLaunchKernelGGL(repeat_kernel_impl<uint8_t>,
+            dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
+            reinterpret_cast<const uint8_t*>(input.data_ptr()),
+            reinterpret_cast<uint8_t*>(output.data_ptr()),
+            d_input_shape, d_output_shape, d_repeats, ndim, total_elements);
+    } else if (input.dtype() == DType::UInt64 || input.dtype() == DType::Complex64) {
+        hipLaunchKernelGGL(repeat_kernel_impl<uint64_t>,
+            dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
+            reinterpret_cast<const uint64_t*>(input.data_ptr()),
+            reinterpret_cast<uint64_t*>(output.data_ptr()),
+            d_input_shape, d_output_shape, d_repeats, ndim, total_elements);
+    } else if (input.dtype() == DType::Complex128) {
+        hipLaunchKernelGGL(repeat_kernel_impl<double2>,
+            dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
+            reinterpret_cast<const double2*>(input.data_ptr()),
+            reinterpret_cast<double2*>(output.data_ptr()),
+            d_input_shape, d_output_shape, d_repeats, ndim, total_elements);
     } else {
         HIP_CHECK(hipFree(d_input_shape));
         HIP_CHECK(hipFree(d_output_shape));

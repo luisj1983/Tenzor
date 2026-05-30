@@ -1354,128 +1354,58 @@ MultiLabelMarginLoss::MultiLabelMarginLoss(Reduction reduction)
 // it alongside the loss. Reduction scaling is applied by attaching the
 // built-in mean/sum autograd ops after the per-sample loss Variable.
 // ---------------------------------------------------------------------------
-class MultiLabelMarginLossBackward : public Function {
-public:
-    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override {
-        (void)inputs;
-        return {};
-    }
-
-    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override {
-        // grad_outputs[0]: d(loss_reduced)/d(per_sample_loss), shape (N,).
-        // We owe d(loss_reduced)/d(input), shape (N, C):
-        //     grad_input[b, c] = grad_outputs[0][b] * raw_grad_[b, c]
-        auto g_cpu = grad_outputs[0].to(Device::cpu()).to(DType::Float32).contiguous();
-        const float* g = g_cpu.data<float>();
-        const int64_t N = raw_grad_.shape()[0];
-        const int64_t C = raw_grad_.shape()[1];
-
-        Tensor out({N, C}, DType::Float32, Device::cpu());
-        const float* r = raw_grad_.data<float>();
-        float* o = out.data<float>();
-        for (int64_t b = 0; b < N; ++b) {
-            const float gb = g[b];
-            for (int64_t c = 0; c < C; ++c) {
-                o[b * C + c] = gb * r[b * C + c];
-            }
-        }
-        return {out.to(orig_dtype_).to(orig_device_)};
-    }
-
-    auto name() const -> std::string override { return "MultiLabelMarginLossBackward"; }
-
-    // MultiLabelMarginLoss is a sum of max(0, 1 - x_y + x_i) terms — piecewise-
-    // linear in the input. Its second derivative is structurally zero at every
-    // differentiable point, so the stub correctly represents the op for
-    // create_graph=true instead of throwing.
-    TENZOR_HIGHER_ORDER_STRUCTURAL_ZERO_STUB()
-
-    Tensor raw_grad_;              // (N, C) float32 on CPU
-    DType orig_dtype_ = DType::Float32;
-    Device orig_device_ = Device::cpu();
-};
-
 auto MultiLabelMarginLoss::forward(const Variable& input, const Tensor& target) -> Variable {
-    // Multi-label margin loss. target is (N, C) with class indices and -1 sentinels.
-    //   per_sample_loss[b] = (1/C) * sum_{j: y_j >= 0} sum_{k: k not in targets}
-    //                         max(0, 1 - (x[b, y_j] - x[b, k]))
-    //
-    // For active margin terms (margin > 0):
-    //   d(sample_loss)/d(x[b, y_j]) += -1/C
-    //   d(sample_loss)/d(x[b, k])   += +1/C
-    auto input_t = input.tensor();
-    int64_t batch_size = input_t.shape()[0];
-    int64_t n_classes = input_t.shape()[1];
+    // Multi-label margin loss, computed entirely on the input's device (no host
+    // round-trip — the previous implementation ran a CPU loop and copied back,
+    // violating the backend-agnostic contract). For the target-membership mask mt
+    // (mt[b,c] = 1 iff class c is a target of sample b):
+    //   per_sample[b] = (1/C) * sum_{t: mt[b,t]=1} sum_{k: mt[b,k]=0}
+    //                     relu(1 - x[b,t] + x[b,k])
+    // Built from differentiable Variable ops, so autograd derives the backward.
+    const DType orig_dtype = input.tensor().dtype();
+    const Device dev = input.tensor().device();
+    const bool needs_upcast = (orig_dtype == DType::Float16 || orig_dtype == DType::BFloat16);
+    Variable x = needs_upcast ? tenzor::nn::variable_cast(input, DType::Float32) : input;
 
-    // Compute on CPU for correctness (rarely in the hot path).
-    auto cpu_input = input_t.to(Device::cpu()).to(DType::Float32);
-    auto cpu_target = target.to(Device::cpu());
-    auto cpu_loss = tenzor::zeros({batch_size}, DType::Float32, Device::cpu());
-    auto cpu_grad = tenzor::zeros({batch_size, n_classes}, DType::Float32, Device::cpu());
+    const int64_t N = x.tensor().shape()[0];
+    const int64_t C = x.tensor().shape()[1];
 
-    const float* in_data = cpu_input.data<float>();
-    const int64_t* tgt_data = cpu_target.data<int64_t>();
-    float* loss_data = cpu_loss.data<float>();
-    float* grad_data = cpu_grad.data<float>();
+    // Target-membership mask mt (N, C) on device — constant w.r.t. input.
+    Tensor tgt_f = target.to(DType::Float32).to(dev).contiguous();
+    Tensor zeros_nc = tenzor::full({N, C}, 0.0, DType::Float32, dev);
+    Tensor valid = tenzor::ge(tgt_f, zeros_nc).to(DType::Float32);   // 1.0 where target >= 0
+    Tensor safe = tenzor::clamp_min(tgt_f, 0.0).to(DType::Int64);    // -1 sentinels -> 0
+    // one_hot of an (N,C) index tensor yields N*C rows of width C; some backends
+    // return it as (N*C, C) and others as (N, C, C). Reshape to (N, C, C) so the
+    // downstream broadcasting is backend-independent.
+    Tensor oh = tenzor::one_hot(safe, C).to(DType::Float32).reshape({N, C, C});
+    Tensor oh_valid = tenzor::mul(oh, valid.reshape({N, C, 1}));     // drop padded positions
+    Tensor counts = tenzor::sum(oh_valid, 1, false);                // (N, C)
+    Tensor mt = tenzor::clamp_max(counts, 1.0);                      // (N, C) in {0, 1}
 
-    const float inv_C = 1.0f / static_cast<float>(n_classes);
+    // Pairwise hinge P[b,t,k] = relu(1 - x[b,t] + x[b,k]).
+    auto xt = unsqueeze(x, 2);            // (N, C, 1)
+    auto xk = unsqueeze(x, 1);            // (N, 1, C)
+    auto one = scalar_var(1.0f, x);
+    auto P = relu(one - xt + xk);         // (N, C, C)
 
-    for (int64_t b = 0; b < batch_size; b++) {
-        // Build a bitmap of which classes are targets for this sample.
-        std::vector<bool> is_target(n_classes, false);
-        for (int64_t t = 0; t < n_classes; t++) {
-            int64_t yt = tgt_data[b * n_classes + t];
-            if (yt < 0) break;
-            if (yt >= 0 && yt < n_classes) is_target[yt] = true;
-        }
+    // Weight w[b,t,k] = mt[b,t] * (1 - mt[b,k]) (constant, no grad).
+    Tensor ones_1c = tenzor::full({N, 1, C}, 1.0, DType::Float32, dev);
+    Tensor w = tenzor::mul(mt.reshape({N, C, 1}),
+                           tenzor::sub(ones_1c, mt.reshape({N, 1, C})));  // (N, C, C)
+    auto weighted = P * Variable(w, false);
 
-        float sample_loss = 0.0f;
-        for (int64_t j = 0; j < n_classes; j++) {
-            int64_t y_j = tgt_data[b * n_classes + j];
-            if (y_j < 0) break;
-            float x_yj = in_data[b * n_classes + y_j];
-            for (int64_t k = 0; k < n_classes; k++) {
-                if (is_target[k]) continue;
-                float margin = 1.0f - (x_yj - in_data[b * n_classes + k]);
-                if (margin > 0.0f) {
-                    sample_loss += margin;
-                    grad_data[b * n_classes + y_j] -= inv_C;
-                    grad_data[b * n_classes + k]   += inv_C;
-                }
-            }
-        }
-        loss_data[b] = sample_loss * inv_C;
-    }
+    auto per_sample = sum(sum(weighted, 2, false), 1, false);  // (N,)
+    per_sample = per_sample * scalar_var(1.0f / static_cast<float>(C), per_sample);
 
-    const Device original_device = input_t.device();
-    const DType  original_dtype  = input_t.dtype();
-    auto per_sample_tensor = cpu_loss.to(original_dtype).to(original_device);
-
-    const bool needs_grad = input.requires_grad() && is_grad_enabled();
-    Variable loss_var(per_sample_tensor, needs_grad);
-
-    if (needs_grad) {
-        auto grad_fn = std::make_shared<MultiLabelMarginLossBackward>();
-        grad_fn->raw_grad_ = cpu_grad;
-        grad_fn->orig_dtype_ = original_dtype;
-        grad_fn->orig_device_ = original_device;
-
-        std::vector<std::shared_ptr<Function>> next_funcs;
-        if (input.grad_fn()) next_funcs.push_back(input.grad_fn());
-        grad_fn->set_next_functions(next_funcs);
-        grad_fn->set_input_variables({input});
-
-        loss_var.set_grad_fn(grad_fn);
-    }
-
-    // Reduction over the per-sample Variable — uses the standard autograd mean/sum
-    // which will multiply the upstream scalar gradient back into (N,), meeting
-    // our custom grad_fn at the right shape.
+    Variable reduced;
     switch (reduction_) {
-        case Reduction::Mean: return mean(loss_var);
-        case Reduction::Sum:  return sum(loss_var);
-        default:              return loss_var;
+        case Reduction::Mean: reduced = mean(per_sample); break;
+        case Reduction::Sum:  reduced = sum(per_sample); break;
+        default:              reduced = per_sample; break;
     }
+    if (needs_upcast) reduced = tenzor::nn::variable_cast(reduced, orig_dtype);
+    return reduced;
 }
 
 auto multilabel_margin_loss(const Variable& input, const Tensor& target,

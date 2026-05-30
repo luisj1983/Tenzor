@@ -525,8 +525,9 @@ namespace oneapi {
                                 sycl::queue& queue) -> Tensor;
     auto conv2d_backward_bias(const Tensor& grad_output, sycl::queue& queue) -> Tensor;
     auto conv_transpose2d_forward(const Tensor& input, const Tensor& weight, const Tensor* bias,
-                                  int64_t stride, int64_t padding, int64_t output_padding,
-                                  int64_t dilation, int64_t groups, sycl::queue& queue) -> Tensor;
+                                  int64_t sH, int64_t sW, int64_t pH, int64_t pW,
+                                  int64_t opH, int64_t opW, int64_t dH, int64_t dW,
+                                  int64_t groups, sycl::queue& queue) -> Tensor;
 
     // ---- Conv3d operations (kernels/conv3d.cpp) ----
     auto conv3d_forward(const Tensor& input, const Tensor& weight, const Tensor* bias,
@@ -883,7 +884,8 @@ namespace oneapi {
 
     // ---- DepthwiseConv2d (kernels/conv2d.cpp) ----
     auto depthwise_conv2d_kernel(const Tensor& input, const Tensor& weight, const Tensor* bias,
-                                  int64_t stride, int64_t padding, int64_t dilation,
+                                  int64_t sH, int64_t sW, int64_t pH, int64_t pW,
+                                  int64_t dH, int64_t dW,
                                   sycl::queue& queue) -> Tensor;
     auto depthwise_conv1d_kernel(const Tensor& input, const Tensor& weight, const Tensor* bias,
                                   int64_t stride, int64_t padding, int64_t dilation,
@@ -2143,16 +2145,11 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
     table.register_kernel(OpId::ConvTranspose2dForward,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
             TENZOR_READ_CONVT2D_ATTRS();
-            if (stride[0] != stride[1] || padding[0] != padding[1] ||
-                output_padding[0] != output_padding[1] || dilation[0] != dilation[1]) {
-                throw std::runtime_error(
-                    "OneAPI ConvTranspose2d: asymmetric stride/padding/"
-                    "output_padding/dilation is not yet supported (I5-followup).");
-            }
             const Tensor* bias = inputs.size() > 2 ? &inputs[2] : nullptr;
             return {oneapi::conv_transpose2d_forward(inputs[0], inputs[1], bias,
-                                                      stride[0], padding[0], output_padding[0],
-                                                      dilation[0], groups, get_q(inputs))};
+                                                      stride[0], stride[1], padding[0], padding[1],
+                                                      output_padding[0], output_padding[1],
+                                                      dilation[0], dilation[1], groups, get_q(inputs))};
         });
 
     // F.11: Conv3d/ConvT3d on OneAPI take std::vector<int64_t> per axis.
@@ -4297,19 +4294,14 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
 
     table.register_kernel(OpId::DepthwiseConv2d,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
-            // F.11: per-axis read; depthwise OneAPI kernel is scalar-only, so
-            // reject asymmetric instead of silently squashing.
+            // Per-axis (asymmetric) stride/padding/dilation, natively supported.
             const auto stride   = ::tenzor::backend::attrs::stride_2d(attrs);
             const auto padding  = ::tenzor::backend::attrs::padding_2d(attrs);
             const auto dilation = ::tenzor::backend::attrs::dilation_2d(attrs);
-            if (stride[0] != stride[1] || padding[0] != padding[1] || dilation[0] != dilation[1]) {
-                throw std::runtime_error(
-                    "OneAPI DepthwiseConv2d: asymmetric stride/padding/dilation "
-                    "is not yet supported.");
-            }
             const Tensor* bias = inputs.size() > 2 ? &inputs[2] : nullptr;
             return {oneapi::depthwise_conv2d_kernel(inputs[0], inputs[1], bias,
-                                                     stride[0], padding[0], dilation[0],
+                                                     stride[0], stride[1], padding[0], padding[1],
+                                                     dilation[0], dilation[1],
                                                      get_q(inputs))};
         });
 
@@ -4498,22 +4490,8 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
                 left, transpose_q, get_q(inputs));
         });
 
-    table.register_kernel(OpId::LinalgCholeskySolve,
-        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
-            bool upper = attrs.get_bool(AttrKey::Upper, false);
-            auto& q = get_q(inputs);
-            if (!upper) {
-                auto Y = oneapi::linalg_solve_triangular_kernel(inputs[1], inputs[0], false, false, q);
-                int64_t ndim = inputs[1].ndim();
-                auto Lt = tenzor::transpose(inputs[1], ndim - 2, ndim - 1).contiguous();
-                return {oneapi::linalg_solve_triangular_kernel(Lt, Y, true, false, q)};
-            } else {
-                int64_t ndim = inputs[1].ndim();
-                auto Ut = tenzor::transpose(inputs[1], ndim - 2, ndim - 1).contiguous();
-                auto Y = oneapi::linalg_solve_triangular_kernel(Ut, inputs[0], false, false, q);
-                return {oneapi::linalg_solve_triangular_kernel(inputs[1], Y, true, false, q)};
-            }
-        });
+    // (LinalgCholeskySolve registered once above — a duplicate registration here
+    //  previously overwrote it and emitted a dispatch-table warning at init.)
 
     // =========================================================================
     // LinalgVectorNorm, LinalgMatrixNorm, LinalgVecdot

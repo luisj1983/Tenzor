@@ -224,7 +224,11 @@ auto AWQQuantizer::quantize_layer(const Tensor& weight, const Tensor& act_scales
 
     // Prepare output tensors on CPU; move back to original device at the end.
     int64_t num_groups = (in_features + config_.group_size - 1) / config_.group_size;
-    auto scales = ops::zeros({out_features, num_groups}, DType::Float32, Device::cpu());
+    // Per-channel scales (out_features, in_features): scales[row, j] = quant_scale / s[j],
+    // so dequant W_recon[row, j] = (q - zero) * scales[row, j] is EXACT (no geometric-mean
+    // approximation over the group's per-channel activation-scale factors). Zero points
+    // remain per-group.
+    auto scales = ops::zeros({out_features, in_features}, DType::Float32, Device::cpu());
     auto zeros_tensor = ops::zeros({out_features, num_groups}, DType::Float32, Device::cpu());
 
     // Quantized weight in int32 (will be packed later)
@@ -289,24 +293,18 @@ auto AWQQuantizer::quantize_layer(const Tensor& weight, const Tensor& act_scales
                                   static_cast<float>(qmax));
             }
 
-            // The quantization scale must absorb the inverse of the channel
-            // scaling factor. At inference time: dequant = (q - zero) * scale.
-            // Since we scaled W by s before quantizing, we need to bake s^{-1}
-            // into the scale so the final output is correct:
-            //   W_recon[:, j] = (q - zero) * (scale / s[j])
-            // But we store per-group scales (one scale per row per group), not
-            // per-column. So we store the quantization scale as-is and expect
-            // the inference kernel to apply the inverse channel scaling separately,
-            // or we fold s^{-1} into the stored scale by using a representative
-            // value. Following the AWQ convention, we store the raw quant scale
-            // and the caller applies s^{-1} via the group_scales metadata.
-            //
-            // For simplicity and compatibility with the GPTQ packing format,
-            // we store the quant scale directly. The inverse channel scaling
-            // is folded into the per-group scale by dividing by the geometric
-            // mean of s within the group, which gives a good approximation.
+            // We scaled W by s before quantizing, so the exact per-column dequant is
+            //   W_recon[:, j] = (q - zero) * (scale / s[j]).
+            // We store the per-channel scale (scale / s[j]) directly below, so the
+            // reconstruction is exact rather than a per-group geometric-mean approximation.
 
-            scales_ptr[row * num_groups + group_idx] = scale;
+            // Exact per-channel scale: fold the quant scale with the inverse of each
+            // column's activation-scale factor s[j] (replaces the prior geometric-mean
+            // approximation, which was only correct up to a per-group constant).
+            for (int64_t j = 0; j < group_size; ++j) {
+                scales_ptr[row * in_features + (col_start + j)] =
+                    scale / std::max(s_ptr[j], 1e-8f);
+            }
             zeros_ptr[row * num_groups + group_idx] = zero;
 
             // Quantize each column in this group
@@ -317,22 +315,8 @@ auto AWQQuantizer::quantize_layer(const Tensor& weight, const Tensor& act_scales
             }
         }
 
-        // Adjust scales to fold in the inverse channel scaling factor.
-        // For each row, the effective per-column dequantization is:
-        //   W_recon[:, j] = (q[:, j] - zero) * scale / s[j]
-        // Since we store one scale per group, we absorb s^{-1} into the scale
-        // using the geometric mean of the group's scaling factors.
-        // This is an approximation that works well in practice.
-        float log_s_sum = 0.0f;
-        for (int64_t j = 0; j < group_size; ++j) {
-            log_s_sum += std::log(std::max(s_ptr[j], 1e-8f));
-        }
-        float s_geomean = std::exp(log_s_sum / static_cast<float>(group_size));
-        float s_geomean_inv = 1.0f / std::max(s_geomean, 1e-8f);
-
-        for (int64_t row = 0; row < out_features; ++row) {
-            scales_ptr[row * num_groups + group_idx] *= s_geomean_inv;
-        }
+        // (No geometric-mean fold: the exact per-channel s[j]^{-1} is already baked
+        //  into scales[row, col_start + j] above.)
     }
 
     // Pack INT4 weights if using 4-bit quantization

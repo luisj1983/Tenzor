@@ -357,6 +357,9 @@ struct ExpKernelBFloat16 {};
 struct PowKernelBFloat16 {};
 struct WhereKernelInt64 {};
 struct RepeatKernelFloat32 {};
+// Generic size-dispatched repeat copy: one SYCL kernel name per element type.
+template <typename T> class RepeatCopyKernel;
+struct RepeatElem16 { uint64_t a; uint64_t b; };
 struct RepeatKernelFloat64 {};
 struct RepeatKernelFloat16 {};
 
@@ -3265,42 +3268,12 @@ auto repeat_kernel(const Tensor& input_in, const std::vector<int64_t>& repeats, 
         out_stride *= out_shape[i];
     }
 
-    if (input.dtype() == DType::Float32) {
-        const float* in_ptr = get_data_ptr<const float>(input);
-        float* out_ptr = get_data_ptr<float>(output);
-
-        // Copy shape and strides to device-accessible memory
-        auto shape_buf = sycl::buffer<int64_t, 1>(shape.data(), sycl::range<1>(ndim));
-        auto out_shape_buf = sycl::buffer<int64_t, 1>(out_shape.data(), sycl::range<1>(ndim));
-        auto in_strides_buf = sycl::buffer<int64_t, 1>(in_strides.data(), sycl::range<1>(ndim));
-        auto out_strides_buf = sycl::buffer<int64_t, 1>(out_strides.data(), sycl::range<1>(ndim));
-
-        queue.submit([&](sycl::handler& h) {
-            auto shape_acc = shape_buf.get_access<sycl::access::mode::read>(h);
-            auto out_shape_acc = out_shape_buf.get_access<sycl::access::mode::read>(h);
-            auto in_strides_acc = in_strides_buf.get_access<sycl::access::mode::read>(h);
-            auto out_strides_acc = out_strides_buf.get_access<sycl::access::mode::read>(h);
-
-            h.parallel_for<RepeatKernelFloat32>(sycl::range<1>(out_numel), [=](sycl::id<1> idx) {
-                int64_t out_idx = idx[0];
-                int64_t in_idx = 0;
-
-                // Convert output index to input index using modular arithmetic
-                for (int64_t d = 0; d < ndim; ++d) {
-                    int64_t coord = (out_idx / out_strides_acc[d]) % out_shape_acc[d];
-                    // Interleave semantics: match CPU/CUDA/Vulkan. Using
-                    // `coord % input_shape[d]` (tile) diverges from CPU.
-                    int64_t in_coord = coord / (out_shape_acc[d] / shape_acc[d]);
-                    in_idx += in_coord * in_strides_acc[d];
-                }
-
-                out_ptr[out_idx] = in_ptr[in_idx];
-            });
-        }).wait();
-    }
-    else if (input.dtype() == DType::Float64) {
-        const double* in_ptr = get_data_ptr<const double>(input);
-        double* out_ptr = get_data_ptr<double>(output);
+    // repeat is a pure element-wise memory remap (dtype-agnostic). Dispatch by element
+    // byte size to a fixed-width copy so every dtype (incl. unsigned ints, bool, complex)
+    // is supported with one code path. Interleave semantics match CPU/CUDA/ROCm/Vulkan.
+    auto run_repeat = [&]<typename ElemT>() {
+        const ElemT* in_ptr = reinterpret_cast<const ElemT*>(input.data_ptr());
+        ElemT* out_ptr = reinterpret_cast<ElemT*>(output.data_ptr());
 
         auto shape_buf = sycl::buffer<int64_t, 1>(shape.data(), sycl::range<1>(ndim));
         auto out_shape_buf = sycl::buffer<int64_t, 1>(out_shape.data(), sycl::range<1>(ndim));
@@ -3313,55 +3286,27 @@ auto repeat_kernel(const Tensor& input_in, const std::vector<int64_t>& repeats, 
             auto in_strides_acc = in_strides_buf.get_access<sycl::access::mode::read>(h);
             auto out_strides_acc = out_strides_buf.get_access<sycl::access::mode::read>(h);
 
-            h.parallel_for<RepeatKernelFloat64>(sycl::range<1>(out_numel), [=](sycl::id<1> idx) {
+            h.parallel_for<RepeatCopyKernel<ElemT>>(sycl::range<1>(out_numel), [=](sycl::id<1> idx) {
                 int64_t out_idx = idx[0];
                 int64_t in_idx = 0;
-
                 for (int64_t d = 0; d < ndim; ++d) {
                     int64_t coord = (out_idx / out_strides_acc[d]) % out_shape_acc[d];
-                    // Interleave semantics: match CPU/CUDA/Vulkan. Using
-                    // `coord % input_shape[d]` (tile) diverges from CPU.
                     int64_t in_coord = coord / (out_shape_acc[d] / shape_acc[d]);
                     in_idx += in_coord * in_strides_acc[d];
                 }
-
                 out_ptr[out_idx] = in_ptr[in_idx];
             });
         }).wait();
-    }
-    else if (input.dtype() == DType::Float16) {
-        const sycl::half* in_ptr = get_data_ptr<const sycl::half>(input);
-        sycl::half* out_ptr = get_data_ptr<sycl::half>(output);
+    };
 
-        auto shape_buf = sycl::buffer<int64_t, 1>(shape.data(), sycl::range<1>(ndim));
-        auto out_shape_buf = sycl::buffer<int64_t, 1>(out_shape.data(), sycl::range<1>(ndim));
-        auto in_strides_buf = sycl::buffer<int64_t, 1>(in_strides.data(), sycl::range<1>(ndim));
-        auto out_strides_buf = sycl::buffer<int64_t, 1>(out_strides.data(), sycl::range<1>(ndim));
-
-        queue.submit([&](sycl::handler& h) {
-            auto shape_acc = shape_buf.get_access<sycl::access::mode::read>(h);
-            auto out_shape_acc = out_shape_buf.get_access<sycl::access::mode::read>(h);
-            auto in_strides_acc = in_strides_buf.get_access<sycl::access::mode::read>(h);
-            auto out_strides_acc = out_strides_buf.get_access<sycl::access::mode::read>(h);
-
-            h.parallel_for<RepeatKernelFloat16>(sycl::range<1>(out_numel), [=](sycl::id<1> idx) {
-                int64_t out_idx = idx[0];
-                int64_t in_idx = 0;
-
-                for (int64_t d = 0; d < ndim; ++d) {
-                    int64_t coord = (out_idx / out_strides_acc[d]) % out_shape_acc[d];
-                    // Interleave semantics: match CPU/CUDA/Vulkan. Using
-                    // `coord % input_shape[d]` (tile) diverges from CPU.
-                    int64_t in_coord = coord / (out_shape_acc[d] / shape_acc[d]);
-                    in_idx += in_coord * in_strides_acc[d];
-                }
-
-                out_ptr[out_idx] = in_ptr[in_idx];
-            });
-        }).wait();
-    }
-    else {
-        throw std::runtime_error("repeat: unsupported dtype");
+    switch (input.dtype_size()) {
+        case 1:  run_repeat.template operator()<uint8_t>();  break;
+        case 2:  run_repeat.template operator()<uint16_t>(); break;
+        case 4:  run_repeat.template operator()<uint32_t>(); break;
+        case 8:  run_repeat.template operator()<uint64_t>(); break;
+        case 16: run_repeat.template operator()<RepeatElem16>(); break;
+        default:
+            throw std::runtime_error("repeat: unsupported dtype size");
     }
 
     return output;

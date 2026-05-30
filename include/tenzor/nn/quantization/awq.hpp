@@ -44,7 +44,9 @@ struct AWQConfig {
  */
 struct AWQResult {
     Tensor quantized_weight;  ///< Packed INT4/INT8 weight tensor
-    Tensor scales;            ///< Per-group scale factors, shape (out_features, num_groups)
+    Tensor scales;            ///< Per-channel dequant scales, shape (out_features, in_features):
+                              ///< W_recon[o,j] = (q[o,j] - zeros[o, group(j)]) * scales[o,j].
+                              ///< Exact (no geometric-mean approximation over group scales).
     Tensor zeros;             ///< Per-group zero points, shape (out_features, num_groups)
 };
 
