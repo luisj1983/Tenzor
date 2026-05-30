@@ -220,13 +220,37 @@ __global__ void im2col_int8_kernel(
  * correction: precompute weight_col_sums on host and pass them in. This avoids the
  * triple-nested loop of the old kernel.
  */
+// Per-row Int8 sum (rows × K) accumulated in Int32. Builds the zero-point
+// correction terms (sum over each weight filter, and sum over each im2col row)
+// entirely on-device — no host round-trip, no CPU fallback.
+__global__ void quant_row_sum_kernel(
+    const int8_t* __restrict__ mat,
+    int32_t* __restrict__ row_sums,
+    int64_t rows,
+    int64_t K
+) {
+    int64_t r = blockIdx.x * blockDim.x + threadIdx.x;
+    if (r >= rows) return;
+    const int8_t* row_ptr = mat + r * K;
+    int32_t s = 0;
+    for (int64_t k = 0; k < K; ++k) {
+        s += static_cast<int32_t>(row_ptr[k]);
+    }
+    row_sums[r] = s;
+}
+
 __global__ void dequantize_bias_kernel(
     const int32_t* __restrict__ gemm_output,
     float* __restrict__ output,
     const float* __restrict__ bias,
+    const int32_t* __restrict__ weight_col_sums,  // [out_channels] sum_k weight[oc][k]
+    const int32_t* __restrict__ row_sums,         // [M] sum_k im2col_row[m][k]
     int64_t total,
     int64_t out_channels,
     int64_t spatial_size,   // h_out * w_out
+    int64_t k_inner,        // in_channels * kernel_h * kernel_w
+    int32_t input_zp,
+    int32_t weight_zp,
     float combined_scale
 ) {
     int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
@@ -238,7 +262,16 @@ __global__ void dequantize_bias_kernel(
     int64_t row = idx / out_channels;  // spatial position within batch
     int64_t oc = idx % out_channels;
 
-    float result = static_cast<float>(gemm_output[idx]) * combined_scale;
+    // Zero-point correction (mirrors quantized_linear_kernel_hip):
+    //   sum_k (A - input_zp)(B - weight_zp)
+    //     = C - input_zp*sum_k B[oc] - weight_zp*sum_k A[row] + input_zp*weight_zp*K
+    // A = im2col(input) (padding filled with input_zp), B = weight[oc].
+    int32_t acc = gemm_output[idx]
+                  - input_zp * weight_col_sums[oc]
+                  - weight_zp * row_sums[row]
+                  + input_zp * weight_zp * static_cast<int32_t>(k_inner);
+
+    float result = static_cast<float>(acc) * combined_scale;
     if (bias != nullptr) {
         result += bias[oc];
     }
@@ -322,6 +355,24 @@ auto quantized_conv2d_hip(
 
     HIP_CHECK(hipGetLastError());
 
+    // Step 1b: zero-point correction sums, computed on-device.
+    //   weight_col_sums[oc] = sum_k weight[oc][k]   (rows = N = out_channels)
+    //   row_sums[m]         = sum_k col_buffer[m][k] (rows = M = patches; padding=input_zp)
+    int32_t* weight_col_sums = nullptr;
+    int32_t* row_sums = nullptr;
+    HIP_CHECK(hipMalloc(&weight_col_sums, N * sizeof(int32_t)));
+    HIP_CHECK(hipMalloc(&row_sums, M * sizeof(int32_t)));
+
+    hipLaunchKernelGGL(quant_row_sum_kernel,
+        dim3(static_cast<int>((N + THREADS - 1) / THREADS)), dim3(THREADS), 0, stream,
+        weight.data<int8_t>(), weight_col_sums, N, K);
+    HIP_CHECK(hipGetLastError());
+
+    hipLaunchKernelGGL(quant_row_sum_kernel,
+        dim3(static_cast<int>((M + THREADS - 1) / THREADS)), dim3(THREADS), 0, stream,
+        col_buffer, row_sums, M, K);
+    HIP_CHECK(hipGetLastError());
+
     // Step 2: GEMM via rocblas_gemm_ex — Int8 × Int8 → Int32
     // col_buffer: (M, K) row-major — the im2col patches
     // weight: (N, K) row-major — each row is one filter, stored as (out_channels, in_channels*kh*kw)
@@ -385,9 +436,14 @@ auto quantized_conv2d_hip(
         gemm_output,
         output.data<float>(),
         bias ? bias->data<float>() : nullptr,
+        weight_col_sums,
+        row_sums,
         total_output,
         out_channels,
         spatial_size,
+        K,
+        input_zero_point,
+        weight_zero_point,
         combined_scale);
 
     HIP_CHECK(hipGetLastError());
@@ -395,6 +451,8 @@ auto quantized_conv2d_hip(
     // Synchronize before freeing GEMM buffer (it's still in use by the kernel)
     HIP_CHECK(hipStreamSynchronize(stream));
     HIP_CHECK(hipFree(gemm_output));
+    HIP_CHECK(hipFree(weight_col_sums));
+    HIP_CHECK(hipFree(row_sums));
 
     return output;
 }

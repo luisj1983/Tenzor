@@ -25,6 +25,7 @@ class BatchNorm2dBackwardInputKernelFloat32;
 class BatchNorm2dBackwardInputKernelFloat64;
 class BatchNorm2dBackwardInputKernelFloat16;
 class BatchNormScaleShiftKernelFloat32;
+class BatchNormScaleShiftBwdKernelFloat32;
 class BatchNormExtractGradKernelFloat32;
 class BatchNorm2dMeanKernelFloat32;
 class BatchNorm2dMeanKernelFloat64;
@@ -113,14 +114,11 @@ auto batchnorm2d_forward(const Tensor& input, const Tensor& mean, const Tensor& 
     auto scale_shift_md = memory::desc(scale_shift_dims, memory::data_type::f32, memory::format_tag::x);
 
     // Create primitive descriptor
-    auto bn_desc = batch_normalization_forward::desc(
-        prop_kind::forward_inference,
-        src_md,
-        epsilon,
-        normalization_flags::use_global_stats
-    );
-
-    auto bn_pd = batch_normalization_forward::primitive_desc(bn_desc, dnnl_engine);
+    // oneDNN v3 API: primitive_desc from engine + parameters (needs src AND dst).
+    auto bn_pd = batch_normalization_forward::primitive_desc(
+        dnnl_engine, prop_kind::forward_inference,
+        src_md, dst_md, epsilon,
+        normalization_flags::use_global_stats);
 
     // Wrap tensors as oneDNN memory objects
     auto src_mem = sycl_interop::make_memory(bn_pd.src_desc(), dnnl_engine,
@@ -188,14 +186,13 @@ auto batchnorm2d_forward_affine(const Tensor& input, const Tensor& mean, const T
     auto scale_shift_md = memory::desc(scale_shift_dims, memory::data_type::f32, memory::format_tag::x);
 
     // Create primitive descriptor with scale and shift
-    auto bn_desc = batch_normalization_forward::desc(
-        prop_kind::forward_inference,
-        src_md,
-        epsilon,
-        normalization_flags::use_global_stats | normalization_flags::use_scale_shift
-    );
-
-    auto bn_pd = batch_normalization_forward::primitive_desc(bn_desc, dnnl_engine);
+    // oneDNN v3 API: scale/shift are separate args (use_scale | use_shift replaces
+    // the removed use_scale_shift), so the descriptor needs src AND dst.
+    auto bn_pd = batch_normalization_forward::primitive_desc(
+        dnnl_engine, prop_kind::forward_inference,
+        src_md, dst_md, epsilon,
+        normalization_flags::use_global_stats
+        | normalization_flags::use_scale | normalization_flags::use_shift);
 
     // Wrap tensors
     auto src_mem = sycl_interop::make_memory(bn_pd.src_desc(), dnnl_engine,
@@ -225,12 +222,14 @@ auto batchnorm2d_forward_affine(const Tensor& input, const Tensor& mean, const T
         ss_ptr[C + i] = beta_ptr[i];        // Shift
     });
 
-    auto ss_mem = sycl_interop::make_memory(
-        memory::desc({2, C}, memory::data_type::f32, memory::format_tag::nc),
-        dnnl_engine,
-        sycl_interop::memory_kind::usm,
-        const_cast<void*>(scale_shift.data_ptr())
-    );
+    // oneDNN v3: separate scale and shift buffers (views into the packed {2,C}
+    // scale_shift tensor — scale at [0,C), shift at [C,2C)).
+    auto scale_mem = sycl_interop::make_memory(
+        scale_shift_md, dnnl_engine, sycl_interop::memory_kind::usm,
+        static_cast<void*>(ss_ptr));
+    auto shift_mem = sycl_interop::make_memory(
+        scale_shift_md, dnnl_engine, sycl_interop::memory_kind::usm,
+        static_cast<void*>(ss_ptr + C));
 
     // Execute
     auto bn_prim = batch_normalization_forward(bn_pd);
@@ -238,7 +237,8 @@ auto batchnorm2d_forward_affine(const Tensor& input, const Tensor& mean, const T
         {DNNL_ARG_SRC, src_mem},
         {DNNL_ARG_MEAN, mean_mem},
         {DNNL_ARG_VARIANCE, var_mem},
-        {DNNL_ARG_SCALE_SHIFT, ss_mem},
+        {DNNL_ARG_SCALE, scale_mem},
+        {DNNL_ARG_SHIFT, shift_mem},
         {DNNL_ARG_DST, dst_mem}
     });
 
@@ -310,23 +310,18 @@ auto batchnorm2d_backward(const Tensor& grad_output, const Tensor& input, const 
     auto scale_shift_md = memory::desc(scale_shift_dims, memory::data_type::f32, memory::format_tag::x);
 
     // Forward descriptor (needed for backward)
-    auto bn_fwd_desc = batch_normalization_forward::desc(
-        prop_kind::forward_training,
-        src_md,
-        epsilon,
-        normalization_flags::use_scale_shift
-    );
-    auto bn_fwd_pd = batch_normalization_forward::primitive_desc(bn_fwd_desc, dnnl_engine);
+    // oneDNN v3: forward hint pd (src + dst; use_scale|use_shift replaces use_scale_shift).
+    auto bn_fwd_pd = batch_normalization_forward::primitive_desc(
+        dnnl_engine, prop_kind::forward_training,
+        src_md, src_md, epsilon,
+        normalization_flags::use_scale | normalization_flags::use_shift);
 
-    // Backward descriptor
-    auto bn_bwd_desc = batch_normalization_backward::desc(
-        prop_kind::backward,
-        diff_dst_md,
-        src_md,
-        epsilon,
-        normalization_flags::use_scale_shift
-    );
-    auto bn_bwd_pd = batch_normalization_backward::primitive_desc(bn_bwd_desc, dnnl_engine, bn_fwd_pd);
+    // Backward primitive_desc (v3): diff_src, diff_dst, src, eps, flags, fwd hint.
+    auto bn_bwd_pd = batch_normalization_backward::primitive_desc(
+        dnnl_engine, prop_kind::backward,
+        diff_src_md, diff_dst_md, src_md, epsilon,
+        normalization_flags::use_scale | normalization_flags::use_shift,
+        bn_fwd_pd);
 
     // Wrap tensors
     auto src_mem = sycl_interop::make_memory(bn_bwd_pd.src_desc(), dnnl_engine,
@@ -354,26 +349,30 @@ auto batchnorm2d_backward(const Tensor& grad_output, const Tensor& input, const 
     float* ss_ptr = get_data_ptr<float>(scale_shift);
     const float* gamma_ptr = get_data_ptr<const float>(gamma);
 
-    queue.parallel_for<BatchNormScaleShiftKernelFloat32>(sycl::range<1>(C), [=](sycl::id<1> i) {
+    queue.parallel_for<BatchNormScaleShiftBwdKernelFloat32>(sycl::range<1>(C), [=](sycl::id<1> i) {
         ss_ptr[i] = gamma_ptr[i];
         ss_ptr[C + i] = 0.0f;  // Beta not used in backward
     });
 
-    auto ss_mem = sycl_interop::make_memory(
-        memory::desc({2, C}, memory::data_type::f32, memory::format_tag::nc),
-        dnnl_engine,
-        sycl_interop::memory_kind::usm,
-        const_cast<void*>(scale_shift.data_ptr())
-    );
+    // oneDNN v3: separate scale and shift buffers (views into the packed {2,C}
+    // scale_shift tensor — scale at [0,C), shift at [C,2C)).
+    auto scale_mem = sycl_interop::make_memory(
+        scale_shift_md, dnnl_engine, sycl_interop::memory_kind::usm,
+        static_cast<void*>(ss_ptr));
+    auto shift_mem = sycl_interop::make_memory(
+        scale_shift_md, dnnl_engine, sycl_interop::memory_kind::usm,
+        static_cast<void*>(ss_ptr + C));
 
-    // Diff scale-shift for gradients (always f32 for oneDNN)
+    // Diff scale-shift for gradients (always f32 for oneDNN). v3: separate
+    // diff_scale and diff_shift buffers (views into the packed {2,C} tensor).
     Tensor diff_scale_shift({2, C}, DType::Float32, input.device());
-    auto diff_ss_mem = sycl_interop::make_memory(
-        memory::desc({2, C}, memory::data_type::f32, memory::format_tag::nc),
-        dnnl_engine,
-        sycl_interop::memory_kind::usm,
-        const_cast<void*>(diff_scale_shift.data_ptr())
-    );
+    float* diff_ss_base = get_data_ptr<float>(diff_scale_shift);
+    auto diff_scale_mem = sycl_interop::make_memory(
+        scale_shift_md, dnnl_engine, sycl_interop::memory_kind::usm,
+        static_cast<void*>(diff_ss_base));
+    auto diff_shift_mem = sycl_interop::make_memory(
+        scale_shift_md, dnnl_engine, sycl_interop::memory_kind::usm,
+        static_cast<void*>(diff_ss_base + C));
 
     // Execute backward
     auto bn_bwd_prim = batch_normalization_backward(bn_bwd_pd);
@@ -382,9 +381,10 @@ auto batchnorm2d_backward(const Tensor& grad_output, const Tensor& input, const 
         {DNNL_ARG_MEAN, mean_mem},
         {DNNL_ARG_VARIANCE, var_mem},
         {DNNL_ARG_DIFF_DST, diff_dst_mem},
-        {DNNL_ARG_SCALE_SHIFT, ss_mem},
+        {DNNL_ARG_SCALE, scale_mem},
         {DNNL_ARG_DIFF_SRC, diff_src_mem},
-        {DNNL_ARG_DIFF_SCALE_SHIFT, diff_ss_mem}
+        {DNNL_ARG_DIFF_SCALE, diff_scale_mem},
+        {DNNL_ARG_DIFF_SHIFT, diff_shift_mem}
     });
 
     dnnl_stream.wait();

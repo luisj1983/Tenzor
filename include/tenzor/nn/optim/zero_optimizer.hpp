@@ -32,6 +32,8 @@
 #include <map>
 #include <mutex>
 #include <condition_variable>
+#include <thread>
+#include <exception>
 #include <atomic>
 #include <list>
 #include <optional>
@@ -1973,6 +1975,19 @@ private:
     std::unordered_map<Tensor*, ParameterInfo> param_states_;
     mutable std::mutex param_states_mutex_;
 
+    /** Single FIFO async-gather worker. gather_parameter_async() enqueues here;
+     *  one worker thread runs the gathers in submission order so the underlying
+     *  collectives are issued in a consistent order across ranks (NCCL-safe),
+     *  while still overlapping with the caller's compute. Lazily started. */
+    std::thread async_worker_;
+    std::queue<std::function<void()>> async_tasks_;
+    std::mutex async_mutex_;
+    std::condition_variable async_cv_;
+    bool async_worker_started_{false};
+    bool async_worker_stop_{false};
+    void ensure_async_worker();
+    void async_worker_loop();
+
     /** Prefetch queue and scheduler */
     std::unique_ptr<PrefetchScheduler> prefetch_scheduler_;
 
@@ -2108,6 +2123,8 @@ struct ZeROStage3Optimizer::AsyncHandle {
     bool ready{false};                  ///< Operation complete?
     Tensor result;                      ///< Result tensor (when ready)
     std::shared_ptr<void> comm_handle;  ///< Underlying communication handle
+    std::exception_ptr error;           ///< Exception captured from the worker (if any)
+    std::thread worker;                 ///< Background gather thread (genuine comm/compute overlap)
     std::mutex mutex;                   ///< Thread safety
     std::condition_variable cv;         ///< Notification for completion
 
@@ -2120,11 +2137,27 @@ struct ZeROStage3Optimizer::AsyncHandle {
     }
 
     /**
-     * @brief Wait for operation to complete
+     * @brief Wait for operation to complete, join the worker, and rethrow any
+     *        exception raised on the background thread.
      */
     auto wait() -> void {
-        std::unique_lock<std::mutex> lock(mutex);
-        cv.wait(lock, [this] { return ready; });
+        {
+            std::unique_lock<std::mutex> lock(mutex);
+            cv.wait(lock, [this] { return ready; });
+        }
+        if (worker.joinable()) {
+            worker.join();
+        }
+        if (error) {
+            std::rethrow_exception(error);
+        }
+    }
+
+    /// Join the worker before destruction so the thread never outlives the handle.
+    ~AsyncHandle() {
+        if (worker.joinable()) {
+            worker.join();
+        }
     }
 };
 

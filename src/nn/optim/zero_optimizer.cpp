@@ -3364,6 +3364,16 @@ ZeROStage3Optimizer::ZeROStage3Optimizer(
 }
 
 ZeROStage3Optimizer::~ZeROStage3Optimizer() {
+    // Stop and join the FIFO async-gather worker (drains queued gathers first).
+    {
+        std::lock_guard<std::mutex> lock(async_mutex_);
+        async_worker_stop_ = true;
+    }
+    async_cv_.notify_all();
+    if (async_worker_.joinable()) {
+        async_worker_.join();
+    }
+
     // Unregister model if registered
     if (registered_model_) {
         unregister_model();
@@ -3541,10 +3551,13 @@ auto ZeROStage3Optimizer::gather_parameter(Tensor* param) -> Tensor {
         return state.full_param;
     }
 
-    // Case 2: Gathering in progress - wait for it
-    // Note: For now we don't implement async gather, so this case won't occur
+    // Case 2: a gather was marked in-progress. The public async API
+    // (gather_parameter_async / wait_gather) now performs a genuine background
+    // gather; the in-place speculative prefetch below stays synchronous on
+    // purpose — issuing it on a worker thread here would re-enter
+    // param_states_mutex_ (held by this function) and deadlock. Clear the flag
+    // and fall through to a synchronous gather.
     if (state.is_prefetching) {
-        // In a full implementation, we would wait for the async gather here
         state.is_prefetching = false;
     }
 
@@ -4748,19 +4761,59 @@ auto ZeROStage3Optimizer::load_full_state(const std::unordered_map<std::string, 
 auto ZeROStage3Optimizer::gather_parameter_async(Tensor* param) -> std::shared_ptr<AsyncHandle> {
     auto handle = std::make_shared<AsyncHandle>();
 
-    // For now, perform synchronous gather and mark as ready
-    // A full implementation would use async NCCL operations
-    try {
-        handle->result = gather_parameter(param);
-        handle->ready = true;
-        handle->cv.notify_all();
-    } catch (const std::exception& e) {
-        handle->ready = true;  // Mark as ready even on error
-        handle->cv.notify_all();
-        throw;
+    // Genuine async with NCCL-safe ordering: enqueue the gather on the single
+    // FIFO worker thread. The worker runs gathers in submission order (so the
+    // underlying collectives are issued in a consistent order across ranks),
+    // while overlapping with the caller's compute. wait_gather() (via
+    // AsyncHandle::wait) blocks on the handle's condition variable and surfaces
+    // the result or any captured exception. The task captures the shared handle
+    // by value, keeping it alive until the gather completes.
+    ensure_async_worker();
+    {
+        std::lock_guard<std::mutex> lock(async_mutex_);
+        async_tasks_.push([this, param, handle]() {
+            try {
+                Tensor r = gather_parameter(param);
+                std::lock_guard<std::mutex> hl(handle->mutex);
+                handle->result = std::move(r);
+                handle->ready = true;
+            } catch (...) {
+                std::lock_guard<std::mutex> hl(handle->mutex);
+                handle->error = std::current_exception();
+                handle->ready = true;
+            }
+            handle->cv.notify_all();
+        });
     }
+    async_cv_.notify_one();
 
     return handle;
+}
+
+void ZeROStage3Optimizer::ensure_async_worker() {
+    std::lock_guard<std::mutex> lock(async_mutex_);
+    if (!async_worker_started_) {
+        async_worker_started_ = true;
+        async_worker_ = std::thread([this]() { async_worker_loop(); });
+    }
+}
+
+void ZeROStage3Optimizer::async_worker_loop() {
+    for (;;) {
+        std::function<void()> task;
+        {
+            std::unique_lock<std::mutex> lock(async_mutex_);
+            async_cv_.wait(lock, [this]() { return async_worker_stop_ || !async_tasks_.empty(); });
+            if (async_worker_stop_ && async_tasks_.empty()) {
+                return;
+            }
+            task = std::move(async_tasks_.front());
+            async_tasks_.pop();
+        }
+        // Run outside the queue lock so enqueues don't block on the gather, and
+        // so collectives are issued strictly in FIFO submission order.
+        task();
+    }
 }
 
 auto ZeROStage3Optimizer::wait_gather(std::shared_ptr<AsyncHandle> handle) -> Tensor {

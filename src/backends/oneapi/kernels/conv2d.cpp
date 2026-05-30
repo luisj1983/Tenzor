@@ -37,7 +37,7 @@ static auto to_dnnl_dtype(DType dt) -> dnnl::memory::data_type {
         case DType::Float64:  return dnnl::memory::data_type::f64;
         case DType::BFloat16: return dnnl::memory::data_type::bf16;
         case DType::Float16:  return dnnl::memory::data_type::f16;
-        default: throw std::runtime_error("Unsupported dtype for oneDNN conv: " + dtype_name(dt));
+        default: throw std::runtime_error(std::string("Unsupported dtype for oneDNN conv: ") + std::string(dtype_name(dt)));
     }
 }
 
@@ -94,23 +94,23 @@ auto conv2d_forward(const Tensor& input, const Tensor& weight, const Tensor* bia
     auto dst_md = memory::desc(dst_dims, dt, memory::format_tag::nchw);
 
     // Create convolution descriptor
-    auto conv_desc = (bias != nullptr) ?
-        convolution_forward::desc(
-            prop_kind::forward_inference,
+    // oneDNN v3 API: primitive_desc is constructed directly from the engine and
+    // problem parameters (the legacy ::desc step was removed in oneDNN 3.x).
+    auto conv_pd = (bias != nullptr) ?
+        convolution_forward::primitive_desc(
+            dnnl_engine, prop_kind::forward_inference,
             algorithm::convolution_direct,
             src_md, weights_md,
             memory::desc({C_out}, dt, memory::format_tag::x),
             dst_md,
             strides_dims, dilation_dims, padding_dims, padding_dims
         ) :
-        convolution_forward::desc(
-            prop_kind::forward_inference,
+        convolution_forward::primitive_desc(
+            dnnl_engine, prop_kind::forward_inference,
             algorithm::convolution_direct,
             src_md, weights_md, dst_md,
             strides_dims, dilation_dims, padding_dims, padding_dims
         );
-
-    auto conv_pd = convolution_forward::primitive_desc(conv_desc, dnnl_engine);
 
     // Wrap tensors as oneDNN memory
     auto src_mem = sycl_interop::make_memory(conv_pd.src_desc(), dnnl_engine,
@@ -204,13 +204,12 @@ auto conv2d_backward(const Tensor& grad_output, const Tensor& input, const Tenso
     auto dst_md = memory::desc(dst_dims, dt, memory::format_tag::nchw);
 
     // Forward descriptor (needed for backward)
-    auto conv_fwd_desc = convolution_forward::desc(
-        prop_kind::forward_training,
+    auto conv_fwd_pd = convolution_forward::primitive_desc(
+        dnnl_engine, prop_kind::forward_training,
         algorithm::convolution_direct,
         src_md, weights_md, dst_md,
         strides_dims, dilation_dims, padding_dims, padding_dims
     );
-    auto conv_fwd_pd = convolution_forward::primitive_desc(conv_fwd_desc, dnnl_engine);
 
     Tensor grad_input, grad_weight, grad_bias;
 
@@ -218,13 +217,10 @@ auto conv2d_backward(const Tensor& grad_output, const Tensor& input, const Tenso
     if (compute_grad_input) {
         grad_input = Tensor(std::vector<int64_t>(input_shape.begin(), input_shape.end()), input.dtype(), input.device());
 
-        auto conv_bwd_data_desc = convolution_backward_data::desc(
-            algorithm::convolution_direct,
-            src_md, weights_md, dst_md,
-            strides_dims, dilation_dims, padding_dims, padding_dims
-        );
         auto conv_bwd_data_pd = convolution_backward_data::primitive_desc(
-            conv_bwd_data_desc, dnnl_engine, conv_fwd_pd
+            dnnl_engine, algorithm::convolution_direct,
+            src_md, weights_md, dst_md,
+            strides_dims, dilation_dims, padding_dims, padding_dims, conv_fwd_pd
         );
 
         auto diff_src_mem = sycl_interop::make_memory(conv_bwd_data_pd.diff_src_desc(), dnnl_engine,
@@ -257,23 +253,19 @@ auto conv2d_backward(const Tensor& grad_output, const Tensor& input, const Tenso
     if (compute_grad_weight || compute_grad_bias) {
         grad_weight = Tensor(std::vector<int64_t>(weight_shape.begin(), weight_shape.end()), weight.dtype(), weight.device());
 
-        auto conv_bwd_weights_desc = compute_grad_bias ?
-            convolution_backward_weights::desc(
-                algorithm::convolution_direct,
+        auto conv_bwd_weights_pd = compute_grad_bias ?
+            convolution_backward_weights::primitive_desc(
+                dnnl_engine, algorithm::convolution_direct,
                 src_md, weights_md,
                 memory::desc({C_out}, dt, memory::format_tag::x),
                 dst_md,
-                strides_dims, dilation_dims, padding_dims, padding_dims
+                strides_dims, dilation_dims, padding_dims, padding_dims, conv_fwd_pd
             ) :
-            convolution_backward_weights::desc(
-                algorithm::convolution_direct,
+            convolution_backward_weights::primitive_desc(
+                dnnl_engine, algorithm::convolution_direct,
                 src_md, weights_md, dst_md,
-                strides_dims, dilation_dims, padding_dims, padding_dims
+                strides_dims, dilation_dims, padding_dims, padding_dims, conv_fwd_pd
             );
-
-        auto conv_bwd_weights_pd = convolution_backward_weights::primitive_desc(
-            conv_bwd_weights_desc, dnnl_engine, conv_fwd_pd
-        );
 
         auto src_mem = sycl_interop::make_memory(conv_bwd_weights_pd.src_desc(), dnnl_engine,
                                                   sycl_interop::memory_kind::usm,
@@ -335,6 +327,216 @@ auto conv2d_backward(const Tensor& grad_output, const Tensor& input, const Tenso
     }
 
     return {grad_input, grad_weight, grad_bias};
+}
+
+// ============================================================================
+// Conv2d backward — separate entry points used by the dispatcher.
+// The combined conv2d_backward above is retained for internal/legacy callers;
+// the registry dispatches Conv2dBackwardInput/Weight/Bias to these.
+// ============================================================================
+auto conv2d_backward_input(const Tensor& grad_output, const Tensor& weight,
+                           const std::vector<int64_t>& input_shape,
+                           int64_t stride_h, int64_t stride_w,
+                           int64_t padding_h, int64_t padding_w,
+                           int64_t dilation_h, int64_t dilation_w,
+                           int64_t groups,
+                           sycl::queue& queue) -> Tensor {
+    using namespace dnnl;
+
+    auto weight_shape = weight.shape();
+    auto grad_shape = grad_output.shape();
+
+    const int64_t N = input_shape[0];
+    const int64_t C_in = input_shape[1];
+    const int64_t H_in = input_shape[2];
+    const int64_t W_in = input_shape[3];
+
+    const int64_t C_out = weight_shape[0];
+    const int64_t K_h = weight_shape[2];
+    const int64_t K_w = weight_shape[3];
+
+    Tensor grad_input(input_shape, grad_output.dtype(), grad_output.device());
+
+    try {
+        auto dnnl_engine = sycl_interop::make_engine(queue.get_device(), queue.get_context());
+        auto dnnl_stream = sycl_interop::make_stream(dnnl_engine, queue);
+
+        memory::dims src_dims = {N, C_in, H_in, W_in};
+        memory::dims weights_dims = {C_out, C_in / groups, K_h, K_w};
+        memory::dims dst_dims = {grad_shape[0], grad_shape[1], grad_shape[2], grad_shape[3]};
+        memory::dims strides_dims = {stride_h, stride_w};
+        memory::dims padding_dims = {padding_h, padding_w};
+        memory::dims dilation_dims = {dilation_h - 1, dilation_w - 1};
+
+        auto dt = to_dnnl_dtype(grad_output.dtype());
+        auto src_md = memory::desc(src_dims, dt, memory::format_tag::nchw);
+        auto weights_md = memory::desc(weights_dims, dt,
+                                       groups == 1 ? memory::format_tag::oihw : memory::format_tag::goihw);
+        auto dst_md = memory::desc(dst_dims, dt, memory::format_tag::nchw);
+
+        auto conv_fwd_pd = convolution_forward::primitive_desc(
+            dnnl_engine, prop_kind::forward_training, algorithm::convolution_direct,
+            src_md, weights_md, dst_md,
+            strides_dims, dilation_dims, padding_dims, padding_dims);
+
+        auto conv_bwd_data_pd = convolution_backward_data::primitive_desc(
+            dnnl_engine, algorithm::convolution_direct, src_md, weights_md, dst_md,
+            strides_dims, dilation_dims, padding_dims, padding_dims, conv_fwd_pd);
+
+        auto diff_src_mem = sycl_interop::make_memory(conv_bwd_data_pd.diff_src_desc(), dnnl_engine,
+                                                      sycl_interop::memory_kind::usm,
+                                                      const_cast<void*>(grad_input.data_ptr()));
+        auto weights_mem = sycl_interop::make_memory(conv_bwd_data_pd.weights_desc(), dnnl_engine,
+                                                     sycl_interop::memory_kind::usm,
+                                                     const_cast<void*>(weight.data_ptr()));
+        auto diff_dst_mem = sycl_interop::make_memory(conv_bwd_data_pd.diff_dst_desc(), dnnl_engine,
+                                                      sycl_interop::memory_kind::usm,
+                                                      const_cast<void*>(grad_output.data_ptr()));
+
+        auto conv_bwd_data_prim = convolution_backward_data(conv_bwd_data_pd);
+        conv_bwd_data_prim.execute(dnnl_stream, {
+            {DNNL_ARG_DIFF_DST, diff_dst_mem},
+            {DNNL_ARG_WEIGHTS, weights_mem},
+            {DNNL_ARG_DIFF_SRC, diff_src_mem}
+        });
+        dnnl_stream.wait();
+    } catch (const dnnl::error& e) {
+        throw std::runtime_error(std::string("oneDNN Conv2d backward_input failed: ") + e.what());
+    } catch (const sycl::exception& e) {
+        throw std::runtime_error(std::string("SYCL error in Conv2d backward_input: ") + e.what());
+    }
+    return grad_input;
+}
+
+auto conv2d_backward_weight(const Tensor& grad_output, const Tensor& input,
+                            const std::vector<int64_t>& weight_shape,
+                            int64_t stride_h, int64_t stride_w,
+                            int64_t padding_h, int64_t padding_w,
+                            int64_t dilation_h, int64_t dilation_w,
+                            int64_t groups,
+                            sycl::queue& queue) -> Tensor {
+    using namespace dnnl;
+
+    auto input_shape = input.shape();
+    auto grad_shape = grad_output.shape();
+
+    const int64_t N = input_shape[0];
+    const int64_t C_in = input_shape[1];
+    const int64_t H_in = input_shape[2];
+    const int64_t W_in = input_shape[3];
+
+    const int64_t C_out = weight_shape[0];
+    const int64_t K_h = weight_shape[2];
+    const int64_t K_w = weight_shape[3];
+
+    Tensor grad_weight(weight_shape, input.dtype(), input.device());
+
+    try {
+        auto dnnl_engine = sycl_interop::make_engine(queue.get_device(), queue.get_context());
+        auto dnnl_stream = sycl_interop::make_stream(dnnl_engine, queue);
+
+        memory::dims src_dims = {N, C_in, H_in, W_in};
+        memory::dims weights_dims = {C_out, C_in / groups, K_h, K_w};
+        memory::dims dst_dims = {grad_shape[0], grad_shape[1], grad_shape[2], grad_shape[3]};
+        memory::dims strides_dims = {stride_h, stride_w};
+        memory::dims padding_dims = {padding_h, padding_w};
+        memory::dims dilation_dims = {dilation_h - 1, dilation_w - 1};
+
+        auto dt = to_dnnl_dtype(input.dtype());
+        auto src_md = memory::desc(src_dims, dt, memory::format_tag::nchw);
+        auto weights_md = memory::desc(weights_dims, dt,
+                                       groups == 1 ? memory::format_tag::oihw : memory::format_tag::goihw);
+        auto dst_md = memory::desc(dst_dims, dt, memory::format_tag::nchw);
+
+        auto conv_fwd_pd = convolution_forward::primitive_desc(
+            dnnl_engine, prop_kind::forward_training, algorithm::convolution_direct,
+            src_md, weights_md, dst_md,
+            strides_dims, dilation_dims, padding_dims, padding_dims);
+
+        auto conv_bwd_weights_pd = convolution_backward_weights::primitive_desc(
+            dnnl_engine, algorithm::convolution_direct, src_md, weights_md, dst_md,
+            strides_dims, dilation_dims, padding_dims, padding_dims, conv_fwd_pd);
+
+        auto src_mem = sycl_interop::make_memory(conv_bwd_weights_pd.src_desc(), dnnl_engine,
+                                                 sycl_interop::memory_kind::usm,
+                                                 const_cast<void*>(input.data_ptr()));
+        auto diff_weights_mem = sycl_interop::make_memory(conv_bwd_weights_pd.diff_weights_desc(), dnnl_engine,
+                                                          sycl_interop::memory_kind::usm,
+                                                          const_cast<void*>(grad_weight.data_ptr()));
+        auto diff_dst_mem = sycl_interop::make_memory(conv_bwd_weights_pd.diff_dst_desc(), dnnl_engine,
+                                                      sycl_interop::memory_kind::usm,
+                                                      const_cast<void*>(grad_output.data_ptr()));
+
+        auto conv_bwd_weights_prim = convolution_backward_weights(conv_bwd_weights_pd);
+        conv_bwd_weights_prim.execute(dnnl_stream, {
+            {DNNL_ARG_SRC, src_mem},
+            {DNNL_ARG_DIFF_DST, diff_dst_mem},
+            {DNNL_ARG_DIFF_WEIGHTS, diff_weights_mem}
+        });
+        dnnl_stream.wait();
+    } catch (const dnnl::error& e) {
+        throw std::runtime_error(std::string("oneDNN Conv2d backward_weight failed: ") + e.what());
+    } catch (const sycl::exception& e) {
+        throw std::runtime_error(std::string("SYCL error in Conv2d backward_weight: ") + e.what());
+    }
+    return grad_weight;
+}
+
+// Conv2d backward-bias: per-channel reduction of grad_output over (N,H,W).
+// No oneDNN primitive required; float accumulation. Supports F32/F64/F16/BF16.
+class Conv2dOnednnBiasReductionF32;
+class Conv2dOnednnBiasReductionF64;
+class Conv2dOnednnBiasReductionF16;
+auto conv2d_backward_bias(const Tensor& grad_output, sycl::queue& queue) -> Tensor {
+    auto grad_output_shape = grad_output.shape();
+    const int64_t N = grad_output_shape[0];
+    const int64_t C = grad_output_shape[1];
+    const int64_t H = grad_output_shape[2];
+    const int64_t W = grad_output_shape[3];
+
+    Tensor grad_bias({C}, grad_output.dtype(), grad_output.device());
+
+    if (grad_output.dtype() == DType::Float32) {
+        float* gb = get_data_ptr<float>(grad_bias);
+        const float* go = get_data_ptr<const float>(grad_output);
+        queue.parallel_for<Conv2dOnednnBiasReductionF32>(sycl::range<1>(C), [=](sycl::id<1> c) {
+            float sum = 0.0f;
+            for (int64_t n = 0; n < N; ++n)
+                for (int64_t h = 0; h < H; ++h)
+                    for (int64_t w = 0; w < W; ++w)
+                        sum += go[((n * C + c) * H + h) * W + w];
+            gb[c] = sum;
+        });
+    } else if (grad_output.dtype() == DType::Float64) {
+        double* gb = get_data_ptr<double>(grad_bias);
+        const double* go = get_data_ptr<const double>(grad_output);
+        queue.parallel_for<Conv2dOnednnBiasReductionF64>(sycl::range<1>(C), [=](sycl::id<1> c) {
+            double sum = 0.0;
+            for (int64_t n = 0; n < N; ++n)
+                for (int64_t h = 0; h < H; ++h)
+                    for (int64_t w = 0; w < W; ++w)
+                        sum += go[((n * C + c) * H + h) * W + w];
+            gb[c] = sum;
+        });
+    } else if (grad_output.dtype() == DType::Float16) {
+        sycl::half* gb = get_data_ptr<sycl::half>(grad_bias);
+        const sycl::half* go = get_data_ptr<const sycl::half>(grad_output);
+        queue.parallel_for<Conv2dOnednnBiasReductionF16>(sycl::range<1>(C), [=](sycl::id<1> c) {
+            float sum = 0.0f;
+            for (int64_t n = 0; n < N; ++n)
+                for (int64_t h = 0; h < H; ++h)
+                    for (int64_t w = 0; w < W; ++w)
+                        sum += static_cast<float>(go[((n * C + c) * H + h) * W + w]);
+            gb[c] = saturate_to_half(sum);
+        });
+    } else if (grad_output.dtype() == DType::BFloat16) {
+        // BF16 widen-on-device → reduce in F32 → narrow back (Cast runs on the GPU).
+        auto gb_f32 = conv2d_backward_bias(grad_output.to(DType::Float32), queue);
+        return gb_f32.to(DType::BFloat16);
+    } else {
+        throw std::runtime_error("Unsupported dtype for conv2d_backward_bias (oneDNN)");
+    }
+    return grad_bias;
 }
 
 #else // !TENZOR_HAS_ONEDNN - Fallback implementation using im2col + GEMM
@@ -857,6 +1059,16 @@ auto conv2d_forward(const Tensor& input, const Tensor& weight, const Tensor* bia
             }
         }
     }
+    else if (input.dtype() == DType::BFloat16) {
+        // BF16 widen-on-device → compute in F32 → narrow back (Cast runs on the GPU).
+        Tensor bias_f32;
+        const Tensor* bias_f32_ptr = nullptr;
+        if (bias != nullptr) { bias_f32 = bias->to(DType::Float32); bias_f32_ptr = &bias_f32; }
+        Tensor out_f32 = conv2d_forward(input.to(DType::Float32), weight.to(DType::Float32), bias_f32_ptr,
+                                        stride_h, stride_w, padding_h, padding_w,
+                                        dilation_h, dilation_w, groups, queue);
+        return out_f32.to(DType::BFloat16);
+    }
     else {
         throw std::runtime_error("Unsupported dtype for conv2d_forward (fallback)");
     }
@@ -1236,6 +1448,13 @@ auto conv2d_backward_input(const Tensor& grad_output, const Tensor& weight,
             }
         }
     }
+    else if (grad_output.dtype() == DType::BFloat16) {
+        // BF16 widen-on-device → compute in F32 → narrow back (Cast runs on the GPU).
+        Tensor gi = conv2d_backward_input(grad_output.to(DType::Float32), weight.to(DType::Float32),
+                                          input_shape, stride_h, stride_w, padding_h, padding_w,
+                                          dilation_h, dilation_w, groups, queue);
+        return gi.to(DType::BFloat16);
+    }
     else {
         throw std::runtime_error("Unsupported dtype for conv2d_backward_input");
     }
@@ -1435,6 +1654,13 @@ auto conv2d_backward_weight(const Tensor& grad_output, const Tensor& input,
             grad_weight_ptr[i] = sycl::half(grad_weight_float_ptr[i]);
         });
     }
+    else if (input.dtype() == DType::BFloat16) {
+        // BF16 widen-on-device → compute in F32 → narrow back (Cast runs on the GPU).
+        Tensor gw = conv2d_backward_weight(grad_output.to(DType::Float32), input.to(DType::Float32),
+                                           weight_shape, stride_h, stride_w, padding_h, padding_w,
+                                           dilation_h, dilation_w, groups, queue);
+        return gw.to(DType::BFloat16);
+    }
     else {
         throw std::runtime_error("Unsupported dtype for conv2d_backward_weight");
     }
@@ -1501,6 +1727,11 @@ auto conv2d_backward_bias(const Tensor& grad_output, sycl::queue& queue) -> Tens
             grad_bias_ptr[c] = saturate_to_half(sum);
         });
     }
+    else if (grad_output.dtype() == DType::BFloat16) {
+        // BF16 widen-on-device → reduce in F32 → narrow back (Cast runs on the GPU).
+        Tensor gb = conv2d_backward_bias(grad_output.to(DType::Float32), queue);
+        return gb.to(DType::BFloat16);
+    }
     else {
         throw std::runtime_error("Unsupported dtype for conv2d_backward_bias");
     }
@@ -1508,9 +1739,15 @@ auto conv2d_backward_bias(const Tensor& grad_output, sycl::queue& queue) -> Tens
     return grad_bias;
 }
 
+#endif // TENZOR_HAS_ONEDNN
+
 // ============================================================================
 // Transposed Convolution (ConvTranspose2d) Forward
 // ============================================================================
+// NOTE: ConvTranspose2d has no oneDNN primitive wired here, so its SYCL
+// implementation lives OUTSIDE the TENZOR_HAS_ONEDNN guard and is compiled in
+// BOTH configurations (mirrors conv_transpose3d_forward in conv3d.cpp). This
+// fixes an undefined-symbol link error when oneDNN is enabled.
 
 // SYCL Kernel name classes for conv_transpose2d
 struct ConvTranspose2dForwardKernelFloat32 {};
@@ -1757,8 +1994,6 @@ auto conv_transpose2d_forward(
 
     return output;
 }
-
-#endif // TENZOR_HAS_ONEDNN
 
 // ============================================================================
 // DepthwiseConv2d kernel

@@ -2255,8 +2255,13 @@ void register_rocm_kernels(BackendDispatchTable& table) {
     // ========================================================================
     // FlexAttention (built-in score_mod registry; M8 lands the native path)
     // ========================================================================
-    // Per docs/internals/attention-contract.md, ScoreModId 0=identity,
-    // 1=causal — both reduce to FusedAttention. Other IDs throw until M8.
+    // Per docs/internals/attention-contract.md, ScoreModId 0=identity and
+    // 1=causal reduce to FusedAttention; 2 (sliding window) and >=3 (user-
+    // registered score_mods) are served via a composed bmm+softmax path below.
+    // Composed-path limitation: the user score_mod is invoked once over the full
+    // [B,H,Sq,Sk] score tensor with b=h=q_start=kv_start=0, so score_mods that
+    // index by batch/head/position are not yet honoured (the native M8 kernel
+    // will pass true tile indices).
     table.register_kernel(OpId::FlexAttention, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
         float scale = static_cast<float>(attrs.get_float(AttrKey::Scale, 1.0));
         int64_t score_mod_id = attrs.get_int(AttrKey::ScoreModId, 0);

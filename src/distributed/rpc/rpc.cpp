@@ -102,26 +102,21 @@ auto remote(int32_t dst, const std::string& func_name,
             const std::vector<Tensor>& args) -> RRef {
     auto agent = get_agent();
 
-    // Execute function on remote worker
+    // Execute the function on `dst`. rpc_sync runs it on the destination worker
+    // and transfers the result back to this worker.
     auto results = rpc_sync(dst, func_name, args);
 
-    // Store result on the remote worker and get RRef ID
-    // In production: the remote worker stores the result and returns the ID
-    // For simplicity: store locally if dst == self
-    int64_t rref_id;
-    if (dst == agent->self().id) {
-        if (!results.empty()) {
-            rref_id = RRefStore::instance().store(results[0]);
-        } else {
-            rref_id = RRefStore::instance().store(Tensor({}, DType::Float32, Device::cpu()));
-        }
-    } else {
-        // In production: the remote store() call happens on the dst worker
-        // and the ID is returned as part of the RPC response
-        rref_id = 0;  // Placeholder
-    }
-
-    return RRef(dst, rref_id, agent);
+    // Materialize the result in the local RRefStore and return an RRef owned by
+    // THIS worker — that is where the value now lives, so to_here()/local_value()
+    // resolve correctly for any caller. (Eager fetch: the lazy "keep the value on
+    // `dst`, fetch on demand" optimization would need a dedicated remote-store RPC
+    // message type. The previous code returned a broken RRef with id=0 for any
+    // non-self dst, so cross-rank remote() never resolved.)
+    Tensor value = results.empty()
+        ? Tensor({}, DType::Float32, Device::cpu())
+        : results[0];
+    int64_t rref_id = RRefStore::instance().store(value);
+    return RRef(agent->self().id, rref_id, agent);
 }
 
 } // namespace rpc

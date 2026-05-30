@@ -159,15 +159,15 @@ auto quantize_dynamic(
     // Create quantization config for dynamic quantization
     auto qconfig = DefaultQConfigs::fast_qconfig();
 
-    // Create a new quantized model (in practice would clone/copy)
-    // For now, we'll modify in place - real implementation should deep copy
-    auto quantized_model = model;
-
     std::cout << "[Quantization] Quantizing weights to "
               << (weight_dtype == QuantDType::INT8 ? "INT8" : "UINT8") << std::endl;
 
-    // Traverse model and quantize Linear/Conv layers recursively
-    quantized_model = convert_module_to_quantized_recursive(model, qconfig);
+    // Traverse model and build a NEW quantized module tree: a fresh Sequential
+    // whose Linear/Conv2d layers are replaced by QuantizedLinear/QuantizedConv2d
+    // (see QuantizationConverter::to_quantized). The caller's original `model` is
+    // left intact (unquantized) — quantize_dynamic returns an independent module,
+    // matching PyTorch's copy semantics.
+    auto quantized_model = convert_module_to_quantized_recursive(model, qconfig);
 
     std::cout << "[Quantization] Dynamic quantization complete" << std::endl;
 

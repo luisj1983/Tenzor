@@ -187,11 +187,14 @@ auto RendezvousStore::wait(const std::string& key) -> void {
 }
 
 auto RendezvousStore::delete_key(const std::string& key) -> bool {
-    // In a full implementation, this would send a DELETE command to the master store.
-    // For now, use the store protocol to mark the key as deleted.
+    // Send a real DELETE command so the key is removed from the master store
+    // (a subsequent GET observes a missing key, not a sentinel value).
     try {
-        get(key);  // Check if exists
-        set(key, "__deleted__");
+        connect_to_master();
+        std::string command = "DEL:" + key;
+        uint32_t len = command.size();
+        ::send(socket_fd_, &len, sizeof(len), 0);
+        ::send(socket_fd_, command.c_str(), len, 0);
         return true;
     } catch (...) {
         return false;
@@ -201,7 +204,9 @@ auto RendezvousStore::delete_key(const std::string& key) -> bool {
 auto RendezvousStore::check_key(const std::string& key) -> bool {
     try {
         auto val = get(key);
-        return val != "__deleted__";
+        // Missing keys come back empty; also honour the legacy "__deleted__"
+        // sentinel for back-compat with stores written by older peers.
+        return !val.empty() && val != "__deleted__";
     } catch (...) {
         return false;
     }
@@ -322,6 +327,12 @@ auto RendezvousStore::run_master_server() -> void {
                     ::send(client_fd, &response_len, sizeof(response_len), 0);
                     ::send(client_fd, value.c_str(), value.size(), 0);
                 }
+            } else if (op == "DEL") {
+                // Real key deletion: remove from the master store so a later GET
+                // observes a missing key (rather than a "__deleted__" sentinel).
+                std::string key = rest;
+                std::lock_guard<std::mutex> lock(store_mutex);
+                store.erase(key);
             }
 
             ::close(client_fd);

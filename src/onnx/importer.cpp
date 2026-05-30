@@ -1402,9 +1402,19 @@ auto ONNXImporter::convert_batch_normalization(const ONNXImportNode& node) -> st
 
     int64_t num_features = scale.shape()[0];
 
-    // Determine if BatchNorm1d or BatchNorm2d based on input shape
-    // For now, assume BatchNorm2d (most common in CNNs)
-    auto bn = std::make_shared<nn::BatchNorm2d>(num_features, eps);
+    // ONNX uses a single BatchNormalization op for all ranks; pick the Tenzor
+    // layer from the data input's rank: rank 3 -> BatchNorm1d (N,C,L),
+    // rank 4 -> BatchNorm2d (N,C,H,W), rank 5 -> BatchNorm3d (N,C,D,H,W).
+    // Default to 2d when the rank is unavailable (most common in CNNs).
+    const size_t input_rank = get_input(node.inputs[0]).shape().size();
+    std::shared_ptr<nn::Module> bn;
+    if (input_rank == 3) {
+        bn = std::make_shared<nn::BatchNorm1d>(num_features, static_cast<double>(eps));
+    } else if (input_rank == 5) {
+        bn = std::make_shared<nn::BatchNorm3d>(num_features, static_cast<double>(eps));
+    } else {
+        bn = std::make_shared<nn::BatchNorm2d>(num_features, static_cast<double>(eps));
+    }
 
     // Load pretrained parameters from ONNX
     auto params = bn->named_parameters();

@@ -477,6 +477,15 @@ __global__ void nested_attention_kernel_t(
 auto nested_attention_cuda(const Tensor& Q, const Tensor& K, const Tensor& V,
                             const Tensor& q_offsets, const Tensor& kv_offsets,
                             float scale, bool causal, cudaStream_t stream) -> Tensor {
+    // Float16/BFloat16: widen Q/K/V to Float32 on device, compute, narrow output
+    // back (matches CPU nested_attention, nested_kernels.cpp). On-GPU casts.
+    if (Q.dtype() == DType::Float16 || Q.dtype() == DType::BFloat16) {
+        const DType orig = Q.dtype();
+        Tensor out = nested_attention_cuda(Q.to(DType::Float32), K.to(DType::Float32),
+                                           V.to(DType::Float32), q_offsets, kv_offsets,
+                                           scale, causal, stream);
+        return out.to(orig);
+    }
     int64_t head_dim = Q.shape().back();
     int64_t total_q_len = Q.shape()[0];
     int64_t B = q_offsets.numel() - 1;
@@ -848,6 +857,15 @@ __global__ void nested_layer_norm_kernel_t(
 auto nested_layer_norm_cuda(const Tensor& values, const Tensor& offsets,
                              const Tensor& weight, const Tensor& bias,
                              float eps, cudaStream_t stream) -> Tensor {
+    // Float16/BFloat16: widen values/weight/bias to Float32 on device, compute,
+    // narrow output back (matches CPU nested_layer_norm). On-GPU casts.
+    if (values.dtype() == DType::Float16 || values.dtype() == DType::BFloat16) {
+        const DType orig = values.dtype();
+        Tensor out = nested_layer_norm_cuda(values.to(DType::Float32), offsets,
+                                            weight.to(DType::Float32), bias.to(DType::Float32),
+                                            eps, stream);
+        return out.to(orig);
+    }
     auto shape = values.shape();
     int64_t D = (shape.size() > 1) ? shape[1] : 1;
     int64_t B = offsets.numel() - 1;

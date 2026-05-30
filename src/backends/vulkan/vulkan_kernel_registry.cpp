@@ -1362,38 +1362,6 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
         }
         return std::vector<Tensor>{output, mean, rstd};
     });
-    // The host-level mean/rstd recomputation below is no longer reachable —
-    // the kernel returned above. Leaving the rest of the original block
-    // commented out for one release in case any user code depended on a
-    // specific intermediate tensor; safe to delete in a follow-up.
-    /*
-    {
-        // (former host-level workaround follows)
-        const Tensor& X = inputs[0];
-        int64_t batch_size = X.numel() / normalized_size;
-        Tensor X_f32 = (X.dtype() == DType::Float32) ? X : X.to(DType::Float32);
-        Tensor X_2d = tenzor::reshape(X_f32, std::vector<int64_t>{batch_size, normalized_size});
-        NewOpAttributes mean_attrs;
-        mean_attrs.set(AttrKey::Dim, static_cast<int64_t>(-1));
-        mean_attrs.set(AttrKey::Keepdim, false);
-        std::vector<Tensor> mean_in = {X_2d};
-        Tensor mean = tenzor::dispatch(OpId::Mean, mean_in, mean_attrs)[0];
-        Tensor mean_unsq = tenzor::reshape(mean, std::vector<int64_t>{batch_size, 1});
-        Tensor diff = tenzor::sub(X_2d, mean_unsq);
-        Tensor diff_sq = tenzor::mul(diff, diff);
-        std::vector<Tensor> var_in = {diff_sq};
-        Tensor var = tenzor::dispatch(OpId::Mean, var_in, mean_attrs)[0];
-        Tensor eps_t = tenzor::full(
-            std::vector<int64_t>(var.shape().begin(), var.shape().end()),
-            static_cast<double>(eps), var.dtype(), var.device());
-        Tensor var_eps = tenzor::add(var, eps_t);
-        Tensor rstd = tenzor::div(
-            tenzor::full(std::vector<int64_t>(var_eps.shape().begin(), var_eps.shape().end()),
-                         1.0, var_eps.dtype(), var_eps.device()),
-            tenzor::sqrt(var_eps));
-        return std::vector<Tensor>{output, mean, rstd};
-    }
-    */  // end of legacy host-level recompute block
 
     // ========================================================================
     // Interpolation

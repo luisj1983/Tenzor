@@ -2472,8 +2472,13 @@ auto sqrt_kernel(const Tensor& input) -> Tensor {
         for (size_t i = 0; i < n; ++i) {
             out_data[i] = std::sqrt(in_data[i]);
         }
+    } else if (input.dtype() == DType::BFloat16) {
+        // BFloat16: widen to Float32, compute, narrow back (matches pow and the
+        // other unary ops; BF16 has no native std::sqrt path).
+        return tenzor::utils::widen_narrow_compute(input,
+            [](const Tensor& x) { return sqrt_kernel(x); });
     } else {
-        throw std::runtime_error("sqrt operation only supports Float32, Float64, Float16, Complex64, Complex128 dtypes");
+        throw std::runtime_error("sqrt operation only supports Float32, Float64, Float16, BFloat16, Complex64, Complex128 dtypes");
     }
 
     return result;
@@ -3123,8 +3128,12 @@ auto log_kernel(const Tensor& input) -> Tensor {
         for (size_t i = 0; i < n; ++i) {
             out_data[i] = std::log(in_data[i]);
         }
+    } else if (input.dtype() == DType::BFloat16) {
+        // BFloat16: widen to Float32, compute, narrow back.
+        return tenzor::utils::widen_narrow_compute(input,
+            [](const Tensor& x) { return log_kernel(x); });
     } else {
-        throw std::runtime_error("log operation only supports Float32, Float64, Float16, Complex64, Complex128 dtypes");
+        throw std::runtime_error("log operation only supports Float32, Float64, Float16, BFloat16, Complex64, Complex128 dtypes");
     }
 
     return result;
@@ -3253,8 +3262,12 @@ auto exp_kernel(const Tensor& input) -> Tensor {
         for (size_t i = 0; i < n; ++i) {
             out_data[i] = std::exp(in_data[i]);
         }
+    } else if (input.dtype() == DType::BFloat16) {
+        // BFloat16: widen to Float32, compute, narrow back.
+        return tenzor::utils::widen_narrow_compute(input,
+            [](const Tensor& x) { return exp_kernel(x); });
     } else {
-        throw std::runtime_error("exp operation only supports Float32, Float64, Float16, Complex64, Complex128 dtypes");
+        throw std::runtime_error("exp operation only supports Float32, Float64, Float16, BFloat16, Complex64, Complex128 dtypes");
     }
 
     return result;

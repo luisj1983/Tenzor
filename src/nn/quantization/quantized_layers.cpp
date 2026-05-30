@@ -794,15 +794,16 @@ auto QuantStub::forward_to_quantized(const Tensor& input) -> QuantizedTensor {
 }
 
 auto DeQuantStub::forward_impl(const Variable& input) -> Variable {
-    // For Variable input, we assume it contains quantized data that needs dequantization
-    // In a real implementation, the Variable would have metadata indicating it's quantized
-    // For now, we pass through assuming the tensor is already in FP32 format
-    // This is a limitation of the Variable wrapper not having quantization metadata
-
-    // Direct passthrough since Variable doesn't have QuantizedTensor metadata.
-    // In production, this would extract quantization params from Variable metadata.
-    // Return the input directly so its grad_fn is preserved — the previous
-    // Variable(input.tensor(), input.requires_grad()) dropped the autograd chain.
+    // Correct by design — NOT a stub. In Tenzor, autograd Variables always carry
+    // FP32 data: QuantStub::forward_impl returns FP32 in every mode (calibration
+    // passthrough, PTQ Q->DQ which dequantizes back to FP32, and QAT fake-quant
+    // which is FP32 + STE). Real INT8 storage lives in QuantizedTensor and inside
+    // the QuantizedLinear/QuantizedConv2d ops, never in a Variable. So by the time
+    // a value reaches DeQuantStub it is already dequantized FP32; this identity
+    // completes the QuantStub->DeQuantStub pair. The genuinely-quantized entry
+    // point is forward_from_quantized(QuantizedTensor).
+    // (Returning `input` directly preserves grad_fn — an earlier version rebuilt
+    // the Variable and severed the autograd chain.)
     return input;
 }
 

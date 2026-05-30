@@ -6389,11 +6389,17 @@ auto VulkanBackend::dispatchInterpolateBackward(const Tensor& grad_output,
     // M14 fix: nearest mode wired via interpolate_nearest_backward.comp.
     // Same atomic-float scatter shape as bilinear but one source pixel
     // per output element (no weights, no align_corners).
+    // The atomic-float scatter shaders accumulate in Float32 (VK_EXT_shader_atomic_float).
+    // For F16/BF16/F64 grad_output, widen to Float32 on device, run the F32 scatter, and
+    // narrow the gradient back to the original dtype. This keeps InterpolateBackward
+    // available for every float dtype (cross-backend parity) via on-GPU casts — no CPU
+    // fallback. (Accumulation is performed in F32; matches the other backends' results to
+    // F32 precision.)
     if (grad_output.dtype() != DType::Float32) {
-        throw std::runtime_error(
-            "dispatchInterpolateBackward (Vulkan): only Float32 supported "
-            "(VK_EXT_shader_atomic_float covers F32; F64 needs "
-            "GL_EXT_shader_atomic_float2 which is a separate extension).");
+        const DType orig = grad_output.dtype();
+        Tensor grad_input = dispatchInterpolateBackward(grad_output.to(DType::Float32),
+                                                        input_size, mode, align_corners);
+        return grad_input.to(orig);
     }
     auto gshape = grad_output.shape();
 

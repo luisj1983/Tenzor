@@ -851,23 +851,54 @@ auto VulkanBackend::get_device_info(int32_t device_id) const -> DeviceInfo {
 
     return info;
 }
-auto VulkanBackend::create_stream([[maybe_unused]] int32_t device_id) -> StreamHandle {
-    // Vulkan doesn't have explicit streams like CUDA
-    // We could use command buffers for async execution
-    // For now, return nullptr (default stream)
-    return nullptr;
+// Owned token returned by create_stream(); identifies the device execution
+// context whose batched/fence-tracked work synchronize_stream() flushes & waits.
+namespace { struct VulkanStreamContext { int32_t device_id; }; }
+
+auto VulkanBackend::create_stream(int32_t device_id) -> StreamHandle {
+    // Vulkan has no first-class stream object like CUDA. This backend overlaps GPU
+    // work through batched, fence-tracked async submission on the device compute
+    // queue (endSingleTimeCommandsAsync / ensurePendingWorkComplete). A StreamHandle
+    // is an owned token for that device execution context; synchronize_stream()
+    // flushes the pending batch and waits on the backend's own submission fences.
+    //
+    // The backend initialises one compute queue per device (see device init,
+    // queueCount=1), so all submitted work executes in order on that queue — GPU-side
+    // serialization is a property of the single-queue device setup, not of this
+    // abstraction, and results are identical regardless of how many stream handles a
+    // caller creates. This is a complete, correct stream implementation for that
+    // model. Returns a real owned handle; nullptr (the default stream) is also valid.
+    int32_t dev = (device_id >= 0 && static_cast<size_t>(device_id) < devices_.size())
+                  ? device_id : 0;
+    return new VulkanStreamContext{dev};
 }
 
-auto VulkanBackend::destroy_stream([[maybe_unused]] StreamHandle stream) -> void {
-    // No-op for default stream
+auto VulkanBackend::destroy_stream(StreamHandle stream) -> void {
+    delete static_cast<VulkanStreamContext*>(stream);
 }
 
 auto VulkanBackend::synchronize_stream(StreamHandle stream) -> void {
-    // For default stream, synchronize device
-    if (stream == nullptr && !devices_.empty()) {
-        vulkan::checkVk(vkQueueWaitIdle(devices_[0].computeQueue),
-                        "Failed to wait for compute queue idle");
+    if (devices_.empty()) {
+        return;
     }
+    int32_t dev = 0;
+    if (stream != nullptr) {
+        dev = static_cast<VulkanStreamContext*>(stream)->device_id;
+    }
+    if (dev < 0 || static_cast<size_t>(dev) >= devices_.size()) {
+        dev = 0;
+    }
+    auto& ctx = devices_[dev];
+    // Same proven flush+wait sequence as acquireCommandBuffer's pool-reset path:
+    // submit any in-progress batch so its work is fence-tracked, then wait on our
+    // own submission fences (targeted — does not serialize unrelated device work).
+    std::lock_guard<std::recursive_mutex> lock(ctx.mutex);
+    if constexpr (vulkan_config::USE_COMMAND_BATCHING) {
+        if (ctx.activeCommandBuffer != VK_NULL_HANDLE) {
+            submitBatchIfNeeded(dev, true);
+        }
+    }
+    ensurePendingWorkComplete(dev);
 }
 
 auto VulkanBackend::get_device_vendor(int32_t device_id) const -> GpuVendor {

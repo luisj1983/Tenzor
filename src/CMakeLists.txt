@@ -335,6 +335,18 @@ target_include_directories(tenzor_core PUBLIC
 # PRIVATE — only the serving module currently uses it; not part of the public ABI.
 target_link_libraries(tenzor_core PRIVATE tenzor_nlohmann_json)
 
+# zlib: enables reading DEFLATE-compressed entries in PyTorch .pt/.pth ZIP
+# archives (the default torch.save output). Optional — without it, only stored
+# (uncompressed) entries can be read. Standard on every Linux/macOS toolchain.
+find_package(ZLIB QUIET)
+if(ZLIB_FOUND)
+    target_link_libraries(tenzor_core PRIVATE ZLIB::ZLIB)
+    target_compile_definitions(tenzor_core PRIVATE TENZOR_HAS_ZLIB)
+    message(STATUS "tenzor_core: zlib found — compressed .pt/.pth entries supported")
+else()
+    message(STATUS "tenzor_core: zlib NOT found — only stored (uncompressed) .pt entries supported")
+endif()
+
 # Link dependencies
 target_link_libraries(tenzor_core PUBLIC
     Threads::Threads

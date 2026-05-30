@@ -42,7 +42,14 @@ auto nested_attention_kernel(const Tensor& Q, const Tensor& K, const Tensor& V,
     auto kv_off_contig = kv_offsets.contiguous();
 
     if (q_contig.dtype() != DType::Float32) {
-        throw std::runtime_error("nested_attention_kernel (OneAPI): only Float32 currently supported");
+        // Widen reduced/double precision to Float32 on device, compute, narrow back
+        // (this kernel accumulates in Float32; on-GPU casts, no CPU fallback). Keeps
+        // nested attention available for every float dtype to match the CPU backend.
+        const DType orig = q_contig.dtype();
+        Tensor out = nested_attention_kernel(q_contig.to(DType::Float32), k_contig.to(DType::Float32),
+                                             v_contig.to(DType::Float32), q_off_contig, kv_off_contig,
+                                             scale, causal, queue);
+        return out.to(orig);
     }
 
     int64_t head_dim = q_contig.shape().back();
@@ -163,7 +170,16 @@ auto nested_attention_backward_kernel(const Tensor& grad_out, const Tensor& Q,
     auto kv_off_contig = kv_offsets.contiguous();
 
     if (q_contig.dtype() != DType::Float32) {
-        throw std::runtime_error("nested_attention_backward_kernel (OneAPI): only Float32 supported");
+        // Widen reduced/double precision to Float32 on device, compute, narrow each
+        // gradient back (on-GPU casts, no CPU fallback). Matches the CPU dtype surface.
+        const DType orig = q_contig.dtype();
+        auto grads = nested_attention_backward_kernel(
+            do_contig.to(DType::Float32), q_contig.to(DType::Float32),
+            k_contig.to(DType::Float32), v_contig.to(DType::Float32),
+            attn_out.to(DType::Float32), q_off_contig, kv_off_contig,
+            scale, causal, queue);
+        for (auto& g : grads) { g = g.to(orig); }
+        return grads;
     }
 
     int64_t head_dim = q_contig.shape().back();

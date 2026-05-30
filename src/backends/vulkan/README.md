@@ -195,21 +195,28 @@ glslc -fshader-stage=compute kernels/matmul.comp -o matmul.spv
 spirv-dis matmul.spv  # Disassemble SPIR-V
 ```
 
+## Implemented
+
+- Full Conv1d/2d/3d suite (incl. transpose, depthwise) plus pooling and normalization
+- FP16 and BFloat16 compute shaders across the kernel set
+- Sparse tensor ops: SpMM, SpMV, SpGEMM, triangular solve (Trsv/Trsm)
+- Flash/fused attention, reductions, FFT/STFT, and linear algebra
+
 ## Known Limitations
 
-1. **Descriptor Sets**: Currently uses fixed descriptor layout
-2. **Async Operations**: Limited async execution support
-3. **Multi-Device**: Single device operations only
-4. **FP16 Support**: Requires device extension check
-5. **Conv2d**: Basic implementation, not yet optimized
+1. **Async / Streams**: Execution is currently synchronous — `create_stream` returns the
+   default stream and dispatches run via single-shot command buffers. Stream-based
+   overlap/concurrency is planned (timeline semaphores).
+2. **Multi-Device**: Single-device operation only; no cross-device tensor distribution.
+3. **Float64**: Requires the `shaderFloat64` device feature. FP64 ops throw on devices that
+   do not advertise it — by design (no CPU fallback or Float32 upcast).
+4. **Descriptor Sets**: Fixed descriptor layout.
 
 ## Future Improvements
 
 - [ ] Subgroup operations for better performance
 - [ ] Push descriptors for reduced overhead
-- [ ] Timeline semaphores for async execution
-- [ ] Sparse tensor support
-- [ ] FP16/BF16 compute shaders
+- [ ] Timeline semaphores for async/stream execution
 - [ ] Optimized convolution (Winograd, FFT-based)
 - [ ] Multi-device tensor distribution
 

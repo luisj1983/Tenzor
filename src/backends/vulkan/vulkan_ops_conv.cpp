@@ -1290,6 +1290,28 @@ auto VulkanBackend::dispatchDeformableConv2dForward(
     int64_t groups, int64_t offset_groups,
     bool use_mask) -> Tensor {
 
+    // Only an F32 deformable-conv compute shader exists; the F32 shader would
+    // byte-reinterpret a non-F32 buffer (silent corruption). Widen F16/BF16 to
+    // Float32 on device, compute, narrow back (matches the other backends'
+    // deformable conv); reject Float64 with a clear error rather than corrupt
+    // (no F64 deformable shader).
+    if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) {
+        const DType orig = input.dtype();
+        Tensor out = dispatchDeformableConv2dForward(
+            input.to(DType::Float32), offset.to(DType::Float32),
+            weight.to(DType::Float32),
+            bias.numel() > 0 ? bias.to(DType::Float32) : bias,
+            mask.numel() > 0 ? mask.to(DType::Float32) : mask,
+            stride_h, stride_w, pad_h, pad_w, dil_h, dil_w,
+            groups, offset_groups, use_mask);
+        return out.to(orig);
+    }
+    if (input.dtype() != DType::Float32) {
+        throw std::runtime_error(
+            "Vulkan DeformableConv2d: only Float32 (native) and Float16/BFloat16 "
+            "(widened) supported; Float64 has no Vulkan deformable-conv shader.");
+    }
+
     auto input_shape  = input.shape();   // (N, C_in, H, W)
     auto weight_shape = weight.shape();  // (C_out, C_in/groups, kH, kW)
 
@@ -1387,6 +1409,24 @@ auto VulkanBackend::dispatchDeformableConv2dBackwardInput(
     int64_t dil_h, int64_t dil_w,
     int64_t groups, int64_t offset_groups,
     bool use_mask) -> std::vector<Tensor> {
+
+    // F32-only shader: widen F16/BF16 on device, narrow each grad back; reject F64.
+    if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) {
+        const DType orig = input.dtype();
+        auto grads = dispatchDeformableConv2dBackwardInput(
+            grad_output.to(DType::Float32), input.to(DType::Float32),
+            offset.to(DType::Float32), weight.to(DType::Float32),
+            mask.numel() > 0 ? mask.to(DType::Float32) : mask,
+            stride_h, stride_w, pad_h, pad_w, dil_h, dil_w,
+            groups, offset_groups, use_mask);
+        for (auto& g : grads) { g = g.to(orig); }
+        return grads;
+    }
+    if (input.dtype() != DType::Float32) {
+        throw std::runtime_error(
+            "Vulkan DeformableConv2dBackwardInput: only Float32/Float16/BFloat16 "
+            "supported (no F64 deformable-conv shader).");
+    }
 
     auto input_shape  = input.shape();
     auto weight_shape = weight.shape();
@@ -1512,6 +1552,23 @@ auto VulkanBackend::dispatchDeformableConv2dBackwardWeight(
     int64_t groups, int64_t offset_groups,
     bool use_mask,
     const std::vector<int64_t>& weight_shape) -> Tensor {
+
+    // F32-only shader: widen F16/BF16 on device, narrow back; reject F64.
+    if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) {
+        const DType orig = input.dtype();
+        Tensor gw = dispatchDeformableConv2dBackwardWeight(
+            grad_output.to(DType::Float32), input.to(DType::Float32),
+            offset.to(DType::Float32),
+            mask.numel() > 0 ? mask.to(DType::Float32) : mask,
+            stride_h, stride_w, pad_h, pad_w, dil_h, dil_w,
+            groups, offset_groups, use_mask, weight_shape);
+        return gw.to(orig);
+    }
+    if (input.dtype() != DType::Float32) {
+        throw std::runtime_error(
+            "Vulkan DeformableConv2dBackwardWeight: only Float32/Float16/BFloat16 "
+            "supported (no F64 deformable-conv shader).");
+    }
 
     auto input_shape = input.shape();
     auto go_shape    = grad_output.shape();

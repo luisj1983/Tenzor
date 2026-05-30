@@ -1335,8 +1335,44 @@ auto interpolate_kernel(
     sycl::queue& queue
 ) -> Tensor {
     auto input_shape = input.shape();
+
+    // 1D interpolate (N,C,L): reduce to the validated 4D path via a degenerate
+    // height axis. Bilinear over a (1,L) image == 1D linear; nearest stays nearest.
+    if (input_shape.size() == 3) {
+        if (size.size() != 1) {
+            throw std::invalid_argument("interpolate 1D: size must have 1 element (L_out)");
+        }
+        const std::string mode2d = (mode == "nearest") ? "nearest" : "bilinear";
+        Tensor x4 = input.unsqueeze(2);  // (N,C,1,L)
+        Tensor y4 = interpolate_kernel(x4, {1, size[0]}, mode2d, align_corners, queue);
+        return y4.squeeze(2);            // (N,C,L_out)
+    }
+
+    // 3D interpolate (N,C,D,H,W): trilinear/nearest are separable, so compose two
+    // validated 2D interpolations — first over (H,W) with D folded into the batch,
+    // then over D with (H_out*W_out) carried as an identity-mapped width axis
+    // (M->M bilinear/nearest is exact identity). Tensor-product of the two gives
+    // full 3D trilinear/nearest.
+    if (input_shape.size() == 5) {
+        if (size.size() != 3) {
+            throw std::invalid_argument("interpolate 3D: size must have 3 elements (D_out,H_out,W_out)");
+        }
+        const std::string mode2d = (mode == "nearest") ? "nearest" : "bilinear";
+        const int64_t N5 = input_shape[0], C5 = input_shape[1];
+        const int64_t D5 = input_shape[2], H5 = input_shape[3], W5 = input_shape[4];
+        const int64_t Dout = size[0], Hout = size[1], Wout = size[2];
+        // Step 1: interpolate H,W (D folded into the batch dimension).
+        Tensor s1 = input.reshape({N5 * D5, C5, H5, W5});
+        s1 = interpolate_kernel(s1, {Hout, Wout}, mode2d, align_corners, queue);
+        s1 = s1.reshape({N5, C5, D5, Hout, Wout});
+        // Step 2: interpolate D (H_out*W_out is the identity-mapped width axis).
+        Tensor s2 = s1.reshape({N5, C5, D5, Hout * Wout});
+        s2 = interpolate_kernel(s2, {Dout, Hout * Wout}, mode2d, align_corners, queue);
+        return s2.reshape({N5, C5, Dout, Hout, Wout});
+    }
+
     if (input_shape.size() != 4) {
-        throw std::invalid_argument("interpolate requires 4D input (N, C, H, W)");
+        throw std::invalid_argument("interpolate requires 3D (1D), 4D (2D), or 5D (3D) input");
     }
     if (size.size() != 2) {
         throw std::invalid_argument("interpolate size must have 2 elements (H_out, W_out)");
@@ -2237,6 +2273,19 @@ auto interpolate_backward_kernel(const Tensor& grad_output,
                                   bool align_corners,
                                   sycl::queue& queue) -> Tensor {
     auto shape = grad_output.shape();
+
+    // 1D backward (grad is (N,C,L_out)): reduce to the 4D bilinear/nearest path
+    // via a degenerate height axis, mirroring the 1D forward reduction. input_size
+    // is the spatial input size [L_in]; the degenerate 4D spatial size is [1,L_in].
+    if (shape.size() == 3) {
+        if (input_size.size() != 1) {
+            throw std::runtime_error("interpolate_backward 1D (OneAPI): input_size must be [L_in].");
+        }
+        const std::string mode2d = (mode == "nearest") ? "nearest" : "bilinear";
+        Tensor g = grad_output.unsqueeze(2);  // (N,C,1,L_out)
+        Tensor gi = interpolate_backward_kernel(g, {1, input_size[0]}, mode2d, align_corners, queue);
+        return gi.squeeze(2);
+    }
 
     // Trilinear backward operates on 5D (N, C, D, H, W).
     if (mode == "trilinear") {

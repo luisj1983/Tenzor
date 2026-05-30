@@ -80,6 +80,31 @@ else()
     message(STATUS "OneAPI Backend: oneDPL not found - using on-device SYCL bitonic sort fallback")
 endif()
 
+# Check for oneDNN (Intel oneAPI Deep Neural Network Library). When present it
+# provides the optimized convolution_forward/backward primitives used by
+# conv2d.cpp / conv3d.cpp (guarded by TENZOR_HAS_ONEDNN). When absent, the
+# always-compiled im2col/im3col SYCL fallback is used instead — both paths cover
+# the full Float32/Float64/Float16/BFloat16 dtype set.
+set(ONEDNN_FOUND FALSE)
+find_path(ONEDNN_INCLUDE_DIR
+    NAMES oneapi/dnnl/dnnl_sycl.hpp
+    HINTS ${SYCL_COMPILER_DIR}/include ${SYCL_INCLUDE_DIR}
+    PATH_SUFFIXES include
+)
+find_library(ONEDNN_LIBRARY
+    NAMES dnnl
+    HINTS ${SYCL_COMPILER_DIR}/lib ${SYCL_COMPILER_DIR}/lib64 ${SYCL_LIBRARY_DIR}
+)
+option(TENZOR_ONEAPI_DISABLE_ONEDNN
+       "Force the native im2col/im3col SYCL conv fallback (ignore oneDNN) for the OneAPI backend" OFF)
+if(ONEDNN_INCLUDE_DIR AND ONEDNN_LIBRARY AND NOT TENZOR_ONEAPI_DISABLE_ONEDNN)
+    set(ONEDNN_FOUND TRUE)
+    get_filename_component(ONEDNN_LIB_DIR ${ONEDNN_LIBRARY} DIRECTORY)
+    message(STATUS "OneAPI Backend: oneDNN found (include=${ONEDNN_INCLUDE_DIR}, lib=${ONEDNN_LIBRARY})")
+else()
+    message(STATUS "OneAPI Backend: oneDNN not found/disabled - using im2col/im3col SYCL conv fallback")
+endif()
+
 # =========================================================================
 # Common SYCL compile/link flags
 # =========================================================================
@@ -93,6 +118,10 @@ set(SYCL_COMMON_FLAGS
 
 if(ONEDPL_FOUND)
     list(APPEND SYCL_COMMON_FLAGS -DTENZOR_HAS_ONEDPL)
+endif()
+
+if(ONEDNN_FOUND)
+    list(APPEND SYCL_COMMON_FLAGS -DTENZOR_HAS_ONEDNN -I${ONEDNN_INCLUDE_DIR})
 endif()
 
 set(ONEMKL_COMPILE_FLAGS "")
@@ -248,6 +277,11 @@ if(ONEMKL_SYCL_FOUND)
     )
 endif()
 
+set(ONEDNN_LINK_FLAGS "")
+if(ONEDNN_FOUND)
+    set(ONEDNN_LINK_FLAGS -L${ONEDNN_LIB_DIR} -Wl,-rpath,${ONEDNN_LIB_DIR} -ldnnl)
+endif()
+
 set(SYCL_LINK_FLAGS -L${SYCL_LIBRARY_DIR} -lsycl -Wl,-rpath,${SYCL_LIBRARY_DIR})
 
 set(ONEAPI_SO_OUTPUT "${CMAKE_SOURCE_DIR}/bin/tenzor_backend_oneapi.so")
@@ -263,6 +297,7 @@ add_custom_command(
         -Wl,-rpath,${CMAKE_SOURCE_DIR}/bin
         ${SYCL_LINK_FLAGS}
         ${ONEMKL_LINK_FLAGS}
+        ${ONEDNN_LINK_FLAGS}
     DEPENDS ${ALL_OBJECTS}
     COMMENT "Linking oneAPI backend shared library"
     VERBATIM
@@ -301,4 +336,9 @@ if(ONEDPL_FOUND)
     message(STATUS "  oneDPL: Enabled")
 else()
     message(STATUS "  oneDPL: Disabled")
+endif()
+if(ONEDNN_FOUND)
+    message(STATUS "  oneDNN conv primitives: Enabled")
+else()
+    message(STATUS "  oneDNN conv primitives: Disabled (im2col/im3col SYCL fallback)")
 endif()

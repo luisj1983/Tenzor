@@ -18,6 +18,9 @@
 #include <cstring>
 #include <algorithm>
 #include <stdexcept>
+#ifdef TENZOR_HAS_ZLIB
+#include <zlib.h>
+#endif
 #include <map>
 
 namespace tenzor {
@@ -53,6 +56,36 @@ auto read_u32(const uint8_t* p) -> uint32_t {
            (static_cast<uint32_t>(p[3]) << 24);
 }
 
+#ifdef TENZOR_HAS_ZLIB
+// Inflate a raw DEFLATE stream (ZIP method 8 stores raw DEFLATE with no zlib/gzip
+// header, hence negative windowBits). `dst_len` is the known uncompressed size from
+// the ZIP entry. Runs entirely in-process; no temp files.
+inline auto inflate_raw_deflate(const uint8_t* src, size_t src_len, uint64_t dst_len)
+    -> std::vector<uint8_t> {
+    std::vector<uint8_t> out(static_cast<size_t>(dst_len));
+    z_stream strm{};
+    strm.next_in = const_cast<Bytef*>(reinterpret_cast<const Bytef*>(src));
+    strm.avail_in = static_cast<uInt>(src_len);
+    strm.next_out = reinterpret_cast<Bytef*>(out.data());
+    strm.avail_out = static_cast<uInt>(out.size());
+    if (inflateInit2(&strm, -MAX_WBITS) != Z_OK) {
+        throw std::runtime_error("pytorch_loader: zlib inflateInit2 failed");
+    }
+    int rc = inflate(&strm, Z_FINISH);
+    uLong produced = strm.total_out;
+    inflateEnd(&strm);
+    if (rc != Z_STREAM_END) {
+        throw std::runtime_error("pytorch_loader: DEFLATE decompression failed (zlib code " +
+                                 std::to_string(rc) + ")");
+    }
+    if (produced != dst_len) {
+        throw std::runtime_error("pytorch_loader: decompressed size mismatch (expected " +
+                                 std::to_string(dst_len) + ", got " + std::to_string(produced) + ")");
+    }
+    return out;
+}
+#endif
+
 class ZipReader {
 public:
     explicit ZipReader(const std::string& path) : path_(path) {
@@ -82,14 +115,24 @@ public:
         }
 
         const auto& entry = it->second;
-        if (entry.compression != 0) {
-            throw std::runtime_error("Compressed ZIP entries not supported (need stored/uncompressed). "
-                                     "Re-save with torch.save(..., _use_new_zipfile_serialization=True)");
+        if (entry.compression == 0) {  // stored / uncompressed
+            std::vector<uint8_t> result(entry.uncompressed_size);
+            std::memcpy(result.data(), data_.data() + entry.offset, entry.uncompressed_size);
+            return result;
         }
-
-        std::vector<uint8_t> result(entry.uncompressed_size);
-        std::memcpy(result.data(), data_.data() + entry.offset, entry.uncompressed_size);
-        return result;
+#ifdef TENZOR_HAS_ZLIB
+        if (entry.compression == 8) {  // DEFLATE
+            return inflate_raw_deflate(data_.data() + entry.offset,
+                                       static_cast<size_t>(entry.compressed_size),
+                                       entry.uncompressed_size);
+        }
+        throw std::runtime_error("ZIP entry '" + name + "': unsupported compression method " +
+                                 std::to_string(entry.compression) + " (only stored and DEFLATE supported)");
+#else
+        throw std::runtime_error("ZIP entry '" + name + "' is DEFLATE-compressed but tenzor was built "
+                                 "without zlib. Rebuild with zlib for compressed .pt/.pth support, or "
+                                 "re-save with torch.save(..., _use_new_zipfile_serialization=True).");
+#endif
     }
 
     auto get_raw_ptr(const std::string& name) const -> std::pair<const uint8_t*, size_t> {

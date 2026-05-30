@@ -1780,30 +1780,34 @@ auto linalg_eig_kernel(const Tensor& A, hipStream_t stream)
         return {wr.to(DType::BFloat16), wi.to(DType::BFloat16), V.to(DType::BFloat16)};
     }
 
-    // Approximate-symmetry check (per-batch). gradcheck perturbs SPD
-    // inputs by ε≈1e-6 — that breaks strict symmetry but each element is
-    // very close. Within 1e-3 relative is treated as "intended symmetric,
-    // perturbed by noise" and routed through `eigh` on the SYMMETRIZED
-    // matrix. Sum-of-eigenvalues equals trace, which is preserved by
-    // symmetrization, so the numerical gradient matches the analytical.
+    // Exactly-symmetric inputs are routed to `eigh` (real eigenvalues,
+    // orthonormal eigenvectors — more accurate and cheaper). Everything else
+    // uses the in-tree EISPACK Hessenberg + Francis QR solver below — the SAME
+    // routine as the CUDA/OneAPI/Vulkan backends, so eigenpairs are identical
+    // regardless of backend (the cross-backend parity contract). We deliberately
+    // do NOT symmetrize near-symmetric inputs (that silently alters the
+    // eigenpairs of genuinely non-symmetric matrices — a correctness bug), and
+    // do NOT use rocsolver_geev (its column-major real contract does not honour
+    // the LAPACK eigenvector convention the other backends produce).
     {
         auto [n_check, ndim_check] = check_square(A);
+        (void)ndim_check;
         int64_t nbatch_check = batch_size(A);
         auto A_cont = A.contiguous();
-        bool is_near_symmetric = true;
+        bool is_exactly_symmetric = true;
         if (A.dtype() == DType::Float32) {
             auto [a_max, diff_max] = eig_symmetry_metrics<float>(
                 A_cont.data<float>(), nbatch_check, n_check, stream);
-            is_near_symmetric = (diff_max < 1e-2 * std::max(a_max, 1.0));
+            (void)a_max;
+            is_exactly_symmetric = (diff_max == 0.0);
         } else {
             auto [a_max, diff_max] = eig_symmetry_metrics<double>(
                 A_cont.data<double>(), nbatch_check, n_check, stream);
-            is_near_symmetric = (diff_max < 1e-3 * std::max(a_max, 1.0));
+            (void)a_max;
+            is_exactly_symmetric = (diff_max == 0.0);
         }
-        if (is_near_symmetric) {
-            auto At = ::tenzor::transpose(A, ndim_check - 2, ndim_check - 1).contiguous();
-            auto A_sym = ::tenzor::mul(::tenzor::add(A, At), 0.5);
-            auto [W, V] = linalg_eigh_kernel(A_sym.contiguous(), stream);
+        if (is_exactly_symmetric) {
+            auto [W, V] = linalg_eigh_kernel(A.contiguous(), stream);
             std::vector<int64_t> w_shape_v(W.shape().begin(), W.shape().end());
             auto WI = zeros(w_shape_v, A.dtype(), A.device());
             return {W, WI, V};
@@ -1828,69 +1832,11 @@ auto linalg_eig_kernel(const Tensor& A, hipStream_t stream)
     v_shape.push_back(n);
     auto V = zeros(v_shape, A.dtype(), A.device());
 
-#if ROCSOLVER_VERSION_MAJOR > 6 || (ROCSOLVER_VERSION_MAJOR == 6 && ROCSOLVER_VERSION_MINOR >= 0)
-    auto handle = RocSOLVERHandlePool::get(stream);
-    DeviceInfo d_info;
-
-    // rocsolver_geev uses column-major layout. Our row-major A(n×n) is interpreted
-    // as A^T in column-major, so we compute eigenvalues of A^T which has the same
-    // eigenvalues. Right eigenvectors of A^T = left eigenvectors of A, but for
-    // non-symmetric eig we request right eigenvectors (VR) and skip left (VL).
-    // The caller gets correct eigenvalues; eigenvectors may need transposition
-    // for non-symmetric cases but are correct for the common symmetric-ish usage.
-
-    if (A.dtype() == DType::Float32) {
-        float* a_data = work.data<float>();
-        float* wr_data = WR.data<float>();
-        float* wi_data = WI.data<float>();
-        float* vr_data = V.data<float>();
-
-        for (int64_t b = 0; b < nbatch; b++) {
-            float* mat = a_data + b * n * n;
-            float* wr = wr_data + b * n;
-            float* wi = wi_data + b * n;
-            float* vr = vr_data + b * n * n;
-
-            ROCBLAS_CHECK_LINALG(rocsolver_sgeev(handle,
-                rocblas_evect_original,   // compute right eigenvectors
-                rocblas_evect_none,       // skip left eigenvectors
-                n, mat, n,
-                wr, wi,
-                nullptr, n,              // VL (not computed)
-                vr, n,                   // VR (right eigenvectors)
-                d_info.ptr));
-            check_rocsolver_info(d_info.ptr, "eig");
-        }
-    } else {
-        double* a_data = work.data<double>();
-        double* wr_data = WR.data<double>();
-        double* wi_data = WI.data<double>();
-        double* vr_data = V.data<double>();
-
-        for (int64_t b = 0; b < nbatch; b++) {
-            double* mat = a_data + b * n * n;
-            double* wr = wr_data + b * n;
-            double* wi = wi_data + b * n;
-            double* vr = vr_data + b * n * n;
-
-            ROCBLAS_CHECK_LINALG(rocsolver_dgeev(handle,
-                rocblas_evect_original,   // compute right eigenvectors
-                rocblas_evect_none,       // skip left eigenvectors
-                n, mat, n,
-                wr, wi,
-                nullptr, n,              // VL (not computed)
-                vr, n,                   // VR (right eigenvectors)
-                d_info.ptr));
-            check_rocsolver_info(d_info.ptr, "eig");
-        }
-    }
-
-    HIP_CHECK_LINALG(hipStreamSynchronize(stream ? stream : nullptr));
-    return {WR, WI, V};
-#else
-    // No vendor geev in this rocSOLVER. Native EISPACK-hqr2 eigensolver:
-    // one work-item per batch element over global-memory scratch (correct
-    // non-symmetric eigenvalues AND eigenvectors; no shared-memory size cap).
+    // Non-symmetric path: native EISPACK Hessenberg + Francis QR eigensolver
+    // (one work-item per batch element over global-memory scratch). Correct
+    // non-symmetric eigenvalues AND eigenvectors, and bit-for-bit the same
+    // algorithm/output packing as the CUDA/OneAPI/Vulkan backends — so the
+    // library returns identical eigenpairs regardless of backend.
     auto vbuf = zeros({nbatch, n}, A.dtype(), A.device());
     int eblock = 256;
     int egrid = static_cast<int>((nbatch + eblock - 1) / eblock);
@@ -1906,7 +1852,6 @@ auto linalg_eig_kernel(const Tensor& A, hipStream_t stream)
     HIP_CHECK_LINALG(hipGetLastError());
     HIP_CHECK_LINALG(hipStreamSynchronize(stream ? stream : nullptr));
     return {WR, WI, V};
-#endif
 }
 
 // ============================================================================

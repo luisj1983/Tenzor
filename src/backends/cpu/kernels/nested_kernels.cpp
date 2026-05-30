@@ -713,6 +713,18 @@ auto nested_attention_backward_kernel(const Tensor& grad_out, const Tensor& Q,
                                        const Tensor& attn_out,
                                        const Tensor& q_offsets, const Tensor& kv_offsets,
                                        float scale, bool causal) -> std::vector<Tensor> {
+    // The forward (nested_attention_kernel) supports F32/F64/F16/BF16; this backward
+    // kernel computes in Float32. Widen any non-F32 dtype, compute, and narrow each
+    // gradient back so forward/backward dtype support match (no asymmetric throw).
+    if (Q.dtype() != DType::Float32) {
+        const DType orig = Q.dtype();
+        auto grads = nested_attention_backward_kernel(
+            grad_out.to(DType::Float32), Q.to(DType::Float32), K.to(DType::Float32),
+            V.to(DType::Float32), attn_out.to(DType::Float32),
+            q_offsets, kv_offsets, scale, causal);
+        for (auto& g : grads) { g = g.to(orig); }
+        return grads;
+    }
     auto q_off_cpu = (q_offsets.device().type != Device::Type::CPU)
         ? q_offsets.to(Device::cpu()) : q_offsets;
     auto kv_off_cpu = (kv_offsets.device().type != Device::Type::CPU)

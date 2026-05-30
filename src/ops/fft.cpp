@@ -104,6 +104,16 @@ auto rfft(const Tensor& input, std::optional<int64_t> n, int64_t dim,
     validate_fft_input(input, "rfft");
     dim = normalize_dim(dim, input.ndim());
 
+    // Non-innermost transforms: decompose via transpose so every backend only needs
+    // the last-dimension real transform (cuFFT/rocFFT only support last-dim rfft).
+    // The reduced-size frequency axis is transposed back to `dim`.
+    const int64_t last_dim_rfft = input.ndim() - 1;
+    if (dim != last_dim_rfft) {
+        Tensor t = transpose(input, dim, last_dim_rfft);
+        Tensor r = rfft(t, n, last_dim_rfft, norm);
+        return transpose(r, dim, last_dim_rfft);
+    }
+
     int64_t signal_len = n.value_or(input.shape()[dim]);
     if (signal_len <= 0) {
         throw std::runtime_error("rfft: n must be positive, got " + std::to_string(signal_len));
@@ -121,6 +131,15 @@ auto irfft(const Tensor& input, std::optional<int64_t> n, int64_t dim,
            const std::string& norm) -> Tensor {
     validate_fft_input(input, "irfft");
     dim = normalize_dim(dim, input.ndim());
+
+    // Non-innermost transforms: decompose via transpose so every backend only needs
+    // the last-dimension inverse-real transform (cuFFT/rocFFT constraint).
+    const int64_t last_dim_irfft = input.ndim() - 1;
+    if (dim != last_dim_irfft) {
+        Tensor t = transpose(input, dim, last_dim_irfft);
+        Tensor r = irfft(t, n, last_dim_irfft, norm);
+        return transpose(r, dim, last_dim_irfft);
+    }
 
     // Default output length: 2 * (input_len - 1)
     int64_t signal_len = n.value_or(2 * (input.shape()[dim] - 1));

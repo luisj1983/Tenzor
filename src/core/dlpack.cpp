@@ -47,9 +47,9 @@ auto dtype_to_dlpack(DType dt) -> DLDataType {
 }
 
 auto dlpack_to_dtype(DLDataType dl) -> DType {
-    if (dl.lanes != 1) {
-        throw std::runtime_error("from_dlpack: multi-lane dtypes are not supported");
-    }
+    // `lanes` describes a packed vector element (e.g. float32x4). Tenzor has no
+    // vector dtype, so we map to the SCALAR base dtype here; from_dlpack() turns a
+    // lanes>1 element into a trailing contiguous dimension of size `lanes`.
     switch (dl.code) {
         case kDLFloat:
             switch (dl.bits) {
@@ -225,6 +225,16 @@ auto from_dlpack(DLManagedTensor* managed) -> Tensor {
     }
     std::vector<int64_t> shape(dl.shape, dl.shape + dl.ndim);
 
+    // Multi-lane (packed vector) elements: a lanes>1 element is `lanes` contiguous
+    // scalars (innermost). Represent it as a trailing dimension of size `lanes`.
+    // `shape`/`dl.strides` stay in vector-element units for the strided walk below;
+    // `out_shape` is the scalar-element shape exposed to the caller.
+    const int lanes = (dl.dtype.lanes < 1) ? 1 : static_cast<int>(dl.dtype.lanes);
+    std::vector<int64_t> out_shape = shape;
+    if (lanes > 1) {
+        out_shape.push_back(static_cast<int64_t>(lanes));
+    }
+
     // Audit item F.8: support non-contiguous DLPack imports.  Producers
     // (NumPy views, PyTorch slices, …) hand us strides; we copy into a
     // contiguous Tensor on import rather than refusing.  The copy is on
@@ -259,8 +269,10 @@ auto from_dlpack(DLManagedTensor* managed) -> Tensor {
                 "supported on CPU.  For GPU producers, request a "
                 "contiguous copy on the producer side first.");
         }
-        const size_t elem_bytes = dtype_size(dtype);
-        Tensor out(shape, dtype, device);
+        // Per (vector) element = `lanes` contiguous scalars; for lanes==1 this is
+        // just the scalar size (unchanged behavior).
+        const size_t elem_bytes = dtype_size(dtype) * static_cast<size_t>(lanes);
+        Tensor out(out_shape, dtype, device);
         auto* dst = static_cast<uint8_t*>(out.data_ptr());
 
         // Walk every index of the output (row-major) and dereference the
@@ -297,7 +309,7 @@ auto from_dlpack(DLManagedTensor* managed) -> Tensor {
     // Wrap the external buffer with a deleter that invokes the producer's
     // DLPack deleter exactly once. from_blob's deleter runs when the new
     // Tensor's storage is released.
-    Tensor t = Tensor::from_blob(data_ptr, std::move(shape), dtype, device,
+    Tensor t = Tensor::from_blob(data_ptr, std::move(out_shape), dtype, device,
                                  [managed](void*) {
                                      if (managed && managed->deleter) {
                                          managed->deleter(managed);

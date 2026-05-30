@@ -3540,6 +3540,13 @@ auto prod_kernel(const Tensor& input, int64_t dim, bool keepdim, cudaStream_t st
     auto [resolved_stream, stream_guard] = resolve_stream(stream, input);
     stream = resolved_stream;
 
+    // Float16/BFloat16: widen to Float32 on device, compute, narrow back to the
+    // input dtype (matches the CPU prod contract, audit E.2). The cast runs on GPU.
+    if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) {
+        const DType orig = input.dtype();
+        return prod_kernel(input.to(DType::Float32), dim, keepdim, stream).to(orig);
+    }
+
     const auto dtype = input.dtype();
     const auto& device = input.device();
     const auto& input_shape = input.shape();
@@ -3858,6 +3865,12 @@ auto var_kernel(const Tensor& input, int64_t dim, bool keepdim, int64_t correcti
     auto [resolved_stream, stream_guard] = resolve_stream(stream, input);
     stream = resolved_stream;
 
+    // Float16/BFloat16: widen to Float32 on device and compute. The result stays
+    // Float32 to match the CPU var contract (output_dtype promoted). On-GPU cast.
+    if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) {
+        return var_kernel(input.to(DType::Float32), dim, keepdim, correction, stream);
+    }
+
     const auto dtype = input.dtype();
     const auto& device = input.device();
     const auto& input_shape = input.shape();
@@ -4018,6 +4031,12 @@ __global__ void elementwise_sqrt_kernel(const T* input, T* output, int64_t n) {
 auto std_kernel(const Tensor& input, int64_t dim, bool keepdim, int64_t correction, cudaStream_t stream) -> Tensor {
     auto [resolved_stream, stream_guard] = resolve_stream(stream, input);
     stream = resolved_stream;
+
+    // Float16/BFloat16: widen to Float32 on device and compute. The result stays
+    // Float32 to match the CPU std contract (output_dtype promoted). On-GPU cast.
+    if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) {
+        return std_kernel(input.to(DType::Float32), dim, keepdim, correction, stream);
+    }
 
     const auto dtype = input.dtype();
     const auto& device = input.device();

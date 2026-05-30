@@ -290,9 +290,16 @@ auto ctc_loss_forward_kernel(
     bool zero_infinity,
     cudaStream_t stream
 ) -> std::vector<Tensor> {
+    // The CTC compute kernel runs in Float32. Match the CPU CTC dtype surface by
+    // widening F64/F16/BF16 log_probs to Float32 on device, computing, and narrowing
+    // the float outputs (loss, raw_grad) back. targets/lengths remain Int32.
     if (log_probs.dtype() != DType::Float32) {
-        throw std::invalid_argument(
-            "ctc_loss_forward (CUDA): log_probs must be Float32");
+        const DType orig = log_probs.dtype();
+        auto outs = ctc_loss_forward_kernel(
+            log_probs.to(DType::Float32), targets, input_lengths, target_lengths,
+            blank, zero_infinity, stream);
+        for (auto& t : outs) { t = t.to(orig); }
+        return outs;
     }
     if (targets.dtype() != DType::Int32 ||
         input_lengths.dtype() != DType::Int32 ||

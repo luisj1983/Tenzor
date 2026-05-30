@@ -287,7 +287,7 @@ namespace cuda {
                            const std::string& norm, cudaStream_t stream) -> Tensor;
 
     // Fused operations
-    auto fused_conv2d_bn_relu_cuda(const Tensor& input, const Tensor& weight, const Tensor* bias, const Tensor& bn_mean, const Tensor& bn_var, const Tensor& bn_gamma, const Tensor& bn_beta, int64_t stride, int64_t padding, float eps) -> Tensor;
+    auto fused_conv2d_bn_relu_cuda(const Tensor& input, const Tensor& weight, const Tensor* bias, const Tensor& bn_mean, const Tensor& bn_var, const Tensor& bn_gamma, const Tensor& bn_beta, int64_t stride_h, int64_t stride_w, int64_t padding_h, int64_t padding_w, float eps) -> Tensor;
     auto fused_linear_relu_cuda(const Tensor& input, const Tensor& weight, const Tensor* bias) -> Tensor;
     auto fused_batchnorm_relu_cuda(const Tensor& input, const Tensor& running_mean, const Tensor& running_var, const Tensor& weight, const Tensor& bias, float eps) -> Tensor;
     auto fused_add_relu_cuda(const Tensor& a, const Tensor& b) -> Tensor;
@@ -2496,18 +2496,13 @@ void register_cuda_kernels(BackendDispatchTable& table) {
         const auto stride  = ::tenzor::backend::attrs::stride_2d(attrs);
         const auto padding = ::tenzor::backend::attrs::padding_2d(attrs);
         float eps = static_cast<float>(attrs.get_float(AttrKey::Eps, 1e-5));
-        // Phase 2.1: fused_conv2d_bn_relu_cuda kernel is scalar-only; reject asymmetric.
-        if (stride[0] != stride[1] || padding[0] != padding[1]) {
-            throw std::invalid_argument(
-                "FusedConv2dBnReLU (CUDA): backend kernel only supports symmetric stride/padding; "
-                "got stride=" + std::to_string(stride[0]) + "x" + std::to_string(stride[1]) +
-                ", padding=" + std::to_string(padding[0]) + "x" + std::to_string(padding[1]));
-        }
         const Tensor* bias = inputs.size() > 2 && inputs[2].numel() > 0 ? &inputs[2] : nullptr;
         // CPU registration: [input, weight, conv_bias, bn_gamma, bn_beta, bn_running_mean, bn_running_var]
         // CUDA func expects: (input, weight, bias, bn_mean, bn_var, bn_gamma, bn_beta, ...)
+        // Per-axis stride/padding (asymmetric supported); all float dtypes handled in-kernel.
         return cuda::fused_conv2d_bn_relu_cuda(inputs[0], inputs[1], bias,
-            inputs[5], inputs[6], inputs[3], inputs[4], stride[0], padding[0], eps);
+            inputs[5], inputs[6], inputs[3], inputs[4],
+            stride[0], stride[1], padding[0], padding[1], eps);
     });
 
     table.register_single_output_kernel(OpId::FusedLinearReLU, [](std::span<const Tensor> inputs, const OpAttributes&) -> Tensor {

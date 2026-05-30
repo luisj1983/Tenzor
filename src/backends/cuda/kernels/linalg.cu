@@ -1787,15 +1787,17 @@ auto linalg_eig_kernel(const Tensor& A, cudaStream_t stream)
     -> std::tuple<Tensor, Tensor, Tensor> {
     // Non-symmetric eigendecomposition.
     //
-    // cuSOLVER through CUDA 13 ships only the generic `cusolverDnXgeev`,
-    // whose real-input contract requires complex W/VL buffers; the legacy
-    // `cusolverDn[SD]geev` is gone. Until we wire up the new generic API,
-    // dispatch to `eigh` when the input is (numerically) symmetric — this
-    // covers gradcheck (which uses SPD inputs) and any real-physical
-    // problem whose autograd backward formula assumes real eigenvalues.
-    // For non-symmetric inputs we fall back to the in-tree
-    // Hessenberg + Francis QR kernel; that fallback is approximate for
-    // n>3 SPD-like matrices but is the only available path here.
+    // Exactly-symmetric inputs are routed to `eigh` (real eigenvalues,
+    // orthonormal eigenvectors — more accurate and cheaper). All other inputs
+    // use the in-tree EISPACK Hessenberg + Francis double-shift QR solver
+    // (`eig_hqr2_kernel`). This is a full, accurate non-symmetric eigensolver
+    // (the same algorithm as LAPACK dhseqr/dtrevc) and is the SAME routine used
+    // by every other GPU backend (ROCm/OneAPI/Vulkan), so the library returns
+    // identical eigenpairs regardless of backend — the cross-backend parity
+    // contract. (We deliberately do NOT use cuSOLVER `cusolverDnXgeev`: its
+    // real→complex contract does not honour LAPACK adjacent-conjugate-pair
+    // ordering, which misclassifies real vs complex eigenvalues for general
+    // matrices and would diverge from the other backends.)
     if (A.dtype() == DType::Float16) {
         auto [wr, wi, V] = linalg_eig_kernel(A.to(DType::Float32), stream);
         return {wr, wi, V};

@@ -216,8 +216,11 @@ auto maxpool2d_forward_with_indices(const Tensor& input,
     auto src_md = memory::desc(src_dims, memory::data_type::f32, memory::format_tag::nchw);
     auto dst_md = memory::desc(dst_dims, memory::data_type::f32, memory::format_tag::nchw);
 
-    // Create pooling descriptor - use forward_training to get workspace (indices)
-    auto pool_desc = pooling_forward::desc(
+    // oneDNN v3 API: primitive_desc built directly from engine + parameters
+    // (the legacy ::desc step was removed in oneDNN 3.x). forward_training keeps
+    // the workspace (max indices).
+    auto pool_pd = pooling_forward::primitive_desc(
+        dnnl_engine,
         prop_kind::forward_training,
         algorithm::pooling_max,
         src_md, dst_md,
@@ -225,8 +228,6 @@ auto maxpool2d_forward_with_indices(const Tensor& input,
         dilation_dims,
         padding_dims, padding_dims
     );
-
-    auto pool_pd = pooling_forward::primitive_desc(pool_desc, dnnl_engine);
 
     // Wrap tensors
     auto src_mem = sycl_interop::make_memory(pool_pd.src_desc(), dnnl_engine,
@@ -345,16 +346,19 @@ auto avgpool2d_forward(const Tensor& input,
         algorithm::pooling_avg_include_padding :
         algorithm::pooling_avg_exclude_padding;
 
-    // Create pooling descriptor
-    auto pool_desc = pooling_forward::desc(
+    // oneDNN v3 API: primitive_desc built directly from engine + parameters.
+    // v3 requires an explicit dilation argument; average pooling is undilated
+    // (oneDNN encodes dilation as value-1, so 0 == standard pooling).
+    memory::dims pool_dilation = {0, 0};
+    auto pool_pd = pooling_forward::primitive_desc(
+        dnnl_engine,
         prop_kind::forward_inference,
         algo,
         src_md, dst_md,
         strides_dims, kernel_dims,
+        pool_dilation,
         padding_dims, padding_dims
     );
-
-    auto pool_pd = pooling_forward::primitive_desc(pool_desc, dnnl_engine);
 
     // Wrap tensors
     auto src_mem = sycl_interop::make_memory(pool_pd.src_desc(), dnnl_engine,
