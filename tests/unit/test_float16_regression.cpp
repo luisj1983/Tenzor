@@ -19,22 +19,23 @@
 #include "tenzor/ops/math.hpp"
 #include "tenzor/ops/reduction.hpp"
 #include "tenzor/ops/transform.hpp"
+#include "../backend_test_fixture.hpp"
 #include "../grad_flow_helpers.hpp"
 
 using namespace tenzor;
 
-class Float16RegressionTest : public ::testing::Test {
+class Float16RegressionTest : public ::tenzor::testing::BackendTest {
 protected:
-    Device device = Device::cpu();
-
     void SetUp() override {
-        tenzor::initialize();
+        ::tenzor::testing::BackendTest::SetUp();
+        if (::testing::Test::IsSkipped()) return;
     }
 };
 
 // Validates weight initialization doesn't underflow to zero in Float16
-TEST_F(Float16RegressionTest, LinearWeightsNonZero) {
+TEST_P(Float16RegressionTest, LinearWeightsNonZero) {
     auto linear = nn::Linear(768, 768);
+    linear.to(device);
     linear.to(DType::Float16);
 
     auto params = linear.parameters();
@@ -44,15 +45,17 @@ TEST_F(Float16RegressionTest, LinearWeightsNonZero) {
 
     // Verify weights are not all zero by checking sum of absolute values
     auto weight_abs_sum = tenzor::sum(tenzor::abs(weight.to(DType::Float32)));
-    EXPECT_GT(weight_abs_sum.item<float>(), 0.0f) << "Float16 weights should not all be zero";
+    auto weight_abs_sum_host = weight_abs_sum.cpu();
+    EXPECT_GT(weight_abs_sum_host.item<float>(), 0.0f) << "Float16 weights should not all be zero";
 }
 
 // Linear forward pass produces non-zero output
-TEST_F(Float16RegressionTest, LinearForward) {
+TEST_P(Float16RegressionTest, LinearForward) {
     auto linear = nn::Linear(4, 3);
+    linear.to(device);
     linear.to(DType::Float16);
 
-    auto input = Variable(ones({2, 4}, DType::Float16, device), true);
+    auto input = Variable(ones({2, 4}, DType::Float32, device).to(DType::Float16), true);
     auto output = linear.forward(input);
 
     EXPECT_EQ(output.tensor().dtype(), DType::Float16);
@@ -61,11 +64,12 @@ TEST_F(Float16RegressionTest, LinearForward) {
 }
 
 // Linear backward pass computes gradients without crashing
-TEST_F(Float16RegressionTest, LinearBackward) {
+TEST_P(Float16RegressionTest, LinearBackward) {
     auto linear = nn::Linear(64, 32);
+    linear.to(device);
     linear.to(DType::Float16);
 
-    auto input = Variable(randn({4, 64}, DType::Float16, device), true);
+    auto input = Variable(randn({4, 64}, DType::Float32, device).to(DType::Float16), true);
     auto output = linear.forward(input);
     auto loss = sum(output);
     loss.backward();
@@ -75,9 +79,9 @@ TEST_F(Float16RegressionTest, LinearBackward) {
 }
 
 // MatMul with Float16 accumulates in Float32 correctly
-TEST_F(Float16RegressionTest, MatMul) {
-    auto a = randn({128, 768}, DType::Float16, device);
-    auto b = randn({768, 256}, DType::Float16, device);
+TEST_P(Float16RegressionTest, MatMul) {
+    auto a = randn({128, 768}, DType::Float32, device).to(DType::Float16);
+    auto b = randn({768, 256}, DType::Float32, device).to(DType::Float16);
     auto c = matmul(a, b);
 
     EXPECT_EQ(c.dtype(), DType::Float16);
@@ -86,8 +90,8 @@ TEST_F(Float16RegressionTest, MatMul) {
 }
 
 // Softmax backward in Float16
-TEST_F(Float16RegressionTest, SoftmaxBackward) {
-    auto input = Variable(randn({4, 32}, DType::Float16, device), true);
+TEST_P(Float16RegressionTest, SoftmaxBackward) {
+    auto input = Variable(randn({4, 32}, DType::Float32, device).to(DType::Float16), true);
     auto output = softmax(input, 1);
     auto loss = sum(output);
     loss.backward();
@@ -96,8 +100,8 @@ TEST_F(Float16RegressionTest, SoftmaxBackward) {
 }
 
 // Mean backward in Float16
-TEST_F(Float16RegressionTest, MeanBackward) {
-    auto input = Variable(randn({4, 16}, DType::Float16, device), true);
+TEST_P(Float16RegressionTest, MeanBackward) {
+    auto input = Variable(randn({4, 16}, DType::Float32, device).to(DType::Float16), true);
     auto output = mean(input);
     output.backward();
 
@@ -105,8 +109,8 @@ TEST_F(Float16RegressionTest, MeanBackward) {
 }
 
 // Reshape backward in Float16
-TEST_F(Float16RegressionTest, ReshapeBackward) {
-    auto input = Variable(randn({2, 3, 4}, DType::Float16, device), true);
+TEST_P(Float16RegressionTest, ReshapeBackward) {
+    auto input = Variable(randn({2, 3, 4}, DType::Float32, device).to(DType::Float16), true);
     auto reshaped = reshape(input, {2, 12});
     auto loss = sum(reshaped);
     loss.backward();
@@ -115,8 +119,8 @@ TEST_F(Float16RegressionTest, ReshapeBackward) {
 }
 
 // Permute backward in Float16
-TEST_F(Float16RegressionTest, PermuteBackward) {
-    auto input = Variable(randn({2, 3, 4}, DType::Float16, device), true);
+TEST_P(Float16RegressionTest, PermuteBackward) {
+    auto input = Variable(randn({2, 3, 4}, DType::Float32, device).to(DType::Float16), true);
     auto permuted = permute(input, {0, 2, 1});
     auto loss = sum(permuted);
     loss.backward();
@@ -125,8 +129,9 @@ TEST_F(Float16RegressionTest, PermuteBackward) {
 }
 
 // Embedding forward/backward in Float16
-TEST_F(Float16RegressionTest, EmbeddingBackward) {
+TEST_P(Float16RegressionTest, EmbeddingBackward) {
     auto embed = nn::Embedding(100, 64);
+    embed.to(device);
     embed.to(DType::Float16);
 
     auto indices = zeros({4, 8}, DType::Int64, device);
@@ -138,13 +143,14 @@ TEST_F(Float16RegressionTest, EmbeddingBackward) {
 }
 
 // LSTM cell with Float16
-TEST_F(Float16RegressionTest, LSTMCellFloat16) {
+TEST_P(Float16RegressionTest, LSTMCellFloat16) {
     auto lstm = nn::LSTMCell(32, 16);
+    lstm.to(device);
     lstm.to(DType::Float16);
 
-    auto input = Variable(randn({2, 32}, DType::Float16, device), true);
-    auto h = Variable(zeros({2, 16}, DType::Float16, device), false);
-    auto c = Variable(zeros({2, 16}, DType::Float16, device), false);
+    auto input = Variable(randn({2, 32}, DType::Float32, device).to(DType::Float16), true);
+    auto h = Variable(zeros({2, 16}, DType::Float32, device).to(DType::Float16), false);
+    auto c = Variable(zeros({2, 16}, DType::Float32, device).to(DType::Float16), false);
 
     auto [h_new, c_new] = lstm.forward(input, h, c);
 
@@ -153,9 +159,9 @@ TEST_F(Float16RegressionTest, LSTMCellFloat16) {
 }
 
 // Bmm backward in Float16
-TEST_F(Float16RegressionTest, BmmBackward) {
-    auto a = Variable(randn({2, 4, 8}, DType::Float16, device), true);
-    auto b = Variable(randn({2, 8, 6}, DType::Float16, device), true);
+TEST_P(Float16RegressionTest, BmmBackward) {
+    auto a = Variable(randn({2, 4, 8}, DType::Float32, device).to(DType::Float16), true);
+    auto b = Variable(randn({2, 8, 6}, DType::Float32, device).to(DType::Float16), true);
     auto c = bmm(a, b);
     auto loss = sum(c);
     loss.backward();
@@ -163,3 +169,5 @@ TEST_F(Float16RegressionTest, BmmBackward) {
     EXPECT_GRAD_FLOWS(a);
     EXPECT_GRAD_FLOWS(b);
 }
+
+INSTANTIATE_BACKEND_TESTS(Float16RegressionTest);

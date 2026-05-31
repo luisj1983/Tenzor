@@ -47,6 +47,8 @@
 #include <tenzor/ops/math.hpp>
 #include <tenzor/tenzor.hpp>
 
+#include "../backend_test_fixture.hpp"
+
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -57,16 +59,9 @@
 #include <string>
 #include <vector>
 
-namespace tenzor { void initialize(); }
-
 namespace {
 
-class EagerParityEnv : public ::testing::Environment {
-public:
-    void SetUp() override { tenzor::initialize(); }
-};
-[[maybe_unused]] auto* g_eager_parity_env =
-    ::testing::AddGlobalTestEnvironment(new EagerParityEnv);
+class EagerParity : public ::tenzor::testing::BackendTest {};
 
 // Compare two contiguous CPU buffers element-wise within a Float32 ULP-scale
 // tolerance. Returns gtest AssertionResult so the failure message localises
@@ -213,8 +208,6 @@ public:
     std::shared_ptr<tenzor::nn::ReLU>   act;
 };
 
-}  // namespace
-
 // ===========================================================================
 // Lazy parity (FP32 + FP64)
 // ===========================================================================
@@ -222,9 +215,8 @@ public:
 // LazyTensor materialisation funnels through the same dispatch as eager.
 // We assert bitwise equality here — any drift signals that lazy execution
 // took a different code path or applied an unintended transform.
-TEST(EagerParity, LazyVsEager_AddMulChain_Float32) {
+TEST_P(EagerParity, LazyVsEager_AddMulChain_Float32) {
     using namespace tenzor;
-    auto device = Device::cpu();
 
     auto a = randn({16, 8}, DType::Float32, device);
     auto b = randn({16, 8}, DType::Float32, device);
@@ -249,9 +241,8 @@ TEST(EagerParity, LazyVsEager_AddMulChain_Float32) {
                                     alt.owner.data<float>(), ref.numel));
 }
 
-TEST(EagerParity, LazyVsEager_AddMulChain_Float64) {
+TEST_P(EagerParity, LazyVsEager_AddMulChain_Float64) {
     using namespace tenzor;
-    auto device = Device::cpu();
 
     auto a = randn({8, 8}, DType::Float64, device);
     auto b = randn({8, 8}, DType::Float64, device);
@@ -273,9 +264,8 @@ TEST(EagerParity, LazyVsEager_AddMulChain_Float64) {
 }
 
 // MatMul is the workhorse op and is a good lazy-vs-eager parity probe.
-TEST(EagerParity, LazyVsEager_MatMul_Float32) {
+TEST_P(EagerParity, LazyVsEager_MatMul_Float32) {
     using namespace tenzor;
-    auto device = Device::cpu();
 
     auto x = randn({4, 8}, DType::Float32, device);
     auto w = randn({8, 6}, DType::Float32, device);
@@ -298,9 +288,8 @@ TEST(EagerParity, LazyVsEager_MatMul_Float32) {
 // JIT parity (CPU only — GPU JIT requires hardware not assumed in CI)
 // ===========================================================================
 
-TEST(EagerParity, JitVsEager_Mlp_Cpu_Float32) {
+TEST_P(EagerParity, JitVsEager_Mlp_Cpu_Float32) {
     using namespace tenzor;
-    auto device = Device::cpu();
 
     auto eager_model = make_mlp_model();
     eager_model->to(device);
@@ -340,9 +329,8 @@ TEST(EagerParity, JitVsEager_Mlp_Cpu_Float32) {
 // under "JIT Conv2d padding attribute lost during trace").
 // Once the JIT side is fixed, remove the skip macro below to re-enable the
 // numeric parity check.
-TEST(EagerParity, JitVsEager_ConvStack_Cpu_Float32) {
+TEST_P(EagerParity, JitVsEager_ConvStack_Cpu_Float32) {
     using namespace tenzor;
-    auto device = Device::cpu();
 
     auto eager_model = std::make_shared<ConvStackModel>();
     eager_model->to(device);
@@ -386,9 +374,8 @@ TEST(EagerParity, JitVsEager_ConvStack_Cpu_Float32) {
 // `jit::compile` wraps a callable into a CompiledFunction with the trace +
 // shape cache. Exercising both entry points keeps coverage on the user-facing
 // API surface, not just the internal CompiledModule::trace.
-TEST(EagerParity, JitCompileVsEager_Mlp_Cpu_Float32) {
+TEST_P(EagerParity, JitCompileVsEager_Mlp_Cpu_Float32) {
     using namespace tenzor;
-    auto device = Device::cpu();
 
     auto model = make_mlp_model();
     model->to(device);
@@ -420,9 +407,8 @@ TEST(EagerParity, JitCompileVsEager_Mlp_Cpu_Float32) {
 // ReLU). Conv2d / BN / attention layers will roll in once C.3 finishes the
 // op coverage backlog. Once that lands, this test should be extended to the
 // same model coverage as the JIT tests above.
-TEST(EagerParity, LiteVsEager_Mlp_Cpu_Float32) {
+TEST_P(EagerParity, LiteVsEager_Mlp_Cpu_Float32) {
     using namespace tenzor;
-    auto device = Device::cpu();
 
     auto model = make_mlp_model();
     model->to(device);
@@ -456,9 +442,8 @@ TEST(EagerParity, LiteVsEager_Mlp_Cpu_Float32) {
 
 // Sigmoid activation flavour — keeps the lite-supported activation surface
 // exercised under the parity contract.
-TEST(EagerParity, LiteVsEager_LinearSigmoid_Cpu_Float32) {
+TEST_P(EagerParity, LiteVsEager_LinearSigmoid_Cpu_Float32) {
     using namespace tenzor;
-    auto device = Device::cpu();
 
     auto model = std::make_shared<nn::Sequential>(
         std::make_shared<nn::Linear>(8, 4, /*bias=*/true),
@@ -492,3 +477,7 @@ TEST(EagerParity, LiteVsEager_LinearSigmoid_Cpu_Float32) {
 
     std::filesystem::remove(path);
 }
+
+INSTANTIATE_BACKEND_TESTS(EagerParity);
+
+}  // namespace

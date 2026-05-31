@@ -7,6 +7,7 @@
 // docs/internals/attention-contract.md M9 gates.
 
 #include <gtest/gtest.h>
+#include "../backend_test_fixture.hpp"
 #include "../multi_backend_dtype_fixture.hpp"
 #include "tenzor/tenzor.hpp"
 #include "tenzor/autograd/variable.hpp"
@@ -26,10 +27,11 @@ using namespace tenzor::nn;
 
 namespace {
 
-class AttentionAutogradTest : public ::testing::Test {
+class AttentionAutogradTest : public ::tenzor::testing::BackendTest {
 protected:
-    static void SetUpTestSuite() {
-        tenzor::initialize();
+    void SetUp() override {
+        ::tenzor::testing::BackendTest::SetUp();
+        if (::testing::Test::IsSkipped()) return;
     }
 };
 
@@ -39,12 +41,12 @@ protected:
 // dispatch<OpId::FlashAttention>() raw and wrapped output as Variable(t,
 // requires_grad=true) with no grad_fn — silent zero gradients. The new
 // FlashAttentionFunction-based apply helper must attach a grad_fn.
-TEST_F(AttentionAutogradTest, FlashAttentionAttachesGradFn) {
+TEST_P(AttentionAutogradTest, FlashAttentionAttachesGradFn) {
     // Small Q/K/V so the test is fast on CPU (the only backend guaranteed
     // available; this test runs on whatever backend Tensor lands on).
-    auto Q = tenzor::Variable(tenzor::randn({2, 4, 8, 16}), /*requires_grad=*/true);
-    auto K = tenzor::Variable(tenzor::randn({2, 4, 8, 16}), /*requires_grad=*/true);
-    auto V = tenzor::Variable(tenzor::randn({2, 4, 8, 16}), /*requires_grad=*/true);
+    auto Q = tenzor::Variable(tenzor::randn({2, 4, 8, 16}, DType::Float32, device), /*requires_grad=*/true);
+    auto K = tenzor::Variable(tenzor::randn({2, 4, 8, 16}, DType::Float32, device), /*requires_grad=*/true);
+    auto V = tenzor::Variable(tenzor::randn({2, 4, 8, 16}, DType::Float32, device), /*requires_grad=*/true);
 
     float scale = 1.0f / 4.0f;  // 1/sqrt(head_dim=16)
     auto out = tenzor::flash_attention(Q, K, V, scale, /*causal=*/false,
@@ -63,10 +65,10 @@ TEST_F(AttentionAutogradTest, FlashAttentionAttachesGradFn) {
     EXPECT_GRAD_FLOWS(V);
 }
 
-TEST_F(AttentionAutogradTest, FusedAttentionAttachesGradFn) {
-    auto Q = tenzor::Variable(tenzor::randn({2, 4, 8, 16}), true);
-    auto K = tenzor::Variable(tenzor::randn({2, 4, 8, 16}), true);
-    auto V = tenzor::Variable(tenzor::randn({2, 4, 8, 16}), true);
+TEST_P(AttentionAutogradTest, FusedAttentionAttachesGradFn) {
+    auto Q = tenzor::Variable(tenzor::randn({2, 4, 8, 16}, DType::Float32, device), true);
+    auto K = tenzor::Variable(tenzor::randn({2, 4, 8, 16}, DType::Float32, device), true);
+    auto V = tenzor::Variable(tenzor::randn({2, 4, 8, 16}, DType::Float32, device), true);
     float scale = 1.0f / 4.0f;
     auto out = tenzor::fused_attention(Q, K, V, scale, /*causal=*/false,
                                        /*use_cudnn_sdpa=*/false);
@@ -80,10 +82,10 @@ TEST_F(AttentionAutogradTest, FusedAttentionAttachesGradFn) {
 }
 
 // --- M2: causal flag honored for autograd path ---
-TEST_F(AttentionAutogradTest, FlashAttentionCausalGradFlows) {
-    auto Q = tenzor::Variable(tenzor::randn({2, 4, 8, 16}), true);
-    auto K = tenzor::Variable(tenzor::randn({2, 4, 8, 16}), true);
-    auto V = tenzor::Variable(tenzor::randn({2, 4, 8, 16}), true);
+TEST_P(AttentionAutogradTest, FlashAttentionCausalGradFlows) {
+    auto Q = tenzor::Variable(tenzor::randn({2, 4, 8, 16}, DType::Float32, device), true);
+    auto K = tenzor::Variable(tenzor::randn({2, 4, 8, 16}, DType::Float32, device), true);
+    auto V = tenzor::Variable(tenzor::randn({2, 4, 8, 16}, DType::Float32, device), true);
     auto out = tenzor::flash_attention(Q, K, V, 1.0f / 4.0f, /*causal=*/true);
     ASSERT_TRUE(out.requires_grad());
     auto loss = tenzor::sum(out);
@@ -98,15 +100,16 @@ TEST_F(AttentionAutogradTest, FlashAttentionCausalGradFlows) {
 // Audit C5/C6: previously bias_k_ was rebuilt as a new Variable on
 // device-mismatch, breaking the registered_parameters map alias and
 // dropping gradient accumulation on the dangling leaf.
-TEST_F(AttentionAutogradTest, MultiheadAttentionBiasKVGradFlows) {
+TEST_P(AttentionAutogradTest, MultiheadAttentionBiasKVGradFlows) {
     int64_t embed_dim = 16, num_heads = 4, batch = 2, seq_len = 8;
     auto mha = std::make_shared<tenzor::nn::MultiheadAttention>(
         embed_dim, num_heads, /*dropout=*/0.0,
         /*bias=*/true, /*add_bias_kv=*/true, /*add_zero_attn=*/false);
     mha->train(false);  // eval mode so the BMM path runs
                         // (per attention.cpp's grad_path_safe gating)
+    mha->to(device);
 
-    auto x = tenzor::Variable(tenzor::randn({batch, seq_len, embed_dim}), true);
+    auto x = tenzor::Variable(tenzor::randn({batch, seq_len, embed_dim}, DType::Float32, device), true);
     auto [out, weights] = mha->forward(x, x, x);
     auto loss = tenzor::sum(out);
     loss.backward();
@@ -140,14 +143,15 @@ TEST_F(AttentionAutogradTest, MultiheadAttentionBiasKVGradFlows) {
 // x.tensor() and rewrapped as Variable, severing the grad_fn chain back to
 // k_proj_/v_proj_. Every GQA model with num_heads_per_group > 1 (i.e. every
 // real GQA case, not MHA fallback) silently zeroed K/V projection grads.
-TEST_F(AttentionAutogradTest, GQARepeatKVPreservesProjGrads) {
+TEST_P(AttentionAutogradTest, GQARepeatKVPreservesProjGrads) {
     int64_t embed_dim = 16, num_heads = 8, num_kv_heads = 2;  // 4-to-1 GQA
     int64_t batch = 2, seq_len = 8;
     auto gqa = std::make_shared<tenzor::nn::GroupedQueryAttention>(
         embed_dim, num_heads, num_kv_heads);
     gqa->train(true);
+    gqa->to(device);
 
-    auto x = tenzor::Variable(tenzor::randn({batch, seq_len, embed_dim}), true);
+    auto x = tenzor::Variable(tenzor::randn({batch, seq_len, embed_dim}, DType::Float32, device), true);
     auto out = gqa->forward(x);
     auto loss = tenzor::sum(out);
     loss.backward();
@@ -174,16 +178,17 @@ TEST_F(AttentionAutogradTest, GQARepeatKVPreservesProjGrads) {
 }
 
 // --- M2: is_causal && attn_mask raises (was: silently double-masked) ---
-TEST_F(AttentionAutogradTest, MultiheadAttentionRejectsCausalPlusMask) {
+TEST_P(AttentionAutogradTest, MultiheadAttentionRejectsCausalPlusMask) {
     int64_t embed_dim = 16, num_heads = 4, batch = 2, seq_len = 8;
     auto mha = std::make_shared<tenzor::nn::MultiheadAttention>(
         embed_dim, num_heads, /*dropout=*/0.0,
         /*bias=*/true, /*add_bias_kv=*/false, /*add_zero_attn=*/false,
         /*kdim=*/0, /*vdim=*/0, /*batch_first=*/true, /*is_causal=*/true);
     mha->train(false);
+    mha->to(device);
 
-    auto x = tenzor::Variable(tenzor::randn({batch, seq_len, embed_dim}), true);
-    tenzor::Tensor mask = tenzor::ones({seq_len, seq_len}, tenzor::DType::Float32);
+    auto x = tenzor::Variable(tenzor::randn({batch, seq_len, embed_dim}, DType::Float32, device), true);
+    tenzor::Tensor mask = tenzor::ones({seq_len, seq_len}, tenzor::DType::Float32, device);
 
     bool threw = false;
     try {
@@ -203,17 +208,17 @@ TEST_F(AttentionAutogradTest, MultiheadAttentionRejectsCausalPlusMask) {
 // invariant the backward path's host_philox_uniform replay relies on.
 // ====================================================================
 
-TEST_F(AttentionAutogradTest, FlashAttentionPhiloxReplay_SeedDeterminism) {
+TEST_P(AttentionAutogradTest, FlashAttentionPhiloxReplay_SeedDeterminism) {
     int64_t B = 1, H = 2, S = 4, D = 8;
-    auto qt = tenzor::randn({B, H, S, D}) * 0.3f;
-    auto kt = tenzor::randn({B, H, S, D}) * 0.3f;
-    auto vt = tenzor::randn({B, H, S, D}) * 0.3f;
+    auto qt = tenzor::randn({B, H, S, D}, DType::Float32, device) * 0.3f;
+    auto kt = tenzor::randn({B, H, S, D}, DType::Float32, device) * 0.3f;
+    auto vt = tenzor::randn({B, H, S, D}, DType::Float32, device) * 0.3f;
     float scale = 1.0f / std::sqrt(static_cast<float>(D));
 
-    // Pin the default CPU generator's seed; flash_attention's dropout
-    // path derives its Philox seed from this. Same seed → same mask →
+    // Pin the default generator's seed for the active device; flash_attention's
+    // dropout path derives its Philox seed from this. Same seed → same mask →
     // same output.
-    tenzor::default_generator(tenzor::Device::cpu()).manual_seed(42);
+    tenzor::default_generator(device).manual_seed(42);
     auto Q1 = tenzor::Variable(qt, true);
     auto K1 = tenzor::Variable(kt, false);
     auto V1 = tenzor::Variable(vt, false);
@@ -221,7 +226,7 @@ TEST_F(AttentionAutogradTest, FlashAttentionPhiloxReplay_SeedDeterminism) {
         /*causal=*/false, /*dropout_p=*/0.5f, /*is_training=*/true);
     auto o1_cpu = out1.tensor().to(tenzor::Device::cpu()).to(tenzor::DType::Float32).contiguous();
 
-    tenzor::default_generator(tenzor::Device::cpu()).manual_seed(42);
+    tenzor::default_generator(device).manual_seed(42);
     auto Q2 = tenzor::Variable(qt, true);
     auto K2 = tenzor::Variable(kt, false);
     auto V2 = tenzor::Variable(vt, false);
@@ -251,23 +256,23 @@ TEST_F(AttentionAutogradTest, FlashAttentionPhiloxReplay_SeedDeterminism) {
 // ({32, 64, 128}).
 // ====================================================================
 
-TEST_F(AttentionAutogradTest, FlashAttentionFusedVsComposedFallback) {
+TEST_P(AttentionAutogradTest, FlashAttentionFusedVsComposedFallback) {
     int64_t B = 1, H = 2, S = 4;
     // Fused-eligible head_dim path.
     int64_t D_fused = 64;
     float scale_f = 1.0f / std::sqrt(static_cast<float>(D_fused));
-    auto qf = tenzor::Variable(tenzor::randn({B, H, S, D_fused}) * 0.3f, true);
-    auto kf = tenzor::Variable(tenzor::randn({B, H, S, D_fused}) * 0.3f, false);
-    auto vf = tenzor::Variable(tenzor::randn({B, H, S, D_fused}) * 0.3f, false);
+    auto qf = tenzor::Variable(tenzor::randn({B, H, S, D_fused}, DType::Float32, device) * 0.3f, true);
+    auto kf = tenzor::Variable(tenzor::randn({B, H, S, D_fused}, DType::Float32, device) * 0.3f, false);
+    auto vf = tenzor::Variable(tenzor::randn({B, H, S, D_fused}, DType::Float32, device) * 0.3f, false);
     auto out_fused = tenzor::flash_attention(qf, kf, vf, scale_f,
         /*causal=*/false, /*dropout_p=*/0.0f, /*is_training=*/false);
 
     // Composed-ops fallback head_dim path.
     int64_t D_comp = 33;
     float scale_c = 1.0f / std::sqrt(static_cast<float>(D_comp));
-    auto qc = tenzor::Variable(tenzor::randn({B, H, S, D_comp}) * 0.3f, true);
-    auto kc = tenzor::Variable(tenzor::randn({B, H, S, D_comp}) * 0.3f, false);
-    auto vc = tenzor::Variable(tenzor::randn({B, H, S, D_comp}) * 0.3f, false);
+    auto qc = tenzor::Variable(tenzor::randn({B, H, S, D_comp}, DType::Float32, device) * 0.3f, true);
+    auto kc = tenzor::Variable(tenzor::randn({B, H, S, D_comp}, DType::Float32, device) * 0.3f, false);
+    auto vc = tenzor::Variable(tenzor::randn({B, H, S, D_comp}, DType::Float32, device) * 0.3f, false);
     auto out_comp = tenzor::flash_attention(qc, kc, vc, scale_c,
         /*causal=*/false, /*dropout_p=*/0.0f, /*is_training=*/false);
 
@@ -298,7 +303,7 @@ TEST_F(AttentionAutogradTest, FlashAttentionFusedVsComposedFallback) {
 // Philox, ROCm Philox, OneAPI oneDPL, Vulkan Tausworthe, CPU Mersenne) so this
 // test is expected to be RED until a uniform Philox shader/kernel is shipped
 // across all backends. It pins the next-step deliverable.
-TEST_F(AttentionAutogradTest, FlashAttentionPhiloxReplay_CrossBackendMask) {
+TEST_P(AttentionAutogradTest, FlashAttentionPhiloxReplay_CrossBackendMask) {
     // Phase 13b cross-backend Philox bit-equality is gated on a unified
     // Philox4x32-10 kernel/shader across CUDA/ROCm/OneAPI/Vulkan that
     // matches the CPU `tenzor::random::Philox` byte-for-byte. Until
@@ -367,16 +372,16 @@ TEST_F(AttentionAutogradTest, FlashAttentionPhiloxReplay_CrossBackendMask) {
 // fused path, head_dim=33 forces the composed path. Same Q/K/V/seed →
 // the gradients dQ/dK/dV from both paths must agree to within float
 // tolerance (the math is identical at the abstract level).
-TEST_F(AttentionAutogradTest, FlashAttentionFusedVsComposedBackwardEquivalence) {
+TEST_P(AttentionAutogradTest, FlashAttentionFusedVsComposedBackwardEquivalence) {
     int64_t B = 1, H = 2, S = 4;
     int64_t D = 64;  // fused-path head_dim
-    auto qf = tenzor::Variable(tenzor::randn({B, H, S, D}) * 0.1f, true);
+    auto qf = tenzor::Variable(tenzor::randn({B, H, S, D}, DType::Float32, device) * 0.1f, true);
     auto kf = tenzor::Variable(qf.tensor().clone(), true);  // shared rng path
     auto vf = tenzor::Variable(qf.tensor().clone(), true);
     // Use distinct random tensors but reuse the seed determinism.
-    qf = tenzor::Variable(tenzor::randn({B, H, S, D}) * 0.1f, true);
-    kf = tenzor::Variable(tenzor::randn({B, H, S, D}) * 0.1f, true);
-    vf = tenzor::Variable(tenzor::randn({B, H, S, D}) * 0.1f, true);
+    qf = tenzor::Variable(tenzor::randn({B, H, S, D}, DType::Float32, device) * 0.1f, true);
+    kf = tenzor::Variable(tenzor::randn({B, H, S, D}, DType::Float32, device) * 0.1f, true);
+    vf = tenzor::Variable(tenzor::randn({B, H, S, D}, DType::Float32, device) * 0.1f, true);
     float scale_f = 1.0f / std::sqrt(static_cast<float>(D));
     auto out_fused = tenzor::flash_attention(qf, kf, vf, scale_f,
         /*causal=*/false, /*dropout_p=*/0.0f, /*is_training=*/false);
@@ -398,9 +403,9 @@ TEST_F(AttentionAutogradTest, FlashAttentionFusedVsComposedBackwardEquivalence) 
     // grad_fn. This pins the structural invariant.
     int64_t D_c = 33;
     float scale_c = 1.0f / std::sqrt(static_cast<float>(D_c));
-    auto qc = tenzor::Variable(tenzor::randn({B, H, S, D_c}) * 0.1f, true);
-    auto kc = tenzor::Variable(tenzor::randn({B, H, S, D_c}) * 0.1f, true);
-    auto vc = tenzor::Variable(tenzor::randn({B, H, S, D_c}) * 0.1f, true);
+    auto qc = tenzor::Variable(tenzor::randn({B, H, S, D_c}, DType::Float32, device) * 0.1f, true);
+    auto kc = tenzor::Variable(tenzor::randn({B, H, S, D_c}, DType::Float32, device) * 0.1f, true);
+    auto vc = tenzor::Variable(tenzor::randn({B, H, S, D_c}, DType::Float32, device) * 0.1f, true);
     auto out_comp = tenzor::flash_attention(qc, kc, vc, scale_c,
         /*causal=*/false, /*dropout_p=*/0.0f, /*is_training=*/false);
     auto loss_c = tenzor::sum(out_comp);
@@ -433,5 +438,7 @@ TEST_F(AttentionAutogradTest, FlashAttentionFusedVsComposedBackwardEquivalence) 
     check_finite(dK_comp, "dK_comp");
     check_finite(dV_comp, "dV_comp");
 }
+
+INSTANTIATE_BACKEND_TESTS(AttentionAutogradTest);
 
 }  // anonymous namespace

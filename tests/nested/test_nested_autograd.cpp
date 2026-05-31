@@ -17,19 +17,23 @@
 #include <tenzor/autograd/variable.hpp>
 #include <tenzor/autograd/ops.hpp>
 #include <tenzor/ops/creation.hpp>
+#include "../backend_test_fixture.hpp"
 #include <cmath>
 #include <vector>
 
 namespace {
+
+// Offsets are int64 ragged-dimension metadata. The nested ops move them to CPU
+// internally as needed, so we keep them as a CPU index tensor.
 tenzor::Tensor make_int64_tensor(const std::vector<int64_t>& data) {
     return tenzor::from_data(data.data(), {static_cast<int64_t>(data.size())});
 }
-} // namespace
 
-class NestedAutogradTest : public ::testing::Test {
+class NestedAutogradTest : public ::tenzor::testing::BackendTest {
 protected:
     void SetUp() override {
-        tenzor::initialize();
+        ::tenzor::testing::BackendTest::SetUp();
+        if (::testing::Test::IsSkipped()) return;
     }
 };
 
@@ -37,9 +41,9 @@ protected:
 // Gradient through nested_sum
 // ============================================================================
 
-TEST_F(NestedAutogradTest, NestedSumGradient) {
+TEST_P(NestedAutogradTest, NestedSumGradient) {
     // values = [total_len=8, D=4], offsets = [0, 3, 8]
-    auto values_data = tenzor::randn({8, 4}, tenzor::DType::Float32, tenzor::Device::cpu());
+    auto values_data = tenzor::randn({8, 4}, tenzor::DType::Float32, device);
     tenzor::Variable values(values_data, /*requires_grad=*/true);
 
     auto offsets = make_int64_tensor({0, 3, 8});
@@ -55,12 +59,13 @@ TEST_F(NestedAutogradTest, NestedSumGradient) {
 
     // Gradient of sum-of-sums w.r.t. each input element is 1.0
     ASSERT_TRUE(values.has_grad());
-    auto grad = *values.grad();
+    auto grad = (*values.grad()).cpu();
     EXPECT_EQ(grad.shape()[0], 8);
     EXPECT_EQ(grad.shape()[1], 4);
 
+    const float* grad_ptr = grad.data<float>();
     for (int64_t i = 0; i < grad.numel(); ++i) {
-        EXPECT_NEAR(grad.data<float>()[i], 1.0f, 1e-5f);
+        EXPECT_NEAR(grad_ptr[i], 1.0f, 1e-5f);
     }
 }
 
@@ -68,8 +73,8 @@ TEST_F(NestedAutogradTest, NestedSumGradient) {
 // Gradient through nested_mean
 // ============================================================================
 
-TEST_F(NestedAutogradTest, NestedMeanGradient) {
-    auto values_data = tenzor::randn({8, 4}, tenzor::DType::Float32, tenzor::Device::cpu());
+TEST_P(NestedAutogradTest, NestedMeanGradient) {
+    auto values_data = tenzor::randn({8, 4}, tenzor::DType::Float32, device);
     tenzor::Variable values(values_data, true);
 
     auto offsets = make_int64_tensor({0, 3, 8});
@@ -79,18 +84,19 @@ TEST_F(NestedAutogradTest, NestedMeanGradient) {
     loss.backward();
 
     ASSERT_TRUE(values.has_grad());
-    auto grad = *values.grad();
+    auto grad = (*values.grad()).cpu();
+    const float* grad_ptr = grad.data<float>();
 
     // For segment 0 (len=3): grad = 1/3 for each element
     // For segment 1 (len=5): grad = 1/5 for each element
     for (int64_t i = 0; i < 3; ++i) {
         for (int64_t j = 0; j < 4; ++j) {
-            EXPECT_NEAR(grad.data<float>()[i * 4 + j], 1.0f / 3.0f, 1e-5f);
+            EXPECT_NEAR(grad_ptr[i * 4 + j], 1.0f / 3.0f, 1e-5f);
         }
     }
     for (int64_t i = 3; i < 8; ++i) {
         for (int64_t j = 0; j < 4; ++j) {
-            EXPECT_NEAR(grad.data<float>()[i * 4 + j], 1.0f / 5.0f, 1e-5f);
+            EXPECT_NEAR(grad_ptr[i * 4 + j], 1.0f / 5.0f, 1e-5f);
         }
     }
 }
@@ -99,8 +105,8 @@ TEST_F(NestedAutogradTest, NestedMeanGradient) {
 // Gradient through nested_softmax
 // ============================================================================
 
-TEST_F(NestedAutogradTest, NestedSoftmaxGradient) {
-    auto values_data = tenzor::randn({6, 4}, tenzor::DType::Float32, tenzor::Device::cpu());
+TEST_P(NestedAutogradTest, NestedSoftmaxGradient) {
+    auto values_data = tenzor::randn({6, 4}, tenzor::DType::Float32, device);
     tenzor::Variable values(values_data, true);
 
     auto offsets = make_int64_tensor({0, 3, 6});
@@ -114,13 +120,14 @@ TEST_F(NestedAutogradTest, NestedSoftmaxGradient) {
     loss.backward();
 
     ASSERT_TRUE(values.has_grad());
-    auto grad = *values.grad();
+    auto grad = (*values.grad()).cpu();
     EXPECT_EQ(grad.shape()[0], 6);
     EXPECT_EQ(grad.shape()[1], 4);
 
     // Softmax gradient should be well-defined (not NaN)
+    const float* grad_ptr = grad.data<float>();
     for (int64_t i = 0; i < grad.numel(); ++i) {
-        EXPECT_FALSE(std::isnan(grad.data<float>()[i]));
+        EXPECT_FALSE(std::isnan(grad_ptr[i]));
     }
 }
 
@@ -128,11 +135,11 @@ TEST_F(NestedAutogradTest, NestedSoftmaxGradient) {
 // Gradient through nested_linear
 // ============================================================================
 
-TEST_F(NestedAutogradTest, NestedLinearGradient) {
+TEST_P(NestedAutogradTest, NestedLinearGradient) {
     int64_t D_in = 4, D_out = 3;
-    auto values_data = tenzor::randn({8, D_in}, tenzor::DType::Float32, tenzor::Device::cpu());
-    auto weight_data = tenzor::randn({D_out, D_in}, tenzor::DType::Float32, tenzor::Device::cpu());
-    auto bias_data = tenzor::randn({D_out}, tenzor::DType::Float32, tenzor::Device::cpu());
+    auto values_data = tenzor::randn({8, D_in}, tenzor::DType::Float32, device);
+    auto weight_data = tenzor::randn({D_out, D_in}, tenzor::DType::Float32, device);
+    auto bias_data = tenzor::randn({D_out}, tenzor::DType::Float32, device);
 
     tenzor::Variable values(values_data, true);
     tenzor::Variable weight(weight_data, true);
@@ -155,9 +162,10 @@ TEST_F(NestedAutogradTest, NestedLinearGradient) {
 
     // Bias gradient: sum of ones over 8 rows = 8 per output dim... but
     // actually the sum of d(loss)/d(bias) for linear is sum over all rows
-    auto bias_grad = *bias.grad();
+    auto bias_grad = (*bias.grad()).cpu();
+    const float* bias_grad_ptr = bias_grad.data<float>();
     for (int64_t j = 0; j < D_out; ++j) {
-        EXPECT_NEAR(bias_grad.data<float>()[j], 8.0f, 1e-4f);
+        EXPECT_NEAR(bias_grad_ptr[j], 8.0f, 1e-4f);
     }
 }
 
@@ -165,13 +173,13 @@ TEST_F(NestedAutogradTest, NestedLinearGradient) {
 // Gradient through nested_attention
 // ============================================================================
 
-TEST_F(NestedAutogradTest, NestedAttentionGradient) {
+TEST_P(NestedAutogradTest, NestedAttentionGradient) {
     int64_t head_dim = 4;
 
     // Two sequences: Q has [3, 4] and [2, 4]; KV has [3, 4] and [2, 4]
-    auto q_data = tenzor::randn({5, head_dim}, tenzor::DType::Float32, tenzor::Device::cpu());
-    auto k_data = tenzor::randn({5, head_dim}, tenzor::DType::Float32, tenzor::Device::cpu());
-    auto v_data = tenzor::randn({5, head_dim}, tenzor::DType::Float32, tenzor::Device::cpu());
+    auto q_data = tenzor::randn({5, head_dim}, tenzor::DType::Float32, device);
+    auto k_data = tenzor::randn({5, head_dim}, tenzor::DType::Float32, device);
+    auto v_data = tenzor::randn({5, head_dim}, tenzor::DType::Float32, device);
 
     tenzor::Variable Q(q_data, true);
     tenzor::Variable K(k_data, true);
@@ -196,10 +204,11 @@ TEST_F(NestedAutogradTest, NestedAttentionGradient) {
     ASSERT_TRUE(V.has_grad());
 
     // Gradients should be finite
-    auto q_grad = *Q.grad();
+    auto q_grad = (*Q.grad()).cpu();
+    const float* q_grad_ptr = q_grad.data<float>();
     for (int64_t i = 0; i < q_grad.numel(); ++i) {
-        EXPECT_FALSE(std::isnan(q_grad.data<float>()[i]));
-        EXPECT_FALSE(std::isinf(q_grad.data<float>()[i]));
+        EXPECT_FALSE(std::isnan(q_grad_ptr[i]));
+        EXPECT_FALSE(std::isinf(q_grad_ptr[i]));
     }
 }
 
@@ -215,14 +224,14 @@ TEST_F(NestedAutogradTest, NestedAttentionGradient) {
 // to forward and therefore should receive zero gradient — non-trivially
 // different from the unmasked case).
 // ============================================================================
-TEST_F(NestedAutogradTest, NestedAttentionCausalChangesGradient) {
+TEST_P(NestedAutogradTest, NestedAttentionCausalChangesGradient) {
     const int64_t head_dim = 4;
 
     // One sequence of length 3 so causal matters (full upper triangle is
     // non-trivial).
-    auto q_data = tenzor::randn({3, head_dim}, tenzor::DType::Float32, tenzor::Device::cpu());
-    auto k_data = tenzor::randn({3, head_dim}, tenzor::DType::Float32, tenzor::Device::cpu());
-    auto v_data = tenzor::randn({3, head_dim}, tenzor::DType::Float32, tenzor::Device::cpu());
+    auto q_data = tenzor::randn({3, head_dim}, tenzor::DType::Float32, device);
+    auto k_data = tenzor::randn({3, head_dim}, tenzor::DType::Float32, device);
+    auto v_data = tenzor::randn({3, head_dim}, tenzor::DType::Float32, device);
 
     auto q_offsets = make_int64_tensor({0, 3});
     auto kv_offsets = make_int64_tensor({0, 3});
@@ -236,7 +245,7 @@ TEST_F(NestedAutogradTest, NestedAttentionCausalChangesGradient) {
             Q, K, V, q_offsets, kv_offsets, scale, causal);
         auto loss = tenzor::sum(out);
         loss.backward();
-        return {*Q.grad(), *K.grad(), *V.grad()};
+        return {(*Q.grad()).cpu(), (*K.grad()).cpu(), (*V.grad()).cpu()};
     };
 
     auto [gQ_nc, gK_nc, gV_nc] = run_backward(/*causal=*/false);
@@ -260,9 +269,10 @@ TEST_F(NestedAutogradTest, NestedAttentionCausalChangesGradient) {
         << "V gradient unchanged by causal mask — backward did not apply mask";
 
     for (const auto* g : {&gQ_c, &gK_c, &gV_c}) {
+        const float* g_ptr = g->data<float>();
         for (int64_t i = 0; i < g->numel(); ++i) {
-            EXPECT_FALSE(std::isnan(g->data<float>()[i]));
-            EXPECT_FALSE(std::isinf(g->data<float>()[i]));
+            EXPECT_FALSE(std::isnan(g_ptr[i]));
+            EXPECT_FALSE(std::isinf(g_ptr[i]));
         }
     }
 }
@@ -271,10 +281,10 @@ TEST_F(NestedAutogradTest, NestedAttentionCausalChangesGradient) {
 // No-grad path
 // ============================================================================
 
-TEST_F(NestedAutogradTest, NoGradPath) {
+TEST_P(NestedAutogradTest, NoGradPath) {
     tenzor::NoGradGuard guard;
 
-    auto values_data = tenzor::randn({6, 4}, tenzor::DType::Float32, tenzor::Device::cpu());
+    auto values_data = tenzor::randn({6, 4}, tenzor::DType::Float32, device);
     tenzor::Variable values(values_data, false);
 
     auto offsets = make_int64_tensor({0, 3, 6});
@@ -286,3 +296,7 @@ TEST_F(NestedAutogradTest, NoGradPath) {
     // Should not have grad_fn since grad is disabled
     EXPECT_EQ(result.grad_fn(), nullptr);
 }
+
+INSTANTIATE_BACKEND_TESTS(NestedAutogradTest);
+
+} // namespace

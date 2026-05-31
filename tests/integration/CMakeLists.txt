@@ -61,7 +61,7 @@ target_link_libraries(test_attention_autograd PRIVATE
     GTest::gtest_main
 )
 
-tenzor_discover_tests(test_attention_autograd DISCOVERY_TIMEOUT 60 LABELS "integration" BACKENDS cpu)
+tenzor_discover_tests(test_attention_autograd DISCOVERY_TIMEOUT 60 LABELS "integration" BACKENDS multi)
 
 # Phase 13b — Per-backend Philox seed-determinism TEST_P harness.
 add_executable(test_attention_philox_multibackend
@@ -236,4 +236,4 @@ tenzor_discover_tests(test_quantization_e2e DISCOVERY_TIMEOUT 60 PROPERTIES TIME
 # coverage in the lite exporter.
 add_executable(test_eager_parity test_eager_parity.cpp)
 target_link_libraries(test_eager_parity PRIVATE tenzor_core GTest::gtest_main)
-tenzor_discover_tests(test_eager_parity DISCOVERY_TIMEOUT 60 PROPERTIES TIMEOUT ${TENZOR_TEST_TIMEOUT} LABELS "integration;parity" BACKENDS cpu)
+tenzor_discover_tests(test_eager_parity DISCOVERY_TIMEOUT 60 PROPERTIES TIMEOUT ${TENZOR_TEST_TIMEOUT} LABELS "integration;parity" BACKENDS multi)
