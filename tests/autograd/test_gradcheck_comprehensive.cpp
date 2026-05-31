@@ -3,8 +3,10 @@
  * @brief Comprehensive numerical gradient checking for all autograd operations.
  *
  * Verifies backward pass correctness via finite-difference gradient checking
- * for operations in include/tenzor/autograd/ops.hpp that previously had no
- * gradcheck coverage. CPU-only, non-parameterized.
+ * for operations in include/tenzor/autograd/ops.hpp. Cross-backend: each test
+ * runs on every available backend. gradcheck() is device-aware — it perturbs
+ * on a CPU copy and runs the forward pass on the input's device — so inputs are
+ * simply created on `device` and passed in as usual.
  */
 
 #include <gtest/gtest.h>
@@ -12,68 +14,68 @@
 #include <cmath>
 
 #include "gradcheck_complex.hpp"
+#include "../backend_test_fixture.hpp"
 
 using namespace tenzor;
 
-class GradCheckComprehensiveTest : public ::testing::Test {
+class GradCheckComprehensiveTest : public ::tenzor::testing::BackendTest {
 protected:
-    static void SetUpTestSuite() {
-        tenzor::initialize();
-    }
-
     void SetUp() override {
+        ::tenzor::testing::BackendTest::SetUp();
+        if (::testing::Test::IsSkipped()) return;
         set_grad_enabled(true);
     }
 
     // Create a small Variable with positive values in roughly [0.5, 3.2].
     // abs() + offset guarantees strictly positive inputs so ops like log /
     // sqrt / sinc never hit a singularity regardless of random seed.
-    static auto make_var(std::vector<int64_t> shape) -> Variable {
-        auto t = randn(shape, DType::Float32, Device::cpu());
+    static auto make_var(std::vector<int64_t> shape, const tenzor::Device& device) -> Variable {
+        auto t = randn(shape, DType::Float32, device);
         auto abs_t = tenzor::abs(t);
-        auto scale = full(shape, 0.3f, DType::Float32, Device::cpu());
-        auto offset = full(shape, 0.5f, DType::Float32, Device::cpu());
+        auto scale = full(shape, 0.3f, DType::Float32, device);
+        auto offset = full(shape, 0.5f, DType::Float32, device);
         auto shifted = tenzor::add(tenzor::mul(abs_t, scale), offset);
         return Variable(shifted, true);
     }
 
     // Variable with values in [-0.5, 0.5] for ops that need centered data
-    static auto make_centered_var(std::vector<int64_t> shape) -> Variable {
-        auto t = randn(shape, DType::Float32, Device::cpu());
-        auto scale = full(shape, 0.3f, DType::Float32, Device::cpu());
+    static auto make_centered_var(std::vector<int64_t> shape, const tenzor::Device& device) -> Variable {
+        auto t = randn(shape, DType::Float32, device);
+        auto scale = full(shape, 0.3f, DType::Float32, device);
         auto scaled = tenzor::mul(t, scale);
         return Variable(scaled, true);
     }
 
     // Variable with values in (0.05, 0.95) for ops like erfinv
-    static auto make_unit_var(std::vector<int64_t> shape) -> Variable {
-        auto t = randn(shape, DType::Float32, Device::cpu());
+    static auto make_unit_var(std::vector<int64_t> shape, const tenzor::Device& device) -> Variable {
+        auto t = randn(shape, DType::Float32, device);
         // Manual sigmoid to stay in Tensor domain
         auto neg_t = tenzor::neg(t);
         auto exp_neg = tenzor::exp(neg_t);
-        auto one = full(shape, 1.0f, DType::Float32, Device::cpu());
+        auto one = full(shape, 1.0f, DType::Float32, device);
         auto sig_t = tenzor::div(one, tenzor::add(one, exp_neg));
         auto clamped = tenzor::clamp(sig_t, 0.05f, 0.95f);
         return Variable(clamped, true);
     }
 
     // Square matrix variable
-    static auto make_square_var(int64_t n) -> Variable {
+    static auto make_square_var(int64_t n, const tenzor::Device& device) -> Variable {
+        // Host write of the diagonal: build on CPU, then move to device.
         auto t = randn({n, n}, DType::Float32, Device::cpu());
         // Make diagonally dominant for invertibility
         for (int64_t i = 0; i < n; ++i) {
             t.data<float>()[i * n + i] += 3.0f;
         }
-        return Variable(t, true);
+        return Variable(t.to(device), true);
     }
 
     // Positive-definite matrix for cholesky etc.
-    static auto make_posdef_var(int64_t n) -> Variable {
-        auto t = randn({n, n}, DType::Float32, Device::cpu());
+    static auto make_posdef_var(int64_t n, const tenzor::Device& device) -> Variable {
+        auto t = randn({n, n}, DType::Float32, device);
         // A^T A + I ensures positive definite (use tensor-level ops)
         auto t_T = tenzor::transpose(t, 0, 1);
         auto ata = tenzor::matmul(t_T, t);
-        auto eye_t = eye(n, std::nullopt, DType::Float32, Device::cpu());
+        auto eye_t = eye(n, std::nullopt, DType::Float32, device);
         auto result = tenzor::add(ata, eye_t);
         return Variable(result, true);
     }
@@ -83,50 +85,50 @@ protected:
 // Reduction Operations
 // ============================================================================
 
-TEST_F(GradCheckComprehensiveTest, Min) {
-    auto x = make_var({4, 6});
+TEST_P(GradCheckComprehensiveTest, Min) {
+    auto x = make_var({4, 6}, device);
     auto f = [](const Variable& v) { return min(v, 1); };
     EXPECT_TRUE(gradcheck(f, x, 1e-4, 1e-3, 1e-2));
 }
 
-TEST_F(GradCheckComprehensiveTest, Max) {
-    auto x = make_var({4, 6});
+TEST_P(GradCheckComprehensiveTest, Max) {
+    auto x = make_var({4, 6}, device);
     auto f = [](const Variable& v) { return max(v, 1); };
     EXPECT_TRUE(gradcheck(f, x, 1e-4, 1e-3, 1e-2));
 }
 
-TEST_F(GradCheckComprehensiveTest, Std) {
-    auto x = make_var({4, 6});
+TEST_P(GradCheckComprehensiveTest, Std) {
+    auto x = make_var({4, 6}, device);
     auto f = [](const Variable& v) { return tenzor::std(v, 1); };
     EXPECT_TRUE(gradcheck(f, x, 1e-4, 1e-3, 1e-2));
 }
 
-TEST_F(GradCheckComprehensiveTest, Var) {
-    auto x = make_var({4, 6});
+TEST_P(GradCheckComprehensiveTest, Var) {
+    auto x = make_var({4, 6}, device);
     auto f = [](const Variable& v) { return tenzor::var(v, 1); };
     EXPECT_TRUE(gradcheck(f, x, 1e-4, 1e-3, 1e-2));
 }
 
-TEST_F(GradCheckComprehensiveTest, Prod) {
-    auto x = make_var({3, 4});
+TEST_P(GradCheckComprehensiveTest, Prod) {
+    auto x = make_var({3, 4}, device);
     auto f = [](const Variable& v) { return prod(v, 1); };
     EXPECT_TRUE(gradcheck(f, x, 1e-4, 1e-3, 1e-2));
 }
 
-TEST_F(GradCheckComprehensiveTest, Logsumexp) {
-    auto x = make_centered_var({4, 6});
+TEST_P(GradCheckComprehensiveTest, Logsumexp) {
+    auto x = make_centered_var({4, 6}, device);
     auto f = [](const Variable& v) { return logsumexp(v, 1); };
     EXPECT_TRUE(gradcheck(f, x, 1e-5, 1e-4, 1e-3));
 }
 
-TEST_F(GradCheckComprehensiveTest, Cumsum) {
-    auto x = make_var({4, 6});
+TEST_P(GradCheckComprehensiveTest, Cumsum) {
+    auto x = make_var({4, 6}, device);
     auto f = [](const Variable& v) { return cumsum(v, 1); };
     EXPECT_TRUE(gradcheck(f, x));
 }
 
-TEST_F(GradCheckComprehensiveTest, Cumprod) {
-    auto x = make_var({3, 4});
+TEST_P(GradCheckComprehensiveTest, Cumprod) {
+    auto x = make_var({3, 4}, device);
     auto f = [](const Variable& v) { return cumprod(v, 1); };
     EXPECT_TRUE(gradcheck(f, x, 1e-4, 1e-3, 1e-2));
 }
@@ -135,14 +137,14 @@ TEST_F(GradCheckComprehensiveTest, Cumprod) {
 // Activation Functions
 // ============================================================================
 
-TEST_F(GradCheckComprehensiveTest, Softmax) {
-    auto x = make_centered_var({4, 8});
+TEST_P(GradCheckComprehensiveTest, Softmax) {
+    auto x = make_centered_var({4, 8}, device);
     auto f = [](const Variable& v) { return softmax(v, 1); };
     EXPECT_TRUE(gradcheck(f, x, 1e-5, 1e-4, 1e-3));
 }
 
-TEST_F(GradCheckComprehensiveTest, LogSoftmax) {
-    auto x = make_centered_var({4, 8});
+TEST_P(GradCheckComprehensiveTest, LogSoftmax) {
+    auto x = make_centered_var({4, 8}, device);
     auto f = [](const Variable& v) { return log_softmax(v, 1); };
     // log_softmax backward involves exp(y) * sum(grad_y), which loses a
     // couple of decimal digits in Float32 for batched data. The default
@@ -151,32 +153,32 @@ TEST_F(GradCheckComprehensiveTest, LogSoftmax) {
     EXPECT_TRUE(gradcheck(f, x, 1e-4, 1e-3, 1e-2));
 }
 
-TEST_F(GradCheckComprehensiveTest, Elu) {
-    auto x = make_centered_var({4, 6});
+TEST_P(GradCheckComprehensiveTest, Elu) {
+    auto x = make_centered_var({4, 6}, device);
     auto f = [](const Variable& v) { return elu(v, 1.0f); };
     EXPECT_TRUE(gradcheck(f, x));
 }
 
-TEST_F(GradCheckComprehensiveTest, Selu) {
-    auto x = make_centered_var({4, 6});
+TEST_P(GradCheckComprehensiveTest, Selu) {
+    auto x = make_centered_var({4, 6}, device);
     auto f = [](const Variable& v) { return selu(v); };
     EXPECT_TRUE(gradcheck(f, x));
 }
 
-TEST_F(GradCheckComprehensiveTest, Mish) {
-    auto x = make_centered_var({4, 6});
+TEST_P(GradCheckComprehensiveTest, Mish) {
+    auto x = make_centered_var({4, 6}, device);
     auto f = [](const Variable& v) { return mish(v); };
     EXPECT_TRUE(gradcheck(f, x));
 }
 
-TEST_F(GradCheckComprehensiveTest, LeakyRelu) {
-    auto x = make_centered_var({4, 6});
+TEST_P(GradCheckComprehensiveTest, LeakyRelu) {
+    auto x = make_centered_var({4, 6}, device);
     auto f = [](const Variable& v) { return leaky_relu(v, 0.01f); };
     EXPECT_TRUE(gradcheck(f, x, 1e-4, 1e-3, 1e-2));
 }
 
-TEST_F(GradCheckComprehensiveTest, Softplus) {
-    auto x = make_centered_var({4, 6});
+TEST_P(GradCheckComprehensiveTest, Softplus) {
+    auto x = make_centered_var({4, 6}, device);
     auto f = [](const Variable& v) { return softplus(v, 1.0f); };
     EXPECT_TRUE(gradcheck(f, x));
 }
@@ -185,83 +187,83 @@ TEST_F(GradCheckComprehensiveTest, Softplus) {
 // Tensor Manipulation Operations
 // ============================================================================
 
-TEST_F(GradCheckComprehensiveTest, Reshape) {
-    auto x = make_var({3, 4});
+TEST_P(GradCheckComprehensiveTest, Reshape) {
+    auto x = make_var({3, 4}, device);
     auto f = [](const Variable& v) { return reshape(v, {2, 6}); };
     EXPECT_TRUE(gradcheck(f, x));
 }
 
-TEST_F(GradCheckComprehensiveTest, Transpose) {
-    auto x = make_var({3, 5});
+TEST_P(GradCheckComprehensiveTest, Transpose) {
+    auto x = make_var({3, 5}, device);
     auto f = [](const Variable& v) { return transpose(v, 0, 1); };
     EXPECT_TRUE(gradcheck(f, x));
 }
 
-TEST_F(GradCheckComprehensiveTest, Permute) {
-    auto x = make_var({2, 3, 4});
+TEST_P(GradCheckComprehensiveTest, Permute) {
+    auto x = make_var({2, 3, 4}, device);
     auto f = [](const Variable& v) { return permute(v, {2, 0, 1}); };
     EXPECT_TRUE(gradcheck(f, x));
 }
 
-TEST_F(GradCheckComprehensiveTest, Squeeze) {
-    auto x = make_var({3, 1, 4});
+TEST_P(GradCheckComprehensiveTest, Squeeze) {
+    auto x = make_var({3, 1, 4}, device);
     auto f = [](const Variable& v) { return squeeze(v, 1); };
     EXPECT_TRUE(gradcheck(f, x));
 }
 
-TEST_F(GradCheckComprehensiveTest, Unsqueeze) {
-    auto x = make_var({3, 4});
+TEST_P(GradCheckComprehensiveTest, Unsqueeze) {
+    auto x = make_var({3, 4}, device);
     auto f = [](const Variable& v) { return unsqueeze(v, 1); };
     EXPECT_TRUE(gradcheck(f, x));
 }
 
-TEST_F(GradCheckComprehensiveTest, Flatten) {
-    auto x = make_var({2, 3, 4});
+TEST_P(GradCheckComprehensiveTest, Flatten) {
+    auto x = make_var({2, 3, 4}, device);
     auto f = [](const Variable& v) { return flatten(v, 0, -1); };
     EXPECT_TRUE(gradcheck(f, x));
 }
 
-TEST_F(GradCheckComprehensiveTest, Cat) {
-    auto a = make_var({3, 4});
-    auto b = make_var({2, 4});
+TEST_P(GradCheckComprehensiveTest, Cat) {
+    auto a = make_var({3, 4}, device);
+    auto b = make_var({2, 4}, device);
     auto f = [&b](const Variable& v) {
         return cat({v, b}, 0);
     };
     EXPECT_TRUE(gradcheck(f, a));
 }
 
-TEST_F(GradCheckComprehensiveTest, Slice) {
-    auto x = make_var({6, 4});
+TEST_P(GradCheckComprehensiveTest, Slice) {
+    auto x = make_var({6, 4}, device);
     auto f = [](const Variable& v) { return slice(v, 0, 1, 4); };
     EXPECT_TRUE(gradcheck(f, x));
 }
 
-TEST_F(GradCheckComprehensiveTest, Narrow) {
-    auto x = make_var({6, 4});
+TEST_P(GradCheckComprehensiveTest, Narrow) {
+    auto x = make_var({6, 4}, device);
     auto f = [](const Variable& v) { return narrow(v, 0, 1, 3); };
     EXPECT_TRUE(gradcheck(f, x));
 }
 
-TEST_F(GradCheckComprehensiveTest, Flip) {
-    auto x = make_var({4, 6});
+TEST_P(GradCheckComprehensiveTest, Flip) {
+    auto x = make_var({4, 6}, device);
     auto f = [](const Variable& v) { return flip(v, {0, 1}); };
     EXPECT_TRUE(gradcheck(f, x));
 }
 
-TEST_F(GradCheckComprehensiveTest, Roll) {
-    auto x = make_var({4, 6});
+TEST_P(GradCheckComprehensiveTest, Roll) {
+    auto x = make_var({4, 6}, device);
     auto f = [](const Variable& v) { return roll(v, 2, 0); };
     EXPECT_TRUE(gradcheck(f, x));
 }
 
-TEST_F(GradCheckComprehensiveTest, Repeat) {
-    auto x = make_var({2, 3});
+TEST_P(GradCheckComprehensiveTest, Repeat) {
+    auto x = make_var({2, 3}, device);
     auto f = [](const Variable& v) { return repeat(v, {2, 3}); };
     EXPECT_TRUE(gradcheck(f, x));
 }
 
-TEST_F(GradCheckComprehensiveTest, Expand) {
-    auto x = make_var({1, 4});
+TEST_P(GradCheckComprehensiveTest, Expand) {
+    auto x = make_var({1, 4}, device);
     auto f = [](const Variable& v) { return expand(v, {3, 4}); };
     EXPECT_TRUE(gradcheck(f, x));
 }
@@ -270,30 +272,33 @@ TEST_F(GradCheckComprehensiveTest, Expand) {
 // Indexing Operations
 // ============================================================================
 
-TEST_F(GradCheckComprehensiveTest, Gather) {
-    auto x = make_var({4, 6});
-    auto idx = randint(0, 6, {4, 3}, DType::Int64, Device::cpu());
+TEST_P(GradCheckComprehensiveTest, Gather) {
+    auto x = make_var({4, 6}, device);
+    auto idx = randint(0, 6, {4, 3}, DType::Int64, device);
     auto f = [&idx](const Variable& v) { return gather(v, 1, idx); };
     EXPECT_TRUE(gradcheck(f, x));
 }
 
-TEST_F(GradCheckComprehensiveTest, IndexSelect) {
-    auto x = make_var({6, 4});
-    auto idx_data = zeros({3}, DType::Int64, Device::cpu());
-    idx_data.data<int64_t>()[0] = 0;
-    idx_data.data<int64_t>()[1] = 2;
-    idx_data.data<int64_t>()[2] = 4;
+TEST_P(GradCheckComprehensiveTest, IndexSelect) {
+    auto x = make_var({6, 4}, device);
+    // Host write of index values: build on CPU, then move to device.
+    auto idx_cpu = zeros({3}, DType::Int64, Device::cpu());
+    idx_cpu.data<int64_t>()[0] = 0;
+    idx_cpu.data<int64_t>()[1] = 2;
+    idx_cpu.data<int64_t>()[2] = 4;
+    auto idx_data = idx_cpu.to(device);
     auto f = [&idx_data](const Variable& v) { return index_select(v, 0, idx_data); };
     EXPECT_TRUE(gradcheck(f, x));
 }
 
-TEST_F(GradCheckComprehensiveTest, Where) {
-    auto x = make_var({4, 6});
-    auto y = make_var({4, 6});
-    auto cond_t = zeros({4, 6}, DType::Bool, Device::cpu());
-    auto* cond_data = cond_t.data<bool>();
+TEST_P(GradCheckComprehensiveTest, Where) {
+    auto x = make_var({4, 6}, device);
+    auto y = make_var({4, 6}, device);
+    // Host write of the boolean condition: build on CPU, then move to device.
+    auto cond_cpu = zeros({4, 6}, DType::Bool, Device::cpu());
+    auto* cond_data = cond_cpu.data<bool>();
     for (int64_t i = 0; i < 24; ++i) cond_data[i] = (i % 2 == 0);
-    auto cond_var = Variable(cond_t, false);
+    auto cond_var = Variable(cond_cpu.to(device), false);
     auto f = [&y, &cond_var](const Variable& v) { return where(cond_var, v, y); };
     EXPECT_TRUE(gradcheck(f, x));
 }
@@ -302,77 +307,78 @@ TEST_F(GradCheckComprehensiveTest, Where) {
 // Linear Algebra Operations
 // ============================================================================
 
-TEST_F(GradCheckComprehensiveTest, Linear) {
-    auto x = make_var({3, 4});
-    auto w = make_var({5, 4});
-    auto b_var = make_var({5});
+TEST_P(GradCheckComprehensiveTest, Linear) {
+    auto x = make_var({3, 4}, device);
+    auto w = make_var({5, 4}, device);
+    auto b_var = make_var({5}, device);
     auto f = [&w, &b_var](const Variable& v) { return linear(v, w, b_var); };
     EXPECT_TRUE(gradcheck(f, x));
 }
 
-TEST_F(GradCheckComprehensiveTest, Bmm) {
-    auto a = make_var({2, 3, 4});
-    auto b = make_var({2, 4, 5});
+TEST_P(GradCheckComprehensiveTest, Bmm) {
+    auto a = make_var({2, 3, 4}, device);
+    auto b = make_var({2, 4, 5}, device);
     auto f = [&b](const Variable& v) { return bmm(v, b); };
     EXPECT_TRUE(gradcheck(f, a));
 }
 
-TEST_F(GradCheckComprehensiveTest, Det) {
-    auto x = make_square_var(3);
+TEST_P(GradCheckComprehensiveTest, Det) {
+    auto x = make_square_var(3, device);
     auto f = [](const Variable& v) { return det(v); };
     EXPECT_TRUE(gradcheck(f, x, 1e-4, 1e-3, 1e-2));
 }
 
-TEST_F(GradCheckComprehensiveTest, Inv) {
-    auto x = make_square_var(3);
+TEST_P(GradCheckComprehensiveTest, Inv) {
+    auto x = make_square_var(3, device);
     auto f = [](const Variable& v) { return inv(v); };
     EXPECT_TRUE(gradcheck(f, x, 1e-4, 1e-3, 1e-2));
 }
 
-TEST_F(GradCheckComprehensiveTest, Solve) {
-    auto A = make_square_var(3);
-    auto B = make_var({3, 2});
+TEST_P(GradCheckComprehensiveTest, Solve) {
+    auto A = make_square_var(3, device);
+    auto B = make_var({3, 2}, device);
     auto f = [&B](const Variable& v) { return solve(v, B); };
     EXPECT_TRUE(gradcheck(f, A, 1e-4, 1e-3, 1e-2));
 }
 
-TEST_F(GradCheckComprehensiveTest, Cholesky) {
+TEST_P(GradCheckComprehensiveTest, Cholesky) {
     // Cholesky is only defined for symmetric positive-definite inputs, so the
     // straight f(A) = cholesky(A) isn't valid under gradcheck's asymmetric
     // finite-difference perturbations. Wrap the input in A @ A^T + I so the
     // actual cholesky argument is symmetric-PD for any perturbation of A, and
     // the composite gradient stays well-defined.
-    auto x = make_var({3, 3});
-    auto f = [](const Variable& v) {
+    auto x = make_var({3, 3}, device);
+    auto dev = device;
+    auto f = [dev](const Variable& v) {
         auto vt = tenzor::transpose(v, 0, 1);
         auto sym = tenzor::matmul(v, vt);
         auto n = v.shape()[0];
-        auto i = eye(n, std::nullopt, DType::Float32, Device::cpu());
+        auto i = eye(n, std::nullopt, DType::Float32, dev);
         return cholesky(sym + Variable(i, false));
     };
     EXPECT_TRUE(gradcheck(f, x, 1e-4, 1e-3, 1e-2));
 }
 
-TEST_F(GradCheckComprehensiveTest, Diag) {
-    auto x = make_var({4});
+TEST_P(GradCheckComprehensiveTest, Diag) {
+    auto x = make_var({4}, device);
     auto f = [](const Variable& v) { return diag(v, 0); };
     EXPECT_TRUE(gradcheck(f, x));
 }
 
-TEST_F(GradCheckComprehensiveTest, Trace) {
-    auto x = make_var({4, 4});
+TEST_P(GradCheckComprehensiveTest, Trace) {
+    auto x = make_var({4, 4}, device);
     auto f = [](const Variable& v) { return trace(v); };
     EXPECT_TRUE(gradcheck(f, x));
 }
 
-TEST_F(GradCheckComprehensiveTest, Triu) {
-    auto x = make_var({4, 4});
+TEST_P(GradCheckComprehensiveTest, Triu) {
+    auto x = make_var({4, 4}, device);
     auto f = [](const Variable& v) { return triu(v, 0); };
     EXPECT_TRUE(gradcheck(f, x));
 }
 
-TEST_F(GradCheckComprehensiveTest, Tril) {
-    auto x = make_var({4, 4});
+TEST_P(GradCheckComprehensiveTest, Tril) {
+    auto x = make_var({4, 4}, device);
     auto f = [](const Variable& v) { return tril(v, 0); };
     EXPECT_TRUE(gradcheck(f, x));
 }
@@ -381,26 +387,26 @@ TEST_F(GradCheckComprehensiveTest, Tril) {
 // Math Operations
 // ============================================================================
 
-TEST_F(GradCheckComprehensiveTest, Clamp) {
-    auto x = make_centered_var({4, 6});
+TEST_P(GradCheckComprehensiveTest, Clamp) {
+    auto x = make_centered_var({4, 6}, device);
     auto f = [](const Variable& v) { return clamp(v, -0.2f, 0.2f); };
     EXPECT_TRUE(gradcheck(f, x, 1e-4, 1e-3, 1e-2));
 }
 
-TEST_F(GradCheckComprehensiveTest, Pow) {
-    auto x = make_var({4, 6});  // positive values
+TEST_P(GradCheckComprehensiveTest, Pow) {
+    auto x = make_var({4, 6}, device);  // positive values
     auto f = [](const Variable& v) { return pow(v, 2.5f); };
     EXPECT_TRUE(gradcheck(f, x));
 }
 
-TEST_F(GradCheckComprehensiveTest, Reciprocal) {
-    auto x = make_var({4, 6});
+TEST_P(GradCheckComprehensiveTest, Reciprocal) {
+    auto x = make_var({4, 6}, device);
     auto f = [](const Variable& v) { return reciprocal(v); };
     EXPECT_TRUE(gradcheck(f, x, 1e-4, 1e-3, 1e-2));
 }
 
-TEST_F(GradCheckComprehensiveTest, Sqrt) {
-    auto x = make_var({4, 6});  // positive values
+TEST_P(GradCheckComprehensiveTest, Sqrt) {
+    auto x = make_var({4, 6}, device);  // positive values
     auto f = [](const Variable& v) { return sqrt(v); };
     EXPECT_TRUE(gradcheck(f, x));
 }
@@ -409,38 +415,38 @@ TEST_F(GradCheckComprehensiveTest, Sqrt) {
 // Trigonometric Operations
 // ============================================================================
 
-TEST_F(GradCheckComprehensiveTest, Tan) {
-    auto x = make_centered_var({4, 6});  // small values to avoid tan singularities
+TEST_P(GradCheckComprehensiveTest, Tan) {
+    auto x = make_centered_var({4, 6}, device);  // small values to avoid tan singularities
     auto f = [](const Variable& v) { return tan(v); };
     EXPECT_TRUE(gradcheck(f, x));
 }
 
-TEST_F(GradCheckComprehensiveTest, Asin) {
-    auto x = make_unit_var({4, 6});  // values in (0, 1) ⊂ (-1, 1)
+TEST_P(GradCheckComprehensiveTest, Asin) {
+    auto x = make_unit_var({4, 6}, device);  // values in (0, 1) ⊂ (-1, 1)
     auto f = [](const Variable& v) { return asin(v); };
     EXPECT_TRUE(gradcheck(f, x, 1e-4, 1e-3, 1e-2));
 }
 
-TEST_F(GradCheckComprehensiveTest, Acos) {
-    auto x = make_unit_var({4, 6});
+TEST_P(GradCheckComprehensiveTest, Acos) {
+    auto x = make_unit_var({4, 6}, device);
     auto f = [](const Variable& v) { return acos(v); };
     EXPECT_TRUE(gradcheck(f, x, 1e-4, 1e-3, 1e-2));
 }
 
-TEST_F(GradCheckComprehensiveTest, Atan) {
-    auto x = make_centered_var({4, 6});
+TEST_P(GradCheckComprehensiveTest, Atan) {
+    auto x = make_centered_var({4, 6}, device);
     auto f = [](const Variable& v) { return atan(v); };
     EXPECT_TRUE(gradcheck(f, x));
 }
 
-TEST_F(GradCheckComprehensiveTest, Sinh) {
-    auto x = make_centered_var({4, 6});
+TEST_P(GradCheckComprehensiveTest, Sinh) {
+    auto x = make_centered_var({4, 6}, device);
     auto f = [](const Variable& v) { return sinh(v); };
     EXPECT_TRUE(gradcheck(f, x));
 }
 
-TEST_F(GradCheckComprehensiveTest, Cosh) {
-    auto x = make_centered_var({4, 6});
+TEST_P(GradCheckComprehensiveTest, Cosh) {
+    auto x = make_centered_var({4, 6}, device);
     auto f = [](const Variable& v) { return cosh(v); };
     EXPECT_TRUE(gradcheck(f, x));
 }
@@ -449,115 +455,115 @@ TEST_F(GradCheckComprehensiveTest, Cosh) {
 // Special Math Functions
 // ============================================================================
 
-TEST_F(GradCheckComprehensiveTest, Erf) {
-    auto x = make_centered_var({4, 6});
+TEST_P(GradCheckComprehensiveTest, Erf) {
+    auto x = make_centered_var({4, 6}, device);
     auto f = [](const Variable& v) { return erf(v); };
     EXPECT_TRUE(gradcheck(f, x));
 }
 
-TEST_F(GradCheckComprehensiveTest, Erfc) {
-    auto x = make_centered_var({4, 6});
+TEST_P(GradCheckComprehensiveTest, Erfc) {
+    auto x = make_centered_var({4, 6}, device);
     auto f = [](const Variable& v) { return erfc(v); };
     EXPECT_TRUE(gradcheck(f, x));
 }
 
-TEST_F(GradCheckComprehensiveTest, Erfinv) {
-    auto x = make_unit_var({4, 6});  // values in (0.05, 0.95)
+TEST_P(GradCheckComprehensiveTest, Erfinv) {
+    auto x = make_unit_var({4, 6}, device);  // values in (0.05, 0.95)
     // Shift to (-0.9, 0.9) for erfinv domain
-    auto scale = full({4, 6}, 1.8f, DType::Float32, Device::cpu());
-    auto offset = full({4, 6}, 0.9f, DType::Float32, Device::cpu());
+    auto scale = full({4, 6}, 1.8f, DType::Float32, device);
+    auto offset = full({4, 6}, 0.9f, DType::Float32, device);
     auto shifted = tenzor::sub(tenzor::mul(x.tensor(), scale), offset);
     auto x_erfinv = Variable(shifted, true);
     auto f = [](const Variable& v) { return erfinv(v); };
     EXPECT_TRUE(gradcheck(f, x_erfinv, 1e-4, 1e-3, 1e-2));
 }
 
-TEST_F(GradCheckComprehensiveTest, Lgamma) {
-    auto x = make_var({4, 6});  // positive values
+TEST_P(GradCheckComprehensiveTest, Lgamma) {
+    auto x = make_var({4, 6}, device);  // positive values
     auto f = [](const Variable& v) { return lgamma(v); };
     EXPECT_TRUE(gradcheck(f, x, 1e-4, 1e-3, 1e-2));
 }
 
-TEST_F(GradCheckComprehensiveTest, Digamma) {
-    auto x = make_var({4, 6});  // positive values
+TEST_P(GradCheckComprehensiveTest, Digamma) {
+    auto x = make_var({4, 6}, device);  // positive values
     auto f = [](const Variable& v) { return digamma(v); };
     EXPECT_TRUE(gradcheck(f, x, 1e-4, 1e-3, 1e-2));
 }
 
-TEST_F(GradCheckComprehensiveTest, Sinc) {
-    auto x = make_var({4, 6});
+TEST_P(GradCheckComprehensiveTest, Sinc) {
+    auto x = make_var({4, 6}, device);
     auto f = [](const Variable& v) { return sinc(v); };
     EXPECT_TRUE(gradcheck(f, x, 1e-4, 1e-3, 1e-2));
 }
 
-TEST_F(GradCheckComprehensiveTest, Log2) {
-    auto x = make_var({4, 6});  // positive
+TEST_P(GradCheckComprehensiveTest, Log2) {
+    auto x = make_var({4, 6}, device);  // positive
     auto f = [](const Variable& v) { return log2(v); };
     EXPECT_TRUE(gradcheck(f, x));
 }
 
-TEST_F(GradCheckComprehensiveTest, Log10) {
-    auto x = make_var({4, 6});
+TEST_P(GradCheckComprehensiveTest, Log10) {
+    auto x = make_var({4, 6}, device);
     auto f = [](const Variable& v) { return log10(v); };
     EXPECT_TRUE(gradcheck(f, x));
 }
 
-TEST_F(GradCheckComprehensiveTest, Log1p) {
-    auto x = make_var({4, 6});  // > -1
+TEST_P(GradCheckComprehensiveTest, Log1p) {
+    auto x = make_var({4, 6}, device);  // > -1
     auto f = [](const Variable& v) { return log1p(v); };
     EXPECT_TRUE(gradcheck(f, x));
 }
 
-TEST_F(GradCheckComprehensiveTest, Exp2) {
-    auto x = make_centered_var({4, 6});
+TEST_P(GradCheckComprehensiveTest, Exp2) {
+    auto x = make_centered_var({4, 6}, device);
     auto f = [](const Variable& v) { return exp2(v); };
     EXPECT_TRUE(gradcheck(f, x));
 }
 
-TEST_F(GradCheckComprehensiveTest, Expm1) {
-    auto x = make_centered_var({4, 6});
+TEST_P(GradCheckComprehensiveTest, Expm1) {
+    auto x = make_centered_var({4, 6}, device);
     auto f = [](const Variable& v) { return expm1(v); };
     EXPECT_TRUE(gradcheck(f, x));
 }
 
-TEST_F(GradCheckComprehensiveTest, BesselI0) {
-    auto x = make_centered_var({4, 6});
+TEST_P(GradCheckComprehensiveTest, BesselI0) {
+    auto x = make_centered_var({4, 6}, device);
     auto f = [](const Variable& v) { return bessel_i0(v); };
     EXPECT_TRUE(gradcheck(f, x, 1e-4, 1e-3, 1e-2));
 }
 
-TEST_F(GradCheckComprehensiveTest, BesselI1) {
-    auto x = make_centered_var({4, 6});
+TEST_P(GradCheckComprehensiveTest, BesselI1) {
+    auto x = make_centered_var({4, 6}, device);
     auto f = [](const Variable& v) { return bessel_i1(v); };
     EXPECT_TRUE(gradcheck(f, x, 1e-4, 1e-3, 1e-2));
 }
 
-TEST_F(GradCheckComprehensiveTest, I0e) {
-    auto x = make_centered_var({4, 6});
+TEST_P(GradCheckComprehensiveTest, I0e) {
+    auto x = make_centered_var({4, 6}, device);
     auto f = [](const Variable& v) { return i0e(v); };
     EXPECT_TRUE(gradcheck(f, x, 1e-4, 1e-3, 1e-2));
 }
 
-TEST_F(GradCheckComprehensiveTest, I1e) {
-    auto x = make_centered_var({4, 6});
+TEST_P(GradCheckComprehensiveTest, I1e) {
+    auto x = make_centered_var({4, 6}, device);
     auto f = [](const Variable& v) { return i1e(v); };
     EXPECT_TRUE(gradcheck(f, x, 1e-4, 1e-3, 1e-2));
 }
 
-TEST_F(GradCheckComprehensiveTest, Ndtr) {
-    auto x = make_centered_var({4, 6});
+TEST_P(GradCheckComprehensiveTest, Ndtr) {
+    auto x = make_centered_var({4, 6}, device);
     auto f = [](const Variable& v) { return ndtr(v); };
     EXPECT_TRUE(gradcheck(f, x));
 }
 
-TEST_F(GradCheckComprehensiveTest, LogNdtr) {
-    auto x = make_centered_var({4, 6});
+TEST_P(GradCheckComprehensiveTest, LogNdtr) {
+    auto x = make_centered_var({4, 6}, device);
     auto f = [](const Variable& v) { return log_ndtr(v); };
     EXPECT_TRUE(gradcheck(f, x, 1e-4, 1e-3, 1e-2));
 }
 
-TEST_F(GradCheckComprehensiveTest, SphericalBesselJ0) {
-    auto x = make_var({4, 6});
+TEST_P(GradCheckComprehensiveTest, SphericalBesselJ0) {
+    auto x = make_var({4, 6}, device);
     auto f = [](const Variable& v) { return spherical_bessel_j0(v); };
     EXPECT_TRUE(gradcheck(f, x, 1e-4, 1e-3, 1e-2));
 }
@@ -566,30 +572,30 @@ TEST_F(GradCheckComprehensiveTest, SphericalBesselJ0) {
 // Binary Operations
 // ============================================================================
 
-TEST_F(GradCheckComprehensiveTest, Atan2) {
-    auto y_var = make_var({4, 6});
-    auto x_var = make_var({4, 6});
+TEST_P(GradCheckComprehensiveTest, Atan2) {
+    auto y_var = make_var({4, 6}, device);
+    auto x_var = make_var({4, 6}, device);
     auto f = [&x_var](const Variable& v) { return atan2(v, x_var); };
     EXPECT_TRUE(gradcheck(f, y_var, 1e-4, 1e-3, 1e-2));
 }
 
-TEST_F(GradCheckComprehensiveTest, Logaddexp) {
-    auto a = make_centered_var({4, 6});
-    auto b = make_centered_var({4, 6});
+TEST_P(GradCheckComprehensiveTest, Logaddexp) {
+    auto a = make_centered_var({4, 6}, device);
+    auto b = make_centered_var({4, 6}, device);
     auto f = [&b](const Variable& v) { return logaddexp(v, b); };
     EXPECT_TRUE(gradcheck(f, a));
 }
 
-TEST_F(GradCheckComprehensiveTest, Logaddexp2) {
-    auto a = make_centered_var({4, 6});
-    auto b = make_centered_var({4, 6});
+TEST_P(GradCheckComprehensiveTest, Logaddexp2) {
+    auto a = make_centered_var({4, 6}, device);
+    auto b = make_centered_var({4, 6}, device);
     auto f = [&b](const Variable& v) { return logaddexp2(v, b); };
     EXPECT_TRUE(gradcheck(f, a));
 }
 
-TEST_F(GradCheckComprehensiveTest, CosineSimilarity) {
-    auto a = make_var({4, 8});
-    auto b = make_var({4, 8});
+TEST_P(GradCheckComprehensiveTest, CosineSimilarity) {
+    auto a = make_var({4, 8}, device);
+    auto b = make_var({4, 8}, device);
     auto f = [&b](const Variable& v) { return cosine_similarity(v, b, 1); };
     EXPECT_TRUE(gradcheck(f, a, 1e-4, 1e-3, 1e-2));
 }
@@ -598,24 +604,24 @@ TEST_F(GradCheckComprehensiveTest, CosineSimilarity) {
 // Missing Priority 1-3 Operations
 // ============================================================================
 
-TEST_F(GradCheckComprehensiveTest, Scatter) {
-    auto x = make_var({4, 8});
-    auto src = make_var({4, 3});
-    auto idx = randint(0, 8, {4, 3}, DType::Int64, Device::cpu());
+TEST_P(GradCheckComprehensiveTest, Scatter) {
+    auto x = make_var({4, 8}, device);
+    auto src = make_var({4, 3}, device);
+    auto idx = randint(0, 8, {4, 3}, DType::Int64, device);
     auto f = [&src, &idx](const Variable& v) { return scatter(v, 1, idx, src); };
     EXPECT_TRUE(gradcheck(f, x, 1e-4, 1e-3, 1e-2));
 }
 
-TEST_F(GradCheckComprehensiveTest, ScatterAdd) {
-    auto x = make_var({4, 8});
-    auto src = make_var({4, 3});
-    auto idx = randint(0, 8, {4, 3}, DType::Int64, Device::cpu());
+TEST_P(GradCheckComprehensiveTest, ScatterAdd) {
+    auto x = make_var({4, 8}, device);
+    auto src = make_var({4, 3}, device);
+    auto idx = randint(0, 8, {4, 3}, DType::Int64, device);
     auto f = [&src, &idx](const Variable& v) { return scatter_add(v, 1, idx, src); };
     EXPECT_TRUE(gradcheck(f, x, 1e-4, 1e-3, 1e-2));
 }
 
-TEST_F(GradCheckComprehensiveTest, AsStrided) {
-    auto x = make_var({6, 8});
+TEST_P(GradCheckComprehensiveTest, AsStrided) {
+    auto x = make_var({6, 8}, device);
     auto f = [](const Variable& v) {
         std::vector<int64_t> size = {3, 4};
         std::vector<int64_t> stride = {8, 1};
@@ -624,8 +630,8 @@ TEST_F(GradCheckComprehensiveTest, AsStrided) {
     EXPECT_TRUE(gradcheck(f, x, 1e-5, 1e-4, 1e-3));
 }
 
-TEST_F(GradCheckComprehensiveTest, TopK) {
-    auto x = make_var({4, 16});
+TEST_P(GradCheckComprehensiveTest, TopK) {
+    auto x = make_var({4, 16}, device);
     auto f = [](const Variable& v) {
         // topk returns values; gradients flow through the selected positions
         auto result = sum(v);  // Use sum through sorted top-k as proxy
@@ -641,9 +647,9 @@ TEST_F(GradCheckComprehensiveTest, TopK) {
     EXPECT_TRUE(gradcheck(f2, x));
 }
 
-TEST_F(GradCheckComprehensiveTest, Sort) {
+TEST_P(GradCheckComprehensiveTest, Sort) {
     // Sort gradients: permutation of identity matrix rows
-    auto x = make_var({4, 8});
+    auto x = make_var({4, 8}, device);
     auto f = [](const Variable& v) {
         // Sort is non-differentiable at equal-element boundaries
         // but the gradient should be a permutation matrix
@@ -652,14 +658,14 @@ TEST_F(GradCheckComprehensiveTest, Sort) {
     EXPECT_TRUE(gradcheck(f, x));
 }
 
-TEST_F(GradCheckComprehensiveTest, Gamma) {
-    auto x = make_var({4, 6});  // positive values
+TEST_P(GradCheckComprehensiveTest, Gamma) {
+    auto x = make_var({4, 6}, device);  // positive values
     auto f = [](const Variable& v) { return gamma(v); };
     EXPECT_TRUE(gradcheck(f, x, 1e-3, 1e-2, 1e-1));
 }
 
-TEST_F(GradCheckComprehensiveTest, Polygamma) {
-    auto x = make_var({4, 6});  // positive values
+TEST_P(GradCheckComprehensiveTest, Polygamma) {
+    auto x = make_var({4, 6}, device);  // positive values
     auto f = [](const Variable& v) { return polygamma(1, v); };
     EXPECT_TRUE(gradcheck(f, x, 1e-3, 1e-2, 1e-1));
 }
@@ -673,34 +679,36 @@ TEST_F(GradCheckComprehensiveTest, Polygamma) {
 // the stronger `gradcheck_complex` helper (see gradcheck_complex.hpp) runs
 // TWO backward passes — one seeded `(1+0i)` and one `(0+1i)` — so the real
 // and imaginary parts of the Jacobian are exercised independently.
-TEST_F(GradCheckComprehensiveTest, FFT) {
-    auto x = make_centered_var({8});
+TEST_P(GradCheckComprehensiveTest, FFT) {
+    auto x = make_centered_var({8}, device);
     auto f = [](const Variable& v) {
         return fft_autograd::fft(v);
     };
     EXPECT_TRUE(tenzor_test::gradcheck_complex(f, x, 1e-3, 5e-2, 5e-2));
 }
 
-TEST_F(GradCheckComprehensiveTest, IFFT) {
-    auto x = make_centered_var({8});
+TEST_P(GradCheckComprehensiveTest, IFFT) {
+    auto x = make_centered_var({8}, device);
     auto f = [](const Variable& v) {
         return fft_autograd::ifft(v);
     };
     EXPECT_TRUE(tenzor_test::gradcheck_complex(f, x, 1e-3, 5e-2, 5e-2));
 }
 
-TEST_F(GradCheckComprehensiveTest, RFFT) {
-    auto x = make_centered_var({8});
+TEST_P(GradCheckComprehensiveTest, RFFT) {
+    auto x = make_centered_var({8}, device);
     auto f = [](const Variable& v) {
         return fft_autograd::irfft(fft_autograd::rfft(v));
     };
     EXPECT_TRUE(gradcheck(f, x, 1e-4, 1e-3, 1e-2));
 }
 
-TEST_F(GradCheckComprehensiveTest, IRFFT) {
-    auto x = make_centered_var({8});
+TEST_P(GradCheckComprehensiveTest, IRFFT) {
+    auto x = make_centered_var({8}, device);
     auto f = [](const Variable& v) {
         return fft_autograd::irfft(fft_autograd::rfft(v));
     };
     EXPECT_TRUE(gradcheck(f, x, 1e-4, 1e-3, 1e-2));
 }
+
+INSTANTIATE_BACKEND_TESTS(GradCheckComprehensiveTest);

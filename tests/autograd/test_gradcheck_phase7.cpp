@@ -11,9 +11,10 @@
  *   - Reduction: Mode (only the values branch is differentiated; indices
  *     are a non-differentiable side output).
  *
- * Tests run only on CPU because the gradcheck loop perturbs each input
- * element individually, which is too slow to be useful on GPU. Backend
- * parity for these ops is covered by tests/backend_parity/ separately.
+ * Parameterized across all backends via BackendTest. `gradcheck` is
+ * device-aware: each input Variable is created on the fixture `device`;
+ * gradcheck perturbs on a CPU copy and runs the forward on-device internally.
+ * Backends physically absent on the host are skipped by BackendTest::SetUp.
  */
 
 #include <gtest/gtest.h>
@@ -22,25 +23,28 @@
 #include <tenzor/autograd/variable.hpp>
 #include <tenzor/autograd/ops.hpp>
 #include <tenzor/nn/functional.hpp>
+#include "../backend_test_fixture.hpp"
 
 using namespace tenzor;
+
+class GradCheckPhase7 : public ::tenzor::testing::BackendTest {};
 
 namespace {
 
 // Build an SPD matrix A = X^T X + eps*I (well-conditioned for SVD/Eigh).
-Tensor make_spd(int64_t n, double eps = 0.5) {
-    auto x = randn({n, n}, DType::Float64, Device::cpu());
+Tensor make_spd(int64_t n, const Device& device, double eps = 0.5) {
+    auto x = randn({n, n}, DType::Float64, device);
     auto xt = tenzor::transpose(x, 0, 1);
     auto ata = tenzor::matmul(xt, x);
-    auto eye_t = tenzor::eye(n, std::nullopt, DType::Float64, Device::cpu());
+    auto eye_t = tenzor::eye(n, std::nullopt, DType::Float64, device);
     return tenzor::add(ata, tenzor::mul(eye_t, eps));
 }
 
 // Build a tall full-rank matrix for QR / SVD.
-Tensor make_tall(int64_t m, int64_t n) {
-    auto x = randn({m, n}, DType::Float64, Device::cpu()) * 0.5;
+Tensor make_tall(int64_t m, int64_t n, const Device& device) {
+    auto x = randn({m, n}, DType::Float64, device) * 0.5;
     auto eye_pad = tenzor::eye(m, std::optional<int64_t>(n), DType::Float64,
-                               Device::cpu()) * 0.1;
+                               device) * 0.1;
     return tenzor::add(x, eye_pad);
 }
 
@@ -58,10 +62,10 @@ Tensor make_tall(int64_t m, int64_t n) {
 // materialises a contiguous output.
 // ============================================================================
 
-TEST(GradCheckPhase7, SVD_FullMatricesFalse) {
+TEST_P(GradCheckPhase7, SVD_FullMatricesFalse) {
     // SVD on a 3x3 well-conditioned matrix. Use the singular values branch
     // (S) only — it's smooth in the matrix entries.
-    Variable x(make_spd(3, 1.0), true);
+    Variable x(make_spd(3, device, 1.0), true);
     auto f = [](const Variable& v) -> Variable {
         auto [U, S, Vt] = tenzor::svd(v, /*full_matrices=*/false);
         return tenzor::sum(S);  // scalar; smooth in v.
@@ -70,10 +74,10 @@ TEST(GradCheckPhase7, SVD_FullMatricesFalse) {
     EXPECT_TRUE(ok) << "SVD (sum of singular values) gradcheck failed";
 }
 
-TEST(GradCheckPhase7, QR_TraceR) {
+TEST_P(GradCheckPhase7, QR_TraceR) {
     // trace(R) — sum of diagonal of R — is differentiable w.r.t. input
     // away from singular points.
-    Variable x(make_tall(4, 3), true);
+    Variable x(make_tall(4, 3, device), true);
     auto f = [](const Variable& v) -> Variable {
         auto [Q, R] = tenzor::qr(v);
         return tenzor::trace(R);
@@ -82,9 +86,9 @@ TEST(GradCheckPhase7, QR_TraceR) {
     EXPECT_TRUE(ok) << "QR (trace of R) gradcheck failed";
 }
 
-TEST(GradCheckPhase7, Eigh_SumEigvals) {
+TEST_P(GradCheckPhase7, Eigh_SumEigvals) {
     // For symmetric M, sum of eigenvalues = trace(M). Smooth, well-defined.
-    Variable x(make_spd(4, 1.0), true);
+    Variable x(make_spd(4, device, 1.0), true);
     auto f = [](const Variable& v) -> Variable {
         auto [eigvals, eigvecs] = tenzor::eigh(v);
         return tenzor::sum(eigvals);
@@ -93,9 +97,9 @@ TEST(GradCheckPhase7, Eigh_SumEigvals) {
     EXPECT_TRUE(ok) << "Eigh (sum of eigenvalues) gradcheck failed";
 }
 
-TEST(GradCheckPhase7, Slogdet_SumOutputs) {
+TEST_P(GradCheckPhase7, Slogdet_SumOutputs) {
     // log|det(A)| is smooth for an invertible matrix with positive determinant.
-    Variable x(make_spd(3, 1.0), true);
+    Variable x(make_spd(3, device, 1.0), true);
     auto f = [](const Variable& v) -> Variable {
         auto [sign, logabsdet] = tenzor::slogdet(v);
         return logabsdet;  // scalar
@@ -104,11 +108,11 @@ TEST(GradCheckPhase7, Slogdet_SumOutputs) {
     EXPECT_TRUE(ok) << "Slogdet (logabsdet) gradcheck failed";
 }
 
-TEST(GradCheckPhase7, CholeskySolve_VsRHS) {
+TEST_P(GradCheckPhase7, CholeskySolve_VsRHS) {
     // Solve LL^T x = B for B; gradient w.r.t. B should be smooth.
-    Variable A(make_spd(3, 1.0), false);
+    Variable A(make_spd(3, device, 1.0), false);
     auto L = tenzor::cholesky(A);
-    Variable B(randn({3, 2}, DType::Float64, Device::cpu()), true);
+    Variable B(randn({3, 2}, DType::Float64, device), true);
     auto f = [&L](const Variable& b) -> Variable {
         return tenzor::sum(tenzor::cholesky_solve(b, L, /*upper=*/false));
     };
@@ -120,9 +124,9 @@ TEST(GradCheckPhase7, CholeskySolve_VsRHS) {
 // Conv gradcheck — small inputs with Float64 for numerical stability
 // ============================================================================
 
-TEST(GradCheckPhase7, Conv1d_Float64) {
-    Variable input(randn({1, 2, 6}, DType::Float64, Device::cpu()), true);
-    Variable weight(randn({3, 2, 3}, DType::Float64, Device::cpu()) * 0.3, false);
+TEST_P(GradCheckPhase7, Conv1d_Float64) {
+    Variable input(randn({1, 2, 6}, DType::Float64, device), true);
+    Variable weight(randn({3, 2, 3}, DType::Float64, device) * 0.3, false);
     auto f = [&weight](const Variable& x) -> Variable {
         return tenzor::sum(nn::functional::conv1d(x, weight, std::nullopt, 1, 0, 1, 1));
     };
@@ -130,9 +134,9 @@ TEST(GradCheckPhase7, Conv1d_Float64) {
     EXPECT_TRUE(ok) << "Conv1d gradcheck failed";
 }
 
-TEST(GradCheckPhase7, Conv2d_Float64) {
-    Variable input(randn({1, 2, 4, 4}, DType::Float64, Device::cpu()), true);
-    Variable weight(randn({3, 2, 3, 3}, DType::Float64, Device::cpu()) * 0.3, false);
+TEST_P(GradCheckPhase7, Conv2d_Float64) {
+    Variable input(randn({1, 2, 4, 4}, DType::Float64, device), true);
+    Variable weight(randn({3, 2, 3, 3}, DType::Float64, device) * 0.3, false);
     auto f = [&weight](const Variable& x) -> Variable {
         return tenzor::sum(nn::functional::conv2d(
             x, weight, std::nullopt,
@@ -145,9 +149,9 @@ TEST(GradCheckPhase7, Conv2d_Float64) {
     EXPECT_TRUE(ok) << "Conv2d gradcheck failed";
 }
 
-TEST(GradCheckPhase7, Conv3d_Float64) {
-    Variable input(randn({1, 2, 3, 3, 3}, DType::Float64, Device::cpu()), true);
-    Variable weight(randn({2, 2, 2, 2, 2}, DType::Float64, Device::cpu()) * 0.3, false);
+TEST_P(GradCheckPhase7, Conv3d_Float64) {
+    Variable input(randn({1, 2, 3, 3, 3}, DType::Float64, device), true);
+    Variable weight(randn({2, 2, 2, 2, 2}, DType::Float64, device) * 0.3, false);
     auto f = [&weight](const Variable& x) -> Variable {
         return tenzor::sum(nn::functional::conv3d(x, weight, std::nullopt,
                                       {1, 1, 1}, {0, 0, 0}, {1, 1, 1}, 1));
@@ -156,9 +160,9 @@ TEST(GradCheckPhase7, Conv3d_Float64) {
     EXPECT_TRUE(ok) << "Conv3d gradcheck failed";
 }
 
-TEST(GradCheckPhase7, ConvTranspose1d_Float64) {
-    Variable input(randn({1, 2, 4}, DType::Float64, Device::cpu()), true);
-    Variable weight(randn({2, 3, 3}, DType::Float64, Device::cpu()) * 0.3, false);
+TEST_P(GradCheckPhase7, ConvTranspose1d_Float64) {
+    Variable input(randn({1, 2, 4}, DType::Float64, device), true);
+    Variable weight(randn({2, 3, 3}, DType::Float64, device) * 0.3, false);
     auto f = [&weight](const Variable& x) -> Variable {
         return tenzor::sum(nn::functional::conv_transpose1d(x, weight, std::nullopt, 1, 0, 0, 1, 1));
     };
@@ -166,12 +170,12 @@ TEST(GradCheckPhase7, ConvTranspose1d_Float64) {
     EXPECT_TRUE(ok) << "ConvTranspose1d gradcheck failed";
 }
 
-TEST(GradCheckPhase7, ConvTranspose2d_Float64) {
+TEST_P(GradCheckPhase7, ConvTranspose2d_Float64) {
     // Regression guard for the Float32-accumulator bug in
     // conv_transpose2d_forward_impl that previously caused ~7% gradient
     // error for Float64 inputs. Fixed by using a dtype-aware AccumT.
-    Variable input(randn({1, 2, 3, 4}, DType::Float64, Device::cpu()), true);
-    Variable weight(randn({2, 3, 2, 3}, DType::Float64, Device::cpu()) * 0.3, false);
+    Variable input(randn({1, 2, 3, 4}, DType::Float64, device), true);
+    Variable weight(randn({2, 3, 2, 3}, DType::Float64, device) * 0.3, false);
     auto f = [&weight](const Variable& x) -> Variable {
         return tenzor::sum(nn::functional::conv_transpose2d(
             x, weight, std::nullopt,
@@ -189,11 +193,11 @@ TEST(GradCheckPhase7, ConvTranspose2d_Float64) {
 // Mode reduction — only the .values branch is differentiable
 // ============================================================================
 
-TEST(GradCheckPhase7, Mode_ValuesBranch) {
+TEST_P(GradCheckPhase7, Mode_ValuesBranch) {
     // Mode returns just the values Variable (not a tuple — indices are not
     // exposed in the autograd surface). Acts as a gather of the most-frequent
     // element per row.
-    auto x_data = randn({3, 5}, DType::Float64, Device::cpu());
+    auto x_data = randn({3, 5}, DType::Float64, device);
     Variable x(x_data, true);
     auto f = [](const Variable& v) -> Variable {
         return tenzor::sum(tenzor::mode(v, /*dim=*/-1, /*keepdim=*/false));
@@ -202,10 +206,4 @@ TEST(GradCheckPhase7, Mode_ValuesBranch) {
     EXPECT_TRUE(ok) << "Mode (values) gradcheck failed";
 }
 
-int main(int argc, char** argv) {
-    ::testing::InitGoogleTest(&argc, argv);
-    try { tenzor::initialize(); } catch (...) {}
-    int rc = RUN_ALL_TESTS();
-    try { tenzor::finalize(); } catch (...) {}
-    return rc;
-}
+INSTANTIATE_BACKEND_TESTS(GradCheckPhase7);
