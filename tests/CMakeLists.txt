@@ -603,7 +603,7 @@ tenzor_discover_tests(test_median_f16_bf16 DISCOVERY_TIMEOUT 60)
 # half-precision inputs and produce numerically-close results.
 add_executable(test_math_half_dispatch test_math_half_dispatch.cpp)
 target_link_libraries(test_math_half_dispatch PRIVATE tenzor_core GTest::gtest_main)
-tenzor_discover_tests(test_math_half_dispatch DISCOVERY_TIMEOUT 60 BACKENDS cpu)
+tenzor_discover_tests(test_math_half_dispatch DISCOVERY_TIMEOUT 60 BACKENDS multi)
 
 # Stream S4 — fused conv+activation CPU kernels used to silently skip the
 # activation step on Float16 / BFloat16 (no error, no warning). After
@@ -612,7 +612,7 @@ tenzor_discover_tests(test_math_half_dispatch DISCOVERY_TIMEOUT 60 BACKENDS cpu)
 # regression net for that fix.
 add_executable(test_fused_conv_activation_dtype test_fused_conv_activation_dtype.cpp)
 target_link_libraries(test_fused_conv_activation_dtype PRIVATE tenzor_core GTest::gtest_main)
-tenzor_discover_tests(test_fused_conv_activation_dtype DISCOVERY_TIMEOUT 60 BACKENDS cpu)
+tenzor_discover_tests(test_fused_conv_activation_dtype DISCOVERY_TIMEOUT 60 BACKENDS multi)
 
 # Phase P0 / Fix 4 — Vulkan LayerNorm 3-tensor return: forward shader used
 # to compute mean/rstd in shared memory and discard them; backward read

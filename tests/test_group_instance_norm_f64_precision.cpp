@@ -20,24 +20,17 @@
 #include <tenzor/ops/op_id.hpp>
 #include <tenzor/ops/creation.hpp>
 
+#include "backend_test_fixture.hpp"
+
 #include <cmath>
 #include <span>
 #include <vector>
 
-namespace tenzor { void initialize(); }
-
-namespace {
-class GroupInstanceNormF64Env : public ::testing::Environment {
-public:
-    void SetUp() override { tenzor::initialize(); }
-};
-[[maybe_unused]] auto* g_env =
-    ::testing::AddGlobalTestEnvironment(new GroupInstanceNormF64Env);
-}  // namespace
-
 using namespace tenzor;
 
 namespace {
+
+class GroupInstanceNormF64Precision : public ::tenzor::testing::BackendTest {};
 
 // Build a (1, C, H*W) input where each element is 1.0 + idx*1e-9. In Float32
 // every element rounds to 1.0 exactly; in Float64 every element is distinct.
@@ -54,7 +47,9 @@ auto build_input(int64_t C, int64_t spatial) -> std::vector<double> {
 
 }  // namespace
 
-TEST(GroupInstanceNormF64Precision, GroupNormFloat64PreservesPerElementOffsets) {
+namespace {
+
+TEST_P(GroupInstanceNormF64Precision, GroupNormFloat64PreservesPerElementOffsets) {
     constexpr int64_t N = 1;
     constexpr int64_t C = 4;
     constexpr int64_t H = 4;
@@ -65,11 +60,11 @@ TEST(GroupInstanceNormF64Precision, GroupNormFloat64PreservesPerElementOffsets) 
     std::vector<double> raw_b(C, 0.0);
 
     auto in_t = Tensor::from_blob(raw_in.data(), {N, C, H, W}, DType::Float64,
-                                  Device::cpu()).clone();
+                                  Device::cpu()).clone().to(device);
     auto w_t  = Tensor::from_blob(raw_w.data(),  {C}, DType::Float64,
-                                  Device::cpu()).clone();
+                                  Device::cpu()).clone().to(device);
     auto b_t  = Tensor::from_blob(raw_b.data(),  {C}, DType::Float64,
-                                  Device::cpu()).clone();
+                                  Device::cpu()).clone().to(device);
 
     OpAttributes attrs;
     attrs.set(AttrKey::NumGroups, num_groups);
@@ -81,7 +76,7 @@ TEST(GroupInstanceNormF64Precision, GroupNormFloat64PreservesPerElementOffsets) 
     const auto& out = out_vec[0];
     ASSERT_EQ(out.dtype(), DType::Float64);
 
-    auto out_cpu = out.to(Device::cpu()).contiguous();
+    auto out_cpu = out.cpu().contiguous();
     const double* od = out_cpu.data<double>();
 
     // Compute the variance of the output across the elements within one
@@ -103,7 +98,7 @@ TEST(GroupInstanceNormF64Precision, GroupNormFloat64PreservesPerElementOffsets) 
            "accumulator precision loss collapses per-element offsets to zero";
 }
 
-TEST(GroupInstanceNormF64Precision, InstanceNormFloat64PreservesPerElementOffsets) {
+TEST_P(GroupInstanceNormF64Precision, InstanceNormFloat64PreservesPerElementOffsets) {
     constexpr int64_t N = 1;
     constexpr int64_t C = 2;
     constexpr int64_t H = 4;
@@ -113,11 +108,11 @@ TEST(GroupInstanceNormF64Precision, InstanceNormFloat64PreservesPerElementOffset
     std::vector<double> raw_b(C, 0.0);
 
     auto in_t = Tensor::from_blob(raw_in.data(), {N, C, H, W}, DType::Float64,
-                                  Device::cpu()).clone();
+                                  Device::cpu()).clone().to(device);
     auto w_t  = Tensor::from_blob(raw_w.data(),  {C}, DType::Float64,
-                                  Device::cpu()).clone();
+                                  Device::cpu()).clone().to(device);
     auto b_t  = Tensor::from_blob(raw_b.data(),  {C}, DType::Float64,
-                                  Device::cpu()).clone();
+                                  Device::cpu()).clone().to(device);
 
     OpAttributes attrs;
     attrs.set(AttrKey::Eps, 1e-5);
@@ -128,7 +123,7 @@ TEST(GroupInstanceNormF64Precision, InstanceNormFloat64PreservesPerElementOffset
     const auto& out = out_vec[0];
     ASSERT_EQ(out.dtype(), DType::Float64);
 
-    auto out_cpu = out.to(Device::cpu()).contiguous();
+    auto out_cpu = out.cpu().contiguous();
     const double* od = out_cpu.data<double>();
     double mean = 0.0;
     for (int64_t i = 0; i < out_cpu.numel(); ++i) mean += od[i];
@@ -145,12 +140,12 @@ TEST(GroupInstanceNormF64Precision, InstanceNormFloat64PreservesPerElementOffset
 
 // Regression guard: Float32 path still correct (the change widened accumulators
 // from F32 to F64; F32 callers see no behavior change beyond improved stability).
-TEST(GroupInstanceNormF64Precision, Float32PathStillCorrect) {
+TEST_P(GroupInstanceNormF64Precision, Float32PathStillCorrect) {
     constexpr int64_t N = 2;
     constexpr int64_t C = 4;
-    auto x = tenzor::randn({N, C, 4, 4}, DType::Float32, Device::cpu());
-    auto w = tenzor::ones({C}, DType::Float32, Device::cpu());
-    auto b = tenzor::zeros({C}, DType::Float32, Device::cpu());
+    auto x = tenzor::randn({N, C, 4, 4}, DType::Float32, device);
+    auto w = tenzor::ones({C}, DType::Float32, device);
+    auto b = tenzor::zeros({C}, DType::Float32, device);
     OpAttributes attrs;
     attrs.set(AttrKey::NumGroups, static_cast<int64_t>(2));
     attrs.set(AttrKey::Eps, 1e-5);
@@ -161,3 +156,7 @@ TEST(GroupInstanceNormF64Precision, Float32PathStillCorrect) {
     EXPECT_EQ(out_vec[0].dtype(), DType::Float32);
     EXPECT_EQ(out_vec[0].numel(), N * C * 4 * 4);
 }
+
+INSTANTIATE_BACKEND_TESTS(GroupInstanceNormF64Precision);
+
+}  // namespace

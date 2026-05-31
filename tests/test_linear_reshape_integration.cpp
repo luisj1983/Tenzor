@@ -7,35 +7,27 @@
 #include <tenzor/tenzor.hpp>
 #include <memory>
 #include "grad_flow_helpers.hpp"
+#include "backend_test_fixture.hpp"
 
 using namespace tenzor;
 using namespace tenzor::nn;
 
-// Initialize library before all tests
-class GlobalEnvironment : public ::testing::Environment {
-public:
-    void SetUp() override {
-        tenzor::initialize();
-    }
-};
-
-// Register global environment
-static ::testing::Environment* const global_env =
-    ::testing::AddGlobalTestEnvironment(new GlobalEnvironment);
-
-class LinearReshapeIntegrationTest : public ::testing::Test {
+class LinearReshapeIntegrationTest : public ::tenzor::testing::BackendTest {
 protected:
     void SetUp() override {
+        ::tenzor::testing::BackendTest::SetUp();
+        if (::testing::Test::IsSkipped()) return;
         set_grad_enabled(true);
     }
 };
 
-TEST_F(LinearReshapeIntegrationTest, LinearWithReshapeInput) {
+TEST_P(LinearReshapeIntegrationTest, LinearWithReshapeInput) {
     // Create a Linear layer
     auto linear = std::make_shared<Linear>(4, 3);
+    linear->to(device);
 
     // Create input with shape {2, 4} and reshape to {8}
-    auto data = ones({2, 4}, DType::Float32, Device::cpu());
+    auto data = ones({2, 4}, DType::Float32, device);
     Variable x(data, true);
 
     // Reshape before passing to linear
@@ -69,12 +61,13 @@ TEST_F(LinearReshapeIntegrationTest, LinearWithReshapeInput) {
     }
 }
 
-TEST_F(LinearReshapeIntegrationTest, LinearWithPermuteInput) {
+TEST_P(LinearReshapeIntegrationTest, LinearWithPermuteInput) {
     // Create a Linear layer
     auto linear = std::make_shared<Linear>(4, 3);
+    linear->to(device);
 
     // Create input with shape {2, 3, 4}
-    auto data = ones({2, 3, 4}, DType::Float32, Device::cpu());
+    auto data = ones({2, 3, 4}, DType::Float32, device);
     Variable x(data, true);
 
     // Permute dimensions
@@ -85,6 +78,7 @@ TEST_F(LinearReshapeIntegrationTest, LinearWithPermuteInput) {
 
     // Note: Linear expects last dimension to be in_features, so we need 3 features
     auto linear2 = std::make_shared<Linear>(3, 5);
+    linear2->to(device);
     auto output = linear2->forward(x_reshaped);
 
     // Check output shape
@@ -103,9 +97,9 @@ TEST_F(LinearReshapeIntegrationTest, LinearWithPermuteInput) {
     EXPECT_EQ(grad.shape()[2], 4);
 }
 
-TEST_F(LinearReshapeIntegrationTest, MultipleReshapeOps) {
+TEST_P(LinearReshapeIntegrationTest, MultipleReshapeOps) {
     // Test multiple reshape operations in the graph
-    auto data = ones({6}, DType::Float32, Device::cpu());
+    auto data = ones({6}, DType::Float32, device);
     Variable x(data, true);
 
     // Chain of reshape operations
@@ -115,6 +109,7 @@ TEST_F(LinearReshapeIntegrationTest, MultipleReshapeOps) {
 
     // Pass through linear layer
     auto linear = std::make_shared<Linear>(6, 4);
+    linear->to(device);
     auto output = linear->forward(y3);
 
     // Backward pass
@@ -127,9 +122,10 @@ TEST_F(LinearReshapeIntegrationTest, MultipleReshapeOps) {
     EXPECT_EQ(grad.shape()[0], 6);
 
     // Gradient should be non-zero
-    auto grad_data = grad.data<float>();
+    auto grad_cpu = grad.cpu();
+    auto grad_data = grad_cpu.data<float>();
     bool has_nonzero = false;
-    for (int64_t i = 0; i < grad.numel(); ++i) {
+    for (int64_t i = 0; i < grad_cpu.numel(); ++i) {
         if (grad_data[i] != 0.0f) {
             has_nonzero = true;
             break;
@@ -137,3 +133,5 @@ TEST_F(LinearReshapeIntegrationTest, MultipleReshapeOps) {
     }
     EXPECT_TRUE(has_nonzero);
 }
+
+INSTANTIATE_BACKEND_TESTS(LinearReshapeIntegrationTest);

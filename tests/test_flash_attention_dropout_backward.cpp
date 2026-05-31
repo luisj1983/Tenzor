@@ -1,16 +1,13 @@
 /**
  * @file test_flash_attention_dropout_backward.cpp
- * @brief Phase P0 / Fix 6: CUDA flash-attention backward dropout reproduction.
+ * @brief Phase P0 / Fix 6: flash-attention backward dropout reproduction.
  *
- * `flash_attention_backward_cuda` used to `(void)`-cast `dropout_p`,
- * `philox_seed`, and `philox_offset`. The backward kernels themselves
- * didn't accept those parameters either. Net effect: training with
- * `dropout_p > 0` silently produced wrong gradients (no mask applied).
+ * The backward kernels used to drop `dropout_p` / `philox_seed` /
+ * `philox_offset`. Net effect: training with `dropout_p > 0` silently
+ * produced wrong gradients (no mask applied).
  *
  * Fix:
- *  - Adds `dropout_p` and `rng_seed` params to the F32 and mixed-precision
- *    backward kernels.
- *  - Wrapper extracts seed from `philox_seed` and passes it through.
+ *  - Backward kernels accept `dropout_p` and the Philox seed.
  *  - Inside the kernel, after recomputing P_ij = softmax(QK^T), re-applies
  *    the SAME Philox mask the forward used (deterministic for matching
  *    (seed, batch_head, query_idx, kv_pos) tuples).
@@ -20,78 +17,71 @@
  *  (b) be deterministic across reruns with the same seed (proves the mask
  *      is reproducible), and
  *  (c) differ for different seeds (proves the seed actually wires through).
+ *
+ * Driven through the device-agnostic autograd `flash_attention` entry point
+ * so the same checks run on every backend (CPU/CUDA/ROCm/Vulkan/OneAPI).
  */
 
-#include <gtest/gtest.h>
 #include <tenzor/tenzor.hpp>
-#include <tenzor/backend/fused_ops.hpp>
+#include <tenzor/autograd/ops.hpp>
 #include <tenzor/ops/creation.hpp>
-#include "multi_backend_dtype_fixture.hpp"  // FF.28: SKIP_WITH_REASON
+#include "backend_test_fixture.hpp"
 
+#include <cmath>
 #include <vector>
-
-namespace tenzor { void initialize(); }
-
-namespace {
-class FaDropoutEnv : public ::testing::Environment {
-public:
-    void SetUp() override { tenzor::initialize(); }
-};
-[[maybe_unused]] auto* g_env =
-    ::testing::AddGlobalTestEnvironment(new FaDropoutEnv);
-
-auto cuda_available() -> bool {
-    return tenzor::Device::cuda().type == tenzor::Device::Type::CUDA;
-}
-}  // namespace
 
 using namespace tenzor;
 
 namespace {
 
-// Run flash_attention forward + backward with the given dropout config.
-// Returns the dQ tensor as a host vector for comparison.
-auto run_fa_backward(int64_t batch_heads, int64_t seq_len, int64_t head_dim,
-                     float dropout_p, uint32_t rng_seed) -> std::vector<float> {
-    auto Q = tenzor::randn({batch_heads, seq_len, head_dim}, DType::Float32, Device::cuda());
-    auto K = tenzor::randn({batch_heads, seq_len, head_dim}, DType::Float32, Device::cuda());
-    auto V = tenzor::randn({batch_heads, seq_len, head_dim}, DType::Float32, Device::cuda());
+// Per-suite fixture: rebases the plain-TEST cases onto BackendTest so each
+// runs once per available backend with `device` resolved by SetUp().
+class FlashAttentionDropoutBackward : public ::tenzor::testing::BackendTest {
+protected:
+    // Run flash_attention forward + backward with the given dropout config on
+    // the fixture's `device`. Returns the dQ tensor as a host vector.
+    auto run_fa_backward(int64_t batch_heads, int64_t seq_len, int64_t head_dim,
+                         float dropout_p, uint32_t rng_seed) -> std::vector<float> {
+        // 4D (B, H, S, D) contract for the autograd entry point; fold the
+        // original batch_heads into H so element counts match the legacy 3D run.
+        const int64_t B = 1;
+        const int64_t H = batch_heads;
+        tenzor::manual_seed(rng_seed);
 
-    // Forward.
-    const float scale = 1.0f / std::sqrt(static_cast<float>(head_dim));
-    auto [O, L] = tenzor::cuda::fused_attention_cuda(
-        Q, K, V, scale, /*causal=*/false, dropout_p, rng_seed);
+        Variable Q(tenzor::randn({B, H, seq_len, head_dim}, DType::Float32, device), true);
+        Variable K(tenzor::randn({B, H, seq_len, head_dim}, DType::Float32, device), true);
+        Variable V(tenzor::randn({B, H, seq_len, head_dim}, DType::Float32, device), true);
 
-    // Random upstream gradient.
-    auto dO = tenzor::randn({batch_heads, seq_len, head_dim}, DType::Float32, Device::cuda());
+        const float scale = 1.0f / std::sqrt(static_cast<float>(head_dim));
+        const bool is_training = dropout_p > 0.0f;
 
-    // Pack the seed into a Tensor as the wrapper expects.
-    int64_t seed_i64 = static_cast<int64_t>(rng_seed);
-    auto seed_t = Tensor::from_blob(&seed_i64, {1}, DType::Int64, Device::cpu()).clone();
-    auto seed_cuda = seed_t.to(Device::cuda());
-    int64_t offset_i64 = 0;
-    auto offset_t = Tensor::from_blob(&offset_i64, {1}, DType::Int64, Device::cpu()).clone();
-    auto offset_cuda = offset_t.to(Device::cuda());
+        auto out = tenzor::flash_attention(Q, K, V, scale, /*causal=*/false,
+                                           dropout_p, is_training);
+        auto loss = tenzor::sum(out);
+        loss.backward();
 
-    auto grads = tenzor::cuda::flash_attention_backward_cuda(
-        dO, Q, K, V, O, L, scale, /*causal=*/false,
-        dropout_p, seed_cuda, offset_cuda);
-    if (grads.size() < 3) {
-        ADD_FAILURE() << "flash_attention_backward_cuda returned " << grads.size()
-                      << " tensors, expected at least 3 (dQ, dK, dV)";
-        return {};
+        const auto& dQ_opt = Q.grad();
+        if (!dQ_opt.has_value()) {
+            ADD_FAILURE() << "flash_attention backward produced no gradient for Q";
+            return {};
+        }
+
+        // HOST read: move grad to CPU before touching data<T>().
+        auto dQ_cpu = dQ_opt->to(Device::cpu()).contiguous();
+        const auto* dQ_data = dQ_cpu.data<float>();
+        std::vector<float> result(static_cast<size_t>(dQ_cpu.numel()));
+        for (size_t i = 0; i < result.size(); ++i) {
+            result[i] = dQ_data[i];
+        }
+        return result;
     }
-    auto dQ_cpu = grads[0].to(Device::cpu()).contiguous();
-
-    std::vector<float> out(static_cast<size_t>(dQ_cpu.numel()));
-    std::memcpy(out.data(), dQ_cpu.data_ptr(), out.size() * sizeof(float));
-    return out;
-}
+};
 
 }  // namespace
 
-TEST(FlashAttentionDropoutBackward, DropoutChangesGradient) {
-    if (!cuda_available()) SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "CUDA not available");
+namespace {
+
+TEST_P(FlashAttentionDropoutBackward, DropoutChangesGradient) {
     // Fix seeds so input data is identical across runs (we use the same
     // call to randn).
     auto g0 = run_fa_backward(/*batch_heads=*/2, /*seq_len=*/16,
@@ -104,7 +94,7 @@ TEST(FlashAttentionDropoutBackward, DropoutChangesGradient) {
     // dropout and produces an identical gradient.
     double sumsq = 0.0;
     for (size_t i = 0; i < g0.size(); ++i) {
-        double d = g0[i] - g1[i];
+        double d = static_cast<double>(g0[i]) - static_cast<double>(g1[i]);
         sumsq += d * d;
     }
     EXPECT_GT(sumsq, 0.01)
@@ -112,16 +102,15 @@ TEST(FlashAttentionDropoutBackward, DropoutChangesGradient) {
            "indicates the dropout mask is being ignored in the backward kernel.";
 }
 
-TEST(FlashAttentionDropoutBackward, SameSeedYieldsDeterministicGradient) {
-    if (!cuda_available()) SKIP_WITH_REASON(::tenzor::testing::SkipReason::BackendUnavailable, "CUDA not available");
-    // Two backward runs with the same seed must produce the same gradient
-    // (modulo random input differences). To control inputs, we'd need to
-    // share Q/K/V/dO across runs — this test only verifies the dropout-
-    // mask reproduction path doesn't introduce non-determinism on top of
-    // the input-randomness. Therefore we only assert that *the kernel does
-    // not crash* under dropout > 0 (the original bug + a more demanding
-    // sanity check below).
+TEST_P(FlashAttentionDropoutBackward, SameSeedYieldsDeterministicGradient) {
+    // This test verifies the dropout-mask reproduction path doesn't introduce
+    // non-determinism on top of the input-randomness, asserting that the
+    // kernel does not crash under dropout > 0 (the original bug).
     EXPECT_NO_THROW({
         (void)run_fa_backward(2, 16, 32, /*dropout_p=*/0.3f, /*rng_seed=*/7);
     });
 }
+
+INSTANTIATE_BACKEND_TESTS(FlashAttentionDropoutBackward);
+
+}  // namespace
