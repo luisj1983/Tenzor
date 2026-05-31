@@ -13,6 +13,7 @@
  */
 
 #include <gtest/gtest.h>
+#include "backend_test_fixture.hpp"
 #include "tenzor/quantization/quantize_api.hpp"
 #include "tenzor/nn/layers/linear.hpp"
 #include "tenzor/nn/layers/conv.hpp"
@@ -30,27 +31,15 @@ using namespace tenzor::nn::quantization;
 using namespace tenzor::quantization;
 
 // ===========================================================================
-// Global Test Environment for Initialization
-// ===========================================================================
-
-class QuantizationTestEnvironment : public ::testing::Environment {
-public:
-    void SetUp() override {
-        tenzor::initialize();
-    }
-};
-
-static ::testing::Environment* const quant_env =
-    ::testing::AddGlobalTestEnvironment(new QuantizationTestEnvironment);
-
-// ===========================================================================
 // Test Fixtures
 // ===========================================================================
 
-class QuantizationConversionTest : public ::testing::Test {
+class QuantizationConversionTest : public ::tenzor::testing::BackendTest {
 protected:
     void SetUp() override {
-        device_ = Device::cpu();
+        ::tenzor::testing::BackendTest::SetUp();
+        if (::testing::Test::IsSkipped()) return;
+        device_ = device;
     }
 
     Device device_;
@@ -65,9 +54,10 @@ protected:
 // Test 1: Convert Simple Linear Module
 // ===========================================================================
 
-TEST_F(QuantizationConversionTest, ConvertLinearToQuantized) {
+TEST_P(QuantizationConversionTest, ConvertLinearToQuantized) {
     // Create a simple Linear layer
     auto linear = std::make_shared<Linear>(128, 64, true);
+    linear->to(device_);
 
     // Convert to quantized
     auto q_linear = convert_to_quantized(linear, get_qconfig());
@@ -85,9 +75,10 @@ TEST_F(QuantizationConversionTest, ConvertLinearToQuantized) {
 // Test 2: Convert Conv2d Module
 // ===========================================================================
 
-TEST_F(QuantizationConversionTest, ConvertConv2dToQuantized) {
+TEST_P(QuantizationConversionTest, ConvertConv2dToQuantized) {
     // Create Conv2d layer: 3 input channels, 64 output channels, 3x3 kernel
     auto conv = std::make_shared<Conv2d>(3, 64, 3, 1, 1);
+    conv->to(device_);
 
     // Convert to quantized
     auto q_conv = convert_to_quantized(conv, get_qconfig());
@@ -136,9 +127,10 @@ auto max_abs_error(const Tensor& a, const Tensor& b) -> float {
 
 } // namespace
 
-TEST_F(QuantizationConversionTest, RoundTripConversion) {
+TEST_P(QuantizationConversionTest, RoundTripConversion) {
     // Create original Linear layer
     auto original_linear = std::make_shared<Linear>(256, 128, true);
+    original_linear->to(device_);
 
     // Capture original weights by value so the quantize→dequant round trip
     // can't alias back into the comparison.
@@ -183,6 +175,7 @@ TEST_F(QuantizationConversionTest, RoundTripConversion) {
     // rounding without accepting the old broken path (which would give
     // errors on the order of max(|w|) itself).
     Tensor orig_abs = orig_weight.clone();
+    if (orig_abs.device() != Device::cpu()) orig_abs = orig_abs.cpu();
     if (orig_abs.dtype() != DType::Float32) orig_abs = orig_abs.to(DType::Float32);
     const float* op = orig_abs.data<float>();
     float max_abs = 0.0f;
@@ -206,12 +199,13 @@ TEST_F(QuantizationConversionTest, RoundTripConversion) {
 // Test 3b: Conv2d Round-Trip (exercises the new dequant path)
 // ===========================================================================
 
-TEST_F(QuantizationConversionTest, Conv2dRoundTripConversion) {
+TEST_P(QuantizationConversionTest, Conv2dRoundTripConversion) {
     // Stride=2, padding=1, non-trivial groups=1, bias on — exercises
     // every field that QuantizedConv2d's dequant has to carry through.
     auto original_conv = std::make_shared<Conv2d>(
         /*in_channels=*/16, /*out_channels=*/32, /*kernel_size=*/3,
         /*stride=*/2, /*padding=*/1, /*dilation=*/1, /*groups=*/1, /*bias=*/true);
+    original_conv->to(device_);
 
     auto orig_params = original_conv->named_parameters();
     auto orig_weight_var = find_param(orig_params, "weight");
@@ -250,6 +244,7 @@ TEST_F(QuantizationConversionTest, Conv2dRoundTripConversion) {
 
     // Same tolerance derivation as the Linear test.
     Tensor orig_abs = orig_weight.clone();
+    if (orig_abs.device() != Device::cpu()) orig_abs = orig_abs.cpu();
     if (orig_abs.dtype() != DType::Float32) orig_abs = orig_abs.to(DType::Float32);
     const float* op = orig_abs.data<float>();
     float max_abs = 0.0f;
@@ -281,13 +276,14 @@ TEST_F(QuantizationConversionTest, Conv2dRoundTripConversion) {
 // Test 4: Quantize Sequential Model
 // ===========================================================================
 
-TEST_F(QuantizationConversionTest, ConvertSequentialModel) {
+TEST_P(QuantizationConversionTest, ConvertSequentialModel) {
     // Create a sequential model
     auto model = std::make_shared<Sequential>(
         std::make_shared<Linear>(784, 256),
         std::make_shared<Linear>(256, 128),
         std::make_shared<Linear>(128, 10)
     );
+    model->to(device_);
 
     // Convert entire model to quantized
     auto q_model = convert_to_quantized(model, get_qconfig());
@@ -304,12 +300,13 @@ TEST_F(QuantizationConversionTest, ConvertSequentialModel) {
 // Test 5: Prepare Model for QAT
 // ===========================================================================
 
-TEST_F(QuantizationConversionTest, PrepareQAT) {
+TEST_P(QuantizationConversionTest, PrepareQAT) {
     // Create model for QAT
     auto model = std::make_shared<Sequential>(
         std::make_shared<Linear>(128, 64),
         std::make_shared<Linear>(64, 10)
     );
+    model->to(device_);
 
     // Prepare for quantization-aware training
     auto qat_model = prepare_qat(model);
@@ -326,9 +323,10 @@ TEST_F(QuantizationConversionTest, PrepareQAT) {
 // Test 6: QAT Training and Conversion
 // ===========================================================================
 
-TEST_F(QuantizationConversionTest, QATWorkflow) {
+TEST_P(QuantizationConversionTest, QATWorkflow) {
     // Create model
     auto model = std::make_shared<Linear>(64, 32, true);
+    model->to(device_);
 
     // Step 1: Prepare for QAT
     auto qat_model = prepare_qat(model, get_qconfig());
@@ -354,8 +352,9 @@ TEST_F(QuantizationConversionTest, QATWorkflow) {
 // Test 7: Different Quantization Configurations
 // ===========================================================================
 
-TEST_F(QuantizationConversionTest, DifferentQuantConfigs) {
+TEST_P(QuantizationConversionTest, DifferentQuantConfigs) {
     auto linear = std::make_shared<Linear>(128, 64);
+    linear->to(device_);
 
     // Test INT8 symmetric quantization
     auto q_linear_int8 = convert_to_quantized(linear, DefaultQConfigs::default_qconfig());
@@ -397,9 +396,10 @@ private:
     std::shared_ptr<Conv2d> conv2_;
 };
 
-TEST_F(QuantizationConversionTest, ComplexModelQuantization) {
+TEST_P(QuantizationConversionTest, ComplexModelQuantization) {
     // Create ResNet-like block
     auto block = std::make_shared<SimpleResNetBlock>(64);
+    block->to(device_);
 
     // Quantize the complex model
     auto q_block = convert_to_quantized(block, get_qconfig());
@@ -416,9 +416,10 @@ TEST_F(QuantizationConversionTest, ComplexModelQuantization) {
 // Test 9: Quantization Error Measurement
 // ===========================================================================
 
-TEST_F(QuantizationConversionTest, QuantizationError) {
+TEST_P(QuantizationConversionTest, QuantizationError) {
     // Create layer and test input
     auto linear = std::make_shared<Linear>(128, 64);
+    linear->to(device_);
 
     Tensor input({8, 128}, DType::Float32, device_);
     input.fill_(1.0f);
@@ -444,7 +445,8 @@ TEST_F(QuantizationConversionTest, QuantizationError) {
     auto diff = tenzor::sub(fp32_output.tensor(),
                             q_output.tensor().to(fp32_output.tensor().device()));
     auto abs_diff = tenzor::abs(diff);
-    float mae = tenzor::mean(abs_diff).item<float>();
+    Tensor mae_t = tenzor::mean(abs_diff).cpu();
+    float mae = mae_t.item<float>();
     ASSERT_LT(mae, 2.0f) << "quantization MAE too large: " << mae;
 }
 
@@ -452,13 +454,14 @@ TEST_F(QuantizationConversionTest, QuantizationError) {
 // Test 10: Dynamic Quantization Workflow
 // ===========================================================================
 
-TEST_F(QuantizationConversionTest, DynamicQuantization) {
+TEST_P(QuantizationConversionTest, DynamicQuantization) {
     // Create model
     auto model = std::make_shared<Sequential>(
         std::make_shared<Linear>(784, 512),
         std::make_shared<Linear>(512, 256),
         std::make_shared<Linear>(256, 10)
     );
+    model->to(device_);
 
     // Apply dynamic quantization (weights only)
     auto q_model = quantize_dynamic(model);
@@ -472,9 +475,10 @@ TEST_F(QuantizationConversionTest, DynamicQuantization) {
 // Test 11: Static Quantization with Calibration
 // ===========================================================================
 
-TEST_F(QuantizationConversionTest, StaticQuantization) {
+TEST_P(QuantizationConversionTest, StaticQuantization) {
     // Create model
     auto model = std::make_shared<Linear>(128, 64);
+    model->to(device_);
 
     // Define calibration function
     auto calibrate_fn = [&](Module& m) {
@@ -498,7 +502,7 @@ TEST_F(QuantizationConversionTest, StaticQuantization) {
 // Test 12: Null Input Handling
 // ===========================================================================
 
-TEST_F(QuantizationConversionTest, NullInputHandling) {
+TEST_P(QuantizationConversionTest, NullInputHandling) {
     // Test convert_to_quantized with null
     ASSERT_THROW(convert_to_quantized(nullptr, get_qconfig()), std::runtime_error);
 
@@ -515,9 +519,10 @@ TEST_F(QuantizationConversionTest, NullInputHandling) {
 // Test 13: Quantization Parameter Preservation
 // ===========================================================================
 
-TEST_F(QuantizationConversionTest, QuantizationParameterPreservation) {
+TEST_P(QuantizationConversionTest, QuantizationParameterPreservation) {
     // Create and quantize a layer
     auto linear = std::make_shared<Linear>(64, 32);
+    linear->to(device_);
     auto q_linear = convert_to_quantized(linear, get_qconfig());
 
     // In full implementation, verify:
@@ -533,9 +538,10 @@ TEST_F(QuantizationConversionTest, QuantizationParameterPreservation) {
 // Test 14: Batch Processing After Quantization
 // ===========================================================================
 
-TEST_F(QuantizationConversionTest, BatchProcessingAfterQuantization) {
+TEST_P(QuantizationConversionTest, BatchProcessingAfterQuantization) {
     // Create and quantize layer
     auto linear = std::make_shared<Linear>(128, 64);
+    linear->to(device_);
     auto q_linear = convert_to_quantized(linear, get_qconfig());
 
     // Test with different batch sizes — the quantized forward must handle
@@ -556,8 +562,9 @@ TEST_F(QuantizationConversionTest, BatchProcessingAfterQuantization) {
 // Test 15: High-Accuracy Quantization Config
 // ===========================================================================
 
-TEST_F(QuantizationConversionTest, HighAccuracyQuantization) {
+TEST_P(QuantizationConversionTest, HighAccuracyQuantization) {
     auto linear = std::make_shared<Linear>(256, 128);
+    linear->to(device_);
 
     // Use high-accuracy config (histogram-based observers)
     auto ha_config = DefaultQConfigs::high_accuracy_qconfig();
@@ -572,10 +579,9 @@ TEST_F(QuantizationConversionTest, HighAccuracyQuantization) {
 }
 
 // ===========================================================================
-// Main
+// Backend instantiation
 // ===========================================================================
 
-int main(int argc, char** argv) {
-    ::testing::InitGoogleTest(&argc, argv);
-    return RUN_ALL_TESTS();
-}
+namespace {
+INSTANTIATE_BACKEND_TESTS(QuantizationConversionTest);
+}  // namespace

@@ -4,6 +4,7 @@
  */
 
 #include <gtest/gtest.h>
+#include "backend_test_fixture.hpp"
 #include "tenzor/tenzor.hpp"
 #include "tenzor/nn/layers/linear.hpp"
 #include "tenzor/nn/module.hpp"
@@ -20,21 +21,20 @@ using namespace tenzor;
 using namespace tenzor::nn;
 using namespace tenzor::optim;
 
-class MinimalTraining : public ::testing::Test {
+class MinimalTraining : public ::tenzor::testing::BackendTest {
 protected:
-    static void SetUpTestSuite() {
-        tenzor::initialize();
-    }
-
     void SetUp() override {
+        ::tenzor::testing::BackendTest::SetUp();
+        if (::testing::Test::IsSkipped()) return;
         // Fixed seed to keep std::rand()-driven test inputs reproducible.
         std::srand(42);
     }
 };
 
-TEST_F(MinimalTraining, SimpleLinearRegression) {
+TEST_P(MinimalTraining, SimpleLinearRegression) {
     // Create very simple model: just one linear layer
     Linear model(2, 1, true);  // 2 inputs -> 1 output
+    model.to(device);
 
     auto params = model.parameters();
     std::cout << "Number of parameters: " << params.size() << "\n";
@@ -42,26 +42,32 @@ TEST_F(MinimalTraining, SimpleLinearRegression) {
     // Print initial weights
     auto& weight = *params[0];
     auto& bias = *params[1];
-    std::cout << "Initial weight[0,0]: " << weight.tensor().data<float>()[0] << "\n";
-    std::cout << "Initial bias[0]: " << bias.tensor().data<float>()[0] << "\n";
+    {
+        auto weight_cpu = weight.tensor().cpu();
+        auto bias_cpu = bias.tensor().cpu();
+        std::cout << "Initial weight[0,0]: " << weight_cpu.data<float>()[0] << "\n";
+        std::cout << "Initial bias[0]: " << bias_cpu.data<float>()[0] << "\n";
+    }
 
     // Create optimizer with small learning rate
     Adam optimizer(params, 0.01);
 
     // Simple training data: y = 2*x1 + 3*x2 + 1
-    auto x = Tensor({4, 2}, DType::Float32, Device::cpu());
-    auto* x_data = x.data<float>();
+    auto x_host = Tensor({4, 2}, DType::Float32, Device::cpu());
+    auto* x_data = x_host.data<float>();
     x_data[0] = 1.0f; x_data[1] = 2.0f;  // [1, 2]
     x_data[2] = 3.0f; x_data[3] = 4.0f;  // [3, 4]
     x_data[4] = 5.0f; x_data[5] = 6.0f;  // [5, 6]
     x_data[6] = 7.0f; x_data[7] = 8.0f;  // [7, 8]
+    auto x = x_host.to(device);
 
-    auto y = Tensor({4, 1}, DType::Float32, Device::cpu());
-    auto* y_data = y.data<float>();
+    auto y_host = Tensor({4, 1}, DType::Float32, Device::cpu());
+    auto* y_data = y_host.data<float>();
     y_data[0] = 2*1.0f + 3*2.0f + 1.0f;  // 9
     y_data[1] = 2*3.0f + 3*4.0f + 1.0f;  // 19
     y_data[2] = 2*5.0f + 3*6.0f + 1.0f;  // 29
     y_data[3] = 2*7.0f + 3*8.0f + 1.0f;  // 39
+    auto y = y_host.to(device);
 
     std::cout << "Target y[0]: " << y_data[0] << "\n";
 
@@ -79,7 +85,8 @@ TEST_F(MinimalTraining, SimpleLinearRegression) {
 
         // Sum and mean
         float loss_value = 0.0f;
-        auto* sq_data = squared.data<float>();
+        auto squared_cpu = squared.cpu();
+        auto* sq_data = squared_cpu.data<float>();
         for (int i = 0; i < 4; ++i) {
             loss_value += sq_data[i];
         }
@@ -92,13 +99,16 @@ TEST_F(MinimalTraining, SimpleLinearRegression) {
             std::cout << " <- NaN detected!\n";
 
             // Print outputs
-            auto* out_data = output.tensor().data<float>();
+            auto output_cpu = output.tensor().cpu();
+            auto* out_data = output_cpu.data<float>();
             std::cout << "  Outputs: [" << out_data[0] << ", " << out_data[1]
                       << ", " << out_data[2] << ", " << out_data[3] << "]\n";
 
             // Print weights
-            std::cout << "  Weight[0,0]: " << weight.tensor().data<float>()[0] << "\n";
-            std::cout << "  Bias[0]: " << bias.tensor().data<float>()[0] << "\n";
+            auto weight_cpu = weight.tensor().cpu();
+            auto bias_cpu = bias.tensor().cpu();
+            std::cout << "  Weight[0,0]: " << weight_cpu.data<float>()[0] << "\n";
+            std::cout << "  Bias[0]: " << bias_cpu.data<float>()[0] << "\n";
 
             FAIL() << "NaN detected at step " << step;
         }
@@ -107,7 +117,7 @@ TEST_F(MinimalTraining, SimpleLinearRegression) {
         // Backward pass (create scalar variable for loss)
         auto loss_tensor = Tensor({1}, DType::Float32, Device::cpu());
         loss_tensor.data<float>()[0] = loss_value;
-        auto loss_var = Variable(loss_tensor, true);
+        auto loss_var = Variable(loss_tensor.to(device), true);
 
         // We need to compute gradients through the computation graph
         // For now, let's use MSE from nn
@@ -119,7 +129,8 @@ TEST_F(MinimalTraining, SimpleLinearRegression) {
         // Check gradients
         if (weight.has_grad()) {
             auto& grad = weight.grad().value();
-            float grad_val = grad.data<float>()[0];
+            auto grad_cpu = grad.cpu();
+            float grad_val = grad_cpu.data<float>()[0];
             if (std::isnan(grad_val)) {
                 std::cout << "  Gradient is NaN!\n";
                 FAIL() << "Gradient NaN at step " << step;
@@ -131,15 +142,19 @@ TEST_F(MinimalTraining, SimpleLinearRegression) {
         optimizer.step();
 
         // Print updated weight
-        std::cout << "  Updated weight[0,0]: " << weight.tensor().data<float>()[0] << "\n";
+        {
+            auto weight_cpu = weight.tensor().cpu();
+            std::cout << "  Updated weight[0,0]: " << weight_cpu.data<float>()[0] << "\n";
+        }
     }
 
     std::cout << "Training completed successfully!\n";
 }
 
-TEST_F(MinimalTraining, StandardAdamOnly) {
+TEST_P(MinimalTraining, StandardAdamOnly) {
     // Test standard Adam without ZeRO to isolate the issue
     Linear model(10, 5, true);
+    model.to(device);
     auto params = model.parameters();
 
     Adam optimizer(params, 0.001);
@@ -148,8 +163,8 @@ TEST_F(MinimalTraining, StandardAdamOnly) {
         optimizer.zero_grad();
 
         // Random input
-        auto x = randn({8, 10}, DType::Float32, Device::cpu());
-        auto y = randn({8, 5}, DType::Float32, Device::cpu());
+        auto x = randn({8, 10}, DType::Float32, device);
+        auto y = randn({8, 5}, DType::Float32, device);
 
         auto x_var = Variable(x, false);
         auto y_var = Variable(y, false);
@@ -157,7 +172,8 @@ TEST_F(MinimalTraining, StandardAdamOnly) {
         auto output = model.forward(x_var);
         auto loss = mse_loss(output, y_var);
 
-        float loss_val = loss.tensor().template data<float>()[0];
+        auto loss_cpu = loss.tensor().cpu();
+        float loss_val = loss_cpu.template data<float>()[0];
 
         if (step % 5 == 0) {
             std::cout << "Step " << step << ": loss = " << loss_val << "\n";
@@ -174,7 +190,7 @@ TEST_F(MinimalTraining, StandardAdamOnly) {
     std::cout << "Standard Adam test passed!\n";
 }
 
-TEST_F(MinimalTraining, IntegrationTestSetup) {
+TEST_P(MinimalTraining, IntegrationTestSetup) {
     // Replicate the exact setup from integration tests
     // Model: 784 -> 256 -> 128 -> 10 (MLP)
     auto seq = Sequential();
@@ -183,6 +199,7 @@ TEST_F(MinimalTraining, IntegrationTestSetup) {
        .add_module(std::make_shared<Linear>(256, 128))
        .add_module(std::make_shared<ReLU>())
        .add_module(std::make_shared<Linear>(128, 10));
+    seq.to(device);
 
     auto params = seq.parameters();
     std::cout << "Model has " << params.size() << " parameters\n";
@@ -193,20 +210,22 @@ TEST_F(MinimalTraining, IntegrationTestSetup) {
         optimizer.zero_grad();
 
         // Random input like integration tests
-        auto inputs = randn({32, 784}, DType::Float32, Device::cpu());
+        auto inputs = randn({32, 784}, DType::Float32, device);
 
         // Random integer targets manually
-        auto targets = empty({32}, DType::Int64, Device::cpu());
-        auto* target_data = targets.template data<int64_t>();
+        auto targets_host = empty({32}, DType::Int64, Device::cpu());
+        auto* target_data = targets_host.template data<int64_t>();
         for (int i = 0; i < 32; ++i) {
             target_data[i] = std::rand() % 10;
         }
+        auto targets = targets_host.to(device);
 
         // Forward pass
         auto outputs = seq.forward(Variable(inputs, false));
 
         // Check outputs for NaN before loss
-        auto* out_data = outputs.tensor().template data<float>();
+        auto outputs_cpu = outputs.tensor().cpu();
+        auto* out_data = outputs_cpu.template data<float>();
         bool outputs_have_nan = false;
         for (int i = 0; i < 32 * 10; ++i) {
             if (std::isnan(out_data[i])) {
@@ -225,7 +244,8 @@ TEST_F(MinimalTraining, IntegrationTestSetup) {
             std::cout << "]\n";
 
             // Check parameter values
-            std::cout << "  First parameter value: " << params[0]->tensor().template data<float>()[0] << "\n";
+            auto param0_cpu = params[0]->tensor().cpu();
+            std::cout << "  First parameter value: " << param0_cpu.template data<float>()[0] << "\n";
 
             FAIL() << "NaN in outputs at step " << step;
         }
@@ -233,7 +253,8 @@ TEST_F(MinimalTraining, IntegrationTestSetup) {
         // Cross entropy loss
         auto loss = cross_entropy(outputs, targets);
 
-        float loss_val = loss.tensor().template data<float>()[0];
+        auto loss_cpu = loss.tensor().cpu();
+        float loss_val = loss_cpu.template data<float>()[0];
 
         std::cout << "Step " << step << ": loss = " << loss_val << "\n";
 
@@ -248,8 +269,9 @@ TEST_F(MinimalTraining, IntegrationTestSetup) {
         for (auto& param : params) {
             if (param->has_grad()) {
                 auto& grad = param->grad().value();
-                auto* grad_data = grad.template data<float>();
-                int64_t numel = grad.numel();
+                auto grad_cpu = grad.cpu();
+                auto* grad_data = grad_cpu.template data<float>();
+                int64_t numel = grad_cpu.numel();
                 for (int64_t i = 0; i < numel; ++i) {
                     float abs_val = std::abs(grad_data[i]);
                     if (abs_val > max_grad) {
@@ -274,8 +296,9 @@ TEST_F(MinimalTraining, IntegrationTestSetup) {
         // Check parameters after step for inf/nan
         bool params_have_nan = false;
         for (auto& param : params) {
-            auto* p_data = param->tensor().template data<float>();
-            int64_t numel = param->tensor().numel();
+            auto p_cpu = param->tensor().cpu();
+            auto* p_data = p_cpu.template data<float>();
+            int64_t numel = p_cpu.numel();
             for (int64_t i = 0; i < numel; ++i) {
                 if (std::isnan(p_data[i]) || std::isinf(p_data[i])) {
                     params_have_nan = true;
@@ -294,3 +317,5 @@ TEST_F(MinimalTraining, IntegrationTestSetup) {
 
     std::cout << "Integration test setup passed!\n";
 }
+
+INSTANTIATE_BACKEND_TESTS(MinimalTraining);

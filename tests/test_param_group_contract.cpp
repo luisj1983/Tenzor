@@ -8,6 +8,7 @@
 #include <gtest/gtest.h>
 #include <cmath>
 
+#include "backend_test_fixture.hpp"
 #include "tenzor/autograd/variable.hpp"
 #include "tenzor/nn/optim/sgd.hpp"
 #include "tenzor/nn/optim/adam.hpp"
@@ -28,19 +29,22 @@ using namespace tenzor;
 
 namespace {
 
-class ParamGroupContractTest : public ::testing::Test {
+class ParamGroupContractTest : public ::tenzor::testing::BackendTest {
 protected:
-    void SetUp() override { tenzor::initialize(); }
+    void SetUp() override {
+        ::tenzor::testing::BackendTest::SetUp();
+        if (::testing::Test::IsSkipped()) return;
+    }
 };
 
-TEST_F(ParamGroupContractTest, SGDPerGroupLearningRate) {
+TEST_P(ParamGroupContractTest, SGDPerGroupLearningRate) {
     // Two parameters, each in its own group with a different lr.
-    auto p1_tensor = tenzor::zeros({1}, DType::Float32, Device::cpu());
-    auto p2_tensor = tenzor::zeros({1}, DType::Float32, Device::cpu());
+    auto p1_tensor = tenzor::zeros({1}, DType::Float32, device);
+    auto p2_tensor = tenzor::zeros({1}, DType::Float32, device);
     auto p1 = std::make_shared<Variable>(p1_tensor, /*requires_grad=*/true);
     auto p2 = std::make_shared<Variable>(p2_tensor, /*requires_grad=*/true);
-    p1->set_grad(tenzor::ones({1}, DType::Float32, Device::cpu()));
-    p2->set_grad(tenzor::ones({1}, DType::Float32, Device::cpu()));
+    p1->set_grad(tenzor::ones({1}, DType::Float32, device));
+    p2->set_grad(tenzor::ones({1}, DType::Float32, device));
 
     // Group 1: lr=0.1, Group 2: lr=0.5
     optim::ParamGroup g1{{p1}, /*lr=*/0.1, /*weight_decay=*/0.0};
@@ -50,16 +54,18 @@ TEST_F(ParamGroupContractTest, SGDPerGroupLearningRate) {
     sgd.step();
 
     // Each parameter should move by -lr * grad = -lr * 1.
-    EXPECT_NEAR(p1->tensor().data<float>()[0], -0.1f, 1e-6);
-    EXPECT_NEAR(p2->tensor().data<float>()[0], -0.5f, 1e-6);
+    auto p1_cpu = p1->tensor().cpu();
+    auto p2_cpu = p2->tensor().cpu();
+    EXPECT_NEAR(p1_cpu.data<float>()[0], -0.1f, 1e-6);
+    EXPECT_NEAR(p2_cpu.data<float>()[0], -0.5f, 1e-6);
 }
 
-TEST_F(ParamGroupContractTest, SGDPerGroupWeightDecay) {
-    auto p1_tensor = tenzor::ones({1}, DType::Float32, Device::cpu());
-    auto p2_tensor = tenzor::ones({1}, DType::Float32, Device::cpu());
+TEST_P(ParamGroupContractTest, SGDPerGroupWeightDecay) {
+    auto p1_tensor = tenzor::ones({1}, DType::Float32, device);
+    auto p2_tensor = tenzor::ones({1}, DType::Float32, device);
     auto p1 = std::make_shared<Variable>(p1_tensor, /*requires_grad=*/true);
     auto p2 = std::make_shared<Variable>(p2_tensor, /*requires_grad=*/true);
-    auto zero_grad = tenzor::zeros({1}, DType::Float32, Device::cpu());
+    auto zero_grad = tenzor::zeros({1}, DType::Float32, device);
     p1->set_grad(zero_grad);
     p2->set_grad(zero_grad);
 
@@ -71,18 +77,20 @@ TEST_F(ParamGroupContractTest, SGDPerGroupWeightDecay) {
 
     sgd.step();
 
-    EXPECT_FLOAT_EQ(p1->tensor().data<float>()[0], 1.0f);
+    auto p1_cpu = p1->tensor().cpu();
+    auto p2_cpu = p2->tensor().cpu();
+    EXPECT_FLOAT_EQ(p1_cpu.data<float>()[0], 1.0f);
     // p2 -= lr * (grad + wd * p) = 0.1 * (0 + 0.1 * 1) = 0.01
-    EXPECT_NEAR(p2->tensor().data<float>()[0], 1.0f - 0.01f, 1e-6);
+    EXPECT_NEAR(p2_cpu.data<float>()[0], 1.0f - 0.01f, 1e-6);
 }
 
-TEST_F(ParamGroupContractTest, SGDPerGroupMomentumDifferentTrajectories) {
+TEST_P(ParamGroupContractTest, SGDPerGroupMomentumDifferentTrajectories) {
     // Two params with the same gradient but different momentum.
-    auto p1_tensor = tenzor::zeros({1}, DType::Float32, Device::cpu());
-    auto p2_tensor = tenzor::zeros({1}, DType::Float32, Device::cpu());
+    auto p1_tensor = tenzor::zeros({1}, DType::Float32, device);
+    auto p2_tensor = tenzor::zeros({1}, DType::Float32, device);
     auto p1 = std::make_shared<Variable>(p1_tensor, /*requires_grad=*/true);
     auto p2 = std::make_shared<Variable>(p2_tensor, /*requires_grad=*/true);
-    auto grad = tenzor::ones({1}, DType::Float32, Device::cpu());
+    auto grad = tenzor::ones({1}, DType::Float32, device);
     p1->set_grad(grad);
     p2->set_grad(grad);
 
@@ -98,8 +106,10 @@ TEST_F(ParamGroupContractTest, SGDPerGroupMomentumDifferentTrajectories) {
     p2->set_grad(grad);
     sgd.step();
 
-    auto v1 = p1->tensor().data<float>()[0];
-    auto v2 = p2->tensor().data<float>()[0];
+    auto p1_cpu = p1->tensor().cpu();
+    auto p2_cpu = p2->tensor().cpu();
+    auto v1 = p1_cpu.data<float>()[0];
+    auto v2 = p2_cpu.data<float>()[0];
     // Without momentum: -0.1 * 2 = -0.2
     EXPECT_NEAR(v1, -0.2f, 1e-5);
     // With momentum=0.9, dampening=0:
@@ -108,36 +118,39 @@ TEST_F(ParamGroupContractTest, SGDPerGroupMomentumDifferentTrajectories) {
     EXPECT_NEAR(v2, -0.29f, 1e-5);
 }
 
-TEST_F(ParamGroupContractTest, SGDFlatParamListUnchanged) {
+TEST_P(ParamGroupContractTest, SGDFlatParamListUnchanged) {
     // When constructed from a flat parameter list (no groups),
     // `find_group_for_param` returns nullptr and SGD uses its own
     // members exactly as before D.4.
-    auto p_tensor = tenzor::zeros({1}, DType::Float32, Device::cpu());
+    auto p_tensor = tenzor::zeros({1}, DType::Float32, device);
     auto p = std::make_shared<Variable>(p_tensor, /*requires_grad=*/true);
-    p->set_grad(tenzor::ones({1}, DType::Float32, Device::cpu()));
+    p->set_grad(tenzor::ones({1}, DType::Float32, device));
 
     optim::SGD sgd({p}, /*lr=*/0.1);
     sgd.step();
-    EXPECT_NEAR(p->tensor().data<float>()[0], -0.1f, 1e-6);
+    auto p_cpu = p->tensor().cpu();
+    EXPECT_NEAR(p_cpu.data<float>()[0], -0.1f, 1e-6);
 }
 
 // ----- Adam D.4 coverage --------------------------------------------------
 
-TEST_F(ParamGroupContractTest, AdamPerGroupLearningRate) {
-    auto p1_tensor = tenzor::zeros({1}, DType::Float32, Device::cpu());
-    auto p2_tensor = tenzor::zeros({1}, DType::Float32, Device::cpu());
+TEST_P(ParamGroupContractTest, AdamPerGroupLearningRate) {
+    auto p1_tensor = tenzor::zeros({1}, DType::Float32, device);
+    auto p2_tensor = tenzor::zeros({1}, DType::Float32, device);
     auto p1 = std::make_shared<Variable>(p1_tensor, /*requires_grad=*/true);
     auto p2 = std::make_shared<Variable>(p2_tensor, /*requires_grad=*/true);
-    p1->set_grad(tenzor::ones({1}, DType::Float32, Device::cpu()));
-    p2->set_grad(tenzor::ones({1}, DType::Float32, Device::cpu()));
+    p1->set_grad(tenzor::ones({1}, DType::Float32, device));
+    p2->set_grad(tenzor::ones({1}, DType::Float32, device));
 
     optim::ParamGroup g1{{p1}, /*lr=*/0.01, 0.0};
     optim::ParamGroup g2{{p2}, /*lr=*/0.10, 0.0};
     optim::Adam adam({g1, g2});
 
     adam.step();
-    auto v1 = p1->tensor().data<float>()[0];
-    auto v2 = p2->tensor().data<float>()[0];
+    auto p1_cpu = p1->tensor().cpu();
+    auto p2_cpu = p2->tensor().cpu();
+    auto v1 = p1_cpu.data<float>()[0];
+    auto v2 = p2_cpu.data<float>()[0];
 
     // At step 1 with default betas, Adam's first-step update on a unit
     // gradient and zero moments simplifies to -lr (the bias-correction
@@ -148,14 +161,14 @@ TEST_F(ParamGroupContractTest, AdamPerGroupLearningRate) {
     EXPECT_NEAR(v2 / v1, 10.0f, 1e-3) << "per-group lr ratio incorrect";
 }
 
-TEST_F(ParamGroupContractTest, AdamPerGroupBetas) {
+TEST_P(ParamGroupContractTest, AdamPerGroupBetas) {
     // Two params with different beta1.  Under *alternating-sign*
     // gradients the smoothing of the first moment estimate diverges
     // between low- and high-beta1: a high-beta1 (heavy smoothing)
     // group dampens oscillations, so |v_high| < |v_low| after a few
     // alternating steps.
-    auto p1_tensor = tenzor::zeros({1}, DType::Float32, Device::cpu());
-    auto p2_tensor = tenzor::zeros({1}, DType::Float32, Device::cpu());
+    auto p1_tensor = tenzor::zeros({1}, DType::Float32, device);
+    auto p2_tensor = tenzor::zeros({1}, DType::Float32, device);
     auto p1 = std::make_shared<Variable>(p1_tensor, /*requires_grad=*/true);
     auto p2 = std::make_shared<Variable>(p2_tensor, /*requires_grad=*/true);
 
@@ -166,8 +179,8 @@ TEST_F(ParamGroupContractTest, AdamPerGroupBetas) {
     optim::Adam adam({g1, g2});
 
     // Alternating-sign gradients over 6 steps.
-    auto pos = tenzor::ones({1}, DType::Float32, Device::cpu());
-    auto neg = pos * full({1}, -1.0, DType::Float32, Device::cpu());
+    auto pos = tenzor::ones({1}, DType::Float32, device);
+    auto neg = pos * full({1}, -1.0, DType::Float32, device);
     auto neg_t = neg;  // pre-build to reuse
     for (int s = 0; s < 6; ++s) {
         auto g = (s % 2 == 0) ? pos : neg_t;
@@ -175,8 +188,10 @@ TEST_F(ParamGroupContractTest, AdamPerGroupBetas) {
         p2->set_grad(g);
         adam.step();
     }
-    auto v1 = p1->tensor().data<float>()[0];
-    auto v2 = p2->tensor().data<float>()[0];
+    auto p1_cpu = p1->tensor().cpu();
+    auto p2_cpu = p2->tensor().cpu();
+    auto v1 = p1_cpu.data<float>()[0];
+    auto v2 = p2_cpu.data<float>()[0];
     // The two values must be measurably different — that's the point
     // of the test (per-group beta1 actually flows through).  A trivial
     // bug where both groups used the optimizer-member beta1 would
@@ -189,15 +204,15 @@ TEST_F(ParamGroupContractTest, AdamPerGroupBetas) {
            "the late-history grad sign)";
 }
 
-TEST_F(ParamGroupContractTest, AdagradPerGroupLearningRate) {
+TEST_P(ParamGroupContractTest, AdagradPerGroupLearningRate) {
     // Two params share the same gradient but live in groups with
     // distinct learning rates.  Under Adagrad the parameter trajectory
     // depends linearly on lr, so the ratio of parameter movements
     // after one step equals the ratio of lrs.  A bug where step_impl
     // reads lr_ instead of the active group's lr would produce
     // identical trajectories.
-    auto p1_tensor = tenzor::zeros({1}, DType::Float32, Device::cpu());
-    auto p2_tensor = tenzor::zeros({1}, DType::Float32, Device::cpu());
+    auto p1_tensor = tenzor::zeros({1}, DType::Float32, device);
+    auto p2_tensor = tenzor::zeros({1}, DType::Float32, device);
     auto p1 = std::make_shared<Variable>(p1_tensor, /*requires_grad=*/true);
     auto p2 = std::make_shared<Variable>(p2_tensor, /*requires_grad=*/true);
 
@@ -205,13 +220,15 @@ TEST_F(ParamGroupContractTest, AdagradPerGroupLearningRate) {
     optim::ParamGroup g2{{p2}, /*lr=*/0.10, /*wd=*/0.0};
     optim::Adagrad ag({g1, g2});
 
-    auto grad = tenzor::ones({1}, DType::Float32, Device::cpu());
+    auto grad = tenzor::ones({1}, DType::Float32, device);
     p1->set_grad(grad);
     p2->set_grad(grad);
     ag.step();
 
-    auto v1 = p1->tensor().data<float>()[0];
-    auto v2 = p2->tensor().data<float>()[0];
+    auto p1_cpu = p1->tensor().cpu();
+    auto p2_cpu = p2->tensor().cpu();
+    auto v1 = p1_cpu.data<float>()[0];
+    auto v2 = p2_cpu.data<float>()[0];
     // After one Adagrad step with g=1 and initial sum=0:
     //   sum = 1, std_dev = sqrt(1) + eps ≈ 1
     //   delta ≈ -lr * 1 / 1 = -lr
@@ -219,15 +236,15 @@ TEST_F(ParamGroupContractTest, AdagradPerGroupLearningRate) {
     EXPECT_NEAR(v2, -0.10f, 1e-5f);
 }
 
-TEST_F(ParamGroupContractTest, AdagradPerGroupWeightDecay) {
+TEST_P(ParamGroupContractTest, AdagradPerGroupWeightDecay) {
     // Adagrad with constant-sign gradients has the well-known
     // delta = -lr * sign(g) / sqrt(t) property that hides the
     // magnitude of grad after the sqrt-normalisation.  Drive both
     // groups with *zero* gradient — then only weight_decay moves the
     // param.  g1.weight_decay=0 must keep p1 fixed; g2.weight_decay
     // must shrink p2.
-    auto t1 = full({1}, 1.0f, DType::Float32, Device::cpu());
-    auto t2 = full({1}, 1.0f, DType::Float32, Device::cpu());
+    auto t1 = full({1}, 1.0f, DType::Float32, device);
+    auto t2 = full({1}, 1.0f, DType::Float32, device);
     auto p1 = std::make_shared<Variable>(t1, /*requires_grad=*/true);
     auto p2 = std::make_shared<Variable>(t2, /*requires_grad=*/true);
 
@@ -235,13 +252,15 @@ TEST_F(ParamGroupContractTest, AdagradPerGroupWeightDecay) {
     optim::ParamGroup g2{{p2}, /*lr=*/0.01, /*wd=*/0.5};
     optim::Adagrad ag({g1, g2});
 
-    auto zero_grad = tenzor::zeros({1}, DType::Float32, Device::cpu());
+    auto zero_grad = tenzor::zeros({1}, DType::Float32, device);
     p1->set_grad(zero_grad);
     p2->set_grad(zero_grad);
     ag.step();
 
-    auto v1 = p1->tensor().data<float>()[0];
-    auto v2 = p2->tensor().data<float>()[0];
+    auto p1_cpu = p1->tensor().cpu();
+    auto p2_cpu = p2->tensor().cpu();
+    auto v1 = p1_cpu.data<float>()[0];
+    auto v2 = p2_cpu.data<float>()[0];
 
     // p1: grad'=0, sum stays 0, std=eps≈1e-10, delta=0 → v1=1.0
     EXPECT_FLOAT_EQ(v1, 1.0f);
@@ -253,7 +272,7 @@ TEST_F(ParamGroupContractTest, AdagradPerGroupWeightDecay) {
 
 // ----- Adadelta D.4 coverage ----------------------------------------------
 
-TEST_F(ParamGroupContractTest, AdadeltaPerGroupLearningRate) {
+TEST_P(ParamGroupContractTest, AdadeltaPerGroupLearningRate) {
     // Two params with distinct group lr.  Adadelta's update is
     //   delta = -(sqrt(E[Δθ²] + eps) / sqrt(E[g²] + eps)) * g
     //   p   += lr * delta
@@ -261,8 +280,8 @@ TEST_F(ParamGroupContractTest, AdadeltaPerGroupLearningRate) {
     // E[g²] picks up (1-rho)*g² so std_grad = sqrt((1-rho)*g² + eps).
     // The ratio depends only on rho and eps, not lr — so the ratio of
     // |p1|/|p2| after one step equals the lr ratio.
-    auto p1_tensor = tenzor::zeros({1}, DType::Float32, Device::cpu());
-    auto p2_tensor = tenzor::zeros({1}, DType::Float32, Device::cpu());
+    auto p1_tensor = tenzor::zeros({1}, DType::Float32, device);
+    auto p2_tensor = tenzor::zeros({1}, DType::Float32, device);
     auto p1 = std::make_shared<Variable>(p1_tensor, /*requires_grad=*/true);
     auto p2 = std::make_shared<Variable>(p2_tensor, /*requires_grad=*/true);
 
@@ -270,27 +289,29 @@ TEST_F(ParamGroupContractTest, AdadeltaPerGroupLearningRate) {
     optim::ParamGroup g2{{p2}, /*lr=*/2.0, /*wd=*/0.0};
     optim::Adadelta ad({g1, g2});
 
-    auto grad = tenzor::ones({1}, DType::Float32, Device::cpu());
+    auto grad = tenzor::ones({1}, DType::Float32, device);
     p1->set_grad(grad);
     p2->set_grad(grad);
     ad.step();
 
-    auto v1 = p1->tensor().data<float>()[0];
-    auto v2 = p2->tensor().data<float>()[0];
+    auto p1_cpu = p1->tensor().cpu();
+    auto p2_cpu = p2->tensor().cpu();
+    auto v1 = p1_cpu.data<float>()[0];
+    auto v2 = p2_cpu.data<float>()[0];
     EXPECT_LT(v1, 0.0f);
     EXPECT_LT(v2, 0.0f);
     EXPECT_NEAR(v2 / v1, 4.0f, 1e-3f)
         << "Adadelta per-group lr must scale the delta linearly";
 }
 
-TEST_F(ParamGroupContractTest, AdadeltaPerGroupRho) {
+TEST_P(ParamGroupContractTest, AdadeltaPerGroupRho) {
     // Distinct rho changes E[g^2] weighting on the first step:
     //   E[g²]_1 = (1 - rho) * g²
     // Smaller rho → larger E[g²]_1 → larger denominator → smaller
     // |delta|.  Verify p1 (rho=0.5) ends with strictly smaller |delta|
     // than p2 (rho=0.95).
-    auto p1_tensor = tenzor::zeros({1}, DType::Float32, Device::cpu());
-    auto p2_tensor = tenzor::zeros({1}, DType::Float32, Device::cpu());
+    auto p1_tensor = tenzor::zeros({1}, DType::Float32, device);
+    auto p2_tensor = tenzor::zeros({1}, DType::Float32, device);
     auto p1 = std::make_shared<Variable>(p1_tensor, /*requires_grad=*/true);
     auto p2 = std::make_shared<Variable>(p2_tensor, /*requires_grad=*/true);
 
@@ -300,13 +321,15 @@ TEST_F(ParamGroupContractTest, AdadeltaPerGroupRho) {
     g2.rho = 0.95;
     optim::Adadelta ad({g1, g2});
 
-    auto grad = tenzor::ones({1}, DType::Float32, Device::cpu());
+    auto grad = tenzor::ones({1}, DType::Float32, device);
     p1->set_grad(grad);
     p2->set_grad(grad);
     ad.step();
 
-    auto v1 = p1->tensor().data<float>()[0];
-    auto v2 = p2->tensor().data<float>()[0];
+    auto p1_cpu = p1->tensor().cpu();
+    auto p2_cpu = p2->tensor().cpu();
+    auto v1 = p1_cpu.data<float>()[0];
+    auto v2 = p2_cpu.data<float>()[0];
     EXPECT_LT(v1, 0.0f);
     EXPECT_LT(v2, 0.0f);
     EXPECT_GT(std::abs(v2), std::abs(v1))
@@ -319,9 +342,9 @@ TEST_F(ParamGroupContractTest, AdadeltaPerGroupRho) {
 
 namespace {
 template <typename Opt>
-auto first_step_lr_ratio(double lr1, double lr2) -> float {
-    auto p1_t = tenzor::zeros({1}, DType::Float32, Device::cpu());
-    auto p2_t = tenzor::zeros({1}, DType::Float32, Device::cpu());
+auto first_step_lr_ratio(double lr1, double lr2, const tenzor::Device& device) -> float {
+    auto p1_t = tenzor::zeros({1}, DType::Float32, device);
+    auto p2_t = tenzor::zeros({1}, DType::Float32, device);
     auto p1 = std::make_shared<Variable>(p1_t, /*requires_grad=*/true);
     auto p2 = std::make_shared<Variable>(p2_t, /*requires_grad=*/true);
 
@@ -329,12 +352,14 @@ auto first_step_lr_ratio(double lr1, double lr2) -> float {
     optim::ParamGroup g2{{p2}, lr2, 0.0};
     Opt opt({g1, g2});
 
-    auto grad = tenzor::ones({1}, DType::Float32, Device::cpu());
+    auto grad = tenzor::ones({1}, DType::Float32, device);
     p1->set_grad(grad);
     p2->set_grad(grad);
     opt.step();
-    auto v1 = p1->tensor().data<float>()[0];
-    auto v2 = p2->tensor().data<float>()[0];
+    auto p1_cpu = p1->tensor().cpu();
+    auto p2_cpu = p2->tensor().cpu();
+    auto v1 = p1_cpu.data<float>()[0];
+    auto v2 = p2_cpu.data<float>()[0];
     return v2 / v1;
 }
 }  // namespace
@@ -348,59 +373,63 @@ auto first_step_lr_ratio(double lr1, double lr2) -> float {
 // so the ratio v2/v1 must equal lr2/lr1.  An optimiser that ignored
 // the per-group lr would produce v2/v1 = 1.
 
-TEST_F(ParamGroupContractTest, AdamaxPerGroupLearningRate) {
-    EXPECT_NEAR(first_step_lr_ratio<optim::Adamax>(0.01, 0.10), 10.0f, 1e-3f);
+TEST_P(ParamGroupContractTest, AdamaxPerGroupLearningRate) {
+    EXPECT_NEAR(first_step_lr_ratio<optim::Adamax>(0.01, 0.10, device), 10.0f, 1e-3f);
 }
-TEST_F(ParamGroupContractTest, NAdamPerGroupLearningRate) {
-    EXPECT_NEAR(first_step_lr_ratio<optim::NAdam>(0.01, 0.10), 10.0f, 1e-3f);
+TEST_P(ParamGroupContractTest, NAdamPerGroupLearningRate) {
+    EXPECT_NEAR(first_step_lr_ratio<optim::NAdam>(0.01, 0.10, device), 10.0f, 1e-3f);
 }
-TEST_F(ParamGroupContractTest, RAdamPerGroupLearningRate) {
+TEST_P(ParamGroupContractTest, RAdamPerGroupLearningRate) {
     // RAdam falls back to SGDM when the variance-rectification term is
     // undefined (the first few steps with default beta2).  Use lr=0.01
     // vs lr=0.10 and the SGDM update reduces to -lr * g on step 1.
-    EXPECT_NEAR(first_step_lr_ratio<optim::RAdam>(0.01, 0.10), 10.0f, 1e-3f);
+    EXPECT_NEAR(first_step_lr_ratio<optim::RAdam>(0.01, 0.10, device), 10.0f, 1e-3f);
 }
-TEST_F(ParamGroupContractTest, SparseAdamPerGroupLearningRate) {
+TEST_P(ParamGroupContractTest, SparseAdamPerGroupLearningRate) {
     // SparseAdam's dense fallback (no sparse grad) reduces to standard
     // Adam, so the ratio also applies.
-    EXPECT_NEAR(first_step_lr_ratio<optim::SparseAdam>(0.01, 0.10), 10.0f, 1e-3f);
+    EXPECT_NEAR(first_step_lr_ratio<optim::SparseAdam>(0.01, 0.10, device), 10.0f, 1e-3f);
 }
-TEST_F(ParamGroupContractTest, LAMBPerGroupLearningRate) {
+TEST_P(ParamGroupContractTest, LAMBPerGroupLearningRate) {
     // LAMB's trust-ratio multiplies the update, but the trust ratio for
     // params that start at zero is 0 — LAMB's update needs a non-zero
     // ||θ||.  Use a different setup: per-param starting at 1.0 + unit
     // gradient → trust ratio == 1, then ratio simplifies to lr.
-    auto p1_t = full({1}, 1.0f, DType::Float32, Device::cpu());
-    auto p2_t = full({1}, 1.0f, DType::Float32, Device::cpu());
+    auto p1_t = full({1}, 1.0f, DType::Float32, device);
+    auto p2_t = full({1}, 1.0f, DType::Float32, device);
     auto p1 = std::make_shared<Variable>(p1_t, /*requires_grad=*/true);
     auto p2 = std::make_shared<Variable>(p2_t, /*requires_grad=*/true);
     optim::ParamGroup g1{{p1}, 0.01, 0.0};
     optim::ParamGroup g2{{p2}, 0.10, 0.0};
     optim::LAMB opt({g1, g2});
-    auto grad = tenzor::ones({1}, DType::Float32, Device::cpu());
+    auto grad = tenzor::ones({1}, DType::Float32, device);
     p1->set_grad(grad);
     p2->set_grad(grad);
     opt.step();
-    auto d1 = 1.0f - p1->tensor().data<float>()[0];
-    auto d2 = 1.0f - p2->tensor().data<float>()[0];
+    auto p1_cpu = p1->tensor().cpu();
+    auto p2_cpu = p2->tensor().cpu();
+    auto d1 = 1.0f - p1_cpu.data<float>()[0];
+    auto d2 = 1.0f - p2_cpu.data<float>()[0];
     EXPECT_GT(d1, 0.0f);
     EXPECT_GT(d2, 0.0f);
     EXPECT_NEAR(d2 / d1, 10.0f, 5e-2f)
         << "LAMB per-group lr must scale the update by lr ratio";
 }
-TEST_F(ParamGroupContractTest, LionPerGroupLearningRate) {
+TEST_P(ParamGroupContractTest, LionPerGroupLearningRate) {
     // Lion's update is delta = -lr * sign(mt) which is lr-independent
     // in magnitude only via the lr scalar — verify lr ratio.
-    EXPECT_NEAR(first_step_lr_ratio<optim::Lion>(0.01, 0.10), 10.0f, 1e-3f);
+    EXPECT_NEAR(first_step_lr_ratio<optim::Lion>(0.01, 0.10, device), 10.0f, 1e-3f);
 }
-TEST_F(ParamGroupContractTest, AdamAtan2PerGroupLearningRate) {
-    EXPECT_NEAR(first_step_lr_ratio<optim::AdamAtan2>(0.01, 0.10), 10.0f, 1e-3f);
+TEST_P(ParamGroupContractTest, AdamAtan2PerGroupLearningRate) {
+    EXPECT_NEAR(first_step_lr_ratio<optim::AdamAtan2>(0.01, 0.10, device), 10.0f, 1e-3f);
 }
 
-TEST_F(ParamGroupContractTest, ASGDPerGroupLearningRate) {
+TEST_P(ParamGroupContractTest, ASGDPerGroupLearningRate) {
     // ASGD's update is θ -= lr * g (plus the running average bookkeeping
     // that does not feed back into the active param).  Lr scaling holds.
-    EXPECT_NEAR(first_step_lr_ratio<optim::ASGD>(0.01, 0.10), 10.0f, 1e-3f);
+    EXPECT_NEAR(first_step_lr_ratio<optim::ASGD>(0.01, 0.10, device), 10.0f, 1e-3f);
 }
+
+INSTANTIATE_BACKEND_TESTS(ParamGroupContractTest);
 
 }  // namespace
