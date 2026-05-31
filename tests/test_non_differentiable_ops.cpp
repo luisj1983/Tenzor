@@ -14,6 +14,7 @@
 
 #include <gtest/gtest.h>
 
+#include "backend_test_fixture.hpp"
 #include "tenzor/autograd/function.hpp"
 #include "tenzor/core/tensor.hpp"
 #include "tenzor/tenzor.hpp"
@@ -23,16 +24,19 @@ using namespace tenzor;
 
 namespace {
 
-class NonDifferentiableOpsTest : public ::testing::Test {
+class NonDifferentiableOpsTest : public ::tenzor::testing::BackendTest {
 protected:
-    void SetUp() override { tenzor::initialize(); }
+    void SetUp() override {
+        ::tenzor::testing::BackendTest::SetUp();
+        if (::testing::Test::IsSkipped()) return;
+    }
 };
 
-TEST_F(NonDifferentiableOpsTest, HistcBackwardThrowsTypedException) {
+TEST_P(NonDifferentiableOpsTest, HistcBackwardThrowsTypedException) {
     HistcBackward fn;
     std::vector<Tensor> dummy_grads;
     dummy_grads.emplace_back(std::vector<int64_t>{1},
-                              DType::Float32, Device::cpu());
+                              DType::Float32, device);
     try {
         (void) fn.backward(std::move(dummy_grads));
         FAIL() << "expected NonDifferentiable, got no exception";
@@ -45,11 +49,11 @@ TEST_F(NonDifferentiableOpsTest, HistcBackwardThrowsTypedException) {
     }
 }
 
-TEST_F(NonDifferentiableOpsTest, BincountBackwardThrowsTypedException) {
+TEST_P(NonDifferentiableOpsTest, BincountBackwardThrowsTypedException) {
     BincountBackward fn;
     std::vector<Tensor> dummy_grads;
     dummy_grads.emplace_back(std::vector<int64_t>{1},
-                              DType::Float32, Device::cpu());
+                              DType::Float32, device);
     try {
         (void) fn.backward(std::move(dummy_grads));
         FAIL() << "expected NonDifferentiable, got no exception";
@@ -60,11 +64,11 @@ TEST_F(NonDifferentiableOpsTest, BincountBackwardThrowsTypedException) {
     }
 }
 
-TEST_F(NonDifferentiableOpsTest, SearchSortedBackwardThrowsTypedException) {
+TEST_P(NonDifferentiableOpsTest, SearchSortedBackwardThrowsTypedException) {
     SearchSortedBackward fn;
     std::vector<Tensor> dummy_grads;
     dummy_grads.emplace_back(std::vector<int64_t>{1},
-                              DType::Float32, Device::cpu());
+                              DType::Float32, device);
     try {
         (void) fn.backward(std::move(dummy_grads));
         FAIL() << "expected NonDifferentiable, got no exception";
@@ -77,7 +81,7 @@ TEST_F(NonDifferentiableOpsTest, SearchSortedBackwardThrowsTypedException) {
     }
 }
 
-TEST_F(NonDifferentiableOpsTest, ForwardThrowsClearly) {
+TEST_P(NonDifferentiableOpsTest, ForwardThrowsClearly) {
     // The Function-class forward() entry points are not the user-facing API
     // (the corresponding Tensor / Variable wrapper invokes the underlying
     // op directly); calling them through the Function should throw a
@@ -109,11 +113,11 @@ TEST_F(NonDifferentiableOpsTest, ForwardThrowsClearly) {
     }, std::runtime_error);
 }
 
-TEST_F(NonDifferentiableOpsTest, MultinomialSampleBackwardThrowsTypedException) {
+TEST_P(NonDifferentiableOpsTest, MultinomialSampleBackwardThrowsTypedException) {
     MultinomialSampleBackward fn;
     std::vector<Tensor> dummy_grads;
     dummy_grads.emplace_back(std::vector<int64_t>{1},
-                              DType::Float32, Device::cpu());
+                              DType::Float32, device);
     try {
         (void) fn.backward(std::move(dummy_grads));
         FAIL() << "expected NonDifferentiable, got no exception";
@@ -126,11 +130,11 @@ TEST_F(NonDifferentiableOpsTest, MultinomialSampleBackwardThrowsTypedException) 
     }
 }
 
-TEST_F(NonDifferentiableOpsTest, BernoulliSampleBackwardThrowsTypedException) {
+TEST_P(NonDifferentiableOpsTest, BernoulliSampleBackwardThrowsTypedException) {
     BernoulliSampleBackward fn;
     std::vector<Tensor> dummy_grads;
     dummy_grads.emplace_back(std::vector<int64_t>{1},
-                              DType::Float32, Device::cpu());
+                              DType::Float32, device);
     try {
         (void) fn.backward(std::move(dummy_grads));
         FAIL() << "expected NonDifferentiable, got no exception";
@@ -143,12 +147,12 @@ TEST_F(NonDifferentiableOpsTest, BernoulliSampleBackwardThrowsTypedException) {
     }
 }
 
-TEST_F(NonDifferentiableOpsTest, ArgmaxArgminBucketizeBackwardThrow) {
-    auto check = [](Function& fn, const std::string& expected_op,
-                    const std::string& expected_hint) {
+TEST_P(NonDifferentiableOpsTest, ArgmaxArgminBucketizeBackwardThrow) {
+    auto check = [this](Function& fn, const std::string& expected_op,
+                        const std::string& expected_hint) {
         std::vector<Tensor> dummy_grads;
         dummy_grads.emplace_back(std::vector<int64_t>{1},
-                                  DType::Float32, Device::cpu());
+                                  DType::Float32, device);
         try {
             (void) fn.backward(std::move(dummy_grads));
             FAIL() << "expected NonDifferentiable, got no exception";
@@ -169,12 +173,12 @@ TEST_F(NonDifferentiableOpsTest, ArgmaxArgminBucketizeBackwardThrow) {
     check(buck, "bucketize", "sigmoid-of-distance");
 }
 
-TEST_F(NonDifferentiableOpsTest, ArgSortModeBackwardThrow) {
-    auto check = [](Function& fn, const std::string& expected_op,
-                    const std::string& expected_hint) {
+TEST_P(NonDifferentiableOpsTest, ArgSortModeBackwardThrow) {
+    auto check = [this](Function& fn, const std::string& expected_op,
+                        const std::string& expected_hint) {
         std::vector<Tensor> dummy_grads;
         dummy_grads.emplace_back(std::vector<int64_t>{1},
-                                  DType::Float32, Device::cpu());
+                                  DType::Float32, device);
         try {
             (void) fn.backward(std::move(dummy_grads));
             FAIL() << "expected NonDifferentiable, got no exception";
@@ -190,5 +194,7 @@ TEST_F(NonDifferentiableOpsTest, ArgSortModeBackwardThrow) {
     ArgSortBackward as;
     check(as, "argsort", "tenzor::sort");
 }
+
+INSTANTIATE_BACKEND_TESTS(NonDifferentiableOpsTest);
 
 }  // namespace

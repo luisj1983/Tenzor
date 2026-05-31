@@ -25,8 +25,11 @@
 #include <tenzor/nn/layers/pooling.hpp>
 #include <tenzor/nn/layers/dropout.hpp>
 #include <tenzor/nn/layers/embedding.hpp>
+#include "../backend_test_fixture.hpp"
 
 using namespace tenzor;
+
+class HigherOrderStubsRegression : public ::tenzor::testing::BackendTest {};
 
 // Helper: do forward + backward with create_graph, and verify input.grad
 // is populated and finite. Pass-through stubs should return a valid grad
@@ -52,60 +55,66 @@ void check_higher_order_stub_passthrough(const Variable& input,
     }
 }
 
-TEST(HigherOrderStubsRegression, Conv2d_Stub_Passthrough) {
+TEST_P(HigherOrderStubsRegression, Conv2d_Stub_Passthrough) {
     nn::Conv2d conv(/*in=*/2, /*out=*/3, /*k=*/3, /*stride=*/1, /*pad=*/1);
-    Variable input(randn({1, 2, 6, 6}, DType::Float32, Device::cpu()), true);
+    conv.to(device);
+    Variable input(randn({1, 2, 6, 6}, DType::Float32, device), true);
     check_higher_order_stub_passthrough(input,
         [&](const Variable& x) { return conv.forward(x); },
         "Conv2d");
 }
 
-TEST(HigherOrderStubsRegression, BatchNorm2d_Stub_Passthrough) {
+TEST_P(HigherOrderStubsRegression, BatchNorm2d_Stub_Passthrough) {
     nn::BatchNorm2d bn(/*num_features=*/4);
-    Variable input(randn({2, 4, 4, 4}, DType::Float32, Device::cpu()), true);
+    bn.to(device);
+    Variable input(randn({2, 4, 4, 4}, DType::Float32, device), true);
     check_higher_order_stub_passthrough(input,
         [&](const Variable& x) { return bn.forward(x); },
         "BatchNorm2d");
 }
 
-TEST(HigherOrderStubsRegression, LayerNorm_Stub_Passthrough) {
+TEST_P(HigherOrderStubsRegression, LayerNorm_Stub_Passthrough) {
     nn::LayerNorm ln(std::vector<int64_t>{8});
-    Variable input(randn({4, 8}, DType::Float32, Device::cpu()), true);
+    ln.to(device);
+    Variable input(randn({4, 8}, DType::Float32, device), true);
     check_higher_order_stub_passthrough(input,
         [&](const Variable& x) { return ln.forward(x); },
         "LayerNorm");
 }
 
-TEST(HigherOrderStubsRegression, MaxPool2d_Stub_Passthrough) {
+TEST_P(HigherOrderStubsRegression, MaxPool2d_Stub_Passthrough) {
     nn::MaxPool2d pool(/*kernel=*/2, /*stride=*/2);
-    Variable input(randn({1, 2, 8, 8}, DType::Float32, Device::cpu()), true);
+    pool.to(device);
+    Variable input(randn({1, 2, 8, 8}, DType::Float32, device), true);
     check_higher_order_stub_passthrough(input,
         [&](const Variable& x) { return pool.forward(x); },
         "MaxPool2d");
 }
 
-TEST(HigherOrderStubsRegression, AvgPool2d_Stub_Passthrough) {
+TEST_P(HigherOrderStubsRegression, AvgPool2d_Stub_Passthrough) {
     nn::AvgPool2d pool(/*kernel=*/2, /*stride=*/2);
-    Variable input(randn({1, 2, 8, 8}, DType::Float32, Device::cpu()), true);
+    pool.to(device);
+    Variable input(randn({1, 2, 8, 8}, DType::Float32, device), true);
     check_higher_order_stub_passthrough(input,
         [&](const Variable& x) { return pool.forward(x); },
         "AvgPool2d");
 }
 
-TEST(HigherOrderStubsRegression, Dropout_Eval_Stub_Passthrough) {
+TEST_P(HigherOrderStubsRegression, Dropout_Eval_Stub_Passthrough) {
     nn::Dropout d(0.5);
+    d.to(device);
     d.eval();  // deterministic identity in eval mode
-    Variable input(randn({4, 8}, DType::Float32, Device::cpu()), true);
+    Variable input(randn({4, 8}, DType::Float32, device), true);
     check_higher_order_stub_passthrough(input,
         [&](const Variable& x) { return d.forward(x); },
         "Dropout/eval");
 }
 
-TEST(HigherOrderStubsRegression, RReLU_Stub_Passthrough) {
+TEST_P(HigherOrderStubsRegression, RReLU_Stub_Passthrough) {
     // RReLU is piecewise-linear; its 2nd derivative is structurally zero.
     // This test ensures create_graph=true does not throw after B3 added the
     // structural-zero stub to RReLUBackward.
-    Variable input(randn({2, 8}, DType::Float32, Device::cpu()), true);
+    Variable input(randn({2, 8}, DType::Float32, device), true);
     check_higher_order_stub_passthrough(input,
         [](const Variable& x) {
             // Use eval-time RReLU (training=false) for determinism.
@@ -114,22 +123,25 @@ TEST(HigherOrderStubsRegression, RReLU_Stub_Passthrough) {
         "RReLU");
 }
 
-TEST(HigherOrderStubsRegression, CTCLoss_Stub_Passthrough) {
+TEST_P(HigherOrderStubsRegression, CTCLoss_Stub_Passthrough) {
     // CTC's second derivative w.r.t. log_probs is intentionally not exposed
     // (PyTorch takes the same stance). The stub pins that plain backward
     // works and that create_graph=true in Warn mode disconnects cleanly.
     const int64_t T = 4, N = 2, C = 5;
-    Variable log_probs(randn({T, N, C}, DType::Float32, Device::cpu()), true);
-    auto targets = zeros({N, 3}, DType::Int64, Device::cpu());
-    auto input_lengths = zeros({N}, DType::Int64, Device::cpu());
-    auto target_lengths = zeros({N}, DType::Int64, Device::cpu());
+    Variable log_probs(randn({T, N, C}, DType::Float32, device), true);
+    auto targets_cpu = zeros({N, 3}, DType::Int64, Device::cpu());
+    auto input_lengths_cpu = zeros({N}, DType::Int64, Device::cpu());
+    auto target_lengths_cpu = zeros({N}, DType::Int64, Device::cpu());
     for (int64_t i = 0; i < N; ++i) {
-        input_lengths.data<int64_t>()[i] = T;
-        target_lengths.data<int64_t>()[i] = 2;
+        input_lengths_cpu.data<int64_t>()[i] = T;
+        target_lengths_cpu.data<int64_t>()[i] = 2;
     }
     for (int64_t i = 0; i < N * 3; ++i) {
-        targets.data<int64_t>()[i] = 1 + (i % (C - 1));
+        targets_cpu.data<int64_t>()[i] = 1 + (i % (C - 1));
     }
+    auto targets = targets_cpu.to(device);
+    auto input_lengths = input_lengths_cpu.to(device);
+    auto target_lengths = target_lengths_cpu.to(device);
     tenzor::nn::CTCLoss ctc(/*reduction=*/"mean", /*blank=*/0);
     auto loss = ctc.forward(log_probs, targets, input_lengths, target_lengths);
     EXPECT_NO_THROW(loss.backward())
@@ -140,7 +152,7 @@ TEST(HigherOrderStubsRegression, CTCLoss_Stub_Passthrough) {
     // the stubbed chain without throwing, which is the documented behavior
     // for non-differentiable-through loss ops.
     set_higher_order_grad_mode(HigherOrderGradMode::Warn);
-    Variable lp2(randn({T, N, C}, DType::Float32, Device::cpu()), true);
+    Variable lp2(randn({T, N, C}, DType::Float32, device), true);
     auto loss2 = ctc.forward(lp2, targets, input_lengths, target_lengths);
     EXPECT_NO_THROW(
         loss2.backward(/*grad=*/{}, /*retain_graph=*/false, /*create_graph=*/true))
@@ -148,17 +160,18 @@ TEST(HigherOrderStubsRegression, CTCLoss_Stub_Passthrough) {
     set_higher_order_grad_mode(HigherOrderGradMode::Error);
 }
 
-TEST(HigherOrderStubsRegression, MultiLabelMarginLoss_Stub_Passthrough) {
+TEST_P(HigherOrderStubsRegression, MultiLabelMarginLoss_Stub_Passthrough) {
     // Piecewise-linear hinge loss — structural-zero 2nd derivative stub.
     const int64_t N = 3, C = 4;
-    Variable input(randn({N, C}, DType::Float32, Device::cpu()), true);
-    auto targets = zeros({N, C}, DType::Int64, Device::cpu());
+    Variable input(randn({N, C}, DType::Float32, device), true);
+    auto targets_cpu = zeros({N, C}, DType::Int64, Device::cpu());
     for (int64_t b = 0; b < N; ++b) {
-        targets.data<int64_t>()[b * C + 0] = static_cast<int64_t>(b % C);
-        targets.data<int64_t>()[b * C + 1] = -1;
-        targets.data<int64_t>()[b * C + 2] = -1;
-        targets.data<int64_t>()[b * C + 3] = -1;
+        targets_cpu.data<int64_t>()[b * C + 0] = static_cast<int64_t>(b % C);
+        targets_cpu.data<int64_t>()[b * C + 1] = -1;
+        targets_cpu.data<int64_t>()[b * C + 2] = -1;
+        targets_cpu.data<int64_t>()[b * C + 3] = -1;
     }
+    auto targets = targets_cpu.to(device);
     tenzor::nn::MultiLabelMarginLoss loss_fn(tenzor::nn::Reduction::Mean);
     auto loss = loss_fn.forward(input, targets);
     EXPECT_NO_THROW(loss.backward())
@@ -168,7 +181,7 @@ TEST(HigherOrderStubsRegression, MultiLabelMarginLoss_Stub_Passthrough) {
     // Warn mode + create_graph=true: the stub must allow disconnection
     // (rather than throwing) since the 2nd derivative is zero anyway.
     set_higher_order_grad_mode(HigherOrderGradMode::Warn);
-    Variable in2(randn({N, C}, DType::Float32, Device::cpu()), true);
+    Variable in2(randn({N, C}, DType::Float32, device), true);
     auto loss2 = loss_fn.forward(in2, targets);
     EXPECT_NO_THROW(
         loss2.backward(/*grad=*/{}, /*retain_graph=*/false, /*create_graph=*/true))
@@ -176,13 +189,14 @@ TEST(HigherOrderStubsRegression, MultiLabelMarginLoss_Stub_Passthrough) {
     set_higher_order_grad_mode(HigherOrderGradMode::Error);
 }
 
-TEST(HigherOrderStubsRegression, Embedding_Stub_Passthrough) {
+TEST_P(HigherOrderStubsRegression, Embedding_Stub_Passthrough) {
     // Embedding is special: input is index tensor (Int64), output is float
     // lookup. Higher-order through embedding flows through the weights, not
     // the indices — so we mark the embedding's weight differentiable and
     // check that flowing through it works.
     nn::Embedding emb(/*num_embeddings=*/16, /*embedding_dim=*/8);
-    auto idx = randint(0, 16, {2, 4}, DType::Int64, Device::cpu());
+    emb.to(device);
+    auto idx = randint(0, 16, {2, 4}, DType::Int64, device);
     Variable input(idx, false);
     Variable out = emb.forward(input);
     auto loss = sum(out);
@@ -199,10 +213,4 @@ TEST(HigherOrderStubsRegression, Embedding_Stub_Passthrough) {
     }
 }
 
-int main(int argc, char** argv) {
-    ::testing::InitGoogleTest(&argc, argv);
-    try { tenzor::initialize(); } catch (...) {}
-    int rc = RUN_ALL_TESTS();
-    try { tenzor::finalize(); } catch (...) {}
-    return rc;
-}
+INSTANTIATE_BACKEND_TESTS(HigherOrderStubsRegression);

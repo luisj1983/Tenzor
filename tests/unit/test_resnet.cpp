@@ -8,30 +8,30 @@
 #include "../../include/tenzor/models/resnet.hpp"
 #include "../../include/tenzor/core/tensor.hpp"
 #include "../../include/tenzor/autograd/variable.hpp"
+#include "../backend_test_fixture.hpp"
 #include "../grad_flow_helpers.hpp"
 
 using namespace tenzor;
 using namespace tenzor::models;
 
-class ResNetTest : public ::testing::Test {
+class ResNetTest : public ::tenzor::testing::BackendTest {
 protected:
     void SetUp() override {
-        // Use CPU for testing
-        device_ = Device::cpu();
+        ::tenzor::testing::BackendTest::SetUp();
+        if (::testing::Test::IsSkipped()) return;
     }
-
-    Device device_;
 };
 
 // ============================================================================
 // BasicBlock Tests
 // ============================================================================
 
-TEST_F(ResNetTest, BasicBlockForwardShape) {
+TEST_P(ResNetTest, BasicBlockForwardShape) {
     // Test BasicBlock with no downsampling (stride=1, same channels)
     auto block = std::make_shared<BasicBlock>(64, 64, 1, 1, 64, nullptr);
+    block->to(device);
 
-    Variable input(Tensor({2, 64, 56, 56}, DType::Float32, device_), true);
+    Variable input(Tensor({2, 64, 56, 56}, DType::Float32, device), true);
     Variable output = block->forward(input);
 
     // Output shape should match input shape
@@ -39,7 +39,7 @@ TEST_F(ResNetTest, BasicBlockForwardShape) {
     EXPECT_EQ(std::vector<int64_t>(shape.begin(), shape.end()), (std::vector<int64_t>{2, 64, 56, 56}));
 }
 
-TEST_F(ResNetTest, BasicBlockForwardShapeWithStride) {
+TEST_P(ResNetTest, BasicBlockForwardShapeWithStride) {
     // Test BasicBlock with stride=2 (spatial downsampling)
     // Need downsampling for skip connection
     auto downsample = std::make_shared<nn::Sequential>();
@@ -49,8 +49,9 @@ TEST_F(ResNetTest, BasicBlockForwardShapeWithStride) {
     downsample->add_module(bn);
 
     auto block = std::make_shared<BasicBlock>(64, 128, 2, 1, 64, downsample);
+    block->to(device);
 
-    Variable input(Tensor({2, 64, 56, 56}, DType::Float32, device_), true);
+    Variable input(Tensor({2, 64, 56, 56}, DType::Float32, device), true);
     Variable output = block->forward(input);
 
     // Spatial dimensions halved, channels increased
@@ -58,12 +59,13 @@ TEST_F(ResNetTest, BasicBlockForwardShapeWithStride) {
     EXPECT_EQ(std::vector<int64_t>(shape.begin(), shape.end()), (std::vector<int64_t>{2, 128, 28, 28}));
 }
 
-TEST_F(ResNetTest, BasicBlockGradientFlow) {
+TEST_P(ResNetTest, BasicBlockGradientFlow) {
     // Test that gradients flow through skip connection
     auto block = std::make_shared<BasicBlock>(64, 64, 1, 1, 64, nullptr);
+    block->to(device);
     block->train();
 
-    Variable input(Tensor({2, 64, 56, 56}, DType::Float32, device_), true);
+    Variable input(randn({2, 64, 56, 56}, DType::Float32, device), true);
     Variable output = block->forward(input);
 
     // Compute a simple loss using autograd-aware sum
@@ -89,11 +91,12 @@ TEST_F(ResNetTest, BasicBlockGradientFlow) {
 // Bottleneck Tests
 // ============================================================================
 
-TEST_F(ResNetTest, BottleneckForwardShape) {
+TEST_P(ResNetTest, BottleneckForwardShape) {
     // Test Bottleneck with no downsampling
     auto block = std::make_shared<Bottleneck>(256, 64, 1, 1, 64, nullptr);
+    block->to(device);
 
-    Variable input(Tensor({2, 256, 56, 56}, DType::Float32, device_), true);
+    Variable input(Tensor({2, 256, 56, 56}, DType::Float32, device), true);
     Variable output = block->forward(input);
 
     // Output channels = 64 * expansion (4) = 256
@@ -101,7 +104,7 @@ TEST_F(ResNetTest, BottleneckForwardShape) {
     EXPECT_EQ(std::vector<int64_t>(shape.begin(), shape.end()), (std::vector<int64_t>{2, 256, 56, 56}));
 }
 
-TEST_F(ResNetTest, BottleneckForwardShapeWithStride) {
+TEST_P(ResNetTest, BottleneckForwardShapeWithStride) {
     // Test Bottleneck with stride=2
     auto downsample = std::make_shared<nn::Sequential>();
     auto conv = std::make_shared<nn::Conv2d>(256, 512, 1, 2, 0, 1, 1, false);
@@ -110,8 +113,9 @@ TEST_F(ResNetTest, BottleneckForwardShapeWithStride) {
     downsample->add_module(bn);
 
     auto block = std::make_shared<Bottleneck>(256, 128, 2, 1, 64, downsample);
+    block->to(device);
 
-    Variable input(Tensor({2, 256, 56, 56}, DType::Float32, device_), true);
+    Variable input(Tensor({2, 256, 56, 56}, DType::Float32, device), true);
     Variable output = block->forward(input);
 
     // Output: channels = 128 * 4 = 512, spatial halved
@@ -119,7 +123,7 @@ TEST_F(ResNetTest, BottleneckForwardShapeWithStride) {
     EXPECT_EQ(std::vector<int64_t>(shape.begin(), shape.end()), (std::vector<int64_t>{2, 512, 28, 28}));
 }
 
-TEST_F(ResNetTest, BottleneckGroupedConvolution) {
+TEST_P(ResNetTest, BottleneckGroupedConvolution) {
     // Test Bottleneck with groups (ResNeXt)
     auto downsample = std::make_shared<nn::Sequential>();
     auto conv = std::make_shared<nn::Conv2d>(256, 512, 1, 1, 0, 1, 1, false);
@@ -129,20 +133,22 @@ TEST_F(ResNetTest, BottleneckGroupedConvolution) {
 
     // groups=32, base_width=4 (ResNeXt configuration)
     auto block = std::make_shared<Bottleneck>(256, 128, 1, 32, 4, downsample);
+    block->to(device);
 
-    Variable input(Tensor({2, 256, 56, 56}, DType::Float32, device_), true);
+    Variable input(Tensor({2, 256, 56, 56}, DType::Float32, device), true);
     Variable output = block->forward(input);
 
     auto shape = output.tensor().shape();
     EXPECT_EQ(std::vector<int64_t>(shape.begin(), shape.end()), (std::vector<int64_t>{2, 512, 56, 56}));
 }
 
-TEST_F(ResNetTest, BottleneckGradientFlow) {
+TEST_P(ResNetTest, BottleneckGradientFlow) {
     // Test gradient flow through Bottleneck
     auto block = std::make_shared<Bottleneck>(256, 64, 1, 1, 64, nullptr);
+    block->to(device);
     block->train();
 
-    Variable input(Tensor({2, 256, 56, 56}, DType::Float32, device_), true);
+    Variable input(randn({2, 256, 56, 56}, DType::Float32, device), true);
     Variable output = block->forward(input);
 
     Variable loss = tenzor::sum(output * output);
@@ -161,8 +167,9 @@ TEST_F(ResNetTest, BottleneckGradientFlow) {
 // ResNet-18 Tests
 // ============================================================================
 
-TEST_F(ResNetTest, ResNet18Architecture) {
+TEST_P(ResNetTest, ResNet18Architecture) {
     auto model = resnet18(1000, false);
+    model->to(device);
 
     // Check that model has correct number of parameters
     auto params = model->parameters();
@@ -179,12 +186,13 @@ TEST_F(ResNetTest, ResNet18Architecture) {
     EXPECT_LT(total_params, 12000000);
 }
 
-TEST_F(ResNetTest, ResNet18ForwardShape) {
+TEST_P(ResNetTest, ResNet18ForwardShape) {
     auto model = resnet18(1000, false);
+    model->to(device);
     model->eval();
 
     // Standard ImageNet input: (N, 3, 224, 224)
-    Variable input(Tensor({2, 3, 224, 224}, DType::Float32, device_), false);
+    Variable input(Tensor({2, 3, 224, 224}, DType::Float32, device), false);
     Variable output = model->forward(input);
 
     // Output should be (N, num_classes)
@@ -192,25 +200,27 @@ TEST_F(ResNetTest, ResNet18ForwardShape) {
     EXPECT_EQ(std::vector<int64_t>(shape.begin(), shape.end()), (std::vector<int64_t>{2, 1000}));
 }
 
-TEST_F(ResNetTest, ResNet18CustomClasses) {
+TEST_P(ResNetTest, ResNet18CustomClasses) {
     // Test with custom number of classes
     auto model = resnet18(10, false);
+    model->to(device);
     model->eval();
 
-    Variable input(Tensor({4, 3, 224, 224}, DType::Float32, device_), false);
+    Variable input(Tensor({4, 3, 224, 224}, DType::Float32, device), false);
     Variable output = model->forward(input);
 
     auto shape = output.tensor().shape();
     EXPECT_EQ(std::vector<int64_t>(shape.begin(), shape.end()), (std::vector<int64_t>{4, 10}));
 }
 
-TEST_F(ResNetTest, ResNet18DifferentInputSize) {
+TEST_P(ResNetTest, ResNet18DifferentInputSize) {
     // Test with different input size
     auto model = resnet18(1000, false);
+    model->to(device);
     model->eval();
 
     // Smaller input (must be at least 32x32 to pass through all pooling)
-    Variable input(Tensor({2, 3, 128, 128}, DType::Float32, device_), false);
+    Variable input(Tensor({2, 3, 128, 128}, DType::Float32, device), false);
     Variable output = model->forward(input);
 
     // Output classes should still be correct
@@ -219,11 +229,12 @@ TEST_F(ResNetTest, ResNet18DifferentInputSize) {
     EXPECT_EQ(shape[1], 1000);
 }
 
-TEST_F(ResNetTest, ResNet18GradientFlow) {
+TEST_P(ResNetTest, ResNet18GradientFlow) {
     auto model = resnet18(10, false);
+    model->to(device);
     model->train();
 
-    Variable input(Tensor({2, 3, 224, 224}, DType::Float32, device_), true);
+    Variable input(Tensor({2, 3, 224, 224}, DType::Float32, device), true);
     Variable output = model->forward(input);
 
     Variable loss = tenzor::sum(output * output);
@@ -245,19 +256,21 @@ TEST_F(ResNetTest, ResNet18GradientFlow) {
 // ResNet-34 Tests
 // ============================================================================
 
-TEST_F(ResNetTest, ResNet34ForwardShape) {
+TEST_P(ResNetTest, ResNet34ForwardShape) {
     auto model = resnet34(1000, false);
+    model->to(device);
     model->eval();
 
-    Variable input(Tensor({2, 3, 224, 224}, DType::Float32, device_), false);
+    Variable input(Tensor({2, 3, 224, 224}, DType::Float32, device), false);
     Variable output = model->forward(input);
 
     auto shape = output.tensor().shape();
     EXPECT_EQ(std::vector<int64_t>(shape.begin(), shape.end()), (std::vector<int64_t>{2, 1000}));
 }
 
-TEST_F(ResNetTest, ResNet34ParameterCount) {
+TEST_P(ResNetTest, ResNet34ParameterCount) {
     auto model = resnet34(1000, false);
+    model->to(device);
 
     int64_t total_params = 0;
     for (const auto& param : model->parameters()) {
@@ -273,19 +286,21 @@ TEST_F(ResNetTest, ResNet34ParameterCount) {
 // ResNet-50 Tests
 // ============================================================================
 
-TEST_F(ResNetTest, ResNet50ForwardShape) {
+TEST_P(ResNetTest, ResNet50ForwardShape) {
     auto model = resnet50(1000, false);
+    model->to(device);
     model->eval();
 
-    Variable input(Tensor({2, 3, 224, 224}, DType::Float32, device_), false);
+    Variable input(Tensor({2, 3, 224, 224}, DType::Float32, device), false);
     Variable output = model->forward(input);
 
     auto shape = output.tensor().shape();
     EXPECT_EQ(std::vector<int64_t>(shape.begin(), shape.end()), (std::vector<int64_t>{2, 1000}));
 }
 
-TEST_F(ResNetTest, ResNet50ParameterCount) {
+TEST_P(ResNetTest, ResNet50ParameterCount) {
     auto model = resnet50(1000, false);
+    model->to(device);
 
     int64_t total_params = 0;
     for (const auto& param : model->parameters()) {
@@ -297,11 +312,12 @@ TEST_F(ResNetTest, ResNet50ParameterCount) {
     EXPECT_LT(total_params, 26000000);
 }
 
-TEST_F(ResNetTest, ResNet50GradientFlow) {
+TEST_P(ResNetTest, ResNet50GradientFlow) {
     auto model = resnet50(10, false);
+    model->to(device);
     model->train();
 
-    Variable input(Tensor({2, 3, 224, 224}, DType::Float32, device_), true);
+    Variable input(Tensor({2, 3, 224, 224}, DType::Float32, device), true);
     Variable output = model->forward(input);
 
     Variable loss = tenzor::sum(output);
@@ -331,22 +347,24 @@ TEST_F(ResNetTest, ResNet50GradientFlow) {
 // ResNet-101 and ResNet-152 Tests
 // ============================================================================
 
-TEST_F(ResNetTest, ResNet101ForwardShape) {
+TEST_P(ResNetTest, ResNet101ForwardShape) {
     auto model = resnet101(1000, false);
+    model->to(device);
     model->eval();
 
-    Variable input(Tensor({2, 3, 224, 224}, DType::Float32, device_), false);
+    Variable input(Tensor({2, 3, 224, 224}, DType::Float32, device), false);
     Variable output = model->forward(input);
 
     auto shape = output.tensor().shape();
     EXPECT_EQ(std::vector<int64_t>(shape.begin(), shape.end()), (std::vector<int64_t>{2, 1000}));
 }
 
-TEST_F(ResNetTest, ResNet152ForwardShape) {
+TEST_P(ResNetTest, ResNet152ForwardShape) {
     auto model = resnet152(1000, false);
+    model->to(device);
     model->eval();
 
-    Variable input(Tensor({2, 3, 224, 224}, DType::Float32, device_), false);
+    Variable input(Tensor({2, 3, 224, 224}, DType::Float32, device), false);
     Variable output = model->forward(input);
 
     auto shape = output.tensor().shape();
@@ -357,22 +375,24 @@ TEST_F(ResNetTest, ResNet152ForwardShape) {
 // ResNeXt Tests
 // ============================================================================
 
-TEST_F(ResNetTest, ResNeXt50ForwardShape) {
+TEST_P(ResNetTest, ResNeXt50ForwardShape) {
     auto model = resnext50_32x4d(1000, false);
+    model->to(device);
     model->eval();
 
-    Variable input(Tensor({2, 3, 224, 224}, DType::Float32, device_), false);
+    Variable input(Tensor({2, 3, 224, 224}, DType::Float32, device), false);
     Variable output = model->forward(input);
 
     auto shape = output.tensor().shape();
     EXPECT_EQ(std::vector<int64_t>(shape.begin(), shape.end()), (std::vector<int64_t>{2, 1000}));
 }
 
-TEST_F(ResNetTest, ResNeXt101ForwardShape) {
+TEST_P(ResNetTest, ResNeXt101ForwardShape) {
     auto model = resnext101_32x8d(1000, false);
+    model->to(device);
     model->eval();
 
-    Variable input(Tensor({2, 3, 224, 224}, DType::Float32, device_), false);
+    Variable input(Tensor({2, 3, 224, 224}, DType::Float32, device), false);
     Variable output = model->forward(input);
 
     auto shape = output.tensor().shape();
@@ -383,22 +403,24 @@ TEST_F(ResNetTest, ResNeXt101ForwardShape) {
 // Wide ResNet Tests
 // ============================================================================
 
-TEST_F(ResNetTest, WideResNet50ForwardShape) {
+TEST_P(ResNetTest, WideResNet50ForwardShape) {
     auto model = wide_resnet50_2(1000, false);
+    model->to(device);
     model->eval();
 
-    Variable input(Tensor({2, 3, 224, 224}, DType::Float32, device_), false);
+    Variable input(Tensor({2, 3, 224, 224}, DType::Float32, device), false);
     Variable output = model->forward(input);
 
     auto shape = output.tensor().shape();
     EXPECT_EQ(std::vector<int64_t>(shape.begin(), shape.end()), (std::vector<int64_t>{2, 1000}));
 }
 
-TEST_F(ResNetTest, WideResNet101ForwardShape) {
+TEST_P(ResNetTest, WideResNet101ForwardShape) {
     auto model = wide_resnet101_2(1000, false);
+    model->to(device);
     model->eval();
 
-    Variable input(Tensor({2, 3, 224, 224}, DType::Float32, device_), false);
+    Variable input(Tensor({2, 3, 224, 224}, DType::Float32, device), false);
     Variable output = model->forward(input);
 
     auto shape = output.tensor().shape();
@@ -409,8 +431,9 @@ TEST_F(ResNetTest, WideResNet101ForwardShape) {
 // Training Mode Tests
 // ============================================================================
 
-TEST_F(ResNetTest, TrainingModeSwitch) {
+TEST_P(ResNetTest, TrainingModeSwitch) {
     auto model = resnet18(10, false);
+    model->to(device);
 
     // Test training mode
     model->train();
@@ -421,10 +444,11 @@ TEST_F(ResNetTest, TrainingModeSwitch) {
     EXPECT_FALSE(model->is_training());
 }
 
-TEST_F(ResNetTest, BatchNormBehavior) {
+TEST_P(ResNetTest, BatchNormBehavior) {
     auto model = resnet18(10, false);
+    model->to(device);
 
-    Variable input(Tensor({2, 3, 224, 224}, DType::Float32, device_), false);
+    Variable input(Tensor({2, 3, 224, 224}, DType::Float32, device), false);
 
     // Forward in training mode
     model->train();
@@ -446,9 +470,11 @@ TEST_F(ResNetTest, BatchNormBehavior) {
 // State Dict Tests
 // ============================================================================
 
-TEST_F(ResNetTest, StateDictSaveLoad) {
+TEST_P(ResNetTest, StateDictSaveLoad) {
     auto model1 = resnet18(10, false);
     auto model2 = resnet18(10, false);
+    model1->to(device);
+    model2->to(device);
 
     // Get state from model1
     auto state = model1->state_dict();
@@ -468,38 +494,40 @@ TEST_F(ResNetTest, StateDictSaveLoad) {
 // Edge Cases and Error Handling
 // ============================================================================
 
-TEST_F(ResNetTest, BasicBlockRejectsGroups) {
+TEST_P(ResNetTest, BasicBlockRejectsGroups) {
     // BasicBlock should reject groups != 1
     EXPECT_THROW({
         auto block = std::make_shared<BasicBlock>(64, 64, 1, 32, 64, nullptr);
     }, std::invalid_argument);
 }
 
-TEST_F(ResNetTest, BasicBlockRejectsWideWidth) {
+TEST_P(ResNetTest, BasicBlockRejectsWideWidth) {
     // BasicBlock should reject base_width != 64
     EXPECT_THROW({
         auto block = std::make_shared<BasicBlock>(64, 64, 1, 1, 128, nullptr);
     }, std::invalid_argument);
 }
 
-TEST_F(ResNetTest, SmallBatchSize) {
+TEST_P(ResNetTest, SmallBatchSize) {
     // Test with batch size 1
     auto model = resnet18(10, false);
+    model->to(device);
     model->eval();
 
-    Variable input(Tensor({1, 3, 224, 224}, DType::Float32, device_), false);
+    Variable input(Tensor({1, 3, 224, 224}, DType::Float32, device), false);
     Variable output = model->forward(input);
 
     auto shape = output.tensor().shape();
     EXPECT_EQ(std::vector<int64_t>(shape.begin(), shape.end()), (std::vector<int64_t>{1, 10}));
 }
 
-TEST_F(ResNetTest, LargeBatchSize) {
+TEST_P(ResNetTest, LargeBatchSize) {
     // Test with larger batch size
     auto model = resnet18(10, false);
+    model->to(device);
     model->eval();
 
-    Variable input(Tensor({16, 3, 224, 224}, DType::Float32, device_), false);
+    Variable input(Tensor({16, 3, 224, 224}, DType::Float32, device), false);
     Variable output = model->forward(input);
 
     auto shape = output.tensor().shape();
@@ -510,8 +538,9 @@ TEST_F(ResNetTest, LargeBatchSize) {
 // Performance and Memory Tests
 // ============================================================================
 
-TEST_F(ResNetTest, ParameterSharing) {
+TEST_P(ResNetTest, ParameterSharing) {
     auto model = resnet18(10, false);
+    model->to(device);
 
     // Get parameters twice and verify they share underlying storage
     auto params1 = model->parameters();
@@ -525,11 +554,12 @@ TEST_F(ResNetTest, ParameterSharing) {
     }
 }
 
-TEST_F(ResNetTest, ZeroGrad) {
+TEST_P(ResNetTest, ZeroGrad) {
     auto model = resnet18(10, false);
+    model->to(device);
     model->train();
 
-    Variable input(Tensor({2, 3, 224, 224}, DType::Float32, device_), true);
+    Variable input(Tensor({2, 3, 224, 224}, DType::Float32, device), true);
     Variable output = model->forward(input);
 
     Variable loss = tenzor::sum(output);
@@ -543,16 +573,11 @@ TEST_F(ResNetTest, ZeroGrad) {
         if (param->grad().has_value()) {
             // If grad exists, it should be zeros
             auto grad_sum = tenzor::sum(*param->grad());
-            auto* ptr = static_cast<float*>(grad_sum.data_ptr());
+            auto grad_sum_cpu = grad_sum.cpu();
+            auto* ptr = static_cast<float*>(grad_sum_cpu.data_ptr());
             EXPECT_EQ(ptr[0], 0.0f);
         }
     }
 }
 
-int main(int argc, char** argv) {
-    ::testing::InitGoogleTest(&argc, argv);
-    if (!::testing::GTEST_FLAG(list_tests)) {
-        tenzor::initialize();
-    }
-    return RUN_ALL_TESTS();
-}
+INSTANTIATE_BACKEND_TESTS(ResNetTest);

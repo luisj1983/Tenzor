@@ -29,6 +29,8 @@
 #include <tenzor/nn/activations/activations.hpp>
 #include <tenzor/nn/module.hpp>
 
+#include "../backend_test_fixture.hpp"
+
 #include <memory>
 #include <vector>
 
@@ -39,9 +41,12 @@ using namespace tenzor::quantization;
 
 namespace {
 
-class QuantizationE2ETest : public ::testing::Test {
+class QuantizationE2ETest : public ::tenzor::testing::BackendTest {
 protected:
-    static void SetUpTestSuite() { tenzor::initialize(); }
+    void SetUp() override {
+        ::tenzor::testing::BackendTest::SetUp();
+        if (::testing::Test::IsSkipped()) return;
+    }
 };
 
 // Build a small Sequential: Linear -> ReLU -> Linear. Sized for fast tests.
@@ -54,15 +59,17 @@ auto make_simple_model() -> std::shared_ptr<Sequential> {
 }
 
 // Build a calibration callback that runs N forward passes on synthetic data.
-auto make_calibration_fn(int n_batches, std::vector<int64_t> in_shape)
+auto make_calibration_fn(int n_batches, std::vector<int64_t> in_shape,
+                         tenzor::Device device)
     -> std::function<void(Module&)> {
-    return [n_batches, in_shape](Module& m) {
+    return [n_batches, in_shape, device](Module& m) {
         for (int i = 0; i < n_batches; ++i) {
-            auto x = zeros(in_shape, DType::Float32, Device::cpu());
-            auto* p = x.data<float>();
-            for (int64_t k = 0; k < x.numel(); ++k) {
+            auto x_host = zeros(in_shape, DType::Float32, Device::cpu());
+            auto* p = x_host.data<float>();
+            for (int64_t k = 0; k < x_host.numel(); ++k) {
                 p[k] = std::sin(0.01f * (k + i)) * 1.5f;
             }
+            auto x = x_host.to(device);
             Variable v(x, /*requires_grad=*/false);
             (void)m.forward(v);
         }
@@ -75,16 +82,18 @@ auto make_calibration_fn(int n_batches, std::vector<int64_t> in_shape)
 // #1: StaticQuantInt8E2E — quantize_static runs end-to-end and produces a
 // model whose forward() returns a tensor of the expected output shape.
 // ----------------------------------------------------------------------------
-TEST_F(QuantizationE2ETest, StaticQuantInt8E2E_ForwardRuns) {
+TEST_P(QuantizationE2ETest, StaticQuantInt8E2E_ForwardRuns) {
     auto model = make_simple_model();
-    auto calib = make_calibration_fn(/*n_batches=*/3, {/*B=*/2, /*F=*/16});
+    model->to(device);
+    auto calib = make_calibration_fn(/*n_batches=*/3, {/*B=*/2, /*F=*/16}, device);
 
     auto q_model = quantize_static(model, calib);
     ASSERT_NE(q_model, nullptr);
 
-    auto x = zeros({2, 16}, DType::Float32, Device::cpu());
-    auto* p = x.data<float>();
-    for (int64_t k = 0; k < x.numel(); ++k) p[k] = 0.1f * k;
+    auto x_host = zeros({2, 16}, DType::Float32, Device::cpu());
+    auto* p = x_host.data<float>();
+    for (int64_t k = 0; k < x_host.numel(); ++k) p[k] = 0.1f * k;
+    auto x = x_host.to(device);
     Variable vx(x, /*requires_grad=*/false);
     auto y = q_model->forward(vx);
     EXPECT_EQ(y.tensor().shape().size(), 2u);
@@ -96,17 +105,18 @@ TEST_F(QuantizationE2ETest, StaticQuantInt8E2E_ForwardRuns) {
 // #2: StaticQuantPerChannel — per-channel quantization produces distinct
 // scales across output channels (vs. per-tensor's single scalar).
 // ----------------------------------------------------------------------------
-TEST_F(QuantizationE2ETest, PerChannelScalesDifferAcrossChannels) {
+TEST_P(QuantizationE2ETest, PerChannelScalesDifferAcrossChannels) {
     // Build a weight with deliberately-varied per-channel magnitudes so
     // PerChannelSymmetric must produce distinct scales per row.
-    auto w = zeros({4, 8}, DType::Float32, Device::cpu());
-    auto* p = w.data<float>();
+    auto w_host = zeros({4, 8}, DType::Float32, Device::cpu());
+    auto* p = w_host.data<float>();
     for (int64_t i = 0; i < 4; ++i) {
         for (int64_t j = 0; j < 8; ++j) {
             // Row i has values in [-(i+1), +(i+1)] — distinct ranges per row.
             p[i * 8 + j] = std::sin(j * 0.5f) * static_cast<float>(i + 1);
         }
     }
+    auto w = w_host.to(device);
     auto qt = quantize_per_channel_symmetric(w, /*channel_axis=*/0);
     // PerChannelSymmetric stores one scale per channel (axis 0 here);
     // the scale tensor is a 1-D vector of length 4.
@@ -114,8 +124,9 @@ TEST_F(QuantizationE2ETest, PerChannelScalesDifferAcrossChannels) {
     ASSERT_EQ(scale.numel(), 4)
         << "Per-channel quantization should store one scale per channel";
     // Verify distinct scales: row i+1 has ~(i+2)/(i+1) larger range than row i.
-    auto* sp = scale.data<float>();
-    for (int64_t i = 1; i < scale.numel(); ++i) {
+    auto scale_cpu = scale.cpu();
+    auto* sp = scale_cpu.data<float>();
+    for (int64_t i = 1; i < scale_cpu.numel(); ++i) {
         EXPECT_NE(sp[i], sp[i - 1])
             << "Per-channel scale should differ between rows: "
             << sp[i] << " vs " << sp[i - 1];
@@ -126,15 +137,16 @@ TEST_F(QuantizationE2ETest, PerChannelScalesDifferAcrossChannels) {
 // #3: Observer attachment — after prepare_qat + calibration, observers have
 // non-zero min/max (proves calibration invoked the forward path).
 // ----------------------------------------------------------------------------
-TEST_F(QuantizationE2ETest, ObserverReceivesCalibrationStats) {
+TEST_P(QuantizationE2ETest, ObserverReceivesCalibrationStats) {
     // Construct a MinMaxObserver and feed it data; verify min/max move
     // away from their defaults. The prepare_qat path uses MinMaxObserver
     // (or moving-average) under the hood — this test pins that the
     // observer itself records calibration stats correctly.
     MinMaxObserver obs;
-    auto x = zeros({4}, DType::Float32, Device::cpu());
-    auto* p = x.data<float>();
+    auto x_host = zeros({4}, DType::Float32, Device::cpu());
+    auto* p = x_host.data<float>();
     p[0] = -1.5f; p[1] = 2.3f; p[2] = 0.0f; p[3] = -0.8f;
+    auto x = x_host.to(device);
     obs.observe(x);
     EXPECT_TRUE(obs.has_data())
         << "Observer must record data after at least one observe() call";
@@ -150,14 +162,15 @@ TEST_F(QuantizationE2ETest, ObserverReceivesCalibrationStats) {
 // applying backward produces non-zero weight gradients (straight-through
 // estimator survives the fake-quant module).
 // ----------------------------------------------------------------------------
-TEST_F(QuantizationE2ETest, QATFakeQuantPreservesGradPath) {
+TEST_P(QuantizationE2ETest, QATFakeQuantPreservesGradPath) {
     // Build a FakeQuantize module; feed it through forward + check that the
     // result has a grad_fn (autograd chain not severed by fake quant).
     auto fq = std::make_shared<FakeQuantize>(
         QuantDType::INT8, QuantizationScheme::PerTensorSymmetric);
-    auto x_tensor = zeros({4}, DType::Float32, Device::cpu());
-    auto* p = x_tensor.data<float>();
+    auto x_host = zeros({4}, DType::Float32, Device::cpu());
+    auto* p = x_host.data<float>();
     p[0] = -1.5f; p[1] = 2.3f; p[2] = 0.0f; p[3] = -0.8f;
+    auto x_tensor = x_host.to(device);
     Variable x(x_tensor, /*requires_grad=*/true);
     auto y = fq->forward(x);
     // The fake-quant must preserve the autograd chain (STE), so y must
@@ -169,20 +182,22 @@ TEST_F(QuantizationE2ETest, QATFakeQuantPreservesGradPath) {
 // ----------------------------------------------------------------------------
 // #5: INT4 packing — packed Int8 storage holds two 4-bit values per byte.
 // ----------------------------------------------------------------------------
-TEST_F(QuantizationE2ETest, Int4PackedByteCount) {
+TEST_P(QuantizationE2ETest, Int4PackedByteCount) {
     // Inf-G follow-up: INT4 packing through the public quantize_tensor API.
     // src/nn/quantization/quantize.cpp:243 packs two 4-bit values per byte
     // (low nibble = even index, high nibble = odd index). Verify the
     // resulting tensor's byte storage equals ceil(numel / 2).
-    auto x = zeros({8}, DType::Float32, Device::cpu());
-    auto* p = x.data<float>();
+    auto x_host = zeros({8}, DType::Float32, Device::cpu());
+    auto* p = x_host.data<float>();
     p[0] = -1.0f; p[1] = -0.7f; p[2] = -0.3f; p[3] = 0.0f;
     p[4] =  0.3f; p[5] =  0.6f; p[6] =  0.9f; p[7] =  1.0f;
+    auto x = x_host.to(device);
 
     // Build QuantizationParams for INT4 per-tensor symmetric.
-    auto scale = zeros({1}, DType::Float32, Device::cpu());
-    scale.data<float>()[0] = 1.0f / 7.0f;  // [-7, 7] → [-1, 1] approximately
-    auto zp = zeros({1}, DType::Int32, Device::cpu());
+    auto scale_host = zeros({1}, DType::Float32, Device::cpu());
+    scale_host.data<float>()[0] = 1.0f / 7.0f;  // [-7, 7] → [-1, 1] approximately
+    auto scale = scale_host.to(device);
+    auto zp = zeros({1}, DType::Int32, device);
     QuantizationParams params(scale, zp, QuantDType::INT4,
                               QuantizationScheme::PerTensorSymmetric,
                               /*axis=*/-1);
@@ -195,7 +210,7 @@ TEST_F(QuantizationE2ETest, Int4PackedByteCount) {
         << "INT4 storage uses Int8 underlying type";
 }
 
-TEST_F(QuantizationE2ETest, Int4DTypeEnumIsExposed) {
+TEST_P(QuantizationE2ETest, Int4DTypeEnumIsExposed) {
     // Sanity: the enum values exist and are distinct.
     auto v_int4  = QuantDType::INT4;
     auto v_uint4 = QuantDType::UINT4;
@@ -208,14 +223,16 @@ TEST_F(QuantizationE2ETest, Int4DTypeEnumIsExposed) {
 // #6: Dynamic quantization — Linear weights become quantized; activations
 // stay F32 (runtime quantize→dequant inside matmul).
 // ----------------------------------------------------------------------------
-TEST_F(QuantizationE2ETest, DynamicQuantizationProducesModel) {
+TEST_P(QuantizationE2ETest, DynamicQuantizationProducesModel) {
     auto model = make_simple_model();
+    model->to(device);
     auto q_model = quantize_dynamic(model);
     ASSERT_NE(q_model, nullptr);
 
-    auto x = zeros({2, 16}, DType::Float32, Device::cpu());
-    auto* p = x.data<float>();
-    for (int64_t k = 0; k < x.numel(); ++k) p[k] = 0.1f * k;
+    auto x_host = zeros({2, 16}, DType::Float32, Device::cpu());
+    auto* p = x_host.data<float>();
+    for (int64_t k = 0; k < x_host.numel(); ++k) p[k] = 0.1f * k;
+    auto x = x_host.to(device);
     Variable vx(x, /*requires_grad=*/false);
     auto y = q_model->forward(vx);
     EXPECT_EQ(y.tensor().shape()[0], 2);
@@ -227,7 +244,7 @@ TEST_F(QuantizationE2ETest, DynamicQuantizationProducesModel) {
 // Sketches the contract; the actual quantized inference numerical match
 // is checked by existing test_quantization_conversion.cpp.
 // ----------------------------------------------------------------------------
-TEST_F(QuantizationE2ETest, FuseConvBnReluThenQuantizeRuns) {
+TEST_P(QuantizationE2ETest, FuseConvBnReluThenQuantizeRuns) {
     auto m = std::make_shared<Sequential>();
     m->add_module(std::make_shared<Conv2d>(/*in_channels=*/3, /*out_channels=*/8,
                                            /*kernel_size=*/3, /*stride=*/1, /*padding=*/1));
@@ -237,6 +254,7 @@ TEST_F(QuantizationE2ETest, FuseConvBnReluThenQuantizeRuns) {
                                            /*kernel_size=*/3, /*stride=*/1, /*padding=*/1));
     m->add_module(std::make_shared<BatchNorm2d>(/*num_features=*/4));
     m->add_module(std::make_shared<ReLU>());
+    m->to(device);
 
     std::shared_ptr<Module> fused;
     try {
@@ -246,7 +264,8 @@ TEST_F(QuantizationE2ETest, FuseConvBnReluThenQuantizeRuns) {
     }
     ASSERT_NE(fused, nullptr);
 
-    auto calib = make_calibration_fn(/*n_batches=*/2, {/*B=*/1, /*C=*/3, /*H=*/4, /*W=*/4});
+    auto calib = make_calibration_fn(/*n_batches=*/2,
+                                     {/*B=*/1, /*C=*/3, /*H=*/4, /*W=*/4}, device);
     std::shared_ptr<Module> q_model;
     try {
         q_model = quantize_static(std::dynamic_pointer_cast<Sequential>(fused), calib);
@@ -261,7 +280,7 @@ TEST_F(QuantizationE2ETest, FuseConvBnReluThenQuantizeRuns) {
 // ----------------------------------------------------------------------------
 // #8: QConfig serialization (round-trip via to_string + factory).
 // ----------------------------------------------------------------------------
-TEST_F(QuantizationE2ETest, QConfigDefaultsConstructWithoutThrow) {
+TEST_P(QuantizationE2ETest, QConfigDefaultsConstructWithoutThrow) {
     // Verify all named DefaultQConfigs construct cleanly (smoke for
     // serialisation-style factory paths).
     EXPECT_NO_THROW({ auto q = DefaultQConfigs::default_qconfig();         (void)q; });
@@ -270,3 +289,7 @@ TEST_F(QuantizationE2ETest, QConfigDefaultsConstructWithoutThrow) {
     EXPECT_NO_THROW({ auto q = DefaultQConfigs::qat_qconfig();             (void)q; });
     EXPECT_NO_THROW({ auto q = DefaultQConfigs::uint8_activation_qconfig();(void)q; });
 }
+
+namespace {
+INSTANTIATE_BACKEND_TESTS(QuantizationE2ETest);
+}  // namespace

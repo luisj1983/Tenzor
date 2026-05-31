@@ -5,22 +5,24 @@
 
 #include <gtest/gtest.h>
 #include <tenzor/tenzor.hpp>
+#include "../backend_test_fixture.hpp"
 #include "../../include/tenzor/models/roberta.hpp"
 #include "../../include/tenzor/models/electra.hpp"
 
 using namespace tenzor;
 using namespace tenzor::models;
 
-class RoBERTaELECTRATest : public ::testing::Test {
+class RoBERTaELECTRATest : public ::tenzor::testing::BackendTest {
 protected:
     void SetUp() override {
-        device_ = Device::cpu();
+        ::tenzor::testing::BackendTest::SetUp();
+        if (::testing::Test::IsSkipped()) return;
     }
-    Device device_;
 
     // Helper to create input token IDs with valid values
     auto create_input_ids(int64_t batch_size, int64_t seq_len, int64_t vocab_size = 50265) -> Variable {
-        Tensor input_ids({batch_size, seq_len}, DType::Int64, device_);
+        // Token/index inputs are built on CPU via host writes, then moved to device.
+        Tensor input_ids({batch_size, seq_len}, DType::Int64, Device::cpu());
 
         // Fill with valid token IDs within vocabulary range
         std::vector<int64_t> data(batch_size * seq_len);
@@ -29,7 +31,7 @@ protected:
         }
         std::copy(data.begin(), data.end(), input_ids.data<int64_t>());
 
-        return Variable(input_ids, true);
+        return Variable(input_ids.to(device), true);
     }
 };
 
@@ -37,7 +39,7 @@ protected:
 // RoBERTa Base Tests
 // ============================================================================
 
-TEST_F(RoBERTaELECTRATest, RoBERTaBaseConfigTest) {
+TEST_P(RoBERTaELECTRATest, RoBERTaBaseConfigTest) {
     auto config = RobertaConfig::base();
 
     EXPECT_EQ(config.vocab_size, 50265);
@@ -48,9 +50,10 @@ TEST_F(RoBERTaELECTRATest, RoBERTaBaseConfigTest) {
     EXPECT_EQ(config.max_position_embeddings, 514);
 }
 
-TEST_F(RoBERTaELECTRATest, RoBERTaBaseForwardShape) {
+TEST_P(RoBERTaELECTRATest, RoBERTaBaseForwardShape) {
     auto config = RobertaConfig::base();
     auto model = std::make_shared<RobertaModel>(config);
+    model->to(device);
     int64_t batch_size = 2;
     int64_t seq_len = 128;
 
@@ -62,9 +65,10 @@ TEST_F(RoBERTaELECTRATest, RoBERTaBaseForwardShape) {
               (std::vector<int64_t>{batch_size, seq_len, 768}));
 }
 
-TEST_F(RoBERTaELECTRATest, RoBERTaBaseGradientFlow) {
+TEST_P(RoBERTaELECTRATest, RoBERTaBaseGradientFlow) {
     auto config = RobertaConfig::base();
     auto model = std::make_shared<RobertaModel>(config);
+    model->to(device);
     model->train();
 
     auto input_ids = create_input_ids(1, 64, config.vocab_size);
@@ -76,9 +80,10 @@ TEST_F(RoBERTaELECTRATest, RoBERTaBaseGradientFlow) {
     EXPECT_GT(params.size(), 0);
 }
 
-TEST_F(RoBERTaELECTRATest, RoBERTaBaseParameterCount) {
+TEST_P(RoBERTaELECTRATest, RoBERTaBaseParameterCount) {
     auto config = RobertaConfig::base();
     auto model = std::make_shared<RobertaModel>(config);
+    model->to(device);
     auto params = model->parameters();
 
     size_t total_params = 0;
@@ -99,7 +104,7 @@ TEST_F(RoBERTaELECTRATest, RoBERTaBaseParameterCount) {
 // RoBERTa Large Tests
 // ============================================================================
 
-TEST_F(RoBERTaELECTRATest, RoBERTaLargeConfigTest) {
+TEST_P(RoBERTaELECTRATest, RoBERTaLargeConfigTest) {
     auto config = RobertaConfig::large();
 
     EXPECT_EQ(config.hidden_size, 1024);
@@ -108,9 +113,10 @@ TEST_F(RoBERTaELECTRATest, RoBERTaLargeConfigTest) {
     EXPECT_EQ(config.intermediate_size, 4096);
 }
 
-TEST_F(RoBERTaELECTRATest, RoBERTaLargeForwardShape) {
+TEST_P(RoBERTaELECTRATest, RoBERTaLargeForwardShape) {
     auto config = RobertaConfig::large();
     auto model = std::make_shared<RobertaModel>(config);
+    model->to(device);
     int64_t batch_size = 2;
     int64_t seq_len = 128;
 
@@ -122,9 +128,10 @@ TEST_F(RoBERTaELECTRATest, RoBERTaLargeForwardShape) {
               (std::vector<int64_t>{batch_size, seq_len, 1024}));
 }
 
-TEST_F(RoBERTaELECTRATest, RoBERTaLargeGradientFlow) {
+TEST_P(RoBERTaELECTRATest, RoBERTaLargeGradientFlow) {
     auto config = RobertaConfig::large();
     auto model = std::make_shared<RobertaModel>(config);
+    model->to(device);
     model->train();
 
     auto input_ids = create_input_ids(1, 64, config.vocab_size);
@@ -140,7 +147,7 @@ TEST_F(RoBERTaELECTRATest, RoBERTaLargeGradientFlow) {
 // ELECTRA Small Tests
 // ============================================================================
 
-TEST_F(RoBERTaELECTRATest, ELECTRASmallConfigTest) {
+TEST_P(RoBERTaELECTRATest, ELECTRASmallConfigTest) {
     auto config = ElectraConfig::small();
 
     EXPECT_EQ(config.hidden_size, 256);
@@ -149,9 +156,10 @@ TEST_F(RoBERTaELECTRATest, ELECTRASmallConfigTest) {
     EXPECT_EQ(config.intermediate_size, 1024);
 }
 
-TEST_F(RoBERTaELECTRATest, ELECTRASmallForwardShape) {
+TEST_P(RoBERTaELECTRATest, ELECTRASmallForwardShape) {
     auto config = ElectraConfig::small();
     auto discriminator = std::make_shared<ElectraDiscriminator>(config);
+    discriminator->to(device);
     int64_t batch_size = 2;
     int64_t seq_len = 128;
 
@@ -163,9 +171,10 @@ TEST_F(RoBERTaELECTRATest, ELECTRASmallForwardShape) {
               (std::vector<int64_t>{batch_size, seq_len}));
 }
 
-TEST_F(RoBERTaELECTRATest, ELECTRASmallGradientFlow) {
+TEST_P(RoBERTaELECTRATest, ELECTRASmallGradientFlow) {
     auto config = ElectraConfig::small();
     auto discriminator = std::make_shared<ElectraDiscriminator>(config);
+    discriminator->to(device);
     discriminator->train();
 
     auto input_ids = create_input_ids(1, 64, 30522);
@@ -181,7 +190,7 @@ TEST_F(RoBERTaELECTRATest, ELECTRASmallGradientFlow) {
 // ELECTRA Base Tests
 // ============================================================================
 
-TEST_F(RoBERTaELECTRATest, ELECTRABaseConfigTest) {
+TEST_P(RoBERTaELECTRATest, ELECTRABaseConfigTest) {
     auto config = ElectraConfig::base();
 
     EXPECT_EQ(config.hidden_size, 768);
@@ -190,9 +199,10 @@ TEST_F(RoBERTaELECTRATest, ELECTRABaseConfigTest) {
     EXPECT_EQ(config.intermediate_size, 3072);
 }
 
-TEST_F(RoBERTaELECTRATest, ELECTRABaseForwardShape) {
+TEST_P(RoBERTaELECTRATest, ELECTRABaseForwardShape) {
     auto config = ElectraConfig::base();
     auto discriminator = std::make_shared<ElectraDiscriminator>(config);
+    discriminator->to(device);
     int64_t batch_size = 2;
     int64_t seq_len = 128;
 
@@ -204,9 +214,10 @@ TEST_F(RoBERTaELECTRATest, ELECTRABaseForwardShape) {
               (std::vector<int64_t>{batch_size, seq_len}));
 }
 
-TEST_F(RoBERTaELECTRATest, ELECTRABaseGradientFlow) {
+TEST_P(RoBERTaELECTRATest, ELECTRABaseGradientFlow) {
     auto config = ElectraConfig::base();
     auto discriminator = std::make_shared<ElectraDiscriminator>(config);
+    discriminator->to(device);
     discriminator->train();
 
     auto input_ids = create_input_ids(1, 64, 30522);
@@ -222,9 +233,10 @@ TEST_F(RoBERTaELECTRATest, ELECTRABaseGradientFlow) {
 // ELECTRA Large Tests
 // ============================================================================
 
-TEST_F(RoBERTaELECTRATest, ELECTRALargeForwardShape) {
+TEST_P(RoBERTaELECTRATest, ELECTRALargeForwardShape) {
     auto config = ElectraConfig::large();
     auto discriminator = std::make_shared<ElectraDiscriminator>(config);
+    discriminator->to(device);
     int64_t batch_size = 1;
     int64_t seq_len = 128;
 
@@ -236,9 +248,10 @@ TEST_F(RoBERTaELECTRATest, ELECTRALargeForwardShape) {
               (std::vector<int64_t>{batch_size, seq_len}));
 }
 
-TEST_F(RoBERTaELECTRATest, ELECTRALargeGradientFlow) {
+TEST_P(RoBERTaELECTRATest, ELECTRALargeGradientFlow) {
     auto config = ElectraConfig::large();
     auto discriminator = std::make_shared<ElectraDiscriminator>(config);
+    discriminator->to(device);
     discriminator->train();
 
     auto input_ids = create_input_ids(1, 64, 30522);
@@ -254,9 +267,10 @@ TEST_F(RoBERTaELECTRATest, ELECTRALargeGradientFlow) {
 // Edge Case Tests
 // ============================================================================
 
-TEST_F(RoBERTaELECTRATest, RoBERTaBatchSizeOne) {
+TEST_P(RoBERTaELECTRATest, RoBERTaBatchSizeOne) {
     auto config = RobertaConfig::base();
     auto model = std::make_shared<RobertaModel>(config);
+    model->to(device);
     auto input_ids = create_input_ids(1, 64, config.vocab_size);
     auto output = model->forward(input_ids, Tensor{}, Variable{}, Variable{});
 
@@ -265,9 +279,10 @@ TEST_F(RoBERTaELECTRATest, RoBERTaBatchSizeOne) {
               (std::vector<int64_t>{1, 64, 768}));
 }
 
-TEST_F(RoBERTaELECTRATest, ELECTRAVariableSequenceLength) {
+TEST_P(RoBERTaELECTRATest, ELECTRAVariableSequenceLength) {
     auto config = ElectraConfig::base();
     auto discriminator = std::make_shared<ElectraDiscriminator>(config);
+    discriminator->to(device);
 
     // Test with different sequence lengths
     auto input_32 = create_input_ids(2, 32, 30522);
@@ -283,15 +298,4 @@ TEST_F(RoBERTaELECTRATest, ELECTRAVariableSequenceLength) {
               (std::vector<int64_t>{1, 256}));
 }
 
-
-// ============================================================================
-// Main  
-// ============================================================================
-
-int main(int argc, char** argv) {
-    ::testing::InitGoogleTest(&argc, argv);
-    if (!::testing::GTEST_FLAG(list_tests)) {
-        tenzor::initialize();
-    }
-    return RUN_ALL_TESTS();
-}
+INSTANTIATE_BACKEND_TESTS(RoBERTaELECTRATest);

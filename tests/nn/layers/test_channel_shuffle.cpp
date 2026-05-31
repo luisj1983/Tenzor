@@ -1,21 +1,24 @@
 #include <gtest/gtest.h>
 #include <tenzor/tenzor.hpp>
 #include <cmath>
+#include "../../backend_test_fixture.hpp"
 
 using namespace tenzor;
 using namespace tenzor::nn;
 
-class ChannelShuffleTest : public ::testing::Test {
+class ChannelShuffleTest : public ::tenzor::testing::BackendTest {
 protected:
     void SetUp() override {
-        tenzor::initialize();
+        ::tenzor::testing::BackendTest::SetUp();
+        if (::testing::Test::IsSkipped()) return;
     }
 };
 
 // Test basic forward pass shape preservation
-TEST_F(ChannelShuffleTest, ForwardShapePreserved) {
+TEST_P(ChannelShuffleTest, ForwardShapePreserved) {
     ChannelShuffle cs(2);
-    auto input = Variable(randn({1, 4, 8, 8}, DType::Float32, Device::cpu()), false);
+    cs.to(device);
+    auto input = Variable(randn({1, 4, 8, 8}, DType::Float32, device), false);
     auto output = cs.forward(input);
 
     EXPECT_EQ(output.shape().size(), 4);
@@ -26,8 +29,9 @@ TEST_F(ChannelShuffleTest, ForwardShapePreserved) {
 }
 
 // Test that channels are actually shuffled
-TEST_F(ChannelShuffleTest, ChannelReordering) {
+TEST_P(ChannelShuffleTest, ChannelReordering) {
     ChannelShuffle cs(2);
+    cs.to(device);
 
     // Create input with distinct values per channel: channel i filled with float(i)
     auto t = zeros({1, 4, 1, 1}, DType::Float32, Device::cpu());
@@ -37,7 +41,7 @@ TEST_F(ChannelShuffleTest, ChannelReordering) {
     data[2] = 2.0f;  // Group 1, channel 0
     data[3] = 3.0f;  // Group 1, channel 1
 
-    auto input = Variable(t, false);
+    auto input = Variable(t.to(device), false);
     auto output = cs.forward(input);
     auto out_cpu = output.tensor().to(Device::cpu());
     const float* out_data = out_cpu.data<float>();
@@ -51,14 +55,15 @@ TEST_F(ChannelShuffleTest, ChannelReordering) {
 }
 
 // Test gradient flow
-TEST_F(ChannelShuffleTest, BackwardGradient) {
+TEST_P(ChannelShuffleTest, BackwardGradient) {
     ChannelShuffle cs(2);
-    auto input = Variable(randn({2, 4, 3, 3}, DType::Float32, Device::cpu()), true);
+    cs.to(device);
+    auto input = Variable(randn({2, 4, 3, 3}, DType::Float32, device), true);
     auto output = cs.forward(input);
 
     // Backward with ones gradient
     std::vector<int64_t> out_shape(output.shape().begin(), output.shape().end());
-    auto grad_tensor = ones(out_shape, DType::Float32, Device::cpu());
+    auto grad_tensor = ones(out_shape, DType::Float32, device);
     output.backward(grad_tensor);
 
     ASSERT_TRUE(input.grad().has_value());
@@ -72,15 +77,17 @@ TEST_F(ChannelShuffleTest, BackwardGradient) {
 }
 
 // Test that shuffle then unshuffle is identity
-TEST_F(ChannelShuffleTest, DoubleShuffleWithInverseGroups) {
+TEST_P(ChannelShuffleTest, DoubleShuffleWithInverseGroups) {
     int64_t groups = 3;
     int64_t channels = 6;
     int64_t cpg = channels / groups;  // 2
 
     ChannelShuffle cs1(groups);
+    cs1.to(device);
     ChannelShuffle cs2(cpg);  // Inverse shuffle
+    cs2.to(device);
 
-    auto input = Variable(randn({1, channels, 4, 4}, DType::Float32, Device::cpu()), false);
+    auto input = Variable(randn({1, channels, 4, 4}, DType::Float32, device), false);
     auto shuffled = cs1.forward(input);
     auto restored = cs2.forward(shuffled);
 
@@ -92,21 +99,23 @@ TEST_F(ChannelShuffleTest, DoubleShuffleWithInverseGroups) {
 }
 
 // Test invalid groups
-TEST_F(ChannelShuffleTest, InvalidGroupsThrows) {
+TEST_P(ChannelShuffleTest, InvalidGroupsThrows) {
     EXPECT_THROW(ChannelShuffle(0), std::invalid_argument);
 }
 
 // Test channels not divisible by groups
-TEST_F(ChannelShuffleTest, IndivisibleChannelsThrows) {
+TEST_P(ChannelShuffleTest, IndivisibleChannelsThrows) {
     ChannelShuffle cs(3);
-    auto input = Variable(randn({1, 4, 8, 8}, DType::Float32, Device::cpu()), false);
+    cs.to(device);
+    auto input = Variable(randn({1, 4, 8, 8}, DType::Float32, device), false);
     EXPECT_THROW(cs.forward(input), std::invalid_argument);
 }
 
 // Test with groups=1 (identity)
-TEST_F(ChannelShuffleTest, GroupsOneIsIdentity) {
+TEST_P(ChannelShuffleTest, GroupsOneIsIdentity) {
     ChannelShuffle cs(1);
-    auto input = Variable(randn({2, 6, 4, 4}, DType::Float32, Device::cpu()), false);
+    cs.to(device);
+    auto input = Variable(randn({2, 6, 4, 4}, DType::Float32, device), false);
     auto output = cs.forward(input);
 
     auto in_data = input.tensor().to(Device::cpu()).data<float>();
@@ -117,9 +126,10 @@ TEST_F(ChannelShuffleTest, GroupsOneIsIdentity) {
 }
 
 // Test with 3D input (no batch dim)
-TEST_F(ChannelShuffleTest, ThreeDimensionalInput) {
+TEST_P(ChannelShuffleTest, ThreeDimensionalInput) {
     ChannelShuffle cs(2);
-    auto input = Variable(randn({4, 8, 8}, DType::Float32, Device::cpu()), false);
+    cs.to(device);
+    auto input = Variable(randn({4, 8, 8}, DType::Float32, device), false);
     auto output = cs.forward(input);
 
     EXPECT_EQ(output.shape().size(), 3);
@@ -129,8 +139,11 @@ TEST_F(ChannelShuffleTest, ThreeDimensionalInput) {
 }
 
 // Test input too few dimensions
-TEST_F(ChannelShuffleTest, TwoDimensionalThrows) {
+TEST_P(ChannelShuffleTest, TwoDimensionalThrows) {
     ChannelShuffle cs(2);
-    auto input = Variable(randn({4, 8}, DType::Float32, Device::cpu()), false);
+    cs.to(device);
+    auto input = Variable(randn({4, 8}, DType::Float32, device), false);
     EXPECT_THROW(cs.forward(input), std::invalid_argument);
 }
+
+INSTANTIATE_BACKEND_TESTS(ChannelShuffleTest);

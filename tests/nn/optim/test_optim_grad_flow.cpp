@@ -30,19 +30,25 @@
 #include <tenzor/ops/creation.hpp>
 #include <tenzor/ops/reduction.hpp>
 
+#include "../../backend_test_fixture.hpp"
+
 using namespace tenzor;
 using namespace tenzor::nn;
 
 namespace {
 
-// Build a minimal model + data for a forward → backward cycle.
+// Build a minimal model + data for a forward → backward cycle, all placed on
+// the test's target device. Inputs are randn (non-zero) so the gradients that
+// flow back are genuinely non-zero — this is a grad-flow suite.
 struct GradFlowFixture {
     Linear layer{8, 4};
     Tensor x;
     Tensor target;
-    GradFlowFixture()
-        : x(randn({2, 8}, DType::Float32, Device::cpu()))
-        , target(zeros({2, 4}, DType::Float32, Device::cpu())) {}
+    explicit GradFlowFixture(const Device& device)
+        : x(randn({2, 8}, DType::Float32, device))
+        , target(randn({2, 4}, DType::Float32, device)) {
+        layer.to(device);
+    }
 
     auto forward_backward() -> double {
         for (auto& p : layer.parameters()) {
@@ -51,19 +57,22 @@ struct GradFlowFixture {
         auto loss = MSELoss()(layer.forward(Variable(x, false)), Variable(target, false));
         loss.backward();
         // Return the max-abs gradient over the first parameter — used by
-        // the test as the "grad flowed" signal.
+        // the test as the "grad flowed" signal. Read on host via .cpu().
         auto p = layer.parameters();
         if (p.empty() || !(*p[0]).grad().has_value()) return 0.0;
-        auto g = (*p[0]).grad().value().to(DType::Float64);
+        auto g = (*p[0]).grad().value().to(DType::Float64).cpu();
         return ::tenzor::max(::tenzor::abs(g)).item<double>();
     }
 };
 
 }  // anonymous
 
-class OptimGradFlowTest : public ::testing::Test {
+class OptimGradFlowTest : public ::tenzor::testing::BackendTest {
 protected:
-    void SetUp() override { tenzor::initialize(); }
+    void SetUp() override {
+        ::tenzor::testing::BackendTest::SetUp();
+        if (::testing::Test::IsSkipped()) return;
+    }
 };
 
 #define EXPECT_GRAD_FLOWED_THROUGH(fixture)                                    \
@@ -74,52 +83,54 @@ protected:
                "severed somewhere in the forward path";                        \
     } while (0)
 
-TEST_F(OptimGradFlowTest, SGD_GradFlows) {
-    GradFlowFixture f;
+TEST_P(OptimGradFlowTest, SGD_GradFlows) {
+    GradFlowFixture f(device);
     EXPECT_GRAD_FLOWED_THROUGH(f);
 }
 
-TEST_F(OptimGradFlowTest, Adam_GradFlows) {
-    GradFlowFixture f;
+TEST_P(OptimGradFlowTest, Adam_GradFlows) {
+    GradFlowFixture f(device);
     EXPECT_GRAD_FLOWED_THROUGH(f);
 }
 
-TEST_F(OptimGradFlowTest, Adamax_GradFlows) {
-    GradFlowFixture f;
+TEST_P(OptimGradFlowTest, Adamax_GradFlows) {
+    GradFlowFixture f(device);
     EXPECT_GRAD_FLOWED_THROUGH(f);
 }
 
-TEST_F(OptimGradFlowTest, Lion_GradFlows) {
-    GradFlowFixture f;
+TEST_P(OptimGradFlowTest, Lion_GradFlows) {
+    GradFlowFixture f(device);
     EXPECT_GRAD_FLOWED_THROUGH(f);
 }
 
-TEST_F(OptimGradFlowTest, NAdam_GradFlows) {
-    GradFlowFixture f;
+TEST_P(OptimGradFlowTest, NAdam_GradFlows) {
+    GradFlowFixture f(device);
     EXPECT_GRAD_FLOWED_THROUGH(f);
 }
 
-TEST_F(OptimGradFlowTest, Rprop_GradFlows) {
-    GradFlowFixture f;
+TEST_P(OptimGradFlowTest, Rprop_GradFlows) {
+    GradFlowFixture f(device);
     EXPECT_GRAD_FLOWED_THROUGH(f);
 }
 
-TEST_F(OptimGradFlowTest, LBFGS_GradFlows) {
-    GradFlowFixture f;
+TEST_P(OptimGradFlowTest, LBFGS_GradFlows) {
+    GradFlowFixture f(device);
     EXPECT_GRAD_FLOWED_THROUGH(f);
 }
 
-TEST_F(OptimGradFlowTest, ZeROStage1_GradFlows) {
-    GradFlowFixture f;
+TEST_P(OptimGradFlowTest, ZeROStage1_GradFlows) {
+    GradFlowFixture f(device);
     EXPECT_GRAD_FLOWED_THROUGH(f);
 }
 
-TEST_F(OptimGradFlowTest, ZeROStage2_GradFlows) {
-    GradFlowFixture f;
+TEST_P(OptimGradFlowTest, ZeROStage2_GradFlows) {
+    GradFlowFixture f(device);
     EXPECT_GRAD_FLOWED_THROUGH(f);
 }
 
-TEST_F(OptimGradFlowTest, ZeROStage3_GradFlows) {
-    GradFlowFixture f;
+TEST_P(OptimGradFlowTest, ZeROStage3_GradFlows) {
+    GradFlowFixture f(device);
     EXPECT_GRAD_FLOWED_THROUGH(f);
 }
+
+INSTANTIATE_BACKEND_TESTS(OptimGradFlowTest);

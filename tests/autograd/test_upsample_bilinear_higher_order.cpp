@@ -17,19 +17,24 @@
 #include <tenzor/nn/layers/segmentation.hpp>
 
 #include "../grad_flow_helpers.hpp"
+#include "../backend_test_fixture.hpp"
 
 using namespace tenzor;
 
-class D3Test : public ::testing::Test {
+class D3Test : public ::tenzor::testing::BackendTest {
 protected:
-    static void SetUpTestSuite() { tenzor::initialize(); }
+    void SetUp() override {
+        ::tenzor::testing::BackendTest::SetUp();
+        if (::testing::Test::IsSkipped()) return;
+    }
 };
 
-TEST_F(D3Test, CPU_InterpolateBackward_OpId_ProducesExpectedShape) {
+TEST_P(D3Test, CPU_InterpolateBackward_OpId_ProducesExpectedShape) {
     // 1x1x4x6 grad_output downsampled back to 1x1x2x3 grad_input.
-    auto grad_out = zeros({1, 1, 4, 6}, DType::Float32, Device::cpu());
-    auto* p = grad_out.data<float>();
-    for (int i = 0; i < grad_out.numel(); ++i) p[i] = 1.0f;
+    auto grad_out_cpu = zeros({1, 1, 4, 6}, DType::Float32, Device::cpu());
+    auto* p = grad_out_cpu.data<float>();
+    for (int i = 0; i < grad_out_cpu.numel(); ++i) p[i] = 1.0f;
+    auto grad_out = grad_out_cpu.to(device);
 
     OpAttributes attrs;
     attrs.set(AttrKey::InputShape, std::string("2,3"));
@@ -47,14 +52,14 @@ TEST_F(D3Test, CPU_InterpolateBackward_OpId_ProducesExpectedShape) {
     EXPECT_EQ(shape[3], 3);
 }
 
-TEST_F(D3Test, UpsampleBilinearBackward_PreservesGraph) {
+TEST_P(D3Test, UpsampleBilinearBackward_PreservesGraph) {
     // Set up forward via nn::upsample_bilinear, run backward with
     // create_graph=true, and verify input.grad_variable() carries grad_fn.
-    auto x = Variable(zeros({1, 1, 2, 3}, DType::Float32, Device::cpu()),
-                       /*requires_grad=*/true);
+    auto x_cpu = zeros({1, 1, 2, 3}, DType::Float32, Device::cpu());
     // Non-trivial data so gradients aren't trivially zero.
-    auto* p = x.tensor().data<float>();
-    for (int i = 0; i < x.tensor().numel(); ++i) p[i] = static_cast<float>(i + 1);
+    auto* p = x_cpu.data<float>();
+    for (int i = 0; i < x_cpu.numel(); ++i) p[i] = static_cast<float>(i + 1);
+    auto x = Variable(x_cpu.to(device), /*requires_grad=*/true);
 
     auto y = nn::upsample_bilinear(x, /*target_h=*/4, /*target_w=*/6);
 
@@ -75,17 +80,18 @@ TEST_F(D3Test, UpsampleBilinearBackward_PreservesGraph) {
     EXPECT_GRAD_FLOWS(x);
 }
 
-TEST_F(D3Test, BackwardDispatchesToInterpolateBackward_NotCpuRoundTrip) {
+TEST_P(D3Test, BackwardDispatchesToInterpolateBackward_NotCpuRoundTrip) {
     // Verify the tensor-level backward calls OpId::InterpolateBackward
     // rather than the previous on-host scalar loop with .to(cpu) / .to(device).
     // We can't directly observe the kernel selection but we *can* verify the
-    // op is registered on CPU and produces results matching the historical
+    // op is registered and produces results matching the historical
     // implementation for a simple case.
     auto fn = std::make_shared<UpsampleBilinearBackward>(
         /*input_h=*/2, /*input_w=*/3, /*output_h=*/4, /*output_w=*/6);
-    auto grad_out_t = zeros({1, 1, 4, 6}, DType::Float32, Device::cpu());
-    auto* p = grad_out_t.data<float>();
-    for (int i = 0; i < grad_out_t.numel(); ++i) p[i] = 1.0f;
+    auto grad_out_cpu = zeros({1, 1, 4, 6}, DType::Float32, Device::cpu());
+    auto* p = grad_out_cpu.data<float>();
+    for (int i = 0; i < grad_out_cpu.numel(); ++i) p[i] = 1.0f;
+    auto grad_out_t = grad_out_cpu.to(device);
 
     auto results = fn->backward({grad_out_t});
     ASSERT_EQ(results.size(), 1u);
@@ -98,11 +104,14 @@ TEST_F(D3Test, BackwardDispatchesToInterpolateBackward_NotCpuRoundTrip) {
     // PyTorch's `align_corners=false` semantics on the non-clamped path).
     // We just require all values to be finite and non-negative summed mass
     // close to interior pixel count.
-    auto* gp = results[0].data<float>();
+    auto results_cpu = results[0].cpu();
+    auto* gp = results_cpu.data<float>();
     float total = 0.0f;
-    for (int i = 0; i < results[0].numel(); ++i) {
+    for (int i = 0; i < results_cpu.numel(); ++i) {
         EXPECT_TRUE(std::isfinite(gp[i]));
         total += gp[i];
     }
     EXPECT_GT(total, 0.0f);
 }
+
+INSTANTIATE_BACKEND_TESTS(D3Test);

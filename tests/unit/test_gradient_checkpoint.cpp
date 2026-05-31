@@ -13,13 +13,16 @@
 #include "tenzor/nn/activations/activations.hpp"
 #include <cmath>
 #include "../grad_flow_helpers.hpp"
+#include "../backend_test_fixture.hpp"
 
 using namespace tenzor;
 using namespace tenzor::autograd;
 
-class GradientCheckpointTest : public ::testing::Test {
+class GradientCheckpointTest : public ::tenzor::testing::BackendTest {
 protected:
     void SetUp() override {
+        ::tenzor::testing::BackendTest::SetUp();
+        if (::testing::Test::IsSkipped()) return;
         reset_checkpoint_stats();
     }
 
@@ -32,14 +35,14 @@ protected:
 // Basic Checkpoint Statistics Tests
 // ==============================================================================
 
-TEST_F(GradientCheckpointTest, StatsTracking) {
+TEST_P(GradientCheckpointTest, StatsTracking) {
     auto& stats = get_checkpoint_stats();
     EXPECT_EQ(stats.num_checkpoints, 0);
     EXPECT_EQ(stats.num_recomputations, 0);
     EXPECT_EQ(stats.saved_memory_bytes, 0);
 }
 
-TEST_F(GradientCheckpointTest, ResetStats) {
+TEST_P(GradientCheckpointTest, ResetStats) {
     auto& stats = get_checkpoint_stats();
 
     // Modify stats
@@ -56,22 +59,22 @@ TEST_F(GradientCheckpointTest, ResetStats) {
 // Checkpoint Context Tests
 // ==============================================================================
 
-TEST_F(GradientCheckpointTest, CheckpointContextEnabled) {
+TEST_P(GradientCheckpointTest, CheckpointContextEnabled) {
     CheckpointContext ctx(true);
     EXPECT_TRUE(ctx.is_enabled());
 }
 
-TEST_F(GradientCheckpointTest, CheckpointContextDisabled) {
+TEST_P(GradientCheckpointTest, CheckpointContextDisabled) {
     CheckpointContext ctx(false);
     EXPECT_FALSE(ctx.is_enabled());
 }
 
-TEST_F(GradientCheckpointTest, CheckpointContextStats) {
+TEST_P(GradientCheckpointTest, CheckpointContextStats) {
     CheckpointContext ctx(true);
 
     // Create and checkpoint a simple computation
-    auto x = Variable(ones({2, 3}), true);
-    auto two = Variable(full({2, 3}, 2.0f), false);
+    auto x = Variable(ones({2, 3}, DType::Float32, device), true);
+    auto two = Variable(full({2, 3}, 2.0f, DType::Float32, device), false);
     auto y = checkpoint([&two](const Variable& in) {
         return in * two;
     }, x);
@@ -85,7 +88,7 @@ TEST_F(GradientCheckpointTest, CheckpointContextStats) {
 // Global Checkpoint Enable/Disable Tests
 // ==============================================================================
 
-TEST_F(GradientCheckpointTest, GlobalEnableDisable) {
+TEST_P(GradientCheckpointTest, GlobalEnableDisable) {
     set_checkpoint_enabled(false);
     EXPECT_FALSE(is_checkpoint_enabled());
 
@@ -97,7 +100,7 @@ TEST_F(GradientCheckpointTest, GlobalEnableDisable) {
 // Memory Tracker Tests
 // ==============================================================================
 
-TEST_F(GradientCheckpointTest, MemoryTrackerStart) {
+TEST_P(GradientCheckpointTest, MemoryTrackerStart) {
     MemoryTracker::reset();
     MemoryTracker::start_tracking();
 
@@ -107,7 +110,7 @@ TEST_F(GradientCheckpointTest, MemoryTrackerStart) {
     MemoryTracker::stop_tracking();
 }
 
-TEST_F(GradientCheckpointTest, MemoryTrackerPeak) {
+TEST_P(GradientCheckpointTest, MemoryTrackerPeak) {
     MemoryTracker::reset();
     MemoryTracker::start_tracking();
 
@@ -117,7 +120,7 @@ TEST_F(GradientCheckpointTest, MemoryTrackerPeak) {
     MemoryTracker::stop_tracking();
 }
 
-TEST_F(GradientCheckpointTest, MemoryTrackerReset) {
+TEST_P(GradientCheckpointTest, MemoryTrackerReset) {
     MemoryTracker::start_tracking();
     MemoryTracker::reset();
 
@@ -131,17 +134,17 @@ TEST_F(GradientCheckpointTest, MemoryTrackerReset) {
 // Simple Checkpoint Function Tests
 // ==============================================================================
 
-TEST_F(GradientCheckpointTest, SimpleForwardPass) {
+TEST_P(GradientCheckpointTest, SimpleForwardPass) {
     // Create input
-    auto x_tensor = randn({4, 8});
+    auto x_tensor = randn({4, 8}, DType::Float32, device);
     Variable x(x_tensor, true);
 
     // Checkpoint a simple function: y = x * 2 + 1
-    auto checkpointed_fn = [](const Variable& input) -> Variable {
+    auto checkpointed_fn = [this](const Variable& input) -> Variable {
         auto shape = input.shape();
         std::vector<int64_t> shape_vec(shape.begin(), shape.end());
-        auto two = Variable(full(shape_vec, 2.0f), false);
-        auto one = Variable(full(shape_vec, 1.0f), false);
+        auto two = Variable(full(shape_vec, 2.0f, DType::Float32, device), false);
+        auto one = Variable(full(shape_vec, 1.0f, DType::Float32, device), false);
         auto doubled = input * two;
         auto result = doubled + one;
         return result;
@@ -152,17 +155,19 @@ TEST_F(GradientCheckpointTest, SimpleForwardPass) {
     // Verify forward pass correctness
     EXPECT_EQ(y.tensor().shape().size(), x.tensor().shape().size());
 
-    const float* x_data = x.tensor().data<float>();
-    const float* y_data = y.tensor().data<float>();
+    auto x_cpu = x.tensor().cpu();
+    auto y_cpu = y.tensor().cpu();
+    const float* x_data = x_cpu.data<float>();
+    const float* y_data = y_cpu.data<float>();
 
-    for (int i = 0; i < x.tensor().numel(); ++i) {
+    for (int i = 0; i < x_cpu.numel(); ++i) {
         EXPECT_FLOAT_EQ(y_data[i], x_data[i] * 2.0f + 1.0f);
     }
 }
 
-TEST_F(GradientCheckpointTest, CheckpointGradientCorrectness) {
+TEST_P(GradientCheckpointTest, CheckpointGradientCorrectness) {
     // Create input
-    auto x_tensor = ones({3, 3});
+    auto x_tensor = ones({3, 3}, DType::Float32, device);
     Variable x(x_tensor, true);
 
     // Checkpoint function: y = x^2
@@ -179,17 +184,19 @@ TEST_F(GradientCheckpointTest, CheckpointGradientCorrectness) {
 
     // Gradient should be dy/dx = 2*x = 2*1 = 2
     EXPECT_GRAD_FLOWS(x);
-    const float* grad_data = x.grad()->data<float>();
+    auto grad_cpu = x.grad()->cpu();
+    const float* grad_data = grad_cpu.data<float>();
 
-    for (int i = 0; i < x.tensor().numel(); ++i) {
+    for (int i = 0; i < grad_cpu.numel(); ++i) {
         EXPECT_FLOAT_EQ(grad_data[i], 2.0f);
     }
 }
 
-TEST_F(GradientCheckpointTest, MultiVariableCheckpoint) {
+TEST_P(GradientCheckpointTest, MultiVariableCheckpoint) {
     // Test checkpoint with multiple inputs/outputs
-    auto x_tensor = ones({2, 2});
-    auto y_tensor = mul(ones({2, 2}), full({2, 2}, 2.0f));
+    auto x_tensor = ones({2, 2}, DType::Float32, device);
+    auto y_tensor = mul(ones({2, 2}, DType::Float32, device),
+                        full({2, 2}, 2.0f, DType::Float32, device));
 
     Variable x(x_tensor, true);
     Variable y(y_tensor, true);
@@ -209,8 +216,9 @@ TEST_F(GradientCheckpointTest, MultiVariableCheckpoint) {
     auto z = outputs[0];
 
     // Verify forward: z = 1 * 2 + 1 = 3
-    const float* z_data = z.tensor().data<float>();
-    for (int i = 0; i < z.tensor().numel(); ++i) {
+    auto z_cpu = z.tensor().cpu();
+    const float* z_data = z_cpu.data<float>();
+    for (int i = 0; i < z_cpu.numel(); ++i) {
         EXPECT_FLOAT_EQ(z_data[i], 3.0f);
     }
 
@@ -223,24 +231,24 @@ TEST_F(GradientCheckpointTest, MultiVariableCheckpoint) {
     EXPECT_GRAD_FLOWS(y);
 }
 
-TEST_F(GradientCheckpointTest, NestedCheckpoints) {
-    auto x_tensor = ones({2, 2});
+TEST_P(GradientCheckpointTest, NestedCheckpoints) {
+    auto x_tensor = ones({2, 2}, DType::Float32, device);
     Variable x(x_tensor, true);
 
     // Outer checkpoint - pass x by reference
-    auto outer_fn = [&x](const Variable& input) -> Variable {
+    auto outer_fn = [this, &x](const Variable& input) -> Variable {
         // Inner checkpoint - for nested checkpoints with non-leaf intermediates
-        auto inner_fn = [](const Variable& in) -> Variable {
+        auto inner_fn = [this](const Variable& in) -> Variable {
             auto shape = in.shape();
             std::vector<int64_t> shape_vec(shape.begin(), shape.end());
-            auto three = Variable(full(shape_vec, 3.0f), false);
+            auto three = Variable(full(shape_vec, 3.0f, DType::Float32, device), false);
             return in * three;
         };
 
         auto intermediate = checkpoint(inner_fn, input);
         auto shape = input.shape();
         std::vector<int64_t> shape_vec(shape.begin(), shape.end());
-        auto one = Variable(full(shape_vec, 1.0f), false);
+        auto one = Variable(full(shape_vec, 1.0f, DType::Float32, device), false);
         return intermediate + one;
     };
 
@@ -248,8 +256,9 @@ TEST_F(GradientCheckpointTest, NestedCheckpoints) {
     auto y = checkpoint_with_original(outer_fn, x, &x);
 
     // Forward: y = (x * 3) + 1 = 3 + 1 = 4
-    const float* y_data = y.tensor().data<float>();
-    for (int i = 0; i < y.tensor().numel(); ++i) {
+    auto y_cpu = y.tensor().cpu();
+    const float* y_data = y_cpu.data<float>();
+    for (int i = 0; i < y_cpu.numel(); ++i) {
         EXPECT_FLOAT_EQ(y_data[i], 4.0f);
     }
 
@@ -259,8 +268,9 @@ TEST_F(GradientCheckpointTest, NestedCheckpoints) {
 
     // Gradient: dy/dx = 3
     EXPECT_GRAD_FLOWS(x);
-    const float* grad_data = x.grad()->data<float>();
-    for (int i = 0; i < x.tensor().numel(); ++i) {
+    auto grad_cpu = x.grad()->cpu();
+    const float* grad_data = grad_cpu.data<float>();
+    for (int i = 0; i < grad_cpu.numel(); ++i) {
         EXPECT_FLOAT_EQ(grad_data[i], 3.0f);
     }
 }
@@ -269,8 +279,8 @@ TEST_F(GradientCheckpointTest, NestedCheckpoints) {
 // Checkpoint with Activations
 // ==============================================================================
 
-TEST_F(GradientCheckpointTest, CheckpointWithReLU) {
-    auto x_tensor = randn({4, 4});
+TEST_P(GradientCheckpointTest, CheckpointWithReLU) {
+    auto x_tensor = randn({4, 4}, DType::Float32, device);
     Variable x(x_tensor, true);
 
     // Simplified: just apply relu directly without intermediate operations
@@ -288,8 +298,8 @@ TEST_F(GradientCheckpointTest, CheckpointWithReLU) {
     EXPECT_GRAD_FLOWS(x);
 }
 
-TEST_F(GradientCheckpointTest, CheckpointWithSigmoid) {
-    auto x_tensor = randn({3, 3});
+TEST_P(GradientCheckpointTest, CheckpointWithSigmoid) {
+    auto x_tensor = randn({3, 3}, DType::Float32, device);
     Variable x(x_tensor, true);
 
     auto sigmoid_fn = [](const Variable& input) -> Variable {
@@ -300,8 +310,9 @@ TEST_F(GradientCheckpointTest, CheckpointWithSigmoid) {
     auto y = checkpoint_with_original(sigmoid_fn, x, &x);
 
     // Verify sigmoid output is in (0, 1)
-    const float* y_data = y.tensor().data<float>();
-    for (int i = 0; i < y.tensor().numel(); ++i) {
+    auto y_cpu = y.tensor().cpu();
+    const float* y_data = y_cpu.data<float>();
+    for (int i = 0; i < y_cpu.numel(); ++i) {
         EXPECT_GT(y_data[i], 0.0f);
         EXPECT_LT(y_data[i], 1.0f);
     }
@@ -317,24 +328,24 @@ TEST_F(GradientCheckpointTest, CheckpointWithSigmoid) {
 // Checkpoint Segment Tests
 // ==============================================================================
 
-TEST_F(GradientCheckpointTest, CheckpointSegmentConstruction) {
+TEST_P(GradientCheckpointTest, CheckpointSegmentConstruction) {
     CheckpointSegment segment("test_segment", 0);
 
     EXPECT_EQ(segment.name(), "test_segment");
     EXPECT_EQ(segment.nesting_level(), 0);
 }
 
-TEST_F(GradientCheckpointTest, CheckpointSegmentExecution) {
+TEST_P(GradientCheckpointTest, CheckpointSegmentExecution) {
     CheckpointSegment segment("compute_segment", 0);
 
-    auto x_tensor = ones({2, 2});
+    auto x_tensor = ones({2, 2}, DType::Float32, device);
     Variable x(x_tensor, true);
 
     // IMPORTANT: Take inputs by const reference
-    auto compute_fn = [](const std::vector<Variable>& inputs) -> std::vector<Variable> {
+    auto compute_fn = [this](const std::vector<Variable>& inputs) -> std::vector<Variable> {
         auto shape = inputs[0].shape();
         std::vector<int64_t> shape_vec(shape.begin(), shape.end());
-        auto five = Variable(full(shape_vec, 5.0f), false);
+        auto five = Variable(full(shape_vec, 5.0f, DType::Float32, device), false);
         auto result = inputs[0] * five;
         std::vector<Variable> outputs;
         outputs.push_back(result);
@@ -345,13 +356,14 @@ TEST_F(GradientCheckpointTest, CheckpointSegmentExecution) {
 
     EXPECT_EQ(outputs.size(), 1);
 
-    const float* output_data = outputs[0].tensor().data<float>();
-    for (int i = 0; i < outputs[0].tensor().numel(); ++i) {
+    auto output_cpu = outputs[0].tensor().cpu();
+    const float* output_data = output_cpu.data<float>();
+    for (int i = 0; i < output_cpu.numel(); ++i) {
         EXPECT_FLOAT_EQ(output_data[i], 5.0f);
     }
 }
 
-TEST_F(GradientCheckpointTest, CheckpointSegmentNesting) {
+TEST_P(GradientCheckpointTest, CheckpointSegmentNesting) {
     CheckpointSegment outer("outer", 0);
     CheckpointSegment inner("inner", 1);
 
@@ -363,20 +375,20 @@ TEST_F(GradientCheckpointTest, CheckpointSegmentNesting) {
 // Performance and Memory Tests
 // ==============================================================================
 
-TEST_F(GradientCheckpointTest, MemorySavingsEstimation) {
+TEST_P(GradientCheckpointTest, MemorySavingsEstimation) {
     MemoryTracker::reset();
     MemoryTracker::start_tracking();
 
-    auto x_tensor = randn({10, 10});
+    auto x_tensor = randn({10, 10}, DType::Float32, device);
     Variable x(x_tensor, true);
 
     // Checkpoint a computation that creates intermediate tensors
-    auto memory_fn = [](const Variable& input) -> Variable {
+    auto memory_fn = [this](const Variable& input) -> Variable {
         auto shape = input.shape();
         std::vector<int64_t> shape_vec(shape.begin(), shape.end());
-        auto two = Variable(full(shape_vec, 2.0f), false);
-        auto one = Variable(full(shape_vec, 1.0f), false);
-        auto three = Variable(full(shape_vec, 3.0f), false);
+        auto two = Variable(full(shape_vec, 2.0f, DType::Float32, device), false);
+        auto one = Variable(full(shape_vec, 1.0f, DType::Float32, device), false);
+        auto three = Variable(full(shape_vec, 3.0f, DType::Float32, device), false);
         auto temp1 = input * two;
         auto temp2 = temp1 + one;
         auto temp3 = temp2 * three;
@@ -393,18 +405,18 @@ TEST_F(GradientCheckpointTest, MemorySavingsEstimation) {
     MemoryTracker::stop_tracking();
 }
 
-TEST_F(GradientCheckpointTest, CheckpointStatsAccumulation) {
+TEST_P(GradientCheckpointTest, CheckpointStatsAccumulation) {
     reset_checkpoint_stats();
 
-    auto x_tensor = ones({5, 5});
+    auto x_tensor = ones({5, 5}, DType::Float32, device);
     Variable x(x_tensor, true);
 
     // Create multiple checkpoints
     for (int i = 0; i < 3; ++i) {
-        auto fn = [i](const Variable& input) -> Variable {
+        auto fn = [this, i](const Variable& input) -> Variable {
             auto shape = input.shape();
             std::vector<int64_t> shape_vec(shape.begin(), shape.end());
-            auto scalar = Variable(full(shape_vec, static_cast<float>(i + 1)), false);
+            auto scalar = Variable(full(shape_vec, static_cast<float>(i + 1), DType::Float32, device), false);
             return input * scalar;
         };
 
@@ -417,17 +429,4 @@ TEST_F(GradientCheckpointTest, CheckpointStatsAccumulation) {
     EXPECT_GT(stats.num_checkpoints, 0);
 }
 
-int main(int argc, char** argv) {
-    // Initialize Tenzor library (loads backends and registers operations)
-
-    ::testing::InitGoogleTest(&argc, argv);
-    if (!::testing::GTEST_FLAG(list_tests)) {
-        tenzor::initialize();
-    }
-    int result = RUN_ALL_TESTS();
-
-    // Cleanup
-    tenzor::finalize();
-
-    return result;
-}
+INSTANTIATE_BACKEND_TESTS(GradientCheckpointTest);

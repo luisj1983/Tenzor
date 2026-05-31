@@ -4,23 +4,26 @@
  */
 
 #include <gtest/gtest.h>
+#include "../backend_test_fixture.hpp"
 #include "tenzor/tenzor.hpp"
 #include "tenzor/ops/fft.hpp"
 #include <cmath>
 
 using namespace tenzor;
 
-class STFTTest : public ::testing::Test {
+class STFTTest : public ::tenzor::testing::BackendTest {
 protected:
     void SetUp() override {
-        tenzor::initialize();
+        ::tenzor::testing::BackendTest::SetUp();
+        if (::testing::Test::IsSkipped()) return;
     }
 };
 
-TEST_F(STFTTest, BasicSTFT) {
+TEST_P(STFTTest, BasicSTFT) {
     // Simple sine wave signal
     int64_t signal_len = 256;
-    auto t = tenzor::arange(0.0f, static_cast<float>(signal_len), 1.0f);
+    auto t = tenzor::arange(0.0, static_cast<double>(signal_len), 1.0,
+                            DType::Float32, device);
     auto signal = tenzor::sin(t * 0.1f);  // Low frequency sine
 
     int64_t n_fft = 64;
@@ -32,26 +35,27 @@ TEST_F(STFTTest, BasicSTFT) {
     EXPECT_TRUE(result.dtype() == DType::Complex64 || result.dtype() == DType::Complex128);
 }
 
-TEST_F(STFTTest, STFTWithWindow) {
+TEST_P(STFTTest, STFTWithWindow) {
     int64_t signal_len = 256;
-    auto signal = tenzor::randn({signal_len});
+    auto signal = tenzor::randn({signal_len}, DType::Float32, device);
 
     int64_t n_fft = 64;
-    // Hann window
-    auto window = tenzor::zeros({n_fft});
-    auto* w = window.data<float>();
+    // Hann window (build on CPU, then move to device)
+    auto window_cpu = tenzor::zeros({n_fft}, DType::Float32, Device::cpu());
+    auto* w = window_cpu.data<float>();
     for (int64_t i = 0; i < n_fft; i++) {
         w[i] = 0.5f * (1.0f - std::cos(2.0f * M_PI * i / (n_fft - 1)));
     }
+    auto window = window_cpu.to(device);
 
     auto result = tenzor::fft::stft(signal, n_fft, /*hop_length=*/-1, /*win_length=*/-1, window);
     EXPECT_EQ(result.shape()[0], n_fft / 2 + 1);
 }
 
-TEST_F(STFTTest, STFTRoundtrip) {
+TEST_P(STFTTest, STFTRoundtrip) {
     // STFT -> ISTFT should approximately reconstruct
     int64_t signal_len = 256;
-    auto signal = tenzor::randn({signal_len});
+    auto signal = tenzor::randn({signal_len}, DType::Float32, device);
 
     int64_t n_fft = 64;
     int64_t hop_length = 16;
@@ -66,10 +70,10 @@ TEST_F(STFTTest, STFTRoundtrip) {
     EXPECT_EQ(reconstructed.shape()[0], signal_len);
 }
 
-TEST_F(STFTTest, DifferentHopLengths) {
+TEST_P(STFTTest, DifferentHopLengths) {
     // Test with different hop lengths
     int64_t signal_len = 256;
-    auto signal = tenzor::randn({signal_len});
+    auto signal = tenzor::randn({signal_len}, DType::Float32, device);
     int64_t n_fft = 64;
 
     auto result1 = tenzor::fft::stft(signal, n_fft, /*hop_length=*/16);
@@ -78,3 +82,5 @@ TEST_F(STFTTest, DifferentHopLengths) {
     // Smaller hop length = more frames
     EXPECT_GT(result1.shape()[1], result2.shape()[1]);
 }
+
+INSTANTIATE_BACKEND_TESTS(STFTTest);

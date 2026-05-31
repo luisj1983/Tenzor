@@ -11,7 +11,7 @@ if(TENZOR_BUILD_ONEAPI)
     target_link_libraries(test_oneapi_backend PRIVATE tenzor_core GTest::gtest_main)
 
     # OneAPI device initialization can be slow, use 60 second timeout
-    tenzor_discover_tests(test_oneapi_backend DISCOVERY_TIMEOUT 60)
+    tenzor_discover_tests(test_oneapi_backend DISCOVERY_TIMEOUT 60 BACKENDS oneapi)
 endif()
 
 # Vulkan Caching Allocator Tests
@@ -22,7 +22,7 @@ if(TENZOR_BUILD_VULKAN)
     target_link_libraries(test_vulkan_caching_allocator PRIVATE
         tenzor_core tenzor_backend_vulkan ${Vulkan_LIBRARIES} GTest::gtest_main)
     target_include_directories(test_vulkan_caching_allocator PRIVATE ${Vulkan_INCLUDE_DIRS})
-    tenzor_discover_tests(test_vulkan_caching_allocator DISCOVERY_TIMEOUT 60)
+    tenzor_discover_tests(test_vulkan_caching_allocator DISCOVERY_TIMEOUT 60 BACKENDS vulkan)
 endif()
 
 # ROCm Caching Allocator Tests
@@ -34,7 +34,7 @@ if(TENZOR_BUILD_ROCM AND TARGET tenzor_backend_rocm)
         tenzor_core tenzor_backend_rocm hip::host GTest::gtest_main)
     target_include_directories(test_rocm_caching_allocator PRIVATE ${ROCM_PATH}/include)
     add_dependencies(test_rocm_caching_allocator tenzor_backend_rocm)
-    tenzor_discover_tests(test_rocm_caching_allocator DISCOVERY_TIMEOUT 60)
+    tenzor_discover_tests(test_rocm_caching_allocator DISCOVERY_TIMEOUT 60 BACKENDS rocm)
 endif()
 
 # OneAPI Caching Allocator Tests
@@ -51,5 +51,5 @@ if(TENZOR_BUILD_ONEAPI AND TARGET tenzor_backend_oneapi)
     # Ensure the oneapi backend is built before the test
     add_dependencies(test_oneapi_caching_allocator tenzor_backend_oneapi)
 
-    tenzor_discover_tests(test_oneapi_caching_allocator DISCOVERY_TIMEOUT 60)
+    tenzor_discover_tests(test_oneapi_caching_allocator DISCOVERY_TIMEOUT 60 BACKENDS oneapi)
 endif()

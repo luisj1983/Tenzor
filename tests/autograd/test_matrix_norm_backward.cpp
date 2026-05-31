@@ -21,20 +21,11 @@
 #include <tenzor/ops/creation.hpp>
 #include <tenzor/ops/linalg.hpp>
 
+#include "../backend_test_fixture.hpp"
+
 #include <cmath>
 #include <cstdint>
 #include <vector>
-
-namespace tenzor { void initialize(); }
-
-namespace {
-class MatrixNormGradEnv : public ::testing::Environment {
-public:
-    void SetUp() override { tenzor::initialize(); }
-};
-[[maybe_unused]] auto* g_env =
-    ::testing::AddGlobalTestEnvironment(new MatrixNormGradEnv);
-}  // namespace
 
 using namespace tenzor;
 
@@ -89,13 +80,17 @@ auto analytic_matrix_norm_subgrad(const std::vector<double>& A_row_major,
 }
 
 // Run matrix_norm forward via the Variable autograd path, then backward,
-// returning the resulting input gradient as a flat host vector.
+// returning the resulting input gradient as a flat host vector. The input
+// tensor is built on the host and routed onto `device`; the gradient is
+// pulled back to CPU before being read.
 auto run_autograd_matrix_norm(const std::vector<double>& A_row_major,
-                              int64_t M, int64_t N, double ord)
+                              int64_t M, int64_t N, double ord,
+                              const Device& device)
     -> std::vector<double> {
-    auto A_tensor = Tensor::from_blob(const_cast<double*>(A_row_major.data()),
-                                      {M, N}, DType::Float64, Device::cpu())
-                       .clone();  // own a copy so requires_grad can attach
+    auto A_host = Tensor::from_blob(const_cast<double*>(A_row_major.data()),
+                                    {M, N}, DType::Float64, Device::cpu())
+                      .clone();  // own a copy before moving to the target device
+    auto A_tensor = A_host.to(device);
     Variable A(A_tensor, /*requires_grad=*/true);
     auto norm = tenzor::matrix_norm(A, ord);
     // Sum to scalar (always already scalar for unbatched 2D input — but
@@ -113,10 +108,17 @@ auto run_autograd_matrix_norm(const std::vector<double>& A_row_major,
 
 }  // namespace
 
-class MatrixNormSubgradient : public ::testing::TestWithParam<double> {};
+class MatrixNormSubgradient : public ::tenzor::testing::BackendTest {};
 
 TEST_P(MatrixNormSubgradient, MatchesAnalyticForUnbatchedFloat64) {
-    const double ord = GetParam();
+    // The four piecewise-linear induced norms whose subgradients were
+    // previously returned as zeros. Iterated here instead of via a separate
+    // value parameter so the suite can be parameterized by backend.
+    const std::vector<double> ords = {
+        1.0, -1.0,
+        std::numeric_limits<double>::infinity(),
+        -std::numeric_limits<double>::infinity(),
+    };
     // 3x4 matrix with values chosen so the row/column sums have a unique
     // max and min (avoids subgradient ambiguity at ties).
     std::vector<double> A = {
@@ -125,37 +127,26 @@ TEST_P(MatrixNormSubgradient, MatchesAnalyticForUnbatchedFloat64) {
          2.5, -3.5,  4.5, -5.5,
     };
     const int64_t M = 3, N = 4;
-    auto got      = run_autograd_matrix_norm(A, M, N, ord);
-    auto expected = analytic_matrix_norm_subgrad(A, M, N, ord);
-    ASSERT_EQ(got.size(), expected.size());
-    for (size_t i = 0; i < got.size(); ++i) {
-        EXPECT_DOUBLE_EQ(got[i], expected[i])
-            << "ord=" << ord << " mismatch at index " << i
-            << " got=" << got[i] << " expected=" << expected[i];
+    for (double ord : ords) {
+        auto got      = run_autograd_matrix_norm(A, M, N, ord, device);
+        auto expected = analytic_matrix_norm_subgrad(A, M, N, ord);
+        ASSERT_EQ(got.size(), expected.size());
+        for (size_t i = 0; i < got.size(); ++i) {
+            EXPECT_DOUBLE_EQ(got[i], expected[i])
+                << "ord=" << ord << " mismatch at index " << i
+                << " got=" << got[i] << " expected=" << expected[i];
+        }
     }
 }
 
-INSTANTIATE_TEST_SUITE_P(
-    AllInducedNorms, MatrixNormSubgradient,
-    ::testing::Values(1.0, -1.0,
-                      std::numeric_limits<double>::infinity(),
-                      -std::numeric_limits<double>::infinity()),
-    [](const ::testing::TestParamInfo<double>& info) {
-        const double v = info.param;
-        if (v == 1.0) return std::string{"ord_1"};
-        if (v == -1.0) return std::string{"ord_neg1"};
-        if (std::isinf(v)) return std::string{v > 0 ? "ord_posinf" : "ord_neginf"};
-        return std::string{"other"};
-    });
-
 // Regression guard: ord = 2 (spectral norm) was already correct; verify the
 // rewrite of the function didn't break it.
-TEST(MatrixNormSubgradient, SpectralNormStillWorks) {
+TEST_P(MatrixNormSubgradient, SpectralNormStillWorks) {
     std::vector<double> A = {
         1.0, 0.5,
         0.5, 1.0,
     };
-    auto out = run_autograd_matrix_norm(A, 2, 2, 2.0);
+    auto out = run_autograd_matrix_norm(A, 2, 2, 2.0, device);
     // Spectral-norm subgradient is u_1 v_1^T. For a symmetric matrix
     // [[1, 0.5], [0.5, 1]], the leading eigenvector is (1, 1)/sqrt(2) and
     // the singular gradient is the outer product, ~[[0.5, 0.5], [0.5, 0.5]].
@@ -165,3 +156,5 @@ TEST(MatrixNormSubgradient, SpectralNormStillWorks) {
     for (double v : out) sumsq += v * v;
     EXPECT_GT(sumsq, 0.1) << "spectral norm subgradient should be non-zero";
 }
+
+INSTANTIATE_BACKEND_TESTS(MatrixNormSubgradient);

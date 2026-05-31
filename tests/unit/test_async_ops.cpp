@@ -15,41 +15,37 @@
 #include "tenzor/backend/backend.hpp"
 #include "tenzor/backend/loader.hpp"
 #include "tenzor/tenzor.hpp"
+#include "../backend_test_fixture.hpp"
 #include <chrono>
 #include <thread>
 #include <vector>
 
 using namespace tenzor;
 
-// Global test environment for initialization
-class AsyncOpsTestEnvironment : public ::testing::Environment {
-public:
-    void SetUp() override {
-        tenzor::initialize();
-    }
-};
+// Parameterized over all backends via BackendTest: each TEST_P creates its
+// tensors on the fixture's `device` and runs the async ops on that device.
+class AsyncOpsTest : public ::tenzor::testing::BackendTest {};
 
-static ::testing::Environment* const async_ops_env =
-    ::testing::AddGlobalTestEnvironment(new AsyncOpsTestEnvironment);
-
-// Helper function - full_like implementation
+// Helper function - full_like implementation. Builds the filled buffer on the
+// CPU then moves it to the source tensor's device so the result matches the
+// input device for use in subsequent device-side ops.
 auto full_like(const Tensor& tensor, float value) -> Tensor {
-    auto result = tensor.clone();
-    auto size = result.numel();
-    if (result.dtype() == DType::Float32) {
-        float* data = static_cast<float*>(result.data_ptr());
+    auto cpu_tensor = tensor.cpu().clone();
+    auto size = cpu_tensor.numel();
+    if (cpu_tensor.dtype() == DType::Float32) {
+        float* data = static_cast<float*>(cpu_tensor.data_ptr());
         for (int64_t i = 0; i < size; ++i) {
             data[i] = value;
         }
     }
-    return result;
+    return cpu_tensor.to(tensor.device());
 }
 
 // ============================================================================
 // Future/Promise Tests
 // ============================================================================
 
-TEST(AsyncOpsTest, FutureBasicWait) {
+TEST_P(AsyncOpsTest, FutureBasicWait) {
     // Create promise and future
     auto promise = std::make_shared<Promise<int>>();
     Future<int> future(promise->get_state());
@@ -65,7 +61,7 @@ TEST(AsyncOpsTest, FutureBasicWait) {
     EXPECT_EQ(result, 42);
 }
 
-TEST(AsyncOpsTest, FutureIsReady) {
+TEST_P(AsyncOpsTest, FutureIsReady) {
     auto promise = std::make_shared<Promise<int>>();
     Future<int> future(promise->get_state());
 
@@ -82,7 +78,7 @@ TEST(AsyncOpsTest, FutureIsReady) {
     EXPECT_EQ(future.wait(), 100);
 }
 
-TEST(AsyncOpsTest, FutureThenContinuation) {
+TEST_P(AsyncOpsTest, FutureThenContinuation) {
     auto promise = std::make_shared<Promise<int>>();
     Future<int> future(promise->get_state());
 
@@ -107,7 +103,7 @@ TEST(AsyncOpsTest, FutureThenContinuation) {
     EXPECT_EQ(result, 20);
 }
 
-TEST(AsyncOpsTest, FutureExceptionPropagation) {
+TEST_P(AsyncOpsTest, FutureExceptionPropagation) {
     auto promise = std::make_shared<Promise<int>>();
     Future<int> future(promise->get_state());
 
@@ -118,7 +114,7 @@ TEST(AsyncOpsTest, FutureExceptionPropagation) {
     EXPECT_THROW(future.wait(), std::runtime_error);
 }
 
-TEST(AsyncOpsTest, FutureChainedContinuations) {
+TEST_P(AsyncOpsTest, FutureChainedContinuations) {
     auto promise = std::make_shared<Promise<int>>();
     Future<int> future(promise->get_state());
 
@@ -135,7 +131,7 @@ TEST(AsyncOpsTest, FutureChainedContinuations) {
     EXPECT_EQ(result, 9);
 }
 
-TEST(AsyncOpsTest, FutureVoidType) {
+TEST_P(AsyncOpsTest, FutureVoidType) {
     auto promise = std::make_shared<Promise<void>>();
     Future<void> future(promise->get_state());
 
@@ -161,10 +157,10 @@ TEST(AsyncOpsTest, FutureVoidType) {
 // Async Operation Correctness Tests
 // ============================================================================
 
-TEST(AsyncOpsTest, AsyncMatmulCorrectness) {
+TEST_P(AsyncOpsTest, AsyncMatmulCorrectness) {
     // Create test matrices
-    auto a = randn({32, 64}, DType::Float32, Device::cpu());
-    auto b = randn({64, 48}, DType::Float32, Device::cpu());
+    auto a = randn({32, 64}, DType::Float32, device);
+    auto b = randn({64, 48}, DType::Float32, device);
 
     // Compute async
     auto future = async_matmul(a, b);
@@ -182,9 +178,11 @@ TEST(AsyncOpsTest, AsyncMatmulCorrectness) {
               (std::vector<int64_t>{32, 48}));
 
     // Verify values are close (accounting for floating point)
-    const auto* result_data = result.data<float>();
-    const auto* expected_data = expected.data<float>();
-    size_t size = result.numel();
+    auto result_cpu = result.cpu().contiguous();
+    auto expected_cpu = expected.cpu().contiguous();
+    const auto* result_data = result_cpu.data<float>();
+    const auto* expected_data = expected_cpu.data<float>();
+    size_t size = result_cpu.numel();
 
     for (size_t i = 0; i < size; ++i) {
         EXPECT_NEAR(result_data[i], expected_data[i], 1e-4f);
@@ -196,7 +194,7 @@ TEST(AsyncOpsTest, AsyncMatmulCorrectness) {
 // via the backend interface), not the CPU thread-pool special-case — and still
 // produce correct results. Exercises create_stream/synchronize_stream/
 // destroy_stream for whichever backends are present.
-TEST(AsyncOpsTest, GpuAsyncMatmulUsesDeviceStreamAndIsCorrect) {
+TEST_P(AsyncOpsTest, GpuAsyncMatmulUsesDeviceStreamAndIsCorrect) {
     auto a_cpu = randn({16, 24}, DType::Float32, Device::cpu());
     auto b_cpu = randn({24, 20}, DType::Float32, Device::cpu());
     auto ref = matmul(a_cpu, b_cpu);
@@ -231,9 +229,9 @@ TEST(AsyncOpsTest, GpuAsyncMatmulUsesDeviceStreamAndIsCorrect) {
     if (tested == 0) GTEST_SKIP() << "no GPU backend available for async stream test";
 }
 
-TEST(AsyncOpsTest, AsyncAddCorrectness) {
-    auto a = randn({100, 100}, DType::Float32, Device::cpu());
-    auto b = randn({100, 100}, DType::Float32, Device::cpu());
+TEST_P(AsyncOpsTest, AsyncAddCorrectness) {
+    auto a = randn({100, 100}, DType::Float32, device);
+    auto b = randn({100, 100}, DType::Float32, device);
 
     auto future = async_add(a, b);
     auto expected = add(a, b);
@@ -242,17 +240,19 @@ TEST(AsyncOpsTest, AsyncAddCorrectness) {
     EXPECT_EQ(std::vector<int64_t>(result.shape().begin(), result.shape().end()),
               std::vector<int64_t>(expected.shape().begin(), expected.shape().end()));
 
-    const auto* result_data = result.data<float>();
-    const auto* expected_data = expected.data<float>();
+    auto result_cpu = result.cpu().contiguous();
+    auto expected_cpu = expected.cpu().contiguous();
+    const auto* result_data = result_cpu.data<float>();
+    const auto* expected_data = expected_cpu.data<float>();
 
-    for (size_t i = 0; i < result.numel(); ++i) {
+    for (size_t i = 0; i < result_cpu.numel(); ++i) {
         EXPECT_FLOAT_EQ(result_data[i], expected_data[i]);
     }
 }
 
-TEST(AsyncOpsTest, AsyncMulCorrectness) {
-    auto a = randn({50, 50}, DType::Float32, Device::cpu());
-    auto b = randn({50, 50}, DType::Float32, Device::cpu());
+TEST_P(AsyncOpsTest, AsyncMulCorrectness) {
+    auto a = randn({50, 50}, DType::Float32, device);
+    auto b = randn({50, 50}, DType::Float32, device);
 
     auto future = async_mul(a, b);
     auto expected = mul(a, b);
@@ -261,17 +261,19 @@ TEST(AsyncOpsTest, AsyncMulCorrectness) {
     EXPECT_EQ(std::vector<int64_t>(result.shape().begin(), result.shape().end()),
               std::vector<int64_t>(expected.shape().begin(), expected.shape().end()));
 
-    const auto* result_data = result.data<float>();
-    const auto* expected_data = expected.data<float>();
+    auto result_cpu = result.cpu().contiguous();
+    auto expected_cpu = expected.cpu().contiguous();
+    const auto* result_data = result_cpu.data<float>();
+    const auto* expected_data = expected_cpu.data<float>();
 
-    for (size_t i = 0; i < result.numel(); ++i) {
+    for (size_t i = 0; i < result_cpu.numel(); ++i) {
         EXPECT_FLOAT_EQ(result_data[i], expected_data[i]);
     }
 }
 
-TEST(AsyncOpsTest, AsyncSubCorrectness) {
-    auto a = randn({80, 60}, DType::Float32, Device::cpu());
-    auto b = randn({80, 60}, DType::Float32, Device::cpu());
+TEST_P(AsyncOpsTest, AsyncSubCorrectness) {
+    auto a = randn({80, 60}, DType::Float32, device);
+    auto b = randn({80, 60}, DType::Float32, device);
 
     auto future = async_sub(a, b);
     auto expected = sub(a, b);
@@ -280,18 +282,20 @@ TEST(AsyncOpsTest, AsyncSubCorrectness) {
     EXPECT_EQ(std::vector<int64_t>(result.shape().begin(), result.shape().end()),
               std::vector<int64_t>(expected.shape().begin(), expected.shape().end()));
 
-    const auto* result_data = result.data<float>();
-    const auto* expected_data = expected.data<float>();
+    auto result_cpu = result.cpu().contiguous();
+    auto expected_cpu = expected.cpu().contiguous();
+    const auto* result_data = result_cpu.data<float>();
+    const auto* expected_data = expected_cpu.data<float>();
 
-    for (size_t i = 0; i < result.numel(); ++i) {
+    for (size_t i = 0; i < result_cpu.numel(); ++i) {
         EXPECT_FLOAT_EQ(result_data[i], expected_data[i]);
     }
 }
 
-TEST(AsyncOpsTest, AsyncDivCorrectness) {
-    auto a = randn({40, 40}, DType::Float32, Device::cpu());
+TEST_P(AsyncOpsTest, AsyncDivCorrectness) {
+    auto a = randn({40, 40}, DType::Float32, device);
     // Avoid division by zero
-    auto b = randn({40, 40}, DType::Float32, Device::cpu());
+    auto b = randn({40, 40}, DType::Float32, device);
     b = add(b, full_like(b, 1.0f));  // Add 1 to avoid zeros
 
     auto future = async_div(a, b);
@@ -301,64 +305,71 @@ TEST(AsyncOpsTest, AsyncDivCorrectness) {
     EXPECT_EQ(std::vector<int64_t>(result.shape().begin(), result.shape().end()),
               std::vector<int64_t>(expected.shape().begin(), expected.shape().end()));
 
-    const auto* result_data = result.data<float>();
-    const auto* expected_data = expected.data<float>();
+    auto result_cpu = result.cpu().contiguous();
+    auto expected_cpu = expected.cpu().contiguous();
+    const auto* result_data = result_cpu.data<float>();
+    const auto* expected_data = expected_cpu.data<float>();
 
-    for (size_t i = 0; i < result.numel(); ++i) {
+    for (size_t i = 0; i < result_cpu.numel(); ++i) {
         EXPECT_NEAR(result_data[i], expected_data[i], 1e-5f);
     }
 }
 
-TEST(AsyncOpsTest, AsyncReLUCorrectness) {
-    auto input = randn({100, 100}, DType::Float32, Device::cpu());
+TEST_P(AsyncOpsTest, AsyncReLUCorrectness) {
+    auto input = randn({100, 100}, DType::Float32, device);
     input = sub(input, full_like(input, 0.5f));  // Make some values negative
 
     auto future = async_relu(input);
     auto result = future.wait();
 
     // Verify ReLU property: all values >= 0
-    const auto* result_data = result.data<float>();
-    for (size_t i = 0; i < result.numel(); ++i) {
+    auto result_cpu = result.cpu().contiguous();
+    const auto* result_data = result_cpu.data<float>();
+    for (size_t i = 0; i < result_cpu.numel(); ++i) {
         EXPECT_GE(result_data[i], 0.0f);
     }
 
     // Verify correctness against input
-    const auto* input_data = input.data<float>();
-    for (size_t i = 0; i < result.numel(); ++i) {
+    auto input_cpu = input.cpu().contiguous();
+    const auto* input_data = input_cpu.data<float>();
+    for (size_t i = 0; i < result_cpu.numel(); ++i) {
         EXPECT_FLOAT_EQ(result_data[i], std::max(0.0f, input_data[i]));
     }
 }
 
-TEST(AsyncOpsTest, AsyncSigmoidCorrectness) {
-    auto input = randn({50, 50}, DType::Float32, Device::cpu());
+TEST_P(AsyncOpsTest, AsyncSigmoidCorrectness) {
+    auto input = randn({50, 50}, DType::Float32, device);
 
     auto future = async_sigmoid(input);
     auto result = future.wait();
 
     // Verify sigmoid property: all values in (0, 1)
-    const auto* result_data = result.data<float>();
-    for (size_t i = 0; i < result.numel(); ++i) {
+    auto result_cpu = result.cpu().contiguous();
+    const auto* result_data = result_cpu.data<float>();
+    for (size_t i = 0; i < result_cpu.numel(); ++i) {
         EXPECT_GT(result_data[i], 0.0f);
         EXPECT_LT(result_data[i], 1.0f);
     }
 
     // Verify correctness against manual computation
-    const auto* input_data = input.data<float>();
-    for (size_t i = 0; i < result.numel(); ++i) {
+    auto input_cpu = input.cpu().contiguous();
+    const auto* input_data = input_cpu.data<float>();
+    for (size_t i = 0; i < result_cpu.numel(); ++i) {
         float expected = 1.0f / (1.0f + std::exp(-input_data[i]));
         EXPECT_NEAR(result_data[i], expected, 1e-6f);
     }
 }
 
-TEST(AsyncOpsTest, AsyncTanhCorrectness) {
-    auto input = randn({60, 40}, DType::Float32, Device::cpu());
+TEST_P(AsyncOpsTest, AsyncTanhCorrectness) {
+    auto input = randn({60, 40}, DType::Float32, device);
 
     auto future = async_tanh(input);
     auto result = future.wait();
 
     // Verify tanh property: all values in (-1, 1)
-    const auto* result_data = result.data<float>();
-    for (size_t i = 0; i < result.numel(); ++i) {
+    auto result_cpu = result.cpu().contiguous();
+    const auto* result_data = result_cpu.data<float>();
+    for (size_t i = 0; i < result_cpu.numel(); ++i) {
         EXPECT_GT(result_data[i], -1.0f);
         EXPECT_LT(result_data[i], 1.0f);
     }
@@ -366,20 +377,22 @@ TEST(AsyncOpsTest, AsyncTanhCorrectness) {
     // Verify against Tensor-based version
     auto expected = tanh(input);
 
-    const auto* expected_data = expected.data<float>();
-    for (size_t i = 0; i < result.numel(); ++i) {
+    auto expected_cpu = expected.cpu().contiguous();
+    const auto* expected_data = expected_cpu.data<float>();
+    for (size_t i = 0; i < result_cpu.numel(); ++i) {
         EXPECT_NEAR(result_data[i], expected_data[i], 1e-6f);
     }
 }
 
-TEST(AsyncOpsTest, AsyncSoftmaxCorrectness) {
-    auto input = randn({32, 10}, DType::Float32, Device::cpu());
+TEST_P(AsyncOpsTest, AsyncSoftmaxCorrectness) {
+    auto input = randn({32, 10}, DType::Float32, device);
 
     auto future = async_softmax(input, 1);
     auto result = future.wait();
 
     // Verify softmax properties
-    const auto* result_data = result.data<float>();
+    auto result_cpu = result.cpu().contiguous();
+    const auto* result_data = result_cpu.data<float>();
 
     // Each row should sum to 1
     for (int64_t i = 0; i < 32; ++i) {
@@ -398,10 +411,10 @@ TEST(AsyncOpsTest, AsyncSoftmaxCorrectness) {
 // Non-blocking Behavior Tests
 // ============================================================================
 
-TEST(AsyncOpsTest, AsyncOperationsNonBlocking) {
+TEST_P(AsyncOpsTest, AsyncOperationsNonBlocking) {
     // Create large matrices
-    auto a = randn({512, 512}, DType::Float32, Device::cpu());
-    auto b = randn({512, 512}, DType::Float32, Device::cpu());
+    auto a = randn({512, 512}, DType::Float32, device);
+    auto b = randn({512, 512}, DType::Float32, device);
 
     // Start async operation
     auto start = std::chrono::high_resolution_clock::now();
@@ -430,14 +443,14 @@ TEST(AsyncOpsTest, AsyncOperationsNonBlocking) {
               (std::vector<int64_t>{512, 512}));
 }
 
-TEST(AsyncOpsTest, MultipleAsyncOperationsOverlap) {
+TEST_P(AsyncOpsTest, MultipleAsyncOperationsOverlap) {
     // Create test data
-    auto a1 = randn({128, 128}, DType::Float32, Device::cpu());
-    auto b1 = randn({128, 128}, DType::Float32, Device::cpu());
-    auto a2 = randn({128, 128}, DType::Float32, Device::cpu());
-    auto b2 = randn({128, 128}, DType::Float32, Device::cpu());
-    auto a3 = randn({128, 128}, DType::Float32, Device::cpu());
-    auto b3 = randn({128, 128}, DType::Float32, Device::cpu());
+    auto a1 = randn({128, 128}, DType::Float32, device);
+    auto b1 = randn({128, 128}, DType::Float32, device);
+    auto a2 = randn({128, 128}, DType::Float32, device);
+    auto b2 = randn({128, 128}, DType::Float32, device);
+    auto a3 = randn({128, 128}, DType::Float32, device);
+    auto b3 = randn({128, 128}, DType::Float32, device);
 
     // Launch multiple async operations
     auto start = std::chrono::high_resolution_clock::now();
@@ -466,8 +479,8 @@ TEST(AsyncOpsTest, MultipleAsyncOperationsOverlap) {
               (std::vector<int64_t>{128, 128}));
 }
 
-TEST(AsyncOpsTest, AsyncExecuteGenericWrapper) {
-    auto input = randn({100, 100}, DType::Float32, Device::cpu());
+TEST_P(AsyncOpsTest, AsyncExecuteGenericWrapper) {
+    auto input = randn({100, 100}, DType::Float32, device);
 
     // Use generic wrapper
     auto future = async_execute([](const Tensor& t) {
@@ -478,10 +491,12 @@ TEST(AsyncOpsTest, AsyncExecuteGenericWrapper) {
 
     // Verify
     auto expected = add(input, full_like(input, 5.0f));
-    const auto* result_data = result.data<float>();
-    const auto* expected_data = expected.data<float>();
+    auto result_cpu = result.cpu().contiguous();
+    auto expected_cpu = expected.cpu().contiguous();
+    const auto* result_data = result_cpu.data<float>();
+    const auto* expected_data = expected_cpu.data<float>();
 
-    for (size_t i = 0; i < result.numel(); ++i) {
+    for (size_t i = 0; i < result_cpu.numel(); ++i) {
         EXPECT_FLOAT_EQ(result_data[i], expected_data[i]);
     }
 }
@@ -490,10 +505,10 @@ TEST(AsyncOpsTest, AsyncExecuteGenericWrapper) {
 // Utility Function Tests
 // ============================================================================
 
-TEST(AsyncOpsTest, WaitAll) {
-    auto a1 = randn({50, 50}, DType::Float32, Device::cpu());
-    auto a2 = randn({50, 50}, DType::Float32, Device::cpu());
-    auto a3 = randn({50, 50}, DType::Float32, Device::cpu());
+TEST_P(AsyncOpsTest, WaitAll) {
+    auto a1 = randn({50, 50}, DType::Float32, device);
+    auto a2 = randn({50, 50}, DType::Float32, device);
+    auto a3 = randn({50, 50}, DType::Float32, device);
 
     // Launch operations
     auto f1 = async_relu(a1);
@@ -518,9 +533,9 @@ TEST(AsyncOpsTest, WaitAll) {
               std::vector<int64_t>(a3.shape().begin(), a3.shape().end()));
 }
 
-TEST(AsyncOpsTest, WaitAny) {
-    auto a = randn({100, 100}, DType::Float32, Device::cpu());
-    auto b = randn({100, 100}, DType::Float32, Device::cpu());
+TEST_P(AsyncOpsTest, WaitAny) {
+    auto a = randn({100, 100}, DType::Float32, device);
+    auto b = randn({100, 100}, DType::Float32, device);
 
     // Launch fast and slow operations
     auto f1 = async_add(a, b);  // Fast
@@ -542,13 +557,13 @@ TEST(AsyncOpsTest, WaitAny) {
 // Performance Benchmark Tests
 // ============================================================================
 
-TEST(AsyncOpsTest, DISABLED_PerformanceBenchmark) {
+TEST_P(AsyncOpsTest, DISABLED_PerformanceBenchmark) {
     // This test is disabled by default as it's for performance measurement
     // Enable with --gtest_also_run_disabled_tests
 
     const size_t N = 256;
-    auto a = randn({N, N}, DType::Float32, Device::cpu());
-    auto b = randn({N, N}, DType::Float32, Device::cpu());
+    auto a = randn({static_cast<int64_t>(N), static_cast<int64_t>(N)}, DType::Float32, device);
+    auto b = randn({static_cast<int64_t>(N), static_cast<int64_t>(N)}, DType::Float32, device);
 
     // Benchmark synchronous operations
     auto sync_start = std::chrono::high_resolution_clock::now();
@@ -603,7 +618,7 @@ TEST(AsyncOpsTest, DISABLED_PerformanceBenchmark) {
 // Edge Cases and Error Handling
 // ============================================================================
 
-TEST(AsyncOpsTest, ExceptionInAsyncOperation) {
+TEST_P(AsyncOpsTest, ExceptionInAsyncOperation) {
     // This test verifies exception propagation through futures
 
     auto future = async_execute([]() -> Tensor {
@@ -614,9 +629,9 @@ TEST(AsyncOpsTest, ExceptionInAsyncOperation) {
     EXPECT_THROW(future.wait(), std::runtime_error);
 }
 
-TEST(AsyncOpsTest, EmptyTensorHandling) {
+TEST_P(AsyncOpsTest, EmptyTensorHandling) {
     // Test with empty tensors
-    auto empty = zeros({0}, DType::Float32, Device::cpu());
+    auto empty = zeros({0}, DType::Float32, device);
 
     auto future = async_relu(empty);
     auto result = future.wait();
@@ -626,9 +641,9 @@ TEST(AsyncOpsTest, EmptyTensorHandling) {
               std::vector<int64_t>(empty.shape().begin(), empty.shape().end()));
 }
 
-TEST(AsyncOpsTest, BroadcastingInAsyncOps) {
-    auto a = randn({100, 1}, DType::Float32, Device::cpu());
-    auto b = randn({1, 100}, DType::Float32, Device::cpu());
+TEST_P(AsyncOpsTest, BroadcastingInAsyncOps) {
+    auto a = randn({100, 1}, DType::Float32, device);
+    auto b = randn({1, 100}, DType::Float32, device);
 
     auto future = async_add(a, b);
     auto result = future.wait();
@@ -639,15 +654,14 @@ TEST(AsyncOpsTest, BroadcastingInAsyncOps) {
 
     // Verify correctness
     auto expected = add(a, b);
-    const auto* result_data = result.data<float>();
-    const auto* expected_data = expected.data<float>();
+    auto result_cpu = result.cpu().contiguous();
+    auto expected_cpu = expected.cpu().contiguous();
+    const auto* result_data = result_cpu.data<float>();
+    const auto* expected_data = expected_cpu.data<float>();
 
-    for (size_t i = 0; i < result.numel(); ++i) {
+    for (size_t i = 0; i < result_cpu.numel(); ++i) {
         EXPECT_FLOAT_EQ(result_data[i], expected_data[i]);
     }
 }
 
-int main(int argc, char** argv) {
-    ::testing::InitGoogleTest(&argc, argv);
-    return RUN_ALL_TESTS();
-}
+INSTANTIATE_BACKEND_TESTS(AsyncOpsTest);

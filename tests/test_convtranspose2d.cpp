@@ -1,23 +1,28 @@
 #include <gtest/gtest.h>
 #include "tenzor/tenzor.hpp"
+#include "backend_test_fixture.hpp"
 #include <cmath>
 
 using namespace tenzor;
 using namespace tenzor::nn;
 
+class ConvTranspose2dTest : public ::tenzor::testing::BackendTest {};
+
 // Test basic ConvTranspose2d construction
-TEST(ConvTranspose2dTest, Construction) {
+TEST_P(ConvTranspose2dTest, Construction) {
     EXPECT_NO_THROW({
         ConvTranspose2d layer(16, 32, 3);
+        layer.to(device);
     });
 
     EXPECT_NO_THROW({
         ConvTranspose2d layer(16, 32, 3, 2, 1, 1);
+        layer.to(device);
     });
 }
 
 // Test invalid parameters
-TEST(ConvTranspose2dTest, InvalidParameters) {
+TEST_P(ConvTranspose2dTest, InvalidParameters) {
     // in_channels not divisible by groups
     EXPECT_THROW({
         ConvTranspose2d layer(16, 32, 3, 1, 0, 0, 3);
@@ -35,11 +40,12 @@ TEST(ConvTranspose2dTest, InvalidParameters) {
 }
 
 // Test output size calculation
-TEST(ConvTranspose2dTest, OutputSize) {
+TEST_P(ConvTranspose2dTest, OutputSize) {
     ConvTranspose2d layer(3, 16, 4, 2, 1, 0);
+    layer.to(device);
 
     // Input: [1, 3, 8, 8]
-    auto input = randn({1, 3, 8, 8});
+    auto input = randn({1, 3, 8, 8}, DType::Float32, device);
     auto output = layer.forward(Variable(input, false));
 
     // Expected output size:
@@ -54,11 +60,12 @@ TEST(ConvTranspose2dTest, OutputSize) {
 }
 
 // Test upsampling with stride=2 (2x upsampling)
-TEST(ConvTranspose2dTest, Upsampling2x) {
+TEST_P(ConvTranspose2dTest, Upsampling2x) {
     ConvTranspose2d layer(16, 3, 4, 2, 1, 0);
+    layer.to(device);
 
     // Input: [2, 16, 32, 32]
-    auto input = randn({2, 16, 32, 32});
+    auto input = randn({2, 16, 32, 32}, DType::Float32, device);
     auto output = layer.forward(Variable(input, false));
 
     // Expected output size:
@@ -71,11 +78,13 @@ TEST(ConvTranspose2dTest, Upsampling2x) {
 }
 
 // Test with output_padding
-TEST(ConvTranspose2dTest, OutputPadding) {
+TEST_P(ConvTranspose2dTest, OutputPadding) {
     ConvTranspose2d layer1(8, 16, 3, 2, 1, 0);
     ConvTranspose2d layer2(8, 16, 3, 2, 1, 1);
+    layer1.to(device);
+    layer2.to(device);
 
-    auto input = randn({1, 8, 10, 10});
+    auto input = randn({1, 8, 10, 10}, DType::Float32, device);
 
     auto output1 = layer1.forward(Variable(input, false));
     auto output2 = layer2.forward(Variable(input, false));
@@ -89,10 +98,11 @@ TEST(ConvTranspose2dTest, OutputPadding) {
 }
 
 // Test gradient computation (backward pass)
-TEST(ConvTranspose2dTest, BackwardPass) {
+TEST_P(ConvTranspose2dTest, BackwardPass) {
     ConvTranspose2d layer(4, 8, 3, 1, 1);
+    layer.to(device);
 
-    auto input_tensor = randn({2, 4, 6, 6});
+    auto input_tensor = randn({2, 4, 6, 6}, DType::Float32, device);
     auto input = Variable(input_tensor, true);
 
     auto output = layer.forward(input);
@@ -101,7 +111,7 @@ TEST(ConvTranspose2dTest, BackwardPass) {
     // Create gradient and perform backward
     auto out_shape = output.shape();
     std::vector<int64_t> grad_shape(out_shape.begin(), out_shape.end());
-    auto grad_output = ones(grad_shape);
+    auto grad_output = ones(grad_shape, DType::Float32, device);
     output.backward(grad_output);
 
     // Check that gradients were computed
@@ -117,10 +127,11 @@ TEST(ConvTranspose2dTest, BackwardPass) {
 }
 
 // Test with groups
-TEST(ConvTranspose2dTest, GroupedConvolution) {
+TEST_P(ConvTranspose2dTest, GroupedConvolution) {
     ConvTranspose2d layer(16, 32, 3, 1, 1, 0, 4);
+    layer.to(device);
 
-    auto input = randn({1, 16, 8, 8});
+    auto input = randn({1, 16, 8, 8}, DType::Float32, device);
     auto output = layer.forward(Variable(input, false));
 
     auto output_shape = output.shape();
@@ -131,14 +142,17 @@ TEST(ConvTranspose2dTest, GroupedConvolution) {
 }
 
 // Test bias addition
-TEST(ConvTranspose2dTest, BiasAddition) {
+TEST_P(ConvTranspose2dTest, BiasAddition) {
     // With bias
     ConvTranspose2d layer_with_bias(4, 8, 3, 1, 1, 0, 1, true);
 
     // Without bias
     ConvTranspose2d layer_no_bias(4, 8, 3, 1, 1, 0, 1, false);
 
-    auto input = randn({1, 4, 8, 8});
+    layer_with_bias.to(device);
+    layer_no_bias.to(device);
+
+    auto input = randn({1, 4, 8, 8}, DType::Float32, device);
 
     auto output1 = layer_with_bias.forward(Variable(input, false));
     auto output2 = layer_no_bias.forward(Variable(input, false));
@@ -153,13 +167,14 @@ TEST(ConvTranspose2dTest, BiasAddition) {
 }
 
 // Test numerical stability with different kernel sizes
-TEST(ConvTranspose2dTest, DifferentKernelSizes) {
+TEST_P(ConvTranspose2dTest, DifferentKernelSizes) {
     std::vector<int64_t> kernel_sizes = {1, 2, 3, 5, 7};
 
     for (auto k : kernel_sizes) {
         EXPECT_NO_THROW({
             ConvTranspose2d layer(8, 16, k);
-            auto input = randn({1, 8, 10, 10});
+            layer.to(device);
+            auto input = randn({1, 8, 10, 10}, DType::Float32, device);
             auto output = layer.forward(Variable(input, false));
             EXPECT_GT(output.shape()[2], 0);
             EXPECT_GT(output.shape()[3], 0);
@@ -168,13 +183,15 @@ TEST(ConvTranspose2dTest, DifferentKernelSizes) {
 }
 
 // Test that ConvTranspose2d is the approximate inverse of Conv2d
-TEST(ConvTranspose2dTest, InverseOfConv2d) {
+TEST_P(ConvTranspose2dTest, InverseOfConv2d) {
     // Create matching Conv2d and ConvTranspose2d layers
     Conv2d conv(3, 16, 4, 2, 1);
     ConvTranspose2d deconv(16, 3, 4, 2, 1);
+    conv.to(device);
+    deconv.to(device);
 
     // Input: [1, 3, 64, 64]
-    auto input = randn({1, 3, 64, 64});
+    auto input = randn({1, 3, 64, 64}, DType::Float32, device);
 
     // Forward: Conv2d should downsample to [1, 16, 32, 32]
     auto conv_output = conv.forward(Variable(input, false));
@@ -189,10 +206,11 @@ TEST(ConvTranspose2dTest, InverseOfConv2d) {
 }
 
 // Test gradient flow through the layer
-TEST(ConvTranspose2dTest, GradientFlow) {
+TEST_P(ConvTranspose2dTest, GradientFlow) {
     ConvTranspose2d layer(8, 16, 3, 2, 1);
+    layer.to(device);
 
-    auto input_tensor = randn({1, 8, 16, 16});
+    auto input_tensor = randn({1, 8, 16, 16}, DType::Float32, device);
     auto input = Variable(input_tensor, true);
 
     auto output = layer.forward(input);
@@ -200,16 +218,17 @@ TEST(ConvTranspose2dTest, GradientFlow) {
     // Backward pass
     auto out_shape = output.shape();
     std::vector<int64_t> grad_shape(out_shape.begin(), out_shape.end());
-    auto grad = ones(grad_shape);
+    auto grad = ones(grad_shape, DType::Float32, device);
     output.backward(grad);
 
     // Verify gradients exist and are reasonable
     EXPECT_TRUE(input.grad().has_value());
     auto grad_input = input.grad().value();
 
-    const float* grad_data = grad_input.data<float>();
+    auto grad_input_cpu = grad_input.cpu();
+    const float* grad_data = grad_input_cpu.data<float>();
     bool has_nonzero = false;
-    for (int64_t i = 0; i < grad_input.numel(); ++i) {
+    for (int64_t i = 0; i < grad_input_cpu.numel(); ++i) {
         if (std::abs(grad_data[i]) > 1e-6) {
             has_nonzero = true;
             break;
@@ -219,32 +238,36 @@ TEST(ConvTranspose2dTest, GradientFlow) {
 }
 
 // Test multiple strides
-TEST(ConvTranspose2dTest, DifferentStrides) {
-    auto input = randn({1, 8, 16, 16});
+TEST_P(ConvTranspose2dTest, DifferentStrides) {
+    auto input = randn({1, 8, 16, 16}, DType::Float32, device);
 
     // stride=1: output size ~ same
     ConvTranspose2d layer1(8, 16, 3, 1, 1);
+    layer1.to(device);
     auto out1 = layer1.forward(Variable(input, false));
     EXPECT_EQ(out1.shape()[2], 16);
 
     // stride=2: output size ~ 2x
     ConvTranspose2d layer2(8, 16, 3, 2, 1);
+    layer2.to(device);
     auto out2 = layer2.forward(Variable(input, false));
     EXPECT_GT(out2.shape()[2], out1.shape()[2]);
 
     // stride=4: output size ~ 4x
     ConvTranspose2d layer4(8, 16, 3, 4, 1);
+    layer4.to(device);
     auto out4 = layer4.forward(Variable(input, false));
     EXPECT_GT(out4.shape()[2], out2.shape()[2]);
 }
 
 // Test batch processing
-TEST(ConvTranspose2dTest, BatchProcessing) {
+TEST_P(ConvTranspose2dTest, BatchProcessing) {
     ConvTranspose2d layer(4, 8, 3, 2, 1);
+    layer.to(device);
 
     // Test with different batch sizes
     for (int64_t batch : {1, 2, 4, 8}) {
-        auto input = randn({batch, 4, 16, 16});
+        auto input = randn({batch, 4, 16, 16}, DType::Float32, device);
         auto output = layer.forward(Variable(input, false));
 
         EXPECT_EQ(output.shape()[0], batch);
@@ -253,14 +276,18 @@ TEST(ConvTranspose2dTest, BatchProcessing) {
 }
 
 // Test typical GAN generator architecture
-TEST(ConvTranspose2dTest, GANGeneratorPattern) {
+TEST_P(ConvTranspose2dTest, GANGeneratorPattern) {
     // Typical GAN generator upsampling pattern
     ConvTranspose2d layer1(512, 256, 4, 2, 1);  // 4x4 -> 8x8
     ConvTranspose2d layer2(256, 128, 4, 2, 1);  // 8x8 -> 16x16
     ConvTranspose2d layer3(128, 64, 4, 2, 1);   // 16x16 -> 32x32
     ConvTranspose2d layer4(64, 3, 4, 2, 1);     // 32x32 -> 64x64
+    layer1.to(device);
+    layer2.to(device);
+    layer3.to(device);
+    layer4.to(device);
 
-    auto z = randn({1, 512, 4, 4});
+    auto z = randn({1, 512, 4, 4}, DType::Float32, device);
 
     auto h1 = layer1.forward(Variable(z, false));
     EXPECT_EQ(h1.shape()[2], 8);
@@ -277,10 +304,4 @@ TEST(ConvTranspose2dTest, GANGeneratorPattern) {
     EXPECT_EQ(h4.shape()[3], 64);
 }
 
-int main(int argc, char** argv) {
-    ::testing::InitGoogleTest(&argc, argv);
-    if (!::testing::GTEST_FLAG(list_tests)) {
-        tenzor::initialize();
-    }
-    return RUN_ALL_TESTS();
-}
+INSTANTIATE_BACKEND_TESTS(ConvTranspose2dTest);

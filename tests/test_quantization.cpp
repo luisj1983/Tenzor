@@ -12,6 +12,7 @@
  */
 
 #include <gtest/gtest.h>
+#include "backend_test_fixture.hpp"
 #include "tenzor/nn/quantization.hpp"
 #include "tenzor/core/tensor.hpp"
 #include "tenzor/tenzor.hpp"
@@ -21,34 +22,28 @@
 using namespace tenzor;
 using namespace tenzor::nn::quantization;
 
-// Global test environment
-class QuantizationTestEnvironment2 : public ::testing::Environment {
-public:
-    void SetUp() override {
-        tenzor::initialize();
-    }
-};
-
-static ::testing::Environment* const quant_env2 =
-    ::testing::AddGlobalTestEnvironment(new QuantizationTestEnvironment2);
-
-class QuantizationTest : public ::testing::Test {
+class QuantizationTest : public ::tenzor::testing::BackendTest {
 protected:
     void SetUp() override {
-        // Create test tensors
-        weights_ = Tensor({64, 32}, DType::Float32, Device::cpu());
-        activations_ = Tensor({8, 32}, DType::Float32, Device::cpu());
+        ::tenzor::testing::BackendTest::SetUp();
+        if (::testing::Test::IsSkipped()) return;
 
-        // Fill with test data
-        float* w_data = weights_.data<float>();
-        for (int64_t i = 0; i < weights_.numel(); ++i) {
+        // Create test tensors on CPU first, fill host-side, then move to device.
+        Tensor weights_host({64, 32}, DType::Float32, Device::cpu());
+        Tensor activations_host({8, 32}, DType::Float32, Device::cpu());
+
+        float* w_data = weights_host.data<float>();
+        for (int64_t i = 0; i < weights_host.numel(); ++i) {
             w_data[i] = (std::sin(i * 0.1f) * 2.0f);  // Range: [-2, 2]
         }
 
-        float* a_data = activations_.data<float>();
-        for (int64_t i = 0; i < activations_.numel(); ++i) {
+        float* a_data = activations_host.data<float>();
+        for (int64_t i = 0; i < activations_host.numel(); ++i) {
             a_data[i] = (std::cos(i * 0.15f) * 1.5f);  // Range: [-1.5, 1.5]
         }
+
+        weights_ = weights_host.to(device);
+        activations_ = activations_host.to(device);
     }
 
     Tensor weights_;
@@ -59,9 +54,9 @@ protected:
 // Quantization Parameter Tests
 // ============================================================================
 
-TEST_F(QuantizationTest, ComputeQuantizationParams_Symmetric) {
-    Tensor min({1}, DType::Float32, Device::cpu());
-    Tensor max({1}, DType::Float32, Device::cpu());
+TEST_P(QuantizationTest, ComputeQuantizationParams_Symmetric) {
+    Tensor min({1}, DType::Float32, device);
+    Tensor max({1}, DType::Float32, device);
     min.fill_(-2.0f);
     max.fill_(2.0f);
 
@@ -74,18 +69,20 @@ TEST_F(QuantizationTest, ComputeQuantizationParams_Symmetric) {
     EXPECT_EQ(params.axis, -1);
 
     // Symmetric quantization should have zero_point = 0
-    const auto* zp_data = params.zero_point.data<int32_t>();
+    auto zp_cpu = params.zero_point.cpu();
+    const auto* zp_data = zp_cpu.data<int32_t>();
     EXPECT_EQ(zp_data[0], 0);
 
     // Scale should be approximately 2.0 / 127
-    const auto* scale_data = params.scale.data<float>();
+    auto scale_cpu = params.scale.cpu();
+    const auto* scale_data = scale_cpu.data<float>();
     float scale = scale_data[0];
     EXPECT_NEAR(scale, 2.0f / 127.0f, 1e-5f);
 }
 
-TEST_F(QuantizationTest, ComputeQuantizationParams_Asymmetric) {
-    Tensor min({1}, DType::Float32, Device::cpu());
-    Tensor max({1}, DType::Float32, Device::cpu());
+TEST_P(QuantizationTest, ComputeQuantizationParams_Asymmetric) {
+    Tensor min({1}, DType::Float32, device);
+    Tensor max({1}, DType::Float32, device);
     min.fill_(0.0f);
     max.fill_(2.0f);
 
@@ -97,17 +94,19 @@ TEST_F(QuantizationTest, ComputeQuantizationParams_Asymmetric) {
     EXPECT_EQ(params.scheme, QuantizationScheme::PerTensorAsymmetric);
 
     // Asymmetric quantization should use non-zero zero_point
-    int32_t zp = params.zero_point.data<int32_t>()[0];
+    auto zp_cpu = params.zero_point.cpu();
+    int32_t zp = zp_cpu.data<int32_t>()[0];
     EXPECT_NE(zp, 0);
 
     // Scale should be approximately 2.0 / 255
-    float scale = params.scale.data<float>()[0];
+    auto scale_cpu = params.scale.cpu();
+    float scale = scale_cpu.data<float>()[0];
     EXPECT_GT(scale, 0.0f);
 }
 
-TEST_F(QuantizationTest, ComputeQuantizationParams_UINT8) {
-    Tensor min({1}, DType::Float32, Device::cpu());
-    Tensor max({1}, DType::Float32, Device::cpu());
+TEST_P(QuantizationTest, ComputeQuantizationParams_UINT8) {
+    Tensor min({1}, DType::Float32, device);
+    Tensor max({1}, DType::Float32, device);
     min.fill_(0.0f);
     max.fill_(3.0f);
 
@@ -118,21 +117,25 @@ TEST_F(QuantizationTest, ComputeQuantizationParams_UINT8) {
     EXPECT_EQ(params.dtype, QuantDType::UINT8);
 
     // UINT8 range is [0, 255]
-    float scale = params.scale.data<float>()[0];
+    auto scale_cpu = params.scale.cpu();
+    float scale = scale_cpu.data<float>()[0];
     EXPECT_NEAR(scale, 3.0f / 255.0f, 1e-5f);
 }
 
-TEST_F(QuantizationTest, ComputeQuantizationParams_PerChannel) {
+TEST_P(QuantizationTest, ComputeQuantizationParams_PerChannel) {
     int64_t num_channels = 64;
-    Tensor min({num_channels}, DType::Float32, Device::cpu());
-    Tensor max({num_channels}, DType::Float32, Device::cpu());
+    Tensor min_host({num_channels}, DType::Float32, Device::cpu());
+    Tensor max_host({num_channels}, DType::Float32, Device::cpu());
 
-    float* min_data = min.data<float>();
-    float* max_data = max.data<float>();
+    float* min_data = min_host.data<float>();
+    float* max_data = max_host.data<float>();
     for (int64_t i = 0; i < num_channels; ++i) {
         min_data[i] = -1.0f - i * 0.01f;
         max_data[i] = 1.0f + i * 0.01f;
     }
+
+    Tensor min = min_host.to(device);
+    Tensor max = max_host.to(device);
 
     auto params = compute_quantization_params(
         min, max, QuantDType::INT8, QuantizationScheme::PerChannelSymmetric
@@ -147,7 +150,7 @@ TEST_F(QuantizationTest, ComputeQuantizationParams_PerChannel) {
 // Quantization/Dequantization Tests
 // ============================================================================
 
-TEST_F(QuantizationTest, QuantizeAndDequantize_PerTensor) {
+TEST_P(QuantizationTest, QuantizeAndDequantize_PerTensor) {
     auto q_tensor = quantize_per_tensor_symmetric(weights_);
 
     EXPECT_EQ(q_tensor.data().dtype(), DType::Int8);
@@ -168,7 +171,7 @@ TEST_F(QuantizationTest, QuantizeAndDequantize_PerTensor) {
     EXPECT_GT(snr_db, 30.0f);  // SNR > 30dB
 }
 
-TEST_F(QuantizationTest, QuantizePerChannel_Symmetric) {
+TEST_P(QuantizationTest, QuantizePerChannel_Symmetric) {
     auto q_tensor = quantize_per_channel_symmetric(weights_, 0);
 
     EXPECT_EQ(q_tensor.params().axis, 0);
@@ -187,11 +190,12 @@ TEST_F(QuantizationTest, QuantizePerChannel_Symmetric) {
     EXPECT_GT(snr_db, 35.0f);
 }
 
-TEST_F(QuantizationTest, QuantizePerTensor_Asymmetric) {
+TEST_P(QuantizationTest, QuantizePerTensor_Asymmetric) {
     auto q_tensor = quantize_per_tensor_asymmetric(activations_);
 
     EXPECT_EQ(q_tensor.params().scheme, QuantizationScheme::PerTensorAsymmetric);
-    EXPECT_NE(q_tensor.params().zero_point.data<int32_t>()[0], 0);
+    auto zp_cpu = q_tensor.params().zero_point.cpu();
+    EXPECT_NE(zp_cpu.data<int32_t>()[0], 0);
 
     Tensor deq = q_tensor.dequantize();
     auto [mae, mse, snr_db] = compute_quantization_error(activations_, q_tensor);
@@ -200,14 +204,15 @@ TEST_F(QuantizationTest, QuantizePerTensor_Asymmetric) {
     EXPECT_GT(snr_db, 30.0f);
 }
 
-TEST_F(QuantizationTest, QuantizePerChannel_Asymmetric) {
+TEST_P(QuantizationTest, QuantizePerChannel_Asymmetric) {
     auto q_tensor = quantize_per_channel_asymmetric(weights_, 0);
 
     EXPECT_EQ(q_tensor.params().scheme, QuantizationScheme::PerChannelAsymmetric);
     EXPECT_EQ(q_tensor.params().axis, 0);
 
     // Check that zero points are not all zero
-    const int32_t* zp_data = q_tensor.params().zero_point.data<int32_t>();
+    auto zp_cpu = q_tensor.params().zero_point.cpu();
+    const int32_t* zp_data = zp_cpu.data<int32_t>();
     bool has_nonzero = false;
     for (int64_t i = 0; i < 64; ++i) {
         if (zp_data[i] != 0) {
@@ -218,8 +223,8 @@ TEST_F(QuantizationTest, QuantizePerChannel_Asymmetric) {
     EXPECT_TRUE(has_nonzero);
 }
 
-TEST_F(QuantizationTest, RoundTrip_PreservesShape) {
-    Tensor input({16, 8, 4}, DType::Float32, Device::cpu());
+TEST_P(QuantizationTest, RoundTrip_PreservesShape) {
+    Tensor input({16, 8, 4}, DType::Float32, device);
     input.fill_(0.5f);
 
     auto q_tensor = quantize_per_tensor_symmetric(input);
@@ -230,9 +235,9 @@ TEST_F(QuantizationTest, RoundTrip_PreservesShape) {
     EXPECT_EQ(deq.shape()[2], 4);
 }
 
-TEST_F(QuantizationTest, QuantizeWithCustomParams) {
-    Tensor scale({1}, DType::Float32, Device::cpu());
-    Tensor zero_point({1}, DType::Int32, Device::cpu());
+TEST_P(QuantizationTest, QuantizeWithCustomParams) {
+    Tensor scale({1}, DType::Float32, device);
+    Tensor zero_point({1}, DType::Int32, device);
     scale.fill_(0.01f);
     zero_point.fill_(5);
 
@@ -241,15 +246,17 @@ TEST_F(QuantizationTest, QuantizeWithCustomParams) {
 
     auto q_tensor = quantize_tensor(activations_, params);
 
-    EXPECT_EQ(q_tensor.params().zero_point.data<int32_t>()[0], 5);
-    EXPECT_NEAR(q_tensor.params().scale.data<float>()[0], 0.01f, 1e-6f);
+    auto zp_cpu = q_tensor.params().zero_point.cpu();
+    auto scale_cpu = q_tensor.params().scale.cpu();
+    EXPECT_EQ(zp_cpu.data<int32_t>()[0], 5);
+    EXPECT_NEAR(scale_cpu.data<float>()[0], 0.01f, 1e-6f);
 }
 
 // ============================================================================
 // MinMaxObserver Tests
 // ============================================================================
 
-TEST_F(QuantizationTest, MinMaxObserver_PerTensor) {
+TEST_P(QuantizationTest, MinMaxObserver_PerTensor) {
     MinMaxObserver observer(false);
 
     EXPECT_FALSE(observer.has_data());
@@ -260,8 +267,10 @@ TEST_F(QuantizationTest, MinMaxObserver_PerTensor) {
     EXPECT_TRUE(observer.has_data());
 
     // Get min/max
-    float min_val = observer.get_min().data<float>()[0];
-    float max_val = observer.get_max().data<float>()[0];
+    auto min_cpu = observer.get_min().cpu();
+    auto max_cpu = observer.get_max().cpu();
+    float min_val = min_cpu.data<float>()[0];
+    float max_val = max_cpu.data<float>()[0];
 
     EXPECT_LT(min_val, -1.0f);
     EXPECT_GT(max_val, 1.0f);
@@ -271,10 +280,11 @@ TEST_F(QuantizationTest, MinMaxObserver_PerTensor) {
         QuantDType::INT8, QuantizationScheme::PerTensorSymmetric
     );
 
-    EXPECT_GT(params.scale.data<float>()[0], 0.0f);
+    auto scale_cpu = params.scale.cpu();
+    EXPECT_GT(scale_cpu.data<float>()[0], 0.0f);
 }
 
-TEST_F(QuantizationTest, MinMaxObserver_PerChannel) {
+TEST_P(QuantizationTest, MinMaxObserver_PerChannel) {
     MinMaxObserver observer(true, 0);  // Per-channel along axis 0
 
     observer.observe(weights_);
@@ -292,29 +302,33 @@ TEST_F(QuantizationTest, MinMaxObserver_PerChannel) {
     EXPECT_EQ(params.scale.numel(), 64);
 }
 
-TEST_F(QuantizationTest, MinMaxObserver_MultipleObservations) {
+TEST_P(QuantizationTest, MinMaxObserver_MultipleObservations) {
     MinMaxObserver observer(false);
 
-    Tensor batch1({8, 32}, DType::Float32, Device::cpu());
+    Tensor batch1({8, 32}, DType::Float32, device);
     batch1.fill_(1.0f);
     observer.observe(batch1);
 
-    float min1 = observer.get_min().data<float>()[0];
-    float max1 = observer.get_max().data<float>()[0];
+    auto min1_cpu = observer.get_min().cpu();
+    auto max1_cpu = observer.get_max().cpu();
+    float min1 = min1_cpu.data<float>()[0];
+    float max1 = max1_cpu.data<float>()[0];
 
-    Tensor batch2({8, 32}, DType::Float32, Device::cpu());
+    Tensor batch2({8, 32}, DType::Float32, device);
     batch2.fill_(3.0f);
     observer.observe(batch2);
 
-    float min2 = observer.get_min().data<float>()[0];
-    float max2 = observer.get_max().data<float>()[0];
+    auto min2_cpu = observer.get_min().cpu();
+    auto max2_cpu = observer.get_max().cpu();
+    float min2 = min2_cpu.data<float>()[0];
+    float max2 = max2_cpu.data<float>()[0];
 
     // Min should not change, max should increase
     EXPECT_NEAR(min1, min2, 1e-5f);
     EXPECT_GT(max2, max1);
 }
 
-TEST_F(QuantizationTest, MinMaxObserver_Reset) {
+TEST_P(QuantizationTest, MinMaxObserver_Reset) {
     MinMaxObserver observer(false);
     observer.observe(activations_);
 
@@ -325,18 +339,21 @@ TEST_F(QuantizationTest, MinMaxObserver_Reset) {
     EXPECT_FALSE(observer.has_data());
 }
 
-TEST_F(QuantizationTest, MinMaxObserver_NegativeValues) {
-    Tensor negative_data({10, 10}, DType::Float32, Device::cpu());
-    float* data = negative_data.data<float>();
+TEST_P(QuantizationTest, MinMaxObserver_NegativeValues) {
+    Tensor negative_host({10, 10}, DType::Float32, Device::cpu());
+    float* data = negative_host.data<float>();
     for (int64_t i = 0; i < 100; ++i) {
         data[i] = -5.0f - i * 0.1f;
     }
+    Tensor negative_data = negative_host.to(device);
 
     MinMaxObserver observer(false);
     observer.observe(negative_data);
 
-    float min_val = observer.get_min().data<float>()[0];
-    float max_val = observer.get_max().data<float>()[0];
+    auto min_cpu = observer.get_min().cpu();
+    auto max_cpu = observer.get_max().cpu();
+    float min_val = min_cpu.data<float>()[0];
+    float max_val = max_cpu.data<float>()[0];
 
     EXPECT_LT(min_val, -5.0f);
     EXPECT_LT(max_val, 0.0f);
@@ -346,11 +363,11 @@ TEST_F(QuantizationTest, MinMaxObserver_NegativeValues) {
 // MovingAverageMinMaxObserver Tests
 // ============================================================================
 
-TEST_F(QuantizationTest, MovingAverageObserver_Basic) {
+TEST_P(QuantizationTest, MovingAverageObserver_Basic) {
     MovingAverageMinMaxObserver observer(0.9f);
 
     // First observation
-    Tensor batch1({8, 32}, DType::Float32, Device::cpu());
+    Tensor batch1({8, 32}, DType::Float32, device);
     batch1.fill_(1.0f);
     observer.observe(batch1);
 
@@ -362,31 +379,34 @@ TEST_F(QuantizationTest, MovingAverageObserver_Basic) {
         QuantDType::INT8, QuantizationScheme::PerTensorSymmetric
     );
 
-    EXPECT_GT(params.scale.data<float>()[0], 0.0f);
+    auto scale_cpu = params.scale.cpu();
+    EXPECT_GT(scale_cpu.data<float>()[0], 0.0f);
 }
 
-TEST_F(QuantizationTest, MovingAverageObserver_Smoothing) {
+TEST_P(QuantizationTest, MovingAverageObserver_Smoothing) {
     MovingAverageMinMaxObserver observer(0.9f);
 
     // First observation
-    Tensor batch1({8, 32}, DType::Float32, Device::cpu());
+    Tensor batch1({8, 32}, DType::Float32, device);
     batch1.fill_(1.0f);
     observer.observe(batch1);
 
     auto params1 = observer.calculate_qparams(
         QuantDType::INT8, QuantizationScheme::PerTensorSymmetric
     );
-    float scale1 = params1.scale.data<float>()[0];
+    auto scale1_cpu = params1.scale.cpu();
+    float scale1 = scale1_cpu.data<float>()[0];
 
     // Second observation with different range
-    Tensor batch2({8, 32}, DType::Float32, Device::cpu());
+    Tensor batch2({8, 32}, DType::Float32, device);
     batch2.fill_(2.0f);
     observer.observe(batch2);
 
     auto params2 = observer.calculate_qparams(
         QuantDType::INT8, QuantizationScheme::PerTensorSymmetric
     );
-    float scale2 = params2.scale.data<float>()[0];
+    auto scale2_cpu = params2.scale.cpu();
+    float scale2 = scale2_cpu.data<float>()[0];
 
     // Moving average should smooth the update
     // Scale should change but not jump dramatically
@@ -394,59 +414,63 @@ TEST_F(QuantizationTest, MovingAverageObserver_Smoothing) {
     EXPECT_GT(scale2, scale1);
 }
 
-TEST_F(QuantizationTest, MovingAverageObserver_HighMomentum) {
+TEST_P(QuantizationTest, MovingAverageObserver_HighMomentum) {
     MovingAverageMinMaxObserver observer(0.99f);  // High momentum
 
-    Tensor batch1({8, 32}, DType::Float32, Device::cpu());
+    Tensor batch1({8, 32}, DType::Float32, device);
     batch1.fill_(1.0f);
     observer.observe(batch1);
 
     auto params1 = observer.calculate_qparams(
         QuantDType::INT8, QuantizationScheme::PerTensorSymmetric
     );
-    float scale1 = params1.scale.data<float>()[0];
+    auto scale1_cpu = params1.scale.cpu();
+    float scale1 = scale1_cpu.data<float>()[0];
 
-    Tensor batch2({8, 32}, DType::Float32, Device::cpu());
+    Tensor batch2({8, 32}, DType::Float32, device);
     batch2.fill_(10.0f);
     observer.observe(batch2);
 
     auto params2 = observer.calculate_qparams(
         QuantDType::INT8, QuantizationScheme::PerTensorSymmetric
     );
-    float scale2 = params2.scale.data<float>()[0];
+    auto scale2_cpu = params2.scale.cpu();
+    float scale2 = scale2_cpu.data<float>()[0];
 
     // High momentum means slow adaptation
     EXPECT_GT(scale2, scale1);
     EXPECT_LT(scale2, scale1 * 3.0f);  // Should not increase too much
 }
 
-TEST_F(QuantizationTest, MovingAverageObserver_LowMomentum) {
+TEST_P(QuantizationTest, MovingAverageObserver_LowMomentum) {
     MovingAverageMinMaxObserver observer(0.1f);  // Low momentum
 
-    Tensor batch1({8, 32}, DType::Float32, Device::cpu());
+    Tensor batch1({8, 32}, DType::Float32, device);
     batch1.fill_(1.0f);
     observer.observe(batch1);
 
     auto params1 = observer.calculate_qparams(
         QuantDType::INT8, QuantizationScheme::PerTensorSymmetric
     );
-    float scale1 = params1.scale.data<float>()[0];
+    auto scale1_cpu = params1.scale.cpu();
+    float scale1 = scale1_cpu.data<float>()[0];
 
-    Tensor batch2({8, 32}, DType::Float32, Device::cpu());
+    Tensor batch2({8, 32}, DType::Float32, device);
     batch2.fill_(10.0f);
     observer.observe(batch2);
 
     auto params2 = observer.calculate_qparams(
         QuantDType::INT8, QuantizationScheme::PerTensorSymmetric
     );
-    float scale2 = params2.scale.data<float>()[0];
+    auto scale2_cpu = params2.scale.cpu();
+    float scale2 = scale2_cpu.data<float>()[0];
 
     // Low momentum means fast adaptation
     EXPECT_GT(scale2, scale1);
     EXPECT_GT(scale2, scale1 * 5.0f);  // Should increase significantly
 }
 
-TEST_F(QuantizationTest, MovingAverageObserver_PerChannel) {
+TEST_P(QuantizationTest, MovingAverageObserver_PerChannel) {
     MovingAverageMinMaxObserver observer(0.9f, true, 0);
 
     observer.observe(weights_);
@@ -462,7 +486,7 @@ TEST_F(QuantizationTest, MovingAverageObserver_PerChannel) {
 // HistogramObserver Tests
 // ============================================================================
 
-TEST_F(QuantizationTest, HistogramObserver_Basic) {
+TEST_P(QuantizationTest, HistogramObserver_Basic) {
     HistogramObserver observer(2048, 0.001f, 0.999f);
 
     // Observe data
@@ -485,7 +509,7 @@ TEST_F(QuantizationTest, HistogramObserver_Basic) {
     EXPECT_EQ(total_count, weights_.numel() + activations_.numel());
 }
 
-TEST_F(QuantizationTest, HistogramObserver_CalculateQParams) {
+TEST_P(QuantizationTest, HistogramObserver_CalculateQParams) {
     HistogramObserver observer(2048);
 
     observer.observe(weights_);
@@ -494,12 +518,13 @@ TEST_F(QuantizationTest, HistogramObserver_CalculateQParams) {
         QuantDType::INT8, QuantizationScheme::PerTensorSymmetric
     );
 
-    EXPECT_GT(params.scale.data<float>()[0], 0.0f);
+    auto scale_cpu = params.scale.cpu();
+    EXPECT_GT(scale_cpu.data<float>()[0], 0.0f);
 }
 
-TEST_F(QuantizationTest, HistogramObserver_OutlierHandling) {
-    Tensor data_with_outliers({100}, DType::Float32, Device::cpu());
-    float* data = data_with_outliers.data<float>();
+TEST_P(QuantizationTest, HistogramObserver_OutlierHandling) {
+    Tensor outliers_host({100}, DType::Float32, Device::cpu());
+    float* data = outliers_host.data<float>();
 
     // Most values around 0
     for (int64_t i = 0; i < 98; ++i) {
@@ -509,6 +534,8 @@ TEST_F(QuantizationTest, HistogramObserver_OutlierHandling) {
     data[98] = 1000.0f;
     data[99] = -1000.0f;
 
+    Tensor data_with_outliers = outliers_host.to(device);
+
     HistogramObserver observer(2048, 0.01f, 0.99f);  // Clip 1% on each side
     observer.observe(data_with_outliers);
 
@@ -517,11 +544,12 @@ TEST_F(QuantizationTest, HistogramObserver_OutlierHandling) {
     );
 
     // Scale should not be dominated by outliers
-    float scale = params.scale.data<float>()[0];
+    auto scale_cpu = params.scale.cpu();
+    float scale = scale_cpu.data<float>()[0];
     EXPECT_LT(scale, 100.0f);  // Much less than 1000/127
 }
 
-TEST_F(QuantizationTest, HistogramObserver_DifferentBinCounts) {
+TEST_P(QuantizationTest, HistogramObserver_DifferentBinCounts) {
     HistogramObserver observer_small(256);
     HistogramObserver observer_large(4096);
 
@@ -535,7 +563,7 @@ TEST_F(QuantizationTest, HistogramObserver_DifferentBinCounts) {
     EXPECT_EQ(counts_large.size(), 4096);
 }
 
-TEST_F(QuantizationTest, HistogramObserver_Reset) {
+TEST_P(QuantizationTest, HistogramObserver_Reset) {
     HistogramObserver observer(1024);
     observer.observe(weights_);
 
@@ -550,7 +578,7 @@ TEST_F(QuantizationTest, HistogramObserver_Reset) {
 // PerChannelHistogramObserver Tests
 // ============================================================================
 
-TEST_F(QuantizationTest, PerChannelHistogramObserver_Basic) {
+TEST_P(QuantizationTest, PerChannelHistogramObserver_Basic) {
     PerChannelHistogramObserver observer(0, 2048);  // Axis 0
 
     observer.observe(weights_);
@@ -565,8 +593,8 @@ TEST_F(QuantizationTest, PerChannelHistogramObserver_Basic) {
     EXPECT_EQ(params.axis, 0);
 }
 
-TEST_F(QuantizationTest, PerChannelHistogramObserver_DifferentAxes) {
-    Tensor data({16, 32, 8}, DType::Float32, Device::cpu());
+TEST_P(QuantizationTest, PerChannelHistogramObserver_DifferentAxes) {
+    Tensor data({16, 32, 8}, DType::Float32, device);
     data.fill_(0.5f);
 
     // Axis 0
@@ -590,7 +618,7 @@ TEST_F(QuantizationTest, PerChannelHistogramObserver_DifferentAxes) {
 // Observer Factory Tests
 // ============================================================================
 
-TEST_F(QuantizationTest, MakeObserver_MinMax) {
+TEST_P(QuantizationTest, MakeObserver_MinMax) {
     auto observer = make_observer(QuantizationScheme::PerTensorSymmetric, false);
 
     EXPECT_NE(observer, nullptr);
@@ -600,7 +628,7 @@ TEST_F(QuantizationTest, MakeObserver_MinMax) {
     EXPECT_TRUE(observer->has_data());
 }
 
-TEST_F(QuantizationTest, MakeObserver_Histogram) {
+TEST_P(QuantizationTest, MakeObserver_Histogram) {
     auto observer = make_observer(QuantizationScheme::PerTensorSymmetric, true);
 
     EXPECT_NE(observer, nullptr);
@@ -609,7 +637,7 @@ TEST_F(QuantizationTest, MakeObserver_Histogram) {
     EXPECT_TRUE(observer->has_data());
 }
 
-TEST_F(QuantizationTest, MakeObserver_PerChannel) {
+TEST_P(QuantizationTest, MakeObserver_PerChannel) {
     auto observer = make_observer(QuantizationScheme::PerChannelSymmetric, false, 0);
 
     EXPECT_NE(observer, nullptr);
@@ -626,7 +654,7 @@ TEST_F(QuantizationTest, MakeObserver_PerChannel) {
 // QConfig Tests
 // ============================================================================
 
-TEST_F(QuantizationTest, DefaultQConfig) {
+TEST_P(QuantizationTest, DefaultQConfig) {
     auto qconfig = DefaultQConfigs::default_qconfig();
 
     EXPECT_EQ(qconfig.weight_dtype(), QuantDType::INT8);
@@ -642,7 +670,7 @@ TEST_F(QuantizationTest, DefaultQConfig) {
     EXPECT_NE(act_obs, nullptr);
 }
 
-TEST_F(QuantizationTest, HighAccuracyQConfig) {
+TEST_P(QuantizationTest, HighAccuracyQConfig) {
     auto qconfig = DefaultQConfigs::high_accuracy_qconfig();
 
     auto weight_obs = qconfig.create_weight_observer();
@@ -655,14 +683,14 @@ TEST_F(QuantizationTest, HighAccuracyQConfig) {
     EXPECT_EQ(qconfig.activation_scheme(), QuantizationScheme::PerTensorAsymmetric);
 }
 
-TEST_F(QuantizationTest, FastQConfig) {
+TEST_P(QuantizationTest, FastQConfig) {
     auto qconfig = DefaultQConfigs::fast_qconfig();
 
     EXPECT_EQ(qconfig.weight_scheme(), QuantizationScheme::PerChannelSymmetric);
     EXPECT_EQ(qconfig.activation_scheme(), QuantizationScheme::PerTensorSymmetric);
 }
 
-TEST_F(QuantizationTest, QATQConfig) {
+TEST_P(QuantizationTest, QATQConfig) {
     auto qconfig = DefaultQConfigs::qat_qconfig();
 
     auto weight_obs = qconfig.create_weight_observer();
@@ -672,14 +700,14 @@ TEST_F(QuantizationTest, QATQConfig) {
     EXPECT_NE(act_obs, nullptr);
 }
 
-TEST_F(QuantizationTest, UINT8ActivationQConfig) {
+TEST_P(QuantizationTest, UINT8ActivationQConfig) {
     auto qconfig = DefaultQConfigs::uint8_activation_qconfig();
 
     EXPECT_EQ(qconfig.weight_dtype(), QuantDType::INT8);
     EXPECT_EQ(qconfig.activation_dtype(), QuantDType::UINT8);
 }
 
-TEST_F(QuantizationTest, QConfigMapping_Basic) {
+TEST_P(QuantizationTest, QConfigMapping_Basic) {
     QConfigMapping mapping;
 
     auto default_cfg = DefaultQConfigs::default_qconfig();
@@ -705,7 +733,7 @@ TEST_F(QuantizationTest, QConfigMapping_Basic) {
     EXPECT_EQ(cfg3->weight_scheme(), default_cfg.weight_scheme());
 }
 
-TEST_F(QuantizationTest, QConfigMapping_DisableLayer) {
+TEST_P(QuantizationTest, QConfigMapping_DisableLayer) {
     QConfigMapping mapping;
     auto default_cfg = DefaultQConfigs::default_qconfig();
     mapping.set_global(default_cfg);
@@ -716,7 +744,7 @@ TEST_F(QuantizationTest, QConfigMapping_DisableLayer) {
     EXPECT_FALSE(mapping.is_quantized("layer1", "Linear"));
 }
 
-TEST_F(QuantizationTest, QConfigMapping_DisableType) {
+TEST_P(QuantizationTest, QConfigMapping_DisableType) {
     QConfigMapping mapping;
     auto default_cfg = DefaultQConfigs::default_qconfig();
     mapping.set_global(default_cfg);
@@ -731,7 +759,7 @@ TEST_F(QuantizationTest, QConfigMapping_DisableType) {
 // Fake Quantization Tests
 // ============================================================================
 
-TEST_F(QuantizationTest, FakeQuantize_Basic) {
+TEST_P(QuantizationTest, FakeQuantize_Basic) {
     FakeQuantize fake_quant(
         QuantDType::INT8,
         QuantizationScheme::PerTensorSymmetric,
@@ -755,7 +783,7 @@ TEST_F(QuantizationTest, FakeQuantize_Basic) {
     EXPECT_LT(mae, 0.1f);
 }
 
-TEST_F(QuantizationTest, FakeQuantize_EnableDisable) {
+TEST_P(QuantizationTest, FakeQuantize_EnableDisable) {
     FakeQuantize fake_quant(QuantDType::INT8, QuantizationScheme::PerTensorSymmetric);
 
     auto input_var = Variable(activations_, false);
@@ -770,8 +798,10 @@ TEST_F(QuantizationTest, FakeQuantize_EnableDisable) {
     auto output_enabled = fake_quant.forward(input_var);
 
     // Outputs should be different
-    const float* disabled_data = output_disabled.tensor().data<float>();
-    const float* enabled_data = output_enabled.tensor().data<float>();
+    auto disabled_cpu = output_disabled.tensor().cpu();
+    auto enabled_cpu = output_enabled.tensor().cpu();
+    const float* disabled_data = disabled_cpu.data<float>();
+    const float* enabled_data = enabled_cpu.data<float>();
 
     bool different = false;
     for (int64_t i = 0; i < activations_.numel(); ++i) {
@@ -783,7 +813,7 @@ TEST_F(QuantizationTest, FakeQuantize_EnableDisable) {
     EXPECT_TRUE(different);
 }
 
-TEST_F(QuantizationTest, FakeQuantize_ObserverControl) {
+TEST_P(QuantizationTest, FakeQuantize_ObserverControl) {
     FakeQuantize fake_quant(QuantDType::INT8, QuantizationScheme::PerTensorSymmetric);
 
     auto input_var = Variable(activations_, false);
@@ -800,11 +830,11 @@ TEST_F(QuantizationTest, FakeQuantize_ObserverControl) {
     fake_quant.forward(input_var);
 }
 
-TEST_F(QuantizationTest, FakeQuantize_ManualQParams) {
+TEST_P(QuantizationTest, FakeQuantize_ManualQParams) {
     FakeQuantize fake_quant(QuantDType::INT8, QuantizationScheme::PerTensorSymmetric);
 
-    Tensor scale({1}, DType::Float32, Device::cpu());
-    Tensor zero_point({1}, DType::Int32, Device::cpu());
+    Tensor scale({1}, DType::Float32, device);
+    Tensor zero_point({1}, DType::Int32, device);
     scale.fill_(0.05f);
     zero_point.fill_(0);
 
@@ -814,10 +844,11 @@ TEST_F(QuantizationTest, FakeQuantize_ManualQParams) {
     fake_quant.set_qparams(params);
 
     auto qparams = fake_quant.get_qparams();
-    EXPECT_NEAR(qparams.scale.data<float>()[0], 0.05f, 1e-6f);
+    auto scale_cpu = qparams.scale.cpu();
+    EXPECT_NEAR(scale_cpu.data<float>()[0], 0.05f, 1e-6f);
 }
 
-TEST_F(QuantizationTest, FakeQuantize_PerChannel) {
+TEST_P(QuantizationTest, FakeQuantize_PerChannel) {
     FakeQuantize fake_quant(
         QuantDType::INT8,
         QuantizationScheme::PerChannelSymmetric,
@@ -836,7 +867,7 @@ TEST_F(QuantizationTest, FakeQuantize_PerChannel) {
     EXPECT_EQ(qparams.scale.numel(), 64);
 }
 
-TEST_F(QuantizationTest, LearnableFakeQuantize_Basic) {
+TEST_P(QuantizationTest, LearnableFakeQuantize_Basic) {
     LearnableFakeQuantize learnable_fq(
         QuantDType::INT8,
         QuantizationScheme::PerTensorSymmetric
@@ -854,7 +885,7 @@ TEST_F(QuantizationTest, LearnableFakeQuantize_Basic) {
 // Quantized Layer Tests
 // ============================================================================
 
-TEST_F(QuantizationTest, QuantizedLinear_Forward) {
+TEST_P(QuantizationTest, QuantizedLinear_Forward) {
     int64_t in_features = 32;
     int64_t out_features = 16;
 
@@ -862,7 +893,7 @@ TEST_F(QuantizationTest, QuantizedLinear_Forward) {
     auto qconfig = DefaultQConfigs::default_qconfig();
     auto weight_obs = qconfig.create_weight_observer();
 
-    Tensor weights({out_features, in_features}, DType::Float32, Device::cpu());
+    Tensor weights({out_features, in_features}, DType::Float32, device);
     weights.fill_(0.1f);
 
     weight_obs->observe(weights);
@@ -877,7 +908,7 @@ TEST_F(QuantizationTest, QuantizedLinear_Forward) {
     q_linear.set_weight(q_weights);
 
     // Forward pass
-    Tensor input({4, in_features}, DType::Float32, Device::cpu());
+    Tensor input({4, in_features}, DType::Float32, device);
     input.fill_(1.0f);
 
     auto q_input = quantize_per_tensor_symmetric(input);
@@ -888,14 +919,14 @@ TEST_F(QuantizationTest, QuantizedLinear_Forward) {
     EXPECT_EQ(output.dtype(), DType::Float32);
 }
 
-TEST_F(QuantizationTest, QuantizedLinear_WithBias) {
+TEST_P(QuantizationTest, QuantizedLinear_WithBias) {
     int64_t in_features = 32;
     int64_t out_features = 16;
 
     auto qconfig = DefaultQConfigs::default_qconfig();
     auto weight_obs = qconfig.create_weight_observer();
 
-    Tensor weights({out_features, in_features}, DType::Float32, Device::cpu());
+    Tensor weights({out_features, in_features}, DType::Float32, device);
     weights.fill_(0.1f);
 
     weight_obs->observe(weights);
@@ -908,11 +939,11 @@ TEST_F(QuantizationTest, QuantizedLinear_WithBias) {
     q_linear.set_weight(q_weights);
 
     // Add bias
-    Tensor bias({out_features}, DType::Float32, Device::cpu());
+    Tensor bias({out_features}, DType::Float32, device);
     bias.fill_(0.5f);
     q_linear.set_bias(bias);
 
-    Tensor input({4, in_features}, DType::Float32, Device::cpu());
+    Tensor input({4, in_features}, DType::Float32, device);
     input.fill_(1.0f);
 
     auto q_input = quantize_per_tensor_symmetric(input);
@@ -926,36 +957,38 @@ TEST_F(QuantizationTest, QuantizedLinear_WithBias) {
 // Calibration Tests
 // ============================================================================
 
-TEST_F(QuantizationTest, CalibrateQuantizationParams_Basic) {
+TEST_P(QuantizationTest, CalibrateQuantizationParams_Basic) {
     std::vector<Tensor> samples;
 
     for (int i = 0; i < 10; ++i) {
-        Tensor sample({8, 32}, DType::Float32, Device::cpu());
-        float* data = sample.data<float>();
-        for (int64_t j = 0; j < sample.numel(); ++j) {
+        Tensor sample_host({8, 32}, DType::Float32, Device::cpu());
+        float* data = sample_host.data<float>();
+        for (int64_t j = 0; j < sample_host.numel(); ++j) {
             data[j] = std::sin(j * 0.1f + i) * 2.0f;
         }
-        samples.push_back(sample);
+        samples.push_back(sample_host.to(device));
     }
 
     auto params = calibrate_quantization_params(
         samples, QuantDType::INT8, QuantizationScheme::PerTensorSymmetric
     );
 
-    EXPECT_GT(params.scale.data<float>()[0], 0.0f);
-    EXPECT_EQ(params.zero_point.data<int32_t>()[0], 0);
+    auto scale_cpu = params.scale.cpu();
+    auto zp_cpu = params.zero_point.cpu();
+    EXPECT_GT(scale_cpu.data<float>()[0], 0.0f);
+    EXPECT_EQ(zp_cpu.data<int32_t>()[0], 0);
 }
 
-TEST_F(QuantizationTest, CalibrateQuantizationParams_PerChannel) {
+TEST_P(QuantizationTest, CalibrateQuantizationParams_PerChannel) {
     std::vector<Tensor> samples;
 
     for (int i = 0; i < 5; ++i) {
-        Tensor sample({64, 32}, DType::Float32, Device::cpu());
-        float* data = sample.data<float>();
-        for (int64_t j = 0; j < sample.numel(); ++j) {
+        Tensor sample_host({64, 32}, DType::Float32, Device::cpu());
+        float* data = sample_host.data<float>();
+        for (int64_t j = 0; j < sample_host.numel(); ++j) {
             data[j] = std::sin(j * 0.1f + i) * 1.5f;
         }
-        samples.push_back(sample);
+        samples.push_back(sample_host.to(device));
     }
 
     auto params = calibrate_quantization_params(
@@ -970,17 +1003,17 @@ TEST_F(QuantizationTest, CalibrateQuantizationParams_PerChannel) {
 // Edge Case Tests
 // ============================================================================
 
-TEST_F(QuantizationTest, EdgeCase_EmptyTensor) {
+TEST_P(QuantizationTest, EdgeCase_EmptyTensor) {
     // Empty tensor should not crash observers
-    Tensor empty({0}, DType::Float32, Device::cpu());
+    Tensor empty({0}, DType::Float32, device);
 
     MinMaxObserver observer(false);
     // This should handle empty tensor gracefully
     // observer.observe(empty);  // May throw or handle gracefully
 }
 
-TEST_F(QuantizationTest, EdgeCase_SingleValue) {
-    Tensor single({1}, DType::Float32, Device::cpu());
+TEST_P(QuantizationTest, EdgeCase_SingleValue) {
+    Tensor single({1}, DType::Float32, device);
     single.fill_(5.0f);
 
     MinMaxObserver observer(false);
@@ -988,32 +1021,36 @@ TEST_F(QuantizationTest, EdgeCase_SingleValue) {
 
     EXPECT_TRUE(observer.has_data());
 
-    float min_val = observer.get_min().data<float>()[0];
-    float max_val = observer.get_max().data<float>()[0];
+    auto min_cpu = observer.get_min().cpu();
+    auto max_cpu = observer.get_max().cpu();
+    float min_val = min_cpu.data<float>()[0];
+    float max_val = max_cpu.data<float>()[0];
 
     EXPECT_NEAR(min_val, 5.0f, 1e-5f);
     EXPECT_NEAR(max_val, 5.0f, 1e-5f);
 }
 
-TEST_F(QuantizationTest, EdgeCase_AllZeros) {
-    Tensor zeros({10, 10}, DType::Float32, Device::cpu());
+TEST_P(QuantizationTest, EdgeCase_AllZeros) {
+    Tensor zeros({10, 10}, DType::Float32, device);
     zeros.fill_(0.0f);
 
     auto q_tensor = quantize_per_tensor_symmetric(zeros);
     Tensor deq = q_tensor.dequantize();
 
-    float* deq_data = deq.data<float>();
-    for (int64_t i = 0; i < deq.numel(); ++i) {
+    auto deq_cpu = deq.cpu();
+    float* deq_data = deq_cpu.data<float>();
+    for (int64_t i = 0; i < deq_cpu.numel(); ++i) {
         EXPECT_NEAR(deq_data[i], 0.0f, 1e-3f);
     }
 }
 
-TEST_F(QuantizationTest, EdgeCase_VerySmallValues) {
-    Tensor tiny({10, 10}, DType::Float32, Device::cpu());
-    float* data = tiny.data<float>();
+TEST_P(QuantizationTest, EdgeCase_VerySmallValues) {
+    Tensor tiny_host({10, 10}, DType::Float32, Device::cpu());
+    float* data = tiny_host.data<float>();
     for (int64_t i = 0; i < 100; ++i) {
         data[i] = 1e-6f * std::sin(i * 0.1f);
     }
+    Tensor tiny = tiny_host.to(device);
 
     auto q_tensor = quantize_per_tensor_symmetric(tiny);
     auto [mae, mse, snr_db] = compute_quantization_error(tiny, q_tensor);
@@ -1022,12 +1059,13 @@ TEST_F(QuantizationTest, EdgeCase_VerySmallValues) {
     EXPECT_LT(mae, 1e-5f);
 }
 
-TEST_F(QuantizationTest, EdgeCase_VeryLargeValues) {
-    Tensor large({10, 10}, DType::Float32, Device::cpu());
-    float* data = large.data<float>();
+TEST_P(QuantizationTest, EdgeCase_VeryLargeValues) {
+    Tensor large_host({10, 10}, DType::Float32, Device::cpu());
+    float* data = large_host.data<float>();
     for (int64_t i = 0; i < 100; ++i) {
         data[i] = 1000.0f * std::sin(i * 0.1f);
     }
+    Tensor large = large_host.to(device);
 
     auto q_tensor = quantize_per_tensor_symmetric(large);
 
@@ -1041,9 +1079,9 @@ TEST_F(QuantizationTest, EdgeCase_VeryLargeValues) {
     EXPECT_GT(snr_db, 25.0f);
 }
 
-TEST_F(QuantizationTest, EdgeCase_MixedRange) {
-    Tensor mixed({100}, DType::Float32, Device::cpu());
-    float* data = mixed.data<float>();
+TEST_P(QuantizationTest, EdgeCase_MixedRange) {
+    Tensor mixed_host({100}, DType::Float32, Device::cpu());
+    float* data = mixed_host.data<float>();
 
     // Mix of small, medium, and large values
     for (int64_t i = 0; i < 33; ++i) {
@@ -1056,6 +1094,8 @@ TEST_F(QuantizationTest, EdgeCase_MixedRange) {
         data[i] = 100.0f * std::sin(i * 0.1f);
     }
 
+    Tensor mixed = mixed_host.to(device);
+
     auto q_tensor = quantize_per_tensor_symmetric(mixed);
     auto [mae, mse, snr_db] = compute_quantization_error(mixed, q_tensor);
 
@@ -1063,18 +1103,21 @@ TEST_F(QuantizationTest, EdgeCase_MixedRange) {
     EXPECT_GT(snr_db, 20.0f);
 }
 
-TEST_F(QuantizationTest, EdgeCase_NearBoundary) {
-    Tensor boundary({10}, DType::Float32, Device::cpu());
-    float* data = boundary.data<float>();
+TEST_P(QuantizationTest, EdgeCase_NearBoundary) {
+    Tensor boundary_host({10}, DType::Float32, Device::cpu());
+    float* data = boundary_host.data<float>();
 
     // Values near INT8 boundaries after scaling
     for (int64_t i = 0; i < 10; ++i) {
         data[i] = (i % 2 == 0) ? -127.0f : 127.0f;
     }
 
+    Tensor boundary = boundary_host.to(device);
+
     auto q_tensor = quantize_per_tensor_symmetric(boundary);
 
-    const int8_t* q_data = q_tensor.data().data<int8_t>();
+    auto q_data_cpu = q_tensor.data().cpu();
+    const int8_t* q_data = q_data_cpu.data<int8_t>();
     for (int64_t i = 0; i < 10; ++i) {
         // Should be at or near boundaries
         EXPECT_TRUE(q_data[i] == -127 || q_data[i] == 127);
@@ -1085,7 +1128,7 @@ TEST_F(QuantizationTest, EdgeCase_NearBoundary) {
 // Integration Tests
 // ============================================================================
 
-TEST_F(QuantizationTest, Integration_EndToEnd_PerTensor) {
+TEST_P(QuantizationTest, Integration_EndToEnd_PerTensor) {
     // 1. Create and observe weights
     auto observer = std::make_unique<MinMaxObserver>();
     observer->observe(weights_);
@@ -1112,18 +1155,18 @@ TEST_F(QuantizationTest, Integration_EndToEnd_PerTensor) {
               << ", SNR: " << snr_db << " dB" << std::endl;
 }
 
-TEST_F(QuantizationTest, Integration_PTQ_Workflow) {
+TEST_P(QuantizationTest, Integration_PTQ_Workflow) {
     // Post-Training Quantization workflow
 
     // 1. Calibration phase: collect statistics
     std::vector<Tensor> calibration_samples;
     for (int i = 0; i < 20; ++i) {
-        Tensor sample({8, 32}, DType::Float32, Device::cpu());
-        float* data = sample.data<float>();
-        for (int64_t j = 0; j < sample.numel(); ++j) {
+        Tensor sample_host({8, 32}, DType::Float32, Device::cpu());
+        float* data = sample_host.data<float>();
+        for (int64_t j = 0; j < sample_host.numel(); ++j) {
             data[j] = std::sin(j * 0.05f + i) * 1.5f;
         }
-        calibration_samples.push_back(sample);
+        calibration_samples.push_back(sample_host.to(device));
     }
 
     // 2. Calibrate quantization parameters
@@ -1137,7 +1180,7 @@ TEST_F(QuantizationTest, Integration_PTQ_Workflow) {
     auto q_weights = quantize_tensor(weights_, params);
 
     // 4. Run inference with quantized weights
-    Tensor test_input({8, 32}, DType::Float32, Device::cpu());
+    Tensor test_input({8, 32}, DType::Float32, device);
     test_input.fill_(1.0f);
 
     auto q_input = quantize_per_tensor_symmetric(test_input);
@@ -1149,14 +1192,15 @@ TEST_F(QuantizationTest, Integration_PTQ_Workflow) {
     EXPECT_GT(snr_db, 15.0f);
 }
 
-TEST_F(QuantizationTest, Integration_MemoryFootprint) {
+TEST_P(QuantizationTest, Integration_MemoryFootprint) {
     // Verify quantization reduces memory usage
 
-    Tensor large_tensor({256, 512}, DType::Float32, Device::cpu());
-    float* fp32_data = large_tensor.data<float>();
-    for (int64_t i = 0; i < large_tensor.numel(); ++i) {
+    Tensor large_host({256, 512}, DType::Float32, Device::cpu());
+    float* fp32_data = large_host.data<float>();
+    for (int64_t i = 0; i < large_host.numel(); ++i) {
         fp32_data[i] = std::sin(i * 0.01f);
     }
+    Tensor large_tensor = large_host.to(device);
 
     // FP32 memory: 256 * 512 * 4 bytes = 512 KB
     int64_t fp32_bytes = large_tensor.numel() * sizeof(float);
@@ -1175,22 +1219,25 @@ TEST_F(QuantizationTest, Integration_MemoryFootprint) {
     std::cout << "Memory compression: " << compression_ratio << "x" << std::endl;
 }
 
-TEST_F(QuantizationTest, Integration_AccuracyComparison) {
+TEST_P(QuantizationTest, Integration_AccuracyComparison) {
     // Compare FP32 vs INT8 accuracy
 
     // Create simple computation
-    Tensor input({16, 32}, DType::Float32, Device::cpu());
-    Tensor weight({64, 32}, DType::Float32, Device::cpu());
+    Tensor input_host({16, 32}, DType::Float32, Device::cpu());
+    Tensor weight_host({64, 32}, DType::Float32, Device::cpu());
 
-    float* inp_data = input.data<float>();
-    float* wgt_data = weight.data<float>();
+    float* inp_data = input_host.data<float>();
+    float* wgt_data = weight_host.data<float>();
 
-    for (int64_t i = 0; i < input.numel(); ++i) {
+    for (int64_t i = 0; i < input_host.numel(); ++i) {
         inp_data[i] = std::sin(i * 0.1f);
     }
-    for (int64_t i = 0; i < weight.numel(); ++i) {
+    for (int64_t i = 0; i < weight_host.numel(); ++i) {
         wgt_data[i] = std::cos(i * 0.1f) * 0.5f;
     }
+
+    Tensor input = input_host.to(device);
+    Tensor weight = weight_host.to(device);
 
     // FP32 computation (simulated)
     // In real scenario, this would be actual layer forward pass
@@ -1212,11 +1259,13 @@ TEST_F(QuantizationTest, Integration_AccuracyComparison) {
 // Quantized Conv2d Groups Validation
 // ============================================================================
 
-TEST(QuantizedConv2dValidation, NonDivisibleGroupsThrows) {
+class QuantizedConv2dValidation : public ::tenzor::testing::BackendTest {};
+
+TEST_P(QuantizedConv2dValidation, NonDivisibleGroupsThrows) {
     // in_channels=7, groups=3 → 7 % 3 != 0, should throw at construction.
-    auto scale = Tensor({1}, DType::Float32, Device::cpu());
+    auto scale = Tensor({1}, DType::Float32, device);
     scale.fill_(0.1f);
-    auto zp = Tensor({1}, DType::Int32, Device::cpu());
+    auto zp = Tensor({1}, DType::Int32, device);
     zp.zero_();
     QuantizationParams qparams(scale, zp, QuantDType::INT8, QuantizationScheme::PerTensorSymmetric);
 
@@ -1229,11 +1278,11 @@ TEST(QuantizedConv2dValidation, NonDivisibleGroupsThrows) {
         << "quantized_conv2d with in_channels=7, groups=3 should throw";
 }
 
-TEST(QuantizedConv2dValidation, DivisibleGroupsSucceeds) {
+TEST_P(QuantizedConv2dValidation, DivisibleGroupsSucceeds) {
     // in_channels=6, out_channels=6, groups=3 → valid (6%3 == 0)
-    auto scale = Tensor({1}, DType::Float32, Device::cpu());
+    auto scale = Tensor({1}, DType::Float32, device);
     scale.fill_(0.1f);
-    auto zp = Tensor({1}, DType::Int32, Device::cpu());
+    auto zp = Tensor({1}, DType::Int32, device);
     zp.zero_();
     QuantizationParams qparams(scale, zp, QuantDType::INT8, QuantizationScheme::PerTensorSymmetric);
 
@@ -1245,13 +1294,11 @@ TEST(QuantizedConv2dValidation, DivisibleGroupsSucceeds) {
     QuantizationParams input_qparams(scale.clone(), zp.clone(), QuantDType::INT8,
                                      QuantizationScheme::PerTensorSymmetric);
     QuantizedTensor qinput(
-        Tensor({1, 6, 4, 4}, DType::Int8, Device::cpu()), input_qparams);
+        Tensor({1, 6, 4, 4}, DType::Int8, device), input_qparams);
 
     // Forward should succeed
     EXPECT_NO_THROW(conv.forward_quantized(qinput));
 }
 
-int main(int argc, char** argv) {
-    ::testing::InitGoogleTest(&argc, argv);
-    return RUN_ALL_TESTS();
-}
+INSTANTIATE_BACKEND_TESTS(QuantizationTest);
+INSTANTIATE_BACKEND_TESTS(QuantizedConv2dValidation);

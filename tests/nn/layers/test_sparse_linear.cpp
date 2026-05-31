@@ -7,35 +7,42 @@
 #include <tenzor/tenzor.hpp>
 #include <tenzor/nn/layers/sparse_linear.hpp>
 #include "../../grad_flow_helpers.hpp"
+#include "../../backend_test_fixture.hpp"
 
 using namespace tenzor;
 using namespace tenzor::nn;
 
-class SparseLinearTest : public ::testing::Test {
+class SparseLinearTest : public ::tenzor::testing::BackendTest {
 protected:
-    static void SetUpTestSuite() { tenzor::initialize(); }
-    void SetUp() override { set_grad_enabled(true); }
+    void SetUp() override {
+        BackendTest::SetUp();
+        if (::testing::Test::IsSkipped()) return;
+        set_grad_enabled(true);
+    }
 };
 
-TEST_F(SparseLinearTest, ForwardShape) {
+TEST_P(SparseLinearTest, ForwardShape) {
     SparseLinear sl(16, 8, /*density=*/0.5, /*bias=*/true);
-    auto input = Variable(randn({4, 16}, DType::Float32, Device::cpu()), false);
+    sl.to(device);
+    auto input = Variable(randn({4, 16}, DType::Float32, device), false);
     auto output = sl.forward(input);
     ASSERT_EQ(output.tensor().shape()[0], 4);
     ASSERT_EQ(output.tensor().shape()[1], 8);
 }
 
-TEST_F(SparseLinearTest, ForwardShapeNoBias) {
+TEST_P(SparseLinearTest, ForwardShapeNoBias) {
     SparseLinear sl(16, 8, /*density=*/0.5, /*bias=*/false);
-    auto input = Variable(randn({4, 16}, DType::Float32, Device::cpu()), false);
+    sl.to(device);
+    auto input = Variable(randn({4, 16}, DType::Float32, device), false);
     auto output = sl.forward(input);
     ASSERT_EQ(output.tensor().shape()[0], 4);
     ASSERT_EQ(output.tensor().shape()[1], 8);
 }
 
-TEST_F(SparseLinearTest, Backward) {
+TEST_P(SparseLinearTest, Backward) {
     SparseLinear sl(8, 4, 0.5, true);
-    auto input = Variable(randn({2, 8}, DType::Float32, Device::cpu()), true);
+    sl.to(device);
+    auto input = Variable(randn({2, 8}, DType::Float32, device), true);
     auto output = sl.forward(input);
     auto loss = sum(output);
     loss.backward();
@@ -46,3 +53,5 @@ TEST_F(SparseLinearTest, Backward) {
     ASSERT_EQ(input.grad().value().shape()[0], 2);
     ASSERT_EQ(input.grad().value().shape()[1], 8);
 }
+
+INSTANTIATE_BACKEND_TESTS(SparseLinearTest);

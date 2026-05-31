@@ -4,6 +4,7 @@
  */
 
 #include <gtest/gtest.h>
+#include "../backend_test_fixture.hpp"
 #include "tenzor/tenzor.hpp"
 #include "tenzor/nn/amp/grad_scaler.hpp"
 #include "tenzor/nn/optim/sgd.hpp"
@@ -16,17 +17,16 @@ using namespace tenzor;
 using namespace tenzor::nn::amp;
 using namespace tenzor::optim;
 
-class GradScalerTest : public ::testing::Test {
+class GradScalerTest : public ::tenzor::testing::BackendTest {
 protected:
     void SetUp() override {
-        device_ = Device::cpu();
+        ::tenzor::testing::BackendTest::SetUp();
+        if (::testing::Test::IsSkipped()) return;
     }
-
-    Device device_;
 };
 
 // Test 1: Constructor with default parameters
-TEST_F(GradScalerTest, DefaultConstructor) {
+TEST_P(GradScalerTest, DefaultConstructor) {
     GradScaler scaler;
 
     EXPECT_FLOAT_EQ(scaler.get_scale(), 65536.0f);
@@ -35,7 +35,7 @@ TEST_F(GradScalerTest, DefaultConstructor) {
 }
 
 // Test 2: Constructor with custom parameters
-TEST_F(GradScalerTest, CustomConstructor) {
+TEST_P(GradScalerTest, CustomConstructor) {
     GradScaler scaler(1024.0f, 1.5f, 0.75f, 1000);
 
     EXPECT_FLOAT_EQ(scaler.get_scale(), 1024.0f);
@@ -43,7 +43,7 @@ TEST_F(GradScalerTest, CustomConstructor) {
 }
 
 // Test 3: Constructor parameter validation
-TEST_F(GradScalerTest, ConstructorValidation) {
+TEST_P(GradScalerTest, ConstructorValidation) {
     // Invalid init_scale
     EXPECT_THROW(GradScaler(-1.0f), std::invalid_argument);
     EXPECT_THROW(GradScaler(0.0f), std::invalid_argument);
@@ -63,30 +63,31 @@ TEST_F(GradScalerTest, ConstructorValidation) {
 }
 
 // Test 4: Loss scaling
-TEST_F(GradScalerTest, LossScaling) {
+TEST_P(GradScalerTest, LossScaling) {
     GradScaler scaler(1000.0f);
 
     // Create a simple loss value
-    auto loss_tensor = full({}, 0.5f, DType::Float32, device_);
+    auto loss_tensor = full({}, 0.5f, DType::Float32, device);
     auto loss = Variable(loss_tensor, true);
 
     // Scale the loss
     auto scaled_loss = scaler.scale(loss);
 
     // Verify scaling
-    EXPECT_FLOAT_EQ(scaled_loss.tensor().item<float>(), 500.0f);
+    auto scaled_cpu = scaled_loss.tensor().to(Device::cpu());
+    EXPECT_FLOAT_EQ(scaled_cpu.item<float>(), 500.0f);
 }
 
 // Test 5: Gradient unscaling
-TEST_F(GradScalerTest, GradientUnscaling) {
+TEST_P(GradScalerTest, GradientUnscaling) {
     GradScaler scaler(100.0f);
 
     // Create a parameter with gradient
-    auto param_tensor = ones({2, 3}, DType::Float32, device_);
+    auto param_tensor = ones({2, 3}, DType::Float32, device);
     auto param = Variable(param_tensor, true);
 
     // Create fake scaled gradient
-    auto grad_tensor = full({2, 3}, 200.0f, DType::Float32, device_);
+    auto grad_tensor = full({2, 3}, 200.0f, DType::Float32, device);
     param.set_grad(grad_tensor);
 
     // Create optimizer with this parameter
@@ -98,21 +99,22 @@ TEST_F(GradScalerTest, GradientUnscaling) {
     scaler.unscale_(optimizer);
 
     // Verify gradient was unscaled: 200.0 / 100.0 = 2.0
-    const float* grad_data = param.grad()->data<float>();
+    auto grad_cpu = param.grad()->to(Device::cpu());
+    const float* grad_data = grad_cpu.data<float>();
     for (int i = 0; i < 6; ++i) {
         EXPECT_FLOAT_EQ(grad_data[i], 2.0f);
     }
 }
 
 // Test 6: Inf/NaN detection - normal gradients
-TEST_F(GradScalerTest, NoInfNanDetection) {
+TEST_P(GradScalerTest, NoInfNanDetection) {
     GradScaler scaler;
 
     // Create parameter with normal gradient
-    auto param_tensor = ones({3, 3}, DType::Float32, device_);
+    auto param_tensor = ones({3, 3}, DType::Float32, device);
     auto param = Variable(param_tensor, true);
 
-    auto grad_tensor = full({3, 3}, 1.5f, DType::Float32, device_);
+    auto grad_tensor = full({3, 3}, 1.5f, DType::Float32, device);
     param.set_grad(grad_tensor);
 
     auto param_ptr = std::make_shared<Variable>(param);
@@ -127,16 +129,18 @@ TEST_F(GradScalerTest, NoInfNanDetection) {
 }
 
 // Test 7: Inf detection
-TEST_F(GradScalerTest, InfDetection) {
+TEST_P(GradScalerTest, InfDetection) {
     GradScaler scaler;
 
     // Create parameter with inf in gradient
-    auto param_tensor = ones({2, 2}, DType::Float32, device_);
+    auto param_tensor = ones({2, 2}, DType::Float32, device);
     auto param = Variable(param_tensor, true);
 
-    auto grad_tensor = full({2, 2}, 1.0f, DType::Float32, device_);
-    float* grad_data = grad_tensor.data<float>();
+    // Build the gradient on CPU (host write), then move to device.
+    auto grad_host = full({2, 2}, 1.0f, DType::Float32, Device::cpu());
+    float* grad_data = grad_host.data<float>();
     grad_data[1] = std::numeric_limits<float>::infinity();
+    auto grad_tensor = grad_host.to(device);
     param.set_grad(grad_tensor);
 
     auto param_ptr = std::make_shared<Variable>(param);
@@ -151,16 +155,18 @@ TEST_F(GradScalerTest, InfDetection) {
 }
 
 // Test 8: NaN detection
-TEST_F(GradScalerTest, NanDetection) {
+TEST_P(GradScalerTest, NanDetection) {
     GradScaler scaler;
 
     // Create parameter with nan in gradient
-    auto param_tensor = ones({2, 2}, DType::Float32, device_);
+    auto param_tensor = ones({2, 2}, DType::Float32, device);
     auto param = Variable(param_tensor, true);
 
-    auto grad_tensor = full({2, 2}, 1.0f, DType::Float32, device_);
-    float* grad_data = grad_tensor.data<float>();
+    // Build the gradient on CPU (host write), then move to device.
+    auto grad_host = full({2, 2}, 1.0f, DType::Float32, Device::cpu());
+    float* grad_data = grad_host.data<float>();
     grad_data[2] = std::numeric_limits<float>::quiet_NaN();
+    auto grad_tensor = grad_host.to(device);
     param.set_grad(grad_tensor);
 
     auto param_ptr = std::make_shared<Variable>(param);
@@ -175,17 +181,17 @@ TEST_F(GradScalerTest, NanDetection) {
 }
 
 // Test 9: Scale backoff on overflow
-TEST_F(GradScalerTest, ScaleBackoff) {
+TEST_P(GradScalerTest, ScaleBackoff) {
     GradScaler scaler(1000.0f, 2.0f, 0.5f, 10);
 
     float initial_scale = scaler.get_scale();
 
     // Create parameter with inf gradient
-    auto param_tensor = ones({2, 2}, DType::Float32, device_);
+    auto param_tensor = ones({2, 2}, DType::Float32, device);
     auto param = Variable(param_tensor, true);
 
     auto grad_tensor = full({2, 2}, std::numeric_limits<float>::infinity(),
-                                   DType::Float32, device_);
+                                   DType::Float32, device);
     param.set_grad(grad_tensor);
 
     auto param_ptr = std::make_shared<Variable>(param);
@@ -204,11 +210,11 @@ TEST_F(GradScalerTest, ScaleBackoff) {
 }
 
 // Test 10: Scale growth after successful iterations
-TEST_F(GradScalerTest, ScaleGrowth) {
+TEST_P(GradScalerTest, ScaleGrowth) {
     GradScaler scaler(1000.0f, 2.0f, 0.5f, 3);
 
     // Create parameter with normal gradient
-    auto param_tensor = ones({2, 2}, DType::Float32, device_);
+    auto param_tensor = ones({2, 2}, DType::Float32, device);
     auto param = Variable(param_tensor, true);
 
     auto param_ptr = std::make_shared<Variable>(param);
@@ -217,7 +223,7 @@ TEST_F(GradScalerTest, ScaleGrowth) {
 
     // Perform 3 successful iterations
     for (int i = 0; i < 3; ++i) {
-        auto grad_tensor = full({2, 2}, 1.0f, DType::Float32, device_);
+        auto grad_tensor = full({2, 2}, 1.0f, DType::Float32, device);
         param.set_grad(grad_tensor);
 
         bool success = scaler.step(optimizer);
@@ -231,11 +237,11 @@ TEST_F(GradScalerTest, ScaleGrowth) {
 }
 
 // Test 11: Integration with SGD optimizer
-TEST_F(GradScalerTest, SGDIntegration) {
+TEST_P(GradScalerTest, SGDIntegration) {
     GradScaler scaler(100.0f);
 
     // Create simple parameter
-    auto param_tensor = full({3, 3}, 1.0f, DType::Float32, device_);
+    auto param_tensor = full({3, 3}, 1.0f, DType::Float32, device);
     auto param = Variable(param_tensor, true);
 
     auto param_ptr = std::make_shared<Variable>(param);
@@ -243,11 +249,11 @@ TEST_F(GradScalerTest, SGDIntegration) {
     SGD optimizer(params, 0.1);
 
     // Create loss and compute scaled gradients
-    auto loss_tensor = full({}, 0.5f, DType::Float32, device_);
+    auto loss_tensor = full({}, 0.5f, DType::Float32, device);
     auto loss = Variable(loss_tensor, true);
 
     // Manually set gradient (simulating backward)
-    auto grad_tensor = full({3, 3}, 10.0f, DType::Float32, device_);
+    auto grad_tensor = full({3, 3}, 10.0f, DType::Float32, device);
     param.set_grad(grad_tensor);
 
     // Step with scaler
@@ -258,16 +264,17 @@ TEST_F(GradScalerTest, SGDIntegration) {
 
     // Verify parameter was updated (unscaled gradient = 10/100 = 0.1)
     // Update: param = param - lr * grad = 1.0 - 0.1 * 0.1 = 0.99
-    const float* param_data = param.tensor().data<float>();
+    auto param_cpu = param.tensor().to(Device::cpu());
+    const float* param_data = param_cpu.data<float>();
     EXPECT_NEAR(param_data[0], 0.99f, 1e-5f);
 }
 
 // Test 12: Integration with Adam optimizer
-TEST_F(GradScalerTest, AdamIntegration) {
+TEST_P(GradScalerTest, AdamIntegration) {
     GradScaler scaler(100.0f);
 
     // Create parameter
-    auto param_tensor = full({2, 2}, 1.0f, DType::Float32, device_);
+    auto param_tensor = full({2, 2}, 1.0f, DType::Float32, device);
     auto param = Variable(param_tensor, true);
 
     auto param_ptr = std::make_shared<Variable>(param);
@@ -275,7 +282,7 @@ TEST_F(GradScalerTest, AdamIntegration) {
     Adam optimizer(params, 0.01);
 
     // Set gradient
-    auto grad_tensor = full({2, 2}, 50.0f, DType::Float32, device_);
+    auto grad_tensor = full({2, 2}, 50.0f, DType::Float32, device);
     param.set_grad(grad_tensor);
 
     // Step with scaler
@@ -285,19 +292,20 @@ TEST_F(GradScalerTest, AdamIntegration) {
     EXPECT_TRUE(success);
 
     // Verify parameter was updated (unscaled gradient = 50/100 = 0.5)
-    const float* param_data = param.tensor().data<float>();
+    auto param_cpu = param.tensor().to(Device::cpu());
+    const float* param_data = param_cpu.data<float>();
     // Adam update is more complex, just verify it changed
     EXPECT_NE(param_data[0], 1.0f);
 }
 
 // Test 13: Reset functionality
-TEST_F(GradScalerTest, Reset) {
+TEST_P(GradScalerTest, Reset) {
     GradScaler scaler(2048.0f, 2.0f, 0.5f, 100);
 
     // Modify state
-    auto param_tensor = ones({2, 2}, DType::Float32, device_);
+    auto param_tensor = ones({2, 2}, DType::Float32, device);
     auto param = Variable(param_tensor, true);
-    auto grad_tensor = full({2, 2}, 1.0f, DType::Float32, device_);
+    auto grad_tensor = full({2, 2}, 1.0f, DType::Float32, device);
     param.set_grad(grad_tensor);
 
     auto param_ptr = std::make_shared<Variable>(param);
@@ -321,13 +329,13 @@ TEST_F(GradScalerTest, Reset) {
 }
 
 // Test 14: State dict save/load
-TEST_F(GradScalerTest, StateDictSaveLoad) {
+TEST_P(GradScalerTest, StateDictSaveLoad) {
     GradScaler scaler1(2048.0f, 3.0f, 0.25f, 500);
 
     // Modify state
-    auto param_tensor = ones({2, 2}, DType::Float32, device_);
+    auto param_tensor = ones({2, 2}, DType::Float32, device);
     auto param = Variable(param_tensor, true);
-    auto grad_tensor = full({2, 2}, 1.0f, DType::Float32, device_);
+    auto grad_tensor = full({2, 2}, 1.0f, DType::Float32, device);
     param.set_grad(grad_tensor);
 
     auto param_ptr = std::make_shared<Variable>(param);
@@ -353,21 +361,21 @@ TEST_F(GradScalerTest, StateDictSaveLoad) {
 }
 
 // Test 15: Multiple parameters
-TEST_F(GradScalerTest, MultipleParameters) {
+TEST_P(GradScalerTest, MultipleParameters) {
     GradScaler scaler(100.0f);
 
     // Create multiple parameters
-    auto param1_tensor = ones({2, 2}, DType::Float32, device_);
+    auto param1_tensor = ones({2, 2}, DType::Float32, device);
     auto param1 = Variable(param1_tensor, true);
 
-    auto param2_tensor = ones({3, 3}, DType::Float32, device_);
+    auto param2_tensor = ones({3, 3}, DType::Float32, device);
     auto param2 = Variable(param2_tensor, true);
 
     // Set gradients
-    auto grad1_tensor = full({2, 2}, 100.0f, DType::Float32, device_);
+    auto grad1_tensor = full({2, 2}, 100.0f, DType::Float32, device);
     param1.set_grad(grad1_tensor);
 
-    auto grad2_tensor = full({3, 3}, 200.0f, DType::Float32, device_);
+    auto grad2_tensor = full({3, 3}, 200.0f, DType::Float32, device);
     param2.set_grad(grad2_tensor);
 
     auto param1_ptr = std::make_shared<Variable>(param1);
@@ -381,18 +389,20 @@ TEST_F(GradScalerTest, MultipleParameters) {
     EXPECT_TRUE(success);
 
     // Verify both gradients were unscaled
-    const float* grad1_data = param1.grad()->data<float>();
-    const float* grad2_data = param2.grad()->data<float>();
+    auto grad1_cpu = param1.grad()->to(Device::cpu());
+    auto grad2_cpu = param2.grad()->to(Device::cpu());
+    const float* grad1_data = grad1_cpu.data<float>();
+    const float* grad2_data = grad2_cpu.data<float>();
 
     EXPECT_FLOAT_EQ(grad1_data[0], 1.0f);  // 100 / 100 = 1.0
     EXPECT_FLOAT_EQ(grad2_data[0], 2.0f);  // 200 / 100 = 2.0
 }
 
 // Test 16: Training loop simulation
-TEST_F(GradScalerTest, TrainingLoopSimulation) {
+TEST_P(GradScalerTest, TrainingLoopSimulation) {
     GradScaler scaler(1024.0f, 2.0f, 0.5f, 5);
 
-    auto param_tensor = ones({10, 10}, DType::Float32, device_);
+    auto param_tensor = ones({10, 10}, DType::Float32, device);
     auto param = Variable(param_tensor, true);
 
     auto param_ptr = std::make_shared<Variable>(param);
@@ -407,7 +417,7 @@ TEST_F(GradScalerTest, TrainingLoopSimulation) {
         optimizer.zero_grad();
 
         // Simulate loss computation
-        auto loss_tensor = full({}, 0.1f, DType::Float32, device_);
+        auto loss_tensor = full({}, 0.1f, DType::Float32, device);
         auto loss = Variable(loss_tensor, true);
         auto scaled_loss = scaler.scale(loss);
 
@@ -415,7 +425,7 @@ TEST_F(GradScalerTest, TrainingLoopSimulation) {
         float grad_value = (iter % 7 == 0) ?
             std::numeric_limits<float>::infinity() : 1.0f;
 
-        auto grad_tensor = full({10, 10}, grad_value, DType::Float32, device_);
+        auto grad_tensor = full({10, 10}, grad_value, DType::Float32, device);
         param.set_grad(grad_tensor);
 
         // Step and update
@@ -436,11 +446,11 @@ TEST_F(GradScalerTest, TrainingLoopSimulation) {
 }
 
 // Test 17: Scale limits
-TEST_F(GradScalerTest, ScaleLimits) {
+TEST_P(GradScalerTest, ScaleLimits) {
     // Test minimum scale limit
     GradScaler scaler_min(10.0f, 2.0f, 0.1f, 100);
 
-    auto param_tensor = ones({2, 2}, DType::Float32, device_);
+    auto param_tensor = ones({2, 2}, DType::Float32, device);
     auto param = Variable(param_tensor, true);
     auto param_ptr = std::make_shared<Variable>(param);
     auto params = std::vector<std::shared_ptr<Variable>>{param_ptr};
@@ -449,7 +459,7 @@ TEST_F(GradScalerTest, ScaleLimits) {
     // Cause multiple overflows to reduce scale
     for (int i = 0; i < 10; ++i) {
         auto grad_tensor = full({2, 2}, std::numeric_limits<float>::infinity(),
-                                       DType::Float32, device_);
+                                       DType::Float32, device);
         param.set_grad(grad_tensor);
         scaler_min.step(optimizer);
         scaler_min.update();
@@ -460,13 +470,13 @@ TEST_F(GradScalerTest, ScaleLimits) {
 }
 
 // Test 18: Double unscale protection
-TEST_F(GradScalerTest, DoubleUnscaleProtection) {
+TEST_P(GradScalerTest, DoubleUnscaleProtection) {
     GradScaler scaler(100.0f);
 
-    auto param_tensor = ones({2, 2}, DType::Float32, device_);
+    auto param_tensor = ones({2, 2}, DType::Float32, device);
     auto param = Variable(param_tensor, true);
 
-    auto grad_tensor = full({2, 2}, 200.0f, DType::Float32, device_);
+    auto grad_tensor = full({2, 2}, 200.0f, DType::Float32, device);
     param.set_grad(grad_tensor);
 
     auto param_ptr = std::make_shared<Variable>(param);
@@ -475,23 +485,17 @@ TEST_F(GradScalerTest, DoubleUnscaleProtection) {
 
     // Unscale once
     scaler.unscale_(optimizer);
-    float first_grad = param.grad()->data<float>()[0];
+    auto grad_cpu1 = param.grad()->to(Device::cpu());
+    float first_grad = grad_cpu1.data<float>()[0];
 
     // Unscale again (should be no-op)
     scaler.unscale_(optimizer);
-    float second_grad = param.grad()->data<float>()[0];
+    auto grad_cpu2 = param.grad()->to(Device::cpu());
+    float second_grad = grad_cpu2.data<float>()[0];
 
     // Gradient should be same after second unscale
     EXPECT_FLOAT_EQ(first_grad, second_grad);
     EXPECT_FLOAT_EQ(first_grad, 2.0f);  // 200 / 100 = 2.0
 }
 
-int main(int argc, char** argv) {
-    // Initialize Tenzor library
-
-    ::testing::InitGoogleTest(&argc, argv);
-    if (!::testing::GTEST_FLAG(list_tests)) {
-        tenzor::initialize();
-    }
-    return RUN_ALL_TESTS();
-}
+INSTANTIATE_BACKEND_TESTS(GradScalerTest);

@@ -16,6 +16,7 @@
 #include <tenzor/autograd/dual.hpp>
 #include <tenzor/autograd/jvp_rules.hpp>
 #include <cmath>
+#include "../backend_test_fixture.hpp"
 
 using namespace tenzor;
 
@@ -24,8 +25,8 @@ namespace {
 // Compute max absolute element-wise difference between two tensors,
 // promoting to Float64 for the comparison.
 double max_abs_diff_d(const Tensor& a, const Tensor& b) {
-    auto ad = a.to(DType::Float64).contiguous();
-    auto bd = b.to(DType::Float64).contiguous();
+    auto ad = a.cpu().to(DType::Float64).contiguous();
+    auto bd = b.cpu().to(DType::Float64).contiguous();
     const double* ap = ad.data<double>();
     const double* bp = bd.data<double>();
     double m = 0.0;
@@ -48,41 +49,44 @@ Tensor finite_diff_jvp(Op op, const Tensor& x, const Tensor& v, double eps = 1e-
 
 }  // namespace
 
-class JVPRulesTest : public ::testing::Test {
+class JVPRulesTest : public ::tenzor::testing::BackendTest {
 protected:
-    static void SetUpTestSuite() { tenzor::initialize(); }
+    void SetUp() override {
+        ::tenzor::testing::BackendTest::SetUp();
+        if (::testing::Test::IsSkipped()) return;
+    }
 };
 
 // ----------------------------------------------------------------------------
 // Binary linear ops (exact JVPs — should match FD up to machine epsilon)
 // ----------------------------------------------------------------------------
 
-TEST_F(JVPRulesTest, JVP_Add_MatchesFD) {
-    auto a = randn({4, 8}, DType::Float32, Device::cpu());
-    auto b = randn({4, 8}, DType::Float32, Device::cpu());
-    auto va = randn({4, 8}, DType::Float32, Device::cpu());
-    auto vb = randn({4, 8}, DType::Float32, Device::cpu());
+TEST_P(JVPRulesTest, JVP_Add_MatchesFD) {
+    auto a = randn({4, 8}, DType::Float32, device);
+    auto b = randn({4, 8}, DType::Float32, device);
+    auto va = randn({4, 8}, DType::Float32, device);
+    auto vb = randn({4, 8}, DType::Float32, device);
 
     auto out = jvp_add(DualTensor(a, va), DualTensor(b, vb));
     // d/dt (a + t·va) + (b + t·vb) at t=0 = va + vb.
     EXPECT_LT(max_abs_diff_d(out.tangent(), va + vb), 1e-5);
 }
 
-TEST_F(JVPRulesTest, JVP_Sub_MatchesFD) {
-    auto a = randn({3, 5}, DType::Float32, Device::cpu());
-    auto b = randn({3, 5}, DType::Float32, Device::cpu());
-    auto va = randn({3, 5}, DType::Float32, Device::cpu());
-    auto vb = randn({3, 5}, DType::Float32, Device::cpu());
+TEST_P(JVPRulesTest, JVP_Sub_MatchesFD) {
+    auto a = randn({3, 5}, DType::Float32, device);
+    auto b = randn({3, 5}, DType::Float32, device);
+    auto va = randn({3, 5}, DType::Float32, device);
+    auto vb = randn({3, 5}, DType::Float32, device);
 
     auto out = jvp_sub(DualTensor(a, va), DualTensor(b, vb));
     EXPECT_LT(max_abs_diff_d(out.tangent(), va - vb), 1e-5);
 }
 
-TEST_F(JVPRulesTest, JVP_Mul_MatchesProductRule) {
-    auto a = randn({4}, DType::Float32, Device::cpu());
-    auto b = randn({4}, DType::Float32, Device::cpu());
-    auto va = randn({4}, DType::Float32, Device::cpu());
-    auto vb = randn({4}, DType::Float32, Device::cpu());
+TEST_P(JVPRulesTest, JVP_Mul_MatchesProductRule) {
+    auto a = randn({4}, DType::Float32, device);
+    auto b = randn({4}, DType::Float32, device);
+    auto va = randn({4}, DType::Float32, device);
+    auto vb = randn({4}, DType::Float32, device);
 
     auto out = jvp_mul(DualTensor(a, va), DualTensor(b, vb));
     // Product rule: d/dt (a + t·va)(b + t·vb)|t=0 = va*b + a*vb.
@@ -90,12 +94,12 @@ TEST_F(JVPRulesTest, JVP_Mul_MatchesProductRule) {
     EXPECT_LT(max_abs_diff_d(out.tangent(), expected), 1e-5);
 }
 
-TEST_F(JVPRulesTest, JVP_Div_MatchesQuotientRule) {
-    auto a = randn({4}, DType::Float32, Device::cpu());
+TEST_P(JVPRulesTest, JVP_Div_MatchesQuotientRule) {
+    auto a = randn({4}, DType::Float32, device);
     // Keep b away from 0.
-    auto b = abs(randn({4}, DType::Float32, Device::cpu())) + 0.5f;
-    auto va = randn({4}, DType::Float32, Device::cpu());
-    auto vb = randn({4}, DType::Float32, Device::cpu());
+    auto b = abs(randn({4}, DType::Float32, device)) + 0.5f;
+    auto va = randn({4}, DType::Float32, device);
+    auto vb = randn({4}, DType::Float32, device);
 
     auto out = jvp_div(DualTensor(a, va), DualTensor(b, vb));
     // Quotient rule: (va*b - a*vb) / b^2
@@ -103,9 +107,9 @@ TEST_F(JVPRulesTest, JVP_Div_MatchesQuotientRule) {
     EXPECT_LT(max_abs_diff_d(out.tangent(), expected), 1e-4);
 }
 
-TEST_F(JVPRulesTest, JVP_Neg_FlipsTangent) {
-    auto a = randn({3}, DType::Float32, Device::cpu());
-    auto va = randn({3}, DType::Float32, Device::cpu());
+TEST_P(JVPRulesTest, JVP_Neg_FlipsTangent) {
+    auto a = randn({3}, DType::Float32, device);
+    auto va = randn({3}, DType::Float32, device);
 
     auto out = jvp_neg(DualTensor(a, va));
     // -(a + t·va) ⇒ tangent = -va.
@@ -117,11 +121,11 @@ TEST_F(JVPRulesTest, JVP_Neg_FlipsTangent) {
 // MatMul: tangent must satisfy d/dt (A + t Va)(B + t Vb)|t=0 = Va·B + A·Vb
 // ----------------------------------------------------------------------------
 
-TEST_F(JVPRulesTest, JVP_MatMul_MatchesProductRule) {
-    auto A  = randn({3, 4}, DType::Float32, Device::cpu());
-    auto B  = randn({4, 5}, DType::Float32, Device::cpu());
-    auto Va = randn({3, 4}, DType::Float32, Device::cpu());
-    auto Vb = randn({4, 5}, DType::Float32, Device::cpu());
+TEST_P(JVPRulesTest, JVP_MatMul_MatchesProductRule) {
+    auto A  = randn({3, 4}, DType::Float32, device);
+    auto B  = randn({4, 5}, DType::Float32, device);
+    auto Va = randn({3, 4}, DType::Float32, device);
+    auto Vb = randn({4, 5}, DType::Float32, device);
 
     auto out = jvp_matmul(DualTensor(A, Va), DualTensor(B, Vb));
     auto expected = matmul(Va, B) + matmul(A, Vb);
@@ -132,52 +136,52 @@ TEST_F(JVPRulesTest, JVP_MatMul_MatchesProductRule) {
 // Unary nonlinearities — verify tangent ≈ FD approximation.
 // ----------------------------------------------------------------------------
 
-TEST_F(JVPRulesTest, JVP_Sigmoid_MatchesFD) {
-    auto x = randn({16}, DType::Float32, Device::cpu());
-    auto v = randn({16}, DType::Float32, Device::cpu());
+TEST_P(JVPRulesTest, JVP_Sigmoid_MatchesFD) {
+    auto x = randn({16}, DType::Float32, device);
+    auto v = randn({16}, DType::Float32, device);
     auto fd = finite_diff_jvp([](const Tensor& t) { return sigmoid(t); }, x, v);
     auto out = jvp_sigmoid(DualTensor(x, v));
     EXPECT_LT(max_abs_diff_d(out.tangent(), fd), 1e-3);
 }
 
-TEST_F(JVPRulesTest, JVP_Tanh_MatchesFD) {
-    auto x = randn({16}, DType::Float32, Device::cpu());
-    auto v = randn({16}, DType::Float32, Device::cpu());
+TEST_P(JVPRulesTest, JVP_Tanh_MatchesFD) {
+    auto x = randn({16}, DType::Float32, device);
+    auto v = randn({16}, DType::Float32, device);
     auto fd = finite_diff_jvp([](const Tensor& t) { return tanh(t); }, x, v);
     auto out = jvp_tanh(DualTensor(x, v));
     EXPECT_LT(max_abs_diff_d(out.tangent(), fd), 1e-3);
 }
 
-TEST_F(JVPRulesTest, JVP_Exp_MatchesFD) {
+TEST_P(JVPRulesTest, JVP_Exp_MatchesFD) {
     // Restrict input range so exp doesn't overflow Float32 in the FD step.
-    auto x = randn({16}, DType::Float32, Device::cpu()) * 0.5f;
-    auto v = randn({16}, DType::Float32, Device::cpu());
+    auto x = randn({16}, DType::Float32, device) * 0.5f;
+    auto v = randn({16}, DType::Float32, device);
     auto fd = finite_diff_jvp([](const Tensor& t) { return exp(t); }, x, v);
     auto out = jvp_exp(DualTensor(x, v));
     EXPECT_LT(max_abs_diff_d(out.tangent(), fd), 1e-3);
 }
 
-TEST_F(JVPRulesTest, JVP_Log_MatchesFD) {
-    auto x = abs(randn({16}, DType::Float32, Device::cpu())) + 0.1f;
-    auto v = randn({16}, DType::Float32, Device::cpu());
+TEST_P(JVPRulesTest, JVP_Log_MatchesFD) {
+    auto x = abs(randn({16}, DType::Float32, device)) + 0.1f;
+    auto v = randn({16}, DType::Float32, device);
     auto fd = finite_diff_jvp([](const Tensor& t) { return log(t); }, x, v);
     auto out = jvp_log(DualTensor(x, v));
     EXPECT_LT(max_abs_diff_d(out.tangent(), fd), 1e-2);
 }
 
-TEST_F(JVPRulesTest, JVP_Sqrt_MatchesFD) {
-    auto x = abs(randn({16}, DType::Float32, Device::cpu())) + 0.1f;
-    auto v = randn({16}, DType::Float32, Device::cpu());
+TEST_P(JVPRulesTest, JVP_Sqrt_MatchesFD) {
+    auto x = abs(randn({16}, DType::Float32, device)) + 0.1f;
+    auto v = randn({16}, DType::Float32, device);
     auto fd = finite_diff_jvp([](const Tensor& t) { return sqrt(t); }, x, v);
     auto out = jvp_sqrt(DualTensor(x, v));
     EXPECT_LT(max_abs_diff_d(out.tangent(), fd), 1e-2);
 }
 
-TEST_F(JVPRulesTest, JVP_ReLU_MatchesFD_FarFromZero) {
+TEST_P(JVPRulesTest, JVP_ReLU_MatchesFD_FarFromZero) {
     // ReLU is non-differentiable at 0; pick inputs strictly away from
     // the kink so finite differences are well-defined.
-    auto x = randn({16}, DType::Float32, Device::cpu()) + 2.0f;  // mostly > 0
-    auto v = randn({16}, DType::Float32, Device::cpu());
+    auto x = randn({16}, DType::Float32, device) + 2.0f;  // mostly > 0
+    auto v = randn({16}, DType::Float32, device);
     auto relu_t = [](const Tensor& t) { return clamp_min(t, 0.0); };
     auto fd = finite_diff_jvp(relu_t, x, v);
     auto out = jvp_relu(DualTensor(x, v));
@@ -220,9 +224,9 @@ Tensor fd_jvp2(Op op, const Tensor& x, const Tensor& dx,
 }  // namespace
 
 // ---- DCT JVP ----
-TEST_F(JVPRulesTest, JVP_DCT_S15_LinearMatchesFD) {
-    auto x  = randn({4, 16}, DType::Float64, Device::cpu());
-    auto dx = randn({4, 16}, DType::Float64, Device::cpu());
+TEST_P(JVPRulesTest, JVP_DCT_S15_LinearMatchesFD) {
+    auto x  = randn({4, 16}, DType::Float64, device);
+    auto dx = randn({4, 16}, DType::Float64, device);
     OpAttributes attrs;
     attrs.set(AttrKey::DCTType, int64_t{2});
     attrs.set(AttrKey::Dim, int64_t{-1});
@@ -236,9 +240,9 @@ TEST_F(JVPRulesTest, JVP_DCT_S15_LinearMatchesFD) {
 }
 
 // ---- IDCT JVP ----
-TEST_F(JVPRulesTest, JVP_IDCT_S15_LinearMatchesFD) {
-    auto x  = randn({4, 16}, DType::Float64, Device::cpu());
-    auto dx = randn({4, 16}, DType::Float64, Device::cpu());
+TEST_P(JVPRulesTest, JVP_IDCT_S15_LinearMatchesFD) {
+    auto x  = randn({4, 16}, DType::Float64, device);
+    auto dx = randn({4, 16}, DType::Float64, device);
     OpAttributes attrs;
     attrs.set(AttrKey::DCTType, int64_t{2});
     attrs.set(AttrKey::Dim, int64_t{-1});
@@ -252,9 +256,9 @@ TEST_F(JVPRulesTest, JVP_IDCT_S15_LinearMatchesFD) {
 }
 
 // ---- LinalgVectorNorm JVP (p=2) ----
-TEST_F(JVPRulesTest, JVP_LinalgVectorNorm_P2_MatchesFD) {
-    auto x  = randn({4, 8}, DType::Float64, Device::cpu()) + 0.5;
-    auto dx = randn({4, 8}, DType::Float64, Device::cpu());
+TEST_P(JVPRulesTest, JVP_LinalgVectorNorm_P2_MatchesFD) {
+    auto x  = randn({4, 8}, DType::Float64, device) + 0.5;
+    auto dx = randn({4, 8}, DType::Float64, device);
     OpAttributes attrs;
     attrs.set(AttrKey::P, 2.0);
     attrs.set(AttrKey::Dim, int64_t{-1});
@@ -269,9 +273,9 @@ TEST_F(JVPRulesTest, JVP_LinalgVectorNorm_P2_MatchesFD) {
 }
 
 // ---- LinalgMatrixNorm Frobenius JVP ----
-TEST_F(JVPRulesTest, JVP_LinalgMatrixNorm_Fro_MatchesFD) {
-    auto x  = randn({4, 6}, DType::Float64, Device::cpu()) + 0.5;
-    auto dx = randn({4, 6}, DType::Float64, Device::cpu());
+TEST_P(JVPRulesTest, JVP_LinalgMatrixNorm_Fro_MatchesFD) {
+    auto x  = randn({4, 6}, DType::Float64, device) + 0.5;
+    auto dx = randn({4, 6}, DType::Float64, device);
     OpAttributes attrs;
     attrs.set(AttrKey::Order, 0.0);  // Frobenius
     std::array<Tensor, 1> p{x}, t{dx};
@@ -284,11 +288,11 @@ TEST_F(JVPRulesTest, JVP_LinalgMatrixNorm_Fro_MatchesFD) {
 }
 
 // ---- CosineSimilarity JVP ----
-TEST_F(JVPRulesTest, JVP_CosineSimilarity_MatchesFD) {
-    auto a  = randn({4, 8}, DType::Float64, Device::cpu()) + 1.0;
-    auto b  = randn({4, 8}, DType::Float64, Device::cpu()) + 1.0;
-    auto da = randn({4, 8}, DType::Float64, Device::cpu());
-    auto db = randn({4, 8}, DType::Float64, Device::cpu());
+TEST_P(JVPRulesTest, JVP_CosineSimilarity_MatchesFD) {
+    auto a  = randn({4, 8}, DType::Float64, device) + 1.0;
+    auto b  = randn({4, 8}, DType::Float64, device) + 1.0;
+    auto da = randn({4, 8}, DType::Float64, device);
+    auto db = randn({4, 8}, DType::Float64, device);
     OpAttributes attrs;
     attrs.set(AttrKey::Dim, int64_t{1});
     attrs.set(AttrKey::Eps, 1e-8);
@@ -302,11 +306,11 @@ TEST_F(JVPRulesTest, JVP_CosineSimilarity_MatchesFD) {
 }
 
 // ---- CDist JVP (p=2) ----
-TEST_F(JVPRulesTest, JVP_CDist_P2_MatchesFD) {
-    auto x1  = randn({3, 4}, DType::Float64, Device::cpu()) + 1.0;
-    auto x2  = randn({5, 4}, DType::Float64, Device::cpu()) + 1.0;
-    auto dx1 = randn({3, 4}, DType::Float64, Device::cpu());
-    auto dx2 = randn({5, 4}, DType::Float64, Device::cpu());
+TEST_P(JVPRulesTest, JVP_CDist_P2_MatchesFD) {
+    auto x1  = randn({3, 4}, DType::Float64, device) + 1.0;
+    auto x2  = randn({5, 4}, DType::Float64, device) + 1.0;
+    auto dx1 = randn({3, 4}, DType::Float64, device);
+    auto dx2 = randn({5, 4}, DType::Float64, device);
     OpAttributes attrs;
     attrs.set(AttrKey::DistP, 2.0);
     std::array<Tensor, 2> p{x1, x2}, t{dx1, dx2};
@@ -319,11 +323,11 @@ TEST_F(JVPRulesTest, JVP_CDist_P2_MatchesFD) {
 }
 
 // ---- PairwiseDistance JVP (p=2) ----
-TEST_F(JVPRulesTest, JVP_PairwiseDistance_P2_MatchesFD) {
-    auto x1  = randn({6, 4}, DType::Float64, Device::cpu()) + 1.0;
-    auto x2  = randn({6, 4}, DType::Float64, Device::cpu()) + 1.0;
-    auto dx1 = randn({6, 4}, DType::Float64, Device::cpu());
-    auto dx2 = randn({6, 4}, DType::Float64, Device::cpu());
+TEST_P(JVPRulesTest, JVP_PairwiseDistance_P2_MatchesFD) {
+    auto x1  = randn({6, 4}, DType::Float64, device) + 1.0;
+    auto x2  = randn({6, 4}, DType::Float64, device) + 1.0;
+    auto dx1 = randn({6, 4}, DType::Float64, device);
+    auto dx2 = randn({6, 4}, DType::Float64, device);
     OpAttributes attrs;
     attrs.set(AttrKey::DistP, 2.0);
     std::array<Tensor, 2> p{x1, x2}, t{dx1, dx2};
@@ -336,9 +340,9 @@ TEST_F(JVPRulesTest, JVP_PairwiseDistance_P2_MatchesFD) {
 }
 
 // ---- Cov JVP ----
-TEST_F(JVPRulesTest, JVP_Cov_MatchesFD) {
-    auto X  = randn({4, 8}, DType::Float64, Device::cpu());
-    auto dX = randn({4, 8}, DType::Float64, Device::cpu());
+TEST_P(JVPRulesTest, JVP_Cov_MatchesFD) {
+    auto X  = randn({4, 8}, DType::Float64, device);
+    auto dX = randn({4, 8}, DType::Float64, device);
     OpAttributes attrs;
     attrs.set(AttrKey::Correction, int64_t{1});
     std::array<Tensor, 1> p{X}, t{dX};
@@ -351,9 +355,9 @@ TEST_F(JVPRulesTest, JVP_Cov_MatchesFD) {
 }
 
 // ---- Corrcoef JVP ----
-TEST_F(JVPRulesTest, JVP_Corrcoef_MatchesFD) {
-    auto X  = randn({4, 16}, DType::Float64, Device::cpu()) + 1.0;
-    auto dX = randn({4, 16}, DType::Float64, Device::cpu()) * 0.1;
+TEST_P(JVPRulesTest, JVP_Corrcoef_MatchesFD) {
+    auto X  = randn({4, 16}, DType::Float64, device) + 1.0;
+    auto dX = randn({4, 16}, DType::Float64, device) * 0.1;
     OpAttributes attrs;
     std::array<Tensor, 1> p{X}, t{dX};
     auto out = tenzor::dispatch_jvp(OpId::Corrcoef, p, t, attrs);
@@ -365,15 +369,16 @@ TEST_F(JVPRulesTest, JVP_Corrcoef_MatchesFD) {
 }
 
 // ---- SparseToDense JVP ----
-TEST_F(JVPRulesTest, JVP_SparseToDense_S15_LinearMatchesFD) {
+TEST_P(JVPRulesTest, JVP_SparseToDense_S15_LinearMatchesFD) {
     int64_t M = 4, K = 5;
     std::vector<int64_t> crow_d = {0, 2, 3, 5, 6};
     std::vector<int64_t> col_d = {0, 2, 1, 3, 4, 0};
-    auto crow = Tensor::from_blob(crow_d.data(), {M + 1}, DType::Int64, Device::cpu()).clone();
+    auto crow = Tensor::from_blob(crow_d.data(), {M + 1}, DType::Int64, Device::cpu())
+                    .clone().to(device);
     auto col  = Tensor::from_blob(col_d.data(), {static_cast<int64_t>(col_d.size())},
-                                   DType::Int64, Device::cpu()).clone();
-    auto values  = randn({static_cast<int64_t>(col_d.size())}, DType::Float64, Device::cpu());
-    auto dvalues = randn({static_cast<int64_t>(col_d.size())}, DType::Float64, Device::cpu());
+                                   DType::Int64, Device::cpu()).clone().to(device);
+    auto values  = randn({static_cast<int64_t>(col_d.size())}, DType::Float64, device);
+    auto dvalues = randn({static_cast<int64_t>(col_d.size())}, DType::Float64, device);
     OpAttributes attrs;
     attrs.set(AttrKey::M, M);
     attrs.set(AttrKey::K, K);
@@ -389,4 +394,6 @@ TEST_F(JVPRulesTest, JVP_SparseToDense_S15_LinearMatchesFD) {
     auto fd = (plus - minus) * (1.0 / (2.0 * eps));
     EXPECT_LT(max_abs_diff_d(out.tangent, fd), 1e-3);
 }
+
+INSTANTIATE_BACKEND_TESTS(JVPRulesTest);
 

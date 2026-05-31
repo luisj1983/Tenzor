@@ -10,7 +10,7 @@
  * `double` accumulators regardless of T.
  *
  * This test computes Float64 LayerNorm two ways:
- *   1. Via the CPU kernel (the path that used to lose precision).
+ *   1. Via the backend kernel (the path that used to lose precision).
  *   2. Via a `long double` reference implementation done in the test body.
  *
  * Before the fix the divergence was ~1e-7 (Float32 epsilon range). After the
@@ -26,20 +26,16 @@
 #include <tenzor/ops/creation.hpp>
 #include <tenzor/ops/op_id.hpp>
 
+#include "backend_test_fixture.hpp"
+
 #include <span>
 
 #include <cmath>
 #include <vector>
 
-namespace tenzor { void initialize(); }
-
 namespace {
-class LayerNormF64Env : public ::testing::Environment {
-public:
-    void SetUp() override { tenzor::initialize(); }
-};
-[[maybe_unused]] auto* g_env =
-    ::testing::AddGlobalTestEnvironment(new LayerNormF64Env);
+
+class LayerNormF64Precision : public ::tenzor::testing::BackendTest {};
 
 // Reference LayerNorm: two-pass mean+variance in `long double`, then
 // affine in `long double`. Output is double for caller comparison.
@@ -76,10 +72,12 @@ auto reference_layer_norm_f64(const std::vector<double>& in,
 
 using namespace tenzor;
 
-// Drive the CPU LayerNorm kernel on Float64 inputs that would have exposed
+namespace {
+
+// Drive the LayerNorm kernel on Float64 inputs that would have exposed
 // the precision-loss bug: values around 1e7 magnitude where Float32 sum
 // accumulators reliably lose digits.
-TEST(LayerNormF64Precision, ScalarPathMatchesLongDoubleReference) {
+TEST_P(LayerNormF64Precision, ScalarPathMatchesLongDoubleReference) {
     constexpr int64_t batch = 4;
     constexpr int64_t norm = 64;
 
@@ -104,12 +102,13 @@ TEST(LayerNormF64Precision, ScalarPathMatchesLongDoubleReference) {
         raw_b[i] = 0.0;
     }
 
+    // Build the inputs on CPU from host blobs, then move to the target device.
     auto input_t  = Tensor::from_blob(raw_in.data(), {batch, norm},
-                                      DType::Float64, Device::cpu());
+                                      DType::Float64, Device::cpu()).to(device);
     auto weight_t = Tensor::from_blob(raw_w.data(),  {norm},
-                                      DType::Float64, Device::cpu());
+                                      DType::Float64, Device::cpu()).to(device);
     auto bias_t   = Tensor::from_blob(raw_b.data(),  {norm},
-                                      DType::Float64, Device::cpu());
+                                      DType::Float64, Device::cpu()).to(device);
 
     // Dispatch OpId::LayerNorm directly — this is the kernel whose template
     // function `layer_norm_scalar_with_stats<double>` had the float-accumulator
@@ -163,13 +162,13 @@ TEST(LayerNormF64Precision, ScalarPathMatchesLongDoubleReference) {
 // Smoke test: Float32 path remains numerically correct (regression guard).
 // The accumulator change affects this path too — it's now `double`-accumulated
 // internally, but the user-visible API is unchanged.
-TEST(LayerNormF64Precision, Float32PathStillCorrect) {
+TEST_P(LayerNormF64Precision, Float32PathStillCorrect) {
     constexpr int64_t batch = 2;
     constexpr int64_t norm = 8;
-    Variable input(tenzor::randn({batch, norm}, DType::Float32, Device::cpu()),
+    Variable input(tenzor::randn({batch, norm}, DType::Float32, device),
                    false);
-    Variable weight(tenzor::ones({norm}, DType::Float32, Device::cpu()), false);
-    Variable bias(tenzor::zeros({norm}, DType::Float32, Device::cpu()), false);
+    Variable weight(tenzor::ones({norm}, DType::Float32, device), false);
+    Variable bias(tenzor::zeros({norm}, DType::Float32, device), false);
     auto out_v = tenzor::nn::functional::layer_norm(input, {norm}, weight, bias, 1e-5);
     const auto& out = out_v.tensor();
     ASSERT_EQ(out.dtype(), DType::Float32);
@@ -190,3 +189,7 @@ TEST(LayerNormF64Precision, Float32PathStillCorrect) {
         EXPECT_LT(std::abs(var - 1.0), 1e-3);  // approximate (eps != 0)
     }
 }
+
+INSTANTIATE_BACKEND_TESTS(LayerNormF64Precision);
+
+}  // namespace

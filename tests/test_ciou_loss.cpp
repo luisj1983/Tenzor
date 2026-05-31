@@ -19,16 +19,18 @@
 #include "tenzor/ops/creation.hpp"
 #include "tenzor/ops/math.hpp"
 #include "tenzor/core/tensor.hpp"
+#include "backend_test_fixture.hpp"
 #include <cmath>
 #include <iostream>
 
 using namespace tenzor;
 using namespace tenzor::ops;
 
-class CIoULossTest : public ::testing::Test {
+class CIoULossTest : public ::tenzor::testing::BackendTest {
 protected:
     void SetUp() override {
-        // Default device is CPU
+        ::tenzor::testing::BackendTest::SetUp();
+        if (::testing::Test::IsSkipped()) return;
     }
 
     // Helper to create box tensor from coordinates
@@ -44,7 +46,7 @@ protected:
             }
         }
 
-        return tensor;
+        return tensor.to(device);
     }
 
     // Helper to check if value is close to expected
@@ -55,7 +57,7 @@ protected:
 };
 
 // Test 1: Perfect overlap should give CIoU = 1.0
-TEST_F(CIoULossTest, PerfectOverlap) {
+TEST_P(CIoULossTest, PerfectOverlap) {
     // Two identical boxes
     auto boxes1 = make_boxes({{10.0f, 10.0f, 50.0f, 50.0f}});
     auto boxes2 = make_boxes({{10.0f, 10.0f, 50.0f, 50.0f}});
@@ -65,33 +67,36 @@ TEST_F(CIoULossTest, PerfectOverlap) {
     ASSERT_EQ(ciou.shape()[0], 1);
     ASSERT_EQ(ciou.shape()[1], 1);
 
-    float ciou_value = ciou.item<float>();
+    auto ciou_cpu = ciou.cpu();
+    float ciou_value = ciou_cpu.item<float>();
     expect_near(ciou_value, 1.0f, 1e-5f);
 }
 
 // Test 2: No overlap should give CIoU close to 0 or negative
-TEST_F(CIoULossTest, NoOverlap) {
+TEST_P(CIoULossTest, NoOverlap) {
     // Two boxes with no overlap
     auto boxes1 = make_boxes({{10.0f, 10.0f, 50.0f, 50.0f}});
     auto boxes2 = make_boxes({{60.0f, 60.0f, 100.0f, 100.0f}});
 
     auto ciou = box_iou(boxes1, boxes2, IoUType::CIoU);
 
-    float ciou_value = ciou.item<float>();
+    auto ciou_cpu = ciou.cpu();
+    float ciou_value = ciou_cpu.item<float>();
     // CIoU should be negative when boxes don't overlap due to penalties
     EXPECT_LT(ciou_value, 0.1f);
     EXPECT_GT(ciou_value, -2.0f);  // Reasonable lower bound
 }
 
 // Test 3: Partial overlap
-TEST_F(CIoULossTest, PartialOverlap) {
+TEST_P(CIoULossTest, PartialOverlap) {
     // Two boxes with 50% overlap in each dimension (25% area overlap)
     auto boxes1 = make_boxes({{0.0f, 0.0f, 40.0f, 40.0f}});
     auto boxes2 = make_boxes({{20.0f, 20.0f, 60.0f, 60.0f}});
 
     auto ciou = box_iou(boxes1, boxes2, IoUType::CIoU);
 
-    float ciou_value = ciou.item<float>();
+    auto ciou_cpu = ciou.cpu();
+    float ciou_value = ciou_cpu.item<float>();
 
     // IoU for 50% overlap in each dim = (20*20) / (40*40 + 40*40 - 20*20) = 400/2800 ≈ 0.143
     // CIoU will be lower due to center distance and aspect ratio penalties
@@ -100,7 +105,7 @@ TEST_F(CIoULossTest, PartialOverlap) {
 }
 
 // Test 4: Aspect ratio penalty
-TEST_F(CIoULossTest, AspectRatioPenalty) {
+TEST_P(CIoULossTest, AspectRatioPenalty) {
     // Same center and size but different aspect ratios
     // Box 1: 40x40 (square, aspect ratio 1:1)
     auto boxes1 = make_boxes({{10.0f, 10.0f, 50.0f, 50.0f}});
@@ -111,15 +116,17 @@ TEST_F(CIoULossTest, AspectRatioPenalty) {
     auto ciou = box_iou(boxes1, boxes2, IoUType::CIoU);
     auto iou = box_iou(boxes1, boxes2, IoUType::IoU);
 
-    float ciou_value = ciou.item<float>();
-    float iou_value = iou.item<float>();
+    auto ciou_cpu = ciou.cpu();
+    auto iou_cpu = iou.cpu();
+    float ciou_value = ciou_cpu.item<float>();
+    float iou_value = iou_cpu.item<float>();
 
     // CIoU should be less than IoU due to aspect ratio penalty
     EXPECT_LT(ciou_value, iou_value);
 }
 
 // Test 5: Center distance penalty (DIoU component)
-TEST_F(CIoULossTest, CenterDistancePenalty) {
+TEST_P(CIoULossTest, CenterDistancePenalty) {
     // Two boxes same size but different centers
     // Box 1: centered at (30, 30), size 20x20
     auto boxes1 = make_boxes({{20.0f, 20.0f, 40.0f, 40.0f}});
@@ -130,8 +137,10 @@ TEST_F(CIoULossTest, CenterDistancePenalty) {
     auto ciou = box_iou(boxes1, boxes2, IoUType::CIoU);
     auto diou = box_iou(boxes1, boxes2, IoUType::DIoU);
 
-    float ciou_value = ciou.item<float>();
-    float diou_value = diou.item<float>();
+    auto ciou_cpu = ciou.cpu();
+    auto diou_cpu = diou.cpu();
+    float ciou_value = ciou_cpu.item<float>();
+    float diou_value = diou_cpu.item<float>();
 
     // Both should be negative (no overlap), and include center distance penalty
     EXPECT_LT(ciou_value, 0.0f);
@@ -139,7 +148,7 @@ TEST_F(CIoULossTest, CenterDistancePenalty) {
 }
 
 // Test 6: CIoU <= DIoU <= IoU (monotonicity)
-TEST_F(CIoULossTest, Monotonicity) {
+TEST_P(CIoULossTest, Monotonicity) {
     auto boxes1 = make_boxes({{10.0f, 10.0f, 50.0f, 50.0f}});
     auto boxes2 = make_boxes({{20.0f, 15.0f, 70.0f, 60.0f}});
 
@@ -148,10 +157,14 @@ TEST_F(CIoULossTest, Monotonicity) {
     auto diou = box_iou(boxes1, boxes2, IoUType::DIoU);
     auto ciou = box_iou(boxes1, boxes2, IoUType::CIoU);
 
-    float iou_val = iou.item<float>();
-    float giou_val = giou.item<float>();
-    float diou_val = diou.item<float>();
-    float ciou_val = ciou.item<float>();
+    auto iou_cpu = iou.cpu();
+    auto giou_cpu = giou.cpu();
+    auto diou_cpu = diou.cpu();
+    auto ciou_cpu = ciou.cpu();
+    float iou_val = iou_cpu.item<float>();
+    float giou_val = giou_cpu.item<float>();
+    float diou_val = diou_cpu.item<float>();
+    float ciou_val = ciou_cpu.item<float>();
 
     // CIoU adds most penalties, so should be smallest
     EXPECT_LE(ciou_val, diou_val + 1e-5f);
@@ -159,7 +172,7 @@ TEST_F(CIoULossTest, Monotonicity) {
 }
 
 // Test 7: Batch processing (multiple box pairs)
-TEST_F(CIoULossTest, BatchProcessing) {
+TEST_P(CIoULossTest, BatchProcessing) {
     // Multiple predicted boxes
     auto pred_boxes = make_boxes({
         {10.0f, 10.0f, 50.0f, 50.0f},
@@ -189,15 +202,16 @@ TEST_F(CIoULossTest, BatchProcessing) {
 }
 
 // Test 8: Loss computation (1 - CIoU for minimization)
-TEST_F(CIoULossTest, LossComputation) {
+TEST_P(CIoULossTest, LossComputation) {
     auto pred = make_boxes({{10.0f, 10.0f, 50.0f, 50.0f}});
     auto target = make_boxes({{15.0f, 15.0f, 55.0f, 55.0f}});
 
     auto ciou = box_iou(pred, target, IoUType::CIoU);
-    auto one = tenzor::full({}, 1.0f, DType::Float32, Device::cpu());  // Scalar tensor with value 1.0
+    auto one = tenzor::full({}, 1.0f, DType::Float32, device);  // Scalar tensor with value 1.0
     auto loss = one - ciou;  // Loss for minimization
 
-    float loss_value = loss.item<float>();
+    auto loss_cpu = loss.cpu();
+    float loss_value = loss_cpu.item<float>();
 
     // Loss should be positive and less than 2 (since CIoU > -1)
     EXPECT_GT(loss_value, 0.0f);
@@ -208,19 +222,21 @@ TEST_F(CIoULossTest, LossComputation) {
     auto perfect_ciou = box_iou(perfect_pred, target, IoUType::CIoU);
     auto perfect_loss = one - perfect_ciou;
 
-    float perfect_loss_value = perfect_loss.item<float>();
+    auto perfect_loss_cpu = perfect_loss.cpu();
+    float perfect_loss_value = perfect_loss_cpu.item<float>();
     EXPECT_NEAR(perfect_loss_value, 0.0f, 1e-5f);
 }
 
 // Test 9: Numerical stability with edge cases
-TEST_F(CIoULossTest, NumericalStability) {
+TEST_P(CIoULossTest, NumericalStability) {
     // Very small boxes
     auto small_boxes1 = make_boxes({{0.0f, 0.0f, 0.1f, 0.1f}});
     auto small_boxes2 = make_boxes({{0.05f, 0.05f, 0.15f, 0.15f}});
 
     EXPECT_NO_THROW({
         auto ciou = box_iou(small_boxes1, small_boxes2, IoUType::CIoU);
-        float val = ciou.item<float>();
+        auto ciou_cpu = ciou.cpu();
+        float val = ciou_cpu.item<float>();
         EXPECT_FALSE(std::isnan(val));
         EXPECT_FALSE(std::isinf(val));
     });
@@ -231,7 +247,8 @@ TEST_F(CIoULossTest, NumericalStability) {
 
     EXPECT_NO_THROW({
         auto ciou = box_iou(large_boxes1, large_boxes2, IoUType::CIoU);
-        float val = ciou.item<float>();
+        auto ciou_cpu = ciou.cpu();
+        float val = ciou_cpu.item<float>();
         EXPECT_FALSE(std::isnan(val));
         EXPECT_FALSE(std::isinf(val));
     });
@@ -242,36 +259,40 @@ TEST_F(CIoULossTest, NumericalStability) {
 
     EXPECT_NO_THROW({
         auto ciou = box_iou(thin_boxes1, thin_boxes2, IoUType::CIoU);
-        float val = ciou.item<float>();
+        auto ciou_cpu = ciou.cpu();
+        float val = ciou_cpu.item<float>();
         EXPECT_FALSE(std::isnan(val));
         EXPECT_FALSE(std::isinf(val));
     });
 }
 
 // Test 10: Symmetry property
-TEST_F(CIoULossTest, Symmetry) {
+TEST_P(CIoULossTest, Symmetry) {
     auto boxes1 = make_boxes({{10.0f, 10.0f, 50.0f, 50.0f}});
     auto boxes2 = make_boxes({{20.0f, 20.0f, 60.0f, 60.0f}});
 
     auto ciou_12 = box_iou(boxes1, boxes2, IoUType::CIoU);
     auto ciou_21 = box_iou(boxes2, boxes1, IoUType::CIoU);
 
-    float val_12 = ciou_12.item<float>();
-    float val_21 = ciou_21.item<float>();
+    auto ciou_12_cpu = ciou_12.cpu();
+    auto ciou_21_cpu = ciou_21.cpu();
+    float val_12 = ciou_12_cpu.item<float>();
+    float val_21 = ciou_21_cpu.item<float>();
 
     // CIoU should be symmetric: CIoU(A, B) = CIoU(B, A)
     expect_near(val_12, val_21, 1e-5f);
 }
 
 // Test 11: Comparison with reference implementation (manual calculation)
-TEST_F(CIoULossTest, ManualCalculation) {
+TEST_P(CIoULossTest, ManualCalculation) {
     // Box 1: (0, 0, 10, 10) - area = 100, center = (5, 5)
     // Box 2: (5, 5, 15, 15) - area = 100, center = (10, 10)
     auto boxes1 = make_boxes({{0.0f, 0.0f, 10.0f, 10.0f}});
     auto boxes2 = make_boxes({{5.0f, 5.0f, 15.0f, 15.0f}});
 
     auto ciou = box_iou(boxes1, boxes2, IoUType::CIoU);
-    float ciou_val = ciou.item<float>();
+    auto ciou_cpu = ciou.cpu();
+    float ciou_val = ciou_cpu.item<float>();
 
     // Manual calculation:
     // Intersection: (5, 5, 10, 10) -> area = 25
@@ -297,7 +318,7 @@ TEST_F(CIoULossTest, ManualCalculation) {
 }
 
 // Test 12: Different box formats (xywh to xyxy conversion)
-TEST_F(CIoULossTest, BoxFormatConsistency) {
+TEST_P(CIoULossTest, BoxFormatConsistency) {
     // Test that our xyxy format works correctly
     // Box in xyxy: (x1, y1, x2, y2)
     auto xyxy_boxes1 = make_boxes({{10.0f, 10.0f, 50.0f, 50.0f}});
@@ -306,27 +327,29 @@ TEST_F(CIoULossTest, BoxFormatConsistency) {
     auto ciou = box_iou(xyxy_boxes1, xyxy_boxes2, IoUType::CIoU);
 
     // Verify reasonable output
-    float ciou_val = ciou.item<float>();
+    auto ciou_cpu = ciou.cpu();
+    float ciou_val = ciou_cpu.item<float>();
     EXPECT_GT(ciou_val, -1.0f);
     EXPECT_LT(ciou_val, 1.0f);
 }
 
 // Test 13: Zero-sized boxes handling
-TEST_F(CIoULossTest, ZeroSizedBoxes) {
+TEST_P(CIoULossTest, ZeroSizedBoxes) {
     // Box with zero width/height
     auto zero_boxes = make_boxes({{10.0f, 10.0f, 10.0f, 10.0f}});
     auto normal_boxes = make_boxes({{5.0f, 5.0f, 15.0f, 15.0f}});
 
     EXPECT_NO_THROW({
         auto ciou = box_iou(zero_boxes, normal_boxes, IoUType::CIoU);
-        float val = ciou.item<float>();
+        auto ciou_cpu = ciou.cpu();
+        float val = ciou_cpu.item<float>();
         // Should not crash, value should be defined (likely 0 or negative)
         EXPECT_FALSE(std::isnan(val));
     });
 }
 
 // Test 14: Large batch stress test
-TEST_F(CIoULossTest, LargeBatchStressTest) {
+TEST_P(CIoULossTest, LargeBatchStressTest) {
     // Create 100 predicted boxes
     std::vector<std::vector<float>> pred_coords;
     for (int i = 0; i < 100; ++i) {
@@ -359,7 +382,7 @@ TEST_F(CIoULossTest, LargeBatchStressTest) {
 }
 
 // Test 15: CIoU vs IoU improvement verification
-TEST_F(CIoULossTest, CIoUVsIoUImprovement) {
+TEST_P(CIoULossTest, CIoUVsIoUImprovement) {
     // Case where CIoU provides better gradient signal than IoU
     // Two boxes with same IoU but different aspect ratios and centers
 
@@ -378,10 +401,14 @@ TEST_F(CIoULossTest, CIoUVsIoUImprovement) {
     auto ciou2 = box_iou(pred2, target, IoUType::CIoU);
 
     // CIoU should provide more nuanced differentiation
-    float iou1_val = iou1.item<float>();
-    float iou2_val = iou2.item<float>();
-    float ciou1_val = ciou1.item<float>();
-    float ciou2_val = ciou2.item<float>();
+    auto iou1_cpu = iou1.cpu();
+    auto iou2_cpu = iou2.cpu();
+    auto ciou1_cpu = ciou1.cpu();
+    auto ciou2_cpu = ciou2.cpu();
+    float iou1_val = iou1_cpu.item<float>();
+    float iou2_val = iou2_cpu.item<float>();
+    float ciou1_val = ciou1_cpu.item<float>();
+    float ciou2_val = ciou2_cpu.item<float>();
 
     // Verify CIoU captures additional information beyond just IoU
     float iou_diff = std::abs(iou1_val - iou2_val);
@@ -391,11 +418,4 @@ TEST_F(CIoULossTest, CIoUVsIoUImprovement) {
     EXPECT_GT(ciou_diff, 0.0f);
 }
 
-// Main test runner
-int main(int argc, char** argv) {
-    ::testing::InitGoogleTest(&argc, argv);
-    if (!::testing::GTEST_FLAG(list_tests)) {
-        tenzor::initialize();
-    }
-    return RUN_ALL_TESTS();
-}
+INSTANTIATE_BACKEND_TESTS(CIoULossTest);

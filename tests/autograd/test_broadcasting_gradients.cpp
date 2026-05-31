@@ -13,19 +13,21 @@
 #include "tenzor/autograd/ops.hpp"
 #include "tenzor/ops/creation.hpp"
 #include "tenzor/ops/math.hpp"
+#include "../backend_test_fixture.hpp"
 
 using namespace tenzor;
 
-class BroadcastGradientTest : public ::testing::Test {
+class BroadcastGradientTest : public ::tenzor::testing::BackendTest {
 protected:
     void SetUp() override {
-        tenzor::initialize();
+        ::tenzor::testing::BackendTest::SetUp();
+        if (::testing::Test::IsSkipped()) return;
         set_grad_enabled(true);
     }
 
     void check_grad_shape(const Variable& var, const std::vector<int64_t>& expected_shape) {
         ASSERT_TRUE(var.grad().has_value()) << "Gradient not computed";
-        auto grad = var.grad().value();
+        auto grad = var.grad().value().cpu();
         auto grad_shape = std::vector<int64_t>(grad.shape().begin(), grad.shape().end());
         EXPECT_EQ(grad_shape, expected_shape)
             << "Gradient shape mismatch: got " << shape_to_string(grad_shape)
@@ -44,9 +46,9 @@ protected:
 
 // ---------- Addition ----------
 
-TEST_F(BroadcastGradientTest, AddMatrixPlusRow) {
-    Variable a(ones({3, 4}, DType::Float32), true);
-    Variable b(ones({4}, DType::Float32), true);
+TEST_P(BroadcastGradientTest, AddMatrixPlusRow) {
+    Variable a(ones({3, 4}, DType::Float32, device), true);
+    Variable b(ones({4}, DType::Float32, device), true);
     auto c = a + b;
     auto loss = tenzor::sum(c);
     loss.backward();
@@ -54,9 +56,9 @@ TEST_F(BroadcastGradientTest, AddMatrixPlusRow) {
     check_grad_shape(b, {4});
 }
 
-TEST_F(BroadcastGradientTest, AddMatrixPlusScalar) {
-    Variable a(ones({3, 4}, DType::Float32), true);
-    Variable b(ones({1}, DType::Float32), true);
+TEST_P(BroadcastGradientTest, AddMatrixPlusScalar) {
+    Variable a(ones({3, 4}, DType::Float32, device), true);
+    Variable b(ones({1}, DType::Float32, device), true);
     auto c = a + b;
     auto loss = tenzor::sum(c);
     loss.backward();
@@ -64,9 +66,9 @@ TEST_F(BroadcastGradientTest, AddMatrixPlusScalar) {
     check_grad_shape(b, {1});
 }
 
-TEST_F(BroadcastGradientTest, AddColumnPlusRow) {
-    Variable a(ones({3, 1}, DType::Float32), true);
-    Variable b(ones({1, 4}, DType::Float32), true);
+TEST_P(BroadcastGradientTest, AddColumnPlusRow) {
+    Variable a(ones({3, 1}, DType::Float32, device), true);
+    Variable b(ones({1, 4}, DType::Float32, device), true);
     auto c = a + b;
     auto loss = tenzor::sum(c);
     loss.backward();
@@ -76,9 +78,9 @@ TEST_F(BroadcastGradientTest, AddColumnPlusRow) {
 
 // ---------- Subtraction ----------
 
-TEST_F(BroadcastGradientTest, SubMatrixMinusRow) {
-    Variable a(ones({3, 4}, DType::Float32), true);
-    Variable b(ones({4}, DType::Float32), true);
+TEST_P(BroadcastGradientTest, SubMatrixMinusRow) {
+    Variable a(ones({3, 4}, DType::Float32, device), true);
+    Variable b(ones({4}, DType::Float32, device), true);
     auto c = a - b;
     auto loss = tenzor::sum(c);
     loss.backward();
@@ -88,9 +90,9 @@ TEST_F(BroadcastGradientTest, SubMatrixMinusRow) {
 
 // ---------- Multiplication ----------
 
-TEST_F(BroadcastGradientTest, MulMatrixTimesRow) {
-    Variable a(ones({3, 4}, DType::Float32), true);
-    Variable b(ones({4}, DType::Float32), true);
+TEST_P(BroadcastGradientTest, MulMatrixTimesRow) {
+    Variable a(ones({3, 4}, DType::Float32, device), true);
+    Variable b(ones({4}, DType::Float32, device), true);
     auto c = a * b;
     auto loss = tenzor::sum(c);
     loss.backward();
@@ -98,9 +100,9 @@ TEST_F(BroadcastGradientTest, MulMatrixTimesRow) {
     check_grad_shape(b, {4});
 }
 
-TEST_F(BroadcastGradientTest, Mul3DTimesBroadcast) {
-    Variable a(ones({2, 3, 4}, DType::Float32), true);
-    Variable b(ones({1, 1, 4}, DType::Float32), true);
+TEST_P(BroadcastGradientTest, Mul3DTimesBroadcast) {
+    Variable a(ones({2, 3, 4}, DType::Float32, device), true);
+    Variable b(ones({1, 1, 4}, DType::Float32, device), true);
     auto c = a * b;
     auto loss = tenzor::sum(c);
     loss.backward();
@@ -110,9 +112,9 @@ TEST_F(BroadcastGradientTest, Mul3DTimesBroadcast) {
 
 // ---------- Division ----------
 
-TEST_F(BroadcastGradientTest, DivMatrixByRow) {
-    Variable a(ones({3, 4}, DType::Float32), true);
-    Variable b(ones({4}, DType::Float32) * 2.0f, true);  // Avoid div by 1 for interesting grad
+TEST_P(BroadcastGradientTest, DivMatrixByRow) {
+    Variable a(ones({3, 4}, DType::Float32, device), true);
+    Variable b(ones({4}, DType::Float32, device) * 2.0f, true);  // Avoid div by 1 for interesting grad
     auto c = a / b;
     auto loss = tenzor::sum(c);
     loss.backward();
@@ -122,9 +124,9 @@ TEST_F(BroadcastGradientTest, DivMatrixByRow) {
 
 // ---------- Atan2 ----------
 
-TEST_F(BroadcastGradientTest, Atan2MatrixAndRow) {
-    Variable y(ones({3, 4}, DType::Float32), true);
-    Variable x(ones({4}, DType::Float32), true);
+TEST_P(BroadcastGradientTest, Atan2MatrixAndRow) {
+    Variable y(ones({3, 4}, DType::Float32, device), true);
+    Variable x(ones({4}, DType::Float32, device), true);
     auto c = tenzor::atan2(y, x);
     auto loss = tenzor::sum(c);
     loss.backward();
@@ -132,12 +134,14 @@ TEST_F(BroadcastGradientTest, Atan2MatrixAndRow) {
     check_grad_shape(x, {4});
 }
 
-TEST_F(BroadcastGradientTest, Atan2ColumnAndRow) {
-    Variable y(ones({3, 1}, DType::Float32), true);
-    Variable x(ones({1, 4}, DType::Float32), true);
+TEST_P(BroadcastGradientTest, Atan2ColumnAndRow) {
+    Variable y(ones({3, 1}, DType::Float32, device), true);
+    Variable x(ones({1, 4}, DType::Float32, device), true);
     auto c = tenzor::atan2(y, x);
     auto loss = tenzor::sum(c);
     loss.backward();
     check_grad_shape(y, {3, 1});
     check_grad_shape(x, {1, 4});
 }
+
+INSTANTIATE_BACKEND_TESTS(BroadcastGradientTest);

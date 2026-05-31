@@ -7,6 +7,11 @@
  * "-inf", "nuc") threw at runtime, and `vector_norm(ord=0)` used an
  * `ax / (ax + 1e-38)` asymptote that was never exactly 1 (silently biasing
  * the L0 count for every real input). Both are now exact.
+ *
+ * Cross-backend: every suite is parameterized over all backends via
+ * BackendTest. Tensors are created on the fixture `device`; gradcheck and
+ * finite-difference probes are device-aware (inputs wrap device tensors).
+ * Host reads go through `.to(Device::cpu())` before `.data<T>()`.
  */
 
 #include <gtest/gtest.h>
@@ -26,18 +31,14 @@
 
 using namespace tenzor;
 
+// One fixture per suite name (all share BackendTest behaviour).
+class LinalgNormOrds : public ::tenzor::testing::BackendTest {};
+class LinalgVectorNormNegInf : public ::tenzor::testing::BackendTest {};
+class LinalgVectorNormOne : public ::tenzor::testing::BackendTest {};
+class LinalgVectorNormOrd0 : public ::tenzor::testing::BackendTest {};
+class LinalgVectorNormPosInf : public ::tenzor::testing::BackendTest {};
+
 namespace {
-
-// One-shot library init for this TU. Mirrors what other CPU-only ops tests do:
-// they pull in BackendTest indirectly via the fixture, but a single environment
-// is enough here since we never leave CPU.
-class LinalgNormOrdsEnv : public ::testing::Environment {
-public:
-    void SetUp() override { tenzor::testing::EnsureInitialized(); }
-};
-
-::testing::Environment* const kEnv =
-    ::testing::AddGlobalTestEnvironment(new LinalgNormOrdsEnv);
 
 float scalar_f32(const Tensor& t) {
     auto c = t.to(Device::cpu()).to(DType::Float32).contiguous();
@@ -79,12 +80,14 @@ const std::vector<double> kMatF64 = {
     3.0,  1.0,  0.0,
 };
 
-Tensor mk_matrix_f32() {
-    return from_data(kMatF32.data(), {kM, kN}, Device::cpu()).contiguous();
+// Build the test matrices on the requested device. Host data is staged on CPU
+// then moved to `device`.
+Tensor mk_matrix_f32(const Device& device) {
+    return from_data(kMatF32.data(), {kM, kN}, Device::cpu()).contiguous().to(device);
 }
 
-Tensor mk_matrix_f64() {
-    return from_data(kMatF64.data(), {kM, kN}, Device::cpu()).contiguous();
+Tensor mk_matrix_f64(const Device& device) {
+    return from_data(kMatF64.data(), {kM, kN}, Device::cpu()).contiguous().to(device);
 }
 
 }  // namespace
@@ -93,50 +96,50 @@ Tensor mk_matrix_f64() {
 // linalg::norm — matrix ord variants
 // ============================================================================
 
-TEST(LinalgNormOrds, FrobeniusFloat32_StillWorks) {
-    auto A = mk_matrix_f32();
+TEST_P(LinalgNormOrds, FrobeniusFloat32_StillWorks) {
+    auto A = mk_matrix_f32(device);
     auto got = linalg::norm(A, "fro");
     EXPECT_NEAR(scalar_f32(got), std::sqrt(70.0f), 1e-4f);
 }
 
-TEST(LinalgNormOrds, FrobeniusFloat64) {
-    auto A = mk_matrix_f64();
+TEST_P(LinalgNormOrds, FrobeniusFloat64) {
+    auto A = mk_matrix_f64(device);
     auto got = linalg::norm(A, "fro");
     EXPECT_NEAR(scalar_f64(got), std::sqrt(70.0), 1e-9);
 }
 
-TEST(LinalgNormOrds, One_MaxAbsColumnSum) {
+TEST_P(LinalgNormOrds, One_MaxAbsColumnSum) {
     // max(|col| sum) = max(9, 7, 6) = 9.
-    auto A = mk_matrix_f32();
+    auto A = mk_matrix_f32(device);
     auto got = linalg::norm(A, "1");
     EXPECT_NEAR(scalar_f32(got), 9.0f, 1e-5f);
 }
 
-TEST(LinalgNormOrds, NegOne_MinAbsColumnSum) {
+TEST_P(LinalgNormOrds, NegOne_MinAbsColumnSum) {
     // min(9, 7, 6) = 6.
-    auto A = mk_matrix_f32();
+    auto A = mk_matrix_f32(device);
     auto got = linalg::norm(A, "-1");
     EXPECT_NEAR(scalar_f32(got), 6.0f, 1e-5f);
 }
 
-TEST(LinalgNormOrds, Inf_MaxAbsRowSum) {
+TEST_P(LinalgNormOrds, Inf_MaxAbsRowSum) {
     // max(6, 5, 7, 4) = 7.
-    auto A = mk_matrix_f32();
+    auto A = mk_matrix_f32(device);
     auto got = linalg::norm(A, "inf");
     EXPECT_NEAR(scalar_f32(got), 7.0f, 1e-5f);
 }
 
-TEST(LinalgNormOrds, NegInf_MinAbsRowSum) {
+TEST_P(LinalgNormOrds, NegInf_MinAbsRowSum) {
     // min(6, 5, 7, 4) = 4.
-    auto A = mk_matrix_f32();
+    auto A = mk_matrix_f32(device);
     auto got = linalg::norm(A, "-inf");
     EXPECT_NEAR(scalar_f32(got), 4.0f, 1e-5f);
 }
 
-TEST(LinalgNormOrds, Two_SpectralAgreesWithSvdvalsMax) {
-    auto A = mk_matrix_f64();
+TEST_P(LinalgNormOrds, Two_SpectralAgreesWithSvdvalsMax) {
+    auto A = mk_matrix_f64(device);
     auto sv = linalg::svdvals(A);  // shape (3,)
-    auto sv_cpu = sv.contiguous();
+    auto sv_cpu = sv.to(Device::cpu()).contiguous();
     auto* sv_data = sv_cpu.data<double>();
     double sigma_max = 0.0;
     for (int64_t i = 0; i < sv_cpu.numel(); ++i) sigma_max = std::max(sigma_max, sv_data[i]);
@@ -145,10 +148,10 @@ TEST(LinalgNormOrds, Two_SpectralAgreesWithSvdvalsMax) {
     EXPECT_NEAR(scalar_f64(got), sigma_max, 1e-9);
 }
 
-TEST(LinalgNormOrds, NegTwo_SpectralAgreesWithSvdvalsMin) {
-    auto A = mk_matrix_f64();
+TEST_P(LinalgNormOrds, NegTwo_SpectralAgreesWithSvdvalsMin) {
+    auto A = mk_matrix_f64(device);
     auto sv = linalg::svdvals(A);
-    auto sv_cpu = sv.contiguous();
+    auto sv_cpu = sv.to(Device::cpu()).contiguous();
     auto* sv_data = sv_cpu.data<double>();
     double sigma_min = std::numeric_limits<double>::infinity();
     for (int64_t i = 0; i < sv_cpu.numel(); ++i) sigma_min = std::min(sigma_min, sv_data[i]);
@@ -157,10 +160,10 @@ TEST(LinalgNormOrds, NegTwo_SpectralAgreesWithSvdvalsMin) {
     EXPECT_NEAR(scalar_f64(got), sigma_min, 1e-9);
 }
 
-TEST(LinalgNormOrds, Nuc_NuclearAgreesWithSvdvalsSum) {
-    auto A = mk_matrix_f64();
+TEST_P(LinalgNormOrds, Nuc_NuclearAgreesWithSvdvalsSum) {
+    auto A = mk_matrix_f64(device);
     auto sv = linalg::svdvals(A);
-    auto sv_cpu = sv.contiguous();
+    auto sv_cpu = sv.to(Device::cpu()).contiguous();
     auto* sv_data = sv_cpu.data<double>();
     double sum = 0.0;
     for (int64_t i = 0; i < sv_cpu.numel(); ++i) sum += sv_data[i];
@@ -169,8 +172,8 @@ TEST(LinalgNormOrds, Nuc_NuclearAgreesWithSvdvalsSum) {
     EXPECT_NEAR(scalar_f64(got), sum, 1e-9);
 }
 
-TEST(LinalgNormOrds, UnknownOrd_Throws) {
-    auto A = mk_matrix_f32();
+TEST_P(LinalgNormOrds, UnknownOrd_Throws) {
+    auto A = mk_matrix_f32(device);
     EXPECT_THROW(linalg::norm(A, "bogus"), std::runtime_error);
 }
 
@@ -178,53 +181,53 @@ TEST(LinalgNormOrds, UnknownOrd_Throws) {
 // linalg::vector_norm — ord=0 (count nonzero) and ±inf
 // ============================================================================
 
-TEST(LinalgVectorNormOrd0, ExactCountOfNonzero_Float32) {
+TEST_P(LinalgVectorNormOrd0, ExactCountOfNonzero_Float32) {
     // 3 nonzero in a 6-vector. Old `ax/(ax+1e-38)` returned ~3.0 but with
     // 1e-19-ish bias per nonzero; here we want exact integer match.
     std::vector<float> v = {0.0f, 1.0f, 0.0f, -2.5f, 0.0f, 3.0f};
-    auto x = from_data(v.data(), {static_cast<int64_t>(v.size())}, Device::cpu());
+    auto x = from_data(v.data(), {static_cast<int64_t>(v.size())}, Device::cpu()).to(device);
     auto got = linalg::vector_norm(x, /*ord=*/0.0);
     EXPECT_EQ(scalar_f32(got), 3.0f) << "Expected exact L0 count, got " << scalar_f32(got);
 }
 
-TEST(LinalgVectorNormOrd0, AllZeros_ReturnsZero) {
+TEST_P(LinalgVectorNormOrd0, AllZeros_ReturnsZero) {
     std::vector<float> v = {0.0f, 0.0f, 0.0f, 0.0f};
-    auto x = from_data(v.data(), {static_cast<int64_t>(v.size())}, Device::cpu());
+    auto x = from_data(v.data(), {static_cast<int64_t>(v.size())}, Device::cpu()).to(device);
     auto got = linalg::vector_norm(x, /*ord=*/0.0);
     EXPECT_EQ(scalar_f32(got), 0.0f);
 }
 
-TEST(LinalgVectorNormOrd0, AllNonzero_ReturnsNumel) {
+TEST_P(LinalgVectorNormOrd0, AllNonzero_ReturnsNumel) {
     std::vector<float> v = {1.0f, -1.0f, 2.0f, -3.0f, 1e-30f};  // tiny but nonzero counts
-    auto x = from_data(v.data(), {static_cast<int64_t>(v.size())}, Device::cpu());
+    auto x = from_data(v.data(), {static_cast<int64_t>(v.size())}, Device::cpu()).to(device);
     auto got = linalg::vector_norm(x, /*ord=*/0.0);
     EXPECT_EQ(scalar_f32(got), 5.0f);
 }
 
-TEST(LinalgVectorNormOrd0, Float64_ExactCount) {
+TEST_P(LinalgVectorNormOrd0, Float64_ExactCount) {
     std::vector<double> v = {0.0, 4.2, 0.0, 0.0, 1e-200};
-    auto x = from_data(v.data(), {static_cast<int64_t>(v.size())}, Device::cpu());
+    auto x = from_data(v.data(), {static_cast<int64_t>(v.size())}, Device::cpu()).to(device);
     auto got = linalg::vector_norm(x, /*ord=*/0.0);
     EXPECT_EQ(scalar_f64(got), 2.0);
 }
 
-TEST(LinalgVectorNormPosInf, EqualsMaxAbs) {
+TEST_P(LinalgVectorNormPosInf, EqualsMaxAbs) {
     std::vector<float> v = {1.0f, -7.0f, 3.0f, 2.0f, -4.0f};
-    auto x = from_data(v.data(), {static_cast<int64_t>(v.size())}, Device::cpu());
+    auto x = from_data(v.data(), {static_cast<int64_t>(v.size())}, Device::cpu()).to(device);
     auto got = linalg::vector_norm(x, /*ord=*/std::numeric_limits<double>::infinity());
     EXPECT_NEAR(scalar_f32(got), 7.0f, 1e-6f);
 }
 
-TEST(LinalgVectorNormNegInf, EqualsMinAbs) {
+TEST_P(LinalgVectorNormNegInf, EqualsMinAbs) {
     std::vector<float> v = {1.0f, -7.0f, 3.0f, 2.0f, -4.0f};
-    auto x = from_data(v.data(), {static_cast<int64_t>(v.size())}, Device::cpu());
+    auto x = from_data(v.data(), {static_cast<int64_t>(v.size())}, Device::cpu()).to(device);
     auto got = linalg::vector_norm(x, /*ord=*/-std::numeric_limits<double>::infinity());
     EXPECT_NEAR(scalar_f32(got), 1.0f, 1e-6f);
 }
 
-TEST(LinalgVectorNormOne, EqualsSumAbs) {
+TEST_P(LinalgVectorNormOne, EqualsSumAbs) {
     std::vector<float> v = {1.0f, -2.0f, 3.0f, -4.0f};
-    auto x = from_data(v.data(), {static_cast<int64_t>(v.size())}, Device::cpu());
+    auto x = from_data(v.data(), {static_cast<int64_t>(v.size())}, Device::cpu()).to(device);
     auto got = linalg::vector_norm(x, /*ord=*/1.0);
     EXPECT_NEAR(scalar_f32(got), 10.0f, 1e-6f);
 }
@@ -241,7 +244,8 @@ TEST(LinalgVectorNormOne, EqualsSumAbs) {
 namespace {
 
 // Run forward + backward of linalg_norm(A, ord) and return (forward_value,
-// analytic_gradient_wrt_A).
+// analytic_gradient_wrt_A). A_in lives on its own device; the Variable, forward
+// and backward all run there.
 std::pair<double, Tensor> norm_forward_backward(const Tensor& A_in,
                                                 const std::string& ord) {
     tenzor::Variable A_var(A_in, /*requires_grad=*/true);
@@ -255,18 +259,21 @@ std::pair<double, Tensor> norm_forward_backward(const Tensor& A_in,
 }
 
 // Central finite difference along a single random direction d (||d||_F=1).
-// Returns (numerical_dot, analytic_dot) where dot = <d, grad>.
+// Returns (numerical_dot, analytic_dot) where dot = <d, grad>. All forward
+// evaluations run on `device`; the host-side direction is built on CPU and the
+// perturbed matrices are moved to `device` before norm().
 std::pair<double, double> directional_derivative(const Tensor& A,
                                                  const Tensor& grad,
                                                  const std::string& ord,
-                                                 double eps) {
+                                                 double eps,
+                                                 const Device& device) {
     // Build a deterministic direction: d[i,j] = sin(i + 2*j + 1)  → nonzero,
     // bounded, no domain accidents. Normalise to Frobenius unit length.
     std::vector<int64_t> shape(A.shape().begin(), A.shape().end());
     int64_t numel = A.numel();
     std::vector<double> d(numel);
-    auto A_cpu = A.to(DType::Float64).contiguous();
-    auto g_cpu = grad.to(DType::Float64).contiguous();
+    auto A_cpu = A.to(Device::cpu()).to(DType::Float64).contiguous();
+    auto g_cpu = grad.to(Device::cpu()).to(DType::Float64).contiguous();
     auto* a_p = A_cpu.data<double>();
     auto* g_p = g_cpu.data<double>();
     double dnorm = 0.0;
@@ -282,8 +289,8 @@ std::pair<double, double> directional_derivative(const Tensor& A,
     std::vector<double> minus(a_p, a_p + numel);
     for (int64_t i = 0; i < numel; ++i) { plus[i]  += eps * d[i]; }
     for (int64_t i = 0; i < numel; ++i) { minus[i] -= eps * d[i]; }
-    auto Aplus  = from_data(plus.data(),  shape, Device::cpu()).contiguous();
-    auto Aminus = from_data(minus.data(), shape, Device::cpu()).contiguous();
+    auto Aplus  = from_data(plus.data(),  shape, Device::cpu()).contiguous().to(device);
+    auto Aminus = from_data(minus.data(), shape, Device::cpu()).contiguous().to(device);
     double y_plus  = scalar_f64(linalg::norm(Aplus,  ord));
     double y_minus = scalar_f64(linalg::norm(Aminus, ord));
     double numerical = (y_plus - y_minus) / (2.0 * eps);
@@ -295,61 +302,71 @@ std::pair<double, double> directional_derivative(const Tensor& A,
 
 }  // namespace
 
-TEST(LinalgNormOrds, Gradcheck_Fro) {
-    auto A = mk_matrix_f64();
+TEST_P(LinalgNormOrds, Gradcheck_Fro) {
+    auto A = mk_matrix_f64(device);
     auto [y, grad] = norm_forward_backward(A, "fro");
     EXPECT_GT(y, 0.0);
-    auto [num, ana] = directional_derivative(A, grad, "fro", 1e-5);
+    auto [num, ana] = directional_derivative(A, grad, "fro", 1e-5, device);
     EXPECT_NEAR(num, ana, 1e-5) << "fro: numerical=" << num << " analytic=" << ana;
 }
 
-TEST(LinalgNormOrds, Gradcheck_One) {
-    auto A = mk_matrix_f64();
+TEST_P(LinalgNormOrds, Gradcheck_One) {
+    auto A = mk_matrix_f64(device);
     auto [y, grad] = norm_forward_backward(A, "1");
     EXPECT_NEAR(y, 9.0, 1e-9);
     // ord=1 is piecewise-linear; the subgradient at our point picks the
     // unique max column (column 0). Verify analytic ≈ numerical along a
     // direction that doesn't tip into another column.
-    auto [num, ana] = directional_derivative(A, grad, "1", 1e-6);
+    auto [num, ana] = directional_derivative(A, grad, "1", 1e-6, device);
     EXPECT_NEAR(num, ana, 1e-4) << "1: numerical=" << num << " analytic=" << ana;
 }
 
-TEST(LinalgNormOrds, Gradcheck_Inf) {
-    auto A = mk_matrix_f64();
+TEST_P(LinalgNormOrds, Gradcheck_Inf) {
+    auto A = mk_matrix_f64(device);
     auto [y, grad] = norm_forward_backward(A, "inf");
     EXPECT_NEAR(y, 7.0, 1e-9);
-    auto [num, ana] = directional_derivative(A, grad, "inf", 1e-6);
+    auto [num, ana] = directional_derivative(A, grad, "inf", 1e-6, device);
     EXPECT_NEAR(num, ana, 1e-4) << "inf: numerical=" << num << " analytic=" << ana;
 }
 
-TEST(LinalgNormOrds, Gradcheck_Two) {
-    auto A = mk_matrix_f64();
+TEST_P(LinalgNormOrds, Gradcheck_Two) {
+    auto A = mk_matrix_f64(device);
     auto [y, grad] = norm_forward_backward(A, "2");
     EXPECT_GT(y, 0.0);
-    auto [num, ana] = directional_derivative(A, grad, "2", 1e-5);
+    auto [num, ana] = directional_derivative(A, grad, "2", 1e-5, device);
     // Spectral norm gradient is smooth where σ_max is simple — our matrix
     // has well-separated singular values so the tolerance can be tight.
     EXPECT_NEAR(num, ana, 1e-4) << "2: numerical=" << num << " analytic=" << ana;
 }
 
-TEST(LinalgNormOrds, Gradcheck_Nuc) {
-    auto A = mk_matrix_f64();
+TEST_P(LinalgNormOrds, Gradcheck_Nuc) {
+    auto A = mk_matrix_f64(device);
     auto [y, grad] = norm_forward_backward(A, "nuc");
     EXPECT_GT(y, 0.0);
-    auto [num, ana] = directional_derivative(A, grad, "nuc", 1e-5);
+    auto [num, ana] = directional_derivative(A, grad, "nuc", 1e-5, device);
     // Nuclear norm gradient (U @ Vh) is smooth at full-rank, simple-SV
     // matrices. Loose tolerance to absorb LAPACK SVD round-off across the
     // three evaluations (A+εd, A, A-εd) since each does its own SVD.
     EXPECT_NEAR(num, ana, 5e-4) << "nuc: numerical=" << num << " analytic=" << ana;
 }
 
-TEST(LinalgVectorNormOrd0, BackwardThrows) {
+TEST_P(LinalgVectorNormOrd0, BackwardThrows) {
     // ord=0 is piecewise constant — gradient is zero a.e. but undefined at
     // x_i = 0. PyTorch raises here; Tenzor's LinalgVectorNormBackward does
     // the same (see src/autograd/function_new_ops.cpp).
     std::vector<float> v = {0.0f, 1.0f, 0.0f, -2.5f};
-    auto x = from_data(v.data(), {static_cast<int64_t>(v.size())}, Device::cpu());
+    auto x = from_data(v.data(), {static_cast<int64_t>(v.size())}, Device::cpu()).to(device);
     tenzor::Variable xv(x, /*requires_grad=*/true);
     auto y = tenzor::vector_norm(xv, /*ord=*/0.0, /*dim=*/{}, /*keepdim=*/false);
     EXPECT_THROW(y.backward(), std::runtime_error);
 }
+
+// ============================================================================
+// Fan every TEST_P above over all five backends (one per suite). BackendTest::
+// SetUp skips a backend that is physically absent on the host.
+// ============================================================================
+INSTANTIATE_BACKEND_TESTS(LinalgNormOrds);
+INSTANTIATE_BACKEND_TESTS(LinalgVectorNormNegInf);
+INSTANTIATE_BACKEND_TESTS(LinalgVectorNormOne);
+INSTANTIATE_BACKEND_TESTS(LinalgVectorNormOrd0);
+INSTANTIATE_BACKEND_TESTS(LinalgVectorNormPosInf);

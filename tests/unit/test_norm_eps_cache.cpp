@@ -28,41 +28,31 @@
 #include "tenzor/nn/layers/batchnorm.hpp"
 #include "tenzor/autograd/variable.hpp"
 #include "tenzor/ops/creation.hpp"
-
-namespace tenzor { void initialize(); }
+#include "../backend_test_fixture.hpp"
 
 using namespace tenzor;
 using namespace tenzor::nn;
-
-// ---------------------------------------------------------------------------
-// Test environment: initialise backends once per binary
-// ---------------------------------------------------------------------------
-class NormEpsCacheEnv : public ::testing::Environment {
-public:
-    void SetUp() override { tenzor::initialize(); }
-};
-
-static ::testing::Environment* const g_env =
-    ::testing::AddGlobalTestEnvironment(new NormEpsCacheEnv);
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 namespace {
 
+class NormEpsCache : public ::tenzor::testing::BackendTest {};
+
 // Max absolute element-wise difference, cast to float64 for accuracy.
 double max_abs_diff(const Tensor& a, const Tensor& b) {
     auto diff = abs(a.to(DType::Float64) - b.to(DType::Float64));
-    return max(diff).item<double>();
+    auto host = max(diff).cpu();
+    return host.item<double>();
 }
 
 // Mean absolute element-wise difference.
 double mean_abs_diff(const Tensor& a, const Tensor& b) {
     auto diff = abs(a.to(DType::Float64) - b.to(DType::Float64));
-    return mean(diff).item<double>();
+    auto host = mean(diff).cpu();
+    return host.item<double>();
 }
-
-} // namespace
 
 // ---------------------------------------------------------------------------
 // Audit P0 #6 — LayerNorm
@@ -71,17 +61,19 @@ double mean_abs_diff(const Tensor& a, const Tensor& b) {
 // 8*1024*1024 so the primitive cache is actually exercised.
 // Input: randn scaled by 1e-3 → variance ≈ 1e-6 so eps dominates.
 // ---------------------------------------------------------------------------
-TEST(NormEpsCache, LayerNormDistinctEpsProducesDistinctOutput) {
+TEST_P(NormEpsCache, LayerNormDistinctEpsProducesDistinctOutput) {
     // 8M elements — just at/above oneDNN threshold
     const int64_t batch_size = 1;
     const int64_t norm_size  = 8 * 1024 * 1024;
 
     // Small-variance input: randn * 1e-3 so var ≈ 1e-6
-    auto x_t = randn({batch_size, norm_size}, DType::Float32) * 1e-3f;
+    auto x_t = randn({batch_size, norm_size}, DType::Float32, device) * 1e-3f;
     auto x = Variable(x_t, false);
 
     LayerNorm ln_default({norm_size}, /*eps=*/1e-5);
     LayerNorm ln_tiny   ({norm_size}, /*eps=*/1e-12);
+    ln_default.to(device);
+    ln_tiny.to(device);
 
     // Run default first so it populates the cache; then run tiny.
     // Pre-fix: tiny would reuse default's primitive (same {batch, norm} key)
@@ -102,15 +94,17 @@ TEST(NormEpsCache, LayerNormDistinctEpsProducesDistinctOutput) {
 // Shape: [2, 4, 1024, 1280] = 10,485,760 elements — exceeds the oneDNN BN
 // threshold of 10M elements so the cache is exercised.
 // ---------------------------------------------------------------------------
-TEST(NormEpsCache, BatchNormDistinctEpsProducesDistinctOutput) {
+TEST_P(NormEpsCache, BatchNormDistinctEpsProducesDistinctOutput) {
     // 2 * 4 * 1024 * 1280 = 10,485,760 > 10M → oneDNN path
     const int64_t N = 2, C = 4, H = 1024, W = 1280;
 
-    auto x_t = randn({N, C, H, W}, DType::Float32) * 1e-3f;
+    auto x_t = randn({N, C, H, W}, DType::Float32, device) * 1e-3f;
     auto x = Variable(x_t, false);
 
     BatchNorm2d bn_default(C, /*eps=*/1e-5);
     BatchNorm2d bn_tiny   (C, /*eps=*/1e-12);
+    bn_default.to(device);
+    bn_tiny.to(device);
 
     auto y_default = bn_default.forward(x).tensor();
     auto y_tiny    = bn_tiny.forward(x).tensor();
@@ -126,15 +120,17 @@ TEST(NormEpsCache, BatchNormDistinctEpsProducesDistinctOutput) {
 // or corrupted when ln_default runs between two ln_tiny.forward() calls.
 // Uses the same large tensor shape so the oneDNN path is exercised.
 // ---------------------------------------------------------------------------
-TEST(NormEpsCache, OrderIndependence) {
+TEST_P(NormEpsCache, OrderIndependence) {
     const int64_t batch_size = 1;
     const int64_t norm_size  = 8 * 1024 * 1024;
 
-    auto x_t = randn({batch_size, norm_size}, DType::Float32) * 1e-3f;
+    auto x_t = randn({batch_size, norm_size}, DType::Float32, device) * 1e-3f;
     auto x = Variable(x_t, false);
 
     LayerNorm ln_a({norm_size}, /*eps=*/1e-5);
     LayerNorm ln_b({norm_size}, /*eps=*/1e-12);
+    ln_a.to(device);
+    ln_b.to(device);
 
     // Run b first, then a, then b again — b's output must be identical both times.
     auto y_b1 = ln_b.forward(x).tensor();
@@ -146,3 +142,7 @@ TEST(NormEpsCache, OrderIndependence) {
         << "ln_b output changed after ln_a forward — cache invalidation / "
         << "collision bug (audit P0 #6). diff=" << diff;
 }
+
+INSTANTIATE_BACKEND_TESTS(NormEpsCache);
+
+} // namespace

@@ -223,7 +223,7 @@ tenzor_discover_tests(test_normalization_multidtype LABELS "nn" DISCOVERY_TIMEOU
 tenzor_discover_tests(test_flatten_multidtype LABELS "nn" DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST BACKENDS multi)
 tenzor_discover_tests(test_channel_shuffle LABELS "nn" DISCOVERY_TIMEOUT 60)
 tenzor_discover_tests(test_quantized_inference LABELS "nn" DISCOVERY_TIMEOUT 60)
-tenzor_discover_tests(test_quantization_s20 LABELS "nn" DISCOVERY_TIMEOUT 60 BACKENDS cpu)
+tenzor_discover_tests(test_quantization_s20 LABELS "nn" DISCOVERY_TIMEOUT 60 BACKENDS multi)
 tenzor_discover_tests(test_segmentation_multidtype LABELS "nn" DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST BACKENDS multi)
 # PyTorch loader tests
 add_executable(test_pytorch_loader test_pytorch_loader.cpp)
@@ -726,7 +726,7 @@ tenzor_discover_tests(test_optim_grad_flow LABELS "nn" DISCOVERY_TIMEOUT 60)
 # real-work (not identity stub).
 add_executable(test_s5_surgical_fixes test_s5_surgical_fixes.cpp)
 target_link_libraries(test_s5_surgical_fixes PRIVATE tenzor_core GTest::gtest_main)
-tenzor_discover_tests(test_s5_surgical_fixes LABELS "nn" DISCOVERY_TIMEOUT 60 BACKENDS cpu)
+tenzor_discover_tests(test_s5_surgical_fixes LABELS "nn" DISCOVERY_TIMEOUT 60 BACKENDS multi)
 
 # Stream-11 (S11) severance sweep — regression coverage for the
 # raw-tensor-op-inside-forward grad_fn-severance pattern across MaxPool2d,

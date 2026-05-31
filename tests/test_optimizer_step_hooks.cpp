@@ -6,27 +6,33 @@
 
 #include <gtest/gtest.h>
 
+#include "backend_test_fixture.hpp"
 #include "tenzor/autograd/variable.hpp"
 #include "tenzor/nn/optim/sgd.hpp"
 #include "tenzor/ops/creation.hpp"
+#include "tenzor/ops/math.hpp"
 #include "tenzor/tenzor.hpp"
 
 #include <atomic>
+#include <vector>
 
 using namespace tenzor;
 
 namespace {
 
-class OptimizerStepHookTest : public ::testing::Test {
+class OptimizerStepHookTest : public ::tenzor::testing::BackendTest {
 protected:
-    void SetUp() override { tenzor::initialize(); }
+    void SetUp() override {
+        ::tenzor::testing::BackendTest::SetUp();
+        if (::testing::Test::IsSkipped()) return;
+    }
 };
 
-TEST_F(OptimizerStepHookTest, HookFiresAfterStep) {
+TEST_P(OptimizerStepHookTest, HookFiresAfterStep) {
     // Tiny SGD with a single parameter that has a gradient.
-    auto p_tensor = tenzor::zeros({3}, DType::Float32, Device::cpu());
+    auto p_tensor = tenzor::zeros({3}, DType::Float32, device);
     auto param = std::make_shared<Variable>(p_tensor, /*requires_grad=*/true);
-    auto grad = tenzor::ones({3}, DType::Float32, Device::cpu());
+    auto grad = tenzor::ones({3}, DType::Float32, device);
     param->set_grad(grad);
 
     optim::SGD sgd({param}, /*lr=*/0.1);
@@ -46,17 +52,17 @@ TEST_F(OptimizerStepHookTest, HookFiresAfterStep) {
     EXPECT_EQ(hook_calls.load(), 2) << "hook fired after removal";
 }
 
-TEST_F(OptimizerStepHookTest, RemoveUnknownIdReturnsFalse) {
-    auto p_tensor = tenzor::zeros({1}, DType::Float32, Device::cpu());
+TEST_P(OptimizerStepHookTest, RemoveUnknownIdReturnsFalse) {
+    auto p_tensor = tenzor::zeros({1}, DType::Float32, device);
     auto param = std::make_shared<Variable>(p_tensor, /*requires_grad=*/true);
     optim::SGD sgd({param}, 0.1);
     EXPECT_FALSE(sgd.remove_post_step_hook(/*hook_id=*/9999));
 }
 
-TEST_F(OptimizerStepHookTest, MultipleHooksFireInRegistrationOrder) {
-    auto p_tensor = tenzor::zeros({1}, DType::Float32, Device::cpu());
+TEST_P(OptimizerStepHookTest, MultipleHooksFireInRegistrationOrder) {
+    auto p_tensor = tenzor::zeros({1}, DType::Float32, device);
     auto param = std::make_shared<Variable>(p_tensor, /*requires_grad=*/true);
-    param->set_grad(tenzor::ones({1}, DType::Float32, Device::cpu()));
+    param->set_grad(tenzor::ones({1}, DType::Float32, device));
 
     optim::SGD sgd({param}, 0.1);
 
@@ -72,7 +78,7 @@ TEST_F(OptimizerStepHookTest, MultipleHooksFireInRegistrationOrder) {
     EXPECT_EQ(order[2], 3);
 }
 
-TEST_F(OptimizerStepHookTest, PruningMaskRemainsZeroAfterStep) {
+TEST_P(OptimizerStepHookTest, PruningMaskRemainsZeroAfterStep) {
     // Audit G.10: the key motivating use case — a pruning mask that
     // would otherwise drift back to non-zero after each gradient step.
     //
@@ -80,29 +86,35 @@ TEST_F(OptimizerStepHookTest, PruningMaskRemainsZeroAfterStep) {
     // any auto-reapply, an SGD step with grad=ones moves every value by
     // -lr (so indices [1, 3] become -0.1, not zero). With the post-step
     // hook re-masking them, they stay at zero.
-    auto p_tensor = tenzor::zeros({5}, DType::Float32, Device::cpu());
+    auto p_tensor = tenzor::zeros({5}, DType::Float32, device);
     auto param = std::make_shared<Variable>(p_tensor, /*requires_grad=*/true);
-    param->set_grad(tenzor::ones({5}, DType::Float32, Device::cpu()));
+    param->set_grad(tenzor::ones({5}, DType::Float32, device));
 
     optim::SGD sgd({param}, /*lr=*/0.1);
 
     // Manual minimal hook (we exercise the optimizer hook contract here;
     // the full register_pruning_auto_reapply path is exercised via the
-    // pruning module's integration tests).
+    // pruning module's integration tests). Re-mask indices [1, 3] to zero
+    // by multiplying the parameter tensor by a device-resident mask, so the
+    // hook stays correct on every backend (no raw host pointer access).
+    float mask_host[5] = {1.0f, 0.0f, 1.0f, 0.0f, 1.0f};
+    auto mask = tenzor::from_data(mask_host, {5}, device);
     sgd.register_post_step_hook([&]() {
-        auto* data = param->tensor().data<float>();
-        data[1] = 0.0f;
-        data[3] = 0.0f;
+        param->tensor() = mul(param->tensor(), mask);
     });
 
     sgd.step();
 
-    const auto* d = param->tensor().data<float>();
+    // Host reads: bring the parameter to CPU before touching raw data.
+    auto result_cpu = param->tensor().cpu();
+    const auto* d = result_cpu.data<float>();
     EXPECT_NEAR(d[0], -0.1f, 1e-6);
     EXPECT_FLOAT_EQ(d[1], 0.0f) << "mask must keep index 1 at zero";
     EXPECT_NEAR(d[2], -0.1f, 1e-6);
     EXPECT_FLOAT_EQ(d[3], 0.0f) << "mask must keep index 3 at zero";
     EXPECT_NEAR(d[4], -0.1f, 1e-6);
 }
+
+INSTANTIATE_BACKEND_TESTS(OptimizerStepHookTest);
 
 }  // namespace

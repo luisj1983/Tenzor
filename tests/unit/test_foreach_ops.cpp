@@ -17,27 +17,23 @@
 #include "tenzor/core/dtype.hpp"
 #include "tenzor/ops/foreach.hpp"
 #include "tenzor/ops/creation.hpp"
-
-namespace tenzor { void initialize(); }
+#include "../backend_test_fixture.hpp"
 
 namespace tz = ::tenzor;
 
-class ForeachOpsEnv : public ::testing::Environment {
-public:
-    void SetUp() override { tenzor::initialize(); }
-};
-static ::testing::Environment* const g_env =
-    ::testing::AddGlobalTestEnvironment(new ForeachOpsEnv);
+class ForeachOps : public ::tenzor::testing::BackendTest {};
 
 namespace {
 
-// Make a list of n tensors of shape {4, 4} all filled with `value`.
-std::vector<tz::Tensor> make_list(int n, double value,
+// Make a list of n tensors of shape {4, 4} all filled with `value`, on `device`.
+// Every tensor placed into a foreach list must live on the same device as the
+// rest of the list, so the creation call is routed onto `device`.
+std::vector<tz::Tensor> make_list(int n, double value, tz::Device device,
                                    tz::DType dt = tz::DType::Float32) {
     std::vector<tz::Tensor> out;
     out.reserve(n);
     for (int i = 0; i < n; ++i) {
-        out.push_back(tz::full({4, 4}, value, dt));
+        out.push_back(tz::full({4, 4}, value, dt, device));
     }
     return out;
 }
@@ -60,33 +56,33 @@ void check_list_scalar(const std::vector<tz::Tensor>& list,
 // Out-of-place binary ops
 // =============================================================================
 
-TEST(ForeachOps, Add) {
-    auto a = make_list(8, 1.0);
-    auto b = make_list(8, 2.0);
+TEST_P(ForeachOps, Add) {
+    auto a = make_list(8, 1.0, device);
+    auto b = make_list(8, 2.0, device);
     auto c = tz::foreach_add(a, b);
     ASSERT_EQ(c.size(), 8u);
     check_list_scalar(c, 3.0f);
 }
 
-TEST(ForeachOps, Sub) {
-    auto a = make_list(8, 5.0);
-    auto b = make_list(8, 2.0);
+TEST_P(ForeachOps, Sub) {
+    auto a = make_list(8, 5.0, device);
+    auto b = make_list(8, 2.0, device);
     auto c = tz::foreach_sub(a, b);
     ASSERT_EQ(c.size(), 8u);
     check_list_scalar(c, 3.0f);
 }
 
-TEST(ForeachOps, Mul) {
-    auto a = make_list(8, 3.0);
-    auto b = make_list(8, 2.0);
+TEST_P(ForeachOps, Mul) {
+    auto a = make_list(8, 3.0, device);
+    auto b = make_list(8, 2.0, device);
     auto c = tz::foreach_mul(a, b);
     ASSERT_EQ(c.size(), 8u);
     check_list_scalar(c, 6.0f);
 }
 
-TEST(ForeachOps, Div) {
-    auto a = make_list(8, 6.0);
-    auto b = make_list(8, 3.0);
+TEST_P(ForeachOps, Div) {
+    auto a = make_list(8, 6.0, device);
+    auto b = make_list(8, 3.0, device);
     auto c = tz::foreach_div(a, b);
     ASSERT_EQ(c.size(), 8u);
     check_list_scalar(c, 2.0f);
@@ -96,8 +92,8 @@ TEST(ForeachOps, Div) {
 // Out-of-place unary ops
 // =============================================================================
 
-TEST(ForeachOps, Neg) {
-    auto a = make_list(8, 3.0);
+TEST_P(ForeachOps, Neg) {
+    auto a = make_list(8, 3.0, device);
     auto b = tz::foreach_neg(a);
     ASSERT_EQ(b.size(), 8u);
     check_list_scalar(b, -3.0f);
@@ -105,8 +101,8 @@ TEST(ForeachOps, Neg) {
     check_list_scalar(a, 3.0f);
 }
 
-TEST(ForeachOps, Abs) {
-    auto a = make_list(8, -4.0);
+TEST_P(ForeachOps, Abs) {
+    auto a = make_list(8, -4.0, device);
     auto b = tz::foreach_abs(a);
     ASSERT_EQ(b.size(), 8u);
     check_list_scalar(b, 4.0f);
@@ -114,8 +110,8 @@ TEST(ForeachOps, Abs) {
     check_list_scalar(a, -4.0f);
 }
 
-TEST(ForeachOps, Sqrt) {
-    auto a = make_list(8, 4.0);
+TEST_P(ForeachOps, Sqrt) {
+    auto a = make_list(8, 4.0, device);
     auto b = tz::foreach_sqrt(a);
     ASSERT_EQ(b.size(), 8u);
     check_list_scalar(b, 2.0f);
@@ -123,8 +119,8 @@ TEST(ForeachOps, Sqrt) {
     check_list_scalar(a, 4.0f);
 }
 
-TEST(ForeachOps, Copy) {
-    auto a = make_list(6, 7.0);
+TEST_P(ForeachOps, Copy) {
+    auto a = make_list(6, 7.0, device);
     auto b = tz::foreach_copy(a);
     ASSERT_EQ(b.size(), 6u);
     check_list_scalar(b, 7.0f);
@@ -137,30 +133,30 @@ TEST(ForeachOps, Copy) {
 // In-place binary ops
 // =============================================================================
 
-TEST(ForeachOps, AddInplace) {
-    auto a = make_list(8, 1.0);
-    auto b = make_list(8, 2.0);
+TEST_P(ForeachOps, AddInplace) {
+    auto a = make_list(8, 1.0, device);
+    auto b = make_list(8, 2.0, device);
     tz::foreach_add_(a, b);
     check_list_scalar(a, 3.0f);
 }
 
-TEST(ForeachOps, SubInplace) {
-    auto a = make_list(8, 5.0);
-    auto b = make_list(8, 2.0);
+TEST_P(ForeachOps, SubInplace) {
+    auto a = make_list(8, 5.0, device);
+    auto b = make_list(8, 2.0, device);
     tz::foreach_sub_(a, b);
     check_list_scalar(a, 3.0f);
 }
 
-TEST(ForeachOps, MulInplace) {
-    auto a = make_list(8, 3.0);
-    auto b = make_list(8, 2.0);
+TEST_P(ForeachOps, MulInplace) {
+    auto a = make_list(8, 3.0, device);
+    auto b = make_list(8, 2.0, device);
     tz::foreach_mul_(a, b);
     check_list_scalar(a, 6.0f);
 }
 
-TEST(ForeachOps, DivInplace) {
-    auto a = make_list(8, 6.0);
-    auto b = make_list(8, 3.0);
+TEST_P(ForeachOps, DivInplace) {
+    auto a = make_list(8, 6.0, device);
+    auto b = make_list(8, 3.0, device);
     tz::foreach_div_(a, b);
     check_list_scalar(a, 2.0f);
 }
@@ -169,26 +165,26 @@ TEST(ForeachOps, DivInplace) {
 // In-place unary ops
 // =============================================================================
 
-TEST(ForeachOps, NegInplace) {
-    auto a = make_list(8, 3.0);
+TEST_P(ForeachOps, NegInplace) {
+    auto a = make_list(8, 3.0, device);
     tz::foreach_neg_(a);
     check_list_scalar(a, -3.0f);
 }
 
-TEST(ForeachOps, AbsInplace) {
-    auto a = make_list(8, -4.0);
+TEST_P(ForeachOps, AbsInplace) {
+    auto a = make_list(8, -4.0, device);
     tz::foreach_abs_(a);
     check_list_scalar(a, 4.0f);
 }
 
-TEST(ForeachOps, SqrtInplace) {
-    auto a = make_list(8, 4.0);
+TEST_P(ForeachOps, SqrtInplace) {
+    auto a = make_list(8, 4.0, device);
     tz::foreach_sqrt_(a);
     check_list_scalar(a, 2.0f);
 }
 
-TEST(ForeachOps, Zero) {
-    auto a = make_list(8, 7.0);
+TEST_P(ForeachOps, Zero) {
+    auto a = make_list(8, 7.0, device);
     tz::foreach_zero_(a);
     check_list_scalar(a, 0.0f);
 }
@@ -197,31 +193,31 @@ TEST(ForeachOps, Zero) {
 // Ternary fused ops
 // =============================================================================
 
-TEST(ForeachOps, Addcdiv) {
+TEST_P(ForeachOps, Addcdiv) {
     // self[i] += scalar * a[i] / b[i]
     // 1.0 + 0.5 * (6.0 / 3.0) = 1.0 + 1.0 = 2.0
-    auto self_v = make_list(8, 1.0);
-    auto a      = make_list(8, 6.0);
-    auto b      = make_list(8, 3.0);
+    auto self_v = make_list(8, 1.0, device);
+    auto a      = make_list(8, 6.0, device);
+    auto b      = make_list(8, 3.0, device);
     tz::foreach_addcdiv_(self_v, a, b, 0.5);
     check_list_scalar(self_v, 2.0f, 1e-4f);
 }
 
-TEST(ForeachOps, Addcmul) {
+TEST_P(ForeachOps, Addcmul) {
     // self[i] += scalar * a[i] * b[i]
     // 1.0 + 0.5 * 2.0 * 3.0 = 1.0 + 3.0 = 4.0
-    auto self_v = make_list(8, 1.0);
-    auto a      = make_list(8, 2.0);
-    auto b      = make_list(8, 3.0);
+    auto self_v = make_list(8, 1.0, device);
+    auto a      = make_list(8, 2.0, device);
+    auto b      = make_list(8, 3.0, device);
     tz::foreach_addcmul_(self_v, a, b, 0.5);
     check_list_scalar(self_v, 4.0f, 1e-4f);
 }
 
-TEST(ForeachOps, Lerp) {
+TEST_P(ForeachOps, Lerp) {
     // self[i] = self[i] + scalar*(b[i] - self[i]) = (1-scalar)*self + scalar*b
     // = 0.5 * 0.0 + 0.5 * 1.0 = 0.5
-    auto self_v = make_list(8, 0.0);
-    auto b      = make_list(8, 1.0);
+    auto self_v = make_list(8, 0.0, device);
+    auto b      = make_list(8, 1.0, device);
     tz::foreach_lerp_(self_v, b, 0.5);
     check_list_scalar(self_v, 0.5f, 1e-4f);
 }
@@ -230,23 +226,23 @@ TEST(ForeachOps, Lerp) {
 // Reduction
 // =============================================================================
 
-TEST(ForeachOps, Norm) {
+TEST_P(ForeachOps, Norm) {
     // 4x4 tensor of 3.0 → L2 norm = sqrt(16 * 9) = sqrt(144) = 12.0
-    auto a = make_list(4, 3.0);
+    auto a = make_list(4, 3.0, device);
     auto norms = tz::foreach_norm(a, 2.0);
     ASSERT_EQ(norms.size(), 4u);
     for (const auto& n : norms) {
-        EXPECT_NEAR(n.template item<float>(), 12.0f, 1e-3f);
+        EXPECT_NEAR(n.cpu().template item<float>(), 12.0f, 1e-3f);
     }
 }
 
-TEST(ForeachOps, NormL1) {
+TEST_P(ForeachOps, NormL1) {
     // L1 norm of 4x4 tensor of 2.0 = 16 * 2.0 = 32.0
-    auto a = make_list(4, 2.0);
+    auto a = make_list(4, 2.0, device);
     auto norms = tz::foreach_norm(a, 1.0);
     ASSERT_EQ(norms.size(), 4u);
     for (const auto& n : norms) {
-        EXPECT_NEAR(n.template item<float>(), 32.0f, 1e-3f);
+        EXPECT_NEAR(n.cpu().template item<float>(), 32.0f, 1e-3f);
     }
 }
 
@@ -254,9 +250,9 @@ TEST(ForeachOps, NormL1) {
 // Error handling
 // =============================================================================
 
-TEST(ForeachOps, MismatchedSizesThrows) {
-    auto a = make_list(4, 1.0);
-    auto b = make_list(5, 2.0);
+TEST_P(ForeachOps, MismatchedSizesThrows) {
+    auto a = make_list(4, 1.0, device);
+    auto b = make_list(5, 2.0, device);
     EXPECT_THROW(tz::foreach_add(a, b), std::invalid_argument);
     EXPECT_THROW(tz::foreach_add_(a, b), std::invalid_argument);
 }
@@ -265,9 +261,9 @@ TEST(ForeachOps, MismatchedSizesThrows) {
 // Single-element lists (edge case)
 // =============================================================================
 
-TEST(ForeachOps, SingleTensorList) {
-    auto a = make_list(1, 3.0);
-    auto b = make_list(1, 4.0);
+TEST_P(ForeachOps, SingleTensorList) {
+    auto a = make_list(1, 3.0, device);
+    auto b = make_list(1, 4.0, device);
     auto c = tz::foreach_add(a, b);
     ASSERT_EQ(c.size(), 1u);
     EXPECT_NEAR(c[0].cpu().data<float>()[0], 7.0f, 1e-5f);
@@ -277,11 +273,11 @@ TEST(ForeachOps, SingleTensorList) {
 // Float64 dtype
 // =============================================================================
 
-TEST(ForeachOps, Float64Add) {
+TEST_P(ForeachOps, Float64Add) {
     std::vector<tz::Tensor> a, b;
     for (int i = 0; i < 4; ++i) {
-        a.push_back(tz::full({4, 4}, 1.0, tz::DType::Float64));
-        b.push_back(tz::full({4, 4}, 2.0, tz::DType::Float64));
+        a.push_back(tz::full({4, 4}, 1.0, tz::DType::Float64, device));
+        b.push_back(tz::full({4, 4}, 2.0, tz::DType::Float64, device));
     }
     auto c = tz::foreach_add(a, b);
     ASSERT_EQ(c.size(), 4u);
@@ -295,9 +291,9 @@ TEST(ForeachOps, Float64Add) {
 // Perf smoke test: 1000 small tensors, assert < 200ms wall time
 // =============================================================================
 
-TEST(ForeachOps, PerfManyTensors) {
-    auto a = make_list(1000, 1.0);
-    auto b = make_list(1000, 2.0);
+TEST_P(ForeachOps, PerfManyTensors) {
+    auto a = make_list(1000, 1.0, device);
+    auto b = make_list(1000, 2.0, device);
     auto t0 = std::chrono::high_resolution_clock::now();
     auto c = tz::foreach_add(a, b);
     auto t1 = std::chrono::high_resolution_clock::now();
@@ -307,3 +303,8 @@ TEST(ForeachOps, PerfManyTensors) {
     ASSERT_EQ(c.size(), 1000u);
     EXPECT_NEAR(c[0].cpu().data<float>()[0], 3.0f, 1e-5f);
 }
+
+// Fan every TEST_P above over all five backends. BackendTest::SetUp skips a
+// backend that is physically absent on the host; a present backend that does
+// not implement a given foreach op throws → the corresponding cell FAILS.
+INSTANTIATE_BACKEND_TESTS(ForeachOps);

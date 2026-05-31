@@ -11,7 +11,7 @@ target_link_libraries(test_training_loops PRIVATE
     GTest::gtest_main
 )
 
-tenzor_discover_tests(test_training_loops DISCOVERY_TIMEOUT 60 LABELS "integration" BACKENDS cpu)
+tenzor_discover_tests(test_training_loops DISCOVERY_TIMEOUT 60 LABELS "integration" BACKENDS multi)
 
 # Model persistence integration tests
 add_executable(test_model_persistence
@@ -61,7 +61,7 @@ target_link_libraries(test_attention_autograd PRIVATE
     GTest::gtest_main
 )
 
-tenzor_discover_tests(test_attention_autograd DISCOVERY_TIMEOUT 60 LABELS "integration" BACKENDS cpu)
+tenzor_discover_tests(test_attention_autograd DISCOVERY_TIMEOUT 60 LABELS "integration" BACKENDS multi)
 
 # Phase 13b — Per-backend Philox seed-determinism TEST_P harness.
 add_executable(test_attention_philox_multibackend
@@ -111,7 +111,7 @@ target_link_libraries(test_model_zoo PRIVATE
     GTest::gtest_main
 )
 
-tenzor_discover_tests(test_model_zoo DISCOVERY_TIMEOUT 60 LABELS "integration" BACKENDS cpu)
+tenzor_discover_tests(test_model_zoo DISCOVERY_TIMEOUT 60 LABELS "integration" BACKENDS multi)
 
 # Optimization integration tests
 add_executable(test_optimization
@@ -123,7 +123,7 @@ target_link_libraries(test_optimization PRIVATE
     GTest::gtest_main
 )
 
-tenzor_discover_tests(test_optimization DISCOVERY_TIMEOUT 60 LABELS "integration" BACKENDS cpu)
+tenzor_discover_tests(test_optimization DISCOVERY_TIMEOUT 60 LABELS "integration" BACKENDS multi)
 
 # DataParallel multi-GPU integration tests
 add_executable(test_data_parallel_integration
@@ -226,7 +226,7 @@ tenzor_discover_tests(test_program_export DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PR
 # Inf-G: audit-style quantization end-to-end tests (8 behaviour probes).
 add_executable(test_quantization_e2e test_quantization_e2e.cpp)
 target_link_libraries(test_quantization_e2e PRIVATE tenzor_core GTest::gtest_main)
-tenzor_discover_tests(test_quantization_e2e DISCOVERY_TIMEOUT 60 PROPERTIES TIMEOUT ${TENZOR_TEST_TIMEOUT} LABELS "integration;quantization" BACKENDS cpu)
+tenzor_discover_tests(test_quantization_e2e DISCOVERY_TIMEOUT 60 PROPERTIES TIMEOUT ${TENZOR_TEST_TIMEOUT} LABELS "integration;quantization" BACKENDS multi)
 
 # G.13: eager-equivalence parity across lazy / JIT / lite execution paths.
 # First cut of the audit's "every model bitwise-identical across paths" target —
@@ -236,4 +236,4 @@ tenzor_discover_tests(test_quantization_e2e DISCOVERY_TIMEOUT 60 PROPERTIES TIME
 # coverage in the lite exporter.
 add_executable(test_eager_parity test_eager_parity.cpp)
 target_link_libraries(test_eager_parity PRIVATE tenzor_core GTest::gtest_main)
-tenzor_discover_tests(test_eager_parity DISCOVERY_TIMEOUT 60 PROPERTIES TIMEOUT ${TENZOR_TEST_TIMEOUT} LABELS "integration;parity" BACKENDS cpu)
+tenzor_discover_tests(test_eager_parity DISCOVERY_TIMEOUT 60 PROPERTIES TIMEOUT ${TENZOR_TEST_TIMEOUT} LABELS "integration;parity" BACKENDS multi)

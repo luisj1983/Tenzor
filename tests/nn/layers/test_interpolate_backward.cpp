@@ -11,6 +11,7 @@
  */
 
 #include <gtest/gtest.h>
+#include "../../backend_test_fixture.hpp"
 #include "../../grad_flow_helpers.hpp"
 #include <tenzor/tenzor.hpp>
 #include <tenzor/nn/functional.hpp>
@@ -19,27 +20,21 @@
 
 using namespace tenzor;
 
-namespace {
-struct InitTenzorOnce : public ::testing::Environment {
-    void SetUp() override { tenzor::initialize(); }
-};
-::testing::Environment* const _g_init =
-    ::testing::AddGlobalTestEnvironment(new InitTenzorOnce);
-}  // namespace
+class InterpolateBackward : public ::tenzor::testing::BackendTest {};
 
-TEST(InterpolateBackward, BilinearForwardShape) {
-    auto input = Variable(randn({1, 2, 4, 4}, DType::Float32, Device::cpu()), true);
+TEST_P(InterpolateBackward, BilinearForwardShape) {
+    auto input = Variable(randn({1, 2, 4, 4}, DType::Float32, device), true);
     auto out = nn::functional::interpolate(input, {8, 8}, "bilinear", false);
     EXPECT_EQ(out.tensor().shape().size(), 4);
     EXPECT_EQ(out.tensor().shape()[2], 8);
     EXPECT_EQ(out.tensor().shape()[3], 8);
 }
 
-TEST(InterpolateBackward, BilinearGradFlows) {
+TEST_P(InterpolateBackward, BilinearGradFlows) {
     // Phase 7.1 — the previously-broken case. Before this phase, backward
     // through interpolate(bilinear) returned no gradient (Variable was
     // forced requires_grad=false). Now it must flow through to the input.
-    auto input = Variable(randn({1, 2, 4, 4}, DType::Float32, Device::cpu()), true);
+    auto input = Variable(randn({1, 2, 4, 4}, DType::Float32, device), true);
     auto out = nn::functional::interpolate(input, {8, 8}, "bilinear", false);
     EXPECT_TRUE(out.requires_grad())
         << "interpolate(bilinear) should produce a grad-tracking Variable now "
@@ -49,11 +44,11 @@ TEST(InterpolateBackward, BilinearGradFlows) {
     EXPECT_GRAD_FLOWS(input);
 }
 
-TEST(InterpolateBackward, BilinearGradMatchesUpsampleBilinear) {
+TEST_P(InterpolateBackward, BilinearGradMatchesUpsampleBilinear) {
     // The bilinear interpolate() now uses the same backward as nn::Upsample
     // (the canonical Bilinear upsampler). Identical inputs and target sizes
     // should produce numerically equivalent gradients on the input.
-    auto x = randn({1, 2, 3, 3}, DType::Float32, Device::cpu());
+    auto x = randn({1, 2, 3, 3}, DType::Float32, device);
 
     Variable a(x.clone(), true);
     auto out_a = nn::functional::interpolate(a, {6, 6}, "bilinear", false);
@@ -67,8 +62,8 @@ TEST(InterpolateBackward, BilinearGradMatchesUpsampleBilinear) {
 
     ASSERT_TRUE(a.has_grad());
     ASSERT_TRUE(b.has_grad());
-    auto ga = a.grad().value().to(DType::Float32).contiguous();
-    auto gb = b.grad().value().to(DType::Float32).contiguous();
+    auto ga = a.grad().value().cpu().to(DType::Float32).contiguous();
+    auto gb = b.grad().value().cpu().to(DType::Float32).contiguous();
     ASSERT_EQ(ga.numel(), gb.numel());
     auto* pa = ga.data<float>();
     auto* pb = gb.data<float>();
@@ -79,13 +74,15 @@ TEST(InterpolateBackward, BilinearGradMatchesUpsampleBilinear) {
     }
 }
 
-TEST(InterpolateBackward, NearestStillDetached) {
+TEST_P(InterpolateBackward, NearestStillDetached) {
     // Non-bilinear modes don't yet have a backward — they return a detached
     // Variable. Pin this expectation so the silent-detach path is explicit.
-    auto input = Variable(randn({1, 2, 4, 4}, DType::Float32, Device::cpu()), true);
+    auto input = Variable(randn({1, 2, 4, 4}, DType::Float32, device), true);
     auto out = nn::functional::interpolate(input, {8, 8}, "nearest", false);
     EXPECT_FALSE(out.requires_grad())
         << "interpolate(nearest) currently returns detached output (no "
            "backward yet). When the nearest-mode backward lands, this test "
            "should be flipped to expect grad-flow.";
 }
+
+INSTANTIATE_BACKEND_TESTS(InterpolateBackward);

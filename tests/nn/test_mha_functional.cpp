@@ -7,14 +7,16 @@
 #include <tenzor/tenzor.hpp>
 #include <tenzor/nn/functional.hpp>
 #include <tenzor/ops/creation.hpp>
+#include "../backend_test_fixture.hpp"
 
 namespace F = tenzor::nn::functional;
 using namespace tenzor;
 
-class MHAFunctionalTest : public ::testing::Test {
+class MHAFunctionalTest : public ::tenzor::testing::BackendTest {
 protected:
     void SetUp() override {
-        tenzor::initialize();
+        ::tenzor::testing::BackendTest::SetUp();
+        if (::testing::Test::IsSkipped()) return;
     }
 
     // Helpers for common dimensions
@@ -37,10 +39,10 @@ protected:
 
     Projections make_projections() {
         return {
-            rand({3 * embed_dim, embed_dim}, DType::Float32, Device::cpu()),
-            zeros({3 * embed_dim}, DType::Float32, Device::cpu()),
-            rand({embed_dim, embed_dim}, DType::Float32, Device::cpu()),
-            zeros({embed_dim}, DType::Float32, Device::cpu()),
+            rand({3 * embed_dim, embed_dim}, DType::Float32, device),
+            zeros({3 * embed_dim}, DType::Float32, device),
+            rand({embed_dim, embed_dim}, DType::Float32, device),
+            zeros({embed_dim}, DType::Float32, device),
         };
     }
 };
@@ -49,10 +51,10 @@ protected:
 // Basic forward pass
 // ============================================================================
 
-TEST_F(MHAFunctionalTest, BasicForwardShape) {
-    auto query = rand({batch, seq_len, embed_dim}, DType::Float32, Device::cpu());
-    auto key   = rand({batch, seq_len, embed_dim}, DType::Float32, Device::cpu());
-    auto value = rand({batch, seq_len, embed_dim}, DType::Float32, Device::cpu());
+TEST_P(MHAFunctionalTest, BasicForwardShape) {
+    auto query = rand({batch, seq_len, embed_dim}, DType::Float32, device);
+    auto key   = rand({batch, seq_len, embed_dim}, DType::Float32, device);
+    auto value = rand({batch, seq_len, embed_dim}, DType::Float32, device);
     auto proj  = make_projections();
 
     auto [output, attn_weights] = F::multi_head_attention_forward(
@@ -70,11 +72,11 @@ TEST_F(MHAFunctionalTest, BasicForwardShape) {
 // Different seq lengths for Q and K/V
 // ============================================================================
 
-TEST_F(MHAFunctionalTest, DifferentKVSeqLen) {
+TEST_P(MHAFunctionalTest, DifferentKVSeqLen) {
     int64_t kv_seq_len = 6;
-    auto query = rand({batch, seq_len, embed_dim}, DType::Float32, Device::cpu());
-    auto key   = rand({batch, kv_seq_len, embed_dim}, DType::Float32, Device::cpu());
-    auto value = rand({batch, kv_seq_len, embed_dim}, DType::Float32, Device::cpu());
+    auto query = rand({batch, seq_len, embed_dim}, DType::Float32, device);
+    auto key   = rand({batch, kv_seq_len, embed_dim}, DType::Float32, device);
+    auto value = rand({batch, kv_seq_len, embed_dim}, DType::Float32, device);
     auto proj  = make_projections();
 
     auto [output, attn_weights] = F::multi_head_attention_forward(
@@ -92,14 +94,14 @@ TEST_F(MHAFunctionalTest, DifferentKVSeqLen) {
 // With attention mask
 // ============================================================================
 
-TEST_F(MHAFunctionalTest, WithAttentionMask) {
-    auto query = rand({batch, seq_len, embed_dim}, DType::Float32, Device::cpu());
-    auto key   = rand({batch, seq_len, embed_dim}, DType::Float32, Device::cpu());
-    auto value = rand({batch, seq_len, embed_dim}, DType::Float32, Device::cpu());
+TEST_P(MHAFunctionalTest, WithAttentionMask) {
+    auto query = rand({batch, seq_len, embed_dim}, DType::Float32, device);
+    auto key   = rand({batch, seq_len, embed_dim}, DType::Float32, device);
+    auto value = rand({batch, seq_len, embed_dim}, DType::Float32, device);
     auto proj  = make_projections();
 
     // Additive mask: (seq_len, seq_len) — 0 means attend, -inf means mask
-    auto mask = zeros({seq_len, seq_len}, DType::Float32, Device::cpu());
+    auto mask = zeros({seq_len, seq_len}, DType::Float32, device);
 
     auto [output, attn_weights] = F::multi_head_attention_forward(
         query, key, value, num_heads,
@@ -116,10 +118,10 @@ TEST_F(MHAFunctionalTest, WithAttentionMask) {
 // need_weights flag
 // ============================================================================
 
-TEST_F(MHAFunctionalTest, NeedWeightsTrue) {
-    auto query = rand({batch, seq_len, embed_dim}, DType::Float32, Device::cpu());
-    auto key   = rand({batch, seq_len, embed_dim}, DType::Float32, Device::cpu());
-    auto value = rand({batch, seq_len, embed_dim}, DType::Float32, Device::cpu());
+TEST_P(MHAFunctionalTest, NeedWeightsTrue) {
+    auto query = rand({batch, seq_len, embed_dim}, DType::Float32, device);
+    auto key   = rand({batch, seq_len, embed_dim}, DType::Float32, device);
+    auto value = rand({batch, seq_len, embed_dim}, DType::Float32, device);
     auto proj  = make_projections();
 
     auto [output, attn_weights] = F::multi_head_attention_forward(
@@ -139,7 +141,8 @@ TEST_F(MHAFunctionalTest, NeedWeightsTrue) {
     EXPECT_EQ(attn_weights.shape()[3], seq_len);
 
     // Attention weights should sum to ~1 along last dim (softmax output)
-    auto w_cpu = attn_weights.data<float>();
+    auto attn_weights_cpu = attn_weights.cpu();
+    auto w_cpu = attn_weights_cpu.data<float>();
     int64_t head_dim_k = seq_len;
     for (int64_t b = 0; b < batch; ++b) {
         for (int64_t h = 0; h < num_heads; ++h) {
@@ -157,10 +160,10 @@ TEST_F(MHAFunctionalTest, NeedWeightsTrue) {
     }
 }
 
-TEST_F(MHAFunctionalTest, NeedWeightsFalse) {
-    auto query = rand({batch, seq_len, embed_dim}, DType::Float32, Device::cpu());
-    auto key   = rand({batch, seq_len, embed_dim}, DType::Float32, Device::cpu());
-    auto value = rand({batch, seq_len, embed_dim}, DType::Float32, Device::cpu());
+TEST_P(MHAFunctionalTest, NeedWeightsFalse) {
+    auto query = rand({batch, seq_len, embed_dim}, DType::Float32, device);
+    auto key   = rand({batch, seq_len, embed_dim}, DType::Float32, device);
+    auto value = rand({batch, seq_len, embed_dim}, DType::Float32, device);
     auto proj  = make_projections();
 
     auto [output, attn_weights] = F::multi_head_attention_forward(
@@ -185,10 +188,10 @@ TEST_F(MHAFunctionalTest, NeedWeightsFalse) {
 // Output values are finite
 // ============================================================================
 
-TEST_F(MHAFunctionalTest, OutputValuesFinite) {
-    auto query = rand({batch, seq_len, embed_dim}, DType::Float32, Device::cpu());
-    auto key   = rand({batch, seq_len, embed_dim}, DType::Float32, Device::cpu());
-    auto value = rand({batch, seq_len, embed_dim}, DType::Float32, Device::cpu());
+TEST_P(MHAFunctionalTest, OutputValuesFinite) {
+    auto query = rand({batch, seq_len, embed_dim}, DType::Float32, device);
+    auto key   = rand({batch, seq_len, embed_dim}, DType::Float32, device);
+    auto value = rand({batch, seq_len, embed_dim}, DType::Float32, device);
     auto proj  = make_projections();
 
     auto [output, _] = F::multi_head_attention_forward(
@@ -196,8 +199,11 @@ TEST_F(MHAFunctionalTest, OutputValuesFinite) {
         proj.in_proj_weight, proj.in_proj_bias,
         proj.out_proj_weight, proj.out_proj_bias);
 
-    auto* d = output.data<float>();
-    for (int64_t i = 0; i < output.numel(); ++i) {
+    auto output_cpu = output.cpu();
+    auto* d = output_cpu.data<float>();
+    for (int64_t i = 0; i < output_cpu.numel(); ++i) {
         EXPECT_TRUE(std::isfinite(d[i])) << "Non-finite value at index " << i;
     }
 }
+
+INSTANTIATE_BACKEND_TESTS(MHAFunctionalTest);

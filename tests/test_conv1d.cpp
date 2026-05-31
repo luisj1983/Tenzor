@@ -1,37 +1,29 @@
 #include <gtest/gtest.h>
 #include <tenzor/tenzor.hpp>
 #include <cmath>
+#include "backend_test_fixture.hpp"
 
 using namespace tenzor;
 
-// Global test environment that initializes Tenzor before tests
-class Conv1dTestEnvironment : public ::testing::Environment {
-public:
-    void SetUp() override {
-        tenzor::initialize();
-    }
-};
-
-// Register the environment
-static ::testing::Environment* const conv1d_env =
-    ::testing::AddGlobalTestEnvironment(new Conv1dTestEnvironment);
-
-class Conv1dTest : public ::testing::Test {
+class Conv1dTest : public ::tenzor::testing::BackendTest {
 protected:
     void SetUp() override {
+        ::tenzor::testing::BackendTest::SetUp();
+        if (::testing::Test::IsSkipped()) return;
         // Set random seed for reproducibility
         std::srand(42);
     }
 };
 
 // Test basic Conv1d forward pass with simple values
-TEST_F(Conv1dTest, BasicForward) {
+TEST_P(Conv1dTest, BasicForward) {
     // Create simple 1D input: [1, 2, 5] (batch=1, channels=2, length=5)
-    auto input_tensor = randn({1, 2, 5});
+    auto input_tensor = randn({1, 2, 5}, DType::Float32, device);
     auto input = Variable(input_tensor, true);
 
     // Create Conv1d layer: 2 input channels, 3 output channels, kernel size 3
     auto conv = nn::Conv1d(2, 3, 3, 1, 0, 1, 1, false); // no bias for simplicity
+    conv.to(device);
 
     // Forward pass
     auto output = conv.forward(input);
@@ -46,11 +38,12 @@ TEST_F(Conv1dTest, BasicForward) {
 }
 
 // Test Conv1d with padding
-TEST_F(Conv1dTest, WithPadding) {
-    auto input_tensor = randn({2, 4, 10}); // batch=2, channels=4, length=10
+TEST_P(Conv1dTest, WithPadding) {
+    auto input_tensor = randn({2, 4, 10}, DType::Float32, device); // batch=2, channels=4, length=10
     auto input = Variable(input_tensor, true);
 
     auto conv = nn::Conv1d(4, 8, 3, 1, 1, 1, 1, true); // padding=1
+    conv.to(device);
 
     auto output = conv.forward(input);
 
@@ -63,11 +56,12 @@ TEST_F(Conv1dTest, WithPadding) {
 }
 
 // Test Conv1d with stride
-TEST_F(Conv1dTest, WithStride) {
-    auto input_tensor = randn({1, 3, 16}); // batch=1, channels=3, length=16
+TEST_P(Conv1dTest, WithStride) {
+    auto input_tensor = randn({1, 3, 16}, DType::Float32, device); // batch=1, channels=3, length=16
     auto input = Variable(input_tensor, true);
 
     auto conv = nn::Conv1d(3, 6, 3, 2, 0, 1, 1, false); // stride=2
+    conv.to(device);
 
     auto output = conv.forward(input);
 
@@ -80,11 +74,12 @@ TEST_F(Conv1dTest, WithStride) {
 }
 
 // Test Conv1d with dilation
-TEST_F(Conv1dTest, WithDilation) {
-    auto input_tensor = randn({1, 2, 20}); // batch=1, channels=2, length=20
+TEST_P(Conv1dTest, WithDilation) {
+    auto input_tensor = randn({1, 2, 20}, DType::Float32, device); // batch=1, channels=2, length=20
     auto input = Variable(input_tensor, true);
 
     auto conv = nn::Conv1d(2, 4, 3, 1, 0, 2, 1, false); // dilation=2
+    conv.to(device);
 
     auto output = conv.forward(input);
 
@@ -97,11 +92,12 @@ TEST_F(Conv1dTest, WithDilation) {
 }
 
 // Test Conv1d with groups
-TEST_F(Conv1dTest, WithGroups) {
-    auto input_tensor = randn({2, 6, 12}); // batch=2, channels=6, length=12
+TEST_P(Conv1dTest, WithGroups) {
+    auto input_tensor = randn({2, 6, 12}, DType::Float32, device); // batch=2, channels=6, length=12
     auto input = Variable(input_tensor, true);
 
     auto conv = nn::Conv1d(6, 12, 3, 1, 1, 1, 2, true); // groups=2
+    conv.to(device);
 
     auto output = conv.forward(input);
 
@@ -114,18 +110,19 @@ TEST_F(Conv1dTest, WithGroups) {
 }
 
 // Test Conv1d backward pass (gradient computation)
-TEST_F(Conv1dTest, BackwardPass) {
-    auto input_tensor = randn({2, 4, 10}); // batch=2, channels=4, length=10
+TEST_P(Conv1dTest, BackwardPass) {
+    auto input_tensor = randn({2, 4, 10}, DType::Float32, device); // batch=2, channels=4, length=10
     auto input = Variable(input_tensor, true);
 
     auto conv = nn::Conv1d(4, 8, 3, 1, 1, 1, 1, true);
+    conv.to(device);
 
     auto output = conv.forward(input);
 
     // Create gradient for output
     auto out_shape = output.shape();
     std::vector<int64_t> out_shape_vec(out_shape.begin(), out_shape.end());
-    auto grad_output = ones(out_shape_vec);
+    auto grad_output = ones(out_shape_vec, DType::Float32, device);
 
     // Backward pass
     output.backward(grad_output);
@@ -142,9 +139,10 @@ TEST_F(Conv1dTest, BackwardPass) {
     EXPECT_EQ(grad_shape[2], 10); // length
 
     // Check gradient values are not all zeros
-    auto grad_data = input_grad.data<float>();
+    auto input_grad_cpu = input_grad.cpu();
+    auto grad_data = input_grad_cpu.data<float>();
     bool has_nonzero = false;
-    for (int64_t i = 0; i < input_grad.numel(); ++i) {
+    for (int64_t i = 0; i < input_grad_cpu.numel(); ++i) {
         if (std::abs(grad_data[i]) > 1e-6f) {
             has_nonzero = true;
             break;
@@ -154,11 +152,12 @@ TEST_F(Conv1dTest, BackwardPass) {
 }
 
 // Test Conv1d with bias
-TEST_F(Conv1dTest, WithBias) {
-    auto input_tensor = randn({1, 3, 8});
+TEST_P(Conv1dTest, WithBias) {
+    auto input_tensor = randn({1, 3, 8}, DType::Float32, device);
     auto input = Variable(input_tensor, false);
 
     auto conv = nn::Conv1d(3, 5, 3, 1, 1, 1, 1, true); // with bias
+    conv.to(device);
 
     auto output = conv.forward(input);
 
@@ -173,12 +172,13 @@ TEST_F(Conv1dTest, WithBias) {
 }
 
 // Test Conv1d parameter shapes
-TEST_F(Conv1dTest, ParameterShapes) {
+TEST_P(Conv1dTest, ParameterShapes) {
     int64_t in_channels = 4;
     int64_t out_channels = 8;
     int64_t kernel_size = 5;
 
     auto conv = nn::Conv1d(in_channels, out_channels, kernel_size, 1, 0, 1, 1, true);
+    conv.to(device);
 
     auto params = conv.parameters();
 
@@ -199,8 +199,9 @@ TEST_F(Conv1dTest, ParameterShapes) {
 }
 
 // Test Conv1d without bias
-TEST_F(Conv1dTest, WithoutBias) {
+TEST_P(Conv1dTest, WithoutBias) {
     auto conv = nn::Conv1d(3, 6, 3, 1, 0, 1, 1, false); // bias=false
+    conv.to(device);
 
     auto params = conv.parameters();
 
@@ -209,28 +210,30 @@ TEST_F(Conv1dTest, WithoutBias) {
 }
 
 // Test Conv1d input validation
-TEST_F(Conv1dTest, InputValidation) {
+TEST_P(Conv1dTest, InputValidation) {
     auto conv = nn::Conv1d(4, 8, 3, 1, 0, 1, 1, false);
+    conv.to(device);
 
     // Test with wrong number of dimensions (should be 3D)
-    auto wrong_input_2d = Variable(randn({4, 10}), false);
+    auto wrong_input_2d = Variable(randn({4, 10}, DType::Float32, device), false);
     EXPECT_THROW(conv.forward(wrong_input_2d), std::invalid_argument);
 
-    auto wrong_input_4d = Variable(randn({1, 4, 10, 10}), false);
+    auto wrong_input_4d = Variable(randn({1, 4, 10, 10}, DType::Float32, device), false);
     EXPECT_THROW(conv.forward(wrong_input_4d), std::invalid_argument);
 
     // Test with wrong number of input channels
-    auto wrong_channels = Variable(randn({1, 3, 10}), false); // should be 4 channels
+    auto wrong_channels = Variable(randn({1, 3, 10}, DType::Float32, device), false); // should be 4 channels
     EXPECT_THROW(conv.forward(wrong_channels), std::invalid_argument);
 }
 
 // Test Conv1d batch processing
-TEST_F(Conv1dTest, BatchProcessing) {
+TEST_P(Conv1dTest, BatchProcessing) {
     auto conv = nn::Conv1d(3, 6, 3, 1, 1, 1, 1, true);
+    conv.to(device);
 
     // Test with different batch sizes
     for (int64_t batch_size : {1, 2, 4, 8}) {
-        auto input = Variable(randn({batch_size, 3, 10}), false);
+        auto input = Variable(randn({batch_size, 3, 10}, DType::Float32, device), false);
         auto output = conv.forward(input);
 
         auto output_shape = output.shape();
@@ -241,27 +244,30 @@ TEST_F(Conv1dTest, BatchProcessing) {
 }
 
 // Test Conv1d parameter count
-TEST_F(Conv1dTest, ParameterCount) {
+TEST_P(Conv1dTest, ParameterCount) {
     auto conv_with_bias = nn::Conv1d(3, 6, 3, 1, 0, 1, 1, true);
+    conv_with_bias.to(device);
     auto params_with = conv_with_bias.parameters();
     EXPECT_EQ(params_with.size(), 2);  // weight and bias
 
     auto conv_no_bias = nn::Conv1d(3, 6, 3, 1, 0, 1, 1, false);
+    conv_no_bias.to(device);
     auto params_without = conv_no_bias.parameters();
     EXPECT_EQ(params_without.size(), 1);  // only weight
 }
 
 // Test Conv1d gradient computation for weight
-TEST_F(Conv1dTest, WeightGradient) {
-    auto input_tensor = randn({2, 3, 8});
+TEST_P(Conv1dTest, WeightGradient) {
+    auto input_tensor = randn({2, 3, 8}, DType::Float32, device);
     auto input = Variable(input_tensor, true);
 
     auto conv = nn::Conv1d(3, 5, 3, 1, 0, 1, 1, false);
+    conv.to(device);
 
     auto output = conv.forward(input);
     auto out_shape = output.shape();
     std::vector<int64_t> out_shape_vec(out_shape.begin(), out_shape.end());
-    auto grad_output = ones(out_shape_vec);
+    auto grad_output = ones(out_shape_vec, DType::Float32, device);
     output.backward(grad_output);
 
     // Check weight gradient
@@ -277,16 +283,17 @@ TEST_F(Conv1dTest, WeightGradient) {
 }
 
 // Test Conv1d with sequence data (typical NLP use case)
-TEST_F(Conv1dTest, SequenceData) {
+TEST_P(Conv1dTest, SequenceData) {
     // Simulate word embeddings: batch=4, embedding_dim=128, sequence_length=50
     int64_t batch_size = 4;
     int64_t embedding_dim = 128;
     int64_t sequence_length = 50;
 
-    auto input = Variable(randn({batch_size, embedding_dim, sequence_length}), false);
+    auto input = Variable(randn({batch_size, embedding_dim, sequence_length}, DType::Float32, device), false);
 
     // Apply 1D convolution (common in text classification)
     auto conv = nn::Conv1d(embedding_dim, 256, 3, 1, 1, 1, 1, true);
+    conv.to(device);
     auto output = conv.forward(input);
 
     auto output_shape = output.shape();
@@ -295,7 +302,4 @@ TEST_F(Conv1dTest, SequenceData) {
     EXPECT_EQ(output_shape[2], sequence_length); // same length due to padding=1
 }
 
-int main(int argc, char** argv) {
-    ::testing::InitGoogleTest(&argc, argv);
-    return RUN_ALL_TESTS();
-}
+INSTANTIATE_BACKEND_TESTS(Conv1dTest);

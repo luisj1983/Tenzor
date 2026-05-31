@@ -6,20 +6,24 @@
 #include <gtest/gtest.h>
 #include <random>
 #include <tenzor/tenzor.hpp>
+#include "../backend_test_fixture.hpp"
 #include "../../include/tenzor/models/mask_rcnn.hpp"
 
 using namespace tenzor;
 using namespace tenzor::models;
 
-class MaskRCNNTest : public ::testing::Test {
+class MaskRCNNTest : public ::tenzor::testing::BackendTest {
 protected:
-    void SetUp() override { device_ = Device::cpu(); }
-    Device device_;
+    void SetUp() override {
+        ::tenzor::testing::BackendTest::SetUp();
+        if (::testing::Test::IsSkipped()) return;
+    }
 };
 
-TEST_F(MaskRCNNTest, MaskRCNNResNet50ForwardShape) {
+TEST_P(MaskRCNNTest, MaskRCNNResNet50ForwardShape) {
     auto model = mask_rcnn_resnet50_fpn(91, false);
-    Variable images(Tensor({2, 3, 800, 800}, DType::Float32, device_), true);
+    model->to(device);
+    Variable images(randn({2, 3, 800, 800}, DType::Float32, device), true);
 
     model->eval();
     auto [boxes, labels, scores, masks] = model->forward_test(images);
@@ -31,15 +35,16 @@ TEST_F(MaskRCNNTest, MaskRCNNResNet50ForwardShape) {
     EXPECT_GT(masks.shape()[0], 0);
 }
 
-TEST_F(MaskRCNNTest, MaskRCNNResNet50GradientFlow) {
+TEST_P(MaskRCNNTest, MaskRCNNResNet50GradientFlow) {
     auto model = mask_rcnn_resnet50_fpn(91, false);
+    model->to(device);
     model->train();
 
-    Variable images(Tensor({1, 3, 800, 800}, DType::Float32, device_), true);
+    Variable images(randn({1, 3, 800, 800}, DType::Float32, device), true);
 
-    // Create and initialize dummy ground truth
-    Tensor gt_boxes({1, 5, 4}, DType::Float32, device_);
-    auto boxes_data = gt_boxes.data<float>();
+    // Create and initialize dummy ground truth (host-build on CPU, then to device)
+    Tensor gt_boxes_cpu({1, 5, 4}, DType::Float32, Device::cpu());
+    auto boxes_data = gt_boxes_cpu.data<float>();
     // Initialize 5 boxes at different locations [batch, num_boxes, 4]
     // Box 1
     boxes_data[0] = 10.0f;  boxes_data[1] = 10.0f;  boxes_data[2] = 100.0f; boxes_data[3] = 100.0f;
@@ -51,22 +56,25 @@ TEST_F(MaskRCNNTest, MaskRCNNResNet50GradientFlow) {
     boxes_data[12] = 450.0f; boxes_data[13] = 450.0f; boxes_data[14] = 550.0f; boxes_data[15] = 550.0f;
     // Box 5
     boxes_data[16] = 600.0f; boxes_data[17] = 600.0f; boxes_data[18] = 700.0f; boxes_data[19] = 700.0f;
+    Tensor gt_boxes = gt_boxes_cpu.to(device);
 
-    Tensor gt_labels({1, 5}, DType::Int64, device_);
-    auto labels_data = gt_labels.data<int64_t>();
+    Tensor gt_labels_cpu({1, 5}, DType::Int64, Device::cpu());
+    auto labels_data = gt_labels_cpu.data<int64_t>();
     // Initialize with valid class labels
     labels_data[0] = 1;
     labels_data[1] = 2;
     labels_data[2] = 3;
     labels_data[3] = 4;
     labels_data[4] = 5;
+    Tensor gt_labels = gt_labels_cpu.to(device);
 
-    Tensor gt_masks({1, 5, 800, 800}, DType::Float32, device_);
+    Tensor gt_masks_cpu({1, 5, 800, 800}, DType::Float32, Device::cpu());
     // Initialize masks with zeros (background) - this is memory-intensive but necessary
-    auto masks_data = gt_masks.data<float>();
-    std::fill(masks_data, masks_data + gt_masks.numel(), 0.0f);
+    auto masks_data = gt_masks_cpu.data<float>();
+    std::fill(masks_data, masks_data + gt_masks_cpu.numel(), 0.0f);
     // Optionally add some 1s in the mask regions corresponding to the boxes
     // For simplicity, we'll just leave as zeros which represents valid (empty) masks
+    Tensor gt_masks = gt_masks_cpu.to(device);
 
     auto [rpn_cls_loss, rpn_box_loss, roi_cls_loss, roi_box_loss, mask_loss] =
         model->forward_train(images, gt_boxes, gt_labels, gt_masks);
@@ -75,9 +83,10 @@ TEST_F(MaskRCNNTest, MaskRCNNResNet50GradientFlow) {
     EXPECT_GT(params.size(), 0);
 }
 
-TEST_F(MaskRCNNTest, MaskRCNNResNet101ForwardShape) {
+TEST_P(MaskRCNNTest, MaskRCNNResNet101ForwardShape) {
     auto model = mask_rcnn_resnet101_fpn(91, false);
-    Variable images(Tensor({1, 3, 800, 800}, DType::Float32, device_), true);
+    model->to(device);
+    Variable images(randn({1, 3, 800, 800}, DType::Float32, device), true);
 
     model->eval();
     auto [boxes, labels, scores, masks] = model->forward_test(images);
@@ -86,22 +95,24 @@ TEST_F(MaskRCNNTest, MaskRCNNResNet101ForwardShape) {
     EXPECT_GT(masks.shape()[0], 0);
 }
 
-TEST_F(MaskRCNNTest, MaskRCNNDifferentImageSizes) {
+TEST_P(MaskRCNNTest, MaskRCNNDifferentImageSizes) {
     auto model = mask_rcnn_resnet50_fpn(91, false);
+    model->to(device);
     model->eval();
 
-    Variable images_600(Tensor({1, 3, 600, 600}, DType::Float32, device_), true);
+    Variable images_600(randn({1, 3, 600, 600}, DType::Float32, device), true);
     auto [boxes_600, labels_600, scores_600, masks_600] = model->forward_test(images_600);
     EXPECT_GT(boxes_600.shape()[0], 0);
 
-    Variable images_1024(Tensor({1, 3, 1024, 1024}, DType::Float32, device_), true);
+    Variable images_1024(randn({1, 3, 1024, 1024}, DType::Float32, device), true);
     auto [boxes_1024, labels_1024, scores_1024, masks_1024] = model->forward_test(images_1024);
     EXPECT_GT(boxes_1024.shape()[0], 0);
 }
 
-TEST_F(MaskRCNNTest, MaskRCNNCustomClasses) {
+TEST_P(MaskRCNNTest, MaskRCNNCustomClasses) {
     auto model = mask_rcnn_resnet50_fpn(80, false);  // COCO classes
-    Variable images(Tensor({1, 3, 800, 800}, DType::Float32, device_), true);
+    model->to(device);
+    Variable images(randn({1, 3, 800, 800}, DType::Float32, device), true);
 
     model->eval();
     auto [boxes, labels, scores, masks] = model->forward_test(images);
@@ -112,9 +123,10 @@ TEST_F(MaskRCNNTest, MaskRCNNCustomClasses) {
 // G7 regression: forward_impl must pack boxes+scores+labels into (N, 6)
 // instead of returning just boxes. Old behavior silently dropped labels,
 // scores, AND masks; new packing follows the YOLOv5 convention.
-TEST_F(MaskRCNNTest, ForwardImplPacks6Columns_G7) {
+TEST_P(MaskRCNNTest, ForwardImplPacks6Columns_G7) {
     auto model = mask_rcnn_resnet50_fpn(91, false);
-    Variable images(Tensor({1, 3, 800, 800}, DType::Float32, device_), false);
+    model->to(device);
+    Variable images(randn({1, 3, 800, 800}, DType::Float32, device), false);
     model->eval();
 
     Variable output = model->forward(images);
@@ -126,9 +138,10 @@ TEST_F(MaskRCNNTest, ForwardImplPacks6Columns_G7) {
 
 // G7: detect() must return all 4 outputs including masks (which forward()
 // drops because Module::forward returns a single Variable).
-TEST_F(MaskRCNNTest, DetectReturnsAllOutputs_G7) {
+TEST_P(MaskRCNNTest, DetectReturnsAllOutputs_G7) {
     auto model = mask_rcnn_resnet50_fpn(91, false);
-    Variable images(Tensor({1, 3, 800, 800}, DType::Float32, device_), false);
+    model->to(device);
+    Variable images(randn({1, 3, 800, 800}, DType::Float32, device), false);
     model->eval();
 
     auto det = model->detect(images);
@@ -146,9 +159,10 @@ TEST_F(MaskRCNNTest, DetectReturnsAllOutputs_G7) {
 
 // G7: training-mode forward_impl must throw with a helpful message
 // (use forward_train instead).
-TEST_F(MaskRCNNTest, ForwardImplTrainingThrows_G7) {
+TEST_P(MaskRCNNTest, ForwardImplTrainingThrows_G7) {
     auto model = mask_rcnn_resnet50_fpn(91, false);
-    Variable images(Tensor({1, 3, 800, 800}, DType::Float32, device_), false);
+    model->to(device);
+    Variable images(randn({1, 3, 800, 800}, DType::Float32, device), false);
     model->train();
     EXPECT_THROW(model->forward(images), std::runtime_error);
 }
@@ -156,18 +170,19 @@ TEST_F(MaskRCNNTest, ForwardImplTrainingThrows_G7) {
 // G6 regression: FPN encoder must produce a stride-16 feature map (P4)
 // with 256 channels. Catches a regression to the old single 2048→256 1×1
 // projection of C5 which would have been stride 32.
-TEST_F(MaskRCNNTest, FPNEncoderReturnsP4Stride16_G6) {
+TEST_P(MaskRCNNTest, FPNEncoderReturnsP4Stride16_G6) {
     auto model = mask_rcnn_resnet50_fpn(91, false);
+    model->to(device);
     model->eval();
 
     // 800x800 input → P4 is 50x50 (stride 16). Old C5 projection would be
     // 25x25 (stride 32).
-    Tensor img_t({1, 3, 800, 800}, DType::Float32, device_);
-    auto* p = img_t.data<float>();
+    Tensor img_cpu({1, 3, 800, 800}, DType::Float32, Device::cpu());
+    auto* p = img_cpu.data<float>();
     std::mt19937 rng(0xFEEDFACE);
     std::uniform_real_distribution<float> dist(-1.0f, 1.0f);
-    for (int64_t i = 0; i < img_t.numel(); ++i) p[i] = dist(rng);
-    Variable images(img_t, false);
+    for (int64_t i = 0; i < img_cpu.numel(); ++i) p[i] = dist(rng);
+    Variable images(img_cpu.to(device), false);
 
     // We can't call extract_features directly (it's private), but we can
     // run generate_proposals which depends on the feature shape.
@@ -184,15 +199,16 @@ TEST_F(MaskRCNNTest, FPNEncoderReturnsP4Stride16_G6) {
 
 // G5 regression: select_training_samples must do real IoU-based pos/neg
 // sampling (not just return all proposals unchanged).
-TEST_F(MaskRCNNTest, SelectTrainingSamplesIoUSampling_G5) {
+TEST_P(MaskRCNNTest, SelectTrainingSamplesIoUSampling_G5) {
     auto model = mask_rcnn_resnet50_fpn(91, false);
+    model->to(device);
     model->train();
 
     // Build a fake set of proposals: 1000 random boxes inside a 512x512 image,
     // all assigned to batch 0. Layout: (batch_idx, x1, y1, x2, y2).
     const int64_t N = 1000;
-    Tensor proposals({N, 5}, DType::Float32, device_);
-    auto* pp = proposals.data<float>();
+    Tensor proposals_cpu({N, 5}, DType::Float32, Device::cpu());
+    auto* pp = proposals_cpu.data<float>();
     std::mt19937 rng(0x12345);
     std::uniform_real_distribution<float> dx(0.0f, 480.0f);  // x1 in [0, 480)
     std::uniform_real_distribution<float> dw(8.0f, 32.0f);   // box w/h in [8, 32)
@@ -205,17 +221,20 @@ TEST_F(MaskRCNNTest, SelectTrainingSamplesIoUSampling_G5) {
         pp[r * 5 + 3] = x1 + w;
         pp[r * 5 + 4] = y1 + h;
     }
+    Tensor proposals = proposals_cpu.to(device);
 
     // 3 GT boxes well-separated so most random proposals are negatives.
-    Tensor gt_boxes({1, 3, 4}, DType::Float32, device_);
-    auto* gp = gt_boxes.data<float>();
+    Tensor gt_boxes_cpu({1, 3, 4}, DType::Float32, Device::cpu());
+    auto* gp = gt_boxes_cpu.data<float>();
     gp[0] = 50.0f;  gp[1] = 50.0f;  gp[2] = 90.0f;  gp[3] = 90.0f;
     gp[4] = 200.0f; gp[5] = 200.0f; gp[6] = 240.0f; gp[7] = 240.0f;
     gp[8] = 400.0f; gp[9] = 400.0f; gp[10]= 440.0f; gp[11]= 440.0f;
+    Tensor gt_boxes = gt_boxes_cpu.to(device);
 
-    Tensor gt_labels({1, 3}, DType::Int64, device_);
-    auto* lp = gt_labels.data<int64_t>();
+    Tensor gt_labels_cpu({1, 3}, DType::Int64, Device::cpu());
+    auto* lp = gt_labels_cpu.data<int64_t>();
     lp[0] = 1; lp[1] = 2; lp[2] = 3;
+    Tensor gt_labels = gt_labels_cpu.to(device);
 
     Tensor sampled = model->select_training_samples(proposals, gt_boxes, gt_labels);
 
@@ -231,20 +250,22 @@ TEST_F(MaskRCNNTest, SelectTrainingSamplesIoUSampling_G5) {
 }
 
 // G5 regression: zero GT boxes path should sample only negatives without throwing.
-TEST_F(MaskRCNNTest, SelectTrainingSamplesNoGT_G5) {
+TEST_P(MaskRCNNTest, SelectTrainingSamplesNoGT_G5) {
     auto model = mask_rcnn_resnet50_fpn(91, false);
+    model->to(device);
     model->train();
 
     const int64_t N = 200;
-    Tensor proposals({N, 5}, DType::Float32, device_);
-    auto* pp = proposals.data<float>();
+    Tensor proposals_cpu({N, 5}, DType::Float32, Device::cpu());
+    auto* pp = proposals_cpu.data<float>();
     for (int64_t r = 0; r < N; ++r) {
         pp[r * 5 + 0] = 0.0f;
         pp[r * 5 + 1] = 0.0f;  pp[r * 5 + 2] = 0.0f;
         pp[r * 5 + 3] = 10.0f; pp[r * 5 + 4] = 10.0f;
     }
-    Tensor gt_boxes({1, 0, 4}, DType::Float32, device_);
-    Tensor gt_labels({1, 0}, DType::Int64, device_);
+    Tensor proposals = proposals_cpu.to(device);
+    Tensor gt_boxes = Tensor({1, 0, 4}, DType::Float32, Device::cpu()).to(device);
+    Tensor gt_labels = Tensor({1, 0}, DType::Int64, Device::cpu()).to(device);
 
     Tensor sampled = model->select_training_samples(proposals, gt_boxes, gt_labels);
     EXPECT_LE(sampled.shape()[0], 512);
@@ -255,16 +276,17 @@ TEST_F(MaskRCNNTest, SelectTrainingSamplesNoGT_G5) {
 // Before the audit fix the function returned `fill_(0.0)` so every column was
 // 0. Test the proposal output directly (rather than forward_test's final boxes
 // which go through the still-untrained ROI head and can degenerate).
-TEST_F(MaskRCNNTest, GenerateProposalsReturnsRealBoxes_G4) {
+TEST_P(MaskRCNNTest, GenerateProposalsReturnsRealBoxes_G4) {
     auto model = mask_rcnn_resnet50_fpn(91, false);
+    model->to(device);
     model->eval();
 
-    Tensor img_t({1, 3, 512, 512}, DType::Float32, device_);
-    auto* p = img_t.data<float>();
+    Tensor img_cpu({1, 3, 512, 512}, DType::Float32, Device::cpu());
+    auto* p = img_cpu.data<float>();
     std::mt19937 rng(0xC0FFEE);
     std::uniform_real_distribution<float> dist(-1.0f, 1.0f);
-    for (int64_t i = 0; i < img_t.numel(); ++i) p[i] = dist(rng);
-    Variable images(img_t, false);
+    for (int64_t i = 0; i < img_cpu.numel(); ++i) p[i] = dist(rng);
+    Variable images(img_cpu.to(device), false);
 
     // Reach into the FPN encoder to run only what generate_proposals needs.
     // The public entry point on MaskRCNN is generate_proposals(features), and
@@ -285,20 +307,21 @@ TEST_F(MaskRCNNTest, GenerateProposalsReturnsRealBoxes_G4) {
     //     A regression to fill_(0.0) would still produce (N, 5) but with
     //     all four box columns equal — check at least one row has a real
     //     positive-area box on a sample with non-trivial content.
-    Variable fake_features(
-        Tensor({1, 256, 32, 32}, DType::Float32, device_), false);
-    auto* ff = fake_features.tensor().data<float>();
-    for (int64_t i = 0; i < fake_features.tensor().numel(); ++i) {
+    Tensor fake_features_cpu({1, 256, 32, 32}, DType::Float32, Device::cpu());
+    auto* ff = fake_features_cpu.data<float>();
+    for (int64_t i = 0; i < fake_features_cpu.numel(); ++i) {
         ff[i] = dist(rng) * 0.1f;
     }
+    Variable fake_features(fake_features_cpu.to(device), false);
     Tensor proposals = model->generate_proposals(fake_features);
     ASSERT_EQ(proposals.shape()[1], 5)
         << "proposals must be (N, 5) with col 0 = batch_idx";
     if (proposals.shape()[0] > 0) {
-        auto* pp = proposals.data<float>();
+        auto proposals_cpu = proposals.cpu();
+        auto* pp = proposals_cpu.data<float>();
         int64_t valid = 0;
         int64_t zero_rows = 0;
-        for (int64_t r = 0; r < proposals.shape()[0]; ++r) {
+        for (int64_t r = 0; r < proposals_cpu.shape()[0]; ++r) {
             float x1 = pp[r * 5 + 1];
             float y1 = pp[r * 5 + 2];
             float x2 = pp[r * 5 + 3];
@@ -308,20 +331,9 @@ TEST_F(MaskRCNNTest, GenerateProposalsReturnsRealBoxes_G4) {
         }
         EXPECT_GT(valid, 0)
             << "Expected at least one geometrically valid proposal (x1<x2, y1<y2)";
-        EXPECT_LT(zero_rows, proposals.shape()[0])
+        EXPECT_LT(zero_rows, proposals_cpu.shape()[0])
             << "All-zero rows indicate generate_proposals regressed to fill_(0.0)";
     }
 }
 
-
-// ============================================================================
-// Main  
-// ============================================================================
-
-int main(int argc, char** argv) {
-    ::testing::InitGoogleTest(&argc, argv);
-    if (!::testing::GTEST_FLAG(list_tests)) {
-        tenzor::initialize();
-    }
-    return RUN_ALL_TESTS();
-}
+INSTANTIATE_BACKEND_TESTS(MaskRCNNTest);

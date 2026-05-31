@@ -18,6 +18,8 @@
 
 #include <gtest/gtest.h>
 
+#include "backend_test_fixture.hpp"
+
 #include "tenzor/autograd/vmap.hpp"
 #include "tenzor/autograd/variable.hpp"
 #include "tenzor/tenzor.hpp"
@@ -30,17 +32,20 @@ using namespace tenzor;
 
 namespace {
 
-class VmapOpIdDispatchTest : public ::testing::Test {
+class VmapOpIdDispatchTest : public ::tenzor::testing::BackendTest {
 protected:
-    void SetUp() override { tenzor::initialize(); }
+    void SetUp() override {
+        ::tenzor::testing::BackendTest::SetUp();
+        if (::testing::Test::IsSkipped()) return;
+    }
 };
 
-TEST_F(VmapOpIdDispatchTest, OpIdRegistryHasBuiltinPassthroughs) {
+TEST_P(VmapOpIdDispatchTest, OpIdRegistryHasBuiltinPassthroughs) {
     // The init_builtin_batching_rules() function registers OpId-keyed
     // passthrough rules for ~35 OpIds. This test forces initialisation
     // by running a small vmap (input with requires_grad=true so the
     // probe returns a Variable with a real grad_fn).
-    auto x = randn({4, 3}, DType::Float32, Device::cpu());
+    auto x = randn({4, 3}, DType::Float32, device);
     Variable v(x, /*requires_grad=*/true);
     auto fn = [](const Variable& a) -> Variable {
         return a + a;
@@ -53,7 +58,7 @@ TEST_F(VmapOpIdDispatchTest, OpIdRegistryHasBuiltinPassthroughs) {
     EXPECT_TRUE(has_batching_rule(OpId::Gelu));
 }
 
-TEST_F(VmapOpIdDispatchTest, RegisterRefusesUnknown) {
+TEST_P(VmapOpIdDispatchTest, RegisterRefusesUnknown) {
     EXPECT_THROW({
         register_batching_rule(OpId::Unknown,
             [](const std::function<Variable(const Variable&)>& f,
@@ -62,7 +67,7 @@ TEST_F(VmapOpIdDispatchTest, RegisterRefusesUnknown) {
     }, std::runtime_error);
 }
 
-TEST_F(VmapOpIdDispatchTest, OpIdKeyOverridesNameKey) {
+TEST_P(VmapOpIdDispatchTest, OpIdKeyOverridesNameKey) {
     // Register a rule that records a counter under OpId::Mul, then
     // confirm a vmap over multiplication invokes it.
     static std::atomic<int> counter{0};
@@ -74,7 +79,7 @@ TEST_F(VmapOpIdDispatchTest, OpIdKeyOverridesNameKey) {
             return f(v);  // passthrough
         });
 
-    auto x = randn({2, 3}, DType::Float32, Device::cpu());
+    auto x = randn({2, 3}, DType::Float32, device);
     Variable v(x, /*requires_grad=*/true);
     auto fn = [](const Variable& a) -> Variable {
         return a * a;
@@ -90,5 +95,7 @@ TEST_F(VmapOpIdDispatchTest, OpIdKeyOverridesNameKey) {
     // func is `a * a`, so y == x * x element-wise.
     EXPECT_EQ(y.tensor().numel(), x.numel());
 }
+
+INSTANTIATE_BACKEND_TESTS(VmapOpIdDispatchTest);
 
 }  // namespace

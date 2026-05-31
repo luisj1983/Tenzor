@@ -14,7 +14,7 @@
  */
 
 #include <gtest/gtest.h>
-#include "multi_backend_dtype_fixture.hpp"
+#include "backend_test_fixture.hpp"
 #include <tenzor/tenzor.hpp>
 #include <tenzor/autograd/variable.hpp>
 #include <tenzor/backend/fast_dispatch.hpp>
@@ -26,20 +26,11 @@
 #include <span>
 #include <vector>
 
-namespace tenzor { void initialize(); }
-
-namespace {
-class LayerNormStabilityEnv : public ::testing::Environment {
-public:
-    void SetUp() override { tenzor::initialize(); }
-};
-[[maybe_unused]] auto* g_env =
-    ::testing::AddGlobalTestEnvironment(new LayerNormStabilityEnv);
-}  // namespace
-
 using namespace tenzor;
 
 namespace {
+
+class LayerNormVarianceStability : public ::tenzor::testing::BackendTest {};
 
 // Helper: dispatch OpId::LayerNorm and return the per-batch mean / rstd
 // saved-stats Tensors so we can directly assert their values.
@@ -47,16 +38,17 @@ struct LNResult { Tensor output, mean, rstd; };
 
 auto run_layer_norm_f32(const std::vector<float>& in_data,
                          int64_t batch, int64_t norm_size,
+                         const tenzor::Device& device,
                          float eps = 1e-5f) -> LNResult {
     auto x = Tensor::from_blob(const_cast<float*>(in_data.data()),
                                {batch, norm_size}, DType::Float32,
-                               Device::cpu()).clone();
+                               Device::cpu()).clone().to(device);
     std::vector<float> w_data(static_cast<size_t>(norm_size), 1.0f);
     std::vector<float> b_data(static_cast<size_t>(norm_size), 0.0f);
     auto w = Tensor::from_blob(w_data.data(), {norm_size}, DType::Float32,
-                               Device::cpu()).clone();
+                               Device::cpu()).clone().to(device);
     auto b = Tensor::from_blob(b_data.data(), {norm_size}, DType::Float32,
-                               Device::cpu()).clone();
+                               Device::cpu()).clone().to(device);
     NewOpAttributes attrs;
     attrs.set(AttrKey::NormalizedShape, std::to_string(norm_size));
     attrs.set(AttrKey::Eps, static_cast<double>(eps));
@@ -67,9 +59,7 @@ auto run_layer_norm_f32(const std::vector<float>& in_data,
     return {out[0], out[1], out[2]};
 }
 
-}  // namespace
-
-TEST(LayerNormVarianceStability, LargeMeanProducesValidVariance) {
+TEST_P(LayerNormVarianceStability, LargeMeanProducesValidVariance) {
     // Generate input: each row has 64 values, all near 1e6 with std ~1.0.
     // Pre-fix: (sum_sq / n - mean^2) = (~1e12 + 1) - (~1e12) = noise around 1.
     // For values like 1e6 + small_offset, Float32 has only 7 digits of
@@ -85,7 +75,7 @@ TEST(LayerNormVarianceStability, LargeMeanProducesValidVariance) {
         }
     }
 
-    auto r = run_layer_norm_f32(data, batch, norm_size);
+    auto r = run_layer_norm_f32(data, batch, norm_size, device);
     auto rstd_cpu = r.rstd.to(Device::cpu()).contiguous();
     const float* rstd = rstd_cpu.data<float>();
 
@@ -104,7 +94,7 @@ TEST(LayerNormVarianceStability, LargeMeanProducesValidVariance) {
     }
 }
 
-TEST(LayerNormVarianceStability, OutputMatchesNormalizedReference) {
+TEST_P(LayerNormVarianceStability, OutputMatchesNormalizedReference) {
     // For a row with values 0..norm_size-1, mean = (n-1)/2, var = (n^2-1)/12.
     // Verify the kernel produces normalized output matching this reference
     // within Float32 tolerance.
@@ -113,7 +103,7 @@ TEST(LayerNormVarianceStability, OutputMatchesNormalizedReference) {
     std::vector<float> data(static_cast<size_t>(norm_size));
     for (int64_t i = 0; i < norm_size; ++i) data[i] = static_cast<float>(i);
 
-    auto r = run_layer_norm_f32(data, batch, norm_size);
+    auto r = run_layer_norm_f32(data, batch, norm_size, device);
     auto out_cpu = r.output.to(Device::cpu()).contiguous();
     const float* od = out_cpu.data<float>();
 
@@ -137,17 +127,17 @@ TEST(LayerNormVarianceStability, OutputMatchesNormalizedReference) {
 // flows. Sibling to the forward fix already on main (commit 2ee72b5b).
 // =========================================================================
 
-TEST(LayerNormVarianceStability, BackwardLargeMeanProducesFiniteNonZeroGradient) {
-    using namespace tenzor;
+TEST_P(LayerNormVarianceStability, BackwardLargeMeanProducesFiniteNonZeroGradient) {
     using namespace tenzor::nn;
 
     const int64_t B = 2;
     const int64_t N = 64;
-    auto x_t = randn({B, N}, DType::Float32, Device::cpu()) +
-               full({1}, 1e6f, DType::Float32, Device::cpu());
+    auto x_t = randn({B, N}, DType::Float32, device) +
+               full({1}, 1e6f, DType::Float32, device);
     auto x = Variable(x_t, /*requires_grad=*/true);
 
     LayerNorm ln(/*normalized_shape=*/std::vector<int64_t>{N}, /*eps=*/1e-5);
+    ln.to(device);
     auto y = ln.forward(x);
 
     // 7th-audit Fix #4: use a RANDOM grad_output, not ones-like.
@@ -162,11 +152,11 @@ TEST(LayerNormVarianceStability, BackwardLargeMeanProducesFiniteNonZeroGradient)
     // A random grad_output exercises the full backward formula, so
     // pre-fix would produce NaN/Inf or zeros via the bad variance, and
     // post-fix produces well-conditioned finite non-zero gradients.
-    auto grad_out_random = randn({B, N}, DType::Float32, Device::cpu());
+    auto grad_out_random = randn({B, N}, DType::Float32, device);
     y.backward(grad_out_random);
 
     ASSERT_TRUE(x.grad().has_value()) << "grad_input must be populated";
-    auto g = x.grad().value();
+    auto g = x.grad().value().to(Device::cpu()).contiguous();
     const float* p = g.data<float>();
 
     bool any_nan = false, any_inf = false, all_zero = true;
@@ -185,20 +175,20 @@ TEST(LayerNormVarianceStability, BackwardLargeMeanProducesFiniteNonZeroGradient)
                                "well-conditioned non-zero gradient.";
 }
 
-TEST(LayerNormVarianceStability, BackwardSmallVarianceStable) {
-    using namespace tenzor;
+TEST_P(LayerNormVarianceStability, BackwardSmallVarianceStable) {
     using namespace tenzor::nn;
     const int64_t B = 2;
     const int64_t N = 64;
-    auto x_t = randn({B, N}, DType::Float32, Device::cpu()) *
-               full({1}, 1e-4f, DType::Float32, Device::cpu());
+    auto x_t = randn({B, N}, DType::Float32, device) *
+               full({1}, 1e-4f, DType::Float32, device);
     auto x = Variable(x_t, true);
     LayerNorm ln(std::vector<int64_t>{N}, /*eps=*/1e-5);
+    ln.to(device);
     auto y = ln.forward(x);
     y.backward(ones_like(y.tensor()));
 
     ASSERT_TRUE(x.grad().has_value());
-    auto g = x.grad().value();
+    auto g = x.grad().value().to(Device::cpu()).contiguous();
     const float* p = g.data<float>();
     for (int64_t i = 0; i < g.numel(); ++i) {
         EXPECT_TRUE(std::isfinite(p[i]))
@@ -207,60 +197,46 @@ TEST(LayerNormVarianceStability, BackwardSmallVarianceStable) {
 }
 
 // =========================================================================
-// 7th-audit Fix #1: CUDA `layer_norm_mixed_kernel` two-pass variance.
+// 7th-audit Fix #1: mixed-precision `layer_norm_mixed_kernel` two-pass
+// variance.
 //
-// Pre-fix the FP16/BF16 LayerNorm forward fast path on CUDA used
+// Pre-fix the FP16/BF16 LayerNorm forward fast path used
 // `var = E[X^2] - E[X]^2`, which catastrophically cancels for large-mean
 // inputs. Sibling site to the CPU forward fix (commit 2ee72b5b) and the
 // 5th-audit A1 backward fix.
 //
-// The test runs FP16 LayerNorm forward on a mean-1e3 input on CUDA and
-// asserts the output is finite (pre-fix produced Inf via rsqrtf(eps)).
-// Auto-skips when CUDA is not available.
+// The test runs FP16 LayerNorm forward on a mean-1e3 input on the current
+// backend and asserts the output is finite (pre-fix produced Inf via
+// rsqrtf(eps)).
 // =========================================================================
-TEST(LayerNormVarianceStability, CudaMixedKernelLargeMeanFiniteOutput) {
-    using namespace tenzor;
-
-    // Skip cleanly when CUDA isn't compiled in or no device is available.
-    bool has_cuda = false;
-    try {
-        Device d = Device::cuda(0);
-        // Construct a 1-elem tensor on CUDA as a liveness probe.
-        auto probe = zeros({1}, DType::Float32, d);
-        has_cuda = (probe.device().type == Device::Type::CUDA);
-    } catch (...) {
-        has_cuda = false;
-    }
-    if (!has_cuda) {
-        SKIP_WITH_REASON(tenzor::testing::SkipReason::BackendUnavailable,
-            "CUDA device unavailable; skipping CUDA-only test");
-        return;
-    }
-
-    Device cuda_dev = Device::cuda(0);
+TEST_P(LayerNormVarianceStability, MixedKernelLargeMeanFiniteOutput) {
     const int64_t B = 2;
     const int64_t N = 64;
 
     // FP16 input with mean ≈ 1e3 (well into the cancellation regime for
     // Float32 accumulator: 1e3^2 = 1e6 vs sum_sq ~ 1e6 + O(N)).
-    auto base_f32 = randn({B, N}, DType::Float32, cuda_dev);
-    auto shift = full({1}, 1e3f, DType::Float32, cuda_dev);
+    auto base_f32 = randn({B, N}, DType::Float32, device);
+    auto shift = full({1}, 1e3f, DType::Float32, device);
     auto x_f32 = base_f32 + shift;
     auto x_f16 = x_f32.to(DType::Float16);
     Variable x(x_f16, /*requires_grad=*/false);
 
     nn::LayerNorm ln(std::vector<int64_t>{N}, /*eps=*/1e-5);
-    ln.to(cuda_dev);
+    ln.to(device);
     auto y = ln.forward(x);
 
     auto y_cpu = y.tensor().to(Device::cpu()).to(DType::Float32).contiguous();
     auto* p = y_cpu.data<float>();
     for (int64_t i = 0; i < y_cpu.numel(); ++i) {
         ASSERT_FALSE(std::isnan(p[i]))
-            << "CUDA mixed-kernel LN forward produced NaN at i=" << i
+            << "mixed-kernel LN forward produced NaN at i=" << i
             << " (variance catastrophically cancelled — 7th-audit Fix #1)";
         ASSERT_FALSE(std::isinf(p[i]))
-            << "CUDA mixed-kernel LN forward produced Inf at i=" << i
+            << "mixed-kernel LN forward produced Inf at i=" << i
             << " (variance ≈ 0 → rsqrtf(eps) overflowed downstream)";
     }
 }
+
+INSTANTIATE_BACKEND_TESTS(LayerNormVarianceStability);
+
+}  // namespace

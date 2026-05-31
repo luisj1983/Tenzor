@@ -5,6 +5,7 @@
 
 #include <gtest/gtest.h>
 #include <tenzor/tenzor.hpp>
+#include "../backend_test_fixture.hpp"
 #include "../../include/tenzor/models/gpt.hpp"
 #include "../../include/tenzor/autograd/variable.hpp"
 #include "../../include/tenzor/core/tensor.hpp"
@@ -13,9 +14,12 @@
 using namespace tenzor;
 using namespace tenzor::models;
 
-class GPTTest : public ::testing::Test {
+class GPTTest : public ::tenzor::testing::BackendTest {
 protected:
     void SetUp() override {
+        ::tenzor::testing::BackendTest::SetUp();
+        if (::testing::Test::IsSkipped()) return;
+
         // Use small configs for testing
         config_ = GPT2Config{};
         config_.vocab_size = 1000;
@@ -30,29 +34,29 @@ protected:
 
         batch_size_ = 2;
         seq_len_ = 16;
-        device_ = Device::cpu();
     }
 
     GPT2Config config_;
     int64_t batch_size_;
     int64_t seq_len_;
-    Device device_;
 };
 
 // ============================================================================
 // GPTEmbeddings Tests
 // ============================================================================
 
-TEST_F(GPTTest, EmbeddingsForwardShape) {
+TEST_P(GPTTest, EmbeddingsForwardShape) {
     GPTEmbeddings embeddings(config_);
     embeddings.train(false);
+    embeddings.to(device);
 
-    // Create input token IDs
-    Tensor input_ids({batch_size_, seq_len_}, DType::Int64, device_);
-    auto data = input_ids.data<int64_t>();
-    for (int64_t i = 0; i < input_ids.numel(); ++i) {
+    // Create input token IDs on CPU via host writes, then move to device.
+    Tensor input_ids_host({batch_size_, seq_len_}, DType::Int64, Device::cpu());
+    auto data = input_ids_host.data<int64_t>();
+    for (int64_t i = 0; i < input_ids_host.numel(); ++i) {
         data[i] = i % config_.vocab_size;
     }
+    Tensor input_ids = input_ids_host.to(device);
 
     Variable input_var(input_ids, false);
     auto output = embeddings.forward(input_var, Variable{});
@@ -64,16 +68,17 @@ TEST_F(GPTTest, EmbeddingsForwardShape) {
     EXPECT_EQ(output.tensor().shape()[2], config_.n_embd);
 }
 
-TEST_F(GPTTest, EmbeddingsWithPositionIds) {
+TEST_P(GPTTest, EmbeddingsWithPositionIds) {
     GPTEmbeddings embeddings(config_);
     embeddings.train(false);
+    embeddings.to(device);
 
-    // Create input token IDs and position IDs
-    Tensor input_ids({batch_size_, seq_len_}, DType::Int64, device_);
-    Tensor position_ids({batch_size_, seq_len_}, DType::Int64, device_);
+    // Create input token IDs and position IDs on CPU, then move to device.
+    Tensor input_ids_host({batch_size_, seq_len_}, DType::Int64, Device::cpu());
+    Tensor position_ids_host({batch_size_, seq_len_}, DType::Int64, Device::cpu());
 
-    auto input_data = input_ids.data<int64_t>();
-    auto pos_data = position_ids.data<int64_t>();
+    auto input_data = input_ids_host.data<int64_t>();
+    auto pos_data = position_ids_host.data<int64_t>();
 
     for (int64_t b = 0; b < batch_size_; ++b) {
         for (int64_t s = 0; s < seq_len_; ++s) {
@@ -81,6 +86,9 @@ TEST_F(GPTTest, EmbeddingsWithPositionIds) {
             pos_data[b * seq_len_ + s] = s;
         }
     }
+
+    Tensor input_ids = input_ids_host.to(device);
+    Tensor position_ids = position_ids_host.to(device);
 
     Variable input_var(input_ids, false);
     Variable pos_var(position_ids, false);
@@ -92,15 +100,17 @@ TEST_F(GPTTest, EmbeddingsWithPositionIds) {
     EXPECT_EQ(output.tensor().shape()[2], config_.n_embd);
 }
 
-TEST_F(GPTTest, EmbeddingsGradientFlow) {
+TEST_P(GPTTest, EmbeddingsGradientFlow) {
     GPTEmbeddings embeddings(config_);
     embeddings.train();
+    embeddings.to(device);
 
-    Tensor input_ids({batch_size_, seq_len_}, DType::Int64, device_);
-    auto data = input_ids.data<int64_t>();
-    for (int64_t i = 0; i < input_ids.numel(); ++i) {
+    Tensor input_ids_host({batch_size_, seq_len_}, DType::Int64, Device::cpu());
+    auto data = input_ids_host.data<int64_t>();
+    for (int64_t i = 0; i < input_ids_host.numel(); ++i) {
         data[i] = i % config_.vocab_size;
     }
+    Tensor input_ids = input_ids_host.to(device);
 
     Variable input_var(input_ids, false);
     auto output = embeddings.forward(input_var, Variable{});
@@ -128,11 +138,12 @@ TEST_F(GPTTest, EmbeddingsGradientFlow) {
 // GPTDecoderLayer Tests
 // ============================================================================
 
-TEST_F(GPTTest, DecoderLayerForwardShape) {
+TEST_P(GPTTest, DecoderLayerForwardShape) {
     GPTDecoderLayer layer(config_);
     layer.train(false);
+    layer.to(device);
 
-    Tensor hidden_states({batch_size_, seq_len_, config_.n_embd}, DType::Float32, device_);
+    Tensor hidden_states({batch_size_, seq_len_, config_.n_embd}, DType::Float32, device);
     hidden_states.fill_(0.1f);
 
     Variable input_var(hidden_states, false);
@@ -144,15 +155,16 @@ TEST_F(GPTTest, DecoderLayerForwardShape) {
     EXPECT_EQ(output.tensor().shape()[2], config_.n_embd);
 }
 
-TEST_F(GPTTest, DecoderLayerWithCausalMask) {
+TEST_P(GPTTest, DecoderLayerWithCausalMask) {
     GPTDecoderLayer layer(config_);
     layer.train(false);
+    layer.to(device);
 
-    Tensor hidden_states({batch_size_, seq_len_, config_.n_embd}, DType::Float32, device_);
+    Tensor hidden_states({batch_size_, seq_len_, config_.n_embd}, DType::Float32, device);
     hidden_states.fill_(0.1f);
 
-    // Create causal mask
-    Tensor causal_mask = nn::create_causal_mask(seq_len_, device_);
+    // Create causal mask on device
+    Tensor causal_mask = nn::create_causal_mask(seq_len_, device);
 
     Variable input_var(hidden_states, false);
     auto output = layer.forward(input_var, causal_mask);
@@ -162,11 +174,12 @@ TEST_F(GPTTest, DecoderLayerWithCausalMask) {
     EXPECT_EQ(output.tensor().shape()[2], config_.n_embd);
 }
 
-TEST_F(GPTTest, DecoderLayerGradientFlow) {
+TEST_P(GPTTest, DecoderLayerGradientFlow) {
     GPTDecoderLayer layer(config_);
     layer.train();
+    layer.to(device);
 
-    Tensor hidden_states({batch_size_, seq_len_, config_.n_embd}, DType::Float32, device_);
+    Tensor hidden_states({batch_size_, seq_len_, config_.n_embd}, DType::Float32, device);
     hidden_states.fill_(0.1f);
 
     Variable input_var(hidden_states, true);
@@ -195,15 +208,17 @@ TEST_F(GPTTest, DecoderLayerGradientFlow) {
 // GPT2Model Tests
 // ============================================================================
 
-TEST_F(GPTTest, GPT2ModelForwardShape) {
+TEST_P(GPTTest, GPT2ModelForwardShape) {
     GPT2Model model(config_);
     model.train(false);
+    model.to(device);
 
-    Tensor input_ids({batch_size_, seq_len_}, DType::Int64, device_);
-    auto data = input_ids.data<int64_t>();
-    for (int64_t i = 0; i < input_ids.numel(); ++i) {
+    Tensor input_ids_host({batch_size_, seq_len_}, DType::Int64, Device::cpu());
+    auto data = input_ids_host.data<int64_t>();
+    for (int64_t i = 0; i < input_ids_host.numel(); ++i) {
         data[i] = i % config_.vocab_size;
     }
+    Tensor input_ids = input_ids_host.to(device);
 
     Variable input_var(input_ids, false);
     auto output = model.forward(input_var, Variable{}, Tensor{});
@@ -214,8 +229,9 @@ TEST_F(GPTTest, GPT2ModelForwardShape) {
     EXPECT_EQ(output.tensor().shape()[2], config_.n_embd);
 }
 
-TEST_F(GPTTest, GPT2ModelParameterCount) {
+TEST_P(GPTTest, GPT2ModelParameterCount) {
     GPT2Model model(config_);
+    model.to(device);
 
     auto params = model.parameters();
     EXPECT_GT(params.size(), 0);
@@ -238,15 +254,17 @@ TEST_F(GPTTest, GPT2ModelParameterCount) {
     EXPECT_GT(total_params, min_expected);
 }
 
-TEST_F(GPTTest, GPT2ModelGradientFlow) {
+TEST_P(GPTTest, GPT2ModelGradientFlow) {
     GPT2Model model(config_);
     model.train();
+    model.to(device);
 
-    Tensor input_ids({batch_size_, seq_len_}, DType::Int64, device_);
-    auto data = input_ids.data<int64_t>();
-    for (int64_t i = 0; i < input_ids.numel(); ++i) {
+    Tensor input_ids_host({batch_size_, seq_len_}, DType::Int64, Device::cpu());
+    auto data = input_ids_host.data<int64_t>();
+    for (int64_t i = 0; i < input_ids_host.numel(); ++i) {
         data[i] = i % config_.vocab_size;
     }
+    Tensor input_ids = input_ids_host.to(device);
 
     Variable input_var(input_ids, false);
     auto output = model.forward(input_var, Variable{}, Tensor{});
@@ -272,15 +290,17 @@ TEST_F(GPTTest, GPT2ModelGradientFlow) {
 // GPT2LMHeadModel Tests
 // ============================================================================
 
-TEST_F(GPTTest, GPT2LMHeadForwardShape) {
+TEST_P(GPTTest, GPT2LMHeadForwardShape) {
     GPT2LMHeadModel model(config_);
     model.train(false);
+    model.to(device);
 
-    Tensor input_ids({batch_size_, seq_len_}, DType::Int64, device_);
-    auto data = input_ids.data<int64_t>();
-    for (int64_t i = 0; i < input_ids.numel(); ++i) {
+    Tensor input_ids_host({batch_size_, seq_len_}, DType::Int64, Device::cpu());
+    auto data = input_ids_host.data<int64_t>();
+    for (int64_t i = 0; i < input_ids_host.numel(); ++i) {
         data[i] = i % config_.vocab_size;
     }
+    Tensor input_ids = input_ids_host.to(device);
 
     Variable input_var(input_ids, false);
     auto logits = model.forward(input_var, Variable{}, Tensor{});
@@ -291,34 +311,39 @@ TEST_F(GPTTest, GPT2LMHeadForwardShape) {
     EXPECT_EQ(logits.tensor().shape()[2], config_.vocab_size);
 }
 
-TEST_F(GPTTest, GPT2LMHeadLogitsRange) {
+TEST_P(GPTTest, GPT2LMHeadLogitsRange) {
     GPT2LMHeadModel model(config_);
     model.train(false);
+    model.to(device);
 
-    Tensor input_ids({1, 4}, DType::Int64, device_);
-    auto data = input_ids.data<int64_t>();
+    Tensor input_ids_host({1, 4}, DType::Int64, Device::cpu());
+    auto data = input_ids_host.data<int64_t>();
     data[0] = 10; data[1] = 20; data[2] = 30; data[3] = 40;
+    Tensor input_ids = input_ids_host.to(device);
 
     Variable input_var(input_ids, false);
     auto logits = model.forward(input_var, Variable{}, Tensor{});
 
-    // Check that logits are reasonable (not NaN or inf)
-    auto logits_data = logits.tensor().data<float>();
-    for (int64_t i = 0; i < logits.tensor().numel(); ++i) {
+    // Check that logits are reasonable (not NaN or inf). Read on host.
+    auto logits_cpu = logits.tensor().cpu();
+    auto logits_data = logits_cpu.data<float>();
+    for (int64_t i = 0; i < logits_cpu.numel(); ++i) {
         EXPECT_FALSE(std::isnan(logits_data[i]));
         EXPECT_FALSE(std::isinf(logits_data[i]));
     }
 }
 
-TEST_F(GPTTest, GPT2LMHeadGradientFlow) {
+TEST_P(GPTTest, GPT2LMHeadGradientFlow) {
     GPT2LMHeadModel model(config_);
     model.train();
+    model.to(device);
 
-    Tensor input_ids({batch_size_, seq_len_}, DType::Int64, device_);
-    auto data = input_ids.data<int64_t>();
-    for (int64_t i = 0; i < input_ids.numel(); ++i) {
+    Tensor input_ids_host({batch_size_, seq_len_}, DType::Int64, Device::cpu());
+    auto data = input_ids_host.data<int64_t>();
+    for (int64_t i = 0; i < input_ids_host.numel(); ++i) {
         data[i] = i % config_.vocab_size;
     }
+    Tensor input_ids = input_ids_host.to(device);
 
     Variable input_var(input_ids, false);
     auto logits = model.forward(input_var, Variable{}, Tensor{});
@@ -344,19 +369,20 @@ TEST_F(GPTTest, GPT2LMHeadGradientFlow) {
 // GPT3Model Tests
 // ============================================================================
 
-TEST_F(GPTTest, GPT3ModelConstruction) {
+TEST_P(GPTTest, GPT3ModelConstruction) {
     auto gpt3_config = GPT3Config::gpt3_small();
     gpt3_config.vocab_size = 1000;  // Reduce for test
     gpt3_config.n_positions = 64;
     gpt3_config.n_layer = 2;
 
     GPT3Model model(gpt3_config);
+    model.to(device);
 
     auto params = model.parameters();
     EXPECT_GT(params.size(), 0);
 }
 
-TEST_F(GPTTest, GPT3LMHeadModelForward) {
+TEST_P(GPTTest, GPT3LMHeadModelForward) {
     auto gpt3_config = GPT3Config::gpt3_small();
     gpt3_config.vocab_size = 1000;
     gpt3_config.n_positions = 64;
@@ -364,12 +390,14 @@ TEST_F(GPTTest, GPT3LMHeadModelForward) {
 
     GPT3LMHeadModel model(gpt3_config);
     model.train(false);
+    model.to(device);
 
-    Tensor input_ids({1, 8}, DType::Int64, device_);
-    auto data = input_ids.data<int64_t>();
+    Tensor input_ids_host({1, 8}, DType::Int64, Device::cpu());
+    auto data = input_ids_host.data<int64_t>();
     for (int64_t i = 0; i < 8; ++i) {
         data[i] = i * 10;
     }
+    Tensor input_ids = input_ids_host.to(device);
 
     Variable input_var(input_ids, false);
     auto logits = model.forward(input_var, Variable{}, Tensor{});
@@ -383,9 +411,10 @@ TEST_F(GPTTest, GPT3LMHeadModelForward) {
 // TextGenerator Tests
 // ============================================================================
 
-TEST_F(GPTTest, GeneratorGreedySearch) {
+TEST_P(GPTTest, GeneratorGreedySearch) {
     GPT2LMHeadModel model(config_);
     model.train(false);
+    model.to(device);
 
     GenerationConfig gen_config;
     gen_config.max_length = 20;
@@ -393,26 +422,29 @@ TEST_F(GPTTest, GeneratorGreedySearch) {
 
     TextGenerator generator(model, gen_config);
 
-    Tensor input_ids({1, 4}, DType::Int64, device_);
-    auto data = input_ids.data<int64_t>();
+    Tensor input_ids_host({1, 4}, DType::Int64, Device::cpu());
+    auto data = input_ids_host.data<int64_t>();
     data[0] = 10; data[1] = 20; data[2] = 30; data[3] = 40;
+    Tensor input_ids = input_ids_host.to(device);
 
     auto output = generator.greedy_search(input_ids);
 
     EXPECT_EQ(output.shape()[0], 1);
     EXPECT_EQ(output.shape()[1], gen_config.max_length);
 
-    // Check that first tokens match input
-    auto output_data = output.data<int64_t>();
+    // Check that first tokens match input (read on host)
+    auto output_cpu = output.cpu();
+    auto output_data = output_cpu.data<int64_t>();
     EXPECT_EQ(output_data[0], 10);
     EXPECT_EQ(output_data[1], 20);
     EXPECT_EQ(output_data[2], 30);
     EXPECT_EQ(output_data[3], 40);
 }
 
-TEST_F(GPTTest, GeneratorTopKSampling) {
+TEST_P(GPTTest, GeneratorTopKSampling) {
     GPT2LMHeadModel model(config_);
     model.train(false);
+    model.to(device);
 
     GenerationConfig gen_config;
     gen_config.max_length = 15;
@@ -423,25 +455,28 @@ TEST_F(GPTTest, GeneratorTopKSampling) {
 
     TextGenerator generator(model, gen_config);
 
-    Tensor input_ids({1, 3}, DType::Int64, device_);
-    auto data = input_ids.data<int64_t>();
+    Tensor input_ids_host({1, 3}, DType::Int64, Device::cpu());
+    auto data = input_ids_host.data<int64_t>();
     data[0] = 5; data[1] = 15; data[2] = 25;
+    Tensor input_ids = input_ids_host.to(device);
 
     auto output = generator.top_k_sampling(input_ids, gen_config.top_k, gen_config.temperature);
 
     EXPECT_EQ(output.shape()[0], 1);
     EXPECT_EQ(output.shape()[1], gen_config.max_length);
 
-    // Verify input tokens are preserved
-    auto output_data = output.data<int64_t>();
+    // Verify input tokens are preserved (read on host)
+    auto output_cpu = output.cpu();
+    auto output_data = output_cpu.data<int64_t>();
     EXPECT_EQ(output_data[0], 5);
     EXPECT_EQ(output_data[1], 15);
     EXPECT_EQ(output_data[2], 25);
 }
 
-TEST_F(GPTTest, GeneratorTopPSampling) {
+TEST_P(GPTTest, GeneratorTopPSampling) {
     GPT2LMHeadModel model(config_);
     model.train(false);
+    model.to(device);
 
     GenerationConfig gen_config;
     gen_config.max_length = 15;
@@ -452,9 +487,10 @@ TEST_F(GPTTest, GeneratorTopPSampling) {
 
     TextGenerator generator(model, gen_config);
 
-    Tensor input_ids({1, 3}, DType::Int64, device_);
-    auto data = input_ids.data<int64_t>();
+    Tensor input_ids_host({1, 3}, DType::Int64, Device::cpu());
+    auto data = input_ids_host.data<int64_t>();
     data[0] = 7; data[1] = 17; data[2] = 27;
+    Tensor input_ids = input_ids_host.to(device);
 
     auto output = generator.top_p_sampling(input_ids, gen_config.top_p, gen_config.temperature);
 
@@ -462,9 +498,10 @@ TEST_F(GPTTest, GeneratorTopPSampling) {
     EXPECT_EQ(output.shape()[1], gen_config.max_length);
 }
 
-TEST_F(GPTTest, GeneratorBeamSearch) {
+TEST_P(GPTTest, GeneratorBeamSearch) {
     GPT2LMHeadModel model(config_);
     model.train(false);
+    model.to(device);
 
     GenerationConfig gen_config;
     gen_config.max_length = 12;
@@ -473,17 +510,19 @@ TEST_F(GPTTest, GeneratorBeamSearch) {
 
     TextGenerator generator(model, gen_config);
 
-    Tensor input_ids({1, 2}, DType::Int64, device_);
-    auto data = input_ids.data<int64_t>();
+    Tensor input_ids_host({1, 2}, DType::Int64, Device::cpu());
+    auto data = input_ids_host.data<int64_t>();
     data[0] = 100; data[1] = 200;
+    Tensor input_ids = input_ids_host.to(device);
 
     auto output = generator.beam_search(input_ids, gen_config.num_beams);
 
     EXPECT_EQ(output.shape()[0], 1);
     EXPECT_EQ(output.shape()[1], gen_config.max_length);
 
-    // Check input tokens preserved
-    auto output_data = output.data<int64_t>();
+    // Check input tokens preserved (read on host)
+    auto output_cpu = output.cpu();
+    auto output_data = output_cpu.data<int64_t>();
     EXPECT_EQ(output_data[0], 100);
     EXPECT_EQ(output_data[1], 200);
 }
@@ -491,9 +530,10 @@ TEST_F(GPTTest, GeneratorBeamSearch) {
 // G16 regression: beam_search must accept batch_size > 1 and preserve each
 // batch's input tokens at the head of its corresponding output row. The
 // previous implementation threw `runtime_error` when batch_size != 1.
-TEST_F(GPTTest, BeamSearchBatchedBatchSize3_G16) {
+TEST_P(GPTTest, BeamSearchBatchedBatchSize3_G16) {
     GPT2LMHeadModel model(config_);
     model.train(false);
+    model.to(device);
 
     GenerationConfig gen_config;
     gen_config.max_length = 8;
@@ -504,14 +544,15 @@ TEST_F(GPTTest, BeamSearchBatchedBatchSize3_G16) {
     // 3-sample batch with distinct prefixes per row.
     const int64_t B = 3;
     const int64_t T = 3;
-    Tensor input_ids({B, T}, DType::Int64, device_);
-    auto* d = input_ids.data<int64_t>();
+    Tensor input_ids_host({B, T}, DType::Int64, Device::cpu());
+    auto* d = input_ids_host.data<int64_t>();
     // Batch 0: [1, 2, 3]
     d[0] = 1; d[1] = 2; d[2] = 3;
     // Batch 1: [4, 5, 6]
     d[T] = 4; d[T + 1] = 5; d[T + 2] = 6;
     // Batch 2: [7, 8, 9]
     d[2 * T] = 7; d[2 * T + 1] = 8; d[2 * T + 2] = 9;
+    Tensor input_ids = input_ids_host.to(device);
 
     Tensor output;
     ASSERT_NO_THROW({
@@ -521,7 +562,8 @@ TEST_F(GPTTest, BeamSearchBatchedBatchSize3_G16) {
     ASSERT_EQ(output.shape()[0], B);
     ASSERT_EQ(output.shape()[1], gen_config.max_length);
 
-    auto* o = output.data<int64_t>();
+    auto output_cpu = output.cpu();
+    auto* o = output_cpu.data<int64_t>();
     // Each row's first T tokens must match that row's input — proves the
     // batched implementation kept per-batch beam state separate (no cross-
     // contamination between batches).
@@ -533,9 +575,10 @@ TEST_F(GPTTest, BeamSearchBatchedBatchSize3_G16) {
     }
 }
 
-TEST_F(GPTTest, GeneratorGenericGenerate) {
+TEST_P(GPTTest, GeneratorGenericGenerate) {
     GPT2LMHeadModel model(config_);
     model.train(false);
+    model.to(device);
 
     GenerationConfig gen_config;
     gen_config.max_length = 10;
@@ -543,9 +586,10 @@ TEST_F(GPTTest, GeneratorGenericGenerate) {
 
     TextGenerator generator(model, gen_config);
 
-    Tensor input_ids({1, 2}, DType::Int64, device_);
-    auto data = input_ids.data<int64_t>();
+    Tensor input_ids_host({1, 2}, DType::Int64, Device::cpu());
+    auto data = input_ids_host.data<int64_t>();
     data[0] = 50; data[1] = 60;
+    Tensor input_ids = input_ids_host.to(device);
 
     auto output = generator.generate(input_ids);
 
@@ -557,7 +601,7 @@ TEST_F(GPTTest, GeneratorGenericGenerate) {
 // Configuration Tests
 // ============================================================================
 
-TEST_F(GPTTest, GPT2ConfigPresets) {
+TEST_P(GPTTest, GPT2ConfigPresets) {
     auto small = GPT2Config::gpt2_small();
     EXPECT_EQ(small.n_embd, 768);
     EXPECT_EQ(small.n_layer, 12);
@@ -576,7 +620,7 @@ TEST_F(GPTTest, GPT2ConfigPresets) {
     EXPECT_EQ(xl.n_layer, 48);
 }
 
-TEST_F(GPTTest, GPT3ConfigPresets) {
+TEST_P(GPTTest, GPT3ConfigPresets) {
     auto small = GPT3Config::gpt3_small();
     EXPECT_EQ(small.n_embd, 768);
 
@@ -606,12 +650,13 @@ TEST_F(GPTTest, GPT3ConfigPresets) {
 // Integration Tests
 // ============================================================================
 
-TEST_F(GPTTest, EndToEndTextGeneration) {
+TEST_P(GPTTest, EndToEndTextGeneration) {
     // Small model for fast testing
     config_.n_layer = 1;
 
     GPT2LMHeadModel model(config_);
     model.train(false);
+    model.to(device);
 
     GenerationConfig gen_config;
     gen_config.max_length = 10;
@@ -619,10 +664,11 @@ TEST_F(GPTTest, EndToEndTextGeneration) {
 
     TextGenerator generator(model, gen_config);
 
-    // Create input
-    Tensor input_ids({1, 3}, DType::Int64, device_);
-    auto data = input_ids.data<int64_t>();
+    // Create input on CPU, then move to device.
+    Tensor input_ids_host({1, 3}, DType::Int64, Device::cpu());
+    auto data = input_ids_host.data<int64_t>();
     data[0] = 1; data[1] = 2; data[2] = 3;
+    Tensor input_ids = input_ids_host.to(device);
 
     // Generate
     auto output = generator.generate(input_ids);
@@ -631,7 +677,8 @@ TEST_F(GPTTest, EndToEndTextGeneration) {
     EXPECT_EQ(output.shape()[0], 1);
     EXPECT_EQ(output.shape()[1], gen_config.max_length);
 
-    auto output_data = output.data<int64_t>();
+    auto output_cpu = output.cpu();
+    auto output_data = output_cpu.data<int64_t>();
 
     // Input tokens should be preserved
     EXPECT_EQ(output_data[0], 1);
@@ -645,12 +692,14 @@ TEST_F(GPTTest, EndToEndTextGeneration) {
     }
 }
 
-TEST_F(GPTTest, TrainingModeVsEvalMode) {
+TEST_P(GPTTest, TrainingModeVsEvalMode) {
     GPT2LMHeadModel model(config_);
+    model.to(device);
 
-    Tensor input_ids({1, 4}, DType::Int64, device_);
-    auto data = input_ids.data<int64_t>();
+    Tensor input_ids_host({1, 4}, DType::Int64, Device::cpu());
+    auto data = input_ids_host.data<int64_t>();
     data[0] = 10; data[1] = 20; data[2] = 30; data[3] = 40;
+    Tensor input_ids = input_ids_host.to(device);
     Variable input_var(input_ids, false);
 
     // Training mode
@@ -669,10 +718,4 @@ TEST_F(GPTTest, TrainingModeVsEvalMode) {
     EXPECT_EQ(train_output.tensor().shape()[2], eval_output.tensor().shape()[2]);
 }
 
-int main(int argc, char** argv) {
-    ::testing::InitGoogleTest(&argc, argv);
-    if (!::testing::GTEST_FLAG(list_tests)) {
-        tenzor::initialize();
-    }
-    return RUN_ALL_TESTS();
-}
+INSTANTIATE_BACKEND_TESTS(GPTTest);

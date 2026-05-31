@@ -4,6 +4,7 @@
  */
 
 #include <gtest/gtest.h>
+#include "../backend_test_fixture.hpp"
 #include "tenzor/nn/amp/autocast.hpp"
 #include "autocast_guard_test_support.hpp"
 #include "tenzor/core/dtype.hpp"
@@ -12,16 +13,18 @@
 using namespace tenzor;
 using namespace tenzor::nn::amp;
 
-class AutocastTest : public ::testing::Test {
+class AutocastTest : public ::tenzor::testing::BackendTest {
 protected:
     void SetUp() override {
+        ::tenzor::testing::BackendTest::SetUp();
+        if (::testing::Test::IsSkipped()) return;
         // Ensure clean state before each test
         // Note: Thread-local state is automatically reset per test
     }
 };
 
 // Test basic enable/disable
-TEST_F(AutocastTest, BasicEnableDisable) {
+TEST_P(AutocastTest, BasicEnableDisable) {
     EXPECT_FALSE(Autocast::is_enabled());
 
     {
@@ -36,7 +39,7 @@ TEST_F(AutocastTest, BasicEnableDisable) {
 }
 
 // Test nested autocast contexts
-TEST_F(AutocastTest, NestedContexts) {
+TEST_P(AutocastTest, NestedContexts) {
     {
         Autocast outer(true, DType::Float16);
         EXPECT_TRUE(Autocast::is_enabled());
@@ -57,7 +60,7 @@ TEST_F(AutocastTest, NestedContexts) {
 }
 
 // Test disabling within enabled context
-TEST_F(AutocastTest, DisableWithinEnabled) {
+TEST_P(AutocastTest, DisableWithinEnabled) {
     {
         Autocast outer(true, DType::Float16);
         EXPECT_TRUE(Autocast::is_enabled());
@@ -73,7 +76,7 @@ TEST_F(AutocastTest, DisableWithinEnabled) {
 }
 
 // Test compute-heavy operations should be autocast
-TEST_F(AutocastTest, ComputeHeavyOperations) {
+TEST_P(AutocastTest, ComputeHeavyOperations) {
     {
         Autocast autocast(true, DType::Float16, Device::Type::CUDA);
 
@@ -87,7 +90,7 @@ TEST_F(AutocastTest, ComputeHeavyOperations) {
 }
 
 // Test stability-critical operations should not be autocast
-TEST_F(AutocastTest, StabilityCriticalOperations) {
+TEST_P(AutocastTest, StabilityCriticalOperations) {
     {
         Autocast autocast(true, DType::Float16, Device::Type::CUDA);
 
@@ -101,7 +104,7 @@ TEST_F(AutocastTest, StabilityCriticalOperations) {
 }
 
 // Test device type filtering
-TEST_F(AutocastTest, DeviceTypeFiltering) {
+TEST_P(AutocastTest, DeviceTypeFiltering) {
     {
         // Enable only for CUDA
         Autocast autocast(true, DType::Float16, Device::Type::CUDA);
@@ -112,7 +115,7 @@ TEST_F(AutocastTest, DeviceTypeFiltering) {
 }
 
 // Test BFloat16 dtype
-TEST_F(AutocastTest, BFloat16Dtype) {
+TEST_P(AutocastTest, BFloat16Dtype) {
     {
         Autocast autocast(true, DType::BFloat16);
         EXPECT_TRUE(Autocast::is_enabled());
@@ -124,14 +127,14 @@ TEST_F(AutocastTest, BFloat16Dtype) {
 }
 
 // Test invalid dtype throws exception
-TEST_F(AutocastTest, InvalidDtype) {
+TEST_P(AutocastTest, InvalidDtype) {
     EXPECT_THROW({
         Autocast autocast(true, DType::Int32);
     }, std::invalid_argument);
 }
 
 // Test AutocastGuard
-TEST_F(AutocastTest, AutocastGuard) {
+TEST_P(AutocastTest, AutocastGuard) {
     EXPECT_FALSE(Autocast::is_enabled());
 
     {
@@ -143,7 +146,7 @@ TEST_F(AutocastTest, AutocastGuard) {
 }
 
 // Test AutocastDisabled
-TEST_F(AutocastTest, AutocastDisabled) {
+TEST_P(AutocastTest, AutocastDisabled) {
     {
         Autocast autocast(true, DType::Float16);
         EXPECT_TRUE(Autocast::is_enabled());
@@ -158,7 +161,7 @@ TEST_F(AutocastTest, AutocastDisabled) {
 }
 
 // Test get_autocast_dtype with Float32 input
-TEST_F(AutocastTest, AutocastDtypeFloat32) {
+TEST_P(AutocastTest, AutocastDtypeFloat32) {
     {
         Autocast autocast(true, DType::Float16);
 
@@ -179,7 +182,7 @@ TEST_F(AutocastTest, AutocastDtypeFloat32) {
 }
 
 // Test that already-low-precision inputs stay the same
-TEST_F(AutocastTest, LowPrecisionInput) {
+TEST_P(AutocastTest, LowPrecisionInput) {
     {
         Autocast autocast(true, DType::Float16);
 
@@ -194,7 +197,7 @@ TEST_F(AutocastTest, LowPrecisionInput) {
 }
 
 // Test that integer types are preserved
-TEST_F(AutocastTest, IntegerPreservation) {
+TEST_P(AutocastTest, IntegerPreservation) {
     {
         Autocast autocast(true, DType::Float16);
 
@@ -204,7 +207,7 @@ TEST_F(AutocastTest, IntegerPreservation) {
 }
 
 // Test helper function
-TEST_F(AutocastTest, HelperFunction) {
+TEST_P(AutocastTest, HelperFunction) {
     EXPECT_FALSE(Autocast::is_enabled());
 
     {
@@ -217,7 +220,7 @@ TEST_F(AutocastTest, HelperFunction) {
 }
 
 // Test multiple enable/disable cycles
-TEST_F(AutocastTest, MultipleCycles) {
+TEST_P(AutocastTest, MultipleCycles) {
     for (int i = 0; i < 5; ++i) {
         EXPECT_FALSE(Autocast::is_enabled());
 
@@ -231,7 +234,7 @@ TEST_F(AutocastTest, MultipleCycles) {
 }
 
 // Test device type persistence
-TEST_F(AutocastTest, DeviceTypePersistence) {
+TEST_P(AutocastTest, DeviceTypePersistence) {
     {
         Autocast autocast(true, DType::Float16, Device::Type::CUDA);
         EXPECT_TRUE(Autocast::get_device_type().has_value());
@@ -241,7 +244,4 @@ TEST_F(AutocastTest, DeviceTypePersistence) {
     EXPECT_FALSE(Autocast::get_device_type().has_value());
 }
 
-int main(int argc, char** argv) {
-    ::testing::InitGoogleTest(&argc, argv);
-    return RUN_ALL_TESTS();
-}
+INSTANTIATE_BACKEND_TESTS(AutocastTest);

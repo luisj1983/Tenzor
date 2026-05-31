@@ -1,16 +1,16 @@
 #include <gtest/gtest.h>
 #include <tenzor/tenzor.hpp>
 #include <tenzor/nn/quantization/awq.hpp>
-#include <mutex>
+#include "../../backend_test_fixture.hpp"
 
 using namespace tenzor;
 using namespace tenzor::nn::quantization;
 
-class AWQQuantizerTest : public ::testing::Test {
+class AWQQuantizerTest : public ::tenzor::testing::BackendTest {
 protected:
     void SetUp() override {
-        static std::once_flag init_flag;
-        std::call_once(init_flag, []() { tenzor::initialize(); });
+        ::tenzor::testing::BackendTest::SetUp();
+        if (::testing::Test::IsSkipped()) return;
     }
 };
 
@@ -18,12 +18,12 @@ protected:
 // Construction
 // ---------------------------------------------------------------------------
 
-TEST_F(AWQQuantizerTest, DefaultConstruction) {
+TEST_P(AWQQuantizerTest, DefaultConstruction) {
     AWQQuantizer q;
     // Should not throw; default is 4-bit, group_size=128
 }
 
-TEST_F(AWQQuantizerTest, CustomBitsAndGroupSize) {
+TEST_P(AWQQuantizerTest, CustomBitsAndGroupSize) {
     AWQConfig config;
     config.bits = 8;
     config.group_size = 64;
@@ -35,9 +35,9 @@ TEST_F(AWQQuantizerTest, CustomBitsAndGroupSize) {
 // compute_act_scales
 // ---------------------------------------------------------------------------
 
-TEST_F(AWQQuantizerTest, ComputeActScalesShape) {
+TEST_P(AWQQuantizerTest, ComputeActScalesShape) {
     // activations: [batch=8, features=256]
-    auto act = tenzor::randn({8, 256});
+    auto act = tenzor::randn({8, 256}, DType::Float32, device);
     auto scales = AWQQuantizer::compute_act_scales(act);
 
     // Scales should be per-feature, shape [256]
@@ -45,8 +45,8 @@ TEST_F(AWQQuantizerTest, ComputeActScalesShape) {
     EXPECT_EQ(scales.size(0), 256);
 }
 
-TEST_F(AWQQuantizerTest, ComputeActScalesNonNegative) {
-    auto act = tenzor::randn({16, 64});
+TEST_P(AWQQuantizerTest, ComputeActScalesNonNegative) {
+    auto act = tenzor::randn({16, 64}, DType::Float32, device);
     auto scales = AWQQuantizer::compute_act_scales(act);
 
     auto scales_cpu = scales.to(Device::cpu());
@@ -60,13 +60,13 @@ TEST_F(AWQQuantizerTest, ComputeActScalesNonNegative) {
 // quantize_layer exercises the internal find_optimal_scales path
 // ---------------------------------------------------------------------------
 
-TEST_F(AWQQuantizerTest, QuantizeLayerBasicSmall) {
+TEST_P(AWQQuantizerTest, QuantizeLayerBasicSmall) {
     AWQConfig config;
     config.bits = 4;
     config.group_size = 64;
     AWQQuantizer q(config);
-    auto weight = tenzor::randn({32, 64});
-    auto act_scales = AWQQuantizer::compute_act_scales(tenzor::randn({8, 64}));
+    auto weight = tenzor::randn({32, 64}, DType::Float32, device);
+    auto act_scales = AWQQuantizer::compute_act_scales(tenzor::randn({8, 64}, DType::Float32, device));
 
     auto result = q.quantize_layer(weight, act_scales);
 
@@ -78,13 +78,13 @@ TEST_F(AWQQuantizerTest, QuantizeLayerBasicSmall) {
 // quantize_layer
 // ---------------------------------------------------------------------------
 
-TEST_F(AWQQuantizerTest, QuantizeLayerOutputShapes) {
+TEST_P(AWQQuantizerTest, QuantizeLayerOutputShapes) {
     AWQConfig config;
     config.bits = 4;
     config.group_size = 128;
     AWQQuantizer q(config);
-    auto weight = tenzor::randn({64, 128});
-    auto scales = tenzor::abs(tenzor::randn({128})) + 0.1f;
+    auto weight = tenzor::randn({64, 128}, DType::Float32, device);
+    auto scales = tenzor::abs(tenzor::randn({128}, DType::Float32, device)) + 0.1f;
 
     auto result = q.quantize_layer(weight, scales);
 
@@ -95,14 +95,14 @@ TEST_F(AWQQuantizerTest, QuantizeLayerOutputShapes) {
     EXPECT_GT(result.scales.numel(), 0);
 }
 
-TEST_F(AWQQuantizerTest, QuantizeLayerRoundTripError) {
+TEST_P(AWQQuantizerTest, QuantizeLayerRoundTripError) {
     AWQConfig config;
     config.bits = 4;
     config.group_size = 128;
     AWQQuantizer q(config);
     // Use small values to keep quantization error manageable
-    auto weight = tenzor::randn({32, 128}) * 0.1f;
-    auto act = tenzor::randn({16, 128});
+    auto weight = tenzor::randn({32, 128}, DType::Float32, device) * 0.1f;
+    auto act = tenzor::randn({16, 128}, DType::Float32, device);
     auto act_scales = AWQQuantizer::compute_act_scales(act);
 
     auto result = q.quantize_layer(weight, act_scales);
@@ -118,13 +118,13 @@ TEST_F(AWQQuantizerTest, QuantizeLayerRoundTripError) {
 // quantize_layer produces packed INT4 output (pack_int4 is internal)
 // ---------------------------------------------------------------------------
 
-TEST_F(AWQQuantizerTest, QuantizeLayerInt4ProducesPacked) {
+TEST_P(AWQQuantizerTest, QuantizeLayerInt4ProducesPacked) {
     AWQConfig config;
     config.bits = 4;
     config.group_size = 128;
     AWQQuantizer q(config);
-    auto weight = tenzor::randn({64, 128});
-    auto scales = tenzor::abs(tenzor::randn({128})) + 0.1f;
+    auto weight = tenzor::randn({64, 128}, DType::Float32, device);
+    auto scales = tenzor::abs(tenzor::randn({128}, DType::Float32, device)) + 0.1f;
 
     auto result = q.quantize_layer(weight, scales);
 
@@ -133,16 +133,18 @@ TEST_F(AWQQuantizerTest, QuantizeLayerInt4ProducesPacked) {
     EXPECT_EQ(result.quantized_weight.size(0), 64);
 }
 
-TEST_F(AWQQuantizerTest, QuantizeLayerLargerWeight) {
+TEST_P(AWQQuantizerTest, QuantizeLayerLargerWeight) {
     AWQConfig config;
     config.bits = 4;
     config.group_size = 128;
     AWQQuantizer q(config);
-    auto weight = tenzor::randn({16, 256});
-    auto scales = tenzor::abs(tenzor::randn({256})) + 0.1f;
+    auto weight = tenzor::randn({16, 256}, DType::Float32, device);
+    auto scales = tenzor::abs(tenzor::randn({256}, DType::Float32, device)) + 0.1f;
 
     auto result = q.quantize_layer(weight, scales);
 
     EXPECT_EQ(result.quantized_weight.size(0), 16);
     EXPECT_GT(result.scales.numel(), 0);
 }
+
+INSTANTIATE_BACKEND_TESTS(AWQQuantizerTest);

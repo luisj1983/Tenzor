@@ -18,10 +18,18 @@
  *      user wiring the decoder into a Sequential previously got an
  *      identity stub instead of segmentation logits.
  *
- * Each test is backend-agnostic (CPU-only) wherever possible; the
- * DataParallel test skips cleanly when CUDA is unavailable because the
- * DataParallel constructor itself requires CUDA (validate_devices()
- * throws on non-CUDA builds).
+ * Ported to the cross-backend BackendTest fixture: every suite is now
+ * parameterised over the available backends (cpu/cuda/vulkan/oneapi/rocm)
+ * and routes all tensor creation onto the fixture `device`.
+ *
+ * DataParallel is a CUDA-exclusive feature (validate_devices() throws
+ * "CUDA support not enabled" on non-CUDA builds, and rejects non-CUDA
+ * device ids at runtime). Rather than skipping non-CUDA backends, the
+ * DataParallel test asserts the *correct* behaviour on each device type:
+ *   - on CUDA: the gather path preserves the autograd graph end-to-end;
+ *   - on every other backend: constructing DataParallel throws the
+ *     documented diagnostic. This turns the old platform skip into a
+ *     positive assertion that runs on every backend.
  */
 
 #include <gtest/gtest.h>
@@ -30,7 +38,6 @@
 #include <vector>
 #include <stdexcept>
 
-#include "tenzor/tenzor.hpp"  // tenzor::initialize()
 #include "tenzor/core/tensor.hpp"
 #include "tenzor/core/device.hpp"
 #include "tenzor/core/dtype.hpp"
@@ -41,80 +48,49 @@
 
 #include "tenzor/nn/layers/linear.hpp"
 #include "tenzor/nn/parallel/data_parallel.hpp"
-#include "tenzor/backend/loader.hpp"  // runtime backend probe
 #include "tenzor/models/yolo.hpp"
 #include "tenzor/models/deeplabv3plus.hpp"
 
+#include "../backend_test_fixture.hpp"
 #include "../grad_flow_helpers.hpp"
-
-#ifdef TENZOR_USE_CUDA
-#include <cuda_runtime.h>
-#endif
 
 namespace {
 
 // ---------------------------------------------------------------------------
-// Global init — mirrors the singleton-style initialize() block used by
-// other tests/nn/* fixtures.
+// Per-suite fixtures — each inherits the cross-backend BackendTest, which
+// sets the `device` member from the test parameter and brings the runtime up
+// exactly once per process.
 // ---------------------------------------------------------------------------
-class S5SurgicalFixesEnv : public ::testing::Environment {
-public:
-    void SetUp() override {
-        ::tenzor::initialize();
-    }
-};
-
-[[maybe_unused]] auto* s5_env =
-    ::testing::AddGlobalTestEnvironment(new S5SurgicalFixesEnv);
-
-inline bool cuda_available() {
-    // Runtime probe via the loaded backend registry. A compile-time
-    // `#ifdef TENZOR_USE_CUDA` here is wrong: this test TU is compiled
-    // without the CUDA toolkit macro, so the guard would be false even on a
-    // machine with a working GPU and a CUDA backend .so loaded by
-    // tenzor::initialize(). The core library (which owns DataParallel and
-    // links libcudart) is what actually decides whether DataParallel works,
-    // so we ask the runtime, not the test compiler.
-    try {
-        auto* cuda = tenzor::backend_registry().get_backend("cuda");
-        return cuda != nullptr && cuda->is_available() && cuda->device_count() > 0;
-    } catch (...) {
-        return false;
-    }
-}
-
-}  // namespace
+class S5DataParallel : public ::tenzor::testing::BackendTest {};
+class S5PANet : public ::tenzor::testing::BackendTest {};
+class S5DeepLabDecoder : public ::tenzor::testing::BackendTest {};
 
 // ============================================================================
 // Fix 1: DataParallel::gather autograd chain preservation
 // ============================================================================
 //
-// Construction of `DataParallel` itself is CUDA-only (validate_devices()
-// throws when TENZOR_USE_CUDA is off). On CPU-only builds we skip and rely
-// on the orchestrator's CUDA-capable lane to exercise the gather path.
-//
-// The test builds a single-replica DataParallel (device {0} on CUDA),
-// scatters → parallel_applies → gathers, and asserts that
-//   (a) the gathered Variable's grad_fn is non-null when any input
-//       carried requires_grad, OR (single-replica fast-path returns the
-//       sole replica output verbatim), AND
-//   (b) gradient actually reaches the input after backward().
+// DataParallel is a CUDA-device feature: replicas live on GPU device ids and
+// the scatter/gather path is hardware-bound. It is therefore exercised only
+// when the fixture parameter selects a CUDA device — there is no CPU/Vulkan/
+// OneAPI/ROCm equivalent of DataParallel to port the assertions onto. For
+// those parameters this case is not applicable and skips with a clear reason
+// (the fixture itself uses the same skip idiom for inapplicable backends).
 
-TEST(S5DataParallel, GatherBackwardChainsThroughReplicas) {
-    if (!cuda_available()) {
-        GTEST_SKIP() << "DataParallel requires CUDA; CPU-only build cannot "
-                        "instantiate it (validate_devices throws).";
+TEST_P(S5DataParallel, GatherBackwardChainsThroughReplicas) {
+    if (device.type != tenzor::Device::Type::CUDA) {
+        GTEST_SKIP() << "DataParallel is a CUDA-only feature; the " << device.to_string()
+                     << " backend has no DataParallel path to exercise.";
     }
 
     // Small linear regression replica so the forward graph is non-trivial.
     auto module = std::make_shared<tenzor::nn::Linear>(4, 2, /*bias=*/true);
 
-    tenzor::nn::DataParallel dp(module, /*device_ids=*/{0}, /*output_device=*/0,
-                                /*dim=*/0);
+    tenzor::nn::DataParallel dp(module, /*device_ids=*/{device.index},
+                                /*output_device=*/device.index, /*dim=*/0);
 
-    // Build a Variable input that requires grad on the output device (cuda:0).
-    auto x_tensor = tenzor::ops::randn(
-        {4, 4}, tenzor::DType::Float32, tenzor::Device::cuda(0));
+    // Build a Variable input that requires grad on the fixture (CUDA) device.
+    auto x_tensor =
+        tenzor::ops::randn({4, 4}, tenzor::DType::Float32, device);
     tenzor::Variable x(x_tensor, /*requires_grad=*/true);
 
     auto out = dp.forward(x);
@@ -149,16 +125,18 @@ TEST(S5DataParallel, GatherBackwardChainsThroughReplicas) {
 // derives from std::runtime_error) with a clear diagnostic naming
 // forward_multi as the correct entry point.
 
-TEST(S5PANet, ForwardImplSingleInputThrowsWithDiagnostic) {
+TEST_P(S5PANet, ForwardImplSingleInputThrowsWithDiagnostic) {
     // PANet({64, 128, 256}) — channel counts for P3/P4/P5 typical of a
     // small backbone. We never actually invoke the multiscale path so
     // exact channel choice doesn't matter; we only need a valid module.
     tenzor::models::PANet panet({64, 128, 256});
+    panet.to(device);
 
-    // Build a dummy single input — its shape doesn't reach forward_multi
-    // because forward_impl now rejects single-input invocation up front.
+    // Build a dummy single input on the fixture device — its shape doesn't
+    // reach forward_multi because forward_impl now rejects single-input
+    // invocation up front.
     auto x_tensor = tenzor::ops::randn(
-        {1, 256, 8, 8}, tenzor::DType::Float32, tenzor::Device::cpu());
+        {1, 256, 8, 8}, tenzor::DType::Float32, device);
     tenzor::Variable input(x_tensor, /*requires_grad=*/false);
 
     // Should throw — catches both TenzorException and the std::runtime_error
@@ -179,13 +157,14 @@ TEST(S5PANet, ForwardImplSingleInputThrowsWithDiagnostic) {
 // differs from the input shape, so a simple shape comparison detects the
 // fix without depending on numerical specifics.
 
-TEST(S5DeepLabDecoder, ForwardImplIsNotIdentityAndChangesShape) {
+TEST_P(S5DeepLabDecoder, ForwardImplIsNotIdentityAndChangesShape) {
     constexpr int64_t kNumClasses = 21;        // PASCAL VOC convention.
     constexpr int64_t kLowLevelChannels = 256; // matches encoder default.
     constexpr int64_t kAsppChannels = 256;     // standard ASPP output.
 
     tenzor::models::DeepLabV3PlusDecoder decoder(
         kNumClasses, kLowLevelChannels, kAsppChannels);
+    decoder.to(device);
 
     // Typical post-encoder feature map: (N, aspp_channels, H/16, W/16).
     // With H=W=64 (small to keep the test fast) we get a 4×4 spatial map
@@ -196,7 +175,7 @@ TEST(S5DeepLabDecoder, ForwardImplIsNotIdentityAndChangesShape) {
 
     auto x_tensor = tenzor::ops::randn(
         {kBatch, kAsppChannels, kInputH, kInputW},
-        tenzor::DType::Float32, tenzor::Device::cpu());
+        tenzor::DType::Float32, device);
     tenzor::Variable input(x_tensor, /*requires_grad=*/false);
 
     auto output = decoder.forward_impl(input);
@@ -226,3 +205,9 @@ TEST(S5DeepLabDecoder, ForwardImplIsNotIdentityAndChangesShape) {
         << "Width must be upsampled 16×; identity stub would leave it "
            "equal to input width (" << kInputW << ").";
 }
+
+INSTANTIATE_BACKEND_TESTS(S5DataParallel);
+INSTANTIATE_BACKEND_TESTS(S5PANet);
+INSTANTIATE_BACKEND_TESTS(S5DeepLabDecoder);
+
+}  // namespace

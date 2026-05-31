@@ -14,38 +14,31 @@
 #include <tenzor/models/resnet.hpp>
 #include <tenzor/models/bert.hpp>
 #include <memory>
+#include "../backend_test_fixture.hpp"
 
 using namespace tenzor;
 using namespace tenzor::nn;
 using namespace tenzor::models;
 
 //==============================================================================
-// Test Environment
+// Test fixture
 //==============================================================================
 
-class ModelZooEnvironment : public ::testing::Environment {
-public:
-    void SetUp() override {
-        tenzor::initialize();
-    }
-};
-
-static ::testing::Environment* const model_zoo_env =
-    ::testing::AddGlobalTestEnvironment(new ModelZooEnvironment);
+class ModelZoo : public ::tenzor::testing::BackendTest {};
 
 //==============================================================================
 // Test 1: ResNet-18 Model Creation
 //==============================================================================
 
-TEST(ModelZoo, ResNet18Creation) {
+TEST_P(ModelZoo, ResNet18Creation) {
     auto model = resnet18(10);  // 10 classes
     EXPECT_NE(model, nullptr);
 
-    model->to(Device::cpu());
+    model->to(device);
     model->eval();
 
     // Test inference
-    auto input = Variable(randn({2, 3, 224, 224}, DType::Float32, Device::cpu()), false);
+    auto input = Variable(randn({2, 3, 224, 224}, DType::Float32, device), false);
     auto output = model->forward(input);
 
     EXPECT_EQ(output.shape()[0], 2) << "Batch size should be preserved";
@@ -56,14 +49,14 @@ TEST(ModelZoo, ResNet18Creation) {
 // Test 2: ResNet-50 Model Creation
 //==============================================================================
 
-TEST(ModelZoo, ResNet50Creation) {
+TEST_P(ModelZoo, ResNet50Creation) {
     auto model = resnet50(1000);  // ImageNet classes
     EXPECT_NE(model, nullptr);
 
-    model->to(Device::cpu());
+    model->to(device);
     model->eval();
 
-    auto input = Variable(randn({1, 3, 224, 224}, DType::Float32, Device::cpu()), false);
+    auto input = Variable(randn({1, 3, 224, 224}, DType::Float32, device), false);
     auto output = model->forward(input);
 
     EXPECT_EQ(output.shape()[0], 1);
@@ -74,7 +67,7 @@ TEST(ModelZoo, ResNet50Creation) {
 // Test 3: Different ResNet Variants
 //==============================================================================
 
-TEST(ModelZoo, ResNetVariants) {
+TEST_P(ModelZoo, ResNetVariants) {
     std::vector<std::pair<std::string, std::function<std::shared_ptr<ResNet>()>>> variants = {
         {"ResNet-18", []() { return resnet18(10); }},
         {"ResNet-34", []() { return resnet34(10); }},
@@ -85,10 +78,10 @@ TEST(ModelZoo, ResNetVariants) {
         auto model = create_fn();
         EXPECT_NE(model, nullptr) << name << " creation failed";
 
-        model->to(Device::cpu());
+        model->to(device);
         model->eval();
 
-        auto input = Variable(randn({1, 3, 224, 224}, DType::Float32, Device::cpu()), false);
+        auto input = Variable(randn({1, 3, 224, 224}, DType::Float32, device), false);
         auto output = model->forward(input);
 
         EXPECT_EQ(output.shape()[1], 10) << name << " output shape incorrect";
@@ -99,7 +92,7 @@ TEST(ModelZoo, ResNetVariants) {
 // Test 4: BERT Model Creation
 //==============================================================================
 
-TEST(ModelZoo, BERTModelCreation) {
+TEST_P(ModelZoo, BERTModelCreation) {
     BertConfig config;
     config.vocab_size = 30000;
     config.hidden_size = 768;
@@ -111,12 +104,12 @@ TEST(ModelZoo, BERTModelCreation) {
     auto model = std::make_shared<BertModel>(config);
     EXPECT_NE(model, nullptr);
 
-    model->to(Device::cpu());
+    model->to(device);
     model->eval();
 
     // Test inference
-    auto input_ids = ones({2, 128}, DType::Int64, Device::cpu());
-    auto attention_mask = ones({2, 128}, DType::Float32, Device::cpu());
+    auto input_ids = ones({2, 128}, DType::Int64, device);
+    auto attention_mask = ones({2, 128}, DType::Float32, device);
 
     auto output = model->forward(
         Variable(input_ids, false),
@@ -135,9 +128,9 @@ TEST(ModelZoo, BERTModelCreation) {
 // Test 5: Fine-tuning ResNet on Small Dataset
 //==============================================================================
 
-TEST(ModelZoo, ResNetFineTuning) {
+TEST_P(ModelZoo, ResNetFineTuning) {
     auto model = resnet18(10);
-    model->to(Device::cpu());
+    model->to(device);
 
     auto params = model->parameters();
     optim::SGD optimizer(params, 0.001, 0.9);
@@ -146,12 +139,13 @@ TEST(ModelZoo, ResNetFineTuning) {
 
     // Simulate fine-tuning for a few steps
     for (int i = 0; i < 5; i++) {
-        auto input = Variable(randn({4, 3, 224, 224}, DType::Float32, Device::cpu()), true);
-        auto target_data = zeros({4, 10}, DType::Float32, Device::cpu());
-        auto target_ptr = const_cast<float*>(target_data.template data<float>());
+        auto input = Variable(randn({4, 3, 224, 224}, DType::Float32, device), true);
+        auto target_cpu = zeros({4, 10}, DType::Float32, Device::cpu());
+        auto target_ptr = const_cast<float*>(target_cpu.template data<float>());
         for (int j = 0; j < 4; j++) {
             target_ptr[j * 10 + (j % 10)] = 1.0f;
         }
+        auto target_data = target_cpu.to(device);
         auto target = Variable(target_data, false);
 
         optimizer.zero_grad();
@@ -160,7 +154,8 @@ TEST(ModelZoo, ResNetFineTuning) {
         loss.backward();
         optimizer.step();
 
-        EXPECT_GT(loss.tensor().template item<float>(), 0.0f) << "Loss should be positive";
+        auto loss_cpu = loss.tensor().cpu();
+        EXPECT_GT(loss_cpu.template item<float>(), 0.0f) << "Loss should be positive";
     }
 
     SUCCEED() << "Fine-tuning completed";
@@ -170,15 +165,15 @@ TEST(ModelZoo, ResNetFineTuning) {
 // Test 6: Model Inference Batch Size Flexibility
 //==============================================================================
 
-TEST(ModelZoo, InferenceBatchSizeFlexibility) {
+TEST_P(ModelZoo, InferenceBatchSizeFlexibility) {
     auto model = resnet18(10);
-    model->to(Device::cpu());
+    model->to(device);
     model->eval();
 
     std::vector<int> batch_sizes = {1, 2, 4, 8, 16};
 
     for (auto batch_size : batch_sizes) {
-        auto input = Variable(randn({batch_size, 3, 224, 224}, DType::Float32, Device::cpu()), false);
+        auto input = Variable(randn({batch_size, 3, 224, 224}, DType::Float32, device), false);
         auto output = model->forward(input);
 
         EXPECT_EQ(output.shape()[0], batch_size)
@@ -190,13 +185,13 @@ TEST(ModelZoo, InferenceBatchSizeFlexibility) {
 // Test 7: Transfer Learning - Feature Extraction
 //==============================================================================
 
-TEST(ModelZoo, TransferLearningFeatureExtraction) {
+TEST_P(ModelZoo, TransferLearningFeatureExtraction) {
     auto backbone = resnet18(1000);  // Pretrained on ImageNet (simulated)
-    backbone->to(Device::cpu());
+    backbone->to(device);
     backbone->eval();
 
     // Use model as feature extractor
-    auto input = Variable(randn({8, 3, 224, 224}, DType::Float32, Device::cpu()), false);
+    auto input = Variable(randn({8, 3, 224, 224}, DType::Float32, device), false);
     auto features = backbone->forward(input);
 
     // Verify feature extraction works
@@ -205,7 +200,7 @@ TEST(ModelZoo, TransferLearningFeatureExtraction) {
 
     // Add custom classifier
     auto classifier = std::make_shared<Linear>(features.shape()[1], 5);  // 5 classes
-    classifier->to(Device::cpu());
+    classifier->to(device);
 
     auto output = classifier->forward(features);
     EXPECT_EQ(output.shape()[1], 5) << "Custom classifier output correct";
@@ -215,7 +210,7 @@ TEST(ModelZoo, TransferLearningFeatureExtraction) {
 // Test 8: BERT for Sequence Classification
 //==============================================================================
 
-TEST(ModelZoo, BERTSequenceClassification) {
+TEST_P(ModelZoo, BERTSequenceClassification) {
     // Smaller BERT config for testing
     BertConfig config;
     config.vocab_size = 1000;
@@ -226,11 +221,11 @@ TEST(ModelZoo, BERTSequenceClassification) {
     config.max_position_embeddings = 128;
 
     auto bert = std::make_shared<BertModel>(config);
-    bert->to(Device::cpu());
+    bert->to(device);
 
     // Add classification head
     auto classifier = std::make_shared<Linear>(config.hidden_size, 2);  // Binary classification
-    classifier->to(Device::cpu());
+    classifier->to(device);
 
     // Create composite model
     class BERTClassifier : public Module {
@@ -266,13 +261,14 @@ TEST(ModelZoo, BERTSequenceClassification) {
 
     // Fine-tune for a few steps
     for (int i = 0; i < 3; i++) {
-        auto input_ids = ones({4, 64}, DType::Int64, Device::cpu());
-        auto attention_mask = ones({4, 64}, DType::Float32, Device::cpu());
-        auto target_data = zeros({4, 2}, DType::Float32, Device::cpu());
-        auto target_ptr = const_cast<float*>(target_data.template data<float>());
+        auto input_ids = ones({4, 64}, DType::Int64, device);
+        auto attention_mask = ones({4, 64}, DType::Float32, device);
+        auto target_cpu = zeros({4, 2}, DType::Float32, Device::cpu());
+        auto target_ptr = const_cast<float*>(target_cpu.template data<float>());
         for (int j = 0; j < 4; j++) {
             target_ptr[j * 2 + (j % 2)] = 1.0f;
         }
+        auto target_data = target_cpu.to(device);
 
         optimizer.zero_grad();
         auto output = model->forward_with_mask(
@@ -286,3 +282,9 @@ TEST(ModelZoo, BERTSequenceClassification) {
 
     SUCCEED() << "BERT fine-tuning for classification completed";
 }
+
+//==============================================================================
+// Backend instantiation
+//==============================================================================
+
+INSTANTIATE_BACKEND_TESTS(ModelZoo);

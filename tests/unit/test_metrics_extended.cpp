@@ -7,17 +7,18 @@
 #include <tenzor/tenzor.hpp>
 #include <tenzor/nn/metrics.hpp>
 #include <tenzor/ops/creation.hpp>
-#include <mutex>
 #include <cmath>
+
+#include "../backend_test_fixture.hpp"
 
 using namespace tenzor;
 using namespace tenzor::nn;
 
-class MetricsExtendedTest : public ::testing::Test {
+class MetricsExtendedTest : public ::tenzor::testing::BackendTest {
 protected:
     void SetUp() override {
-        static std::once_flag init_flag;
-        std::call_once(init_flag, []() { tenzor::initialize(); });
+        ::tenzor::testing::BackendTest::SetUp();
+        if (::testing::Test::IsSkipped()) return;
     }
 };
 
@@ -25,74 +26,78 @@ protected:
 // AUROC tests
 // ============================================================================
 
-TEST_F(MetricsExtendedTest, AUROC_Construction) {
+TEST_P(MetricsExtendedTest, AUROC_Construction) {
     AUROC auroc;
     // Should not crash; name should be correct.
     EXPECT_EQ(auroc.name(), "auroc");
 }
 
-TEST_F(MetricsExtendedTest, AUROC_PerfectPredictions) {
+TEST_P(MetricsExtendedTest, AUROC_PerfectPredictions) {
     // Negative class gets low scores, positive class gets high scores -> AUC = 1.0
     AUROC auroc;
 
     float pred_data[] = {0.0f, 0.0f, 1.0f, 1.0f};
     float target_data[] = {0.0f, 0.0f, 1.0f, 1.0f};
 
-    auto preds = from_data(pred_data, {4});
-    auto targets = from_data(target_data, {4});
+    auto preds = from_data(pred_data, {4}, device);
+    auto targets = from_data(target_data, {4}, device);
 
     auroc.update(preds, targets);
     auto result = auroc.compute();
 
-    EXPECT_NEAR(result.data<float>()[0], 1.0f, 1e-5);
+    auto result_cpu = result.cpu();
+    EXPECT_NEAR(result_cpu.data<float>()[0], 1.0f, 1e-5);
 }
 
-TEST_F(MetricsExtendedTest, AUROC_InvertedPredictions) {
+TEST_P(MetricsExtendedTest, AUROC_InvertedPredictions) {
     // Perfectly inverted: positive class gets low scores, negative gets high -> AUC = 0.0
     AUROC auroc;
 
     float pred_data[] = {1.0f, 1.0f, 0.0f, 0.0f};
     float target_data[] = {0.0f, 0.0f, 1.0f, 1.0f};
 
-    auto preds = from_data(pred_data, {4});
-    auto targets = from_data(target_data, {4});
+    auto preds = from_data(pred_data, {4}, device);
+    auto targets = from_data(target_data, {4}, device);
 
     auroc.update(preds, targets);
     auto result = auroc.compute();
 
-    EXPECT_NEAR(result.data<float>()[0], 0.0f, 1e-5);
+    auto result_cpu = result.cpu();
+    EXPECT_NEAR(result_cpu.data<float>()[0], 0.0f, 1e-5);
 }
 
-TEST_F(MetricsExtendedTest, AUROC_RandomPredictions) {
+TEST_P(MetricsExtendedTest, AUROC_RandomPredictions) {
     // Mixed predictions should give AUC between 0 and 1
     AUROC auroc;
 
     float pred_data[] = {0.3f, 0.7f, 0.4f, 0.6f, 0.2f, 0.8f};
     float target_data[] = {0.0f, 1.0f, 1.0f, 0.0f, 0.0f, 1.0f};
 
-    auto preds = from_data(pred_data, {6});
-    auto targets = from_data(target_data, {6});
+    auto preds = from_data(pred_data, {6}, device);
+    auto targets = from_data(target_data, {6}, device);
 
     auroc.update(preds, targets);
     auto result = auroc.compute();
 
-    float auc = result.data<float>()[0];
+    auto result_cpu = result.cpu();
+    float auc = result_cpu.data<float>()[0];
     EXPECT_GE(auc, 0.0f);
     EXPECT_LE(auc, 1.0f);
 }
 
-TEST_F(MetricsExtendedTest, AUROC_Reset) {
+TEST_P(MetricsExtendedTest, AUROC_Reset) {
     AUROC auroc;
 
     float pred_data[] = {0.0f, 1.0f};
     float target_data[] = {0.0f, 1.0f};
 
-    auto preds = from_data(pred_data, {2});
-    auto targets = from_data(target_data, {2});
+    auto preds = from_data(pred_data, {2}, device);
+    auto targets = from_data(target_data, {2}, device);
 
     auroc.update(preds, targets);
     auto result1 = auroc.compute();
-    EXPECT_NEAR(result1.data<float>()[0], 1.0f, 1e-5);
+    auto result1_cpu = result1.cpu();
+    EXPECT_NEAR(result1_cpu.data<float>()[0], 1.0f, 1e-5);
 
     auroc.reset();
 
@@ -100,15 +105,16 @@ TEST_F(MetricsExtendedTest, AUROC_Reset) {
     float pred_data2[] = {1.0f, 0.0f};
     float target_data2[] = {0.0f, 1.0f};
 
-    auto preds2 = from_data(pred_data2, {2});
-    auto targets2 = from_data(target_data2, {2});
+    auto preds2 = from_data(pred_data2, {2}, device);
+    auto targets2 = from_data(target_data2, {2}, device);
 
     auroc.update(preds2, targets2);
     auto result2 = auroc.compute();
-    EXPECT_NEAR(result2.data<float>()[0], 0.0f, 1e-5);
+    auto result2_cpu = result2.cpu();
+    EXPECT_NEAR(result2_cpu.data<float>()[0], 0.0f, 1e-5);
 }
 
-TEST_F(MetricsExtendedTest, AUROC_MultipleUpdates) {
+TEST_P(MetricsExtendedTest, AUROC_MultipleUpdates) {
     // Multiple update calls should accumulate data identically to a single call.
     AUROC auroc_single;
     AUROC auroc_multi;
@@ -118,15 +124,15 @@ TEST_F(MetricsExtendedTest, AUROC_MultipleUpdates) {
     float pred_data2[] = {0.2f, 0.8f};
     float target_data2[] = {0.0f, 1.0f};
 
-    auto p1 = from_data(pred_data1, {2});
-    auto t1 = from_data(target_data1, {2});
-    auto p2 = from_data(pred_data2, {2});
-    auto t2 = from_data(target_data2, {2});
+    auto p1 = from_data(pred_data1, {2}, device);
+    auto t1 = from_data(target_data1, {2}, device);
+    auto p2 = from_data(pred_data2, {2}, device);
+    auto t2 = from_data(target_data2, {2}, device);
 
     // Single update with all data
     float pred_all[] = {0.1f, 0.9f, 0.2f, 0.8f};
     float target_all[] = {0.0f, 1.0f, 0.0f, 1.0f};
-    auroc_single.update(from_data(pred_all, {4}), from_data(target_all, {4}));
+    auroc_single.update(from_data(pred_all, {4}, device), from_data(target_all, {4}, device));
 
     // Multiple updates
     auroc_multi.update(p1, t1);
@@ -135,19 +141,21 @@ TEST_F(MetricsExtendedTest, AUROC_MultipleUpdates) {
     auto result_single = auroc_single.compute();
     auto result_multi = auroc_multi.compute();
 
-    EXPECT_NEAR(result_single.data<float>()[0], result_multi.data<float>()[0], 1e-5);
+    auto result_single_cpu = result_single.cpu();
+    auto result_multi_cpu = result_multi.cpu();
+    EXPECT_NEAR(result_single_cpu.data<float>()[0], result_multi_cpu.data<float>()[0], 1e-5);
 }
 
 // ============================================================================
 // ConfusionMatrix tests
 // ============================================================================
 
-TEST_F(MetricsExtendedTest, ConfusionMatrix_Construction) {
+TEST_P(MetricsExtendedTest, ConfusionMatrix_Construction) {
     ConfusionMatrix cm(3);
     EXPECT_EQ(cm.name(), "confusion_matrix");
 }
 
-TEST_F(MetricsExtendedTest, ConfusionMatrix_PerfectPredictions) {
+TEST_P(MetricsExtendedTest, ConfusionMatrix_PerfectPredictions) {
     // 3-class, all predictions correct -> diagonal nonzero, off-diagonal zero
     ConfusionMatrix cm(3);
 
@@ -160,8 +168,8 @@ TEST_F(MetricsExtendedTest, ConfusionMatrix_PerfectPredictions) {
     };
     float target_data[] = {0.0f, 1.0f, 2.0f};
 
-    auto preds = from_data(pred_data, {3, 3});
-    auto targets = from_data(target_data, {3});
+    auto preds = from_data(pred_data, {3, 3}, device);
+    auto targets = from_data(target_data, {3}, device);
 
     cm.update(preds, targets);
     auto mat = cm.compute();
@@ -171,7 +179,8 @@ TEST_F(MetricsExtendedTest, ConfusionMatrix_PerfectPredictions) {
     EXPECT_EQ(mat.shape()[0], 3);
     EXPECT_EQ(mat.shape()[1], 3);
 
-    const float* d = mat.data<float>();
+    auto mat_cpu = mat.cpu();
+    const float* d = mat_cpu.data<float>();
     // Diagonal should be 1 each
     EXPECT_NEAR(d[0 * 3 + 0], 1.0f, 1e-5);  // (0,0)
     EXPECT_NEAR(d[1 * 3 + 1], 1.0f, 1e-5);  // (1,1)
@@ -186,7 +195,7 @@ TEST_F(MetricsExtendedTest, ConfusionMatrix_PerfectPredictions) {
     EXPECT_NEAR(d[2 * 3 + 1], 0.0f, 1e-5);
 }
 
-TEST_F(MetricsExtendedTest, ConfusionMatrix_KnownConfusion) {
+TEST_P(MetricsExtendedTest, ConfusionMatrix_KnownConfusion) {
     // 3-class problem:
     // predictions (argmax) = {0, 1, 0, 2}
     // targets               = {0, 0, 0, 2}
@@ -206,13 +215,14 @@ TEST_F(MetricsExtendedTest, ConfusionMatrix_KnownConfusion) {
     };
     float target_data[] = {0.0f, 0.0f, 0.0f, 2.0f};
 
-    auto preds = from_data(pred_data, {4, 3});
-    auto targets = from_data(target_data, {4});
+    auto preds = from_data(pred_data, {4, 3}, device);
+    auto targets = from_data(target_data, {4}, device);
 
     cm.update(preds, targets);
     auto mat = cm.compute();
 
-    const float* d = mat.data<float>();
+    auto mat_cpu = mat.cpu();
+    const float* d = mat_cpu.data<float>();
     // matrix[0][0] = 2 (true=0, pred=0)
     EXPECT_NEAR(d[0 * 3 + 0], 2.0f, 1e-5);
     // matrix[0][1] = 1 (true=0, pred=1)
@@ -227,14 +237,14 @@ TEST_F(MetricsExtendedTest, ConfusionMatrix_KnownConfusion) {
     EXPECT_NEAR(d[1 * 3 + 2], 0.0f, 1e-5);
 }
 
-TEST_F(MetricsExtendedTest, ConfusionMatrix_Reset) {
+TEST_P(MetricsExtendedTest, ConfusionMatrix_Reset) {
     ConfusionMatrix cm(2);
 
     float pred_data[] = {0.0f, 1.0f, 1.0f, 0.0f};
     float target_data[] = {1.0f, 0.0f};
 
-    auto preds = from_data(pred_data, {2, 2});
-    auto targets = from_data(target_data, {2});
+    auto preds = from_data(pred_data, {2, 2}, device);
+    auto targets = from_data(target_data, {2}, device);
 
     cm.update(preds, targets);
     auto mat1 = cm.compute();
@@ -242,14 +252,15 @@ TEST_F(MetricsExtendedTest, ConfusionMatrix_Reset) {
     cm.reset();
     auto mat2 = cm.compute();
 
-    const float* d = mat2.data<float>();
+    auto mat2_cpu = mat2.cpu();
+    const float* d = mat2_cpu.data<float>();
     // After reset, matrix should be all zeros
     for (int i = 0; i < 4; ++i) {
         EXPECT_NEAR(d[i], 0.0f, 1e-5) << "index " << i;
     }
 }
 
-TEST_F(MetricsExtendedTest, ConfusionMatrix_MatrixShape) {
+TEST_P(MetricsExtendedTest, ConfusionMatrix_MatrixShape) {
     // Verify that compute() returns an (N, N) tensor for various N
     for (int64_t n : {2, 3, 5, 10}) {
         ConfusionMatrix cm(n);
@@ -260,3 +271,5 @@ TEST_F(MetricsExtendedTest, ConfusionMatrix_MatrixShape) {
         EXPECT_EQ(mat.shape()[1], n) << "num_classes=" << n;
     }
 }
+
+INSTANTIATE_BACKEND_TESTS(MetricsExtendedTest);

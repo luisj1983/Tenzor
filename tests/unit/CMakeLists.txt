@@ -577,7 +577,7 @@ target_link_libraries(test_linalg PRIVATE tenzor_core GTest::gtest_main)
 
 # Linear Algebra — Complex64/Complex128 via LAPACKE (Task 2.9)
 add_executable(test_linalg_complex test_linalg_complex.cpp)
-target_link_libraries(test_linalg_complex PRIVATE tenzor_core GTest::gtest)
+target_link_libraries(test_linalg_complex PRIVATE tenzor_core GTest::gtest_main)
 
 # Linear Algebra — advanced routines (lstsq, pinv, matrix_exp)
 add_executable(test_linalg_lstsq_pinv_matexp test_linalg_lstsq_pinv_matexp.cpp)
@@ -1062,18 +1062,18 @@ tenzor_discover_tests(test_fused_layer_norm_backward_f64 DISCOVERY_TIMEOUT 60 BA
 # Audit P0 #3 regression: fill_kernel uninitialized memory for missing dtypes
 add_executable(test_fill_kernel_dtype_coverage test_fill_kernel_dtype_coverage.cpp)
 target_link_libraries(test_fill_kernel_dtype_coverage PRIVATE tenzor_core GTest::gtest_main)
-tenzor_discover_tests(test_fill_kernel_dtype_coverage DISCOVERY_TIMEOUT 60 BACKENDS cpu LABELS "audit;cpu")
+tenzor_discover_tests(test_fill_kernel_dtype_coverage DISCOVERY_TIMEOUT 60 BACKENDS multi LABELS "audit")
 
 # Audit P0 #9 regression: StridedFill switch default: break silently no-ops for
 # Complex64/128, UInt16/32/64, FP8, and quantized dtypes on non-contiguous views
 add_executable(test_strided_fill_dtype_coverage test_strided_fill_dtype_coverage.cpp)
 target_link_libraries(test_strided_fill_dtype_coverage PRIVATE tenzor_core GTest::gtest_main)
-tenzor_discover_tests(test_strided_fill_dtype_coverage DISCOVERY_TIMEOUT 60 BACKENDS cpu LABELS "audit;cpu")
+tenzor_discover_tests(test_strided_fill_dtype_coverage DISCOVERY_TIMEOUT 60 BACKENDS multi LABELS "audit")
 
 # Audit P0 #4 regression: scatter_add missing UInt16/UInt32/UInt64/Int16 dispatch
 add_executable(test_scatter_add_dtype_coverage test_scatter_add_dtype_coverage.cpp)
 target_link_libraries(test_scatter_add_dtype_coverage PRIVATE tenzor_core GTest::gtest_main)
-tenzor_discover_tests(test_scatter_add_dtype_coverage DISCOVERY_TIMEOUT 60 BACKENDS cpu LABELS "audit;cpu")
+tenzor_discover_tests(test_scatter_add_dtype_coverage DISCOVERY_TIMEOUT 60 BACKENDS multi LABELS "audit")
 
 # Audit P0 #5 regression: complex matmul TENZOR_HAS_MKL → TENZOR_USE_MKL guard fix
 add_executable(test_complex_matmul_mkl test_complex_matmul_mkl.cpp)
@@ -1088,21 +1088,21 @@ tenzor_discover_tests(test_norm_eps_cache DISCOVERY_TIMEOUT 60 BACKENDS cpu LABE
 # Audit Phase 2 Tasks 2.1+2.2: creation kernels (zeros/ones/full/arange/linspace) dtype coverage
 add_executable(test_creation_dtype_coverage test_creation_dtype_coverage.cpp)
 target_link_libraries(test_creation_dtype_coverage PRIVATE tenzor_core GTest::gtest_main)
-tenzor_discover_tests(test_creation_dtype_coverage DISCOVERY_TIMEOUT 60 BACKENDS cpu LABELS "audit;cpu")
+tenzor_discover_tests(test_creation_dtype_coverage DISCOVERY_TIMEOUT 60 BACKENDS multi LABELS "audit")
 
 # Audit Phase 2 Tasks 2.3+2.4+2.5+2.10: math kernels (matmul/bmm/dot/pow/clamp) dtype coverage + F64 precision
 add_executable(test_math_dtype_coverage test_math_dtype_coverage.cpp)
 target_link_libraries(test_math_dtype_coverage PRIVATE tenzor_core GTest::gtest_main)
-tenzor_discover_tests(test_math_dtype_coverage DISCOVERY_TIMEOUT 60 BACKENDS cpu LABELS "audit;cpu")
+tenzor_discover_tests(test_math_dtype_coverage DISCOVERY_TIMEOUT 60 BACKENDS multi LABELS "audit")
 
 add_executable(test_reductions_dtype_coverage test_reductions_dtype_coverage.cpp)
 target_link_libraries(test_reductions_dtype_coverage PRIVATE tenzor_core GTest::gtest_main)
-tenzor_discover_tests(test_reductions_dtype_coverage DISCOVERY_TIMEOUT 60 BACKENDS cpu LABELS "audit;cpu")
+tenzor_discover_tests(test_reductions_dtype_coverage DISCOVERY_TIMEOUT 60 BACKENDS multi LABELS "audit")
 
 # Audit Phase 3 Tasks 3.1+3.2+3.3: norm F64 native, NaN propagation, F64 Kahan
 add_executable(test_reduction_numerical_fixes test_reduction_numerical_fixes.cpp)
 target_link_libraries(test_reduction_numerical_fixes PRIVATE tenzor_core GTest::gtest_main)
-tenzor_discover_tests(test_reduction_numerical_fixes DISCOVERY_TIMEOUT 60 BACKENDS cpu LABELS "audit;cpu")
+tenzor_discover_tests(test_reduction_numerical_fixes DISCOVERY_TIMEOUT 60 BACKENDS multi LABELS "audit")
 
 # Audit Phase 4 Task 4.2: Int8/UInt8 mul/add/sub wrap-on-overflow consistency
 add_executable(test_int8_overflow_semantics test_int8_overflow_semantics.cpp)
@@ -1148,9 +1148,9 @@ tenzor_discover_tests(test_onednn_format_any DISCOVERY_TIMEOUT 60 BACKENDS cpu L
 # Phase 9: _foreach_* multi-tensor optimizer ops
 add_executable(test_foreach_ops test_foreach_ops.cpp)
 target_link_libraries(test_foreach_ops PRIVATE tenzor_core GTest::gtest_main)
-tenzor_discover_tests(test_foreach_ops DISCOVERY_TIMEOUT 60 BACKENDS cpu LABELS "audit;cpu;foreach")
+tenzor_discover_tests(test_foreach_ops DISCOVERY_TIMEOUT 60 BACKENDS multi LABELS "audit;foreach")
 
 # Phase 11: New distribution sampler free functions
 add_executable(test_distributions_samplers test_distributions_samplers.cpp)
 target_link_libraries(test_distributions_samplers PRIVATE tenzor_core GTest::gtest_main)
-tenzor_discover_tests(test_distributions_samplers DISCOVERY_TIMEOUT 120 BACKENDS cpu LABELS "cpu;distributions")
+tenzor_discover_tests(test_distributions_samplers DISCOVERY_TIMEOUT 120 BACKENDS multi LABELS "distributions")

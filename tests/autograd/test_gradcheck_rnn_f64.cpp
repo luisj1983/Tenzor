@@ -1,18 +1,22 @@
 /**
  * @file test_gradcheck_rnn_f64.cpp
- * @brief S12 — Float64 native precision regression tests for the CPU RNN
- *        (LSTM/GRU) kernels.
+ * @brief S12 — Float64 native precision regression tests for the RNN
+ *        (LSTM/GRU) kernels, run across every available backend.
  *
- * Before S12, every kernel in `src/backends/cpu/kernels/rnn_kernels.cpp`
+ * Before S12, every CPU kernel in `src/backends/cpu/kernels/rnn_kernels.cpp`
  * funnelled Float64 inputs through `to(Float32) → compute → to(Float64)`.
  * That hides Float32 precision loss in the Float64 storage, so gradcheck
  * against the Float64 numerical derivative was off by `ε(Float32) · signal`
  * — small enough that earlier passes mistook it as a tolerance issue.
  *
  * These tests exercise each of the nine audit-listed kernels with Float64
- * inputs and confirm gradcheck passes at the tight Float64 tolerance
- * (1e-6 ε, 1e-5 / 1e-3 abs/rel). If somebody re-introduces a Float32
- * round-trip, the regression here trips.
+ * inputs and confirm the result matches a pure-double reference at the tight
+ * Float64 tolerance. If somebody re-introduces a Float32 round-trip, the
+ * regression here trips. Now parametrized over backends via BackendTest:
+ * inputs are created on `device` and dispatched there; host-side reference
+ * math reads tensors back via `.cpu()`. Float64 on some GPU backends (e.g.
+ * Vulkan) is genuinely unsupported and will surface here as a failure — that
+ * is intended, no skip is added.
  *
  * Coverage map (kernel → test):
  *   lstm_cell_forward_kernel          LSTMCellForwardF64
@@ -38,17 +42,17 @@
 #include <cmath>
 #include <vector>
 
+#include "../backend_test_fixture.hpp"
+
 using namespace tenzor;
 
 namespace {
 
-class RNNF64Test : public ::testing::Test {
+class RNNF64Test : public ::tenzor::testing::BackendTest {
 protected:
-    static void SetUpTestSuite() {
-        tenzor::initialize();
-    }
-
     void SetUp() override {
+        ::tenzor::testing::BackendTest::SetUp();
+        if (::testing::Test::IsSkipped()) return;
         tenzor::set_grad_enabled(true);
     }
 
@@ -60,8 +64,10 @@ protected:
 };
 
 // Build a small Float64 tensor with values in [-1, 1) using a fixed seed
-// so the test is fully deterministic across runs/builds.
-Tensor det_randn(std::vector<int64_t> shape, uint64_t seed) {
+// so the test is fully deterministic across runs/builds. The tensor is
+// materialised on CPU (host memcpy) and then moved to `device`.
+Tensor det_randn(std::vector<int64_t> shape, uint64_t seed,
+                 const Device& device) {
     int64_t numel = 1;
     for (auto s : shape) numel *= s;
     std::vector<double> data(static_cast<size_t>(numel));
@@ -76,7 +82,7 @@ Tensor det_randn(std::vector<int64_t> shape, uint64_t seed) {
     Tensor t = Tensor::empty_uninitialized(shape, DType::Float64, Device::cpu());
     std::memcpy(t.data<double>(), data.data(),
                 static_cast<size_t>(numel) * sizeof(double));
-    return t;
+    return t.to(device);
 }
 
 }  // namespace
@@ -85,20 +91,20 @@ Tensor det_randn(std::vector<int64_t> shape, uint64_t seed) {
 // Cell forward kernels (LSTM, GRU)
 // =============================================================================
 
-TEST_F(RNNF64Test, LSTMCellForwardF64) {
+TEST_P(RNNF64Test, LSTMCellForwardF64) {
     // nn::LSTMCell goes through the Linear-based gate-composition path for
     // Float64 (the fused LSTMCellForward op-dispatch is skipped because
     // the OneDNN/SIMD cell kernel is Float32-only). However, the dispatch
     // path through OpId::LSTMCellForward IS still callable, and IS what the
     // audit complained about. Test it directly.
     const int64_t batch = 2, in_sz = 3, hid = 4;
-    auto input = det_randn({batch, in_sz}, 0xA1);
-    auto hx    = det_randn({batch, hid}, 0xA2);
-    auto cx    = det_randn({batch, hid}, 0xA3);
-    auto w_ih  = det_randn({4 * hid, in_sz}, 0xA4);
-    auto w_hh  = det_randn({4 * hid, hid}, 0xA5);
-    auto b_ih  = det_randn({4 * hid}, 0xA6);
-    auto b_hh  = det_randn({4 * hid}, 0xA7);
+    auto input = det_randn({batch, in_sz}, 0xA1, device);
+    auto hx    = det_randn({batch, hid}, 0xA2, device);
+    auto cx    = det_randn({batch, hid}, 0xA3, device);
+    auto w_ih  = det_randn({4 * hid, in_sz}, 0xA4, device);
+    auto w_hh  = det_randn({4 * hid, hid}, 0xA5, device);
+    auto b_ih  = det_randn({4 * hid}, 0xA6, device);
+    auto b_hh  = det_randn({4 * hid}, 0xA7, device);
 
     // Sanity check: kernel runs in Float64 end-to-end and the result
     // dtype matches.
@@ -110,15 +116,23 @@ TEST_F(RNNF64Test, LSTMCellForwardF64) {
     EXPECT_EQ(outs[1].dtype(), DType::Float64);
 
     // Compare against a reference implementation done entirely in double.
+    // Host reads go through .cpu().
+    auto input_c = input.cpu();
+    auto hx_c = hx.cpu();
+    auto cx_c = cx.cpu();
+    auto w_ih_c = w_ih.cpu();
+    auto w_hh_c = w_hh.cpu();
+    auto b_ih_c = b_ih.cpu();
+    auto b_hh_c = b_hh.cpu();
     auto sig = [](double x) { return 1.0 / (1.0 + std::exp(-x)); };
     std::vector<double> ref_hy(batch * hid), ref_cy(batch * hid);
-    const double* in_d  = input.data<double>();
-    const double* hx_d  = hx.data<double>();
-    const double* cx_d  = cx.data<double>();
-    const double* wih_d = w_ih.data<double>();
-    const double* whh_d = w_hh.data<double>();
-    const double* bih_d = b_ih.data<double>();
-    const double* bhh_d = b_hh.data<double>();
+    const double* in_d  = input_c.data<double>();
+    const double* hx_d  = hx_c.data<double>();
+    const double* cx_d  = cx_c.data<double>();
+    const double* wih_d = w_ih_c.data<double>();
+    const double* whh_d = w_hh_c.data<double>();
+    const double* bih_d = b_ih_c.data<double>();
+    const double* bhh_d = b_hh_c.data<double>();
     for (int64_t b = 0; b < batch; ++b) {
         std::vector<double> gates(4 * hid);
         for (int64_t g = 0; g < 4 * hid; ++g) {
@@ -140,8 +154,10 @@ TEST_F(RNNF64Test, LSTMCellForwardF64) {
         }
     }
 
-    const double* got_hy = outs[0].data<double>();
-    const double* got_cy = outs[1].data<double>();
+    auto hy_c = outs[0].cpu();
+    auto cy_c = outs[1].cpu();
+    const double* got_hy = hy_c.data<double>();
+    const double* got_cy = cy_c.data<double>();
     for (int64_t i = 0; i < batch * hid; ++i) {
         // Native Float64 must match scalar double reference to ~1e-13.
         EXPECT_NEAR(got_hy[i], ref_hy[static_cast<size_t>(i)], 1e-13)
@@ -151,14 +167,14 @@ TEST_F(RNNF64Test, LSTMCellForwardF64) {
     }
 }
 
-TEST_F(RNNF64Test, GRUCellForwardF64) {
+TEST_P(RNNF64Test, GRUCellForwardF64) {
     const int64_t batch = 2, in_sz = 3, hid = 4;
-    auto input = det_randn({batch, in_sz}, 0xB1);
-    auto hx    = det_randn({batch, hid}, 0xB2);
-    auto w_ih  = det_randn({3 * hid, in_sz}, 0xB3);
-    auto w_hh  = det_randn({3 * hid, hid}, 0xB4);
-    auto b_ih  = det_randn({3 * hid}, 0xB5);
-    auto b_hh  = det_randn({3 * hid}, 0xB6);
+    auto input = det_randn({batch, in_sz}, 0xB1, device);
+    auto hx    = det_randn({batch, hid}, 0xB2, device);
+    auto w_ih  = det_randn({3 * hid, in_sz}, 0xB3, device);
+    auto w_hh  = det_randn({3 * hid, hid}, 0xB4, device);
+    auto b_ih  = det_randn({3 * hid}, 0xB5, device);
+    auto b_hh  = det_randn({3 * hid}, 0xB6, device);
 
     const Tensor in_arr[6] = {input, hx, w_ih, w_hh, b_ih, b_hh};
     auto outs = tenzor::dispatch(OpId::GRUCellForward,
@@ -166,15 +182,21 @@ TEST_F(RNNF64Test, GRUCellForwardF64) {
     ASSERT_EQ(outs.size(), 1u);
     EXPECT_EQ(outs[0].dtype(), DType::Float64);
 
-    // Reference: PyTorch GRU cell semantics in double.
+    // Reference: PyTorch GRU cell semantics in double. Host reads via .cpu().
+    auto input_c = input.cpu();
+    auto hx_c = hx.cpu();
+    auto w_ih_c = w_ih.cpu();
+    auto w_hh_c = w_hh.cpu();
+    auto b_ih_c = b_ih.cpu();
+    auto b_hh_c = b_hh.cpu();
     auto sig = [](double x) { return 1.0 / (1.0 + std::exp(-x)); };
     std::vector<double> ref_hy(batch * hid);
-    const double* in_d  = input.data<double>();
-    const double* hx_d  = hx.data<double>();
-    const double* wih_d = w_ih.data<double>();
-    const double* whh_d = w_hh.data<double>();
-    const double* bih_d = b_ih.data<double>();
-    const double* bhh_d = b_hh.data<double>();
+    const double* in_d  = input_c.data<double>();
+    const double* hx_d  = hx_c.data<double>();
+    const double* wih_d = w_ih_c.data<double>();
+    const double* whh_d = w_hh_c.data<double>();
+    const double* bih_d = b_ih_c.data<double>();
+    const double* bhh_d = b_hh_c.data<double>();
     for (int64_t b = 0; b < batch; ++b) {
         std::vector<double> rz(2 * hid);
         for (int64_t g = 0; g < 2 * hid; ++g) {
@@ -199,7 +221,8 @@ TEST_F(RNNF64Test, GRUCellForwardF64) {
             ref_hy[b * hid + h] = (1.0 - z) * n + z * hx_d[b * hid + h];
         }
     }
-    const double* got_hy = outs[0].data<double>();
+    auto hy_c = outs[0].cpu();
+    const double* got_hy = hy_c.data<double>();
     for (int64_t i = 0; i < batch * hid; ++i) {
         EXPECT_NEAR(got_hy[i], ref_hy[static_cast<size_t>(i)], 1e-13)
             << "GRU cell hy mismatch at " << i;
@@ -211,7 +234,7 @@ TEST_F(RNNF64Test, GRUCellForwardF64) {
 // =============================================================================
 
 // FD gradient of f(input) w.r.t. each input element, for scalar-output `f`.
-// f operates on a Float64 tensor and returns a Float64 scalar.
+// f operates on a host (CPU) Float64 tensor and returns a Float64 scalar.
 std::vector<double> fd_grad(std::function<double(const Tensor&)> f,
                             Tensor input, double h = 1e-6) {
     Tensor x = input.contiguous();
@@ -230,18 +253,18 @@ std::vector<double> fd_grad(std::function<double(const Tensor&)> f,
     return grad;
 }
 
-TEST_F(RNNF64Test, LSTMCellBackwardF64) {
+TEST_P(RNNF64Test, LSTMCellBackwardF64) {
     // Drive lstm_cell_backward_kernel via direct dispatch on
     // OpId::LSTMCellBackward, and compare against numerical FD through a
     // pure-double reference forward.
     const int64_t batch = 2, in_sz = 3, hid = 4;
-    auto input = det_randn({batch, in_sz}, 0xC1);
-    auto hx    = det_randn({batch, hid}, 0xC2);
-    auto cx    = det_randn({batch, hid}, 0xC3);
-    auto w_ih  = det_randn({4 * hid, in_sz}, 0xC4);
-    auto w_hh  = det_randn({4 * hid, hid}, 0xC5);
-    auto b_ih  = det_randn({4 * hid}, 0xC6);
-    auto b_hh  = det_randn({4 * hid}, 0xC7);
+    auto input = det_randn({batch, in_sz}, 0xC1, device);
+    auto hx    = det_randn({batch, hid}, 0xC2, device);
+    auto cx    = det_randn({batch, hid}, 0xC3, device);
+    auto w_ih  = det_randn({4 * hid, in_sz}, 0xC4, device);
+    auto w_hh  = det_randn({4 * hid, hid}, 0xC5, device);
+    auto b_ih  = det_randn({4 * hid}, 0xC6, device);
+    auto b_hh  = det_randn({4 * hid}, 0xC7, device);
 
     // Forward to get hy, cy (needed as inputs to backward).
     const Tensor fwd_in[7] = {input, hx, cx, w_ih, w_hh, b_ih, b_hh};
@@ -250,8 +273,8 @@ TEST_F(RNNF64Test, LSTMCellBackwardF64) {
     Tensor hy = fwd[0], cy = fwd[1];
 
     // Upstream grads: arbitrary fixed pattern.
-    Tensor d_hy = det_randn({batch, hid}, 0xC8);
-    Tensor d_cy = det_randn({batch, hid}, 0xC9);
+    Tensor d_hy = det_randn({batch, hid}, 0xC8, device);
+    Tensor d_cy = det_randn({batch, hid}, 0xC9, device);
 
     const Tensor bwd_in[11] = {d_hy, d_cy, input, hx, cx, hy, cy,
                                 w_ih, w_hh, b_ih, b_hh};
@@ -260,17 +283,26 @@ TEST_F(RNNF64Test, LSTMCellBackwardF64) {
     ASSERT_EQ(bwd.size(), 7u);
     for (const auto& t : bwd) EXPECT_EQ(t.dtype(), DType::Float64);
 
-    // Pure-double reference forward (matches the kernel logic).
+    // Pure-double reference forward (matches the kernel logic). Operates on a
+    // host (CPU) perturbed copy of `input`; other tensors read back to host.
+    auto hx_c = hx.cpu();
+    auto cx_c = cx.cpu();
+    auto w_ih_c = w_ih.cpu();
+    auto w_hh_c = w_hh.cpu();
+    auto b_ih_c = b_ih.cpu();
+    auto b_hh_c = b_hh.cpu();
+    auto d_hy_c = d_hy.cpu();
+    auto d_cy_c = d_cy.cpu();
     auto sig = [](double x) { return 1.0 / (1.0 + std::exp(-x)); };
     auto forward_loss = [&](const Tensor& in_) -> double {
         std::vector<double> hy_out(batch * hid), cy_out(batch * hid);
         const double* in_d  = in_.data<double>();
-        const double* hx_d  = hx.data<double>();
-        const double* cx_d  = cx.data<double>();
-        const double* wih_d = w_ih.data<double>();
-        const double* whh_d = w_hh.data<double>();
-        const double* bih_d = b_ih.data<double>();
-        const double* bhh_d = b_hh.data<double>();
+        const double* hx_d  = hx_c.data<double>();
+        const double* cx_d  = cx_c.data<double>();
+        const double* wih_d = w_ih_c.data<double>();
+        const double* whh_d = w_hh_c.data<double>();
+        const double* bih_d = b_ih_c.data<double>();
+        const double* bhh_d = b_hh_c.data<double>();
         for (int64_t b = 0; b < batch; ++b) {
             std::vector<double> g(4 * hid);
             for (int64_t gi = 0; gi < 4 * hid; ++gi) {
@@ -293,8 +325,8 @@ TEST_F(RNNF64Test, LSTMCellBackwardF64) {
         }
         // Loss = sum(d_hy * hy + d_cy * cy) — that makes the gradient w.r.t.
         // `input` equal to d_input from the kernel.
-        const double* dhy = d_hy.data<double>();
-        const double* dcy = d_cy.data<double>();
+        const double* dhy = d_hy_c.data<double>();
+        const double* dcy = d_cy_c.data<double>();
         double loss = 0.0;
         for (int64_t i = 0; i < batch * hid; ++i) {
             loss += dhy[i] * hy_out[static_cast<size_t>(i)] +
@@ -303,23 +335,24 @@ TEST_F(RNNF64Test, LSTMCellBackwardF64) {
         return loss;
     };
 
-    auto fd = fd_grad(forward_loss, input, 1e-6);
-    const double* d_input = bwd[0].data<double>();
+    auto fd = fd_grad(forward_loss, input.cpu(), 1e-6);
+    auto d_input_c = bwd[0].cpu();
+    const double* d_input = d_input_c.data<double>();
     for (int64_t i = 0; i < input.numel(); ++i) {
         EXPECT_NEAR(d_input[i], fd[static_cast<size_t>(i)], 1e-6)
             << "LSTM-cell-backward d_input mismatch at " << i;
     }
 }
 
-TEST_F(RNNF64Test, GRUCellBackwardF64) {
+TEST_P(RNNF64Test, GRUCellBackwardF64) {
     const int64_t batch = 2, in_sz = 3, hid = 4;
-    auto input = det_randn({batch, in_sz}, 0xD1);
-    auto hx    = det_randn({batch, hid}, 0xD2);
-    auto w_ih  = det_randn({3 * hid, in_sz}, 0xD3);
-    auto w_hh  = det_randn({3 * hid, hid}, 0xD4);
-    auto b_ih  = det_randn({3 * hid}, 0xD5);
-    auto b_hh  = det_randn({3 * hid}, 0xD6);
-    Tensor d_hy = det_randn({batch, hid}, 0xD7);
+    auto input = det_randn({batch, in_sz}, 0xD1, device);
+    auto hx    = det_randn({batch, hid}, 0xD2, device);
+    auto w_ih  = det_randn({3 * hid, in_sz}, 0xD3, device);
+    auto w_hh  = det_randn({3 * hid, hid}, 0xD4, device);
+    auto b_ih  = det_randn({3 * hid}, 0xD5, device);
+    auto b_hh  = det_randn({3 * hid}, 0xD6, device);
+    Tensor d_hy = det_randn({batch, hid}, 0xD7, device);
 
     const Tensor bwd_in[7] = {d_hy, input, hx, w_ih, w_hh, b_ih, b_hh};
     auto bwd = tenzor::dispatch(OpId::GRUCellBackward,
@@ -327,16 +360,22 @@ TEST_F(RNNF64Test, GRUCellBackwardF64) {
     ASSERT_EQ(bwd.size(), 6u);
     for (const auto& t : bwd) EXPECT_EQ(t.dtype(), DType::Float64);
 
-    // Pure-double reference forward → scalar loss.
+    // Pure-double reference forward → scalar loss. Host reads via .cpu().
+    auto hx_c = hx.cpu();
+    auto w_ih_c = w_ih.cpu();
+    auto w_hh_c = w_hh.cpu();
+    auto b_ih_c = b_ih.cpu();
+    auto b_hh_c = b_hh.cpu();
+    auto d_hy_c = d_hy.cpu();
     auto sig = [](double x) { return 1.0 / (1.0 + std::exp(-x)); };
     auto forward_loss = [&](const Tensor& in_) -> double {
         std::vector<double> hy_out(batch * hid);
         const double* in_d  = in_.data<double>();
-        const double* hx_d  = hx.data<double>();
-        const double* wih_d = w_ih.data<double>();
-        const double* whh_d = w_hh.data<double>();
-        const double* bih_d = b_ih.data<double>();
-        const double* bhh_d = b_hh.data<double>();
+        const double* hx_d  = hx_c.data<double>();
+        const double* wih_d = w_ih_c.data<double>();
+        const double* whh_d = w_hh_c.data<double>();
+        const double* bih_d = b_ih_c.data<double>();
+        const double* bhh_d = b_hh_c.data<double>();
         for (int64_t b = 0; b < batch; ++b) {
             std::vector<double> rz(2 * hid);
             for (int64_t g = 0; g < 2 * hid; ++g) {
@@ -361,15 +400,16 @@ TEST_F(RNNF64Test, GRUCellBackwardF64) {
                 hy_out[b * hid + h] = (1.0 - z) * n + z * hx_d[b * hid + h];
             }
         }
-        const double* dhy = d_hy.data<double>();
+        const double* dhy = d_hy_c.data<double>();
         double loss = 0.0;
         for (int64_t i = 0; i < batch * hid; ++i)
             loss += dhy[i] * hy_out[static_cast<size_t>(i)];
         return loss;
     };
 
-    auto fd = fd_grad(forward_loss, input, 1e-6);
-    const double* d_input = bwd[0].data<double>();
+    auto fd = fd_grad(forward_loss, input.cpu(), 1e-6);
+    auto d_input_c = bwd[0].cpu();
+    const double* d_input = d_input_c.data<double>();
     for (int64_t i = 0; i < input.numel(); ++i) {
         EXPECT_NEAR(d_input[i], fd[static_cast<size_t>(i)], 1e-6)
             << "GRU-cell-backward d_input mismatch at " << i;
@@ -423,15 +463,15 @@ void ref_lstm_forward_f64(
     std::memcpy(c_n, c_curr.data(), batch * hid * sizeof(double));
 }
 
-TEST_F(RNNF64Test, LSTMForwardF64) {
+TEST_P(RNNF64Test, LSTMForwardF64) {
     const int64_t seq = 3, batch = 2, in_sz = 3, hid = 4;
-    auto input = det_randn({seq, batch, in_sz}, 0xE1);
-    auto W_ih  = det_randn({4 * hid, in_sz}, 0xE2);
-    auto W_hh  = det_randn({4 * hid, hid}, 0xE3);
-    auto b_ih  = det_randn({4 * hid}, 0xE4);
-    auto b_hh  = det_randn({4 * hid}, 0xE5);
-    auto h0    = det_randn({batch, hid}, 0xE6);
-    auto c0    = det_randn({batch, hid}, 0xE7);
+    auto input = det_randn({seq, batch, in_sz}, 0xE1, device);
+    auto W_ih  = det_randn({4 * hid, in_sz}, 0xE2, device);
+    auto W_hh  = det_randn({4 * hid, hid}, 0xE3, device);
+    auto b_ih  = det_randn({4 * hid}, 0xE4, device);
+    auto b_hh  = det_randn({4 * hid}, 0xE5, device);
+    auto h0    = det_randn({batch, hid}, 0xE6, device);
+    auto c0    = det_randn({batch, hid}, 0xE7, device);
 
     const Tensor in_arr[7] = {input, W_ih, W_hh, b_ih, b_hh, h0, c0};
     auto outs = tenzor::dispatch(OpId::LSTMForward,
@@ -439,18 +479,28 @@ TEST_F(RNNF64Test, LSTMForwardF64) {
     ASSERT_EQ(outs.size(), 3u);
     EXPECT_EQ(outs[0].dtype(), DType::Float64);
 
+    auto input_c = input.cpu();
+    auto W_ih_c = W_ih.cpu();
+    auto W_hh_c = W_hh.cpu();
+    auto b_ih_c = b_ih.cpu();
+    auto b_hh_c = b_hh.cpu();
+    auto h0_c = h0.cpu();
+    auto c0_c = c0.cpu();
     std::vector<double> ref_out(seq * batch * hid);
     std::vector<double> ref_hn(batch * hid), ref_cn(batch * hid);
-    ref_lstm_forward_f64(input.data<double>(), W_ih.data<double>(),
-                          W_hh.data<double>(), b_ih.data<double>(),
-                          b_hh.data<double>(), h0.data<double>(),
-                          c0.data<double>(), ref_out.data(),
+    ref_lstm_forward_f64(input_c.data<double>(), W_ih_c.data<double>(),
+                          W_hh_c.data<double>(), b_ih_c.data<double>(),
+                          b_hh_c.data<double>(), h0_c.data<double>(),
+                          c0_c.data<double>(), ref_out.data(),
                           ref_hn.data(), ref_cn.data(),
                           seq, batch, in_sz, hid);
 
-    const double* got_out = outs[0].data<double>();
-    const double* got_hn  = outs[1].data<double>();
-    const double* got_cn  = outs[2].data<double>();
+    auto out_c = outs[0].cpu();
+    auto hn_c = outs[1].cpu();
+    auto cn_c = outs[2].cpu();
+    const double* got_out = out_c.data<double>();
+    const double* got_hn  = hn_c.data<double>();
+    const double* got_cn  = cn_c.data<double>();
     for (int64_t i = 0; i < seq * batch * hid; ++i) {
         EXPECT_NEAR(got_out[i], ref_out[static_cast<size_t>(i)], 1e-12)
             << "lstm_forward output mismatch at " << i;
@@ -461,14 +511,14 @@ TEST_F(RNNF64Test, LSTMForwardF64) {
     }
 }
 
-TEST_F(RNNF64Test, GRUForwardF64) {
+TEST_P(RNNF64Test, GRUForwardF64) {
     const int64_t seq = 3, batch = 2, in_sz = 3, hid = 4;
-    auto input = det_randn({seq, batch, in_sz}, 0xF1);
-    auto W_ih  = det_randn({3 * hid, in_sz}, 0xF2);
-    auto W_hh  = det_randn({3 * hid, hid}, 0xF3);
-    auto b_ih  = det_randn({3 * hid}, 0xF4);
-    auto h0    = det_randn({batch, hid}, 0xF6);
-    auto b_hh  = det_randn({3 * hid}, 0xF5);
+    auto input = det_randn({seq, batch, in_sz}, 0xF1, device);
+    auto W_ih  = det_randn({3 * hid, in_sz}, 0xF2, device);
+    auto W_hh  = det_randn({3 * hid, hid}, 0xF3, device);
+    auto b_ih  = det_randn({3 * hid}, 0xF4, device);
+    auto h0    = det_randn({batch, hid}, 0xF6, device);
+    auto b_hh  = det_randn({3 * hid}, 0xF5, device);
 
     // Inputs ordered per cpu_kernel_registry.cpp: [input, W_ih, W_hh,
     // bias_ih, h0, bias_hh].
@@ -478,17 +528,23 @@ TEST_F(RNNF64Test, GRUForwardF64) {
     ASSERT_EQ(outs.size(), 2u);
     EXPECT_EQ(outs[0].dtype(), DType::Float64);
 
-    // Reference: PyTorch GRU semantics.
+    // Reference: PyTorch GRU semantics. Host reads via .cpu().
+    auto input_c = input.cpu();
+    auto W_ih_c = W_ih.cpu();
+    auto W_hh_c = W_hh.cpu();
+    auto b_ih_c = b_ih.cpu();
+    auto b_hh_c = b_hh.cpu();
+    auto h0_c = h0.cpu();
     auto sig = [](double x) { return 1.0 / (1.0 + std::exp(-x)); };
     std::vector<double> ref_out(seq * batch * hid);
     std::vector<double> ref_hn(batch * hid);
     std::vector<double> h_curr(batch * hid);
-    std::memcpy(h_curr.data(), h0.data<double>(), batch * hid * sizeof(double));
-    const double* in_d = input.data<double>();
-    const double* wih = W_ih.data<double>();
-    const double* whh = W_hh.data<double>();
-    const double* bih = b_ih.data<double>();
-    const double* bhh = b_hh.data<double>();
+    std::memcpy(h_curr.data(), h0_c.data<double>(), batch * hid * sizeof(double));
+    const double* in_d = input_c.data<double>();
+    const double* wih = W_ih_c.data<double>();
+    const double* whh = W_hh_c.data<double>();
+    const double* bih = b_ih_c.data<double>();
+    const double* bhh = b_hh_c.data<double>();
     for (int64_t t = 0; t < seq; ++t) {
         const double* in_t = in_d + t * batch * in_sz;
         double* out_t = ref_out.data() + t * batch * hid;
@@ -521,27 +577,29 @@ TEST_F(RNNF64Test, GRUForwardF64) {
     }
     std::memcpy(ref_hn.data(), h_curr.data(), batch * hid * sizeof(double));
 
-    const double* got_out = outs[0].data<double>();
-    const double* got_hn  = outs[1].data<double>();
+    auto out_c = outs[0].cpu();
+    auto hn_c = outs[1].cpu();
+    const double* got_out = out_c.data<double>();
+    const double* got_hn  = hn_c.data<double>();
     for (int64_t i = 0; i < seq * batch * hid; ++i)
         EXPECT_NEAR(got_out[i], ref_out[static_cast<size_t>(i)], 1e-12);
     for (int64_t i = 0; i < batch * hid; ++i)
         EXPECT_NEAR(got_hn[i], ref_hn[static_cast<size_t>(i)], 1e-12);
 }
 
-TEST_F(RNNF64Test, BiLSTMForwardF64) {
+TEST_P(RNNF64Test, BiLSTMForwardF64) {
     const int64_t seq = 3, batch = 2, in_sz = 3, hid = 4;
-    auto input  = det_randn({seq, batch, in_sz}, 0x101);
-    auto Wih_f  = det_randn({4 * hid, in_sz}, 0x102);
-    auto Whh_f  = det_randn({4 * hid, hid}, 0x103);
-    auto bih_f  = det_randn({4 * hid}, 0x104);
-    auto bhh_f  = det_randn({4 * hid}, 0x105);
-    auto Wih_b  = det_randn({4 * hid, in_sz}, 0x106);
-    auto Whh_b  = det_randn({4 * hid, hid}, 0x107);
-    auto bih_b  = det_randn({4 * hid}, 0x108);
-    auto bhh_b  = det_randn({4 * hid}, 0x109);
-    auto h0     = det_randn({2, batch, hid}, 0x10A);
-    auto c0     = det_randn({2, batch, hid}, 0x10B);
+    auto input  = det_randn({seq, batch, in_sz}, 0x101, device);
+    auto Wih_f  = det_randn({4 * hid, in_sz}, 0x102, device);
+    auto Whh_f  = det_randn({4 * hid, hid}, 0x103, device);
+    auto bih_f  = det_randn({4 * hid}, 0x104, device);
+    auto bhh_f  = det_randn({4 * hid}, 0x105, device);
+    auto Wih_b  = det_randn({4 * hid, in_sz}, 0x106, device);
+    auto Whh_b  = det_randn({4 * hid, hid}, 0x107, device);
+    auto bih_b  = det_randn({4 * hid}, 0x108, device);
+    auto bhh_b  = det_randn({4 * hid}, 0x109, device);
+    auto h0     = det_randn({2, batch, hid}, 0x10A, device);
+    auto c0     = det_randn({2, batch, hid}, 0x10B, device);
 
     const Tensor in_arr[11] = {input, h0, c0,
                                 Wih_f, Whh_f, bih_f, bhh_f,
@@ -552,21 +610,30 @@ TEST_F(RNNF64Test, BiLSTMForwardF64) {
     EXPECT_EQ(outs[0].dtype(), DType::Float64);
 
     // Sanity: forward direction matches independent ref_lstm_forward_f64.
+    // Host reads via .cpu().
+    auto input_c = input.cpu();
+    auto Wih_f_c = Wih_f.cpu();
+    auto Whh_f_c = Whh_f.cpu();
+    auto bih_f_c = bih_f.cpu();
+    auto bhh_f_c = bhh_f.cpu();
+    auto h0_c = h0.cpu();
+    auto c0_c = c0.cpu();
     std::vector<double> ref_fwd_out(seq * batch * hid);
     std::vector<double> ref_fwd_hn(batch * hid), ref_fwd_cn(batch * hid);
     std::vector<double> bias_fwd_combined(4 * hid);
     for (int64_t i = 0; i < 4 * hid; ++i)
         bias_fwd_combined[static_cast<size_t>(i)] =
-            bih_f.data<double>()[i] + bhh_f.data<double>()[i];
-    ref_lstm_forward_f64(input.data<double>(), Wih_f.data<double>(),
-                          Whh_f.data<double>(), bias_fwd_combined.data(),
+            bih_f_c.data<double>()[i] + bhh_f_c.data<double>()[i];
+    ref_lstm_forward_f64(input_c.data<double>(), Wih_f_c.data<double>(),
+                          Whh_f_c.data<double>(), bias_fwd_combined.data(),
                           nullptr,
-                          h0.data<double>(), c0.data<double>(),
+                          h0_c.data<double>(), c0_c.data<double>(),
                           ref_fwd_out.data(), ref_fwd_hn.data(),
                           ref_fwd_cn.data(),
                           seq, batch, in_sz, hid);
     // The kernel writes forward into output[:, :, :hid].
-    const double* got_out = outs[0].data<double>();
+    auto out_c = outs[0].cpu();
+    const double* got_out = out_c.data<double>();
     for (int64_t t = 0; t < seq; ++t) {
         for (int64_t b = 0; b < batch; ++b) {
             for (int64_t h = 0; h < hid; ++h) {
@@ -581,18 +648,18 @@ TEST_F(RNNF64Test, BiLSTMForwardF64) {
     }
 }
 
-TEST_F(RNNF64Test, LSTMMultilayerF64) {
+TEST_P(RNNF64Test, LSTMMultilayerF64) {
     const int64_t seq = 3, batch = 2, in_sz = 3, hid = 4, layers = 2;
 
-    auto input = det_randn({seq, batch, in_sz}, 0x201);
-    auto W_ih_0 = det_randn({4 * hid, in_sz}, 0x202);
-    auto W_hh_0 = det_randn({4 * hid, hid}, 0x203);
-    auto bias_0 = det_randn({4 * hid}, 0x204);
-    auto W_ih_1 = det_randn({4 * hid, hid}, 0x205);
-    auto W_hh_1 = det_randn({4 * hid, hid}, 0x206);
-    auto bias_1 = det_randn({4 * hid}, 0x207);
-    auto h0 = det_randn({layers, batch, hid}, 0x208);
-    auto c0 = det_randn({layers, batch, hid}, 0x209);
+    auto input = det_randn({seq, batch, in_sz}, 0x201, device);
+    auto W_ih_0 = det_randn({4 * hid, in_sz}, 0x202, device);
+    auto W_hh_0 = det_randn({4 * hid, hid}, 0x203, device);
+    auto bias_0 = det_randn({4 * hid}, 0x204, device);
+    auto W_ih_1 = det_randn({4 * hid, hid}, 0x205, device);
+    auto W_hh_1 = det_randn({4 * hid, hid}, 0x206, device);
+    auto bias_1 = det_randn({4 * hid}, 0x207, device);
+    auto h0 = det_randn({layers, batch, hid}, 0x208, device);
+    auto c0 = det_randn({layers, batch, hid}, 0x209, device);
 
     NewOpAttributes attrs;
     attrs.set(AttrKey::NumLayers, static_cast<int64_t>(layers));
@@ -609,17 +676,17 @@ TEST_F(RNNF64Test, LSTMMultilayerF64) {
     EXPECT_EQ(outs[0].shape()[2], hid);
 }
 
-TEST_F(RNNF64Test, GRUMultilayerF64) {
+TEST_P(RNNF64Test, GRUMultilayerF64) {
     const int64_t seq = 3, batch = 2, in_sz = 3, hid = 4, layers = 2;
 
-    auto input = det_randn({seq, batch, in_sz}, 0x301);
-    auto W_ih_0 = det_randn({3 * hid, in_sz}, 0x302);
-    auto W_hh_0 = det_randn({3 * hid, hid}, 0x303);
-    auto bias_0 = det_randn({3 * hid}, 0x304);
-    auto W_ih_1 = det_randn({3 * hid, hid}, 0x305);
-    auto W_hh_1 = det_randn({3 * hid, hid}, 0x306);
-    auto bias_1 = det_randn({3 * hid}, 0x307);
-    auto h0 = det_randn({layers, batch, hid}, 0x308);
+    auto input = det_randn({seq, batch, in_sz}, 0x301, device);
+    auto W_ih_0 = det_randn({3 * hid, in_sz}, 0x302, device);
+    auto W_hh_0 = det_randn({3 * hid, hid}, 0x303, device);
+    auto bias_0 = det_randn({3 * hid}, 0x304, device);
+    auto W_ih_1 = det_randn({3 * hid, hid}, 0x305, device);
+    auto W_hh_1 = det_randn({3 * hid, hid}, 0x306, device);
+    auto bias_1 = det_randn({3 * hid}, 0x307, device);
+    auto h0 = det_randn({layers, batch, hid}, 0x308, device);
 
     NewOpAttributes attrs;
     attrs.set(AttrKey::NumLayers, static_cast<int64_t>(layers));
@@ -634,3 +701,5 @@ TEST_F(RNNF64Test, GRUMultilayerF64) {
     EXPECT_EQ(outs[0].shape()[1], batch);
     EXPECT_EQ(outs[0].shape()[2], hid);
 }
+
+INSTANTIATE_BACKEND_TESTS(RNNF64Test);

@@ -25,23 +25,10 @@
 #include <tenzor/ops/creation.hpp>
 #include <tenzor/ops/vision.hpp>
 
+#include "backend_test_fixture.hpp"
+
 #include <cmath>
 #include <vector>
-
-namespace tenzor { void initialize(); }
-
-namespace {
-class GridSampleBicubicEnv : public ::testing::Environment {
-public:
-    void SetUp() override { tenzor::initialize(); }
-};
-[[maybe_unused]] auto* g_env =
-    ::testing::AddGlobalTestEnvironment(new GridSampleBicubicEnv);
-
-auto cuda_available() -> bool {
-    return tenzor::Device::cuda().type == tenzor::Device::Type::CUDA;
-}
-}  // namespace
 
 using namespace tenzor;
 
@@ -72,13 +59,12 @@ auto make_grid(Device device) -> Tensor {
 
 }  // namespace
 
-class GridSampleBicubicForward : public ::testing::TestWithParam<Device> {};
+namespace {
+
+class GridSampleBicubicForward : public ::tenzor::testing::BackendTest {};
+class GridSampleBicubicBackward : public ::tenzor::testing::BackendTest {};
 
 TEST_P(GridSampleBicubicForward, DiffersFromBilinear) {
-    Device device = GetParam();
-    if (device.type == Device::Type::CUDA && !cuda_available())
-        GTEST_SKIP() << "CUDA not available";
-
     auto input = make_nonlinear_input(device);
     auto grid  = make_grid(device);
 
@@ -101,16 +87,9 @@ TEST_P(GridSampleBicubicForward, DiffersFromBilinear) {
            "fallback hasn't been fixed.";
 }
 
-INSTANTIATE_TEST_SUITE_P(
-    Devices, GridSampleBicubicForward,
-    ::testing::Values(Device::cpu(), Device::cuda()),
-    [](const ::testing::TestParamInfo<Device>& info) {
-        return info.param.type == Device::Type::CUDA ? "cuda" : "cpu";
-    });
-
-TEST(GridSampleBicubicBackward, ProducesNonZeroGradients) {
-    auto input_t = make_nonlinear_input(Device::cpu());
-    auto grid_t  = make_grid(Device::cpu());
+TEST_P(GridSampleBicubicBackward, ProducesNonZeroGradients) {
+    auto input_t = make_nonlinear_input(device);
+    auto grid_t  = make_grid(device);
     Variable input(input_t, /*requires_grad=*/true);
     Variable grid(grid_t, /*requires_grad=*/true);
 
@@ -131,14 +110,17 @@ TEST(GridSampleBicubicBackward, ProducesNonZeroGradients) {
     auto gi_cpu = gi_opt->to(Device::cpu()).contiguous();
     auto gg_cpu = gg_opt->to(Device::cpu()).contiguous();
 
+    const float* gi = gi_cpu.data<float>();
+    const float* gg = gg_cpu.data<float>();
+
     double gi_sumsq = 0.0;
     for (int64_t i = 0; i < gi_cpu.numel(); ++i) {
-        float v = gi_cpu.data<float>()[i];
+        float v = gi[i];
         gi_sumsq += v * v;
     }
     double gg_sumsq = 0.0;
     for (int64_t i = 0; i < gg_cpu.numel(); ++i) {
-        float v = gg_cpu.data<float>()[i];
+        float v = gg[i];
         gg_sumsq += v * v;
     }
     // Pre-fix: GridSampleBackward only handled mode=='bilinear' and returned
@@ -148,9 +130,9 @@ TEST(GridSampleBicubicBackward, ProducesNonZeroGradients) {
 }
 
 // Regression guard: bilinear mode unchanged.
-TEST(GridSampleBicubicForward, BilinearForwardUnchanged) {
-    auto input = make_nonlinear_input(Device::cpu());
-    auto grid  = make_grid(Device::cpu());
+TEST_P(GridSampleBicubicForward, BilinearForwardUnchanged) {
+    auto input = make_nonlinear_input(device);
+    auto grid  = make_grid(device);
     auto out = tenzor::ops::grid_sample(input, grid, "bilinear", "zeros", false);
     ASSERT_EQ(out.ndim(), 4);
     // The bilinear path is exercised by other tests; here we just ensure
@@ -160,3 +142,8 @@ TEST(GridSampleBicubicForward, BilinearForwardUnchanged) {
     EXPECT_EQ(out.size(2), 2);
     EXPECT_EQ(out.size(3), 2);
 }
+
+INSTANTIATE_BACKEND_TESTS(GridSampleBicubicForward);
+INSTANTIATE_BACKEND_TESTS(GridSampleBicubicBackward);
+
+}  // namespace

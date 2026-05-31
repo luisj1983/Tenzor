@@ -1,16 +1,13 @@
 // Dedicated tests for the AdamW optimizer (Adam + decoupled weight decay).
 //
-// Before this file, AdamW was only covered by an integration test in
-// tests/integration/test_optimization.cpp (CPU-only). This file mirrors the
-// unit-test pattern used by test_adamax.cpp / test_lion.cpp / test_nadam.cpp
-// (convergence, basic step, lr getter/setter, state dict round-trip) plus a
-// decoupled-weight-decay check that distinguishes AdamW from plain Adam.
-//
-// CPU-only by design — optimizer state storage is on CPU regardless of the
-// parameter tensor device; cross-backend parity for AdamW is covered in
-// tests/backend_parity/ via the full training-loop tests.
+// Mirrors the unit-test pattern used by test_adamax.cpp / test_lion.cpp /
+// test_nadam.cpp (convergence, basic step, lr getter/setter, state dict
+// round-trip) plus a decoupled-weight-decay check that distinguishes AdamW
+// from plain Adam. Runs across all available backends via BackendTest.
 
 #include <gtest/gtest.h>
+
+#include "../../backend_test_fixture.hpp"
 
 #include <tenzor/autograd/variable.hpp>
 #include <tenzor/nn/optim/adam.hpp>
@@ -20,12 +17,15 @@
 namespace tenzor {
 namespace {
 
-class AdamWTest : public ::testing::Test {
+class AdamWTest : public ::tenzor::testing::BackendTest {
 protected:
-    void SetUp() override { tenzor::initialize(); }
+    void SetUp() override {
+        ::tenzor::testing::BackendTest::SetUp();
+        if (::testing::Test::IsSkipped()) return;
+    }
 
     std::vector<std::shared_ptr<Variable>> make_params() {
-        auto t = tenzor::ones({4, 4}, DType::Float32, Device::cpu());
+        auto t = tenzor::ones({4, 4}, DType::Float32, device);
         return {std::make_shared<Variable>(t, /*requires_grad=*/true)};
     }
 
@@ -34,7 +34,7 @@ protected:
     static float sum_abs(const std::vector<std::shared_ptr<Variable>>& params) {
         float s = 0.0f;
         for (const auto& p : params) {
-            auto cpu = p->tensor().to(Device::cpu());
+            auto cpu = p->tensor().cpu();
             const auto* d = cpu.data<float>();
             for (int64_t i = 0; i < cpu.numel(); ++i) s += std::abs(d[i]);
         }
@@ -46,12 +46,12 @@ protected:
         for (auto& p : params) {
             auto shape = p->tensor().shape();
             p->set_grad(tenzor::ones({shape.begin(), shape.end()},
-                                     p->tensor().dtype(), Device::cpu()));
+                                     p->tensor().dtype(), p->tensor().device()));
         }
     }
 };
 
-TEST_F(AdamWTest, BasicStepReducesParamMagnitude) {
+TEST_P(AdamWTest, BasicStepReducesParamMagnitude) {
     auto params = make_params();
     optim::AdamW opt(params, /*lr=*/1e-2);
 
@@ -66,7 +66,7 @@ TEST_F(AdamWTest, BasicStepReducesParamMagnitude) {
         << "AdamW with constant positive gradient should shrink |params|";
 }
 
-TEST_F(AdamWTest, ConvergesOnQuadratic) {
+TEST_P(AdamWTest, ConvergesOnQuadratic) {
     // Minimize f(x) = ||x||^2 starting from x = ones(4,4). Gradient is 2x.
     auto params = make_params();
     optim::AdamW opt(params, /*lr=*/1e-2, /*beta1=*/0.9, /*beta2=*/0.999,
@@ -80,7 +80,7 @@ TEST_F(AdamWTest, ConvergesOnQuadratic) {
         opt.step();
     }
 
-    auto final_t = params[0]->tensor().to(Device::cpu());
+    auto final_t = params[0]->tensor().cpu();
     const auto* d = final_t.data<float>();
     float sq = 0.0f;
     for (int64_t i = 0; i < final_t.numel(); ++i) sq += d[i] * d[i];
@@ -88,7 +88,7 @@ TEST_F(AdamWTest, ConvergesOnQuadratic) {
         << "AdamW on a quadratic should drive ||x||^2 well below 16 (starting value)";
 }
 
-TEST_F(AdamWTest, WeightDecayDecouplesFromGradient) {
+TEST_P(AdamWTest, WeightDecayDecouplesFromGradient) {
     // Decoupled weight decay means: even with zero gradient, weight decay
     // alone shrinks the parameters. That's the defining difference vs Adam
     // (which would leave params untouched when gradient is zero).
@@ -111,7 +111,7 @@ TEST_F(AdamWTest, WeightDecayDecouplesFromGradient) {
         << "AdamW with zero gradient and nonzero weight_decay must still shrink params";
 }
 
-TEST_F(AdamWTest, LrGetSet) {
+TEST_P(AdamWTest, LrGetSet) {
     auto params = make_params();
     optim::AdamW opt(params, /*lr=*/2e-3);
 
@@ -120,7 +120,7 @@ TEST_F(AdamWTest, LrGetSet) {
     EXPECT_DOUBLE_EQ(opt.get_lr(), 5e-3);
 }
 
-TEST_F(AdamWTest, StateDictNonEmptyAndRoundtrippable) {
+TEST_P(AdamWTest, StateDictNonEmptyAndRoundtrippable) {
     // Exercise the serialize / deserialize surface: after a few steps the
     // state dict must be non-empty (step count, first/second moments), and
     // load_state_dict on a fresh optimizer must accept it without throwing.
@@ -144,10 +144,7 @@ TEST_F(AdamWTest, StateDictNonEmptyAndRoundtrippable) {
     EXPECT_NO_THROW(fresh_opt.load_state_dict(state));
 }
 
+INSTANTIATE_BACKEND_TESTS(AdamWTest);
+
 }  // namespace
 }  // namespace tenzor
-
-int main(int argc, char** argv) {
-    ::testing::InitGoogleTest(&argc, argv);
-    return RUN_ALL_TESTS();
-}

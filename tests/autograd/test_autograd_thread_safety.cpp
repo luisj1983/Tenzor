@@ -14,6 +14,7 @@
 #include "tenzor/ops/creation.hpp"
 #include "tenzor/ops/math.hpp"
 #include "tenzor/ops/reduction.hpp"
+#include "../backend_test_fixture.hpp"
 
 #include <thread>
 #include <vector>
@@ -21,13 +22,19 @@
 
 using namespace tenzor;
 
+// Parameterized over all backends via BackendTest: every tensor is created on
+// the fixture's `device`. The concurrent-backward logic itself is device-
+// agnostic autograd engine code; tensors created inside worker threads must
+// also live on `device`, so the device is captured by value into each lambda.
+class AutogradThreadSafety : public ::tenzor::testing::BackendTest {};
+
 // ============================================================================
 // Concurrent backward with shared parameters
 // ============================================================================
 
-TEST(AutogradThreadSafety, ConcurrentBackwardSharedParam) {
+TEST_P(AutogradThreadSafety, ConcurrentBackwardSharedParam) {
     // Create a shared parameter used by multiple computation graphs
-    auto w = Variable(randn({4, 4}, DType::Float32, Device::cpu()), true);
+    auto w = Variable(randn({4, 4}, DType::Float32, device), true);
     w.make_thread_safe();
 
     constexpr int num_threads = 4;
@@ -36,11 +43,12 @@ TEST(AutogradThreadSafety, ConcurrentBackwardSharedParam) {
     std::atomic<int> completed{0};
     std::vector<std::thread> threads;
 
+    tenzor::Device dev = device;
     for (int t = 0; t < num_threads; ++t) {
-        threads.emplace_back([&w, &completed]() {
+        threads.emplace_back([&w, &completed, dev]() {
             for (int i = 0; i < iters_per_thread; ++i) {
                 // Each thread creates its own input and graph but shares w
-                auto x = Variable(randn({4, 4}, DType::Float32, Device::cpu()), false);
+                auto x = Variable(randn({4, 4}, DType::Float32, dev), false);
                 auto y = x * w;
                 auto loss = tenzor::sum(y);
                 loss.backward();
@@ -60,7 +68,7 @@ TEST(AutogradThreadSafety, ConcurrentBackwardSharedParam) {
         << "All threads should complete without deadlock";
 }
 
-TEST(AutogradThreadSafety, ConcurrentBackwardIndependentParams) {
+TEST_P(AutogradThreadSafety, ConcurrentBackwardIndependentParams) {
     // Each thread has its own parameters — no contention, but exercises
     // the thread-local BackwardEngine isolation
     constexpr int num_threads = 4;
@@ -68,10 +76,11 @@ TEST(AutogradThreadSafety, ConcurrentBackwardIndependentParams) {
     std::atomic<int> completed{0};
     std::vector<std::thread> threads;
 
+    tenzor::Device dev = device;
     for (int t = 0; t < num_threads; ++t) {
-        threads.emplace_back([&completed]() {
-            auto a = Variable(randn({3, 3}, DType::Float32, Device::cpu()), true);
-            auto b = Variable(randn({3, 3}, DType::Float32, Device::cpu()), true);
+        threads.emplace_back([&completed, dev]() {
+            auto a = Variable(randn({3, 3}, DType::Float32, dev), true);
+            auto b = Variable(randn({3, 3}, DType::Float32, dev), true);
             auto c = a * b;
             auto loss = tenzor::sum(c);
             loss.backward();
@@ -89,10 +98,10 @@ TEST(AutogradThreadSafety, ConcurrentBackwardIndependentParams) {
     EXPECT_EQ(completed.load(), num_threads);
 }
 
-TEST(AutogradThreadSafety, SharedParamGradientAccumulation) {
+TEST_P(AutogradThreadSafety, SharedParamGradientAccumulation) {
     // Verify that concurrent gradient accumulations to a shared parameter
     // produce a result consistent with sequential accumulation.
-    auto w = Variable(ones({2, 2}, DType::Float32, Device::cpu()), true);
+    auto w = Variable(ones({2, 2}, DType::Float32, device), true);
     w.make_thread_safe();
 
     constexpr int num_threads = 8;
@@ -101,10 +110,11 @@ TEST(AutogradThreadSafety, SharedParamGradientAccumulation) {
     // Gradient of sum(ones * w) w.r.t. w = ones (for element-wise mul)
     // Sum of 2x2 ones = 4. With num_threads, total grad_sum = num_threads * 4
 
+    tenzor::Device dev = device;
     std::vector<std::thread> threads;
     for (int t = 0; t < num_threads; ++t) {
-        threads.emplace_back([&w]() {
-            auto x = Variable(ones({2, 2}, DType::Float32, Device::cpu()), false);
+        threads.emplace_back([&w, dev]() {
+            auto x = Variable(ones({2, 2}, DType::Float32, dev), false);
             auto y = x * w;
             auto loss = tenzor::sum(y);
             // Don't clear grads — let them accumulate across threads
@@ -120,7 +130,7 @@ TEST(AutogradThreadSafety, SharedParamGradientAccumulation) {
     ASSERT_TRUE(w.has_grad()) << "Shared parameter should have gradient";
 
     auto grad = w.grad().value();
-    auto grad_sum = tenzor::sum(grad).data<float>()[0];
+    auto grad_sum = tenzor::sum(grad).cpu().data<float>()[0];
 
     // Each backward contributes grad = ones(2,2), sum = 4
     // Total accumulated = num_threads * 4 = 32
@@ -129,11 +139,11 @@ TEST(AutogradThreadSafety, SharedParamGradientAccumulation) {
         << "Accumulated gradient should equal sum of all thread contributions";
 }
 
-TEST(AutogradThreadSafety, MultiPathGraph) {
+TEST_P(AutogradThreadSafety, MultiPathGraph) {
     // Single thread, but the parameter appears multiple times in the graph.
     // This tests that the engine correctly accumulates gradients from multiple
     // paths through the same shared parameter.
-    auto w = Variable(ones({3, 3}, DType::Float32, Device::cpu()), true);
+    auto w = Variable(ones({3, 3}, DType::Float32, device), true);
 
     // y = w * w (w used twice)
     auto y1 = w * w;
@@ -143,27 +153,8 @@ TEST(AutogradThreadSafety, MultiPathGraph) {
     ASSERT_TRUE(w.has_grad());
     // d/dW sum(W * W) = 2 * W = 2 * ones = [[2,2,2],[2,2,2],[2,2,2]]
     // Sum of gradient = 2 * 9 = 18
-    auto grad_sum = tenzor::sum(w.grad().value()).data<float>()[0];
+    auto grad_sum = tenzor::sum(w.grad().value()).cpu().data<float>()[0];
     EXPECT_NEAR(grad_sum, 18.0f, 1e-4f);
 }
 
-int main(int argc, char** argv) {
-    ::testing::InitGoogleTest(&argc, argv);
-
-    try {
-        if (!::testing::GTEST_FLAG(list_tests)) {
-            tenzor::initialize();
-        }
-    } catch (const std::exception& e) {
-        std::cerr << "Failed to initialize Tenzor: " << e.what() << std::endl;
-        return 1;
-    }
-
-    int result = RUN_ALL_TESTS();
-
-    try {
-        tenzor::finalize();
-    } catch (...) {}
-
-    return result;
-}
+INSTANTIATE_BACKEND_TESTS(AutogradThreadSafety);

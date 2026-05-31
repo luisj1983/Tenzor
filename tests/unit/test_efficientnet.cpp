@@ -10,28 +10,29 @@
 #include "../../include/tenzor/core/tensor.hpp"
 #include "../../include/tenzor/autograd/variable.hpp"
 #include "../grad_flow_helpers.hpp"
+#include "../backend_test_fixture.hpp"
 
 using namespace tenzor;
 using namespace tenzor::models;
 
-class EfficientNetTest : public ::testing::Test {
+class EfficientNetTest : public ::tenzor::testing::BackendTest {
 protected:
     void SetUp() override {
-        device_ = Device::cpu();
+        ::tenzor::testing::BackendTest::SetUp();
+        if (::testing::Test::IsSkipped()) return;
     }
-
-    Device device_;
 };
 
 // ============================================================================
 // SqueezeExcitation Tests
 // ============================================================================
 
-TEST_F(EfficientNetTest, SqueezeExcitationForwardShape) {
+TEST_P(EfficientNetTest, SqueezeExcitationForwardShape) {
     int64_t channels = 64;
     auto se = std::make_shared<EfficientNetSqueezeExcitation>(channels, 0.25);
+    se->to(device);
 
-    Variable input(Tensor({2, channels, 14, 14}, DType::Float32, device_), true);
+    Variable input(randn({2, channels, 14, 14}, DType::Float32, device), true);
     Variable output = se->forward(input);
 
     // SE preserves input shape
@@ -40,10 +41,11 @@ TEST_F(EfficientNetTest, SqueezeExcitationForwardShape) {
               (std::vector<int64_t>{2, channels, 14, 14}));
 }
 
-TEST_F(EfficientNetTest, SqueezeExcitationGradientFlow) {
+TEST_P(EfficientNetTest, SqueezeExcitationGradientFlow) {
     auto se = std::make_shared<EfficientNetSqueezeExcitation>(32, 0.25);
+    se->to(device);
 
-    Variable input(Tensor({1, 32, 7, 7}, DType::Float32, device_), true);
+    Variable input(randn({1, 32, 7, 7}, DType::Float32, device), true);
     Variable output = se->forward(input);
     Variable loss = tenzor::sum(output * output);
     loss.backward();
@@ -60,11 +62,12 @@ TEST_F(EfficientNetTest, SqueezeExcitationGradientFlow) {
 // MBConvBlock Tests
 // ============================================================================
 
-TEST_F(EfficientNetTest, MBConvBlockNoExpansionShape) {
+TEST_P(EfficientNetTest, MBConvBlockNoExpansionShape) {
     // MBConv with expand_ratio=1 (no expansion phase)
     auto block = std::make_shared<MBConvBlock>(32, 32, 1, 3, 1, true, 0.25, 0.0);
+    block->to(device);
 
-    Variable input(Tensor({2, 32, 28, 28}, DType::Float32, device_), true);
+    Variable input(randn({2, 32, 28, 28}, DType::Float32, device), true);
     Variable output = block->forward(input);
 
     auto shape = output.tensor().shape();
@@ -72,11 +75,12 @@ TEST_F(EfficientNetTest, MBConvBlockNoExpansionShape) {
               (std::vector<int64_t>{2, 32, 28, 28}));
 }
 
-TEST_F(EfficientNetTest, MBConvBlockWithExpansionShape) {
+TEST_P(EfficientNetTest, MBConvBlockWithExpansionShape) {
     // MBConv with expand_ratio=6
     auto block = std::make_shared<MBConvBlock>(32, 64, 6, 3, 2, true, 0.25, 0.0);
+    block->to(device);
 
-    Variable input(Tensor({2, 32, 28, 28}, DType::Float32, device_), true);
+    Variable input(randn({2, 32, 28, 28}, DType::Float32, device), true);
     Variable output = block->forward(input);
 
     // Stride=2 halves spatial dims, channels change to out_channels
@@ -85,10 +89,11 @@ TEST_F(EfficientNetTest, MBConvBlockWithExpansionShape) {
               (std::vector<int64_t>{2, 64, 14, 14}));
 }
 
-TEST_F(EfficientNetTest, MBConvBlockGradientFlow) {
+TEST_P(EfficientNetTest, MBConvBlockGradientFlow) {
     auto block = std::make_shared<MBConvBlock>(16, 24, 6, 3, 1, true, 0.25, 0.0);
+    block->to(device);
 
-    Variable input(Tensor({2, 16, 56, 56}, DType::Float32, device_), true);
+    Variable input(randn({2, 16, 56, 56}, DType::Float32, device), true);
     Variable output = block->forward(input);
     Variable loss = tenzor::sum(output);
     loss.backward();
@@ -102,20 +107,22 @@ TEST_F(EfficientNetTest, MBConvBlockGradientFlow) {
 // mode and be a no-op in eval mode. Previously the implementation contained
 // only commented-out pseudocode and was effectively disabled — making the
 // `drop_connect_rate` constructor argument meaningless.
-TEST_F(EfficientNetTest, StochasticDepthActuallyApplied_G14) {
+TEST_P(EfficientNetTest, StochasticDepthActuallyApplied_G14) {
     // High drop rate so the effect is detectable in just a few trials.
     const double drop_rate = 0.5;
     // in==out and stride==1 → has_skip_ == true (DropPath only fires on skip).
     auto block = std::make_shared<MBConvBlock>(16, 16, 6, 3, 1, true, 0.25, drop_rate);
+    block->to(device);
 
     // Non-constant input is essential: BN squashes constant input to ~0
     // (zero variance) which would make the residual branch ~0 regardless of
     // DropPath, hiding any drop behavior.
-    Variable input(Tensor({4, 16, 8, 8}, DType::Float32, device_), false);
-    auto* ip = input.tensor().data<float>();
+    Tensor input_host({4, 16, 8, 8}, DType::Float32, Device::cpu());
+    auto* ip = input_host.data<float>();
     std::mt19937 rng(0xBEEF);
     std::uniform_real_distribution<float> dist(-1.0f, 1.0f);
-    for (int64_t i = 0; i < input.tensor().numel(); ++i) ip[i] = dist(rng);
+    for (int64_t i = 0; i < input_host.numel(); ++i) ip[i] = dist(rng);
+    Variable input(input_host.to(device), false);
 
     // Eval mode: DropPath becomes identity, so multiple calls should produce
     // identical outputs. This proves stochastic depth isn't accidentally
@@ -159,15 +166,17 @@ TEST_F(EfficientNetTest, StochasticDepthActuallyApplied_G14) {
 
 // G14 corollary: drop_connect_rate=0 must produce no random behavior at all,
 // even in train mode (no DropPath module is registered).
-TEST_F(EfficientNetTest, NoDropConnectMeansDeterministicTrain_G14) {
+TEST_P(EfficientNetTest, NoDropConnectMeansDeterministicTrain_G14) {
     auto block = std::make_shared<MBConvBlock>(16, 16, 6, 3, 1, true, 0.25, /*drop_rate=*/0.0);
+    block->to(device);
     block->train();
 
-    Variable input(Tensor({2, 16, 8, 8}, DType::Float32, device_), false);
-    auto* ip = input.tensor().data<float>();
+    Tensor input_host({2, 16, 8, 8}, DType::Float32, Device::cpu());
+    auto* ip = input_host.data<float>();
     std::mt19937 rng(0xDEAD);
     std::uniform_real_distribution<float> dist(-1.0f, 1.0f);
-    for (int64_t i = 0; i < input.tensor().numel(); ++i) ip[i] = dist(rng);
+    for (int64_t i = 0; i < input_host.numel(); ++i) ip[i] = dist(rng);
+    Variable input(input_host.to(device), false);
 
     // Two consecutive forwards. Without DropPath, output should be
     // deterministic (modulo BN running-stats updates, which only happen on
@@ -194,7 +203,7 @@ TEST_F(EfficientNetTest, NoDropConnectMeansDeterministicTrain_G14) {
 // EfficientNet-B0 Tests
 // ============================================================================
 
-TEST_F(EfficientNetTest, EfficientNetB0ConfigTest) {
+TEST_P(EfficientNetTest, EfficientNetB0ConfigTest) {
     auto config = EfficientNetConfig::efficientnet_b0(1000);
 
     EXPECT_EQ(config.width_mult, 1.0);
@@ -204,10 +213,11 @@ TEST_F(EfficientNetTest, EfficientNetB0ConfigTest) {
     EXPECT_DOUBLE_EQ(config.dropout_rate, 0.2);
 }
 
-TEST_F(EfficientNetTest, EfficientNetB0ForwardShape) {
+TEST_P(EfficientNetTest, EfficientNetB0ForwardShape) {
     auto model = efficientnet_b0(1000, false);
+    model->to(device);
 
-    Variable input(Tensor({2, 3, 224, 224}, DType::Float32, device_), true);
+    Variable input(randn({2, 3, 224, 224}, DType::Float32, device), true);
     Variable output = model->forward(input);
 
     auto shape = output.tensor().shape();
@@ -215,11 +225,12 @@ TEST_F(EfficientNetTest, EfficientNetB0ForwardShape) {
               (std::vector<int64_t>{2, 1000}));
 }
 
-TEST_F(EfficientNetTest, EfficientNetB0GradientFlow) {
+TEST_P(EfficientNetTest, EfficientNetB0GradientFlow) {
     auto model = efficientnet_b0(10, false);
+    model->to(device);
     model->train();
 
-    Variable input(Tensor({1, 3, 224, 224}, DType::Float32, device_), true);
+    Variable input(randn({1, 3, 224, 224}, DType::Float32, device), true);
     Variable output = model->forward(input);
     Variable loss = tenzor::sum(output);
     loss.backward();
@@ -229,8 +240,9 @@ TEST_F(EfficientNetTest, EfficientNetB0GradientFlow) {
     EXPECT_GT(params.size(), 0);
 }
 
-TEST_F(EfficientNetTest, EfficientNetB0ParameterCount) {
+TEST_P(EfficientNetTest, EfficientNetB0ParameterCount) {
     auto model = efficientnet_b0(1000, false);
+    model->to(device);
     auto params = model->parameters();
 
     // B0 should have around 5.3M parameters
@@ -253,10 +265,11 @@ TEST_F(EfficientNetTest, EfficientNetB0ParameterCount) {
 // EfficientNet-B1 Tests
 // ============================================================================
 
-TEST_F(EfficientNetTest, EfficientNetB1ForwardShape) {
+TEST_P(EfficientNetTest, EfficientNetB1ForwardShape) {
     auto model = efficientnet_b1(1000, false);
+    model->to(device);
 
-    Variable input(Tensor({2, 3, 240, 240}, DType::Float32, device_), true);
+    Variable input(randn({2, 3, 240, 240}, DType::Float32, device), true);
     Variable output = model->forward(input);
 
     auto shape = output.tensor().shape();
@@ -264,11 +277,12 @@ TEST_F(EfficientNetTest, EfficientNetB1ForwardShape) {
               (std::vector<int64_t>{2, 1000}));
 }
 
-TEST_F(EfficientNetTest, EfficientNetB1GradientFlow) {
+TEST_P(EfficientNetTest, EfficientNetB1GradientFlow) {
     auto model = efficientnet_b1(10, false);
+    model->to(device);
     model->train();
 
-    Variable input(Tensor({1, 3, 240, 240}, DType::Float32, device_), true);
+    Variable input(randn({1, 3, 240, 240}, DType::Float32, device), true);
     Variable output = model->forward(input);
     Variable loss = tenzor::sum(output);
     loss.backward();
@@ -280,10 +294,11 @@ TEST_F(EfficientNetTest, EfficientNetB1GradientFlow) {
 // EfficientNet-B2 Tests
 // ============================================================================
 
-TEST_F(EfficientNetTest, EfficientNetB2ForwardShape) {
+TEST_P(EfficientNetTest, EfficientNetB2ForwardShape) {
     auto model = efficientnet_b2(1000, false);
+    model->to(device);
 
-    Variable input(Tensor({2, 3, 260, 260}, DType::Float32, device_), true);
+    Variable input(randn({2, 3, 260, 260}, DType::Float32, device), true);
     Variable output = model->forward(input);
 
     auto shape = output.tensor().shape();
@@ -291,11 +306,12 @@ TEST_F(EfficientNetTest, EfficientNetB2ForwardShape) {
               (std::vector<int64_t>{2, 1000}));
 }
 
-TEST_F(EfficientNetTest, EfficientNetB2GradientFlow) {
+TEST_P(EfficientNetTest, EfficientNetB2GradientFlow) {
     auto model = efficientnet_b2(10, false);
+    model->to(device);
     model->train();
 
-    Variable input(Tensor({1, 3, 260, 260}, DType::Float32, device_), true);
+    Variable input(randn({1, 3, 260, 260}, DType::Float32, device), true);
     Variable output = model->forward(input);
     Variable loss = tenzor::sum(output);
     loss.backward();
@@ -307,10 +323,11 @@ TEST_F(EfficientNetTest, EfficientNetB2GradientFlow) {
 // EfficientNet-B3 Tests
 // ============================================================================
 
-TEST_F(EfficientNetTest, EfficientNetB3ForwardShape) {
+TEST_P(EfficientNetTest, EfficientNetB3ForwardShape) {
     auto model = efficientnet_b3(1000, false);
+    model->to(device);
 
-    Variable input(Tensor({1, 3, 300, 300}, DType::Float32, device_), true);
+    Variable input(randn({1, 3, 300, 300}, DType::Float32, device), true);
     Variable output = model->forward(input);
 
     auto shape = output.tensor().shape();
@@ -318,11 +335,12 @@ TEST_F(EfficientNetTest, EfficientNetB3ForwardShape) {
               (std::vector<int64_t>{1, 1000}));
 }
 
-TEST_F(EfficientNetTest, EfficientNetB3BatchSizeOne) {
+TEST_P(EfficientNetTest, EfficientNetB3BatchSizeOne) {
     auto model = efficientnet_b3(10, false);
+    model->to(device);
 
     // Test with batch size 1
-    Variable input(Tensor({1, 3, 300, 300}, DType::Float32, device_), true);
+    Variable input(randn({1, 3, 300, 300}, DType::Float32, device), true);
     Variable output = model->forward(input);
 
     auto shape = output.tensor().shape();
@@ -334,10 +352,11 @@ TEST_F(EfficientNetTest, EfficientNetB3BatchSizeOne) {
 // EfficientNet-B4 Tests
 // ============================================================================
 
-TEST_F(EfficientNetTest, EfficientNetB4ForwardShape) {
+TEST_P(EfficientNetTest, EfficientNetB4ForwardShape) {
     auto model = efficientnet_b4(1000, false);
+    model->to(device);
 
-    Variable input(Tensor({1, 3, 380, 380}, DType::Float32, device_), true);
+    Variable input(randn({1, 3, 380, 380}, DType::Float32, device), true);
     Variable output = model->forward(input);
 
     auto shape = output.tensor().shape();
@@ -349,10 +368,11 @@ TEST_F(EfficientNetTest, EfficientNetB4ForwardShape) {
 // EfficientNet-B5 Tests
 // ============================================================================
 
-TEST_F(EfficientNetTest, EfficientNetB5ForwardShape) {
+TEST_P(EfficientNetTest, EfficientNetB5ForwardShape) {
     auto model = efficientnet_b5(1000, false);
+    model->to(device);
 
-    Variable input(Tensor({1, 3, 456, 456}, DType::Float32, device_), true);
+    Variable input(randn({1, 3, 456, 456}, DType::Float32, device), true);
     Variable output = model->forward(input);
 
     auto shape = output.tensor().shape();
@@ -364,10 +384,11 @@ TEST_F(EfficientNetTest, EfficientNetB5ForwardShape) {
 // EfficientNet-B6 Tests
 // ============================================================================
 
-TEST_F(EfficientNetTest, EfficientNetB6ForwardShape) {
+TEST_P(EfficientNetTest, EfficientNetB6ForwardShape) {
     auto model = efficientnet_b6(1000, false);
+    model->to(device);
 
-    Variable input(Tensor({1, 3, 528, 528}, DType::Float32, device_), true);
+    Variable input(randn({1, 3, 528, 528}, DType::Float32, device), true);
     Variable output = model->forward(input);
 
     auto shape = output.tensor().shape();
@@ -379,10 +400,11 @@ TEST_F(EfficientNetTest, EfficientNetB6ForwardShape) {
 // EfficientNet-B7 Tests
 // ============================================================================
 
-TEST_F(EfficientNetTest, EfficientNetB7ForwardShape) {
+TEST_P(EfficientNetTest, EfficientNetB7ForwardShape) {
     auto model = efficientnet_b7(1000, false);
+    model->to(device);
 
-    Variable input(Tensor({1, 3, 600, 600}, DType::Float32, device_), true);
+    Variable input(randn({1, 3, 600, 600}, DType::Float32, device), true);
     Variable output = model->forward(input);
 
     auto shape = output.tensor().shape();
@@ -390,11 +412,12 @@ TEST_F(EfficientNetTest, EfficientNetB7ForwardShape) {
               (std::vector<int64_t>{1, 1000}));
 }
 
-TEST_F(EfficientNetTest, EfficientNetB7GradientFlow) {
+TEST_P(EfficientNetTest, EfficientNetB7GradientFlow) {
     auto model = efficientnet_b7(10, false);
+    model->to(device);
     model->train();
 
-    Variable input(Tensor({1, 3, 600, 600}, DType::Float32, device_), true);
+    Variable input(randn({1, 3, 600, 600}, DType::Float32, device), true);
     Variable output = model->forward(input);
     Variable loss = tenzor::sum(output);
     loss.backward();
@@ -406,11 +429,12 @@ TEST_F(EfficientNetTest, EfficientNetB7GradientFlow) {
 // Edge Case Tests
 // ============================================================================
 
-TEST_F(EfficientNetTest, EfficientNetB0SmallBatch) {
+TEST_P(EfficientNetTest, EfficientNetB0SmallBatch) {
     auto model = efficientnet_b0(10, false);
+    model->to(device);
 
     // Test with batch size 1
-    Variable input(Tensor({1, 3, 224, 224}, DType::Float32, device_), true);
+    Variable input(randn({1, 3, 224, 224}, DType::Float32, device), true);
     Variable output = model->forward(input);
 
     auto shape = output.tensor().shape();
@@ -418,11 +442,12 @@ TEST_F(EfficientNetTest, EfficientNetB0SmallBatch) {
               (std::vector<int64_t>{1, 10}));
 }
 
-TEST_F(EfficientNetTest, EfficientNetB0CustomClasses) {
+TEST_P(EfficientNetTest, EfficientNetB0CustomClasses) {
     // Test with non-standard number of classes
     auto model = efficientnet_b0(100, false);
+    model->to(device);
 
-    Variable input(Tensor({2, 3, 224, 224}, DType::Float32, device_), true);
+    Variable input(randn({2, 3, 224, 224}, DType::Float32, device), true);
     Variable output = model->forward(input);
 
     auto shape = output.tensor().shape();
@@ -430,7 +455,7 @@ TEST_F(EfficientNetTest, EfficientNetB0CustomClasses) {
               (std::vector<int64_t>{2, 100}));
 }
 
-TEST_F(EfficientNetTest, CompoundScalingTest) {
+TEST_P(EfficientNetTest, CompoundScalingTest) {
     auto config_b0 = EfficientNetConfig::efficientnet_b0(1000);
     auto config_b1 = EfficientNetConfig::efficientnet_b0(1000);
     config_b1.apply_compound_scaling(0.5);
@@ -440,14 +465,4 @@ TEST_F(EfficientNetTest, CompoundScalingTest) {
     EXPECT_GT(config_b1.depth_mult, config_b0.depth_mult);
 }
 
-// ============================================================================
-// Main
-// ============================================================================
-
-int main(int argc, char** argv) {
-    ::testing::InitGoogleTest(&argc, argv);
-    if (!::testing::GTEST_FLAG(list_tests)) {
-        tenzor::initialize();
-    }
-    return RUN_ALL_TESTS();
-}
+INSTANTIATE_BACKEND_TESTS(EfficientNetTest);

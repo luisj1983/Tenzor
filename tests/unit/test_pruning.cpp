@@ -11,6 +11,7 @@
 #include <gtest/gtest.h>
 #include "../../include/tenzor/tenzor.hpp"
 #include "../../include/tenzor/nn/compression/pruning.hpp"
+#include "../backend_test_fixture.hpp"
 #include "../grad_flow_helpers.hpp"
 #include <memory>
 #include <cmath>
@@ -20,28 +21,21 @@ using namespace tenzor;
 using namespace tenzor::nn;
 using namespace tenzor::nn::compression;
 
-class PruningTestEnvironment : public ::testing::Environment {
-public:
-    void SetUp() override {
-        tenzor::initialize();
-    }
-};
-
-static ::testing::Environment* const pruning_env =
-    ::testing::AddGlobalTestEnvironment(new PruningTestEnvironment);
-
-class PruningTest : public ::testing::Test {
+class PruningTest : public ::tenzor::testing::BackendTest {
 protected:
     void SetUp() override {
+        ::tenzor::testing::BackendTest::SetUp();
+        if (::testing::Test::IsSkipped()) return;
         // Seed for reproducibility
         std::srand(42);
     }
 
-    // Helper to count zeros in tensor
+    // Helper to count zeros in tensor (host read via .cpu())
     int64_t count_zeros(const Tensor& t) {
-        auto* data = t.data<float>();
+        auto host = t.cpu();
+        auto* data = host.data<float>();
         int64_t count = 0;
-        for (int64_t i = 0; i < t.numel(); ++i) {
+        for (int64_t i = 0; i < host.numel(); ++i) {
             if (std::abs(data[i]) < 1e-7f) {
                 count++;
             }
@@ -55,14 +49,15 @@ protected:
         return static_cast<float>(count_zeros(t)) / static_cast<float>(t.numel());
     }
 
-    // Helper to create random tensor
+    // Helper to create random tensor on the active device.
+    // Host-fills a CPU tensor then moves it to `device`.
     Tensor create_random_tensor(const std::vector<int64_t>& shape) {
         Tensor t(shape, DType::Float32, Device::cpu());
         auto* data = t.data<float>();
         for (int64_t i = 0; i < t.numel(); ++i) {
             data[i] = (static_cast<float>(rand()) / RAND_MAX) * 2.0f - 1.0f;
         }
-        return t;
+        return t.to(device);
     }
 
     // Create simple sequential model for testing
@@ -100,7 +95,7 @@ protected:
 // Importance Criterion Tests
 // ============================================================================
 
-TEST_F(PruningTest, ComputeImportance_L1) {
+TEST_P(PruningTest, ComputeImportance_L1) {
     Tensor weights = create_random_tensor({64, 32});
 
     Tensor importance = compute_importance(weights, ImportanceCriterion::L1);
@@ -108,14 +103,16 @@ TEST_F(PruningTest, ComputeImportance_L1) {
     EXPECT_TRUE(std::equal(importance.shape().begin(), importance.shape().end(), weights.shape().begin(), weights.shape().end()));
 
     // L1 importance should be absolute values
-    auto* w_data = weights.data<float>();
-    auto* i_data = importance.data<float>();
-    for (int64_t i = 0; i < weights.numel(); ++i) {
+    auto weights_cpu = weights.cpu();
+    auto importance_cpu = importance.cpu();
+    auto* w_data = weights_cpu.data<float>();
+    auto* i_data = importance_cpu.data<float>();
+    for (int64_t i = 0; i < weights_cpu.numel(); ++i) {
         EXPECT_NEAR(i_data[i], std::abs(w_data[i]), 1e-5f);
     }
 }
 
-TEST_F(PruningTest, ComputeImportance_L2) {
+TEST_P(PruningTest, ComputeImportance_L2) {
     Tensor weights = create_random_tensor({64, 32});
 
     Tensor importance = compute_importance(weights, ImportanceCriterion::L2);
@@ -123,14 +120,16 @@ TEST_F(PruningTest, ComputeImportance_L2) {
     EXPECT_TRUE(std::equal(importance.shape().begin(), importance.shape().end(), weights.shape().begin(), weights.shape().end()));
 
     // L2 importance should be squared values
-    auto* w_data = weights.data<float>();
-    auto* i_data = importance.data<float>();
-    for (int64_t i = 0; i < weights.numel(); ++i) {
+    auto weights_cpu = weights.cpu();
+    auto importance_cpu = importance.cpu();
+    auto* w_data = weights_cpu.data<float>();
+    auto* i_data = importance_cpu.data<float>();
+    for (int64_t i = 0; i < weights_cpu.numel(); ++i) {
         EXPECT_NEAR(i_data[i], w_data[i] * w_data[i], 1e-5f);
     }
 }
 
-TEST_F(PruningTest, ComputeImportance_L1Norm) {
+TEST_P(PruningTest, ComputeImportance_L1Norm) {
     Tensor weights = create_random_tensor({64, 32});
 
     Tensor importance = compute_importance(weights, ImportanceCriterion::L1Norm);
@@ -138,15 +137,17 @@ TEST_F(PruningTest, ComputeImportance_L1Norm) {
     EXPECT_TRUE(std::equal(importance.shape().begin(), importance.shape().end(), weights.shape().begin(), weights.shape().end()));
 
     // L1Norm should normalize by number of parameters
-    auto* w_data = weights.data<float>();
-    auto* i_data = importance.data<float>();
-    for (int64_t i = 0; i < weights.numel(); ++i) {
-        float expected = std::abs(w_data[i]) / weights.numel();
+    auto weights_cpu = weights.cpu();
+    auto importance_cpu = importance.cpu();
+    auto* w_data = weights_cpu.data<float>();
+    auto* i_data = importance_cpu.data<float>();
+    for (int64_t i = 0; i < weights_cpu.numel(); ++i) {
+        float expected = std::abs(w_data[i]) / weights_cpu.numel();
         EXPECT_NEAR(i_data[i], expected, 1e-5f);
     }
 }
 
-TEST_F(PruningTest, ComputeImportance_L2Norm) {
+TEST_P(PruningTest, ComputeImportance_L2Norm) {
     Tensor weights = create_random_tensor({64, 32});
 
     Tensor importance = compute_importance(weights, ImportanceCriterion::L2Norm);
@@ -154,10 +155,12 @@ TEST_F(PruningTest, ComputeImportance_L2Norm) {
     EXPECT_TRUE(std::equal(importance.shape().begin(), importance.shape().end(), weights.shape().begin(), weights.shape().end()));
 
     // L2Norm should normalize by number of parameters
-    auto* w_data = weights.data<float>();
-    auto* i_data = importance.data<float>();
-    for (int64_t i = 0; i < weights.numel(); ++i) {
-        float expected = (w_data[i] * w_data[i]) / weights.numel();
+    auto weights_cpu = weights.cpu();
+    auto importance_cpu = importance.cpu();
+    auto* w_data = weights_cpu.data<float>();
+    auto* i_data = importance_cpu.data<float>();
+    for (int64_t i = 0; i < weights_cpu.numel(); ++i) {
+        float expected = (w_data[i] * w_data[i]) / weights_cpu.numel();
         EXPECT_NEAR(i_data[i], expected, 1e-5f);
     }
 }
@@ -166,7 +169,7 @@ TEST_F(PruningTest, ComputeImportance_L2Norm) {
 // Mask Creation Tests
 // ============================================================================
 
-TEST_F(PruningTest, CreateMask_50PercentSparsity) {
+TEST_P(PruningTest, CreateMask_50PercentSparsity) {
     Tensor importance = create_random_tensor({100, 100});
 
     Tensor mask = create_mask_from_importance(importance, 0.5f);
@@ -174,8 +177,9 @@ TEST_F(PruningTest, CreateMask_50PercentSparsity) {
     EXPECT_TRUE(std::equal(mask.shape().begin(), mask.shape().end(), importance.shape().begin(), importance.shape().end()));
 
     // Check mask is binary
-    auto* mask_data = mask.data<float>();
-    for (int64_t i = 0; i < mask.numel(); ++i) {
+    auto mask_cpu = mask.cpu();
+    auto* mask_data = mask_cpu.data<float>();
+    for (int64_t i = 0; i < mask_cpu.numel(); ++i) {
         EXPECT_TRUE(mask_data[i] == 0.0f || mask_data[i] == 1.0f);
     }
 
@@ -184,7 +188,7 @@ TEST_F(PruningTest, CreateMask_50PercentSparsity) {
     EXPECT_NEAR(sparsity, 0.5f, 0.02f);
 }
 
-TEST_F(PruningTest, CreateMask_VariousSparsityLevels) {
+TEST_P(PruningTest, CreateMask_VariousSparsityLevels) {
     std::vector<float> sparsity_levels = {0.1f, 0.3f, 0.5f, 0.7f, 0.9f};
 
     for (float target_sparsity : sparsity_levels) {
@@ -197,7 +201,7 @@ TEST_F(PruningTest, CreateMask_VariousSparsityLevels) {
     }
 }
 
-TEST_F(PruningTest, CreateMask_ZeroSparsity) {
+TEST_P(PruningTest, CreateMask_ZeroSparsity) {
     Tensor importance = create_random_tensor({64, 64});
     Tensor mask = create_mask_from_importance(importance, 0.0f);
 
@@ -206,7 +210,7 @@ TEST_F(PruningTest, CreateMask_ZeroSparsity) {
     EXPECT_NEAR(sparsity, 0.0f, 1e-5f);
 }
 
-TEST_F(PruningTest, CreateMask_FullSparsity) {
+TEST_P(PruningTest, CreateMask_FullSparsity) {
     Tensor importance = create_random_tensor({64, 64});
     Tensor mask = create_mask_from_importance(importance, 1.0f);
 
@@ -219,15 +223,17 @@ TEST_F(PruningTest, CreateMask_FullSparsity) {
 // PruningMask Tests
 // ============================================================================
 
-TEST_F(PruningTest, PruningMask_Apply) {
+TEST_P(PruningTest, PruningMask_Apply) {
     Tensor weights = create_random_tensor({64, 32});
     Tensor mask_tensor = create_random_tensor({64, 32});
 
-    // Make mask binary
-    auto* mask_data = mask_tensor.data<float>();
-    for (int64_t i = 0; i < mask_tensor.numel(); ++i) {
+    // Make mask binary (host write -> back to device)
+    Tensor mask_host = mask_tensor.cpu();
+    auto* mask_data = mask_host.data<float>();
+    for (int64_t i = 0; i < mask_host.numel(); ++i) {
         mask_data[i] = (mask_data[i] > 0.0f) ? 1.0f : 0.0f;
     }
+    mask_tensor = mask_host.to(device);
 
     PruningMask mask;
     mask.mask = mask_tensor;
@@ -236,27 +242,31 @@ TEST_F(PruningTest, PruningMask_Apply) {
     Tensor masked_weights = mask.apply(weights);
 
     // Check element-wise multiplication
-    auto* w_data = weights.data<float>();
-    auto* m_data = mask_tensor.data<float>();
-    auto* mw_data = masked_weights.data<float>();
+    auto weights_cpu = weights.cpu();
+    auto mask_cpu = mask_tensor.cpu();
+    auto masked_cpu = masked_weights.cpu();
+    auto* w_data = weights_cpu.data<float>();
+    auto* m_data = mask_cpu.data<float>();
+    auto* mw_data = masked_cpu.data<float>();
 
-    for (int64_t i = 0; i < weights.numel(); ++i) {
+    for (int64_t i = 0; i < weights_cpu.numel(); ++i) {
         EXPECT_NEAR(mw_data[i], w_data[i] * m_data[i], 1e-5f);
     }
 }
 
-TEST_F(PruningTest, PruningMask_ComputeSparsity) {
+TEST_P(PruningTest, PruningMask_ComputeSparsity) {
     PruningMask mask;
-    mask.mask = create_random_tensor({100, 100});
+    Tensor mask_host = create_random_tensor({100, 100}).cpu();
 
     // Set 30% to zero
-    auto* data = mask.mask.data<float>();
+    auto* data = mask_host.data<float>();
     for (int64_t i = 0; i < 3000; ++i) {
         data[i] = 0.0f;
     }
-    for (int64_t i = 3000; i < mask.mask.numel(); ++i) {
+    for (int64_t i = 3000; i < mask_host.numel(); ++i) {
         data[i] = 1.0f;
     }
+    mask.mask = mask_host.to(device);
 
     float sparsity = mask.compute_sparsity();
     EXPECT_NEAR(sparsity, 0.3f, 0.01f);
@@ -266,8 +276,9 @@ TEST_F(PruningTest, PruningMask_ComputeSparsity) {
 // Unstructured Pruning Tests - L1 Criterion
 // ============================================================================
 
-TEST_F(PruningTest, UnstructuredPruning_L1_50Percent) {
+TEST_P(PruningTest, UnstructuredPruning_L1_50Percent) {
     auto linear = std::make_shared<Linear>(128, 64, true);
+    linear->to(device);
 
     PruningConfig config = prune_unstructured(linear, 0.5f, ImportanceCriterion::L1, false);
 
@@ -282,11 +293,12 @@ TEST_F(PruningTest, UnstructuredPruning_L1_50Percent) {
     EXPECT_NEAR(sparsity, 0.5f, 0.05f);
 }
 
-TEST_F(PruningTest, UnstructuredPruning_L1_VariousSparsities) {
+TEST_P(PruningTest, UnstructuredPruning_L1_VariousSparsities) {
     std::vector<float> sparsity_levels = {0.1f, 0.3f, 0.5f, 0.7f, 0.9f};
 
     for (float target_sparsity : sparsity_levels) {
         auto linear = std::make_shared<Linear>(64, 32, true);
+        linear->to(device);
 
         PruningConfig config = prune_unstructured(linear, target_sparsity,
                                                    ImportanceCriterion::L1, false);
@@ -304,8 +316,9 @@ TEST_F(PruningTest, UnstructuredPruning_L1_VariousSparsities) {
 // Unstructured Pruning Tests - L2 Criterion
 // ============================================================================
 
-TEST_F(PruningTest, UnstructuredPruning_L2_50Percent) {
+TEST_P(PruningTest, UnstructuredPruning_L2_50Percent) {
     auto linear = std::make_shared<Linear>(128, 64, true);
+    linear->to(device);
 
     PruningConfig config = prune_unstructured(linear, 0.5f, ImportanceCriterion::L2, false);
     apply_pruning_masks(linear, config);
@@ -315,8 +328,9 @@ TEST_F(PruningTest, UnstructuredPruning_L2_50Percent) {
     EXPECT_NEAR(sparsity, 0.5f, 0.05f);
 }
 
-TEST_F(PruningTest, UnstructuredPruning_L2_70Percent) {
+TEST_P(PruningTest, UnstructuredPruning_L2_70Percent) {
     auto linear = std::make_shared<Linear>(256, 128, true);
+    linear->to(device);
 
     PruningConfig config = prune_unstructured(linear, 0.7f, ImportanceCriterion::L2, false);
     apply_pruning_masks(linear, config);
@@ -330,8 +344,9 @@ TEST_F(PruningTest, UnstructuredPruning_L2_70Percent) {
 // Unstructured Pruning Tests - L1Norm Criterion
 // ============================================================================
 
-TEST_F(PruningTest, UnstructuredPruning_L1Norm) {
+TEST_P(PruningTest, UnstructuredPruning_L1Norm) {
     auto linear = std::make_shared<Linear>(100, 50, true);
+    linear->to(device);
 
     PruningConfig config = prune_unstructured(linear, 0.4f, ImportanceCriterion::L1Norm, false);
     apply_pruning_masks(linear, config);
@@ -345,8 +360,9 @@ TEST_F(PruningTest, UnstructuredPruning_L1Norm) {
 // Unstructured Pruning Tests - L2Norm Criterion
 // ============================================================================
 
-TEST_F(PruningTest, UnstructuredPruning_L2Norm) {
+TEST_P(PruningTest, UnstructuredPruning_L2Norm) {
     auto linear = std::make_shared<Linear>(100, 50, true);
+    linear->to(device);
 
     PruningConfig config = prune_unstructured(linear, 0.6f, ImportanceCriterion::L2Norm, false);
     apply_pruning_masks(linear, config);
@@ -360,8 +376,9 @@ TEST_F(PruningTest, UnstructuredPruning_L2Norm) {
 // Global vs Local Pruning
 // ============================================================================
 
-TEST_F(PruningTest, UnstructuredPruning_GlobalVsLocal) {
+TEST_P(PruningTest, UnstructuredPruning_GlobalVsLocal) {
     auto model = std::make_shared<SimpleSequential>(3, 128, 128, 10);
+    model->to(device);
 
     // Global pruning
     PruningConfig config_global = prune_unstructured(model, 0.5f,
@@ -369,6 +386,7 @@ TEST_F(PruningTest, UnstructuredPruning_GlobalVsLocal) {
 
     // Local pruning
     auto model2 = std::make_shared<SimpleSequential>(3, 128, 128, 10);
+    model2->to(device);
     PruningConfig config_local = prune_unstructured(model2, 0.5f,
                                                      ImportanceCriterion::L1, false);
 
@@ -381,8 +399,9 @@ TEST_F(PruningTest, UnstructuredPruning_GlobalVsLocal) {
 // Iterative Pruning Tests
 // ============================================================================
 
-TEST_F(PruningTest, IterativePruning_OneShot) {
+TEST_P(PruningTest, IterativePruning_OneShot) {
     auto linear = std::make_shared<Linear>(128, 64, true);
+    linear->to(device);
 
     PruningConfig config = prune_iterative(linear, 0.8f, 1,
                                            PruningSchedule::OneShot,
@@ -392,8 +411,9 @@ TEST_F(PruningTest, IterativePruning_OneShot) {
     EXPECT_NEAR(config.target_sparsity, 0.8f, 1e-5f);
 }
 
-TEST_F(PruningTest, IterativePruning_Iterative_5Steps) {
+TEST_P(PruningTest, IterativePruning_Iterative_5Steps) {
     auto linear = std::make_shared<Linear>(128, 64, true);
+    linear->to(device);
 
     PruningConfig config = prune_iterative(linear, 0.9f, 5,
                                            PruningSchedule::Iterative,
@@ -404,8 +424,9 @@ TEST_F(PruningTest, IterativePruning_Iterative_5Steps) {
     EXPECT_NEAR(config.target_sparsity, 0.9f, 1e-5f);
 }
 
-TEST_F(PruningTest, IterativePruning_Polynomial) {
+TEST_P(PruningTest, IterativePruning_Polynomial) {
     auto linear = std::make_shared<Linear>(128, 64, true);
+    linear->to(device);
 
     PruningConfig config = prune_iterative(linear, 0.7f, 10,
                                            PruningSchedule::Polynomial,
@@ -415,8 +436,9 @@ TEST_F(PruningTest, IterativePruning_Polynomial) {
     EXPECT_EQ(config.num_iterations, 10);
 }
 
-TEST_F(PruningTest, IterativePruning_CurrentSparsity) {
+TEST_P(PruningTest, IterativePruning_CurrentSparsity) {
     auto linear = std::make_shared<Linear>(128, 64, true);
+    linear->to(device);
 
     PruningConfig config = prune_iterative(linear, 0.9f, 10,
                                            PruningSchedule::Iterative,
@@ -437,8 +459,9 @@ TEST_F(PruningTest, IterativePruning_CurrentSparsity) {
 // Structured Pruning - Channel Pruning Tests
 // ============================================================================
 
-TEST_F(PruningTest, ChannelPruning_Conv2d_30Percent) {
+TEST_P(PruningTest, ChannelPruning_Conv2d_30Percent) {
     auto conv = std::make_shared<Conv2d>(64, 128, 3, 1, 1, 1, 1, true);
+    conv->to(device);
 
     auto pruned_conv = prune_channels(conv, 0.3f, ImportanceCriterion::L1);
 
@@ -466,8 +489,9 @@ TEST_F(PruningTest, ChannelPruning_Conv2d_30Percent) {
     EXPECT_EQ(pruned_weight.shape()[0], expected_channels);
 }
 
-TEST_F(PruningTest, ChannelPruning_Conv2d_50Percent) {
+TEST_P(PruningTest, ChannelPruning_Conv2d_50Percent) {
     auto conv = std::make_shared<Conv2d>(32, 64, 3, 1, 1, 1, 1, true);
+    conv->to(device);
 
     auto pruned_conv = prune_channels(conv, 0.5f, ImportanceCriterion::L1);
 
@@ -484,8 +508,9 @@ TEST_F(PruningTest, ChannelPruning_Conv2d_50Percent) {
     EXPECT_EQ(pruned_weight.shape()[0], expected_channels);
 }
 
-TEST_F(PruningTest, ChannelPruning_L2Criterion) {
+TEST_P(PruningTest, ChannelPruning_L2Criterion) {
     auto conv = std::make_shared<Conv2d>(64, 128, 3, 1, 1, 1, 1, true);
+    conv->to(device);
 
     auto pruned_conv = prune_channels(conv, 0.25f, ImportanceCriterion::L2);
 
@@ -505,8 +530,9 @@ TEST_F(PruningTest, ChannelPruning_L2Criterion) {
 // Structured Pruning - Filter Pruning Tests
 // ============================================================================
 
-TEST_F(PruningTest, FilterPruning_Conv2d_40Percent) {
+TEST_P(PruningTest, FilterPruning_Conv2d_40Percent) {
     auto conv = std::make_shared<Conv2d>(64, 128, 3, 1, 1, 1, 1, true);
+    conv->to(device);
 
     auto pruned_conv = prune_filters(conv, 0.4f, ImportanceCriterion::L1);
 
@@ -525,8 +551,9 @@ TEST_F(PruningTest, FilterPruning_Conv2d_40Percent) {
     EXPECT_EQ(pruned_weight.shape()[0], expected_filters);
 }
 
-TEST_F(PruningTest, FilterPruning_L2Criterion) {
+TEST_P(PruningTest, FilterPruning_L2Criterion) {
     auto conv = std::make_shared<Conv2d>(32, 64, 3, 1, 1, 1, 1, true);
+    conv->to(device);
 
     auto pruned_conv = prune_filters(conv, 0.5f, ImportanceCriterion::L2);
 
@@ -546,8 +573,9 @@ TEST_F(PruningTest, FilterPruning_L2Criterion) {
 // CRITICAL: Layer Pruning Tests (Agent 6 Implementation)
 // ============================================================================
 
-TEST_F(PruningTest, LayerPruning_RemoveHalfLayers) {
+TEST_P(PruningTest, LayerPruning_RemoveHalfLayers) {
     auto model = std::make_shared<SimpleSequential>(6, 128, 128, 10);
+    model->to(device);
 
     // Prune 3 out of 6 layers
     auto pruned_model = prune_layers(model, 3, ImportanceCriterion::L1);
@@ -557,14 +585,16 @@ TEST_F(PruningTest, LayerPruning_RemoveHalfLayers) {
     // Test that model still works
     Tensor input({4, 128}, DType::Float32, Device::cpu());
     input.fill_(1.0f);
+    input = input.to(device);
 
     auto output = pruned_model->forward(Variable(input, false));
     EXPECT_EQ(output.tensor().shape()[0], 4);
     EXPECT_EQ(output.tensor().shape()[1], 10);
 }
 
-TEST_F(PruningTest, LayerPruning_RemoveSingleLayer) {
+TEST_P(PruningTest, LayerPruning_RemoveSingleLayer) {
     auto model = std::make_shared<SimpleSequential>(5, 128, 128, 10);
+    model->to(device);
 
     // Prune 1 layer
     auto pruned_model = prune_layers(model, 1, ImportanceCriterion::L1);
@@ -573,13 +603,15 @@ TEST_F(PruningTest, LayerPruning_RemoveSingleLayer) {
 
     Tensor input({8, 128}, DType::Float32, Device::cpu());
     input.fill_(0.5f);
+    input = input.to(device);
 
     auto output = pruned_model->forward(Variable(input, false));
     EXPECT_EQ(output.tensor().shape()[0], 8);
 }
 
-TEST_F(PruningTest, LayerPruning_L2Criterion) {
+TEST_P(PruningTest, LayerPruning_L2Criterion) {
     auto model = std::make_shared<SimpleSequential>(4, 64, 64, 10);
+    model->to(device);
 
     // Prune 2 layers using L2
     auto pruned_model = prune_layers(model, 2, ImportanceCriterion::L2);
@@ -588,14 +620,16 @@ TEST_F(PruningTest, LayerPruning_L2Criterion) {
 
     Tensor input({2, 64}, DType::Float32, Device::cpu());
     input.fill_(1.0f);
+    input = input.to(device);
 
     EXPECT_NO_THROW({
         auto output = pruned_model->forward(Variable(input, false));
     });
 }
 
-TEST_F(PruningTest, LayerPruning_VerifyLayersZeroed) {
+TEST_P(PruningTest, LayerPruning_VerifyLayersZeroed) {
     auto model = std::make_shared<SimpleSequential>(5, 128, 128, 10);
+    model->to(device);
 
     // Store original parameters
     auto original_params = model->named_parameters();
@@ -619,7 +653,7 @@ TEST_F(PruningTest, LayerPruning_VerifyLayersZeroed) {
     EXPECT_EQ(zero_layer_count, 2);
 }
 
-TEST_F(PruningTest, LayerPruning_DifferentLayerSizes) {
+TEST_P(PruningTest, LayerPruning_DifferentLayerSizes) {
     // Create model with varying layer sizes
     class VariedModel : public Module {
     public:
@@ -647,6 +681,7 @@ TEST_F(PruningTest, LayerPruning_DifferentLayerSizes) {
     };
 
     auto model = std::make_shared<VariedModel>();
+    model->to(device);
 
     auto pruned_model = prune_layers(model, 1, ImportanceCriterion::L1);
 
@@ -657,8 +692,9 @@ TEST_F(PruningTest, LayerPruning_DifferentLayerSizes) {
 // Mask Application Tests
 // ============================================================================
 
-TEST_F(PruningTest, ApplyPruningMasks_PreservesSparsity) {
+TEST_P(PruningTest, ApplyPruningMasks_PreservesSparsity) {
     auto linear = std::make_shared<Linear>(128, 64, true);
+    linear->to(device);
 
     PruningConfig config = prune_unstructured(linear, 0.5f, ImportanceCriterion::L1, false);
 
@@ -677,8 +713,9 @@ TEST_F(PruningTest, ApplyPruningMasks_PreservesSparsity) {
     EXPECT_NEAR(sparsity_before, sparsity_after, 1e-5f);
 }
 
-TEST_F(PruningTest, ApplyPruningMasks_MultipleApplications) {
+TEST_P(PruningTest, ApplyPruningMasks_MultipleApplications) {
     auto linear = std::make_shared<Linear>(100, 50, true);
+    linear->to(device);
 
     PruningConfig config = prune_unstructured(linear, 0.6f, ImportanceCriterion::L1, false);
 
@@ -698,8 +735,9 @@ TEST_F(PruningTest, ApplyPruningMasks_MultipleApplications) {
 // Finalize Pruning Tests
 // ============================================================================
 
-TEST_F(PruningTest, FinalizePruning_MakesPermanent) {
+TEST_P(PruningTest, FinalizePruning_MakesPermanent) {
     auto linear = std::make_shared<Linear>(128, 64, true);
+    linear->to(device);
 
     PruningConfig config = prune_unstructured(linear, 0.5f, ImportanceCriterion::L1, false);
     apply_pruning_masks(linear, config);
@@ -725,8 +763,9 @@ TEST_F(PruningTest, FinalizePruning_MakesPermanent) {
 // Remove Pruning Tests
 // ============================================================================
 
-TEST_F(PruningTest, RemovePruning_RestoresWeights) {
+TEST_P(PruningTest, RemovePruning_RestoresWeights) {
     auto linear = std::make_shared<Linear>(128, 64, true);
+    linear->to(device);
 
     // Store original weights
     auto original_weight = linear->weight();
@@ -745,8 +784,9 @@ TEST_F(PruningTest, RemovePruning_RestoresWeights) {
 // Sparsity Analysis Tests
 // ============================================================================
 
-TEST_F(PruningTest, ComputeSparsity_UnprunedModel) {
+TEST_P(PruningTest, ComputeSparsity_UnprunedModel) {
     auto linear = std::make_shared<Linear>(128, 64, true);
+    linear->to(device);
 
     float sparsity = compute_sparsity(linear);
 
@@ -754,8 +794,9 @@ TEST_F(PruningTest, ComputeSparsity_UnprunedModel) {
     EXPECT_LT(sparsity, 0.1f);
 }
 
-TEST_F(PruningTest, ComputeSparsity_PrunedModel) {
+TEST_P(PruningTest, ComputeSparsity_PrunedModel) {
     auto linear = std::make_shared<Linear>(128, 64, true);
+    linear->to(device);
 
     PruningConfig config = prune_unstructured(linear, 0.7f, ImportanceCriterion::L1, false);
     apply_pruning_masks(linear, config);
@@ -765,8 +806,9 @@ TEST_F(PruningTest, ComputeSparsity_PrunedModel) {
     EXPECT_NEAR(sparsity, 0.7f, 0.1f);
 }
 
-TEST_F(PruningTest, AnalyzeLayerSparsity) {
+TEST_P(PruningTest, AnalyzeLayerSparsity) {
     auto model = std::make_shared<SimpleSequential>(3, 128, 128, 10);
+    model->to(device);
 
     PruningConfig config = prune_unstructured(model, 0.5f, ImportanceCriterion::L1, false);
     apply_pruning_masks(model, config);
@@ -785,9 +827,11 @@ TEST_F(PruningTest, AnalyzeLayerSparsity) {
 // Compression Ratio Tests
 // ============================================================================
 
-TEST_F(PruningTest, ComputeCompressionRatio_50PercentPruning) {
+TEST_P(PruningTest, ComputeCompressionRatio_50PercentPruning) {
     auto original = std::make_shared<Linear>(256, 256, true);
+    original->to(device);
     auto pruned = std::make_shared<Linear>(256, 256, true);
+    pruned->to(device);
 
     PruningConfig config = prune_unstructured(pruned, 0.5f, ImportanceCriterion::L1, false);
     apply_pruning_masks(pruned, config);
@@ -799,9 +843,11 @@ TEST_F(PruningTest, ComputeCompressionRatio_50PercentPruning) {
     EXPECT_LT(ratio, 2.5f);
 }
 
-TEST_F(PruningTest, ComputeCompressionRatio_90PercentPruning) {
+TEST_P(PruningTest, ComputeCompressionRatio_90PercentPruning) {
     auto original = std::make_shared<Linear>(128, 128, true);
+    original->to(device);
     auto pruned = std::make_shared<Linear>(128, 128, true);
+    pruned->to(device);
 
     PruningConfig config = prune_unstructured(pruned, 0.9f, ImportanceCriterion::L1, false);
     apply_pruning_masks(pruned, config);
@@ -816,8 +862,9 @@ TEST_F(PruningTest, ComputeCompressionRatio_90PercentPruning) {
 // Integration Tests
 // ============================================================================
 
-TEST_F(PruningTest, Integration_PruneThenTrain) {
+TEST_P(PruningTest, Integration_PruneThenTrain) {
     auto linear = std::make_shared<Linear>(128, 64, true);
+    linear->to(device);
 
     // Prune
     PruningConfig config = prune_unstructured(linear, 0.5f, ImportanceCriterion::L1, false);
@@ -833,8 +880,9 @@ TEST_F(PruningTest, Integration_PruneThenTrain) {
     EXPECT_NEAR(sparsity, 0.5f, 0.05f);
 }
 
-TEST_F(PruningTest, Integration_SequentialPruning) {
+TEST_P(PruningTest, Integration_SequentialPruning) {
     auto linear = std::make_shared<Linear>(128, 64, true);
+    linear->to(device);
 
     // Prune in steps: 30% -> 50% -> 70%
     std::vector<float> sparsity_schedule = {0.3f, 0.5f, 0.7f};
@@ -851,7 +899,7 @@ TEST_F(PruningTest, Integration_SequentialPruning) {
     }
 }
 
-TEST_F(PruningTest, Integration_PruneConvAndLinear) {
+TEST_P(PruningTest, Integration_PruneConvAndLinear) {
     class MixedModel : public Module {
     public:
         MixedModel() {
@@ -873,6 +921,7 @@ TEST_F(PruningTest, Integration_PruneConvAndLinear) {
     };
 
     auto model = std::make_shared<MixedModel>();
+    model->to(device);
 
     PruningConfig config = prune_unstructured(model, 0.5f, ImportanceCriterion::L1, false);
     apply_pruning_masks(model, config);
@@ -889,8 +938,9 @@ TEST_F(PruningTest, Integration_PruneConvAndLinear) {
 // Edge Cases
 // ============================================================================
 
-TEST_F(PruningTest, EdgeCase_PruneAlreadyPrunedModel) {
+TEST_P(PruningTest, EdgeCase_PruneAlreadyPrunedModel) {
     auto linear = std::make_shared<Linear>(128, 64, true);
+    linear->to(device);
 
     // First pruning
     PruningConfig config1 = prune_unstructured(linear, 0.5f, ImportanceCriterion::L1, false);
@@ -906,8 +956,9 @@ TEST_F(PruningTest, EdgeCase_PruneAlreadyPrunedModel) {
     EXPECT_NEAR(sparsity, 0.7f, 0.05f);
 }
 
-TEST_F(PruningTest, EdgeCase_ZeroSparsityPruning) {
+TEST_P(PruningTest, EdgeCase_ZeroSparsityPruning) {
     auto linear = std::make_shared<Linear>(128, 64, true);
+    linear->to(device);
 
     PruningConfig config = prune_unstructured(linear, 0.0f, ImportanceCriterion::L1, false);
     apply_pruning_masks(linear, config);
@@ -919,8 +970,9 @@ TEST_F(PruningTest, EdgeCase_ZeroSparsityPruning) {
     EXPECT_LT(sparsity, 0.1f);
 }
 
-TEST_F(PruningTest, EdgeCase_NearFullSparsityPruning) {
+TEST_P(PruningTest, EdgeCase_NearFullSparsityPruning) {
     auto linear = std::make_shared<Linear>(128, 64, true);
+    linear->to(device);
 
     PruningConfig config = prune_unstructured(linear, 0.99f, ImportanceCriterion::L1, false);
     apply_pruning_masks(linear, config);
@@ -931,8 +983,9 @@ TEST_F(PruningTest, EdgeCase_NearFullSparsityPruning) {
     EXPECT_GT(sparsity, 0.9f);
 }
 
-TEST_F(PruningTest, EdgeCase_SingleLayerModel) {
+TEST_P(PruningTest, EdgeCase_SingleLayerModel) {
     auto linear = std::make_shared<Linear>(10, 10, true);
+    linear->to(device);
 
     PruningConfig config = prune_unstructured(linear, 0.5f, ImportanceCriterion::L1, false);
     apply_pruning_masks(linear, config);
@@ -945,9 +998,10 @@ TEST_F(PruningTest, EdgeCase_SingleLayerModel) {
     EXPECT_EQ(output.tensor().shape()[1], 10);
 }
 
-TEST_F(PruningTest, EdgeCase_VerySmallTensor) {
+TEST_P(PruningTest, EdgeCase_VerySmallTensor) {
     Tensor tiny({2, 2}, DType::Float32, Device::cpu());
     tiny.fill_(1.0f);
+    tiny = tiny.to(device);
 
     Tensor importance = compute_importance(tiny, ImportanceCriterion::L1);
     Tensor mask = create_mask_from_importance(importance, 0.5f);
@@ -960,8 +1014,9 @@ TEST_F(PruningTest, EdgeCase_VerySmallTensor) {
 // Functional Tests
 // ============================================================================
 
-TEST_F(PruningTest, ModelStillFunctional_AfterPruning) {
+TEST_P(PruningTest, ModelStillFunctional_AfterPruning) {
     auto model = std::make_shared<SimpleSequential>(3, 784, 256, 10);
+    model->to(device);
 
     // Test before pruning
     Tensor input = create_random_tensor({16, 784});
@@ -979,8 +1034,9 @@ TEST_F(PruningTest, ModelStillFunctional_AfterPruning) {
                           output_before.tensor().shape().begin(), output_before.tensor().shape().end()));
 }
 
-TEST_F(PruningTest, PrunedModelGradients) {
+TEST_P(PruningTest, PrunedModelGradients) {
     auto linear = std::make_shared<Linear>(64, 32, true);
+    linear->to(device);
 
     PruningConfig config = prune_unstructured(linear, 0.5f, ImportanceCriterion::L1, false);
     apply_pruning_masks(linear, config);
@@ -999,11 +1055,4 @@ TEST_F(PruningTest, PrunedModelGradients) {
     EXPECT_GRAD_FLOWS(input_var);
 }
 
-// ============================================================================
-// Main
-// ============================================================================
-
-int main(int argc, char** argv) {
-    ::testing::InitGoogleTest(&argc, argv);
-    return RUN_ALL_TESTS();
-}
+INSTANTIATE_BACKEND_TESTS(PruningTest);

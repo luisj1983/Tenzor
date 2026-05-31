@@ -8,39 +8,27 @@
 #include "tenzor/ops/creation.hpp"
 #include "tenzor/autograd/variable.hpp"
 #include "tenzor/nn/activations/activations.hpp"
+#include "../backend_test_fixture.hpp"
 #include <cmath>
-
-namespace tenzor {
-    void initialize();
-}
 
 using namespace tenzor;
 using namespace tenzor::nn;
 
-class TenzorTestEnvironment : public ::testing::Environment {
-public:
-    void SetUp() override {
-        tenzor::initialize();
-    }
-};
-
-static ::testing::Environment* const tenzor_env =
-    ::testing::AddGlobalTestEnvironment(new TenzorTestEnvironment);
-
-class HardtanhTest : public ::testing::Test {};
+class HardtanhTest : public ::tenzor::testing::BackendTest {};
 
 // ============================================================================
 // Default range [-1, 1]
 // ============================================================================
 
-TEST_F(HardtanhTest, DefaultRangeClampsBelowMin) {
+TEST_P(HardtanhTest, DefaultRangeClampsBelowMin) {
     // Values below -1 should be clamped to -1
     float data[] = {-5.0f, -2.0f, -1.5f, -1.0f};
-    auto input = Variable(from_data(data, {4}), false);
+    auto input = Variable(from_data(data, {4}, device), false);
 
     Hardtanh act;
     auto result = act.forward_impl(input);
-    auto* out = result.tensor().data<float>();
+    auto out_cpu = result.tensor().cpu();
+    auto* out = out_cpu.data<float>();
 
     EXPECT_FLOAT_EQ(out[0], -1.0f);
     EXPECT_FLOAT_EQ(out[1], -1.0f);
@@ -48,14 +36,15 @@ TEST_F(HardtanhTest, DefaultRangeClampsBelowMin) {
     EXPECT_FLOAT_EQ(out[3], -1.0f);
 }
 
-TEST_F(HardtanhTest, DefaultRangeClampsAboveMax) {
+TEST_P(HardtanhTest, DefaultRangeClampsAboveMax) {
     // Values above 1 should be clamped to 1
     float data[] = {1.0f, 1.5f, 2.0f, 5.0f};
-    auto input = Variable(from_data(data, {4}), false);
+    auto input = Variable(from_data(data, {4}, device), false);
 
     Hardtanh act;
     auto result = act.forward_impl(input);
-    auto* out = result.tensor().data<float>();
+    auto out_cpu = result.tensor().cpu();
+    auto* out = out_cpu.data<float>();
 
     EXPECT_FLOAT_EQ(out[0], 1.0f);
     EXPECT_FLOAT_EQ(out[1], 1.0f);
@@ -63,14 +52,15 @@ TEST_F(HardtanhTest, DefaultRangeClampsAboveMax) {
     EXPECT_FLOAT_EQ(out[3], 1.0f);
 }
 
-TEST_F(HardtanhTest, DefaultRangePassesThrough) {
+TEST_P(HardtanhTest, DefaultRangePassesThrough) {
     // Values in [-1, 1] should pass through unchanged
     float data[] = {-0.5f, 0.0f, 0.5f, 0.99f};
-    auto input = Variable(from_data(data, {4}), false);
+    auto input = Variable(from_data(data, {4}, device), false);
 
     Hardtanh act;
     auto result = act.forward_impl(input);
-    auto* out = result.tensor().data<float>();
+    auto out_cpu = result.tensor().cpu();
+    auto* out = out_cpu.data<float>();
 
     EXPECT_FLOAT_EQ(out[0], -0.5f);
     EXPECT_FLOAT_EQ(out[1], 0.0f);
@@ -78,13 +68,14 @@ TEST_F(HardtanhTest, DefaultRangePassesThrough) {
     EXPECT_FLOAT_EQ(out[3], 0.99f);
 }
 
-TEST_F(HardtanhTest, DefaultRangeMixed) {
+TEST_P(HardtanhTest, DefaultRangeMixed) {
     float data[] = {-3.0f, -0.5f, 0.5f, 3.0f};
-    auto input = Variable(from_data(data, {4}), false);
+    auto input = Variable(from_data(data, {4}, device), false);
 
     Hardtanh act;
     auto result = act.forward_impl(input);
-    auto* out = result.tensor().data<float>();
+    auto out_cpu = result.tensor().cpu();
+    auto* out = out_cpu.data<float>();
 
     EXPECT_FLOAT_EQ(out[0], -1.0f);
     EXPECT_FLOAT_EQ(out[1], -0.5f);
@@ -96,13 +87,14 @@ TEST_F(HardtanhTest, DefaultRangeMixed) {
 // Custom range
 // ============================================================================
 
-TEST_F(HardtanhTest, CustomRange) {
+TEST_P(HardtanhTest, CustomRange) {
     float data[] = {-10.0f, -5.0f, 0.0f, 5.0f, 10.0f};
-    auto input = Variable(from_data(data, {5}), false);
+    auto input = Variable(from_data(data, {5}, device), false);
 
     Hardtanh act(-2.0, 3.0);
     auto result = act.forward_impl(input);
-    auto* out = result.tensor().data<float>();
+    auto out_cpu = result.tensor().cpu();
+    auto* out = out_cpu.data<float>();
 
     EXPECT_FLOAT_EQ(out[0], -2.0f);  // clamped to min
     EXPECT_FLOAT_EQ(out[1], -2.0f);  // clamped to min
@@ -115,13 +107,14 @@ TEST_F(HardtanhTest, CustomRange) {
 // Edge cases
 // ============================================================================
 
-TEST_F(HardtanhTest, AllValuesInRange) {
+TEST_P(HardtanhTest, AllValuesInRange) {
     float data[] = {-0.1f, 0.0f, 0.1f, 0.5f};
-    auto input = Variable(from_data(data, {4}), false);
+    auto input = Variable(from_data(data, {4}, device), false);
 
     Hardtanh act;
     auto result = act.forward_impl(input);
-    auto* out = result.tensor().data<float>();
+    auto out_cpu = result.tensor().cpu();
+    auto* out = out_cpu.data<float>();
 
     // Everything should pass through
     EXPECT_FLOAT_EQ(out[0], -0.1f);
@@ -130,13 +123,14 @@ TEST_F(HardtanhTest, AllValuesInRange) {
     EXPECT_FLOAT_EQ(out[3], 0.5f);
 }
 
-TEST_F(HardtanhTest, AllValuesClamped) {
+TEST_P(HardtanhTest, AllValuesClamped) {
     float data[] = {-100.0f, -50.0f, 50.0f, 100.0f};
-    auto input = Variable(from_data(data, {4}), false);
+    auto input = Variable(from_data(data, {4}, device), false);
 
     Hardtanh act;
     auto result = act.forward_impl(input);
-    auto* out = result.tensor().data<float>();
+    auto out_cpu = result.tensor().cpu();
+    auto* out = out_cpu.data<float>();
 
     EXPECT_FLOAT_EQ(out[0], -1.0f);
     EXPECT_FLOAT_EQ(out[1], -1.0f);
@@ -144,12 +138,13 @@ TEST_F(HardtanhTest, AllValuesClamped) {
     EXPECT_FLOAT_EQ(out[3], 1.0f);
 }
 
-TEST_F(HardtanhTest, FunctionalHardtanh) {
+TEST_P(HardtanhTest, FunctionalHardtanh) {
     float data[] = {-3.0f, -0.5f, 0.5f, 3.0f};
-    auto input = Variable(from_data(data, {4}), false);
+    auto input = Variable(from_data(data, {4}, device), false);
 
     auto result = hardtanh(input, -1.0, 1.0);
-    auto* out = result.tensor().data<float>();
+    auto out_cpu = result.tensor().cpu();
+    auto* out = out_cpu.data<float>();
 
     EXPECT_FLOAT_EQ(out[0], -1.0f);
     EXPECT_FLOAT_EQ(out[1], -0.5f);
@@ -157,15 +152,18 @@ TEST_F(HardtanhTest, FunctionalHardtanh) {
     EXPECT_FLOAT_EQ(out[3], 1.0f);
 }
 
-TEST_F(HardtanhTest, ExactBoundaryValues) {
+TEST_P(HardtanhTest, ExactBoundaryValues) {
     // Test exact boundary values: -1 and 1 should pass through
     float data[] = {-1.0f, 1.0f};
-    auto input = Variable(from_data(data, {2}), false);
+    auto input = Variable(from_data(data, {2}, device), false);
 
     Hardtanh act;
     auto result = act.forward_impl(input);
-    auto* out = result.tensor().data<float>();
+    auto out_cpu = result.tensor().cpu();
+    auto* out = out_cpu.data<float>();
 
     EXPECT_FLOAT_EQ(out[0], -1.0f);
     EXPECT_FLOAT_EQ(out[1], 1.0f);
 }
+
+INSTANTIATE_BACKEND_TESTS(HardtanhTest);

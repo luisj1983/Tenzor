@@ -3,23 +3,13 @@
 #include "tenzor/ops/transform.hpp"
 #include "tenzor/ops/creation.hpp"
 #include "tenzor/tenzor.hpp"
+#include "backend_test_fixture.hpp"
 #include <iostream>
 #include <vector>
 
 using namespace tenzor;
 
-// Global test environment for initialization
-class RepeatTileTestEnvironment : public ::testing::Environment {
-public:
-    void SetUp() override {
-        tenzor::initialize();
-    }
-};
-
-static ::testing::Environment* const repeat_tile_env =
-    ::testing::AddGlobalTestEnvironment(new RepeatTileTestEnvironment);
-
-// Helper function to print tensor values
+// Helper function to print tensor values (reads on host; caller passes a CPU tensor)
 template<typename T>
 void print_tensor(const Tensor& t, const std::string& name) {
     std::cout << name << " (shape: [";
@@ -41,18 +31,23 @@ void print_tensor(const Tensor& t, const std::string& name) {
     std::cout << "]" << std::endl;
 }
 
-TEST(RepeatTileTest, Repeat1D) {
+class RepeatTileTest : public ::tenzor::testing::BackendTest {};
+class RepeatInterleaveTest : public ::tenzor::testing::BackendTest {};
+
+TEST_P(RepeatTileTest, Repeat1D) {
     // Test repeat on 1D tensor: [1, 2, 3] with repeats={2}
     // Expected: [1, 1, 2, 2, 3, 3]
-    auto input = from_data<float>(std::vector<float>{1.0f, 2.0f, 3.0f}.data(), {3});
+    auto input = from_data<float>(std::vector<float>{1.0f, 2.0f, 3.0f}.data(), {3}, device);
     auto output = repeat(input, {2});
 
-    print_tensor<float>(input, "Input");
-    print_tensor<float>(output, "Output (repeat)");
+    auto input_cpu = input.cpu();
+    auto output_cpu = output.cpu();
+    print_tensor<float>(input_cpu, "Input");
+    print_tensor<float>(output_cpu, "Output (repeat)");
 
     ASSERT_EQ(output.shape()[0], 6);
 
-    const float* data = output.data<float>();
+    const float* data = output_cpu.data<float>();
     EXPECT_FLOAT_EQ(data[0], 1.0f);
     EXPECT_FLOAT_EQ(data[1], 1.0f);
     EXPECT_FLOAT_EQ(data[2], 2.0f);
@@ -61,18 +56,20 @@ TEST(RepeatTileTest, Repeat1D) {
     EXPECT_FLOAT_EQ(data[5], 3.0f);
 }
 
-TEST(RepeatTileTest, Tile1D) {
+TEST_P(RepeatTileTest, Tile1D) {
     // Test tile on 1D tensor: [1, 2, 3] with reps={2}
     // Expected: [1, 2, 3, 1, 2, 3]
-    auto input = from_data<float>(std::vector<float>{1.0f, 2.0f, 3.0f}.data(), {3});
+    auto input = from_data<float>(std::vector<float>{1.0f, 2.0f, 3.0f}.data(), {3}, device);
     auto output = tile(input, {2});
 
-    print_tensor<float>(input, "Input");
-    print_tensor<float>(output, "Output (tile)");
+    auto input_cpu = input.cpu();
+    auto output_cpu = output.cpu();
+    print_tensor<float>(input_cpu, "Input");
+    print_tensor<float>(output_cpu, "Output (tile)");
 
     ASSERT_EQ(output.shape()[0], 6);
 
-    const float* data = output.data<float>();
+    const float* data = output_cpu.data<float>();
     EXPECT_FLOAT_EQ(data[0], 1.0f);
     EXPECT_FLOAT_EQ(data[1], 2.0f);
     EXPECT_FLOAT_EQ(data[2], 3.0f);
@@ -81,20 +78,22 @@ TEST(RepeatTileTest, Tile1D) {
     EXPECT_FLOAT_EQ(data[5], 3.0f);
 }
 
-TEST(RepeatTileTest, Repeat2D) {
+TEST_P(RepeatTileTest, Repeat2D) {
     // Test repeat on 2D tensor: [[1, 2], [3, 4]] with repeats={2, 3}
     // Each element repeated 2 times in dim 0, 3 times in dim 1
     std::vector<float> data_vec = {1.0f, 2.0f, 3.0f, 4.0f};
-    auto input = from_data<float>(data_vec.data(), {2, 2});
+    auto input = from_data<float>(data_vec.data(), {2, 2}, device);
     auto output = repeat(input, {2, 3});
 
-    print_tensor<float>(input, "Input");
-    print_tensor<float>(output, "Output (repeat)");
+    auto input_cpu = input.cpu();
+    auto output_cpu = output.cpu();
+    print_tensor<float>(input_cpu, "Input");
+    print_tensor<float>(output_cpu, "Output (repeat)");
 
     ASSERT_EQ(output.shape()[0], 4);  // 2 * 2
     ASSERT_EQ(output.shape()[1], 6);  // 2 * 3
 
-    const float* out_data = output.data<float>();
+    const float* out_data = output_cpu.data<float>();
     // First row repeated: [1, 1, 1, 2, 2, 2]
     EXPECT_FLOAT_EQ(out_data[0], 1.0f);
     EXPECT_FLOAT_EQ(out_data[1], 1.0f);
@@ -104,20 +103,22 @@ TEST(RepeatTileTest, Repeat2D) {
     EXPECT_FLOAT_EQ(out_data[5], 2.0f);
 }
 
-TEST(RepeatTileTest, Tile2D) {
+TEST_P(RepeatTileTest, Tile2D) {
     // Test tile on 2D tensor: [[1, 2], [3, 4]] with reps={2, 3}
     // Entire tensor tiled 2 times in dim 0, 3 times in dim 1
     std::vector<float> data_vec = {1.0f, 2.0f, 3.0f, 4.0f};
-    auto input = from_data<float>(data_vec.data(), {2, 2});
+    auto input = from_data<float>(data_vec.data(), {2, 2}, device);
     auto output = tile(input, {2, 3});
 
-    print_tensor<float>(input, "Input");
-    print_tensor<float>(output, "Output (tile)");
+    auto input_cpu = input.cpu();
+    auto output_cpu = output.cpu();
+    print_tensor<float>(input_cpu, "Input");
+    print_tensor<float>(output_cpu, "Output (tile)");
 
     ASSERT_EQ(output.shape()[0], 4);  // 2 * 2
     ASSERT_EQ(output.shape()[1], 6);  // 2 * 3
 
-    const float* out_data = output.data<float>();
+    const float* out_data = output_cpu.data<float>();
     // First row tiled: [1, 2, 1, 2, 1, 2]
     EXPECT_FLOAT_EQ(out_data[0], 1.0f);
     EXPECT_FLOAT_EQ(out_data[1], 2.0f);
@@ -127,19 +128,21 @@ TEST(RepeatTileTest, Tile2D) {
     EXPECT_FLOAT_EQ(out_data[5], 2.0f);
 }
 
-TEST(RepeatTileTest, TileWithBroadcast) {
+TEST_P(RepeatTileTest, TileWithBroadcast) {
     // Test tile with broadcasting: [1, 2, 3] with reps={2, 1}
     // Should expand to shape (2, 3)
-    auto input = from_data<float>(std::vector<float>{1.0f, 2.0f, 3.0f}.data(), {3});
+    auto input = from_data<float>(std::vector<float>{1.0f, 2.0f, 3.0f}.data(), {3}, device);
     auto output = tile(input, {2, 1});
 
-    print_tensor<float>(input, "Input");
-    print_tensor<float>(output, "Output (tile with broadcast)");
+    auto input_cpu = input.cpu();
+    auto output_cpu = output.cpu();
+    print_tensor<float>(input_cpu, "Input");
+    print_tensor<float>(output_cpu, "Output (tile with broadcast)");
 
     ASSERT_EQ(output.shape()[0], 2);
     ASSERT_EQ(output.shape()[1], 3);
 
-    const float* out_data = output.data<float>();
+    const float* out_data = output_cpu.data<float>();
     // First row: [1, 2, 3]
     EXPECT_FLOAT_EQ(out_data[0], 1.0f);
     EXPECT_FLOAT_EQ(out_data[1], 2.0f);
@@ -150,15 +153,17 @@ TEST(RepeatTileTest, TileWithBroadcast) {
     EXPECT_FLOAT_EQ(out_data[5], 3.0f);
 }
 
-TEST(RepeatTileTest, RepeatPartialDimensions) {
+TEST_P(RepeatTileTest, RepeatPartialDimensions) {
     // Test repeat with fewer repeats than dimensions
     // Input shape: (2, 3), repeats: {2} should apply only to last dimension
     std::vector<float> data_vec = {1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f};
-    auto input = from_data<float>(data_vec.data(), {2, 3});
+    auto input = from_data<float>(data_vec.data(), {2, 3}, device);
     auto output = repeat(input, {2});
 
-    print_tensor<float>(input, "Input");
-    print_tensor<float>(output, "Output (repeat partial)");
+    auto input_cpu = input.cpu();
+    auto output_cpu = output.cpu();
+    print_tensor<float>(input_cpu, "Input");
+    print_tensor<float>(output_cpu, "Output (repeat partial)");
 
     ASSERT_EQ(output.shape()[0], 2);
     ASSERT_EQ(output.shape()[1], 6);  // 3 * 2
@@ -168,17 +173,18 @@ TEST(RepeatTileTest, RepeatPartialDimensions) {
 // repeat_interleave tests
 // =========================================================================
 
-TEST(RepeatInterleaveTest, Scalar1D) {
+TEST_P(RepeatInterleaveTest, Scalar1D) {
     // [1, 2, 3] with repeats=2 -> [1, 1, 2, 2, 3, 3]
-    auto input = from_data<float>(std::vector<float>{1.0f, 2.0f, 3.0f}.data(), {3});
+    auto input = from_data<float>(std::vector<float>{1.0f, 2.0f, 3.0f}.data(), {3}, device);
     auto output = repeat_interleave(input, 2);
 
-    print_tensor<float>(output, "repeat_interleave scalar 1D");
+    auto output_cpu = output.cpu();
+    print_tensor<float>(output_cpu, "repeat_interleave scalar 1D");
 
     ASSERT_EQ(output.ndim(), 1);
     ASSERT_EQ(output.shape()[0], 6);
 
-    const float* data = output.data<float>();
+    const float* data = output_cpu.data<float>();
     EXPECT_FLOAT_EQ(data[0], 1.0f);
     EXPECT_FLOAT_EQ(data[1], 1.0f);
     EXPECT_FLOAT_EQ(data[2], 2.0f);
@@ -187,17 +193,18 @@ TEST(RepeatInterleaveTest, Scalar1D) {
     EXPECT_FLOAT_EQ(data[5], 3.0f);
 }
 
-TEST(RepeatInterleaveTest, Scalar1DWithDim) {
+TEST_P(RepeatInterleaveTest, Scalar1DWithDim) {
     // Same as above but with explicit dim=0
-    auto input = from_data<float>(std::vector<float>{1.0f, 2.0f, 3.0f}.data(), {3});
+    auto input = from_data<float>(std::vector<float>{1.0f, 2.0f, 3.0f}.data(), {3}, device);
     auto output = repeat_interleave(input, 3, 0);
 
-    print_tensor<float>(output, "repeat_interleave scalar 1D dim=0");
+    auto output_cpu = output.cpu();
+    print_tensor<float>(output_cpu, "repeat_interleave scalar 1D dim=0");
 
     ASSERT_EQ(output.ndim(), 1);
     ASSERT_EQ(output.shape()[0], 9);
 
-    const float* data = output.data<float>();
+    const float* data = output_cpu.data<float>();
     EXPECT_FLOAT_EQ(data[0], 1.0f);
     EXPECT_FLOAT_EQ(data[1], 1.0f);
     EXPECT_FLOAT_EQ(data[2], 1.0f);
@@ -209,18 +216,19 @@ TEST(RepeatInterleaveTest, Scalar1DWithDim) {
     EXPECT_FLOAT_EQ(data[8], 3.0f);
 }
 
-TEST(RepeatInterleaveTest, Scalar2D_Dim0) {
+TEST_P(RepeatInterleaveTest, Scalar2D_Dim0) {
     // [[1, 2], [3, 4]] with repeats=2, dim=0 -> [[1,2],[1,2],[3,4],[3,4]]
     std::vector<float> data_vec = {1.0f, 2.0f, 3.0f, 4.0f};
-    auto input = from_data<float>(data_vec.data(), {2, 2});
+    auto input = from_data<float>(data_vec.data(), {2, 2}, device);
     auto output = repeat_interleave(input, 2, 0);
 
-    print_tensor<float>(output, "repeat_interleave scalar 2D dim=0");
+    auto output_cpu = output.cpu();
+    print_tensor<float>(output_cpu, "repeat_interleave scalar 2D dim=0");
 
     ASSERT_EQ(output.shape()[0], 4);
     ASSERT_EQ(output.shape()[1], 2);
 
-    const float* data = output.data<float>();
+    const float* data = output_cpu.data<float>();
     // Row 0: [1, 2] (original row 0)
     EXPECT_FLOAT_EQ(data[0], 1.0f);
     EXPECT_FLOAT_EQ(data[1], 2.0f);
@@ -235,18 +243,19 @@ TEST(RepeatInterleaveTest, Scalar2D_Dim0) {
     EXPECT_FLOAT_EQ(data[7], 4.0f);
 }
 
-TEST(RepeatInterleaveTest, Scalar2D_Dim1) {
+TEST_P(RepeatInterleaveTest, Scalar2D_Dim1) {
     // [[1, 2], [3, 4]] with repeats=2, dim=1 -> [[1,1,2,2],[3,3,4,4]]
     std::vector<float> data_vec = {1.0f, 2.0f, 3.0f, 4.0f};
-    auto input = from_data<float>(data_vec.data(), {2, 2});
+    auto input = from_data<float>(data_vec.data(), {2, 2}, device);
     auto output = repeat_interleave(input, 2, 1);
 
-    print_tensor<float>(output, "repeat_interleave scalar 2D dim=1");
+    auto output_cpu = output.cpu();
+    print_tensor<float>(output_cpu, "repeat_interleave scalar 2D dim=1");
 
     ASSERT_EQ(output.shape()[0], 2);
     ASSERT_EQ(output.shape()[1], 4);
 
-    const float* data = output.data<float>();
+    const float* data = output_cpu.data<float>();
     EXPECT_FLOAT_EQ(data[0], 1.0f);
     EXPECT_FLOAT_EQ(data[1], 1.0f);
     EXPECT_FLOAT_EQ(data[2], 2.0f);
@@ -257,18 +266,19 @@ TEST(RepeatInterleaveTest, Scalar2D_Dim1) {
     EXPECT_FLOAT_EQ(data[7], 4.0f);
 }
 
-TEST(RepeatInterleaveTest, Tensor1D) {
+TEST_P(RepeatInterleaveTest, Tensor1D) {
     // [1, 2, 3] with repeats=[1, 2, 3] -> [1, 2, 2, 3, 3, 3]
-    auto input = from_data<float>(std::vector<float>{1.0f, 2.0f, 3.0f}.data(), {3});
-    auto repeats = from_data<int64_t>(std::vector<int64_t>{1, 2, 3}.data(), {3});
+    auto input = from_data<float>(std::vector<float>{1.0f, 2.0f, 3.0f}.data(), {3}, device);
+    auto repeats = from_data<int64_t>(std::vector<int64_t>{1, 2, 3}.data(), {3}, device);
     auto output = repeat_interleave(input, repeats);
 
-    print_tensor<float>(output, "repeat_interleave tensor 1D");
+    auto output_cpu = output.cpu();
+    print_tensor<float>(output_cpu, "repeat_interleave tensor 1D");
 
     ASSERT_EQ(output.ndim(), 1);
     ASSERT_EQ(output.shape()[0], 6);
 
-    const float* data = output.data<float>();
+    const float* data = output_cpu.data<float>();
     EXPECT_FLOAT_EQ(data[0], 1.0f);
     EXPECT_FLOAT_EQ(data[1], 2.0f);
     EXPECT_FLOAT_EQ(data[2], 2.0f);
@@ -277,20 +287,21 @@ TEST(RepeatInterleaveTest, Tensor1D) {
     EXPECT_FLOAT_EQ(data[5], 3.0f);
 }
 
-TEST(RepeatInterleaveTest, Tensor2D_Dim0) {
+TEST_P(RepeatInterleaveTest, Tensor2D_Dim0) {
     // [[1, 2], [3, 4]] with repeats=[1, 3], dim=0
     // -> [[1,2], [3,4], [3,4], [3,4]]
     std::vector<float> data_vec = {1.0f, 2.0f, 3.0f, 4.0f};
-    auto input = from_data<float>(data_vec.data(), {2, 2});
-    auto repeats = from_data<int64_t>(std::vector<int64_t>{1, 3}.data(), {2});
+    auto input = from_data<float>(data_vec.data(), {2, 2}, device);
+    auto repeats = from_data<int64_t>(std::vector<int64_t>{1, 3}.data(), {2}, device);
     auto output = repeat_interleave(input, repeats, 0);
 
-    print_tensor<float>(output, "repeat_interleave tensor 2D dim=0");
+    auto output_cpu = output.cpu();
+    print_tensor<float>(output_cpu, "repeat_interleave tensor 2D dim=0");
 
     ASSERT_EQ(output.shape()[0], 4);
     ASSERT_EQ(output.shape()[1], 2);
 
-    const float* data = output.data<float>();
+    const float* data = output_cpu.data<float>();
     EXPECT_FLOAT_EQ(data[0], 1.0f);
     EXPECT_FLOAT_EQ(data[1], 2.0f);
     EXPECT_FLOAT_EQ(data[2], 3.0f);
@@ -301,19 +312,20 @@ TEST(RepeatInterleaveTest, Tensor2D_Dim0) {
     EXPECT_FLOAT_EQ(data[7], 4.0f);
 }
 
-TEST(RepeatInterleaveTest, FlattenNoDim) {
+TEST_P(RepeatInterleaveTest, FlattenNoDim) {
     // [[1, 2], [3, 4]] with repeats=2, no dim -> flatten first then repeat
     // flatten: [1, 2, 3, 4] -> [1, 1, 2, 2, 3, 3, 4, 4]
     std::vector<float> data_vec = {1.0f, 2.0f, 3.0f, 4.0f};
-    auto input = from_data<float>(data_vec.data(), {2, 2});
+    auto input = from_data<float>(data_vec.data(), {2, 2}, device);
     auto output = repeat_interleave(input, 2);
 
-    print_tensor<float>(output, "repeat_interleave flatten (no dim)");
+    auto output_cpu = output.cpu();
+    print_tensor<float>(output_cpu, "repeat_interleave flatten (no dim)");
 
     ASSERT_EQ(output.ndim(), 1);
     ASSERT_EQ(output.shape()[0], 8);
 
-    const float* data = output.data<float>();
+    const float* data = output_cpu.data<float>();
     EXPECT_FLOAT_EQ(data[0], 1.0f);
     EXPECT_FLOAT_EQ(data[1], 1.0f);
     EXPECT_FLOAT_EQ(data[2], 2.0f);
@@ -324,9 +336,9 @@ TEST(RepeatInterleaveTest, FlattenNoDim) {
     EXPECT_FLOAT_EQ(data[7], 4.0f);
 }
 
-TEST(RepeatInterleaveTest, ZeroRepeats) {
+TEST_P(RepeatInterleaveTest, ZeroRepeats) {
     // [1, 2, 3] with repeats=0 -> empty tensor
-    auto input = from_data<float>(std::vector<float>{1.0f, 2.0f, 3.0f}.data(), {3});
+    auto input = from_data<float>(std::vector<float>{1.0f, 2.0f, 3.0f}.data(), {3}, device);
     auto output = repeat_interleave(input, 0);
 
     ASSERT_EQ(output.ndim(), 1);
@@ -334,7 +346,5 @@ TEST(RepeatInterleaveTest, ZeroRepeats) {
     ASSERT_EQ(output.numel(), 0);
 }
 
-int main(int argc, char** argv) {
-    ::testing::InitGoogleTest(&argc, argv);
-    return RUN_ALL_TESTS();
-}
+INSTANTIATE_BACKEND_TESTS(RepeatTileTest);
+INSTANTIATE_BACKEND_TESTS(RepeatInterleaveTest);

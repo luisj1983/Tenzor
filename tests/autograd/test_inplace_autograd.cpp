@@ -18,6 +18,7 @@
 #include <tenzor/ops/math.hpp>
 #include <tenzor/ops/creation.hpp>
 #include "../grad_flow_helpers.hpp"
+#include "../backend_test_fixture.hpp"
 
 using namespace tenzor;
 
@@ -25,30 +26,25 @@ using namespace tenzor;
 // Test Fixture
 // ============================================================================
 
-class InplaceAutogradTest : public ::testing::Test {
+class InplaceAutogradTest : public ::tenzor::testing::BackendTest {
 protected:
-    static bool initialized;
     void SetUp() override {
-        if (!initialized) {
-            tenzor::initialize();
-            initialized = true;
-        }
+        ::tenzor::testing::BackendTest::SetUp();
+        if (::testing::Test::IsSkipped()) return;
     }
 };
-
-bool InplaceAutogradTest::initialized = false;
 
 // ============================================================================
 // 1. Version Counter Basics
 // ============================================================================
 
-TEST_F(InplaceAutogradTest, NewTensorVersionIsZero) {
-    auto t = ones({3, 3}, DType::Float32, Device::cpu());
+TEST_P(InplaceAutogradTest, NewTensorVersionIsZero) {
+    auto t = ones({3, 3}, DType::Float32, device);
     EXPECT_EQ(t.version(), 0u);
 }
 
-TEST_F(InplaceAutogradTest, FillBumpsVersion) {
-    auto t = zeros({4, 4}, DType::Float32, Device::cpu());
+TEST_P(InplaceAutogradTest, FillBumpsVersion) {
+    auto t = zeros({4, 4}, DType::Float32, device);
     uint64_t v0 = t.version();
 
     t.fill_(1.0);
@@ -60,8 +56,8 @@ TEST_F(InplaceAutogradTest, FillBumpsVersion) {
     EXPECT_GT(v2, v1) << "Second fill_() should bump version again";
 }
 
-TEST_F(InplaceAutogradTest, ZeroBumpsVersion) {
-    auto t = ones({3, 3}, DType::Float32, Device::cpu());
+TEST_P(InplaceAutogradTest, ZeroBumpsVersion) {
+    auto t = ones({3, 3}, DType::Float32, device);
     uint64_t v0 = t.version();
 
     t.zero_();
@@ -69,9 +65,9 @@ TEST_F(InplaceAutogradTest, ZeroBumpsVersion) {
     EXPECT_GT(v1, v0) << "zero_() should bump version counter";
 }
 
-TEST_F(InplaceAutogradTest, OperatorPlusEqualBumpsVersion) {
-    auto t = ones({3, 3}, DType::Float32, Device::cpu());
-    auto other = ones({3, 3}, DType::Float32, Device::cpu());
+TEST_P(InplaceAutogradTest, OperatorPlusEqualBumpsVersion) {
+    auto t = ones({3, 3}, DType::Float32, device);
+    auto other = ones({3, 3}, DType::Float32, device);
     uint64_t v0 = t.version();
 
     t += other;
@@ -79,9 +75,9 @@ TEST_F(InplaceAutogradTest, OperatorPlusEqualBumpsVersion) {
     EXPECT_GT(v1, v0) << "operator+= should bump version counter";
 }
 
-TEST_F(InplaceAutogradTest, OperatorTimesEqualBumpsVersion) {
-    auto t = ones({3, 3}, DType::Float32, Device::cpu());
-    auto other = ones({3, 3}, DType::Float32, Device::cpu()) * 2.0f;
+TEST_P(InplaceAutogradTest, OperatorTimesEqualBumpsVersion) {
+    auto t = ones({3, 3}, DType::Float32, device);
+    auto other = ones({3, 3}, DType::Float32, device) * 2.0f;
     uint64_t v0 = t.version();
 
     t *= other;
@@ -89,9 +85,9 @@ TEST_F(InplaceAutogradTest, OperatorTimesEqualBumpsVersion) {
     EXPECT_GT(v1, v0) << "operator*= should bump version counter";
 }
 
-TEST_F(InplaceAutogradTest, OperatorMinusEqualBumpsVersion) {
-    auto t = ones({3, 3}, DType::Float32, Device::cpu());
-    auto other = ones({3, 3}, DType::Float32, Device::cpu());
+TEST_P(InplaceAutogradTest, OperatorMinusEqualBumpsVersion) {
+    auto t = ones({3, 3}, DType::Float32, device);
+    auto other = ones({3, 3}, DType::Float32, device);
     uint64_t v0 = t.version();
 
     t -= other;
@@ -99,9 +95,9 @@ TEST_F(InplaceAutogradTest, OperatorMinusEqualBumpsVersion) {
     EXPECT_GT(v1, v0) << "operator-= should bump version counter";
 }
 
-TEST_F(InplaceAutogradTest, OperatorDivEqualBumpsVersion) {
-    auto t = ones({3, 3}, DType::Float32, Device::cpu());
-    auto other = ones({3, 3}, DType::Float32, Device::cpu()) * 2.0f;
+TEST_P(InplaceAutogradTest, OperatorDivEqualBumpsVersion) {
+    auto t = ones({3, 3}, DType::Float32, device);
+    auto other = ones({3, 3}, DType::Float32, device) * 2.0f;
     uint64_t v0 = t.version();
 
     t /= other;
@@ -109,8 +105,8 @@ TEST_F(InplaceAutogradTest, OperatorDivEqualBumpsVersion) {
     EXPECT_GT(v1, v0) << "operator/= should bump version counter";
 }
 
-TEST_F(InplaceAutogradTest, MultipleFillsIncrementSequentially) {
-    auto t = zeros({2, 2}, DType::Float32, Device::cpu());
+TEST_P(InplaceAutogradTest, MultipleFillsIncrementSequentially) {
+    auto t = zeros({2, 2}, DType::Float32, device);
     uint64_t v0 = t.version();
 
     t.fill_(1.0);
@@ -135,8 +131,8 @@ TEST_F(InplaceAutogradTest, MultipleFillsIncrementSequentially) {
 // 2. Version Counter with Clone
 // ============================================================================
 
-TEST_F(InplaceAutogradTest, CloneGetsIndependentVersion) {
-    auto t = ones({3, 3}, DType::Float32, Device::cpu());
+TEST_P(InplaceAutogradTest, CloneGetsIndependentVersion) {
+    auto t = ones({3, 3}, DType::Float32, device);
     t.fill_(5.0);  // bump version to 1
     uint64_t v_before = t.version();
 
@@ -152,19 +148,19 @@ TEST_F(InplaceAutogradTest, CloneGetsIndependentVersion) {
 // 3. In-Place Ops Rejected on Tensors with requires_grad
 // ============================================================================
 
-TEST_F(InplaceAutogradTest, InplaceAddRejectsRequiresGrad) {
-    auto t = ones({3, 3}, DType::Float32, Device::cpu());
+TEST_P(InplaceAutogradTest, InplaceAddRejectsRequiresGrad) {
+    auto t = ones({3, 3}, DType::Float32, device);
     t.set_requires_grad(true);
-    auto other = ones({3, 3}, DType::Float32, Device::cpu());
+    auto other = ones({3, 3}, DType::Float32, device);
 
     // The free-function add_() should throw on tensors that require grad
     EXPECT_THROW(add_(t, other), std::runtime_error);
 }
 
-TEST_F(InplaceAutogradTest, InplaceMulRejectsRequiresGrad) {
-    auto t = ones({3, 3}, DType::Float32, Device::cpu());
+TEST_P(InplaceAutogradTest, InplaceMulRejectsRequiresGrad) {
+    auto t = ones({3, 3}, DType::Float32, device);
     t.set_requires_grad(true);
-    auto other = ones({3, 3}, DType::Float32, Device::cpu());
+    auto other = ones({3, 3}, DType::Float32, device);
 
     EXPECT_THROW(mul_(t, other), std::runtime_error);
 }
@@ -173,13 +169,13 @@ TEST_F(InplaceAutogradTest, InplaceMulRejectsRequiresGrad) {
 // 4. Version Mismatch Detection with save_for_backward
 // ============================================================================
 
-TEST_F(InplaceAutogradTest, InplaceAfterForwardDetectedOnBackward) {
+TEST_P(InplaceAutogradTest, InplaceAfterForwardDetectedOnBackward) {
     // Build a computation graph: y = x * x
     // Then modify x in-place before calling backward.
     // The engine validates saved tensor versions before backward(),
     // so in-place modification should be detected and throw.
 
-    auto x = Variable(ones({3, 3}, DType::Float32, Device::cpu()), /*requires_grad=*/true);
+    auto x = Variable(ones({3, 3}, DType::Float32, device), /*requires_grad=*/true);
     auto y = x * x;  // Forward: MulBackward saves x via save_for_backward()
 
     // Modify the underlying tensor in-place via fill_
@@ -190,11 +186,11 @@ TEST_F(InplaceAutogradTest, InplaceAfterForwardDetectedOnBackward) {
         << "backward() should detect in-place modification of saved tensor";
 }
 
-TEST_F(InplaceAutogradTest, InplaceAfterForwardNoSavedTensorsAdd) {
+TEST_P(InplaceAutogradTest, InplaceAfterForwardNoSavedTensorsAdd) {
     // AddBackward does not save input tensors (only needs shapes for
     // broadcasting reduction), so in-place modification of inputs
     // does not trigger a version mismatch. backward() should succeed.
-    auto x = Variable(ones({2, 2}, DType::Float32, Device::cpu()), /*requires_grad=*/true);
+    auto x = Variable(ones({2, 2}, DType::Float32, device), /*requires_grad=*/true);
     auto y = x + x;
 
     // Modify underlying tensor in-place
@@ -211,9 +207,9 @@ TEST_F(InplaceAutogradTest, InplaceAfterForwardNoSavedTensorsAdd) {
     EXPECT_GRAD_FLOWS(x);
 }
 
-TEST_F(InplaceAutogradTest, NoModificationNoThrow) {
+TEST_P(InplaceAutogradTest, NoModificationNoThrow) {
     // When no in-place modification happens, backward should succeed
-    auto x = Variable(ones({3, 3}, DType::Float32, Device::cpu()), /*requires_grad=*/true);
+    auto x = Variable(ones({3, 3}, DType::Float32, device), /*requires_grad=*/true);
     auto y = x * x;
     auto loss = tenzor::sum(y);
 
@@ -227,9 +223,9 @@ TEST_F(InplaceAutogradTest, NoModificationNoThrow) {
 // 5. Version Counter with Multiple Operations
 // ============================================================================
 
-TEST_F(InplaceAutogradTest, MixedInplaceOpsBumpVersionCumulatively) {
-    auto t = ones({4, 4}, DType::Float32, Device::cpu());
-    auto other = ones({4, 4}, DType::Float32, Device::cpu());
+TEST_P(InplaceAutogradTest, MixedInplaceOpsBumpVersionCumulatively) {
+    auto t = ones({4, 4}, DType::Float32, device);
+    auto other = ones({4, 4}, DType::Float32, device);
     uint64_t v0 = t.version();
 
     t.fill_(2.0);  // v0 + 1
@@ -241,10 +237,10 @@ TEST_F(InplaceAutogradTest, MixedInplaceOpsBumpVersionCumulatively) {
         << "Four in-place ops should bump version by 4";
 }
 
-TEST_F(InplaceAutogradTest, VersionCounterOnDifferentDtypes) {
+TEST_P(InplaceAutogradTest, VersionCounterOnDifferentDtypes) {
     // Verify version counter works across different dtypes
-    auto t_f32 = ones({2, 2}, DType::Float32, Device::cpu());
-    auto t_f64 = ones({2, 2}, DType::Float64, Device::cpu());
+    auto t_f32 = ones({2, 2}, DType::Float32, device);
+    auto t_f64 = ones({2, 2}, DType::Float64, device);
 
     EXPECT_EQ(t_f32.version(), 0u);
     EXPECT_EQ(t_f64.version(), 0u);
@@ -260,15 +256,15 @@ TEST_F(InplaceAutogradTest, VersionCounterOnDifferentDtypes) {
 // 6. Autograd Variable Backward Without Modification
 // ============================================================================
 
-TEST_F(InplaceAutogradTest, SimpleGradientComputationWorks) {
+TEST_P(InplaceAutogradTest, SimpleGradientComputationWorks) {
     // Sanity: y = 2*x, dy/dx = 2
-    auto x = Variable(ones({2, 2}, DType::Float32, Device::cpu()), /*requires_grad=*/true);
+    auto x = Variable(ones({2, 2}, DType::Float32, device), /*requires_grad=*/true);
     auto y = x + x;  // 2*x
     auto loss = tenzor::sum(y);
     loss.backward();
 
     EXPECT_TRUE(x.has_grad());
-    auto grad = x.grad().value();
+    auto grad = x.grad().value().cpu();
     auto* data = grad.data<float>();
     for (int64_t i = 0; i < grad.numel(); ++i) {
         EXPECT_FLOAT_EQ(data[i], 2.0f)
@@ -276,16 +272,16 @@ TEST_F(InplaceAutogradTest, SimpleGradientComputationWorks) {
     }
 }
 
-TEST_F(InplaceAutogradTest, SquaredGradientComputationWorks) {
+TEST_P(InplaceAutogradTest, SquaredGradientComputationWorks) {
     // y = x^2, dy/dx = 2x
-    auto x_data = ones({2, 2}, DType::Float32, Device::cpu()) * 3.0f;
+    auto x_data = ones({2, 2}, DType::Float32, device) * 3.0f;
     auto x = Variable(x_data, /*requires_grad=*/true);
     auto y = x * x;
     auto loss = tenzor::sum(y);
     loss.backward();
 
     EXPECT_TRUE(x.has_grad());
-    auto grad = x.grad().value();
+    auto grad = x.grad().value().cpu();
     auto* data = grad.data<float>();
     for (int64_t i = 0; i < grad.numel(); ++i) {
         EXPECT_FLOAT_EQ(data[i], 6.0f)
@@ -297,10 +293,10 @@ TEST_F(InplaceAutogradTest, SquaredGradientComputationWorks) {
 // Version Tracking for save_for_backward (Phase 1B)
 // ============================================================================
 
-TEST_F(InplaceAutogradTest, MulBackwardDetectsInplaceModification) {
+TEST_P(InplaceAutogradTest, MulBackwardDetectsInplaceModification) {
     // y = a * b; in-place modify a; then backward → should detect stale saved tensor
-    auto a_data = ones({2, 2}, DType::Float32, Device::cpu()) * 2.0f;
-    auto b_data = ones({2, 2}, DType::Float32, Device::cpu()) * 3.0f;
+    auto a_data = ones({2, 2}, DType::Float32, device) * 2.0f;
+    auto b_data = ones({2, 2}, DType::Float32, device) * 3.0f;
     auto a = Variable(a_data, /*requires_grad=*/true);
     auto b = Variable(b_data, /*requires_grad=*/true);
     auto y = a * b;  // MulBackward saves a and b
@@ -313,9 +309,9 @@ TEST_F(InplaceAutogradTest, MulBackwardDetectsInplaceModification) {
         << "MulBackward should detect in-place modification of saved tensor";
 }
 
-TEST_F(InplaceAutogradTest, DivBackwardDetectsInplaceModification) {
-    auto a_data = ones({2, 2}, DType::Float32, Device::cpu()) * 6.0f;
-    auto b_data = ones({2, 2}, DType::Float32, Device::cpu()) * 3.0f;
+TEST_P(InplaceAutogradTest, DivBackwardDetectsInplaceModification) {
+    auto a_data = ones({2, 2}, DType::Float32, device) * 6.0f;
+    auto b_data = ones({2, 2}, DType::Float32, device) * 3.0f;
     auto a = Variable(a_data, /*requires_grad=*/true);
     auto b = Variable(b_data, /*requires_grad=*/true);
     auto y = a / b;  // DivBackward saves a and b
@@ -326,9 +322,9 @@ TEST_F(InplaceAutogradTest, DivBackwardDetectsInplaceModification) {
         << "DivBackward should detect in-place modification of saved tensor";
 }
 
-TEST_F(InplaceAutogradTest, MatMulBackwardDetectsInplaceModification) {
-    auto a_data = ones({2, 3}, DType::Float32, Device::cpu());
-    auto b_data = ones({3, 2}, DType::Float32, Device::cpu());
+TEST_P(InplaceAutogradTest, MatMulBackwardDetectsInplaceModification) {
+    auto a_data = ones({2, 3}, DType::Float32, device);
+    auto b_data = ones({3, 2}, DType::Float32, device);
     auto a = Variable(a_data, /*requires_grad=*/true);
     auto b = Variable(b_data, /*requires_grad=*/true);
     auto y = matmul(a, b);  // MatMulBackward saves a and b
@@ -339,11 +335,11 @@ TEST_F(InplaceAutogradTest, MatMulBackwardDetectsInplaceModification) {
         << "MatMulBackward should detect in-place modification of saved tensor";
 }
 
-TEST_F(InplaceAutogradTest, AddBackwardWithVersionTracking) {
+TEST_P(InplaceAutogradTest, AddBackwardWithVersionTracking) {
     // AddBackward in variable.cpp operator+ now uses save_for_backward
     // Verify normal backward still works (no false positive)
-    auto a = Variable(ones({2, 2}, DType::Float32, Device::cpu()) * 2.0f, true);
-    auto b = Variable(ones({2, 2}, DType::Float32, Device::cpu()) * 3.0f, true);
+    auto a = Variable(ones({2, 2}, DType::Float32, device) * 2.0f, true);
+    auto b = Variable(ones({2, 2}, DType::Float32, device) * 3.0f, true);
     auto y = a + b;
     auto loss = tenzor::sum(y);
 
@@ -351,3 +347,5 @@ TEST_F(InplaceAutogradTest, AddBackwardWithVersionTracking) {
     EXPECT_NO_THROW(loss.backward());
     EXPECT_TRUE(a.has_grad());
 }
+
+INSTANTIATE_BACKEND_TESTS(InplaceAutogradTest);

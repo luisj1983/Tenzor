@@ -5,19 +5,23 @@
 
 #include <gtest/gtest.h>
 #include "tenzor/tenzor.hpp"
+#include "../backend_test_fixture.hpp"
+
+#include <set>
 
 using namespace tenzor;
 
-class MultinomialTest : public ::testing::Test {
+class MultinomialTest : public ::tenzor::testing::BackendTest {
 protected:
     void SetUp() override {
-        tenzor::initialize();
+        ::tenzor::testing::BackendTest::SetUp();
+        if (::testing::Test::IsSkipped()) return;
     }
 };
 
-TEST_F(MultinomialTest, BasicSampling) {
+TEST_P(MultinomialTest, BasicSampling) {
     // Uniform weights
-    auto probs = tenzor::ones({4});
+    auto probs = tenzor::ones({4}, DType::Float32, device);
     auto samples = tenzor::multinomial(probs, 2, /*replacement=*/true);
 
     EXPECT_EQ(samples.ndim(), 1);
@@ -25,46 +29,52 @@ TEST_F(MultinomialTest, BasicSampling) {
     EXPECT_EQ(samples.dtype(), DType::Int64);
 
     // All samples should be in [0, 4)
-    auto* data = samples.data<int64_t>();
+    auto samples_cpu = samples.cpu();
+    auto* data = samples_cpu.data<int64_t>();
     for (int64_t i = 0; i < 2; i++) {
         EXPECT_GE(data[i], 0);
         EXPECT_LT(data[i], 4);
     }
 }
 
-TEST_F(MultinomialTest, DeterministicWeight) {
+TEST_P(MultinomialTest, DeterministicWeight) {
     // All weight on index 2
-    auto probs = tenzor::zeros({5});
-    probs.data<float>()[2] = 1.0f;
+    auto probs_cpu = tenzor::zeros({5}, DType::Float32);
+    probs_cpu.data<float>()[2] = 1.0f;
+    auto probs = probs_cpu.to(device);
 
     auto samples = tenzor::multinomial(probs, 10, /*replacement=*/true);
 
     // All samples should be 2
-    auto* data = samples.data<int64_t>();
+    auto samples_cpu = samples.cpu();
+    auto* data = samples_cpu.data<int64_t>();
     for (int64_t i = 0; i < 10; i++) {
         EXPECT_EQ(data[i], 2);
     }
 }
 
-TEST_F(MultinomialTest, WithoutReplacement) {
-    auto probs = tenzor::ones({5});
+TEST_P(MultinomialTest, WithoutReplacement) {
+    auto probs = tenzor::ones({5}, DType::Float32, device);
     auto samples = tenzor::multinomial(probs, 5, /*replacement=*/false);
 
     EXPECT_EQ(samples.shape()[0], 5);
 
     // All indices should be unique
-    auto* data = samples.data<int64_t>();
+    auto samples_cpu = samples.cpu();
+    auto* data = samples_cpu.data<int64_t>();
     std::set<int64_t> seen;
     for (int64_t i = 0; i < 5; i++) {
         EXPECT_TRUE(seen.insert(data[i]).second) << "Duplicate index: " << data[i];
     }
 }
 
-TEST_F(MultinomialTest, BatchedSampling) {
-    auto probs = tenzor::ones({3, 4});
+TEST_P(MultinomialTest, BatchedSampling) {
+    auto probs = tenzor::ones({3, 4}, DType::Float32, device);
     auto samples = tenzor::multinomial(probs, 2, /*replacement=*/true);
 
     EXPECT_EQ(samples.ndim(), 2);
     EXPECT_EQ(samples.shape()[0], 3);
     EXPECT_EQ(samples.shape()[1], 2);
 }
+
+INSTANTIATE_BACKEND_TESTS(MultinomialTest);

@@ -12,6 +12,7 @@
 
 #include <gtest/gtest.h>
 #include <tenzor/tenzor.hpp>
+#include "../backend_test_fixture.hpp"
 #include <chrono>
 #include <cmath>
 #include <memory>
@@ -22,19 +23,10 @@ using namespace tenzor::nn;
 using namespace tenzor::optim;
 
 //==============================================================================
-// Test Environment Setup
+// Backend Parity Fixture
 //==============================================================================
 
-class TrainingLoopsEnvironment : public ::testing::Environment {
-public:
-    void SetUp() override {
-        tenzor::initialize();
-        std::cout << "Training loops test environment initialized" << std::endl;
-    }
-};
-
-static ::testing::Environment* const training_env =
-    ::testing::AddGlobalTestEnvironment(new TrainingLoopsEnvironment);
+class TrainingLoops : public ::tenzor::testing::BackendTest {};
 
 //==============================================================================
 // Helper Functions
@@ -183,8 +175,7 @@ private:
 // Test 1: Basic MNIST Training - Full Epoch with Validation
 //==============================================================================
 
-TEST(TrainingLoops, BasicMNISTTraining) {
-    auto device = Device::cpu();
+TEST_P(TrainingLoops, BasicMNISTTraining) {
     auto model = std::make_shared<SimpleCNN>();
     model->to(device);
 
@@ -212,7 +203,7 @@ TEST(TrainingLoops, BasicMNISTTraining) {
             loss.backward();
             optimizer.step();
 
-            total_loss += loss.tensor().template item<float>();
+            total_loss += loss.tensor().cpu().template item<float>();
             total_accuracy += calculate_accuracy(output, target);
         }
 
@@ -240,8 +231,7 @@ TEST(TrainingLoops, BasicMNISTTraining) {
 // Test 2: Training with Learning Rate Scheduling
 //==============================================================================
 
-TEST(TrainingLoops, MNISTWithLRScheduling) {
-    auto device = Device::cpu();
+TEST_P(TrainingLoops, MNISTWithLRScheduling) {
     auto model = std::make_shared<SimpleCNN>();
     model->to(device);
 
@@ -284,8 +274,7 @@ TEST(TrainingLoops, MNISTWithLRScheduling) {
 // Test 3: Training with Gradient Clipping
 //==============================================================================
 
-TEST(TrainingLoops, MNISTWithGradientClipping) {
-    auto device = Device::cpu();
+TEST_P(TrainingLoops, MNISTWithGradientClipping) {
     auto model = std::make_shared<SimpleCNN>();
     model->to(device);
 
@@ -343,8 +332,7 @@ TEST(TrainingLoops, MNISTWithGradientClipping) {
 // Test 4: Training with Adam Optimizer
 //==============================================================================
 
-TEST(TrainingLoops, MNISTWithAdamOptimizer) {
-    auto device = Device::cpu();
+TEST_P(TrainingLoops, MNISTWithAdamOptimizer) {
     auto model = std::make_shared<SimpleCNN>();
     model->to(device);
 
@@ -370,7 +358,7 @@ TEST(TrainingLoops, MNISTWithAdamOptimizer) {
             loss.backward();
             optimizer.step();
 
-            total_loss += loss.tensor().template item<float>();
+            total_loss += loss.tensor().cpu().template item<float>();
         }
 
         losses.push_back(total_loss / batches_per_epoch);
@@ -385,8 +373,7 @@ TEST(TrainingLoops, MNISTWithAdamOptimizer) {
 // Test 5: Training with AdamW Optimizer and Weight Decay
 //==============================================================================
 
-TEST(TrainingLoops, MNISTWithAdamWOptimizer) {
-    auto device = Device::cpu();
+TEST_P(TrainingLoops, MNISTWithAdamWOptimizer) {
     auto model = std::make_shared<SimpleCNN>();
     model->to(device);
 
@@ -412,7 +399,7 @@ TEST(TrainingLoops, MNISTWithAdamWOptimizer) {
             loss.backward();
             optimizer.step();
 
-            total_loss += loss.tensor().template item<float>();
+            total_loss += loss.tensor().cpu().template item<float>();
         }
 
         losses.push_back(total_loss / batches_per_epoch);
@@ -426,8 +413,7 @@ TEST(TrainingLoops, MNISTWithAdamWOptimizer) {
 // Test 6: Training with Cosine Annealing LR
 //==============================================================================
 
-TEST(TrainingLoops, MNISTWithCosineAnnealingLR) {
-    auto device = Device::cpu();
+TEST_P(TrainingLoops, MNISTWithCosineAnnealingLR) {
     auto model = std::make_shared<SimpleCNN>();
     model->to(device);
 
@@ -470,8 +456,7 @@ TEST(TrainingLoops, MNISTWithCosineAnnealingLR) {
 // Test 7: Training with Validation Loop
 //==============================================================================
 
-TEST(TrainingLoops, MNISTWithValidation) {
-    auto device = Device::cpu();
+TEST_P(TrainingLoops, MNISTWithValidation) {
     auto model = std::make_shared<SimpleCNN>();
     model->to(device);
 
@@ -521,8 +506,7 @@ TEST(TrainingLoops, MNISTWithValidation) {
 // Test 8: Training with Multiple Loss Functions
 //==============================================================================
 
-TEST(TrainingLoops, MNISTWithMultipleLosses) {
-    auto device = Device::cpu();
+TEST_P(TrainingLoops, MNISTWithMultipleLosses) {
     auto model = std::make_shared<SimpleCNN>();
     model->to(device);
 
@@ -562,8 +546,7 @@ TEST(TrainingLoops, MNISTWithMultipleLosses) {
 // Test 9: Training with Early Stopping (simulated)
 //==============================================================================
 
-TEST(TrainingLoops, MNISTWithEarlyStopping) {
-    auto device = Device::cpu();
+TEST_P(TrainingLoops, MNISTWithEarlyStopping) {
     auto model = std::make_shared<SimpleCNN>();
     model->to(device);
 
@@ -596,7 +579,7 @@ TEST(TrainingLoops, MNISTWithEarlyStopping) {
             auto [input, target] = generate_mnist_batch(batch_size, device);
             auto output = model->forward(input);
             auto loss = cross_entropy(output, target.tensor());
-            val_loss += loss.tensor().template item<float>();
+            val_loss += loss.tensor().cpu().template item<float>();
         }
         val_loss /= 3;
 
@@ -620,9 +603,7 @@ TEST(TrainingLoops, MNISTWithEarlyStopping) {
 // Test 10: Training with Batch Size Variation
 //==============================================================================
 
-TEST(TrainingLoops, MNISTWithVaryingBatchSizes) {
-    auto device = Device::cpu();
-
+TEST_P(TrainingLoops, MNISTWithVaryingBatchSizes) {
     std::vector<int> batch_sizes = {8, 16, 32, 64};
 
     for (auto batch_size : batch_sizes) {
@@ -650,8 +631,7 @@ TEST(TrainingLoops, MNISTWithVaryingBatchSizes) {
 // Test 11: Training with Gradient Accumulation
 //==============================================================================
 
-TEST(TrainingLoops, MNISTWithGradientAccumulation) {
-    auto device = Device::cpu();
+TEST_P(TrainingLoops, MNISTWithGradientAccumulation) {
     auto model = std::make_shared<SimpleCNN>();
     model->to(device);
 
@@ -683,8 +663,7 @@ TEST(TrainingLoops, MNISTWithGradientAccumulation) {
 // Test 12: Training with Exponential LR Scheduler
 //==============================================================================
 
-TEST(TrainingLoops, MNISTWithExponentialLR) {
-    auto device = Device::cpu();
+TEST_P(TrainingLoops, MNISTWithExponentialLR) {
     auto model = std::make_shared<SimpleCNN>();
     model->to(device);
 
@@ -728,8 +707,7 @@ TEST(TrainingLoops, MNISTWithExponentialLR) {
 // Test 13: Training with Different Optimizers Comparison
 //==============================================================================
 
-TEST(TrainingLoops, OptimizersComparison) {
-    auto device = Device::cpu();
+TEST_P(TrainingLoops, OptimizersComparison) {
     int num_epochs = 3;
     int batches_per_epoch = 10;
     int batch_size = 32;
@@ -758,7 +736,7 @@ TEST(TrainingLoops, OptimizersComparison) {
                 auto loss = cross_entropy(output, target.tensor());
                 loss.backward();
                 optimizer.step();
-                final_loss = loss.tensor().template item<float>();
+                final_loss = loss.tensor().cpu().template item<float>();
             }
         }
         results.push_back({"SGD", final_loss});
@@ -781,7 +759,7 @@ TEST(TrainingLoops, OptimizersComparison) {
                 auto loss = cross_entropy(output, target.tensor());
                 loss.backward();
                 optimizer.step();
-                final_loss = loss.tensor().template item<float>();
+                final_loss = loss.tensor().cpu().template item<float>();
             }
         }
         results.push_back({"Adam", final_loss});
@@ -804,7 +782,7 @@ TEST(TrainingLoops, OptimizersComparison) {
                 auto loss = cross_entropy(output, target.tensor());
                 loss.backward();
                 optimizer.step();
-                final_loss = loss.tensor().template item<float>();
+                final_loss = loss.tensor().cpu().template item<float>();
             }
         }
         results.push_back({"AdamW", final_loss});
@@ -826,8 +804,7 @@ TEST(TrainingLoops, OptimizersComparison) {
 // Test 14: Training with Model Checkpointing (simulated)
 //==============================================================================
 
-TEST(TrainingLoops, MNISTWithCheckpointing) {
-    auto device = Device::cpu();
+TEST_P(TrainingLoops, MNISTWithCheckpointing) {
     auto model = std::make_shared<SimpleCNN>();
     model->to(device);
 
@@ -855,7 +832,7 @@ TEST(TrainingLoops, MNISTWithCheckpointing) {
             loss.backward();
             optimizer.step();
 
-            epoch_loss += loss.tensor().template item<float>();
+            epoch_loss += loss.tensor().cpu().template item<float>();
         }
 
         epoch_loss /= batches_per_epoch;
@@ -879,8 +856,7 @@ TEST(TrainingLoops, MNISTWithCheckpointing) {
 // Test 15: End-to-End Training Workflow
 //==============================================================================
 
-TEST(TrainingLoops, CompleteTrainingWorkflow) {
-    auto device = Device::cpu();
+TEST_P(TrainingLoops, CompleteTrainingWorkflow) {
     auto model = std::make_shared<SimpleCNN>();
     model->to(device);
 
@@ -920,7 +896,7 @@ TEST(TrainingLoops, CompleteTrainingWorkflow) {
             loss.backward();
             optimizer.step();
 
-            train_loss += loss.tensor().template item<float>();
+            train_loss += loss.tensor().cpu().template item<float>();
             train_accuracy += calculate_accuracy(output, target);
         }
 
@@ -937,7 +913,7 @@ TEST(TrainingLoops, CompleteTrainingWorkflow) {
             auto output = model->forward(input);
             auto loss = cross_entropy(output, target.tensor());
 
-            val_loss += loss.tensor().template item<float>();
+            val_loss += loss.tensor().cpu().template item<float>();
             val_accuracy += calculate_accuracy(output, target);
         }
 
@@ -965,3 +941,9 @@ TEST(TrainingLoops, CompleteTrainingWorkflow) {
     EXPECT_LT(history.back().learning_rate, history.front().learning_rate)
         << "Learning rate should decrease with scheduler";
 }
+
+//==============================================================================
+// Backend Parity Instantiation
+//==============================================================================
+
+INSTANTIATE_BACKEND_TESTS(TrainingLoops);

@@ -20,20 +20,23 @@
 #include <tenzor/autograd/variable.hpp>
 #include <tenzor/ops/creation.hpp>
 #include <tenzor/ops/math.hpp>
+#include "../backend_test_fixture.hpp"
 
 using namespace tenzor;
 
-namespace {
-
-class D1Test : public ::testing::Test {
+class D1Test : public ::tenzor::testing::BackendTest {
 protected:
-    static void SetUpTestSuite() { tenzor::initialize(); }
+    void SetUp() override {
+        ::tenzor::testing::BackendTest::SetUp();
+        if (::testing::Test::IsSkipped()) return;
+    }
 
     // Helper: build a FusedLinearReLUBackward instance whose saved state
     // matches a forward of  z = ReLU(x @ W.T + b)  with shapes:
     //   x: [B, IN], W: [OUT, IN], z: [B, OUT].
     // Saves input + weight, sets relu_output = z (post-ReLU).
-    static auto build_backward(int64_t B, int64_t IN, int64_t OUT)
+    // Tensors are created on CPU (host writes), then moved to `device`.
+    auto build_backward(int64_t B, int64_t IN, int64_t OUT)
         -> std::shared_ptr<FusedLinearReLUBackward>
     {
         auto fn = std::make_shared<FusedLinearReLUBackward>();
@@ -61,15 +64,13 @@ protected:
         for (int64_t i = 0; i < z.numel(); ++i) {
             zp[i] = ((i % 3) == 0) ? 0.0f : 1.5f;
         }
-        fn->set_relu_output(z);
-        fn->save_for_backward({x, W});
+        fn->set_relu_output(z.to(device));
+        fn->save_for_backward({x.to(device), W.to(device)});
         return fn;
     }
 };
 
-} // namespace
-
-TEST_F(D1Test, BackwardWithVariables_ReturnsVariablesWithGradFn) {
+TEST_P(D1Test, BackwardWithVariables_ReturnsVariablesWithGradFn) {
     auto fn = build_backward(/*B=*/3, /*IN=*/4, /*OUT=*/2);
 
     // grad_out has requires_grad=true so the test can detect whether the
@@ -78,7 +79,7 @@ TEST_F(D1Test, BackwardWithVariables_ReturnsVariablesWithGradFn) {
     auto grad_out_t = zeros({3, 2}, DType::Float32, Device::cpu());
     auto* p = grad_out_t.data<float>();
     for (int64_t i = 0; i < grad_out_t.numel(); ++i) p[i] = 1.0f;
-    Variable grad_out(grad_out_t, /*requires_grad=*/true);
+    Variable grad_out(grad_out_t.to(device), /*requires_grad=*/true);
 
     auto results = fn->backward_with_variables({grad_out});
     ASSERT_EQ(results.size(), 2u);  // grad_input, grad_weight
@@ -96,16 +97,17 @@ TEST_F(D1Test, BackwardWithVariables_ReturnsVariablesWithGradFn) {
         << "grad_weight must carry a grad_fn — Variable-level graph preserved";
 }
 
-TEST_F(D1Test, BackwardWithVariables_ShapesMatchTensorPath) {
+TEST_P(D1Test, BackwardWithVariables_ShapesMatchTensorPath) {
     auto fn = build_backward(/*B=*/3, /*IN=*/4, /*OUT=*/2);
 
     auto grad_out_t = zeros({3, 2}, DType::Float32, Device::cpu());
     auto* p = grad_out_t.data<float>();
     for (int64_t i = 0; i < grad_out_t.numel(); ++i) p[i] = 1.0f;
-    Variable grad_out(grad_out_t, /*requires_grad=*/true);
+    auto grad_out_dev = grad_out_t.to(device);
+    Variable grad_out(grad_out_dev, /*requires_grad=*/true);
 
     auto var_results = fn->backward_with_variables({grad_out});
-    auto tensor_results = fn->backward({grad_out_t});
+    auto tensor_results = fn->backward({grad_out_dev});
 
     ASSERT_EQ(var_results.size(), tensor_results.size());
     for (size_t i = 0; i < var_results.size(); ++i) {
@@ -116,11 +118,13 @@ TEST_F(D1Test, BackwardWithVariables_ShapesMatchTensorPath) {
             EXPECT_EQ(var_results[i].tensor().shape()[d],
                       tensor_results[i].shape()[d]);
         }
-        // Same values (within float tolerance).
-        auto* vp = var_results[i].tensor().data<float>();
-        auto* tp = tensor_results[i].data<float>();
-        int64_t n = var_results[i].tensor().numel();
-        ASSERT_EQ(n, tensor_results[i].numel());
+        // Same values (within float tolerance). Move to CPU for host reads.
+        auto var_cpu = var_results[i].tensor().cpu();
+        auto tensor_cpu = tensor_results[i].cpu();
+        auto* vp = var_cpu.data<float>();
+        auto* tp = tensor_cpu.data<float>();
+        int64_t n = var_cpu.numel();
+        ASSERT_EQ(n, tensor_cpu.numel());
         for (int64_t k = 0; k < n; ++k) {
             EXPECT_NEAR(vp[k], tp[k], 1e-5f)
                 << "result " << i << " elem " << k;
@@ -128,7 +132,7 @@ TEST_F(D1Test, BackwardWithVariables_ShapesMatchTensorPath) {
     }
 }
 
-TEST_F(D1Test, BackwardWithVariables_NoGradGradOut_GradFnCanBeNull) {
+TEST_P(D1Test, BackwardWithVariables_NoGradGradOut_GradFnCanBeNull) {
     // When grad_out itself does NOT require grad, the Variable-level path
     // produces results without grad_fn — that's fine, there's no graph to
     // preserve. This test pins down the contract.
@@ -136,7 +140,7 @@ TEST_F(D1Test, BackwardWithVariables_NoGradGradOut_GradFnCanBeNull) {
     auto grad_out_t = zeros({3, 2}, DType::Float32, Device::cpu());
     auto* p = grad_out_t.data<float>();
     for (int64_t i = 0; i < grad_out_t.numel(); ++i) p[i] = 1.0f;
-    Variable grad_out(grad_out_t, /*requires_grad=*/false);
+    Variable grad_out(grad_out_t.to(device), /*requires_grad=*/false);
 
     auto results = fn->backward_with_variables({grad_out});
     ASSERT_EQ(results.size(), 2u);
@@ -145,3 +149,5 @@ TEST_F(D1Test, BackwardWithVariables_NoGradGradOut_GradFnCanBeNull) {
     EXPECT_EQ(results[0].tensor().shape().size(), 2u);
     EXPECT_EQ(results[1].tensor().shape().size(), 2u);
 }
+
+INSTANTIATE_BACKEND_TESTS(D1Test);

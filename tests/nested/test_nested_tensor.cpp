@@ -8,21 +8,24 @@
 #include <tenzor/nested/nested_tensor.hpp>
 #include <tenzor/nested/nested_ops.hpp>
 #include <tenzor/ops/creation.hpp>
+#include "../backend_test_fixture.hpp"
 #include <vector>
 #include <cmath>
 #include <numeric>
 
 namespace {
-// Helper to create an Int64 tensor from a vector
-tenzor::Tensor make_int64_tensor(const std::vector<int64_t>& data) {
-    return tenzor::from_data(data.data(), {static_cast<int64_t>(data.size())});
+// Helper to create an Int64 tensor from a vector on a given device
+tenzor::Tensor make_int64_tensor(const std::vector<int64_t>& data,
+                                 tenzor::Device device) {
+    return tenzor::from_data(data.data(),
+                             {static_cast<int64_t>(data.size())}, device);
 }
-} // namespace
 
-class NestedTensorTest : public ::testing::Test {
+class NestedTensorTest : public ::tenzor::testing::BackendTest {
 protected:
     void SetUp() override {
-        tenzor::initialize();
+        ::tenzor::testing::BackendTest::SetUp();
+        if (::testing::Test::IsSkipped()) return;
     }
 };
 
@@ -30,23 +33,23 @@ protected:
 // Construction
 // ============================================================================
 
-TEST_F(NestedTensorTest, FromTensorList) {
-    auto t1 = tenzor::randn({3, 4}, tenzor::DType::Float32, tenzor::Device::cpu());
-    auto t2 = tenzor::randn({5, 4}, tenzor::DType::Float32, tenzor::Device::cpu());
-    auto t3 = tenzor::randn({2, 4}, tenzor::DType::Float32, tenzor::Device::cpu());
+TEST_P(NestedTensorTest, FromTensorList) {
+    auto t1 = tenzor::randn({3, 4}, tenzor::DType::Float32, device);
+    auto t2 = tenzor::randn({5, 4}, tenzor::DType::Float32, device);
+    auto t3 = tenzor::randn({2, 4}, tenzor::DType::Float32, device);
 
     auto nt = tenzor::NestedTensor::from_tensor_list({t1, t2, t3});
 
     EXPECT_EQ(nt.batch_size(), 3);
     EXPECT_EQ(nt.dtype(), tenzor::DType::Float32);
-    EXPECT_TRUE(nt.device().type == tenzor::Device::Type::CPU);
+    EXPECT_TRUE(nt.device().type == device.type);
 
     // Total length should be 3 + 5 + 2 = 10
     EXPECT_EQ(nt.values().shape()[0], 10);
     EXPECT_EQ(nt.values().shape()[1], 4);
 
     // Offsets should be [0, 3, 8, 10]
-    auto off_cpu = nt.offsets().to(tenzor::Device::cpu());
+    auto off_cpu = nt.offsets().cpu();
     EXPECT_EQ(off_cpu.numel(), 4);
     EXPECT_EQ(off_cpu.data<int64_t>()[0], 0);
     EXPECT_EQ(off_cpu.data<int64_t>()[1], 3);
@@ -54,9 +57,9 @@ TEST_F(NestedTensorTest, FromTensorList) {
     EXPECT_EQ(off_cpu.data<int64_t>()[3], 10);
 }
 
-TEST_F(NestedTensorTest, Unbind) {
-    auto t1 = tenzor::randn({3, 4}, tenzor::DType::Float32, tenzor::Device::cpu());
-    auto t2 = tenzor::randn({5, 4}, tenzor::DType::Float32, tenzor::Device::cpu());
+TEST_P(NestedTensorTest, Unbind) {
+    auto t1 = tenzor::randn({3, 4}, tenzor::DType::Float32, device);
+    auto t2 = tenzor::randn({5, 4}, tenzor::DType::Float32, device);
 
     auto nt = tenzor::NestedTensor::from_tensor_list({t1, t2});
     auto unbound = nt.unbind();
@@ -68,17 +71,19 @@ TEST_F(NestedTensorTest, Unbind) {
     EXPECT_EQ(unbound[1].shape()[1], 4);
 
     // Values should match originals
+    auto unbound0_cpu = unbound[0].cpu();
+    auto t1_cpu = t1.cpu();
     for (int64_t i = 0; i < 3; ++i) {
         for (int64_t j = 0; j < 4; ++j) {
-            EXPECT_FLOAT_EQ(unbound[0].data<float>()[i * 4 + j],
-                            t1.data<float>()[i * 4 + j]);
+            EXPECT_FLOAT_EQ(unbound0_cpu.data<float>()[i * 4 + j],
+                            t1_cpu.data<float>()[i * 4 + j]);
         }
     }
 }
 
-TEST_F(NestedTensorTest, Select) {
-    auto t1 = tenzor::randn({3, 4}, tenzor::DType::Float32, tenzor::Device::cpu());
-    auto t2 = tenzor::randn({5, 4}, tenzor::DType::Float32, tenzor::Device::cpu());
+TEST_P(NestedTensorTest, Select) {
+    auto t1 = tenzor::randn({3, 4}, tenzor::DType::Float32, device);
+    auto t2 = tenzor::randn({5, 4}, tenzor::DType::Float32, device);
 
     auto nt = tenzor::NestedTensor::from_tensor_list({t1, t2});
     auto selected = nt.select(1);
@@ -91,11 +96,11 @@ TEST_F(NestedTensorTest, Select) {
 // Padding roundtrip
 // ============================================================================
 
-TEST_F(NestedTensorTest, ToPaddedRoundtrip) {
-    auto t1 = tenzor::ones({3, 4}, tenzor::DType::Float32, tenzor::Device::cpu());
-    auto t2 = tenzor::ones({5, 4}, tenzor::DType::Float32, tenzor::Device::cpu());
+TEST_P(NestedTensorTest, ToPaddedRoundtrip) {
+    auto t1 = tenzor::ones({3, 4}, tenzor::DType::Float32, device);
+    auto t2 = tenzor::ones({5, 4}, tenzor::DType::Float32, device);
     // Scale t2 so we can distinguish
-    t2 = tenzor::mul(t2, tenzor::full({1}, 2.0f, tenzor::DType::Float32, tenzor::Device::cpu()));
+    t2 = tenzor::mul(t2, tenzor::full({1}, 2.0f, tenzor::DType::Float32, device));
 
     auto nt = tenzor::NestedTensor::from_tensor_list({t1, t2});
 
@@ -106,18 +111,19 @@ TEST_F(NestedTensorTest, ToPaddedRoundtrip) {
     EXPECT_EQ(padded.shape()[1], 5);   // max_len
     EXPECT_EQ(padded.shape()[2], 4);   // D
 
+    auto padded_cpu = padded.cpu();
     // First sequence: rows 0-2 should be 1.0, rows 3-4 should be 0.0 (padding)
-    EXPECT_FLOAT_EQ(padded.data<float>()[0], 1.0f);
-    EXPECT_FLOAT_EQ(padded.data<float>()[3 * 4], 0.0f);  // padding row
+    EXPECT_FLOAT_EQ(padded_cpu.data<float>()[0], 1.0f);
+    EXPECT_FLOAT_EQ(padded_cpu.data<float>()[3 * 4], 0.0f);  // padding row
 
     // Second sequence: all rows should be 2.0
-    EXPECT_FLOAT_EQ(padded.data<float>()[5 * 4], 2.0f);  // row 0 of seq 2
+    EXPECT_FLOAT_EQ(padded_cpu.data<float>()[5 * 4], 2.0f);  // row 0 of seq 2
 }
 
-TEST_F(NestedTensorTest, FromPadded) {
+TEST_P(NestedTensorTest, FromPadded) {
     // Create a padded tensor [2, 5, 4] and lengths [3, 5]
-    auto padded = tenzor::randn({2, 5, 4}, tenzor::DType::Float32, tenzor::Device::cpu());
-    auto lengths = make_int64_tensor({3, 5});
+    auto padded = tenzor::randn({2, 5, 4}, tenzor::DType::Float32, device);
+    auto lengths = make_int64_tensor({3, 5}, device);
 
     auto nt = tenzor::NestedTensor::from_padded(padded, lengths);
 
@@ -130,9 +136,9 @@ TEST_F(NestedTensorTest, FromPadded) {
 // Element-wise ops
 // ============================================================================
 
-TEST_F(NestedTensorTest, ElementWiseAdd) {
-    auto t1 = tenzor::ones({3, 4}, tenzor::DType::Float32, tenzor::Device::cpu());
-    auto t2 = tenzor::ones({5, 4}, tenzor::DType::Float32, tenzor::Device::cpu());
+TEST_P(NestedTensorTest, ElementWiseAdd) {
+    auto t1 = tenzor::ones({3, 4}, tenzor::DType::Float32, device);
+    auto t2 = tenzor::ones({5, 4}, tenzor::DType::Float32, device);
 
     auto nt1 = tenzor::NestedTensor::from_tensor_list({t1, t2});
     auto nt2 = tenzor::NestedTensor::from_tensor_list({t1, t2});
@@ -140,15 +146,15 @@ TEST_F(NestedTensorTest, ElementWiseAdd) {
     auto result = tenzor::nested_add(nt1, nt2);
 
     // All values should be 2.0
-    auto vals = result.values();
+    auto vals = result.values().cpu();
     for (int64_t i = 0; i < vals.numel(); ++i) {
         EXPECT_FLOAT_EQ(vals.data<float>()[i], 2.0f);
     }
 }
 
-TEST_F(NestedTensorTest, ElementWiseMul) {
-    auto t1 = tenzor::full({3, 4}, 3.0f, tenzor::DType::Float32, tenzor::Device::cpu());
-    auto t2 = tenzor::full({5, 4}, 2.0f, tenzor::DType::Float32, tenzor::Device::cpu());
+TEST_P(NestedTensorTest, ElementWiseMul) {
+    auto t1 = tenzor::full({3, 4}, 3.0f, tenzor::DType::Float32, device);
+    auto t2 = tenzor::full({5, 4}, 2.0f, tenzor::DType::Float32, device);
 
     auto nt1 = tenzor::NestedTensor::from_tensor_list({t1, t2});
     auto nt2 = tenzor::NestedTensor::from_tensor_list({t1, t2});
@@ -156,7 +162,7 @@ TEST_F(NestedTensorTest, ElementWiseMul) {
     auto result = tenzor::nested_mul(nt1, nt2);
 
     // First segment: 3*3 = 9, second: 2*2 = 4
-    auto vals = result.values();
+    auto vals = result.values().cpu();
     EXPECT_FLOAT_EQ(vals.data<float>()[0], 9.0f);
     EXPECT_FLOAT_EQ(vals.data<float>()[3 * 4], 4.0f);
 }
@@ -165,9 +171,9 @@ TEST_F(NestedTensorTest, ElementWiseMul) {
 // Softmax
 // ============================================================================
 
-TEST_F(NestedTensorTest, NestedSoftmax) {
-    auto t1 = tenzor::randn({3, 4}, tenzor::DType::Float32, tenzor::Device::cpu());
-    auto t2 = tenzor::randn({5, 4}, tenzor::DType::Float32, tenzor::Device::cpu());
+TEST_P(NestedTensorTest, NestedSoftmax) {
+    auto t1 = tenzor::randn({3, 4}, tenzor::DType::Float32, device);
+    auto t2 = tenzor::randn({5, 4}, tenzor::DType::Float32, device);
 
     auto nt = tenzor::NestedTensor::from_tensor_list({t1, t2});
     auto result = tenzor::nested_softmax(nt, /*dim=*/-1);
@@ -182,9 +188,9 @@ TEST_F(NestedTensorTest, NestedSoftmax) {
 // Reduction
 // ============================================================================
 
-TEST_F(NestedTensorTest, NestedSum) {
-    auto t1 = tenzor::ones({3, 4}, tenzor::DType::Float32, tenzor::Device::cpu());
-    auto t2 = tenzor::ones({5, 4}, tenzor::DType::Float32, tenzor::Device::cpu());
+TEST_P(NestedTensorTest, NestedSum) {
+    auto t1 = tenzor::ones({3, 4}, tenzor::DType::Float32, device);
+    auto t2 = tenzor::ones({5, 4}, tenzor::DType::Float32, device);
 
     auto nt = tenzor::NestedTensor::from_tensor_list({t1, t2});
     // Sum along ragged dim (dim=0 within each segment)
@@ -196,9 +202,9 @@ TEST_F(NestedTensorTest, NestedSum) {
     EXPECT_EQ(result.batch_size(), 2);
 }
 
-TEST_F(NestedTensorTest, NestedMean) {
-    auto t1 = tenzor::full({3, 4}, 6.0f, tenzor::DType::Float32, tenzor::Device::cpu());
-    auto t2 = tenzor::full({5, 4}, 10.0f, tenzor::DType::Float32, tenzor::Device::cpu());
+TEST_P(NestedTensorTest, NestedMean) {
+    auto t1 = tenzor::full({3, 4}, 6.0f, tenzor::DType::Float32, device);
+    auto t2 = tenzor::full({5, 4}, 10.0f, tenzor::DType::Float32, device);
 
     auto nt = tenzor::NestedTensor::from_tensor_list({t1, t2});
     auto result = tenzor::nested_mean(nt, /*dim=*/1, /*keepdim=*/false);
@@ -210,8 +216,8 @@ TEST_F(NestedTensorTest, NestedMean) {
 // Clone
 // ============================================================================
 
-TEST_F(NestedTensorTest, Clone) {
-    auto t1 = tenzor::randn({3, 4}, tenzor::DType::Float32, tenzor::Device::cpu());
+TEST_P(NestedTensorTest, Clone) {
+    auto t1 = tenzor::randn({3, 4}, tenzor::DType::Float32, device);
     auto nt = tenzor::NestedTensor::from_tensor_list({t1});
     auto cloned = nt.clone();
 
@@ -222,3 +228,7 @@ TEST_F(NestedTensorTest, Clone) {
     // Should be a deep copy (different pointers)
     EXPECT_NE(cloned.values().data_ptr(), nt.values().data_ptr());
 }
+
+INSTANTIATE_BACKEND_TESTS(NestedTensorTest);
+
+} // namespace

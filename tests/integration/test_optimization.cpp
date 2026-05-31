@@ -11,6 +11,7 @@
 
 #include <gtest/gtest.h>
 #include <tenzor/tenzor.hpp>
+#include "../backend_test_fixture.hpp"
 #include <memory>
 #include <cmath>
 
@@ -19,18 +20,10 @@ using namespace tenzor::nn;
 using namespace tenzor::optim;
 
 //==============================================================================
-// Test Environment
+// Backend parity fixture
 //==============================================================================
 
-class OptimizationEnvironment : public ::testing::Environment {
-public:
-    void SetUp() override {
-        tenzor::initialize();
-    }
-};
-
-static ::testing::Environment* const optimization_env =
-    ::testing::AddGlobalTestEnvironment(new OptimizationEnvironment);
+class Optimization : public ::tenzor::testing::BackendTest {};
 
 //==============================================================================
 // Helper Model
@@ -61,8 +54,7 @@ private:
 // Test 1: SGD with StepLR Integration
 //==============================================================================
 
-TEST(Optimization, SGDWithStepLR) {
-    auto device = Device::cpu();
+TEST_P(Optimization, SGDWithStepLR) {
     auto model = std::make_shared<SimpleModel>();
     model->to(device);
 
@@ -99,8 +91,7 @@ TEST(Optimization, SGDWithStepLR) {
 // Test 2: Adam with CosineAnnealingLR
 //==============================================================================
 
-TEST(Optimization, AdamWithCosineAnnealing) {
-    auto device = Device::cpu();
+TEST_P(Optimization, AdamWithCosineAnnealing) {
     auto model = std::make_shared<SimpleModel>();
     model->to(device);
 
@@ -135,8 +126,7 @@ TEST(Optimization, AdamWithCosineAnnealing) {
 // Test 3: AdamW with Weight Decay
 //==============================================================================
 
-TEST(Optimization, AdamWWeightDecay) {
-    auto device = Device::cpu();
+TEST_P(Optimization, AdamWWeightDecay) {
     auto model = std::make_shared<SimpleModel>();
     model->to(device);
 
@@ -162,8 +152,10 @@ TEST(Optimization, AdamWWeightDecay) {
     // Parameters should have changed
     auto final_param = params[0]->tensor();
 
-    auto initial_cpu = initial_param.to(Device::cpu()).template data<float>();
-    auto final_cpu = final_param.to(Device::cpu()).template data<float>();
+    auto initial_host = initial_param.cpu();
+    auto final_host = final_param.cpu();
+    auto* initial_cpu = initial_host.template data<float>();
+    auto* final_cpu = final_host.template data<float>();
 
     bool changed = false;
     for (size_t i = 0; i < initial_param.numel(); i++) {
@@ -180,8 +172,7 @@ TEST(Optimization, AdamWWeightDecay) {
 // Test 4: OneCycleLR Full Cycle
 //==============================================================================
 
-TEST(Optimization, OneCycleLRFullCycle) {
-    auto device = Device::cpu();
+TEST_P(Optimization, OneCycleLRFullCycle) {
     auto model = std::make_shared<SimpleModel>();
     model->to(device);
 
@@ -222,8 +213,7 @@ TEST(Optimization, OneCycleLRFullCycle) {
 // Test 5: ReduceLROnPlateau with Validation Metric
 //==============================================================================
 
-TEST(Optimization, ReduceLROnPlateau) {
-    auto device = Device::cpu();
+TEST_P(Optimization, ReduceLROnPlateau) {
     auto model = std::make_shared<SimpleModel>();
     model->to(device);
 
@@ -261,8 +251,7 @@ TEST(Optimization, ReduceLROnPlateau) {
 // Test 6: Multiple Optimizers on Different Parameters
 //==============================================================================
 
-TEST(Optimization, MultipleOptimizers) {
-    auto device = Device::cpu();
+TEST_P(Optimization, MultipleOptimizers) {
     auto model = std::make_shared<SimpleModel>();
     model->to(device);
 
@@ -298,8 +287,7 @@ TEST(Optimization, MultipleOptimizers) {
 // Test 7: Gradient Accumulation with Optimizer
 //==============================================================================
 
-TEST(Optimization, GradientAccumulation) {
-    auto device = Device::cpu();
+TEST_P(Optimization, GradientAccumulation) {
     auto model = std::make_shared<SimpleModel>();
     model->to(device);
 
@@ -331,8 +319,7 @@ TEST(Optimization, GradientAccumulation) {
 // Test 8: Exponential LR Decay
 //==============================================================================
 
-TEST(Optimization, ExponentialLRDecay) {
-    auto device = Device::cpu();
+TEST_P(Optimization, ExponentialLRDecay) {
     auto model = std::make_shared<SimpleModel>();
     model->to(device);
 
@@ -369,8 +356,7 @@ TEST(Optimization, ExponentialLRDecay) {
 // Test 9: CosineAnnealingWarmRestarts
 //==============================================================================
 
-TEST(Optimization, CosineAnnealingWarmRestarts) {
-    auto device = Device::cpu();
+TEST_P(Optimization, CosineAnnealingWarmRestarts) {
     auto model = std::make_shared<SimpleModel>();
     model->to(device);
 
@@ -411,8 +397,7 @@ TEST(Optimization, CosineAnnealingWarmRestarts) {
 // Test 10: Optimizer State Save/Load Integration
 //==============================================================================
 
-TEST(Optimization, OptimizerStateSaveLoad) {
-    auto device = Device::cpu();
+TEST_P(Optimization, OptimizerStateSaveLoad) {
     auto model = std::make_shared<SimpleModel>();
     model->to(device);
 
@@ -442,3 +427,9 @@ TEST(Optimization, OptimizerStateSaveLoad) {
 
     SUCCEED() << "Optimizer state saved and loaded successfully";
 }
+
+//==============================================================================
+// Backend instantiation
+//==============================================================================
+
+INSTANTIATE_BACKEND_TESTS(Optimization);

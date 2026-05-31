@@ -1,5 +1,5 @@
 // Tests for the Lion (EvoLved Sign Momentum) optimizer.
-// CPU-only. Verifies convergence on a small quadratic, lr get/set,
+// Cross-backend. Verifies convergence on a small quadratic, lr get/set,
 // and state_dict round-trip.
 
 #include <gtest/gtest.h>
@@ -9,16 +9,21 @@
 #include <tenzor/nn/optim/lion.hpp>
 #include <tenzor/ops/creation.hpp>
 
+#include "../../backend_test_fixture.hpp"
+
 namespace tenzor {
 namespace {
 
-class LionTest : public ::testing::Test {
+class LionTest : public ::tenzor::testing::BackendTest {
 protected:
-    void SetUp() override { tenzor::initialize(); }
+    void SetUp() override {
+        BackendTest::SetUp();
+        if (::testing::Test::IsSkipped()) return;
+    }
 
-    // One 4x4 parameter initialized to ones, on CPU Float32.
+    // One 4x4 parameter initialized to ones, on the test device, Float32.
     std::vector<std::shared_ptr<Variable>> make_params() {
-        auto t = tenzor::ones({4, 4}, DType::Float32, Device::cpu());
+        auto t = tenzor::ones({4, 4}, DType::Float32, device);
         auto param = std::make_shared<Variable>(t, /*requires_grad=*/true);
         return {param};
     }
@@ -37,14 +42,14 @@ protected:
         for (auto& p : params) {
             auto shape = p->tensor().shape();
             p->set_grad(tenzor::ones({shape.begin(), shape.end()},
-                                     p->tensor().dtype(), Device::cpu()));
+                                     p->tensor().dtype(), device));
         }
         opt.step();
         return sum;
     }
 };
 
-TEST_F(LionTest, BasicStepReducesLoss) {
+TEST_P(LionTest, BasicStepReducesLoss) {
     // Params start at ones, gradient is constantly +1, so Lion should
     // monotonically push every element toward zero. The |sum| must shrink
     // at every step.
@@ -58,7 +63,7 @@ TEST_F(LionTest, BasicStepReducesLoss) {
         << "Lion should reduce |param| sum when gradient is constant positive";
 }
 
-TEST_F(LionTest, LrGetSet) {
+TEST_P(LionTest, LrGetSet) {
     auto params = make_params();
     optim::Lion opt(params, /*lr=*/1e-4);
 
@@ -67,7 +72,7 @@ TEST_F(LionTest, LrGetSet) {
     EXPECT_DOUBLE_EQ(opt.get_lr(), 5e-4);
 }
 
-TEST_F(LionTest, StateDictRoundtrip) {
+TEST_P(LionTest, StateDictRoundtrip) {
     auto params = make_params();
     optim::Lion opt(params, /*lr=*/0.01, /*beta1=*/0.9, /*beta2=*/0.99,
                     /*weight_decay=*/0.1);
@@ -95,7 +100,7 @@ TEST_F(LionTest, StateDictRoundtrip) {
     EXPECT_EQ(state.size(), state2.size());
 }
 
-TEST_F(LionTest, SignBasedUpdateMagnitudeIsLr) {
+TEST_P(LionTest, SignBasedUpdateMagnitudeIsLr) {
     // Lion's update is lr * sign(c_t). With weight_decay=0, after one step
     // from ones with grad=+1, every element must equal exactly 1 - lr.
     // This is the distinguishing property of a sign-based optimizer.
@@ -106,7 +111,7 @@ TEST_F(LionTest, SignBasedUpdateMagnitudeIsLr) {
     for (auto& p : params) {
         auto shape = p->tensor().shape();
         p->set_grad(tenzor::ones({shape.begin(), shape.end()},
-                                 p->tensor().dtype(), Device::cpu()));
+                                 p->tensor().dtype(), device));
     }
     opt.step();
 
@@ -118,6 +123,8 @@ TEST_F(LionTest, SignBasedUpdateMagnitudeIsLr) {
                "element " << i << " was " << d[i];
     }
 }
+
+INSTANTIATE_BACKEND_TESTS(LionTest);
 
 } // namespace
 } // namespace tenzor

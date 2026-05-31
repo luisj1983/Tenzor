@@ -1,8 +1,9 @@
 // Tests for the L-BFGS optimizer, with specific coverage of the
 // strong-Wolfe line search that Phase 1.4 of typed-meandering-dragon added.
 //
-// The tests are CPU-only, deterministic, and do not touch the backend parity
-// suite — each test constructs its own parameters and closure.
+// Ported to the cross-backend parity suite: each case runs on every available
+// backend via BackendTest. Parameters and closures construct their tensors on
+// the per-test `device`; host-side assertions read back through .cpu().
 
 #include <gtest/gtest.h>
 
@@ -13,6 +14,7 @@
 #include <tenzor/ops/math.hpp>
 #include <tenzor/ops/reduction.hpp>
 
+#include "../../backend_test_fixture.hpp"
 #include "../../grad_flow_helpers.hpp"
 
 #include <cmath>
@@ -20,9 +22,12 @@
 namespace tenzor {
 namespace {
 
-class LBFGSTest : public ::testing::Test {
+class LBFGSTest : public ::tenzor::testing::BackendTest {
 protected:
-    void SetUp() override { tenzor::initialize(); }
+    void SetUp() override {
+        ::tenzor::testing::BackendTest::SetUp();
+        if (::testing::Test::IsSkipped()) return;
+    }
 
     // Scalar loss to plain double for assertions.
     static auto to_double(const Variable& v) -> double {
@@ -38,10 +43,11 @@ protected:
     // curvature — the canonical quasi-Newton benchmark.
     static auto rosenbrock(const std::shared_ptr<Variable>& x,
                            const std::shared_ptr<Variable>& y,
+                           const Device& device,
                            double a = 1.0,
                            double b = 100.0) -> Variable {
-        auto ax = tenzor::full({1}, a, DType::Float64, Device::cpu());
-        auto bx = tenzor::full({1}, b, DType::Float64, Device::cpu());
+        auto ax = tenzor::full({1}, a, DType::Float64, device);
+        auto bx = tenzor::full({1}, b, DType::Float64, device);
         auto term1 = (Variable(ax, false) - *x) * (Variable(ax, false) - *x);
         auto x_sq = (*x) * (*x);
         auto diff = (*y) - x_sq;
@@ -49,8 +55,9 @@ protected:
         return term1 + term2;
     }
 
-    static auto make_scalar_param(double value) -> std::shared_ptr<Variable> {
-        auto t = tenzor::full({1}, value, DType::Float64, Device::cpu());
+    static auto make_scalar_param(double value, const Device& device)
+        -> std::shared_ptr<Variable> {
+        auto t = tenzor::full({1}, value, DType::Float64, device);
         return std::make_shared<Variable>(t, /*requires_grad=*/true);
     }
 };
@@ -59,14 +66,14 @@ protected:
 // Strong Wolfe converges on Rosenbrock starting from (-1.2, 1.0).
 // ---------------------------------------------------------------------------
 
-TEST_F(LBFGSTest, StrongWolfeRosenbrockConverges) {
-    auto x = make_scalar_param(-1.2);
-    auto y = make_scalar_param(1.0);
+TEST_P(LBFGSTest, StrongWolfeRosenbrockConverges) {
+    auto x = make_scalar_param(-1.2, device);
+    auto y = make_scalar_param(1.0, device);
 
     auto closure = [&]() -> Variable {
         x->zero_grad();
         y->zero_grad();
-        auto loss = rosenbrock(x, y);
+        auto loss = rosenbrock(x, y, device);
         loss.backward();
         return loss;
     };
@@ -105,14 +112,14 @@ TEST_F(LBFGSTest, StrongWolfeRosenbrockConverges) {
 // require that it also reaches the minimum under the same wall-clock budget.
 // ---------------------------------------------------------------------------
 
-TEST_F(LBFGSTest, ArmijoRosenbrockAlsoConverges) {
-    auto x = make_scalar_param(-1.2);
-    auto y = make_scalar_param(1.0);
+TEST_P(LBFGSTest, ArmijoRosenbrockAlsoConverges) {
+    auto x = make_scalar_param(-1.2, device);
+    auto y = make_scalar_param(1.0, device);
 
     auto closure = [&]() -> Variable {
         x->zero_grad();
         y->zero_grad();
-        auto loss = rosenbrock(x, y);
+        auto loss = rosenbrock(x, y, device);
         loss.backward();
         return loss;
     };
@@ -141,18 +148,20 @@ TEST_F(LBFGSTest, ArmijoRosenbrockAlsoConverges) {
 // precision in O(dim) iterations — this is the line-search reliability test.
 // ---------------------------------------------------------------------------
 
-TEST_F(LBFGSTest, StrongWolfeQuadraticExact) {
+TEST_P(LBFGSTest, StrongWolfeQuadraticExact) {
     // f(x) = 0.5 * (x0^2 + 2*x1^2 + 3*x2^2) — diagonal PSD.
     auto x = std::make_shared<Variable>(
-        tenzor::full({3}, 1.5, DType::Float64, Device::cpu()),
+        tenzor::full({3}, 1.5, DType::Float64, device),
         /*requires_grad=*/true);
 
     auto closure = [&]() -> Variable {
         x->zero_grad();
-        auto coef = tenzor::full({3}, 0.0, DType::Float64, Device::cpu());
-        coef.data<double>()[0] = 0.5;
-        coef.data<double>()[1] = 1.0;
-        coef.data<double>()[2] = 1.5;
+        // Host write of the diagonal coefficients, then move onto device.
+        auto coef_cpu = tenzor::full({3}, 0.0, DType::Float64, Device::cpu());
+        coef_cpu.data<double>()[0] = 0.5;
+        coef_cpu.data<double>()[1] = 1.0;
+        coef_cpu.data<double>()[2] = 1.5;
+        auto coef = coef_cpu.to(device);
         auto coef_v = Variable(coef, false);
         auto sq = (*x) * (*x);
         auto weighted = coef_v * sq;
@@ -185,16 +194,16 @@ TEST_F(LBFGSTest, StrongWolfeQuadraticExact) {
 // steep-curvature quadratic where bisection would spin.
 // ---------------------------------------------------------------------------
 
-TEST_F(LBFGSTest, StrongWolfeHandlesSteepCurvature) {
+TEST_P(LBFGSTest, StrongWolfeHandlesSteepCurvature) {
     // f(x) = 0.5 * 1e4 * x^2 — very steep quadratic. The default lr=1 is
     // massively too large; the line search must shrink aggressively.
     auto x = std::make_shared<Variable>(
-        tenzor::full({1}, 2.0, DType::Float64, Device::cpu()),
+        tenzor::full({1}, 2.0, DType::Float64, device),
         /*requires_grad=*/true);
 
     auto closure = [&]() -> Variable {
         x->zero_grad();
-        auto c = Variable(tenzor::full({1}, 5000.0, DType::Float64, Device::cpu()), false);
+        auto c = Variable(tenzor::full({1}, 5000.0, DType::Float64, device), false);
         auto loss = c * (*x) * (*x);
         loss.backward();
         return loss;
@@ -216,6 +225,8 @@ TEST_F(LBFGSTest, StrongWolfeHandlesSteepCurvature) {
 
     EXPECT_LT(final_loss, 1e-8);
 }
+
+INSTANTIATE_BACKEND_TESTS(LBFGSTest);
 
 } // namespace
 } // namespace tenzor

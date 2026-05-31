@@ -5,6 +5,7 @@
 
 #include <gtest/gtest.h>
 #include "tenzor/tenzor.hpp"
+#include "backend_test_fixture.hpp"
 #include "backend_parity/parity_test_utils.hpp"
 #include "grad_flow_helpers.hpp"
 #include <cmath>
@@ -14,27 +15,21 @@ using namespace tenzor;
 // Namespace alias for autograd operations
 namespace autograd = tenzor;
 
-// Global test environment to initialize Tenzor once
-class TenzorEnvironment : public ::testing::Environment {
-public:
-    void SetUp() override {
-        initialize();
-    }
-};
-
-class BmmAutogradTest : public ::testing::Test {
+class BmmAutogradTest : public ::tenzor::testing::BackendTest {
 protected:
     void SetUp() override {
+        ::tenzor::testing::BackendTest::SetUp();
+        if (::testing::Test::IsSkipped()) return;
         // Enable gradient computation
         set_grad_enabled(true);
     }
 };
 
-TEST_F(BmmAutogradTest, ForwardPass) {
+TEST_P(BmmAutogradTest, ForwardPass) {
     // Create two 3D tensors for batch matrix multiplication
     // a: (2, 3, 4), b: (2, 4, 5) -> result: (2, 3, 5)
-    auto a_tensor = ones({2, 3, 4}, DType::Float32, Device::cpu());
-    auto b_tensor = ones({2, 4, 5}, DType::Float32, Device::cpu());
+    auto a_tensor = ones({2, 3, 4}, DType::Float32, device);
+    auto b_tensor = ones({2, 4, 5}, DType::Float32, device);
 
     Variable a(a_tensor, true);
     Variable b(b_tensor, true);
@@ -52,23 +47,25 @@ TEST_F(BmmAutogradTest, ForwardPass) {
     EXPECT_TRUE(c.grad_fn() != nullptr);
 
     // Check values (ones @ ones with middle dim=4 should give all 4s)
-    auto* c_data = c.tensor().data<float>();
-    for (int64_t i = 0; i < c.tensor().numel(); ++i) {
+    auto c_cpu = c.tensor().cpu();
+    auto* c_data = c_cpu.data<float>();
+    for (int64_t i = 0; i < c_cpu.numel(); ++i) {
         EXPECT_NEAR(c_data[i], 4.0f, 1e-5f);
     }
 }
 
-TEST_F(BmmAutogradTest, BackwardGradientA) {
+TEST_P(BmmAutogradTest, BackwardGradientA) {
     // Create simple test case
     // a: (1, 2, 3), b: (1, 3, 2) -> c: (1, 2, 2)
-    auto a_tensor = ones({1, 2, 3}, DType::Float32, Device::cpu());
-    auto b_tensor = ones({1, 3, 2}, DType::Float32, Device::cpu());
+    auto a_host = ones({1, 2, 3}, DType::Float32, Device::cpu());
+    auto b_tensor = ones({1, 3, 2}, DType::Float32, device);
 
     // Fill with specific values
-    auto* a_data = a_tensor.data<float>();
+    auto* a_host_data = a_host.data<float>();
     for (int i = 0; i < 6; ++i) {
-        a_data[i] = static_cast<float>(i + 1);  // [1, 2, 3, 4, 5, 6]
+        a_host_data[i] = static_cast<float>(i + 1);  // [1, 2, 3, 4, 5, 6]
     }
+    auto a_tensor = a_host.to(device);
 
     Variable a(a_tensor, true);
     Variable b(b_tensor, true);
@@ -98,16 +95,17 @@ TEST_F(BmmAutogradTest, BackwardGradientA) {
     // b^T has shape (1, 2, 3)
     // grad_a = (1, 2, 2) @ (1, 2, 3) = (1, 2, 3)
     // Each element should be sum along rows of b^T = 2 (since b has 2 columns)
-    auto* grad_a_data = a.grad()->data<float>();
+    auto grad_a_cpu = a.grad()->cpu();
+    auto* grad_a_data = grad_a_cpu.data<float>();
     for (int i = 0; i < 6; ++i) {
         EXPECT_NEAR(grad_a_data[i], 2.0f, 1e-5f);
     }
 }
 
-TEST_F(BmmAutogradTest, BackwardGradientB) {
+TEST_P(BmmAutogradTest, BackwardGradientB) {
     // Test gradient computation for b
-    auto a_tensor = ones({1, 2, 3}, DType::Float32, Device::cpu());
-    auto b_tensor = ones({1, 3, 2}, DType::Float32, Device::cpu());
+    auto a_tensor = ones({1, 2, 3}, DType::Float32, device);
+    auto b_tensor = ones({1, 3, 2}, DType::Float32, device);
 
     Variable a(a_tensor, true);
     Variable b(b_tensor, true);
@@ -132,17 +130,18 @@ TEST_F(BmmAutogradTest, BackwardGradientB) {
     // grad_c is all ones with shape (1, 2, 2)
     // grad_b = (1, 3, 2) @ (1, 2, 2) = (1, 3, 2)
     // Each element should be sum along rows of grad_c = 2
-    auto* grad_b_data = b.grad()->data<float>();
+    auto grad_b_cpu = b.grad()->cpu();
+    auto* grad_b_data = grad_b_cpu.data<float>();
     for (int i = 0; i < 6; ++i) {
         EXPECT_NEAR(grad_b_data[i], 2.0f, 1e-5f);
     }
 }
 
-TEST_F(BmmAutogradTest, LargerBatchSize) {
+TEST_P(BmmAutogradTest, LargerBatchSize) {
     // Test with larger batch size
     // a: (4, 5, 6), b: (4, 6, 7) -> c: (4, 5, 7)
-    auto a_tensor = ones({4, 5, 6}, DType::Float32, Device::cpu());
-    auto b_tensor = ones({4, 6, 7}, DType::Float32, Device::cpu());
+    auto a_tensor = ones({4, 5, 6}, DType::Float32, device);
+    auto b_tensor = ones({4, 6, 7}, DType::Float32, device);
 
     Variable a(a_tensor, true);
     Variable b(b_tensor, true);
@@ -169,10 +168,10 @@ TEST_F(BmmAutogradTest, LargerBatchSize) {
     EXPECT_EQ(b.grad()->shape()[2], 7);
 }
 
-TEST_F(BmmAutogradTest, NoGradWhenDisabled) {
+TEST_P(BmmAutogradTest, NoGradWhenDisabled) {
     // Test that gradients are not computed when grad is disabled
-    auto a_tensor = ones({2, 3, 4}, DType::Float32, Device::cpu());
-    auto b_tensor = ones({2, 4, 5}, DType::Float32, Device::cpu());
+    auto a_tensor = ones({2, 3, 4}, DType::Float32, device);
+    auto b_tensor = ones({2, 4, 5}, DType::Float32, device);
 
     Variable a(a_tensor, false);  // No grad
     Variable b(b_tensor, false);  // No grad
@@ -184,10 +183,10 @@ TEST_F(BmmAutogradTest, NoGradWhenDisabled) {
     EXPECT_TRUE(c.grad_fn() == nullptr);
 }
 
-TEST_F(BmmAutogradTest, OneInputRequiresGrad) {
+TEST_P(BmmAutogradTest, OneInputRequiresGrad) {
     // Test when only one input requires gradient
-    auto a_tensor = ones({1, 2, 3}, DType::Float32, Device::cpu());
-    auto b_tensor = ones({1, 3, 2}, DType::Float32, Device::cpu());
+    auto a_tensor = ones({1, 2, 3}, DType::Float32, device);
+    auto b_tensor = ones({1, 3, 2}, DType::Float32, device);
 
     Variable a(a_tensor, true);   // Requires grad
     Variable b(b_tensor, false);  // No grad
@@ -207,18 +206,10 @@ TEST_F(BmmAutogradTest, OneInputRequiresGrad) {
     EXPECT_FALSE(b.has_grad());
 }
 
-#ifdef TENZOR_USE_CUDA
-TEST_F(BmmAutogradTest, CUDABackward) {
-    // Skip when CUDA is not available on this host. SKIP_IF_NO_CUDA goes
-    // through the canonical has_cuda() probe, which honors
-    // TENZOR_SKIP_BACKENDS — TESTING.md bans inline cuda_available() checks
-    // because they bypass that env var.
-    SKIP_IF_NO_CUDA;
-
-    auto cuda_device = Device::cuda(0);
-
-    auto a_tensor = ones({2, 3, 4}, DType::Float32, cuda_device);
-    auto b_tensor = ones({2, 4, 5}, DType::Float32, cuda_device);
+TEST_P(BmmAutogradTest, GradFlows) {
+    // End-to-end gradient flow check across the parameterized backend.
+    auto a_tensor = ones({2, 3, 4}, DType::Float32, device);
+    auto b_tensor = ones({2, 4, 5}, DType::Float32, device);
 
     Variable a(a_tensor, true);
     Variable b(b_tensor, true);
@@ -231,10 +222,5 @@ TEST_F(BmmAutogradTest, CUDABackward) {
     EXPECT_GRAD_FLOWS(a);
     EXPECT_GRAD_FLOWS(b);
 }
-#endif
 
-int main(int argc, char** argv) {
-    ::testing::InitGoogleTest(&argc, argv);
-    ::testing::AddGlobalTestEnvironment(new TenzorEnvironment);
-    return RUN_ALL_TESTS();
-}
+INSTANTIATE_BACKEND_TESTS(BmmAutogradTest);

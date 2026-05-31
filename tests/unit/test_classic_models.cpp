@@ -5,6 +5,7 @@
 
 #include <gtest/gtest.h>
 #include <tenzor/tenzor.hpp>
+#include "../backend_test_fixture.hpp"
 #include "../../include/tenzor/models/vgg.hpp"
 #include "../../include/tenzor/models/alexnet.hpp"
 #include "../../include/tenzor/models/googlenet.hpp"
@@ -15,21 +16,19 @@
 using namespace tenzor;
 using namespace tenzor::models;
 
-class ClassicModelsTest : public ::testing::Test {
+class ClassicModelsTest : public ::tenzor::testing::BackendTest {
 protected:
     void SetUp() override {
-        // Use CPU for testing
-        device_ = Device::cpu();
+        ::tenzor::testing::BackendTest::SetUp();
+        if (::testing::Test::IsSkipped()) return;
     }
-
-    Device device_;
 };
 
 // ============================================================================
 // VGG Tests
 // ============================================================================
 
-TEST_F(ClassicModelsTest, VGG11Construction) {
+TEST_P(ClassicModelsTest, VGG11Construction) {
     auto model = vgg11(1000, true, false);
     ASSERT_NE(model, nullptr);
 
@@ -38,12 +37,13 @@ TEST_F(ClassicModelsTest, VGG11Construction) {
     EXPECT_GT(params.size(), 0);
 }
 
-TEST_F(ClassicModelsTest, VGG11Forward) {
+TEST_P(ClassicModelsTest, VGG11Forward) {
     auto model = vgg11(10, true, false);  // CIFAR-10 classes
     model->eval();
+    model->to(device);
 
     // Create input: (batch=2, channels=3, height=224, width=224)
-    Tensor input({2, 3, 224, 224}, DType::Float32, device_);
+    Tensor input({2, 3, 224, 224}, DType::Float32, device);
     input.fill_(0.5f);
     Variable x(input, true);
 
@@ -56,7 +56,7 @@ TEST_F(ClassicModelsTest, VGG11Forward) {
     EXPECT_EQ(output.tensor().shape()[1], 10);
 }
 
-TEST_F(ClassicModelsTest, VGG13Construction) {
+TEST_P(ClassicModelsTest, VGG13Construction) {
     auto model = vgg13(1000, true, false);
     ASSERT_NE(model, nullptr);
 
@@ -64,7 +64,7 @@ TEST_F(ClassicModelsTest, VGG13Construction) {
     EXPECT_GT(params.size(), 0);
 }
 
-TEST_F(ClassicModelsTest, VGG16Construction) {
+TEST_P(ClassicModelsTest, VGG16Construction) {
     auto model = vgg16(1000, true, false);
     ASSERT_NE(model, nullptr);
 
@@ -72,11 +72,12 @@ TEST_F(ClassicModelsTest, VGG16Construction) {
     EXPECT_GT(params.size(), 0);
 }
 
-TEST_F(ClassicModelsTest, VGG16Forward) {
+TEST_P(ClassicModelsTest, VGG16Forward) {
     auto model = vgg16(1000, true, false);
     model->eval();
+    model->to(device);
 
-    Tensor input({1, 3, 224, 224}, DType::Float32, device_);
+    Tensor input({1, 3, 224, 224}, DType::Float32, device);
     input.fill_(0.5f);
     Variable x(input, true);
 
@@ -87,7 +88,7 @@ TEST_F(ClassicModelsTest, VGG16Forward) {
     EXPECT_EQ(output.tensor().shape()[1], 1000);
 }
 
-TEST_F(ClassicModelsTest, VGG19Construction) {
+TEST_P(ClassicModelsTest, VGG19Construction) {
     auto model = vgg19(1000, true, false);
     ASSERT_NE(model, nullptr);
 
@@ -95,11 +96,12 @@ TEST_F(ClassicModelsTest, VGG19Construction) {
     EXPECT_GT(params.size(), 0);
 }
 
-TEST_F(ClassicModelsTest, VGG19Forward) {
+TEST_P(ClassicModelsTest, VGG19Forward) {
     auto model = vgg19(100, true, false);  // Custom num_classes
     model->eval();
+    model->to(device);
 
-    Tensor input({4, 3, 224, 224}, DType::Float32, device_);
+    Tensor input({4, 3, 224, 224}, DType::Float32, device);
     input.fill_(0.3f);
     Variable x(input, true);
 
@@ -109,12 +111,13 @@ TEST_F(ClassicModelsTest, VGG19Forward) {
     EXPECT_EQ(output.tensor().shape()[1], 100);
 }
 
-TEST_F(ClassicModelsTest, VGGWithoutBatchNorm) {
+TEST_P(ClassicModelsTest, VGGWithoutBatchNorm) {
     auto model = vgg11(10, false, false);  // No batch norm
     ASSERT_NE(model, nullptr);
 
     model->eval();
-    Tensor input({1, 3, 224, 224}, DType::Float32, device_);
+    model->to(device);
+    Tensor input({1, 3, 224, 224}, DType::Float32, device);
     input.fill_(0.5f);
     Variable x(input, true);
 
@@ -126,7 +129,7 @@ TEST_F(ClassicModelsTest, VGGWithoutBatchNorm) {
 // AlexNet Tests
 // ============================================================================
 
-TEST_F(ClassicModelsTest, AlexNetConstruction) {
+TEST_P(ClassicModelsTest, AlexNetConstruction) {
     auto model = alexnet(1000, false);
     ASSERT_NE(model, nullptr);
 
@@ -134,12 +137,13 @@ TEST_F(ClassicModelsTest, AlexNetConstruction) {
     EXPECT_GT(params.size(), 0);
 }
 
-TEST_F(ClassicModelsTest, AlexNetForward) {
+TEST_P(ClassicModelsTest, AlexNetForward) {
     auto model = alexnet(1000, false);
     model->eval();
+    model->to(device);
 
     // Input: (batch=2, channels=3, height=224, width=224)
-    Tensor input({2, 3, 224, 224}, DType::Float32, device_);
+    Tensor input({2, 3, 224, 224}, DType::Float32, device);
     input.fill_(0.5f);
     Variable x(input, true);
 
@@ -151,11 +155,12 @@ TEST_F(ClassicModelsTest, AlexNetForward) {
     EXPECT_EQ(output.tensor().shape()[1], 1000);
 }
 
-TEST_F(ClassicModelsTest, AlexNetCustomClasses) {
+TEST_P(ClassicModelsTest, AlexNetCustomClasses) {
     auto model = alexnet(10, false);  // CIFAR-10
     model->eval();
+    model->to(device);
 
-    Tensor input({1, 3, 224, 224}, DType::Float32, device_);
+    Tensor input({1, 3, 224, 224}, DType::Float32, device);
     input.fill_(0.5f);
     Variable x(input, true);
 
@@ -163,12 +168,13 @@ TEST_F(ClassicModelsTest, AlexNetCustomClasses) {
     EXPECT_EQ(output.tensor().shape()[1], 10);
 }
 
-TEST_F(ClassicModelsTest, AlexNetBatchProcessing) {
+TEST_P(ClassicModelsTest, AlexNetBatchProcessing) {
     auto model = alexnet(100, false);
     model->eval();
+    model->to(device);
 
     // Larger batch
-    Tensor input({8, 3, 224, 224}, DType::Float32, device_);
+    Tensor input({8, 3, 224, 224}, DType::Float32, device);
     input.fill_(0.5f);
     Variable x(input, true);
 
@@ -181,7 +187,7 @@ TEST_F(ClassicModelsTest, AlexNetBatchProcessing) {
 // GoogLeNet Tests
 // ============================================================================
 
-TEST_F(ClassicModelsTest, GoogLeNetConstruction) {
+TEST_P(ClassicModelsTest, GoogLeNetConstruction) {
     auto model = googlenet(1000, false, true);
     ASSERT_NE(model, nullptr);
 
@@ -189,11 +195,12 @@ TEST_F(ClassicModelsTest, GoogLeNetConstruction) {
     EXPECT_GT(params.size(), 0);
 }
 
-TEST_F(ClassicModelsTest, GoogLeNetForward) {
+TEST_P(ClassicModelsTest, GoogLeNetForward) {
     auto model = googlenet(1000, false, false);  // No aux classifiers
     model->eval();
+    model->to(device);
 
-    Tensor input({1, 3, 224, 224}, DType::Float32, device_);
+    Tensor input({1, 3, 224, 224}, DType::Float32, device);
     input.fill_(0.5f);
     Variable x(input, true);
 
@@ -204,11 +211,12 @@ TEST_F(ClassicModelsTest, GoogLeNetForward) {
     EXPECT_EQ(output.tensor().shape()[1], 1000);
 }
 
-TEST_F(ClassicModelsTest, GoogLeNetWithAuxiliaryClassifiers) {
+TEST_P(ClassicModelsTest, GoogLeNetWithAuxiliaryClassifiers) {
     auto model = googlenet(10, false, true);  // With aux classifiers
     model->train();  // Training mode
+    model->to(device);
 
-    Tensor input({2, 3, 224, 224}, DType::Float32, device_);
+    Tensor input({2, 3, 224, 224}, DType::Float32, device);
     input.fill_(0.5f);
     Variable x(input, true);
 
@@ -226,11 +234,12 @@ TEST_F(ClassicModelsTest, GoogLeNetWithAuxiliaryClassifiers) {
     EXPECT_EQ(aux2_out.tensor().shape()[1], 10);
 }
 
-TEST_F(ClassicModelsTest, GoogLeNetInferenceMode) {
+TEST_P(ClassicModelsTest, GoogLeNetInferenceMode) {
     auto model = googlenet(1000, false, true);
     model->eval();  // Evaluation mode
+    model->to(device);
 
-    Tensor input({1, 3, 224, 224}, DType::Float32, device_);
+    Tensor input({1, 3, 224, 224}, DType::Float32, device);
     input.fill_(0.5f);
     Variable x(input, true);
 
@@ -240,7 +249,7 @@ TEST_F(ClassicModelsTest, GoogLeNetInferenceMode) {
     EXPECT_EQ(output.tensor().shape()[1], 1000);
 }
 
-TEST_F(ClassicModelsTest, InceptionModuleForward) {
+TEST_P(ClassicModelsTest, InceptionModuleForward) {
     // Test individual Inception module
     auto inception = std::make_shared<InceptionModule>(
         192,        // in_channels
@@ -249,8 +258,9 @@ TEST_F(ClassicModelsTest, InceptionModuleForward) {
         16, 32,     // reduce_5x5, out_5x5
         32          // out_pool_proj
     );
+    inception->to(device);
 
-    Tensor input({1, 192, 28, 28}, DType::Float32, device_);
+    Tensor input({1, 192, 28, 28}, DType::Float32, device);
     input.fill_(0.5f);
     Variable x(input, true);
 
@@ -267,7 +277,7 @@ TEST_F(ClassicModelsTest, InceptionModuleForward) {
 // Comparative Tests
 // ============================================================================
 
-TEST_F(ClassicModelsTest, ModelParameterCounts) {
+TEST_P(ClassicModelsTest, ModelParameterCounts) {
     auto vgg16_model = vgg16(1000, true, false);
     auto alexnet_model = alexnet(1000, false);
     auto googlenet_model = googlenet(1000, false, false);
@@ -285,7 +295,7 @@ TEST_F(ClassicModelsTest, ModelParameterCounts) {
     EXPECT_GT(google_params.size(), 0);
 }
 
-TEST_F(ClassicModelsTest, TrainingModeSwitch) {
+TEST_P(ClassicModelsTest, TrainingModeSwitch) {
     auto model = vgg16(10, true, false);
 
     // Default should be training mode
@@ -300,10 +310,11 @@ TEST_F(ClassicModelsTest, TrainingModeSwitch) {
     EXPECT_TRUE(model->is_training());
 }
 
-TEST_F(ClassicModelsTest, GradientTracking) {
+TEST_P(ClassicModelsTest, GradientTracking) {
     auto model = vgg11(10, true, false);
+    model->to(device);
 
-    Tensor input({1, 3, 224, 224}, DType::Float32, device_);
+    Tensor input({1, 3, 224, 224}, DType::Float32, device);
     input.fill_(0.5f);
     Variable x(input, true);  // requires_grad = true
 
@@ -313,7 +324,7 @@ TEST_F(ClassicModelsTest, GradientTracking) {
     EXPECT_TRUE(output.requires_grad());
 }
 
-TEST_F(ClassicModelsTest, PretrainedWeightsNotImplemented) {
+TEST_P(ClassicModelsTest, PretrainedWeightsNotImplemented) {
     // All models should throw when trying to load pretrained weights
     EXPECT_THROW(vgg16(1000, true, true), std::runtime_error);
     EXPECT_THROW(alexnet(1000, true), std::runtime_error);
@@ -324,12 +335,13 @@ TEST_F(ClassicModelsTest, PretrainedWeightsNotImplemented) {
 // Stress Tests
 // ============================================================================
 
-TEST_F(ClassicModelsTest, LargeBatchVGG) {
+TEST_P(ClassicModelsTest, LargeBatchVGG) {
     auto model = vgg11(10, true, false);
     model->eval();
+    model->to(device);
 
     // Large batch
-    Tensor input({16, 3, 224, 224}, DType::Float32, device_);
+    Tensor input({16, 3, 224, 224}, DType::Float32, device);
     input.fill_(0.5f);
     Variable x(input, false);  // No gradient tracking for speed
 
@@ -337,12 +349,13 @@ TEST_F(ClassicModelsTest, LargeBatchVGG) {
     EXPECT_EQ(output.tensor().shape()[0], 16);
 }
 
-TEST_F(ClassicModelsTest, SmallBatchGoogLeNet) {
+TEST_P(ClassicModelsTest, SmallBatchGoogLeNet) {
     auto model = googlenet(1000, false, false);
     model->eval();
+    model->to(device);
 
     // Single sample
-    Tensor input({1, 3, 224, 224}, DType::Float32, device_);
+    Tensor input({1, 3, 224, 224}, DType::Float32, device);
     input.fill_(0.5f);
     Variable x(input, false);
 
@@ -354,7 +367,7 @@ TEST_F(ClassicModelsTest, SmallBatchGoogLeNet) {
 // Edge Cases
 // ============================================================================
 
-TEST_F(ClassicModelsTest, VGGCustomDropout) {
+TEST_P(ClassicModelsTest, VGGCustomDropout) {
     // Test with different dropout rates
     auto model1 = std::make_shared<VGG>(VGGConfig::vgg11(), 10, true, 0.3);
     auto model2 = std::make_shared<VGG>(VGGConfig::vgg11(), 10, true, 0.7);
@@ -363,12 +376,13 @@ TEST_F(ClassicModelsTest, VGGCustomDropout) {
     EXPECT_NE(model2, nullptr);
 }
 
-TEST_F(ClassicModelsTest, AlexNetCustomDropout) {
+TEST_P(ClassicModelsTest, AlexNetCustomDropout) {
     auto model = std::make_shared<AlexNet>(10, 0.3);
     EXPECT_NE(model, nullptr);
 
     model->eval();
-    Tensor input({1, 3, 224, 224}, DType::Float32, device_);
+    model->to(device);
+    Tensor input({1, 3, 224, 224}, DType::Float32, device);
     input.fill_(0.5f);
     Variable x(input, true);
 
@@ -376,12 +390,13 @@ TEST_F(ClassicModelsTest, AlexNetCustomDropout) {
     EXPECT_EQ(output.tensor().shape()[1], 10);
 }
 
-TEST_F(ClassicModelsTest, GoogLeNetCustomDropout) {
+TEST_P(ClassicModelsTest, GoogLeNetCustomDropout) {
     auto model = std::make_shared<GoogLeNet>(10, false, 0.2);
     EXPECT_NE(model, nullptr);
 
     model->eval();
-    Tensor input({1, 3, 224, 224}, DType::Float32, device_);
+    model->to(device);
+    Tensor input({1, 3, 224, 224}, DType::Float32, device);
     input.fill_(0.5f);
     Variable x(input, true);
 
@@ -389,10 +404,4 @@ TEST_F(ClassicModelsTest, GoogLeNetCustomDropout) {
     EXPECT_EQ(output.tensor().shape()[1], 10);
 }
 
-int main(int argc, char** argv) {
-    ::testing::InitGoogleTest(&argc, argv);
-    if (!::testing::GTEST_FLAG(list_tests)) {
-        tenzor::initialize();
-    }
-    return RUN_ALL_TESTS();
-}
+INSTANTIATE_BACKEND_TESTS(ClassicModelsTest);

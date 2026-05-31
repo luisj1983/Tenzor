@@ -15,6 +15,8 @@
 
 #include <gtest/gtest.h>
 
+#include "../backend_test_fixture.hpp"
+
 #include <tenzor/tenzor.hpp>
 #include <tenzor/autograd/variable.hpp>
 #include <tenzor/core/device.hpp>
@@ -33,33 +35,38 @@
 
 using namespace tenzor;
 
-class OptimizerHolesTest : public ::testing::Test {
+class OptimizerHolesTest : public ::tenzor::testing::BackendTest {
 protected:
-    void SetUp() override { tenzor::initialize(); }
+    void SetUp() override {
+        ::tenzor::testing::BackendTest::SetUp();
+        if (::testing::Test::IsSkipped()) return;
+    }
 };
 
 // ----------------------------------------------------------------------------
 // Fix 1: LBFGS::load_state_dict throws on missing keys
 // ----------------------------------------------------------------------------
-TEST_F(OptimizerHolesTest, LBFGSLoadStateDictMissingKeyRaises) {
+TEST_P(OptimizerHolesTest, LBFGSLoadStateDictMissingKeyRaises) {
     auto param = std::make_shared<Variable>(
-        zeros({4}, DType::Float32, Device::cpu()), /*requires_grad=*/true);
+        zeros({4}, DType::Float32, device), /*requires_grad=*/true);
     std::vector<std::shared_ptr<Variable>> params = { param };
     optim::LBFGS lbfgs(params);
 
     // A "saved" state dict that's missing the required "tolerance_grad" key.
     // Pre-S27 this would silently fall back to the constructor default;
-    // post-fix it must throw.
+    // post-fix it must throw. State-dict scalars are bookkeeping values read
+    // on the host; build them on CPU and move onto the active device.
     std::unordered_map<std::string, Tensor> bad_state;
-    auto scalar_i64 = [](int64_t v) {
+    Device dev = device;
+    auto scalar_i64 = [dev](int64_t v) {
         Tensor t({1}, DType::Int64, Device::cpu());
         t.data<int64_t>()[0] = v;
-        return t;
+        return t.to(dev);
     };
-    auto scalar_f64 = [](double v) {
+    auto scalar_f64 = [dev](double v) {
         Tensor t({1}, DType::Float64, Device::cpu());
         t.data<double>()[0] = v;
-        return t;
+        return t.to(dev);
     };
     bad_state["n_iter"]            = scalar_i64(0);
     bad_state["lr"]                = scalar_f64(1.0);
@@ -81,40 +88,30 @@ TEST_F(OptimizerHolesTest, LBFGSLoadStateDictMissingKeyRaises) {
 // ----------------------------------------------------------------------------
 // Fix 2: LazyLinear honours .to(Device) before forward
 // ----------------------------------------------------------------------------
-TEST_F(OptimizerHolesTest, LazyLinearHonoursToBeforeForward) {
-    // Stage the request on CPU explicitly (we don't gate this on CUDA
-    // availability — the assertion is "materialize() honours requested_device_
-    // over the input's device", which is observable on any backend by
-    // requesting a *different* CPU device variant or any non-input device).
+TEST_P(OptimizerHolesTest, LazyLinearHonoursToBeforeForward) {
+    // The assertion is "materialize() honours requested_device_ over the
+    // input's device". We request the active backend device explicitly, feed
+    // a CPU input, and assert both the output and the materialised parameters
+    // land on the requested (active) device.
     nn::LazyLinear layer(/*out_features=*/4, /*has_bias=*/true);
 
-    // Explicit pre-materialisation .to() request.
-    layer.to(Device::cpu());
+    // Explicit pre-materialisation .to() request onto the active device.
+    layer.to(device);
 
-    // First forward materialises. Use a CPU input so the explicit
-    // request and the input's device agree — this exercises the path
-    // without depending on a GPU.
+    // First forward materialises. Use a CPU input so the explicit request and
+    // the input's device may differ — the requested device must win.
     auto x = zeros({2, 8}, DType::Float32, Device::cpu());
     Variable input(x, /*requires_grad=*/false);
     auto out = layer.forward(input);
 
-    EXPECT_EQ(out.tensor().device().type, Device::cpu().type);
+    EXPECT_EQ(out.tensor().device().type, device.type);
 
     auto params = layer.parameters();
     ASSERT_FALSE(params.empty());
     for (auto& p : params) {
-        EXPECT_EQ(p->tensor().device().type, Device::cpu().type)
+        EXPECT_EQ(p->tensor().device().type, device.type)
             << "LazyLinear parameter not on requested device";
     }
-
-    // Direct-materialize check: call materialize() with a *different* device
-    // arg than requested_device_ via a second instance; the explicit
-    // requested_device_ must win. We can't construct a fictional second
-    // device on a CPU-only build, so we re-validate that the parameter
-    // device matches the requested_device_ set in the previous block. If
-    // CUDA is available, the broader test (skipped here) would build a
-    // CUDA-requested layer + CPU input and assert weights land on CUDA.
-    SUCCEED();
 }
 
 // ----------------------------------------------------------------------------
@@ -128,7 +125,7 @@ TEST_F(OptimizerHolesTest, LazyLinearHonoursToBeforeForward) {
 // feature's variance dominates. The test therefore contrasts a uniform-
 // variance activation (high PR, ≈ D) against a concentrated-variance one
 // (low PR, ≈ 1).
-TEST_F(OptimizerHolesTest, HRMParticipationRatioVaries) {
+TEST_P(OptimizerHolesTest, HRMParticipationRatioVaries) {
     nn::HRMConfig cfg;
     cfg.d_model        = 8;
     cfg.n_heads        = 2;
@@ -142,11 +139,13 @@ TEST_F(OptimizerHolesTest, HRMParticipationRatioVaries) {
     cfg.use_act        = false;
     cfg.deep_supervision = false;
     nn::HRM hrm(cfg);
+    hrm.to(device);
 
     const int64_t N = 16, D = 8;
 
     // Activation A: uniform per-feature variance — each of the D features
     // carries the same spread across the N rows. PR_diag must be ≈ D.
+    // Build the pattern on CPU then move onto the active device.
     Tensor uniform = zeros({N, D}, DType::Float32, Device::cpu());
     {
         auto* d = uniform.data<float>();
@@ -157,7 +156,7 @@ TEST_F(OptimizerHolesTest, HRMParticipationRatioVaries) {
             }
         }
     }
-    Variable uniform_var(uniform, /*requires_grad=*/false);
+    Variable uniform_var(uniform.to(device), /*requires_grad=*/false);
 
     // Activation B: variance concentrated in a single feature — column 0 has
     // a large spread, the rest are (near) constant. PR_diag must be ≈ 1.
@@ -171,7 +170,7 @@ TEST_F(OptimizerHolesTest, HRMParticipationRatioVaries) {
             }
         }
     }
-    Variable concentrated_var(concentrated, /*requires_grad=*/false);
+    Variable concentrated_var(concentrated.to(device), /*requires_grad=*/false);
 
     double pr_uniform      = hrm.participation_ratio_for(uniform_var);
     double pr_concentrated = hrm.participation_ratio_for(concentrated_var);
@@ -200,7 +199,7 @@ TEST_F(OptimizerHolesTest, HRMParticipationRatioVaries) {
 // Fix 4: Adam routes a sparse-grad-only parameter through the dense fallback
 // ----------------------------------------------------------------------------
 // Adam routes a sparse-grad-only parameter through the dense fallback.
-TEST_F(OptimizerHolesTest, AdamSparseGradPathDispatches) {
+TEST_P(OptimizerHolesTest, AdamSparseGradPathDispatches) {
     // Build a parameter with NO dense grad but a populated sparse_grad slot.
     // Pre-S27 the Adam step skipped this parameter entirely (since has_grad()
     // was false); post-fix it densifies the sparse grad, warns once, and
@@ -211,11 +210,12 @@ TEST_F(OptimizerHolesTest, AdamSparseGradPathDispatches) {
         auto* d = weight.data<float>();
         for (int64_t i = 0; i < weight.numel(); ++i) d[i] = 1.0f;
     }
-    auto param = std::make_shared<Variable>(weight, /*requires_grad=*/true);
+    auto param = std::make_shared<Variable>(weight.to(device), /*requires_grad=*/true);
 
     // Construct a 2-D COO grad: row 1 is active across all 3 columns
     // (embedding-style row-sparse update). COO indices have shape
     // (sparse_dim, nnz) = (2, 3): row coords {1,1,1}, col coords {0,1,2}.
+    // Build the COO components on CPU then move them onto the active device.
     Tensor indices({2, 3}, DType::Int64, Device::cpu());
     {
         auto* ix = indices.data<int64_t>();
@@ -228,7 +228,7 @@ TEST_F(OptimizerHolesTest, AdamSparseGradPathDispatches) {
         d[0] = 1.0f; d[1] = 1.0f; d[2] = 1.0f;
     }
     auto sparse_grad =
-        SparseTensor::sparse_coo(indices, values, /*shape=*/{4, 3});
+        SparseTensor::sparse_coo(indices.to(device), values.to(device), /*shape=*/{4, 3});
     param->set_sparse_grad(sparse_grad);
     // Ensure the dense grad slot is genuinely empty.
     ASSERT_FALSE(param->has_grad());
@@ -243,11 +243,14 @@ TEST_F(OptimizerHolesTest, AdamSparseGradPathDispatches) {
     EXPECT_NO_THROW(adam.step());
 
     // After the step, *some* entry should have changed (the densified
-    // sparse-grad row triggers the standard Adam update).
-    const auto* a = before.data<float>();
-    const auto* b = param->tensor().data<float>();
+    // sparse-grad row triggers the standard Adam update). Read both on the
+    // host via .cpu() before touching the raw buffer.
+    Tensor before_cpu = before.cpu();
+    Tensor after_cpu = param->tensor().cpu();
+    const auto* a = before_cpu.data<float>();
+    const auto* b = after_cpu.data<float>();
     double max_abs_delta = 0.0;
-    for (int64_t i = 0; i < before.numel(); ++i) {
+    for (int64_t i = 0; i < before_cpu.numel(); ++i) {
         max_abs_delta = std::max(max_abs_delta,
             static_cast<double>(std::abs(a[i] - b[i])));
     }
@@ -260,3 +263,5 @@ TEST_F(OptimizerHolesTest, AdamSparseGradPathDispatches) {
     EXPECT_FALSE(param->has_sparse_grad())
         << "Sparse grad slot was not cleared after the dense fallback ran.";
 }
+
+INSTANTIATE_BACKEND_TESTS(OptimizerHolesTest);

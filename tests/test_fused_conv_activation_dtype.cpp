@@ -1,6 +1,6 @@
 /**
  * @file test_fused_conv_activation_dtype.cpp
- * @brief Stream S4: fused conv+activation CPU kernels must apply the
+ * @brief Stream S4: fused conv+activation kernels must apply the
  *        activation step on Float16 / BFloat16 inputs (not silently no-op).
  *
  * The CPU implementations in src/backends/cpu/kernels/fused_ops.cpp used to
@@ -24,7 +24,7 @@
  *      two cases unambiguously.
  */
 
-#include <gtest/gtest.h>
+#include "backend_test_fixture.hpp"
 
 #include <tenzor/tenzor.hpp>
 #include <tenzor/core/dtype.hpp>
@@ -37,40 +37,35 @@
 #include <random>
 #include <vector>
 
-namespace tenzor { void initialize(); void finalize(); }
-
 namespace {
-
-class FusedConvActEnv : public ::testing::Environment {
-public:
-    void SetUp() override { tenzor::initialize(); }
-    void TearDown() override { try { tenzor::finalize(); } catch (...) {} }
-};
-[[maybe_unused]] auto* const g_env =
-    ::testing::AddGlobalTestEnvironment(new FusedConvActEnv);
 
 using tenzor::DType;
 using tenzor::Tensor;
 using tenzor::Float16;
 using tenzor::BFloat16;
 
+class FusedConvActivationDtype : public ::tenzor::testing::BackendTest {};
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
-// Build a Float32 tensor of `shape` populated from `data` (row-major).
+// Build a Float32 tensor of `shape` populated from `data` (row-major) and
+// move it onto `device`. Host writes happen on CPU first, then `.to(device)`.
 auto make_f32(const std::vector<int64_t>& shape,
-              const std::vector<float>& data) -> Tensor {
-    Tensor t(shape, DType::Float32, tenzor::Device::cpu());
-    float* dst = t.data<float>();
+              const std::vector<float>& data,
+              const tenzor::Device& device) -> Tensor {
+    Tensor host(shape, DType::Float32, tenzor::Device::cpu());
+    float* dst = host.data<float>();
     for (size_t i = 0; i < data.size(); ++i) dst[i] = data[i];
-    return t;
+    return host.to(device);
 }
 
 // Fill `shape`-sized buffer with deterministic pseudo-random Float32 in
-// [-lo, hi]. We keep magnitudes small so that BFloat16's 7-bit mantissa
-// is the tolerance driver, not Float16 overflow.
+// [-lo, hi] and place it on `device`. We keep magnitudes small so that
+// BFloat16's 7-bit mantissa is the tolerance driver, not Float16 overflow.
 auto rand_f32(const std::vector<int64_t>& shape, uint32_t seed,
+              const tenzor::Device& device,
               float lo = -0.5f, float hi = 0.5f) -> Tensor {
     std::mt19937 rng(seed);
     std::uniform_real_distribution<float> dist(lo, hi);
@@ -78,19 +73,22 @@ auto rand_f32(const std::vector<int64_t>& shape, uint32_t seed,
     for (auto d : shape) numel *= d;
     std::vector<float> v(static_cast<size_t>(numel));
     for (auto& x : v) x = dist(rng);
-    return make_f32(shape, v);
+    return make_f32(shape, v, device);
 }
 
 // Maximum absolute element-wise difference between two same-shape Float32
-// tensors. Both inputs are expected to be Float32-typed already.
+// tensors. Both inputs are expected to be Float32-typed already. Reads run
+// on CPU copies.
 auto max_abs_diff_f32(const Tensor& a, const Tensor& b) -> float {
     EXPECT_EQ(a.dtype(), DType::Float32);
     EXPECT_EQ(b.dtype(), DType::Float32);
     EXPECT_EQ(a.numel(), b.numel());
-    const float* da = a.data<float>();
-    const float* db = b.data<float>();
+    Tensor a_cpu = a.cpu();
+    Tensor b_cpu = b.cpu();
+    const float* da = a_cpu.data<float>();
+    const float* db = b_cpu.data<float>();
     float m = 0.0f;
-    for (int64_t i = 0; i < a.numel(); ++i) {
+    for (int64_t i = 0; i < a_cpu.numel(); ++i) {
         float d = std::fabs(da[i] - db[i]);
         if (d > m) m = d;
     }
@@ -120,10 +118,11 @@ constexpr int64_t kPad = 1;
 // Run a fused conv+activation public-API entry point across (F32 ref,
 // F16 cast, BF16 cast) and assert half precision matches the F32 ref.
 template <typename FusedFn>
-void check_conv_half_parity(const char* name, FusedFn&& fused, uint32_t seed) {
-    Tensor x32 = rand_f32({kN, kCin, kH, kW}, seed);
-    Tensor w32 = rand_f32({kCout, kCin, kK, kK}, seed + 1u);
-    Tensor b32 = rand_f32({kCout}, seed + 2u);
+void check_conv_half_parity(const char* name, FusedFn&& fused, uint32_t seed,
+                            const tenzor::Device& device) {
+    Tensor x32 = rand_f32({kN, kCin, kH, kW}, seed, device);
+    Tensor w32 = rand_f32({kCout, kCin, kK, kK}, seed + 1u, device);
+    Tensor b32 = rand_f32({kCout}, seed + 2u, device);
 
     Tensor ref = fused(x32, w32, &b32);
     ASSERT_EQ(ref.dtype(), DType::Float32) << name << ": F32 ref dtype";
@@ -153,13 +152,13 @@ void check_conv_half_parity(const char* name, FusedFn&& fused, uint32_t seed) {
 
 // Run the fused_linear_relu public-API entry point across (F32 ref, F16,
 // BF16) and assert half precision matches.
-void check_linear_half_parity(uint32_t seed) {
+void check_linear_half_parity(uint32_t seed, const tenzor::Device& device) {
     constexpr int64_t kBatch = 4;
     constexpr int64_t kInF = 6;
     constexpr int64_t kOutF = 5;
-    Tensor x32 = rand_f32({kBatch, kInF}, seed);
-    Tensor w32 = rand_f32({kOutF, kInF}, seed + 1u);
-    Tensor b32 = rand_f32({kOutF}, seed + 2u);
+    Tensor x32 = rand_f32({kBatch, kInF}, seed, device);
+    Tensor w32 = rand_f32({kOutF, kInF}, seed + 1u, device);
+    Tensor b32 = rand_f32({kOutF}, seed + 2u, device);
 
     Tensor ref = tenzor::ops::fused_linear_relu(x32, w32, &b32);
     ASSERT_EQ(ref.dtype(), DType::Float32);
@@ -184,16 +183,18 @@ void check_linear_half_parity(uint32_t seed) {
     }
 }
 
-// Build an all-zero tensor of given shape/dtype.
-auto zeros_like_shape(const std::vector<int64_t>& shape, DType dt) -> Tensor {
-    return tenzor::zeros(shape, dt, tenzor::Device::cpu());
+// Build an all-zero tensor of given shape/dtype on `device`.
+auto zeros_like_shape(const std::vector<int64_t>& shape, DType dt,
+                      const tenzor::Device& device) -> Tensor {
+    return tenzor::zeros(shape, dt, device);
 }
 
 // Assert every element of `t` (a half-precision tensor) is close to
 // `expected` (a Float32 scalar). Used for the zero-input sanity checks.
+// Reads run on a CPU copy.
 void expect_all_close_to_scalar(const Tensor& t, float expected, float tol,
                                  const char* what) {
-    Tensor t32 = t.to(DType::Float32);
+    Tensor t32 = t.to(DType::Float32).cpu();
     const float* d = t32.data<float>();
     int64_t n = t32.numel();
     for (int64_t i = 0; i < n; ++i) {
@@ -206,36 +207,36 @@ void expect_all_close_to_scalar(const Tensor& t, float expected, float tol,
 // Half-precision parity: each kernel against its Float32 reference.
 // ---------------------------------------------------------------------------
 
-TEST(FusedConvActivationDtype, Conv2dReLUHalfParity) {
+TEST_P(FusedConvActivationDtype, Conv2dReLUHalfParity) {
     auto fn = [](const Tensor& x, const Tensor& w, const Tensor* b) {
         return tenzor::ops::fused_conv2d_relu(x, w, b, kStride, kPad);
     };
-    check_conv_half_parity("fused_conv2d_relu", fn, /*seed=*/1u);
+    check_conv_half_parity("fused_conv2d_relu", fn, /*seed=*/1u, device);
 }
 
-TEST(FusedConvActivationDtype, Conv2dSigmoidHalfParity) {
+TEST_P(FusedConvActivationDtype, Conv2dSigmoidHalfParity) {
     auto fn = [](const Tensor& x, const Tensor& w, const Tensor* b) {
         return tenzor::ops::fused_conv2d_sigmoid(x, w, b, kStride, kPad);
     };
-    check_conv_half_parity("fused_conv2d_sigmoid", fn, /*seed=*/2u);
+    check_conv_half_parity("fused_conv2d_sigmoid", fn, /*seed=*/2u, device);
 }
 
-TEST(FusedConvActivationDtype, Conv2dTanhHalfParity) {
+TEST_P(FusedConvActivationDtype, Conv2dTanhHalfParity) {
     auto fn = [](const Tensor& x, const Tensor& w, const Tensor* b) {
         return tenzor::ops::fused_conv2d_tanh(x, w, b, kStride, kPad);
     };
-    check_conv_half_parity("fused_conv2d_tanh", fn, /*seed=*/3u);
+    check_conv_half_parity("fused_conv2d_tanh", fn, /*seed=*/3u, device);
 }
 
-TEST(FusedConvActivationDtype, Conv2dSwishHalfParity) {
+TEST_P(FusedConvActivationDtype, Conv2dSwishHalfParity) {
     auto fn = [](const Tensor& x, const Tensor& w, const Tensor* b) {
         return tenzor::ops::fused_conv2d_swish(x, w, b, kStride, kPad);
     };
-    check_conv_half_parity("fused_conv2d_swish", fn, /*seed=*/4u);
+    check_conv_half_parity("fused_conv2d_swish", fn, /*seed=*/4u, device);
 }
 
-TEST(FusedConvActivationDtype, LinearReLUHalfParity) {
-    check_linear_half_parity(/*seed=*/5u);
+TEST_P(FusedConvActivationDtype, LinearReLUHalfParity) {
+    check_linear_half_parity(/*seed=*/5u, device);
 }
 
 // ---------------------------------------------------------------------------
@@ -250,79 +251,83 @@ void zero_input_conv_check(const char* name,
                            float expected,
                            float tol,
                            Tensor (*fused)(const Tensor&, const Tensor&,
-                                           const Tensor*, int64_t, int64_t)) {
-    Tensor x = zeros_like_shape({kN, kCin, kH, kW}, DT);
-    Tensor w = zeros_like_shape({kCout, kCin, kK, kK}, DT);
-    Tensor b = zeros_like_shape({kCout}, DT);
+                                           const Tensor*, int64_t, int64_t),
+                           const tenzor::Device& device) {
+    Tensor x = zeros_like_shape({kN, kCin, kH, kW}, DT, device);
+    Tensor w = zeros_like_shape({kCout, kCin, kK, kK}, DT, device);
+    Tensor b = zeros_like_shape({kCout}, DT, device);
     Tensor y = fused(x, w, &b, kStride, kPad);
     ASSERT_EQ(y.dtype(), DT) << name;
     expect_all_close_to_scalar(y, expected, tol, name);
 }
 
-TEST(FusedConvActivationDtype, Conv2dReLUZeroInputFloat16) {
+TEST_P(FusedConvActivationDtype, Conv2dReLUZeroInputFloat16) {
     zero_input_conv_check<DType::Float16>(
         "fused_conv2d_relu f16 zero", /*expected=*/0.0f, /*tol=*/1e-4f,
-        &tenzor::ops::fused_conv2d_relu);
+        &tenzor::ops::fused_conv2d_relu, device);
 }
-TEST(FusedConvActivationDtype, Conv2dReLUZeroInputBFloat16) {
+TEST_P(FusedConvActivationDtype, Conv2dReLUZeroInputBFloat16) {
     zero_input_conv_check<DType::BFloat16>(
         "fused_conv2d_relu bf16 zero", /*expected=*/0.0f, /*tol=*/1e-4f,
-        &tenzor::ops::fused_conv2d_relu);
+        &tenzor::ops::fused_conv2d_relu, device);
 }
 
-TEST(FusedConvActivationDtype, Conv2dSigmoidZeroInputFloat16) {
+TEST_P(FusedConvActivationDtype, Conv2dSigmoidZeroInputFloat16) {
     // sigmoid(0) = 0.5 — distinguishes "activation applied" from
     // "activation silently skipped" (which would yield 0).
     zero_input_conv_check<DType::Float16>(
         "fused_conv2d_sigmoid f16 zero", /*expected=*/0.5f, /*tol=*/2e-3f,
-        &tenzor::ops::fused_conv2d_sigmoid);
+        &tenzor::ops::fused_conv2d_sigmoid, device);
 }
-TEST(FusedConvActivationDtype, Conv2dSigmoidZeroInputBFloat16) {
+TEST_P(FusedConvActivationDtype, Conv2dSigmoidZeroInputBFloat16) {
     zero_input_conv_check<DType::BFloat16>(
         "fused_conv2d_sigmoid bf16 zero", /*expected=*/0.5f, /*tol=*/8e-3f,
-        &tenzor::ops::fused_conv2d_sigmoid);
+        &tenzor::ops::fused_conv2d_sigmoid, device);
 }
 
-TEST(FusedConvActivationDtype, Conv2dTanhZeroInputFloat16) {
+TEST_P(FusedConvActivationDtype, Conv2dTanhZeroInputFloat16) {
     zero_input_conv_check<DType::Float16>(
         "fused_conv2d_tanh f16 zero", /*expected=*/0.0f, /*tol=*/1e-4f,
-        &tenzor::ops::fused_conv2d_tanh);
+        &tenzor::ops::fused_conv2d_tanh, device);
 }
-TEST(FusedConvActivationDtype, Conv2dTanhZeroInputBFloat16) {
+TEST_P(FusedConvActivationDtype, Conv2dTanhZeroInputBFloat16) {
     zero_input_conv_check<DType::BFloat16>(
         "fused_conv2d_tanh bf16 zero", /*expected=*/0.0f, /*tol=*/1e-4f,
-        &tenzor::ops::fused_conv2d_tanh);
+        &tenzor::ops::fused_conv2d_tanh, device);
 }
 
-TEST(FusedConvActivationDtype, Conv2dSwishZeroInputFloat16) {
+TEST_P(FusedConvActivationDtype, Conv2dSwishZeroInputFloat16) {
     // swish(0) = 0 * sigmoid(0) = 0
     zero_input_conv_check<DType::Float16>(
         "fused_conv2d_swish f16 zero", /*expected=*/0.0f, /*tol=*/1e-4f,
-        &tenzor::ops::fused_conv2d_swish);
+        &tenzor::ops::fused_conv2d_swish, device);
 }
-TEST(FusedConvActivationDtype, Conv2dSwishZeroInputBFloat16) {
+TEST_P(FusedConvActivationDtype, Conv2dSwishZeroInputBFloat16) {
     zero_input_conv_check<DType::BFloat16>(
         "fused_conv2d_swish bf16 zero", /*expected=*/0.0f, /*tol=*/1e-4f,
-        &tenzor::ops::fused_conv2d_swish);
+        &tenzor::ops::fused_conv2d_swish, device);
 }
 
 template <DType DT>
-void zero_input_linear_relu_check(const char* name, float tol) {
-    Tensor x = zeros_like_shape({4, 6}, DT);
-    Tensor w = zeros_like_shape({5, 6}, DT);
-    Tensor b = zeros_like_shape({5}, DT);
+void zero_input_linear_relu_check(const char* name, float tol,
+                                  const tenzor::Device& device) {
+    Tensor x = zeros_like_shape({4, 6}, DT, device);
+    Tensor w = zeros_like_shape({5, 6}, DT, device);
+    Tensor b = zeros_like_shape({5}, DT, device);
     Tensor y = tenzor::ops::fused_linear_relu(x, w, &b);
     ASSERT_EQ(y.dtype(), DT) << name;
     expect_all_close_to_scalar(y, /*expected=*/0.0f, tol, name);
 }
 
-TEST(FusedConvActivationDtype, LinearReLUZeroInputFloat16) {
+TEST_P(FusedConvActivationDtype, LinearReLUZeroInputFloat16) {
     zero_input_linear_relu_check<DType::Float16>(
-        "fused_linear_relu f16 zero", /*tol=*/1e-4f);
+        "fused_linear_relu f16 zero", /*tol=*/1e-4f, device);
 }
-TEST(FusedConvActivationDtype, LinearReLUZeroInputBFloat16) {
+TEST_P(FusedConvActivationDtype, LinearReLUZeroInputBFloat16) {
     zero_input_linear_relu_check<DType::BFloat16>(
-        "fused_linear_relu bf16 zero", /*tol=*/1e-4f);
+        "fused_linear_relu bf16 zero", /*tol=*/1e-4f, device);
 }
+
+INSTANTIATE_BACKEND_TESTS(FusedConvActivationDtype);
 
 } // namespace

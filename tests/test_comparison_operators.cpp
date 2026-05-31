@@ -7,32 +7,28 @@
 #include "tenzor/core/tensor.hpp"
 #include "tenzor/ops/creation.hpp"
 #include "tenzor/ops/math.hpp"
-#include "tenzor/tenzor.hpp"  // For initialize()
+#include "backend_test_fixture.hpp"
 
 using namespace tenzor;
 
-class ComparisonOperatorTest : public ::testing::Test {
+class ComparisonOperatorTest : public ::tenzor::testing::BackendTest {
 protected:
     void SetUp() override {
-        // Initialize the library (only on first test)
-        static bool initialized = false;
-        if (!initialized) {
-            tenzor::initialize();
-            initialized = true;
-        }
+        ::tenzor::testing::BackendTest::SetUp();
+        if (::testing::Test::IsSkipped()) return;
 
-        // Create test tensors with known values
+        // Create test tensors with known values (host -> CPU -> device).
         std::vector<float> data_a = {1.0f, 2.0f, 3.0f, 4.0f, 5.0f};
         std::vector<float> data_b = {3.0f, 2.0f, 3.0f, 2.0f, 6.0f};
-        a = from_data<float>(data_a.data(), {5}, Device::cpu());
-        b = from_data<float>(data_b.data(), {5}, Device::cpu());
+        a = from_data<float>(data_a.data(), {5}, Device::cpu()).to(device);
+        b = from_data<float>(data_b.data(), {5}, Device::cpu()).to(device);
     }
 
     Tensor a;
     Tensor b;
 };
 
-TEST_F(ComparisonOperatorTest, EqualOperator) {
+TEST_P(ComparisonOperatorTest, EqualOperator) {
     // Test operator==
     Tensor result = a == b;
 
@@ -41,7 +37,8 @@ TEST_F(ComparisonOperatorTest, EqualOperator) {
     EXPECT_EQ(result.dtype(), DType::Bool);
 
     // Expected: {false, true, true, false, false}
-    auto* data = result.data<bool>();
+    auto result_cpu = result.cpu();
+    auto* data = result_cpu.data<bool>();
     EXPECT_FALSE(data[0]);  // 1.0 != 3.0
     EXPECT_TRUE(data[1]);   // 2.0 == 2.0
     EXPECT_TRUE(data[2]);   // 3.0 == 3.0
@@ -49,7 +46,7 @@ TEST_F(ComparisonOperatorTest, EqualOperator) {
     EXPECT_FALSE(data[4]);  // 5.0 != 6.0
 }
 
-TEST_F(ComparisonOperatorTest, NotEqualOperator) {
+TEST_P(ComparisonOperatorTest, NotEqualOperator) {
     // Test operator!=
     Tensor result = a != b;
 
@@ -58,7 +55,8 @@ TEST_F(ComparisonOperatorTest, NotEqualOperator) {
     EXPECT_EQ(result.dtype(), DType::Bool);
 
     // Expected: {true, false, false, true, true}
-    auto* data = result.data<bool>();
+    auto result_cpu = result.cpu();
+    auto* data = result_cpu.data<bool>();
     EXPECT_TRUE(data[0]);   // 1.0 != 3.0
     EXPECT_FALSE(data[1]);  // 2.0 == 2.0
     EXPECT_FALSE(data[2]);  // 3.0 == 3.0
@@ -66,7 +64,7 @@ TEST_F(ComparisonOperatorTest, NotEqualOperator) {
     EXPECT_TRUE(data[4]);   // 5.0 != 6.0
 }
 
-TEST_F(ComparisonOperatorTest, LessThanOperator) {
+TEST_P(ComparisonOperatorTest, LessThanOperator) {
     // Test operator<
     Tensor result = a < b;
 
@@ -75,7 +73,8 @@ TEST_F(ComparisonOperatorTest, LessThanOperator) {
     EXPECT_EQ(result.dtype(), DType::Bool);
 
     // Expected: {true, false, false, false, true}
-    auto* data = result.data<bool>();
+    auto result_cpu = result.cpu();
+    auto* data = result_cpu.data<bool>();
     EXPECT_TRUE(data[0]);   // 1.0 < 3.0
     EXPECT_FALSE(data[1]);  // 2.0 < 2.0
     EXPECT_FALSE(data[2]);  // 3.0 < 3.0
@@ -83,7 +82,7 @@ TEST_F(ComparisonOperatorTest, LessThanOperator) {
     EXPECT_TRUE(data[4]);   // 5.0 < 6.0
 }
 
-TEST_F(ComparisonOperatorTest, LessThanOrEqualOperator) {
+TEST_P(ComparisonOperatorTest, LessThanOrEqualOperator) {
     // Test operator<=
     Tensor result = a <= b;
 
@@ -92,7 +91,8 @@ TEST_F(ComparisonOperatorTest, LessThanOrEqualOperator) {
     EXPECT_EQ(result.dtype(), DType::Bool);
 
     // Expected: {true, true, true, false, true}
-    auto* data = result.data<bool>();
+    auto result_cpu = result.cpu();
+    auto* data = result_cpu.data<bool>();
     EXPECT_TRUE(data[0]);   // 1.0 <= 3.0
     EXPECT_TRUE(data[1]);   // 2.0 <= 2.0
     EXPECT_TRUE(data[2]);   // 3.0 <= 3.0
@@ -100,7 +100,7 @@ TEST_F(ComparisonOperatorTest, LessThanOrEqualOperator) {
     EXPECT_TRUE(data[4]);   // 5.0 <= 6.0
 }
 
-TEST_F(ComparisonOperatorTest, GreaterThanOperator) {
+TEST_P(ComparisonOperatorTest, GreaterThanOperator) {
     // Test operator>
     Tensor result = a > b;
 
@@ -109,7 +109,8 @@ TEST_F(ComparisonOperatorTest, GreaterThanOperator) {
     EXPECT_EQ(result.dtype(), DType::Bool);
 
     // Expected: {false, false, false, true, false}
-    auto* data = result.data<bool>();
+    auto result_cpu = result.cpu();
+    auto* data = result_cpu.data<bool>();
     EXPECT_FALSE(data[0]);  // 1.0 > 3.0
     EXPECT_FALSE(data[1]);  // 2.0 > 2.0
     EXPECT_FALSE(data[2]);  // 3.0 > 3.0
@@ -117,7 +118,7 @@ TEST_F(ComparisonOperatorTest, GreaterThanOperator) {
     EXPECT_FALSE(data[4]);  // 5.0 > 6.0
 }
 
-TEST_F(ComparisonOperatorTest, GreaterThanOrEqualOperator) {
+TEST_P(ComparisonOperatorTest, GreaterThanOrEqualOperator) {
     // Test operator>=
     Tensor result = a >= b;
 
@@ -126,7 +127,8 @@ TEST_F(ComparisonOperatorTest, GreaterThanOrEqualOperator) {
     EXPECT_EQ(result.dtype(), DType::Bool);
 
     // Expected: {false, true, true, true, false}
-    auto* data = result.data<bool>();
+    auto result_cpu = result.cpu();
+    auto* data = result_cpu.data<bool>();
     EXPECT_FALSE(data[0]);  // 1.0 >= 3.0
     EXPECT_TRUE(data[1]);   // 2.0 >= 2.0
     EXPECT_TRUE(data[2]);   // 3.0 >= 3.0
@@ -134,12 +136,12 @@ TEST_F(ComparisonOperatorTest, GreaterThanOrEqualOperator) {
     EXPECT_FALSE(data[4]);  // 5.0 >= 6.0
 }
 
-TEST_F(ComparisonOperatorTest, ComparisonWith2D) {
+TEST_P(ComparisonOperatorTest, ComparisonWith2D) {
     // Test with 2D tensors
     std::vector<float> data_x = {1.0f, 2.0f, 3.0f, 4.0f};
     std::vector<float> data_y = {2.0f, 2.0f, 4.0f, 3.0f};
-    auto x = from_data<float>(data_x.data(), {2, 2}, Device::cpu());
-    auto y = from_data<float>(data_y.data(), {2, 2}, Device::cpu());
+    auto x = from_data<float>(data_x.data(), {2, 2}, Device::cpu()).to(device);
+    auto y = from_data<float>(data_y.data(), {2, 2}, Device::cpu()).to(device);
 
     Tensor eq_result = x == y;
     Tensor lt_result = x < y;
@@ -150,20 +152,22 @@ TEST_F(ComparisonOperatorTest, ComparisonWith2D) {
     EXPECT_EQ(eq_result.shape()[1], 2);
     EXPECT_EQ(eq_result.dtype(), DType::Bool);
 
-    auto* eq_data = eq_result.data<bool>();
+    auto eq_cpu = eq_result.cpu();
+    auto* eq_data = eq_cpu.data<bool>();
     EXPECT_FALSE(eq_data[0]);  // 1.0 != 2.0
     EXPECT_TRUE(eq_data[1]);   // 2.0 == 2.0
     EXPECT_FALSE(eq_data[2]);  // 3.0 != 4.0
     EXPECT_FALSE(eq_data[3]);  // 4.0 != 3.0
 
-    auto* lt_data = lt_result.data<bool>();
+    auto lt_cpu = lt_result.cpu();
+    auto* lt_data = lt_cpu.data<bool>();
     EXPECT_TRUE(lt_data[0]);   // 1.0 < 2.0
     EXPECT_FALSE(lt_data[1]);  // 2.0 < 2.0
     EXPECT_TRUE(lt_data[2]);   // 3.0 < 4.0
     EXPECT_FALSE(lt_data[3]);  // 4.0 < 3.0
 }
 
-TEST_F(ComparisonOperatorTest, FunctionVersions) {
+TEST_P(ComparisonOperatorTest, FunctionVersions) {
     // Test that function versions work the same as operators
     Tensor eq_op = a == b;
     Tensor eq_fn = eq(a, b);
@@ -171,8 +175,10 @@ TEST_F(ComparisonOperatorTest, FunctionVersions) {
     EXPECT_EQ(eq_op.shape().size(), eq_fn.shape().size());
     EXPECT_EQ(eq_op.dtype(), eq_fn.dtype());
 
-    auto* op_data = eq_op.data<bool>();
-    auto* fn_data = eq_fn.data<bool>();
+    auto eq_op_cpu = eq_op.cpu();
+    auto eq_fn_cpu = eq_fn.cpu();
+    auto* op_data = eq_op_cpu.data<bool>();
+    auto* fn_data = eq_fn_cpu.data<bool>();
     for (int64_t i = 0; i < 5; ++i) {
         EXPECT_EQ(op_data[i], fn_data[i]);
     }
@@ -191,7 +197,4 @@ TEST_F(ComparisonOperatorTest, FunctionVersions) {
     EXPECT_EQ(ge_result.dtype(), DType::Bool);
 }
 
-int main(int argc, char** argv) {
-    ::testing::InitGoogleTest(&argc, argv);
-    return RUN_ALL_TESTS();
-}
+INSTANTIATE_BACKEND_TESTS(ComparisonOperatorTest);

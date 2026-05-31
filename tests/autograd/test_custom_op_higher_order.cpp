@@ -28,19 +28,30 @@
 #include <tenzor/ops/creation.hpp>
 #include <tenzor/ops/math.hpp>
 #include "../grad_flow_helpers.hpp"
+#include "../backend_test_fixture.hpp"
 
 using namespace tenzor;
 
-class D2Test : public ::testing::Test {
+class D2Test : public ::tenzor::testing::BackendTest {
 protected:
-    static void SetUpTestSuite() { tenzor::initialize(); }
+    void SetUp() override {
+        ::tenzor::testing::BackendTest::SetUp();
+        if (::testing::Test::IsSkipped()) return;
+    }
+
+    // Custom-op names live in a process-global registry. The fixture runs each
+    // TEST_P once per backend, so derive a per-device-type suffix to keep the
+    // registered op names unique across parametrized instantiations.
+    std::string opName(const std::string& base) const {
+        return base + "::" + std::to_string(static_cast<int>(device.type));
+    }
 };
 
 // ----------------------------------------------------------------------------
 // 1. Tensor-only backward: stub flag must be honest (true).
 // ----------------------------------------------------------------------------
 
-TEST_F(D2Test, TensorBackwardOnly_IsHigherOrderStub) {
+TEST_P(D2Test, TensorBackwardOnly_IsHigherOrderStub) {
     static int call_count = 0;
     auto fwd = [](std::span<const Tensor> inputs, const OpAttributes&) -> Tensor {
         return inputs[0].clone();
@@ -51,9 +62,9 @@ TEST_F(D2Test, TensorBackwardOnly_IsHigherOrderStub) {
         return {grads[0].clone()};
     };
     auto op = register_custom_op_with_backward(
-        "d2::tensor_only", Device::Type::CPU, fwd, bwd);
+        opName("d2::tensor_only"), device.type, fwd, bwd);
 
-    auto x = Variable(zeros({3}, DType::Float32, Device::cpu()), /*requires_grad=*/true);
+    auto x = Variable(zeros({3}, DType::Float32, device), /*requires_grad=*/true);
     auto y = dispatch_custom_op(op, {x});
     ASSERT_NE(y.grad_fn(), nullptr);
     auto* custom_bwd = dynamic_cast<CustomOpBackward*>(y.grad_fn().get());
@@ -66,7 +77,7 @@ TEST_F(D2Test, TensorBackwardOnly_IsHigherOrderStub) {
 // 2. Variable backward registered: stub flag false; graph preserved.
 // ----------------------------------------------------------------------------
 
-TEST_F(D2Test, VariableBackward_PreservesGraph) {
+TEST_P(D2Test, VariableBackward_PreservesGraph) {
     auto fwd = [](std::span<const Tensor> inputs, const OpAttributes&) -> Tensor {
         return inputs[0].clone();
     };
@@ -90,10 +101,10 @@ TEST_F(D2Test, VariableBackward_PreservesGraph) {
     };
 
     auto op = register_custom_op_with_backward(
-        "d2::var_backward", Device::Type::CPU, fwd, tensor_bwd,
+        opName("d2::var_backward"), device.type, fwd, tensor_bwd,
         /*save_fn=*/nullptr, var_bwd);
 
-    auto x = Variable(zeros({3}, DType::Float32, Device::cpu()), /*requires_grad=*/true);
+    auto x = Variable(zeros({3}, DType::Float32, device), /*requires_grad=*/true);
     auto y = dispatch_custom_op(op, {x});
     ASSERT_NE(y.grad_fn(), nullptr);
     auto* custom_bwd = dynamic_cast<CustomOpBackward*>(y.grad_fn().get());
@@ -103,7 +114,7 @@ TEST_F(D2Test, VariableBackward_PreservesGraph) {
 
     // Invoke backward_with_variables directly with a requires_grad=true grad,
     // confirm the result carries a grad_fn (the multiplication preserves it).
-    auto g_t = ones({3}, DType::Float32, Device::cpu());
+    auto g_t = ones({3}, DType::Float32, device);
     Variable g(g_t, /*requires_grad=*/true);
     auto results = custom_bwd->backward_with_variables({g});
     ASSERT_EQ(results.size(), 1u);
@@ -116,7 +127,7 @@ TEST_F(D2Test, VariableBackward_PreservesGraph) {
 // 3. Direct CustomOpBackward unit test: stub flag flips with constructor.
 // ----------------------------------------------------------------------------
 
-TEST_F(D2Test, DirectConstruction_StubFlagMatchesConstructor) {
+TEST_P(D2Test, DirectConstruction_StubFlagMatchesConstructor) {
     auto tensor_bwd = [](std::span<const Tensor>,
                          std::span<const Tensor> grads) -> std::vector<Tensor> {
         return {grads[0].clone()};
@@ -143,7 +154,7 @@ TEST_F(D2Test, DirectConstruction_StubFlagMatchesConstructor) {
 // 4. First-order grad still computes correctly when no var backward.
 // ----------------------------------------------------------------------------
 
-TEST_F(D2Test, TensorBackwardOnly_FirstOrderStillWorks) {
+TEST_P(D2Test, TensorBackwardOnly_FirstOrderStillWorks) {
     auto fwd = [](std::span<const Tensor> inputs, const OpAttributes&) -> Tensor {
         return inputs[0].clone();
     };
@@ -152,19 +163,21 @@ TEST_F(D2Test, TensorBackwardOnly_FirstOrderStillWorks) {
         return {grads[0].clone()};
     };
     auto op = register_custom_op_with_backward(
-        "d2::first_order_only", Device::Type::CPU, fwd, bwd);
+        opName("d2::first_order_only"), device.type, fwd, bwd);
 
-    auto x_t = ones({4}, DType::Float32, Device::cpu());
+    auto x_t = ones({4}, DType::Float32, device);
     Variable x(x_t, /*requires_grad=*/true);
     auto y = dispatch_custom_op(op, {x});
 
     auto loss = tenzor::sum(y);
     loss.backward();
     EXPECT_GRAD_FLOWS(x);
-    auto& g = x.grad().value();
+    auto g = x.grad().value().cpu();
     ASSERT_EQ(g.numel(), 4);
     auto* gp = g.data<float>();
     for (int64_t i = 0; i < g.numel(); ++i) {
         EXPECT_FLOAT_EQ(gp[i], 1.0f);
     }
 }
+
+INSTANTIATE_BACKEND_TESTS(D2Test);

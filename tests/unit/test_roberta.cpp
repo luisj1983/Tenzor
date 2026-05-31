@@ -4,7 +4,7 @@
  */
 
 #include <gtest/gtest.h>
-#include "tenzor/tenzor.hpp"  // For initialize()
+#include "../backend_test_fixture.hpp"
 #include "tenzor/models/roberta.hpp"
 #include "tenzor/core/tensor.hpp"
 #include "tenzor/autograd/variable.hpp"
@@ -14,11 +14,11 @@
 using namespace tenzor;
 using namespace tenzor::models;
 
-class RobertaTest : public ::testing::Test {
+class RobertaTest : public ::tenzor::testing::BackendTest {
 protected:
     void SetUp() override {
-        // Set random seed for reproducibility
-        // srand(42);
+        ::tenzor::testing::BackendTest::SetUp();
+        if (::testing::Test::IsSkipped()) return;
     }
 };
 
@@ -26,7 +26,7 @@ protected:
 // RobertaConfig Tests
 // ============================================================================
 
-TEST_F(RobertaTest, ConfigBase) {
+TEST_P(RobertaTest, ConfigBase) {
     auto config = RobertaConfig::base();
 
     EXPECT_EQ(config.vocab_size, 50265);  // Byte-level BPE
@@ -39,7 +39,7 @@ TEST_F(RobertaTest, ConfigBase) {
     EXPECT_EQ(config.max_position_embeddings, 514);
 }
 
-TEST_F(RobertaTest, ConfigLarge) {
+TEST_P(RobertaTest, ConfigLarge) {
     auto config = RobertaConfig::large();
 
     EXPECT_EQ(config.vocab_size, 50265);
@@ -49,7 +49,7 @@ TEST_F(RobertaTest, ConfigLarge) {
     EXPECT_EQ(config.intermediate_size, 4096);
 }
 
-TEST_F(RobertaTest, ConfigToBertConfig) {
+TEST_P(RobertaTest, ConfigToBertConfig) {
     auto roberta_config = RobertaConfig::base();
     auto bert_config = roberta_config.to_bert_config();
 
@@ -63,25 +63,28 @@ TEST_F(RobertaTest, ConfigToBertConfig) {
 // RobertaModel Tests
 // ============================================================================
 
-TEST_F(RobertaTest, ModelCreation) {
+TEST_P(RobertaTest, ModelCreation) {
     auto config = RobertaConfig::base();
     EXPECT_NO_THROW({
         RobertaModel model(config);
+        model.to(device);
     });
 }
 
-TEST_F(RobertaTest, ModelForwardBase) {
+TEST_P(RobertaTest, ModelForwardBase) {
     auto config = RobertaConfig::base();
     config.num_hidden_layers = 2;  // Reduce for faster testing
     RobertaModel model(config);
+    model.to(device);
 
     // Create dummy input [batch=2, seq_len=10]
     int64_t batch_size = 2;
     int64_t seq_len = 10;
 
+    // Token/index inputs built on CPU then moved to device.
     Tensor input_tensor({batch_size, seq_len}, DType::Int64, Device::cpu());
     input_tensor.fill_(42);  // Fill with dummy token IDs
-    Variable input_ids(input_tensor, false);
+    Variable input_ids(input_tensor.to(device), false);
 
     // Forward pass
     auto outputs = model.forward(input_ids, Tensor{}, Variable{}, Variable{});
@@ -95,19 +98,21 @@ TEST_F(RobertaTest, ModelForwardBase) {
     EXPECT_EQ(outputs.pooled_output.shape()[1], config.hidden_size);
 }
 
-TEST_F(RobertaTest, ModelForwardWithAttentionMask) {
+TEST_P(RobertaTest, ModelForwardWithAttentionMask) {
     auto config = RobertaConfig::base();
     config.num_hidden_layers = 2;
     RobertaModel model(config);
+    model.to(device);
 
     int64_t batch_size = 2;
     int64_t seq_len = 10;
 
     Tensor input_tensor({batch_size, seq_len}, DType::Int64, Device::cpu());
     input_tensor.fill_(42);
-    Variable input_ids(input_tensor, false);
+    Variable input_ids(input_tensor.to(device), false);
 
-    // Create attention mask (1 for valid tokens, 0 for padding)
+    // Create attention mask (1 for valid tokens, 0 for padding) on CPU,
+    // then move to device.
     Tensor mask({batch_size, seq_len}, DType::Float32, Device::cpu());
     mask.fill_(1.0f);
     // Mask last 3 tokens as padding
@@ -118,7 +123,7 @@ TEST_F(RobertaTest, ModelForwardWithAttentionMask) {
         }
     }
 
-    auto outputs = model.forward(input_ids, mask, Variable{}, Variable{});
+    auto outputs = model.forward(input_ids, mask.to(device), Variable{}, Variable{});
 
     EXPECT_EQ(outputs.sequence_output.shape()[0], batch_size);
     EXPECT_EQ(outputs.sequence_output.shape()[1], seq_len);
@@ -129,28 +134,30 @@ TEST_F(RobertaTest, ModelForwardWithAttentionMask) {
 // RobertaForSequenceClassification Tests
 // ============================================================================
 
-TEST_F(RobertaTest, SequenceClassificationCreation) {
+TEST_P(RobertaTest, SequenceClassificationCreation) {
     auto config = RobertaConfig::base();
     config.num_hidden_layers = 2;
     int64_t num_labels = 3;
 
     EXPECT_NO_THROW({
         RobertaForSequenceClassification model(config, num_labels);
+        model.to(device);
     });
 }
 
-TEST_F(RobertaTest, SequenceClassificationForward) {
+TEST_P(RobertaTest, SequenceClassificationForward) {
     auto config = RobertaConfig::base();
     config.num_hidden_layers = 2;
     int64_t num_labels = 3;
     RobertaForSequenceClassification model(config, num_labels);
+    model.to(device);
 
     int64_t batch_size = 2;
     int64_t seq_len = 10;
 
     Tensor input_tensor({batch_size, seq_len}, DType::Int64, Device::cpu());
     input_tensor.fill_(42);
-    Variable input_ids(input_tensor, false);
+    Variable input_ids(input_tensor.to(device), false);
 
     auto logits = model.forward(input_ids, Tensor{}, Variable{});
 
@@ -163,28 +170,30 @@ TEST_F(RobertaTest, SequenceClassificationForward) {
 // RobertaForTokenClassification Tests
 // ============================================================================
 
-TEST_F(RobertaTest, TokenClassificationCreation) {
+TEST_P(RobertaTest, TokenClassificationCreation) {
     auto config = RobertaConfig::base();
     config.num_hidden_layers = 2;
     int64_t num_labels = 9;  // NER tags
 
     EXPECT_NO_THROW({
         RobertaForTokenClassification model(config, num_labels);
+        model.to(device);
     });
 }
 
-TEST_F(RobertaTest, TokenClassificationForward) {
+TEST_P(RobertaTest, TokenClassificationForward) {
     auto config = RobertaConfig::base();
     config.num_hidden_layers = 2;
     int64_t num_labels = 9;
     RobertaForTokenClassification model(config, num_labels);
+    model.to(device);
 
     int64_t batch_size = 2;
     int64_t seq_len = 10;
 
     Tensor input_tensor({batch_size, seq_len}, DType::Int64, Device::cpu());
     input_tensor.fill_(42);
-    Variable input_ids(input_tensor, false);
+    Variable input_ids(input_tensor.to(device), false);
 
     auto logits = model.forward(input_ids, Tensor{}, Variable{});
 
@@ -198,26 +207,28 @@ TEST_F(RobertaTest, TokenClassificationForward) {
 // RobertaForQuestionAnswering Tests
 // ============================================================================
 
-TEST_F(RobertaTest, QuestionAnsweringCreation) {
+TEST_P(RobertaTest, QuestionAnsweringCreation) {
     auto config = RobertaConfig::base();
     config.num_hidden_layers = 2;
 
     EXPECT_NO_THROW({
         RobertaForQuestionAnswering model(config);
+        model.to(device);
     });
 }
 
-TEST_F(RobertaTest, QuestionAnsweringForward) {
+TEST_P(RobertaTest, QuestionAnsweringForward) {
     auto config = RobertaConfig::base();
     config.num_hidden_layers = 2;
     RobertaForQuestionAnswering model(config);
+    model.to(device);
 
     int64_t batch_size = 2;
     int64_t seq_len = 10;
 
     Tensor input_tensor({batch_size, seq_len}, DType::Int64, Device::cpu());
     input_tensor.fill_(42);
-    Variable input_ids(input_tensor, false);
+    Variable input_ids(input_tensor.to(device), false);
 
     auto outputs = model.forward(input_ids, Tensor{}, Variable{});
 
@@ -233,18 +244,19 @@ TEST_F(RobertaTest, QuestionAnsweringForward) {
 // Gradient Flow Tests
 // ============================================================================
 
-TEST_F(RobertaTest, GradientFlowSequenceClassification) {
+TEST_P(RobertaTest, GradientFlowSequenceClassification) {
     auto config = RobertaConfig::base();
     config.num_hidden_layers = 1;  // Minimal for testing
     int64_t num_labels = 2;
     RobertaForSequenceClassification model(config, num_labels);
+    model.to(device);
 
     int64_t batch_size = 2;
     int64_t seq_len = 8;
 
     Tensor input_tensor({batch_size, seq_len}, DType::Int64, Device::cpu());
     input_tensor.fill_(42);
-    Variable input_ids(input_tensor, false);
+    Variable input_ids(input_tensor.to(device), false);
 
     // Forward pass
     auto logits = model.forward(input_ids, Tensor{}, Variable{});
@@ -262,18 +274,19 @@ TEST_F(RobertaTest, GradientFlowSequenceClassification) {
     EXPECT_TRUE((grad.has_value() && grad->numel() > 0) || !loss.requires_grad());
 }
 
-TEST_F(RobertaTest, NoSegmentEmbeddings) {
+TEST_P(RobertaTest, NoSegmentEmbeddings) {
     // RoBERTa should work fine without explicit token_type_ids
     auto config = RobertaConfig::base();
     config.num_hidden_layers = 2;
     RobertaModel model(config);
+    model.to(device);
 
     int64_t batch_size = 2;
     int64_t seq_len = 10;
 
     Tensor input_tensor({batch_size, seq_len}, DType::Int64, Device::cpu());
     input_tensor.fill_(42);
-    Variable input_ids(input_tensor, false);
+    Variable input_ids(input_tensor.to(device), false);
 
     // Forward without token_type_ids (should default to all zeros)
     auto outputs1 = model.forward(input_ids, Tensor{}, Variable{}, Variable{});
@@ -281,7 +294,7 @@ TEST_F(RobertaTest, NoSegmentEmbeddings) {
     // Forward with explicit zeros
     Tensor token_type_zeros({batch_size, seq_len}, DType::Int64, Device::cpu());
     token_type_zeros.zero_();
-    Variable token_type_ids(token_type_zeros, false);
+    Variable token_type_ids(token_type_zeros.to(device), false);
     auto outputs2 = model.forward(input_ids, Tensor{}, token_type_ids);
 
     // Both should produce same output shapes
@@ -298,17 +311,18 @@ TEST_F(RobertaTest, NoSegmentEmbeddings) {
 // Performance Tests
 // ============================================================================
 
-TEST_F(RobertaTest, DISABLED_BenchmarkInference) {
+TEST_P(RobertaTest, DISABLED_BenchmarkInference) {
     // Disabled by default - enable for performance testing
     auto config = RobertaConfig::base();
     RobertaForSequenceClassification model(config, 2);
+    model.to(device);
 
     int64_t batch_size = 32;
     int64_t seq_len = 128;
 
     Tensor input_tensor({batch_size, seq_len}, DType::Int64, Device::cpu());
     input_tensor.fill_(42);
-    Variable input_ids(input_tensor, false);
+    Variable input_ids(input_tensor.to(device), false);
 
     // Warmup
     for (int i = 0; i < 5; ++i) {
@@ -330,14 +344,4 @@ TEST_F(RobertaTest, DISABLED_BenchmarkInference) {
     EXPECT_LT(duration.count(), 10000);
 }
 
-// ============================================================================
-// Main
-// ============================================================================
-
-int main(int argc, char** argv) {
-    ::testing::InitGoogleTest(&argc, argv);
-    if (!::testing::GTEST_FLAG(list_tests)) {
-        tenzor::initialize();  // Initialize Tenzor library and backends
-    }
-    return RUN_ALL_TESTS();
-}
+INSTANTIATE_BACKEND_TESTS(RobertaTest);

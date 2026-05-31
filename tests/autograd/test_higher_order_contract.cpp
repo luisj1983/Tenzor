@@ -12,11 +12,14 @@
  * re-flags a real implementation as a stub would silently corrupt
  * create_graph=true for that op.
  *
- * Single-process, CPU-only by design: the contract is engine-level and does
- * not vary across backends.
+ * The contract is engine-level and does not vary across backends, but this
+ * suite is run cross-backend so that the stub/real backward paths are also
+ * exercised against every available device's kernels.
  */
 
 #include <gtest/gtest.h>
+
+#include "../backend_test_fixture.hpp"
 
 #include "tenzor/autograd/function.hpp"
 #include "tenzor/autograd/ops.hpp"
@@ -31,10 +34,11 @@ namespace {
 
 using namespace tenzor;
 
-class HigherOrderContractTest : public ::testing::Test {
+class HigherOrderContractTest : public ::tenzor::testing::BackendTest {
 protected:
-    static void SetUpTestSuite() { tenzor::initialize(); }
     void SetUp() override {
+        ::tenzor::testing::BackendTest::SetUp();
+        if (::testing::Test::IsSkipped()) return;
         saved_mode_ = get_higher_order_grad_mode();
         reset_higher_order_disconnection_count();
     }
@@ -48,12 +52,13 @@ protected:
 // structurally-zero second derivative). It's a stable, cheap stub op to
 // anchor the contract test against.
 
-TEST_F(HigherOrderContractTest, WarnMode_LogsAndDisconnects) {
+TEST_P(HigherOrderContractTest, WarnMode_LogsAndDisconnects) {
     set_higher_order_grad_mode(HigherOrderGradMode::Warn);
     reset_higher_order_disconnection_count();
 
-    auto x = Variable(randn({1, 1, 4, 4}, DType::Float32, Device::cpu()), true);
+    auto x = Variable(randn({1, 1, 4, 4}, DType::Float32, device), true);
     nn::MaxPool2d pool(2, 2);
+    pool.to(device);
     auto y = pool.forward(x);
     auto loss = tenzor::sum(y);
 
@@ -63,11 +68,12 @@ TEST_F(HigherOrderContractTest, WarnMode_LogsAndDisconnects) {
         << "Warn mode should bump the disconnection counter";
 }
 
-TEST_F(HigherOrderContractTest, ErrorMode_ThrowsForStubOp) {
+TEST_P(HigherOrderContractTest, ErrorMode_ThrowsForStubOp) {
     set_higher_order_grad_mode(HigherOrderGradMode::Error);
 
-    auto x = Variable(randn({1, 1, 4, 4}, DType::Float32, Device::cpu()), true);
+    auto x = Variable(randn({1, 1, 4, 4}, DType::Float32, device), true);
     nn::MaxPool2d pool(2, 2);
+    pool.to(device);
     auto y = pool.forward(x);
     auto loss = tenzor::sum(y);
 
@@ -80,12 +86,12 @@ TEST_F(HigherOrderContractTest, ErrorMode_ThrowsForStubOp) {
 // A real (non-stub) op must NOT trip the contract path — verifies we're
 // detecting stubs specifically, not firing on every create_graph=true call.
 
-TEST_F(HigherOrderContractTest, ErrorMode_AllowsRealBackwardWithVariables) {
+TEST_P(HigherOrderContractTest, ErrorMode_AllowsRealBackwardWithVariables) {
     set_higher_order_grad_mode(HigherOrderGradMode::Error);
     reset_higher_order_disconnection_count();
 
-    auto a = Variable(randn({4}, DType::Float32, Device::cpu()), true);
-    auto b = Variable(randn({4}, DType::Float32, Device::cpu()), true);
+    auto a = Variable(randn({4}, DType::Float32, device), true);
+    auto b = Variable(randn({4}, DType::Float32, device), true);
     auto y = a * b;                 // MulBackward has a real backward_with_variables
     auto loss = tenzor::sum(y);
 
@@ -95,10 +101,6 @@ TEST_F(HigherOrderContractTest, ErrorMode_AllowsRealBackwardWithVariables) {
         << "Real bwv ops must not bump the disconnection counter";
 }
 
-}  // namespace
+INSTANTIATE_BACKEND_TESTS(HigherOrderContractTest);
 
-int main(int argc, char** argv) {
-    ::testing::InitGoogleTest(&argc, argv);
-    try { tenzor::initialize(); } catch (...) {}
-    return RUN_ALL_TESTS();
-}
+}  // namespace

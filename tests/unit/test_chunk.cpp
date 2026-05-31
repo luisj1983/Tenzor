@@ -2,29 +2,16 @@
 #include "tenzor/core/tensor.hpp"
 #include "tenzor/ops/creation.hpp"
 #include "tenzor/ops/transform.hpp"
-
-// Forward declare tenzor::initialize
-namespace tenzor {
-    void initialize();
-}
+#include "../backend_test_fixture.hpp"
 
 using namespace tenzor;
 
-// Global test environment to initialize Tenzor library
-class TenzorTestEnvironment : public ::testing::Environment {
-public:
-    void SetUp() override {
-        tenzor::initialize();
-    }
-};
+class ChunkTest : public ::tenzor::testing::BackendTest {};
 
-static ::testing::Environment* const tenzor_env =
-    ::testing::AddGlobalTestEnvironment(new TenzorTestEnvironment);
-
-TEST(ChunkTest, BasicChunkEvenDivision) {
+TEST_P(ChunkTest, BasicChunkEvenDivision) {
     // Test case: Shape (12, 20), split into 4 chunks along dim=0
     // Expected: 4 tensors of shape (3, 20)
-    auto x = zeros({12, 20}, DType::Float32, Device::cpu());
+    auto x = zeros({12, 20}, DType::Float32, device);
 
     auto chunks = chunk(x, 4, 0);
 
@@ -38,10 +25,10 @@ TEST(ChunkTest, BasicChunkEvenDivision) {
     }
 }
 
-TEST(ChunkTest, BasicChunkUnevenDivision) {
+TEST_P(ChunkTest, BasicChunkUnevenDivision) {
     // Test case: Shape (10, 20), split into 4 chunks along dim=0
     // Expected: 3 tensors of shape (3, 20) and 1 tensor of shape (1, 20)
-    auto x = zeros({10, 20}, DType::Float32, Device::cpu());
+    auto x = zeros({10, 20}, DType::Float32, device);
 
     auto chunks = chunk(x, 4, 0);
 
@@ -61,10 +48,10 @@ TEST(ChunkTest, BasicChunkUnevenDivision) {
     EXPECT_EQ(last_shape[1], 20);
 }
 
-TEST(ChunkTest, ChunkFewerThanDimensionSize) {
+TEST_P(ChunkTest, ChunkFewerThanDimensionSize) {
     // Test case: Shape (5, 20), split into 10 chunks along dim=0
     // Expected: 5 tensors of shape (1, 20) - fewer chunks than requested
-    auto x = zeros({5, 20}, DType::Float32, Device::cpu());
+    auto x = zeros({5, 20}, DType::Float32, device);
 
     auto chunks = chunk(x, 10, 0);
 
@@ -79,10 +66,10 @@ TEST(ChunkTest, ChunkFewerThanDimensionSize) {
     }
 }
 
-TEST(ChunkTest, ChunkAlongDifferentDimension) {
+TEST_P(ChunkTest, ChunkAlongDifferentDimension) {
     // Test case: Shape (10, 20), split into 5 chunks along dim=1
     // Expected: 5 tensors of shape (10, 4)
-    auto x = zeros({10, 20}, DType::Float32, Device::cpu());
+    auto x = zeros({10, 20}, DType::Float32, device);
 
     auto chunks = chunk(x, 5, 1);
 
@@ -96,9 +83,9 @@ TEST(ChunkTest, ChunkAlongDifferentDimension) {
     }
 }
 
-TEST(ChunkTest, ChunkNegativeDimension) {
+TEST_P(ChunkTest, ChunkNegativeDimension) {
     // Test case: Use negative dimension indexing
-    auto x = zeros({10, 20}, DType::Float32, Device::cpu());
+    auto x = zeros({10, 20}, DType::Float32, device);
 
     // dim=-1 should be equivalent to dim=1
     auto chunks = chunk(x, 4, -1);
@@ -112,9 +99,9 @@ TEST(ChunkTest, ChunkNegativeDimension) {
     }
 }
 
-TEST(ChunkTest, ChunkSingleChunk) {
+TEST_P(ChunkTest, ChunkSingleChunk) {
     // Test case: Split into 1 chunk should return original tensor
-    auto x = zeros({10, 20}, DType::Float32, Device::cpu());
+    auto x = zeros({10, 20}, DType::Float32, device);
 
     auto chunks = chunk(x, 1, 0);
 
@@ -124,8 +111,8 @@ TEST(ChunkTest, ChunkSingleChunk) {
     EXPECT_EQ(shape[1], 20);
 }
 
-TEST(ChunkTest, ChunkInvalidChunks) {
-    auto x = zeros({10, 20}, DType::Float32, Device::cpu());
+TEST_P(ChunkTest, ChunkInvalidChunks) {
+    auto x = zeros({10, 20}, DType::Float32, device);
 
     // Zero chunks should throw
     EXPECT_THROW(chunk(x, 0, 0), std::invalid_argument);
@@ -134,23 +121,26 @@ TEST(ChunkTest, ChunkInvalidChunks) {
     EXPECT_THROW(chunk(x, -1, 0), std::invalid_argument);
 }
 
-TEST(ChunkTest, ChunkInvalidDimension) {
-    auto x = zeros({10, 20}, DType::Float32, Device::cpu());
+TEST_P(ChunkTest, ChunkInvalidDimension) {
+    auto x = zeros({10, 20}, DType::Float32, device);
 
     // Dimension out of range
     EXPECT_THROW(chunk(x, 4, 2), std::invalid_argument);
     EXPECT_THROW(chunk(x, 4, -3), std::invalid_argument);
 }
 
-TEST(ChunkTest, ChunkDataCorrectness) {
+TEST_P(ChunkTest, ChunkDataCorrectness) {
     // Verify that chunk() creates tensors with correct shapes and is slice-based
-    auto x = zeros({6, 3}, DType::Float32, Device::cpu());
+    // Build the source on CPU (host writes), then move to the target device.
+    auto x_cpu = zeros({6, 3}, DType::Float32, Device::cpu());
 
     // Fill with sequential values for verification
-    float* data = x.data<float>();
+    float* data = x_cpu.data<float>();
     for (int i = 0; i < 18; ++i) {
         data[i] = static_cast<float>(i);
     }
+
+    auto x = x_cpu.to(device);
 
     // Split into 3 chunks along dim=0
     auto chunks = chunk(x, 3, 0);
@@ -168,3 +158,5 @@ TEST(ChunkTest, ChunkDataCorrectness) {
     // Note: Testing actual data values requires contiguous() to work properly,
     // which is a separate concern from chunk() functionality
 }
+
+INSTANTIATE_BACKEND_TESTS(ChunkTest);

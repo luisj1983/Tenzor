@@ -13,28 +13,23 @@
 
 #include <gtest/gtest.h>
 #include "tenzor/tenzor.hpp"
+#include "../backend_test_fixture.hpp"
 #include <cmath>
 #include <limits>
 
 using namespace tenzor;
 
-// Test environment that initialises Tenzor once for the whole binary.
-class SoftmaxStrideAuditEnv : public ::testing::Environment {
-public:
-    void SetUp() override { tenzor::initialize(); }
-};
-
-static ::testing::Environment* const stride_audit_env =
-    ::testing::AddGlobalTestEnvironment(new SoftmaxStrideAuditEnv);
+// Fan all softmax stride-audit cases over every available backend.
+class SoftmaxStrideAudit : public ::tenzor::testing::BackendTest {};
 
 // ---------------------------------------------------------------------------
 // Audit P0 #1: softmax must produce identical output on a transposed view
 // as on the equivalent explicitly-permuted-and-contiguous tensor. A stride-
 // ignoring kernel will silently differ.
 // ---------------------------------------------------------------------------
-TEST(SoftmaxStrideAudit, TransposedInputMatchesContiguous) {
+TEST_P(SoftmaxStrideAudit, TransposedInputMatchesContiguous) {
     // src shape {4, 3}, row-major contiguous
-    auto src   = arange(1.0, 13.0, 1.0).reshape({4, 3});
+    auto src   = arange(1.0, 13.0, 1.0, DType::Float64, device).reshape({4, 3});
     auto view_t = transpose(src, 0, 1);      // {3, 4} non-contiguous view
     auto ref_t  = view_t.contiguous();       // {3, 4} packed copy
 
@@ -51,15 +46,16 @@ TEST(SoftmaxStrideAudit, TransposedInputMatchesContiguous) {
     // Compare element-wise via abs diff; promote to float64 to avoid rounding
     auto diff_t = abs(out_view.tensor().to(DType::Float64)
                       - out_ref.tensor().to(DType::Float64));
-    auto max_diff = max(diff_t).item<double>();
+    auto max_diff_cpu = max(diff_t).cpu();
+    auto max_diff = max_diff_cpu.item<double>();
 
     EXPECT_LT(max_diff, 1e-6)
         << "softmax on transposed view differs from contiguous copy "
            "(stride-from-shape bug, audit P0 #1). max_diff=" << max_diff;
 }
 
-TEST(SoftmaxStrideAudit, LogSoftmaxTransposedInputMatchesContiguous) {
-    auto src    = arange(1.0, 13.0, 1.0).reshape({4, 3});
+TEST_P(SoftmaxStrideAudit, LogSoftmaxTransposedInputMatchesContiguous) {
+    auto src    = arange(1.0, 13.0, 1.0, DType::Float64, device).reshape({4, 3});
     auto view_t = transpose(src, 0, 1);      // {3, 4} non-contiguous view
     auto ref_t  = view_t.contiguous();
 
@@ -74,7 +70,8 @@ TEST(SoftmaxStrideAudit, LogSoftmaxTransposedInputMatchesContiguous) {
 
     auto diff_t  = abs(out_view.tensor().to(DType::Float64)
                        - out_ref.tensor().to(DType::Float64));
-    auto max_diff = max(diff_t).item<double>();
+    auto max_diff_cpu = max(diff_t).cpu();
+    auto max_diff = max_diff_cpu.item<double>();
 
     EXPECT_LT(max_diff, 1e-6)
         << "log_softmax on transposed view differs from contiguous copy "
@@ -82,8 +79,8 @@ TEST(SoftmaxStrideAudit, LogSoftmaxTransposedInputMatchesContiguous) {
 }
 
 // Non-last-dim axis: softmax along dim=0 of a transposed view
-TEST(SoftmaxStrideAudit, TransposedInputDim0MatchesContiguous) {
-    auto src    = arange(1.0, 25.0, 1.0).reshape({4, 6});
+TEST_P(SoftmaxStrideAudit, TransposedInputDim0MatchesContiguous) {
+    auto src    = arange(1.0, 25.0, 1.0, DType::Float64, device).reshape({4, 6});
     auto view_t = transpose(src, 0, 1);      // {6, 4} non-contiguous view
     auto ref_t  = view_t.contiguous();
 
@@ -98,7 +95,8 @@ TEST(SoftmaxStrideAudit, TransposedInputDim0MatchesContiguous) {
 
     auto diff_t  = abs(out_view.tensor().to(DType::Float64)
                        - out_ref.tensor().to(DType::Float64));
-    auto max_diff = max(diff_t).item<double>();
+    auto max_diff_cpu = max(diff_t).cpu();
+    auto max_diff = max_diff_cpu.item<double>();
 
     EXPECT_LT(max_diff, 1e-6)
         << "softmax(dim=0) on transposed view differs from contiguous copy. "
@@ -110,9 +108,9 @@ TEST(SoftmaxStrideAudit, TransposedInputDim0MatchesContiguous) {
 // gradients on a transposed view as on the equivalent contiguous tensor.
 // A stride-ignoring backward kernel would compute wrong grad values silently.
 // ---------------------------------------------------------------------------
-TEST(SoftmaxStrideAudit, BackwardTransposedInputMatchesContiguous) {
+TEST_P(SoftmaxStrideAudit, BackwardTransposedInputMatchesContiguous) {
     // Deterministic source data avoids flaky failures from large random values.
-    auto src_t = arange(1.0, 13.0, 1.0).reshape({4, 3});  // {4,3} contiguous
+    auto src_t = arange(1.0, 13.0, 1.0, DType::Float64, device).reshape({4, 3});  // {4,3} contiguous
 
     // Two independent Variables share the same underlying data pattern but
     // one uses a non-contiguous transposed view and one is explicitly packed.
@@ -142,15 +140,16 @@ TEST(SoftmaxStrideAudit, BackwardTransposedInputMatchesContiguous) {
     auto gr = x_ref.grad().value().contiguous().to(DType::Float64);
 
     auto diff_t   = abs(gv - gr);
-    auto max_diff = max(diff_t).item<double>();
+    auto max_diff_cpu = max(diff_t).cpu();
+    auto max_diff = max_diff_cpu.item<double>();
 
     EXPECT_LT(max_diff, 1e-6)
         << "softmax backward on transposed view differs from contiguous copy "
            "(stride-from-shape bug in softmax_backward_kernel). max_diff=" << max_diff;
 }
 
-TEST(SoftmaxStrideAudit, BackwardLogSoftmaxTransposedInputMatchesContiguous) {
-    auto src_t = arange(1.0, 13.0, 1.0).reshape({4, 3});  // {4,3} contiguous
+TEST_P(SoftmaxStrideAudit, BackwardLogSoftmaxTransposedInputMatchesContiguous) {
+    auto src_t = arange(1.0, 13.0, 1.0, DType::Float64, device).reshape({4, 3});  // {4,3} contiguous
 
     auto view_t = transpose(src_t, 0, 1);          // {3, 4} non-contiguous
     auto ref_t  = view_t.contiguous();             // {3, 4} packed copy
@@ -177,9 +176,14 @@ TEST(SoftmaxStrideAudit, BackwardLogSoftmaxTransposedInputMatchesContiguous) {
     auto gr = x_ref.grad().value().contiguous().to(DType::Float64);
 
     auto diff_t   = abs(gv - gr);
-    auto max_diff = max(diff_t).item<double>();
+    auto max_diff_cpu = max(diff_t).cpu();
+    auto max_diff = max_diff_cpu.item<double>();
 
     EXPECT_LT(max_diff, 1e-6)
         << "log_softmax backward on transposed view differs from contiguous copy "
            "(stride-from-shape bug in log_softmax_backward_kernel). max_diff=" << max_diff;
 }
+
+// Fan every TEST_P above over all five backends. BackendTest::SetUp skips a
+// backend that is physically absent on the host.
+INSTANTIATE_BACKEND_TESTS(SoftmaxStrideAudit);

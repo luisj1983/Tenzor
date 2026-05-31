@@ -10,36 +10,34 @@
 
 #include <gtest/gtest.h>
 #include "tenzor/tenzor.hpp"
+#include "../backend_test_fixture.hpp"
 #include <cmath>
 
 using namespace tenzor;
 
-class BroadcastingEdgeCaseTest : public ::testing::Test {
+class BroadcastingEdgeCaseTest : public ::tenzor::testing::BackendTest {
 protected:
-    static bool initialized;
     void SetUp() override {
-        if (!initialized) {
-            tenzor::initialize();
-            initialized = true;
-        }
+        ::tenzor::testing::BackendTest::SetUp();
+        if (::testing::Test::IsSkipped()) return;
     }
 };
-
-bool BroadcastingEdgeCaseTest::initialized = false;
 
 // ============================================================================
 // 1. High-Rank to Low-Rank Broadcasting
 // ============================================================================
 
-TEST_F(BroadcastingEdgeCaseTest, Broadcast_1_1_1_N_Plus_N) {
+TEST_P(BroadcastingEdgeCaseTest, Broadcast_1_1_1_N_Plus_N) {
     // (1, 1, 1, 4) + (4,) should broadcast to (1, 1, 1, 4)
-    auto a = ones({1, 1, 1, 4}, DType::Float32, Device::cpu());
-    auto* a_data = a.data<float>();
+    auto a_host = ones({1, 1, 1, 4}, DType::Float32, Device::cpu());
+    auto* a_data = a_host.data<float>();
     a_data[0] = 1.0f; a_data[1] = 2.0f; a_data[2] = 3.0f; a_data[3] = 4.0f;
+    auto a = a_host.to(device);
 
-    auto b = ones({4}, DType::Float32, Device::cpu());
-    auto* b_data = b.data<float>();
+    auto b_host = ones({4}, DType::Float32, Device::cpu());
+    auto* b_data = b_host.data<float>();
     b_data[0] = 10.0f; b_data[1] = 20.0f; b_data[2] = 30.0f; b_data[3] = 40.0f;
+    auto b = b_host.to(device);
 
     auto c = add(a, b);
 
@@ -49,28 +47,31 @@ TEST_F(BroadcastingEdgeCaseTest, Broadcast_1_1_1_N_Plus_N) {
     EXPECT_EQ(c.shape()[2], 1);
     EXPECT_EQ(c.shape()[3], 4);
 
-    auto* c_data = c.to(Device::cpu()).data<float>();
+    auto c_cpu = c.cpu();
+    auto* c_data = c_cpu.data<float>();
     EXPECT_FLOAT_EQ(c_data[0], 11.0f);
     EXPECT_FLOAT_EQ(c_data[1], 22.0f);
     EXPECT_FLOAT_EQ(c_data[2], 33.0f);
     EXPECT_FLOAT_EQ(c_data[3], 44.0f);
 }
 
-TEST_F(BroadcastingEdgeCaseTest, Broadcast_N_Plus_1_1_1_N) {
+TEST_P(BroadcastingEdgeCaseTest, Broadcast_N_Plus_1_1_1_N) {
     // (4,) + (1, 1, 1, 4) should broadcast to (1, 1, 1, 4)
-    auto a = ones({4}, DType::Float32, Device::cpu());
-    auto* a_data = a.data<float>();
+    auto a_host = ones({4}, DType::Float32, Device::cpu());
+    auto* a_data = a_host.data<float>();
     a_data[0] = 10.0f; a_data[1] = 20.0f; a_data[2] = 30.0f; a_data[3] = 40.0f;
+    auto a = a_host.to(device);
 
-    auto b = ones({1, 1, 1, 4}, DType::Float32, Device::cpu());
-    auto* b_data = b.data<float>();
+    auto b_host = ones({1, 1, 1, 4}, DType::Float32, Device::cpu());
+    auto* b_data = b_host.data<float>();
     b_data[0] = 1.0f; b_data[1] = 2.0f; b_data[2] = 3.0f; b_data[3] = 4.0f;
+    auto b = b_host.to(device);
 
     auto c = add(a, b);
 
     EXPECT_EQ(c.shape()[3], 4);
 
-    auto c_contig = c.contiguous().to(Device::cpu());
+    auto c_contig = c.contiguous().cpu();
     auto* c_data = c_contig.data<float>();
     EXPECT_FLOAT_EQ(c_data[0], 11.0f);
     EXPECT_FLOAT_EQ(c_data[1], 22.0f);
@@ -82,22 +83,25 @@ TEST_F(BroadcastingEdgeCaseTest, Broadcast_N_Plus_1_1_1_N) {
 // 2. Scalar Broadcasting
 // ============================================================================
 
-TEST_F(BroadcastingEdgeCaseTest, ScalarAddToMatrix) {
+TEST_P(BroadcastingEdgeCaseTest, ScalarAddToMatrix) {
     // (1,) + (2, 3) should broadcast to (2, 3)
-    auto scalar = ones({1}, DType::Float32, Device::cpu());
-    scalar.data<float>()[0] = 5.0f;
+    auto scalar_host = ones({1}, DType::Float32, Device::cpu());
+    scalar_host.data<float>()[0] = 5.0f;
+    auto scalar = scalar_host.to(device);
 
-    auto matrix = zeros({2, 3}, DType::Float32, Device::cpu());
-    auto* m_data = matrix.data<float>();
+    auto matrix_host = zeros({2, 3}, DType::Float32, Device::cpu());
+    auto* m_data = matrix_host.data<float>();
     for (int i = 0; i < 6; ++i) {
         m_data[i] = static_cast<float>(i + 1);
     }
+    auto matrix = matrix_host.to(device);
 
     auto result = add(matrix, scalar);
     EXPECT_EQ(result.shape()[0], 2);
     EXPECT_EQ(result.shape()[1], 3);
 
-    auto* r_data = result.to(Device::cpu()).data<float>();
+    auto result_cpu = result.cpu();
+    auto* r_data = result_cpu.data<float>();
     EXPECT_FLOAT_EQ(r_data[0], 6.0f);   // 1 + 5
     EXPECT_FLOAT_EQ(r_data[1], 7.0f);   // 2 + 5
     EXPECT_FLOAT_EQ(r_data[2], 8.0f);   // 3 + 5
@@ -106,31 +110,35 @@ TEST_F(BroadcastingEdgeCaseTest, ScalarAddToMatrix) {
     EXPECT_FLOAT_EQ(r_data[5], 11.0f);  // 6 + 5
 }
 
-TEST_F(BroadcastingEdgeCaseTest, ScalarMulToMatrix) {
-    auto scalar = ones({1}, DType::Float32, Device::cpu());
-    scalar.data<float>()[0] = 3.0f;
+TEST_P(BroadcastingEdgeCaseTest, ScalarMulToMatrix) {
+    auto scalar_host = ones({1}, DType::Float32, Device::cpu());
+    scalar_host.data<float>()[0] = 3.0f;
+    auto scalar = scalar_host.to(device);
 
-    auto matrix = ones({2, 4}, DType::Float32, Device::cpu());
-    auto* m_data = matrix.data<float>();
+    auto matrix_host = ones({2, 4}, DType::Float32, Device::cpu());
+    auto* m_data = matrix_host.data<float>();
     for (int i = 0; i < 8; ++i) {
         m_data[i] = static_cast<float>(i + 1);
     }
+    auto matrix = matrix_host.to(device);
 
     auto result = mul(matrix, scalar);
     EXPECT_EQ(result.shape()[0], 2);
     EXPECT_EQ(result.shape()[1], 4);
 
-    auto* r_data = result.to(Device::cpu()).data<float>();
+    auto result_cpu = result.cpu();
+    auto* r_data = result_cpu.data<float>();
     for (int i = 0; i < 8; ++i) {
         EXPECT_FLOAT_EQ(r_data[i], static_cast<float>((i + 1) * 3));
     }
 }
 
-TEST_F(BroadcastingEdgeCaseTest, ScalarAddWithOperator) {
+TEST_P(BroadcastingEdgeCaseTest, ScalarAddWithOperator) {
     // Test scalar add via the add(Tensor, double) overload
-    auto t = ones({3, 3}, DType::Float32, Device::cpu());
+    auto t = ones({3, 3}, DType::Float32, device);
     auto result = add(t, 2.0);
-    auto* data = result.to(Device::cpu()).data<float>();
+    auto result_cpu = result.cpu();
+    auto* data = result_cpu.data<float>();
     for (int i = 0; i < 9; ++i) {
         EXPECT_FLOAT_EQ(data[i], 3.0f);
     }
@@ -140,21 +148,24 @@ TEST_F(BroadcastingEdgeCaseTest, ScalarAddWithOperator) {
 // 3. Multi-Dimensional Broadcasting Patterns
 // ============================================================================
 
-TEST_F(BroadcastingEdgeCaseTest, Broadcast_N1_Plus_1M) {
+TEST_P(BroadcastingEdgeCaseTest, Broadcast_N1_Plus_1M) {
     // (3, 1) + (1, 4) should broadcast to (3, 4)
-    auto a = zeros({3, 1}, DType::Float32, Device::cpu());
-    auto* a_data = a.data<float>();
+    auto a_host = zeros({3, 1}, DType::Float32, Device::cpu());
+    auto* a_data = a_host.data<float>();
     a_data[0] = 1.0f; a_data[1] = 2.0f; a_data[2] = 3.0f;
+    auto a = a_host.to(device);
 
-    auto b = zeros({1, 4}, DType::Float32, Device::cpu());
-    auto* b_data = b.data<float>();
+    auto b_host = zeros({1, 4}, DType::Float32, Device::cpu());
+    auto* b_data = b_host.data<float>();
     b_data[0] = 10.0f; b_data[1] = 20.0f; b_data[2] = 30.0f; b_data[3] = 40.0f;
+    auto b = b_host.to(device);
 
     auto c = add(a, b);
     EXPECT_EQ(c.shape()[0], 3);
     EXPECT_EQ(c.shape()[1], 4);
 
-    auto* c_data = c.to(Device::cpu()).data<float>();
+    auto c_cpu = c.cpu();
+    auto* c_data = c_cpu.data<float>();
     // Row 0: 1 + [10, 20, 30, 40] = [11, 21, 31, 41]
     EXPECT_FLOAT_EQ(c_data[0], 11.0f);
     EXPECT_FLOAT_EQ(c_data[1], 21.0f);
@@ -172,14 +183,15 @@ TEST_F(BroadcastingEdgeCaseTest, Broadcast_N1_Plus_1M) {
     EXPECT_FLOAT_EQ(c_data[11], 43.0f);
 }
 
-TEST_F(BroadcastingEdgeCaseTest, Broadcast_Batch_Plus_NonBatch) {
+TEST_P(BroadcastingEdgeCaseTest, Broadcast_Batch_Plus_NonBatch) {
     // (2, 3, 4) + (3, 4) -> (2, 3, 4)
-    auto a = ones({2, 3, 4}, DType::Float32, Device::cpu());
-    auto b = ones({3, 4}, DType::Float32, Device::cpu());
-    auto* b_data = b.data<float>();
+    auto a = ones({2, 3, 4}, DType::Float32, device);
+    auto b_host = ones({3, 4}, DType::Float32, Device::cpu());
+    auto* b_data = b_host.data<float>();
     for (int i = 0; i < 12; ++i) {
         b_data[i] = static_cast<float>(i);
     }
+    auto b = b_host.to(device);
 
     auto c = add(a, b);
     EXPECT_EQ(c.ndim(), 3);
@@ -187,7 +199,8 @@ TEST_F(BroadcastingEdgeCaseTest, Broadcast_Batch_Plus_NonBatch) {
     EXPECT_EQ(c.shape()[1], 3);
     EXPECT_EQ(c.shape()[2], 4);
 
-    auto* c_data = c.to(Device::cpu()).data<float>();
+    auto c_cpu = c.cpu();
+    auto* c_data = c_cpu.data<float>();
     // Both batches should get same broadcast result
     for (int batch = 0; batch < 2; ++batch) {
         for (int i = 0; i < 12; ++i) {
@@ -200,11 +213,11 @@ TEST_F(BroadcastingEdgeCaseTest, Broadcast_Batch_Plus_NonBatch) {
 // 4. Backward Gradient Reduction Through Broadcast
 // ============================================================================
 
-TEST_F(BroadcastingEdgeCaseTest, BackwardGradientReductionBroadcastAdd) {
+TEST_P(BroadcastingEdgeCaseTest, BackwardGradientReductionBroadcastAdd) {
     // x: (3, 4), b: (1, 4) (bias), y = x + b, loss = sum(y)
     // Gradient of b should be (3, 4) summed to (1, 4), i.e., each element = 3
-    auto x_data = ones({3, 4}, DType::Float32, Device::cpu());
-    auto b_data = ones({1, 4}, DType::Float32, Device::cpu());
+    auto x_data = ones({3, 4}, DType::Float32, device);
+    auto b_data = ones({1, 4}, DType::Float32, device);
 
     Variable x(x_data, true);
     Variable b(b_data, true);
@@ -230,16 +243,17 @@ TEST_F(BroadcastingEdgeCaseTest, BackwardGradientReductionBroadcastAdd) {
     }
 }
 
-TEST_F(BroadcastingEdgeCaseTest, BackwardGradientReductionBroadcastMul) {
+TEST_P(BroadcastingEdgeCaseTest, BackwardGradientReductionBroadcastMul) {
     // x: (2, 3), s: (1,) scalar, y = x * s, loss = sum(y)
     // dL/ds should be sum of x
-    auto x_data = ones({2, 3}, DType::Float32, Device::cpu());
-    auto* xp = x_data.data<float>();
+    auto x_host = ones({2, 3}, DType::Float32, Device::cpu());
+    auto* xp = x_host.data<float>();
     for (int i = 0; i < 6; ++i) {
         xp[i] = static_cast<float>(i + 1);  // [1,2,3,4,5,6]
     }
+    auto x_data = x_host.to(device);
 
-    auto s_data = full({1}, 2.0f, DType::Float32, Device::cpu());
+    auto s_data = full({1}, 2.0f, DType::Float32, device);
 
     Variable x(x_data, true);
     Variable s(s_data, true);
@@ -266,26 +280,29 @@ TEST_F(BroadcastingEdgeCaseTest, BackwardGradientReductionBroadcastMul) {
 // 5. Broadcasting Shape Correctness
 // ============================================================================
 
-TEST_F(BroadcastingEdgeCaseTest, Broadcast_1x1_Plus_MxN) {
+TEST_P(BroadcastingEdgeCaseTest, Broadcast_1x1_Plus_MxN) {
     // (1, 1) + (3, 4) -> (3, 4)
-    auto a = full({1, 1}, 10.0f, DType::Float32, Device::cpu());
-    auto b = ones({3, 4}, DType::Float32, Device::cpu());
+    auto a = full({1, 1}, 10.0f, DType::Float32, device);
+    auto b = ones({3, 4}, DType::Float32, device);
     auto c = add(a, b);
     EXPECT_EQ(c.shape()[0], 3);
     EXPECT_EQ(c.shape()[1], 4);
 
-    auto* c_data = c.to(Device::cpu()).data<float>();
+    auto c_cpu = c.cpu();
+    auto* c_data = c_cpu.data<float>();
     for (int i = 0; i < 12; ++i) {
         EXPECT_FLOAT_EQ(c_data[i], 11.0f);
     }
 }
 
-TEST_F(BroadcastingEdgeCaseTest, Broadcast_1_Plus_1_1_1) {
+TEST_P(BroadcastingEdgeCaseTest, Broadcast_1_Plus_1_1_1) {
     // (1,) + (1, 1, 1) -> (1, 1, 1)
-    auto a = full({1}, 5.0f, DType::Float32, Device::cpu());
-    auto b = full({1, 1, 1}, 3.0f, DType::Float32, Device::cpu());
+    auto a = full({1}, 5.0f, DType::Float32, device);
+    auto b = full({1, 1, 1}, 3.0f, DType::Float32, device);
     auto c = add(a, b);
     EXPECT_EQ(c.numel(), 1);
-    auto c_contig = c.contiguous().to(Device::cpu());
+    auto c_contig = c.contiguous().cpu();
     EXPECT_FLOAT_EQ(c_contig.data<float>()[0], 8.0f);
 }
+
+INSTANTIATE_BACKEND_TESTS(BroadcastingEdgeCaseTest);
