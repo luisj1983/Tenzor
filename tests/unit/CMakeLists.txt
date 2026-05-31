@@ -1102,7 +1102,7 @@ tenzor_discover_tests(test_reductions_dtype_coverage DISCOVERY_TIMEOUT 60 BACKEN
 # Audit Phase 3 Tasks 3.1+3.2+3.3: norm F64 native, NaN propagation, F64 Kahan
 add_executable(test_reduction_numerical_fixes test_reduction_numerical_fixes.cpp)
 target_link_libraries(test_reduction_numerical_fixes PRIVATE tenzor_core GTest::gtest_main)
-tenzor_discover_tests(test_reduction_numerical_fixes DISCOVERY_TIMEOUT 60 BACKENDS cpu LABELS "audit;cpu")
+tenzor_discover_tests(test_reduction_numerical_fixes DISCOVERY_TIMEOUT 60 BACKENDS multi LABELS "audit")
 
 # Audit Phase 4 Task 4.2: Int8/UInt8 mul/add/sub wrap-on-overflow consistency
 add_executable(test_int8_overflow_semantics test_int8_overflow_semantics.cpp)
@@ -1148,7 +1148,7 @@ tenzor_discover_tests(test_onednn_format_any DISCOVERY_TIMEOUT 60 BACKENDS cpu L
 # Phase 9: _foreach_* multi-tensor optimizer ops
 add_executable(test_foreach_ops test_foreach_ops.cpp)
 target_link_libraries(test_foreach_ops PRIVATE tenzor_core GTest::gtest_main)
-tenzor_discover_tests(test_foreach_ops DISCOVERY_TIMEOUT 60 BACKENDS cpu LABELS "audit;cpu;foreach")
+tenzor_discover_tests(test_foreach_ops DISCOVERY_TIMEOUT 60 BACKENDS multi LABELS "audit;foreach")
 
 # Phase 11: New distribution sampler free functions
 add_executable(test_distributions_samplers test_distributions_samplers.cpp)
