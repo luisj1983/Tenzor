@@ -577,7 +577,7 @@ target_link_libraries(test_linalg PRIVATE tenzor_core GTest::gtest_main)
 
 # Linear Algebra — Complex64/Complex128 via LAPACKE (Task 2.9)
 add_executable(test_linalg_complex test_linalg_complex.cpp)
-target_link_libraries(test_linalg_complex PRIVATE tenzor_core GTest::gtest)
+target_link_libraries(test_linalg_complex PRIVATE tenzor_core GTest::gtest_main)
 
 # Linear Algebra — advanced routines (lstsq, pinv, matrix_exp)
 add_executable(test_linalg_lstsq_pinv_matexp test_linalg_lstsq_pinv_matexp.cpp)

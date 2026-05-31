@@ -10,36 +10,40 @@
  * - Slice backward gradient
  */
 
-#include <gtest/gtest.h>
+#include "../backend_test_fixture.hpp"
 #include "tenzor/tenzor.hpp"
 #include <cmath>
+#include <vector>
 
 using namespace tenzor;
 
-class ViewSliceTest : public ::testing::Test {
+namespace {
+
+class ViewSliceTest : public ::tenzor::testing::BackendTest {
 protected:
-    static bool initialized;
     void SetUp() override {
-        if (!initialized) {
-            tenzor::initialize();
-            initialized = true;
+        ::tenzor::testing::BackendTest::SetUp();
+        if (::testing::Test::IsSkipped()) return;
+    }
+
+    // Build a Float32 tensor on `device` filled with 0..n-1 (row-major).
+    Tensor iota(std::initializer_list<int64_t> shape) {
+        auto host = zeros(shape, DType::Float32, Device::cpu());
+        auto* data = host.data<float>();
+        for (int64_t i = 0; i < host.numel(); ++i) {
+            data[i] = static_cast<float>(i);
         }
+        return host.to(device);
     }
 };
-
-bool ViewSliceTest::initialized = false;
 
 // ============================================================================
 // 1. Slice Produces Views with Correct Offset
 // ============================================================================
 
-TEST_F(ViewSliceTest, SliceBasicShape) {
+TEST_P(ViewSliceTest, SliceBasicShape) {
     // Create a 4x5 tensor and slice rows 1..3
-    auto t = zeros({4, 5}, DType::Float32, Device::cpu());
-    auto* data = t.data<float>();
-    for (int64_t i = 0; i < 20; ++i) {
-        data[i] = static_cast<float>(i);
-    }
+    auto t = iota({4, 5});
 
     auto s = t.slice(0, 1, 3);  // rows 1 and 2
     EXPECT_EQ(s.shape()[0], 2);
@@ -47,15 +51,11 @@ TEST_F(ViewSliceTest, SliceBasicShape) {
     EXPECT_EQ(s.numel(), 10);
 }
 
-TEST_F(ViewSliceTest, SliceDataCorrectness) {
-    auto t = zeros({4, 5}, DType::Float32, Device::cpu());
-    auto* data = t.data<float>();
-    for (int64_t i = 0; i < 20; ++i) {
-        data[i] = static_cast<float>(i);
-    }
+TEST_P(ViewSliceTest, SliceDataCorrectness) {
+    auto t = iota({4, 5});
 
     auto s = t.slice(0, 1, 3);  // rows 1 and 2
-    auto s_contig = s.contiguous();
+    auto s_contig = s.contiguous().cpu();
     auto* s_data = s_contig.data<float>();
 
     // Row 1 of original: [5, 6, 7, 8, 9]
@@ -73,12 +73,8 @@ TEST_F(ViewSliceTest, SliceDataCorrectness) {
     EXPECT_FLOAT_EQ(s_data[9], 14.0f);
 }
 
-TEST_F(ViewSliceTest, SliceAlongDim1) {
-    auto t = zeros({3, 6}, DType::Float32, Device::cpu());
-    auto* data = t.data<float>();
-    for (int64_t i = 0; i < 18; ++i) {
-        data[i] = static_cast<float>(i);
-    }
+TEST_P(ViewSliceTest, SliceAlongDim1) {
+    auto t = iota({3, 6});
 
     auto s = t.slice(1, 2, 5);  // cols 2, 3, 4
     EXPECT_EQ(s.shape()[0], 3);
@@ -90,12 +86,8 @@ TEST_F(ViewSliceTest, SliceAlongDim1) {
 // 2. .contiguous() Creates Independent Copy
 // ============================================================================
 
-TEST_F(ViewSliceTest, ContiguousCreatesIndependentCopy) {
-    auto t = zeros({4, 4}, DType::Float32, Device::cpu());
-    auto* data = t.data<float>();
-    for (int64_t i = 0; i < 16; ++i) {
-        data[i] = static_cast<float>(i);
-    }
+TEST_P(ViewSliceTest, ContiguousCreatesIndependentCopy) {
+    auto t = iota({4, 4});
 
     // Slicing rows of a row-major tensor leaves it contiguous, and
     // `.contiguous()` on an already-contiguous tensor is a no-op view
@@ -108,32 +100,45 @@ TEST_F(ViewSliceTest, ContiguousCreatesIndependentCopy) {
     EXPECT_EQ(c.numel(), 16);
 
     // c[0] is t.T[0][0] = t[0][0] = 0.
-    auto* c_data = c.data<float>();
+    auto c_host = c.cpu();
+    auto* c_data = c_host.data<float>();
     ASSERT_FLOAT_EQ(c_data[0], 0.0f);
 
-    // Mutate the original. c — being an independent copy — must not
+    // Mutate the original in place via a contiguous view onto row 0 (which
+    // includes element [0][0]). c — being an independent copy — must not
     // change.
-    data[0] = 999.0f;
-    EXPECT_FLOAT_EQ(c_data[0], 0.0f);
+    auto bump = ones({1, 4}, DType::Float32, device);
+    auto row0 = t.slice(0, 0, 1);  // contiguous {1,4} view onto t row 0
+    add_(row0, bump);              // t[0][*] += 1, so t[0][0] -> 1.0
+
+    auto c_after = c.cpu();
+    EXPECT_FLOAT_EQ(c_after.data<float>()[0], 0.0f);
 }
 
 // ============================================================================
 // 3. In-place Operations on Views Affect Original
 // ============================================================================
 
-TEST_F(ViewSliceTest, InplaceAddOnViewAffectsOriginal) {
-    auto t = zeros({4, 3}, DType::Float32, Device::cpu());
-    auto* data = t.data<float>();
-    for (int64_t i = 0; i < 12; ++i) {
-        data[i] = static_cast<float>(i);
+TEST_P(ViewSliceTest, InplaceAddOnViewAffectsOriginal) {
+    auto t = zeros({4, 3}, DType::Float32, device);
+    {
+        auto host = zeros({4, 3}, DType::Float32, Device::cpu());
+        auto* h = host.data<float>();
+        for (int64_t i = 0; i < 12; ++i) {
+            h[i] = static_cast<float>(i);
+        }
+        add_(t, host.to(device));
     }
 
     // Get a slice (view) of rows 1-2
     auto s = t.slice(0, 1, 3);
 
     // Perform in-place add on the slice
-    auto increment = ones({2, 3}, DType::Float32, Device::cpu());
+    auto increment = ones({2, 3}, DType::Float32, device);
     add_(s, increment);
+
+    auto t_host = t.cpu();
+    auto* data = t_host.data<float>();
 
     // Original tensor row 1 should be modified: [3+1, 4+1, 5+1] = [4, 5, 6]
     EXPECT_FLOAT_EQ(data[3], 4.0f);
@@ -155,12 +160,8 @@ TEST_F(ViewSliceTest, InplaceAddOnViewAffectsOriginal) {
 // 4. Chained Slices
 // ============================================================================
 
-TEST_F(ViewSliceTest, ChainedSlicesShape) {
-    auto t = zeros({10, 8}, DType::Float32, Device::cpu());
-    auto* data = t.data<float>();
-    for (int64_t i = 0; i < 80; ++i) {
-        data[i] = static_cast<float>(i);
-    }
+TEST_P(ViewSliceTest, ChainedSlicesShape) {
+    auto t = iota({10, 8});
 
     // First slice: rows 2..7 -> shape (5, 8)
     auto s1 = t.slice(0, 2, 7);
@@ -173,7 +174,7 @@ TEST_F(ViewSliceTest, ChainedSlicesShape) {
     EXPECT_EQ(s2.shape()[1], 8);
 
     // s2 should correspond to original rows 3 and 4
-    auto s2_contig = s2.contiguous();
+    auto s2_contig = s2.contiguous().cpu();
     auto* s2_data = s2_contig.data<float>();
     // Row 3 of original starts at index 24
     EXPECT_FLOAT_EQ(s2_data[0], 24.0f);
@@ -181,12 +182,8 @@ TEST_F(ViewSliceTest, ChainedSlicesShape) {
     EXPECT_FLOAT_EQ(s2_data[8], 32.0f);
 }
 
-TEST_F(ViewSliceTest, ChainedSlicesOnDifferentDims) {
-    auto t = zeros({6, 8}, DType::Float32, Device::cpu());
-    auto* data = t.data<float>();
-    for (int64_t i = 0; i < 48; ++i) {
-        data[i] = static_cast<float>(i);
-    }
+TEST_P(ViewSliceTest, ChainedSlicesOnDifferentDims) {
+    auto t = iota({6, 8});
 
     // Slice rows 1..4 -> shape (3, 8)
     auto s1 = t.slice(0, 1, 4);
@@ -203,8 +200,8 @@ TEST_F(ViewSliceTest, ChainedSlicesOnDifferentDims) {
 // 5. Slice Ndim and Numel
 // ============================================================================
 
-TEST_F(ViewSliceTest, SlicePreservesNdim) {
-    auto t = zeros({5, 4, 3}, DType::Float32, Device::cpu());
+TEST_P(ViewSliceTest, SlicePreservesNdim) {
+    auto t = zeros({5, 4, 3}, DType::Float32, device);
     auto s = t.slice(0, 1, 3);
     EXPECT_EQ(s.ndim(), 3);
     EXPECT_EQ(s.shape()[0], 2);
@@ -213,8 +210,8 @@ TEST_F(ViewSliceTest, SlicePreservesNdim) {
     EXPECT_EQ(s.numel(), 24);
 }
 
-TEST_F(ViewSliceTest, SliceSingleRow) {
-    auto t = zeros({5, 4}, DType::Float32, Device::cpu());
+TEST_P(ViewSliceTest, SliceSingleRow) {
+    auto t = zeros({5, 4}, DType::Float32, device);
     auto s = t.slice(0, 2, 3);  // single row
     EXPECT_EQ(s.shape()[0], 1);
     EXPECT_EQ(s.shape()[1], 4);
@@ -225,13 +222,14 @@ TEST_F(ViewSliceTest, SliceSingleRow) {
 // 6. Slice Backward Gradient
 // ============================================================================
 
-TEST_F(ViewSliceTest, SliceBackwardGradient) {
+TEST_P(ViewSliceTest, SliceBackwardGradient) {
     // x is a 4x3 Variable
-    auto x_data = ones({4, 3}, DType::Float32, Device::cpu());
-    auto* x_ptr = x_data.data<float>();
+    auto x_host = ones({4, 3}, DType::Float32, Device::cpu());
+    auto* x_ptr = x_host.data<float>();
     for (int64_t i = 0; i < 12; ++i) {
         x_ptr[i] = static_cast<float>(i + 1);
     }
+    auto x_data = x_host.to(device);
 
     Variable x(x_data, true);
 
@@ -257,12 +255,12 @@ TEST_F(ViewSliceTest, SliceBackwardGradient) {
 // 7. DType Preservation Through Slice
 // ============================================================================
 
-TEST_F(ViewSliceTest, SlicePreservesDType) {
-    auto t_f32 = zeros({4, 3}, DType::Float32, Device::cpu());
+TEST_P(ViewSliceTest, SlicePreservesDType) {
+    auto t_f32 = zeros({4, 3}, DType::Float32, device);
     auto s_f32 = t_f32.slice(0, 0, 2);
     EXPECT_EQ(s_f32.dtype(), DType::Float32);
 
-    auto t_f64 = zeros({4, 3}, DType::Float64, Device::cpu());
+    auto t_f64 = zeros({4, 3}, DType::Float64, device);
     auto s_f64 = t_f64.slice(0, 0, 2);
     EXPECT_EQ(s_f64.dtype(), DType::Float64);
 }
@@ -271,11 +269,15 @@ TEST_F(ViewSliceTest, SlicePreservesDType) {
 // 8. Contiguous on Already-Contiguous Tensor
 // ============================================================================
 
-TEST_F(ViewSliceTest, ContiguousOnContiguousTensorIsNoOp) {
-    auto t = ones({3, 4}, DType::Float32, Device::cpu());
+TEST_P(ViewSliceTest, ContiguousOnContiguousTensorIsNoOp) {
+    auto t = ones({3, 4}, DType::Float32, device);
     auto c = t.contiguous();
     // Calling contiguous on an already-contiguous tensor should be efficient
     EXPECT_EQ(c.shape()[0], 3);
     EXPECT_EQ(c.shape()[1], 4);
     EXPECT_EQ(c.numel(), 12);
 }
+
+INSTANTIATE_BACKEND_TESTS(ViewSliceTest);
+
+}  // namespace

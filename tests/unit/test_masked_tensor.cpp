@@ -22,83 +22,97 @@
 #include "tenzor/ops/creation.hpp"
 #include "tenzor/tenzor.hpp"
 
+#include "../backend_test_fixture.hpp"
 #include "masked_tensor_test_support.hpp"
 
 using namespace tenzor;
 
 namespace {
 
-class MaskedTensorTest : public ::testing::Test {
+class MaskedTensorTest : public ::tenzor::testing::BackendTest {
 protected:
-    void SetUp() override { tenzor::initialize(); }
+    void SetUp() override {
+        ::tenzor::testing::BackendTest::SetUp();
+        if (::testing::Test::IsSkipped()) return;
+    }
 
+    // Build a bool tensor with host-provided values on the test device.
+    // Bool storage is filled on CPU (1 byte per element convention) then
+    // moved to the target device.
     static Tensor make_bool(std::vector<int64_t> shape,
-                            std::vector<bool> vals) {
+                            std::vector<bool> vals,
+                            Device device) {
         Tensor t(shape, DType::Bool, Device::cpu());
         // bool storage convention: 1 byte per element on CPU.
         auto* p = static_cast<uint8_t*>(t.data_ptr());
         for (size_t i = 0; i < vals.size(); ++i) {
             p[i] = vals[i] ? 1 : 0;
         }
-        return t;
+        return t.to(device);
     }
 };
 
 // ---------------------------------------------------------------------------
 // A.7 — Integer-dtype max() must not overflow on the ±inf sentinel.
 // ---------------------------------------------------------------------------
-TEST_F(MaskedTensorTest, IntegerMaxRespectsDtype) {
-    Tensor data({4}, DType::Int32, Device::cpu());
-    auto* dp = data.data<int32_t>();
+TEST_P(MaskedTensorTest, IntegerMaxRespectsDtype) {
+    Tensor data_host({4}, DType::Int32, Device::cpu());
+    auto* dp = data_host.data<int32_t>();
     dp[0] = 7; dp[1] = -5; dp[2] = 12; dp[3] = -100;
+    Tensor data = data_host.to(device);
 
-    Tensor mask = make_bool({4}, {true, true, false, true});
+    Tensor mask = make_bool({4}, {true, true, false, true}, device);
 
     MaskedTensor mt(data, mask);
     Tensor maxv = mt.max();
     ASSERT_EQ(maxv.dtype(), DType::Int32);
     // Max over unmasked positions {7, -5, -100} is 7.
-    EXPECT_EQ(maxv.item<int32_t>(), 7);
+    Tensor maxv_cpu = maxv.cpu();
+    EXPECT_EQ(maxv_cpu.item<int32_t>(), 7);
 }
 
-TEST_F(MaskedTensorTest, IntegerMinRespectsDtype) {
-    Tensor data({4}, DType::Int32, Device::cpu());
-    auto* dp = data.data<int32_t>();
+TEST_P(MaskedTensorTest, IntegerMinRespectsDtype) {
+    Tensor data_host({4}, DType::Int32, Device::cpu());
+    auto* dp = data_host.data<int32_t>();
     dp[0] = 7; dp[1] = -5; dp[2] = 12; dp[3] = -100;
+    Tensor data = data_host.to(device);
 
-    Tensor mask = make_bool({4}, {true, true, false, false});
+    Tensor mask = make_bool({4}, {true, true, false, false}, device);
 
     MaskedTensor mt(data, mask);
     Tensor minv = mt.min();
     ASSERT_EQ(minv.dtype(), DType::Int32);
     // Min over unmasked positions {7, -5} is -5.
-    EXPECT_EQ(minv.item<int32_t>(), -5);
+    Tensor minv_cpu = minv.cpu();
+    EXPECT_EQ(minv_cpu.item<int32_t>(), -5);
 }
 
 // ---------------------------------------------------------------------------
 // A.7 — Binary ops must zero out masked positions of the result so
 //       NaN/Inf produced at masked positions doesn't bleed into data().
 // ---------------------------------------------------------------------------
-TEST_F(MaskedTensorTest, BinaryOpsZeroMaskedPositions) {
+TEST_P(MaskedTensorTest, BinaryOpsZeroMaskedPositions) {
     // a / b where b[2] = 0 (masked) — division by zero yields ±inf in the
     // raw tensor; the masked-tensor binary op must zero that position so
     // the user-visible data buffer is clean.
-    Tensor a({4}, DType::Float32, Device::cpu());
-    Tensor b({4}, DType::Float32, Device::cpu());
-    auto* ap = a.data<float>();
-    auto* bp = b.data<float>();
+    Tensor a_host({4}, DType::Float32, Device::cpu());
+    Tensor b_host({4}, DType::Float32, Device::cpu());
+    auto* ap = a_host.data<float>();
+    auto* bp = b_host.data<float>();
     ap[0] = 1.0f; ap[1] = 4.0f; ap[2] = 9.0f; ap[3] = 16.0f;
     bp[0] = 1.0f; bp[1] = 2.0f; bp[2] = 0.0f; bp[3] = 4.0f;
+    Tensor a = a_host.to(device);
+    Tensor b = b_host.to(device);
 
     // Mask out position 2 (where b is zero).
-    Tensor mask_a = make_bool({4}, {true, true, false, true});
-    Tensor mask_b = make_bool({4}, {true, true, false, true});
+    Tensor mask_a = make_bool({4}, {true, true, false, true}, device);
+    Tensor mask_b = make_bool({4}, {true, true, false, true}, device);
 
     MaskedTensor A(a, mask_a);
     MaskedTensor B(b, mask_b);
 
     MaskedTensor C = A / B;
-    const auto& cd = C.data();
+    Tensor cd = C.data().cpu();
     ASSERT_EQ(cd.dtype(), DType::Float32);
 
     const float* cp = cd.data<float>();
@@ -112,23 +126,26 @@ TEST_F(MaskedTensorTest, BinaryOpsZeroMaskedPositions) {
     EXPECT_FLOAT_EQ(cp[3], 16.0f / 4.0f);
 }
 
-TEST_F(MaskedTensorTest, BinaryOpsCleanForAllVariants) {
-    Tensor a({3}, DType::Float32, Device::cpu());
-    Tensor b({3}, DType::Float32, Device::cpu());
-    auto* ap = a.data<float>();
-    auto* bp = b.data<float>();
+TEST_P(MaskedTensorTest, BinaryOpsCleanForAllVariants) {
+    Tensor a_host({3}, DType::Float32, Device::cpu());
+    Tensor b_host({3}, DType::Float32, Device::cpu());
+    auto* ap = a_host.data<float>();
+    auto* bp = b_host.data<float>();
     // Position 1 will be masked; put something that would produce NaN
     // under sqrt-then-divide so we are sure the data buffer stays clean.
     ap[0] = 1.0f; ap[1] = std::numeric_limits<float>::infinity(); ap[2] = 3.0f;
     bp[0] = 4.0f; bp[1] = 0.0f; bp[2] = 2.0f;
+    Tensor a = a_host.to(device);
+    Tensor b = b_host.to(device);
 
-    Tensor mask = make_bool({3}, {true, false, true});
+    Tensor mask = make_bool({3}, {true, false, true}, device);
     MaskedTensor A(a, mask);
     MaskedTensor B(b, mask);
 
     auto check_clean = [](const MaskedTensor& mt, int64_t i,
                           const char* label) {
-        const float v = mt.data().data<float>()[i];
+        Tensor d = mt.data().cpu();
+        const float v = d.data<float>()[i];
         EXPECT_FALSE(std::isinf(v)) << label << " leaked Inf at i=" << i;
         EXPECT_FALSE(std::isnan(v)) << label << " leaked NaN at i=" << i;
         EXPECT_FLOAT_EQ(v, 0.0f) << label << " masked slot not zeroed";
@@ -139,5 +156,7 @@ TEST_F(MaskedTensorTest, BinaryOpsCleanForAllVariants) {
     check_clean(A * B, 1, "operator*");
     check_clean(A / B, 1, "operator/");
 }
+
+INSTANTIATE_BACKEND_TESTS(MaskedTensorTest);
 
 }  // namespace
