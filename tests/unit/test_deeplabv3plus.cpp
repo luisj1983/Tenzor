@@ -6,20 +6,24 @@
 #include <gtest/gtest.h>
 #include <tenzor/tenzor.hpp>
 #include "../../include/tenzor/models/deeplabv3plus.hpp"
+#include "../backend_test_fixture.hpp"
 #include "../grad_flow_helpers.hpp"
 
 using namespace tenzor;
 using namespace tenzor::models;
 
-class DeepLabV3PlusTest : public ::testing::Test {
+class DeepLabV3PlusTest : public ::tenzor::testing::BackendTest {
 protected:
-    void SetUp() override { device_ = Device::cpu(); }
-    Device device_;
+    void SetUp() override {
+        ::tenzor::testing::BackendTest::SetUp();
+        if (::testing::Test::IsSkipped()) return;
+    }
 };
 
-TEST_F(DeepLabV3PlusTest, DeepLabV3PlusResNet50ForwardShape) {
+TEST_P(DeepLabV3PlusTest, DeepLabV3PlusResNet50ForwardShape) {
     auto model = DeepLabV3Plus_ResNet50(21, 16, false);
-    Variable images(Tensor({2, 3, 512, 512}, DType::Float32, device_), true);
+    model->to(device);
+    Variable images(randn({2, 3, 512, 512}, DType::Float32, device), true);
     Variable output = model->forward(images);
 
     auto shape = output.tensor().shape();
@@ -27,11 +31,12 @@ TEST_F(DeepLabV3PlusTest, DeepLabV3PlusResNet50ForwardShape) {
               (std::vector<int64_t>{2, 21, 512, 512}));
 }
 
-TEST_F(DeepLabV3PlusTest, DeepLabV3PlusResNet50GradientFlow) {
+TEST_P(DeepLabV3PlusTest, DeepLabV3PlusResNet50GradientFlow) {
     auto model = DeepLabV3Plus_ResNet50(21, 16, false);
+    model->to(device);
     model->train();
 
-    Variable images(Tensor({1, 3, 512, 512}, DType::Float32, device_), true);
+    Variable images(randn({1, 3, 512, 512}, DType::Float32, device), true);
     Variable output = model->forward(images);
     Variable loss = tenzor::sum(output);
     loss.backward();
@@ -41,9 +46,10 @@ TEST_F(DeepLabV3PlusTest, DeepLabV3PlusResNet50GradientFlow) {
     EXPECT_GT(params.size(), 0);
 }
 
-TEST_F(DeepLabV3PlusTest, DeepLabV3PlusResNet101ForwardShape) {
+TEST_P(DeepLabV3PlusTest, DeepLabV3PlusResNet101ForwardShape) {
     auto model = DeepLabV3Plus_ResNet101(21, 16, false);
-    Variable images(Tensor({1, 3, 512, 512}, DType::Float32, device_), true);
+    model->to(device);
+    Variable images(randn({1, 3, 512, 512}, DType::Float32, device), true);
     Variable output = model->forward(images);
 
     auto shape = output.tensor().shape();
@@ -51,11 +57,12 @@ TEST_F(DeepLabV3PlusTest, DeepLabV3PlusResNet101ForwardShape) {
               (std::vector<int64_t>{1, 21, 512, 512}));
 }
 
-TEST_F(DeepLabV3PlusTest, DeepLabV3PlusResNet101GradientFlow) {
+TEST_P(DeepLabV3PlusTest, DeepLabV3PlusResNet101GradientFlow) {
     auto model = DeepLabV3Plus_ResNet101(21, 16, false);
+    model->to(device);
     model->train();
 
-    Variable images(Tensor({1, 3, 512, 512}, DType::Float32, device_), true);
+    Variable images(randn({1, 3, 512, 512}, DType::Float32, device), true);
     Variable output = model->forward(images);
     Variable loss = tenzor::sum(output);
     loss.backward();
@@ -63,9 +70,10 @@ TEST_F(DeepLabV3PlusTest, DeepLabV3PlusResNet101GradientFlow) {
     EXPECT_GRAD_FLOWS(images);
 }
 
-TEST_F(DeepLabV3PlusTest, DeepLabV3PlusMobileNetForwardShape) {
+TEST_P(DeepLabV3PlusTest, DeepLabV3PlusMobileNetForwardShape) {
     auto model = DeepLabV3Plus_MobileNetV2(21, 16, false);
-    Variable images(Tensor({2, 3, 512, 512}, DType::Float32, device_), true);
+    model->to(device);
+    Variable images(randn({2, 3, 512, 512}, DType::Float32, device), true);
     Variable output = model->forward(images);
 
     auto shape = output.tensor().shape();
@@ -73,26 +81,28 @@ TEST_F(DeepLabV3PlusTest, DeepLabV3PlusMobileNetForwardShape) {
               (std::vector<int64_t>{2, 21, 512, 512}));
 }
 
-TEST_F(DeepLabV3PlusTest, DeepLabV3PlusDifferentSizes) {
+TEST_P(DeepLabV3PlusTest, DeepLabV3PlusDifferentSizes) {
     auto model = DeepLabV3Plus_ResNet50(21, 16, false);
+    model->to(device);
 
     // Test with 256x256
-    Variable images_256(Tensor({1, 3, 256, 256}, DType::Float32, device_), true);
+    Variable images_256(randn({1, 3, 256, 256}, DType::Float32, device), true);
     Variable output_256 = model->forward(images_256);
     auto shape_256 = output_256.tensor().shape();
     EXPECT_EQ(std::vector<int64_t>(shape_256.begin(), shape_256.end()),
               (std::vector<int64_t>{1, 21, 256, 256}));
 
     // Test with 1024x1024
-    Variable images_1024(Tensor({1, 3, 1024, 1024}, DType::Float32, device_), true);
+    Variable images_1024(randn({1, 3, 1024, 1024}, DType::Float32, device), true);
     Variable output_1024 = model->forward(images_1024);
     auto shape_1024 = output_1024.tensor().shape();
     EXPECT_EQ(std::vector<int64_t>(shape_1024.begin(), shape_1024.end()),
               (std::vector<int64_t>{1, 21, 1024, 1024}));
 }
 
-TEST_F(DeepLabV3PlusTest, DeepLabV3PlusParameterCount) {
+TEST_P(DeepLabV3PlusTest, DeepLabV3PlusParameterCount) {
     auto model = DeepLabV3Plus_ResNet50(21, 16, false);
+    model->to(device);
     auto params = model->parameters();
 
     size_t total_params = 0;
@@ -117,10 +127,11 @@ TEST_F(DeepLabV3PlusTest, DeepLabV3PlusParameterCount) {
 // G11 regression: atrous ResNet variants must produce features at the
 // requested output_stride, not stride 32. Specifically, ResNet50 with
 // output_stride=16 should give a C5 spatial size of input/16 (not input/32).
-TEST_F(DeepLabV3PlusTest, AtrousResNet50OutputStride16_G11) {
+TEST_P(DeepLabV3PlusTest, AtrousResNet50OutputStride16_G11) {
     using namespace tenzor::models;
     auto backbone = resnet50_atrous(/*num_classes=*/1000, /*output_stride=*/16, /*pretrained=*/false);
-    Variable img(Tensor({1, 3, 256, 256}, DType::Float32, device_), false);
+    backbone->to(device);
+    Variable img(randn({1, 3, 256, 256}, DType::Float32, device), false);
     auto c5 = backbone->forward_features(img);
 
     // With output_stride=16, the layer4 stride was replaced by dilation=2,
@@ -131,10 +142,11 @@ TEST_F(DeepLabV3PlusTest, AtrousResNet50OutputStride16_G11) {
     EXPECT_EQ(shape[1], 2048);  // channel count unchanged by atrous
 }
 
-TEST_F(DeepLabV3PlusTest, AtrousResNet50OutputStride8_G11) {
+TEST_P(DeepLabV3PlusTest, AtrousResNet50OutputStride8_G11) {
     using namespace tenzor::models;
     auto backbone = resnet50_atrous(1000, /*output_stride=*/8, false);
-    Variable img(Tensor({1, 3, 256, 256}, DType::Float32, device_), false);
+    backbone->to(device);
+    Variable img(randn({1, 3, 256, 256}, DType::Float32, device), false);
     auto c5 = backbone->forward_features(img);
 
     auto shape = c5.tensor().shape();
@@ -144,10 +156,11 @@ TEST_F(DeepLabV3PlusTest, AtrousResNet50OutputStride8_G11) {
 }
 
 // G11: regular resnet50 must still produce stride 32 (no regression).
-TEST_F(DeepLabV3PlusTest, RegularResNet50StillStride32_G11) {
+TEST_P(DeepLabV3PlusTest, RegularResNet50StillStride32_G11) {
     using namespace tenzor::models;
     auto backbone = resnet50(1000, false);
-    Variable img(Tensor({1, 3, 256, 256}, DType::Float32, device_), false);
+    backbone->to(device);
+    Variable img(randn({1, 3, 256, 256}, DType::Float32, device), false);
     auto c5 = backbone->forward_features(img);
 
     auto shape = c5.tensor().shape();
@@ -157,7 +170,7 @@ TEST_F(DeepLabV3PlusTest, RegularResNet50StillStride32_G11) {
 
 // G11: ResNet18/34 (BasicBlock) must reject atrous construction with a
 // clear error message. Documented in resnet.hpp / deeplabv3plus.cpp.
-TEST_F(DeepLabV3PlusTest, BasicBlockRejectsAtrous_G11) {
+TEST_P(DeepLabV3PlusTest, BasicBlockRejectsAtrous_G11) {
     EXPECT_THROW(
         std::make_shared<tenzor::models::ResNet>(
             std::vector<int64_t>{2, 2, 2, 2}, 1000, /*use_basic_block=*/true,
@@ -165,9 +178,10 @@ TEST_F(DeepLabV3PlusTest, BasicBlockRejectsAtrous_G11) {
         std::invalid_argument);
 }
 
-TEST_F(DeepLabV3PlusTest, DeepLabV3PlusBinarySegmentation) {
+TEST_P(DeepLabV3PlusTest, DeepLabV3PlusBinarySegmentation) {
     auto model = DeepLabV3Plus_ResNet50(1, 16, false);
-    Variable images(Tensor({2, 3, 512, 512}, DType::Float32, device_), true);
+    model->to(device);
+    Variable images(randn({2, 3, 512, 512}, DType::Float32, device), true);
     Variable output = model->forward(images);
 
     auto shape = output.tensor().shape();
@@ -175,15 +189,4 @@ TEST_F(DeepLabV3PlusTest, DeepLabV3PlusBinarySegmentation) {
               (std::vector<int64_t>{2, 1, 512, 512}));
 }
 
-
-// ============================================================================
-// Main  
-// ============================================================================
-
-int main(int argc, char** argv) {
-    ::testing::InitGoogleTest(&argc, argv);
-    if (!::testing::GTEST_FLAG(list_tests)) {
-        tenzor::initialize();
-    }
-    return RUN_ALL_TESTS();
-}
+INSTANTIATE_BACKEND_TESTS(DeepLabV3PlusTest);

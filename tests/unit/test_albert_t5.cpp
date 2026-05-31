@@ -4,6 +4,7 @@
  */
 
 #include <gtest/gtest.h>
+#include "../backend_test_fixture.hpp"
 #include <tenzor/tenzor.hpp>
 #include "../../include/tenzor/models/albert.hpp"
 #include "../../include/tenzor/models/t5.hpp"
@@ -11,16 +12,17 @@
 using namespace tenzor;
 using namespace tenzor::models;
 
-class ALBERTandT5Test : public ::testing::Test {
+class ALBERTandT5Test : public ::tenzor::testing::BackendTest {
 protected:
     void SetUp() override {
-        device_ = Device::cpu();
+        ::tenzor::testing::BackendTest::SetUp();
+        if (::testing::Test::IsSkipped()) return;
     }
-    Device device_;
 
-    // Helper to create input token IDs with valid values
+    // Helper to create input token IDs with valid values.
+    // Token/index inputs are built on CPU via host writes, then moved to `device`.
     auto create_input_ids(int64_t batch_size, int64_t seq_len, int64_t vocab_size = 30000) -> Variable {
-        Tensor input_ids({batch_size, seq_len}, DType::Int64, device_);
+        Tensor input_ids({batch_size, seq_len}, DType::Int64, Device::cpu());
 
         // Fill with valid token IDs within vocabulary range
         std::vector<int64_t> data(batch_size * seq_len);
@@ -29,7 +31,7 @@ protected:
         }
         std::copy(data.begin(), data.end(), input_ids.data<int64_t>());
 
-        return Variable(input_ids, true);
+        return Variable(input_ids.to(device), true);
     }
 };
 
@@ -37,7 +39,7 @@ protected:
 // ALBERT Base Tests
 // ============================================================================
 
-TEST_F(ALBERTandT5Test, ALBERTBaseConfigTest) {
+TEST_P(ALBERTandT5Test, ALBERTBaseConfigTest) {
     auto config = AlbertConfig::base();
 
     EXPECT_EQ(config.embedding_size, 128);
@@ -47,10 +49,11 @@ TEST_F(ALBERTandT5Test, ALBERTBaseConfigTest) {
     EXPECT_EQ(config.intermediate_size, 3072);
 }
 
-TEST_F(ALBERTandT5Test, ALBERTBaseForwardShape) {
+TEST_P(ALBERTandT5Test, ALBERTBaseForwardShape) {
     auto config = AlbertConfig::base();
     config.vocab_size = 30000;
     auto model = std::make_shared<AlbertModel>(config);
+    model->to(device);
     int64_t batch_size = 2;
     int64_t seq_len = 128;
 
@@ -62,10 +65,11 @@ TEST_F(ALBERTandT5Test, ALBERTBaseForwardShape) {
               (std::vector<int64_t>{batch_size, seq_len, 768}));
 }
 
-TEST_F(ALBERTandT5Test, ALBERTBaseGradientFlow) {
+TEST_P(ALBERTandT5Test, ALBERTBaseGradientFlow) {
     auto config = AlbertConfig::base();
     config.vocab_size = 30000;
     auto model = std::make_shared<AlbertModel>(config);
+    model->to(device);
     model->train();
 
     auto input_ids = create_input_ids(1, 64);
@@ -77,10 +81,11 @@ TEST_F(ALBERTandT5Test, ALBERTBaseGradientFlow) {
     EXPECT_GT(params.size(), 0);
 }
 
-TEST_F(ALBERTandT5Test, ALBERTBaseParameterCount) {
+TEST_P(ALBERTandT5Test, ALBERTBaseParameterCount) {
     auto config = AlbertConfig::base();
     config.vocab_size = 30000;
     auto model = std::make_shared<AlbertModel>(config);
+    model->to(device);
     auto params = model->parameters();
 
     size_t total_params = 0;
@@ -102,7 +107,7 @@ TEST_F(ALBERTandT5Test, ALBERTBaseParameterCount) {
 // ALBERT Large Tests
 // ============================================================================
 
-TEST_F(ALBERTandT5Test, ALBERTLargeConfigTest) {
+TEST_P(ALBERTandT5Test, ALBERTLargeConfigTest) {
     auto config = AlbertConfig::large();
 
     EXPECT_EQ(config.hidden_size, 1024);
@@ -110,10 +115,11 @@ TEST_F(ALBERTandT5Test, ALBERTLargeConfigTest) {
     EXPECT_EQ(config.num_attention_heads, 16);
 }
 
-TEST_F(ALBERTandT5Test, ALBERTLargeForwardShape) {
+TEST_P(ALBERTandT5Test, ALBERTLargeForwardShape) {
     auto config = AlbertConfig::large();
     config.vocab_size = 30000;
     auto model = std::make_shared<AlbertModel>(config);
+    model->to(device);
     int64_t batch_size = 2;
     int64_t seq_len = 128;
 
@@ -125,10 +131,11 @@ TEST_F(ALBERTandT5Test, ALBERTLargeForwardShape) {
               (std::vector<int64_t>{batch_size, seq_len, 1024}));
 }
 
-TEST_F(ALBERTandT5Test, ALBERTLargeGradientFlow) {
+TEST_P(ALBERTandT5Test, ALBERTLargeGradientFlow) {
     auto config = AlbertConfig::large();
     config.vocab_size = 30000;
     auto model = std::make_shared<AlbertModel>(config);
+    model->to(device);
     model->train();
 
     auto input_ids = create_input_ids(1, 64);
@@ -144,10 +151,11 @@ TEST_F(ALBERTandT5Test, ALBERTLargeGradientFlow) {
 // ALBERT XLarge Tests
 // ============================================================================
 
-TEST_F(ALBERTandT5Test, ALBERTXLargeForwardShape) {
+TEST_P(ALBERTandT5Test, ALBERTXLargeForwardShape) {
     auto config = AlbertConfig::xlarge();
     config.vocab_size = 30000;
     auto model = std::make_shared<AlbertModel>(config);
+    model->to(device);
     int64_t batch_size = 1;
     int64_t seq_len = 128;
 
@@ -163,10 +171,11 @@ TEST_F(ALBERTandT5Test, ALBERTXLargeForwardShape) {
 // ALBERT XXLarge Tests
 // ============================================================================
 
-TEST_F(ALBERTandT5Test, ALBERTXXLargeForwardShape) {
+TEST_P(ALBERTandT5Test, ALBERTXXLargeForwardShape) {
     auto config = AlbertConfig::xxlarge();
     config.vocab_size = 30000;
     auto model = std::make_shared<AlbertModel>(config);
+    model->to(device);
     int64_t batch_size = 1;
     int64_t seq_len = 64;
 
@@ -182,7 +191,7 @@ TEST_F(ALBERTandT5Test, ALBERTXXLargeForwardShape) {
 // T5 Small Tests
 // ============================================================================
 
-TEST_F(ALBERTandT5Test, T5SmallConfigTest) {
+TEST_P(ALBERTandT5Test, T5SmallConfigTest) {
     auto config = T5Config::small();
 
     EXPECT_EQ(config.d_model, 512);
@@ -191,10 +200,11 @@ TEST_F(ALBERTandT5Test, T5SmallConfigTest) {
     EXPECT_EQ(config.num_heads, 8);
 }
 
-TEST_F(ALBERTandT5Test, T5SmallForwardShape) {
+TEST_P(ALBERTandT5Test, T5SmallForwardShape) {
     auto config = T5Config::small();
     config.vocab_size = 32128;
     auto model = std::make_shared<T5Model>(config);
+    model->to(device);
     int64_t batch_size = 2;
     int64_t seq_len = 128;
 
@@ -208,10 +218,11 @@ TEST_F(ALBERTandT5Test, T5SmallForwardShape) {
               (std::vector<int64_t>{batch_size, seq_len, 512}));
 }
 
-TEST_F(ALBERTandT5Test, T5SmallGradientFlow) {
+TEST_P(ALBERTandT5Test, T5SmallGradientFlow) {
     auto config = T5Config::small();
     config.vocab_size = 32128;
     auto model = std::make_shared<T5Model>(config);
+    model->to(device);
     model->train();
 
     auto input_ids = create_input_ids(1, 64, config.vocab_size);
@@ -229,7 +240,7 @@ TEST_F(ALBERTandT5Test, T5SmallGradientFlow) {
 // T5 Base Tests
 // ============================================================================
 
-TEST_F(ALBERTandT5Test, T5BaseConfigTest) {
+TEST_P(ALBERTandT5Test, T5BaseConfigTest) {
     auto config = T5Config::base();
 
     EXPECT_EQ(config.d_model, 768);
@@ -238,10 +249,11 @@ TEST_F(ALBERTandT5Test, T5BaseConfigTest) {
     EXPECT_EQ(config.num_heads, 12);
 }
 
-TEST_F(ALBERTandT5Test, T5BaseForwardShape) {
+TEST_P(ALBERTandT5Test, T5BaseForwardShape) {
     auto config = T5Config::base();
     config.vocab_size = 32128;
     auto model = std::make_shared<T5Model>(config);
+    model->to(device);
     int64_t batch_size = 2;
     int64_t seq_len = 128;
 
@@ -255,10 +267,11 @@ TEST_F(ALBERTandT5Test, T5BaseForwardShape) {
               (std::vector<int64_t>{batch_size, seq_len, 768}));
 }
 
-TEST_F(ALBERTandT5Test, T5BaseGradientFlow) {
+TEST_P(ALBERTandT5Test, T5BaseGradientFlow) {
     auto config = T5Config::base();
     config.vocab_size = 32128;
     auto model = std::make_shared<T5Model>(config);
+    model->to(device);
     model->train();
 
     auto input_ids = create_input_ids(1, 64, config.vocab_size);
@@ -276,10 +289,11 @@ TEST_F(ALBERTandT5Test, T5BaseGradientFlow) {
 // T5 Large Tests
 // ============================================================================
 
-TEST_F(ALBERTandT5Test, T5LargeForwardShape) {
+TEST_P(ALBERTandT5Test, T5LargeForwardShape) {
     auto config = T5Config::large();
     config.vocab_size = 32128;
     auto model = std::make_shared<T5Model>(config);
+    model->to(device);
     int64_t batch_size = 1;
     int64_t seq_len = 128;
 
@@ -297,10 +311,11 @@ TEST_F(ALBERTandT5Test, T5LargeForwardShape) {
 // Edge Case Tests
 // ============================================================================
 
-TEST_F(ALBERTandT5Test, ALBERTBatchSizeOne) {
+TEST_P(ALBERTandT5Test, ALBERTBatchSizeOne) {
     auto config = AlbertConfig::base();
     config.vocab_size = 30000;
     auto model = std::make_shared<AlbertModel>(config);
+    model->to(device);
     auto input_ids = create_input_ids(1, 64);
     auto output = model->forward(input_ids, Tensor{}, Variable{}, Variable{});
 
@@ -311,12 +326,13 @@ TEST_F(ALBERTandT5Test, ALBERTBatchSizeOne) {
 
 // G15 regression: T5 generate() must read its starting decoder token from
 // the config (default 0 = HF T5 convention) and honor an explicit override.
-TEST_F(ALBERTandT5Test, T5GenerateUsesConfiguredDecoderStartToken_G15) {
+TEST_P(ALBERTandT5Test, T5GenerateUsesConfiguredDecoderStartToken_G15) {
     auto config = T5Config::small();
     config.vocab_size = 32128;
     // Explicit non-zero start token — distinct from the previous hard-coded 0.
     config.decoder_start_token_id = 7;
     auto model = std::make_shared<T5ForConditionalGeneration>(config);
+    model->to(device);
     model->eval();
 
     auto input_ids = create_input_ids(/*B=*/2, /*T=*/16, config.vocab_size);
@@ -336,11 +352,12 @@ TEST_F(ALBERTandT5Test, T5GenerateUsesConfiguredDecoderStartToken_G15) {
 }
 
 // G15: explicit bos_token_id argument must override config value.
-TEST_F(ALBERTandT5Test, T5GenerateBosTokenOverride_G15) {
+TEST_P(ALBERTandT5Test, T5GenerateBosTokenOverride_G15) {
     auto config = T5Config::small();
     config.vocab_size = 32128;
     config.decoder_start_token_id = 0;  // HF default
     auto model = std::make_shared<T5ForConditionalGeneration>(config);
+    model->to(device);
     model->eval();
 
     auto input_ids = create_input_ids(1, 8, config.vocab_size);
@@ -356,10 +373,11 @@ TEST_F(ALBERTandT5Test, T5GenerateBosTokenOverride_G15) {
 // instead of silently dropping the padding mask. Verify by running two
 // forward passes with the same inputs but different padding masks — outputs
 // at non-padded positions must change when padded positions vary.
-TEST_F(ALBERTandT5Test, T5DecoderCombinesPaddingMaskWithCausal_G12) {
+TEST_P(ALBERTandT5Test, T5DecoderCombinesPaddingMaskWithCausal_G12) {
     auto config = T5Config::small();
     config.vocab_size = 32128;
     auto model = std::make_shared<T5Model>(config);
+    model->to(device);
     model->eval();
 
     const int64_t B = 1;
@@ -368,17 +386,22 @@ TEST_F(ALBERTandT5Test, T5DecoderCombinesPaddingMaskWithCausal_G12) {
     auto decoder_input_ids = create_input_ids(B, T, config.vocab_size);
 
     // Mask 1: full attention (all 1s). Mask 2: mask the last 16 tokens.
-    Tensor mask_full({B, T}, DType::Float32, device_);
-    Tensor mask_half({B, T}, DType::Float32, device_);
-    auto* fp = mask_full.data<float>();
-    auto* hp = mask_half.data<float>();
+    // Build masks on CPU via host writes, then move to `device`.
+    Tensor mask_full_cpu({B, T}, DType::Float32, Device::cpu());
+    Tensor mask_half_cpu({B, T}, DType::Float32, Device::cpu());
+    auto* fp = mask_full_cpu.data<float>();
+    auto* hp = mask_half_cpu.data<float>();
     for (int64_t i = 0; i < T; ++i) {
         fp[i] = 1.0f;
         hp[i] = (i < T / 2) ? 1.0f : 0.0f;
     }
 
-    Tensor enc_mask({B, T}, DType::Float32, device_);
-    for (int64_t i = 0; i < T; ++i) enc_mask.data<float>()[i] = 1.0f;
+    Tensor enc_mask_cpu({B, T}, DType::Float32, Device::cpu());
+    for (int64_t i = 0; i < T; ++i) enc_mask_cpu.data<float>()[i] = 1.0f;
+
+    Tensor mask_full = mask_full_cpu.to(device);
+    Tensor mask_half = mask_half_cpu.to(device);
+    Tensor enc_mask = enc_mask_cpu.to(device);
 
     auto out_full = model->forward(input_ids, decoder_input_ids, enc_mask, mask_full);
     auto out_half = model->forward(input_ids, decoder_input_ids, enc_mask, mask_half);
@@ -416,10 +439,11 @@ TEST_F(ALBERTandT5Test, T5DecoderCombinesPaddingMaskWithCausal_G12) {
         << diff_pos_mid;
 }
 
-TEST_F(ALBERTandT5Test, T5VariableSequenceLength) {
+TEST_P(ALBERTandT5Test, T5VariableSequenceLength) {
     auto config = T5Config::small();
     config.vocab_size = 32128;
     auto model = std::make_shared<T5Model>(config);
+    model->to(device);
 
     // Test with different sequence lengths
     auto input_32 = create_input_ids(2, 32, config.vocab_size);
@@ -430,15 +454,4 @@ TEST_F(ALBERTandT5Test, T5VariableSequenceLength) {
               (std::vector<int64_t>{2, 32, 512}));
 }
 
-
-// ============================================================================
-// Main  
-// ============================================================================
-
-int main(int argc, char** argv) {
-    ::testing::InitGoogleTest(&argc, argv);
-    if (!::testing::GTEST_FLAG(list_tests)) {
-        tenzor::initialize();
-    }
-    return RUN_ALL_TESTS();
-}
+INSTANTIATE_BACKEND_TESTS(ALBERTandT5Test);

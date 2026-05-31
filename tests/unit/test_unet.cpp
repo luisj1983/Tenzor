@@ -6,20 +6,24 @@
 #include <gtest/gtest.h>
 #include <tenzor/tenzor.hpp>
 #include "../../include/tenzor/models/unet.hpp"
+#include "../backend_test_fixture.hpp"
 #include "../grad_flow_helpers.hpp"
 
 using namespace tenzor;
 using namespace tenzor::models;
 
-class UNetTest : public ::testing::Test {
+class UNetTest : public ::tenzor::testing::BackendTest {
 protected:
-    void SetUp() override { device_ = Device::cpu(); }
-    Device device_;
+    void SetUp() override {
+        ::tenzor::testing::BackendTest::SetUp();
+        if (::testing::Test::IsSkipped()) return;
+    }
 };
 
-TEST_F(UNetTest, UNetForwardShape) {
+TEST_P(UNetTest, UNetForwardShape) {
     auto model = std::make_shared<UNet>(3, 21, false);  // 3 input channels, 21 output classes
-    Variable images(Tensor({2, 3, 256, 256}, DType::Float32, device_), true);
+    model->to(device);
+    Variable images(randn({2, 3, 256, 256}, DType::Float32, device), true);
     Variable output = model->forward(images);
 
     auto shape = output.tensor().shape();
@@ -27,11 +31,12 @@ TEST_F(UNetTest, UNetForwardShape) {
               (std::vector<int64_t>{2, 21, 256, 256}));
 }
 
-TEST_F(UNetTest, UNetGradientFlow) {
+TEST_P(UNetTest, UNetGradientFlow) {
     auto model = std::make_shared<UNet>(3, 21, false);
+    model->to(device);
     model->train();
 
-    Variable images(Tensor({1, 3, 256, 256}, DType::Float32, device_), true);
+    Variable images(randn({1, 3, 256, 256}, DType::Float32, device), true);
     Variable output = model->forward(images);
     Variable loss = tenzor::sum(output);
     loss.backward();
@@ -41,8 +46,9 @@ TEST_F(UNetTest, UNetGradientFlow) {
     EXPECT_GT(params.size(), 0);
 }
 
-TEST_F(UNetTest, UNetParameterCount) {
+TEST_P(UNetTest, UNetParameterCount) {
     auto model = std::make_shared<UNet>(3, 21, false);
+    model->to(device);
     auto params = model->parameters();
 
     size_t total_params = 0;
@@ -59,27 +65,29 @@ TEST_F(UNetTest, UNetParameterCount) {
     EXPECT_LT(total_params, 45'000'000);
 }
 
-TEST_F(UNetTest, UNetDifferentInputSizes) {
+TEST_P(UNetTest, UNetDifferentInputSizes) {
     auto model = std::make_shared<UNet>(3, 21, false);
+    model->to(device);
 
     // Test with 128x128
-    Variable images_128(Tensor({1, 3, 128, 128}, DType::Float32, device_), true);
+    Variable images_128(randn({1, 3, 128, 128}, DType::Float32, device), true);
     Variable output_128 = model->forward(images_128);
     auto shape_128 = output_128.tensor().shape();
     EXPECT_EQ(std::vector<int64_t>(shape_128.begin(), shape_128.end()),
               (std::vector<int64_t>{1, 21, 128, 128}));
 
     // Test with 512x512
-    Variable images_512(Tensor({1, 3, 512, 512}, DType::Float32, device_), true);
+    Variable images_512(randn({1, 3, 512, 512}, DType::Float32, device), true);
     Variable output_512 = model->forward(images_512);
     auto shape_512 = output_512.tensor().shape();
     EXPECT_EQ(std::vector<int64_t>(shape_512.begin(), shape_512.end()),
               (std::vector<int64_t>{1, 21, 512, 512}));
 }
 
-TEST_F(UNetTest, UNetBinarySegmentation) {
+TEST_P(UNetTest, UNetBinarySegmentation) {
     auto model = std::make_shared<UNet>(3, 1, false);  // Binary segmentation
-    Variable images(Tensor({2, 3, 256, 256}, DType::Float32, device_), true);
+    model->to(device);
+    Variable images(randn({2, 3, 256, 256}, DType::Float32, device), true);
     Variable output = model->forward(images);
 
     auto shape = output.tensor().shape();
@@ -87,9 +95,10 @@ TEST_F(UNetTest, UNetBinarySegmentation) {
               (std::vector<int64_t>{2, 1, 256, 256}));
 }
 
-TEST_F(UNetTest, UNetGrayscaleInput) {
+TEST_P(UNetTest, UNetGrayscaleInput) {
     auto model = std::make_shared<UNet>(1, 21, false);  // 1 input channel (grayscale)
-    Variable images(Tensor({1, 1, 256, 256}, DType::Float32, device_), true);
+    model->to(device);
+    Variable images(randn({1, 1, 256, 256}, DType::Float32, device), true);
     Variable output = model->forward(images);
 
     auto shape = output.tensor().shape();
@@ -100,15 +109,16 @@ TEST_F(UNetTest, UNetGrayscaleInput) {
 // G10 regression: Up in bilinear mode must do real spatial upsampling
 // (not just a channel-adjust 1x1 conv). Verify by feeding a small input and
 // a larger skip and confirming the upsample target size is honored.
-TEST_F(UNetTest, BilinearUpDoesRealSpatialUpsample_G10) {
+TEST_P(UNetTest, BilinearUpDoesRealSpatialUpsample_G10) {
     // 64 in, 32 out, bilinear=true. The up_ 1x1 conv maps 64→32 channels;
     // the bilinear upsample resizes to skip's spatial dims.
     auto up = std::make_shared<Up>(/*in_channels=*/64, /*out_channels=*/32, /*bilinear=*/true);
+    up->to(device);
 
     // input : (1, 64, 8, 8)  — small "bottom" feature
     // skip  : (1, 32, 16, 16) — twice the spatial size (the encoder skip)
-    Variable input(Tensor({1, 64, 8, 8}, DType::Float32, device_), false);
-    Variable skip(Tensor({1, 32, 16, 16}, DType::Float32, device_), false);
+    Variable input(randn({1, 64, 8, 8}, DType::Float32, device), false);
+    Variable skip(randn({1, 32, 16, 16}, DType::Float32, device), false);
 
     Variable output = up->forward(input, skip);
     auto shape = output.tensor().shape();
@@ -125,11 +135,13 @@ TEST_F(UNetTest, BilinearUpDoesRealSpatialUpsample_G10) {
 // G10: bilinear-mode UNet must restore the full input spatial dims at the
 // output — same as transposed-conv mode. A regression to "channel-adjust only"
 // (no real upsample) would leave the output at bottleneck spatial size.
-TEST_F(UNetTest, UNetBilinearMatchesOutputShape_G10) {
+TEST_P(UNetTest, UNetBilinearMatchesOutputShape_G10) {
     auto model_bilinear  = std::make_shared<UNet>(3, 21, /*bilinear=*/true);
     auto model_transpose = std::make_shared<UNet>(3, 21, /*bilinear=*/false);
+    model_bilinear->to(device);
+    model_transpose->to(device);
 
-    Variable images(Tensor({1, 3, 256, 256}, DType::Float32, device_), false);
+    Variable images(randn({1, 3, 256, 256}, DType::Float32, device), false);
     Variable out_bi = model_bilinear->forward(images);
     Variable out_tr = model_transpose->forward(images);
 
@@ -142,15 +154,4 @@ TEST_F(UNetTest, UNetBilinearMatchesOutputShape_G10) {
     EXPECT_EQ(sb[3], 256);
 }
 
-
-// ============================================================================
-// Main
-// ============================================================================
-
-int main(int argc, char** argv) {
-    ::testing::InitGoogleTest(&argc, argv);
-    if (!::testing::GTEST_FLAG(list_tests)) {
-        tenzor::initialize();
-    }
-    return RUN_ALL_TESTS();
-}
+INSTANTIATE_BACKEND_TESTS(UNetTest);

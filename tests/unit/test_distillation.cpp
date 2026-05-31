@@ -12,6 +12,7 @@
 #include <gtest/gtest.h>
 #include "tenzor/tenzor.hpp"
 #include "tenzor/nn/compression/distillation.hpp"
+#include "../backend_test_fixture.hpp"
 #include <cmath>
 #include <limits>
 
@@ -27,8 +28,9 @@ using namespace tenzor::nn::compression;
  * @brief Check if tensor contains NaN or Inf values
  */
 bool has_nan_or_inf(const Tensor& t) {
-    const float* data = t.data<const float>();
-    int64_t numel = t.numel();
+    auto t_cpu = t.to(Device::cpu()).to(DType::Float32);
+    const float* data = t_cpu.data<const float>();
+    int64_t numel = t_cpu.numel();
 
     for (int64_t i = 0; i < numel; ++i) {
         if (std::isnan(data[i]) || std::isinf(data[i])) {
@@ -41,7 +43,8 @@ bool has_nan_or_inf(const Tensor& t) {
 /**
  * @brief Naive (unstable) temperature softmax for comparison
  */
-Tensor naive_temperature_softmax(const Tensor& logits, float temperature) {
+Tensor naive_temperature_softmax(const Tensor& logits_in, float temperature) {
+    auto logits = logits_in.to(Device::cpu()).to(DType::Float32);
     const float* input_data = logits.data<const float>();
     auto shape = logits.shape();
 
@@ -128,25 +131,31 @@ private:
 // Test Fixture
 // =============================================================================
 
-class DistillationTest : public ::testing::Test {
+class DistillationTest : public ::tenzor::testing::BackendTest {
 protected:
     void SetUp() override {
-        // Create simple test data
-        logits_normal_ = Tensor({2, 3}, DType::Float32, Device::cpu());
-        float* data = logits_normal_.data<float>();
+        ::tenzor::testing::BackendTest::SetUp();
+        if (::testing::Test::IsSkipped()) return;
+
+        // Create simple test data (host-written on CPU, then moved to device)
+        Tensor logits_normal_cpu({2, 3}, DType::Float32, Device::cpu());
+        float* data = logits_normal_cpu.data<float>();
         data[0] = 1.0f; data[1] = 2.0f; data[2] = 3.0f;
         data[3] = -1.0f; data[4] = 0.0f; data[5] = 1.0f;
+        logits_normal_ = logits_normal_cpu.to(device);
 
         // Create extreme value test data
-        logits_extreme_ = Tensor({2, 3}, DType::Float32, Device::cpu());
-        float* extreme_data = logits_extreme_.data<float>();
+        Tensor logits_extreme_cpu({2, 3}, DType::Float32, Device::cpu());
+        float* extreme_data = logits_extreme_cpu.data<float>();
         extreme_data[0] = 100.0f; extreme_data[1] = 200.0f; extreme_data[2] = 300.0f;
         extreme_data[3] = -100.0f; extreme_data[4] = -200.0f; extreme_data[5] = -300.0f;
+        logits_extreme_ = logits_extreme_cpu.to(device);
 
         // Very large values
-        logits_very_large_ = Tensor({1, 3}, DType::Float32, Device::cpu());
-        float* large_data = logits_very_large_.data<float>();
+        Tensor logits_very_large_cpu({1, 3}, DType::Float32, Device::cpu());
+        float* large_data = logits_very_large_cpu.data<float>();
         large_data[0] = 1000.0f; large_data[1] = 2000.0f; large_data[2] = 3000.0f;
+        logits_very_large_ = logits_very_large_cpu.to(device);
     }
 
     Tensor logits_normal_;
@@ -158,7 +167,7 @@ protected:
 // Temperature Softmax Stability Tests (Agent 9's Critical Fixes)
 // =============================================================================
 
-TEST_F(DistillationTest, TemperatureSoftmaxNormalValues) {
+TEST_P(DistillationTest, TemperatureSoftmaxNormalValues) {
     Variable logits(logits_normal_, true);
 
     auto result = temperature_softmax(logits, 1.0f, -1);
@@ -167,7 +176,8 @@ TEST_F(DistillationTest, TemperatureSoftmaxNormalValues) {
     EXPECT_FALSE(has_nan_or_inf(result.tensor()));
 
     // Check probabilities sum to 1 for each sample
-    const float* data = result.tensor().data<const float>();
+    auto result_cpu = result.tensor().to(Device::cpu()).to(DType::Float32);
+    const float* data = result_cpu.data<const float>();
     float sum1 = data[0] + data[1] + data[2];
     float sum2 = data[3] + data[4] + data[5];
 
@@ -175,7 +185,7 @@ TEST_F(DistillationTest, TemperatureSoftmaxNormalValues) {
     EXPECT_NEAR(sum2, 1.0f, 1e-5);
 }
 
-TEST_F(DistillationTest, TemperatureSoftmaxExtremeValues) {
+TEST_P(DistillationTest, TemperatureSoftmaxExtremeValues) {
     // CRITICAL TEST: Agent 9's fix for numerical stability
     Variable logits(logits_extreme_, true);
 
@@ -187,7 +197,8 @@ TEST_F(DistillationTest, TemperatureSoftmaxExtremeValues) {
             << "Failed for temperature: " << temp;
 
         // Probabilities must sum to 1
-        const float* data = result.tensor().data<const float>();
+        auto result_cpu = result.tensor().to(Device::cpu()).to(DType::Float32);
+        const float* data = result_cpu.data<const float>();
         float sum1 = data[0] + data[1] + data[2];
         float sum2 = data[3] + data[4] + data[5];
 
@@ -204,7 +215,7 @@ TEST_F(DistillationTest, TemperatureSoftmaxExtremeValues) {
     }
 }
 
-TEST_F(DistillationTest, TemperatureSoftmaxVeryLargeValues) {
+TEST_P(DistillationTest, TemperatureSoftmaxVeryLargeValues) {
     // Test with values that would overflow naive exp(x/T)
     Variable logits(logits_very_large_, true);
 
@@ -216,13 +227,14 @@ TEST_F(DistillationTest, TemperatureSoftmaxVeryLargeValues) {
             << "Overflow with temperature: " << temp;
 
         // Must sum to 1
-        const float* data = result.tensor().data<const float>();
+        auto result_cpu = result.tensor().to(Device::cpu()).to(DType::Float32);
+        const float* data = result_cpu.data<const float>();
         float sum = data[0] + data[1] + data[2];
         EXPECT_NEAR(sum, 1.0f, 1e-4);
     }
 }
 
-TEST_F(DistillationTest, TemperatureSoftmaxStabilityVsNaive) {
+TEST_P(DistillationTest, TemperatureSoftmaxStabilityVsNaive) {
     // Compare stable implementation with naive for normal values
     Variable logits(logits_normal_, true);
 
@@ -230,7 +242,8 @@ TEST_F(DistillationTest, TemperatureSoftmaxStabilityVsNaive) {
     auto naive_result = naive_temperature_softmax(logits_normal_, 2.0f);
 
     // Should match for normal values
-    const float* stable_data = stable_result.tensor().data<const float>();
+    auto stable_cpu = stable_result.tensor().to(Device::cpu()).to(DType::Float32);
+    const float* stable_data = stable_cpu.data<const float>();
     const float* naive_data = naive_result.data<const float>();
 
     for (int64_t i = 0; i < 6; ++i) {
@@ -248,14 +261,15 @@ TEST_F(DistillationTest, TemperatureSoftmaxStabilityVsNaive) {
     // Naive version likely has Inf/NaN (we don't assert this, just document the difference)
 }
 
-TEST_F(DistillationTest, TemperatureSoftmaxSmallTemperature) {
+TEST_P(DistillationTest, TemperatureSoftmaxSmallTemperature) {
     // Very small temperature should approach one-hot
     Variable logits(logits_normal_, true);
     auto result = temperature_softmax(logits, 0.01f, -1);
 
     EXPECT_FALSE(has_nan_or_inf(result.tensor()));
 
-    const float* data = result.tensor().data<const float>();
+    auto result_cpu = result.tensor().to(Device::cpu()).to(DType::Float32);
+    const float* data = result_cpu.data<const float>();
 
     // First sample: largest logit is index 2 (value 3.0)
     EXPECT_NEAR(data[2], 1.0f, 0.01f);  // Should be close to 1
@@ -268,14 +282,15 @@ TEST_F(DistillationTest, TemperatureSoftmaxSmallTemperature) {
     EXPECT_LT(data[4], 0.01f);
 }
 
-TEST_F(DistillationTest, TemperatureSoftmaxLargeTemperature) {
+TEST_P(DistillationTest, TemperatureSoftmaxLargeTemperature) {
     // Large temperature should approach uniform distribution
     Variable logits(logits_normal_, true);
     auto result = temperature_softmax(logits, 100.0f, -1);
 
     EXPECT_FALSE(has_nan_or_inf(result.tensor()));
 
-    const float* data = result.tensor().data<const float>();
+    auto result_cpu = result.tensor().to(Device::cpu()).to(DType::Float32);
+    const float* data = result_cpu.data<const float>();
 
     // Each sample should have roughly uniform probabilities
     float expected = 1.0f / 3.0f;
@@ -289,7 +304,7 @@ TEST_F(DistillationTest, TemperatureSoftmaxLargeTemperature) {
 // Temperature Log-Softmax Tests
 // =============================================================================
 
-TEST_F(DistillationTest, TemperatureLogSoftmaxStability) {
+TEST_P(DistillationTest, TemperatureLogSoftmaxStability) {
     Variable logits(logits_extreme_, true);
 
     for (float temp : {0.01f, 0.1f, 1.0f, 10.0f}) {
@@ -300,14 +315,15 @@ TEST_F(DistillationTest, TemperatureLogSoftmaxStability) {
             << "Failed for temperature: " << temp;
 
         // Log probabilities should be negative
-        const float* data = result.tensor().data<const float>();
+        auto result_cpu = result.tensor().to(Device::cpu()).to(DType::Float32);
+        const float* data = result_cpu.data<const float>();
         for (int64_t i = 0; i < 6; ++i) {
             EXPECT_LE(data[i], 0.0f) << "Log prob should be <= 0 at index " << i;
         }
     }
 }
 
-TEST_F(DistillationTest, TemperatureLogSoftmaxVsSoftmax) {
+TEST_P(DistillationTest, TemperatureLogSoftmaxVsSoftmax) {
     // log_softmax should match log(softmax)
     Variable logits(logits_normal_, true);
 
@@ -315,8 +331,10 @@ TEST_F(DistillationTest, TemperatureLogSoftmaxVsSoftmax) {
     auto softmax_result = temperature_softmax(logits, 2.0f, -1);
 
     // Manually compute log of softmax
-    const float* softmax_data = softmax_result.tensor().data<const float>();
-    const float* log_data = log_result.tensor().data<const float>();
+    auto softmax_cpu = softmax_result.tensor().to(Device::cpu()).to(DType::Float32);
+    auto log_cpu = log_result.tensor().to(Device::cpu()).to(DType::Float32);
+    const float* softmax_data = softmax_cpu.data<const float>();
+    const float* log_data = log_cpu.data<const float>();
 
     for (int64_t i = 0; i < 6; ++i) {
         float expected_log = std::log(softmax_data[i]);
@@ -329,7 +347,7 @@ TEST_F(DistillationTest, TemperatureLogSoftmaxVsSoftmax) {
 // KL Divergence Tests
 // =============================================================================
 
-TEST_F(DistillationTest, KLDivergenceBasic) {
+TEST_P(DistillationTest, KLDivergenceBasic) {
     // Create simple probability distributions
     Tensor p_tensor({2, 3}, DType::Float32, Device::cpu());
     Tensor log_q_tensor({2, 3}, DType::Float32, Device::cpu());
@@ -350,15 +368,15 @@ TEST_F(DistillationTest, KLDivergenceBasic) {
     log_q_data[4] = std::log(0.4f);
     log_q_data[5] = std::log(0.2f);
 
-    Variable p(p_tensor, false);
-    Variable log_q(log_q_tensor, false);
+    Variable p(p_tensor.to(device), false);
+    Variable log_q(log_q_tensor.to(device), false);
 
     auto kl = kl_divergence(log_q, p, "sum");
 
     EXPECT_FALSE(has_nan_or_inf(kl.tensor()));
 
     // KL divergence sum should be non-negative (individual elements can be negative)
-    float kl_sum = kl.tensor().data<const float>()[0];
+    float kl_sum = kl.tensor().to(Device::cpu()).to(DType::Float32).data<const float>()[0];
     EXPECT_GE(kl_sum, 0.0f) << "Total KL divergence should be non-negative";
 
     // Manually verify: KL(P||Q) = sum(P * (log P - log Q))
@@ -369,7 +387,7 @@ TEST_F(DistillationTest, KLDivergenceBasic) {
     EXPECT_GT(kl_sum, 0.0f) << "KL(P||Q) should be positive when P != Q";
 }
 
-TEST_F(DistillationTest, KLDivergenceIdenticalDistributions) {
+TEST_P(DistillationTest, KLDivergenceIdenticalDistributions) {
     // KL(P||P) should be 0
     Tensor p_tensor({1, 3}, DType::Float32, Device::cpu());
     float* data = p_tensor.data<float>();
@@ -381,13 +399,13 @@ TEST_F(DistillationTest, KLDivergenceIdenticalDistributions) {
     log_data[1] = std::log(0.3f);
     log_data[2] = std::log(0.2f);
 
-    Variable p(p_tensor, false);
-    Variable log_p(log_p_tensor, false);
+    Variable p(p_tensor.to(device), false);
+    Variable log_p(log_p_tensor.to(device), false);
 
     auto kl = kl_divergence(log_p, p, "batchmean");
 
     // Should be very close to 0
-    float kl_value = kl.tensor().data<const float>()[0];
+    float kl_value = kl.tensor().to(Device::cpu()).to(DType::Float32).data<const float>()[0];
     EXPECT_NEAR(kl_value, 0.0f, 1e-5);
 }
 
@@ -395,16 +413,16 @@ TEST_F(DistillationTest, KLDivergenceIdenticalDistributions) {
 // Distillation Loss Tests
 // =============================================================================
 
-TEST_F(DistillationTest, DistillationLossAlphaBlending) {
+TEST_P(DistillationTest, DistillationLossAlphaBlending) {
     // Test that alpha correctly balances soft and hard losses
     Tensor student_logits({2, 3}, DType::Float32, Device::cpu());
     Tensor teacher_logits({2, 3}, DType::Float32, Device::cpu());
-    Tensor targets({2}, DType::Int64, Device::cpu());
+    Tensor targets_cpu({2}, DType::Int64, Device::cpu());
 
     // Initialize with some values
     float* s_data = student_logits.data<float>();
     float* t_data = teacher_logits.data<float>();
-    int64_t* target_data = targets.data<int64_t>();
+    int64_t* target_data = targets_cpu.data<int64_t>();
 
     for (int i = 0; i < 6; ++i) {
         s_data[i] = static_cast<float>(i) * 0.5f;
@@ -413,8 +431,9 @@ TEST_F(DistillationTest, DistillationLossAlphaBlending) {
     target_data[0] = 1;
     target_data[1] = 2;
 
-    Variable student(student_logits, true);
-    Variable teacher(teacher_logits, false);
+    Tensor targets = targets_cpu.to(device);
+    Variable student(student_logits.to(device), true);
+    Variable teacher(teacher_logits.to(device), false);
 
     // Test alpha = 0.0 (only hard targets)
     DistillationConfig config_hard;
@@ -444,7 +463,7 @@ TEST_F(DistillationTest, DistillationLossAlphaBlending) {
     EXPECT_FALSE(has_nan_or_inf(loss_balanced.tensor()));
 }
 
-TEST_F(DistillationTest, DistillationLossTemperatureScaling) {
+TEST_P(DistillationTest, DistillationLossTemperatureScaling) {
     Tensor student_logits({1, 3}, DType::Float32, Device::cpu());
     Tensor teacher_logits({1, 3}, DType::Float32, Device::cpu());
 
@@ -454,8 +473,8 @@ TEST_F(DistillationTest, DistillationLossTemperatureScaling) {
     s_data[0] = 1.0f; s_data[1] = 2.0f; s_data[2] = 3.0f;
     t_data[0] = 1.5f; t_data[1] = 2.5f; t_data[2] = 3.5f;
 
-    Variable student(student_logits, true);
-    Variable teacher(teacher_logits, false);
+    Variable student(student_logits.to(device), true);
+    Variable teacher(teacher_logits.to(device), false);
 
     DistillationConfig config;
     config.alpha = 1.0f;
@@ -470,13 +489,13 @@ TEST_F(DistillationTest, DistillationLossTemperatureScaling) {
         EXPECT_FALSE(has_nan_or_inf(loss.tensor()))
             << "Loss has NaN/Inf for temperature: " << temp;
 
-        float loss_val = loss.tensor().data<const float>()[0];
+        float loss_val = loss.tensor().to(Device::cpu()).to(DType::Float32).data<const float>()[0];
         EXPECT_GE(loss_val, 0.0f)
             << "Loss should be non-negative for temperature: " << temp;
     }
 }
 
-TEST_F(DistillationTest, DistillationLossNormalization) {
+TEST_P(DistillationTest, DistillationLossNormalization) {
     Tensor student_logits({1, 3}, DType::Float32, Device::cpu());
     Tensor teacher_logits({1, 3}, DType::Float32, Device::cpu());
 
@@ -486,8 +505,8 @@ TEST_F(DistillationTest, DistillationLossNormalization) {
     s_data[0] = 1.0f; s_data[1] = 2.0f; s_data[2] = 3.0f;
     t_data[0] = 1.0f; t_data[1] = 2.0f; t_data[2] = 3.0f;
 
-    Variable student(student_logits, true);
-    Variable teacher(teacher_logits, false);
+    Variable student(student_logits.to(device), true);
+    Variable teacher(teacher_logits.to(device), false);
 
     DistillationConfig config_normalized;
     config_normalized.temperature = 5.0f;
@@ -506,8 +525,8 @@ TEST_F(DistillationTest, DistillationLossNormalization) {
     auto loss_unnormalized = distillation_loss(student, teacher, std::nullopt, config_unnormalized);
 
     // Normalized loss should be scaled by T^2
-    float norm_val = loss_normalized.tensor().data<const float>()[0];
-    float unnorm_val = loss_unnormalized.tensor().data<const float>()[0];
+    float norm_val = loss_normalized.tensor().to(Device::cpu()).to(DType::Float32).data<const float>()[0];
+    float unnorm_val = loss_unnormalized.tensor().to(Device::cpu()).to(DType::Float32).data<const float>()[0];
 
     EXPECT_NEAR(norm_val, unnorm_val * 25.0f, 0.1f);  // 5^2 = 25
 }
@@ -516,9 +535,11 @@ TEST_F(DistillationTest, DistillationLossNormalization) {
 // KnowledgeDistillation Class Tests
 // =============================================================================
 
-TEST_F(DistillationTest, KnowledgeDistillationConstruction) {
+TEST_P(DistillationTest, KnowledgeDistillationConstruction) {
     auto teacher = std::make_shared<SimpleTeacher>(10, 20, 15, 5);
     auto student = std::make_shared<SimpleStudent>(10, 8, 5);
+    teacher->to(device);
+    student->to(device);
 
     DistillationConfig config;
     config.temperature = 4.0f;
@@ -532,13 +553,15 @@ TEST_F(DistillationTest, KnowledgeDistillationConstruction) {
     EXPECT_FLOAT_EQ(distiller.config().alpha, 0.8f);
 }
 
-TEST_F(DistillationTest, KnowledgeDistillationForwardPass) {
+TEST_P(DistillationTest, KnowledgeDistillationForwardPass) {
     auto teacher = std::make_shared<SimpleTeacher>(10, 20, 15, 5);
     auto student = std::make_shared<SimpleStudent>(10, 8, 5);
+    teacher->to(device);
+    student->to(device);
 
     auto distiller = KnowledgeDistillation(teacher, student);
 
-    Tensor input({2, 10}, DType::Float32, Device::cpu());
+    Tensor input({2, 10}, DType::Float32, device);
     input.fill_(0.5f);
     Variable input_var(input, true);
 
@@ -553,9 +576,11 @@ TEST_F(DistillationTest, KnowledgeDistillationForwardPass) {
     EXPECT_FALSE(has_nan_or_inf(teacher_out.tensor()));
 }
 
-TEST_F(DistillationTest, KnowledgeDistillationComputeLoss) {
+TEST_P(DistillationTest, KnowledgeDistillationComputeLoss) {
     auto teacher = std::make_shared<SimpleTeacher>(10, 20, 15, 5);
     auto student = std::make_shared<SimpleStudent>(10, 8, 5);
+    teacher->to(device);
+    student->to(device);
 
     DistillationConfig config;
     config.temperature = 3.0f;
@@ -563,25 +588,28 @@ TEST_F(DistillationTest, KnowledgeDistillationComputeLoss) {
 
     auto distiller = KnowledgeDistillation(teacher, student, config);
 
-    Tensor input({2, 10}, DType::Float32, Device::cpu());
+    Tensor input({2, 10}, DType::Float32, device);
     input.fill_(0.5f);
     Variable input_var(input, true);
 
-    Tensor targets({2}, DType::Int64, Device::cpu());
-    targets.data<int64_t>()[0] = 1;
-    targets.data<int64_t>()[1] = 3;
+    Tensor targets_cpu({2}, DType::Int64, Device::cpu());
+    targets_cpu.data<int64_t>()[0] = 1;
+    targets_cpu.data<int64_t>()[1] = 3;
+    Tensor targets = targets_cpu.to(device);
 
     auto loss = distiller.compute_loss(input_var, targets);
 
     EXPECT_FALSE(has_nan_or_inf(loss.tensor()));
 
-    float loss_val = loss.tensor().data<const float>()[0];
+    float loss_val = loss.tensor().to(Device::cpu()).to(DType::Float32).data<const float>()[0];
     EXPECT_GE(loss_val, 0.0f);
 }
 
-TEST_F(DistillationTest, KnowledgeDistillationConfigUpdate) {
+TEST_P(DistillationTest, KnowledgeDistillationConfigUpdate) {
     auto teacher = std::make_shared<SimpleTeacher>(10, 20, 15, 5);
     auto student = std::make_shared<SimpleStudent>(10, 8, 5);
+    teacher->to(device);
+    student->to(device);
 
     auto distiller = KnowledgeDistillation(teacher, student);
 
@@ -609,7 +637,7 @@ TEST_F(DistillationTest, KnowledgeDistillationConfigUpdate) {
 // Temperature Schedule Tests
 // =============================================================================
 
-TEST_F(DistillationTest, TemperatureScheduleLinear) {
+TEST_P(DistillationTest, TemperatureScheduleLinear) {
     float initial = 10.0f;
     float final = 2.0f;
     int total_epochs = 100;
@@ -627,7 +655,7 @@ TEST_F(DistillationTest, TemperatureScheduleLinear) {
     EXPECT_FLOAT_EQ(temp100, final);
 }
 
-TEST_F(DistillationTest, TemperatureScheduleExponential) {
+TEST_P(DistillationTest, TemperatureScheduleExponential) {
     float initial = 10.0f;
     float final = 1.0f;
     int total_epochs = 100;
@@ -644,7 +672,7 @@ TEST_F(DistillationTest, TemperatureScheduleExponential) {
     EXPECT_LT(temp25, linear_temp25);
 }
 
-TEST_F(DistillationTest, TemperatureScheduleCosine) {
+TEST_P(DistillationTest, TemperatureScheduleCosine) {
     float initial = 10.0f;
     float final = 2.0f;
     int total_epochs = 100;
@@ -660,7 +688,7 @@ TEST_F(DistillationTest, TemperatureScheduleCosine) {
 // Configuration Presets Tests
 // =============================================================================
 
-TEST_F(DistillationTest, ClassificationConfig) {
+TEST_P(DistillationTest, ClassificationConfig) {
     auto config = make_classification_distillation_config();
 
     EXPECT_FLOAT_EQ(config.temperature, 3.0f);
@@ -669,7 +697,7 @@ TEST_F(DistillationTest, ClassificationConfig) {
     EXPECT_TRUE(config.normalize_temperature);
 }
 
-TEST_F(DistillationTest, DetectionConfig) {
+TEST_P(DistillationTest, DetectionConfig) {
     auto config = make_detection_distillation_config();
 
     EXPECT_FLOAT_EQ(config.temperature, 2.0f);
@@ -678,7 +706,7 @@ TEST_F(DistillationTest, DetectionConfig) {
     EXPECT_TRUE(config.normalize_temperature);
 }
 
-TEST_F(DistillationTest, SegmentationConfig) {
+TEST_P(DistillationTest, SegmentationConfig) {
     auto config = make_segmentation_distillation_config();
 
     EXPECT_FLOAT_EQ(config.temperature, 1.5f);
@@ -691,9 +719,11 @@ TEST_F(DistillationTest, SegmentationConfig) {
 // Compression Ratio Tests
 // =============================================================================
 
-TEST_F(DistillationTest, CompressionRatio) {
+TEST_P(DistillationTest, CompressionRatio) {
     auto teacher = std::make_shared<SimpleTeacher>(10, 20, 15, 5);
     auto student = std::make_shared<SimpleStudent>(10, 8, 5);
+    teacher->to(device);
+    student->to(device);
 
     float ratio = compute_distillation_compression_ratio(teacher, student);
 
@@ -708,7 +738,7 @@ TEST_F(DistillationTest, CompressionRatio) {
 // Edge Cases and Error Handling
 // =============================================================================
 
-TEST_F(DistillationTest, InvalidTemperature) {
+TEST_P(DistillationTest, InvalidTemperature) {
     Variable logits(logits_normal_, true);
 
     // Temperature must be positive
@@ -718,18 +748,18 @@ TEST_F(DistillationTest, InvalidTemperature) {
     EXPECT_THROW(temperature_log_softmax(logits, -1.0f, -1), std::runtime_error);
 }
 
-TEST_F(DistillationTest, EmptyTensorHandling) {
+TEST_P(DistillationTest, EmptyTensorHandling) {
     // Test with empty tensors (should not crash)
-    Tensor empty({0, 3}, DType::Float32, Device::cpu());
+    Tensor empty({0, 3}, DType::Float32, device);
     Variable empty_var(empty, false);
 
     // These should handle empty input gracefully
     // (actual behavior depends on implementation)
 }
 
-TEST_F(DistillationTest, SingleClassProblem) {
+TEST_P(DistillationTest, SingleClassProblem) {
     // Test with single class (edge case)
-    Tensor single_class({2, 1}, DType::Float32, Device::cpu());
+    Tensor single_class({2, 1}, DType::Float32, device);
     single_class.fill_(1.0f);
 
     Variable logits(single_class, true);
@@ -738,7 +768,8 @@ TEST_F(DistillationTest, SingleClassProblem) {
     EXPECT_FALSE(has_nan_or_inf(result.tensor()));
 
     // Single class should have probability 1.0
-    const float* data = result.tensor().data<const float>();
+    auto result_cpu = result.tensor().to(Device::cpu()).to(DType::Float32);
+    const float* data = result_cpu.data<const float>();
     EXPECT_NEAR(data[0], 1.0f, 1e-5);
     EXPECT_NEAR(data[1], 1.0f, 1e-5);
 }
@@ -747,7 +778,7 @@ TEST_F(DistillationTest, SingleClassProblem) {
 // Numerical Stability Stress Tests
 // =============================================================================
 
-TEST_F(DistillationTest, NumericalStabilityExtremeTemperatures) {
+TEST_P(DistillationTest, NumericalStabilityExtremeTemperatures) {
     Variable logits(logits_extreme_, true);
 
     // Very small temperatures (approaching hard targets)
@@ -765,49 +796,51 @@ TEST_F(DistillationTest, NumericalStabilityExtremeTemperatures) {
     }
 }
 
-TEST_F(DistillationTest, NumericalStabilityMixedRanges) {
+TEST_P(DistillationTest, NumericalStabilityMixedRanges) {
     // Test with mixed positive and negative extreme values
-    Tensor mixed({1, 4}, DType::Float32, Device::cpu());
-    float* data = mixed.data<float>();
+    Tensor mixed_cpu({1, 4}, DType::Float32, Device::cpu());
+    float* data = mixed_cpu.data<float>();
     data[0] = -500.0f;
     data[1] = 0.0f;
     data[2] = 500.0f;
     data[3] = 1000.0f;
 
-    Variable logits(mixed, true);
+    Variable logits(mixed_cpu.to(device), true);
 
     for (float temp : {0.1f, 1.0f, 10.0f}) {
         auto result = temperature_softmax(logits, temp, -1);
 
         EXPECT_FALSE(has_nan_or_inf(result.tensor()));
 
-        const float* result_data = result.tensor().data<const float>();
+        auto result_cpu = result.tensor().to(Device::cpu()).to(DType::Float32);
+        const float* result_data = result_cpu.data<const float>();
         float sum = result_data[0] + result_data[1] + result_data[2] + result_data[3];
         EXPECT_NEAR(sum, 1.0f, 1e-4);
     }
 }
 
-TEST_F(DistillationTest, NumericalStabilityAllNegative) {
+TEST_P(DistillationTest, NumericalStabilityAllNegative) {
     // Test with all negative values
-    Tensor all_negative({1, 3}, DType::Float32, Device::cpu());
-    float* data = all_negative.data<float>();
+    Tensor all_negative_cpu({1, 3}, DType::Float32, Device::cpu());
+    float* data = all_negative_cpu.data<float>();
     data[0] = -100.0f;
     data[1] = -200.0f;
     data[2] = -300.0f;
 
-    Variable logits(all_negative, true);
+    Variable logits(all_negative_cpu.to(device), true);
     auto result = temperature_softmax(logits, 1.0f, -1);
 
     EXPECT_FALSE(has_nan_or_inf(result.tensor()));
 
-    const float* result_data = result.tensor().data<const float>();
+    auto result_cpu = result.tensor().to(Device::cpu()).to(DType::Float32);
+    const float* result_data = result_cpu.data<const float>();
     float sum = result_data[0] + result_data[1] + result_data[2];
     EXPECT_NEAR(sum, 1.0f, 1e-5);
 }
 
-TEST_F(DistillationTest, NumericalStabilityAllZeros) {
+TEST_P(DistillationTest, NumericalStabilityAllZeros) {
     // Test with all zeros (should give uniform distribution)
-    Tensor all_zeros({1, 3}, DType::Float32, Device::cpu());
+    Tensor all_zeros({1, 3}, DType::Float32, device);
     all_zeros.fill_(0.0f);
 
     Variable logits(all_zeros, true);
@@ -815,7 +848,8 @@ TEST_F(DistillationTest, NumericalStabilityAllZeros) {
 
     EXPECT_FALSE(has_nan_or_inf(result.tensor()));
 
-    const float* data = result.tensor().data<const float>();
+    auto result_cpu = result.tensor().to(Device::cpu()).to(DType::Float32);
+    const float* data = result_cpu.data<const float>();
     float expected = 1.0f / 3.0f;
     for (int i = 0; i < 3; ++i) {
         EXPECT_NEAR(data[i], expected, 1e-5);
@@ -834,8 +868,8 @@ TEST_F(DistillationTest, NumericalStabilityAllZeros) {
 // These tests lock in the fix: backward must produce a non-zero grad on the
 // original Float16 input.
 
-TEST_F(DistillationTest, TemperatureSoftmaxF16PreservesAutogradChain) {
-    auto logits_f16 = randn({2, 5}, DType::Float16, Device::cpu());
+TEST_P(DistillationTest, TemperatureSoftmaxF16PreservesAutogradChain) {
+    auto logits_f16 = randn({2, 5}, DType::Float16, device);
     Variable logits(logits_f16, /*requires_grad=*/true);
     auto out = temperature_softmax(logits, 2.0f, -1);
     // sum(softmax(x)) is constant (rows sum to 1) so its grad would be zero
@@ -859,8 +893,8 @@ TEST_F(DistillationTest, TemperatureSoftmaxF16PreservesAutogradChain) {
         << "grad dtype must match input dtype (Float16) via TypeCastBackward";
 }
 
-TEST_F(DistillationTest, TemperatureLogSoftmaxF16PreservesAutogradChain) {
-    auto logits_f16 = randn({2, 5}, DType::Float16, Device::cpu());
+TEST_P(DistillationTest, TemperatureLogSoftmaxF16PreservesAutogradChain) {
+    auto logits_f16 = randn({2, 5}, DType::Float16, device);
     Variable logits(logits_f16, /*requires_grad=*/true);
     auto out = temperature_log_softmax(logits, 2.0f, -1);
     auto loss = tenzor::sum(out);
@@ -877,9 +911,9 @@ TEST_F(DistillationTest, TemperatureLogSoftmaxF16PreservesAutogradChain) {
         << "temperature_log_softmax gradient zero on Float16 — graph severed";
 }
 
-TEST_F(DistillationTest, DistillationLossF16StudentGetsGradient) {
-    auto student_f16 = randn({2, 4}, DType::Float16, Device::cpu());
-    auto teacher_f16 = randn({2, 4}, DType::Float16, Device::cpu());
+TEST_P(DistillationTest, DistillationLossF16StudentGetsGradient) {
+    auto student_f16 = randn({2, 4}, DType::Float16, device);
+    auto teacher_f16 = randn({2, 4}, DType::Float16, device);
     Variable student(student_f16, /*requires_grad=*/true);
     Variable teacher(teacher_f16, /*requires_grad=*/false);
 
@@ -903,15 +937,7 @@ TEST_F(DistillationTest, DistillationLossF16StudentGetsGradient) {
 }
 
 // =============================================================================
-// Main
+// Backend instantiation
 // =============================================================================
 
-int main(int argc, char** argv) {
-    // Initialize Tenzor backend
-
-    ::testing::InitGoogleTest(&argc, argv);
-    if (!::testing::GTEST_FLAG(list_tests)) {
-        tenzor::initialize();
-    }
-    return RUN_ALL_TESTS();
-}
+INSTANTIATE_BACKEND_TESTS(DistillationTest);

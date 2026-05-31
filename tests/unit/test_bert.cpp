@@ -10,6 +10,7 @@
 #include "tenzor/autograd/variable.hpp"
 #include "tenzor/ops/reduction.hpp"
 #include "tenzor/ops/math.hpp"
+#include "../backend_test_fixture.hpp"
 #include <memory>
 #include <vector>
 
@@ -20,9 +21,12 @@ using namespace tenzor::models;
 // Test Fixtures
 // ============================================================================
 
-class BertTest : public ::testing::Test {
+class BertTest : public ::tenzor::testing::BackendTest {
 protected:
     void SetUp() override {
+        ::tenzor::testing::BackendTest::SetUp();
+        if (::testing::Test::IsSkipped()) return;
+
         // Use small config for fast testing
         config_ = BertConfig();
         config_.vocab_size = 1000;
@@ -35,17 +39,16 @@ protected:
 
         batch_size_ = 2;
         seq_len_ = 16;
-        device_ = Device::cpu();
     }
 
     BertConfig config_;
     int64_t batch_size_;
     int64_t seq_len_;
-    Device device_;
 
     // Helper to create input token IDs
     auto create_input_ids() -> Variable {
-        Tensor input_ids({batch_size_, seq_len_}, DType::Int64, device_);
+        // Index tensors are built via host writes on CPU, then moved to device.
+        Tensor input_ids({batch_size_, seq_len_}, DType::Int64, Device::cpu());
 
         // Fill with random token IDs
         std::vector<int64_t> data(batch_size_ * seq_len_);
@@ -54,19 +57,19 @@ protected:
         }
         std::copy(data.begin(), data.end(), input_ids.data<int64_t>());
 
-        return Variable(input_ids, true);
+        return Variable(input_ids.to(device), true);
     }
 
     // Helper to create attention mask
     auto create_attention_mask() -> Tensor {
-        Tensor mask({batch_size_, seq_len_}, DType::Float32, device_);
+        Tensor mask({batch_size_, seq_len_}, DType::Float32, Device::cpu());
         mask.fill_(1.0f);  // All valid (no padding)
-        return mask;
+        return mask.to(device);
     }
 
     // Helper to create token type IDs
     auto create_token_type_ids() -> Variable {
-        Tensor type_ids({batch_size_, seq_len_}, DType::Int64, device_);
+        Tensor type_ids({batch_size_, seq_len_}, DType::Int64, Device::cpu());
 
         // First half is segment 0, second half is segment 1
         std::vector<int64_t> data(batch_size_ * seq_len_);
@@ -77,7 +80,7 @@ protected:
         }
         std::copy(data.begin(), data.end(), type_ids.data<int64_t>());
 
-        return Variable(type_ids, false);
+        return Variable(type_ids.to(device), false);
     }
 };
 
@@ -85,8 +88,9 @@ protected:
 // BertEmbeddings Tests
 // ============================================================================
 
-TEST_F(BertTest, BertEmbeddingsForwardShape) {
+TEST_P(BertTest, BertEmbeddingsForwardShape) {
     auto embeddings = BertEmbeddings(config_);
+    embeddings.to(device);
     auto input_ids = create_input_ids();
 
     auto output = embeddings.forward(input_ids, Variable{}, Variable{});
@@ -98,8 +102,9 @@ TEST_F(BertTest, BertEmbeddingsForwardShape) {
     EXPECT_EQ(output.tensor().shape()[2], config_.hidden_size);
 }
 
-TEST_F(BertTest, BertEmbeddingsWithTokenTypes) {
+TEST_P(BertTest, BertEmbeddingsWithTokenTypes) {
     auto embeddings = BertEmbeddings(config_);
+    embeddings.to(device);
     auto input_ids = create_input_ids();
     auto token_type_ids = create_token_type_ids();
 
@@ -111,8 +116,9 @@ TEST_F(BertTest, BertEmbeddingsWithTokenTypes) {
     EXPECT_EQ(output.tensor().shape()[2], config_.hidden_size);
 }
 
-TEST_F(BertTest, BertEmbeddingsGradientFlow) {
+TEST_P(BertTest, BertEmbeddingsGradientFlow) {
     auto embeddings = BertEmbeddings(config_);
+    embeddings.to(device);
     embeddings.train();
 
     auto input_ids = create_input_ids();
@@ -138,12 +144,13 @@ TEST_F(BertTest, BertEmbeddingsGradientFlow) {
 // BertEncoder Tests
 // ============================================================================
 
-TEST_F(BertTest, BertEncoderForwardShape) {
+TEST_P(BertTest, BertEncoderForwardShape) {
     auto encoder = BertEncoder(config_);
+    encoder.to(device);
 
     // Create input embeddings
     Tensor hidden_states({batch_size_, seq_len_, config_.hidden_size},
-                        DType::Float32, device_);
+                        DType::Float32, device);
     hidden_states.fill_(0.1f);
     Variable input(hidden_states, true);
 
@@ -155,11 +162,12 @@ TEST_F(BertTest, BertEncoderForwardShape) {
     EXPECT_EQ(output.tensor().shape()[2], config_.hidden_size);
 }
 
-TEST_F(BertTest, BertEncoderWithMask) {
+TEST_P(BertTest, BertEncoderWithMask) {
     auto encoder = BertEncoder(config_);
+    encoder.to(device);
 
     Tensor hidden_states({batch_size_, seq_len_, config_.hidden_size},
-                        DType::Float32, device_);
+                        DType::Float32, device);
     hidden_states.fill_(0.1f);
     Variable input(hidden_states, true);
 
@@ -172,12 +180,13 @@ TEST_F(BertTest, BertEncoderWithMask) {
     EXPECT_EQ(output.tensor().shape()[2], config_.hidden_size);
 }
 
-TEST_F(BertTest, BertEncoderGradientFlow) {
+TEST_P(BertTest, BertEncoderGradientFlow) {
     auto encoder = BertEncoder(config_);
+    encoder.to(device);
     encoder.train();
 
     Tensor hidden_states({batch_size_, seq_len_, config_.hidden_size},
-                        DType::Float32, device_);
+                        DType::Float32, device);
     hidden_states.fill_(0.1f);
     Variable input(hidden_states, true);
 
@@ -198,11 +207,12 @@ TEST_F(BertTest, BertEncoderGradientFlow) {
 // BertPooler Tests
 // ============================================================================
 
-TEST_F(BertTest, BertPoolerForwardShape) {
+TEST_P(BertTest, BertPoolerForwardShape) {
     auto pooler = BertPooler(config_);
+    pooler.to(device);
 
     Tensor hidden_states({batch_size_, seq_len_, config_.hidden_size},
-                        DType::Float32, device_);
+                        DType::Float32, device);
     hidden_states.fill_(0.1f);
     Variable input(hidden_states, true);
 
@@ -214,18 +224,19 @@ TEST_F(BertTest, BertPoolerForwardShape) {
     EXPECT_EQ(output.tensor().shape()[1], config_.hidden_size);
 }
 
-TEST_F(BertTest, BertPoolerTanhActivation) {
+TEST_P(BertTest, BertPoolerTanhActivation) {
     auto pooler = BertPooler(config_);
+    pooler.to(device);
 
     Tensor hidden_states({batch_size_, seq_len_, config_.hidden_size},
-                        DType::Float32, device_);
+                        DType::Float32, device);
     hidden_states.fill_(0.1f);
     Variable input(hidden_states, true);
 
     auto output = pooler.forward(input);
 
     // Check that output is in tanh range [-1, 1]
-    auto output_data = output.tensor();
+    auto output_data = output.tensor().cpu();
     float max_val = tenzor::max(output_data).item<float>();
     float min_val = tenzor::min(output_data).item<float>();
 
@@ -237,8 +248,9 @@ TEST_F(BertTest, BertPoolerTanhActivation) {
 // BertModel Tests
 // ============================================================================
 
-TEST_F(BertTest, BertModelForwardShape) {
+TEST_P(BertTest, BertModelForwardShape) {
     auto model = BertModel(config_);
+    model.to(device);
     auto input_ids = create_input_ids();
 
     auto outputs = model.forward(input_ids, Tensor{}, Variable{}, Variable{});
@@ -253,8 +265,9 @@ TEST_F(BertTest, BertModelForwardShape) {
     EXPECT_EQ(outputs.pooled_output.tensor().shape()[1], config_.hidden_size);
 }
 
-TEST_F(BertTest, BertModelWithAllInputs) {
+TEST_P(BertTest, BertModelWithAllInputs) {
     auto model = BertModel(config_);
+    model.to(device);
     auto input_ids = create_input_ids();
     auto attention_mask = create_attention_mask();
     auto token_type_ids = create_token_type_ids();
@@ -270,8 +283,9 @@ TEST_F(BertTest, BertModelWithAllInputs) {
     EXPECT_EQ(outputs.pooled_output.tensor().shape()[1], config_.hidden_size);
 }
 
-TEST_F(BertTest, BertModelGradientFlow) {
+TEST_P(BertTest, BertModelGradientFlow) {
     auto model = BertModel(config_);
+    model.to(device);
     model.train();
 
     auto input_ids = create_input_ids();
@@ -290,8 +304,9 @@ TEST_F(BertTest, BertModelGradientFlow) {
     }
 }
 
-TEST_F(BertTest, BertModelTrainEvalMode) {
+TEST_P(BertTest, BertModelTrainEvalMode) {
     auto model = BertModel(config_);
+    model.to(device);
     auto input_ids = create_input_ids();
 
     // Test training mode
@@ -313,9 +328,10 @@ TEST_F(BertTest, BertModelTrainEvalMode) {
 // BertForSequenceClassification Tests
 // ============================================================================
 
-TEST_F(BertTest, SequenceClassificationForwardShape) {
+TEST_P(BertTest, SequenceClassificationForwardShape) {
     int64_t num_labels = 2;  // Binary classification
     auto model = BertForSequenceClassification(config_, num_labels);
+    model.to(device);
     auto input_ids = create_input_ids();
 
     auto logits = model.forward(input_ids, Tensor{}, Variable{});
@@ -326,9 +342,10 @@ TEST_F(BertTest, SequenceClassificationForwardShape) {
     EXPECT_EQ(logits.tensor().shape()[1], num_labels);
 }
 
-TEST_F(BertTest, SequenceClassificationMultiClass) {
+TEST_P(BertTest, SequenceClassificationMultiClass) {
     int64_t num_labels = 5;  // 5-way classification
     auto model = BertForSequenceClassification(config_, num_labels);
+    model.to(device);
     auto input_ids = create_input_ids();
 
     auto logits = model.forward(input_ids, Tensor{}, Variable{});
@@ -337,9 +354,10 @@ TEST_F(BertTest, SequenceClassificationMultiClass) {
     EXPECT_EQ(logits.tensor().shape()[1], num_labels);
 }
 
-TEST_F(BertTest, SequenceClassificationGradientFlow) {
+TEST_P(BertTest, SequenceClassificationGradientFlow) {
     int64_t num_labels = 3;
     auto model = BertForSequenceClassification(config_, num_labels);
+    model.to(device);
     model.train();
 
     auto input_ids = create_input_ids();
@@ -362,9 +380,10 @@ TEST_F(BertTest, SequenceClassificationGradientFlow) {
 // BertForTokenClassification Tests
 // ============================================================================
 
-TEST_F(BertTest, TokenClassificationForwardShape) {
+TEST_P(BertTest, TokenClassificationForwardShape) {
     int64_t num_labels = 9;  // NER with 9 tags
     auto model = BertForTokenClassification(config_, num_labels);
+    model.to(device);
     auto input_ids = create_input_ids();
 
     auto logits = model.forward(input_ids, Tensor{}, Variable{});
@@ -376,9 +395,10 @@ TEST_F(BertTest, TokenClassificationForwardShape) {
     EXPECT_EQ(logits.tensor().shape()[2], num_labels);
 }
 
-TEST_F(BertTest, TokenClassificationWithMask) {
+TEST_P(BertTest, TokenClassificationWithMask) {
     int64_t num_labels = 9;
     auto model = BertForTokenClassification(config_, num_labels);
+    model.to(device);
     auto input_ids = create_input_ids();
     auto attention_mask = create_attention_mask();
 
@@ -389,9 +409,10 @@ TEST_F(BertTest, TokenClassificationWithMask) {
     EXPECT_EQ(logits.tensor().shape()[2], num_labels);
 }
 
-TEST_F(BertTest, TokenClassificationGradientFlow) {
+TEST_P(BertTest, TokenClassificationGradientFlow) {
     int64_t num_labels = 9;
     auto model = BertForTokenClassification(config_, num_labels);
+    model.to(device);
     model.train();
 
     auto input_ids = create_input_ids();
@@ -412,8 +433,9 @@ TEST_F(BertTest, TokenClassificationGradientFlow) {
 // BertForQuestionAnswering Tests
 // ============================================================================
 
-TEST_F(BertTest, QuestionAnsweringForwardShape) {
+TEST_P(BertTest, QuestionAnsweringForwardShape) {
     auto model = BertForQuestionAnswering(config_);
+    model.to(device);
     auto input_ids = create_input_ids();
 
     auto outputs = model.forward(input_ids, Tensor{}, Variable{});
@@ -429,8 +451,9 @@ TEST_F(BertTest, QuestionAnsweringForwardShape) {
     EXPECT_EQ(outputs.end_logits.tensor().shape()[1], seq_len_);
 }
 
-TEST_F(BertTest, QuestionAnsweringWithTokenTypes) {
+TEST_P(BertTest, QuestionAnsweringWithTokenTypes) {
     auto model = BertForQuestionAnswering(config_);
+    model.to(device);
     auto input_ids = create_input_ids();
     auto token_type_ids = create_token_type_ids();
 
@@ -441,8 +464,9 @@ TEST_F(BertTest, QuestionAnsweringWithTokenTypes) {
     EXPECT_EQ(outputs.end_logits.tensor().shape()[0], batch_size_);
 }
 
-TEST_F(BertTest, QuestionAnsweringGradientFlow) {
+TEST_P(BertTest, QuestionAnsweringGradientFlow) {
     auto model = BertForQuestionAnswering(config_);
+    model.to(device);
     model.train();
 
     auto input_ids = create_input_ids();
@@ -464,7 +488,7 @@ TEST_F(BertTest, QuestionAnsweringGradientFlow) {
 // Configuration Tests
 // ============================================================================
 
-TEST_F(BertTest, BertConfigBase) {
+TEST_P(BertTest, BertConfigBase) {
     auto config = BertConfig::base();
 
     EXPECT_EQ(config.vocab_size, 30522);
@@ -474,7 +498,7 @@ TEST_F(BertTest, BertConfigBase) {
     EXPECT_EQ(config.intermediate_size, 3072);
 }
 
-TEST_F(BertTest, BertConfigLarge) {
+TEST_P(BertTest, BertConfigLarge) {
     auto config = BertConfig::large();
 
     EXPECT_EQ(config.hidden_size, 1024);
@@ -487,8 +511,9 @@ TEST_F(BertTest, BertConfigLarge) {
 // Parameter Counting Tests
 // ============================================================================
 
-TEST_F(BertTest, BertModelParameterCount) {
+TEST_P(BertTest, BertModelParameterCount) {
     auto model = BertModel(config_);
+    model.to(device);
     auto params = model.parameters();
 
     // Should have parameters from embeddings, encoder, and pooler
@@ -508,13 +533,15 @@ TEST_F(BertTest, BertModelParameterCount) {
     EXPECT_GT(total_params, 0);
 }
 
-TEST_F(BertTest, SequenceClassificationExtraParameters) {
+TEST_P(BertTest, SequenceClassificationExtraParameters) {
     int64_t num_labels = 2;
     auto model = BertForSequenceClassification(config_, num_labels);
+    model.to(device);
     auto params = model.parameters();
 
     // Should have more parameters than base BERT (due to classifier head)
     auto base_model = BertModel(config_);
+    base_model.to(device);
     auto base_params = base_model.parameters();
 
     EXPECT_GT(params.size(), base_params.size());
@@ -524,47 +551,35 @@ TEST_F(BertTest, SequenceClassificationExtraParameters) {
 // Device Tests
 // ============================================================================
 
-TEST_F(BertTest, BertModelCPU) {
+TEST_P(BertTest, BertModelCPU) {
     auto model = BertModel(config_);
     model.cpu();
 
-    auto input_ids = create_input_ids();
-    auto outputs = model.forward(input_ids, Tensor{}, Variable{}, Variable{});
+    // input_ids built on CPU to match the explicitly-CPU model under test.
+    Tensor input_ids({batch_size_, seq_len_}, DType::Int64, Device::cpu());
+    std::vector<int64_t> data(batch_size_ * seq_len_);
+    for (size_t i = 0; i < data.size(); ++i) {
+        data[i] = i % config_.vocab_size;
+    }
+    std::copy(data.begin(), data.end(), input_ids.data<int64_t>());
+    Variable input(input_ids, true);
+
+    auto outputs = model.forward(input, Tensor{}, Variable{}, Variable{});
 
     // Check output device is CPU
     EXPECT_EQ(outputs.sequence_output.tensor().device().type, Device::Type::CPU);
     EXPECT_EQ(outputs.pooled_output.tensor().device().type, Device::Type::CPU);
 }
 
-#ifdef TENZOR_CUDA_AVAILABLE
-TEST_F(BertTest, BertModelCUDA) {
-    if (!Device::cuda(0).is_available()) {
-        GTEST_SKIP() << "CUDA not available";
-    }
-
-    auto model = BertModel(config_);
-    model.cuda(0);
-
-    // Create input on CUDA
-    Tensor input_ids({batch_size_, seq_len_}, DType::Int64, Device::cuda(0));
-    // ... fill with data ...
-    Variable input(input_ids, true);
-
-    auto outputs = model.forward(input, Tensor{}, Variable{}, Variable{});
-
-    // Check output device is CUDA
-    EXPECT_EQ(outputs.sequence_output.tensor().device().type, Device::Type::CUDA);
-    EXPECT_EQ(outputs.pooled_output.tensor().device().type, Device::Type::CUDA);
-}
-#endif
-
 // ============================================================================
 // Serialization Tests
 // ============================================================================
 
-TEST_F(BertTest, BertModelStateDictSaveLoad) {
+TEST_P(BertTest, BertModelStateDictSaveLoad) {
     auto model1 = BertModel(config_);
+    model1.to(device);
     auto model2 = BertModel(config_);
+    model2.to(device);
 
     // Save state from model1
     auto state = model1.state_dict();
@@ -590,7 +605,7 @@ TEST_F(BertTest, BertModelStateDictSaveLoad) {
         }
 
         // Parameters should be exactly equal (not just similar)
-        auto diff = tenzor::abs(p1 - p2);
+        auto diff = tenzor::abs(p1 - p2).cpu();
         EXPECT_LT(tenzor::max(diff).item<float>(), 1e-7)
             << "Parameter " << i << " differs after load_state_dict";
     }
@@ -600,7 +615,7 @@ TEST_F(BertTest, BertModelStateDictSaveLoad) {
 // ModelHub Tests (basic)
 // ============================================================================
 
-TEST_F(BertTest, ModelHubParameterNameMapping) {
+TEST_P(BertTest, ModelHubParameterNameMapping) {
     // Test parameter name mapping
     auto mapped = BertModelHub::map_parameter_name("bert.embeddings.word_embeddings.weight");
     EXPECT_EQ(mapped, "embeddings.word_embeddings.weight");
@@ -614,7 +629,7 @@ TEST_F(BertTest, ModelHubParameterNameMapping) {
 // The test exercises the public entry point — succeeds when cached or
 // network-reachable; the older "throws because not implemented" assertion
 // no longer matches reality.
-TEST_F(BertTest, ModelHubDownloadEntryPoint) {
+TEST_P(BertTest, ModelHubDownloadEntryPoint) {
     // Don't assert success unconditionally — CI may be offline. Just verify
     // the call either returns a path (cached / downloaded) or throws a
     // network/curl runtime_error. It should NEVER throw "not implemented".
@@ -633,7 +648,7 @@ TEST_F(BertTest, ModelHubDownloadEntryPoint) {
 // A.4: load_pytorch_checkpoint is now implemented (delegates to
 // tenzor::io::load_torch_pickle / SafeTensorsSerializer by extension).
 // A non-existent path now throws "file not found", not "not implemented".
-TEST_F(BertTest, ModelHubLoadCheckpointMissingFile) {
+TEST_P(BertTest, ModelHubLoadCheckpointMissingFile) {
     EXPECT_THROW(
         BertModelHub::load_pytorch_checkpoint("nonexistent_path.bin"),
         std::runtime_error
@@ -644,57 +659,50 @@ TEST_F(BertTest, ModelHubLoadCheckpointMissingFile) {
 // Edge Case Tests
 // ============================================================================
 
-TEST_F(BertTest, BertModelShortSequence) {
+TEST_P(BertTest, BertModelShortSequence) {
     auto model = BertModel(config_);
+    model.to(device);
 
     // Very short sequence (1 token)
-    Tensor input_ids({batch_size_, 1}, DType::Int64, device_);
+    Tensor input_ids({batch_size_, 1}, DType::Int64, Device::cpu());
     std::vector<int64_t> data(batch_size_, 0);
     std::copy(data.begin(), data.end(), input_ids.data<int64_t>());
 
-    Variable input(input_ids, true);
+    Variable input(input_ids.to(device), true);
     auto outputs = model.forward(input, Tensor{}, Variable{}, Variable{});
 
     EXPECT_EQ(outputs.sequence_output.tensor().shape()[1], 1);
 }
 
-TEST_F(BertTest, BertModelLongSequence) {
+TEST_P(BertTest, BertModelLongSequence) {
     auto model = BertModel(config_);
+    model.to(device);
 
     // Maximum length sequence
     int64_t max_len = config_.max_position_embeddings;
-    Tensor input_ids({batch_size_, max_len}, DType::Int64, device_);
+    Tensor input_ids({batch_size_, max_len}, DType::Int64, Device::cpu());
     std::vector<int64_t> data(batch_size_ * max_len, 0);
     std::copy(data.begin(), data.end(), input_ids.data<int64_t>());
 
-    Variable input(input_ids, true);
+    Variable input(input_ids.to(device), true);
     auto outputs = model.forward(input, Tensor{}, Variable{}, Variable{});
 
     EXPECT_EQ(outputs.sequence_output.tensor().shape()[1], max_len);
 }
 
-TEST_F(BertTest, BertModelBatchSizeOne) {
+TEST_P(BertTest, BertModelBatchSizeOne) {
     auto model = BertModel(config_);
+    model.to(device);
 
-    Tensor input_ids({1, seq_len_}, DType::Int64, device_);
+    Tensor input_ids({1, seq_len_}, DType::Int64, Device::cpu());
     std::vector<int64_t> data(seq_len_, 0);
     std::copy(data.begin(), data.end(), input_ids.data<int64_t>());
 
-    Variable input(input_ids, true);
+    Variable input(input_ids.to(device), true);
     auto outputs = model.forward(input, Tensor{}, Variable{}, Variable{});
 
     EXPECT_EQ(outputs.sequence_output.tensor().shape()[0], 1);
     EXPECT_EQ(outputs.pooled_output.tensor().shape()[0], 1);
 }
 
-// ============================================================================
-// Main
-// ============================================================================
-
-int main(int argc, char** argv) {
-    ::testing::InitGoogleTest(&argc, argv);
-    if (!::testing::GTEST_FLAG(list_tests)) {
-        tenzor::initialize();
-    }
-    return RUN_ALL_TESTS();
-}
+INSTANTIATE_BACKEND_TESTS(BertTest);

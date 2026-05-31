@@ -7,25 +7,27 @@
 #include <tenzor/tenzor.hpp>
 #include "../../include/tenzor/models/convnext.hpp"
 #include "../grad_flow_helpers.hpp"
+#include "../backend_test_fixture.hpp"
 
 using namespace tenzor;
 using namespace tenzor::models;
 
-class ConvNeXtTest : public ::testing::Test {
+class ConvNeXtTest : public ::tenzor::testing::BackendTest {
 protected:
     void SetUp() override {
-        device_ = Device::cpu();
+        ::tenzor::testing::BackendTest::SetUp();
+        if (::testing::Test::IsSkipped()) return;
     }
-    Device device_;
 };
 
 // ============================================================================
 // ConvNeXt-Tiny Tests
 // ============================================================================
 
-TEST_F(ConvNeXtTest, ConvNeXtTinyForwardShape) {
+TEST_P(ConvNeXtTest, ConvNeXtTinyForwardShape) {
     auto model = convnext_tiny(1000, false);
-    Variable input(Tensor({2, 3, 224, 224}, DType::Float32, device_), true);
+    model->to(device);
+    Variable input(randn({2, 3, 224, 224}, DType::Float32, device), true);
     Variable output = model->forward(input);
 
     auto shape = output.tensor().shape();
@@ -33,11 +35,12 @@ TEST_F(ConvNeXtTest, ConvNeXtTinyForwardShape) {
               (std::vector<int64_t>{2, 1000}));
 }
 
-TEST_F(ConvNeXtTest, ConvNeXtTinyGradientFlow) {
+TEST_P(ConvNeXtTest, ConvNeXtTinyGradientFlow) {
     auto model = convnext_tiny(10, false);
+    model->to(device);
     model->train();
 
-    Variable input(Tensor({1, 3, 224, 224}, DType::Float32, device_), true);
+    Variable input(randn({1, 3, 224, 224}, DType::Float32, device), true);
     Variable output = model->forward(input);
     Variable loss = tenzor::sum(output);
     loss.backward();
@@ -47,8 +50,9 @@ TEST_F(ConvNeXtTest, ConvNeXtTinyGradientFlow) {
     EXPECT_GT(params.size(), 0);
 }
 
-TEST_F(ConvNeXtTest, ConvNeXtTinyParameterCount) {
+TEST_P(ConvNeXtTest, ConvNeXtTinyParameterCount) {
     auto model = convnext_tiny(1000, false);
+    model->to(device);
     auto params = model->parameters();
 
     size_t total_params = 0;
@@ -69,9 +73,10 @@ TEST_F(ConvNeXtTest, ConvNeXtTinyParameterCount) {
 // ConvNeXt-Small Tests
 // ============================================================================
 
-TEST_F(ConvNeXtTest, ConvNeXtSmallForwardShape) {
+TEST_P(ConvNeXtTest, ConvNeXtSmallForwardShape) {
     auto model = convnext_small(1000, false);
-    Variable input(Tensor({2, 3, 224, 224}, DType::Float32, device_), true);
+    model->to(device);
+    Variable input(randn({2, 3, 224, 224}, DType::Float32, device), true);
     Variable output = model->forward(input);
 
     auto shape = output.tensor().shape();
@@ -79,11 +84,12 @@ TEST_F(ConvNeXtTest, ConvNeXtSmallForwardShape) {
               (std::vector<int64_t>{2, 1000}));
 }
 
-TEST_F(ConvNeXtTest, ConvNeXtSmallGradientFlow) {
+TEST_P(ConvNeXtTest, ConvNeXtSmallGradientFlow) {
     auto model = convnext_small(10, false);
+    model->to(device);
     model->train();
 
-    Variable input(Tensor({1, 3, 224, 224}, DType::Float32, device_), true);
+    Variable input(randn({1, 3, 224, 224}, DType::Float32, device), true);
     Variable output = model->forward(input);
     Variable loss = tenzor::sum(output);
     loss.backward();
@@ -95,9 +101,10 @@ TEST_F(ConvNeXtTest, ConvNeXtSmallGradientFlow) {
 // ConvNeXt-Base Tests
 // ============================================================================
 
-TEST_F(ConvNeXtTest, ConvNeXtBaseForwardShape) {
+TEST_P(ConvNeXtTest, ConvNeXtBaseForwardShape) {
     auto model = convnext_base(1000, false);
-    Variable input(Tensor({2, 3, 224, 224}, DType::Float32, device_), true);
+    model->to(device);
+    Variable input(randn({2, 3, 224, 224}, DType::Float32, device), true);
     Variable output = model->forward(input);
 
     auto shape = output.tensor().shape();
@@ -105,11 +112,12 @@ TEST_F(ConvNeXtTest, ConvNeXtBaseForwardShape) {
               (std::vector<int64_t>{2, 1000}));
 }
 
-TEST_F(ConvNeXtTest, ConvNeXtBaseGradientFlow) {
+TEST_P(ConvNeXtTest, ConvNeXtBaseGradientFlow) {
     auto model = convnext_base(10, false);
+    model->to(device);
     model->train();
 
-    Variable input(Tensor({1, 3, 224, 224}, DType::Float32, device_), true);
+    Variable input(randn({1, 3, 224, 224}, DType::Float32, device), true);
     Variable output = model->forward(input);
     Variable loss = tenzor::sum(output);
     loss.backward();
@@ -117,8 +125,9 @@ TEST_F(ConvNeXtTest, ConvNeXtBaseGradientFlow) {
     EXPECT_GRAD_FLOWS(input);
 }
 
-TEST_F(ConvNeXtTest, ConvNeXtBaseParameterCount) {
+TEST_P(ConvNeXtTest, ConvNeXtBaseParameterCount) {
     auto model = convnext_base(1000, false);
+    model->to(device);
     auto params = model->parameters();
 
     size_t total_params = 0;
@@ -139,9 +148,10 @@ TEST_F(ConvNeXtTest, ConvNeXtBaseParameterCount) {
 // ConvNeXt-Large Tests
 // ============================================================================
 
-TEST_F(ConvNeXtTest, ConvNeXtLargeForwardShape) {
+TEST_P(ConvNeXtTest, ConvNeXtLargeForwardShape) {
     auto model = convnext_large(1000, false);
-    Variable input(Tensor({1, 3, 224, 224}, DType::Float32, device_), true);
+    model->to(device);
+    Variable input(randn({1, 3, 224, 224}, DType::Float32, device), true);
     Variable output = model->forward(input);
 
     auto shape = output.tensor().shape();
@@ -149,11 +159,12 @@ TEST_F(ConvNeXtTest, ConvNeXtLargeForwardShape) {
               (std::vector<int64_t>{1, 1000}));
 }
 
-TEST_F(ConvNeXtTest, ConvNeXtLargeGradientFlow) {
+TEST_P(ConvNeXtTest, ConvNeXtLargeGradientFlow) {
     auto model = convnext_large(10, false);
+    model->to(device);
     model->train();
 
-    Variable input(Tensor({1, 3, 224, 224}, DType::Float32, device_), true);
+    Variable input(randn({1, 3, 224, 224}, DType::Float32, device), true);
     Variable output = model->forward(input);
     Variable loss = tenzor::sum(output);
     loss.backward();
@@ -161,8 +172,9 @@ TEST_F(ConvNeXtTest, ConvNeXtLargeGradientFlow) {
     EXPECT_GRAD_FLOWS(input);
 }
 
-TEST_F(ConvNeXtTest, ConvNeXtLargeParameterCount) {
+TEST_P(ConvNeXtTest, ConvNeXtLargeParameterCount) {
     auto model = convnext_large(1000, false);
+    model->to(device);
     auto params = model->parameters();
 
     size_t total_params = 0;
@@ -183,9 +195,10 @@ TEST_F(ConvNeXtTest, ConvNeXtLargeParameterCount) {
 // ConvNeXt-XLarge Tests
 // ============================================================================
 
-TEST_F(ConvNeXtTest, ConvNeXtXLargeForwardShape) {
+TEST_P(ConvNeXtTest, ConvNeXtXLargeForwardShape) {
     auto model = convnext_xlarge(1000, false);
-    Variable input(Tensor({1, 3, 224, 224}, DType::Float32, device_), true);
+    model->to(device);
+    Variable input(randn({1, 3, 224, 224}, DType::Float32, device), true);
     Variable output = model->forward(input);
 
     auto shape = output.tensor().shape();
@@ -193,11 +206,12 @@ TEST_F(ConvNeXtTest, ConvNeXtXLargeForwardShape) {
               (std::vector<int64_t>{1, 1000}));
 }
 
-TEST_F(ConvNeXtTest, ConvNeXtXLargeGradientFlow) {
+TEST_P(ConvNeXtTest, ConvNeXtXLargeGradientFlow) {
     auto model = convnext_xlarge(10, false);
+    model->to(device);
     model->train();
 
-    Variable input(Tensor({1, 3, 224, 224}, DType::Float32, device_), true);
+    Variable input(randn({1, 3, 224, 224}, DType::Float32, device), true);
     Variable output = model->forward(input);
     Variable loss = tenzor::sum(output);
     loss.backward();
@@ -209,9 +223,10 @@ TEST_F(ConvNeXtTest, ConvNeXtXLargeGradientFlow) {
 // Edge Case Tests
 // ============================================================================
 
-TEST_F(ConvNeXtTest, ConvNeXtTinyBatchSizeOne) {
+TEST_P(ConvNeXtTest, ConvNeXtTinyBatchSizeOne) {
     auto model = convnext_tiny(10, false);
-    Variable input(Tensor({1, 3, 224, 224}, DType::Float32, device_), true);
+    model->to(device);
+    Variable input(randn({1, 3, 224, 224}, DType::Float32, device), true);
     Variable output = model->forward(input);
 
     auto shape = output.tensor().shape();
@@ -219,9 +234,10 @@ TEST_F(ConvNeXtTest, ConvNeXtTinyBatchSizeOne) {
               (std::vector<int64_t>{1, 10}));
 }
 
-TEST_F(ConvNeXtTest, ConvNeXtTinyCustomClasses) {
+TEST_P(ConvNeXtTest, ConvNeXtTinyCustomClasses) {
     auto model = convnext_tiny(100, false);
-    Variable input(Tensor({2, 3, 224, 224}, DType::Float32, device_), true);
+    model->to(device);
+    Variable input(randn({2, 3, 224, 224}, DType::Float32, device), true);
     Variable output = model->forward(input);
 
     auto shape = output.tensor().shape();
@@ -229,15 +245,4 @@ TEST_F(ConvNeXtTest, ConvNeXtTinyCustomClasses) {
               (std::vector<int64_t>{2, 100}));
 }
 
-
-// ============================================================================
-// Main  
-// ============================================================================
-
-int main(int argc, char** argv) {
-    ::testing::InitGoogleTest(&argc, argv);
-    if (!::testing::GTEST_FLAG(list_tests)) {
-        tenzor::initialize();
-    }
-    return RUN_ALL_TESTS();
-}
+INSTANTIATE_BACKEND_TESTS(ConvNeXtTest);

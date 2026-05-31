@@ -9,30 +9,33 @@
 #include <tenzor/nn/detection/anchors.hpp>
 #include <tenzor/ops/detection.hpp>
 #include "../grad_flow_helpers.hpp"
+#include "../backend_test_fixture.hpp"
 
 using namespace tenzor;
 using namespace tenzor::nn;
 using namespace tenzor::nn::detection;
 using namespace tenzor::ops;
 
-class DetectionOpsTest : public ::testing::Test {
+class DetectionOpsTest : public ::tenzor::testing::BackendTest {
 protected:
-    void SetUp() override { device_ = Device::cpu(); }
-    Device device_;
+    void SetUp() override {
+        ::tenzor::testing::BackendTest::SetUp();
+        if (::testing::Test::IsSkipped()) return;
+    }
 };
 
 // ============================================================================
 // ROI Align Tests (Basic Shape Tests)
 // ============================================================================
 
-TEST_F(DetectionOpsTest, ROIAlignBasicForwardShape) {
+TEST_P(DetectionOpsTest, ROIAlignBasicForwardShape) {
     ROIAlign roi_align(7, 7, 1.0/16.0, 2);
 
     // Feature map: (N, C, H, W)
-    Variable features(Tensor({1, 512, 28, 28}, DType::Float32, device_), true);
+    Variable features(zeros({1, 512, 28, 28}, DType::Float32, device), true);
 
     // ROIs: (num_rois, 5) where each row is [batch_idx, x1, y1, x2, y2]
-    Tensor rois({10, 5}, DType::Float32, device_);
+    Tensor rois = zeros({10, 5}, DType::Float32, device);
 
     Variable output = roi_align.forward(features, rois);
 
@@ -42,11 +45,11 @@ TEST_F(DetectionOpsTest, ROIAlignBasicForwardShape) {
               (std::vector<int64_t>{10, 512, 7, 7}));
 }
 
-TEST_F(DetectionOpsTest, ROIAlignBasicGradientFlow) {
+TEST_P(DetectionOpsTest, ROIAlignBasicGradientFlow) {
     ROIAlign roi_align(7, 7, 1.0/16.0, 2);
 
-    Variable features(Tensor({1, 256, 28, 28}, DType::Float32, device_), true);
-    Tensor rois({5, 5}, DType::Float32, device_);
+    Variable features(zeros({1, 256, 28, 28}, DType::Float32, device), true);
+    Tensor rois = zeros({5, 5}, DType::Float32, device);
 
     Variable output = roi_align.forward(features, rois);
     Variable loss = tenzor::sum(output);
@@ -55,12 +58,12 @@ TEST_F(DetectionOpsTest, ROIAlignBasicGradientFlow) {
     EXPECT_GRAD_FLOWS(features);
 }
 
-TEST_F(DetectionOpsTest, ROIAlignDifferentPoolSizes) {
+TEST_P(DetectionOpsTest, ROIAlignDifferentPoolSizes) {
     ROIAlign roi_align_7(7, 7, 1.0/16.0, 2);
     ROIAlign roi_align_14(14, 14, 1.0/16.0, 2);
 
-    Variable features(Tensor({1, 512, 56, 56}, DType::Float32, device_), true);
-    Tensor rois({3, 5}, DType::Float32, device_);
+    Variable features(zeros({1, 512, 56, 56}, DType::Float32, device), true);
+    Tensor rois = zeros({3, 5}, DType::Float32, device);
 
     Variable output_7 = roi_align_7.forward(features, rois);
     auto shape_7 = output_7.tensor().shape();
@@ -77,11 +80,11 @@ TEST_F(DetectionOpsTest, ROIAlignDifferentPoolSizes) {
 // ROI Align Tests (Advanced)
 // ============================================================================
 
-TEST_F(DetectionOpsTest, ROIAlignForwardShape) {
+TEST_P(DetectionOpsTest, ROIAlignForwardShape) {
     ROIAlign roi_align(7, 7, 1.0/16.0, 2);
 
-    Variable features(Tensor({1, 512, 28, 28}, DType::Float32, device_), true);
-    Tensor rois({10, 5}, DType::Float32, device_);
+    Variable features(zeros({1, 512, 28, 28}, DType::Float32, device), true);
+    Tensor rois = zeros({10, 5}, DType::Float32, device);
 
     Variable output = roi_align.forward(features, rois);
 
@@ -90,11 +93,11 @@ TEST_F(DetectionOpsTest, ROIAlignForwardShape) {
               (std::vector<int64_t>{10, 512, 7, 7}));
 }
 
-TEST_F(DetectionOpsTest, ROIAlignGradientFlow) {
+TEST_P(DetectionOpsTest, ROIAlignGradientFlow) {
     ROIAlign roi_align(7, 7, 1.0/16.0, 2);
 
-    Variable features(Tensor({1, 256, 28, 28}, DType::Float32, device_), true);
-    Tensor rois({5, 5}, DType::Float32, device_);
+    Variable features(zeros({1, 256, 28, 28}, DType::Float32, device), true);
+    Tensor rois = zeros({5, 5}, DType::Float32, device);
 
     Variable output = roi_align.forward(features, rois);
     Variable loss = tenzor::sum(output);
@@ -103,12 +106,12 @@ TEST_F(DetectionOpsTest, ROIAlignGradientFlow) {
     EXPECT_GRAD_FLOWS(features);
 }
 
-TEST_F(DetectionOpsTest, ROIAlignDifferentSamplingRatios) {
+TEST_P(DetectionOpsTest, ROIAlignDifferentSamplingRatios) {
     ROIAlign roi_align_2(7, 7, 1.0/16.0, 2);
     ROIAlign roi_align_4(7, 7, 1.0/16.0, 4);
 
-    Variable features(Tensor({1, 512, 56, 56}, DType::Float32, device_), true);
-    Tensor rois({3, 5}, DType::Float32, device_);
+    Variable features(zeros({1, 512, 56, 56}, DType::Float32, device), true);
+    Tensor rois = zeros({3, 5}, DType::Float32, device);
 
     Variable output_2 = roi_align_2.forward(features, rois);
     Variable output_4 = roi_align_4.forward(features, rois);
@@ -125,12 +128,12 @@ TEST_F(DetectionOpsTest, ROIAlignDifferentSamplingRatios) {
 // Non-Maximum Suppression (NMS) Tests
 // ============================================================================
 
-TEST_F(DetectionOpsTest, NMSBasicFiltering) {
+TEST_P(DetectionOpsTest, NMSBasicFiltering) {
     // Boxes: (N, 4) where each row is [x1, y1, x2, y2]
-    Tensor boxes({20, 4}, DType::Float32, device_);
+    Tensor boxes = zeros({20, 4}, DType::Float32, device);
 
     // Scores: (N,)
-    Tensor scores({20}, DType::Float32, device_);
+    Tensor scores = zeros({20}, DType::Float32, device);
 
     auto keep_indices = nms(boxes, scores, 0.5);  // IOU threshold = 0.5
 
@@ -139,9 +142,9 @@ TEST_F(DetectionOpsTest, NMSBasicFiltering) {
     EXPECT_LE(keep_indices.shape()[0], 20);
 }
 
-TEST_F(DetectionOpsTest, NMSDifferentThresholds) {
-    Tensor boxes({50, 4}, DType::Float32, device_);
-    Tensor scores({50}, DType::Float32, device_);
+TEST_P(DetectionOpsTest, NMSDifferentThresholds) {
+    Tensor boxes = zeros({50, 4}, DType::Float32, device);
+    Tensor scores = zeros({50}, DType::Float32, device);
 
     auto keep_low = nms(boxes, scores, 0.3);   // Stricter
     auto keep_high = nms(boxes, scores, 0.7);  // More permissive
@@ -150,10 +153,10 @@ TEST_F(DetectionOpsTest, NMSDifferentThresholds) {
     EXPECT_LE(keep_low.shape()[0], keep_high.shape()[0]);
 }
 
-TEST_F(DetectionOpsTest, NMSOutputShape) {
+TEST_P(DetectionOpsTest, NMSOutputShape) {
     // Create boxes and scores
-    Tensor boxes({5, 4}, DType::Float32, device_);
-    Tensor scores({5}, DType::Float32, device_);
+    Tensor boxes = zeros({5, 4}, DType::Float32, device);
+    Tensor scores = zeros({5}, DType::Float32, device);
 
     auto keep_indices = nms(boxes, scores, 0.5);
 
@@ -166,10 +169,10 @@ TEST_F(DetectionOpsTest, NMSOutputShape) {
 // Box Operations Tests
 // ============================================================================
 
-TEST_F(DetectionOpsTest, BoxIOUComputation) {
+TEST_P(DetectionOpsTest, BoxIOUComputation) {
     // Box format: [x1, y1, x2, y2]
-    Tensor boxes1({5, 4}, DType::Float32, device_);
-    Tensor boxes2({5, 4}, DType::Float32, device_);
+    Tensor boxes1 = zeros({5, 4}, DType::Float32, device);
+    Tensor boxes2 = zeros({5, 4}, DType::Float32, device);
 
     auto ious = box_iou(boxes1, boxes2);
 
@@ -179,9 +182,9 @@ TEST_F(DetectionOpsTest, BoxIOUComputation) {
               (std::vector<int64_t>{5, 5}));
 }
 
-TEST_F(DetectionOpsTest, BoxEncodingDecoding) {
-    Tensor boxes({10, 4}, DType::Float32, device_);
-    Tensor anchors({10, 4}, DType::Float32, device_);
+TEST_P(DetectionOpsTest, BoxEncodingDecoding) {
+    Tensor boxes = zeros({10, 4}, DType::Float32, device);
+    Tensor anchors = zeros({10, 4}, DType::Float32, device);
 
     // Encode boxes relative to anchors
     auto encoded = encode_boxes(boxes, anchors);
@@ -195,9 +198,9 @@ TEST_F(DetectionOpsTest, BoxEncodingDecoding) {
               (std::vector<int64_t>{10, 4}));
 }
 
-TEST_F(DetectionOpsTest, BoxEncodingShape) {
-    Tensor boxes({20, 4}, DType::Float32, device_);
-    Tensor anchors({20, 4}, DType::Float32, device_);
+TEST_P(DetectionOpsTest, BoxEncodingShape) {
+    Tensor boxes = zeros({20, 4}, DType::Float32, device);
+    Tensor anchors = zeros({20, 4}, DType::Float32, device);
 
     auto encoded = encode_boxes(boxes, anchors);
 
@@ -210,13 +213,13 @@ TEST_F(DetectionOpsTest, BoxEncodingShape) {
 // Anchor Generator Tests
 // ============================================================================
 
-TEST_F(DetectionOpsTest, AnchorGeneratorSizes) {
+TEST_P(DetectionOpsTest, AnchorGeneratorSizes) {
     std::vector<float> sizes = {32.0f, 64.0f, 128.0f, 256.0f, 512.0f};
     std::vector<float> aspect_ratios = {0.5f, 1.0f, 2.0f};
     AnchorGenerator anchor_gen(sizes, aspect_ratios);
 
     // Feature map size: 56x56
-    auto anchors = anchor_gen.generate(56, 56, 16, device_);  // stride=16
+    auto anchors = anchor_gen.generate(56, 56, 16, device);  // stride=16
 
     // Number of anchors = H * W * (num_sizes * num_aspect_ratios)
     // 56 * 56 * (5 * 3) = 47040
@@ -224,7 +227,7 @@ TEST_F(DetectionOpsTest, AnchorGeneratorSizes) {
     EXPECT_EQ(anchors.shape()[1], 4);
 }
 
-TEST_F(DetectionOpsTest, AnchorGeneratorDifferentScales) {
+TEST_P(DetectionOpsTest, AnchorGeneratorDifferentScales) {
     std::vector<float> sizes_small = {32.0f, 64.0f};
     std::vector<float> sizes_large = {128.0f, 256.0f, 512.0f};
     std::vector<float> aspect_ratios = {1.0f};
@@ -232,8 +235,8 @@ TEST_F(DetectionOpsTest, AnchorGeneratorDifferentScales) {
     AnchorGenerator anchor_gen_small(sizes_small, aspect_ratios);
     AnchorGenerator anchor_gen_large(sizes_large, aspect_ratios);
 
-    auto anchors_small = anchor_gen_small.generate(28, 28, 16, device_);
-    auto anchors_large = anchor_gen_large.generate(28, 28, 16, device_);
+    auto anchors_small = anchor_gen_small.generate(28, 28, 16, device);
+    auto anchors_large = anchor_gen_large.generate(28, 28, 16, device);
 
     // 28 * 28 * 2 = 1568 for small
     // 28 * 28 * 3 = 2352 for large
@@ -241,7 +244,7 @@ TEST_F(DetectionOpsTest, AnchorGeneratorDifferentScales) {
     EXPECT_EQ(anchors_large.shape()[0], 2352);
 }
 
-TEST_F(DetectionOpsTest, AnchorGeneratorNumAnchorsPerLocation) {
+TEST_P(DetectionOpsTest, AnchorGeneratorNumAnchorsPerLocation) {
     std::vector<float> sizes = {32.0f, 64.0f, 128.0f};
     std::vector<float> aspect_ratios = {0.5f, 1.0f, 2.0f};
     AnchorGenerator anchor_gen(sizes, aspect_ratios);
@@ -250,15 +253,4 @@ TEST_F(DetectionOpsTest, AnchorGeneratorNumAnchorsPerLocation) {
     EXPECT_EQ(anchor_gen.num_anchors_per_location(), 9);
 }
 
-
-// ============================================================================
-// Main  
-// ============================================================================
-
-int main(int argc, char** argv) {
-    ::testing::InitGoogleTest(&argc, argv);
-    if (!::testing::GTEST_FLAG(list_tests)) {
-        tenzor::initialize();
-    }
-    return RUN_ALL_TESTS();
-}
+INSTANTIATE_BACKEND_TESTS(DetectionOpsTest);

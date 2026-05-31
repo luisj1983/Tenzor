@@ -6,26 +6,28 @@
 #include <gtest/gtest.h>
 #include <tenzor/tenzor.hpp>
 #include "../../include/tenzor/models/mobilenet.hpp"
+#include "../backend_test_fixture.hpp"
 #include "../grad_flow_helpers.hpp"
 
 using namespace tenzor;
 using namespace tenzor::models;
 
-class MobileNetTest : public ::testing::Test {
+class MobileNetTest : public ::tenzor::testing::BackendTest {
 protected:
     void SetUp() override {
-        device_ = Device::cpu();
+        ::tenzor::testing::BackendTest::SetUp();
+        if (::testing::Test::IsSkipped()) return;
     }
-    Device device_;
 };
 
 // ============================================================================
 // MobileNetV2 Tests
 // ============================================================================
 
-TEST_F(MobileNetTest, MobileNetV2ForwardShape) {
+TEST_P(MobileNetTest, MobileNetV2ForwardShape) {
     auto model = mobilenet_v2(1000, false);
-    Variable input(Tensor({2, 3, 224, 224}, DType::Float32, device_), true);
+    model->to(device);
+    Variable input(randn({2, 3, 224, 224}, DType::Float32, device), true);
     Variable output = model->forward(input);
 
     auto shape = output.tensor().shape();
@@ -33,11 +35,12 @@ TEST_F(MobileNetTest, MobileNetV2ForwardShape) {
               (std::vector<int64_t>{2, 1000}));
 }
 
-TEST_F(MobileNetTest, MobileNetV2GradientFlow) {
+TEST_P(MobileNetTest, MobileNetV2GradientFlow) {
     auto model = mobilenet_v2(10, false);
+    model->to(device);
     model->train();
 
-    Variable input(Tensor({1, 3, 224, 224}, DType::Float32, device_), true);
+    Variable input(randn({1, 3, 224, 224}, DType::Float32, device), true);
     Variable output = model->forward(input);
     Variable loss = tenzor::sum(output);
     loss.backward();
@@ -47,10 +50,11 @@ TEST_F(MobileNetTest, MobileNetV2GradientFlow) {
     EXPECT_GT(params.size(), 0);
 }
 
-TEST_F(MobileNetTest, MobileNetV2WidthMultiplier) {
+TEST_P(MobileNetTest, MobileNetV2WidthMultiplier) {
     // Test with width multiplier 0.5
     auto model_05 = mobilenet_v2_width(1000, 0.5, false);
-    Variable input(Tensor({2, 3, 224, 224}, DType::Float32, device_), true);
+    model_05->to(device);
+    Variable input(randn({2, 3, 224, 224}, DType::Float32, device), true);
     Variable output = model_05->forward(input);
 
     auto shape = output.tensor().shape();
@@ -58,8 +62,9 @@ TEST_F(MobileNetTest, MobileNetV2WidthMultiplier) {
               (std::vector<int64_t>{2, 1000}));
 }
 
-TEST_F(MobileNetTest, MobileNetV2ParameterCount) {
+TEST_P(MobileNetTest, MobileNetV2ParameterCount) {
     auto model = mobilenet_v2(1000, false);
+    model->to(device);
     auto params = model->parameters();
 
     size_t total_params = 0;
@@ -80,9 +85,10 @@ TEST_F(MobileNetTest, MobileNetV2ParameterCount) {
 // MobileNetV3-Small Tests
 // ============================================================================
 
-TEST_F(MobileNetTest, MobileNetV3SmallForwardShape) {
+TEST_P(MobileNetTest, MobileNetV3SmallForwardShape) {
     auto model = mobilenet_v3_small(1000, false);
-    Variable input(Tensor({2, 3, 224, 224}, DType::Float32, device_), true);
+    model->to(device);
+    Variable input(randn({2, 3, 224, 224}, DType::Float32, device), true);
     Variable output = model->forward(input);
 
     auto shape = output.tensor().shape();
@@ -90,11 +96,12 @@ TEST_F(MobileNetTest, MobileNetV3SmallForwardShape) {
               (std::vector<int64_t>{2, 1000}));
 }
 
-TEST_F(MobileNetTest, MobileNetV3SmallGradientFlow) {
+TEST_P(MobileNetTest, MobileNetV3SmallGradientFlow) {
     auto model = mobilenet_v3_small(10, false);
+    model->to(device);
     model->train();
 
-    Variable input(Tensor({1, 3, 224, 224}, DType::Float32, device_), true);
+    Variable input(randn({1, 3, 224, 224}, DType::Float32, device), true);
     Variable output = model->forward(input);
     Variable loss = tenzor::sum(output);
     loss.backward();
@@ -102,8 +109,9 @@ TEST_F(MobileNetTest, MobileNetV3SmallGradientFlow) {
     EXPECT_GRAD_FLOWS(input);
 }
 
-TEST_F(MobileNetTest, MobileNetV3SmallParameterCount) {
+TEST_P(MobileNetTest, MobileNetV3SmallParameterCount) {
     auto model = mobilenet_v3_small(1000, false);
+    model->to(device);
     auto params = model->parameters();
 
     size_t total_params = 0;
@@ -124,9 +132,10 @@ TEST_F(MobileNetTest, MobileNetV3SmallParameterCount) {
 // MobileNetV3-Large Tests
 // ============================================================================
 
-TEST_F(MobileNetTest, MobileNetV3LargeForwardShape) {
+TEST_P(MobileNetTest, MobileNetV3LargeForwardShape) {
     auto model = mobilenet_v3_large(1000, false);
-    Variable input(Tensor({2, 3, 224, 224}, DType::Float32, device_), true);
+    model->to(device);
+    Variable input(randn({2, 3, 224, 224}, DType::Float32, device), true);
     Variable output = model->forward(input);
 
     auto shape = output.tensor().shape();
@@ -134,11 +143,12 @@ TEST_F(MobileNetTest, MobileNetV3LargeForwardShape) {
               (std::vector<int64_t>{2, 1000}));
 }
 
-TEST_F(MobileNetTest, MobileNetV3LargeGradientFlow) {
+TEST_P(MobileNetTest, MobileNetV3LargeGradientFlow) {
     auto model = mobilenet_v3_large(10, false);
+    model->to(device);
     model->train();
 
-    Variable input(Tensor({1, 3, 224, 224}, DType::Float32, device_), true);
+    Variable input(randn({1, 3, 224, 224}, DType::Float32, device), true);
     Variable output = model->forward(input);
     Variable loss = tenzor::sum(output);
     loss.backward();
@@ -146,8 +156,9 @@ TEST_F(MobileNetTest, MobileNetV3LargeGradientFlow) {
     EXPECT_GRAD_FLOWS(input);
 }
 
-TEST_F(MobileNetTest, MobileNetV3LargeParameterCount) {
+TEST_P(MobileNetTest, MobileNetV3LargeParameterCount) {
     auto model = mobilenet_v3_large(1000, false);
+    model->to(device);
     auto params = model->parameters();
 
     size_t total_params = 0;
@@ -168,9 +179,10 @@ TEST_F(MobileNetTest, MobileNetV3LargeParameterCount) {
 // Edge Case Tests
 // ============================================================================
 
-TEST_F(MobileNetTest, MobileNetV2BatchSizeOne) {
+TEST_P(MobileNetTest, MobileNetV2BatchSizeOne) {
     auto model = mobilenet_v2(10, false);
-    Variable input(Tensor({1, 3, 224, 224}, DType::Float32, device_), true);
+    model->to(device);
+    Variable input(randn({1, 3, 224, 224}, DType::Float32, device), true);
     Variable output = model->forward(input);
 
     auto shape = output.tensor().shape();
@@ -178,9 +190,10 @@ TEST_F(MobileNetTest, MobileNetV2BatchSizeOne) {
               (std::vector<int64_t>{1, 10}));
 }
 
-TEST_F(MobileNetTest, MobileNetV3CustomClasses) {
+TEST_P(MobileNetTest, MobileNetV3CustomClasses) {
     auto model = mobilenet_v3_large(100, false);
-    Variable input(Tensor({2, 3, 224, 224}, DType::Float32, device_), true);
+    model->to(device);
+    Variable input(randn({2, 3, 224, 224}, DType::Float32, device), true);
     Variable output = model->forward(input);
 
     auto shape = output.tensor().shape();
@@ -188,15 +201,4 @@ TEST_F(MobileNetTest, MobileNetV3CustomClasses) {
               (std::vector<int64_t>{2, 100}));
 }
 
-
-// ============================================================================
-// Main  
-// ============================================================================
-
-int main(int argc, char** argv) {
-    ::testing::InitGoogleTest(&argc, argv);
-    if (!::testing::GTEST_FLAG(list_tests)) {
-        tenzor::initialize();
-    }
-    return RUN_ALL_TESTS();
-}
+INSTANTIATE_BACKEND_TESTS(MobileNetTest);
