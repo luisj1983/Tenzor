@@ -7,15 +7,11 @@
 #include <tenzor/tenzor.hpp>
 #include <tenzor/autograd/vmap.hpp>
 #include <tenzor/autograd/ops.hpp>
+#include "../backend_test_fixture.hpp"
 
 using namespace tenzor;
 
-class VmapExpandedTestEnv : public ::testing::Environment {
-public:
-    void SetUp() override { tenzor::initialize(); }
-};
-static ::testing::Environment* const env =
-    ::testing::AddGlobalTestEnvironment(new VmapExpandedTestEnv);
+class VmapExpanded : public ::tenzor::testing::BackendTest {};
 
 // Helper: compare vmap result against loop-and-stack reference
 static void verify_vmap(std::function<Variable(const Variable&)> func,
@@ -46,36 +42,36 @@ static void verify_vmap(std::function<Variable(const Variable&)> func,
     }
 }
 
-TEST(VmapExpanded, ElementWise_Exp) {
-    auto x = Variable(tenzor::randn({4, 3}, DType::Float32, Device::cpu()), false);
+TEST_P(VmapExpanded, ElementWise_Exp) {
+    auto x = Variable(tenzor::randn({4, 3}, DType::Float32, device), false);
     verify_vmap([](const Variable& v) { return tenzor::exp(v); }, x, 0, "exp");
 }
 
-TEST(VmapExpanded, ElementWise_Sigmoid) {
-    auto x = Variable(tenzor::randn({4, 3}, DType::Float32, Device::cpu()), false);
+TEST_P(VmapExpanded, ElementWise_Sigmoid) {
+    auto x = Variable(tenzor::randn({4, 3}, DType::Float32, device), false);
     verify_vmap([](const Variable& v) { return tenzor::sigmoid(v); }, x, 0, "sigmoid");
 }
 
-TEST(VmapExpanded, ElementWise_Tanh) {
-    auto x = Variable(tenzor::randn({4, 3}, DType::Float32, Device::cpu()), false);
+TEST_P(VmapExpanded, ElementWise_Tanh) {
+    auto x = Variable(tenzor::randn({4, 3}, DType::Float32, device), false);
     verify_vmap([](const Variable& v) { return tenzor::tanh(v); }, x, 0, "tanh");
 }
 
-TEST(VmapExpanded, Reduction_Sum) {
-    auto x = Variable(tenzor::randn({4, 3, 5}, DType::Float32, Device::cpu()), false);
+TEST_P(VmapExpanded, Reduction_Sum) {
+    auto x = Variable(tenzor::randn({4, 3, 5}, DType::Float32, device), false);
     verify_vmap([](const Variable& v) { return tenzor::sum(v); }, x, 0, "sum");
 }
 
-TEST(VmapExpanded, Softmax) {
-    auto x = Variable(tenzor::randn({4, 3, 5}, DType::Float32, Device::cpu()), false);
+TEST_P(VmapExpanded, Softmax) {
+    auto x = Variable(tenzor::randn({4, 3, 5}, DType::Float32, device), false);
     verify_vmap([](const Variable& v) {
         // Softmax along last dim
         return tenzor::softmax(v, -1);
     }, x, 0, "softmax");
 }
 
-TEST(VmapExpanded, ShapePreserved) {
-    auto x = Variable(tenzor::randn({4, 3, 5}, DType::Float32, Device::cpu()), false);
+TEST_P(VmapExpanded, ShapePreserved) {
+    auto x = Variable(tenzor::randn({4, 3, 5}, DType::Float32, device), false);
     auto result = vmap([](const Variable& v) { return tenzor::exp(v); }, x, 0);
     auto shape = result.tensor().shape();
     EXPECT_EQ(shape[0], 4);
@@ -83,7 +79,7 @@ TEST(VmapExpanded, ShapePreserved) {
     EXPECT_EQ(shape[2], 5);
 }
 
-TEST(VmapExpanded, HasBatchingRules) {
+TEST_P(VmapExpanded, HasBatchingRules) {
     // Verify key rules are registered
     init_builtin_batching_rules();
     EXPECT_TRUE(has_batching_rule("AddBackward"));
@@ -97,3 +93,5 @@ TEST(VmapExpanded, HasBatchingRules) {
     EXPECT_TRUE(has_batching_rule("ErfBackward"));
     EXPECT_TRUE(has_batching_rule("GammaBackward"));
 }
+
+INSTANTIATE_BACKEND_TESTS(VmapExpanded);

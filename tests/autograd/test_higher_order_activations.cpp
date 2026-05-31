@@ -25,13 +25,17 @@
 #include <tenzor/ops/creation.hpp>
 #include <tenzor/ops/reduction.hpp>
 #include "../grad_flow_helpers.hpp"
+#include "../backend_test_fixture.hpp"
 
 namespace tenzor {
 namespace {
 
-class HigherOrderActivationsTest : public ::testing::Test {
+class HigherOrderActivationsTest : public ::tenzor::testing::BackendTest {
 protected:
-    void SetUp() override { tenzor::initialize(); }
+    void SetUp() override {
+        ::tenzor::testing::BackendTest::SetUp();
+        if (::testing::Test::IsSkipped()) return;
+    }
 };
 
 // For f(x) = sum(sigmoid(x)), the gradient is df/dx = sigmoid(x)*(1-sigmoid(x)),
@@ -40,11 +44,12 @@ protected:
 // which at x=0 equals 0.25 * 0 = 0, at x=ln(2) equals (2/3)*(1/3)*(1-4/3) = -2/27.
 // We don't depend on exact values — the key test is that the second derivative
 // is non-zero (before the P4.2 fix it was identically zero due to the stub).
-TEST_F(HigherOrderActivationsTest, SigmoidDoubleBackwardNonZero) {
-    auto x_t = zeros({3}, DType::Float64, Device::cpu());
-    x_t.data<double>()[0] = -1.0;
-    x_t.data<double>()[1] =  0.5;
-    x_t.data<double>()[2] =  2.0;
+TEST_P(HigherOrderActivationsTest, SigmoidDoubleBackwardNonZero) {
+    auto x_host = zeros({3}, DType::Float64, Device::cpu());
+    x_host.data<double>()[0] = -1.0;
+    x_host.data<double>()[1] =  0.5;
+    x_host.data<double>()[2] =  2.0;
+    auto x_t = x_host.to(device);
 
     auto x = Variable(x_t, /*requires_grad=*/true);
 
@@ -78,11 +83,12 @@ TEST_F(HigherOrderActivationsTest, SigmoidDoubleBackwardNonZero) {
            "higher-order path is not active";
 }
 
-TEST_F(HigherOrderActivationsTest, TanhDoubleBackwardNonZero) {
-    auto x_t = zeros({3}, DType::Float64, Device::cpu());
-    x_t.data<double>()[0] = -0.5;
-    x_t.data<double>()[1] =  0.3;
-    x_t.data<double>()[2] =  1.0;
+TEST_P(HigherOrderActivationsTest, TanhDoubleBackwardNonZero) {
+    auto x_host = zeros({3}, DType::Float64, Device::cpu());
+    x_host.data<double>()[0] = -0.5;
+    x_host.data<double>()[1] =  0.3;
+    x_host.data<double>()[2] =  1.0;
+    auto x_t = x_host.to(device);
 
     auto x = Variable(x_t, true);
     auto y = tenzor::nn::tanh(x);
@@ -108,9 +114,10 @@ TEST_F(HigherOrderActivationsTest, TanhDoubleBackwardNonZero) {
 // Linear-chain sanity check: sigmoid -> sigmoid should still support a
 // second backward. This catches regressions in the chain rule where
 // downstream ops lose their grad_fn.
-TEST_F(HigherOrderActivationsTest, SigmoidChainDoubleBackward) {
-    auto x_t = zeros({2, 2}, DType::Float64, Device::cpu());
-    for (int i = 0; i < 4; ++i) x_t.data<double>()[i] = 0.1 * (i + 1);
+TEST_P(HigherOrderActivationsTest, SigmoidChainDoubleBackward) {
+    auto x_host = zeros({2, 2}, DType::Float64, Device::cpu());
+    for (int i = 0; i < 4; ++i) x_host.data<double>()[i] = 0.1 * (i + 1);
+    auto x_t = x_host.to(device);
 
     auto x = Variable(x_t, true);
     auto y = tenzor::nn::sigmoid(tenzor::nn::sigmoid(x));
@@ -135,12 +142,14 @@ TEST_F(HigherOrderActivationsTest, SigmoidChainDoubleBackward) {
 // a proper autograd-aware backward this is non-zero; if it routes through a
 // stub / leaf Variable this is zero.
 static auto double_backward_magnitude(
-    const std::function<Variable(const Variable&)>& act) -> double {
-    auto x_t = zeros({4}, DType::Float64, Device::cpu());
-    x_t.data<double>()[0] = -0.7;
-    x_t.data<double>()[1] = -0.1;
-    x_t.data<double>()[2] =  0.4;
-    x_t.data<double>()[3] =  1.5;
+    const std::function<Variable(const Variable&)>& act,
+    const Device& device) -> double {
+    auto x_host = zeros({4}, DType::Float64, Device::cpu());
+    x_host.data<double>()[0] = -0.7;
+    x_host.data<double>()[1] = -0.1;
+    x_host.data<double>()[2] =  0.4;
+    x_host.data<double>()[3] =  1.5;
+    auto x_t = x_host.to(device);
 
     auto x = Variable(x_t, true);
     auto y = act(x);
@@ -160,75 +169,76 @@ static auto double_backward_magnitude(
     return total;
 }
 
-TEST_F(HigherOrderActivationsTest, LogSigmoidDoubleBackwardNonZero) {
+TEST_P(HigherOrderActivationsTest, LogSigmoidDoubleBackwardNonZero) {
     // d(log_sigmoid(x))/dx = 1 - sigmoid(x); d²/dx² = -sigmoid(x) * (1 - sigmoid(x))
     // which is nonzero for x != ±∞. Before LogSigmoidBackward gained
     // backward_with_variables() the second derivative silently came out zero.
     double m = double_backward_magnitude(
-        [](const Variable& x) { return tenzor::nn::log_sigmoid(x); });
+        [](const Variable& x) { return tenzor::nn::log_sigmoid(x); }, device);
     EXPECT_GT(m, 1e-6)
         << "nn::log_sigmoid second derivative is zero — LogSigmoidBackward "
            "lost its backward_with_variables override";
 }
 
-TEST_F(HigherOrderActivationsTest, GeLUDoubleBackwardNonZero) {
+TEST_P(HigherOrderActivationsTest, GeLUDoubleBackwardNonZero) {
     double m = double_backward_magnitude(
-        [](const Variable& x) { return tenzor::nn::gelu(x, "none"); });
+        [](const Variable& x) { return tenzor::nn::gelu(x, "none"); }, device);
     EXPECT_GT(m, 1e-6)
         << "nn::gelu did not route through the autograd-aware GeluBackward";
 }
 
-TEST_F(HigherOrderActivationsTest, GeLUTanhApproxDoubleBackwardNonZero) {
+TEST_P(HigherOrderActivationsTest, GeLUTanhApproxDoubleBackwardNonZero) {
     // The tanh-approx path is a pure Variable-level composition (x * x * x,
     // then scaled and tanh'd); higher-order flows naturally through the
     // _AG tanh already tested above.
     double m = double_backward_magnitude(
-        [](const Variable& x) { return tenzor::nn::gelu(x, "tanh"); });
+        [](const Variable& x) { return tenzor::nn::gelu(x, "tanh"); }, device);
     EXPECT_GT(m, 1e-6);
 }
 
-TEST_F(HigherOrderActivationsTest, ELUDoubleBackwardNonZero) {
+TEST_P(HigherOrderActivationsTest, ELUDoubleBackwardNonZero) {
     double m = double_backward_magnitude(
-        [](const Variable& x) { return tenzor::nn::elu(x, 1.0); });
+        [](const Variable& x) { return tenzor::nn::elu(x, 1.0); }, device);
     EXPECT_GT(m, 1e-6)
         << "nn::elu did not route through the autograd-aware EluBackward";
 }
 
-TEST_F(HigherOrderActivationsTest, SELUDoubleBackwardNonZero) {
+TEST_P(HigherOrderActivationsTest, SELUDoubleBackwardNonZero) {
     double m = double_backward_magnitude(
-        [](const Variable& x) { return tenzor::nn::selu(x); });
+        [](const Variable& x) { return tenzor::nn::selu(x); }, device);
     EXPECT_GT(m, 1e-6)
         << "nn::selu did not route through the autograd-aware SeluBackward";
 }
 
-TEST_F(HigherOrderActivationsTest, MishDoubleBackwardNonZero) {
+TEST_P(HigherOrderActivationsTest, MishDoubleBackwardNonZero) {
     double m = double_backward_magnitude(
-        [](const Variable& x) { return tenzor::nn::mish(x); });
+        [](const Variable& x) { return tenzor::nn::mish(x); }, device);
     EXPECT_GT(m, 1e-6)
         << "nn::mish did not route through the autograd-aware MishBackward";
 }
 
-TEST_F(HigherOrderActivationsTest, SwishDoubleBackwardNonZero) {
+TEST_P(HigherOrderActivationsTest, SwishDoubleBackwardNonZero) {
     // Swish = x * sigmoid(x) — nonlinear, second derivative non-zero.
     // P4.2c rewrote nn::swish as a Variable-level composition, so the
     // chain rule flows through nn::sigmoid's autograd-aware backward.
     double m = double_backward_magnitude(
-        [](const Variable& x) { return tenzor::nn::swish(x); });
+        [](const Variable& x) { return tenzor::nn::swish(x); }, device);
     EXPECT_GT(m, 1e-6)
         << "nn::swish should produce non-zero second derivatives via "
            "x * sigmoid(x) Variable composition";
 }
 
-TEST_F(HigherOrderActivationsTest, HardswishDoubleBackwardFinite) {
+TEST_P(HigherOrderActivationsTest, HardswishDoubleBackwardFinite) {
     // Hardswish is piecewise linear/quadratic. Second derivatives may be
     // small or zero except in the [-3, 3] transition region. We verify
     // the graph threads through without throwing; magnitude is
     // implementation-dependent.
-    auto x_t = zeros({4}, DType::Float64, Device::cpu());
-    x_t.data<double>()[0] = -2.0;
-    x_t.data<double>()[1] = -1.0;
-    x_t.data<double>()[2] =  1.0;
-    x_t.data<double>()[3] =  2.0;
+    auto x_host = zeros({4}, DType::Float64, Device::cpu());
+    x_host.data<double>()[0] = -2.0;
+    x_host.data<double>()[1] = -1.0;
+    x_host.data<double>()[2] =  1.0;
+    x_host.data<double>()[3] =  2.0;
+    auto x_t = x_host.to(device);
 
     auto x = Variable(x_t, true);
     auto y = tenzor::nn::hardswish(x);
@@ -241,12 +251,13 @@ TEST_F(HigherOrderActivationsTest, HardswishDoubleBackwardFinite) {
     EXPECT_NO_THROW(grad_norm.backward());
 }
 
-TEST_F(HigherOrderActivationsTest, HardsigmoidDoubleBackwardFinite) {
-    auto x_t = zeros({4}, DType::Float64, Device::cpu());
-    x_t.data<double>()[0] = -2.0;
-    x_t.data<double>()[1] = -1.0;
-    x_t.data<double>()[2] =  1.0;
-    x_t.data<double>()[3] =  2.0;
+TEST_P(HigherOrderActivationsTest, HardsigmoidDoubleBackwardFinite) {
+    auto x_host = zeros({4}, DType::Float64, Device::cpu());
+    x_host.data<double>()[0] = -2.0;
+    x_host.data<double>()[1] = -1.0;
+    x_host.data<double>()[2] =  1.0;
+    x_host.data<double>()[3] =  2.0;
+    auto x_t = x_host.to(device);
 
     auto x = Variable(x_t, true);
     auto y = tenzor::nn::hardsigmoid(x);
@@ -259,17 +270,18 @@ TEST_F(HigherOrderActivationsTest, HardsigmoidDoubleBackwardFinite) {
     EXPECT_NO_THROW(grad_norm.backward());
 }
 
-TEST_F(HigherOrderActivationsTest, LeakyReLUDoubleBackwardPiecewiseLinear) {
+TEST_P(HigherOrderActivationsTest, LeakyReLUDoubleBackwardPiecewiseLinear) {
     // Leaky ReLU is piecewise linear, so the mathematical second derivative
     // is zero almost everywhere. The autograd-aware path should still
     // produce a non-throwing gradient graph — we verify it completes
     // without exceptions and returns a finite tensor (the magnitude may
     // legitimately be very small or zero).
-    auto x_t = zeros({4}, DType::Float64, Device::cpu());
-    x_t.data<double>()[0] = -0.7;
-    x_t.data<double>()[1] = -0.1;
-    x_t.data<double>()[2] =  0.4;
-    x_t.data<double>()[3] =  1.5;
+    auto x_host = zeros({4}, DType::Float64, Device::cpu());
+    x_host.data<double>()[0] = -0.7;
+    x_host.data<double>()[1] = -0.1;
+    x_host.data<double>()[2] =  0.4;
+    x_host.data<double>()[3] =  1.5;
+    auto x_t = x_host.to(device);
 
     auto x = Variable(x_t, true);
     auto y = tenzor::nn::leaky_relu(x, 0.1);
@@ -277,6 +289,8 @@ TEST_F(HigherOrderActivationsTest, LeakyReLUDoubleBackwardPiecewiseLinear) {
     loss.backward(std::nullopt, false, true);
     EXPECT_GRAD_FLOWS(x);
 }
+
+INSTANTIATE_BACKEND_TESTS(HigherOrderActivationsTest);
 
 } // namespace
 } // namespace tenzor

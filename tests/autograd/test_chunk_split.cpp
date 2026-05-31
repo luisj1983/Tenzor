@@ -19,27 +19,24 @@
 #include "tenzor/tenzor.hpp"
 #include "tenzor/autograd/ops.hpp"
 #include "tenzor/autograd/variable.hpp"
+#include "../backend_test_fixture.hpp"
 
 using namespace tenzor;
 
-class ChunkSplitTest : public ::testing::Test {
+class ChunkSplitTest : public ::tenzor::testing::BackendTest {
 protected:
-    static bool initialized;
     void SetUp() override {
-        if (!initialized) {
-            tenzor::initialize();
-            initialized = true;
-        }
+        ::tenzor::testing::BackendTest::SetUp();
+        if (::testing::Test::IsSkipped()) return;
     }
 };
-bool ChunkSplitTest::initialized = false;
 
 // ============================================================================
 // Y.5 + Z.27: chunk(zeros({0, 5}), 3, dim=0) must yield 3 empty [0, 5] outputs
 // ============================================================================
 
-TEST_F(ChunkSplitTest, ChunkEmptyDimReturnsRequestedChunks) {
-    Variable input(zeros({0, 5}, DType::Float32, Device::cpu()),
+TEST_P(ChunkSplitTest, ChunkEmptyDimReturnsRequestedChunks) {
+    Variable input(zeros({0, 5}, DType::Float32, device),
                    /*requires_grad=*/true);
 
     auto pieces = tenzor::chunk(input, /*chunks=*/3, /*dim=*/0);
@@ -59,9 +56,9 @@ TEST_F(ChunkSplitTest, ChunkEmptyDimReturnsRequestedChunks) {
     }
 }
 
-TEST_F(ChunkSplitTest, ChunkEmptyDimAllowsStructuredBinding) {
+TEST_P(ChunkSplitTest, ChunkEmptyDimAllowsStructuredBinding) {
     // The bug Y.5 surfaced — destructuring assumes `chunks` outputs.
-    Variable input(zeros({0, 4}, DType::Float32, Device::cpu()), false);
+    Variable input(zeros({0, 4}, DType::Float32, device), false);
 
     auto pieces = tenzor::chunk(input, /*chunks=*/2, /*dim=*/0);
     ASSERT_EQ(pieces.size(), 2u);
@@ -75,8 +72,8 @@ TEST_F(ChunkSplitTest, ChunkEmptyDimAllowsStructuredBinding) {
 // Z.27: split(zeros({0, 5}), 2, dim=0) must yield a single empty [0, 5] output
 // ============================================================================
 
-TEST_F(ChunkSplitTest, SplitEmptyDimReturnsSingleEmptyOutput) {
-    Variable input(zeros({0, 5}, DType::Float32, Device::cpu()),
+TEST_P(ChunkSplitTest, SplitEmptyDimReturnsSingleEmptyOutput) {
+    Variable input(zeros({0, 5}, DType::Float32, device),
                    /*requires_grad=*/true);
 
     auto pieces = tenzor::split(input, /*split_size=*/2, /*dim=*/0);
@@ -99,8 +96,8 @@ TEST_F(ChunkSplitTest, SplitEmptyDimReturnsSingleEmptyOutput) {
 // Non-empty sanity: ensure the regression test didn't break the common case.
 // ============================================================================
 
-TEST_F(ChunkSplitTest, ChunkNonEmptyDimPartitionsAndPreservesGrad) {
-    Variable input(ones({6, 4}, DType::Float32, Device::cpu()),
+TEST_P(ChunkSplitTest, ChunkNonEmptyDimPartitionsAndPreservesGrad) {
+    Variable input(ones({6, 4}, DType::Float32, device),
                    /*requires_grad=*/true);
 
     auto pieces = tenzor::chunk(input, /*chunks=*/3, /*dim=*/0);
@@ -117,8 +114,8 @@ TEST_F(ChunkSplitTest, ChunkNonEmptyDimPartitionsAndPreservesGrad) {
     EXPECT_GT(input.grad().value().numel(), 0);
 }
 
-TEST_F(ChunkSplitTest, SplitNonEmptyDimPartitions) {
-    Variable input(ones({5, 3}, DType::Float32, Device::cpu()),
+TEST_P(ChunkSplitTest, SplitNonEmptyDimPartitions) {
+    Variable input(ones({5, 3}, DType::Float32, device),
                    /*requires_grad=*/false);
 
     auto pieces = tenzor::split(input, /*split_size=*/2, /*dim=*/0);
@@ -128,3 +125,5 @@ TEST_F(ChunkSplitTest, SplitNonEmptyDimPartitions) {
     EXPECT_EQ(pieces[1].shape()[0], 2);
     EXPECT_EQ(pieces[2].shape()[0], 1);
 }
+
+INSTANTIATE_BACKEND_TESTS(ChunkSplitTest);

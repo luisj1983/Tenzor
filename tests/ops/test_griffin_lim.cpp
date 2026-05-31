@@ -9,10 +9,12 @@
  *   - n_iter == 0 returns zero-phase ISTFT of |S|.
  *   - Float64 magnitude is round-tripped through the algorithm and narrowed back.
  *
- * Release-prep stream S7. Backend: CPU.
+ * Release-prep stream S7. Backend: cross-backend (fixture-parametrized).
  */
 
 #include <gtest/gtest.h>
+
+#include "../backend_test_fixture.hpp"
 
 #include "tenzor/tenzor.hpp"
 #include "tenzor/ops/fft.hpp"
@@ -26,28 +28,31 @@ using namespace tenzor;
 namespace {
 
 // ---- Test fixture ---------------------------------------------------------
-class GriffinLimTest : public ::testing::Test {
+class GriffinLimTest : public ::tenzor::testing::BackendTest {
 protected:
     void SetUp() override {
-        tenzor::initialize();
+        ::tenzor::testing::BackendTest::SetUp();
+        if (::testing::Test::IsSkipped()) return;
         // Deterministic per-test phase init.
-        tenzor::default_generator(Device::cpu()).manual_seed(42);
+        tenzor::default_generator(device).manual_seed(42);
     }
 };
 
-// Build a Hann window of given length as a Float32 tensor.
-Tensor hann_window(int64_t n_fft) {
+// Build a Hann window of given length as a Float32 tensor on `device`.
+// Host writes happen on CPU, then the tensor is moved to the target device.
+Tensor hann_window(int64_t n_fft, const Device& device) {
     auto win = ::tenzor::zeros({n_fft}, DType::Float32, Device::cpu());
     auto* wp = win.data<float>();
     for (int64_t i = 0; i < n_fft; ++i) {
         wp[i] = 0.5f * (1.0f - std::cos(2.0f * static_cast<float>(M_PI) * i
                                         / static_cast<float>(n_fft - 1)));
     }
-    return win;
+    return win.to(device);
 }
 
 // Mix-of-sinusoids test signal: y(t) = sum_k a_k sin(2 pi f_k t / N).
-Tensor synth_signal(int64_t N) {
+// Host writes on CPU, then moved to `device`.
+Tensor synth_signal(int64_t N, const Device& device) {
     auto y = ::tenzor::zeros({N}, DType::Float32, Device::cpu());
     auto* p = y.data<float>();
     const float two_pi = 6.283185307179586f;
@@ -57,13 +62,13 @@ Tensor synth_signal(int64_t N) {
              + 0.6f * std::sin(two_pi * 21.0f * t / static_cast<float>(N))
              + 0.3f * std::sin(two_pi * 47.0f * t / static_cast<float>(N));
     }
-    return y;
+    return y.to(device);
 }
 
 // Sum-of-squares over a real or complex tensor, returned as double.
 double sum_sq_real(const Tensor& t) {
     Tensor f = (t.dtype() == DType::Float32) ? t : t.to(DType::Float32);
-    f = f.contiguous();
+    f = f.cpu().contiguous();
     const float* p = f.data<float>();
     double acc = 0.0;
     for (int64_t i = 0; i < f.numel(); ++i) {
@@ -75,8 +80,8 @@ double sum_sq_real(const Tensor& t) {
 double sum_sq_diff(const Tensor& a, const Tensor& b) {
     Tensor af = (a.dtype() == DType::Float32) ? a : a.to(DType::Float32);
     Tensor bf = (b.dtype() == DType::Float32) ? b : b.to(DType::Float32);
-    af = af.contiguous();
-    bf = bf.contiguous();
+    af = af.cpu().contiguous();
+    bf = bf.cpu().contiguous();
     EXPECT_EQ(af.numel(), bf.numel());
     const float* ap = af.data<float>();
     const float* bp = bf.data<float>();
@@ -103,8 +108,8 @@ double spectral_convergence(const Tensor& mag, const Tensor& signal,
 float max_abs_diff(const Tensor& a, const Tensor& b) {
     Tensor af = (a.dtype() == DType::Float32) ? a : a.to(DType::Float32);
     Tensor bf = (b.dtype() == DType::Float32) ? b : b.to(DType::Float32);
-    af = af.contiguous();
-    bf = bf.contiguous();
+    af = af.cpu().contiguous();
+    bf = bf.cpu().contiguous();
     EXPECT_EQ(af.numel(), bf.numel());
     const float* ap = af.data<float>();
     const float* bp = bf.data<float>();
@@ -118,14 +123,14 @@ float max_abs_diff(const Tensor& a, const Tensor& b) {
 } // namespace
 
 // ---- 1. Magnitude-recovery test -------------------------------------------
-TEST_F(GriffinLimTest, RecoversMagnitudeWithinTolerance) {
+TEST_P(GriffinLimTest, RecoversMagnitudeWithinTolerance) {
     const int64_t N      = 1024;
     const int64_t n_fft  = 128;
     const int64_t hop    = 32;
     const int64_t winlen = 128;
-    auto window = hann_window(n_fft);
+    auto window = hann_window(n_fft, device);
 
-    auto signal = synth_signal(N);
+    auto signal = synth_signal(N, device);
     auto S      = ::tenzor::fft::stft(signal, n_fft, hop, winlen, window);
     auto mag    = ::tenzor::abs(S);  // Float32
 
@@ -145,21 +150,21 @@ TEST_F(GriffinLimTest, RecoversMagnitudeWithinTolerance) {
 }
 
 // ---- 2. Convergence-monotonicity-like test --------------------------------
-TEST_F(GriffinLimTest, SpectralConvergenceDecreasesOverIterations) {
+TEST_P(GriffinLimTest, SpectralConvergenceDecreasesOverIterations) {
     const int64_t N      = 1024;
     const int64_t n_fft  = 128;
     const int64_t hop    = 32;
     const int64_t winlen = 128;
-    auto window = hann_window(n_fft);
+    auto window = hann_window(n_fft, device);
 
-    auto signal = synth_signal(N);
+    auto signal = synth_signal(N, device);
     auto S      = ::tenzor::fft::stft(signal, n_fft, hop, winlen, window);
     auto mag    = ::tenzor::abs(S);
 
     // Re-seed before each call so the random-phase initialization is identical;
     // any difference in spectral-convergence then comes purely from n_iter.
     auto sc_at = [&](int64_t n_iter) -> double {
-        tenzor::default_generator(Device::cpu()).manual_seed(123);
+        tenzor::default_generator(device).manual_seed(123);
         auto y = ::tenzor::fft::griffin_lim(mag, n_fft, hop, winlen,
                                             window, n_iter, /*momentum=*/0.99);
         return spectral_convergence(mag, y, n_fft, hop, winlen, window);
@@ -186,20 +191,20 @@ TEST_F(GriffinLimTest, SpectralConvergenceDecreasesOverIterations) {
 }
 
 // ---- 3. Momentum-improvement test -----------------------------------------
-TEST_F(GriffinLimTest, MomentumImprovesOrMatchesNoMomentum) {
+TEST_P(GriffinLimTest, MomentumImprovesOrMatchesNoMomentum) {
     const int64_t N      = 1024;
     const int64_t n_fft  = 128;
     const int64_t hop    = 32;
     const int64_t winlen = 128;
-    auto window = hann_window(n_fft);
+    auto window = hann_window(n_fft, device);
 
-    auto signal = synth_signal(N);
+    auto signal = synth_signal(N, device);
     auto S      = ::tenzor::fft::stft(signal, n_fft, hop, winlen, window);
     auto mag    = ::tenzor::abs(S);
 
     auto run = [&](double momentum) -> double {
         // Same seed for both runs so the initial random phase is identical.
-        tenzor::default_generator(Device::cpu()).manual_seed(7);
+        tenzor::default_generator(device).manual_seed(7);
         auto y = ::tenzor::fft::griffin_lim(mag, n_fft, hop, winlen,
                                             window, /*n_iter=*/50, momentum);
         return spectral_convergence(mag, y, n_fft, hop, winlen, window);
@@ -221,14 +226,14 @@ TEST_F(GriffinLimTest, MomentumImprovesOrMatchesNoMomentum) {
 }
 
 // ---- 4. n_iter == 0 path ---------------------------------------------------
-TEST_F(GriffinLimTest, NIterZeroReturnsZeroPhaseISTFT) {
+TEST_P(GriffinLimTest, NIterZeroReturnsZeroPhaseISTFT) {
     const int64_t N      = 512;
     const int64_t n_fft  = 64;
     const int64_t hop    = 16;
     const int64_t winlen = 64;
-    auto window = hann_window(n_fft);
+    auto window = hann_window(n_fft, device);
 
-    auto signal = synth_signal(N);
+    auto signal = synth_signal(N, device);
     auto S      = ::tenzor::fft::stft(signal, n_fft, hop, winlen, window);
     auto mag    = ::tenzor::abs(S);
 
@@ -250,14 +255,14 @@ TEST_F(GriffinLimTest, NIterZeroReturnsZeroPhaseISTFT) {
 }
 
 // ---- 5. Float64 magnitude path --------------------------------------------
-TEST_F(GriffinLimTest, AcceptsFloat64Magnitude) {
+TEST_P(GriffinLimTest, AcceptsFloat64Magnitude) {
     const int64_t N      = 512;
     const int64_t n_fft  = 64;
     const int64_t hop    = 16;
     const int64_t winlen = 64;
-    auto window = hann_window(n_fft);
+    auto window = hann_window(n_fft, device);
 
-    auto signal = synth_signal(N);
+    auto signal = synth_signal(N, device);
     auto S      = ::tenzor::fft::stft(signal, n_fft, hop, winlen, window);
     auto mag_f32 = ::tenzor::abs(S);
     auto mag_f64 = mag_f32.to(DType::Float64);
@@ -275,3 +280,5 @@ TEST_F(GriffinLimTest, AcceptsFloat64Magnitude) {
                                      n_fft, hop, winlen, window);
     EXPECT_LT(sc, 0.35) << "spectral convergence = " << sc;
 }
+
+INSTANTIATE_BACKEND_TESTS(GriffinLimTest);

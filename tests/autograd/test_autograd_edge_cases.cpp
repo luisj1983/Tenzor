@@ -11,35 +11,32 @@
 
 #include <gtest/gtest.h>
 #include "tenzor/tenzor.hpp"
+#include "../backend_test_fixture.hpp"
 #include <cmath>
 
 using namespace tenzor;
 
-class AutogradEdgeCaseTest : public ::testing::Test {
+class AutogradEdgeCaseTest : public ::tenzor::testing::BackendTest {
 protected:
-    static bool initialized;
     void SetUp() override {
-        if (!initialized) {
-            tenzor::initialize();
-            initialized = true;
-        }
+        ::tenzor::testing::BackendTest::SetUp();
+        if (::testing::Test::IsSkipped()) return;
     }
 };
-
-bool AutogradEdgeCaseTest::initialized = false;
 
 // ============================================================================
 // 1. x*x Gradient (Should Be 2*x)
 // ============================================================================
 
-TEST_F(AutogradEdgeCaseTest, SquareGradient) {
+TEST_P(AutogradEdgeCaseTest, SquareGradient) {
     // f(x) = x*x, df/dx = 2*x
-    auto x_data = zeros({4}, DType::Float32, Device::cpu());
-    auto* ptr = x_data.data<float>();
+    auto x_host = zeros({4}, DType::Float32, Device::cpu());
+    auto* ptr = x_host.data<float>();
     ptr[0] = 1.0f;
     ptr[1] = 2.0f;
     ptr[2] = 3.0f;
     ptr[3] = -1.0f;
+    auto x_data = x_host.to(device);
 
     Variable x(x_data, true);
     auto y = x * x;
@@ -57,9 +54,9 @@ TEST_F(AutogradEdgeCaseTest, SquareGradient) {
     EXPECT_NEAR(g[3], -2.0f, 1e-5f);  // 2*(-1) = -2
 }
 
-TEST_F(AutogradEdgeCaseTest, SquareGradientScalar) {
+TEST_P(AutogradEdgeCaseTest, SquareGradientScalar) {
     // Single element: f(x) = x^2, df/dx = 2x at x=5
-    auto x_data = full({1}, 5.0f, DType::Float32, Device::cpu());
+    auto x_data = full({1}, 5.0f, DType::Float32, device);
     Variable x(x_data, true);
 
     auto y = x * x;
@@ -71,13 +68,14 @@ TEST_F(AutogradEdgeCaseTest, SquareGradientScalar) {
     EXPECT_NEAR(grad.data<float>()[0], 10.0f, 1e-5f);  // 2*5 = 10
 }
 
-TEST_F(AutogradEdgeCaseTest, CubeGradient) {
+TEST_P(AutogradEdgeCaseTest, CubeGradient) {
     // f(x) = x*x*x, df/dx = 3*x^2
-    auto x_data = zeros({3}, DType::Float32, Device::cpu());
-    auto* ptr = x_data.data<float>();
+    auto x_host = zeros({3}, DType::Float32, Device::cpu());
+    auto* ptr = x_host.data<float>();
     ptr[0] = 1.0f;
     ptr[1] = 2.0f;
     ptr[2] = -2.0f;
+    auto x_data = x_host.to(device);
 
     Variable x(x_data, true);
     auto y = x * x * x;
@@ -98,10 +96,10 @@ TEST_F(AutogradEdgeCaseTest, CubeGradient) {
 // 2. Detach Mid-Graph
 // ============================================================================
 
-TEST_F(AutogradEdgeCaseTest, DetachMidGraph) {
+TEST_P(AutogradEdgeCaseTest, DetachMidGraph) {
     // x -> y = 2*x -> y_detached (no grad) -> z = y_detached + 1 -> sum
     // Gradient should NOT flow back to x because y is detached
-    auto x_data = ones({3}, DType::Float32, Device::cpu());
+    auto x_data = ones({3}, DType::Float32, device);
     Variable x(x_data, true);
 
     auto y = x * 2.0f;
@@ -129,10 +127,11 @@ TEST_F(AutogradEdgeCaseTest, DetachMidGraph) {
     }
 }
 
-TEST_F(AutogradEdgeCaseTest, DetachPreservesData) {
-    auto x_data = zeros({3}, DType::Float32, Device::cpu());
-    auto* ptr = x_data.data<float>();
+TEST_P(AutogradEdgeCaseTest, DetachPreservesData) {
+    auto x_host = zeros({3}, DType::Float32, Device::cpu());
+    auto* ptr = x_host.data<float>();
     ptr[0] = 1.0f; ptr[1] = 2.0f; ptr[2] = 3.0f;
+    auto x_data = x_host.to(device);
 
     Variable x(x_data, true);
     auto y = x * 3.0f;
@@ -150,9 +149,9 @@ TEST_F(AutogradEdgeCaseTest, DetachPreservesData) {
 // 3. Gradient Accumulation
 // ============================================================================
 
-TEST_F(AutogradEdgeCaseTest, GradientAccumulation) {
+TEST_P(AutogradEdgeCaseTest, GradientAccumulation) {
     // Accumulate gradients across multiple backward passes
-    auto x_data = ones({3}, DType::Float32, Device::cpu());
+    auto x_data = ones({3}, DType::Float32, device);
     Variable x(x_data, true);
 
     // First backward pass: loss = sum(x * 2)
@@ -180,8 +179,8 @@ TEST_F(AutogradEdgeCaseTest, GradientAccumulation) {
     }
 }
 
-TEST_F(AutogradEdgeCaseTest, ZeroGradThenBackward) {
-    auto x_data = ones({3}, DType::Float32, Device::cpu());
+TEST_P(AutogradEdgeCaseTest, ZeroGradThenBackward) {
+    auto x_data = ones({3}, DType::Float32, device);
     Variable x(x_data, true);
 
     // First backward
@@ -213,10 +212,11 @@ TEST_F(AutogradEdgeCaseTest, ZeroGradThenBackward) {
 // 4. retain_graph=true Multi-Backward
 // ============================================================================
 
-TEST_F(AutogradEdgeCaseTest, RetainGraphMultiBackward) {
-    auto x_data = ones({3}, DType::Float32, Device::cpu());
-    auto* ptr = x_data.data<float>();
+TEST_P(AutogradEdgeCaseTest, RetainGraphMultiBackward) {
+    auto x_host = ones({3}, DType::Float32, Device::cpu());
+    auto* ptr = x_host.data<float>();
     ptr[0] = 1.0f; ptr[1] = 2.0f; ptr[2] = 3.0f;
+    auto x_data = x_host.to(device);
 
     Variable x(x_data, true);
     auto y = x * x;  // y = x^2
@@ -243,8 +243,8 @@ TEST_F(AutogradEdgeCaseTest, RetainGraphMultiBackward) {
     EXPECT_NEAR(g2[2], 12.0f, 1e-5f);  // 2*3 + 2*3
 }
 
-TEST_F(AutogradEdgeCaseTest, RetainGraphWithZeroGrad) {
-    auto x_data = full({2}, 3.0f, DType::Float32, Device::cpu());
+TEST_P(AutogradEdgeCaseTest, RetainGraphWithZeroGrad) {
+    auto x_data = full({2}, 3.0f, DType::Float32, device);
     Variable x(x_data, true);
 
     auto y = x * 2.0f;
@@ -271,12 +271,12 @@ TEST_F(AutogradEdgeCaseTest, RetainGraphWithZeroGrad) {
 // 5. Complex Graph Patterns
 // ============================================================================
 
-TEST_F(AutogradEdgeCaseTest, DiamondGraph) {
+TEST_P(AutogradEdgeCaseTest, DiamondGraph) {
     // x -> y = x + 1
     //   -> z = x * 2
     // loss = sum(y + z) = sum(x + 1 + 2*x) = sum(3*x + 1)
     // dL/dx = 3
-    auto x_data = ones({4}, DType::Float32, Device::cpu());
+    auto x_data = ones({4}, DType::Float32, device);
     Variable x(x_data, true);
 
     auto y = x + 1.0f;
@@ -293,10 +293,10 @@ TEST_F(AutogradEdgeCaseTest, DiamondGraph) {
     }
 }
 
-TEST_F(AutogradEdgeCaseTest, VariableReuse) {
+TEST_P(AutogradEdgeCaseTest, VariableReuse) {
     // Use same variable twice in an expression: y = x + x
     // dL/dx should be 2 (sum of both paths)
-    auto x_data = ones({3}, DType::Float32, Device::cpu());
+    auto x_data = ones({3}, DType::Float32, device);
     Variable x(x_data, true);
 
     auto y = x + x;
@@ -315,9 +315,9 @@ TEST_F(AutogradEdgeCaseTest, VariableReuse) {
 // 6. Gradient with Zero Input
 // ============================================================================
 
-TEST_F(AutogradEdgeCaseTest, GradientAtZero) {
+TEST_P(AutogradEdgeCaseTest, GradientAtZero) {
     // f(x) = x*x at x=0 -> gradient should be 0
-    auto x_data = zeros({3}, DType::Float32, Device::cpu());
+    auto x_data = zeros({3}, DType::Float32, device);
     Variable x(x_data, true);
 
     auto y = x * x;
@@ -336,8 +336,8 @@ TEST_F(AutogradEdgeCaseTest, GradientAtZero) {
 // 7. No Grad Context
 // ============================================================================
 
-TEST_F(AutogradEdgeCaseTest, NoGradGuardPreventsGradient) {
-    auto x_data = ones({3}, DType::Float32, Device::cpu());
+TEST_P(AutogradEdgeCaseTest, NoGradGuardPreventsGradient) {
+    auto x_data = ones({3}, DType::Float32, device);
     Variable x(x_data, true);
 
     Variable y;
@@ -354,21 +354,21 @@ TEST_F(AutogradEdgeCaseTest, NoGradGuardPreventsGradient) {
 // 8. Leaf Variable Properties
 // ============================================================================
 
-TEST_F(AutogradEdgeCaseTest, LeafVariableIsLeaf) {
-    auto data = ones({3}, DType::Float32, Device::cpu());
+TEST_P(AutogradEdgeCaseTest, LeafVariableIsLeaf) {
+    auto data = ones({3}, DType::Float32, device);
     Variable x(data, true);
     EXPECT_TRUE(x.is_leaf());
 }
 
-TEST_F(AutogradEdgeCaseTest, NonLeafVariableIsNotLeaf) {
-    auto data = ones({3}, DType::Float32, Device::cpu());
+TEST_P(AutogradEdgeCaseTest, NonLeafVariableIsNotLeaf) {
+    auto data = ones({3}, DType::Float32, device);
     Variable x(data, true);
     auto y = x * 2.0f;
     EXPECT_FALSE(y.is_leaf());
 }
 
-TEST_F(AutogradEdgeCaseTest, RetainGradOnNonLeaf) {
-    auto data = ones({3}, DType::Float32, Device::cpu());
+TEST_P(AutogradEdgeCaseTest, RetainGradOnNonLeaf) {
+    auto data = ones({3}, DType::Float32, device);
     Variable x(data, true);
     auto y = x * 2.0f;
 
@@ -397,15 +397,16 @@ TEST_F(AutogradEdgeCaseTest, RetainGradOnNonLeaf) {
 // 9. Matmul Gradient
 // ============================================================================
 
-TEST_F(AutogradEdgeCaseTest, MatmulGradient) {
+TEST_P(AutogradEdgeCaseTest, MatmulGradient) {
     // y = matmul(x, w), loss = sum(y)
     // dy/dx = w^T, dy/dw = x^T
-    auto x_data = ones({2, 3}, DType::Float32, Device::cpu());
-    auto w_data = ones({3, 4}, DType::Float32, Device::cpu());
-    auto* wp = w_data.data<float>();
+    auto x_data = ones({2, 3}, DType::Float32, device);
+    auto w_host = ones({3, 4}, DType::Float32, Device::cpu());
+    auto* wp = w_host.data<float>();
     for (int i = 0; i < 12; ++i) {
         wp[i] = static_cast<float>(i + 1) * 0.1f;
     }
+    auto w_data = w_host.to(device);
 
     Variable x(x_data, true);
     Variable w(w_data, true);
@@ -440,3 +441,5 @@ TEST_F(AutogradEdgeCaseTest, MatmulGradient) {
         EXPECT_FALSE(std::isinf(wg[i])) << "w gradient Inf at index " << i;
     }
 }
+
+INSTANTIATE_BACKEND_TESTS(AutogradEdgeCaseTest);
