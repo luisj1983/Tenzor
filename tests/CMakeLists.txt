@@ -700,7 +700,7 @@ tenzor_discover_tests(test_dtype_conversion DISCOVERY_TIMEOUT 60)
 
 # BMM autograd tests
 add_executable(test_bmm_autograd test_bmm_autograd.cpp)
-target_link_libraries(test_bmm_autograd PRIVATE tenzor_core GTest::gtest)
+target_link_libraries(test_bmm_autograd PRIVATE tenzor_core GTest::gtest_main)
 tenzor_discover_tests(test_bmm_autograd DISCOVERY_TIMEOUT 60)
 
 # Linear reshape integration tests

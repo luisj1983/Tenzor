@@ -3,34 +3,21 @@
  * @brief Tests for the split() operation
  */
 
-#include <gtest/gtest.h>
+#include "backend_test_fixture.hpp"
 #include "tenzor/core/tensor.hpp"
 #include "tenzor/ops/transform.hpp"
 #include "tenzor/ops/creation.hpp"
 #include <vector>
 #include <cmath>
 
-// Forward declare tenzor::initialize
-namespace tenzor {
-    void initialize();
-}
-
 using namespace tenzor;
 
-// Global test environment to initialize Tenzor library
-class TenzorTestEnvironment : public ::testing::Environment {
-public:
-    void SetUp() override {
-        tenzor::initialize();
-    }
-};
-
-static ::testing::Environment* const tenzor_env =
-    ::testing::AddGlobalTestEnvironment(new TenzorTestEnvironment);
-
-class SplitOperationTest : public ::testing::Test {
+class SplitOperationTest : public ::tenzor::testing::BackendTest {
 protected:
     void SetUp() override {
+        ::tenzor::testing::BackendTest::SetUp();
+        if (::testing::Test::IsSkipped()) return;
+
         // Basic test shapes
         shape_1d = {12};
         shape_2d = {6, 8};
@@ -43,8 +30,8 @@ protected:
 };
 
 // Test 1D tensor split
-TEST_F(SplitOperationTest, Split1DTensorEvenDivision) {
-    auto tensor = arange(0.0f, 12.0f, 1.0f, DType::Float32, Device::cpu());
+TEST_P(SplitOperationTest, Split1DTensorEvenDivision) {
+    auto tensor = arange(0.0f, 12.0f, 1.0f, DType::Float32, device);
 
     // Split into chunks of size 3
     auto chunks = split(tensor, 3, 0);
@@ -57,7 +44,8 @@ TEST_F(SplitOperationTest, Split1DTensorEvenDivision) {
         EXPECT_EQ(chunks[i].numel(), 3);
 
         // Verify values
-        auto data = chunks[i].cpu().data<float>();
+        auto chunk_cpu = chunks[i].cpu();
+        auto data = chunk_cpu.data<float>();
         for (int64_t j = 0; j < 3; ++j) {
             EXPECT_FLOAT_EQ(data[j], i * 3 + j);
         }
@@ -65,8 +53,8 @@ TEST_F(SplitOperationTest, Split1DTensorEvenDivision) {
 }
 
 // Test 1D tensor split with uneven division
-TEST_F(SplitOperationTest, Split1DTensorUnevenDivision) {
-    auto tensor = arange(0.0f, 10.0f, 1.0f, DType::Float32, Device::cpu());
+TEST_P(SplitOperationTest, Split1DTensorUnevenDivision) {
+    auto tensor = arange(0.0f, 10.0f, 1.0f, DType::Float32, device);
 
     // Split into chunks of size 3 (will have 4 chunks: 3, 3, 3, 1)
     auto chunks = split(tensor, 3, 0);
@@ -84,13 +72,14 @@ TEST_F(SplitOperationTest, Split1DTensorUnevenDivision) {
     EXPECT_EQ(chunks[3].numel(), 1);
 
     // Verify last chunk value
-    auto last_data = chunks[3].cpu().data<float>();
+    auto last_cpu = chunks[3].cpu();
+    auto last_data = last_cpu.data<float>();
     EXPECT_FLOAT_EQ(last_data[0], 9.0f);
 }
 
 // Test 2D tensor split along dim 0
-TEST_F(SplitOperationTest, Split2DTensorDim0) {
-    auto tensor = ones(shape_2d, DType::Float32, Device::cpu());
+TEST_P(SplitOperationTest, Split2DTensorDim0) {
+    auto tensor = ones(shape_2d, DType::Float32, device);
 
     // Split into chunks of size 2 along dimension 0
     auto chunks = split(tensor, 2, 0);
@@ -107,8 +96,8 @@ TEST_F(SplitOperationTest, Split2DTensorDim0) {
 }
 
 // Test 2D tensor split along dim 1
-TEST_F(SplitOperationTest, Split2DTensorDim1) {
-    auto tensor = ones(shape_2d, DType::Float32, Device::cpu());
+TEST_P(SplitOperationTest, Split2DTensorDim1) {
+    auto tensor = ones(shape_2d, DType::Float32, device);
 
     // Split into chunks of size 3 along dimension 1
     auto chunks = split(tensor, 3, 1);
@@ -127,8 +116,8 @@ TEST_F(SplitOperationTest, Split2DTensorDim1) {
 }
 
 // Test 3D tensor split along different dimensions
-TEST_F(SplitOperationTest, Split3DTensorMultipleDims) {
-    auto tensor = zeros(shape_3d, DType::Float32, Device::cpu());
+TEST_P(SplitOperationTest, Split3DTensorMultipleDims) {
+    auto tensor = zeros(shape_3d, DType::Float32, device);
 
     // Split along dimension 0
     auto chunks_dim0 = split(tensor, 2, 0);
@@ -157,8 +146,8 @@ TEST_F(SplitOperationTest, Split3DTensorMultipleDims) {
 }
 
 // Test negative dimension indexing
-TEST_F(SplitOperationTest, SplitNegativeDimension) {
-    auto tensor = ones({4, 6, 8}, DType::Float32, Device::cpu());
+TEST_P(SplitOperationTest, SplitNegativeDimension) {
+    auto tensor = ones({4, 6, 8}, DType::Float32, device);
 
     // Split along dimension -1 (same as dimension 2)
     auto chunks = split(tensor, 4, -1);
@@ -169,25 +158,29 @@ TEST_F(SplitOperationTest, SplitNegativeDimension) {
 }
 
 // Test that split creates views (zero-copy)
-TEST_F(SplitOperationTest, SplitCreatesViews) {
-    auto tensor = arange(0.0f, 10.0f, 1.0f, DType::Float32, Device::cpu());
+TEST_P(SplitOperationTest, SplitCreatesViews) {
+    auto tensor = arange(0.0f, 10.0f, 1.0f, DType::Float32, device);
 
     // Split into chunks
     auto chunks = split(tensor, 3, 0);
 
-    // Modify first chunk and verify it affects original tensor
+    // Modify first chunk in-place and verify it affects original tensor.
+    // fill_() is device-aware and mutates shared storage, so this exercises
+    // the view (zero-copy) property on every backend.
     auto first_chunk = chunks[0];
-    float* data = first_chunk.data<float>();
-    data[0] = 999.0f;
+    first_chunk.fill_(999.0f);
 
     // Check that original tensor is modified (because slice creates views)
-    float* orig_data = tensor.data<float>();
+    auto orig_cpu = tensor.cpu();
+    float* orig_data = orig_cpu.data<float>();
     EXPECT_FLOAT_EQ(orig_data[0], 999.0f);
+    EXPECT_FLOAT_EQ(orig_data[1], 999.0f);
+    EXPECT_FLOAT_EQ(orig_data[2], 999.0f);
 }
 
 // Test split with size equal to dimension size
-TEST_F(SplitOperationTest, SplitSizeEqualsDimSize) {
-    auto tensor = ones({6, 8}, DType::Float32, Device::cpu());
+TEST_P(SplitOperationTest, SplitSizeEqualsDimSize) {
+    auto tensor = ones({6, 8}, DType::Float32, device);
 
     // Split with split_size == dim_size (should return single chunk)
     auto chunks = split(tensor, 6, 0);
@@ -198,8 +191,8 @@ TEST_F(SplitOperationTest, SplitSizeEqualsDimSize) {
 }
 
 // Test split with size larger than dimension size
-TEST_F(SplitOperationTest, SplitSizeLargerThanDimSize) {
-    auto tensor = ones({4, 8}, DType::Float32, Device::cpu());
+TEST_P(SplitOperationTest, SplitSizeLargerThanDimSize) {
+    auto tensor = ones({4, 8}, DType::Float32, device);
 
     // Split with split_size > dim_size (should return single chunk)
     auto chunks = split(tensor, 10, 0);
@@ -210,8 +203,8 @@ TEST_F(SplitOperationTest, SplitSizeLargerThanDimSize) {
 }
 
 // Test split with split_size = 1
-TEST_F(SplitOperationTest, SplitSizeOne) {
-    auto tensor = arange(0.0f, 5.0f, 1.0f, DType::Float32, Device::cpu());
+TEST_P(SplitOperationTest, SplitSizeOne) {
+    auto tensor = arange(0.0f, 5.0f, 1.0f, DType::Float32, device);
 
     // Split into individual elements
     auto chunks = split(tensor, 1, 0);
@@ -221,34 +214,35 @@ TEST_F(SplitOperationTest, SplitSizeOne) {
         EXPECT_EQ(chunks[i].shape()[0], 1);
         EXPECT_EQ(chunks[i].numel(), 1);
 
-        float value = chunks[i].cpu().data<float>()[0];
+        auto chunk_cpu = chunks[i].cpu();
+        float value = chunk_cpu.data<float>()[0];
         EXPECT_FLOAT_EQ(value, static_cast<float>(i));
     }
 }
 
 // Test error handling: invalid split size
-TEST_F(SplitOperationTest, ErrorInvalidSplitSize) {
-    auto tensor = ones({6, 8}, DType::Float32, Device::cpu());
+TEST_P(SplitOperationTest, ErrorInvalidSplitSize) {
+    auto tensor = ones({6, 8}, DType::Float32, device);
 
     EXPECT_THROW(split(tensor, 0, 0), std::invalid_argument);
     EXPECT_THROW(split(tensor, -1, 0), std::invalid_argument);
 }
 
 // Test error handling: dimension out of range
-TEST_F(SplitOperationTest, ErrorDimensionOutOfRange) {
-    auto tensor = ones({6, 8}, DType::Float32, Device::cpu());
+TEST_P(SplitOperationTest, ErrorDimensionOutOfRange) {
+    auto tensor = ones({6, 8}, DType::Float32, device);
 
     EXPECT_THROW(split(tensor, 2, 2), std::invalid_argument);
     EXPECT_THROW(split(tensor, 2, -3), std::invalid_argument);
 }
 
 // Test split use case: multi-head attention
-TEST_F(SplitOperationTest, MultiHeadAttentionUseCase) {
+TEST_P(SplitOperationTest, MultiHeadAttentionUseCase) {
     // Simulate splitting attention heads
     // Input: [batch_size, seq_len, hidden_dim] = [2, 10, 64]
     // Split hidden_dim into 8 heads of size 8 each
 
-    auto tensor = ones({2, 10, 64}, DType::Float32, Device::cpu());
+    auto tensor = ones({2, 10, 64}, DType::Float32, device);
     auto heads = split(tensor, 8, 2);  // Split along hidden dimension
 
     ASSERT_EQ(heads.size(), 8);  // 8 attention heads
@@ -262,12 +256,12 @@ TEST_F(SplitOperationTest, MultiHeadAttentionUseCase) {
 }
 
 // Test split use case: batch processing
-TEST_F(SplitOperationTest, BatchProcessingUseCase) {
+TEST_P(SplitOperationTest, BatchProcessingUseCase) {
     // Split large batch into mini-batches
     // Input: [batch_size, features] = [100, 32]
     // Split into mini-batches of size 10
 
-    auto tensor = ones({100, 32}, DType::Float32, Device::cpu());
+    auto tensor = ones({100, 32}, DType::Float32, device);
     auto mini_batches = split(tensor, 10, 0);
 
     ASSERT_EQ(mini_batches.size(), 10);  // 100 / 10 = 10 mini-batches
@@ -280,9 +274,9 @@ TEST_F(SplitOperationTest, BatchProcessingUseCase) {
 }
 
 // Test split on contiguous vs non-contiguous tensors
-TEST_F(SplitOperationTest, SplitNonContiguousTensor) {
+TEST_P(SplitOperationTest, SplitNonContiguousTensor) {
     // Create a non-contiguous tensor via transpose
-    auto tensor = ones({4, 8}, DType::Float32, Device::cpu());
+    auto tensor = ones({4, 8}, DType::Float32, device);
     auto transposed = tensor.transpose(0, 1);  // Non-contiguous
 
     EXPECT_FALSE(transposed.is_contiguous());
@@ -297,38 +291,4 @@ TEST_F(SplitOperationTest, SplitNonContiguousTensor) {
     }
 }
 
-// GPU Tests (if available)
-#ifdef TENZOR_CUDA_AVAILABLE
-TEST_F(SplitOperationTest, SplitCUDATensor) {
-    auto tensor = ones({6, 8}, DType::Float32, Device::cuda(0));
-
-    auto chunks = split(tensor, 2, 0);
-
-    ASSERT_EQ(chunks.size(), 3);
-    for (size_t i = 0; i < chunks.size(); ++i) {
-        EXPECT_EQ(chunks[i].shape()[0], 2);
-        EXPECT_EQ(chunks[i].shape()[1], 8);
-        EXPECT_EQ(chunks[i].device().type, Device::Type::CUDA);
-    }
-}
-#endif
-
-#ifdef TENZOR_ROCM_AVAILABLE
-TEST_F(SplitOperationTest, SplitROCmTensor) {
-    auto tensor = ones({6, 8}, DType::Float32, Device::hip(0));
-
-    auto chunks = split(tensor, 2, 0);
-
-    ASSERT_EQ(chunks.size(), 3);
-    for (size_t i = 0; i < chunks.size(); ++i) {
-        EXPECT_EQ(chunks[i].shape()[0], 2);
-        EXPECT_EQ(chunks[i].shape()[1], 8);
-        EXPECT_EQ(chunks[i].device().type, Device::Type::HIP);
-    }
-}
-#endif
-
-int main(int argc, char** argv) {
-    ::testing::InitGoogleTest(&argc, argv);
-    return RUN_ALL_TESTS();
-}
+INSTANTIATE_BACKEND_TESTS(SplitOperationTest);

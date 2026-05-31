@@ -7,21 +7,23 @@
 #include "tenzor/nn/loss/losses.hpp"
 #include <iostream>
 #include "grad_flow_helpers.hpp"
+#include "backend_test_fixture.hpp"
 
 using namespace tenzor;
 
-class KLDivManualTest : public ::testing::Test {
+class KLDivManualTest : public ::tenzor::testing::BackendTest {
 protected:
-    static void SetUpTestSuite() {
-        tenzor::initialize();
+    void SetUp() override {
+        ::tenzor::testing::BackendTest::SetUp();
+        if (::testing::Test::IsSkipped()) return;
     }
 };
 
-TEST_F(KLDivManualTest, SimpleSubtract) {
+TEST_P(KLDivManualTest, SimpleSubtract) {
     std::cout << "\n=== Testing simple subtraction ===" << std::endl;
 
-    auto a = Variable(full({2, 3}, 2.0f, DType::Float32), true);
-    auto b = Variable(full({2, 3}, 1.0f, DType::Float32), false);
+    auto a = Variable(full({2, 3}, 2.0f, DType::Float32, device), true);
+    auto b = Variable(full({2, 3}, 1.0f, DType::Float32, device), false);
 
     std::cout << "Computing a - b..." << std::endl;
     auto c = a - b;
@@ -41,11 +43,11 @@ TEST_F(KLDivManualTest, SimpleSubtract) {
     }
 }
 
-TEST_F(KLDivManualTest, SimpleMultiply) {
+TEST_P(KLDivManualTest, SimpleMultiply) {
     std::cout << "\n=== Testing simple multiplication ===" << std::endl;
 
-    auto a = Variable(full({2, 3}, 2.0f, DType::Float32), true);
-    auto b = Variable(full({2, 3}, 3.0f, DType::Float32), false);
+    auto a = Variable(full({2, 3}, 2.0f, DType::Float32, device), true);
+    auto b = Variable(full({2, 3}, 3.0f, DType::Float32, device), false);
 
     std::cout << "Computing a * b..." << std::endl;
     auto c = a * b;
@@ -64,13 +66,13 @@ TEST_F(KLDivManualTest, SimpleMultiply) {
     }
 }
 
-TEST_F(KLDivManualTest, StepByStepBackward) {
+TEST_P(KLDivManualTest, StepByStepBackward) {
     std::cout << "\n=== Testing KLDiv loss manually ===" << std::endl;
 
     // Create inputs
     std::cout << "1. Creating input (requires_grad=true) and target..." << std::endl;
-    auto input = Variable(full({2, 3}, -1.0f, DType::Float32), true);
-    auto target = Variable(full({2, 3}, 0.5f, DType::Float32), false);
+    auto input = Variable(full({2, 3}, -1.0f, DType::Float32, device), true);
+    auto target = Variable(full({2, 3}, 0.5f, DType::Float32, device), false);
 
     std::cout << "   input is_leaf: " << input.is_leaf() << std::endl;
     std::cout << "   target is_leaf: " << target.is_leaf() << std::endl;
@@ -112,11 +114,11 @@ TEST_F(KLDivManualTest, StepByStepBackward) {
     EXPECT_GRAD_FLOWS(input);
 }
 
-TEST_F(KLDivManualTest, ExactReplicaOfFailingTest) {
+TEST_P(KLDivManualTest, ExactReplicaOfFailingTest) {
     std::cout << "\n=== EXACT REPLICA of AdvancedLossTest.KLDivLoss_BackwardGradient ===" << std::endl;
 
-    auto input = Variable(full({2, 3}, -1.0f, DType::Float32), true);  // requires_grad=true
-    auto target = Variable(full({2, 3}, 0.5f, DType::Float32), false);
+    auto input = Variable(full({2, 3}, -1.0f, DType::Float32, device), true);  // requires_grad=true
+    auto target = Variable(full({2, 3}, 0.5f, DType::Float32, device), false);
 
     auto criterion = nn::KLDivLoss("mean");
     auto loss = criterion(input, target);
@@ -127,3 +129,5 @@ TEST_F(KLDivManualTest, ExactReplicaOfFailingTest) {
 
     std::cout << "SUCCESS: Test passed!" << std::endl;
 }
+
+INSTANTIATE_BACKEND_TESTS(KLDivManualTest);
