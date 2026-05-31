@@ -65,7 +65,7 @@ TEST_P(ResNetTest, BasicBlockGradientFlow) {
     block->to(device);
     block->train();
 
-    Variable input(Tensor({2, 64, 56, 56}, DType::Float32, device), true);
+    Variable input(randn({2, 64, 56, 56}, DType::Float32, device), true);
     Variable output = block->forward(input);
 
     // Compute a simple loss using autograd-aware sum
@@ -148,7 +148,7 @@ TEST_P(ResNetTest, BottleneckGradientFlow) {
     block->to(device);
     block->train();
 
-    Variable input(Tensor({2, 256, 56, 56}, DType::Float32, device), true);
+    Variable input(randn({2, 256, 56, 56}, DType::Float32, device), true);
     Variable output = block->forward(input);
 
     Variable loss = tenzor::sum(output * output);
