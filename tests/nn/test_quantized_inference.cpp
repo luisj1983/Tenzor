@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 #include <tenzor/tenzor.hpp>
+#include "../backend_test_fixture.hpp"
 #include <cmath>
 #include <numeric>
 
@@ -13,10 +14,11 @@ using namespace tenzor;
  * results within acceptable tolerance of the float reference.
  */
 
-class QuantizedInferenceTest : public ::testing::Test {
+class QuantizedInferenceTest : public ::tenzor::testing::BackendTest {
 protected:
     void SetUp() override {
-        tenzor::initialize();
+        ::tenzor::testing::BackendTest::SetUp();
+        if (::testing::Test::IsSkipped()) return;
     }
 
     // Compute max absolute error between two float tensors
@@ -34,9 +36,9 @@ protected:
 };
 
 // Test: quantize a weight matrix, dequantize, compare to original
-TEST_F(QuantizedInferenceTest, WeightQuantizeRoundTrip) {
+TEST_P(QuantizedInferenceTest, WeightQuantizeRoundTrip) {
     // Simulate a Linear layer weight [out=16, in=32]
-    auto weight = randn({16, 32}, DType::Float32, Device::cpu());
+    auto weight = randn({16, 32}, DType::Float32, device);
 
     // Compute quantization parameters
     auto weight_cpu = weight.to(Device::cpu());
@@ -58,31 +60,33 @@ TEST_F(QuantizedInferenceTest, WeightQuantizeRoundTrip) {
 }
 
 // Test: quantize input, manually compute quantized matmul, compare to float
-TEST_F(QuantizedInferenceTest, QuantizedMatmulAccuracy) {
+TEST_P(QuantizedInferenceTest, QuantizedMatmulAccuracy) {
     int64_t batch = 4, in_feat = 32, out_feat = 16;
 
     // Create float input and weight
-    auto input_f = randn({batch, in_feat}, DType::Float32, Device::cpu());
-    auto weight_f = randn({out_feat, in_feat}, DType::Float32, Device::cpu());
+    auto input_f = randn({batch, in_feat}, DType::Float32, device);
+    auto weight_f = randn({out_feat, in_feat}, DType::Float32, device);
 
     // Float reference: output = input @ weight.T
     auto ref_output = matmul(input_f, weight_f.transpose(0, 1));
 
     // Quantize both to int8
     // Input: symmetric quantization (zero_point = 0)
+    auto input_f_cpu = input_f.to(Device::cpu());
     float input_max = 0.0f;
     {
-        const float* d = input_f.data<float>();
-        for (size_t i = 0; i < input_f.numel(); ++i) {
+        const float* d = input_f_cpu.data<float>();
+        for (size_t i = 0; i < input_f_cpu.numel(); ++i) {
             input_max = std::max(input_max, std::abs(d[i]));
         }
     }
     double input_scale = static_cast<double>(input_max) / 127.0;
 
+    auto weight_f_cpu = weight_f.to(Device::cpu());
     float weight_max = 0.0f;
     {
-        const float* d = weight_f.data<float>();
-        for (size_t i = 0; i < weight_f.numel(); ++i) {
+        const float* d = weight_f_cpu.data<float>();
+        for (size_t i = 0; i < weight_f_cpu.numel(); ++i) {
             weight_max = std::max(weight_max, std::abs(d[i]));
         }
     }
@@ -98,10 +102,11 @@ TEST_F(QuantizedInferenceTest, QuantizedMatmulAccuracy) {
 
     // Compare: quantized output should be close to float reference
     double err = max_abs_error(ref_output, quant_output);
+    auto ref_output_cpu = ref_output.to(Device::cpu());
     double ref_mag = 0.0;
     {
-        const float* d = ref_output.data<float>();
-        for (size_t i = 0; i < ref_output.numel(); ++i) {
+        const float* d = ref_output_cpu.data<float>();
+        for (size_t i = 0; i < ref_output_cpu.numel(); ++i) {
             ref_mag = std::max(ref_mag, std::abs(static_cast<double>(d[i])));
         }
     }
@@ -112,12 +117,13 @@ TEST_F(QuantizedInferenceTest, QuantizedMatmulAccuracy) {
 }
 
 // Test: full Linear layer quantize-dequantize pipeline
-TEST_F(QuantizedInferenceTest, LinearLayerQuantization) {
+TEST_P(QuantizedInferenceTest, LinearLayerQuantization) {
     int64_t in_feat = 64, out_feat = 32, batch = 8;
 
     // Create and run float linear layer
     nn::Linear linear(in_feat, out_feat);
-    auto input = Variable(randn({batch, in_feat}, DType::Float32, Device::cpu()), false);
+    linear.to(device);
+    auto input = Variable(randn({batch, in_feat}, DType::Float32, device), false);
     auto float_output = linear.forward(input);
 
     // Get weight and bias
@@ -126,11 +132,11 @@ TEST_F(QuantizedInferenceTest, LinearLayerQuantization) {
     auto weight = params[0]->tensor();
 
     // Quantize weight
+    auto weight_cpu = weight.to(Device::cpu());
     float wmax = 0.0f;
     {
-        auto wc = weight.to(Device::cpu());
-        const float* d = wc.data<float>();
-        for (size_t i = 0; i < wc.numel(); ++i) {
+        const float* d = weight_cpu.data<float>();
+        for (size_t i = 0; i < weight_cpu.numel(); ++i) {
             wmax = std::max(wmax, std::abs(d[i]));
         }
     }
@@ -147,8 +153,8 @@ TEST_F(QuantizedInferenceTest, LinearLayerQuantization) {
 }
 
 // Test: quantization preserves shape
-TEST_F(QuantizedInferenceTest, ShapePreservation) {
-    auto t = randn({3, 4, 5}, DType::Float32, Device::cpu());
+TEST_P(QuantizedInferenceTest, ShapePreservation) {
+    auto t = randn({3, 4, 5}, DType::Float32, device);
     auto qt = quantize_per_tensor(t, 0.01, 0, DType::QInt8);
 
     EXPECT_EQ(qt.shape()[0], 3);
@@ -158,13 +164,14 @@ TEST_F(QuantizedInferenceTest, ShapePreservation) {
 }
 
 // Test: QUInt8 asymmetric quantization with non-zero zero_point
-TEST_F(QuantizedInferenceTest, AsymmetricQuantization) {
-    auto t = zeros({4}, DType::Float32, Device::cpu());
-    float* data = t.data<float>();
+TEST_P(QuantizedInferenceTest, AsymmetricQuantization) {
+    auto t_cpu = zeros({4}, DType::Float32, Device::cpu());
+    float* data = t_cpu.data<float>();
     data[0] = 0.0f;
     data[1] = 0.5f;
     data[2] = 1.0f;
     data[3] = 0.25f;
+    auto t = t_cpu.to(device);
 
     // Asymmetric: range [0, 1] maps to [0, 255]
     double scale = 1.0 / 255.0;
@@ -173,9 +180,12 @@ TEST_F(QuantizedInferenceTest, AsymmetricQuantization) {
     auto qt = quantize_per_tensor(t, scale, zero_point, DType::QUInt8);
     auto deq = qt.dequantize();
 
-    const float* out = deq.data<float>();
+    auto deq_cpu = deq.to(Device::cpu());
+    const float* out = deq_cpu.data<float>();
     EXPECT_NEAR(out[0], 0.0f, scale * 2);
     EXPECT_NEAR(out[1], 0.5f, scale * 2);
     EXPECT_NEAR(out[2], 1.0f, scale * 2);
     EXPECT_NEAR(out[3], 0.25f, scale * 2);
 }
+
+INSTANTIATE_BACKEND_TESTS(QuantizedInferenceTest);

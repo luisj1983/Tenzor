@@ -19,6 +19,8 @@
 #include <tenzor/ops/reduction.hpp>
 #include <tenzor/autograd/variable.hpp>
 
+#include "../backend_test_fixture.hpp"
+
 namespace tenzor {
 namespace {
 
@@ -28,9 +30,12 @@ using namespace tenzor::distributions;
 // Helper
 // ============================================================================
 
-class NewFeaturesTest : public ::testing::Test {
+class NewFeaturesTest : public ::tenzor::testing::BackendTest {
 protected:
-    void SetUp() override { tenzor::initialize(); }
+    void SetUp() override {
+        ::tenzor::testing::BackendTest::SetUp();
+        if (::testing::Test::IsSkipped()) return;
+    }
 
     static double scalar_val(const Tensor& t) {
         auto cpu = t.to(Device::cpu()).contiguous();
@@ -53,9 +58,9 @@ protected:
 // Distribution Tests
 // ============================================================================
 
-TEST_F(NewFeaturesTest, Pareto_SampleAndLogProb) {
-    auto scale = tenzor::full({1}, 1.0f);
-    auto alpha = tenzor::full({1}, 3.0f);
+TEST_P(NewFeaturesTest, Pareto_SampleAndLogProb) {
+    auto scale = tenzor::full({1}, 1.0f, DType::Float32, device);
+    auto alpha = tenzor::full({1}, 3.0f, DType::Float32, device);
     Pareto dist(scale, alpha);
 
     auto samples = dist.sample({1000});
@@ -63,14 +68,14 @@ TEST_F(NewFeaturesTest, Pareto_SampleAndLogProb) {
     // Pareto mean = alpha * scale / (alpha - 1) = 3 / 2 = 1.5
     EXPECT_NEAR(mean_val, 1.5, 0.3);
 
-    auto lp = dist.log_prob(tenzor::full({1}, 2.0f));
+    auto lp = dist.log_prob(tenzor::full({1}, 2.0f, DType::Float32, device));
     // log(3) + 3*log(1) - 4*log(2) = log(3) - 4*log(2) ~ 1.0986 - 2.7726 = -1.674
     EXPECT_NEAR(scalar_val(lp), -1.674, 0.01);
 }
 
-TEST_F(NewFeaturesTest, Weibull_Sample) {
-    auto scale = tenzor::full({1}, 1.0f);
-    auto concentration = tenzor::full({1}, 2.0f);
+TEST_P(NewFeaturesTest, Weibull_Sample) {
+    auto scale = tenzor::full({1}, 1.0f, DType::Float32, device);
+    auto concentration = tenzor::full({1}, 2.0f, DType::Float32, device);
     Weibull dist(scale, concentration);
 
     auto samples = dist.sample({5000});
@@ -79,9 +84,9 @@ TEST_F(NewFeaturesTest, Weibull_Sample) {
     EXPECT_NEAR(mean_val, 0.886, 0.1);
 }
 
-TEST_F(NewFeaturesTest, Kumaraswamy_SampleInUnitInterval) {
-    auto a = tenzor::full({1}, 2.0f);
-    auto b = tenzor::full({1}, 5.0f);
+TEST_P(NewFeaturesTest, Kumaraswamy_SampleInUnitInterval) {
+    auto a = tenzor::full({1}, 2.0f, DType::Float32, device);
+    auto b = tenzor::full({1}, 5.0f, DType::Float32, device);
     Kumaraswamy dist(a, b);
 
     auto samples = dist.sample({1000});
@@ -93,8 +98,8 @@ TEST_F(NewFeaturesTest, Kumaraswamy_SampleInUnitInterval) {
     }
 }
 
-TEST_F(NewFeaturesTest, ContinuousBernoulli_Sample) {
-    auto probs = tenzor::full({1}, 0.7f);
+TEST_P(NewFeaturesTest, ContinuousBernoulli_Sample) {
+    auto probs = tenzor::full({1}, 0.7f, DType::Float32, device);
     ContinuousBernoulli dist(probs);
 
     auto samples = dist.sample({1000});
@@ -104,11 +109,12 @@ TEST_F(NewFeaturesTest, ContinuousBernoulli_Sample) {
     EXPECT_LT(mean_val, 0.9);
 }
 
-TEST_F(NewFeaturesTest, OneHotCategorical_Sample) {
-    auto probs = tenzor::Tensor({3}, DType::Float32, Device::cpu());
-    probs.data<float>()[0] = 0.2f;
-    probs.data<float>()[1] = 0.3f;
-    probs.data<float>()[2] = 0.5f;
+TEST_P(NewFeaturesTest, OneHotCategorical_Sample) {
+    auto probs_cpu = tenzor::Tensor({3}, DType::Float32, Device::cpu());
+    probs_cpu.data<float>()[0] = 0.2f;
+    probs_cpu.data<float>()[1] = 0.3f;
+    probs_cpu.data<float>()[2] = 0.5f;
+    auto probs = probs_cpu.to(device);
     OneHotCategorical dist(probs);
 
     auto samples = dist.sample({100});
@@ -121,9 +127,9 @@ TEST_F(NewFeaturesTest, OneHotCategorical_Sample) {
     }
 }
 
-TEST_F(NewFeaturesTest, LogisticNormal_SampleOnSimplex) {
-    auto loc = tenzor::zeros({3});
-    auto scale = tenzor::ones({3});
+TEST_P(NewFeaturesTest, LogisticNormal_SampleOnSimplex) {
+    auto loc = tenzor::zeros({3}, DType::Float32, device);
+    auto scale = tenzor::ones({3}, DType::Float32, device);
     LogisticNormal dist(loc, scale);
 
     auto samples = dist.sample({100});
@@ -140,8 +146,8 @@ TEST_F(NewFeaturesTest, LogisticNormal_SampleOnSimplex) {
 // Scheduler Tests
 // ============================================================================
 
-TEST_F(NewFeaturesTest, ConstantLR_Schedule) {
-    auto param = std::make_shared<Variable>(tenzor::randn({2, 2}), true);
+TEST_P(NewFeaturesTest, ConstantLR_Schedule) {
+    auto param = std::make_shared<Variable>(tenzor::randn({2, 2}, DType::Float32, device), true);
     std::vector<std::shared_ptr<Variable>> params = {param};
     optim::SGD optimizer(params, 0.1);
 
@@ -156,8 +162,8 @@ TEST_F(NewFeaturesTest, ConstantLR_Schedule) {
     EXPECT_NEAR(scheduler.get_last_lr(), 0.1, 1e-7);
 }
 
-TEST_F(NewFeaturesTest, LinearLR_Schedule) {
-    auto param = std::make_shared<Variable>(tenzor::randn({2, 2}), true);
+TEST_P(NewFeaturesTest, LinearLR_Schedule) {
+    auto param = std::make_shared<Variable>(tenzor::randn({2, 2}, DType::Float32, device), true);
     std::vector<std::shared_ptr<Variable>> params = {param};
     optim::SGD optimizer(params, 0.1);
 
@@ -171,8 +177,8 @@ TEST_F(NewFeaturesTest, LinearLR_Schedule) {
     EXPECT_NEAR(scheduler.get_last_lr(), 0.075, 1e-7);
 }
 
-TEST_F(NewFeaturesTest, MultiplicativeLR_Schedule) {
-    auto param = std::make_shared<Variable>(tenzor::randn({2, 2}), true);
+TEST_P(NewFeaturesTest, MultiplicativeLR_Schedule) {
+    auto param = std::make_shared<Variable>(tenzor::randn({2, 2}, DType::Float32, device), true);
     std::vector<std::shared_ptr<Variable>> params = {param};
     optim::SGD optimizer(params, 0.1);
 
@@ -190,11 +196,12 @@ TEST_F(NewFeaturesTest, MultiplicativeLR_Schedule) {
 // Special Function Tests
 // ============================================================================
 
-TEST_F(NewFeaturesTest, Ndtri_KnownValues) {
-    auto p = tenzor::Tensor({3}, DType::Float32, Device::cpu());
-    p.data<float>()[0] = 0.5f;
-    p.data<float>()[1] = 0.8413f;  // ndtri(0.8413) ~ 1.0
-    p.data<float>()[2] = 0.1587f;  // ndtri(0.1587) ~ -1.0
+TEST_P(NewFeaturesTest, Ndtri_KnownValues) {
+    auto p_cpu = tenzor::Tensor({3}, DType::Float32, Device::cpu());
+    p_cpu.data<float>()[0] = 0.5f;
+    p_cpu.data<float>()[1] = 0.8413f;  // ndtri(0.8413) ~ 1.0
+    p_cpu.data<float>()[2] = 0.1587f;  // ndtri(0.1587) ~ -1.0
+    auto p = p_cpu.to(device);
 
     auto result = tenzor::ndtri(p);
     auto cpu = result.to(Device::cpu()).contiguous();
@@ -205,11 +212,12 @@ TEST_F(NewFeaturesTest, Ndtri_KnownValues) {
     EXPECT_NEAR(r[2], -1.0f, 0.02f);
 }
 
-TEST_F(NewFeaturesTest, Ndtri_RoundtripWithNdtr) {
-    auto x = tenzor::Tensor({3}, DType::Float32, Device::cpu());
-    x.data<float>()[0] = -1.5f;
-    x.data<float>()[1] = 0.0f;
-    x.data<float>()[2] = 2.0f;
+TEST_P(NewFeaturesTest, Ndtri_RoundtripWithNdtr) {
+    auto x_cpu = tenzor::Tensor({3}, DType::Float32, Device::cpu());
+    x_cpu.data<float>()[0] = -1.5f;
+    x_cpu.data<float>()[1] = 0.0f;
+    x_cpu.data<float>()[2] = 2.0f;
+    auto x = x_cpu.to(device);
 
     auto roundtrip = tenzor::ndtri(tenzor::ndtr(x));
     auto cpu = roundtrip.to(Device::cpu()).contiguous();
@@ -220,13 +228,15 @@ TEST_F(NewFeaturesTest, Ndtri_RoundtripWithNdtr) {
     EXPECT_NEAR(r[2], 2.0f, 0.01f);
 }
 
-TEST_F(NewFeaturesTest, GammaincPlusGammaincc_EqualsGamma) {
-    auto a = tenzor::Tensor({2}, DType::Float32, Device::cpu());
-    a.data<float>()[0] = 2.0f;
-    a.data<float>()[1] = 3.0f;
-    auto x = tenzor::Tensor({2}, DType::Float32, Device::cpu());
-    x.data<float>()[0] = 1.0f;
-    x.data<float>()[1] = 2.0f;
+TEST_P(NewFeaturesTest, GammaincPlusGammaincc_EqualsGamma) {
+    auto a_cpu = tenzor::Tensor({2}, DType::Float32, Device::cpu());
+    a_cpu.data<float>()[0] = 2.0f;
+    a_cpu.data<float>()[1] = 3.0f;
+    auto a = a_cpu.to(device);
+    auto x_cpu = tenzor::Tensor({2}, DType::Float32, Device::cpu());
+    x_cpu.data<float>()[0] = 1.0f;
+    x_cpu.data<float>()[1] = 2.0f;
+    auto x = x_cpu.to(device);
 
     auto inc = tenzor::gammainc(a, x);
     auto incc = tenzor::gammaincc(a, x);
@@ -245,8 +255,8 @@ TEST_F(NewFeaturesTest, GammaincPlusGammaincc_EqualsGamma) {
 // Functional Activation Tests
 // ============================================================================
 
-TEST_F(NewFeaturesTest, FunctionalRReLU) {
-    auto input_t = tenzor::randn({10});
+TEST_P(NewFeaturesTest, FunctionalRReLU) {
+    auto input_t = tenzor::randn({10}, DType::Float32, device);
     auto input = Variable(input_t, false);
 
     auto result = nn::functional::rrelu(input, 0.1, 0.3, false);
@@ -265,11 +275,12 @@ TEST_F(NewFeaturesTest, FunctionalRReLU) {
     }
 }
 
-TEST_F(NewFeaturesTest, FunctionalLogSigmoid) {
-    auto input_t = tenzor::Tensor({3}, DType::Float32, Device::cpu());
-    input_t.data<float>()[0] = 0.0f;
-    input_t.data<float>()[1] = 5.0f;
-    input_t.data<float>()[2] = -5.0f;
+TEST_P(NewFeaturesTest, FunctionalLogSigmoid) {
+    auto input_cpu = tenzor::Tensor({3}, DType::Float32, Device::cpu());
+    input_cpu.data<float>()[0] = 0.0f;
+    input_cpu.data<float>()[1] = 5.0f;
+    input_cpu.data<float>()[2] = -5.0f;
+    auto input_t = input_cpu.to(device);
     auto input = Variable(input_t, false);
 
     auto result = nn::functional::log_sigmoid(input);
@@ -288,11 +299,11 @@ TEST_F(NewFeaturesTest, FunctionalLogSigmoid) {
 // Additional Distribution Tests (gap coverage)
 // ============================================================================
 
-TEST_F(NewFeaturesTest, LowRankMVN_SampleMean) {
+TEST_P(NewFeaturesTest, LowRankMVN_SampleMean) {
     // 3D with rank-1 factor
-    auto loc = tenzor::zeros({3});
-    auto cov_factor = tenzor::ones({3, 1});
-    auto cov_diag = tenzor::ones({3});
+    auto loc = tenzor::zeros({3}, DType::Float32, device);
+    auto cov_factor = tenzor::ones({3, 1}, DType::Float32, device);
+    auto cov_diag = tenzor::ones({3}, DType::Float32, device);
 
     LowRankMultivariateNormal dist(loc, cov_factor, cov_diag);
     auto m = dist.mean();
@@ -302,9 +313,9 @@ TEST_F(NewFeaturesTest, LowRankMVN_SampleMean) {
     }
 }
 
-TEST_F(NewFeaturesTest, Weibull_Entropy) {
-    auto scale = tenzor::full({1}, 1.0f);
-    auto k = tenzor::full({1}, 1.0f);
+TEST_P(NewFeaturesTest, Weibull_Entropy) {
+    auto scale = tenzor::full({1}, 1.0f, DType::Float32, device);
+    auto k = tenzor::full({1}, 1.0f, DType::Float32, device);
     Weibull dist(scale, k);
 
     // Weibull(1, 1) = Exponential(1)
@@ -313,28 +324,29 @@ TEST_F(NewFeaturesTest, Weibull_Entropy) {
     EXPECT_NEAR(scalar_val(ent), 1.0f, 0.01f);
 
     // Weibull(1, 2): entropy = 0.5772*(1 - 0.5) + log(1/2) + 1 ~ 0.2886 - 0.6931 + 1 = 0.5955
-    auto k2 = tenzor::full({1}, 2.0f);
+    auto k2 = tenzor::full({1}, 2.0f, DType::Float32, device);
     Weibull dist2(scale, k2);
     auto ent2 = dist2.entropy();
     EXPECT_NEAR(scalar_val(ent2), 0.5955f, 0.02f);
 }
 
-TEST_F(NewFeaturesTest, Pareto_CDF) {
-    auto scale = tenzor::full({1}, 1.0f);
-    auto alpha = tenzor::full({1}, 2.0f);
+TEST_P(NewFeaturesTest, Pareto_CDF) {
+    auto scale = tenzor::full({1}, 1.0f, DType::Float32, device);
+    auto alpha = tenzor::full({1}, 2.0f, DType::Float32, device);
     Pareto dist(scale, alpha);
 
-    auto val = tenzor::full({1}, 2.0f);
+    auto val = tenzor::full({1}, 2.0f, DType::Float32, device);
     auto c = dist.cdf(val);
     // CDF(2) = 1 - (1/2)^2 = 1 - 0.25 = 0.75
     EXPECT_NEAR(scalar_val(c), 0.75f, 0.01f);
 }
 
-TEST_F(NewFeaturesTest, OneHotCategorical_Variance) {
-    auto probs = tenzor::Tensor({3}, DType::Float32, Device::cpu());
-    probs.data<float>()[0] = 0.2f;
-    probs.data<float>()[1] = 0.3f;
-    probs.data<float>()[2] = 0.5f;
+TEST_P(NewFeaturesTest, OneHotCategorical_Variance) {
+    auto probs_cpu = tenzor::Tensor({3}, DType::Float32, Device::cpu());
+    probs_cpu.data<float>()[0] = 0.2f;
+    probs_cpu.data<float>()[1] = 0.3f;
+    probs_cpu.data<float>()[2] = 0.5f;
+    auto probs = probs_cpu.to(device);
     OneHotCategorical dist(probs);
 
     auto var = dist.variance();
@@ -349,8 +361,8 @@ TEST_F(NewFeaturesTest, OneHotCategorical_Variance) {
 // Additional Scheduler Tests (gap coverage)
 // ============================================================================
 
-TEST_F(NewFeaturesTest, SequentialLR_MilestoneTransitions) {
-    auto param = std::make_shared<Variable>(tenzor::randn({2, 2}), true);
+TEST_P(NewFeaturesTest, SequentialLR_MilestoneTransitions) {
+    auto param = std::make_shared<Variable>(tenzor::randn({2, 2}, DType::Float32, device), true);
     std::vector<std::shared_ptr<Variable>> params = {param};
     optim::SGD optimizer(params, 0.1);
 
@@ -370,8 +382,8 @@ TEST_F(NewFeaturesTest, SequentialLR_MilestoneTransitions) {
     EXPECT_GT(lr, 0.0);
 }
 
-TEST_F(NewFeaturesTest, ChainedScheduler_MultipleSchedulers) {
-    auto param = std::make_shared<Variable>(tenzor::randn({2, 2}), true);
+TEST_P(NewFeaturesTest, ChainedScheduler_MultipleSchedulers) {
+    auto param = std::make_shared<Variable>(tenzor::randn({2, 2}, DType::Float32, device), true);
     std::vector<std::shared_ptr<Variable>> params = {param};
     optim::SGD optimizer(params, 0.1);
 
@@ -389,8 +401,8 @@ TEST_F(NewFeaturesTest, ChainedScheduler_MultipleSchedulers) {
 // Audit-4 W.10: ChainedScheduler::state_dict() delegates entirely to its
 // children — it has no parent epoch_/step_count_. Round-trip through
 // state_dict/load_state_dict must restore the children's counters exactly.
-TEST_F(NewFeaturesTest, ChainedScheduler_StateDict_RoundTrip) {
-    auto param_src = std::make_shared<Variable>(tenzor::randn({2, 2}), true);
+TEST_P(NewFeaturesTest, ChainedScheduler_StateDict_RoundTrip) {
+    auto param_src = std::make_shared<Variable>(tenzor::randn({2, 2}, DType::Float32, device), true);
     std::vector<std::shared_ptr<Variable>> params_src = {param_src};
     optim::SGD optimizer_src(params_src, 0.1);
 
@@ -407,7 +419,7 @@ TEST_F(NewFeaturesTest, ChainedScheduler_StateDict_RoundTrip) {
 
     // Build a fresh, independent destination chain (different optimizer
     // instance) and restore from the source state_dict.
-    auto param_dst = std::make_shared<Variable>(tenzor::randn({2, 2}), true);
+    auto param_dst = std::make_shared<Variable>(tenzor::randn({2, 2}, DType::Float32, device), true);
     std::vector<std::shared_ptr<Variable>> params_dst = {param_dst};
     optim::SGD optimizer_dst(params_dst, 0.1);
     auto sched1_dst = std::make_shared<optim::StepLR>(optimizer_dst, 2, 0.5);
@@ -428,6 +440,8 @@ TEST_F(NewFeaturesTest, ChainedScheduler_StateDict_RoundTrip) {
     chained_dst.step();
     EXPECT_NEAR(chained_dst.get_last_lr(), chained_src.get_last_lr(), 1e-9);
 }
+
+INSTANTIATE_BACKEND_TESTS(NewFeaturesTest);
 
 } // namespace
 } // namespace tenzor

@@ -16,9 +16,7 @@
  * Sites covered:
  *   - MaxPool2d, AvgPool2d (Pattern A: contig rewrap)
  *   - LayerNorm                (Pattern A: contig rewrap)
- *   - Conv2d                   (Pattern A: device-mismatch rewrap; CPU-only
- *                               this branch is unreachable so we exercise
- *                               only the in-training autograd path)
+ *   - Conv2d                   (Pattern A: device-mismatch rewrap)
  *   - BatchNorm2d              (Pattern A: higher-order saved-variable rewrap)
  *   - LSTM eval-mode backward  (Pattern D: widened fast-path guard)
  *   - GRU eval-mode backward   (Pattern D: pre-existing strong guard — covered
@@ -32,11 +30,16 @@
  * severances inside `backward_with_variables` of a Function whose
  * `is_higher_order_stub()` returns true. They are *not* exercised here; the
  * higher-order-grad-mode machinery covers them.
+ *
+ * This is a grad-flow sweep parameterized across all backends via BackendTest:
+ * every tensor is created on the fixture `device` and nn modules are moved
+ * onto it. Inputs are randn (non-zero) so gradients are genuinely non-zero.
  */
 
 #include <gtest/gtest.h>
 
 #include "../grad_flow_helpers.hpp"
+#include "../backend_test_fixture.hpp"
 
 #include "tenzor/tenzor.hpp"
 #include "tenzor/autograd/variable.hpp"
@@ -53,20 +56,15 @@
 
 using namespace tenzor;
 
-class SeveranceSweepEnvironment : public ::testing::Environment {
-public:
-    void SetUp() override { tenzor::initialize(); }
-};
-
-static ::testing::Environment* const severance_env =
-    ::testing::AddGlobalTestEnvironment(new SeveranceSweepEnvironment);
+class SeveranceSweep : public ::tenzor::testing::BackendTest {};
 
 // ---------------------------------------------------------------------------
 // MaxPool2d — Pattern A site (pooling.cpp:151 contig rewrap)
 // ---------------------------------------------------------------------------
-TEST(SeveranceSweep, MaxPool2dGradFlows) {
+TEST_P(SeveranceSweep, MaxPool2dGradFlows) {
     nn::MaxPool2d layer(/*kernel_size=*/2, /*stride=*/2);
-    auto input = Variable(randn({2, 3, 8, 8}, DType::Float32, Device::cpu()), true);
+    layer.to(device);
+    auto input = Variable(randn({2, 3, 8, 8}, DType::Float32, device), true);
     auto output = layer.forward_impl(input);
     auto loss = tenzor::sum(output);
     loss.backward();
@@ -76,9 +74,10 @@ TEST(SeveranceSweep, MaxPool2dGradFlows) {
 // ---------------------------------------------------------------------------
 // AvgPool2d — Pattern A site (pooling.cpp:436 contig rewrap)
 // ---------------------------------------------------------------------------
-TEST(SeveranceSweep, AvgPool2dGradFlows) {
+TEST_P(SeveranceSweep, AvgPool2dGradFlows) {
     nn::AvgPool2d layer(/*kernel_size=*/2, /*stride=*/2);
-    auto input = Variable(randn({2, 3, 8, 8}, DType::Float32, Device::cpu()), true);
+    layer.to(device);
+    auto input = Variable(randn({2, 3, 8, 8}, DType::Float32, device), true);
     auto output = layer.forward_impl(input);
     auto loss = tenzor::sum(output);
     loss.backward();
@@ -88,9 +87,10 @@ TEST(SeveranceSweep, AvgPool2dGradFlows) {
 // ---------------------------------------------------------------------------
 // LayerNorm — Pattern A site (normalization.cpp:830 contig rewrap)
 // ---------------------------------------------------------------------------
-TEST(SeveranceSweep, LayerNormGradFlows) {
+TEST_P(SeveranceSweep, LayerNormGradFlows) {
     nn::LayerNorm layer({16});
-    auto input = Variable(randn({4, 16}, DType::Float32, Device::cpu()), true);
+    layer.to(device);
+    auto input = Variable(randn({4, 16}, DType::Float32, device), true);
     auto output = layer.forward_impl(input);
     auto loss = tenzor::sum(output);
     loss.backward();
@@ -99,19 +99,13 @@ TEST(SeveranceSweep, LayerNormGradFlows) {
 
 // ---------------------------------------------------------------------------
 // Conv2d — Pattern A site (conv.cpp:308/317 device-mismatch rewrap).
-//
-// On a CPU-only test fixture the device-mismatch branch is unreachable;
-// what we want to guarantee is that the autograd graph routes correctly
-// through the standard path so a future regression in the rewrap helper
-// shows up here. The original audit-listed branch (cross-device parameter
-// transfer) requires a multi-backend environment to exercise — that is
-// covered by the multi-backend conv tests; this test pins the baseline.
 // ---------------------------------------------------------------------------
-TEST(SeveranceSweep, Conv2dGradFlows) {
+TEST_P(SeveranceSweep, Conv2dGradFlows) {
     nn::Conv2d layer(/*in_channels=*/3, /*out_channels=*/4,
                      /*kernel_size=*/3, /*stride=*/1,
                      /*padding=*/1);
-    auto input = Variable(randn({2, 3, 8, 8}, DType::Float32, Device::cpu()), true);
+    layer.to(device);
+    auto input = Variable(randn({2, 3, 8, 8}, DType::Float32, device), true);
     auto output = layer.forward_impl(input);
     auto loss = tenzor::sum(output);
     loss.backward();
@@ -122,10 +116,11 @@ TEST(SeveranceSweep, Conv2dGradFlows) {
 // BatchNorm2d — Pattern A site (batchnorm.cpp:782/785 saved-variable rewrap
 // for higher-order graphs).
 // ---------------------------------------------------------------------------
-TEST(SeveranceSweep, BatchNorm2dGradFlows) {
+TEST_P(SeveranceSweep, BatchNorm2dGradFlows) {
     nn::BatchNorm2d layer(/*num_features=*/4);
+    layer.to(device);
     layer.train();
-    auto input = Variable(randn({2, 4, 6, 6}, DType::Float32, Device::cpu()), true);
+    auto input = Variable(randn({2, 4, 6, 6}, DType::Float32, device), true);
     auto output = layer.forward_impl(input);
     auto loss = tenzor::sum(output);
     loss.backward();
@@ -143,18 +138,19 @@ TEST(SeveranceSweep, BatchNorm2dGradFlows) {
 // all-params-no-grad`. The test below puts the layer in eval() but with a
 // requires_grad input — the autograd-aware standard path must now be taken.
 // ---------------------------------------------------------------------------
-TEST(SeveranceSweep, LSTM_EvalMode_BackwardGradFlows) {
+TEST_P(SeveranceSweep, LSTM_EvalMode_BackwardGradFlows) {
     int64_t seq_len = 4, batch = 2, input_size = 8, hidden_size = 8;
     nn::LSTM lstm(input_size, hidden_size, /*num_layers=*/1);
+    lstm.to(device);
     lstm.eval();
 
     auto input = Variable(
-        randn({seq_len, batch, input_size}, DType::Float32, Device::cpu()),
+        randn({seq_len, batch, input_size}, DType::Float32, device),
         true);
 
-    Variable h0(zeros({1, batch, hidden_size}, DType::Float32, Device::cpu()),
+    Variable h0(zeros({1, batch, hidden_size}, DType::Float32, device),
                 false);
-    Variable c0(zeros({1, batch, hidden_size}, DType::Float32, Device::cpu()),
+    Variable c0(zeros({1, batch, hidden_size}, DType::Float32, device),
                 false);
 
     auto [output, hc] = lstm.forward(input, {h0, c0});
@@ -168,16 +164,17 @@ TEST(SeveranceSweep, LSTM_EvalMode_BackwardGradFlows) {
 // GRU eval-mode backward — Pattern D site (already strong-guarded; pinned
 // for regression).
 // ---------------------------------------------------------------------------
-TEST(SeveranceSweep, GRU_EvalMode_BackwardGradFlows) {
+TEST_P(SeveranceSweep, GRU_EvalMode_BackwardGradFlows) {
     int64_t seq_len = 4, batch = 2, input_size = 8, hidden_size = 8;
     nn::GRU gru(input_size, hidden_size, /*num_layers=*/1);
+    gru.to(device);
     gru.eval();
 
     auto input = Variable(
-        randn({seq_len, batch, input_size}, DType::Float32, Device::cpu()),
+        randn({seq_len, batch, input_size}, DType::Float32, device),
         true);
 
-    Variable h0(zeros({1, batch, hidden_size}, DType::Float32, Device::cpu()),
+    Variable h0(zeros({1, batch, hidden_size}, DType::Float32, device),
                 false);
 
     auto [output, h_final] = gru.forward(input, h0);
@@ -192,9 +189,10 @@ TEST(SeveranceSweep, GRU_EvalMode_BackwardGradFlows) {
 // severance site at lazy_linear.cpp:42 lives in a higher-order stub
 // backward (Pattern C); first-order grad flow must still work.
 // ---------------------------------------------------------------------------
-TEST(SeveranceSweep, LazyLinearGradFlows) {
+TEST_P(SeveranceSweep, LazyLinearGradFlows) {
     nn::LazyLinear layer(/*out_features=*/8);
-    auto input = Variable(randn({2, 16}, DType::Float32, Device::cpu()), true);
+    layer.to(device);
+    auto input = Variable(randn({2, 16}, DType::Float32, device), true);
     auto output = layer.forward(input);
     auto loss = tenzor::sum(output);
     loss.backward();
@@ -205,7 +203,7 @@ TEST(SeveranceSweep, LazyLinearGradFlows) {
 // MultiheadAttention — Pattern C site is in the backward stub; first-order
 // grad flow through the layer's forward must still reach the input.
 // ---------------------------------------------------------------------------
-TEST(SeveranceSweep, MultiheadAttentionGradFlows) {
+TEST_P(SeveranceSweep, MultiheadAttentionGradFlows) {
     int64_t embed_dim = 16, num_heads = 4, batch = 2, seq_len = 8;
     nn::MultiheadAttention mha(embed_dim, num_heads, /*dropout=*/0.0,
                                /*bias=*/true,
@@ -214,11 +212,12 @@ TEST(SeveranceSweep, MultiheadAttentionGradFlows) {
                                /*kdim=*/0, /*vdim=*/0,
                                /*batch_first=*/true,
                                /*is_causal=*/false);
+    mha.to(device);
     mha.train(false);  // eval mode so the BMM path runs (per
                        // attention.cpp's grad_path_safe gating).
 
     auto x = Variable(
-        randn({batch, seq_len, embed_dim}, DType::Float32, Device::cpu()),
+        randn({batch, seq_len, embed_dim}, DType::Float32, device),
         true);
     auto [out, weights] = mha.forward(x, x, x);
     auto loss = tenzor::sum(out);
@@ -226,3 +225,5 @@ TEST(SeveranceSweep, MultiheadAttentionGradFlows) {
 
     EXPECT_GRAD_FLOWS(x);
 }
+
+INSTANTIATE_BACKEND_TESTS(SeveranceSweep);

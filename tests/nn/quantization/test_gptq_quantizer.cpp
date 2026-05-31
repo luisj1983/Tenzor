@@ -1,16 +1,16 @@
 #include <gtest/gtest.h>
 #include <tenzor/tenzor.hpp>
 #include <tenzor/nn/quantization/gptq.hpp>
-#include <mutex>
+#include "../../backend_test_fixture.hpp"
 
 using namespace tenzor;
 using namespace tenzor::nn::quantization;
 
-class GPTQQuantizerTest : public ::testing::Test {
+class GPTQQuantizerTest : public ::tenzor::testing::BackendTest {
 protected:
     void SetUp() override {
-        static std::once_flag init_flag;
-        std::call_once(init_flag, []() { tenzor::initialize(); });
+        ::tenzor::testing::BackendTest::SetUp();
+        if (::testing::Test::IsSkipped()) return;
     }
 };
 
@@ -18,12 +18,12 @@ protected:
 // Construction
 // ---------------------------------------------------------------------------
 
-TEST_F(GPTQQuantizerTest, DefaultConstruction) {
+TEST_P(GPTQQuantizerTest, DefaultConstruction) {
     GPTQQuantizer q;
     // Default: 4-bit, group_size=128, damp_percent=0.01
 }
 
-TEST_F(GPTQQuantizerTest, CustomParameters) {
+TEST_P(GPTQQuantizerTest, CustomParameters) {
     GPTQConfig config;
     config.bits = 8;
     config.group_size = 64;
@@ -36,9 +36,9 @@ TEST_F(GPTQQuantizerTest, CustomParameters) {
 // compute_hessian
 // ---------------------------------------------------------------------------
 
-TEST_F(GPTQQuantizerTest, ComputeHessianShape) {
+TEST_P(GPTQQuantizerTest, ComputeHessianShape) {
     // Simulate calibration inputs: [batch_size, in_features]
-    auto input = tenzor::randn({12, 64});
+    auto input = tenzor::randn({12, 64}, DType::Float32, device);
 
     auto hessian = GPTQQuantizer::compute_hessian(input);
 
@@ -48,11 +48,11 @@ TEST_F(GPTQQuantizerTest, ComputeHessianShape) {
     EXPECT_EQ(hessian.size(1), 64);
 }
 
-TEST_F(GPTQQuantizerTest, ComputeHessianSymmetric) {
-    auto input = tenzor::randn({16, 32});
+TEST_P(GPTQQuantizerTest, ComputeHessianSymmetric) {
+    auto input = tenzor::randn({16, 32}, DType::Float32, device);
 
     auto hessian = GPTQQuantizer::compute_hessian(input);
-    auto h_cpu = hessian.to(Device::cpu());
+    auto h_cpu = hessian.cpu();
     const float* data = h_cpu.data<float>();
 
     // Check symmetry: H[i,j] == H[j,i]
@@ -66,11 +66,11 @@ TEST_F(GPTQQuantizerTest, ComputeHessianSymmetric) {
     }
 }
 
-TEST_F(GPTQQuantizerTest, ComputeHessianPositiveDiagonal) {
-    auto input = tenzor::randn({16, 32});
+TEST_P(GPTQQuantizerTest, ComputeHessianPositiveDiagonal) {
+    auto input = tenzor::randn({16, 32}, DType::Float32, device);
 
     auto hessian = GPTQQuantizer::compute_hessian(input);
-    auto h_cpu = hessian.to(Device::cpu());
+    auto h_cpu = hessian.cpu();
     const float* data = h_cpu.data<float>();
 
     // Diagonal of H = X^T X + damping should be positive
@@ -84,15 +84,15 @@ TEST_F(GPTQQuantizerTest, ComputeHessianPositiveDiagonal) {
 // quantize_layer
 // ---------------------------------------------------------------------------
 
-TEST_F(GPTQQuantizerTest, QuantizeLayerOutputShapes) {
+TEST_P(GPTQQuantizerTest, QuantizeLayerOutputShapes) {
     GPTQConfig config;
     config.bits = 4;
     config.group_size = 128;
     config.damp_percent = 0.01f;
     GPTQQuantizer q(config);
 
-    auto weight = tenzor::randn({64, 128});
-    auto input = tenzor::randn({8, 128});
+    auto weight = tenzor::randn({64, 128}, DType::Float32, device);
+    auto input = tenzor::randn({8, 128}, DType::Float32, device);
     auto hessian = GPTQQuantizer::compute_hessian(input);
 
     auto result = q.quantize_layer(weight, hessian);
@@ -103,7 +103,7 @@ TEST_F(GPTQQuantizerTest, QuantizeLayerOutputShapes) {
     EXPECT_GT(result.scales.numel(), 0);
 }
 
-TEST_F(GPTQQuantizerTest, QuantizeLayerErrorBounded) {
+TEST_P(GPTQQuantizerTest, QuantizeLayerErrorBounded) {
     GPTQConfig config;
     config.bits = 4;
     config.group_size = 128;
@@ -111,14 +111,14 @@ TEST_F(GPTQQuantizerTest, QuantizeLayerErrorBounded) {
     GPTQQuantizer q(config);
 
     // Small weight range for tighter quantization
-    auto weight = tenzor::randn({32, 128}) * 0.1f;
-    auto input = tenzor::randn({32, 128});
+    auto weight = tenzor::randn({32, 128}, DType::Float32, device) * 0.1f;
+    auto input = tenzor::randn({32, 128}, DType::Float32, device);
     auto hessian = GPTQQuantizer::compute_hessian(input);
 
     auto result = q.quantize_layer(weight, hessian);
 
     // Verify the scales are finite
-    auto s_cpu = result.scales.to(Device::cpu());
+    auto s_cpu = result.scales.cpu();
     const float* data = s_cpu.data<float>();
     for (int64_t i = 0; i < s_cpu.numel(); ++i) {
         EXPECT_TRUE(std::isfinite(data[i]))
@@ -130,15 +130,15 @@ TEST_F(GPTQQuantizerTest, QuantizeLayerErrorBounded) {
 // quantize_layer produces packed INT4 output (pack_int4 is internal)
 // ---------------------------------------------------------------------------
 
-TEST_F(GPTQQuantizerTest, QuantizeLayerPackedOutput) {
+TEST_P(GPTQQuantizerTest, QuantizeLayerPackedOutput) {
     GPTQConfig config;
     config.bits = 4;
     config.group_size = 128;
     config.damp_percent = 0.01f;
     GPTQQuantizer q(config);
 
-    auto weight = tenzor::randn({32, 128});
-    auto input = tenzor::randn({8, 128});
+    auto weight = tenzor::randn({32, 128}, DType::Float32, device);
+    auto input = tenzor::randn({8, 128}, DType::Float32, device);
     auto hessian = GPTQQuantizer::compute_hessian(input);
 
     auto result = q.quantize_layer(weight, hessian);
@@ -148,15 +148,15 @@ TEST_F(GPTQQuantizerTest, QuantizeLayerPackedOutput) {
     EXPECT_EQ(result.packed_weight.size(0), 32);
 }
 
-TEST_F(GPTQQuantizerTest, QuantizeLayerLargerWeight) {
+TEST_P(GPTQQuantizerTest, QuantizeLayerLargerWeight) {
     GPTQConfig config;
     config.bits = 4;
     config.group_size = 128;
     config.damp_percent = 0.01f;
     GPTQQuantizer q(config);
 
-    auto weight = tenzor::randn({64, 256});
-    auto input = tenzor::randn({8, 256});
+    auto weight = tenzor::randn({64, 256}, DType::Float32, device);
+    auto input = tenzor::randn({8, 256}, DType::Float32, device);
     auto hessian = GPTQQuantizer::compute_hessian(input);
 
     auto result = q.quantize_layer(weight, hessian);
@@ -164,3 +164,5 @@ TEST_F(GPTQQuantizerTest, QuantizeLayerLargerWeight) {
     EXPECT_EQ(result.packed_weight.size(0), 64);
     EXPECT_GT(result.scales.numel(), 0);
 }
+
+INSTANTIATE_BACKEND_TESTS(GPTQQuantizerTest);
