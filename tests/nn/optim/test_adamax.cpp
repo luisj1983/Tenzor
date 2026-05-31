@@ -1,5 +1,5 @@
 // Tests for the Adamax optimizer (Adam variant with infinity-norm denominator).
-// CPU-only. Follows the pattern of test_lion.cpp / test_nadam.cpp.
+// Cross-backend. Follows the pattern of test_lion.cpp / test_nadam.cpp.
 
 #include <gtest/gtest.h>
 
@@ -8,15 +8,20 @@
 #include <tenzor/nn/optim/adamax.hpp>
 #include <tenzor/ops/creation.hpp>
 
+#include "../../backend_test_fixture.hpp"
+
 namespace tenzor {
 namespace {
 
-class AdamaxTest : public ::testing::Test {
+class AdamaxTest : public ::tenzor::testing::BackendTest {
 protected:
-    void SetUp() override { tenzor::initialize(); }
+    void SetUp() override {
+        ::tenzor::testing::BackendTest::SetUp();
+        if (::testing::Test::IsSkipped()) return;
+    }
 
     std::vector<std::shared_ptr<Variable>> make_params() {
-        auto t = tenzor::ones({4, 4}, DType::Float32, Device::cpu());
+        auto t = tenzor::ones({4, 4}, DType::Float32, device);
         auto param = std::make_shared<Variable>(t, /*requires_grad=*/true);
         return {param};
     }
@@ -25,21 +30,21 @@ protected:
                               optim::Optimizer& opt) {
         float sum = 0.0f;
         for (auto& p : params) {
-            auto cpu_t = p->tensor().to(Device::cpu());
+            auto cpu_t = p->tensor().cpu();
             const auto* d = cpu_t.data<float>();
             for (int64_t i = 0; i < cpu_t.numel(); ++i) sum += std::abs(d[i]);
         }
         for (auto& p : params) {
             auto shape = p->tensor().shape();
             p->set_grad(tenzor::ones({shape.begin(), shape.end()},
-                                     p->tensor().dtype(), Device::cpu()));
+                                     p->tensor().dtype(), device));
         }
         opt.step();
         return sum;
     }
 };
 
-TEST_F(AdamaxTest, BasicStepReducesLoss) {
+TEST_P(AdamaxTest, BasicStepReducesLoss) {
     auto params = make_params();
     optim::Adamax opt(params, /*lr=*/1e-2);
 
@@ -50,7 +55,7 @@ TEST_F(AdamaxTest, BasicStepReducesLoss) {
         << "Adamax should reduce |param| sum when gradient is constant positive";
 }
 
-TEST_F(AdamaxTest, ConvergesOnQuadratic) {
+TEST_P(AdamaxTest, ConvergesOnQuadratic) {
     auto params = make_params();
     optim::Adamax opt(params, /*lr=*/1e-2);
 
@@ -61,7 +66,7 @@ TEST_F(AdamaxTest, ConvergesOnQuadratic) {
         opt.step();
     }
 
-    auto final = params[0]->tensor().to(Device::cpu());
+    auto final = params[0]->tensor().cpu();
     const auto* d = final.data<float>();
     float norm = 0.0f;
     for (int64_t i = 0; i < final.numel(); ++i) norm += d[i] * d[i];
@@ -69,7 +74,7 @@ TEST_F(AdamaxTest, ConvergesOnQuadratic) {
         << "Adamax on a quadratic should drive ||x||^2 well below the initial 16";
 }
 
-TEST_F(AdamaxTest, LrGetSet) {
+TEST_P(AdamaxTest, LrGetSet) {
     auto params = make_params();
     optim::Adamax opt(params, /*lr=*/2e-3);
 
@@ -78,7 +83,7 @@ TEST_F(AdamaxTest, LrGetSet) {
     EXPECT_DOUBLE_EQ(opt.get_lr(), 5e-3);
 }
 
-TEST_F(AdamaxTest, StateDictRoundtrip) {
+TEST_P(AdamaxTest, StateDictRoundtrip) {
     auto params = make_params();
     optim::Adamax opt(params, /*lr=*/2e-3);
 
@@ -97,6 +102,8 @@ TEST_F(AdamaxTest, StateDictRoundtrip) {
     opt2.load_state_dict(state);
     EXPECT_DOUBLE_EQ(opt2.get_lr(), 2e-3) << "lr should come from loaded state";
 }
+
+INSTANTIATE_BACKEND_TESTS(AdamaxTest);
 
 } // namespace
 } // namespace tenzor

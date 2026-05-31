@@ -1,5 +1,6 @@
 // Tests for the NAdam (Nesterov-Adam) optimizer.
-// CPU-only. Verifies convergence on a small quadratic, lr get/set,
+// Cross-backend: runs on every available backend via BackendTest.
+// Verifies convergence on a small quadratic, lr get/set,
 // and state_dict round-trip. Follows the pattern of test_lion.cpp.
 
 #include <gtest/gtest.h>
@@ -9,15 +10,20 @@
 #include <tenzor/nn/optim/nadam.hpp>
 #include <tenzor/ops/creation.hpp>
 
+#include "../../backend_test_fixture.hpp"
+
 namespace tenzor {
 namespace {
 
-class NAdamTest : public ::testing::Test {
+class NAdamTest : public ::tenzor::testing::BackendTest {
 protected:
-    void SetUp() override { tenzor::initialize(); }
+    void SetUp() override {
+        ::tenzor::testing::BackendTest::SetUp();
+        if (::testing::Test::IsSkipped()) return;
+    }
 
     std::vector<std::shared_ptr<Variable>> make_params() {
-        auto t = tenzor::ones({4, 4}, DType::Float32, Device::cpu());
+        auto t = tenzor::ones({4, 4}, DType::Float32, device);
         auto param = std::make_shared<Variable>(t, /*requires_grad=*/true);
         return {param};
     }
@@ -26,21 +32,21 @@ protected:
                               optim::Optimizer& opt) {
         float sum = 0.0f;
         for (auto& p : params) {
-            auto cpu_t = p->tensor().to(Device::cpu());
+            auto cpu_t = p->tensor().cpu();
             const auto* d = cpu_t.data<float>();
             for (int64_t i = 0; i < cpu_t.numel(); ++i) sum += std::abs(d[i]);
         }
         for (auto& p : params) {
             auto shape = p->tensor().shape();
             p->set_grad(tenzor::ones({shape.begin(), shape.end()},
-                                     p->tensor().dtype(), Device::cpu()));
+                                     p->tensor().dtype(), device));
         }
         opt.step();
         return sum;
     }
 };
 
-TEST_F(NAdamTest, BasicStepReducesLoss) {
+TEST_P(NAdamTest, BasicStepReducesLoss) {
     auto params = make_params();
     optim::NAdam opt(params, /*lr=*/1e-2);
 
@@ -51,7 +57,7 @@ TEST_F(NAdamTest, BasicStepReducesLoss) {
         << "NAdam should reduce |param| sum when gradient is constant positive";
 }
 
-TEST_F(NAdamTest, ConvergesOnQuadratic) {
+TEST_P(NAdamTest, ConvergesOnQuadratic) {
     // Minimize f(x) = ||x||^2 from x0 = ones. Gradient is 2*x.
     // After 200 steps with lr=1e-2, |x| should be substantially smaller.
     auto params = make_params();
@@ -64,7 +70,7 @@ TEST_F(NAdamTest, ConvergesOnQuadratic) {
         opt.step();
     }
 
-    auto final = params[0]->tensor().to(Device::cpu());
+    auto final = params[0]->tensor().cpu();
     const auto* d = final.data<float>();
     float norm = 0.0f;
     for (int64_t i = 0; i < final.numel(); ++i) norm += d[i] * d[i];
@@ -72,7 +78,7 @@ TEST_F(NAdamTest, ConvergesOnQuadratic) {
         << "NAdam on a quadratic should drive ||x||^2 well below the initial 16";
 }
 
-TEST_F(NAdamTest, LrGetSet) {
+TEST_P(NAdamTest, LrGetSet) {
     auto params = make_params();
     optim::NAdam opt(params, /*lr=*/2e-3);
 
@@ -81,7 +87,7 @@ TEST_F(NAdamTest, LrGetSet) {
     EXPECT_DOUBLE_EQ(opt.get_lr(), 5e-3);
 }
 
-TEST_F(NAdamTest, StateDictRoundtrip) {
+TEST_P(NAdamTest, StateDictRoundtrip) {
     auto params = make_params();
     optim::NAdam opt(params, /*lr=*/2e-3);
 
@@ -102,6 +108,8 @@ TEST_F(NAdamTest, StateDictRoundtrip) {
     opt2.load_state_dict(state);
     EXPECT_DOUBLE_EQ(opt2.get_lr(), 2e-3) << "lr should come from loaded state";
 }
+
+INSTANTIATE_BACKEND_TESTS(NAdamTest);
 
 } // namespace
 } // namespace tenzor

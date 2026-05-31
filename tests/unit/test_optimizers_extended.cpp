@@ -4,6 +4,7 @@
  */
 
 #include <gtest/gtest.h>
+#include "../backend_test_fixture.hpp"
 #include "tenzor/nn/optim/rmsprop.hpp"
 #include "tenzor/nn/optim/adagrad.hpp"
 #include "tenzor/nn/optim/adadelta.hpp"
@@ -13,32 +14,24 @@
 #include <cmath>
 #include <vector>
 
-// Forward declare tenzor::initialize
-namespace tenzor {
-    void initialize();
-}
-
 using namespace tenzor;
 using namespace tenzor::optim;
 
-// Global test environment to initialize Tenzor library
-class TenzorTestEnvironment : public ::testing::Environment {
-public:
-    void SetUp() override {
-        tenzor::initialize();
-    }
-};
-
-static ::testing::Environment* const tenzor_env =
-    ::testing::AddGlobalTestEnvironment(new TenzorTestEnvironment);
-
-class OptimizersExtendedTest : public ::testing::Test {
+class OptimizersExtendedTest : public ::tenzor::testing::BackendTest {
 protected:
     void SetUp() override {
-        // Create simple test parameters
-        param1_ = std::make_shared<Variable>(ones({2, 3}), true);
-        param2_ = std::make_shared<Variable>(ones({4}), true);
+        ::tenzor::testing::BackendTest::SetUp();
+        if (::testing::Test::IsSkipped()) return;
+
+        // Create simple test parameters on the target device
+        param1_ = std::make_shared<Variable>(ones({2, 3}, DType::Float32, device), true);
+        param2_ = std::make_shared<Variable>(ones({4}, DType::Float32, device), true);
         params_ = {param1_, param2_};
+    }
+
+    // Read the first scalar element of a tensor on the host.
+    static float first(const Tensor& t) {
+        return t.cpu().data<float>()[0];
     }
 
     std::shared_ptr<Variable> param1_;
@@ -50,23 +43,23 @@ protected:
 // RMSprop Tests
 // ============================================================================
 
-TEST_F(OptimizersExtendedTest, RMSpropBasicStep) {
+TEST_P(OptimizersExtendedTest, RMSpropBasicStep) {
     auto optimizer = RMSprop(params_, 0.01, 0.99, 1e-8);
 
     // Set gradients
-    param1_->set_grad(ones({2, 3}));
-    param2_->set_grad(ones({4}));
+    param1_->set_grad(ones({2, 3}, DType::Float32, device));
+    param2_->set_grad(ones({4}, DType::Float32, device));
 
     // Get initial parameter values
-    auto param1_before = param1_->tensor().data<float>()[0];
-    auto param2_before = param2_->tensor().data<float>()[0];
+    auto param1_before = first(param1_->tensor());
+    auto param2_before = first(param2_->tensor());
 
     // Perform optimization step
     optimizer.step();
 
     // Check parameters have changed
-    auto param1_after = param1_->tensor().data<float>()[0];
-    auto param2_after = param2_->tensor().data<float>()[0];
+    auto param1_after = first(param1_->tensor());
+    auto param2_after = first(param2_->tensor());
 
     EXPECT_NE(param1_before, param1_after);
     EXPECT_NE(param2_before, param2_after);
@@ -76,23 +69,23 @@ TEST_F(OptimizersExtendedTest, RMSpropBasicStep) {
     EXPECT_LT(param2_after, param2_before);
 }
 
-TEST_F(OptimizersExtendedTest, RMSpropWithMomentum) {
+TEST_P(OptimizersExtendedTest, RMSpropWithMomentum) {
     auto optimizer = RMSprop(params_, 0.01, 0.99, 1e-8, 0.0, 0.9);
 
     // Set gradients
-    param1_->set_grad(ones({2, 3}));
-    param2_->set_grad(ones({4}));
+    param1_->set_grad(ones({2, 3}, DType::Float32, device));
+    param2_->set_grad(ones({4}, DType::Float32, device));
 
     // First step
     optimizer.step();
-    auto param1_step1 = param1_->tensor().data<float>()[0];
+    auto param1_step1 = first(param1_->tensor());
 
     // Second step with same gradient
     optimizer.zero_grad();
-    param1_->set_grad(ones({2, 3}));
-    param2_->set_grad(ones({4}));
+    param1_->set_grad(ones({2, 3}, DType::Float32, device));
+    param2_->set_grad(ones({4}, DType::Float32, device));
     optimizer.step();
-    auto param1_step2 = param1_->tensor().data<float>()[0];
+    auto param1_step2 = first(param1_->tensor());
 
     // With momentum, second step should be larger
     float step1_delta = 1.0f - param1_step1;
@@ -101,22 +94,22 @@ TEST_F(OptimizersExtendedTest, RMSpropWithMomentum) {
     EXPECT_GT(step2_delta, step1_delta * 0.8);  // Momentum accelerates
 }
 
-TEST_F(OptimizersExtendedTest, RMSpropCentered) {
+TEST_P(OptimizersExtendedTest, RMSpropCentered) {
     auto optimizer = RMSprop(params_, 0.01, 0.99, 1e-8, 0.0, 0.0, true);
 
     // Set gradients
-    param1_->set_grad(ones({2, 3}));
-    param2_->set_grad(ones({4}));
+    param1_->set_grad(ones({2, 3}, DType::Float32, device));
+    param2_->set_grad(ones({4}, DType::Float32, device));
 
     // Should work without errors
     EXPECT_NO_THROW(optimizer.step());
 
     // Check parameters updated
-    auto param1_after = param1_->tensor().data<float>()[0];
+    auto param1_after = first(param1_->tensor());
     EXPECT_LT(param1_after, 1.0f);
 }
 
-TEST_F(OptimizersExtendedTest, RMSpropLearningRate) {
+TEST_P(OptimizersExtendedTest, RMSpropLearningRate) {
     auto optimizer = RMSprop(params_, 0.01);
 
     EXPECT_FLOAT_EQ(optimizer.get_lr(), 0.01);
@@ -125,15 +118,15 @@ TEST_F(OptimizersExtendedTest, RMSpropLearningRate) {
     EXPECT_FLOAT_EQ(optimizer.get_lr(), 0.001);
 }
 
-TEST_F(OptimizersExtendedTest, RMSpropStateDictSaveLoad) {
+TEST_P(OptimizersExtendedTest, RMSpropStateDictSaveLoad) {
     auto optimizer1 = RMSprop(params_, 0.01, 0.99, 1e-8);
     auto optimizer2 = RMSprop(params_, 0.01, 0.99, 1e-8);
 
     // Run optimizer1 for a few steps
     for (int i = 0; i < 3; ++i) {
         optimizer1.zero_grad();
-        param1_->set_grad(ones({2, 3}));
-        param2_->set_grad(ones({4}));
+        param1_->set_grad(ones({2, 3}, DType::Float32, device));
+        param2_->set_grad(ones({4}, DType::Float32, device));
         optimizer1.step();
     }
 
@@ -145,7 +138,7 @@ TEST_F(OptimizersExtendedTest, RMSpropStateDictSaveLoad) {
     EXPECT_GT(state.size(), 0);
 }
 
-TEST_F(OptimizersExtendedTest, RMSpropInvalidParameters) {
+TEST_P(OptimizersExtendedTest, RMSpropInvalidParameters) {
     EXPECT_THROW(RMSprop(params_, -0.01), std::invalid_argument);  // Negative lr
     EXPECT_THROW(RMSprop(params_, 0.01, -0.5), std::invalid_argument);  // Negative alpha
     EXPECT_THROW(RMSprop(params_, 0.01, 1.5), std::invalid_argument);  // Alpha > 1
@@ -157,7 +150,7 @@ TEST_F(OptimizersExtendedTest, RMSpropInvalidParameters) {
 // per-parameter buffers.  Previously dropped, so a checkpoint→restart of
 // a non-default-hyperparam RMSprop silently reverted to constructor
 // defaults.
-TEST_F(OptimizersExtendedTest, RMSpropStateDictRoundTripsHyperparams) {
+TEST_P(OptimizersExtendedTest, RMSpropStateDictRoundTripsHyperparams) {
     // Use distinctly non-default hyperparams so any default-revert is visible.
     const double lr           = 0.0123;
     const double alpha        = 0.91;
@@ -180,18 +173,18 @@ TEST_F(OptimizersExtendedTest, RMSpropStateDictRoundTripsHyperparams) {
 
     // Round-trip through a second state_dict; values should match `state`.
     auto state2 = dst.state_dict();
-    EXPECT_DOUBLE_EQ(state2["lr"].data<double>()[0],            lr);
-    EXPECT_DOUBLE_EQ(state2["alpha"].data<double>()[0],         alpha);
-    EXPECT_DOUBLE_EQ(state2["eps"].data<double>()[0],           eps);
-    EXPECT_DOUBLE_EQ(state2["weight_decay"].data<double>()[0],  weight_decay);
-    EXPECT_DOUBLE_EQ(state2["momentum"].data<double>()[0],      momentum);
-    EXPECT_EQ      (state2["centered"].data<int64_t>()[0],      centered ? 1 : 0);
+    EXPECT_DOUBLE_EQ(state2["lr"].cpu().data<double>()[0],            lr);
+    EXPECT_DOUBLE_EQ(state2["alpha"].cpu().data<double>()[0],         alpha);
+    EXPECT_DOUBLE_EQ(state2["eps"].cpu().data<double>()[0],           eps);
+    EXPECT_DOUBLE_EQ(state2["weight_decay"].cpu().data<double>()[0],  weight_decay);
+    EXPECT_DOUBLE_EQ(state2["momentum"].cpu().data<double>()[0],      momentum);
+    EXPECT_EQ      (state2["centered"].cpu().data<int64_t>()[0],      centered ? 1 : 0);
 }
 
 // D.5 (buffer-count guard): load_state_dict must reject a checkpoint whose
 // parameter count does not match the current optimiser, mirroring Adam's
 // guard (which catches mis-aligned per-parameter buffers).
-TEST_F(OptimizersExtendedTest, RMSpropLoadStateDictRejectsParamCountMismatch) {
+TEST_P(OptimizersExtendedTest, RMSpropLoadStateDictRejectsParamCountMismatch) {
     auto src = RMSprop(params_, 0.01);
     auto state = src.state_dict();
     // Force a count mismatch by overwriting the stored num_params.
@@ -204,80 +197,80 @@ TEST_F(OptimizersExtendedTest, RMSpropLoadStateDictRejectsParamCountMismatch) {
 // Adagrad Tests
 // ============================================================================
 
-TEST_F(OptimizersExtendedTest, AdagradBasicStep) {
+TEST_P(OptimizersExtendedTest, AdagradBasicStep) {
     auto optimizer = Adagrad(params_, 0.01);
 
     // Set gradients
-    param1_->set_grad(ones({2, 3}));
-    param2_->set_grad(ones({4}));
+    param1_->set_grad(ones({2, 3}, DType::Float32, device));
+    param2_->set_grad(ones({4}, DType::Float32, device));
 
-    auto param1_before = param1_->tensor().data<float>()[0];
+    auto param1_before = first(param1_->tensor());
 
     // Perform optimization step
     optimizer.step();
 
-    auto param1_after = param1_->tensor().data<float>()[0];
+    auto param1_after = first(param1_->tensor());
 
     // Parameters should decrease
     EXPECT_LT(param1_after, param1_before);
 }
 
-TEST_F(OptimizersExtendedTest, AdagradAccumulation) {
+TEST_P(OptimizersExtendedTest, AdagradAccumulation) {
     auto optimizer = Adagrad(params_, 0.1);
 
     // First step
-    param1_->set_grad(ones({2, 3}));
-    param2_->set_grad(ones({4}));
+    param1_->set_grad(ones({2, 3}, DType::Float32, device));
+    param2_->set_grad(ones({4}, DType::Float32, device));
     optimizer.step();
-    auto param1_step1 = param1_->tensor().data<float>()[0];
+    auto param1_step1 = first(param1_->tensor());
     float delta1 = 1.0f - param1_step1;
 
     // Second step
     optimizer.zero_grad();
-    param1_->set_grad(ones({2, 3}));
-    param2_->set_grad(ones({4}));
+    param1_->set_grad(ones({2, 3}, DType::Float32, device));
+    param2_->set_grad(ones({4}, DType::Float32, device));
     optimizer.step();
-    auto param1_step2 = param1_->tensor().data<float>()[0];
+    auto param1_step2 = first(param1_->tensor());
     float delta2 = param1_step1 - param1_step2;
 
     // Second step should be smaller due to accumulation
     EXPECT_LT(delta2, delta1);
 }
 
-TEST_F(OptimizersExtendedTest, AdagradLearningRateDecay) {
+TEST_P(OptimizersExtendedTest, AdagradLearningRateDecay) {
     auto optimizer = Adagrad(params_, 0.1, /*lr_decay=*/0.1);
 
     // Initial learning rate
     EXPECT_FLOAT_EQ(optimizer.get_lr(), 0.1);
 
     // After first step
-    param1_->set_grad(ones({2, 3}));
-    param2_->set_grad(ones({4}));
+    param1_->set_grad(ones({2, 3}, DType::Float32, device));
+    param2_->set_grad(ones({4}, DType::Float32, device));
     optimizer.step();
 
     // Learning rate should decay
     EXPECT_LT(optimizer.get_lr(), 0.1);
 }
 
-TEST_F(OptimizersExtendedTest, AdagradInitialAccumulator) {
+TEST_P(OptimizersExtendedTest, AdagradInitialAccumulator) {
     auto optimizer = Adagrad(params_, 0.01, 0.0, 0.0, /*initial_accumulator=*/0.1);
 
-    param1_->set_grad(ones({2, 3}));
-    param2_->set_grad(ones({4}));
+    param1_->set_grad(ones({2, 3}, DType::Float32, device));
+    param2_->set_grad(ones({4}, DType::Float32, device));
 
     // Should work without errors
     EXPECT_NO_THROW(optimizer.step());
 }
 
-TEST_F(OptimizersExtendedTest, AdagradStateDictSaveLoad) {
+TEST_P(OptimizersExtendedTest, AdagradStateDictSaveLoad) {
     auto optimizer1 = Adagrad(params_, 0.01);
     auto optimizer2 = Adagrad(params_, 0.01);
 
     // Run optimizer1
     for (int i = 0; i < 3; ++i) {
         optimizer1.zero_grad();
-        param1_->set_grad(ones({2, 3}));
-        param2_->set_grad(ones({4}));
+        param1_->set_grad(ones({2, 3}, DType::Float32, device));
+        param2_->set_grad(ones({4}, DType::Float32, device));
         optimizer1.step();
     }
 
@@ -289,7 +282,7 @@ TEST_F(OptimizersExtendedTest, AdagradStateDictSaveLoad) {
     EXPECT_TRUE(state.find("step_count") != state.end());
 }
 
-TEST_F(OptimizersExtendedTest, AdagradInvalidParameters) {
+TEST_P(OptimizersExtendedTest, AdagradInvalidParameters) {
     EXPECT_THROW(Adagrad(params_, -0.01), std::invalid_argument);  // Negative lr
     EXPECT_THROW(Adagrad(params_, 0.01, -0.1), std::invalid_argument);  // Negative lr_decay
     EXPECT_THROW(Adagrad(params_, 0.01, 0.0, -0.1), std::invalid_argument);  // Negative weight_decay
@@ -300,51 +293,51 @@ TEST_F(OptimizersExtendedTest, AdagradInvalidParameters) {
 // Adadelta Tests
 // ============================================================================
 
-TEST_F(OptimizersExtendedTest, AdadeltaBasicStep) {
+TEST_P(OptimizersExtendedTest, AdadeltaBasicStep) {
     auto optimizer = Adadelta(params_, 1.0, 0.9, 1e-6);
 
     // Set gradients
-    param1_->set_grad(ones({2, 3}));
-    param2_->set_grad(ones({4}));
+    param1_->set_grad(ones({2, 3}, DType::Float32, device));
+    param2_->set_grad(ones({4}, DType::Float32, device));
 
-    auto param1_before = param1_->tensor().data<float>()[0];
+    auto param1_before = first(param1_->tensor());
 
     // Perform optimization step
     optimizer.step();
 
-    auto param1_after = param1_->tensor().data<float>()[0];
+    auto param1_after = first(param1_->tensor());
 
     // Parameters should change
     EXPECT_NE(param1_after, param1_before);
 }
 
-TEST_F(OptimizersExtendedTest, AdadeltaNoLearningRateNeeded) {
+TEST_P(OptimizersExtendedTest, AdadeltaNoLearningRateNeeded) {
     // Adadelta designed to work with lr=1.0 (no tuning needed)
     auto optimizer = Adadelta(params_);  // Uses default lr=1.0
 
     EXPECT_FLOAT_EQ(optimizer.get_lr(), 1.0);
 
-    param1_->set_grad(ones({2, 3}));
-    param2_->set_grad(ones({4}));
+    param1_->set_grad(ones({2, 3}, DType::Float32, device));
+    param2_->set_grad(ones({4}, DType::Float32, device));
 
     // Should work with default parameters
     EXPECT_NO_THROW(optimizer.step());
 }
 
-TEST_F(OptimizersExtendedTest, AdadeltaAdaptiveRate) {
+TEST_P(OptimizersExtendedTest, AdadeltaAdaptiveRate) {
     auto optimizer = Adadelta(params_, 1.0, 0.9, 1e-6);
 
     // Multiple steps should adapt
     std::vector<float> deltas;
-    float prev_val = param1_->tensor().data<float>()[0];
+    float prev_val = first(param1_->tensor());
 
     for (int i = 0; i < 5; ++i) {
         optimizer.zero_grad();
-        param1_->set_grad(ones({2, 3}));
-        param2_->set_grad(ones({4}));
+        param1_->set_grad(ones({2, 3}, DType::Float32, device));
+        param2_->set_grad(ones({4}, DType::Float32, device));
         optimizer.step();
 
-        float curr_val = param1_->tensor().data<float>()[0];
+        float curr_val = first(param1_->tensor());
         deltas.push_back(std::abs(curr_val - prev_val));
         prev_val = curr_val;
     }
@@ -355,15 +348,15 @@ TEST_F(OptimizersExtendedTest, AdadeltaAdaptiveRate) {
     }
 }
 
-TEST_F(OptimizersExtendedTest, AdadeltaStateDictSaveLoad) {
+TEST_P(OptimizersExtendedTest, AdadeltaStateDictSaveLoad) {
     auto optimizer1 = Adadelta(params_, 1.0, 0.9, 1e-6);
     auto optimizer2 = Adadelta(params_, 1.0, 0.9, 1e-6);
 
     // Run optimizer1
     for (int i = 0; i < 3; ++i) {
         optimizer1.zero_grad();
-        param1_->set_grad(ones({2, 3}));
-        param2_->set_grad(ones({4}));
+        param1_->set_grad(ones({2, 3}, DType::Float32, device));
+        param2_->set_grad(ones({4}, DType::Float32, device));
         optimizer1.step();
     }
 
@@ -374,7 +367,7 @@ TEST_F(OptimizersExtendedTest, AdadeltaStateDictSaveLoad) {
     EXPECT_GT(state.size(), 0);
 }
 
-TEST_F(OptimizersExtendedTest, AdadeltaInvalidParameters) {
+TEST_P(OptimizersExtendedTest, AdadeltaInvalidParameters) {
     EXPECT_THROW(Adadelta(params_, -1.0), std::invalid_argument);  // Negative lr
     EXPECT_THROW(Adadelta(params_, 1.0, -0.5), std::invalid_argument);  // Negative rho
     EXPECT_THROW(Adadelta(params_, 1.0, 1.5), std::invalid_argument);  // rho > 1
@@ -385,11 +378,11 @@ TEST_F(OptimizersExtendedTest, AdadeltaInvalidParameters) {
 // Convergence Tests
 // ============================================================================
 
-TEST_F(OptimizersExtendedTest, RMSpropConvergence) {
+TEST_P(OptimizersExtendedTest, RMSpropConvergence) {
     // Simple quadratic: f(x) = (x - 3)^2, optimal at x=3
-    auto param = std::make_shared<Variable>(zeros({1}), true);
-    auto param_ptr = param->tensor().data<float>();
-    param_ptr[0] = 10.0f;  // Start far from optimum
+    // Start far from optimum (x = 10) on the target device.
+    auto param = std::make_shared<Variable>(
+        full({1}, 10.0, DType::Float32, device), true);
 
     auto optimizer = RMSprop(std::vector<std::shared_ptr<Variable>>{param}, 0.1);
 
@@ -397,46 +390,42 @@ TEST_F(OptimizersExtendedTest, RMSpropConvergence) {
         optimizer.zero_grad();
 
         // Gradient: 2(x - 3)
-        float x = param_ptr[0];
-        auto grad_tensor = zeros({1});
-        auto grad_ptr = grad_tensor.data<float>();
-        grad_ptr[0] = 2.0f * (x - 3.0f);
+        float x = first(param->tensor());
+        auto grad_tensor = zeros({1}, DType::Float32);
+        grad_tensor.data<float>()[0] = 2.0f * (x - 3.0f);
 
-        param->set_grad(grad_tensor);
+        param->set_grad(grad_tensor.to(device));
         optimizer.step();
     }
 
     // Should converge near 3
-    EXPECT_NEAR(param_ptr[0], 3.0f, 0.1f);
+    EXPECT_NEAR(first(param->tensor()), 3.0f, 0.1f);
 }
 
-TEST_F(OptimizersExtendedTest, AdagradConvergence) {
-    auto param = std::make_shared<Variable>(zeros({1}), true);
-    auto param_ptr = param->tensor().data<float>();
-    param_ptr[0] = 10.0f;
+TEST_P(OptimizersExtendedTest, AdagradConvergence) {
+    auto param = std::make_shared<Variable>(
+        full({1}, 10.0, DType::Float32, device), true);
 
     auto optimizer = Adagrad(std::vector<std::shared_ptr<Variable>>{param}, 1.0);
 
     for (int i = 0; i < 100; ++i) {
         optimizer.zero_grad();
 
-        float x = param_ptr[0];
-        auto grad_tensor = zeros({1});
-        auto grad_ptr = grad_tensor.data<float>();
-        grad_ptr[0] = 2.0f * (x - 3.0f);
+        float x = first(param->tensor());
+        auto grad_tensor = zeros({1}, DType::Float32);
+        grad_tensor.data<float>()[0] = 2.0f * (x - 3.0f);
 
-        param->set_grad(grad_tensor);
+        param->set_grad(grad_tensor.to(device));
         optimizer.step();
     }
 
     // Should converge near 3
-    EXPECT_NEAR(param_ptr[0], 3.0f, 0.5f);
+    EXPECT_NEAR(first(param->tensor()), 3.0f, 0.5f);
 }
 
-TEST_F(OptimizersExtendedTest, AdadeltaConvergence) {
-    auto param = std::make_shared<Variable>(zeros({1}), true);
-    auto param_ptr = param->tensor().data<float>();
-    param_ptr[0] = 10.0f;
+TEST_P(OptimizersExtendedTest, AdadeltaConvergence) {
+    auto param = std::make_shared<Variable>(
+        full({1}, 10.0, DType::Float32, device), true);
 
     // Use larger eps for better initial convergence (common in practice)
     auto optimizer = Adadelta(std::vector<std::shared_ptr<Variable>>{param}, 1.0, 0.95, 1e-4);
@@ -444,20 +433,16 @@ TEST_F(OptimizersExtendedTest, AdadeltaConvergence) {
     for (int i = 0; i < 500; ++i) {
         optimizer.zero_grad();
 
-        float x = param_ptr[0];
-        auto grad_tensor = zeros({1});
-        auto grad_ptr = grad_tensor.data<float>();
-        grad_ptr[0] = 2.0f * (x - 3.0f);
+        float x = first(param->tensor());
+        auto grad_tensor = zeros({1}, DType::Float32);
+        grad_tensor.data<float>()[0] = 2.0f * (x - 3.0f);
 
-        param->set_grad(grad_tensor);
+        param->set_grad(grad_tensor.to(device));
         optimizer.step();
     }
 
     // Adadelta may converge slower but should get close
-    EXPECT_NEAR(param_ptr[0], 3.0f, 1.0f);
+    EXPECT_NEAR(first(param->tensor()), 3.0f, 1.0f);
 }
 
-int main(int argc, char** argv) {
-    ::testing::InitGoogleTest(&argc, argv);
-    return RUN_ALL_TESTS();
-}
+INSTANTIATE_BACKEND_TESTS(OptimizersExtendedTest);
