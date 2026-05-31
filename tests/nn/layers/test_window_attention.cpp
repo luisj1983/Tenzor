@@ -6,22 +6,27 @@
 #include <gtest/gtest.h>
 #include <tenzor/tenzor.hpp>
 #include <tenzor/nn/layers/vision.hpp>
+#include "../../backend_test_fixture.hpp"
 #include "../../grad_flow_helpers.hpp"
 
 using namespace tenzor;
 using namespace tenzor::nn;
 
-class WindowAttentionTest : public ::testing::Test {
+class WindowAttentionTest : public ::tenzor::testing::BackendTest {
 protected:
-    static void SetUpTestSuite() { tenzor::initialize(); }
-    void SetUp() override { set_grad_enabled(true); }
+    void SetUp() override {
+        ::tenzor::testing::BackendTest::SetUp();
+        if (::testing::Test::IsSkipped()) return;
+        set_grad_enabled(true);
+    }
 };
 
-TEST_F(WindowAttentionTest, ForwardShape) {
+TEST_P(WindowAttentionTest, ForwardShape) {
     // dim=32, window_size=7, num_heads=4
     WindowAttention wa(32, 7, 4);
+    wa.to(device);
     // Input: (batch * num_windows, window_size*window_size, dim)
-    auto input = Variable(randn({4, 49, 32}, DType::Float32, Device::cpu()), false);
+    auto input = Variable(randn({4, 49, 32}, DType::Float32, device), false);
     auto output = wa.forward(input, Tensor{});
     auto shape = output.tensor().shape();
     ASSERT_EQ(shape.size(), 3);
@@ -30,12 +35,15 @@ TEST_F(WindowAttentionTest, ForwardShape) {
     ASSERT_EQ(shape[2], 32);
 }
 
-TEST_F(WindowAttentionTest, Backward) {
+TEST_P(WindowAttentionTest, Backward) {
     WindowAttention wa(16, 4, 2);
-    auto input = Variable(randn({2, 16, 16}, DType::Float32, Device::cpu()), true);
+    wa.to(device);
+    auto input = Variable(randn({2, 16, 16}, DType::Float32, device), true);
     auto output = wa.forward(input, Tensor{});
     auto loss = sum(output);
     loss.backward();
     EXPECT_GRAD_FLOWS(input);
     ASSERT_EQ(input.grad().value().shape()[0], 2);
 }
+
+INSTANTIATE_BACKEND_TESTS(WindowAttentionTest);

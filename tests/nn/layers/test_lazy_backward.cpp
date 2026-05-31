@@ -11,19 +11,24 @@
 #include <tenzor/nn/layers/lazy_linear.hpp>
 #include <tenzor/nn/layers/lazy_conv.hpp>
 #include "../../grad_flow_helpers.hpp"
+#include "../../backend_test_fixture.hpp"
 
 using namespace tenzor;
 using namespace tenzor::nn;
 
-class LazyBackwardTest : public ::testing::Test {
+class LazyBackwardTest : public ::tenzor::testing::BackendTest {
 protected:
-    static void SetUpTestSuite() { tenzor::initialize(); }
-    void SetUp() override { set_grad_enabled(true); }
+    void SetUp() override {
+        ::tenzor::testing::BackendTest::SetUp();
+        if (::testing::Test::IsSkipped()) return;
+        set_grad_enabled(true);
+    }
 };
 
-TEST_F(LazyBackwardTest, LazyLinear_Backward) {
+TEST_P(LazyBackwardTest, LazyLinear_Backward) {
     LazyLinear layer(8);
-    auto input = Variable(randn({2, 16}, DType::Float32, Device::cpu()), true);
+    layer.to(device);
+    auto input = Variable(randn({2, 16}, DType::Float32, device), true);
     auto output = layer.forward(input);
     ASSERT_EQ(output.tensor().shape()[1], 8);
 
@@ -42,9 +47,10 @@ TEST_F(LazyBackwardTest, LazyLinear_Backward) {
     ASSERT_FALSE(params.empty());
 }
 
-TEST_F(LazyBackwardTest, LazyConv1d_Backward) {
+TEST_P(LazyBackwardTest, LazyConv1d_Backward) {
     LazyConv1d layer(8, 3, 1, 1);
-    auto input = Variable(randn({1, 4, 16}, DType::Float32, Device::cpu()), true);
+    layer.to(device);
+    auto input = Variable(randn({1, 4, 16}, DType::Float32, device), true);
     auto output = layer.forward(input);
     ASSERT_EQ(output.tensor().shape()[1], 8);
 
@@ -55,9 +61,10 @@ TEST_F(LazyBackwardTest, LazyConv1d_Backward) {
     ASSERT_EQ(input.grad().value().shape()[0], 1);
 }
 
-TEST_F(LazyBackwardTest, LazyConv2d_Backward) {
+TEST_P(LazyBackwardTest, LazyConv2d_Backward) {
     LazyConv2d layer(16, 3, 1, 1);
-    auto input = Variable(randn({1, 8, 8, 8}, DType::Float32, Device::cpu()), true);
+    layer.to(device);
+    auto input = Variable(randn({1, 8, 8, 8}, DType::Float32, device), true);
     auto output = layer.forward(input);
     ASSERT_EQ(output.tensor().shape()[1], 16);
 
@@ -68,9 +75,10 @@ TEST_F(LazyBackwardTest, LazyConv2d_Backward) {
     ASSERT_EQ(input.grad().value().shape()[1], 8);
 }
 
-TEST_F(LazyBackwardTest, LazyConv3d_Backward) {
+TEST_P(LazyBackwardTest, LazyConv3d_Backward) {
     LazyConv3d layer(8, 3, 1, 1);
-    auto input = Variable(randn({1, 4, 4, 4, 4}, DType::Float32, Device::cpu()), true);
+    layer.to(device);
+    auto input = Variable(randn({1, 4, 4, 4, 4}, DType::Float32, device), true);
     auto output = layer.forward(input);
     ASSERT_EQ(output.tensor().shape()[1], 8);
 
@@ -80,3 +88,5 @@ TEST_F(LazyBackwardTest, LazyConv3d_Backward) {
     EXPECT_GRAD_FLOWS(input);
     ASSERT_EQ(input.grad().value().shape()[1], 4);
 }
+
+INSTANTIATE_BACKEND_TESTS(LazyBackwardTest);

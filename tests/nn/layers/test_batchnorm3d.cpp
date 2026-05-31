@@ -9,31 +9,21 @@
 
 #include <gtest/gtest.h>
 #include <tenzor/tenzor.hpp>
+#include "../../backend_test_fixture.hpp"
 #include <cmath>
 
 using namespace tenzor;
 using namespace tenzor::nn;
 
-namespace {
-
-class BatchNorm3dTestEnvironment : public ::testing::Environment {
-public:
-    void SetUp() override {
-        tenzor::initialize();
-    }
-};
-
-static ::testing::Environment* const batchnorm3d_env =
-    ::testing::AddGlobalTestEnvironment(new BatchNorm3dTestEnvironment);
-
-} // namespace
+class BatchNorm3dTest : public ::tenzor::testing::BackendTest {};
 
 // ==================== Forward Shape Preservation ====================
 
-TEST(BatchNorm3dTest, ForwardShapePreservation) {
+TEST_P(BatchNorm3dTest, ForwardShapePreservation) {
     BatchNorm3d bn(16);
+    bn.to(device);
 
-    auto input = Variable(randn({8, 16, 4, 8, 8}), true);
+    auto input = Variable(randn({8, 16, 4, 8, 8}, DType::Float32, device), true);
     auto output = bn.forward(input);
 
     auto out_shape = output.shape();
@@ -45,10 +35,11 @@ TEST(BatchNorm3dTest, ForwardShapePreservation) {
     EXPECT_EQ(out_shape[4], 8);   // W
 }
 
-TEST(BatchNorm3dTest, ForwardShapeLarger) {
+TEST_P(BatchNorm3dTest, ForwardShapeLarger) {
     BatchNorm3d bn(32);
+    bn.to(device);
 
-    auto input = Variable(randn({4, 32, 8, 16, 16}), true);
+    auto input = Variable(randn({4, 32, 8, 16, 16}, DType::Float32, device), true);
     auto output = bn.forward(input);
 
     auto out_shape = output.shape();
@@ -62,16 +53,17 @@ TEST(BatchNorm3dTest, ForwardShapeLarger) {
 
 // ==================== Parameter Initialization ====================
 
-TEST(BatchNorm3dTest, ParameterInitialization) {
+TEST_P(BatchNorm3dTest, ParameterInitialization) {
     BatchNorm3d bn_affine(32, 1e-5, 0.1, true);
+    bn_affine.to(device);
     auto params = bn_affine.parameters();
 
     ASSERT_EQ(params.size(), 2);
     EXPECT_EQ(params[0]->shape()[0], 32);
     EXPECT_EQ(params[1]->shape()[0], 32);
 
-    auto weight_data = params[0]->tensor().data<float>();
-    auto bias_data = params[1]->tensor().data<float>();
+    auto weight_data = params[0]->tensor().cpu().data<float>();
+    auto bias_data = params[1]->tensor().cpu().data<float>();
 
     for (int64_t i = 0; i < 32; ++i) {
         EXPECT_FLOAT_EQ(weight_data[i], 1.0f);
@@ -79,21 +71,23 @@ TEST(BatchNorm3dTest, ParameterInitialization) {
     }
 }
 
-TEST(BatchNorm3dTest, NoAffineParameters) {
+TEST_P(BatchNorm3dTest, NoAffineParameters) {
     BatchNorm3d bn_no_affine(32, 1e-5, 0.1, false);
+    bn_no_affine.to(device);
     EXPECT_EQ(bn_no_affine.parameters().size(), 0);
 }
 
 // ==================== Training Mode Normalization ====================
 
-TEST(BatchNorm3dTest, TrainingModeNormalization) {
+TEST_P(BatchNorm3dTest, TrainingModeNormalization) {
     BatchNorm3d bn(3, 1e-5, 0.1, false);
+    bn.to(device);
     bn.train();
 
-    auto input = Variable(randn({16, 3, 4, 4, 4}), false);
+    auto input = Variable(randn({16, 3, 4, 4, 4}, DType::Float32, device), false);
     auto output = bn.forward(input);
 
-    auto output_data = output.tensor().data<float>();
+    auto output_data = output.tensor().cpu().data<float>();
     const int64_t N = 16, C = 3, D = 4, H = 4, W = 4;
     const int64_t spatial = D * H * W;
     const int64_t batch = N * spatial;
@@ -122,20 +116,21 @@ TEST(BatchNorm3dTest, TrainingModeNormalization) {
 
 // ==================== Backward (Gradient Flow) ====================
 
-TEST(BatchNorm3dTest, BackwardPassGradientFlow) {
+TEST_P(BatchNorm3dTest, BackwardPassGradientFlow) {
     BatchNorm3d bn(4, 1e-5, 0.1, true);
+    bn.to(device);
     bn.train();
 
-    auto input = Variable(randn({4, 4, 2, 4, 4}), true);
+    auto input = Variable(randn({4, 4, 2, 4, 4}, DType::Float32, device), true);
     auto output = bn.forward(input);
 
     auto out_shape = output.shape();
     std::vector<int64_t> shape_vec(out_shape.begin(), out_shape.end());
-    output.backward(ones(shape_vec));
+    output.backward(ones(shape_vec, DType::Float32, device));
 
     ASSERT_TRUE(input.has_grad());
 
-    auto input_grad = input.grad().value();
+    auto input_grad = input.grad().value().cpu();
     auto grad_data = input_grad.data<float>();
     for (int64_t i = 0; i < input_grad.numel(); ++i) {
         EXPECT_FALSE(std::isnan(grad_data[i]));
@@ -152,33 +147,37 @@ TEST(BatchNorm3dTest, BackwardPassGradientFlow) {
 
 // ==================== Edge Cases ====================
 
-TEST(BatchNorm3dTest, ConstantInput) {
+TEST_P(BatchNorm3dTest, ConstantInput) {
     BatchNorm3d bn(3, 1e-5, 0.1, false);
+    bn.to(device);
     bn.train();
 
-    auto input = Variable(ones({8, 3, 2, 4, 4}) * 5.0f, false);
+    auto input = Variable(ones({8, 3, 2, 4, 4}, DType::Float32, device) * 5.0f, false);
     auto output = bn.forward(input);
 
-    auto data = output.tensor().data<float>();
+    auto data = output.tensor().cpu().data<float>();
     for (int64_t i = 0; i < output.tensor().numel(); ++i) {
         EXPECT_FALSE(std::isnan(data[i]));
         EXPECT_FALSE(std::isinf(data[i]));
     }
 }
 
-TEST(BatchNorm3dTest, InferenceAfterTraining) {
+TEST_P(BatchNorm3dTest, InferenceAfterTraining) {
     BatchNorm3d bn(4, 1e-5, 0.1, false);
+    bn.to(device);
 
     bn.train();
-    auto train_input = Variable(randn({16, 4, 2, 4, 4}) * 2.0f + 5.0f, false);
+    auto train_input = Variable(randn({16, 4, 2, 4, 4}, DType::Float32, device) * 2.0f + 5.0f, false);
     bn.forward(train_input);
 
     bn.eval();
-    auto test_input = Variable(randn({8, 4, 2, 4, 4}), false);
+    auto test_input = Variable(randn({8, 4, 2, 4, 4}, DType::Float32, device), false);
     auto output = bn.forward(test_input);
 
-    auto data = output.tensor().data<float>();
+    auto data = output.tensor().cpu().data<float>();
     for (int64_t i = 0; i < output.tensor().numel(); ++i) {
         EXPECT_FALSE(std::isnan(data[i]));
     }
 }
+
+INSTANTIATE_BACKEND_TESTS(BatchNorm3dTest);
