@@ -16,6 +16,8 @@
  * The kernel is tested via direct dispatch (OpId::FusedLayerNormBackward) to
  * exercise the kernel itself, following the pattern in
  * test_layer_norm_f64_precision.cpp which dispatches OpId::LayerNorm directly.
+ *
+ * Ported to cross-backend via BackendTest (TEST_P fanned over all backends).
  */
 
 #include <gtest/gtest.h>
@@ -25,23 +27,15 @@
 #include "tenzor/backend/op_attributes.hpp"
 #include "tenzor/ops/op_id.hpp"
 #include "tenzor/ops/creation.hpp"
+#include "../backend_test_fixture.hpp"
 
 #include <cmath>
 #include <span>
 
-namespace tenzor { void initialize(); }
-
 using namespace tenzor;
 using namespace tenzor::nn;
 
-// Test environment that initializes Tenzor once for the whole binary.
-class FusedLNBwdF64Env : public ::testing::Environment {
-public:
-    void SetUp() override { tenzor::initialize(); }
-};
-
-static ::testing::Environment* const g_fused_ln_bwd_f64_env =
-    ::testing::AddGlobalTestEnvironment(new FusedLNBwdF64Env);
+class FusedLayerNormBackwardF64 : public ::tenzor::testing::BackendTest {};
 
 // ---------------------------------------------------------------------------
 // P0 #2 — direct dispatch test.
@@ -52,21 +46,23 @@ static ::testing::Environment* const g_fused_ln_bwd_f64_env =
 // Float32 (wrong dtype), and accumulated into float vectors. Post-fix the
 // kernel allocates all outputs as Float64 and reads stats through double*.
 // ---------------------------------------------------------------------------
-TEST(FusedLayerNormBackwardF64, DirectDispatchGradDtypesMatchInputDtype) {
+TEST_P(FusedLayerNormBackwardF64, DirectDispatchGradDtypesMatchInputDtype) {
     const int64_t N = 8, C = 16;
 
-    // Build Float64 forward inputs
-    Tensor input     = tenzor::randn({N, C}, DType::Float64, Device::cpu());
-    Tensor grad_out  = tenzor::randn({N, C}, DType::Float64, Device::cpu());
-    Tensor weight    = tenzor::ones ({C},    DType::Float64, Device::cpu());
+    // Build Float64 forward inputs on the target device
+    Tensor input     = tenzor::randn({N, C}, DType::Float64, device);
+    Tensor grad_out  = tenzor::randn({N, C}, DType::Float64, device);
+    Tensor weight    = tenzor::ones ({C},    DType::Float64, device);
 
-    // Compute plausible mean and inv_std in Float64 (simulating the forward pass)
-    Tensor mean    = tenzor::zeros({N}, DType::Float64, Device::cpu());
-    Tensor inv_std = tenzor::zeros({N}, DType::Float64, Device::cpu());
+    // Compute plausible mean and inv_std in Float64 (simulating the forward pass).
+    // Read input on the host, compute stats on the host, then move to device.
+    Tensor mean_cpu    = tenzor::zeros({N}, DType::Float64, Device::cpu());
+    Tensor inv_std_cpu = tenzor::zeros({N}, DType::Float64, Device::cpu());
     {
-        const double* inp = input.data<double>();
-        double* m   = mean.data<double>();
-        double* rs  = inv_std.data<double>();
+        Tensor input_cpu = input.cpu();
+        const double* inp = input_cpu.data<double>();
+        double* m   = mean_cpu.data<double>();
+        double* rs  = inv_std_cpu.data<double>();
         for (int64_t b = 0; b < N; ++b) {
             double sum = 0.0;
             for (int64_t i = 0; i < C; ++i) sum += inp[b * C + i];
@@ -80,16 +76,11 @@ TEST(FusedLayerNormBackwardF64, DirectDispatchGradDtypesMatchInputDtype) {
             rs[b] = 1.0 / std::sqrt(var + 1e-5);
         }
     }
+    Tensor mean    = mean_cpu.to(device);
+    Tensor inv_std = inv_std_cpu.to(device);
 
     // Dispatch: inputs order must match kernel_registry expectation:
     //   [0] grad_output, [1] input, [2] weight(?), [3] mean, [4] inv_std
-    // Check cpu_kernel_registry.cpp for the canonical argument order.
-    // From the registry: inputs[0]=grad_output, inputs[1]=input,
-    //                    inputs[2]=weight, inputs[3]=mean, inputs[4]=inv_std
-    // (same order as the fused_layer_norm_backward_kernel signature which
-    //  is: grad_output, input, normalized_shape, mean, inv_std, weight)
-    // The registry wrapper reorders: inputs[0], inputs[1], normalized_shape,
-    //   inputs[3], inputs[4], inputs[2]
     const std::string norm_shape_str = std::to_string(C);
     NewOpAttributes attrs;
     attrs.set(AttrKey::NormalizedShape, norm_shape_str);
@@ -117,7 +108,7 @@ TEST(FusedLayerNormBackwardF64, DirectDispatchGradDtypesMatchInputDtype) {
 
     // --- sanity: grad_input finite and nonzero ---
     {
-        Tensor gi_c = gi.contiguous();
+        Tensor gi_c = gi.contiguous().cpu();
         const double* p = gi_c.data<double>();
         bool any_bad = false, all_zero = true;
         for (int64_t i = 0; i < gi_c.numel(); ++i) {
@@ -131,7 +122,7 @@ TEST(FusedLayerNormBackwardF64, DirectDispatchGradDtypesMatchInputDtype) {
 
     // --- sanity: grad_weight finite and nonzero ---
     {
-        Tensor gw_c = gw.contiguous();
+        Tensor gw_c = gw.contiguous().cpu();
         const double* p = gw_c.data<double>();
         bool any_bad = false, all_zero = true;
         for (int64_t i = 0; i < gw_c.numel(); ++i) {
@@ -144,7 +135,7 @@ TEST(FusedLayerNormBackwardF64, DirectDispatchGradDtypesMatchInputDtype) {
 
     // --- sanity: grad_bias finite and nonzero ---
     {
-        Tensor gb_c = gb.contiguous();
+        Tensor gb_c = gb.contiguous().cpu();
         const double* p = gb_c.data<double>();
         bool any_bad = false, all_zero = true;
         for (int64_t i = 0; i < gb_c.numel(); ++i) {
@@ -163,27 +154,31 @@ TEST(FusedLayerNormBackwardF64, DirectDispatchGradDtypesMatchInputDtype) {
 // This test uses a large-offset input so Float32-reinterpretation of the
 // Float64 mean/rstd values would produce clearly bogus (NaN/Inf/huge) grads.
 // ---------------------------------------------------------------------------
-TEST(FusedLayerNormBackwardF64, LargeMagnitudeInputNoGarbage) {
+TEST_P(FusedLayerNormBackwardF64, LargeMagnitudeInputNoGarbage) {
     const int64_t N = 4, C = 8;
 
     // Inputs with magnitude 1e7 — if mean is stored as Float64 (~1e7) and
     // then reinterpreted as float*, the bit pattern gives a completely wrong
     // exponent, so intermediate values in the backward computation go NaN or Inf.
-    Tensor input    = tenzor::randn({N, C}, DType::Float64, Device::cpu());
-    // shift to large positive mean
+    Tensor input = tenzor::randn({N, C}, DType::Float64, device);
+    // shift to large positive mean (host write: edit on CPU, move back to device)
     {
-        double* p = input.data<double>();
-        for (int64_t i = 0; i < input.numel(); ++i) p[i] += 1e7;
+        Tensor input_cpu = input.cpu();
+        double* p = input_cpu.data<double>();
+        for (int64_t i = 0; i < input_cpu.numel(); ++i) p[i] += 1e7;
+        input = input_cpu.to(device);
     }
-    Tensor grad_out = tenzor::ones({N, C}, DType::Float64, Device::cpu());
-    Tensor weight   = tenzor::ones({C},   DType::Float64, Device::cpu());
+    Tensor grad_out = tenzor::ones({N, C}, DType::Float64, device);
+    Tensor weight   = tenzor::ones({C},   DType::Float64, device);
 
-    Tensor mean    = tenzor::zeros({N}, DType::Float64, Device::cpu());
-    Tensor inv_std = tenzor::zeros({N}, DType::Float64, Device::cpu());
+    // Compute stats on the host from the device input, then move to device.
+    Tensor mean_cpu    = tenzor::zeros({N}, DType::Float64, Device::cpu());
+    Tensor inv_std_cpu = tenzor::zeros({N}, DType::Float64, Device::cpu());
     {
-        const double* inp = input.data<double>();
-        double* m  = mean.data<double>();
-        double* rs = inv_std.data<double>();
+        Tensor input_cpu = input.cpu();
+        const double* inp = input_cpu.data<double>();
+        double* m  = mean_cpu.data<double>();
+        double* rs = inv_std_cpu.data<double>();
         for (int64_t b = 0; b < N; ++b) {
             double sum = 0.0;
             for (int64_t i = 0; i < C; ++i) sum += inp[b * C + i];
@@ -197,6 +192,8 @@ TEST(FusedLayerNormBackwardF64, LargeMagnitudeInputNoGarbage) {
             rs[b] = 1.0 / std::sqrt(var + 1e-5);
         }
     }
+    Tensor mean    = mean_cpu.to(device);
+    Tensor inv_std = inv_std_cpu.to(device);
 
     NewOpAttributes attrs;
     attrs.set(AttrKey::NormalizedShape, std::to_string(C));
@@ -205,7 +202,7 @@ TEST(FusedLayerNormBackwardF64, LargeMagnitudeInputNoGarbage) {
                                     std::span<const Tensor>{inputs_arr, 5}, attrs);
     ASSERT_GE(results.size(), 3u);
 
-    Tensor gi_c = results[0].contiguous();
+    Tensor gi_c = results[0].contiguous().cpu();
     const double* p = gi_c.data<double>();
     bool any_bad = false;
     for (int64_t i = 0; i < gi_c.numel(); ++i) {
@@ -222,14 +219,14 @@ TEST(FusedLayerNormBackwardF64, LargeMagnitudeInputNoGarbage) {
 // ---------------------------------------------------------------------------
 // Smoke test: Float32 path continues to produce correct dtype and finite grads.
 // ---------------------------------------------------------------------------
-TEST(FusedLayerNormBackwardF64, Float32PathUnchanged) {
+TEST_P(FusedLayerNormBackwardF64, Float32PathUnchanged) {
     const int64_t N = 4, C = 8;
 
-    Tensor input    = tenzor::randn({N, C}, DType::Float32, Device::cpu());
-    Tensor grad_out = tenzor::ones ({N, C}, DType::Float32, Device::cpu());
-    Tensor weight   = tenzor::ones ({C},    DType::Float32, Device::cpu());
-    Tensor mean     = tenzor::zeros({N},    DType::Float32, Device::cpu());
-    Tensor inv_std  = tenzor::ones ({N},    DType::Float32, Device::cpu());
+    Tensor input    = tenzor::randn({N, C}, DType::Float32, device);
+    Tensor grad_out = tenzor::ones ({N, C}, DType::Float32, device);
+    Tensor weight   = tenzor::ones ({C},    DType::Float32, device);
+    Tensor mean     = tenzor::zeros({N},    DType::Float32, device);
+    Tensor inv_std  = tenzor::ones ({N},    DType::Float32, device);
 
     NewOpAttributes attrs;
     attrs.set(AttrKey::NormalizedShape, std::to_string(C));
@@ -248,11 +245,8 @@ TEST(FusedLayerNormBackwardF64, Float32PathUnchanged) {
     EXPECT_EQ(gb.dtype(), DType::Float32) << "grad_bias dtype mismatch";
 
     // --- value-sanity: grad_weight non-zero ---
-    // grad_weight[c] = sum_n grad_out[n,c] * normalized[n,c]; with grad_out=ones
-    // and non-trivial normalized values (mean=0, inv_std=1 => normalized=input),
-    // the per-channel sums will be non-zero for random input.
     {
-        Tensor gw_c = gw.contiguous();
+        Tensor gw_c = gw.contiguous().cpu();
         const float* p = gw_c.data<float>();
         float max_abs = 0.0f;
         for (int64_t i = 0; i < gw_c.numel(); ++i)
@@ -262,9 +256,8 @@ TEST(FusedLayerNormBackwardF64, Float32PathUnchanged) {
     }
 
     // --- value-sanity: grad_bias non-zero ---
-    // grad_bias[c] = sum_n grad_out[n,c]; with grad_out=ones and N=4 this equals 4.
     {
-        Tensor gb_c = gb.contiguous();
+        Tensor gb_c = gb.contiguous().cpu();
         const float* p = gb_c.data<float>();
         float max_abs = 0.0f;
         for (int64_t i = 0; i < gb_c.numel(); ++i)
@@ -275,7 +268,7 @@ TEST(FusedLayerNormBackwardF64, Float32PathUnchanged) {
 
     // --- value-sanity: grad_input finite (no NaN/Inf) ---
     {
-        Tensor gi_c = gi.contiguous();
+        Tensor gi_c = gi.contiguous().cpu();
         const float* p = gi_c.data<float>();
         bool any_bad = false;
         for (int64_t i = 0; i < gi_c.numel(); ++i) {
@@ -285,3 +278,5 @@ TEST(FusedLayerNormBackwardF64, Float32PathUnchanged) {
             << "grad_input contains NaN/Inf in the Float32 path";
     }
 }
+
+INSTANTIATE_BACKEND_TESTS(FusedLayerNormBackwardF64);

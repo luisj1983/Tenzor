@@ -8,32 +8,25 @@
 #include "tenzor/nn/metrics.hpp"
 #include "tenzor/core/tensor.hpp"
 #include "tenzor/ops/creation.hpp"
+#include "../backend_test_fixture.hpp"
 #include <cmath>
-
-namespace tenzor {
-    void initialize();
-}
 
 using namespace tenzor;
 using namespace tenzor::nn;
 
-class TenzorTestEnvironment : public ::testing::Environment {
-public:
+class MetricsTest : public ::tenzor::testing::BackendTest {
+protected:
     void SetUp() override {
-        tenzor::initialize();
+        ::tenzor::testing::BackendTest::SetUp();
+        if (::testing::Test::IsSkipped()) return;
     }
 };
-
-static ::testing::Environment* const tenzor_env =
-    ::testing::AddGlobalTestEnvironment(new TenzorTestEnvironment);
-
-class MetricsTest : public ::testing::Test {};
 
 // ============================================================================
 // Accuracy tests
 // ============================================================================
 
-TEST_F(MetricsTest, AccuracyPerfect) {
+TEST_P(MetricsTest, AccuracyPerfect) {
     // Binary classification: predictions match targets exactly
     Accuracy acc(2);
 
@@ -43,16 +36,17 @@ TEST_F(MetricsTest, AccuracyPerfect) {
     float pred_data[] = {0.1f, 0.9f,  0.8f, 0.2f,  0.3f, 0.7f};
     float target_data[] = {1.0f, 0.0f, 1.0f};
 
-    auto preds = from_data(pred_data, {3, 2});
-    auto targets = from_data(target_data, {3});
+    auto preds = from_data(pred_data, {3, 2}, device);
+    auto targets = from_data(target_data, {3}, device);
 
     acc.update(preds, targets);
     auto result = acc.compute();
 
-    EXPECT_NEAR(result.data<float>()[0], 1.0f, 1e-5);
+    auto result_cpu = result.cpu();
+    EXPECT_NEAR(result_cpu.data<float>()[0], 1.0f, 1e-5);
 }
 
-TEST_F(MetricsTest, AccuracyPartial) {
+TEST_P(MetricsTest, AccuracyPartial) {
     // 2 out of 4 correct = 50%
     Accuracy acc(2);
 
@@ -62,39 +56,41 @@ TEST_F(MetricsTest, AccuracyPartial) {
     float pred_data[] = {0.1f, 0.9f,  0.8f, 0.2f,  0.1f, 0.9f,  0.8f, 0.2f};
     float target_data[] = {1.0f, 1.0f, 0.0f, 0.0f};
 
-    auto preds = from_data(pred_data, {4, 2});
-    auto targets = from_data(target_data, {4});
+    auto preds = from_data(pred_data, {4, 2}, device);
+    auto targets = from_data(target_data, {4}, device);
 
     acc.update(preds, targets);
     auto result = acc.compute();
 
-    EXPECT_NEAR(result.data<float>()[0], 0.5f, 1e-5);
+    auto result_cpu = result.cpu();
+    EXPECT_NEAR(result_cpu.data<float>()[0], 0.5f, 1e-5);
 }
 
-TEST_F(MetricsTest, AccuracyReset) {
+TEST_P(MetricsTest, AccuracyReset) {
     Accuracy acc(2);
 
     float pred_data[] = {0.1f, 0.9f};
     float target_data[] = {1.0f};
 
-    acc.update(from_data(pred_data, {1, 2}), from_data(target_data, {1}));
+    acc.update(from_data(pred_data, {1, 2}, device), from_data(target_data, {1}, device));
     acc.reset();
 
     // After reset, update with different data
     float pred_data2[] = {0.9f, 0.1f};
     float target_data2[] = {1.0f};  // predicted 0, target 1 -> wrong
 
-    acc.update(from_data(pred_data2, {1, 2}), from_data(target_data2, {1}));
+    acc.update(from_data(pred_data2, {1, 2}, device), from_data(target_data2, {1}, device));
     auto result = acc.compute();
 
-    EXPECT_NEAR(result.data<float>()[0], 0.0f, 1e-5);
+    auto result_cpu = result.cpu();
+    EXPECT_NEAR(result_cpu.data<float>()[0], 0.0f, 1e-5);
 }
 
 // ============================================================================
 // Precision tests
 // ============================================================================
 
-TEST_F(MetricsTest, PrecisionKnownValues) {
+TEST_P(MetricsTest, PrecisionKnownValues) {
     // Binary: TP=2, FP=1 -> Precision = 2/3
     Precision prec(2, AverageMode::Micro);
 
@@ -104,8 +100,8 @@ TEST_F(MetricsTest, PrecisionKnownValues) {
     float pred_data[] = {0.1f, 0.9f,  0.1f, 0.9f,  0.1f, 0.9f,  0.9f, 0.1f};
     float target_data[] = {1.0f, 1.0f, 0.0f, 0.0f};
 
-    auto preds = from_data(pred_data, {4, 2});
-    auto targets = from_data(target_data, {4});
+    auto preds = from_data(pred_data, {4, 2}, device);
+    auto targets = from_data(target_data, {4}, device);
 
     prec.update(preds, targets);
     auto result = prec.compute();
@@ -114,7 +110,8 @@ TEST_F(MetricsTest, PrecisionKnownValues) {
     // For binary with micro: correct_predictions / total_predictions
     // Class 1: TP=2, FP=1 -> precision for class 1 = 2/3
     // Micro averages across all classes
-    float precision_val = result.data<float>()[0];
+    auto result_cpu = result.cpu();
+    float precision_val = result_cpu.data<float>()[0];
     // Depending on micro implementation: could be overall TP/(TP+FP)
     EXPECT_GT(precision_val, 0.0f);
     EXPECT_LE(precision_val, 1.0f);
@@ -124,7 +121,7 @@ TEST_F(MetricsTest, PrecisionKnownValues) {
 // Recall tests
 // ============================================================================
 
-TEST_F(MetricsTest, RecallKnownValues) {
+TEST_P(MetricsTest, RecallKnownValues) {
     // Binary: TP=1, FN=1 -> Recall = 1/2 for positive class
     Recall rec(2, AverageMode::Micro);
 
@@ -134,13 +131,14 @@ TEST_F(MetricsTest, RecallKnownValues) {
     float pred_data[] = {0.1f, 0.9f,  0.9f, 0.1f};
     float target_data[] = {1.0f, 1.0f};
 
-    auto preds = from_data(pred_data, {2, 2});
-    auto targets = from_data(target_data, {2});
+    auto preds = from_data(pred_data, {2, 2}, device);
+    auto targets = from_data(target_data, {2}, device);
 
     rec.update(preds, targets);
     auto result = rec.compute();
 
-    float recall_val = result.data<float>()[0];
+    auto result_cpu = result.cpu();
+    float recall_val = result_cpu.data<float>()[0];
     EXPECT_GT(recall_val, 0.0f);
     EXPECT_LE(recall_val, 1.0f);
 }
@@ -149,23 +147,24 @@ TEST_F(MetricsTest, RecallKnownValues) {
 // F1Score tests
 // ============================================================================
 
-TEST_F(MetricsTest, F1ScorePerfect) {
+TEST_P(MetricsTest, F1ScorePerfect) {
     // Perfect predictions -> F1 = 1.0
     F1Score f1(2, AverageMode::Micro);
 
     float pred_data[] = {0.9f, 0.1f,  0.1f, 0.9f,  0.9f, 0.1f};
     float target_data[] = {0.0f, 1.0f, 0.0f};
 
-    auto preds = from_data(pred_data, {3, 2});
-    auto targets = from_data(target_data, {3});
+    auto preds = from_data(pred_data, {3, 2}, device);
+    auto targets = from_data(target_data, {3}, device);
 
     f1.update(preds, targets);
     auto result = f1.compute();
 
-    EXPECT_NEAR(result.data<float>()[0], 1.0f, 1e-5);
+    auto result_cpu = result.cpu();
+    EXPECT_NEAR(result_cpu.data<float>()[0], 1.0f, 1e-5);
 }
 
-TEST_F(MetricsTest, F1ScoreConsistency) {
+TEST_P(MetricsTest, F1ScoreConsistency) {
     // F1 should be between 0 and 1
     F1Score f1(2, AverageMode::Macro);
 
@@ -173,33 +172,35 @@ TEST_F(MetricsTest, F1ScoreConsistency) {
     float pred_data[] = {0.1f, 0.9f,  0.9f, 0.1f,  0.1f, 0.9f,  0.9f, 0.1f};
     float target_data[] = {1.0f, 1.0f, 0.0f, 0.0f};
 
-    auto preds = from_data(pred_data, {4, 2});
-    auto targets = from_data(target_data, {4});
+    auto preds = from_data(pred_data, {4, 2}, device);
+    auto targets = from_data(target_data, {4}, device);
 
     f1.update(preds, targets);
     auto result = f1.compute();
 
-    float f1_val = result.data<float>()[0];
+    auto result_cpu = result.cpu();
+    float f1_val = result_cpu.data<float>()[0];
     EXPECT_GE(f1_val, 0.0f);
     EXPECT_LE(f1_val, 1.0f);
 }
 
-TEST_F(MetricsTest, F1ScoreMultipleBatches) {
+TEST_P(MetricsTest, F1ScoreMultipleBatches) {
     // Accumulating over multiple batches should give correct result
     F1Score f1(2, AverageMode::Micro);
 
     // Batch 1: all correct
     float pred_data1[] = {0.9f, 0.1f,  0.1f, 0.9f};
     float target_data1[] = {0.0f, 1.0f};
-    f1.update(from_data(pred_data1, {2, 2}), from_data(target_data1, {2}));
+    f1.update(from_data(pred_data1, {2, 2}, device), from_data(target_data1, {2}, device));
 
     // Batch 2: all wrong
     float pred_data2[] = {0.1f, 0.9f,  0.9f, 0.1f};
     float target_data2[] = {0.0f, 1.0f};
-    f1.update(from_data(pred_data2, {2, 2}), from_data(target_data2, {2}));
+    f1.update(from_data(pred_data2, {2, 2}, device), from_data(target_data2, {2}, device));
 
     auto result = f1.compute();
-    float f1_val = result.data<float>()[0];
+    auto result_cpu = result.cpu();
+    float f1_val = result_cpu.data<float>()[0];
 
     // Half correct -> F1 should be around 0.5
     EXPECT_GT(f1_val, 0.0f);
@@ -210,7 +211,7 @@ TEST_F(MetricsTest, F1ScoreMultipleBatches) {
 // MeanAbsoluteError tests
 // ============================================================================
 
-TEST_F(MetricsTest, MAEKnownValues) {
+TEST_P(MetricsTest, MAEKnownValues) {
     // preds = [1, 2, 3], targets = [1, 3, 5]
     // abs errors = [0, 1, 2], MAE = 1.0
     MeanAbsoluteError mae;
@@ -218,44 +219,47 @@ TEST_F(MetricsTest, MAEKnownValues) {
     float pred_data[] = {1.0f, 2.0f, 3.0f};
     float target_data[] = {1.0f, 3.0f, 5.0f};
 
-    mae.update(from_data(pred_data, {3}), from_data(target_data, {3}));
+    mae.update(from_data(pred_data, {3}, device), from_data(target_data, {3}, device));
     auto result = mae.compute();
 
-    EXPECT_NEAR(result.data<float>()[0], 1.0f, 1e-5);
+    auto result_cpu = result.cpu();
+    EXPECT_NEAR(result_cpu.data<float>()[0], 1.0f, 1e-5);
 }
 
-TEST_F(MetricsTest, MAEPerfect) {
+TEST_P(MetricsTest, MAEPerfect) {
     MeanAbsoluteError mae;
 
     float data[] = {1.0f, 2.0f, 3.0f};
-    mae.update(from_data(data, {3}), from_data(data, {3}));
+    mae.update(from_data(data, {3}, device), from_data(data, {3}, device));
     auto result = mae.compute();
 
-    EXPECT_NEAR(result.data<float>()[0], 0.0f, 1e-5);
+    auto result_cpu = result.cpu();
+    EXPECT_NEAR(result_cpu.data<float>()[0], 0.0f, 1e-5);
 }
 
-TEST_F(MetricsTest, MAEReset) {
+TEST_P(MetricsTest, MAEReset) {
     MeanAbsoluteError mae;
 
     float pred1[] = {0.0f};
     float target1[] = {10.0f};
-    mae.update(from_data(pred1, {1}), from_data(target1, {1}));
+    mae.update(from_data(pred1, {1}, device), from_data(target1, {1}, device));
 
     mae.reset();
 
     float pred2[] = {1.0f};
     float target2[] = {1.0f};
-    mae.update(from_data(pred2, {1}), from_data(target2, {1}));
+    mae.update(from_data(pred2, {1}, device), from_data(target2, {1}, device));
 
     auto result = mae.compute();
-    EXPECT_NEAR(result.data<float>()[0], 0.0f, 1e-5);
+    auto result_cpu = result.cpu();
+    EXPECT_NEAR(result_cpu.data<float>()[0], 0.0f, 1e-5);
 }
 
 // ============================================================================
 // MeanSquaredError tests
 // ============================================================================
 
-TEST_F(MetricsTest, MSEKnownValues) {
+TEST_P(MetricsTest, MSEKnownValues) {
     // preds = [1, 2, 3], targets = [1, 3, 5]
     // squared errors = [0, 1, 4], MSE = 5/3 ~ 1.6667
     MeanSquaredError mse;
@@ -263,36 +267,41 @@ TEST_F(MetricsTest, MSEKnownValues) {
     float pred_data[] = {1.0f, 2.0f, 3.0f};
     float target_data[] = {1.0f, 3.0f, 5.0f};
 
-    mse.update(from_data(pred_data, {3}), from_data(target_data, {3}));
+    mse.update(from_data(pred_data, {3}, device), from_data(target_data, {3}, device));
     auto result = mse.compute();
 
-    EXPECT_NEAR(result.data<float>()[0], 5.0f / 3.0f, 1e-4);
+    auto result_cpu = result.cpu();
+    EXPECT_NEAR(result_cpu.data<float>()[0], 5.0f / 3.0f, 1e-4);
 }
 
-TEST_F(MetricsTest, MSEPerfect) {
+TEST_P(MetricsTest, MSEPerfect) {
     MeanSquaredError mse;
 
     float data[] = {1.0f, 2.0f, 3.0f};
-    mse.update(from_data(data, {3}), from_data(data, {3}));
+    mse.update(from_data(data, {3}, device), from_data(data, {3}, device));
     auto result = mse.compute();
 
-    EXPECT_NEAR(result.data<float>()[0], 0.0f, 1e-5);
+    auto result_cpu = result.cpu();
+    EXPECT_NEAR(result_cpu.data<float>()[0], 0.0f, 1e-5);
 }
 
-TEST_F(MetricsTest, MSEMultipleBatches) {
+TEST_P(MetricsTest, MSEMultipleBatches) {
     MeanSquaredError mse;
 
     // Batch 1: errors = [1], squared = [1]
     float pred1[] = {0.0f};
     float target1[] = {1.0f};
-    mse.update(from_data(pred1, {1}), from_data(target1, {1}));
+    mse.update(from_data(pred1, {1}, device), from_data(target1, {1}, device));
 
     // Batch 2: errors = [2], squared = [4]
     float pred2[] = {0.0f};
     float target2[] = {2.0f};
-    mse.update(from_data(pred2, {1}), from_data(target2, {1}));
+    mse.update(from_data(pred2, {1}, device), from_data(target2, {1}, device));
 
     // Total: (1 + 4) / 2 = 2.5
     auto result = mse.compute();
-    EXPECT_NEAR(result.data<float>()[0], 2.5f, 1e-5);
+    auto result_cpu = result.cpu();
+    EXPECT_NEAR(result_cpu.data<float>()[0], 2.5f, 1e-5);
 }
+
+INSTANTIATE_BACKEND_TESTS(MetricsTest);
