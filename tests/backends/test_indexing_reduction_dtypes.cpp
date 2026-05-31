@@ -30,45 +30,56 @@
 #include <tenzor/ops/indexing.hpp>
 #include <tenzor/ops/reduction.hpp>
 
+#include "../backend_test_fixture.hpp"
+
 #include <complex>
 #include <cstdint>
 #include <vector>
 
 using namespace tenzor;
 
+// One fixture per distinct GoogleTest suite name. Each TEST_P creates its
+// tensors on the fixture's `device`. Backends physically absent on the host
+// are skipped by BackendTest::SetUp; a present backend that does not implement
+// a given (op, dtype) cell throws and FAILS the corresponding test — intended.
+class EyeDtypeGap          : public ::tenzor::testing::BackendTest {};
+class GatherDtypeGap       : public ::tenzor::testing::BackendTest {};
+class IndexSelectDtypeGap  : public ::tenzor::testing::BackendTest {};
+class LinspaceDtypeGap     : public ::tenzor::testing::BackendTest {};
+class MaskedFillDtypeGap   : public ::tenzor::testing::BackendTest {};
+class MaskedSelectBroadcast: public ::tenzor::testing::BackendTest {};
+class MaskedSelectDtypeGap : public ::tenzor::testing::BackendTest {};
+class ScatterDtypeGap      : public ::tenzor::testing::BackendTest {};
+class ScatterReduceDtypeGap: public ::tenzor::testing::BackendTest {};
+class SumDtypeGap          : public ::tenzor::testing::BackendTest {};
+class WhereDtypeGap        : public ::tenzor::testing::BackendTest {};
+
 namespace {
 
-class IndexingReductionDtypesEnv : public ::testing::Environment {
-public:
-    void SetUp() override { tenzor::initialize(); }
-};
-
-::testing::Environment* const env =
-    ::testing::AddGlobalTestEnvironment(new IndexingReductionDtypesEnv);
-
 // Build a length-N 1-D tensor of the given dtype with values [0,1,...,N-1].
+// Host-filled on CPU then moved to the target device.
 template <typename T>
-Tensor make_arange(int64_t n, DType dtype) {
+Tensor make_arange(int64_t n, DType dtype, const Device& device) {
     Tensor t = empty({n}, dtype, Device::cpu());
     T* p = t.data<T>();
     for (int64_t i = 0; i < n; ++i) p[i] = static_cast<T>(i);
-    return t;
+    return t.to(device);
 }
 
 // Build a length-N 1-D Bool tensor (alternating true/false).
-Tensor make_alt_bool(int64_t n) {
+Tensor make_alt_bool(int64_t n, const Device& device) {
     Tensor t = empty({n}, DType::Bool, Device::cpu());
     bool* p = t.data<bool>();
     for (int64_t i = 0; i < n; ++i) p[i] = (i % 2 == 0);
-    return t;
+    return t.to(device);
 }
 
 // Build an Int64 1-D index tensor from a std::vector<int64_t>.
-Tensor make_idx(const std::vector<int64_t>& v) {
+Tensor make_idx(const std::vector<int64_t>& v, const Device& device) {
     Tensor t = empty({static_cast<int64_t>(v.size())}, DType::Int64, Device::cpu());
     int64_t* p = t.data<int64_t>();
     for (size_t i = 0; i < v.size(); ++i) p[i] = v[i];
-    return t;
+    return t.to(device);
 }
 
 } // namespace
@@ -78,61 +89,63 @@ Tensor make_idx(const std::vector<int64_t>& v) {
 // ---------------------------------------------------------------------------
 
 template <typename T>
-static void check_index_select_int_dtype(DType dtype) {
+static void check_index_select_int_dtype(DType dtype, const Device& device) {
     constexpr int64_t N = 6;
-    Tensor data = make_arange<T>(N, dtype);
-    Tensor idx = make_idx({1, 3, 5, 0});
+    Tensor data = make_arange<T>(N, dtype, device);
+    Tensor idx = make_idx({1, 3, 5, 0}, device);
     Tensor out = index_select(data, /*dim=*/0, idx);
 
     ASSERT_EQ(out.dtype(), dtype);
     ASSERT_EQ(out.numel(), 4);
-    const T* p = out.data<T>();
+    const T* p = out.cpu().data<T>();
     EXPECT_EQ(p[0], static_cast<T>(1));
     EXPECT_EQ(p[1], static_cast<T>(3));
     EXPECT_EQ(p[2], static_cast<T>(5));
     EXPECT_EQ(p[3], static_cast<T>(0));
 }
 
-TEST(IndexSelectDtypeGap, Int16)  { check_index_select_int_dtype<int16_t>(DType::Int16); }
-TEST(IndexSelectDtypeGap, UInt16) { check_index_select_int_dtype<uint16_t>(DType::UInt16); }
-TEST(IndexSelectDtypeGap, UInt32) { check_index_select_int_dtype<uint32_t>(DType::UInt32); }
-TEST(IndexSelectDtypeGap, UInt64) { check_index_select_int_dtype<uint64_t>(DType::UInt64); }
+TEST_P(IndexSelectDtypeGap, Int16)  { check_index_select_int_dtype<int16_t>(DType::Int16, device); }
+TEST_P(IndexSelectDtypeGap, UInt16) { check_index_select_int_dtype<uint16_t>(DType::UInt16, device); }
+TEST_P(IndexSelectDtypeGap, UInt32) { check_index_select_int_dtype<uint32_t>(DType::UInt32, device); }
+TEST_P(IndexSelectDtypeGap, UInt64) { check_index_select_int_dtype<uint64_t>(DType::UInt64, device); }
 
-TEST(IndexSelectDtypeGap, Complex64) {
+TEST_P(IndexSelectDtypeGap, Complex64) {
     using C = std::complex<float>;
-    Tensor data = empty({4}, DType::Complex64, Device::cpu());
-    C* p = data.data<C>();
+    Tensor host = empty({4}, DType::Complex64, Device::cpu());
+    C* p = host.data<C>();
     p[0] = C(0.0f, 0.0f);
     p[1] = C(1.0f, -1.0f);
     p[2] = C(2.0f, -2.0f);
     p[3] = C(3.0f, -3.0f);
+    Tensor data = host.to(device);
 
-    Tensor idx = make_idx({2, 0, 3});
+    Tensor idx = make_idx({2, 0, 3}, device);
     Tensor out = index_select(data, 0, idx);
 
     ASSERT_EQ(out.dtype(), DType::Complex64);
     ASSERT_EQ(out.numel(), 3);
-    const C* op_ptr = out.data<C>();
+    const C* op_ptr = out.cpu().data<C>();
     EXPECT_EQ(op_ptr[0], C(2.0f, -2.0f));
     EXPECT_EQ(op_ptr[1], C(0.0f, 0.0f));
     EXPECT_EQ(op_ptr[2], C(3.0f, -3.0f));
 }
 
-TEST(IndexSelectDtypeGap, Complex128) {
+TEST_P(IndexSelectDtypeGap, Complex128) {
     using C = std::complex<double>;
-    Tensor data = empty({4}, DType::Complex128, Device::cpu());
-    C* p = data.data<C>();
+    Tensor host = empty({4}, DType::Complex128, Device::cpu());
+    C* p = host.data<C>();
     p[0] = C(0.0, 0.0);
     p[1] = C(1.0, -1.0);
     p[2] = C(2.0, -2.0);
     p[3] = C(3.0, -3.0);
+    Tensor data = host.to(device);
 
-    Tensor idx = make_idx({1, 3});
+    Tensor idx = make_idx({1, 3}, device);
     Tensor out = index_select(data, 0, idx);
 
     ASSERT_EQ(out.dtype(), DType::Complex128);
     ASSERT_EQ(out.numel(), 2);
-    const C* op_ptr = out.data<C>();
+    const C* op_ptr = out.cpu().data<C>();
     EXPECT_EQ(op_ptr[0], C(1.0, -1.0));
     EXPECT_EQ(op_ptr[1], C(3.0, -3.0));
 }
@@ -142,15 +155,15 @@ TEST(IndexSelectDtypeGap, Complex128) {
 // ---------------------------------------------------------------------------
 
 template <typename T>
-static void check_gather_int_dtype(DType dtype) {
+static void check_gather_int_dtype(DType dtype, const Device& device) {
     constexpr int64_t N = 5;
-    Tensor data = make_arange<T>(N, dtype);
-    Tensor idx = make_idx({4, 2, 0, 1, 3});  // shape matches data
+    Tensor data = make_arange<T>(N, dtype, device);
+    Tensor idx = make_idx({4, 2, 0, 1, 3}, device);  // shape matches data
     Tensor out = gather(data, /*dim=*/0, idx);
 
     ASSERT_EQ(out.dtype(), dtype);
     ASSERT_EQ(out.numel(), N);
-    const T* p = out.data<T>();
+    const T* p = out.cpu().data<T>();
     EXPECT_EQ(p[0], static_cast<T>(4));
     EXPECT_EQ(p[1], static_cast<T>(2));
     EXPECT_EQ(p[2], static_cast<T>(0));
@@ -158,46 +171,48 @@ static void check_gather_int_dtype(DType dtype) {
     EXPECT_EQ(p[4], static_cast<T>(3));
 }
 
-TEST(GatherDtypeGap, Int16)  { check_gather_int_dtype<int16_t>(DType::Int16); }
-TEST(GatherDtypeGap, UInt16) { check_gather_int_dtype<uint16_t>(DType::UInt16); }
-TEST(GatherDtypeGap, UInt32) { check_gather_int_dtype<uint32_t>(DType::UInt32); }
-TEST(GatherDtypeGap, UInt64) { check_gather_int_dtype<uint64_t>(DType::UInt64); }
+TEST_P(GatherDtypeGap, Int16)  { check_gather_int_dtype<int16_t>(DType::Int16, device); }
+TEST_P(GatherDtypeGap, UInt16) { check_gather_int_dtype<uint16_t>(DType::UInt16, device); }
+TEST_P(GatherDtypeGap, UInt32) { check_gather_int_dtype<uint32_t>(DType::UInt32, device); }
+TEST_P(GatherDtypeGap, UInt64) { check_gather_int_dtype<uint64_t>(DType::UInt64, device); }
 
-TEST(GatherDtypeGap, Complex64) {
+TEST_P(GatherDtypeGap, Complex64) {
     using C = std::complex<float>;
-    Tensor data = empty({4}, DType::Complex64, Device::cpu());
-    C* p = data.data<C>();
+    Tensor host = empty({4}, DType::Complex64, Device::cpu());
+    C* p = host.data<C>();
     p[0] = C(10.0f, 1.0f);
     p[1] = C(20.0f, 2.0f);
     p[2] = C(30.0f, 3.0f);
     p[3] = C(40.0f, 4.0f);
+    Tensor data = host.to(device);
 
-    Tensor idx = make_idx({3, 1, 0, 2});
+    Tensor idx = make_idx({3, 1, 0, 2}, device);
     Tensor out = gather(data, 0, idx);
 
     ASSERT_EQ(out.dtype(), DType::Complex64);
     ASSERT_EQ(out.numel(), 4);
-    const C* op_ptr = out.data<C>();
+    const C* op_ptr = out.cpu().data<C>();
     EXPECT_EQ(op_ptr[0], C(40.0f, 4.0f));
     EXPECT_EQ(op_ptr[1], C(20.0f, 2.0f));
     EXPECT_EQ(op_ptr[2], C(10.0f, 1.0f));
     EXPECT_EQ(op_ptr[3], C(30.0f, 3.0f));
 }
 
-TEST(GatherDtypeGap, Complex128) {
+TEST_P(GatherDtypeGap, Complex128) {
     using C = std::complex<double>;
-    Tensor data = empty({3}, DType::Complex128, Device::cpu());
-    C* p = data.data<C>();
+    Tensor host = empty({3}, DType::Complex128, Device::cpu());
+    C* p = host.data<C>();
     p[0] = C(100.0, 0.5);
     p[1] = C(200.0, 1.5);
     p[2] = C(300.0, 2.5);
+    Tensor data = host.to(device);
 
-    Tensor idx = make_idx({2, 0, 1});
+    Tensor idx = make_idx({2, 0, 1}, device);
     Tensor out = gather(data, 0, idx);
 
     ASSERT_EQ(out.dtype(), DType::Complex128);
     ASSERT_EQ(out.numel(), 3);
-    const C* op_ptr = out.data<C>();
+    const C* op_ptr = out.cpu().data<C>();
     EXPECT_EQ(op_ptr[0], C(300.0, 2.5));
     EXPECT_EQ(op_ptr[1], C(100.0, 0.5));
     EXPECT_EQ(op_ptr[2], C(200.0, 1.5));
@@ -208,21 +223,22 @@ TEST(GatherDtypeGap, Complex128) {
 // ---------------------------------------------------------------------------
 
 template <typename T>
-static void check_scatter_int_dtype(DType dtype) {
+static void check_scatter_int_dtype(DType dtype, const Device& device) {
     constexpr int64_t N = 5;
-    Tensor base = make_arange<T>(N, dtype);  // [0,1,2,3,4]
-    Tensor idx = make_idx({4, 2, 0});
-    Tensor src = empty({3}, dtype, Device::cpu());
-    T* sp = src.data<T>();
+    Tensor base = make_arange<T>(N, dtype, device);  // [0,1,2,3,4]
+    Tensor idx = make_idx({4, 2, 0}, device);
+    Tensor src_host = empty({3}, dtype, Device::cpu());
+    T* sp = src_host.data<T>();
     sp[0] = static_cast<T>(100);  // -> base[4]
     sp[1] = static_cast<T>(50);   // -> base[2]
     sp[2] = static_cast<T>(7);    // -> base[0]
+    Tensor src = src_host.to(device);
 
     Tensor out = scatter(base, /*dim=*/0, idx, src);
 
     ASSERT_EQ(out.dtype(), dtype);
     ASSERT_EQ(out.numel(), N);
-    const T* p = out.data<T>();
+    const T* p = out.cpu().data<T>();
     EXPECT_EQ(p[0], static_cast<T>(7));
     EXPECT_EQ(p[1], static_cast<T>(1));
     EXPECT_EQ(p[2], static_cast<T>(50));
@@ -230,49 +246,53 @@ static void check_scatter_int_dtype(DType dtype) {
     EXPECT_EQ(p[4], static_cast<T>(100));
 }
 
-TEST(ScatterDtypeGap, Int16)  { check_scatter_int_dtype<int16_t>(DType::Int16); }
-TEST(ScatterDtypeGap, UInt16) { check_scatter_int_dtype<uint16_t>(DType::UInt16); }
-TEST(ScatterDtypeGap, UInt32) { check_scatter_int_dtype<uint32_t>(DType::UInt32); }
-TEST(ScatterDtypeGap, UInt64) { check_scatter_int_dtype<uint64_t>(DType::UInt64); }
+TEST_P(ScatterDtypeGap, Int16)  { check_scatter_int_dtype<int16_t>(DType::Int16, device); }
+TEST_P(ScatterDtypeGap, UInt16) { check_scatter_int_dtype<uint16_t>(DType::UInt16, device); }
+TEST_P(ScatterDtypeGap, UInt32) { check_scatter_int_dtype<uint32_t>(DType::UInt32, device); }
+TEST_P(ScatterDtypeGap, UInt64) { check_scatter_int_dtype<uint64_t>(DType::UInt64, device); }
 
-TEST(ScatterDtypeGap, Complex64) {
+TEST_P(ScatterDtypeGap, Complex64) {
     using C = std::complex<float>;
-    Tensor base = empty({4}, DType::Complex64, Device::cpu());
-    C* bp = base.data<C>();
+    Tensor base_host = empty({4}, DType::Complex64, Device::cpu());
+    C* bp = base_host.data<C>();
     for (int i = 0; i < 4; ++i) bp[i] = C(static_cast<float>(i), 0.0f);
+    Tensor base = base_host.to(device);
 
-    Tensor idx = make_idx({3, 1});
-    Tensor src = empty({2}, DType::Complex64, Device::cpu());
-    C* sp = src.data<C>();
+    Tensor idx = make_idx({3, 1}, device);
+    Tensor src_host = empty({2}, DType::Complex64, Device::cpu());
+    C* sp = src_host.data<C>();
     sp[0] = C(9.0f, 9.0f);
     sp[1] = C(7.0f, -7.0f);
+    Tensor src = src_host.to(device);
 
     Tensor out = scatter(base, 0, idx, src);
     ASSERT_EQ(out.dtype(), DType::Complex64);
     ASSERT_EQ(out.numel(), 4);
-    const C* op_ptr = out.data<C>();
+    const C* op_ptr = out.cpu().data<C>();
     EXPECT_EQ(op_ptr[0], C(0.0f, 0.0f));
     EXPECT_EQ(op_ptr[1], C(7.0f, -7.0f));
     EXPECT_EQ(op_ptr[2], C(2.0f, 0.0f));
     EXPECT_EQ(op_ptr[3], C(9.0f, 9.0f));
 }
 
-TEST(ScatterDtypeGap, Complex128) {
+TEST_P(ScatterDtypeGap, Complex128) {
     using C = std::complex<double>;
-    Tensor base = empty({3}, DType::Complex128, Device::cpu());
-    C* bp = base.data<C>();
+    Tensor base_host = empty({3}, DType::Complex128, Device::cpu());
+    C* bp = base_host.data<C>();
     for (int i = 0; i < 3; ++i) bp[i] = C(static_cast<double>(i), 0.0);
+    Tensor base = base_host.to(device);
 
-    Tensor idx = make_idx({2, 0});
-    Tensor src = empty({2}, DType::Complex128, Device::cpu());
-    C* sp = src.data<C>();
+    Tensor idx = make_idx({2, 0}, device);
+    Tensor src_host = empty({2}, DType::Complex128, Device::cpu());
+    C* sp = src_host.data<C>();
     sp[0] = C(11.0, 11.0);
     sp[1] = C(-3.0, 0.5);
+    Tensor src = src_host.to(device);
 
     Tensor out = scatter(base, 0, idx, src);
     ASSERT_EQ(out.dtype(), DType::Complex128);
     ASSERT_EQ(out.numel(), 3);
-    const C* op_ptr = out.data<C>();
+    const C* op_ptr = out.cpu().data<C>();
     EXPECT_EQ(op_ptr[0], C(-3.0, 0.5));
     EXPECT_EQ(op_ptr[1], C(1.0, 0.0));
     EXPECT_EQ(op_ptr[2], C(11.0, 11.0));
@@ -317,115 +337,125 @@ static int64_t ref_sum(const std::vector<T>& v) {
 // (other kernel impls). We additionally exercise the kernel branch by
 // invoking dispatch directly below.
 
-TEST(SumDtypeGap, Int8_PublicOpPromotesToInt64) {
+TEST_P(SumDtypeGap, Int8_PublicOpPromotesToInt64) {
     std::vector<int8_t> vals = {1, 2, 3, -4, 5};
-    Tensor t = empty({static_cast<int64_t>(vals.size())}, DType::Int8, Device::cpu());
-    int8_t* p = t.data<int8_t>();
+    Tensor host = empty({static_cast<int64_t>(vals.size())}, DType::Int8, Device::cpu());
+    int8_t* p = host.data<int8_t>();
     for (size_t i = 0; i < vals.size(); ++i) p[i] = vals[i];
+    Tensor t = host.to(device);
 
     Tensor out = sum(t);
     EXPECT_EQ(out.dtype(), DType::Int64)
         << "public sum() must promote Int8 -> Int64 for overflow safety";
-    EXPECT_EQ(out.data<int64_t>()[0], ref_sum(vals));
+    EXPECT_EQ(out.cpu().data<int64_t>()[0], ref_sum(vals));
 }
 
-TEST(SumDtypeGap, UInt8_PublicOpPromotesToInt64) {
+TEST_P(SumDtypeGap, UInt8_PublicOpPromotesToInt64) {
     std::vector<uint8_t> vals = {10, 20, 30, 40, 50};
-    Tensor t = empty({5}, DType::UInt8, Device::cpu());
-    uint8_t* p = t.data<uint8_t>();
+    Tensor host = empty({5}, DType::UInt8, Device::cpu());
+    uint8_t* p = host.data<uint8_t>();
     for (size_t i = 0; i < vals.size(); ++i) p[i] = vals[i];
+    Tensor t = host.to(device);
 
     Tensor out = sum(t);
     EXPECT_EQ(out.dtype(), DType::Int64);
-    EXPECT_EQ(out.data<int64_t>()[0], ref_sum(vals));
+    EXPECT_EQ(out.cpu().data<int64_t>()[0], ref_sum(vals));
 }
 
-TEST(SumDtypeGap, Int16_PublicOpPromotesToInt64) {
+TEST_P(SumDtypeGap, Int16_PublicOpPromotesToInt64) {
     std::vector<int16_t> vals = {1000, -2000, 3000, -4000, 5000};
-    Tensor t = empty({5}, DType::Int16, Device::cpu());
-    int16_t* p = t.data<int16_t>();
+    Tensor host = empty({5}, DType::Int16, Device::cpu());
+    int16_t* p = host.data<int16_t>();
     for (size_t i = 0; i < vals.size(); ++i) p[i] = vals[i];
+    Tensor t = host.to(device);
 
     Tensor out = sum(t);
     EXPECT_EQ(out.dtype(), DType::Int64);
-    EXPECT_EQ(out.data<int64_t>()[0], ref_sum(vals));
+    EXPECT_EQ(out.cpu().data<int64_t>()[0], ref_sum(vals));
 }
 
-TEST(SumDtypeGap, UInt16_PublicOpPromotesToInt64) {
+TEST_P(SumDtypeGap, UInt16_PublicOpPromotesToInt64) {
     std::vector<uint16_t> vals = {1, 1000, 50000, 12345, 65535};
-    Tensor t = empty({5}, DType::UInt16, Device::cpu());
-    uint16_t* p = t.data<uint16_t>();
+    Tensor host = empty({5}, DType::UInt16, Device::cpu());
+    uint16_t* p = host.data<uint16_t>();
     for (size_t i = 0; i < vals.size(); ++i) p[i] = vals[i];
+    Tensor t = host.to(device);
 
     Tensor out = sum(t);
     EXPECT_EQ(out.dtype(), DType::Int64);
-    EXPECT_EQ(out.data<int64_t>()[0], ref_sum(vals));
+    EXPECT_EQ(out.cpu().data<int64_t>()[0], ref_sum(vals));
 }
 
-TEST(SumDtypeGap, UInt32_PublicOpPromotesToInt64) {
+TEST_P(SumDtypeGap, UInt32_PublicOpPromotesToInt64) {
     std::vector<uint32_t> vals = {1u, 1000u, 1'000'000u, 12345u};
-    Tensor t = empty({4}, DType::UInt32, Device::cpu());
-    uint32_t* p = t.data<uint32_t>();
+    Tensor host = empty({4}, DType::UInt32, Device::cpu());
+    uint32_t* p = host.data<uint32_t>();
     for (size_t i = 0; i < vals.size(); ++i) p[i] = vals[i];
+    Tensor t = host.to(device);
 
     Tensor out = sum(t);
     EXPECT_EQ(out.dtype(), DType::Int64);
-    EXPECT_EQ(out.data<int64_t>()[0], ref_sum(vals));
+    EXPECT_EQ(out.cpu().data<int64_t>()[0], ref_sum(vals));
 }
 
-TEST(SumDtypeGap, UInt64_KernelNative) {
+TEST_P(SumDtypeGap, UInt64_KernelNative) {
     // UInt64 is NOT in the public-op small-int promotion list, so the
     // kernel-level UInt64 branch is the one exercised here.
     std::vector<uint64_t> vals = {1ull, 2ull, 3ull, 4ull, 5ull};
-    Tensor t = empty({5}, DType::UInt64, Device::cpu());
-    uint64_t* p = t.data<uint64_t>();
+    Tensor host = empty({5}, DType::UInt64, Device::cpu());
+    uint64_t* p = host.data<uint64_t>();
     for (size_t i = 0; i < vals.size(); ++i) p[i] = vals[i];
+    Tensor t = host.to(device);
 
     Tensor out = sum(t);
     EXPECT_EQ(out.dtype(), DType::UInt64)
         << "UInt64 is not in the small-int promotion list; kernel preserves dtype";
-    EXPECT_EQ(out.data<uint64_t>()[0], 15ull);
+    EXPECT_EQ(out.cpu().data<uint64_t>()[0], 15ull);
 }
 
-TEST(SumDtypeGap, Bool_PublicOpPromotesToInt64) {
+TEST_P(SumDtypeGap, Bool_PublicOpPromotesToInt64) {
     // 4 True out of 6 elements -> Int64 result == 4
-    Tensor t = make_alt_bool(6);  // [T,F,T,F,T,F]  count=3
+    Tensor t = make_alt_bool(6, device);  // [T,F,T,F,T,F]  count=3
     Tensor out = sum(t);
     EXPECT_EQ(out.dtype(), DType::Int64);
-    EXPECT_EQ(out.data<int64_t>()[0], 3);
+    EXPECT_EQ(out.cpu().data<int64_t>()[0], 3);
 }
 
 // Dim-wise reductions on the new dtypes (still via public op).
-TEST(SumDtypeGap, Int16_DimWise) {
+TEST_P(SumDtypeGap, Int16_DimWise) {
     // 2x3:
     //   [ 1,  2,  3]
     //   [10, 20, 30]
     // sum(dim=1) -> [6, 60]
-    Tensor t = empty({2, 3}, DType::Int16, Device::cpu());
-    int16_t* p = t.data<int16_t>();
+    Tensor host = empty({2, 3}, DType::Int16, Device::cpu());
+    int16_t* p = host.data<int16_t>();
     p[0] = 1; p[1] = 2; p[2] = 3;
     p[3] = 10; p[4] = 20; p[5] = 30;
+    Tensor t = host.to(device);
 
     Tensor out = sum(t, /*dim=*/1, /*keepdim=*/false);
     EXPECT_EQ(out.dtype(), DType::Int64);
     ASSERT_EQ(out.numel(), 2);
-    EXPECT_EQ(out.data<int64_t>()[0], 6);
-    EXPECT_EQ(out.data<int64_t>()[1], 60);
+    const int64_t* op = out.cpu().data<int64_t>();
+    EXPECT_EQ(op[0], 6);
+    EXPECT_EQ(op[1], 60);
 }
 
-TEST(SumDtypeGap, UInt64_DimWise) {
+TEST_P(SumDtypeGap, UInt64_DimWise) {
     // 2x2:
     //   [1, 2]
     //   [3, 4]
-    Tensor t = empty({2, 2}, DType::UInt64, Device::cpu());
-    uint64_t* p = t.data<uint64_t>();
+    Tensor host = empty({2, 2}, DType::UInt64, Device::cpu());
+    uint64_t* p = host.data<uint64_t>();
     p[0] = 1; p[1] = 2; p[2] = 3; p[3] = 4;
+    Tensor t = host.to(device);
 
     Tensor out = sum(t, /*dim=*/0, /*keepdim=*/false);
     EXPECT_EQ(out.dtype(), DType::UInt64);  // kernel-native
     ASSERT_EQ(out.numel(), 2);
-    EXPECT_EQ(out.data<uint64_t>()[0], 4ull);
-    EXPECT_EQ(out.data<uint64_t>()[1], 6ull);
+    const uint64_t* op = out.cpu().data<uint64_t>();
+    EXPECT_EQ(op[0], 4ull);
+    EXPECT_EQ(op[1], 6ull);
 }
 
 // ---------------------------------------------------------------------------
@@ -433,107 +463,119 @@ TEST(SumDtypeGap, UInt64_DimWise) {
 // 200 elements of value 127. Sum = 25400. This MUST NOT wrap mod 128.
 // ---------------------------------------------------------------------------
 
-TEST(SumDtypeGap, Int8_NoOverflow_200x127) {
+TEST_P(SumDtypeGap, Int8_NoOverflow_200x127) {
     constexpr int64_t N = 200;
     constexpr int8_t V = 127;
-    Tensor t = empty({N}, DType::Int8, Device::cpu());
-    int8_t* p = t.data<int8_t>();
+    Tensor host = empty({N}, DType::Int8, Device::cpu());
+    int8_t* p = host.data<int8_t>();
     for (int64_t i = 0; i < N; ++i) p[i] = V;
+    Tensor t = host.to(device);
 
     Tensor out = sum(t);
     EXPECT_EQ(out.dtype(), DType::Int64);
-    EXPECT_EQ(out.data<int64_t>()[0], static_cast<int64_t>(N) * V)
+    const int64_t* op = out.cpu().data<int64_t>();
+    EXPECT_EQ(op[0], static_cast<int64_t>(N) * V)
         << "Int8 sum of 200x127 must equal 25400; if you see something near "
         << "0 or a negative wraparound, the public sum() op stopped "
         << "promoting Int8 -> Int64.";
-    EXPECT_EQ(out.data<int64_t>()[0], 25400);
+    EXPECT_EQ(op[0], 25400);
 }
 
-TEST(SumDtypeGap, UInt8_NoOverflow_300x250) {
+TEST_P(SumDtypeGap, UInt8_NoOverflow_300x250) {
     constexpr int64_t N = 300;
     constexpr uint8_t V = 250;
-    Tensor t = empty({N}, DType::UInt8, Device::cpu());
-    uint8_t* p = t.data<uint8_t>();
+    Tensor host = empty({N}, DType::UInt8, Device::cpu());
+    uint8_t* p = host.data<uint8_t>();
     for (int64_t i = 0; i < N; ++i) p[i] = V;
+    Tensor t = host.to(device);
 
     Tensor out = sum(t);
     EXPECT_EQ(out.dtype(), DType::Int64);
-    EXPECT_EQ(out.data<int64_t>()[0], static_cast<int64_t>(N) * V);  // 75000
+    EXPECT_EQ(out.cpu().data<int64_t>()[0], static_cast<int64_t>(N) * V);  // 75000
 }
 
 // ---------------------------------------------------------------------------
 // masked_select — mask broadcasting (release audit D) + complex (audit B3)
 // ---------------------------------------------------------------------------
 
-TEST(MaskedSelectBroadcast, MaskRankLessThanInput) {
+TEST_P(MaskedSelectBroadcast, MaskRankLessThanInput) {
     // input (2,3), mask (3,) -> broadcast to (2,3): pick cols 0 and 2 per row.
-    Tensor input = empty({2, 3}, DType::Float32, Device::cpu());
-    float* ip = input.data<float>();
+    Tensor input_host = empty({2, 3}, DType::Float32, Device::cpu());
+    float* ip = input_host.data<float>();
     for (int i = 0; i < 6; ++i) ip[i] = static_cast<float>(i);  // [[0,1,2],[3,4,5]]
+    Tensor input = input_host.to(device);
 
-    Tensor mask = empty({3}, DType::Bool, Device::cpu());
-    bool* mp = mask.data<bool>();
+    Tensor mask_host = empty({3}, DType::Bool, Device::cpu());
+    bool* mp = mask_host.data<bool>();
     mp[0] = true; mp[1] = false; mp[2] = true;
+    Tensor mask = mask_host.to(device);
 
     Tensor out = masked_select(input, mask);
     ASSERT_EQ(out.numel(), 4);
-    const float* op = out.data<float>();
+    const float* op = out.cpu().data<float>();
     EXPECT_FLOAT_EQ(op[0], 0.0f);
     EXPECT_FLOAT_EQ(op[1], 2.0f);
     EXPECT_FLOAT_EQ(op[2], 3.0f);
     EXPECT_FLOAT_EQ(op[3], 5.0f);
 }
 
-TEST(MaskedSelectDtypeGap, Complex64) {
+TEST_P(MaskedSelectDtypeGap, Complex64) {
     using C = std::complex<float>;
-    Tensor input = empty({3}, DType::Complex64, Device::cpu());
-    C* ip = input.data<C>();
+    Tensor input_host = empty({3}, DType::Complex64, Device::cpu());
+    C* ip = input_host.data<C>();
     ip[0] = C(1.0f, 2.0f); ip[1] = C(3.0f, 4.0f); ip[2] = C(5.0f, 6.0f);
+    Tensor input = input_host.to(device);
 
-    Tensor mask = empty({3}, DType::Bool, Device::cpu());
-    bool* mp = mask.data<bool>();
+    Tensor mask_host = empty({3}, DType::Bool, Device::cpu());
+    bool* mp = mask_host.data<bool>();
     mp[0] = true; mp[1] = false; mp[2] = true;
+    Tensor mask = mask_host.to(device);
 
     Tensor out = masked_select(input, mask);
     ASSERT_EQ(out.dtype(), DType::Complex64);
     ASSERT_EQ(out.numel(), 2);
-    const C* op = out.data<C>();
+    const C* op = out.cpu().data<C>();
     EXPECT_EQ(op[0], C(1.0f, 2.0f));
     EXPECT_EQ(op[1], C(5.0f, 6.0f));
 }
 
-TEST(MaskedFillDtypeGap, Complex64) {
+TEST_P(MaskedFillDtypeGap, Complex64) {
     using C = std::complex<float>;
-    Tensor input = empty({3}, DType::Complex64, Device::cpu());
-    C* ip = input.data<C>();
+    Tensor input_host = empty({3}, DType::Complex64, Device::cpu());
+    C* ip = input_host.data<C>();
     ip[0] = C(1.0f, 1.0f); ip[1] = C(2.0f, 2.0f); ip[2] = C(3.0f, 3.0f);
+    Tensor input = input_host.to(device);
 
-    Tensor mask = empty({3}, DType::Bool, Device::cpu());
-    bool* mp = mask.data<bool>();
+    Tensor mask_host = empty({3}, DType::Bool, Device::cpu());
+    bool* mp = mask_host.data<bool>();
     mp[0] = false; mp[1] = true; mp[2] = false;
+    Tensor mask = mask_host.to(device);
 
     Tensor out = masked_fill(input, mask, 9.0);
     ASSERT_EQ(out.dtype(), DType::Complex64);
-    const C* op = out.data<C>();
+    const C* op = out.cpu().data<C>();
     EXPECT_EQ(op[0], C(1.0f, 1.0f));
     EXPECT_EQ(op[1], C(9.0f, 0.0f));
     EXPECT_EQ(op[2], C(3.0f, 3.0f));
 }
 
-TEST(WhereDtypeGap, Complex64) {
+TEST_P(WhereDtypeGap, Complex64) {
     using C = std::complex<float>;
-    Tensor cond = empty({3}, DType::Bool, Device::cpu());
-    bool* cp = cond.data<bool>();
+    Tensor cond_host = empty({3}, DType::Bool, Device::cpu());
+    bool* cp = cond_host.data<bool>();
     cp[0] = true; cp[1] = false; cp[2] = true;
+    Tensor cond = cond_host.to(device);
 
-    Tensor x = empty({3}, DType::Complex64, Device::cpu());
-    Tensor y = empty({3}, DType::Complex64, Device::cpu());
-    C* xp = x.data<C>(); C* yp = y.data<C>();
+    Tensor x_host = empty({3}, DType::Complex64, Device::cpu());
+    Tensor y_host = empty({3}, DType::Complex64, Device::cpu());
+    C* xp = x_host.data<C>(); C* yp = y_host.data<C>();
     for (int i = 0; i < 3; ++i) { xp[i] = C(static_cast<float>(i), 1.0f); yp[i] = C(-1.0f, static_cast<float>(i)); }
+    Tensor x = x_host.to(device);
+    Tensor y = y_host.to(device);
 
     Tensor out = where(cond, x, y);
     ASSERT_EQ(out.dtype(), DType::Complex64);
-    const C* op = out.data<C>();
+    const C* op = out.cpu().data<C>();
     EXPECT_EQ(op[0], C(0.0f, 1.0f));
     EXPECT_EQ(op[1], C(-1.0f, 1.0f));
     EXPECT_EQ(op[2], C(2.0f, 1.0f));
@@ -543,19 +585,21 @@ TEST(WhereDtypeGap, Complex64) {
 // scatter_reduce — newly supported integer dtypes (audit B3)
 // ---------------------------------------------------------------------------
 
-TEST(ScatterReduceDtypeGap, Int16Sum) {
-    Tensor input = empty({4}, DType::Int16, Device::cpu());
-    int16_t* ip = input.data<int16_t>();
+TEST_P(ScatterReduceDtypeGap, Int16Sum) {
+    Tensor input_host = empty({4}, DType::Int16, Device::cpu());
+    int16_t* ip = input_host.data<int16_t>();
     for (int i = 0; i < 4; ++i) ip[i] = 0;
+    Tensor input = input_host.to(device);
 
-    Tensor idx = make_idx({0, 0, 3});
-    Tensor src = empty({3}, DType::Int16, Device::cpu());
-    int16_t* sp = src.data<int16_t>();
+    Tensor idx = make_idx({0, 0, 3}, device);
+    Tensor src_host = empty({3}, DType::Int16, Device::cpu());
+    int16_t* sp = src_host.data<int16_t>();
     sp[0] = 5; sp[1] = 7; sp[2] = 9;
+    Tensor src = src_host.to(device);
 
     Tensor out = scatter_reduce(input, /*dim=*/0, idx, src, "sum", /*include_self=*/true);
     ASSERT_EQ(out.dtype(), DType::Int16);
-    const int16_t* op = out.data<int16_t>();
+    const int16_t* op = out.cpu().data<int16_t>();
     EXPECT_EQ(op[0], 12);  // 0 + 5 + 7
     EXPECT_EQ(op[3], 9);   // 0 + 9
 }
@@ -564,33 +608,50 @@ TEST(ScatterReduceDtypeGap, Int16Sum) {
 // eye / linspace — newly supported dtypes (audit B1 / B2)
 // ---------------------------------------------------------------------------
 
-TEST(EyeDtypeGap, Complex64) {
+TEST_P(EyeDtypeGap, Complex64) {
     using C = std::complex<float>;
-    Tensor e = eye(3, std::nullopt, DType::Complex64, Device::cpu());
+    Tensor e = eye(3, std::nullopt, DType::Complex64, device);
     ASSERT_EQ(e.dtype(), DType::Complex64);
-    const C* p = e.data<C>();
+    const C* p = e.cpu().data<C>();
     EXPECT_EQ(p[0], C(1.0f, 0.0f));
     EXPECT_EQ(p[4], C(1.0f, 0.0f));
     EXPECT_EQ(p[8], C(1.0f, 0.0f));
     EXPECT_EQ(p[1], C(0.0f, 0.0f));
 }
 
-TEST(EyeDtypeGap, Float16) {
-    Tensor e = eye(2, std::nullopt, DType::Float16, Device::cpu());
+TEST_P(EyeDtypeGap, Float16) {
+    Tensor e = eye(2, std::nullopt, DType::Float16, device);
     ASSERT_EQ(e.dtype(), DType::Float16);
-    const Float16* p = e.data<Float16>();
+    const Float16* p = e.cpu().data<Float16>();
     EXPECT_FLOAT_EQ(static_cast<float>(p[0]), 1.0f);
     EXPECT_FLOAT_EQ(static_cast<float>(p[1]), 0.0f);
     EXPECT_FLOAT_EQ(static_cast<float>(p[3]), 1.0f);
 }
 
-TEST(LinspaceDtypeGap, Complex64) {
+TEST_P(LinspaceDtypeGap, Complex64) {
     using C = std::complex<float>;
-    Tensor t = linspace(0.0, 3.0, 4, DType::Complex64, Device::cpu());
+    Tensor t = linspace(0.0, 3.0, 4, DType::Complex64, device);
     ASSERT_EQ(t.dtype(), DType::Complex64);
-    const C* p = t.data<C>();
+    const C* p = t.cpu().data<C>();
     EXPECT_EQ(p[0], C(0.0f, 0.0f));
     EXPECT_EQ(p[1], C(1.0f, 0.0f));
     EXPECT_EQ(p[2], C(2.0f, 0.0f));
     EXPECT_EQ(p[3], C(3.0f, 0.0f));
 }
+
+// ---------------------------------------------------------------------------
+// Fan every TEST_P above over all backends. BackendTest::SetUp skips a backend
+// that is physically absent on the host; a present backend that does not
+// implement a given (op, dtype) cell throws → the corresponding test FAILS.
+// ---------------------------------------------------------------------------
+INSTANTIATE_BACKEND_TESTS(EyeDtypeGap);
+INSTANTIATE_BACKEND_TESTS(GatherDtypeGap);
+INSTANTIATE_BACKEND_TESTS(IndexSelectDtypeGap);
+INSTANTIATE_BACKEND_TESTS(LinspaceDtypeGap);
+INSTANTIATE_BACKEND_TESTS(MaskedFillDtypeGap);
+INSTANTIATE_BACKEND_TESTS(MaskedSelectBroadcast);
+INSTANTIATE_BACKEND_TESTS(MaskedSelectDtypeGap);
+INSTANTIATE_BACKEND_TESTS(ScatterDtypeGap);
+INSTANTIATE_BACKEND_TESTS(ScatterReduceDtypeGap);
+INSTANTIATE_BACKEND_TESTS(SumDtypeGap);
+INSTANTIATE_BACKEND_TESTS(WhereDtypeGap);

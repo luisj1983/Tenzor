@@ -172,7 +172,7 @@ target_link_libraries(test_dtype_preservation PRIVATE
 set_target_properties(test_dtype_preservation PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/bin")
 tenzor_discover_tests(test_dtype_preservation
-    LABELS "backends" DISCOVERY_TIMEOUT 60 BACKENDS cpu)
+    LABELS "backends" DISCOVERY_TIMEOUT 60 BACKENDS multi)
 
 # S17 CPU thread / SIMD unification regression: deprecates legacy CPUInfo,
 # unifies OMP thread defaults, exercises CPUBackend::event_elapsed_ms wall-clock.
@@ -205,4 +205,4 @@ target_link_libraries(test_indexing_reduction_dtypes PRIVATE
 set_target_properties(test_indexing_reduction_dtypes PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/bin")
 tenzor_discover_tests(test_indexing_reduction_dtypes
-    LABELS "backends" DISCOVERY_TIMEOUT 60 BACKENDS cpu)
+    LABELS "backends" DISCOVERY_TIMEOUT 60 BACKENDS multi)
