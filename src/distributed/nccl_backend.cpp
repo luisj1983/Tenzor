@@ -732,46 +732,6 @@ auto NCCLBackend::get_unique_id() -> ncclUniqueId {
 // Private Helper Methods
 // ============================================================================
 
-auto NCCLBackend::to_nccl_reduce_op(ReduceOp op) -> ncclRedOp_t {
-#if defined(TENZOR_USE_CUDA) || defined(TENZOR_USE_ROCM)
-    switch (op) {
-        case ReduceOp::SUM:
-        case ReduceOp::AVG:  // Handle average as sum, then divide
-            return ncclSum;
-        case ReduceOp::PRODUCT:
-            return ncclProd;
-        case ReduceOp::MIN:
-            return ncclMin;
-        case ReduceOp::MAX:
-            return ncclMax;
-        default:
-            throw std::invalid_argument("Unsupported reduce operation for NCCL");
-    }
-#else
-    return ncclSum;
-#endif
-}
-
-auto NCCLBackend::to_nccl_datatype(DType dtype) -> ncclDataType_t {
-#if defined(TENZOR_USE_CUDA) || defined(TENZOR_USE_ROCM)
-    switch (dtype) {
-        case DType::Float32:
-            return ncclFloat;
-        case DType::Float64:
-            return ncclDouble;
-        case DType::Int32:
-            return ncclInt;
-        case DType::Int64:
-            return ncclInt64;
-        default:
-            throw std::invalid_argument(
-                "Unsupported dtype for NCCL: " + std::to_string(static_cast<int>(dtype))
-            );
-    }
-#else
-    return ncclFloat;
-#endif
-}
 
 auto NCCLBackend::init_communicator(int device_id) -> void {
 #if defined(TENZOR_USE_CUDA) || defined(TENZOR_USE_ROCM)

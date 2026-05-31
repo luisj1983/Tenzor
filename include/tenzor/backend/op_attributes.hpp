@@ -547,6 +547,6 @@ using OpAttributes = NewOpAttributes;
 /**
  * @brief Get human-readable name for an AttrKey (for error messages).
  */
-auto attr_key_name(AttrKey key) -> std::string_view;
+;
 
 } // namespace tenzor

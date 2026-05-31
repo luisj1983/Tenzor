@@ -48,13 +48,7 @@ public:
 
     /// W.8: destroy the thread-local cuSOLVER handle so the next get() lazily
     /// rebuilds.  Frees the workspace memory cuSOLVER retains internally.
-    static void clear_idle() {
-        if (handle() != nullptr) {
-            cusolverDnDestroy(handle());
-            handle() = nullptr;
-        }
-        last_stream() = nullptr;
-    }
+    
 
 private:
     struct HandleGuard {

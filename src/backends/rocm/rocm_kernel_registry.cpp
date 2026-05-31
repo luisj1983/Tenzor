@@ -37,6 +37,8 @@
 #include <tuple>
 #include <utility>
 
+#include "tenzor/backend/dtype_from_string.hpp"
+
 namespace tenzor {
 
 // Helper to extract HIP stream from attributes
@@ -49,21 +51,6 @@ inline hipStream_t get_hip_stream(const OpAttributes& attrs) {
     return nullptr;  // Default stream
 }
 
-// Helper to convert dtype string to DType enum
-inline DType dtype_from_string(std::string_view s, DType default_val = DType::Float32) {
-    if (s == "float32") return DType::Float32;
-    if (s == "float64") return DType::Float64;
-    if (s == "float16") return DType::Float16;
-    if (s == "bfloat16") return DType::BFloat16;
-    if (s == "int32") return DType::Int32;
-    if (s == "int64") return DType::Int64;
-    if (s == "int8") return DType::Int8;
-    if (s == "uint8") return DType::UInt8;
-    if (s == "bool") return DType::Bool;
-    if (s == "complex64") return DType::Complex64;
-    if (s == "complex128") return DType::Complex128;
-    return default_val;
-}
 
 // Helper to convert device string to Device
 inline Device device_from_string(std::string_view s, Device default_val = Device::rocm(0)) {

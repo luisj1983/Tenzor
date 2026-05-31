@@ -53,19 +53,6 @@ namespace mlir_detail {
 struct MlirInvokerCache;
 }  // namespace mlir_detail
 
-/**
- * @brief A segment of a compiled graph, split at graph breaks.
- */
-struct GraphSegment {
-    /// Compiled sub-graph (nullptr for eager/break segments)
-    std::shared_ptr<CompiledModule> compiled;
-
-    /// Node index in original graph (for break segments)
-    size_t break_node_index{0};
-
-    /// Whether this is a compiled segment or an eager break
-    bool is_compiled{true};
-};
 
 /**
  * @brief Configuration for compiled functions.
@@ -242,9 +229,6 @@ private:
     int warmup_count_{0};
     static constexpr int kReduceOverheadWarmupCalls = 2;
 
-    /// Segmented execution for graphs with breaks
-    std::vector<GraphSegment> segments_;
-    bool has_segments_{false};
 
     /// Break positions recorded during tracing
     std::vector<size_t> break_positions_;

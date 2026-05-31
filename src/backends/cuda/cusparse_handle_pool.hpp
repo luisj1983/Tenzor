@@ -48,13 +48,7 @@ public:
 
     /// W.8: destroy the thread-local cuSPARSE handle so the next get()
     /// lazily rebuilds.
-    static void clear_idle() {
-        if (handle() != nullptr) {
-            cusparseDestroy(handle());
-            handle() = nullptr;
-        }
-        last_stream() = sentinel_stream();
-    }
+    
 
 private:
     struct HandleGuard {

@@ -36,28 +36,10 @@
 #include <sstream>
 #include <tuple>
 
+#include "tenzor/backend/dtype_from_string.hpp"
+
 namespace tenzor {
 
-// Helper to convert dtype string to DType enum (matches creation.cpp's dtype_to_string)
-inline DType dtype_from_string(std::string_view s, DType default_val = DType::Float32) {
-    if (s == "float32") return DType::Float32;
-    if (s == "float64") return DType::Float64;
-    if (s == "float16") return DType::Float16;
-    if (s == "bfloat16") return DType::BFloat16;
-    if (s == "int32") return DType::Int32;
-    if (s == "int64") return DType::Int64;
-    if (s == "int16") return DType::Int16;
-    if (s == "int8") return DType::Int8;
-    if (s == "uint8") return DType::UInt8;
-    if (s == "uint16") return DType::UInt16;
-    if (s == "uint32") return DType::UInt32;
-    if (s == "uint64") return DType::UInt64;
-    if (s == "bool") return DType::Bool;
-    if (s == "complex64") return DType::Complex64;
-    if (s == "complex128") return DType::Complex128;
-    if (s.empty()) return default_val;
-    return default_val;
-}
 
 // Helper to extract CUDA stream from attributes
 inline cudaStream_t get_cuda_stream(const OpAttributes& attrs) {

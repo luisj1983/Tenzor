@@ -37,6 +37,8 @@
 #undef Bool
 #endif
 
+#include "tenzor/backend/dtype_from_string.hpp"
+
 namespace tenzor {
 
 // Helper to get VulkanBackend from the dispatch table registry
@@ -45,22 +47,6 @@ inline VulkanBackend* get_vulkan_backend() {
     return static_cast<VulkanBackend*>(backend);
 }
 
-// Helper to convert dtype string to DType enum
-inline DType dtype_from_string(std::string_view s, DType default_val = DType::Float32) {
-    if (s == "float32") return DType::Float32;
-    if (s == "float64") return DType::Float64;
-    if (s == "float16") return DType::Float16;
-    if (s == "bfloat16") return DType::BFloat16;
-    if (s == "int32") return DType::Int32;
-    if (s == "int64") return DType::Int64;
-    if (s == "int8") return DType::Int8;
-    if (s == "uint8") return DType::UInt8;
-    if (s == "bool") return DType::Bool;
-    if (s == "complex64") return DType::Complex64;
-    if (s == "complex128") return DType::Complex128;
-    if (s.empty()) return default_val;
-    return default_val;
-}
 
 // Helper: extract normalized_shape from attrs (may be string or int list)
 static int64_t vulkan_extract_normalized_size(const OpAttributes& attrs, const Tensor& fallback) {

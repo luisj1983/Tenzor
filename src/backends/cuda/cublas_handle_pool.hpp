@@ -51,13 +51,7 @@ public:
     /// rebuilds. Frees the workspace memory cuBLAS retains internally.
     /// Intended for backend reset_state() / long-running training loops
     /// that rotate streams and accumulate idle handles.
-    static void clear_idle() {
-        if (handle() != nullptr) {
-            cublasDestroy(handle());
-            handle() = nullptr;
-        }
-        last_stream() = nullptr;
-    }
+    
 
 private:
     // RAII guard owned per-thread; destroys the handle when the thread exits.

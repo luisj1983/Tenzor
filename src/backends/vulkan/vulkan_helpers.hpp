@@ -78,14 +78,6 @@ inline void insertTransferToComputeBarrier(VkCommandBuffer cmdBuffer) {
     insertBarrier(cmdBuffer, BarrierType::TransferToCompute);
 }
 
-/// Pre-read compute barrier for RAW (Read-After-Write) dependencies between dispatches.
-/// Always inserted regardless of command batching mode — without batching, consecutive
-/// dispatches within a single command buffer still need barriers to ensure write
-/// visibility before the next read.
-inline void insertPreReadBarrier(VkCommandBuffer cmdBuffer) {
-    insertBarrier(cmdBuffer, BarrierType::ComputeToCompute);
-}
-
 /// Post-dispatch compute barrier for GPU-only workloads.
 /// Only ensures SHADER_WRITE → SHADER_READ visibility between dispatches.
 /// Use this when the next operation is another compute dispatch (no host readback).
@@ -187,12 +179,6 @@ inline uint32_t div_wg(uint64_t n, uint32_t wg_size) {
 }
 
 /// Dispatch compute work with device-limit validation.
-inline void safeDispatch(VkCommandBuffer cmd, uint32_t gx, uint32_t gy, uint32_t gz,
-                         const uint32_t maxCounts[3]) {
-    if (gx > maxCounts[0] || gy > maxCounts[1] || gz > maxCounts[2]) {
-        throw std::runtime_error("Vulkan: workgroup count exceeds device limits");
-    }
-    vkCmdDispatch(cmd, gx, gy, gz);
-}
+
 
 } // namespace tenzor

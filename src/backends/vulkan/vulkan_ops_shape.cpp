@@ -228,7 +228,7 @@ auto VulkanBackend::dispatchTranspose(const Tensor& input, int64_t dim0, int64_t
         VkCommandBuffer cmdBuffer = beginSingleTimeCommands(device_id);
 
         // Insert pre-read barrier to ensure input data from previous ops is ready
-        insertPreReadBarrier(cmdBuffer);
+        insertComputeOnlyBarrier(cmdBuffer);
 
         vkCmdBindPipeline(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
         vkCmdBindDescriptorSets(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE,
@@ -374,7 +374,7 @@ auto VulkanBackend::dispatchPermute(const Tensor& input, const std::vector<int64
     VkCommandBuffer cmdBuffer = beginSingleTimeCommands(device_id);
 
     // Insert pre-read barrier to ensure input data from previous ops is ready
-    insertPreReadBarrier(cmdBuffer);
+    insertComputeOnlyBarrier(cmdBuffer);
 
     vkCmdBindPipeline(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
     vkCmdBindDescriptorSets(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE,
@@ -607,7 +607,7 @@ auto VulkanBackend::dispatchContiguous(const Tensor& input) -> Tensor {
 
     // Insert pre-read barrier to ensure input data from previous ops is ready
     // This is critical for strided_copy which reads non-contiguous data
-    insertPreReadBarrier(cmdBuffer);
+    insertComputeOnlyBarrier(cmdBuffer);
 
     vkCmdBindPipeline(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
     vkCmdBindDescriptorSets(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE,

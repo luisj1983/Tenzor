@@ -25,24 +25,12 @@
 #include <immintrin.h>
 #endif
 
+#include "../int4_utils.hpp"  // shared tenzor::cpu::unpack_int4
+
 namespace tenzor {
 namespace nn {
 namespace quantization {
 namespace kernels {
-
-/// Unpack an INT4 weight byte into two signed int8 values.
-/// Tenzor stores signed INT4 in two's-complement form masked to a nibble
-/// (range [-8, 7], `value & 0xF`), matching every INT4 packer in the codebase
-/// (tensor.cpp, gptq.cpp, awq.cpp) and int4_utils.hpp.  Recover the sign by
-/// extending bit 3 into the high nibble — NOT an offset-8 (zero-point) decode.
-static inline void unpack_int4(uint8_t packed, int8_t& low, int8_t& high) {
-    int8_t lo = static_cast<int8_t>(packed & 0x0F);
-    if (lo & 0x08) lo |= static_cast<int8_t>(0xF0);  // sign-extend
-    int8_t hi = static_cast<int8_t>((packed >> 4) & 0x0F);
-    if (hi & 0x08) hi |= static_cast<int8_t>(0xF0);  // sign-extend
-    low  = lo;
-    high = hi;
-}
 
 /**
  * @brief INT4 quantized matrix multiplication for linear layer (CPU).
@@ -97,7 +85,7 @@ auto quantized_linear_int4_kernel(
         // Per-(thread, o) heap buffer; ~in_features bytes (4KB for 4096), L1-resident.
         std::vector<int8_t> unpacked_weights(static_cast<size_t>(in_features));
         for (int64_t p = 0; p < packed_features; ++p) {
-            unpack_int4(weight_row[p], unpacked_weights[p * 2], unpacked_weights[p * 2 + 1]);
+            tenzor::cpu::unpack_int4(weight_row[p], unpacked_weights[p * 2], unpacked_weights[p * 2 + 1]);
         }
 
         for (int64_t b = 0; b < batch_size; ++b) {

@@ -44,33 +44,4 @@ extract_sparse_grad(const tenzor::Variable& v)
     return v.sparse_grad();  // returns const std::optional<SparseTensor>&
 }
 
-/// Convenience: project a sparse row-grad onto its active row indices,
-/// for "row-only" optimizers (SparseAdam, sparse SGD).
-///
-/// For COO layout, returns `(row_indices, row_values)` where:
-///   - `row_indices` is a 1D Int64 tensor of unique row ids.
-///   - `row_values` is a 2D tensor `[len(row_indices), embedding_dim]`.
-///
-/// For CSR layout the caller can use `crow_indices/col_indices/values`
-/// directly via `sg.crow_indices()` etc.
-struct ActiveRowGrad {
-    Tensor indices;  // [active_rows] Int64
-    Tensor values;   // [active_rows, embedding_dim] same dtype as param
-};
-
-/// Returns the active-row view of a row-sparse gradient.
-///
-/// Caller must ensure the SparseTensor was produced as a row-sparse COO
-/// (which is what `EmbeddingBackward` emits). For other layouts, the
-/// caller should `to_coo()` first or handle the structured form directly.
-///
-/// Implementation note: COO layout stores `indices` as `[ndim, nnz]` and
-/// `values` as `[nnz, embedding_dim]` for row-sparse embedding grads.
-/// The exact shape contract is documented at
-/// `include/tenzor/sparse/sparse_tensor.hpp`.
-[[nodiscard]] inline auto
-active_row_grad(const tenzor::SparseTensor& sg) -> ActiveRowGrad {
-    return ActiveRowGrad{ sg.indices(), sg.values() };
-}
-
 }  // namespace tenzor::optim::detail

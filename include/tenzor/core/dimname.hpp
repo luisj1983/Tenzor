@@ -118,39 +118,6 @@ inline auto find_dim_by_name(const DimnameList& names, std::string_view name) ->
  *
  * @throws std::invalid_argument if names conflict
  */
-inline auto unify_names(const std::optional<DimnameList>& a,
-                        const std::optional<DimnameList>& b,
-                        size_t ndim) -> std::optional<DimnameList> {
-    if (!a && !b) return std::nullopt;
 
-    DimnameList result(ndim);
-    const DimnameList* na = a ? &*a : nullptr;
-    const DimnameList* nb = b ? &*b : nullptr;
-
-    for (size_t i = 0; i < ndim; ++i) {
-        Dimname da = (na && i < na->size()) ? (*na)[i] : Dimname::wildcard();
-        Dimname db = (nb && i < nb->size()) ? (*nb)[i] : Dimname::wildcard();
-
-        if (da.is_wildcard()) {
-            result[i] = db;
-        } else if (db.is_wildcard()) {
-            result[i] = da;
-        } else if (da == db) {
-            result[i] = da;
-        } else {
-            throw std::invalid_argument(
-                "Mismatched dimension names: '" + std::string(da.name()) +
-                "' vs '" + std::string(db.name()) + "' at dim " + std::to_string(i));
-        }
-    }
-
-    // Return nullopt if all names are wildcards (avoid unnecessary allocation)
-    bool all_wildcard = true;
-    for (auto& d : result) {
-        if (!d.is_wildcard()) { all_wildcard = false; break; }
-    }
-    if (all_wildcard) return std::nullopt;
-    return result;
-}
 
 } // namespace tenzor

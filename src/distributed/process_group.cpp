@@ -31,6 +31,7 @@
         #include <nccl.h>
     #endif
     #include "tenzor/backend/loader.hpp"  // for is_backend_registry_alive()
+    #include "tenzor/distributed/nccl_backend.hpp"  // shared to_nccl_reduce_op/to_nccl_datatype
     #include "tenzor/ops/creation.hpp"    // for zeros(), empty()
     #include "tenzor/ops/transform.hpp"   // for cat()
     #include <cstring>
@@ -80,48 +81,6 @@
             } \
         } while(0)
 
-namespace {
-
-/// Convert ReduceOp to ncclRedOp_t
-auto to_nccl_reduce_op(tenzor::distributed::ReduceOp op) -> ncclRedOp_t {
-    using tenzor::distributed::ReduceOp;
-    switch (op) {
-        case ReduceOp::SUM:
-        case ReduceOp::AVG:  // Average implemented as sum + divide
-            return ncclSum;
-        case ReduceOp::PRODUCT:
-            return ncclProd;
-        case ReduceOp::MIN:
-            return ncclMin;
-        case ReduceOp::MAX:
-            return ncclMax;
-        default:
-            throw std::invalid_argument(
-                "NCCLProcessGroup: unsupported reduce operation"
-            );
-    }
-}
-
-/// Convert DType to ncclDataType_t
-auto to_nccl_datatype(tenzor::DType dtype) -> ncclDataType_t {
-    switch (dtype) {
-        case tenzor::DType::Float32:
-            return ncclFloat;
-        case tenzor::DType::Float64:
-            return ncclDouble;
-        case tenzor::DType::Int32:
-            return ncclInt;
-        case tenzor::DType::Int64:
-            return ncclInt64;
-        default:
-            throw std::invalid_argument(
-                "NCCLProcessGroup: unsupported dtype for NCCL: " +
-                std::to_string(static_cast<int>(dtype))
-            );
-    }
-}
-
-} // anonymous namespace
 #endif // TENZOR_HAS_NCCL
 
 namespace tenzor::distributed {

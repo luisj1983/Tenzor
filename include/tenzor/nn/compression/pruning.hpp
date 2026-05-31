@@ -238,19 +238,7 @@ auto prune_iterative(
 /**
  * @brief Structured pruning options
  */
-struct StructuredPruningConfig {
-    enum class Granularity {
-        Channel,    ///< Prune entire output channels (Conv2d, Linear)
-        Filter,     ///< Prune entire filters (Conv2d)
-        Layer,      ///< Remove entire layers
-        Block       ///< Remove residual blocks
-    };
-
-    Granularity granularity{Granularity::Channel};
-    float sparsity{0.5f};
-    ImportanceCriterion criterion{ImportanceCriterion::L1};
-    bool prune_dependent_layers{true};  ///< Also prune layers that depend on pruned channels
-};
+;
 
 /**
  * @brief Apply structured channel pruning to convolutional layers

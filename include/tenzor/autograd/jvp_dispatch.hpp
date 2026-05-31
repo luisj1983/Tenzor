@@ -210,23 +210,4 @@ template <OpId Op>
     return dispatch_jvp_multi(Op, primals, tangents, attrs);
 }
 
-/// Non-template runtime form, useful from generic / template-bound call sites
-/// (e.g. Python bindings that receive the OpId as data). Mirrors
-/// `dispatch_jvp` but exists under the `dual_apply` name so call sites read
-/// uniformly with the template form above.
-[[nodiscard]] inline JvpResult dual_apply_dyn(OpId op,
-                                              std::span<const Tensor> primals,
-                                              std::span<const Tensor> tangents,
-                                              const OpAttributes& attrs = {}) {
-    return dispatch_jvp(op, primals, tangents, attrs);
-}
-
-[[nodiscard]] inline JvpMultiResult dual_apply_multi_dyn(
-        OpId op,
-        std::span<const Tensor> primals,
-        std::span<const Tensor> tangents,
-        const OpAttributes& attrs = {}) {
-    return dispatch_jvp_multi(op, primals, tangents, attrs);
-}
-
 } // namespace tenzor

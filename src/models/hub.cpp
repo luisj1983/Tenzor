@@ -320,6 +320,12 @@ public:
 std::unique_ptr<ModelHub::Impl> ModelHub::impl_;
 std::mutex ModelHub::mutex_;
 
+// Internal forward declaration (definition below, in namespace registry).
+// Kept out of the public header — see hub.hpp.
+namespace registry {
+void initialize_default_registry(std::unordered_map<std::string, ModelWeightInfo>& registry);
+}  // namespace registry
+
 void ModelHub::ensure_initialized() {
     std::lock_guard<std::mutex> lock(mutex_);
     if (!impl_) {

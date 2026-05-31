@@ -10,6 +10,8 @@
 #include "distributed.hpp"
 #include <vector>
 #include <unordered_map>
+#include <stdexcept>
+#include <string>
 
 // Forward declare NCCL types to avoid dependency in header
 #if defined(TENZOR_HAS_NCCL)
@@ -29,6 +31,38 @@
 
 namespace tenzor {
 namespace distributed {
+
+/// Convert a ReduceOp to the corresponding NCCL reduction operator.
+/// Shared by NCCLBackend and the process-group collective wrappers (single
+/// source of truth — previously duplicated in process_group.cpp).
+inline ncclRedOp_t to_nccl_reduce_op(ReduceOp op) {
+    switch (op) {
+        case ReduceOp::SUM:
+        case ReduceOp::AVG:  // Average implemented as sum + divide
+            return ncclSum;
+        case ReduceOp::PRODUCT:
+            return ncclProd;
+        case ReduceOp::MIN:
+            return ncclMin;
+        case ReduceOp::MAX:
+            return ncclMax;
+        default:
+            throw std::invalid_argument("Unsupported reduce operation for NCCL");
+    }
+}
+
+/// Convert a DType to the corresponding NCCL data type.
+inline ncclDataType_t to_nccl_datatype(DType dtype) {
+    switch (dtype) {
+        case DType::Float32: return ncclFloat;
+        case DType::Float64: return ncclDouble;
+        case DType::Int32:   return ncclInt;
+        case DType::Int64:   return ncclInt64;
+        default:
+            throw std::invalid_argument(
+                "Unsupported dtype for NCCL: " + std::to_string(static_cast<int>(dtype)));
+    }
+}
 
 /**
  * @brief NCCL communication backend for GPU operations.
@@ -141,15 +175,6 @@ private:
 
     // Helper methods
 
-    /**
-     * @brief Convert ReduceOp to NCCL reduction operation.
-     */
-    auto to_nccl_reduce_op(ReduceOp op) -> ncclRedOp_t;
-
-    /**
-     * @brief Convert DType to NCCL data type.
-     */
-    auto to_nccl_datatype(DType dtype) -> ncclDataType_t;
 
     /**
      * @brief Initialize communicator for a device.

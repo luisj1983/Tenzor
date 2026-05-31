@@ -33,15 +33,6 @@ __global__ void im2col_kernel(
 
 // compute_launch_config_1d() is now in cuda_launch_utils.cuh
 
-inline void compute_launch_config_2d(int64_t rows, int64_t cols, dim3& grid, dim3& block) {
-    const int block_x = 16;
-    const int block_y = 16;
-    block = dim3(block_x, block_y, 1);
-    // Ensure at least 1 block in each dimension to avoid CUDA invalid argument error
-    unsigned int grid_x = static_cast<unsigned int>((cols + block_x - 1) / block_x);
-    unsigned int grid_y = static_cast<unsigned int>((rows + block_y - 1) / block_y);
-    grid = dim3(grid_x > 0 ? grid_x : 1, grid_y > 0 ? grid_y : 1, 1);
-}
 
 
 // ============================================================================

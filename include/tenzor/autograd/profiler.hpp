@@ -47,7 +47,7 @@ struct AutogradProfile {
 };
 
 /// Backward-compatible alias
-using BackwardProfile = AutogradProfile;
+;
 
 /**
  * @brief A single trace event for Chrome Trace Event Format export.

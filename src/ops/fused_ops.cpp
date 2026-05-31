@@ -61,6 +61,11 @@ auto fused_linear_relu(
     return dispatch(OpId::FusedLinearReLU, inputs, attrs)[0];
 }
 
+// Forward declaration of the shared validate-and-dispatch helper (defined below).
+static auto fused_conv2d_dispatch(
+    const char* name, OpId op_id, const Tensor& input, const Tensor& weight,
+    const Tensor* bias, int64_t stride, int64_t padding) -> Tensor;
+
 auto fused_conv2d_relu(
     const Tensor& input,
     const Tensor& weight,
@@ -68,53 +73,8 @@ auto fused_conv2d_relu(
     int64_t stride,
     int64_t padding
 ) -> Tensor {
-    // Validate inputs
-    if (input.ndim() != 4) {
-        throw std::runtime_error(
-            "fused_conv2d_relu: input must be 4D (N, C, H, W), got " +
-            std::to_string(input.ndim()) + "D"
-        );
-    }
-
-    if (weight.ndim() != 4) {
-        throw std::runtime_error(
-            "fused_conv2d_relu: weight must be 4D (C_out, C_in, KH, KW), got " +
-            std::to_string(weight.ndim()) + "D"
-        );
-    }
-
-    int64_t in_channels = input.shape()[1];
-    int64_t weight_in_channels = weight.shape()[1];
-    int64_t out_channels = weight.shape()[0];
-
-    if (in_channels != weight_in_channels) {
-        throw std::runtime_error(
-            "fused_conv2d_relu: input channels mismatch: input has " +
-            std::to_string(in_channels) + ", weight expects " +
-            std::to_string(weight_in_channels)
-        );
-    }
-
-    if (bias != nullptr && bias->numel() != out_channels) {
-        throw std::runtime_error(
-            "fused_conv2d_relu: bias size mismatch: expected " +
-            std::to_string(out_channels) + ", got " +
-            std::to_string(bias->numel())
-        );
-    }
-
-    // Prepare inputs for dispatcher
-    std::vector<Tensor> inputs = {input, weight};
-    if (bias != nullptr) {
-        inputs.push_back(*bias);
-    }
-
-    OpAttributes attrs;
-    attrs.set(AttrKey::HasBias, bias != nullptr);
-    attrs.set(AttrKey::Stride, stride);
-    attrs.set(AttrKey::Padding, padding);
-
-    return dispatch(OpId::FusedConv2dReLU, inputs, attrs)[0];
+    return fused_conv2d_dispatch("fused_conv2d_relu", OpId::FusedConv2dReLU,
+                                 input, weight, bias, stride, padding);
 }
 
 static auto fused_conv2d_dispatch(

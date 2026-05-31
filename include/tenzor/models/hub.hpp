@@ -296,23 +296,9 @@ private:
  */
 namespace registry {
 
-/**
- * @brief Initialize default model registry
- *
- * Registers popular pretrained models:
- * - ResNet (18, 34, 50, 101, 152)
- * - VGG (11, 13, 16, 19)
- * - MobileNet v2
- * - EfficientNet (b0-b7)
- */
-void initialize_default_registry(std::unordered_map<std::string, ModelWeightInfo>& registry);
-
-/**
- * @brief Get PyTorch model zoo URL
- * @param model_name Model name (e.g., "resnet50")
- * @return Full download URL
- */
-std::string get_pytorch_model_url(const std::string& model_name);
+// Internal registry initialization helpers (get_pytorch_model_url,
+// initialize_default_registry) live in hub.cpp — they are implementation
+// details and intentionally not part of the public API.
 
 /**
  * @brief Look up the reason a previously-registered model was removed.
