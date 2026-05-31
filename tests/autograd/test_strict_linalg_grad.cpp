@@ -21,15 +21,17 @@
 #include <tenzor/tenzor.hpp>
 #include <tenzor/utils/error.hpp>
 
+#include "../backend_test_fixture.hpp"
 #include "../grad_flow_helpers.hpp"
 
 namespace tenzor {
 namespace {
 
-class StrictLinalgGradTest : public ::testing::Test {
+class StrictLinalgGradTest : public ::tenzor::testing::BackendTest {
 protected:
     void SetUp() override {
-        tenzor::initialize();
+        ::tenzor::testing::BackendTest::SetUp();
+        if (::testing::Test::IsSkipped()) return;
         const char* prev = std::getenv("TENZOR_STRICT_LINALG_GRAD");
         saved_strict_ = prev ? std::string(prev) : std::string();
     }
@@ -48,8 +50,8 @@ protected:
     // (trivial ipiv), so these gradient tests exercise the supported path
     // deterministically rather than relying on a random draw not pivoting.
     Tensor make_spd(int64_t n) {
-        auto x = randn({n, n}, DType::Float64, Device::cpu());
-        auto eye_n = eye(n, std::nullopt, DType::Float64, Device::cpu());
+        auto x = randn({n, n}, DType::Float64, device);
+        auto eye_n = eye(n, std::nullopt, DType::Float64, device);
         return matmul(x, transpose(x, 0, 1)) + eye_n * 100.0;
     }
 
@@ -61,7 +63,7 @@ protected:
         double* d = A.data<double>();
         d[1] = 1.0;  // (0,1)
         d[2] = 1.0;  // (1,0)
-        return A;
+        return A.to(device);
     }
 };
 
@@ -74,7 +76,7 @@ protected:
 // (it stays in source as a structural marker for *other* linalg ops that
 // still use the zero-grad stub: `householder_product`).
 
-TEST_F(StrictLinalgGradTest, LDLFactor_ProducesMeaningfulGradient) {
+TEST_P(StrictLinalgGradTest, LDLFactor_ProducesMeaningfulGradient) {
     unsetenv("TENZOR_STRICT_LINALG_GRAD");
 
     Variable A(make_spd(4), /*requires_grad=*/true);
@@ -83,7 +85,7 @@ TEST_F(StrictLinalgGradTest, LDLFactor_ProducesMeaningfulGradient) {
     EXPECT_NO_THROW(loss.backward());
 
     ASSERT_TRUE(A.has_grad());
-    auto g = A.grad().value().to(DType::Float64).contiguous();
+    auto g = A.grad().value().cpu().to(DType::Float64).contiguous();
     const double* gp = g.data<double>();
     bool any_nonzero = false;
     for (int64_t i = 0; i < g.numel(); ++i) {
@@ -93,7 +95,7 @@ TEST_F(StrictLinalgGradTest, LDLFactor_ProducesMeaningfulGradient) {
         << "LDL backward should now produce a real (non-zero) gradient";
 }
 
-TEST_F(StrictLinalgGradTest, LDLFactor_StrictModeIsNoopForLDL) {
+TEST_P(StrictLinalgGradTest, LDLFactor_StrictModeIsNoopForLDL) {
     setenv("TENZOR_STRICT_LINALG_GRAD", "1", /*overwrite=*/1);
 
     Variable A(make_spd(4), /*requires_grad=*/true);
@@ -104,7 +106,7 @@ TEST_F(StrictLinalgGradTest, LDLFactor_StrictModeIsNoopForLDL) {
     EXPECT_GRAD_FLOWS(A);
 }
 
-TEST_F(StrictLinalgGradTest, LDLFactor_StrictModeFalseEquivalentToUnset) {
+TEST_P(StrictLinalgGradTest, LDLFactor_StrictModeFalseEquivalentToUnset) {
     setenv("TENZOR_STRICT_LINALG_GRAD", "0", /*overwrite=*/1);
 
     Variable A(make_spd(4), /*requires_grad=*/true);
@@ -113,7 +115,7 @@ TEST_F(StrictLinalgGradTest, LDLFactor_StrictModeFalseEquivalentToUnset) {
     EXPECT_NO_THROW(loss.backward());
 
     ASSERT_TRUE(A.has_grad());
-    auto g = A.grad().value().to(DType::Float64).contiguous();
+    auto g = A.grad().value().cpu().to(DType::Float64).contiguous();
     const double* gp = g.data<double>();
     bool any_nonzero = false;
     for (int64_t i = 0; i < g.numel(); ++i) {
@@ -128,7 +130,7 @@ TEST_F(StrictLinalgGradTest, LDLFactor_StrictModeFalseEquivalentToUnset) {
 // through an indefinite (pivoting) factorization must fail loud rather than
 // return a silently-wrong gradient. (Mirrors PyTorch, which has no pivoted
 // ldl_factor backward.)
-TEST_F(StrictLinalgGradTest, LDLFactor_PivotingThrowsNonDifferentiable) {
+TEST_P(StrictLinalgGradTest, LDLFactor_PivotingThrowsNonDifferentiable) {
     unsetenv("TENZOR_STRICT_LINALG_GRAD");
 
     Variable A(make_indefinite_pivoting(), /*requires_grad=*/true);
@@ -137,11 +139,7 @@ TEST_F(StrictLinalgGradTest, LDLFactor_PivotingThrowsNonDifferentiable) {
     EXPECT_THROW(loss.backward(), tenzor::NonDifferentiable);
 }
 
+INSTANTIATE_BACKEND_TESTS(StrictLinalgGradTest);
+
 }  // namespace
 }  // namespace tenzor
-
-int main(int argc, char** argv) {
-    ::testing::InitGoogleTest(&argc, argv);
-    try { tenzor::initialize(); } catch (...) {}
-    return RUN_ALL_TESTS();
-}

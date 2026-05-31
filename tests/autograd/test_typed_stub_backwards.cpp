@@ -25,12 +25,14 @@
 #include <tenzor/utils/error.hpp>
 #include <cmath>
 
+#include "../backend_test_fixture.hpp"
+
 using namespace tenzor;
 
 namespace {
 
 bool tensor_is_finite_and_nonzero(const Tensor& t) {
-    auto d = t.to(DType::Float64).contiguous();
+    auto d = t.cpu().to(DType::Float64).contiguous();
     const double* p = d.data<double>();
     bool any_nonzero = false;
     for (int64_t i = 0; i < d.numel(); ++i) {
@@ -42,19 +44,22 @@ bool tensor_is_finite_and_nonzero(const Tensor& t) {
 
 }  // namespace
 
-class TypedStubBackwardsTest : public ::testing::Test {
+class TypedStubBackwardsTest : public ::tenzor::testing::BackendTest {
 protected:
-    static void SetUpTestSuite() { tenzor::initialize(); }
+    void SetUp() override {
+        ::tenzor::testing::BackendTest::SetUp();
+        if (::testing::Test::IsSkipped()) return;
+    }
 };
 
 // ---- ROIAlignBackward ----------------------------------------------------
-TEST_F(TypedStubBackwardsTest, ROIAlignBackward_ComputesFiniteGrad) {
+TEST_P(TypedStubBackwardsTest, ROIAlignBackward_ComputesFiniteGrad) {
     // Tiny feature map [N=1, C=2, H=4, W=4]
-    auto features = randn({1, 2, 4, 4}, DType::Float32, Device::cpu());
+    auto features = randn({1, 2, 4, 4}, DType::Float32, device);
     // One ROI: [batch_idx, x1, y1, x2, y2]
     std::vector<float> rois_data = {0.0f, 0.0f, 0.0f, 3.0f, 3.0f};
     auto rois = Tensor::from_blob(rois_data.data(), {1, 5},
-                                  DType::Float32, Device::cpu()).clone();
+                                  DType::Float32, Device::cpu()).clone().to(device);
 
     auto fn = std::make_shared<ROIAlignBackward>(
         /*output_h=*/2, /*output_w=*/2,
@@ -78,8 +83,8 @@ TEST_F(TypedStubBackwardsTest, ROIAlignBackward_ComputesFiniteGrad) {
 }
 
 // ---- DCTBackward ---------------------------------------------------------
-TEST_F(TypedStubBackwardsTest, DCTBackward_ComputesFiniteGrad) {
-    auto x = randn({2, 8}, DType::Float32, Device::cpu());
+TEST_P(TypedStubBackwardsTest, DCTBackward_ComputesFiniteGrad) {
+    auto x = randn({2, 8}, DType::Float32, device);
     auto fn = std::make_shared<DCTBackward>(
         /*type=*/2, /*n=*/-1, /*dim=*/-1, "ortho");
     Variable x_v(x, /*requires_grad=*/true);
@@ -96,11 +101,11 @@ TEST_F(TypedStubBackwardsTest, DCTBackward_ComputesFiniteGrad) {
 }
 
 // ---- MelScaleBackward ----------------------------------------------------
-TEST_F(TypedStubBackwardsTest, MelScaleBackward_ComputesFiniteGrad) {
+TEST_P(TypedStubBackwardsTest, MelScaleBackward_ComputesFiniteGrad) {
     // mel_scale expects spectrogram of shape (..., n_freqs, time)
     int64_t n_freqs = 9;  // n_fft = (n_freqs - 1) * 2 = 16
     int64_t time = 4;
-    auto spec = abs(randn({n_freqs, time}, DType::Float32, Device::cpu())) + 0.1f;
+    auto spec = abs(randn({n_freqs, time}, DType::Float32, device)) + 0.1f;
     auto fn = std::make_shared<MelScaleBackward>(
         /*n_mels=*/4, /*f_min=*/0.0, /*f_max=*/0.0, /*sample_rate=*/16000);
 
@@ -118,12 +123,12 @@ TEST_F(TypedStubBackwardsTest, MelScaleBackward_ComputesFiniteGrad) {
 }
 
 // ---- MFCCBackward --------------------------------------------------------
-TEST_F(TypedStubBackwardsTest, MFCCBackward_ComputesFiniteGrad) {
+TEST_P(TypedStubBackwardsTest, MFCCBackward_ComputesFiniteGrad) {
     // Use a small waveform; n_fft chosen small for fast test.
     int64_t n_fft = 16;
     int64_t hop = 4;
     int64_t length = 64;
-    auto wave = randn({length}, DType::Float32, Device::cpu());
+    auto wave = randn({length}, DType::Float32, device);
     auto fn = std::make_shared<MFCCBackward>(
         /*sample_rate=*/16000,
         /*n_mfcc=*/4,
@@ -143,7 +148,7 @@ TEST_F(TypedStubBackwardsTest, MFCCBackward_ComputesFiniteGrad) {
     ASSERT_EQ(grads.size(), 1u);
     EXPECT_EQ(grads[0].numel(), wave.numel());
     // Allow zero on the boundary samples (overlap-add structure); just check finiteness.
-    auto d = grads[0].to(DType::Float64).contiguous();
+    auto d = grads[0].cpu().to(DType::Float64).contiguous();
     const double* p = d.data<double>();
     for (int64_t i = 0; i < d.numel(); ++i) {
         ASSERT_TRUE(std::isfinite(p[i])) << "MFCC backward produced NaN/Inf at " << i;
@@ -159,12 +164,12 @@ TEST_F(TypedStubBackwardsTest, MFCCBackward_ComputesFiniteGrad) {
 // optional trailing inputs.
 
 // Case 1: no bias, no mask (DCNv1 with zero offsets) — the original crash.
-TEST_F(TypedStubBackwardsTest, DeformableConv2dBackward_NoBiasNoMask) {
+TEST_P(TypedStubBackwardsTest, DeformableConv2dBackward_NoBiasNoMask) {
     int64_t N = 1, Cin = 2, H = 5, W = 5;
     int64_t Cout = 2, kH = 3, kW = 3;
-    auto input  = randn({N, Cin, H, W}, DType::Float32, Device::cpu());
-    auto offset = randn({N, 2 * kH * kW, H, W}, DType::Float32, Device::cpu()) * 0.0f;
-    auto weight = randn({Cout, Cin, kH, kW}, DType::Float32, Device::cpu());
+    auto input  = randn({N, Cin, H, W}, DType::Float32, device);
+    auto offset = randn({N, 2 * kH * kW, H, W}, DType::Float32, device) * 0.0f;
+    auto weight = randn({Cout, Cin, kH, kW}, DType::Float32, device);
 
     auto fn = std::make_shared<DeformableConv2dBackward>(
         /*stride_h=*/1, /*stride_w=*/1, /*pad_h=*/1, /*pad_w=*/1,
@@ -190,8 +195,9 @@ TEST_F(TypedStubBackwardsTest, DeformableConv2dBackward_NoBiasNoMask) {
     ASSERT_GE(grads.size(), 3u);  // dinput, doffset, dweight
     for (const auto& g : grads) {
         ASSERT_TRUE(g.is_valid());
-        auto* p = g.data<float>();
-        for (int64_t i = 0; i < g.numel(); ++i) {
+        auto g_cpu = g.cpu().contiguous();
+        auto* p = g_cpu.data<float>();
+        for (int64_t i = 0; i < g_cpu.numel(); ++i) {
             ASSERT_TRUE(std::isfinite(p[i])) << "deformable backward grad NaN/Inf";
         }
     }
@@ -199,15 +205,15 @@ TEST_F(TypedStubBackwardsTest, DeformableConv2dBackward_NoBiasNoMask) {
 
 // Case 2: with bias and with mask (full DCNv2) — verifies the canonical
 // {input,offset,weight,bias,mask} ordering survives forward+backward.
-TEST_F(TypedStubBackwardsTest, DeformableConv2dBackward_WithBiasAndMask) {
+TEST_P(TypedStubBackwardsTest, DeformableConv2dBackward_WithBiasAndMask) {
     int64_t N = 1, Cin = 2, H = 5, W = 5;
     int64_t Cout = 3, kH = 3, kW = 3;
-    auto input  = randn({N, Cin, H, W}, DType::Float32, Device::cpu());
-    auto offset = randn({N, 2 * kH * kW, H, W}, DType::Float32, Device::cpu()) * 0.0f;
-    auto weight = randn({Cout, Cin, kH, kW}, DType::Float32, Device::cpu());
-    auto bias   = randn({Cout}, DType::Float32, Device::cpu());
+    auto input  = randn({N, Cin, H, W}, DType::Float32, device);
+    auto offset = randn({N, 2 * kH * kW, H, W}, DType::Float32, device) * 0.0f;
+    auto weight = randn({Cout, Cin, kH, kW}, DType::Float32, device);
+    auto bias   = randn({Cout}, DType::Float32, device);
     // DCNv2 modulation mask: (N, kH*kW, H, W), values in (0,1) via 0.5 const.
-    auto mask   = full({N, kH * kW, H, W}, 0.5, DType::Float32, Device::cpu());
+    auto mask   = full({N, kH * kW, H, W}, 0.5, DType::Float32, device);
 
     auto fn = std::make_shared<DeformableConv2dBackward>(
         /*stride_h=*/1, /*stride_w=*/1, /*pad_h=*/1, /*pad_w=*/1,
@@ -235,9 +241,12 @@ TEST_F(TypedStubBackwardsTest, DeformableConv2dBackward_WithBiasAndMask) {
     ASSERT_GE(grads.size(), 5u);
     for (const auto& g : grads) {
         ASSERT_TRUE(g.is_valid());
-        auto* p = g.data<float>();
-        for (int64_t i = 0; i < g.numel(); ++i) {
+        auto g_cpu = g.cpu().contiguous();
+        auto* p = g_cpu.data<float>();
+        for (int64_t i = 0; i < g_cpu.numel(); ++i) {
             ASSERT_TRUE(std::isfinite(p[i])) << "deformable backward grad NaN/Inf";
         }
     }
 }
+
+INSTANTIATE_BACKEND_TESTS(TypedStubBackwardsTest);
