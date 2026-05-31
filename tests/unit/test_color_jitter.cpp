@@ -14,6 +14,7 @@
 #include <cmath>
 #include <vector>
 
+#include "../backend_test_fixture.hpp"
 #include "tenzor/data/transforms.hpp"
 #include "tenzor/core/dtype.hpp"
 #include "tenzor/core/device.hpp"
@@ -26,26 +27,29 @@ using namespace tenzor::data::transforms;
 
 namespace {
 
-class ColorJitterTest : public ::testing::Test {
+class ColorJitterTest : public ::tenzor::testing::BackendTest {
 protected:
-    void SetUp() override { tenzor::initialize(); }
+    void SetUp() override {
+        ::tenzor::testing::BackendTest::SetUp();
+        if (::testing::Test::IsSkipped()) return;
+    }
 
-    /// Build a [3, 2, 2] RGB image with distinct colour per channel.
-    static Tensor make_rgb(float r, float g, float b) {
-        Tensor t({3, 2, 2}, DType::Float32, Device::cpu());
-        auto* p = t.data<float>();
+    /// Build a [3, 2, 2] RGB image with distinct colour per channel, on `device`.
+    Tensor make_rgb(float r, float g, float b) const {
+        Tensor host({3, 2, 2}, DType::Float32, Device::cpu());
+        auto* p = host.data<float>();
         // Channel-major: R-plane, G-plane, B-plane each 2x2 spatial.
         for (int i = 0; i < 4; ++i) p[i]     = r;
         for (int i = 0; i < 4; ++i) p[4 + i] = g;
         for (int i = 0; i < 4; ++i) p[8 + i] = b;
-        return t;
+        return host.to(device);
     }
 };
 
 // ---------------------------------------------------------------------------
 // I.11 — Hue shift must actually rotate pixel values in HSV space.
 // ---------------------------------------------------------------------------
-TEST_F(ColorJitterTest, HueRotationChangesPixels) {
+TEST_P(ColorJitterTest, HueRotationChangesPixels) {
     tenzor::manual_seed(42);
     // Pure red input — hue 0°, sat 1.0, val 1.0.
     auto input = make_rgb(1.0f, 0.0f, 0.0f);
@@ -59,7 +63,8 @@ TEST_F(ColorJitterTest, HueRotationChangesPixels) {
                            /*saturation=*/0.0f, /*hue=*/0.5f);
         auto cloned = input;  // ColorJitter writes to a copy already
         auto [out, _] = jitter(cloned, Tensor{});
-        const auto* o = out.data<float>();
+        auto out_cpu = out.cpu();
+        const auto* o = out_cpu.data<float>();
         // Original is (R=1, G=0, B=0).  After ANY non-zero hue shift it
         // should differ in G or B by at least a small amount.
         const float g_max = std::max({o[4], o[5], o[6], o[7]});
@@ -83,14 +88,15 @@ TEST_F(ColorJitterTest, HueRotationChangesPixels) {
 // mean, the two images shift toward a single common reference, so the
 // per-image identity invariant is broken.
 // ---------------------------------------------------------------------------
-TEST_F(ColorJitterTest, ContrastUsesPerImageMean) {
+TEST_P(ColorJitterTest, ContrastUsesPerImageMean) {
     tenzor::manual_seed(7);
     // Build a 2-image batch [N=2, C=3, H=2, W=2] where each image is
     // uniform: image 0 = (0.2, 0.2, 0.2); image 1 = (0.8, 0.8, 0.8).
-    Tensor input({2, 3, 2, 2}, DType::Float32, Device::cpu());
-    auto* p = input.data<float>();
+    Tensor host({2, 3, 2, 2}, DType::Float32, Device::cpu());
+    auto* p = host.data<float>();
     for (int i = 0; i < 12; ++i)  p[i]      = 0.2f;
     for (int i = 0; i < 12; ++i)  p[12 + i] = 0.8f;
+    auto input = host.to(device);
 
     // contrast=0 ⇒ U[1, 1] = factor 1, so the math reduces to
     // mean + 1*(x - mean) = x.  But the loop only fires when contrast_ > 0
@@ -100,7 +106,8 @@ TEST_F(ColorJitterTest, ContrastUsesPerImageMean) {
     ColorJitter jitter(/*brightness=*/0.0f, /*contrast=*/0.05f,
                        /*saturation=*/0.0f, /*hue=*/0.0f);
     auto [out, _] = jitter(input, Tensor{});
-    const auto* o = out.data<float>();
+    auto out_cpu = out.cpu();
+    const auto* o = out_cpu.data<float>();
     // Image 0 was uniformly 0.2 ⇒ stays uniformly 0.2 regardless of factor.
     for (int i = 0; i < 12; ++i) {
         EXPECT_NEAR(o[i], 0.2f, 1e-5f) << "image 0 should stay uniform at i=" << i;
@@ -112,5 +119,7 @@ TEST_F(ColorJitterTest, ContrastUsesPerImageMean) {
         EXPECT_NEAR(o[12 + i], 0.8f, 1e-5f) << "image 1 should stay uniform at i=" << i;
     }
 }
+
+INSTANTIATE_BACKEND_TESTS(ColorJitterTest);
 
 }  // namespace

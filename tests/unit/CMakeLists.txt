@@ -1153,4 +1153,4 @@ tenzor_discover_tests(test_foreach_ops DISCOVERY_TIMEOUT 60 BACKENDS multi LABEL
 # Phase 11: New distribution sampler free functions
 add_executable(test_distributions_samplers test_distributions_samplers.cpp)
 target_link_libraries(test_distributions_samplers PRIVATE tenzor_core GTest::gtest_main)
-tenzor_discover_tests(test_distributions_samplers DISCOVERY_TIMEOUT 120 BACKENDS cpu LABELS "cpu;distributions")
+tenzor_discover_tests(test_distributions_samplers DISCOVERY_TIMEOUT 120 BACKENDS multi LABELS "distributions")

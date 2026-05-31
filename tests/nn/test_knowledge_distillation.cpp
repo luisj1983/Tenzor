@@ -16,6 +16,7 @@
 #include <tenzor/tenzor.hpp>
 #include <tenzor/nn/compression/distillation.hpp>
 #include <tenzor/nn/layers/linear.hpp>
+#include "../backend_test_fixture.hpp"
 #include <cmath>
 #include <limits>
 
@@ -39,35 +40,36 @@ public:
     }
 };
 
-}  // namespace
-
-class KnowledgeDistillationTest : public ::testing::Test {
+class KnowledgeDistillationTest : public ::tenzor::testing::BackendTest {
 protected:
-    static void SetUpTestSuite() { tenzor::initialize(); }
+    void SetUp() override {
+        ::tenzor::testing::BackendTest::SetUp();
+        if (::testing::Test::IsSkipped()) return;
+    }
 };
 
 // ---------------------------------------------------------------------------
 // temperature_softmax
 // ---------------------------------------------------------------------------
 
-TEST_F(KnowledgeDistillationTest, TemperatureSoftmax_SumToOnePerRow) {
-    Variable logits(randn({4, 10}, DType::Float32, Device::cpu()), false);
+TEST_P(KnowledgeDistillationTest, TemperatureSoftmax_SumToOnePerRow) {
+    Variable logits(randn({4, 10}, DType::Float32, device), false);
     Variable probs = temperature_softmax(logits, /*temperature=*/3.0f);
     EXPECT_EQ(probs.tensor().shape().size(), 2u);
     EXPECT_EQ(probs.tensor().shape()[0], 4);
     EXPECT_EQ(probs.tensor().shape()[1], 10);
     auto sum_each_row = sum(probs, /*dim=*/-1);
-    auto cpu = sum_each_row.tensor().contiguous();
+    auto cpu = sum_each_row.tensor().contiguous().to(Device::cpu());
     const float* p = cpu.data<float>();
     for (int64_t i = 0; i < cpu.numel(); ++i) {
         EXPECT_NEAR(p[i], 1.0f, 1e-4f) << "row " << i << " softmax did not sum to 1";
     }
 }
 
-TEST_F(KnowledgeDistillationTest, TemperatureSoftmax_HighT_NearlyUniform) {
-    Variable logits(randn({1, 8}, DType::Float32, Device::cpu()), false);
+TEST_P(KnowledgeDistillationTest, TemperatureSoftmax_HighT_NearlyUniform) {
+    Variable logits(randn({1, 8}, DType::Float32, device), false);
     Variable probs = temperature_softmax(logits, /*temperature=*/1e6f);
-    auto cpu = probs.tensor().contiguous();
+    auto cpu = probs.tensor().contiguous().to(Device::cpu());
     const float* p = cpu.data<float>();
     // High temperature → all entries ≈ 1/8.
     for (int64_t i = 0; i < cpu.numel(); ++i) {
@@ -79,12 +81,12 @@ TEST_F(KnowledgeDistillationTest, TemperatureSoftmax_HighT_NearlyUniform) {
 // distillation_loss (free function)
 // ---------------------------------------------------------------------------
 
-TEST_F(KnowledgeDistillationTest, DistillationLoss_Finite) {
-    auto student_t = randn({4, 5}, DType::Float32, Device::cpu());
-    auto teacher_t = randn({4, 5}, DType::Float32, Device::cpu());
+TEST_P(KnowledgeDistillationTest, DistillationLoss_Finite) {
+    auto student_t = randn({4, 5}, DType::Float32, device);
+    auto teacher_t = randn({4, 5}, DType::Float32, device);
     Variable student(student_t, true);
     Variable teacher(teacher_t, false);
-    auto target_keys = (rand({4}, DType::Float32, Device::cpu()) * 5).to(DType::Int64);
+    auto target_keys = (rand({4}, DType::Float32, device) * 5).to(DType::Int64);
 
     DistillationConfig cfg;
     cfg.temperature = 3.0f;
@@ -102,11 +104,13 @@ TEST_F(KnowledgeDistillationTest, DistillationLoss_Finite) {
 // KnowledgeDistillation wrapper
 // ---------------------------------------------------------------------------
 
-TEST_F(KnowledgeDistillationTest, Forward_ReturnsBothOutputs) {
+TEST_P(KnowledgeDistillationTest, Forward_ReturnsBothOutputs) {
     auto teacher = std::make_shared<TinyClassifier>(8, 5);
     auto student = std::make_shared<TinyClassifier>(8, 5);
+    teacher->to(device);
+    student->to(device);
     KnowledgeDistillation distiller(teacher, student);
-    Variable x(randn({2, 8}, DType::Float32, Device::cpu()), false);
+    Variable x(randn({2, 8}, DType::Float32, device), false);
 
     auto [s_out, t_out] = distiller.forward(x);
     EXPECT_EQ(s_out.tensor().shape().size(), 2u);
@@ -117,16 +121,18 @@ TEST_F(KnowledgeDistillationTest, Forward_ReturnsBothOutputs) {
     EXPECT_EQ(t_out.tensor().shape()[1], 5);
 }
 
-TEST_F(KnowledgeDistillationTest, ComputeLoss_GradientFlowsToStudentNotTeacher) {
+TEST_P(KnowledgeDistillationTest, ComputeLoss_GradientFlowsToStudentNotTeacher) {
     auto teacher = std::make_shared<TinyClassifier>(8, 5);
     auto student = std::make_shared<TinyClassifier>(8, 5);
+    teacher->to(device);
+    student->to(device);
     DistillationConfig cfg;
     cfg.alpha = 0.5f;
     cfg.use_hard_targets = true;
     KnowledgeDistillation distiller(teacher, student, cfg);
 
-    Variable x(randn({4, 8}, DType::Float32, Device::cpu()), false);
-    Tensor targets = (rand({4}, DType::Float32, Device::cpu()) * 5).to(DType::Int64);
+    Variable x(randn({4, 8}, DType::Float32, device), false);
+    Tensor targets = (rand({4}, DType::Float32, device) * 5).to(DType::Int64);
 
     Variable loss = distiller.compute_loss(x, std::optional<Tensor>{targets});
     EXPECT_EQ(loss.tensor().numel(), 1);
@@ -168,3 +174,7 @@ TEST_F(KnowledgeDistillationTest, ComputeLoss_GradientFlowsToStudentNotTeacher) 
         }
     }
 }
+
+INSTANTIATE_BACKEND_TESTS(KnowledgeDistillationTest);
+
+}  // namespace
