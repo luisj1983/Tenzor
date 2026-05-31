@@ -4,6 +4,7 @@
  */
 
 #include <gtest/gtest.h>
+#include "../backend_test_fixture.hpp"
 #include "tenzor/tenzor.hpp"
 #include "tenzor/nn/mixed_precision.hpp"
 #include "tenzor/nn/module.hpp"
@@ -42,17 +43,16 @@ private:
     std::shared_ptr<Linear> fc2_;
 };
 
-class MixedPrecisionTest : public ::testing::Test {
+class MixedPrecisionTest : public ::tenzor::testing::BackendTest {
 protected:
     void SetUp() override {
-        device_ = Device::cpu();
+        ::tenzor::testing::BackendTest::SetUp();
+        if (::testing::Test::IsSkipped()) return;
     }
-
-    Device device_;
 };
 
 // Test 1: MixedPrecisionConfig - FP16 CUDA configuration
-TEST_F(MixedPrecisionTest, ConfigFP16CUDA) {
+TEST_P(MixedPrecisionTest, ConfigFP16CUDA) {
     auto config = MixedPrecisionConfig::fp16_cuda();
 
     EXPECT_EQ(config.dtype, DType::Float16);
@@ -65,7 +65,7 @@ TEST_F(MixedPrecisionTest, ConfigFP16CUDA) {
 }
 
 // Test 2: MixedPrecisionConfig - BFloat16 CUDA configuration
-TEST_F(MixedPrecisionTest, ConfigBFloat16CUDA) {
+TEST_P(MixedPrecisionTest, ConfigBFloat16CUDA) {
     auto config = MixedPrecisionConfig::bfloat16_cuda();
 
     EXPECT_EQ(config.dtype, DType::BFloat16);
@@ -74,7 +74,7 @@ TEST_F(MixedPrecisionTest, ConfigBFloat16CUDA) {
 }
 
 // Test 3: MixedPrecisionConfig - Conservative configuration
-TEST_F(MixedPrecisionTest, ConfigConservative) {
+TEST_P(MixedPrecisionTest, ConfigConservative) {
     auto config = MixedPrecisionConfig::conservative();
 
     EXPECT_FLOAT_EQ(config.init_scale, 1024.0f);
@@ -84,8 +84,9 @@ TEST_F(MixedPrecisionTest, ConfigConservative) {
 }
 
 // Test 4: MixedPrecisionTrainer - Basic construction
-TEST_F(MixedPrecisionTest, TrainerConstruction) {
+TEST_P(MixedPrecisionTest, TrainerConstruction) {
     auto model = std::make_shared<SimpleMLP>(10, 20, 5);
+    model->to(device);
     auto optimizer = std::make_shared<optim::SGD>(model->parameters(), 0.01);
     auto loss_fn = [](const Variable& pred, const Variable& target) {
         auto diff = pred - target;
@@ -104,8 +105,9 @@ TEST_F(MixedPrecisionTest, TrainerConstruction) {
 }
 
 // Test 5: MixedPrecisionTrainer - Train step without mixed precision (FP32)
-TEST_F(MixedPrecisionTest, TrainStepFP32) {
+TEST_P(MixedPrecisionTest, TrainStepFP32) {
     auto model = std::make_shared<SimpleMLP>(10, 20, 5);
+    model->to(device);
     auto optimizer = std::make_shared<optim::SGD>(model->parameters(), 0.01);
     auto loss_fn = [](const Variable& pred, const Variable& target) {
         auto diff = pred - target;
@@ -118,8 +120,8 @@ TEST_F(MixedPrecisionTest, TrainStepFP32) {
     MixedPrecisionTrainer trainer(model, optimizer, loss_fn, config);
 
     // Create dummy input and target
-    auto input_tensor = randn({4, 10}, DType::Float32, device_);
-    auto target_tensor = randn({4, 5}, DType::Float32, device_);
+    auto input_tensor = randn({4, 10}, DType::Float32, device);
+    auto target_tensor = randn({4, 5}, DType::Float32, device);
     auto input = Variable(input_tensor, false);
     auto target = Variable(target_tensor, false);
 
@@ -132,8 +134,9 @@ TEST_F(MixedPrecisionTest, TrainStepFP32) {
 }
 
 // Test 6: MixedPrecisionTrainer - Multiple training steps
-TEST_F(MixedPrecisionTest, MultipleTrainSteps) {
+TEST_P(MixedPrecisionTest, MultipleTrainSteps) {
     auto model = std::make_shared<SimpleMLP>(5, 10, 3);
+    model->to(device);
     auto optimizer = std::make_shared<optim::Adam>(model->parameters(), 0.001);
     auto loss_fn = [](const Variable& pred, const Variable& target) {
         auto diff = pred - target;
@@ -144,8 +147,8 @@ TEST_F(MixedPrecisionTest, MultipleTrainSteps) {
     config.enabled = false;
     MixedPrecisionTrainer trainer(model, optimizer, loss_fn, config);
 
-    auto input_tensor = randn({8, 5}, DType::Float32, device_);
-    auto target_tensor = randn({8, 3}, DType::Float32, device_);
+    auto input_tensor = randn({8, 5}, DType::Float32, device);
+    auto target_tensor = randn({8, 3}, DType::Float32, device);
     auto input = Variable(input_tensor, false);
     auto target = Variable(target_tensor, false);
 
@@ -166,8 +169,9 @@ TEST_F(MixedPrecisionTest, MultipleTrainSteps) {
 }
 
 // Test 7: MixedPrecisionTrainer - Evaluation step
-TEST_F(MixedPrecisionTest, EvalStep) {
+TEST_P(MixedPrecisionTest, EvalStep) {
     auto model = std::make_shared<SimpleMLP>(5, 10, 3);
+    model->to(device);
     auto optimizer = std::make_shared<optim::SGD>(model->parameters(), 0.01);
     auto loss_fn = [](const Variable& pred, const Variable& target) {
         auto diff = pred - target;
@@ -178,8 +182,8 @@ TEST_F(MixedPrecisionTest, EvalStep) {
     config.enabled = false;
     MixedPrecisionTrainer trainer(model, optimizer, loss_fn, config);
 
-    auto input_tensor = randn({4, 5}, DType::Float32, device_);
-    auto target_tensor = randn({4, 3}, DType::Float32, device_);
+    auto input_tensor = randn({4, 5}, DType::Float32, device);
+    auto target_tensor = randn({4, 3}, DType::Float32, device);
     auto input = Variable(input_tensor, false);
     auto target = Variable(target_tensor, false);
 
@@ -192,8 +196,9 @@ TEST_F(MixedPrecisionTest, EvalStep) {
 }
 
 // Test 8: MixedPrecisionTrainer - Train/Eval mode switching
-TEST_F(MixedPrecisionTest, TrainEvalModeSwitching) {
+TEST_P(MixedPrecisionTest, TrainEvalModeSwitching) {
     auto model = std::make_shared<SimpleMLP>(5, 10, 3);
+    model->to(device);
     auto optimizer = std::make_shared<optim::SGD>(model->parameters(), 0.01);
     auto loss_fn = [](const Variable& pred, const Variable& target) {
         auto diff = pred - target;
@@ -215,8 +220,9 @@ TEST_F(MixedPrecisionTest, TrainEvalModeSwitching) {
 }
 
 // Test 9: MixedPrecisionTrainer - Get model and optimizer
-TEST_F(MixedPrecisionTest, GetModelAndOptimizer) {
+TEST_P(MixedPrecisionTest, GetModelAndOptimizer) {
     auto model = std::make_shared<SimpleMLP>(5, 10, 3);
+    model->to(device);
     auto optimizer = std::make_shared<optim::SGD>(model->parameters(), 0.01);
     auto loss_fn = [](const Variable& pred, const Variable& target) {
         auto diff = pred - target;
@@ -233,8 +239,9 @@ TEST_F(MixedPrecisionTest, GetModelAndOptimizer) {
 }
 
 // Test 10: MixedPrecisionTrainer - Get configuration
-TEST_F(MixedPrecisionTest, GetConfiguration) {
+TEST_P(MixedPrecisionTest, GetConfiguration) {
     auto model = std::make_shared<SimpleMLP>(5, 10, 3);
+    model->to(device);
     auto optimizer = std::make_shared<optim::SGD>(model->parameters(), 0.01);
     auto loss_fn = [](const Variable& pred, const Variable& target) {
         auto diff = pred - target;
@@ -252,8 +259,9 @@ TEST_F(MixedPrecisionTest, GetConfiguration) {
 }
 
 // Test 11: MixedPrecisionTrainer - Reset statistics
-TEST_F(MixedPrecisionTest, ResetStatistics) {
+TEST_P(MixedPrecisionTest, ResetStatistics) {
     auto model = std::make_shared<SimpleMLP>(5, 10, 3);
+    model->to(device);
     auto optimizer = std::make_shared<optim::SGD>(model->parameters(), 0.01);
     auto loss_fn = [](const Variable& pred, const Variable& target) {
         auto diff = pred - target;
@@ -265,8 +273,8 @@ TEST_F(MixedPrecisionTest, ResetStatistics) {
     config.enabled = false;
     MixedPrecisionTrainer trainer(model, optimizer, loss_fn, config);
 
-    auto input_tensor = randn({4, 5}, DType::Float32, device_);
-    auto target_tensor = randn({4, 3}, DType::Float32, device_);
+    auto input_tensor = randn({4, 5}, DType::Float32, device);
+    auto target_tensor = randn({4, 3}, DType::Float32, device);
     auto input = Variable(input_tensor, false);
     auto target = Variable(target_tensor, false);
 
@@ -285,8 +293,9 @@ TEST_F(MixedPrecisionTest, ResetStatistics) {
 }
 
 // Test 12: MixedPrecisionTrainer - Fit with DataLoader
-TEST_F(MixedPrecisionTest, FitWithDataLoader) {
+TEST_P(MixedPrecisionTest, FitWithDataLoader) {
     auto model = std::make_shared<SimpleMLP>(5, 10, 3);
+    model->to(device);
     auto optimizer = std::make_shared<optim::SGD>(model->parameters(), 0.01);
     auto loss_fn = [](const Variable& pred, const Variable& target) {
         auto diff = pred - target;
@@ -301,8 +310,8 @@ TEST_F(MixedPrecisionTest, FitWithDataLoader) {
     // Create simple dataset
     std::vector<std::pair<Tensor, Tensor>> train_data;
     for (int i = 0; i < 8; ++i) {
-        auto input = randn({5}, DType::Float32, device_);
-        auto target = randn({3}, DType::Float32, device_);
+        auto input = randn({5}, DType::Float32, device);
+        auto target = randn({3}, DType::Float32, device);
         train_data.emplace_back(input, target);
     }
 
@@ -316,8 +325,9 @@ TEST_F(MixedPrecisionTest, FitWithDataLoader) {
 }
 
 // Test 13: MixedPrecisionTrainer - Fit with validation
-TEST_F(MixedPrecisionTest, FitWithValidation) {
+TEST_P(MixedPrecisionTest, FitWithValidation) {
     auto model = std::make_shared<SimpleMLP>(5, 10, 3);
+    model->to(device);
     auto optimizer = std::make_shared<optim::Adam>(model->parameters(), 0.001);
     auto loss_fn = [](const Variable& pred, const Variable& target) {
         auto diff = pred - target;
@@ -332,15 +342,15 @@ TEST_F(MixedPrecisionTest, FitWithValidation) {
     // Create train and validation datasets
     std::vector<std::pair<Tensor, Tensor>> train_data;
     for (int i = 0; i < 8; ++i) {
-        auto input = randn({5}, DType::Float32, device_);
-        auto target = randn({3}, DType::Float32, device_);
+        auto input = randn({5}, DType::Float32, device);
+        auto target = randn({3}, DType::Float32, device);
         train_data.emplace_back(input, target);
     }
 
     std::vector<std::pair<Tensor, Tensor>> val_data;
     for (int i = 0; i < 4; ++i) {
-        auto input = randn({5}, DType::Float32, device_);
-        auto target = randn({3}, DType::Float32, device_);
+        auto input = randn({5}, DType::Float32, device);
+        auto target = randn({3}, DType::Float32, device);
         val_data.emplace_back(input, target);
     }
 
@@ -354,8 +364,9 @@ TEST_F(MixedPrecisionTest, FitWithValidation) {
 }
 
 // Test 14: Helper functions - create_fp16_trainer
-TEST_F(MixedPrecisionTest, CreateFP16Trainer) {
+TEST_P(MixedPrecisionTest, CreateFP16Trainer) {
     auto model = std::make_shared<SimpleMLP>(5, 10, 3);
+    model->to(device);
     auto optimizer = std::make_shared<optim::SGD>(model->parameters(), 0.01);
     auto loss_fn = [](const Variable& pred, const Variable& target) {
         auto diff = pred - target;
@@ -371,8 +382,9 @@ TEST_F(MixedPrecisionTest, CreateFP16Trainer) {
 }
 
 // Test 15: Helper functions - create_bfloat16_trainer
-TEST_F(MixedPrecisionTest, CreateBFloat16Trainer) {
+TEST_P(MixedPrecisionTest, CreateBFloat16Trainer) {
     auto model = std::make_shared<SimpleMLP>(5, 10, 3);
+    model->to(device);
     auto optimizer = std::make_shared<optim::SGD>(model->parameters(), 0.01);
     auto loss_fn = [](const Variable& pred, const Variable& target) {
         auto diff = pred - target;
@@ -388,8 +400,9 @@ TEST_F(MixedPrecisionTest, CreateBFloat16Trainer) {
 }
 
 // Test 16: Loss computation in correct precision
-TEST_F(MixedPrecisionTest, LossPrecision) {
+TEST_P(MixedPrecisionTest, LossPrecision) {
     auto model = std::make_shared<SimpleMLP>(5, 10, 3);
+    model->to(device);
     auto optimizer = std::make_shared<optim::SGD>(model->parameters(), 0.01);
 
     int loss_computation_count = 0;
@@ -404,8 +417,8 @@ TEST_F(MixedPrecisionTest, LossPrecision) {
     config.enabled = false;
     MixedPrecisionTrainer trainer(model, optimizer, loss_fn, config);
 
-    auto input_tensor = randn({4, 5}, DType::Float32, device_);
-    auto target_tensor = randn({4, 3}, DType::Float32, device_);
+    auto input_tensor = randn({4, 5}, DType::Float32, device);
+    auto target_tensor = randn({4, 3}, DType::Float32, device);
     auto input = Variable(input_tensor, false);
     auto target = Variable(target_tensor, false);
 
@@ -415,8 +428,9 @@ TEST_F(MixedPrecisionTest, LossPrecision) {
 }
 
 // Test 17: Gradient scaler integration
-TEST_F(MixedPrecisionTest, GradScalerIntegration) {
+TEST_P(MixedPrecisionTest, GradScalerIntegration) {
     auto model = std::make_shared<SimpleMLP>(5, 10, 3);
+    model->to(device);
     auto optimizer = std::make_shared<optim::SGD>(model->parameters(), 0.01);
     auto loss_fn = [](const Variable& pred, const Variable& target) {
         auto diff = pred - target;
@@ -438,8 +452,9 @@ TEST_F(MixedPrecisionTest, GradScalerIntegration) {
 }
 
 // Test 18: Convergence test - simple regression
-TEST_F(MixedPrecisionTest, SimpleConvergence) {
+TEST_P(MixedPrecisionTest, SimpleConvergence) {
     auto model = std::make_shared<SimpleMLP>(2, 8, 1);
+    model->to(device);
     auto optimizer = std::make_shared<optim::SGD>(model->parameters(), 0.1);
     auto loss_fn = [](const Variable& pred, const Variable& target) {
         auto diff = pred - target;
@@ -452,19 +467,21 @@ TEST_F(MixedPrecisionTest, SimpleConvergence) {
     MixedPrecisionTrainer trainer(model, optimizer, loss_fn, config);
 
     // Simple linear relationship: y = 2*x1 + 3*x2
-    auto input_tensor = randn({32, 2}, DType::Float32, device_);
-    auto input_data = input_tensor.data<float>();
+    auto input_tensor = randn({32, 2}, DType::Float32, device);
+    auto input_cpu = input_tensor.cpu();
+    auto* input_data = input_cpu.data<float>();
 
     std::vector<float> target_data(32);
     for (int i = 0; i < 32; ++i) {
         target_data[i] = 2.0f * input_data[i*2] + 3.0f * input_data[i*2 + 1];
     }
 
-    auto target_tensor = Tensor({32, 1}, DType::Float32, device_);
-    float* target_ptr = target_tensor.data<float>();
+    auto target_cpu = Tensor({32, 1}, DType::Float32, Device::cpu());
+    float* target_ptr = target_cpu.data<float>();
     for (int i = 0; i < 32; ++i) {
         target_ptr[i] = target_data[i];
     }
+    auto target_tensor = target_cpu.to(device);
 
     auto input = Variable(input_tensor, false);
     auto target = Variable(target_tensor, false);
@@ -483,8 +500,9 @@ TEST_F(MixedPrecisionTest, SimpleConvergence) {
 }
 
 // Test 19: Mixed precision disabled - should use FP32
-TEST_F(MixedPrecisionTest, DisabledMixedPrecision) {
+TEST_P(MixedPrecisionTest, DisabledMixedPrecision) {
     auto model = std::make_shared<SimpleMLP>(5, 10, 3);
+    model->to(device);
     auto optimizer = std::make_shared<optim::SGD>(model->parameters(), 0.01);
     auto loss_fn = [](const Variable& pred, const Variable& target) {
         auto diff = pred - target;
@@ -496,8 +514,8 @@ TEST_F(MixedPrecisionTest, DisabledMixedPrecision) {
     config.enabled = false;  // Explicitly disable
     MixedPrecisionTrainer trainer(model, optimizer, loss_fn, config);
 
-    auto input_tensor = randn({4, 5}, DType::Float32, device_);
-    auto target_tensor = randn({4, 3}, DType::Float32, device_);
+    auto input_tensor = randn({4, 5}, DType::Float32, device);
+    auto target_tensor = randn({4, 3}, DType::Float32, device);
     auto input = Variable(input_tensor, false);
     auto target = Variable(target_tensor, false);
 
@@ -508,8 +526,9 @@ TEST_F(MixedPrecisionTest, DisabledMixedPrecision) {
 }
 
 // Test 20: Statistics tracking over multiple epochs
-TEST_F(MixedPrecisionTest, StatisticsTracking) {
+TEST_P(MixedPrecisionTest, StatisticsTracking) {
     auto model = std::make_shared<SimpleMLP>(5, 10, 3);
+    model->to(device);
     auto optimizer = std::make_shared<optim::SGD>(model->parameters(), 0.01);
     auto loss_fn = [](const Variable& pred, const Variable& target) {
         auto diff = pred - target;
@@ -523,8 +542,8 @@ TEST_F(MixedPrecisionTest, StatisticsTracking) {
 
     std::vector<std::pair<Tensor, Tensor>> train_data;
     for (int i = 0; i < 10; ++i) {
-        auto input = randn({5}, DType::Float32, device_);
-        auto target = randn({3}, DType::Float32, device_);
+        auto input = randn({5}, DType::Float32, device);
+        auto target = randn({3}, DType::Float32, device);
         train_data.emplace_back(input, target);
     }
 
@@ -538,12 +557,4 @@ TEST_F(MixedPrecisionTest, StatisticsTracking) {
     EXPECT_EQ(final_steps - initial_steps, 15);
 }
 
-int main(int argc, char** argv) {
-    // Initialize Tenzor library
-
-    ::testing::InitGoogleTest(&argc, argv);
-    if (!::testing::GTEST_FLAG(list_tests)) {
-        tenzor::initialize();
-    }
-    return RUN_ALL_TESTS();
-}
+INSTANTIATE_BACKEND_TESTS(MixedPrecisionTest);
