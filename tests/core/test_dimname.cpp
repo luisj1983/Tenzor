@@ -9,6 +9,14 @@
 
 using namespace tenzor;
 
+// Matches if either is wildcard, or both have the same name. This was formerly
+// the Dimname::matches member method; it lived only for these tests, so it was
+// moved out of the production header and replicated here as a local helper.
+static bool dimname_matches(const Dimname& a, const Dimname& b) {
+    if (a.is_wildcard() || b.is_wildcard()) return true;
+    return a == b;
+}
+
 class DimnameTest : public ::testing::Test {
 protected:
     void SetUp() override {
@@ -49,16 +57,16 @@ TEST_F(DimnameTest, MatchingSemantics) {
     Dimname channel("channel");
 
     // Wildcard matches anything
-    EXPECT_TRUE(wild.matches(batch));
-    EXPECT_TRUE(batch.matches(wild));
-    EXPECT_TRUE(wild.matches(wild));
+    EXPECT_TRUE(dimname_matches(wild, batch));
+    EXPECT_TRUE(dimname_matches(batch, wild));
+    EXPECT_TRUE(dimname_matches(wild, wild));
 
     // Same name matches
     Dimname batch2("batch");
-    EXPECT_TRUE(batch.matches(batch2));
+    EXPECT_TRUE(dimname_matches(batch, batch2));
 
     // Different names don't match
-    EXPECT_FALSE(batch.matches(channel));
+    EXPECT_FALSE(dimname_matches(batch, channel));
 }
 
 TEST_F(DimnameTest, DimnameList) {

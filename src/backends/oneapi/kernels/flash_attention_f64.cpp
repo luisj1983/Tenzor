@@ -39,6 +39,7 @@
 // =============================================================================
 
 #include "tenzor/core/tensor.hpp"
+#include "oneapi_kernel_utils.hpp"
 #include <sycl/sycl.hpp>
 #include <cmath>
 #include <limits>
@@ -59,10 +60,6 @@ template<int HEAD_DIM> struct BackwardF64 {};
 
 namespace {
 
-template<typename T>
-inline T* get_dp(const Tensor& t) {
-    return static_cast<T*>(const_cast<void*>(t.data_ptr()));
-}
 
 inline Tensor make_zeros_f64(const std::vector<int64_t>& shape, DType dtype,
                               Device device, sycl::queue& queue) {
@@ -557,11 +554,11 @@ auto fused_attention_oneapi_f64(
     Tensor lse    = make_zeros_f64({batch_heads, seq_len_q},
                                     DType::Float32, Q.device(), queue);
 
-    const double* q_ptr = get_dp<const double>(Q);
-    const double* k_ptr = get_dp<const double>(K);
-    const double* v_ptr = get_dp<const double>(V);
-    double*       o_ptr = get_dp<double>(output);
-    float*        l_ptr = get_dp<float>(lse);
+    const double* q_ptr = get_data_ptr<const double>(Q);
+    const double* k_ptr = get_data_ptr<const double>(K);
+    const double* v_ptr = get_data_ptr<const double>(V);
+    double*       o_ptr = get_data_ptr<double>(output);
+    float*        l_ptr = get_data_ptr<float>(lse);
 
     switch (head_dim) {
         case 16:  launch_flash_attention_f64_forward<16> (q_ptr, k_ptr, v_ptr, o_ptr, l_ptr, batch_heads, seq_len_q, seq_len_k, scale, causal, queue); break;
@@ -603,14 +600,14 @@ auto flash_attention_backward_oneapi_f64(
     Tensor dK = make_zeros_f64({batch_heads, seq_len, head_dim}, DType::Float64, K.device(), queue);
     Tensor dV = make_zeros_f64({batch_heads, seq_len, head_dim}, DType::Float64, V.device(), queue);
 
-    const double* q_ptr  = get_dp<const double>(Q);
-    const double* k_ptr  = get_dp<const double>(K);
-    const double* v_ptr  = get_dp<const double>(V);
-    const double* o_ptr  = get_dp<const double>(O);
-    const double* do_ptr = get_dp<const double>(dO);
-    double* dq_ptr = get_dp<double>(dQ);
-    double* dk_ptr = get_dp<double>(dK);
-    double* dv_ptr = get_dp<double>(dV);
+    const double* q_ptr  = get_data_ptr<const double>(Q);
+    const double* k_ptr  = get_data_ptr<const double>(K);
+    const double* v_ptr  = get_data_ptr<const double>(V);
+    const double* o_ptr  = get_data_ptr<const double>(O);
+    const double* do_ptr = get_data_ptr<const double>(dO);
+    double* dq_ptr = get_data_ptr<double>(dQ);
+    double* dk_ptr = get_data_ptr<double>(dK);
+    double* dv_ptr = get_data_ptr<double>(dV);
 
     switch (head_dim) {
         case 16:  launch_flash_attention_f64_backward<16> (q_ptr, k_ptr, v_ptr, o_ptr, do_ptr, dq_ptr, dk_ptr, dv_ptr, batch_heads, seq_len, scale, causal, queue); break;

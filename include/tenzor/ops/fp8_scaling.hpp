@@ -135,24 +135,5 @@ auto quantize_to_fp8(const Tensor& input, DType fp8_dtype,
  */
 auto dequantize_from_fp8(const Tensor& fp8_tensor, float scale) -> Tensor;
 
-/**
- * @brief Round-trip a Variable through FP8 with straight-through-estimator
- *        backward (audit item E.15).
- *
- * Forward:  output = dequantize_from_fp8(quantize_to_fp8(input.tensor()))
- *           — semantically identical to a no-op cast except that values
- *           outside FP8's representable range are clipped.
- * Backward: gradient is passed through unchanged on the in-range positions
- *           and zeroed outside (the standard FP8 STE used by Transformer
- *           Engine, Megatron-LM, etc.).
- *
- * Provides a real autograd Function so callers can train with FP8
- * activations / weights end-to-end without severing the gradient
- * graph at the quantization boundary.
- */
-auto fp8_quantize_dequantize(const Variable& input,
-                             DType fp8_dtype,
-                             std::optional<float> scale = std::nullopt)
-    -> Variable;
 
 } // namespace tenzor

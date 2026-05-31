@@ -47,21 +47,6 @@ public:
         return handle();
     }
 
-    static void shutdown() {
-        // No-op: thread_local instances destroyed when each thread exits.
-    }
-
-    /// W.8: destroy the thread-local rocSPARSE handle so the next get()
-    /// lazily rebuilds.
-    static void clear_idle() {
-        if (handle() != nullptr) {
-            try { rocsparse_destroy_handle(handle()); }
-            catch (...) { /* must not throw from cleanup */ }
-            handle() = nullptr;
-        }
-        last_stream() = nullptr;
-    }
-
 private:
     struct HandleGuard {
         rocsparse_handle handle = nullptr;

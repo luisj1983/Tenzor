@@ -8,6 +8,7 @@
 
 #include <gtest/gtest.h>
 #include "tenzor/ops/async_ops.hpp"
+#include "async_test_support.hpp"
 #include "tenzor/ops/math.hpp"
 #include "tenzor/ops/creation.hpp"
 #include "tenzor/autograd/ops.hpp"

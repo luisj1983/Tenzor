@@ -8,7 +8,6 @@
 #include "tenzor/core/shape.hpp"
 #include "cuda_common.cuh"
 #include "cuda_launch_utils.cuh"
-#include "launch_config.cuh"
 #include <stdexcept>
 #include <vector>
 #include <cstring>

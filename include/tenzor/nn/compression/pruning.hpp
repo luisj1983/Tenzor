@@ -236,11 +236,6 @@ auto prune_iterative(
 // =============================================================================
 
 /**
- * @brief Structured pruning options
- */
-;
-
-/**
  * @brief Apply structured channel pruning to convolutional layers
  *
  * Removes entire output channels from Conv2d layers based on importance.

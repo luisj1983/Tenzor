@@ -2,6 +2,7 @@
 #include <tenzor/tenzor.hpp>
 #include <tenzor/nn/quantization/observer.hpp>
 #include <tenzor/nn/quantization/quantize.hpp>
+#include "observers_extended_test_support.hpp"
 #include <mutex>
 
 using namespace tenzor;

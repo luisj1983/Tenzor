@@ -11,6 +11,7 @@
 #include "tenzor/ops/creation.hpp"
 #include "tenzor/ops/indexing.hpp"
 #include "tenzor/autograd/ops.hpp"
+#include "attention_mask_utils.hpp"
 #include <cmath>
 #include <stdexcept>
 #include <limits>
@@ -26,29 +27,6 @@ namespace autograd = tenzor;
 // accept Bool masks where True = "ignore"; without this widening the downstream
 // `scores + mask` adds 1.0 (Bool→float of true) at masked positions instead of
 // -inf, leaking attention. Mirrors the helper in attention.cpp.
-static auto normalize_attn_mask(const Tensor& attn_mask) -> Tensor {
-    const DType am_dtype = attn_mask.dtype();
-    if (am_dtype == DType::Float32 || am_dtype == DType::Float64 ||
-        am_dtype == DType::Float16 || am_dtype == DType::BFloat16) {
-        return attn_mask;
-    }
-    auto pm_shape = std::vector<int64_t>(attn_mask.shape().begin(),
-                                         attn_mask.shape().end());
-    if (am_dtype == DType::Bool) {
-        Tensor neg_inf_tensor = full(pm_shape, -std::numeric_limits<float>::infinity(),
-                                     DType::Float32, attn_mask.device());
-        Tensor zero_tensor = zeros(pm_shape, DType::Float32, attn_mask.device());
-        return Tensor(where(attn_mask, neg_inf_tensor, zero_tensor));
-    }
-    // Integer mask: treat as 0/1 indicator, widen to a float -inf/0 mask.
-    Tensor as_float = attn_mask.to(DType::Float32);
-    Tensor threshold = full(pm_shape, 0.5f, DType::Float32, attn_mask.device());
-    Tensor neg_inf_tensor = full(pm_shape, -std::numeric_limits<float>::infinity(),
-                                 DType::Float32, attn_mask.device());
-    Tensor zero_tensor = zeros(pm_shape, DType::Float32, attn_mask.device());
-    Tensor mask_gt = Tensor(gt(as_float, threshold));
-    return Tensor(where(mask_gt, neg_inf_tensor, zero_tensor));
-}
 
 // ============================================================================
 // GroupedQueryAttention Implementation

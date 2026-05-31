@@ -49,30 +49,5 @@ inline void wrap_preserving_grad(Variable& v, Tensor new_data) {
     v.set_data_view(std::move(new_data));
 }
 
-/**
- * @brief Build a fresh Variable from @p new_data that adopts @p parent's
- *        grad_fn and requires_grad.
- *
- * Convenience for op-level wrap sites that need a distinct Variable
- * instance (e.g. one returned from a forward Function) yet must still
- * chain into the upstream backward graph. Equivalent to:
- *
- * @code
- *     Variable out(new_data, parent.requires_grad());
- *     if (auto fn = parent.grad_fn()) out.set_grad_fn(std::move(fn));
- * @endcode
- *
- * Returning a Variable with the parent's grad_fn means a backward through
- * @p out will traverse the same nodes that built @p parent. Callers that
- * also need to compute through `new_data`'s own forward provenance should
- * wire a proper autograd Function instead.
- */
-inline auto with_parent_grad_fn(Tensor new_data, const Variable& parent) -> Variable {
-    Variable out(std::move(new_data), parent.requires_grad());
-    if (auto fn = parent.grad_fn()) {
-        out.set_grad_fn(std::move(fn));
-    }
-    return out;
-}
 
 } // namespace tenzor::utils

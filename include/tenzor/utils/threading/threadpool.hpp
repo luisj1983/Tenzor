@@ -45,8 +45,6 @@ namespace tenzor {
  * });
  * auto result = future.get();  // Wait for completion
  * @endcode
- *
- * @see parallel_for for simpler data-parallel loops
  */
 class ThreadPool {
 public:
@@ -80,29 +78,10 @@ public:
     auto submit(F&& func, Args&&... args) -> std::future<std::invoke_result_t<F, Args...>>;
 
     /**
-     * @brief Execute loop iterations in parallel using thread pool
-     *
-     * Convenience method for parallel loops.
-     *
-     * @tparam F Function type with signature void(int64_t)
-     * @param begin Start of iteration range
-     * @param end End of iteration range
-     * @param func Function to execute for each iteration
-     */
-    template<typename F>
-    auto parallel_for(int64_t begin, int64_t end, F&& func) -> void;
-
-    /**
      * @brief Get number of threads in pool
      * @return Number of worker threads
      */
     auto num_threads() const -> size_t { return num_threads_; }
-
-    /**
-     * @brief Get number of currently active (busy) threads
-     * @return Active thread count
-     */
-    auto active_threads() const -> size_t;
 
 private:
     std::vector<std::thread> workers_;
@@ -135,32 +114,6 @@ auto ThreadPool::submit(F&& func, Args&&... args) -> std::future<std::invoke_res
     }
     condition_.notify_one();
     return result;
-}
-
-template<typename F>
-auto ThreadPool::parallel_for(int64_t begin, int64_t end, F&& func) -> void {
-    if (begin >= end) return;
-
-    const size_t num_tasks = std::min<size_t>(end - begin, num_threads_ * 4);
-    const int64_t chunk_size = (end - begin + num_tasks - 1) / num_tasks;
-
-    std::vector<std::future<void>> futures;
-    futures.reserve(num_tasks);
-
-    for (size_t i = 0; i < num_tasks; ++i) {
-        int64_t start = begin + i * chunk_size;
-        int64_t finish = std::min(start + chunk_size, end);
-
-        futures.push_back(submit([&func, start, finish]() {
-            for (int64_t j = start; j < finish; ++j) {
-                func(j);
-            }
-        }));
-    }
-
-    for (auto& future : futures) {
-        future.wait();
-    }
 }
 
 /**

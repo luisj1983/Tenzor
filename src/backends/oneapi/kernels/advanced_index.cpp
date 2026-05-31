@@ -14,6 +14,7 @@
 
 #include "tenzor/core/tensor.hpp"
 #include "tenzor/core/dtype.hpp"
+#include "oneapi_kernel_utils.hpp"
 #include <sycl/sycl.hpp>
 #include <cstdint>
 #include <stdexcept>
@@ -109,11 +110,6 @@ inline PreparedAdvancedIndex prepare_advanced_index(
     }
     out.total = out.meta.bc_numel * out.meta.pass_numel;
     return out;
-}
-
-template<typename T>
-inline auto get_data_ptr(const Tensor& t) -> T* {
-    return static_cast<T*>(const_cast<void*>(t.data_ptr()));
 }
 
 // Kernel name tags

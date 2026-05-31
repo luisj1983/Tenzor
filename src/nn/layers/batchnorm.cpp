@@ -21,22 +21,6 @@
 #include <thread>
 #endif
 
-// Get optimal thread count for compute-bound operations
-static inline int get_optimal_threads() {
-#ifdef _OPENMP
-    static int optimal = []() {
-        // Use all hardware threads for compute-bound work
-        int hw_threads = static_cast<int>(std::max(1u, std::thread::hardware_concurrency()));
-        // Ensure OpenMP uses this count
-        omp_set_num_threads(hw_threads);
-        return hw_threads;
-    }();
-    return optimal;
-#else
-    return 1;
-#endif
-}
-
 namespace tenzor::nn {
 
 // BatchNorm2d autograd function

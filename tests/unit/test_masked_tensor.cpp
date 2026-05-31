@@ -18,10 +18,11 @@
 
 #include "tenzor/core/dtype.hpp"
 #include "tenzor/core/device.hpp"
-#include "tenzor/core/masked_tensor.hpp"
 #include "tenzor/core/tensor.hpp"
 #include "tenzor/ops/creation.hpp"
 #include "tenzor/tenzor.hpp"
+
+#include "masked_tensor_test_support.hpp"
 
 using namespace tenzor;
 

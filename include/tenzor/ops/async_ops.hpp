@@ -94,30 +94,6 @@ private:
 };
 
 /**
- * @brief Async execution context
- *
- * Encapsulates execution parameters for async operations,
- * including stream selection and backend choice.
- */
-struct AsyncContext {
-    Device device;
-    StreamHandle stream{nullptr};
-    bool use_stream{false};
-
-    /**
-     * @brief Create context for device
-     * @param dev Target device
-     * @param enable_stream Use CUDA streams if available
-     */
-    explicit AsyncContext(const Device& dev, bool enable_stream = true)
-        : device(dev), use_stream(enable_stream && dev.type == Device::Type::CUDA) {
-        if (use_stream) {
-            stream = StreamManager::instance().get_stream(device);
-        }
-    }
-};
-
-/**
  * @defgroup async_ops Asynchronous Operations
  * @brief Non-blocking tensor operations for improved throughput
  * @{
@@ -147,43 +123,6 @@ struct AsyncContext {
  * @see matmul for synchronous version
  */
 auto async_matmul(const Tensor& a, const Tensor& b) -> Future<Tensor>;
-
-/**
- * @brief Asynchronous 2D convolution
- *
- * Performs 2D convolution without blocking. Particularly beneficial for
- * GPU operations where multiple convolutions can overlap.
- *
- * @param input Input tensor (N, C_in, H, W)
- * @param weight Convolution kernel (C_out, C_in/groups, K, K)
- * @param bias Optional bias (C_out)
- * @param stride Convolution stride
- * @param padding Zero padding
- * @param dilation Kernel dilation
- * @param groups Number of groups
- * @return Future<Tensor> for output (N, C_out, H_out, W_out)
- *
- * @code
- * // Overlap multiple convolutions
- * auto f1 = async_conv2d(input, weight1, bias1, 1, 1);
- * auto f2 = async_conv2d(input, weight2, bias2, 2, 0);
- * auto f3 = async_conv2d(input, weight3, bias3, 1, 2);
- *
- * // All execute concurrently on different streams
- * auto r1 = f1.wait();
- * auto r2 = f2.wait();
- * auto r3 = f3.wait();
- * @endcode
- */
-auto async_conv2d(
-    const Tensor& input,
-    const Tensor& weight,
-    const std::optional<Tensor>& bias = std::nullopt,
-    int64_t stride = 1,
-    int64_t padding = 0,
-    int64_t dilation = 1,
-    int64_t groups = 1
-) -> Future<Tensor>;
 
 /**
  * @brief Asynchronous element-wise addition
@@ -226,46 +165,6 @@ auto async_sub(const Tensor& a, const Tensor& b) -> Future<Tensor>;
  */
 auto async_div(const Tensor& a, const Tensor& b) -> Future<Tensor>;
 
-/**
- * @brief Generic async operation wrapper
- *
- * Wraps any synchronous tensor operation to execute asynchronously.
- * Automatically selects CPU thread pool or GPU streams based on device.
- *
- * @tparam F Callable type with signature Tensor(Args...)
- * @tparam Args Argument types
- * @param func Function to execute asynchronously
- * @param args Arguments to pass to func
- * @return Future<Tensor> for operation result
- *
- * @code
- * // Make any operation async
- * auto future = async_execute([](const Tensor& t) {
- *     return relu(sigmoid(t));
- * }, input);
- * @endcode
- */
-template<typename F, typename... Args>
-auto async_execute(F&& func, Args&&... args) -> Future<Tensor> {
-    // Create promise and future
-    auto promise = std::make_shared<Promise<Tensor>>();
-    auto future = Future<Tensor>(promise->get_state());
-
-    // Submit to thread pool
-    thread_pool().submit([promise, func = std::forward<F>(func),
-                         ... captured_args = std::forward<Args>(args)]() mutable {
-        try {
-            // Execute function
-            Tensor result = func(std::forward<Args>(captured_args)...);
-            promise->set_value(std::move(result));
-        } catch (...) {
-            // Propagate exception
-            promise->set_exception(std::current_exception());
-        }
-    });
-
-    return future;
-}
 
 /**
  * @brief Asynchronous ReLU activation

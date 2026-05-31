@@ -69,18 +69,6 @@ inline int64_t checked_stride_mul(int64_t a, int64_t b) {
 // FP16/BF16 Conversion Utilities
 // ============================================================================
 
-// Convert Tenzor Float16 to CUDA __half
-__device__ __host__ inline __half to_cuda_half(const Float16& x) {
-    __half_raw raw;
-    raw.x = x.bits;
-    return raw;
-}
-
-// Convert CUDA __half to Tenzor Float16
-__device__ __host__ inline Float16 from_cuda_half(const __half& x) {
-    return Float16(__half_as_ushort(x));
-}
-
 // Convert Tenzor BFloat16 to CUDA __nv_bfloat16
 __device__ __host__ inline __nv_bfloat16 to_cuda_bfloat16(const BFloat16& x) {
     __nv_bfloat16_raw raw;

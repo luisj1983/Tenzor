@@ -175,7 +175,6 @@ private:
 
     // Helper methods
 
-
     /**
      * @brief Initialize communicator for a device.
      */

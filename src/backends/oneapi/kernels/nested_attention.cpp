@@ -12,6 +12,7 @@
 
 #include "tenzor/core/tensor.hpp"
 #include "tenzor/core/dtype.hpp"
+#include "oneapi_kernel_utils.hpp"
 #include <sycl/sycl.hpp>
 #include <vector>
 #include <cmath>
@@ -22,11 +23,6 @@ namespace tenzor {
 namespace oneapi {
 
 namespace {
-
-template<typename T>
-inline auto get_data_ptr(const Tensor& t) -> T* {
-    return static_cast<T*>(const_cast<void*>(t.data_ptr()));
-}
 
 struct NestedAttentionKernelTag {};
 

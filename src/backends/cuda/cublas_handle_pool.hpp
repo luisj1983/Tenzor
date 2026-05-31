@@ -47,11 +47,6 @@ public:
         // No-op: thread_local instances destroyed when each thread exits.
     }
 
-    /// W.8: destroy the thread-local cuBLAS handle so the next get() lazily
-    /// rebuilds. Frees the workspace memory cuBLAS retains internally.
-    /// Intended for backend reset_state() / long-running training loops
-    /// that rotate streams and accumulate idle handles.
-    
 
 private:
     // RAII guard owned per-thread; destroys the handle when the thread exits.

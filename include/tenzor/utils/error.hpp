@@ -181,20 +181,6 @@ class DistributionMethodUndefined : public TenzorException {
         } \
     } while (0)
 
-#define TENZOR_CHECK_DEVICE(condition, message) \
-    do { \
-        if (!(condition)) { \
-            throw ::tenzor::DeviceException(message); \
-        } \
-    } while (0)
-
-#define TENZOR_CHECK_DTYPE(condition, message) \
-    do { \
-        if (!(condition)) { \
-            throw ::tenzor::DTypeException(message); \
-        } \
-    } while (0)
-
 #define TENZOR_CHECK_SHAPE(condition, message) \
     do { \
         if (!(condition)) { \

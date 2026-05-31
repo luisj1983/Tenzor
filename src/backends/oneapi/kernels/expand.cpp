@@ -1,6 +1,7 @@
 #include "tenzor/core/tensor.hpp"
 #include "tenzor/backend/backend.hpp"
 #include "tenzor/backend/op_attributes.hpp"
+#include "oneapi_kernel_utils.hpp"
 #include <sycl/sycl.hpp>
 #include <stdexcept>
 #include <sstream>
@@ -17,11 +18,6 @@ struct ExpandKernelInt32 {};
 struct ExpandKernelInt64 {};
 struct ExpandKernelBool {};
 
-// Helper function to get typed pointer from tensor
-template<typename T>
-inline auto get_data_ptr(const Tensor& t) -> T* {
-    return static_cast<T*>(const_cast<void*>(t.data_ptr()));
-}
 
 /**
  * @brief Parse comma-separated shape string into vector.

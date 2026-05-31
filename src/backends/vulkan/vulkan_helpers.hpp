@@ -178,7 +178,5 @@ inline uint32_t div_wg(uint64_t n, uint32_t wg_size) {
     return static_cast<uint32_t>(result);
 }
 
-/// Dispatch compute work with device-limit validation.
-
 
 } // namespace tenzor

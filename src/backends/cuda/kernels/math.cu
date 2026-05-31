@@ -5,7 +5,6 @@
 #include "tenzor/ops/creation.hpp"     // For tenzor::get_global_seed
 #include "cuda_common.cuh"
 #include "cuda_launch_utils.cuh"
-#include "launch_config.cuh"
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
 #include <cuda_bf16.h>
@@ -31,18 +30,6 @@ namespace cuda {
 // ============================================================================
 // FP16/BF16 Conversion Functions
 // ============================================================================
-
-// Convert Tenzor Float16 to CUDA __half
-__device__ __host__ inline __half to_cuda_half(const Float16& x) {
-    __half_raw raw;
-    raw.x = x.bits;
-    return __half(raw);
-}
-
-// Convert CUDA __half to Tenzor Float16
-__device__ __host__ inline Float16 from_cuda_half(const __half& x) {
-    return Float16(__half_as_ushort(x));
-}
 
 // Convert Tenzor BFloat16 to CUDA __nv_bfloat16
 __device__ __host__ inline __nv_bfloat16 to_cuda_bfloat16(const BFloat16& x) {

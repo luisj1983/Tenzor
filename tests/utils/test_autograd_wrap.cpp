@@ -21,8 +21,22 @@ namespace {
 using tenzor::DType;
 using tenzor::Tensor;
 using tenzor::Variable;
-using tenzor::utils::with_parent_grad_fn;
 using tenzor::utils::wrap_preserving_grad;
+
+// Relocated from include/tenzor/utils/autograd_wrap.hpp: this helper is
+// exercised only by this test, so it lives here as a file-local definition
+// rather than on the public header surface.
+//
+// Build a fresh Variable from `new_data` that adopts `parent`'s grad_fn and
+// requires_grad. A backward through the returned Variable traverses the same
+// nodes that built `parent`.
+inline auto with_parent_grad_fn(Tensor new_data, const Variable& parent) -> Variable {
+    Variable out(std::move(new_data), parent.requires_grad());
+    if (auto fn = parent.grad_fn()) {
+        out.set_grad_fn(std::move(fn));
+    }
+    return out;
+}
 
 class AutogradWrapEnv : public ::testing::Environment {
 public:

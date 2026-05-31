@@ -1,6 +1,7 @@
 #include "tenzor/core/tensor.hpp"
 #include "tenzor/backend/backend.hpp"
 #include "tenzor/backend/op_attributes.hpp"
+#include "oneapi_kernel_utils.hpp"
 #include <sycl/sycl.hpp>
 #include <limits>
 #include <stdexcept>
@@ -42,11 +43,6 @@ class NormReducePhase2Float64;
 class NormDimKernelFloat32;
 class NormDimKernelFloat64;
 
-// Helper function to get typed pointer from tensor
-template<typename T>
-inline auto get_data_ptr(const Tensor& t) -> T* {
-    return static_cast<T*>(const_cast<void*>(t.data_ptr()));
-}
 
 /**
  * @brief Standard deviation operation wrapper.

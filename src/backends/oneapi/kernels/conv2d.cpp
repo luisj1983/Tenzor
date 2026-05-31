@@ -1,4 +1,5 @@
 #include "tenzor/core/tensor.hpp"
+#include "oneapi_kernel_utils.hpp"
 #include <sycl/sycl.hpp>
 #include <cmath>
 #include <stdexcept>
@@ -15,18 +16,6 @@
 namespace tenzor {
 namespace oneapi {
 
-// Saturating float-to-half conversion: clamps to Float16 representable range
-// instead of producing Infinity on overflow (matches Vulkan/GPU hardware behavior)
-constexpr float HALF_MAX = 65504.0f;
-inline sycl::half saturate_to_half(float val) {
-    return sycl::half(sycl::fmin(sycl::fmax(val, -HALF_MAX), HALF_MAX));
-}
-
-// Helper function to get typed pointer from tensor
-template<typename T>
-inline auto get_data_ptr(const Tensor& t) -> T* {
-    return static_cast<T*>(const_cast<void*>(t.data_ptr()));
-}
 
 #ifdef TENZOR_HAS_ONEDNN
 

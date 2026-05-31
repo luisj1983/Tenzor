@@ -13,6 +13,8 @@
 #include "tenzor/backend/op_attributes.hpp"
 #include "tenzor/backend/fast_dispatch.hpp"
 #include "tenzor/ops/op_id.hpp"
+#include "attention_mask_utils.hpp"
+#include "tenzor/nn/utils/variable_cast.hpp"
 #include <cmath>
 #include <stdexcept>
 #include <limits>
@@ -36,76 +38,6 @@ namespace nn {
 // Namespace alias for autograd operations
 namespace autograd = tenzor;
 
-// Autograd-aware dtype cast (gradient flows through with proper dtype conversion)
-class AttentionTypeCastBackward : public Function {
-public:
-    DType original_dtype_ = DType::Float32;
-    auto forward(std::vector<Variable>) -> std::vector<Variable> override {
-        throw std::runtime_error("AttentionTypeCastBackward::forward should not be called");
-    }
-    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override {
-        auto& grad = grad_outputs[0];
-        return {(grad.dtype() != original_dtype_) ? grad.to(original_dtype_) : grad};
-    }
-    auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override {
-        auto& grad = grad_outputs[0];
-        if (grad.dtype() != original_dtype_) {
-            return {Variable(grad.tensor().to(original_dtype_), grad.requires_grad())};
-        }
-        return {grad};
-    }
-
-    // P4.2d: type cast is linear; second derivative is zero.
-    auto supports_higher_order() const -> bool override { return true; }
-    auto is_higher_order_stub() const -> bool override { return true; }
-};
-
-// Y.19 / EE.11 / EE.12: normalise a Bool or integer attention mask to a float
-// additive mask (-inf where True/non-zero, 0 elsewhere). PyTorch's MHA accepts
-// Bool masks where True = "ignore"; without this widening the downstream
-// `scores + mask` adds 1.0 (Bool→float of true) at masked positions instead of
-// -inf, leaking attention. The same fix is mirrored in gqa_attention.cpp.
-// Returns the normalised Tensor; passes through float dtypes unchanged.
-static auto normalize_attn_mask(const Tensor& attn_mask) -> Tensor {
-    const DType am_dtype = attn_mask.dtype();
-    if (am_dtype == DType::Float32 || am_dtype == DType::Float64 ||
-        am_dtype == DType::Float16 || am_dtype == DType::BFloat16) {
-        return attn_mask;
-    }
-    auto pm_shape = std::vector<int64_t>(attn_mask.shape().begin(),
-                                         attn_mask.shape().end());
-    if (am_dtype == DType::Bool) {
-        Tensor neg_inf_tensor = full(pm_shape, -std::numeric_limits<float>::infinity(),
-                                     DType::Float32, attn_mask.device());
-        Tensor zero_tensor = zeros(pm_shape, DType::Float32, attn_mask.device());
-        return Tensor(where(attn_mask, neg_inf_tensor, zero_tensor));
-    }
-    // Integer mask: treat as 0/1 indicator, widen to a float -inf/0 mask.
-    Tensor as_float = attn_mask.to(DType::Float32);
-    Tensor threshold = full(pm_shape, 0.5f, DType::Float32, attn_mask.device());
-    Tensor neg_inf_tensor = full(pm_shape, -std::numeric_limits<float>::infinity(),
-                                 DType::Float32, attn_mask.device());
-    Tensor zero_tensor = zeros(pm_shape, DType::Float32, attn_mask.device());
-    Tensor mask_gt = Tensor(gt(as_float, threshold));
-    return Tensor(where(mask_gt, neg_inf_tensor, zero_tensor));
-}
-
-static auto attention_cast(const Variable& input, DType target_dtype) -> Variable {
-    if (input.dtype() == target_dtype) return input;
-    auto converted = input.tensor().to(target_dtype);
-    Variable result(converted, input.requires_grad());
-    if (input.requires_grad() && is_grad_enabled()) {
-        auto grad_fn = std::make_shared<AttentionTypeCastBackward>();
-        grad_fn->original_dtype_ = input.dtype();
-        std::vector<Variable> input_vars = {input};
-        grad_fn->set_input_variables(input_vars);
-        if (auto fn = input.grad_fn()) {
-            grad_fn->set_next_functions({fn});
-        }
-        result.set_grad_fn(grad_fn);
-    }
-    return result;
-}
 
 // ============================================================================
 // MultiheadAttention Implementation
@@ -431,9 +363,9 @@ auto MultiheadAttention::scaled_dot_product_attention(
     // to prevent gradient overflow. This matches PyTorch's scaled_dot_product_attention behavior.
     DType orig_dtype = query.dtype();
     bool needs_attn_upcast = (orig_dtype == DType::Float16 || orig_dtype == DType::BFloat16);
-    Variable query_compute = needs_attn_upcast ? attention_cast(query, DType::Float32) : query;
-    Variable key_compute = needs_attn_upcast ? attention_cast(key, DType::Float32) : key;
-    Variable value_compute = needs_attn_upcast ? attention_cast(value, DType::Float32) : value;
+    Variable query_compute = needs_attn_upcast ? variable_cast(query, DType::Float32) : query;
+    Variable key_compute = needs_attn_upcast ? variable_cast(key, DType::Float32) : key;
+    Variable value_compute = needs_attn_upcast ? variable_cast(value, DType::Float32) : value;
 
     // Compute scaling factor
     double scale = 1.0 / std::sqrt(static_cast<double>(head_dim));
@@ -550,8 +482,8 @@ auto MultiheadAttention::scaled_dot_product_attention(
 
     // Downcast attention output back to original dtype
     if (needs_attn_upcast) {
-        attended = attention_cast(attended, orig_dtype);
-        attn_weights = attention_cast(attn_weights, orig_dtype);
+        attended = variable_cast(attended, orig_dtype);
+        attn_weights = variable_cast(attn_weights, orig_dtype);
     }
 
     return {attended, attn_weights};

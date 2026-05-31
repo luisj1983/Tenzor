@@ -59,18 +59,4 @@ DeviceGuard::~DeviceGuard() {
     }
 }
 
-// --- OptionalDeviceGuard ---
-
-OptionalDeviceGuard::OptionalDeviceGuard(std::optional<Device> device) {
-    if (device.has_value() && device->type != Device::Type::CPU) {
-        guard_.emplace(device.value());
-    }
-}
-
-OptionalDeviceGuard::OptionalDeviceGuard(Device device) {
-    if (device.type != Device::Type::CPU) {
-        guard_.emplace(device);
-    }
-}
-
 } // namespace tenzor

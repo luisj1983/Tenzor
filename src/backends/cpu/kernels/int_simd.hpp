@@ -38,33 +38,6 @@ inline void add_i32(const int32_t* a, const int32_t* b, int32_t* c, size_t n) {
 #endif
 }
 
-inline void sub_i32(const int32_t* a, const int32_t* b, int32_t* c, size_t n) {
-#ifdef TENZOR_HAS_AVX2
-    size_t i = 0;
-    for (; i + 8 <= n; i += 8) {
-        __m256i va = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(a + i));
-        __m256i vb = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(b + i));
-        _mm256_storeu_si256(reinterpret_cast<__m256i*>(c + i), _mm256_sub_epi32(va, vb));
-    }
-    for (; i < n; ++i) c[i] = a[i] - b[i];
-#else
-    for (size_t i = 0; i < n; ++i) c[i] = a[i] - b[i];
-#endif
-}
-
-inline void mul_i32(const int32_t* a, const int32_t* b, int32_t* c, size_t n) {
-#ifdef TENZOR_HAS_AVX2
-    size_t i = 0;
-    for (; i + 8 <= n; i += 8) {
-        __m256i va = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(a + i));
-        __m256i vb = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(b + i));
-        _mm256_storeu_si256(reinterpret_cast<__m256i*>(c + i), _mm256_mullo_epi32(va, vb));
-    }
-    for (; i < n; ++i) c[i] = a[i] * b[i];
-#else
-    for (size_t i = 0; i < n; ++i) c[i] = a[i] * b[i];
-#endif
-}
 
 // ============================================================================
 // Int16 AVX2
@@ -84,33 +57,7 @@ inline void add_i16(const int16_t* a, const int16_t* b, int16_t* c, size_t n) {
 #endif
 }
 
-inline void sub_i16(const int16_t* a, const int16_t* b, int16_t* c, size_t n) {
-#ifdef TENZOR_HAS_AVX2
-    size_t i = 0;
-    for (; i + 16 <= n; i += 16) {
-        __m256i va = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(a + i));
-        __m256i vb = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(b + i));
-        _mm256_storeu_si256(reinterpret_cast<__m256i*>(c + i), _mm256_sub_epi16(va, vb));
-    }
-    for (; i < n; ++i) c[i] = a[i] - b[i];
-#else
-    for (size_t i = 0; i < n; ++i) c[i] = a[i] - b[i];
-#endif
-}
 
-inline void mul_i16(const int16_t* a, const int16_t* b, int16_t* c, size_t n) {
-#ifdef TENZOR_HAS_AVX2
-    size_t i = 0;
-    for (; i + 16 <= n; i += 16) {
-        __m256i va = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(a + i));
-        __m256i vb = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(b + i));
-        _mm256_storeu_si256(reinterpret_cast<__m256i*>(c + i), _mm256_mullo_epi16(va, vb));
-    }
-    for (; i < n; ++i) c[i] = a[i] * b[i];
-#else
-    for (size_t i = 0; i < n; ++i) c[i] = a[i] * b[i];
-#endif
-}
 
 // ============================================================================
 // Int8 AVX2
@@ -130,19 +77,6 @@ inline void add_i8(const int8_t* a, const int8_t* b, int8_t* c, size_t n) {
 #endif
 }
 
-inline void sub_i8(const int8_t* a, const int8_t* b, int8_t* c, size_t n) {
-#ifdef TENZOR_HAS_AVX2
-    size_t i = 0;
-    for (; i + 32 <= n; i += 32) {
-        __m256i va = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(a + i));
-        __m256i vb = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(b + i));
-        _mm256_storeu_si256(reinterpret_cast<__m256i*>(c + i), _mm256_sub_epi8(va, vb));
-    }
-    for (; i < n; ++i) c[i] = a[i] - b[i];
-#else
-    for (size_t i = 0; i < n; ++i) c[i] = a[i] - b[i];
-#endif
-}
 
 inline void mul_i8(const int8_t* a, const int8_t* b, int8_t* c, size_t n) {
     // Int8 multiply: widen to 16-bit, multiply, take low byte (wrap semantics).
@@ -205,19 +139,6 @@ inline void add_u8(const uint8_t* a, const uint8_t* b, uint8_t* c, size_t n) {
 #endif
 }
 
-inline void sub_u8(const uint8_t* a, const uint8_t* b, uint8_t* c, size_t n) {
-#ifdef TENZOR_HAS_AVX2
-    size_t i = 0;
-    for (; i + 32 <= n; i += 32) {
-        __m256i va = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(a + i));
-        __m256i vb = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(b + i));
-        _mm256_storeu_si256(reinterpret_cast<__m256i*>(c + i), _mm256_sub_epi8(va, vb));
-    }
-    for (; i < n; ++i) c[i] = a[i] - b[i];
-#else
-    for (size_t i = 0; i < n; ++i) c[i] = a[i] - b[i];
-#endif
-}
 
 inline void mul_u8(const uint8_t* a, const uint8_t* b, uint8_t* c, size_t n) {
     // UInt8 multiply: widen to 16-bit, multiply, take low byte (wrap semantics).

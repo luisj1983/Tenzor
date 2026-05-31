@@ -544,9 +544,4 @@ private:
 // in the backend dispatch headers and create circular includes.
 using OpAttributes = NewOpAttributes;
 
-/**
- * @brief Get human-readable name for an AttrKey (for error messages).
- */
-;
-
 } // namespace tenzor

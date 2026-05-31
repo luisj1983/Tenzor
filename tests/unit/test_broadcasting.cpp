@@ -270,12 +270,51 @@ INSTANTIATE_BACKEND_TESTS(BroadcastingTest);
 
 #include "tenzor/core/shape.hpp"
 
+namespace {
+
+// Compute strides for a tensor after broadcasting to a target shape.
+//
+// Given a tensor's original shape and strides, returns the strides that
+// correspond to the broadcast shape. Dimensions where the original size was 1
+// (broadcast dimensions) get stride 0. This helper previously lived in
+// include/tenzor/core/shape.hpp but its only consumer was this test, so it was
+// relocated here to shrink the public surface.
+static std::vector<int64_t> broadcast_strides(
+    std::span<const int64_t> shape,
+    std::span<const int64_t> strides,
+    std::span<const int64_t> broadcast_shape) {
+    size_t ndim = broadcast_shape.size();
+    std::vector<int64_t> result(ndim, 0);
+
+    // Use signed arithmetic to avoid size_t underflow when ndim > shape.size()
+    ptrdiff_t offset = static_cast<ptrdiff_t>(shape.size()) - static_cast<ptrdiff_t>(ndim);
+
+    for (size_t i = 0; i < ndim; ++i) {
+        ptrdiff_t orig_idx = static_cast<ptrdiff_t>(i) + offset;
+        if (orig_idx >= 0 && orig_idx < static_cast<ptrdiff_t>(shape.size())) {
+            // This dimension exists in the original tensor
+            int64_t orig_dim = shape[static_cast<size_t>(orig_idx)];
+            if (orig_dim == broadcast_shape[i]) {
+                result[i] = strides[static_cast<size_t>(orig_idx)];
+            } else {
+                // orig_dim must be 1 (broadcast) — stride is 0
+                result[i] = 0;
+            }
+        }
+        // Dimensions that don't exist in original (prepended) get stride 0
+    }
+
+    return result;
+}
+
+}  // namespace
+
 TEST(BroadcastStrides, ScalarBroadcast) {
     // Scalar (shape {1}) broadcast to {4}: stride should be 0
     std::vector<int64_t> shape = {1};
     std::vector<int64_t> strides = {1};
     std::vector<int64_t> target = {4};
-    auto result = tenzor::broadcast_strides(shape, strides, target);
+    auto result = broadcast_strides(shape, strides, target);
     ASSERT_EQ(result.size(), 1u);
     EXPECT_EQ(result[0], 0);  // broadcast dim gets stride 0
 }
@@ -285,7 +324,7 @@ TEST(BroadcastStrides, DimensionExpansion) {
     std::vector<int64_t> shape = {3};
     std::vector<int64_t> strides = {1};
     std::vector<int64_t> target = {4, 3};
-    auto result = tenzor::broadcast_strides(shape, strides, target);
+    auto result = broadcast_strides(shape, strides, target);
     ASSERT_EQ(result.size(), 2u);
     EXPECT_EQ(result[0], 0);  // prepended dim
     EXPECT_EQ(result[1], 1);  // original dim kept
@@ -296,7 +335,7 @@ TEST(BroadcastStrides, MultipleBroadcastDims) {
     std::vector<int64_t> shape = {1, 3, 1};
     std::vector<int64_t> strides = {3, 1, 1};
     std::vector<int64_t> target = {4, 3, 5};
-    auto result = tenzor::broadcast_strides(shape, strides, target);
+    auto result = broadcast_strides(shape, strides, target);
     ASSERT_EQ(result.size(), 3u);
     EXPECT_EQ(result[0], 0);  // dim 0: was 1, broadcast to 4
     EXPECT_EQ(result[1], 1);  // dim 1: was 3, stays 3
@@ -308,7 +347,7 @@ TEST(BroadcastStrides, NoBroadcast) {
     std::vector<int64_t> shape = {2, 3};
     std::vector<int64_t> strides = {3, 1};
     std::vector<int64_t> target = {2, 3};
-    auto result = tenzor::broadcast_strides(shape, strides, target);
+    auto result = broadcast_strides(shape, strides, target);
     ASSERT_EQ(result.size(), 2u);
     EXPECT_EQ(result[0], 3);
     EXPECT_EQ(result[1], 1);
@@ -319,7 +358,7 @@ TEST(BroadcastStrides, PrependMultipleDims) {
     std::vector<int64_t> shape = {3};
     std::vector<int64_t> strides = {1};
     std::vector<int64_t> target = {2, 4, 3};
-    auto result = tenzor::broadcast_strides(shape, strides, target);
+    auto result = broadcast_strides(shape, strides, target);
     ASSERT_EQ(result.size(), 3u);
     EXPECT_EQ(result[0], 0);
     EXPECT_EQ(result[1], 0);

@@ -301,47 +301,13 @@ auto attention_transfer_loss(
     return squared_diff;
 }
 
-auto relational_distillation_loss(
-    const Variable& student_outputs,
-    const Variable& teacher_outputs
-) -> Variable {
-    // Cast to Float32 for consistent dtype
-    Variable student_fp32(student_outputs.tensor().to(DType::Float32), student_outputs.requires_grad());
-    Variable teacher_fp32(teacher_outputs.tensor().to(DType::Float32), false);
 
-    // Compute pairwise distances within batch
-    // For each pair (i,j): similarity_matrix[i,j] = cos_sim(output[i], output[j])
-
-    // Simplified implementation
-    // In practice, compute full similarity matrix and match distributions
-
-    auto diff = student_fp32 - teacher_fp32;
-    auto mse = diff * diff;
-
-    // Return the Variable directly — re-wrapping mse.tensor() would
-    // silently sever the autograd chain back to student.
-    return mse;
-}
 
 // =============================================================================
 // Self-Distillation
 // =============================================================================
 
-auto self_distillation_loss(
-    const Variable& current_logits,
-    const Variable& past_logits,
-    float temperature
-) -> Variable {
-    // Cast to Float32 for consistent dtype
-    Variable current_logits_fp32(current_logits.tensor().to(DType::Float32), current_logits.requires_grad());
-    Variable past_logits_fp32(past_logits.tensor().to(DType::Float32), false);
 
-    // Treat past predictions as soft targets (similar to teacher-student)
-    Variable past_soft = temperature_softmax(past_logits_fp32, temperature, -1);
-    Variable current_log_soft = temperature_log_softmax(current_logits_fp32, temperature, -1);
-
-    return kl_divergence(current_log_soft, past_soft, "batchmean") * (temperature * temperature);
-}
 
 // =============================================================================
 // Advanced Techniques
@@ -380,51 +346,7 @@ auto multi_teacher_distillation(
     return distillation_loss(student_logits, avg_teacher, targets, config);
 }
 
-auto online_distillation(
-    const std::vector<Variable>& student_logits_list,
-    const Tensor& targets,
-    float temperature
-) -> std::vector<Variable> {
-    size_t num_students = student_logits_list.size();
-    std::vector<Variable> losses;
 
-    if (num_students < 2) {
-        throw std::runtime_error("Online distillation requires at least 2 students");
-    }
-
-    // Each student learns from all other students
-    for (size_t i = 0; i < num_students; ++i) {
-        Variable student_loss;
-
-        // Learn from other students
-        for (size_t j = 0; j < num_students; ++j) {
-            if (i == j) continue;
-
-            DistillationConfig config;
-            config.temperature = temperature;
-            config.alpha = 0.5f;  // Balance peer learning with hard targets
-
-            auto peer_loss = distillation_loss(
-                student_logits_list[i],
-                student_logits_list[j],
-                targets,
-                config
-            );
-
-            if (j == 0 || (j == 1 && i == 0)) {
-                student_loss = peer_loss;
-            } else {
-                student_loss = student_loss + peer_loss;
-            }
-        }
-
-        // Average over peers
-        student_loss = student_loss / static_cast<float>(num_students - 1);
-        losses.push_back(student_loss);
-    }
-
-    return losses;
-}
 
 // =============================================================================
 // Utilities
@@ -542,32 +464,7 @@ auto temperature_schedule(
     }
 }
 
-auto compute_teacher_student_agreement(
-    const std::shared_ptr<Module>& student,
-    const std::shared_ptr<Module>& teacher,
-    const std::vector<std::pair<Variable, Tensor>>& validation_data
-) -> float {
-    teacher->eval();
-    student->eval();
 
-    int total = 0;
-    int agreements = 0;
-
-    for (const auto& [input, target] : validation_data) {
-        // Create non-gradient inputs
-        Variable no_grad_input(input.tensor(), false);
-
-        Variable teacher_out = teacher->forward(no_grad_input);
-        Variable student_out = student->forward(no_grad_input);
-
-        // Compare argmax predictions
-        // Simplified - in practice would compute actual argmax
-        total++;
-        // If predictions match, increment agreements
-    }
-
-    return static_cast<float>(agreements) / static_cast<float>(total);
-}
 
 auto compute_distillation_compression_ratio(
     const std::shared_ptr<Module>& teacher,

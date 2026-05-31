@@ -16,11 +16,6 @@ namespace tenzor {
 // unchanged.
 
 /**
- * @brief Determine the result dtype for a binary operation on two tensors.
- */
-auto result_type(const Tensor& a, const Tensor& b) -> DType;
-
-/**
  * @brief Promote two tensors to a common dtype, converting if necessary.
  * @return Pair of tensors with matching dtype (may be the originals if already matching)
  */

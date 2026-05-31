@@ -42,20 +42,6 @@ public:
         return handle();
     }
 
-    static void shutdown() {
-        // No-op: thread_local instances destroyed when each thread exits.
-    }
-
-    /// W.8: destroy the thread-local rocBLAS handle so the next get() lazily
-    /// rebuilds.  Frees workspace memory rocBLAS / rocSOLVER retains.
-    static void clear_idle() {
-        if (handle() != nullptr) {
-            rocblas_destroy_handle(handle());
-            handle() = nullptr;
-        }
-        last_stream() = nullptr;
-    }
-
 private:
     struct HandleGuard {
         rocblas_handle handle = nullptr;

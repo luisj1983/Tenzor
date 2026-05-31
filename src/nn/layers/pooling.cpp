@@ -15,24 +15,6 @@
 
 namespace tenzor::nn {
 
-// Helper namespace for pooling operations
-namespace {
-
-// Calculate output size for pooling
-auto calculate_pool_output_size(int64_t input_size, int64_t kernel_size,
-                                int64_t stride, int64_t padding,
-                                bool ceil_mode = false) -> int64_t {
-    if (stride == 0) {
-        throw std::runtime_error("Pooling: stride cannot be zero");
-    }
-    if (ceil_mode) {
-        return (input_size + 2 * padding - kernel_size + stride - 1) / stride + 1;
-    }
-    return (input_size + 2 * padding - kernel_size) / stride + 1;
-}
-
-} // anonymous namespace
-
 // =======================
 // MaxPool2d Implementation
 // =======================

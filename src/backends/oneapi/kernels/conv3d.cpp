@@ -1,4 +1,5 @@
 #include "tenzor/core/tensor.hpp"
+#include "oneapi_kernel_utils.hpp"
 #include <sycl/sycl.hpp>
 #include <cmath>
 #include <stdexcept>
@@ -21,15 +22,6 @@ namespace oneapi {
 // Helpers
 // ============================================================================
 
-constexpr float HALF_MAX_CONV3D = 65504.0f;
-inline sycl::half saturate_to_half_conv3d(float val) {
-    return sycl::half(sycl::fmin(sycl::fmax(val, -HALF_MAX_CONV3D), HALF_MAX_CONV3D));
-}
-
-template<typename T>
-inline auto get_data_ptr_conv3d(const Tensor& t) -> T* {
-    return static_cast<T*>(const_cast<void*>(t.data_ptr()));
-}
 
 static inline int64_t calc_out_size_3d(int64_t in, int64_t kernel, int64_t stride,
                                         int64_t padding, int64_t dilation) {
@@ -617,8 +609,8 @@ auto conv3d_backward_bias(const Tensor& grad_output, sycl::queue& queue) -> Tens
     Tensor grad_bias({C}, grad_output.dtype(), grad_output.device());
 
     if (grad_output.dtype() == DType::Float32) {
-        float* grad_bias_ptr = get_data_ptr_conv3d<float>(grad_bias);
-        const float* grad_output_ptr = get_data_ptr_conv3d<const float>(grad_output);
+        float* grad_bias_ptr = get_data_ptr<float>(grad_bias);
+        const float* grad_output_ptr = get_data_ptr<const float>(grad_output);
         queue.parallel_for<Conv3dBackwardBiasKernel>(sycl::range<1>(C), [=](sycl::id<1> c) {
             float sum = 0.0f;
             for (int64_t n = 0; n < N; ++n)
@@ -629,8 +621,8 @@ auto conv3d_backward_bias(const Tensor& grad_output, sycl::queue& queue) -> Tens
             grad_bias_ptr[c] = sum;
         });
     } else if (grad_output.dtype() == DType::Float64) {
-        double* grad_bias_ptr = get_data_ptr_conv3d<double>(grad_bias);
-        const double* grad_output_ptr = get_data_ptr_conv3d<const double>(grad_output);
+        double* grad_bias_ptr = get_data_ptr<double>(grad_bias);
+        const double* grad_output_ptr = get_data_ptr<const double>(grad_output);
         queue.parallel_for<Conv3dBackwardBiasKernelFloat64>(sycl::range<1>(C), [=](sycl::id<1> c) {
             double sum = 0.0;
             for (int64_t n = 0; n < N; ++n)
@@ -641,8 +633,8 @@ auto conv3d_backward_bias(const Tensor& grad_output, sycl::queue& queue) -> Tens
             grad_bias_ptr[c] = sum;
         });
     } else if (grad_output.dtype() == DType::Float16) {
-        sycl::half* grad_bias_ptr = get_data_ptr_conv3d<sycl::half>(grad_bias);
-        const sycl::half* grad_output_ptr = get_data_ptr_conv3d<const sycl::half>(grad_output);
+        sycl::half* grad_bias_ptr = get_data_ptr<sycl::half>(grad_bias);
+        const sycl::half* grad_output_ptr = get_data_ptr<const sycl::half>(grad_output);
         queue.parallel_for<Conv3dBackwardBiasKernelFloat16>(sycl::range<1>(C), [=](sycl::id<1> c) {
             float sum = 0.0f;
             for (int64_t n = 0; n < N; ++n)
@@ -650,7 +642,7 @@ auto conv3d_backward_bias(const Tensor& grad_output, sycl::queue& queue) -> Tens
                     for (int64_t h = 0; h < H; ++h)
                         for (int64_t w = 0; w < W; ++w)
                             sum += static_cast<float>(grad_output_ptr[(((n * C + c) * D + d) * H + h) * W + w]);
-            grad_bias_ptr[c] = saturate_to_half_conv3d(sum);
+            grad_bias_ptr[c] = saturate_to_half(sum);
         });
     } else if (grad_output.dtype() == DType::BFloat16) {
         // BF16 widen-on-device → reduce in F32 → narrow back (Cast runs on the GPU).
@@ -717,12 +709,12 @@ auto conv3d_forward(const Tensor& input, const Tensor& weight, const Tensor* bia
     const int64_t col_size = K * N_gemm;
 
     if (input.dtype() == DType::Float32) {
-        const float* input_ptr = get_data_ptr_conv3d<const float>(input);
-        const float* weight_ptr = get_data_ptr_conv3d<const float>(weight);
-        float* output_ptr = get_data_ptr_conv3d<float>(output);
+        const float* input_ptr = get_data_ptr<const float>(input);
+        const float* weight_ptr = get_data_ptr<const float>(weight);
+        float* output_ptr = get_data_ptr<float>(output);
 
         Tensor col_buffer({col_size}, input.dtype(), input.device());
-        float* col_ptr = get_data_ptr_conv3d<float>(col_buffer);
+        float* col_ptr = get_data_ptr<float>(col_buffer);
 
         for (int64_t n = 0; n < N; ++n) {
             for (int64_t g = 0; g < groups; ++g) {
@@ -756,7 +748,7 @@ auto conv3d_forward(const Tensor& input, const Tensor& weight, const Tensor* bia
             }
 
             if (bias != nullptr) {
-                const float* bias_ptr = get_data_ptr_conv3d<const float>(*bias);
+                const float* bias_ptr = get_data_ptr<const float>(*bias);
                 queue.parallel_for<Conv3dForwardBiasKernel>(sycl::range<2>(C_out, N_gemm), [=](sycl::id<2> idx) {
                     const int64_t oc = idx[0];
                     const int64_t dhw = idx[1];
@@ -766,12 +758,12 @@ auto conv3d_forward(const Tensor& input, const Tensor& weight, const Tensor* bia
             }
         }
     } else if (input.dtype() == DType::Float64) {
-        const double* input_ptr = get_data_ptr_conv3d<const double>(input);
-        const double* weight_ptr = get_data_ptr_conv3d<const double>(weight);
-        double* output_ptr = get_data_ptr_conv3d<double>(output);
+        const double* input_ptr = get_data_ptr<const double>(input);
+        const double* weight_ptr = get_data_ptr<const double>(weight);
+        double* output_ptr = get_data_ptr<double>(output);
 
         Tensor col_buffer({col_size}, input.dtype(), input.device());
-        double* col_ptr = get_data_ptr_conv3d<double>(col_buffer);
+        double* col_ptr = get_data_ptr<double>(col_buffer);
 
         for (int64_t n = 0; n < N; ++n) {
             for (int64_t g = 0; g < groups; ++g) {
@@ -805,7 +797,7 @@ auto conv3d_forward(const Tensor& input, const Tensor& weight, const Tensor* bia
             }
 
             if (bias != nullptr) {
-                const double* bias_ptr = get_data_ptr_conv3d<const double>(*bias);
+                const double* bias_ptr = get_data_ptr<const double>(*bias);
                 queue.parallel_for<Conv3dForwardBiasKernelFloat64>(sycl::range<2>(C_out, N_gemm), [=](sycl::id<2> idx) {
                     const int64_t oc = idx[0];
                     const int64_t dhw = idx[1];
@@ -815,12 +807,12 @@ auto conv3d_forward(const Tensor& input, const Tensor& weight, const Tensor* bia
             }
         }
     } else if (input.dtype() == DType::Float16) {
-        const sycl::half* input_ptr = get_data_ptr_conv3d<const sycl::half>(input);
-        const sycl::half* weight_ptr = get_data_ptr_conv3d<const sycl::half>(weight);
-        sycl::half* output_ptr = get_data_ptr_conv3d<sycl::half>(output);
+        const sycl::half* input_ptr = get_data_ptr<const sycl::half>(input);
+        const sycl::half* weight_ptr = get_data_ptr<const sycl::half>(weight);
+        sycl::half* output_ptr = get_data_ptr<sycl::half>(output);
 
         Tensor col_buffer({col_size}, input.dtype(), input.device());
-        sycl::half* col_ptr = get_data_ptr_conv3d<sycl::half>(col_buffer);
+        sycl::half* col_ptr = get_data_ptr<sycl::half>(col_buffer);
 
         for (int64_t n = 0; n < N; ++n) {
             for (int64_t g = 0; g < groups; ++g) {
@@ -850,17 +842,17 @@ auto conv3d_forward(const Tensor& input, const Tensor& weight, const Tensor* bia
                         sum += static_cast<float>(weight_group_ptr[oc_local * K + k]) *
                                static_cast<float>(col_ptr[k * N_gemm + hw]);
                     }
-                    output_group_ptr[oc_local * N_gemm + hw] = saturate_to_half_conv3d(sum);
+                    output_group_ptr[oc_local * N_gemm + hw] = saturate_to_half(sum);
                 });
             }
 
             if (bias != nullptr) {
-                const sycl::half* bias_ptr = get_data_ptr_conv3d<const sycl::half>(*bias);
+                const sycl::half* bias_ptr = get_data_ptr<const sycl::half>(*bias);
                 queue.parallel_for<Conv3dForwardBiasKernelFloat16>(sycl::range<2>(C_out, N_gemm), [=](sycl::id<2> idx) {
                     const int64_t oc = idx[0];
                     const int64_t dhw = idx[1];
                     const int64_t out_idx = n * C_out * N_gemm + oc * N_gemm + dhw;
-                    output_ptr[out_idx] = saturate_to_half_conv3d(
+                    output_ptr[out_idx] = saturate_to_half(
                         static_cast<float>(output_ptr[out_idx]) + static_cast<float>(bias_ptr[oc]));
                 });
             }
@@ -928,14 +920,14 @@ auto conv3d_backward_input(const Tensor& grad_output, const Tensor& weight,
     const int64_t col_size = K * N_gemm;
 
     if (grad_output.dtype() == DType::Float32) {
-        float* grad_input_ptr = get_data_ptr_conv3d<float>(grad_input);
-        const float* weight_ptr = get_data_ptr_conv3d<const float>(weight);
-        const float* grad_output_ptr = get_data_ptr_conv3d<const float>(grad_output);
+        float* grad_input_ptr = get_data_ptr<float>(grad_input);
+        const float* weight_ptr = get_data_ptr<const float>(weight);
+        const float* grad_output_ptr = get_data_ptr<const float>(grad_output);
 
         queue.fill(grad_input_ptr, 0.0f, N * C_in * D_in * H_in * W_in);
 
         Tensor col_buffer({col_size}, grad_output.dtype(), grad_output.device());
-        float* col_ptr = get_data_ptr_conv3d<float>(col_buffer);
+        float* col_ptr = get_data_ptr<float>(col_buffer);
 
         for (int64_t n = 0; n < N; ++n) {
             float* grad_in_batch = grad_input_ptr + n * C_in * D_in * H_in * W_in;
@@ -973,14 +965,14 @@ auto conv3d_backward_input(const Tensor& grad_output, const Tensor& weight,
             }
         }
     } else if (grad_output.dtype() == DType::Float64) {
-        double* grad_input_ptr = get_data_ptr_conv3d<double>(grad_input);
-        const double* weight_ptr = get_data_ptr_conv3d<const double>(weight);
-        const double* grad_output_ptr = get_data_ptr_conv3d<const double>(grad_output);
+        double* grad_input_ptr = get_data_ptr<double>(grad_input);
+        const double* weight_ptr = get_data_ptr<const double>(weight);
+        const double* grad_output_ptr = get_data_ptr<const double>(grad_output);
 
         queue.fill(grad_input_ptr, 0.0, N * C_in * D_in * H_in * W_in);
 
         Tensor col_buffer({col_size}, grad_output.dtype(), grad_output.device());
-        double* col_ptr = get_data_ptr_conv3d<double>(col_buffer);
+        double* col_ptr = get_data_ptr<double>(col_buffer);
 
         for (int64_t n = 0; n < N; ++n) {
             double* grad_in_batch = grad_input_ptr + n * C_in * D_in * H_in * W_in;
@@ -1017,16 +1009,16 @@ auto conv3d_backward_input(const Tensor& grad_output, const Tensor& weight,
             }
         }
     } else if (grad_output.dtype() == DType::Float16) {
-        sycl::half* grad_input_ptr = get_data_ptr_conv3d<sycl::half>(grad_input);
-        const sycl::half* weight_ptr = get_data_ptr_conv3d<const sycl::half>(weight);
-        const sycl::half* grad_output_ptr = get_data_ptr_conv3d<const sycl::half>(grad_output);
+        sycl::half* grad_input_ptr = get_data_ptr<sycl::half>(grad_input);
+        const sycl::half* weight_ptr = get_data_ptr<const sycl::half>(weight);
+        const sycl::half* grad_output_ptr = get_data_ptr<const sycl::half>(grad_output);
 
         queue.parallel_for(sycl::range<1>(N * C_in * D_in * H_in * W_in), [=](sycl::id<1> i) {
             grad_input_ptr[i] = sycl::half(0.0f);
         });
 
         Tensor col_buffer({col_size}, grad_output.dtype(), grad_output.device());
-        sycl::half* col_ptr = get_data_ptr_conv3d<sycl::half>(col_buffer);
+        sycl::half* col_ptr = get_data_ptr<sycl::half>(col_buffer);
 
         for (int64_t n = 0; n < N; ++n) {
             sycl::half* grad_in_batch = grad_input_ptr + n * C_in * D_in * H_in * W_in;
@@ -1049,7 +1041,7 @@ auto conv3d_backward_input(const Tensor& grad_output, const Tensor& weight,
                         sum += static_cast<float>(weight_group[oc * M_group + k]) *
                                static_cast<float>(grad_out_group[oc * N_gemm + hw]);
                     }
-                    col_ptr[k * N_gemm + hw] = saturate_to_half_conv3d(sum);
+                    col_ptr[k * N_gemm + hw] = saturate_to_half(sum);
                 });
 
                 col3im_grouped_3d_kernel(
@@ -1124,14 +1116,14 @@ auto conv3d_backward_weight(const Tensor& grad_output, const Tensor& input,
     const int64_t col_size = K * N_spatial;
 
     if (input.dtype() == DType::Float32) {
-        float* grad_weight_ptr = get_data_ptr_conv3d<float>(grad_weight);
-        const float* input_ptr = get_data_ptr_conv3d<const float>(input);
-        const float* grad_output_ptr = get_data_ptr_conv3d<const float>(grad_output);
+        float* grad_weight_ptr = get_data_ptr<float>(grad_weight);
+        const float* input_ptr = get_data_ptr<const float>(input);
+        const float* grad_output_ptr = get_data_ptr<const float>(grad_output);
 
         queue.fill(grad_weight_ptr, 0.0f, total_weight_size);
 
         Tensor col_buffer({col_size}, input.dtype(), input.device());
-        float* col_ptr = get_data_ptr_conv3d<float>(col_buffer);
+        float* col_ptr = get_data_ptr<float>(col_buffer);
 
         for (int64_t n = 0; n < N; ++n) {
             const float* input_batch = input_ptr + n * C_in * D_in * H_in * W_in;
@@ -1169,14 +1161,14 @@ auto conv3d_backward_weight(const Tensor& grad_output, const Tensor& input,
             }
         }
     } else if (input.dtype() == DType::Float64) {
-        double* grad_weight_ptr = get_data_ptr_conv3d<double>(grad_weight);
-        const double* input_ptr = get_data_ptr_conv3d<const double>(input);
-        const double* grad_output_ptr = get_data_ptr_conv3d<const double>(grad_output);
+        double* grad_weight_ptr = get_data_ptr<double>(grad_weight);
+        const double* input_ptr = get_data_ptr<const double>(input);
+        const double* grad_output_ptr = get_data_ptr<const double>(grad_output);
 
         queue.fill(grad_weight_ptr, 0.0, total_weight_size);
 
         Tensor col_buffer({col_size}, input.dtype(), input.device());
-        double* col_ptr = get_data_ptr_conv3d<double>(col_buffer);
+        double* col_ptr = get_data_ptr<double>(col_buffer);
 
         for (int64_t n = 0; n < N; ++n) {
             const double* input_batch = input_ptr + n * C_in * D_in * H_in * W_in;
@@ -1214,17 +1206,17 @@ auto conv3d_backward_weight(const Tensor& grad_output, const Tensor& input,
             }
         }
     } else if (input.dtype() == DType::Float16) {
-        sycl::half* grad_weight_ptr = get_data_ptr_conv3d<sycl::half>(grad_weight);
-        const sycl::half* input_ptr = get_data_ptr_conv3d<const sycl::half>(input);
-        const sycl::half* grad_output_ptr = get_data_ptr_conv3d<const sycl::half>(grad_output);
+        sycl::half* grad_weight_ptr = get_data_ptr<sycl::half>(grad_weight);
+        const sycl::half* input_ptr = get_data_ptr<const sycl::half>(input);
+        const sycl::half* grad_output_ptr = get_data_ptr<const sycl::half>(grad_output);
 
         // Use float accumulation buffer
         Tensor grad_weight_float({total_weight_size}, DType::Float32, input.device());
-        float* grad_weight_float_ptr = get_data_ptr_conv3d<float>(grad_weight_float);
+        float* grad_weight_float_ptr = get_data_ptr<float>(grad_weight_float);
         queue.fill(grad_weight_float_ptr, 0.0f, total_weight_size);
 
         Tensor col_buffer({col_size}, input.dtype(), input.device());
-        sycl::half* col_ptr = get_data_ptr_conv3d<sycl::half>(col_buffer);
+        sycl::half* col_ptr = get_data_ptr<sycl::half>(col_buffer);
 
         for (int64_t n = 0; n < N; ++n) {
             const sycl::half* input_batch = input_ptr + n * C_in * D_in * H_in * W_in;
@@ -1293,8 +1285,8 @@ auto conv3d_backward_bias(const Tensor& grad_output, sycl::queue& queue) -> Tens
     Tensor grad_bias({C}, grad_output.dtype(), grad_output.device());
 
     if (grad_output.dtype() == DType::Float32) {
-        float* grad_bias_ptr = get_data_ptr_conv3d<float>(grad_bias);
-        const float* grad_output_ptr = get_data_ptr_conv3d<const float>(grad_output);
+        float* grad_bias_ptr = get_data_ptr<float>(grad_bias);
+        const float* grad_output_ptr = get_data_ptr<const float>(grad_output);
 
         queue.parallel_for<Conv3dBackwardBiasKernel>(sycl::range<1>(C), [=](sycl::id<1> c) {
             float sum = 0.0f;
@@ -1310,8 +1302,8 @@ auto conv3d_backward_bias(const Tensor& grad_output, sycl::queue& queue) -> Tens
             grad_bias_ptr[c] = sum;
         });
     } else if (grad_output.dtype() == DType::Float64) {
-        double* grad_bias_ptr = get_data_ptr_conv3d<double>(grad_bias);
-        const double* grad_output_ptr = get_data_ptr_conv3d<const double>(grad_output);
+        double* grad_bias_ptr = get_data_ptr<double>(grad_bias);
+        const double* grad_output_ptr = get_data_ptr<const double>(grad_output);
 
         queue.parallel_for<Conv3dBackwardBiasKernelFloat64>(sycl::range<1>(C), [=](sycl::id<1> c) {
             double sum = 0.0;
@@ -1327,8 +1319,8 @@ auto conv3d_backward_bias(const Tensor& grad_output, sycl::queue& queue) -> Tens
             grad_bias_ptr[c] = sum;
         });
     } else if (grad_output.dtype() == DType::Float16) {
-        sycl::half* grad_bias_ptr = get_data_ptr_conv3d<sycl::half>(grad_bias);
-        const sycl::half* grad_output_ptr = get_data_ptr_conv3d<const sycl::half>(grad_output);
+        sycl::half* grad_bias_ptr = get_data_ptr<sycl::half>(grad_bias);
+        const sycl::half* grad_output_ptr = get_data_ptr<const sycl::half>(grad_output);
 
         queue.parallel_for<Conv3dBackwardBiasKernelFloat16>(sycl::range<1>(C), [=](sycl::id<1> c) {
             float sum = 0.0f;
@@ -1341,7 +1333,7 @@ auto conv3d_backward_bias(const Tensor& grad_output, sycl::queue& queue) -> Tens
                     }
                 }
             }
-            grad_bias_ptr[c] = saturate_to_half_conv3d(sum);
+            grad_bias_ptr[c] = saturate_to_half(sum);
         });
     } else if (grad_output.dtype() == DType::BFloat16) {
         // BF16 widen-on-device → reduce in F32 → narrow back (Cast runs on the GPU).
@@ -1402,10 +1394,10 @@ auto conv_transpose3d_forward(const Tensor& input, const Tensor& weight, const T
     const int64_t total_elements = output.numel();
 
     if (input.dtype() == DType::Float32) {
-        const float* input_ptr = get_data_ptr_conv3d<const float>(input);
-        const float* weight_ptr = get_data_ptr_conv3d<const float>(weight);
-        const float* bias_ptr = (bias != nullptr) ? get_data_ptr_conv3d<const float>(*bias) : nullptr;
-        float* output_ptr = get_data_ptr_conv3d<float>(output);
+        const float* input_ptr = get_data_ptr<const float>(input);
+        const float* weight_ptr = get_data_ptr<const float>(weight);
+        const float* bias_ptr = (bias != nullptr) ? get_data_ptr<const float>(*bias) : nullptr;
+        float* output_ptr = get_data_ptr<float>(output);
 
         queue.parallel_for<ConvTranspose3dForwardKernelFloat32>(sycl::range<1>(total_elements), [=](sycl::id<1> idx) {
             int64_t tmp = idx;
@@ -1442,10 +1434,10 @@ auto conv_transpose3d_forward(const Tensor& input, const Tensor& weight, const T
             output_ptr[idx] = sum;
         });
     } else if (input.dtype() == DType::Float64) {
-        const double* input_ptr = get_data_ptr_conv3d<const double>(input);
-        const double* weight_ptr = get_data_ptr_conv3d<const double>(weight);
-        const double* bias_ptr = (bias != nullptr) ? get_data_ptr_conv3d<const double>(*bias) : nullptr;
-        double* output_ptr = get_data_ptr_conv3d<double>(output);
+        const double* input_ptr = get_data_ptr<const double>(input);
+        const double* weight_ptr = get_data_ptr<const double>(weight);
+        const double* bias_ptr = (bias != nullptr) ? get_data_ptr<const double>(*bias) : nullptr;
+        double* output_ptr = get_data_ptr<double>(output);
 
         queue.parallel_for<ConvTranspose3dForwardKernelFloat64>(sycl::range<1>(total_elements), [=](sycl::id<1> idx) {
             int64_t tmp = idx;
@@ -1482,10 +1474,10 @@ auto conv_transpose3d_forward(const Tensor& input, const Tensor& weight, const T
             output_ptr[idx] = sum;
         });
     } else if (input.dtype() == DType::Float16) {
-        const sycl::half* input_ptr = get_data_ptr_conv3d<const sycl::half>(input);
-        const sycl::half* weight_ptr = get_data_ptr_conv3d<const sycl::half>(weight);
-        const sycl::half* bias_ptr = (bias != nullptr) ? get_data_ptr_conv3d<const sycl::half>(*bias) : nullptr;
-        sycl::half* output_ptr = get_data_ptr_conv3d<sycl::half>(output);
+        const sycl::half* input_ptr = get_data_ptr<const sycl::half>(input);
+        const sycl::half* weight_ptr = get_data_ptr<const sycl::half>(weight);
+        const sycl::half* bias_ptr = (bias != nullptr) ? get_data_ptr<const sycl::half>(*bias) : nullptr;
+        sycl::half* output_ptr = get_data_ptr<sycl::half>(output);
 
         queue.parallel_for<ConvTranspose3dForwardKernelFloat16>(sycl::range<1>(total_elements), [=](sycl::id<1> idx) {
             int64_t tmp = idx;
@@ -1519,7 +1511,7 @@ auto conv_transpose3d_forward(const Tensor& input, const Tensor& weight, const T
                     }
                 }
             }
-            output_ptr[idx] = saturate_to_half_conv3d(sum);
+            output_ptr[idx] = saturate_to_half(sum);
         });
     } else {
         throw std::runtime_error("ConvTranspose3d forward: unsupported dtype");

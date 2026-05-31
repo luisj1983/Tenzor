@@ -10,15 +10,12 @@ set(TENZOR_CORE_SOURCES
     core/shape.cpp
     core/init.cpp
     core/caching_allocator.cpp
-    core/numa.cpp
     core/memory_manager.cpp
     core/transfer_engine.cpp
     core/pinned_allocator.cpp
     core/offload_engine.cpp
     core/device_guard.cpp
     core/generator.cpp
-    core/named_tensor.cpp
-    core/masked_tensor.cpp
     backend/backend.cpp
     backend/loader.cpp
     backend/registry.cpp
@@ -26,7 +23,6 @@ set(TENZOR_CORE_SOURCES
     backend/simd_dispatch.cpp
     backend/runtime_simd.cpp
     backend/dispatch_table.cpp
-    backend/op_attributes.cpp
     backend/omp_thresholds.cpp
     backend/cuda_graph_stub.cpp
     ops/op_id.cpp

@@ -10,6 +10,7 @@
  */
 
 #include "tenzor/core/tensor.hpp"
+#include "oneapi_kernel_utils.hpp"
 #include "tenzor/ops/fft.hpp"
 #include <sycl/sycl.hpp>
 #include <algorithm>
@@ -39,29 +40,9 @@ struct SyclDevicePtr {
     SyclDevicePtr& operator=(const SyclDevicePtr&) = delete;
 };
 
-template<typename T>
-inline auto get_data_ptr(const Tensor& t) -> T* {
-    return static_cast<T*>(const_cast<void*>(t.data_ptr()));
-}
 
 auto clone_kernel(const Tensor& input, sycl::queue& queue) -> Tensor;
 
-// BFloat16 conversion helpers (BFloat16 stored as uint16_t)
-inline float bf16_to_f32(uint16_t bf16) {
-    uint32_t bits = static_cast<uint32_t>(bf16) << 16;
-    float result;
-    __builtin_memcpy(&result, &bits, sizeof(float));
-    return result;
-}
-inline uint16_t f32_to_bf16(float f32) {
-    uint32_t bits;
-    __builtin_memcpy(&bits, &f32, sizeof(uint32_t));
-    // Round to nearest even (banker's rounding) for BFloat16
-    uint32_t lsb = (bits >> 16) & 1;
-    uint32_t rounding_bias = 0x7FFF + lsb;
-    bits += rounding_bias;
-    return static_cast<uint16_t>(bits >> 16);
-}
 
 // Device-side upcast: F16/BF16 -> F32 (zero host transfers)
 inline void device_upcast_to_f32(const void* src_ptr, float* dst_ptr, int64_t numel,

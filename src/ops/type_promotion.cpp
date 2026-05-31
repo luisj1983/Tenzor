@@ -6,10 +6,6 @@
 
 namespace tenzor {
 
-auto result_type(const Tensor& a, const Tensor& b) -> DType {
-    return promote_types(a.dtype(), b.dtype());
-}
-
 auto promote_inputs(const Tensor& a, const Tensor& b) -> std::pair<Tensor, Tensor> {
     DType target = promote_types(a.dtype(), b.dtype());
     Tensor a_out = (a.dtype() == target) ? a : a.to(target);

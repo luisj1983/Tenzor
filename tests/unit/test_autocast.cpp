@@ -5,6 +5,7 @@
 
 #include <gtest/gtest.h>
 #include "tenzor/nn/amp/autocast.hpp"
+#include "autocast_guard_test_support.hpp"
 #include "tenzor/core/dtype.hpp"
 #include "tenzor/core/device.hpp"
 

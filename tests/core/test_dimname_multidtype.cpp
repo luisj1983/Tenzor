@@ -10,6 +10,14 @@
 namespace tenzor {
 namespace testing {
 
+// Matches if either is wildcard, or both have the same name. This was formerly
+// the Dimname::matches member method; it lived only for these tests, so it was
+// moved out of the production header and replicated here as a local helper.
+static bool dimname_matches(const Dimname& a, const Dimname& b) {
+    if (a.is_wildcard() || b.is_wildcard()) return true;
+    return a == b;
+}
+
 class DimnameMultiDTypeTest : public MultiBackendDTypeTest {};
 
 // ---------------------------------------------------------------------------
@@ -45,11 +53,11 @@ TEST_P(DimnameMultiDTypeTest, MatchingSemantics) {
     Dimname wild;
     Dimname channel("channel");
 
-    EXPECT_TRUE(wild.matches(batch));
-    EXPECT_TRUE(batch.matches(wild));
-    EXPECT_TRUE(wild.matches(wild));
-    EXPECT_TRUE(batch.matches(Dimname("batch")));
-    EXPECT_FALSE(batch.matches(channel));
+    EXPECT_TRUE(dimname_matches(wild, batch));
+    EXPECT_TRUE(dimname_matches(batch, wild));
+    EXPECT_TRUE(dimname_matches(wild, wild));
+    EXPECT_TRUE(dimname_matches(batch, Dimname("batch")));
+    EXPECT_FALSE(dimname_matches(batch, channel));
 }
 
 // ---------------------------------------------------------------------------

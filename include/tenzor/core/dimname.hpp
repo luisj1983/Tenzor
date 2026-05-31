@@ -62,11 +62,6 @@ public:
         return ptr_ != other.ptr_;
     }
 
-    /// Matches if either is wildcard, or both have the same name.
-    [[nodiscard]] auto matches(const Dimname& other) const noexcept -> bool {
-        if (is_wildcard() || other.is_wildcard()) return true;
-        return ptr_ == other.ptr_;
-    }
 
 private:
     const std::string* ptr_;
@@ -109,15 +104,5 @@ inline auto find_dim_by_name(const DimnameList& names, std::string_view name) ->
     throw std::invalid_argument(
         "Dimension name '" + std::string(name) + "' not found");
 }
-
-/**
- * @brief Propagate names through elementwise operations.
- *
- * For each dimension, if either input has a non-wildcard name, the output
- * inherits that name. If both have non-wildcard names, they must match.
- *
- * @throws std::invalid_argument if names conflict
- */
-
 
 } // namespace tenzor

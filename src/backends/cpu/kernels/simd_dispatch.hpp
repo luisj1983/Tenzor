@@ -122,14 +122,6 @@ void reinit_dispatch();
  */
 std::string get_simd_level();
 
-/**
- * @brief Check if dispatch is initialized
- */
-inline bool is_initialized() {
-    return g_dispatch.initialized;
-}
-
-
 } // namespace dispatch
 } // namespace cpu
 } // namespace tenzor

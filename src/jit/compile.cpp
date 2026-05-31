@@ -237,7 +237,6 @@ auto CompiledFunction::shape_key(std::span<const Variable> inputs) -> std::strin
 auto CompiledFunction::trace_and_compile(std::span<const Variable> inputs)
     -> std::shared_ptr<CompiledModule> {
     had_graph_break_ = false;
-    break_positions_.clear();
     size_t traced_op_count = 0;
 
     auto& tracer = Tracer::get_instance();
@@ -247,7 +246,6 @@ auto CompiledFunction::trace_and_compile(std::span<const Variable> inputs)
     auto interceptor = make_tracing_interceptor(tracer,
         [this, &traced_op_count](OpId op) {
             had_graph_break_ = true;
-            break_positions_.push_back(traced_op_count);
             if (config_.fullgraph) {
                 throw std::runtime_error(
                     "tenzor.compile(fullgraph=True): graph break at OpId "

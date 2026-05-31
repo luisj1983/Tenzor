@@ -230,8 +230,6 @@ private:
     static constexpr int kReduceOverheadWarmupCalls = 2;
 
 
-    /// Break positions recorded during tracing
-    std::vector<size_t> break_positions_;
 
     /// Cache key: shape signature (e.g., "4x3x224x224_f32_cpu")
     std::unordered_map<std::string, std::shared_ptr<CompiledModule>> cache_;

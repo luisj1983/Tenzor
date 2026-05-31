@@ -2,7 +2,7 @@
  * @file device_guard.hpp
  * @brief RAII device context management for multi-GPU programming
  *
- * Provides DeviceGuard and OptionalDeviceGuard for automatic device
+ * Provides DeviceGuard for automatic device
  * switching and restoration, eliminating manual cudaSetDevice/hipSetDevice
  * save-restore patterns.
  *
@@ -110,49 +110,6 @@ public:
 private:
     Device device_;
     int32_t prev_index_;
-};
-
-/**
- * @brief Optional RAII device guard that is a no-op when device is nullopt or CPU.
- *
- * Useful when a function accepts an optional device parameter:
- * @code
- * void my_function(std::optional<Device> device = std::nullopt) {
- *     OptionalDeviceGuard guard(device);
- *     // If device was provided and is a GPU, we're now on that device
- * }
- * @endcode
- */
-class OptionalDeviceGuard {
-public:
-    /**
-     * @brief Construct from optional device.
-     *
-     * If device is nullopt or CPU, no device switch occurs.
-     *
-     * @param device Optional target device
-     */
-    explicit OptionalDeviceGuard(std::optional<Device> device = std::nullopt);
-
-    /**
-     * @brief Construct from device, treating CPU as no-op.
-     *
-     * @param device Target device (no-op if CPU)
-     */
-    explicit OptionalDeviceGuard(Device device);
-
-    ~OptionalDeviceGuard() = default;
-
-    OptionalDeviceGuard(const OptionalDeviceGuard&) = delete;
-    OptionalDeviceGuard& operator=(const OptionalDeviceGuard&) = delete;
-
-    /**
-     * @brief Check if this guard is actively managing a device switch.
-     */
-    auto has_value() const -> bool { return guard_.has_value(); }
-
-private:
-    std::optional<DeviceGuard> guard_;
 };
 
 /**

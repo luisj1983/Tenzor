@@ -177,46 +177,9 @@ auto LearnableFakeQuantize::init_from_observer() -> void {
 // Functional Interface
 // ============================================================================
 
-auto fake_quantize_activation(
-    const Tensor& input,
-    const Tensor& scale,
-    const Tensor& zero_point,
-    QuantDType dtype
-) -> Tensor {
-    QuantizationParams params(
-        scale, zero_point, dtype,
-        QuantizationScheme::PerTensorSymmetric, -1
-    );
 
-    QuantizedTensor q_tensor = quantize_tensor(input, params);
-    Tensor output = dequantize_tensor(q_tensor);
-    // Preserve original dtype
-    if (output.dtype() != input.dtype()) {
-        output = output.to(input.dtype());
-    }
-    return output;
-}
 
-auto fake_quantize_weight(
-    const Tensor& weight,
-    const Tensor& scale,
-    const Tensor& zero_point,
-    int64_t axis,
-    QuantDType dtype
-) -> Tensor {
-    QuantizationParams params(
-        scale, zero_point, dtype,
-        QuantizationScheme::PerChannelSymmetric, axis
-    );
 
-    QuantizedTensor q_tensor = quantize_tensor(weight, params);
-    Tensor output = dequantize_tensor(q_tensor);
-    // Preserve original dtype
-    if (output.dtype() != weight.dtype()) {
-        output = output.to(weight.dtype());
-    }
-    return output;
-}
 
 // ============================================================================
 // QATHelper
@@ -331,36 +294,6 @@ auto QATHelper::convert_to_quantized(Module& model) -> std::shared_ptr<Module> {
     }
 
     return quantized_seq;
-}
-
-// ============================================================================
-// Straight-Through Estimator
-// ============================================================================
-
-auto StraightThroughEstimator::forward(const Tensor& input, float quant_min, float quant_max)
-    -> Tensor {
-    // Clamp values to quantization range using device-resident operations
-    return tenzor::clamp(input, quant_min, quant_max);
-}
-
-auto StraightThroughEstimator::backward(
-    const Tensor& grad_output,
-    const Tensor& input,
-    float quant_min,
-    float quant_max
-) -> Tensor {
-    // Pass gradients through for values within range, zero otherwise
-    // Create scalar tensors on the same device as input
-    Tensor min_t = full({1}, quant_min, input.dtype(), input.device());
-    Tensor max_t = full({1}, quant_max, input.dtype(), input.device());
-
-    // Create mask: true where input is within [quant_min, quant_max]
-    Tensor mask = ge(input, min_t) * le(input, max_t);
-
-    // Zero out gradients for out-of-range values
-    auto shape = grad_output.shape();
-    Tensor zero_grad = zeros(std::vector<int64_t>(shape.begin(), shape.end()), grad_output.dtype(), grad_output.device());
-    return tenzor::where(mask, grad_output, zero_grad);
 }
 
 // ============================================================================

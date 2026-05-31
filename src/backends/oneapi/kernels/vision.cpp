@@ -1,4 +1,5 @@
 #include "tenzor/core/tensor.hpp"
+#include "oneapi_kernel_utils.hpp"
 #include <sycl/sycl.hpp>
 #include <cmath>
 #include <numeric>
@@ -50,29 +51,7 @@ struct BoxIoUKernelFloat16 {};
 struct BoxIoUKernelBFloat16 {};
 struct NmsIoUBitmaskKernel {};
 
-// BFloat16 conversion helpers
-inline float bf16_to_f32(uint16_t bf16) {
-    uint32_t bits = static_cast<uint32_t>(bf16) << 16;
-    float result;
-    std::memcpy(&result, &bits, sizeof(float));
-    return result;
-}
 
-inline uint16_t f32_to_bf16(float f32) {
-    uint32_t bits;
-    std::memcpy(&bits, &f32, sizeof(uint32_t));
-    // Round to nearest even (banker's rounding) for BFloat16
-    uint32_t lsb = (bits >> 16) & 1;
-    uint32_t rounding_bias = 0x7FFF + lsb;
-    bits += rounding_bias;
-    return static_cast<uint16_t>(bits >> 16);
-}
-
-// Helper function to get typed pointer from tensor
-template<typename T>
-inline auto get_data_ptr(const Tensor& t) -> T* {
-    return static_cast<T*>(const_cast<void*>(t.data_ptr()));
-}
 
 // ============================================================================
 // Non-Maximum Suppression (NMS)

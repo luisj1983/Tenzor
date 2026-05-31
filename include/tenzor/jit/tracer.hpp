@@ -347,10 +347,6 @@ public:
      */
     auto set_strict_mode(bool strict) -> void { strict_mode_ = strict; }
 
-    /**
-     * @brief Query the current strict-mode setting.
-     */
-    [[nodiscard]] auto is_strict_mode() const -> bool { return strict_mode_; }
 
     /**
      * @brief Number of graph breaks recorded during the current trace.
@@ -540,36 +536,6 @@ class CompiledModule;
  */
 auto trace(std::shared_ptr<nn::Module> module,
            const Tensor& dummy_input) -> std::shared_ptr<CompiledModule>;
-
-/**
- * @brief Helper macros for automatic operation tracing.
- *
- * These macros should be inserted into tensor operations to enable tracing.
- */
-#define TRACE_OP_BEGIN(op_type, inputs, outputs) \
-    do { \
-        if (::tenzor::jit::Tracer::get_instance().is_tracing()) { \
-            ::tenzor::jit::TracedOp trace_op((op_type), (inputs), (outputs));
-
-#define TRACE_OP_ATTR(name, value) \
-            trace_op.attrs[(name)] = (value);
-
-#define TRACE_OP_INT_ATTR(name, value) \
-            trace_op.int_attrs[(name)] = (value);
-
-#define TRACE_OP_VEC_ATTR(name, value) \
-            trace_op.vec_attrs[(name)] = (value);
-
-#define TRACE_OP_BOOL_ATTR(name, value) \
-            trace_op.bool_attrs[(name)] = (value);
-
-#define TRACE_OP_TENSOR_ATTR(name, value) \
-            trace_op.tensor_attrs[(name)] = (value);
-
-#define TRACE_OP_END() \
-            ::tenzor::jit::Tracer::get_instance().record_op(std::move(trace_op)); \
-        } \
-    } while (0)
 
 } // namespace jit
 } // namespace tenzor

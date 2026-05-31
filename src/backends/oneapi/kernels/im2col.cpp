@@ -2,6 +2,7 @@
 #include "tenzor/backend/backend.hpp"
 #include "tenzor/backend/op_attributes.hpp"
 #include "tenzor/backend/attr_macros.hpp"   // HH.7: per-axis attr readers (stride_2d/padding_2d/...)
+#include "oneapi_kernel_utils.hpp"
 #include <sycl/sycl.hpp>
 #include <stdexcept>
 #include <type_traits>  // FF.7: std::is_same_v in col2im atomic_ref guard
@@ -33,11 +34,6 @@ template<> struct Col2imTag<float>      { using type = Col2imKernelFloat32; };
 template<> struct Col2imTag<double>     { using type = Col2imKernelFloat64; };
 template<> struct Col2imTag<sycl::half> { using type = Col2imKernelFloat16; };
 
-// Helper function to get typed pointer from tensor
-template<typename T>
-inline auto get_data_ptr(const Tensor& t) -> T* {
-    return static_cast<T*>(const_cast<void*>(t.data_ptr()));
-}
 
 /**
  * @brief Im2col transformation kernel implementation.

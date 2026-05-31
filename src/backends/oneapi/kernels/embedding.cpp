@@ -2,6 +2,7 @@
 #include "tenzor/ops/creation.hpp"
 #include "tenzor/backend/backend.hpp"
 #include "../sycl_prefix_sum.hpp"
+#include "oneapi_kernel_utils.hpp"
 #include <sycl/sycl.hpp>
 #include <stdexcept>
 #include <cmath>
@@ -30,11 +31,6 @@ class EmbeddingBagBackwardKernelFloat64;
 class EmbeddingBagBackwardZeroFloat32;
 class EmbeddingBagBackwardZeroFloat64;
 
-// Helper function to get typed pointer from tensor
-template<typename T>
-inline auto get_data_ptr(const Tensor& t) -> T* {
-    return static_cast<T*>(const_cast<void*>(t.data_ptr()));
-}
 
 /**
  * @brief Embedding lookup kernel for OneAPI/SYCL
@@ -314,23 +310,6 @@ auto embedding_backward_kernel(const Tensor& grad_output, const Tensor& indices,
     return grad_weight;
 }
 
-// BFloat16 conversion helpers for EmbeddingBag kernels
-inline float embag_bf16_to_f32(uint16_t bf16) {
-    uint32_t bits = static_cast<uint32_t>(bf16) << 16;
-    float result;
-    __builtin_memcpy(&result, &bits, sizeof(float));
-    return result;
-}
-
-inline uint16_t embag_f32_to_bf16(float f32) {
-    uint32_t bits;
-    __builtin_memcpy(&bits, &f32, sizeof(uint32_t));
-    // Round to nearest even (banker's rounding) for BFloat16
-    uint32_t lsb = (bits >> 16) & 1;
-    uint32_t rounding_bias = 0x7FFF + lsb;
-    bits += rounding_bias;
-    return static_cast<uint16_t>(bits >> 16);
-}
 
 /**
  * @brief EmbeddingBag forward kernel - aggregate embeddings
@@ -479,13 +458,13 @@ auto embedding_bag_forward_kernel(const Tensor& embeddings, const Tensor& offset
                 bool first = true;
                 int64_t arg = start_idx;
                 for (int64_t i = start_idx; i < end_idx; ++i) {
-                    float val = embag_bf16_to_f32(embeddings_ptr[i * embedding_dim + emb_dim_idx]);
+                    float val = bf16_to_f32(embeddings_ptr[i * embedding_dim + emb_dim_idx]);
                     if (mode_enum == 0 || mode_enum == 1) { result += val; }
                     else if (mode_enum == 2) { if (first || val > result) { result = val; arg = i; first = false; } }
                 }
                 if (mode_enum == 1 && bag_size > 0) { result /= bag_size; }
                 if (mode_enum == 2 && max_idx_ptr != nullptr) { max_idx_ptr[bag_idx * embedding_dim + emb_dim_idx] = arg; }
-                output_ptr[bag_idx * embedding_dim + emb_dim_idx] = embag_f32_to_bf16(result);
+                output_ptr[bag_idx * embedding_dim + emb_dim_idx] = f32_to_bf16(result);
             }
         ).wait();
     }

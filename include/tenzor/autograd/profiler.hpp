@@ -251,45 +251,4 @@ private:
     std::chrono::steady_clock::time_point start_;
 };
 
-/**
- * @brief RAII timer for forward pass operations.
- *
- * Construct at the start of a forward op; destructor records elapsed time
- * under the Forward phase. Zero cost when profiler is disabled.
- */
-class ForwardTimer {
-public:
-    explicit ForwardTimer(const std::string& name)
-        : name_(name), start_(std::chrono::steady_clock::now()) {}
-
-    ~ForwardTimer() {
-        auto elapsed = std::chrono::steady_clock::now() - start_;
-        auto ns = std::chrono::duration_cast<std::chrono::nanoseconds>(elapsed);
-        auto& prof = AutogradProfiler::instance();
-        prof.record(name_, ns, ProfilePhase::Forward);
-        if (prof.is_trace_enabled()) {
-            prof.record_trace(name_, start_, ns, ProfilePhase::Forward);
-        }
-    }
-
-    ForwardTimer(const ForwardTimer&) = delete;
-    ForwardTimer& operator=(const ForwardTimer&) = delete;
-
-private:
-    std::string name_;
-    std::chrono::steady_clock::time_point start_;
-};
-
-/**
- * @brief Convenience macro for forward op profiling.
- *
- * Usage in dispatch paths:
- *   TENZOR_PROFILE_FORWARD("MatMul");
- *   // ... op implementation ...
- */
-#define TENZOR_PROFILE_FORWARD(name) \
-    std::optional<tenzor::ForwardTimer> _fwd_timer_; \
-    if (tenzor::AutogradProfiler::instance().is_enabled()) \
-        _fwd_timer_.emplace(name)
-
 } // namespace tenzor

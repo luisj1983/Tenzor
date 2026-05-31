@@ -9,6 +9,7 @@
 #include "tenzor/core/tensor.hpp"
 #include "tenzor/core/dtype.hpp"
 #include "tenzor/ops/creation.hpp"  // for tenzor::get_global_seed
+#include "oneapi_kernel_utils.hpp"
 #include <sycl/sycl.hpp>
 #include <chrono>
 #include <cmath>
@@ -24,11 +25,6 @@ auto topk_kernel(const Tensor& input, int64_t k, int64_t dim, bool largest,
                  bool sorted, sycl::queue& queue) -> std::pair<Tensor, Tensor>;
 
 namespace {
-
-template<typename T>
-inline auto get_data_ptr(const Tensor& t) -> T* {
-    return static_cast<T*>(const_cast<void*>(t.data_ptr()));
-}
 
 struct BernoulliKernelTag {};
 struct MultinomialCdfKernelTag {};

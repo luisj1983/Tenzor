@@ -29,11 +29,4 @@ DualModeGuard::~DualModeGuard() {
     g_dual_mode = prev_state_;
 }
 
-DualVariable::DualVariable(Variable primal, Tensor tangent)
-    : primal_(std::move(primal)), tangent_(std::move(tangent)) {}
-
-DualVariable::DualVariable(Variable primal)
-    : primal_(std::move(primal)),
-      tangent_(zeros_like(primal_.tensor())) {}
-
 } // namespace tenzor

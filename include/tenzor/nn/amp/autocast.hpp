@@ -141,27 +141,6 @@ private:
 };
 
 /**
- * @brief RAII helper for autocast context
- *
- * Usage:
- * @code
- * {
- *     AutocastGuard guard(true, DType::Float16);
- *     auto output = model.forward(input);  // Operations auto-cast to FP16
- * }
- * // Autocast disabled after scope
- * @endcode
- */
-class AutocastGuard {
-public:
-    explicit AutocastGuard(bool enabled, DType dtype = DType::Float16)
-        : autocast_(enabled, dtype) {}
-
-private:
-    Autocast autocast_;
-};
-
-/**
  * @brief Decorator for disabling autocast in a scope
  *
  * Usage:

@@ -35,6 +35,10 @@ public:
         }
         return {grad};
     }
+
+    // Type cast is linear; second derivative is zero.
+    auto supports_higher_order() const -> bool override { return true; }
+    auto is_higher_order_stub() const -> bool override { return true; }
 };
 
 /// Cast a Variable to a new dtype with proper autograd graph connectivity.

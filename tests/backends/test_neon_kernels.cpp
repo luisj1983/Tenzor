@@ -21,8 +21,8 @@ TEST(NeonKernels, PlatformPlaceholder) {
 
 #ifdef __ARM_NEON
 
-#include "src/backends/cpu/kernels/simd_arm.hpp"
-#include "src/backends/cpu/kernels/simd_arm_quantized.hpp"
+#include "simd_arm.hpp"
+#include "simd_arm_quantized.hpp"
 
 using namespace tenzor::cpu::neon;
 

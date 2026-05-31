@@ -1,4 +1,5 @@
 #include "tenzor/core/tensor.hpp"
+#include "oneapi_kernel_utils.hpp"
 #include <sycl/sycl.hpp>
 #include <stdexcept>
 #include <algorithm>
@@ -26,48 +27,7 @@ struct SignKernelFloat16 {};
 struct SignKernelBFloat16 {};
 struct SignKernelInt32 {};
 
-// Helper function to get typed pointer from tensor
-template<typename T>
-inline auto get_data_ptr(const Tensor& t) -> T* {
-    return static_cast<T*>(const_cast<void*>(t.data_ptr()));
-}
 
-// Helper to calculate total elements
-inline auto calculate_numel(const std::vector<int64_t>& shape) -> int64_t {
-    int64_t numel = 1;
-    for (auto s : shape) {
-        numel *= s;
-    }
-    return numel;
-}
-
-// Helper to calculate strides from shape
-inline auto calculate_strides(const std::vector<int64_t>& shape) -> std::vector<int64_t> {
-    std::vector<int64_t> strides(shape.size());
-    int64_t stride = 1;
-    for (int64_t i = shape.size() - 1; i >= 0; --i) {
-        strides[i] = stride;
-        stride *= shape[i];
-    }
-    return strides;
-}
-
-// BFloat16 conversion helpers (BFloat16 stored as uint16_t in memory)
-inline float bf16_to_f32(uint16_t bf16) {
-    uint32_t bits = static_cast<uint32_t>(bf16) << 16;
-    float result;
-    __builtin_memcpy(&result, &bits, sizeof(float));
-    return result;
-}
-inline uint16_t f32_to_bf16(float f32) {
-    uint32_t bits;
-    __builtin_memcpy(&bits, &f32, sizeof(uint32_t));
-    // Round to nearest even (banker's rounding) for BFloat16
-    uint32_t lsb = (bits >> 16) & 1;
-    uint32_t rounding_bias = 0x7FFF + lsb;
-    bits += rounding_bias;
-    return static_cast<uint16_t>(bits >> 16);
-}
 
 /**
  * @brief Concatenate tensors along a specified dimension

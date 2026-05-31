@@ -294,11 +294,3 @@ auto tensordot(const Tensor& a, const Tensor& b, int64_t dims = 2) -> Tensor;
 /** @} */ // end of tensor_advanced group
 
 } // namespace tenzor
-
-namespace tenzor {
-namespace ops {
-using tenzor::cumsum;
-using tenzor::cumprod;
-using tenzor::logcumsumexp;
-} // namespace ops
-} // namespace tenzor

@@ -11,6 +11,7 @@
 #include "tenzor/ops/transform.hpp"
 #include "tenzor/ops/indexing.hpp"
 #include "tenzor/ops/math.hpp"
+#include "oneapi_kernel_utils.hpp"
 #include <sycl/sycl.hpp>
 #include <cmath>
 #include <stdexcept>
@@ -21,11 +22,6 @@ namespace tenzor {
 namespace oneapi {
 
 namespace {
-
-template<typename T>
-inline auto get_data_ptr(const Tensor& t) -> T* {
-    return static_cast<T*>(const_cast<void*>(t.data_ptr()));
-}
 
 struct STFTFrameWindowKernel {};
 struct ISTFTOverlapAddKernel {};

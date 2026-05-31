@@ -75,17 +75,6 @@ namespace nn {
  */
 using ModuleFactory = std::function<std::shared_ptr<Module>()>;
 
-/**
- * @brief Tag type that disambiguates the factory-based DataParallel ctor
- *        from the shared-module ctor (otherwise `DataParallel(nullptr, ...)`
- *        is ambiguous because both `shared_ptr<Module>` and `std::function`
- *        accept implicit conversion from nullptr_t).
- *
- * Usage: `DataParallel(use_factory, [&]() { return ...; }, {0,1,2,3})`.
- */
-struct UseFactoryTag {};
-inline constexpr UseFactoryTag use_factory{};
-
 class DataParallel : public Module {
 public:
     /**
@@ -102,38 +91,6 @@ public:
         std::vector<int> device_ids = {},
         int output_device = -1,
         int dim = 0,
-        ::tenzor::distributed::ReduceOp reduce_op = ::tenzor::distributed::ReduceOp::AVG
-    );
-
-    /**
-     * @brief Construct DataParallel via a module factory (A1/B5).
-     *
-     * @param tag `tenzor::nn::use_factory` — disambiguates this ctor from
-     *            the shared-module ctor (so `DataParallel(nullptr, ...)`
-     *            stays unambiguous).
-     * @param factory Callable that returns a fresh module instance — called
-     *                once per device to materialize an independent replica.
-     *                The user is responsible for ensuring the factory builds
-     *                the same architecture on each call.
-     * @param device_ids List of GPU device IDs to use.
-     * @param output_device Master GPU device ID (default: device_ids[0]).
-     * @param dim Batch dimension to split (default: 0).
-     * @param pg Optional process group for gradient all_reduce (B5). When
-     *           non-null, `synchronize_gradients` performs a real all_reduce
-     *           on each parameter's gradient and divides by world_size,
-     *           replacing the `grad *= 1/N` workaround.
-     *
-     * Compared to the constructor that takes a single shared `module`, this
-     * variant produces *independent* per-device replicas (the factory is
-     * called N times) and is the recommended path for new code.
-     */
-    DataParallel(
-        UseFactoryTag tag,
-        ModuleFactory factory,
-        std::vector<int> device_ids,
-        int output_device = -1,
-        int dim = 0,
-        std::shared_ptr<::tenzor::distributed::ProcessGroupBase> pg = nullptr,
         ::tenzor::distributed::ReduceOp reduce_op = ::tenzor::distributed::ReduceOp::AVG
     );
 

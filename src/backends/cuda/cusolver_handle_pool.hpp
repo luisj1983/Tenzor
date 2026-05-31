@@ -46,9 +46,6 @@ public:
         // No-op: thread_local instances destroyed when each thread exits.
     }
 
-    /// W.8: destroy the thread-local cuSOLVER handle so the next get() lazily
-    /// rebuilds.  Frees the workspace memory cuSOLVER retains internally.
-    
 
 private:
     struct HandleGuard {

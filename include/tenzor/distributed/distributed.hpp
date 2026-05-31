@@ -634,15 +634,5 @@ auto all_reduce(Tensor& tensor, ReduceOp op = ReduceOp::SUM) -> void;
  */
 auto broadcast(Tensor& tensor, int src_rank = 0) -> void;
 
-/**
- * @brief Point-to-point send tensor to destination rank.
- */
-auto send(const Tensor& tensor, int dst_rank) -> void;
-
-/**
- * @brief Point-to-point receive tensor from source rank.
- */
-auto recv(Tensor& tensor, int src_rank) -> void;
-
 } // namespace distributed
 } // namespace tenzor

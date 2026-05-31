@@ -30,13 +30,8 @@
 
 namespace tenzor {
 
-// OpAttributes is defined as `using OpAttributes = NewOpAttributes` in
-// backend/backend.hpp. We re-declare the alias locally so that this header
-// does not need to pull in the much heavier backend.hpp transitively.
-#ifndef TENZOR_OPATTRIBUTES_ALIAS_DEFINED
-#define TENZOR_OPATTRIBUTES_ALIAS_DEFINED
-using OpAttributes = NewOpAttributes;
-#endif
+// OpAttributes (`using OpAttributes = NewOpAttributes`) is provided by the
+// included backend/op_attributes.hpp above.
 
 namespace lazy {
 

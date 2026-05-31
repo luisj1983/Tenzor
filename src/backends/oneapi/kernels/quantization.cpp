@@ -1,4 +1,5 @@
 #include "tenzor/core/tensor.hpp"
+#include "oneapi_kernel_utils.hpp"
 #include <sycl/sycl.hpp>
 #include <cmath>
 #include <stdexcept>
@@ -13,11 +14,6 @@ struct DequantizeKernelFloat32 {};
 struct QuantizedLinearKernelInt8 {};
 struct QuantizedConv2dKernelInt8 {};
 
-// Helper function to get typed pointer from tensor
-template<typename T>
-inline auto get_data_ptr(const Tensor& t) -> T* {
-    return static_cast<T*>(const_cast<void*>(t.data_ptr()));
-}
 
 // ============================================================================
 // Quantize Operation

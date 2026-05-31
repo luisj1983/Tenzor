@@ -67,48 +67,6 @@ DataParallel::DataParallel(
     validate_devices();
 }
 
-// A1/B5: factory-based constructor for real per-device replicas.
-DataParallel::DataParallel(
-    UseFactoryTag /*tag*/,
-    ModuleFactory factory,
-    std::vector<int> device_ids,
-    int output_device,
-    int dim,
-    std::shared_ptr<::tenzor::distributed::ProcessGroupBase> pg,
-    ::tenzor::distributed::ReduceOp reduce_op
-) : device_ids_(std::move(device_ids)),
-    output_device_(output_device),
-    dim_(dim),
-    module_factory_(std::move(factory)),
-    pg_(std::move(pg)),
-    reduce_op_(reduce_op)
-{
-    if (!module_factory_) {
-        throw std::invalid_argument("DataParallel(factory): factory cannot be null");
-    }
-    if (device_ids_.empty()) {
-        throw std::invalid_argument("DataParallel(factory): device_ids cannot be empty");
-    }
-
-    // Set output device
-    if (output_device_ == -1) {
-        output_device_ = device_ids_[0];
-    }
-
-    // Validate that output_device is in device_ids
-    if (std::find(device_ids_.begin(), device_ids_.end(), output_device_) == device_ids_.end()) {
-        throw std::invalid_argument("DataParallel(factory): output_device must be in device_ids");
-    }
-
-    validate_devices();
-
-    // Build the master module from the factory once now so accessors
-    // (parameters(), named_parameters()) work before the first forward.
-    module_ = module_factory_();
-    if (!module_) {
-        throw std::runtime_error("DataParallel(factory): factory returned a null module");
-    }
-}
 
 auto DataParallel::forward_impl(const Variable& input) -> Variable {
     // Single device optimization

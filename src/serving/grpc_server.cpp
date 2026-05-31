@@ -12,6 +12,7 @@
 #include "tenzor/autograd/variable.hpp"
 #include "tenzor/ops/creation.hpp"
 #include "tenzor/core/dtype.hpp"
+#include "tenzor/backend/dtype_from_string.hpp"
 
 #include <grpcpp/grpcpp.h>
 #include "tenzor_serving.grpc.pb.h"
@@ -25,16 +26,6 @@ namespace tenzor {
 namespace serving {
 
 namespace {
-
-// Convert DType string to enum
-DType dtype_from_string(const std::string& s) {
-    if (s == "float32" || s.empty()) return DType::Float32;
-    if (s == "float64") return DType::Float64;
-    if (s == "float16") return DType::Float16;
-    if (s == "int32") return DType::Int32;
-    if (s == "int64") return DType::Int64;
-    return DType::Float32;
-}
 
 // Convert DType enum to string
 std::string dtype_to_string(DType dt) {
@@ -68,7 +59,7 @@ public:
             // Deserialize input tensor
             const auto& tensor_data = request->input();
             std::vector<int64_t> shape(tensor_data.shape().begin(), tensor_data.shape().end());
-            DType dtype = dtype_from_string(tensor_data.dtype());
+            DType dtype = tenzor::dtype_from_string(tensor_data.dtype());
 
             auto input = tenzor::from_data(
                 reinterpret_cast<const float*>(tensor_data.data().data()),

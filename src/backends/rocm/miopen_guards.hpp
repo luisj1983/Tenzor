@@ -97,27 +97,6 @@ struct MiopenPoolingDescGuard {
     MiopenPoolingDescGuard& operator=(const MiopenPoolingDescGuard&) = delete;
 };
 
-/// RAII guard for miopenActivationDescriptor_t.
-struct MiopenActivationDescGuard {
-    miopenActivationDescriptor_t desc = nullptr;
-
-    MiopenActivationDescGuard() {
-        auto status = miopenCreateActivationDescriptor(&desc);
-        if (status != miopenStatusSuccess) {
-            throw std::runtime_error(
-                std::string("miopenCreateActivationDescriptor failed with status ") +
-                std::to_string(static_cast<int>(status)));
-        }
-    }
-
-    ~MiopenActivationDescGuard() noexcept {
-        if (desc) miopenDestroyActivationDescriptor(desc);
-    }
-
-    MiopenActivationDescGuard(const MiopenActivationDescGuard&) = delete;
-    MiopenActivationDescGuard& operator=(const MiopenActivationDescGuard&) = delete;
-};
-
 /// RAII guard for miopenRNNDescriptor_t.
 struct MiopenRNNDescGuard {
     miopenRNNDescriptor_t desc = nullptr;
@@ -137,27 +116,6 @@ struct MiopenRNNDescGuard {
 
     MiopenRNNDescGuard(const MiopenRNNDescGuard&) = delete;
     MiopenRNNDescGuard& operator=(const MiopenRNNDescGuard&) = delete;
-};
-
-/// RAII guard for miopenLRNDescriptor_t (Local Response Normalization).
-struct MiopenLRNDescGuard {
-    miopenLRNDescriptor_t desc = nullptr;
-
-    MiopenLRNDescGuard() {
-        auto status = miopenCreateLRNDescriptor(&desc);
-        if (status != miopenStatusSuccess) {
-            throw std::runtime_error(
-                std::string("miopenCreateLRNDescriptor failed with status ") +
-                std::to_string(static_cast<int>(status)));
-        }
-    }
-
-    ~MiopenLRNDescGuard() noexcept {
-        if (desc) miopenDestroyLRNDescriptor(desc);
-    }
-
-    MiopenLRNDescGuard(const MiopenLRNDescGuard&) = delete;
-    MiopenLRNDescGuard& operator=(const MiopenLRNDescGuard&) = delete;
 };
 
 /// Note: MIOpen batch normalization uses miopenTensorDescriptor_t for the

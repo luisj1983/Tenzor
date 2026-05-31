@@ -67,9 +67,6 @@ private:
     }
     static cusparseHandle_t& handle() { return guard().handle; }
     static cudaStream_t& last_stream() { return guard().last_stream; }
-    static cudaStream_t sentinel_stream() {
-        return reinterpret_cast<cudaStream_t>(~uintptr_t(0));
-    }
     static void ensure_initialized() {
         if (handle() == nullptr) {
             CUSPARSE_CHECK(cusparseCreate(&handle()));

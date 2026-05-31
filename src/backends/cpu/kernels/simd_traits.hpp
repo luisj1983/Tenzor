@@ -28,12 +28,6 @@ namespace tenzor::cpu::int_simd {
     void add_i16(const int16_t*, const int16_t*, int16_t*, size_t);
     void add_i8(const int8_t*, const int8_t*, int8_t*, size_t);
     void add_u8(const uint8_t*, const uint8_t*, uint8_t*, size_t);
-    void sub_i32(const int32_t*, const int32_t*, int32_t*, size_t);
-    void sub_i16(const int16_t*, const int16_t*, int16_t*, size_t);
-    void sub_i8(const int8_t*, const int8_t*, int8_t*, size_t);
-    void sub_u8(const uint8_t*, const uint8_t*, uint8_t*, size_t);
-    void mul_i32(const int32_t*, const int32_t*, int32_t*, size_t);
-    void mul_i16(const int16_t*, const int16_t*, int16_t*, size_t);
     void mul_i8(const int8_t*, const int8_t*, int8_t*, size_t);
     void mul_u8(const uint8_t*, const uint8_t*, uint8_t*, size_t);
 }

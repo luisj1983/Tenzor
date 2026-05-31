@@ -4,6 +4,7 @@
  */
 
 #include "../../include/tenzor/models/yolo.hpp"
+#include "channel_utils.hpp"
 #include "../../include/tenzor/models/hub.hpp"
 #include "../../include/tenzor/nn/checkpoint.hpp"
 #include "../../include/tenzor/autograd/ops.hpp"
@@ -706,7 +707,7 @@ CSPDarknet::CSPDarknet(double depth_multiple, double width_multiple)
 }
 
 auto CSPDarknet::make_divisible(int64_t x, int64_t divisor) -> int64_t {
-    return ((x + divisor / 2) / divisor) * divisor;
+    return tenzor::models::make_divisible(x, divisor, /*round_down_guard=*/false);
 }
 
 auto CSPDarknet::forward_impl(const Variable& input) -> Variable {
@@ -908,7 +909,7 @@ YOLOv5::YOLOv5(Size size, int64_t num_classes, bool pretrained,
 
     // Helper to match CSPDarknet's make_divisible logic
     auto make_divisible = [](int64_t x, int64_t divisor = 8) -> int64_t {
-        return ((x + divisor / 2) / divisor) * divisor;
+        return tenzor::models::make_divisible(x, divisor, /*round_down_guard=*/false);
     };
 
     // Create neck - use same channel calculation as CSPDarknet

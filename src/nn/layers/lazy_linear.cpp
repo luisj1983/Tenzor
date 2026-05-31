@@ -6,6 +6,7 @@
 #include "tenzor/ops/transform.hpp"
 #include "tenzor/autograd/ops.hpp"
 #include "tenzor/autograd/function.hpp"
+#include "tenzor/nn/utils/variable_cast.hpp"
 #include "tenzor/backend/fast_dispatch.hpp"
 #include "tenzor/ops/op_id.hpp"
 #include "tenzor/utils/logging.hpp"
@@ -17,65 +18,6 @@ namespace tenzor::nn {
 // Namespace alias for autograd operations (matches linear.cpp pattern)
 namespace autograd = tenzor;
 
-// TypeCastBackward - same as in linear.cpp for dtype conversion with gradient flow
-class LazyLinearTypeCastBackward : public Function {
-public:
-    DType original_dtype_ = DType::Float32;
-
-    LazyLinearTypeCastBackward() = default;
-
-    auto forward([[maybe_unused]] std::vector<Variable> inputs) -> std::vector<Variable> override {
-        throw std::runtime_error("LazyLinearTypeCastBackward::forward should not be called");
-    }
-
-    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override {
-        auto& grad = grad_outputs[0];
-        if (grad.dtype() != original_dtype_) {
-            return {grad.to(original_dtype_)};
-        }
-        return {grad};
-    }
-
-    auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override {
-        auto& grad = grad_outputs[0];
-        if (grad.dtype() != original_dtype_) {
-            return {Variable(grad.tensor().to(original_dtype_), grad.requires_grad())};
-        }
-        return {grad};
-    }
-
-    // P4.2d: type cast is linear; second derivative is zero.
-    auto supports_higher_order() const -> bool override { return true; }
-    auto is_higher_order_stub() const -> bool override { return true; }
-};
-
-// Helper function to cast a Variable to a new dtype with autograd support
-static auto variable_cast(const Variable& input, DType target_dtype) -> Variable {
-    if (input.dtype() == target_dtype) {
-        return input;
-    }
-
-    auto converted_tensor = input.tensor().to(target_dtype);
-    Variable result(converted_tensor, input.requires_grad());
-
-    if (input.requires_grad() && is_grad_enabled()) {
-        auto grad_fn = std::make_shared<LazyLinearTypeCastBackward>();
-        grad_fn->original_dtype_ = input.dtype();
-
-        std::vector<Variable> input_vars = {input};
-        grad_fn->set_input_variables(input_vars);
-
-        std::vector<std::shared_ptr<Function>> next_funcs;
-        if (input.grad_fn()) {
-            next_funcs.push_back(input.grad_fn());
-        }
-        grad_fn->set_next_functions(next_funcs);
-
-        result.set_grad_fn(grad_fn);
-    }
-
-    return result;
-}
 
 // Helper function to compute linear using matmul (fallback for backends without fused linear)
 static auto linear_via_matmul(const Variable& input, const Variable& weight,

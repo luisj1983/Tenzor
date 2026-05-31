@@ -441,15 +441,5 @@ auto broadcast(Tensor& tensor, int src_rank) -> void {
     pg->broadcast(tensor, src_rank);
 }
 
-auto send(const Tensor& tensor, int dst_rank) -> void {
-    auto pg = DistributedContext::get_process_group();
-    pg->send(tensor, dst_rank);
-}
-
-auto recv(Tensor& tensor, int src_rank) -> void {
-    auto pg = DistributedContext::get_process_group();
-    pg->recv(tensor, src_rank);
-}
-
 } // namespace distributed
 } // namespace tenzor

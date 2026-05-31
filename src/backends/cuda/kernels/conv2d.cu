@@ -3,7 +3,6 @@
 #include "tenzor/backend/caching_allocator.hpp"
 #include "cuda_common.cuh"
 #include "cuda_launch_utils.cuh"
-#include "launch_config.cuh"
 #include <cuda_runtime.h>
 #include <cublas_v2.h>
 #include <cuda_fp16.h>  // For __half
@@ -50,23 +49,6 @@ __host__ __device__ inline int64_t calculate_output_size(int64_t input_size, int
     #endif
     return (input_size + 2 * padding - dilation * (kernel_size - 1) - 1) / stride + 1;
 }
-
-// ============================================================================
-// FP16 Conversion Functions
-// ============================================================================
-
-// Convert Tenzor Float16 to CUDA __half
-__device__ __host__ inline __half to_cuda_half(const Float16& x) {
-    __half_raw raw;
-    raw.x = x.bits;
-    return __half(raw);
-}
-
-// Convert CUDA __half to Tenzor Float16
-__device__ __host__ inline Float16 from_cuda_half(const __half& x) {
-    return Float16(__half_as_ushort(x));
-}
-
 
 // ============================================================================
 // NHWC to NCHW Transpose Kernel

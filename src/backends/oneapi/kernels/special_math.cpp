@@ -14,6 +14,7 @@
 #include "tenzor/ops/math.hpp"
 #include "tenzor/ops/reduction.hpp"
 #include "tenzor/ops/creation.hpp"
+#include "oneapi_kernel_utils.hpp"
 #include <sycl/sycl.hpp>
 #include <cmath>
 #include <limits>
@@ -30,25 +31,6 @@ namespace oneapi {
 // Helpers (mirror those in math.cpp)
 // =========================================================================
 
-template<typename T>
-inline auto get_data_ptr(const Tensor& t) -> T* {
-    return static_cast<T*>(const_cast<void*>(t.data_ptr()));
-}
-
-inline float bf16_to_f32_h(uint16_t bf16) {
-    uint32_t bits = static_cast<uint32_t>(bf16) << 16;
-    float result;
-    __builtin_memcpy(&result, &bits, sizeof(float));
-    return result;
-}
-inline uint16_t f32_to_bf16_h(float f32) {
-    uint32_t bits;
-    __builtin_memcpy(&bits, &f32, sizeof(uint32_t));
-    uint32_t lsb = (bits >> 16) & 1;
-    uint32_t rounding_bias = 0x7FFF + lsb;
-    bits += rounding_bias;
-    return static_cast<uint16_t>(bits >> 16);
-}
 
 // =========================================================================
 // Device-side approximations (callable from SYCL kernel lambdas)
@@ -554,12 +536,12 @@ SPECIAL_TAGS(Renorm)
             uint16_t* out_ptr = get_data_ptr<uint16_t>(output);                    \
             queue.parallel_for<TAG_PREFIX##KernelBF16>(sycl::range<1>(numel),      \
                 [=](sycl::id<1> idx) {                                             \
-                    a_f32[idx] = bf16_to_f32_h(in_ptr[idx]);                       \
+                    a_f32[idx] = bf16_to_f32(in_ptr[idx]);                       \
                 }).wait();                                                         \
             ::oneapi::mkl::vm::MKL_FN(queue, numel, a_f32, y_f32).wait();            \
             queue.parallel_for<TAG_PREFIX##KernelF16>(sycl::range<1>(numel),       \
                 [=](sycl::id<1> idx) {                                             \
-                    out_ptr[idx] = f32_to_bf16_h(y_f32[idx]);                      \
+                    out_ptr[idx] = f32_to_bf16(y_f32[idx]);                      \
                 }).wait();                                                         \
             sycl::free(a_f32, queue);                                              \
             sycl::free(y_f32, queue);                                              \
@@ -611,7 +593,7 @@ ONEMKL_DISPATCH_UNARY(erfinv, ErfInv,   erfinv,    erfinv_dev_f32, erfinv_dev_f6
             const uint16_t* in_ptr = get_data_ptr<const uint16_t>(input);                      \
             uint16_t* out_ptr = get_data_ptr<uint16_t>(output);                                \
             queue.parallel_for<TAG_PREFIX##KernelBF16>(sycl::range<1>(numel), [=](sycl::id<1> idx) { \
-                out_ptr[idx] = f32_to_bf16_h((F32_FN)(bf16_to_f32_h(in_ptr[idx])));            \
+                out_ptr[idx] = f32_to_bf16((F32_FN)(bf16_to_f32(in_ptr[idx])));            \
             });                                                                                \
         } else {                                                                               \
             throw std::runtime_error(#NAME ": only Float32/64/16 + BF16 supported");           \
@@ -823,11 +805,11 @@ auto multigammaln_kernel(const Tensor& input, int64_t d, sycl::queue& queue) -> 
         const uint16_t* in_ptr = get_data_ptr<const uint16_t>(input);
         uint16_t* out_ptr = get_data_ptr<uint16_t>(output);
         queue.parallel_for<MultigammalnKernelBF16>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
-            float x = bf16_to_f32_h(in_ptr[idx]);
+            float x = bf16_to_f32(in_ptr[idx]);
             float val = log_pi_coeff;
             for (int j = 0; j < d_val; ++j)
                 val += sycl::lgamma(x - static_cast<float>(j) * 0.5f);
-            out_ptr[idx] = f32_to_bf16_h(val);
+            out_ptr[idx] = f32_to_bf16(val);
         });
     } else {
         throw std::runtime_error("multigammaln: only Float32/64/16 + BF16 supported");
@@ -878,8 +860,8 @@ auto beta_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tensor
         const uint16_t* b_ptr = get_data_ptr<const uint16_t>(b);
         uint16_t* out_ptr = get_data_ptr<uint16_t>(output);
         queue.parallel_for<BetaKernelBF16>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
-            out_ptr[idx] = f32_to_bf16_h(beta_dev_f32(bf16_to_f32_h(a_ptr[idx]),
-                                                       bf16_to_f32_h(b_ptr[idx])));
+            out_ptr[idx] = f32_to_bf16(beta_dev_f32(bf16_to_f32(a_ptr[idx]),
+                                                       bf16_to_f32(b_ptr[idx])));
         });
     } else {
         throw std::runtime_error("beta: unsupported dtype");
@@ -923,8 +905,8 @@ auto zeta_kernel(const Tensor& s, const Tensor& q, sycl::queue& queue) -> Tensor
         const uint16_t* q_ptr = get_data_ptr<const uint16_t>(q);
         uint16_t* out_ptr = get_data_ptr<uint16_t>(output);
         queue.parallel_for<ZetaKernelBF16>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
-            out_ptr[idx] = f32_to_bf16_h(zeta_dev_f32(bf16_to_f32_h(s_ptr[idx]),
-                                                       bf16_to_f32_h(q_ptr[idx])));
+            out_ptr[idx] = f32_to_bf16(zeta_dev_f32(bf16_to_f32(s_ptr[idx]),
+                                                       bf16_to_f32(q_ptr[idx])));
         });
     } else {
         throw std::runtime_error("zeta: unsupported dtype");
@@ -964,7 +946,7 @@ auto polygamma_kernel(int64_t n, const Tensor& input, sycl::queue& queue) -> Ten
         const uint16_t* in_ptr = get_data_ptr<const uint16_t>(input);
         uint16_t* out_ptr = get_data_ptr<uint16_t>(output);
         queue.parallel_for<PolygammaKernelBF16>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
-            out_ptr[idx] = f32_to_bf16_h(polygamma_dev_f32(n_int, bf16_to_f32_h(in_ptr[idx])));
+            out_ptr[idx] = f32_to_bf16(polygamma_dev_f32(n_int, bf16_to_f32(in_ptr[idx])));
         });
     } else {
         throw std::runtime_error("polygamma: unsupported dtype");
@@ -1019,10 +1001,10 @@ auto betainc_kernel(const Tensor& a, const Tensor& b, const Tensor& x, sycl::que
         uint16_t* out_ptr = get_data_ptr<uint16_t>(output);
         queue.parallel_for<BetaIncKernelBF16>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
             double r = betainc_dev_f64(
-                static_cast<double>(bf16_to_f32_h(a_ptr[idx])),
-                static_cast<double>(bf16_to_f32_h(b_ptr[idx])),
-                static_cast<double>(bf16_to_f32_h(x_ptr[idx])));
-            out_ptr[idx] = f32_to_bf16_h(static_cast<float>(r));
+                static_cast<double>(bf16_to_f32(a_ptr[idx])),
+                static_cast<double>(bf16_to_f32(b_ptr[idx])),
+                static_cast<double>(bf16_to_f32(x_ptr[idx])));
+            out_ptr[idx] = f32_to_bf16(static_cast<float>(r));
         });
     } else {
         throw std::runtime_error("betainc: unsupported dtype");
@@ -1071,9 +1053,9 @@ auto logaddexp_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> T
         const uint16_t* b_ptr = get_data_ptr<const uint16_t>(b);
         uint16_t* out_ptr = get_data_ptr<uint16_t>(output);
         queue.parallel_for<LogAddExpKernelBF16>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
-            float va = bf16_to_f32_h(a_ptr[idx]), vb = bf16_to_f32_h(b_ptr[idx]);
+            float va = bf16_to_f32(a_ptr[idx]), vb = bf16_to_f32(b_ptr[idx]);
             float m = sycl::fmax(va, vb);
-            out_ptr[idx] = f32_to_bf16_h(m + sycl::log1p(sycl::exp(-sycl::fabs(va - vb))));
+            out_ptr[idx] = f32_to_bf16(m + sycl::log1p(sycl::exp(-sycl::fabs(va - vb))));
         });
     } else {
         throw std::runtime_error("logaddexp: unsupported dtype");
@@ -1122,9 +1104,9 @@ auto logaddexp2_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> 
         const uint16_t* b_ptr = get_data_ptr<const uint16_t>(b);
         uint16_t* out_ptr = get_data_ptr<uint16_t>(output);
         queue.parallel_for<LogAddExp2KernelBF16>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
-            float va = bf16_to_f32_h(a_ptr[idx]), vb = bf16_to_f32_h(b_ptr[idx]);
+            float va = bf16_to_f32(a_ptr[idx]), vb = bf16_to_f32(b_ptr[idx]);
             float m = sycl::fmax(va, vb);
-            out_ptr[idx] = f32_to_bf16_h(m + sycl::log2(1.0f + sycl::exp2(-sycl::fabs(va - vb))));
+            out_ptr[idx] = f32_to_bf16(m + sycl::log2(1.0f + sycl::exp2(-sycl::fabs(va - vb))));
         });
     } else {
         throw std::runtime_error("logaddexp2: unsupported dtype");
@@ -1170,8 +1152,8 @@ auto xlogy_kernel(const Tensor& x, const Tensor& y, sycl::queue& queue) -> Tenso
         const uint16_t* y_ptr = get_data_ptr<const uint16_t>(y);
         uint16_t* out_ptr = get_data_ptr<uint16_t>(output);
         queue.parallel_for<XLogYKernelBF16>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
-            float xv = bf16_to_f32_h(x_ptr[idx]);
-            out_ptr[idx] = f32_to_bf16_h((xv == 0.0f) ? 0.0f : xv * sycl::log(bf16_to_f32_h(y_ptr[idx])));
+            float xv = bf16_to_f32(x_ptr[idx]);
+            out_ptr[idx] = f32_to_bf16((xv == 0.0f) ? 0.0f : xv * sycl::log(bf16_to_f32(y_ptr[idx])));
         });
     } else {
         throw std::runtime_error("xlogy: unsupported dtype");

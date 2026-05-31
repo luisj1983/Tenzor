@@ -323,7 +323,8 @@ std::mutex ModelHub::mutex_;
 // Internal forward declaration (definition below, in namespace registry).
 // Kept out of the public header — see hub.hpp.
 namespace registry {
-void initialize_default_registry(std::unordered_map<std::string, ModelWeightInfo>& registry);
+// Internal-only (defined below); internal linkage — not part of the public API.
+static void initialize_default_registry(std::unordered_map<std::string, ModelWeightInfo>& registry);
 }  // namespace registry
 
 void ModelHub::ensure_initialized() {
@@ -873,7 +874,7 @@ void ModelHub::default_progress_callback(size_t downloaded, size_t total, double
 
 namespace registry {
 
-std::string get_pytorch_model_url(const std::string& model_name) {
+static std::string get_pytorch_model_url(const std::string& model_name) {
     return "https://download.pytorch.org/models/" + model_name + ".pth";
 }
 
@@ -900,7 +901,7 @@ std::string get_timm_safetensors_url(const std::string& timm_model_id) {
 // When a real safetensors mirror becomes available (timm publishes one, or
 // the Tenzor model-hub starts self-hosting), drop the name from this map
 // and re-add it to `initialize_default_registry` with the new URL.
-const std::unordered_map<std::string, std::string>& removed_pretrained_reasons() {
+static const std::unordered_map<std::string, std::string>& removed_pretrained_reasons() {
     static const std::unordered_map<std::string, std::string> table = {
         // VGG (plain + batch-norm) — torchvision-canonical only, no timm mirror.
         {"vgg11",     "no safetensors mirror published by timm"},
@@ -953,7 +954,7 @@ std::string removed_pretrained_reason(const std::string& model_name) {
     return it->second;
 }
 
-void initialize_default_registry(std::unordered_map<std::string, ModelWeightInfo>& registry) {
+static void initialize_default_registry(std::unordered_map<std::string, ModelWeightInfo>& registry) {
     std::vector<ModelWeightInfo> models;
 
     // ============================================================================

@@ -17,17 +17,9 @@
 #include <stdexcept>
 #include <limits>
 #include "../utils/safe_math.hpp"
+#include "checked_math.hpp"
 
 namespace tenzor {
-
-namespace detail {
-inline auto checked_mul(int64_t a, int64_t b) -> int64_t {
-    if (b != 0 && safe_abs(a) > static_cast<uint64_t>(std::numeric_limits<int64_t>::max()) / safe_abs(b)) {
-        throw std::overflow_error("Shape stride/numel computation overflow");
-    }
-    return a * b;
-}
-} // namespace detail
 
 /**
  * @brief Represents the shape (dimensions) of a tensor.
@@ -160,7 +152,7 @@ public:
     auto numel() const -> size_type {
         size_type result = 1;
         for (auto dim : dims_) {
-            result = detail::checked_mul(result, dim);
+            result = checked_mul(result, dim);
         }
         return result;
     }
@@ -203,7 +195,7 @@ inline auto compute_strides(std::span<const int64_t> shape) -> std::vector<int64
 
     strides.back() = 1;
     for (int64_t i = static_cast<int64_t>(shape.size()) - 2; i >= 0; --i) {
-        strides[i] = detail::checked_mul(strides[i + 1], shape[i + 1]);
+        strides[i] = checked_mul(strides[i + 1], shape[i + 1]);
     }
     return strides;
 }
@@ -233,8 +225,8 @@ inline auto compute_channels_last_strides(std::span<const int64_t> shape)
     }
     // Shape is [N, C, H, W], compute NHWC strides
     int64_t C = shape[1], H = shape[2], W = shape[3];
-    int64_t WC = detail::checked_mul(W, C);
-    int64_t HWC = detail::checked_mul(H, WC);
+    int64_t WC = checked_mul(W, C);
+    int64_t HWC = checked_mul(H, WC);
     return {HWC, 1, WC, C};
 }
 
@@ -256,9 +248,9 @@ inline auto compute_channels_last_3d_strides(std::span<const int64_t> shape)
     }
     // Shape is [N, C, D, H, W], compute NDHWC strides
     int64_t C = shape[1], D = shape[2], H = shape[3], W = shape[4];
-    int64_t WC = detail::checked_mul(W, C);
-    int64_t HWC = detail::checked_mul(H, WC);
-    int64_t DHWC = detail::checked_mul(D, HWC);
+    int64_t WC = checked_mul(W, C);
+    int64_t HWC = checked_mul(H, WC);
+    int64_t DHWC = checked_mul(D, HWC);
     return {DHWC, 1, HWC, WC, C};
 }
 
@@ -304,51 +296,6 @@ inline auto broadcast_shapes(std::span<const int64_t> shape1,
         } else {
             throw std::runtime_error("Shapes are not broadcastable");
         }
-    }
-
-    return result;
-}
-
-/**
- * @brief Compute strides for a tensor after broadcasting to a target shape.
- *
- * Given a tensor's original shape and strides, returns the strides that
- * correspond to the broadcast shape. Dimensions where the original size
- * was 1 (broadcast dimensions) get stride 0.
- *
- * @param shape Original tensor shape
- * @param strides Original tensor strides
- * @param broadcast_shape Target broadcast shape (must be compatible)
- * @return Strides for the broadcast shape (stride 0 for broadcast dims)
- *
- * @code
- * auto strides = broadcast_strides({1, 3}, {3, 1}, {4, 3});
- * // Returns {0, 1} — first dim is broadcast (stride 0), second is kept
- * @endcode
- */
-inline auto broadcast_strides(std::span<const int64_t> shape,
-                              std::span<const int64_t> strides,
-                              std::span<const int64_t> broadcast_shape)
-    -> std::vector<int64_t> {
-    size_t ndim = broadcast_shape.size();
-    std::vector<int64_t> result(ndim, 0);
-
-    // Use signed arithmetic to avoid size_t underflow when ndim > shape.size()
-    ptrdiff_t offset = static_cast<ptrdiff_t>(shape.size()) - static_cast<ptrdiff_t>(ndim);
-
-    for (size_t i = 0; i < ndim; ++i) {
-        ptrdiff_t orig_idx = static_cast<ptrdiff_t>(i) + offset;
-        if (orig_idx >= 0 && orig_idx < static_cast<ptrdiff_t>(shape.size())) {
-            // This dimension exists in the original tensor
-            int64_t orig_dim = shape[static_cast<size_t>(orig_idx)];
-            if (orig_dim == broadcast_shape[i]) {
-                result[i] = strides[static_cast<size_t>(orig_idx)];
-            } else {
-                // orig_dim must be 1 (broadcast) — stride is 0
-                result[i] = 0;
-            }
-        }
-        // Dimensions that don't exist in original (prepended) get stride 0
     }
 
     return result;

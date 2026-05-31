@@ -311,56 +311,6 @@ auto attention_transfer_loss(
     const Variable& teacher_features
 ) -> Variable;
 
-/**
- * @brief Relational knowledge distillation
- *
- * Transfers knowledge about relationships between samples in a batch.
- * Computes pairwise similarities and matches them between teacher and student.
- *
- * **Reference:** "Relational Knowledge Distillation" (Park et al., 2019)
- *
- * @param student_outputs Student outputs for batch (N, D)
- * @param teacher_outputs Teacher outputs for batch (N, D)
- * @return Relational distillation loss
- */
-auto relational_distillation_loss(
-    const Variable& student_outputs,
-    const Variable& teacher_outputs
-) -> Variable;
-
-// =============================================================================
-// Self-Distillation
-// =============================================================================
-
-/**
- * @brief Self-distillation loss (student learns from itself)
- *
- * Uses model's own predictions as soft targets. Surprisingly effective
- * for regularization and ensemble-like behavior.
- *
- * **Approaches:**
- * - Temporal ensemble: Average predictions over time
- * - Deep supervision: Early layers learn from final layer
- * - Label smoothing: Soften one-hot labels
- *
- * @param current_logits Current model outputs
- * @param past_logits Previous outputs (from EMA model or earlier epoch)
- * @param temperature Temperature for softmax
- * @return Self-distillation loss
- *
- * @code
- * // Maintain EMA of model for temporal ensemble
- * Variable current_out = model->forward(input);
- * Variable ema_out = ema_model->forward(input);
- * Variable loss = self_distillation_loss(current_out, ema_out, 2.0f);
- * @endcode
- */
-auto self_distillation_loss(
-    const Variable& current_logits,
-    const Variable& past_logits,
-    float temperature
-) -> Variable;
-
 // =============================================================================
 // Advanced Distillation Techniques
 // =============================================================================
@@ -399,35 +349,6 @@ auto multi_teacher_distillation(
     const DistillationConfig& config,
     const std::optional<std::vector<float>>& teacher_weights = std::nullopt
 ) -> Variable;
-
-/**
- * @brief Online distillation (mutual learning)
- *
- * Multiple student models learn from each other simultaneously.
- * No pre-trained teacher required - students co-evolve.
- *
- * **Reference:** "Deep Mutual Learning" (Zhang et al., 2018)
- *
- * @param student_logits_list Outputs from all student models
- * @param targets True labels
- * @param temperature Temperature for soft targets
- * @return Vector of losses (one per student)
- *
- * @code
- * std::vector<Variable> outputs = {
- *     student1->forward(input),
- *     student2->forward(input),
- *     student3->forward(input)
- * };
- * auto losses = online_distillation(outputs, targets, 3.0f);
- * auto total_loss = losses[0] + losses[1] + losses[2];
- * @endcode
- */
-auto online_distillation(
-    const std::vector<Variable>& student_logits_list,
-    const Tensor& targets,
-    float temperature
-) -> std::vector<Variable>;
 
 // =============================================================================
 // Utilities
@@ -487,28 +408,6 @@ auto temperature_schedule(
     int current_epoch,
     int total_epochs,
     const std::string& schedule_type = "linear"
-) -> float;
-
-/**
- * @brief Compute model similarity score
- *
- * Measures how similar student and teacher predictions are.
- * Useful for monitoring distillation progress.
- *
- * @param student Student model
- * @param teacher Teacher model
- * @param validation_data Validation dataset
- * @return Agreement percentage [0, 1]
- *
- * @code
- * float agreement = compute_teacher_student_agreement(student, teacher, val_data);
- * std::cout << "Student agrees with teacher " << (agreement * 100) << "% of time\n";
- * @endcode
- */
-auto compute_teacher_student_agreement(
-    const std::shared_ptr<Module>& student,
-    const std::shared_ptr<Module>& teacher,
-    const std::vector<std::pair<Variable, Tensor>>& validation_data
 ) -> float;
 
 /**

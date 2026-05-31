@@ -52,10 +52,6 @@ auto ThreadPool::worker_thread() -> void {
     }
 }
 
-auto ThreadPool::active_threads() const -> size_t {
-    return active_threads_.load();
-}
-
 // Global thread pool
 auto thread_pool() -> ThreadPool& {
     static ThreadPool pool;

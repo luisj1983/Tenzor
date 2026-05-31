@@ -4,6 +4,7 @@
  */
 
 #include "../../include/tenzor/models/mobilenet.hpp"
+#include "channel_utils.hpp"
 #include "../../include/tenzor/autograd/ops.hpp"
 #include "../../include/tenzor/models/hub.hpp"
 #include <cmath>
@@ -177,12 +178,7 @@ auto InvertedResidual::forward_impl(const Variable& input) -> Variable {
 // ============================================================================
 
 auto MobileNetV2::make_divisible(int64_t v, int64_t divisor) -> int64_t {
-    int64_t new_v = std::max(divisor, (v + divisor / 2) / divisor * divisor);
-    // Make sure that round down does not go down by more than 10%
-    if (new_v < 0.9 * v) {
-        new_v += divisor;
-    }
-    return new_v;
+    return tenzor::models::make_divisible(v, divisor, /*round_down_guard=*/true);
 }
 
 MobileNetV2::MobileNetV2(int64_t num_classes,
@@ -365,11 +361,7 @@ auto MobileNetV2::load_pretrained(const std::string& path) -> void {
 // ============================================================================
 
 auto MobileNetV3::make_divisible(int64_t v, int64_t divisor) -> int64_t {
-    int64_t new_v = std::max(divisor, (v + divisor / 2) / divisor * divisor);
-    if (new_v < 0.9 * v) {
-        new_v += divisor;
-    }
-    return new_v;
+    return tenzor::models::make_divisible(v, divisor, /*round_down_guard=*/true);
 }
 
 auto MobileNetV3::build_large_config() -> std::vector<std::vector<int64_t>> {

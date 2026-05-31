@@ -7,6 +7,7 @@
 #include "../../multi_backend_dtype_fixture.hpp"
 #include "tenzor/tenzor.hpp"
 #include "tenzor/nn/optim/gradient_utils.hpp"
+#include "gradient_utils_test_support.hpp"
 #include "tenzor/core/tensor.hpp"
 #include "tenzor/autograd/variable.hpp"
 

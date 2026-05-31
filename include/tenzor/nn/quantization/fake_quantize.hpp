@@ -163,55 +163,6 @@ private:
 };
 
 /**
- * @brief Fake quantization function for activations.
- *
- * Functional interface for fake quantization without creating a module.
- * Useful for ad-hoc quantization simulation.
- *
- * @param input Input tensor
- * @param scale Scale factor
- * @param zero_point Zero point
- * @param dtype Quantized data type
- * @return Fake-quantized tensor
- *
- * @code
- * Tensor scale({1}, DType::Float32, Device::cpu());
- * Tensor zero_point({1}, DType::Int32, Device::cpu());
- * scale.fill_(0.1f);
- * zero_point.fill_(0);
- *
- * Tensor quantized = fake_quantize_activation(input, scale, zero_point,
- *                                            QuantDType::INT8);
- * @endcode
- */
-auto fake_quantize_activation(
-    const Tensor& input,
-    const Tensor& scale,
-    const Tensor& zero_point,
-    QuantDType dtype
-) -> Tensor;
-
-/**
- * @brief Fake quantization function for weights (per-channel).
- *
- * Applies per-channel fake quantization to weight tensors.
- *
- * @param weight Weight tensor
- * @param scale Per-channel scale factors
- * @param zero_point Per-channel zero points
- * @param axis Channel axis (typically 0)
- * @param dtype Quantized data type
- * @return Fake-quantized weight tensor
- */
-auto fake_quantize_weight(
-    const Tensor& weight,
-    const Tensor& scale,
-    const Tensor& zero_point,
-    int64_t axis,
-    QuantDType dtype
-) -> Tensor;
-
-/**
  * @brief Learnable fake quantization with trainable parameters.
  *
  * Extends fake quantization with learnable scale and zero_point parameters
@@ -323,39 +274,6 @@ public:
 
 private:
     std::vector<std::shared_ptr<FakeQuantize>> fake_quant_modules_;  ///< Tracked modules
-};
-
-/**
- * @brief Straight-through estimator gradient for quantization.
- *
- * Implements the gradient pass-through for the non-differentiable
- * quantization operation. During backward pass, gradients flow through
- * as if quantization was identity, except for values outside the
- * quantization range which get zero gradient.
- */
-class StraightThroughEstimator {
-public:
-    /**
-     * @brief Apply STE forward pass.
-     *
-     * @param input Input tensor
-     * @param quant_min Minimum quantized value
-     * @param quant_max Maximum quantized value
-     * @return Clamped tensor for gradient computation
-     */
-    static auto forward(const Tensor& input, float quant_min, float quant_max) -> Tensor;
-
-    /**
-     * @brief Apply STE backward pass.
-     *
-     * @param grad_output Gradient from next layer
-     * @param input Original input
-     * @param quant_min Minimum quantized value
-     * @param quant_max Maximum quantized value
-     * @return Gradient for input
-     */
-    static auto backward(const Tensor& grad_output, const Tensor& input,
-                        float quant_min, float quant_max) -> Tensor;
 };
 
 /**

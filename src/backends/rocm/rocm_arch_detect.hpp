@@ -137,20 +137,6 @@ inline auto get_wavefront_size(int device_id = 0) -> int {
     return detail::get_cached_info(device_id).wavefront_size;
 }
 
-/// Check if device supports MFMA (Matrix Fused Multiply-Add) instructions
-inline auto has_mfma(int device_id = 0) -> bool {
-    AMDArch arch = detect_arch(device_id);
-    // MFMA instructions are available on CDNA and later CDNA architectures
-    return arch == AMDArch::CDNA  ||
-           arch == AMDArch::CDNA2 ||
-           arch == AMDArch::CDNA3;
-}
-
-/// Get the raw gcn arch name (e.g. "gfx1150", colon suffix stripped).
-inline auto get_gcn_arch_name(int device_id = 0) -> const std::string& {
-    return detail::get_cached_info(device_id).gcn_arch_name;
-}
-
 /// Check whether MIOpen is usable on this device.
 ///
 /// Upstream MIOpen ships a prebuilt kernel database (the .ufdb / .ktn / .tn

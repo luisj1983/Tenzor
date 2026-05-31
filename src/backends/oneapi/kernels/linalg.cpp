@@ -14,6 +14,7 @@
 #include "tenzor/ops/reduction.hpp"
 #include "tenzor/ops/math.hpp"
 #include "../sycl_buffer_guard.hpp"
+#include "oneapi_kernel_utils.hpp"
 #include <sycl/sycl.hpp>
 #include <stdexcept>
 #include <vector>
@@ -25,11 +26,6 @@
 
 namespace tenzor {
 namespace oneapi {
-
-template<typename T>
-inline auto get_data_ptr(const Tensor& t) -> T* {
-    return static_cast<T*>(const_cast<void*>(t.data_ptr()));
-}
 
 auto clone_kernel(const Tensor& input, sycl::queue& queue) -> Tensor;
 
