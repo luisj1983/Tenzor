@@ -85,12 +85,69 @@ function(tenzor_discover_tests target)
     # silent miss.
     set(_backends ${ARG_BACKENDS})
     if(NOT _backends)
-        set(_backends "cpu")
+        # Auto-detect backend-parameterized suites. When the call site does not
+        # state BACKENDS, scan the target's sources: any suite instantiated via
+        # an INSTANTIATE_*BACKEND*_TESTS / INSTANTIATE_*DEVICE*_TESTS macro fans
+        # out over all five backends, so its generated CTest case names already
+        # carry the backend value (e.g. `.../"cuda"`). Such targets must be
+        # tagged `multi` (no `cpu_` prefix, all five backend labels) — otherwise
+        # the whole binary inherits a single `cpu_` prefix and `ctest -R cpu`
+        # sweeps in the non-CPU parameter cases. Pure dtype-only suites
+        # (INSTANTIATE_MULTI_DTYPE_TESTS / INSTANTIATE_ALL_DTYPE_TESTS, which run
+        # on CPU only) carry no BACKEND/DEVICE token and correctly stay `cpu`.
+        # An explicit BACKENDS at the call site always wins (this branch is only
+        # reached when ARG_BACKENDS is empty).
+        set(_auto_multi FALSE)
+        get_target_property(_auto_src_dir ${target} SOURCE_DIR)
+        get_target_property(_auto_srcs ${target} SOURCES)
+        if(_auto_srcs)
+            foreach(_auto_s IN LISTS _auto_srcs)
+                if(NOT IS_ABSOLUTE "${_auto_s}")
+                    set(_auto_s "${_auto_src_dir}/${_auto_s}")
+                endif()
+                if(EXISTS "${_auto_s}")
+                    file(READ "${_auto_s}" _auto_content)
+                    # High-precision backend-fanning signals: a multi-backend
+                    # fixture base, a backend value-set, a runtime backend
+                    # helper, or a named INSTANTIATE_*BACKEND*/*DEVICE*_TESTS
+                    # macro. (The dtype-only fixtures — MultiDTypeTest, derived
+                    # from TestWithParam<DType> with INSTANTIATE_MULTI_DTYPE_TESTS
+                    # / INSTANTIATE_ALL_DTYPE_TESTS — carry none of these and
+                    # correctly stay `cpu`.)
+                    if(_auto_content MATCHES "INSTANTIATE_[A-Z_]*(BACKEND|DEVICE)[A-Z_]*_TESTS|: *public +BackendTest|MultiBackend[A-Za-z]*Test|STANDARD_BACKENDS|ALL_BACKENDS|DISCOVERED_BACKENDS_WITH_DEVICES|get_available_backends|getAvailableBackends")
+                        set(_auto_multi TRUE)
+                        break()
+                    endif()
+                    # Inline form: a parameterized suite (INSTANTIATE_TEST_SUITE_P)
+                    # whose source carries a literal non-CPU backend name. This
+                    # catches suites that fan out via custom param structs /
+                    # device enums rather than a recognised fixture, e.g.
+                    #   TestWithParam<Device>  Values(Device::cpu(), Device::cuda())
+                    #   TestWithParam<LossDTypeParam>  {"cpu","cuda","vulkan",..}
+                    # A non-parameterized (TEST/TEST_F) CPU suite that merely
+                    # mentions a backend name in a skip-guard has no
+                    # INSTANTIATE_TEST_SUITE_P and is not promoted.
+                    if(_auto_content MATCHES "INSTANTIATE_TEST_SUITE_P" AND
+                       _auto_content MATCHES "\"(cuda|rocm|vulkan|oneapi)\"")
+                        set(_auto_multi TRUE)
+                        break()
+                    endif()
+                endif()
+            endforeach()
+        endif()
+        if(_auto_multi)
+            set(_backends "multi")
+        else()
+            set(_backends "cpu")
+        endif()
     endif()
 
     set(_test_prefix "")
     set(_backend_labels "")
-    set(_valid_single cpu cuda rocm vulkan oneapi)
+    # `mps` is a valid single-backend tag (Apple Metal; tests skip when absent)
+    # but is intentionally NOT in `_all_backends` — source-level `multi` suites
+    # fan over the five built-in backends only, never MPS.
+    set(_valid_single cpu cuda rocm vulkan oneapi mps)
     set(_all_backends cpu cuda rocm vulkan oneapi)
 
     list(LENGTH _backends _nbackends)
@@ -330,29 +387,19 @@ add_subdirectory(sparse)
 # ============================================================================
 # Combined unit test executable
 # ============================================================================
+# CPU-only / pure-logic suites. These never fan out over backends, so they
+# are correctly tagged `cpu` (prefix `cpu_`, label `cpu`). Backend-parameterized
+# suites (INSTANTIATE_BACKEND_TESTS) and the oneAPI-specific suites live in the
+# separate executables below — bundling them here would force one CTest
+# prefix/label on the whole binary, which is what made `ctest -R cpu` run the
+# `..."cuda"` parameter cases and the oneAPI suites.
 add_executable(tenzor_unit_tests
-    unit/test_tensor.cpp
-    unit/test_device.cpp
-    unit/test_ops.cpp
-    unit/test_ops_additional.cpp
-    unit/test_special_math.cpp
-    unit/test_matrix_construction.cpp
     unit/test_ddp_unused_params.cpp
-    unit/test_autograd.cpp
-    test_autograd_transform.cpp
     unit/test_cpu_kernels.cpp
-    unit/test_broadcasting.cpp
-    unit/test_transforms.cpp
-    unit/test_linear.cpp
-    unit/test_losses.cpp
-    unit/test_optimizers.cpp
     unit/test_callbacks.cpp
     unit/test_graph_optimizer.cpp
     unit/test_simd_dispatch.cpp
-    unit/test_simd.cpp
     unit/test_simd_runtime_dispatch.cpp
-    unit/test_oneapi_backend_loading.cpp
-    unit/test_oneapi_operations.cpp
 )
 
 target_link_libraries(tenzor_unit_tests PRIVATE
@@ -377,6 +424,69 @@ endforeach()
 # gtest_discover_tests enables individual test case discovery for better sharding
 # (Previously used add_test due to static destruction crash — now resolved)
 tenzor_discover_tests(tenzor_unit_tests DISCOVERY_TIMEOUT 120 LABELS "unit")
+
+# ----------------------------------------------------------------------------
+# Backend-parameterized unit suites (INSTANTIATE_BACKEND_TESTS)
+# ----------------------------------------------------------------------------
+# Every suite here fans out over all five backends inside its source via the
+# BackendTest fixture, producing case names like `AllBackends/...Creation/"cuda"`.
+# Tagged BACKENDS multi: no `cpu_` prefix (the backend already appears in each
+# case name) and all five backend labels are attached, so `ctest -L cuda`,
+# `ctest -L cpu`, and `ctest -L multi` all select them while `ctest -R '^cpu_'`
+# no longer sweeps in the non-CPU parameter cases.
+add_executable(tenzor_backend_param_tests
+    unit/test_tensor.cpp
+    unit/test_device.cpp
+    unit/test_ops.cpp
+    unit/test_ops_additional.cpp
+    unit/test_special_math.cpp
+    unit/test_matrix_construction.cpp
+    unit/test_autograd.cpp
+    test_autograd_transform.cpp
+    unit/test_broadcasting.cpp
+    unit/test_transforms.cpp
+    unit/test_linear.cpp
+    unit/test_losses.cpp
+    unit/test_optimizers.cpp
+    unit/test_simd.cpp
+)
+target_link_libraries(tenzor_backend_param_tests PRIVATE
+    tenzor_core
+    tenzor_backend_cpu
+    GTest::gtest_main
+)
+target_include_directories(tenzor_backend_param_tests PRIVATE
+    ${PROJECT_SOURCE_DIR}/include
+)
+foreach(backend cuda rocm oneapi vulkan)
+    if(TARGET tenzor_backend_${backend})
+        target_link_libraries(tenzor_backend_param_tests PRIVATE tenzor_backend_${backend})
+    endif()
+endforeach()
+tenzor_discover_tests(tenzor_backend_param_tests DISCOVERY_TIMEOUT 120 BACKENDS multi LABELS "unit")
+
+# ----------------------------------------------------------------------------
+# oneAPI-specific unit suites
+# ----------------------------------------------------------------------------
+# These drive the oneAPI backend directly (skipping at runtime when no oneAPI
+# device is present). Tagged BACKENDS oneapi so they get the `oneapi_` prefix
+# and `oneapi` label instead of masquerading as CPU tests.
+add_executable(tenzor_oneapi_tests
+    unit/test_oneapi_backend_loading.cpp
+    unit/test_oneapi_operations.cpp
+)
+target_link_libraries(tenzor_oneapi_tests PRIVATE
+    tenzor_core
+    tenzor_backend_cpu
+    GTest::gtest_main
+)
+target_include_directories(tenzor_oneapi_tests PRIVATE
+    ${PROJECT_SOURCE_DIR}/include
+)
+if(TARGET tenzor_backend_oneapi)
+    target_link_libraries(tenzor_oneapi_tests PRIVATE tenzor_backend_oneapi)
+endif()
+tenzor_discover_tests(tenzor_oneapi_tests DISCOVERY_TIMEOUT 120 BACKENDS oneapi LABELS "unit")
 
 # Runtime SIMD dispatch test — standalone executable for targeted runs.
 # Also included in tenzor_unit_tests above.

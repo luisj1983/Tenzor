@@ -20,9 +20,12 @@ if(TENZOR_BUILD_CUDA)
     target_include_directories(test_fp16_kernels PRIVATE ${CUDAToolkit_INCLUDE_DIRS})
     set_target_properties(test_fp16_kernels PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
 
-    # Test registration
-    tenzor_discover_tests(test_cuda_kernels DISCOVERY_TIMEOUT 60)
-    tenzor_discover_tests(test_fp16_kernels DISCOVERY_TIMEOUT 60)
+    # Test registration. These suites drive the CUDA backend directly (Device::cuda(),
+    # cudaGetDeviceCount, FP16 kernels) and skip at runtime when no CUDA device is
+    # present — so they are tagged `cuda` (prefix `cuda_`, label `cuda`) rather than
+    # inheriting the default `cpu` tag and masquerading as CPU tests.
+    tenzor_discover_tests(test_cuda_kernels DISCOVERY_TIMEOUT 60 BACKENDS cuda)
+    tenzor_discover_tests(test_fp16_kernels DISCOVERY_TIMEOUT 60 BACKENDS cuda)
 endif()
 
 # ROCm-specific tests
@@ -56,13 +59,16 @@ if(TENZOR_BUILD_ROCM)
     target_link_libraries(test_rocm_rnn_kernels PRIVATE tenzor_core GTest::gtest_main hip::host)
     target_include_directories(test_rocm_rnn_kernels PRIVATE ${ROCM_PATH}/include)
 
-    # ROCm initialization can be slow, use 60 second timeout
-    tenzor_discover_tests(test_rocm_backend DISCOVERY_TIMEOUT 60)
-    tenzor_discover_tests(test_rocm_kernels DISCOVERY_TIMEOUT 60)
-    tenzor_discover_tests(test_rocm_fft DISCOVERY_TIMEOUT 60)
-    tenzor_discover_tests(test_rocm_detection_kernels DISCOVERY_TIMEOUT 60)
-    tenzor_discover_tests(test_rocm_reduction DISCOVERY_TIMEOUT 60)
-    tenzor_discover_tests(test_rocm_rnn_kernels DISCOVERY_TIMEOUT 60)
+    # ROCm initialization can be slow, use 60 second timeout. All six suites drive
+    # the ROCm backend directly (Device::rocm(), hipGetDeviceCount) and skip when no
+    # ROCm device is present, so they are tagged `rocm` (prefix `rocm_`, label `rocm`)
+    # instead of the default `cpu` tag.
+    tenzor_discover_tests(test_rocm_backend DISCOVERY_TIMEOUT 60 BACKENDS rocm)
+    tenzor_discover_tests(test_rocm_kernels DISCOVERY_TIMEOUT 60 BACKENDS rocm)
+    tenzor_discover_tests(test_rocm_fft DISCOVERY_TIMEOUT 60 BACKENDS rocm)
+    tenzor_discover_tests(test_rocm_detection_kernels DISCOVERY_TIMEOUT 60 BACKENDS rocm)
+    tenzor_discover_tests(test_rocm_reduction DISCOVERY_TIMEOUT 60 BACKENDS rocm)
+    tenzor_discover_tests(test_rocm_rnn_kernels DISCOVERY_TIMEOUT 60 BACKENDS rocm)
 endif()
 
 # Sparse GPU tests (works with any GPU backend: CUDA or ROCm)
@@ -76,7 +82,8 @@ endif()
 if(TENZOR_BUILD_VULKAN)
     add_executable(test_vulkan_threading test_vulkan_threading.cpp)
     target_link_libraries(test_vulkan_threading PRIVATE tenzor_core GTest::gtest_main)
-    tenzor_discover_tests(test_vulkan_threading DISCOVERY_TIMEOUT 60)
+    # Drives the Vulkan backend directly; skips when no Vulkan device is present.
+    tenzor_discover_tests(test_vulkan_threading DISCOVERY_TIMEOUT 60 BACKENDS vulkan)
 
     find_package(Vulkan REQUIRED)
 
@@ -84,7 +91,7 @@ if(TENZOR_BUILD_VULKAN)
     target_link_libraries(test_vulkan_allocator_merge PRIVATE
         tenzor_core tenzor_backend_vulkan ${Vulkan_LIBRARIES} GTest::gtest_main)
     target_include_directories(test_vulkan_allocator_merge PRIVATE ${Vulkan_INCLUDE_DIRS})
-    tenzor_discover_tests(test_vulkan_allocator_merge DISCOVERY_TIMEOUT 60)
+    tenzor_discover_tests(test_vulkan_allocator_merge DISCOVERY_TIMEOUT 60 BACKENDS vulkan)
 endif()
 
 # ARM NEON kernel tests (compiles on all platforms; tests skip on non-ARM)
@@ -98,10 +105,11 @@ add_executable(test_event_api test_event_api.cpp)
 target_link_libraries(test_event_api PRIVATE tenzor_core GTest::gtest_main)
 tenzor_discover_tests(test_event_api DISCOVERY_TIMEOUT 60)
 
-# MPS training tests (skips if MPS not available)
+# MPS training tests (skips if MPS not available). Tagged `mps` so they do not
+# masquerade as CPU tests; on non-Apple builds every case skips at runtime.
 add_executable(test_mps_training test_mps_training.cpp)
 target_link_libraries(test_mps_training PRIVATE tenzor_core GTest::gtest_main)
-tenzor_discover_tests(test_mps_training DISCOVERY_TIMEOUT 60)
+tenzor_discover_tests(test_mps_training DISCOVERY_TIMEOUT 60 BACKENDS mps)
 
 # Backend kernel operations (14 tests using BackendTest fixture)
 add_executable(test_backend_kernel_ops test_backend_kernel_ops.cpp)

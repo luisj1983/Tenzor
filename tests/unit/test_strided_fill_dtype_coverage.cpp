@@ -6,6 +6,12 @@
 //
 // Test strategy: transpose a 2-D tensor to produce a non-contiguous strided
 // view, call fill_(), then verify every element has the expected value.
+//
+// Parameterized over all backends via BackendTest: each TEST_P creates its
+// base tensors on the fixture's `device`. A (backend, dtype) cell the backend
+// does not implement will throw and FAIL the test — intentional, to surface
+// the real coverage gap rather than hide it. Backends physically absent on the
+// host are skipped by BackendTest::SetUp (availability, not capability).
 
 #include <gtest/gtest.h>
 #include "tenzor/tenzor.hpp"
@@ -13,18 +19,11 @@
 #include "tenzor/core/dtype.hpp"
 #include "tenzor/ops/creation.hpp"
 #include "tenzor/ops/math.hpp"
-
-namespace tenzor { void initialize(); }
+#include "../backend_test_fixture.hpp"
 
 namespace tz = ::tenzor;
 
-class StridedFillDtypeCoverageEnv : public ::testing::Environment {
-public:
-    void SetUp() override { tenzor::initialize(); }
-};
-
-static ::testing::Environment* const g_env =
-    ::testing::AddGlobalTestEnvironment(new StridedFillDtypeCoverageEnv);
+class StridedFillDtypeCoverage : public ::tenzor::testing::BackendTest {};
 
 namespace {
 // Verify all elements of a Float64-cast view equal expected_value.
@@ -41,8 +40,8 @@ void expect_all_near(const tz::Tensor& t, double expected_value, double tol = 1e
 
 // Build a non-contiguous strided view via transpose, fill, verify.
 template <tz::DType DT>
-void run_strided_fill_check(double fill_value) {
-    auto t = tz::empty({4, 4}, DT);
+void run_strided_fill_check(double fill_value, tz::Device device) {
+    auto t = tz::empty({4, 4}, DT, device);
     auto view = t.transpose(0, 1);
     ASSERT_FALSE(view.is_contiguous())
         << "transpose of {4,4} must be non-contiguous to exercise StridedFill";
@@ -53,42 +52,42 @@ void run_strided_fill_check(double fill_value) {
 
 // --- scalar integer / float types previously missing from the switch ---
 
-TEST(StridedFillDtypeCoverage, UInt16) { run_strided_fill_check<tz::DType::UInt16>(7.0); }
-TEST(StridedFillDtypeCoverage, UInt32) { run_strided_fill_check<tz::DType::UInt32>(7.0); }
-TEST(StridedFillDtypeCoverage, UInt64) { run_strided_fill_check<tz::DType::UInt64>(7.0); }
+TEST_P(StridedFillDtypeCoverage, UInt16) { run_strided_fill_check<tz::DType::UInt16>(7.0, device); }
+TEST_P(StridedFillDtypeCoverage, UInt32) { run_strided_fill_check<tz::DType::UInt32>(7.0, device); }
+TEST_P(StridedFillDtypeCoverage, UInt64) { run_strided_fill_check<tz::DType::UInt64>(7.0, device); }
 
 // --- types already in the switch; regression guard ---
 
-TEST(StridedFillDtypeCoverage, Int16)    { run_strided_fill_check<tz::DType::Int16>(7.0);    }
-TEST(StridedFillDtypeCoverage, Int32)    { run_strided_fill_check<tz::DType::Int32>(7.0);    }
-TEST(StridedFillDtypeCoverage, Int64)    { run_strided_fill_check<tz::DType::Int64>(7.0);    }
-TEST(StridedFillDtypeCoverage, Float32)  { run_strided_fill_check<tz::DType::Float32>(2.5);  }
-TEST(StridedFillDtypeCoverage, Float64)  { run_strided_fill_check<tz::DType::Float64>(2.5);  }
-TEST(StridedFillDtypeCoverage, Float16)  { run_strided_fill_check<tz::DType::Float16>(2.5);  }
-TEST(StridedFillDtypeCoverage, BFloat16) { run_strided_fill_check<tz::DType::BFloat16>(2.5); }
+TEST_P(StridedFillDtypeCoverage, Int16)    { run_strided_fill_check<tz::DType::Int16>(7.0, device);    }
+TEST_P(StridedFillDtypeCoverage, Int32)    { run_strided_fill_check<tz::DType::Int32>(7.0, device);    }
+TEST_P(StridedFillDtypeCoverage, Int64)    { run_strided_fill_check<tz::DType::Int64>(7.0, device);    }
+TEST_P(StridedFillDtypeCoverage, Float32)  { run_strided_fill_check<tz::DType::Float32>(2.5, device);  }
+TEST_P(StridedFillDtypeCoverage, Float64)  { run_strided_fill_check<tz::DType::Float64>(2.5, device);  }
+TEST_P(StridedFillDtypeCoverage, Float16)  { run_strided_fill_check<tz::DType::Float16>(2.5, device);  }
+TEST_P(StridedFillDtypeCoverage, BFloat16) { run_strided_fill_check<tz::DType::BFloat16>(2.5, device); }
 
-TEST(StridedFillDtypeCoverage, Bool) {
-    auto t = tz::empty({4, 4}, tz::DType::Bool);
+TEST_P(StridedFillDtypeCoverage, Bool) {
+    auto t = tz::empty({4, 4}, tz::DType::Bool, device);
     auto view = t.transpose(0, 1);
     ASSERT_FALSE(view.is_contiguous());
     view.fill_(1.0);
     auto cpu_t = view.cpu();
     auto as_i32 = cpu_t.to(tz::DType::Int32);
     const int32_t* p = as_i32.data<int32_t>();
-    for (int64_t i = 0; i < view.numel(); ++i)
+    for (int64_t i = 0; i < cpu_t.numel(); ++i)
         EXPECT_EQ(p[i], 1) << "Bool StridedFill silent no-op at i=" << i;
 }
 
 // --- complex types: real part = fill value, imag = 0 ---
 
-TEST(StridedFillDtypeCoverage, Complex64) {
-    auto t = tz::empty({4, 4}, tz::DType::Complex64);
+TEST_P(StridedFillDtypeCoverage, Complex64) {
+    auto t = tz::empty({4, 4}, tz::DType::Complex64, device);
     auto view = t.transpose(0, 1);
     ASSERT_FALSE(view.is_contiguous());
     view.fill_(2.5);
     auto re = tz::real(view).cpu().to(tz::DType::Float64);
     auto im = tz::imag(view).cpu().to(tz::DType::Float64);
-    for (int64_t i = 0; i < view.numel(); ++i) {
+    for (int64_t i = 0; i < re.numel(); ++i) {
         EXPECT_NEAR(re.data<double>()[i], 2.5, 1e-6)
             << "Complex64 StridedFill real part mismatch at i=" << i;
         EXPECT_NEAR(im.data<double>()[i], 0.0, 1e-6)
@@ -96,14 +95,14 @@ TEST(StridedFillDtypeCoverage, Complex64) {
     }
 }
 
-TEST(StridedFillDtypeCoverage, Complex128) {
-    auto t = tz::empty({4, 4}, tz::DType::Complex128);
+TEST_P(StridedFillDtypeCoverage, Complex128) {
+    auto t = tz::empty({4, 4}, tz::DType::Complex128, device);
     auto view = t.transpose(0, 1);
     ASSERT_FALSE(view.is_contiguous());
     view.fill_(2.5);
     auto re = tz::real(view).cpu().to(tz::DType::Float64);
     auto im = tz::imag(view).cpu().to(tz::DType::Float64);
-    for (int64_t i = 0; i < view.numel(); ++i) {
+    for (int64_t i = 0; i < re.numel(); ++i) {
         EXPECT_NEAR(re.data<double>()[i], 2.5, 1e-12)
             << "Complex128 StridedFill real part mismatch at i=" << i;
         EXPECT_NEAR(im.data<double>()[i], 0.0, 1e-12)
@@ -113,25 +112,25 @@ TEST(StridedFillDtypeCoverage, Complex128) {
 
 // --- FP8: 2.0 is exactly representable in both E4M3 and E5M2 ---
 
-TEST(StridedFillDtypeCoverage, FP8E4M3) {
-    auto t = tz::empty({4, 4}, tz::DType::FP8_E4M3);
+TEST_P(StridedFillDtypeCoverage, FP8E4M3) {
+    auto t = tz::empty({4, 4}, tz::DType::FP8_E4M3, device);
     auto view = t.transpose(0, 1);
     ASSERT_FALSE(view.is_contiguous());
     view.fill_(2.0);
-    auto f32 = view.to(tz::DType::Float32);
+    auto f32 = view.cpu().to(tz::DType::Float32);
     const float* p = f32.data<float>();
-    for (int64_t i = 0; i < view.numel(); ++i)
+    for (int64_t i = 0; i < f32.numel(); ++i)
         EXPECT_FLOAT_EQ(p[i], 2.0f) << "FP8_E4M3 StridedFill round-trip at i=" << i;
 }
 
-TEST(StridedFillDtypeCoverage, FP8E5M2) {
-    auto t = tz::empty({4, 4}, tz::DType::FP8_E5M2);
+TEST_P(StridedFillDtypeCoverage, FP8E5M2) {
+    auto t = tz::empty({4, 4}, tz::DType::FP8_E5M2, device);
     auto view = t.transpose(0, 1);
     ASSERT_FALSE(view.is_contiguous());
     view.fill_(2.0);
-    auto f32 = view.to(tz::DType::Float32);
+    auto f32 = view.cpu().to(tz::DType::Float32);
     const float* p = f32.data<float>();
-    for (int64_t i = 0; i < view.numel(); ++i)
+    for (int64_t i = 0; i < f32.numel(); ++i)
         EXPECT_FLOAT_EQ(p[i], 2.0f) << "FP8_E5M2 StridedFill round-trip at i=" << i;
 }
 
@@ -142,8 +141,8 @@ TEST(StridedFillDtypeCoverage, FP8E5M2) {
 // bug in TensorImpl). We therefore call set_quantization_params on the view
 // itself so the strided fill path (which reads self.q_scale()) works.
 
-TEST(StridedFillDtypeCoverage, QInt8Strided) {
-    auto t = tz::empty({4, 4}, tz::DType::QInt8);
+TEST_P(StridedFillDtypeCoverage, QInt8Strided) {
+    auto t = tz::empty({4, 4}, tz::DType::QInt8, device);
     auto view = t.transpose(0, 1);
     ASSERT_FALSE(view.is_contiguous());
     // Set quant params on the view's own impl so fill_ can read them.
@@ -151,30 +150,30 @@ TEST(StridedFillDtypeCoverage, QInt8Strided) {
     // Should not throw and should encode 3 -> qval=3, stored as int8(3)
     ASSERT_NO_THROW(view.fill_(3.0));
     // Verify via int_repr of the view
-    auto repr = view.int_repr();
+    auto repr = view.int_repr().cpu();
     const int8_t* p = repr.data<int8_t>();
-    for (int64_t i = 0; i < view.numel(); ++i)
+    for (int64_t i = 0; i < repr.numel(); ++i)
         EXPECT_EQ(p[i], static_cast<int8_t>(3))
             << "QInt8 StridedFill storage mismatch at i=" << i;
 }
 
-TEST(StridedFillDtypeCoverage, QUInt8Strided) {
-    auto t = tz::empty({4, 4}, tz::DType::QUInt8);
+TEST_P(StridedFillDtypeCoverage, QUInt8Strided) {
+    auto t = tz::empty({4, 4}, tz::DType::QUInt8, device);
     auto view = t.transpose(0, 1);
     ASSERT_FALSE(view.is_contiguous());
     view.set_quantization_params(1.0, 0);
     ASSERT_NO_THROW(view.fill_(5.0));
-    auto repr = view.int_repr();
+    auto repr = view.int_repr().cpu();
     EXPECT_EQ(repr.dtype(), tz::DType::UInt8);
     const uint8_t* p = repr.data<uint8_t>();
-    for (int64_t i = 0; i < view.numel(); ++i)
+    for (int64_t i = 0; i < repr.numel(); ++i)
         EXPECT_EQ(p[i], static_cast<uint8_t>(5))
             << "QUInt8 StridedFill storage mismatch at i=" << i;
 }
 
 // Quantized without params must throw, not silently no-op.
-TEST(StridedFillDtypeCoverage, QInt8NoParamsThrows) {
-    auto t = tz::empty({4, 4}, tz::DType::QInt8);
+TEST_P(StridedFillDtypeCoverage, QInt8NoParamsThrows) {
+    auto t = tz::empty({4, 4}, tz::DType::QInt8, device);
     auto view = t.transpose(0, 1);
     ASSERT_FALSE(view.is_contiguous());
     // Do NOT call set_quantization_params -- q_scale() == 0.0 must throw
@@ -182,8 +181,8 @@ TEST(StridedFillDtypeCoverage, QInt8NoParamsThrows) {
 }
 
 // QUInt8 without params must also throw (parity with QInt8 above).
-TEST(StridedFillDtypeCoverage, QUInt8NoParamsThrows) {
-    auto t = tz::empty({4, 4}, tz::DType::QUInt8);
+TEST_P(StridedFillDtypeCoverage, QUInt8NoParamsThrows) {
+    auto t = tz::empty({4, 4}, tz::DType::QUInt8, device);
     auto view = t.transpose(0, 1);
     ASSERT_FALSE(view.is_contiguous());
     // Do NOT call set_quantization_params -- q_scale() == 0.0 must throw
@@ -191,9 +190,9 @@ TEST(StridedFillDtypeCoverage, QUInt8NoParamsThrows) {
 }
 
 // QInt4x2 without params must throw (parity with QInt8/QUInt8 above).
-TEST(StridedFillDtypeCoverage, QInt4x2NoParamsThrows) {
+TEST_P(StridedFillDtypeCoverage, QInt4x2NoParamsThrows) {
     // QInt4x2 packed shape: {4, 4} logical → {4, 2} packed bytes
-    auto t = tz::empty({4, 4}, tz::DType::QInt4x2);
+    auto t = tz::empty({4, 4}, tz::DType::QInt4x2, device);
     auto view = t.transpose(0, 1);
     ASSERT_FALSE(view.is_contiguous());
     // Do NOT call set_quantization_params -- q_scale() == 0.0 must throw
@@ -213,9 +212,9 @@ TEST(StridedFillDtypeCoverage, QInt4x2NoParamsThrows) {
 // kernel and tensor.cpp's inline CPU fill loop. This test exercises the
 // correctness of the fix for the achievable case (all nibbles in visited bytes
 // get the fill value) plus preservation of unvisited bytes.
-TEST(StridedFillDtypeCoverage, QInt4x2StridedPreservesAdjacentNibble) {
+TEST_P(StridedFillDtypeCoverage, QInt4x2StridedPreservesAdjacentNibble) {
     // Create a {4, 2} packed QInt4x2 tensor (represents {4, 4} logical values).
-    auto t = tz::empty({4, 4}, tz::DType::QInt4x2);
+    auto t = tz::empty({4, 4}, tz::DType::QInt4x2, device);
     t.set_quantization_params(1.0, 0);
 
     // Step 1: fill everything to 3.0 (qval=3, both nibbles = 0x3 in every byte).
@@ -236,11 +235,17 @@ TEST(StridedFillDtypeCoverage, QInt4x2StridedPreservesAdjacentNibble) {
     // Specifically: low nibble = 0xE, high nibble = 0xE → byte = 0xEE.
     const uint8_t expected_byte = static_cast<uint8_t>(
         (static_cast<uint8_t>(-2 & 0xF)) | (static_cast<uint8_t>((-2 & 0xF) << 4)));
-    auto* raw = reinterpret_cast<const uint8_t*>(t.data_ptr());
-    const int64_t n_bytes = t.numel();  // numel() = number of packed bytes
+    auto t_cpu = t.cpu();
+    auto* raw = reinterpret_cast<const uint8_t*>(t_cpu.data_ptr());
+    const int64_t n_bytes = t_cpu.numel();  // numel() = number of packed bytes
     for (int64_t b = 0; b < n_bytes; ++b) {
         EXPECT_EQ(raw[b], expected_byte)
             << "QInt4x2 strided fill: byte " << b
             << " has wrong value after fill_(-2.0) on transposed view";
     }
 }
+
+// Fan every TEST_P above over all five backends. BackendTest::SetUp skips a
+// backend that is physically absent on the host; a present backend that does
+// not implement a given strided-fill dtype throws → the corresponding cell FAILS.
+INSTANTIATE_BACKEND_TESTS(StridedFillDtypeCoverage);
