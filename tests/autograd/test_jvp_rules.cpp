@@ -873,6 +873,16 @@ TEST_P(JVPRulesTest, LinalgLDLSolve_JVP_MatchesFD) {
     w4_verify_single(OpId::LinalgLDLSolve, {f[0], f[1], B}, {0,2}, a, 1e-3);
 }
 
+// Geqrf JVP: packed (R, reflectors) + tau. dlarfg recurrence dual-propagated.
+TEST_P(JVPRulesTest, Geqrf_JVP_MatchesFD) {
+    if (device != Device::cpu()) return;
+    OpAttributes a;
+    Tensor A = w4_randf64({4,3}, 201) * 0.5;
+    { double* d = A.data<double>(); for (int i=0;i<3;++i) d[i*3+i] += 3.0; }
+    w4_verify(OpId::Geqrf, {A}, {0}, 0, a, 1e-4);  // d(packed)
+    w4_verify(OpId::Geqrf, {A}, {0}, 1, a, 1e-4);  // d(tau)
+}
+
 // NOTE: LinalgLU / LinalgSVD / LinalgEig / LDLFactor / Geqrf / RNN-forward JVP
 // adapters are drafted (LU/SVD parked in jvp_rules.cpp) but do not yet pass
 // this finite-difference gradcheck, so their OpIds remain registered to the

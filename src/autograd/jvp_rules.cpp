@@ -5709,8 +5709,12 @@ TENZOR_JVP_NONDIFF(jvp_adapter_nondiff_cholesky_inverse,
     "CholeskyInverse JVP requires the saved L factor and the inverse output; "
     "not yet implemented.")
 TENZOR_JVP_NONDIFF(jvp_adapter_nondiff_lobpcg,
-    "LOBPCG JVP requires the saved eigen-pair and a Sylvester-equation "
-    "update plus the preconditioner-tangent; not yet implemented.")
+    "LOBPCG returns only the k extreme eigenpairs. The eigenvalue tangent "
+    "dλ_i = v_iᵀ dA v_i is well defined, but the eigenvector tangent "
+    "dv_i = Σ_j v_j (v_jᵀ dA v_i)/(λ_i−λ_j) sums over the FULL spectrum — the "
+    "(k+1)-th eigenpair (absent from the k-subset output) contributes a "
+    "dominant term — so a correct dV cannot be formed from the op's output. "
+    "For a differentiable symmetric eigendecomposition use LinalgEigh.")
 
 // Sequence-level RNN forwards: implementable via per-step replay of the cell
 // rules, but the cell-level forward Functions are the supported entry point
@@ -8632,6 +8636,93 @@ JvpResult jvp_adapter_linalg_ldl_solve_s15(std::span<const Tensor> primals,
     return JvpResult{ std::move(X), std::move(dX) };
 }
 
+// Geqrf: A → (packed[R above/on diag, reflectors below], tau). The Householder
+// QR is inherently sequential (each reflector depends on the previous trailing
+// update), so the forward tangent is obtained by dual-propagating the standard
+// LAPACK dlarfg recurrence (β=−sign(x₀)‖x‖, τ=(β−x₀)/β, vᵢ=xᵢ/(x₀−β)) on host
+// buffers — consistent with geqrf's forward being a host/LAPACK routine and
+// with the LU adapter's host-side pivot handling. Primals come from the op;
+// only the tangent is computed here. Restricted to rank-2 inputs.
+JvpMultiResult jvp_adapter_geqrf_s15(std::span<const Tensor> primals,
+                                     std::span<const Tensor> tangents,
+                                     const OpAttributes& attrs) {
+    if (primals.empty()) {
+        throw std::runtime_error("jvp_adapter_geqrf_s15: expected 1 input (A)");
+    }
+    const Tensor& A = primals[0];
+    if (A.ndim() != 2) {
+        throw NonDifferentiable("Geqrf forward-mode JVP is implemented for rank-2 inputs only.");
+    }
+    Tensor dA = jvp_zeros_like_or(A, tangents.empty() ? Tensor() : tangents[0]);
+
+    const int64_t m = A.shape()[0];
+    const int64_t n = A.shape()[1];
+    const int64_t k = std::min(m, n);
+
+    Tensor Acpu  = A.to(Device::cpu()).to(DType::Float64).contiguous();
+    Tensor dAcpu = dA.to(Device::cpu()).to(DType::Float64).contiguous();
+    std::vector<double> Ap(Acpu.data<double>(),  Acpu.data<double>()  + m * n);
+    std::vector<double> Ad(dAcpu.data<double>(), dAcpu.data<double>() + m * n);
+    std::vector<double> dtau(static_cast<size_t>(k), 0.0);
+
+    std::vector<double> v(static_cast<size_t>(m)), dv(static_cast<size_t>(m));
+    for (int64_t j = 0; j < k; ++j) {
+        double nrm2 = 0.0, dnrm2 = 0.0;
+        for (int64_t i = j; i < m; ++i) {
+            double a = Ap[i * n + j], da = Ad[i * n + j];
+            nrm2 += a * a; dnrm2 += 2.0 * a * da;
+        }
+        double nrm = std::sqrt(nrm2);
+        if (nrm == 0.0) { dtau[j] = 0.0; continue; }
+        double dnrm = dnrm2 / (2.0 * nrm);
+        double x0 = Ap[j * n + j], dx0 = Ad[j * n + j];
+        double s = (x0 >= 0.0) ? 1.0 : -1.0;
+        double beta = -s * nrm, dbeta = -s * dnrm;
+        double tau_j = (beta - x0) / beta;
+        // d[(β−x₀)/β] = (dβ−dx₀)/β − (β−x₀)dβ/β²
+        dtau[j] = (dbeta - dx0) / beta - (beta - x0) * dbeta / (beta * beta);
+        double denom = x0 - beta, ddenom = dx0 - dbeta;
+
+        for (int64_t i = 0; i < m; ++i) { v[i] = 0.0; dv[i] = 0.0; }
+        v[j] = 1.0;
+        for (int64_t i = j + 1; i < m; ++i) {
+            double a = Ap[i * n + j], da = Ad[i * n + j];
+            v[i]  = a / denom;
+            dv[i] = (da * denom - a * ddenom) / (denom * denom);
+        }
+        // Apply H_j = I − τ v vᵀ to trailing columns c > j (rows j..m-1).
+        for (int64_t c = j + 1; c < n; ++c) {
+            double w = 0.0, dw = 0.0;
+            for (int64_t i = j; i < m; ++i) {
+                w  += v[i] * Ap[i * n + c];
+                dw += dv[i] * Ap[i * n + c] + v[i] * Ad[i * n + c];
+            }
+            for (int64_t i = j; i < m; ++i) {
+                double old = Ap[i * n + c], dold = Ad[i * n + c];
+                Ap[i * n + c] = old - tau_j * v[i] * w;
+                Ad[i * n + c] = dold - (dtau[j] * v[i] * w + tau_j * dv[i] * w + tau_j * v[i] * dw);
+            }
+        }
+        // Column j: R diagonal = β, reflectors v_i (i>j) below.
+        Ap[j * n + j] = beta;  Ad[j * n + j] = dbeta;
+        for (int64_t i = j + 1; i < m; ++i) { Ap[i * n + j] = v[i]; Ad[i * n + j] = dv[i]; }
+    }
+
+    Tensor packed_tan_cpu(std::vector<int64_t>{m, n}, DType::Float64, Device::cpu());
+    std::copy(Ad.begin(), Ad.end(), packed_tan_cpu.data<double>());
+    Tensor tau_tan_cpu(std::vector<int64_t>{k}, DType::Float64, Device::cpu());
+    std::copy(dtau.begin(), dtau.end(), tau_tan_cpu.data<double>());
+
+    auto outs = tenzor::dispatch(OpId::Geqrf, std::vector<Tensor>{A}, attrs);
+    Tensor packed_tan = packed_tan_cpu.to(A.dtype()).to(A.device());
+    Tensor tau_tan    = tau_tan_cpu.to(outs[1].dtype()).to(outs[1].device());
+
+    JvpMultiResult result;
+    result.primals  = { outs[0], outs[1] };
+    result.tangents = { std::move(packed_tan), std::move(tau_tan) };
+    return result;
+}
+
 // ============================================================================
 // Wave-4 JVP: BatchNorm2dForward (single-output kernel; inputs (x, mean, var),
 // attr Eps; output y = (x - mean) * rstd, rstd = 1/sqrt(var + eps)). mean/var
@@ -9226,7 +9317,7 @@ void register_builtin_jvp_rules() {
     // S-final: solve / inverse family — closed-form JVP, gradchecked.
     register_jvp_rule       (OpId::LinalgLUSolve,        &jvp_adapter_lu_solve_s15);
     register_jvp_rule       (OpId::LinalgCholeskySolve,  &jvp_adapter_cholesky_solve_s15);
-    register_jvp_rule_multi(OpId::Geqrf,                &jvp_adapter_nondiff_geqrf);
+    register_jvp_rule_multi(OpId::Geqrf,                &jvp_adapter_geqrf_s15);
     register_jvp_rule       (OpId::Ormqr,                &jvp_adapter_ormqr_s15);
     register_jvp_rule       (OpId::TensorInv,            &jvp_adapter_tensor_inv_s15);
     register_jvp_rule       (OpId::TensorSolve,          &jvp_adapter_tensor_solve_s15);
