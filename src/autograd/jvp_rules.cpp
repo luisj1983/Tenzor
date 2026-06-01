@@ -8426,6 +8426,100 @@ JvpMultiResult jvp_adapter_linalg_eig_s15(std::span<const Tensor> primals,
     return result;
 }
 
+// Build the full (m×m) orthogonal factor Q = ∏_{i<k}(I − τ_i v_i v_iᵀ) from the
+// LAPACK elementary-reflector representation together with its forward tangent.
+// v_i is column i of (tril(reflectors,-1) + I) (unit diagonal, zeros above);
+// reflectors' strict-upper triangle and diagonal are not part of the reflectors
+// (orgqr/ormqr ignore them), so only tril(dR,-1) contributes to dv_i. Q is a
+// smooth function of (reflectors, τ) away from degenerate reflectors.
+inline std::pair<Tensor, Tensor> householder_q_and_dq(
+        const Tensor& reflectors, const Tensor& dR,
+        const Tensor& tau, const Tensor& dtau) {
+    const int64_t m = reflectors.shape()[reflectors.ndim() - 2];
+    const int64_t n = reflectors.shape()[reflectors.ndim() - 1];
+    const int64_t k = tau.shape().back();
+    const DType dt = reflectors.dtype();
+    const Device dev = reflectors.device();
+
+    Tensor Vmat  = tenzor::add(tenzor::tril(reflectors, -1), tenzor::eye(m, n, dt, dev));
+    Tensor dVmat = tenzor::tril(dR, -1);
+
+    Tensor Q  = tenzor::eye(m, std::nullopt, dt, dev);
+    Tensor dQ = tenzor::zeros({m, m}, dt, dev);
+    for (int64_t i = 0; i < k; ++i) {
+        Tensor v   = Vmat.slice(1, i, i + 1);    // (m,1)
+        Tensor dv  = dVmat.slice(1, i, i + 1);
+        Tensor ti  = tau.slice(0, i, i + 1).reshape({1, 1});
+        Tensor dti = dtau.slice(0, i, i + 1).reshape({1, 1});
+        Tensor vt  = tenzor::transpose(v, -1, -2);
+        Tensor dvt = tenzor::transpose(dv, -1, -2);
+
+        Tensor Qv  = tenzor::matmul(Q, v);                            // (m,1)
+        Tensor dQv = tenzor::add(tenzor::matmul(dQ, v), tenzor::matmul(Q, dv));
+        Tensor QvVt = tenzor::matmul(Qv, vt);                         // (m,m)
+
+        // Q ← Q − τ_i (Q v_i) v_iᵀ
+        Tensor Q_new = tenzor::sub(Q, tenzor::mul(ti, QvVt));
+        // dQ ← dQ − τ_i(dQv v_iᵀ + Q v_i dv_iᵀ) − dτ_i (Q v_i) v_iᵀ
+        Tensor term = tenzor::add(tenzor::matmul(dQv, vt), tenzor::matmul(Qv, dvt));
+        Tensor dQ_new = tenzor::sub(dQ, tenzor::mul(ti, term));
+        dQ_new = tenzor::sub(dQ_new, tenzor::mul(dti, QvVt));
+        Q = std::move(Q_new); dQ = std::move(dQ_new);
+    }
+    return { std::move(Q), std::move(dQ) };
+}
+
+// LinalgHouseholder (orgqr): Y = Q (first n columns). Smooth in (reflectors, τ).
+JvpResult jvp_adapter_linalg_householder_s15(std::span<const Tensor> primals,
+                                             std::span<const Tensor> tangents,
+                                             const OpAttributes&) {
+    if (primals.size() != 2) {
+        throw std::runtime_error(
+            "jvp_adapter_linalg_householder_s15: expected 2 inputs (reflectors, tau)");
+    }
+    const Tensor& reflectors = primals[0];
+    const Tensor& tau = primals[1];
+    Tensor dR   = jvp_zeros_like_or(reflectors, tangents.empty()    ? Tensor() : tangents[0]);
+    Tensor dtau = jvp_zeros_like_or(tau,        tangents.size() < 2 ? Tensor() : tangents[1]);
+
+    auto [Q, dQ] = householder_q_and_dq(reflectors, dR, tau, dtau);
+    const int64_t n = reflectors.shape()[reflectors.ndim() - 1];
+    return JvpResult{ Q.slice(1, 0, n), dQ.slice(1, 0, n) };
+}
+
+// Ormqr: Y = op(Q) B (left) or B op(Q) (right), op = transpose? Qᵀ : Q.
+// dY follows the product rule with dQ from the reflector representation.
+JvpResult jvp_adapter_ormqr_s15(std::span<const Tensor> primals,
+                                std::span<const Tensor> tangents,
+                                const OpAttributes& attrs) {
+    if (primals.size() != 3) {
+        throw std::runtime_error(
+            "jvp_adapter_ormqr_s15: expected 3 inputs (reflectors, tau, B)");
+    }
+    const bool left  = attrs.get_int(AttrKey::Left, 1) != 0;
+    const bool trans = attrs.get_int(AttrKey::TransposeQ, 0) != 0;
+    const Tensor& reflectors = primals[0];
+    const Tensor& tau = primals[1];
+    const Tensor& B   = primals[2];
+    Tensor dR   = jvp_zeros_like_or(reflectors, tangents.empty()    ? Tensor() : tangents[0]);
+    Tensor dtau = jvp_zeros_like_or(tau,        tangents.size() < 2 ? Tensor() : tangents[1]);
+    Tensor dB   = jvp_zeros_like_or(B,          tangents.size() < 3 ? Tensor() : tangents[2]);
+
+    auto [Q, dQ] = householder_q_and_dq(reflectors, dR, tau, dtau);
+    Tensor opQ  = trans ? tenzor::transpose(Q,  -1, -2) : Q;
+    Tensor dopQ = trans ? tenzor::transpose(dQ, -1, -2) : dQ;
+
+    Tensor Y, dY;
+    if (left) {
+        Y  = tenzor::matmul(opQ, B);
+        dY = tenzor::add(tenzor::matmul(dopQ, B), tenzor::matmul(opQ, dB));
+    } else {
+        Y  = tenzor::matmul(B, opQ);
+        dY = tenzor::add(tenzor::matmul(dB, opQ), tenzor::matmul(B, dopQ));
+    }
+    return JvpResult{ std::move(Y), std::move(dY) };
+}
+
 // ============================================================================
 // Wave-4 JVP: BatchNorm2dForward (single-output kernel; inputs (x, mean, var),
 // attr Eps; output y = (x - mean) * rstd, rstd = 1/sqrt(var + eps)). mean/var
@@ -9014,14 +9108,14 @@ void register_builtin_jvp_rules() {
     register_jvp_rule_multi(OpId::LinalgQR,             &jvp_adapter_linalg_qr_s15);
     register_jvp_rule_multi(OpId::LinalgEig,            &jvp_adapter_linalg_eig_s15);
     register_jvp_rule_multi(OpId::LinalgLU,             &jvp_adapter_linalg_lu_s15);
-    register_jvp_rule       (OpId::LinalgHouseholder,    &jvp_adapter_nondiff_linalg_householder);
+    register_jvp_rule       (OpId::LinalgHouseholder,    &jvp_adapter_linalg_householder_s15);
     register_jvp_rule_multi(OpId::LinalgLDLFactor,      &jvp_adapter_nondiff_linalg_ldl_factor);
     register_jvp_rule       (OpId::LinalgLDLSolve,       &jvp_adapter_nondiff_linalg_ldl_solve);
     // S-final: solve / inverse family — closed-form JVP, gradchecked.
     register_jvp_rule       (OpId::LinalgLUSolve,        &jvp_adapter_lu_solve_s15);
     register_jvp_rule       (OpId::LinalgCholeskySolve,  &jvp_adapter_cholesky_solve_s15);
     register_jvp_rule_multi(OpId::Geqrf,                &jvp_adapter_nondiff_geqrf);
-    register_jvp_rule       (OpId::Ormqr,                &jvp_adapter_nondiff_ormqr);
+    register_jvp_rule       (OpId::Ormqr,                &jvp_adapter_ormqr_s15);
     register_jvp_rule       (OpId::TensorInv,            &jvp_adapter_tensor_inv_s15);
     register_jvp_rule       (OpId::TensorSolve,          &jvp_adapter_tensor_solve_s15);
     register_jvp_rule       (OpId::SolveTriangular,      &jvp_adapter_solve_triangular_s15);

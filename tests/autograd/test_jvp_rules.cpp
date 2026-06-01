@@ -818,6 +818,31 @@ TEST_P(JVPRulesTest, LinalgEig_JVP_MatchesFD) {
     EXPECT_LT(max_abs_diff_d(recon, dA), 1e-3);
 }
 
+// LinalgHouseholder (orgqr) JVP: Q from elementary reflectors (smooth in
+// (reflectors, tau)). Inputs generated via geqrf so they are a valid pair.
+TEST_P(JVPRulesTest, LinalgHouseholder_JVP_MatchesFD) {
+    if (device != Device::cpu()) return;
+    OpAttributes a;
+    Tensor A = w4_randf64({4,3}, 181) * 0.5;
+    { double* d = A.data<double>(); for (int i=0;i<3;++i) d[i*3+i] += 3.0; }
+    auto qr = tenzor::dispatch(OpId::Geqrf, std::vector<Tensor>{A}, a);
+    w4_verify_single(OpId::LinalgHouseholder, {qr[0], qr[1]}, {0,1}, a, 1e-4);
+}
+
+// Ormqr JVP: Y = Q B (left, no transpose), Q from reflectors. Smooth in all
+// three inputs.
+TEST_P(JVPRulesTest, Ormqr_JVP_MatchesFD) {
+    if (device != Device::cpu()) return;
+    OpAttributes a;
+    a.set(AttrKey::Left, true);
+    a.set(AttrKey::TransposeQ, false);
+    Tensor A = w4_randf64({4,3}, 183) * 0.5;
+    { double* d = A.data<double>(); for (int i=0;i<3;++i) d[i*3+i] += 3.0; }
+    auto qr = tenzor::dispatch(OpId::Geqrf, std::vector<Tensor>{A}, OpAttributes{});
+    Tensor B = w4_randf64({4,2}, 184);
+    w4_verify_single(OpId::Ormqr, {qr[0], qr[1], B}, {0,1,2}, a, 1e-4);
+}
+
 // NOTE: LinalgLU / LinalgSVD / LinalgEig / LDLFactor / Geqrf / RNN-forward JVP
 // adapters are drafted (LU/SVD parked in jvp_rules.cpp) but do not yet pass
 // this finite-difference gradcheck, so their OpIds remain registered to the
