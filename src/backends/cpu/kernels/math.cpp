@@ -2852,7 +2852,28 @@ auto clamp_kernel(const Tensor& input, double min_val, double max_val) -> Tensor
         }
 
     } else {
-        throw std::runtime_error("clamp operation only supports Float16, BFloat16, Float32 and Float64 dtypes");
+        // Integer dtypes: clamp is dtype-agnostic. Matches PyTorch, which
+        // supports torch.clamp on integer tensors.
+        auto run = [&]<typename T>() {
+            const T* in_data = input.data<T>();
+            T* out_data = result.data<T>();
+            T lo = static_cast<T>(min_val), hi = static_cast<T>(max_val);
+            for (size_t i = 0; i < n; ++i)
+                out_data[i] = std::max(std::min(in_data[i], hi), lo);
+        };
+        switch (input.dtype()) {
+            case DType::Int8:   run.template operator()<int8_t>();   break;
+            case DType::Int16:  run.template operator()<int16_t>();  break;
+            case DType::Int32:  run.template operator()<int32_t>();  break;
+            case DType::Int64:  run.template operator()<int64_t>();  break;
+            case DType::UInt8:  run.template operator()<uint8_t>();  break;
+            case DType::UInt16: run.template operator()<uint16_t>(); break;
+            case DType::UInt32: run.template operator()<uint32_t>(); break;
+            case DType::UInt64: run.template operator()<uint64_t>(); break;
+            default:
+                throw std::runtime_error(
+                    "clamp: unsupported dtype " + std::string(dtype_name(input.dtype())));
+        }
     }
 
     return result;
@@ -2936,7 +2957,26 @@ auto clamp_min_kernel(const Tensor& input, double min_val) -> Tensor {
         }
 
     } else {
-        throw std::runtime_error("clamp_min operation only supports Float16, BFloat16, Float32 and Float64 dtypes");
+        // Integer dtypes (PyTorch supports torch.clamp_min on integers).
+        auto run = [&]<typename T>() {
+            const T* in_data = input.data<T>();
+            T* out_data = result.data<T>();
+            T lo = static_cast<T>(min_val);
+            for (size_t i = 0; i < n; ++i) out_data[i] = std::max(in_data[i], lo);
+        };
+        switch (input.dtype()) {
+            case DType::Int8:   run.template operator()<int8_t>();   break;
+            case DType::Int16:  run.template operator()<int16_t>();  break;
+            case DType::Int32:  run.template operator()<int32_t>();  break;
+            case DType::Int64:  run.template operator()<int64_t>();  break;
+            case DType::UInt8:  run.template operator()<uint8_t>();  break;
+            case DType::UInt16: run.template operator()<uint16_t>(); break;
+            case DType::UInt32: run.template operator()<uint32_t>(); break;
+            case DType::UInt64: run.template operator()<uint64_t>(); break;
+            default:
+                throw std::runtime_error(
+                    "clamp_min: unsupported dtype " + std::string(dtype_name(input.dtype())));
+        }
     }
 
     return result;
@@ -3020,7 +3060,26 @@ auto clamp_max_kernel(const Tensor& input, double max_val) -> Tensor {
         }
 
     } else {
-        throw std::runtime_error("clamp_max operation only supports Float16, BFloat16, Float32 and Float64 dtypes");
+        // Integer dtypes (PyTorch supports torch.clamp_max on integers).
+        auto run = [&]<typename T>() {
+            const T* in_data = input.data<T>();
+            T* out_data = result.data<T>();
+            T hi = static_cast<T>(max_val);
+            for (size_t i = 0; i < n; ++i) out_data[i] = std::min(in_data[i], hi);
+        };
+        switch (input.dtype()) {
+            case DType::Int8:   run.template operator()<int8_t>();   break;
+            case DType::Int16:  run.template operator()<int16_t>();  break;
+            case DType::Int32:  run.template operator()<int32_t>();  break;
+            case DType::Int64:  run.template operator()<int64_t>();  break;
+            case DType::UInt8:  run.template operator()<uint8_t>();  break;
+            case DType::UInt16: run.template operator()<uint16_t>(); break;
+            case DType::UInt32: run.template operator()<uint32_t>(); break;
+            case DType::UInt64: run.template operator()<uint64_t>(); break;
+            default:
+                throw std::runtime_error(
+                    "clamp_max: unsupported dtype " + std::string(dtype_name(input.dtype())));
+        }
     }
 
     return result;
@@ -3328,7 +3387,39 @@ auto pow_kernel(const Tensor& input, double exponent) -> Tensor {
         }
 
     } else {
-        throw std::runtime_error("pow operation only supports Float32, Float64, Float16, and BFloat16 dtypes");
+        // Integer dtypes (PyTorch supports torch.pow on integer tensors). Use
+        // exact integer exponentiation for non-negative integer exponents (the
+        // PyTorch-valid case); otherwise fall back to a rounded double power.
+        const double e = exponent;
+        const bool int_exp = (e == std::floor(e)) && e >= 0.0;
+        const long long k = static_cast<long long>(e);
+        auto run = [&]<typename T>() {
+            const T* in_data = input.data<T>();
+            T* out_data = result.data<T>();
+            for (size_t i = 0; i < n; ++i) {
+                if (int_exp) {
+                    T base = in_data[i], r = T(1);
+                    for (long long j = 0; j < k; ++j) r *= base;
+                    out_data[i] = r;
+                } else {
+                    out_data[i] = static_cast<T>(
+                        std::llround(std::pow(static_cast<double>(in_data[i]), e)));
+                }
+            }
+        };
+        switch (input.dtype()) {
+            case DType::Int8:   run.template operator()<int8_t>();   break;
+            case DType::Int16:  run.template operator()<int16_t>();  break;
+            case DType::Int32:  run.template operator()<int32_t>();  break;
+            case DType::Int64:  run.template operator()<int64_t>();  break;
+            case DType::UInt8:  run.template operator()<uint8_t>();  break;
+            case DType::UInt16: run.template operator()<uint16_t>(); break;
+            case DType::UInt32: run.template operator()<uint32_t>(); break;
+            case DType::UInt64: run.template operator()<uint64_t>(); break;
+            default:
+                throw std::runtime_error(
+                    "pow: unsupported dtype " + std::string(dtype_name(input.dtype())));
+        }
     }
 
     return result;
@@ -3380,7 +3471,31 @@ auto sign_kernel(const Tensor& input) -> Tensor {
         }
 
     } else {
-        throw std::runtime_error("sign operation only supports Float32, Float64, Float16, and BFloat16 dtypes");
+        // Integer dtypes (PyTorch supports torch.sign on integers): -1/0/1 for
+        // signed, 0/1 for unsigned.
+        auto run = [&]<typename T>() {
+            const T* in_data = input.data<T>();
+            T* out_data = result.data<T>();
+            for (size_t i = 0; i < n; ++i) {
+                if constexpr (std::is_signed_v<T>)
+                    out_data[i] = static_cast<T>((in_data[i] > 0) - (in_data[i] < 0));
+                else
+                    out_data[i] = static_cast<T>(in_data[i] > 0 ? 1 : 0);
+            }
+        };
+        switch (input.dtype()) {
+            case DType::Int8:   run.template operator()<int8_t>();   break;
+            case DType::Int16:  run.template operator()<int16_t>();  break;
+            case DType::Int32:  run.template operator()<int32_t>();  break;
+            case DType::Int64:  run.template operator()<int64_t>();  break;
+            case DType::UInt8:  run.template operator()<uint8_t>();  break;
+            case DType::UInt16: run.template operator()<uint16_t>(); break;
+            case DType::UInt32: run.template operator()<uint32_t>(); break;
+            case DType::UInt64: run.template operator()<uint64_t>(); break;
+            default:
+                throw std::runtime_error(
+                    "sign: unsupported dtype " + std::string(dtype_name(input.dtype())));
+        }
     }
 
     return result;

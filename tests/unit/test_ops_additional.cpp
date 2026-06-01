@@ -17,6 +17,7 @@
 #include <gtest/gtest.h>
 #include "../backend_test_fixture.hpp"
 #include <cmath>
+#include <complex>
 #include <limits>
 
 using namespace tenzor;
@@ -616,6 +617,103 @@ TEST_P(IndexingOpsTest, NonzeroOperation) {
     auto indices = nonzero(t);
     EXPECT_EQ(indices.shape()[0], 3) << "Failed on " << device.to_string();
     EXPECT_EQ(indices.shape()[1], 2) << "Failed on " << device.to_string();
+}
+
+// Regression (release-audit WS6): the old `is_nonzero` default branch
+// reinterpreted complex storage as float* and tested only the first 4 bytes
+// (the real part), so a value with zero real part but nonzero imaginary part
+// (e.g. 0 + 1i) was silently misclassified as zero. nonzero() copies the input
+// to CPU internally, so a CPU complex tensor exercises the fixed path.
+TEST(NonzeroComplexTest, ZeroRealNonzeroImagCountsAsNonzero) {
+    tenzor::initialize();  // plain TEST() bypasses the param-fixture's init
+    auto t = zeros({4}, DType::Complex64, Device::cpu());
+    auto* p = static_cast<std::complex<float>*>(t.data_ptr());
+    p[0] = {0.0f, 0.0f};  // zero -> excluded
+    p[1] = {0.0f, 1.0f};  // nonzero (imaginary only) -> the bug case
+    p[2] = {2.0f, 0.0f};  // nonzero (real only)
+    p[3] = {0.0f, 0.0f};  // zero -> excluded
+
+    auto indices = nonzero(t);
+    ASSERT_EQ(indices.shape()[0], 2);  // exactly indices 1 and 2
+    ASSERT_EQ(indices.shape()[1], 1);
+    auto idx = indices.to(Device::cpu());
+    auto* ip = static_cast<const int64_t*>(idx.data_ptr());
+    EXPECT_EQ(ip[0], 1);  // the (0 + 1i) element must be reported
+    EXPECT_EQ(ip[1], 2);
+}
+
+// Integer clamp/sign/pow (release-audit WS16): PyTorch supports these on integer
+// tensors; previously every backend threw. Now CPU/CUDA/ROCm/OneAPI compute them.
+TEST(IntegerMathOpsTest, ClampSignPowInt32) {
+    tenzor::initialize();
+    auto t = zeros({5}, DType::Int32, Device::cpu());
+    auto* p = static_cast<int32_t*>(t.data_ptr());
+    p[0] = -5; p[1] = -1; p[2] = 0; p[3] = 3; p[4] = 10;
+
+    auto cl = clamp(t, -2.0, 4.0);
+    auto* c = static_cast<const int32_t*>(cl.data_ptr());
+    EXPECT_EQ(c[0], -2); EXPECT_EQ(c[1], -1); EXPECT_EQ(c[2], 0);
+    EXPECT_EQ(c[3], 3);  EXPECT_EQ(c[4], 4);
+
+    auto sg = sign(t);
+    auto* s = static_cast<const int32_t*>(sg.data_ptr());
+    EXPECT_EQ(s[0], -1); EXPECT_EQ(s[1], -1); EXPECT_EQ(s[2], 0);
+    EXPECT_EQ(s[3], 1);  EXPECT_EQ(s[4], 1);
+
+    auto t2 = zeros({4}, DType::Int64, Device::cpu());
+    auto* q = static_cast<int64_t*>(t2.data_ptr());
+    q[0] = 2; q[1] = 3; q[2] = 4; q[3] = 5;
+    auto pw = pow(t2, 2.0);  // exact integer exponentiation
+    auto* r = static_cast<const int64_t*>(pw.data_ptr());
+    EXPECT_EQ(r[0], 4); EXPECT_EQ(r[1], 9); EXPECT_EQ(r[2], 16); EXPECT_EQ(r[3], 25);
+}
+
+// Cross-backend integer clamp/sign/pow parity (WS16 + Vulkan integer shaders):
+// every available GPU backend must match the CPU result byte-for-byte for all
+// integer dtypes. Backends that aren't built/available are skipped.
+TEST(IntegerMathOpsTest, GpuBackendsMatchCpu) {
+    tenzor::initialize();
+    auto bytes_eq = [](const Tensor& a, const Tensor& b) {
+        auto x = a.to(Device::cpu()).contiguous();
+        auto y = b.to(Device::cpu()).contiguous();
+        if (x.numel() != y.numel() || x.dtype() != y.dtype()) return false;
+        return std::memcmp(x.data_ptr(), y.data_ptr(),
+                           static_cast<size_t>(x.numel()) * dtype_size(x.dtype())) == 0;
+    };
+    // One representative signed-and-unsigned-safe tensor (Int32) is enough to
+    // exercise the per-backend integer dispatch end to end.
+    auto base = zeros({7}, DType::Int32, Device::cpu());
+    auto* p = static_cast<int32_t*>(base.data_ptr());
+    p[0]=-100; p[1]=-5; p[2]=-1; p[3]=0; p[4]=3; p[5]=10; p[6]=100;
+    auto ref_clamp = clamp(base, -2.0, 4.0);
+    auto ref_sign  = sign(base);
+    auto ref_pow   = pow(base, 2.0);
+
+    const Device::Type devs[] = {Device::Type::Vulkan, Device::Type::CUDA,
+                                 Device::Type::ROCm, Device::Type::OneAPI};
+    for (auto dt : devs) {
+        Tensor t;
+        try { t = base.to(Device(dt, 0)); }
+        catch (...) { continue; }  // backend not available
+        EXPECT_TRUE(bytes_eq(ref_clamp, clamp(t, -2.0, 4.0)));
+        EXPECT_TRUE(bytes_eq(ref_sign, sign(t)));
+        EXPECT_TRUE(bytes_eq(ref_pow, pow(t, 2.0)));
+    }
+}
+
+TEST(NonzeroComplexTest, Complex128ZeroRealNonzeroImag) {
+    tenzor::initialize();
+    auto t = zeros({3}, DType::Complex128, Device::cpu());
+    auto* p = static_cast<std::complex<double>*>(t.data_ptr());
+    p[0] = {0.0, 0.0};
+    p[1] = {0.0, 2.0};  // nonzero (imaginary only)
+    p[2] = {5.0, 0.0};
+    auto indices = nonzero(t);
+    ASSERT_EQ(indices.shape()[0], 2);
+    auto idx = indices.to(Device::cpu());
+    auto* ip = static_cast<const int64_t*>(idx.data_ptr());
+    EXPECT_EQ(ip[0], 1);
+    EXPECT_EQ(ip[1], 2);
 }
 
 TEST_P(IndexingOpsTest, SelectOperation) {
