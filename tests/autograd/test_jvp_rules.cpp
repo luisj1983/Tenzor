@@ -569,6 +569,88 @@ TEST_P(JVPRulesTest, Sort_JVP_MatchesFD) {
     w4_verify(OpId::Sort, { w4_randf64({4,8},72) }, {0}, 0, a, 1e-7);  // d(values)
 }
 
+// SolveTriangular forward-mode JVP. Upper-triangular, diagonally dominant A
+// keeps the system well-conditioned. A X = B => A dX = dB - dA X.
+TEST_P(JVPRulesTest, SolveTriangular_JVP_MatchesFD) {
+    if (device != Device::cpu()) return;
+    OpAttributes a;
+    a.set(AttrKey::Upper, true);
+    a.set(AttrKey::UnitTriangular, false);
+    Tensor A = w4_randf64({4,4}, 81) * 0.3;
+    {
+        double* d = A.data<double>();
+        for (int i=0;i<4;++i) for (int j=0;j<i;++j) d[i*4+j] = 0.0;  // upper
+        for (int i=0;i<4;++i) d[i*4+i] += (4.0 + i);                 // diag-dominant
+    }
+    Tensor B = w4_randf64({4,3}, 82);
+    w4_verify_single(OpId::SolveTriangular, {A, B}, {0,1}, a, 1e-4);
+}
+
+// CholeskySolve / CholeskyInverse forward-mode JVP. Build a lower-triangular
+// factor L with positive diagonal directly, so A = L L^T is SPD.
+TEST_P(JVPRulesTest, CholeskySolve_JVP_MatchesFD) {
+    if (device != Device::cpu()) return;
+    OpAttributes a;
+    a.set(AttrKey::Upper, false);
+    Tensor L = w4_randf64({4,4}, 83) * 0.3;
+    {
+        double* d = L.data<double>();
+        for (int i=0;i<4;++i) for (int j=i+1;j<4;++j) d[i*4+j] = 0.0;  // lower
+        for (int i=0;i<4;++i) d[i*4+i] += (3.0 + i);                   // pos diag
+    }
+    Tensor B = w4_randf64({4,3}, 84);
+    w4_verify_single(OpId::LinalgCholeskySolve, {B, L}, {0,1}, a, 1e-4);
+}
+
+TEST_P(JVPRulesTest, CholeskyInverse_JVP_MatchesFD) {
+    if (device != Device::cpu()) return;
+    OpAttributes a;
+    a.set(AttrKey::Upper, false);
+    Tensor L = w4_randf64({4,4}, 85) * 0.3;
+    {
+        double* d = L.data<double>();
+        for (int i=0;i<4;++i) for (int j=i+1;j<4;++j) d[i*4+j] = 0.0;
+        for (int i=0;i<4;++i) d[i*4+i] += (3.0 + i);
+    }
+    w4_verify_single(OpId::CholeskyInverse, {L}, {0}, a, 1e-4);
+}
+
+// TensorInv forward-mode JVP. A is (2,2,2,2) viewed as a 4x4 matrix (ind=2);
+// flat-diagonal dominance keeps the inverse well-conditioned.
+TEST_P(JVPRulesTest, TensorInv_JVP_MatchesFD) {
+    if (device != Device::cpu()) return;
+    OpAttributes a;
+    a.set(AttrKey::Ind, static_cast<int64_t>(2));
+    Tensor A = w4_randf64({2,2,2,2}, 86) * 0.3;
+    { double* d = A.data<double>(); for (int i=0;i<4;++i) d[i*4+i] += (4.0 + i); }
+    w4_verify_single(OpId::TensorInv, {A}, {0}, a, 1e-4);
+}
+
+// TensorSolve forward-mode JVP. A is (2,2,2,2) -> 4x4, B is (2,2) -> rhs of 4.
+TEST_P(JVPRulesTest, TensorSolve_JVP_MatchesFD) {
+    if (device != Device::cpu()) return;
+    OpAttributes a;
+    Tensor A = w4_randf64({2,2,2,2}, 87) * 0.3;
+    { double* d = A.data<double>(); for (int i=0;i<4;++i) d[i*4+i] += (4.0 + i); }
+    Tensor B = w4_randf64({2,2}, 88);
+    w4_verify_single(OpId::TensorSolve, {A, B}, {0,1}, a, 1e-4);
+}
+
+// LinalgLUSolve forward-mode JVP. Build a packed LU matrix directly with a
+// dominant diagonal (well-conditioned U, small unit-L) and identity pivots
+// (no row interchange), then perturb both the packed factors and B.
+TEST_P(JVPRulesTest, LUSolve_JVP_MatchesFD) {
+    if (device != Device::cpu()) return;
+    OpAttributes a;
+    Tensor LU = w4_randf64({4,4}, 89) * 0.3;
+    { double* d = LU.data<double>(); for (int i=0;i<4;++i) d[i*4+i] += (4.0 + i); }
+    Tensor piv(std::vector<int64_t>{4}, DType::Int32, Device::cpu());
+    { int32_t* p = piv.data<int32_t>(); for (int i=0;i<4;++i) p[i] = i + 1; }
+    Tensor B = w4_randf64({4,3}, 90);
+    // pivots (index 1) carry no tangent; verify the LU_data and B paths.
+    w4_verify_single(OpId::LinalgLUSolve, {LU, piv, B}, {0,2}, a, 1e-4);
+}
+
 // NOTE: LinalgLU / LinalgSVD / LinalgEig / LDLFactor / Geqrf / RNN-forward JVP
 // adapters are drafted (LU/SVD parked in jvp_rules.cpp) but do not yet pass
 // this finite-difference gradcheck, so their OpIds remain registered to the

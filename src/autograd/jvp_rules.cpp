@@ -7747,6 +7747,204 @@ JvpMultiResult jvp_adapter_linalg_qr_s15(std::span<const Tensor> primals,
     return result;
 }
 
+// ---------------- Tier E: triangular / Cholesky solve family ---------------
+//
+// These ops are linear-system solves with no gauge freedom: the tangent is
+// obtained by differentiating the defining equation once and reapplying the
+// same (factor-reusing) solve. All are gradcheck-clean against finite
+// differences for generic well-conditioned inputs.
+
+// SolveTriangular: X = A^{-1} B with A triangular (upper/lower, optional unit
+// diagonal). A X = B  =>  A dX = dB - dA X  =>  dX = solve_triangular(A, rhs).
+// Only the relevant triangle of dA participates (the solve ignores the rest),
+// so dA is masked to the same triangle for a consistent tangent.
+JvpResult jvp_adapter_solve_triangular_s15(std::span<const Tensor> primals,
+                                           std::span<const Tensor> tangents,
+                                           const OpAttributes& attrs) {
+    if (primals.size() != 2) {
+        throw std::runtime_error(
+            "jvp_adapter_solve_triangular_s15: expected 2 inputs (A, B)");
+    }
+    const bool upper  = attrs.get_int(AttrKey::Upper, 1) != 0;
+    const bool unitri = attrs.get_int(AttrKey::UnitTriangular, 0) != 0;
+    const Tensor& A = primals[0];
+    const Tensor& B = primals[1];
+    Tensor dA = jvp_zeros_like_or(A, tangents.empty()    ? Tensor() : tangents[0]);
+    Tensor dB = jvp_zeros_like_or(B, tangents.size() < 2 ? Tensor() : tangents[1]);
+
+    Tensor X = tenzor::linalg::solve_triangular(A, B, upper, unitri);
+    Tensor dA_tri = upper ? tenzor::triu(dA, unitri ? 1 : 0)
+                          : tenzor::tril(dA, unitri ? -1 : 0);
+    Tensor rhs = tenzor::sub(dB, tenzor::matmul(dA_tri, X));
+    Tensor dX = tenzor::linalg::solve_triangular(A, rhs, upper, unitri);
+    return JvpResult{ std::move(X), std::move(dX) };
+}
+
+// CholeskySolve: X = cholesky_solve(B, L) solves A X = B with A = L L^T (lower)
+// or A = U^T U (upper).  A dX = dB - dA X, dA = dL L^T + L dL^T (lower form).
+// dX = cholesky_solve(dB - dA X, L) reuses the same factor.
+JvpResult jvp_adapter_cholesky_solve_s15(std::span<const Tensor> primals,
+                                         std::span<const Tensor> tangents,
+                                         const OpAttributes& attrs) {
+    if (primals.size() != 2) {
+        throw std::runtime_error(
+            "jvp_adapter_cholesky_solve_s15: expected 2 inputs (B, L)");
+    }
+    const bool upper = attrs.get_int(AttrKey::Upper, 0) != 0;
+    const Tensor& B = primals[0];
+    const Tensor& L = primals[1];
+    Tensor dB = jvp_zeros_like_or(B, tangents.empty()    ? Tensor() : tangents[0]);
+    Tensor dL = jvp_zeros_like_or(L, tangents.size() < 2 ? Tensor() : tangents[1]);
+    // cholesky_solve uses only the relevant triangle of the factor; mask the
+    // factor tangent to the same triangle so the JVP matches the op exactly.
+    dL = upper ? tenzor::triu(dL, 0) : tenzor::tril(dL, 0);
+
+    Tensor X  = tenzor::linalg::cholesky_solve(B, L, upper);
+    Tensor Lt  = tenzor::transpose(L, -2, -1);
+    Tensor dLt = tenzor::transpose(dL, -2, -1);
+    Tensor dA = upper
+        ? tenzor::add(tenzor::matmul(dLt, L), tenzor::matmul(Lt, dL))   // dU^T U + U^T dU
+        : tenzor::add(tenzor::matmul(dL, Lt), tenzor::matmul(L, dLt));  // dL L^T + L dL^T
+    Tensor rhs = tenzor::sub(dB, tenzor::matmul(dA, X));
+    Tensor dX = tenzor::linalg::cholesky_solve(rhs, L, upper);
+    return JvpResult{ std::move(X), std::move(dX) };
+}
+
+// CholeskyInverse: Y = cholesky_inverse(L) = A^{-1}, A = L L^T (lower) or
+// U^T U (upper).  dY = -Y dA Y, dA = dL L^T + L dL^T (lower form).
+JvpResult jvp_adapter_cholesky_inverse_s15(std::span<const Tensor> primals,
+                                           std::span<const Tensor> tangents,
+                                           const OpAttributes& attrs) {
+    if (primals.empty()) {
+        throw std::runtime_error(
+            "jvp_adapter_cholesky_inverse_s15: expected 1 input (L)");
+    }
+    const bool upper = attrs.get_int(AttrKey::Upper, 0) != 0;
+    const Tensor& L = primals[0];
+    Tensor dL = jvp_zeros_like_or(L, tangents.empty() ? Tensor() : tangents[0]);
+    // cholesky_inverse uses only the relevant triangle of the factor.
+    dL = upper ? tenzor::triu(dL, 0) : tenzor::tril(dL, 0);
+
+    Tensor Y  = tenzor::linalg::cholesky_inverse(L, upper);
+    Tensor Lt  = tenzor::transpose(L, -2, -1);
+    Tensor dLt = tenzor::transpose(dL, -2, -1);
+    Tensor dA = upper
+        ? tenzor::add(tenzor::matmul(dLt, L), tenzor::matmul(Lt, dL))
+        : tenzor::add(tenzor::matmul(dL, Lt), tenzor::matmul(L, dLt));
+    Tensor dY = tenzor::neg(tenzor::matmul(tenzor::matmul(Y, dA), Y));
+    return JvpResult{ std::move(Y), std::move(dY) };
+}
+
+// TensorInv: generalized inverse. Reshape A to a square matrix M, invert,
+// reshape back. Y = inv(M); dY = reshape(-Minv dM Minv).
+JvpResult jvp_adapter_tensor_inv_s15(std::span<const Tensor> primals,
+                                     std::span<const Tensor> tangents,
+                                     const OpAttributes& attrs) {
+    if (primals.empty()) {
+        throw std::runtime_error("jvp_adapter_tensor_inv_s15: expected 1 input (A)");
+    }
+    const int64_t ind = attrs.get_int(AttrKey::Ind, 2);
+    const Tensor& A = primals[0];
+    Tensor dA = jvp_zeros_like_or(A, tangents.empty() ? Tensor() : tangents[0]);
+    auto shape = A.shape();
+    const int64_t ndim = static_cast<int64_t>(shape.size());
+    int64_t rows = 1; for (int64_t i = 0; i < ind; ++i)    rows *= shape[i];
+    int64_t cols = 1; for (int64_t i = ind; i < ndim; ++i) cols *= shape[i];
+
+    Tensor M    = tenzor::reshape(A,  {rows, cols});
+    Tensor dM   = tenzor::reshape(dA, {rows, cols});
+    Tensor Minv = tenzor::linalg::inv(M);
+    Tensor dMinv = tenzor::neg(tenzor::matmul(tenzor::matmul(Minv, dM), Minv));
+
+    std::vector<int64_t> out_shape;
+    for (int64_t i = ind; i < ndim; ++i) out_shape.push_back(shape[i]);
+    for (int64_t i = 0; i < ind; ++i)    out_shape.push_back(shape[i]);
+    Tensor Y  = tenzor::reshape(Minv,  out_shape);
+    Tensor dY = tenzor::reshape(dMinv, out_shape);
+    return JvpResult{ std::move(Y), std::move(dY) };
+}
+
+// TensorSolve: A X = B with A reshaped to a square matrix. The differential is
+// the ordinary linear-solve rule applied to the flattened system, then
+// reshaped to the solution's tensor shape.
+JvpResult jvp_adapter_tensor_solve_s15(std::span<const Tensor> primals,
+                                       std::span<const Tensor> tangents,
+                                       const OpAttributes&) {
+    if (primals.size() != 2) {
+        throw std::runtime_error("jvp_adapter_tensor_solve_s15: expected 2 inputs (A, B)");
+    }
+    const Tensor& A = primals[0];
+    const Tensor& B = primals[1];
+    Tensor dA = jvp_zeros_like_or(A, tangents.empty()    ? Tensor() : tangents[0]);
+    Tensor dB = jvp_zeros_like_or(B, tangents.size() < 2 ? Tensor() : tangents[1]);
+
+    auto a_shape = A.shape();
+    auto b_shape = B.shape();
+    const int64_t a_ndim = static_cast<int64_t>(a_shape.size());
+    const int64_t b_ndim = static_cast<int64_t>(b_shape.size());
+    int64_t rhs_size = 1; for (int64_t i = 0; i < b_ndim; ++i) rhs_size *= b_shape[i];
+    int64_t total = 1;    for (int64_t i = 0; i < a_ndim; ++i) total *= a_shape[i];
+    int64_t lhs_size = total / rhs_size;
+
+    Tensor A2d  = tenzor::reshape(A,  {rhs_size, lhs_size});
+    Tensor dA2d = tenzor::reshape(dA, {rhs_size, lhs_size});
+    Tensor Bcol  = tenzor::unsqueeze(tenzor::reshape(B,  {rhs_size}), -1);
+    Tensor dBcol = tenzor::unsqueeze(tenzor::reshape(dB, {rhs_size}), -1);
+
+    Tensor Xcol  = tenzor::linalg::solve(A2d, Bcol);
+    Tensor rhs   = tenzor::sub(dBcol, tenzor::matmul(dA2d, Xcol));
+    Tensor dXcol = tenzor::linalg::solve(A2d, rhs);
+
+    Tensor Xflat  = tenzor::squeeze(Xcol,  -1);
+    Tensor dXflat = tenzor::squeeze(dXcol, -1);
+    std::vector<int64_t> x_shape;
+    for (int64_t i = b_ndim; i < a_ndim; ++i) x_shape.push_back(a_shape[i]);
+    if (x_shape.empty()) {
+        return JvpResult{ std::move(Xflat), std::move(dXflat) };
+    }
+    Tensor Y  = tenzor::reshape(Xflat,  x_shape);
+    Tensor dY = tenzor::reshape(dXflat, x_shape);
+    return JvpResult{ std::move(Y), std::move(dY) };
+}
+
+// LinalgLUSolve: X = A^{-1} B from packed LU factors (A = P L U). The tangent
+// w.r.t. the packed factors and B is, using A^{-1} = U^{-1} L^{-1} P^{-1} so
+// the permutation cancels:
+//   dX = A^{-1} dB - U^{-1} L^{-1} (dL U + L dU) X,
+// where L = unit-lower(LU)+I, U = upper(LU), dL = strict-lower(dLU),
+// dU = upper(dLU). A^{-1}(·) reuses lu_solve; the L/U solves are triangular.
+// The integer pivot tensor carries no tangent.
+JvpResult jvp_adapter_lu_solve_s15(std::span<const Tensor> primals,
+                                   std::span<const Tensor> tangents,
+                                   const OpAttributes&) {
+    if (primals.size() != 3) {
+        throw std::runtime_error(
+            "jvp_adapter_lu_solve_s15: expected 3 inputs (LU_data, pivots, B)");
+    }
+    const Tensor& LU = primals[0];
+    const Tensor& piv = primals[1];
+    const Tensor& B   = primals[2];
+    Tensor dLU = jvp_zeros_like_or(LU, tangents.empty()    ? Tensor() : tangents[0]);
+    Tensor dB  = jvp_zeros_like_or(B,  tangents.size() < 3 ? Tensor() : tangents[2]);
+
+    const int64_t n = LU.shape().back();
+    Tensor I = tenzor::eye(n, std::nullopt, LU.dtype(), LU.device());
+    Tensor L  = tenzor::add(tenzor::tril(LU, -1), I);
+    Tensor U  = tenzor::triu(LU, 0);
+    Tensor dL = tenzor::tril(dLU, -1);
+    Tensor dU = tenzor::triu(dLU, 0);
+
+    Tensor X = tenzor::linalg::lu_solve(LU, piv, B);
+    // (dL U + L dU) X
+    Tensor dAX = tenzor::add(tenzor::matmul(dL, tenzor::matmul(U, X)),
+                             tenzor::matmul(L,  tenzor::matmul(dU, X)));
+    // U^{-1} L^{-1} dAX  (L unit-lower, U upper).
+    Tensor t = tenzor::linalg::solve_triangular(L, dAX, /*upper=*/false, /*unitri=*/true);
+    t        = tenzor::linalg::solve_triangular(U, t,   /*upper=*/true,  /*unitri=*/false);
+    Tensor dX = tenzor::sub(tenzor::linalg::lu_solve(LU, piv, dB), t);
+    return JvpResult{ std::move(X), std::move(dX) };
+}
+
 // ============================================================================
 // Wave-4 JVP: LU factorization with partial pivoting (P A = L U, L unit-lower,
 // U upper; outputs {P, L, U}). The permutation P is piecewise-constant (zero
@@ -8456,14 +8654,15 @@ void register_builtin_jvp_rules() {
     register_jvp_rule       (OpId::LinalgHouseholder,    &jvp_adapter_nondiff_linalg_householder);
     register_jvp_rule_multi(OpId::LinalgLDLFactor,      &jvp_adapter_nondiff_linalg_ldl_factor);
     register_jvp_rule       (OpId::LinalgLDLSolve,       &jvp_adapter_nondiff_linalg_ldl_solve);
-    register_jvp_rule       (OpId::LinalgLUSolve,        &jvp_adapter_nondiff_linalg_lu_solve);
-    register_jvp_rule       (OpId::LinalgCholeskySolve,  &jvp_adapter_nondiff_linalg_cholesky_solve);
+    // S-final: solve / inverse family — closed-form JVP, gradchecked.
+    register_jvp_rule       (OpId::LinalgLUSolve,        &jvp_adapter_lu_solve_s15);
+    register_jvp_rule       (OpId::LinalgCholeskySolve,  &jvp_adapter_cholesky_solve_s15);
     register_jvp_rule_multi(OpId::Geqrf,                &jvp_adapter_nondiff_geqrf);
     register_jvp_rule       (OpId::Ormqr,                &jvp_adapter_nondiff_ormqr);
-    register_jvp_rule       (OpId::TensorInv,            &jvp_adapter_nondiff_tensor_inv);
-    register_jvp_rule       (OpId::TensorSolve,          &jvp_adapter_nondiff_tensor_solve);
-    register_jvp_rule       (OpId::SolveTriangular,      &jvp_adapter_nondiff_solve_triangular);
-    register_jvp_rule       (OpId::CholeskyInverse,      &jvp_adapter_nondiff_cholesky_inverse);
+    register_jvp_rule       (OpId::TensorInv,            &jvp_adapter_tensor_inv_s15);
+    register_jvp_rule       (OpId::TensorSolve,          &jvp_adapter_tensor_solve_s15);
+    register_jvp_rule       (OpId::SolveTriangular,      &jvp_adapter_solve_triangular_s15);
+    register_jvp_rule       (OpId::CholeskyInverse,      &jvp_adapter_cholesky_inverse_s15);
     register_jvp_rule       (OpId::LOBPCG,               &jvp_adapter_nondiff_lobpcg);
 
     // Sequence-level RNNs.
