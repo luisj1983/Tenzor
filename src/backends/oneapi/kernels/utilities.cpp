@@ -8,6 +8,11 @@
 namespace tenzor {
 namespace oneapi {
 
+// Templated SYCL kernel-name tags for integer clamp/sign (PyTorch integer
+// support; matches the CPU/CUDA/ROCm integer paths for cross-backend parity).
+template <typename T> class OneapiClampIntKernel;
+template <typename T> class OneapiSignIntKernel;
+
 // SYCL Kernel name classes
 struct CatKernelFloat32 {};
 struct CatKernelFloat64 {};
@@ -414,7 +419,28 @@ auto clamp_kernel(const Tensor& input, float min_val, float max_val, sycl::queue
         }).wait();
     }
     else {
-        throw std::runtime_error("clamp_kernel: unsupported dtype");
+        // Remaining integer dtypes (Int32 handled above). Matches CPU/CUDA/ROCm.
+        auto run = [&]<typename T>() {
+            const T* in_ptr = get_data_ptr<const T>(input);
+            T* out_ptr = get_data_ptr<T>(output);
+            const T lo = static_cast<T>(min_val), hi = static_cast<T>(max_val);
+            queue.parallel_for<OneapiClampIntKernel<T>>(sycl::range<1>(numel),
+                [=](sycl::id<1> idx) {
+                    const T v = in_ptr[idx];
+                    out_ptr[idx] = sycl::min(sycl::max(v, lo), hi);
+                }).wait();
+        };
+        switch (input.dtype()) {
+            case DType::Int8:   run.template operator()<int8_t>();   break;
+            case DType::Int16:  run.template operator()<int16_t>();  break;
+            case DType::Int64:  run.template operator()<int64_t>();  break;
+            case DType::UInt8:  run.template operator()<uint8_t>();  break;
+            case DType::UInt16: run.template operator()<uint16_t>(); break;
+            case DType::UInt32: run.template operator()<uint32_t>(); break;
+            case DType::UInt64: run.template operator()<uint64_t>(); break;
+            default:
+                throw std::runtime_error("clamp_kernel: unsupported dtype");
+        }
     }
 
     return output;
@@ -527,7 +553,30 @@ auto sign_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
         }).wait();
     }
     else {
-        throw std::runtime_error("sign_kernel: unsupported dtype");
+        // Remaining integer dtypes (Int32 handled above): -1/0/1 signed, 0/1 unsigned.
+        auto run = [&]<typename T>() {
+            const T* in_ptr = get_data_ptr<const T>(input);
+            T* out_ptr = get_data_ptr<T>(output);
+            const bool is_signed = (T(-1) < T(0));
+            queue.parallel_for<OneapiSignIntKernel<T>>(sycl::range<1>(numel),
+                [=](sycl::id<1> idx) {
+                    const T v = in_ptr[idx];
+                    const int neg = (is_signed && v < T(0)) ? 1 : 0;
+                    const int pos = (v > T(0)) ? 1 : 0;
+                    out_ptr[idx] = static_cast<T>(pos - neg);
+                }).wait();
+        };
+        switch (input.dtype()) {
+            case DType::Int8:   run.template operator()<int8_t>();   break;
+            case DType::Int16:  run.template operator()<int16_t>();  break;
+            case DType::Int64:  run.template operator()<int64_t>();  break;
+            case DType::UInt8:  run.template operator()<uint8_t>();  break;
+            case DType::UInt16: run.template operator()<uint16_t>(); break;
+            case DType::UInt32: run.template operator()<uint32_t>(); break;
+            case DType::UInt64: run.template operator()<uint64_t>(); break;
+            default:
+                throw std::runtime_error("sign_kernel: unsupported dtype");
+        }
     }
 
     return output;

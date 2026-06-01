@@ -1,0 +1,40 @@
+#version 450
+
+// Integer clamp for 16-bit dtypes (Int16 / UInt16). Two elements per uint word.
+// All 16-bit values (signed or unsigned) and their bounds fit in a 32-bit int,
+// so the clamp comparison is done in `int`; is_signed only controls whether the
+// 16-bit lane is sign-extended or zero-extended on unpack.
+layout(local_size_x_id = 0) in;
+
+layout(binding = 0) readonly buffer Input  { uint input_data[]; };
+layout(binding = 1)          buffer Output { uint output_data[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint n_elements;
+    uint is_signed;
+    int  lo;
+    int  hi;
+} p;
+
+int unpack16(uint word, uint off, bool sgn) {
+    uint raw = (word >> (off * 16u)) & 0xFFFFu;
+    return sgn ? (int(raw << 16) >> 16) : int(raw);
+}
+
+void main() {
+    uint w = gl_GlobalInvocationID.x;
+    uint base = w * 2u;
+    if (base >= p.n_elements) return;
+
+    bool sgn = p.is_signed != 0u;
+    uint inw = input_data[w];
+    uint outw = 0u;
+    for (uint k = 0u; k < 2u; ++k) {
+        uint idx = base + k;
+        if (idx >= p.n_elements) break;
+        int v = unpack16(inw, k, sgn);
+        v = max(p.lo, min(p.hi, v));
+        outw |= (uint(v) & 0xFFFFu) << (k * 16u);
+    }
+    output_data[w] = outw;
+}

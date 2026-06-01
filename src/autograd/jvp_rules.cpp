@@ -4425,15 +4425,98 @@ JvpResult jvp_adapter_grid_sample(std::span<const Tensor> primals,
     if (primals.size() < 2 || primals.size() != tangents.size()) {
         throw std::runtime_error("jvp_adapter_grid_sample: expected 2 inputs (input, grid)");
     }
-    if (tangents[1].numel() != 0) {
-        throw NonDifferentiable(
-            "GridSample forward-mode JVP w.r.t. grid is not implemented; "
-            "grid carries non-zero tangent. Only input-side JVP is supported.");
-    }
+    const Tensor& input = primals[0];
+    const Tensor& grid  = primals[1];
+
     auto primal = tenzor::dispatch(OpId::GridSample,
-                                   std::vector<Tensor>{primals[0], primals[1]}, attrs)[0];
-    auto tangent = tenzor::dispatch(OpId::GridSample,
-                                    std::vector<Tensor>{tangents[0], primals[1]}, attrs)[0];
+                                   std::vector<Tensor>{input, grid}, attrs)[0];
+
+    // Input-side tangent: grid_sample is linear in the input, so its JVP is the
+    // same sampling applied to the input tangent.
+    Tensor tangent;
+    if (tangents[0].numel() != 0) {
+        tangent = tenzor::dispatch(OpId::GridSample,
+                                   std::vector<Tensor>{tangents[0], grid}, attrs)[0];
+    } else {
+        tangent = tenzor::zeros_like(primal);
+    }
+
+    // Grid-side tangent. The sampled output O(g) varies with the grid; its JVP
+    // is sum_d (dO/dg_d) * tangent_grid_d. For bilinear interpolation dO/dfx
+    // within a cell equals (column at x0+1) - (column at x0), obtained exactly
+    // by re-sampling the input at the floor/ceil integer pixel columns with the
+    // SAME interpolated y (and vice-versa for y). Reusing GridSample for the
+    // shifted samples means padding mode and align_corners boundary handling are
+    // inherited exactly. (Previously this threw NonDifferentiable.)
+    if (tangents[1].numel() != 0) {
+        std::string mode = std::string(attrs.get_string(AttrKey::Mode, "bilinear"));
+        if (mode == "nearest") {
+            // Nearest sampling is piecewise-constant in the grid → zero
+            // grid-side contribution (a.e.). Nothing to add.
+        } else if (mode == "bilinear" && input.ndim() == 4) {
+            const bool align = attrs.get_bool(AttrKey::AlignCorners, false);
+            const int64_t N = input.shape()[0];
+            const int64_t H = input.shape()[2];
+            const int64_t W = input.shape()[3];
+            const int64_t Hg = grid.shape()[1];
+            const int64_t Wg = grid.shape()[2];
+
+            auto denorm = [&](const Tensor& g, int64_t size) -> Tensor {
+                // align:    (g+1)*0.5*(size-1)
+                // !align: ((g+1)*size - 1)*0.5
+                return align
+                    ? tenzor::mul(tenzor::add(g, 1.0), 0.5 * static_cast<double>(size - 1))
+                    : tenzor::mul(tenzor::sub(tenzor::mul(tenzor::add(g, 1.0),
+                                                          static_cast<double>(size)), 1.0), 0.5);
+            };
+            auto renorm = [&](const Tensor& ix, int64_t size) -> Tensor {
+                // inverse of denorm
+                return align
+                    ? tenzor::sub(tenzor::mul(ix, 2.0 / static_cast<double>(size - 1)), 1.0)
+                    : tenzor::sub(tenzor::mul(tenzor::add(tenzor::mul(ix, 2.0), 1.0),
+                                              1.0 / static_cast<double>(size)), 1.0);
+            };
+            const double dscale_x = align ? 0.5 * static_cast<double>(W - 1)
+                                          : 0.5 * static_cast<double>(W);
+            const double dscale_y = align ? 0.5 * static_cast<double>(H - 1)
+                                          : 0.5 * static_cast<double>(H);
+
+            auto gx = tenzor::narrow(grid, 3, 0, 1);  // [N,Hg,Wg,1]
+            auto gy = tenzor::narrow(grid, 3, 1, 1);
+
+            // dO/dgx via integer-x columns (y kept at its interpolated value).
+            auto ix0 = tenzor::floor(denorm(gx, W));
+            auto gx0 = renorm(ix0, W);
+            auto gx1 = renorm(tenzor::add(ix0, 1.0), W);
+            auto col_l = tenzor::dispatch(OpId::GridSample,
+                std::vector<Tensor>{input, tenzor::cat(std::vector<Tensor>{gx0, gy}, 3)}, attrs)[0];
+            auto col_r = tenzor::dispatch(OpId::GridSample,
+                std::vector<Tensor>{input, tenzor::cat(std::vector<Tensor>{gx1, gy}, 3)}, attrs)[0];
+            auto dOdgx = tenzor::mul(tenzor::sub(col_r, col_l), dscale_x);  // [N,C,Hg,Wg]
+            auto tgx = tenzor::reshape(tenzor::narrow(tangents[1], 3, 0, 1), {N, 1, Hg, Wg});
+            auto contrib_x = tenzor::mul(dOdgx, tgx);  // broadcast over channels
+
+            // dO/dgy via integer-y rows (x kept at its interpolated value).
+            auto iy0 = tenzor::floor(denorm(gy, H));
+            auto gy0 = renorm(iy0, H);
+            auto gy1 = renorm(tenzor::add(iy0, 1.0), H);
+            auto col_d = tenzor::dispatch(OpId::GridSample,
+                std::vector<Tensor>{input, tenzor::cat(std::vector<Tensor>{gx, gy0}, 3)}, attrs)[0];
+            auto col_u = tenzor::dispatch(OpId::GridSample,
+                std::vector<Tensor>{input, tenzor::cat(std::vector<Tensor>{gx, gy1}, 3)}, attrs)[0];
+            auto dOdgy = tenzor::mul(tenzor::sub(col_u, col_d), dscale_y);
+            auto tgy = tenzor::reshape(tenzor::narrow(tangents[1], 3, 1, 1), {N, 1, Hg, Wg});
+            auto contrib_y = tenzor::mul(dOdgy, tgy);
+
+            tangent = tenzor::add(tangent, tenzor::add(contrib_x, contrib_y));
+        } else {
+            throw NonDifferentiable(
+                "GridSample forward-mode JVP w.r.t. grid is implemented for 4D "
+                "'bilinear' and 'nearest' modes; got mode '" + mode + "' with " +
+                std::to_string(input.ndim()) + "D input.");
+        }
+    }
+
     return JvpResult{std::move(primal), std::move(tangent)};
 }
 

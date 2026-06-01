@@ -1,0 +1,34 @@
+#version 450
+
+// Integer clamp for 32-bit dtypes (Int32 / UInt32). One element per uint word.
+// is_signed selects signed vs unsigned comparison; lo/hi are the (already
+// type-cast) bounds passed as the raw 32-bit bit pattern.
+layout(local_size_x_id = 0) in;
+
+layout(binding = 0) readonly buffer Input  { uint input_data[]; };
+layout(binding = 1)          buffer Output { uint output_data[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint n_elements;
+    uint is_signed;
+    int  lo;   // bit pattern of the lower bound
+    int  hi;   // bit pattern of the upper bound
+} p;
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= p.n_elements) return;
+
+    uint raw = input_data[idx];
+    if (p.is_signed != 0u) {
+        int v = int(raw);
+        v = max(p.lo, min(p.hi, v));
+        output_data[idx] = uint(v);
+    } else {
+        uint v   = raw;
+        uint ulo = uint(p.lo);
+        uint uhi = uint(p.hi);
+        v = max(ulo, min(uhi, v));
+        output_data[idx] = v;
+    }
+}

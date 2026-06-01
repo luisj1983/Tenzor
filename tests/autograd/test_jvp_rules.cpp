@@ -889,5 +889,31 @@ TEST_P(JVPRulesTest, Geqrf_JVP_MatchesFD) {
 // NonDifferentiable thrower (forward-mode AD fails loudly rather than returning
 // a wrong tangent) until the analytic rule is gradcheck-clean.
 
+// GridSample forward-mode JVP w.r.t. the GRID (release-audit WS15). The grid
+// tangent previously threw NonDifferentiable; it is now computed analytically
+// for bilinear mode via shifted integer-pixel re-sampling and must match FD.
+TEST_P(JVPRulesTest, GridSample_GridJVP_MatchesFD) {
+    if (device != Device::cpu()) return;  // Float64 FD reference is CPU-side.
+    auto input = w4_randf64({1, 2, 5, 6}, 11);
+    auto grid  = w4_randf64({1, 4, 4, 2}, 12) * 0.5;  // mostly-interior coords
+    OpAttributes a;
+    a.set(AttrKey::Mode, std::string("bilinear"));
+    a.set(AttrKey::PaddingMode, std::string("zeros"));
+    a.set(AttrKey::AlignCorners, false);
+    // diff_primals = {1}: differentiate w.r.t. the grid (the fixed path).
+    w4_verify_single(OpId::GridSample, {input, grid}, {1}, a, 1e-5);
+}
+
+TEST_P(JVPRulesTest, GridSample_GridJVP_AlignCorners_MatchesFD) {
+    if (device != Device::cpu()) return;
+    auto input = w4_randf64({1, 3, 4, 4}, 13);
+    auto grid  = w4_randf64({1, 5, 5, 2}, 14) * 0.5;
+    OpAttributes a;
+    a.set(AttrKey::Mode, std::string("bilinear"));
+    a.set(AttrKey::PaddingMode, std::string("border"));
+    a.set(AttrKey::AlignCorners, true);
+    w4_verify_single(OpId::GridSample, {input, grid}, {1}, a, 1e-5);
+}
+
 INSTANTIATE_BACKEND_TESTS(JVPRulesTest);
 

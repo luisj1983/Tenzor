@@ -91,10 +91,53 @@ def test_creation_empty():
 
 def test_creation_randperm():
     """Test randperm creation."""
+    import numpy as np
     print("Testing randperm...")
     t = tz.randperm(10)
     assert t.shape == [10]
+    # Must be a valid permutation of [0, 10), not the unshuffled identity.
+    arr = np.sort(np.asarray(t.tensor() if hasattr(t, "tensor") else t).astype(np.int64).ravel())
+    assert np.array_equal(arr, np.arange(10)), "randperm is not a valid permutation"
+
+    # GPU randperm must produce a real on-device permutation (regression: the
+    # old non-CPU path silently returned the unshuffled arange identity).
+    for dev in ("vulkan", "cuda", "rocm", "oneapi"):
+        try:
+            g = tz.randperm(64, dev)
+        except Exception:
+            continue  # backend not built/available in this environment
+        garr = np.asarray((g.tensor() if hasattr(g, "tensor") else g).cpu()).astype(np.int64).ravel()
+        assert np.array_equal(np.sort(garr), np.arange(64)), f"{dev} randperm not a permutation"
+        assert not np.array_equal(garr, np.arange(64)), f"{dev} randperm returned identity"
+        print(f"  randperm {dev} OK")
     print("  randperm OK")
+
+
+def test_creation_meshgrid():
+    """meshgrid must match numpy and work on every device (regression: the old
+    host memcpy loop dereferenced device pointers and crashed on GPU tensors)."""
+    import numpy as np
+    print("Testing meshgrid...")
+    x = tz.arange(0, 3, 1)
+    y = tz.arange(0, 4, 1)
+    for indexing in ("ij", "xy"):
+        gx, gy = tz.meshgrid([x, y], indexing)
+        nx, ny = np.meshgrid(np.arange(3), np.arange(4), indexing=indexing)
+        assert np.array_equal(np.asarray(gx).astype(int), nx)
+        assert np.array_equal(np.asarray(gy).astype(int), ny)
+    # On-device meshgrid: must not crash and must match the CPU/numpy result.
+    refx, refy = np.meshgrid(np.arange(3), np.arange(4), indexing="ij")
+    for dev in ("vulkan", "cuda", "rocm", "oneapi"):
+        try:
+            xg = tz.arange(0, 3, 1).to(dev)
+            yg = tz.arange(0, 4, 1).to(dev)
+        except Exception:
+            continue
+        gx, gy = tz.meshgrid([xg, yg], "ij")
+        assert np.array_equal(np.asarray(gx.cpu()).astype(int), refx), f"{dev} meshgrid x"
+        assert np.array_equal(np.asarray(gy.cpu()).astype(int), refy), f"{dev} meshgrid y"
+        print(f"  meshgrid {dev} OK")
+    print("  meshgrid OK")
 
 
 def test_math_basic():
@@ -326,6 +369,7 @@ def main():
         test_creation_linspace()
         test_creation_empty()
         test_creation_randperm()
+        test_creation_meshgrid()
         test_math_basic()
         test_math_unary()
         test_math_matmul()

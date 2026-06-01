@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import numpy as np
 
+import tenzor as _tz
 from tenzor.tenzor_core import Tensor, Variable  # type: ignore
 
 from .distribution import (
@@ -11,7 +12,6 @@ from .distribution import (
     _shape_of,
     _to_variable,
     _wrap_numpy,
-    _require_scipy_special,
 )
 
 
@@ -57,15 +57,19 @@ class NegativeBinomial(Distribution):
         return _wrap_numpy(np.asarray(s, dtype=np.float32))
 
     def log_prob(self, value):
-        gammaln = _require_scipy_special().gammaln
-        v_np = np.asarray(_to_variable(value).tensor(), dtype=np.float64)
-        r_np = np.asarray(self.total_count.tensor(), dtype=np.float64)
+        # log p(x) = lgamma(x+r) - lgamma(r) - lgamma(x+1)
+        #            + r·log(1-p) + x·log(p).
+        # Built entirely with autograd-aware Variable ops so the gradient flows
+        # to BOTH the learnable total_count (r) and probs (p) — a numpy
+        # round-trip would detach both.  lgamma(x+1) is computed on-device from
+        # the (detached) value and contributes no gradient to either param.
+        value = _to_variable(value)
+        r = self.total_count
         eps = 1e-7
-        p_np = np.clip(np.asarray(self.probs.tensor(), dtype=np.float64),
-                       eps, 1.0 - eps)
-        out = (gammaln(v_np + r_np) - gammaln(r_np) - gammaln(v_np + 1.0)
-               + r_np * np.log(1.0 - p_np) + v_np * np.log(p_np))
-        return _wrap_numpy(out)
+        log_p = _tz.log(self.probs + eps)
+        log_1mp = _tz.log((1.0 - self.probs) + eps)
+        return (_tz.lgamma(value + r) - _tz.lgamma(r) - _tz.lgamma(value + 1.0)
+                + r * log_1mp + value * log_p)
 
     def entropy(self, n_samples: int = 10000, rng=None):
         """Monte-Carlo entropy estimate (no closed form)."""

@@ -49,6 +49,16 @@ auto lstm_cell_forward_kernel(
     int64_t hidden_size,
     sycl::queue& queue
 ) -> std::pair<Tensor, Tensor> {
+    // Float16: widen to Float32 on device, compute, narrow back. (BFloat16 has
+    // a native SYCL kernel below; Float16 previously fell through to the throw,
+    // so a fp16 LSTM cell crashed on OneAPI while ROCm/CPU handle it.)
+    if (gates.dtype() == DType::Float16) {
+        auto [h, c] = lstm_cell_forward_kernel(
+            gates.to(DType::Float32), c_prev.to(DType::Float32),
+            batch_size, hidden_size, queue);
+        return {h.to(DType::Float16), c.to(DType::Float16)};
+    }
+
     std::vector<int64_t> output_shape = {batch_size, hidden_size};
     Tensor h_out(output_shape, gates.dtype(), gates.device());
     Tensor c_out(output_shape, gates.dtype(), gates.device());
@@ -219,6 +229,15 @@ auto lstm_cell_backward_kernel(
     int64_t hidden_size,
     sycl::queue& queue
 ) -> std::pair<Tensor, Tensor> {
+    // Float16: widen to Float32 on device, compute, narrow each gradient back.
+    if (gates.dtype() == DType::Float16) {
+        auto [gg, gc] = lstm_cell_backward_kernel(
+            grad_h.to(DType::Float32), grad_c.to(DType::Float32),
+            gates.to(DType::Float32), c_prev.to(DType::Float32),
+            c_out.to(DType::Float32), batch_size, hidden_size, queue);
+        return {gg.to(DType::Float16), gc.to(DType::Float16)};
+    }
+
     std::vector<int64_t> gate_shape = {batch_size, 4 * hidden_size};
     std::vector<int64_t> state_shape = {batch_size, hidden_size};
 

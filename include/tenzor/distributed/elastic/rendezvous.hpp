@@ -12,11 +12,15 @@
 #include <chrono>
 #include <cstdint>
 #include <functional>
+#include <memory>
 #include <string>
 #include <vector>
 
 namespace tenzor {
 namespace distributed {
+
+class RendezvousStore;  // shared key-value store (gloo_backend.hpp)
+
 namespace elastic {
 
 /**
@@ -83,10 +87,21 @@ public:
     auto rank() const -> int32_t { return rank_; }
 
 private:
+    /// Lazily-created connection to the shared store. Held for the rendezvous
+    /// object's lifetime so a coordinator's master server keeps serving across
+    /// rounds (and after join() returns, while stragglers read the result).
+    auto ensure_store() -> RendezvousStore&;
+    /// Per-process unique worker identifier (hostname:pid).
+    auto worker_id() const -> std::string;
+
     RendezvousConfig config_;
+    std::unique_ptr<RendezvousStore> store_;
     int32_t rank_{-1};
     int32_t world_size_{0};
     int64_t round_{0};
+
+public:
+    ~C10dRendezvous();
 };
 
 } // namespace elastic

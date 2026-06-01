@@ -13,6 +13,7 @@
 #include <vector>
 #include <memory>
 #include <thread>
+#include <atomic>
 
 namespace tenzor {
 namespace distributed {
@@ -85,12 +86,24 @@ public:
      */
     auto check_key(const std::string& key) -> bool;
 
+    /**
+     * @brief Atomically add `delta` to the integer value at `key` (missing key
+     *        treated as 0) and return the new value.
+     *
+     * Used by the elastic rendezvous to allocate unique, monotonically
+     * increasing participant slots without a coordinator-election race. The
+     * increment is serialized by the master store's mutex.
+     */
+    auto add(const std::string& key, int64_t delta) -> int64_t;
+
 private:
     std::string master_addr_;
     int master_port_;
     int rank_;
     int world_size_;
     int socket_fd_{-1};
+    int listen_fd_{-1};                  ///< Master server listening socket.
+    std::atomic<bool> stop_{false};      ///< Signals the server thread to exit.
 
     auto connect_to_master() -> void;
     auto run_master_server() -> void;

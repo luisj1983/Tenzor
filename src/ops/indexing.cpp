@@ -8,6 +8,7 @@
 #include "tenzor/core/dtype.hpp"
 #include "tenzor/core/shape.hpp"
 #include <cstdint>
+#include <complex>
 #include <optional>
 #include <variant>
 
@@ -211,9 +212,24 @@ auto nonzero(const Tensor& input) -> Tensor {
             case DType::Int8:    return static_cast<const int8_t*>(input_cpu.data_ptr())[flat_idx] != 0;
             case DType::UInt8:   return static_cast<const uint8_t*>(input_cpu.data_ptr())[flat_idx] != 0;
             case DType::Bool:    return static_cast<const bool*>(input_cpu.data_ptr())[flat_idx];
+            case DType::UInt16:  return static_cast<const uint16_t*>(input_cpu.data_ptr())[flat_idx] != 0;
+            case DType::UInt32:  return static_cast<const uint32_t*>(input_cpu.data_ptr())[flat_idx] != 0;
+            case DType::UInt64:  return static_cast<const uint64_t*>(input_cpu.data_ptr())[flat_idx] != 0;
             case DType::Float16: return static_cast<float>(static_cast<const Float16*>(input_cpu.data_ptr())[flat_idx]) != 0.0f;
             case DType::BFloat16: return static_cast<float>(static_cast<const BFloat16*>(input_cpu.data_ptr())[flat_idx]) != 0.0f;
-            default: return static_cast<const float*>(input_cpu.data_ptr())[flat_idx] != 0.0f;
+            // Complex: nonzero iff the real OR imaginary part is nonzero. The
+            // old default reinterpreted complex storage as float* and tested
+            // only the first 4 bytes (the real part of Complex64 / half the real
+            // part of Complex128), silently misclassifying e.g. (0 + 1i).
+            case DType::Complex64:
+                return static_cast<const std::complex<float>*>(input_cpu.data_ptr())[flat_idx]
+                       != std::complex<float>(0.0f, 0.0f);
+            case DType::Complex128:
+                return static_cast<const std::complex<double>*>(input_cpu.data_ptr())[flat_idx]
+                       != std::complex<double>(0.0, 0.0);
+            default:
+                throw std::runtime_error(
+                    "nonzero: unsupported dtype " + std::string(dtype_name(input_cpu.dtype())));
         }
     };
 

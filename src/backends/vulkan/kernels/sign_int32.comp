@@ -1,0 +1,26 @@
+#version 450
+
+// Integer sign for 32-bit dtypes (Int32 / UInt32): -1/0/1 for signed, 0/1 for
+// unsigned. One element per uint word.
+layout(local_size_x_id = 0) in;
+
+layout(binding = 0) readonly buffer Input  { uint input_data[]; };
+layout(binding = 1)          buffer Output { uint output_data[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint n_elements;
+    uint is_signed;
+} p;
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= p.n_elements) return;
+    uint raw = input_data[idx];
+    if (p.is_signed != 0u) {
+        int v = int(raw);
+        int s = (v > 0 ? 1 : 0) - (v < 0 ? 1 : 0);
+        output_data[idx] = uint(s);
+    } else {
+        output_data[idx] = (raw > 0u) ? 1u : 0u;
+    }
+}

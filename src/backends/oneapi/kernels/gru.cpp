@@ -48,6 +48,17 @@ auto gru_cell_forward_kernel(
     int64_t hidden_size,
     sycl::queue& queue
 ) -> Tensor {
+    // Float16: widen all gates to Float32 on device, compute, narrow back.
+    // (BFloat16 has a native SYCL kernel below; Float16 previously fell through
+    // to the throw, so a fp16 GRU cell crashed on OneAPI while ROCm/CPU handle it.)
+    if (reset_gates.dtype() == DType::Float16) {
+        Tensor h = gru_cell_forward_kernel(
+            reset_gates.to(DType::Float32), update_gates.to(DType::Float32),
+            new_gates_input.to(DType::Float32), new_gates_hidden.to(DType::Float32),
+            h_prev.to(DType::Float32), batch_size, hidden_size, queue);
+        return h.to(DType::Float16);
+    }
+
     std::vector<int64_t> output_shape = {batch_size, hidden_size};
     Tensor h_out(output_shape, reset_gates.dtype(), reset_gates.device());
 
@@ -188,6 +199,21 @@ auto gru_cell_backward_kernel(
     int64_t hidden_size,
     sycl::queue& queue
 ) -> GRUBackwardOutputs {
+    // Float16: widen to Float32 on device, compute, narrow each gradient back.
+    if (grad_h.dtype() == DType::Float16) {
+        auto out = gru_cell_backward_kernel(
+            grad_h.to(DType::Float32), reset_gates.to(DType::Float32),
+            update_gates.to(DType::Float32), new_gates_input.to(DType::Float32),
+            new_gates_hidden.to(DType::Float32), h_prev.to(DType::Float32),
+            batch_size, hidden_size, queue);
+        out.grad_reset = out.grad_reset.to(DType::Float16);
+        out.grad_update = out.grad_update.to(DType::Float16);
+        out.grad_new_input = out.grad_new_input.to(DType::Float16);
+        out.grad_new_hidden = out.grad_new_hidden.to(DType::Float16);
+        out.grad_h_prev = out.grad_h_prev.to(DType::Float16);
+        return out;
+    }
+
     std::vector<int64_t> state_shape = {batch_size, hidden_size};
 
     GRUBackwardOutputs outputs;

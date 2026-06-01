@@ -44,12 +44,14 @@ class Poisson(Distribution):
         return _tz.poisson(rate_t)
 
     def log_prob(self, value):
-        gammaln = _require_scipy_special().gammaln
-        v_np = np.asarray(_to_variable(value).tensor(), dtype=np.float64)
+        # log p(x) = x·log(rate) - rate - log(x!).  Built entirely with
+        # autograd-aware Variable ops so the gradient flows to the learnable
+        # rate (a numpy round-trip would detach it, breaking MLE / variational
+        # training).  -log(x!) = -lgamma(x+1) is computed on-device from the
+        # (detached) value and contributes no gradient to rate.
+        value = _to_variable(value)
         eps = 1e-7
-        rate_np = np.clip(np.asarray(self.rate.tensor(), dtype=np.float64), eps, None)
-        out = v_np * np.log(rate_np) - rate_np - gammaln(v_np + 1.0)
-        return _wrap_numpy(out)
+        return value * _tz.log(self.rate + eps) - self.rate - _tz.lgamma(value + 1.0)
 
     def entropy(self):
         gammaln = _require_scipy_special().gammaln

@@ -1,0 +1,87 @@
+#version 450
+
+// Fused Adam optimizer step for BFloat16 parameters.
+// Grad/param buffers are packed BF16; state buffers (exp_avg, exp_avg_sq, max)
+// are Float32 master copies — matches fused_adam_atan2_step_bf16.comp.
+layout(local_size_x_id = 0) in;
+
+layout(binding = 0) buffer Grad { uint grad_data[]; };                 // Packed BF16
+layout(binding = 1) buffer Param { uint param_data[]; };               // Packed BF16
+layout(binding = 2) buffer ExpAvg { float exp_avg[]; };                // Float32
+layout(binding = 3) buffer ExpAvgSq { float exp_avg_sq[]; };           // Float32
+layout(binding = 4) buffer MaxExpAvgSq { float max_exp_avg_sq[]; };    // Float32
+
+layout(push_constant) uniform PushConstants {
+    uint numel;
+    float lr;
+    float beta1;
+    float beta2;
+    float eps;
+    float weight_decay;
+    float bias_correction1;       // 1 - beta1^t (precomputed on host)
+    float bias_correction2_sqrt;  // sqrt(1 - beta2^t) (precomputed on host)
+    uint decoupled;               // 0=L2, 1=decoupled (AdamW)
+    uint amsgrad;                 // 0=off, 1=on
+    uint padding0;
+    uint padding1;
+} params;
+
+// Read a bfloat16 lane (offset 0 or 1) from a packed uint word.
+float readBF16(uint packed, uint offset) {
+    uint bits = (packed >> (offset * 16)) & 0xFFFFu;
+    return uintBitsToFloat(bits << 16);
+}
+
+float adamStep(uint idx) {
+    uint word = idx / 2;
+    uint off = idx % 2;
+    float g = readBF16(grad_data[word], off);
+    float p = readBF16(param_data[word], off);
+
+    if (params.weight_decay > 0.0) {
+        if (params.decoupled != 0) {
+            p -= params.lr * params.weight_decay * p;
+        } else {
+            g += params.weight_decay * p;
+        }
+    }
+
+    float m = params.beta1 * exp_avg[idx] + (1.0 - params.beta1) * g;
+    exp_avg[idx] = m;
+
+    float v = params.beta2 * exp_avg_sq[idx] + (1.0 - params.beta2) * g * g;
+    exp_avg_sq[idx] = v;
+
+    float denom_v = v;
+    if (params.amsgrad != 0) {
+        float max_v = max(max_exp_avg_sq[idx], v);
+        max_exp_avg_sq[idx] = max_v;
+        denom_v = max_v;
+    }
+
+    float m_hat = m / params.bias_correction1;
+    float denom = sqrt(denom_v) / params.bias_correction2_sqrt + params.eps;
+    p -= params.lr * m_hat / denom;
+    return p;
+}
+
+// Round-to-nearest-even float -> bf16 (top 16 bits).
+uint packBF16(float val) {
+    uint u = floatBitsToUint(val);
+    return (u + 0x7FFFu + ((u >> 16) & 1u)) >> 16;
+}
+
+void main() {
+    uint word_idx = gl_GlobalInvocationID.x;
+    uint num_words = (params.numel + 1) / 2;
+    if (word_idx >= num_words) return;
+
+    uint elem0 = word_idx * 2;
+    uint elem1 = word_idx * 2 + 1;
+
+    float p0 = 0.0, p1 = 0.0;
+    if (elem0 < params.numel) p0 = adamStep(elem0);
+    if (elem1 < params.numel) p1 = adamStep(elem1);
+
+    param_data[word_idx] = packBF16(p0) | (packBF16(p1) << 16);
+}

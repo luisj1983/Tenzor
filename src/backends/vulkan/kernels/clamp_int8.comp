@@ -1,0 +1,39 @@
+#version 450
+
+// Integer clamp for 1-byte dtypes (Int8 / UInt8 / Bool). Four elements per uint
+// word. Values and bounds fit in a 32-bit int; is_signed controls sign- vs
+// zero-extension on unpack.
+layout(local_size_x_id = 0) in;
+
+layout(binding = 0) readonly buffer Input  { uint input_data[]; };
+layout(binding = 1)          buffer Output { uint output_data[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint n_elements;
+    uint is_signed;
+    int  lo;
+    int  hi;
+} p;
+
+int unpack8(uint word, uint off, bool sgn) {
+    uint raw = (word >> (off * 8u)) & 0xFFu;
+    return sgn ? (int(raw << 24) >> 24) : int(raw);
+}
+
+void main() {
+    uint w = gl_GlobalInvocationID.x;
+    uint base = w * 4u;
+    if (base >= p.n_elements) return;
+
+    bool sgn = p.is_signed != 0u;
+    uint inw = input_data[w];
+    uint outw = 0u;
+    for (uint k = 0u; k < 4u; ++k) {
+        uint idx = base + k;
+        if (idx >= p.n_elements) break;
+        int v = unpack8(inw, k, sgn);
+        v = max(p.lo, min(p.hi, v));
+        outw |= (uint(v) & 0xFFu) << (k * 8u);
+    }
+    output_data[w] = outw;
+}

@@ -226,12 +226,14 @@ auto lstm_forward_cuda(
 //   n = tanh(W_in@x + b_in + r * (W_hn@h + b_hn))
 //   h_out = (1 - z) * n + z * h_prev
 //
-// To match this exactly, the kernel needs both b_ih and b_hh applied at
-// the right places: r/z gates fold both biases together; n gate keeps
-// b_hn inside `r * (...)`. The signature accepts bias = bias_ih (size
-// 3*hidden) and bias_hh (size 3*hidden); when bias_hh is empty (legacy
-// callers) we fall back to the single-bias approximation that previously
-// shipped (matches CPU SIMD; off-by-r*b_hn for the n gate).
+// The kernel applies both biases at the correct places: the r/z gates fold
+// b_i* and b_h* together (sigmoid(gate_ih + gate_hh)), and the n gate keeps
+// b_hn inside `r * (...)` because gru_cell_fused_kernel computes
+// n = tanh(n_ih + r * n_hh) where n_hh already contains b_hn. The signature
+// accepts bias = bias_ih (size 3*hidden) and bias_hh (size 3*hidden). When
+// bias_hh is empty it simply means there is no hidden bias (b_h* = 0), which
+// is the mathematically exact result for that configuration — NOT an
+// approximation. So this matches PyTorch's GRU formula exactly in all cases.
 auto gru_forward_cuda(
     const Tensor& input,     // (seq_len, batch, input_size)
     const Tensor& W_ih,      // (3*hidden, input_size)

@@ -355,6 +355,12 @@ __global__ void nested_mean_kernel_t(
 
 auto nested_mean_cuda(const Tensor& values, const Tensor& offsets,
                        cudaStream_t stream) -> Tensor {
+    // Float16/BFloat16: widen to Float32 on device, compute, narrow back
+    // (matches nested_layer_norm_cuda and the CPU nested ops).
+    if (values.dtype() == DType::Float16 || values.dtype() == DType::BFloat16) {
+        const DType orig = values.dtype();
+        return nested_mean_cuda(values.to(DType::Float32), offsets, stream).to(orig);
+    }
     auto shape = values.shape();
     int64_t D = (shape.size() > 1) ? shape[1] : 1;
     int64_t B = offsets.numel() - 1;
@@ -645,6 +651,20 @@ auto nested_attention_backward_cuda(const Tensor& grad_out, const Tensor& Q,
                                      const Tensor& q_offsets, const Tensor& kv_offsets,
                                      float scale, bool causal, cudaStream_t stream)
     -> std::vector<Tensor> {
+    // Float16/BFloat16: widen all inputs to Float32 on device, compute, narrow
+    // each gradient back. Mirrors the forward path (nested_attention_cuda) and
+    // the CPU/ROCm/OneAPI backward; the forward already runs in half precision,
+    // so the backward must too (previously it threw, crashing half-precision
+    // training of nested attention on CUDA only).
+    if (Q.dtype() == DType::Float16 || Q.dtype() == DType::BFloat16) {
+        const DType orig = Q.dtype();
+        auto grads = nested_attention_backward_cuda(
+            grad_out.to(DType::Float32), Q.to(DType::Float32), K.to(DType::Float32),
+            V.to(DType::Float32), attn_out.to(DType::Float32),
+            q_offsets, kv_offsets, scale, causal, stream);
+        for (auto& g : grads) g = g.to(orig);
+        return grads;
+    }
     int64_t head_dim = Q.shape().back();
     int64_t total_q_len = Q.shape()[0];
     int64_t total_kv_len = K.shape()[0];

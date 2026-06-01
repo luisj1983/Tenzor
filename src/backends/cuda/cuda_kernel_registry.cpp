@@ -1940,9 +1940,14 @@ void register_cuda_kernels(BackendDispatchTable& table) {
                 std::vector<Tensor> sm_in = {scores};
                 Tensor probs = tenzor::dispatch(OpId::Softmax, sm_in, sm_attrs)[0];
                 output = tenzor::bmm(probs, Vi);
-                // LSE is Float32 per the contract; build it for consistency.
-                lse = tenzor::zeros({Qi.shape()[0], Qi.shape()[1]},
-                                     DType::Float32, Qi.device());
+                // LSE is the true row log-sum-exp of the (masked) scores,
+                // computed on-device via the FP64 LogSumExp kernel and cast to
+                // Float32 per the output contract. Masked positions carry -inf,
+                // so exp() contributes 0 — the causal LSE is exact. (Previously
+                // this returned a zero-filled placeholder, silently corrupting
+                // any consumer that reads the second FlashAttention output.)
+                lse = tenzor::logsumexp(scores, /*dim=*/-1, /*keepdim=*/false)
+                          .to(DType::Float32);
             }
         } else {
             auto [o, l] = cuda::fused_attention_cuda(

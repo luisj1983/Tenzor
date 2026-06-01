@@ -2063,6 +2063,50 @@ auto log_kernel(const Tensor& input, hipStream_t stream) -> Tensor {
     return result;
 }
 
+// ============================================================================
+// Integer clamp / pow / sign (templated; matches PyTorch integer support).
+// ============================================================================
+template <typename T>
+__global__ void clamp_int_kernel(const T* input, T* output, T lo, T hi, int64_t n) {
+    HIP_KERNEL_LOOP(idx, n) { T v = input[idx]; output[idx] = v < lo ? lo : (v > hi ? hi : v); }
+}
+template <typename T>
+__global__ void sign_int_kernel(const T* input, T* output, int64_t n) {
+    const bool kSigned = (T(-1) < T(0));
+    HIP_KERNEL_LOOP(idx, n) {
+        T v = input[idx];
+        int neg = (kSigned && v < T(0)) ? 1 : 0;
+        int pos = (v > T(0)) ? 1 : 0;
+        output[idx] = static_cast<T>(pos - neg);
+    }
+}
+template <typename T>
+__global__ void pow_int_kernel(const T* input, T* output, double e, int int_exp,
+                               long long k, int64_t n) {
+    HIP_KERNEL_LOOP(idx, n) {
+        if (int_exp) {
+            T base = input[idx], r = T(1);
+            for (long long j = 0; j < k; ++j) r *= base;
+            output[idx] = r;
+        } else {
+            output[idx] = static_cast<T>(llround(pow(static_cast<double>(input[idx]), e)));
+        }
+    }
+}
+
+#define TENZOR_HIP_INT_DISPATCH(DT, NAME, ...)                                   \
+    switch (DT) {                                                                \
+        case DType::Int8:   { using T = int8_t;   __VA_ARGS__ } break;           \
+        case DType::Int16:  { using T = int16_t;  __VA_ARGS__ } break;           \
+        case DType::Int32:  { using T = int32_t;  __VA_ARGS__ } break;           \
+        case DType::Int64:  { using T = int64_t;  __VA_ARGS__ } break;           \
+        case DType::UInt8:  { using T = uint8_t;  __VA_ARGS__ } break;           \
+        case DType::UInt16: { using T = uint16_t; __VA_ARGS__ } break;           \
+        case DType::UInt32: { using T = uint32_t; __VA_ARGS__ } break;           \
+        case DType::UInt64: { using T = uint64_t; __VA_ARGS__ } break;           \
+        default: throw std::runtime_error(std::string(NAME) + ": unsupported dtype"); \
+    }
+
 /**
  * @brief Power kernel launcher: output = input^exponent
  * @param input Input tensor (base)
@@ -2090,7 +2134,12 @@ auto pow_kernel(const Tensor& input, float exponent, hipStream_t stream) -> Tens
             reinterpret_cast<const __half*>(input.data<Float16>()),
             reinterpret_cast<__half*>(result.data<Float16>()), exponent, n);
     } else {
-        throw std::runtime_error("pow operation only supports Float32, Float64, and Float16 dtypes");
+        const double e = static_cast<double>(exponent);
+        const int int_exp = (e == floor(e) && e >= 0.0) ? 1 : 0;
+        const long long k = static_cast<long long>(e);
+        TENZOR_HIP_INT_DISPATCH(input.dtype(), "pow",
+            hipLaunchKernelGGL(pow_int_kernel<T>, grid, block, 0, stream,
+                input.data<T>(), result.data<T>(), e, int_exp, k, n);)
     }
 
     HIP_CHECK(hipGetLastError());
@@ -2135,7 +2184,10 @@ auto clamp_kernel(const Tensor& input, float min_val, float max_val, hipStream_t
         auto result_f32 = clamp_kernel(input_f32, min_val, max_val, stream);
         return result_f32.to(DType::BFloat16);
     } else {
-        throw std::runtime_error("clamp operation only supports Float32, Float64, Float16, and BFloat16 dtypes");
+        TENZOR_HIP_INT_DISPATCH(input.dtype(), "clamp",
+            hipLaunchKernelGGL(clamp_int_kernel<T>, grid, block, 0, stream,
+                input.data<T>(), result.data<T>(),
+                static_cast<T>(min_val), static_cast<T>(max_val), n);)
     }
 
     HIP_CHECK(hipGetLastError());
@@ -2167,7 +2219,9 @@ auto sign_kernel(const Tensor& input, hipStream_t stream) -> Tensor {
             reinterpret_cast<const __half*>(input.data<Float16>()),
             reinterpret_cast<__half*>(result.data<Float16>()), n);
     } else {
-        throw std::runtime_error("sign operation only supports Float32, Float64, and Float16 dtypes");
+        TENZOR_HIP_INT_DISPATCH(input.dtype(), "sign",
+            hipLaunchKernelGGL(sign_int_kernel<T>, grid, block, 0, stream,
+                input.data<T>(), result.data<T>(), n);)
     }
 
     HIP_CHECK(hipGetLastError());

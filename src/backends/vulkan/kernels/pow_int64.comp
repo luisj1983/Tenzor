@@ -1,0 +1,35 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
+
+// Integer pow for 64-bit dtypes (Int64 / UInt64).
+layout(local_size_x_id = 0) in;
+
+layout(binding = 0) readonly buffer Input  { int64_t input_data[]; };
+layout(binding = 1)          buffer Output { int64_t output_data[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint  n_elements;
+    uint  is_signed;
+    uint  int_exp;
+    uint  k;
+    float e;
+} p;
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= p.n_elements) return;
+
+    int64_t v = input_data[idx];
+    if (p.int_exp != 0u) {
+        uint64_t r = 1UL;
+        uint64_t base = uint64_t(v);
+        for (uint j = 0u; j < p.k; ++j) r *= base;  // mod 2^64
+        output_data[idx] = int64_t(r);
+    } else {
+        // Non-integer exponent on an integer tensor is a PyTorch error case;
+        // compute it approximately in float (GLSL pow is float-only).
+        float b = (p.is_signed != 0u) ? float(v) : float(uint64_t(v));
+        float res = round(pow(b, p.e));
+        output_data[idx] = (p.is_signed != 0u) ? int64_t(res) : int64_t(uint64_t(res));
+    }
+}
