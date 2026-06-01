@@ -985,7 +985,12 @@ auto lstm_forward_kernel(
         HIP_CHECK(hipMemcpyAsync(c_n.data<double>(), c_t_ptr,
                       batch * hidden * sizeof(double),
                       hipMemcpyDeviceToDevice, stream));
-    } else if (input.dtype() == DType::BFloat16) {
+    } else if (input.dtype() == DType::BFloat16 || input.dtype() == DType::Float16) {
+        // Half precision (BFloat16 or Float16): widen to Float32 on device,
+        // compute, narrow back to the original dtype. (Float16 previously fell
+        // through to the throw below, so a fp16 sequence-LSTM crashed on ROCm
+        // while CPU/CUDA handle it.)
+        const DType orig = input.dtype();
         auto input_f32 = input.to(DType::Float32);
         auto W_ih_f32 = W_ih.to(DType::Float32);
         auto W_hh_f32 = W_hh.to(DType::Float32);
@@ -994,10 +999,11 @@ auto lstm_forward_kernel(
         auto c0_f32 = c0.to(DType::Float32);
         auto results = lstm_forward_kernel(input_f32, W_ih_f32, W_hh_f32, bias_f32,
                                             h0_f32, c0_f32, stream);
-        for (auto& t : results) t = t.to(DType::BFloat16);
+        for (auto& t : results) t = t.to(orig);
         return results;
     } else {
-        throw std::runtime_error("LSTM forward only supports Float32, Float64, and BFloat16");
+        throw std::runtime_error(
+            "LSTM forward only supports Float32, Float64, BFloat16, and Float16");
     }
 
     HIP_CHECK(hipGetLastError());
@@ -1135,8 +1141,12 @@ auto bilstm_forward_kernel(
     const Tensor& c0,    // (2, batch, hidden)
     hipStream_t stream) -> std::vector<Tensor> {
 
-    // BFloat16: upcast to Float32, compute, convert back
-    if (input.dtype() == DType::BFloat16) {
+    // Half precision (BFloat16 or Float16): upcast to Float32, compute, convert
+    // back to the original dtype. (Float16 previously had no branch here and
+    // fell through to the F32/F64-only kernels, so a fp16 bidirectional LSTM
+    // threw on ROCm while CPU handles it.)
+    if (input.dtype() == DType::BFloat16 || input.dtype() == DType::Float16) {
+        const DType orig = input.dtype();
         auto input_f32 = input.to(DType::Float32);
         auto wif_f32 = W_ih_fwd.to(DType::Float32);
         auto whf_f32 = W_hh_fwd.to(DType::Float32);
@@ -1151,7 +1161,7 @@ auto bilstm_forward_kernel(
         auto results = bilstm_forward_kernel(input_f32, wif_f32, whf_f32, bif_f32, bhf_f32,
                                               wib_f32, whb_f32, bib_f32, bhb_f32,
                                               h0_f32, c0_f32, stream);
-        for (auto& t : results) t = t.to(DType::BFloat16);
+        for (auto& t : results) t = t.to(orig);
         return results;
     }
 
