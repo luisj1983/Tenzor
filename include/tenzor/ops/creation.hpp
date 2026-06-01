@@ -223,6 +223,15 @@ auto exponential(const Tensor& rate) -> Tensor;
 /// @brief Sample from exponential distribution using a specific Generator.
 auto exponential(const Tensor& rate, Generator& generator) -> Tensor;
 
+/**
+ * @brief Sample from a Gamma distribution.
+ *
+ * Draws gamma(concentration=alpha, rate=beta) (shape alpha, scale 1/beta) via
+ * the native per-backend Marsaglia-Tsang kernel. concentration and rate
+ * broadcast to a common shape.
+ */
+auto gamma_sample(const Tensor& concentration, const Tensor& rate) -> Tensor;
+
 // ============================================================================
 // New distribution samplers (Phase 11) — delegate to C++ distribution classes
 // ============================================================================

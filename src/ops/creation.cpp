@@ -1087,6 +1087,17 @@ auto exponential(const Tensor& rate) -> Tensor {
     return dispatch<OpId::ExponentialSample>(inputs)[0];
 }
 
+auto gamma_sample(const Tensor& concentration, const Tensor& rate) -> Tensor {
+    // Native gamma(concentration=alpha, rate=beta) sampler. Concentration and
+    // rate must broadcast to a common shape; we broadcast here so every backend
+    // kernel can assume equal element-aligned inputs.
+    auto bshape = broadcast_shapes(concentration.shape(), rate.shape());
+    auto a = broadcast_to(concentration, bshape).contiguous();
+    auto b = broadcast_to(rate, bshape).contiguous();
+    std::array<Tensor, 2> inputs = {a, b};
+    return dispatch<OpId::GammaSample>(inputs)[0];
+}
+
 // ============================================================================
 // Phase 11: New distribution samplers — delegate to C++ distribution classes
 // ============================================================================

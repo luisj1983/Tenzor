@@ -3469,6 +3469,12 @@ Returns:
          py::arg("rate"),
          py::call_guard<py::gil_scoped_release>());
 
+    m.def("gamma_sample", [](const tenzor::Tensor& concentration, const tenzor::Tensor& rate) {
+         return tenzor::gamma_sample(concentration, rate);
+         }, "Sample from Gamma(concentration, rate) via the native Marsaglia-Tsang kernel",
+         py::arg("concentration"), py::arg("rate"),
+         py::call_guard<py::gil_scoped_release>());
+
     m.def("bernoulli", [](const tenzor::Tensor& probs) {
          return tenzor::bernoulli(probs);
          }, "Sample from Bernoulli distribution",

@@ -119,13 +119,23 @@ class Gamma(Distribution):
         return self.concentration / (self.rate * self.rate)
 
     def sample(self, sample_shape=()):
-        out_shape = tuple(sample_shape) + self._batch_shape
-        alpha_np = np.asarray(self.concentration.tensor(), dtype=np.float64)
-        beta_np = np.asarray(self.rate.tensor(), dtype=np.float64)
-        # numpy gamma uses shape α and scale 1/β.
-        samples = np.random.gamma(shape=alpha_np, scale=1.0 / beta_np,
-                                  size=out_shape or None)
-        return _wrap_numpy(np.asarray(samples, dtype=np.float32))
+        # Native device-side Marsaglia-Tsang sampler (tz.gamma_sample) — no
+        # NumPy round-trip, runs on the concentration tensor's device. The
+        # params are broadcast to the requested output shape so each draw uses
+        # its own (alpha, beta); the result is detached (sample(), not rsample).
+        out_shape = list(tuple(sample_shape) + self._batch_shape)
+        a_t = self.concentration.tensor() if hasattr(self.concentration, "tensor") \
+            else self.concentration
+        b_t = self.rate.tensor() if hasattr(self.rate, "tensor") else self.rate
+        if out_shape:
+            # Broadcast the per-element params to the full draw shape. _tz.ones
+            # follows the same pattern as rsample() below; the native
+            # gamma_sample broadcasts internally too, but materialising here
+            # keeps the output shape explicit for scalar params.
+            ones = _tz.ones(out_shape)
+            a_t = a_t * ones
+            b_t = b_t * ones
+        return _tz.gamma_sample(a_t, b_t)
 
     def rsample(self, sample_shape=()):
         # Reparameterised sample with implicit-reparam gradient (see module
