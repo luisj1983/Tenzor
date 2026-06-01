@@ -23,6 +23,13 @@
 // Forward declaration for contiguous kernel
 namespace tenzor {
 namespace oneapi {
+
+// Templated SYCL kernel-name tags for integer pow / clamp_min / clamp_max
+// (PyTorch integer support; cross-backend parity with CPU/CUDA/ROCm).
+template <typename T> class OneapiPowIntKernel;
+template <typename T> class OneapiClampMinIntKernel;
+template <typename T> class OneapiClampMaxIntKernel;
+
     auto contiguous_kernel(const Tensor& input, sycl::queue& queue) -> Tensor;
 }
 }
@@ -2299,7 +2306,38 @@ auto pow_kernel(const Tensor& input, float exponent, sycl::queue& queue) -> Tens
         }).wait();
     }
     else {
-        throw std::runtime_error("Unsupported dtype for pow");
+        // Integer dtypes: exact integer exponentiation for non-negative integer
+        // exponents, else a rounded double power. Matches CPU/CUDA/ROCm.
+        const double e = static_cast<double>(exponent);
+        const bool int_exp = (e == sycl::floor(e)) && e >= 0.0;
+        const long long k = static_cast<long long>(e);
+        auto run = [&]<typename T>() {
+            const T* in_ptr = get_data_ptr<const T>(input);
+            T* out_ptr = get_data_ptr<T>(output);
+            queue.parallel_for<OneapiPowIntKernel<T>>(sycl::range<1>(numel),
+                [=](sycl::id<1> idx) {
+                    if (int_exp) {
+                        T base = in_ptr[idx], r = T(1);
+                        for (long long j = 0; j < k; ++j) r *= base;
+                        out_ptr[idx] = r;
+                    } else {
+                        out_ptr[idx] = static_cast<T>(
+                            sycl::round(sycl::pow(static_cast<double>(in_ptr[idx]), e)));
+                    }
+                }).wait();
+        };
+        switch (input.dtype()) {
+            case DType::Int8:   run.template operator()<int8_t>();   break;
+            case DType::Int16:  run.template operator()<int16_t>();  break;
+            case DType::Int32:  run.template operator()<int32_t>();  break;
+            case DType::Int64:  run.template operator()<int64_t>();  break;
+            case DType::UInt8:  run.template operator()<uint8_t>();  break;
+            case DType::UInt16: run.template operator()<uint16_t>(); break;
+            case DType::UInt32: run.template operator()<uint32_t>(); break;
+            case DType::UInt64: run.template operator()<uint64_t>(); break;
+            default:
+                throw std::runtime_error("Unsupported dtype for pow");
+        }
     }
 
     return output;
@@ -3083,7 +3121,25 @@ auto clamp_min_kernel(const Tensor& input, float min_val, sycl::queue& queue) ->
         }).wait();
     }
     else {
-        throw std::runtime_error("clamp_min: unsupported dtype");
+        auto run = [&]<typename T>() {
+            const T* in_ptr = get_data_ptr<const T>(input);
+            T* out_ptr = get_data_ptr<T>(output);
+            const T lo = static_cast<T>(min_val);
+            queue.parallel_for<OneapiClampMinIntKernel<T>>(sycl::range<1>(numel),
+                [=](sycl::id<1> idx) { out_ptr[idx] = sycl::max(in_ptr[idx], lo); }).wait();
+        };
+        switch (input.dtype()) {
+            case DType::Int8:   run.template operator()<int8_t>();   break;
+            case DType::Int16:  run.template operator()<int16_t>();  break;
+            case DType::Int32:  run.template operator()<int32_t>();  break;
+            case DType::Int64:  run.template operator()<int64_t>();  break;
+            case DType::UInt8:  run.template operator()<uint8_t>();  break;
+            case DType::UInt16: run.template operator()<uint16_t>(); break;
+            case DType::UInt32: run.template operator()<uint32_t>(); break;
+            case DType::UInt64: run.template operator()<uint64_t>(); break;
+            default:
+                throw std::runtime_error("clamp_min: unsupported dtype");
+        }
     }
 
     return output;
@@ -3128,7 +3184,25 @@ auto clamp_max_kernel(const Tensor& input, float max_val, sycl::queue& queue) ->
         }).wait();
     }
     else {
-        throw std::runtime_error("clamp_max: unsupported dtype");
+        auto run = [&]<typename T>() {
+            const T* in_ptr = get_data_ptr<const T>(input);
+            T* out_ptr = get_data_ptr<T>(output);
+            const T hi = static_cast<T>(max_val);
+            queue.parallel_for<OneapiClampMaxIntKernel<T>>(sycl::range<1>(numel),
+                [=](sycl::id<1> idx) { out_ptr[idx] = sycl::min(in_ptr[idx], hi); }).wait();
+        };
+        switch (input.dtype()) {
+            case DType::Int8:   run.template operator()<int8_t>();   break;
+            case DType::Int16:  run.template operator()<int16_t>();  break;
+            case DType::Int32:  run.template operator()<int32_t>();  break;
+            case DType::Int64:  run.template operator()<int64_t>();  break;
+            case DType::UInt8:  run.template operator()<uint8_t>();  break;
+            case DType::UInt16: run.template operator()<uint16_t>(); break;
+            case DType::UInt32: run.template operator()<uint32_t>(); break;
+            case DType::UInt64: run.template operator()<uint64_t>(); break;
+            default:
+                throw std::runtime_error("clamp_max: unsupported dtype");
+        }
     }
 
     return output;
