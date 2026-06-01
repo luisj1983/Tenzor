@@ -1,0 +1,37 @@
+#version 450
+
+// Integer sign for 16-bit dtypes (Int16 / UInt16). Two elements per uint word.
+layout(local_size_x_id = 0) in;
+
+layout(binding = 0) readonly buffer Input  { uint input_data[]; };
+layout(binding = 1)          buffer Output { uint output_data[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint n_elements;
+    uint is_signed;
+} p;
+
+uint sign_lane(uint rawb, bool sgn) {
+    if (sgn) {
+        int v = int(rawb << 16) >> 16;          // sign-extend
+        int s = (v > 0 ? 1 : 0) - (v < 0 ? 1 : 0);
+        return uint(s) & 0xFFFFu;               // -1 -> 0xFFFF
+    }
+    return (rawb > 0u) ? 1u : 0u;
+}
+
+void main() {
+    uint w = gl_GlobalInvocationID.x;
+    uint base = w * 2u;
+    if (base >= p.n_elements) return;
+    bool sgn = p.is_signed != 0u;
+    uint inw = input_data[w];
+    uint outw = 0u;
+    for (uint k = 0u; k < 2u; ++k) {
+        uint idx = base + k;
+        if (idx >= p.n_elements) break;
+        uint rawb = (inw >> (k * 16u)) & 0xFFFFu;
+        outw |= sign_lane(rawb, sgn) << (k * 16u);
+    }
+    output_data[w] = outw;
+}

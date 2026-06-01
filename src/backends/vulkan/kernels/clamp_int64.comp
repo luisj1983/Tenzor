@@ -1,0 +1,32 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
+
+// Integer clamp for 64-bit dtypes (Int64 / UInt64). One element per int64 slot.
+layout(local_size_x_id = 0) in;
+
+layout(binding = 0) readonly buffer Input  { int64_t input_data[]; };
+layout(binding = 1)          buffer Output { int64_t output_data[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint    n_elements;
+    uint    is_signed;
+    int64_t lo;
+    int64_t hi;
+} p;
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= p.n_elements) return;
+
+    int64_t v = input_data[idx];
+    if (p.is_signed != 0) {
+        v = max(p.lo, min(p.hi, v));
+        output_data[idx] = v;
+    } else {
+        uint64_t uv  = uint64_t(v);
+        uint64_t ulo = uint64_t(p.lo);
+        uint64_t uhi = uint64_t(p.hi);
+        uv = max(ulo, min(uhi, uv));
+        output_data[idx] = int64_t(uv);
+    }
+}

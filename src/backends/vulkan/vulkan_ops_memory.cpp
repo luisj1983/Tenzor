@@ -1,4 +1,6 @@
 #include "vulkan_ops_common.hpp"
+#include <cmath>
+#include <cstdint>
 
 namespace tenzor {
 
@@ -1032,6 +1034,95 @@ auto VulkanBackend::dispatchClamp(const Tensor& input, float min_value, float ma
         auto input_shape = input.shape();
         std::vector<int64_t> output_shape(input_shape.begin(), input_shape.end());
         return Tensor(output_shape, input.dtype(), input.device());
+    }
+
+    // Integer clamp: dedicated by-byte-width shaders (the float clamp shaders
+    // would reinterpret integer storage as float and corrupt it). ±inf bounds
+    // (from clamp_min / clamp_max) map to the dtype's representable extremes.
+    {
+        const DType dt = input.dtype();
+        int elem_bytes = 0;
+        bool is_signed = false;
+        int64_t tmin = 0, tmax = 0;
+        bool is_int = true;
+        switch (dt) {
+            case DType::Int8:   elem_bytes=1; is_signed=true;  tmin=-128; tmax=127; break;
+            case DType::UInt8:  elem_bytes=1; is_signed=false; tmin=0; tmax=255; break;
+            case DType::Int16:  elem_bytes=2; is_signed=true;  tmin=-32768; tmax=32767; break;
+            case DType::UInt16: elem_bytes=2; is_signed=false; tmin=0; tmax=65535; break;
+            case DType::Int32:  elem_bytes=4; is_signed=true;  tmin=INT32_MIN; tmax=INT32_MAX; break;
+            case DType::UInt32: elem_bytes=4; is_signed=false; tmin=0; tmax=UINT32_MAX; break;
+            case DType::Int64:  elem_bytes=8; is_signed=true;  tmin=INT64_MIN; tmax=INT64_MAX; break;
+            case DType::UInt64: elem_bytes=8; is_signed=false;
+                                tmin=0; tmax=static_cast<int64_t>(UINT64_MAX); break;
+            default: is_int = false; break;
+        }
+        if (is_int) {
+            auto cast_bound = [&](double v) -> int64_t {
+                switch (dt) {
+                    case DType::Int8:   return static_cast<int64_t>(static_cast<int8_t>(v));
+                    case DType::UInt8:  return static_cast<int64_t>(static_cast<uint8_t>(v));
+                    case DType::Int16:  return static_cast<int64_t>(static_cast<int16_t>(v));
+                    case DType::UInt16: return static_cast<int64_t>(static_cast<uint16_t>(v));
+                    case DType::Int32:  return static_cast<int64_t>(static_cast<int32_t>(v));
+                    case DType::UInt32: return static_cast<int64_t>(static_cast<uint32_t>(v));
+                    case DType::Int64:  return static_cast<int64_t>(v);
+                    default:            return static_cast<int64_t>(static_cast<uint64_t>(v));
+                }
+            };
+            const int64_t lo64 = std::isinf(min_value) ? (min_value < 0 ? tmin : tmax)
+                                                       : cast_bound(min_value);
+            const int64_t hi64 = std::isinf(max_value) ? (max_value > 0 ? tmax : tmin)
+                                                       : cast_bound(max_value);
+
+            const int32_t device_id = input.device().index;
+            const std::string shader = elem_bytes == 1 ? "clamp_int8"
+                                     : elem_bytes == 2 ? "clamp_int16"
+                                     : elem_bytes == 4 ? "clamp_int32"
+                                                       : "clamp_int64";
+            auto* pipeline = getPipeline(shader, device_id);
+
+            std::vector<int64_t> oshape(input.shape().begin(), input.shape().end());
+            Tensor output(oshape, input.dtype(), input.device());
+            const int64_t numel = input.numel();
+            const size_t buf = ((static_cast<size_t>(numel) * elem_bytes + 3) / 4) * 4;
+
+            std::vector<std::pair<uint32_t, const void*>> bindings = {
+                {0, input.data_ptr()}, {1, output.data_ptr()}};
+            std::vector<size_t> sizes = {buf, buf};
+            VkDescriptorSet descriptorSet =
+                allocateAndWriteDescriptorSet(device_id, pipeline, bindings, sizes);
+
+            VkCommandBuffer cmdBuffer = beginSingleTimeCommands(device_id);
+            vkCmdBindPipeline(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
+            vkCmdBindDescriptorSets(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE,
+                                    pipeline->layout(), 0, 1, &descriptorSet, 0, nullptr);
+            if (elem_bytes == 8) {
+                struct PC64 { uint32_t n; uint32_t is_signed; int64_t lo; int64_t hi; } pc;
+                pc.n = static_cast<uint32_t>(numel);
+                pc.is_signed = is_signed ? 1u : 0u;
+                pc.lo = lo64; pc.hi = hi64;
+                vkCmdPushConstants(cmdBuffer, pipeline->layout(),
+                                   VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), &pc);
+            } else {
+                struct PC32 { uint32_t n; uint32_t is_signed; int32_t lo; int32_t hi; } pc;
+                pc.n = static_cast<uint32_t>(numel);
+                pc.is_signed = is_signed ? 1u : 0u;
+                pc.lo = static_cast<int32_t>(lo64);
+                pc.hi = static_cast<int32_t>(hi64);
+                vkCmdPushConstants(cmdBuffer, pipeline->layout(),
+                                   VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), &pc);
+            }
+            const int64_t units = elem_bytes == 1 ? (numel + 3) / 4
+                                : elem_bytes == 2 ? (numel + 1) / 2
+                                                  : numel;
+            uint32_t workgroups = div_wg(static_cast<uint32_t>(units),
+                                         devices_[device_id].workgroupSize);
+            vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
+            insertComputeOnlyBarrier(cmdBuffer);
+            endSingleTimeCommands(cmdBuffer, device_id);
+            return output;
+        }
     }
 
     int32_t device_id = input.device().index;

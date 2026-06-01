@@ -128,12 +128,22 @@ PreparedMeta prepare_meta(const Tensor& src, const std::vector<Tensor>& indices,
     return prep;
 }
 
+// Advanced index gather/put is pure data movement, so the shader is selected by
+// element BYTE WIDTH, not numeric type — every same-width dtype shares one shader
+// (the f16/bf16 shaders are pure 16-bit bit-moves, _f64 a 64-bit move, etc.).
+// This gives full dtype coverage including the sub-32-bit integer and Bool types
+// that previously threw "unsupported dtype".
 const char* select_gather_shader(DType dt) {
     switch (dt) {
-        case DType::Float32: case DType::Int32: return "advanced_index_gather";
-        case DType::Float64: case DType::Int64: return "advanced_index_gather_f64";
-        case DType::Float16:                    return "advanced_index_gather_f16";
-        case DType::BFloat16:                   return "advanced_index_gather_bf16";
+        case DType::Int8: case DType::UInt8: case DType::Bool:
+            return "advanced_index_gather_i8";    // 1-byte
+        case DType::Float16: case DType::BFloat16:
+        case DType::Int16: case DType::UInt16:
+            return "advanced_index_gather_f16";   // 2-byte (pure 16-bit move)
+        case DType::Float32: case DType::Int32: case DType::UInt32:
+            return "advanced_index_gather";       // 4-byte
+        case DType::Float64: case DType::Int64: case DType::UInt64:
+            return "advanced_index_gather_f64";   // 8-byte
         default: break;
     }
     throw std::runtime_error("Vulkan AdvancedIndex: unsupported dtype");
@@ -141,10 +151,15 @@ const char* select_gather_shader(DType dt) {
 
 const char* select_put_shader(DType dt) {
     switch (dt) {
-        case DType::Float32: case DType::Int32: return "advanced_index_put";
-        case DType::Float64: case DType::Int64: return "advanced_index_put_f64";
-        case DType::Float16:                    return "advanced_index_put_f16";
-        case DType::BFloat16:                   return "advanced_index_put_bf16";
+        case DType::Int8: case DType::UInt8: case DType::Bool:
+            return "advanced_index_put_i8";       // 1-byte
+        case DType::Float16: case DType::BFloat16:
+        case DType::Int16: case DType::UInt16:
+            return "advanced_index_put_f16";      // 2-byte (pure 16-bit move)
+        case DType::Float32: case DType::Int32: case DType::UInt32:
+            return "advanced_index_put";          // 4-byte
+        case DType::Float64: case DType::Int64: case DType::UInt64:
+            return "advanced_index_put_f64";      // 8-byte
         default: break;
     }
     throw std::runtime_error("Vulkan AdvancedIndexPut: unsupported dtype");

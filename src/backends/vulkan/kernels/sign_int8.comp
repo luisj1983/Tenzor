@@ -1,0 +1,37 @@
+#version 450
+
+// Integer sign for 1-byte dtypes (Int8 / UInt8). Four elements per uint word.
+layout(local_size_x_id = 0) in;
+
+layout(binding = 0) readonly buffer Input  { uint input_data[]; };
+layout(binding = 1)          buffer Output { uint output_data[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint n_elements;
+    uint is_signed;
+} p;
+
+uint sign_lane(uint rawb, bool sgn) {
+    if (sgn) {
+        int v = int(rawb << 24) >> 24;          // sign-extend
+        int s = (v > 0 ? 1 : 0) - (v < 0 ? 1 : 0);
+        return uint(s) & 0xFFu;                 // -1 -> 0xFF
+    }
+    return (rawb > 0u) ? 1u : 0u;
+}
+
+void main() {
+    uint w = gl_GlobalInvocationID.x;
+    uint base = w * 4u;
+    if (base >= p.n_elements) return;
+    bool sgn = p.is_signed != 0u;
+    uint inw = input_data[w];
+    uint outw = 0u;
+    for (uint k = 0u; k < 4u; ++k) {
+        uint idx = base + k;
+        if (idx >= p.n_elements) break;
+        uint rawb = (inw >> (k * 8u)) & 0xFFu;
+        outw |= sign_lane(rawb, sgn) << (k * 8u);
+    }
+    output_data[w] = outw;
+}

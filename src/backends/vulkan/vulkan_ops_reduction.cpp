@@ -324,6 +324,16 @@ auto VulkanBackend::dispatchNorm(const Tensor& input, float p, int64_t dim, bool
     // For p=2 (L2 norm): sqrt(sum(x^2))
     // For p=1 (L1 norm): sum(|x|)
 
+    // General-p norm needs to stage the p / (1/p) scalars, which only supports
+    // Float32/Float64. For Float16/BFloat16 with p not in {1,2}, widen to
+    // Float32 on device, compute, narrow back. The p==1/p==2 branches below
+    // already handle half via their sub-dispatches, so leave them native.
+    if ((input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16)
+        && p != 1.0f && p != 2.0f) {
+        const DType orig = input.dtype();
+        return dispatchNorm(input.to(DType::Float32), p, dim, keepdim).to(orig);
+    }
+
     Tensor abs_input = dispatchUnaryOp("abs", input);
 
     if (p == 1.0f) {
@@ -335,13 +345,15 @@ auto VulkanBackend::dispatchNorm(const Tensor& input, float p, int64_t dim, bool
         Tensor sum = dispatchReduction("sum", squared, dim, keepdim);
         return dispatchUnaryOp("sqrt", sum);
     } else {
-        // General p-norm: (sum(|x|^p))^(1/p)
-        // Build the p / (1/p) scalars on CPU first because Vulkan tensors
-        // live in VK_MEMORY_PROPERTY_DEVICE_LOCAL memory — Tensor::data_ptr()
-        // on a Vulkan tensor returns a synthetic VkBuffer marker, so writing
-        // through it silently no-ops and the kernel reads uninitialised
-        // device memory. Stage the scalars via a CPU tensor and let
-        // Tensor::to(...) push them through the proper Vulkan upload path.
+        // General p-norm: (sum(|x|^p))^(1/p). Vulkan has no 'pow' binary op, so
+        // compute it through exp/log (both supported):
+        //   |x|^p        = exp(p * log|x|)        (0^p == 0 via exp(-inf))
+        //   (sum)^(1/p)  = exp((1/p) * log(sum))
+        // Build the p / (1/p) scalars on CPU first because Vulkan tensors live
+        // in VK_MEMORY_PROPERTY_DEVICE_LOCAL memory — Tensor::data_ptr() on a
+        // Vulkan tensor returns a synthetic VkBuffer marker, so writing through
+        // it silently no-ops. Stage via a CPU tensor and let Tensor::to(...)
+        // push them through the proper Vulkan upload path.
         std::vector<int64_t> scalar_shape = {1};
         Tensor p_cpu(scalar_shape, input.dtype(), Device::cpu());
         Tensor inv_p_cpu(scalar_shape, input.dtype(), Device::cpu());
@@ -352,6 +364,8 @@ auto VulkanBackend::dispatchNorm(const Tensor& input, float p, int64_t dim, bool
             *static_cast<double*>(p_cpu.data_ptr()) = static_cast<double>(p);
             *static_cast<double*>(inv_p_cpu.data_ptr()) = 1.0 / static_cast<double>(p);
         } else {
+            // Float16/BFloat16 are intercepted at the top of dispatchNorm and
+            // recursed through Float32, so they never reach here.
             throw std::runtime_error(
                 "Vulkan dispatchNorm (general p): unsupported dtype " +
                 std::string(tenzor::dtype_name(input.dtype())));
@@ -359,9 +373,13 @@ auto VulkanBackend::dispatchNorm(const Tensor& input, float p, int64_t dim, bool
         Tensor p_tensor = p_cpu.to(input.device());
         Tensor inv_p_tensor = inv_p_cpu.to(input.device());
 
-        Tensor powered = dispatchBinaryOp("pow", abs_input, p_tensor);
+        Tensor log_abs = dispatchUnaryOp("log", abs_input);          // log|x|
+        Tensor p_log_abs = dispatchBinaryOp("mul", log_abs, p_tensor);  // p*log|x|
+        Tensor powered = dispatchUnaryOp("exp", p_log_abs);          // |x|^p
         Tensor sum = dispatchReduction("sum", powered, dim, keepdim);
-        return dispatchBinaryOp("pow", sum, inv_p_tensor);
+        Tensor log_sum = dispatchUnaryOp("log", sum);
+        Tensor scaled = dispatchBinaryOp("mul", log_sum, inv_p_tensor);  // (1/p)*log(sum)
+        return dispatchUnaryOp("exp", scaled);                       // (sum)^(1/p)
     }
 }
 

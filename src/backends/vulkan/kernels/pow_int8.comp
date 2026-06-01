@@ -1,0 +1,44 @@
+#version 450
+
+// Integer pow for 1-byte dtypes (Int8 / UInt8). Four elements per uint word.
+// Modular repeated-multiply is exact for non-negative integer exponents.
+layout(local_size_x_id = 0) in;
+
+layout(binding = 0) readonly buffer Input  { uint input_data[]; };
+layout(binding = 1)          buffer Output { uint output_data[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint  n_elements;
+    uint  is_signed;
+    uint  int_exp;
+    uint  k;
+    float e;
+} p;
+
+uint pow_lane(uint rawb, bool sgn) {
+    if (p.int_exp != 0u) {
+        uint r = 1u;
+        for (uint j = 0u; j < p.k; ++j) r *= rawb;
+        return r & 0xFFu;
+    }
+    float b = sgn ? float(int(rawb << 24) >> 24) : float(rawb);
+    float res = round(pow(b, p.e));
+    return (sgn ? uint(int(res)) : uint(res)) & 0xFFu;
+}
+
+void main() {
+    uint w = gl_GlobalInvocationID.x;
+    uint base = w * 4u;
+    if (base >= p.n_elements) return;
+
+    bool sgn = p.is_signed != 0u;
+    uint inw = input_data[w];
+    uint outw = 0u;
+    for (uint k = 0u; k < 4u; ++k) {
+        uint idx = base + k;
+        if (idx >= p.n_elements) break;
+        uint rawb = (inw >> (k * 8u)) & 0xFFu;
+        outw |= pow_lane(rawb, sgn) << (k * 8u);
+    }
+    output_data[w] = outw;
+}

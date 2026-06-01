@@ -1,6 +1,8 @@
 #include "vulkan_ops_common.hpp"
 #include "tenzor/backend/attr_macros.hpp"
 #include <unordered_set>
+#include <cmath>
+#include <cstdint>
 
 namespace tenzor {
 
@@ -462,6 +464,61 @@ auto VulkanBackend::dispatchUnaryOp(const std::string& op_name,
 
     int32_t device_id = input.device().index;
 
+    // Integer sign: dedicated by-byte-width shaders (the float `math` shader
+    // would reinterpret integer storage as float). -1/0/1 for signed, 0/1 for
+    // unsigned — matches CPU/CUDA/ROCm/OneAPI.
+    if (op_name == "sign") {
+        const DType dt = input.dtype();
+        int elem_bytes = 0;
+        bool is_signed = false;
+        bool is_int = true;
+        switch (dt) {
+            case DType::Int8:   elem_bytes=1; is_signed=true;  break;
+            case DType::UInt8:  elem_bytes=1; is_signed=false; break;
+            case DType::Int16:  elem_bytes=2; is_signed=true;  break;
+            case DType::UInt16: elem_bytes=2; is_signed=false; break;
+            case DType::Int32:  elem_bytes=4; is_signed=true;  break;
+            case DType::UInt32: elem_bytes=4; is_signed=false; break;
+            case DType::Int64:  elem_bytes=8; is_signed=true;  break;
+            case DType::UInt64: elem_bytes=8; is_signed=false; break;
+            default: is_int = false; break;
+        }
+        if (is_int) {
+            const std::string shader = elem_bytes == 1 ? "sign_int8"
+                                     : elem_bytes == 2 ? "sign_int16"
+                                     : elem_bytes == 4 ? "sign_int32"
+                                                       : "sign_int64";
+            auto* pipeline = getPipeline(shader, device_id);
+            std::vector<int64_t> oshape(input.shape().begin(), input.shape().end());
+            Tensor output(oshape, input.dtype(), input.device());
+            const int64_t numel = input.numel();
+            const size_t buf = ((static_cast<size_t>(numel) * elem_bytes + 3) / 4) * 4;
+            std::vector<std::pair<uint32_t, const void*>> bindings = {
+                {0, input.data_ptr()}, {1, output.data_ptr()}};
+            std::vector<size_t> sizes = {buf, buf};
+            VkDescriptorSet descriptorSet =
+                allocateAndWriteDescriptorSet(device_id, pipeline, bindings, sizes);
+            VkCommandBuffer cmdBuffer = beginSingleTimeCommands(device_id);
+            vkCmdBindPipeline(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
+            vkCmdBindDescriptorSets(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE,
+                                    pipeline->layout(), 0, 1, &descriptorSet, 0, nullptr);
+            struct SignPC { uint32_t n; uint32_t is_signed; } pc;
+            pc.n = static_cast<uint32_t>(numel);
+            pc.is_signed = is_signed ? 1u : 0u;
+            vkCmdPushConstants(cmdBuffer, pipeline->layout(),
+                               VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), &pc);
+            const int64_t units = elem_bytes == 1 ? (numel + 3) / 4
+                                : elem_bytes == 2 ? (numel + 1) / 2
+                                                  : numel;
+            uint32_t workgroups = div_wg(static_cast<uint32_t>(units),
+                                         devices_[device_id].workgroupSize);
+            vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
+            insertComputeOnlyBarrier(cmdBuffer);
+            endSingleTimeCommands(cmdBuffer, device_id);
+            return output;
+        }
+    }
+
     // Complex-input path for abs/neg/exp/log/sqrt/sin/cos. The generic `math`
     // and `trigonometric` shaders interpret memory as float and would corrupt
     // interleaved complex pairs; dispatch to dedicated complex_* shaders
@@ -720,6 +777,78 @@ auto VulkanBackend::dispatchUnaryOpWithParam(const std::string& op_name,
                                               const Tensor& input,
                                               float param) -> Tensor {
     int32_t device_id = input.device().index;
+
+    // Integer pow: dedicated by-byte-width shaders (the float "math" shader would
+    // reinterpret integer storage as float and corrupt it). Non-negative integer
+    // exponents use exact modular exponentiation, matching CPU/CUDA/ROCm/OneAPI.
+    {
+        const DType dt = input.dtype();
+        int elem_bytes = 0;
+        bool is_signed = false;
+        bool is_int = true;
+        switch (dt) {
+            case DType::Int8:   elem_bytes=1; is_signed=true;  break;
+            case DType::UInt8:  elem_bytes=1; is_signed=false; break;
+            case DType::Int16:  elem_bytes=2; is_signed=true;  break;
+            case DType::UInt16: elem_bytes=2; is_signed=false; break;
+            case DType::Int32:  elem_bytes=4; is_signed=true;  break;
+            case DType::UInt32: elem_bytes=4; is_signed=false; break;
+            case DType::Int64:  elem_bytes=8; is_signed=true;  break;
+            case DType::UInt64: elem_bytes=8; is_signed=false; break;
+            default: is_int = false; break;
+        }
+        if (is_int) {
+            if (op_name != "pow") {
+                throw std::runtime_error(
+                    "Vulkan " + op_name + ": integer dtypes are only supported for pow");
+            }
+            const double e = static_cast<double>(param);
+            const bool int_exp = (e == std::floor(e)) && e >= 0.0;
+            const uint32_t k = static_cast<uint32_t>(int_exp ? static_cast<int64_t>(e) : 0);
+
+            const std::string shader = elem_bytes == 1 ? "pow_int8"
+                                     : elem_bytes == 2 ? "pow_int16"
+                                     : elem_bytes == 4 ? "pow_int32"
+                                                       : "pow_int64";
+            auto* pipeline = getPipeline(shader, device_id);
+
+            std::vector<int64_t> oshape(input.shape().begin(), input.shape().end());
+            Tensor output(oshape, input.dtype(), input.device());
+            const int64_t numel = input.numel();
+            const size_t buf = ((static_cast<size_t>(numel) * elem_bytes + 3) / 4) * 4;
+
+            std::vector<std::pair<uint32_t, const void*>> bindings = {
+                {0, input.data_ptr()}, {1, output.data_ptr()}};
+            std::vector<size_t> sizes = {buf, buf};
+            VkDescriptorSet descriptorSet =
+                allocateAndWriteDescriptorSet(device_id, pipeline, bindings, sizes);
+
+            VkCommandBuffer cmdBuffer = beginSingleTimeCommands(device_id);
+            vkCmdBindPipeline(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
+            vkCmdBindDescriptorSets(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE,
+                                    pipeline->layout(), 0, 1, &descriptorSet, 0, nullptr);
+            struct PowPC {
+                uint32_t n; uint32_t is_signed; uint32_t int_exp; uint32_t k; float e;
+            } pc;
+            pc.n = static_cast<uint32_t>(numel);
+            pc.is_signed = is_signed ? 1u : 0u;
+            pc.int_exp = int_exp ? 1u : 0u;
+            pc.k = k;
+            pc.e = static_cast<float>(e);
+            vkCmdPushConstants(cmdBuffer, pipeline->layout(),
+                               VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), &pc);
+
+            const int64_t units = elem_bytes == 1 ? (numel + 3) / 4
+                                : elem_bytes == 2 ? (numel + 1) / 2
+                                                  : numel;
+            uint32_t workgroups = div_wg(static_cast<uint32_t>(units),
+                                         devices_[device_id].workgroupSize);
+            vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
+            insertComputeOnlyBarrier(cmdBuffer);
+            endSingleTimeCommands(cmdBuffer, device_id);
+            return output;
+        }
+    }
 
     // Select correct pipeline based on dtype
     std::string shader_name;
