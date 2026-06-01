@@ -536,7 +536,18 @@ TEST_P(JVPRulesTest, BatchNorm2dForward_JVP_MatchesFD) {
     w4_verify_single(OpId::BatchNorm2dForward, p, {0,1,2}, a, 1e-6);
 }
 
-// NOTE: TopK / Sort / LinalgQR / LinalgLU / LinalgSVD JVP adapters were drafted
+// LinalgQR forward-mode JVP (reduced QR, A = Q R). Diagonal-dominant tall
+// matrix keeps the factorization smooth (stable signs, no gauge flips).
+TEST_P(JVPRulesTest, LinalgQR_JVP_MatchesFD) {
+    if (device != Device::cpu()) return;
+    OpAttributes a;
+    Tensor A = w4_randf64({5,4}, 61) * 0.3;
+    { double* d = A.data<double>(); for (int i=0;i<4;++i) d[i*4+i] += (4.0 + i); }
+    w4_verify(OpId::LinalgQR, {A}, {0}, 0, a, 1e-4);  // dQ
+    w4_verify(OpId::LinalgQR, {A}, {0}, 1, a, 1e-4);  // dR
+}
+
+// NOTE: TopK / Sort / LinalgLU / LinalgSVD JVP adapters were drafted
 // but did not pass this finite-difference gradcheck, so their OpIds remain
 // registered to the NonDifferentiable thrower (forward-mode AD fails loudly
 // rather than returning a wrong tangent). The draft adapters are parked

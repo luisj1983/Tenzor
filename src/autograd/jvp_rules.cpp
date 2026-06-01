@@ -8450,7 +8450,7 @@ void register_builtin_jvp_rules() {
 
     // Multi-output linalg factorisations awaiting bespoke JVPs.
     register_jvp_rule_multi(OpId::LinalgSVD,            &jvp_adapter_nondiff_linalg_svd);
-    register_jvp_rule_multi(OpId::LinalgQR,             &jvp_adapter_nondiff_linalg_qr);
+    register_jvp_rule_multi(OpId::LinalgQR,             &jvp_adapter_linalg_qr_s15);
     register_jvp_rule_multi(OpId::LinalgEig,            &jvp_adapter_nondiff_linalg_eig);
     register_jvp_rule_multi(OpId::LinalgLU,             &jvp_adapter_nondiff_linalg_lu);
     register_jvp_rule       (OpId::LinalgHouseholder,    &jvp_adapter_nondiff_linalg_householder);
