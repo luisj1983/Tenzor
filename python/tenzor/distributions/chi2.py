@@ -39,12 +39,16 @@ class Chi2(Distribution):
         return 2.0 * self.df
 
     def sample(self, sample_shape=()):
-        out_shape = tuple(sample_shape) + self._batch_shape
-        df_np = np.asarray(self.df.tensor(), dtype=np.float64)
-        return _wrap_numpy(np.asarray(
-            np.random.chisquare(df=df_np, size=out_shape or None),
-            dtype=np.float32,
-        ))
+        # Chi2(df) = Gamma(df/2, rate=1/2). Draw via the native Gamma sampler
+        # (device-side, no NumPy) with params broadcast to the full shape.
+        out_shape = list(tuple(sample_shape) + self._batch_shape)
+        df_t = self.df.tensor() if hasattr(self.df, "tensor") else self.df
+        alpha = df_t * 0.5
+        if out_shape:
+            ones = _tz.ones(out_shape)
+            alpha = alpha * ones
+        beta = alpha * 0.0 + 0.5  # rate = 1/2, matching alpha's shape/device
+        return _tz.gamma_sample(alpha, beta)
 
     def rsample(self, sample_shape=()):
         # Chi2(df) = Gamma(df/2, 1/2); reparameterised via Gamma.rsample so the

@@ -44,13 +44,22 @@ class Dirichlet(Distribution):
         return _wrap_numpy(out)
 
     def sample(self, sample_shape=()):
+        # Dirichlet(a) = G / sum_last(G), G_i ~ Gamma(a_i, 1). Native device
+        # Gamma draw (no NumPy), normalised over the last (event) axis.
         sample_shape = tuple(int(s) for s in sample_shape)
-        alpha_np = np.asarray(self.concentration.tensor(), dtype=np.float64)
-        output_shape = sample_shape + alpha_np.shape
-        alpha_b = np.broadcast_to(alpha_np, output_shape)
-        g = np.random.gamma(shape=alpha_b, scale=1.0, size=output_shape)
-        s = g / g.sum(axis=-1, keepdims=True)
-        return _wrap_numpy(np.asarray(s, dtype=np.float32))
+        alpha_t = self.concentration.tensor() if hasattr(self.concentration, "tensor") \
+            else self.concentration
+        # Tensor.shape is a property (list), not a method.
+        alpha_shape = list(alpha_t.shape) if hasattr(alpha_t, "shape") else []
+        out_shape = list(sample_shape) + alpha_shape
+        if out_shape:
+            ones = _tz.ones(out_shape)
+            alpha_b = alpha_t * ones
+        else:
+            alpha_b = alpha_t
+        beta_b = alpha_b * 0.0 + 1.0  # rate = 1
+        g = _tz.gamma_sample(alpha_b, beta_b)
+        return g / _tz.sum(g, -1, True)
 
     def rsample(self, sample_shape=()):
         # Dirichlet(a) = G / sum(G), G_i ~ Gamma(a_i, 1); reparameterised, so the

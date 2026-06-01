@@ -55,12 +55,20 @@ class StudentT(Distribution):
         return _wrap_numpy(out)
 
     def sample(self, sample_shape=()):
-        out_shape = tuple(sample_shape) + self._batch_shape
-        df_np = np.asarray(self.df.tensor(), dtype=np.float64)
-        loc_np = np.asarray(self.loc.tensor(), dtype=np.float64)
-        scale_np = np.asarray(self.scale.tensor(), dtype=np.float64)
-        z = np.random.standard_t(df_np, size=out_shape or None)
-        return _wrap_numpy(np.asarray(loc_np + scale_np * z, dtype=np.float32))
+        # T = loc + scale * Z / sqrt(V/df), Z ~ N(0,1), V ~ Chi2(df). All draws
+        # use native device samplers (randn + native Chi2 = native Gamma); no
+        # NumPy. Detached (sample(), not rsample()).
+        from .chi2 import Chi2
+        out_shape = list(tuple(sample_shape) + self._batch_shape)
+        z = _tz.randn(out_shape) if out_shape else _tz.randn([])
+        v = Chi2(self.df).sample(sample_shape)  # Tensor (detached)
+        # sample() is detached: operate on raw Tensors throughout so we never mix
+        # Tensor and Variable operands.
+        df_t = self.df.tensor() if hasattr(self.df, "tensor") else self.df
+        loc_t = self.loc.tensor() if hasattr(self.loc, "tensor") else self.loc
+        scale_t = self.scale.tensor() if hasattr(self.scale, "tensor") else self.scale
+        inv_sqrt = _tz.exp(-0.5 * _tz.log(v / df_t))
+        return loc_t + scale_t * z * inv_sqrt
 
     def rsample(self, sample_shape=()):
         # T = loc + scale * Z / sqrt(V/df), Z ~ N(0,1) (noise), V ~ Chi2(df).

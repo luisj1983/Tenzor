@@ -47,11 +47,20 @@ class Beta(Distribution):
         return (a * b) / (s * s * (s + 1.0))
 
     def sample(self, sample_shape=()):
-        out_shape = tuple(sample_shape) + self._batch_shape
-        a_np = np.asarray(self.concentration1.tensor(), dtype=np.float64)
-        b_np = np.asarray(self.concentration0.tensor(), dtype=np.float64)
-        s = np.random.beta(a_np, b_np, size=out_shape or None)
-        return _wrap_numpy(np.asarray(s, dtype=np.float32))
+        # Beta(c1, c0) = X / (X + Y) with X ~ Gamma(c1, 1), Y ~ Gamma(c0, 1).
+        # Both Gammas use the native device sampler (no NumPy round-trip).
+        out_shape = list(tuple(sample_shape) + self._batch_shape)
+        c1 = self.concentration1.tensor() if hasattr(self.concentration1, "tensor") else self.concentration1
+        c0 = self.concentration0.tensor() if hasattr(self.concentration0, "tensor") else self.concentration0
+        if out_shape:
+            ones = _tz.ones(out_shape)
+            c1 = c1 * ones
+            c0 = c0 * ones
+        one_a = c1 * 0.0 + 1.0  # rate = 1, matching shape/device
+        one_b = c0 * 0.0 + 1.0
+        x = _tz.gamma_sample(c1, one_a)
+        y = _tz.gamma_sample(c0, one_b)
+        return x / (x + y)
 
     def rsample(self, sample_shape=()):
         # Beta(c1, c0) = X/(X+Y), X~Gamma(c1,1), Y~Gamma(c0,1); both Gammas are

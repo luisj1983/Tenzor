@@ -5,6 +5,7 @@ import math
 
 import numpy as np
 
+import tenzor as _tz
 from tenzor.tenzor_core import Tensor, Variable  # type: ignore
 
 from .distribution import (
@@ -34,12 +35,13 @@ class Poisson(Distribution):
         return self.rate
 
     def sample(self, sample_shape=()):
-        out_shape = tuple(sample_shape) + self._batch_shape
-        rate_np = np.asarray(self.rate.tensor(), dtype=np.float64)
-        return _wrap_numpy(np.asarray(
-            np.random.poisson(rate_np, size=out_shape or None),
-            dtype=np.float32,
-        ))
+        # Native device-side Poisson sampler (tz.poisson / OpId::PoissonSample),
+        # no NumPy round-trip. Rates broadcast to the full draw shape.
+        out_shape = list(tuple(sample_shape) + self._batch_shape)
+        rate_t = self.rate.tensor() if hasattr(self.rate, "tensor") else self.rate
+        if out_shape:
+            rate_t = rate_t * _tz.ones(out_shape)
+        return _tz.poisson(rate_t)
 
     def log_prob(self, value):
         gammaln = _require_scipy_special().gammaln
