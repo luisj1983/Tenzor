@@ -564,6 +564,7 @@ enum class OpId : uint16_t {
     PoissonSample,             // Poisson distribution: poisson(rates) -> tensor
     ExponentialSample,         // Exponential distribution: exponential(rate) -> tensor
     Histogramdd,               // Multi-dimensional histogram
+    GammaSample = 488,         // Gamma distribution: gamma(concentration, rate) -> tensor (Marsaglia-Tsang)
 
     // =========================================================================
     // Special Math Functions (490-509)

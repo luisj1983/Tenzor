@@ -825,5 +825,48 @@ auto exponential_sample_kernel(const Tensor& rate) -> Tensor {
     return result;
 }
 
+
+// Native Gamma sampler. concentration (shape parameter alpha) and rate (beta);
+// the sample is gamma(alpha, scale=1/beta). std::gamma_distribution implements
+// the Marsaglia-Tsang method internally (with Marsaglia's squeeze for alpha<1),
+// so this is a real device-side draw with no NumPy round-trip. Both inputs must
+// have the same shape (the Python layer broadcasts before dispatch, matching
+// normal_sample_kernel).
+auto gamma_sample_kernel(const Tensor& concentration, const Tensor& rate) -> Tensor {
+    if (concentration.shape() != rate.shape()) {
+        throw std::invalid_argument(
+            "gamma_sample: concentration and rate must have the same shape");
+    }
+    Tensor result(std::vector<int64_t>(concentration.shape().begin(),
+                                       concentration.shape().end()),
+                  concentration.dtype(), concentration.device());
+    auto& gen = detail::global_rng();
+
+    if (concentration.dtype() == DType::Float32) {
+        const float* a_data = concentration.data<float>();
+        const float* b_data = rate.data<float>();
+        float* out = result.data<float>();
+        for (int64_t i = 0; i < concentration.numel(); ++i) {
+            float alpha = a_data[i] > 0.0f ? a_data[i] : std::numeric_limits<float>::min();
+            float beta  = b_data[i] > 0.0f ? b_data[i] : std::numeric_limits<float>::min();
+            std::gamma_distribution<float> dist(alpha, 1.0f / beta);
+            out[i] = dist(gen);
+        }
+    } else if (concentration.dtype() == DType::Float64) {
+        const double* a_data = concentration.data<double>();
+        const double* b_data = rate.data<double>();
+        double* out = result.data<double>();
+        for (int64_t i = 0; i < concentration.numel(); ++i) {
+            double alpha = a_data[i] > 0.0 ? a_data[i] : std::numeric_limits<double>::min();
+            double beta  = b_data[i] > 0.0 ? b_data[i] : std::numeric_limits<double>::min();
+            std::gamma_distribution<double> dist(alpha, 1.0 / beta);
+            out[i] = dist(gen);
+        }
+    } else {
+        throw std::runtime_error("gamma_sample: unsupported dtype (Float32/Float64 only)");
+    }
+    return result;
+}
+
 } // namespace cpu
 } // namespace tenzor

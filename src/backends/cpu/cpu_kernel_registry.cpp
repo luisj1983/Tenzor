@@ -723,6 +723,7 @@ namespace cpu {
     auto normal_sample_kernel(const Tensor& mean, const Tensor& std) -> Tensor;
     auto poisson_sample_kernel(const Tensor& rates) -> Tensor;
     auto exponential_sample_kernel(const Tensor& rate) -> Tensor;
+    auto gamma_sample_kernel(const Tensor& concentration, const Tensor& rate) -> Tensor;
 
     // Histogram
     auto histogram_kernel(const Tensor& input, int64_t bins, double min_val, double max_val)
@@ -4220,6 +4221,10 @@ static void register_cpu_kernels_fft(BackendDispatchTable& table) {
 
     table.register_single_output_kernel(OpId::ExponentialSample, [](std::span<const Tensor> inputs, [[maybe_unused]] const OpAttributes& attrs) -> Tensor {
         return cpu::exponential_sample_kernel(inputs[0]);
+    });
+
+    table.register_single_output_kernel(OpId::GammaSample, [](std::span<const Tensor> inputs, [[maybe_unused]] const OpAttributes& attrs) -> Tensor {
+        return cpu::gamma_sample_kernel(inputs[0], inputs[1]);
     });
 
     // =========================================================================
