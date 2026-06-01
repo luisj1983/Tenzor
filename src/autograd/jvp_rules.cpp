@@ -8520,6 +8520,118 @@ JvpResult jvp_adapter_ormqr_s15(std::span<const Tensor> primals,
     return JvpResult{ std::move(Y), std::move(dY) };
 }
 
+// Helper: true iff the LAPACK sytrf pivot vector encodes the trivial case —
+// every pivot is a 1×1 block with no interchange (ipiv[i] == i+1, 1-based).
+// Interchanges or 2×2 blocks (negative ipiv) make the packed (L,D) layout
+// permutation/block dependent, which this rule does not handle.
+inline bool ldl_pivots_are_identity(const Tensor& pivots, int64_t n) {
+    Tensor pc = pivots.to(Device::cpu()).contiguous();
+    const int32_t* p = pc.data<int32_t>();
+    for (int64_t i = 0; i < n; ++i) if (p[i] != static_cast<int32_t>(i + 1)) return false;
+    return true;
+}
+
+// LinalgLDLFactor: symmetric A = L D Lᵀ (sytrf 'L', 1×1 pivots, no interchange).
+// sytrf reads only the lower triangle, so the effective input perturbation is
+// dA_eff = tril(dA) + tril(dA,-1)ᵀ. With M = L⁻¹ dA_eff L⁻ᵀ:
+//   dD = diag(M),  dL = L · (tril(M,-1) diag(1/D))   (strictly lower)
+// packed dLD = strict-lower(dL) + diag(dD); pivots carry no tangent.
+JvpMultiResult jvp_adapter_linalg_ldl_factor_s15(std::span<const Tensor> primals,
+                                                 std::span<const Tensor> tangents,
+                                                 const OpAttributes& attrs) {
+    if (primals.empty()) {
+        throw std::runtime_error("jvp_adapter_linalg_ldl_factor_s15: expected 1 input (A)");
+    }
+    const Tensor& A = primals[0];
+    if (A.ndim() != 2) {
+        throw NonDifferentiable("LinalgLDLFactor JVP is implemented for rank-2 inputs only.");
+    }
+    Tensor dA = jvp_zeros_like_or(A, tangents.empty() ? Tensor() : tangents[0]);
+
+    auto outs = tenzor::dispatch(OpId::LinalgLDLFactor, std::vector<Tensor>{A}, attrs);
+    const Tensor& LD = outs[0];
+    const Tensor& piv = outs[1];
+    const int64_t n = LD.shape().back();
+    if (!ldl_pivots_are_identity(piv, n)) {
+        throw NonDifferentiable(
+            "LinalgLDLFactor JVP supports only the no-interchange, 1x1-pivot case "
+            "(diagonally dominant symmetric input); the Bunch-Kaufman pivoting/2x2 "
+            "blocking for this matrix is not differentiably reconstructable.");
+    }
+
+    Tensor I = tenzor::eye(n, std::nullopt, A.dtype(), A.device());
+    Tensor L = tenzor::add(tenzor::tril(LD, -1), I);
+    Tensor Dvec = tenzor::diag(LD);                              // (n,)
+    // sytrf 'L' factors from the lower triangle (L = tril(LD,-1)+I, D=diag(LD),
+    // verified by the storage probe), so the effective symmetric input is built
+    // from the lower triangle: dA_eff = tril(dA) + tril(dA,-1)ᵀ.
+    Tensor dA_eff = tenzor::add(tenzor::tril(dA, 0),
+                                tenzor::transpose(tenzor::tril(dA, -1), -1, -2));
+    Tensor Linv = tenzor::linalg::inv(L);
+    Tensor M = tenzor::matmul(tenzor::matmul(Linv, dA_eff),
+                              tenzor::transpose(Linv, -1, -2));
+    Tensor dDvec = tenzor::diag(M);
+    Tensor invD = tenzor::reciprocal(Dvec);
+    Tensor dL = tenzor::matmul(L, tenzor::mul(tenzor::tril(M, -1),
+                                              tenzor::reshape(invD, {1, n})));
+    // The op leaves LD's strict-upper triangle equal to the input's strict-upper
+    // triangle (unreferenced by sytrf), so that part of the tangent passes
+    // through as strict-upper(dA).
+    Tensor dLD = tenzor::add(
+        tenzor::add(tenzor::tril(dL, -1),
+                    tenzor::linalg::diag_embed(dDvec, 0, -2, -1)),
+        tenzor::triu(dA, 1));
+    Tensor dPiv = tenzor::zeros(
+        std::vector<int64_t>(piv.shape().begin(), piv.shape().end()),
+        piv.dtype(), piv.device());
+
+    JvpMultiResult result;
+    result.primals  = { LD, piv };
+    result.tangents = { std::move(dLD), std::move(dPiv) };
+    return result;
+}
+
+// LinalgLDLSolve: X = A⁻¹ B, A = L D Lᵀ from packed LD (1×1 pivots, no
+// interchange). A⁻¹(·) reuses ldl_solve; dA from the packed-factor tangent.
+JvpResult jvp_adapter_linalg_ldl_solve_s15(std::span<const Tensor> primals,
+                                           std::span<const Tensor> tangents,
+                                           const OpAttributes&) {
+    if (primals.size() != 3) {
+        throw std::runtime_error(
+            "jvp_adapter_linalg_ldl_solve_s15: expected 3 inputs (LD, pivots, B)");
+    }
+    const Tensor& LD = primals[0];
+    const Tensor& piv = primals[1];
+    const Tensor& B   = primals[2];
+    const int64_t n = LD.shape().back();
+    if (!ldl_pivots_are_identity(piv, n)) {
+        throw NonDifferentiable(
+            "LinalgLDLSolve JVP supports only the no-interchange, 1x1-pivot case; "
+            "the Bunch-Kaufman pivoting/2x2 blocking for this factor is not "
+            "differentiably reconstructable.");
+    }
+    Tensor dLD = jvp_zeros_like_or(LD, tangents.empty()    ? Tensor() : tangents[0]);
+    Tensor dB  = jvp_zeros_like_or(B,  tangents.size() < 3 ? Tensor() : tangents[2]);
+
+    Tensor I = tenzor::eye(n, std::nullopt, LD.dtype(), LD.device());
+    Tensor L  = tenzor::add(tenzor::tril(LD, -1), I);
+    Tensor dL = tenzor::tril(dLD, -1);
+    Tensor D  = tenzor::linalg::diag_embed(tenzor::diag(LD),  0, -2, -1);
+    Tensor dD = tenzor::linalg::diag_embed(tenzor::diag(dLD), 0, -2, -1);
+    Tensor Lt = tenzor::transpose(L, -1, -2);
+    Tensor dLt = tenzor::transpose(dL, -1, -2);
+    // dA = dL D Lᵀ + L dD Lᵀ + L D dLᵀ
+    Tensor dA = tenzor::add(
+        tenzor::matmul(tenzor::matmul(dL, D), Lt),
+        tenzor::add(tenzor::matmul(tenzor::matmul(L, dD), Lt),
+                    tenzor::matmul(tenzor::matmul(L, D), dLt)));
+
+    Tensor X = tenzor::linalg::ldl_solve(LD, piv, B);
+    Tensor rhs = tenzor::sub(dB, tenzor::matmul(dA, X));
+    Tensor dX = tenzor::linalg::ldl_solve(LD, piv, rhs);
+    return JvpResult{ std::move(X), std::move(dX) };
+}
+
 // ============================================================================
 // Wave-4 JVP: BatchNorm2dForward (single-output kernel; inputs (x, mean, var),
 // attr Eps; output y = (x - mean) * rstd, rstd = 1/sqrt(var + eps)). mean/var
@@ -9109,8 +9221,8 @@ void register_builtin_jvp_rules() {
     register_jvp_rule_multi(OpId::LinalgEig,            &jvp_adapter_linalg_eig_s15);
     register_jvp_rule_multi(OpId::LinalgLU,             &jvp_adapter_linalg_lu_s15);
     register_jvp_rule       (OpId::LinalgHouseholder,    &jvp_adapter_linalg_householder_s15);
-    register_jvp_rule_multi(OpId::LinalgLDLFactor,      &jvp_adapter_nondiff_linalg_ldl_factor);
-    register_jvp_rule       (OpId::LinalgLDLSolve,       &jvp_adapter_nondiff_linalg_ldl_solve);
+    register_jvp_rule_multi(OpId::LinalgLDLFactor,      &jvp_adapter_linalg_ldl_factor_s15);
+    register_jvp_rule       (OpId::LinalgLDLSolve,       &jvp_adapter_linalg_ldl_solve_s15);
     // S-final: solve / inverse family — closed-form JVP, gradchecked.
     register_jvp_rule       (OpId::LinalgLUSolve,        &jvp_adapter_lu_solve_s15);
     register_jvp_rule       (OpId::LinalgCholeskySolve,  &jvp_adapter_cholesky_solve_s15);

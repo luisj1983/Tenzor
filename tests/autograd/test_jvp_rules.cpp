@@ -843,6 +843,36 @@ TEST_P(JVPRulesTest, Ormqr_JVP_MatchesFD) {
     w4_verify_single(OpId::Ormqr, {qr[0], qr[1], B}, {0,1,2}, a, 1e-4);
 }
 
+// Helper: symmetric diagonally dominant matrix (=> sytrf picks 1x1 pivots in
+// order, no interchange) for the LDL tests.
+static Tensor w4_sym_dd(uint64_t seed) {
+    Tensor base = w4_randf64({4,4}, seed) * 0.2;
+    const double* b = base.data<double>();
+    Tensor A(std::vector<int64_t>{4,4}, DType::Float64, Device::cpu());
+    double* d = A.data<double>();
+    for (int i=0;i<4;++i) for (int j=0;j<4;++j) d[i*4+j] = 0.5*(b[i*4+j]+b[j*4+i]);
+    for (int i=0;i<4;++i) d[i*4+i] += 5.0 + i;
+    return A;
+}
+
+// LinalgLDLFactor JVP (symmetric A = L D Lᵀ, no interchange).
+TEST_P(JVPRulesTest, LinalgLDLFactor_JVP_MatchesFD) {
+    if (device != Device::cpu()) return;
+    OpAttributes a;
+    Tensor A = w4_sym_dd(191);
+    w4_verify(OpId::LinalgLDLFactor, {A}, {0}, 0, a, 1e-3);  // dLD
+}
+
+// LinalgLDLSolve JVP. Inputs (LD, pivots, B) from ldl_factor of a symmetric DD A.
+TEST_P(JVPRulesTest, LinalgLDLSolve_JVP_MatchesFD) {
+    if (device != Device::cpu()) return;
+    OpAttributes a;
+    Tensor A = w4_sym_dd(193);
+    auto f = tenzor::dispatch(OpId::LinalgLDLFactor, std::vector<Tensor>{A}, a);
+    Tensor B = w4_randf64({4,2}, 194);
+    w4_verify_single(OpId::LinalgLDLSolve, {f[0], f[1], B}, {0,2}, a, 1e-3);
+}
+
 // NOTE: LinalgLU / LinalgSVD / LinalgEig / LDLFactor / Geqrf / RNN-forward JVP
 // adapters are drafted (LU/SVD parked in jvp_rules.cpp) but do not yet pass
 // this finite-difference gradcheck, so their OpIds remain registered to the
