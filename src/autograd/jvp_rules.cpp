@@ -8298,12 +8298,12 @@ JvpMultiResult jvp_adapter_bilstm_forward_s15(std::span<const Tensor> primals,
 JvpMultiResult jvp_adapter_linalg_svd_s15(std::span<const Tensor> primals,
                                           std::span<const Tensor> tangents,
                                           const OpAttributes& attrs) {
-    // NOTE: this analytic thin-SVD differential is retained for reference but is
-    // NOT currently registered — it did not pass the forward-mode gradcheck for
-    // the U/Vh tangents (the singular-vector phase/rotation coupling needs more
-    // care for non-trivial spectra). LinalgSVD stays registered to the
-    // NonDifferentiable adapter until this is gradcheck-clean, so forward-mode
-    // AD fails loudly rather than returning a wrong tangent.
+    // Thin-SVD forward differential (Townsend 2016 / standard). Gradcheck-clean
+    // for distinct singular values; for repeated singular values the singular
+    // vectors are only defined up to rotation within the degenerate subspace
+    // and the per-vector tangent is not unique (dS and the reconstruction
+    // U dS Vᵀ + ... remain well defined). Restricted to rank-2 inputs (the
+    // SVD kernel's autograd domain).
     if (primals.empty()) {
         throw std::runtime_error("jvp_adapter_linalg_svd_s15: expected 1 input (A)");
     }
@@ -8937,7 +8937,7 @@ void register_builtin_jvp_rules() {
     register_jvp_rule_multi(OpId::BatchNorm2dFusedTraining,      &jvp_adapter_batchnorm2d_fused_training_s15);
 
     // Multi-output linalg factorisations awaiting bespoke JVPs.
-    register_jvp_rule_multi(OpId::LinalgSVD,            &jvp_adapter_nondiff_linalg_svd);
+    register_jvp_rule_multi(OpId::LinalgSVD,            &jvp_adapter_linalg_svd_s15);
     register_jvp_rule_multi(OpId::LinalgQR,             &jvp_adapter_linalg_qr_s15);
     register_jvp_rule_multi(OpId::LinalgEig,            &jvp_adapter_nondiff_linalg_eig);
     register_jvp_rule_multi(OpId::LinalgLU,             &jvp_adapter_linalg_lu_s15);

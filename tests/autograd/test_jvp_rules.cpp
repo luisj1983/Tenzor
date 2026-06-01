@@ -767,6 +767,20 @@ TEST_P(JVPRulesTest, BiLSTM_JVP_MatchesFD) {
     for (int oi = 0; oi < 3; ++oi) w4_verify(OpId::BiLSTMForward, p, diffs, oi, a, 1e-4);
 }
 
+// LinalgSVD JVP (thin SVD A = U S Vh). Well-separated singular values keep the
+// singular vectors' sign/gauge stable under the FD step.
+TEST_P(JVPRulesTest, LinalgSVD_JVP_MatchesFD) {
+    if (device != Device::cpu()) return;
+    OpAttributes a;
+    a.set(AttrKey::FullMatrices, false);
+    Tensor A = w4_randf64({4,4}, 161) * 0.15;
+    { double* d = A.data<double>(); double diag[4]={6.0,4.0,2.5,1.0};
+      for (int i=0;i<4;++i) d[i*4+i] += diag[i]; }
+    w4_verify(OpId::LinalgSVD, {A}, {0}, 1, a, 1e-3);  // dS
+    w4_verify(OpId::LinalgSVD, {A}, {0}, 0, a, 1e-3);  // dU
+    w4_verify(OpId::LinalgSVD, {A}, {0}, 2, a, 1e-3);  // dVh
+}
+
 // NOTE: LinalgLU / LinalgSVD / LinalgEig / LDLFactor / Geqrf / RNN-forward JVP
 // adapters are drafted (LU/SVD parked in jvp_rules.cpp) but do not yet pass
 // this finite-difference gradcheck, so their OpIds remain registered to the
