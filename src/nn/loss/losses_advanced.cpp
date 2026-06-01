@@ -956,15 +956,23 @@ auto PoissonNLLLoss::forward(const Variable& input, const Variable& target) -> V
     }
 
     if (full_) {
-        // Add Stirling approximation: target * log(target) - target + 0.5 * log(2 * pi * target)
-        // Simplified: use only the dominant term target * log(target) - target for target > 1
+        // Stirling correction: target*log(target) - target + 0.5*log(2*pi*target).
+        // PyTorch adds this ONLY where target > 1; for target <= 1 it contributes
+        // 0. The previous code applied it to every element (clamped to eps),
+        // which adds a spurious strongly-negative 0.5*log(2*pi*target) term for
+        // fractional/small targets, diverging from the reference.
         auto target_safe = clamp(target_c, static_cast<float>(eps_), std::numeric_limits<float>::max());
-        auto stirling = target_safe * log(target_safe) - target_safe;
-        // Add 0.5 * log(2*pi*target)
         auto half = scalar_var(0.5f, target_c);
         auto two_pi = scalar_var(static_cast<float>(2.0 * M_PI), target_c);
-        stirling = stirling + half * log(two_pi * target_safe);
-        loss = loss + stirling;
+        auto stirling = target_safe * log(target_safe) - target_safe
+                        + half * log(two_pi * target_safe);
+        // Detached 0/1 mask = (target > 1); gradient still flows through the
+        // stirling term where the mask selects it (torch.where semantics).
+        auto one_var = scalar_var(1.0f, target_c);
+        Tensor mask_t = tenzor::gt(target_c.tensor(), one_var.tensor())
+                            .to(target_c.tensor().dtype());
+        Variable mask(mask_t, /*requires_grad=*/false);
+        loss = loss + stirling * mask;
     }
 
     auto red_str = reduction_to_string(reduction_);

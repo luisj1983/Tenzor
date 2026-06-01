@@ -31,7 +31,12 @@ auto apply_rnn_activation(const std::string& name, const Variable& x) -> Variabl
     if (name == "hardtanh"    || name == "hard_tanh")    return nn::hardtanh(x);
     if (name == "softsign")      return nn::softsign(x);
     if (name == "affine" || name == "identity" || name == "linear") return x;
-    if (name == "scaledtanh" || name == "scaled_tanh") return nn::tanh(x);
+    if (name == "scaledtanh" || name == "scaled_tanh")
+        // LeCun scaled tanh: 1.7159 * tanh((2/3) * x), the canonical "scaled
+        // tanh" (LeCun 1998) chosen so the output has ~unit variance for
+        // normalized inputs. Previously this silently returned plain tanh(x),
+        // dropping the characteristic scaling entirely.
+        return nn::tanh(x * (2.0f / 3.0f)) * 1.7159f;
     throw std::invalid_argument(
         "RNNCell: unsupported activation '" + name + "'. Supported: tanh, relu, "
         "sigmoid, leaky_relu, elu, hardsigmoid, hardtanh, softsign, affine, "
