@@ -1,6 +1,8 @@
 #include "tenzor/ops/creation.hpp"
 #include "tenzor/core/generator.hpp"
 #include "tenzor/ops/math.hpp"
+#include "tenzor/ops/reduction.hpp"  // argsort (GPU randperm)
+#include "tenzor/ops/transform.hpp"  // reshape/expand (device-agnostic meshgrid)
 #include "tenzor/distributions/distribution.hpp"
 #include "tenzor/backend/dispatch.hpp"
 #include "tenzor/backend/fast_dispatch.hpp"
@@ -967,20 +969,26 @@ auto randn_like(const Tensor& tensor) -> Tensor {
 }
 
 auto randperm(int64_t n, Device device) -> Tensor {
-    // Create tensor with sequential integers 0 to n-1
-    auto tensor = arange(0.0f, static_cast<float>(n), 1.0f, DType::Int64, device);
-
-    // For CPU, shuffle in place
     if (device.type == Device::Type::CPU) {
-        auto data = tensor.data<int64_t>();
-        auto& gen = get_rng();
-        std::shuffle(data, data + n, gen);
-    } else {
-        // For other devices, would need backend-specific implementation
-        throw std::runtime_error("randperm only supported on CPU currently");
+        // CPU: sequential range shuffled in place with the global RNG.
+        auto tensor = arange(0.0f, static_cast<float>(n), 1.0f, DType::Int64, device);
+        if (n > 1) {
+            auto data = tensor.data<int64_t>();
+            auto& gen = get_rng();
+            std::shuffle(data, data + n, gen);
+        }
+        return tensor;
     }
 
-    return tensor;
+    // GPU: a uniformly random permutation of [0, n) is the argsort of n uniform
+    // random keys. Both the key generation (rand) and the sort (argsort) run on
+    // the target device — no host shuffle / CPU fallback, and never the silent
+    // unshuffled identity the old guard returned for non-CPU devices.
+    if (n <= 1) {
+        return arange(0.0, static_cast<double>(n), 1.0, DType::Int64, device);
+    }
+    Tensor keys = rand({n}, DType::Float32, device);
+    return argsort(keys, /*dim=*/0, /*descending=*/false).to(DType::Int64);
 }
 
 auto meshgrid(const std::vector<Tensor>& tensors, const std::string& indexing) -> std::vector<Tensor> {
@@ -994,52 +1002,33 @@ auto meshgrid(const std::vector<Tensor>& tensors, const std::string& indexing) -
             throw std::invalid_argument("meshgrid: all input tensors must be 1-D");
     }
 
-    // Build output shape
+    // Output shape: one axis per input (length = that input's numel). For "xy"
+    // indexing with >= 2 inputs the first two axes are swapped.
     std::vector<int64_t> out_shape;
-    for (size_t i = 0; i < ndim; ++i) {
-        out_shape.push_back(tensors[i].numel());
-    }
-
-    // For "xy" indexing with >= 2 tensors, swap first two dimensions
-    if (indexing == "xy" && ndim >= 2) {
-        std::swap(out_shape[0], out_shape[1]);
-    }
-
-    // Total elements per grid
-    int64_t total = 1;
-    for (auto s : out_shape) total *= s;
+    out_shape.reserve(ndim);
+    for (size_t i = 0; i < ndim; ++i) out_shape.push_back(tensors[i].numel());
+    if (indexing == "xy" && ndim >= 2) std::swap(out_shape[0], out_shape[1]);
 
     std::vector<Tensor> result;
+    result.reserve(ndim);
     for (size_t ti = 0; ti < ndim; ++ti) {
-        // Determine which output dimension this tensor varies along
+        // Output axis along which this tensor's values vary.
         size_t dim_idx = ti;
         if (indexing == "xy" && ndim >= 2) {
             if (ti == 0) dim_idx = 1;
             else if (ti == 1) dim_idx = 0;
         }
 
-        auto grid = empty(out_shape, tensors[ti].dtype(), tensors[ti].device());
-        auto src = tensors[ti].contiguous();
-        size_t elem_size = dtype_size(src.dtype());
-
-        // Compute strides for index calculation
-        std::vector<int64_t> strides(ndim);
-        int64_t stride = 1;
-        for (int64_t d = static_cast<int64_t>(ndim) - 1; d >= 0; --d) {
-            strides[d] = stride;
-            stride *= out_shape[d];
-        }
-
-        auto* dst = static_cast<uint8_t*>(grid.data_ptr());
-        auto* src_ptr = static_cast<const uint8_t*>(src.data_ptr());
-
-        for (int64_t flat = 0; flat < total; ++flat) {
-            // Extract index along dim_idx from flat index
-            int64_t idx = (flat / strides[dim_idx]) % out_shape[dim_idx];
-            std::memcpy(dst + flat * elem_size, src_ptr + idx * elem_size, elem_size);
-        }
-
-        result.push_back(grid);
+        // Reshape the 1-D input to place its values on `dim_idx` (size 1 on
+        // every other axis), then broadcast to the full grid shape. reshape and
+        // expand both dispatch to the input's device, so meshgrid now works on
+        // every backend. (The previous host std::memcpy loop dereferenced
+        // grid.data_ptr()/src.data_ptr() directly — device pointers for a GPU
+        // tensor — and crashed / produced garbage off-CPU.)
+        std::vector<int64_t> view_shape(ndim, 1);
+        view_shape[dim_idx] = tensors[ti].numel();
+        Tensor reshaped = reshape(tensors[ti], view_shape);
+        result.push_back(expand(reshaped, out_shape).contiguous());
     }
 
     return result;
@@ -1342,18 +1331,30 @@ auto exponential(const Tensor& rate, Generator& generator) -> Tensor {
 }
 
 auto randperm(int64_t n, Device device, Generator& generator) -> Tensor {
-    // Generate sequential tensor then shuffle with Generator's engine
-    auto result = tenzor::arange(0.0, static_cast<double>(n), 1.0, DType::Int64, device);
-    if (device.type == Device::Type::CPU && n > 1) {
-        auto& eng = generator.engine();
-        auto* data = result.data<int64_t>();
-        for (int64_t i = n - 1; i > 0; --i) {
-            std::uniform_int_distribution<int64_t> dist(0, i);
-            int64_t j = dist(eng);
-            std::swap(data[i], data[j]);
+    if (device.type == Device::Type::CPU) {
+        // CPU: Fisher-Yates shuffle driven by the supplied Generator's engine.
+        auto result = tenzor::arange(0.0, static_cast<double>(n), 1.0, DType::Int64, device);
+        if (n > 1) {
+            auto& eng = generator.engine();
+            auto* data = result.data<int64_t>();
+            for (int64_t i = n - 1; i > 0; --i) {
+                std::uniform_int_distribution<int64_t> dist(0, i);
+                int64_t j = dist(eng);
+                std::swap(data[i], data[j]);
+            }
         }
+        return result;
     }
-    return result;
+
+    // GPU: generator-seeded uniform keys + on-device argsort. The Generator
+    // overload of rand() forwards generator.next_seed() to the device kernel,
+    // so this is reproducible and stays on-device (never the silent unshuffled
+    // identity the old CPU-only guard returned for non-CPU devices).
+    if (n <= 1) {
+        return tenzor::arange(0.0, static_cast<double>(n), 1.0, DType::Int64, device);
+    }
+    Tensor keys = rand({n}, DType::Float32, device, generator);
+    return argsort(keys, /*dim=*/0, /*descending=*/false).to(DType::Int64);
 }
 
 auto logspace(float start, float end, int64_t steps, double base,
