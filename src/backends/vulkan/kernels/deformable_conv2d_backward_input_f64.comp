@@ -1,0 +1,223 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_float64 : require
+#extension GL_EXT_shader_atomic_float : enable
+
+// Deformable Conv2d Backward Input — gradients w.r.t. input, offset, and mask.
+//
+// One thread per output spatial element (n, og_ic, kh, kw, oh, ow) in the
+// column-style formulation.  We iterate over the output elements and scatter
+// gradients back to grad_input via bilinear weights, while also accumulating
+// grad_offset and grad_mask analytically.
+//
+// Thread mapping: one thread per (n, oc, oh, ow) — mirrors forward pass.
+// For each output element we walk the same kernel window, accumulate
+// grad_input contributions (via atomicAdd because multiple output positions
+// can map to the same input location) and directly write grad_offset /
+// grad_mask (each uniquely owned by the thread's oh,ow,kernel position).
+
+layout(local_size_x_id = 0) in;
+
+layout(binding = 0) buffer GradOutput { double grad_output[]; };  // (N, C_out, H_out, W_out)
+layout(binding = 1) buffer Input      { double input_data[];  };  // (N, C_in, H, W)
+layout(binding = 2) buffer Offset     { double offset_data[]; };  // (N, og*kH*kW*2, H_out, W_out)
+layout(binding = 3) buffer Weight     { double weight_data[]; };  // (C_out, C_in/groups, kH, kW)
+layout(binding = 4) buffer Mask       { double mask_data[];   };  // (N, og*kH*kW, H_out, W_out)
+layout(binding = 5) buffer GradInput  { double grad_input[];  };  // (N, C_in, H, W)
+layout(binding = 6) buffer GradOffset { double grad_offset[]; };  // (N, og*kH*kW*2, H_out, W_out)
+layout(binding = 7) buffer GradMask   { double grad_mask[];   };  // (N, og*kH*kW, H_out, W_out)
+
+layout(push_constant) uniform PushConstants {
+    uint batch;
+    uint in_channels;
+    uint out_channels;
+    uint H;
+    uint W;
+    uint kH;
+    uint kW;
+    uint H_out;
+    uint W_out;
+    uint stride_h;
+    uint stride_w;
+    uint pad_h;
+    uint pad_w;
+    uint dil_h;
+    uint dil_w;
+    uint groups;
+    uint offset_groups;
+    uint use_mask;
+    uint n_elements;         // offset_groups * kH * kW * H_out * W_out * batch
+} params;
+
+// Bilinear interpolation (same as forward)
+double bilinear_interp(uint base_idx, double h, double w) {
+    if (h <= -1.0 || h >= double(params.H) || w <= -1.0 || w >= double(params.W))
+        return 0.0;
+    int h_low = int(floor(h));
+    int w_low = int(floor(w));
+    int h_high = h_low + 1;
+    int w_high = w_low + 1;
+    double lh = h - double(h_low);
+    double lw = w - double(w_low);
+    double hh = 1.0 - lh;
+    double hw = 1.0 - lw;
+    double v1 = 0.0, v2 = 0.0, v3 = 0.0, v4 = 0.0;
+    if (h_low >= 0 && w_low >= 0)
+        v1 = input_data[base_idx + uint(h_low) * params.W + uint(w_low)];
+    if (h_low >= 0 && w_high < int(params.W))
+        v2 = input_data[base_idx + uint(h_low) * params.W + uint(w_high)];
+    if (h_high < int(params.H) && w_low >= 0)
+        v3 = input_data[base_idx + uint(h_high) * params.W + uint(w_low)];
+    if (h_high < int(params.H) && w_high < int(params.W))
+        v4 = input_data[base_idx + uint(h_high) * params.W + uint(w_high)];
+    return hh * hw * v1 + hh * lw * v2 + lh * hw * v3 + lh * lw * v4;
+}
+
+// Partial derivatives of bilinear interpolation w.r.t. h and w
+void bilinear_interp_grad(uint base_idx, double h, double w,
+                           out double grad_h, out double grad_w) {
+    grad_h = 0.0;
+    grad_w = 0.0;
+    if (h <= -1.0 || h >= double(params.H) || w <= -1.0 || w >= double(params.W))
+        return;
+
+    int h_low = int(floor(h));
+    int w_low = int(floor(w));
+    int h_high = h_low + 1;
+    int w_high = w_low + 1;
+    double lh = h - double(h_low);
+    double lw = w - double(w_low);
+    double hh = 1.0 - lh;
+    double hw = 1.0 - lw;
+
+    double v1 = 0.0, v2 = 0.0, v3 = 0.0, v4 = 0.0;
+    if (h_low >= 0 && w_low >= 0)
+        v1 = input_data[base_idx + uint(h_low) * params.W + uint(w_low)];
+    if (h_low >= 0 && w_high < int(params.W))
+        v2 = input_data[base_idx + uint(h_low) * params.W + uint(w_high)];
+    if (h_high < int(params.H) && w_low >= 0)
+        v3 = input_data[base_idx + uint(h_high) * params.W + uint(w_low)];
+    if (h_high < int(params.H) && w_high < int(params.W))
+        v4 = input_data[base_idx + uint(h_high) * params.W + uint(w_high)];
+
+    // d/dh of bilinear: -hw*v1 - lw*v2 + hw*v3 + lw*v4
+    grad_h = -hw * v1 - lw * v2 + hw * v3 + lw * v4;
+    // d/dw of bilinear: -hh*v1 + hh*v2 - lh*v3 + lh*v4
+    grad_w = -hh * v1 + hh * v2 - lh * v3 + lh * v4;
+}
+
+void main() {
+    // Thread per (n, og, kh, kw, oh, ow) — each thread owns one offset/mask
+    // gradient element and contributes to grad_input via the 4 bilinear corners.
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= params.n_elements)
+        return;
+
+    // Decode: n_elements = batch * offset_groups * kH * kW * H_out * W_out
+    uint ow = idx % params.W_out;
+    uint tmp = idx / params.W_out;
+    uint oh = tmp % params.H_out;
+    tmp /= params.H_out;
+    uint kw = tmp % params.kW;
+    tmp /= params.kW;
+    uint kh = tmp % params.kH;
+    tmp /= params.kH;
+    uint og = tmp % params.offset_groups;
+    uint n  = tmp / params.offset_groups;
+
+    uint kernel_idx = kh * params.kW + kw;
+
+    // Offset indices
+    uint off_base = ((n * params.offset_groups + og) * params.kH * params.kW + kernel_idx) * 2;
+    uint spatial = oh * params.W_out + ow;
+    uint off_h_idx = off_base * params.H_out * params.W_out + spatial;
+    uint off_w_idx = (off_base + 1) * params.H_out * params.W_out + spatial;
+
+    double h_off = offset_data[off_h_idx];
+    double w_off = offset_data[off_w_idx];
+
+    double h_base = double(oh * params.stride_h) - double(params.pad_h) + double(kh * params.dil_h);
+    double w_base = double(ow * params.stride_w) - double(params.pad_w) + double(kw * params.dil_w);
+    double h_loc = h_base + h_off;
+    double w_loc = w_base + w_off;
+
+    // Mask value and index
+    uint mask_idx = ((n * params.offset_groups + og) * params.kH * params.kW + kernel_idx)
+                    * params.H_out * params.W_out + spatial;
+    double m = (params.use_mask == 1) ? mask_data[mask_idx] : 1.0;
+
+    // Channels in this offset group
+    uint channels_per_offset_group = params.in_channels / params.offset_groups;
+    uint ic_start_og = og * channels_per_offset_group;
+
+    // Group/channel layout
+    uint in_channels_per_group  = params.in_channels / params.groups;
+    uint out_channels_per_group = params.out_channels / params.groups;
+
+    // Accumulate grad_offset_h, grad_offset_w, grad_mask across all (oc, ic) pairs
+    double acc_grad_off_h = 0.0;
+    double acc_grad_off_w = 0.0;
+    double acc_grad_mask  = 0.0;
+
+    // For each input channel in this offset group
+    for (uint ic_off = 0; ic_off < channels_per_offset_group; ic_off++) {
+        uint ic = ic_start_og + ic_off;
+        uint g = ic / in_channels_per_group;
+        uint ic_local = ic - g * in_channels_per_group;
+
+        uint input_plane = (n * params.in_channels + ic) * params.H * params.W;
+        double interp_val = bilinear_interp(input_plane, h_loc, w_loc);
+
+        double grad_h_interp, grad_w_interp;
+        bilinear_interp_grad(input_plane, h_loc, w_loc, grad_h_interp, grad_w_interp);
+
+        // Sum grad_output over output channels in this group
+        uint oc_start = g * out_channels_per_group;
+        for (uint oc_off = 0; oc_off < out_channels_per_group; oc_off++) {
+            uint oc = oc_start + oc_off;
+            uint go_idx = ((n * params.out_channels + oc) * params.H_out + oh) * params.W_out + ow;
+            double go = grad_output[go_idx];
+
+            uint w_idx = ((oc * in_channels_per_group + ic_local) * params.kH + kh) * params.kW + kw;
+            double wt = weight_data[w_idx];
+
+            double chain = go * wt * m;
+            acc_grad_off_h += chain * grad_h_interp;
+            acc_grad_off_w += chain * grad_w_interp;
+            acc_grad_mask  += go * wt * interp_val;
+
+            // grad_input: scatter bilinear weights to 4 corners
+            if (h_loc > -1.0 && h_loc < double(params.H) && w_loc > -1.0 && w_loc < double(params.W)) {
+                int h_low  = int(floor(h_loc));
+                int w_low  = int(floor(w_loc));
+                int h_high = h_low + 1;
+                int w_high = w_low + 1;
+                double lh = h_loc - double(h_low);
+                double lw = w_loc - double(w_low);
+                double hh = 1.0 - lh;
+                double hw = 1.0 - lw;
+
+                double grad_val = chain;
+
+                // Atomic adds because multiple threads may write to same input pixel
+                uint gi_base = (n * params.in_channels + ic) * params.H * params.W;
+                if (h_low >= 0 && w_low >= 0)
+                    atomicAdd(grad_input[gi_base + uint(h_low) * params.W + uint(w_low)],   grad_val * hh * hw);
+                if (h_low >= 0 && w_high < int(params.W))
+                    atomicAdd(grad_input[gi_base + uint(h_low) * params.W + uint(w_high)],  grad_val * hh * lw);
+                if (h_high < int(params.H) && w_low >= 0)
+                    atomicAdd(grad_input[gi_base + uint(h_high) * params.W + uint(w_low)],  grad_val * lh * hw);
+                if (h_high < int(params.H) && w_high < int(params.W))
+                    atomicAdd(grad_input[gi_base + uint(h_high) * params.W + uint(w_high)], grad_val * lh * lw);
+            }
+        }
+    }
+
+    // Write grad_offset (uniquely owned by this thread)
+    grad_offset[off_h_idx] = acc_grad_off_h;
+    grad_offset[off_w_idx] = acc_grad_off_w;
+
+    // Write grad_mask
+    if (params.use_mask == 1) {
+        grad_mask[mask_idx] = acc_grad_mask;
+    }
+}

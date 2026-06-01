@@ -4753,9 +4753,42 @@ auto ZeROStage3Optimizer::gather_full_state() -> std::unordered_map<std::string,
 }
 
 auto ZeROStage3Optimizer::load_full_state(const std::unordered_map<std::string, Tensor>& full_state) -> void {
-    // Load full state and automatically partition across ranks
-    // For now, just call load_state_dict
-    load_state_dict(full_state);
+    // Re-shard a full (un-partitioned) optimizer state across ranks — the exact
+    // inverse of gather_full_state(), which all_gathers each rank's equal-sized
+    // shard and cats them along dim 0. So the full tensor's dim-0 length is
+    // world_size * shard_len, and this rank owns the contiguous chunk
+    // [rank*shard_len, (rank+1)*shard_len). Slicing that out and feeding it to
+    // load_state_dict() reconstructs the correct local shard even when the
+    // checkpoint was produced at a different world size. (Previously this just
+    // forwarded the full state to load_state_dict, leaving every rank holding
+    // the entire un-sharded state.)
+    auto pg = config_.process_group;
+    if (!pg || pg->world_size() <= 1) {
+        load_state_dict(full_state);
+        return;
+    }
+
+    const int world_size = pg->world_size();
+    const int rank = pg->rank();
+
+    std::unordered_map<std::string, Tensor> local;
+    local.reserve(full_state.size());
+    for (const auto& [name, full] : full_state) {
+        const int64_t full_dim0 = full.shape().empty() ? 0 : full.shape()[0];
+        if (full_dim0 % world_size != 0) {
+            throw std::runtime_error(
+                "ZeROStage3Optimizer::load_full_state: full state '" + name +
+                "' dim0=" + std::to_string(full_dim0) + " is not divisible by "
+                "world_size=" + std::to_string(world_size) +
+                " (gather_full_state concatenates equal-sized shards along dim 0).");
+        }
+        const int64_t shard_len = full_dim0 / world_size;
+        // Tensor::slice(dim, start, end) — end-exclusive, mirroring the
+        // ElementLevel all-gather slicing used elsewhere in this file.
+        local.emplace(name,
+                      full.slice(0, rank * shard_len, (rank + 1) * shard_len).contiguous());
+    }
+    load_state_dict(local);
 }
 
 auto ZeROStage3Optimizer::gather_parameter_async(Tensor* param) -> std::shared_ptr<AsyncHandle> {

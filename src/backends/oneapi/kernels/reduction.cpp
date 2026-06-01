@@ -1933,7 +1933,8 @@ auto unique_kernel(const Tensor& input, bool sorted, bool return_inverse, bool r
         } else if (input.dtype() == DType::Int32) {
             return device_unique_impl(get_data_ptr<const int32_t>(input));
         }
-        // Unsupported dtypes fall through to host path
+        // Unsupported dtypes fall through to the device-side sorted-unique impl
+        // below (or a loud "unsupported dtype" throw) — there is no host path.
     }
     // SYCL device-side unique (sorted path only; unsorted throws)
 #endif

@@ -330,6 +330,15 @@ auto HistogramObserver::calculate_qparams(QuantDType dtype, QuantizationScheme s
     return compute_quantization_params(min, max, dtype, scheme);
 }
 
+auto HistogramObserver::get_qrange() const -> std::pair<float, float> {
+    // Same percentile-clipped range calculate_qparams() uses internally,
+    // exposed so the per-channel wrapper reuses identical outlier rejection.
+    if (total_count_ == 0) {
+        throw std::runtime_error("Cannot compute qrange without observed data");
+    }
+    return {compute_percentile(percentile_low_), compute_percentile(percentile_high_)};
+}
+
 auto HistogramObserver::reset() -> void {
     std::fill(histogram_.begin(), histogram_.end(), 0);
     min_val_ = 0.0f;
@@ -415,14 +424,12 @@ auto PerChannelHistogramObserver::calculate_qparams(QuantDType dtype, Quantizati
     float* max_data = max.data<float>();
 
     for (int64_t c = 0; c < num_channels; ++c) {
-        auto ch_params = channel_observers_[c]->calculate_qparams(dtype, scheme);
-        // Move scale to CPU for data access
-        Tensor scale_cpu = ch_params.scale;
-        if (scale_cpu.device() != Device::cpu()) {
-            scale_cpu = scale_cpu.to(Device::cpu());
-        }
-        min_data[c] = scale_cpu.data<const float>()[0];  // Simplified
-        max_data[c] = scale_cpu.data<const float>()[0];
+        // Use each channel histogram's percentile-clipped [min, max]. The
+        // previous code wrote the per-channel *scale* into BOTH min and max,
+        // producing min==max and therefore degenerate (wrong) qparams.
+        auto [ch_min, ch_max] = channel_observers_[c]->get_qrange();
+        min_data[c] = ch_min;
+        max_data[c] = ch_max;
     }
 
     auto params = compute_quantization_params(min, max, dtype, scheme);

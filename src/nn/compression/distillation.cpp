@@ -249,13 +249,14 @@ auto feature_distillation_loss(
     Variable teacher_fp32(teacher_features.tensor().to(DType::Float32), false);
 
     if (loss_type == "mse") {
-        // Mean squared error between features
+        // Mean squared error between features, reduced to a scalar via the
+        // autograd-aware mean() so the gradient flows back to the student.
+        // (Previously this read squared.tensor() and returned it unreduced as
+        // a fresh leaf Variable, which both skipped the reduction and severed
+        // the autograd graph.)
         auto diff = student_fp32 - teacher_fp32;
         auto squared = diff * diff;
-        auto sum = squared.tensor();  // Sum all elements
-        auto mean_val = sum;  // Mean over all elements
-
-        return Variable(mean_val, student_fp32.requires_grad());
+        return mean(squared);
 
     } else if (loss_type == "cosine") {
         return cosine_similarity_loss(student_fp32, teacher_fp32);
@@ -272,33 +273,59 @@ auto attention_transfer_loss(
     const Variable& student_features,
     const Variable& teacher_features
 ) -> Variable {
-    // Cast to Float32 for consistent dtype. Student needs autograd-aware cast
-    // so backward reaches the student params; teacher is a frozen reference.
+    // Attention Transfer (Zagoruyko & Komodakis, ICLR 2017,
+    // "Paying More Attention to Attention"). Given activations of shape
+    // (N, C, H, W):
+    //   1. Spatial attention map  F(A)_{n,h,w} = sum_c A_{n,c,h,w}^2
+    //      (sum over the channel dimension -> (N, H, W)).
+    //   2. Flatten each sample to a vector of length H*W and L2-normalise it:
+    //      Q = vec(F) / ||vec(F)||_2.
+    //   3. Loss = mean over the batch of the squared L2 distance between the
+    //      normalised student and teacher attention vectors.
+    //
+    // Everything is expressed with autograd-aware Variable ops so the gradient
+    // flows back to the student parameters (the teacher branch is detached via
+    // the requires_grad=false cast).
+    //
+    // Cast to Float32 for consistent dtype. Student needs an autograd-aware
+    // cast so backward reaches the student params; teacher is a frozen ref.
     Variable student_fp32 = nn::variable_cast(student_features, DType::Float32);
     Variable teacher_fp32(teacher_features.tensor().to(DType::Float32), false);
 
-    // Compute attention maps: sum of squared activations
-    // Attention_map[n, h, w] = sum_c (features[n, c, h, w]^2)
+    const auto& in_shape = student_fp32.tensor().shape();
+    const int64_t rank = static_cast<int64_t>(in_shape.size());
+    if (rank < 2) {
+        throw std::runtime_error(
+            "attention_transfer_loss: expected features of rank >= 2 "
+            "(N, C, ...), got rank " + std::to_string(rank));
+    }
+    const int64_t batch = in_shape[0];
+    int64_t spatial = 1;
+    for (int64_t d = 2; d < rank; ++d) spatial *= in_shape[d];
 
-    auto student_squared = student_fp32 * student_fp32;
-    auto teacher_squared = teacher_fp32 * teacher_fp32;
+    // Channel-reduced spatial attention map: sum over dim=1 (the channel axis).
+    // autograd::sum reduces a single dim at a time; channel is dim 1.
+    auto student_attn = sum(student_fp32 * student_fp32, /*dim=*/1, /*keepdim=*/false);
+    auto teacher_attn = sum(teacher_fp32 * teacher_fp32, /*dim=*/1, /*keepdim=*/false);
 
-    // Sum over channel dimension
-    // Simplified - in practice would use proper reduction along axis
-    auto student_attention = student_squared;
-    auto teacher_attention = teacher_squared;
+    // Collapse the (N, <spatial dims>) attention map to (N, spatial).
+    auto student_flat = reshape(student_attn, std::vector<int64_t>{batch, spatial});
+    auto teacher_flat = reshape(teacher_attn, std::vector<int64_t>{batch, spatial});
 
-    // Normalize attention maps
-    auto student_norm = student_attention;  // Should normalize
-    auto teacher_norm = teacher_attention;  // Should normalize
+    // Per-sample L2 normalisation: Q = F / (||F||_2 + eps). eps guards the
+    // all-zero-activation case so the division stays finite and the gradient
+    // does not blow up.
+    constexpr double EPS = 1e-12;
+    auto student_l2 = sqrt(sum(student_flat * student_flat, /*dim=*/1, /*keepdim=*/true));
+    auto teacher_l2 = sqrt(sum(teacher_flat * teacher_flat, /*dim=*/1, /*keepdim=*/true));
+    auto student_norm = student_flat / (student_l2 + EPS);
+    auto teacher_norm = teacher_flat / (teacher_l2 + EPS);
 
-    // L2 distance between normalized attention maps
+    // Mean over the batch of the squared L2 distance between normalised maps.
     auto diff = student_norm - teacher_norm;
     auto squared_diff = diff * diff;
-
-    // Return the Variable directly — re-wrapping squared_diff.tensor()
-    // would silently sever the autograd chain back to student.
-    return squared_diff;
+    auto per_sample = sum(squared_diff, /*dim=*/1, /*keepdim=*/false);
+    return mean(per_sample);
 }
 
 
@@ -412,31 +439,41 @@ auto cosine_similarity_loss(
     const Variable& student_features,
     const Variable& teacher_features
 ) -> Variable {
-    // Cast to Float32 for consistent dtype. Student needs autograd-aware cast
-    // so backward reaches the student params; teacher is a frozen reference.
+    // Per-sample cosine-similarity distillation loss:
+    //   cos_n = <s_n, t_n> / (||s_n||_2 ||t_n||_2)
+    //   loss  = mean_n (1 - cos_n)
+    // The features are flattened to (N, D) so the similarity is taken over the
+    // full per-sample feature vector. All ops are autograd-aware so the
+    // gradient reaches the student params (teacher is a frozen reference).
+    //
+    // Cast to Float32 for consistent dtype. Student needs an autograd-aware
+    // cast so backward reaches the student params; teacher is a frozen ref.
     Variable student_fp32 = nn::variable_cast(student_features, DType::Float32);
     Variable teacher_fp32(teacher_features.tensor().to(DType::Float32), false);
 
-    // Cosine similarity: dot(a, b) / (norm(a) * norm(b))
-    // Loss: 1 - cosine_similarity
+    const auto& in_shape = student_fp32.tensor().shape();
+    const int64_t rank = static_cast<int64_t>(in_shape.size());
+    if (rank < 1) {
+        throw std::runtime_error(
+            "cosine_similarity_loss: expected features of rank >= 1");
+    }
+    const int64_t batch = in_shape[0];
+    int64_t feat = 1;
+    for (int64_t d = 1; d < rank; ++d) feat *= in_shape[d];
 
-    auto dot_product = student_fp32 * teacher_fp32;
+    auto student_flat = reshape(student_fp32, std::vector<int64_t>{batch, feat});
+    auto teacher_flat = reshape(teacher_fp32, std::vector<int64_t>{batch, feat});
 
-    auto student_squared = student_fp32 * student_fp32;
-    auto teacher_squared = teacher_fp32 * teacher_fp32;
+    // Per-sample dot product and L2 norms (reduce over the feature dim=1).
+    constexpr double EPS = 1e-12;
+    auto dot = sum(student_flat * teacher_flat, /*dim=*/1, /*keepdim=*/false);
+    auto student_l2 = sqrt(sum(student_flat * student_flat, /*dim=*/1, /*keepdim=*/false));
+    auto teacher_l2 = sqrt(sum(teacher_flat * teacher_flat, /*dim=*/1, /*keepdim=*/false));
 
-    // Compute norms
-    auto student_norm = student_squared;  // Should be sqrt(sum(squared))
-    auto teacher_norm = teacher_squared;  // Should be sqrt(sum(squared))
-
-    auto cosine_sim = dot_product / (student_norm * teacher_norm);
-    // loss = 1 - cosine_sim, computed via Variable-level ops so backward
-    // propagates back through cosine_sim to student. Previously the
-    // re-wrap into Variable(.,.) silently severed the autograd chain.
-    auto neg_cos = cosine_sim * (-1.0);
-    auto loss = neg_cos + 1.0;
-
-    return loss;
+    auto cosine_sim = dot / ((student_l2 * teacher_l2) + EPS);
+    // loss = mean over batch of (1 - cosine_sim).
+    auto per_sample = (cosine_sim * (-1.0)) + 1.0;
+    return mean(per_sample);
 }
 
 auto temperature_schedule(

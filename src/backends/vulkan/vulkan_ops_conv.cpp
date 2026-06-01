@@ -1306,10 +1306,10 @@ auto VulkanBackend::dispatchDeformableConv2dForward(
             groups, offset_groups, use_mask);
         return out.to(orig);
     }
-    if (input.dtype() != DType::Float32) {
+    if (input.dtype() != DType::Float32 && input.dtype() != DType::Float64) {
         throw std::runtime_error(
-            "Vulkan DeformableConv2d: only Float32 (native) and Float16/BFloat16 "
-            "(widened) supported; Float64 has no Vulkan deformable-conv shader.");
+            "Vulkan DeformableConv2d: only Float32/Float64 (native) and "
+            "Float16/BFloat16 (widened) supported.");
     }
 
     auto input_shape  = input.shape();   // (N, C_in, H, W)
@@ -1327,7 +1327,9 @@ auto VulkanBackend::dispatchDeformableConv2dForward(
     int64_t W_out = (W + 2 * pad_w - dil_w * (kW - 1) - 1) / stride_w + 1;
 
     int32_t device_id = input.device().index;
-    auto* pipeline = getPipeline("deformable_conv2d", device_id);
+    auto* pipeline = getPipeline(
+        input.dtype() == DType::Float64 ? "deformable_conv2d_f64" : "deformable_conv2d",
+        device_id);
 
     std::vector<int64_t> output_shape = {batch, out_channels, H_out, W_out};
     Tensor output(output_shape, input.dtype(), input.device());
@@ -1410,7 +1412,7 @@ auto VulkanBackend::dispatchDeformableConv2dBackwardInput(
     int64_t groups, int64_t offset_groups,
     bool use_mask) -> std::vector<Tensor> {
 
-    // F32-only shader: widen F16/BF16 on device, narrow each grad back; reject F64.
+    // F16/BF16: widen on device, narrow each grad back. F32/F64 run natively.
     if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) {
         const DType orig = input.dtype();
         auto grads = dispatchDeformableConv2dBackwardInput(
@@ -1422,10 +1424,10 @@ auto VulkanBackend::dispatchDeformableConv2dBackwardInput(
         for (auto& g : grads) { g = g.to(orig); }
         return grads;
     }
-    if (input.dtype() != DType::Float32) {
+    if (input.dtype() != DType::Float32 && input.dtype() != DType::Float64) {
         throw std::runtime_error(
-            "Vulkan DeformableConv2dBackwardInput: only Float32/Float16/BFloat16 "
-            "supported (no F64 deformable-conv shader).");
+            "Vulkan DeformableConv2dBackwardInput: only Float32/Float64 (native) "
+            "and Float16/BFloat16 (widened) supported.");
     }
 
     auto input_shape  = input.shape();
@@ -1443,7 +1445,10 @@ auto VulkanBackend::dispatchDeformableConv2dBackwardInput(
     int64_t W_out       = go_shape[3];
 
     int32_t device_id = input.device().index;
-    auto* pipeline = getPipeline("deformable_conv2d_backward_input", device_id);
+    auto* pipeline = getPipeline(
+        input.dtype() == DType::Float64 ? "deformable_conv2d_backward_input_f64"
+                                        : "deformable_conv2d_backward_input",
+        device_id);
 
     // Create output tensors (zero-initialized for atomic accumulation)
     auto is = input.shape();
@@ -1564,10 +1569,10 @@ auto VulkanBackend::dispatchDeformableConv2dBackwardWeight(
             groups, offset_groups, use_mask, weight_shape);
         return gw.to(orig);
     }
-    if (input.dtype() != DType::Float32) {
+    if (input.dtype() != DType::Float32 && input.dtype() != DType::Float64) {
         throw std::runtime_error(
-            "Vulkan DeformableConv2dBackwardWeight: only Float32/Float16/BFloat16 "
-            "supported (no F64 deformable-conv shader).");
+            "Vulkan DeformableConv2dBackwardWeight: only Float32/Float64 (native) "
+            "and Float16/BFloat16 (widened) supported.");
     }
 
     auto input_shape = input.shape();
@@ -1584,7 +1589,10 @@ auto VulkanBackend::dispatchDeformableConv2dBackwardWeight(
     int64_t W_out       = go_shape[3];
 
     int32_t device_id = input.device().index;
-    auto* pipeline = getPipeline("deformable_conv2d_backward_weight", device_id);
+    auto* pipeline = getPipeline(
+        input.dtype() == DType::Float64 ? "deformable_conv2d_backward_weight_f64"
+                                        : "deformable_conv2d_backward_weight",
+        device_id);
 
     Tensor grad_weight(weight_shape, input.dtype(), input.device());
 

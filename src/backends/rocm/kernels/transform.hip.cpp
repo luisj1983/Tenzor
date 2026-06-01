@@ -400,6 +400,10 @@ __global__ void split_kernel_impl(
 // Chunk Kernel - split into equal-sized chunks
 // ==============================================================================
 
+// Forward declaration: chunk delegates to split_kernel (defined later in this
+// translation unit) so it reuses split's real device-to-device copy path.
+auto split_kernel(const Tensor& input, int64_t split_size, int64_t dim, hipStream_t stream) -> std::vector<Tensor>;
+
 auto chunk_kernel(const Tensor& input, int64_t chunks, int64_t dim, hipStream_t stream) -> std::vector<Tensor> {
     auto input_shape = input.shape();
     // audit V.14: normalise negative dim (PyTorch convention) and range-check
@@ -409,29 +413,24 @@ auto chunk_kernel(const Tensor& input, int64_t chunks, int64_t dim, hipStream_t 
     if (dim < 0 || dim >= ndim) {
         throw std::out_of_range("chunk: dim out of range");
     }
+    if (chunks <= 0) {
+        throw std::invalid_argument("chunk: chunks must be positive");
+    }
     int64_t dim_size = input_shape[dim];
 
-    // Calculate chunk size
+    // PyTorch chunk semantics: split into at most `chunks` pieces, each of size
+    // ceil(dim_size / chunks) (the final piece may be smaller). This is exactly
+    // split() with split_size = chunk_size, so delegate to split_kernel, which
+    // performs the real device-to-device copy. (Previously this allocated empty
+    // output tensors and returned uninitialised device memory.)
     int64_t chunk_size = (dim_size + chunks - 1) / chunks;
-
-    std::vector<Tensor> results;
-    for (int64_t i = 0; i < chunks; ++i) {
-        int64_t start = i * chunk_size;
-        int64_t end = std::min(start + chunk_size, dim_size);
-
-        if (start >= dim_size) break;
-
-        // Create slice for this chunk
-        std::vector<int64_t> chunk_shape(input_shape.begin(), input_shape.end());
-        chunk_shape[dim] = end - start;
-
-        Tensor chunk(chunk_shape, input.dtype(), input.device());
-
-        // Copy data (simplified - would need proper slicing kernel)
-        results.push_back(chunk);
+    if (chunk_size <= 0) {
+        // dim_size == 0: return a single empty chunk matching the input shape.
+        std::vector<int64_t> empty_shape(input_shape.begin(), input_shape.end());
+        Tensor empty(empty_shape, input.dtype(), input.device());
+        return std::vector<Tensor>{empty};
     }
-
-    return results;
+    return split_kernel(input, chunk_size, dim, stream);
 }
 
 // ==============================================================================

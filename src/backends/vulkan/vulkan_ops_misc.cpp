@@ -6577,7 +6577,7 @@ auto VulkanBackend::dispatchInterpolateBackward(const Tensor& grad_output,
 
 // =========================================================================
 // F22-followup: device-side Philox4x32-10 Bernoulli mask via the
-// `philox_dropout_mask.comp` compute shader. Replaces the prior CPU-host
+// `philox_dropout.comp` compute shader. Replaces the prior CPU-host
 // generation + .to(device) copy. The shader writes a Float32 pre-scaled
 // mask (keep_scale = 1/(1-p) on kept positions, 0 on dropped) directly
 // into a device-allocated buffer in a single dispatch.
@@ -6614,7 +6614,7 @@ auto VulkanBackend::dispatchPhiloxDropoutMask(const std::vector<int64_t>& shape,
     Tensor output(std::vector<int64_t>(shape.begin(), shape.end()),
                    DType::Float32, Device::vulkan(device_id));
 
-    auto* pipeline = getPipeline("philox_dropout_mask", device_id);
+    auto* pipeline = getPipeline("philox_dropout", device_id);
 
     struct PushConstants {
         uint32_t n_elements;

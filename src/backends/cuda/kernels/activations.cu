@@ -9,7 +9,7 @@
 #include <chrono>
 #include "tenzor/core/dtype.hpp"
 #include "tenzor/backend/backend.hpp"  // For OpAttributes (dispatch wrappers)
-#include "tenzor/backend/fast_dispatch.hpp"  // For tenzor::dispatch (CPU fallback paths)
+#include "tenzor/backend/fast_dispatch.hpp"  // dispatch-table types for kernel registration (device-only; no CPU fallback)
 #include "cuda_launch_utils.cuh"
 #include "cuda_common.cuh"
 #include <stdexcept>

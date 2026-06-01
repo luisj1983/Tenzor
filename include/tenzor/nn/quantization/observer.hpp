@@ -12,6 +12,7 @@
 #include <memory>
 #include <vector>
 #include <cmath>
+#include <utility>
 #include "quantize.hpp"
 #include "../../core/tensor.hpp"
 
@@ -203,6 +204,15 @@ public:
      * @return Tuple of (bin_edges, bin_counts)
      */
     auto get_histogram() const -> std::tuple<std::vector<float>, std::vector<int64_t>>;
+
+    /**
+     * @brief Percentile-clipped [min, max] range used for qparam derivation.
+     *
+     * Returns the same outlier-rejected range calculate_qparams() applies
+     * internally (percentile_low_ / percentile_high_), so a per-channel wrapper
+     * can reuse the identical clipped range per channel.
+     */
+    auto get_qrange() const -> std::pair<float, float>;
 
 private:
     int64_t num_bins_;              ///< Number of histogram bins

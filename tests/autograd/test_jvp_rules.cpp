@@ -395,5 +395,109 @@ TEST_P(JVPRulesTest, JVP_SparseToDense_S15_LinearMatchesFD) {
     EXPECT_LT(max_abs_diff_d(out.tangent, fd), 1e-3);
 }
 
+// ---------------------------------------------------------------------------
+// Wave-4 multi-output JVP rules: GroupNorm / InstanceNorm / RMSNorm / Chunk /
+// Split / TopK / Sort / BatchNorm2dForward. Each compares the analytic
+// forward-mode tangent of output `out_idx` against a central finite-difference
+// reference, in Float64, summing the contribution of every differentiable
+// primal.
+// ---------------------------------------------------------------------------
+namespace {
+
+Tensor w4_randf64(const std::vector<int64_t>& shape, uint64_t seed) {
+    Tensor t(shape, DType::Float64, Device::cpu());
+    double* d = t.data<double>();
+    int64_t n = t.numel();
+    uint64_t s = seed * 2654435761u + 12345u;
+    for (int64_t i = 0; i < n; ++i) {
+        s = s * 6364136223846793005ull + 1442695040888963407ull;
+        double u = static_cast<double>((s >> 11) & ((1ull << 53) - 1)) /
+                   static_cast<double>(1ull << 53);
+        d[i] = 2.0 * u - 1.0;
+    }
+    return t;
+}
+
+void w4_verify(OpId op, std::vector<Tensor> primals, std::vector<int> diff_primals,
+               int out_idx, const OpAttributes& attrs, double tol) {
+    std::vector<Tensor> tangents(primals.size());
+    for (size_t i = 0; i < primals.size(); ++i) {
+        tangents[i] = zeros(std::vector<int64_t>(primals[i].shape().begin(),
+                                                 primals[i].shape().end()),
+                            DType::Float64, Device::cpu());
+    }
+    for (int dp : diff_primals) {
+        tangents[dp] = w4_randf64(std::vector<int64_t>(primals[dp].shape().begin(),
+                                                       primals[dp].shape().end()),
+                                  1000 + dp);
+    }
+    auto analytic = tenzor::dispatch_jvp_multi(op, primals, tangents, attrs);
+    Tensor an = analytic.tangents.at(out_idx);
+    Tensor num = zeros(std::vector<int64_t>(an.shape().begin(), an.shape().end()),
+                       DType::Float64, Device::cpu());
+    const double h = 1e-6;
+    for (int dp : diff_primals) {
+        auto pp = primals, pm = primals;
+        pp[dp] = primals[dp] + tangents[dp] * h;
+        pm[dp] = primals[dp] - tangents[dp] * h;
+        auto yp = tenzor::dispatch(op, pp, attrs)[out_idx];
+        auto ym = tenzor::dispatch(op, pm, attrs)[out_idx];
+        num = num + (yp - ym) * (1.0 / (2.0 * h));
+    }
+    EXPECT_LT(max_abs_diff_d(an, num), tol);
+}
+
+}  // namespace
+
+TEST_P(JVPRulesTest, GroupNorm_JVP_MatchesFD) {
+    if (device != Device::cpu()) return;  // Float64 reference is CPU-side.
+    OpAttributes a;
+    a.set(AttrKey::NumGroups, static_cast<int64_t>(2));
+    a.set(AttrKey::Eps, 1e-5);
+    w4_verify(OpId::GroupNorm,
+              { w4_randf64({2,4,3,3},1), w4_randf64({4},2), w4_randf64({4},3) },
+              {0,1,2}, 0, a, 1e-5);
+}
+
+TEST_P(JVPRulesTest, InstanceNorm_JVP_MatchesFD) {
+    if (device != Device::cpu()) return;
+    OpAttributes a;
+    a.set(AttrKey::Eps, 1e-5);
+    w4_verify(OpId::InstanceNorm,
+              { w4_randf64({2,4,3,3},4), w4_randf64({4},5), w4_randf64({4},6) },
+              {0,1,2}, 0, a, 1e-5);
+}
+
+TEST_P(JVPRulesTest, RMSNorm_JVP_MatchesFD) {
+    if (device != Device::cpu()) return;
+    OpAttributes a;
+    a.set(AttrKey::Eps, 1e-5);
+    w4_verify(OpId::RMSNorm, { w4_randf64({2,8},7), w4_randf64({8},8) }, {0,1}, 0, a, 1e-5);
+}
+
+TEST_P(JVPRulesTest, Chunk_JVP_MatchesFD) {
+    if (device != Device::cpu()) return;
+    OpAttributes a;
+    a.set(AttrKey::Chunks, static_cast<int64_t>(3));
+    a.set(AttrKey::Dim, static_cast<int64_t>(0));
+    std::vector<Tensor> p = { w4_randf64({6,4},9) };
+    for (int oi = 0; oi < 3; ++oi) w4_verify(OpId::Chunk, p, {0}, oi, a, 1e-7);
+}
+
+TEST_P(JVPRulesTest, Split_JVP_MatchesFD) {
+    if (device != Device::cpu()) return;
+    OpAttributes a;
+    a.set(AttrKey::SplitSize, static_cast<int64_t>(2));
+    a.set(AttrKey::Dim, static_cast<int64_t>(0));
+    std::vector<Tensor> p = { w4_randf64({6,4},10) };
+    for (int oi = 0; oi < 3; ++oi) w4_verify(OpId::Split, p, {0}, oi, a, 1e-7);
+}
+
+// NOTE: TopK / Sort / BatchNorm2dForward / LinalgQR / LinalgLU / LinalgSVD JVP
+// adapters were drafted but did not pass this finite-difference gradcheck, so
+// their OpIds remain registered to the NonDifferentiable thrower (forward-mode
+// AD fails loudly rather than returning a wrong tangent). The draft adapters are
+// parked (defined but unregistered) in jvp_rules.cpp for a future pass.
+
 INSTANTIATE_BACKEND_TESTS(JVPRulesTest);
 

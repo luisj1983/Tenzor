@@ -489,12 +489,15 @@ auto emit_conv_transpose3d(nn::ConvTranspose3d& c, GraphBuilder& b,
 // shape[0], C from shape[1], and accumulates spatial dims from shape[2..],
 // so a single emitter handles InstanceNorm1d/2d/3d transparently.
 auto emit_instancenorm(nn::Module& m, GraphBuilder& b, int16_t in_id,
-                       double eps, const char* layer) -> int16_t {
+                       double eps, int64_t num_features, const char* layer) -> int16_t {
     // affine=false leaves the InstanceNorm module without weight/bias
     // parameters. The CPU kernel signature is (x, weight, bias, eps) with
     // weight/bias allowed to be uninitialized — but the lite runtime
     // can't pass empty tensors. So when there are no affine params we
-    // synthesize ones/zeros constants of shape [C].
+    // synthesize identity affine constants of shape [C] (weight=1, bias=0),
+    // which leaves the normalisation output unchanged. num_features (C) is
+    // taken directly from the layer, so no input-shape inference is needed.
+    (void)layer;
     auto weight_var = try_get_parameter(m, "weight");
     auto bias_var   = try_get_parameter(m, "bias");
 
@@ -503,16 +506,14 @@ auto emit_instancenorm(nn::Module& m, GraphBuilder& b, int16_t in_id,
         w_id = b.add_weight(weight_var->tensor());
         b_id = b.add_weight(bias_var->tensor());
     } else {
-        // Use Tensor.shape() info from a buffer-less layer is tricky; fall
-        // back to the running stats shape if available. For InstanceNorm
-        // there are no running stats — so we must read num_features from
-        // the input shape at runtime, which we don't have. Refuse for now.
-        throw std::runtime_error(
-            std::string{"export_to_tzlite: "} + layer +
-            " was built with affine=false. Lite export currently requires "
-            "affine=true so that weight/bias tensors are available as "
-            "constants — synthesized identity tensors would need a shape "
-            "we cannot recover here.");
+        // No affine params: synthesize identity weight (ones) / bias (zeros)
+        // of shape [num_features]. Lite tensors are Float32 host constants.
+        Tensor ones_w({num_features}, DType::Float32, Device::cpu());
+        ones_w.fill_(1.0f);
+        Tensor zeros_b({num_features}, DType::Float32, Device::cpu());
+        zeros_b.fill_(0.0f);
+        w_id = b.add_weight(ones_w);
+        b_id = b.add_weight(zeros_b);
     }
 
     LiteNode node;
@@ -900,11 +901,11 @@ auto visit(nn::Module& m, GraphBuilder& b, int16_t in_id) -> int16_t {
     // (InstanceNorm) covers 1d/2d/3d transparently.
     if (auto* in1 = dynamic_cast<nn::InstanceNorm1d*>(&m)) {
         return emit_instancenorm(*in1, b, in_id, in1->eps(),
-                                 "nn::InstanceNorm1d");
+                                 in1->num_features(), "nn::InstanceNorm1d");
     }
     if (auto* in2 = dynamic_cast<nn::InstanceNorm2d*>(&m)) {
         return emit_instancenorm(*in2, b, in_id, in2->eps(),
-                                 "nn::InstanceNorm2d");
+                                 in2->num_features(), "nn::InstanceNorm2d");
     }
     if (auto* in3 = dynamic_cast<nn::InstanceNorm3d*>(&m)) {
         // The affine params live on the inner in2d_ submodule (registered
@@ -917,7 +918,7 @@ auto visit(nn::Module& m, GraphBuilder& b, int16_t in_id) -> int16_t {
                 "'in2d' submodule - internal contract changed.");
         }
         return emit_instancenorm(*it->second, b, in_id, in3->eps(),
-                                 "nn::InstanceNorm3d");
+                                 in3->num_features(), "nn::InstanceNorm3d");
     }
     if (auto* em = dynamic_cast<nn::Embedding*>(&m)) {
         return emit_embedding(*em, b, in_id);

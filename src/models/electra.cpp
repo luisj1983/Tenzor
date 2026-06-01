@@ -266,10 +266,16 @@ auto ElectraForPreTraining::forward(const Variable& input_ids,
 }
 
 auto ElectraForPreTraining::forward_impl(const Variable& input) -> Variable {
-    // Simplified interface - just return discriminator output
-    // For actual pre-training, use the full forward() method
-    auto disc_logits = discriminator_->forward(input, Tensor{}, Variable{});
-    return disc_logits;
+    // Single-input Module contract: the full ELECTRA pre-training pipeline
+    // (generator MLM -> token replacement -> discriminator RTD) requires
+    // masked_positions and original_tokens, which the one-argument Module
+    // interface cannot supply. We therefore run the discriminator directly on
+    // the input ids and return its replaced-token-detection logits — the head
+    // that is kept and used for downstream fine-tuning. Callers performing
+    // pre-training use the multi-output forward(input_ids, masked_positions,
+    // original_tokens) overload, which returns {gen_logits, disc_logits,
+    // is_replaced}.
+    return discriminator_->forward(input, Tensor{}, Variable{});
 }
 
 auto ElectraForPreTraining::load_pretrained(const std::string& path, bool strict) -> void {

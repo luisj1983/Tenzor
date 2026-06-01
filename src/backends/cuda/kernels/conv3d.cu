@@ -90,7 +90,9 @@ __global__ void conv3d_forward_direct_kernel(
     int64_t Cout, int64_t Cin_per_g,
     int64_t kD, int64_t kH, int64_t kW,
     int64_t oD, int64_t oH, int64_t oW,
-    int64_t stride, int64_t padding, int64_t dilation, int64_t groups,
+    int64_t sD, int64_t sH, int64_t sW,
+    int64_t pD, int64_t pH, int64_t pW,
+    int64_t dD, int64_t dH, int64_t dW, int64_t groups,
     int64_t total)
 {
     const int64_t Cout_per_g = Cout / groups;
@@ -113,13 +115,13 @@ __global__ void conv3d_forward_direct_kernel(
         for (int64_t kc = 0; kc < Cin_per_g; ++kc) {
             int64_t in_c = in_c_start + kc;
             for (int64_t kd = 0; kd < kD; ++kd) {
-                int64_t id = od * stride - padding + kd * dilation;
+                int64_t id = od * sD - pD + kd * dD;
                 if (id < 0 || id >= D) continue;
                 for (int64_t kh = 0; kh < kH; ++kh) {
-                    int64_t ih = oh * stride - padding + kh * dilation;
+                    int64_t ih = oh * sH - pH + kh * dH;
                     if (ih < 0 || ih >= H) continue;
                     for (int64_t kwi = 0; kwi < kW; ++kwi) {
-                        int64_t iw = ow * stride - padding + kwi * dilation;
+                        int64_t iw = ow * sW - pW + kwi * dW;
                         if (iw < 0 || iw >= W) continue;
 
                         int64_t in_idx =
@@ -168,7 +170,9 @@ __global__ void conv3d_backward_input_kernel(
     int64_t Cout, int64_t Cin_per_g,
     int64_t kD, int64_t kH, int64_t kW,
     int64_t oD, int64_t oH, int64_t oW,
-    int64_t stride, int64_t padding, int64_t dilation, int64_t groups,
+    int64_t sD, int64_t sH, int64_t sW,
+    int64_t pD, int64_t pH, int64_t pW,
+    int64_t dD, int64_t dH, int64_t dW, int64_t groups,
     int64_t total)
 {
     const int64_t Cout_per_g = Cout / groups;
@@ -190,21 +194,21 @@ __global__ void conv3d_backward_input_kernel(
         Acc sum = static_cast<Acc>(0);
 
         for (int64_t kd = 0; kd < kD; ++kd) {
-            int64_t od_num = id + padding - kd * dilation;
-            if (od_num < 0 || (od_num % stride) != 0) continue;
-            int64_t od = od_num / stride;
+            int64_t od_num = id + pD - kd * dD;
+            if (od_num < 0 || (od_num % sD) != 0) continue;
+            int64_t od = od_num / sD;
             if (od < 0 || od >= oD) continue;
 
             for (int64_t kh = 0; kh < kH; ++kh) {
-                int64_t oh_num = ih + padding - kh * dilation;
-                if (oh_num < 0 || (oh_num % stride) != 0) continue;
-                int64_t oh = oh_num / stride;
+                int64_t oh_num = ih + pH - kh * dH;
+                if (oh_num < 0 || (oh_num % sH) != 0) continue;
+                int64_t oh = oh_num / sH;
                 if (oh < 0 || oh >= oH) continue;
 
                 for (int64_t kwi = 0; kwi < kW; ++kwi) {
-                    int64_t ow_num = iw + padding - kwi * dilation;
-                    if (ow_num < 0 || (ow_num % stride) != 0) continue;
-                    int64_t ow = ow_num / stride;
+                    int64_t ow_num = iw + pW - kwi * dW;
+                    if (ow_num < 0 || (ow_num % sW) != 0) continue;
+                    int64_t ow = ow_num / sW;
                     if (ow < 0 || ow >= oW) continue;
 
                     for (int64_t oc_off = 0; oc_off < Cout_per_g; ++oc_off) {
@@ -247,7 +251,9 @@ __global__ void conv3d_backward_weight_kernel(
     int64_t Cout, int64_t Cin_per_g,
     int64_t kD, int64_t kH, int64_t kW,
     int64_t oD, int64_t oH, int64_t oW,
-    int64_t stride, int64_t padding, int64_t dilation, int64_t groups,
+    int64_t sD, int64_t sH, int64_t sW,
+    int64_t pD, int64_t pH, int64_t pW,
+    int64_t dD, int64_t dH, int64_t dW, int64_t groups,
     int64_t total)
 {
     const int64_t Cout_per_g = Cout / groups;
@@ -269,13 +275,13 @@ __global__ void conv3d_backward_weight_kernel(
 
         for (int64_t n = 0; n < N; ++n) {
             for (int64_t od = 0; od < oD; ++od) {
-                int64_t id = od * stride - padding + kd * dilation;
+                int64_t id = od * sD - pD + kd * dD;
                 if (id < 0 || id >= D) continue;
                 for (int64_t oh = 0; oh < oH; ++oh) {
-                    int64_t ih = oh * stride - padding + kh * dilation;
+                    int64_t ih = oh * sH - pH + kh * dH;
                     if (ih < 0 || ih >= H) continue;
                     for (int64_t ow = 0; ow < oW; ++ow) {
-                        int64_t iw = ow * stride - padding + kwi * dilation;
+                        int64_t iw = ow * sW - pW + kwi * dW;
                         if (iw < 0 || iw >= W) continue;
 
                         int64_t go_idx =
@@ -609,7 +615,9 @@ void launch_conv3d_forward(
     int64_t Cout, int64_t Cin_per_g,
     int64_t kD, int64_t kH, int64_t kW,
     int64_t oD, int64_t oH, int64_t oW,
-    int64_t stride, int64_t padding, int64_t dilation, int64_t groups,
+    int64_t sD, int64_t sH, int64_t sW,
+    int64_t pD, int64_t pH, int64_t pW,
+    int64_t dD, int64_t dH, int64_t dW, int64_t groups,
     cudaStream_t stream)
 {
     int64_t total = N * Cout * oD * oH * oW;
@@ -622,7 +630,7 @@ void launch_conv3d_forward(
         bias ? reinterpret_cast<const T*>(bias->data_ptr()) : nullptr,
         reinterpret_cast<T*>(output.data_ptr()),
         N, Cin, D, H, W, Cout, Cin_per_g, kD, kH, kW,
-        oD, oH, oW, stride, padding, dilation, groups, total);
+        oD, oH, oW, sD, sH, sW, pD, pH, pW, dD, dH, dW, groups, total);
     TENZOR_CUDA_POST_LAUNCH_CHECK();
 }
 
@@ -633,7 +641,9 @@ void launch_conv3d_backward_input(
     int64_t Cout, int64_t Cin_per_g,
     int64_t kD, int64_t kH, int64_t kW,
     int64_t oD, int64_t oH, int64_t oW,
-    int64_t stride, int64_t padding, int64_t dilation, int64_t groups,
+    int64_t sD, int64_t sH, int64_t sW,
+    int64_t pD, int64_t pH, int64_t pW,
+    int64_t dD, int64_t dH, int64_t dW, int64_t groups,
     cudaStream_t stream)
 {
     int64_t total = N * Cin * D * H * W;
@@ -645,7 +655,7 @@ void launch_conv3d_backward_input(
         reinterpret_cast<const T*>(weight.data_ptr()),
         reinterpret_cast<T*>(grad_input.data_ptr()),
         N, Cin, D, H, W, Cout, Cin_per_g, kD, kH, kW,
-        oD, oH, oW, stride, padding, dilation, groups, total);
+        oD, oH, oW, sD, sH, sW, pD, pH, pW, dD, dH, dW, groups, total);
     TENZOR_CUDA_POST_LAUNCH_CHECK();
 }
 
@@ -656,7 +666,9 @@ void launch_conv3d_backward_weight(
     int64_t Cout, int64_t Cin_per_g,
     int64_t kD, int64_t kH, int64_t kW,
     int64_t oD, int64_t oH, int64_t oW,
-    int64_t stride, int64_t padding, int64_t dilation, int64_t groups,
+    int64_t sD, int64_t sH, int64_t sW,
+    int64_t pD, int64_t pH, int64_t pW,
+    int64_t dD, int64_t dH, int64_t dW, int64_t groups,
     cudaStream_t stream)
 {
     int64_t total = Cout * Cin_per_g * kD * kH * kW;
@@ -668,7 +680,7 @@ void launch_conv3d_backward_weight(
         reinterpret_cast<const T*>(input.data_ptr()),
         reinterpret_cast<T*>(grad_weight.data_ptr()),
         N, Cin, D, H, W, Cout, Cin_per_g, kD, kH, kW,
-        oD, oH, oW, stride, padding, dilation, groups, total);
+        oD, oH, oW, sD, sH, sW, pD, pH, pW, dD, dH, dW, groups, total);
     TENZOR_CUDA_POST_LAUNCH_CHECK();
 }
 
@@ -775,16 +787,11 @@ auto conv3d_forward_kernel(
     if (stride[0] == 0 || stride[1] == 0 || stride[2] == 0)
         throw std::invalid_argument("Conv3d: stride cannot be zero");
     if (groups == 0)  throw std::invalid_argument("Conv3d: groups cannot be zero");
-    // Non-cuDNN fallback device kernel uses scalar index math; honest-throw on
-    // asymmetric until per-axis device kernel lands as a separate refactor.
-    if (stride[0] != stride[1] || stride[1] != stride[2] ||
-        padding[0] != padding[1] || padding[1] != padding[2] ||
-        dilation[0] != dilation[1] || dilation[1] != dilation[2]) {
-        throw std::runtime_error(
-            "CUDA Conv3d (non-cuDNN fallback): asymmetric stride/padding/dilation "
-            "requires cuDNN; rebuild with TENZOR_WITH_CUDNN=ON or use isotropic params.");
-    }
-    int64_t s = stride[0], p = padding[0], d = dilation[0];
+    // Per-axis stride/padding/dilation: the direct kernels index each spatial
+    // axis (D, H, W) independently, so anisotropic params are fully supported.
+    const int64_t sD = stride[0], sH = stride[1], sW = stride[2];
+    const int64_t pD = padding[0], pH = padding[1], pW = padding[2];
+    const int64_t dD = dilation[0], dH = dilation[1], dW = dilation[2];
 
     auto in_shape = input.shape();
     auto w_shape  = weight.shape();
@@ -799,9 +806,9 @@ auto conv3d_forward_kernel(
     int64_t kH = w_shape[3];
     int64_t kW = w_shape[4];
 
-    int64_t oD = conv3d_out_dim(D, kD, s, p, d);
-    int64_t oH = conv3d_out_dim(H, kH, s, p, d);
-    int64_t oW = conv3d_out_dim(W, kW, s, p, d);
+    int64_t oD = conv3d_out_dim(D, kD, sD, pD, dD);
+    int64_t oH = conv3d_out_dim(H, kH, sH, pH, dH);
+    int64_t oW = conv3d_out_dim(W, kW, sW, pW, dW);
 
     Tensor output({N, Cout, oD, oH, oW}, input.dtype(), input.device());
 
@@ -809,22 +816,22 @@ auto conv3d_forward_kernel(
         case DType::Float32:
             launch_conv3d_forward<float, float>(
                 input, weight, bias, output, N, Cin, D, H, W, Cout, Cin_per_g,
-                kD, kH, kW, oD, oH, oW, s, p, d, groups, stream);
+                kD, kH, kW, oD, oH, oW, sD, sH, sW, pD, pH, pW, dD, dH, dW, groups, stream);
             break;
         case DType::Float64:
             launch_conv3d_forward<double, double>(
                 input, weight, bias, output, N, Cin, D, H, W, Cout, Cin_per_g,
-                kD, kH, kW, oD, oH, oW, s, p, d, groups, stream);
+                kD, kH, kW, oD, oH, oW, sD, sH, sW, pD, pH, pW, dD, dH, dW, groups, stream);
             break;
         case DType::Float16:
             launch_conv3d_forward<__half, float>(
                 input, weight, bias, output, N, Cin, D, H, W, Cout, Cin_per_g,
-                kD, kH, kW, oD, oH, oW, s, p, d, groups, stream);
+                kD, kH, kW, oD, oH, oW, sD, sH, sW, pD, pH, pW, dD, dH, dW, groups, stream);
             break;
         case DType::BFloat16:
             launch_conv3d_forward<__nv_bfloat16, float>(
                 input, weight, bias, output, N, Cin, D, H, W, Cout, Cin_per_g,
-                kD, kH, kW, oD, oH, oW, s, p, d, groups, stream);
+                kD, kH, kW, oD, oH, oW, sD, sH, sW, pD, pH, pW, dD, dH, dW, groups, stream);
             break;
         default:
             throw std::invalid_argument(
@@ -849,14 +856,11 @@ auto conv3d_backward_kernel(
     if (stride[0] == 0 || stride[1] == 0 || stride[2] == 0)
         throw std::invalid_argument("Conv3d: stride cannot be zero");
     if (groups == 0)  throw std::invalid_argument("Conv3d: groups cannot be zero");
-    if (stride[0] != stride[1] || stride[1] != stride[2] ||
-        padding[0] != padding[1] || padding[1] != padding[2] ||
-        dilation[0] != dilation[1] || dilation[1] != dilation[2]) {
-        throw std::runtime_error(
-            "CUDA Conv3d backward (non-cuDNN fallback): asymmetric stride/padding/dilation "
-            "requires cuDNN; rebuild with TENZOR_WITH_CUDNN=ON or use isotropic params.");
-    }
-    int64_t s_ = stride[0], p_ = padding[0], d_ = dilation[0];
+    // Per-axis stride/padding/dilation; backward kernels index each spatial
+    // axis independently so anisotropic params are fully supported.
+    const int64_t sD = stride[0], sH = stride[1], sW = stride[2];
+    const int64_t pD = padding[0], pH = padding[1], pW = padding[2];
+    const int64_t dD = dilation[0], dH = dilation[1], dW = dilation[2];
 
     auto in_shape = input.shape();
     auto w_shape  = weight.shape();
@@ -887,13 +891,13 @@ auto conv3d_backward_kernel(
             launch_conv3d_backward_input<T_, ACC_>(                                      \
                 grad_output, weight, grad_input,                                         \
                 N, Cin, D, H, W, Cout, Cin_per_g, kD, kH, kW,                            \
-                oD, oH, oW, s_, p_, d_, groups, stream);                  \
+                oD, oH, oW, sD, sH, sW, pD, pH, pW, dD, dH, dW, groups, stream);                  \
         }                                                                                \
         if (compute_grad_weight) {                                                       \
             launch_conv3d_backward_weight<T_, ACC_>(                                     \
                 grad_output, input, grad_weight,                                         \
                 N, Cin, D, H, W, Cout, Cin_per_g, kD, kH, kW,                            \
-                oD, oH, oW, s_, p_, d_, groups, stream);                  \
+                oD, oH, oW, sD, sH, sW, pD, pH, pW, dD, dH, dW, groups, stream);                  \
         }                                                                                \
         if (compute_grad_bias) {                                                         \
             launch_conv3d_backward_bias<T_, ACC_>(                                       \

@@ -237,6 +237,9 @@ public:
     /// @brief Get the epsilon value used for numerical stability.
     [[nodiscard]] auto eps() const -> double { return eps_; }
 
+    /// @brief Number of channels (C dimension) this layer normalizes.
+    [[nodiscard]] auto num_features() const -> int64_t { return num_features_; }
+
 private:
     int64_t num_features_;
     double eps_;
@@ -284,6 +287,9 @@ public:
     /// @brief Get the epsilon value used for numerical stability.
     [[nodiscard]] auto eps() const -> double { return eps_; }
 
+    /// @brief Number of channels (C dimension) this layer normalizes.
+    [[nodiscard]] auto num_features() const -> int64_t { return num_features_; }
+
 private:
     int64_t num_features_;
     double eps_;
@@ -319,6 +325,9 @@ public:
     /// @brief Get the epsilon value used for numerical stability (forwarded from the
     /// internal InstanceNorm2d delegate).
     [[nodiscard]] auto eps() const -> double { return in2d_->eps(); }
+
+    /// @brief Number of channels (C dimension) this layer normalizes.
+    [[nodiscard]] auto num_features() const -> int64_t { return num_features_; }
 
 private:
     int64_t num_features_;

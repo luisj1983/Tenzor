@@ -795,7 +795,7 @@ public:
                                       const std::string& mode,
                                       bool align_corners) -> Tensor;
     // F22-followup: device-side Philox4x32-10 Bernoulli mask via the
-    // `philox_dropout_mask.comp` compute shader. Output is Float32; callers
+    // `philox_dropout.comp` compute shader. Output is Float32; callers
     // requesting F16/BF16 should cast via dispatchCast after this returns.
     auto dispatchPhiloxDropoutMask(const std::vector<int64_t>& shape,
                                     float p,
