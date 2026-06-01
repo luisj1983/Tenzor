@@ -8353,6 +8353,79 @@ JvpMultiResult jvp_adapter_linalg_svd_s15(std::span<const Tensor> primals,
     return result;
 }
 
+// LinalgEig (general, non-symmetric): A V = V diag(λ); outputs {Re(λ), Im(λ),
+// V}. For a REAL spectrum (the differentiable real-arithmetic case) the
+// standard differential is, with G = V^{-1} dA V:
+//   dλ_i = G_ii
+//   C_ji = G_ji / (λ_i - λ_j)   (j ≠ i)
+//   C_ii fixed by the unit-norm gauge ‖v_i‖=1  =>  v_iᵀ dv_i = 0:
+//          C_ii = -(Σ_{j≠i} C_ji N_ij) / N_ii,   N = Vᵀ V
+//   dV = V C
+// Complex spectra need complex eigenvector arithmetic the real op output does
+// not expose, so this rule fails loudly when any eigenvalue is non-real.
+JvpMultiResult jvp_adapter_linalg_eig_s15(std::span<const Tensor> primals,
+                                          std::span<const Tensor> tangents,
+                                          const OpAttributes& attrs) {
+    if (primals.empty()) {
+        throw std::runtime_error("jvp_adapter_linalg_eig_s15: expected 1 input (A)");
+    }
+    const Tensor& A = primals[0];
+    if (A.ndim() != 2) {
+        throw NonDifferentiable(
+            "LinalgEig forward-mode JVP is implemented for rank-2 inputs only.");
+    }
+    Tensor dA = jvp_zeros_like_or(A, tangents.empty() ? Tensor() : tangents[0]);
+
+    auto outs = tenzor::dispatch(OpId::LinalgEig, std::vector<Tensor>{A}, attrs);
+    const Tensor& Re = outs[0];
+    const Tensor& Im = outs[1];
+    const Tensor& V  = outs[2];
+    const int64_t n = Re.shape()[0];
+
+    // Guard: a real-arithmetic forward-mode tangent only exists when every
+    // eigenvalue is real (and the eigenvectors V are real).
+    {
+        Tensor im_cpu = Im.to(Device::cpu()).to(DType::Float64).contiguous();
+        const double* im = im_cpu.data<double>();
+        double max_im = 0.0;
+        for (int64_t i = 0; i < n; ++i) max_im = std::max(max_im, std::abs(im[i]));
+        if (max_im > 1e-7) {
+            throw NonDifferentiable(
+                "LinalgEig forward-mode JVP requires a real spectrum; the matrix "
+                "has complex eigenvalues (complex eigenvector arithmetic is not "
+                "exposed by the real {Re, Im, V} op output).");
+        }
+    }
+
+    Tensor lam   = Re;                       // (n,)
+    Tensor Vinv  = tenzor::linalg::inv(V);
+    Tensor G     = tenzor::matmul(Vinv, tenzor::matmul(dA, V));  // V^{-1} dA V
+    Tensor dRe   = tenzor::diag(G);
+    Tensor dIm   = tenzor::zeros_like(Im);
+
+    // F[j][i] = 1/(λ_i - λ_j) off-diagonal (Lorentzian-broadened), 0 on diag.
+    Tensor lam_row = tenzor::reshape(lam, {n, 1});  // varies over j
+    Tensor lam_col = tenzor::reshape(lam, {1, n});  // varies over i
+    Tensor diff = tenzor::sub(lam_col, lam_row);    // [j][i] = λ_i - λ_j
+    const double eps2 = 1e-24;
+    Tensor F = tenzor::div(diff, tenzor::add(tenzor::mul(diff, diff), eps2));
+    Tensor C = tenzor::mul(F, G);                   // off-diagonal part
+
+    // Normalization-fixed diagonal: C_ii = -(Σ_j C_ji N_ij)/N_ii, N = Vᵀ V.
+    Tensor N = tenzor::matmul(tenzor::transpose(V, -1, -2), V);
+    Tensor s = tenzor::sum(tenzor::mul(C, N), 0, /*keepdim=*/false);  // Σ_j C[j][i] N[j][i]
+    Tensor Ndiag = tenzor::diag(N);
+    Tensor Cii = tenzor::neg(tenzor::div(s, Ndiag));
+    C = tenzor::add(C, tenzor::linalg::diag_embed(Cii, 0, -2, -1));
+
+    Tensor dV = tenzor::matmul(V, C);
+
+    JvpMultiResult result;
+    result.primals  = { Re, Im, V };
+    result.tangents = { std::move(dRe), std::move(dIm), std::move(dV) };
+    return result;
+}
+
 // ============================================================================
 // Wave-4 JVP: BatchNorm2dForward (single-output kernel; inputs (x, mean, var),
 // attr Eps; output y = (x - mean) * rstd, rstd = 1/sqrt(var + eps)). mean/var
@@ -8939,7 +9012,7 @@ void register_builtin_jvp_rules() {
     // Multi-output linalg factorisations awaiting bespoke JVPs.
     register_jvp_rule_multi(OpId::LinalgSVD,            &jvp_adapter_linalg_svd_s15);
     register_jvp_rule_multi(OpId::LinalgQR,             &jvp_adapter_linalg_qr_s15);
-    register_jvp_rule_multi(OpId::LinalgEig,            &jvp_adapter_nondiff_linalg_eig);
+    register_jvp_rule_multi(OpId::LinalgEig,            &jvp_adapter_linalg_eig_s15);
     register_jvp_rule_multi(OpId::LinalgLU,             &jvp_adapter_linalg_lu_s15);
     register_jvp_rule       (OpId::LinalgHouseholder,    &jvp_adapter_nondiff_linalg_householder);
     register_jvp_rule_multi(OpId::LinalgLDLFactor,      &jvp_adapter_nondiff_linalg_ldl_factor);

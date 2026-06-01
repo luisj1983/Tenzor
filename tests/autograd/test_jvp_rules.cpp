@@ -201,6 +201,7 @@ TEST_P(JVPRulesTest, JVP_ReLU_MatchesFD_FarFromZero) {
 #include <tenzor/backend/fast_dispatch.hpp>
 #include <tenzor/backend/op_attributes.hpp>
 #include <tenzor/ops/op_id.hpp>
+#include <tenzor/ops/linalg.hpp>
 
 namespace {
 
@@ -779,6 +780,42 @@ TEST_P(JVPRulesTest, LinalgSVD_JVP_MatchesFD) {
     w4_verify(OpId::LinalgSVD, {A}, {0}, 1, a, 1e-3);  // dS
     w4_verify(OpId::LinalgSVD, {A}, {0}, 0, a, 1e-3);  // dU
     w4_verify(OpId::LinalgSVD, {A}, {0}, 2, a, 1e-3);  // dVh
+}
+
+// LinalgEig JVP (general non-symmetric, real spectrum). Upper-triangular A
+// with a distinct, well-separated diagonal => real eigenvalues = diagonal and
+// real, non-orthogonal eigenvectors (exercises the Gram normalization). The
+// FD step keeps the spectrum real and the ordering stable.
+TEST_P(JVPRulesTest, LinalgEig_JVP_MatchesFD) {
+    if (device != Device::cpu()) return;
+    OpAttributes a;
+    Tensor A = w4_randf64({4,4}, 171) * 0.1;
+    {
+        double* d = A.data<double>();
+        for (int i=0;i<4;++i) for (int j=0;j<i;++j) d[i*4+j] = 0.0;  // upper triangular
+        double dg[4] = {8.0, 5.0, 2.0, 0.5};
+        for (int i=0;i<4;++i) d[i*4+i] = dg[i];
+    }
+    // Eigenvalues are gauge-free: FD-verify dRe and dIm directly.
+    w4_verify(OpId::LinalgEig, {A}, {0}, 0, a, 1e-3);  // dRe
+    w4_verify(OpId::LinalgEig, {A}, {0}, 1, a, 1e-3);  // dIm (== 0)
+    // The op's eigenvectors carry a discontinuous sign gauge (a tiny FD step can
+    // flip a column's sign), so a raw dV-vs-FD check is meaningless. Validate
+    // {dV, dRe} jointly via the gauge-invariant reconstruction d(VΛV⁻¹) == dA:
+    //   dA = dV Λ V⁻¹ + V dΛ V⁻¹ − V Λ V⁻¹ dV V⁻¹.
+    Tensor dA = w4_randf64({4,4}, 172);
+    std::array<Tensor,1> p{A}, t{dA};
+    auto out  = tenzor::dispatch_jvp_multi(OpId::LinalgEig, p, t, a);
+    auto outs = tenzor::dispatch(OpId::LinalgEig, std::vector<Tensor>{A}, a);
+    Tensor Re = outs[0], V = outs[2];
+    Tensor dRe = out.tangents[0], dV = out.tangents[2];
+    Tensor Vinv = tenzor::linalg::inv(V);
+    Tensor Lam  = tenzor::linalg::diag_embed(Re,  0, -2, -1);
+    Tensor dLam = tenzor::linalg::diag_embed(dRe, 0, -2, -1);
+    Tensor recon = tenzor::matmul(tenzor::matmul(dV, Lam), Vinv);
+    recon = recon + tenzor::matmul(tenzor::matmul(V, dLam), Vinv);
+    recon = recon - tenzor::matmul(tenzor::matmul(tenzor::matmul(tenzor::matmul(V, Lam), Vinv), dV), Vinv);
+    EXPECT_LT(max_abs_diff_d(recon, dA), 1e-3);
 }
 
 // NOTE: LinalgLU / LinalgSVD / LinalgEig / LDLFactor / Geqrf / RNN-forward JVP
