@@ -7945,16 +7945,14 @@ JvpResult jvp_adapter_lu_solve_s15(std::span<const Tensor> primals,
     return JvpResult{ std::move(X), std::move(dX) };
 }
 
-// ============================================================================
-// Wave-4 JVP: LU factorization with partial pivoting (P A = L U, L unit-lower,
-// U upper; outputs {P, L, U}). The permutation P is piecewise-constant (zero
-// tangent). With B = P dA:
-//   F  = L^{-1} B U^{-1}
-//   dL = L · tril(F, -1)          (strictly-lower part scaled back by L)
-//   dU = triu(F) · U              (upper part scaled by U)
-// L^{-1}B via a unit-lower left solve; (·)U^{-1} via the transpose identity
-// (U is upper so Uᵀ is lower):  X U = Y  <=>  Uᵀ Xᵀ = Yᵀ.
-// ============================================================================
+// LinalgLU: A = P L U (L unit-lower, U upper, pivots in LAPACK 1-based
+// sequential-swap convention).  With the pivot pattern locally constant,
+//   dA = P (dL U + L dU)  =>  Pᵀ dA = dL U + L dU
+//   M := L⁻¹ (Pᵀ dA) U⁻¹ = L⁻¹ dL + dU U⁻¹,
+// where L⁻¹ dL is strictly lower and dU U⁻¹ is upper, so
+//   dL = L · tril(M, -1),   dU = triu(M, 0) · U.
+// Pᵀ is reconstructed from the pivot sequence as a permutation matrix
+// (applied per batch element), which keeps the rule batch-correct.
 JvpMultiResult jvp_adapter_linalg_lu_s15(std::span<const Tensor> primals,
                                          std::span<const Tensor> tangents,
                                          const OpAttributes& attrs) {
@@ -7965,30 +7963,59 @@ JvpMultiResult jvp_adapter_linalg_lu_s15(std::span<const Tensor> primals,
     Tensor dA = jvp_zeros_like_or(A, tangents.empty() ? Tensor() : tangents[0]);
 
     auto outs = tenzor::dispatch(OpId::LinalgLU, std::vector<Tensor>{A}, attrs);
-    const Tensor& P = outs[0];
-    const Tensor& L = outs[1];
-    const Tensor& U = outs[2];
+    const Tensor& L = outs[0];
+    const Tensor& U = outs[1];
+    const Tensor& piv = outs[2];
 
-    Tensor B = tenzor::matmul(P, dA);                       // P dA
+    auto shape = A.shape();
+    const int64_t ndim = static_cast<int64_t>(shape.size());
+    const int64_t n = shape[ndim - 1];
+    int64_t batch = 1;
+    for (int64_t i = 0; i < ndim - 2; ++i) batch *= shape[i];
 
-    // Y = L^{-1} B  (L unit-lower-triangular, left solve).
-    Tensor Y = tenzor::linalg::solve_triangular(L, B, /*upper=*/false,
-                                                /*unitriangular=*/true);
-    // F = Y U^{-1}:  F U = Y  <=>  Uᵀ Fᵀ = Yᵀ.
+    // Build Pᵀ as a batched permutation matrix on the host (Float64), then cast
+    // to A's dtype/device.  Applying the sequential getrf swaps to the identity
+    // index yields the row map of Pᵀ (Pᵀ A = L U).
+    Tensor piv_cpu = piv.to(Device::cpu()).contiguous();
+    const int32_t* p = piv_cpu.data<int32_t>();
+    Tensor Pt_cpu = tenzor::zeros({batch, n, n}, DType::Float64, Device::cpu());
+    double* pt = Pt_cpu.data<double>();
+    std::vector<int64_t> rowidx(static_cast<size_t>(n));
+    for (int64_t b = 0; b < batch; ++b) {
+        for (int64_t i = 0; i < n; ++i) rowidx[i] = i;
+        for (int64_t i = 0; i < n; ++i) {
+            int64_t j = static_cast<int64_t>(p[b * n + i]) - 1;  // 1-based
+            std::swap(rowidx[i], rowidx[j]);
+        }
+        for (int64_t i = 0; i < n; ++i) {
+            pt[(b * n + i) * n + rowidx[i]] = 1.0;
+        }
+    }
+    std::vector<int64_t> pt_shape(shape.begin(), shape.end());  // (..., n, n)
+    Tensor Pt = tenzor::reshape(Pt_cpu, {batch, n, n})
+                    .to(A.dtype()).to(A.device());
+    Pt = tenzor::reshape(Pt, pt_shape);
+
+    Tensor W = tenzor::matmul(Pt, dA);                       // Pᵀ dA
+    // M = L⁻¹ W U⁻¹.
+    Tensor M = tenzor::linalg::solve_triangular(L, W, /*upper=*/false,
+                                                /*unitri=*/true);   // L⁻¹ W
+    // (L⁻¹ W) U⁻¹: solve X U = M  =>  Uᵀ Xᵀ = Mᵀ.
     Tensor Ut = tenzor::transpose(U, -1, -2);
-    Tensor Yt = tenzor::transpose(Y, -1, -2);
-    Tensor Ft = tenzor::linalg::solve_triangular(Ut, Yt, /*upper=*/false,
-                                                 /*unitriangular=*/false);
-    Tensor F = tenzor::transpose(Ft, -1, -2);
+    Tensor Mt = tenzor::transpose(M, -1, -2);
+    Tensor Xt = tenzor::linalg::solve_triangular(Ut, Mt, /*upper=*/false,
+                                                 /*unitri=*/false);
+    M = tenzor::transpose(Xt, -1, -2);
 
-    Tensor dL = tenzor::matmul(L, tenzor::tril(F, -1));
-    Tensor dU = tenzor::matmul(tenzor::triu(F, 0), U);
-    Tensor dP = tenzor::zeros(std::vector<int64_t>(P.shape().begin(), P.shape().end()),
-                              P.dtype(), P.device());
+    Tensor dL = tenzor::matmul(L, tenzor::tril(M, -1));
+    Tensor dU = tenzor::matmul(tenzor::triu(M, 0), U);
+    Tensor dPiv = tenzor::zeros(
+        std::vector<int64_t>(piv.shape().begin(), piv.shape().end()),
+        piv.dtype(), piv.device());
 
     JvpMultiResult result;
-    result.primals  = { P, L, U };
-    result.tangents = { std::move(dP), std::move(dL), std::move(dU) };
+    result.primals  = { L, U, piv };
+    result.tangents = { std::move(dL), std::move(dU), std::move(dPiv) };
     return result;
 }
 
@@ -8650,7 +8677,7 @@ void register_builtin_jvp_rules() {
     register_jvp_rule_multi(OpId::LinalgSVD,            &jvp_adapter_nondiff_linalg_svd);
     register_jvp_rule_multi(OpId::LinalgQR,             &jvp_adapter_linalg_qr_s15);
     register_jvp_rule_multi(OpId::LinalgEig,            &jvp_adapter_nondiff_linalg_eig);
-    register_jvp_rule_multi(OpId::LinalgLU,             &jvp_adapter_nondiff_linalg_lu);
+    register_jvp_rule_multi(OpId::LinalgLU,             &jvp_adapter_linalg_lu_s15);
     register_jvp_rule       (OpId::LinalgHouseholder,    &jvp_adapter_nondiff_linalg_householder);
     register_jvp_rule_multi(OpId::LinalgLDLFactor,      &jvp_adapter_nondiff_linalg_ldl_factor);
     register_jvp_rule       (OpId::LinalgLDLSolve,       &jvp_adapter_nondiff_linalg_ldl_solve);

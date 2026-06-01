@@ -651,6 +651,35 @@ TEST_P(JVPRulesTest, LUSolve_JVP_MatchesFD) {
     w4_verify_single(OpId::LinalgLUSolve, {LU, piv, B}, {0,2}, a, 1e-4);
 }
 
+// LinalgLU forward-mode JVP, A = P L U.  Diagonally dominant A => no pivoting
+// (P = I), so the pivot pattern is stable under the FD perturbation; validates
+// the dL / dU differential.
+TEST_P(JVPRulesTest, LinalgLU_JVP_MatchesFD) {
+    if (device != Device::cpu()) return;
+    OpAttributes a;
+    Tensor A = w4_randf64({4,4}, 91) * 0.3;
+    { double* d = A.data<double>(); for (int i=0;i<4;++i) d[i*4+i] += (5.0 + i); }
+    w4_verify(OpId::LinalgLU, {A}, {0}, 0, a, 1e-4);  // dL
+    w4_verify(OpId::LinalgLU, {A}, {0}, 1, a, 1e-4);  // dU
+}
+
+// LinalgLU with a real, stable row interchange (column-0 max in row 1) to
+// exercise the permutation-reconstruction path. The dominant pivot entry (9)
+// keeps the pivot choice constant under the FD step.
+TEST_P(JVPRulesTest, LinalgLU_JVP_Permuted_MatchesFD) {
+    if (device != Device::cpu()) return;
+    OpAttributes a;
+    Tensor A(std::vector<int64_t>{3,3}, DType::Float64, Device::cpu());
+    {
+        double vals[9] = { 1.0, 2.0, 0.5,
+                           9.0, 1.0, 0.3,
+                           0.4, 0.7, 8.0 };
+        double* d = A.data<double>(); for (int i=0;i<9;++i) d[i] = vals[i];
+    }
+    w4_verify(OpId::LinalgLU, {A}, {0}, 0, a, 1e-4);  // dL
+    w4_verify(OpId::LinalgLU, {A}, {0}, 1, a, 1e-4);  // dU
+}
+
 // NOTE: LinalgLU / LinalgSVD / LinalgEig / LDLFactor / Geqrf / RNN-forward JVP
 // adapters are drafted (LU/SVD parked in jvp_rules.cpp) but do not yet pass
 // this finite-difference gradcheck, so their OpIds remain registered to the
