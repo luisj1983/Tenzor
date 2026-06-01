@@ -8474,8 +8474,8 @@ void register_builtin_jvp_rules() {
     register_jvp_rule_multi(OpId::BiLSTMForward,         &jvp_adapter_nondiff_bilstm_forward);
 
     // Search / sort multi-output.
-    register_jvp_rule_multi(OpId::TopK, &jvp_adapter_nondiff_topk);
-    register_jvp_rule_multi(OpId::Sort, &jvp_adapter_nondiff_sort);
+    register_jvp_rule_multi(OpId::TopK, &jvp_adapter_topk_s15);
+    register_jvp_rule_multi(OpId::Sort, &jvp_adapter_sort_s15);
 
     // Specialised / quantized.
     register_jvp_rule(OpId::QuantizedLinear,            &jvp_adapter_nondiff_quantized_linear);

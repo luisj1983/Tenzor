@@ -547,11 +547,33 @@ TEST_P(JVPRulesTest, LinalgQR_JVP_MatchesFD) {
     w4_verify(OpId::LinalgQR, {A}, {0}, 1, a, 1e-4);  // dR
 }
 
-// NOTE: TopK / Sort / LinalgLU / LinalgSVD JVP adapters were drafted
-// but did not pass this finite-difference gradcheck, so their OpIds remain
-// registered to the NonDifferentiable thrower (forward-mode AD fails loudly
-// rather than returning a wrong tangent). The draft adapters are parked
-// (defined but unregistered) in jvp_rules.cpp for a future pass.
+// TopK / Sort forward-mode JVP. The `values` output is a pure gather of the
+// input by the (locally-constant) ranking indices, so its tangent is the same
+// gather of the input tangent; the integer `indices` output has zero tangent.
+// Distinct random Float64 inputs make the ranking stable under the FD step.
+TEST_P(JVPRulesTest, TopK_JVP_MatchesFD) {
+    if (device != Device::cpu()) return;
+    OpAttributes a;
+    a.set(AttrKey::K, static_cast<int64_t>(3));
+    a.set(AttrKey::Dim, static_cast<int64_t>(1));
+    a.set(AttrKey::Largest, true);
+    a.set(AttrKey::Sorted, true);
+    w4_verify(OpId::TopK, { w4_randf64({4,8},71) }, {0}, 0, a, 1e-7);  // d(values)
+}
+
+TEST_P(JVPRulesTest, Sort_JVP_MatchesFD) {
+    if (device != Device::cpu()) return;
+    OpAttributes a;
+    a.set(AttrKey::Dim, static_cast<int64_t>(1));
+    a.set(AttrKey::Descending, false);
+    w4_verify(OpId::Sort, { w4_randf64({4,8},72) }, {0}, 0, a, 1e-7);  // d(values)
+}
+
+// NOTE: LinalgLU / LinalgSVD / LinalgEig / LDLFactor / Geqrf / RNN-forward JVP
+// adapters are drafted (LU/SVD parked in jvp_rules.cpp) but do not yet pass
+// this finite-difference gradcheck, so their OpIds remain registered to the
+// NonDifferentiable thrower (forward-mode AD fails loudly rather than returning
+// a wrong tangent) until the analytic rule is gradcheck-clean.
 
 INSTANTIATE_BACKEND_TESTS(JVPRulesTest);
 
