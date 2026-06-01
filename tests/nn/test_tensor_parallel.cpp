@@ -14,6 +14,7 @@
 #include <tenzor/core/dtype.hpp>
 #include <memory>
 #include <cmath>
+#include "../grad_flow_helpers.hpp"  // EXPECT_GRAD_FLOWS
 
 using namespace tenzor;
 namespace dist = tenzor::distributed;
@@ -299,4 +300,73 @@ TEST(RowParallelLinearTest, SingleRankEquivalence) {
         EXPECT_FALSE(std::isnan(data[i])) << "NaN at index " << i;
     }
     EXPECT_GT(sum, 0.0f);
+}
+
+// ============================================================================
+// Gradient-flow tests (regression for the raw-tensor-op autograd severance
+// bug: forward extracted .tensor() across the collective and rewrapped via the
+// leaf Variable ctor, discarding grad_fn so local weights got ZERO gradient).
+// These assert non-zero gradients actually reach the sharded parameters and
+// the input. world_size=1 exercises the graph wiring (the collective ops
+// degrade to identity but must still keep grad_fn intact).
+// ============================================================================
+
+TEST(TensorParallelGradFlow, ColumnParallelWeightAndInput) {
+    auto pg = dist::ProcessGroup::create_process_group(
+        dist::Backend::GLOO, 0, 1, "localhost", 29760);
+    dist::ColumnParallelLinear layer(16, 32, *pg, /*bias=*/true, /*gather_output=*/true);
+
+    Variable input(rand({4, 16}), /*requires_grad=*/true);
+    Variable output = layer.forward(input);
+    Variable loss = sum(output);
+    loss.backward();
+
+    auto weight = layer.get_parameter("weight");
+    auto bias = layer.get_parameter("bias");
+    EXPECT_GRAD_FLOWS(*weight);
+    EXPECT_GRAD_FLOWS(*bias);
+    EXPECT_GRAD_FLOWS(input);
+}
+
+TEST(TensorParallelGradFlow, RowParallelWeightBiasAndInput) {
+    auto pg = dist::ProcessGroup::create_process_group(
+        dist::Backend::GLOO, 0, 1, "localhost", 29761);
+    dist::RowParallelLinear layer(16, 8, *pg, /*bias=*/true, /*input_is_parallel=*/false);
+
+    Variable input(rand({2, 16}), /*requires_grad=*/true);
+    Variable output = layer.forward(input);
+    Variable loss = sum(output);
+    loss.backward();
+
+    auto weight = layer.get_parameter("weight");
+    auto bias = layer.get_parameter("bias");
+    EXPECT_GRAD_FLOWS(*weight);  // the previously-zeroed gradient
+    EXPECT_GRAD_FLOWS(*bias);
+    EXPECT_GRAD_FLOWS(input);
+}
+
+TEST(TensorParallelGradFlow, ParallelAttentionOutProjGrad) {
+    auto pg = dist::ProcessGroup::create_process_group(
+        dist::Backend::GLOO, 0, 1, "localhost", 29762);
+    dist::ParallelAttention attn(32, 4, *pg);
+
+    Variable input(rand({2, 5, 32}), /*requires_grad=*/true);
+    Variable output = attn.forward(input);
+    Variable loss = sum(output);
+    loss.backward();
+
+    // Every parameter must receive a non-zero gradient. out_proj is a
+    // RowParallelLinear whose weight grad was previously severed by the raw
+    // all-reduce rewrap.
+    bool saw_out_proj_weight = false;
+    for (auto& [name, param] : attn.named_parameters()) {
+        SCOPED_TRACE("parameter: " + name);
+        EXPECT_GRAD_FLOWS(*param);
+        if (name.find("out_proj") != std::string::npos &&
+            name.find("weight") != std::string::npos) {
+            saw_out_proj_weight = true;
+        }
+    }
+    EXPECT_TRUE(saw_out_proj_weight) << "out_proj.weight parameter not found";
+    EXPECT_GRAD_FLOWS(input);
 }

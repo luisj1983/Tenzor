@@ -138,6 +138,14 @@ RendezvousStore::RendezvousStore(
 RendezvousStore::~RendezvousStore() {
     if (socket_fd_ >= 0) {
         ::close(socket_fd_);
+        socket_fd_ = -1;
+    }
+    // Signal the server thread to stop and unblock its accept() by shutting down
+    // the listening socket, then join (previously join() hung forever because
+    // the accept() loop had no shutdown path).
+    stop_.store(true);
+    if (listen_fd_ >= 0) {
+        ::shutdown(listen_fd_, SHUT_RDWR);
     }
     if (server_thread_ && server_thread_->joinable()) {
         server_thread_->join();
@@ -212,34 +220,68 @@ auto RendezvousStore::check_key(const std::string& key) -> bool {
     }
 }
 
+auto RendezvousStore::add(const std::string& key, int64_t delta) -> int64_t {
+    connect_to_master();
+
+    std::string command = "ADD:" + key + ":" + std::to_string(delta);
+    uint32_t len = command.size();
+    ::send(socket_fd_, &len, sizeof(len), 0);
+    ::send(socket_fd_, command.c_str(), len, 0);
+
+    uint32_t response_len = 0;
+    if (::recv(socket_fd_, &response_len, sizeof(response_len), MSG_WAITALL)
+            != static_cast<ssize_t>(sizeof(response_len))) {
+        throw std::runtime_error("RendezvousStore::add: no response from master");
+    }
+    std::string response(response_len, '\0');
+    if (response_len > 0) {
+        ::recv(socket_fd_, &response[0], response_len, MSG_WAITALL);
+    }
+    try {
+        return std::stoll(response);
+    } catch (...) {
+        throw std::runtime_error("RendezvousStore::add: invalid response '" + response + "'");
+    }
+}
+
 auto RendezvousStore::connect_to_master() -> void {
+    // The master server handles exactly one command per accepted connection and
+    // then closes it, so each store operation needs a FRESH connection — never
+    // reuse a cached (now-dead) socket. Close any stale fd before reconnecting.
     if (socket_fd_ >= 0) {
-        return;  // Already connected
+        ::close(socket_fd_);
+        socket_fd_ = -1;
     }
 
-    socket_fd_ = socket(AF_INET, SOCK_STREAM, 0);
-    if (socket_fd_ < 0) {
-        throw std::runtime_error("Failed to create socket");
+    struct hostent* server = gethostbyname(master_addr_.c_str());
+    if (!server) {
+        throw std::runtime_error("Failed to resolve address: " + master_addr_);
     }
 
     struct sockaddr_in addr;
     std::memset(&addr, 0, sizeof(addr));
     addr.sin_family = AF_INET;
     addr.sin_port = htons(master_port_);
-
-    struct hostent* server = gethostbyname(master_addr_.c_str());
-    if (!server) {
-        ::close(socket_fd_);
-        socket_fd_ = -1;
-        throw std::runtime_error("Failed to resolve address: " + master_addr_);
-    }
-
     std::memcpy(&addr.sin_addr.s_addr, server->h_addr, server->h_length);
 
-    if (connect(socket_fd_, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
+    // Retry with backoff: the server may be starting in another thread/process,
+    // or briefly busy handling the previous one-shot connection.
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(30);
+    for (;;) {
+        socket_fd_ = socket(AF_INET, SOCK_STREAM, 0);
+        if (socket_fd_ < 0) {
+            throw std::runtime_error("Failed to create socket");
+        }
+        if (connect(socket_fd_, (struct sockaddr*)&addr, sizeof(addr)) == 0) {
+            return;  // connected
+        }
         ::close(socket_fd_);
         socket_fd_ = -1;
-        throw std::runtime_error("Failed to connect to master");
+        if (std::chrono::steady_clock::now() >= deadline) {
+            throw std::runtime_error("Failed to connect to rendezvous master at " +
+                                     master_addr_ + ":" + std::to_string(master_port_));
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
 }
 
@@ -268,6 +310,10 @@ auto RendezvousStore::run_master_server() -> void {
         ::close(server_fd);
         return;
     }
+
+    // Record the listening socket so the destructor can shut it down and unblock
+    // the accept() loop below for a clean thread join.
+    listen_fd_ = server_fd;
 
     // Run server in background thread
     server_thread_ = std::make_unique<std::thread>([this, server_fd]() {
@@ -333,6 +379,30 @@ auto RendezvousStore::run_master_server() -> void {
                 std::string key = rest;
                 std::lock_guard<std::mutex> lock(store_mutex);
                 store.erase(key);
+            } else if (op == "ADD") {
+                // Atomic fetch-and-add: "ADD:key:delta" -> new integer value.
+                size_t second_colon = rest.find(':');
+                if (second_colon != std::string::npos) {
+                    std::string key = rest.substr(0, second_colon);
+                    long long delta = 0;
+                    try { delta = std::stoll(rest.substr(second_colon + 1)); }
+                    catch (...) { delta = 0; }
+                    long long new_val;
+                    {
+                        std::lock_guard<std::mutex> lock(store_mutex);
+                        long long cur = 0;
+                        auto it = store.find(key);
+                        if (it != store.end()) {
+                            try { cur = std::stoll(it->second); } catch (...) { cur = 0; }
+                        }
+                        new_val = cur + delta;
+                        store[key] = std::to_string(new_val);
+                    }
+                    std::string value = std::to_string(new_val);
+                    uint32_t response_len = value.size();
+                    ::send(client_fd, &response_len, sizeof(response_len), 0);
+                    ::send(client_fd, value.c_str(), value.size(), 0);
+                }
             }
 
             ::close(client_fd);
@@ -1001,9 +1071,12 @@ auto GlooBackend::apply_reduce_op(Tensor& result, const Tensor& operand, ReduceO
 }
 
 auto GlooBackend::ring_all_reduce(Tensor& tensor, ReduceOp op) -> void {
-    // Ring all-reduce algorithm using direct memory operations
-    // Works with any tensor shape by operating on contiguous memory
-    // Dtype-generic: supports Float32, Float64, and half types
+    // Ring all-reduce algorithm using direct memory operations.
+    // Works with any tensor shape by operating on contiguous memory.
+    // Dtype-generic over all numeric types: Float32/Float64 (half is pre-widened
+    // by all_reduce) AND integer types (Int8/16/32/64, UInt8). Integer all_reduce
+    // — e.g. summing counts/indices across ranks — matches NCCL/MPI and the
+    // apply_reduce_op helper used by reduce(); it previously threw here.
 
     validate_cpu_accessible(tensor);
     Tensor cpu_tensor = get_cpu_buffer(tensor);
@@ -1013,7 +1086,11 @@ auto GlooBackend::ring_all_reduce(Tensor& tensor, ReduceOp op) -> void {
     size_t chunk_size = (total_elements + num_chunks - 1) / num_chunks;
     size_t elem_size = dtype_size(cpu_tensor.dtype());
 
-    TENZOR_DISPATCH_FLOATING_TYPES(cpu_tensor.dtype(), "ring_all_reduce", [&] {
+    // Generic over the reduction element type. Dispatched explicitly (below)
+    // over Float32/Float64 + integer types only — Float16/BFloat16 are widened
+    // to Float32 by all_reduce before reaching here, and std::min/std::max are
+    // not defined for the half types, so they are intentionally excluded.
+    auto ring_body = [&]<typename scalar_t>() {
         auto* data_ptr = static_cast<scalar_t*>(cpu_tensor.data_ptr());
 
         // Reduce-scatter phase: reduce chunks in a ring pattern
@@ -1105,7 +1182,21 @@ auto GlooBackend::ring_all_reduce(Tensor& tensor, ReduceOp op) -> void {
                 data_ptr[i] /= divisor;
             }
         }
-    });
+    };
+
+    switch (cpu_tensor.dtype()) {
+        case DType::Float32: ring_body.template operator()<float>();   break;
+        case DType::Float64: ring_body.template operator()<double>();  break;
+        case DType::Int64:   ring_body.template operator()<int64_t>(); break;
+        case DType::Int32:   ring_body.template operator()<int32_t>(); break;
+        case DType::Int16:   ring_body.template operator()<int16_t>(); break;
+        case DType::Int8:    ring_body.template operator()<int8_t>();  break;
+        case DType::UInt8:   ring_body.template operator()<uint8_t>(); break;
+        default:
+            throw std::runtime_error(
+                "ring_all_reduce: unsupported dtype " +
+                std::string(dtype_name(cpu_tensor.dtype())));
+    }
 
     // Copy back to original device if needed
     if (tensor.device().type != Device::Type::CPU) {

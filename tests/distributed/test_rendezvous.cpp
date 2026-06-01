@@ -5,6 +5,7 @@
 
 #include <gtest/gtest.h>
 #include <tenzor/distributed/elastic/rendezvous.hpp>
+#include <chrono>
 
 using namespace tenzor::distributed::elastic;
 
@@ -30,4 +31,36 @@ TEST(RendezvousTest, LeaveResetsState) {
     rendezvous.leave();
     EXPECT_EQ(rendezvous.rank(), -1);
     EXPECT_EQ(rendezvous.world_size(), 0);
+}
+
+// Real store-based join (WS17): a single worker with min_workers=1 must get
+// rank 0 / world_size 1 (previously join() was a stub returning rank=-1).
+TEST(RendezvousTest, SingleWorkerJoinAssignsRankZero) {
+    RendezvousConfig config;
+    config.run_id = "test_single";
+    config.min_workers = 1;
+    config.max_workers = 4;
+    config.store_port = 29621;
+    config.timeout = std::chrono::seconds(5);
+    C10dRendezvous rendezvous(config);
+
+    auto result = rendezvous.join();
+    EXPECT_EQ(result.rank, 0);
+    EXPECT_EQ(result.world_size, 1);
+    EXPECT_EQ(rendezvous.rank(), 0);
+    EXPECT_EQ(rendezvous.world_size(), 1);
+}
+
+// join() must THROW on timeout when min_workers cannot be met, rather than
+// silently returning rank=-1 / world_size=0 (the old stub behaviour).
+TEST(RendezvousTest, JoinThrowsOnTimeoutBelowMinWorkers) {
+    RendezvousConfig config;
+    config.run_id = "test_timeout";
+    config.min_workers = 2;   // never met by a single worker
+    config.max_workers = 4;
+    config.store_port = 29622;
+    config.timeout = std::chrono::seconds(1);
+    C10dRendezvous rendezvous(config);
+
+    EXPECT_THROW(rendezvous.join(), std::runtime_error);
 }

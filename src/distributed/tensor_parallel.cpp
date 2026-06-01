@@ -12,8 +12,11 @@
 #include "tenzor/ops/math.hpp"
 #include "tenzor/ops/transform.hpp"
 #include "tenzor/autograd/ops.hpp"
+#include "tenzor/autograd/function.hpp"
+#include "tenzor/autograd/variable.hpp"
 #include "tenzor/core/dtype.hpp"
 #include <cmath>
+#include <memory>
 #include <stdexcept>
 #include <cstring>
 
@@ -21,6 +24,164 @@ namespace tenzor::distributed {
 
 // Namespace alias for autograd operations (matches linear.cpp pattern)
 namespace autograd = tenzor;
+
+// ============================================================================
+// Megatron-LM tensor-parallel collective autograd operators (f / g / gather /
+// scatter). These keep the autograd graph intact across collective ops so that
+// gradients reach the local sharded weights. Forward/backward semantics follow
+// Megatron-LM exactly:
+//   - g  (TPReduce):  forward all-reduce(SUM),  backward identity.
+//   - f  (TPCopy):    forward identity,         backward all-reduce(SUM).
+//   - gather:         forward all-gather + cat, backward narrow to local slice.
+//   - scatter:        forward narrow to slice,  backward all-gather + cat.
+// g and f are duals: re-reducing the gradient in g's backward (as a plain
+// differentiable all-reduce would) overcounts by world_size, so g's backward
+// must be identity.
+// ============================================================================
+namespace {
+
+auto normalize_dim(int64_t dim, int64_t rank) -> int64_t {
+    return dim < 0 ? dim + rank : dim;
+}
+
+// Wire a single-input/single-output collective Function into the graph,
+// mirroring tenzor::distributed_all_reduce's manual graph construction.
+auto make_collective_node(const Variable& input, Tensor out,
+                          std::shared_ptr<Function> grad_fn) -> Variable {
+    Variable result(std::move(out), input.requires_grad());
+    if (input.requires_grad() && tenzor::is_grad_enabled()) {
+        std::vector<std::shared_ptr<Function>> next_funcs;
+        next_funcs.push_back(input.grad_fn());  // nullptr if leaf
+        grad_fn->set_next_functions(std::move(next_funcs));
+        std::vector<Variable> input_vars;
+        input_vars.push_back(input);
+        grad_fn->set_input_variables(std::move(input_vars));
+        result.set_grad_fn(grad_fn);
+    }
+    return result;
+}
+
+// g operator: backward is identity (gradient passes straight through).
+class TPReduceBackward : public Function {
+public:
+    auto forward(std::vector<Variable>) -> std::vector<Variable> override {
+        throw std::runtime_error(
+            "TPReduceBackward::forward should not be called directly");
+    }
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override {
+        return {grad_outputs.at(0)};
+    }
+    auto name() const -> std::string override { return "TPReduceBackward"; }
+};
+
+// f operator: backward all-reduces the incoming gradient across ranks.
+class TPCopyBackward : public Function {
+public:
+    explicit TPCopyBackward(ProcessGroup* pg) : pg_(pg) {}
+    auto forward(std::vector<Variable>) -> std::vector<Variable> override {
+        throw std::runtime_error(
+            "TPCopyBackward::forward should not be called directly");
+    }
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override {
+        Tensor g = grad_outputs.at(0).clone();
+        pg_->all_reduce(g, ReduceOp::SUM);
+        return {g};
+    }
+    auto name() const -> std::string override { return "TPCopyBackward"; }
+private:
+    ProcessGroup* pg_;
+};
+
+// gather: backward narrows the full gradient to this rank's slice.
+class TPGatherBackward : public Function {
+public:
+    TPGatherBackward(int rank, int64_t dim, int64_t local_len)
+        : rank_(rank), dim_(dim), local_len_(local_len) {}
+    auto forward(std::vector<Variable>) -> std::vector<Variable> override {
+        throw std::runtime_error(
+            "TPGatherBackward::forward should not be called directly");
+    }
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override {
+        return {grad_outputs.at(0).narrow(dim_, rank_ * local_len_, local_len_).clone()};
+    }
+    auto name() const -> std::string override { return "TPGatherBackward"; }
+private:
+    int rank_;
+    int64_t dim_;
+    int64_t local_len_;
+};
+
+// scatter: backward all-gathers the per-rank gradient slices into the full
+// (replicated) gradient.
+class TPScatterBackward : public Function {
+public:
+    TPScatterBackward(ProcessGroup* pg, int64_t dim) : pg_(pg), dim_(dim) {}
+    auto forward(std::vector<Variable>) -> std::vector<Variable> override {
+        throw std::runtime_error(
+            "TPScatterBackward::forward should not be called directly");
+    }
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override {
+        const Tensor& g_local = grad_outputs.at(0);
+        int ws = pg_->world_size();
+        std::vector<Tensor> parts(ws);
+        std::vector<int64_t> shp(g_local.shape().begin(), g_local.shape().end());
+        for (int i = 0; i < ws; ++i) {
+            parts[i] = tenzor::zeros(shp, g_local.dtype(), g_local.device());
+        }
+        pg_->all_gather(g_local, parts);
+        return {tenzor::cat(parts, dim_)};
+    }
+    auto name() const -> std::string override { return "TPScatterBackward"; }
+private:
+    ProcessGroup* pg_;
+    int64_t dim_;
+};
+
+// g: all-reduce(SUM) forward, identity backward.
+auto tp_reduce(const Variable& input, ProcessGroup& pg) -> Variable {
+    Tensor out = input.tensor().clone();
+    pg.all_reduce(out, ReduceOp::SUM);
+    return make_collective_node(input, std::move(out),
+                                std::make_shared<TPReduceBackward>());
+}
+
+// f: identity forward, all-reduce(SUM) backward.
+auto tp_copy(const Variable& input, ProcessGroup& pg) -> Variable {
+    Tensor out = input.tensor().clone();
+    return make_collective_node(input, std::move(out),
+                                std::make_shared<TPCopyBackward>(&pg));
+}
+
+// gather: all-gather + cat forward, narrow backward.
+auto tp_gather(const Variable& input, ProcessGroup& pg, int64_t dim) -> Variable {
+    int ws = pg.world_size();
+    const Tensor& local = input.tensor();
+    std::vector<int64_t> shp(local.shape().begin(), local.shape().end());
+    int64_t pos_dim = normalize_dim(dim, static_cast<int64_t>(shp.size()));
+    int64_t local_len = shp.at(pos_dim);
+    std::vector<Tensor> parts(ws);
+    for (int i = 0; i < ws; ++i) {
+        parts[i] = tenzor::zeros(shp, local.dtype(), local.device());
+    }
+    pg.all_gather(local, parts);
+    Tensor out = tenzor::cat(parts, pos_dim);
+    return make_collective_node(
+        input, std::move(out),
+        std::make_shared<TPGatherBackward>(pg.rank(), pos_dim, local_len));
+}
+
+// scatter: narrow-to-local forward, all-gather backward.
+auto tp_scatter(const Variable& input, ProcessGroup& pg, int64_t dim,
+                int64_t start, int64_t length) -> Variable {
+    const Tensor& full = input.tensor();
+    int64_t pos_dim = normalize_dim(dim, static_cast<int64_t>(full.shape().size()));
+    Tensor out = full.narrow(pos_dim, start, length).clone();
+    return make_collective_node(
+        input, std::move(out),
+        std::make_shared<TPScatterBackward>(&pg, pos_dim));
+}
+
+} // namespace
 
 // ============================================================================
 // ColumnParallelLinear Implementation
@@ -62,11 +223,15 @@ ColumnParallelLinear::ColumnParallelLinear(
 }
 
 auto ColumnParallelLinear::forward_impl(const Variable& input) -> Variable {
+    // f operator: identity forward, all-reduce backward. Makes the replicated
+    // input's gradient correct (summed across ranks) while staying graph-connected.
+    Variable input_parallel = (pg_.world_size() > 1) ? tp_copy(input, pg_) : input;
+
     // Local matmul: input @ weight.T
     // input: (*, in_features), weight: (local_out_features, in_features)
     auto weight = get_parameter("weight");
     auto weight_t = autograd::permute(*weight, {1, 0});
-    auto output = autograd::matmul(input, weight_t);
+    auto output = autograd::matmul(input_parallel, weight_t);
 
     // Add local bias
     if (has_bias_) {
@@ -74,28 +239,11 @@ auto ColumnParallelLinear::forward_impl(const Variable& input) -> Variable {
         output = output + *bias;
     }
 
-    if (gather_output_) {
-        // All-gather the partial outputs from all ranks
-        // Each rank has (*, local_out_features), result is (*, out_features)
-        int ws = pg_.world_size();
-        Tensor output_tensor = output.tensor();
-
-        std::vector<Tensor> gathered(ws);
-        for (int i = 0; i < ws; ++i) {
-            gathered[i] = tenzor::zeros(std::vector<int64_t>(output_tensor.shape().begin(), output_tensor.shape().end()),
-                                        output_tensor.dtype(), output_tensor.device());
-        }
-
-        pg_.all_gather(output_tensor, gathered);
-
-        // Concatenate along the last dimension
-        std::vector<Variable> gathered_vars;
-        gathered_vars.reserve(ws);
-        for (int i = 0; i < ws; ++i) {
-            gathered_vars.emplace_back(gathered[i], false);
-        }
-
-        output = autograd::cat(gathered_vars, -1);
+    if (gather_output_ && pg_.world_size() > 1) {
+        // gather operator: all-gather the partial outputs and concatenate along
+        // the last dimension. Backward narrows the gradient to this rank's slice.
+        // Each rank has (*, local_out_features), result is (*, out_features).
+        output = tp_gather(output, pg_, -1);
     }
 
     return output;
@@ -141,8 +289,11 @@ RowParallelLinear::RowParallelLinear(
     Variable weight(rand({out_features, local_in_features_}) * (2.0f * bound) - bound, true);
     register_parameter("weight", std::move(weight));
 
-    // Only rank 0 holds the bias to avoid double-counting after all-reduce
-    if (bias && pg_.rank() == 0) {
+    // Bias is replicated on every rank and added once AFTER the all-reduce of
+    // partial products, so there is no double-counting. Replicating (rather than
+    // keeping it only on rank 0 + broadcasting) keeps the add autograd-connected
+    // and identical on all ranks, and its gradient is identical on every rank.
+    if (bias) {
         Variable bias_var(rand({out_features}) * (2.0f * bound) - bound, true);
         register_parameter("bias", std::move(bias_var));
     }
@@ -151,16 +302,14 @@ RowParallelLinear::RowParallelLinear(
 auto RowParallelLinear::forward_impl(const Variable& input) -> Variable {
     Variable local_input = input;
 
-    // If input is not already parallel (not split across ranks), split it
-    if (!input_is_parallel_) {
+    // If input is not already parallel (replicated full input), scatter it to
+    // this rank's column slice. scatter's backward all-gathers the per-rank
+    // gradient slices into the full (replicated) input gradient.
+    if (!input_is_parallel_ && pg_.world_size() > 1) {
         int rank = pg_.rank();
-        // Split input along last dimension
-        // input: (*, in_features) -> (*, local_in_features)
         int64_t start = rank * local_in_features_;
-        // Use narrow on the last dimension
-        auto input_shape = input.tensor().shape();
-        int64_t last_dim = static_cast<int64_t>(input_shape.size()) - 1;
-        local_input = autograd::narrow(input, last_dim, start, local_in_features_);
+        int64_t last_dim = static_cast<int64_t>(input.tensor().shape().size()) - 1;
+        local_input = tp_scatter(input, pg_, last_dim, start, local_in_features_);
     }
 
     // Local matmul: local_input @ weight.T
@@ -169,26 +318,17 @@ auto RowParallelLinear::forward_impl(const Variable& input) -> Variable {
     auto weight_t = autograd::permute(*weight, {1, 0});
     auto output = autograd::matmul(local_input, weight_t);
 
-    // All-reduce to sum partial results across ranks
-    Tensor output_tensor = output.tensor();
-    pg_.all_reduce(output_tensor, ReduceOp::SUM);
-
-    // Wrap back as Variable (gradient tracking through all-reduce is approximate;
-    // for full autograd support, a custom Function would be needed)
-    output = Variable(output_tensor, output.requires_grad());
-
-    // Add bias (only rank 0 has it, but after all-reduce all ranks need it)
-    if (has_bias_ && pg_.rank() == 0) {
-        auto bias = get_parameter("bias");
-        output = output + *bias;
+    // g operator: all-reduce(SUM) the partial products across ranks. Backward is
+    // identity, so the gradient flows straight to the local weight (and input).
+    if (pg_.world_size() > 1) {
+        output = tp_reduce(output, pg_);
     }
 
-    // Broadcast the output from rank 0 so all ranks have identical output
-    // (rank 0 added bias, others didn't)
+    // Replicated bias added once on every rank after the all-reduce (identical
+    // result on all ranks; graph-connected so the bias gradient flows).
     if (has_bias_) {
-        Tensor out_t = output.tensor();
-        pg_.broadcast(out_t, /*src_rank=*/0);
-        output = Variable(out_t, output.requires_grad());
+        auto bias = get_parameter("bias");
+        output = output + *bias;
     }
 
     return output;
