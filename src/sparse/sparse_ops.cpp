@@ -971,6 +971,17 @@ auto spmm(const SparseTensor& sparse, const Tensor& dense) -> Tensor {
         if (auto r = dispatch_gpu_spmm(Device::Type::Vulkan)) return *r;
     }
 
+    // Refuse CPU fallback for GPU tensors (mirrors sparse::add). cpu_spmm calls
+    // .data<float>()/.data<int64_t>() which dereference device pointers on the
+    // host for a GPU tensor — crash/UB. If a GPU backend lacks the SparseSpMM
+    // kernel, fail loudly instead of silently falling back to CPU.
+    if (sparse_compute.device().type != Device::Type::CPU ||
+        dense_compute.device().type != Device::Type::CPU) {
+        throw std::runtime_error(
+            "sparse::spmm: GPU tensor but no GPU SparseSpMM kernel matched — "
+            "refusing CPU fallback (move tensors to CPU explicitly)");
+    }
+
     // CPU path: MKL-accelerated with scalar fallback
     auto result = cpu_spmm(sparse_compute, dense_compute, M, K, N);
 
@@ -1050,6 +1061,15 @@ auto spmv(const SparseTensor& sparse, const Tensor& vec) -> Tensor {
     if (sparse_compute.device().type == Device::Type::Vulkan ||
         vec_compute.device().type == Device::Type::Vulkan) {
         if (auto r = dispatch_gpu_spmv(Device::Type::Vulkan)) return *r;
+    }
+
+    // Refuse CPU fallback for GPU tensors (mirrors sparse::add). cpu_spmv
+    // dereferences device pointers on the host for a GPU tensor — crash/UB.
+    if (sparse_compute.device().type != Device::Type::CPU ||
+        vec_compute.device().type != Device::Type::CPU) {
+        throw std::runtime_error(
+            "sparse::spmv: GPU tensor but no GPU SparseSpMV kernel matched — "
+            "refusing CPU fallback (move tensors to CPU explicitly)");
     }
 
     // CPU path: MKL-accelerated with scalar fallback

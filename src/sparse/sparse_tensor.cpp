@@ -5,6 +5,7 @@
 #include "tenzor/ops/indexing.hpp"
 #include "tenzor/ops/advanced.hpp"
 #include <algorithm>
+#include <complex>
 #include <numeric>
 #include <unordered_map>  // B.5: direct CSR→BSR block index
 #include <optional>
@@ -1280,105 +1281,81 @@ auto SparseTensor::to_bsr(std::pair<int64_t, int64_t> block_size) const -> Spars
         return to_csr().to_bsr(block_size);
     }
 
-    // Unsupported dtype (e.g. complex) still falls back to dense scan as
-    // a correctness backstop; widening sparse complex would require a
-    // separate set of complex helpers throughout sparse_tensor.cpp.
-    auto dense = to_dense();
-    auto cont = dense.contiguous();
+    // Backstop for dtypes without a direct CSR->BSR fast path (e.g. complex):
+    // densify and scan for non-zero blocks on the HOST. The dense copy is moved
+    // to CPU first and the BSR is built entirely on CPU, then moved back to the
+    // original device. (The previous code dereferenced cont.data<>() — a device
+    // pointer for a GPU sparse tensor — and allocated the outputs on
+    // cont.device() while writing through host pointers, which is crash/UB
+    // off-CPU. It also only branched f32/else-f64, silently misreading complex
+    // storage as double.)
+    const Device orig_device = device();
+    auto cont = to_dense().contiguous().to(Device::cpu());
+    const int64_t block_elems = bh * bw;
 
-    // Find non-zero blocks
-    std::vector<int64_t> block_rows, block_cols;
-    std::vector<std::vector<float>> block_vals_f32;
-    std::vector<std::vector<double>> block_vals_f64;
+    auto build_bsr = [&](auto zero) -> SparseTensor {
+        using T = decltype(zero);
+        const T* data = static_cast<const T*>(cont.data_ptr());
 
-    bool is_f32 = (cont.dtype() == DType::Float32);
-
-    for (int64_t br = 0; br < nblockrows; ++br) {
-        for (int64_t bc = 0; bc < nblockcols; ++bc) {
-            // Check if block is non-zero
-            bool has_nonzero = false;
-            for (int64_t i = 0; i < bh && !has_nonzero; ++i) {
-                for (int64_t j = 0; j < bw && !has_nonzero; ++j) {
-                    int64_t r = br * bh + i;
-                    int64_t c = bc * bw + j;
-                    if (r < nrows && c < ncols) {
-                        if (is_f32) {
-                            if (cont.data<float>()[r * ncols + c] != 0.0f) has_nonzero = true;
-                        } else {
-                            if (cont.data<double>()[r * ncols + c] != 0.0) has_nonzero = true;
+        std::vector<int64_t> block_rows, block_cols;
+        std::vector<std::vector<T>> blocks;
+        for (int64_t br = 0; br < nblockrows; ++br) {
+            for (int64_t bc = 0; bc < nblockcols; ++bc) {
+                bool has_nonzero = false;
+                for (int64_t i = 0; i < bh && !has_nonzero; ++i) {
+                    for (int64_t j = 0; j < bw && !has_nonzero; ++j) {
+                        int64_t r = br * bh + i, c = bc * bw + j;
+                        if (r < nrows && c < ncols && data[r * ncols + c] != T(0)) {
+                            has_nonzero = true;
                         }
                     }
                 }
-            }
-
-            if (has_nonzero) {
+                if (!has_nonzero) continue;
                 block_rows.push_back(br);
                 block_cols.push_back(bc);
-
-                if (is_f32) {
-                    std::vector<float> blk(bh * bw, 0.0f);
-                    for (int64_t i = 0; i < bh; ++i) {
-                        for (int64_t j = 0; j < bw; ++j) {
-                            int64_t r = br * bh + i;
-                            int64_t c = bc * bw + j;
-                            if (r < nrows && c < ncols) {
-                                blk[i * bw + j] = cont.data<float>()[r * ncols + c];
-                            }
+                std::vector<T> blk(block_elems, T(0));
+                for (int64_t i = 0; i < bh; ++i) {
+                    for (int64_t j = 0; j < bw; ++j) {
+                        int64_t r = br * bh + i, c = bc * bw + j;
+                        if (r < nrows && c < ncols) {
+                            blk[i * bw + j] = data[r * ncols + c];
                         }
                     }
-                    block_vals_f32.push_back(std::move(blk));
-                } else {
-                    std::vector<double> blk(bh * bw, 0.0);
-                    for (int64_t i = 0; i < bh; ++i) {
-                        for (int64_t j = 0; j < bw; ++j) {
-                            int64_t r = br * bh + i;
-                            int64_t c = bc * bw + j;
-                            if (r < nrows && c < ncols) {
-                                blk[i * bw + j] = cont.data<double>()[r * ncols + c];
-                            }
-                        }
-                    }
-                    block_vals_f64.push_back(std::move(blk));
                 }
+                blocks.push_back(std::move(blk));
             }
         }
-    }
 
-    int64_t nnzb = static_cast<int64_t>(block_cols.size());
+        int64_t nnzb = static_cast<int64_t>(block_cols.size());
+        auto row_ptr = Tensor({nblockrows + 1}, DType::Int64, Device::cpu());
+        auto col_ind = Tensor({nnzb}, DType::Int64, Device::cpu());
+        auto* rp = row_ptr.data<int64_t>();
+        auto* ci = col_ind.data<int64_t>();
+        std::memset(rp, 0, static_cast<size_t>(nblockrows + 1) * sizeof(int64_t));
+        for (int64_t i = 0; i < nnzb; ++i) rp[block_rows[i] + 1]++;
+        for (int64_t i = 0; i < nblockrows; ++i) rp[i + 1] += rp[i];
+        for (int64_t i = 0; i < nnzb; ++i) ci[i] = block_cols[i];
 
-    // Build bsr_row_ptr
-    auto row_ptr = Tensor({nblockrows + 1}, DType::Int64, cont.device());
-    auto col_ind = Tensor({nnzb}, DType::Int64, cont.device());
-    auto* rp = row_ptr.data<int64_t>();
-    auto* ci = col_ind.data<int64_t>();
-
-    std::memset(rp, 0, (nblockrows + 1) * sizeof(int64_t));
-    for (int64_t i = 0; i < nnzb; ++i) {
-        rp[block_rows[i] + 1]++;
-    }
-    for (int64_t i = 0; i < nblockrows; ++i) {
-        rp[i + 1] += rp[i];
-    }
-    for (int64_t i = 0; i < nnzb; ++i) {
-        ci[i] = block_cols[i];
-    }
-
-    // Build values tensor
-    DType vdt = cont.dtype();
-    auto values = Tensor({nnzb, bh, bw}, vdt, cont.device());
-    if (is_f32) {
-        auto* vp = values.data<float>();
+        auto values = Tensor({nnzb, bh, bw}, cont.dtype(), Device::cpu());
+        T* vp = static_cast<T*>(values.data_ptr());
         for (int64_t i = 0; i < nnzb; ++i) {
-            std::memcpy(vp + i * bh * bw, block_vals_f32[i].data(), bh * bw * sizeof(float));
+            std::memcpy(vp + i * block_elems, blocks[i].data(), block_elems * sizeof(T));
         }
-    } else {
-        auto* vp = values.data<double>();
-        for (int64_t i = 0; i < nnzb; ++i) {
-            std::memcpy(vp + i * bh * bw, block_vals_f64[i].data(), bh * bw * sizeof(double));
-        }
-    }
 
-    return sparse_bsr(row_ptr, col_ind, values, shape_, block_size);
+        auto result = sparse_bsr(row_ptr, col_ind, values, shape_, block_size);
+        return (orig_device.type != Device::Type::CPU) ? result.to(orig_device) : result;
+    };
+
+    switch (cont.dtype()) {
+        case DType::Float32:    return build_bsr(float{});
+        case DType::Float64:    return build_bsr(double{});
+        case DType::Complex64:  return build_bsr(std::complex<float>{});
+        case DType::Complex128: return build_bsr(std::complex<double>{});
+        default:
+            throw std::runtime_error(
+                "SparseTensor::to_bsr backstop: unsupported dtype " +
+                std::string(dtype_name(cont.dtype())));
+    }
 }
 
 // Free functions
