@@ -5,6 +5,7 @@ import math
 
 import numpy as np
 
+import tenzor as _tz
 from tenzor.tenzor_core import Tensor, Variable  # type: ignore
 
 from .distribution import (
@@ -46,12 +47,14 @@ class Geometric(Distribution):
         return _wrap_numpy(np.asarray(out, dtype=np.float32))
 
     def log_prob(self, value):
-        v_np = np.asarray(_to_variable(value).tensor(), dtype=np.float64)
+        # log p(x) = x·log(1-p) + log(p).  Every term depends on the learnable
+        # probs, so the whole expression is built with autograd-aware Variable
+        # ops (a numpy round-trip would detach the gradient to probs).
+        value = _to_variable(value)
         eps = 1e-7
-        p_np = np.clip(np.asarray(self.probs.tensor(), dtype=np.float64),
-                       eps, 1.0 - eps)
-        out = v_np * np.log(1.0 - p_np) + np.log(p_np)
-        return _wrap_numpy(out)
+        log_p = _tz.log(self.probs + eps)
+        log_1mp = _tz.log((1.0 - self.probs) + eps)
+        return value * log_1mp + log_p
 
     def entropy(self):
         eps = 1e-7

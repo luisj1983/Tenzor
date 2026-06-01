@@ -5,6 +5,7 @@ import math
 
 import numpy as np
 
+import tenzor as _tz
 from tenzor.tenzor_core import Tensor, Variable  # type: ignore
 
 from .distribution import (
@@ -47,15 +48,20 @@ class Binomial(Distribution):
         ))
 
     def log_prob(self, value):
-        gammaln = _require_scipy_special().gammaln
-        v_np = np.asarray(_to_variable(value).tensor(), dtype=np.float64)
-        eps = 1e-7
-        p_np = np.clip(np.asarray(self.probs.tensor(), dtype=np.float64),
-                       eps, 1.0 - eps)
+        # log p(x) = log C(n,x) + x·log(p) + (n-x)·log(1-p).  Built entirely with
+        # autograd-aware Variable ops so the gradient flows to probs (a numpy
+        # round-trip would silently detach it, breaking MLE training).  The
+        # log C(n,x) = lgamma(n+1) - lgamma(x+1) - lgamma(n-x+1) coefficient is
+        # computed on-device from the (detached) value and contributes no
+        # gradient to probs.
+        value = _to_variable(value)
         n = float(self.total_count)
-        log_binom = gammaln(n + 1.0) - gammaln(v_np + 1.0) - gammaln(n - v_np + 1.0)
-        out = log_binom + v_np * np.log(p_np) + (n - v_np) * np.log(1.0 - p_np)
-        return _wrap_numpy(out)
+        eps = 1e-7
+        log_binom = (math.lgamma(n + 1.0) - _tz.lgamma(value + 1.0)
+                     - _tz.lgamma((n - value) + 1.0))
+        log_p = _tz.log(self.probs + eps)
+        log_1mp = _tz.log((1.0 - self.probs) + eps)
+        return log_binom + value * log_p + (n - value) * log_1mp
 
     def entropy(self):
         # Exact entropy via the PMF; see audit note A.9.c.

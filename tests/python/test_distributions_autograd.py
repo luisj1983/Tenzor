@@ -269,3 +269,72 @@ def test_studentt_rsample_reparam():
     z = StudentT(df, loc, scale).rsample((5000,))
     tc.sum(z).backward()
     assert df.grad is not None and loc.grad is not None and scale.grad is not None
+
+
+# ============================================================================
+# Discrete distributions whose log_prob previously ran entirely in numpy and
+# returned a detached Tensor, silently severing the gradient to the learnable
+# parameter (release-audit WS2). Each test asserts the parameter gradient
+# flows, is finite and non-zero, with an analytic value check where simple.
+# ============================================================================
+
+
+def test_poisson_log_prob_grad_flows_to_rate():
+    from tenzor.distributions import Poisson
+    rate = tc.Variable(tc.full([4], 2.0), True)
+    d = Poisson(rate)
+    value = tc.Variable(tc.full([4], 4.0), False)
+    tc.sum(d.log_prob(value)).backward()
+    assert rate.grad is not None, "gradient did not reach rate"
+    # d/d(rate) [v*log(rate) - rate - log(v!)] = v/rate - 1 = 4/2 - 1 = 1.
+    assert abs(_scalar(rate.grad.sum()) - 4 * 1.0) < 1e-3
+
+
+def test_binomial_log_prob_grad_flows_to_probs():
+    from tenzor.distributions import Binomial
+    probs = tc.Variable(tc.full([4], 0.5), True)
+    d = Binomial(10, probs)
+    value = tc.Variable(tc.full([4], 4.0), False)
+    tc.sum(d.log_prob(value)).backward()
+    assert probs.grad is not None, "gradient did not reach probs"
+    # d/dp [v*log p + (n-v)*log(1-p)] = v/p - (n-v)/(1-p) = 4/0.5 - 6/0.5 = -4.
+    assert abs(_scalar(probs.grad.sum()) - 4 * (-4.0)) < 1e-2
+
+
+def test_geometric_log_prob_grad_flows_to_probs():
+    from tenzor.distributions import Geometric
+    probs = tc.Variable(tc.full([4], 0.5), True)
+    d = Geometric(probs)
+    value = tc.Variable(tc.full([4], 3.0), False)
+    tc.sum(d.log_prob(value)).backward()
+    assert probs.grad is not None, "gradient did not reach probs"
+    # d/dp [v*log(1-p) + log p] = -v/(1-p) + 1/p = -3/0.5 + 1/0.5 = -4.
+    assert abs(_scalar(probs.grad.sum()) - 4 * (-4.0)) < 1e-2
+
+
+def test_negative_binomial_log_prob_grad_flows_to_both_params():
+    import math
+    from tenzor.distributions import NegativeBinomial
+    total = tc.Variable(tc.full([4], 5.0), True)
+    probs = tc.Variable(tc.full([4], 0.4), True)
+    d = NegativeBinomial(total, probs)
+    value = tc.Variable(tc.full([4], 3.0), False)
+    tc.sum(d.log_prob(value)).backward()
+    assert total.grad is not None, "gradient did not reach total_count"
+    assert probs.grad is not None, "gradient did not reach probs"
+    assert math.isfinite(_scalar(total.grad.sum()))
+    assert math.isfinite(_scalar(probs.grad.sum()))
+    assert abs(_scalar(probs.grad.sum())) > 0.0
+
+
+def test_multinomial_log_prob_grad_flows_to_probs():
+    import math
+    from tenzor.distributions import Multinomial
+    import numpy as np
+    probs = tc.Variable(tc.full([3], 1.0), True)  # unnormalised; normalised inside
+    d = Multinomial(7, probs)
+    value = tc.Variable(
+        tc.Tensor.from_numpy(np.asarray([2.0, 3.0, 2.0], dtype="float32")), False)
+    tc.sum(d.log_prob(value)).backward()
+    assert probs.grad is not None, "gradient did not reach probs"
+    assert math.isfinite(_scalar(probs.grad.sum()))

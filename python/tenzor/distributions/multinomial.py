@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import numpy as np
 
+import tenzor as _tz
 from tenzor.tenzor_core import Tensor, Variable  # type: ignore
 
 from .distribution import (
@@ -10,7 +11,6 @@ from .distribution import (
     _to_variable,
     _wrap_numpy,
     _wrap_numpy_int,
-    _require_scipy_special,
 )
 
 
@@ -26,11 +26,14 @@ class Multinomial(Distribution):
     def __init__(self, total_count, probs):
         self.total_count = int(total_count)
         probs = _to_variable(probs)
-        probs_np = np.asarray(probs.tensor(), dtype=np.float64)
-        total = probs_np.sum(axis=-1, keepdims=True)
-        self._probs_np = (probs_np / total).astype(np.float32, copy=False)
-        self.probs = Variable(Tensor.from_numpy(np.ascontiguousarray(self._probs_np)),
-                              False)
+        # Normalise over the event (last) axis with autograd-aware ops so the
+        # gradient flows back to the caller's `probs` through log_prob (the
+        # previous numpy round-trip + detached Variable severed the graph).
+        self.probs = probs / _tz.sum(probs, -1, True)
+        # Detached numpy copy for the (inherently non-differentiable) sampler
+        # and for mean/variance/shape bookkeeping.
+        probs_np = np.asarray(self.probs.tensor(), dtype=np.float64)
+        self._probs_np = probs_np.astype(np.float32, copy=False)
         self._num_events = int(probs_np.shape[-1])
         super().__init__(tuple(int(s) for s in probs_np.shape[:-1]))
 
@@ -61,17 +64,18 @@ class Multinomial(Distribution):
         return _wrap_numpy_int(out_t)
 
     def log_prob(self, value):
-        gammaln = _require_scipy_special().gammaln
-        v_np = np.asarray(_to_variable(value).tensor()
-                          if isinstance(value, Variable)
-                          else np.asarray(value, dtype=np.float64),
-                          dtype=np.float64)
+        # log p(x) = log(n! / prod_k x_k!) + sum_k x_k·log(p_k).  Built with
+        # autograd-aware Variable ops so the gradient flows to probs (the
+        # previous numpy round-trip detached it).  The multinomial-coefficient
+        # normaliser log(n!) - sum_k lgamma(x_k+1) is computed on-device from
+        # the (detached) value and contributes no gradient to probs.
+        import math
+        value_v = _to_variable(value)
         eps = 1e-12
-        p = np.clip(self._probs_np.astype(np.float64), eps, 1.0)
-        log_norm = (gammaln(self.total_count + 1.0)
-                    - gammaln(v_np + 1.0).sum(axis=-1))
-        out = log_norm + (v_np * np.log(p)).sum(axis=-1)
-        return _wrap_numpy(out)
+        log_norm = (math.lgamma(self.total_count + 1.0)
+                    - _tz.sum(_tz.lgamma(value_v + 1.0), -1))
+        log_p = _tz.log(self.probs + eps)
+        return log_norm + _tz.sum(value_v * log_p, -1)
 
     def support(self):
         return f"vectors of K non-negative integers summing to {self.total_count}"
