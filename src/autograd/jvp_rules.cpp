@@ -8019,6 +8019,269 @@ JvpMultiResult jvp_adapter_linalg_lu_s15(std::span<const Tensor> primals,
     return result;
 }
 
+// ---------------- Tier E: sequence-level RNN forwards ----------------------
+//
+// The fused single-layer sequence kernels (LSTMForward / GRUForward) are just
+// the per-step cell recurrence unrolled over time. Forward-mode AD composes
+// the (already gradchecked) cell JVP at each timestep, threading the hidden /
+// cell-state tangents through the recurrence and stacking the per-step output
+// tangents. The weight/bias tangents are shared (constant) across steps.
+
+// LSTMForward inputs: {x(T,B,I), W_ih(4H,I), W_hh(4H,H), b_ih, b_hh,
+//                      h0(B,H), c0(B,H)}; outputs {y(T,B,H), hT(B,H), cT(B,H)}.
+JvpMultiResult jvp_adapter_lstm_forward_s15(std::span<const Tensor> primals,
+                                            std::span<const Tensor> tangents,
+                                            const OpAttributes&) {
+    if (primals.size() != 7) {
+        throw std::runtime_error(
+            "jvp_adapter_lstm_forward_s15: expected 7 inputs "
+            "(x, W_ih, W_hh, b_ih, b_hh, h0, c0)");
+    }
+    auto td = [&](size_t i) { return i < tangents.size() ? tangents[i] : Tensor(); };
+    const Tensor& X = primals[0];
+    Tensor Wih = primals[1], Whh = primals[2];
+    Tensor bih = primals[3], bhh = primals[4];
+    Tensor h0 = primals[5], c0 = primals[6];
+
+    Tensor dX   = jvp_zeros_like_or(X,   td(0));
+    Tensor dWih = jvp_zeros_like_or(Wih, td(1));
+    Tensor dWhh = jvp_zeros_like_or(Whh, td(2));
+    Tensor cur_h  = h0,                       cur_c  = c0;
+    Tensor cur_dh = jvp_zeros_like_or(h0, td(5));
+    Tensor cur_dc = jvp_zeros_like_or(c0, td(6));
+
+    const int64_t H = h0.shape()[1];
+    const int64_t fourH = 4 * H;
+    Tensor dbih, dbhh;
+    if (bih.numel() == 0) { bih = tenzor::zeros({fourH}, Wih.dtype(), Wih.device());
+                            dbih = tenzor::zeros({fourH}, Wih.dtype(), Wih.device()); }
+    else                  { dbih = jvp_zeros_like_or(bih, td(3)); }
+    if (bhh.numel() == 0) { bhh = tenzor::zeros({fourH}, Wih.dtype(), Wih.device());
+                            dbhh = tenzor::zeros({fourH}, Wih.dtype(), Wih.device()); }
+    else                  { dbhh = jvp_zeros_like_or(bhh, td(4)); }
+
+    const int64_t T = X.shape()[0];
+    const int64_t B = X.shape()[1];
+    const int64_t I = X.shape()[2];
+    std::vector<Tensor> out_p, out_d;
+    out_p.reserve(static_cast<size_t>(T));
+    out_d.reserve(static_cast<size_t>(T));
+    for (int64_t t = 0; t < T; ++t) {
+        Tensor x_t  = X.slice(0, t, t + 1).reshape({B, I}).contiguous();
+        Tensor dx_t = dX.slice(0, t, t + 1).reshape({B, I}).contiguous();
+        std::array<Tensor, 7> cp = { x_t, cur_h, cur_c, Wih, Whh, bih, bhh };
+        std::array<Tensor, 7> ct = { dx_t, cur_dh, cur_dc, dWih, dWhh, dbih, dbhh };
+        auto r = jvp_adapter_lstm_cell_forward(cp, ct, OpAttributes{});
+        cur_h  = r.primals[0];  cur_c  = r.primals[1];
+        cur_dh = r.tangents[0]; cur_dc = r.tangents[1];
+        out_p.push_back(cur_h.reshape({1, B, H}));
+        out_d.push_back(cur_dh.reshape({1, B, H}));
+    }
+    JvpMultiResult result;
+    result.primals  = { tenzor::cat(out_p, 0), cur_h, cur_c };
+    result.tangents = { tenzor::cat(out_d, 0), cur_dh, cur_dc };
+    return result;
+}
+
+// GRUForward inputs: {x(T,B,I), W_ih(3H,I), W_hh(3H,H), b_ih, h0(B,H), b_hh};
+// outputs {y(T,B,H), hT(B,H)}.
+JvpMultiResult jvp_adapter_gru_forward_s15(std::span<const Tensor> primals,
+                                           std::span<const Tensor> tangents,
+                                           const OpAttributes&) {
+    if (primals.size() != 6) {
+        throw std::runtime_error(
+            "jvp_adapter_gru_forward_s15: expected 6 inputs "
+            "(x, W_ih, W_hh, b_ih, h0, b_hh)");
+    }
+    auto td = [&](size_t i) { return i < tangents.size() ? tangents[i] : Tensor(); };
+    const Tensor& X = primals[0];
+    Tensor Wih = primals[1], Whh = primals[2];
+    Tensor bih = primals[3], h0 = primals[4], bhh = primals[5];
+
+    Tensor dX   = jvp_zeros_like_or(X,   td(0));
+    Tensor dWih = jvp_zeros_like_or(Wih, td(1));
+    Tensor dWhh = jvp_zeros_like_or(Whh, td(2));
+    Tensor cur_h  = h0;
+    Tensor cur_dh = jvp_zeros_like_or(h0, td(4));
+
+    const int64_t H = h0.shape()[1];
+    const int64_t threeH = 3 * H;
+    Tensor dbih, dbhh;
+    if (bih.numel() == 0) { bih = tenzor::zeros({threeH}, Wih.dtype(), Wih.device());
+                            dbih = tenzor::zeros({threeH}, Wih.dtype(), Wih.device()); }
+    else                  { dbih = jvp_zeros_like_or(bih, td(3)); }
+    if (bhh.numel() == 0) { bhh = tenzor::zeros({threeH}, Wih.dtype(), Wih.device());
+                            dbhh = tenzor::zeros({threeH}, Wih.dtype(), Wih.device()); }
+    else                  { dbhh = jvp_zeros_like_or(bhh, td(5)); }
+
+    const int64_t T = X.shape()[0];
+    const int64_t B = X.shape()[1];
+    const int64_t I = X.shape()[2];
+    std::vector<Tensor> out_p, out_d;
+    out_p.reserve(static_cast<size_t>(T));
+    out_d.reserve(static_cast<size_t>(T));
+    for (int64_t t = 0; t < T; ++t) {
+        Tensor x_t  = X.slice(0, t, t + 1).reshape({B, I}).contiguous();
+        Tensor dx_t = dX.slice(0, t, t + 1).reshape({B, I}).contiguous();
+        std::array<Tensor, 6> cp = { x_t, cur_h, Wih, Whh, bih, bhh };
+        std::array<Tensor, 6> ct = { dx_t, cur_dh, dWih, dWhh, dbih, dbhh };
+        auto r = jvp_adapter_gru_cell_forward(cp, ct, OpAttributes{});
+        cur_h  = r.primal;
+        cur_dh = r.tangent;
+        out_p.push_back(cur_h.reshape({1, B, H}));
+        out_d.push_back(cur_dh.reshape({1, B, H}));
+    }
+    JvpMultiResult result;
+    result.primals  = { tenzor::cat(out_p, 0), cur_h };
+    result.tangents = { tenzor::cat(out_d, 0), cur_dh };
+    return result;
+}
+
+// LSTMMultiLayerForward inputs: {x, h0(L,B,H), c0(L,B,H), then per layer
+// (W_ih, W_hh, bias)} with NumLayers attr; bias is the combined ih+hh term.
+// Compose the single-layer sequence JVP layer by layer, feeding each layer's
+// output sequence as the next layer's input and stacking the final states.
+JvpMultiResult jvp_adapter_lstm_multilayer_forward_s15(std::span<const Tensor> primals,
+                                                       std::span<const Tensor> tangents,
+                                                       const OpAttributes& attrs) {
+    const int64_t L = attrs.get_int(AttrKey::NumLayers, 1);
+    if (static_cast<int64_t>(primals.size()) != 3 + 3 * L) {
+        throw std::runtime_error("jvp_adapter_lstm_multilayer_forward_s15: bad input count");
+    }
+    auto td = [&](size_t i) { return i < tangents.size() ? tangents[i] : Tensor(); };
+    const Tensor& h0 = primals[1];
+    const Tensor& c0 = primals[2];
+    const int64_t B = h0.shape()[1];
+    const int64_t H = h0.shape()[2];
+
+    Tensor cur_x  = primals[0];
+    Tensor cur_dx = jvp_zeros_like_or(primals[0], td(0));
+    Tensor dh0 = jvp_zeros_like_or(h0, td(1));
+    Tensor dc0 = jvp_zeros_like_or(c0, td(2));
+
+    std::vector<Tensor> hT_p, hT_d, cT_p, cT_d;
+    for (int64_t l = 0; l < L; ++l) {
+        const size_t base = static_cast<size_t>(3 + l * 3);
+        Tensor h0_l  = h0.slice(0, l, l + 1).reshape({B, H}).contiguous();
+        Tensor c0_l  = c0.slice(0, l, l + 1).reshape({B, H}).contiguous();
+        Tensor dh0_l = dh0.slice(0, l, l + 1).reshape({B, H}).contiguous();
+        Tensor dc0_l = dc0.slice(0, l, l + 1).reshape({B, H}).contiguous();
+        std::array<Tensor, 7> cp = { cur_x, primals[base], primals[base + 1],
+                                     primals[base + 2], Tensor(), h0_l, c0_l };
+        std::array<Tensor, 7> ct = { cur_dx, td(base), td(base + 1),
+                                     td(base + 2), Tensor(), dh0_l, dc0_l };
+        auto r = jvp_adapter_lstm_forward_s15(cp, ct, OpAttributes{});
+        cur_x  = r.primals[0];  cur_dx = r.tangents[0];
+        hT_p.push_back(r.primals[1].reshape({1, B, H}));
+        cT_p.push_back(r.primals[2].reshape({1, B, H}));
+        hT_d.push_back(r.tangents[1].reshape({1, B, H}));
+        cT_d.push_back(r.tangents[2].reshape({1, B, H}));
+    }
+    JvpMultiResult result;
+    result.primals  = { cur_x,  tenzor::cat(hT_p, 0), tenzor::cat(cT_p, 0) };
+    result.tangents = { cur_dx, tenzor::cat(hT_d, 0), tenzor::cat(cT_d, 0) };
+    return result;
+}
+
+// GRUMultiLayerForward inputs: {x, h0(L,B,H), then per layer (W_ih, W_hh, bias)}.
+JvpMultiResult jvp_adapter_gru_multilayer_forward_s15(std::span<const Tensor> primals,
+                                                      std::span<const Tensor> tangents,
+                                                      const OpAttributes& attrs) {
+    const int64_t L = attrs.get_int(AttrKey::NumLayers, 1);
+    if (static_cast<int64_t>(primals.size()) != 2 + 3 * L) {
+        throw std::runtime_error("jvp_adapter_gru_multilayer_forward_s15: bad input count");
+    }
+    auto td = [&](size_t i) { return i < tangents.size() ? tangents[i] : Tensor(); };
+    const Tensor& h0 = primals[1];
+    const int64_t B = h0.shape()[1];
+    const int64_t H = h0.shape()[2];
+
+    Tensor cur_x  = primals[0];
+    Tensor cur_dx = jvp_zeros_like_or(primals[0], td(0));
+    Tensor dh0 = jvp_zeros_like_or(h0, td(1));
+
+    std::vector<Tensor> hT_p, hT_d;
+    for (int64_t l = 0; l < L; ++l) {
+        const size_t base = static_cast<size_t>(2 + l * 3);
+        Tensor h0_l  = h0.slice(0, l, l + 1).reshape({B, H}).contiguous();
+        Tensor dh0_l = dh0.slice(0, l, l + 1).reshape({B, H}).contiguous();
+        std::array<Tensor, 6> cp = { cur_x, primals[base], primals[base + 1],
+                                     primals[base + 2], h0_l, Tensor() };
+        std::array<Tensor, 6> ct = { cur_dx, td(base), td(base + 1),
+                                     td(base + 2), dh0_l, Tensor() };
+        auto r = jvp_adapter_gru_forward_s15(cp, ct, OpAttributes{});
+        cur_x  = r.primals[0];  cur_dx = r.tangents[0];
+        hT_p.push_back(r.primals[1].reshape({1, B, H}));
+        hT_d.push_back(r.tangents[1].reshape({1, B, H}));
+    }
+    JvpMultiResult result;
+    result.primals  = { cur_x,  tenzor::cat(hT_p, 0) };
+    result.tangents = { cur_dx, tenzor::cat(hT_d, 0) };
+    return result;
+}
+
+// BiLSTMForward inputs: {x, h0(2,B,H), c0(2,B,H), W_ih_f, W_hh_f, b_ih_f,
+// b_hh_f, W_ih_b, W_hh_b, b_ih_b, b_hh_b}; outputs {y(T,B,2H), hT(2,B,H),
+// cT(2,B,H)}. Forward direction is a plain LSTM sequence; backward runs the
+// same on the time-reversed input and flips its output back. y concatenates
+// the two along the hidden axis.
+JvpMultiResult jvp_adapter_bilstm_forward_s15(std::span<const Tensor> primals,
+                                              std::span<const Tensor> tangents,
+                                              const OpAttributes&) {
+    if (primals.size() != 11) {
+        throw std::runtime_error("jvp_adapter_bilstm_forward_s15: expected 11 inputs");
+    }
+    auto td = [&](size_t i) { return i < tangents.size() ? tangents[i] : Tensor(); };
+    const Tensor& x  = primals[0];
+    const Tensor& h0 = primals[1];
+    const Tensor& c0 = primals[2];
+    const int64_t B = h0.shape()[1];
+    const int64_t H = h0.shape()[2];
+
+    Tensor dx  = jvp_zeros_like_or(x,  td(0));
+    Tensor dh0 = jvp_zeros_like_or(h0, td(1));
+    Tensor dc0 = jvp_zeros_like_or(c0, td(2));
+
+    auto dir_state = [&](int64_t d, const Tensor& s) {
+        return s.slice(0, d, d + 1).reshape({B, H}).contiguous();
+    };
+
+    // Forward direction.
+    std::array<Tensor, 7> fp = { x, primals[3], primals[4], primals[5], primals[6],
+                                 dir_state(0, h0), dir_state(0, c0) };
+    std::array<Tensor, 7> ft = { dx, td(3), td(4), td(5), td(6),
+                                 dir_state(0, dh0), dir_state(0, dc0) };
+    auto rf = jvp_adapter_lstm_forward_s15(fp, ft, OpAttributes{});
+
+    // Backward direction: reverse along time, run, then flip the output back.
+    Tensor x_rev  = tenzor::flip(x,  std::vector<int64_t>{0});
+    Tensor dx_rev = tenzor::flip(dx, std::vector<int64_t>{0});
+    std::array<Tensor, 7> bp = { x_rev, primals[7], primals[8], primals[9], primals[10],
+                                 dir_state(1, h0), dir_state(1, c0) };
+    std::array<Tensor, 7> bt = { dx_rev, td(7), td(8), td(9), td(10),
+                                 dir_state(1, dh0), dir_state(1, dc0) };
+    auto rb = jvp_adapter_lstm_forward_s15(bp, bt, OpAttributes{});
+
+    Tensor yb_p = tenzor::flip(rb.primals[0],  std::vector<int64_t>{0});
+    Tensor yb_d = tenzor::flip(rb.tangents[0], std::vector<int64_t>{0});
+
+    Tensor y_p = tenzor::cat(std::vector<Tensor>{ rf.primals[0],  yb_p }, 2);
+    Tensor y_d = tenzor::cat(std::vector<Tensor>{ rf.tangents[0], yb_d }, 2);
+    Tensor hN_p = tenzor::cat(std::vector<Tensor>{ rf.primals[1].reshape({1, B, H}),
+                                                   rb.primals[1].reshape({1, B, H}) }, 0);
+    Tensor cN_p = tenzor::cat(std::vector<Tensor>{ rf.primals[2].reshape({1, B, H}),
+                                                   rb.primals[2].reshape({1, B, H}) }, 0);
+    Tensor hN_d = tenzor::cat(std::vector<Tensor>{ rf.tangents[1].reshape({1, B, H}),
+                                                   rb.tangents[1].reshape({1, B, H}) }, 0);
+    Tensor cN_d = tenzor::cat(std::vector<Tensor>{ rf.tangents[2].reshape({1, B, H}),
+                                                   rb.tangents[2].reshape({1, B, H}) }, 0);
+
+    JvpMultiResult result;
+    result.primals  = { std::move(y_p), std::move(hN_p), std::move(cN_p) };
+    result.tangents = { std::move(y_d), std::move(hN_d), std::move(cN_d) };
+    return result;
+}
+
 // ============================================================================
 // Wave-4 JVP: thin SVD (A = U diag(S) Vh, V = Vhᵀ; U m×k, S k, Vh k×n,
 // k = min(m,n)). Forward differential (Townsend 2016 / standard):
@@ -8692,12 +8955,13 @@ void register_builtin_jvp_rules() {
     register_jvp_rule       (OpId::CholeskyInverse,      &jvp_adapter_cholesky_inverse_s15);
     register_jvp_rule       (OpId::LOBPCG,               &jvp_adapter_nondiff_lobpcg);
 
-    // Sequence-level RNNs.
-    register_jvp_rule_multi(OpId::LSTMForward,           &jvp_adapter_nondiff_lstm_forward);
-    register_jvp_rule_multi(OpId::GRUForward,            &jvp_adapter_nondiff_gru_forward);
-    register_jvp_rule_multi(OpId::LSTMMultiLayerForward, &jvp_adapter_nondiff_lstm_multilayer_forward);
-    register_jvp_rule_multi(OpId::GRUMultiLayerForward,  &jvp_adapter_nondiff_gru_multilayer_forward);
-    register_jvp_rule_multi(OpId::BiLSTMForward,         &jvp_adapter_nondiff_bilstm_forward);
+    // Sequence-level RNNs. Single-layer forwards compose the gradchecked cell
+    // JVP over the time axis (S-final).
+    register_jvp_rule_multi(OpId::LSTMForward,           &jvp_adapter_lstm_forward_s15);
+    register_jvp_rule_multi(OpId::GRUForward,            &jvp_adapter_gru_forward_s15);
+    register_jvp_rule_multi(OpId::LSTMMultiLayerForward, &jvp_adapter_lstm_multilayer_forward_s15);
+    register_jvp_rule_multi(OpId::GRUMultiLayerForward,  &jvp_adapter_gru_multilayer_forward_s15);
+    register_jvp_rule_multi(OpId::BiLSTMForward,         &jvp_adapter_bilstm_forward_s15);
 
     // Search / sort multi-output.
     register_jvp_rule_multi(OpId::TopK, &jvp_adapter_topk_s15);

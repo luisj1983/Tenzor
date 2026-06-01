@@ -680,6 +680,93 @@ TEST_P(JVPRulesTest, LinalgLU_JVP_Permuted_MatchesFD) {
     w4_verify(OpId::LinalgLU, {A}, {0}, 1, a, 1e-4);  // dU
 }
 
+// LSTMForward sequence JVP: composes the cell JVP over time. Inputs
+// (x, W_ih, W_hh, b_ih, b_hh, h0, c0); small scaled values keep gates smooth.
+TEST_P(JVPRulesTest, LSTMForward_JVP_MatchesFD) {
+    if (device != Device::cpu()) return;
+    OpAttributes a;
+    const int64_t T=3, B=2, I=4, H=2;
+    std::vector<Tensor> p = {
+        w4_randf64({T,B,I}, 101) * 0.5,
+        w4_randf64({4*H,I}, 102) * 0.4,
+        w4_randf64({4*H,H}, 103) * 0.4,
+        w4_randf64({4*H},   104) * 0.3,
+        w4_randf64({4*H},   105) * 0.3,
+        w4_randf64({B,H},   106) * 0.3,
+        w4_randf64({B,H},   107) * 0.3,
+    };
+    for (int oi = 0; oi < 3; ++oi)
+        w4_verify(OpId::LSTMForward, p, {0,1,2,3,4,5,6}, oi, a, 1e-4);
+}
+
+// GRUForward sequence JVP. Inputs (x, W_ih, W_hh, b_ih, h0, b_hh).
+TEST_P(JVPRulesTest, GRUForward_JVP_MatchesFD) {
+    if (device != Device::cpu()) return;
+    OpAttributes a;
+    const int64_t T=3, B=2, I=4, H=2;
+    std::vector<Tensor> p = {
+        w4_randf64({T,B,I}, 111) * 0.5,
+        w4_randf64({3*H,I}, 112) * 0.4,
+        w4_randf64({3*H,H}, 113) * 0.4,
+        w4_randf64({3*H},   114) * 0.3,
+        w4_randf64({B,H},   115) * 0.3,
+        w4_randf64({3*H},   116) * 0.3,
+    };
+    for (int oi = 0; oi < 2; ++oi)
+        w4_verify(OpId::GRUForward, p, {0,1,2,3,4,5}, oi, a, 1e-4);
+}
+
+// LSTMMultiLayerForward JVP: layer-by-layer composition. Inputs
+// {x, h0(L,B,H), c0(L,B,H), per layer (W_ih, W_hh, bias)}.
+TEST_P(JVPRulesTest, LSTMMultiLayer_JVP_MatchesFD) {
+    if (device != Device::cpu()) return;
+    OpAttributes a;
+    const int64_t Lyr=2, T=3, B=2, I=4, H=2;
+    a.set(AttrKey::NumLayers, Lyr);
+    std::vector<Tensor> p = {
+        w4_randf64({T,B,I}, 121) * 0.5,
+        w4_randf64({Lyr,B,H}, 122) * 0.3,
+        w4_randf64({Lyr,B,H}, 123) * 0.3,
+        w4_randf64({4*H,I}, 124) * 0.4, w4_randf64({4*H,H}, 125) * 0.4, w4_randf64({4*H}, 126) * 0.3,
+        w4_randf64({4*H,H}, 127) * 0.4, w4_randf64({4*H,H}, 128) * 0.4, w4_randf64({4*H}, 129) * 0.3,
+    };
+    std::vector<int> diffs; for (int i=0;i<(int)p.size();++i) diffs.push_back(i);
+    for (int oi = 0; oi < 3; ++oi) w4_verify(OpId::LSTMMultiLayerForward, p, diffs, oi, a, 1e-4);
+}
+
+// GRUMultiLayerForward JVP. Inputs {x, h0(L,B,H), per layer (W_ih, W_hh, bias)}.
+TEST_P(JVPRulesTest, GRUMultiLayer_JVP_MatchesFD) {
+    if (device != Device::cpu()) return;
+    OpAttributes a;
+    const int64_t Lyr=2, T=3, B=2, I=4, H=2;
+    a.set(AttrKey::NumLayers, Lyr);
+    std::vector<Tensor> p = {
+        w4_randf64({T,B,I}, 131) * 0.5,
+        w4_randf64({Lyr,B,H}, 132) * 0.3,
+        w4_randf64({3*H,I}, 133) * 0.4, w4_randf64({3*H,H}, 134) * 0.4, w4_randf64({3*H}, 135) * 0.3,
+        w4_randf64({3*H,H}, 136) * 0.4, w4_randf64({3*H,H}, 137) * 0.4, w4_randf64({3*H}, 138) * 0.3,
+    };
+    std::vector<int> diffs; for (int i=0;i<(int)p.size();++i) diffs.push_back(i);
+    for (int oi = 0; oi < 2; ++oi) w4_verify(OpId::GRUMultiLayerForward, p, diffs, oi, a, 1e-4);
+}
+
+// BiLSTMForward JVP: forward + time-reversed backward direction, concatenated.
+// Inputs {x, h0(2,B,H), c0(2,B,H), Wih_f,Whh_f,bih_f,bhh_f, Wih_b,Whh_b,bih_b,bhh_b}.
+TEST_P(JVPRulesTest, BiLSTM_JVP_MatchesFD) {
+    if (device != Device::cpu()) return;
+    OpAttributes a;
+    const int64_t T=3, B=2, I=4, H=2;
+    std::vector<Tensor> p = {
+        w4_randf64({T,B,I}, 141) * 0.5,
+        w4_randf64({2,B,H}, 142) * 0.3,
+        w4_randf64({2,B,H}, 143) * 0.3,
+        w4_randf64({4*H,I},144)*0.4, w4_randf64({4*H,H},145)*0.4, w4_randf64({4*H},146)*0.3, w4_randf64({4*H},147)*0.3,
+        w4_randf64({4*H,I},148)*0.4, w4_randf64({4*H,H},149)*0.4, w4_randf64({4*H},150)*0.3, w4_randf64({4*H},151)*0.3,
+    };
+    std::vector<int> diffs; for (int i=0;i<(int)p.size();++i) diffs.push_back(i);
+    for (int oi = 0; oi < 3; ++oi) w4_verify(OpId::BiLSTMForward, p, diffs, oi, a, 1e-4);
+}
+
 // NOTE: LinalgLU / LinalgSVD / LinalgEig / LDLFactor / Geqrf / RNN-forward JVP
 // adapters are drafted (LU/SVD parked in jvp_rules.cpp) but do not yet pass
 // this finite-difference gradcheck, so their OpIds remain registered to the
