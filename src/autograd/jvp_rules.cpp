@@ -7865,6 +7865,56 @@ JvpMultiResult jvp_adapter_linalg_svd_s15(std::span<const Tensor> primals,
     return result;
 }
 
+// ============================================================================
+// Wave-4 JVP: BatchNorm2dForward (single-output kernel; inputs (x, mean, var),
+// attr Eps; output y = (x - mean) * rstd, rstd = 1/sqrt(var + eps)). mean/var
+// are supplied per-channel (C,) constants — NOT batch statistics derived from x
+// — so they are treated as independent inputs. Per-channel quantities broadcast
+// as [1, C, 1, 1] for NCHW. JVP:
+//   rstd  = rsqrt(var + eps)
+//   drstd = -0.5 * rstd^3 * dvar
+//   dy    = (dx - dmean) * rstd + (x - mean) * drstd
+// ============================================================================
+JvpResult jvp_adapter_batch_norm2d_forward_single_s15(std::span<const Tensor> primals,
+                                                      std::span<const Tensor> tangents,
+                                                      const OpAttributes& attrs) {
+    if (primals.size() < 3) {
+        throw std::runtime_error(
+            "jvp_adapter_batch_norm2d_forward_single_s15: expected 3 inputs (x, mean, var)");
+    }
+    const Tensor& x    = primals[0];
+    const Tensor& mean = primals[1];
+    const Tensor& var  = primals[2];
+    Tensor dx    = jvp_zeros_like_or(x,    tangents.size() > 0 ? tangents[0] : Tensor());
+    Tensor dmean = jvp_zeros_like_or(mean, tangents.size() > 1 ? tangents[1] : Tensor());
+    Tensor dvar  = jvp_zeros_like_or(var,  tangents.size() > 2 ? tangents[2] : Tensor());
+
+    double eps = attrs.get_float(AttrKey::Eps, 1e-5);
+    const auto xshape = x.shape();
+    if (xshape.size() != 4) {
+        throw std::runtime_error(
+            "jvp_adapter_batch_norm2d_forward_single_s15: expected NCHW (rank-4) input");
+    }
+    const int64_t C = xshape[1];
+    const std::vector<int64_t> c_shape = {1, C, 1, 1};
+
+    auto rstd  = tenzor::rsqrt(tenzor::add(var, eps));
+    auto rstd_b  = tenzor::reshape(rstd,  c_shape);
+    auto mean_b  = tenzor::reshape(mean,  c_shape);
+    auto dmean_b = tenzor::reshape(dmean, c_shape);
+    auto dvar_b  = tenzor::reshape(dvar,  c_shape);
+
+    auto x_minus_mean = tenzor::sub(x, mean_b);
+    auto y = tenzor::mul(x_minus_mean, rstd_b);
+
+    auto drstd_b = tenzor::mul(tenzor::mul(tenzor::mul(rstd_b, rstd_b), rstd_b),
+                               tenzor::mul(dvar_b, -0.5));
+    auto dy = tenzor::add(tenzor::mul(tenzor::sub(dx, dmean_b), rstd_b),
+                          tenzor::mul(x_minus_mean, drstd_b));
+
+    return JvpResult{ std::move(y), std::move(dy) };
+}
+
 void register_builtin_jvp_rules() {
     using ::tenzor::register_jvp_rule;
 
@@ -8394,7 +8444,7 @@ void register_builtin_jvp_rules() {
     // BatchNorm helper/stat ops.
     register_jvp_rule_multi(OpId::BatchNorm2dMeanVar,            &jvp_adapter_nondiff_batch_norm2d_mean_var);
     register_jvp_rule       (OpId::BatchNorm2dUpdateRunningStats, &jvp_adapter_nondiff_batch_norm2d_update_running_stats);
-    register_jvp_rule_multi(OpId::BatchNorm2dForward,            &jvp_adapter_nondiff_batch_norm2d_forward);
+    register_jvp_rule(OpId::BatchNorm2dForward,                 &jvp_adapter_batch_norm2d_forward_single_s15);
     // S15: replaced NonDifferentiable stub with closed-form chain-rule JVP.
     register_jvp_rule_multi(OpId::BatchNorm2dFusedTraining,      &jvp_adapter_batchnorm2d_fused_training_s15);
 

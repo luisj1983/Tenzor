@@ -447,6 +447,37 @@ void w4_verify(OpId op, std::vector<Tensor> primals, std::vector<int> diff_prima
     EXPECT_LT(max_abs_diff_d(an, num), tol);
 }
 
+// Single-output variant (dispatch_jvp / JvpResult.tangent) for ops whose JVP
+// rule is registered via register_jvp_rule rather than register_jvp_rule_multi.
+void w4_verify_single(OpId op, std::vector<Tensor> primals, std::vector<int> diff_primals,
+                      const OpAttributes& attrs, double tol) {
+    std::vector<Tensor> tangents(primals.size());
+    for (size_t i = 0; i < primals.size(); ++i) {
+        tangents[i] = zeros(std::vector<int64_t>(primals[i].shape().begin(),
+                                                 primals[i].shape().end()),
+                            DType::Float64, Device::cpu());
+    }
+    for (int dp : diff_primals) {
+        tangents[dp] = w4_randf64(std::vector<int64_t>(primals[dp].shape().begin(),
+                                                       primals[dp].shape().end()),
+                                  2000 + dp);
+    }
+    auto analytic = tenzor::dispatch_jvp(op, primals, tangents, attrs);
+    Tensor an = analytic.tangent;
+    Tensor num = zeros(std::vector<int64_t>(an.shape().begin(), an.shape().end()),
+                       DType::Float64, Device::cpu());
+    const double h = 1e-6;
+    for (int dp : diff_primals) {
+        auto pp = primals, pm = primals;
+        pp[dp] = primals[dp] + tangents[dp] * h;
+        pm[dp] = primals[dp] - tangents[dp] * h;
+        auto yp = tenzor::dispatch(op, pp, attrs)[0];
+        auto ym = tenzor::dispatch(op, pm, attrs)[0];
+        num = num + (yp - ym) * (1.0 / (2.0 * h));
+    }
+    EXPECT_LT(max_abs_diff_d(an, num), tol);
+}
+
 }  // namespace
 
 TEST_P(JVPRulesTest, GroupNorm_JVP_MatchesFD) {
@@ -493,11 +524,23 @@ TEST_P(JVPRulesTest, Split_JVP_MatchesFD) {
     for (int oi = 0; oi < 3; ++oi) w4_verify(OpId::Split, p, {0}, oi, a, 1e-7);
 }
 
-// NOTE: TopK / Sort / BatchNorm2dForward / LinalgQR / LinalgLU / LinalgSVD JVP
-// adapters were drafted but did not pass this finite-difference gradcheck, so
-// their OpIds remain registered to the NonDifferentiable thrower (forward-mode
-// AD fails loudly rather than returning a wrong tangent). The draft adapters are
-// parked (defined but unregistered) in jvp_rules.cpp for a future pass.
+// BatchNorm2dForward (single-output kernel): inputs (x, mean, var), mean/var
+// treated as independent per-channel constants (no batch-stat coupling).
+TEST_P(JVPRulesTest, BatchNorm2dForward_JVP_MatchesFD) {
+    if (device != Device::cpu()) return;
+    OpAttributes a;
+    a.set(AttrKey::Eps, 1e-5);
+    std::vector<Tensor> p = { w4_randf64({2,3,4,4}, 51),
+                              w4_randf64({3}, 52),
+                              w4_randf64({3}, 53) * 0.1 + 1.0 };  // var > 0
+    w4_verify_single(OpId::BatchNorm2dForward, p, {0,1,2}, a, 1e-6);
+}
+
+// NOTE: TopK / Sort / LinalgQR / LinalgLU / LinalgSVD JVP adapters were drafted
+// but did not pass this finite-difference gradcheck, so their OpIds remain
+// registered to the NonDifferentiable thrower (forward-mode AD fails loudly
+// rather than returning a wrong tangent). The draft adapters are parked
+// (defined but unregistered) in jvp_rules.cpp for a future pass.
 
 INSTANTIATE_BACKEND_TESTS(JVPRulesTest);
 
