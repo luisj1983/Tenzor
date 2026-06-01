@@ -865,6 +865,53 @@ auto VulkanBackend::dispatchExponentialSample(const Tensor& rate) -> Tensor {
     return output;
 }
 
+
+auto VulkanBackend::dispatchGammaSample(const Tensor& concentration, const Tensor& rate) -> Tensor {
+    Tensor alpha_f32 = (concentration.dtype() == DType::Float32)
+                           ? concentration.contiguous()
+                           : dispatchCast(concentration.contiguous(), DType::Float32);
+    Tensor beta_f32 = (rate.dtype() == DType::Float32)
+                          ? rate.contiguous()
+                          : dispatchCast(rate.contiguous(), DType::Float32);
+
+    std::vector<int64_t> shape(alpha_f32.shape().begin(), alpha_f32.shape().end());
+    int64_t n = alpha_f32.numel();
+    Tensor output(shape, DType::Float32, concentration.device());
+    if (n == 0) return output;
+
+    int32_t device_id = concentration.device().index;
+    auto* pipeline = getPipeline("gamma_sample", device_id);
+
+    auto [seed_lo, seed_hi] = seed_split();
+    BernoulliPC pc{static_cast<uint32_t>(n), seed_lo, seed_hi};
+
+    std::vector<std::pair<uint32_t, const void*>> bindings = {
+        {0, alpha_f32.data_ptr()},
+        {1, beta_f32.data_ptr()},
+        {2, output.data_ptr()},
+    };
+    std::vector<size_t> sizes = {
+        static_cast<size_t>(n) * sizeof(float),
+        static_cast<size_t>(n) * sizeof(float),
+        static_cast<size_t>(n) * sizeof(float),
+    };
+
+    VkDescriptorSet ds = allocateAndWriteDescriptorSet(device_id, pipeline, bindings, sizes);
+    VkCommandBuffer cmd = beginSingleTimeCommands(device_id);
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
+                           pipeline->layout(), 0, 1, &ds, 0, nullptr);
+    vkCmdPushConstants(cmd, pipeline->layout(), VK_SHADER_STAGE_COMPUTE_BIT,
+                      0, sizeof(BernoulliPC), &pc);
+    uint32_t workgroups = div_wg(static_cast<uint32_t>(n), devices_[device_id].workgroupSize);
+    vkCmdDispatch(cmd, workgroups, 1, 1);
+    insertComputeOnlyBarrier(cmd);
+    endSingleTimeCommands(cmd, device_id);
+    synchronize(device_id);
+
+    return output;
+}
+
 auto VulkanBackend::dispatchNestedAttention(const Tensor& Q, const Tensor& K, const Tensor& V,
                                               const Tensor& q_offsets, const Tensor& kv_offsets,
                                               float scale, bool causal) -> Tensor {

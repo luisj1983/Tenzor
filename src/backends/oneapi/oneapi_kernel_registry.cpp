@@ -157,6 +157,7 @@ namespace oneapi {
     auto poisson_sample_kernel(const Tensor& rates, sycl::queue& queue) -> Tensor;
     auto normal_sample_kernel(const Tensor& mean, const Tensor& stddev, sycl::queue& queue) -> Tensor;
     auto exponential_sample_kernel(const Tensor& rate, sycl::queue& queue) -> Tensor;
+    auto gamma_sample_kernel(const Tensor& concentration, const Tensor& rate, sycl::queue& queue) -> Tensor;
 
     // Standalone SYCL sparse ops (no oneMKL dependency)
     auto spgemm_standalone_sycl(std::span<const Tensor> inputs, const OpAttributes& attrs,
@@ -5169,6 +5170,11 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
     table.register_single_output_kernel(OpId::NormalSample,
         [](std::span<const Tensor> inputs, const OpAttributes&) -> Tensor {
             return oneapi::normal_sample_kernel(inputs[0], inputs[1], get_q(inputs));
+        });
+
+    table.register_single_output_kernel(OpId::GammaSample,
+        [](std::span<const Tensor> inputs, const OpAttributes&) -> Tensor {
+            return oneapi::gamma_sample_kernel(inputs[0], inputs[1], get_q(inputs));
         });
 
     table.register_single_output_kernel(OpId::ExponentialSample,

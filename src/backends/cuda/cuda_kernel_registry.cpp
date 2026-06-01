@@ -372,6 +372,7 @@ namespace cuda {
     auto cdist_kernel(const Tensor& x1, const Tensor& x2, double p, cudaStream_t stream) -> Tensor;
     auto normal_sample_kernel(const Tensor& mean, const Tensor& stddev, cudaStream_t stream) -> Tensor;
     auto exponential_sample_kernel(const Tensor& rate, cudaStream_t stream) -> Tensor;
+    auto gamma_sample_kernel(const Tensor& concentration, const Tensor& rate, cudaStream_t stream) -> Tensor;
     auto trapezoid_kernel(const Tensor& y, int64_t dim, double dx, const Tensor* x_ptr, cudaStream_t stream) -> Tensor;
     auto cumulative_trapezoid_kernel(const Tensor& y, int64_t dim, double dx, const Tensor* x_ptr, cudaStream_t stream) -> Tensor;
     auto gradient_kernel(const Tensor& input, int64_t dim, double spacing, cudaStream_t stream) -> Tensor;
@@ -4508,6 +4509,11 @@ void register_cuda_kernels(BackendDispatchTable& table) {
     table.register_single_output_kernel(OpId::ExponentialSample,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
             return cuda::exponential_sample_kernel(inputs[0], get_cuda_stream(attrs));
+        });
+
+    table.register_single_output_kernel(OpId::GammaSample,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+            return cuda::gamma_sample_kernel(inputs[0], inputs[1], get_cuda_stream(attrs));
         });
 
     table.register_single_output_kernel(OpId::Multinomial,

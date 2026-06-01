@@ -3176,6 +3176,11 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
             return get_vulkan_backend()->dispatchNormalSample(inputs[0], inputs[1]);
         });
 
+    table.register_single_output_kernel(OpId::GammaSample,
+        [](std::span<const Tensor> inputs, const OpAttributes&) -> Tensor {
+            return get_vulkan_backend()->dispatchGammaSample(inputs[0], inputs[1]);
+        });
+
     table.register_single_output_kernel(OpId::ExponentialSample,
         [](std::span<const Tensor> inputs, const OpAttributes&) -> Tensor {
             return get_vulkan_backend()->dispatchExponentialSample(inputs[0]);

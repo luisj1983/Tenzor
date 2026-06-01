@@ -351,6 +351,7 @@ public:
     auto dispatchPoissonSample(const Tensor& rates) -> Tensor;
     auto dispatchNormalSample(const Tensor& mean, const Tensor& stddev) -> Tensor;
     auto dispatchExponentialSample(const Tensor& rate) -> Tensor;
+    auto dispatchGammaSample(const Tensor& concentration, const Tensor& rate) -> Tensor;
     auto dispatchNestedAttention(const Tensor& Q, const Tensor& K, const Tensor& V,
                                   const Tensor& q_offsets, const Tensor& kv_offsets,
                                   float scale, bool causal) -> Tensor;

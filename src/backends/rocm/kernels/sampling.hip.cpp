@@ -194,6 +194,83 @@ auto exponential_sample_kernel(const Tensor& rate, hipStream_t stream) -> Tensor
     return result;
 }
 
+
+// =========================================================================
+// Gamma sampling (Marsaglia-Tsang 2000) — device-side, no host fallback.
+// =========================================================================
+
+__device__ __forceinline__ float gamma_next_uniform(uint64_t& state) {
+    state = state * 6364136223846793005ULL + 1442695040888963407ULL;
+    return static_cast<float>(state >> 33) / static_cast<float>(1ULL << 31);
+}
+
+__device__ __forceinline__ float gamma_next_normal(uint64_t& state) {
+    float u1 = fmaxf(gamma_next_uniform(state), 1.0e-7f);
+    float u2 = gamma_next_uniform(state);
+    return sqrtf(-2.0f * logf(u1)) * cosf(2.0f * 3.14159265358979323846f * u2);
+}
+
+__global__ void gamma_sample_kernel_impl(const float* alpha_in, const float* beta_in,
+                                         float* output, int64_t n, uint64_t seed) {
+    int64_t tid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (tid >= n) return;
+
+    uint64_t state = seed + tid * 6364136223846793005ULL + 1442695040888963407ULL;
+
+    float alpha = alpha_in[tid];
+    float beta  = beta_in[tid];
+    if (!(alpha > 0.0f)) alpha = 1.1754944e-38f;  // FLT_MIN floor
+    if (!(beta  > 0.0f)) beta  = 1.1754944e-38f;
+
+    float boost = 1.0f;
+    if (alpha < 1.0f) {
+        float u0 = fmaxf(gamma_next_uniform(state), 1.0e-7f);
+        boost = powf(u0, 1.0f / alpha);
+        alpha += 1.0f;
+    }
+
+    const float d = alpha - 1.0f / 3.0f;
+    const float c = 1.0f / sqrtf(9.0f * d);
+    float result;
+    for (;;) {
+        float x = gamma_next_normal(state);
+        float v = 1.0f + c * x;
+        if (v <= 0.0f) continue;
+        v = v * v * v;
+        float u = fmaxf(gamma_next_uniform(state), 1.0e-7f);
+        float x2 = x * x;
+        if (u < 1.0f - 0.0331f * x2 * x2 ||
+            logf(u) < 0.5f * x2 + d * (1.0f - v + logf(v))) {
+            result = d * v;
+            break;
+        }
+    }
+    output[tid] = boost * result / beta;
+}
+
+auto gamma_sample_kernel(const Tensor& concentration, const Tensor& rate,
+                         hipStream_t stream) -> Tensor {
+    auto a = concentration.contiguous();
+    if (a.dtype() != DType::Float32) a = a.to(DType::Float32);
+    auto b = rate.contiguous();
+    if (b.dtype() != DType::Float32) b = b.to(DType::Float32);
+
+    std::vector<int64_t> shape(a.shape().begin(), a.shape().end());
+    Tensor result(shape, DType::Float32, a.device());
+    int64_t n = a.numel();
+    if (n == 0) return result;
+
+    int threads = 256;
+    int blocks_n = static_cast<int>((n + threads - 1) / threads);
+    uint64_t seed = std::chrono::high_resolution_clock::now().time_since_epoch().count();
+
+    hipLaunchKernelGGL(gamma_sample_kernel_impl,
+        dim3(blocks_n), dim3(threads), 0, stream,
+        a.data<float>(), b.data<float>(), result.data<float>(), n, seed);
+    HIP_CHECK(hipGetLastError());
+    return result;
+}
+
 // =========================================================================
 // Multinomial sampling
 // =========================================================================

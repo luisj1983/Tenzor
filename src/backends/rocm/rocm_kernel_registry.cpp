@@ -177,6 +177,7 @@ namespace rocm {
     auto poisson_sample_kernel(const Tensor& rates, hipStream_t stream) -> Tensor;
     auto normal_sample_kernel(const Tensor& mean, const Tensor& stddev, hipStream_t stream) -> Tensor;
     auto exponential_sample_kernel(const Tensor& rate, hipStream_t stream) -> Tensor;
+    auto gamma_sample_kernel(const Tensor& concentration, const Tensor& rate, hipStream_t stream) -> Tensor;
     auto multinomial_kernel(const Tensor& probs, int64_t num_samples,
                             bool replacement, hipStream_t stream) -> Tensor;
     auto bucketize_kernel(const Tensor& input, const Tensor& boundaries,
@@ -4381,6 +4382,11 @@ void register_rocm_kernels(BackendDispatchTable& table) {
     table.register_single_output_kernel(OpId::ExponentialSample,
         [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
             return rocm::exponential_sample_kernel(inputs[0], get_hip_stream(attrs));
+        });
+
+    table.register_single_output_kernel(OpId::GammaSample,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+            return rocm::gamma_sample_kernel(inputs[0], inputs[1], get_hip_stream(attrs));
         });
 
     table.register_single_output_kernel(OpId::Multinomial,

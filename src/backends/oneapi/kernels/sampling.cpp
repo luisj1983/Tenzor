@@ -42,6 +42,7 @@ struct CDistKernelTag {};
 struct CDistL2Tag {};
 struct CDistL1Tag {};
 struct CDistLpTag {};
+struct GammaSampleKernelTag {};
 struct TrapezoidKernelTag {};
 struct CumulativeTrapezoidKernelTag {};
 struct GradientKernelTag {};
@@ -798,6 +799,87 @@ auto exponential_sample_kernel(const Tensor& rate, sycl::queue& queue) -> Tensor
 
         // Inverse CDF: -log(1 - u) / rate
         out_ptr[i] = -sycl::log(1.0f - u) / rate_ptr[i];
+    });
+    queue.wait_and_throw();
+    return result;
+}
+
+
+// Gamma distribution sampling (Marsaglia-Tsang 2000) — native SYCL device
+// kernel, no host fallback. gamma(concentration=alpha, rate=beta); for
+// alpha < 1 the alpha+1 draw is boosted by u^(1/alpha). The per-element LCG
+// state threads through inline uniform/normal helpers.
+auto gamma_sample_kernel(const Tensor& concentration, const Tensor& rate,
+                         sycl::queue& queue) -> Tensor {
+    auto a = concentration.contiguous();
+    if (a.dtype() != DType::Float32) a = a.to(DType::Float32);
+    auto b = rate.contiguous();
+    if (b.dtype() != DType::Float32) b = b.to(DType::Float32);
+    {
+        auto as = a.shape();
+        auto bs = b.shape();
+        bool same = as.size() == bs.size();
+        for (size_t d = 0; same && d < as.size(); ++d) same = (as[d] == bs[d]);
+        if (!same) {
+            throw std::invalid_argument(
+                "gamma_sample: concentration and rate must have the same shape");
+        }
+    }
+
+    std::vector<int64_t> shape(a.shape().begin(), a.shape().end());
+    Tensor result(shape, DType::Float32, a.device());
+    int64_t n = a.numel();
+    if (n == 0) return result;
+
+    const float* a_ptr = get_data_ptr<const float>(a);
+    const float* b_ptr = get_data_ptr<const float>(b);
+    float* out_ptr = get_data_ptr<float>(result);
+    uint64_t seed = std::chrono::high_resolution_clock::now().time_since_epoch().count();
+
+    queue.parallel_for<GammaSampleKernelTag>(sycl::range<1>(n), [=](sycl::id<1> idx_) {
+        int64_t i = static_cast<int64_t>(idx_);
+        uint64_t state = seed + static_cast<uint64_t>(i) * 6364136223846793005ULL + 1442695040888963407ULL;
+
+        auto next_uniform = [&state]() -> float {
+            state = state * 6364136223846793005ULL + 1442695040888963407ULL;
+            return static_cast<float>(state >> 33) / static_cast<float>(1ULL << 31);
+        };
+        auto next_normal = [&]() -> float {
+            float u1 = sycl::fmax(next_uniform(), 1.0e-7f);
+            float u2 = next_uniform();
+            return sycl::sqrt(-2.0f * sycl::log(u1)) *
+                   sycl::cos(2.0f * 3.14159265358979323846f * u2);
+        };
+
+        float alpha = a_ptr[i];
+        float beta  = b_ptr[i];
+        if (!(alpha > 0.0f)) alpha = 1.1754944e-38f;
+        if (!(beta  > 0.0f)) beta  = 1.1754944e-38f;
+
+        float boost = 1.0f;
+        if (alpha < 1.0f) {
+            float u0 = sycl::fmax(next_uniform(), 1.0e-7f);
+            boost = sycl::pow(u0, 1.0f / alpha);
+            alpha += 1.0f;
+        }
+
+        const float d = alpha - 1.0f / 3.0f;
+        const float c = 1.0f / sycl::sqrt(9.0f * d);
+        float res;
+        for (;;) {
+            float x = next_normal();
+            float v = 1.0f + c * x;
+            if (v <= 0.0f) continue;
+            v = v * v * v;
+            float u = sycl::fmax(next_uniform(), 1.0e-7f);
+            float x2 = x * x;
+            if (u < 1.0f - 0.0331f * x2 * x2 ||
+                sycl::log(u) < 0.5f * x2 + d * (1.0f - v + sycl::log(v))) {
+                res = d * v;
+                break;
+            }
+        }
+        out_ptr[i] = boost * res / beta;
     });
     queue.wait_and_throw();
     return result;

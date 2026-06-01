@@ -1,0 +1,72 @@
+#version 450
+
+// Gamma sampling: out[i] ~ gamma(concentration=alpha, rate=beta), i.e.
+// shape alpha, scale 1/beta. Marsaglia-Tsang (2000) acceptance-rejection with a
+// per-invocation LCG PRNG (matching exponential_sample.comp / bernoulli.comp).
+// For alpha < 1 the alpha+1 draw is boosted by u^(1/alpha). Float32 only — the
+// host promotes other dtypes via dispatchCast.
+
+layout(local_size_x_id = 0) in;
+
+layout(binding = 0) buffer AlphaBuf  { float alpha_data[]; };
+layout(binding = 1) buffer BetaBuf   { float beta_data[];  };
+layout(binding = 2) buffer OutputBuf { float out_data[];   };
+
+layout(push_constant) uniform PushConstants {
+    uint n;
+    uint seed_lo;
+    uint seed_hi;
+} params;
+
+// Advance LCG and return a uniform in (0, 1].
+float next_uniform(inout uint state) {
+    state = state * 1664525u + 1013904223u;
+    float u = float(state) / 4294967295.0;
+    return max(u, 1.0e-7);
+}
+
+// Box-Muller standard normal from two uniforms.
+float next_normal(inout uint state) {
+    float u1 = next_uniform(state);
+    float u2 = next_uniform(state);
+    return sqrt(-2.0 * log(u1)) * cos(6.28318530717958647692 * u2);
+}
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= params.n) return;
+
+    uint state = params.seed_lo ^ (params.seed_hi * 0x9E3779B9u) ^ (idx * 0x85EBCA77u);
+
+    float alpha = alpha_data[idx];
+    float beta  = beta_data[idx];
+    if (!(alpha > 0.0)) alpha = 1.1754944e-38;  // FLT_MIN floor
+    if (!(beta  > 0.0)) beta  = 1.1754944e-38;
+
+    float boost = 1.0;
+    if (alpha < 1.0) {
+        float u0 = next_uniform(state);
+        boost = pow(u0, 1.0 / alpha);
+        alpha += 1.0;
+    }
+
+    float d = alpha - 1.0 / 3.0;
+    float c = 1.0 / sqrt(9.0 * d);
+    float result = d;  // initialized; overwritten before use
+    // Bounded loop: acceptance prob is high (>0.95 for alpha>=1); 128 iters is
+    // astronomically safe while guaranteeing GPU loop termination.
+    for (int iter = 0; iter < 128; ++iter) {
+        float x = next_normal(state);
+        float v = 1.0 + c * x;
+        if (v <= 0.0) continue;
+        v = v * v * v;
+        float u = next_uniform(state);
+        float x2 = x * x;
+        if (u < 1.0 - 0.0331 * x2 * x2 ||
+            log(u) < 0.5 * x2 + d * (1.0 - v + log(v))) {
+            result = d * v;
+            break;
+        }
+    }
+    out_data[idx] = boost * result / beta;
+}
