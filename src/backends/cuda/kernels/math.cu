@@ -956,6 +956,65 @@ __global__ void sign_kernel_bf16(const __nv_bfloat16* input, __nv_bfloat16* outp
 }
 
 // ============================================================================
+// Integer clamp / pow / sign (templated; matches PyTorch integer support).
+// ============================================================================
+template <typename T>
+__global__ void clamp_int_kernel(const T* input, T* output, T lo, T hi, int64_t n) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) {
+        T v = input[idx];
+        output[idx] = v < lo ? lo : (v > hi ? hi : v);
+    }
+}
+template <typename T>
+__global__ void clamp_min_int_kernel(const T* input, T* output, T lo, int64_t n) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) { T v = input[idx]; output[idx] = v < lo ? lo : v; }
+}
+template <typename T>
+__global__ void clamp_max_int_kernel(const T* input, T* output, T hi, int64_t n) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) { T v = input[idx]; output[idx] = v > hi ? hi : v; }
+}
+template <typename T>
+__global__ void sign_int_kernel(const T* input, T* output, int64_t n) {
+    // (T(-1) < T(0)) is a per-instantiation constant: true for signed, false
+    // for unsigned — so unsigned gives 0/1, signed gives -1/0/1.
+    const bool kSigned = (T(-1) < T(0));
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) {
+        T v = input[idx];
+        int neg = (kSigned && v < T(0)) ? 1 : 0;
+        int pos = (v > T(0)) ? 1 : 0;
+        output[idx] = static_cast<T>(pos - neg);
+    }
+}
+template <typename T>
+__global__ void pow_int_kernel(const T* input, T* output, double e, int int_exp,
+                               long long k, int64_t n) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) {
+        if (int_exp) {
+            T base = input[idx], r = T(1);
+            for (long long j = 0; j < k; ++j) r *= base;
+            output[idx] = r;
+        } else {
+            output[idx] = static_cast<T>(llround(pow(static_cast<double>(input[idx]), e)));
+        }
+    }
+}
+
+// Dispatch the statement (which uses `using T = ...`) over the integer dtypes.
+// Variadic so commas inside the kernel-launch statement are absorbed.
+#define TENZOR_CUDA_INT_DISPATCH(DT, NAME, ...)                                   \
+    switch (DT) {                                                                 \
+        case DType::Int8:   { using T = int8_t;   __VA_ARGS__ } break;            \
+        case DType::Int16:  { using T = int16_t;  __VA_ARGS__ } break;            \
+        case DType::Int32:  { using T = int32_t;  __VA_ARGS__ } break;            \
+        case DType::Int64:  { using T = int64_t;  __VA_ARGS__ } break;            \
+        case DType::UInt8:  { using T = uint8_t;  __VA_ARGS__ } break;            \
+        case DType::UInt16: { using T = uint16_t; __VA_ARGS__ } break;            \
+        case DType::UInt32: { using T = uint32_t; __VA_ARGS__ } break;            \
+        case DType::UInt64: { using T = uint64_t; __VA_ARGS__ } break;            \
+        default: throw std::runtime_error(std::string(NAME) + ": unsupported dtype"); \
+    }
+
+// ============================================================================
 // Complex Elementwise Arithmetic Kernels
 // ============================================================================
 
@@ -2039,7 +2098,13 @@ auto pow_kernel(const Tensor& input, float exponent, cudaStream_t stream) -> Ten
             reinterpret_cast<__nv_bfloat16*>(result.data<BFloat16>()), exp_bf, n);
         CUDA_CHECK(cudaGetLastError());
     } else {
-        throw std::runtime_error("pow operation only supports Float32, Float64, Float16, and BFloat16 dtypes");
+        const double e = static_cast<double>(exponent);
+        const int int_exp = (e == floor(e) && e >= 0.0) ? 1 : 0;
+        const long long k = static_cast<long long>(e);
+        TENZOR_CUDA_INT_DISPATCH(input.dtype(), "pow",
+            pow_int_kernel<T><<<grid, block, 0, stream>>>(
+                input.data<T>(), result.data<T>(), e, int_exp, k, n);)
+        CUDA_CHECK(cudaGetLastError());
     }
 
     CUDA_CHECK(cudaGetLastError());
@@ -2079,7 +2144,11 @@ auto clamp_kernel(const Tensor& input, float min_val, float max_val, cudaStream_
             reinterpret_cast<__nv_bfloat16*>(result.data<BFloat16>()), min_bf, max_bf, n);
         CUDA_CHECK(cudaGetLastError());
     } else {
-        throw std::runtime_error("clamp operation only supports Float32, Float64, Float16, and BFloat16 dtypes");
+        TENZOR_CUDA_INT_DISPATCH(input.dtype(), "clamp",
+            clamp_int_kernel<T><<<grid, block, 0, stream>>>(
+                input.data<T>(), result.data<T>(),
+                static_cast<T>(min_val), static_cast<T>(max_val), n);)
+        CUDA_CHECK(cudaGetLastError());
     }
 
     CUDA_CHECK(cudaGetLastError());
@@ -2113,7 +2182,10 @@ auto sign_kernel(const Tensor& input, cudaStream_t stream) -> Tensor {
             reinterpret_cast<__nv_bfloat16*>(result.data<BFloat16>()), n);
         CUDA_CHECK(cudaGetLastError());
     } else {
-        throw std::runtime_error("sign operation only supports Float32, Float64, Float16, and BFloat16 dtypes");
+        TENZOR_CUDA_INT_DISPATCH(input.dtype(), "sign",
+            sign_int_kernel<T><<<grid, block, 0, stream>>>(
+                input.data<T>(), result.data<T>(), n);)
+        CUDA_CHECK(cudaGetLastError());
     }
 
     CUDA_CHECK(cudaGetLastError());
@@ -2388,7 +2460,10 @@ auto clamp_min_kernel(const Tensor& input, float min_val, cudaStream_t stream) -
             reinterpret_cast<__nv_bfloat16*>(result.data<BFloat16>()), min_val, n);
         CUDA_CHECK(cudaGetLastError());
     } else {
-        throw std::runtime_error("clamp_min operation only supports Float32, Float64, Float16, and BFloat16 dtypes");
+        TENZOR_CUDA_INT_DISPATCH(input.dtype(), "clamp_min",
+            clamp_min_int_kernel<T><<<grid, block, 0, stream>>>(
+                input.data<T>(), result.data<T>(), static_cast<T>(min_val), n);)
+        CUDA_CHECK(cudaGetLastError());
     }
 
     CUDA_CHECK(cudaGetLastError());
@@ -2421,7 +2496,10 @@ auto clamp_max_kernel(const Tensor& input, float max_val, cudaStream_t stream) -
             reinterpret_cast<__nv_bfloat16*>(result.data<BFloat16>()), max_val, n);
         CUDA_CHECK(cudaGetLastError());
     } else {
-        throw std::runtime_error("clamp_max operation only supports Float32, Float64, Float16, and BFloat16 dtypes");
+        TENZOR_CUDA_INT_DISPATCH(input.dtype(), "clamp_max",
+            clamp_max_int_kernel<T><<<grid, block, 0, stream>>>(
+                input.data<T>(), result.data<T>(), static_cast<T>(max_val), n);)
+        CUDA_CHECK(cudaGetLastError());
     }
 
     CUDA_CHECK(cudaGetLastError());
