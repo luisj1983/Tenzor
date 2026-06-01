@@ -1438,6 +1438,85 @@ auto exponential_sample_kernel(const Tensor& rate, cudaStream_t stream) -> Tenso
 }
 
 // ============================================================================
+// Gamma sampling kernel (Marsaglia-Tsang 2000) — device-side, no CPU fallback.
+// Uses the same per-thread LCG + Box-Muller as the normal/exponential kernels
+// above (no curand dependency). alpha < 1 is boosted by u^(1/alpha).
+// ============================================================================
+
+__device__ __forceinline__ float gamma_lcg_uniform(uint64_t& state) {
+    state = state * 6364136223846793005ULL + 1442695040888963407ULL;
+    float u = static_cast<float>(state >> 33) / static_cast<float>(1ULL << 31);
+    return fmaxf(u, 1.0e-7f);
+}
+
+__device__ __forceinline__ float gamma_lcg_normal(uint64_t& state) {
+    float u1 = gamma_lcg_uniform(state);
+    float u2 = gamma_lcg_uniform(state);
+    return sqrtf(-2.0f * logf(u1)) * cosf(2.0f * 3.14159265358979323846f * u2);
+}
+
+__global__ void gamma_sample_kernel_impl(const float* alpha_in, const float* beta_in,
+                                         float* output, int64_t n, uint64_t seed) {
+    int64_t tid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (tid >= n) return;
+
+    uint64_t state = seed + tid * 6364136223846793005ULL + 1442695040888963407ULL;
+
+    float alpha = alpha_in[tid];
+    float beta  = beta_in[tid];
+    if (!(alpha > 0.0f)) alpha = 1.1754944e-38f;  // FLT_MIN floor
+    if (!(beta  > 0.0f)) beta  = 1.1754944e-38f;
+
+    float boost = 1.0f;
+    if (alpha < 1.0f) {
+        float u0 = gamma_lcg_uniform(state);
+        boost = powf(u0, 1.0f / alpha);
+        alpha += 1.0f;
+    }
+
+    const float d = alpha - 1.0f / 3.0f;
+    const float c = 1.0f / sqrtf(9.0f * d);
+    float result = d;
+    // Bounded loop guarantees GPU termination; acceptance prob > 0.95 for
+    // alpha >= 1, so 128 iters is astronomically safe.
+    for (int iter = 0; iter < 128; ++iter) {
+        float x = gamma_lcg_normal(state);
+        float v = 1.0f + c * x;
+        if (v <= 0.0f) continue;
+        v = v * v * v;
+        float u = gamma_lcg_uniform(state);
+        float x2 = x * x;
+        if (u < 1.0f - 0.0331f * x2 * x2 ||
+            logf(u) < 0.5f * x2 + d * (1.0f - v + logf(v))) {
+            result = d * v;
+            break;
+        }
+    }
+    output[tid] = boost * result / beta;
+}
+
+auto gamma_sample_kernel(const Tensor& concentration, const Tensor& rate,
+                         cudaStream_t stream) -> Tensor {
+    auto a = concentration.contiguous();
+    if (a.dtype() != DType::Float32) a = a.to(DType::Float32);
+    auto b = rate.contiguous();
+    if (b.dtype() != DType::Float32) b = b.to(DType::Float32);
+
+    std::vector<int64_t> shape_vec(a.shape().begin(), a.shape().end());
+    auto result = Tensor(shape_vec, DType::Float32, a.device());
+    int64_t n = a.numel();
+    if (n == 0) return result;
+
+    int threads = 256;
+    int blocks_n = (n + threads - 1) / threads;
+    uint64_t seed = std::chrono::high_resolution_clock::now().time_since_epoch().count();
+
+    gamma_sample_kernel_impl<<<blocks_n, threads, 0, stream>>>(
+        a.data<float>(), b.data<float>(), result.data<float>(), n, seed);
+    return result;
+}
+
+// ============================================================================
 // Multinomial sampling kernel
 // ============================================================================
 

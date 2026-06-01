@@ -833,20 +833,30 @@ auto exponential_sample_kernel(const Tensor& rate) -> Tensor {
 // have the same shape (the Python layer broadcasts before dispatch, matching
 // normal_sample_kernel).
 auto gamma_sample_kernel(const Tensor& concentration, const Tensor& rate) -> Tensor {
-    if (concentration.shape() != rate.shape()) {
-        throw std::invalid_argument(
-            "gamma_sample: concentration and rate must have the same shape");
+    {
+        auto as = concentration.shape();
+        auto bs = rate.shape();
+        bool same = as.size() == bs.size();
+        for (size_t d = 0; same && d < as.size(); ++d) same = (as[d] == bs[d]);
+        if (!same) {
+            throw std::invalid_argument(
+                "gamma_sample: concentration and rate must have the same shape");
+        }
     }
     Tensor result(std::vector<int64_t>(concentration.shape().begin(),
                                        concentration.shape().end()),
                   concentration.dtype(), concentration.device());
-    auto& gen = detail::global_rng();
+    const uint64_t seed = static_cast<uint64_t>(detail::get_base_seed());
+    int64_t n = concentration.numel();
 
     if (concentration.dtype() == DType::Float32) {
         const float* a_data = concentration.data<float>();
         const float* b_data = rate.data<float>();
         float* out = result.data<float>();
-        for (int64_t i = 0; i < concentration.numel(); ++i) {
+        #pragma omp parallel for schedule(static)
+        for (int64_t i = 0; i < n; ++i) {
+            // Per-element RNG so the draw is deterministic and parallel-safe.
+            std::mt19937_64 gen(seed ^ (static_cast<uint64_t>(i) * 0x9E3779B97F4A7C15ULL));
             float alpha = a_data[i] > 0.0f ? a_data[i] : std::numeric_limits<float>::min();
             float beta  = b_data[i] > 0.0f ? b_data[i] : std::numeric_limits<float>::min();
             std::gamma_distribution<float> dist(alpha, 1.0f / beta);
@@ -856,7 +866,9 @@ auto gamma_sample_kernel(const Tensor& concentration, const Tensor& rate) -> Ten
         const double* a_data = concentration.data<double>();
         const double* b_data = rate.data<double>();
         double* out = result.data<double>();
-        for (int64_t i = 0; i < concentration.numel(); ++i) {
+        #pragma omp parallel for schedule(static)
+        for (int64_t i = 0; i < n; ++i) {
+            std::mt19937_64 gen(seed ^ (static_cast<uint64_t>(i) * 0x9E3779B97F4A7C15ULL));
             double alpha = a_data[i] > 0.0 ? a_data[i] : std::numeric_limits<double>::min();
             double beta  = b_data[i] > 0.0 ? b_data[i] : std::numeric_limits<double>::min();
             std::gamma_distribution<double> dist(alpha, 1.0 / beta);
