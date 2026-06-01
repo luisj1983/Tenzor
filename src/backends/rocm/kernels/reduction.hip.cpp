@@ -2008,7 +2008,11 @@ auto argmax_kernel(const Tensor& input, int64_t dim, bool keepdim, hipStream_t s
         throw std::runtime_error("argmax: cannot compute argmax of empty tensor");
     }
 
-    // For full reduction (dim < 0), output is a scalar index
+    // Normalize a negative axis index (dim=-1 => last axis); INT64_MIN remains
+    // the "reduce all" sentinel handled by the dim<0 branch below.
+    if (dim != INT64_MIN && dim < 0) dim += static_cast<int64_t>(input_shape.size());
+
+    // For full reduction (dim == INT64_MIN), output is a scalar index
     std::vector<int64_t> output_shape;
     if (dim >= 0) {
         output_shape = compute_reduction_shape(
@@ -2128,6 +2132,10 @@ auto argmin_kernel(const Tensor& input, int64_t dim, bool keepdim, hipStream_t s
     if (n == 0) {
         throw std::runtime_error("argmin: cannot compute argmin of empty tensor");
     }
+
+    // Normalize a negative axis index (dim=-1 => last axis); INT64_MIN remains
+    // the "reduce all" sentinel handled by the dim<0 branch below.
+    if (dim != INT64_MIN && dim < 0) dim += static_cast<int64_t>(input_shape.size());
 
     std::vector<int64_t> output_shape;
     if (dim >= 0) {
@@ -2542,6 +2550,13 @@ auto norm_kernel(const Tensor& input, float p, int64_t dim, bool keepdim, hipStr
     const auto& device = input.device();
     int64_t n = input.numel();
 
+    // INT64_MIN is the "reduce all axes" sentinel; any other negative value is
+    // a Python-style axis index (dim=-1 => last axis) and must be normalized,
+    // NOT treated as a full reduction.
+    const int64_t ndim_in = static_cast<int64_t>(input.shape().size());
+    const bool reduce_all = (dim == INT64_MIN) || ndim_in == 0;
+    if (!reduce_all && dim < 0) dim += ndim_in;
+
     if (dtype != DType::Float32 && dtype != DType::Float64 && dtype != DType::Float16 && dtype != DType::BFloat16) {
         throw std::runtime_error("norm: only Float32, Float64, Float16, and BFloat16 are supported");
     }
@@ -2566,7 +2581,7 @@ auto norm_kernel(const Tensor& input, float p, int64_t dim, bool keepdim, hipStr
 
     Tensor output(output_shape, dtype, device);
 
-    if (dim < 0) {
+    if (reduce_all) {
         int num_blocks = std::min((n + REDUCTION_BLOCK_SIZE - 1) / REDUCTION_BLOCK_SIZE, static_cast<int64_t>(1024));
 
         if (dtype == DType::Float32) {
