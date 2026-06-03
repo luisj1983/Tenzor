@@ -1,13 +1,15 @@
 #version 450
 
 // 3D Convolution Forward Pass - BFloat16 version (with groups support)
-// Uses float32 accumulation for precision
+// BF16 stored packed two-per-uint32 word; all computation in float32 for
+// precision, results written back as BF16 (round-to-nearest-even) via a
+// bounded compare-and-swap on the shared 32-bit word.
 layout(local_size_x_id = 0) in;
 
-layout(binding = 0) buffer Input { float input_data[]; };
-layout(binding = 1) buffer Weight { float weight_data[]; };
-layout(binding = 2) buffer Bias { float bias_data[]; };
-layout(binding = 3) buffer Output { float output_data[]; };
+layout(binding = 0) buffer Input { uint input_data[]; };    // Packed BF16
+layout(binding = 1) buffer Weight { uint weight_data[]; };  // Packed BF16
+layout(binding = 2) buffer Bias { uint bias_data[]; };      // Packed BF16
+layout(binding = 3) buffer Output { uint output_data[]; };  // Packed BF16
 
 layout(push_constant) uniform PushConstants {
     uint n_elements;
@@ -35,6 +37,40 @@ layout(push_constant) uniform PushConstants {
     uint out_w;
     uint has_bias;
 } params;
+
+// Read a BF16 element from one of the three input buffers (0=input, 1=weight, 2=bias).
+float readBF16_buf(uint element_idx, uint buf_id) {
+    uint word_idx = element_idx / 2;
+    uint word_offset = element_idx % 2;
+    uint packed;
+    if (buf_id == 0) packed = input_data[word_idx];
+    else if (buf_id == 1) packed = weight_data[word_idx];
+    else packed = bias_data[word_idx];
+    uint bits = (packed >> (word_offset * 16)) & 0xFFFFu;
+    return uintBitsToFloat(bits << 16);
+}
+
+// Write a single BF16 element to the packed output via bounded CAS (two adjacent
+// output elements share a 32-bit word and may be written by distinct invocations).
+void writeBF16(uint element_idx, float val) {
+    uint word_idx = element_idx / 2;
+    uint word_offset = element_idx % 2;
+    uint shift = word_offset * 16;
+    uint mask = 0xFFFFu << shift;
+    uint bf16_bits = ((floatBitsToUint(val) + 0x7FFFu +
+                      ((floatBitsToUint(val) >> 16) & 1u)) >> 16) & 0xFFFFu;
+    uint new_half = bf16_bits << shift;
+
+    uint prev = output_data[word_idx];
+    uint desired = (prev & ~mask) | new_half;
+    for (uint attempt = 0u; attempt < 65536u; ++attempt) {
+        desired = (prev & ~mask) | new_half;
+        uint observed = atomicCompSwap(output_data[word_idx], prev, desired);
+        if (observed == prev) return;
+        prev = observed;
+    }
+    output_data[word_idx] = desired;
+}
 
 void main() {
     uint idx = gl_GlobalInvocationID.x;
@@ -80,7 +116,7 @@ void main() {
                                           params.kernel_h * params.kernel_w +
                                           kh * params.kernel_w + kw;
 
-                        sum += float(input_data[input_idx]) * float(weight_data[weight_idx]);
+                        sum += readBF16_buf(input_idx, 0) * readBF16_buf(weight_idx, 1);
                     }
                 }
             }
@@ -88,8 +124,8 @@ void main() {
     }
 
     if (params.has_bias == 1) {
-        sum += float(bias_data[oc]);
+        sum += readBF16_buf(oc, 2);
     }
 
-    output_data[idx] = float(sum);
+    writeBF16(idx, sum);
 }

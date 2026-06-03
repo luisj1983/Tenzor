@@ -1,13 +1,17 @@
 #version 450
 
 // ROI Align Forward Pass (BFloat16)
-// Computation done in float32, input/output in bfloat16
+// BF16 stored packed two-per-uint32 word (no native GLSL bfloat16 type).
+// All math in float32; output written back as BF16 (round-to-nearest-even) via
+// a bounded compare-and-swap on the shared 32-bit word.
+// Input: features (N, C, H, W), rois (num_rois, 5) = [batch_idx, x1, y1, x2, y2]
+// Output: (num_rois, C, output_h, output_w)
 
 layout(local_size_x_id = 0) in;
 
-layout(binding = 0) buffer Features { float features_data[]; };
-layout(binding = 1) buffer ROIs { float rois_data[]; };
-layout(binding = 2) buffer Output { float output_data[]; };
+layout(binding = 0) buffer Features { uint features_data[]; };  // Packed BF16
+layout(binding = 1) buffer ROIs { uint rois_data[]; };          // Packed BF16
+layout(binding = 2) buffer Output { uint output_data[]; };      // Packed BF16
 
 layout(push_constant) uniform PushConstants {
     uint n_elements;
@@ -21,6 +25,35 @@ layout(push_constant) uniform PushConstants {
     uint sampling_ratio;
     uint aligned;
 } params;
+
+// buf_id: 0 = features, 1 = rois
+float readBF16(uint buf_id, uint element_idx) {
+    uint word_idx = element_idx >> 1u;
+    uint word_offset = element_idx & 1u;
+    uint packed = (buf_id == 0u) ? features_data[word_idx] : rois_data[word_idx];
+    uint bits = (packed >> (word_offset * 16u)) & 0xFFFFu;
+    return uintBitsToFloat(bits << 16);
+}
+
+void writeBF16(uint element_idx, float value) {
+    uint word_idx = element_idx >> 1u;
+    uint word_offset = element_idx & 1u;
+    uint shift = word_offset * 16u;
+    uint mask = 0xFFFFu << shift;
+    uint bf16_bits = ((floatBitsToUint(value) + 0x7FFFu +
+                      ((floatBitsToUint(value) >> 16) & 1u)) >> 16) & 0xFFFFu;
+    uint new_half = bf16_bits << shift;
+
+    uint prev = output_data[word_idx];
+    uint desired = (prev & ~mask) | new_half;
+    for (uint attempt = 0u; attempt < 65536u; ++attempt) {
+        desired = (prev & ~mask) | new_half;
+        uint observed = atomicCompSwap(output_data[word_idx], prev, desired);
+        if (observed == prev) return;
+        prev = observed;
+    }
+    output_data[word_idx] = desired;
+}
 
 float bilinear_interpolate(uint base_offset, float y, float x) {
     int height = int(params.feat_height);
@@ -43,10 +76,10 @@ float bilinear_interpolate(uint base_offset, float y, float x) {
     float hy = 1.0 - ly;
     float hx = 1.0 - lx;
 
-    float v1 = float(features_data[base_offset + y_low * width + x_low]);
-    float v2 = float(features_data[base_offset + y_low * width + x_high]);
-    float v3 = float(features_data[base_offset + y_high * width + x_low]);
-    float v4 = float(features_data[base_offset + y_high * width + x_high]);
+    float v1 = readBF16(0u, base_offset + uint(y_low * width + x_low));
+    float v2 = readBF16(0u, base_offset + uint(y_low * width + x_high));
+    float v3 = readBF16(0u, base_offset + uint(y_high * width + x_low));
+    float v4 = readBF16(0u, base_offset + uint(y_high * width + x_high));
 
     return hy * hx * v1 + hy * lx * v2 + ly * hx * v3 + ly * lx * v4;
 }
@@ -67,13 +100,13 @@ void main() {
     uint roi_idx = temp / params.channels;
 
     uint roi_base = roi_idx * 5;
-    uint batch_idx = uint(rois_data[roi_base]);
+    uint batch_idx = uint(readBF16(1u, roi_base));
     float spatial_scale = uintBitsToFloat(params.spatial_scale_bits);
 
-    float roi_x1 = float(rois_data[roi_base + 1]) * spatial_scale;
-    float roi_y1 = float(rois_data[roi_base + 2]) * spatial_scale;
-    float roi_x2 = float(rois_data[roi_base + 3]) * spatial_scale;
-    float roi_y2 = float(rois_data[roi_base + 4]) * spatial_scale;
+    float roi_x1 = readBF16(1u, roi_base + 1) * spatial_scale;
+    float roi_y1 = readBF16(1u, roi_base + 2) * spatial_scale;
+    float roi_x2 = readBF16(1u, roi_base + 3) * spatial_scale;
+    float roi_y2 = readBF16(1u, roi_base + 4) * spatial_scale;
 
     if (params.aligned != 0) {
         roi_x1 -= 0.5;
@@ -113,5 +146,5 @@ void main() {
         }
     }
 
-    output_data[idx] = float(sum / float(count));
+    writeBF16(idx, count > 0u ? sum / float(count) : 0.0);
 }

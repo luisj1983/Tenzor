@@ -4894,6 +4894,34 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
             auto norm = std::string(attrs.get_string(AttrKey::Norm, "backward"));
             return {oneapi::ifftn_kernel(inputs[0], dims, signal_lengths, norm, get_q(inputs))};
         });
+
+    // LinalgVectorNorm / LinalgMatrixNorm / LinalgVecdot — registered here too
+    // (non-oneMKL build) so every backend exposes the identical 480 OpIds. These
+    // delegate to general SYCL kernels (norm/svd/sum/max/mul), not oneMKL.
+    table.register_kernel(OpId::LinalgVectorNorm,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            return {oneapi::norm_kernel(inputs[0], attrs, get_q(inputs))};
+        });
+    table.register_kernel(OpId::LinalgMatrixNorm,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            int64_t ord = static_cast<int64_t>(attrs.get_float(AttrKey::Order, 0.0));
+            auto& q = get_q(inputs);
+            if (ord == 0) {
+                return {oneapi::norm_kernel(inputs[0], attrs, q)};
+            }
+            auto [U, S, Vt] = oneapi::linalg_svd_kernel(inputs[0], false, q);
+            if (ord == 1) {
+                return {oneapi::sum_kernel(S, INT64_MIN, false, q)};
+            }
+            return {oneapi::max_kernel(S, INT64_MIN, false, q)};
+        });
+    table.register_kernel(OpId::LinalgVecdot,
+        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            int64_t dim = attrs.get_int(AttrKey::Dim, -1);
+            auto& q = get_q(inputs);
+            Tensor product = oneapi::mul_kernel(inputs[0], inputs[1], q);
+            return {oneapi::sum_kernel(product, dim, false, q)};
+        });
 #endif // TENZOR_HAS_ONEMKL
 
     // =========================================================================

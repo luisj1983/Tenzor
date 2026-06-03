@@ -72,6 +72,7 @@ crash-*
 # Local git worktrees
 .worktrees/
 .superpowers/
+.serena/
 
 # audit-11 PP.4: gtest_discover_tests / tenzor_discover_tests PRE_TEST
 # include files are auto-generated into the build tree by cmake (see

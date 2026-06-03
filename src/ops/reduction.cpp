@@ -125,8 +125,15 @@ auto var(const Tensor& input, std::optional<int64_t> dim, bool keepdim, bool unb
 }
 
 auto norm(const Tensor& input, float p, std::optional<int64_t> dim, bool keepdim) -> Tensor {
-    // Integer/bool norm must produce floating-point results
-    Tensor promoted = is_integer_dtype(input.dtype()) ? input.to(DType::Float32) : input;
+    // Complex norm = norm of the elementwise magnitudes (PyTorch semantics).
+    // Reduce to the real magnitude here so every backend computes it uniformly
+    // (the per-backend kernels operate on real dtypes only).
+    Tensor promoted = input;
+    if (input.dtype() == DType::Complex64 || input.dtype() == DType::Complex128) {
+        promoted = tenzor::abs(input);  // |z| -> Float32 / Float64
+    } else if (is_integer_dtype(input.dtype())) {
+        promoted = input.to(DType::Float32);
+    }
     NewOpAttributes attrs;
     attrs.set(AttrKey::P, static_cast<double>(p));
     if (dim.has_value()) attrs.set(AttrKey::Dim, *dim);
@@ -477,6 +484,54 @@ auto cov(const Tensor& input, int64_t correction) -> Tensor {
     auto centered_t = tenzor::transpose(centered, 0, 1);     // (M, N)
     auto product = tenzor::matmul(centered, centered_t);     // (N, N)
     return tenzor::div(product, tenzor::full({}, m_val, x2d.dtype(), x2d.device()));
+}
+
+auto cov(const Tensor& input, int64_t correction,
+         const Tensor& fweights, const Tensor& aweights) -> Tensor {
+    const bool has_fw = fweights.numel() > 0;
+    const bool has_aw = aweights.numel() > 0;
+    if (!has_fw && !has_aw) {
+        return cov(input, correction);
+    }
+    if (input.ndim() != 1 && input.ndim() != 2) {
+        throw std::invalid_argument("cov: input must be 1D or 2D");
+    }
+    Tensor x2d = (input.ndim() == 1)
+        ? input.reshape({1, input.shape()[0]})
+        : input;
+    const int64_t M = x2d.shape()[1];
+    const DType dt = x2d.dtype();
+
+    // Combined per-observation weights w (length M), promoted to input dtype:
+    // w = fweights * aweights (each defaulting to 1 when absent).
+    Tensor w;
+    if (has_fw) w = fweights.to(dt);
+    if (has_aw) {
+        Tensor aw = aweights.to(dt);
+        w = has_fw ? tenzor::mul(w, aw) : aw;
+    }
+    Tensor w_row = w.reshape({1, M});                 // (1, M)
+    Tensor w_sum = tenzor::sum(w);                    // scalar
+
+    // Normalization (PyTorch torch.cov):
+    //   no aweights: fact = w_sum - correction
+    //   aweights:    fact = w_sum - correction * sum(w * aweights) / w_sum
+    Tensor fact;
+    if (has_aw) {
+        Tensor wa_sum = tenzor::sum(tenzor::mul(w, aweights.to(dt)));
+        Tensor term = tenzor::div(wa_sum, w_sum);
+        fact = tenzor::sub(w_sum, tenzor::mul(term, static_cast<double>(correction)));
+    } else {
+        fact = tenzor::add(w_sum, static_cast<double>(-correction));
+    }
+
+    // Weighted row means: sum(x * w, dim=1, keepdim) / w_sum  -> (N, 1)
+    Tensor mu = tenzor::div(tenzor::sum(tenzor::mul(x2d, w_row), 1, true), w_sum);
+    Tensor centered = tenzor::sub(x2d, mu);           // (N, M)
+    Tensor x_w = tenzor::mul(centered, w_row);        // (N, M)
+    Tensor centered_t = tenzor::transpose(centered, 0, 1);  // (M, N)
+    Tensor product = tenzor::matmul(x_w, centered_t);       // (N, N)
+    return tenzor::div(product, fact);
 }
 
 // =========================================================================

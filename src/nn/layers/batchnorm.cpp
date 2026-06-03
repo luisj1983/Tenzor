@@ -159,9 +159,16 @@ auto BatchNorm2dBackward::backward(std::vector<Tensor> grad_outputs) -> std::vec
     // FAST GPU PATH
     if (input.device().type != Device::Type::CPU &&
         is_op_supported(OpId::BatchNorm2dBackward, input.device().type) &&
-        (input.dtype() == DType::Float32 || input.dtype() == DType::Float16 || input.dtype() == DType::Float64)) {
+        (input.dtype() == DType::Float32 || input.dtype() == DType::Float16 ||
+         input.dtype() == DType::BFloat16 || input.dtype() == DType::Float64)) {
+        // Half-precision batch-norm backward must run with F32 statistics. CUDA
+        // (cuDNN) accepts half I/O with F32 stats directly, but the ROCm / Vulkan
+        // / OneAPI kernels require dtype-consistent buffers (verified: dispatching
+        // half here throws a dtype-mismatch on ROCm). Promote to F32 on-device so
+        // the accumulation is correct on every backend, then narrow the result
+        // back — this entire sequence executes on the GPU (no CPU involvement).
         DType fast_orig_dtype = input.dtype();
-        bool fast_upcast = (fast_orig_dtype == DType::Float16);
+        bool fast_upcast = (fast_orig_dtype == DType::Float16 || fast_orig_dtype == DType::BFloat16);
         if (fast_upcast) {
             grad_output = grad_output.to(DType::Float32);
             input = input.to(DType::Float32);
@@ -186,7 +193,7 @@ auto BatchNorm2dBackward::backward(std::vector<Tensor> grad_outputs) -> std::vec
 
     // FALLBACK: tensor ops
     DType orig_dtype = input.dtype();
-    bool needs_upcast = (orig_dtype == DType::Float16);
+    bool needs_upcast = (orig_dtype == DType::Float16 || orig_dtype == DType::BFloat16);
     if (needs_upcast) {
         grad_output = grad_output.to(DType::Float32);
         input = input.to(DType::Float32);
@@ -288,6 +295,15 @@ auto BatchNorm2dBackward::backward_with_variables(std::vector<Variable> grad_out
 
     return {grad_input, grad_gamma, grad_beta};
 }
+
+namespace internal {
+auto make_batch_norm2d_backward(bool affine, double eps, bool training,
+                                std::vector<Tensor> tensors_to_save)
+    -> std::shared_ptr<::tenzor::Function> {
+    return std::make_shared<BatchNorm2dBackward>(affine, eps, training,
+                                                 std::move(tensors_to_save));
+}
+}  // namespace internal
 
 BatchNorm2d::BatchNorm2d(int64_t num_features, double eps, double momentum,
                         bool affine, bool track_running_stats)

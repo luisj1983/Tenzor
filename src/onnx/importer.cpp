@@ -617,6 +617,10 @@ auto ONNXImporter::validate_model(const ONNXModelData& model) -> void {
 }
 
 auto ONNXImporter::convert_graph(const ONNXGraphData& graph) -> std::shared_ptr<nn::Module> {
+    // Retain the host initializer map so control/shape inputs can be read on the
+    // host without uploading the constants to the compute device.
+    initializers_ptr_ = &graph.initializers;
+
     // Load initializers (weights, biases)
     load_initializers(graph);
 
@@ -641,7 +645,25 @@ auto ONNXImporter::convert_graph(const ONNXGraphData& graph) -> std::shared_ptr<
         }
     }
 
+    initializers_ptr_ = nullptr;
     return model;
+}
+
+auto ONNXImporter::get_host_input(const std::string& name) -> Tensor {
+    // Prefer decoding the constant straight from the host proto bytes so it is
+    // never uploaded to the compute device (and there is no device->host copy).
+    if (initializers_ptr_) {
+        auto it = initializers_ptr_->find(name);
+        if (it != initializers_ptr_->end()) {
+            return it->second.to_tensor(Device::cpu());
+        }
+    }
+    // Non-initializer (computed) control input: its value only exists on the
+    // import device, so a host copy is unavoidable to read it for graph
+    // construction. This is rare — Slice/Pad/Resize control inputs are almost
+    // always graph initializers.
+    Tensor t = get_input(name);
+    return (t.device().type == Device::Type::CPU) ? t : t.to(Device::cpu());
 }
 
 auto ONNXImporter::load_initializers(const ONNXGraphData& graph) -> void {
@@ -2015,8 +2037,11 @@ auto ONNXImporter::convert_slice(const ONNXImportNode& node) -> void {
     auto input = get_input(node.inputs[0]);
 
     // ONNX Slice: inputs are [data, starts, ends, axes(optional), steps(optional)]
-    auto starts_t = get_input(node.inputs[1]);
-    auto ends_t = get_input(node.inputs[2]);
+    // Control tensors (starts/ends/axes/steps) are read on the host below, so
+    // force them to CPU first — they may be initializers placed on a GPU device
+    // (dereferencing a device pointer on the host crashes).
+    auto starts_t = get_host_input(node.inputs[1]);
+    auto ends_t = get_host_input(node.inputs[2]);
 
     const int64_t* starts = starts_t.data<int64_t>();
     const int64_t* ends = ends_t.data<int64_t>();
@@ -2026,7 +2051,7 @@ auto ONNXImporter::convert_slice(const ONNXImportNode& node) -> void {
     std::vector<int64_t> steps_vec;
 
     if (node.inputs.size() > 3) {
-        auto axes_t = get_input(node.inputs[3]);
+        auto axes_t = get_host_input(node.inputs[3]);
         const int64_t* axes_data = axes_t.data<int64_t>();
         axes_vec.assign(axes_data, axes_data + axes_t.numel());
     } else {
@@ -2034,7 +2059,7 @@ auto ONNXImporter::convert_slice(const ONNXImportNode& node) -> void {
     }
 
     if (node.inputs.size() > 4) {
-        auto steps_t = get_input(node.inputs[4]);
+        auto steps_t = get_host_input(node.inputs[4]);
         const int64_t* steps_data = steps_t.data<int64_t>();
         steps_vec.assign(steps_data, steps_data + steps_t.numel());
     } else {
@@ -2070,7 +2095,7 @@ auto ONNXImporter::convert_pad(const ONNXImportNode& node) -> void {
 
     std::vector<int64_t> pads_vec;
     if (node.inputs.size() > 1) {
-        auto pads_t = get_input(node.inputs[1]);
+        auto pads_t = get_host_input(node.inputs[1]);
         const int64_t* pads_data = pads_t.data<int64_t>();
         pads_vec.assign(pads_data, pads_data + pads_t.numel());
     } else {
@@ -2214,7 +2239,7 @@ auto ONNXImporter::convert_resize(const ONNXImportNode& node) -> void {
     std::vector<int64_t> output_size;
 
     if (node.inputs.size() > 3 && !node.inputs[3].empty()) {
-        auto sizes_t = get_input(node.inputs[3]);
+        auto sizes_t = get_host_input(node.inputs[3]);
         const int64_t* sizes_data = sizes_t.data<int64_t>();
         // sizes includes batch and channel dims — take only spatial
         int64_t ndim = sizes_t.numel();
@@ -2222,7 +2247,7 @@ auto ONNXImporter::convert_resize(const ONNXImportNode& node) -> void {
             output_size.push_back(sizes_data[i]);
         }
     } else if (node.inputs.size() > 2 && !node.inputs[2].empty()) {
-        auto scales_t = get_input(node.inputs[2]);
+        auto scales_t = get_host_input(node.inputs[2]);
         auto scales_f32 = scales_t.to(DType::Float32);
         const float* scales = scales_f32.data<float>();
         // scales includes batch and channel dims
@@ -2257,7 +2282,7 @@ static auto get_reduce_axes(const ONNXImportNode& node,
         return axes_attr->ints.value();  // full vector, not `at(0)`
     }
     if (node.inputs.size() > 1 && !node.inputs[1].empty()) {
-        auto axes_t = get_input(node.inputs[1]);
+        auto axes_t = get_input(node.inputs[1]);  // host-reader passed by caller
         if (axes_t.numel() > 0) {
             const int64_t* p = axes_t.data<int64_t>();
             return std::vector<int64_t>(p, p + axes_t.numel());
@@ -2301,7 +2326,7 @@ auto ONNXImporter::convert_reduce_sum(const ONNXImportNode& node) -> void {
     auto input = get_input(node.inputs[0]);
     bool keepdims = node.get_attr("keepdims").value_or(ONNXAttribute{}).get_int(1) != 0;
     auto axes = get_reduce_axes(node,
-        [this](const std::string& s) { return this->get_input(s); });
+        [this](const std::string& s) { return this->get_host_input(s); });
     auto result = apply_multi_axis_reduce(input, axes, keepdims,
         [](const Tensor& t, std::optional<int64_t> d, bool k) {
             return tenzor::sum(t, d, k);
@@ -2313,7 +2338,7 @@ auto ONNXImporter::convert_reduce_mean(const ONNXImportNode& node) -> void {
     auto input = get_input(node.inputs[0]);
     bool keepdims = node.get_attr("keepdims").value_or(ONNXAttribute{}).get_int(1) != 0;
     auto axes = get_reduce_axes(node,
-        [this](const std::string& s) { return this->get_input(s); });
+        [this](const std::string& s) { return this->get_host_input(s); });
     auto result = apply_multi_axis_reduce(input, axes, keepdims,
         [](const Tensor& t, std::optional<int64_t> d, bool k) {
             return tenzor::mean(t, d, k);
@@ -2325,7 +2350,7 @@ auto ONNXImporter::convert_reduce_max(const ONNXImportNode& node) -> void {
     auto input = get_input(node.inputs[0]);
     bool keepdims = node.get_attr("keepdims").value_or(ONNXAttribute{}).get_int(1) != 0;
     auto axes = get_reduce_axes(node,
-        [this](const std::string& s) { return this->get_input(s); });
+        [this](const std::string& s) { return this->get_host_input(s); });
     auto result = apply_multi_axis_reduce(input, axes, keepdims,
         [](const Tensor& t, std::optional<int64_t> d, bool k) {
             return tenzor::max(t, d, k);
@@ -2341,7 +2366,7 @@ auto ONNXImporter::convert_reduce_min(const ONNXImportNode& node) -> void {
     auto input = get_input(node.inputs[0]);
     bool keepdims = node.get_attr("keepdims").value_or(ONNXAttribute{}).get_int(1) != 0;
     auto axes = get_reduce_axes(node,
-        [this](const std::string& s) { return this->get_input(s); });
+        [this](const std::string& s) { return this->get_host_input(s); });
     auto result = apply_multi_axis_reduce(input, axes, keepdims,
         [](const Tensor& t, std::optional<int64_t> d, bool k) {
             return tenzor::min(t, d, k);
@@ -2353,7 +2378,7 @@ auto ONNXImporter::convert_reduce_prod(const ONNXImportNode& node) -> void {
     auto input = get_input(node.inputs[0]);
     bool keepdims = node.get_attr("keepdims").value_or(ONNXAttribute{}).get_int(1) != 0;
     auto axes = get_reduce_axes(node,
-        [this](const std::string& s) { return this->get_input(s); });
+        [this](const std::string& s) { return this->get_host_input(s); });
     auto result = apply_multi_axis_reduce(input, axes, keepdims,
         [](const Tensor& t, std::optional<int64_t> d, bool k) {
             return tenzor::prod(t, d, k);
@@ -2366,7 +2391,7 @@ auto ONNXImporter::convert_reduce_l1(const ONNXImportNode& node) -> void {
     auto input = get_input(node.inputs[0]);
     bool keepdims = node.get_attr("keepdims").value_or(ONNXAttribute{}).get_int(1) != 0;
     auto axes = get_reduce_axes(node,
-        [this](const std::string& s) { return this->get_input(s); });
+        [this](const std::string& s) { return this->get_host_input(s); });
     auto abs_in = tenzor::abs(input);
     auto result = apply_multi_axis_reduce(abs_in, axes, keepdims,
         [](const Tensor& t, std::optional<int64_t> d, bool k) {
@@ -2380,7 +2405,7 @@ auto ONNXImporter::convert_reduce_l2(const ONNXImportNode& node) -> void {
     auto input = get_input(node.inputs[0]);
     bool keepdims = node.get_attr("keepdims").value_or(ONNXAttribute{}).get_int(1) != 0;
     auto axes = get_reduce_axes(node,
-        [this](const std::string& s) { return this->get_input(s); });
+        [this](const std::string& s) { return this->get_host_input(s); });
     auto sq = tenzor::mul(input, input);
     auto sum = apply_multi_axis_reduce(sq, axes, keepdims,
         [](const Tensor& t, std::optional<int64_t> d, bool k) {
@@ -2615,6 +2640,22 @@ auto ONNXImporter::convert_quantize_linear(const ONNXImportNode& node) -> void {
     auto x = get_input(node.inputs[0]);
     auto y_scale = get_input(node.inputs[1]);
 
+    // Per-channel quantization: scale/zero_point are 1-D along `axis` (ONNX
+    // default axis = 1). Reshape them to broadcast along that axis rather than
+    // the trailing dim (the previous code ignored `axis`, so per-channel QDQ on
+    // any non-last axis was applied to the wrong dimension).
+    auto qaxis_attr = node.get_attr("axis");
+    int64_t qaxis = qaxis_attr.has_value() ? qaxis_attr->get_int(1) : 1;
+    auto qbcast_shape = [&](const Tensor& t) {
+        std::vector<int64_t> shp(static_cast<size_t>(x.ndim()), 1);
+        int64_t ax = qaxis < 0 ? qaxis + x.ndim() : qaxis;
+        if (ax >= 0 && ax < x.ndim() && t.ndim() == 1) shp[static_cast<size_t>(ax)] = t.shape()[0];
+        return shp;
+    };
+    if (y_scale.ndim() == 1) {
+        y_scale = y_scale.reshape(qbcast_shape(y_scale));
+    }
+
     auto scaled = x / y_scale;
     auto rounded = round(scaled);
 
@@ -2624,7 +2665,9 @@ auto ONNXImporter::convert_quantize_linear(const ONNXImportNode& node) -> void {
     if (node.inputs.size() > 2 && !node.inputs[2].empty()) {
         auto y_zero_point = get_input(node.inputs[2]);
         out_dtype = y_zero_point.dtype();
-        rounded = rounded + y_zero_point.to(rounded.dtype());
+        Tensor zp = (y_zero_point.ndim() == 1)
+            ? y_zero_point.reshape(qbcast_shape(y_zero_point)) : y_zero_point;
+        rounded = rounded + zp.to(rounded.dtype());
 
         switch (out_dtype) {
             case DType::UInt8:    sat_lo =       0.0; sat_hi =     255.0; break;
@@ -2657,12 +2700,28 @@ auto ONNXImporter::convert_dequantize_linear(const ONNXImportNode& node) -> void
     auto x = get_input(node.inputs[0]);
     auto x_scale = get_input(node.inputs[1]);
 
+    // Per-channel dequant: scale/zero_point are 1-D along `axis` (default 1);
+    // reshape to broadcast along that axis instead of the trailing dim.
+    auto dqaxis_attr = node.get_attr("axis");
+    int64_t dqaxis = dqaxis_attr.has_value() ? dqaxis_attr->get_int(1) : 1;
+    auto dqbcast_shape = [&](const Tensor& t) {
+        std::vector<int64_t> shp(static_cast<size_t>(x.ndim()), 1);
+        int64_t ax = dqaxis < 0 ? dqaxis + x.ndim() : dqaxis;
+        if (ax >= 0 && ax < x.ndim() && t.ndim() == 1) shp[static_cast<size_t>(ax)] = t.shape()[0];
+        return shp;
+    };
+    if (x_scale.ndim() == 1) {
+        x_scale = x_scale.reshape(dqbcast_shape(x_scale));
+    }
+
     // Convert quantized input to float
     auto x_float = x.to(DType::Float32);
 
     if (node.inputs.size() > 2 && !node.inputs[2].empty()) {
         auto x_zero_point = get_input(node.inputs[2]);
-        x_float = x_float - x_zero_point.to(DType::Float32);
+        Tensor zp = (x_zero_point.ndim() == 1)
+            ? x_zero_point.reshape(dqbcast_shape(x_zero_point)) : x_zero_point;
+        x_float = x_float - zp.to(DType::Float32);
     }
 
     auto result = x_float * x_scale;

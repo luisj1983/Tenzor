@@ -1,6 +1,7 @@
 #include "tenzor/sparse/sparse_ops.hpp"
 #include "tenzor/ops/creation.hpp"
 #include "tenzor/ops/math.hpp"
+#include "tenzor/ops/transform.hpp"
 #include "tenzor/ops/type_promotion.hpp"
 #include "tenzor/backend/dispatch_table.hpp"
 #include <algorithm>
@@ -1224,65 +1225,28 @@ auto add(const SparseTensor& a, const SparseTensor& b) -> SparseTensor {
             std::string(dtype_name(b.dtype())));
     }
 
-    // Convert both to COO, concatenate indices and values
+    // Concatenate the two COO tensors along the nnz axis and coalesce. Both the
+    // index/value concatenation (tenzor::cat) and the coalesce dispatch to the
+    // active backend, so this stays on-device for CUDA/ROCm (Vulkan/OneAPI fall
+    // to coalesce's host path, consistent with the rest of the sparse subsystem).
+    // No host pointer math, every dtype supported (cat covers int/half/complex).
     auto a_coo = a.to_coo();
     auto b_coo = b.to_coo();
+    const int64_t nnz_a = a_coo.nnz();
+    const int64_t nnz_b = b_coo.nnz();
+    const int64_t sparse_dim = a_coo.sparse_dim();
+    auto shape_vec = std::vector<int64_t>(a.shape().begin(), a.shape().end());
 
-    int64_t nnz_a = a_coo.nnz();
-    int64_t nnz_b = b_coo.nnz();
-    int64_t total_nnz = nnz_a + nnz_b;
-    int64_t sparse_dim = a_coo.sparse_dim();
-
-    if (total_nnz == 0) {
+    if (nnz_a + nnz_b == 0) {
         auto indices = Tensor({sparse_dim, int64_t(0)}, DType::Int64, a.device());
         auto values = Tensor({int64_t(0)}, a.dtype(), a.device());
-        return SparseTensor::sparse_coo(indices, values, std::vector<int64_t>(a.shape().begin(), a.shape().end()));
+        return SparseTensor::sparse_coo(indices, values, shape_vec);
     }
+    if (nnz_a == 0) return b_coo.coalesce();
+    if (nnz_b == 0) return a_coo.coalesce();
 
-    // Concatenate indices
-    auto new_indices = Tensor({sparse_dim, total_nnz}, DType::Int64, a.device());
-    auto* ni_ptr = new_indices.data<int64_t>();
-
-    if (nnz_a > 0) {
-        auto a_idx = a_coo.indices().contiguous();
-        auto* a_ptr = a_idx.data<int64_t>();
-        for (int64_t d = 0; d < sparse_dim; ++d) {
-            std::memcpy(ni_ptr + d * total_nnz, a_ptr + d * nnz_a, nnz_a * sizeof(int64_t));
-        }
-    }
-    if (nnz_b > 0) {
-        auto b_idx = b_coo.indices().contiguous();
-        auto* b_ptr = b_idx.data<int64_t>();
-        for (int64_t d = 0; d < sparse_dim; ++d) {
-            std::memcpy(ni_ptr + d * total_nnz + nnz_a, b_ptr + d * nnz_b, nnz_b * sizeof(int64_t));
-        }
-    }
-
-    // Concatenate values
-    auto new_values = Tensor({total_nnz}, a.dtype(), a.device());
-    if (a.dtype() == DType::Float32) {
-        auto* nv = new_values.data<float>();
-        if (nnz_a > 0) {
-            auto av = a_coo.values().contiguous();
-            std::memcpy(nv, av.data<float>(), nnz_a * sizeof(float));
-        }
-        if (nnz_b > 0) {
-            auto bv = b_coo.values().contiguous();
-            std::memcpy(nv + nnz_a, bv.data<float>(), nnz_b * sizeof(float));
-        }
-    } else if (a.dtype() == DType::Float64) {
-        auto* nv = new_values.data<double>();
-        if (nnz_a > 0) {
-            auto av = a_coo.values().contiguous();
-            std::memcpy(nv, av.data<double>(), nnz_a * sizeof(double));
-        }
-        if (nnz_b > 0) {
-            auto bv = b_coo.values().contiguous();
-            std::memcpy(nv + nnz_a, bv.data<double>(), nnz_b * sizeof(double));
-        }
-    }
-
-    auto shape_vec = std::vector<int64_t>(a.shape().begin(), a.shape().end());
+    Tensor new_indices = tenzor::cat({a_coo.indices(), b_coo.indices()}, /*dim=*/1);
+    Tensor new_values  = tenzor::cat({a_coo.values(),  b_coo.values()},  /*dim=*/0);
     return SparseTensor::sparse_coo(new_indices, new_values, shape_vec).coalesce();
 }
 
@@ -1292,66 +1256,11 @@ auto add(const SparseTensor& a, const SparseTensor& b) -> SparseTensor {
 
 auto mul(const SparseTensor& sparse, double scalar) -> SparseTensor {
     auto vals = sparse.values().contiguous();
-    int64_t nnz = sparse.nnz();
 
-    // Audit J13: F16/BF16 widen-narrow. The branched scalar multiplication
-    // below has no native half-precision path; widen to F32 around the call.
-    if (vals.dtype() == DType::Float16 || vals.dtype() == DType::BFloat16) {
-        DType orig = vals.dtype();
-        SparseTensor widened = (sparse.layout() == SparseLayout::COO)
-            ? SparseTensor::sparse_coo(sparse.indices(),
-                                       vals.to(DType::Float32),
-                                       std::vector<int64_t>(sparse.shape().begin(),
-                                                            sparse.shape().end()))
-            : SparseTensor::sparse_csr(sparse.crow_indices(), sparse.col_indices(),
-                                       vals.to(DType::Float32),
-                                       std::vector<int64_t>(sparse.shape().begin(),
-                                                            sparse.shape().end()));
-        SparseTensor result = mul(widened, scalar);
-        Tensor narrowed = result.values().to(orig);
-        auto shape_vec = std::vector<int64_t>(sparse.shape().begin(), sparse.shape().end());
-        return (sparse.layout() == SparseLayout::COO)
-            ? SparseTensor::sparse_coo(result.indices(), narrowed, shape_vec)
-            : SparseTensor::sparse_csr(result.crow_indices(), result.col_indices(),
-                                       narrowed, shape_vec);
-    }
-
-    auto new_values = Tensor({nnz}, vals.dtype(), vals.device());
-    if (vals.dtype() == DType::Float32) {
-        auto* src = vals.data<float>();
-        auto* dst = new_values.data<float>();
-        float s = static_cast<float>(scalar);
-        #pragma omp parallel for schedule(static) if(nnz > 65536)
-        for (int64_t i = 0; i < nnz; ++i) {
-            dst[i] = src[i] * s;
-        }
-    } else if (vals.dtype() == DType::Float64) {
-        auto* src = vals.data<double>();
-        auto* dst = new_values.data<double>();
-        #pragma omp parallel for schedule(static) if(nnz > 65536)
-        for (int64_t i = 0; i < nnz; ++i) {
-            dst[i] = src[i] * scalar;
-        }
-    } else if (vals.dtype() == DType::Int32) {
-        auto* src = vals.data<int32_t>();
-        auto* dst = new_values.data<int32_t>();
-        int32_t s = static_cast<int32_t>(scalar);
-        #pragma omp parallel for schedule(static) if(nnz > 65536)
-        for (int64_t i = 0; i < nnz; ++i) {
-            dst[i] = src[i] * s;
-        }
-    } else if (vals.dtype() == DType::Int64) {
-        auto* src = vals.data<int64_t>();
-        auto* dst = new_values.data<int64_t>();
-        int64_t s = static_cast<int64_t>(scalar);
-        #pragma omp parallel for schedule(static) if(nnz > 65536)
-        for (int64_t i = 0; i < nnz; ++i) {
-            dst[i] = src[i] * s;
-        }
-    } else {
-        throw std::runtime_error("sparse::mul: unsupported dtype " +
-            std::string(dtype_name(vals.dtype())));
-    }
+    // Scalar-multiply the value buffer with the standard dense elementwise op.
+    // It dispatches to the active backend (CPU/CUDA/ROCm/Vulkan/OneAPI) and
+    // covers every dtype, so there is no host pointer math on device memory.
+    Tensor new_values = tenzor::mul(vals, scalar);
 
     auto shape_vec = std::vector<int64_t>(sparse.shape().begin(), sparse.shape().end());
     if (sparse.layout() == SparseLayout::COO) {
@@ -1837,6 +1746,17 @@ auto sparse_softmax(const SparseTensor& sparse) -> SparseTensor {
         throw std::runtime_error("sparse_softmax: input must be 2D");
     }
 
+    // Float16/BFloat16: widen values to Float32, softmax, narrow back.
+    if (sparse.values().dtype() == DType::Float16 || sparse.values().dtype() == DType::BFloat16) {
+        const DType orig = sparse.values().dtype();
+        std::vector<int64_t> shp(sparse.shape().begin(), sparse.shape().end());
+        auto widened = SparseTensor::sparse_csr(sparse.crow_indices(), sparse.col_indices(),
+                                                sparse.values().to(DType::Float32), shp);
+        auto res = sparse_softmax(widened);
+        return SparseTensor::sparse_csr(res.crow_indices(), res.col_indices(),
+                                        res.values().to(orig), shp);
+    }
+
     int64_t M = shape[0];
     auto crow = sparse.crow_indices();
     auto col = sparse.col_indices();
@@ -1928,6 +1848,17 @@ auto sparse_log_softmax(const SparseTensor& sparse) -> SparseTensor {
     auto shape = sparse.shape();
     if (shape.size() != 2) {
         throw std::runtime_error("sparse_log_softmax: input must be 2D");
+    }
+
+    // Float16/BFloat16: widen values to Float32, log-softmax, narrow back.
+    if (sparse.values().dtype() == DType::Float16 || sparse.values().dtype() == DType::BFloat16) {
+        const DType orig = sparse.values().dtype();
+        std::vector<int64_t> shp(sparse.shape().begin(), sparse.shape().end());
+        auto widened = SparseTensor::sparse_csr(sparse.crow_indices(), sparse.col_indices(),
+                                                sparse.values().to(DType::Float32), shp);
+        auto res = sparse_log_softmax(widened);
+        return SparseTensor::sparse_csr(res.crow_indices(), res.col_indices(),
+                                        res.values().to(orig), shp);
     }
 
     int64_t M = shape[0];

@@ -606,10 +606,13 @@ auto cholesky(const Tensor& A, bool upper) -> Tensor {
 
 auto norm(const Tensor& A, const std::string& ord) -> Tensor {
     if (ord == "fro") {
-        // Frobenius norm: sqrt(sum(x^2)). Expressed in pure tensor ops so it
+        // Frobenius norm: sqrt(sum(|x|^2)). Expressed in pure tensor ops so it
         // runs device-agnostically (CPU / CUDA / etc.) — no dedicated kernel
-        // needed.
-        auto flat = A.contiguous().reshape({A.numel()});
+        // needed. For complex inputs use the elementwise magnitude so we sum
+        // |z|^2 (z*conj(z)) rather than z^2.
+        Tensor mag = (A.dtype() == DType::Complex64 || A.dtype() == DType::Complex128)
+            ? tenzor::abs(A) : A;
+        auto flat = mag.contiguous().reshape({mag.numel()});
         auto sq = flat * flat;
         auto s = tenzor::sum(sq);
         return tenzor::sqrt(s);
@@ -2221,6 +2224,12 @@ auto vector_norm(const Tensor& input, double ord,
     // GPU tensors use the same tensor-op path (ops dispatch per-element).
 
     auto x = input;
+    // Complex vector norm = norm of elementwise magnitudes (PyTorch semantics);
+    // reduce to the real magnitude up front so the downstream real-valued ops
+    // (pow / sum / max) compute the correct result on every backend.
+    if (input.dtype() == DType::Complex64 || input.dtype() == DType::Complex128) {
+        x = tenzor::abs(input);
+    }
 
     // Helper: reduce over a single dim or all dims
     auto reduce_sum = [&](const Tensor& t, const std::vector<int64_t>& dims,

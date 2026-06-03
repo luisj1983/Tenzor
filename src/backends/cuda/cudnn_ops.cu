@@ -2503,6 +2503,7 @@ auto cudnn_avgpool2d_forward(
     int64_t kernel_size,
     int64_t stride,
     int64_t padding,
+    bool count_include_pad,
     cudaStream_t stream
 ) -> Tensor {
     return cudnn_avgpool2d_forward(
@@ -2510,6 +2511,7 @@ auto cudnn_avgpool2d_forward(
         kernel_size, kernel_size,
         stride, stride,
         padding, padding,
+        count_include_pad,
         stream);
 }
 
@@ -2518,6 +2520,7 @@ auto cudnn_avgpool2d_forward(
     int64_t kernel_h, int64_t kernel_w,
     int64_t stride_h, int64_t stride_w,
     int64_t pad_h, int64_t pad_w,
+    bool count_include_pad,
     cudaStream_t stream
 ) -> Tensor {
     auto shape = input.shape();
@@ -2549,7 +2552,7 @@ auto cudnn_avgpool2d_forward(
 
     input_desc.set(cudnn_dtype, batch, channels, height, width);
     output_desc.set(cudnn_dtype, batch, channels, out_h, out_w);
-    pool_desc.set_avgpool(kernel_h, kernel_w, pad_h, pad_w, stride_h, stride_w);
+    pool_desc.set_avgpool(kernel_h, kernel_w, pad_h, pad_w, stride_h, stride_w, count_include_pad);
 
     // cuDNN requires alpha/beta type to match tensor dtype
     if (input.dtype() == DType::Float64) {
@@ -2591,6 +2594,7 @@ auto cudnn_avgpool2d_backward(
     int64_t kernel_size,
     int64_t stride,
     int64_t padding,
+    bool count_include_pad,
     cudaStream_t stream
 ) -> Tensor {
     return cudnn_avgpool2d_backward(
@@ -2598,6 +2602,7 @@ auto cudnn_avgpool2d_backward(
         kernel_size, kernel_size,
         stride, stride,
         padding, padding,
+        count_include_pad,
         stream);
 }
 
@@ -2607,6 +2612,7 @@ auto cudnn_avgpool2d_backward(
     int64_t kernel_h, int64_t kernel_w,
     int64_t stride_h, int64_t stride_w,
     int64_t pad_h, int64_t pad_w,
+    bool count_include_pad,
     cudaStream_t stream
 ) -> Tensor {
     auto in_shape = input.shape();
@@ -2639,7 +2645,7 @@ auto cudnn_avgpool2d_backward(
 
     input_desc.set(cudnn_dtype, batch, channels, height, width);
     output_desc.set(cudnn_dtype, batch, channels, out_h, out_w);
-    pool_desc.set_avgpool(kernel_h, kernel_w, pad_h, pad_w, stride_h, stride_w);
+    pool_desc.set_avgpool(kernel_h, kernel_w, pad_h, pad_w, stride_h, stride_w, count_include_pad);
 
     // AvgPool backward doesn't need original output, but cuDNN API requires all params
     Tensor dummy_output({batch, channels, out_h, out_w}, input.dtype(), input.device());

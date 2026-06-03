@@ -1,0 +1,36 @@
+#version 450
+
+// ScatterAdd (Int32): atomically accumulates integer source values into the
+// output along a dimension. Equivalent to: output[...][index[i]][...] += src[i].
+// Integer atomicAdd is core Vulkan (no extension needed), so no CAS loop.
+// Narrow integer dtypes are widened to Int32 by the host before dispatch;
+// 64-bit integers are narrowed to Int32 (sparse counts/indices are in range).
+layout(local_size_x_id = 0) in;
+
+layout(binding = 0) buffer Src { int src_data[]; };      // Source values
+layout(binding = 1) buffer Index { int idx_data[]; };    // Index tensor (same shape as src)
+layout(binding = 2) buffer Output { int out_data[]; };   // Self/output
+
+layout(push_constant) uniform PushConstants {
+    uint n;             // Number of source elements
+    uint dim_size;      // Size of scatter dimension in output
+    uint inner_size;    // Product of dims after scatter dim
+    uint src_dim_size;  // Size of scatter dimension in source
+} params;
+
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    if (i >= params.n) return;
+
+    uint inner_idx = i % params.inner_size;
+    uint outer_idx = i / (params.inner_size * params.src_dim_size);
+
+    int dest_dim_idx = idx_data[i];
+    if (dest_dim_idx < 0 || dest_dim_idx >= int(params.dim_size)) return;
+
+    uint out_idx = outer_idx * (params.dim_size * params.inner_size) +
+                   uint(dest_dim_idx) * params.inner_size +
+                   inner_idx;
+
+    atomicAdd(out_data[out_idx], src_data[i]);
+}

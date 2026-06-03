@@ -678,6 +678,8 @@ auto VulkanBackend::dispatchConv3dForward(const Tensor& input, const Tensor& wei
         shader_name = "conv3d_forward_f64";
     } else if (input.dtype() == DType::Float16) {
         shader_name = "conv3d_forward_f16";
+    } else if (input.dtype() == DType::BFloat16) {
+        shader_name = "conv3d_forward_bf16";
     }
     auto* pipeline = getPipeline(shader_name, device_id);
 
@@ -691,11 +693,17 @@ auto VulkanBackend::dispatchConv3dForward(const Tensor& input, const Tensor& wei
     const void* buffer_output = output.data_ptr();
     const void* buffer_bias = has_bias ? bias->data_ptr() : buffer_output;
 
-    // Calculate buffer sizes
-    size_t buffer_size_input = input.numel() * input.dtype_size();
-    size_t buffer_size_weight = weight.numel() * weight.dtype_size();
-    size_t buffer_size_output = output.numel() * output.dtype_size();
-    size_t buffer_size_bias = has_bias ? (bias->numel() * bias->dtype_size()) : 4;
+    // Calculate buffer sizes. The BFloat16 shader packs two elements per uint32
+    // word, so round each buffer up to a 4-byte boundary. Float16 uses a native
+    // 16-bit shader and Float32/64 are unpacked, so element*size suffices there.
+    const bool is_bf16_packed = (input.dtype() == DType::BFloat16);
+    auto bf16_words = [](int64_t numel) -> size_t { return ((numel + 1) / 2) * 4; };
+    size_t buffer_size_input = is_bf16_packed ? bf16_words(input.numel()) : input.numel() * input.dtype_size();
+    size_t buffer_size_weight = is_bf16_packed ? bf16_words(weight.numel()) : weight.numel() * weight.dtype_size();
+    size_t buffer_size_output = is_bf16_packed ? bf16_words(output.numel()) : output.numel() * output.dtype_size();
+    size_t buffer_size_bias = has_bias
+        ? (is_bf16_packed ? bf16_words(bias->numel()) : bias->numel() * bias->dtype_size())
+        : 4;
 
     // Setup descriptor set bindings (input, weight, bias, output)
     std::vector<std::pair<uint32_t, const void*>> bindings = {
@@ -831,6 +839,8 @@ auto VulkanBackend::dispatchConv3dBackwardInput(
         shader_name = "conv3d_backward_input_f64";
     } else if (grad_output.dtype() == DType::Float16) {
         shader_name = "conv3d_backward_input_f16";
+    } else if (grad_output.dtype() == DType::BFloat16) {
+        shader_name = "conv3d_backward_input_bf16";
     }
     auto* pipeline = getPipeline(shader_name, device_id);
 
@@ -844,7 +854,7 @@ auto VulkanBackend::dispatchConv3dBackwardInput(
 
     // Calculate buffer sizes (round up to 4-byte boundary for F16 packed uint32 access)
     size_t buffer_size_grad_out, buffer_size_weight, buffer_size_grad_in;
-    if (grad_output.dtype() == DType::Float16) {
+    if (grad_output.dtype() == DType::Float16 || grad_output.dtype() == DType::BFloat16) {
         buffer_size_grad_out = ((grad_output.numel() + 1) / 2) * 4;
         buffer_size_weight = ((weight.numel() + 1) / 2) * 4;
         buffer_size_grad_in = ((grad_input.numel() + 1) / 2) * 4;
@@ -979,6 +989,8 @@ auto VulkanBackend::dispatchConv3dBackwardWeight(
         shader_name = "conv3d_backward_weight_f64";
     } else if (grad_output.dtype() == DType::Float16) {
         shader_name = "conv3d_backward_weight_f16";
+    } else if (grad_output.dtype() == DType::BFloat16) {
+        shader_name = "conv3d_backward_weight_bf16";
     }
     auto* pipeline = getPipeline(shader_name, device_id);
 
@@ -992,7 +1004,7 @@ auto VulkanBackend::dispatchConv3dBackwardWeight(
 
     // Calculate buffer sizes (round up to 4-byte boundary for F16 packed uint32 access)
     size_t buffer_size_grad_out, buffer_size_input, buffer_size_grad_weight;
-    if (grad_output.dtype() == DType::Float16) {
+    if (grad_output.dtype() == DType::Float16 || grad_output.dtype() == DType::BFloat16) {
         buffer_size_grad_out = ((grad_output.numel() + 1) / 2) * 4;
         buffer_size_input = ((input.numel() + 1) / 2) * 4;
         buffer_size_grad_weight = ((grad_weight.numel() + 1) / 2) * 4;
@@ -1110,6 +1122,8 @@ auto VulkanBackend::dispatchConv3dBackwardBias(const Tensor& grad_output) -> Ten
         shader_name = "conv3d_backward_bias_f64";
     } else if (grad_output.dtype() == DType::Float16) {
         shader_name = "conv3d_backward_bias_f16";
+    } else if (grad_output.dtype() == DType::BFloat16) {
+        shader_name = "conv3d_backward_bias_bf16";
     }
     auto* pipeline = getPipeline(shader_name, device_id);
 
@@ -1123,7 +1137,7 @@ auto VulkanBackend::dispatchConv3dBackwardBias(const Tensor& grad_output) -> Ten
 
     // Calculate buffer sizes (round up to 4-byte boundary for F16 packed uint32 access)
     size_t buffer_size_grad_out, buffer_size_grad_bias;
-    if (grad_output.dtype() == DType::Float16) {
+    if (grad_output.dtype() == DType::Float16 || grad_output.dtype() == DType::BFloat16) {
         buffer_size_grad_out = ((grad_output.numel() + 1) / 2) * 4;
         buffer_size_grad_bias = ((grad_bias.numel() + 1) / 2) * 4;
     } else {

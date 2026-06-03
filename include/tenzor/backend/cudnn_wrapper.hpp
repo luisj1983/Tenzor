@@ -1540,6 +1540,7 @@ auto cudnn_avgpool2d_forward(
     int64_t kernel_size,
     int64_t stride,
     int64_t padding,
+    bool count_include_pad,
     cudaStream_t stream
 ) -> Tensor;
 
@@ -1549,6 +1550,7 @@ auto cudnn_avgpool2d_forward(
     int64_t kernel_h, int64_t kernel_w,
     int64_t stride_h, int64_t stride_w,
     int64_t pad_h, int64_t pad_w,
+    bool count_include_pad,
     cudaStream_t stream
 ) -> Tensor;
 
@@ -1558,6 +1560,7 @@ auto cudnn_avgpool2d_backward(
     int64_t kernel_size,
     int64_t stride,
     int64_t padding,
+    bool count_include_pad,
     cudaStream_t stream
 ) -> Tensor;
 
@@ -1568,6 +1571,7 @@ auto cudnn_avgpool2d_backward(
     int64_t kernel_h, int64_t kernel_w,
     int64_t stride_h, int64_t stride_w,
     int64_t pad_h, int64_t pad_w,
+    bool count_include_pad,
     cudaStream_t stream
 ) -> Tensor;
 

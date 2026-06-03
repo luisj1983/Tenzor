@@ -82,7 +82,11 @@ auto QuantizedLinear::forward_impl(const Variable& input) -> Variable {
     // gradients cannot flow through. For QAT training, compose a regular
     // Linear with a FakeQuantize module, which uses the STE backward path.
     // Returning a Variable with requires_grad=false makes this honest.
-    auto q_input = quantize_per_tensor_symmetric(input.tensor());
+    // Static quantization: quantize the input with the calibrated activation
+    // scale/zero_point; otherwise fall back to dynamic per-call computation.
+    auto q_input = activation_qparams_.has_value()
+        ? quantize_tensor(input.tensor(), *activation_qparams_)
+        : quantize_per_tensor_symmetric(input.tensor());
     Tensor output = forward_quantized(q_input);
     return Variable(output, /*requires_grad=*/false);
 }
@@ -331,7 +335,10 @@ QuantizedConv2d::QuantizedConv2d(
 auto QuantizedConv2d::forward_impl(const Variable& input) -> Variable {
     // Inference-only: see QuantizedLinear::forward_impl for rationale.
     // Compose Conv2d + FakeQuantize for QAT training instead.
-    auto q_input = quantize_per_tensor_symmetric(input.tensor());
+    // Static quantization: quantize input with calibrated activation qparams.
+    auto q_input = activation_qparams_.has_value()
+        ? quantize_tensor(input.tensor(), *activation_qparams_)
+        : quantize_per_tensor_symmetric(input.tensor());
     Tensor output = forward_quantized(q_input);
     return Variable(output, /*requires_grad=*/false);
 }

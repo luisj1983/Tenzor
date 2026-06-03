@@ -25,25 +25,47 @@
  */
 
 #include "tenzor/utils/logging.hpp"
-#include "tenzor/utils/log.hpp"
 
-#include <spdlog/sinks/basic_file_sink.h>
-
+#include <chrono>
+#include <ctime>
+#include <fstream>
+#include <iomanip>
+#include <iostream>
+#include <mutex>
+#include <sstream>
 #include <string>
 
 namespace tenzor {
 
 namespace {
 
-auto to_spdlog_level(LogLevel level) -> spdlog::level::level_enum {
+auto level_tag(LogLevel level) -> const char* {
     switch (level) {
-        case LogLevel::Debug:   return spdlog::level::debug;
-        case LogLevel::Info:    return spdlog::level::info;
-        case LogLevel::Warning: return spdlog::level::warn;
-        case LogLevel::Error:   return spdlog::level::err;
-        case LogLevel::Fatal:   return spdlog::level::critical;
+        case LogLevel::Debug:   return "DEBUG";
+        case LogLevel::Info:    return "INFO";
+        case LogLevel::Warning: return "WARNING";
+        case LogLevel::Error:   return "ERROR";
+        case LogLevel::Fatal:   return "FATAL";
     }
-    return spdlog::level::info;
+    return "INFO";
+}
+
+auto timestamp_now() -> std::string {
+    using namespace std::chrono;
+    const auto now = system_clock::now();
+    const auto t = system_clock::to_time_t(now);
+    const auto ms =
+        duration_cast<milliseconds>(now.time_since_epoch()) % 1000;
+    std::tm tm_buf{};
+#if defined(_WIN32)
+    localtime_s(&tm_buf, &t);
+#else
+    localtime_r(&t, &tm_buf);
+#endif
+    std::ostringstream os;
+    os << std::put_time(&tm_buf, "%Y-%m-%d %H:%M:%S") << '.'
+       << std::setfill('0') << std::setw(3) << ms.count();
+    return os.str();
 }
 
 }  // namespace
@@ -55,12 +77,30 @@ auto Logger::instance() -> Logger& {
 
 auto Logger::log(LogLevel level, std::string_view message,
                 [[maybe_unused]] const std::source_location& location) -> void {
+    std::lock_guard<std::mutex> lock(mutex_);
     if (level < level_) return;
-    // Forward to the unified spdlog facade. The "%v" pattern in log.cpp
-    // already prefixes timestamp + severity + logger name, so we just emit
-    // the raw message payload.
-    auto lg = ::tenzor::utils::logger();
-    lg->log(to_spdlog_level(level), "{}", message);
+
+    // Legacy contract (restored): each line is
+    //   [YYYY-MM-DD HH:MM:SS.mmm] [LEVEL] message
+    // with an uppercase severity tag (DEBUG/INFO/WARNING/ERROR/FATAL),
+    // emitted to std::cout when the console is enabled and/or to the
+    // configured output file, and flushed per line so consumers that read
+    // the stream/file immediately after logging (tests, crash handlers)
+    // observe the message.
+    std::string line;
+    line.reserve(message.size() + 48);
+    line.append("[").append(timestamp_now()).append("] [")
+        .append(level_tag(level)).append("] ")
+        .append(message).append("\n");
+
+    if (console_enabled_) {
+        std::cout << line;
+        std::cout.flush();
+    }
+    if (file_stream_.is_open()) {
+        file_stream_ << line;
+        file_stream_.flush();
+    }
 }
 
 auto Logger::debug(std::string_view message, const std::source_location& location) -> void {
@@ -84,12 +124,8 @@ auto Logger::fatal(std::string_view message, const std::source_location& locatio
 }
 
 auto Logger::set_level(LogLevel level) -> void {
+    std::lock_guard<std::mutex> lock(mutex_);
     level_ = level;
-    // Mirror onto the spdlog logger so env-driven filters and Logger-driven
-    // filters stay in sync. The minimum of the two wins (spdlog's filter is
-    // checked first; if it passes, our LogLevel `level_` is the second
-    // gate inside Logger::log).
-    ::tenzor::utils::logger()->set_level(to_spdlog_level(level));
 }
 
 auto Logger::get_level() const -> LogLevel {
@@ -97,27 +133,19 @@ auto Logger::get_level() const -> LogLevel {
 }
 
 auto Logger::set_output_file(std::string_view path) -> void {
-    output_file_ = path;
-    // Attach a file sink to the unified spdlog logger. Idempotent in spirit:
-    // adding a sink with the same path twice will duplicate writes, so this
-    // is best-effort and mostly used by tests.
-    try {
-        auto lg = ::tenzor::utils::logger();
-        auto file_sink = std::make_shared<spdlog::sinks::basic_file_sink_mt>(
-            std::string(path), /*truncate=*/false);
-        lg->sinks().push_back(std::move(file_sink));
-    } catch (const std::exception&) {
-        // Permission denied or path unreachable — silently fall back to the
-        // existing sinks (stderr remains available).
+    std::lock_guard<std::mutex> lock(mutex_);
+    output_file_ = std::string(path);
+    if (file_stream_.is_open()) {
+        file_stream_.close();
+    }
+    if (!output_file_.empty()) {
+        file_stream_.open(output_file_, std::ios::out | std::ios::trunc);
     }
 }
 
 auto Logger::enable_console(bool enable) -> void {
+    std::lock_guard<std::mutex> lock(mutex_);
     console_enabled_ = enable;
-    // The unified spdlog logger always keeps a stderr sink (created in
-    // log.cpp), so this flag is now an API-compat hint only. It is stored
-    // but no longer drives output routing — disabling stderr globally would
-    // affect every other consumer of the unified logger.
 }
 
 } // namespace tenzor

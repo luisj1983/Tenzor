@@ -141,33 +141,21 @@ auto randn_kernel(const std::vector<int64_t>& shape, DType dtype, Device device,
         uint32_t c0 = counter;
         uint32_t c1 = ~counter;
         uint32_t k0 = key;
-        uint32_t k1 = ~key;
 
-        // Philox multiplier constants
-        constexpr uint32_t M0 = 0xD2511F53u;
-        constexpr uint32_t M1 = 0xCD9E8D57u;
-        constexpr uint32_t BUMP = 0x9E3779B9u;
-        constexpr uint32_t BUMP1 = 0xBB67AE85u;
-
-        // 10 rounds of Philox mixing
+        // Philox-2x32-10 (Salmon et al., "Parallel Random Numbers", 2011).
+        // Each round multiplies the counter lane c0, then mixes the high word
+        // with c1 and the key; the key advances by the Weyl constant. The
+        // previous loop mixed 4x32 multipliers into a 2-lane state with
+        // redundant self-assignments, producing a biased non-Philox stream.
+        constexpr uint32_t PHILOX_M = 0xD256D193u;  // 2x32 multiplier
+        constexpr uint32_t PHILOX_W = 0x9E3779B9u;  // Weyl key increment
         for (int round = 0; round < 10; ++round) {
-            uint32_t hi0 = static_cast<uint32_t>((static_cast<uint64_t>(c0) * M0) >> 32);
-            uint32_t lo0 = c0 * M0;
-            uint32_t hi1 = static_cast<uint32_t>((static_cast<uint64_t>(c1) * M1) >> 32);
-            uint32_t lo1 = c1 * M1;
-
-            c0 = hi1 ^ c0 ^ k0;
-            c1 = lo1;
-            uint32_t tmp0 = hi0 ^ c1 ^ k1;
-            uint32_t tmp1 = lo0;
-            c0 = c0;     // already set
-            c1 = tmp0;
-            // Reassign for 4-element version
-            c0 = hi1 ^ k0 ^ c0;
-            c1 = lo1;
-            // Bump key
-            k0 += BUMP;
-            k1 += BUMP1;
+            uint32_t hi = static_cast<uint32_t>((static_cast<uint64_t>(c0) * PHILOX_M) >> 32);
+            uint32_t lo = c0 * PHILOX_M;
+            uint32_t new_c0 = hi ^ c1 ^ k0;
+            c1 = lo;
+            c0 = new_c0;
+            k0 += PHILOX_W;
         }
 
         // Convert two uint32 outputs to uniform [0,1) floats

@@ -3990,10 +3990,12 @@ Returns:
          py::call_guard<py::gil_scoped_release>());
 
     // Statistical operations (cov, corrcoef)
-    m.def("cov", [](const tenzor::Tensor& input, int64_t correction) {
-         return tenzor::cov(input, correction);
-         }, "Compute sample covariance matrix",
+    m.def("cov", [](const tenzor::Tensor& input, int64_t correction,
+                    const tenzor::Tensor& fweights, const tenzor::Tensor& aweights) {
+         return tenzor::cov(input, correction, fweights, aweights);
+         }, "Compute sample covariance matrix (optional fweights/aweights)",
          py::arg("input"), py::arg("correction") = 1,
+         py::arg("fweights") = tenzor::Tensor(), py::arg("aweights") = tenzor::Tensor(),
          py::call_guard<py::gil_scoped_release>());
     m.def("corrcoef", [](const tenzor::Tensor& input) {
          return tenzor::corrcoef(input);

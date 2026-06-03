@@ -1086,6 +1086,39 @@ auto SparseTensor::to_csc() const -> SparseTensor {
     }
 #endif
 
+    // No native CSC kernel for this device (e.g. Vulkan/OneAPI). Build CSC
+    // entirely on-device using the same primitives as coalesce(): sort the COO
+    // by a column-major key (col*nrows + row), reorder rows/values with
+    // index_select, and build the column-pointer array via on-device
+    // bincount (scatter_add) + cumsum. No CPU staging, no host pointer math.
+    if (values_.device().type != Device::Type::CPU) {
+        auto coo = to_coo();
+        const int64_t nnz = coo.nnz();
+        const int64_t nrows = shape_[0];
+        const int64_t ncols = shape_[1];
+        Device dev = values_.device();
+        if (nnz == 0) {
+            return sparse_csc(zeros({ncols + 1}, DType::Int64, dev),
+                              zeros({int64_t(0)}, DType::Int64, dev),
+                              zeros({int64_t(0)}, values_.dtype(), dev), shape_);
+        }
+        Tensor idx = coo.indices().contiguous();  // (2, nnz)
+        Tensor row = reshape(slice(idx, 0, 0, 1), {nnz}).contiguous();
+        Tensor col = reshape(slice(idx, 0, 1, 2), {nnz}).contiguous();
+        // Column-major sort key so entries order by column then row.
+        Tensor key = add(mul(col, full({nnz}, static_cast<double>(nrows), DType::Int64, dev)), row);
+        auto [sorted_key, perm] = ::tenzor::sort(key, /*dim=*/0, /*descending=*/false);
+        Tensor row_sorted = index_select(row, /*dim=*/0, perm);
+        Tensor val_sorted = index_select(coo.values(), /*dim=*/0, perm);
+        // Column pointers: per-column counts (order-independent) -> cumsum.
+        Tensor counts = zeros({ncols}, DType::Int64, dev);
+        counts = scatter_add(counts, /*dim=*/0, col, full({nnz}, 1.0, DType::Int64, dev));
+        Tensor cs = cumsum(counts, /*dim=*/0);
+        if (cs.dtype() != DType::Int64) cs = cs.to(DType::Int64);
+        Tensor ccol = cat({zeros({int64_t(1)}, DType::Int64, dev), cs}, /*dim=*/0);
+        return sparse_csc(ccol, row_sorted, val_sorted, shape_);
+    }
+
     // CPU path: convert to COO first, then build CSC
     auto coo = to_coo();
     auto idx = coo.indices_.contiguous();
@@ -1125,16 +1158,17 @@ auto SparseTensor::to_csc() const -> SparseTensor {
         row_ptr[i] = idx_ptr[perm[i]];
     }
 
-    // Reorder values
+    // Reorder values. This is a pure permutation copy, so an element-size byte
+    // copy is correct for every dtype (Int/half/complex), not just F32/F64
+    // (previously other dtypes were silently left zero).
     auto new_vals = zeros({coo_nnz}, vals.dtype(), vals.device());
-    if (vals.dtype() == DType::Float32) {
-        auto* vp = vals.data<float>();
-        auto* nvp = new_vals.data<float>();
-        for (int64_t i = 0; i < coo_nnz; ++i) nvp[i] = vp[perm[i]];
-    } else if (vals.dtype() == DType::Float64) {
-        auto* vp = vals.data<double>();
-        auto* nvp = new_vals.data<double>();
-        for (int64_t i = 0; i < coo_nnz; ++i) nvp[i] = vp[perm[i]];
+    {
+        const size_t es = vals.dtype_size();
+        const char* vp = static_cast<const char*>(vals.data_ptr());
+        char* nvp = static_cast<char*>(new_vals.data_ptr());
+        for (int64_t i = 0; i < coo_nnz; ++i) {
+            std::memcpy(nvp + i * es, vp + perm[i] * es, es);
+        }
     }
 
     return sparse_csc(ccol, row, new_vals, shape_);

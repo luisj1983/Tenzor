@@ -732,12 +732,6 @@ auto jvp_prod(const DualTensor& x, std::optional<int64_t> dim, bool keepdim) -> 
     // behaviour for the no-zero case (zero-handling is asymptotic and
     // not exercised by smooth-domain JVP tests).
     auto primal = tenzor::prod(x.primal(), dim, keepdim);
-    Tensor primal_kd;
-    if (dim.has_value() && !keepdim) {
-        primal_kd = tenzor::prod(x.primal(), dim, /*keepdim=*/true);
-    } else {
-        primal_kd = primal;
-    }
     auto ratio = tenzor::div(x.tangent(), x.primal());
     auto sum_ratio = tenzor::sum(ratio, dim, keepdim);
     auto tangent = tenzor::mul(primal, sum_ratio);

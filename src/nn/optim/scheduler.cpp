@@ -167,10 +167,12 @@ auto CosineAnnealingLR::update_lr() -> void {
     if (T_max_ == 0) {
         throw std::runtime_error("CosineAnnealingLR: T_max cannot be zero");
     }
-    // LL.9: Clamp epoch to T_max so the cosine never rebounds below eta_min
-    // past the end of the schedule (PyTorch holds at eta_min after T_max).
-    const int64_t clamped_epoch = std::min<int64_t>(epoch_, T_max_);
-    double cosine_term = std::cos(std::numbers::pi * clamped_epoch / T_max_);
+    // PyTorch's CosineAnnealingLR implements the SGDR cosine schedule via the
+    // closed form below WITHOUT clamping last_epoch: past T_max the cosine
+    // keeps oscillating (period 2*T_max), rebounding toward base_lr. A clamp
+    // here would incorrectly pin the LR at eta_min after T_max.
+    double cosine_term =
+        std::cos(std::numbers::pi * static_cast<double>(epoch_) / T_max_);
     double new_lr = eta_min_ + (base_lr_ - eta_min_) * (1.0 + cosine_term) / 2.0;
     last_lr_ = new_lr;
     optimizer_->set_lr(new_lr);

@@ -5,6 +5,7 @@
 
 #include "tenzor/distributed/device_mesh.hpp"
 #include "tenzor/distributed/process_group.hpp"
+#include "tenzor/utils/log.hpp"
 
 #include <algorithm>
 #include <cstdlib>
@@ -80,17 +81,28 @@ DeviceMesh::DeviceMesh(Device::Type device_type,
     // matches the global rank when one mesh spans all processes. Fall back
     // to LOCAL_RANK for single-host setups, then to 0 (single-process).
     int64_t resolved = 0;
+    bool from_env = false;
     if (auto r = read_env_int("RANK"); r.has_value()) {
         resolved = *r;
+        from_env = true;
     } else if (auto lr = read_env_int("LOCAL_RANK"); lr.has_value()) {
         resolved = *lr;
+        from_env = true;
     }
 
     if (resolved < 0 || resolved >= size) {
-        // Out-of-range env values are silently clamped to 0 rather than
-        // throwing: many tests construct meshes without a full distributed
-        // env, and a hard throw here would be surprising. Multi-process
-        // launches always set RANK consistent with WORLD_SIZE.
+        if (from_env) {
+            // An explicitly-set RANK/LOCAL_RANK that is out of range is a
+            // misconfiguration, but DeviceMesh must stay constructible as a
+            // single-process safety net (a stray RANK left in the environment
+            // shouldn't crash an otherwise single-process run). Warn and fall
+            // back to rank 0.
+            TENZOR_LOG_WARN(
+                "DeviceMesh: RANK/LOCAL_RANK {} is outside the valid range "
+                "[0, {}); falling back to rank 0. Ensure RANK is consistent "
+                "with WORLD_SIZE for multi-process runs.", resolved, size);
+        }
+        // Out-of-range or no rank env set (single-process / tests): rank 0.
         resolved = 0;
     }
     local_rank_ = resolved;

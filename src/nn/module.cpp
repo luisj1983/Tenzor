@@ -397,10 +397,16 @@ auto Module::load_state_dict(const std::unordered_map<std::string, Tensor>& stat
             !std::equal(dst.shape().begin(), dst.shape().end(), src.shape().begin())) {
             throw std::runtime_error(std::string("Shape mismatch for ") + kind + " '" + name + "'");
         }
-        Tensor adapted = src;
-        if (adapted.dtype() != dst.dtype()) {
-            adapted = adapted.to(dst.dtype());
+        // Strict load: a dtype mismatch is an error, mirroring the shape
+        // check above. Silently casting the checkpoint tensor to the live
+        // dtype would mask precision/format mistakes (e.g. loading a Float64
+        // checkpoint into a Float32 model), so reject it explicitly.
+        if (src.dtype() != dst.dtype()) {
+            throw std::runtime_error(std::string("DType mismatch for ") + kind +
+                " '" + name + "': checkpoint dtype does not match the model's " +
+                kind + " dtype");
         }
+        Tensor adapted = src;
         if (adapted.device() != dst.device()) {
             adapted = adapted.to(dst.device());
         }

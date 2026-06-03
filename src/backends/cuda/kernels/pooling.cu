@@ -373,7 +373,8 @@ __global__ void avgpool2d_forward_impl(
     T* __restrict__ output,
     int64_t N, int64_t C, int64_t H, int64_t W,
     int64_t H_out, int64_t W_out,
-    int64_t kernel_size, int64_t stride, int64_t padding
+    int64_t kernel_size, int64_t stride, int64_t padding,
+    bool count_include_pad
 ) {
     using Compute = pool_compute_t<T>;
     const int64_t total = N * C * H_out * W_out;
@@ -405,12 +406,14 @@ __global__ void avgpool2d_forward_impl(
             }
         }
 
-        dev_store_compute(output, idx, sum / count);
+        int64_t divisor = count_include_pad ? (kernel_size * kernel_size) : (int64_t)count;
+        dev_store_compute(output, idx, divisor > 0 ? sum / Compute(divisor) : Compute(0));
     }
 }
 
 auto avgpool2d_forward_kernel(const Tensor& input, int64_t kernel_size,
                                int64_t stride, int64_t padding,
+                               bool count_include_pad,
                                cudaStream_t stream) -> Tensor {
     auto shape = input.shape();
     int64_t N = shape[0];
@@ -429,27 +432,27 @@ auto avgpool2d_forward_kernel(const Tensor& input, int64_t kernel_size,
         auto [grid, block] = optimal_launch_config(avgpool2d_forward_impl<float>, total);
         avgpool2d_forward_impl<float><<<grid, block, 0, stream>>>(
             input.data<float>(), output.data<float>(),
-            N, C, H, W, H_out, W_out, kernel_size, stride, padding);
+            N, C, H, W, H_out, W_out, kernel_size, stride, padding, count_include_pad);
             CUDA_CHECK(cudaGetLastError());
     } else if (input.dtype() == DType::Float64) {
         auto [grid, block] = optimal_launch_config(avgpool2d_forward_impl<double>, total);
         avgpool2d_forward_impl<double><<<grid, block, 0, stream>>>(
             input.data<double>(), output.data<double>(),
-            N, C, H, W, H_out, W_out, kernel_size, stride, padding);
+            N, C, H, W, H_out, W_out, kernel_size, stride, padding, count_include_pad);
             CUDA_CHECK(cudaGetLastError());
     } else if (input.dtype() == DType::Float16) {
         auto [grid, block] = optimal_launch_config(avgpool2d_forward_impl<__half>, total);
         avgpool2d_forward_impl<__half><<<grid, block, 0, stream>>>(
             reinterpret_cast<const __half*>(input.data<Float16>()),
             reinterpret_cast<__half*>(output.data<Float16>()),
-            N, C, H, W, H_out, W_out, kernel_size, stride, padding);
+            N, C, H, W, H_out, W_out, kernel_size, stride, padding, count_include_pad);
             CUDA_CHECK(cudaGetLastError());
     } else if (input.dtype() == DType::BFloat16) {
         auto [grid, block] = optimal_launch_config(avgpool2d_forward_impl<__nv_bfloat16>, total);
         avgpool2d_forward_impl<__nv_bfloat16><<<grid, block, 0, stream>>>(
             reinterpret_cast<const __nv_bfloat16*>(input.data<BFloat16>()),
             reinterpret_cast<__nv_bfloat16*>(output.data<BFloat16>()),
-            N, C, H, W, H_out, W_out, kernel_size, stride, padding);
+            N, C, H, W, H_out, W_out, kernel_size, stride, padding, count_include_pad);
             CUDA_CHECK(cudaGetLastError());
     } else {
         throw std::runtime_error("avgpool2d_forward_kernel: unsupported dtype");
@@ -468,7 +471,8 @@ __global__ void avgpool2d_backward_f32(
     float* __restrict__ grad_input,
     int64_t N, int64_t C, int64_t H, int64_t W,
     int64_t H_out, int64_t W_out,
-    int64_t kernel_size, int64_t stride, int64_t padding
+    int64_t kernel_size, int64_t stride, int64_t padding,
+    bool count_include_pad
 ) {
     const int64_t total = N * C * H_out * W_out;
 
@@ -493,7 +497,8 @@ __global__ void avgpool2d_backward_f32(
             }
         }
 
-        float grad_val = grad_output[idx] / count;
+        int64_t divisor = count_include_pad ? (kernel_size * kernel_size) : (int64_t)count;
+        float grad_val = divisor > 0 ? grad_output[idx] / float(divisor) : float(0);
 
         for (int64_t kh = 0; kh < kernel_size; ++kh) {
             for (int64_t kw = 0; kw < kernel_size; ++kw) {
@@ -513,7 +518,8 @@ __global__ void avgpool2d_backward_f64(
     double* __restrict__ grad_input,
     int64_t N, int64_t C, int64_t H, int64_t W,
     int64_t H_out, int64_t W_out,
-    int64_t kernel_size, int64_t stride, int64_t padding
+    int64_t kernel_size, int64_t stride, int64_t padding,
+    bool count_include_pad
 ) {
     const int64_t total = N * C * H_out * W_out;
 
@@ -538,7 +544,8 @@ __global__ void avgpool2d_backward_f64(
             }
         }
 
-        double grad_val = grad_output[idx] / count;
+        int64_t divisor = count_include_pad ? (kernel_size * kernel_size) : (int64_t)count;
+        double grad_val = divisor > 0 ? grad_output[idx] / double(divisor) : double(0);
 
         for (int64_t kh = 0; kh < kernel_size; ++kh) {
             for (int64_t kw = 0; kw < kernel_size; ++kw) {
@@ -556,6 +563,7 @@ __global__ void avgpool2d_backward_f64(
 auto avgpool2d_backward_kernel(const Tensor& grad_output,
                                 const std::vector<int64_t>& input_shape,
                                 int64_t kernel_size, int64_t stride, int64_t padding,
+                                bool count_include_pad,
                                 cudaStream_t stream) -> Tensor {
     int64_t N = input_shape[0];
     int64_t C = input_shape[1];
@@ -574,7 +582,7 @@ auto avgpool2d_backward_kernel(const Tensor& grad_output,
         auto [grid_out, block_out] = optimal_launch_config(avgpool2d_backward_f32, total_out);
         avgpool2d_backward_f32<<<grid_out, block_out, 0, stream>>>(
             grad_output.data<float>(), grad_input.data<float>(),
-            N, C, H, W, H_out, W_out, kernel_size, stride, padding);
+            N, C, H, W, H_out, W_out, kernel_size, stride, padding, count_include_pad);
         CUDA_CHECK(cudaGetLastError());
         return grad_input;
     } else if (grad_output.dtype() == DType::Float64) {
@@ -582,7 +590,7 @@ auto avgpool2d_backward_kernel(const Tensor& grad_output,
         auto [grid_out, block_out] = optimal_launch_config(avgpool2d_backward_f64, total_out);
         avgpool2d_backward_f64<<<grid_out, block_out, 0, stream>>>(
             grad_output.data<double>(), grad_input.data<double>(),
-            N, C, H, W, H_out, W_out, kernel_size, stride, padding);
+            N, C, H, W, H_out, W_out, kernel_size, stride, padding, count_include_pad);
         CUDA_CHECK(cudaGetLastError());
         return grad_input;
     } else if (grad_output.dtype() == DType::Float16 || grad_output.dtype() == DType::BFloat16) {
@@ -606,7 +614,7 @@ auto avgpool2d_backward_kernel(const Tensor& grad_output,
         auto [grid_bwd, block_bwd] = optimal_launch_config(avgpool2d_backward_f32, total_out);
         avgpool2d_backward_f32<<<grid_bwd, block_bwd, 0, stream>>>(
             go_f32.data<float>(), grad_f32.data<float>(),
-            N, C, H, W, H_out, W_out, kernel_size, stride, padding);
+            N, C, H, W, H_out, W_out, kernel_size, stride, padding, count_include_pad);
         CUDA_CHECK(cudaGetLastError());
 
         Tensor grad_input(input_shape, grad_output.dtype(), grad_output.device());
@@ -897,7 +905,8 @@ __global__ void avgpool1d_forward_impl(
     T* __restrict__ output,
     int64_t N, int64_t C, int64_t L,
     int64_t L_out,
-    int64_t kernel_size, int64_t stride, int64_t padding
+    int64_t kernel_size, int64_t stride, int64_t padding,
+    bool count_include_pad
 ) {
     using Compute = pool_compute_t<T>;
     const int64_t total = N * C * L_out;
@@ -923,12 +932,14 @@ __global__ void avgpool1d_forward_impl(
             }
         }
 
-        dev_store_compute(output, idx, sum / count);
+        int64_t divisor = count_include_pad ? kernel_size : (int64_t)count;
+        dev_store_compute(output, idx, divisor > 0 ? sum / Compute(divisor) : Compute(0));
     }
 }
 
 auto avgpool1d_forward_kernel(const Tensor& input, std::array<int64_t, 1> kernel_size_a,
                                std::array<int64_t, 1> stride_a, std::array<int64_t, 1> padding_a,
+                               bool count_include_pad,
                                cudaStream_t stream) -> Tensor {
     // Q.5: per-axis std::array<int64_t, 1> signature.
     const int64_t kernel_size = kernel_size_a[0];
@@ -949,27 +960,27 @@ auto avgpool1d_forward_kernel(const Tensor& input, std::array<int64_t, 1> kernel
         auto [grid, block] = optimal_launch_config(avgpool1d_forward_impl<float>, total);
         avgpool1d_forward_impl<float><<<grid, block, 0, stream>>>(
             input.data<float>(), output.data<float>(),
-            N, C, L, L_out, kernel_size, stride, padding);
+            N, C, L, L_out, kernel_size, stride, padding, count_include_pad);
         CUDA_CHECK(cudaGetLastError());
     } else if (input.dtype() == DType::Float64) {
         auto [grid, block] = optimal_launch_config(avgpool1d_forward_impl<double>, total);
         avgpool1d_forward_impl<double><<<grid, block, 0, stream>>>(
             input.data<double>(), output.data<double>(),
-            N, C, L, L_out, kernel_size, stride, padding);
+            N, C, L, L_out, kernel_size, stride, padding, count_include_pad);
         CUDA_CHECK(cudaGetLastError());
     } else if (input.dtype() == DType::Float16) {
         auto [grid, block] = optimal_launch_config(avgpool1d_forward_impl<__half>, total);
         avgpool1d_forward_impl<__half><<<grid, block, 0, stream>>>(
             reinterpret_cast<const __half*>(input.data<Float16>()),
             reinterpret_cast<__half*>(output.data<Float16>()),
-            N, C, L, L_out, kernel_size, stride, padding);
+            N, C, L, L_out, kernel_size, stride, padding, count_include_pad);
         CUDA_CHECK(cudaGetLastError());
     } else if (input.dtype() == DType::BFloat16) {
         auto [grid, block] = optimal_launch_config(avgpool1d_forward_impl<__nv_bfloat16>, total);
         avgpool1d_forward_impl<__nv_bfloat16><<<grid, block, 0, stream>>>(
             reinterpret_cast<const __nv_bfloat16*>(input.data<BFloat16>()),
             reinterpret_cast<__nv_bfloat16*>(output.data<BFloat16>()),
-            N, C, L, L_out, kernel_size, stride, padding);
+            N, C, L, L_out, kernel_size, stride, padding, count_include_pad);
         CUDA_CHECK(cudaGetLastError());
     } else {
         throw std::runtime_error("avgpool1d_forward_kernel: unsupported dtype");
@@ -987,7 +998,8 @@ __global__ void avgpool1d_backward_f32(
     float* __restrict__ grad_input,
     int64_t N, int64_t C, int64_t L,
     int64_t L_out,
-    int64_t kernel_size, int64_t stride, int64_t padding
+    int64_t kernel_size, int64_t stride, int64_t padding,
+    bool count_include_pad
 ) {
     const int64_t total = N * C * L_out;
 
@@ -1007,7 +1019,8 @@ __global__ void avgpool1d_backward_f32(
             if (l >= 0 && l < L) count++;
         }
 
-        float grad_val = grad_output[idx] / count;
+        int64_t divisor = count_include_pad ? kernel_size : (int64_t)count;
+        float grad_val = divisor > 0 ? grad_output[idx] / float(divisor) : float(0);
 
         for (int64_t k = 0; k < kernel_size; ++k) {
             int64_t l = l_start + k;
@@ -1024,7 +1037,8 @@ __global__ void avgpool1d_backward_f64(
     double* __restrict__ grad_input,
     int64_t N, int64_t C, int64_t L,
     int64_t L_out,
-    int64_t kernel_size, int64_t stride, int64_t padding
+    int64_t kernel_size, int64_t stride, int64_t padding,
+    bool count_include_pad
 ) {
     const int64_t total = N * C * L_out;
 
@@ -1044,7 +1058,8 @@ __global__ void avgpool1d_backward_f64(
             if (l >= 0 && l < L) count++;
         }
 
-        double grad_val = grad_output[idx] / count;
+        int64_t divisor = count_include_pad ? kernel_size : (int64_t)count;
+        double grad_val = divisor > 0 ? grad_output[idx] / double(divisor) : double(0);
 
         for (int64_t k = 0; k < kernel_size; ++k) {
             int64_t l = l_start + k;
@@ -1059,6 +1074,7 @@ __global__ void avgpool1d_backward_f64(
 auto avgpool1d_backward_kernel(const Tensor& grad_output,
                                 const std::vector<int64_t>& input_shape,
                                 std::array<int64_t, 1> kernel_size_a, std::array<int64_t, 1> stride_a, std::array<int64_t, 1> padding_a,
+                                bool count_include_pad,
                                 cudaStream_t stream) -> Tensor {
     // Q.5: per-axis std::array<int64_t, 1> signature.
     const int64_t kernel_size = kernel_size_a[0];
@@ -1079,7 +1095,7 @@ auto avgpool1d_backward_kernel(const Tensor& grad_output,
         auto [grid_out, block_out] = optimal_launch_config(avgpool1d_backward_f32, total_out);
         avgpool1d_backward_f32<<<grid_out, block_out, 0, stream>>>(
             grad_output.data<float>(), grad_input.data<float>(),
-            N, C, L, L_out, kernel_size, stride, padding);
+            N, C, L, L_out, kernel_size, stride, padding, count_include_pad);
         CUDA_CHECK(cudaGetLastError());
         return grad_input;
     } else if (grad_output.dtype() == DType::Float64) {
@@ -1087,7 +1103,7 @@ auto avgpool1d_backward_kernel(const Tensor& grad_output,
         auto [grid_out, block_out] = optimal_launch_config(avgpool1d_backward_f64, total_out);
         avgpool1d_backward_f64<<<grid_out, block_out, 0, stream>>>(
             grad_output.data<double>(), grad_input.data<double>(),
-            N, C, L, L_out, kernel_size, stride, padding);
+            N, C, L, L_out, kernel_size, stride, padding, count_include_pad);
         CUDA_CHECK(cudaGetLastError());
         return grad_input;
     } else if (grad_output.dtype() == DType::Float16 || grad_output.dtype() == DType::BFloat16) {
@@ -1109,7 +1125,7 @@ auto avgpool1d_backward_kernel(const Tensor& grad_output,
         auto [grid_bwd, block_bwd] = optimal_launch_config(avgpool1d_backward_f32, total_out);
         avgpool1d_backward_f32<<<grid_bwd, block_bwd, 0, stream>>>(
             go_f32.data<float>(), grad_f32.data<float>(),
-            N, C, L, L_out, kernel_size, stride, padding);
+            N, C, L, L_out, kernel_size, stride, padding, count_include_pad);
         CUDA_CHECK(cudaGetLastError());
 
         Tensor grad_input(input_shape, grad_output.dtype(), grad_output.device());
@@ -1773,7 +1789,8 @@ __global__ void avgpool3d_forward_impl(
     int64_t D_out, int64_t H_out, int64_t W_out,
     int64_t kD, int64_t kH, int64_t kW,
     int64_t sD, int64_t sH, int64_t sW,
-    int64_t pD, int64_t pH, int64_t pW
+    int64_t pD, int64_t pH, int64_t pW,
+    bool count_include_pad
 ) {
     using Compute = pool_compute_t<T>;
     const int64_t total = N * C * D_out * H_out * W_out;
@@ -1810,12 +1827,14 @@ __global__ void avgpool3d_forward_impl(
             }
         }
 
-        dev_store_compute(output, idx, sum / static_cast<Compute>(count));
+        int64_t divisor = count_include_pad ? (kD * kH * kW) : (int64_t)count;
+        dev_store_compute(output, idx, divisor > 0 ? sum / static_cast<Compute>(divisor) : Compute(0));
     }
 }
 
 auto avgpool3d_forward_kernel(const Tensor& input, std::array<int64_t, 3> kernel_size,
                                std::array<int64_t, 3> stride, std::array<int64_t, 3> padding,
+                               bool count_include_pad,
                                cudaStream_t stream) -> Tensor {
     // Q.5: per-axis std::array<int64_t, 3>.
     const int64_t kD = kernel_size[0], kH = kernel_size[1], kW = kernel_size[2];
@@ -1840,27 +1859,27 @@ auto avgpool3d_forward_kernel(const Tensor& input, std::array<int64_t, 3> kernel
         auto [grid, block] = optimal_launch_config(avgpool3d_forward_impl<float>, total);
         avgpool3d_forward_impl<float><<<grid, block, 0, stream>>>(
             input.data<float>(), output.data<float>(),
-            N, C, D, H, W, D_out, H_out, W_out, kD, kH, kW, sD, sH, sW, pD, pH, pW);
+            N, C, D, H, W, D_out, H_out, W_out, kD, kH, kW, sD, sH, sW, pD, pH, pW, count_include_pad);
         CUDA_CHECK(cudaGetLastError());
     } else if (input.dtype() == DType::Float64) {
         auto [grid, block] = optimal_launch_config(avgpool3d_forward_impl<double>, total);
         avgpool3d_forward_impl<double><<<grid, block, 0, stream>>>(
             input.data<double>(), output.data<double>(),
-            N, C, D, H, W, D_out, H_out, W_out, kD, kH, kW, sD, sH, sW, pD, pH, pW);
+            N, C, D, H, W, D_out, H_out, W_out, kD, kH, kW, sD, sH, sW, pD, pH, pW, count_include_pad);
         CUDA_CHECK(cudaGetLastError());
     } else if (input.dtype() == DType::Float16) {
         auto [grid, block] = optimal_launch_config(avgpool3d_forward_impl<__half>, total);
         avgpool3d_forward_impl<__half><<<grid, block, 0, stream>>>(
             reinterpret_cast<const __half*>(input.data<Float16>()),
             reinterpret_cast<__half*>(output.data<Float16>()),
-            N, C, D, H, W, D_out, H_out, W_out, kD, kH, kW, sD, sH, sW, pD, pH, pW);
+            N, C, D, H, W, D_out, H_out, W_out, kD, kH, kW, sD, sH, sW, pD, pH, pW, count_include_pad);
         CUDA_CHECK(cudaGetLastError());
     } else if (input.dtype() == DType::BFloat16) {
         auto [grid, block] = optimal_launch_config(avgpool3d_forward_impl<__nv_bfloat16>, total);
         avgpool3d_forward_impl<__nv_bfloat16><<<grid, block, 0, stream>>>(
             reinterpret_cast<const __nv_bfloat16*>(input.data<BFloat16>()),
             reinterpret_cast<__nv_bfloat16*>(output.data<BFloat16>()),
-            N, C, D, H, W, D_out, H_out, W_out, kD, kH, kW, sD, sH, sW, pD, pH, pW);
+            N, C, D, H, W, D_out, H_out, W_out, kD, kH, kW, sD, sH, sW, pD, pH, pW, count_include_pad);
         CUDA_CHECK(cudaGetLastError());
     } else {
         throw std::runtime_error("avgpool3d_forward_kernel: unsupported dtype");
@@ -1881,7 +1900,8 @@ __global__ void avgpool3d_backward_f32(
     int64_t D_out, int64_t H_out, int64_t W_out,
     int64_t kD, int64_t kH, int64_t kW,
     int64_t sD, int64_t sH, int64_t sW,
-    int64_t pD, int64_t pH, int64_t pW
+    int64_t pD, int64_t pH, int64_t pW,
+    bool count_include_pad
 ) {
     const int64_t total = N * C * D_out * H_out * W_out;
 
@@ -1911,7 +1931,8 @@ __global__ void avgpool3d_backward_f32(
             }
         }
 
-        float grad_val = grad_output[idx] / count;
+        int64_t divisor = count_include_pad ? (kD * kH * kW) : (int64_t)count;
+        float grad_val = divisor > 0 ? grad_output[idx] / float(divisor) : float(0);
 
         for (int64_t kd = 0; kd < kD; ++kd) {
             for (int64_t kh = 0; kh < kH; ++kh) {
@@ -1937,7 +1958,8 @@ __global__ void avgpool3d_backward_f64(
     int64_t D_out, int64_t H_out, int64_t W_out,
     int64_t kD, int64_t kH, int64_t kW,
     int64_t sD, int64_t sH, int64_t sW,
-    int64_t pD, int64_t pH, int64_t pW
+    int64_t pD, int64_t pH, int64_t pW,
+    bool count_include_pad
 ) {
     const int64_t total = N * C * D_out * H_out * W_out;
 
@@ -1967,7 +1989,8 @@ __global__ void avgpool3d_backward_f64(
             }
         }
 
-        double grad_val = grad_output[idx] / count;
+        int64_t divisor = count_include_pad ? (kD * kH * kW) : (int64_t)count;
+        double grad_val = divisor > 0 ? grad_output[idx] / double(divisor) : double(0);
 
         for (int64_t kd = 0; kd < kD; ++kd) {
             for (int64_t kh = 0; kh < kH; ++kh) {
@@ -1988,6 +2011,7 @@ __global__ void avgpool3d_backward_f64(
 auto avgpool3d_backward_kernel(const Tensor& grad_output,
                                 const std::vector<int64_t>& input_shape,
                                 std::array<int64_t, 3> kernel_size, std::array<int64_t, 3> stride, std::array<int64_t, 3> padding,
+                                bool count_include_pad,
                                 cudaStream_t stream) -> Tensor {
     // Q.5: per-axis std::array<int64_t, 3>.
     const int64_t kD = kernel_size[0], kH = kernel_size[1], kW = kernel_size[2];
@@ -2012,7 +2036,7 @@ auto avgpool3d_backward_kernel(const Tensor& grad_output,
         auto [grid, block] = optimal_launch_config(avgpool3d_backward_f32, total_out);
         avgpool3d_backward_f32<<<grid, block, 0, stream>>>(
             grad_output.data<float>(), grad_input.data<float>(),
-            N, C, D, H, W, D_out, H_out, W_out, kD, kH, kW, sD, sH, sW, pD, pH, pW);
+            N, C, D, H, W, D_out, H_out, W_out, kD, kH, kW, sD, sH, sW, pD, pH, pW, count_include_pad);
         CUDA_CHECK(cudaGetLastError());
         return grad_input;
     } else if (grad_output.dtype() == DType::Float64) {
@@ -2020,7 +2044,7 @@ auto avgpool3d_backward_kernel(const Tensor& grad_output,
         auto [grid, block] = optimal_launch_config(avgpool3d_backward_f64, total_out);
         avgpool3d_backward_f64<<<grid, block, 0, stream>>>(
             grad_output.data<double>(), grad_input.data<double>(),
-            N, C, D, H, W, D_out, H_out, W_out, kD, kH, kW, sD, sH, sW, pD, pH, pW);
+            N, C, D, H, W, D_out, H_out, W_out, kD, kH, kW, sD, sH, sW, pD, pH, pW, count_include_pad);
         CUDA_CHECK(cudaGetLastError());
         return grad_input;
     } else if (grad_output.dtype() == DType::Float16 || grad_output.dtype() == DType::BFloat16) {
@@ -2042,7 +2066,7 @@ auto avgpool3d_backward_kernel(const Tensor& grad_output,
         auto [grid_bwd, block_bwd] = optimal_launch_config(avgpool3d_backward_f32, total_out);
         avgpool3d_backward_f32<<<grid_bwd, block_bwd, 0, stream>>>(
             go_f32.data<float>(), grad_f32.data<float>(),
-            N, C, D, H, W, D_out, H_out, W_out, kD, kH, kW, sD, sH, sW, pD, pH, pW);
+            N, C, D, H, W, D_out, H_out, W_out, kD, kH, kW, sD, sH, sW, pD, pH, pW, count_include_pad);
         CUDA_CHECK(cudaGetLastError());
 
         Tensor grad_input(input_shape, grad_output.dtype(), grad_output.device());

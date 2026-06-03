@@ -316,6 +316,14 @@ auto create_numpy_array(const Tensor& tensor, DType original_dtype,
     }
 
     std::string format = dtype_to_numpy_format(dtype);
+    // Complex dtypes: the PEP-3118 'Zf'/'Zd' format strings are rejected by
+    // newer NumPy when constructing a py::dtype, so use the canonical complex
+    // dtype object instead (fixes `Tensor.numpy()` on Complex64/128).
+    py::dtype np_dtype = (dtype == DType::Complex64)
+        ? py::dtype::of<std::complex<float>>()
+        : (dtype == DType::Complex128)
+            ? py::dtype::of<std::complex<double>>()
+            : py::dtype(format);
 
     // Validate that max accessible offset falls within storage bounds
     int64_t max_offset = tensor.offset();
@@ -344,7 +352,7 @@ auto create_numpy_array(const Tensor& tensor, DType original_dtype,
             "Strided tensor view exceeds storage bounds, "
             "falling back to contiguous copy for NumPy conversion", 1);
         Tensor contiguous = tensor.contiguous();
-        py::array result(py::dtype(format), np_shape);
+        py::array result(np_dtype, np_shape);
         void* src = const_cast<void*>(contiguous.storage()->data());
         void* dst = result.mutable_data();
         std::memcpy(dst, src, contiguous.numel() * element_size);
@@ -378,7 +386,7 @@ auto create_numpy_array(const Tensor& tensor, DType original_dtype,
         delete static_cast<intrusive_ptr<Storage>*>(ptr);
     });
 
-    py::array result(py::dtype(format), np_shape, np_strides, data_ptr, capsule);
+    py::array result(np_dtype, np_shape, np_strides, data_ptr, capsule);
     return apply_bfloat16_dtype(result, original_dtype);
 }
 

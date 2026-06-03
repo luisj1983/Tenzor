@@ -206,6 +206,22 @@ auto sort(const Tensor& input,
         return {values_f32.to(orig), indices};
     }
 
+    // Narrow integer / boolean dtypes are not natively sortable on every backend
+    // (nor on the CPU reference path). Widen losslessly, sort, then narrow the
+    // values back; indices are Int64 and pass through unchanged. This keeps sort
+    // dtype coverage identical across CPU/CUDA/ROCm/Vulkan/OneAPI.
+    if (input.dtype() == DType::Int8 || input.dtype() == DType::Int16 ||
+        input.dtype() == DType::UInt8 || input.dtype() == DType::UInt16 ||
+        input.dtype() == DType::Bool) {
+        const DType orig = input.dtype();
+        auto [values_i32, indices] = sort(input.to(DType::Int32), dim, descending);
+        return {values_i32.to(orig), indices};
+    }
+    if (input.dtype() == DType::UInt32) {
+        auto [values_i64, indices] = sort(input.to(DType::Int64), dim, descending);
+        return {values_i64.to(DType::UInt32), indices};
+    }
+
     // For non-CPU tensors, dispatch to backend kernel
     if (input.device().type != Device::Type::CPU) {
         OpAttributes attrs;

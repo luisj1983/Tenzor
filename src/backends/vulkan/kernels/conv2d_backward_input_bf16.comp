@@ -29,9 +29,13 @@ layout(push_constant) uniform PushConstants {
     uint groups;
 } params;
 
-// Helper to read bfloat16 from packed buffer
-float readBF16(uint packed, uint offset) {
-    uint bits = (packed >> (offset * 16)) & 0xFFFFu;
+// Read a BF16 element by flat index from one of the input buffers
+// (buf_id 0 = grad_output, 1 = weight); two BF16 elements are packed per uint32.
+float readBF16(uint element_idx, uint buf_id) {
+    uint word_idx = element_idx >> 1u;
+    uint word_offset = element_idx & 1u;
+    uint packed = (buf_id == 0u) ? grad_output[word_idx] : weight[word_idx];
+    uint bits = (packed >> (word_offset * 16u)) & 0xFFFFu;
     return uintBitsToFloat(bits << 16);
 }
 

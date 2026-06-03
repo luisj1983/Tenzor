@@ -4067,10 +4067,10 @@ void register_rocm_kernels(BackendDispatchTable& table) {
         const auto stride      = ::tenzor::backend::attrs::read_2d(attrs,
             AttrKey::Stride, AttrKey::StrideH, AttrKey::StrideW, kernel_size[0]);
         const auto padding     = ::tenzor::backend::attrs::padding_2d(attrs);
-        // Match Tenzor CPU/CUDA/Vulkan/OneAPI convention: averages divide
-        // by the count of valid (non-padded) positions. Older ROCm code
-        // defaulted to `true` which diverged from every other backend.
-        bool count_include_pad = attrs.get_bool(AttrKey::CountIncludePad, false);
+        // PyTorch/library default is count_include_pad=true (divide by full
+        // window area); the nn layer always sets this attr explicitly, and on
+        // direct dispatch we match CPU/CUDA which default to true.
+        bool count_include_pad = attrs.get_bool(AttrKey::CountIncludePad, true);
         hipStream_t stream = get_hip_stream(attrs);
         return rocm::avgpool2d_forward_hip(inputs[0],
             kernel_size[0], kernel_size[1], stride[0], stride[1],
@@ -4082,10 +4082,10 @@ void register_rocm_kernels(BackendDispatchTable& table) {
         const auto stride      = ::tenzor::backend::attrs::read_2d(attrs,
             AttrKey::Stride, AttrKey::StrideH, AttrKey::StrideW, kernel_size[0]);
         const auto padding     = ::tenzor::backend::attrs::padding_2d(attrs);
-        // Match Tenzor CPU/CUDA/Vulkan/OneAPI convention: averages divide
-        // by the count of valid (non-padded) positions. Older ROCm code
-        // defaulted to `true` which diverged from every other backend.
-        bool count_include_pad = attrs.get_bool(AttrKey::CountIncludePad, false);
+        // PyTorch/library default is count_include_pad=true (divide by full
+        // window area); the nn layer always sets this attr explicitly, and on
+        // direct dispatch we match CPU/CUDA which default to true.
+        bool count_include_pad = attrs.get_bool(AttrKey::CountIncludePad, true);
         auto input_shape = attrs.get_int_list(AttrKey::InputShape);
         hipStream_t stream = get_hip_stream(attrs);
         return rocm::avgpool2d_backward_hip(inputs[0], input_shape,

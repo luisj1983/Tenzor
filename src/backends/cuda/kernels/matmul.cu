@@ -1873,6 +1873,21 @@ void batched_matmul_bf16(
 // ============================================================================
 
 auto matmul_kernel(const Tensor& a, const Tensor& b, cudaStream_t stream) -> Tensor {
+    // Integer dtypes other than Int32 have no native CUDA GEMM (CPU supports
+    // them all). Widen losslessly, GEMM, narrow back to keep cross-backend
+    // parity: small ints -> Int32 (exact, native int GEMM); 64-bit and UInt32
+    // -> Float64 (exact for integer products up to 2^52).
+    if (a.dtype() == b.dtype()) {
+        const DType dt = a.dtype();
+        if (dt == DType::Int8 || dt == DType::Int16 ||
+            dt == DType::UInt8 || dt == DType::UInt16) {
+            return matmul_kernel(a.to(DType::Int32), b.to(DType::Int32), stream).to(dt);
+        }
+        if (dt == DType::Int64 || dt == DType::UInt32 || dt == DType::UInt64) {
+            return matmul_kernel(a.to(DType::Float64), b.to(DType::Float64), stream).to(dt);
+        }
+    }
+
     // FP8 dispatch: use native Hopper Tensor Cores when available, else emulate via FP32
     if ((a.dtype() == DType::FP8_E4M3 || a.dtype() == DType::FP8_E5M2) &&
         (b.dtype() == DType::FP8_E4M3 || b.dtype() == DType::FP8_E5M2)) {

@@ -115,6 +115,14 @@ public:
     auto bias() const -> const Tensor& { return *bias_; }
 
     /**
+     * @brief Set calibrated input-activation quantization parameters (static
+     * quantization). When set, forward quantizes the input with this fixed
+     * scale/zero_point instead of recomputing them per call (dynamic quant).
+     */
+    auto set_activation_qparams(const QuantizationParams& params) -> void { activation_qparams_ = params; }
+    auto has_activation_qparams() const -> bool { return activation_qparams_.has_value(); }
+
+    /**
      * @brief Create quantized layer from floating-point layer.
      *
      * @param fp_linear Floating-point linear layer
@@ -130,6 +138,7 @@ private:
     QuantizedTensor weight_;       ///< Quantized weights
     std::optional<Tensor> bias_;   ///< Floating-point bias
     float bias_scale_;             ///< Bias scale factor
+    std::optional<QuantizationParams> activation_qparams_;  ///< Calibrated input qparams (static quant)
 };
 
 /**
@@ -194,6 +203,14 @@ public:
     auto has_bias() const -> bool { return bias_.has_value(); }
     auto bias() const -> const Tensor& { return *bias_; }
 
+    /**
+     * @brief Set calibrated input-activation quantization parameters (static
+     * quantization). When set, forward quantizes the input with this fixed
+     * scale/zero_point instead of recomputing them per call (dynamic quant).
+     */
+    auto set_activation_qparams(const QuantizationParams& params) -> void { activation_qparams_ = params; }
+    auto has_activation_qparams() const -> bool { return activation_qparams_.has_value(); }
+
     static auto from_float(const Conv2d& fp_conv, const QConfig& qconfig)
         -> std::shared_ptr<QuantizedConv2d>;
 
@@ -208,6 +225,7 @@ private:
     QuantizedTensor weight_;
     std::optional<Tensor> bias_;
     float bias_scale_;
+    std::optional<QuantizationParams> activation_qparams_;  ///< Calibrated input qparams (static quant)
 };
 
 /**

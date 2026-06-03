@@ -34,13 +34,13 @@ class HalfNormal(Distribution):
 
     @property
     def mean(self):
-        scale_np = np.asarray(self.scale.tensor(), dtype=np.float32)
-        return _wrap_numpy(scale_np * math.sqrt(2.0 / math.pi))
+        # E[X] = scale * sqrt(2/pi); autograd-aware in scale.
+        return self.scale * math.sqrt(2.0 / math.pi)
 
     @property
     def variance(self):
-        scale_np = np.asarray(self.scale.tensor(), dtype=np.float32)
-        return _wrap_numpy(scale_np ** 2 * (1.0 - 2.0 / math.pi))
+        # Var[X] = scale^2 * (1 - 2/pi); autograd-aware in scale.
+        return (self.scale * self.scale) * (1.0 - 2.0 / math.pi)
 
     def sample(self, sample_shape=()):
         out_shape = tuple(sample_shape) + self._batch_shape
@@ -89,8 +89,9 @@ class HalfNormal(Distribution):
         return _wrap_numpy(scale_np * math.sqrt(2.0) * scipy_special.erfinv(p_np))
 
     def entropy(self):
-        scale_np = np.asarray(self.scale.tensor(), dtype=np.float64)
-        return _wrap_numpy(0.5 * np.log(math.pi * scale_np ** 2 / 2.0) + 0.5)
+        # H = 0.5*log(pi*scale^2/2) + 0.5 = log(scale) + 0.5*log(pi/2) + 0.5;
+        # autograd-aware in scale via _tz.log.
+        return _tz.log(self.scale) + (0.5 * math.log(math.pi / 2.0) + 0.5)
 
     def support(self):
         return "[0, inf)"

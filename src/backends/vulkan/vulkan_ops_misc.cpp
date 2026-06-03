@@ -1196,6 +1196,8 @@ auto VulkanBackend::dispatchROIAlignForward(const Tensor& features, const Tensor
         shader_name = "roi_align_f64";
     } else if (features.dtype() == DType::Float16) {
         shader_name = "roi_align_f16";
+    } else if (features.dtype() == DType::BFloat16) {
+        shader_name = "roi_align_bf16";
     }
     auto* pipeline = getPipeline(shader_name, device_id);
 
@@ -1208,9 +1210,13 @@ auto VulkanBackend::dispatchROIAlignForward(const Tensor& features, const Tensor
     const void* buffer_rois = rois.data_ptr();
     const void* buffer_output = output.data_ptr();
 
-    size_t buffer_size_features = features.numel() * features.dtype_size();
-    size_t buffer_size_rois = rois.numel() * rois.dtype_size();
-    size_t buffer_size_output = output.numel() * output.dtype_size();
+    // BFloat16 packs two elements per uint32 word, so round each buffer up to a
+    // 4-byte boundary. Float16 uses a native 16-bit shader; F32/F64 are unpacked.
+    const bool roi_bf16_packed = (features.dtype() == DType::BFloat16);
+    auto roi_words = [](int64_t numel) -> size_t { return ((numel + 1) / 2) * 4; };
+    size_t buffer_size_features = roi_bf16_packed ? roi_words(features.numel()) : features.numel() * features.dtype_size();
+    size_t buffer_size_rois = roi_bf16_packed ? roi_words(rois.numel()) : rois.numel() * rois.dtype_size();
+    size_t buffer_size_output = roi_bf16_packed ? roi_words(output.numel()) : output.numel() * output.dtype_size();
 
     // Allocate and write descriptor set (3 bindings)
     std::vector<std::pair<uint32_t, const void*>> bindings = {
@@ -3918,6 +3924,24 @@ auto VulkanBackend::dispatchScatterAdd(const Tensor& self, int64_t dim,
         return result_f32.to(orig_dtype);
     }
 
+    // Integer dtypes: accumulate via the native Int32 atomic shader (integer
+    // atomicAdd is core Vulkan). Narrow integers widen losslessly to Int32;
+    // 64-bit integers narrow to Int32 (sparse counts/indices are well within
+    // range). Previously every integer dtype fell through to the Float32 shader,
+    // which reinterpreted the integer bits as floats and produced all-zeros.
+    {
+        DType d = self.dtype();
+        bool is_int = (d == DType::Int8 || d == DType::Int16 || d == DType::Int64 ||
+                       d == DType::UInt8 || d == DType::UInt16 || d == DType::UInt32 ||
+                       d == DType::UInt64 || d == DType::Bool);
+        if (is_int) {
+            auto self_i32 = self.to(DType::Int32);
+            auto src_i32 = src.to(DType::Int32);
+            auto result_i32 = dispatchScatterAdd(self_i32, dim, index, src_i32);
+            return result_i32.to(d);
+        }
+    }
+
     // Float64 requires atomic int64 for CAS-loop atomics
     if (self.dtype() == DType::Float64 && !devices_[device_id].hasAtomicInt64) {
         throw std::runtime_error(
@@ -3929,6 +3953,7 @@ auto VulkanBackend::dispatchScatterAdd(const Tensor& self, int64_t dim,
     const char* shader_name = (self.dtype() == DType::Float64) ? "scatter_add_f64"
                             : (self.dtype() == DType::Float16) ? "scatter_add_f16"
                             : (self.dtype() == DType::BFloat16) ? "scatter_add_bf16"
+                            : (self.dtype() == DType::Int32) ? "scatter_add_i32"
                             : "scatter_add";
     auto* pipeline = getPipeline(shader_name, device_id);
 

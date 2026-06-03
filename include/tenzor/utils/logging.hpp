@@ -22,10 +22,12 @@
 
 #include "tenzor/utils/log.hpp"
 
+#include <fstream>
 #include <mutex>
 #include <string>
 #include <string_view>
 #include <source_location>
+#include <utility>
 
 namespace tenzor {
 
@@ -85,6 +87,8 @@ private:
     LogLevel level_{LogLevel::Info};
     bool console_enabled_{true};
     std::string output_file_;
+    std::ofstream file_stream_;
+    std::mutex mutex_;
 };
 
 // ---------------------------------------------------------------------------
@@ -97,9 +101,39 @@ private:
 // so the existing legacy callers keep working unchanged.
 // ---------------------------------------------------------------------------
 
+namespace detail {
+
+/// Format a legacy log message. Mirrors spdlog's call contract: the first
+/// argument is treated as a format string and the rest as fmt arguments.
+/// A lone pre-formatted string (the common case for `TENZOR_LOG_INFO(s)`)
+/// is returned verbatim, so callers passing a `std::format`/`std::string`
+/// result with incidental braces are never re-parsed.
+template <typename... Args>
+inline auto legacy_log_format(std::string_view fmt_str, Args&&... args) -> std::string {
+    if constexpr (sizeof...(Args) == 0) {
+        return std::string(fmt_str);
+    } else {
+        return ::fmt::format(::fmt::runtime(fmt_str), std::forward<Args>(args)...);
+    }
+}
+
+}  // namespace detail
+
 // String-only severity macros that the unified facade does not provide.
 #define TENZOR_LOG_WARNING(msg) ::tenzor::Logger::instance().warning(msg)
 #define TENZOR_LOG_FATAL(msg)   ::tenzor::Logger::instance().fatal(msg)
+
+// The overlapping severities are defined by `log.hpp` to target the spdlog
+// facade (stderr). For translation units that include this legacy header,
+// re-point them at the unified `tenzor::Logger` so a single facade owns
+// console (std::cout) and Logger::set_output_file() routing with uppercase
+// [LEVEL] tags. TUs including only log.hpp keep the spdlog definitions.
+#undef TENZOR_LOG_DEBUG
+#undef TENZOR_LOG_INFO
+#undef TENZOR_LOG_ERROR
+#define TENZOR_LOG_DEBUG(...) ::tenzor::Logger::instance().debug(::tenzor::detail::legacy_log_format(__VA_ARGS__))
+#define TENZOR_LOG_INFO(...)  ::tenzor::Logger::instance().info(::tenzor::detail::legacy_log_format(__VA_ARGS__))
+#define TENZOR_LOG_ERROR(...) ::tenzor::Logger::instance().error(::tenzor::detail::legacy_log_format(__VA_ARGS__))
 
 // Emit a warning at most once for a given call site over the lifetime of
 // the process. Safe under concurrent calls (std::call_once is thread-safe).

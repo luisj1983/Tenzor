@@ -57,11 +57,12 @@ class Geometric(Distribution):
         return value * log_1mp + log_p
 
     def entropy(self):
+        # H = -(log(p) + (1-p)*log(1-p)/p), autograd-aware in probs via _tz.log
+        # (same eps-regularised logs as log_prob).
         eps = 1e-7
-        p_np = np.clip(np.asarray(self.probs.tensor(), dtype=np.float64),
-                       eps, 1.0 - eps)
-        out = -(np.log(p_np) + (1.0 - p_np) * np.log(1.0 - p_np) / p_np)
-        return _wrap_numpy(out)
+        log_p = _tz.log(self.probs + eps)
+        log_1mp = _tz.log((1.0 - self.probs) + eps)
+        return -1.0 * (log_p + (1.0 - self.probs) * log_1mp / self.probs)
 
     def cdf(self, value):
         v_np = np.asarray(_to_variable(value).tensor(), dtype=np.float64)

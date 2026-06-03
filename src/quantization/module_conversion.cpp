@@ -53,8 +53,13 @@ public:
             return QuantizedConv2d::from_float(*conv2d, qconfig_);
         }
 
-        // If not a recognized type, return as-is
-        // (e.g., activation layers like ReLU, which don't need quantization)
+        // Nested Sequential containers are handled by the Sequential branch
+        // above (each child is recursively converted). Arbitrary custom Module
+        // containers cannot be converted in place: their forward() binds typed
+        // member fields (e.g. `Linear fc1_;`) rather than dispatching through the
+        // submodule map, so swapping a submodule entry would not change their
+        // computation. Such models must expose their layers via Sequential (or a
+        // model-specific quantized reimplementation) to be quantized.
         return module;
     }
 
@@ -169,9 +174,31 @@ private:
     auto convert_sequential(std::shared_ptr<Sequential> seq) -> std::shared_ptr<Sequential> {
         auto quantized_seq = std::make_shared<Sequential>();
 
-        // Iterate through the Sequential's module list and convert each
-        for (const auto& module : seq->modules()) {
-            auto converted = convert_to_quantized(module);
+        const auto& mods = seq->modules();
+        for (size_t i = 0; i < mods.size(); ++i) {
+            auto converted = convert_to_quantized(mods[i]);
+
+            // Static-quant calibration: if the next module is the FakeQuantize
+            // inserted after this layer, freeze its observed activation qparams
+            // into the quantized layer and drop the FakeQuantize (audit
+            // quant-static-02 — previously the calibrated stats were discarded).
+            if (i + 1 < mods.size()) {
+                if (auto fq = std::dynamic_pointer_cast<FakeQuantize>(mods[i + 1])) {
+                    fq->calculate_qparams();
+                    const auto& aq = fq->get_qparams();
+                    bool absorbed = false;
+                    if (auto ql = std::dynamic_pointer_cast<QuantizedLinear>(converted)) {
+                        ql->set_activation_qparams(aq); absorbed = true;
+                    } else if (auto qc = std::dynamic_pointer_cast<QuantizedConv2d>(converted)) {
+                        qc->set_activation_qparams(aq); absorbed = true;
+                    }
+                    if (absorbed) {
+                        quantized_seq->add_module(converted);
+                        ++i;  // skip the absorbed FakeQuantize
+                        continue;
+                    }
+                }
+            }
             quantized_seq->add_module(converted);
         }
 

@@ -24,6 +24,7 @@
 #include "tenzor/autograd/function.hpp"
 #include "tenzor/autograd/ops.hpp"
 #include "tenzor/autograd/anomaly_mode.hpp"
+#include <iostream>
 #include "tenzor/backend/fast_dispatch.hpp"
 #include "tenzor/backend/op_attributes.hpp"
 #include "tenzor/ops/op_id.hpp"
@@ -277,8 +278,16 @@ auto try_fused_or_compose_backward(const Tensor& dO,
         bwd_attrs.set(AttrKey::Causal, causal);
         bwd_attrs.set(AttrKey::DropoutP, static_cast<double>(dropout_p));
         return dispatch<OpId::FlashAttentionBackward>(bwd_inputs, bwd_attrs);
-    } catch (const std::exception&) {
-        // Fall through — backend doesn't support this combo.
+    } catch (const std::exception& e) {
+        // The fused FlashAttentionBackward kernel does not support this
+        // dtype/head-dim combination on this backend — fall back to the
+        // mathematically-equivalent composed backward. Surface the underlying
+        // reason under anomaly mode so a genuine backend error is not silently
+        // masked as a routing decision (audit autograd-attn-01).
+        if (is_anomaly_detection_enabled()) {
+            std::cerr << "[tenzor] FlashAttentionBackward fused path unavailable; "
+                         "using composed backward. Reason: " << e.what() << std::endl;
+        }
         return composed_attention_backward(dO, Q, K, V, scale, causal,
                                             dropout_p, seed_for_replay);
     }

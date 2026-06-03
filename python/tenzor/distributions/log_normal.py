@@ -36,16 +36,15 @@ class LogNormal(Distribution):
 
     @property
     def mean(self):
-        loc_np = np.asarray(self.loc.tensor(), dtype=np.float64)
-        scale_np = np.asarray(self.scale.tensor(), dtype=np.float64)
-        return _wrap_numpy(np.exp(loc_np + 0.5 * scale_np ** 2))
+        # E[X] = exp(loc + scale^2/2); autograd-aware in loc and scale.
+        s2 = self.scale * self.scale
+        return _tz.exp(self.loc + 0.5 * s2)
 
     @property
     def variance(self):
-        loc_np = np.asarray(self.loc.tensor(), dtype=np.float64)
-        scale_np = np.asarray(self.scale.tensor(), dtype=np.float64)
-        s2 = scale_np ** 2
-        return _wrap_numpy((np.exp(s2) - 1.0) * np.exp(2.0 * loc_np + s2))
+        # Var[X] = (exp(scale^2) - 1) * exp(2*loc + scale^2); autograd-aware.
+        s2 = self.scale * self.scale
+        return (_tz.exp(s2) - 1.0) * _tz.exp(2.0 * self.loc + s2)
 
     def sample(self, sample_shape=()):
         out_shape = tuple(sample_shape) + self._batch_shape

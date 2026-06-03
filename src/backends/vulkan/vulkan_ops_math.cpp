@@ -2058,6 +2058,8 @@ auto VulkanBackend::dispatchConv2dBackwardInput(
         shader_name = "conv2d_backward_input_f64";
     } else if (grad_output.dtype() == DType::Float16) {
         shader_name = "conv2d_backward_input_f16";
+    } else if (grad_output.dtype() == DType::BFloat16) {
+        shader_name = "conv2d_backward_input_bf16";
     }
     auto* pipeline = getPipeline(shader_name, device_id);
 
@@ -2071,7 +2073,7 @@ auto VulkanBackend::dispatchConv2dBackwardInput(
 
     // Calculate buffer sizes (round up to 4-byte boundary for F16 packed uint32 access)
     size_t buffer_size_grad_out, buffer_size_weight, buffer_size_grad_in;
-    if (grad_output.dtype() == DType::Float16) {
+    if (grad_output.dtype() == DType::Float16 || grad_output.dtype() == DType::BFloat16) {
         buffer_size_grad_out = ((grad_output.numel() + 1) / 2) * 4;
         buffer_size_weight = ((weight.numel() + 1) / 2) * 4;
         buffer_size_grad_in = ((grad_input.numel() + 1) / 2) * 4;
@@ -2193,6 +2195,8 @@ auto VulkanBackend::dispatchConv2dBackwardWeight(
         shader_name = "conv2d_backward_weight_f64";
     } else if (grad_output.dtype() == DType::Float16) {
         shader_name = "conv2d_backward_weight_f16";
+    } else if (grad_output.dtype() == DType::BFloat16) {
+        shader_name = "conv2d_backward_weight_bf16";
     }
     auto* pipeline = getPipeline(shader_name, device_id);
 
@@ -2206,7 +2210,7 @@ auto VulkanBackend::dispatchConv2dBackwardWeight(
 
     // Calculate buffer sizes (round up to 4-byte boundary for F16 packed uint32 access)
     size_t buffer_size_grad_out, buffer_size_input, buffer_size_grad_weight;
-    if (grad_output.dtype() == DType::Float16) {
+    if (grad_output.dtype() == DType::Float16 || grad_output.dtype() == DType::BFloat16) {
         buffer_size_grad_out = ((grad_output.numel() + 1) / 2) * 4;
         buffer_size_input = ((input.numel() + 1) / 2) * 4;
         buffer_size_grad_weight = ((grad_weight.numel() + 1) / 2) * 4;
@@ -2314,6 +2318,8 @@ auto VulkanBackend::dispatchConv2dBackwardBias(const Tensor& grad_output) -> Ten
         shader_name = "conv2d_backward_bias_f64";
     } else if (grad_output.dtype() == DType::Float16) {
         shader_name = "conv2d_backward_bias_f16";
+    } else if (grad_output.dtype() == DType::BFloat16) {
+        shader_name = "conv2d_backward_bias_bf16";
     }
     auto* pipeline = getPipeline(shader_name, device_id);
 
@@ -2327,7 +2333,7 @@ auto VulkanBackend::dispatchConv2dBackwardBias(const Tensor& grad_output) -> Ten
 
     // Calculate buffer sizes (round up to 4-byte boundary for F16 packed uint32 access)
     size_t buffer_size_grad_out, buffer_size_grad_bias;
-    if (grad_output.dtype() == DType::Float16) {
+    if (grad_output.dtype() == DType::Float16 || grad_output.dtype() == DType::BFloat16) {
         buffer_size_grad_out = ((grad_output.numel() + 1) / 2) * 4;
         buffer_size_grad_bias = ((grad_bias.numel() + 1) / 2) * 4;
     } else {

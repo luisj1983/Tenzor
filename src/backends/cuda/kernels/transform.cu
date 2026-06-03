@@ -547,6 +547,20 @@ auto cat_kernel(std::span<const Tensor> tensors, int64_t dim, cudaStream_t strea
             d_input_shapes, d_output_shape, d_output_strides, d_offsets,
             num_tensors, ndim, dim, total_elements);
             CUDA_CHECK(cudaGetLastError());
+    } else if (tensors[0].dtype() == DType::Complex64) {
+        // Concatenation is pure data movement; treat each complex element as a
+        // float2 (real,imag) so it copies correctly (matches contiguous_kernel).
+        cat_kernel_impl<float2><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
+            reinterpret_cast<float2**>(d_input_ptrs), reinterpret_cast<float2*>(output.data_ptr()),
+            d_input_shapes, d_output_shape, d_output_strides, d_offsets,
+            num_tensors, ndim, dim, total_elements);
+            CUDA_CHECK(cudaGetLastError());
+    } else if (tensors[0].dtype() == DType::Complex128) {
+        cat_kernel_impl<double2><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
+            reinterpret_cast<double2**>(d_input_ptrs), reinterpret_cast<double2*>(output.data_ptr()),
+            d_input_shapes, d_output_shape, d_output_strides, d_offsets,
+            num_tensors, ndim, dim, total_elements);
+            CUDA_CHECK(cudaGetLastError());
     } else {
         throw std::runtime_error("Concatenation: unsupported dtype");
     }

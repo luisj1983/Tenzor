@@ -529,31 +529,31 @@ namespace cuda {
     // Pooling operations (custom kernels - fallback)
     auto maxpool2d_forward_kernel(const Tensor& input, int64_t kernel_size, int64_t stride, int64_t padding, int64_t dilation, cudaStream_t stream) -> std::pair<Tensor, Tensor>;
     auto maxpool2d_backward_kernel(const Tensor& grad_output, const Tensor& indices, const std::vector<int64_t>& input_shape, cudaStream_t stream) -> Tensor;
-    auto avgpool2d_forward_kernel(const Tensor& input, int64_t kernel_size, int64_t stride, int64_t padding, cudaStream_t stream) -> Tensor;
-    auto avgpool2d_backward_kernel(const Tensor& grad_output, const std::vector<int64_t>& input_shape, int64_t kernel_size, int64_t stride, int64_t padding, cudaStream_t stream) -> Tensor;
+    auto avgpool2d_forward_kernel(const Tensor& input, int64_t kernel_size, int64_t stride, int64_t padding, bool count_include_pad, cudaStream_t stream) -> Tensor;
+    auto avgpool2d_backward_kernel(const Tensor& grad_output, const std::vector<int64_t>& input_shape, int64_t kernel_size, int64_t stride, int64_t padding, bool count_include_pad, cudaStream_t stream) -> Tensor;
 
     // 1D Pooling operations
     // Q.5: per-axis std::array<int64_t, 1> signatures (1D has only one spatial
     // axis but the API matches the per-axis sweep across 2D/3D).
     auto maxpool1d_forward_kernel(const Tensor& input, std::array<int64_t, 1> kernel_size, std::array<int64_t, 1> stride, std::array<int64_t, 1> padding, std::array<int64_t, 1> dilation, cudaStream_t stream) -> std::pair<Tensor, Tensor>;
     auto maxpool1d_backward_kernel(const Tensor& grad_output, const Tensor& indices, const std::vector<int64_t>& input_shape, cudaStream_t stream) -> Tensor;
-    auto avgpool1d_forward_kernel(const Tensor& input, std::array<int64_t, 1> kernel_size, std::array<int64_t, 1> stride, std::array<int64_t, 1> padding, cudaStream_t stream) -> Tensor;
-    auto avgpool1d_backward_kernel(const Tensor& grad_output, const std::vector<int64_t>& input_shape, std::array<int64_t, 1> kernel_size, std::array<int64_t, 1> stride, std::array<int64_t, 1> padding, cudaStream_t stream) -> Tensor;
+    auto avgpool1d_forward_kernel(const Tensor& input, std::array<int64_t, 1> kernel_size, std::array<int64_t, 1> stride, std::array<int64_t, 1> padding, bool count_include_pad, cudaStream_t stream) -> Tensor;
+    auto avgpool1d_backward_kernel(const Tensor& grad_output, const std::vector<int64_t>& input_shape, std::array<int64_t, 1> kernel_size, std::array<int64_t, 1> stride, std::array<int64_t, 1> padding, bool count_include_pad, cudaStream_t stream) -> Tensor;
 
     // 3D Pooling operations
     // Q.5: per-axis std::array<int64_t, 3> signatures honour asymmetric D/H/W
     // stride/padding (previously silently collapsed via scalar parameters).
     auto maxpool3d_forward_kernel(const Tensor& input, std::array<int64_t, 3> kernel_size, std::array<int64_t, 3> stride, std::array<int64_t, 3> padding, cudaStream_t stream) -> std::pair<Tensor, Tensor>;
     auto maxpool3d_backward_kernel(const Tensor& grad_output, const Tensor& indices, const std::vector<int64_t>& input_shape, cudaStream_t stream) -> Tensor;
-    auto avgpool3d_forward_kernel(const Tensor& input, std::array<int64_t, 3> kernel_size, std::array<int64_t, 3> stride, std::array<int64_t, 3> padding, cudaStream_t stream) -> Tensor;
-    auto avgpool3d_backward_kernel(const Tensor& grad_output, const std::vector<int64_t>& input_shape, std::array<int64_t, 3> kernel_size, std::array<int64_t, 3> stride, std::array<int64_t, 3> padding, cudaStream_t stream) -> Tensor;
+    auto avgpool3d_forward_kernel(const Tensor& input, std::array<int64_t, 3> kernel_size, std::array<int64_t, 3> stride, std::array<int64_t, 3> padding, bool count_include_pad, cudaStream_t stream) -> Tensor;
+    auto avgpool3d_backward_kernel(const Tensor& grad_output, const std::vector<int64_t>& input_shape, std::array<int64_t, 3> kernel_size, std::array<int64_t, 3> stride, std::array<int64_t, 3> padding, bool count_include_pad, cudaStream_t stream) -> Tensor;
 
 #ifdef TENZOR_HAS_CUDNN
     // cuDNN pooling operations (faster than custom kernels)
     auto cudnn_maxpool2d_forward(const Tensor& input, int64_t kernel_size, int64_t stride, int64_t padding, cudaStream_t stream) -> std::pair<Tensor, Tensor>;
     auto cudnn_maxpool2d_backward(const Tensor& grad_output, const Tensor& input, const Tensor& output, int64_t kernel_size, int64_t stride, int64_t padding, cudaStream_t stream) -> Tensor;
-    auto cudnn_avgpool2d_forward(const Tensor& input, int64_t kernel_size, int64_t stride, int64_t padding, cudaStream_t stream) -> Tensor;
-    auto cudnn_avgpool2d_backward(const Tensor& grad_output, const Tensor& input, int64_t kernel_size, int64_t stride, int64_t padding, cudaStream_t stream) -> Tensor;
+    auto cudnn_avgpool2d_forward(const Tensor& input, int64_t kernel_size, int64_t stride, int64_t padding, bool count_include_pad, cudaStream_t stream) -> Tensor;
+    auto cudnn_avgpool2d_backward(const Tensor& grad_output, const Tensor& input, int64_t kernel_size, int64_t stride, int64_t padding, bool count_include_pad, cudaStream_t stream) -> Tensor;
 
     // cuDNN softmax operations (faster than custom kernels)
     auto cudnn_softmax_forward(const Tensor& input, int64_t dim, cudaStream_t stream) -> Tensor;
@@ -1532,6 +1532,7 @@ void register_cuda_kernels(BackendDispatchTable& table) {
             kernel_size[0], kernel_size[1],
             stride[0], stride[1],
             padding[0], padding[1],
+            attrs.get_int(AttrKey::CountIncludePad, 1) != 0,
             get_cuda_stream(attrs));
     });
 #else
@@ -1572,7 +1573,8 @@ void register_cuda_kernels(BackendDispatchTable& table) {
                 ". Build with cuDNN for asymmetric support.");
         }
         return cuda::avgpool2d_forward_kernel(inputs[0],
-            kernel_size[0], stride[0], padding[0], get_cuda_stream(attrs));
+            kernel_size[0], stride[0], padding[0],
+            attrs.get_int(AttrKey::CountIncludePad, 1) != 0, get_cuda_stream(attrs));
     });
 #endif
 
@@ -1602,6 +1604,7 @@ void register_cuda_kernels(BackendDispatchTable& table) {
             kernel_size[0], kernel_size[1],
             stride[0], stride[1],
             padding[0], padding[1],
+            attrs.get_int(AttrKey::CountIncludePad, 1) != 0,
             get_cuda_stream(attrs));
     });
 #else
@@ -1627,7 +1630,8 @@ void register_cuda_kernels(BackendDispatchTable& table) {
                 ". Build with cuDNN for asymmetric support.");
         }
         return cuda::avgpool2d_backward_kernel(inputs[0], input_shape,
-            kernel_size[0], stride[0], padding[0], get_cuda_stream(attrs));
+            kernel_size[0], stride[0], padding[0],
+            attrs.get_int(AttrKey::CountIncludePad, 1) != 0, get_cuda_stream(attrs));
     });
 #endif
 
@@ -3268,7 +3272,8 @@ void register_cuda_kernels(BackendDispatchTable& table) {
             AttrKey::Stride, AttrKey::StrideW, kernel_size[0]);
         const auto padding     = ::tenzor::backend::attrs::padding_1d(attrs);
         return cuda::avgpool1d_forward_kernel(inputs[0],
-            kernel_size, stride, padding, get_cuda_stream(attrs));
+            kernel_size, stride, padding,
+            attrs.get_int(AttrKey::CountIncludePad, 1) != 0, get_cuda_stream(attrs));
     });
 
     table.register_single_output_kernel(OpId::AvgPool1dBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
@@ -3279,7 +3284,8 @@ void register_cuda_kernels(BackendDispatchTable& table) {
             AttrKey::Stride, AttrKey::StrideW, kernel_size[0]);
         const auto padding     = ::tenzor::backend::attrs::padding_1d(attrs);
         return cuda::avgpool1d_backward_kernel(inputs[0], input_shape,
-            kernel_size, stride, padding, get_cuda_stream(attrs));
+            kernel_size, stride, padding,
+            attrs.get_int(AttrKey::CountIncludePad, 1) != 0, get_cuda_stream(attrs));
     });
 
     table.register_kernel(OpId::AdaptiveMaxPool1d, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
@@ -3331,7 +3337,8 @@ void register_cuda_kernels(BackendDispatchTable& table) {
             AttrKey::Stride, AttrKey::StrideD, AttrKey::StrideH, AttrKey::StrideW, kernel_size[0]);
         const auto padding     = ::tenzor::backend::attrs::padding_3d(attrs);
         return cuda::avgpool3d_forward_kernel(inputs[0],
-            kernel_size, stride, padding, get_cuda_stream(attrs));
+            kernel_size, stride, padding,
+            attrs.get_int(AttrKey::CountIncludePad, 1) != 0, get_cuda_stream(attrs));
     });
 
     table.register_single_output_kernel(OpId::AvgPool3dBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
@@ -3342,7 +3349,8 @@ void register_cuda_kernels(BackendDispatchTable& table) {
             AttrKey::Stride, AttrKey::StrideD, AttrKey::StrideH, AttrKey::StrideW, kernel_size[0]);
         const auto padding     = ::tenzor::backend::attrs::padding_3d(attrs);
         return cuda::avgpool3d_backward_kernel(inputs[0], input_shape,
-            kernel_size, stride, padding, get_cuda_stream(attrs));
+            kernel_size, stride, padding,
+            attrs.get_int(AttrKey::CountIncludePad, 1) != 0, get_cuda_stream(attrs));
     });
 
     table.register_kernel(OpId::AdaptiveMaxPool3d, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {

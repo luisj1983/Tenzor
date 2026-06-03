@@ -407,6 +407,13 @@ auto linalg_det_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
 // LinalgInv - Matrix inverse via LU (getrf + getri)
 // ============================================================================
 auto linalg_inv_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
+    // Float16 / BFloat16: widen to Float32, compute, narrow back (oneMKL getrf
+    // is not overloaded for half precision). Mirrors linalg_det_kernel.
+    if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) {
+        const DType orig_dtype = input.dtype();
+        return linalg_inv_kernel(input.to(DType::Float32), queue).to(orig_dtype);
+    }
+
     auto shape = input.shape();
     int64_t n = shape[shape.size() - 1];
 
@@ -459,6 +466,11 @@ auto linalg_inv_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
 // LinalgSolve - Solve Ax=B via LU (getrf + getrs)
 // ============================================================================
 auto linalg_solve_kernel(const Tensor& A, const Tensor& B, sycl::queue& queue) -> Tensor {
+    // Float16 / BFloat16: widen both operands to Float32, solve, narrow back.
+    if (A.dtype() == DType::Float16 || A.dtype() == DType::BFloat16) {
+        const DType orig_dtype = A.dtype();
+        return linalg_solve_kernel(A.to(DType::Float32), B.to(DType::Float32), queue).to(orig_dtype);
+    }
     // row_to_col_major reads via raw pointer and ignores strides, so views
     // (e.g. A.transpose(-1,-2)) produce wrong results unless forced contiguous.
     auto A_cont = A.contiguous();
@@ -736,6 +748,12 @@ auto linalg_lu_solve_kernel(const Tensor& LU_data, const Tensor& pivots,
 // ============================================================================
 auto linalg_svd_kernel(const Tensor& input, bool full_matrices, sycl::queue& queue)
     -> std::tuple<Tensor, Tensor, Tensor> {
+    // Float16 / BFloat16: widen to Float32, decompose, narrow all outputs back.
+    if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) {
+        const DType orig_dtype = input.dtype();
+        auto [U, S, Vh] = linalg_svd_kernel(input.to(DType::Float32), full_matrices, queue);
+        return {U.to(orig_dtype), S.to(orig_dtype), Vh.to(orig_dtype)};
+    }
     auto shape = input.shape();
     int64_t m = shape[shape.size() - 2];
     int64_t n = shape[shape.size() - 1];
@@ -974,6 +992,13 @@ inline std::pair<double, double> linalg_eig_symmetry_metrics(
 // LinalgEigh - Symmetric eigendecomposition via syevd
 // ============================================================================
 auto linalg_eigh_kernel(const Tensor& input, sycl::queue& queue) -> std::pair<Tensor, Tensor> {
+    // Float16 / BFloat16: widen to Float32, decompose, narrow eigenvalues and
+    // eigenvectors back to the original dtype.
+    if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) {
+        const DType orig_dtype = input.dtype();
+        auto [W, V] = linalg_eigh_kernel(input.to(DType::Float32), queue);
+        return {W.to(orig_dtype), V.to(orig_dtype)};
+    }
     auto shape = input.shape();
     int64_t ndim = static_cast<int64_t>(shape.size());
     int64_t n = shape[ndim - 1];
@@ -1164,6 +1189,11 @@ auto linalg_eig_kernel(const Tensor& input, sycl::queue& queue) -> std::tuple<Te
 // LinalgCholesky - Cholesky factorization via potrf
 // ============================================================================
 auto linalg_cholesky_kernel(const Tensor& input, bool upper, sycl::queue& queue) -> Tensor {
+    // Float16 / BFloat16: widen to Float32, factorize, narrow back.
+    if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) {
+        const DType orig_dtype = input.dtype();
+        return linalg_cholesky_kernel(input.to(DType::Float32), upper, queue).to(orig_dtype);
+    }
     auto shape = input.shape();
     int64_t n = shape[shape.size() - 1];
     auto uplo = upper ? ::oneapi::mkl::uplo::upper : ::oneapi::mkl::uplo::lower;
@@ -1232,6 +1262,12 @@ auto linalg_cholesky_kernel(const Tensor& input, bool upper, sycl::queue& queue)
 auto linalg_solve_triangular_kernel(const Tensor& A, const Tensor& B,
                                      bool upper, bool unitriangular,
                                      sycl::queue& queue) -> Tensor {
+    // Float16 / BFloat16: widen both operands to Float32, solve, narrow back.
+    if (A.dtype() == DType::Float16 || A.dtype() == DType::BFloat16) {
+        const DType orig_dtype = A.dtype();
+        return linalg_solve_triangular_kernel(A.to(DType::Float32), B.to(DType::Float32),
+                                              upper, unitriangular, queue).to(orig_dtype);
+    }
     // row_to_col_major reads via raw pointer and ignores strides, so views
     // (e.g. A.transpose(-1,-2) that `linalg::cholesky_inverse` feeds in as
     // L^T) produce wrong results unless the caller's logical layout is
@@ -1298,6 +1334,12 @@ auto linalg_solve_triangular_kernel(const Tensor& A, const Tensor& B,
 // Geqrf — raw QR factorization returning packed reflectors + tau (oneMKL)
 // ============================================================================
 auto linalg_geqrf_kernel(const Tensor& input, sycl::queue& queue) -> std::pair<Tensor, Tensor> {
+    // Float16 / BFloat16: widen to Float32, factorize, narrow reflectors and tau.
+    if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) {
+        const DType orig_dtype = input.dtype();
+        auto [refl, tau] = linalg_geqrf_kernel(input.to(DType::Float32), queue);
+        return {refl.to(orig_dtype), tau.to(orig_dtype)};
+    }
     auto shape = input.shape();
     int64_t m = shape[shape.size() - 2];
     int64_t n = shape[shape.size() - 1];
@@ -1355,6 +1397,12 @@ auto linalg_geqrf_kernel(const Tensor& input, sycl::queue& queue) -> std::pair<T
 auto linalg_ormqr_kernel(const Tensor& reflectors, const Tensor& tau,
                           const Tensor& C, bool left, bool transpose_q,
                           sycl::queue& queue) -> Tensor {
+    // Float16 / BFloat16: widen all operands to Float32, apply Q, narrow back.
+    if (C.dtype() == DType::Float16 || C.dtype() == DType::BFloat16) {
+        const DType orig_dtype = C.dtype();
+        return linalg_ormqr_kernel(reflectors.to(DType::Float32), tau.to(DType::Float32),
+                                   C.to(DType::Float32), left, transpose_q, queue).to(orig_dtype);
+    }
     auto c_shape = C.shape();
     auto r_shape = reflectors.shape();
     int64_t c_m = c_shape[c_shape.size() - 2];
@@ -1923,8 +1971,8 @@ auto linalg_qr_kernel(const Tensor& A, sycl::queue& queue) -> std::pair<Tensor, 
 
 auto linalg_eigh_kernel(const Tensor& A, sycl::queue& queue) -> std::pair<Tensor, Tensor> {
     validate_linalg_dtype(A, "eigh");
-    if (A.dtype() == DType::Float16) { auto [W,V] = linalg_eigh_kernel(A.to(DType::Float32), queue); return {W,V}; }
-    if (A.dtype() == DType::BFloat16) { auto [W,V] = linalg_eigh_kernel(A.to(DType::Float32), queue); return {W,V}; }
+    if (A.dtype() == DType::Float16) { auto [W,V] = linalg_eigh_kernel(A.to(DType::Float32), queue); return {W.to(DType::Float16), V.to(DType::Float16)}; }
+    if (A.dtype() == DType::BFloat16) { auto [W,V] = linalg_eigh_kernel(A.to(DType::Float32), queue); return {W.to(DType::BFloat16), V.to(DType::BFloat16)}; }
 
     auto work = A.contiguous().clone();
     auto [n, ndim] = check_square(work);

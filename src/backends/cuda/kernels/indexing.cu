@@ -190,6 +190,41 @@ auto index_select_kernel(const Tensor& input, int64_t dim, const Tensor& index,
                     error_buf.as<int>());
             CUDA_CHECK(cudaGetLastError());
             break;
+        case DType::Complex64:
+            // index_select is pure data movement; treat complex as float2.
+            if (idx_is_int32)
+                index_select_kernel_impl<float2, int32_t><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
+                    reinterpret_cast<const float2*>(input.data_ptr()),
+                    index.data<int32_t>(),
+                    reinterpret_cast<float2*>(output.data_ptr()),
+                    num_indices, dim_size, outer_size, inner_size, total_output,
+                    error_buf.as<int>());
+            else
+                index_select_kernel_impl<float2, int64_t><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
+                    reinterpret_cast<const float2*>(input.data_ptr()),
+                    index.data<int64_t>(),
+                    reinterpret_cast<float2*>(output.data_ptr()),
+                    num_indices, dim_size, outer_size, inner_size, total_output,
+                    error_buf.as<int>());
+            CUDA_CHECK(cudaGetLastError());
+            break;
+        case DType::Complex128:
+            if (idx_is_int32)
+                index_select_kernel_impl<double2, int32_t><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
+                    reinterpret_cast<const double2*>(input.data_ptr()),
+                    index.data<int32_t>(),
+                    reinterpret_cast<double2*>(output.data_ptr()),
+                    num_indices, dim_size, outer_size, inner_size, total_output,
+                    error_buf.as<int>());
+            else
+                index_select_kernel_impl<double2, int64_t><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
+                    reinterpret_cast<const double2*>(input.data_ptr()),
+                    index.data<int64_t>(),
+                    reinterpret_cast<double2*>(output.data_ptr()),
+                    num_indices, dim_size, outer_size, inner_size, total_output,
+                    error_buf.as<int>());
+            CUDA_CHECK(cudaGetLastError());
+            break;
         default:
             throw std::runtime_error("index_select: unsupported dtype");
     }

@@ -204,11 +204,22 @@ private:
 
     // Helper functions
     auto get_input(const std::string& name) -> Tensor;
+    // Read a control/shape input (Slice/Pad/Resize starts/ends/axes/sizes/scales)
+    // as a host (CPU) tensor. When the input is a graph initializer the value is
+    // decoded straight from the host proto bytes, so the constant is never
+    // uploaded to the GPU (and there is no device->host copy). Falls back to a
+    // host copy of a computed value only for the rare non-initializer case.
+    auto get_host_input(const std::string& name) -> Tensor;
     auto register_output(const std::string& name, const Tensor& tensor) -> void;
     auto log(const std::string& message) -> void;
 
     bool verbose_ = false;
     Device device_ = Device::cpu();
+    // Pointer to the current graph's host-side initializer map (owned by the
+    // ONNXGraphData being converted; valid for the duration of convert_graph).
+    // Lets shape/control inputs be read from host bytes without uploading the
+    // constant to the compute device.
+    const std::unordered_map<std::string, ONNXTensorData>* initializers_ptr_ = nullptr;
     ONNXModelData model_data_;
     ONNXImportContext context_;
 

@@ -51,8 +51,12 @@ auto VulkanBackend::dispatchBatchNorm2dBackward(const Tensor& grad_out, const Te
         shader_name = "batchnorm2d_backward_f64";
     } else if (input.dtype() == DType::Float16) {
         shader_name = "batchnorm2d_backward_f16";
+    } else if (input.dtype() == DType::BFloat16) {
+        shader_name = "batchnorm2d_backward_bf16";
     }
     auto* pipeline = getPipeline(shader_name, device_id);
+
+    const bool bn_is_half = (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16);
 
     // Create output tensors
     std::vector<int64_t> grad_in_shape(input_shape.begin(), input_shape.end());
@@ -60,7 +64,7 @@ auto VulkanBackend::dispatchBatchNorm2dBackward(const Tensor& grad_out, const Te
 
     // For Float16, the backward shader accumulates grad_gamma/grad_beta in Float32
     // (mean/var are also Float32 for F16 input)
-    DType stats_dtype = (input.dtype() == DType::Float16) ? DType::Float32 : input.dtype();
+    DType stats_dtype = bn_is_half ? DType::Float32 : input.dtype();
     std::vector<int64_t> param_shape = {channels};
     // Initialize grad_gamma and grad_beta to zeros (non-f64 shaders use atomicAdd; f64 uses reduction pass)
     Tensor grad_gamma = dispatchZeros(param_shape, stats_dtype, input.device());
@@ -69,7 +73,7 @@ auto VulkanBackend::dispatchBatchNorm2dBackward(const Tensor& grad_out, const Te
     // For Float16 input, cast gamma to Float32 if needed (shader expects Float32 stats)
     Tensor gamma_f32;
     const Tensor* gamma_effective = gamma;
-    if (gamma && input.dtype() == DType::Float16 && gamma->dtype() == DType::Float16) {
+    if (gamma && bn_is_half && gamma->dtype() != DType::Float32) {
         gamma_f32 = gamma->to(DType::Float32);
         gamma_effective = &gamma_f32;
     }
@@ -85,8 +89,8 @@ auto VulkanBackend::dispatchBatchNorm2dBackward(const Tensor& grad_out, const Te
 
     // Calculate buffer sizes
     size_t buffer_size_input = n_elements * input.dtype_size();
-    if (input.dtype() == DType::Float16) {
-        // Round up to 4-byte boundary for uint32 shader access (2 Float16 per uint32)
+    if (bn_is_half) {
+        // Round up to 4-byte boundary for uint32 shader access (2 half per uint32)
         size_t input_pairs = (n_elements + 1) / 2;
         buffer_size_input = input_pairs * 4;
     }

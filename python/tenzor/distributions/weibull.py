@@ -92,12 +92,11 @@ class Weibull(Distribution):
         return _wrap_numpy(scale_np * (-np.log(1.0 - p_np)) ** (1.0 / k_np))
 
     def entropy(self):
+        # H = gamma*(1 - 1/k) + log(scale/k) + 1, autograd-aware in scale and
+        # concentration. Rewrite (1 - 1/k) as (k-1)/k to avoid scalar/Variable.
         euler_mascheroni = 0.5772156649015328
-        scale_np = np.asarray(self.scale.tensor(), dtype=np.float64)
-        k_np = np.asarray(self.concentration.tensor(), dtype=np.float64)
-        out = (euler_mascheroni * (1.0 - 1.0 / k_np)
-               + np.log(scale_np / k_np) + 1.0)
-        return _wrap_numpy(out)
+        return (euler_mascheroni * ((self.concentration - 1.0) / self.concentration)
+                + _tz.log(self.scale / self.concentration) + 1.0)
 
     def support(self):
         return "(0, inf)"

@@ -23,6 +23,11 @@
 namespace tenzor {
 namespace rocm {
 
+// Defined in flash_attention_f64.hip.cpp — native double-precision attention.
+auto fused_attention_hip_f64(const Tensor& Q, const Tensor& K, const Tensor& V,
+                             double scale, bool causal,
+                             hipStream_t stream) -> std::pair<Tensor, Tensor>;
+
 // Helper to create zero-initialized tensor on HIP device
 inline Tensor create_hip_zeros(const std::vector<int64_t>& shape, DType dtype, Device device, hipStream_t stream = nullptr) {
     Tensor t(shape, dtype, device);
@@ -1872,6 +1877,20 @@ auto fused_attention_hip(
     float dropout_p,     // M5-rem: dropout probability
     uint32_t rng_seed    // M5-rem: Philox seed; 0 disables dropout
 ) -> std::pair<Tensor, Tensor> {
+    // Float64: use the native double-precision kernel for supported head dims so
+    // the forward keeps full precision instead of downcasting to Float32 (audit
+    // rocm-attn-01). Unsupported head dims / dropout fall through to the widen
+    // path below. fused_attention_hip_f64 lives in flash_attention_f64.hip.cpp.
+    if (Q.dtype() == DType::Float64 && dropout_p == 0.0f) {
+        const int64_t head_dim = Q.shape()[Q.ndim() - 1];
+        switch (head_dim) {
+            case 16: case 32: case 48: case 64: case 80: case 96: case 128:
+                return fused_attention_hip_f64(Q, K, V, static_cast<double>(scale),
+                                               causal, /*stream=*/nullptr);
+            default: break;
+        }
+    }
+
     // Non-Float32: upcast to Float32, compute, convert back
     if (Q.dtype() != DType::Float32) {
         DType orig_dtype = Q.dtype();

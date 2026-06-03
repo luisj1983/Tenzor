@@ -1865,10 +1865,18 @@ def cov(input, correction=1, fweights=None, aweights=None):
     Tensor
         Covariance matrix of shape ``(N, N)``.
     """
-    from .. import tenzor_core as _c
-    fw = fweights if fweights is not None else _c.Tensor()
-    aw = aweights if aweights is not None else _c.Tensor()
-    return _core.cov(input, correction, fw, aw)
+    # The C++ binding operates on Tensors; extract the underlying tensor from
+    # Variable arguments. Pass only the weights the caller supplied (the binding
+    # fills the rest with empty-tensor defaults — there is no valid no-argument
+    # Tensor ctor, so the previous `_c.Tensor()` sentinel raised TypeError).
+    def _t(x):
+        return x.tensor() if hasattr(x, "tensor") else x
+    kwargs = {}
+    if fweights is not None:
+        kwargs["fweights"] = _t(fweights)
+    if aweights is not None:
+        kwargs["aweights"] = _t(aweights)
+    return _core.cov(_t(input), correction, **kwargs)
 
 
 def corrcoef(input):

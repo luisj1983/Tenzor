@@ -56,13 +56,14 @@ auto VulkanBackend::dispatchInstanceNorm(const Tensor& input, const Tensor& weig
     Tensor rstd_out({total_nc}, stats_dtype, input.device());
 
     size_t elem_size = input.dtype_size();
-    // For F16: packed uint32 words, 4-byte aligned
-    size_t input_buf_size = is_float16 ? ((input.numel() + 1) / 2) * 4 : input.numel() * elem_size;
-    size_t output_buf_size = is_float16 ? ((output.numel() + 1) / 2) * 4 : output.numel() * elem_size;
-    size_t stats_elem_size = is_float16 ? sizeof(float) : elem_size;
+    // For F16/BF16: packed uint32 words (4-byte aligned); stats and weight/bias are Float32.
+    const bool is_packed_half = (is_float16 || is_bfloat16);
+    size_t input_buf_size = is_packed_half ? ((input.numel() + 1) / 2) * 4 : input.numel() * elem_size;
+    size_t output_buf_size = is_packed_half ? ((output.numel() + 1) / 2) * 4 : output.numel() * elem_size;
+    size_t stats_elem_size = is_packed_half ? sizeof(float) : elem_size;
     size_t nc_buf_size = total_nc * stats_elem_size;
-    // Weight/bias are Float32 for F16 shader
-    size_t channel_buf_size = C * (is_float16 ? sizeof(float) : elem_size);
+    // Weight/bias are Float32 for the F16/BF16 shader
+    size_t channel_buf_size = C * (is_packed_half ? sizeof(float) : elem_size);
 
     // Build bindings: input(0), output(1), weight(2), bias(3), mean(4), var(5)
     std::vector<std::pair<uint32_t, const void*>> bindings = {
@@ -159,8 +160,9 @@ auto VulkanBackend::dispatchInstanceNormBackward(const Tensor& grad_output, cons
     // Allocate outputs — grad_weight/grad_bias always Float32 for F16 shader
     std::vector<int64_t> out_shape(input_shape.begin(), input_shape.end());
     Tensor grad_input(out_shape, input.dtype(), input.device());
-    DType accum_dtype = is_float16 ? DType::Float32 : input.dtype();
-    size_t accum_elem_size = is_float16 ? sizeof(float) : elem_size;
+    const bool is_packed_half = (is_float16 || is_bfloat16);
+    DType accum_dtype = is_packed_half ? DType::Float32 : input.dtype();
+    size_t accum_elem_size = is_packed_half ? sizeof(float) : elem_size;
     Tensor grad_weight({C}, accum_dtype, input.device());
     Tensor grad_bias({C}, accum_dtype, input.device());
 
@@ -168,10 +170,10 @@ auto VulkanBackend::dispatchInstanceNormBackward(const Tensor& grad_output, cons
     memset(grad_weight.data_ptr(), 0, C * accum_elem_size, device_id);
     memset(grad_bias.data_ptr(), 0, C * accum_elem_size, device_id);
 
-    // For F16: packed uint32 words
-    size_t input_buf_size = is_float16 ? ((input.numel() + 1) / 2) * 4 : input.numel() * elem_size;
-    // mean/rstd are Float32 for F16
-    size_t nc_buf_size = total_nc * (is_float16 ? sizeof(float) : elem_size);
+    // For F16/BF16: packed uint32 words
+    size_t input_buf_size = is_packed_half ? ((input.numel() + 1) / 2) * 4 : input.numel() * elem_size;
+    // mean/rstd are Float32 for F16/BF16
+    size_t nc_buf_size = total_nc * (is_packed_half ? sizeof(float) : elem_size);
     size_t channel_buf_size = C * accum_elem_size;
 
     // Bindings: grad_output(0), input(1), mean(2), rstd(3), weight(4),

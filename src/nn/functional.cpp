@@ -8,6 +8,7 @@
 
 #include "tenzor/nn/functional.hpp"
 #include "tenzor/nn/layers/normalization.hpp"  // for internal::make_layer_norm_backward
+#include "tenzor/nn/layers/batchnorm.hpp"       // for internal::make_batch_norm2d_backward
 #include "tenzor/nn/layers/embedding.hpp"      // for internal::make_embedding_backward
 #include "tenzor/nn/layers/pooling.hpp"        // J7: delegate pool functional to Module
 #include "tenzor/nn/activations/activations.hpp" // U.13: nn::relu for prelu composition
@@ -665,7 +666,39 @@ auto batch_norm(const Variable& input,
         fwd_attrs.set(AttrKey::Eps, eps);
         auto output = dispatch(OpId::BatchNorm2dForwardAffine, fwd_inputs, fwd_attrs);
 
-        return Variable(output[0], input.requires_grad());
+        const bool needs_grad = input.requires_grad()
+            || (weight.has_value() && weight->requires_grad())
+            || (bias.has_value() && bias->requires_grad());
+        if (!needs_grad) {
+            return Variable(output[0], false);
+        }
+
+        // Wire the BatchNorm2d backward so gradients flow. Previously this
+        // functional path returned a grad_fn-less Variable that still claimed
+        // requires_grad -> silent zero gradients (audit nn-func-bn-01).
+        // BatchNorm2dBackward saves {input, mean, invstd, weight}.
+        const int64_t C = input_t.shape()[1];
+        Tensor invstd = tenzor::rsqrt(tenzor::add(batch_var, eps));
+        Tensor weight_t = weight.has_value()
+            ? weight->tensor()
+            : tenzor::ones({C}, input_t.dtype(), input_t.device());
+        std::vector<Tensor> saved = {
+            input_t.contiguous(), batch_mean, invstd, weight_t.contiguous()
+        };
+        auto grad_fn = internal::make_batch_norm2d_backward(
+            /*affine=*/weight.has_value(), eps, /*training=*/true, std::move(saved));
+        Variable result(output[0], true);
+        result.set_grad_fn(grad_fn);
+        std::vector<Variable> input_vars = {input};
+        if (weight.has_value()) input_vars.push_back(*weight);
+        if (bias.has_value()) input_vars.push_back(*bias);
+        grad_fn->set_input_variables(std::move(input_vars));
+        std::vector<std::shared_ptr<::tenzor::Function>> next_funcs;
+        if (auto fn = input.grad_fn()) next_funcs.push_back(fn);
+        if (weight.has_value()) { if (auto fn = weight->grad_fn()) next_funcs.push_back(fn); }
+        if (bias.has_value()) { if (auto fn = bias->grad_fn()) next_funcs.push_back(fn); }
+        grad_fn->set_next_functions(std::move(next_funcs));
+        return result;
     } else {
         // Eval mode: use running statistics
         std::vector<Tensor> inputs_vec = {input.tensor(), running_mean, running_var};
@@ -676,7 +709,10 @@ auto batch_norm(const Variable& input,
         attrs.set(AttrKey::Eps, eps);
         auto output = dispatch(OpId::BatchNorm2dForwardAffine, inputs_vec, attrs);
 
-        return Variable(output[0], input.requires_grad());
+        // Eval mode uses fixed running statistics; mirror the BatchNorm layer,
+        // which treats this as a non-differentiable inference path rather than
+        // returning a grad_fn-less Variable that falsely claims requires_grad.
+        return Variable(output[0], false);
     }
 }
 
@@ -1613,18 +1649,13 @@ auto local_response_norm(const Variable& input, int64_t size,
     // Pad the channel dimension with zeros on both sides
     int64_t pad_size = (size - 1) / 2;
 
-    // Use avg_pool1d with kernel=size, stride=1, padding=pad_size to compute channel sum
-    NewOpAttributes pool_attrs;
-    pool_attrs.set(AttrKey::KernelSize, size);
-    pool_attrs.set(AttrKey::Stride, int64_t{1});
-    pool_attrs.set(AttrKey::Padding, pad_size);
-
-    std::vector<Tensor> pool_inputs = {sq_for_pool.tensor()};
-    auto channel_avg = dispatch_to_device(OpId::AvgPool1dForward,
-        input.tensor().device().type, pool_inputs, pool_attrs);
-
-    // avg_pool1d gives sum/size, we want alpha/size * sum = alpha * (sum/size)
-    auto channel_sum_scaled = Variable(channel_avg[0], input.requires_grad());
+    // Use the autograd-aware avg_pool1d (kernel=size, stride=1, padding=pad_size,
+    // count_include_pad=true so the divisor is `size` at every channel) so the
+    // denominator's dependence on the input stays in the graph. Previously this
+    // dispatched the raw op and wrapped the result as a leaf Variable, severing
+    // the gradient through the normalization denominator (audit nn-func-lrn-01).
+    auto channel_sum_scaled = avg_pool1d(sq_for_pool, size, /*stride=*/1,
+                                         /*padding=*/pad_size, /*count_include_pad=*/true);
 
     // Reshape back: [N*S, 1, C] -> [N, S, C] -> [N, C, S] -> original shape
     std::vector<int64_t> nsc_shape = {N, spatial, C};

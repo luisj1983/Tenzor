@@ -270,6 +270,15 @@ auto unique_consecutive(const Tensor& input, bool return_inverse = false,
 auto cov(const Tensor& input, int64_t correction = 1) -> Tensor;
 
 /**
+ * @brief Weighted sample covariance (PyTorch torch.cov semantics).
+ * @param fweights Integer frequency weights of length M (empty Tensor = none).
+ * @param aweights Float analytic weights of length M (empty Tensor = none).
+ * When both are empty this is equivalent to cov(input, correction).
+ */
+auto cov(const Tensor& input, int64_t correction,
+         const Tensor& fweights, const Tensor& aweights) -> Tensor;
+
+/**
  * @brief Pearson correlation coefficient matrix.
  *
  * Equivalent to normalizing the covariance matrix by the product of

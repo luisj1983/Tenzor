@@ -3398,7 +3398,10 @@ static void register_cpu_kernels_rmsnorm_etc(BackendDispatchTable& table) {
         std::vector<Tensor> sm_in = {scores};
         Tensor probs = tenzor::dispatch(OpId::Softmax, sm_in, sm_attrs)[0];
         Tensor output = tenzor::matmul(probs, V);
-        return {output, Tensor{}};  // LSE not computed in composed path
+        // LSE = logsumexp over the key axis, matching the fused-path contract
+        // (previously the composed path returned an empty second output).
+        Tensor lse = tenzor::logsumexp(scores, static_cast<int64_t>(-1), /*keepdim=*/false);
+        return {output, lse};
     };
     table.register_kernel(OpId::FlexAttention, flex_attention_dispatch);
 

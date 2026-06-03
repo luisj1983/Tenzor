@@ -210,5 +210,15 @@ private:
     std::shared_ptr<BatchNorm2d> bn2d_; ///< Delegate to BatchNorm2d after reshaping
 };
 
+namespace internal {
+/// Factory for the BatchNorm2d backward autograd Function. Lets the functional
+/// API (F::batch_norm) attach the same grad_fn the BatchNorm layers use without
+/// exposing the concrete Function class. tensors_to_save = {input, mean, invstd,
+/// weight} where invstd = 1/sqrt(var + eps).
+auto make_batch_norm2d_backward(bool affine, double eps, bool training,
+                                std::vector<::tenzor::Tensor> tensors_to_save)
+    -> std::shared_ptr<::tenzor::Function>;
+}  // namespace internal
+
 } // namespace nn
 } // namespace tenzor

@@ -48,6 +48,25 @@ float readBF16(uint flat_idx) {
     return (half_idx == 0) ? unpackBF16x2(packed).x : unpackBF16x2(packed >> 16).x;
 }
 
+// Atomic packed-BF16 write to the output buffer. Two adjacent elements share a
+// 32-bit word and may belong to different (n,c) slices when spatial_size is odd,
+// so update only the target half via compare-and-swap to avoid clobbering.
+void writeBF16(uint flat_idx, float value) {
+    uint word_idx = flat_idx / 2;
+    uint shift = (flat_idx & 1u) * 16u;
+    uint mask = 0xFFFFu << shift;
+    uint vb = floatBitsToUint(value);
+    uint bf = ((vb + 0x7FFFu + ((vb >> 16) & 1u)) >> 16) & 0xFFFFu;
+    uint new_half = bf << shift;
+    uint prev = output_data[word_idx];
+    for (uint attempt = 0u; attempt < 65536u; ++attempt) {
+        uint desired = (prev & ~mask) | new_half;
+        uint observed = atomicCompSwap(output_data[word_idx], prev, desired);
+        if (observed == prev) return;
+        prev = observed;
+    }
+}
+
 void main() {
     uint tid = gl_LocalInvocationID.x;
     uint nc_idx = gl_WorkGroupID.x;
@@ -97,33 +116,14 @@ void main() {
     }
     barrier();
 
-    // Step 3: Normalize and write pairs
-    uint num_words = (params.spatial_size + 1) / 2;
-    for (uint w = tid; w < num_words; w += WORKGROUP_SIZE) {
-        uint elem0 = w * 2;
-        uint elem1 = w * 2 + 1;
-
-        float r0 = 0.0, r1 = 0.0;
-
-        if (elem0 < params.spatial_size) {
-            float normalized = (readBF16(base + elem0) - mean) * inv_std;
-            if (params.affine > 0) {
-                normalized = normalized * weight_data[c] + bias_data[c];
-            }
-            r0 = normalized;
+    // Step 3: Normalize and write each element with an atomic packed-BF16 store.
+    // Per-element CAS is required because adjacent (n,c) slices can share a
+    // 32-bit word when spatial_size is odd.
+    for (uint e = tid; e < params.spatial_size; e += WORKGROUP_SIZE) {
+        float normalized = (readBF16(base + e) - mean) * inv_std;
+        if (params.affine > 0) {
+            normalized = normalized * weight_data[c] + bias_data[c];
         }
-
-        if (elem1 < params.spatial_size) {
-            float normalized = (readBF16(base + elem1) - mean) * inv_std;
-            if (params.affine > 0) {
-                normalized = normalized * weight_data[c] + bias_data[c];
-            }
-            r1 = normalized;
-        }
-
-        uint out_word_idx = (base + elem0) / 2;
-        uint bits0 = ((floatBitsToUint(r0) + 0x7FFFu + ((floatBitsToUint(r0) >> 16) & 1u)) >> 16);
-        uint bits1 = ((floatBitsToUint(r1) + 0x7FFFu + ((floatBitsToUint(r1) >> 16) & 1u)) >> 16);
-        output_data[out_word_idx] = bits0 | (bits1 << 16);
+        writeBF16(base + e, normalized);
     }
 }

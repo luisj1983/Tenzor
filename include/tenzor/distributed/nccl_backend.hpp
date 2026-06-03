@@ -24,7 +24,9 @@
     // Stub definitions for builds without NCCL
     typedef void* ncclComm_t;
     typedef struct { char internal[128]; } ncclUniqueId;
-    typedef enum { ncclFloat = 0, ncclDouble = 1, ncclInt = 2, ncclInt64 = 3 } ncclDataType_t;
+    typedef enum { ncclFloat = 0, ncclDouble = 1, ncclInt = 2, ncclInt64 = 3,
+                   ncclFloat16 = 4, ncclInt8 = 5, ncclUint8 = 6,
+                   ncclUint32 = 7, ncclUint64 = 8 } ncclDataType_t;
     typedef enum { ncclSum = 0, ncclProd = 1, ncclMax = 2, ncclMin = 3 } ncclRedOp_t;
     typedef enum { ncclSuccess = 0 } ncclResult_t;
 #endif
@@ -56,8 +58,20 @@ inline ncclDataType_t to_nccl_datatype(DType dtype) {
     switch (dtype) {
         case DType::Float32: return ncclFloat;
         case DType::Float64: return ncclDouble;
+        case DType::Float16: return ncclFloat16;
+        case DType::Int8:    return ncclInt8;
+        case DType::UInt8:   return ncclUint8;
         case DType::Int32:   return ncclInt;
+        case DType::UInt32:  return ncclUint32;
         case DType::Int64:   return ncclInt64;
+        case DType::UInt64:  return ncclUint64;
+#if defined(NCCL_VERSION_CODE)
+#  if NCCL_VERSION_CODE >= NCCL_VERSION(2, 10, 0)
+        // ncclBfloat16 requires NCCL/RCCL >= 2.10. Older runtimes fall through
+        // to the throw below (FP32 master-weight reduction is the workaround there).
+        case DType::BFloat16: return ncclBfloat16;
+#  endif
+#endif
         default:
             throw std::invalid_argument(
                 "Unsupported dtype for NCCL: " + std::to_string(static_cast<int>(dtype)));
