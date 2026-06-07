@@ -18,6 +18,7 @@
 #include "tenzor/ops/creation.hpp"
 #include "tenzor/ops/math.hpp"
 #include "tenzor/nn/layers/segmentation.hpp"
+#include "tenzor/nn/functional.hpp"
 #include "../backend_test_fixture.hpp"
 
 using namespace tenzor;
@@ -51,9 +52,11 @@ TEST_P(WarnModeCounterMultiDTypeTest, CounterStartsAtZero) {
 // Note: upsample_bilinear requires CPU Float32 (the kernel is CPU-only),
 // so the resulting test body does not vary by the parameterized `device`.
 static Variable make_multidtype_stub_graph() {
+    // UpsampleBilinear gained full higher-order support (audit D3); the canary
+    // is now max_pool2d (MaxPool2dBackward is a passthrough higher-order stub).
     auto x = Variable(randn({1, 1, 4, 4}, DType::Float32, Device::cpu()), true);
     auto y = x * x;
-    return tenzor::nn::upsample_bilinear(y, 8, 8);
+    return tenzor::nn::functional::max_pool2d(y, {2, 2}, {2, 2});
 }
 
 // Warn mode increments the counter when an op with a passthrough stub

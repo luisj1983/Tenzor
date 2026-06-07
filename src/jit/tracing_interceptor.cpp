@@ -40,6 +40,14 @@ auto opid_to_optype(OpId op) -> std::optional<OpType> {
 
         // Convolution
         case OpId::Conv2dForward:     return OpType::Conv2d;
+        // 1D/3D convs map to the same ONNX "Conv" op; the kernel_shape rank
+        // (emitted from the kernel_size vec attr) distinguishes them.
+        case OpId::Conv1dForward:     return OpType::Conv2d;
+        case OpId::Conv3dForward:     return OpType::Conv2d;
+        // Transposed (fractionally-strided) convs map to ONNX "ConvTranspose".
+        case OpId::ConvTranspose1dForward: return OpType::ConvTranspose;
+        case OpId::ConvTranspose2dForward: return OpType::ConvTranspose;
+        case OpId::ConvTranspose3dForward: return OpType::ConvTranspose;
 
         // Normalization
         case OpId::BatchNorm2dForward:       return OpType::BatchNorm2d;
@@ -193,6 +201,15 @@ auto make_tracing_interceptor(
                 traced.vec_attrs[name] = {attrs.get_int(kh), attrs.get_int(kw)};
             }
         };
+        // 3D (depth, height, width) variant for Conv3d etc. Called after the
+        // 2D pairs so a present D dim upgrades the vec to [D, H, W].
+        auto copy_dhw_triple = [&](AttrKey kd, AttrKey kh, AttrKey kw,
+                                   const char* name) {
+            if (attrs.has(kd) && attrs.has(kh) && attrs.has(kw)) {
+                traced.vec_attrs[name] = {attrs.get_int(kd), attrs.get_int(kh),
+                                          attrs.get_int(kw)};
+            }
+        };
         copy_float(AttrKey::Exponent, "exponent");
         copy_float(AttrKey::Alpha,    "alpha");
         copy_float(AttrKey::Beta,     "beta");
@@ -232,11 +249,32 @@ auto make_tracing_interceptor(
         copy_int(AttrKey::Stride,      "stride");
         copy_int(AttrKey::Padding,     "padding");
         copy_int(AttrKey::Dilation,    "dilation");
+        copy_int(AttrKey::OutputPadding, "output_padding");
         copy_int(AttrKey::Groups,      "groups");
         copy_hw_pair(AttrKey::KernelSizeH, AttrKey::KernelSizeW, "kernel_size");
         copy_hw_pair(AttrKey::StrideH,     AttrKey::StrideW,     "stride");
         copy_hw_pair(AttrKey::PaddingH,    AttrKey::PaddingW,    "padding");
         copy_hw_pair(AttrKey::DilationH,   AttrKey::DilationW,   "dilation");
+        copy_hw_pair(AttrKey::OutputPaddingH, AttrKey::OutputPaddingW, "output_padding");
+        copy_dhw_triple(AttrKey::KernelSizeD, AttrKey::KernelSizeH, AttrKey::KernelSizeW, "kernel_size");
+        copy_dhw_triple(AttrKey::StrideD,     AttrKey::StrideH,     AttrKey::StrideW,     "stride");
+        copy_dhw_triple(AttrKey::PaddingD,    AttrKey::PaddingH,    AttrKey::PaddingW,    "padding");
+        copy_dhw_triple(AttrKey::DilationD,   AttrKey::DilationH,   AttrKey::DilationW,   "dilation");
+        copy_dhw_triple(AttrKey::OutputPaddingD, AttrKey::OutputPaddingH, AttrKey::OutputPaddingW, "output_padding");
+        // 1-D conv-family ops set only scalar KernelSize/Stride/Padding/
+        // Dilation/OutputPadding (no per-axis pairs/triples fire above). Emit
+        // them as rank-1 vecs so the ONNX exporter produces a faithful
+        // 1-spatial-dim Conv/ConvTranspose (rank-1 kernel_shape/pads/etc).
+        if (op == OpId::Conv1dForward || op == OpId::ConvTranspose1dForward) {
+            auto vec1 = [&](AttrKey k, const char* name) {
+                if (attrs.has(k)) traced.vec_attrs[name] = {attrs.get_int(k)};
+            };
+            vec1(AttrKey::KernelSize,    "kernel_size");
+            vec1(AttrKey::Stride,        "stride");
+            vec1(AttrKey::Padding,       "padding");
+            vec1(AttrKey::Dilation,      "dilation");
+            vec1(AttrKey::OutputPadding, "output_padding");
+        }
 
         tracer.record_op(std::move(traced));
 

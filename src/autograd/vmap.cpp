@@ -532,6 +532,22 @@ void init_builtin_batching_rules() {
     register_batching_rule("UpsampleNearestBackward", shape_passthrough);
 }
 
+// Install the built-in batching rules eagerly at load time, before any user
+// code runs. Previously init ran lazily on the first vmap() call; a caller
+// that registered a custom rule (e.g. an OpId::Mul override) *before* its
+// first vmap had that rule silently clobbered when the deferred init then
+// re-registered the built-in passthrough for the same key. Running init at
+// static-init time guarantees user registrations always take precedence,
+// since they happen after main() starts. vmap()'s own call_once becomes a
+// no-op once the flag is consumed here.
+namespace {
+struct BuiltinBatchingRulesInitializer {
+    BuiltinBatchingRulesInitializer() {
+        std::call_once(init_flag, init_builtin_batching_rules);
+    }
+} g_builtin_batching_rules_initializer;
+} // namespace
+
 // Audit A.3: legacy helpers detect_op_name / detect_op_id collapsed
 // into the inline probe-and-dispatch logic inside `vmap()` below
 // (which now reads both the OpId *and* the name from a single probe

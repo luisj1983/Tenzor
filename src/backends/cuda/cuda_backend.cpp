@@ -134,8 +134,8 @@ namespace cuda {
     auto tanh_backward_kernel(const Tensor& grad_output, const Tensor& input, cudaStream_t stream) -> Tensor;
     auto gelu_kernel(const Tensor& input, cudaStream_t stream) -> Tensor;
     auto gelu_backward_kernel(const Tensor& grad_output, const Tensor& input, cudaStream_t stream) -> Tensor;
-    auto leaky_relu_kernel(const Tensor& input, float alpha, cudaStream_t stream) -> Tensor;
-    auto leaky_relu_backward_kernel(const Tensor& grad_output, const Tensor& input, float alpha, cudaStream_t stream) -> Tensor;
+    auto leaky_relu_kernel(const Tensor& input, double alpha, cudaStream_t stream) -> Tensor;
+    auto leaky_relu_backward_kernel(const Tensor& grad_output, const Tensor& input, double alpha, cudaStream_t stream) -> Tensor;
     auto elu_kernel(const Tensor& input, float alpha, cudaStream_t stream) -> Tensor;
     auto elu_backward_kernel(const Tensor& grad_output, const Tensor& input, float alpha, cudaStream_t stream) -> Tensor;
     auto selu_kernel(const Tensor& input, cudaStream_t stream) -> Tensor;
@@ -257,6 +257,18 @@ public:
 
         // Enable peer access between GPU pairs for fast D2D transfers
         init_peer_access();
+
+        // Eagerly construct the CUDAStreamPool singleton now, during backend
+        // load (which happens inside initialize(), BEFORE its atexit(finalize)
+        // registration). Static-local destruction is the reverse of
+        // construction order, so this guarantees ~CUDAStreamPool runs AFTER
+        // finalize(). Otherwise the pool is constructed lazily on the first
+        // stream acquire (e.g. an async matmul, AFTER the atexit registration),
+        // so its destructor runs BEFORE finalize() — and finalize()'s
+        // StreamManager::reset() then calls CUDAStreamPool::release() on the
+        // destroyed pool, reading its freed device_pools_ vector (a garbage
+        // stream count / SIGSEGV at process exit).
+        cuda::CUDAStreamPool::instance();
     }
 
     auto name() const -> std::string_view override {

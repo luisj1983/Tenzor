@@ -708,7 +708,8 @@ public:
                              const Tensor& bias_ih, const Tensor& bias_hh,
                              const Tensor& h0, const Tensor& c0) -> std::vector<Tensor>;
     auto dispatchGRUForward(const Tensor& input, const Tensor& W_ih, const Tensor& W_hh,
-                            const Tensor& bias, const Tensor& h0) -> std::vector<Tensor>;
+                            const Tensor& bias, const Tensor& h0,
+                            const Tensor& bias_hh_in = {}) -> std::vector<Tensor>;
     auto dispatchLSTMCellForward(const Tensor& input, const Tensor& hx, const Tensor& cx,
                                  const Tensor& weight_ih, const Tensor& weight_hh,
                                  const Tensor& bias_ih, const Tensor& bias_hh) -> std::vector<Tensor>;

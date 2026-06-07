@@ -53,6 +53,7 @@ enum class OpType {
 
     // Convolution
     Conv2d,
+    ConvTranspose,
 
     // Normalization
     BatchNorm2d,

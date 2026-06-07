@@ -51,6 +51,18 @@ static void check_same_size3(const char* name,
 // OMP parallel threshold: use parallel loop when list has this many tensors.
 static constexpr int64_t OMP_PARALLEL_THRESHOLD = 4;
 
+// Host-parallelising per-tensor dispatch only helps for CPU tensors. For
+// device tensors every dispatch funnels into the backend's (mutex-guarded)
+// queue, so OMP threads just fight over the lock — on the Intel oneAPI CPU
+// OpenCL runtime the contention made 1000 tiny adds take ~17 s instead of
+// ~30 ms (ForeachOps.PerfManyTensors), and concurrent enqueue is a suspected
+// trigger of its internal-state crashes. Device lists dispatch sequentially
+// into the (already asynchronous) queue instead.
+static inline bool foreach_use_omp(int64_t n, const std::vector<Tensor>& lst) {
+    return n >= OMP_PARALLEL_THRESHOLD &&
+           (lst.empty() || lst[0].device().type == Device::Type::CPU);
+}
+
 // ---------------------------------------------------------------------------
 // Out-of-place binary ops
 // ---------------------------------------------------------------------------
@@ -60,7 +72,7 @@ auto foreach_add(const std::vector<Tensor>& a, const std::vector<Tensor>& b)
     check_same_size("foreach_add", a, b);
     std::vector<Tensor> out(a.size());
     const auto n = static_cast<int64_t>(a.size());
-    #pragma omp parallel for if(n >= OMP_PARALLEL_THRESHOLD) schedule(static)
+    #pragma omp parallel for if(foreach_use_omp(n, a)) schedule(static)
     for (int64_t i = 0; i < n; ++i) {
         out[i] = tenzor::add(a[i], b[i]);
     }
@@ -72,7 +84,7 @@ auto foreach_sub(const std::vector<Tensor>& a, const std::vector<Tensor>& b)
     check_same_size("foreach_sub", a, b);
     std::vector<Tensor> out(a.size());
     const auto n = static_cast<int64_t>(a.size());
-    #pragma omp parallel for if(n >= OMP_PARALLEL_THRESHOLD) schedule(static)
+    #pragma omp parallel for if(foreach_use_omp(n, a)) schedule(static)
     for (int64_t i = 0; i < n; ++i) {
         out[i] = tenzor::sub(a[i], b[i]);
     }
@@ -84,7 +96,7 @@ auto foreach_mul(const std::vector<Tensor>& a, const std::vector<Tensor>& b)
     check_same_size("foreach_mul", a, b);
     std::vector<Tensor> out(a.size());
     const auto n = static_cast<int64_t>(a.size());
-    #pragma omp parallel for if(n >= OMP_PARALLEL_THRESHOLD) schedule(static)
+    #pragma omp parallel for if(foreach_use_omp(n, a)) schedule(static)
     for (int64_t i = 0; i < n; ++i) {
         out[i] = tenzor::mul(a[i], b[i]);
     }
@@ -96,7 +108,7 @@ auto foreach_div(const std::vector<Tensor>& a, const std::vector<Tensor>& b)
     check_same_size("foreach_div", a, b);
     std::vector<Tensor> out(a.size());
     const auto n = static_cast<int64_t>(a.size());
-    #pragma omp parallel for if(n >= OMP_PARALLEL_THRESHOLD) schedule(static)
+    #pragma omp parallel for if(foreach_use_omp(n, a)) schedule(static)
     for (int64_t i = 0; i < n; ++i) {
         out[i] = tenzor::div(a[i], b[i]);
     }
@@ -110,7 +122,7 @@ auto foreach_div(const std::vector<Tensor>& a, const std::vector<Tensor>& b)
 auto foreach_neg(const std::vector<Tensor>& a) -> std::vector<Tensor> {
     std::vector<Tensor> out(a.size());
     const auto n = static_cast<int64_t>(a.size());
-    #pragma omp parallel for if(n >= OMP_PARALLEL_THRESHOLD) schedule(static)
+    #pragma omp parallel for if(foreach_use_omp(n, a)) schedule(static)
     for (int64_t i = 0; i < n; ++i) {
         out[i] = tenzor::neg(a[i]);
     }
@@ -120,7 +132,7 @@ auto foreach_neg(const std::vector<Tensor>& a) -> std::vector<Tensor> {
 auto foreach_abs(const std::vector<Tensor>& a) -> std::vector<Tensor> {
     std::vector<Tensor> out(a.size());
     const auto n = static_cast<int64_t>(a.size());
-    #pragma omp parallel for if(n >= OMP_PARALLEL_THRESHOLD) schedule(static)
+    #pragma omp parallel for if(foreach_use_omp(n, a)) schedule(static)
     for (int64_t i = 0; i < n; ++i) {
         out[i] = tenzor::abs(a[i]);
     }
@@ -130,7 +142,7 @@ auto foreach_abs(const std::vector<Tensor>& a) -> std::vector<Tensor> {
 auto foreach_sqrt(const std::vector<Tensor>& a) -> std::vector<Tensor> {
     std::vector<Tensor> out(a.size());
     const auto n = static_cast<int64_t>(a.size());
-    #pragma omp parallel for if(n >= OMP_PARALLEL_THRESHOLD) schedule(static)
+    #pragma omp parallel for if(foreach_use_omp(n, a)) schedule(static)
     for (int64_t i = 0; i < n; ++i) {
         out[i] = tenzor::sqrt(a[i]);
     }
@@ -140,7 +152,7 @@ auto foreach_sqrt(const std::vector<Tensor>& a) -> std::vector<Tensor> {
 auto foreach_copy(const std::vector<Tensor>& src) -> std::vector<Tensor> {
     std::vector<Tensor> out(src.size());
     const auto n = static_cast<int64_t>(src.size());
-    #pragma omp parallel for if(n >= OMP_PARALLEL_THRESHOLD) schedule(static)
+    #pragma omp parallel for if(foreach_use_omp(n, src)) schedule(static)
     for (int64_t i = 0; i < n; ++i) {
         out[i] = src[i].clone();
     }
@@ -154,7 +166,7 @@ auto foreach_copy(const std::vector<Tensor>& src) -> std::vector<Tensor> {
 void foreach_add_(std::vector<Tensor>& a, const std::vector<Tensor>& b) {
     check_same_size("foreach_add_", a, b);
     const auto n = static_cast<int64_t>(a.size());
-    #pragma omp parallel for if(n >= OMP_PARALLEL_THRESHOLD) schedule(static)
+    #pragma omp parallel for if(foreach_use_omp(n, a)) schedule(static)
     for (int64_t i = 0; i < n; ++i) {
         tenzor::add_(a[i], b[i]);
     }
@@ -163,7 +175,7 @@ void foreach_add_(std::vector<Tensor>& a, const std::vector<Tensor>& b) {
 void foreach_sub_(std::vector<Tensor>& a, const std::vector<Tensor>& b) {
     check_same_size("foreach_sub_", a, b);
     const auto n = static_cast<int64_t>(a.size());
-    #pragma omp parallel for if(n >= OMP_PARALLEL_THRESHOLD) schedule(static)
+    #pragma omp parallel for if(foreach_use_omp(n, a)) schedule(static)
     for (int64_t i = 0; i < n; ++i) {
         tenzor::sub_(a[i], b[i]);
     }
@@ -172,7 +184,7 @@ void foreach_sub_(std::vector<Tensor>& a, const std::vector<Tensor>& b) {
 void foreach_mul_(std::vector<Tensor>& a, const std::vector<Tensor>& b) {
     check_same_size("foreach_mul_", a, b);
     const auto n = static_cast<int64_t>(a.size());
-    #pragma omp parallel for if(n >= OMP_PARALLEL_THRESHOLD) schedule(static)
+    #pragma omp parallel for if(foreach_use_omp(n, a)) schedule(static)
     for (int64_t i = 0; i < n; ++i) {
         tenzor::mul_(a[i], b[i]);
     }
@@ -181,7 +193,7 @@ void foreach_mul_(std::vector<Tensor>& a, const std::vector<Tensor>& b) {
 void foreach_div_(std::vector<Tensor>& a, const std::vector<Tensor>& b) {
     check_same_size("foreach_div_", a, b);
     const auto n = static_cast<int64_t>(a.size());
-    #pragma omp parallel for if(n >= OMP_PARALLEL_THRESHOLD) schedule(static)
+    #pragma omp parallel for if(foreach_use_omp(n, a)) schedule(static)
     for (int64_t i = 0; i < n; ++i) {
         tenzor::div_(a[i], b[i]);
     }
@@ -193,7 +205,7 @@ void foreach_div_(std::vector<Tensor>& a, const std::vector<Tensor>& b) {
 
 void foreach_neg_(std::vector<Tensor>& a) {
     const auto n = static_cast<int64_t>(a.size());
-    #pragma omp parallel for if(n >= OMP_PARALLEL_THRESHOLD) schedule(static)
+    #pragma omp parallel for if(foreach_use_omp(n, a)) schedule(static)
     for (int64_t i = 0; i < n; ++i) {
         // neg_ is not a standalone op; use mul_ by -1 cast to same dtype
         Tensor minus_one = full_like(a[i], -1.0);
@@ -203,7 +215,7 @@ void foreach_neg_(std::vector<Tensor>& a) {
 
 void foreach_abs_(std::vector<Tensor>& a) {
     const auto n = static_cast<int64_t>(a.size());
-    #pragma omp parallel for if(n >= OMP_PARALLEL_THRESHOLD) schedule(static)
+    #pragma omp parallel for if(foreach_use_omp(n, a)) schedule(static)
     for (int64_t i = 0; i < n; ++i) {
         Tensor result = tenzor::abs(a[i]);
         // Copy result data back into a[i] storage (same shape/dtype guaranteed)
@@ -213,7 +225,7 @@ void foreach_abs_(std::vector<Tensor>& a) {
 
 void foreach_sqrt_(std::vector<Tensor>& a) {
     const auto n = static_cast<int64_t>(a.size());
-    #pragma omp parallel for if(n >= OMP_PARALLEL_THRESHOLD) schedule(static)
+    #pragma omp parallel for if(foreach_use_omp(n, a)) schedule(static)
     for (int64_t i = 0; i < n; ++i) {
         Tensor result = tenzor::sqrt(a[i]);
         tenzor::add_(a[i], tenzor::sub(result, a[i]));
@@ -222,7 +234,7 @@ void foreach_sqrt_(std::vector<Tensor>& a) {
 
 void foreach_zero_(std::vector<Tensor>& a) {
     const auto n = static_cast<int64_t>(a.size());
-    #pragma omp parallel for if(n >= OMP_PARALLEL_THRESHOLD) schedule(static)
+    #pragma omp parallel for if(foreach_use_omp(n, a)) schedule(static)
     for (int64_t i = 0; i < n; ++i) {
         Tensor z = zeros_like(a[i]);
         tenzor::add_(a[i], tenzor::sub(z, a[i]));
@@ -239,7 +251,7 @@ void foreach_addcdiv_(std::vector<Tensor>& self,
                       double scalar) {
     check_same_size3("foreach_addcdiv_", self, a, b);
     const auto n = static_cast<int64_t>(self.size());
-    #pragma omp parallel for if(n >= OMP_PARALLEL_THRESHOLD) schedule(static)
+    #pragma omp parallel for if(foreach_use_omp(n, self)) schedule(static)
     for (int64_t i = 0; i < n; ++i) {
         // self[i] = self[i] + scalar * a[i] / b[i]
         Tensor result = tenzor::addcdiv(self[i], a[i], b[i], scalar);
@@ -253,7 +265,7 @@ void foreach_addcmul_(std::vector<Tensor>& self,
                       double scalar) {
     check_same_size3("foreach_addcmul_", self, a, b);
     const auto n = static_cast<int64_t>(self.size());
-    #pragma omp parallel for if(n >= OMP_PARALLEL_THRESHOLD) schedule(static)
+    #pragma omp parallel for if(foreach_use_omp(n, self)) schedule(static)
     for (int64_t i = 0; i < n; ++i) {
         // self[i] = self[i] + scalar * a[i] * b[i]
         Tensor result = tenzor::addcmul(self[i], a[i], b[i], scalar);
@@ -266,7 +278,7 @@ void foreach_lerp_(std::vector<Tensor>& self,
                    double scalar) {
     check_same_size("foreach_lerp_", self, b);
     const auto n = static_cast<int64_t>(self.size());
-    #pragma omp parallel for if(n >= OMP_PARALLEL_THRESHOLD) schedule(static)
+    #pragma omp parallel for if(foreach_use_omp(n, self)) schedule(static)
     for (int64_t i = 0; i < n; ++i) {
         // self[i] = lerp(self[i], b[i], scalar) = self[i] + scalar*(b[i]-self[i])
         Tensor result = tenzor::lerp(self[i], b[i], scalar);
@@ -282,7 +294,7 @@ auto foreach_norm(const std::vector<Tensor>& a, double p) -> std::vector<Tensor>
     std::vector<Tensor> out(a.size());
     const auto n = static_cast<int64_t>(a.size());
     const auto p_f = static_cast<float>(p);
-    #pragma omp parallel for if(n >= OMP_PARALLEL_THRESHOLD) schedule(static)
+    #pragma omp parallel for if(foreach_use_omp(n, a)) schedule(static)
     for (int64_t i = 0; i < n; ++i) {
         // norm() with no dim gives global scalar norm
         out[i] = tenzor::norm(a[i], p_f, std::nullopt, false);

@@ -52,8 +52,10 @@ TEST_P(BatchNorm2dTest, ParameterInitialization) {
     EXPECT_EQ(params[1]->shape()[0], 32);  // bias shape
 
     // Weight should be initialized to 1, bias to 0
-    auto weight_data = params[0]->tensor().cpu().data<float>();
-    auto bias_data = params[1]->tensor().cpu().data<float>();
+    auto weight_data_cpu_keepalive = params[0]->tensor().cpu();
+    auto weight_data = weight_data_cpu_keepalive.data<float>();
+    auto bias_data_cpu_keepalive = params[1]->tensor().cpu();
+    auto bias_data = bias_data_cpu_keepalive.data<float>();
 
     for (int64_t i = 0; i < 32; ++i) {
         EXPECT_FLOAT_EQ(weight_data[i], 1.0f);
@@ -83,7 +85,8 @@ TEST_P(BatchNorm2dTest, TrainingModeNormalization) {
     auto output = bn.forward(input);
 
     // Check output statistics per channel
-    auto output_data = output.tensor().cpu().data<float>();
+    auto output_data_cpu_keepalive = output.tensor().cpu();
+    auto output_data = output_data_cpu_keepalive.data<float>();
     int64_t N = 16, C = 3, H = 8, W = 8;
     int64_t spatial_size = H * W;
     int64_t batch_size = N * spatial_size;
@@ -145,8 +148,10 @@ TEST_P(BatchNorm2dTest, TrainingModeConsistency) {
     auto output1 = bn.forward(input);
     auto output2 = bn.forward(input);
 
-    auto data1 = output1.tensor().cpu().data<float>();
-    auto data2 = output2.tensor().cpu().data<float>();
+    auto data1_cpu_keepalive = output1.tensor().cpu();
+    auto data1 = data1_cpu_keepalive.data<float>();
+    auto data2_cpu_keepalive = output2.tensor().cpu();
+    auto data2 = data2_cpu_keepalive.data<float>();
 
     for (size_t i = 0; i < output1.tensor().numel(); ++i) {
         EXPECT_FLOAT_EQ(data1[i], data2[i]);
@@ -174,7 +179,8 @@ TEST_P(BatchNorm2dTest, RunningStatisticsUpdate) {
     auto eval_output = bn.forward(test_input);
 
     // Outputs should be valid (no NaN)
-    auto eval_data = eval_output.tensor().cpu().data<float>();
+    auto eval_data_cpu_keepalive = eval_output.tensor().cpu();
+    auto eval_data = eval_data_cpu_keepalive.data<float>();
     for (int64_t i = 0; i < eval_output.tensor().numel(); ++i) {
         EXPECT_FALSE(std::isnan(eval_data[i]));
         EXPECT_FALSE(std::isinf(eval_data[i]));
@@ -198,8 +204,10 @@ TEST_P(BatchNorm2dTest, MomentumEffect) {
     auto output_low = bn_low_momentum.forward(input);
 
     // Check both outputs are valid
-    auto data_high = output_high.tensor().cpu().data<float>();
-    auto data_low = output_low.tensor().cpu().data<float>();
+    auto data_high_cpu_keepalive = output_high.tensor().cpu();
+    auto data_high = data_high_cpu_keepalive.data<float>();
+    auto data_low_cpu_keepalive = output_low.tensor().cpu();
+    auto data_low = data_low_cpu_keepalive.data<float>();
 
     for (int64_t i = 0; i < output_high.tensor().numel(); ++i) {
         EXPECT_FALSE(std::isnan(data_high[i]));
@@ -224,8 +232,10 @@ TEST_P(BatchNorm2dTest, RunningStatsNotUpdatedInEval) {
     auto output2 = bn.forward(eval_input);
 
     // Outputs should be identical (running stats not updated)
-    auto data1 = output1.tensor().cpu().data<float>();
-    auto data2 = output2.tensor().cpu().data<float>();
+    auto data1_cpu_keepalive = output1.tensor().cpu();
+    auto data1 = data1_cpu_keepalive.data<float>();
+    auto data2_cpu_keepalive = output2.tensor().cpu();
+    auto data2 = data2_cpu_keepalive.data<float>();
 
     for (int64_t i = 0; i < output1.tensor().numel(); ++i) {
         EXPECT_FLOAT_EQ(data1[i], data2[i]);
@@ -252,8 +262,10 @@ TEST_P(BatchNorm2dTest, EpsilonPreventsDivisionByZero) {
         auto output_small = bn_small_eps.forward(input);
         auto output_large = bn_large_eps.forward(input);
 
-        auto data_small = output_small.tensor().cpu().data<float>();
-        auto data_large = output_large.tensor().cpu().data<float>();
+        auto data_small_cpu_keepalive = output_small.tensor().cpu();
+        auto data_small = data_small_cpu_keepalive.data<float>();
+        auto data_large_cpu_keepalive = output_large.tensor().cpu();
+        auto data_large = data_large_cpu_keepalive.data<float>();
 
         for (size_t i = 0; i < output_small.tensor().numel(); ++i) {
             EXPECT_FALSE(std::isnan(data_small[i]));
@@ -279,8 +291,10 @@ TEST_P(BatchNorm2dTest, DifferentEpsilonValues) {
     auto output2 = bn2.forward(input);
 
     // Outputs should be slightly different due to epsilon
-    auto data1 = output1.tensor().cpu().data<float>();
-    auto data2 = output2.tensor().cpu().data<float>();
+    auto data1_cpu_keepalive = output1.tensor().cpu();
+    auto data1 = data1_cpu_keepalive.data<float>();
+    auto data2_cpu_keepalive = output2.tensor().cpu();
+    auto data2 = data2_cpu_keepalive.data<float>();
 
     bool has_difference = false;
     for (int64_t i = 0; i < output1.tensor().numel(); ++i) {
@@ -312,7 +326,8 @@ TEST_P(BatchNorm2dTest, AffineTransformationApplied) {
     auto output = bn.forward(input);
 
     // Zero input normalized is still zero, so output should be bias = 1.0
-    auto output_data = output.tensor().cpu().data<float>();
+    auto output_data_cpu_keepalive = output.tensor().cpu();
+    auto output_data = output_data_cpu_keepalive.data<float>();
     for (int64_t i = 0; i < output.tensor().numel(); ++i) {
         EXPECT_NEAR(output_data[i], 1.0f, 1e-4f);
     }
@@ -340,8 +355,10 @@ TEST_P(BatchNorm2dTest, AffineScaling) {
     bn_no_affine.train();
     auto output_no_affine = bn_no_affine.forward(input);
 
-    auto data = output.tensor().cpu().data<float>();
-    auto data_no_affine = output_no_affine.tensor().cpu().data<float>();
+    auto data_cpu_keepalive = output.tensor().cpu();
+    auto data = data_cpu_keepalive.data<float>();
+    auto data_no_affine_cpu_keepalive = output_no_affine.tensor().cpu();
+    auto data_no_affine = data_no_affine_cpu_keepalive.data<float>();
 
     // Output should be approximately 3.0 * normalized
     for (int64_t i = 0; i < output.tensor().numel(); ++i) {
@@ -364,7 +381,8 @@ TEST_P(BatchNorm2dTest, BatchSize1) {
     EXPECT_EQ(output.shape()[1], 4);
 
     // Check no NaN values
-    auto data = output.tensor().cpu().data<float>();
+    auto data_cpu_keepalive = output.tensor().cpu();
+    auto data = data_cpu_keepalive.data<float>();
     for (int64_t i = 0; i < output.tensor().numel(); ++i) {
         EXPECT_FALSE(std::isnan(data[i]));
     }
@@ -542,7 +560,8 @@ TEST_P(BatchNorm2dTest, BackwardPassGradientFlow) {
     EXPECT_EQ(input_grad.shape().size(), 4);
 
     // Check no NaN in gradients
-    auto grad_data = input_grad.cpu().data<float>();
+    auto grad_data_cpu_keepalive = input_grad.cpu();
+    auto grad_data = grad_data_cpu_keepalive.data<float>();
     for (int64_t i = 0; i < input_grad.numel(); ++i) {
         EXPECT_FALSE(std::isnan(grad_data[i]));
         EXPECT_FALSE(std::isinf(grad_data[i]));
@@ -595,7 +614,8 @@ TEST_P(BatchNorm2dTest, GradientCheckingSimple) {
 
     // Check gradient magnitude is reasonable
     auto input_grad = input.grad().value();
-    auto grad_data = input_grad.cpu().data<float>();
+    auto grad_data_cpu_keepalive = input_grad.cpu();
+    auto grad_data = grad_data_cpu_keepalive.data<float>();
 
     double grad_sum = 0.0;
     for (int64_t i = 0; i < input_grad.numel(); ++i) {
@@ -619,7 +639,8 @@ TEST_P(BatchNorm2dTest, VerySmallEpsilon) {
 
     EXPECT_NO_THROW({
         auto output = bn.forward(input);
-        auto data = output.tensor().cpu().data<float>();
+        auto data_cpu_keepalive = output.tensor().cpu();
+        auto data = data_cpu_keepalive.data<float>();
         for (int64_t i = 0; i < output.tensor().numel(); ++i) {
             EXPECT_FALSE(std::isnan(data[i]));
         }
@@ -636,7 +657,8 @@ TEST_P(BatchNorm2dTest, ConstantInput) {
     auto output = bn.forward(input);
 
     // Should not crash or produce NaN
-    auto data = output.tensor().cpu().data<float>();
+    auto data_cpu_keepalive = output.tensor().cpu();
+    auto data = data_cpu_keepalive.data<float>();
     for (int64_t i = 0; i < output.tensor().numel(); ++i) {
         EXPECT_FALSE(std::isnan(data[i]));
         EXPECT_FALSE(std::isinf(data[i]));
@@ -653,7 +675,8 @@ TEST_P(BatchNorm2dTest, ExtremeValues) {
 
     EXPECT_NO_THROW({
         auto output = bn.forward(input);
-        auto data = output.tensor().cpu().data<float>();
+        auto data_cpu_keepalive = output.tensor().cpu();
+        auto data = data_cpu_keepalive.data<float>();
         for (int64_t i = 0; i < output.tensor().numel(); ++i) {
             EXPECT_FALSE(std::isnan(data[i]));
             EXPECT_FALSE(std::isinf(data[i]));
@@ -707,7 +730,8 @@ TEST_P(BatchNorm2dTest, IndependentChannelNormalization) {
     auto output = bn.forward(input);
 
     // Each channel in output should have similar statistics
-    auto output_data = output.tensor().cpu().data<float>();
+    auto output_data_cpu_keepalive = output.tensor().cpu();
+    auto output_data = output_data_cpu_keepalive.data<float>();
     int64_t spatial_size = H * W;
     int64_t batch_size = N * spatial_size;
 
@@ -745,8 +769,10 @@ TEST_P(BatchNorm2dTest, ConsistentWithManualNormalization) {
     auto output = bn.forward(input);
 
     // Manual normalization (read both back to host)
-    auto input_data = input.tensor().cpu().data<float>();
-    auto output_data = output.tensor().cpu().data<float>();
+    auto input_data_cpu_keepalive = input.tensor().cpu();
+    auto input_data = input_data_cpu_keepalive.data<float>();
+    auto output_data_cpu_keepalive = output.tensor().cpu();
+    auto output_data = output_data_cpu_keepalive.data<float>();
 
     int64_t N = 4, C = 2, H = 8, W = 8;
     int64_t spatial_size = H * W;
@@ -798,7 +824,8 @@ TEST_P(BatchNorm2dTest, StatisticsAccumulationOverMultipleBatches) {
         auto output = bn.forward(input);
 
         // Check output is valid
-        auto data = output.tensor().cpu().data<float>();
+        auto data_cpu_keepalive = output.tensor().cpu();
+        auto data = data_cpu_keepalive.data<float>();
         for (int64_t j = 0; j < output.tensor().numel(); ++j) {
             EXPECT_FALSE(std::isnan(data[j]));
         }
@@ -882,7 +909,8 @@ TEST_P(BatchNorm2dTest, NumericalStability) {
     auto small_input = Variable(randn({8, 4, 8, 8}, DType::Float32, device) * 1e-6f, false);
     EXPECT_NO_THROW({
         auto output = bn.forward(small_input);
-        auto data = output.tensor().cpu().data<float>();
+        auto data_cpu_keepalive = output.tensor().cpu();
+        auto data = data_cpu_keepalive.data<float>();
         for (int64_t i = 0; i < output.tensor().numel(); ++i) {
             EXPECT_FALSE(std::isnan(data[i]));
         }
@@ -892,7 +920,8 @@ TEST_P(BatchNorm2dTest, NumericalStability) {
     auto zero_input = Variable(randn({8, 4, 8, 8}, DType::Float32, device) * 1e-8f, false);
     EXPECT_NO_THROW({
         auto output = bn.forward(zero_input);
-        auto data = output.tensor().cpu().data<float>();
+        auto data_cpu_keepalive = output.tensor().cpu();
+        auto data = data_cpu_keepalive.data<float>();
         for (int64_t i = 0; i < output.tensor().numel(); ++i) {
             EXPECT_FALSE(std::isnan(data[i]));
         }

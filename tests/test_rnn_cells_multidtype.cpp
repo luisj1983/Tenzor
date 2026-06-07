@@ -66,6 +66,10 @@ TEST_P(RNNCellsMultiDTypeTest, RNNCell_GradientFlow) {
     tenzor::sum(out_ref).backward();
 
     auto cell = nn::RNNCell(input_size, hidden_size);
+    // Sync weights to the Float32 reference cell BEFORE converting dtype — both
+    // cells are independently random-initialised otherwise, so their outputs
+    // (and grads) would never match the reference.
+    cell.load_state_dict(cell_ref.state_dict());
     convert_model(cell);
     auto input = Variable(in_cpu.to(dtype_).to(device_), true);
     auto hx = Variable(hx_cpu.to(dtype_).to(device_), true);
@@ -147,6 +151,8 @@ TEST_P(RNNCellsMultiDTypeTest, GRUCell_GradientFlow) {
     tenzor::sum(out_ref).backward();
 
     auto cell = nn::GRUCell(input_size, hidden_size);
+    // Sync weights to the Float32 reference cell before dtype conversion.
+    cell.load_state_dict(cell_ref.state_dict());
     convert_model(cell);
     auto input = Variable(in_cpu.to(dtype_).to(device_), true);
     auto hx = Variable(hx_cpu.to(dtype_).to(device_), true);

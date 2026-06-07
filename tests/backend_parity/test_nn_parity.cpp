@@ -411,10 +411,15 @@ TEST_P(NNOperationParity, GELU) {
 
     auto input = randn({32, 64}, DType::Float32, Device::cpu());
 
+    // atol=1e-6 (not 1e-7): GELU is erf-based on every backend, and a single
+    // Float32 ULP of erf(x)≈1 scaled by 0.5·x (x up to ~3 here) is ≈1.8e-7 of
+    // absolute error at small-output points (x≈-3) where rtol cannot help. The
+    // previous 1e-7 was below Float32's achievable precision for a transcendental
+    // and contradicted this file's own standard (see Softplus, raised to 1e-6).
     test_operation_parity([](const std::vector<Tensor>& inputs) {
         auto input_var = Variable(inputs[0], false);
         return nn::gelu(input_var).tensor();
-    }, {input}, 1e-5f, 1e-7f, "GELU");
+    }, {input}, 1e-5f, 1e-6f, "GELU");
 }
 
 TEST_P(NNOperationParity, Swish) {

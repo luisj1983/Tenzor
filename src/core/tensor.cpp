@@ -775,6 +775,19 @@ auto Tensor::to(Device device) const -> Tensor {
                   size_bytes,
                   copy_kind);
 
+    // Preserve quantization metadata across the device transfer. The result has
+    // the same (quantized) dtype, but a freshly-allocated impl loses the scale /
+    // zero-point (and per-channel params) — so q_scale()/dequantize() on the
+    // moved tensor would read defaults and produce garbage. (CPU->CPU is a no-op
+    // copy that returns *this, so this path is what GPU transfers hit.)
+    if (tenzor::is_quantized(cont.impl_->dtype)) {
+        result.impl_->q_scale_       = cont.impl_->q_scale_;
+        result.impl_->q_zero_point_  = cont.impl_->q_zero_point_;
+        result.impl_->q_scales_      = cont.impl_->q_scales_;
+        result.impl_->q_zero_points_ = cont.impl_->q_zero_points_;
+        result.impl_->q_axis_        = cont.impl_->q_axis_;
+    }
+
     return result;
 }
 
@@ -1309,12 +1322,17 @@ auto Tensor::fill_(double value) -> Tensor& {
             // Guard: quantized tensors with non-zero zero_point encode 0.0 as
             // q_zero_point bytes, not 0x00, so we must NOT memset in that case.
             backend->memset(data_ptr(), 0, size_bytes, device().index);
+            bump_version();
         } else {
             // Use in-place StridedFill to preserve tensor identity (version tracking, views)
             auto& table = DispatchTableRegistry::get_table(impl_->device.type);
             if (table.has_inplace_kernel(OpId::StridedFill)) {
                 OpAttributes attrs;
                 attrs.set(AttrKey::Value, value);
+                // dispatch_inplace auto-bumps the version exactly once; do
+                // NOT bump again here. (Backends with a StridedFill inplace
+                // kernel used to see fill_ bump the version by 2 — see
+                // InplaceAutogradTest.VersionCounterOnDifferentDtypes.)
                 table.dispatch_inplace(OpId::StridedFill, *this, {}, attrs);
             } else {
                 // Fallback: dispatch Fill and replace impl
@@ -1325,9 +1343,9 @@ auto Tensor::fill_(double value) -> Tensor& {
                 if (!result.empty()) {
                     impl_ = result[0].impl_;
                 }
+                bump_version();
             }
         }
-        bump_version();
         return *this;
     }
 

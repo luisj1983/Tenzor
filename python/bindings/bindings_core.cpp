@@ -5378,12 +5378,65 @@ Returns:
                     return result;
                 }
                 case IndexKind::TensorMask: {
-                    if (mask_tensor.dtype() == tenzor::DType::Bool) {
+                    if (mask_tensor.dtype() != tenzor::DType::Bool) {
+                        throw std::runtime_error("Unsupported index type: expected bool Tensor");
+                    }
+                    auto ss = self.tensor().shape();
+                    std::vector<int64_t> self_shape(ss.begin(), ss.end());
+                    auto ms = mask_tensor.shape();
+                    std::vector<int64_t> mask_shape(ms.begin(), ms.end());
+                    // Full-shape mask: flattened element selection
+                    // (PyTorch x[mask] when mask.shape == x.shape).
+                    if (mask_shape.size() == self_shape.size()) {
                         return ::tenzor::masked_select(self, mask_tensor);
                     }
-                    throw std::runtime_error("Unsupported index type: expected bool Tensor");
+                    if (mask_shape.size() > self_shape.size()) {
+                        throw std::runtime_error(
+                            "Boolean index has more dimensions than the indexed tensor");
+                    }
+                    // Leading-dims mask (PyTorch x[mask] with mask.ndim < x.ndim):
+                    // select along the masked leading dims, keep the trailing dims
+                    // -> shape [num_selected, *x.shape[mask.ndim:]]. Implemented as
+                    // index_select over the flattened leading block so grad flows.
+                    for (size_t i = 0; i < mask_shape.size(); ++i) {
+                        if (mask_shape[i] != self_shape[i]) {
+                            throw std::runtime_error(
+                                "Boolean index dimension does not match indexed tensor");
+                        }
+                    }
+                    int64_t lead = 1;
+                    for (size_t i = 0; i < mask_shape.size(); ++i) lead *= mask_shape[i];
+                    tenzor::Tensor mflat =
+                        tenzor::reshape(mask_tensor, {lead})
+                            .to(tenzor::DType::Int64)
+                            .to(tenzor::Device::cpu());
+                    const int64_t* mp = mflat.data<int64_t>();
+                    std::vector<int64_t> idx_vals;
+                    for (int64_t i = 0; i < lead; ++i) {
+                        if (mp[i]) idx_vals.push_back(i);
+                    }
+                    tenzor::Tensor idx_t = tenzor::from_data(
+                        idx_vals.data(),
+                        {static_cast<int64_t>(idx_vals.size())},
+                        tenzor::Device::cpu());
+                    if (self.tensor().device() != tenzor::Device::cpu()) {
+                        idx_t = idx_t.to(self.tensor().device());
+                    }
+                    std::vector<int64_t> flat_shape;
+                    flat_shape.push_back(lead);
+                    for (size_t i = mask_shape.size(); i < self_shape.size(); ++i) {
+                        flat_shape.push_back(self_shape[i]);
+                    }
+                    tenzor::Variable self_flat = ::tenzor::reshape(self, flat_shape);
+                    return ::tenzor::index_select(self_flat, 0, idx_t);
                 }
                 case IndexKind::FancyIndex: {
+                    // Single 1-D integer index over dim 0 is index_select
+                    // (PyTorch x[idx] -> rows), keeping grad_fn through self.
+                    if (fancy_indices.size() == 1 && fancy_indices[0].has_value() &&
+                        fancy_indices[0]->ndim() == 1) {
+                        return ::tenzor::index_select(self, 0, *fancy_indices[0]);
+                    }
                     return ::tenzor::index(self, fancy_indices);
                 }
             }

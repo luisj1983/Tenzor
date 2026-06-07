@@ -59,6 +59,7 @@ namespace cuda {
     auto mul_kernel(const Tensor& a, const Tensor& b, cudaStream_t stream) -> Tensor;
     auto div_kernel(const Tensor& a, const Tensor& b, cudaStream_t stream) -> Tensor;
     auto matmul_kernel(const Tensor& a, const Tensor& b, cudaStream_t stream) -> Tensor;
+    auto ones_kernel(const std::vector<int64_t>& shape, DType dtype, Device device, cudaStream_t stream) -> Tensor;
     auto dot_kernel(const Tensor& a, const Tensor& b, cudaStream_t stream) -> Tensor;
     auto addmm_kernel(const Tensor& input, const Tensor& mat1, const Tensor& mat2,
                       double alpha, double beta, cudaStream_t stream) -> Tensor;
@@ -137,8 +138,8 @@ namespace cuda {
     auto gelu_backward_kernel(const Tensor& grad_output, const Tensor& input, cudaStream_t stream) -> Tensor;
     auto swish_kernel(const Tensor& input, cudaStream_t stream) -> Tensor;
     auto swish_backward_kernel(const Tensor& grad_output, const Tensor& input, cudaStream_t stream) -> Tensor;
-    auto leaky_relu_kernel(const Tensor& input, float alpha, cudaStream_t stream) -> Tensor;
-    auto leaky_relu_backward_kernel(const Tensor& grad_output, const Tensor& input, float alpha, cudaStream_t stream) -> Tensor;
+    auto leaky_relu_kernel(const Tensor& input, double alpha, cudaStream_t stream) -> Tensor;
+    auto leaky_relu_backward_kernel(const Tensor& grad_output, const Tensor& input, double alpha, cudaStream_t stream) -> Tensor;
     auto elu_kernel(const Tensor& input, float alpha, cudaStream_t stream) -> Tensor;
     auto elu_backward_kernel(const Tensor& grad_output, const Tensor& input, float alpha, cudaStream_t stream) -> Tensor;
     auto selu_kernel(const Tensor& input, cudaStream_t stream) -> Tensor;
@@ -1328,11 +1329,11 @@ void register_cuda_kernels(BackendDispatchTable& table) {
 
     // Parameterized activations (keep lambdas for attribute parsing)
     table.register_single_output_kernel(OpId::LeakyReLU, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
-        float alpha = static_cast<float>(attrs.get_float(AttrKey::Alpha, 0.01));
+        double alpha = attrs.get_float(AttrKey::Alpha, 0.01);  // keep F64 precision
         return cuda::leaky_relu_kernel(inputs[0], alpha, get_cuda_stream(attrs));
     });
     table.register_single_output_kernel(OpId::LeakyReLUBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
-        float alpha = static_cast<float>(attrs.get_float(AttrKey::Alpha, 0.01));
+        double alpha = attrs.get_float(AttrKey::Alpha, 0.01);
         return cuda::leaky_relu_backward_kernel(inputs[0], inputs[1], alpha, get_cuda_stream(attrs));
     });
     table.register_single_output_kernel(OpId::Elu, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
@@ -2925,8 +2926,13 @@ void register_cuda_kernels(BackendDispatchTable& table) {
         const auto dilation = ::tenzor::backend::attrs::dilation_2d(attrs);
         int64_t groups = attrs.get_int(AttrKey::Groups, 1);
         int64_t offset_groups = attrs.get_int(AttrKey::OffsetGroups, 1);
+        // bias (inputs[3]) and mask (inputs[4]) are optional; std::span has
+        // no bounds checking and indexing past size() crashed (no-mask form).
+        Tensor empty_t = Tensor({0}, inputs[0].dtype(), inputs[0].device());
+        const Tensor& dcf_bias = inputs.size() > 3 ? inputs[3] : empty_t;
+        const Tensor& dcf_mask = inputs.size() > 4 ? inputs[4] : empty_t;
         return std::vector<Tensor>{cuda::deformable_conv2d_forward_kernel(
-            inputs[0], inputs[1], inputs[2], inputs[3], inputs[4],
+            inputs[0], inputs[1], inputs[2], dcf_bias, dcf_mask,
             stride[0], stride[1], padding[0], padding[1], dilation[0], dilation[1],
             groups, offset_groups, get_cuda_stream(attrs))};
     });
@@ -2938,8 +2944,11 @@ void register_cuda_kernels(BackendDispatchTable& table) {
         const auto dilation = ::tenzor::backend::attrs::dilation_2d(attrs);
         int64_t groups = attrs.get_int(AttrKey::Groups, 1);
         int64_t offset_groups = attrs.get_int(AttrKey::OffsetGroups, 1);
+        // mask (inputs[4]) is optional (no-mask form passes 4 inputs).
+        Tensor empty_t = Tensor({0}, inputs[1].dtype(), inputs[1].device());
+        const Tensor& dcb_mask = inputs.size() > 4 ? inputs[4] : empty_t;
         return cuda::deformable_conv2d_backward_input_kernel(
-            inputs[0], inputs[1], inputs[2], inputs[3], inputs[4],
+            inputs[0], inputs[1], inputs[2], inputs[3], dcb_mask,
             stride[0], stride[1], padding[0], padding[1], dilation[0], dilation[1],
             groups, offset_groups, get_cuda_stream(attrs));
     });
@@ -2952,8 +2961,12 @@ void register_cuda_kernels(BackendDispatchTable& table) {
         int64_t groups = attrs.get_int(AttrKey::Groups, 1);
         int64_t offset_groups = attrs.get_int(AttrKey::OffsetGroups, 1);
         auto weight_shape = attrs.get_int_list(AttrKey::WeightShape);
+        // mask (inputs[3]) is optional; std::span has no bounds checking and
+        // indexing past size() crashed on the no-mask call form.
+        Tensor empty_t = Tensor({0}, inputs[1].dtype(), inputs[1].device());
+        const Tensor& mask = inputs.size() > 3 ? inputs[3] : empty_t;
         return std::vector<Tensor>{cuda::deformable_conv2d_backward_weight_kernel(
-            inputs[0], inputs[1], inputs[2], inputs[3],
+            inputs[0], inputs[1], inputs[2], mask,
             stride[0], stride[1], padding[0], padding[1], dilation[0], dilation[1],
             groups, offset_groups, weight_shape, get_cuda_stream(attrs))};
     });
@@ -3141,42 +3154,178 @@ void register_cuda_kernels(BackendDispatchTable& table) {
     // =========================================================================
     // LSTM Operations (Phase 1C - HIGH)
     // =========================================================================
-    table.register_kernel(OpId::LSTMCellForward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        // inputs: [gates, c_prev]
+    table.register_kernel(OpId::LSTMCellForward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+        auto stream = get_cuda_stream(attrs);
+        // Canonical 7-input contract (matches the CPU backend and the
+        // OpId-dispatch callers/tests): {input, hx, cx, w_ih, w_hh, b_ih, b_hh}.
+        // Compose the gate pre-activations here, then run the cell kernel.
+        // The previous 2-input {gates, c_prev} form read 4*hidden gate
+        // offsets out of a [batch, in_size] tensor -> OOB / segfault on F64.
+        if (inputs.size() >= 5) {
+            const Tensor& input = inputs[0];
+            const Tensor& hx    = inputs[1];
+            const Tensor& cx    = inputs[2];
+            const Tensor& w_ih  = inputs[3];
+            const Tensor& w_hh  = inputs[4];
+            const int64_t batch_size  = input.shape()[0];
+            const int64_t hidden_size = hx.shape()[1];
+            // gates = input @ w_ih^T + hx @ w_hh^T + b_ih + b_hh
+            Tensor gates = cuda::add_kernel(
+                cuda::matmul_kernel(input, cuda::transpose_kernel(w_ih, 0, 1, stream), stream),
+                cuda::matmul_kernel(hx, cuda::transpose_kernel(w_hh, 0, 1, stream), stream), stream);
+            if (inputs.size() > 5 && inputs[5].numel() > 0)
+                gates = cuda::add_kernel(gates, inputs[5], stream);
+            if (inputs.size() > 6 && inputs[6].numel() > 0)
+                gates = cuda::add_kernel(gates, inputs[6], stream);
+            auto [h_out, c_out] = cuda::lstm_cell_forward_kernel(
+                gates, cx, batch_size, hidden_size, stream);
+            return {h_out, c_out};
+        }
+        // Legacy 2-input fused form ({gates, c_prev} + size attrs), used by
+        // the internal full-sequence path.
         int64_t batch_size = attrs.get_int(AttrKey::BatchSize, 0);
         int64_t hidden_size = attrs.get_int(AttrKey::HiddenSize, 0);
-        auto [h_out, c_out] = cuda::lstm_cell_forward_kernel(inputs[0], inputs[1], batch_size, hidden_size, get_cuda_stream(attrs));
-        return std::vector<Tensor>{h_out, c_out};
+        auto [h_out, c_out] = cuda::lstm_cell_forward_kernel(inputs[0], inputs[1], batch_size, hidden_size, stream);
+        return {h_out, c_out};
     });
-    table.register_kernel(OpId::LSTMCellBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        // inputs: [grad_h, grad_c, gates, c_prev, c_out]
+    table.register_kernel(OpId::LSTMCellBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+        auto stream = get_cuda_stream(attrs);
+        // Canonical 11-input contract (matches CPU/tests):
+        // [d_hy, d_cy, input, hx, cx, hy, cy, w_ih, w_hh, b_ih, b_hh]
+        // -> 7 grads [grad_input, grad_hx, grad_cx, grad_w_ih, grad_w_hh, grad_b_ih, grad_b_hh].
+        if (inputs.size() >= 11) {
+            const Tensor& d_hy  = inputs[0];
+            const Tensor& d_cy  = inputs[1];
+            const Tensor& input = inputs[2];
+            const Tensor& hx    = inputs[3];
+            const Tensor& cx    = inputs[4];
+            const Tensor& cy    = inputs[6];
+            const Tensor& w_ih  = inputs[7];
+            const Tensor& w_hh  = inputs[8];
+            const int64_t batch_size  = input.shape()[0];
+            const int64_t hidden_size = hx.shape()[1];
+            // Recompute the gate pre-activations (cell backward needs them).
+            Tensor gates = cuda::add_kernel(
+                cuda::matmul_kernel(input, cuda::transpose_kernel(w_ih, 0, 1, stream), stream),
+                cuda::matmul_kernel(hx, cuda::transpose_kernel(w_hh, 0, 1, stream), stream), stream);
+            if (inputs[9].numel() > 0)  gates = cuda::add_kernel(gates, inputs[9], stream);
+            if (inputs[10].numel() > 0) gates = cuda::add_kernel(gates, inputs[10], stream);
+            // Cell backward -> grad wrt gate pre-activations and wrt c_prev.
+            auto [d_gates, grad_cx] = cuda::lstm_cell_backward_kernel(
+                d_hy, d_cy, gates, cx, cy, batch_size, hidden_size, stream);
+            // Linear backward through gates = input@w_ih^T + hx@w_hh^T + b.
+            Tensor grad_input = cuda::matmul_kernel(d_gates, w_ih, stream);      // [B,in]
+            Tensor grad_hx    = cuda::matmul_kernel(d_gates, w_hh, stream);      // [B,H]
+            Tensor d_gates_T  = cuda::transpose_kernel(d_gates, 0, 1, stream);   // [4H,B]
+            Tensor grad_w_ih  = cuda::matmul_kernel(d_gates_T, input, stream);   // [4H,in]
+            Tensor grad_w_hh  = cuda::matmul_kernel(d_gates_T, hx, stream);      // [4H,H]
+            // Column-sum over the batch for the bias grads: ones[1,B] @ d_gates.
+            Tensor ones = cuda::ones_kernel({1, batch_size}, d_gates.dtype(), d_gates.device(), stream);
+            Tensor grad_b = cuda::matmul_kernel(ones, d_gates, stream).reshape({4 * hidden_size});
+            return {grad_input, grad_hx, grad_cx, grad_w_ih, grad_w_hh, grad_b, grad_b};
+        }
+        // Legacy fused 5-input form ({grad_h, grad_c, gates, c_prev, c_out}).
         int64_t batch_size = attrs.get_int(AttrKey::BatchSize, 0);
         int64_t hidden_size = attrs.get_int(AttrKey::HiddenSize, 0);
         auto [grad_gates, grad_c_prev] = cuda::lstm_cell_backward_kernel(
             inputs[0], inputs[1], inputs[2], inputs[3], inputs[4],
-            batch_size, hidden_size, get_cuda_stream(attrs));
+            batch_size, hidden_size, stream);
         return std::vector<Tensor>{grad_gates, grad_c_prev};
     });
 
     // =========================================================================
     // GRU Operations (Phase 1C - HIGH)
     // =========================================================================
-    table.register_kernel(OpId::GRUCellForward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        // inputs: [reset_gates, update_gates, new_gates_input, new_gates_hidden, h_prev]
+    table.register_kernel(OpId::GRUCellForward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+        auto stream = get_cuda_stream(attrs);
+        // Canonical 6-input contract (matches the CPU backend and the
+        // OpId-dispatch callers/tests): {input, hx, w_ih, w_hh, b_ih, b_hh}.
+        // Compose the GRU gate pre-activations here, then run the cell kernel.
+        if (inputs.size() == 6) {
+            const Tensor& input = inputs[0];
+            const Tensor& hx    = inputs[1];
+            const Tensor& w_ih  = inputs[2];
+            const Tensor& w_hh  = inputs[3];
+            const Tensor& b_ih  = inputs[4];
+            const Tensor& b_hh  = inputs[5];
+            const int64_t batch_size  = input.shape()[0];
+            const int64_t hidden_size = hx.shape()[1];
+            // gates_ih = input @ w_ih^T + b_ih  (shape [batch, 3H])
+            Tensor gates_ih = cuda::matmul_kernel(
+                input, cuda::transpose_kernel(w_ih, 0, 1, stream), stream);
+            if (b_ih.numel() > 0) gates_ih = cuda::add_kernel(gates_ih, b_ih, stream);
+            Tensor gates_hh = cuda::matmul_kernel(
+                hx, cuda::transpose_kernel(w_hh, 0, 1, stream), stream);
+            if (b_hh.numel() > 0) gates_hh = cuda::add_kernel(gates_hh, b_hh, stream);
+            // Split each [batch, 3H] into reset/update/new chunks of width H.
+            auto ih = cuda::split_kernel(gates_ih, hidden_size, /*dim=*/1, stream);
+            auto hh = cuda::split_kernel(gates_hh, hidden_size, /*dim=*/1, stream);
+            Tensor reset_gates  = cuda::add_kernel(ih[0], hh[0], stream);
+            Tensor update_gates = cuda::add_kernel(ih[1], hh[1], stream);
+            Tensor new_input    = ih[2];
+            Tensor new_hidden   = hh[2];
+            return {cuda::gru_cell_forward_kernel(
+                reset_gates, update_gates, new_input, new_hidden,
+                hx, batch_size, hidden_size, stream)};
+        }
+        // Legacy 5-input fused form, used by the internal full-sequence path.
         int64_t batch_size = attrs.get_int(AttrKey::BatchSize, 0);
         int64_t hidden_size = attrs.get_int(AttrKey::HiddenSize, 0);
-        auto h_out = cuda::gru_cell_forward_kernel(
+        return {cuda::gru_cell_forward_kernel(
             inputs[0], inputs[1], inputs[2], inputs[3], inputs[4],
-            batch_size, hidden_size, get_cuda_stream(attrs));
-        return std::vector<Tensor>{h_out};
+            batch_size, hidden_size, stream)};
     });
-    table.register_kernel(OpId::GRUCellBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        // inputs: [grad_h, reset_gates, update_gates, new_gates_input, new_gates_hidden, h_prev]
+    table.register_kernel(OpId::GRUCellBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+        auto stream = get_cuda_stream(attrs);
+        // Canonical 7-input contract (matches CPU/tests):
+        // [d_hy, input, hx, w_ih, w_hh, b_ih, b_hh]
+        // -> 6 grads [grad_input, grad_hx, grad_w_ih, grad_w_hh, grad_b_ih, grad_b_hh].
+        if (inputs.size() == 7) {
+            const Tensor& d_hy  = inputs[0];
+            const Tensor& input = inputs[1];
+            const Tensor& hx    = inputs[2];
+            const Tensor& w_ih  = inputs[3];
+            const Tensor& w_hh  = inputs[4];
+            const Tensor& b_ih  = inputs[5];
+            const Tensor& b_hh  = inputs[6];
+            const int64_t batch_size  = input.shape()[0];
+            const int64_t hidden_size = hx.shape()[1];
+            // Recompute the gate pre-activations (per ih/hh side).
+            Tensor gates_ih = cuda::matmul_kernel(input, cuda::transpose_kernel(w_ih, 0, 1, stream), stream);
+            if (b_ih.numel() > 0) gates_ih = cuda::add_kernel(gates_ih, b_ih, stream);
+            Tensor gates_hh = cuda::matmul_kernel(hx, cuda::transpose_kernel(w_hh, 0, 1, stream), stream);
+            if (b_hh.numel() > 0) gates_hh = cuda::add_kernel(gates_hh, b_hh, stream);
+            auto ih = cuda::split_kernel(gates_ih, hidden_size, /*dim=*/1, stream); // [r_i,z_i,n_i]
+            auto hh = cuda::split_kernel(gates_hh, hidden_size, /*dim=*/1, stream); // [r_h,z_h,n_h]
+            Tensor reset_gates  = cuda::add_kernel(ih[0], hh[0], stream);
+            Tensor update_gates = cuda::add_kernel(ih[1], hh[1], stream);
+            Tensor new_input    = ih[2];
+            Tensor new_hidden   = hh[2];
+            auto o = cuda::gru_cell_backward_kernel(
+                d_hy, reset_gates, update_gates, new_input, new_hidden, hx,
+                batch_size, hidden_size, stream);
+            // reset/update gates receive grad on both ih and hh sides;
+            // new gate's ih chunk gets grad_new_input, hh chunk grad_new_hidden.
+            std::array<Tensor, 3> ih_parts{o.grad_reset, o.grad_update, o.grad_new_input};
+            std::array<Tensor, 3> hh_parts{o.grad_reset, o.grad_update, o.grad_new_hidden};
+            Tensor d_gates_ih = cuda::cat_kernel(ih_parts, /*dim=*/1, stream);
+            Tensor d_gates_hh = cuda::cat_kernel(hh_parts, /*dim=*/1, stream);
+            Tensor grad_input = cuda::matmul_kernel(d_gates_ih, w_ih, stream);
+            Tensor grad_hx = cuda::add_kernel(cuda::matmul_kernel(d_gates_hh, w_hh, stream),
+                                              o.grad_h_prev, stream);
+            Tensor grad_w_ih = cuda::matmul_kernel(cuda::transpose_kernel(d_gates_ih, 0, 1, stream), input, stream);
+            Tensor grad_w_hh = cuda::matmul_kernel(cuda::transpose_kernel(d_gates_hh, 0, 1, stream), hx, stream);
+            Tensor ones = cuda::ones_kernel({1, batch_size}, d_gates_ih.dtype(), d_gates_ih.device(), stream);
+            Tensor grad_b_ih = cuda::matmul_kernel(ones, d_gates_ih, stream).reshape({3 * hidden_size});
+            Tensor grad_b_hh = cuda::matmul_kernel(ones, d_gates_hh, stream).reshape({3 * hidden_size});
+            return {grad_input, grad_hx, grad_w_ih, grad_w_hh, grad_b_ih, grad_b_hh};
+        }
+        // Legacy fused 6-input form.
         int64_t batch_size = attrs.get_int(AttrKey::BatchSize, 0);
         int64_t hidden_size = attrs.get_int(AttrKey::HiddenSize, 0);
         auto result = cuda::gru_cell_backward_kernel(
             inputs[0], inputs[1], inputs[2], inputs[3], inputs[4], inputs[5],
-            batch_size, hidden_size, get_cuda_stream(attrs));
+            batch_size, hidden_size, stream);
         return std::vector<Tensor>{result.grad_reset, result.grad_update, result.grad_new_input, result.grad_new_hidden, result.grad_h_prev};
     });
 

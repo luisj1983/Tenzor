@@ -1542,6 +1542,12 @@ auto mul_kernel(const Tensor& a_in, const Tensor& b_in, hipStream_t stream) -> T
                 reinterpret_cast<const hip_bfloat16*>(a.data<BFloat16>()),
                 reinterpret_cast<const hip_bfloat16*>(b.data<BFloat16>()),
                 reinterpret_cast<hip_bfloat16*>(result.data<BFloat16>()), n);
+        } else if (a.dtype() == DType::Int8) {
+            hipLaunchKernelGGL(mul_kernel_device<int8_t>, grid, block, 0, stream,
+                a.data<int8_t>(), b.data<int8_t>(), result.data<int8_t>(), n);
+        } else if (a.dtype() == DType::UInt8) {
+            hipLaunchKernelGGL(mul_kernel_device<uint8_t>, grid, block, 0, stream,
+                a.data<uint8_t>(), b.data<uint8_t>(), result.data<uint8_t>(), n);
         } else if (a.dtype() == DType::Bool) {
             // For Bool, mul acts as logical AND
             hipLaunchKernelGGL(mul_kernel_device<bool>, grid, block, 0, stream,
@@ -1610,6 +1616,14 @@ auto mul_kernel(const Tensor& a_in, const Tensor& b_in, hipStream_t stream) -> T
     } else if (a.dtype() == DType::Int64) {
         hipLaunchKernelGGL(HIP_KERNEL_NAME(broadcast_kernel<int64_t, MulOp>), grid, block, 0, stream,
             a.data<int64_t>(), b.data<int64_t>(), result.data<int64_t>(),
+            d_strides_a, d_strides_b, d_output_shape, ndim, n, MulOp());
+    } else if (a.dtype() == DType::Int8) {
+        hipLaunchKernelGGL(HIP_KERNEL_NAME(broadcast_kernel<int8_t, MulOp>), grid, block, 0, stream,
+            a.data<int8_t>(), b.data<int8_t>(), result.data<int8_t>(),
+            d_strides_a, d_strides_b, d_output_shape, ndim, n, MulOp());
+    } else if (a.dtype() == DType::UInt8) {
+        hipLaunchKernelGGL(HIP_KERNEL_NAME(broadcast_kernel<uint8_t, MulOp>), grid, block, 0, stream,
+            a.data<uint8_t>(), b.data<uint8_t>(), result.data<uint8_t>(),
             d_strides_a, d_strides_b, d_output_shape, ndim, n, MulOp());
     } else if (a.dtype() == DType::Float16) {
         hipLaunchKernelGGL(HIP_KERNEL_NAME(broadcast_kernel<__half, MulOp>), grid, block, 0, stream,
@@ -3564,6 +3578,14 @@ auto full_kernel(const std::vector<int64_t>& shape, double value, DType dtype, D
     } else if (dtype == DType::BFloat16) {
         hipLaunchKernelGGL(fill_kernel_device<hip_bfloat16>, grid, block, 0, stream,
             reinterpret_cast<hip_bfloat16*>(result.data<BFloat16>()), tenzor::rocm::f32_to_bf16_rne(static_cast<float>(value)), n);
+    } else if (dtype == DType::Complex64) {
+        hipLaunchKernelGGL(fill_kernel_device<hipFloatComplex>, grid, block, 0, stream,
+            reinterpret_cast<hipFloatComplex*>(result.data_ptr()),
+            make_hipFloatComplex(static_cast<float>(value), 0.0f), n);
+    } else if (dtype == DType::Complex128) {
+        hipLaunchKernelGGL(fill_kernel_device<hipDoubleComplex>, grid, block, 0, stream,
+            reinterpret_cast<hipDoubleComplex*>(result.data_ptr()),
+            make_hipDoubleComplex(value, 0.0), n);
     } else {
         throw std::runtime_error("Unsupported dtype for full operation");
     }

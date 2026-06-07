@@ -71,6 +71,8 @@ class ConvTranspose3dForwardKernelFloat16;
 class ConvTranspose3dBiasKernelFloat32;
 class ConvTranspose3dBiasKernelFloat64;
 class ConvTranspose3dBiasKernelFloat16;
+struct ConvTranspose3dBwWeightFloat32 {};
+struct ConvTranspose3dBwWeightFloat64 {};
 
 // ============================================================================
 // im3col grouped kernel - type-specific overloads
@@ -298,6 +300,270 @@ static auto to_dnnl_dtype_conv3d(DType dt) -> dnnl::memory::data_type {
 // ============================================================================
 // Conv3d Forward using oneDNN (supports 3D convolution natively)
 // ============================================================================
+// ============================================================================
+// Native SYCL FP64 conv3d (im3col + GEMM). oneDNN has no FP64 3D convolution
+// primitive on this device, and widening to FP32 introduces rounding that
+// breaks FP64 finite-difference gradcheck. These helpers mirror the pure-SYCL
+// fallback's FP64 path and are only compiled when oneDNN is present (the
+// no-oneDNN build's identically-named functions cover FP64 there), so the
+// shared kernel-name tags never collide.
+// ============================================================================
+static auto conv3d_forward_f64_sycl(const Tensor& input, const Tensor& weight, const Tensor* bias,
+                                    const std::vector<int64_t>& stride, const std::vector<int64_t>& padding,
+                                    const std::vector<int64_t>& dilation, int64_t groups,
+                                    sycl::queue& queue) -> Tensor {
+    auto input_shape = input.shape();
+    auto weight_shape = weight.shape();
+
+    const int64_t N = input_shape[0];
+    const int64_t C_in = input_shape[1];
+    const int64_t D_in = input_shape[2];
+    const int64_t H_in = input_shape[3];
+    const int64_t W_in = input_shape[4];
+
+    const int64_t C_out = weight_shape[0];
+    const int64_t C_in_per_group = weight_shape[1];
+    const int64_t kD = weight_shape[2];
+    const int64_t kH = weight_shape[3];
+    const int64_t kW = weight_shape[4];
+    const int64_t C_out_per_group = C_out / groups;
+
+    const int64_t stride_d = stride.size() > 0 ? stride[0] : 1;
+    const int64_t stride_h = stride.size() > 1 ? stride[1] : stride_d;
+    const int64_t stride_w = stride.size() > 2 ? stride[2] : stride_h;
+    const int64_t pad_d = padding.size() > 0 ? padding[0] : 0;
+    const int64_t pad_h = padding.size() > 1 ? padding[1] : pad_d;
+    const int64_t pad_w = padding.size() > 2 ? padding[2] : pad_h;
+    const int64_t dil_d = dilation.size() > 0 ? dilation[0] : 1;
+    const int64_t dil_h = dilation.size() > 1 ? dilation[1] : dil_d;
+    const int64_t dil_w = dilation.size() > 2 ? dilation[2] : dil_h;
+
+    const int64_t D_out = calc_out_size_3d(D_in, kD, stride_d, pad_d, dil_d);
+    const int64_t H_out = calc_out_size_3d(H_in, kH, stride_h, pad_h, dil_h);
+    const int64_t W_out = calc_out_size_3d(W_in, kW, stride_w, pad_w, dil_w);
+
+    Tensor output({N, C_out, D_out, H_out, W_out}, DType::Float64, input.device());
+
+    const int64_t K = C_in_per_group * kD * kH * kW;
+    const int64_t N_gemm = D_out * H_out * W_out;
+    const int64_t M = C_out_per_group;
+    const int64_t col_size = K * N_gemm;
+
+    const double* input_ptr = get_data_ptr<const double>(input);
+    const double* weight_ptr = get_data_ptr<const double>(weight);
+    double* output_ptr = get_data_ptr<double>(output);
+
+    Tensor col_buffer({col_size}, DType::Float64, input.device());
+    double* col_ptr = get_data_ptr<double>(col_buffer);
+
+    for (int64_t n = 0; n < N; ++n) {
+        for (int64_t g = 0; g < groups; ++g) {
+            const int64_t in_channel_offset = g * C_in_per_group;
+            const int64_t out_channel_offset = g * C_out_per_group;
+            const int64_t weight_offset = g * C_out_per_group * K;
+
+            im3col_grouped_3d_kernel(
+                input_ptr + n * C_in * D_in * H_in * W_in,
+                C_in, C_in_per_group, in_channel_offset,
+                D_in, H_in, W_in, kD, kH, kW,
+                stride_d, stride_h, stride_w, pad_d, pad_h, pad_w,
+                dil_d, dil_h, dil_w, D_out, H_out, W_out, col_ptr, queue);
+
+            const double* weight_group_ptr = weight_ptr + weight_offset;
+            double* output_group_ptr = output_ptr + n * C_out * N_gemm + out_channel_offset * N_gemm;
+
+            queue.parallel_for<Conv3dGroupedForwardGemmKernelFloat64>(sycl::range<2>(M, N_gemm), [=](sycl::id<2> idx) {
+                const int64_t oc_local = idx[0];
+                const int64_t hw = idx[1];
+                double sum = 0.0;
+                for (int64_t k = 0; k < K; ++k) {
+                    sum += weight_group_ptr[oc_local * K + k] * col_ptr[k * N_gemm + hw];
+                }
+                output_group_ptr[oc_local * N_gemm + hw] = sum;
+            });
+        }
+
+        if (bias != nullptr) {
+            const double* bias_ptr = get_data_ptr<const double>(*bias);
+            queue.parallel_for<Conv3dForwardBiasKernelFloat64>(sycl::range<2>(C_out, N_gemm), [=](sycl::id<2> idx) {
+                const int64_t oc = idx[0];
+                const int64_t dhw = idx[1];
+                output_ptr[n * C_out * N_gemm + oc * N_gemm + dhw] += bias_ptr[oc];
+            });
+        }
+    }
+    queue.wait();
+    return output;
+}
+
+static auto conv3d_backward_input_f64_sycl(const Tensor& grad_output, const Tensor& weight,
+                                           const std::vector<int64_t>& input_shape,
+                                           const std::vector<int64_t>& stride, const std::vector<int64_t>& padding,
+                                           const std::vector<int64_t>& dilation, int64_t groups,
+                                           sycl::queue& queue) -> Tensor {
+    auto weight_shape = weight.shape();
+    auto grad_shape = grad_output.shape();
+
+    const int64_t N = input_shape[0];
+    const int64_t C_in = input_shape[1];
+    const int64_t D_in = input_shape[2];
+    const int64_t H_in = input_shape[3];
+    const int64_t W_in = input_shape[4];
+
+    const int64_t C_out = weight_shape[0];
+    const int64_t C_in_per_group = weight_shape[1];
+    const int64_t kD = weight_shape[2];
+    const int64_t kH = weight_shape[3];
+    const int64_t kW = weight_shape[4];
+    const int64_t C_out_per_group = C_out / groups;
+
+    const int64_t D_out = grad_shape[2];
+    const int64_t H_out = grad_shape[3];
+    const int64_t W_out = grad_shape[4];
+
+    const int64_t stride_d = stride.size() > 0 ? stride[0] : 1;
+    const int64_t stride_h = stride.size() > 1 ? stride[1] : stride_d;
+    const int64_t stride_w = stride.size() > 2 ? stride[2] : stride_h;
+    const int64_t pad_d = padding.size() > 0 ? padding[0] : 0;
+    const int64_t pad_h = padding.size() > 1 ? padding[1] : pad_d;
+    const int64_t pad_w = padding.size() > 2 ? padding[2] : pad_h;
+    const int64_t dil_d = dilation.size() > 0 ? dilation[0] : 1;
+    const int64_t dil_h = dilation.size() > 1 ? dilation[1] : dil_d;
+    const int64_t dil_w = dilation.size() > 2 ? dilation[2] : dil_h;
+
+    Tensor grad_input(input_shape, DType::Float64, grad_output.device());
+
+    const int64_t K = C_in_per_group * kD * kH * kW;
+    const int64_t N_gemm = D_out * H_out * W_out;
+    const int64_t col_size = K * N_gemm;
+
+    double* grad_input_ptr = get_data_ptr<double>(grad_input);
+    const double* weight_ptr = get_data_ptr<const double>(weight);
+    const double* grad_output_ptr = get_data_ptr<const double>(grad_output);
+
+    queue.fill(grad_input_ptr, 0.0, N * C_in * D_in * H_in * W_in).wait();
+
+    Tensor col_buffer({col_size}, DType::Float64, grad_output.device());
+    double* col_ptr = get_data_ptr<double>(col_buffer);
+
+    for (int64_t n = 0; n < N; ++n) {
+        double* grad_in_batch = grad_input_ptr + n * C_in * D_in * H_in * W_in;
+        for (int64_t g = 0; g < groups; ++g) {
+            const int64_t in_channel_offset = g * C_in_per_group;
+            const int64_t out_channel_offset = g * C_out_per_group;
+            const int64_t weight_offset = g * C_out_per_group * K;
+
+            const double* grad_out_group = grad_output_ptr + n * C_out * N_gemm + out_channel_offset * N_gemm;
+            const double* weight_group = weight_ptr + weight_offset;
+
+            const int64_t M_group = K;
+            queue.parallel_for<Conv3dBackwardInputGemmKernelFloat64>(sycl::range<2>(M_group, N_gemm),
+                             [=](sycl::id<2> idx) {
+                const int64_t k = idx[0];
+                const int64_t hw = idx[1];
+                double sum = 0.0;
+                for (int64_t oc = 0; oc < C_out_per_group; ++oc) {
+                    sum += weight_group[oc * M_group + k] * grad_out_group[oc * N_gemm + hw];
+                }
+                col_ptr[k * N_gemm + hw] = sum;
+            });
+
+            col3im_grouped_3d_kernel(
+                col_ptr, C_in, C_in_per_group, in_channel_offset,
+                D_in, H_in, W_in, kD, kH, kW,
+                stride_d, stride_h, stride_w, pad_d, pad_h, pad_w,
+                dil_d, dil_h, dil_w, D_out, H_out, W_out, grad_in_batch, queue);
+        }
+    }
+    queue.wait();
+    return grad_input;
+}
+
+static auto conv3d_backward_weight_f64_sycl(const Tensor& grad_output, const Tensor& input,
+                                            const std::vector<int64_t>& weight_shape,
+                                            const std::vector<int64_t>& stride, const std::vector<int64_t>& padding,
+                                            const std::vector<int64_t>& dilation, int64_t groups,
+                                            sycl::queue& queue) -> Tensor {
+    auto input_shape = input.shape();
+    auto grad_shape = grad_output.shape();
+
+    const int64_t N = input_shape[0];
+    const int64_t C_in = input_shape[1];
+    const int64_t D_in = input_shape[2];
+    const int64_t H_in = input_shape[3];
+    const int64_t W_in = input_shape[4];
+
+    const int64_t C_out = weight_shape[0];
+    const int64_t C_in_per_group = weight_shape[1];
+    const int64_t kD = weight_shape[2];
+    const int64_t kH = weight_shape[3];
+    const int64_t kW = weight_shape[4];
+    const int64_t C_out_per_group = C_out / groups;
+
+    const int64_t D_out = grad_shape[2];
+    const int64_t H_out = grad_shape[3];
+    const int64_t W_out = grad_shape[4];
+
+    const int64_t stride_d = stride.size() > 0 ? stride[0] : 1;
+    const int64_t stride_h = stride.size() > 1 ? stride[1] : stride_d;
+    const int64_t stride_w = stride.size() > 2 ? stride[2] : stride_h;
+    const int64_t pad_d = padding.size() > 0 ? padding[0] : 0;
+    const int64_t pad_h = padding.size() > 1 ? padding[1] : pad_d;
+    const int64_t pad_w = padding.size() > 2 ? padding[2] : pad_h;
+    const int64_t dil_d = dilation.size() > 0 ? dilation[0] : 1;
+    const int64_t dil_h = dilation.size() > 1 ? dilation[1] : dil_d;
+    const int64_t dil_w = dilation.size() > 2 ? dilation[2] : dil_h;
+
+    Tensor grad_weight(weight_shape, DType::Float64, input.device());
+
+    const int64_t K = C_in_per_group * kD * kH * kW;
+    const int64_t N_spatial = D_out * H_out * W_out;
+    const int64_t total_weight_size = C_out * K;
+    const int64_t col_size = K * N_spatial;
+
+    double* grad_weight_ptr = get_data_ptr<double>(grad_weight);
+    const double* input_ptr = get_data_ptr<const double>(input);
+    const double* grad_output_ptr = get_data_ptr<const double>(grad_output);
+
+    queue.fill(grad_weight_ptr, 0.0, total_weight_size).wait();
+
+    Tensor col_buffer({col_size}, DType::Float64, input.device());
+    double* col_ptr = get_data_ptr<double>(col_buffer);
+
+    for (int64_t n = 0; n < N; ++n) {
+        const double* input_batch = input_ptr + n * C_in * D_in * H_in * W_in;
+        for (int64_t g = 0; g < groups; ++g) {
+            const int64_t in_channel_offset = g * C_in_per_group;
+            const int64_t out_channel_offset = g * C_out_per_group;
+            const int64_t weight_offset = g * C_out_per_group * K;
+
+            const double* grad_out_group = grad_output_ptr + n * C_out * N_spatial + out_channel_offset * N_spatial;
+            double* grad_weight_group = grad_weight_ptr + weight_offset;
+
+            im3col_grouped_3d_kernel(
+                input_batch, C_in, C_in_per_group, in_channel_offset,
+                D_in, H_in, W_in, kD, kH, kW,
+                stride_d, stride_h, stride_w, pad_d, pad_h, pad_w,
+                dil_d, dil_h, dil_w, D_out, H_out, W_out, col_ptr, queue);
+
+            queue.parallel_for<Conv3dBackwardWeightGemmKernelFloat64>(sycl::range<2>(C_out_per_group, K),
+                             [=](sycl::id<2> idx) {
+                const int64_t oc = idx[0];
+                const int64_t k = idx[1];
+                double sum = 0.0;
+                for (int64_t hw = 0; hw < N_spatial; ++hw) {
+                    sum += grad_out_group[oc * N_spatial + hw] * col_ptr[k * N_spatial + hw];
+                }
+                sycl::atomic_ref<double, sycl::memory_order::relaxed, sycl::memory_scope::device>
+                    atomic_val(grad_weight_group[oc * K + k]);
+                atomic_val.fetch_add(sum);
+            });
+        }
+    }
+    queue.wait();
+    return grad_weight;
+}
+
 auto conv3d_forward(const Tensor& input, const Tensor& weight, const Tensor* bias,
                     const std::vector<int64_t>& stride, const std::vector<int64_t>& padding,
                     const std::vector<int64_t>& dilation, int64_t groups,
@@ -309,6 +575,24 @@ auto conv3d_forward(const Tensor& input, const Tensor& weight, const Tensor* bia
 
     if (input_shape.size() != 5 || weight_shape.size() != 5) {
         throw std::invalid_argument("Conv3d requires 5D tensors (N,C,D,H,W)");
+    }
+
+    // oneDNN has no FP64 convolution primitive — route FP64 to the native SYCL
+    // im3col+GEMM path (widening to FP32 would break FP64 gradcheck precision).
+    if (input.dtype() == DType::Float64) {
+        return conv3d_forward_f64_sycl(input, weight, bias, stride, padding, dilation, groups, queue);
+    }
+    // FP16/BF16 3D conv is unsupported on some SYCL devices ("could not create a
+    // primitive descriptor"). Widen to FP32, run, then narrow back — all on the
+    // same queue/device, so the result stays on the input's device.
+    if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) {
+        const DType orig = input.dtype();
+        Tensor bias_f32;
+        const Tensor* bias_f32_ptr = nullptr;
+        if (bias != nullptr) { bias_f32 = bias->to(DType::Float32); bias_f32_ptr = &bias_f32; }
+        Tensor out_f32 = conv3d_forward(input.to(DType::Float32), weight.to(DType::Float32),
+                                        bias_f32_ptr, stride, padding, dilation, groups, queue);
+        return out_f32.to(orig);
     }
 
     const int64_t N = input_shape[0];
@@ -347,7 +631,9 @@ auto conv3d_forward(const Tensor& input, const Tensor& weight, const Tensor* bia
         auto dnnl_stream = sycl_interop::make_stream(dnnl_engine, queue);
 
         memory::dims src_dims = {N, C_in, D_in, H_in, W_in};
-        memory::dims weights_dims = {C_out, C_in / groups, kD, kH, kW};
+        memory::dims weights_dims = groups == 1
+        ? memory::dims{C_out, C_in / groups, kD, kH, kW}
+        : memory::dims{groups, C_out / groups, C_in / groups, kD, kH, kW};
         memory::dims dst_dims = {N, C_out, D_out, H_out, W_out};
         memory::dims strides_dims = {stride_d, stride_h, stride_w};
         memory::dims padding_dims = {pad_d, pad_h, pad_w};
@@ -426,6 +712,20 @@ auto conv3d_backward_input(const Tensor& grad_output, const Tensor& weight,
                             sycl::queue& queue) -> Tensor {
     using namespace dnnl;
 
+    // FP64 runs natively (oneDNN lacks the primitive; widening breaks gradcheck).
+    if (grad_output.dtype() == DType::Float64) {
+        return conv3d_backward_input_f64_sycl(grad_output, weight, input_shape,
+                                              stride, padding, dilation, groups, queue);
+    }
+    // See conv3d_forward: widen FP16/BF16 to FP32 (oneDNN lacks the primitives)
+    // and narrow back, staying on-device.
+    if (grad_output.dtype() == DType::Float16 || grad_output.dtype() == DType::BFloat16) {
+        const DType orig = grad_output.dtype();
+        Tensor gi = conv3d_backward_input(grad_output.to(DType::Float32), weight.to(DType::Float32),
+                                          input_shape, stride, padding, dilation, groups, queue);
+        return gi.to(orig);
+    }
+
     auto weight_shape = weight.shape();
     auto grad_shape = grad_output.shape();
 
@@ -460,7 +760,9 @@ auto conv3d_backward_input(const Tensor& grad_output, const Tensor& weight,
         auto dnnl_stream = sycl_interop::make_stream(dnnl_engine, queue);
 
         memory::dims src_dims = {N, C_in, D_in, H_in, W_in};
-        memory::dims weights_dims = {C_out, C_in / groups, kD, kH, kW};
+        memory::dims weights_dims = groups == 1
+        ? memory::dims{C_out, C_in / groups, kD, kH, kW}
+        : memory::dims{groups, C_out / groups, C_in / groups, kD, kH, kW};
         memory::dims dst_dims = {grad_shape[0], grad_shape[1], grad_shape[2], grad_shape[3], grad_shape[4]};
         memory::dims strides_dims = {stride_d, stride_h, stride_w};
         memory::dims padding_dims = {pad_d, pad_h, pad_w};
@@ -516,6 +818,19 @@ auto conv3d_backward_weight(const Tensor& grad_output, const Tensor& input,
                              sycl::queue& queue) -> Tensor {
     using namespace dnnl;
 
+    // FP64 runs natively (oneDNN lacks the primitive; widening breaks gradcheck).
+    if (grad_output.dtype() == DType::Float64) {
+        return conv3d_backward_weight_f64_sycl(grad_output, input, weight_shape,
+                                               stride, padding, dilation, groups, queue);
+    }
+    // See conv3d_forward: widen FP16/BF16 to FP32 and narrow back.
+    if (grad_output.dtype() == DType::Float16 || grad_output.dtype() == DType::BFloat16) {
+        const DType orig = grad_output.dtype();
+        Tensor gw = conv3d_backward_weight(grad_output.to(DType::Float32), input.to(DType::Float32),
+                                           weight_shape, stride, padding, dilation, groups, queue);
+        return gw.to(orig);
+    }
+
     auto input_shape = input.shape();
     auto grad_shape = grad_output.shape();
 
@@ -550,7 +865,9 @@ auto conv3d_backward_weight(const Tensor& grad_output, const Tensor& input,
         auto dnnl_stream = sycl_interop::make_stream(dnnl_engine, queue);
 
         memory::dims src_dims = {N, C_in, D_in, H_in, W_in};
-        memory::dims weights_dims = {C_out, C_in / groups, kD, kH, kW};
+        memory::dims weights_dims = groups == 1
+        ? memory::dims{C_out, C_in / groups, kD, kH, kW}
+        : memory::dims{groups, C_out / groups, C_in / groups, kD, kH, kW};
         memory::dims dst_dims = {grad_shape[0], grad_shape[1], grad_shape[2], grad_shape[3], grad_shape[4]};
         memory::dims strides_dims = {stride_d, stride_h, stride_w};
         memory::dims padding_dims = {pad_d, pad_h, pad_w};
@@ -1536,14 +1853,84 @@ auto conv_transpose3d_backward_input(const Tensor& grad_output, const Tensor& we
     return conv3d_forward(grad_output, weight, nullptr, stride, padding, dilation, groups, queue);
 }
 
-// ConvTranspose3d backward weight: delegates to conv3d backward weight
+// ConvTranspose3d backward weight. NOT the same as conv3d_backward_weight:
+// the ConvTranspose weight layout is [IC, OC/groups, kD,kH,kW] and the spatial
+// correlation maps an INPUT cell (id,ih,iw) to an OUTPUT cell
+// od = id*stride - pad + kd*dil (the transpose of the forward gather). Delegating
+// to conv3d_backward_weight gave wrong math and oneDNN rejected the shapes.
+// Native direct kernel: one work-item per weight element accumulates over
+// (batch, input-spatial). Mirrors the CPU conv_transpose3d_backward_weight_impl.
 auto conv_transpose3d_backward_weight(const Tensor& grad_output, const Tensor& input,
                                        const std::vector<int64_t>& weight_shape,
                                        const std::vector<int64_t>& stride,
                                        const std::vector<int64_t>& padding,
                                        const std::vector<int64_t>& dilation,
                                        int64_t groups, sycl::queue& queue) -> Tensor {
-    return conv3d_backward_weight(grad_output, input, weight_shape, stride, padding, dilation, groups, queue);
+    // FP16/BF16 (and FP64 stays native): widen reduced precision to FP32.
+    if (grad_output.dtype() == DType::Float16 || grad_output.dtype() == DType::BFloat16) {
+        const DType orig = grad_output.dtype();
+        Tensor gw = conv_transpose3d_backward_weight(grad_output.to(DType::Float32),
+                        input.to(DType::Float32), weight_shape, stride, padding, dilation, groups, queue);
+        return gw.to(orig);
+    }
+
+    const auto go = grad_output.contiguous();
+    const auto in = input.contiguous();
+    const auto& gs = go.shape();   // [N, OC, OD, OH, OW]
+    const auto& is = in.shape();   // [N, IC, ID, IH, IW]
+    const int64_t N = gs[0], OC = gs[1], OD = gs[2], OH = gs[3], OW = gs[4];
+    const int64_t IC = is[1], ID = is[2], IH = is[3], IW = is[4];
+    const int64_t OCpg = weight_shape[1];
+    const int64_t kD = weight_shape[2], kH = weight_shape[3], kW = weight_shape[4];
+    const int64_t icpg = IC / groups;
+    const int64_t sD = stride[0], sH = stride.size() > 1 ? stride[1] : sD, sW = stride.size() > 2 ? stride[2] : sH;
+    const int64_t pD = padding[0], pH = padding.size() > 1 ? padding[1] : pD, pW = padding.size() > 2 ? padding[2] : pH;
+    const int64_t dD = dilation[0], dH = dilation.size() > 1 ? dilation[1] : dD, dW = dilation.size() > 2 ? dilation[2] : dH;
+
+    Tensor grad_weight(weight_shape, go.dtype(), go.device());
+    const int64_t n_w = IC * OCpg * kD * kH * kW;
+
+    auto run = [&]<typename T, typename Tag>(Tag) {
+        const T* go_ptr = get_data_ptr<const T>(go);
+        const T* in_ptr = get_data_ptr<const T>(in);
+        T* gw_ptr = get_data_ptr<T>(grad_weight);
+        queue.parallel_for<Tag>(sycl::range<1>(n_w), [=](sycl::id<1> idx) {
+            int64_t w = static_cast<int64_t>(idx[0]);
+            int64_t kw = w % kW; int64_t t = w / kW;
+            int64_t kh = t % kH; t /= kH;
+            int64_t kd = t % kD; t /= kD;
+            int64_t ocg = t % OCpg; t /= OCpg;
+            int64_t ic = t;                       // global input channel
+            int64_t g = ic / icpg;
+            int64_t oc = g * OCpg + ocg;          // global output channel
+            T acc = T(0);
+            for (int64_t b = 0; b < N; ++b) {
+                const T* in_bc = in_ptr + (b * IC + ic) * ID * IH * IW;
+                const T* go_bc = go_ptr + (b * OC + oc) * OD * OH * OW;
+                for (int64_t id = 0; id < ID; ++id) {
+                    int64_t od = id * sD - pD + kd * dD;
+                    if (od < 0 || od >= OD) continue;
+                    for (int64_t ih = 0; ih < IH; ++ih) {
+                        int64_t oh = ih * sH - pH + kh * dH;
+                        if (oh < 0 || oh >= OH) continue;
+                        for (int64_t iw = 0; iw < IW; ++iw) {
+                            int64_t ow = iw * sW - pW + kw * dW;
+                            if (ow < 0 || ow >= OW) continue;
+                            acc += in_bc[(id * IH + ih) * IW + iw]
+                                 * go_bc[(od * OH + oh) * OW + ow];
+                        }
+                    }
+                }
+            }
+            gw_ptr[w] = acc;
+        }).wait();
+    };
+
+    if (go.dtype() == DType::Float32)      run.template operator()<float>(ConvTranspose3dBwWeightFloat32{});
+    else if (go.dtype() == DType::Float64) run.template operator()<double>(ConvTranspose3dBwWeightFloat64{});
+    else throw std::runtime_error("conv_transpose3d_backward_weight (OneAPI): unsupported dtype");
+
+    return grad_weight;
 }
 
 // ConvTranspose3d backward bias: same as conv3d backward bias

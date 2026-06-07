@@ -4124,6 +4124,15 @@ auto median_kernel(const Tensor& input, int64_t dim, bool keepdim) -> std::vecto
 
     dim = normalize_dim(dim, ndim);
 
+    // Float16/BFloat16: no native comparison path. Widen to Float32, compute,
+    // then narrow the value tensor back. median selects an actual element, so
+    // the Float32->half cast reproduces the original half value exactly; the
+    // index tensor is dtype-independent (Int64).
+    if (dtype == DType::Float16 || dtype == DType::BFloat16) {
+        auto widened = median_kernel(input.to(DType::Float32), dim, keepdim);
+        return {widened[0].to(dtype), widened[1]};
+    }
+
     // For full reduction, flatten to 1D then reduce along dim 0
     if (dim == REDUCE_ALL) {
         Tensor flat = input.contiguous().reshape({input.numel()});

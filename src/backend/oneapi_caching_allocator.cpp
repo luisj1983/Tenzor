@@ -118,6 +118,17 @@ void* OneAPICachingAllocator::allocate_impl(size_t size, int device, bool shared
     return block->ptr;
 }
 
+// Wait for (and discard) a block's release fence. Must be called before the
+// block's memory is recycled to a new owner or returned to the runtime.
+static void wait_and_clear_release_fence(OneAPIBlock* block) {
+    if (block->release_fence) {
+        auto* ev = static_cast<sycl::event*>(block->release_fence);
+        try { ev->wait(); } catch (...) { /* device teardown */ }
+        delete ev;
+        block->release_fence = nullptr;
+    }
+}
+
 void OneAPICachingAllocator::free(void* ptr, int device) {
     if (!ptr) {
         return;
@@ -141,6 +152,18 @@ void OneAPICachingAllocator::free(void* ptr, int device) {
 
     // Mark as free
     block->allocated = false;
+
+    // Fence the free: operations already enqueued on the (in-order) device
+    // queue may still touch this block. Attach a barrier event; reuse and
+    // sycl::free both wait on it (see OneAPIBlock::release_fence).
+    if (sycl::queue* q = static_cast<sycl::queue*>(device_alloc.queue)) {
+        try {
+            wait_and_clear_release_fence(block);  // none expected, be safe
+            block->release_fence = new sycl::event(q->ext_oneapi_submit_barrier());
+        } catch (...) {
+            // Queue unusable (teardown) — no pending work to fence.
+        }
+    }
 
     // Update statistics
     if (device_alloc.stats.allocated_bytes >= block->size) {
@@ -438,6 +461,29 @@ OneAPIBlock* OneAPICachingAllocator::try_allocate_from_cache(size_t size, int de
     if (it != free_blocks.end()) {
         OneAPIBlock* block = *it;
 
+        // The previous owner's enqueued work must be complete before this
+        // memory gets a new owner (see OneAPIBlock::release_fence). Use a
+        // NON-blocking completeness check: waiting here would stall every
+        // cached-block reuse on the whole in-order queue (measured: DeepLab
+        // GradientFlow went from seconds to a 1200 s timeout with a blocking
+        // wait). If the fence hasn't signalled, leave the block cached and
+        // let the caller allocate fresh memory instead.
+        if (block->release_fence) {
+            auto* ev = static_cast<sycl::event*>(block->release_fence);
+            bool complete = false;
+            try {
+                complete = ev->get_info<sycl::info::event::command_execution_status>() ==
+                           sycl::info::event_command_status::complete;
+            } catch (...) {
+                complete = true;  // device teardown — nothing left in flight
+            }
+            if (!complete) {
+                return nullptr;  // still in flight: skip reuse, keep cached
+            }
+            delete ev;
+            block->release_fence = nullptr;
+        }
+
         // Remove from free blocks
         free_blocks.erase(it);
 
@@ -542,8 +588,11 @@ void OneAPICachingAllocator::release_block(OneAPIBlock* block) {
         device_alloc.free_device_blocks.erase(block);
     }
 
-    // Free SYCL memory
+    // Free SYCL memory — only after any work enqueued before the free has
+    // completed (sycl::free with in-flight operations corrupts the Intel
+    // runtime's internal allocator).
     if (block->ptr) {
+        wait_and_clear_release_fence(block);
         try {
             sycl::free(block->ptr, *queue);
         } catch (const sycl::exception&) {

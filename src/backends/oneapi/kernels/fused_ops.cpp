@@ -1168,8 +1168,11 @@ auto fused_softmax_cross_entropy_kernel(
     const std::string& reduction,
     sycl::queue& queue
 ) -> Tensor {
-    int64_t batch_size = logits.shape()[0];
-    int64_t num_classes = logits.shape()[1];
+    // Classes are the LAST dim; flatten all leading dims into the batch so this
+    // works for rank-2 (N,C) and rank>2 (D1,...,Dk,C) seq2seq logits alike.
+    // (Was shape[0]/shape[1], which mis-read rank-3 as (N, T) and ignored C.)
+    int64_t num_classes = logits.shape().back();
+    int64_t batch_size = (num_classes > 0) ? logits.numel() / num_classes : 0;
 
     Tensor losses({batch_size}, logits.dtype(), logits.device());
 
@@ -1333,7 +1336,61 @@ auto fused_softmax_cross_entropy_kernel(
         return result;
     }
 
+    // "none" reduction: per-sample loss. Reshape the flat [batch] buffer back to
+    // the logits' leading dims (e.g. (N,T) for rank-3 logits (N,T,C)) so the
+    // op preserves rank, matching the CPU contract.
+    if (logits.ndim() > 2) {
+        std::vector<int64_t> lead(logits.shape().begin(), logits.shape().end() - 1);
+        return losses.reshape(lead);
+    }
     return losses;
+}
+
+// Gradient of softmax-cross-entropy w.r.t. logits (assuming upstream grad 1 on
+// the reduced scalar): grad[b,c] = (softmax(logits)[b,c] - [c==target_b]) * s,
+// where s = 1/N for "mean" and 1 for "sum"/"none". Preserves the logits shape
+// (incl. rank>2) and dtype; computes in Float32 internally. targets are Int64
+// (matching the loss kernel's contract).
+auto fused_softmax_cross_entropy_grad_kernel(
+    const Tensor& logits,
+    const Tensor& targets,
+    const std::string& reduction,
+    sycl::queue& queue
+) -> Tensor {
+    const int64_t num_classes = logits.shape().back();
+    const int64_t batch_size = (num_classes > 0) ? logits.numel() / num_classes : 0;
+    std::vector<int64_t> shape(logits.shape().begin(), logits.shape().end());
+
+    Tensor grad(shape, logits.dtype(), logits.device());
+    if (batch_size == 0) return grad;
+
+    const bool is_f32 = (logits.dtype() == DType::Float32);
+    Tensor lp = is_f32 ? logits.contiguous() : logits.to(DType::Float32);
+    Tensor gp = is_f32 ? grad : Tensor(shape, DType::Float32, logits.device());
+
+    const float* in_ptr  = get_data_ptr<const float>(lp);
+    float*       out_ptr = get_data_ptr<float>(gp);
+    auto targets_i64 = (targets.dtype() == DType::Int64) ? targets : targets.to(DType::Int64);
+    const int64_t* tgt_ptr = get_data_ptr<const int64_t>(targets_i64);
+
+    const int64_t nc = num_classes;
+    const float scale = (reduction == "mean") ? 1.0f / static_cast<float>(batch_size) : 1.0f;
+
+    queue.parallel_for(sycl::range<1>(batch_size), [=](sycl::id<1> idx) {
+        int64_t b = static_cast<int64_t>(idx[0]);
+        const float* row = in_ptr + b * nc;
+        int64_t t = tgt_ptr[b];
+        float mx = row[0];
+        for (int64_t i = 1; i < nc; ++i) mx = sycl::fmax(mx, row[i]);
+        float se = 0.0f;
+        for (int64_t i = 0; i < nc; ++i) se += sycl::exp(row[i] - mx);
+        for (int64_t c = 0; c < nc; ++c) {
+            float sm = sycl::exp(row[c] - mx) / se;
+            out_ptr[b * nc + c] = (sm - ((c == t) ? 1.0f : 0.0f)) * scale;
+        }
+    }).wait();
+
+    return is_f32 ? gp : gp.to(logits.dtype());
 }
 
 // ============================================================================

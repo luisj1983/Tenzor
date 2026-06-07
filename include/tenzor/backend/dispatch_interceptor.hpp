@@ -111,11 +111,14 @@ public:
     }
 
 private:
-    /// Thread-local stack accessor.
-    static std::vector<DispatchInterceptor>& stack_() {
-        static thread_local std::vector<DispatchInterceptor> s;
-        return s;
-    }
+    /// Thread-local stack accessor. Defined out-of-line in a single
+    /// translation unit (dispatch_interceptor.cpp) so there is exactly ONE
+    /// thread_local instance process-wide. A header-inline `static thread_local`
+    /// could be duplicated across translation units / inline instantiations
+    /// (so push()/depth() in one TU and run() in another saw different stacks),
+    /// which silently dropped dispatch interceptors — e.g. the JIT tracer
+    /// recorded ops dispatched from some TUs but not others.
+    static std::vector<DispatchInterceptor>& stack_();
 
     /// Recursively build the chain: interceptor[idx] calls run_chain_(idx+1).
     static std::vector<Tensor> run_chain_(

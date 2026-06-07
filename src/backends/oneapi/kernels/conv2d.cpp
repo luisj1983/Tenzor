@@ -16,6 +16,36 @@
 namespace tenzor {
 namespace oneapi {
 
+// Forward declarations of the im2col+GEMM convolution kernels. These are always
+// compiled (definitions appear after the oneDNN block). The oneDNN convolution
+// primitive on CPU devices implements only f32/bf16; Float64 and Float16
+// convolution have no oneDNN primitive, so the oneDNN entry points below route
+// those dtypes to these real SYCL implementations.
+auto conv2d_forward_im2col(const Tensor& input, const Tensor& weight, const Tensor* bias,
+                           int64_t stride_h, int64_t stride_w,
+                           int64_t padding_h, int64_t padding_w,
+                           int64_t dilation_h, int64_t dilation_w,
+                           int64_t groups, sycl::queue& queue) -> Tensor;
+auto conv2d_backward_im2col(const Tensor& grad_output, const Tensor& input, const Tensor& weight,
+                            int64_t stride_h, int64_t stride_w,
+                            int64_t padding_h, int64_t padding_w,
+                            int64_t dilation_h, int64_t dilation_w,
+                            int64_t groups,
+                            bool compute_grad_input, bool compute_grad_weight, bool compute_grad_bias,
+                            sycl::queue& queue) -> std::tuple<Tensor, Tensor, Tensor>;
+auto conv2d_backward_input_im2col(const Tensor& grad_output, const Tensor& weight,
+                                  const std::vector<int64_t>& input_shape,
+                                  int64_t stride_h, int64_t stride_w,
+                                  int64_t padding_h, int64_t padding_w,
+                                  int64_t dilation_h, int64_t dilation_w,
+                                  int64_t groups, sycl::queue& queue) -> Tensor;
+auto conv2d_backward_weight_im2col(const Tensor& grad_output, const Tensor& input,
+                                   const std::vector<int64_t>& weight_shape,
+                                   int64_t stride_h, int64_t stride_w,
+                                   int64_t padding_h, int64_t padding_w,
+                                   int64_t dilation_h, int64_t dilation_w,
+                                   int64_t groups, sycl::queue& queue) -> Tensor;
+auto conv2d_backward_bias_im2col(const Tensor& grad_output, sycl::queue& queue) -> Tensor;
 
 #ifdef TENZOR_HAS_ONEDNN
 
@@ -49,6 +79,14 @@ auto conv2d_forward(const Tensor& input, const Tensor& weight, const Tensor* bia
         throw std::invalid_argument("Conv2d requires 4D tensors");
     }
 
+    // oneDNN has no f64 convolution primitive and no f16 conv on CPU devices;
+    // route those dtypes to the real im2col+GEMM SYCL implementation.
+    if (input.dtype() == DType::Float64 || input.dtype() == DType::Float16) {
+        return conv2d_forward_im2col(input, weight, bias, stride_h, stride_w,
+                                     padding_h, padding_w, dilation_h, dilation_w,
+                                     groups, queue);
+    }
+
     const int64_t N = input_shape[0];   // Batch
     const int64_t C_in = input_shape[1]; // Input channels
     const int64_t H_in = input_shape[2]; // Input height
@@ -70,7 +108,9 @@ auto conv2d_forward(const Tensor& input, const Tensor& weight, const Tensor* bia
 
     // Create memory descriptors
     memory::dims src_dims = {N, C_in, H_in, W_in};
-    memory::dims weights_dims = {C_out, C_in / groups, K_h, K_w};
+    memory::dims weights_dims = groups == 1
+        ? memory::dims{C_out, C_in / groups, K_h, K_w}
+        : memory::dims{groups, C_out / groups, C_in / groups, K_h, K_w};
     memory::dims dst_dims = {N, C_out, H_out, W_out};
     memory::dims strides_dims = {stride_h, stride_w};
     memory::dims padding_dims = {padding_h, padding_w};
@@ -160,6 +200,14 @@ auto conv2d_backward(const Tensor& grad_output, const Tensor& input, const Tenso
                      sycl::queue& queue) -> std::tuple<Tensor, Tensor, Tensor> {
     using namespace dnnl;
 
+    // oneDNN has no f64 conv and no f16 conv on CPU devices; route to im2col.
+    if (input.dtype() == DType::Float64 || input.dtype() == DType::Float16) {
+        return conv2d_backward_im2col(grad_output, input, weight, stride_h, stride_w,
+                                      padding_h, padding_w, dilation_h, dilation_w,
+                                      groups, compute_grad_input, compute_grad_weight,
+                                      compute_grad_bias, queue);
+    }
+
     auto input_shape = input.shape();
     auto weight_shape = weight.shape();
     auto grad_output_shape = grad_output.shape();
@@ -179,7 +227,9 @@ auto conv2d_backward(const Tensor& grad_output, const Tensor& input, const Tenso
 
     // Memory descriptors
     memory::dims src_dims = {N, C_in, H_in, W_in};
-    memory::dims weights_dims = {C_out, C_in / groups, K_h, K_w};
+    memory::dims weights_dims = groups == 1
+        ? memory::dims{C_out, C_in / groups, K_h, K_w}
+        : memory::dims{groups, C_out / groups, C_in / groups, K_h, K_w};
     memory::dims dst_dims = {grad_output_shape[0], grad_output_shape[1],
                              grad_output_shape[2], grad_output_shape[3]};
     memory::dims strides_dims = {stride_h, stride_w};
@@ -332,6 +382,13 @@ auto conv2d_backward_input(const Tensor& grad_output, const Tensor& weight,
                            sycl::queue& queue) -> Tensor {
     using namespace dnnl;
 
+    // oneDNN has no f64 conv and no f16 conv on CPU devices; route to im2col.
+    if (grad_output.dtype() == DType::Float64 || grad_output.dtype() == DType::Float16) {
+        return conv2d_backward_input_im2col(grad_output, weight, input_shape,
+                                            stride_h, stride_w, padding_h, padding_w,
+                                            dilation_h, dilation_w, groups, queue);
+    }
+
     auto weight_shape = weight.shape();
     auto grad_shape = grad_output.shape();
 
@@ -351,7 +408,9 @@ auto conv2d_backward_input(const Tensor& grad_output, const Tensor& weight,
         auto dnnl_stream = sycl_interop::make_stream(dnnl_engine, queue);
 
         memory::dims src_dims = {N, C_in, H_in, W_in};
-        memory::dims weights_dims = {C_out, C_in / groups, K_h, K_w};
+        memory::dims weights_dims = groups == 1
+        ? memory::dims{C_out, C_in / groups, K_h, K_w}
+        : memory::dims{groups, C_out / groups, C_in / groups, K_h, K_w};
         memory::dims dst_dims = {grad_shape[0], grad_shape[1], grad_shape[2], grad_shape[3]};
         memory::dims strides_dims = {stride_h, stride_w};
         memory::dims padding_dims = {padding_h, padding_w};
@@ -406,6 +465,13 @@ auto conv2d_backward_weight(const Tensor& grad_output, const Tensor& input,
                             sycl::queue& queue) -> Tensor {
     using namespace dnnl;
 
+    // oneDNN has no f64 conv and no f16 conv on CPU devices; route to im2col.
+    if (grad_output.dtype() == DType::Float64 || grad_output.dtype() == DType::Float16) {
+        return conv2d_backward_weight_im2col(grad_output, input, weight_shape,
+                                             stride_h, stride_w, padding_h, padding_w,
+                                             dilation_h, dilation_w, groups, queue);
+    }
+
     auto input_shape = input.shape();
     auto grad_shape = grad_output.shape();
 
@@ -425,7 +491,9 @@ auto conv2d_backward_weight(const Tensor& grad_output, const Tensor& input,
         auto dnnl_stream = sycl_interop::make_stream(dnnl_engine, queue);
 
         memory::dims src_dims = {N, C_in, H_in, W_in};
-        memory::dims weights_dims = {C_out, C_in / groups, K_h, K_w};
+        memory::dims weights_dims = groups == 1
+        ? memory::dims{C_out, C_in / groups, K_h, K_w}
+        : memory::dims{groups, C_out / groups, C_in / groups, K_h, K_w};
         memory::dims dst_dims = {grad_shape[0], grad_shape[1], grad_shape[2], grad_shape[3]};
         memory::dims strides_dims = {stride_h, stride_w};
         memory::dims padding_dims = {padding_h, padding_w};
@@ -528,7 +596,14 @@ auto conv2d_backward_bias(const Tensor& grad_output, sycl::queue& queue) -> Tens
     return grad_bias;
 }
 
-#else // !TENZOR_HAS_ONEDNN - Fallback implementation using im2col + GEMM
+#endif // TENZOR_HAS_ONEDNN
+
+// ============================================================================
+// im2col + GEMM convolution kernels (ALWAYS compiled).
+// When oneDNN is present these provide the Float64/Float16 path (oneDNN has no
+// such conv primitive on CPU); when oneDNN is absent the thin wrappers at the
+// bottom expose them under the dispatcher-facing conv2d_* names.
+// ============================================================================
 
 // Kernel class declarations for conv2d operations - Float32
 class Conv2dIm2colKernel;
@@ -871,7 +946,7 @@ void col2im_grouped_kernel(const sycl::half* data_col, int64_t total_channels, i
 }
 
 // Audit J.2: per-axis stride/padding/dilation for the im2col+GEMM fallback path.
-auto conv2d_forward(const Tensor& input, const Tensor& weight, const Tensor* bias,
+auto conv2d_forward_im2col(const Tensor& input, const Tensor& weight, const Tensor* bias,
                     int64_t stride_h, int64_t stride_w,
                     int64_t padding_h, int64_t padding_w,
                     int64_t dilation_h, int64_t dilation_w,
@@ -1053,7 +1128,7 @@ auto conv2d_forward(const Tensor& input, const Tensor& weight, const Tensor* bia
         Tensor bias_f32;
         const Tensor* bias_f32_ptr = nullptr;
         if (bias != nullptr) { bias_f32 = bias->to(DType::Float32); bias_f32_ptr = &bias_f32; }
-        Tensor out_f32 = conv2d_forward(input.to(DType::Float32), weight.to(DType::Float32), bias_f32_ptr,
+        Tensor out_f32 = conv2d_forward_im2col(input.to(DType::Float32), weight.to(DType::Float32), bias_f32_ptr,
                                         stride_h, stride_w, padding_h, padding_w,
                                         dilation_h, dilation_w, groups, queue);
         return out_f32.to(DType::BFloat16);
@@ -1066,7 +1141,7 @@ auto conv2d_forward(const Tensor& input, const Tensor& weight, const Tensor* bia
 }
 
 // Audit J.2: per-axis stride/padding/dilation for the im2col+GEMM fallback path.
-auto conv2d_backward(const Tensor& grad_output, const Tensor& input, const Tensor& weight,
+auto conv2d_backward_im2col(const Tensor& grad_output, const Tensor& input, const Tensor& weight,
                      int64_t stride_h, int64_t stride_w,
                      int64_t padding_h, int64_t padding_w,
                      int64_t dilation_h, int64_t dilation_w,
@@ -1266,7 +1341,7 @@ class Conv2dBackwardBiasSeparateReductionFloat16;
 
 // Separate conv2d_backward_input that takes input_shape instead of input tensor.
 // Audit J.2: per-axis stride/padding/dilation, matches CPU backend API.
-auto conv2d_backward_input(const Tensor& grad_output, const Tensor& weight,
+auto conv2d_backward_input_im2col(const Tensor& grad_output, const Tensor& weight,
                            const std::vector<int64_t>& input_shape,
                            int64_t stride_h, int64_t stride_w,
                            int64_t padding_h, int64_t padding_w,
@@ -1439,7 +1514,7 @@ auto conv2d_backward_input(const Tensor& grad_output, const Tensor& weight,
     }
     else if (grad_output.dtype() == DType::BFloat16) {
         // BF16 widen-on-device → compute in F32 → narrow back (Cast runs on the GPU).
-        Tensor gi = conv2d_backward_input(grad_output.to(DType::Float32), weight.to(DType::Float32),
+        Tensor gi = conv2d_backward_input_im2col(grad_output.to(DType::Float32), weight.to(DType::Float32),
                                           input_shape, stride_h, stride_w, padding_h, padding_w,
                                           dilation_h, dilation_w, groups, queue);
         return gi.to(DType::BFloat16);
@@ -1453,7 +1528,7 @@ auto conv2d_backward_input(const Tensor& grad_output, const Tensor& weight,
 
 // Separate conv2d_backward_weight that takes weight_shape instead of weight tensor.
 // Audit J.2: per-axis stride/padding/dilation, matches CPU backend API.
-auto conv2d_backward_weight(const Tensor& grad_output, const Tensor& input,
+auto conv2d_backward_weight_im2col(const Tensor& grad_output, const Tensor& input,
                             const std::vector<int64_t>& weight_shape,
                             int64_t stride_h, int64_t stride_w,
                             int64_t padding_h, int64_t padding_w,
@@ -1645,7 +1720,7 @@ auto conv2d_backward_weight(const Tensor& grad_output, const Tensor& input,
     }
     else if (input.dtype() == DType::BFloat16) {
         // BF16 widen-on-device → compute in F32 → narrow back (Cast runs on the GPU).
-        Tensor gw = conv2d_backward_weight(grad_output.to(DType::Float32), input.to(DType::Float32),
+        Tensor gw = conv2d_backward_weight_im2col(grad_output.to(DType::Float32), input.to(DType::Float32),
                                            weight_shape, stride_h, stride_w, padding_h, padding_w,
                                            dilation_h, dilation_w, groups, queue);
         return gw.to(DType::BFloat16);
@@ -1658,7 +1733,7 @@ auto conv2d_backward_weight(const Tensor& grad_output, const Tensor& input,
 }
 
 // Separate conv2d_backward_bias
-auto conv2d_backward_bias(const Tensor& grad_output, sycl::queue& queue) -> Tensor {
+auto conv2d_backward_bias_im2col(const Tensor& grad_output, sycl::queue& queue) -> Tensor {
     auto grad_output_shape = grad_output.shape();
     const int64_t N = grad_output_shape[0];
     const int64_t C = grad_output_shape[1];
@@ -1718,7 +1793,7 @@ auto conv2d_backward_bias(const Tensor& grad_output, sycl::queue& queue) -> Tens
     }
     else if (grad_output.dtype() == DType::BFloat16) {
         // BF16 widen-on-device → reduce in F32 → narrow back (Cast runs on the GPU).
-        Tensor gb = conv2d_backward_bias(grad_output.to(DType::Float32), queue);
+        Tensor gb = conv2d_backward_bias_im2col(grad_output.to(DType::Float32), queue);
         return gb.to(DType::BFloat16);
     }
     else {
@@ -1728,7 +1803,45 @@ auto conv2d_backward_bias(const Tensor& grad_output, sycl::queue& queue) -> Tens
     return grad_bias;
 }
 
-#endif // TENZOR_HAS_ONEDNN
+#ifndef TENZOR_HAS_ONEDNN
+// When oneDNN is unavailable, the dispatcher-facing conv2d_* entry points are
+// the im2col+GEMM kernels for every dtype.
+auto conv2d_forward(const Tensor& input, const Tensor& weight, const Tensor* bias,
+                    int64_t stride_h, int64_t stride_w, int64_t padding_h, int64_t padding_w,
+                    int64_t dilation_h, int64_t dilation_w, int64_t groups,
+                    sycl::queue& queue) -> Tensor {
+    return conv2d_forward_im2col(input, weight, bias, stride_h, stride_w,
+                                 padding_h, padding_w, dilation_h, dilation_w, groups, queue);
+}
+auto conv2d_backward(const Tensor& grad_output, const Tensor& input, const Tensor& weight,
+                     int64_t stride_h, int64_t stride_w, int64_t padding_h, int64_t padding_w,
+                     int64_t dilation_h, int64_t dilation_w, int64_t groups,
+                     bool compute_grad_input, bool compute_grad_weight, bool compute_grad_bias,
+                     sycl::queue& queue) -> std::tuple<Tensor, Tensor, Tensor> {
+    return conv2d_backward_im2col(grad_output, input, weight, stride_h, stride_w,
+                                  padding_h, padding_w, dilation_h, dilation_w, groups,
+                                  compute_grad_input, compute_grad_weight, compute_grad_bias, queue);
+}
+auto conv2d_backward_input(const Tensor& grad_output, const Tensor& weight,
+                           const std::vector<int64_t>& input_shape,
+                           int64_t stride_h, int64_t stride_w, int64_t padding_h, int64_t padding_w,
+                           int64_t dilation_h, int64_t dilation_w, int64_t groups,
+                           sycl::queue& queue) -> Tensor {
+    return conv2d_backward_input_im2col(grad_output, weight, input_shape, stride_h, stride_w,
+                                        padding_h, padding_w, dilation_h, dilation_w, groups, queue);
+}
+auto conv2d_backward_weight(const Tensor& grad_output, const Tensor& input,
+                            const std::vector<int64_t>& weight_shape,
+                            int64_t stride_h, int64_t stride_w, int64_t padding_h, int64_t padding_w,
+                            int64_t dilation_h, int64_t dilation_w, int64_t groups,
+                            sycl::queue& queue) -> Tensor {
+    return conv2d_backward_weight_im2col(grad_output, input, weight_shape, stride_h, stride_w,
+                                         padding_h, padding_w, dilation_h, dilation_w, groups, queue);
+}
+auto conv2d_backward_bias(const Tensor& grad_output, sycl::queue& queue) -> Tensor {
+    return conv2d_backward_bias_im2col(grad_output, queue);
+}
+#endif // !TENZOR_HAS_ONEDNN
 
 // ============================================================================
 // Transposed Convolution (ConvTranspose2d) Forward

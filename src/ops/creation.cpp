@@ -87,6 +87,11 @@ static auto dtype_to_string(DType dtype) -> std::string {
         case DType::Bool: return "bool";
         case DType::Complex64: return "complex64";
         case DType::Complex128: return "complex128";
+        case DType::FP8_E4M3: return "fp8_e4m3";
+        case DType::FP8_E5M2: return "fp8_e5m2";
+        case DType::QInt8: return "qint8";
+        case DType::QUInt8: return "quint8";
+        case DType::QInt4x2: return "qint4x2";
         default: return "unknown";
     }
 }

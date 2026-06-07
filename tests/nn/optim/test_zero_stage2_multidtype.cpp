@@ -95,7 +95,7 @@ TEST_P(ZeROStage2MultiDTypeTest, ZeroGrad) {
     auto adam = std::make_unique<Adam>(params, 1e-3);
     ZeROStage2Optimizer optimizer(std::move(adam), default_config);
 
-    EXPECT_NO_THROW(optimizer.zero_grad());
+    EXPECT_NO_THROW(optimizer.zero_grad(/*set_to_none=*/false));  // assert in-place zeroing (slot kept), not the set_to_none default which drops it
 
     // audit T.1: assert grads were actually zeroed.
     for (auto& p : params) {
@@ -124,7 +124,9 @@ TEST_P(ZeROStage2MultiDTypeTest, GradientBucketing) {
 
     EXPECT_NO_THROW({
         optimizer.step();
-        optimizer.zero_grad();
+        // In-place zero (slot kept) — the assertion below checks
+        // grad().has_value(); the set_to_none=true default would drop the slot.
+        optimizer.zero_grad(/*set_to_none=*/false);
     });
 
     // audit T.1: after step+zero_grad, params must match CPU+F32 Adam step

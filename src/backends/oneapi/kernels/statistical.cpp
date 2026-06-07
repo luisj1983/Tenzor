@@ -288,6 +288,12 @@ auto std_kernel(const Tensor& input, const OpAttributes& attrs, sycl::queue& que
  * @return Tensor Variance tensor
  */
 auto var_kernel(const Tensor& input, const OpAttributes& attrs, sycl::queue& queue) -> Tensor {
+    // Float16/BFloat16 aren't handled by the native kernels below; widen to
+    // Float32, compute, and narrow back (variance is fine in fp32).
+    if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) {
+        const DType orig = input.dtype();
+        return var_kernel(input.to(DType::Float32), attrs, queue).to(orig);
+    }
     // INT64_MIN is the project-wide "all dims" sentinel. The legacy
     // OneAPI convention also accepted -1 as full reduction; that
     // ambiguates `var(v, dim=-1)` (last dim) with full reduction. Treat

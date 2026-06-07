@@ -62,8 +62,18 @@ inline std::vector<int64_t> compute_broadcast_shape(std::span<const int64_t> sha
         int64_t dim_a = i < shape_a.size() ? shape_a[shape_a.size() - 1 - i] : 1;
         int64_t dim_b = i < shape_b.size() ? shape_b[shape_b.size() - 1 - i] : 1;
 
-        if (dim_a == dim_b || dim_a == 1 || dim_b == 1) {
-            result[max_ndim - 1 - i] = std::max(dim_a, dim_b);
+        // A size-1 dimension broadcasts to the OTHER dimension's extent —
+        // which includes 0. Using std::max here was wrong for the 0-vs-1 case:
+        // broadcast(0, 1) must be 0 (an empty result), not 1. Returning 1 made
+        // an empty-input elementwise op allocate a non-empty output and then
+        // read the (null) empty operand's data — a segfault on e.g. `x * 2`
+        // when x has a zero-size batch dim.
+        if (dim_a == dim_b) {
+            result[max_ndim - 1 - i] = dim_a;
+        } else if (dim_a == 1) {
+            result[max_ndim - 1 - i] = dim_b;
+        } else if (dim_b == 1) {
+            result[max_ndim - 1 - i] = dim_a;
         } else {
             throw std::runtime_error("Shapes are not broadcastable");
         }

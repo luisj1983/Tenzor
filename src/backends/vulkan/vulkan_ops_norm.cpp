@@ -520,7 +520,12 @@ auto VulkanBackend::dispatchBatchNorm2dMeanVar(const Tensor& input) -> std::pair
                           VK_SHADER_STAGE_COMPUTE_BIT,
                           0, sizeof(PushConstants), &push_constants);
 
-        uint32_t workgroups = static_cast<uint32_t>(div_wg(input.numel(), devices_[device_id].workgroupSize));
+        // The F32 shader is a deterministic one-workgroup-per-channel tree
+        // reduction (see batchnorm2d_mean_var.comp); the f16/f64 variants
+        // still use one-thread-per-element atomics.
+        uint32_t workgroups = (shader_name == "batchnorm2d_mean_var")
+            ? static_cast<uint32_t>(channels)
+            : static_cast<uint32_t>(div_wg(input.numel(), devices_[device_id].workgroupSize));
         vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
         // Add memory barrier
@@ -576,7 +581,10 @@ auto VulkanBackend::dispatchBatchNorm2dMeanVar(const Tensor& input) -> std::pair
                           VK_SHADER_STAGE_COMPUTE_BIT,
                           0, sizeof(PushConstants), &push_constants);
 
-        uint32_t workgroups = static_cast<uint32_t>(div_wg(input.numel(), devices_[device_id].workgroupSize));
+        // Same deterministic per-channel dispatch as the mean pass.
+        uint32_t workgroups = (shader_name == "batchnorm2d_mean_var")
+            ? static_cast<uint32_t>(channels)
+            : static_cast<uint32_t>(div_wg(input.numel(), devices_[device_id].workgroupSize));
         vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
         // Add memory barrier

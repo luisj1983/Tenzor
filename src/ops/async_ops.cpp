@@ -172,21 +172,27 @@ auto StreamManager::reset() -> void {
 }
 
 StreamManager::~StreamManager() {
-    // Destructors must not throw. Destroy every stream through its owning
-    // backend; the backend registry may already be torn down at static-dtor
-    // time, in which case the OS reclaims the streams.
-    if (!is_backend_registry_alive()) {
-        return;
-    }
-    for (auto& [stream, owner] : stream_owner_) {
-        if (stream && owner) {
-            try {
-                owner->destroy_stream(stream);
-            } catch (...) {
-                std::fprintf(stderr, "StreamManager: destroy_stream failed in destructor\n");
-            }
-        }
-    }
+    // Do NOT destroy streams through their owning backends here.
+    //
+    // This destructor runs at static-destruction time, where the ordering
+    // between this singleton and the backends' own singletons (e.g.
+    // CUDAStreamPool, the per-backend objects, their SYCL/Vulkan/HIP runtime
+    // globals) is unspecified across translation units. If a backend's stream
+    // pool was destructed first, calling destroy_stream() here dereferences
+    // freed state — the "double free or corruption" / SIGSEGV seen at process
+    // exit. `is_backend_registry_alive()` does not protect against this: the
+    // registry object can still report "alive" while the pool it delegates to
+    // is already gone.
+    //
+    // The authoritative, safe teardown is StreamManager::reset(), invoked from
+    // finalize() via atexit() — that runs BEFORE any static destructor, while
+    // every backend and its pools are guaranteed live, and it clears the maps.
+    // So in the normal path these containers are already empty here. If
+    // finalize() never ran (library never initialized, or a hard exit), the OS
+    // reclaims the GPU streams at process teardown — a leak at exit, never a
+    // crash. Just drop our references.
+    stream_owner_.clear();
+    device_streams_.clear();
 }
 
 // Async operations implementations

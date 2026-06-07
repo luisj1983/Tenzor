@@ -1575,6 +1575,18 @@ auto mul_kernel(const Tensor& a, const Tensor& b, cudaStream_t stream) -> Tensor
                 reinterpret_cast<const __nv_bfloat16*>(b.data<BFloat16>()),
                 reinterpret_cast<__nv_bfloat16*>(result.data<BFloat16>()), n);
             CUDA_CHECK(cudaGetLastError());
+        } else if (a.dtype() == DType::Int8) {
+            mul_kernel_device<<<grid, block, 0, stream>>>(
+                a.data<int8_t>(), b.data<int8_t>(), result.data<int8_t>(), n);
+            CUDA_CHECK(cudaGetLastError());
+        } else if (a.dtype() == DType::UInt8) {
+            mul_kernel_device<<<grid, block, 0, stream>>>(
+                a.data<uint8_t>(), b.data<uint8_t>(), result.data<uint8_t>(), n);
+            CUDA_CHECK(cudaGetLastError());
+        } else if (a.dtype() == DType::Int16) {
+            mul_kernel_device<<<grid, block, 0, stream>>>(
+                a.data<int16_t>(), b.data<int16_t>(), result.data<int16_t>(), n);
+            CUDA_CHECK(cudaGetLastError());
         } else if (a.dtype() == DType::Bool) {
             mul_kernel_device<<<grid, block, 0, stream>>>(a.data<bool>(), b.data<bool>(), result.data<bool>(), n);
             CUDA_CHECK(cudaGetLastError());
@@ -1635,6 +1647,21 @@ auto mul_kernel(const Tensor& a, const Tensor& b, cudaStream_t stream) -> Tensor
     } else if (a.dtype() == DType::Int64) {
         broadcast_kernel<<<grid, block, 0, stream>>>(
             a.data<int64_t>(), b.data<int64_t>(), result.data<int64_t>(),
+            meta, ndim, n, MulOp());
+        CUDA_CHECK(cudaGetLastError());
+    } else if (a.dtype() == DType::Int8) {
+        broadcast_kernel<<<grid, block, 0, stream>>>(
+            a.data<int8_t>(), b.data<int8_t>(), result.data<int8_t>(),
+            meta, ndim, n, MulOp());
+        CUDA_CHECK(cudaGetLastError());
+    } else if (a.dtype() == DType::UInt8) {
+        broadcast_kernel<<<grid, block, 0, stream>>>(
+            a.data<uint8_t>(), b.data<uint8_t>(), result.data<uint8_t>(),
+            meta, ndim, n, MulOp());
+        CUDA_CHECK(cudaGetLastError());
+    } else if (a.dtype() == DType::Int16) {
+        broadcast_kernel<<<grid, block, 0, stream>>>(
+            a.data<int16_t>(), b.data<int16_t>(), result.data<int16_t>(),
             meta, ndim, n, MulOp());
         CUDA_CHECK(cudaGetLastError());
     } else if (a.dtype() == DType::Float16) {

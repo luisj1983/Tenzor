@@ -452,6 +452,17 @@ public:
     // Result tensor (set when transfer completes)
     Tensor result;
 
+    // Source tensor of the async copy. MUST be retained until the transfer
+    // completes: the direct-submit async paths (SYCL memcpy, hip/cudaMemcpyAsync)
+    // read the source buffer on a worker stream after the issuing call returns.
+    // Callers may pass temporaries (e.g. OffloadContext's dtype-cast offload
+    // source); without this anchor the source Tensor was destroyed and its
+    // buffer freed with the DMA still queued — on the oneAPI CPU runtime,
+    // sycl::free of USM with in-flight operations corrupted the runtime's
+    // internal allocator ("corrupted double-linked list" aborts in the
+    // DeepLabV3Plus offload tests).
+    Tensor source;
+
     // Completion flag
     std::atomic<bool> completed{false};
 

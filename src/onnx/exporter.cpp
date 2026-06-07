@@ -140,6 +140,8 @@ auto ONNXExporter::op_to_onnx(OpId op) -> std::string {
         // Activation functions
         case OpId::ReLU:         return "Relu";
         case OpId::Sigmoid:      return "Sigmoid";
+        case OpId::Hardswish:    return "HardSwish";    // opset 14+
+        case OpId::Hardsigmoid:  return "HardSigmoid";
         case OpId::TanhActivation: return "Tanh";
         case OpId::Gelu:         return "Gelu";       // opset 20+
         // Inf-D2: Swish has no direct ONNX equivalent before opset 14 (HardSwish).
@@ -261,6 +263,8 @@ auto ONNXExporter::op_to_onnx(OpId op) -> std::string {
 
         // Depthwise convolution
         case OpId::DepthwiseConv2d: return "Conv";      // group=in_channels attribute
+        case OpId::DepthwiseConv1d: return "Conv";      // group=in_channels attribute
+        case OpId::DepthwiseConv3d: return "Conv";      // group=in_channels attribute
 
         // Log2 (custom: Log / Log(2) decomposition)
         case OpId::Log2:         return "Log";          // Decomposed: Log(x) / Log(2)
@@ -3244,6 +3248,7 @@ auto ONNXExporter::jit_op_type_to_onnx(jit::OpType op_type) -> std::string {
 
         // Convolution
         case jit::OpType::Conv2d:           return "Conv";
+        case jit::OpType::ConvTranspose:    return "ConvTranspose";
 
         // Normalization
         case jit::OpType::BatchNorm2d:      return "BatchNormalization";
@@ -3400,17 +3405,49 @@ auto ONNXExporter::convert_jit_node_to_onnx(
             }
             auto padding = node->get_vec_attr("padding");
             if (!padding.empty()) {
-                // ONNX expects [top, left, bottom, right] for 2D
-                if (padding.size() == 2) {
-                    onnx_node.set_attr("pads", std::vector<int64_t>{
-                        padding[0], padding[1], padding[0], padding[1]});
-                } else {
-                    onnx_node.set_attr("pads", padding);
-                }
+                // ONNX `pads` is [x1_begin..xN_begin, x1_end..xN_end] — i.e. the
+                // per-axis padding repeated (begins then ends). This generalises
+                // to 1D/2D/3D: [w]->[w,w], [h,w]->[h,w,h,w], [d,h,w]->[d,h,w,d,h,w].
+                std::vector<int64_t> pads(padding.begin(), padding.end());
+                pads.insert(pads.end(), padding.begin(), padding.end());
+                onnx_node.set_attr("pads", pads);
             }
             auto dilation = node->get_vec_attr("dilation");
             if (!dilation.empty()) {
                 onnx_node.set_attr("dilations", dilation);
+            }
+            auto groups = node->get_int_attr("groups");
+            if (groups > 0) {
+                onnx_node.set_attr("group", groups);
+            }
+            break;
+        }
+        case jit::OpType::ConvTranspose: {
+            // ONNX ConvTranspose mirrors Conv's attribute set plus
+            // output_padding. kernel_shape is inferred from the weight by the
+            // importer when omitted, but we emit it for round-trip fidelity.
+            auto kernel = node->get_vec_attr("kernel_size");
+            if (!kernel.empty()) {
+                onnx_node.set_attr("kernel_shape", kernel);
+            }
+            auto stride = node->get_vec_attr("stride");
+            if (!stride.empty()) {
+                onnx_node.set_attr("strides", stride);
+            }
+            auto padding = node->get_vec_attr("padding");
+            if (!padding.empty()) {
+                // ONNX `pads` = [begins..., ends...]; per-axis padding repeated.
+                std::vector<int64_t> pads(padding.begin(), padding.end());
+                pads.insert(pads.end(), padding.begin(), padding.end());
+                onnx_node.set_attr("pads", pads);
+            }
+            auto dilation = node->get_vec_attr("dilation");
+            if (!dilation.empty()) {
+                onnx_node.set_attr("dilations", dilation);
+            }
+            auto output_padding = node->get_vec_attr("output_padding");
+            if (!output_padding.empty()) {
+                onnx_node.set_attr("output_padding", output_padding);
             }
             auto groups = node->get_int_attr("groups");
             if (groups > 0) {
@@ -4263,6 +4300,19 @@ auto ONNXExporter::convert_jit_graph_to_onnx(const jit::Graph& graph) -> void {
     const auto& jit_inputs = graph.inputs();
     for (size_t i = 0; i < jit_inputs.size() && i < graph_.inputs.size(); ++i) {
         value_name_map[jit_inputs[i]->id()] = graph_.inputs[i].name;
+    }
+
+    // Map captured constants (module parameters/buffers that appear as node
+    // inputs) to ONNX initializers, so a node input referencing a constant
+    // value resolves to a real initializer tensor rather than a dangling
+    // placeholder name (which the importer rejects as "Input tensor not found").
+    for (const auto& [value_id, tensor] : graph.constants()) {
+        if (value_name_map.count(value_id) || tensor.numel() == 0) {
+            continue;
+        }
+        std::string init_name = graph_.get_unique_name("const");
+        add_initializer_tensor(tensor.cpu().contiguous(), init_name);
+        value_name_map[value_id] = init_name;
     }
 
     // Convert each node in topological order

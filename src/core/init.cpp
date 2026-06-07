@@ -590,6 +590,20 @@ auto initialize() -> void {
 
     g_initialized.store(true, std::memory_order_release);
 
+    // Eagerly construct the StreamManager singleton NOW, before registering the
+    // atexit(finalize) handler below. Destruction order is the reverse of
+    // construction/registration order, so this guarantees the StreamManager's
+    // destructor runs AFTER finalize(). Otherwise the singleton is constructed
+    // lazily on the first async op (e.g. async_matmul -> get_stream), i.e. AFTER
+    // this atexit registration — making its destructor run BEFORE finalize().
+    // finalize() then calls StreamManager::instance().reset() on the
+    // already-destroyed singleton, a use-after-free on its internal maps
+    // (AddressSanitizer: heap-use-after-free in StreamManager::reset). The
+    // symptom previously surfaced as a heap-corruption abort at process exit
+    // only when the freed memory happened to be reused (e.g. by the ROCm async
+    // matmul path).
+    (void)StreamManager::instance();
+
     // Register finalize() to run before static destructors.
     // atexit handlers registered after a static's construction run before
     // that static's destructor, ensuring proper ordered cleanup.

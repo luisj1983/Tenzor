@@ -624,6 +624,23 @@ auto ONNXImporter::convert_graph(const ONNXGraphData& graph) -> std::shared_ptr<
     // Load initializers (weights, biases)
     load_initializers(graph);
 
+    // Seed graph inputs (runtime activations) with placeholder tensors so node
+    // converters that resolve a data input by name during module construction
+    // (e.g. BatchNormalization reading its data input) succeed. These are
+    // placeholders (zeros, with dynamic/symbolic dims concretised to 1); the
+    // built model is fed real inputs at forward() time.
+    for (const auto& vi : graph.inputs) {
+        if (initializers_ptr_ && initializers_ptr_->count(vi.name)) {
+            continue;  // already a constant weight, not a runtime activation
+        }
+        std::vector<int64_t> ph_shape = vi.shape;
+        for (auto& d : ph_shape) {
+            if (d <= 0) d = 1;
+        }
+        context_.register_value(
+            vi.name, zeros(ph_shape, onnx_to_dtype(vi.dtype), Device::cpu()));
+    }
+
     // Create sequential container for model
     auto model = std::make_shared<nn::Sequential>();
 
@@ -729,6 +746,13 @@ auto ONNXImporter::convert_node(const ONNXImportNode& node) -> std::optional<std
         return std::nullopt;
     } else if (node.op_type == "Cast") {
         convert_cast(node);
+        return std::nullopt;
+    } else if (node.op_type == "Identity") {
+        // Identity is a pure pass-through. The exporter only inserts one to
+        // bridge a traced value name to the declared graph-output name, so it
+        // contributes no structure to the imported model — skip it. (Module
+        // converters track structure via the Sequential, not the value map, so
+        // the Identity's input value is intentionally not resolved here.)
         return std::nullopt;
     } else if (node.op_type == "Dropout") {
         convert_dropout(node);
@@ -841,34 +865,25 @@ auto ONNXImporter::convert_node(const ONNXImportNode& node) -> std::optional<std
         return convert_layer_normalization(node);
     }
 
-    // Activation functions (in-place)
+    // Activation functions (return module so they join the Sequential model)
     else if (node.op_type == "Relu") {
-        convert_relu(node);
-        return std::nullopt;
+        return convert_relu(node);
     } else if (node.op_type == "LeakyRelu") {
-        convert_leaky_relu(node);
-        return std::nullopt;
+        return convert_leaky_relu(node);
     } else if (node.op_type == "Sigmoid") {
-        convert_sigmoid(node);
-        return std::nullopt;
+        return convert_sigmoid(node);
     } else if (node.op_type == "Tanh") {
-        convert_tanh(node);
-        return std::nullopt;
+        return convert_tanh(node);
     } else if (node.op_type == "Gelu") {
-        convert_gelu(node);
-        return std::nullopt;
+        return convert_gelu(node);
     } else if (node.op_type == "Softmax") {
-        convert_softmax(node);
-        return std::nullopt;
+        return convert_softmax(node);
     } else if (node.op_type == "LogSoftmax") {
-        convert_log_softmax(node);
-        return std::nullopt;
+        return convert_log_softmax(node);
     } else if (node.op_type == "Elu") {
-        convert_elu(node);
-        return std::nullopt;
+        return convert_elu(node);
     } else if (node.op_type == "Selu") {
-        convert_selu(node);
-        return std::nullopt;
+        return convert_selu(node);
     }
 
     // Pooling layers (return module)
@@ -1129,7 +1144,16 @@ auto ONNXImporter::convert_conv(const ONNXImportNode& node) -> std::shared_ptr<n
                                  std::to_string(weight_shape.size()));
     }
 
-    auto kernel_shape = node.get_attr("kernel_shape")->get_ints();
+    // kernel_shape is optional in ONNX — when omitted it is inferred from the
+    // weight tensor's spatial dimensions. Default to those instead of derefing
+    // a possibly-empty optional.
+    std::vector<int64_t> kernel_from_weight;
+    for (size_t i = weight_shape.size() - spatial_dims; i < weight_shape.size(); ++i) {
+        kernel_from_weight.push_back(weight_shape[i]);
+    }
+    auto kernel_shape = node.get_attr("kernel_shape")
+                            .value_or(ONNXAttribute{})
+                            .get_ints(kernel_from_weight);
     std::vector<int64_t> default_ones(spatial_dims, 1);
     std::vector<int64_t> default_pads(spatial_dims * 2, 0);
     auto strides = node.get_attr("strides").value_or(ONNXAttribute{}).get_ints(default_ones);
@@ -1278,7 +1302,14 @@ auto ONNXImporter::convert_conv_transpose(const ONNXImportNode& node)
                                  std::to_string(weight_shape.size()));
     }
 
-    auto kernel_shape = node.get_attr("kernel_shape")->get_ints();
+    // kernel_shape is optional in ONNX; when omitted, infer it from the
+    // weight's trailing spatial dims ([in, out/groups, *kernel]).
+    std::vector<int64_t> kernel_shape;
+    if (auto ks = node.get_attr("kernel_shape")) {
+        kernel_shape = ks->get_ints();
+    } else {
+        kernel_shape.assign(weight_shape.begin() + 2, weight_shape.end());
+    }
     std::vector<int64_t> default_ones(spatial_dims, 1);
     std::vector<int64_t> default_zeros(spatial_dims, 0);
     std::vector<int64_t> default_pads(spatial_dims * 2, 0);
@@ -1427,8 +1458,13 @@ auto ONNXImporter::convert_batch_normalization(const ONNXImportNode& node) -> st
     // ONNX uses a single BatchNormalization op for all ranks; pick the Tenzor
     // layer from the data input's rank: rank 3 -> BatchNorm1d (N,C,L),
     // rank 4 -> BatchNorm2d (N,C,H,W), rank 5 -> BatchNorm3d (N,C,D,H,W).
-    // Default to 2d when the rank is unavailable (most common in CNNs).
-    const size_t input_rank = get_input(node.inputs[0]).shape().size();
+    // Default to 2d (most common in CNNs) when the data input's rank is
+    // unavailable — e.g. the graph input lacks a declared shape/value-info, in
+    // which case we must NOT hard-fail on a missing activation tensor.
+    size_t input_rank = 4;
+    if (auto data_in = context_.get_value(node.inputs[0]); data_in.has_value()) {
+        input_rank = data_in->shape().size();
+    }
     std::shared_ptr<nn::Module> bn;
     if (input_rank == 3) {
         bn = std::make_shared<nn::BatchNorm1d>(num_features, static_cast<double>(eps));
@@ -1860,71 +1896,53 @@ auto ONNXImporter::convert_rnn(const ONNXImportNode& node) -> std::shared_ptr<nn
 // Activation Functions
 // ============================================================================
 
-auto ONNXImporter::convert_relu(const ONNXImportNode& node) -> void {
-    auto input = get_input(node.inputs[0]);
-    Variable var_input(input);
-    auto result = nn::relu(var_input).tensor();
-    register_output(node.outputs[0], result);
+auto ONNXImporter::convert_relu(const ONNXImportNode&)
+    -> std::shared_ptr<nn::Module> {
+    return std::make_shared<nn::ReLU>();
 }
 
-auto ONNXImporter::convert_leaky_relu(const ONNXImportNode& node) -> void {
-    auto input = get_input(node.inputs[0]);
+auto ONNXImporter::convert_leaky_relu(const ONNXImportNode& node)
+    -> std::shared_ptr<nn::Module> {
     float alpha = node.get_attr("alpha").value_or(ONNXAttribute{}).get_float(0.01f);
-    Variable var_input(input);
-    auto result = nn::leaky_relu(var_input, alpha).tensor();
-    register_output(node.outputs[0], result);
+    return std::make_shared<nn::LeakyReLU>(static_cast<double>(alpha));
 }
 
-auto ONNXImporter::convert_sigmoid(const ONNXImportNode& node) -> void {
-    auto input = get_input(node.inputs[0]);
-    Variable var_input(input);
-    auto result = nn::sigmoid(var_input).tensor();
-    register_output(node.outputs[0], result);
+auto ONNXImporter::convert_sigmoid(const ONNXImportNode&)
+    -> std::shared_ptr<nn::Module> {
+    return std::make_shared<nn::Sigmoid>();
 }
 
-auto ONNXImporter::convert_tanh(const ONNXImportNode& node) -> void {
-    auto input = get_input(node.inputs[0]);
-    Variable var_input(input);
-    auto result = nn::tanh(var_input).tensor();
-    register_output(node.outputs[0], result);
+auto ONNXImporter::convert_tanh(const ONNXImportNode&)
+    -> std::shared_ptr<nn::Module> {
+    return std::make_shared<nn::Tanh>();
 }
 
-auto ONNXImporter::convert_gelu(const ONNXImportNode& node) -> void {
-    auto input = get_input(node.inputs[0]);
-    Variable var_input(input);
-    auto result = nn::gelu(var_input).tensor();
-    register_output(node.outputs[0], result);
+auto ONNXImporter::convert_gelu(const ONNXImportNode&)
+    -> std::shared_ptr<nn::Module> {
+    return std::make_shared<nn::GELU>();
 }
 
-auto ONNXImporter::convert_softmax(const ONNXImportNode& node) -> void {
-    auto input = get_input(node.inputs[0]);
+auto ONNXImporter::convert_softmax(const ONNXImportNode& node)
+    -> std::shared_ptr<nn::Module> {
     int64_t axis = node.get_attr("axis").value_or(ONNXAttribute{}).get_int(-1);
-    Variable var_input(input);
-    auto result = nn::softmax(var_input, axis).tensor();
-    register_output(node.outputs[0], result);
+    return std::make_shared<nn::Softmax>(axis);
 }
 
-auto ONNXImporter::convert_log_softmax(const ONNXImportNode& node) -> void {
-    auto input = get_input(node.inputs[0]);
+auto ONNXImporter::convert_log_softmax(const ONNXImportNode& node)
+    -> std::shared_ptr<nn::Module> {
     int64_t axis = node.get_attr("axis").value_or(ONNXAttribute{}).get_int(-1);
-    Variable var_input(input);
-    auto result = nn::log_softmax(var_input, axis).tensor();
-    register_output(node.outputs[0], result);
+    return std::make_shared<nn::LogSoftmax>(axis);
 }
 
-auto ONNXImporter::convert_elu(const ONNXImportNode& node) -> void {
-    auto input = get_input(node.inputs[0]);
+auto ONNXImporter::convert_elu(const ONNXImportNode& node)
+    -> std::shared_ptr<nn::Module> {
     float alpha = node.get_attr("alpha").value_or(ONNXAttribute{}).get_float(1.0f);
-    Variable var_input(input);
-    auto result = nn::elu(var_input, alpha).tensor();
-    register_output(node.outputs[0], result);
+    return std::make_shared<nn::ELU>(static_cast<double>(alpha));
 }
 
-auto ONNXImporter::convert_selu(const ONNXImportNode& node) -> void {
-    auto input = get_input(node.inputs[0]);
-    Variable var_input(input);
-    auto result = nn::selu(var_input).tensor();
-    register_output(node.outputs[0], result);
+auto ONNXImporter::convert_selu(const ONNXImportNode&)
+    -> std::shared_ptr<nn::Module> {
+    return std::make_shared<nn::SELU>();
 }
 
 // ============================================================================

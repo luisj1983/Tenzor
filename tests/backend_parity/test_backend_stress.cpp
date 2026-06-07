@@ -182,9 +182,14 @@ TEST_P(BackendStressParity, LargeTensor_1GB) {
 TEST_P(BackendStressParity, LargeTensor_MatMul) {
     auto a = randn({1024, 1024}, DType::Float32, Device::cpu());
     auto b = randn({1024, 1024}, DType::Float32, Device::cpu());
+    // Float32 GEMM forward-error bound is O(K * eps * |a||b|) ≈ 1e-3 for
+    // K = 1024 with N(0,1) inputs; two correct GEMMs that merely sum in a
+    // different blocked order legitimately differ by ~1e-4 on near-zero
+    // (catastrophically cancelled) outputs, where rtol gives no slack.
+    // atol must absorb that: 1e-5 flagged oneMKL-vs-MKL at 9.2e-5.
     test_operation_parity_single([](const std::vector<Tensor>& inputs) {
         return matmul(inputs[0], inputs[1]);
-    }, {a, b}, device, 1e-3f, 1e-5f, "Stress LargeMatMul 1024x1024");
+    }, {a, b}, device, 1e-3f, 5e-4f, "Stress LargeMatMul 1024x1024");
 }
 
 TEST_P(BackendStressParity, LargeBatch_Conv2d) {
@@ -242,7 +247,10 @@ TEST_P(BackendStressParity, MemoryPressure_AllocDealloc) {
     test_operation_parity_single([](const std::vector<Tensor>& inputs) {
         auto result = inputs[0];
         for (int i = 0; i < 100; ++i) {
-            auto temp = randn({64, 64}, DType::Float32, inputs[0].device());
+            // Deterministic per-iteration tensor (was randn, whose RNG sequence
+            // differs between CPU and the target backend, making the parity
+            // comparison meaningless). ones() still exercises alloc/dealloc.
+            auto temp = ones({64, 64}, DType::Float32, inputs[0].device());
             result = result + temp * 0.01f;
         }
         return result;
@@ -260,12 +268,16 @@ TEST_P(BackendStressParity, DeepGraph_100Layers) {
     auto x = randn({8, 64}, DType::Float32, Device::cpu());
     std::vector<Tensor> weights;
     for (int i = 0; i < 100; ++i) {
-        weights.push_back(randn({64, 64}, DType::Float32, Device::cpu()));
+        // Scale so 100 unnormalized matmul+ReLU layers stay finite (otherwise
+        // activations overflow to +inf and the parity diff is a meaningless inf).
+        weights.push_back(randn({64, 64}, DType::Float32, Device::cpu()) * 0.1f);
     }
     test_operation_parity_single([&weights](const std::vector<Tensor>& inputs) {
         auto result = inputs[0];
         for (const auto& w : weights) {
-            result = clamp_min(matmul(result, w), 0.0f);
+            // Captured weights are CPU tensors; move to the run's compute device
+            // so the device run doesn't mix OneAPI/CPU operands in matmul.
+            result = clamp_min(matmul(result, w.to(result.device())), 0.0f);
         }
         return result;
     }, {x}, device, 1e-3f, 1e-5f, "Stress Deep Graph 100 Layers");
@@ -273,8 +285,11 @@ TEST_P(BackendStressParity, DeepGraph_100Layers) {
 
 TEST_P(BackendStressParity, DeepGraph_Residual) {
     auto x = randn({16, 128}, DType::Float32, Device::cpu());
-    auto w1 = randn({128, 128}, DType::Float32, Device::cpu());
-    auto w2 = randn({128, 128}, DType::Float32, Device::cpu());
+    // Scale weights so 50 unnormalized matmul blocks don't overflow to +inf
+    // (an inf-vs-inf comparison gives a meaningless "max diff = inf" failure).
+    // 0.1 keeps activations finite while still exercising a deep residual graph.
+    auto w1 = randn({128, 128}, DType::Float32, Device::cpu()) * 0.1f;
+    auto w2 = randn({128, 128}, DType::Float32, Device::cpu()) * 0.1f;
     test_operation_parity_single([](const std::vector<Tensor>& inputs) {
         auto x = inputs[0];
         auto w1 = inputs[1];
@@ -298,7 +313,8 @@ TEST_P(BackendStressParity, MemoryPressure_ManyTensors) {
     test_operation_parity_single([&tensors](const std::vector<Tensor>& inputs) {
         auto result = inputs[0];
         for (const auto& t : tensors) {
-            result = result + t * 0.01f;
+            // Captured tensors are CPU; move to the run's compute device.
+            result = result + t.to(result.device()) * 0.01f;
         }
         return result;
     }, {input}, device, 1e-4f, 1e-6f, "Stress Memory Pressure 100 Tensors");
@@ -353,10 +369,14 @@ TEST_P(BackendStressParity, Performance_MatMul_Large_Benchmark) {
 
 TEST_P(BackendStressParity, StabilityUnderLoad_Repeated) {
     auto x = randn({64, 64}, DType::Float32, Device::cpu());
+    // K = 64 Float32 GEMM error bound is O(64 * eps * |a||b|) ≈ 7e-5; the
+    // previous atol=1e-7 demanded near-bitwise agreement between different
+    // GEMM implementations (oneMKL SYCL differed from CPU MKL by 2.3e-5,
+    // squarely inside the legitimate bound). Tolerances sized to the math.
     for (int iter = 0; iter < 10; ++iter) {
         test_operation_parity_single([](const std::vector<Tensor>& inputs) {
             return matmul(inputs[0], inputs[0].transpose(0, 1));
-        }, {x}, device, 1e-5f, 1e-7f,
+        }, {x}, device, 1e-3f, 1e-4f,
            "Stress Stability Iter " + std::to_string(iter));
     }
 }

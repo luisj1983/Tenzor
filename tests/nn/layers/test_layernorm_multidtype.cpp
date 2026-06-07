@@ -89,7 +89,11 @@ TEST_P(LayerNormMultiDTypeTest, GradientFlow) {
     convert_model(ln);
     Variable x = createInput({2, 16}, true);
     auto y = ln.forward(x);
-    auto grad = tenzor::ones({2, 16}, dtype_, device_);
+    // Non-uniform upstream grad: d(sum(LayerNorm(x)))/dx is ~0 (the LN output
+    // sums to a constant), so an all-ones seed yields a legitimately-zero input
+    // grad — only rounding noise keeps it >0 on F32/F64, and F16 rounds to 0.
+    // A varied seed exercises a genuinely non-zero gradient on every dtype.
+    auto grad = tenzor::randn({2, 16}, DType::Float32, device_).to(dtype_);
     EXPECT_NO_THROW({ y.backward(grad); });
     EXPECT_GRAD_FLOWS(x);  // W.26
     ASSERT_TRUE(x.grad().has_value())

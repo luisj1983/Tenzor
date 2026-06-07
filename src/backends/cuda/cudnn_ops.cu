@@ -2705,6 +2705,12 @@ auto cudnn_softmax_forward(
     // Normalize dim
     if (dim < 0) dim += ndim;
 
+    // cuDNN reads the buffer assuming a contiguous [outer, dim, inner] layout
+    // (set on the descriptor below). A non-contiguous input (e.g. a transposed
+    // view) would be read with the wrong strides — the stride-from-shape audit
+    // bug. Materialise a contiguous copy so the descriptor matches the data.
+    const Tensor input_c = input.contiguous();
+
     // Calculate sizes before and after the softmax dimension
     int64_t outer_size = 1;
     for (int64_t i = 0; i < dim; ++i) outer_size *= shape[i];
@@ -2714,13 +2720,13 @@ auto cudnn_softmax_forward(
 
     int64_t dim_size = shape[dim];
 
-    Tensor output = Tensor(std::vector<int64_t>(shape.begin(), shape.end()), input.dtype(), input.device());
+    Tensor output = Tensor(std::vector<int64_t>(shape.begin(), shape.end()), input_c.dtype(), input_c.device());
 
     cudnnHandle_t handle = CuDNNHandle::get();
     CuDNNHandle::set_stream(stream);
 
     cudnnDataType_t cudnn_dtype;
-    switch (input.dtype()) {
+    switch (input_c.dtype()) {
         case DType::Float32: cudnn_dtype = CUDNN_DATA_FLOAT; break;
         case DType::Float64: cudnn_dtype = CUDNN_DATA_DOUBLE; break;
         case DType::Float16: cudnn_dtype = CUDNN_DATA_HALF; break;
@@ -2735,7 +2741,7 @@ auto cudnn_softmax_forward(
     output_desc.set(cudnn_dtype, outer_size, dim_size, inner_size, 1);
 
     // cuDNN requires alpha/beta type to match tensor dtype
-    if (input.dtype() == DType::Float64) {
+    if (input_c.dtype() == DType::Float64) {
         double alpha = 1.0, beta = 0.0;
         CUDNN_CHECK(cudnnSoftmaxForward(
             handle,
@@ -2743,7 +2749,7 @@ auto cudnn_softmax_forward(
             CUDNN_SOFTMAX_MODE_CHANNEL,
             &alpha,
             input_desc.get(),
-            input.data_ptr(),
+            input_c.data_ptr(),
             &beta,
             output_desc.get(),
             output.data_ptr()
@@ -2756,7 +2762,7 @@ auto cudnn_softmax_forward(
             CUDNN_SOFTMAX_MODE_CHANNEL,
             &alpha,
             input_desc.get(),
-            input.data_ptr(),
+            input_c.data_ptr(),
             &beta,
             output_desc.get(),
             output.data_ptr()
@@ -2781,6 +2787,11 @@ auto cudnn_softmax_backward(
 
     if (dim < 0) dim += ndim;
 
+    // cuDNN reads both buffers with a contiguous [outer, dim, inner] layout;
+    // non-contiguous inputs would be mis-read (stride-from-shape audit bug).
+    const Tensor output_c = output.contiguous();
+    const Tensor grad_output_c = grad_output.contiguous();
+
     int64_t outer_size = 1;
     for (int64_t i = 0; i < dim; ++i) outer_size *= shape[i];
 
@@ -2789,13 +2800,13 @@ auto cudnn_softmax_backward(
 
     int64_t dim_size = shape[dim];
 
-    Tensor grad_input = Tensor(std::vector<int64_t>(shape.begin(), shape.end()), output.dtype(), output.device());
+    Tensor grad_input = Tensor(std::vector<int64_t>(shape.begin(), shape.end()), output_c.dtype(), output_c.device());
 
     cudnnHandle_t handle = CuDNNHandle::get();
     CuDNNHandle::set_stream(stream);
 
     cudnnDataType_t cudnn_dtype;
-    switch (output.dtype()) {
+    switch (output_c.dtype()) {
         case DType::Float32: cudnn_dtype = CUDNN_DATA_FLOAT; break;
         case DType::Float64: cudnn_dtype = CUDNN_DATA_DOUBLE; break;
         case DType::Float16: cudnn_dtype = CUDNN_DATA_HALF; break;
@@ -2809,7 +2820,7 @@ auto cudnn_softmax_backward(
     grad_desc.set(cudnn_dtype, outer_size, dim_size, inner_size, 1);
 
     // cuDNN requires alpha/beta type to match tensor dtype
-    if (output.dtype() == DType::Float64) {
+    if (output_c.dtype() == DType::Float64) {
         double alpha = 1.0, beta = 0.0;
         CUDNN_CHECK(cudnnSoftmaxBackward(
             handle,
@@ -2817,9 +2828,9 @@ auto cudnn_softmax_backward(
             CUDNN_SOFTMAX_MODE_CHANNEL,
             &alpha,
             output_desc.get(),
-            output.data_ptr(),
+            output_c.data_ptr(),
             grad_desc.get(),
-            grad_output.data_ptr(),
+            grad_output_c.data_ptr(),
             &beta,
             grad_desc.get(),
             grad_input.data_ptr()
@@ -2832,9 +2843,9 @@ auto cudnn_softmax_backward(
             CUDNN_SOFTMAX_MODE_CHANNEL,
             &alpha,
             output_desc.get(),
-            output.data_ptr(),
+            output_c.data_ptr(),
             grad_desc.get(),
-            grad_output.data_ptr(),
+            grad_output_c.data_ptr(),
             &beta,
             grad_desc.get(),
             grad_input.data_ptr()
@@ -2858,6 +2869,10 @@ auto cudnn_log_softmax_forward(
 
     if (dim < 0) dim += ndim;
 
+    // Contiguous copy so cuDNN's [outer, dim, inner] descriptor matches the
+    // buffer layout (stride-from-shape audit bug for transposed views).
+    const Tensor input_c = input.contiguous();
+
     int64_t outer_size = 1;
     for (int64_t i = 0; i < dim; ++i) outer_size *= shape[i];
 
@@ -2866,13 +2881,13 @@ auto cudnn_log_softmax_forward(
 
     int64_t dim_size = shape[dim];
 
-    Tensor output = Tensor(std::vector<int64_t>(shape.begin(), shape.end()), input.dtype(), input.device());
+    Tensor output = Tensor(std::vector<int64_t>(shape.begin(), shape.end()), input_c.dtype(), input_c.device());
 
     cudnnHandle_t handle = CuDNNHandle::get();
     CuDNNHandle::set_stream(stream);
 
     cudnnDataType_t cudnn_dtype;
-    switch (input.dtype()) {
+    switch (input_c.dtype()) {
         case DType::Float32: cudnn_dtype = CUDNN_DATA_FLOAT; break;
         case DType::Float64: cudnn_dtype = CUDNN_DATA_DOUBLE; break;
         case DType::Float16: cudnn_dtype = CUDNN_DATA_HALF; break;
@@ -2886,7 +2901,7 @@ auto cudnn_log_softmax_forward(
     output_desc.set(cudnn_dtype, outer_size, dim_size, inner_size, 1);
 
     // cuDNN requires alpha/beta type to match tensor dtype
-    if (input.dtype() == DType::Float64) {
+    if (input_c.dtype() == DType::Float64) {
         double alpha = 1.0, beta = 0.0;
         CUDNN_CHECK(cudnnSoftmaxForward(
             handle,
@@ -2894,7 +2909,7 @@ auto cudnn_log_softmax_forward(
             CUDNN_SOFTMAX_MODE_CHANNEL,
             &alpha,
             input_desc.get(),
-            input.data_ptr(),
+            input_c.data_ptr(),
             &beta,
             output_desc.get(),
             output.data_ptr()
@@ -2907,7 +2922,7 @@ auto cudnn_log_softmax_forward(
             CUDNN_SOFTMAX_MODE_CHANNEL,
             &alpha,
             input_desc.get(),
-            input.data_ptr(),
+            input_c.data_ptr(),
             &beta,
             output_desc.get(),
             output.data_ptr()
@@ -2940,13 +2955,18 @@ auto cudnn_log_softmax_backward(
 
     int64_t dim_size = shape[dim];
 
-    Tensor grad_input = Tensor(std::vector<int64_t>(shape.begin(), shape.end()), output.dtype(), output.device());
+    // Contiguous copies so cuDNN's [outer, dim, inner] descriptor matches the
+    // buffer layout (stride-from-shape audit bug for transposed views).
+    const Tensor output_c = output.contiguous();
+    const Tensor grad_output_c = grad_output.contiguous();
+
+    Tensor grad_input = Tensor(std::vector<int64_t>(shape.begin(), shape.end()), output_c.dtype(), output_c.device());
 
     cudnnHandle_t handle = CuDNNHandle::get();
     CuDNNHandle::set_stream(stream);
 
     cudnnDataType_t cudnn_dtype;
-    switch (output.dtype()) {
+    switch (output_c.dtype()) {
         case DType::Float32: cudnn_dtype = CUDNN_DATA_FLOAT; break;
         case DType::Float64: cudnn_dtype = CUDNN_DATA_DOUBLE; break;
         case DType::Float16: cudnn_dtype = CUDNN_DATA_HALF; break;
@@ -2960,7 +2980,7 @@ auto cudnn_log_softmax_backward(
     grad_desc.set(cudnn_dtype, outer_size, dim_size, inner_size, 1);
 
     // cuDNN requires alpha/beta type to match tensor dtype
-    if (output.dtype() == DType::Float64) {
+    if (output_c.dtype() == DType::Float64) {
         double alpha = 1.0, beta = 0.0;
         CUDNN_CHECK(cudnnSoftmaxBackward(
             handle,
@@ -2968,9 +2988,9 @@ auto cudnn_log_softmax_backward(
             CUDNN_SOFTMAX_MODE_CHANNEL,
             &alpha,
             output_desc.get(),
-            output.data_ptr(),
+            output_c.data_ptr(),
             grad_desc.get(),
-            grad_output.data_ptr(),
+            grad_output_c.data_ptr(),
             &beta,
             grad_desc.get(),
             grad_input.data_ptr()
@@ -2983,9 +3003,9 @@ auto cudnn_log_softmax_backward(
             CUDNN_SOFTMAX_MODE_CHANNEL,
             &alpha,
             output_desc.get(),
-            output.data_ptr(),
+            output_c.data_ptr(),
             grad_desc.get(),
-            grad_output.data_ptr(),
+            grad_output_c.data_ptr(),
             &beta,
             grad_desc.get(),
             grad_input.data_ptr()

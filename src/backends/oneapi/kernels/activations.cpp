@@ -837,7 +837,7 @@ auto softmax_backward_kernel(const Tensor& grad_output, const Tensor& output, in
 }
 
 // Leaky ReLU activation
-auto leaky_relu_kernel(const Tensor& input, float alpha, sycl::queue& queue) -> Tensor {
+auto leaky_relu_kernel(const Tensor& input, double alpha, sycl::queue& queue) -> Tensor {
     Tensor output(std::vector<int64_t>(input.shape().begin(), input.shape().end()),
                   input.dtype(), input.device());
 
@@ -849,7 +849,7 @@ auto leaky_relu_kernel(const Tensor& input, float alpha, sycl::queue& queue) -> 
 
         queue.parallel_for<LeakyReLUKernelFloat32>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
             float x = in_ptr[idx];
-            out_ptr[idx] = x > 0.0f ? x : alpha * x;
+            out_ptr[idx] = x > 0.0f ? x : static_cast<float>(alpha) * x;
         });
     }
     else if (input.dtype() == DType::Float64) {
@@ -868,7 +868,7 @@ auto leaky_relu_kernel(const Tensor& input, float alpha, sycl::queue& queue) -> 
 
         queue.parallel_for<LeakyReLUKernelFloat16>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
             float x = static_cast<float>(in_ptr[idx]);
-            out_ptr[idx] = sycl::half(x > 0.0f ? x : alpha * x);
+            out_ptr[idx] = sycl::half(x > 0.0f ? x : static_cast<float>(alpha) * x);
         });
     }
     else if (input.dtype() == DType::BFloat16) {
@@ -877,7 +877,7 @@ auto leaky_relu_kernel(const Tensor& input, float alpha, sycl::queue& queue) -> 
 
         queue.parallel_for<LeakyReLUKernelBFloat16>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
             float x = bf16_to_f32(in_ptr[idx]);
-            out_ptr[idx] = f32_to_bf16(x > 0.0f ? x : alpha * x);
+            out_ptr[idx] = f32_to_bf16(x > 0.0f ? x : static_cast<float>(alpha) * x);
         });
     }
     else {
@@ -888,7 +888,7 @@ auto leaky_relu_kernel(const Tensor& input, float alpha, sycl::queue& queue) -> 
 }
 
 // Leaky ReLU backward
-auto leaky_relu_backward_kernel(const Tensor& grad_output, const Tensor& input, float alpha, sycl::queue& queue) -> Tensor {
+auto leaky_relu_backward_kernel(const Tensor& grad_output, const Tensor& input, double alpha, sycl::queue& queue) -> Tensor {
     Tensor grad_input(std::vector<int64_t>(input.shape().begin(), input.shape().end()),
                       input.dtype(), input.device());
 
@@ -900,7 +900,7 @@ auto leaky_relu_backward_kernel(const Tensor& grad_output, const Tensor& input, 
         float* grad_in_ptr = get_data_ptr<float>(grad_input);
 
         queue.parallel_for<LeakyReLUBackwardKernelFloat32>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
-            grad_in_ptr[idx] = in_ptr[idx] > 0.0f ? grad_out_ptr[idx] : alpha * grad_out_ptr[idx];
+            grad_in_ptr[idx] = in_ptr[idx] > 0.0f ? grad_out_ptr[idx] : static_cast<float>(alpha) * grad_out_ptr[idx];
         });
     }
     else if (input.dtype() == DType::Float64) {
@@ -921,7 +921,7 @@ auto leaky_relu_backward_kernel(const Tensor& grad_output, const Tensor& input, 
         queue.parallel_for<LeakyReLUBackwardKernelFloat16>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
             float in_val = static_cast<float>(in_ptr[idx]);
             float grad_out_val = static_cast<float>(grad_out_ptr[idx]);
-            grad_in_ptr[idx] = sycl::half(in_val > 0.0f ? grad_out_val : alpha * grad_out_val);
+            grad_in_ptr[idx] = sycl::half(in_val > 0.0f ? grad_out_val : static_cast<float>(alpha) * grad_out_val);
         });
     }
     else if (input.dtype() == DType::BFloat16) {
@@ -932,7 +932,7 @@ auto leaky_relu_backward_kernel(const Tensor& grad_output, const Tensor& input, 
         queue.parallel_for<LeakyReLUBackwardKernelBFloat16>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
             float in_val = bf16_to_f32(in_ptr[idx]);
             float g_out = bf16_to_f32(grad_out_ptr[idx]);
-            grad_in_ptr[idx] = f32_to_bf16(in_val > 0.0f ? g_out : alpha * g_out);
+            grad_in_ptr[idx] = f32_to_bf16(in_val > 0.0f ? g_out : static_cast<float>(alpha) * g_out);
         });
     }
     else {

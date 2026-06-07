@@ -166,7 +166,9 @@ TEST_P(OptimizersMultiDTypeTest, SGDZeroGrad) {
     auto params = std::vector<std::shared_ptr<Variable>>{param};
     auto optimizer = SGD(params, 0.1);
 
-    optimizer.zero_grad();
+    // set_to_none=false: zero the gradient in place so it stays allocated and
+    // its values are observable (the default set_to_none=true drops the slot).
+    optimizer.zero_grad(/*set_to_none=*/false);
 
     ASSERT_TRUE(param->has_grad()) << "Failed on " << device().to_string();
     VerifyDataGeneric(param->grad().value(), 0.0, 4, 0.0);
@@ -356,7 +358,9 @@ TEST_P(OptimizersMultiDTypeTest, AdamZeroGrad) {
     auto params = std::vector<std::shared_ptr<Variable>>{param};
     auto optimizer = Adam(params, 0.001);
 
-    optimizer.zero_grad();
+    // set_to_none=false: zero the gradient in place so it stays allocated and
+    // its values are observable (the default set_to_none=true drops the slot).
+    optimizer.zero_grad(/*set_to_none=*/false);
 
     ASSERT_TRUE(param->has_grad()) << "Failed on " << device().to_string();
     VerifyDataGeneric(param->grad().value(), 0.0, 4, 0.0);

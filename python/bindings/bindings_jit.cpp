@@ -17,6 +17,8 @@
 #include <tenzor/jit/script.hpp>
 #include <tenzor/jit/serialization.hpp>
 #include <tenzor/jit/tracer.hpp>
+#include <tenzor/jit/tracing_interceptor.hpp>
+#include <tenzor/backend/dispatch_interceptor.hpp>
 #include <tenzor/lazy/lazy_tensor.hpp>
 #include <tenzor/nn/module.hpp>
 
@@ -27,6 +29,16 @@
 namespace py = pybind11;
 
 namespace tenzor::python {
+
+// Per-thread flag tracking whether the Python Tracer API pushed a tracing
+// interceptor onto the (thread-local) DispatchInterceptorStack, so end_trace
+// pops exactly what start_trace pushed and a repeated start_trace does not
+// stack duplicate interceptors. Tracing is inherently thread-local (Tracer
+// uses a thread-local instance), so a thread_local flag is the right scope.
+static bool& py_tracer_interceptor_installed() {
+    static thread_local bool installed = false;
+    return installed;
+}
 
 void register_jit(py::module_& m) {
     auto jit = m.def_submodule("jit", "JIT compilation and tracing");
@@ -56,7 +68,70 @@ void register_jit(py::module_& m) {
         .value("Linear", tenzor::jit::OpType::Linear)
         .value("Constant", tenzor::jit::OpType::Constant)
         .value("Input", tenzor::jit::OpType::Input)
-        .value("Output", tenzor::jit::OpType::Output);
+        .value("Output", tenzor::jit::OpType::Output)
+        // Remaining OpType members — the enum is the public IR vocabulary, so
+        // expose every value (previously only a subset was bound, which made
+        // e.g. ``OpType.Pow`` raise AttributeError in trace-inspection tests
+        // even though the C++ tracer emits it).
+        .value("Bmm", tenzor::jit::OpType::Bmm)
+        .value("LogSoftmax", tenzor::jit::OpType::LogSoftmax)
+        .value("AdaptiveAvgPool2d", tenzor::jit::OpType::AdaptiveAvgPool2d)
+        .value("ConvTranspose", tenzor::jit::OpType::ConvTranspose)
+        .value("Permute", tenzor::jit::OpType::Permute)
+        .value("Squeeze", tenzor::jit::OpType::Squeeze)
+        .value("Unsqueeze", tenzor::jit::OpType::Unsqueeze)
+        .value("Sum", tenzor::jit::OpType::Sum)
+        .value("Mean", tenzor::jit::OpType::Mean)
+        .value("Max", tenzor::jit::OpType::Max)
+        .value("Min", tenzor::jit::OpType::Min)
+        .value("Exp", tenzor::jit::OpType::Exp)
+        .value("Log", tenzor::jit::OpType::Log)
+        .value("Sqrt", tenzor::jit::OpType::Sqrt)
+        .value("Pow", tenzor::jit::OpType::Pow)
+        .value("Abs", tenzor::jit::OpType::Abs)
+        .value("Neg", tenzor::jit::OpType::Neg)
+        .value("Clamp", tenzor::jit::OpType::Clamp)
+        .value("Slice", tenzor::jit::OpType::Slice)
+        .value("Cat", tenzor::jit::OpType::Cat)
+        .value("Dropout", tenzor::jit::OpType::Dropout)
+        .value("Embedding", tenzor::jit::OpType::Embedding)
+        .value("Det", tenzor::jit::OpType::Det)
+        .value("Inv", tenzor::jit::OpType::Inv)
+        .value("Solve", tenzor::jit::OpType::Solve)
+        .value("Cholesky", tenzor::jit::OpType::Cholesky)
+        .value("Svd", tenzor::jit::OpType::Svd)
+        .value("Qr", tenzor::jit::OpType::Qr)
+        .value("Eigh", tenzor::jit::OpType::Eigh)
+        .value("Eigvalsh", tenzor::jit::OpType::Eigvalsh)
+        .value("Norm", tenzor::jit::OpType::Norm)
+        .value("Slogdet", tenzor::jit::OpType::Slogdet)
+        .value("FlashAttention", tenzor::jit::OpType::FlashAttention)
+        .value("FusedFFN", tenzor::jit::OpType::FusedFFN)
+        .value("ResidualAdd", tenzor::jit::OpType::ResidualAdd)
+        .value("ShapeGuard", tenzor::jit::OpType::ShapeGuard)
+        .value("GuardNode", tenzor::jit::OpType::GuardNode)
+        .value("SwapOut", tenzor::jit::OpType::SwapOut)
+        .value("SwapIn", tenzor::jit::OpType::SwapIn)
+        .value("QuantizedLinear", tenzor::jit::OpType::QuantizedLinear)
+        .value("QuantizedConv2d", tenzor::jit::OpType::QuantizedConv2d)
+        .value("Dequantize", tenzor::jit::OpType::Dequantize)
+        .value("Quantize", tenzor::jit::OpType::Quantize)
+        .value("SparseMatMul", tenzor::jit::OpType::SparseMatMul)
+        .value("DenseToSparse", tenzor::jit::OpType::DenseToSparse)
+        .value("If", tenzor::jit::OpType::If)
+        .value("Loop", tenzor::jit::OpType::Loop)
+        .value("LayoutConvert", tenzor::jit::OpType::LayoutConvert)
+        .value("Cast", tenzor::jit::OpType::Cast)
+        .value("SiLU", tenzor::jit::OpType::SiLU)
+        .value("Where", tenzor::jit::OpType::Where)
+        .value("Stack", tenzor::jit::OpType::Stack)
+        .value("Broadcast", tenzor::jit::OpType::Broadcast)
+        .value("IndexSelect", tenzor::jit::OpType::IndexSelect)
+        .value("RMSNorm", tenzor::jit::OpType::RMSNorm)
+        .value("GQA", tenzor::jit::OpType::GQA)
+        .value("RoPE", tenzor::jit::OpType::RoPE)
+        .value("Padding", tenzor::jit::OpType::Padding)
+        .value("Interpolate", tenzor::jit::OpType::Interpolate);
 
     py::class_<tenzor::jit::Value, std::shared_ptr<tenzor::jit::Value>>(jit, "Value",
         "Represents a tensor value in the IR graph")
@@ -113,9 +188,33 @@ void register_jit(py::module_& m) {
     py::class_<tenzor::jit::Tracer>(jit, "Tracer",
         "Tracing context for recording operations")
         .def(py::init<>())
-        .def("start_trace", &tenzor::jit::Tracer::start_trace,
+        .def("start_trace", [](tenzor::jit::Tracer& self) {
+                // Recording requires the dispatch interceptor that turns each
+                // dispatched op into a Tracer::record_op call — the raw
+                // Tracer::start_trace only flips the tracing flag (the C++
+                // TracingGuard installs the interceptor separately). Without
+                // this, a Python `Tracer().start_trace()` produced an empty
+                // graph (op_types == []). Install it here so the direct Tracer
+                // API records ops the same way TracingGuard does.
+                self.start_trace();
+                auto& installed = py_tracer_interceptor_installed();
+                if (!installed) {
+                    DispatchInterceptorStack::push(
+                        tenzor::jit::make_tracing_interceptor(self, nullptr));
+                    installed = true;
+                }
+             },
              "Start recording operations")
-        .def("end_trace", &tenzor::jit::Tracer::end_trace,
+        .def("end_trace", [](tenzor::jit::Tracer& self,
+                             const std::vector<tenzor::Variable>& inputs,
+                             const std::vector<tenzor::Variable>& outputs) {
+                auto& installed = py_tracer_interceptor_installed();
+                if (installed) {
+                    DispatchInterceptorStack::pop();
+                    installed = false;
+                }
+                return self.end_trace(inputs, outputs);
+             },
              py::arg("inputs"), py::arg("outputs"),
              "Stop recording and build IR graph")
         .def("is_tracing", &tenzor::jit::Tracer::is_tracing,

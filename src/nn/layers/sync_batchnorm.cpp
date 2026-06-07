@@ -492,6 +492,15 @@ auto SyncBatchNorm::forward_impl(const Variable& input) -> Variable {
         normalized = normalized * w + b;
     }
 
+    // Preserve the input dtype. Statistics/normalization run in Float32 for
+    // half-precision inputs (Float16/BFloat16), which promotes `normalized` to
+    // Float32; the layer's output must match the input dtype so the autograd
+    // engine's backward-seed dtype validation (and downstream layers) agree.
+    // SyncBatchNormBackward already upcasts the half grad_output internally.
+    if (normalized.dtype() != x.dtype()) {
+        normalized = normalized.to(x.dtype());
+    }
+
     // Set up autograd if needed.
     bool requires_grad = input.requires_grad();
     if (affine_) {

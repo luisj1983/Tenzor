@@ -1808,10 +1808,42 @@ static void register_cpu_kernels_convolution(BackendDispatchTable& table) {
         int64_t padding = attrs.get_int(AttrKey::Padding, 0);
         int64_t dilation = attrs.get_int(AttrKey::Dilation, 1);
         int64_t groups = attrs.get_int(AttrKey::Groups, 1);
-        auto input_4d = inputs[0].unsqueeze(2);
-        auto weight_4d = inputs[1].unsqueeze(2);
+        auto input_4d = inputs[0].unsqueeze(2);   // [N,C,L] -> [N,C,1,L]
+        auto weight_4d = inputs[1].unsqueeze(2);  // [O,I,kL] -> [O,I,1,kL]
         const Tensor* bias = inputs.size() > 2 ? &inputs[2] : nullptr;
-        auto result_4d = cpu::conv2d_forward_kernel(input_4d, weight_4d, bias, stride, padding, dilation, groups);
+        // Pad the length (W) axis only — the unsqueezed H axis is a singleton
+        // and must stay unpadded (pad_h=0). Using the scalar `padding` overload
+        // would pad H too, producing a [N,C,1+2p,L] result that cannot squeeze
+        // back to 3-D. Use the per-axis overload to pad W (length) alone.
+        auto result_4d = cpu::conv2d_forward_kernel(
+            input_4d, weight_4d, bias,
+            /*stride_h=*/1, /*stride_w=*/stride,
+            /*pad_h=*/0,    /*pad_w=*/padding,
+            /*dil_h=*/1,    /*dil_w=*/dilation, groups);
+        return std::vector<Tensor>{result_4d.squeeze(2)};
+    });
+
+    // ConvTranspose1dForward (audit: faithful 1-D transpose conv). Mirrors the
+    // nn::ConvTranspose1d layer's inline logic: unsqueeze to 4-D, run the
+    // per-axis ConvTranspose2d helper padding only the W (length) axis
+    // (pad_w trims the output edges, output_padding extends the W axis), then
+    // squeeze. Keeping it as a dedicated op (3-D operands) lets the tracer /
+    // ONNX exporter represent it as a true 1-spatial-dim ConvTranspose.
+    table.register_kernel(OpId::ConvTranspose1dForward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        int64_t stride = attrs.get_int(AttrKey::Stride, 1);
+        int64_t padding = attrs.get_int(AttrKey::Padding, 0);
+        int64_t output_padding = attrs.get_int(AttrKey::OutputPadding, 0);
+        int64_t dilation = attrs.get_int(AttrKey::Dilation, 1);
+        int64_t groups = attrs.get_int(AttrKey::Groups, 1);
+        auto input_4d = inputs[0].unsqueeze(2);   // [N,C,L] -> [N,C,1,L]
+        auto weight_4d = inputs[1].unsqueeze(2);  // [I,O,kL] -> [I,O,1,kL]
+        const Tensor* bias = inputs.size() > 2 ? &inputs[2] : nullptr;
+        auto result_4d = cpu::conv_transpose2d_forward_kernel(
+            input_4d, weight_4d, bias,
+            /*sH=*/1,  /*sW=*/stride,
+            /*pH=*/0,  /*pW=*/padding,
+            /*opH=*/0, /*opW=*/output_padding,
+            /*dH=*/1,  /*dW=*/dilation, groups);
         return std::vector<Tensor>{result_4d.squeeze(2)};
     });
 

@@ -434,6 +434,17 @@ void VulkanBackend::submitBatchIfNeeded(int32_t device_id, bool force) {
 
     VkFence fence = ctx.frameFences[ctx.currentFrame];
 
+    // Wait for the previous submission that used this frame slot before
+    // resetting its fence (same guard as endSingleTimeCommandsAsync).
+    // Resetting a fence whose submission is still executing is undefined
+    // behaviour: the slot's completion signal is destroyed, so the command
+    // buffer pool / deferred frees could recycle resources the GPU was still
+    // using — observed as nondeterministic corruption in multi-step loops
+    // (e.g. sequence-GRU diverging from t>=3 on RADV).
+    if (ctx.submittedFrames >= DeviceContext::MAX_FRAMES_IN_FLIGHT) {
+        waitForFrame(device_id, ctx.currentFrame);
+    }
+
     // Reset fence before use
     VkResult resetResult = vkResetFences(ctx.device, 1, &fence);
     if (resetResult != VK_SUCCESS) {

@@ -674,6 +674,28 @@ protected:
      * reference; this method is for model-level forwards where the CPU path
      * is prohibitively slow.
      */
+    /**
+     * @brief Per-element finiteness check WITHOUT the any-nonzero assertion.
+     *
+     * For outputs that are legitimately all-zero in valid runs — e.g. the
+     * pasted instance masks of an UNTRAINED detection model, which are
+     * empty whenever no (randomly initialised) detection box overlaps the
+     * image. Asserting nonzero there encodes a property the model does not
+     * guarantee, and flips with backend/dtype-level numeric jitter in which
+     * boxes win NMS.
+     */
+    void expectAllFinite(const Tensor& t) {
+        if (t.numel() == 0) return;
+        auto cpu = t.to(Device::cpu()).to(DType::Float32);
+        const float* data = cpu.data<float>();
+        for (int64_t i = 0; i < cpu.numel(); ++i) {
+            ASSERT_TRUE(std::isfinite(data[i]))
+                << "Non-finite value at index " << i << ": " << data[i]
+                << " on device " << device_.to_string()
+                << " with dtype " << static_cast<int>(dtype_);
+        }
+    }
+
     void expectFiniteNonZero(const Tensor& t) {
         auto cpu = t.to(Device::cpu());
         if (cpu.dtype() != DType::Float32) cpu = cpu.to(DType::Float32);

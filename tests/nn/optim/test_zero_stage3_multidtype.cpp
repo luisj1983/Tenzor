@@ -96,7 +96,7 @@ TEST_P(ZeROStage3MultiDTypeTest, ZeroGrad) {
     auto adam = std::make_unique<Adam>(params, 1e-3);
     ZeROStage3Optimizer optimizer(std::move(adam), default_config);
 
-    EXPECT_NO_THROW(optimizer.zero_grad());
+    EXPECT_NO_THROW(optimizer.zero_grad(/*set_to_none=*/false));  // assert in-place zeroing (slot kept), not the set_to_none default which drops it
 
     // audit T.1: grads must actually be zero after zero_grad.
     for (auto& p : params) {

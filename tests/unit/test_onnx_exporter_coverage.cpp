@@ -56,6 +56,10 @@ const std::set<OpId> kExportSkipList = {
     OpId::FusedAdadeltaStep,
     OpId::FusedAdagradStep,
     OpId::FusedAdamAtan2Step,
+    // CTC loss forward is a training-only loss with no standard ONNX operator
+    // (ONNX has no CTC primitive); it never appears in an exported inference
+    // graph, so it is skip-listed rather than mapped.
+    OpId::CTCLossForward,
 };
 
 // Backward / Inplace OpIds and unnamed enum-gap entries are filtered out

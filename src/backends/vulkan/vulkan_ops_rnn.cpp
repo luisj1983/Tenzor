@@ -117,7 +117,8 @@ auto VulkanBackend::dispatchLSTMForward(const Tensor& input, const Tensor& W_ih,
  * @brief GRU forward pass — loops over timesteps using gru_cell compute shader.
  */
 auto VulkanBackend::dispatchGRUForward(const Tensor& input, const Tensor& W_ih, const Tensor& W_hh,
-                                        const Tensor& bias, const Tensor& h0) -> std::vector<Tensor> {
+                                        const Tensor& bias, const Tensor& h0,
+                                        const Tensor& bias_hh_in) -> std::vector<Tensor> {
     auto input_shape = input.shape();
     int64_t seq_len = input_shape[0];
     int64_t batch_size = input_shape[1];
@@ -149,6 +150,12 @@ auto VulkanBackend::dispatchGRUForward(const Tensor& input, const Tensor& W_ih, 
         bias_hh = bias.slice(0, 3 * hidden_size, 6 * hidden_size);
     } else if (bias.numel() >= 3 * hidden_size) {
         bias_ih = bias;
+    }
+    // Explicit separate hh-side bias (canonical 6-input GRUForward contract)
+    // wins over the combined-vector split above. Dropping it would break the
+    // reset-gated n-gate term (PyTorch GRU semantics).
+    if (bias_hh_in.numel() > 0) {
+        bias_hh = bias_hh_in;
     }
 
     auto* pipeline = getPipeline(cell_shader, device_id);

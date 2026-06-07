@@ -347,6 +347,27 @@ auto roi_align_kernel(
         return output;
     }
 
+    // Float16/BFloat16: compute in Float32 and narrow (mirrors CPU + the
+    // backward kernel). Otherwise, ensure rois matches the feature dtype: each
+    // native branch below reads rois with features.dtype(), so a Float32-rois /
+    // Float64-features mismatch reinterpreted the ROI bytes as the wrong type,
+    // yielding garbage coordinates and wrong outputs.
+    if (features.dtype() == DType::Float16 ||
+        features.dtype() == DType::BFloat16) {
+        Tensor feat_f32 = features.to(DType::Float32);
+        Tensor rois_f32 = rois.to(DType::Float32);
+        Tensor result = roi_align_kernel(
+            feat_f32, rois_f32, output_height, output_width, spatial_scale,
+            sampling_ratio, aligned, queue);
+        return result.to(features.dtype());
+    }
+    if (rois.dtype() != features.dtype()) {
+        Tensor rois_matched = rois.to(features.dtype());
+        return roi_align_kernel(
+            features, rois_matched, output_height, output_width, spatial_scale,
+            sampling_ratio, aligned, queue);
+    }
+
     int64_t total_elements = num_rois * channels * output_height * output_width;
 
     if (features.dtype() == DType::Float32) {
@@ -771,6 +792,36 @@ auto roi_align_backward_kernel(
     int64_t num_rois = grad_shape[0];
     int64_t output_height = grad_shape[2];
     int64_t output_width = grad_shape[3];
+
+    // Float16/BFloat16: compute the whole backward in Float32 and narrow the
+    // result, mirroring the CPU kernel. The dedicated reduced-precision branches
+    // below read the `rois` buffer as sycl::half / uint16, but rois is supplied
+    // as Float32 (it is not converted to the feature dtype) — reinterpreting its
+    // bytes as half corrupted every ROI coordinate, so the bounds check rejected
+    // all sample points and the gradient came back all zeros. Widening both
+    // tensors here also sidesteps the lack of half/bf16 atomic adds.
+    if (grad_output.dtype() == DType::Float16 ||
+        grad_output.dtype() == DType::BFloat16) {
+        Tensor go_f32   = grad_output.to(DType::Float32);
+        Tensor rois_f32 = rois.to(DType::Float32);
+        Tensor result = roi_align_backward_kernel(
+            go_f32, rois_f32, batch_size, channels, feat_height, feat_width,
+            spatial_scale, sampling_ratio, aligned, queue);
+        return result.to(grad_output.dtype());
+    }
+    // rois may arrive in a different dtype than grad_output (the test, and the
+    // general API, keep ROI boxes in Float32 while features may be Float64).
+    // Each native branch below reads rois with grad_output's dtype, so a
+    // mismatch reinterprets the ROI bytes as the wrong type → garbage
+    // coordinates → all-zero gradients (this broke the Float64 path the same way
+    // it broke Float16). Bring rois to the compute dtype, then recurse into the
+    // matching native branch.
+    if (rois.dtype() != grad_output.dtype()) {
+        Tensor rois_matched = rois.to(grad_output.dtype());
+        return roi_align_backward_kernel(
+            grad_output, rois_matched, batch_size, channels, feat_height,
+            feat_width, spatial_scale, sampling_ratio, aligned, queue);
+    }
 
     Tensor grad_features({batch_size, channels, feat_height, feat_width},
                          grad_output.dtype(), grad_output.device());
@@ -1939,6 +1990,32 @@ auto box_iou_kernel(
                 float enc_y2 = sycl::fmax(y2_1, y2_2);
                 float enc_area = (enc_x2 - enc_x1) * (enc_y2 - enc_y1);
                 iou = iou - (enc_area - union_area) / (enc_area + 1e-7f);
+            } else if (iou_type == 2 || iou_type == 3) {
+                // DIoU (2) / CIoU (3): subtract the center-distance penalty (and,
+                // for CIoU, the aspect-ratio penalty). Previously these fell
+                // through and returned plain IoU. Matches the CPU reference.
+                float enc_x1 = sycl::fmin(x1_1, x1_2);
+                float enc_y1 = sycl::fmin(y1_1, y1_2);
+                float enc_x2 = sycl::fmax(x2_1, x2_2);
+                float enc_y2 = sycl::fmax(y2_1, y2_2);
+                float enc_w = enc_x2 - enc_x1;
+                float enc_h = enc_y2 - enc_y1;
+                float cx1 = (x1_1 + x2_1) * 0.5f, cy1 = (y1_1 + y2_1) * 0.5f;
+                float cx2 = (x1_2 + x2_2) * 0.5f, cy2 = (y1_2 + y2_2) * 0.5f;
+                float center_dist_sq = (cx1 - cx2) * (cx1 - cx2) + (cy1 - cy2) * (cy1 - cy2);
+                float diag_dist_sq = enc_w * enc_w + enc_h * enc_h;
+                float result = iou - center_dist_sq / (diag_dist_sq + 1e-7f);
+                if (iou_type == 3) {
+                    const float four_over_pi_sq =
+                        4.0f / (3.14159265358979323846f * 3.14159265358979323846f);
+                    float w1 = x2_1 - x1_1, h1 = y2_1 - y1_1;
+                    float w2 = x2_2 - x1_2, h2 = y2_2 - y1_2;
+                    float at = sycl::atan(w2 / (h2 + 1e-7f)) - sycl::atan(w1 / (h1 + 1e-7f));
+                    float v = four_over_pi_sq * at * at;
+                    float alpha = v / (1.0f - iou + v + 1e-7f);  // raw iou
+                    result = result - alpha * v;
+                }
+                iou = result;
             }
 
             out_ptr[i * M + j] = iou;
@@ -1984,6 +2061,30 @@ auto box_iou_kernel(
                 double enc_y2 = sycl::fmax(y2_1, y2_2);
                 double enc_area = (enc_x2 - enc_x1) * (enc_y2 - enc_y1);
                 iou = iou - (enc_area - union_area) / (enc_area + 1e-7);
+            } else if (iou_type == 2 || iou_type == 3) {
+                // DIoU (2) / CIoU (3): center-distance (+ aspect-ratio) penalty.
+                double enc_x1 = sycl::fmin(x1_1, x1_2);
+                double enc_y1 = sycl::fmin(y1_1, y1_2);
+                double enc_x2 = sycl::fmax(x2_1, x2_2);
+                double enc_y2 = sycl::fmax(y2_1, y2_2);
+                double enc_w = enc_x2 - enc_x1;
+                double enc_h = enc_y2 - enc_y1;
+                double cx1 = (x1_1 + x2_1) * 0.5, cy1 = (y1_1 + y2_1) * 0.5;
+                double cx2 = (x1_2 + x2_2) * 0.5, cy2 = (y1_2 + y2_2) * 0.5;
+                double center_dist_sq = (cx1 - cx2) * (cx1 - cx2) + (cy1 - cy2) * (cy1 - cy2);
+                double diag_dist_sq = enc_w * enc_w + enc_h * enc_h;
+                double result = iou - center_dist_sq / (diag_dist_sq + 1e-7);
+                if (iou_type == 3) {
+                    const double four_over_pi_sq =
+                        4.0 / (3.14159265358979323846 * 3.14159265358979323846);
+                    double w1 = x2_1 - x1_1, h1 = y2_1 - y1_1;
+                    double w2 = x2_2 - x1_2, h2 = y2_2 - y1_2;
+                    double at = sycl::atan(w2 / (h2 + 1e-7)) - sycl::atan(w1 / (h1 + 1e-7));
+                    double v = four_over_pi_sq * at * at;
+                    double alpha = v / (1.0 - iou + v + 1e-7);  // raw iou
+                    result = result - alpha * v;
+                }
+                iou = result;
             }
 
             out_ptr[i * M + j] = iou;
@@ -2251,6 +2352,14 @@ auto interpolate_backward_kernel(const Tensor& grad_output,
                                   const std::string& mode,
                                   bool align_corners,
                                   sycl::queue& queue) -> Tensor {
+    // The backward scatter uses sycl::atomic_ref, which is only available for
+    // Float32/Float64 on this device. Widen Float16/BFloat16 to Float32, run,
+    // and narrow back (on-device).
+    if (grad_output.dtype() == DType::Float16 || grad_output.dtype() == DType::BFloat16) {
+        const DType orig = grad_output.dtype();
+        return interpolate_backward_kernel(grad_output.to(DType::Float32),
+                                           input_size, mode, align_corners, queue).to(orig);
+    }
     auto shape = grad_output.shape();
 
     // 1D backward (grad is (N,C,L_out)): reduce to the 4D bilinear/nearest path

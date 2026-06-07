@@ -36,6 +36,11 @@ void main() {
     int val = input_data[i];
     if (val < 0 || uint(val) >= params.num_bins) return;
 
-    float weight = (params.has_weights != 0) ? weights_data[i] : 1.0;
-    atomicAddFloat(uint(val), weight);
+    if (params.has_weights != 0) {
+        atomicAddFloat(uint(val), weights_data[i]);
+    } else {
+        // Unweighted counts use integer atomics — exact for any count,
+        // unlike float accumulation which loses counts past 2^24.
+        atomicAdd(output_data[uint(val)], 1u);
+    }
 }

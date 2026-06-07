@@ -88,7 +88,7 @@ TEST_P(VisionComponentsMultiDTypeTest, PatchEmbeddingGradientFlow) {
     Variable input(input_tensor, true);
 
     Variable output = patch_embed->forward(input);
-    Variable loss = tenzor::sum(output);
+    Variable loss = tenzor::sum(output * output);
 
     EXPECT_NO_THROW({
         loss.backward();
@@ -250,7 +250,7 @@ TEST_P(VisionComponentsMultiDTypeTest, MBConvBlockGradientFlow) {
     Variable input(input_tensor, true);
 
     Variable output = mbconv->forward(input);
-    Variable loss = tenzor::sum(output);
+    Variable loss = tenzor::sum(output * output);
 
     EXPECT_NO_THROW({
         loss.backward();
@@ -292,7 +292,7 @@ TEST_P(VisionComponentsMultiDTypeTest, ConvNeXtBlockGradientFlow) {
     Variable input(input_tensor, true);
 
     Variable output = block->forward(input);
-    Variable loss = tenzor::sum(output);
+    Variable loss = tenzor::sum(output * output);
 
     EXPECT_NO_THROW({
         loss.backward();
@@ -362,6 +362,10 @@ TEST_P(VisionComponentsMultiDTypeTest, LayerScaleGradientFlow) {
     Variable input(input_tensor, true);
 
     Variable output = layer_scale->forward(input);
+    // LayerScale multiplies by a per-channel gamma initialised to 1e-6, so the
+    // input gradient is ~gamma. A plain sum() keeps it at ~1e-6 (a representable
+    // Float16 subnormal); squaring the output would drive it to ~1e-12, which
+    // underflows Float16 to exactly zero and falsely trips the grad-flow check.
     Variable loss = tenzor::sum(output);
 
     EXPECT_NO_THROW({
@@ -402,7 +406,7 @@ TEST_P(VisionComponentsMultiDTypeTest, SwinMLPGradientFlow) {
     Variable input(input_tensor, true);
 
     Variable output = mlp->forward(input);
-    Variable loss = tenzor::sum(output);
+    Variable loss = tenzor::sum(output * output);
 
     EXPECT_NO_THROW({
         loss.backward();

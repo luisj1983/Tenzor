@@ -15,6 +15,7 @@
 #include "tenzor/ops/op_id.hpp"
 #include "tenzor/utils/error.hpp"
 #include "tenzor/utils/safe_math.hpp"
+#include <algorithm>
 #include <cmath>
 #include <complex>
 #include <cstring>
@@ -313,6 +314,108 @@ static std::string invert_fft_norm(const std::string& norm) {
     return norm;  // "ortho" is self-adjoint
 }
 
+// ---------------------------------------------------------------------------
+// True linear adjoints for the real FFTs (rfft / irfft).
+//
+// The gradient of a linear operator is its Hermitian adjoint, NOT its inverse.
+// rfft and irfft are inverses, but their adjoints differ from the inverse by
+// the treatment of the conjugate-symmetric ("redundant") frequency bins:
+//
+//   * adjoint(rfft)(g)  = Re( ifft_full( zero-pad g to N bins ) )
+//       — a plain complex inverse DFT of the one-sided spectrum padded with
+//         zeros (NOT Hermitian-reconstructed/doubled as irfft does), real part.
+//
+//   * adjoint(irfft)(g) = fold( rfft(g) )
+//       — the one-sided forward DFT with the interior bins doubled (DC and,
+//         when N is even, the Nyquist bin are kept single). This is the
+//         transpose of the Hermitian-symmetry embedding irfft applies.
+//
+// Using irfft as the rfft-adjoint (and bare rfft as the irfft-adjoint) leaves
+// the off-DC/Nyquist bins mis-weighted by a factor of 2, which passes a
+// grad-of-ones round-trip by luck but fails per-basis-vector gradcheck.
+// The norm scaling is handled by routing the inner fft/ifft through the
+// opposite normalization convention (invert_fft_norm).
+// ---------------------------------------------------------------------------
+
+static int64_t fft_norm_dim(int64_t dim, int64_t ndim) {
+    return dim < 0 ? dim + ndim : dim;
+}
+
+// adjoint(rfft): complex one-sided grad (M bins) -> real grad (N samples).
+static Tensor rfft_adjoint(const Tensor& grad_freq, int64_t signal_length,
+                           int64_t dim, const std::string& norm) {
+    const int64_t d = fft_norm_dim(dim, grad_freq.ndim());
+    const int64_t M = grad_freq.shape()[d];
+    const int64_t N = signal_length;
+
+    Tensor full;
+    if (M < N) {
+        std::vector<int64_t> pad_shape(grad_freq.shape().begin(),
+                                       grad_freq.shape().end());
+        pad_shape[d] = N - M;
+        Tensor zpad = tenzor::zeros(pad_shape, grad_freq.dtype(),
+                                    grad_freq.device());
+        full = tenzor::cat({grad_freq, zpad}, d);
+    } else if (M > N) {
+        full = tenzor::slice(grad_freq, d, 0, N);
+    } else {
+        full = grad_freq;
+    }
+    Tensor spatial = tenzor::fft::ifft(full, N, d, invert_fft_norm(norm));
+    return tenzor::real(spatial);
+}
+
+// Per-bin Hermitian-fold weights as a complex tensor broadcastable along `dim`
+// (length P there, 1 elsewhere): w[0]=1, interior=2, Nyquist=1 (when N even).
+static Tensor hermitian_fold_weight(int64_t P, int64_t N, int64_t dim,
+                                    int64_t ndim, DType complex_dtype,
+                                    Device device) {
+    const DType real_dtype = (complex_dtype == DType::Complex128)
+        ? DType::Float64 : DType::Float32;
+    std::vector<int64_t> wshape(static_cast<size_t>(ndim), 1);
+    wshape[static_cast<size_t>(dim)] = P;
+
+    std::vector<double> wv(static_cast<size_t>(P), 2.0);
+    wv[0] = 1.0;                                   // DC bin
+    if (N % 2 == 0 && P >= 1) wv[static_cast<size_t>(P - 1)] = 1.0;  // Nyquist
+
+    Tensor w_real;
+    if (real_dtype == DType::Float64) {
+        w_real = tenzor::from_data(wv.data(), wshape, device);
+    } else {
+        std::vector<float> wf(wv.begin(), wv.end());
+        w_real = tenzor::from_data(wf.data(), wshape, device);
+    }
+    Tensor w_imag = tenzor::zeros(wshape, real_dtype, device);
+    return tenzor::complex(w_real, w_imag);
+}
+
+// adjoint(irfft): real grad (N samples) -> complex one-sided grad (M bins).
+static Tensor irfft_adjoint(const Tensor& grad_spatial, int64_t bins_M,
+                            int64_t dim, const std::string& norm) {
+    const int64_t d = fft_norm_dim(dim, grad_spatial.ndim());
+    const int64_t N = grad_spatial.shape()[d];
+
+    Tensor freq = tenzor::fft::rfft(grad_spatial, std::nullopt, d,
+                                    invert_fft_norm(norm));   // P = N/2+1 bins
+    const int64_t P = freq.shape()[d];
+    Tensor w = hermitian_fold_weight(P, N, d, freq.ndim(), freq.dtype(),
+                                     freq.device());
+    Tensor folded = tenzor::mul(freq, w);
+
+    const int64_t M = (bins_M >= 0) ? bins_M : P;
+    if (P > M) {
+        folded = tenzor::slice(folded, d, 0, M);
+    } else if (P < M) {
+        std::vector<int64_t> pad_shape(folded.shape().begin(),
+                                       folded.shape().end());
+        pad_shape[d] = M - P;
+        Tensor zpad = tenzor::zeros(pad_shape, folded.dtype(), folded.device());
+        folded = tenzor::cat({folded, zpad}, d);
+    }
+    return folded;
+}
+
 auto FFTBackward::forward(std::vector<Variable>) -> std::vector<Variable> {
     throw std::runtime_error("FFTBackward::forward should not be called");
 }
@@ -350,12 +453,34 @@ auto RFFTBackward::forward(std::vector<Variable>) -> std::vector<Variable> {
 }
 
 auto RFFTBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> {
-    // irfft needs the original signal length to reconstruct
-    return {fft::irfft(grad_outputs[0], signal_length_, dim_, invert_fft_norm(norm_))};
+    return {rfft_adjoint(grad_outputs[0], signal_length_, dim_, norm_)};
 }
 
 auto RFFTBackward::backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> {
-    return {fft_autograd::irfft(grad_outputs[0], signal_length_, dim_, invert_fft_norm(norm_))};
+    // True adjoint as autograd ops (so create_graph threads second order):
+    //   Re( ifft_full( zero-pad(grad, N) ) ).
+    const Variable& g = grad_outputs[0];
+    const int64_t d = fft_norm_dim(dim_, g.tensor().ndim());
+    const int64_t M = g.tensor().shape()[d];
+    const int64_t N = signal_length_;
+
+    Variable full = g;
+    if (M < N) {
+        std::vector<int64_t> pad_shape(g.tensor().shape().begin(),
+                                       g.tensor().shape().end());
+        pad_shape[d] = N - M;
+        Variable zpad(tenzor::zeros(pad_shape, g.tensor().dtype(),
+                                    g.tensor().device()), false);
+        full = cat(std::vector<Variable>{g, zpad}, d);
+    } else if (M > N) {
+        full = slice(g, d, 0, N);
+    }
+    Variable spatial = fft_autograd::ifft(full, N, d, invert_fft_norm(norm_));
+    // Real part: view_as_real appends a size-2 (re, im) trailing dim.
+    Variable asreal = view_as_real(spatial);
+    const int64_t last = asreal.tensor().ndim() - 1;
+    Variable re = squeeze(slice(asreal, last, 0, 1), last);
+    return {re};
 }
 
 // ============================================================================
@@ -367,17 +492,37 @@ auto IRFFTBackward::forward(std::vector<Variable>) -> std::vector<Variable> {
 }
 
 auto IRFFTBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> {
-    // R.7: Forward saved the original frequency-bin count so the adjoint
-    // rfft reproduces that exact bin count instead of letting rfft infer
-    // n from the time-domain shape (which differs whenever the forward
-    // irfft used a non-default n).
-    std::optional<int64_t> n_opt = (n_orig_ >= 0) ? std::optional<int64_t>(n_orig_) : std::nullopt;
-    return {fft::rfft(grad_outputs[0], n_opt, dim_, invert_fft_norm(norm_))};
+    // n_orig_ is the frequency-bin count (M) of the original irfft input, so
+    // the adjoint produces exactly M bins even when the forward irfft used a
+    // non-default time length.
+    return {irfft_adjoint(grad_outputs[0], n_orig_, dim_, norm_)};
 }
 
 auto IRFFTBackward::backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> {
-    std::optional<int64_t> n_opt = (n_orig_ >= 0) ? std::optional<int64_t>(n_orig_) : std::nullopt;
-    return {fft_autograd::rfft(grad_outputs[0], n_opt, dim_, invert_fft_norm(norm_))};
+    // True adjoint as autograd ops: rfft(grad) with interior bins doubled
+    // (DC and, for even N, Nyquist kept single), then fit to M bins.
+    const Variable& g = grad_outputs[0];
+    const int64_t d = fft_norm_dim(dim_, g.tensor().ndim());
+    const int64_t N = g.tensor().shape()[d];
+
+    Variable freq = fft_autograd::rfft(g, std::nullopt, d, invert_fft_norm(norm_));
+    const int64_t P = freq.tensor().shape()[d];
+    Tensor w = hermitian_fold_weight(P, N, d, freq.tensor().ndim(),
+                                     freq.tensor().dtype(), freq.tensor().device());
+    Variable folded = freq * Variable(w, false);
+
+    const int64_t M = (n_orig_ >= 0) ? n_orig_ : P;
+    if (P > M) {
+        folded = slice(folded, d, 0, M);
+    } else if (P < M) {
+        std::vector<int64_t> pad_shape(folded.tensor().shape().begin(),
+                                       folded.tensor().shape().end());
+        pad_shape[d] = M - P;
+        Variable zpad(tenzor::zeros(pad_shape, folded.tensor().dtype(),
+                                    folded.tensor().device()), false);
+        folded = cat(std::vector<Variable>{folded, zpad}, d);
+    }
+    return {folded};
 }
 
 // ============================================================================
@@ -446,7 +591,8 @@ auto resolve_window(const Tensor& window, int64_t n_fft, int64_t win_length)
 
 // Per-batch trim helper: copy `[trim_start, trim_start + final_length)` of
 // the expanded buffer into the output buffer for batch element `b`.
-void copy_with_trim(const float* src, float* dst, int64_t expected_length,
+[[maybe_unused]] void copy_with_trim(const float* src, float* dst,
+                    int64_t expected_length,
                     int64_t trim_start, int64_t final_length) {
     int64_t copy_len = std::min(final_length, expected_length - trim_start);
     if (copy_len > 0) {
@@ -518,34 +664,31 @@ auto stft_adjoint_impl(const Tensor& grad,
                     in_ptr[b * freq_bins * num_frames + k * num_frames + f];
             }
 
-            // Inverse FFT — same norm as forward STFT used.
-            Tensor time_frame;
+            // The adjoint of `Y = FFT(window .* x_frame)` w.r.t. the real
+            // x_frame is `window .* adjoint(FFT)(Y)`. For the one-sided rfft
+            // the adjoint is NOT `irfft` — it must zero-pad (not Hermitian-
+            // double) the redundant bins, so reuse the proven `rfft_adjoint`
+            // helper. Using `irfft * N` here double-counted the interior bins.
+            Tensor real_frame;
             if (onesided) {
-                time_frame = fft::irfft(frame_freq, n_fft, -1,
-                                        normalized ? "ortho" : "backward");
+                real_frame = rfft_adjoint(frame_freq, n_fft, 0,
+                                          normalized ? "ortho" : "backward");
             } else {
-                time_frame = fft::ifft(frame_freq, n_fft, -1,
-                                       normalized ? "ortho" : "backward");
+                // adjoint(fft_b) = N * ifft_b; take the real part since the
+                // forward frame fed to the FFT was real-valued.
+                Tensor time_frame = fft::ifft(frame_freq, n_fft, -1,
+                                              normalized ? "ortho" : "backward");
+                real_frame = tenzor::real(time_frame);
             }
-
-            // The adjoint of `Y = FFT(window .* x_frame)` w.r.t. x_frame is
-            // `IFFT_adjoint(Y) .* window`. For backward-normalised FFT, the
-            // adjoint of FFT equals N*IFFT — but combined with backward IFFT's
-            // 1/N factor we get exactly `IFFT(Y)` * N, while combined with
-            // ortho normalisation the adjoint equals the inverse. We compute
-            // both consistently with the forward path's norm choice above and
-            // then apply the (forward, not inverse) `N` scaling for the
-            // backward-norm case so the per-sample relationship matches
-            // `adjoint(FFT_b) = N * IFFT_b`.
-            Tensor real_frame = (time_frame.dtype() == DType::Complex64 ||
-                                 time_frame.dtype() == DType::Complex128)
-                ? time_frame.to(DType::Float32)
-                : time_frame;
+            if (real_frame.dtype() != DType::Float32)
+                real_frame = real_frame.to(DType::Float32);
             if (!real_frame.is_contiguous()) real_frame = real_frame.contiguous();
             const float* frame_data = real_frame.data<float>();
 
-            const float n_scale = normalized ? 1.0f
-                                             : static_cast<float>(n_fft);
+            // rfft_adjoint already encodes the norm; only the non-onesided
+            // ifft path needs the forward-FFT `N` factor.
+            const float n_scale = (onesided || normalized)
+                                      ? 1.0f : static_cast<float>(n_fft);
             int64_t frame_offset = f * hop_length;
             for (int64_t i = 0; i < n_fft; ++i) {
                 out[frame_offset + i] += frame_data[i] *
@@ -555,11 +698,15 @@ auto stft_adjoint_impl(const Tensor& grad,
         }
     }
 
-    // Trim center padding and resize to signal_length.
-    int64_t trim_start = center ? (n_fft / 2) : 0;
+    // Undo the forward STFT's center padding. The forward pads by REFLECTION
+    // (n_fft/2 each side), so the adjoint is NOT a plain trim: every reflected
+    // sample's gradient must fold back onto the source index it was copied
+    // from. (Treating it as zero-pad/trim left the first/last `pad` samples'
+    // gradients wrong — the STFT round-trip gradcheck failure.)
+    int64_t pad = center ? (n_fft / 2) : 0;
     int64_t final_length =
         (signal_length > 0) ? signal_length
-                            : (expected_length - 2 * trim_start);
+                            : (expected_length - 2 * pad);
 
     std::vector<int64_t> final_shape;
     for (int64_t d = 0; d < ndim - 2; ++d) final_shape.push_back(in_shape[d]);
@@ -567,10 +714,38 @@ auto stft_adjoint_impl(const Tensor& grad,
 
     Tensor result(final_shape, DType::Float32, Device::cpu());
     float* result_data = result.data<float>();
+    std::fill(result_data,
+              result_data + static_cast<size_t>(batch_size * final_length),
+              0.0f);
     for (int64_t b = 0; b < batch_size; ++b) {
-        copy_with_trim(output_data.data() + b * expected_length,
-                       result_data + b * final_length,
-                       expected_length, trim_start, final_length);
+        const float* src = output_data.data() + b * expected_length;
+        float* dst = result_data + b * final_length;
+        if (!center) {
+            int64_t copy_len = std::min(final_length, expected_length);
+            if (copy_len > 0)
+                std::memcpy(dst, src,
+                            static_cast<size_t>(copy_len) * sizeof(float));
+            continue;
+        }
+        // Identity (middle) copy: forward out[pad + j] = sig[j].
+        for (int64_t j = 0; j < final_length; ++j) {
+            int64_t s = pad + j;
+            if (s >= 0 && s < expected_length) dst[j] += src[s];
+        }
+        // Left reflect: forward out[i] = sig[clamp(pad - i, .., L-1)].
+        for (int64_t i = 0; i < pad && i < expected_length; ++i) {
+            int64_t idx = pad - i;
+            if (idx >= final_length) idx = final_length - 1;
+            if (idx >= 0 && idx < final_length) dst[idx] += src[i];
+        }
+        // Right reflect: forward out[pad + L + i] = sig[clamp(L - 2 - i, 0, ..)].
+        for (int64_t i = 0; i < pad; ++i) {
+            int64_t s = pad + final_length + i;
+            int64_t idx = final_length - 2 - i;
+            if (idx < 0) idx = 0;
+            if (idx >= 0 && idx < final_length && s < expected_length)
+                dst[idx] += src[s];
+        }
     }
 
     // Restore original dtype/device.
@@ -695,11 +870,16 @@ auto istft_adjoint_impl(const Tensor& grad,
                 fd[i] = row[off + i] * win_data[static_cast<size_t>(i)];
             }
 
+            // Forward ISTFT applied `irfft` per frame; its adjoint is
+            // `irfft_adjoint` (Hermitian-fold of rfft, interior bins doubled),
+            // NOT a bare `rfft`. The bare rfft left every off-DC/Nyquist bin
+            // mis-scaled, breaking the round-trip gradcheck.
             Tensor freq;
             if (onesided) {
-                freq = fft::rfft(frame_t, n_fft, -1,
-                                 normalized ? "ortho" : "backward");
+                freq = irfft_adjoint(frame_t, freq_bins, 0,
+                                     normalized ? "ortho" : "backward");
             } else {
+                // adjoint(ifft_b) = (1/N) * fft_b; the 1/N is applied below.
                 freq = fft::fft(frame_t, n_fft, -1,
                                 normalized ? "ortho" : "backward");
             }
@@ -708,11 +888,13 @@ auto istft_adjoint_impl(const Tensor& grad,
             }
             if (!freq.is_contiguous()) freq = freq.contiguous();
 
+            const float inv_scale = (onesided || normalized)
+                ? 1.0f : (1.0f / static_cast<float>(n_fft));
             const auto* freq_ptr =
                 reinterpret_cast<const std::complex<float>*>(freq.data_ptr());
             for (int64_t k = 0; k < freq_bins; ++k) {
                 out_ptr[b * freq_bins * num_frames + k * num_frames + f] =
-                    freq_ptr[k];
+                    freq_ptr[k] * inv_scale;
             }
         }
     }

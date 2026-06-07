@@ -84,7 +84,9 @@ TEST_P(SAMSWAMultiDTypeTest, SAMLrGetSet) {
 TEST_P(SAMSWAMultiDTypeTest, AveragedModelInitialState) {
     auto params = make_params();
     optim::AveragedModel avg(params);
-    EXPECT_EQ(avg.n_averaged(), 1);
+    // PyTorch semantics (audit V.26): n_averaged starts at 0; first
+    // update_parameters() installs sample 1.
+    EXPECT_EQ(avg.n_averaged(), 0);
     EXPECT_EQ(avg.averaged_params().size(), params.size());
 }
 

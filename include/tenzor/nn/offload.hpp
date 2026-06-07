@@ -263,6 +263,13 @@ private:
      */
     struct TensorInfo {
         Tensor* tensor;                  ///< Pointer to original tensor
+        /// Keeps the Variable that owns `tensor` alive for as long as this
+        /// entry exists. Without it `tensor` is a raw pointer into the model;
+        /// when the model is destroyed before the OffloadContext (a perfectly
+        /// legal ordering), the restore paths (~OffloadContext, load_to_gpu)
+        /// wrote through dangling pointers — observed as SIGSEGV / random
+        /// heap corruption in the DeepLabV3Plus offload tests.
+        std::shared_ptr<Variable> owner;
         Tensor cpu_copy;                 ///< Copy on CPU (if offloaded)
         Device original_device;          ///< Original GPU device before offloading
         bool is_offloaded{false};        ///< Currently offloaded to CPU
@@ -312,6 +319,16 @@ private:
     };
     std::vector<ParamHook> param_grad_hooks_;
 
+    // Host-resident copies of offloaded gradients, keyed by the owning
+    // parameter's identity. Gradient offload is driven from the per-parameter
+    // backward hook (the only point where the freshly-computed gradient value
+    // is observable — see register_param_grad_hooks()), independently of the
+    // Tensor*-keyed `tensor_map_` used for parameter/activation offload. Keying
+    // by parameter keeps the entry count stable across training steps (one per
+    // parameter) instead of growing with each step's fresh gradient storage.
+    std::unordered_map<const Variable*, Tensor> offloaded_gradients_;
+    mutable std::mutex offloaded_gradients_mutex_;
+
     // Layer ordering for sequential offload/prefetch
     std::vector<Module*> layer_order_;
     std::unordered_map<Module*, int> layer_indices_;
@@ -355,6 +372,18 @@ private:
     auto register_param_grad_hooks() -> void;
 
     /**
+     * @brief Record a gradient offload for memory accounting.
+     *
+     * Called from the per-parameter backward hook with the freshly-computed
+     * gradient. Copies the gradient payload to host (the actual offload) and
+     * stores it keyed by the owning parameter so get_stats() can report the
+     * number of gradients currently held off-device. Must NOT publish into
+     * param->grad(): the BackwardEngine inspects grad_.has_value() right after
+     * the hook returns and would otherwise double-accumulate the gradient.
+     */
+    auto record_gradient_offload(const Variable* param, const Tensor& grad) -> void;
+
+    /**
      * @brief Build layer ordering for sequential processing
      */
     auto build_layer_order() -> void;
@@ -367,7 +396,8 @@ private:
     /**
      * @brief Initialize tensor info for a parameter
      */
-    auto initialize_tensor_info(Tensor* tensor, Module* layer) -> void;
+    auto initialize_tensor_info(Tensor* tensor, Module* layer,
+                                std::shared_ptr<Variable> owner = nullptr) -> void;
 
     // ========================================================================
     // Offload/Prefetch Operations

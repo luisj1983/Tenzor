@@ -87,11 +87,17 @@ auto NestedTensor::from_tensor_list(std::span<const Tensor> tensors) -> NestedTe
     // Cat all tensors along dim 0 to create contiguous values buffer
     auto values = tenzor::cat(tensors, 0);
 
-    // Build offsets tensor (always Int64, same device as values)
-    auto offsets = tenzor::zeros({B + 1}, DType::Int64, ref_device);
+    // Build offsets tensor (always Int64). Populate on CPU first — off_ptr is a
+    // raw host pointer, so writing into a device-resident tensor here would be a
+    // no-op on GPU backends (offsets stayed all-zero on OneAPI, making select()
+    // return empty slices). Fill on CPU, then move to the values' device.
+    auto offsets = tenzor::zeros({B + 1}, DType::Int64, Device::cpu());
     auto* off_ptr = offsets.data<int64_t>();
     for (int64_t i = 0; i <= B; ++i) {
         off_ptr[i] = offsets_data[i];
+    }
+    if (ref_device.type != Device::Type::CPU) {
+        offsets = offsets.to(ref_device);
     }
 
     return NestedTensor(std::move(values), std::move(offsets), B,

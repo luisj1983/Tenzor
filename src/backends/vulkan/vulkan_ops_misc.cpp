@@ -1168,6 +1168,25 @@ auto VulkanBackend::dispatchROIAlignForward(const Tensor& features, const Tensor
         throw std::invalid_argument("roi_align_forward requires rois of shape (num_rois, 5)");
     }
 
+    // The dtype-specific shaders read the `rois` buffer with the *feature* value
+    // dtype, but ROI boxes are supplied in Float32 — a Float64/Float16 feature
+    // map therefore reinterpreted the Float32 ROI bytes as the wrong type,
+    // giving garbage coordinates and wrong outputs everywhere. Float16/BFloat16
+    // are computed in Float32 and narrowed (this also avoids the fp16-shader
+    // device-feature gate); Float64 needs rois widened to Float64 to match the
+    // f64 shader.
+    if (features.dtype() == DType::Float16 ||
+        features.dtype() == DType::BFloat16) {
+        Tensor out_f32 = dispatchROIAlignForward(
+            dispatchCast(features, DType::Float32),
+            dispatchCast(rois, DType::Float32), attrs);
+        return dispatchCast(out_f32, features.dtype());
+    }
+    if (rois.dtype() != features.dtype()) {
+        return dispatchROIAlignForward(
+            features, dispatchCast(rois, features.dtype()), attrs);
+    }
+
     int64_t channels = feat_shape[1];
     int64_t feat_height = feat_shape[2];
     int64_t feat_width = feat_shape[3];
@@ -1279,6 +1298,27 @@ auto VulkanBackend::dispatchROIAlignBackward(const Tensor& grad_output, const Te
     auto grad_shape = grad_output.shape();
     if (grad_shape.size() != 4) {
         throw std::invalid_argument("roi_align_backward requires 4D grad_output (num_rois, C, output_h, output_w)");
+    }
+
+    // Compute the backward in Float32 for every non-Float32 dtype, then cast the
+    // result. Two bugs are fixed at once:
+    //  - rois-dtype mismatch: the dtype-specific shaders read the Float32 rois
+    //    buffer with the grad value dtype → garbage coordinates.
+    //  - the f64 backward shader scatters with a NON-atomic `+=`, so concurrent
+    //    threads writing the same feature pixel race and drop the vast majority
+    //    of contributions (gradients came back ~80x too small). The f32 shader
+    //    uses a correct atomicAdd. The f64 shader already computes its gradient
+    //    scale in Float32 internally, so routing through the f32 path loses no
+    //    real precision while making the accumulation race-free.
+    if (grad_output.dtype() != DType::Float32) {
+        Tensor gf_f32 = dispatchROIAlignBackward(
+            dispatchCast(grad_output, DType::Float32),
+            dispatchCast(rois, DType::Float32), attrs);
+        return dispatchCast(gf_f32, grad_output.dtype());
+    }
+    if (rois.dtype() != grad_output.dtype()) {
+        return dispatchROIAlignBackward(
+            grad_output, dispatchCast(rois, grad_output.dtype()), attrs);
     }
 
     int64_t num_rois = grad_shape[0];
@@ -3440,22 +3480,28 @@ auto VulkanBackend::dispatchBincount(const Tensor& input, const std::optional<Te
         num_bins = std::max(num_bins, max_v + 1);
     }
 
+    bool has_weights = weights.has_value();
+    // PyTorch semantics (and the CPU backend): unweighted bincount returns
+    // Int64 counts; weighted bincount returns Float64.
+    const DType result_dtype = has_weights ? DType::Float64 : DType::Int64;
+
     if (num_bins == 0) {
-        return Tensor({0}, DType::Float32, input.device());
+        return Tensor({0}, result_dtype, input.device());
     }
 
-    // Allocate output and zero-initialize
-    Tensor output = dispatchFull({num_bins}, 0.0f, DType::Float32);
+    // Device-side accumulator: uint counts (exact, integer atomics) for the
+    // unweighted path, float CAS-adds for the weighted path. Cast to the
+    // public result dtype at the end.
+    Tensor output = has_weights ? dispatchFull({num_bins}, 0.0f, DType::Float32)
+                                : dispatchFull({num_bins}, 0.0, DType::Int32);
     // Move output to the correct device if needed
     if (output.device() != input.device()) {
         output = output.to(input.device());
     }
 
     if (input.numel() == 0) {
-        return output;
+        return dispatchCast(output, result_dtype);
     }
-
-    bool has_weights = weights.has_value();
     Tensor w_tensor = has_weights ? weights.value() : dispatchFull({1}, 1.0f, DType::Float32);
     if (has_weights && w_tensor.dtype() != DType::Float32) {
         w_tensor = dispatchCast(w_tensor, DType::Float32);
@@ -3494,7 +3540,7 @@ auto VulkanBackend::dispatchBincount(const Tensor& input, const std::optional<Te
     insertComputeOnlyBarrier(cmd);
     endSingleTimeCommands(cmd, device_id);
 
-    return output;
+    return dispatchCast(output, result_dtype);
 }
 
 // ============================================================================

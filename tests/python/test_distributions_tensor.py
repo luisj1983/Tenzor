@@ -205,15 +205,11 @@ _NO_RSAMPLE = [
     (Geometric, (0.4,)),
     (NegativeBinomial, (3.0, 0.5)),
     (Multinomial, (10, Tensor.from_numpy(np.array([0.3, 0.7], dtype=np.float32)))),
-    (Dirichlet, (Tensor.from_numpy(np.array([1.0, 2.0, 3.0], dtype=np.float32)),)),
-    (Gamma, (2.0, 1.0)),
-    (Beta, (2.0, 3.0)),
-    (StudentT, (3.0,)),
-    (Chi2, (2.0,)),
-    (LogNormal, (0.0, 1.0)),
-    (HalfNormal, (1.0,)),
-    (Weibull, (1.0, 2.0)),
-    (VonMises, (0.0, 1.0)),
+    # Continuous reparameterisable distributions (Dirichlet/Gamma/Beta/StudentT/
+    # Chi2/LogNormal/HalfNormal/Weibull) DO implement a real reparameterised
+    # rsample, so they correctly report has_rsample=True and are NOT part of the
+    # no-rsample honesty set.
+    (VonMises, (0.0, 1.0)),  # rejection-sampled; no straightforward reparam
 ]
 
 

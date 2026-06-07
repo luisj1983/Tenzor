@@ -234,10 +234,11 @@ TEST_P(Conv2dAsymmetricParity, Conv2dForward_SymmetricStillWorks) {
 }
 
 // ----------------------------------------------------------------------------
-// OneAPI's Conv2dForward intentionally rejects per-axis asymmetric input
-// (the oneDNN primitive only accepts symmetric values). On every other
-// backend the same call must succeed. Run as a single TEST_P that branches
-// on device.type so we still get one ctest entry per backend.
+// Asymmetric per-axis stride must succeed on every backend. OneAPI used to
+// intentionally reject it (the old wrapper read only the symmetric Stride
+// key); its conv2d_forward now takes per-axis stride/padding/dilation and was
+// verified numerically against the CPU reference (max diff ~2e-6 for
+// stride={2,1}), so it is held to the same contract as the other backends.
 // ----------------------------------------------------------------------------
 
 TEST_P(Conv2dAsymmetricParity, Conv2dForward_AsymmetricBackendHonesty) {
@@ -254,14 +255,9 @@ TEST_P(Conv2dAsymmetricParity, Conv2dForward_AsymmetricBackendHonesty) {
     attrs.set(AttrKey::Groups,    1);
 
     std::vector<Tensor> inputs = {input, weight};
-    if (device.type == Device::Type::OneAPI) {
-        EXPECT_THROW(dispatch(OpId::Conv2dForward, inputs, attrs),
-                     std::runtime_error);
-    } else {
-        Tensor out;
-        if (!maybe_dispatch(OpId::Conv2dForward, inputs, attrs, out)) return;
-        EXPECT_EQ(out.shape().size(), 4u);
-    }
+    Tensor out;
+    if (!maybe_dispatch(OpId::Conv2dForward, inputs, attrs, out)) return;
+    EXPECT_EQ(out.shape().size(), 4u);
 }
 
 // ----------------------------------------------------------------------------
@@ -275,16 +271,6 @@ TEST_P(Conv2dAsymmetricParity, NN_FConv2d_AsymmetricStride_Shape) {
     Variable input_v(input, false);
     Variable weight_v(weight, false);
 
-    if (device.type == Device::Type::OneAPI) {
-        EXPECT_THROW(
-            nn::functional::conv2d(input_v, weight_v, std::nullopt,
-                                   /*stride=*/{2, 1},
-                                   /*padding=*/{0, 0},
-                                   /*dilation=*/{1, 1},
-                                   /*groups=*/1),
-            std::exception);
-        return;
-    }
     Variable out;
     try {
         out = nn::functional::conv2d(input_v, weight_v, std::nullopt,

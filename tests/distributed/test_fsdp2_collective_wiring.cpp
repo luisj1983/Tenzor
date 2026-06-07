@@ -35,9 +35,10 @@ class FsdpFakePG : public ProcessGroupBase {
 public:
     int reduce_scatter_calls = 0;
     int all_gather_calls = 0;
+    int all_reduce_calls = 0;
     auto rank() const -> int override { return 0; }
     auto world_size() const -> int override { return 2; }
-    auto all_reduce(Tensor&, ReduceOp) -> void override {}
+    auto all_reduce(Tensor&, ReduceOp) -> void override { ++all_reduce_calls; }
     auto broadcast(Tensor&, int) -> void override {}
     auto all_gather(std::vector<Tensor>& output, const Tensor& input) -> void override {
         ++all_gather_calls;
@@ -154,8 +155,12 @@ TEST_F(B4Test, BackwardHook_InvokesReduceScatter_PerParameter) {
 
     fsdp.backward_hook();
 
-    // Each trainable parameter triggers one reduce_scatter.
-    EXPECT_EQ(pg->reduce_scatter_calls, trainable_count);
+    // Each trainable parameter triggers one gradient reduction collective.
+    // Audit S.16: the backward hook reduces via a Partial{Mean} -> Shard
+    // redistribute, which takes the all_reduce(AVG)+narrow path (keeping the
+    // averaging inside the placement layer) rather than a native reduce_scatter.
+    EXPECT_EQ(pg->all_reduce_calls, trainable_count);
+    EXPECT_EQ(pg->reduce_scatter_calls, 0);
 }
 
 TEST_F(B4Test, BackwardHook_WritesShardedGradients) {

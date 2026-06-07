@@ -23,6 +23,20 @@ namespace oneapi {
 namespace tenzor {
 namespace oneapi {
 
+// NaN-propagating max/min for reductions. IEEE sycl::fmax/fmin return the
+// non-NaN operand when one is NaN, which silently drops NaNs — but max()/min()
+// must propagate NaN (PyTorch / CPU contract). These are sticky: once the
+// accumulator is NaN it stays NaN. (oneAPI build does not use fast-math, so
+// sycl::isnan is reliable here.)
+template <typename T>
+static inline T nan_fmax(T acc, T val) {
+    return (sycl::isnan(val) || sycl::isnan(acc)) ? val + acc : sycl::fmax(acc, val);
+}
+template <typename T>
+static inline T nan_fmin(T acc, T val) {
+    return (sycl::isnan(val) || sycl::isnan(acc)) ? val + acc : sycl::fmin(acc, val);
+}
+
 // Kernel class declarations for SYCL
 class SumKernelFloat32;
 class SumKernelFloat64;
@@ -30,6 +44,7 @@ class SumKernelFloat16;
 class SumKernelBFloat16;
 class SumKernelInt32;
 class SumKernelInt64;
+class SumKernelUInt64;
 class SumKernelBool;
 class MeanKernelFloat32;
 class MeanKernelFloat64;
@@ -40,11 +55,13 @@ class MaxKernelFloat64;
 class MaxKernelFloat16;
 class MaxKernelBFloat16;
 class MaxKernelInt32;
+class MaxKernelInt64;
 class MinKernelFloat32;
 class MinKernelFloat64;
 class MinKernelFloat16;
 class MinKernelBFloat16;
 class MinKernelInt32;
+class MinKernelInt64;
 class ArgmaxKernelFloat32;
 class ArgmaxKernelFloat64;
 class ArgmaxKernelFloat16;
@@ -268,6 +285,40 @@ auto sum_kernel(const Tensor& input, int64_t dim, bool keepdim, sycl::queue& que
             event2.wait();
             sycl::free(partial_buf, queue);
         }
+        else if (in_cont.dtype() == DType::UInt64) {
+            // UInt64 is not in the public-op small-int promotion list, so the
+            // kernel preserves UInt64. Native two-pass work-group reduction.
+            const uint64_t* in_ptr = get_data_ptr<const uint64_t>(in_cont);
+            uint64_t* out_ptr = get_data_ptr<uint64_t>(output);
+
+            constexpr int64_t WG_SIZE = 256;
+            int64_t num_wgs = (total_size + WG_SIZE - 1) / WG_SIZE;
+            auto partial_buf = sycl::malloc_device<uint64_t>(num_wgs, queue);
+
+            queue.parallel_for(
+                sycl::nd_range<1>(num_wgs * WG_SIZE, WG_SIZE),
+                [=](sycl::nd_item<1> item) {
+                    int64_t gid = item.get_global_id(0);
+                    uint64_t val = (gid < total_size) ? in_ptr[gid] : uint64_t(0);
+                    uint64_t sum = sycl::reduce_over_group(item.get_group(), val, sycl::plus<uint64_t>());
+                    if (item.get_local_id(0) == 0) {
+                        partial_buf[item.get_group(0)] = sum;
+                    }
+                }
+            ).wait();
+
+            auto event2 = queue.parallel_for(
+                sycl::nd_range<1>(WG_SIZE, WG_SIZE),
+                [=](sycl::nd_item<1> item) {
+                    int64_t lid = item.get_local_id(0);
+                    uint64_t val = (lid < num_wgs) ? partial_buf[lid] : uint64_t(0);
+                    uint64_t sum = sycl::reduce_over_group(item.get_group(), val, sycl::plus<uint64_t>());
+                    if (lid == 0) out_ptr[0] = sum;
+                }
+            );
+            event2.wait();
+            sycl::free(partial_buf, queue);
+        }
         else if (in_cont.dtype() == DType::Bool) {
             const uint8_t* in_ptr = get_data_ptr<const uint8_t>(in_cont);
             // Sum of bools returns Int64 — reassign output with correct dtype
@@ -436,6 +487,23 @@ auto sum_kernel(const Tensor& input, int64_t dim, bool keepdim, sycl::queue& que
                 const int64_t base_offset = outer_idx * dim_size * inner_size + inner_idx;
 
                 int64_t sum = 0;
+                for (int64_t d = 0; d < dim_size; ++d) {
+                    sum += in_ptr[base_offset + d * inner_size];
+                }
+
+                out_ptr[outer_idx * inner_size + inner_idx] = sum;
+            });
+        }
+        else if (in_cont.dtype() == DType::UInt64) {
+            const uint64_t* in_ptr = get_data_ptr<const uint64_t>(in_cont);
+            uint64_t* out_ptr = get_data_ptr<uint64_t>(output);
+
+            queue.parallel_for<SumKernelUInt64>(sycl::range<2>(outer_size, inner_size), [=](sycl::id<2> idx) {
+                const int64_t outer_idx = idx[0];
+                const int64_t inner_idx = idx[1];
+                const int64_t base_offset = outer_idx * dim_size * inner_size + inner_idx;
+
+                uint64_t sum = 0;
                 for (int64_t d = 0; d < dim_size; ++d) {
                     sum += in_ptr[base_offset + d * inner_size];
                 }
@@ -623,6 +691,32 @@ auto mean_kernel(const Tensor& input, int64_t dim, bool keepdim, sycl::queue& qu
             out_ptr[0] = f32_to_bf16(sum_buf[0] * scale);
             sycl::free(sum_buf, queue);
         }
+        else if (in_cont.dtype() == DType::Complex64 || in_cont.dtype() == DType::Complex128) {
+            // Complex mean: separate real/imag reductions over the interleaved
+            // (re, im) storage, then divide by element count.
+            auto run_c = [&]<typename R>() {
+                const R* in_ptr = get_data_ptr<const R>(in_cont);
+                R* out_ptr = get_data_ptr<R>(output);
+                const R scale = R(1) / static_cast<R>(total_size);
+                auto re_buf = sycl::malloc_shared<R>(1, queue);
+                auto im_buf = sycl::malloc_shared<R>(1, queue);
+                re_buf[0] = R(0); im_buf[0] = R(0);
+                queue.parallel_for(sycl::range<1>(total_size),
+                                   sycl::reduction(re_buf, sycl::plus<R>()),
+                                   sycl::reduction(im_buf, sycl::plus<R>()),
+                                   [=](auto idx, auto& re_s, auto& im_s) {
+                    re_s += in_ptr[idx[0] * 2];
+                    im_s += in_ptr[idx[0] * 2 + 1];
+                }).wait();
+                queue.wait_and_throw();
+                out_ptr[0] = re_buf[0] * scale;
+                out_ptr[1] = im_buf[0] * scale;
+                sycl::free(re_buf, queue);
+                sycl::free(im_buf, queue);
+            };
+            if (in_cont.dtype() == DType::Complex64) run_c.template operator()<float>();
+            else run_c.template operator()<double>();
+        }
         else {
             throw std::runtime_error("Unsupported dtype for mean reduction");
         }
@@ -746,7 +840,7 @@ auto max_kernel(const Tensor& input, int64_t dim, bool keepdim, sycl::queue& que
             queue.single_task([=]() {
                 float max_val = -std::numeric_limits<float>::infinity();
                 for (int64_t i = 0; i < total_size; ++i) {
-                    max_val = sycl::fmax(max_val, in_ptr[i]);
+                    max_val = nan_fmax(max_val, in_ptr[i]);
                 }
                 out_ptr[0] = max_val;
             });
@@ -758,7 +852,7 @@ auto max_kernel(const Tensor& input, int64_t dim, bool keepdim, sycl::queue& que
             queue.single_task([=]() {
                 double max_val = -std::numeric_limits<double>::infinity();
                 for (int64_t i = 0; i < total_size; ++i) {
-                    max_val = sycl::fmax(max_val, in_ptr[i]);
+                    max_val = nan_fmax(max_val, in_ptr[i]);
                 }
                 out_ptr[0] = max_val;
             });
@@ -770,7 +864,7 @@ auto max_kernel(const Tensor& input, int64_t dim, bool keepdim, sycl::queue& que
             queue.single_task([=]() {
                 float max_val = -std::numeric_limits<float>::infinity();
                 for (int64_t i = 0; i < total_size; ++i) {
-                    max_val = sycl::fmax(max_val, static_cast<float>(in_ptr[i]));
+                    max_val = nan_fmax(max_val, static_cast<float>(in_ptr[i]));
                 }
                 out_ptr[0] = sycl::half(max_val);
             });
@@ -782,7 +876,7 @@ auto max_kernel(const Tensor& input, int64_t dim, bool keepdim, sycl::queue& que
             queue.single_task([=]() {
                 float max_val = -std::numeric_limits<float>::infinity();
                 for (int64_t i = 0; i < total_size; ++i) {
-                    max_val = sycl::fmax(max_val, bf16_to_f32(in_ptr[i]));
+                    max_val = nan_fmax(max_val, bf16_to_f32(in_ptr[i]));
                 }
                 out_ptr[0] = f32_to_bf16(max_val);
             });
@@ -795,6 +889,18 @@ auto max_kernel(const Tensor& input, int64_t dim, bool keepdim, sycl::queue& que
                 int32_t max_val = std::numeric_limits<int32_t>::min();
                 for (int64_t i = 0; i < total_size; ++i) {
                     max_val = sycl::max(max_val, in_ptr[i]);
+                }
+                out_ptr[0] = max_val;
+            });
+        }
+        else if (input.dtype() == DType::Int64) {
+            const int64_t* in_ptr = get_data_ptr<const int64_t>(input);
+            int64_t* out_ptr = get_data_ptr<int64_t>(output);
+
+            queue.single_task([=]() {
+                int64_t max_val = std::numeric_limits<int64_t>::min();
+                for (int64_t i = 0; i < total_size; ++i) {
+                    if (in_ptr[i] > max_val) max_val = in_ptr[i];
                 }
                 out_ptr[0] = max_val;
             });
@@ -820,7 +926,7 @@ auto max_kernel(const Tensor& input, int64_t dim, bool keepdim, sycl::queue& que
                 float max_val = -std::numeric_limits<float>::infinity();
                 for (int64_t d = 0; d < dim_size; ++d) {
                     float val = in_ptr[base_offset + d * inner_size];
-                    max_val = sycl::fmax(max_val, val);
+                    max_val = nan_fmax(max_val, val);
                 }
 
                 out_ptr[outer_idx * inner_size + inner_idx] = max_val;
@@ -838,7 +944,7 @@ auto max_kernel(const Tensor& input, int64_t dim, bool keepdim, sycl::queue& que
                 double max_val = -std::numeric_limits<double>::infinity();
                 for (int64_t d = 0; d < dim_size; ++d) {
                     double val = in_ptr[base_offset + d * inner_size];
-                    max_val = sycl::fmax(max_val, val);
+                    max_val = nan_fmax(max_val, val);
                 }
 
                 out_ptr[outer_idx * inner_size + inner_idx] = max_val;
@@ -856,7 +962,7 @@ auto max_kernel(const Tensor& input, int64_t dim, bool keepdim, sycl::queue& que
                 float max_val = -std::numeric_limits<float>::infinity();
                 for (int64_t d = 0; d < dim_size; ++d) {
                     float val = static_cast<float>(in_ptr[base_offset + d * inner_size]);
-                    max_val = sycl::fmax(max_val, val);
+                    max_val = nan_fmax(max_val, val);
                 }
 
                 out_ptr[outer_idx * inner_size + inner_idx] = sycl::half(max_val);
@@ -874,7 +980,7 @@ auto max_kernel(const Tensor& input, int64_t dim, bool keepdim, sycl::queue& que
                 float max_val = -std::numeric_limits<float>::infinity();
                 for (int64_t d = 0; d < dim_size; ++d) {
                     float val = bf16_to_f32(in_ptr[base_offset + d * inner_size]);
-                    max_val = sycl::fmax(max_val, val);
+                    max_val = nan_fmax(max_val, val);
                 }
 
                 out_ptr[outer_idx * inner_size + inner_idx] = f32_to_bf16(max_val);
@@ -893,6 +999,24 @@ auto max_kernel(const Tensor& input, int64_t dim, bool keepdim, sycl::queue& que
                 for (int64_t d = 0; d < dim_size; ++d) {
                     int32_t val = in_ptr[base_offset + d * inner_size];
                     max_val = sycl::max(max_val, val);
+                }
+
+                out_ptr[outer_idx * inner_size + inner_idx] = max_val;
+            });
+        }
+        else if (input.dtype() == DType::Int64) {
+            const int64_t* in_ptr = get_data_ptr<const int64_t>(input);
+            int64_t* out_ptr = get_data_ptr<int64_t>(output);
+
+            queue.parallel_for<MaxKernelInt64>(sycl::range<2>(outer_size, inner_size), [=](sycl::id<2> idx) {
+                const int64_t outer_idx = idx[0];
+                const int64_t inner_idx = idx[1];
+                const int64_t base_offset = outer_idx * dim_size * inner_size + inner_idx;
+
+                int64_t max_val = std::numeric_limits<int64_t>::min();
+                for (int64_t d = 0; d < dim_size; ++d) {
+                    int64_t val = in_ptr[base_offset + d * inner_size];
+                    if (val > max_val) max_val = val;
                 }
 
                 out_ptr[outer_idx * inner_size + inner_idx] = max_val;
@@ -940,7 +1064,7 @@ auto min_kernel(const Tensor& input, int64_t dim, bool keepdim, sycl::queue& que
             queue.single_task([=]() {
                 float min_val = std::numeric_limits<float>::infinity();
                 for (int64_t i = 0; i < total_size; ++i) {
-                    min_val = sycl::fmin(min_val, in_ptr[i]);
+                    min_val = nan_fmin(min_val, in_ptr[i]);
                 }
                 out_ptr[0] = min_val;
             });
@@ -952,7 +1076,7 @@ auto min_kernel(const Tensor& input, int64_t dim, bool keepdim, sycl::queue& que
             queue.single_task([=]() {
                 double min_val = std::numeric_limits<double>::infinity();
                 for (int64_t i = 0; i < total_size; ++i) {
-                    min_val = sycl::fmin(min_val, in_ptr[i]);
+                    min_val = nan_fmin(min_val, in_ptr[i]);
                 }
                 out_ptr[0] = min_val;
             });
@@ -964,7 +1088,7 @@ auto min_kernel(const Tensor& input, int64_t dim, bool keepdim, sycl::queue& que
             queue.single_task([=]() {
                 float min_val = std::numeric_limits<float>::infinity();
                 for (int64_t i = 0; i < total_size; ++i) {
-                    min_val = sycl::fmin(min_val, static_cast<float>(in_ptr[i]));
+                    min_val = nan_fmin(min_val, static_cast<float>(in_ptr[i]));
                 }
                 out_ptr[0] = sycl::half(min_val);
             });
@@ -976,7 +1100,7 @@ auto min_kernel(const Tensor& input, int64_t dim, bool keepdim, sycl::queue& que
             queue.single_task([=]() {
                 float min_val = std::numeric_limits<float>::infinity();
                 for (int64_t i = 0; i < total_size; ++i) {
-                    min_val = sycl::fmin(min_val, bf16_to_f32(in_ptr[i]));
+                    min_val = nan_fmin(min_val, bf16_to_f32(in_ptr[i]));
                 }
                 out_ptr[0] = f32_to_bf16(min_val);
             });
@@ -989,6 +1113,18 @@ auto min_kernel(const Tensor& input, int64_t dim, bool keepdim, sycl::queue& que
                 int32_t min_val = std::numeric_limits<int32_t>::max();
                 for (int64_t i = 0; i < total_size; ++i) {
                     min_val = sycl::min(min_val, in_ptr[i]);
+                }
+                out_ptr[0] = min_val;
+            });
+        }
+        else if (input.dtype() == DType::Int64) {
+            const int64_t* in_ptr = get_data_ptr<const int64_t>(input);
+            int64_t* out_ptr = get_data_ptr<int64_t>(output);
+
+            queue.single_task([=]() {
+                int64_t min_val = std::numeric_limits<int64_t>::max();
+                for (int64_t i = 0; i < total_size; ++i) {
+                    if (in_ptr[i] < min_val) min_val = in_ptr[i];
                 }
                 out_ptr[0] = min_val;
             });
@@ -1014,7 +1150,7 @@ auto min_kernel(const Tensor& input, int64_t dim, bool keepdim, sycl::queue& que
                 float min_val = std::numeric_limits<float>::infinity();
                 for (int64_t d = 0; d < dim_size; ++d) {
                     float val = in_ptr[base_offset + d * inner_size];
-                    min_val = sycl::fmin(min_val, val);
+                    min_val = nan_fmin(min_val, val);
                 }
 
                 out_ptr[outer_idx * inner_size + inner_idx] = min_val;
@@ -1032,7 +1168,7 @@ auto min_kernel(const Tensor& input, int64_t dim, bool keepdim, sycl::queue& que
                 double min_val = std::numeric_limits<double>::infinity();
                 for (int64_t d = 0; d < dim_size; ++d) {
                     double val = in_ptr[base_offset + d * inner_size];
-                    min_val = sycl::fmin(min_val, val);
+                    min_val = nan_fmin(min_val, val);
                 }
 
                 out_ptr[outer_idx * inner_size + inner_idx] = min_val;
@@ -1050,7 +1186,7 @@ auto min_kernel(const Tensor& input, int64_t dim, bool keepdim, sycl::queue& que
                 float min_val = std::numeric_limits<float>::infinity();
                 for (int64_t d = 0; d < dim_size; ++d) {
                     float val = static_cast<float>(in_ptr[base_offset + d * inner_size]);
-                    min_val = sycl::fmin(min_val, val);
+                    min_val = nan_fmin(min_val, val);
                 }
 
                 out_ptr[outer_idx * inner_size + inner_idx] = sycl::half(min_val);
@@ -1068,7 +1204,7 @@ auto min_kernel(const Tensor& input, int64_t dim, bool keepdim, sycl::queue& que
                 float min_val = std::numeric_limits<float>::infinity();
                 for (int64_t d = 0; d < dim_size; ++d) {
                     float val = bf16_to_f32(in_ptr[base_offset + d * inner_size]);
-                    min_val = sycl::fmin(min_val, val);
+                    min_val = nan_fmin(min_val, val);
                 }
 
                 out_ptr[outer_idx * inner_size + inner_idx] = f32_to_bf16(min_val);
@@ -1087,6 +1223,24 @@ auto min_kernel(const Tensor& input, int64_t dim, bool keepdim, sycl::queue& que
                 for (int64_t d = 0; d < dim_size; ++d) {
                     int32_t val = in_ptr[base_offset + d * inner_size];
                     min_val = sycl::min(min_val, val);
+                }
+
+                out_ptr[outer_idx * inner_size + inner_idx] = min_val;
+            });
+        }
+        else if (input.dtype() == DType::Int64) {
+            const int64_t* in_ptr = get_data_ptr<const int64_t>(input);
+            int64_t* out_ptr = get_data_ptr<int64_t>(output);
+
+            queue.parallel_for<MinKernelInt64>(sycl::range<2>(outer_size, inner_size), [=](sycl::id<2> idx) {
+                const int64_t outer_idx = idx[0];
+                const int64_t inner_idx = idx[1];
+                const int64_t base_offset = outer_idx * dim_size * inner_size + inner_idx;
+
+                int64_t min_val = std::numeric_limits<int64_t>::max();
+                for (int64_t d = 0; d < dim_size; ++d) {
+                    int64_t val = in_ptr[base_offset + d * inner_size];
+                    if (val < min_val) min_val = val;
                 }
 
                 out_ptr[outer_idx * inner_size + inner_idx] = min_val;
@@ -1259,6 +1413,23 @@ static void sycl_arg_reduce_full(const ReadT* in_ptr, int64_t* out_ptr,
  * @return Tensor containing indices (Int64 dtype)
  */
 auto argmax_kernel(const Tensor& input, int64_t dim, bool keepdim, sycl::queue& queue) -> Tensor {
+    // Argmax returns INDICES, invariant under a lossless integer widen. oneAPI
+    // has native argmax kernels only for {F32,F64,F16,Int32}; widen the narrow
+    // integer / Bool types to Int32 (exact) so they're supported.
+    {
+        const DType dt = input.dtype();
+        if (dt == DType::Int8 || dt == DType::UInt8 || dt == DType::Bool) {
+            return argmax_kernel(input.to(DType::Int32), dim, keepdim, queue);
+        }
+        if (dt == DType::Int16 || dt == DType::UInt16) {
+            // A *device* 16-bit integer cast crashes the Intel oneAPI runtime
+            // ("submit a bug report to Intel"); the cast must happen on the host.
+            // Device<->host memcpy and host casts of 16-bit ints are both safe,
+            // so widen on CPU (lossless), then run the Int32 argmax ON DEVICE.
+            Tensor as_i32 = input.to(Device::cpu()).to(DType::Int32).to(input.device());
+            return argmax_kernel(as_i32, dim, keepdim, queue);
+        }
+    }
     const auto& shape = input.shape();
 
     // For full reduction (dim=-1)
@@ -1422,6 +1593,19 @@ auto argmax_kernel(const Tensor& input, int64_t dim, bool keepdim, sycl::queue& 
  * @return Tensor containing indices (Int64 dtype)
  */
 auto argmin_kernel(const Tensor& input, int64_t dim, bool keepdim, sycl::queue& queue) -> Tensor {
+    // See argmax_kernel: widen narrow-int / bool to Int32 (exact, index-
+    // invariant). 16-bit casts must be done on the host (device 16-bit cast
+    // crashes the Intel oneAPI runtime); the argmin itself stays on device.
+    {
+        const DType dt = input.dtype();
+        if (dt == DType::Int8 || dt == DType::UInt8 || dt == DType::Bool) {
+            return argmin_kernel(input.to(DType::Int32), dim, keepdim, queue);
+        }
+        if (dt == DType::Int16 || dt == DType::UInt16) {
+            Tensor as_i32 = input.to(Device::cpu()).to(DType::Int32).to(input.device());
+            return argmin_kernel(as_i32, dim, keepdim, queue);
+        }
+    }
     const auto& shape = input.shape();
 
     // For full reduction (dim=-1) — two-phase device-side reduction

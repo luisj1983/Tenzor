@@ -114,7 +114,7 @@ TEST_P(ConvNeXtMultiDTypeTest, ConvNeXtTinyForwardShape) {
     auto model = convnext_tiny(1000, false);
     convert_model(model);
     int64_t img_size = getInputSize(224);
-    Variable input(zeros({2, 3, img_size, img_size}, dtype(), device()), true);
+    Variable input = createInput({2, 3, img_size, img_size});
     Variable output = model->forward(input);
 
     auto shape = output.tensor().shape();
@@ -129,9 +129,9 @@ TEST_P(ConvNeXtMultiDTypeTest, ConvNeXtTinyGradientFlow) {
     model->train();
 
     int64_t img_size = getInputSize(224);
-    Variable input(zeros({1, 3, img_size, img_size}, dtype(), device()), true);
+    Variable input = createInput({1, 3, img_size, img_size});
     Variable output = model->forward(input);
-    Variable loss = tenzor::sum(output);
+    Variable loss = tenzor::sum(output * output);
     loss.backward();
 
     EXPECT_GRAD_FLOWS(input);
@@ -162,7 +162,7 @@ TEST_P(ConvNeXtMultiDTypeTest, ConvNeXtTinyDepthwiseConvolution) {
     auto model = convnext_tiny(10, false);
     convert_model(model);
     int64_t img_size = getInputSize(224);
-    Variable input(zeros({1, 3, img_size, img_size}, dtype(), device()), true);
+    Variable input = createInput({1, 3, img_size, img_size});
     Variable output = model->forward(input);
 
     EXPECT_EQ(output.tensor().dtype(), dtype());
@@ -187,9 +187,9 @@ TEST_P(ConvNeXtMultiDTypeTest, ConvNeXtTinyLayerScaling) {
     model->train();
 
     int64_t img_size = getInputSize(224);
-    Variable input(zeros({1, 3, img_size, img_size}, dtype(), device()), true);
+    Variable input = createInput({1, 3, img_size, img_size});
     Variable output = model->forward(input);
-    Variable loss = tenzor::sum(output);
+    Variable loss = tenzor::sum(output * output);
     loss.backward();
 
     // Verify gradients flow through layer scaling - just check gradient exists
@@ -202,7 +202,7 @@ TEST_P(ConvNeXtMultiDTypeTest, ConvNeXtTinyGELUActivation) {
     auto model = convnext_tiny(10, false);
     convert_model(model);
     int64_t img_size = getInputSize(224);
-    Variable input(zeros({1, 3, img_size, img_size}, dtype(), device()), true);
+    Variable input = createInput({1, 3, img_size, img_size});
     Variable output = model->forward(input);
 
     // GELU should produce bounded outputs for reasonable inputs
@@ -222,7 +222,7 @@ TEST_P(ConvNeXtMultiDTypeTest, ConvNeXtSmallForwardShape) {
     auto model = convnext_small(1000, false);
     convert_model(model);
     int64_t img_size = getInputSize(224);
-    Variable input(zeros({2, 3, img_size, img_size}, dtype(), device()), true);
+    Variable input = createInput({2, 3, img_size, img_size});
     Variable output = model->forward(input);
 
     auto shape = output.tensor().shape();
@@ -237,9 +237,9 @@ TEST_P(ConvNeXtMultiDTypeTest, ConvNeXtSmallGradientFlow) {
     model->train();
 
     int64_t img_size = getInputSize(224);
-    Variable input(zeros({1, 3, img_size, img_size}, dtype(), device()), true);
+    Variable input = createInput({1, 3, img_size, img_size});
     Variable output = model->forward(input);
-    Variable loss = tenzor::sum(output);
+    Variable loss = tenzor::sum(output * output);
     loss.backward();
 
     EXPECT_GRAD_FLOWS(input);
@@ -250,7 +250,7 @@ TEST_P(ConvNeXtMultiDTypeTest, ConvNeXtSmallDepthwiseConvolution) {
     auto model = convnext_small(10, false);
     convert_model(model);
     int64_t img_size = getInputSize(224);
-    Variable input(zeros({1, 3, img_size, img_size}, dtype(), device()), true);
+    Variable input = createInput({1, 3, img_size, img_size});
     Variable output = model->forward(input);
 
     EXPECT_EQ(output.tensor().dtype(), dtype());
@@ -274,7 +274,7 @@ TEST_P(ConvNeXtMultiDTypeTest, ConvNeXtBaseForwardShape) {
     auto model = convnext_base(1000, false);
     convert_model(model);
     int64_t img_size = getInputSize(224);
-    Variable input(zeros({2, 3, img_size, img_size}, dtype(), device()), true);
+    Variable input = createInput({2, 3, img_size, img_size});
     Variable output = model->forward(input);
 
     auto shape = output.tensor().shape();
@@ -289,9 +289,9 @@ TEST_P(ConvNeXtMultiDTypeTest, ConvNeXtBaseGradientFlow) {
     model->train();
 
     int64_t img_size = getInputSize(224);
-    Variable input(zeros({1, 3, img_size, img_size}, dtype(), device()), true);
+    Variable input = createInput({1, 3, img_size, img_size});
     Variable output = model->forward(input);
-    Variable loss = tenzor::sum(output);
+    Variable loss = tenzor::sum(output * output);
     loss.backward();
 
     EXPECT_GRAD_FLOWS(input);
@@ -325,9 +325,9 @@ TEST_P(ConvNeXtMultiDTypeTest, ConvNeXtBaseLayerScaling) {
     model->train();
 
     int64_t img_size = getInputSize(224);
-    Variable input(zeros({1, 3, img_size, img_size}, dtype(), device()), true);
+    Variable input = createInput({1, 3, img_size, img_size});
     Variable output = model->forward(input);
-    Variable loss = tenzor::sum(output);
+    Variable loss = tenzor::sum(output * output);
     loss.backward();
 
     // Verify gradients flow through layer scaling - just check gradient exists
@@ -343,7 +343,7 @@ TEST_P(ConvNeXtMultiDTypeTest, ConvNeXtLargeForwardShape) {
     auto model = convnext_large(1000, false);
     convert_model(model);
     int64_t img_size = getLargeModelInputSize("large", false);
-    Variable input(zeros({1, 3, img_size, img_size}, dtype(), device()), true);
+    Variable input = createInput({1, 3, img_size, img_size});
     Variable output = model->forward(input);
 
     auto shape = output.tensor().shape();
@@ -358,9 +358,9 @@ TEST_P(ConvNeXtMultiDTypeTest, ConvNeXtLargeGradientFlow) {
     model->train();
 
     int64_t img_size = getLargeModelInputSize("large", true);
-    Variable input(zeros({1, 3, img_size, img_size}, dtype(), device()), true);
+    Variable input = createInput({1, 3, img_size, img_size});
     Variable output = model->forward(input);
-    Variable loss = tenzor::sum(output);
+    Variable loss = tenzor::sum(output * output);
     loss.backward();
 
     EXPECT_GRAD_FLOWS(input);
@@ -390,7 +390,7 @@ TEST_P(ConvNeXtMultiDTypeTest, ConvNeXtLargeGELUActivation) {
     auto model = convnext_large(10, false);
     convert_model(model);
     int64_t img_size = getLargeModelInputSize("large", false);
-    Variable input(zeros({1, 3, img_size, img_size}, dtype(), device()), true);
+    Variable input = createInput({1, 3, img_size, img_size});
     Variable output = model->forward(input);
 
     auto cpu_output = output.tensor().to(Device::cpu()).to(DType::Float32);
@@ -409,7 +409,7 @@ TEST_P(ConvNeXtMultiDTypeTest, ConvNeXtXLargeForwardShape) {
     auto model = convnext_xlarge(1000, false);
     convert_model(model);
     int64_t img_size = getLargeModelInputSize("xlarge", false);
-    Variable input(zeros({1, 3, img_size, img_size}, dtype(), device()), true);
+    Variable input = createInput({1, 3, img_size, img_size});
     Variable output = model->forward(input);
 
     auto shape = output.tensor().shape();
@@ -424,9 +424,9 @@ TEST_P(ConvNeXtMultiDTypeTest, ConvNeXtXLargeGradientFlow) {
     model->train();
 
     int64_t img_size = getLargeModelInputSize("xlarge", true);
-    Variable input(zeros({1, 3, img_size, img_size}, dtype(), device()), true);
+    Variable input = createInput({1, 3, img_size, img_size});
     Variable output = model->forward(input);
-    Variable loss = tenzor::sum(output);
+    Variable loss = tenzor::sum(output * output);
     loss.backward();
 
     EXPECT_GRAD_FLOWS(input);
@@ -441,7 +441,7 @@ TEST_P(ConvNeXtMultiDTypeTest, ConvNeXtTinyBatchSizeOne) {
     auto model = convnext_tiny(10, false);
     convert_model(model);
     int64_t img_size = getInputSize(224);
-    Variable input(zeros({1, 3, img_size, img_size}, dtype(), device()), true);
+    Variable input = createInput({1, 3, img_size, img_size});
     Variable output = model->forward(input);
 
     auto shape = output.tensor().shape();
@@ -454,7 +454,7 @@ TEST_P(ConvNeXtMultiDTypeTest, ConvNeXtTinyCustomClasses) {
     auto model = convnext_tiny(100, false);
     convert_model(model);
     int64_t img_size = getInputSize(224);
-    Variable input(zeros({2, 3, img_size, img_size}, dtype(), device()), true);
+    Variable input = createInput({2, 3, img_size, img_size});
     Variable output = model->forward(input);
 
     auto shape = output.tensor().shape();
@@ -471,7 +471,7 @@ TEST_P(ConvNeXtMultiDTypeTest, ConvNeXtTinyMultipleBatchSizes) {
     // Test with different batch sizes (fewer for memory-constrained configs)
     std::vector<int> batch_sizes = isMemoryConstrained() ? std::vector<int>{1, 2} : std::vector<int>{1, 2, 4, 8};
     for (int batch_size : batch_sizes) {
-        Variable input(zeros({batch_size, 3, img_size, img_size}, dtype(), device()), true);
+        Variable input = createInput({batch_size, 3, img_size, img_size});
         Variable output = model->forward(input);
 
         auto shape = output.tensor().shape();
@@ -485,7 +485,7 @@ TEST_P(ConvNeXtMultiDTypeTest, ConvNeXtSmallNumericalStability) {
     auto model = convnext_small(10, false);
     convert_model(model);
     int64_t img_size = getInputSize(224);
-    Variable input(zeros({1, 3, img_size, img_size}, dtype(), device()), true);
+    Variable input = createInput({1, 3, img_size, img_size});
     Variable output = model->forward(input);
 
     // Check for numerical stability (no NaN or Inf)
@@ -501,7 +501,7 @@ TEST_P(ConvNeXtMultiDTypeTest, ConvNeXtBaseDepthwiseConsistency) {
     auto model = convnext_base(10, false);
     convert_model(model);
     int64_t img_size = getInputSize(224);
-    Variable input(zeros({1, 3, img_size, img_size}, dtype(), device()), true);
+    Variable input = createInput({1, 3, img_size, img_size});
 
     // Run forward pass twice with same input
     Variable output1 = model->forward(input);
@@ -513,11 +513,18 @@ TEST_P(ConvNeXtMultiDTypeTest, ConvNeXtBaseDepthwiseConsistency) {
     auto data1 = cpu_out1.data<float>();
     auto data2 = cpu_out2.data<float>();
 
-    // CUDA can have slight non-determinism due to cuDNN algorithms and atomic operations
-    // Use larger tolerance for CUDA Float64
+    // CUDA can have slight non-determinism due to cuDNN algorithms and atomic
+    // operations; oneMKL/oneDNN likewise do not promise bitwise run-to-run
+    // reproducibility without CNR mode (results vary with buffer alignment,
+    // which the caching allocator changes between two forward passes of the
+    // same model). Component-level probes are bit-identical; the ~1-ulp GEMM
+    // jitter only becomes visible through ConvNeXt-Base's 27-block stage 3,
+    // where it amplifies to ~3e-6. Use the same relaxed Float64 tolerance for
+    // both library-backed GPU backends.
     float consistency_tol = atol();
-    if (device().type == Device::Type::CUDA && dtype() == DType::Float64) {
-        consistency_tol = 5e-5f;  // Allow for CUDA non-determinism in deep networks
+    if ((device().type == Device::Type::CUDA ||
+         device().type == Device::Type::OneAPI) && dtype() == DType::Float64) {
+        consistency_tol = 5e-5f;  // library-level run-to-run jitter in deep networks
     }
 
     for (size_t i = 0; i < cpu_out1.numel(); ++i) {
@@ -531,9 +538,9 @@ TEST_P(ConvNeXtMultiDTypeTest, ConvNeXtLargeGradientNumericalStability) {
     model->train();
 
     int64_t img_size = getLargeModelInputSize("large", true);
-    Variable input(zeros({1, 3, img_size, img_size}, dtype(), device()), true);
+    Variable input = createInput({1, 3, img_size, img_size});
     Variable output = model->forward(input);
-    Variable loss = tenzor::sum(output);
+    Variable loss = tenzor::sum(output * output);
     loss.backward();
 
     // Check gradient numerical stability
@@ -554,7 +561,7 @@ TEST_P(ConvNeXtMultiDTypeTest, CrossVariantOutputShapeConsistency) {
     // All variants should produce same output shape for same num_classes
     int num_classes = 100;
     int64_t img_size = getInputSize(224);
-    Variable input(zeros({1, 3, img_size, img_size}, dtype(), device()), true);
+    Variable input = createInput({1, 3, img_size, img_size});
 
     auto tiny = convnext_tiny(num_classes, false);
     auto small = convnext_small(num_classes, false);
@@ -575,7 +582,7 @@ TEST_P(ConvNeXtMultiDTypeTest, CrossVariantOutputShapeConsistency) {
 TEST_P(ConvNeXtMultiDTypeTest, CrossVariantDTypePreservation) {
     // All variants should preserve dtype
     int64_t img_size = getInputSize(224);
-    Variable input(zeros({1, 3, img_size, img_size}, dtype(), device()), true);
+    Variable input = createInput({1, 3, img_size, img_size});
 
     auto tiny = convnext_tiny(10, false);
     auto small = convnext_small(10, false);

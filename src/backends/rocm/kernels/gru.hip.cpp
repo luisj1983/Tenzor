@@ -86,7 +86,11 @@ __global__ void combine_rz_gates_kernel(const T* __restrict__ gates_ih,
                                          int64_t hidden) {
     int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx < batch * 2 * hidden) {
-        rz_gates[idx] = gates_ih[idx] + gates_hh[idx];
+        // gates_ih/gates_hh are [batch, 3*hidden]; the r,z chunks are the
+        // first 2*hidden columns of each row (NOT a dense [batch, 2*hidden]).
+        int64_t b = idx / (2 * hidden);
+        int64_t g = idx % (2 * hidden);
+        rz_gates[idx] = gates_ih[b * 3 * hidden + g] + gates_hh[b * 3 * hidden + g];
     }
 }
 
@@ -96,8 +100,8 @@ __global__ void combine_rz_gates_kernel(const T* __restrict__ gates_ih,
 template<typename T>
 __global__ void gru_sequence_step_kernel(
     const T* __restrict__ rz_gates,    // (batch, 2*hidden) - combined r,z gates
-    const T* __restrict__ n_ih_gates,  // (batch, hidden) - new gate input part
-    const T* __restrict__ n_hh_gates,  // (batch, hidden) - new gate hidden part
+    const T* __restrict__ gates_ih,    // (batch, 3*hidden) - full ih gates; n part = cols [2H,3H)
+    const T* __restrict__ gates_hh,    // (batch, 3*hidden) - full hh gates; n part = cols [2H,3H)
     const T* __restrict__ h_prev,
     T* __restrict__ h_out,
     int64_t batch,
@@ -108,11 +112,11 @@ __global__ void gru_sequence_step_kernel(
         int64_t b = idx / hidden;
         int64_t h = idx % hidden;
 
-        // Load gate values
+        // Load gate values (n chunks live inside the [batch, 3*hidden] rows)
         T r_gate = rz_gates[b * 2 * hidden + h];
         T z_gate = rz_gates[b * 2 * hidden + hidden + h];
-        T n_ih = n_ih_gates[idx];
-        T n_hh = n_hh_gates[idx];
+        T n_ih = gates_ih[b * 3 * hidden + 2 * hidden + h];
+        T n_hh = gates_hh[b * 3 * hidden + 2 * hidden + h];
         T h_prev_val = h_prev[idx];
 
         // Apply sigmoid to r and z
@@ -407,11 +411,12 @@ __global__ void gru_sequence_step_kernel_fp16(
         int64_t b = idx / hidden;
         int64_t h = idx % hidden;
 
-        // Load gate values and convert to float
+        // Load gate values and convert to float (n chunks live inside the
+        // [batch, 3*hidden] rows)
         float r_gate = tenzor::rocm::safe_h2f(rz_gates[b * 2 * hidden + h]);
         float z_gate = tenzor::rocm::safe_h2f(rz_gates[b * 2 * hidden + hidden + h]);
-        float n_ih = tenzor::rocm::safe_h2f(n_ih_gates[idx]);
-        float n_hh = tenzor::rocm::safe_h2f(n_hh_gates[idx]);
+        float n_ih = tenzor::rocm::safe_h2f(n_ih_gates[b * 3 * hidden + 2 * hidden + h]);
+        float n_hh = tenzor::rocm::safe_h2f(n_hh_gates[b * 3 * hidden + 2 * hidden + h]);
         float h_prev_val = tenzor::rocm::safe_h2f(h_prev[idx]);
 
         // Apply sigmoid to r and z
@@ -450,8 +455,12 @@ __global__ void combine_rz_gates_kernel_fp16(const __half* __restrict__ gates_ih
                                               int64_t hidden) {
     int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx < batch * 2 * hidden) {
-        float ih_val = tenzor::rocm::safe_h2f(gates_ih[idx]);
-        float hh_val = tenzor::rocm::safe_h2f(gates_hh[idx]);
+        // gates_ih/gates_hh are [batch, 3*hidden]; the r,z chunks are the
+        // first 2*hidden columns of each row (NOT a dense [batch, 2*hidden]).
+        int64_t b = idx / (2 * hidden);
+        int64_t g = idx % (2 * hidden);
+        float ih_val = tenzor::rocm::safe_h2f(gates_ih[b * 3 * hidden + g]);
+        float hh_val = tenzor::rocm::safe_h2f(gates_hh[b * 3 * hidden + g]);
         rz_gates[idx] = tenzor::rocm::safe_f2h(ih_val + hh_val);
     }
 }
@@ -921,6 +930,7 @@ auto gru_forward_kernel(
     const Tensor& W_hh,
     const Tensor& bias,
     const Tensor& h0,
+    const Tensor& bias_hh,
     hipStream_t stream) -> std::vector<Tensor> {
 
     // BFloat16 upcast: convert to Float32, compute, convert back
@@ -929,16 +939,22 @@ auto gru_forward_kernel(
         auto W_ih_f32 = W_ih.to(DType::Float32);
         auto W_hh_f32 = W_hh.to(DType::Float32);
         auto bias_f32 = (bias.numel() > 0) ? bias.to(DType::Float32) : bias;
+        auto bias_hh_f32 = (bias_hh.numel() > 0) ? bias_hh.to(DType::Float32) : bias_hh;
         auto h0_f32 = h0.to(DType::Float32);
-        auto results = gru_forward_kernel(input_f32, W_ih_f32, W_hh_f32, bias_f32, h0_f32, stream);
+        auto results = gru_forward_kernel(input_f32, W_ih_f32, W_hh_f32, bias_f32, h0_f32, bias_hh_f32, stream);
         results[0] = results[0].to(DType::BFloat16);  // output
         results[1] = results[1].to(DType::BFloat16);  // h_n
         return results;
     }
 
 #ifdef USE_MIOPEN
-    // Use MIOpen for Float32 GRU forward (optimized fused kernels)
-    if (input.dtype() == DType::Float32) {
+    // Use MIOpen for Float32 GRU forward (optimized fused kernels).
+    // Only when there is no separate hh-side bias: gru_forward_miopen packs a
+    // single bias vector, but PyTorch GRU semantics require b_hh inside the
+    // reset-gated term (n = tanh(n_ih + b_ih_n + r * (n_hh + b_hh_n))), which
+    // the combined form cannot represent. With bias_hh present we use the
+    // rocBLAS path below, which applies the biases per side.
+    if (input.dtype() == DType::Float32 && bias_hh.numel() == 0) {
         return gru_forward_miopen(input, W_ih, W_hh, bias, h0, stream);
     }
 #endif
@@ -982,6 +998,7 @@ auto gru_forward_kernel(
         const float* W_hh_ptr = W_hh.data<float>();
         const float* input_ptr = input.data<float>();
         const float* bias_ptr = bias.numel() > 0 ? bias.data<float>() : nullptr;
+        const float* bias_hh_ptr = bias_hh.numel() > 0 ? bias_hh.data<float>() : nullptr;
         float* gates_ih_ptr = gates_ih.data<float>();
         float* gates_hh_ptr = gates_hh.data<float>();
         float* rz_gates_ptr = rz_gates.data<float>();
@@ -1019,6 +1036,15 @@ auto gru_forward_kernel(
                     dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
                     bias_ptr, gates_ih_ptr, batch, 3 * hidden);
             }
+            // hh-side bias goes on gates_hh so the n-gate chunk lands inside
+            // the reset-gated term (PyTorch GRU semantics).
+            if (bias_hh_ptr != nullptr) {
+                int64_t total_hh = batch * 3 * hidden;
+                int num_blocks_hh = get_num_blocks(total_hh);
+                hipLaunchKernelGGL(add_bias_kernel<float>,
+                    dim3(num_blocks_hh), dim3(BLOCK_SIZE), 0, stream,
+                    bias_hh_ptr, gates_hh_ptr, batch, 3 * hidden);
+            }
 
             // Combine r and z gates: rz = gates_ih[:, :2*hidden] + gates_hh[:, :2*hidden]
             // n_ih = gates_ih[:, 2*hidden:]
@@ -1036,8 +1062,8 @@ auto gru_forward_kernel(
             hipLaunchKernelGGL(gru_sequence_step_kernel<float>,
                               dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
                               rz_gates_ptr,
-                              gates_ih_ptr + 2 * hidden,  // n_ih part
-                              gates_hh_ptr + 2 * hidden,  // n_hh part
+                              gates_ih_ptr,
+                              gates_hh_ptr,
                               h_t_ptr,
                               h_t_ptr,
                               batch, hidden);
@@ -1065,6 +1091,7 @@ auto gru_forward_kernel(
         const double* W_hh_ptr = W_hh.data<double>();
         const double* input_ptr = input.data<double>();
         const double* bias_ptr = bias.numel() > 0 ? bias.data<double>() : nullptr;
+        const double* bias_hh_ptr = bias_hh.numel() > 0 ? bias_hh.data<double>() : nullptr;
         double* gates_ih_ptr = gates_ih.data<double>();
         double* gates_hh_ptr = gates_hh.data<double>();
         double* rz_gates_ptr = rz_gates.data<double>();
@@ -1101,6 +1128,15 @@ auto gru_forward_kernel(
                     dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
                     bias_ptr, gates_ih_ptr, batch, 3 * hidden);
             }
+            // hh-side bias goes on gates_hh so the n-gate chunk lands inside
+            // the reset-gated term (PyTorch GRU semantics).
+            if (bias_hh_ptr != nullptr) {
+                int64_t total_hh = batch * 3 * hidden;
+                int num_blocks_hh = get_num_blocks(total_hh);
+                hipLaunchKernelGGL(add_bias_kernel<double>,
+                    dim3(num_blocks_hh), dim3(BLOCK_SIZE), 0, stream,
+                    bias_hh_ptr, gates_hh_ptr, batch, 3 * hidden);
+            }
 
             // Combine rz gates and apply GRU step
             int64_t total = batch * hidden;
@@ -1113,8 +1149,8 @@ auto gru_forward_kernel(
             hipLaunchKernelGGL(gru_sequence_step_kernel<double>,
                               dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
                               rz_gates_ptr,
-                              gates_ih_ptr + 2 * hidden,
-                              gates_hh_ptr + 2 * hidden,
+                              gates_ih_ptr,
+                              gates_hh_ptr,
                               h_t_ptr,
                               h_t_ptr,
                               batch, hidden);
@@ -1141,6 +1177,7 @@ auto gru_forward_kernel(
         const __half* W_hh_ptr = reinterpret_cast<const __half*>(W_hh.data<Float16>());
         const __half* input_ptr = reinterpret_cast<const __half*>(input.data<Float16>());
         const __half* bias_ptr = bias.numel() > 0 ? reinterpret_cast<const __half*>(bias.data<Float16>()) : nullptr;
+        const __half* bias_hh_ptr = bias_hh.numel() > 0 ? reinterpret_cast<const __half*>(bias_hh.data<Float16>()) : nullptr;
         __half* gates_ih_ptr = reinterpret_cast<__half*>(gates_ih.data<Float16>());
         __half* gates_hh_ptr = reinterpret_cast<__half*>(gates_hh.data<Float16>());
         __half* rz_gates_ptr = reinterpret_cast<__half*>(rz_gates.data<Float16>());
@@ -1177,6 +1214,15 @@ auto gru_forward_kernel(
                     dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
                     bias_ptr, gates_ih_ptr, batch, 3 * hidden);
             }
+            // hh-side bias goes on gates_hh so the n-gate chunk lands inside
+            // the reset-gated term (PyTorch GRU semantics).
+            if (bias_hh_ptr != nullptr) {
+                int64_t total_hh = batch * 3 * hidden;
+                int num_blocks_hh = get_num_blocks(total_hh);
+                hipLaunchKernelGGL(add_bias_kernel_fp16,
+                    dim3(num_blocks_hh), dim3(BLOCK_SIZE), 0, stream,
+                    bias_hh_ptr, gates_hh_ptr, batch, 3 * hidden);
+            }
 
             // Combine rz gates and apply GRU step
             int64_t total = batch * hidden;
@@ -1189,8 +1235,8 @@ auto gru_forward_kernel(
             hipLaunchKernelGGL(gru_sequence_step_kernel_fp16,
                               dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
                               rz_gates_ptr,
-                              gates_ih_ptr + 2 * hidden,
-                              gates_hh_ptr + 2 * hidden,
+                              gates_ih_ptr,
+                              gates_hh_ptr,
                               h_t_ptr,
                               h_t_ptr,
                               batch, hidden);
@@ -1245,7 +1291,7 @@ auto gru_multi_layer_forward_kernel(
 
         auto result = gru_forward_kernel(
             layer_input, W_ih_list[l], W_hh_list[l],
-            bias_list[l], h_l, stream);
+            bias_list[l], h_l, Tensor{}, stream);
 
         layer_input = result[0];
 

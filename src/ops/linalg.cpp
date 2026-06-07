@@ -32,9 +32,28 @@ namespace {
 /// register native kernels.
 /// Note: The CPU dispatch table wrappers call these functions, which check device==CPU
 /// and skip try_gpu_dispatch, so there is no circular dispatch.
+// Complex linalg (qr/svd/eig/det/inv/solve/cholesky) is implemented only on the
+// CPU LAPACK path in this codebase; the GPU backend kernels handle real floats
+// and throw for Complex64/Complex128. Rather than let that throw escape (which
+// crashed lstsq and made every complex linalg op fail on GPU devices), route
+// complex inputs through the CPU implementation and move the result back to the
+// caller's device. This is transparent to callers and keeps device semantics.
+static bool is_complex_dtype(DType dt) {
+    return dt == DType::Complex64 || dt == DType::Complex128;
+}
+
 bool try_gpu_dispatch(OpId op, std::span<const Tensor> inputs,
                       const OpAttributes& attrs, Tensor& result) {
-    if (inputs[0].device().type == Device::Type::CPU) return false;
+    const Device dev = inputs[0].device();
+    if (dev.type == Device::Type::CPU) return false;
+    if (is_complex_dtype(inputs[0].dtype())) {
+        std::vector<Tensor> cpu_inputs;
+        cpu_inputs.reserve(inputs.size());
+        for (const auto& t : inputs) cpu_inputs.push_back(t.to(Device::cpu()));
+        result = dispatch_single(op, cpu_inputs, attrs);
+        if (result.device() != dev) result = result.to(dev);
+        return true;
+    }
     result = dispatch_single(op, inputs, attrs);
     return true;
 }
@@ -42,7 +61,16 @@ bool try_gpu_dispatch(OpId op, std::span<const Tensor> inputs,
 /// Try GPU dispatch for a multi-output linalg op. Returns true and sets results on success.
 bool try_gpu_dispatch_multi(OpId op, std::span<const Tensor> inputs,
                             const OpAttributes& attrs, std::vector<Tensor>& results) {
-    if (inputs[0].device().type == Device::Type::CPU) return false;
+    const Device dev = inputs[0].device();
+    if (dev.type == Device::Type::CPU) return false;
+    if (is_complex_dtype(inputs[0].dtype())) {
+        std::vector<Tensor> cpu_inputs;
+        cpu_inputs.reserve(inputs.size());
+        for (const auto& t : inputs) cpu_inputs.push_back(t.to(Device::cpu()));
+        results = dispatch(op, cpu_inputs, attrs);
+        for (auto& r : results) if (r.device() != dev) r = r.to(dev);
+        return true;
+    }
     results = dispatch(op, inputs, attrs);
     return true;
 }
@@ -498,6 +526,26 @@ auto solve_triangular(const Tensor& A, const Tensor& B, bool upper, bool unitria
         for (int64_t batch = 0; batch < nbatch; ++batch) {
             cblas_strsm(CblasRowMajor, CblasLeft, uplo, CblasNoTrans, diag,
                         ln, lnrhs, 1.0f,
+                        a_data + batch * n * n, ln,
+                        b_data + batch * n * nrhs, lnrhs);
+        }
+    } else if (work_a.dtype() == DType::Complex64) {
+        const auto* a_data = work_a.data<std::complex<float>>();
+        auto* b_data = work_b.data<std::complex<float>>();
+        const std::complex<float> one(1.0f, 0.0f);
+        for (int64_t batch = 0; batch < nbatch; ++batch) {
+            cblas_ctrsm(CblasRowMajor, CblasLeft, uplo, CblasNoTrans, diag,
+                        ln, lnrhs, &one,
+                        a_data + batch * n * n, ln,
+                        b_data + batch * n * nrhs, lnrhs);
+        }
+    } else if (work_a.dtype() == DType::Complex128) {
+        const auto* a_data = work_a.data<std::complex<double>>();
+        auto* b_data = work_b.data<std::complex<double>>();
+        const std::complex<double> one(1.0, 0.0);
+        for (int64_t batch = 0; batch < nbatch; ++batch) {
+            cblas_ztrsm(CblasRowMajor, CblasLeft, uplo, CblasNoTrans, diag,
+                        ln, lnrhs, &one,
                         a_data + batch * n * n, ln,
                         b_data + batch * n * nrhs, lnrhs);
         }
@@ -1567,10 +1615,23 @@ auto lstsq(const Tensor& A, const Tensor& B) -> std::tuple<Tensor, Tensor> {
     DType compute_dtype = original_dtype;
     if (needs_upcast(compute_dtype)) compute_dtype = DType::Float32;
 
+    // Complex linalg primitives (qr / svd / triangular-solve) are implemented
+    // only on the CPU LAPACK path in this codebase — the GPU kernels handle
+    // Float32/Float64 and throw for complex, which qr() catches and silently
+    // services on CPU. Composing lstsq from those ops on a GPU device therefore
+    // mixed CPU results (from qr) with GPU operands (B), producing NaN. Run the
+    // whole complex composition on CPU for device consistency and move the
+    // result back to the caller's device at the end.
+    const bool is_complex_dt = (compute_dtype == DType::Complex64 ||
+                                compute_dtype == DType::Complex128);
+    const Device compute_device = is_complex_dt ? Device::cpu() : orig_device;
+
     Tensor A_c = A.contiguous();
     if (A_c.dtype() != compute_dtype) A_c = A_c.to(compute_dtype);
+    if (A_c.device() != compute_device) A_c = A_c.to(compute_device);
     Tensor B_c = B.contiguous();
     if (B_c.dtype() != compute_dtype) B_c = B_c.to(compute_dtype);
+    if (B_c.device() != compute_device) B_c = B_c.to(compute_device);
 
     // Promote 1D B to (m, 1) so the composition is uniform; we'll squeeze
     // the solution back at the end.
@@ -1595,7 +1656,15 @@ auto lstsq(const Tensor& A, const Tensor& B) -> std::tuple<Tensor, Tensor> {
         // Over-determined or square: QR gives the least-squares solution
         // when A has full column rank. Reduced QR returns Q (m, n), R (n, n).
         auto [Q, R] = tenzor::linalg::qr(A_c);
-        Tensor QT  = tenzor::transpose(Q, -2, -1);               // (n, m)
+        // Complex least squares uses the conjugate (Hermitian) transpose:
+        // x = R^{-1} Q^H b. Conjugate the contiguous Q first, THEN transpose
+        // (conjugating the transposed view can be mishandled). For real inputs
+        // Q^H == Q^T.
+        const bool is_complex = (compute_dtype == DType::Complex64 ||
+                                 compute_dtype == DType::Complex128);
+        Tensor QT = is_complex
+            ? tenzor::transpose(tenzor::conj(Q), -2, -1)         // Q^H
+            : tenzor::transpose(Q, -2, -1);                      // Q^T
         Tensor QTB = tenzor::matmul(QT, B_c);                    // (n, nrhs)
         x = tenzor::linalg::solve_triangular(
             R, QTB, /*upper=*/true, /*unitriangular=*/false);    // (n, nrhs)
@@ -1615,8 +1684,11 @@ auto lstsq(const Tensor& A, const Tensor& B) -> std::tuple<Tensor, Tensor> {
     // Squeeze solution back to 1D if B was 1D.
     if (b_was_1d) x = tenzor::reshape(x, {n});
 
-    return {maybe_downcast(x, original_dtype),
-            maybe_downcast(residuals, original_dtype)};
+    Tensor x_out = maybe_downcast(x, original_dtype);
+    Tensor res_out = maybe_downcast(residuals, original_dtype);
+    if (x_out.device() != orig_device) x_out = x_out.to(orig_device);
+    if (res_out.device() != orig_device) res_out = res_out.to(orig_device);
+    return {x_out, res_out};
 }
 
 auto pinv(const Tensor& A, double rcond) -> Tensor {

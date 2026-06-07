@@ -67,8 +67,17 @@ auto fft(const Tensor& input, std::optional<int64_t> n, int64_t dim,
     }
 
     // Promote real to complex if needed
-    Tensor inp = (input.dtype() == DType::Float32 || input.dtype() == DType::Float64)
-                 ? input.to(to_complex_dtype(input.dtype())) : input;
+    // Real inputs widen to complex. Float16/BFloat16 must route through Float32
+    // first (no direct half->complex cast); to_complex_dtype maps them to
+    // Complex64. Without this the kernel received a half tensor and threw
+    // "unsupported dtype (expected Complex64 or Complex128)".
+    DType in_dt = input.dtype();
+    Tensor inp =
+        (in_dt == DType::Float16 || in_dt == DType::BFloat16)
+            ? input.to(DType::Float32).to(to_complex_dtype(in_dt))
+        : (in_dt == DType::Float32 || in_dt == DType::Float64)
+            ? input.to(to_complex_dtype(in_dt))
+            : input;
 
     std::array<Tensor, 1> inputs = {inp.contiguous()};
     NewOpAttributes attrs;
@@ -88,8 +97,17 @@ auto ifft(const Tensor& input, std::optional<int64_t> n, int64_t dim,
         throw std::runtime_error("ifft: n must be positive, got " + std::to_string(signal_len));
     }
 
-    Tensor inp = (input.dtype() == DType::Float32 || input.dtype() == DType::Float64)
-                 ? input.to(to_complex_dtype(input.dtype())) : input;
+    // Real inputs widen to complex. Float16/BFloat16 must route through Float32
+    // first (no direct half->complex cast); to_complex_dtype maps them to
+    // Complex64. Without this the kernel received a half tensor and threw
+    // "unsupported dtype (expected Complex64 or Complex128)".
+    DType in_dt = input.dtype();
+    Tensor inp =
+        (in_dt == DType::Float16 || in_dt == DType::BFloat16)
+            ? input.to(DType::Float32).to(to_complex_dtype(in_dt))
+        : (in_dt == DType::Float32 || in_dt == DType::Float64)
+            ? input.to(to_complex_dtype(in_dt))
+            : input;
 
     std::array<Tensor, 1> inputs = {inp.contiguous()};
     NewOpAttributes attrs;

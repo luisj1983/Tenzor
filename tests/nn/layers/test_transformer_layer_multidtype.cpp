@@ -59,7 +59,12 @@ TEST_P(TransformerLayerMultiDTypeTest, TransformerEncoder_BackwardGradPopulated)
     convert_model(encoder);
     Variable src = createInput({4, 2, 16}, true);
     auto out = encoder.forward(src, Tensor{}, Tensor{});
-    sum(out).backward();
+    // The encoder ends in LayerNorm (affine weight=1, bias=0), so sum(out) is
+    // identically zero per row (sum of a zero-mean normalized vector) and the
+    // input gradient is mathematically 0 — backends only "passed" the >0 check
+    // via float rounding noise (oneAPI FP64 correctly computes a clean 0). Use a
+    // non-degenerate loss so this test actually exercises gradient flow.
+    sum(out * out).backward();
     ASSERT_TRUE(src.has_grad()) << device().to_string();
     auto g = max(abs(src.grad()->to(Device::cpu()).to(DType::Float32)));
     EXPECT_GT(g.item<float>(), 0.0f) << "encoder src grad zero on " << device().to_string();

@@ -1759,7 +1759,7 @@ auto gelu_backward_kernel(const Tensor& grad_output, const Tensor& input, hipStr
 }
 
 // Leaky ReLU wrapper
-auto leaky_relu_kernel(const Tensor& input, float alpha, hipStream_t stream) -> Tensor {
+auto leaky_relu_kernel(const Tensor& input, double alpha, hipStream_t stream) -> Tensor {
     int64_t n = input.numel();
     std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
     Tensor result(shape, input.dtype(), input.device());
@@ -1797,7 +1797,7 @@ auto leaky_relu_kernel(const Tensor& input, float alpha, hipStream_t stream) -> 
 }
 
 // Leaky ReLU backward wrapper
-auto leaky_relu_backward_kernel(const Tensor& grad_output, const Tensor& input, float alpha, hipStream_t stream) -> Tensor {
+auto leaky_relu_backward_kernel(const Tensor& grad_output, const Tensor& input, double alpha, hipStream_t stream) -> Tensor {
     int64_t n = input.numel();
     std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
     Tensor result(shape, input.dtype(), input.device());

@@ -73,12 +73,18 @@ TEST_P(Conv1dMultiDTypeTest, MultipleKernelSizes) {
 // populates .grad() on the input tensor and the conv's parameters.
 TEST_P(Conv1dMultiDTypeTest, BackwardProducesGradients) {
     // CPU reference: same conv config, same input, run on CPU.
+    // Reseed before each construction so reference and device modules get
+    // byte-identical weights (the fixture seeds once per test, so constructing
+    // two modules sequentially would otherwise draw different init weights and
+    // the forward/grad comparison would fail even for cpu/Float32).
+    tenzor::manual_seed(42);
     auto conv_ref = nn::Conv1d(2, 4, 3, 1, 1, 1, 1, /*bias=*/true);
     auto input_cpu = tenzor::randn({1, 2, 8}, DType::Float32, Device::cpu());
     auto in_ref = Variable(input_cpu, /*requires_grad=*/true);
     auto out_ref = conv_ref.forward(in_ref);
     tenzor::sum(out_ref).backward();
 
+    tenzor::manual_seed(42);
     auto conv = nn::Conv1d(2, 4, 3, 1, 1, 1, 1, /*bias=*/true);
     convert_model(conv);
     auto input = Variable(input_cpu.to(dtype_).to(device_), /*requires_grad=*/true);
@@ -105,12 +111,14 @@ TEST_P(Conv1dMultiDTypeTest, BackwardProducesGradients) {
 }
 
 TEST_P(Conv1dMultiDTypeTest, BackwardWithStridePadding) {
+    tenzor::manual_seed(43);
     auto conv_ref = nn::Conv1d(3, 6, 5, 2, 2);
     auto input_cpu = tenzor::randn({2, 3, 12}, DType::Float32, Device::cpu());
     auto in_ref = Variable(input_cpu, /*requires_grad=*/true);
     auto out_ref = conv_ref.forward(in_ref);
     tenzor::sum(out_ref).backward();
 
+    tenzor::manual_seed(43);
     auto conv = nn::Conv1d(3, 6, 5, 2, 2);
     convert_model(conv);
     auto input = Variable(input_cpu.to(dtype_).to(device_), /*requires_grad=*/true);

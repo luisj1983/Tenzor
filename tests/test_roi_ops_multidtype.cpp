@@ -124,8 +124,36 @@ TEST_P(ROIOpsMultiDTypeTest, GradientFlow) {
     }
     // Cross-check forward and input gradient against CPU reference.
     expectTensorNear(output.tensor(), out_ref.tensor(), std::max(atol_, 5e-2f));
-    expectTensorNear(*features.grad(), *feats_ref.grad(),
-                     std::max(atol_, 5e-2f));
+
+    // The input gradient is validated with a RELATIVE tolerance rather than the
+    // pure-absolute expectTensorNear. With grad_output = ones, ROIAlign's
+    // backward overlap-adds many bilinear contributions onto the corner feature
+    // pixels, so those gradients reach large magnitudes (~136 here). The kernel
+    // computes in Float32 and narrows the result to the requested dtype, so a
+    // Float16 gradient is the correctly-rounded Float16 value — but Float16's
+    // ulp at magnitude 136 is ~0.125, larger than a 5e-2 absolute tolerance, so
+    // an absolute comparison can never pass at that scale regardless of
+    // correctness. |a-b| <= atol + rtol*|b| validates the actual numerical
+    // property (relative accuracy) for every dtype.
+    {
+        auto ga = features.grad()->to(Device::cpu()).to(DType::Float32);
+        auto gb = feats_ref.grad()->to(Device::cpu()).to(DType::Float32);
+        ASSERT_EQ(ga.numel(), gb.numel());
+        const auto* a = ga.data<float>();
+        const auto* b = gb.data<float>();
+        const float atol = std::max(atol_, 5e-2f);
+        // Float16 carries ~10 mantissa bits (≈1e-3 relative); BFloat16 ~7
+        // (≈8e-3). 2e-2 covers both with margin while still catching real
+        // gradient bugs (which manifest as O(1) relative error).
+        const float rtol = (dtype_ == DType::Float16 ||
+                            dtype_ == DType::BFloat16) ? 2e-2f : 1e-3f;
+        for (int64_t i = 0; i < ga.numel(); ++i) {
+            EXPECT_LE(std::abs(a[i] - b[i]), atol + rtol * std::abs(b[i]))
+                << "Gradient mismatch at index " << i << " (actual " << a[i]
+                << " vs ref " << b[i] << ") with dtype "
+                << static_cast<int>(dtype_);
+        }
+    }
 }
 
 // ============================================================================

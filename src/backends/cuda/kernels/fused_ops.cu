@@ -734,14 +734,12 @@ __global__ void fused_gelu_kernel(
     int64_t stride = blockDim.x * gridDim.x;
 
     for (int64_t i = tid; i < n; i += stride) {
-        // Use float constants and convert for type safety
+        // Exact GELU (erf form) to match the CPU / oneAPI / Vulkan kernels and
+        // PyTorch's default. The tanh approximation used previously differed by
+        // ~5e-4, breaking cross-backend parity.
         float x_f = static_cast<float>(input[i]);
-        constexpr float sqrt_2_over_pi = 0.7978845608f;
-        constexpr float coeff = 0.044715f;
-        float x_cubed = x_f * x_f * x_f;
-        float inner = sqrt_2_over_pi * (x_f + coeff * x_cubed);
-        float tanh_val = tanhf(inner);
-        float result = 0.5f * x_f * (1.0f + tanh_val);
+        constexpr float inv_sqrt2 = 0.70710678118654752440f;
+        float result = 0.5f * x_f * (1.0f + erff(x_f * inv_sqrt2));
         output[i] = static_cast<T>(result);
     }
 }
@@ -753,18 +751,14 @@ __global__ void fused_gelu_kernel<float>(
     float* output,
     int64_t n
 ) {
-    constexpr float sqrt_2_over_pi = 0.7978845608f;
-    constexpr float coeff = 0.044715f;
+    constexpr float inv_sqrt2 = 0.70710678118654752440f;  // exact GELU (erf form)
 
     int64_t tid = blockIdx.x * blockDim.x + threadIdx.x;
     int64_t stride = blockDim.x * gridDim.x;
 
     for (int64_t i = tid; i < n; i += stride) {
         float x = input[i];
-        float x_cubed = x * x * x;
-        float inner = sqrt_2_over_pi * (x + coeff * x_cubed);
-        float tanh_val = tanhf(inner);
-        output[i] = 0.5f * x * (1.0f + tanh_val);
+        output[i] = 0.5f * x * (1.0f + erff(x * inv_sqrt2));
     }
 }
 
@@ -775,18 +769,14 @@ __global__ void fused_gelu_kernel<double>(
     double* output,
     int64_t n
 ) {
-    constexpr double sqrt_2_over_pi = 0.7978845608028654;
-    constexpr double coeff = 0.044715;
+    constexpr double inv_sqrt2 = 0.70710678118654752440;  // exact GELU (erf form)
 
     int64_t tid = blockIdx.x * blockDim.x + threadIdx.x;
     int64_t stride = blockDim.x * gridDim.x;
 
     for (int64_t i = tid; i < n; i += stride) {
         double x = input[i];
-        double x_cubed = x * x * x;
-        double inner = sqrt_2_over_pi * (x + coeff * x_cubed);
-        double tanh_val = tanh(inner);
-        output[i] = 0.5 * x * (1.0 + tanh_val);
+        output[i] = 0.5 * x * (1.0 + erf(x * inv_sqrt2));
     }
 }
 

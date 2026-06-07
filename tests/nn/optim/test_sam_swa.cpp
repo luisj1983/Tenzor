@@ -166,8 +166,10 @@ TEST_P(SAMSWATest, AveragedModelInitialState) {
     auto params = make_params();
     optim::AveragedModel avg(params);
 
-    // Construction clones the initial params, so n_averaged starts at 1
-    EXPECT_EQ(avg.n_averaged(), 1);
+    // PyTorch semantics (audit V.26): n_averaged starts at 0; the first
+    // update_parameters() installs sample 1. Construction only pre-allocates
+    // (and clones for storage) the averaged_params slots.
+    EXPECT_EQ(avg.n_averaged(), 0);
     EXPECT_EQ(avg.averaged_params().size(), params.size());
 }
 
@@ -187,14 +189,15 @@ TEST_P(SAMSWATest, AveragedModelUpdateProducesRunningAverage) {
     params[0] = std::make_shared<Variable>(new_t, /*requires_grad=*/true);
     avg.update_parameters(params);
 
-    EXPECT_EQ(avg.n_averaged(), 2);
+    // V.26: first update installs sample 1 (n_averaged 0 -> 1).
+    EXPECT_EQ(avg.n_averaged(), 1);
 
     // Update again with params = all 5s
     auto new_t2 = tenzor::full({4, 4}, 5.0f, DType::Float32, device);
     params[0] = std::make_shared<Variable>(new_t2, /*requires_grad=*/true);
     avg.update_parameters(params);
 
-    EXPECT_EQ(avg.n_averaged(), 3);
+    EXPECT_EQ(avg.n_averaged(), 2);
 
     // The averaged value should be between the initial and latest
     auto avg_cpu = avg.averaged_params()[0].to(Device::cpu());

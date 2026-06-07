@@ -52,6 +52,18 @@ auto ctc_loss_forward_kernel(
     bool zero_infinity,
     sycl::queue& queue
 ) -> std::vector<Tensor> {
+    // The CTC kernel computes in Float32. For Float64/Float16/BFloat16 inputs,
+    // widen to Float32, run, then narrow BOTH outputs (loss + raw_grad) back to
+    // the original dtype so the op preserves precision metadata (matches CPU).
+    if (log_probs.dtype() == DType::Float64 || log_probs.dtype() == DType::Float16 ||
+        log_probs.dtype() == DType::BFloat16) {
+        const DType orig = log_probs.dtype();
+        auto out = ctc_loss_forward_kernel(log_probs.to(DType::Float32), targets,
+                                           input_lengths, target_lengths, blank,
+                                           zero_infinity, queue);
+        for (auto& t : out) t = t.to(orig);
+        return out;
+    }
     if (log_probs.dtype() != DType::Float32) {
         throw std::invalid_argument(
             "ctc_loss_forward (OneAPI): log_probs must be Float32");

@@ -618,6 +618,17 @@ auto run_flash_dispatch(const Tensor& Q, const Tensor& K, const Tensor& V,
     attrs.set(AttrKey::Causal, causal);
     attrs.set(AttrKey::DropoutP, static_cast<double>(dropout_p));
     attrs.set(AttrKey::IsTraining, is_training);
+    if (dropout_p > 0.0f && is_training) {
+        // Dropout determinism contract: the Philox key derives from the
+        // device's default generator, so manual_seed() + identical inputs
+        // reproduce the mask bit-exactly. Without this the backends invented
+        // their own keys (CUDA hashed the Q data pointer; the oneAPI/Vulkan
+        // composed path drew from std::random_device), so a re-seeded
+        // forward was NOT reproducible.
+        auto seed = static_cast<int64_t>(default_generator(Q.device()).next_seed());
+        if (seed == 0) seed = 1;  // 0 means "unset" to the backend wrappers
+        attrs.set(AttrKey::Seed, seed);
+    }
     std::vector<Tensor> inputs = {Q, K, V};
     std::vector<Tensor> outs = dispatch<OpId::FlashAttention>(inputs, attrs);
     while (outs.size() < 4) outs.emplace_back();  // empty Tensor fillers

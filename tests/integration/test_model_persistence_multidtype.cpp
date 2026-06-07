@@ -47,7 +47,11 @@ TEST_P(ModelPersistenceMultiDTypeTest, SaveLoadFile) {
     // same host. Mirror tests/utils/test_logging.cpp:19's pid+test-name pattern.
     const auto* info =
         ::testing::UnitTest::GetInstance()->current_test_info();
-    const std::string test_name = info ? info->name() : "unknown";
+    std::string test_name = info ? info->name() : "unknown";
+    // Parametrized test names contain '/' (e.g. "SaveLoadFile/cpu_Float32"),
+    // which would turn the filename into a path with a non-existent parent
+    // directory. Sanitise to a flat filename component.
+    std::replace(test_name.begin(), test_name.end(), '/', '_');
     std::string path = (std::filesystem::temp_directory_path() /
                         ("tenzor_test_model_" +
                          std::to_string(::getpid()) + "_" + test_name + "_" +

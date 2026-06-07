@@ -183,15 +183,19 @@ private:
     auto convert_rnn(const ONNXImportNode& node)  -> std::shared_ptr<nn::Module>;
 
     // Activation functions
-    auto convert_relu(const ONNXImportNode& node) -> void;
-    auto convert_leaky_relu(const ONNXImportNode& node) -> void;
-    auto convert_sigmoid(const ONNXImportNode& node) -> void;
-    auto convert_tanh(const ONNXImportNode& node) -> void;
-    auto convert_gelu(const ONNXImportNode& node) -> void;
-    auto convert_softmax(const ONNXImportNode& node) -> void;
-    auto convert_log_softmax(const ONNXImportNode& node) -> void;
-    auto convert_elu(const ONNXImportNode& node) -> void;
-    auto convert_selu(const ONNXImportNode& node) -> void;
+    // Activations map to nn::Module equivalents so they are appended to the
+    // imported Sequential and run (in order) at forward() time. Returning a
+    // module — rather than eager-executing on placeholder activations — is what
+    // lets a module op (Linear/Conv) feed an activation correctly.
+    auto convert_relu(const ONNXImportNode& node) -> std::shared_ptr<nn::Module>;
+    auto convert_leaky_relu(const ONNXImportNode& node) -> std::shared_ptr<nn::Module>;
+    auto convert_sigmoid(const ONNXImportNode& node) -> std::shared_ptr<nn::Module>;
+    auto convert_tanh(const ONNXImportNode& node) -> std::shared_ptr<nn::Module>;
+    auto convert_gelu(const ONNXImportNode& node) -> std::shared_ptr<nn::Module>;
+    auto convert_softmax(const ONNXImportNode& node) -> std::shared_ptr<nn::Module>;
+    auto convert_log_softmax(const ONNXImportNode& node) -> std::shared_ptr<nn::Module>;
+    auto convert_elu(const ONNXImportNode& node) -> std::shared_ptr<nn::Module>;
+    auto convert_selu(const ONNXImportNode& node) -> std::shared_ptr<nn::Module>;
 
     // Pooling layers
     auto convert_maxpool(const ONNXImportNode& node) -> std::shared_ptr<nn::Module>;

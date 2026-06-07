@@ -18,6 +18,31 @@ constexpr size_t DEFAULT_MIN_SPLIT_SIZE = 256;
 // This prevents crashes when shutdown_device is called after the allocator is destroyed
 static std::atomic<bool> g_allocator_destroyed{false};
 
+// Synthetic address space for DEVICE_LOCAL (non-mappable) blocks.
+//
+// Device-local blocks have no host mapping, so each slab gets a fake base
+// address and sub-allocations live at base + memory_offset, mirroring the
+// host-visible pointer arithmetic. Earlier code used the VkBuffer handle
+// value (`reinterpret_cast<void*>(buffer)`) as the synthetic address. Driver
+// handle values are arbitrary heap pointers, so one block's synthetic range
+// [handle, handle + size) could CONTAIN another block's handle. Tensor views
+// (slices) carry base + byte-offset pointers, and find_buffer_and_offset's
+// enclosing-range search then resolved them into the WRONG block — compute
+// shaders silently read/wrote another live tensor's memory (observed as
+// deterministic, allocator-state-dependent corruption in multi-step RNN
+// loops on Vulkan). Minting bases from a private monotonic counter placed
+// above the x86-64 user-space VA limit guarantees ranges never overlap each
+// other or real host pointers. These addresses are never dereferenced.
+static std::atomic<uintptr_t> g_next_synthetic_base{0xE000'0000'0000ULL};
+
+static void* mint_synthetic_base(size_t span_bytes) {
+    // Keep 4 KiB spacing between slabs so even out-of-range arithmetic on
+    // the last suballocation cannot collide with the next slab's range.
+    const size_t span = (span_bytes + 4095) & ~size_t(4095);
+    return reinterpret_cast<void*>(
+        g_next_synthetic_base.fetch_add(span + 4096, std::memory_order_relaxed));
+}
+
 VulkanCachingAllocator::VulkanCachingAllocator()
     : alignment_(DEFAULT_ALIGNMENT),
       max_cached_memory_(0),  // Unlimited by default
@@ -675,9 +700,11 @@ VulkanBlock* VulkanCachingAllocator::allocate_new_block(size_t size, int device,
                                      std::to_string(result));
         }
     } else {
-        // For device-local only memory, use buffer handle as synthetic address
-        // This allows us to track the allocation even without a mapped pointer
-        mapped_ptr = reinterpret_cast<void*>(buffer);
+        // Device-local only memory has no host mapping: mint a synthetic,
+        // never-overlapping base address for this slab (see
+        // g_next_synthetic_base above for why the VkBuffer handle value
+        // must NOT be used here).
+        mapped_ptr = mint_synthetic_base(slab_size);
     }
 
     // Create block with full slab size
@@ -754,14 +781,15 @@ bool VulkanCachingAllocator::split_block(VulkanBlock* block, size_t size) {
         return false;
     }
 
-    // Calculate mapped pointer for the new block using pointer arithmetic
-    void* new_ptr = nullptr;
-    if (block->is_host_visible && block->base_mapped_ptr) {
-        new_ptr = static_cast<char*>(block->base_mapped_ptr) + new_offset;
-    } else {
-        // For device-local memory, use synthetic address
-        new_ptr = reinterpret_cast<void*>(new_buffer);
-    }
+    // Calculate the new block's pointer with base + offset arithmetic for
+    // BOTH host-visible and device-local memory. base_mapped_ptr is the
+    // slab's real mapping for host-visible memory and its synthetic base for
+    // device-local memory (see g_next_synthetic_base) — either way, sub-block
+    // addresses stay inside the slab's non-overlapping range so the
+    // enclosing-range search in find_buffer_and_offset resolves views to the
+    // correct block. (The previous device-local branch used the new VkBuffer
+    // handle value, which can alias other blocks' ranges.)
+    void* new_ptr = static_cast<char*>(block->base_mapped_ptr) + new_offset;
 
     // Create new block for remaining memory (shares memory with original block)
     auto new_block = std::make_unique<VulkanBlock>(new_buffer, block->memory, new_ptr,

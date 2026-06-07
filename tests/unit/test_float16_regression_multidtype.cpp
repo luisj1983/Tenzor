@@ -108,7 +108,11 @@ TEST_P(Float16RegressionMultiBackendTest, MatMul) {
 TEST_P(Float16RegressionMultiBackendTest, SoftmaxBackward) {
     auto input = Variable(randn({4, 32}, DType::Float16, device), true);
     auto output = softmax(input, 1);
-    auto loss = sum(output);
+    // sum(softmax(x)) == 1 identically, so its true input-grad is ZERO — a
+    // backend computing the backward accurately fails the nonzero check on
+    // pure round-off (oneAPI did). Square the output so the true gradient is
+    // genuinely nonzero while still exercising the Float16 softmax backward.
+    auto loss = sum(output * output);
     loss.backward();
 
     EXPECT_GRAD_FLOWS(input);

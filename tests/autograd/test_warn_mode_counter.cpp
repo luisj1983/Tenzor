@@ -18,6 +18,7 @@
 #include "tenzor/ops/creation.hpp"
 #include "tenzor/ops/math.hpp"
 #include "tenzor/nn/layers/segmentation.hpp"
+#include "tenzor/nn/functional.hpp"
 
 using namespace tenzor;
 
@@ -54,12 +55,15 @@ TEST_F(WarnModeCounterTest, CounterStartsAtZero) {
     EXPECT_EQ(higher_order_disconnection_count(), 0u);
 }
 
-// Helper: build a tiny graph ending in upsample_bilinear (the remaining stub).
+// Helper: build a tiny graph ending in a passthrough higher-order stub.
+// UpsampleBilinear gained full higher-order support (audit D3), so the canary
+// is now max_pool2d, whose MaxPool2dBackward reports is_higher_order_stub()==true
+// and exercises the warn-mode disconnection machinery during create_graph.
 static Variable make_stub_graph() {
-    // Shape [1, 1, 4, 4] → upsample to [1, 1, 8, 8]
+    // Shape [1, 1, 4, 4] → max_pool2d to [1, 1, 2, 2]
     auto x = Variable(randn({1, 1, 4, 4}, DType::Float32, Device::cpu()), true);
     auto y = x * x;  // MulBackward — full higher-order support
-    return tenzor::nn::upsample_bilinear(y, 8, 8);  // UpsampleBilinearBackward — stub
+    return tenzor::nn::functional::max_pool2d(y, {2, 2}, {2, 2});  // stub backward
 }
 
 // Warn mode increments the counter when an op with a passthrough stub
@@ -160,9 +164,15 @@ TEST_F(WarnModeCounterTest, IsHigherOrderStubIntrospection) {
     auto sort_fn = std::make_shared<SortBackward>(0);
     EXPECT_FALSE(sort_fn->is_higher_order_stub());
 
-    // UpsampleBilinearBackward is still a stub — verify the mechanism
-    // still correctly identifies a real stub.
+    // UpsampleBilinearBackward now has FULL higher-order support (audit D3 added
+    // UpsampleBilinearForwardAdjoint), so it is no longer a stub.
     auto upsample_fn = std::make_shared<UpsampleBilinearBackward>(4, 4, 8, 8);
-    EXPECT_TRUE(upsample_fn->is_higher_order_stub());
-    EXPECT_TRUE(upsample_fn->supports_higher_order());  // claims support, falls back at runtime
+    EXPECT_FALSE(upsample_fn->is_higher_order_stub());
+    EXPECT_TRUE(upsample_fn->supports_higher_order());
+
+    // ConjBackward remains a passthrough stub — verify the mechanism still
+    // correctly identifies a real stub.
+    auto conj_fn = std::make_shared<ConjBackward>();
+    EXPECT_TRUE(conj_fn->is_higher_order_stub());
+    EXPECT_TRUE(conj_fn->supports_higher_order());  // claims support, falls back at runtime
 }

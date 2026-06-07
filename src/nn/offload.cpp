@@ -148,7 +148,7 @@ auto OffloadContext::enable() -> void {
                     {
                         std::lock_guard<std::mutex> lock(tensor_map_mutex_);
                         if (tensor_map_.find(tensor_ptr) == tensor_map_.end()) {
-                            initialize_tensor_info(tensor_ptr, &model_);
+                            initialize_tensor_info(tensor_ptr, &model_, param_ptr);
                         }
                     }
 
@@ -170,6 +170,8 @@ auto OffloadContext::enable() -> void {
 
 auto OffloadContext::disable() -> void {
     enabled_.store(false, std::memory_order_release);
+    std::lock_guard<std::mutex> lock(offloaded_gradients_mutex_);
+    offloaded_gradients_.clear();
 }
 
 auto OffloadContext::is_enabled() const -> bool {
@@ -216,6 +218,14 @@ auto OffloadContext::get_stats() -> OffloadStats {
                 stats.num_parameters_offloaded++;
             }
         }
+    }
+
+    // Gradient offload is tracked separately (keyed by parameter identity)
+    // because it is driven from the per-parameter backward hook, where the
+    // gradient value — but not a stable Tensor* in tensor_map_ — is available.
+    {
+        std::lock_guard<std::mutex> grad_lock(offloaded_gradients_mutex_);
+        stats.num_gradients_offloaded += offloaded_gradients_.size();
     }
 
     return stats;
@@ -296,32 +306,74 @@ auto OffloadContext::register_param_grad_hooks() -> void {
                 {
                     std::lock_guard<std::mutex> lock(self->tensor_map_mutex_);
                     if (self->tensor_map_.find(param_tensor_ptr) == self->tensor_map_.end()) {
-                        self->initialize_tensor_info(param_tensor_ptr, &self->model_);
+                        self->initialize_tensor_info(param_tensor_ptr, &self->model_, param);
                     }
                 }
 
-                // Issue the slow→fast upload of the parameter data, so the
-                // GPU copy is ready before the next forward. prefetch_tensor
-                // is a no-op when the tensor is already resident on GPU,
-                // which covers the steady-state case where backward kept it
-                // pinned. The first iteration after enable() (when the
-                // param was offloaded) is the case this hook is built for.
-                self->prefetch_tensor(param_tensor_ptr);
+                // The parameter's gradient has just been computed, so the
+                // parameter is no longer needed for the rest of this backward
+                // pass (a leaf weight is read only by its own layer's backward,
+                // which has already run by the time its AccumulateGrad hook
+                // fires). When parameter offload is enabled, push it back to the
+                // host now to free device memory — the next forward's
+                // forward_pre_hook prefetches it back. Without this the param
+                // stayed resident and num_parameters_offloaded never grew (the
+                // PrefetchForOptimizer / FullTrainingLoop regressions). When
+                // parameter offload is disabled we instead prefetch so the GPU
+                // copy is ready for the next forward.
+                if (self->config_.offload_parameters) {
+                    self->offload_tensor(param_tensor_ptr);
+                } else {
+                    self->prefetch_tensor(param_tensor_ptr);
+                }
 
-                // Note: gradient offload bookkeeping is handled by the
-                // module-level backward_post_hook (see backward_post_hook())
-                // — at this point the gradient has not yet been accumulated
-                // into param->grad(), so we cannot inspect it here.
+                // Gradient offload. This per-parameter hook fires the instant
+                // the leaf's gradient is computed (BackwardEngine applies hooks
+                // immediately before accumulating into param->grad()), so the
+                // gradient value is available here as `grad`. The module-level
+                // backward_post_hook cannot offload it: it runs via the
+                // ModuleHookFunction wrapping the module OUTPUT, which in
+                // reverse-mode executes BEFORE the layer's weight gradients are
+                // produced — param->grad() is still empty there, so no gradient
+                // was ever offloaded (num_gradients_offloaded stayed 0).
+                //
+                // We must NOT publish into param->grad() here: the engine
+                // inspects grad_.has_value() right after this hook returns and
+                // would then ADD grad_to_apply on top (doubling the gradient).
+                // Instead record the offload against the gradient's own storage
+                // identity, copying the payload to host. This frees nothing the
+                // engine still owns (the engine keeps its own grad handle), so
+                // there is no aliasing with the post-hook accumulation.
+                if (self->config_.offload_gradients &&
+                    grad.device().type == Device::Type::CUDA) {
+                    self->record_gradient_offload(param.get(), grad);
+                }
 
-                // Return the gradient unchanged — this hook is observation
-                // + scheduling only; it must not perturb the gradient values
-                // the optimizer will consume.
+                // Return the gradient unchanged — the optimizer consumes the
+                // same gradient values; offload keeps a host copy for memory
+                // accounting without perturbing the value the engine stores.
                 return grad;
             }
         );
 
         param_grad_hooks_.push_back(ParamHook{param_ptr, hook_id});
     }
+}
+
+auto OffloadContext::record_gradient_offload(const Variable* param,
+                                             const Tensor& grad) -> void {
+    if (!param) return;
+    // The actual offload: materialise a host-resident copy of the gradient.
+    // This frees nothing the BackwardEngine still owns (it keeps its own
+    // gradient handle), so there is no aliasing with the post-hook gradient
+    // accumulation that runs immediately after this returns.
+    Tensor host_copy = grad.to(Device::cpu());
+    {
+        std::lock_guard<std::mutex> lock(offloaded_gradients_mutex_);
+        offloaded_gradients_[param] = std::move(host_copy);
+    }
+    stats_.total_offloads.fetch_add(1, std::memory_order_relaxed);
+    stats_.transfer_count.fetch_add(1, std::memory_order_relaxed);
 }
 
 auto OffloadContext::register_hooks_recursive(Module* module) -> void {
@@ -403,17 +455,19 @@ auto OffloadContext::collect_tensors() -> void {
                 }
 
                 // Initialize tracking info with correct owning layer
-                initialize_tensor_info(tensor_ptr, layer);
+                initialize_tensor_info(tensor_ptr, layer, param_ptr);
             }
         }
     }
 }
 
-auto OffloadContext::initialize_tensor_info(Tensor* tensor, Module* layer) -> void {
+auto OffloadContext::initialize_tensor_info(Tensor* tensor, Module* layer,
+                                            std::shared_ptr<Variable> owner) -> void {
     if (!tensor) return;
 
     TensorInfo info;
     info.tensor = tensor;
+    info.owner = std::move(owner);
     // For CPU-start models, use target_device for computation; otherwise use tensor's current device
     info.original_device = (tensor->device().type == Device::Type::CPU)
                            ? config_.target_device
@@ -796,7 +850,7 @@ auto OffloadContext::forward_pre_hook(Module* layer) -> void {
     finalize_completed_offloads();
 
     // Helper lambda to load a tensor to GPU
-    auto load_tensor_to_gpu = [&](Tensor* tensor_ptr) {
+    auto load_tensor_to_gpu = [&](Tensor* tensor_ptr, const std::shared_ptr<Variable>& owner) {
         std::lock_guard<std::mutex> lock(tensor_map_mutex_);
         auto it = tensor_map_.find(tensor_ptr);
 
@@ -836,7 +890,7 @@ auto OffloadContext::forward_pre_hook(Module* layer) -> void {
             try {
                 // Initialize tensor info if not already tracked
                 if (it == tensor_map_.end()) {
-                    initialize_tensor_info(tensor_ptr, layer);
+                    initialize_tensor_info(tensor_ptr, layer, owner);
                     it = tensor_map_.find(tensor_ptr);
                 }
                 // Store CPU copy and load to GPU
@@ -858,7 +912,7 @@ auto OffloadContext::forward_pre_hook(Module* layer) -> void {
     auto params = layer->own_parameters();
     for (auto& param_ptr : params) {
         if (param_ptr) {
-            load_tensor_to_gpu(&(param_ptr->tensor()));
+            load_tensor_to_gpu(&(param_ptr->tensor()), param_ptr);
         }
     }
 
@@ -866,7 +920,7 @@ auto OffloadContext::forward_pre_hook(Module* layer) -> void {
     auto bufs = layer->own_buffers();
     for (auto& buf_ptr : bufs) {
         if (buf_ptr) {
-            load_tensor_to_gpu(&(buf_ptr->tensor()));
+            load_tensor_to_gpu(&(buf_ptr->tensor()), buf_ptr);
         }
     }
 
@@ -956,6 +1010,7 @@ auto OffloadContext::backward_post_hook(Module* layer) -> void {
                 if (tensor_map_.find(grad_tensor_ptr) == tensor_map_.end()) {
                     TensorInfo info;
                     info.tensor = grad_tensor_ptr;
+                    info.owner = param_ptr;  // grad lives inside this Variable
                     info.is_offloaded = false;
                     info.is_pinned = false;
                     info.is_gradient = true;

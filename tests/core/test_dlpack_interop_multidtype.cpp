@@ -124,8 +124,15 @@ TEST_P(DLPackInteropMultiDTypeTest, NonContiguousImportThrows) {
     managed->manager_ctx = nullptr;
     managed->deleter = [](DLManagedTensor* self) { delete self; };
 
-    EXPECT_THROW(from_dlpack(managed), std::runtime_error);
-    managed->deleter(managed);
+    // Audit F.8: non-contiguous DLPack tensors are now SUPPORTED on CPU —
+    // from_dlpack copies the strided source into a fresh contiguous Tensor and
+    // takes ownership of `managed` (invoking the producer deleter itself), so
+    // we must NOT call the deleter again here (that double-free segfaulted).
+    Tensor imported = from_dlpack(managed);
+    EXPECT_TRUE(imported.is_contiguous());
+    ASSERT_EQ(imported.ndim(), 2);
+    EXPECT_EQ(imported.shape()[0], 2);
+    EXPECT_EQ(imported.shape()[1], 3);
 }
 
 // ---------------------------------------------------------------------------

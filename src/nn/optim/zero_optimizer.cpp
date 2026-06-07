@@ -496,15 +496,23 @@ auto ZeROStage1Optimizer::state_dict_unlocked() const -> std::unordered_map<std:
     state["world_size"] = Tensor({1}, DType::Int32, Device::cpu());
     state["world_size"].fill_(config_.world_size);
 
-    // Add optimizer states
+    // Adam step counter — must round-trip, else a restored optimizer applies
+    // t=1 bias correction instead of the trained step count, so its next step()
+    // diverges from continuing the original optimizer (state-roundtrip test).
+    state["step_count"] = Tensor({1}, DType::Int64, Device::cpu());
+    state["step_count"].fill_(static_cast<double>(step_count_));
+
+    // Add optimizer states. clone() so the snapshot is independent of the live
+    // buffers — a later step() that updates momentum/variance in place would
+    // otherwise retroactively corrupt the saved state.
     for (size_t i = 0; i < partition.momentum.size(); ++i) {
         std::string key = "momentum_" + std::to_string(i);
-        state[key] = partition.momentum[i];
+        state[key] = partition.momentum[i].clone();
     }
 
     for (size_t i = 0; i < partition.variance.size(); ++i) {
         std::string key = "variance_" + std::to_string(i);
-        state[key] = partition.variance[i];
+        state[key] = partition.variance[i].clone();
     }
 
     return state;
@@ -539,6 +547,11 @@ auto ZeROStage1Optimizer::load_state_dict_unlocked(
                 ", current=" + std::to_string(config_.world_size)
             );
         }
+    }
+
+    // Restore the Adam step counter (bias correction); see state_dict_unlocked.
+    if (state.count("step_count")) {
+        step_count_ = state.at("step_count").to(Device::cpu()).data<int64_t>()[0];
     }
 
     // Load optimizer states

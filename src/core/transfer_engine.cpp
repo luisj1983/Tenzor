@@ -247,6 +247,27 @@ auto TransferEngine::create_staging_buffer(VkDeviceSize size, VkBuffer& buffer, 
 // ============================================================================
 
 TransferState::~TransferState() {
+    // The destructor releases `source` (and possibly `result`). If the async
+    // copy is still in flight, freeing those buffers now reintroduces the
+    // exact use-after-free this state exists to prevent (see `source` in the
+    // header) — so wait for completion first. For finalized handles the event
+    // has already signalled and these waits are no-ops.
+#ifdef TENZOR_USE_ONEAPI
+    if (has_sycl_event) {
+        try { sycl_event.wait(); } catch (...) { /* device teardown */ }
+    }
+#endif
+#ifdef TENZOR_USE_CUDA
+    if (event && !completed.load(std::memory_order_acquire)) {
+        cudaEventSynchronize(event);  // ignore errors at teardown
+    }
+#endif
+#ifdef TENZOR_USE_ROCM
+    if (hip_event && !completed.load(std::memory_order_acquire)) {
+        hipEventSynchronize(hip_event);  // ignore errors at teardown
+    }
+#endif
+
 #ifdef TENZOR_USE_CUDA
     if (event && engine) {
         engine->return_event(event);
@@ -977,6 +998,7 @@ auto TransferEngine::cpu_to_gpu_async(
         HIP_CHECK(hipEventRecord(event, stream));
 
         state->result = gpu_tensor;
+        state->source = cpu_tensor;  // keep source alive until DMA completes
         state->hip_event = event;
         state->hip_stream = stream;
 
@@ -1005,6 +1027,7 @@ auto TransferEngine::cpu_to_gpu_async(
         try {
             sycl::event event = queue.memcpy(gpu_tensor.data_ptr(), cpu_tensor.data_ptr(), bytes);
             state->result = gpu_tensor;
+        state->source = cpu_tensor;  // keep source alive until DMA completes
             state->sycl_event = event;
             state->has_sycl_event = true;
 
@@ -1086,6 +1109,7 @@ auto TransferEngine::gpu_to_cpu_async(const Tensor& gpu_tensor) -> TransferHandl
                 return_hip_event(event);
                 state->pinned_buffer = pinned;
                 state->result = cpu_result;
+        state->source = gpu_tensor;  // keep source alive until DMA completes
                 state->completed.store(true, std::memory_order_release);
             } else {
                 HIP_CHECK(hipMemcpyAsync(dst_ptr, src_ptr, bytes, hipMemcpyDeviceToHost, stream));
@@ -1094,6 +1118,7 @@ auto TransferEngine::gpu_to_cpu_async(const Tensor& gpu_tensor) -> TransferHandl
                 HIP_CHECK(hipEventRecord(event, stream));
 
                 state->result = cpu_result;
+        state->source = gpu_tensor;  // keep source alive until DMA completes
                 state->hip_event = event;
                 state->hip_stream = stream;
             }
@@ -1104,6 +1129,7 @@ auto TransferEngine::gpu_to_cpu_async(const Tensor& gpu_tensor) -> TransferHandl
             HIP_CHECK(hipEventRecord(event, stream));
 
             state->result = cpu_result;
+        state->source = gpu_tensor;  // keep source alive until DMA completes
             state->hip_event = event;
             state->hip_stream = stream;
         }
@@ -1133,6 +1159,7 @@ auto TransferEngine::gpu_to_cpu_async(const Tensor& gpu_tensor) -> TransferHandl
         try {
             sycl::event event = queue.memcpy(cpu_result.data_ptr(), gpu_tensor.data_ptr(), bytes);
             state->result = cpu_result;
+        state->source = gpu_tensor;  // keep source alive until DMA completes
             state->sycl_event = event;
             state->has_sycl_event = true;
 
@@ -1257,6 +1284,7 @@ auto TransferEngine::process_transfer(const TransferRequest& request) -> void {
         CUDA_CHECK(cudaEventRecord(event, stream));
         request.state->event = event;
         request.state->result = gpu_tensor;
+        // (source is already retained by request.source for the queued path)
 
         request.state->cv.notify_all();
 

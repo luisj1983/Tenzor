@@ -804,16 +804,29 @@ auto InferenceServer::serve_loop() -> void {
     std::cout << "[TenzorServing] HTTP server listening on port " << config_.http_port << std::endl;
     svr.listen("0.0.0.0", config_.http_port);
 #else
-    // G.12: per the audit, the non-httplib fallback (which previously
-    // entered a silent 100ms-sleep busy-loop pretending to serve) has
-    // been removed. The build-time static_assert above guarantees that
-    // some HTTP/gRPC transport is configured, so reaching this branch
-    // means the build picked a transport other than httplib — surface a
-    // typed runtime error rather than silently no-op'ing.
-    throw std::runtime_error(
-        "tenzor::serving::InferenceServer::serve_loop: this build has "
-        "no httplib transport. Configure with TENZOR_BUILD_SERVING=ON "
-        "or call the gRPC server entry point instead.");
+    // No HTTP transport compiled in (TENZOR_BUILD_SERVING=OFF). serve_loop runs
+    // on the background server_thread_, so throwing here is fatal: an uncaught
+    // exception on a non-main thread calls std::terminate and aborts the whole
+    // process (this broke the start/stop lifecycle — start() returns, then the
+    // serve thread throws asynchronously and kills the process). start() also
+    // cannot throw synchronously because callers legitimately expect a server
+    // built without a transport to support the lifecycle API (construct, start,
+    // query repository/router, stop) — only actual request serving is
+    // unavailable.
+    //
+    // So address the G.12 audit's real concern — "don't *silently* pretend to
+    // serve" — by emitting one loud warning, then idling on running_ until
+    // stop() clears it, allowing a clean join(). This is observable (not
+    // silent) and lifecycle-safe (not a process abort).
+    std::cerr << "[TenzorServing] WARNING: this build has no HTTP transport "
+                 "(TENZOR_BUILD_SERVING=OFF). start()/stop() are supported but "
+                 "no HTTP requests will be served. Configure with "
+                 "TENZOR_BUILD_SERVING=ON for httplib, or use the gRPC server "
+                 "entry point."
+              << std::endl;
+    while (running_.load(std::memory_order_acquire)) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
 #endif
 }
 

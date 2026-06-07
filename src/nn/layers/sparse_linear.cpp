@@ -212,15 +212,23 @@ auto SparseLinear::sync_sparse_weight_values() -> void {
         return;
     }
     const auto& cur_values = it->second->tensor();
-    // Fast path: storage already matches — nothing to do.
-    if (cur_values.data_ptr() == sparse_weight_->values().data_ptr()) {
+    // Fast path: storage already matches AND device already consistent.
+    if (cur_values.data_ptr() == sparse_weight_->values().data_ptr() &&
+        sparse_weight_->crow_indices().device().type == cur_values.device().type) {
         return;
     }
+    // module.to(device) moves the registered "sparse_weight.values" Parameter
+    // but NOT the SparseTensor member's CSR index tensors. Rebuilding the CSR
+    // with the moved (e.g. OneAPI) values but stale CPU crow/col indices yields
+    // a mixed-device SparseTensor → spmm throws "tensors must be on the same
+    // device". Move the indices onto the values' device so the pattern follows
+    // the parameter across .to() (no-op when already co-located).
+    auto crow = sparse_weight_->crow_indices();
+    auto col  = sparse_weight_->col_indices();
+    if (crow.device().type != cur_values.device().type) crow = crow.to(cur_values.device());
+    if (col.device().type  != cur_values.device().type) col  = col.to(cur_values.device());
     sparse_weight_ = SparseTensor::sparse_csr(
-        sparse_weight_->crow_indices(),
-        sparse_weight_->col_indices(),
-        cur_values,
-        sparse_weight_->shape());
+        crow, col, cur_values, sparse_weight_->shape());
 }
 
 auto SparseLinear::forward_impl(const Variable& input) -> Variable {

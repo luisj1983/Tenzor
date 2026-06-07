@@ -109,7 +109,7 @@ def test_variable_getitem_tuple_all_slices_keeps_grad_flow():
 
 def test_variable_getitem_fancy_keeps_grad_flow():
     x = tz.Variable(tz.randn([6, 4], tz.dtype.float32), True)
-    idx = tz.Tensor([0, 2, 5], tz.dtype.int64)
+    idx = tz.tensor([0, 2, 5], tz.dtype.int64)  # from-data (lowercase); Tensor([...]) would be a shape
     y = x[idx]                     # shape [3, 4]
     loss = tz.sum(y)
     loss.backward()
@@ -123,7 +123,7 @@ def test_variable_getitem_fancy_keeps_grad_flow():
 def test_variable_getitem_bool_mask_keeps_grad_flow():
     x = tz.Variable(tz.randn([5, 3], tz.dtype.float32), True)
     # Mask along dim-0: pick rows 0, 2, 4.
-    mask = tz.Tensor([True, False, True, False, True], tz.dtype.bool)
+    mask = tz.tensor([True, False, True, False, True], tz.dtype.bool)  # from-data (lowercase)
     y = x[mask]                    # shape [3, 3]
     loss = tz.sum(y)
     loss.backward()

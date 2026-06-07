@@ -279,6 +279,11 @@ enum class OpId : uint16_t {
     // audit Q.4.
     GridSampleBackward = 700,  // audit Q.4: backward of F.grid_sample
     AffineGridBackward = 701,  // audit Q.4: backward of F.affine_grid
+    // ConvTranspose1dForward occupies a free slot (698) inside the pinned
+    // OP_COUNT=702 table, so it needs no resize. A dedicated 1-D transpose-conv
+    // op lets the JIT tracer / ONNX exporter see a faithful 1-spatial-dim
+    // ConvTranspose with a 3-D weight (instead of the lossy unsqueeze→2D path).
+    ConvTranspose1dForward = 698,
 
     // =========================================================================
     // Fused Operations (210-229)

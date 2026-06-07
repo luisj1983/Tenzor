@@ -1,7 +1,18 @@
 #include "tenzor/backend/dispatch.hpp"
 #include "tenzor/backend/loader.hpp"
+#include "tenzor/backend/dispatch_interceptor.hpp"
 
 namespace tenzor {
+
+// Single out-of-line definition of the dispatch-interceptor thread-local stack.
+// Defining it here (one TU) guarantees a single thread_local instance shared by
+// every push()/pop()/depth()/run() caller across all translation units; a
+// header-inline definition could be duplicated, causing interceptors (e.g. the
+// JIT tracer) to be invisible to dispatches made from other TUs.
+auto DispatchInterceptorStack::stack_() -> std::vector<DispatchInterceptor>& {
+    static thread_local std::vector<DispatchInterceptor> s;
+    return s;
+}
 
 auto Dispatcher::get_backend(std::span<const Tensor> tensors) -> Backend* {
     if (tensors.empty()) {

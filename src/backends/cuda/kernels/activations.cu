@@ -1689,17 +1689,17 @@ __global__ void leaky_relu_inplace_fp16_kernel(__half* data, float alpha, int64_
     }
 }
 
-// In-place GELU: x = 0.5 * x * (1 + tanh(sqrt(2/pi) * (x + 0.044715 * x^3)))
+// In-place GELU — exact erf form 0.5 * x * (1 + erf(x / sqrt(2))), matching
+// PyTorch's default ('none'), the out-of-place CUDA kernel above, and every
+// other backend. The previous tanh approximation differed from the exact
+// form by up to ~5e-4, which broke cross-backend parity (InplaceOpsParity).
 template<typename T>
 __global__ void gelu_inplace_cuda_kernel(T* data, int64_t n) {
-    constexpr T sqrt_2_over_pi = T(0.7978845608028654);
-    constexpr T coeff = T(0.044715);
+    constexpr T inv_sqrt2 = T(0.7071067811865475);
 
     TENZOR_CUDA_KERNEL_LOOP(idx, n) {
         T x = data[idx];
-        T x_cubed = x * x * x;
-        T inner = sqrt_2_over_pi * (x + coeff * x_cubed);
-        data[idx] = T(0.5) * x * (T(1) + tanh(inner));
+        data[idx] = T(0.5) * x * (T(1) + erf(x * inv_sqrt2));
     }
 }
 
@@ -1708,9 +1708,7 @@ template<>
 __global__ void gelu_inplace_cuda_kernel<__half>(__half* data, int64_t n) {
     TENZOR_CUDA_KERNEL_LOOP(idx, n) {
         float x = __half2float(data[idx]);
-        float x_cubed = x * x * x;
-        float inner = 0.7978845608028654f * (x + 0.044715f * x_cubed);
-        data[idx] = __float2half(0.5f * x * (1.0f + tanhf(inner)));
+        data[idx] = __float2half(0.5f * x * (1.0f + erff(x * 0.7071067811865475f)));
     }
 }
 
@@ -1719,9 +1717,7 @@ template<>
 __global__ void gelu_inplace_cuda_kernel<__nv_bfloat16>(__nv_bfloat16* data, int64_t n) {
     TENZOR_CUDA_KERNEL_LOOP(idx, n) {
         float x = __bfloat162float(data[idx]);
-        float x_cubed = x * x * x;
-        float inner = 0.7978845608028654f * (x + 0.044715f * x_cubed);
-        data[idx] = __float2bfloat16(0.5f * x * (1.0f + tanhf(inner)));
+        data[idx] = __float2bfloat16(0.5f * x * (1.0f + erff(x * 0.7071067811865475f)));
     }
 }
 
@@ -2634,7 +2630,7 @@ auto gelu_backward_kernel(const Tensor& grad_output, const Tensor& input, cudaSt
 }
 
 // Leaky ReLU wrapper - uses vectorized float4 for 4x memory throughput on Float32
-auto leaky_relu_kernel(const Tensor& input, float alpha, cudaStream_t stream) -> Tensor {
+auto leaky_relu_kernel(const Tensor& input, double alpha, cudaStream_t stream) -> Tensor {
     int64_t n = input.numel();
     std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
     Tensor result(shape, input.dtype(), input.device());
@@ -2705,7 +2701,7 @@ auto leaky_relu_kernel(const Tensor& input, float alpha, cudaStream_t stream) ->
 }
 
 // Leaky ReLU backward wrapper
-auto leaky_relu_backward_kernel(const Tensor& grad_output, const Tensor& input, float alpha, cudaStream_t stream) -> Tensor {
+auto leaky_relu_backward_kernel(const Tensor& grad_output, const Tensor& input, double alpha, cudaStream_t stream) -> Tensor {
     int64_t n = input.numel();
     std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
     Tensor result(shape, input.dtype(), input.device());
@@ -3175,6 +3171,20 @@ auto softmax_kernel(const Tensor& input, int64_t dim, cudaStream_t stream) -> Te
         throw std::invalid_argument("Dimension out of range for softmax");
     }
 
+    // The kernel below flattens to a contiguous [batch, dim_size] layout with
+    // the softmax axis innermost, which is only valid for a CONTIGUOUS tensor
+    // whose softmax axis is the last dimension. For a non-contiguous input
+    // (e.g. a transposed view) or a non-last axis it read the wrong elements
+    // (the stride-from-shape audit bug). Normalise by moving `dim` to the last
+    // axis and materialising a contiguous copy, then transpose the result back.
+    const int64_t last = ndim - 1;
+    if (dim != last || !input.is_contiguous()) {
+        Tensor norm = (dim == last) ? input.contiguous()
+                                    : input.transpose(dim, last).contiguous();
+        Tensor out = softmax_kernel(norm, last, stream);
+        return (dim == last) ? out : out.transpose(dim, last).contiguous();
+    }
+
     // For simplicity, assume softmax over last dimension (reshape if needed)
     // Calculate batch size and dimension size
     int64_t batch_size = 1;
@@ -3240,6 +3250,19 @@ auto softmax_backward_kernel(const Tensor& grad_output, const Tensor& output, in
     int64_t ndim = static_cast<int64_t>(shape.size());
     if (dim < 0) dim += ndim;
 
+    // Stride-from-shape normalisation (see softmax_kernel): the flattened
+    // [batch, dim_size] backward kernel requires both grad_output and output to
+    // be contiguous with the softmax axis last.
+    const int64_t last = ndim - 1;
+    if (dim != last || !grad_output.is_contiguous() || !output.is_contiguous()) {
+        Tensor g = (dim == last) ? grad_output.contiguous()
+                                 : grad_output.transpose(dim, last).contiguous();
+        Tensor o = (dim == last) ? output.contiguous()
+                                 : output.transpose(dim, last).contiguous();
+        Tensor gi = softmax_backward_kernel(g, o, last, stream);
+        return (dim == last) ? gi : gi.transpose(dim, last).contiguous();
+    }
+
     int64_t batch_size = 1;
     for (int64_t i = 0; i < dim; ++i) {
         batch_size *= shape[i];
@@ -3304,6 +3327,16 @@ auto log_softmax_kernel(const Tensor& input, int64_t dim, cudaStream_t stream) -
     int64_t ndim = static_cast<int64_t>(shape.size());
     if (dim < 0) dim += ndim;
 
+    // Same stride-from-shape normalisation as softmax_kernel: the flattened
+    // [batch, dim_size] kernel is only valid for a contiguous, last-axis input.
+    const int64_t last = ndim - 1;
+    if (dim != last || !input.is_contiguous()) {
+        Tensor norm = (dim == last) ? input.contiguous()
+                                    : input.transpose(dim, last).contiguous();
+        Tensor out = log_softmax_kernel(norm, last, stream);
+        return (dim == last) ? out : out.transpose(dim, last).contiguous();
+    }
+
     int64_t batch_size = 1;
     for (int64_t i = 0; i < dim; ++i) {
         batch_size *= shape[i];
@@ -3365,6 +3398,19 @@ auto log_softmax_backward_kernel(const Tensor& grad_output, const Tensor& output
 
     int64_t ndim = static_cast<int64_t>(shape.size());
     if (dim < 0) dim += ndim;
+
+    // Stride-from-shape normalisation (see softmax_kernel): the flattened
+    // [batch, dim_size] backward kernel requires both grad_output and output to
+    // be contiguous with the softmax axis last.
+    const int64_t last = ndim - 1;
+    if (dim != last || !grad_output.is_contiguous() || !output.is_contiguous()) {
+        Tensor g = (dim == last) ? grad_output.contiguous()
+                                 : grad_output.transpose(dim, last).contiguous();
+        Tensor o = (dim == last) ? output.contiguous()
+                                 : output.transpose(dim, last).contiguous();
+        Tensor gi = log_softmax_backward_kernel(g, o, last, stream);
+        return (dim == last) ? gi : gi.transpose(dim, last).contiguous();
+    }
 
     int64_t batch_size = 1;
     for (int64_t i = 0; i < dim; ++i) {

@@ -224,12 +224,16 @@ auto AWQQuantizer::quantize_layer(const Tensor& weight, const Tensor& act_scales
 
     // Prepare output tensors on CPU; move back to original device at the end.
     int64_t num_groups = (in_features + config_.group_size - 1) / config_.group_size;
-    // Per-channel scales (out_features, in_features): scales[row, j] = quant_scale / s[j],
-    // so dequant W_recon[row, j] = (q - zero) * scales[row, j] is EXACT (no geometric-mean
-    // approximation over the group's per-channel activation-scale factors). Zero points
-    // remain per-group.
-    auto scales = ops::zeros({out_features, in_features}, DType::Float32, Device::cpu());
+    // Standard AWQ group-wise quantization parameters:
+    //   scales / zeros: (out_features, num_groups) — one (scale, zero) per output
+    //     row per input-channel group. Storing one float scale per *channel* would
+    //     cost more bits than the 4-bit weight it quantizes, defeating the point.
+    //   act_scales: (in_features,) — the per-input-channel AWQ scaling factor s[j]
+    //     applied to the weights before quantization. Exact dequant is
+    //       W_recon[o,j] = (q[o,j] - zeros[o,g]) * scales[o,g] / act_scales[j].
+    auto scales = ops::zeros({out_features, num_groups}, DType::Float32, Device::cpu());
     auto zeros_tensor = ops::zeros({out_features, num_groups}, DType::Float32, Device::cpu());
+    auto act_scales_out = ops::zeros({in_features}, DType::Float32, Device::cpu());
 
     // Quantized weight in int32 (will be packed later)
     auto Q = ops::zeros({out_features, in_features}, DType::Int32, Device::cpu());
@@ -251,6 +255,7 @@ auto AWQQuantizer::quantize_layer(const Tensor& weight, const Tensor& act_scales
     auto* q_ptr = static_cast<int32_t*>(Q.data_ptr());
     auto* scales_ptr = static_cast<float*>(scales.data_ptr());
     auto* zeros_ptr = static_cast<float*>(zeros_tensor.data_ptr());
+    auto* act_scales_ptr = static_cast<float*>(act_scales_out.data_ptr());
 
     for (int64_t col_start = 0; col_start < in_features; col_start += config_.group_size) {
         int64_t col_end = std::min(col_start + config_.group_size, in_features);
@@ -258,6 +263,12 @@ auto AWQQuantizer::quantize_layer(const Tensor& weight, const Tensor& act_scales
         int64_t group_size = col_end - col_start;
 
         auto* s_ptr = static_cast<const float*>(group_scales[group_idx].data_ptr());
+
+        // Record the per-input-channel AWQ scale factors for this group so the
+        // weight pre-scaling can be undone at dequant/inference time.
+        for (int64_t j = 0; j < group_size; ++j) {
+            act_scales_ptr[col_start + j] = s_ptr[j];
+        }
 
         // Apply scaling to weight columns: W_scaled[:, j] = W[:, j] * s[j]
         // We modify W in-place for this group
@@ -293,18 +304,10 @@ auto AWQQuantizer::quantize_layer(const Tensor& weight, const Tensor& act_scales
                                   static_cast<float>(qmax));
             }
 
-            // We scaled W by s before quantizing, so the exact per-column dequant is
-            //   W_recon[:, j] = (q - zero) * (scale / s[j]).
-            // We store the per-channel scale (scale / s[j]) directly below, so the
-            // reconstruction is exact rather than a per-group geometric-mean approximation.
-
-            // Exact per-channel scale: fold the quant scale with the inverse of each
-            // column's activation-scale factor s[j] (replaces the prior geometric-mean
-            // approximation, which was only correct up to a per-group constant).
-            for (int64_t j = 0; j < group_size; ++j) {
-                scales_ptr[row * in_features + (col_start + j)] =
-                    scale / std::max(s_ptr[j], 1e-8f);
-            }
+            // Store the per-group quant scale and zero point. The per-channel AWQ
+            // factor s[j] is recorded separately in act_scales; exact dequant is
+            //   W_recon[row, j] = (q - zero) * scale / act_scales[j].
+            scales_ptr[row * num_groups + group_idx] = scale;
             zeros_ptr[row * num_groups + group_idx] = zero;
 
             // Quantize each column in this group
@@ -343,12 +346,14 @@ auto AWQQuantizer::quantize_layer(const Tensor& weight, const Tensor& act_scales
         packed = packed.to(original_device);
         scales = scales.to(original_device);
         zeros_tensor = zeros_tensor.to(original_device);
+        act_scales_out = act_scales_out.to(original_device);
     }
 
     return AWQResult{
         .quantized_weight = std::move(packed),
         .scales = std::move(scales),
-        .zeros = std::move(zeros_tensor)
+        .zeros = std::move(zeros_tensor),
+        .act_scales = std::move(act_scales_out)
     };
 }
 

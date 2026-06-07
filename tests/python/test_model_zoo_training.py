@@ -97,8 +97,15 @@ class TestResNet18Depth:
         tz.manual_seed(0)
         model = tz.models.resnet18(num_classes=10)
         model.train()
-        x = tz.Variable(tz.randn([2, 3, 32, 32]), False)
-        target = tz.Variable(tz.randn([2, 10]), False)
+        # Batch size must be large enough for train-mode BatchNorm to be
+        # numerically stable. With batch=2 the per-channel variance is computed
+        # over just 2 samples, so the normalization (and its gradient) is
+        # dominated by noise and the loss oscillates instead of decreasing —
+        # even though the model is training correctly. batch=8 keeps BN gradients
+        # well-conditioned, so the loss decreases monotonically over the window.
+        # (Verified: bs=2 oscillates 1.51↔1.93; bs=8 decreases monotonically.)
+        x = tz.Variable(tz.randn([8, 3, 32, 32]), False)
+        target = tz.Variable(tz.randn([8, 10]), False)
 
         # Small lr to keep BatchNorm stats and weight updates stable —
         # without proper LR scheduling ResNet18 diverges quickly on

@@ -150,8 +150,10 @@ TEST_P(OptimizerTestSGDZeroGrad, ZeroGrad) {
     auto params = std::vector<std::shared_ptr<Variable>>{param};
     auto optimizer = SGD(params, 0.1);
 
-    // Zero gradients
-    optimizer.zero_grad();
+    // Zero gradients in place (set_to_none=false) so the slot stays allocated
+    // and the zeroed values are observable; the default set_to_none=true would
+    // drop the grad slot entirely.
+    optimizer.zero_grad(/*set_to_none=*/false);
 
     // Check gradient is zero
     ASSERT_TRUE(param->has_grad()) << "Failed on " << device.to_string();
@@ -349,7 +351,9 @@ TEST_P(OptimizerTestAdamZeroGrad, ZeroGrad) {
     auto params = std::vector<std::shared_ptr<Variable>>{param};
     auto optimizer = Adam(params, 0.001);
 
-    optimizer.zero_grad();
+    // set_to_none=false: zero the gradient in place so it stays allocated and
+    // its values are observable (the default set_to_none=true drops the slot).
+    optimizer.zero_grad(/*set_to_none=*/false);
 
     ASSERT_TRUE(param->has_grad()) << "Failed on " << device.to_string();
     auto grad_cpu = param->grad().value().to(Device::cpu());

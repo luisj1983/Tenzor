@@ -729,8 +729,13 @@ auto decode_boxes(const Tensor& deltas, const Tensor& anchors,
     // Decode
     auto pred_cx = dx * anchors_w + anchors_cx;
     auto pred_cy = dy * anchors_h + anchors_cy;
-    auto pred_w = exp(dw) * anchors_w;
-    auto pred_h = exp(dh) * anchors_h;
+    // Clamp width/height deltas before exp to avoid overflow to +inf on large
+    // (e.g. untrained/random) deltas — the standard Faster/Mask-RCNN
+    // bbox_xform_clip = log(1000/16). Without it, exp(dw) can become inf and
+    // poison every downstream box coordinate.
+    const double bbox_xform_clip = std::log(1000.0 / 16.0);
+    auto pred_w = exp(clamp(dw, -bbox_xform_clip, bbox_xform_clip)) * anchors_w;
+    auto pred_h = exp(clamp(dh, -bbox_xform_clip, bbox_xform_clip)) * anchors_h;
 
     // Convert back to (x1, y1, x2, y2)
     auto pred_x1 = pred_cx - pred_w * 0.5f;

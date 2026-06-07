@@ -200,6 +200,41 @@ auto gather_kernel(const Tensor& input, int64_t dim, const Tensor& index, sycl::
             output_ptr[flat_idx] = input_ptr[input_idx];
         });
     }
+    else if (input.dtype() != DType::QInt4x2 &&
+             (input.dtype_size() == 1 || input.dtype_size() == 2 ||
+              input.dtype_size() == 4 || input.dtype_size() == 8 ||
+              input.dtype_size() == 16)) {
+        // Generic gather for any remaining fixed-width dtype (Int16/UInt16/32/64,
+        // Complex64/128): pure element movement keyed by byte width.
+        const int64_t* index_ptr = get_data_ptr<const int64_t>(index);
+        auto gen = [&]<typename U>(int64_t lanes) {
+            const U* in_ptr = get_data_ptr<const U>(input);
+            U* out_ptr = get_data_ptr<U>(output);
+            queue.parallel_for(sycl::range<1>(numel), [=](sycl::id<1> flat_idx) {
+                int64_t temp = flat_idx, input_idx = 0;
+                for (size_t d = 0; d < ndims; ++d) {
+                    int64_t coord = temp / index_strides_arr[d];
+                    temp %= index_strides_arr[d];
+                    if (static_cast<int64_t>(d) == dim) {
+                        int64_t iv = index_ptr[flat_idx];
+                        if (iv < 0) iv += input_shape_arr[d];
+                        input_idx += iv * input_strides_arr[d];
+                    } else {
+                        input_idx += coord * input_strides_arr[d];
+                    }
+                }
+                for (int64_t l = 0; l < lanes; ++l)
+                    out_ptr[flat_idx * lanes + l] = in_ptr[input_idx * lanes + l];
+            });
+        };
+        switch (input.dtype_size()) {
+            case 1:  gen.template operator()<uint8_t>(1);  break;
+            case 2:  gen.template operator()<uint16_t>(1); break;
+            case 4:  gen.template operator()<uint32_t>(1); break;
+            case 8:  gen.template operator()<uint64_t>(1); break;
+            case 16: gen.template operator()<uint64_t>(2); break;
+        }
+    }
     else {
         throw std::runtime_error("Unsupported dtype for gather");
     }
@@ -245,6 +280,10 @@ auto scatter_kernel(const Tensor& input, int64_t dim, const Tensor& index,
         const uint16_t* in_ptr = get_data_ptr<const uint16_t>(input_cont);
         uint16_t* out_ptr = get_data_ptr<uint16_t>(output);
         queue.memcpy(out_ptr, in_ptr, bytes).wait();
+    } else {
+        // Any other dtype (int/uint/complex): the seed copy is pure bytes.
+        queue.memcpy(const_cast<void*>(output.data_ptr()),
+                     input_cont.data_ptr(), bytes).wait();
     }
 
     auto index_shape_span = index.shape();
@@ -311,10 +350,22 @@ auto scatter_kernel(const Tensor& input, int64_t dim, const Tensor& index,
             }).wait();
     };
 
+    struct U128 { uint64_t a, b; };
     if (input.dtype() == DType::Float32)  run.template operator()<float>();
     else if (input.dtype() == DType::Float64) run.template operator()<double>();
     else if (input.dtype() == DType::Float16) run.template operator()<sycl::half>();
     else if (input.dtype() == DType::BFloat16) run.template operator()<uint16_t>();
+    else if (input.dtype() == DType::Int8)   run.template operator()<int8_t>();
+    else if (input.dtype() == DType::Int16)  run.template operator()<int16_t>();
+    else if (input.dtype() == DType::Int32)  run.template operator()<int32_t>();
+    else if (input.dtype() == DType::Int64)  run.template operator()<int64_t>();
+    else if (input.dtype() == DType::UInt8)  run.template operator()<uint8_t>();
+    else if (input.dtype() == DType::UInt16) run.template operator()<uint16_t>();
+    else if (input.dtype() == DType::UInt32) run.template operator()<uint32_t>();
+    else if (input.dtype() == DType::UInt64) run.template operator()<uint64_t>();
+    else if (input.dtype() == DType::Bool)   run.template operator()<uint8_t>();
+    else if (input.dtype() == DType::Complex64)  run.template operator()<uint64_t>();   // 8 bytes
+    else if (input.dtype() == DType::Complex128) run.template operator()<U128>();        // 16 bytes
     else {
         throw std::runtime_error("Unsupported dtype for scatter");
     }
@@ -521,6 +572,40 @@ auto index_select_kernel(const Tensor& input, int64_t dim, const Tensor& index, 
             output_ptr[flat_idx] = input_ptr[input_idx];
         });
     }
+    else if (input.dtype() != DType::QInt4x2 &&
+             (input.dtype_size() == 1 || input.dtype_size() == 2 ||
+              input.dtype_size() == 4 || input.dtype_size() == 8 ||
+              input.dtype_size() == 16)) {
+        // Generic index_select for any remaining fixed-width dtype.
+        const int64_t* index_ptr = get_data_ptr<const int64_t>(index);
+        auto gen = [&]<typename U>(int64_t lanes) {
+            const U* input_ptr = get_data_ptr<const U>(input);
+            U* output_ptr = get_data_ptr<U>(output);
+            queue.parallel_for(sycl::range<1>(numel), [=](sycl::id<1> flat_idx) {
+                int64_t temp = flat_idx, input_idx = 0;
+                for (size_t d = 0; d < ndims; ++d) {
+                    int64_t coord = temp / output_strides_arr[d];
+                    temp %= output_strides_arr[d];
+                    if (static_cast<int64_t>(d) == dim) {
+                        int64_t idx_val = index_ptr[coord];
+                        if (idx_val < 0) idx_val += input_shape_arr[d];
+                        input_idx += idx_val * input_strides_arr[d];
+                    } else {
+                        input_idx += coord * input_strides_arr[d];
+                    }
+                }
+                for (int64_t l = 0; l < lanes; ++l)
+                    output_ptr[flat_idx * lanes + l] = input_ptr[input_idx * lanes + l];
+            });
+        };
+        switch (input.dtype_size()) {
+            case 1:  gen.template operator()<uint8_t>(1);  break;
+            case 2:  gen.template operator()<uint16_t>(1); break;
+            case 4:  gen.template operator()<uint32_t>(1); break;
+            case 8:  gen.template operator()<uint64_t>(1); break;
+            case 16: gen.template operator()<uint64_t>(2); break;
+        }
+    }
     else {
         throw std::runtime_error("Unsupported dtype for index_select");
     }
@@ -578,6 +663,29 @@ auto masked_fill_kernel(const Tensor& input, const Tensor& mask, float value, sy
 
         queue.parallel_for<MaskedFillKernelBFloat16>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
             output_ptr[idx] = mask_ptr[idx] ? value_bf16 : input_ptr[idx];
+        });
+    }
+    else if (input.dtype() == DType::Complex64) {
+        // Fill with value + 0i; elements are interleaved (real, imag) floats.
+        const float* input_ptr = reinterpret_cast<const float*>(input.data_ptr());
+        const bool* mask_ptr = get_data_ptr<const bool>(mask);
+        float* output_ptr = reinterpret_cast<float*>(output.data_ptr());
+        const float value_f = value;
+        queue.parallel_for(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+            const size_t b = idx[0] * 2;
+            output_ptr[b]     = mask_ptr[idx] ? value_f : input_ptr[b];
+            output_ptr[b + 1] = mask_ptr[idx] ? 0.0f : input_ptr[b + 1];
+        });
+    }
+    else if (input.dtype() == DType::Complex128) {
+        const double* input_ptr = reinterpret_cast<const double*>(input.data_ptr());
+        const bool* mask_ptr = get_data_ptr<const bool>(mask);
+        double* output_ptr = reinterpret_cast<double*>(output.data_ptr());
+        const double value_d = value;
+        queue.parallel_for(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+            const size_t b = idx[0] * 2;
+            output_ptr[b]     = mask_ptr[idx] ? value_d : input_ptr[b];
+            output_ptr[b + 1] = mask_ptr[idx] ? 0.0 : input_ptr[b + 1];
         });
     }
     else {
@@ -649,9 +757,32 @@ auto masked_select_kernel(const Tensor& input, const Tensor& mask, sycl::queue& 
         scatter_impl(get_data_ptr<uint16_t>(output), get_data_ptr<const uint16_t>(input));
     }
     else {
-        sycl::free(d_mask_int, queue);
-        sycl::free(d_offsets, queue);
-        throw std::runtime_error("Unsupported dtype for masked_select");
+        // Size-generic scatter for the remaining dtypes (integers, Bool,
+        // Complex64/128): the gather is a bit-copy, so only element size
+        // matters. Complex64 moves as one 8-byte word, Complex128 as a
+        // 16-byte two-word struct.
+        const size_t esz = dtype_size(input.dtype());
+        if (esz == 1) {
+            scatter_impl(reinterpret_cast<uint8_t*>(output.data_ptr()),
+                         reinterpret_cast<const uint8_t*>(input.data_ptr()));
+        } else if (esz == 2) {
+            scatter_impl(reinterpret_cast<uint16_t*>(output.data_ptr()),
+                         reinterpret_cast<const uint16_t*>(input.data_ptr()));
+        } else if (esz == 4) {
+            scatter_impl(reinterpret_cast<uint32_t*>(output.data_ptr()),
+                         reinterpret_cast<const uint32_t*>(input.data_ptr()));
+        } else if (esz == 8) {
+            scatter_impl(reinterpret_cast<uint64_t*>(output.data_ptr()),
+                         reinterpret_cast<const uint64_t*>(input.data_ptr()));
+        } else if (esz == 16) {
+            struct alignas(16) W16 { uint64_t lo, hi; };
+            scatter_impl(reinterpret_cast<W16*>(output.data_ptr()),
+                         reinterpret_cast<const W16*>(input.data_ptr()));
+        } else {
+            sycl::free(d_mask_int, queue);
+            sycl::free(d_offsets, queue);
+            throw std::runtime_error("Unsupported dtype for masked_select");
+        }
     }
 
     sycl::free(d_mask_int, queue);
@@ -1122,6 +1253,56 @@ auto scatter_add_kernel(const Tensor& self, int64_t dim, const Tensor& index, co
                 atomic_out(out_ptr[out_offset]);
             atomic_out.fetch_add(src_ptr[flat]);
         }).wait();
+    } else if (self.dtype() == DType::UInt32 || self.dtype() == DType::UInt64) {
+        std::array<int64_t, 8> d_out_strides{}, d_idx_strides{};
+        for (int64_t d = 0; d < ndim; ++d) { d_out_strides[d] = out_strides[d]; d_idx_strides[d] = idx_strides[d]; }
+        const int64_t* idx_ptr = get_data_ptr<const int64_t>(index);
+        const int64_t nd = ndim, dm = dim, inum = idx_numel;
+        auto run_u = [&]<typename T>() {
+            T* out_ptr = get_data_ptr<T>(output);
+            const T* src_ptr = get_data_ptr<const T>(src);
+            queue.parallel_for(sycl::range<1>(inum), [=](sycl::id<1> id) {
+                int64_t flat = id[0], remaining = flat, out_offset = 0;
+                for (int64_t d = 0; d < nd; ++d) {
+                    int64_t coord = remaining / d_idx_strides[d];
+                    remaining %= d_idx_strides[d];
+                    out_offset += (d == dm) ? idx_ptr[flat] * d_out_strides[d] : coord * d_out_strides[d];
+                }
+                sycl::atomic_ref<T, sycl::memory_order::relaxed, sycl::memory_scope::device,
+                                 sycl::access::address_space::global_space> atomic_out(out_ptr[out_offset]);
+                atomic_out.fetch_add(src_ptr[flat]);
+            }).wait();
+        };
+        if (self.dtype() == DType::UInt32) run_u.template operator()<uint32_t>();
+        else run_u.template operator()<uint64_t>();
+    } else if (self.dtype() == DType::Int16 || self.dtype() == DType::UInt16) {
+        // 16-bit lacks atomic_ref support; accumulate in a 32-bit device buffer.
+        const int64_t total = self.numel();
+        int32_t* acc = sycl::malloc_device<int32_t>(total, queue);
+        std::array<int64_t, 8> d_out_strides{}, d_idx_strides{};
+        for (int64_t d = 0; d < ndim; ++d) { d_out_strides[d] = out_strides[d]; d_idx_strides[d] = idx_strides[d]; }
+        const int64_t* idx_ptr = get_data_ptr<const int64_t>(index);
+        const int64_t nd = ndim, dm = dim, inum = idx_numel;
+        auto run16 = [&]<typename T>() {
+            T* out_ptr = get_data_ptr<T>(output);
+            const T* src_ptr = get_data_ptr<const T>(src);
+            queue.parallel_for(sycl::range<1>(total), [=](sycl::id<1> i) { acc[i] = static_cast<int32_t>(out_ptr[i]); }).wait();
+            queue.parallel_for(sycl::range<1>(inum), [=](sycl::id<1> id) {
+                int64_t flat = id[0], remaining = flat, out_offset = 0;
+                for (int64_t d = 0; d < nd; ++d) {
+                    int64_t coord = remaining / d_idx_strides[d];
+                    remaining %= d_idx_strides[d];
+                    out_offset += (d == dm) ? idx_ptr[flat] * d_out_strides[d] : coord * d_out_strides[d];
+                }
+                sycl::atomic_ref<int32_t, sycl::memory_order::relaxed, sycl::memory_scope::device,
+                                 sycl::access::address_space::global_space> atomic_out(acc[out_offset]);
+                atomic_out.fetch_add(static_cast<int32_t>(src_ptr[flat]));
+            }).wait();
+            queue.parallel_for(sycl::range<1>(total), [=](sycl::id<1> i) { out_ptr[i] = static_cast<T>(acc[i]); }).wait();
+        };
+        if (self.dtype() == DType::Int16) run16.template operator()<int16_t>();
+        else run16.template operator()<uint16_t>();
+        sycl::free(acc, queue);
     } else if (self.dtype() == DType::Float16) {
         // Float16: use float32 accumulator since atomic_ref<half> not widely supported
         float* acc = sycl::malloc_device<float>(self.numel(), queue);

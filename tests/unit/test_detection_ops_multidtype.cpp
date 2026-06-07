@@ -76,10 +76,10 @@ TEST_P(DetectionOpsMultiDTypeTest, ROIAlignBasicForwardShape) {
     ROIAlign roi_align(7, 7, 1.0/16.0, 2);
 
     // Feature map: (N, C, H, W)
-    Variable features(Tensor({1, 512, 28, 28}, dtype(), device()), true);
+    Variable features = createInput({1, 512, 28, 28});
 
     // ROIs: (num_rois, 5) where each row is [batch_idx, x1, y1, x2, y2]
-    Tensor rois({10, 5}, dtype(), device());
+    Tensor rois = createZeros({10, 5});
 
     Variable output = roi_align.forward(features, rois);
 
@@ -92,8 +92,8 @@ TEST_P(DetectionOpsMultiDTypeTest, ROIAlignBasicForwardShape) {
 TEST_P(DetectionOpsMultiDTypeTest, ROIAlignGradientFlow) {
     ROIAlign roi_align(7, 7, 1.0/16.0, 2);
 
-    Variable features(Tensor({1, 256, 28, 28}, dtype(), device()), true);
-    Tensor rois({5, 5}, dtype(), device());
+    Variable features = createInput({1, 256, 28, 28});
+    Tensor rois = createZeros({5, 5});
 
     Variable output = roi_align.forward(features, rois);
     Variable loss = tenzor::sum(output);
@@ -109,8 +109,8 @@ TEST_P(DetectionOpsMultiDTypeTest, ROIAlignDifferentPoolSizes) {
     ROIAlign roi_align_7(7, 7, 1.0/16.0, 2);
     ROIAlign roi_align_14(14, 14, 1.0/16.0, 2);
 
-    Variable features(Tensor({1, 512, 56, 56}, dtype(), device()), true);
-    Tensor rois({3, 5}, dtype(), device());
+    Variable features = createInput({1, 512, 56, 56});
+    Tensor rois = createZeros({3, 5});
 
     Variable output_7 = roi_align_7.forward(features, rois);
     expectShape(output_7.tensor(), {3, 512, 7, 7});
@@ -127,8 +127,8 @@ TEST_P(DetectionOpsMultiDTypeTest, ROIAlignDifferentSamplingRatios) {
     ROIAlign roi_align_2(7, 7, 1.0/16.0, 2);
     ROIAlign roi_align_4(7, 7, 1.0/16.0, 4);
 
-    Variable features(Tensor({1, 512, 56, 56}, dtype(), device()), true);
-    Tensor rois({3, 5}, dtype(), device());
+    Variable features = createInput({1, 512, 56, 56});
+    Tensor rois = createZeros({3, 5});
 
     Variable output_2 = roi_align_2.forward(features, rois);
     Variable output_4 = roi_align_4.forward(features, rois);
@@ -299,8 +299,23 @@ TEST_P(DetectionOpsMultiDTypeTest, BoxEncodingDecoding) {
 }
 
 TEST_P(DetectionOpsMultiDTypeTest, BoxEncodingShape) {
-    Tensor boxes({20, 4}, dtype(), device());
-    Tensor anchors({20, 4}, dtype(), device());
+    // Valid corner boxes (x2 > x1, y2 > y1) so encode_boxes' log(w/aw) term
+    // is finite and non-zero. Zero/uninitialised inputs would make the widths
+    // zero and the encoding -inf.
+    std::vector<float> box_vals(20 * 4), anchor_vals(20 * 4);
+    for (int i = 0; i < 20; ++i) {
+        const float o = static_cast<float>(i);
+        box_vals[i * 4 + 0] = o;           box_vals[i * 4 + 1] = o;
+        box_vals[i * 4 + 2] = o + 10.0f;   box_vals[i * 4 + 3] = o + 12.0f;
+        anchor_vals[i * 4 + 0] = o + 1.0f; anchor_vals[i * 4 + 1] = o + 1.0f;
+        anchor_vals[i * 4 + 2] = o + 9.0f; anchor_vals[i * 4 + 3] = o + 11.0f;
+    }
+    Tensor boxes = from_data(box_vals.data(), {20, 4}, device());
+    Tensor anchors = from_data(anchor_vals.data(), {20, 4}, device());
+    if (dtype() != DType::Float32) {
+        boxes = boxes.to(dtype());
+        anchors = anchors.to(dtype());
+    }
 
     auto encoded = encode_boxes(boxes, anchors);
 

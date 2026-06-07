@@ -569,6 +569,9 @@ _LOSS_TYPES = tuple(
     if name.endswith("Loss")
     and isinstance(obj := getattr(_core.nn, name, None), type)
 )
+# The walrus target `obj` above binds in this (module) scope, leaking a stray
+# `tenzor.nn.obj` symbol into the public surface (.pyi parity drift). Drop it.
+del obj
 
 
 class _LossMeta(type(Module)):

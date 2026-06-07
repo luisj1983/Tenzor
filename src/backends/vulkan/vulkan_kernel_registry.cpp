@@ -1462,8 +1462,10 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
     });
 
     table.register_kernel(OpId::GRUForward, [](std::span<const Tensor> inputs, const OpAttributes&) {
+        // inputs: [input, W_ih, W_hh, bias_ih, h0, bias_hh] — bias_hh optional.
+        Tensor bias_hh = (inputs.size() > 5) ? inputs[5] : Tensor{};
         return get_vulkan_backend()->dispatchGRUForward(
-            inputs[0], inputs[1], inputs[2], inputs[3], inputs[4]);
+            inputs[0], inputs[1], inputs[2], inputs[3], inputs[4], bias_hh);
     });
 
     table.register_kernel(OpId::LSTMMultiLayerForward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
@@ -1616,10 +1618,15 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
         TENZOR_READ_CONV2D_ATTRS();
         int64_t offset_groups = attrs.get_int(AttrKey::OffsetGroups, 1);
         bool use_mask = attrs.get_int(AttrKey::UseMask, 0) != 0;
+        // bias (inputs[3]) and mask (inputs[4]) are optional; std::span has
+        // no bounds checking and indexing past size() crashed (no-mask form).
+        Tensor empty_t = Tensor({0}, inputs[0].dtype(), inputs[0].device());
+        const Tensor& dcf_bias = inputs.size() > 3 ? inputs[3] : empty_t;
+        const Tensor& dcf_mask = inputs.size() > 4 ? inputs[4] : empty_t;
         return std::vector<Tensor>{get_vulkan_backend()->dispatchDeformableConv2dForward(
-            inputs[0], inputs[1], inputs[2], inputs[3], inputs[4],
+            inputs[0], inputs[1], inputs[2], dcf_bias, dcf_mask,
             stride[0], stride[1], padding[0], padding[1], dilation[0], dilation[1],
-            groups, offset_groups, use_mask)};
+            groups, offset_groups, use_mask && inputs.size() > 4)};
     });
 
     // DeformableConv2dBackwardInput — inputs: {grad_output, input, offset, weight, mask}
@@ -1628,10 +1635,13 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
         TENZOR_READ_CONV2D_ATTRS();
         int64_t offset_groups = attrs.get_int(AttrKey::OffsetGroups, 1);
         bool use_mask = attrs.get_int(AttrKey::UseMask, 0) != 0;
+        // mask (inputs[4]) is optional (no-mask form passes 4 inputs).
+        Tensor empty_t = Tensor({0}, inputs[1].dtype(), inputs[1].device());
+        const Tensor& dcb_mask = inputs.size() > 4 ? inputs[4] : empty_t;
         return get_vulkan_backend()->dispatchDeformableConv2dBackwardInput(
-            inputs[0], inputs[1], inputs[2], inputs[3], inputs[4],
+            inputs[0], inputs[1], inputs[2], inputs[3], dcb_mask,
             stride[0], stride[1], padding[0], padding[1], dilation[0], dilation[1],
-            groups, offset_groups, use_mask);
+            groups, offset_groups, use_mask && inputs.size() > 4);
     });
 
     // DeformableConv2dBackwardWeight — inputs: {grad_output, input, offset, mask}
@@ -1640,10 +1650,14 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
         int64_t offset_groups = attrs.get_int(AttrKey::OffsetGroups, 1);
         bool use_mask = attrs.get_int(AttrKey::UseMask, 0) != 0;
         auto weight_shape = attrs.get_int_list(AttrKey::WeightShape);
+        // mask (inputs[3]) is optional; std::span has no bounds checking and
+        // indexing past size() crashed on the no-mask call form.
+        Tensor empty_t = Tensor({0}, inputs[1].dtype(), inputs[1].device());
+        const Tensor& mask = inputs.size() > 3 ? inputs[3] : empty_t;
         return std::vector<Tensor>{get_vulkan_backend()->dispatchDeformableConv2dBackwardWeight(
-            inputs[0], inputs[1], inputs[2], inputs[3],
+            inputs[0], inputs[1], inputs[2], mask,
             stride[0], stride[1], padding[0], padding[1], dilation[0], dilation[1],
-            groups, offset_groups, use_mask, weight_shape)};
+            groups, offset_groups, use_mask && inputs.size() > 3, weight_shape)};
     });
 
     // DeformableConv2dBackwardBias — reuse regular conv2d bias backward (channel-wise sum)
@@ -2347,11 +2361,50 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
         return get_vulkan_backend()->dispatchLSTMCellForward(
             inputs[0], inputs[1], inputs[2], inputs[3], inputs[4], inputs[5], inputs[6]);
     });
-    table.register_kernel(OpId::LSTMCellBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        // inputs: [grad_h, grad_c_next, gates, c_prev, c_out]
+    table.register_kernel(OpId::LSTMCellBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs)
+        -> std::vector<Tensor> {
+        auto* vb = get_vulkan_backend();
+        // Canonical 11-input contract (matches CPU/tests):
+        // [d_hy, d_cy, input, hx, cx, hy, cy, w_ih, w_hh, b_ih, b_hh]
+        // -> 7 grads [grad_input, grad_hx, grad_cx, grad_w_ih, grad_w_hh, grad_b_ih, grad_b_hh].
+        if (inputs.size() >= 11) {
+            const Tensor& d_hy  = inputs[0];
+            const Tensor& d_cy  = inputs[1];
+            const Tensor& input = inputs[2];
+            const Tensor& hx    = inputs[3];
+            const Tensor& cx    = inputs[4];
+            const Tensor& cy    = inputs[6];
+            const Tensor& w_ih  = inputs[7];
+            const Tensor& w_hh  = inputs[8];
+            const int64_t batch_size  = input.shape()[0];
+            const int64_t hidden_size = hx.shape()[1];
+            // Recompute the gate pre-activations (cell backward needs them).
+            Tensor gates = vb->dispatchBinaryOp("add",
+                vb->dispatchMatmul(input, vb->dispatchTranspose(w_ih, 0, 1)),
+                vb->dispatchMatmul(hx, vb->dispatchTranspose(w_hh, 0, 1)));
+            if (inputs[9].numel() > 0)  gates = vb->dispatchBinaryOp("add", gates, inputs[9]);
+            if (inputs[10].numel() > 0) gates = vb->dispatchBinaryOp("add", gates, inputs[10]);
+            // Cell backward -> grad wrt gate pre-activations and wrt c_prev.
+            auto cell = vb->dispatchLSTMCellBackward(d_hy, d_cy, gates, cx, cy,
+                                                     batch_size, hidden_size);
+            const Tensor& d_gates = cell[0];
+            const Tensor& grad_cx = cell[1];
+            // Linear backward through gates = input@w_ih^T + hx@w_hh^T + b.
+            Tensor grad_input = vb->dispatchMatmul(d_gates, w_ih);                       // [B,in]
+            Tensor grad_hx    = vb->dispatchMatmul(d_gates, w_hh);                       // [B,H]
+            Tensor d_gates_T  = vb->dispatchTranspose(d_gates, 0, 1);                    // [4H,B]
+            Tensor grad_w_ih  = vb->dispatchMatmul(d_gates_T, input);                    // [4H,in]
+            Tensor grad_w_hh  = vb->dispatchMatmul(d_gates_T, hx);                       // [4H,H]
+            // Column-sum over the batch for the bias grads: ones[1,B] @ d_gates.
+            Tensor ones = vb->dispatchOnes({1, batch_size}, d_gates.dtype());
+            Tensor grad_b = vb->dispatchReshape(vb->dispatchMatmul(ones, d_gates),
+                                                {4 * hidden_size});
+            return {grad_input, grad_hx, grad_cx, grad_w_ih, grad_w_hh, grad_b, grad_b};
+        }
+        // Legacy fused 5-input form ({grad_h, grad_c_next, gates, c_prev, c_out}).
         int64_t batch_size = attrs.get_int(AttrKey::BatchSize, 0);
         int64_t hidden_size = attrs.get_int(AttrKey::HiddenSize, 0);
-        return get_vulkan_backend()->dispatchLSTMCellBackward(
+        return vb->dispatchLSTMCellBackward(
             inputs[0], inputs[1], inputs[2], inputs[3], inputs[4],
             batch_size, hidden_size);
     });
@@ -2361,11 +2414,49 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
         return std::vector<Tensor>{get_vulkan_backend()->dispatchGRUCellForward(
             inputs[0], inputs[1], inputs[2], inputs[3], inputs[4], inputs[5])};
     });
-    table.register_kernel(OpId::GRUCellBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        // inputs: [grad_h, gates_x, gates_h, h_prev]
+    table.register_kernel(OpId::GRUCellBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs)
+        -> std::vector<Tensor> {
+        auto* vb = get_vulkan_backend();
+        // Canonical 7-input contract (matches CPU/tests):
+        // [d_hy, input, hx, w_ih, w_hh, b_ih, b_hh]
+        // -> 6 grads [grad_input, grad_hx, grad_w_ih, grad_w_hh, grad_b_ih, grad_b_hh].
+        if (inputs.size() == 7) {
+            const Tensor& d_hy  = inputs[0];
+            const Tensor& input = inputs[1];
+            const Tensor& hx    = inputs[2];
+            const Tensor& w_ih  = inputs[3];
+            const Tensor& w_hh  = inputs[4];
+            const Tensor& b_ih  = inputs[5];
+            const Tensor& b_hh  = inputs[6];
+            const int64_t batch_size  = input.shape()[0];
+            const int64_t hidden_size = hx.shape()[1];
+            // Recompute the per-side gate pre-activations.
+            Tensor gates_x = vb->dispatchMatmul(input, vb->dispatchTranspose(w_ih, 0, 1));
+            if (b_ih.numel() > 0) gates_x = vb->dispatchBinaryOp("add", gates_x, b_ih);
+            Tensor gates_h = vb->dispatchMatmul(hx, vb->dispatchTranspose(w_hh, 0, 1));
+            if (b_hh.numel() > 0) gates_h = vb->dispatchBinaryOp("add", gates_h, b_hh);
+            // Cell backward -> per-side gate grads + direct h_prev grad.
+            auto cell = vb->dispatchGRUCellBackward(d_hy, gates_x, gates_h, hx,
+                                                    batch_size, hidden_size);
+            const Tensor& d_gates_ih = cell[0];
+            const Tensor& d_gates_hh = cell[1];
+            const Tensor& d_h_direct = cell[2];
+            Tensor grad_input = vb->dispatchMatmul(d_gates_ih, w_ih);
+            Tensor grad_hx = vb->dispatchBinaryOp("add",
+                vb->dispatchMatmul(d_gates_hh, w_hh), d_h_direct);
+            Tensor grad_w_ih = vb->dispatchMatmul(vb->dispatchTranspose(d_gates_ih, 0, 1), input);
+            Tensor grad_w_hh = vb->dispatchMatmul(vb->dispatchTranspose(d_gates_hh, 0, 1), hx);
+            Tensor ones = vb->dispatchOnes({1, batch_size}, d_gates_ih.dtype());
+            Tensor grad_b_ih = vb->dispatchReshape(vb->dispatchMatmul(ones, d_gates_ih),
+                                                   {3 * hidden_size});
+            Tensor grad_b_hh = vb->dispatchReshape(vb->dispatchMatmul(ones, d_gates_hh),
+                                                   {3 * hidden_size});
+            return {grad_input, grad_hx, grad_w_ih, grad_w_hh, grad_b_ih, grad_b_hh};
+        }
+        // Legacy fused 4-input form ({grad_h, gates_x, gates_h, h_prev}).
         int64_t batch_size = attrs.get_int(AttrKey::BatchSize, 0);
         int64_t hidden_size = attrs.get_int(AttrKey::HiddenSize, 0);
-        return get_vulkan_backend()->dispatchGRUCellBackward(
+        return vb->dispatchGRUCellBackward(
             inputs[0], inputs[1], inputs[2], inputs[3],
             batch_size, hidden_size);
     });
@@ -2588,7 +2679,15 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
                 std::vector<Tensor> sm_in = {scaled};
                 Tensor attn = tenzor::dispatch(OpId::Softmax, sm_in, sm_attrs)[0];
 
+                // Honor the generator-derived seed from the autograd dispatch
+                // (AttrKey::Seed) so manual_seed() reproduces the dropout mask
+                // (same contract as the oneAPI composed path).
                 auto philox = tenzor::new_philox_stream();
+                const int64_t seed_attr = attrs.get_int(AttrKey::Seed, 0);
+                if (seed_attr != 0) {
+                    philox.seed.data<int64_t>()[0] = seed_attr;
+                    philox.offset.data<int64_t>()[0] = 0;
+                }
                 uint64_t seed_v = static_cast<uint64_t>(philox.seed.data<int64_t>()[0]);
                 uint64_t offset_v = static_cast<uint64_t>(philox.offset.data<int64_t>()[0]);
                 std::vector<int64_t> attn_shape(attn.shape().begin(), attn.shape().end());

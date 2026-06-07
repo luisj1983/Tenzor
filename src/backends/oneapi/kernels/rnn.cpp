@@ -221,7 +221,8 @@ auto gru_forward_kernel(
     const Tensor& input,     // (seq_len, batch, input_size)
     const Tensor& W_ih,      // (3*hidden_size, input_size)
     const Tensor& W_hh,      // (3*hidden_size, hidden_size)
-    const Tensor& bias,      // (3*hidden_size) or empty -- combined ih+hh
+    const Tensor& bias_ih,   // (3*hidden_size) or empty
+    const Tensor& bias_hh,   // (3*hidden_size) or empty
     const Tensor& h0,        // (batch, hidden_size)
     sycl::queue& queue
 ) -> std::vector<Tensor> {
@@ -232,7 +233,13 @@ auto gru_forward_kernel(
     int64_t input_size = in_shape[2];
     int64_t gate3 = 3 * hidden_size;
 
-    bool has_bias = (bias.numel() > 0);
+    // GRU bias placement is gate-side-specific: b_ih is added to the input
+    // projection and b_hh to the hidden projection BEFORE the reset gate
+    // multiplies the hidden new-gate. Lumping them together (or onto ih only)
+    // misplaces b_hn and corrupts the new gate — visible as a Float64 gradcheck
+    // mismatch.
+    bool has_bias_ih = (bias_ih.numel() > 0);
+    bool has_bias_hh = (bias_hh.numel() > 0);
 
     // For GRU, the 3 gates (reset, update, new) have separate input/hidden projections
     // gates_ih = x @ W_ih^T   shape (B, 3H)
@@ -323,8 +330,11 @@ auto gru_forward_kernel(
         Tensor gates_ih = matmul_kernel(x_t, W_ih_T, queue);
         Tensor gates_hh = matmul_kernel(h_t, W_hh_T, queue);
 
-        if (has_bias) {
-            gates_ih = add_kernel(gates_ih, bias, queue);
+        if (has_bias_ih) {
+            gates_ih = add_kernel(gates_ih, bias_ih, queue);
+        }
+        if (has_bias_hh) {
+            gates_hh = add_kernel(gates_hh, bias_hh, queue);
         }
 
         // Split into reset, update, new for ih and hh
@@ -435,8 +445,11 @@ auto gru_multilayer_forward_kernel(
         Tensor h0_l = slice_at(h0, l, queue);
         Tensor bias_l = bias_list[l];
 
+        // Multilayer passes a single combined per-layer bias on the input side
+        // (unchanged from before the b_ih/b_hh split); pass empty for bias_hh.
+        Tensor empty_bhh({0}, input.dtype(), input.device());
         auto results = gru_forward_kernel(current_input, W_ih_list[l], W_hh_list[l],
-                                          bias_l, h0_l, queue);
+                                          bias_l, empty_bhh, h0_l, queue);
         current_input = results[0];
         copy_to_time(h_n, results[1], l, queue);
     }

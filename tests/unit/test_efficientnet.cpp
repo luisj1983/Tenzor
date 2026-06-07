@@ -95,7 +95,7 @@ TEST_P(EfficientNetTest, MBConvBlockGradientFlow) {
 
     Variable input(randn({2, 16, 56, 56}, DType::Float32, device), true);
     Variable output = block->forward(input);
-    Variable loss = tenzor::sum(output);
+    Variable loss = tenzor::sum(output * output);  // sum(output) is degenerate through trailing train-mode BN (true grad == 0)
     loss.backward();
 
     EXPECT_GRAD_FLOWS(input);
@@ -232,7 +232,7 @@ TEST_P(EfficientNetTest, EfficientNetB0GradientFlow) {
 
     Variable input(randn({1, 3, 224, 224}, DType::Float32, device), true);
     Variable output = model->forward(input);
-    Variable loss = tenzor::sum(output);
+    Variable loss = tenzor::sum(output * output);  // sum(output) is degenerate through trailing train-mode BN (true grad == 0)
     loss.backward();
 
     EXPECT_GRAD_FLOWS(input);
@@ -284,7 +284,7 @@ TEST_P(EfficientNetTest, EfficientNetB1GradientFlow) {
 
     Variable input(randn({1, 3, 240, 240}, DType::Float32, device), true);
     Variable output = model->forward(input);
-    Variable loss = tenzor::sum(output);
+    Variable loss = tenzor::sum(output * output);  // sum(output) is degenerate through trailing train-mode BN (true grad == 0)
     loss.backward();
 
     EXPECT_GRAD_FLOWS(input);
@@ -313,7 +313,7 @@ TEST_P(EfficientNetTest, EfficientNetB2GradientFlow) {
 
     Variable input(randn({1, 3, 260, 260}, DType::Float32, device), true);
     Variable output = model->forward(input);
-    Variable loss = tenzor::sum(output);
+    Variable loss = tenzor::sum(output * output);  // sum(output) is degenerate through trailing train-mode BN (true grad == 0)
     loss.backward();
 
     EXPECT_GRAD_FLOWS(input);
@@ -419,7 +419,7 @@ TEST_P(EfficientNetTest, EfficientNetB7GradientFlow) {
 
     Variable input(randn({1, 3, 600, 600}, DType::Float32, device), true);
     Variable output = model->forward(input);
-    Variable loss = tenzor::sum(output);
+    Variable loss = tenzor::sum(output * output);  // sum(output) is degenerate through trailing train-mode BN (true grad == 0)
     loss.backward();
 
     EXPECT_GRAD_FLOWS(input);

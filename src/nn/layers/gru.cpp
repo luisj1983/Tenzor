@@ -107,6 +107,7 @@ auto GRUCell::forward(const Variable& input, const Variable& hx) -> Variable {
     //  / Variable + Variable, all of which are autograd-aware)
     auto h_new = n_t + z_t * (h - n_t);
 
+
     return h_new;
 }
 

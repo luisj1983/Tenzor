@@ -56,13 +56,16 @@ struct PdistKernelTag {};
 // =========================================================================
 
 auto bernoulli_kernel(const Tensor& probs, sycl::queue& queue) -> Tensor {
+    // Preserve the input dtype on output (matches CPU/other backends and the
+    // DtypePreservation contract). Compute in Float32 internally.
+    const DType orig_dtype = probs.dtype();
     auto input = probs.contiguous();
     if (input.dtype() != DType::Float32) input = input.to(DType::Float32);
 
     std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
     Tensor result(shape, DType::Float32, input.device());
     int64_t n = input.numel();
-    if (n == 0) return result;
+    if (n == 0) return orig_dtype != DType::Float32 ? result.to(orig_dtype) : result;
 
     const float* in_ptr = get_data_ptr<const float>(input);
     float* out_ptr = get_data_ptr<float>(result);
@@ -76,7 +79,7 @@ auto bernoulli_kernel(const Tensor& probs, sycl::queue& queue) -> Tensor {
         out_ptr[i] = (u < in_ptr[i]) ? 1.0f : 0.0f;
     });
     queue.wait_and_throw();
-    return result;
+    return orig_dtype != DType::Float32 ? result.to(orig_dtype) : result;
 }
 
 // =========================================================================
@@ -730,6 +733,8 @@ struct NormalSampleKernelTag {};
 }  // namespace
 
 auto normal_sample_kernel(const Tensor& mean, const Tensor& stddev, sycl::queue& queue) -> Tensor {
+    // Preserve the input (mean) dtype on output; compute in Float32 internally.
+    const DType orig_dtype = mean.dtype();
     auto m = mean.contiguous();
     auto s = stddev.contiguous();
     if (m.dtype() != DType::Float32) m = m.to(DType::Float32);
@@ -738,7 +743,7 @@ auto normal_sample_kernel(const Tensor& mean, const Tensor& stddev, sycl::queue&
     std::vector<int64_t> shape(m.shape().begin(), m.shape().end());
     Tensor result(shape, DType::Float32, m.device());
     int64_t n = m.numel();
-    if (n == 0) return result;
+    if (n == 0) return orig_dtype != DType::Float32 ? result.to(orig_dtype) : result;
 
     const float* mean_ptr = get_data_ptr<const float>(m);
     const float* std_ptr = get_data_ptr<const float>(s);
@@ -765,7 +770,7 @@ auto normal_sample_kernel(const Tensor& mean, const Tensor& stddev, sycl::queue&
         out_ptr[i] = mean_ptr[i] + std_ptr[i] * z;
     });
     queue.wait_and_throw();
-    return result;
+    return orig_dtype != DType::Float32 ? result.to(orig_dtype) : result;
 }
 
 // =========================================================================
@@ -939,6 +944,10 @@ auto trapezoid_kernel(const Tensor& y, int64_t dim, double dx,
         out_ptr[idx] = sum;
     });
     queue.wait_and_throw();
+    // Half-precision dispatch: narrow the Float32 result back to the
+    // caller's reduced-precision dtype.
+    if (y.dtype() == DType::Float16 || y.dtype() == DType::BFloat16)
+        return result.to(y.dtype());
     return result;
 }
 
@@ -992,6 +1001,10 @@ auto cumulative_trapezoid_kernel(const Tensor& y, int64_t dim, double dx,
         }
     });
     queue.wait_and_throw();
+    // Half-precision dispatch: narrow the Float32 result back to the
+    // caller's reduced-precision dtype.
+    if (y.dtype() == DType::Float16 || y.dtype() == DType::BFloat16)
+        return result.to(y.dtype());
     return result;
 }
 
@@ -1036,6 +1049,10 @@ auto gradient_kernel(const Tensor& input, int64_t dim, double spacing,
         out_ptr[(o * n_val + n_val - 1) * inner_val + i_inner] = (at(n_val - 1) - at(n_val - 2)) / h;
     });
     queue.wait_and_throw();
+    // Half-precision dispatch: narrow the Float32 result back to the
+    // caller's reduced-precision dtype.
+    if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16)
+        return result.to(input.dtype());
     return result;
 }
 
@@ -1079,6 +1096,10 @@ auto pairwise_distance_kernel(const Tensor& x1, const Tensor& x2, double p,
         }
     });
     queue.wait_and_throw();
+    // Half-precision dispatch: narrow the Float32 result back to the
+    // caller's reduced-precision dtype.
+    if (x1.dtype() == DType::Float16 || x1.dtype() == DType::BFloat16)
+        return result.to(x1.dtype());
     return result;
 }
 
@@ -1128,6 +1149,10 @@ auto pdist_kernel(const Tensor& input, double p, sycl::queue& queue) -> Tensor {
         }
     });
     queue.wait_and_throw();
+    // Half-precision dispatch: narrow the Float32 result back to the
+    // caller's reduced-precision dtype.
+    if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16)
+        return result.to(input.dtype());
     return result;
 }
 

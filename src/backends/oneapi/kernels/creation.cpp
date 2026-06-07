@@ -424,6 +424,41 @@ auto arange_kernel(double start, double end, double step, DType dtype, Device de
             ptr[i] = s + static_cast<int64_t>(i[0]) * st;
         });
     }
+    else if (dtype == DType::Int8 || dtype == DType::Int16 || dtype == DType::UInt8 ||
+             dtype == DType::UInt16 || dtype == DType::UInt32 || dtype == DType::UInt64) {
+        const double s = start, st = step;
+        auto run = [&]<typename T>() {
+            T* ptr = get_data_ptr<T>(output);
+            queue.parallel_for(sycl::range<1>(numel), [=](sycl::id<1> i) {
+                ptr[i] = static_cast<T>(s + static_cast<double>(i[0]) * st);
+            });
+        };
+        switch (dtype) {
+            case DType::Int8:   run.template operator()<int8_t>();   break;
+            case DType::Int16:  run.template operator()<int16_t>();  break;
+            case DType::UInt8:  run.template operator()<uint8_t>();  break;
+            case DType::UInt16: run.template operator()<uint16_t>(); break;
+            case DType::UInt32: run.template operator()<uint32_t>(); break;
+            case DType::UInt64: run.template operator()<uint64_t>(); break;
+            default: break;
+        }
+    }
+    else if (dtype == DType::Complex64) {
+        float* ptr = get_data_ptr<float>(output);
+        const float s = static_cast<float>(start), st = static_cast<float>(step);
+        queue.parallel_for(sycl::range<1>(numel), [=](sycl::id<1> i) {
+            ptr[2 * i[0]] = s + static_cast<float>(i[0]) * st;
+            ptr[2 * i[0] + 1] = 0.0f;
+        });
+    }
+    else if (dtype == DType::Complex128) {
+        double* ptr = get_data_ptr<double>(output);
+        const double s = start, st = step;
+        queue.parallel_for(sycl::range<1>(numel), [=](sycl::id<1> i) {
+            ptr[2 * i[0]] = s + static_cast<double>(i[0]) * st;
+            ptr[2 * i[0] + 1] = 0.0;
+        });
+    }
     else {
         throw std::runtime_error("Unsupported dtype for arange kernel");
     }
@@ -455,6 +490,24 @@ auto linspace_kernel(double start, double end, int64_t steps, DType dtype, Devic
             uint16_t val = f32_to_bf16(static_cast<float>(start));
             uint16_t* ptr = get_data_ptr<uint16_t>(output);
             queue.memcpy(ptr, &val, sizeof(uint16_t)).wait();
+        } else {
+            auto set_one = [&](auto* ptr) {
+                using T = std::remove_pointer_t<decltype(ptr)>;
+                T val = static_cast<T>(start);
+                queue.memcpy(ptr, &val, sizeof(T)).wait();
+            };
+            switch (dtype) {
+                case DType::Int8:   set_one(get_data_ptr<int8_t>(output)); break;
+                case DType::Int16:  set_one(get_data_ptr<int16_t>(output)); break;
+                case DType::Int32:  set_one(get_data_ptr<int32_t>(output)); break;
+                case DType::Int64:  set_one(get_data_ptr<int64_t>(output)); break;
+                case DType::UInt8:  set_one(get_data_ptr<uint8_t>(output)); break;
+                case DType::UInt16: set_one(get_data_ptr<uint16_t>(output)); break;
+                case DType::UInt32: set_one(get_data_ptr<uint32_t>(output)); break;
+                case DType::UInt64: set_one(get_data_ptr<uint64_t>(output)); break;
+                default:
+                    throw std::runtime_error("Unsupported dtype for linspace kernel");
+            }
         }
         return output;
     }
@@ -507,6 +560,55 @@ auto linspace_kernel(double start, double end, int64_t steps, DType dtype, Devic
                 ptr[i] = f32_to_bf16(s + static_cast<float>(i[0]) * st);
             }
         });
+    }
+    else if (dtype == DType::Int8 || dtype == DType::Int16 || dtype == DType::Int32 ||
+             dtype == DType::Int64 || dtype == DType::UInt8 || dtype == DType::UInt16 ||
+             dtype == DType::UInt32 || dtype == DType::UInt64) {
+        // Integer linspace: compute the value in double and truncate toward zero,
+        // forcing the last element to exactly `end` — matches the CPU backend.
+        const double s = start, e = end, st = step_size;
+        const int64_t n = steps;
+        auto run = [&](auto* ptr) {
+            using T = std::remove_pointer_t<decltype(ptr)>;
+            queue.parallel_for(sycl::range<1>(steps), [=](sycl::id<1> i) {
+                double v = (static_cast<int64_t>(i[0]) == n - 1)
+                               ? e : (s + static_cast<double>(i[0]) * st);
+                ptr[i] = static_cast<T>(v);
+            });
+        };
+        switch (dtype) {
+            case DType::Int8:   run(get_data_ptr<int8_t>(output)); break;
+            case DType::Int16:  run(get_data_ptr<int16_t>(output)); break;
+            case DType::Int32:  run(get_data_ptr<int32_t>(output)); break;
+            case DType::Int64:  run(get_data_ptr<int64_t>(output)); break;
+            case DType::UInt8:  run(get_data_ptr<uint8_t>(output)); break;
+            case DType::UInt16: run(get_data_ptr<uint16_t>(output)); break;
+            case DType::UInt32: run(get_data_ptr<uint32_t>(output)); break;
+            case DType::UInt64: run(get_data_ptr<uint64_t>(output)); break;
+            default: break;
+        }
+    }
+    else if (dtype == DType::Complex64 || dtype == DType::Complex128) {
+        // Complex linspace: real part ramps start->end, imaginary part is 0.
+        const double s = start, e = end, st = step_size;
+        const int64_t n = steps;
+        if (dtype == DType::Complex64) {
+            float* ptr = reinterpret_cast<float*>(output.data_ptr());
+            queue.parallel_for(sycl::range<1>(steps), [=](sycl::id<1> i) {
+                double v = (static_cast<int64_t>(i[0]) == n - 1)
+                               ? e : (s + static_cast<double>(i[0]) * st);
+                ptr[i[0] * 2]     = static_cast<float>(v);
+                ptr[i[0] * 2 + 1] = 0.0f;
+            });
+        } else {
+            double* ptr = reinterpret_cast<double*>(output.data_ptr());
+            queue.parallel_for(sycl::range<1>(steps), [=](sycl::id<1> i) {
+                double v = (static_cast<int64_t>(i[0]) == n - 1)
+                               ? e : (s + static_cast<double>(i[0]) * st);
+                ptr[i[0] * 2]     = v;
+                ptr[i[0] * 2 + 1] = 0.0;
+            });
+        }
     }
     else {
         throw std::runtime_error("Unsupported dtype for linspace kernel");
@@ -562,6 +664,52 @@ auto eye_kernel(int64_t n, int64_t m, DType dtype, Device device, sycl::queue& q
         int64_t* ptr = get_data_ptr<int64_t>(output);
         queue.parallel_for(sycl::range<1>(diag_len), [=](sycl::id<1> i) {
             ptr[i[0] * m + i[0]] = 1;
+        });
+    }
+    else if (dtype == DType::Int16) {
+        int16_t* ptr = get_data_ptr<int16_t>(output);
+        queue.parallel_for(sycl::range<1>(diag_len), [=](sycl::id<1> i) {
+            ptr[i[0] * m + i[0]] = 1;
+        });
+    }
+    else if (dtype == DType::Int8 || dtype == DType::UInt8 || dtype == DType::Bool) {
+        // 1-byte types (Bool stores 1 for true). Write the diagonal as bytes.
+        uint8_t* ptr = get_data_ptr<uint8_t>(output);
+        queue.parallel_for(sycl::range<1>(diag_len), [=](sycl::id<1> i) {
+            ptr[i[0] * m + i[0]] = uint8_t(1);
+        });
+    }
+    else if (dtype == DType::UInt16) {
+        uint16_t* ptr = get_data_ptr<uint16_t>(output);
+        queue.parallel_for(sycl::range<1>(diag_len), [=](sycl::id<1> i) {
+            ptr[i[0] * m + i[0]] = uint16_t(1);
+        });
+    }
+    else if (dtype == DType::UInt32) {
+        uint32_t* ptr = get_data_ptr<uint32_t>(output);
+        queue.parallel_for(sycl::range<1>(diag_len), [=](sycl::id<1> i) {
+            ptr[i[0] * m + i[0]] = uint32_t(1);
+        });
+    }
+    else if (dtype == DType::UInt64) {
+        uint64_t* ptr = get_data_ptr<uint64_t>(output);
+        queue.parallel_for(sycl::range<1>(diag_len), [=](sycl::id<1> i) {
+            ptr[i[0] * m + i[0]] = uint64_t(1);
+        });
+    }
+    else if (dtype == DType::Complex64) {
+        // Interleaved (real, imag) float pairs: diagonal = 1 + 0i.
+        float* ptr = reinterpret_cast<float*>(output.data_ptr());
+        queue.parallel_for(sycl::range<1>(diag_len), [=](sycl::id<1> i) {
+            ptr[(i[0] * m + i[0]) * 2]     = 1.0f;
+            ptr[(i[0] * m + i[0]) * 2 + 1] = 0.0f;
+        });
+    }
+    else if (dtype == DType::Complex128) {
+        double* ptr = reinterpret_cast<double*>(output.data_ptr());
+        queue.parallel_for(sycl::range<1>(diag_len), [=](sycl::id<1> i) {
+            ptr[(i[0] * m + i[0]) * 2]     = 1.0;
+            ptr[(i[0] * m + i[0]) * 2 + 1] = 0.0;
         });
     }
     else {

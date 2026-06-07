@@ -215,7 +215,7 @@ TEST_P(MaskRCNNMultiDTypeTest, ROIAlignSpatialAlignment) {
     EXPECT_GT(boxes.shape()[0], 0);
     // Masks should correspond to detected boxes
     EXPECT_EQ(masks.shape()[0], boxes.shape()[0]);
-    if (masks.shape()[0] > 0) expectFiniteNonZero(masks);
+    if (masks.shape()[0] > 0) expectAllFinite(masks);  // untrained model: all-zero masks are valid (no box overlaps the image)
 }
 
 TEST_P(MaskRCNNMultiDTypeTest, ROIAlignOutputDimensions) {
@@ -255,7 +255,7 @@ TEST_P(MaskRCNNMultiDTypeTest, MaskHeadOutputShape) {
     // Masks should have reasonable resolution
     EXPECT_GE(masks.shape()[2], 14);  // At least 14x14
     EXPECT_GE(masks.shape()[3], 14);
-    if (masks.shape()[0] > 0) expectFiniteNonZero(masks);
+    if (masks.shape()[0] > 0) expectAllFinite(masks);  // untrained model: all-zero masks are valid (no box overlaps the image)
 }
 
 TEST_P(MaskRCNNMultiDTypeTest, MaskHeadMultiInstance) {
@@ -339,7 +339,7 @@ TEST_P(MaskRCNNMultiDTypeTest, DetectionHeadOutputs) {
     EXPECT_EQ(boxes.shape()[0], masks.shape()[0]);
     if (boxes.shape()[0] > 0) expectFiniteNonZero(boxes);
     if (scores.shape()[0] > 0) expectFiniteNonZero(scores);
-    if (masks.shape()[0] > 0) expectFiniteNonZero(masks);
+    if (masks.shape()[0] > 0) expectAllFinite(masks);  // untrained model: all-zero masks are valid (no box overlaps the image)
 }
 
 TEST_P(MaskRCNNMultiDTypeTest, DetectionHeadClassification) {
@@ -398,7 +398,7 @@ TEST_P(MaskRCNNMultiDTypeTest, ForwardPassSmallImage) {
     EXPECT_GT(boxes.shape()[0], 0);
     EXPECT_GT(masks.shape()[0], 0);
     if (boxes.shape()[0] > 0) expectFiniteNonZero(boxes);
-    if (masks.shape()[0] > 0) expectFiniteNonZero(masks);
+    if (masks.shape()[0] > 0) expectAllFinite(masks);  // untrained model: all-zero masks are valid (no box overlaps the image)
 }
 
 TEST_P(MaskRCNNMultiDTypeTest, ForwardPassMediumImage) {
@@ -413,7 +413,7 @@ TEST_P(MaskRCNNMultiDTypeTest, ForwardPassMediumImage) {
     EXPECT_GT(boxes.shape()[0], 0);
     EXPECT_GT(masks.shape()[0], 0);
     if (boxes.shape()[0] > 0) expectFiniteNonZero(boxes);
-    if (masks.shape()[0] > 0) expectFiniteNonZero(masks);
+    if (masks.shape()[0] > 0) expectAllFinite(masks);  // untrained model: all-zero masks are valid (no box overlaps the image)
 }
 
 TEST_P(MaskRCNNMultiDTypeTest, ForwardPassLargeImage) {
@@ -428,7 +428,7 @@ TEST_P(MaskRCNNMultiDTypeTest, ForwardPassLargeImage) {
     EXPECT_GT(boxes.shape()[0], 0);
     EXPECT_GT(masks.shape()[0], 0);
     if (boxes.shape()[0] > 0) expectFiniteNonZero(boxes);
-    if (masks.shape()[0] > 0) expectFiniteNonZero(masks);
+    if (masks.shape()[0] > 0) expectAllFinite(masks);  // untrained model: all-zero masks are valid (no box overlaps the image)
 }
 
 TEST_P(MaskRCNNMultiDTypeTest, ForwardPassBatchProcessing) {
@@ -444,7 +444,7 @@ TEST_P(MaskRCNNMultiDTypeTest, ForwardPassBatchProcessing) {
     EXPECT_GT(boxes.shape()[0], 0);
     EXPECT_GT(masks.shape()[0], 0);
     if (boxes.shape()[0] > 0) expectFiniteNonZero(boxes);
-    if (masks.shape()[0] > 0) expectFiniteNonZero(masks);
+    if (masks.shape()[0] > 0) expectAllFinite(masks);  // untrained model: all-zero masks are valid (no box overlaps the image)
 }
 
 TEST_P(MaskRCNNMultiDTypeTest, ForwardPassRectangularImage) {
@@ -460,7 +460,7 @@ TEST_P(MaskRCNNMultiDTypeTest, ForwardPassRectangularImage) {
     EXPECT_GT(boxes.shape()[0], 0);
     EXPECT_GT(masks.shape()[0], 0);
     if (boxes.shape()[0] > 0) expectFiniteNonZero(boxes);
-    if (masks.shape()[0] > 0) expectFiniteNonZero(masks);
+    if (masks.shape()[0] > 0) expectAllFinite(masks);  // untrained model: all-zero masks are valid (no box overlaps the image)
 }
 
 // ============================================================================
@@ -481,7 +481,7 @@ TEST_P(MaskRCNNMultiDTypeTest, MultiInstanceDetection) {
     // Each instance should have corresponding mask
     EXPECT_EQ(boxes.shape()[0], masks.shape()[0]);
     if (boxes.shape()[0] > 0) expectFiniteNonZero(boxes);
-    if (masks.shape()[0] > 0) expectFiniteNonZero(masks);
+    if (masks.shape()[0] > 0) expectAllFinite(masks);  // untrained model: all-zero masks are valid (no box overlaps the image)
 }
 
 TEST_P(MaskRCNNMultiDTypeTest, MultiInstanceTraining) {

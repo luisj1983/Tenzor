@@ -343,6 +343,11 @@ auto Conv2d::forward_impl(const Variable& input_orig) -> Variable {
     forward_attrs.set(AttrKey::DilationH, dilation_h_);
     forward_attrs.set(AttrKey::DilationW, dilation_w_);
     forward_attrs.set(AttrKey::Groups, groups_);
+    // Kernel size is informational for the conv kernels (they read it from the
+    // weight shape) but the JIT tracer / ONNX exporter need it as an attribute
+    // to emit a faithful Conv node (kernel_shape).
+    forward_attrs.set(AttrKey::KernelSizeH, kernel_h_);
+    forward_attrs.set(AttrKey::KernelSizeW, kernel_w_);
     DType original_dtype = input.dtype();
     auto output_result = dispatch_to_device(OpId::Conv2dForward, input.tensor().device().type,
         inputs_vec, forward_attrs);
@@ -637,50 +642,56 @@ auto Conv1d::forward_impl(const Variable& input) -> Variable {
         }
     }
 
-    // Manually pad in the length dimension, then unsqueeze to 4D for Conv2d dispatch.
-    // Conv1dForward OpId is registered for all backends but the NN layer still uses
-    // the proven Conv2d path (unsqueeze + Conv2dForward + squeeze) to avoid asymmetric
-    // padding issues. A future native Conv1d kernel can be activated by switching
-    // this dispatch to OpId::Conv1dForward.
-    Tensor input_tensor = input.tensor();
-    if (padding_ > 0) {
-        input_tensor = pad_1d(input_tensor, padding_);
-    }
-
-    auto input_4d = input_tensor.unsqueeze(2);
-    auto weight_4d = weight_matched.unsqueeze(2);
-
-    std::vector<Tensor> inputs_vec = {input_4d, weight_4d};
-    if (bias_ptr != nullptr) {
-        inputs_vec.push_back(*bias_ptr);
-    }
-
-    NewOpAttributes forward_attrs;
-    forward_attrs.set(AttrKey::Stride, stride_);
-    forward_attrs.set(AttrKey::Padding, static_cast<int64_t>(0));
-    forward_attrs.set(AttrKey::Dilation, dilation_);
-    forward_attrs.set(AttrKey::Groups, groups_);
-
+    Tensor input_tensor = input.tensor();   // 3-D [N, C, L], unpadded
     DType original_dtype = input.dtype();
+
     // CC.5: depthwise fast-path dispatch surface. When `groups_ == in_channels_`
     // and a native DepthwiseConv1d kernel is registered, dispatch the
-    // specialised OpId instead of routing through the generic 2D pipeline.
-    // FF.3: was previously a `constexpr bool ... = false` (the throw-stub
-    // registrations from CC.5 made it unreachable). Promote to a runtime
-    // query so the dispatch surface is live — eligible depthwise inputs now
-    // route to OpId::DepthwiseConv1d. Until a backend ships a real kernel
-    // its throw-stub will fire with the documented diagnostic; that is the
-    // intended behaviour (loud failure beats silent generic-Conv2d
-    // miscomputation when callers explicitly construct a depthwise layer).
+    // specialised OpId instead of routing through the generic pipeline. Its
+    // throw-stub fires loudly on backends without a real kernel (intended).
     const bool depthwise_conv1d_kernel_available =
         ::tenzor::is_op_supported(
             OpId::DepthwiseConv1d, input.tensor().device().type);
-    [[maybe_unused]] const bool eligible_depthwise =
+    const bool eligible_depthwise =
         (groups_ == in_channels_) && (groups_ > 1);
-    auto output_result = (depthwise_conv1d_kernel_available && eligible_depthwise)
-        ? dispatch(OpId::DepthwiseConv1d, std::span<const Tensor>(inputs_vec), forward_attrs)
-        : dispatch(OpId::Conv2dForward,    std::span<const Tensor>(inputs_vec), forward_attrs);
-    Tensor output = output_result[0].squeeze(2);
+
+    Tensor output;
+    if (depthwise_conv1d_kernel_available && eligible_depthwise) {
+        // Depthwise path keeps the proven manual-pad + unsqueeze-to-4D form.
+        Tensor padded = (padding_ > 0) ? pad_1d(input_tensor, padding_) : input_tensor;
+        std::vector<Tensor> dw_inputs = {padded.unsqueeze(2), weight_matched.unsqueeze(2)};
+        if (bias_ptr != nullptr) {
+            dw_inputs.push_back(*bias_ptr);
+        }
+        NewOpAttributes dw_attrs;
+        dw_attrs.set(AttrKey::Stride, stride_);
+        dw_attrs.set(AttrKey::Padding, static_cast<int64_t>(0));
+        dw_attrs.set(AttrKey::Dilation, dilation_);
+        dw_attrs.set(AttrKey::Groups, groups_);
+        auto r = dispatch(OpId::DepthwiseConv1d,
+                          std::span<const Tensor>(dw_inputs), dw_attrs);
+        output = r[0].squeeze(2);
+    } else {
+        // Native 1-D conv: dispatch OpId::Conv1dForward with 3-D operands and
+        // the real padding. The backend kernel pads the length axis only
+        // (per-axis), which is numerically identical to the previous
+        // manual-pad + Conv2dForward(pad=0) path. Using 3-D operands keeps the
+        // op faithful for JIT tracing / ONNX export (3-D weight, rank-1 attrs)
+        // instead of leaking a degenerate 4-D Conv2d into the traced graph.
+        std::vector<Tensor> inputs_vec = {input_tensor, weight_matched};
+        if (bias_ptr != nullptr) {
+            inputs_vec.push_back(*bias_ptr);
+        }
+        NewOpAttributes forward_attrs;
+        forward_attrs.set(AttrKey::KernelSize, kernel_size_);
+        forward_attrs.set(AttrKey::Stride, stride_);
+        forward_attrs.set(AttrKey::Padding, padding_);
+        forward_attrs.set(AttrKey::Dilation, dilation_);
+        forward_attrs.set(AttrKey::Groups, groups_);
+        auto r = dispatch(OpId::Conv1dForward,
+                          std::span<const Tensor>(inputs_vec), forward_attrs);
+        output = r[0];
+    }
     if (output.dtype() != original_dtype) {
         output = output.to(original_dtype);
     }
@@ -976,6 +987,8 @@ auto ConvTranspose2d::forward_impl(const Variable& input) -> Variable {
     forward_attrs.set(AttrKey::Padding,        pH_);
     forward_attrs.set(AttrKey::OutputPadding,  opH_);
     forward_attrs.set(AttrKey::Dilation,       dH_);
+    forward_attrs.set(AttrKey::KernelSizeH,    kH_);
+    forward_attrs.set(AttrKey::KernelSizeW,    kW_);
     forward_attrs.set(AttrKey::StrideH,        sH_);
     forward_attrs.set(AttrKey::StrideW,        sW_);
     forward_attrs.set(AttrKey::PaddingH,       pH_);
@@ -1337,6 +1350,11 @@ auto Conv3d::forward_impl(const Variable& input) -> Variable {
     forward_attrs.set(AttrKey::DilationH, dH_);
     forward_attrs.set(AttrKey::DilationW, dW_);
     forward_attrs.set(AttrKey::Groups,    groups_);
+    // Kernel size as attributes so the JIT tracer / ONNX exporter emit a
+    // faithful 3D Conv node (kernel_shape); the kernels read it from the weight.
+    forward_attrs.set(AttrKey::KernelSizeD, kD_);
+    forward_attrs.set(AttrKey::KernelSizeH, kH_);
+    forward_attrs.set(AttrKey::KernelSizeW, kW_);
     DType original_dtype = input.dtype();
     // CC.5: depthwise fast-path dispatch surface for 3D (groups == in_channels).
     // FF.3: promoted from a `constexpr bool ... = false` gate to a runtime
@@ -1978,57 +1996,65 @@ auto ConvTranspose1d::forward_impl(const Variable& input) -> Variable {
         bias_ptr = &bias_matched.tensor();
     }
 
-    // Unsqueeze to 4D: [N, C, L] -> [N, C, 1, L]
-    auto input_4d = input.tensor().unsqueeze(2);
-    auto weight_4d = weight_matched.tensor().unsqueeze(2);
-
-    // Dispatch to ConvTranspose2d forward
-    std::vector<Tensor> inputs_vec = {input_4d, weight_4d};
-    if (bias_ptr != nullptr) {
-        inputs_vec.push_back(*bias_ptr);
-    }
-
-    // ConvTranspose2d kernel applies the scalar padding to BOTH H and W.
-    // For our unsqueezed H=1 axis we need pad_h=0, pad_w=padding_. Since
-    // the kernel has no per-axis keys today, dispatch with scalar pad=0
-    // and trim the W axis of the output after the fact (ConvTranspose
-    // "padding" semantically trims output edges). Backward still sees
-    // the original padding_ via ConvTranspose1dBackward, so gradients
-    // flow correctly.
-    //
-    // Audit F.17 dilation: only the real spatial (W) axis is dilated;
-    // the unsqueezed H axis is a singleton so it must keep dH=1. The
-    // CPU ConvTranspose2d kernel reads DilationH / DilationW per-axis
-    // (with fallback to scalar Dilation), so we set the scalar key for
-    // backward-compat callers and override DilationH/W explicitly.
-    NewOpAttributes forward_attrs;
-    forward_attrs.set(AttrKey::Stride, stride_);
-    forward_attrs.set(AttrKey::Padding, static_cast<int64_t>(0));
-    forward_attrs.set(AttrKey::OutputPadding, output_padding_);
-    forward_attrs.set(AttrKey::Dilation, dilation_);
-    forward_attrs.set(AttrKey::DilationH, static_cast<int64_t>(1));
-    forward_attrs.set(AttrKey::DilationW, dilation_);
-    forward_attrs.set(AttrKey::Groups, groups_);
     DType original_dtype = input.dtype();
-    auto output_result = dispatch(OpId::ConvTranspose2dForward,
-        std::span<const Tensor>(inputs_vec),
-        forward_attrs);
-    Tensor output_4d = output_result[0];
+    Tensor output;
 
-    // Squeeze back: [N, C_out, 1, L_full] -> [N, C_out, L_full]
-    Tensor output = output_4d.squeeze(2);
-
-    if (padding_ > 0) {
-        int64_t L_full = output.shape()[2];
-        int64_t L_trimmed = L_full - 2 * padding_;
-        if (L_trimmed <= 0) {
-            throw std::runtime_error(
-                "Invalid ConvTranspose1d configuration: output length after "
-                "padding trim is non-positive (L_full=" + std::to_string(L_full) +
-                ", padding=" + std::to_string(padding_) + ")");
+    if (::tenzor::is_op_supported(OpId::ConvTranspose1dForward,
+                                  input.tensor().device().type)) {
+        // Native 1-D transpose conv: 3-D operands keep the op faithful for JIT
+        // tracing / ONNX export (3-D weight, rank-1 attrs). The backend kernel
+        // applies padding/output_padding to the length axis only — numerically
+        // identical to the unsqueeze→ConvTranspose2d(pad=0)→trim path below.
+        std::vector<Tensor> inputs_vec = {input.tensor(), weight_matched.tensor()};
+        if (bias_ptr != nullptr) {
+            inputs_vec.push_back(*bias_ptr);
         }
-        output = tenzor::slice(output, /*dim=*/2, /*start=*/padding_,
-                               /*end=*/padding_ + L_trimmed);
+        NewOpAttributes forward_attrs;
+        forward_attrs.set(AttrKey::KernelSize, kernel_size_);
+        forward_attrs.set(AttrKey::Stride, stride_);
+        forward_attrs.set(AttrKey::Padding, padding_);
+        forward_attrs.set(AttrKey::OutputPadding, output_padding_);
+        forward_attrs.set(AttrKey::Dilation, dilation_);
+        forward_attrs.set(AttrKey::Groups, groups_);
+        auto output_result = dispatch(OpId::ConvTranspose1dForward,
+            std::span<const Tensor>(inputs_vec), forward_attrs);
+        output = output_result[0];
+    } else {
+        // Fallback (backends without a native ConvTranspose1dForward kernel):
+        // unsqueeze to 4-D, dispatch ConvTranspose2d with scalar pad=0 (the
+        // kernel would otherwise pad BOTH H and W), squeeze, then trim the W
+        // axis by padding_ (ConvTranspose "padding" trims output edges). The H
+        // axis is a singleton so dH must stay 1.
+        auto input_4d = input.tensor().unsqueeze(2);
+        auto weight_4d = weight_matched.tensor().unsqueeze(2);
+        std::vector<Tensor> inputs_vec = {input_4d, weight_4d};
+        if (bias_ptr != nullptr) {
+            inputs_vec.push_back(*bias_ptr);
+        }
+        NewOpAttributes forward_attrs;
+        forward_attrs.set(AttrKey::Stride, stride_);
+        forward_attrs.set(AttrKey::Padding, static_cast<int64_t>(0));
+        forward_attrs.set(AttrKey::OutputPadding, output_padding_);
+        forward_attrs.set(AttrKey::Dilation, dilation_);
+        forward_attrs.set(AttrKey::DilationH, static_cast<int64_t>(1));
+        forward_attrs.set(AttrKey::DilationW, dilation_);
+        forward_attrs.set(AttrKey::Groups, groups_);
+        auto output_result = dispatch(OpId::ConvTranspose2dForward,
+            std::span<const Tensor>(inputs_vec), forward_attrs);
+        output = output_result[0].squeeze(2);
+
+        if (padding_ > 0) {
+            int64_t L_full = output.shape()[2];
+            int64_t L_trimmed = L_full - 2 * padding_;
+            if (L_trimmed <= 0) {
+                throw std::runtime_error(
+                    "Invalid ConvTranspose1d configuration: output length after "
+                    "padding trim is non-positive (L_full=" + std::to_string(L_full) +
+                    ", padding=" + std::to_string(padding_) + ")");
+            }
+            output = tenzor::slice(output, /*dim=*/2, /*start=*/padding_,
+                                   /*end=*/padding_ + L_trimmed);
+        }
     }
     if (output.dtype() != original_dtype) {
         output = output.to(original_dtype);

@@ -42,18 +42,18 @@ void main() {
     }
 
     // Pool window is always kernel_h x kernel_w; start derived from sample.
-    float h_ratio = float(params.H - params.kernel_h) / float(max(params.out_h - 1u, 1u));
-    float w_ratio = float(params.W - params.kernel_w) / float(max(params.out_w - 1u, 1u));
+    // Graham's disjoint-subsequence method (arXiv:1412.6071), matching the
+    // CPU reference kernel (cpu/kernels/pooling.cpp fractional_maxpool2d_impl):
+    //   start_i = floor((i + u) * (in/out) - u)
+    //   end_i   = floor((i + 1 + u) * (in/out) - u)
+    float h_alpha = float(params.H) / float(params.out_h);
+    float w_alpha = float(params.W) / float(params.out_w);
 
-    int h_start = (oh == params.out_h - 1u)
-        ? int(params.H - params.kernel_h)
-        : int(floor((float(oh) + sample_h) * h_ratio));
-    int w_start = (ow == params.out_w - 1u)
-        ? int(params.W - params.kernel_w)
-        : int(floor((float(ow) + sample_w) * w_ratio));
+    int h_start = int(floor((float(oh) + sample_h) * h_alpha - sample_h));
+    int w_start = int(floor((float(ow) + sample_w) * w_alpha - sample_w));
 
-    int h_end = h_start + int(params.kernel_h);
-    int w_end = w_start + int(params.kernel_w);
+    int h_end = int(floor((float(oh) + 1.0 + sample_h) * h_alpha - sample_h));
+    int w_end = int(floor((float(ow) + 1.0 + sample_w) * w_alpha - sample_w));
 
     h_start = max(h_start, 0);
     w_start = max(w_start, 0);

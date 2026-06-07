@@ -10,6 +10,7 @@
  */
 
 #include <gtest/gtest.h>
+#include "tenzor/tenzor.hpp"
 #include "tenzor/core/tensor.hpp"
 #include "tenzor/core/device.hpp"
 #include "tenzor/ops/creation.hpp"
@@ -22,6 +23,12 @@ namespace test {
 class OneAPIOperationsTest : public ::testing::Test {
 protected:
     void SetUp() override {
+        // Initialize the library so the backend dispatch tables are populated
+        // (this binary uses gtest_main, which does not call initialize(), so
+        // without this the ops fail with "Backend dispatch table not ready").
+        // initialize() is idempotent.
+        tenzor::initialize();
+
         // Skip tests if OneAPI backend is not available
         try {
             [[maybe_unused]] Device device = Device::oneapi(0);

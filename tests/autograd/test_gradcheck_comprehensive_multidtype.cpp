@@ -183,7 +183,13 @@ TEST_P(GradCheckComprehensiveMultiDTypeTest, LogSoftmax) {
     if (dtype() == DType::Float16) SKIP_WITH_REASON(::tenzor::testing::SkipReason::GradcheckFDPrecision, "Float16 gradcheck precision");
     auto x = make_centered_var({4, 8});
     auto f = [](const Variable& v) { return log_softmax(v, 1); };
-    EXPECT_TRUE(gradcheck(f, x, gc_eps(), gc_atol(), gc_rtol()));
+    // Float32 central differences with eps=1e-4 lose ~4 of 7 significant
+    // digits to cancellation in f(x+h)-f(x-h), leaving ~1e-3 noise — right at
+    // atol. Use the f32-optimal step (~cbrt(eps_f32) * scale ≈ 1e-3) so the
+    // check verifies the gradient instead of the FD rounding floor. (The
+    // Float64 instance keeps the tight step and fully validates the math.)
+    const double fd_eps = (dtype() == DType::Float32) ? 1e-3 : gc_eps();
+    EXPECT_TRUE(gradcheck(f, x, fd_eps, gc_atol(), gc_rtol()));
 }
 
 TEST_P(GradCheckComprehensiveMultiDTypeTest, Elu) {
@@ -468,7 +474,11 @@ TEST_P(GradCheckComprehensiveMultiDTypeTest, Pow) {
 
 TEST_P(GradCheckComprehensiveMultiDTypeTest, Reciprocal) {
     if (dtype() == DType::Float16) SKIP_WITH_REASON(::tenzor::testing::SkipReason::GradcheckFDPrecision, "Float16 gradcheck precision");
-    auto x = make_var({4, 6});
+    // 1/x has a pole at 0: make_var draws N(0.5, 0.3) and lands |x| < 0.05
+    // for some per-test seeds, where the finite difference of 1/x explodes
+    // (classic gradcheck domain violation). Use the positive, bounded-away
+    // input (min 0.2) so the FD stays well-conditioned on every backend seed.
+    auto x = make_positive_var({4, 6});
     auto f = [](const Variable& v) { return reciprocal(v); };
     EXPECT_TRUE(gradcheck(f, x, gc_eps(), gc_atol(), gc_rtol()));
 }
@@ -547,7 +557,16 @@ TEST_P(GradCheckComprehensiveMultiDTypeTest, Erfc) {
 
 TEST_P(GradCheckComprehensiveMultiDTypeTest, Lgamma) {
     if (dtype() == DType::Float16) SKIP_WITH_REASON(::tenzor::testing::SkipReason::GradcheckFDPrecision, "Float16 gradcheck precision");
-    auto x = make_var({4, 6});
+    // lgamma has a pole at 0 (and negative integers); make_var() (mean 0.5,
+    // std 0.3) samples close enough that Float32 finite-difference gradcheck is
+    // ill-conditioned near the singularity (Float64 tolerates it). Shift to a
+    // safely-positive range where lgamma/digamma are smooth — the analytic
+    // gradient (digamma) is unchanged, we just gradcheck away from the pole.
+    auto base = make_var({4, 6});
+    Variable x(tenzor::add(base.tensor(),
+                   full(std::vector<int64_t>{4, 6}, 2.5,
+                        base.tensor().dtype(), base.tensor().device())),
+               /*requires_grad=*/true);
     auto f = [](const Variable& v) { return lgamma(v); };
     EXPECT_TRUE(gradcheck(f, x, gc_eps(), gc_atol(), gc_rtol()));
 }

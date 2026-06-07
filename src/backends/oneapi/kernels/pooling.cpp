@@ -360,6 +360,59 @@ auto avgpool2d_forward(const Tensor& input,
     return output;
 }
 
+// Native SYCL FP64 average-pool forward. oneDNN has no FP64 pooling primitive,
+// and widening to FP32 introduces rounding that breaks FP64 finite-difference
+// gradcheck. Computed directly in double.
+static auto avgpool2d_forward_f64_sycl(const Tensor& input,
+                                       int64_t kernel_h, int64_t kernel_w,
+                                       int64_t stride_h, int64_t stride_w,
+                                       int64_t padding_h, int64_t padding_w,
+                                       bool count_include_pad, sycl::queue& queue) -> Tensor {
+    const auto shape = input.shape();
+    if (shape.size() != 4) {
+        throw std::invalid_argument("AvgPool2d requires 4D input (N, C, H, W)");
+    }
+    const int64_t N = shape[0];
+    const int64_t C = shape[1];
+    const int64_t H_in = shape[2];
+    const int64_t W_in = shape[3];
+    const int64_t H_out = (H_in + 2 * padding_h - kernel_h) / stride_h + 1;
+    const int64_t W_out = (W_in + 2 * padding_w - kernel_w) / stride_w + 1;
+
+    Tensor output({N, C, H_out, W_out}, DType::Float64, input.device());
+    const double* in_ptr = get_data_ptr<const double>(input);
+    double* out_ptr = get_data_ptr<double>(output);
+
+    const int64_t total_size = N * C * H_out * W_out;
+    queue.parallel_for<AvgPool2dKernelFloat64>(sycl::range<1>(total_size), [=](sycl::id<1> flat_idx) {
+        int64_t temp = flat_idx;
+        const int64_t w_out = temp % W_out;
+        temp /= W_out;
+        const int64_t h_out = temp % H_out;
+        temp /= H_out;
+        const int64_t c = temp % C;
+        const int64_t n = temp / C;
+
+        double sum = 0.0;
+        int64_t count = 0;
+        for (int64_t kh = 0; kh < kernel_h; ++kh) {
+            for (int64_t kw = 0; kw < kernel_w; ++kw) {
+                int64_t h_in = h_out * stride_h - padding_h + kh;
+                int64_t w_in = w_out * stride_w - padding_w + kw;
+                if (h_in >= 0 && h_in < H_in && w_in >= 0 && w_in < W_in) {
+                    sum += in_ptr[((n * C + c) * H_in + h_in) * W_in + w_in];
+                    count++;
+                } else if (count_include_pad) {
+                    count++;
+                }
+            }
+        }
+        out_ptr[((n * C + c) * H_out + h_out) * W_out + w_out] =
+            count > 0 ? sum / static_cast<double>(count) : 0.0;
+    });
+    return output;
+}
+
 // Pure SYCL maxpool implementation used for non-Float32 dtypes when oneDNN is available
 static auto maxpool2d_forward_with_indices_sycl(const Tensor& input,
                                                  int64_t kernel_h, int64_t kernel_w,
@@ -1508,6 +1561,14 @@ auto adaptive_maxpool2d_backward(const Tensor& grad_output, const Tensor& indice
  * @return Tensor Pooled output tensor
  */
 auto avg_pool2d_kernel(const Tensor& input, const OpAttributes& attrs, sycl::queue& queue) -> Tensor {
+    // FP16/BF16 pooling is unsupported on some SYCL oneDNN devices ("could not
+    // create a descriptor for a pooling primitive"). Widen those to FP32.
+    // FP64 is computed natively (oneDNN has no FP64 pooling primitive, and
+    // widening it would break FP64 finite-difference gradcheck precision).
+    if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) {
+        const DType orig = input.dtype();
+        return avg_pool2d_kernel(input.to(DType::Float32), attrs, queue).to(orig);
+    }
     if (!attrs.has(AttrKey::KernelSize) && !attrs.has(AttrKey::KernelSizeH) && !attrs.has(AttrKey::KernelSizeW)) {
         throw std::invalid_argument("avg_pool2d: 'kernel_size' attribute is required");
     }
@@ -1525,6 +1586,13 @@ auto avg_pool2d_kernel(const Tensor& input, const OpAttributes& attrs, sycl::que
     const int64_t padding_w = attrs.get_int(AttrKey::PaddingW, p_scalar);
     const bool count_include_pad = attrs.get_bool(AttrKey::CountIncludePad, false);
 
+#ifdef TENZOR_HAS_ONEDNN
+    // oneDNN avgpool2d_forward has no FP64 primitive; route FP64 to native SYCL.
+    if (input.dtype() == DType::Float64) {
+        return avgpool2d_forward_f64_sycl(input, kernel_h, kernel_w, stride_h, stride_w,
+                                          padding_h, padding_w, count_include_pad, queue);
+    }
+#endif
     return avgpool2d_forward(input, kernel_h, kernel_w, stride_h, stride_w,
                               padding_h, padding_w, count_include_pad, queue);
 }
@@ -1542,6 +1610,14 @@ auto avg_pool2d_kernel(const Tensor& input, const OpAttributes& attrs, sycl::que
  * @return std::pair<Tensor, Tensor> Pooled output tensor and indices tensor
  */
 auto max_pool2d_kernel(const Tensor& input, const OpAttributes& attrs, sycl::queue& queue) -> std::pair<Tensor, Tensor> {
+    // See avg_pool2d_kernel: widen FP64/FP16/BF16 to FP32 (oneDNN lacks the
+    // primitives). Indices are dtype-independent — only narrow the output.
+    if (input.dtype() == DType::Float64 || input.dtype() == DType::Float16 ||
+        input.dtype() == DType::BFloat16) {
+        const DType orig = input.dtype();
+        auto [out, idx] = max_pool2d_kernel(input.to(DType::Float32), attrs, queue);
+        return {out.to(orig), idx};
+    }
     if (!attrs.has(AttrKey::KernelSize) && !attrs.has(AttrKey::KernelSizeH) && !attrs.has(AttrKey::KernelSizeW)) {
         throw std::invalid_argument("max_pool2d: 'kernel_size' attribute is required");
     }
@@ -1576,6 +1652,11 @@ auto max_pool2d_kernel(const Tensor& input, const OpAttributes& attrs, sycl::que
  * @return Tensor Pooled output tensor
  */
 auto adaptive_avg_pool2d_kernel(const Tensor& input, const OpAttributes& attrs, sycl::queue& queue) -> Tensor {
+    // FP16/BF16 widen to FP32; FP64 runs natively (widening breaks FP64 gradcheck).
+    if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) {
+        const DType orig = input.dtype();
+        return adaptive_avg_pool2d_kernel(input.to(DType::Float32), attrs, queue).to(orig);
+    }
     int64_t output_h = 1, output_w = 1;
 
     // Support both formats: "output_size" (H,W string) and "output_h"/"output_w" (separate integers)
@@ -1613,6 +1694,13 @@ auto adaptive_avg_pool2d_kernel(const Tensor& input, const OpAttributes& attrs, 
  * @return Tensor Pooled output tensor
  */
 auto adaptive_max_pool2d_kernel(const Tensor& input, const OpAttributes& attrs, sycl::queue& queue) -> std::vector<Tensor> {
+    if (input.dtype() == DType::Float64 || input.dtype() == DType::Float16 ||
+        input.dtype() == DType::BFloat16) {
+        const DType orig = input.dtype();
+        auto out = adaptive_max_pool2d_kernel(input.to(DType::Float32), attrs, queue);
+        if (!out.empty()) out[0] = out[0].to(orig);  // out[1] = indices (dtype-independent)
+        return out;
+    }
     int64_t output_h = 1, output_w = 1;
 
     // Support both formats: "output_size" (H,W string) and "output_h"/"output_w" (separate integers)
@@ -1652,6 +1740,14 @@ auto adaptive_max_pool2d_kernel(const Tensor& input, const OpAttributes& attrs, 
  */
 auto avg_pool2d_backward_kernel(const Tensor& grad_output, const Tensor& input,
                                 const OpAttributes& attrs, sycl::queue& queue) -> Tensor {
+    // FP16/BF16 widen to FP32 (no native atomic accumulation for those types).
+    // FP64 is handled by the native FP64 branch below — widening it loses the
+    // precision FP64 finite-difference gradcheck requires.
+    if (grad_output.dtype() == DType::Float16 || grad_output.dtype() == DType::BFloat16) {
+        const DType orig = grad_output.dtype();
+        return avg_pool2d_backward_kernel(grad_output.to(DType::Float32),
+                                          input.to(DType::Float32), attrs, queue).to(orig);
+    }
     if (!attrs.has(AttrKey::KernelSize) && !attrs.has(AttrKey::KernelSizeH) && !attrs.has(AttrKey::KernelSizeW)) {
         throw std::invalid_argument("avg_pool2d_backward: 'kernel_size' attribute is required");
     }
@@ -1934,6 +2030,12 @@ auto avg_pool2d_backward_kernel(const Tensor& grad_output, const Tensor& input,
  */
 auto max_pool2d_backward_kernel(const Tensor& grad_output, const Tensor& input,
                                 const OpAttributes& attrs, sycl::queue& queue) -> Tensor {
+    if (grad_output.dtype() == DType::Float64 || grad_output.dtype() == DType::Float16 ||
+        grad_output.dtype() == DType::BFloat16) {
+        const DType orig = grad_output.dtype();
+        return max_pool2d_backward_kernel(grad_output.to(DType::Float32),
+                                          input.to(DType::Float32), attrs, queue).to(orig);
+    }
     if (!attrs.has(AttrKey::KernelSize) && !attrs.has(AttrKey::KernelSizeH) && !attrs.has(AttrKey::KernelSizeW)) {
         throw std::invalid_argument("max_pool2d_backward: 'kernel_size' attribute is required");
     }
@@ -2153,6 +2255,12 @@ auto max_pool2d_backward_kernel(const Tensor& grad_output, const Tensor& input,
  */
 auto adaptive_avg_pool2d_backward_kernel(const Tensor& grad_output, const Tensor& input,
                                           const OpAttributes& attrs, sycl::queue& queue) -> Tensor {
+    // FP16/BF16 widen to FP32; FP64 runs natively (widening breaks FP64 gradcheck).
+    if (grad_output.dtype() == DType::Float16 || grad_output.dtype() == DType::BFloat16) {
+        const DType orig = grad_output.dtype();
+        return adaptive_avg_pool2d_backward_kernel(grad_output.to(DType::Float32),
+                                                   input.to(DType::Float32), attrs, queue).to(orig);
+    }
     auto input_shape = input.shape();
     if (input_shape.size() != 4) {
         throw std::invalid_argument("adaptive_avg_pool2d_backward requires 4D input (N, C, H, W)");

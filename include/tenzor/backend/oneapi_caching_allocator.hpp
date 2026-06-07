@@ -24,6 +24,16 @@ struct OneAPIBlock {
     int device;                 // Device index
     bool is_shared;             // Whether this is shared memory (vs device-only)
 
+    // Release fence (actually a heap-allocated sycl::event*, kept as void* to
+    // avoid the sycl.hpp header dependency). Set when the block is freed: a
+    // barrier submitted on the device's in-order queue, signalling once every
+    // operation enqueued BEFORE the free has finished. The block may only be
+    // recycled or sycl::free'd after this event completes — freeing USM with
+    // in-flight kernels corrupts the Intel runtime's internal allocator
+    // ("corrupted double-linked list" aborts), and recycling it early lets a
+    // queued kernel write into the next owner's data.
+    void* release_fence{nullptr};
+
     OneAPIBlock(void* p, size_t s, int dev, bool shared = true)
         : ptr(p), size(s), allocated(false), device(dev), is_shared(shared) {}
 

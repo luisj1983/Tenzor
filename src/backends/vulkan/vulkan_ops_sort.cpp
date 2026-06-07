@@ -526,8 +526,16 @@ auto VulkanBackend::dispatchMedian(const Tensor& input, int64_t dim, bool keepdi
                 Tensor(out_shape, DType::Int64, input.device())};
     }
 
-    // Sort along dim (ascending)
-    auto [sorted_values, sorted_indices] = dispatchSort(input, dim, false);
+    // Sort along dim (ascending). Float16/BFloat16 are sorted as Float32: the
+    // sort comparator path does not order reduced-precision values correctly,
+    // which produced a wrong sorted order and therefore the wrong median index
+    // (the IndexNotPlaceholderZero regression). Widening preserves the original
+    // slice positions in sorted_indices; the median value is narrowed back to
+    // the input dtype below.
+    const bool half_input = (input.dtype() == DType::Float16 ||
+                             input.dtype() == DType::BFloat16);
+    Tensor sort_input = half_input ? dispatchCast(input, DType::Float32) : input;
+    auto [sorted_values, sorted_indices] = dispatchSort(sort_input, dim, false);
 
     // Median index: N/2 for even-length (lower median), (N-1)/2 same thing
     int64_t median_idx = (dim_size - 1) / 2;
@@ -537,6 +545,9 @@ auto VulkanBackend::dispatchMedian(const Tensor& input, int64_t dim, bool keepdi
 
     Tensor median_values = dispatchIndexSelect(sorted_values, dim, idx_tensor);
     Tensor median_indices = dispatchIndexSelect(sorted_indices, dim, idx_tensor);
+    if (half_input) {
+        median_values = dispatchCast(median_values, input.dtype());
+    }
 
     // Squeeze the dim (index_select keeps dim with size 1)
     if (!keepdim) {

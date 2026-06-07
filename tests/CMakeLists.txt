@@ -1051,6 +1051,20 @@ if(TENZOR_BUILD_PYTHON)
         set(PYTHON_TEST_DIR "${CMAKE_CURRENT_SOURCE_DIR}/python")
         set(PYTHON_TEST_ENV "PYTHONPATH=${CMAKE_BINARY_DIR}/python")
 
+        # The project's Python dependencies (numpy, ml_dtypes, …) live in the
+        # in-tree .venv-iree virtualenv. The CMake-discovered interpreter may be
+        # a bare system python that lacks them (e.g. BFloat16<->numpy interop
+        # needs ml_dtypes), so expose the venv's site-packages to the test
+        # interpreter. ABI-compatible because the venv is the same CPython
+        # minor version the extension module is built against.
+        file(GLOB _venv_site_dirs
+             "${CMAKE_SOURCE_DIR}/.venv-iree/lib/python*/site-packages")
+        foreach(_venv_site ${_venv_site_dirs})
+            if(IS_DIRECTORY "${_venv_site}")
+                set(PYTHON_TEST_ENV "${PYTHON_TEST_ENV}:${_venv_site}")
+            endif()
+        endforeach()
+
         # Python tests in this list also get the "smoke" label so the
         # fast-feedback `ctest -L smoke` set covers basic Python-binding
         # surface (audit 2026-05-02 I.1). Each must be a small,

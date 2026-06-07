@@ -8,6 +8,7 @@
 #include "tenzor/nn/checkpoint.hpp"
 #include "tenzor/nn/layers/linear.hpp"
 #include "tenzor/nn/layers/conv.hpp"
+#include "tenzor/nn/init.hpp"
 #include "tenzor/nn/activations/activations.hpp"
 #include "tenzor/ops/detection.hpp"
 #include "tenzor/ops/transform.hpp"
@@ -115,11 +116,16 @@ auto decode_boxes(const Tensor& deltas, const Tensor& anchors) -> Tensor {
     anchors_w = tenzor::clamp_min(anchors_w, eps);
     anchors_h = tenzor::clamp_min(anchors_h, eps);
 
-    // Decode to box centers and sizes
-    auto boxes_cx = dx * anchors_w + anchors_cx;
-    auto boxes_cy = dy * anchors_h + anchors_cy;
-    auto boxes_w = tenzor::exp(dw) * anchors_w;
-    auto boxes_h = tenzor::exp(dh) * anchors_h;
+    // Clamp deltas before use. dw/dh before exp (bbox_xform_clip =
+    // log(1000/16), matches torchvision) to prevent exp overflow. dx/dy to
+    // the same bound so the centre shift is capped at ~4 anchor extents:
+    // untrained heads can emit O(100) deltas, and dx*anchor_w would exceed
+    // Float16's 65504 max and decode to +-inf (finite-but-huge on Float32).
+    const double bbox_xform_clip = std::log(1000.0 / 16.0);
+    auto boxes_cx = tenzor::clamp(dx, -bbox_xform_clip, bbox_xform_clip) * anchors_w + anchors_cx;
+    auto boxes_cy = tenzor::clamp(dy, -bbox_xform_clip, bbox_xform_clip) * anchors_h + anchors_cy;
+    auto boxes_w = tenzor::exp(tenzor::clamp(dw, -bbox_xform_clip, bbox_xform_clip)) * anchors_w;
+    auto boxes_h = tenzor::exp(tenzor::clamp(dh, -bbox_xform_clip, bbox_xform_clip)) * anchors_h;
 
     // Convert to (x1, y1, x2, y2)
     auto boxes_x1 = boxes_cx - boxes_w * 0.5f;
@@ -232,6 +238,19 @@ RPN::RPN(int64_t in_channels, int64_t num_anchors) {
     // Regression: box deltas (4 per anchor: dx, dy, dw, dh)
     bbox_pred_ = std::make_shared<nn::Conv2d>(512, num_anchors * 4, 1);
     register_module("bbox_pred", bbox_pred_);
+
+    // torchvision RPNHead init: all convs normal(std=0.01), bias 0. With the
+    // default (Kaiming) Conv2d init an UNtrained RPN emits O(1) box deltas, so
+    // decoded proposals explode far off-image and clip to degenerate edge boxes,
+    // collapsing the proposal set. Small-std init keeps untrained proposals
+    // close to the anchors (in-bounds). Standard for training too.
+    auto init_conv = [](const std::shared_ptr<nn::Conv2d>& m) {
+        ::tenzor::nn::init::normal_(m->get_parameter("weight")->tensor(), 0.0, 0.01);
+        if (auto b = m->get_parameter("bias")) ::tenzor::nn::init::zeros_(b->tensor());
+    };
+    init_conv(conv_);
+    init_conv(cls_logits_);
+    init_conv(bbox_pred_);
 }
 
 auto RPN::forward_multi(const Variable& features)
@@ -283,6 +302,17 @@ ROIHead::ROIHead(int64_t in_channels, int64_t num_classes, int64_t roi_size) {
     // Box regression head (4 coordinates per class)
     bbox_pred_ = std::make_shared<nn::Linear>(1024, (num_classes + 1) * 4);
     register_module("bbox_pred", bbox_pred_);
+
+    // torchvision FastRCNNPredictor init: cls_score normal(std=0.01),
+    // bbox_pred normal(std=0.001), biases 0. With the default (Kaiming) Linear
+    // init an UNtrained predictor emits O(1) box deltas, so decode_boxes pushes
+    // box centres tens of thousands of pixels off-image; after clipping the box
+    // collapses to a degenerate edge and process_masks skips it -> all-zero
+    // masks. Small-std init keeps untrained boxes ~ proposals (in-bounds).
+    ::tenzor::nn::init::normal_(cls_score_->weight()->tensor(), 0.0, 0.01);
+    ::tenzor::nn::init::normal_(bbox_pred_->weight()->tensor(), 0.0, 0.001);
+    if (auto b = cls_score_->bias()) ::tenzor::nn::init::zeros_(b->tensor());
+    if (auto b = bbox_pred_->bias()) ::tenzor::nn::init::zeros_(b->tensor());
 }
 
 auto ROIHead::forward_multi(const Variable& roi_features)
@@ -734,9 +764,20 @@ auto MaskRCNN::forward_test(const Variable& images)
     auto scores = tenzor::max(cls_probs_no_bg, 1);
     auto labels = tenzor::argmax(cls_probs_no_bg, 1);
 
-    // Decode predicted box deltas relative to proposal anchors
+    // Decode predicted box deltas relative to proposal anchors. Decode in
+    // Float32 for half dtypes: even with clamped deltas, Float16 loses
+    // mantissa on the dx*anchor_w products; decode_boxes itself clamps dx/dy
+    // and dw/dh so the result stays inside half range before narrowing.
     auto proposal_boxes = proposals.slice(1, 1, 5);  // Remove batch index
-    auto boxes = decode_boxes(bbox_deltas.tensor(), proposal_boxes);
+    const DType box_dtype = bbox_deltas.tensor().dtype();
+    const bool half_boxes =
+        (box_dtype == DType::Float16 || box_dtype == DType::BFloat16);
+    Tensor deltas_t = half_boxes ? bbox_deltas.tensor().to(DType::Float32)
+                                 : bbox_deltas.tensor();
+    Tensor props_t = half_boxes ? proposal_boxes.to(DType::Float32)
+                                : proposal_boxes;
+    auto boxes = decode_boxes(deltas_t, props_t);
+    if (half_boxes) boxes = boxes.to(box_dtype);
 
     // 6. ROI Align for masks (only for detected objects)
     auto roi_features_mask = roi_align_mask_->forward(features, proposals);

@@ -54,12 +54,17 @@ TEST_P(ConvTranspose2dMultiDTypeTest, BatchDim) {
 }
 
 TEST_P(ConvTranspose2dMultiDTypeTest, BackwardProducesGradients) {
+    // Reseed before each construction so reference and device modules get
+    // byte-identical weights (the fixture seeds once per test; two sequential
+    // constructions would otherwise draw different init weights).
+    tenzor::manual_seed(44);
     nn::ConvTranspose2d deconv_ref(3, 6, 4, 2, 1);
     auto input_cpu = tenzor::randn({1, 3, 4, 4}, DType::Float32, Device::cpu());
     auto in_ref = Variable(input_cpu, /*requires_grad=*/true);
     auto out_ref = deconv_ref.forward(in_ref);
     tenzor::sum(out_ref).backward();
 
+    tenzor::manual_seed(44);
     nn::ConvTranspose2d deconv(3, 6, 4, 2, 1);
     convert_model(deconv);
     auto input = Variable(input_cpu.to(dtype_).to(device_), /*requires_grad=*/true);

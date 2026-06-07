@@ -9,6 +9,7 @@
 #include "oneapi_kernel_utils.hpp"
 #include <sycl/sycl.hpp>
 #include <cstring>
+#include <cmath>
 #include <numeric>
 #include <algorithm>
 #include <stdexcept>
@@ -21,6 +22,8 @@ namespace oneapi {
     auto repeat_kernel(const Tensor& input, const std::vector<int64_t>& repeats, sycl::queue& queue) -> Tensor;
     // Forward declaration for contiguous_kernel (defined later in this file)
     auto contiguous_kernel(const Tensor& input, sycl::queue& queue) -> Tensor;
+    // Forward declaration for fill_kernel (defined later in this file)
+    auto fill_kernel(const Tensor& tensor, double value, sycl::queue& queue) -> Tensor;
 }
 }
 
@@ -771,6 +774,31 @@ auto contiguous_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
             out_ptr[flat_idx * 2 + 1] = in_ptr[in_idx * 2 + 1];
         });
     }
+    else if (input.dtype() != DType::QInt4x2 &&
+             (input.dtype_size() == 1 || input.dtype_size() == 2 ||
+              input.dtype_size() == 4 || input.dtype_size() == 8)) {
+        // Generic gather for any remaining fixed-width POD dtype (UInt32/UInt64,
+        // FP8, etc.): the copy is pure byte movement keyed by element width.
+        auto copy_w = [&]<typename U>() {
+            const U* in_ptr = get_data_ptr<const U>(input);
+            U* out_ptr = get_data_ptr<U>(output);
+            queue.parallel_for(sycl::range<1>(numel), [=](sycl::id<1> flat_idx) {
+                int64_t remaining = flat_idx, in_idx = 0;
+                for (size_t d = 0; d < ndim; ++d) {
+                    int64_t coord = remaining / out_strides_arr[d];
+                    remaining %= out_strides_arr[d];
+                    in_idx += coord * in_strides_arr[d];
+                }
+                out_ptr[flat_idx] = in_ptr[in_idx];
+            });
+        };
+        switch (input.dtype_size()) {
+            case 1: copy_w.template operator()<uint8_t>();  break;
+            case 2: copy_w.template operator()<uint16_t>(); break;
+            case 4: copy_w.template operator()<uint32_t>(); break;
+            case 8: copy_w.template operator()<uint64_t>(); break;
+        }
+    }
     else {
         throw std::runtime_error("Unsupported dtype for contiguous kernel");
     }
@@ -857,7 +885,11 @@ auto ones_kernel(const std::vector<int64_t>& shape, DType dtype, Device device, 
         queue.fill(get_data_ptr<uint8_t>(output), static_cast<uint8_t>(1), numel).wait();
     }
     else {
-        throw std::runtime_error("Unsupported dtype for ones");
+        // Complex/FP8/quantized: defer to fill_kernel(value=1), which handles
+        // those representations (and throws for quantized dtypes that lack
+        // quantization params, matching the CPU backend's "ones on a quantized
+        // dtype needs params" contract).
+        return fill_kernel(output, 1.0, queue);
     }
 
     return output;
@@ -962,7 +994,8 @@ auto full_kernel(const std::vector<int64_t>& shape, double value, DType dtype, D
         }).wait();
     }
     else {
-        throw std::runtime_error("Unsupported dtype for full");
+        // Complex/FP8/quantized: defer to fill_kernel.
+        return fill_kernel(output, value, queue);
     }
 
     return output;
@@ -1027,6 +1060,56 @@ auto fill_kernel(const Tensor& tensor, double value, sycl::queue& queue) -> Tens
     }
     else if (tensor.dtype() == DType::UInt64) {
         fill_simple(static_cast<uint64_t>(value));
+    }
+    else if (tensor.dtype() == DType::Bool) {
+        bool* p = get_data_ptr<bool>(output);
+        queue.fill(p, (value != 0.0), count).wait();
+    }
+    else if (tensor.dtype() == DType::Complex64) {
+        float* p = get_data_ptr<float>(output);
+        const float re = static_cast<float>(value);
+        queue.parallel_for(sycl::range<1>(numel), [=](sycl::id<1> i) {
+            p[2 * i[0]] = re; p[2 * i[0] + 1] = 0.0f;
+        }).wait();
+    }
+    else if (tensor.dtype() == DType::Complex128) {
+        double* p = get_data_ptr<double>(output);
+        const double re = value;
+        queue.parallel_for(sycl::range<1>(numel), [=](sycl::id<1> i) {
+            p[2 * i[0]] = re; p[2 * i[0] + 1] = 0.0;
+        }).wait();
+    }
+    else if (tensor.dtype() == DType::FP8_E4M3) {
+        FP8_E4M3 v(static_cast<float>(value));
+        uint8_t byte; std::memcpy(&byte, &v, sizeof(uint8_t));
+        queue.fill(get_data_ptr<uint8_t>(output), byte, count).wait();
+    }
+    else if (tensor.dtype() == DType::FP8_E5M2) {
+        FP8_E5M2 v(static_cast<float>(value));
+        uint8_t byte; std::memcpy(&byte, &v, sizeof(uint8_t));
+        queue.fill(get_data_ptr<uint8_t>(output), byte, count).wait();
+    }
+    else if (tensor.dtype() == DType::QInt8 || tensor.dtype() == DType::QUInt8 ||
+             tensor.dtype() == DType::QInt4x2) {
+        if (tensor.q_scale() == 0.0) {
+            throw std::runtime_error(
+                "fill_kernel: fill on quantized tensor requires quantization params: "
+                "call set_quantization_params(scale, zero_point) first");
+        }
+        const int64_t qval = static_cast<int64_t>(std::llround(value / tensor.q_scale()))
+                             + tensor.q_zero_point();
+        uint8_t byte;
+        if (tensor.dtype() == DType::QInt8) {
+            byte = static_cast<uint8_t>(static_cast<int8_t>(
+                std::clamp<int64_t>(qval, -128, 127)));
+        } else if (tensor.dtype() == DType::QUInt8) {
+            byte = static_cast<uint8_t>(std::clamp<int64_t>(qval, 0, 255));
+        } else { // QInt4x2: pack identical 4-bit nibbles
+            const int64_t c = std::clamp<int64_t>(qval, -8, 7);
+            byte = static_cast<uint8_t>((c & 0xF) | ((c & 0xF) << 4));
+        }
+        queue.fill(get_data_ptr<uint8_t>(output), byte, count).wait();
+        output.set_quantization_params(tensor.q_scale(), tensor.q_zero_point());
     }
     else {
         throw std::runtime_error("Unsupported dtype for fill");
@@ -1195,7 +1278,56 @@ auto chunk_kernel(const Tensor& input, int64_t chunks, int64_t dim, sycl::queue&
 // ============================================================================
 
 auto tile_kernel(const Tensor& input, const std::vector<int64_t>& reps, sycl::queue& queue) -> Tensor {
-    return repeat_kernel(input, reps, queue);
+    // tile (numpy.tile / torch.tile) is BLOCK replication: tile([1,2,3],{2}) =
+    // [1,2,3,1,2,3]. It is NOT repeat() — Tenzor's repeat is element-wise
+    // interleave (repeat([1,2,3],{2}) = [1,1,2,2,3,3]). Delegating to
+    // repeat_kernel produced the interleaved (wrong) result on oneAPI. Implement
+    // proper per-dimension block tiling with right-aligned reps (numpy semantics).
+    auto in_shape = input.shape();
+    const int64_t ndim = static_cast<int64_t>(in_shape.size());
+    const int64_t out_ndim = std::max(ndim, static_cast<int64_t>(reps.size()));
+
+    std::vector<int64_t> cur(out_ndim, 1), rps(out_ndim, 1);
+    for (int64_t i = 0; i < ndim; ++i) cur[out_ndim - ndim + i] = in_shape[i];
+    for (size_t i = 0; i < reps.size(); ++i)
+        rps[out_ndim - static_cast<int64_t>(reps.size()) + i] = reps[i];
+
+    const size_t elem = input.dtype_size();
+    Tensor result = input.is_contiguous() ? input : contiguous_kernel(input, queue);
+
+    for (int64_t d = out_ndim - 1; d >= 0; --d) {
+        if (rps[d] == 1) continue;
+        const int64_t D = cur[d];
+        const int64_t R = rps[d];
+        int64_t outer = 1; for (int64_t i = 0; i < d; ++i) outer *= cur[i];
+        int64_t inner = 1; for (int64_t i = d + 1; i < out_ndim; ++i) inner *= cur[i];
+
+        std::vector<int64_t> new_shape(cur);
+        new_shape[d] = D * R;
+        Tensor next(new_shape, input.dtype(), input.device());
+
+        Tensor cont = result.is_contiguous() ? result : contiguous_kernel(result, queue);
+        const uint8_t* src = static_cast<const uint8_t*>(cont.data_ptr());
+        uint8_t* dst = static_cast<uint8_t*>(const_cast<void*>(next.data_ptr()));
+        const size_t block = static_cast<size_t>(D) * inner * elem;  // one full dim-d block
+
+        for (int64_t o = 0; o < outer; ++o) {
+            for (int64_t r = 0; r < R; ++r) {
+                queue.memcpy(dst + (static_cast<size_t>(o) * R + r) * block,
+                             src + static_cast<size_t>(o) * block, block);
+            }
+        }
+        queue.wait();
+        result = next;
+        cur = new_shape;
+    }
+
+    // Carry the full out_ndim shape even when no dim was tiled (right-aligned
+    // padding adds leading singleton dims).
+    if (static_cast<int64_t>(result.shape().size()) != out_ndim) {
+        result = reshape_kernel(result, cur, queue);
+    }
+    return result;
 }
 
 // ============================================================================
@@ -1664,6 +1796,24 @@ auto cast_kernel(const Tensor& input, DType target_dtype, sycl::queue& queue) ->
         return clone_kernel(input, queue);
     }
 
+    // Intel oneAPI CPU runtime bug: device casts touching 16-bit integer
+    // dtypes SEGV inside the runtime (QueryMaxMemAllocSize during an
+    // enqueue-triggered internal flush; "PLEASE submit a bug report" banner).
+    // Host<->device memcpy of 16-bit data is safe, so do the cast losslessly
+    // on the host and upload the result. Same proven detour as the oneAPI
+    // argmax/argmin Int16 path (see feedback_rocm_intrinsic_nan-adjacent
+    // notes / grind session 2).
+    {
+        auto runtime_unsafe = [](DType dt) {
+            // UInt32 casts crash the same way (verified via SumDtypeGap.UInt32
+            // backtrace), so it takes the host detour too.
+            return dt == DType::Int16 || dt == DType::UInt16 || dt == DType::UInt32;
+        };
+        if (runtime_unsafe(input.dtype()) || runtime_unsafe(target_dtype)) {
+            return input.to(Device::cpu()).to(target_dtype).to(input.device());
+        }
+    }
+
     auto shape_span = input.shape();
     std::vector<int64_t> shape(shape_span.begin(), shape_span.end());
     Tensor output(shape, target_dtype, input.device());
@@ -2053,7 +2203,72 @@ auto strided_fill_kernel(Tensor& self, double value, sycl::queue& queue) -> void
             ptr[offset] = val;
         }).wait();
     } else {
-        throw std::runtime_error("strided_fill: unsupported dtype for non-contiguous fill");
+        // Generic strided fill for the remaining fixed-width dtypes: compute the
+        // scalar's storage representation on host and scatter it to the strided
+        // offsets (offsets are in element units).
+        auto strided_write = [&]<typename T>(T fillv) {
+            T* ptr = get_data_ptr<T>(self);
+            queue.parallel_for(sycl::range<1>(numel), [=](sycl::id<1> flat_idx) {
+                int64_t remaining = flat_idx, offset = 0;
+                for (size_t d = 0; d < ndim; ++d) {
+                    int64_t coord = remaining / cont_strides_arr[d];
+                    remaining %= cont_strides_arr[d];
+                    offset += coord * strides_arr[d];
+                }
+                ptr[offset] = fillv;
+            }).wait();
+        };
+        auto strided_write_complex = [&]<typename R>(R re) {
+            R* ptr = get_data_ptr<R>(self);
+            queue.parallel_for(sycl::range<1>(numel), [=](sycl::id<1> flat_idx) {
+                int64_t remaining = flat_idx, offset = 0;
+                for (size_t d = 0; d < ndim; ++d) {
+                    int64_t coord = remaining / cont_strides_arr[d];
+                    remaining %= cont_strides_arr[d];
+                    offset += coord * strides_arr[d];
+                }
+                ptr[offset * 2] = re; ptr[offset * 2 + 1] = R(0);
+            }).wait();
+        };
+        switch (self.dtype()) {
+            case DType::Int8:   strided_write(static_cast<int8_t>(value)); break;
+            case DType::Int16:  strided_write(static_cast<int16_t>(value)); break;
+            case DType::UInt8:  strided_write(static_cast<uint8_t>(value)); break;
+            case DType::UInt16: strided_write(static_cast<uint16_t>(value)); break;
+            case DType::UInt32: strided_write(static_cast<uint32_t>(value)); break;
+            case DType::UInt64: strided_write(static_cast<uint64_t>(value)); break;
+            case DType::Bool:   strided_write(static_cast<bool>(value != 0.0)); break;
+            case DType::Complex64:  strided_write_complex(static_cast<float>(value)); break;
+            case DType::Complex128: strided_write_complex(static_cast<double>(value)); break;
+            case DType::FP8_E4M3: { FP8_E4M3 v(static_cast<float>(value)); uint8_t b; std::memcpy(&b,&v,1); strided_write(b); break; }
+            case DType::FP8_E5M2: { FP8_E5M2 v(static_cast<float>(value)); uint8_t b; std::memcpy(&b,&v,1); strided_write(b); break; }
+            case DType::QInt8:
+            case DType::QUInt8: {
+                if (self.q_scale() == 0.0)
+                    throw std::runtime_error("strided_fill: quantized tensor requires quantization params");
+                const int64_t qv = static_cast<int64_t>(std::llround(value / self.q_scale())) + self.q_zero_point();
+                const uint8_t b = (self.dtype() == DType::QInt8)
+                    ? static_cast<uint8_t>(static_cast<int8_t>(std::clamp<int64_t>(qv, -128, 127)))
+                    : static_cast<uint8_t>(std::clamp<int64_t>(qv, 0, 255));
+                strided_write(b);
+                break;
+            }
+            case DType::QInt4x2: {
+                // Packed two-nibble byte. numel()/shape()/strides() are at byte
+                // (packed) granularity, so every visited element is a whole byte
+                // whose two logical 4-bit values both belong to the view — write
+                // identical nibbles, mirroring the CPU StridedFill kernel.
+                if (self.q_scale() == 0.0)
+                    throw std::runtime_error("strided_fill: quantized tensor requires quantization params");
+                const int64_t qv = static_cast<int64_t>(std::llround(value / self.q_scale())) + self.q_zero_point();
+                const int64_t clamped = std::clamp<int64_t>(qv, -8, 7);
+                const uint8_t b = static_cast<uint8_t>((clamped & 0xF) | ((clamped & 0xF) << 4));
+                strided_write(b);
+                break;
+            }
+            default:
+                throw std::runtime_error("strided_fill: unsupported dtype for non-contiguous fill");
+        }
     }
 }
 

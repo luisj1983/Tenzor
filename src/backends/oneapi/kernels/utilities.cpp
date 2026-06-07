@@ -326,6 +326,40 @@ auto cat_kernel(std::span<const Tensor> tensors, int64_t dim, sycl::queue& queue
                 }
             );
         }
+        else if (dtype == DType::Complex64 || dtype == DType::Complex128 ||
+                 dtype == DType::UInt16 || dtype == DType::UInt32 || dtype == DType::UInt64 ||
+                 dtype == DType::FP8_E4M3 || dtype == DType::FP8_E5M2) {
+            // Generic fixed-width element copy (pure data movement). Each logical
+            // element is dtype_size() bytes; reinterpret to the matching POD width.
+            const int64_t src_slice_stride = elements_per_slice * tensor_size_in_dim;
+            const int64_t dst_slice_stride = elements_per_slice * out_shape[dim];
+            const int64_t total = num_slices * tensor_size_in_dim * elements_per_slice;
+            const int64_t off = offset_in_concat_dim;
+            const int64_t eps = elements_per_slice;
+            auto gen = [&]<typename U>(int64_t lanes) {
+                const U* src_ptr = get_data_ptr<const U>(tensor);
+                U* dst_ptr = get_data_ptr<U>(output);
+                queue.parallel_for(sycl::range<1>(total), [=](sycl::id<1> idx) {
+                    const int64_t flat_idx = idx[0];
+                    const int64_t slice_idx = flat_idx / src_slice_stride;
+                    const int64_t remainder = flat_idx % src_slice_stride;
+                    const int64_t concat_idx = remainder / eps;
+                    const int64_t elem_idx = remainder % eps;
+                    const int64_t src_idx = slice_idx * src_slice_stride + concat_idx * eps + elem_idx;
+                    const int64_t dst_idx = slice_idx * dst_slice_stride + (off + concat_idx) * eps + elem_idx;
+                    for (int64_t l = 0; l < lanes; ++l)
+                        dst_ptr[dst_idx * lanes + l] = src_ptr[src_idx * lanes + l];
+                });
+            };
+            switch (dtype_size(dtype)) {
+                case 1:  gen.template operator()<uint8_t>(1);  break;
+                case 2:  gen.template operator()<uint16_t>(1); break;
+                case 4:  gen.template operator()<uint32_t>(1); break;
+                case 8:  gen.template operator()<uint64_t>(1); break;
+                case 16: gen.template operator()<uint64_t>(2); break;
+                default: throw std::runtime_error("cat_kernel: unsupported dtype");
+            }
+        }
         else {
             throw std::runtime_error("cat_kernel: unsupported dtype");
         }
@@ -354,7 +388,9 @@ auto cat_kernel(std::span<const Tensor> tensors, int64_t dim, sycl::queue& queue
  *   input = [-2.0, -1.0, 0.0, 1.0, 2.0]
  *   clamp(input, -1.0, 1.0) = [-1.0, -1.0, 0.0, 1.0, 1.0]
  */
-auto clamp_kernel(const Tensor& input, float min_val, float max_val, sycl::queue& queue) -> Tensor {
+auto clamp_kernel(const Tensor& input, double min_val, double max_val, sycl::queue& queue) -> Tensor {
+    const float min_val_f = static_cast<float>(min_val);
+    const float max_val_f = static_cast<float>(max_val);
     // Validate min <= max
     if (min_val > max_val) {
         throw std::invalid_argument("clamp_kernel: min_val must be <= max_val");
@@ -373,7 +409,7 @@ auto clamp_kernel(const Tensor& input, float min_val, float max_val, sycl::queue
 
         queue.parallel_for<ClampKernelFloat32>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
             const float val = in_ptr[idx];
-            out_ptr[idx] = sycl::fmin(sycl::fmax(val, min_val), max_val);
+            out_ptr[idx] = sycl::fmin(sycl::fmax(val, min_val_f), max_val_f);
         }).wait();
     }
     else if (input.dtype() == DType::Float64) {
@@ -394,7 +430,7 @@ auto clamp_kernel(const Tensor& input, float min_val, float max_val, sycl::queue
 
         queue.parallel_for<ClampKernelFloat16>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
             const float val = static_cast<float>(in_ptr[idx]);
-            out_ptr[idx] = sycl::half(sycl::fmin(sycl::fmax(val, min_val), max_val));
+            out_ptr[idx] = sycl::half(sycl::fmin(sycl::fmax(val, min_val_f), max_val_f));
         }).wait();
     }
     else if (input.dtype() == DType::BFloat16) {
@@ -403,7 +439,7 @@ auto clamp_kernel(const Tensor& input, float min_val, float max_val, sycl::queue
 
         queue.parallel_for<ClampKernelBFloat16>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
             const float val = bf16_to_f32(in_ptr[idx]);
-            out_ptr[idx] = f32_to_bf16(sycl::fmin(sycl::fmax(val, min_val), max_val));
+            out_ptr[idx] = f32_to_bf16(sycl::fmin(sycl::fmax(val, min_val_f), max_val_f));
         }).wait();
     }
     else if (input.dtype() == DType::Int32) {

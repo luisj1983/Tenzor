@@ -33,27 +33,34 @@ namespace tenzor {
 
 namespace {
 
+// Offsets are CPU index metadata in many call sites, but the nested backend
+// kernels read them inside device kernels and dispatch requires one device per
+// op — align offsets to the values' device (no-op when already co-located).
+static inline Tensor align_offsets(const Tensor& offsets, const Tensor& ref) {
+    return (offsets.device().type == ref.device().type) ? offsets : offsets.to(ref.device());
+}
+
 auto nested_softmax_forward_impl(const Tensor& values, const Tensor& offsets, int64_t dim) -> Tensor {
-    std::vector<Tensor> inputs = {values, offsets};
+    std::vector<Tensor> inputs = {values, align_offsets(offsets, values)};
     OpAttributes attrs;
     attrs.set(AttrKey::Dim, dim);
     return dispatch<OpId::NestedSoftmax>(inputs, attrs)[0];
 }
 
 auto nested_sum_forward_impl(const Tensor& values, const Tensor& offsets) -> Tensor {
-    std::vector<Tensor> inputs = {values, offsets};
+    std::vector<Tensor> inputs = {values, align_offsets(offsets, values)};
     return dispatch<OpId::NestedSum>(inputs)[0];
 }
 
 auto nested_mean_forward_impl(const Tensor& values, const Tensor& offsets) -> Tensor {
-    std::vector<Tensor> inputs = {values, offsets};
+    std::vector<Tensor> inputs = {values, align_offsets(offsets, values)};
     return dispatch<OpId::NestedMean>(inputs)[0];
 }
 
 auto nested_layer_norm_forward_impl(const Tensor& values, const Tensor& offsets,
                                      const Tensor& weight, const Tensor& bias,
                                      double eps) -> Tensor {
-    std::vector<Tensor> inputs = {values, offsets, weight, bias};
+    std::vector<Tensor> inputs = {values, align_offsets(offsets, values), weight, bias};
     OpAttributes attrs;
     attrs.set(AttrKey::Eps, eps);
     return dispatch<OpId::NestedLayerNorm>(inputs, attrs)[0];
@@ -62,7 +69,13 @@ auto nested_layer_norm_forward_impl(const Tensor& values, const Tensor& offsets,
 auto nested_attention_forward_impl(const Tensor& Q, const Tensor& K, const Tensor& V,
                                     const Tensor& q_offsets, const Tensor& kv_offsets,
                                     double scale, bool causal) -> Tensor {
-    std::vector<Tensor> inputs = {Q, K, V, q_offsets, kv_offsets};
+    // The backend NestedAttention kernel reads the offset arrays inside the
+    // device kernel, so they must live on Q's device; dispatch also requires a
+    // single device across inputs. Offsets commonly arrive as CPU index
+    // metadata — align them to Q's device (no-op when already co-located).
+    const Tensor q_off  = (q_offsets.device().type  == Q.device().type) ? q_offsets  : q_offsets.to(Q.device());
+    const Tensor kv_off = (kv_offsets.device().type == Q.device().type) ? kv_offsets : kv_offsets.to(Q.device());
+    std::vector<Tensor> inputs = {Q, K, V, q_off, kv_off};
     OpAttributes attrs;
     attrs.set(AttrKey::Scale, scale);
     attrs.set(AttrKey::Causal, causal);

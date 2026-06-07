@@ -423,6 +423,21 @@ static void configure_opencl_cpu_target_arch() {
 #endif  // __x86_64__
 }
 
+// ============================================================================
+// SYCL persistent kernel-binary cache
+// ============================================================================
+// The Intel OpenCL CPU runtime JIT-compiles every kernel bundle on first use
+// in each process. On this runtime a single cold elementwise kernel bundle
+// can take 15-20 s to compile (measured: full()+first add() = 19.7 s cold vs
+// 0.13 s warm), which made per-process test runs absurdly slow (e.g.
+// ForeachOps.PerfManyTensors: 17.6 s for 1000 tiny adds, all of it one JIT)
+// and starved heavy-model tests into 1200 s timeouts. SYCL ships an official
+// on-disk binary cache for exactly this, but it is OFF by default. Enable it
+// (respecting any explicit user setting, including an explicit "0").
+static void configure_sycl_persistent_cache() {
+    setenv("SYCL_CACHE_PERSISTENT", "1", /*overwrite=*/0);
+}
+
 /**
  * @brief OneAPI/SYCL backend implementation for Intel GPUs and CPUs.
  *
@@ -443,6 +458,7 @@ public:
         // Must happen before any SYCL platform/device enumeration so the
         // runtime picks up the setting before it JIT-compiles SPIR-V kernels.
         configure_opencl_cpu_target_arch();
+        configure_sycl_persistent_cache();
 
         // Policy: prefer Intel GPUs. If none are available, fall back to a
         // SYCL CPU device so the OneAPI code path remains exercisable on
@@ -955,6 +971,10 @@ private:
     }
 
     auto get_queue(int32_t device_id) -> sycl::queue& {
+        // Out-of-range indices previously did raw vector indexing (UB) — an
+        // invalid Device::oneapi(N) must throw, not fall through (see
+        // OneAPIBackendTest.InvalidDeviceIndex).
+        validate_device_id(device_id);
         return *devices_[device_id].queue;
     }
 
@@ -1014,6 +1034,7 @@ private:
 __attribute__((constructor))
 static void early_configure_opencl_cpu_target() {
     configure_opencl_cpu_target_arch();
+    configure_sycl_persistent_cache();
 }
 
 extern "C" {

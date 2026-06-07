@@ -119,6 +119,24 @@ protected:
         return zeros(shape, dtype, device);
     }
 
+    // Helper to create a deterministic NON-uniform tensor (distinct per-element
+    // values). Uniform/collinear inputs make several losses' gradients
+    // symmetric and exactly zero (e.g. log_softmax of equal logits, or a
+    // triplet whose anchor is collinear with both pos/neg), which only "passes"
+    // EXPECT_GRAD_FLOWS on Float32 via rounding noise. Use this for grad-flow.
+    Tensor createVaried(const std::vector<int64_t>& shape, double base = 0.5,
+                        double step = 0.37) {
+        int64_t n = 1;
+        for (auto s : shape) n *= s;
+        std::vector<float> vals(static_cast<size_t>(n));
+        for (int64_t i = 0; i < n; ++i) {
+            vals[static_cast<size_t>(i)] =
+                static_cast<float>(base + step * static_cast<double>((i % 5) + 1));
+        }
+        Tensor t = from_data(vals.data(), shape, device);
+        return (dtype == DType::Float32) ? t : t.to(dtype);
+    }
+
     // Helper to verify scalar loss value
     template<typename T>
     void assertLossValue(const Tensor& loss_tensor, double expected_value) {
@@ -574,7 +592,7 @@ TEST_P(LossAdvancedMultiDTypeTest, KLDivLoss_BackwardGradient) {
 }
 
 TEST_P(LossAdvancedMultiDTypeTest, FocalLoss_BackwardGradient) {
-    auto input = Variable(createOnes({2, 3}), true);
+    auto input = Variable(createVaried({2, 3}), true);
     auto target = Variable(createOnes({2, 3}) / 3.0f, false);
 
     auto criterion = FocalLoss(1.0, 2.0, "mean");
@@ -666,8 +684,11 @@ TEST_P(LossAdvancedMultiDTypeTest, CTCLoss_BackwardGradient) {
 
 TEST_P(LossAdvancedMultiDTypeTest, TripletMarginWithDistanceLoss_BackwardGradient) {
     auto anchor   = Variable(createFull({4, 8}, 0.0), true);
-    auto positive = Variable(createFull({4, 8}, 0.1), false);
-    auto negative = Variable(createFull({4, 8}, 1.0), false);
+    // Hard, non-collinear triplet: positive far, negative close (active hinge),
+    // and distinct per-element values so (a-p)/|a-p| and (a-n)/|a-n| differ —
+    // otherwise the true-Euclidean anchor gradient d_ap'-d_an' cancels to zero.
+    auto positive = Variable(createVaried({4, 8}, 1.4, 0.07), false);
+    auto negative = Variable(createVaried({4, 8}, 0.2, 0.17), false);
 
     TripletMarginWithDistanceLoss::DistanceFunction dist_fn =
         [](const Variable& a, const Variable& b) -> Variable {
@@ -714,8 +735,8 @@ TEST_P(LossAdvancedMultiDTypeTest, MultiLabelMarginLoss_BackwardGradient) {
 }
 
 TEST_P(LossAdvancedMultiDTypeTest, InfoNCELoss_BackwardGradient) {
-    auto queries = Variable(createFull({4, 8}, 0.1), true);
-    auto keys    = Variable(createFull({4, 8}, 0.2), false);
+    auto queries = Variable(createVaried({4, 8}, 0.1, 0.13), true);
+    auto keys    = Variable(createVaried({4, 8}, 0.3, 0.21), false);
 
     auto criterion = InfoNCELoss(/*temperature=*/0.07, Reduction::Mean);
     auto loss = criterion(queries, keys);
@@ -739,8 +760,11 @@ TEST_P(LossAdvancedMultiDTypeTest, NTXentLoss_BackwardGradient) {
 
 TEST_P(LossAdvancedMultiDTypeTest, TripletLoss_BackwardGradient) {
     auto anchor   = Variable(createFull({4, 8}, 0.0), true);
-    auto positive = Variable(createFull({4, 8}, 0.1), false);
-    auto negative = Variable(createFull({4, 8}, 1.0), false);
+    // Hard triplet: positive far from the anchor, negative close, so the
+    // hinge max(0, d_ap - d_an + margin) is ACTIVE and a gradient flows.
+    // (The previous easy triplet satisfied the margin -> loss 0 -> no grad.)
+    auto positive = Variable(createFull({4, 8}, 1.0), false);
+    auto negative = Variable(createFull({4, 8}, 0.1), false);
 
     auto criterion = TripletLoss(/*margin=*/1.0, /*p=*/2.0, /*swap=*/false,
                                  Reduction::Mean);

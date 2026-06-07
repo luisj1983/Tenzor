@@ -39,6 +39,7 @@ auto op_type_to_string(OpType type) -> std::string {
         case OpType::AvgPool2d: return "AvgPool2d";
         case OpType::AdaptiveAvgPool2d: return "AdaptiveAvgPool2d";
         case OpType::Conv2d: return "Conv2d";
+        case OpType::ConvTranspose: return "ConvTranspose";
         case OpType::BatchNorm2d: return "BatchNorm2d";
         case OpType::LayerNorm: return "LayerNorm";
         case OpType::Reshape: return "Reshape";
@@ -119,6 +120,7 @@ auto string_to_op_type(const std::string& str) -> OpType {
         {"AvgPool2d", OpType::AvgPool2d},
         {"AdaptiveAvgPool2d", OpType::AdaptiveAvgPool2d},
         {"Conv2d", OpType::Conv2d},
+        {"ConvTranspose", OpType::ConvTranspose},
         {"BatchNorm2d", OpType::BatchNorm2d},
         {"LayerNorm", OpType::LayerNorm},
         {"Reshape", OpType::Reshape},
