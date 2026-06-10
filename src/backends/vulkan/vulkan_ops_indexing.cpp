@@ -125,11 +125,26 @@ auto VulkanBackend::dispatchGather(const Tensor& input, int64_t dim, const Tenso
         return Tensor(out_shape, input.dtype(), input.device());
     }
 
-    bool is_float64 = (input.dtype() == DType::Float64);
-    bool is_float16 = (input.dtype() == DType::Float16);
-    std::string shader_name = is_float64 ? "gather_f64"
-                            : is_float16 ? "gather_f16"
-                            : "gather";
+    // Dispatch by element representation. The generic "gather" shader copies
+    // 32-bit slots; 8-byte/16-bit/16-byte dtypes need width-matched movers.
+    // gather_f64 / gather_c128 / gather_i16 are pure bit-preserving copies, so
+    // they serve any same-width dtype (e.g. Complex64 via the 8-byte mover).
+    const DType gdt = input.dtype();
+    std::string shader_name;
+    if (gdt == DType::Float64 || gdt == DType::Int64 || gdt == DType::UInt64 ||
+        gdt == DType::Complex64) {
+        shader_name = "gather_f64";
+    } else if (gdt == DType::Float16) {
+        shader_name = "gather_f16";
+    } else if (gdt == DType::BFloat16) {
+        shader_name = "gather_bf16";
+    } else if (gdt == DType::Int16 || gdt == DType::UInt16) {
+        shader_name = "gather_i16";
+    } else if (gdt == DType::Complex128) {
+        shader_name = "gather_c128";
+    } else {
+        shader_name = "gather";  // Float32 / Int32 / UInt32
+    }
     auto* pipeline = getPipeline(shader_name, device_id);
 
     // Normalize dimension
@@ -275,10 +290,18 @@ auto VulkanBackend::dispatchScatter(const Tensor& input_raw, int64_t dim, const 
             "Use CPU backend or reduction=0 (direct assignment) for this device.");
     }
 
-    // Select shader based on dtype
-    const char* shader_name = (input.dtype() == DType::Float64) ? "scatter_f64"
-                            : (input.dtype() == DType::Float16) ? "scatter_f16"
-                            : "scatter";
+    // Select shader by element representation. scatter_f64 (8-byte) and
+    // scatter_c128 (16-byte) are bit-preserving for any same-width dtype on
+    // overwrite; scatter_i16 packs 2x 16-bit. Generic scatter covers 32-bit.
+    const DType sdt = input.dtype();
+    const char* shader_name =
+        (sdt == DType::Float64 || sdt == DType::Int64 || sdt == DType::UInt64 ||
+         sdt == DType::Complex64) ? "scatter_f64"
+        : (sdt == DType::Float16) ? "scatter_f16"
+        : (sdt == DType::BFloat16) ? "scatter_bf16"
+        : (sdt == DType::Int16 || sdt == DType::UInt16) ? "scatter_i16"
+        : (sdt == DType::Complex128) ? "scatter_c128"
+        : "scatter";
     auto* pipeline = getPipeline(shader_name, device_id);
 
     // Normalize dimension
@@ -442,6 +465,12 @@ auto VulkanBackend::dispatchIndexSelect(const Tensor& input, int64_t dim, const 
     else if (input.dtype() == DType::Int64) shader_name = "index_select_i64";
     else if (input.dtype() == DType::Int32) shader_name = "index_select_i32";
     else if (input.dtype() == DType::Bool) shader_name = "index_select_bool";
+    // 8-byte (UInt64 / Complex64) and 16-byte (Complex128) move bit-exact via
+    // the f64/c128 shaders — far better than widening complex through Float32
+    // (which would drop the imaginary part) or losing UInt64 precision.
+    else if (input.dtype() == DType::UInt64 || input.dtype() == DType::Complex64)
+        shader_name = "index_select_f64";
+    else if (input.dtype() == DType::Complex128) shader_name = "index_select_c128";
     else shader_name = "index_select";
 
     // For Int8/UInt8: cast to Int32, do index_select, cast back
@@ -455,7 +484,8 @@ auto VulkanBackend::dispatchIndexSelect(const Tensor& input, int64_t dim, const 
     // For any remaining unsupported dtypes: cast to Float32, run on GPU, cast back (no CPU fallback)
     if (input.dtype() != DType::Float32 && input.dtype() != DType::Float64 &&
         input.dtype() != DType::Float16 && input.dtype() != DType::BFloat16 &&
-        input.dtype() != DType::Int64 &&
+        input.dtype() != DType::Int64 && input.dtype() != DType::UInt64 &&
+        input.dtype() != DType::Complex64 && input.dtype() != DType::Complex128 &&
         input.dtype() != DType::Int32 && input.dtype() != DType::Bool) {
         DType orig_dtype = input.dtype();
         auto input_f32 = input.to(DType::Float32);

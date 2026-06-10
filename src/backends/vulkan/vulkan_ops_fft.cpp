@@ -1365,6 +1365,14 @@ auto VulkanBackend::dispatchRFFT(const Tensor& input, int64_t dim, int64_t n,
     int64_t ndim = static_cast<int64_t>(shape.size());
     if (dim < 0) dim += ndim;
 
+    // Float16: the packed-half RFFT path produces zero/garbage spectra. Compute
+    // in Float32 (the complex output dtype is Complex64 either way — there is no
+    // half-complex type — so this is dtype-transparent to callers). This also
+    // fixes the IRFFT roundtrip, whose error originates in the RFFT stage.
+    if (input.dtype() == DType::Float16) {
+        return dispatchRFFT(dispatchCast(input, DType::Float32), dim, n, norm);
+    }
+
     // Non-last-dim: transpose, RFFT on last dim, transpose back
     if (dim != ndim - 1 && ndim > 1) {
         auto transposed = dispatchTranspose(input, dim, ndim - 1);

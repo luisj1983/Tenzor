@@ -489,12 +489,18 @@ auto VulkanBackend::dispatchCrossEntropy(const Tensor& log_probs, const Tensor& 
     auto* pipeline = getPipeline(shader_name, device_id);
 
     auto log_probs_shape = log_probs.shape();
-    int64_t batch_size = log_probs_shape[0];
-    int64_t num_classes = log_probs_shape[1];
+    // The class dimension is the LAST axis; everything before it is the (flat)
+    // batch. Previously this assumed rank-2 [N, C] and read shape[1] as classes,
+    // so rank-3 [N, T, C] was mis-shaped (classes=T) and reduction=none returned
+    // a rank-1 [N] loss instead of [N, T].
+    int64_t num_classes = log_probs_shape.back();
+    int64_t batch_size = 1;
+    for (size_t i = 0; i + 1 < log_probs_shape.size(); ++i) batch_size *= log_probs_shape[i];
 
     std::vector<int64_t> out_shape;
-    if (reduction == 0) { // none
-        out_shape = {batch_size};
+    if (reduction == 0) { // none: one loss per sample, keeping the leading dims
+        out_shape.assign(log_probs_shape.begin(), log_probs_shape.end() - 1);
+        if (out_shape.empty()) out_shape = {batch_size};
     } else { // mean or sum
         out_shape = {1};
     }

@@ -306,7 +306,7 @@ public:
     // Kernel dispatch helpers — used by vulkan_kernel_registry.cpp
     auto dispatchBinaryOp(const std::string& op_name, const Tensor& a, const Tensor& b) -> Tensor;
     auto dispatchUnaryOp(const std::string& op_name, const Tensor& input) -> Tensor;
-    auto dispatchUnaryOpWithParam(const std::string& op_name, const Tensor& input, float param) -> Tensor;
+    auto dispatchUnaryOpWithParam(const std::string& op_name, const Tensor& input, double param) -> Tensor;
     // NanToNum and bitwise shift dispatchers (vulkan_ops_misc.cpp). Replace previous CPU fallbacks.
     auto dispatchNanToNum(const Tensor& input, float nan_val, float posinf_val, float neginf_val) -> Tensor;
     auto dispatchBitwiseBinaryOp(const std::string& shader_name, const Tensor& a, const Tensor& b) -> Tensor;
@@ -629,8 +629,8 @@ public:
     auto dispatchContiguous(const Tensor& input) -> Tensor;
 
     // Creation operations
-    auto dispatchArange(float start, float end, float step, DType dtype, const Device& device) -> Tensor;
-    auto dispatchLinspace(float start, float end, int64_t steps, DType dtype, const Device& device) -> Tensor;
+    auto dispatchArange(double start, double end, double step, DType dtype, const Device& device) -> Tensor;
+    auto dispatchLinspace(double start, double end, int64_t steps, DType dtype, const Device& device) -> Tensor;
     auto dispatchEye(int64_t n, int64_t m, DType dtype, const Device& device) -> Tensor;
 
     // Memory operations
@@ -749,7 +749,7 @@ public:
     auto dispatchMode(const Tensor& input, int64_t dim, bool keepdim) -> std::vector<Tensor>;
 
     // Misc operations (Phase 11.5)
-    auto dispatchStridedFill(Tensor& input, float value) -> void;
+    auto dispatchStridedFill(Tensor& input, double value) -> void;
     auto dispatchToMemoryFormat(const Tensor& input, int format) -> Tensor;
     auto dispatchHasInfNan(const Tensor& input) -> Tensor;
     auto dispatchDepthwiseConv2d(const Tensor& input, const Tensor& weight,
@@ -786,7 +786,7 @@ public:
     // Tensor manipulation operations (Repeat/Masked already declared above)
     auto dispatchExpand(const Tensor& input, const std::vector<int64_t>& shape) -> Tensor;
     auto dispatchCat(const std::vector<Tensor>& inputs, int64_t dim) -> Tensor;
-    auto dispatchClamp(const Tensor& input, float min_value, float max_value) -> Tensor;
+    auto dispatchClamp(const Tensor& input, double min_value, double max_value) -> Tensor;
 
     // Interpolation operation
     auto dispatchInterpolate(const Tensor& input, const OpAttributes& attrs) -> Tensor;

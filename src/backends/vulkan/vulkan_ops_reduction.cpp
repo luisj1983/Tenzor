@@ -4,6 +4,14 @@ namespace tenzor {
 
 // Advanced reduction operations implementation
 auto VulkanBackend::dispatchArgmax(const Tensor& input, int64_t dim, bool keepdim) -> Tensor {
+    // Small integer / Bool dtypes: widen to Int32 (exact, order-preserving) so
+    // argmax_argmin_i32 handles them — the generic float shader would misread
+    // narrow integer storage as float32 and return wrong indices.
+    if (input.dtype() == DType::Int8 || input.dtype() == DType::Int16 ||
+        input.dtype() == DType::UInt8 || input.dtype() == DType::UInt16 ||
+        input.dtype() == DType::Bool) {
+        return dispatchArgmax(input.to(DType::Int32), dim, keepdim);
+    }
     // Compute output shape first
     std::vector<int64_t> out_shape;
     auto input_shape = input.shape();
@@ -105,6 +113,14 @@ auto VulkanBackend::dispatchArgmax(const Tensor& input, int64_t dim, bool keepdi
 }
 
 auto VulkanBackend::dispatchArgmin(const Tensor& input, int64_t dim, bool keepdim) -> Tensor {
+    // Small integer / Bool dtypes: widen to Int32 (exact, order-preserving) so
+    // argmax_argmin_i32 handles them — the generic float shader would misread
+    // narrow integer storage as float32 and return wrong indices.
+    if (input.dtype() == DType::Int8 || input.dtype() == DType::Int16 ||
+        input.dtype() == DType::UInt8 || input.dtype() == DType::UInt16 ||
+        input.dtype() == DType::Bool) {
+        return dispatchArgmin(input.to(DType::Int32), dim, keepdim);
+    }
     // Compute output shape first
     std::vector<int64_t> out_shape;
     auto input_shape = input.shape();

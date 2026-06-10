@@ -821,6 +821,11 @@ auto VulkanBackend::dispatchNormalSample(const Tensor& mean, const Tensor& stdde
     endSingleTimeCommands(cmd, device_id);
     synchronize(device_id);
 
+    // Preserve the caller's dtype: sampling runs in Float32 for RNG, but
+    // normal(Float64/BFloat16, ...) must return that dtype (was always Float32).
+    if (mean.dtype() != DType::Float32) {
+        return dispatchCast(output, mean.dtype());
+    }
     return output;
 }
 

@@ -1,0 +1,33 @@
+#version 450
+
+// Strided Fill — Complex64 variant. Each logical element is two float32 lanes
+// (re, im); strides are in complex-element units. Fills re=value, im=0.
+layout(local_size_x_id = 0) in;
+
+layout(binding = 0) buffer Data { float data[]; };  // 2 floats per complex element
+
+layout(push_constant) uniform PushConstants {
+    uint n_elements;
+    uint ndim;
+    float fill_value;   // real component
+    uint _pad;
+    uint shape_stride[16];
+} params;
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= params.n_elements) return;
+
+    uint physical_offset = 0;
+    uint rem = idx;
+    for (int d = int(params.ndim) - 1; d >= 0; d--) {
+        uint dim_size = params.shape_stride[2 * d];
+        uint dim_stride = params.shape_stride[2 * d + 1];
+        uint coord = rem % dim_size;
+        rem /= dim_size;
+        physical_offset += coord * dim_stride;
+    }
+
+    data[2u * physical_offset]      = params.fill_value;
+    data[2u * physical_offset + 1u] = 0.0;
+}

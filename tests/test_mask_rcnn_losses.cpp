@@ -19,6 +19,15 @@ protected:
     void SetUp() override {
         ::tenzor::testing::BackendTest::SetUp();
         if (::testing::Test::IsSkipped()) return;
+        // Deterministic, reproducible model initialisation. gtest runs every
+        // parameterised backend instance (cpu/cuda/rocm/oneapi/vulkan/multi) of
+        // a TEST_P in a single process, all drawing from the shared global RNG.
+        // Without a per-instance reseed each backend would get *different*
+        // random weights, so the cross-backend parity checks and loss-range
+        // assertions become order-dependent and flaky. Reseeding here gives
+        // every instance identical weights — parity is then a genuine
+        // same-weights comparison.
+        tenzor::manual_seed(42);
     }
 };
 

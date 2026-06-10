@@ -1,0 +1,57 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_float64 : require
+
+// Scatter for Complex128: each element is two float64 lanes (re, im).
+// reduction 0=overwrite, 1=add, 2=complex-multiply. Reductions 1/2 are
+// non-atomic (racy for duplicate destination indices), matching the
+// "last/under-defined for duplicates" contract; overwrite is the common path.
+layout(local_size_x_id = 0) in;
+
+layout(binding = 0) buffer Input { float64_t input_data[]; };   // 2 per element
+layout(binding = 1) buffer Indices { int indices[]; };
+layout(binding = 2) buffer Output { float64_t output_data[]; }; // 2 per element
+layout(binding = 3) buffer Values { float64_t values[]; };      // 2 per element
+
+layout(push_constant) uniform PushConstants {
+    uint input_size;
+    uint output_size;
+    uint dim;
+    uint dim_size;
+    uint input_dim_size;
+    uint inner_size;
+    uint outer_size;
+    uint reduction;
+    uint use_values;
+} params;
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= params.input_size) return;
+
+    uint outer_idx = idx / (params.inner_size * params.input_dim_size);
+    uint remainder = idx % (params.inner_size * params.input_dim_size);
+    uint inner_idx = remainder % params.inner_size;
+
+    int scatter_idx = indices[idx];
+    if (scatter_idx < 0 || scatter_idx >= int(params.dim_size)) return;
+
+    uint out_idx = outer_idx * (params.dim_size * params.inner_size) +
+                   uint(scatter_idx) * params.inner_size +
+                   inner_idx;
+
+    float64_t re = (params.use_values > 0u) ? values[2u * idx]      : input_data[2u * idx];
+    float64_t im = (params.use_values > 0u) ? values[2u * idx + 1u] : input_data[2u * idx + 1u];
+
+    if (params.reduction == 1u) {
+        output_data[2u * out_idx]      = output_data[2u * out_idx] + re;
+        output_data[2u * out_idx + 1u] = output_data[2u * out_idx + 1u] + im;
+    } else if (params.reduction == 2u) {
+        float64_t orr = output_data[2u * out_idx];
+        float64_t oii = output_data[2u * out_idx + 1u];
+        output_data[2u * out_idx]      = orr * re - oii * im;
+        output_data[2u * out_idx + 1u] = orr * im + oii * re;
+    } else {
+        output_data[2u * out_idx]      = re;
+        output_data[2u * out_idx + 1u] = im;
+    }
+}

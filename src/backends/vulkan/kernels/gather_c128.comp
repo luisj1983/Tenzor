@@ -1,0 +1,42 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_float64 : require
+
+// Gather for Complex128: each element is two float64 lanes (re, im). Pure
+// bit-preserving copy of both lanes.
+layout(local_size_x_id = 0) in;
+
+layout(binding = 0) buffer Input { float64_t input_data[]; };   // 2 per element
+layout(binding = 1) buffer Indices { int indices[]; };
+layout(binding = 2) buffer Output { float64_t output_data[]; }; // 2 per element
+
+layout(push_constant) uniform PushConstants {
+    uint input_size;
+    uint output_size;
+    uint dim;
+    uint dim_size;
+    uint inner_size;
+    uint outer_size;
+    uint input_dim_size;
+} params;
+
+void main() {
+    uint out_idx = gl_GlobalInvocationID.x;
+    if (out_idx >= params.output_size) return;
+
+    uint outer_idx = out_idx / (params.inner_size * params.dim_size);
+    uint remainder = out_idx % (params.inner_size * params.dim_size);
+    uint inner_idx = remainder % params.inner_size;
+
+    int gather_idx = indices[out_idx];
+    if (gather_idx < 0 || gather_idx >= int(params.input_dim_size)) {
+        output_data[2u * out_idx]      = float64_t(0.0);
+        output_data[2u * out_idx + 1u] = float64_t(0.0);
+        return;
+    }
+
+    uint in_idx = outer_idx * (params.input_dim_size * params.inner_size) +
+                  uint(gather_idx) * params.inner_size +
+                  inner_idx;
+    output_data[2u * out_idx]      = input_data[2u * in_idx];
+    output_data[2u * out_idx + 1u] = input_data[2u * in_idx + 1u];
+}

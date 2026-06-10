@@ -902,6 +902,17 @@ auto VulkanBackend::dispatchLayerNormBackward(const Tensor& grad_output, const T
     std::string shader_name = is_float64 ? "layer_norm_backward_f64" : is_bfloat16 ? "layer_norm_backward_bf16" : "layer_norm_backward";
     auto* pipeline = getPipeline(shader_name, device_id);
 
+    // Saved mean/rstd are Float32 (the saved-stats contract). The f64 backward
+    // shader declares them as double[]; reading Float32 bytes as double yields
+    // garbage rstd, which trips the (rstd > 100) zero-variance guard and zeros
+    // grad_input. Widen the stats to Float64 so the shader reads them correctly.
+    Tensor mean_use = mean;
+    Tensor rstd_use = rstd;
+    if (is_float64) {
+        if (mean_use.dtype() != DType::Float64) mean_use = mean_use.to(DType::Float64);
+        if (rstd_use.dtype() != DType::Float64) rstd_use = rstd_use.to(DType::Float64);
+    }
+
     int64_t batch_size = input.numel() / normalized_shape;
     bool has_affine = (weight != nullptr);
 
@@ -923,8 +934,8 @@ auto VulkanBackend::dispatchLayerNormBackward(const Tensor& grad_output, const T
     // Get VkBuffer handles
     const void* buf_grad_out = grad_output.data_ptr();
     const void* buf_input = input.data_ptr();
-    const void* buf_mean = mean.data_ptr();
-    const void* buf_rstd = rstd.data_ptr();
+    const void* buf_mean = mean_use.data_ptr();
+    const void* buf_rstd = rstd_use.data_ptr();
     const void* buf_grad_input = grad_input.data_ptr();
     const void* buf_grad_weight = grad_weight.data_ptr();
     const void* buf_grad_bias = grad_bias.data_ptr();

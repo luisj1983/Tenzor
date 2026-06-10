@@ -1,0 +1,32 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
+
+// Linspace for Int64 / UInt64: num_steps points evenly spaced over
+// [start, end], rounded to the nearest integer. Computed in double precision
+// so large integer endpoints stay exact.
+layout(local_size_x_id = 0) in;
+
+layout(binding = 0) buffer Output { int64_t output_data[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint num_steps;
+    uint _pad;
+    double start;
+    double end_val;
+} params;
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= params.num_steps) {
+        return;
+    }
+
+    double v;
+    if (params.num_steps == 1u) {
+        v = params.start;
+    } else {
+        double t = double(idx) / double(params.num_steps - 1u);
+        v = params.start + t * (params.end_val - params.start);
+    }
+    output_data[idx] = int64_t(round(v));
+}

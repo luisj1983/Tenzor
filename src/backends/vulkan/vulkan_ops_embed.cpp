@@ -484,6 +484,7 @@ auto VulkanBackend::dispatchEmbeddingBagBackward(const Tensor& grad_output,
         uint32_t mode;
         uint32_t include_last_offset;
         uint32_t num_offsets;
+        uint32_t total_indices;
     } push_constants;
 
     push_constants.num_bags = static_cast<uint32_t>(num_bags);
@@ -492,6 +493,7 @@ auto VulkanBackend::dispatchEmbeddingBagBackward(const Tensor& grad_output,
     push_constants.mode = mode_int;
     push_constants.include_last_offset = include_last_offset ? 1u : 0u;
     push_constants.num_offsets = static_cast<uint32_t>(num_offsets_raw);
+    push_constants.total_indices = static_cast<uint32_t>(indices_i32.numel());
 
     uint32_t total_output = static_cast<uint32_t>(num_bags * embedding_dim);
     uint32_t workgroups = div_wg(total_output, devices_[device_id].workgroupSize);

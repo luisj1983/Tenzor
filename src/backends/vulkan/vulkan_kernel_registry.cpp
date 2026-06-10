@@ -52,7 +52,26 @@ inline VulkanBackend* get_vulkan_backend() {
 static int64_t vulkan_extract_normalized_size(const OpAttributes& attrs, const Tensor& fallback) {
     auto ns_str = attrs.get_string(AttrKey::NormalizedShape);
     if (!ns_str.empty()) {
-        return std::stoll(std::string(ns_str));
+        // NormalizedShape may be a comma-separated multi-dim spec (e.g. "2,2,2"
+        // for LayerNorm({2,2,2})). std::stoll would parse only the FIRST
+        // component (2) and silently normalize over the wrong (too-small) span
+        // — e.g. Float64 LayerNorm normalizing 2 elements instead of 8. Take
+        // the PRODUCT of all comma-separated components.
+        const std::string s(ns_str);
+        int64_t sz = 1;
+        bool any = false;
+        size_t pos = 0;
+        while (pos < s.size()) {
+            size_t comma = s.find(',', pos);
+            std::string tok = s.substr(pos, comma == std::string::npos ? std::string::npos : comma - pos);
+            if (!tok.empty()) {
+                sz *= std::stoll(tok);
+                any = true;
+            }
+            if (comma == std::string::npos) break;
+            pos = comma + 1;
+        }
+        if (any && sz > 0) return sz;
     }
     auto ns_list = attrs.get_int_list(AttrKey::NormalizedShape);
     if (!ns_list.empty()) {
@@ -191,7 +210,7 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
     });
 
     table.register_kernel(OpId::Pow, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        return std::vector<Tensor>{get_vulkan_backend()->dispatchUnaryOpWithParam("pow", inputs[0], static_cast<float>(attrs.get_float(AttrKey::Exponent, 2.0)))};
+        return std::vector<Tensor>{get_vulkan_backend()->dispatchUnaryOpWithParam("pow", inputs[0], attrs.get_float(AttrKey::Exponent, 2.0))};
     });
 
     table.register_kernel(OpId::Reciprocal, [](std::span<const Tensor> inputs, const OpAttributes&) {
@@ -215,21 +234,22 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
     });
 
     table.register_kernel(OpId::Clamp, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        // Pass bounds as double so Float64 clamp preserves full precision.
         return std::vector<Tensor>{get_vulkan_backend()->dispatchClamp(inputs[0],
-            static_cast<float>(attrs.get_float(AttrKey::Min, -std::numeric_limits<float>::infinity())),
-            static_cast<float>(attrs.get_float(AttrKey::Max, std::numeric_limits<float>::infinity())))};
+            attrs.get_float(AttrKey::Min, -std::numeric_limits<double>::infinity()),
+            attrs.get_float(AttrKey::Max, std::numeric_limits<double>::infinity()))};
     });
 
     table.register_kernel(OpId::ClampMin, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
         return std::vector<Tensor>{get_vulkan_backend()->dispatchClamp(inputs[0],
-            static_cast<float>(attrs.get_float(AttrKey::Min, 0.0)),
-            std::numeric_limits<float>::infinity())};
+            attrs.get_float(AttrKey::Min, 0.0),
+            std::numeric_limits<double>::infinity())};
     });
 
     table.register_kernel(OpId::ClampMax, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
         return std::vector<Tensor>{get_vulkan_backend()->dispatchClamp(inputs[0],
-            -std::numeric_limits<float>::infinity(),
-            static_cast<float>(attrs.get_float(AttrKey::Max, std::numeric_limits<float>::infinity())))};
+            -std::numeric_limits<double>::infinity(),
+            attrs.get_float(AttrKey::Max, std::numeric_limits<double>::infinity()))};
     });
 
     // ========================================================================
@@ -593,15 +613,15 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
     table.register_kernel(OpId::Arange, [](std::span<const Tensor>, const OpAttributes& attrs) {
         auto device_id = static_cast<int32_t>(attrs.get_int(AttrKey::Device, 0));
         return std::vector<Tensor>{get_vulkan_backend()->dispatchArange(
-            static_cast<float>(attrs.get_float(AttrKey::Start, 0.0)), static_cast<float>(attrs.get_float(AttrKey::End, 0.0)),
-            static_cast<float>(attrs.get_float(AttrKey::Step, 1.0)), dtype_from_string(attrs.get_string(AttrKey::Dtype)),
+            attrs.get_float(AttrKey::Start, 0.0), attrs.get_float(AttrKey::End, 0.0),
+            attrs.get_float(AttrKey::Step, 1.0), dtype_from_string(attrs.get_string(AttrKey::Dtype)),
             Device(Device::Type::Vulkan, device_id))};
     });
 
     table.register_kernel(OpId::Linspace, [](std::span<const Tensor>, const OpAttributes& attrs) {
         auto device_id = static_cast<int32_t>(attrs.get_int(AttrKey::Device, 0));
         return std::vector<Tensor>{get_vulkan_backend()->dispatchLinspace(
-            static_cast<float>(attrs.get_float(AttrKey::Start, 0.0)), static_cast<float>(attrs.get_float(AttrKey::End, 1.0)),
+            attrs.get_float(AttrKey::Start, 0.0), attrs.get_float(AttrKey::End, 1.0),
             attrs.get_int(AttrKey::Steps, 100), dtype_from_string(attrs.get_string(AttrKey::Dtype)),
             Device(Device::Type::Vulkan, device_id))};
     });
@@ -1270,21 +1290,31 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
     table.register_kernel(OpId::FusedLinearReLU, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
         auto vk = get_vulkan_backend();
         bool has_bias = attrs.get_bool(AttrKey::HasBias, false);
+        // Half-precision: compute the whole compose in Float32 and narrow the
+        // output. The composed add/relu steps don't all have correct BF16/F16
+        // paths, so a native-half compose produced large errors.
+        const DType orig_dt = inputs[0].dtype();
+        const bool widen = (orig_dt == DType::BFloat16 || orig_dt == DType::Float16);
+        auto x = widen ? vk->dispatchCast(inputs[0], DType::Float32) : inputs[0];
+        auto w = widen ? vk->dispatchCast(inputs[1], DType::Float32) : inputs[1];
         auto input_shape = inputs[0].shape();
         int64_t in_features = input_shape.back();
         int64_t batch_size = 1;
         for (size_t i = 0; i < input_shape.size() - 1; ++i) batch_size *= input_shape[i];
-        auto input_2d = vk->dispatchReshape(inputs[0], {batch_size, in_features});
-        auto weight_t = vk->dispatchTranspose(inputs[1], 0, 1);
+        auto input_2d = vk->dispatchReshape(x, {batch_size, in_features});
+        auto weight_t = vk->dispatchTranspose(w, 0, 1);
         auto mm_result = vk->dispatchMatmul(input_2d, weight_t);
         if (has_bias && inputs.size() > 2) {
-            mm_result = vk->dispatchBinaryOp("add", mm_result, inputs[2]);
+            auto bias = widen ? vk->dispatchCast(inputs[2], DType::Float32) : inputs[2];
+            mm_result = vk->dispatchBinaryOp("add", mm_result, bias);
         }
         mm_result = vk->dispatchActivation("relu", mm_result, 0, 0.0f);
         auto out_features = inputs[1].shape()[0];
         std::vector<int64_t> output_shape(input_shape.begin(), input_shape.end() - 1);
         output_shape.push_back(out_features);
-        return std::vector<Tensor>{vk->dispatchReshape(mm_result, output_shape)};
+        auto out = vk->dispatchReshape(mm_result, output_shape);
+        if (widen) out = vk->dispatchCast(out, orig_dt);
+        return std::vector<Tensor>{out};
     });
 
     table.register_kernel(OpId::FusedBatchNormReLU, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
@@ -1552,7 +1582,7 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
     // Phase 11.5: Misc Operations
     // ========================================================================
     table.register_inplace_kernel(OpId::StridedFill, [](Tensor& self, std::span<const Tensor>, const OpAttributes& attrs) -> Tensor& {
-        float value = static_cast<float>(attrs.get_float(AttrKey::Value, 0.0));
+        double value = attrs.get_float(AttrKey::Value, 0.0);
         get_vulkan_backend()->dispatchStridedFill(self, value);
         return self;
     });
@@ -2180,6 +2210,32 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
         if (reduction_str == "none") reduction = 0;
         else if (reduction_str == "sum") reduction = 2;
         auto loss = vk->dispatchCrossEntropy(log_probs, inputs[1], reduction);
+
+        // When the caller requests gradients (e.g. the fused training path or
+        // the dtype-preservation contract test), also return grad_logits.
+        // d/dlogits of softmax-CE = softmax(logits) - one_hot(target), scaled
+        // by 1/N for mean reduction. Previously only {loss} was returned, so
+        // any consumer expecting {loss, grad_logits} broke.
+        if (attrs.get_bool(AttrKey::ComputeGrad, false)) {
+            const DType in_dt = inputs[0].dtype();
+            Tensor lp32 = (log_probs.dtype() == DType::Float32)
+                              ? log_probs : vk->dispatchCast(log_probs, DType::Float32);
+            Tensor probs = vk->dispatchUnaryOp("exp", lp32);           // softmax, Float32
+            int64_t C = inputs[0].shape().back();
+            Tensor oh = vk->dispatchOneHot(inputs[1], C);              // [numel, C] Float32
+            std::vector<int64_t> logit_shape(inputs[0].shape().begin(), inputs[0].shape().end());
+            oh = vk->dispatchReshape(oh, logit_shape);                 // match logits rank
+            Tensor grad = vk->dispatchBinaryOp("sub", probs, oh);
+            if (reduction == 1) {  // mean: average over the target entries
+                double n = static_cast<double>(inputs[1].numel());
+                if (n > 0.0) {
+                    Tensor scale = vk->dispatchFull({1}, 1.0 / n, DType::Float32);
+                    grad = vk->dispatchBinaryOp("mul", grad, scale);
+                }
+            }
+            if (in_dt != DType::Float32) grad = vk->dispatchCast(grad, in_dt);
+            return std::vector<Tensor>{loss, grad};
+        }
         return std::vector<Tensor>{loss};
     });
 
@@ -2194,26 +2250,82 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
     // Fused Attention (Q, K, V -> output)
     // ========================================================================
     table.register_kernel(OpId::FusedAttention, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        // Compose: scaled dot-product attention via dispatch methods
-        // inputs: [query, key, value]
+        // Compose: scaled dot-product attention via dispatch methods.
+        // inputs: [query, key, value]. The native flash-attention kernel
+        // handles 4D directly, but dtypes that fall to this compose (e.g.
+        // Float64) carry 4D [B, H, S, D] tensors while dispatchBmm requires
+        // 3D — so flatten the leading dims to a single batch axis for the
+        // bmm chain and restore the original rank on the output.
         auto vk = get_vulkan_backend();
         float scale = static_cast<float>(attrs.get_float(AttrKey::Scale, 1.0));
+        bool causal = attrs.get_bool(AttrKey::Causal, false);
 
-        // scores = Q @ K^T
-        auto key_t = vk->dispatchTranspose(inputs[1], -2, -1);
-        auto scores = vk->dispatchBmm(inputs[0], key_t);
+        Tensor q = inputs[0], k = inputs[1], v = inputs[2];
+        auto qs = q.shape();
+        const int64_t nd = static_cast<int64_t>(qs.size());
 
-        // scores *= scale
+        // Grouped-query attention: when Q has more heads than K/V, repeat each
+        // K/V head so head counts match (the head axis is 3rd-from-last in
+        // [.., H, S, D]). Without this the bmm batch dims mismatch (Hq vs Hkv).
+        if (nd >= 3) {
+            int64_t head_axis = nd - 3;
+            int64_t hq = qs[head_axis];
+            int64_t hk = k.shape()[head_axis];
+            if (hk > 0 && hq != hk && hq % hk == 0) {
+                int64_t rep = hq / hk;
+                k = vk->dispatchRepeatInterleave(k, rep, head_axis);
+                v = vk->dispatchRepeatInterleave(v, rep, head_axis);
+            }
+        }
+
+        // Flatten leading dims to a single batch axis for the bmm chain
+        // (dispatchBmm is 3D-only); restore the original rank on the output.
+        const bool flat = (nd > 3);
+        std::vector<int64_t> lead_dims(qs.begin(), qs.end() - 2);  // B, H, ...
+        const int64_t Sq = qs[nd - 2];
+        auto flatten3d = [&](const Tensor& t) {
+            auto s = t.shape();
+            int64_t r = static_cast<int64_t>(s.size());
+            int64_t b = 1;
+            for (int64_t i = 0; i < r - 2; ++i) b *= s[i];
+            return vk->dispatchReshape(t, {b, s[r - 2], s[r - 1]});
+        };
+        if (flat) { q = flatten3d(q); k = flatten3d(k); v = flatten3d(v); }
+
+        // scores = (Q @ K^T) * scale  -> [batch, Sq, Sk]
+        auto key_t = vk->dispatchTranspose(k, -2, -1);
+        auto scores = vk->dispatchBmm(q, key_t);
         if (scale != 1.0f) {
             auto scale_tensor = vk->dispatchFull({1}, scale, scores.dtype());
             scores = vk->dispatchBinaryOp("mul", scores, scale_tensor);
         }
 
-        // attn_weights = softmax(scores, dim=-1)
-        auto attn_weights = vk->dispatchSoftmax(scores, -1);
+        // Causal mask: -inf where key index j > query index i (future tokens).
+        if (causal) {
+            std::vector<int64_t> sc(scores.shape().begin(), scores.shape().end());
+            int64_t snd = static_cast<int64_t>(sc.size());
+            int64_t seq_q = sc[snd - 2];
+            int64_t seq_k = sc[snd - 1];
+            Tensor row_idx = vk->dispatchArange(0, seq_q, 1, DType::Int32, scores.device()).reshape({seq_q, 1});
+            Tensor col_idx = vk->dispatchArange(0, seq_k, 1, DType::Int32, scores.device()).reshape({1, seq_k});
+            Tensor mask = vk->dispatchComparisonOp("gt",
+                vk->dispatchExpand(col_idx, {seq_q, seq_k}),
+                vk->dispatchExpand(row_idx, {seq_q, seq_k}));   // j > i
+            mask = vk->dispatchExpand(mask.unsqueeze(0), sc);
+            Tensor neg_inf({1}, scores.dtype(), scores.device());
+            neg_inf.fill_(-std::numeric_limits<float>::infinity());
+            scores = vk->dispatchWhere(mask, vk->dispatchExpand(neg_inf, sc), scores);
+        }
 
-        // output = attn_weights @ V
-        auto output = vk->dispatchBmm(attn_weights, inputs[2]);
+        auto attn_weights = vk->dispatchSoftmax(scores, -1);
+        auto output = vk->dispatchBmm(attn_weights, v);
+
+        if (flat) {
+            std::vector<int64_t> out_shape = lead_dims;
+            out_shape.push_back(Sq);
+            out_shape.push_back(output.shape().back());
+            output = vk->dispatchReshape(output, out_shape);
+        }
         return std::vector<Tensor>{output};
     });
 

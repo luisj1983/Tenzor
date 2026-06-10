@@ -514,12 +514,17 @@ auto VulkanBackend::dispatchContiguous(const Tensor& input) -> Tensor {
     // Select shader based on dtype (element size must match shader buffer layout)
     std::string shader_name = "strided_copy";
     if (input.dtype() == DType::Float64 || input.dtype() == DType::Int64 ||
-        input.dtype() == DType::Complex64) {
+        input.dtype() == DType::UInt64 || input.dtype() == DType::Complex64) {
         shader_name = "strided_copy_f64";  // uvec2 layout works for any 8-byte type
-    } else if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) {
+    } else if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16 ||
+               input.dtype() == DType::Int16 || input.dtype() == DType::UInt16) {
+        // strided_copy_f16 moves raw 16-bit words (bit copy), so it serves all
+        // 2-byte dtypes, not just half floats.
         shader_name = "strided_copy_f16";
     } else if (input.dtype() == DType::UInt8 || input.dtype() == DType::Bool ||
-               input.dtype() == DType::Int8) {
+               input.dtype() == DType::Int8 ||
+               input.dtype() == DType::FP8_E4M3 || input.dtype() == DType::FP8_E5M2) {
+        // strided_copy_u8 moves raw bytes, so it serves all 1-byte dtypes.
         shader_name = "strided_copy_u8";
     } else if (input.dtype() == DType::Complex128) {
         // F18: 16-byte element wired through new `strided_copy_c128.comp`

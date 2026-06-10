@@ -245,11 +245,13 @@ auto box_iou(const Tensor& boxes1, const Tensor& boxes2, IoUType iou_type) -> Te
         return result_f32.to(boxes1.dtype());
     }
 
-    // For non-CPU devices, dispatch to registered backend kernel
+    // For non-CPU devices, dispatch to registered backend kernel. Force
+    // contiguous: a non-contiguous column slice (e.g. proposals[:, 1:5]) would
+    // otherwise be indexed assuming a packed 4-per-row layout by the kernel.
     if (boxes1.device().type != Device::Type::CPU) {
         OpAttributes attrs;
         attrs.set(AttrKey::IouType, static_cast<int>(iou_type));
-        std::vector<Tensor> inputs_vec = {boxes1, boxes2};
+        std::vector<Tensor> inputs_vec = {boxes1.contiguous(), boxes2.contiguous()};
         auto results = dispatch<OpId::BoxIoU>(inputs_vec, attrs);
         return results[0];
     }
@@ -259,9 +261,13 @@ auto box_iou(const Tensor& boxes1, const Tensor& boxes2, IoUType iou_type) -> Te
         // Remember original dtype for output
         DType original_dtype = boxes1.dtype();
 
-        // Convert to Float32 for computation
-        auto boxes1_f32 = boxes1.to(DType::Float32);
-        auto boxes2_f32 = boxes2.to(DType::Float32);
+        // Convert to Float32 for computation. .contiguous() is essential: callers
+        // routinely pass a non-contiguous column slice (e.g. proposals[:, 1:5]
+        // with row stride 5). Without it, .to(Float32) is a no-op view and the
+        // i*4 row indexing below reads progressively shifted garbage for every
+        // row past the first — silently corrupting the IoU matrix.
+        auto boxes1_f32 = boxes1.to(DType::Float32).contiguous();
+        auto boxes2_f32 = boxes2.to(DType::Float32).contiguous();
 
         auto result = zeros({N, M}, DType::Float32, Device::cpu());
         const float* boxes1_data = static_cast<const float*>(boxes1_f32.data_ptr());

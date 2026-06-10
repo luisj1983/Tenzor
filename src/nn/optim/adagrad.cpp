@@ -212,7 +212,11 @@ auto Adagrad::step_impl() -> void {
             original_device.type == Device::Type::Vulkan &&
             grad_orig.device().type == Device::Type::Vulkan) {
 
-            std::vector<Tensor> inputs = {grad_orig, param->tensor(), sum_[i]};
+            // Input order MUST be [param, grad, sum_sq] to match the fused
+            // kernel (binding 1 = param). Previously {grad, param, ...} made the
+            // kernel write the update into the GRAD buffer, leaving param
+            // unchanged — Adagrad was a silent no-op on Vulkan.
+            std::vector<Tensor> inputs = {param->tensor(), grad_orig, sum_[i]};
 
             // Audit item I.14: pass Float64 hyperparams through to dispatch
             // (was static_cast<float>, losing precision vs Adam/AdamW which
