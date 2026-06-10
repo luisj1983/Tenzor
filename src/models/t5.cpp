@@ -732,27 +732,31 @@ auto T5ForConditionalGeneration::generate(const Variable& input_ids,
         int64_t seq_len = last_logits_shape[1];
         int64_t vocab_size = last_logits_shape[2];
 
-        // Extract last token logits [batch, vocab_size]
-        Tensor last_logits({batch_size, vocab_size}, logits.tensor().dtype(), device);
+        // Extract last token logits [batch, vocab_size]. The greedy decode below
+        // reads logits / writes token ids through raw host pointers, so this
+        // bookkeeping runs on the CPU (logits live on the compute device).
+        Tensor logits_host = logits.tensor();
+        if (logits_host.device().type != Device::Type::CPU) logits_host = logits_host.cpu();
+        Tensor last_logits({batch_size, vocab_size}, logits_host.dtype(), Device::cpu());
 
         // Dtype-generic last logits extraction
-        DType logits_dtype = logits.tensor().dtype();
+        DType logits_dtype = logits_host.dtype();
         if (logits_dtype == DType::Float16) {
-            auto* src = logits.tensor().data<Float16>();
+            auto* src = logits_host.data<Float16>();
             auto* dst = last_logits.data<Float16>();
             for (int64_t b = 0; b < batch_size; ++b) {
                 int64_t offset = b * seq_len * vocab_size + (seq_len - 1) * vocab_size;
                 std::copy(src + offset, src + offset + vocab_size, dst + b * vocab_size);
             }
         } else if (logits_dtype == DType::Float32) {
-            auto* src = logits.tensor().data<float>();
+            auto* src = logits_host.data<float>();
             auto* dst = last_logits.data<float>();
             for (int64_t b = 0; b < batch_size; ++b) {
                 int64_t offset = b * seq_len * vocab_size + (seq_len - 1) * vocab_size;
                 std::copy(src + offset, src + offset + vocab_size, dst + b * vocab_size);
             }
         } else if (logits_dtype == DType::Float64) {
-            auto* src = logits.tensor().data<double>();
+            auto* src = logits_host.data<double>();
             auto* dst = last_logits.data<double>();
             for (int64_t b = 0; b < batch_size; ++b) {
                 int64_t offset = b * seq_len * vocab_size + (seq_len - 1) * vocab_size;
@@ -780,8 +784,8 @@ auto T5ForConditionalGeneration::generate(const Variable& input_ids,
             }
         }
 
-        // Greedy: argmax
-        Tensor next_tokens({batch_size, 1}, DType::Int64, device);
+        // Greedy: argmax (host-side over CPU last_logits)
+        Tensor next_tokens({batch_size, 1}, DType::Int64, Device::cpu());
         auto* tokens_data = next_tokens.data<int64_t>();
 
         if (logits_dtype == DType::Float16) {
@@ -826,9 +830,12 @@ auto T5ForConditionalGeneration::generate(const Variable& input_ids,
             }
         }
 
-        // Append to generated
-        Tensor new_generated({batch_size, i + 2}, DType::Int64, device);
-        auto* gen_src = generated.data<int64_t>();
+        // Append to generated. Build on CPU (host pointer loop) then move back
+        // to the compute device for the next decoder forward.
+        Tensor generated_host = (generated.device().type != Device::Type::CPU)
+            ? generated.cpu() : generated;
+        Tensor new_generated({batch_size, i + 2}, DType::Int64, Device::cpu());
+        auto* gen_src = generated_host.data<int64_t>();
         auto* gen_dst = new_generated.data<int64_t>();
         auto* next_data = next_tokens.data<int64_t>();
         for (int64_t b = 0; b < batch_size; ++b) {
@@ -836,7 +843,7 @@ auto T5ForConditionalGeneration::generate(const Variable& input_ids,
                      gen_dst + b * (i + 2));
             gen_dst[b * (i + 2) + i + 1] = next_data[b];
         }
-        generated = new_generated;
+        generated = (device == Device::cpu()) ? new_generated : new_generated.to(device);
     }
 
     return generated;

@@ -168,7 +168,8 @@ template<typename T>
 __device__ __forceinline__ T warp_reduce_max(T val) {
     for (int offset = 16; offset > 0; offset /= 2) {
         T other = __shfl_down_sync(0xffffffff, val, offset);
-        val = (val > other) ? val : other;
+        if constexpr (std::is_floating_point_v<T>) val = (isnan(val) || isnan(other)) ? (val + other) : ((val > other) ? val : other);
+        else val = (val > other) ? val : other;
     }
     return val;
 }
@@ -178,7 +179,7 @@ template<>
 __device__ __forceinline__ __half warp_reduce_max(__half val) {
     for (int offset = 16; offset > 0; offset /= 2) {
         __half other = __shfl_down_sync(0xffffffff, val, offset);
-        val = __hgt(val, other) ? val : other;
+        val = (__hisnan(val) || __hisnan(other)) ? __hadd(val, other) : (__hgt(val, other) ? val : other);
     }
     return val;
 }
@@ -188,7 +189,7 @@ template<>
 __device__ __forceinline__ __nv_bfloat16 warp_reduce_max(__nv_bfloat16 val) {
     for (int offset = 16; offset > 0; offset /= 2) {
         __nv_bfloat16 other = __shfl_down_sync(0xffffffff, val, offset);
-        val = __hgt(val, other) ? val : other;
+        val = (__hisnan(val) || __hisnan(other)) ? __hadd(val, other) : (__hgt(val, other) ? val : other);
     }
     return val;
 }
@@ -198,7 +199,8 @@ template<typename T>
 __device__ __forceinline__ T warp_reduce_min(T val) {
     for (int offset = 16; offset > 0; offset /= 2) {
         T other = __shfl_down_sync(0xffffffff, val, offset);
-        val = (val < other) ? val : other;
+        if constexpr (std::is_floating_point_v<T>) val = (isnan(val) || isnan(other)) ? (val + other) : ((val < other) ? val : other);
+        else val = (val < other) ? val : other;
     }
     return val;
 }
@@ -208,7 +210,7 @@ template<>
 __device__ __forceinline__ __half warp_reduce_min(__half val) {
     for (int offset = 16; offset > 0; offset /= 2) {
         __half other = __shfl_down_sync(0xffffffff, val, offset);
-        val = __hlt(val, other) ? val : other;
+        val = (__hisnan(val) || __hisnan(other)) ? __hadd(val, other) : (__hlt(val, other) ? val : other);
     }
     return val;
 }
@@ -218,7 +220,7 @@ template<>
 __device__ __forceinline__ __nv_bfloat16 warp_reduce_min(__nv_bfloat16 val) {
     for (int offset = 16; offset > 0; offset /= 2) {
         __nv_bfloat16 other = __shfl_down_sync(0xffffffff, val, offset);
-        val = __hlt(val, other) ? val : other;
+        val = (__hisnan(val) || __hisnan(other)) ? __hadd(val, other) : (__hlt(val, other) ? val : other);
     }
     return val;
 }

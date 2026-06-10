@@ -25,15 +25,22 @@ using namespace tenzor::testing;
 class MFCCTest : public BackendTest {};
 
 // audit-3 T.1 helper: float-tensor element comparison against a CPU reference.
+// numpy.allclose-style comparison: |a-b| <= atol + rtol*|expected|. The pure
+// absolute form is wrong for large-magnitude outputs — an MFCC c0 coefficient
+// is ~-145 for a constant signal (every mel bin pinned at the log(1e-10) floor),
+// so a 1e-2 absolute bound demands 5-digit agreement that two different float32
+// FFT backends (cuFFT vs CPU) cannot reach on the ~1e-9 leakage bins. rtol
+// defaults to 0 so existing absolute-only callers are unchanged.
 static void expect_tensors_near(const Tensor& actual, const Tensor& expected,
-                                float tol = 1e-3f) {
+                                float tol = 1e-3f, float rtol = 0.0f) {
     ASSERT_EQ(actual.numel(), expected.numel());
     auto a = actual.to(Device::cpu()).to(DType::Float32);
     auto b = expected.to(Device::cpu()).to(DType::Float32);
     const float* ad = a.data<float>();
     const float* bd = b.data<float>();
     for (int64_t i = 0; i < a.numel(); ++i) {
-        EXPECT_NEAR(ad[i], bd[i], tol) << "Mismatch at " << i;
+        EXPECT_LE(std::abs(ad[i] - bd[i]), tol + rtol * std::abs(bd[i]))
+            << "Mismatch at " << i << ": " << ad[i] << " vs " << bd[i];
     }
 }
 
@@ -120,16 +127,21 @@ TEST_P(MFCCTest, MFCCOutputShape) {
     const int64_t n_mels = 40;
     const int64_t sample_rate = 16000;
 
-    // Use a non-zero waveform for a meaningful value comparison.
-    auto wf_cpu = tenzor::ones({signal_length}, DType::Float32, Device::cpu());
+    // Use a spectrally-rich waveform (the SAME samples on CPU and the target
+    // device) for a meaningful value comparison. A constant/DC waveform is
+    // degenerate here: every mel bin lands on the log(1e-10) floor, so the MFCC
+    // is pure floor-vs-FFT-noise and the comparison measures each backend's FFT
+    // noise floor rather than MFCC correctness — white noise fills every mel bin
+    // with real energy and the backends then agree to floating-point precision.
+    auto wf_cpu = tenzor::randn({signal_length}, DType::Float32, Device::cpu());
     auto ref = fft::mfcc(wf_cpu, sample_rate, n_mfcc, n_mels, n_fft, hop_length);
-    auto waveform = tenzor::ones({signal_length}, DType::Float32, device);
+    auto waveform = wf_cpu.to(device);
     auto result = fft::mfcc(waveform, sample_rate, n_mfcc, n_mels, n_fft, hop_length);
 
     ASSERT_EQ(result.ndim(), 2);
     EXPECT_EQ(result.shape()[0], n_mfcc);
     EXPECT_GT(result.shape()[1], 0);
-    expect_tensors_near(result, ref, 1e-2f);
+    expect_tensors_near(result, ref, 1e-2f, /*rtol=*/1e-3f);
 }
 
 // MFCC: batched waveform
@@ -142,16 +154,19 @@ TEST_P(MFCCTest, MFCCBatchedShape) {
     const int64_t n_mels = 64;
     const int64_t sample_rate = 16000;
 
-    auto wf_cpu = tenzor::ones({batch, signal_length}, DType::Float32, Device::cpu());
+    // Spectrally-rich waveform shared between CPU reference and target device
+    // (see MFCCOutputShape: a constant signal degenerates to a log-floor noise
+    // comparison rather than validating MFCC).
+    auto wf_cpu = tenzor::randn({batch, signal_length}, DType::Float32, Device::cpu());
     auto ref = fft::mfcc(wf_cpu, sample_rate, n_mfcc, n_mels, n_fft, hop_length);
-    auto waveform = tenzor::ones({batch, signal_length}, DType::Float32, device);
+    auto waveform = wf_cpu.to(device);
     auto result = fft::mfcc(waveform, sample_rate, n_mfcc, n_mels, n_fft, hop_length);
 
     ASSERT_EQ(result.ndim(), 3);
     EXPECT_EQ(result.shape()[0], batch);
     EXPECT_EQ(result.shape()[1], n_mfcc);
     EXPECT_GT(result.shape()[2], 0);
-    expect_tensors_near(result, ref, 1e-2f);
+    expect_tensors_near(result, ref, 1e-2f, /*rtol=*/1e-3f);
 }
 
 // MFCC: n_mfcc must be <= n_mels

@@ -637,84 +637,102 @@ auto MaskRCNN::forward_train(const Variable& images,
         roi_targets
     );
 
-    // 8. ROI Align for mask head (14×14, only for positive samples)
-    auto roi_features_mask = roi_align_mask_->forward(features, sampled_rois);
-
-    // 8. Mask prediction
-    auto mask_logits = mask_head_->forward(roi_features_mask);
-
-    // 9. Create sampled_masks with correct shape to match mask_logits output
-    // mask_logits has shape [num_sampled, num_classes, mask_H, mask_W]
-    // where mask_H and mask_W are typically 28x28 for mask head output
-    auto mask_output_H = mask_logits.tensor().shape()[2];
-    auto mask_output_W = mask_logits.tensor().shape()[3];
-
-    // Create masks on CPU for data manipulation
-    auto sampled_masks_cpu = Tensor({num_sampled, mask_output_H, mask_output_W},
-                                    DType::Float32, Device::cpu());
-    sampled_masks_cpu.fill_(0.0f);
-
-    // Audit G.7: per-image mask sampling. For each foreground ROI, locate the
-    // best-matching GT box IN ITS OWN IMAGE (via the sampled_rois batch_idx
-    // column), then pull the corresponding GT mask from gt_masks[that image].
-    // Previously every ROI was matched against image 0's GT boxes/masks.
-    if (num_gt > 0 && num_sampled > 0) {
-        auto batch_col_cpu_masks = sampled_rois.slice(1, 0, 1)
-                                                .to(Device::cpu())
-                                                .to(DType::Float32);
-        const float* bc_m = batch_col_cpu_masks.data<float>();
-        const int64_t batch_size_masks = gt_boxes.shape()[0];
-
-        for (int64_t i = 0; i < num_sampled; ++i) {
-            if (sampled_labels_data[i] <= 0) continue;  // Background ROI.
-
-            const int64_t b = static_cast<int64_t>(bc_m[i]);
-            if (b < 0 || b >= batch_size_masks) continue;
-
-            // ROI box on its native device; GT for THIS image.
-            auto roi_box = sampled_rois.slice(0, i, i + 1).slice(1, 1, 5);  // (1, 4)
-            auto gt_boxes_b = tenzor::select(gt_boxes, 0, b);              // (num_gt, 4)
-            if (gt_boxes_b.dtype() != roi_box.dtype()) {
-                gt_boxes_b = gt_boxes_b.to(roi_box.dtype());
-            }
-
-            auto iou = ops::box_iou(roi_box, gt_boxes_b);                  // (1, num_gt)
-            auto best_gt_idx = tenzor::argmax(iou, 1).to(Device::cpu()).item<int64_t>();
-            if (best_gt_idx < 0 || best_gt_idx >= num_gt) continue;
-
-            auto gt_masks_b = tenzor::select(gt_masks, 0, b);              // (num_gt, H, W)
-            auto gt_mask = tenzor::select(gt_masks_b, 0, best_gt_idx);     // (H, W)
-
-            // Resize GT mask to (mask_output_H, mask_output_W).
-            auto resized_mask = ops::interpolate(
-                gt_mask.unsqueeze(0).unsqueeze(0),  // (1, 1, H, W)
-                std::vector<int64_t>{mask_output_H, mask_output_W},
-                "bilinear",
-                false
-            );
-            resized_mask = resized_mask.squeeze(0).squeeze(0)
-                                       .to(DType::Float32).to(Device::cpu());
-
-            auto target_mask_cpu = tenzor::select(sampled_masks_cpu, 0, i);
-            auto* resized_data = resized_mask.data<float>();
-            auto* target_data  = target_mask_cpu.data<float>();
-            std::copy(resized_data,
-                      resized_data + mask_output_H * mask_output_W,
-                      target_data);
-        }
+    // 8. Mask branch — run the mask head on POSITIVE ROIs ONLY (standard
+    // Mask R-CNN). The mask loss is undefined for background ROIs, so building
+    // the full num_sampled (e.g. 1024) ROI feature map + mask-head conv stack
+    // when only a handful are positive wasted multiple GB of activations and
+    // OOM'd at batch-2 x 800x800. Gathering the positives first keeps the mask
+    // head's working set proportional to the number of foreground ROIs.
+    std::vector<int64_t> pos_rows;
+    pos_rows.reserve(static_cast<size_t>(num_sampled));
+    for (int64_t i = 0; i < num_sampled; ++i) {
+        if (sampled_labels_data[i] > 0) pos_rows.push_back(i);
     }
+    const int64_t num_pos = static_cast<int64_t>(pos_rows.size());
 
-    // Move sampled_masks to target device
-    auto sampled_masks = sampled_masks_cpu.to(original_device);
+    // Differentiable zero default (no positives -> no mask loss this batch).
+    Variable mask_loss_val(tenzor::zeros({}, DType::Float32, original_device),
+                           /*requires_grad=*/true);
 
-    // 10. Compute mask loss
-    // Convert sampled_masks to match mask_logits dtype
-    auto sampled_masks_converted = sampled_masks.to(mask_logits.tensor().dtype());
-    std::vector<Tensor> mask_targets = {sampled_masks_converted, sampled_labels};
-    auto mask_loss_val = compute_mask_loss(
-        mask_logits.tensor(),
-        mask_targets
-    );
+    if (num_pos > 0) {
+        Tensor pos_idx_cpu({num_pos}, DType::Int64, Device::cpu());
+        std::memcpy(pos_idx_cpu.data<int64_t>(), pos_rows.data(),
+                    pos_rows.size() * sizeof(int64_t));
+        Tensor pos_idx = pos_idx_cpu.to(original_device);
+
+        // ROI-align + mask head on positives only.
+        Tensor pos_rois = tenzor::ops::index_select(sampled_rois, 0, pos_idx);
+        auto roi_features_mask = roi_align_mask_->forward(features, pos_rois);
+        auto mask_logits = mask_head_->forward(roi_features_mask);
+
+        const int64_t mask_output_H = mask_logits.tensor().shape()[2];
+        const int64_t mask_output_W = mask_logits.tensor().shape()[3];
+
+        // Per-positive GT-mask targets (num_pos, H, W) and labels (num_pos,),
+        // aligned row-for-row with pos_rois.
+        Tensor pos_masks_cpu({num_pos, mask_output_H, mask_output_W},
+                             DType::Float32, Device::cpu());
+        pos_masks_cpu.fill_(0.0f);
+        Tensor pos_labels_cpu({num_pos}, DType::Int64, Device::cpu());
+        auto* pos_labels_data = pos_labels_cpu.data<int64_t>();
+        for (int64_t k = 0; k < num_pos; ++k) {
+            pos_labels_data[k] = sampled_labels_data[pos_rows[static_cast<size_t>(k)]];
+        }
+
+        // Audit G.7: per-image mask sampling. For each foreground ROI, locate
+        // the best-matching GT box IN ITS OWN IMAGE (via the sampled_rois
+        // batch_idx column), then pull the corresponding GT mask.
+        if (num_gt > 0) {
+            auto batch_col_cpu_masks = sampled_rois.slice(1, 0, 1)
+                                                    .to(Device::cpu())
+                                                    .to(DType::Float32);
+            const float* bc_m = batch_col_cpu_masks.data<float>();
+            const int64_t batch_size_masks = gt_boxes.shape()[0];
+
+            for (int64_t k = 0; k < num_pos; ++k) {
+                const int64_t i = pos_rows[static_cast<size_t>(k)];
+                const int64_t b = static_cast<int64_t>(bc_m[i]);
+                if (b < 0 || b >= batch_size_masks) continue;
+
+                // ROI box on its native device; GT for THIS image.
+                auto roi_box = sampled_rois.slice(0, i, i + 1).slice(1, 1, 5);  // (1, 4)
+                auto gt_boxes_b = tenzor::select(gt_boxes, 0, b);              // (num_gt, 4)
+                if (gt_boxes_b.dtype() != roi_box.dtype()) {
+                    gt_boxes_b = gt_boxes_b.to(roi_box.dtype());
+                }
+
+                auto iou = ops::box_iou(roi_box, gt_boxes_b);                  // (1, num_gt)
+                auto best_gt_idx = tenzor::argmax(iou, 1).to(Device::cpu()).item<int64_t>();
+                if (best_gt_idx < 0 || best_gt_idx >= num_gt) continue;
+
+                auto gt_masks_b = tenzor::select(gt_masks, 0, b);              // (num_gt, H, W)
+                auto gt_mask = tenzor::select(gt_masks_b, 0, best_gt_idx);     // (H, W)
+
+                // Resize GT mask to (mask_output_H, mask_output_W).
+                auto resized_mask = ops::interpolate(
+                    gt_mask.unsqueeze(0).unsqueeze(0),  // (1, 1, H, W)
+                    std::vector<int64_t>{mask_output_H, mask_output_W},
+                    "bilinear",
+                    false
+                );
+                resized_mask = resized_mask.squeeze(0).squeeze(0)
+                                           .to(DType::Float32).to(Device::cpu());
+
+                auto target_mask_cpu = tenzor::select(pos_masks_cpu, 0, k);
+                auto* resized_data = resized_mask.data<float>();
+                auto* target_data  = target_mask_cpu.data<float>();
+                std::copy(resized_data,
+                          resized_data + mask_output_H * mask_output_W,
+                          target_data);
+            }
+        }
+
+        // Compute mask loss on positives.
+        auto pos_masks = pos_masks_cpu.to(mask_logits.tensor().dtype()).to(original_device);
+        auto pos_labels = pos_labels_cpu.to(original_device);
+        std::vector<Tensor> mask_targets = {pos_masks, pos_labels};
+        mask_loss_val = compute_mask_loss(mask_logits.tensor(), mask_targets);
+    }
 
     return std::make_tuple(
         rpn_cls_loss,

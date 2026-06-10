@@ -1610,10 +1610,14 @@ auto avg_pool2d_kernel(const Tensor& input, const OpAttributes& attrs, sycl::que
  * @return std::pair<Tensor, Tensor> Pooled output tensor and indices tensor
  */
 auto max_pool2d_kernel(const Tensor& input, const OpAttributes& attrs, sycl::queue& queue) -> std::pair<Tensor, Tensor> {
-    // See avg_pool2d_kernel: widen FP64/FP16/BF16 to FP32 (oneDNN lacks the
-    // primitives). Indices are dtype-independent — only narrow the output.
-    if (input.dtype() == DType::Float64 || input.dtype() == DType::Float16 ||
-        input.dtype() == DType::BFloat16) {
+    // FP16/BF16 widen to FP32 (oneDNN lacks those primitives). FP64 must NOT
+    // widen: max-pool is a pure element selection with no arithmetic, so the
+    // native double sycl path (maxpool2d_forward_with_indices -> *_sycl)
+    // reproduces the input element bit-exactly. Widening FP64 to FP32 truncated
+    // the selected element by ~1e-7 and broke exact cross-backend parity (and
+    // FP64 finite-difference gradcheck) — same rationale as adaptive_avg_pool2d.
+    // Indices are dtype-independent — only narrow the output.
+    if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) {
         const DType orig = input.dtype();
         auto [out, idx] = max_pool2d_kernel(input.to(DType::Float32), attrs, queue);
         return {out.to(orig), idx};

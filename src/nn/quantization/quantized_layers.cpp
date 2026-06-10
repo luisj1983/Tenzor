@@ -767,11 +767,14 @@ auto QuantStub::forward_impl(const Variable& input) -> Variable {
             "per-tensor quantization; per-channel scale was supplied. "
             "Use FakeQuantize directly for per-channel QAT.");
     }
+    // scale / zero_point may live on a non-CPU device (the module was moved to
+    // GPU); read their scalar values via a host copy — data<T>()[0] on a device
+    // pointer would segfault.
     const float scale = qparams_.scale.numel() > 0
-        ? qparams_.scale.data<float>()[0]
+        ? qparams_.scale.cpu().data<float>()[0]
         : 1.0f;
     const float zero_point = qparams_.zero_point.numel() > 0
-        ? static_cast<float>(qparams_.zero_point.data<int64_t>()[0])
+        ? static_cast<float>(qparams_.zero_point.cpu().data<int64_t>()[0])
         : 0.0f;
     float qmin = -128.0f, qmax = 127.0f;
     switch (qparams_.dtype) {

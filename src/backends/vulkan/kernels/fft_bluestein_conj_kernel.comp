@@ -19,7 +19,14 @@ void main() {
     uint k = gl_GlobalInvocationID.x;
     if (k >= N) return;
 
-    float angle = float(sign) * 3.14159265358979323846 * float(k) * float(k) / float(N);
+    // Range-reduce k^2 modulo 2N before scaling by pi/N so the trig argument
+    // stays within [0, 2*pi). The raw pi*k^2/N reaches ~pi*N radians where GLSL
+    // cos/sin lose precision (must match fft_bluestein_chirp_gen exactly, else
+    // the forward chirp and this conjugate kernel use mismatched values).
+    uint twoN = 2u * N;
+    uint kr = k % twoN;
+    uint m = (kr * kr) % twoN;
+    float angle = float(sign) * 3.14159265358979323846 * float(m) / float(N);
     float conj_re = cos(angle);
     float conj_im = -sin(angle);  // conjugate: negate imaginary
 

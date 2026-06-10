@@ -122,8 +122,14 @@ auto ColorJitter::operator()(const Tensor& input, const Tensor& target)
     std::mt19937 rng(static_cast<std::mt19937::result_type>(
         tenzor::get_global_seed()));
 
-    // Work with a copy to avoid modifying the original
-    Tensor output = input;
+    // Work with a copy to avoid modifying the original. The pixel math below
+    // is host-side (raw float* loops), so a non-CPU input must be moved to the
+    // host first (data_ptr() is a device pointer otherwise → segfault) and the
+    // result moved back to the original device at the end.
+    const Device orig_device = input.device();
+    Tensor output = (orig_device.type != Device::Type::CPU)
+        ? input.to(Device::cpu()).contiguous()
+        : input;
     float* data = static_cast<float*>(output.data_ptr());
     int64_t numel = output.numel();
 
@@ -311,6 +317,9 @@ auto ColorJitter::operator()(const Tensor& input, const Tensor& target)
         }
     }
 
+    if (orig_device.type != Device::Type::CPU) {
+        output = output.to(orig_device);
+    }
     return {output, target};
 }
 

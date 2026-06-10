@@ -94,10 +94,10 @@ namespace cuda {
     auto round_kernel(const Tensor& input, cudaStream_t stream) -> Tensor;
 
     // Operations with parameters
-    auto clamp_kernel(const Tensor& input, float min_val, float max_val, cudaStream_t stream) -> Tensor;
-    auto clamp_min_kernel(const Tensor& input, float min_val, cudaStream_t stream) -> Tensor;
-    auto clamp_max_kernel(const Tensor& input, float max_val, cudaStream_t stream) -> Tensor;
-    auto pow_kernel(const Tensor& input, float exponent, cudaStream_t stream) -> Tensor;
+    auto clamp_kernel(const Tensor& input, double min_val, double max_val, cudaStream_t stream) -> Tensor;
+    auto clamp_min_kernel(const Tensor& input, double min_val, cudaStream_t stream) -> Tensor;
+    auto clamp_max_kernel(const Tensor& input, double max_val, cudaStream_t stream) -> Tensor;
+    auto pow_kernel(const Tensor& input, double exponent, cudaStream_t stream) -> Tensor;
 
     // Trigonometric functions
     auto sin_kernel(const Tensor& input, cudaStream_t stream) -> Tensor;
@@ -698,8 +698,8 @@ namespace cuda {
     auto rand_kernel(const std::vector<int64_t>& shape, DType dtype, Device device, cudaStream_t stream) -> Tensor;
     auto randn_kernel(const std::vector<int64_t>& shape, DType dtype, Device device, cudaStream_t stream) -> Tensor;
     auto randint_kernel(int64_t low, int64_t high, const std::vector<int64_t>& shape, DType dtype, Device device, cudaStream_t stream) -> Tensor;
-    auto arange_kernel(float start, float end, float step, DType dtype, Device device, cudaStream_t stream) -> Tensor;
-    auto linspace_kernel(float start, float end, int64_t steps, DType dtype, Device device, cudaStream_t stream) -> Tensor;
+    auto arange_kernel(double start, double end, double step, DType dtype, Device device, cudaStream_t stream) -> Tensor;
+    auto linspace_kernel(double start, double end, int64_t steps, DType dtype, Device device, cudaStream_t stream) -> Tensor;
     auto eye_kernel(int64_t n, int64_t m, DType dtype, Device device, cudaStream_t stream) -> Tensor;
 
     // Transform operations
@@ -1153,20 +1153,20 @@ void register_cuda_kernels(BackendDispatchTable& table) {
     table.register_single_output_kernel(OpId::Round, cuda::round_dispatch);
     table.register_single_output_kernel(OpId::Trunc, cuda::trunc_dispatch);
     table.register_kernel(OpId::Pow, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        float exponent = static_cast<float>(attrs.get_float(AttrKey::Exponent, 2.0));
+        double exponent = attrs.get_float(AttrKey::Exponent, 2.0);
         return std::vector<Tensor>{cuda::pow_kernel(inputs[0], exponent, get_cuda_stream(attrs))};
     });
     table.register_kernel(OpId::Clamp, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        float min_val = static_cast<float>(attrs.get_float(AttrKey::Min, -std::numeric_limits<float>::infinity()));
-        float max_val = static_cast<float>(attrs.get_float(AttrKey::Max, std::numeric_limits<float>::infinity()));
+        double min_val = attrs.get_float(AttrKey::Min, -std::numeric_limits<double>::infinity());
+        double max_val = attrs.get_float(AttrKey::Max, std::numeric_limits<double>::infinity());
         return std::vector<Tensor>{cuda::clamp_kernel(inputs[0], min_val, max_val, get_cuda_stream(attrs))};
     });
     table.register_kernel(OpId::ClampMin, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        float min_val = static_cast<float>(attrs.get_float(AttrKey::Min, 0.0));
+        double min_val = attrs.get_float(AttrKey::Min, 0.0);
         return std::vector<Tensor>{cuda::clamp_min_kernel(inputs[0], min_val, get_cuda_stream(attrs))};
     });
     table.register_kernel(OpId::ClampMax, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        float max_val = static_cast<float>(attrs.get_float(AttrKey::Max, 0.0));
+        double max_val = attrs.get_float(AttrKey::Max, 0.0);
         return std::vector<Tensor>{cuda::clamp_max_kernel(inputs[0], max_val, get_cuda_stream(attrs))};
     });
 
@@ -1517,6 +1517,20 @@ void register_cuda_kernels(BackendDispatchTable& table) {
         const auto stride      = ::tenzor::backend::attrs::read_2d(attrs,
             AttrKey::Stride, AttrKey::StrideH, AttrKey::StrideW, kernel_size[0]);
         const auto padding     = ::tenzor::backend::attrs::padding_2d(attrs);
+        // Float64: cuDNN's pooling selects the max in single precision even with
+        // a CUDNN_DATA_DOUBLE descriptor, so the returned element is the F32-
+        // truncated input (~1e-7 off the true double element) and breaks exact
+        // cross-backend parity. Max-pool is a pure selection with no arithmetic,
+        // so the native kernel (Compute=double) reproduces the input bit-exactly.
+        // Use it for symmetric Float64; cuDNN still serves all other dtypes.
+        const auto dilation = ::tenzor::backend::attrs::dilation_2d(attrs);
+        const bool symmetric = kernel_size[0] == kernel_size[1] && stride[0] == stride[1] &&
+                               padding[0] == padding[1] && dilation[0] == dilation[1];
+        if (inputs[0].dtype() == DType::Float64 && symmetric) {
+            auto [output, indices] = cuda::maxpool2d_forward_kernel(inputs[0],
+                kernel_size[0], stride[0], padding[0], dilation[0], get_cuda_stream(attrs));
+            return std::vector<Tensor>{output, indices};
+        }
         auto [output, indices] = cuda::cudnn_maxpool2d_forward(inputs[0],
             kernel_size[0], kernel_size[1],
             stride[0], stride[1],
@@ -1780,6 +1794,47 @@ void register_cuda_kernels(BackendDispatchTable& table) {
         float scale = static_cast<float>(attrs.get_float(AttrKey::Scale, 1.0));
         bool causal_attr = attrs.get_bool(AttrKey::Causal, false);
 
+        // Float64 path: fused_attention_cuda is float-only. Compute in native
+        // double precision via composed CUDA ops (bmm + softmax + bmm) so the
+        // output stays Float64. Handles 3D and 4D inputs; preserves precision
+        // (no FP32 round-trip — every op below dispatches to a double CUDA kernel).
+        if (inputs[0].dtype() == DType::Float64) {
+            const double scale_d = attrs.get_float(AttrKey::Scale, 1.0);
+            const Tensor& Q = inputs[0];
+            const Tensor& K = inputs[1];
+            const Tensor& V = inputs[2];
+            auto qsh = Q.shape();
+            const bool is4d = (qsh.size() == 4);
+            int64_t b = 0, h = 0, sq = 0, d = 0, sk = 0, dv = 0;
+            Tensor Q3 = Q, K3 = K, V3 = V;
+            if (is4d) {
+                b = qsh[0]; h = qsh[1]; sq = qsh[2]; d = qsh[3];
+                sk = K.shape()[2]; dv = V.shape()[3];
+                Q3 = tenzor::reshape(Q.contiguous(), std::vector<int64_t>{b * h, sq, d});
+                K3 = tenzor::reshape(K.contiguous(), std::vector<int64_t>{b * h, sk, d});
+                V3 = tenzor::reshape(V.contiguous(), std::vector<int64_t>{b * h, sk, dv});
+            }
+            Tensor scores = tenzor::bmm(Q3, tenzor::transpose(K3, -1, -2));
+            std::vector<int64_t> ssh(scores.shape().begin(), scores.shape().end());
+            scores = tenzor::mul(scores, tenzor::full(ssh, scale_d, DType::Float64, scores.device()));
+            if (causal_attr) {
+                int64_t S_q = ssh[ssh.size() - 2], S_k = ssh[ssh.size() - 1];
+                Tensor rows = tenzor::reshape(tenzor::arange(0, S_q, 1, DType::Int64, Q.device()), {S_q, 1});
+                Tensor cols = tenzor::reshape(tenzor::arange(0, S_k, 1, DType::Int64, Q.device()), {1, S_k});
+                Tensor mask = tenzor::gt(cols.to(DType::Float64), rows.to(DType::Float64));
+                Tensor neg_inf = tenzor::full(ssh, -std::numeric_limits<double>::infinity(),
+                                              DType::Float64, scores.device());
+                scores = tenzor::add(scores, tenzor::mul(mask.to(DType::Float64), neg_inf));
+            }
+            NewOpAttributes sm_attrs;
+            sm_attrs.set(AttrKey::Dim, static_cast<int64_t>(-1));
+            std::vector<Tensor> sm_in = {scores};
+            Tensor probs = tenzor::dispatch(OpId::Softmax, sm_in, sm_attrs)[0];
+            Tensor out = tenzor::bmm(probs, V3);
+            if (is4d) out = tenzor::reshape(out, std::vector<int64_t>{b, h, sq, dv});
+            return std::vector<Tensor>{out};
+        }
+
 #ifdef TENZOR_HAS_CUDNN_FRONTEND
         // Check if cuDNN SDPA is requested and input is 4D. Causal flag is now
         // plumbed through (audit C4/M5 fix): the cuDNN graph is rebuilt with
@@ -2007,6 +2062,25 @@ void register_cuda_kernels(BackendDispatchTable& table) {
 
             if (has_lse && fused_supported && Q.dtype() == DType::Float32) {
                 const Tensor& L = inputs[5];
+                // The fused kernel expects 3D (B*H, S, D); collapse a 4D
+                // (B, H, S, D) layout and restore the grads afterwards. Passing
+                // 4D directly made the kernel read num_heads as part of the batch
+                // and collapse the head_dim → grad_Q came back as (B, H, S).
+                if (Q.shape().size() == 4) {
+                    int64_t b = Q.shape()[0], h = Q.shape()[1], sq = Q.shape()[2], d = Q.shape()[3];
+                    int64_t sk = K.shape()[2], dv = V.shape()[3];
+                    Tensor Qi  = tenzor::reshape(Q,  std::vector<int64_t>{b * h, sq, d});
+                    Tensor Ki  = tenzor::reshape(K,  std::vector<int64_t>{b * h, sk, d});
+                    Tensor Vi  = tenzor::reshape(V,  std::vector<int64_t>{b * h, sk, dv});
+                    Tensor Oi  = tenzor::reshape(O,  std::vector<int64_t>{b * h, sq, dv});
+                    Tensor dOi = tenzor::reshape(dO, std::vector<int64_t>{b * h, sq, dv});
+                    Tensor Li  = tenzor::reshape(L,  std::vector<int64_t>{b * h, sq});
+                    auto grads = cuda::flash_attention_backward_cuda(dOi, Qi, Ki, Vi, Oi, Li, scale, causal);
+                    grads[0] = tenzor::reshape(grads[0], std::vector<int64_t>{b, h, sq, d});
+                    grads[1] = tenzor::reshape(grads[1], std::vector<int64_t>{b, h, sk, d});
+                    grads[2] = tenzor::reshape(grads[2], std::vector<int64_t>{b, h, sk, dv});
+                    return grads;
+                }
                 return cuda::flash_attention_backward_cuda(dO, Q, K, V, O, L, scale, causal);
             }
 
@@ -3564,9 +3638,13 @@ void register_cuda_kernels(BackendDispatchTable& table) {
     // RMSNorm Backward (Phase 3C - HIGH)
     // =========================================================================
     table.register_kernel(OpId::RMSNormBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        // inputs: [grad_output, input, weight, rrms]
+        // inputs: [grad_output, input, rrms, weight] — order set by the autograd
+        // RMSNormBackward (saved [input, rrms, weight]). The wrapper expects
+        // (grad_output, input, weight, rrms), so pass weight=inputs[3], rrms=inputs[2].
+        // (Previously these were swapped — weight and rrms transposed — which
+        // produced a wrong input gradient: gradcheck off by ~0.12.)
         auto [grad_input, grad_weight] = cuda::fused_rms_norm_backward_cuda(
-            inputs[0], inputs[1], inputs[2], inputs[3]);
+            inputs[0], inputs[1], inputs[3], inputs[2]);
         return std::vector<Tensor>{grad_input, grad_weight};
     });
 
@@ -3634,17 +3712,17 @@ void register_cuda_kernels(BackendDispatchTable& table) {
         return std::vector<Tensor>{cuda::randint_kernel(low, high, shape, dtype, device, get_cuda_stream(attrs))};
     });
     table.register_kernel(OpId::Arange, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        float start = static_cast<float>(attrs.get_float(AttrKey::Start, 0.0));
-        float end = static_cast<float>(attrs.get_float(AttrKey::End, 0.0));
-        float step = static_cast<float>(attrs.get_float(AttrKey::Step, 1.0));
+        double start = attrs.get_float(AttrKey::Start, 0.0);
+        double end = attrs.get_float(AttrKey::End, 0.0);
+        double step = attrs.get_float(AttrKey::Step, 1.0);
         DType dtype = dtype_from_string(attrs.get_string(AttrKey::Dtype, "float32"));
         int device_idx = static_cast<int>(attrs.get_int(AttrKey::Device, 0));
         Device device = Device::cuda(device_idx);
         return std::vector<Tensor>{cuda::arange_kernel(start, end, step, dtype, device, get_cuda_stream(attrs))};
     });
     table.register_kernel(OpId::Linspace, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        float start = static_cast<float>(attrs.get_float(AttrKey::Start, 0.0));
-        float end = static_cast<float>(attrs.get_float(AttrKey::End, 1.0));
+        double start = attrs.get_float(AttrKey::Start, 0.0);
+        double end = attrs.get_float(AttrKey::End, 1.0);
         int64_t steps = attrs.get_int(AttrKey::Steps, 100);
         DType dtype = dtype_from_string(attrs.get_string(AttrKey::Dtype, "float32"));
         int device_idx = static_cast<int>(attrs.get_int(AttrKey::Device, 0));
@@ -3753,8 +3831,37 @@ void register_cuda_kernels(BackendDispatchTable& table) {
     // =========================================================================
     table.register_kernel(OpId::FusedSoftmaxCrossEntropy, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
         // inputs: [logits, targets]
-        // Use the reduction-aware overload that returns a single reduced loss tensor
         std::string reduction = std::string(attrs.get_string(AttrKey::Reduction, "mean"));
+        bool compute_grad = attrs.get_bool(AttrKey::ComputeGrad, false);
+        if (compute_grad) {
+            // Grad-returning overload returns {loss, grad_logits}. The kernel works
+            // on rank-2 (batch, C); flatten rank-3 (N, T, C) logits to (N*T, C),
+            // then reshape loss -> (N, T) and grad -> (N, T, C).
+            const Tensor& logits = inputs[0];
+            const Tensor& targets = inputs[1];
+            const bool is3d = (logits.ndim() == 3);
+            int64_t N = 0, T = 0, C = 0;
+            Tensor lf = logits, tf = targets;
+            if (is3d) {
+                N = logits.shape()[0]; T = logits.shape()[1]; C = logits.shape()[2];
+                lf = tenzor::reshape(logits.contiguous(), std::vector<int64_t>{N * T, C});
+                tf = tenzor::reshape(targets.contiguous(), std::vector<int64_t>{N * T});
+            }
+            // The grad kernel computes in Float32; widen Float16/BFloat16 logits,
+            // then narrow grad_logits back to the original dtype.
+            const DType orig_dtype = logits.dtype();
+            const bool is_half = (orig_dtype == DType::Float16 || orig_dtype == DType::BFloat16);
+            if (is_half) lf = lf.to(DType::Float32);
+            auto [loss, grad_logits] = cuda::fused_softmax_cross_entropy_cuda(
+                lf, tf, /*compute_grad=*/true);
+            if (is_half) grad_logits = grad_logits.to(orig_dtype);
+            if (is3d) {
+                loss = tenzor::reshape(loss, std::vector<int64_t>{N, T});
+                grad_logits = tenzor::reshape(grad_logits, std::vector<int64_t>{N, T, C});
+            }
+            return std::vector<Tensor>{loss, grad_logits};
+        }
+        // Reduction-aware overload: single reduced loss tensor.
         auto loss = cuda::fused_softmax_cross_entropy_cuda(inputs[0], inputs[1], reduction);
         return std::vector<Tensor>{loss};
     });
@@ -3773,8 +3880,14 @@ void register_cuda_kernels(BackendDispatchTable& table) {
 
         Tensor& param = const_cast<Tensor&>(inputs[0]);
         Tensor& square_avg = const_cast<Tensor&>(inputs[2]);
+        // The optimizer pushes grad_avg (index 3) only when centered, then
+        // momentum_buffer. So momentum_buffer is at index 3 when NOT centered and
+        // index 4 when centered. Hard-coding index 4 dropped the momentum buffer
+        // for the common (centered=false, momentum>0) case → momentum ignored.
         Tensor* grad_avg = (centered && inputs.size() > 3) ? &const_cast<Tensor&>(inputs[3]) : nullptr;
-        Tensor* momentum_buffer = (momentum > 0.0f && inputs.size() > 4) ? &const_cast<Tensor&>(inputs[4]) : nullptr;
+        const size_t mb_idx = centered ? 4u : 3u;
+        Tensor* momentum_buffer = (momentum > 0.0f && inputs.size() > mb_idx)
+            ? &const_cast<Tensor&>(inputs[mb_idx]) : nullptr;
 
         cuda::fused_rmsprop_step_cuda(param, inputs[1], square_avg, grad_avg, momentum_buffer,
             lr, alpha, eps, weight_decay, momentum, centered, get_cuda_stream(attrs));

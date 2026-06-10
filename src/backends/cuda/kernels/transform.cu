@@ -183,6 +183,35 @@ auto contiguous_kernel(const Tensor& input, cudaStream_t stream) -> Tensor {
             reinterpret_cast<double2*>(result.data_ptr()),
             meta, ndim, total_elements);
             CUDA_CHECK(cudaGetLastError());
+    } else if (input.dtype() == DType::Int16) {
+        contiguous_kernel_impl<int16_t><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
+            input.data<int16_t>(), result.data<int16_t>(),
+            meta, ndim, total_elements);
+            CUDA_CHECK(cudaGetLastError());
+    } else if (input.dtype() == DType::UInt16) {
+        contiguous_kernel_impl<uint16_t><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
+            input.data<uint16_t>(), result.data<uint16_t>(),
+            meta, ndim, total_elements);
+            CUDA_CHECK(cudaGetLastError());
+    } else if (input.dtype() == DType::UInt32) {
+        contiguous_kernel_impl<uint32_t><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
+            input.data<uint32_t>(), result.data<uint32_t>(),
+            meta, ndim, total_elements);
+            CUDA_CHECK(cudaGetLastError());
+    } else if (input.dtype() == DType::UInt64) {
+        contiguous_kernel_impl<uint64_t><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
+            input.data<uint64_t>(), result.data<uint64_t>(),
+            meta, ndim, total_elements);
+            CUDA_CHECK(cudaGetLastError());
+    } else if (input.dtype() == DType::FP8_E4M3 || input.dtype() == DType::FP8_E5M2 ||
+               input.dtype() == DType::QInt8 || input.dtype() == DType::QUInt8 ||
+               input.dtype() == DType::QInt4x2) {
+        // All 1-byte storage types: contiguous copy is a pure byte move.
+        contiguous_kernel_impl<uint8_t><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
+            reinterpret_cast<const uint8_t*>(input.data_ptr()),
+            reinterpret_cast<uint8_t*>(result.data_ptr()),
+            meta, ndim, total_elements);
+            CUDA_CHECK(cudaGetLastError());
     } else {
         throw std::runtime_error("Contiguous: unsupported dtype");
     }
@@ -1029,8 +1058,85 @@ auto chunk_kernel(const Tensor& input, int64_t chunks, int64_t dim, cudaStream_t
 // Tile (repeat wrapper)
 // ============================================================================
 
+// True numpy-style tile: the WHOLE tensor is tiled `reps` times along each dim
+// (source index = out_coord % in_dim), distinct from `repeat` which duplicates
+// each element. Previously tile delegated to repeat_kernel — wrong values.
+template<typename T>
+__global__ void tile_kernel_device(const T* __restrict__ in, T* __restrict__ out,
+        int64_t out_numel, int ndim,
+        const int64_t* __restrict__ out_shape,
+        const int64_t* __restrict__ in_shape,
+        const int64_t* __restrict__ in_strides) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, out_numel) {
+        int64_t rem = idx;
+        int64_t in_off = 0;
+        for (int d = ndim - 1; d >= 0; --d) {
+            int64_t coord = rem % out_shape[d];
+            rem /= out_shape[d];
+            in_off += (coord % in_shape[d]) * in_strides[d];
+        }
+        out[idx] = in[in_off];
+    }
+}
+
 auto tile_kernel(const Tensor& input, const std::vector<int64_t>& reps, cudaStream_t stream) -> Tensor {
-    return repeat_kernel(input, reps, stream);
+    Tensor in = input.is_contiguous() ? input : input.contiguous();
+    auto ishape = in.shape();
+    int64_t in_ndim = static_cast<int64_t>(ishape.size());
+    int64_t out_ndim = std::max(in_ndim, static_cast<int64_t>(reps.size()));
+
+    // Right-align input shape and reps, padding leading dims with 1.
+    std::vector<int64_t> pshape(out_ndim, 1), preps(out_ndim, 1);
+    for (int64_t i = 0; i < in_ndim; ++i) pshape[out_ndim - in_ndim + i] = ishape[i];
+    for (int64_t i = 0; i < static_cast<int64_t>(reps.size()); ++i)
+        preps[out_ndim - static_cast<int64_t>(reps.size()) + i] = reps[i];
+
+    std::vector<int64_t> out_shape(out_ndim), in_strides(out_ndim);
+    int64_t s = 1;
+    for (int64_t d = out_ndim - 1; d >= 0; --d) {
+        in_strides[d] = s; s *= pshape[d];
+        out_shape[d] = pshape[d] * preps[d];
+    }
+    int64_t out_numel = 1;
+    for (auto v : out_shape) out_numel *= v;
+
+    Tensor output(out_shape, in.dtype(), in.device());
+    if (out_numel == 0) return output;
+
+    std::vector<int64_t> meta;
+    meta.reserve(out_ndim * 3);
+    meta.insert(meta.end(), out_shape.begin(), out_shape.end());
+    meta.insert(meta.end(), pshape.begin(), pshape.end());
+    meta.insert(meta.end(), in_strides.begin(), in_strides.end());
+    int64_t* d_meta = nullptr;
+    CUDA_CHECK(cudaMallocAsync(&d_meta, meta.size() * sizeof(int64_t), stream));
+    CUDA_CHECK(cudaMemcpyAsync(d_meta, meta.data(), meta.size() * sizeof(int64_t),
+                               cudaMemcpyHostToDevice, stream));
+    const int64_t* d_out_shape = d_meta;
+    const int64_t* d_in_shape = d_meta + out_ndim;
+    const int64_t* d_in_strides = d_meta + 2 * out_ndim;
+
+    int num_blocks = get_num_blocks(out_numel);
+    auto launch = [&](auto* tag) {
+        using T = std::remove_pointer_t<decltype(tag)>;
+        tile_kernel_device<T><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
+            reinterpret_cast<const T*>(in.data_ptr()), reinterpret_cast<T*>(output.data_ptr()),
+            out_numel, static_cast<int>(out_ndim), d_out_shape, d_in_shape, d_in_strides);
+        CUDA_CHECK(cudaGetLastError());
+    };
+    // tile is pure data movement; dispatch by element size.
+    switch (dtype_size(in.dtype())) {
+        case 1:  launch(static_cast<uint8_t*>(nullptr));  break;
+        case 2:  launch(static_cast<uint16_t*>(nullptr)); break;
+        case 4:  launch(static_cast<uint32_t*>(nullptr)); break;
+        case 8:  launch(static_cast<uint64_t*>(nullptr)); break;
+        case 16: launch(static_cast<double2*>(nullptr));  break;
+        default:
+            CUDA_CHECK(cudaFreeAsync(d_meta, stream));
+            throw std::runtime_error("tile: unsupported element size");
+    }
+    CUDA_CHECK(cudaFreeAsync(d_meta, stream));
+    return output;
 }
 
 // ============================================================================

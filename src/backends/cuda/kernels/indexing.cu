@@ -156,6 +156,10 @@ auto index_select_kernel(const Tensor& input, int64_t dim, const Tensor& index,
         case DType::Int64:   LAUNCH_INDEX_SELECT(int64_t); break;
         case DType::Int8:    LAUNCH_INDEX_SELECT(int8_t); break;
         case DType::UInt8:   LAUNCH_INDEX_SELECT(uint8_t); break;
+        case DType::Int16:   LAUNCH_INDEX_SELECT(int16_t); break;
+        case DType::UInt16:  LAUNCH_INDEX_SELECT(uint16_t); break;
+        case DType::UInt32:  LAUNCH_INDEX_SELECT(uint32_t); break;
+        case DType::UInt64:  LAUNCH_INDEX_SELECT(uint64_t); break;
         case DType::Float16:
             if (idx_is_int32)
                 index_select_kernel_impl<__half, int32_t><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
@@ -349,6 +353,10 @@ auto gather_kernel(const Tensor& input, int64_t dim, const Tensor& index,
         case DType::Int64:   LAUNCH_GATHER(int64_t); break;
         case DType::Int8:    LAUNCH_GATHER(int8_t); break;
         case DType::UInt8:   LAUNCH_GATHER(uint8_t); break;
+        case DType::Int16:   LAUNCH_GATHER(int16_t); break;
+        case DType::UInt16:  LAUNCH_GATHER(uint16_t); break;
+        case DType::UInt32:  LAUNCH_GATHER(uint32_t); break;
+        case DType::UInt64:  LAUNCH_GATHER(uint64_t); break;
         case DType::Float16:
             if (idx_is_int32)
                 gather_kernel_impl<__half, int32_t><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
@@ -381,6 +389,33 @@ auto gather_kernel(const Tensor& input, int64_t dim, const Tensor& index,
                     reinterpret_cast<__nv_bfloat16*>(output.data_ptr()),
                     outer_size, dim_size, inner_size, index_dim_size, total_output,
                     error_buf.as<int>());
+            CUDA_CHECK(cudaGetLastError());
+            break;
+        case DType::Complex64:
+            // gather is pure data movement; treat complex as float2.
+            if (idx_is_int32)
+                gather_kernel_impl<float2, int32_t><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
+                    reinterpret_cast<const float2*>(input.data_ptr()), index.data<int32_t>(),
+                    reinterpret_cast<float2*>(output.data_ptr()),
+                    outer_size, dim_size, inner_size, index_dim_size, total_output, error_buf.as<int>());
+            else
+                gather_kernel_impl<float2, int64_t><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
+                    reinterpret_cast<const float2*>(input.data_ptr()), index.data<int64_t>(),
+                    reinterpret_cast<float2*>(output.data_ptr()),
+                    outer_size, dim_size, inner_size, index_dim_size, total_output, error_buf.as<int>());
+            CUDA_CHECK(cudaGetLastError());
+            break;
+        case DType::Complex128:
+            if (idx_is_int32)
+                gather_kernel_impl<double2, int32_t><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
+                    reinterpret_cast<const double2*>(input.data_ptr()), index.data<int32_t>(),
+                    reinterpret_cast<double2*>(output.data_ptr()),
+                    outer_size, dim_size, inner_size, index_dim_size, total_output, error_buf.as<int>());
+            else
+                gather_kernel_impl<double2, int64_t><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
+                    reinterpret_cast<const double2*>(input.data_ptr()), index.data<int64_t>(),
+                    reinterpret_cast<double2*>(output.data_ptr()),
+                    outer_size, dim_size, inner_size, index_dim_size, total_output, error_buf.as<int>());
             CUDA_CHECK(cudaGetLastError());
             break;
         default:
@@ -524,6 +559,10 @@ auto scatter_kernel(const Tensor& input, int64_t dim, const Tensor& index,
         case DType::Int64:   LAUNCH_SCATTER(int64_t); break;
         case DType::Int8:    LAUNCH_SCATTER(int8_t); break;
         case DType::UInt8:   LAUNCH_SCATTER(uint8_t); break;
+        case DType::Int16:   LAUNCH_SCATTER(int16_t); break;
+        case DType::UInt16:  LAUNCH_SCATTER(uint16_t); break;
+        case DType::UInt32:  LAUNCH_SCATTER(uint32_t); break;
+        case DType::UInt64:  LAUNCH_SCATTER(uint64_t); break;
         case DType::Float16:
             copy_kernel_impl<__half><<<num_blocks_copy, BLOCK_SIZE, 0, stream>>>(
                 reinterpret_cast<const __half*>(input.data_ptr()),
@@ -564,6 +603,40 @@ auto scatter_kernel(const Tensor& input, int64_t dim, const Tensor& index,
                     reinterpret_cast<__nv_bfloat16*>(output.data_ptr()),
                     outer_size, dim_size, inner_size, index_dim_size, total_scatter,
                     error_buf.as<int>());
+            CUDA_CHECK(cudaGetLastError());
+            break;
+        case DType::Complex64:
+            copy_kernel_impl<float2><<<num_blocks_copy, BLOCK_SIZE, 0, stream>>>(
+                reinterpret_cast<const float2*>(input.data_ptr()),
+                reinterpret_cast<float2*>(output.data_ptr()), total_input);
+            CUDA_CHECK(cudaGetLastError());
+            if (idx_is_int32)
+                scatter_values_kernel_impl<float2, int32_t><<<num_blocks_scatter, BLOCK_SIZE, 0, stream>>>(
+                    index.data<int32_t>(), reinterpret_cast<const float2*>(src.data_ptr()),
+                    reinterpret_cast<float2*>(output.data_ptr()),
+                    outer_size, dim_size, inner_size, index_dim_size, total_scatter, error_buf.as<int>());
+            else
+                scatter_values_kernel_impl<float2, int64_t><<<num_blocks_scatter, BLOCK_SIZE, 0, stream>>>(
+                    index.data<int64_t>(), reinterpret_cast<const float2*>(src.data_ptr()),
+                    reinterpret_cast<float2*>(output.data_ptr()),
+                    outer_size, dim_size, inner_size, index_dim_size, total_scatter, error_buf.as<int>());
+            CUDA_CHECK(cudaGetLastError());
+            break;
+        case DType::Complex128:
+            copy_kernel_impl<double2><<<num_blocks_copy, BLOCK_SIZE, 0, stream>>>(
+                reinterpret_cast<const double2*>(input.data_ptr()),
+                reinterpret_cast<double2*>(output.data_ptr()), total_input);
+            CUDA_CHECK(cudaGetLastError());
+            if (idx_is_int32)
+                scatter_values_kernel_impl<double2, int32_t><<<num_blocks_scatter, BLOCK_SIZE, 0, stream>>>(
+                    index.data<int32_t>(), reinterpret_cast<const double2*>(src.data_ptr()),
+                    reinterpret_cast<double2*>(output.data_ptr()),
+                    outer_size, dim_size, inner_size, index_dim_size, total_scatter, error_buf.as<int>());
+            else
+                scatter_values_kernel_impl<double2, int64_t><<<num_blocks_scatter, BLOCK_SIZE, 0, stream>>>(
+                    index.data<int64_t>(), reinterpret_cast<const double2*>(src.data_ptr()),
+                    reinterpret_cast<double2*>(output.data_ptr()),
+                    outer_size, dim_size, inner_size, index_dim_size, total_scatter, error_buf.as<int>());
             CUDA_CHECK(cudaGetLastError());
             break;
         default:
@@ -945,6 +1018,17 @@ auto scatter_add_kernel(const Tensor& input, int64_t dim, const Tensor& index,
             CUDA_CHECK(cudaMemcpyAsync(output.data_ptr(), result.data_ptr(),
                                         output.numel() * dtype_size(input.dtype()),
                                         cudaMemcpyDeviceToDevice, stream));
+        } else if (input.dtype() == DType::Int8 || input.dtype() == DType::Int16 ||
+                   input.dtype() == DType::UInt8 || input.dtype() == DType::UInt16 ||
+                   input.dtype() == DType::UInt32 || input.dtype() == DType::UInt64) {
+            // No native deterministic accumulate for 8/16-bit/unsigned ints; upcast to Int64.
+            Tensor src_i64 = src.to(DType::Int64);
+            Tensor output_i64 = output.to(DType::Int64);
+            do_sort(src_i64.data<int64_t>(), output_i64.data<int64_t>());
+            Tensor result = output_i64.to(input.dtype());
+            CUDA_CHECK(cudaMemcpyAsync(output.data_ptr(), result.data_ptr(),
+                                        output.numel() * dtype_size(input.dtype()),
+                                        cudaMemcpyDeviceToDevice, stream));
         }
 
         CUDA_CHECK(cudaStreamSynchronize(stream));
@@ -1003,6 +1087,34 @@ auto scatter_add_kernel(const Tensor& input, int64_t dim, const Tensor& index,
                 CUDA_CHECK(cudaGetLastError());
             }
             output = output_f32.to(input.dtype());
+            break;
+        }
+        case DType::Int8:
+        case DType::Int16:
+        case DType::UInt8:
+        case DType::UInt16:
+        case DType::UInt32:
+        case DType::UInt64: {
+            // 8/16-bit and unsigned ints have no native atomicAdd; upcast to
+            // Int64 for accumulation, then narrow back to the original dtype.
+            Tensor input_i64 = input.to(DType::Int64);
+            Tensor src_i64 = src.to(DType::Int64);
+            Tensor output_i64(output_shape, DType::Int64, input.device());
+            CUDA_CHECK(cudaMemcpyAsync(output_i64.data_ptr(), input_i64.data_ptr(),
+                                       total_input * sizeof(int64_t), cudaMemcpyDeviceToDevice, stream));
+            if (total_scatter > 0) {
+                int nb = get_num_blocks(total_scatter);
+                if (idx_is_int32)
+                    scatter_add_kernel_impl<int64_t, int32_t><<<nb, BLOCK_SIZE, 0, stream>>>(
+                        index.data<int32_t>(), src_i64.data<int64_t>(), output_i64.data<int64_t>(),
+                        outer_size, dim_size, inner_size, index_dim_size, total_scatter, error_buf.as<int>());
+                else
+                    scatter_add_kernel_impl<int64_t, int64_t><<<nb, BLOCK_SIZE, 0, stream>>>(
+                        index.data<int64_t>(), src_i64.data<int64_t>(), output_i64.data<int64_t>(),
+                        outer_size, dim_size, inner_size, index_dim_size, total_scatter, error_buf.as<int>());
+                CUDA_CHECK(cudaGetLastError());
+            }
+            output = output_i64.to(input.dtype());
             break;
         }
         default: throw std::runtime_error("scatter_add: unsupported dtype " +
@@ -1078,6 +1190,12 @@ auto masked_select_kernel(const Tensor& input, const Tensor& mask,
         case DType::UInt8:   RUN_FLAGGED_SELECT(uint8_t); break;
         case DType::Float16: RUN_FLAGGED_SELECT(__half); break;
         case DType::BFloat16: RUN_FLAGGED_SELECT(__nv_bfloat16); break;
+        case DType::Int16:   RUN_FLAGGED_SELECT(int16_t); break;
+        case DType::UInt16:  RUN_FLAGGED_SELECT(uint16_t); break;
+        case DType::UInt32:  RUN_FLAGGED_SELECT(uint32_t); break;
+        case DType::UInt64:  RUN_FLAGGED_SELECT(uint64_t); break;
+        case DType::Complex64:  RUN_FLAGGED_SELECT(float2); break;
+        case DType::Complex128: RUN_FLAGGED_SELECT(double2); break;
         default:
             throw std::runtime_error("masked_select: unsupported dtype");
     }
@@ -1188,6 +1306,24 @@ auto masked_fill_kernel(const Tensor& input, const Tensor& mask, double value,
             CUDA_CHECK(cudaGetLastError());
             break;
         }
+        case DType::Complex64: {
+            float2 fill_val = make_float2(static_cast<float>(value), 0.0f);
+            auto [grid_size, block_size] = optimal_launch_config(masked_fill_kernel_impl<float2>, n);
+            masked_fill_kernel_impl<float2><<<grid_size, block_size, 0, stream>>>(
+                reinterpret_cast<const float2*>(input.data_ptr()), mask_ptr, fill_val,
+                reinterpret_cast<float2*>(output.data_ptr()), n);
+            CUDA_CHECK(cudaGetLastError());
+            break;
+        }
+        case DType::Complex128: {
+            double2 fill_val = make_double2(value, 0.0);
+            auto [grid_size, block_size] = optimal_launch_config(masked_fill_kernel_impl<double2>, n);
+            masked_fill_kernel_impl<double2><<<grid_size, block_size, 0, stream>>>(
+                reinterpret_cast<const double2*>(input.data_ptr()), mask_ptr, fill_val,
+                reinterpret_cast<double2*>(output.data_ptr()), n);
+            CUDA_CHECK(cudaGetLastError());
+            break;
+        }
         default:
             throw std::runtime_error("masked_fill: unsupported dtype");
     }
@@ -1261,6 +1397,30 @@ auto where_kernel(const Tensor& condition, const Tensor& x, const Tensor& y,
                 reinterpret_cast<const __nv_bfloat16*>(x.data_ptr()),
                 reinterpret_cast<const __nv_bfloat16*>(y.data_ptr()),
                 reinterpret_cast<__nv_bfloat16*>(output.data_ptr()), n);
+            CUDA_CHECK(cudaGetLastError());
+            break;
+        }
+        case DType::Int16:   LAUNCH_WHERE(int16_t); break;
+        case DType::UInt16:  LAUNCH_WHERE(uint16_t); break;
+        case DType::UInt32:  LAUNCH_WHERE(uint32_t); break;
+        case DType::UInt64:  LAUNCH_WHERE(uint64_t); break;
+        case DType::Complex64: {
+            auto [grid_size, block_size] = optimal_launch_config(where_kernel_impl<float2>, n);
+            where_kernel_impl<float2><<<grid_size, block_size, 0, stream>>>(
+                cond_ptr,
+                reinterpret_cast<const float2*>(x.data_ptr()),
+                reinterpret_cast<const float2*>(y.data_ptr()),
+                reinterpret_cast<float2*>(output.data_ptr()), n);
+            CUDA_CHECK(cudaGetLastError());
+            break;
+        }
+        case DType::Complex128: {
+            auto [grid_size, block_size] = optimal_launch_config(where_kernel_impl<double2>, n);
+            where_kernel_impl<double2><<<grid_size, block_size, 0, stream>>>(
+                cond_ptr,
+                reinterpret_cast<const double2*>(x.data_ptr()),
+                reinterpret_cast<const double2*>(y.data_ptr()),
+                reinterpret_cast<double2*>(output.data_ptr()), n);
             CUDA_CHECK(cudaGetLastError());
             break;
         }

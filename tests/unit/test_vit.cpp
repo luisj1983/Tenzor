@@ -311,6 +311,14 @@ TEST_P(ViTTest, ViTHugePatch14GradientFlow) {
     auto model = ViT_Huge_Patch14(10, false, 224);
     model->to(device);
     model->train();
+    // ViT-Huge/14 (~632M params) forward+backward in Float32 exceeds an 8GB
+    // GPU when every layer's activations are retained. Enable activation
+    // (gradient) checkpointing so the 32 encoder layers recompute their
+    // activations during backward instead of storing them — peak memory drops
+    // by ~O(num_layers) and the full model fits. Gradients are identical
+    // (checkpoint captures/replays RNG for dropout), so the grad-flow check
+    // still validates the real model.
+    model->set_gradient_checkpointing(true);
 
     Variable input(randn({1, 3, 224, 224}, DType::Float32, device), true);
     Variable output = model->forward(input);

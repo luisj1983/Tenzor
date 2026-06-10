@@ -1503,6 +1503,15 @@ auto fused_rms_norm_backward_cuda(
                      ? DType::Float32 : input.dtype();
     Tensor grad_weight = create_cuda_zeros({norm_size}, gw_dtype, input.device());
 
+    // The half-precision kernels keep rrms (the per-row reciprocal-RMS scalar)
+    // in F32 for accuracy. The autograd layer, however, narrows every saved
+    // tensor — rrms included — to the input dtype before dispatch, so for
+    // F16/BF16 inputs rrms arrives as half here. Widen it back to F32 so the
+    // F16/BF16 branches' `const float* rrms` reads the right storage instead of
+    // throwing a Float16 type mismatch (and silently zeroing the gradient).
+    Tensor rrms_f32 = (rrms.dtype() == DType::Float32) ? rrms
+                      : rrms.to(DType::Float32).contiguous();
+
     constexpr int BLOCK_SIZE = 256;
     int blocks = batch_size;
 
@@ -1538,7 +1547,7 @@ auto fused_rms_norm_backward_cuda(
             reinterpret_cast<const __half*>(grad_output.data_ptr()),
             reinterpret_cast<const __half*>(input.data_ptr()),
             reinterpret_cast<const __half*>(weight.data_ptr()),
-            rrms.data<float>(),
+            rrms_f32.data<float>(),
             reinterpret_cast<__half*>(grad_input.data_ptr()),
             grad_weight.data<float>(),
             batch_size,
@@ -1551,7 +1560,7 @@ auto fused_rms_norm_backward_cuda(
             reinterpret_cast<const __nv_bfloat16*>(grad_output.data_ptr()),
             reinterpret_cast<const __nv_bfloat16*>(input.data_ptr()),
             reinterpret_cast<const __nv_bfloat16*>(weight.data_ptr()),
-            rrms.data<float>(),
+            rrms_f32.data<float>(),
             reinterpret_cast<__nv_bfloat16*>(grad_input.data_ptr()),
             grad_weight.data<float>(),
             batch_size,

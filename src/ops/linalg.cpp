@@ -344,11 +344,17 @@ auto inv(const Tensor& A) -> Tensor {
 }
 
 auto solve(const Tensor& A, const Tensor& B) -> Tensor {
-    // Try GPU dispatch first
+    // Try GPU dispatch first. The GPU solve kernels expect a 2D RHS (they
+    // transpose B for the column-major cuSOLVER call, which fails on a 1D
+    // vector); promote a 1D B to (n, 1) and squeeze the solution back.
     {
+        const bool b_was_1d = (B.shape().size() == 1);
+        Tensor B2 = b_was_1d ? tenzor::reshape(B, {B.shape()[0], 1}) : B;
         Tensor result;
-        std::array<Tensor, 2> inputs = {A, B};
-        if (try_gpu_dispatch(OpId::LinalgSolve, inputs, {}, result)) return result;
+        std::array<Tensor, 2> inputs = {A, B2};
+        if (try_gpu_dispatch(OpId::LinalgSolve, inputs, {}, result)) {
+            return b_was_1d ? tenzor::reshape(result, {B.shape()[0]}) : result;
+        }
     }
 
 #if !defined(TENZOR_USE_MKL) && !defined(TENZOR_USE_LAPACKE)

@@ -8,6 +8,7 @@
 #include "../multi_backend_dtype_fixture.hpp"
 #include "../../include/tenzor/models/efficientnet.hpp"
 #include <tenzor/nn/offload.hpp>
+#include <tenzor/autograd/anomaly_mode.hpp>
 #include <memory>
 #include "../grad_flow_helpers.hpp"
 
@@ -57,6 +58,25 @@ protected:
      */
     double gradFlowLossScale() const {
         return dtype() == DType::Float16 ? 2048.0 : 1.0;
+    }
+
+    /**
+     * @brief Loss scale for *block-level* gradient-flow tests.
+     *
+     * gradFlowLossScale() (2048) is sized for whole-model tests, where the loss
+     * sits on the O(1) classifier logits and the scale only compensates for the
+     * deep backward chain's attenuation toward the network input. A single
+     * MBConv block has no such deep attenuation: with sum(out^2) applied
+     * directly to its output the input gradient is already O(1) and the
+     * parameter gradients O(10^2) in Float16 — both far from underflow. Applying
+     * the model-level 2048x scale here is not just unnecessary, it is harmful:
+     * it inflates the Squeeze-Excite conv weight gradients (and the broadcast
+     * multiply's gradient w.r.t. the channel scale, a sum over H*W) past
+     * Float16's 65504 max to +Inf, which then propagates NaN through backward.
+     * A shallow block therefore needs no loss scaling at any dtype.
+     */
+    double blockGradFlowLossScale() const {
+        return 1.0;
     }
 
     /**
@@ -272,7 +292,7 @@ TEST_P(EfficientNetMultiDTypeTest, MBConvBlockGradientFlow) {
 
     Variable input = createInput({2, 16, 56, 56});
     Variable output = block->forward(input);
-    Variable loss = tenzor::sum(output * output) * gradFlowLossScale();
+    Variable loss = tenzor::sum(output * output) * blockGradFlowLossScale();
     loss.backward();
 
     EXPECT_GRAD_FLOWS(input);

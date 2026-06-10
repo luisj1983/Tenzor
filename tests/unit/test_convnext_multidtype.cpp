@@ -523,8 +523,16 @@ TEST_P(ConvNeXtMultiDTypeTest, ConvNeXtBaseDepthwiseConsistency) {
     // both library-backed GPU backends.
     float consistency_tol = atol();
     if ((device().type == Device::Type::CUDA ||
-         device().type == Device::Type::OneAPI) && dtype() == DType::Float64) {
-        consistency_tol = 5e-5f;  // library-level run-to-run jitter in deep networks
+         device().type == Device::Type::OneAPI) &&
+        (dtype() == DType::Float64 || dtype() == DType::Float32)) {
+        // Library-level run-to-run jitter in deep networks. cuDNN/oneDNN pick
+        // convolution algorithms heuristically and use atomic reductions, so
+        // two forward passes of the same model are not bit-identical — the
+        // ~1-ulp GEMM jitter amplifies through ConvNeXt-Base's 27-block stage 3.
+        // Float32's default 1e-5 atol sits right at that amplified jitter
+        // (~1e-5 observed), so it needs the same relaxed bound already used for
+        // Float64. (Float16's 1e-2 atol is already loose enough.)
+        consistency_tol = 5e-5f;
     }
 
     for (size_t i = 0; i < cpu_out1.numel(); ++i) {

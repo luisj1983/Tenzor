@@ -260,10 +260,13 @@ auto try_fused_or_compose_backward(const Tensor& dO,
         }
     }
 
-    if (!L.is_valid() || L.shape().size() == 0) {
-        // No saved logsumexp — backward must recompute from scratch.
-        // If dropout was applied in forward, replay the mask using the
-        // saved seed so dV/dQ/dK match the masked attention pattern.
+    if (dropout_p > 0.0 || !L.is_valid() || L.shape().size() == 0) {
+        // Use the composed backward when (a) there is no saved logsumexp, or
+        // (b) dropout was applied: the fused FlashAttentionBackward kernel does
+        // not replay the forward dropout mask, so routing a dropout backward
+        // through it yields the wrong (and wrong-shaped) gradient. The composed
+        // path rebuilds the exact mask from the saved Philox seed, so dV/dQ/dK
+        // match the masked attention pattern and are deterministic per seed.
         return composed_attention_backward(dO, Q, K, V, scale, causal,
                                             dropout_p, seed_for_replay);
     }

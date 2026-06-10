@@ -1299,7 +1299,7 @@ auto bernoulli_kernel(const Tensor& probs, cudaStream_t stream) -> Tensor {
 
     bernoulli_kernel_impl<<<blocks_n, threads, 0, stream>>>(
         input.data<float>(), result.data<float>(), n, seed);
-    return result;
+    return (probs.dtype() == DType::Float32) ? result : result.to(probs.dtype());
 }
 
 // ============================================================================
@@ -1396,7 +1396,7 @@ auto normal_sample_kernel(const Tensor& mean, const Tensor& stddev, cudaStream_t
 
     normal_sample_kernel_impl<<<blocks_n, threads, 0, stream>>>(
         m.data<float>(), s.data<float>(), result.data<float>(), n, seed);
-    return result;
+    return (mean.dtype() == DType::Float32) ? result : result.to(mean.dtype());
 }
 
 // ============================================================================
@@ -4089,7 +4089,7 @@ auto trapezoid_kernel(const Tensor& y, int64_t dim, double dx,
         static_cast<uint32_t>(outer), static_cast<uint32_t>(inner),
         static_cast<uint32_t>(n), static_cast<float>(dx), x_ptr != nullptr);
     TENZOR_CUDA_POST_LAUNCH_CHECK();
-    return result;
+    return (y.dtype() == DType::Float32) ? result : result.to(y.dtype());
 }
 
 // ============================================================================
@@ -4150,7 +4150,7 @@ auto cumulative_trapezoid_kernel(const Tensor& y, int64_t dim, double dx,
         static_cast<uint32_t>(outer), static_cast<uint32_t>(inner),
         static_cast<uint32_t>(n), static_cast<float>(dx), x_ptr != nullptr);
     TENZOR_CUDA_POST_LAUNCH_CHECK();
-    return result;
+    return (y.dtype() == DType::Float32) ? result : result.to(y.dtype());
 }
 
 // ============================================================================
@@ -4208,7 +4208,7 @@ auto gradient_kernel(const Tensor& input, int64_t dim, double spacing,
         static_cast<uint32_t>(outer), static_cast<uint32_t>(inner),
         static_cast<uint32_t>(n), static_cast<float>(spacing));
     TENZOR_CUDA_POST_LAUNCH_CHECK();
-    return result;
+    return (input.dtype() == DType::Float32) ? result : result.to(input.dtype());
 }
 
 // ============================================================================
@@ -4256,7 +4256,7 @@ auto pairwise_distance_kernel(const Tensor& x1, const Tensor& x2, double p,
         a.data<float>(), b.data<float>(), result.data<float>(),
         static_cast<uint32_t>(N), static_cast<uint32_t>(D), static_cast<float>(p));
     TENZOR_CUDA_POST_LAUNCH_CHECK();
-    return result;
+    return (x1.dtype() == DType::Float32) ? result : result.to(x1.dtype());
 }
 
 // ============================================================================
@@ -4312,7 +4312,7 @@ auto pdist_kernel(const Tensor& input, double p, cudaStream_t stream) -> Tensor 
         static_cast<uint32_t>(N), static_cast<uint32_t>(D),
         static_cast<uint32_t>(num_pairs), static_cast<float>(p));
     TENZOR_CUDA_POST_LAUNCH_CHECK();
-    return result;
+    return (input.dtype() == DType::Float32) ? result : result.to(input.dtype());
 }
 
 // ============================================================================

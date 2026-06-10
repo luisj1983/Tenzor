@@ -2990,14 +2990,19 @@ auto fused_rms_norm_backward_hip(
     const Tensor& weight,
     const Tensor& rrms
 ) -> std::tuple<Tensor, Tensor> {
-    // BFloat16: upcast to Float32, compute, convert back
-    if (input.dtype() == DType::BFloat16) {
+    // Half precision (BFloat16/Float16): upcast to Float32, compute, convert
+    // back. The native kernel only has Float32/Float64 instantiations, and the
+    // autograd layer narrows every saved tensor — rrms included — to the input
+    // dtype before dispatch, so a half rrms would otherwise hit the
+    // unsupported-dtype throw and silently drop the RMSNorm gradient.
+    if (input.dtype() == DType::BFloat16 || input.dtype() == DType::Float16) {
+        DType orig = input.dtype();
         auto go_f32 = grad_output.to(DType::Float32);
         auto input_f32 = input.to(DType::Float32);
         auto w_f32 = weight.to(DType::Float32);
         auto rrms_f32 = rrms.to(DType::Float32);
         auto [gi, gw] = fused_rms_norm_backward_hip(go_f32, input_f32, w_f32, rrms_f32);
-        return {gi.to(DType::BFloat16), gw.to(DType::BFloat16)};
+        return {gi.to(orig), gw.to(orig)};
     }
 
     auto shape = input.shape();

@@ -416,6 +416,12 @@ TEST_P(EfficientNetTest, EfficientNetB7GradientFlow) {
     auto model = efficientnet_b7(10, false);
     model->to(device);
     model->train();
+    // EfficientNet-B7 @ 600x600 retains very large early-stage activation maps;
+    // forward+backward exceeds an 8GB GPU. Enable activation (gradient)
+    // checkpointing so each MBConv stage recomputes its activations in backward
+    // instead of storing them — peak memory drops enough to fit. Gradients are
+    // identical (RNG captured/replayed), so the grad-flow check still holds.
+    model->set_gradient_checkpointing(true);
 
     Variable input(randn({1, 3, 600, 600}, DType::Float32, device), true);
     Variable output = model->forward(input);

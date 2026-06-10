@@ -1624,7 +1624,15 @@ auto LinalgMatrixNormBackward::backward(std::vector<Tensor> grad_outputs) -> std
     //   col_norm: mask shape (..., N), unsqueeze to (..., 1, N).
     //   row_norm: mask shape (..., M), unsqueeze to (..., M, 1).
     auto mask = tenzor::one_hot(idx, num_classes).to(input.dtype());
-    mask = mask.unsqueeze(col_norm ? ndim - 2 : ndim - 1);
+    // Reshape the one-hot mask to its explicit broadcast target (the reduced
+    // matrix dim becomes 1). Rank-robust: argmax/one_hot keepdim conventions
+    // differ across backends (CUDA argmax of a 1-D tensor yields (1,) vs CPU's
+    // scalar), which previously left a stray leading dim -> [1,M,N] gradient.
+    {
+        std::vector<int64_t> mask_shape(input.shape().begin(), input.shape().end());
+        mask_shape[col_norm ? (ndim - 2) : (ndim - 1)] = 1;
+        mask = reshape(mask, mask_shape);
+    }
 
     // Expand `grad` to broadcast against (..., M, N): append two trailing 1s.
     auto grad_shape = std::vector<int64_t>(grad.shape().begin(), grad.shape().end());

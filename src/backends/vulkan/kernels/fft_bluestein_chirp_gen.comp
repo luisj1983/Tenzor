@@ -18,7 +18,16 @@ void main() {
     uint k = gl_GlobalInvocationID.x;
     if (k >= N) return;
 
-    float angle = float(sign) * 3.14159265358979323846 * float(k) * float(k) / float(N);
+    // angle = sign * pi * k^2 / N. k^2/N grows to ~N, so the raw argument
+    // reaches ~pi*N radians (e.g. ~1256 for N=400), far outside the range where
+    // GLSL cos/sin keep precision — the resulting chirp is near-garbage and
+    // inflates Bluestein FFT error ~500x. The chirp is periodic in k^2/N modulo
+    // 2, so reduce k^2 modulo 2N first (exact integer arithmetic) and only then
+    // scale by pi/N, keeping the trig argument within [0, 2*pi).
+    uint twoN = 2u * N;
+    uint kr = k % twoN;                 // (k mod 2N)^2 == k^2 (mod 2N)
+    uint m = (kr * kr) % twoN;
+    float angle = float(sign) * 3.14159265358979323846 * float(m) / float(N);
     float c = cos(angle);
     float s = sin(angle);
 

@@ -171,11 +171,16 @@ auto NestedTensor::from_padded(const Tensor& padded,
         values = tenzor::cat(segments, 0);
     }
 
-    // Build offsets tensor
-    auto offsets = tenzor::zeros({B + 1}, DType::Int64, padded.device());
+    // Build offsets tensor on the HOST first, then move to the target device.
+    // offsets.data<int64_t>() is a DEVICE pointer when `padded` is on GPU, so
+    // the host write-loop below would segfault writing through it.
+    auto offsets = tenzor::zeros({B + 1}, DType::Int64, Device::cpu());
     auto* off_ptr = offsets.data<int64_t>();
     for (int64_t i = 0; i <= B; ++i) {
         off_ptr[i] = offsets_data[i];
+    }
+    if (padded.device().type != Device::Type::CPU) {
+        offsets = offsets.to(padded.device());
     }
 
     return NestedTensor(std::move(values), std::move(offsets), B,
@@ -274,8 +279,15 @@ auto NestedTensor::to_padded_tensor(double padding_value) const -> Tensor {
     out_shape.insert(out_shape.end(), regular_shape_.begin(),
                      regular_shape_.end());
 
-    auto output = tenzor::full(out_shape, padding_value, values_.dtype(),
-                               values_.device());
+    // The per-segment copy below uses std::memcpy on HOST pointers. For a
+    // non-CPU `values_` tensor, data_ptr() is a DEVICE pointer and memcpy'ing
+    // it segfaults. Build the padded result on CPU (with values copied to host)
+    // and move it back to the original device at the end.
+    const Device target_device = values_.device();
+    const bool on_device = (target_device.type != Device::Type::CPU);
+
+    Tensor values_host = (on_device ? values_.to(Device::cpu()) : values_).contiguous();
+    auto output = tenzor::full(out_shape, padding_value, values_.dtype(), Device::cpu());
 
     auto offsets_cpu = (offsets_.device().type != Device::Type::CPU)
         ? offsets_.to(Device::cpu()) : offsets_;
@@ -288,7 +300,7 @@ auto NestedTensor::to_padded_tensor(double padding_value) const -> Tensor {
         inner_size *= d;
     }
 
-    // Copy each segment into the padded output via memcpy
+    // Copy each segment into the padded output via memcpy (host-to-host).
     for (int64_t i = 0; i < batch_size_; ++i) {
         int64_t start = off_ptr[i];
         int64_t end = off_ptr[i + 1];
@@ -296,7 +308,7 @@ auto NestedTensor::to_padded_tensor(double padding_value) const -> Tensor {
         if (len > 0) {
             // src: values[start : end] is contiguous [len, *regular_shape]
             // dst: output[i, 0:len] at offset i * max_len * inner_size
-            auto* src_ptr = static_cast<const char*>(values_.data_ptr()) +
+            auto* src_ptr = static_cast<const char*>(values_host.data_ptr()) +
                             static_cast<size_t>(start * inner_size) * elem_size;
             auto* dst_ptr = static_cast<char*>(output.data_ptr()) +
                             static_cast<size_t>(i * max_len * inner_size) * elem_size;
@@ -305,7 +317,7 @@ auto NestedTensor::to_padded_tensor(double padding_value) const -> Tensor {
         }
     }
 
-    return output;
+    return on_device ? output.to(target_device) : output;
 }
 
 auto NestedTensor::unbind() const -> std::vector<Tensor> {

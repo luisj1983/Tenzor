@@ -54,11 +54,26 @@ void main() {
     float b_re = data_in[base_bot];
     float b_im = data_in[base_bot + 1];
 
-    float angle = -2.0 * PI * float(pos_in_group) / float(group_size);
-    if (direction == 1) angle = -angle;
-
-    float w_re = cos(angle);
-    float w_im = sin(angle);
+    // Twiddle w = exp(-i*2*PI*pos/group_size). pos/group_size is in [0, 0.5),
+    // so the raw angle spans up to PI — past PI/2 GLSL cos/sin lose precision
+    // (only ~2^-11 absolute is guaranteed outside [-PI/2, PI/2]). Reduce the
+    // first-quadrant fraction so the trig argument stays in [0, PI/2], then
+    // rebuild cos/sin by quadrant. Matters for the Bluestein internal FFTs whose
+    // near-zero output bins are otherwise inflated.
+    float frac = float(pos_in_group) / float(group_size);   // [0, 0.5)
+    float x = 2.0 * PI * frac;                               // [0, PI)
+    float c, s;                                              // cos(x), sin(x)
+    if (x > 0.5 * PI) {
+        float y = x - 0.5 * PI;                             // (0, PI/2]
+        c = -sin(y);
+        s =  cos(y);
+    } else {
+        c = cos(x);
+        s = sin(x);
+    }
+    // angle = -x for forward, +x for inverse. cos is even, sin is odd.
+    float w_re = c;
+    float w_im = (direction == 1) ? s : -s;
 
     float tw_re = b_re * w_re - b_im * w_im;
     float tw_im = b_re * w_im + b_im * w_re;

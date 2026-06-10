@@ -1,6 +1,7 @@
 #include "tenzor/nn/module.hpp"
 #include "tenzor/nn/serialize.hpp"
 #include "tenzor/ops/math.hpp"
+#include "tenzor/autograd/checkpoint.hpp"
 #include "tenzor/utils/error.hpp"  // NotImplementedError (S25 / audit-12)
 #include <algorithm>
 #include <unordered_set>
@@ -708,7 +709,20 @@ auto Sequential::add_module(std::shared_ptr<Module> module) -> Sequential& {
 auto Sequential::forward_impl(const Variable& input) -> Variable {
     auto output = input;
     for (auto& module : modules_) {
-        output = module->forward(output);
+        if (gradient_checkpointing_ && output.requires_grad()) {
+            // Recompute this module's activations in backward instead of
+            // retaining them. Only when the input tracks gradients (otherwise
+            // there is nothing to recompute for).
+            Module* m = module.get();
+            auto outs = ::tenzor::autograd::checkpoint(
+                [m](const std::vector<Variable>& v) -> std::vector<Variable> {
+                    return { m->forward(v[0]) };
+                },
+                std::vector<Variable>{output});
+            output = outs[0];
+        } else {
+            output = module->forward(output);
+        }
     }
     return output;
 }

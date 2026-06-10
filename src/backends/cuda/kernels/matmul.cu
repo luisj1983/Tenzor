@@ -50,6 +50,16 @@ auto set_warn_fp16_saturation(bool value) -> void { g_warn_fp16_saturation = val
 } // namespace tenzor::cuda::matmul
 
 namespace tenzor {
+
+// Forward declarations of op-level helpers used by the complex batched-matmul
+// fallback. (Including ops/math.hpp directly clashes with local overloads.)
+auto real(const Tensor& input) -> Tensor;
+auto imag(const Tensor& input) -> Tensor;
+auto add(const Tensor& a, const Tensor& b) -> Tensor;
+auto sub(const Tensor& a, const Tensor& b) -> Tensor;
+auto matmul(const Tensor& a, const Tensor& b) -> Tensor;
+auto complex(const Tensor& real, const Tensor& imag) -> Tensor;
+
 namespace cuda {
 
 // Forward declarations from cublas_ops.cu for FP8 Hopper support
@@ -1888,6 +1898,17 @@ auto matmul_kernel(const Tensor& a, const Tensor& b, cudaStream_t stream) -> Ten
         }
     }
 
+    // Complex matmul (any rank) via real arithmetic — cuBLAS gemm here is real-only:
+    // (Ar + i·Ai)(Br + i·Bi) = (Ar·Br - Ai·Bi) + i·(Ar·Bi + Ai·Br).
+    if (a.dtype() == b.dtype() &&
+        (a.dtype() == DType::Complex64 || a.dtype() == DType::Complex128)) {
+        Tensor ar = tenzor::real(a), ai = tenzor::imag(a);
+        Tensor br = tenzor::real(b), bi = tenzor::imag(b);
+        Tensor rp = tenzor::sub(tenzor::matmul(ar, br), tenzor::matmul(ai, bi));
+        Tensor ip = tenzor::add(tenzor::matmul(ar, bi), tenzor::matmul(ai, br));
+        return tenzor::complex(rp, ip);
+    }
+
     // FP8 dispatch: use native Hopper Tensor Cores when available, else emulate via FP32
     if ((a.dtype() == DType::FP8_E4M3 || a.dtype() == DType::FP8_E5M2) &&
         (b.dtype() == DType::FP8_E4M3 || b.dtype() == DType::FP8_E5M2)) {
@@ -2084,6 +2105,25 @@ auto matmul_kernel(const Tensor& a, const Tensor& b, cudaStream_t stream) -> Ten
 
     // Handle batched 3D matrices (batch_size, M, N) @ (batch_size, N, K)
     if (a_contig.ndim() == 3 && b_contig.ndim() == 3) {
+        // No native batched integer GEMM (cuBLAS strided-batched is float-only).
+        // Widen integer dtypes to Float64 (exact for integer products up to 2^52),
+        // batched-GEMM, then narrow back — keeps cross-backend parity.
+        if (a_contig.dtype() == b_contig.dtype()) {
+            const DType bdt = a_contig.dtype();
+            if (bdt == DType::Int8 || bdt == DType::Int16 || bdt == DType::Int32 || bdt == DType::Int64 ||
+                bdt == DType::UInt8 || bdt == DType::UInt16 || bdt == DType::UInt32 || bdt == DType::UInt64) {
+                return matmul_kernel(a_contig.to(DType::Float64), b_contig.to(DType::Float64), stream).to(bdt);
+            }
+            // Complex batched matmul via real arithmetic:
+            // (Ar + i·Ai)(Br + i·Bi) = (Ar·Br - Ai·Bi) + i·(Ar·Bi + Ai·Br).
+            if (bdt == DType::Complex64 || bdt == DType::Complex128) {
+                Tensor ar = tenzor::real(a_contig), ai = tenzor::imag(a_contig);
+                Tensor br = tenzor::real(b_contig), bi = tenzor::imag(b_contig);
+                Tensor rp = tenzor::sub(tenzor::matmul(ar, br), tenzor::matmul(ai, bi));
+                Tensor ip = tenzor::add(tenzor::matmul(ar, bi), tenzor::matmul(ai, br));
+                return tenzor::complex(rp, ip);
+            }
+        }
         auto a_shape = a_contig.shape();
         auto b_shape = b_contig.shape();
 

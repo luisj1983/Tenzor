@@ -53,6 +53,20 @@ template<> __device__ __host__ inline int32_t sentinel_lowest<int32_t>() { retur
 template<> __device__ __host__ inline int32_t sentinel_max<int32_t>() { return INT32_MAX; }
 template<> __device__ __host__ inline int64_t sentinel_lowest<int64_t>() { return INT64_MIN; }
 template<> __device__ __host__ inline int64_t sentinel_max<int64_t>() { return INT64_MAX; }
+template<> __device__ __host__ inline int8_t sentinel_lowest<int8_t>() { return INT8_MIN; }
+template<> __device__ __host__ inline int8_t sentinel_max<int8_t>() { return INT8_MAX; }
+template<> __device__ __host__ inline int16_t sentinel_lowest<int16_t>() { return INT16_MIN; }
+template<> __device__ __host__ inline int16_t sentinel_max<int16_t>() { return INT16_MAX; }
+template<> __device__ __host__ inline uint8_t sentinel_lowest<uint8_t>() { return 0; }
+template<> __device__ __host__ inline uint8_t sentinel_max<uint8_t>() { return UINT8_MAX; }
+template<> __device__ __host__ inline uint16_t sentinel_lowest<uint16_t>() { return 0; }
+template<> __device__ __host__ inline uint16_t sentinel_max<uint16_t>() { return UINT16_MAX; }
+template<> __device__ __host__ inline uint32_t sentinel_lowest<uint32_t>() { return 0; }
+template<> __device__ __host__ inline uint32_t sentinel_max<uint32_t>() { return UINT32_MAX; }
+template<> __device__ __host__ inline uint64_t sentinel_lowest<uint64_t>() { return 0; }
+template<> __device__ __host__ inline uint64_t sentinel_max<uint64_t>() { return UINT64_MAX; }
+template<> __device__ __host__ inline bool sentinel_lowest<bool>() { return false; }
+template<> __device__ __host__ inline bool sentinel_max<bool>() { return true; }
 
 // Metadata struct passed by value to kernels (avoids cudaMalloc for shape/stride arrays).
 //
@@ -118,13 +132,25 @@ __device__ __forceinline__ __nv_bfloat16 bfloat16_pos_inf() {
     return __ushort_as_bfloat16(0x7F80);  // +inf in bfloat16
 }
 
-// BFloat16 comparison helpers
+// BFloat16 comparison helpers (NaN-propagating: max/min of a set containing NaN is NaN)
 __device__ __forceinline__ __nv_bfloat16 cuda_max_val(__nv_bfloat16 a, __nv_bfloat16 b) {
-    return __hgt(a, b) ? a : b;
+    return (__hisnan(a) || __hisnan(b)) ? __hadd(a, b) : (__hgt(a, b) ? a : b);
 }
 
 __device__ __forceinline__ __nv_bfloat16 cuda_min_val(__nv_bfloat16 a, __nv_bfloat16 b) {
-    return __hlt(a, b) ? a : b;
+    return (__hisnan(a) || __hisnan(b)) ? __hadd(a, b) : (__hlt(a, b) ? a : b);
+}
+
+// Generic NaN-propagating max/min for real scalar types (float/double/integers).
+// For floats, if either operand is NaN the result is NaN (IEEE reduction semantics);
+// integers have no NaN so this is a plain comparison.
+template<typename T> __device__ __forceinline__ T cuda_max_val(T a, T b) {
+    if constexpr (std::is_floating_point_v<T>) return (isnan(a) || isnan(b)) ? (a + b) : ((a > b) ? a : b);
+    else return (a > b) ? a : b;
+}
+template<typename T> __device__ __forceinline__ T cuda_min_val(T a, T b) {
+    if constexpr (std::is_floating_point_v<T>) return (isnan(a) || isnan(b)) ? (a + b) : ((a < b) ? a : b);
+    else return (a < b) ? a : b;
 }
 
 // GPU-side scalar fill (replaces host_zero + cudaMemcpyAsync H2D pattern to avoid UB)
@@ -331,11 +357,11 @@ __global__ void argmin_final_kernel_half(const __half* input, const int64_t* blo
 
 // Helper for __half comparison (using __hgt and __hlt)
 __device__ __forceinline__ __half cuda_max_val(__half a, __half b) {
-    return __hgt(a, b) ? a : b;
+    return (__hisnan(a) || __hisnan(b)) ? __hadd(a, b) : (__hgt(a, b) ? a : b);
 }
 
 __device__ __forceinline__ __half cuda_min_val(__half a, __half b) {
-    return __hlt(a, b) ? a : b;
+    return (__hisnan(a) || __hisnan(b)) ? __hadd(a, b) : (__hlt(a, b) ? a : b);
 }
 
 // Get negative infinity for __half
@@ -406,7 +432,7 @@ __global__ void max_reduce_kernel(const T* input, T* output, int64_t n) {
     // Grid-stride loop
     for (int64_t i = idx + grid_size; i < n; i += grid_size) {
         T val = input[i];
-        thread_max = (val > thread_max) ? val : thread_max;
+        thread_max = cuda_max_val(val, thread_max);
     }
 
     shared[tid] = thread_max;
@@ -416,7 +442,7 @@ __global__ void max_reduce_kernel(const T* input, T* output, int64_t n) {
     for (int stride = blockDim.x / 2; stride >= WARP_SIZE; stride >>= 1) {
         if (tid < stride) {
             T other = shared[tid + stride];
-            shared[tid] = (shared[tid] > other) ? shared[tid] : other;
+            shared[tid] = cuda_max_val(shared[tid], other);
         }
         __syncthreads();
     }
@@ -447,7 +473,7 @@ __global__ void min_reduce_kernel(const T* input, T* output, int64_t n) {
     // Grid-stride loop
     for (int64_t i = idx + grid_size; i < n; i += grid_size) {
         T val = input[i];
-        thread_min = (val < thread_min) ? val : thread_min;
+        thread_min = cuda_min_val(val, thread_min);
     }
 
     shared[tid] = thread_min;
@@ -457,7 +483,7 @@ __global__ void min_reduce_kernel(const T* input, T* output, int64_t n) {
     for (int stride = blockDim.x / 2; stride >= WARP_SIZE; stride >>= 1) {
         if (tid < stride) {
             T other = shared[tid + stride];
-            shared[tid] = (shared[tid] < other) ? shared[tid] : other;
+            shared[tid] = cuda_min_val(shared[tid], other);
         }
         __syncthreads();
     }
@@ -1570,6 +1596,12 @@ auto sum_kernel(const Tensor& input_raw, int64_t dim, bool keepdim, cudaStream_t
             }
             break;
         }
+        case DType::Int8:   { auto* in = input.data<int8_t>();   auto* out = output.data<int8_t>();   if (dim == INT64_MIN) launch_full_reduction_sum(in, out, input.numel(), stream); else launch_dim_reduction_sum(in, out, std::vector<int64_t>(input_shape.begin(), input_shape.end()), std::vector<int64_t>(input_strides.begin(), input_strides.end()), normalized_dim); break; }
+        case DType::Int16:  { auto* in = input.data<int16_t>();  auto* out = output.data<int16_t>();  if (dim == INT64_MIN) launch_full_reduction_sum(in, out, input.numel(), stream); else launch_dim_reduction_sum(in, out, std::vector<int64_t>(input_shape.begin(), input_shape.end()), std::vector<int64_t>(input_strides.begin(), input_strides.end()), normalized_dim); break; }
+        case DType::UInt8:  { auto* in = input.data<uint8_t>();  auto* out = output.data<uint8_t>();  if (dim == INT64_MIN) launch_full_reduction_sum(in, out, input.numel(), stream); else launch_dim_reduction_sum(in, out, std::vector<int64_t>(input_shape.begin(), input_shape.end()), std::vector<int64_t>(input_strides.begin(), input_strides.end()), normalized_dim); break; }
+        case DType::UInt16: { auto* in = input.data<uint16_t>(); auto* out = output.data<uint16_t>(); if (dim == INT64_MIN) launch_full_reduction_sum(in, out, input.numel(), stream); else launch_dim_reduction_sum(in, out, std::vector<int64_t>(input_shape.begin(), input_shape.end()), std::vector<int64_t>(input_strides.begin(), input_strides.end()), normalized_dim); break; }
+        case DType::UInt32: { auto* in = input.data<uint32_t>(); auto* out = output.data<uint32_t>(); if (dim == INT64_MIN) launch_full_reduction_sum(in, out, input.numel(), stream); else launch_dim_reduction_sum(in, out, std::vector<int64_t>(input_shape.begin(), input_shape.end()), std::vector<int64_t>(input_strides.begin(), input_strides.end()), normalized_dim); break; }
+        case DType::UInt64: { auto* in = input.data<uint64_t>(); auto* out = output.data<uint64_t>(); if (dim == INT64_MIN) launch_full_reduction_sum(in, out, input.numel(), stream); else launch_dim_reduction_sum(in, out, std::vector<int64_t>(input_shape.begin(), input_shape.end()), std::vector<int64_t>(input_strides.begin(), input_strides.end()), normalized_dim); break; }
         case DType::Complex64:
         case DType::Complex128: {
             // Complex sum: reduce real and imaginary parts independently. This
@@ -1652,8 +1684,9 @@ auto mean_kernel(const Tensor& input, int64_t dim, bool keepdim, cudaStream_t st
 
     const auto dtype = input.dtype();
 
-    if (dtype != DType::Float32 && dtype != DType::Float64 && dtype != DType::Float16 && dtype != DType::BFloat16) {
-        throw std::runtime_error("mean: only Float32, Float64, Float16, and BFloat16 are supported");
+    if (dtype != DType::Float32 && dtype != DType::Float64 && dtype != DType::Float16 && dtype != DType::BFloat16 &&
+        dtype != DType::Complex64 && dtype != DType::Complex128) {
+        throw std::runtime_error("mean: only Float32, Float64, Float16, BFloat16, Complex64, and Complex128 are supported");
     }
 
     // Normalize negative dim (INT64_MIN sentinel means full reduction).
@@ -1703,10 +1736,25 @@ auto mean_kernel(const Tensor& input, int64_t dim, bool keepdim, cudaStream_t st
         const __half scale = __float2half(1.0f / static_cast<float>(count));
         scale_kernel<<<grid_size, block_size, 0, stream>>>(data, n, scale);
         CUDA_CHECK(cudaGetLastError());
-    } else {  // BFloat16
+    } else if (dtype == DType::BFloat16) {
         auto* data = reinterpret_cast<__nv_bfloat16*>(sum_result.data_ptr());
         const __nv_bfloat16 scale = __float2bfloat16(1.0f / static_cast<float>(count));
         scale_kernel<<<grid_size, block_size, 0, stream>>>(data, n, scale);
+        CUDA_CHECK(cudaGetLastError());
+    } else if (dtype == DType::Complex64) {
+        // Scale real & imag independently as 2*n contiguous floats.
+        auto* data = reinterpret_cast<float*>(sum_result.data_ptr());
+        const float scale = 1.0f / static_cast<float>(count);
+        const int64_t n2 = 2 * n;
+        const int grid2 = (n2 + block_size - 1) / block_size;
+        scale_kernel<<<grid2, block_size, 0, stream>>>(data, n2, scale);
+        CUDA_CHECK(cudaGetLastError());
+    } else {  // Complex128
+        auto* data = reinterpret_cast<double*>(sum_result.data_ptr());
+        const double scale = 1.0 / static_cast<double>(count);
+        const int64_t n2 = 2 * n;
+        const int grid2 = (n2 + block_size - 1) / block_size;
+        scale_kernel<<<grid2, block_size, 0, stream>>>(data, n2, scale);
         CUDA_CHECK(cudaGetLastError());
     }
 
@@ -3236,6 +3284,13 @@ auto argmax_kernel(const Tensor& input, int64_t dim, bool keepdim, cudaStream_t 
             }
             break;
         }
+        case DType::Int8:   { auto* in = input.data<int8_t>();   auto* out = output.data<int64_t>(); if (dim == INT64_MIN) launch_full_argmax(in, out, input.numel(), stream); else launch_dim_argmax(in, out, std::vector<int64_t>(input_shape.begin(), input_shape.end()), std::vector<int64_t>(input_strides.begin(), input_strides.end()), normalized_dim); break; }
+        case DType::Int16:  { auto* in = input.data<int16_t>();  auto* out = output.data<int64_t>(); if (dim == INT64_MIN) launch_full_argmax(in, out, input.numel(), stream); else launch_dim_argmax(in, out, std::vector<int64_t>(input_shape.begin(), input_shape.end()), std::vector<int64_t>(input_strides.begin(), input_strides.end()), normalized_dim); break; }
+        case DType::UInt8:  { auto* in = input.data<uint8_t>();  auto* out = output.data<int64_t>(); if (dim == INT64_MIN) launch_full_argmax(in, out, input.numel(), stream); else launch_dim_argmax(in, out, std::vector<int64_t>(input_shape.begin(), input_shape.end()), std::vector<int64_t>(input_strides.begin(), input_strides.end()), normalized_dim); break; }
+        case DType::UInt16: { auto* in = input.data<uint16_t>(); auto* out = output.data<int64_t>(); if (dim == INT64_MIN) launch_full_argmax(in, out, input.numel(), stream); else launch_dim_argmax(in, out, std::vector<int64_t>(input_shape.begin(), input_shape.end()), std::vector<int64_t>(input_strides.begin(), input_strides.end()), normalized_dim); break; }
+        case DType::UInt32: { auto* in = input.data<uint32_t>(); auto* out = output.data<int64_t>(); if (dim == INT64_MIN) launch_full_argmax(in, out, input.numel(), stream); else launch_dim_argmax(in, out, std::vector<int64_t>(input_shape.begin(), input_shape.end()), std::vector<int64_t>(input_strides.begin(), input_strides.end()), normalized_dim); break; }
+        case DType::UInt64: { auto* in = input.data<uint64_t>(); auto* out = output.data<int64_t>(); if (dim == INT64_MIN) launch_full_argmax(in, out, input.numel(), stream); else launch_dim_argmax(in, out, std::vector<int64_t>(input_shape.begin(), input_shape.end()), std::vector<int64_t>(input_strides.begin(), input_strides.end()), normalized_dim); break; }
+        case DType::Bool:   { auto* in = input.data<bool>();     auto* out = output.data<int64_t>(); if (dim == INT64_MIN) launch_full_argmax(in, out, input.numel(), stream); else launch_dim_argmax(in, out, std::vector<int64_t>(input_shape.begin(), input_shape.end()), std::vector<int64_t>(input_strides.begin(), input_strides.end()), normalized_dim); break; }
         default:
             throw std::runtime_error("argmax: only Float32, Float64, Float16, BFloat16, Int32, and Int64 are supported");
     }
@@ -3369,6 +3424,13 @@ auto argmin_kernel(const Tensor& input, int64_t dim, bool keepdim, cudaStream_t 
             }
             break;
         }
+        case DType::Int8:   { auto* in = input.data<int8_t>();   auto* out = output.data<int64_t>(); if (dim == INT64_MIN) launch_full_argmin(in, out, input.numel(), stream); else launch_dim_argmin(in, out, std::vector<int64_t>(input_shape.begin(), input_shape.end()), std::vector<int64_t>(input_strides.begin(), input_strides.end()), normalized_dim); break; }
+        case DType::Int16:  { auto* in = input.data<int16_t>();  auto* out = output.data<int64_t>(); if (dim == INT64_MIN) launch_full_argmin(in, out, input.numel(), stream); else launch_dim_argmin(in, out, std::vector<int64_t>(input_shape.begin(), input_shape.end()), std::vector<int64_t>(input_strides.begin(), input_strides.end()), normalized_dim); break; }
+        case DType::UInt8:  { auto* in = input.data<uint8_t>();  auto* out = output.data<int64_t>(); if (dim == INT64_MIN) launch_full_argmin(in, out, input.numel(), stream); else launch_dim_argmin(in, out, std::vector<int64_t>(input_shape.begin(), input_shape.end()), std::vector<int64_t>(input_strides.begin(), input_strides.end()), normalized_dim); break; }
+        case DType::UInt16: { auto* in = input.data<uint16_t>(); auto* out = output.data<int64_t>(); if (dim == INT64_MIN) launch_full_argmin(in, out, input.numel(), stream); else launch_dim_argmin(in, out, std::vector<int64_t>(input_shape.begin(), input_shape.end()), std::vector<int64_t>(input_strides.begin(), input_strides.end()), normalized_dim); break; }
+        case DType::UInt32: { auto* in = input.data<uint32_t>(); auto* out = output.data<int64_t>(); if (dim == INT64_MIN) launch_full_argmin(in, out, input.numel(), stream); else launch_dim_argmin(in, out, std::vector<int64_t>(input_shape.begin(), input_shape.end()), std::vector<int64_t>(input_strides.begin(), input_strides.end()), normalized_dim); break; }
+        case DType::UInt64: { auto* in = input.data<uint64_t>(); auto* out = output.data<int64_t>(); if (dim == INT64_MIN) launch_full_argmin(in, out, input.numel(), stream); else launch_dim_argmin(in, out, std::vector<int64_t>(input_shape.begin(), input_shape.end()), std::vector<int64_t>(input_strides.begin(), input_strides.end()), normalized_dim); break; }
+        case DType::Bool:   { auto* in = input.data<bool>();     auto* out = output.data<int64_t>(); if (dim == INT64_MIN) launch_full_argmin(in, out, input.numel(), stream); else launch_dim_argmin(in, out, std::vector<int64_t>(input_shape.begin(), input_shape.end()), std::vector<int64_t>(input_strides.begin(), input_strides.end()), normalized_dim); break; }
         default:
             throw std::runtime_error("argmin: only Float32, Float64, Float16, BFloat16, Int32, and Int64 are supported");
     }

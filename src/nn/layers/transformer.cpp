@@ -9,6 +9,7 @@
 #include "tenzor/ops/transform.hpp"
 #include "tenzor/ops/creation.hpp"
 #include "tenzor/autograd/ops.hpp"
+#include "tenzor/autograd/checkpoint.hpp"
 #include <cmath>
 #include <stdexcept>
 #include <numbers>
@@ -281,12 +282,31 @@ auto TransformerEncoder::forward(const Variable& src,
     // NOTE: This is necessary because this multi-argument forward bypasses Module::forward()
     call_forward_pre_hooks();
 
+    // Run one encoder layer, optionally wrapped in a gradient-checkpoint so its
+    // activations are recomputed in backward instead of retained. Only worth it
+    // when the input tracks gradients (otherwise there is nothing to recompute
+    // for and checkpoint() would needlessly run an extra forward).
+    auto run_layer = [&](size_t i, const Variable& in) -> Variable {
+        if (gradient_checkpointing_ && in.requires_grad()) {
+            TransformerEncoderLayer* layer = layers_[i].get();
+            Tensor m = mask;
+            Tensor p = src_key_padding_mask;
+            auto outs = ::tenzor::autograd::checkpoint(
+                [layer, m, p](const std::vector<Variable>& v) -> std::vector<Variable> {
+                    return { layer->forward(v[0], m, p) };
+                },
+                std::vector<Variable>{in});
+            return outs[0];
+        }
+        return layers_[i]->forward(in, mask, src_key_padding_mask);
+    };
+
     // Pass through first encoder layer using original src (no copy)
-    Variable output = layers_[0]->forward(src, mask, src_key_padding_mask);
+    Variable output = run_layer(0, src);
 
     // Pass through remaining encoder layers
     for (size_t i = 1; i < layers_.size(); ++i) {
-        output = layers_[i]->forward(output, mask, src_key_padding_mask);
+        output = run_layer(i, output);
     }
 
     // Apply final normalization if provided

@@ -119,9 +119,11 @@ TEST_P(QuantizedDTypeTest, IntReprIsZeroCopyView) {
     EXPECT_EQ(view.data_ptr(), quantized.data_ptr());
     EXPECT_EQ(view.dtype(), DType::Int8);
 
-    // Mutate via the view and confirm dequantize() observes the change.
-    int8_t* vdata = view.data<int8_t>();
-    vdata[1] = 42;  // overwrite the quantized byte for element 1
+    // Mutate element 1 in-place through the view (device-safe: fill_ on the
+    // shared storage) and confirm dequantize() observes it. Writing through a
+    // raw host pointer (view.data<int8_t>()[1]) segfaults for a GPU-resident
+    // view; fill_ exercises the same zero-copy-mutation property on any backend.
+    view.slice(0, 1, 2).fill_(42.0);
     auto deq = quantized.dequantize();
     auto deq_cpu = deq.cpu();
     const float* fdata = deq_cpu.data<float>();

@@ -491,6 +491,11 @@ auto cuda_ifft_kernel(const Tensor& input, int64_t dim, int64_t n,
 
 auto cuda_rfft_kernel(const Tensor& input, int64_t dim, int64_t n,
                       const std::string& norm, cudaStream_t stream) -> Tensor {
+    // cuFFT R2C only accepts float/double; widen Float16/BFloat16 to Float32
+    // (output is Complex64), mirroring the CPU build_complex64_from_half path.
+    if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) {
+        return cuda_rfft_kernel(input.to(DType::Float32), dim, n, norm, stream);
+    }
     auto shape = std::vector<int64_t>(input.shape().begin(), input.shape().end());
     int64_t ndim = static_cast<int64_t>(shape.size());
     if (dim < 0) dim += ndim;
@@ -1980,6 +1985,11 @@ auto cuda_ifft_kernel(const Tensor& input, int64_t dim, int64_t n,
 
 auto cuda_rfft_kernel(const Tensor& input, int64_t dim, int64_t n,
                       const std::string& norm, cudaStream_t stream) -> Tensor {
+    // cuFFT R2C only accepts float/double; widen Float16/BFloat16 to Float32
+    // (output is Complex64), mirroring the CPU build_complex64_from_half path.
+    if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) {
+        return cuda_rfft_kernel(input.to(DType::Float32), dim, n, norm, stream);
+    }
     auto shape = std::vector<int64_t>(input.shape().begin(), input.shape().end());
     int64_t ndim = static_cast<int64_t>(shape.size());
     if (dim < 0) dim += ndim;

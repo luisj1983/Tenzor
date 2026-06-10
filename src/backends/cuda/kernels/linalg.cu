@@ -154,6 +154,22 @@ __global__ void set_identity_kernel(T* data, int64_t n, int64_t total) {
     data[idx] = (row == col) ? T(1) : T(0);
 }
 
+/// Batched identity for complex dtypes (diagonal = 1+0i).
+__global__ void set_identity_c64_kernel(cuFloatComplex* data, int64_t n, int64_t total) {
+    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= total) return;
+    int64_t mat_offset = idx % (n * n);
+    data[idx] = (mat_offset / n == mat_offset % n) ? make_cuFloatComplex(1.0f, 0.0f)
+                                                    : make_cuFloatComplex(0.0f, 0.0f);
+}
+__global__ void set_identity_c128_kernel(cuDoubleComplex* data, int64_t n, int64_t total) {
+    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= total) return;
+    int64_t mat_offset = idx % (n * n);
+    data[idx] = (mat_offset / n == mat_offset % n) ? make_cuDoubleComplex(1.0, 0.0)
+                                                    : make_cuDoubleComplex(0.0, 0.0);
+}
+
 /// CUDA kernel to compute determinant from LU diagonal + pivot info.
 __global__ void det_from_lu_f32(const float* lu_data, const int* ipiv,
                                  float* det_out, int n, int nbatch) {
@@ -1315,7 +1331,7 @@ auto linalg_inv_kernel(const Tensor& A, cudaStream_t stream) -> Tensor {
                 mat, n, d_ipiv, id_mat, n, d_info.ptr));
             check_cusolver_info(d_info.ptr, "inv");
         }
-    } else {
+    } else if (A.dtype() == DType::Float64) {
         double* data = work.data<double>();
         double* id_data = identity.data<double>();
 
@@ -1341,6 +1357,52 @@ auto linalg_inv_kernel(const Tensor& A, cudaStream_t stream) -> Tensor {
             check_cusolver_info(d_info.ptr, "inv");
 
             CUSOLVER_CHECK(cusolverDnDgetrs(handle, CUBLAS_OP_N, n, n,
+                mat, n, d_ipiv, id_mat, n, d_info.ptr));
+            check_cusolver_info(d_info.ptr, "inv");
+        }
+    } else if (A.dtype() == DType::Complex64) {
+        cuFloatComplex* data = reinterpret_cast<cuFloatComplex*>(work.data_ptr());
+        cuFloatComplex* id_data = reinterpret_cast<cuFloatComplex*>(identity.data_ptr());
+        {
+            int64_t total = nbatch * n * n;
+            int threads = 256;
+            int blocks = (total + threads - 1) / threads;
+            set_identity_c64_kernel<<<blocks, threads, 0, stream>>>(id_data, n, total);
+            CUDA_CHECK_LINALG(cudaGetLastError());
+        }
+        for (int64_t b = 0; b < nbatch; b++) {
+            cuFloatComplex* mat = data + b * n * n;
+            cuFloatComplex* id_mat = id_data + b * n * n;
+            int lwork = 0;
+            CUSOLVER_CHECK(cusolverDnCgetrf_bufferSize(handle, n, n, mat, n, &lwork));
+            DeviceWorkspace workspace(lwork * sizeof(cuFloatComplex));
+            CUSOLVER_CHECK(cusolverDnCgetrf(handle, n, n, mat, n,
+                static_cast<cuFloatComplex*>(workspace.ptr), d_ipiv, d_info.ptr));
+            check_cusolver_info(d_info.ptr, "inv");
+            CUSOLVER_CHECK(cusolverDnCgetrs(handle, CUBLAS_OP_N, n, n,
+                mat, n, d_ipiv, id_mat, n, d_info.ptr));
+            check_cusolver_info(d_info.ptr, "inv");
+        }
+    } else if (A.dtype() == DType::Complex128) {
+        cuDoubleComplex* data = reinterpret_cast<cuDoubleComplex*>(work.data_ptr());
+        cuDoubleComplex* id_data = reinterpret_cast<cuDoubleComplex*>(identity.data_ptr());
+        {
+            int64_t total = nbatch * n * n;
+            int threads = 256;
+            int blocks = (total + threads - 1) / threads;
+            set_identity_c128_kernel<<<blocks, threads, 0, stream>>>(id_data, n, total);
+            CUDA_CHECK_LINALG(cudaGetLastError());
+        }
+        for (int64_t b = 0; b < nbatch; b++) {
+            cuDoubleComplex* mat = data + b * n * n;
+            cuDoubleComplex* id_mat = id_data + b * n * n;
+            int lwork = 0;
+            CUSOLVER_CHECK(cusolverDnZgetrf_bufferSize(handle, n, n, mat, n, &lwork));
+            DeviceWorkspace workspace(lwork * sizeof(cuDoubleComplex));
+            CUSOLVER_CHECK(cusolverDnZgetrf(handle, n, n, mat, n,
+                static_cast<cuDoubleComplex*>(workspace.ptr), d_ipiv, d_info.ptr));
+            check_cusolver_info(d_info.ptr, "inv");
+            CUSOLVER_CHECK(cusolverDnZgetrs(handle, CUBLAS_OP_N, n, n,
                 mat, n, d_ipiv, id_mat, n, d_info.ptr));
             check_cusolver_info(d_info.ptr, "inv");
         }
@@ -1397,7 +1459,7 @@ auto linalg_solve_kernel(const Tensor& A, const Tensor& B, cudaStream_t stream) 
                 a_mat, n, d_ipiv, b_mat, n, d_info.ptr));
             check_cusolver_info(d_info.ptr, "solve");
         }
-    } else {
+    } else if (A.dtype() == DType::Float64) {
         double* a_data = work_a.data<double>();
         double* b_data = work_b.data<double>();
 
@@ -1414,6 +1476,38 @@ auto linalg_solve_kernel(const Tensor& A, const Tensor& B, cudaStream_t stream) 
             check_cusolver_info(d_info.ptr, "solve");
 
             CUSOLVER_CHECK(cusolverDnDgetrs(handle, CUBLAS_OP_N, n, nrhs,
+                a_mat, n, d_ipiv, b_mat, n, d_info.ptr));
+            check_cusolver_info(d_info.ptr, "solve");
+        }
+    } else if (A.dtype() == DType::Complex64) {
+        cuFloatComplex* a_data = reinterpret_cast<cuFloatComplex*>(work_a.data_ptr());
+        cuFloatComplex* b_data = reinterpret_cast<cuFloatComplex*>(work_b.data_ptr());
+        for (int64_t b = 0; b < nbatch; b++) {
+            cuFloatComplex* a_mat = a_data + b * n * n;
+            cuFloatComplex* b_mat = b_data + b * n * nrhs;
+            int lwork = 0;
+            CUSOLVER_CHECK(cusolverDnCgetrf_bufferSize(handle, n, n, a_mat, n, &lwork));
+            DeviceWorkspace workspace(lwork * sizeof(cuFloatComplex));
+            CUSOLVER_CHECK(cusolverDnCgetrf(handle, n, n, a_mat, n,
+                static_cast<cuFloatComplex*>(workspace.ptr), d_ipiv, d_info.ptr));
+            check_cusolver_info(d_info.ptr, "solve");
+            CUSOLVER_CHECK(cusolverDnCgetrs(handle, CUBLAS_OP_N, n, nrhs,
+                a_mat, n, d_ipiv, b_mat, n, d_info.ptr));
+            check_cusolver_info(d_info.ptr, "solve");
+        }
+    } else if (A.dtype() == DType::Complex128) {
+        cuDoubleComplex* a_data = reinterpret_cast<cuDoubleComplex*>(work_a.data_ptr());
+        cuDoubleComplex* b_data = reinterpret_cast<cuDoubleComplex*>(work_b.data_ptr());
+        for (int64_t b = 0; b < nbatch; b++) {
+            cuDoubleComplex* a_mat = a_data + b * n * n;
+            cuDoubleComplex* b_mat = b_data + b * n * nrhs;
+            int lwork = 0;
+            CUSOLVER_CHECK(cusolverDnZgetrf_bufferSize(handle, n, n, a_mat, n, &lwork));
+            DeviceWorkspace workspace(lwork * sizeof(cuDoubleComplex));
+            CUSOLVER_CHECK(cusolverDnZgetrf(handle, n, n, a_mat, n,
+                static_cast<cuDoubleComplex*>(workspace.ptr), d_ipiv, d_info.ptr));
+            check_cusolver_info(d_info.ptr, "solve");
+            CUSOLVER_CHECK(cusolverDnZgetrs(handle, CUBLAS_OP_N, n, nrhs,
                 a_mat, n, d_ipiv, b_mat, n, d_info.ptr));
             check_cusolver_info(d_info.ptr, "solve");
         }
@@ -1895,6 +1989,13 @@ auto linalg_eig_kernel(const Tensor& A, cudaStream_t stream)
 // ============================================================================
 
 auto linalg_cholesky_kernel(const Tensor& A, bool upper, cudaStream_t stream) -> Tensor {
+    // cuSOLVER potrf only supports Float32/Float64. Widen Float16/BFloat16 to
+    // Float32, factor, then narrow back to the original dtype (without this the
+    // Float16 buffer was read as double -> type-mismatch throw).
+    if (A.dtype() == DType::Float16 || A.dtype() == DType::BFloat16) {
+        return linalg_cholesky_kernel(A.to(DType::Float32), upper, stream).to(A.dtype());
+    }
+
     auto work = A.contiguous().clone();
     auto [n, ndim] = check_square(work);
     int64_t nbatch = batch_size(work);
@@ -2190,7 +2291,6 @@ auto linalg_solve_triangular_kernel(const Tensor& A, const Tensor& B,
 
 auto linalg_geqrf_kernel(const Tensor& A, cudaStream_t stream)
     -> std::tuple<Tensor, Tensor> {
-    auto work = A.contiguous().clone();
     auto shape = A.shape();
     auto a_ndim = static_cast<int64_t>(shape.size());
     if (a_ndim < 2) throw std::invalid_argument("linalg::geqrf: input must be at least 2D");
@@ -2198,7 +2298,14 @@ auto linalg_geqrf_kernel(const Tensor& A, cudaStream_t stream)
     int64_t m = shape[a_ndim - 2];
     int64_t n_cols = shape[a_ndim - 1];
     int64_t k = std::min(m, n_cols);
-    int64_t nbatch = batch_size(work);
+
+    // cuSOLVER is column-major only. Transpose A so the contiguous buffer IS A
+    // in column-major (lda = m); geqrf then factorizes A (not A^T). The previous
+    // code passed the raw row-major buffer as col-major, which factorized A^T and
+    // returned the packed form of the WRONG matrix (geqrf op + householder_product
+    // round-trip then failed Q@R == A). A_col is shape (..., n_cols, m).
+    Tensor A_col = tenzor::transpose(A.contiguous(), -2, -1).contiguous();
+    int64_t nbatch = batch_size(A_col);
 
     std::vector<int64_t> batch_dims;
     for (size_t i = 0; i + 2 < shape.size(); i++) batch_dims.push_back(shape[i]);
@@ -2211,26 +2318,24 @@ auto linalg_geqrf_kernel(const Tensor& A, cudaStream_t stream)
     DeviceInt d_info;
 
     if (A.dtype() == DType::Float32) {
-        float* a_data = work.data<float>();
+        float* a_data = A_col.data<float>();
         float* tau_data = tau_result.data<float>();
 
         for (int64_t b = 0; b < nbatch; b++) {
             float* a_mat = a_data + b * m * n_cols;
             float* tau_ptr = tau_data + b * k;
 
-            // cuSOLVER geqrf works in column-major. For row-major m x n,
-            // we pass n_cols as m and m as n (treating as A^T in col-major).
             int lwork = 0;
-            CUSOLVER_CHECK(cusolverDnSgeqrf_bufferSize(handle, n_cols, m, a_mat, n_cols, &lwork));
+            CUSOLVER_CHECK(cusolverDnSgeqrf_bufferSize(handle, m, n_cols, a_mat, m, &lwork));
             DeviceWorkspace workspace(lwork * sizeof(float));
 
-            CUSOLVER_CHECK(cusolverDnSgeqrf(handle, n_cols, m,
-                a_mat, n_cols, tau_ptr,
+            CUSOLVER_CHECK(cusolverDnSgeqrf(handle, m, n_cols,
+                a_mat, m, tau_ptr,
                 static_cast<float*>(workspace.ptr), lwork, d_info.ptr));
             check_cusolver_info(d_info.ptr, "geqrf");
         }
     } else {
-        double* a_data = work.data<double>();
+        double* a_data = A_col.data<double>();
         double* tau_data = tau_result.data<double>();
 
         for (int64_t b = 0; b < nbatch; b++) {
@@ -2238,18 +2343,22 @@ auto linalg_geqrf_kernel(const Tensor& A, cudaStream_t stream)
             double* tau_ptr = tau_data + b * k;
 
             int lwork = 0;
-            CUSOLVER_CHECK(cusolverDnDgeqrf_bufferSize(handle, n_cols, m, a_mat, n_cols, &lwork));
+            CUSOLVER_CHECK(cusolverDnDgeqrf_bufferSize(handle, m, n_cols, a_mat, m, &lwork));
             DeviceWorkspace workspace(lwork * sizeof(double));
 
-            CUSOLVER_CHECK(cusolverDnDgeqrf(handle, n_cols, m,
-                a_mat, n_cols, tau_ptr,
+            CUSOLVER_CHECK(cusolverDnDgeqrf(handle, m, n_cols,
+                a_mat, m, tau_ptr,
                 static_cast<double*>(workspace.ptr), lwork, d_info.ptr));
             check_cusolver_info(d_info.ptr, "geqrf");
         }
     }
 
     CUDA_CHECK_LINALG(cudaStreamSynchronize(stream ? stream : 0));
-    return {work, tau_result};
+    // A_col holds the packed factorization in column-major. Transpose back to the
+    // row-major packed convention (R in upper triangle, reflector v_j in column j
+    // below the diagonal) consumed by householder_product / ormqr.
+    Tensor packed = tenzor::transpose(A_col, -2, -1).contiguous();
+    return {packed, tau_result};
 }
 
 // ============================================================================
@@ -2259,104 +2368,16 @@ auto linalg_geqrf_kernel(const Tensor& A, cudaStream_t stream)
 auto linalg_ormqr_kernel(const Tensor& reflectors, const Tensor& tau,
                           const Tensor& C, bool left, bool transpose_q,
                           cudaStream_t stream) -> Tensor {
-    auto work_c = C.contiguous().clone();
-    auto refl = reflectors.contiguous();
-    auto tau_c = tau.contiguous();
-
-    auto c_shape = C.shape();
-    auto r_shape = reflectors.shape();
-    auto c_ndim = static_cast<int64_t>(c_shape.size());
-    auto r_ndim = static_cast<int64_t>(r_shape.size());
-    if (c_ndim < 2) throw std::invalid_argument("linalg::ormqr: C must be at least 2D");
-    if (r_ndim < 2) throw std::invalid_argument("linalg::ormqr: reflectors must be at least 2D");
-
-    int64_t c_m = c_shape[c_ndim - 2];
-    int64_t c_n = c_shape[c_ndim - 1];
-    int64_t k_refl = tau.shape()[static_cast<int64_t>(tau.shape().size()) - 1];
-    int64_t nbatch = batch_size(work_c);
-
-    int64_t r_m = r_shape[r_ndim - 2];
-    int64_t r_n = r_shape[r_ndim - 1];
-
-    auto handle = CuSOLVERHandlePool::get(stream);
-    DeviceInt d_info;
-
-    // cuSOLVER ormqr operates in column-major. For row-major data:
-    // C is c_m x c_n in row-major = c_n x c_m matrix in column-major (C^T).
-    // Q*C in row-major = (Q*C)^T^T; in col-major terms on C^T:
-    //   left,  no-trans Q*C:    col-major does C^T * Q^T => ormqr(Right, Trans, c_n, c_m, k, ...)
-    //   left,  trans    Q^T*C:  col-major does C^T * Q   => ormqr(Right, NoTrans, c_n, c_m, k, ...)
-    //   right, no-trans C*Q:    col-major does Q^T * C^T => ormqr(Left, Trans, c_n, c_m, k, ...)
-    //   right, trans    C*Q^T:  col-major does Q * C^T   => ormqr(Left, NoTrans, c_n, c_m, k, ...)
-    cublasSideMode_t side;
-    cublasOperation_t trans;
-    if (left && !transpose_q)       { side = CUBLAS_SIDE_RIGHT; trans = CUBLAS_OP_T; }
-    else if (left && transpose_q)   { side = CUBLAS_SIDE_RIGHT; trans = CUBLAS_OP_N; }
-    else if (!left && !transpose_q) { side = CUBLAS_SIDE_LEFT;  trans = CUBLAS_OP_T; }
-    else                            { side = CUBLAS_SIDE_LEFT;  trans = CUBLAS_OP_N; }
-
-    cusolverDnHandle_t solver_handle = handle;
-
-    if (C.dtype() == DType::Float32) {
-        float* c_data = work_c.data<float>();
-        const float* r_data = refl.data<float>();
-        const float* tau_data = tau_c.data<float>();
-
-        for (int64_t b = 0; b < nbatch; b++) {
-            const float* r_mat = r_data + b * r_m * r_n;
-            const float* tau_ptr = tau_data + b * k_refl;
-            float* c_mat = c_data + b * c_m * c_n;
-
-            int lwork = 0;
-            CUSOLVER_CHECK(cusolverDnSormqr_bufferSize(solver_handle,
-                side, trans,
-                static_cast<int>(c_n), static_cast<int>(c_m), static_cast<int>(k_refl),
-                const_cast<float*>(r_mat), static_cast<int>(r_n),
-                const_cast<float*>(tau_ptr),
-                c_mat, static_cast<int>(c_n), &lwork));
-            DeviceWorkspace workspace(lwork * sizeof(float));
-
-            CUSOLVER_CHECK(cusolverDnSormqr(solver_handle,
-                side, trans,
-                static_cast<int>(c_n), static_cast<int>(c_m), static_cast<int>(k_refl),
-                const_cast<float*>(r_mat), static_cast<int>(r_n),
-                const_cast<float*>(tau_ptr),
-                c_mat, static_cast<int>(c_n),
-                static_cast<float*>(workspace.ptr), lwork, d_info.ptr));
-            check_cusolver_info(d_info.ptr, "ormqr");
-        }
-    } else {
-        double* c_data = work_c.data<double>();
-        const double* r_data = refl.data<double>();
-        const double* tau_data = tau_c.data<double>();
-
-        for (int64_t b = 0; b < nbatch; b++) {
-            const double* r_mat = r_data + b * r_m * r_n;
-            const double* tau_ptr = tau_data + b * k_refl;
-            double* c_mat = c_data + b * c_m * c_n;
-
-            int lwork = 0;
-            CUSOLVER_CHECK(cusolverDnDormqr_bufferSize(solver_handle,
-                side, trans,
-                static_cast<int>(c_n), static_cast<int>(c_m), static_cast<int>(k_refl),
-                const_cast<double*>(r_mat), static_cast<int>(r_n),
-                const_cast<double*>(tau_ptr),
-                c_mat, static_cast<int>(c_n), &lwork));
-            DeviceWorkspace workspace(lwork * sizeof(double));
-
-            CUSOLVER_CHECK(cusolverDnDormqr(solver_handle,
-                side, trans,
-                static_cast<int>(c_n), static_cast<int>(c_m), static_cast<int>(k_refl),
-                const_cast<double*>(r_mat), static_cast<int>(r_n),
-                const_cast<double*>(tau_ptr),
-                c_mat, static_cast<int>(c_n),
-                static_cast<double*>(workspace.ptr), lwork, d_info.ptr));
-            check_cusolver_info(d_info.ptr, "ormqr");
-        }
-    }
-
-    CUDA_CHECK_LINALG(cudaStreamSynchronize(stream ? stream : 0));
-    return work_c;
+    (void)stream;
+    // Apply Q (from the QR Householder reflectors) to C. The previous cuSOLVER
+    // ormqr path assumed a column-major packed layout; geqrf now returns
+    // row-major packed (LAPACK convention, consistent with householder_product),
+    // so reconstruct Q via householder_product and apply it directly. For square
+    // reflectors Q is the full m×m orthogonal factor — matches the reference
+    // identity ormqr(qr, tau, C) == Q @ C.
+    Tensor Q = tenzor::linalg::householder_product(reflectors, tau);
+    Tensor Qx = transpose_q ? tenzor::transpose(Q, -2, -1).contiguous() : Q;
+    return left ? tenzor::matmul(Qx, C) : tenzor::matmul(C, Qx);
 }
 
 // =========================================================================
@@ -2830,11 +2851,12 @@ std::pair<int64_t, int64_t> check_square(const Tensor& t) {
 void validate_linalg_dtype(const Tensor& t, const std::string& op_name) {
     auto dt = t.dtype();
     if (dt != DType::Float32 && dt != DType::Float64 &&
-        dt != DType::Float16 && dt != DType::BFloat16) {
+        dt != DType::Float16 && dt != DType::BFloat16 &&
+        dt != DType::Complex64 && dt != DType::Complex128) {
         throw std::invalid_argument(
             "linalg::" + op_name + ": unsupported dtype " +
             std::string(dtype_name(dt)) +
-            ". Supported: Float32, Float64 (Float16/BFloat16 auto-upcast to Float32).");
+            ". Supported: Float32, Float64, Complex64, Complex128 (Float16/BFloat16 auto-upcast to Float32).");
     }
 }
 
@@ -5452,47 +5474,16 @@ auto linalg_ormqr_kernel(const Tensor& reflectors, const Tensor& tau,
                                     C.to(DType::Float32), left, transpose_q, stream);
     }
 
-    auto work_c = C.contiguous().clone();
-    auto refl = reflectors.contiguous();
-    auto tau_c = tau.contiguous();
-
-    auto c_shape = C.shape();
-    auto r_shape = reflectors.shape();
-    auto c_ndim = static_cast<int64_t>(c_shape.size());
-    auto r_ndim = static_cast<int64_t>(r_shape.size());
-    if (c_ndim < 2) throw std::invalid_argument("linalg::ormqr: C must be at least 2D");
-    if (r_ndim < 2) throw std::invalid_argument("linalg::ormqr: reflectors must be at least 2D");
-
-    int64_t c_m = c_shape[c_ndim - 2];
-    int64_t c_n = c_shape[c_ndim - 1];
-    int64_t k_refl = tau.shape()[static_cast<int64_t>(tau.shape().size()) - 1];
-    int64_t nbatch = batch_size(work_c);
-
-    int64_t r_m = r_shape[r_ndim - 2];
-    int64_t r_n = r_shape[r_ndim - 1];
-
-    if (C.dtype() == DType::Float32) {
-        check_size_limit<float>(std::max(c_m, c_n), "ormqr");
-        size_t smem = (c_m * c_n + std::max(c_m, c_n)) * sizeof(float);
-        int threads = min(static_cast<int>(std::max(c_m, c_n)), 128);
-        if (threads < 1) threads = 1;
-        householder_ormqr_kernel<float><<<nbatch, threads, smem, stream>>>(
-            refl.data<float>(), tau_c.data<float>(), work_c.data<float>(),
-            r_m, r_n, c_m, c_n, k_refl, left, transpose_q);
-        CUDA_CHECK_LINALG(cudaGetLastError());
-    } else {
-        check_size_limit<double>(std::max(c_m, c_n), "ormqr");
-        size_t smem = (c_m * c_n + std::max(c_m, c_n)) * sizeof(double);
-        int threads = min(static_cast<int>(std::max(c_m, c_n)), 128);
-        if (threads < 1) threads = 1;
-        householder_ormqr_kernel<double><<<nbatch, threads, smem, stream>>>(
-            refl.data<double>(), tau_c.data<double>(), work_c.data<double>(),
-            r_m, r_n, c_m, c_n, k_refl, left, transpose_q);
-        CUDA_CHECK_LINALG(cudaGetLastError());
-    }
-
-    CUDA_CHECK_LINALG(cudaStreamSynchronize(stream ? stream : 0));
-    return work_c;
+    (void)stream;
+    // Apply Q (from the QR Householder reflectors) to C. The previous cuSOLVER
+    // ormqr path assumed a column-major packed layout; geqrf now returns
+    // row-major packed (LAPACK convention, consistent with householder_product),
+    // so reconstruct Q via householder_product and apply it directly. For square
+    // reflectors Q is the full m×m orthogonal factor — matches the reference
+    // identity ormqr(qr, tau, C) == Q @ C.
+    Tensor Q = tenzor::linalg::householder_product(reflectors, tau);
+    Tensor Qx = transpose_q ? tenzor::transpose(Q, -2, -1).contiguous() : Q;
+    return left ? tenzor::matmul(Qx, C) : tenzor::matmul(C, Qx);
 }
 
 // =========================================================================

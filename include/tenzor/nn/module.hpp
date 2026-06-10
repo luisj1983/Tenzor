@@ -263,6 +263,22 @@ public:
         return submodules_;
     }
 
+    /**
+     * @brief Enable/disable activation (gradient) checkpointing recursively.
+     *
+     * The base implementation simply forwards the request to every registered
+     * submodule, so a single call on a top-level model reaches whatever
+     * checkpoint-capable containers (Sequential, TransformerEncoder) live inside
+     * it — including those behind type-erased `Module` pointers (e.g. a
+     * detection model's backbone). Containers override this to set their own
+     * flag; leaf modules inherit the recursing default. Off by default.
+     */
+    virtual auto set_gradient_checkpointing(bool enabled) -> void {
+        for (auto& [name, sub] : submodules_) {
+            if (sub) sub->set_gradient_checkpointing(enabled);
+        }
+    }
+
     // ============================================================================
     // Training Mode
     // ============================================================================
@@ -1020,8 +1036,22 @@ public:
      */
     auto modules() const -> const std::vector<std::shared_ptr<Module>>& { return modules_; }
 
+    /**
+     * @brief Enable/disable activation (gradient) checkpointing.
+     *
+     * When enabled, each contained module's forward is wrapped in
+     * autograd::checkpoint(): its activations are recomputed during backward
+     * instead of being retained, cutting peak memory by ~O(num_modules) at the
+     * cost of one extra forward. Gradients are identical (RNG is captured and
+     * replayed). Off by default. Lets very deep Sequential stacks (e.g.
+     * EfficientNet-B7 stages, ResNet backbones) train within tight GPU memory.
+     */
+    auto set_gradient_checkpointing(bool enabled) -> void { gradient_checkpointing_ = enabled; }
+    auto gradient_checkpointing() const -> bool { return gradient_checkpointing_; }
+
 private:
     std::vector<std::shared_ptr<Module>> modules_;  ///< Ordered list of modules
+    bool gradient_checkpointing_{false};
 };
 
 /**

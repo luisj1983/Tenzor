@@ -264,6 +264,14 @@ public:
      */
     auto load_pretrained(const std::string& path) -> void;
 
+    /// Enable/disable activation (gradient) checkpointing on the MBConv stages.
+    /// Recomputes block activations in backward to cut peak memory (lets the
+    /// large variants like B7 train within tight GPU memory); gradients are
+    /// unchanged. Off by default.
+    auto set_gradient_checkpointing(bool enabled) -> void {
+        if (stages_) stages_->set_gradient_checkpointing(enabled);
+    }
+
 private:
     /**
      * @brief Build stem layer

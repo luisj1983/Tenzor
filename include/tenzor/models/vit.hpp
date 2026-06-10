@@ -272,6 +272,12 @@ public:
      */
     auto forward_impl(const Variable& hidden_states) -> Variable override;
 
+    /// Enable/disable activation (gradient) checkpointing on the underlying
+    /// transformer encoder layers. Off by default.
+    auto set_gradient_checkpointing(bool enabled) -> void {
+        if (encoder_) encoder_->set_gradient_checkpointing(enabled);
+    }
+
 private:
     ViTConfig config_;
     std::shared_ptr<nn::TransformerEncoder> encoder_;
@@ -332,6 +338,11 @@ public:
      */
     auto config() const -> const ViTConfig& { return config_; }
 
+    /// Enable/disable activation (gradient) checkpointing on the encoder.
+    auto set_gradient_checkpointing(bool enabled) -> void {
+        if (encoder_) encoder_->set_gradient_checkpointing(enabled);
+    }
+
 private:
     ViTConfig config_;
     bool add_pooling_layer_;
@@ -376,6 +387,13 @@ public:
      * @return Classification logits [batch, num_labels]
      */
     auto forward_impl(const Variable& pixel_values) -> Variable override;
+
+    /// Enable/disable activation (gradient) checkpointing on the ViT encoder.
+    /// Recomputes layer activations in backward to cut peak memory (lets
+    /// ViT-Huge train within tight GPU memory); gradients are unchanged.
+    auto set_gradient_checkpointing(bool enabled) -> void {
+        if (vit_) vit_->set_gradient_checkpointing(enabled);
+    }
 
 private:
     ViTConfig config_;

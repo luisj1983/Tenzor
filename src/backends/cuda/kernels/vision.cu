@@ -1119,6 +1119,14 @@ auto interpolate_backward_cuda(const Tensor& grad_output,
                                 bool align_corners) -> Tensor {
     auto shape = grad_output.shape();
 
+    // Float16/BFloat16 have no atomicAdd; the scatter-add backward kernels are
+    // float-only (TENZOR_DISPATCH_FLOATING_TYPES). Widen to Float32, compute the
+    // gradient, then narrow back — mirrors the oneAPI/Vulkan fix for the same op.
+    if (grad_output.dtype() == DType::Float16 || grad_output.dtype() == DType::BFloat16) {
+        const DType odt = grad_output.dtype();
+        return interpolate_backward_cuda(grad_output.to(DType::Float32), input_size, mode, align_corners).to(odt);
+    }
+
     // Trilinear backward operates on 5D (N, C, D, H, W).
     if (mode == "trilinear") {
         if (shape.size() != 5)
@@ -1248,6 +1256,37 @@ __global__ void box_iou_kernel(
         T enc_y2 = max(y2_1, y2_2);
         T enc_area = (enc_x2 - enc_x1) * (enc_y2 - enc_y1);
         iou = iou - (enc_area - union_area) / (enc_area + static_cast<T>(1e-7));
+    } else if (iou_type == 2 || iou_type == 3) {
+        // DIoU (2) / CIoU (3): subtract the normalized squared center distance
+        // (and, for CIoU, the aspect-ratio penalty). Previously these fell
+        // through and returned plain IoU — off by the penalty term(s).
+        T cx1 = (x1_1 + x2_1) / static_cast<T>(2);
+        T cy1 = (y1_1 + y2_1) / static_cast<T>(2);
+        T cx2 = (x1_2 + x2_2) / static_cast<T>(2);
+        T cy2 = (y1_2 + y2_2) / static_cast<T>(2);
+        T center_dist_sq = (cx1 - cx2) * (cx1 - cx2) + (cy1 - cy2) * (cy1 - cy2);
+
+        T enc_x1 = min(x1_1, x1_2);
+        T enc_y1 = min(y1_1, y1_2);
+        T enc_x2 = max(x2_1, x2_2);
+        T enc_y2 = max(y2_1, y2_2);
+        T enc_w = enc_x2 - enc_x1;
+        T enc_h = enc_y2 - enc_y1;
+        T diag_dist_sq = enc_w * enc_w + enc_h * enc_h;
+
+        T result = iou - center_dist_sq / (diag_dist_sq + static_cast<T>(1e-7));
+        if (iou_type == 3) {
+            T w1 = x2_1 - x1_1, h1 = y2_1 - y1_1;
+            T w2 = x2_2 - x1_2, h2 = y2_2 - y1_2;
+            const T four_over_pi_sq =
+                static_cast<T>(4.0 / (3.14159265358979323846 * 3.14159265358979323846));
+            T diff = atan(w2 / (h2 + static_cast<T>(1e-7))) -
+                     atan(w1 / (h1 + static_cast<T>(1e-7)));
+            T v = four_over_pi_sq * diff * diff;
+            T alpha = v / (static_cast<T>(1) - iou + v + static_cast<T>(1e-7));  // original IoU
+            result = result - alpha * v;
+        }
+        iou = result;
     }
 
     output[i * M + j] = iou;

@@ -326,7 +326,14 @@ auto NormBackward_Linalg::backward(std::vector<Tensor> grad_outputs) -> std::vec
         auto idx = use_min ? tenzor::argmin(sums, /*dim=*/-1, /*keepdim=*/false)
                            : tenzor::argmax(sums, /*dim=*/-1, /*keepdim=*/false);
         auto mask = tenzor::one_hot(idx, num_classes).to(input.dtype());
-        mask = mask.unsqueeze(col_norm ? ndim - 2 : ndim - 1);
+        // Reshape the one-hot mask to its explicit broadcast target (the matrix
+        // dim that was reduced becomes 1). This is rank-robust: argmax/one_hot
+        // keepdim conventions differ across backends (CUDA argmax of a 1-D tensor
+        // yields shape (1,) vs CPU's scalar), which previously left a stray leading
+        // dim -> [1,M,N] gradient / [1,1,N] broadcast failures.
+        std::vector<int64_t> mask_shape(input.shape().begin(), input.shape().end());
+        mask_shape[col_norm ? (ndim - 2) : (ndim - 1)] = 1;
+        mask = reshape(mask, mask_shape);
 
         auto gs = std::vector<int64_t>(grad.shape().begin(), grad.shape().end());
         while (gs.size() < static_cast<size_t>(ndim)) gs.push_back(1);

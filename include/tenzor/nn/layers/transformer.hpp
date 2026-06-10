@@ -270,10 +270,25 @@ public:
      */
     auto forward_impl(const Variable& input) -> Variable override;
 
+    /**
+     * @brief Enable/disable gradient (activation) checkpointing.
+     *
+     * When enabled, each encoder layer's forward is wrapped in
+     * autograd::checkpoint(): intermediate activations are not retained, and
+     * the layer forward is recomputed during backward. This trades ~one extra
+     * forward of compute for an O(num_layers) reduction in peak activation
+     * memory — letting very deep encoders (e.g. ViT-Huge, 32 layers) train
+     * within tight GPU memory. Gradients are identical (the checkpoint captures
+     * and replays RNG state for dropout). Default: off.
+     */
+    auto set_gradient_checkpointing(bool enabled) -> void { gradient_checkpointing_ = enabled; }
+    auto gradient_checkpointing() const -> bool { return gradient_checkpointing_; }
+
 private:
     std::vector<std::shared_ptr<TransformerEncoderLayer>> layers_;
     std::shared_ptr<LayerNorm> norm_;
     int64_t num_layers_;
+    bool gradient_checkpointing_{false};
 };
 
 /**
