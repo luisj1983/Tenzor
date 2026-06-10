@@ -19,6 +19,10 @@ layout(push_constant) uniform PushConstants {
 
 shared float shared_data[WORKGROUP_SIZE];
 
+// NaN-propagating max/min (IEEE/PyTorch); `x != x` is true iff x is NaN.
+float nanmax(float a, float b) { return (a != a) ? a : ((b != b) ? b : max(a, b)); }
+float nanmin(float a, float b) { return (a != a) ? a : ((b != b) ? b : min(a, b)); }
+
 // Helper to read bfloat16 at element index
 float readBF16(uint element_idx) {
     uint word_idx = element_idx / 2;
@@ -73,10 +77,10 @@ void main() {
                         accum += val;
                         break;
                     case 2: // max
-                        accum = max(accum, val);
+                        accum = nanmax(accum, val);
                         break;
                     case 3: // min
-                        accum = min(accum, val);
+                        accum = nanmin(accum, val);
                         break;
                 }
             }
@@ -94,10 +98,10 @@ void main() {
                         shared_data[tid] += shared_data[tid + s];
                         break;
                     case 2: // max
-                        shared_data[tid] = max(shared_data[tid], shared_data[tid + s]);
+                        shared_data[tid] = nanmax(shared_data[tid], shared_data[tid + s]);
                         break;
                     case 3: // min
-                        shared_data[tid] = min(shared_data[tid], shared_data[tid + s]);
+                        shared_data[tid] = nanmin(shared_data[tid], shared_data[tid + s]);
                         break;
                 }
             }
@@ -142,10 +146,10 @@ void main() {
                         accum += val;
                         break;
                     case 2: // max
-                        accum = max(accum, val);
+                        accum = nanmax(accum, val);
                         break;
                     case 3: // min
-                        accum = min(accum, val);
+                        accum = nanmin(accum, val);
                         break;
                 }
             }
@@ -163,10 +167,10 @@ void main() {
                         shared_data[tid] += shared_data[tid + s];
                         break;
                     case 2: // max
-                        shared_data[tid] = max(shared_data[tid], shared_data[tid + s]);
+                        shared_data[tid] = nanmax(shared_data[tid], shared_data[tid + s]);
                         break;
                     case 3: // min
-                        shared_data[tid] = min(shared_data[tid], shared_data[tid + s]);
+                        shared_data[tid] = nanmin(shared_data[tid], shared_data[tid + s]);
                         break;
                 }
             }

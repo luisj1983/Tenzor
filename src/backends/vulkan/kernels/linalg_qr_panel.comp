@@ -22,6 +22,7 @@ shared float col_data[256];  // column data for norm computation
 shared float norm_sq;
 shared float alpha;
 shared float tau_k;
+shared float vhead;          // x[k] - alpha, the Householder vector head
 
 void main() {
     uint tid = gl_LocalInvocationID.x;
@@ -55,6 +56,7 @@ void main() {
 
             alpha = -sign(A[base + (col_start + k) * n + col]) * sqrt(norm_sq);
             float v_k = A[base + (col_start + k) * n + col] - alpha;
+            vhead = v_k;
 
             if (abs(v_k) < 1e-30) {
                 tau_k = 0.0;
@@ -74,11 +76,15 @@ void main() {
 
         if (abs(tau_k) < 1e-30) continue;
 
-        // Normalize Householder vector: v[k] = 1, v[k+1:] = A[k+1:,col] / (A[k,col] - alpha)
-        float v_k_val = 0.0;
-        if (tid == 0) {
-            v_k_val = 1.0;  // v[k] = 1 by convention
+        // Normalize the below-diagonal Householder entries in place:
+        //   v[r] = x[r] / (x[k] - alpha)   for r > k,  with v[k] = 1 implicit.
+        // tau was derived for this v[k]=1 convention, and Ormqr reads the
+        // stored sub-diagonal as v[k+1:]; without this division the reflectors
+        // were inconsistent with tau (Q@R did not reconstruct A).
+        for (uint r = k + 1 + tid; r < panel_rows; r += 256) {
+            A[base + (col_start + r) * n + col] /= vhead;
         }
+        barrier();
 
         // Apply reflection to remaining columns: A[:,j] -= tau * v * (v^T * A[:,j])
         for (uint j = col + 1; j < min(col_start + panel_cols, n); j++) {

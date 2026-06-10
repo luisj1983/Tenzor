@@ -1,0 +1,35 @@
+#version 450
+
+// Full operation: create tensor filled with a specific value for 16-bit
+// integer dtypes (Int16 / UInt16). Elements are packed 2 per 32-bit word.
+layout(local_size_x_id = 0) in;
+
+layout(binding = 0) buffer Output { uint output_data[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint n_elements;       // Number of 16-bit elements
+    uint fill_value_i16;   // Fill value bit pattern (only lower 16 bits used)
+} params;
+
+void main() {
+    uint pair_idx = gl_GlobalInvocationID.x;
+    uint base_element = pair_idx * 2;
+
+    if (base_element >= params.n_elements) {
+        return;
+    }
+
+    uint value_i16 = params.fill_value_i16 & 0xFFFFu;
+
+    uint packed_value;
+    if (base_element + 1 < params.n_elements) {
+        packed_value = value_i16 | (value_i16 << 16);
+    } else {
+        // Odd tail: only the low 16 bits belong to a real element; the high
+        // 16 bits land in trailing allocation padding (descriptor size is
+        // rounded up to a 32-bit boundary by the host).
+        packed_value = value_i16;
+    }
+
+    output_data[pair_idx] = packed_value;
+}

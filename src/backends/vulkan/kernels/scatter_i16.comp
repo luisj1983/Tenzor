@@ -1,0 +1,65 @@
+#version 450
+
+// Scatter for 16-bit dtypes (Int16 / UInt16): raw 16-bit element scatter.
+// Elements are packed 2 per 32-bit word; the target 16-bit field is updated
+// with a CAS loop so concurrent writes to the two halves of a word don't race.
+layout(local_size_x_id = 0) in;
+
+layout(binding = 0) buffer Input { uint input_data[]; };    // packed 2x u16
+layout(binding = 1) buffer Indices { int indices[]; };
+layout(binding = 2) buffer Output { uint output_data[]; };  // packed 2x u16
+layout(binding = 3) buffer Values { uint values[]; };       // packed 2x u16
+
+layout(push_constant) uniform PushConstants {
+    uint input_size;
+    uint output_size;
+    uint dim;
+    uint dim_size;
+    uint input_dim_size;
+    uint inner_size;
+    uint outer_size;
+    uint reduction;     // 0=overwrite, 1=add, 2=multiply
+    uint use_values;
+} params;
+
+uint getU16(uint e, bool from_values) {
+    uint w = from_values ? values[e >> 1] : input_data[e >> 1];
+    return ((e & 1u) == 0u) ? (w & 0xFFFFu) : (w >> 16);
+}
+
+void updateU16(uint e, uint new16, uint reduction) {
+    uint widx = e >> 1;
+    uint shift = (e & 1u) * 16u;
+    uint mask = 0xFFFFu << shift;
+    uint old = output_data[widx];
+    uint expected;
+    do {
+        expected = old;
+        uint cur = (expected >> shift) & 0xFFFFu;
+        uint res;
+        if (reduction == 1u)      res = (cur + new16) & 0xFFFFu;
+        else if (reduction == 2u) res = (cur * new16) & 0xFFFFu;
+        else                      res = new16 & 0xFFFFu;
+        uint nw = (expected & ~mask) | (res << shift);
+        old = atomicCompSwap(output_data[widx], expected, nw);
+    } while (old != expected);
+}
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= params.input_size) return;
+
+    uint outer_idx = idx / (params.inner_size * params.input_dim_size);
+    uint remainder = idx % (params.inner_size * params.input_dim_size);
+    uint inner_idx = remainder % params.inner_size;
+
+    int scatter_idx = indices[idx];
+    if (scatter_idx < 0 || scatter_idx >= int(params.dim_size)) return;
+
+    uint out_idx = outer_idx * (params.dim_size * params.inner_size) +
+                   uint(scatter_idx) * params.inner_size +
+                   inner_idx;
+
+    uint v = getU16(idx, params.use_values > 0u);
+    updateU16(out_idx, v, params.reduction);
+}

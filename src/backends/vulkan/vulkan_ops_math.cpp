@@ -775,7 +775,7 @@ auto VulkanBackend::dispatchUnaryOp(const std::string& op_name,
 
 auto VulkanBackend::dispatchUnaryOpWithParam(const std::string& op_name,
                                               const Tensor& input,
-                                              float param) -> Tensor {
+                                              double param) -> Tensor {
     int32_t device_id = input.device().index;
 
     // Integer pow: dedicated by-byte-width shaders (the float "math" shader would
@@ -891,7 +891,7 @@ auto VulkanBackend::dispatchUnaryOpWithParam(const std::string& op_name,
     if (is_float64) {
         push_constants_f64.n = static_cast<uint32_t>(input.numel());
         push_constants_f64.op = opcode;
-        push_constants_f64.param = static_cast<double>(param);
+        push_constants_f64.param = param;
         push_constants_ptr = &push_constants_f64;
         push_constants_size = sizeof(PushConstantsF64);
     } else {
@@ -1285,6 +1285,15 @@ auto VulkanBackend::dispatchReduction(const std::string& op_name,
     // inner_size) already handle arbitrary reduction axes on a
     // contiguous input. The contiguous() below ensures the shader's
     // assumption holds.
+    // Complex sum/mean: reduce the real and imaginary parts independently and
+    // recombine. (Other reductions — max/min/prod — are undefined on complex.)
+    if ((input_orig.dtype() == DType::Complex64 || input_orig.dtype() == DType::Complex128) &&
+        (op_name == "sum" || op_name == "mean")) {
+        Tensor re = dispatchReduction(op_name, dispatchReal(input_orig), dim, keepdim);
+        Tensor im = dispatchReduction(op_name, dispatchImag(input_orig), dim, keepdim);
+        return dispatchComplexTensor(re, im);
+    }
+
     Tensor input = input_orig.is_contiguous() ? input_orig : input_orig.contiguous();
     // Special case: handle empty tensors
     if (input.numel() == 0) {
@@ -1330,7 +1339,10 @@ auto VulkanBackend::dispatchReduction(const std::string& op_name,
     bool is_float16 = (input.dtype() == DType::Float16);
     bool is_bfloat16 = (input.dtype() == DType::BFloat16);
     bool is_int32 = (input.dtype() == DType::Int32);
-    bool is_int64 = (input.dtype() == DType::Int64);
+    // Int64 and UInt64 have no native reduction shader; reduce via Float64 and
+    // narrow back to the original dtype (exact for the magnitudes that fit f64's
+    // 53-bit mantissa). UInt64 is not promoted at the op layer, so it arrives here.
+    bool is_int64 = (input.dtype() == DType::Int64 || input.dtype() == DType::UInt64);
 
     // Int64 has no native shader; convert to Float64 for reduction, then convert back
     DType orig_dtype = input.dtype();
@@ -1350,9 +1362,11 @@ auto VulkanBackend::dispatchReduction(const std::string& op_name,
     } else if (is_int32) {
         shader_name = "reduction_i32";
     } else {
-        // Use subgroup-optimized shader when device supports subgroup arithmetic
+        // Use subgroup-optimized shader when device supports subgroup arithmetic.
+        // EXCEPT max/min: subgroupMax/Min drop NaN, but IEEE/PyTorch require NaN
+        // propagation — so force the explicit NaN-aware `reduction` shader.
         auto& ctx = devices_[device_id];
-        if (ctx.hasSubgroupArithmetic) {
+        if (ctx.hasSubgroupArithmetic && op_name != "max" && op_name != "min") {
             shader_name = "reduction_subgroup";
         } else {
             shader_name = "reduction";
@@ -1380,7 +1394,8 @@ auto VulkanBackend::dispatchReduction(const std::string& op_name,
         && ctx_tree.hasSubgroupArithmetic
         && !is_float64 && !is_float16 && !is_bfloat16 && !is_int32 && !is_int64
         && reduction_input.numel() > 1024
-        && (op_name == "sum" || op_name == "max" || op_name == "min" || op_name == "mean");
+        // max/min excluded: the tree path's subgroupMax/Min drop NaN.
+        && (op_name == "sum" || op_name == "mean");
 
     if (use_tree_reduction) {
         // Tree reduction maps reduce_op: 0=sum, 1=max, 2=min
@@ -1630,6 +1645,30 @@ auto VulkanBackend::dispatchMatmul(const Tensor& a_raw, const Tensor& b_raw) -> 
         return result_f32.to(orig_dtype);
     }
 
+    // Integer dtypes (except Int32, which has a native shader): no integer
+    // matmul shader, so widen to Float32, compute, narrow. Exact while the
+    // accumulated products fit Float32's 24-bit mantissa — same accepted
+    // pattern as the F16/FP8 widen above.
+    if (a.dtype() == DType::Int8  || a.dtype() == DType::Int16  ||
+        a.dtype() == DType::Int64 || a.dtype() == DType::UInt8  ||
+        a.dtype() == DType::UInt16 || a.dtype() == DType::UInt32 ||
+        a.dtype() == DType::UInt64) {
+        DType orig_dtype = a.dtype();
+        auto result_f32 = dispatchMatmul(a.to(DType::Float32), b.to(DType::Float32));
+        return result_f32.to(orig_dtype);
+    }
+
+    // Complex matmul via four real matmuls:
+    //   Cr = Ar@Br - Ai@Bi,  Ci = Ar@Bi + Ai@Br.
+    // (No native complex matmul shader; mirrors the Bmm/Dot complex paths.)
+    if (a.dtype() == DType::Complex64 || a.dtype() == DType::Complex128) {
+        Tensor Ar = dispatchReal(a), Ai = dispatchImag(a);
+        Tensor Br = dispatchReal(b), Bi = dispatchImag(b);
+        Tensor Cr = dispatchBinaryOp("sub", dispatchMatmul(Ar, Br), dispatchMatmul(Ai, Bi));
+        Tensor Ci = dispatchBinaryOp("add", dispatchMatmul(Ar, Bi), dispatchMatmul(Ai, Br));
+        return dispatchComplexTensor(Cr, Ci);
+    }
+
     // Make A contiguous if needed (A is usually already contiguous)
     Tensor a_contig = a.is_contiguous() ? a : dispatchContiguous(a);
 
@@ -1827,6 +1866,28 @@ auto VulkanBackend::dispatchBmm(const Tensor& a, const Tensor& b) -> Tensor {
     }
 
     int32_t device_id = a.device().index;
+    // Integer dtypes (except Int32): widen to Float32, compute, narrow. Exact
+    // while products fit Float32's 24-bit mantissa (matches the matmul/F16/FP8
+    // widen pattern). No native integer batched-matmul shader exists.
+    if (a.dtype() == DType::Int8  || a.dtype() == DType::Int16  ||
+        a.dtype() == DType::Int64 || a.dtype() == DType::UInt8  ||
+        a.dtype() == DType::UInt16 || a.dtype() == DType::UInt32 ||
+        a.dtype() == DType::UInt64) {
+        DType orig_dtype = a.dtype();
+        auto result_f32 = dispatchBmm(a.to(DType::Float32), b.to(DType::Float32));
+        return result_f32.to(orig_dtype);
+    }
+
+    // Complex batched matmul via four real bmms:
+    //   Cr = Ar@Br - Ai@Bi,  Ci = Ar@Bi + Ai@Br.
+    if (a.dtype() == DType::Complex64 || a.dtype() == DType::Complex128) {
+        Tensor Ar = dispatchReal(a), Ai = dispatchImag(a);
+        Tensor Br = dispatchReal(b), Bi = dispatchImag(b);
+        Tensor Cr = dispatchBinaryOp("sub", dispatchBmm(Ar, Br), dispatchBmm(Ai, Bi));
+        Tensor Ci = dispatchBinaryOp("add", dispatchBmm(Ar, Bi), dispatchBmm(Ai, Br));
+        return dispatchComplexTensor(Cr, Ci);
+    }
+
     bool is_float64 = (a.dtype() == DType::Float64);
     bool is_float16 = (a.dtype() == DType::Float16);
     bool is_bfloat16 = (a.dtype() == DType::BFloat16);
@@ -2007,6 +2068,28 @@ auto VulkanBackend::dispatchDot(const Tensor& a, const Tensor& b) -> Tensor {
     }
     if (a_shape[0] != b_shape[0]) {
         throw std::invalid_argument("Dot product tensors must have same size");
+    }
+
+    // Complex dot: sum(a_i * b_i) without conjugation. Decompose into real dot
+    // products on the real/imag parts: re = ar·br - ai·bi, im = ar·bi + ai·br.
+    if (a.dtype() == DType::Complex64 || a.dtype() == DType::Complex128) {
+        Tensor ar = dispatchReal(a), ai = dispatchImag(a);
+        Tensor br = dispatchReal(b), bi = dispatchImag(b);
+        Tensor re = dispatchBinaryOp("sub", dispatchDot(ar, br), dispatchDot(ai, bi));
+        Tensor im = dispatchBinaryOp("add", dispatchDot(ar, bi), dispatchDot(ai, br));
+        return dispatchComplexTensor(re, im);
+    }
+
+    // Integer dtypes (except Int32): widen to Float32, compute, narrow. Exact
+    // while products fit Float32's 24-bit mantissa. The mul/sum building blocks
+    // below lack integer paths for these widths.
+    if (a.dtype() == DType::Int8  || a.dtype() == DType::Int16  ||
+        a.dtype() == DType::Int64 || a.dtype() == DType::UInt8  ||
+        a.dtype() == DType::UInt16 || a.dtype() == DType::UInt32 ||
+        a.dtype() == DType::UInt64) {
+        DType orig_dtype = a.dtype();
+        auto result_f32 = dispatchDot(a.to(DType::Float32), b.to(DType::Float32));
+        return result_f32.to(orig_dtype);
     }
 
     // Element-wise multiply

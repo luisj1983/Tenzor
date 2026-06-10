@@ -23,6 +23,7 @@ layout(push_constant) uniform PushConstants {
     uint mode;              // 0=sum, 1=mean, 2=max
     uint include_last_offset;
     uint num_offsets;
+    uint total_indices;     // length of the indices array (last bag's end)
 } params;
 
 void main() {
@@ -39,17 +40,12 @@ void main() {
     if (bag + 1 < params.num_offsets) {
         end_val = offset_data[bag + 1];
     } else {
-        // If include_last_offset, the last offset is already a sentinel,
-        // otherwise we don't know total_indices from here — use num_offsets sentinel
-        end_val = offset_data[params.num_offsets - 1];
-        if (bag + 1 == params.num_offsets) {
-            // Last bag without include_last_offset: range extends to the end
-            // The host must ensure num_offsets == num_bags when !include_last_offset,
-            // and num_offsets == num_bags+1 when include_last_offset.
-            // In both cases, bag+1 < num_offsets is handled above.
-            // This branch is unreachable in normal operation.
-            return;
-        }
+        // Last bag: range runs to the end of the indices array. (For
+        // include_last_offset the sentinel makes the branch above cover all
+        // bags; for !include_last_offset the final bag lands here and must
+        // extend to total_indices — previously this returned early, dropping
+        // the last bag's gradient entirely.)
+        end_val = int(params.total_indices);
     }
 
     int bag_size = end_val - start;

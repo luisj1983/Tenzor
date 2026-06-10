@@ -250,10 +250,16 @@ auto nested_sum(const NestedTensor& input, int64_t dim,
     }
 
     auto new_values = tenzor::cat(results, 0);
-    auto new_offsets = tenzor::zeros({B + 1}, DType::Int64, input.device());
+    // Build offsets on CPU (host writes) then move to the input's device.
+    // Writing through .data<int64_t>() on a device-resident tensor is a
+    // host-side dereference of GPU memory and segfaults on Vulkan/CUDA/etc.
+    auto new_offsets = tenzor::zeros({B + 1}, DType::Int64, Device::cpu());
     auto* noff_ptr = new_offsets.data<int64_t>();
     for (int64_t i = 0; i <= B; ++i) {
         noff_ptr[i] = i;
+    }
+    if (input.device().type != Device::Type::CPU) {
+        new_offsets = new_offsets.to(input.device());
     }
     return NestedTensor::from_jagged(new_values, new_offsets,
                                      input.ragged_dim());
@@ -290,10 +296,16 @@ auto nested_mean(const NestedTensor& input, int64_t dim,
     }
 
     auto new_values = tenzor::cat(results, 0);
-    auto new_offsets = tenzor::zeros({B + 1}, DType::Int64, input.device());
+    // Build offsets on CPU (host writes) then move to the input's device.
+    // Writing through .data<int64_t>() on a device-resident tensor is a
+    // host-side dereference of GPU memory and segfaults on Vulkan/CUDA/etc.
+    auto new_offsets = tenzor::zeros({B + 1}, DType::Int64, Device::cpu());
     auto* noff_ptr = new_offsets.data<int64_t>();
     for (int64_t i = 0; i <= B; ++i) {
         noff_ptr[i] = i;
+    }
+    if (input.device().type != Device::Type::CPU) {
+        new_offsets = new_offsets.to(input.device());
     }
     return NestedTensor::from_jagged(new_values, new_offsets,
                                      input.ragged_dim());

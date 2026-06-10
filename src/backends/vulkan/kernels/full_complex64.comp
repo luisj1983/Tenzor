@@ -1,0 +1,23 @@
+#version 450
+
+// Full operation for Complex64: each element is a pair of float32 (re, im).
+// Fills real part with `real_value` and imaginary part with 0.
+layout(local_size_x_id = 0) in;
+
+layout(binding = 0) buffer Output { float output_data[]; };  // 2 floats per complex
+
+layout(push_constant) uniform PushConstants {
+    uint n_elements;    // Number of complex elements
+    float real_value;   // Value for the real component
+} params;
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+
+    if (idx >= params.n_elements) {
+        return;
+    }
+
+    output_data[2u * idx]      = params.real_value;
+    output_data[2u * idx + 1u] = 0.0;
+}

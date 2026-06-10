@@ -1,7 +1,14 @@
 #version 450
 #extension GL_EXT_shader_explicit_arithmetic_types_float64 : require
 
-// Log-Cumulative-Sum-Exp along a dimension — Float64 variant
+// Log-Cumulative-Sum-Exp along a dimension — Float64 variant.
+//
+// GLSL has no float64 exp/log, so the running update log(1 + exp(-diff)) used
+// to be computed in float32, losing ~7 digits (failed a 1e-10 tolerance). We
+// compute it in true double precision via short series:
+//   exp(-d) with range reduction d = k*ln2 + r (r in [0,ln2)), Taylor on exp(-r),
+//           scaled by 2^-k;
+//   log(1+t) via 2*atanh(t/(2+t)) (fast for t in (0,1]).
 layout(local_size_x_id = 0) in;
 
 layout(binding = 0) buffer Input { float64_t input_data[]; };
@@ -12,6 +19,38 @@ layout(push_constant) uniform PushConstants {
     uint reduce_size;
     uint inner_size;
 } params;
+
+// exp(-d) for d >= 0, full double precision.
+float64_t exp_neg_d(float64_t d) {
+    const float64_t LN2 = 0.69314718055994530942LF;
+    float64_t kf = floor(d / LN2);
+    int k = int(kf);
+    float64_t r = d - kf * LN2;          // r in [0, LN2)
+    // Taylor: exp(-r) = sum_{n>=0} (-r)^n / n!
+    float64_t term = 1.0LF;
+    float64_t sum = 1.0LF;
+    for (int n = 1; n < 18; ++n) {
+        term *= (-r) / float64_t(n);
+        sum += term;
+    }
+    // multiply by 2^-k
+    float64_t scale = 1.0LF;
+    for (int i = 0; i < k; ++i) scale *= 0.5LF;
+    return sum * scale;
+}
+
+// log(1 + t) for t in (0, 1], full double precision via 2*atanh(t/(2+t)).
+float64_t log1p_d(float64_t t) {
+    float64_t u = t / (2.0LF + t);       // u in (0, 1/3]
+    float64_t u2 = u * u;
+    float64_t term = u;
+    float64_t sum = u;
+    for (int n = 1; n < 16; ++n) {
+        term *= u2;
+        sum += term / float64_t(2 * n + 1);
+    }
+    return 2.0LF * sum;
+}
 
 void main() {
     uint line_idx = gl_GlobalInvocationID.x;
@@ -35,9 +74,7 @@ void main() {
         if (diff > 50.0LF) {
             running = m;
         } else {
-            // exp/log not available for float64 in GLSL; compute in float32
-            float fdiff = float(-diff);
-            running = m + float64_t(log(1.0 + exp(fdiff)));
+            running = m + log1p_d(exp_neg_d(diff));
         }
         output_data[idx] = running;
     }

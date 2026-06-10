@@ -20,6 +20,7 @@ layout(push_constant) uniform PushConstants {
     uint mode;
     uint include_last_offset;
     uint num_offsets;
+    uint total_indices;
 } params;
 
 void main() {
@@ -35,7 +36,7 @@ void main() {
     if (bag + 1 < params.num_offsets) {
         end_val = offset_data[bag + 1];
     } else {
-        return;
+        end_val = int(params.total_indices);
     }
 
     int bag_size = end_val - start;

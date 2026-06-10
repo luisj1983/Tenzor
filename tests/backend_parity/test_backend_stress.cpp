@@ -284,12 +284,22 @@ TEST_P(BackendStressParity, DeepGraph_100Layers) {
 }
 
 TEST_P(BackendStressParity, DeepGraph_Residual) {
+    // Deterministic inputs: an unseeded draw makes the failing backend random
+    // run-to-run (see below), so pin the RNG for reproducibility.
+    tenzor::manual_seed(777);
     auto x = randn({16, 128}, DType::Float32, Device::cpu());
-    // Scale weights so 50 unnormalized matmul blocks don't overflow to +inf
-    // (an inf-vs-inf comparison gives a meaningless "max diff = inf" failure).
-    // 0.1 keeps activations finite while still exercising a deep residual graph.
-    auto w1 = randn({128, 128}, DType::Float32, Device::cpu()) * 0.1f;
-    auto w2 = randn({128, 128}, DType::Float32, Device::cpu()) * 0.1f;
+    // The residual block x += relu(x@w1)@w2 has per-block gain ≈ 1 + c·scale²·dim.
+    // At scale 0.1 that gain is ≈1.9, so 50 blocks amplify activations to ~1e14 —
+    // effectively a chaotic map. Tiny, *legitimate* FP differences between
+    // backends (e.g. FMA vs non-FMA accumulation order) then diverge to O(1)
+    // relative error at some elements, so cross-backend parity is impossible no
+    // matter how correct each backend is (measured: Vulkan matched CPU exactly
+    // while CUDA drifted 5e7 at 1e14 magnitude). Scale 0.02 keeps the per-block
+    // gain just above 1 so activations stay bounded (~O(10)) over 50 blocks —
+    // still a genuine deep residual graph, but now numerically well-conditioned
+    // and meaningfully comparable across backends.
+    auto w1 = randn({128, 128}, DType::Float32, Device::cpu()) * 0.02f;
+    auto w2 = randn({128, 128}, DType::Float32, Device::cpu()) * 0.02f;
     test_operation_parity_single([](const std::vector<Tensor>& inputs) {
         auto x = inputs[0];
         auto w1 = inputs[1];

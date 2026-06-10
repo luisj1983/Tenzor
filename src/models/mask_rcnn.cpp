@@ -629,8 +629,19 @@ auto MaskRCNN::forward_train(const Variable& images,
     auto sampled_labels = sampled_labels_cpu.to(original_device);
     auto sampled_target_boxes = sampled_target_boxes_cpu.to(sampled_rois.dtype()).to(original_device);
 
+    // The ROI box head predicts deltas (dx, dy, dw, dh) relative to each
+    // proposal, so the regression targets must be the matched GT boxes ENCODED
+    // against their proposals — not raw GT coordinates. Comparing predicted
+    // deltas against absolute coordinates makes the Smooth-L1 loss explode
+    // (~|coords|, e.g. roi_box≈224 for 800px boxes). Mirrors the RPN target
+    // encoding and torchvision's BoxCoder.encode in RoIHeads. Background rows
+    // (zero target box) encode to finite junk but are filtered by the
+    // foreground mask inside compute_roi_head_loss, so they never reach the loss.
+    Tensor roi_proposal_boxes = sampled_rois.slice(1, 1, 5).contiguous();  // (num_sampled, 4)
+    Tensor sampled_target_deltas = encode_boxes(sampled_target_boxes, roi_proposal_boxes);
+
     // Compute ROI head losses
-    std::vector<Tensor> roi_targets = {sampled_labels, sampled_target_boxes};
+    std::vector<Tensor> roi_targets = {sampled_labels, sampled_target_deltas};
     auto [roi_cls_loss, roi_bbox_loss] = compute_roi_head_loss(
         cls_logits.tensor(),
         bbox_deltas.tensor(),
@@ -1270,16 +1281,49 @@ auto MaskRCNN::select_training_samples(const Tensor& proposals,
     constexpr double  fg_iou_thresh     = 0.5;
     constexpr int64_t num_positive      = static_cast<int64_t>(num_samples * positive_fraction);
 
-    if (proposals.shape()[0] == 0) return proposals;
-
     const Device device     = proposals.device();
     const DType  dtype      = proposals.dtype();
     const int64_t batch_size = gt_boxes.shape()[0];
     const int64_t num_gt     = gt_boxes.shape()[1];
-    const int64_t N          = proposals.shape()[0];
+
+    // Standard Mask R-CNN `add_gt_proposals`: append the ground-truth boxes to
+    // the proposal set so every GT object is guaranteed a positive (IoU=1 with
+    // itself) ROI. Without this, a fresh/randomly-initialised RPN frequently
+    // yields zero proposals reaching fg_iou_thresh — the box and mask losses
+    // then collapse to a no-op (mask_loss==0). torchvision's RoIHeads does the
+    // same before sampling; this is correctness, not a backend workaround.
+    Tensor proposals_aug = proposals;
+    if (num_gt > 0) {
+        Tensor gt_cpu = gt_boxes.to(Device::cpu()).to(DType::Float32);  // (B, M, 4)
+        const float* gd = gt_cpu.data<float>();
+        std::vector<float> gt_rows;  // [batch_idx, x1, y1, x2, y2] per valid GT
+        for (int64_t b = 0; b < batch_size; ++b) {
+            for (int64_t m = 0; m < num_gt; ++m) {
+                const float* bx = gd + (b * num_gt + m) * 4;
+                if (bx[2] > bx[0] && bx[3] > bx[1]) {  // skip padding / degenerate
+                    gt_rows.push_back(static_cast<float>(b));
+                    gt_rows.push_back(bx[0]); gt_rows.push_back(bx[1]);
+                    gt_rows.push_back(bx[2]); gt_rows.push_back(bx[3]);
+                }
+            }
+        }
+        if (!gt_rows.empty()) {
+            const int64_t G = static_cast<int64_t>(gt_rows.size() / 5);
+            Tensor gt_props_cpu({G, 5}, DType::Float32, Device::cpu());
+            std::memcpy(gt_props_cpu.data<float>(), gt_rows.data(),
+                        gt_rows.size() * sizeof(float));
+            Tensor gt_props = gt_props_cpu.to(dtype).to(device);
+            proposals_aug = (proposals.shape()[0] == 0)
+                ? gt_props
+                : tenzor::ops::cat({proposals, gt_props}, 0);
+        }
+    }
+
+    const int64_t N = proposals_aug.shape()[0];
+    if (N == 0) return proposals_aug;
 
     // Group proposal row indices by batch_idx (col 0). One CPU copy.
-    Tensor batch_col_cpu = proposals.slice(1, 0, 1).to(Device::cpu()).to(DType::Float32);
+    Tensor batch_col_cpu = proposals_aug.slice(1, 0, 1).to(Device::cpu()).to(DType::Float32);
     const float* bc = batch_col_cpu.data<float>();
     std::vector<std::vector<int64_t>> rows_by_batch(static_cast<size_t>(batch_size));
     for (int64_t r = 0; r < N; ++r) {
@@ -1312,7 +1356,7 @@ auto MaskRCNN::select_training_samples(const Tensor& proposals,
             continue;
         }
 
-        Tensor props_b       = tenzor::ops::index_select(proposals, 0, rows_idx);     // (Nb, 5)
+        Tensor props_b       = tenzor::ops::index_select(proposals_aug, 0, rows_idx); // (Nb, 5)
         Tensor props_boxes_b = props_b.slice(1, 1, 5);                                // (Nb, 4)
 
         Tensor gt_b = tenzor::ops::select(gt_boxes, 0, b);                            // (M, 4)
@@ -1349,7 +1393,7 @@ auto MaskRCNN::select_training_samples(const Tensor& proposals,
     Tensor idx_cpu({static_cast<int64_t>(sampled_global.size())}, DType::Int64, Device::cpu());
     std::memcpy(idx_cpu.data<int64_t>(), sampled_global.data(), sampled_global.size() * sizeof(int64_t));
     Tensor idx = idx_cpu.to(device);
-    return tenzor::ops::index_select(proposals, 0, idx);
+    return tenzor::ops::index_select(proposals_aug, 0, idx);
 }
 
 void MaskRCNN::load_pretrained(const std::string& path, bool strict) {

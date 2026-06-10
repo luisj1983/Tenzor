@@ -1,0 +1,25 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_float64 : require
+
+// Full operation for Complex128: each element is a pair of float64 (re, im).
+// Fills real part with `real_value` and imaginary part with 0.
+layout(local_size_x_id = 0) in;
+
+layout(binding = 0) buffer Output { double output_data[]; };  // 2 doubles per complex
+
+layout(push_constant) uniform PushConstants {
+    uint n_elements;     // Number of complex elements
+    uint _pad;           // Alignment padding before the 8-byte double
+    double real_value;   // Value for the real component
+} params;
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+
+    if (idx >= params.n_elements) {
+        return;
+    }
+
+    output_data[2u * idx]      = params.real_value;
+    output_data[2u * idx + 1u] = double(0.0);
+}

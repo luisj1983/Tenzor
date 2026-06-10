@@ -26,6 +26,16 @@ auto VulkanBackend::dispatchFull(const std::vector<int64_t>& shape, double value
         return output;
     }
 
+    // Quantized dtypes carry no scale/zero-point here, so a non-zero fill has
+    // no well-defined value. Mirror the CPU op-layer, which throws for
+    // ones()/full() on a bare quantized dtype. (zeros() never reaches here for
+    // quantized dtypes — dispatchZeros fills raw zero bytes directly.)
+    if (dtype == DType::QInt8 || dtype == DType::QUInt8 || dtype == DType::QInt4x2) {
+        throw std::runtime_error(
+            "VulkanBackend::dispatchFull: quantized dtypes (QInt8/QUInt8/QInt4x2) "
+            "require quantization parameters and are not supported by full()/ones()");
+    }
+
     int32_t device_id = device.index;
 
     // Select shader based on dtype
@@ -34,11 +44,18 @@ auto VulkanBackend::dispatchFull(const std::vector<int64_t>& shape, double value
     bool is_bfloat16 = (dtype == DType::BFloat16);
     bool is_int8 = (dtype == DType::Int8);
     bool is_uint8 = (dtype == DType::UInt8);
-    bool is_int64 = (dtype == DType::Int64);
+    // Int64 and UInt64 share the 64-bit full_i64 shader (raw 64-bit bit copy).
+    bool is_int64 = (dtype == DType::Int64 || dtype == DType::UInt64);
     bool is_bool = (dtype == DType::Bool);
+    // Int16 and UInt16 share the 16-bit packing shader (raw 16-bit bit copy).
+    bool is_int16 = (dtype == DType::Int16 || dtype == DType::UInt16);
+    bool is_complex64 = (dtype == DType::Complex64);
+    bool is_complex128 = (dtype == DType::Complex128);
+    // FP8 (1 byte) reuses the 4-per-word byte-packing shader (full_i8).
+    bool is_fp8 = (dtype == DType::FP8_E4M3 || dtype == DType::FP8_E5M2);
 
     // R.13: gate FP64 dispatch on shaderFloat64 device support.
-    if (is_float64) {
+    if (is_float64 || is_complex128) {
         vulkan::ensure_fp64_supported(device_id, "Full");
     }
     // S.4: gate FP16/BF16 dispatch on shaderFloat16 device support.
@@ -53,14 +70,22 @@ auto VulkanBackend::dispatchFull(const std::vector<int64_t>& shape, double value
         shader_name = "full_f16";
     } else if (is_bfloat16) {
         shader_name = "full_bf16";
-    } else if (is_int8) {
+    } else if (is_int8 || is_fp8) {
+        // FP8 packs 4 single-byte elements per uint32, identical to Int8.
         shader_name = "full_i8";
     } else if (is_uint8 || is_bool) {
         // Bool is stored as uint8_t, so use the same shader
         shader_name = "full_uint8";
     } else if (is_int64) {
         shader_name = "full_i64";
+    } else if (is_int16) {
+        shader_name = "full_i16";
+    } else if (is_complex64) {
+        shader_name = "full_complex64";
+    } else if (is_complex128) {
+        shader_name = "full_complex128";
     } else {
+        // 32-bit raw-bit shader: Float32, Int32, UInt32.
         shader_name = "full";
     }
     auto* pipeline = getPipeline(shader_name, device_id);
@@ -69,10 +94,15 @@ auto VulkanBackend::dispatchFull(const std::vector<int64_t>& shape, double value
     // For Float16, the shader works with uint32 (packed pairs), so descriptor size needs
     // to cover the full uint32 writes. Even for 1 element, shader writes a full uint32.
     size_t buffer_size_out = output.numel() * output.dtype_size();
-    if (is_float16) {
-        // Round up to 4-byte boundary (minimum uint32 size for shader access)
+    if (is_float16 || is_int16) {
+        // 16-bit elements are packed 2 per uint32; round up to a 4-byte
+        // boundary so the descriptor covers the shader's full uint32 writes.
         size_t num_pairs = (output.numel() + 1) / 2;
         buffer_size_out = num_pairs * 4;
+    } else if (is_fp8) {
+        // FP8 elements are packed 4 per uint32; round up to a 4-byte boundary.
+        size_t num_quads = (output.numel() + 3) / 4;
+        buffer_size_out = num_quads * 4;
     }
 
     std::vector<std::pair<uint32_t, const void*>> bindings = {
@@ -146,17 +176,25 @@ auto VulkanBackend::dispatchFull(const std::vector<int64_t>& shape, double value
         return output;
     }
 
-    // Int8 uses a dedicated shader that packs 4 elements per uint32
-    if (is_int8) {
+    // Int8 (and FP8) use a dedicated shader that packs 4 single-byte
+    // elements per uint32.
+    if (is_int8 || is_fp8) {
         struct PushConstantsI8 {
             uint32_t n_elements;
-            uint32_t fill_value_i8;  // Int8 bits in lower 8 bits
+            uint32_t fill_value_i8;  // single-byte bit pattern in lower 8 bits
         } push_constants;
 
         push_constants.n_elements = static_cast<uint32_t>(output.numel());
-        // Convert float value to int8 and store in lower 8 bits
-        int8_t i8_value = static_cast<int8_t>(value);
-        push_constants.fill_value_i8 = static_cast<uint32_t>(static_cast<uint8_t>(i8_value));
+        // Convert the fill value to this dtype's single-byte bit pattern.
+        uint8_t byte_value;
+        if (dtype == DType::FP8_E4M3) {
+            byte_value = FP8_E4M3(static_cast<float>(value)).bits;
+        } else if (dtype == DType::FP8_E5M2) {
+            byte_value = FP8_E5M2(static_cast<float>(value)).bits;
+        } else {
+            byte_value = static_cast<uint8_t>(static_cast<int8_t>(value));
+        }
+        push_constants.fill_value_i8 = static_cast<uint32_t>(byte_value);
 
         VkCommandBuffer cmdBuffer = beginSingleTimeCommands(device_id);
         vkCmdBindPipeline(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
@@ -220,10 +258,13 @@ auto VulkanBackend::dispatchFull(const std::vector<int64_t>& shape, double value
         } push_constants_i64;
 
         push_constants_i64.n_elements = static_cast<uint32_t>(output.numel());
-        // Convert float value to int64 and split into two uint32
-        int64_t i64_value = static_cast<int64_t>(value);
-        push_constants_i64.value_low = static_cast<uint32_t>(i64_value & 0xFFFFFFFF);
-        push_constants_i64.value_high = static_cast<uint32_t>((static_cast<uint64_t>(i64_value) >> 32) & 0xFFFFFFFF);
+        // Convert the fill value to its 64-bit bit pattern (Int64 or UInt64)
+        // and split into two uint32 halves for the push constant.
+        uint64_t bits64 = (dtype == DType::UInt64)
+            ? static_cast<uint64_t>(value)
+            : static_cast<uint64_t>(static_cast<int64_t>(value));
+        push_constants_i64.value_low = static_cast<uint32_t>(bits64 & 0xFFFFFFFFu);
+        push_constants_i64.value_high = static_cast<uint32_t>((bits64 >> 32) & 0xFFFFFFFFu);
 
         VkCommandBuffer cmdBuffer = beginSingleTimeCommands(device_id);
         vkCmdBindPipeline(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
@@ -239,6 +280,90 @@ auto VulkanBackend::dispatchFull(const std::vector<int64_t>& shape, double value
         // Add memory barrier
         insertComputeOnlyBarrier(cmdBuffer);
 
+        endSingleTimeCommands(cmdBuffer, device_id);
+        return output;
+    }
+
+    // Int16 / UInt16: 16-bit elements packed 2 per uint32 (full_i16 shader).
+    if (is_int16) {
+        struct PushConstantsI16 {
+            uint32_t n_elements;
+            uint32_t fill_value_i16;  // 16-bit bit pattern in lower 16 bits
+        } push_constants_i16;
+
+        push_constants_i16.n_elements = static_cast<uint32_t>(output.numel());
+        uint16_t v16 = (dtype == DType::UInt16)
+            ? static_cast<uint16_t>(static_cast<uint32_t>(value))
+            : static_cast<uint16_t>(static_cast<int16_t>(value));
+        push_constants_i16.fill_value_i16 = static_cast<uint32_t>(v16);
+
+        VkCommandBuffer cmdBuffer = beginSingleTimeCommands(device_id);
+        vkCmdBindPipeline(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
+        vkCmdBindDescriptorSets(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE,
+                               pipeline->layout(), 0, 1, &descriptorSet, 0, nullptr);
+        vkCmdPushConstants(cmdBuffer, pipeline->layout(),
+                          VK_SHADER_STAGE_COMPUTE_BIT,
+                          0, sizeof(PushConstantsI16), &push_constants_i16);
+
+        uint32_t num_pairs = (static_cast<uint32_t>(output.numel()) + 1) / 2;
+        uint32_t workgroups = div_wg(num_pairs, devices_[device_id].workgroupSize);
+        vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
+
+        insertComputeOnlyBarrier(cmdBuffer);
+        endSingleTimeCommands(cmdBuffer, device_id);
+        return output;
+    }
+
+    // Complex64: each element is (re, im) as float32; fill re=value, im=0.
+    if (is_complex64) {
+        struct PushConstantsC64 {
+            uint32_t n_elements;   // number of complex elements
+            float real_value;
+        } push_constants_c64;
+
+        push_constants_c64.n_elements = static_cast<uint32_t>(output.numel());
+        push_constants_c64.real_value = static_cast<float>(value);
+
+        VkCommandBuffer cmdBuffer = beginSingleTimeCommands(device_id);
+        vkCmdBindPipeline(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
+        vkCmdBindDescriptorSets(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE,
+                               pipeline->layout(), 0, 1, &descriptorSet, 0, nullptr);
+        vkCmdPushConstants(cmdBuffer, pipeline->layout(),
+                          VK_SHADER_STAGE_COMPUTE_BIT,
+                          0, sizeof(PushConstantsC64), &push_constants_c64);
+
+        uint32_t workgroups = div_wg(output.numel(), devices_[device_id].workgroupSize);
+        vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
+
+        insertComputeOnlyBarrier(cmdBuffer);
+        endSingleTimeCommands(cmdBuffer, device_id);
+        return output;
+    }
+
+    // Complex128: each element is (re, im) as float64; fill re=value, im=0.
+    if (is_complex128) {
+        struct PushConstantsC128 {
+            uint32_t n_elements;   // number of complex elements
+            uint32_t _pad;
+            double real_value;
+        } push_constants_c128;
+
+        push_constants_c128.n_elements = static_cast<uint32_t>(output.numel());
+        push_constants_c128._pad = 0;
+        push_constants_c128.real_value = value;
+
+        VkCommandBuffer cmdBuffer = beginSingleTimeCommands(device_id);
+        vkCmdBindPipeline(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
+        vkCmdBindDescriptorSets(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE,
+                               pipeline->layout(), 0, 1, &descriptorSet, 0, nullptr);
+        vkCmdPushConstants(cmdBuffer, pipeline->layout(),
+                          VK_SHADER_STAGE_COMPUTE_BIT,
+                          0, sizeof(PushConstantsC128), &push_constants_c128);
+
+        uint32_t workgroups = div_wg(output.numel(), devices_[device_id].workgroupSize);
+        vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
+
+        insertComputeOnlyBarrier(cmdBuffer);
         endSingleTimeCommands(cmdBuffer, device_id);
         return output;
     }
@@ -264,6 +389,9 @@ auto VulkanBackend::dispatchFull(const std::vector<int64_t>& shape, double value
     if (dtype == DType::Int32) {
         int32_t int_value = static_cast<int32_t>(value);
         std::memcpy(&push_constants.fill_value_bits, &int_value, sizeof(uint32_t));
+    } else if (dtype == DType::UInt32) {
+        uint32_t uint_value = static_cast<uint32_t>(value);
+        std::memcpy(&push_constants.fill_value_bits, &uint_value, sizeof(uint32_t));
     } else if (dtype == DType::BFloat16) {
         // BFloat16 is the upper 16 bits of float32 with round-to-nearest-even
         float float_value = static_cast<float>(value);
@@ -302,10 +430,29 @@ auto VulkanBackend::dispatchFull(const std::vector<int64_t>& shape, double value
 // ============================================================================
 
 auto VulkanBackend::dispatchOnes(const std::vector<int64_t>& shape, DType dtype) -> Tensor {
-    // For Int64, UInt8, Bool, or BFloat16, use full() instead since ones shader only supports 32-bit values
-    // (BFloat16 now has a native full_bf16 shader, but we still route through full() for consistency)
-    if (dtype == DType::Int64 || dtype == DType::UInt8 || dtype == DType::Bool || dtype == DType::BFloat16) {
-        return dispatchFull(shape, 1.0, dtype);
+    // Route every dtype without a dedicated 32-bit "ones" shader through
+    // dispatchFull(1.0), which carries the complete dtype coverage (16/64-bit
+    // ints, unsigned, complex, FP8) and throws for bare quantized dtypes.
+    // The generic path below only correctly handles Float32 and Int32.
+    switch (dtype) {
+        case DType::Int16:
+        case DType::UInt16:
+        case DType::UInt32:
+        case DType::Int64:
+        case DType::UInt64:
+        case DType::UInt8:
+        case DType::Bool:
+        case DType::BFloat16:
+        case DType::Complex64:
+        case DType::Complex128:
+        case DType::FP8_E4M3:
+        case DType::FP8_E5M2:
+        case DType::QInt8:
+        case DType::QUInt8:
+        case DType::QInt4x2:
+            return dispatchFull(shape, 1.0, dtype);
+        default:
+            break;
     }
 
     // Float64 uses dedicated ones_f64 shader
@@ -796,6 +943,10 @@ auto VulkanBackend::dispatchMaskedSelect(const Tensor& input, const Tensor& mask
         gather_shader = "masked_select_gather_bool";
     } else if (input.dtype() == DType::BFloat16) {
         gather_shader = "masked_select_gather_bf16";
+    } else if (input.dtype() == DType::UInt64 || input.dtype() == DType::Complex64) {
+        // 8-byte dtypes gather bit-exact through the f64 mover (Complex64 must
+        // not widen through Float32 — that would drop the imaginary part).
+        gather_shader = "masked_select_gather_f64";
     } else if (input.dtype() == DType::Int8 || input.dtype() == DType::UInt8) {
         // Cast to Int32, do masked_select, cast back
         DType orig_dtype = input.dtype();
@@ -983,9 +1134,14 @@ auto VulkanBackend::dispatchWhere(const Tensor& condition, const Tensor& x, cons
     // to Float32 since their relative error falls within test tolerances.
     DType target_dtype = x.dtype();
     bool is_f64 = (target_dtype == DType::Float64);
+    // Complex64 is two float32 lanes (8 bytes); the where_f64 shader selects
+    // whole 8-byte elements bit-exact, so route Complex64 through it WITHOUT
+    // converting to Float32 (which would drop the imaginary part).
+    bool is_c64 = (target_dtype == DType::Complex64);
 
-    // R.13: gate FP64 dispatch on shaderFloat64 device support.
-    if (is_f64) {
+    // R.13: gate FP64 dispatch on shaderFloat64 device support (the 8-byte
+    // where_f64 path uses a float64-typed buffer to move 8-byte elements).
+    if (is_f64 || is_c64) {
         vulkan::ensure_fp64_supported(x.device().index, "Where");
     }
 
@@ -995,6 +1151,10 @@ auto VulkanBackend::dispatchWhere(const Tensor& condition, const Tensor& x, cons
     if (is_f64) {
         x_work = (x.dtype() == DType::Float64) ? x : x.to(DType::Float64);
         y_work = (y.dtype() == DType::Float64) ? y : y.to(DType::Float64);
+    } else if (is_c64) {
+        // Keep raw Complex64 storage; the 8-byte mover preserves both lanes.
+        x_work = (x.dtype() == DType::Complex64) ? x : x.to(DType::Complex64);
+        y_work = (y.dtype() == DType::Complex64) ? y : y.to(DType::Complex64);
     } else {
         x_work = (x.dtype() == DType::Float32) ? x : x.to(DType::Float32);
         y_work = (y.dtype() == DType::Float32) ? y : y.to(DType::Float32);
@@ -1005,16 +1165,19 @@ auto VulkanBackend::dispatchWhere(const Tensor& condition, const Tensor& x, cons
     if (!y_work.is_contiguous())  y_work  = y_work.contiguous();
 
     int32_t device_id = x.device().index;
-    auto* pipeline = getPipeline(is_f64 ? "where_f64" : "where", device_id);
+    auto* pipeline = getPipeline((is_f64 || is_c64) ? "where_f64" : "where", device_id);
 
     std::vector<int64_t> out_shape(cond_shape.begin(), cond_shape.end());
-    Tensor out_work(out_shape, is_f64 ? DType::Float64 : DType::Float32, x.device());
+    Tensor out_work(out_shape,
+                    is_f64 ? DType::Float64 : (is_c64 ? DType::Complex64 : DType::Float32),
+                    x.device());
 
     uint32_t n = static_cast<uint32_t>(out_work.numel());
     struct { uint32_t num_elements; } pc;
     pc.num_elements = n;
 
-    size_t elem_size = is_f64 ? sizeof(double) : sizeof(float);
+    // Complex64 is bound as 8-byte elements (one float64-sized slot each).
+    size_t elem_size = (is_f64 || is_c64) ? 8 : sizeof(float);
     size_t data_size = static_cast<size_t>(n) * elem_size;
     size_t bool_size = static_cast<size_t>(n) * sizeof(uint8_t);
 
@@ -1985,6 +2148,18 @@ auto VulkanBackend::dispatchCast(const Tensor& input, DType target_dtype) -> Ten
         shader_name = "cast_f32_fp8e5m2";
     } else if (src_dtype == DType::FP8_E5M2 && target_dtype == DType::Float32) {
         shader_name = "cast_fp8e5m2_f32";
+    } else if (src_dtype == DType::Float32 && target_dtype == DType::UInt16) {
+        shader_name = "cast_f32_u16";
+    } else if (src_dtype == DType::UInt16 && target_dtype == DType::Float32) {
+        shader_name = "cast_u16_f32";
+    } else if (src_dtype == DType::Float32 && target_dtype == DType::UInt32) {
+        shader_name = "cast_f32_u32";
+    } else if (src_dtype == DType::UInt32 && target_dtype == DType::Float32) {
+        shader_name = "cast_u32_f32";
+    } else if (src_dtype == DType::Float32 && target_dtype == DType::UInt64) {
+        shader_name = "cast_f32_u64";
+    } else if (src_dtype == DType::UInt64 && target_dtype == DType::Float32) {
+        shader_name = "cast_u64_f32";
     } else if ((src_dtype == DType::FP8_E4M3 || src_dtype == DType::FP8_E5M2) &&
                target_dtype != DType::Float32) {
         // FP8 -> non-Float32: two-step via Float32
@@ -2642,130 +2817,201 @@ auto VulkanBackend::dispatchFusedAdagradStep(
 /**
  * @brief Strided fill — fill non-contiguous tensor with a value.
  */
-auto VulkanBackend::dispatchStridedFill(Tensor& input, float value) -> void {
-    // Always use the strided fill shader to write into the existing buffer.
-    // The previous contiguous fast-path called dispatchFill() which creates a
-    // NEW tensor, replacing input's impl_ and losing the version counter.
-    // For in-place fill, we must write to the existing allocation.
-
+auto VulkanBackend::dispatchStridedFill(Tensor& input, double value) -> void {
+    // In-place strided fill: write `value` into the existing buffer, honoring
+    // non-contiguous strides. Each dtype width needs a shader that stores the
+    // full element (the generic 32-bit float shader would smear 16/8-bit slots
+    // and write wrong bits into integer / complex / quantized buffers).
     int32_t device_id = input.device().index;
-    bool is_f64 = (input.dtype() == DType::Float64);
-    bool is_f16 = (input.dtype() == DType::Float16);
-    bool is_bf16 = (input.dtype() == DType::BFloat16);
-    bool is_i64 = (input.dtype() == DType::Int64);
-    // The generic `strided_fill` shader writes 32-bit floats; for BFloat16
-    // buffers that smears two BF16 slots per store and produces [0, v, 0, v]
-    // patterns. Dispatch to the dedicated BF16 shader instead. Int64 needs
-    // full 8-byte writes or fill_(v) leaves the high half undefined.
-    std::string shader =
-        is_f64 ? "strided_fill_f64"
-        : is_i64 ? "strided_fill_i64"
-        : is_f16 ? "strided_fill_f16"
-        : is_bf16 ? "strided_fill_bf16"
-        : "strided_fill";
-    auto* pipeline = getPipeline(shader, device_id);
+    const DType dt = input.dtype();
 
-    int64_t numel = input.numel();
-    auto shape = input.shape();
-    auto strides = input.strides();
-    int ndim = static_cast<int>(shape.size());
+    const int64_t numel = input.numel();
+    const auto shape = input.shape();
+    const auto strides = input.strides();
+    const int ndim = static_cast<int>(shape.size());
 
-    // Compute physical storage extent: max_offset + 1 element
+    // Physical storage extent: max element offset + 1.
     size_t max_offset = 0;
     for (int d = 0; d < ndim; d++) {
         if (shape[d] > 0) {
             max_offset += static_cast<size_t>(shape[d] - 1) * static_cast<size_t>(strides[d]);
         }
     }
-    size_t buffer_size = (max_offset + 1) * input.dtype_size();
+    // Round up to a 4-byte boundary: the 16/8-bit shaders address the buffer
+    // as 32-bit words (masked atomics), so the descriptor must cover the full
+    // enclosing word of the last element.
+    const size_t raw_bytes = (max_offset + 1) * input.dtype_size();
+    const size_t buffer_size = ((raw_bytes + 3) / 4) * 4;
 
-    if (is_f64 || is_i64) {
-        // 8-byte variants (F64 / I64): pass fill value as two uint32 halves so
-        // the shader can reassemble a full 64-bit word per slot.
-        struct {
-            uint32_t n_elements;
-            uint32_t ndim;
-            uint32_t fill_value_lo;
-            uint32_t fill_value_hi;
-            uint32_t shape_stride[16];
-        } pc = {};
-        pc.n_elements = static_cast<uint32_t>(numel);
+    auto set_ss = [&](uint32_t ss[16]) {
+        for (int d = 0; d < std::min(ndim, 8); d++) {
+            ss[2 * d]     = static_cast<uint32_t>(shape[d]);
+            ss[2 * d + 1] = static_cast<uint32_t>(strides[d]);
+        }
+    };
+
+    auto run = [&](vulkan::ComputePipeline* pl, const void* pc, size_t pc_size) {
+        std::vector<std::pair<uint32_t, const void*>> bindings = {{0, input.data_ptr()}};
+        std::vector<size_t> sizes = {buffer_size};
+        VkDescriptorSet ds = allocateAndWriteDescriptorSet(device_id, pl, bindings, sizes);
+        VkCommandBuffer cmd = beginSingleTimeCommands(device_id);
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pl->pipeline());
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
+                               pl->layout(), 0, 1, &ds, 0, nullptr);
+        vkCmdPushConstants(cmd, pl->layout(), VK_SHADER_STAGE_COMPUTE_BIT, 0,
+                           static_cast<uint32_t>(pc_size), pc);
+        vkCmdDispatch(cmd, div_wg(numel, devices_[device_id].workgroupSize), 1, 1);
+        insertComputeOnlyBarrier(cmd);
+        endSingleTimeCommands(cmd, device_id);
+    };
+
+    // 64-bit: Float64 / Int64 / UInt64.
+    if (dt == DType::Float64 || dt == DType::Int64 || dt == DType::UInt64) {
+        struct Pc { uint32_t n, ndim, lo, hi; uint32_t ss[16]; } pc = {};
+        pc.n = static_cast<uint32_t>(numel);
         pc.ndim = static_cast<uint32_t>(ndim);
-
-        if (is_f64) {
-            double dval = static_cast<double>(value);
-            uint64_t bits;
+        uint64_t bits = 0;
+        if (dt == DType::Float64) {
+            double dval = value;
             std::memcpy(&bits, &dval, sizeof(bits));
-            pc.fill_value_lo = static_cast<uint32_t>(bits & 0xFFFFFFFF);
-            pc.fill_value_hi = static_cast<uint32_t>(bits >> 32);
+        } else if (dt == DType::UInt64) {
+            bits = static_cast<uint64_t>(value);
         } else {
             int64_t ival = static_cast<int64_t>(value);
-            uint64_t bits;
             std::memcpy(&bits, &ival, sizeof(bits));
-            pc.fill_value_lo = static_cast<uint32_t>(bits & 0xFFFFFFFF);
-            pc.fill_value_hi = static_cast<uint32_t>(bits >> 32);
         }
+        pc.lo = static_cast<uint32_t>(bits & 0xFFFFFFFFu);
+        pc.hi = static_cast<uint32_t>(bits >> 32);
+        set_ss(pc.ss);
+        run(getPipeline(dt == DType::Float64 ? "strided_fill_f64" : "strided_fill_i64", device_id),
+            &pc, sizeof(pc));
+        return;
+    }
 
-        for (int d = 0; d < std::min(ndim, 8); d++) {
-            pc.shape_stride[2 * d] = static_cast<uint32_t>(shape[d]);
-            pc.shape_stride[2 * d + 1] = static_cast<uint32_t>(strides[d]);
-        }
-
-        std::vector<std::pair<uint32_t, const void*>> bindings = {{0, input.data_ptr()}};
-        std::vector<size_t> sizes = {buffer_size};
-
-        VkDescriptorSet ds = allocateAndWriteDescriptorSet(device_id, pipeline, bindings, sizes);
-
-        VkCommandBuffer cmd = beginSingleTimeCommands(device_id);
-        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
-        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
-                               pipeline->layout(), 0, 1, &ds, 0, nullptr);
-        vkCmdPushConstants(cmd, pipeline->layout(), VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), &pc);
-        vkCmdDispatch(cmd, div_wg(numel, devices_[device_id].workgroupSize), 1, 1);
-        insertComputeOnlyBarrier(cmd);
-        endSingleTimeCommands(cmd, device_id);
-    } else {
-        struct {
-            uint32_t n_elements;
-            uint32_t ndim;
-            float fill_value;
-            uint32_t shape_stride[16];
-        } pc = {};
-        pc.n_elements = static_cast<uint32_t>(numel);
+    // 16-bit: Int16 / UInt16.
+    if (dt == DType::Int16 || dt == DType::UInt16) {
+        struct Pc { uint32_t n, ndim, val, pad; uint32_t ss[16]; } pc = {};
+        pc.n = static_cast<uint32_t>(numel);
         pc.ndim = static_cast<uint32_t>(ndim);
+        uint16_t v16 = (dt == DType::UInt16)
+            ? static_cast<uint16_t>(static_cast<uint32_t>(value))
+            : static_cast<uint16_t>(static_cast<int16_t>(value));
+        pc.val = static_cast<uint32_t>(v16);
+        set_ss(pc.ss);
+        run(getPipeline("strided_fill_i16", device_id), &pc, sizeof(pc));
+        return;
+    }
 
-        // The shader declares the buffer as `float[]` and stores `fill_value`
-        // directly. For Int32 storage (same 4-byte slot as Float32) we must
-        // pass the exact bit pattern so that Int32(v) reads back correctly,
-        // not float(v)'s IEEE bits. Reinterpret the target bit pattern as a
-        // float so the shader writes those bits verbatim.
-        if (input.dtype() == DType::Int32) {
-            int32_t ival = static_cast<int32_t>(value);
-            uint32_t bits;
-            std::memcpy(&bits, &ival, sizeof(uint32_t));
-            std::memcpy(&pc.fill_value, &bits, sizeof(float));
-        } else {
-            pc.fill_value = value;
+    // 8-bit: Int8 / UInt8 / Bool / FP8 / quantized (host-encoded byte).
+    if (dt == DType::Int8 || dt == DType::UInt8 || dt == DType::Bool ||
+        dt == DType::FP8_E4M3 || dt == DType::FP8_E5M2 ||
+        dt == DType::QInt8 || dt == DType::QUInt8 || dt == DType::QInt4x2) {
+        uint8_t byte_val;
+        if (dt == DType::QInt8 || dt == DType::QUInt8 || dt == DType::QInt4x2) {
+            if (input.q_scale() == 0.0) {
+                throw std::runtime_error(
+                    "fill_ on quantized tensor requires quantization params: "
+                    "call set_quantization_params(scale, zero_point) first");
+            }
+            const int64_t qval =
+                static_cast<int64_t>(std::llround(value / input.q_scale())) + input.q_zero_point();
+            if (dt == DType::QInt8) {
+                byte_val = static_cast<uint8_t>(
+                    static_cast<int8_t>(std::clamp<int64_t>(qval, -128, 127)));
+            } else if (dt == DType::QUInt8) {
+                byte_val = static_cast<uint8_t>(std::clamp<int64_t>(qval, 0, 255));
+            } else {  // QInt4x2: pack both nibbles with the same value.
+                const int64_t c = std::clamp<int64_t>(qval, -8, 7);
+                byte_val = static_cast<uint8_t>((c & 0xF) | ((c & 0xF) << 4));
+            }
+        } else if (dt == DType::Bool) {
+            byte_val = (value != 0.0) ? 1 : 0;
+        } else if (dt == DType::FP8_E4M3) {
+            byte_val = FP8_E4M3(static_cast<float>(value)).bits;
+        } else if (dt == DType::FP8_E5M2) {
+            byte_val = FP8_E5M2(static_cast<float>(value)).bits;
+        } else if (dt == DType::UInt8) {
+            byte_val = static_cast<uint8_t>(value);
+        } else {  // Int8
+            byte_val = static_cast<uint8_t>(static_cast<int8_t>(value));
         }
+        // Bind the storage BASE (always allocation-aligned) and pass the view's
+        // element offset to the shader. A sub-element-offset slice (e.g. a
+        // 1-byte Int8 view) cannot be bound directly: its byte offset violates
+        // minStorageBufferOffsetAlignment, so the descriptor would address the
+        // wrong word and the masked write would hit the wrong byte.
+        struct Pc { uint32_t n, ndim, val, base_offset; uint32_t ss[16]; } pc = {};
+        pc.n = static_cast<uint32_t>(numel);
+        pc.ndim = static_cast<uint32_t>(ndim);
+        pc.val = static_cast<uint32_t>(byte_val);
+        pc.base_offset = static_cast<uint32_t>(input.is_valid() ? input.offset() : 0);
+        set_ss(pc.ss);
 
-        for (int d = 0; d < std::min(ndim, 8); d++) {
-            pc.shape_stride[2 * d] = static_cast<uint32_t>(shape[d]);
-            pc.shape_stride[2 * d + 1] = static_cast<uint32_t>(strides[d]);
-        }
-
-        std::vector<std::pair<uint32_t, const void*>> bindings = {{0, input.data_ptr()}};
-        std::vector<size_t> sizes = {buffer_size};
-
-        VkDescriptorSet ds = allocateAndWriteDescriptorSet(device_id, pipeline, bindings, sizes);
-
+        auto* pl = getPipeline("strided_fill_i8", device_id);
+        const void* base_ptr = input.is_valid() ? input.storage()->data() : input.data_ptr();
+        const size_t base_bytes =
+            (static_cast<size_t>(pc.base_offset) + max_offset + 1) * input.dtype_size();
+        const size_t base_buf_size = ((base_bytes + 3) / 4) * 4;
+        std::vector<std::pair<uint32_t, const void*>> bindings = {{0, base_ptr}};
+        std::vector<size_t> sizes = {base_buf_size};
+        VkDescriptorSet ds = allocateAndWriteDescriptorSet(device_id, pl, bindings, sizes);
         VkCommandBuffer cmd = beginSingleTimeCommands(device_id);
-        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pl->pipeline());
         vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
-                               pipeline->layout(), 0, 1, &ds, 0, nullptr);
-        vkCmdPushConstants(cmd, pipeline->layout(), VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), &pc);
+                                pl->layout(), 0, 1, &ds, 0, nullptr);
+        vkCmdPushConstants(cmd, pl->layout(), VK_SHADER_STAGE_COMPUTE_BIT, 0,
+                           static_cast<uint32_t>(sizeof(pc)), &pc);
         vkCmdDispatch(cmd, div_wg(numel, devices_[device_id].workgroupSize), 1, 1);
         insertComputeOnlyBarrier(cmd);
         endSingleTimeCommands(cmd, device_id);
+        return;
+    }
+
+    // Complex64: (re, im) float32 lanes, im forced to 0.
+    if (dt == DType::Complex64) {
+        struct Pc { uint32_t n, ndim; float val; uint32_t pad; uint32_t ss[16]; } pc = {};
+        pc.n = static_cast<uint32_t>(numel);
+        pc.ndim = static_cast<uint32_t>(ndim);
+        pc.val = static_cast<float>(value);
+        set_ss(pc.ss);
+        run(getPipeline("strided_fill_complex64", device_id), &pc, sizeof(pc));
+        return;
+    }
+
+    // Complex128: (re, im) float64 lanes, im forced to 0.
+    if (dt == DType::Complex128) {
+        struct Pc { uint32_t n, ndim, pad0, pad1; double val; uint32_t ss[16]; } pc = {};
+        pc.n = static_cast<uint32_t>(numel);
+        pc.ndim = static_cast<uint32_t>(ndim);
+        pc.val = value;
+        set_ss(pc.ss);
+        run(getPipeline("strided_fill_complex128", device_id), &pc, sizeof(pc));
+        return;
+    }
+
+    // 32-bit: Float32 / Int32 / UInt32 (and packed Float16 / BFloat16, whose
+    // dedicated shaders consume the same float-valued push constant).
+    {
+        std::string shader =
+            (dt == DType::Float16)    ? "strided_fill_f16"
+            : (dt == DType::BFloat16) ? "strided_fill_bf16"
+            : "strided_fill";
+        struct Pc { uint32_t n, ndim; float val; uint32_t ss[16]; } pc = {};
+        pc.n = static_cast<uint32_t>(numel);
+        pc.ndim = static_cast<uint32_t>(ndim);
+        if (dt == DType::Int32) {
+            int32_t iv = static_cast<int32_t>(value);
+            uint32_t bits;
+            std::memcpy(&bits, &iv, sizeof(uint32_t));
+            std::memcpy(&pc.val, &bits, sizeof(float));
+        } else if (dt == DType::UInt32) {
+            uint32_t uv = static_cast<uint32_t>(value);
+            std::memcpy(&pc.val, &uv, sizeof(float));
+        } else {
+            pc.val = static_cast<float>(value);
+        }
+        set_ss(pc.ss);
+        run(getPipeline(shader, device_id), &pc, sizeof(pc));
     }
 }
 
@@ -3957,6 +4203,16 @@ auto VulkanBackend::dispatchScatterAdd(const Tensor& self, int64_t dim,
         // tensor of the same shape leaves it uninitialised, which on
         // Vulkan defaults to zeros and silently corrupts the result.
         return self.clone();
+    }
+
+    // Accumulation is undefined / unsupported for these dtypes: fail loudly
+    // rather than silently dropping or corrupting writes. (Bool += is UB-prone;
+    // complex accumulation is not implemented in the Vulkan scatter_add path.)
+    if (self.dtype() == DType::Bool ||
+        self.dtype() == DType::Complex64 || self.dtype() == DType::Complex128) {
+        throw std::runtime_error(
+            "VulkanBackend::dispatchScatterAdd: scatter_add is not supported for "
+            "Bool/Complex64/Complex128 dtypes");
     }
 
     int32_t device_id = self.device().index;
@@ -6790,7 +7046,7 @@ auto VulkanBackend::dispatchCTCLossForward(const Tensor& log_probs_in,
     if (N == 0 || T_max == 0 || C == 0) {
         // Zero-sized: nothing to dispatch. Leave outputs zero-initialised
         // (Tensor ctor zeroes via the caching allocator's clear path).
-        return {loss_out, grad_out};
+        return {loss_out.to(log_probs_in.dtype()), grad_out.to(log_probs_in.dtype())};
     }
 
     // Workspace tiles. alpha / beta: (N, T_max, L_max). post_scratch:
@@ -6858,7 +7114,7 @@ auto VulkanBackend::dispatchCTCLossForward(const Tensor& log_probs_in,
     insertComputeOnlyBarrier(cmdBuffer);
     endSingleTimeCommands(cmdBuffer, device_id);
 
-    return {loss_out, grad_out};
+    return {loss_out.to(log_probs_in.dtype()), grad_out.to(log_probs_in.dtype())};
 }
 
 } // namespace tenzor

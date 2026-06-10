@@ -198,12 +198,24 @@ auto RMSprop::step_impl() -> void {
             original_device.type == Device::Type::Vulkan &&
             grad_orig.device().type == Device::Type::Vulkan) {
 
-            std::vector<Tensor> inputs = {grad_orig, param->tensor(), square_avg_[i]};
-            if (hp.momentum > 0.0 && i < momentum_buffer_.size()) {
-                inputs.push_back(momentum_buffer_[i]);
+            // Input order MUST match the kernel contract [param, grad,
+            // square_avg, grad_avg?(centered), momentum?(momentum)] — the same
+            // order the CUDA path uses below. Previously this passed
+            // {grad, param, ...}, so the fused kernel (binding 1 = param) wrote
+            // the update into the GRAD buffer and left param unchanged (the
+            // RMSprop step was a silent no-op on Vulkan).
+            std::vector<Tensor> inputs = {param->tensor(), grad_orig, square_avg_[i]};
+            // The Vulkan fused kernel reads grad_avg from the FIXED slot
+            // inputs[3] and momentum_buffer from the FIXED slot inputs[4]. When
+            // momentum is active but centered is not, slot 3 must still be
+            // present (placeholder) so momentum lands at slot 4.
+            const bool want_momentum = (hp.momentum > 0.0 && i < momentum_buffer_.size());
+            const bool want_gradavg  = (hp.centered && i < grad_avg_.size());
+            if (want_gradavg || want_momentum) {
+                inputs.push_back(want_gradavg ? grad_avg_[i] : square_avg_[i]);  // slot 3 = grad_avg
             }
-            if (hp.centered && i < grad_avg_.size()) {
-                inputs.push_back(grad_avg_[i]);
+            if (want_momentum) {
+                inputs.push_back(momentum_buffer_[i]);                           // slot 4 = momentum
             }
 
             NewOpAttributes attrs;

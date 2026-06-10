@@ -1,0 +1,47 @@
+#version 450
+
+// Strided Fill — 8-bit variant (Int8 / UInt8 / Bool / FP8 / quantized byte).
+//
+// Writes the target byte of its containing 32-bit word using atomic AND/OR, so
+// the four bytes of a word can be written by concurrent threads of a
+// non-contiguous (e.g. transposed) view without the non-atomic
+// read-modify-write races that a plain 8-bit store
+// (GL_EXT_shader_8bit_storage) suffers on some drivers. Neighbouring bytes
+// outside the view are preserved. For quantized dtypes the host pre-encodes
+// the byte (scale/zero-point / nibble packing).
+layout(local_size_x_id = 0) in;
+
+layout(binding = 0) buffer Data { uint data[]; };  // 4 bytes per word
+
+layout(push_constant) uniform PushConstants {
+    uint n_elements;
+    uint ndim;
+    uint fill_value;   // 8-bit bit pattern in the low 8 bits
+    uint base_offset;  // element offset of a view into its storage (0 for a base tensor)
+    uint shape_stride[16];
+} params;
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= params.n_elements) return;
+
+    uint physical_offset = 0;
+    uint rem = idx;
+    for (int d = int(params.ndim) - 1; d >= 0; d--) {
+        uint dim_size = params.shape_stride[2 * d];
+        uint dim_stride = params.shape_stride[2 * d + 1];
+        uint coord = rem % dim_size;
+        rem /= dim_size;
+        physical_offset += coord * dim_stride;
+    }
+    // Buffer is bound at the storage base (alignment-safe); add the view's
+    // element offset here so a sub-aligned slice writes the correct byte.
+    physical_offset += params.base_offset;
+
+    uint word  = physical_offset >> 2;
+    uint shift = (physical_offset & 3u) * 8u;
+    uint mask  = 0xFFu << shift;
+    uint v     = (params.fill_value & 0xFFu) << shift;
+    atomicAnd(data[word], ~mask);
+    atomicOr(data[word], v);
+}

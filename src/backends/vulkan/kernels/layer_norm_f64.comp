@@ -9,6 +9,10 @@ layout(binding = 0) buffer Input { double input_data[]; };
 layout(binding = 1) buffer Output { double output_data[]; };
 layout(binding = 2) buffer Gamma { double gamma_data[]; };    // Optional affine parameter
 layout(binding = 3) buffer Beta { double beta_data[]; };      // Optional affine parameter
+// Saved-stats outputs (Float32 contract, one per batch element) — required by
+// LayerNormBackward. Without these the backward read rstd=0 and produced zero grad.
+layout(binding = 4) buffer MeanOut { float mean_out[]; };
+layout(binding = 5) buffer RstdOut { float rstd_out[]; };
 
 layout(push_constant) uniform PushConstants {
     uint batch_size;
@@ -68,6 +72,12 @@ void main() {
 
     double variance = shared_sum_sq[0] / double(params.normalized_shape);
     double inv_std = 1.0 / sqrt(variance + double(params.epsilon));
+
+    // Persist saved stats (one thread per batch element) for the backward pass.
+    if (tid == 0) {
+        mean_out[batch_idx] = float(mean);
+        rstd_out[batch_idx] = float(inv_std);
+    }
     barrier();
 
     // Step 3: Normalize and apply affine transformation

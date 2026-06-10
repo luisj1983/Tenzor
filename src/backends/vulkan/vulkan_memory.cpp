@@ -119,7 +119,20 @@ auto VulkanBackend::allocate(size_t bytes, int32_t device_id) -> void* {
 
     // Lock only the target device for the actual Vulkan allocation
     std::lock_guard<std::recursive_mutex> dev_lock(devices_[device_id].mutex);
-    void* ptr = allocateDeviceMemory(alloc_bytes, device_id);
+    void* ptr = nullptr;
+    try {
+        ptr = allocateDeviceMemory(alloc_bytes, device_id);
+    } catch (const std::exception&) {
+        // OOM: freed tensors sit in the per-device deferred-free list (they are
+        // not returned to the allocator until a synchronize(), to avoid a GPU
+        // sync on every deallocate). A long compute-only loop never syncs, so
+        // the deferred list grows until the allocator exhausts device memory
+        // even though most of it is reclaimable. Drain the GPU + flush the
+        // deferred frees back into the allocator cache, then retry once.
+        // (Mirrors the CUDA caching allocator's free-cache-and-retry on OOM.)
+        synchronize(device_id);
+        ptr = allocateDeviceMemory(alloc_bytes, device_id);
+    }
 
     // Lock the allocations map briefly to insert the tracking entry
     {

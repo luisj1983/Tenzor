@@ -113,7 +113,7 @@ auto VulkanBackend::dispatchZeros(const std::vector<int64_t>& shape, DType dtype
 /**
  * @brief Arange - generate sequential values on GPU
  */
-auto VulkanBackend::dispatchArange(float start, float end, float step, DType dtype, const Device& device) -> Tensor {
+auto VulkanBackend::dispatchArange(double start, double end, double step, DType dtype, const Device& device) -> Tensor {
     if (step == 0.0f) {
         throw std::runtime_error("arange: step must be non-zero");
     }
@@ -208,6 +208,46 @@ auto VulkanBackend::dispatchArange(float start, float end, float step, DType dty
         return output;
     }
 
+    // Int64 / UInt64: dedicated 64-bit shader. Going through a Float32
+    // intermediate would truncate large integers (>2^24), so compute the
+    // sequence directly from the double-precision start/step.
+    if (dtype == DType::Int64 || dtype == DType::UInt64) {
+        Tensor output({numel}, dtype, device);
+        int32_t device_id = device.index;
+        auto* pipeline = getPipeline("arange_i64", device_id);
+
+        const void* buf_out = output.data_ptr();
+        size_t buf_size = output.numel() * output.dtype_size();
+        std::vector<std::pair<uint32_t, const void*>> bindings = {{0, buf_out}};
+        std::vector<size_t> sizes = {buf_size};
+        VkDescriptorSet descriptorSet = allocateAndWriteDescriptorSet(
+            device_id, pipeline, bindings, sizes);
+
+        struct PushConstantsI64 {
+            uint32_t num_elements;
+            uint32_t _pad;
+            double start;
+            double step;
+        } push_constants;
+        push_constants.num_elements = static_cast<uint32_t>(numel);
+        push_constants._pad = 0;
+        push_constants.start = start;
+        push_constants.step = step;
+
+        VkCommandBuffer cmdBuffer = beginSingleTimeCommands(device_id);
+        vkCmdBindPipeline(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
+        vkCmdBindDescriptorSets(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE,
+                               pipeline->layout(), 0, 1, &descriptorSet, 0, nullptr);
+        vkCmdPushConstants(cmdBuffer, pipeline->layout(),
+                          VK_SHADER_STAGE_COMPUTE_BIT,
+                          0, sizeof(PushConstantsI64), &push_constants);
+        uint32_t workgroups = div_wg(numel, devices_[device_id].workgroupSize);
+        vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
+        insertComputeOnlyBarrier(cmdBuffer);
+        endSingleTimeCommands(cmdBuffer, device_id);
+        return output;
+    }
+
     // For other non-Float32 dtypes, compute in Float32 then convert
     if (dtype != DType::Float32) {
         auto result_f32 = dispatchArange(start, end, step, DType::Float32, device);
@@ -258,7 +298,7 @@ auto VulkanBackend::dispatchArange(float start, float end, float step, DType dty
 /**
  * @brief Linspace - generate linearly-spaced values on GPU
  */
-auto VulkanBackend::dispatchLinspace(float start, float end, int64_t steps, DType dtype, const Device& device) -> Tensor {
+auto VulkanBackend::dispatchLinspace(double start, double end, int64_t steps, DType dtype, const Device& device) -> Tensor {
     if (steps < 0) {
         throw std::runtime_error("linspace: number of steps must be non-negative");
     }
@@ -342,6 +382,45 @@ auto VulkanBackend::dispatchLinspace(float start, float end, int64_t steps, DTyp
                           VK_SHADER_STAGE_COMPUTE_BIT,
                           0, sizeof(PushConstants), &push_constants);
         vkCmdDispatch(cmdBuffer, div_wg(num_pairs, devices_[device_id].workgroupSize), 1, 1);
+        insertComputeOnlyBarrier(cmdBuffer);
+        endSingleTimeCommands(cmdBuffer, device_id);
+        return output;
+    }
+
+    // Int64 / UInt64: dedicated 64-bit shader to avoid Float32-intermediate
+    // truncation of large integer endpoints.
+    if (dtype == DType::Int64 || dtype == DType::UInt64) {
+        Tensor output({steps}, dtype, device);
+        int32_t device_id = device.index;
+        auto* pipeline = getPipeline("linspace_i64", device_id);
+
+        const void* buf_out = output.data_ptr();
+        size_t buf_size = output.numel() * output.dtype_size();
+        std::vector<std::pair<uint32_t, const void*>> bindings = {{0, buf_out}};
+        std::vector<size_t> sizes = {buf_size};
+        VkDescriptorSet descriptorSet = allocateAndWriteDescriptorSet(
+            device_id, pipeline, bindings, sizes);
+
+        struct PushConstantsI64 {
+            uint32_t num_steps;
+            uint32_t _pad;
+            double start;
+            double end_val;
+        } push_constants;
+        push_constants.num_steps = static_cast<uint32_t>(steps);
+        push_constants._pad = 0;
+        push_constants.start = start;
+        push_constants.end_val = end;
+
+        VkCommandBuffer cmdBuffer = beginSingleTimeCommands(device_id);
+        vkCmdBindPipeline(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
+        vkCmdBindDescriptorSets(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE,
+                               pipeline->layout(), 0, 1, &descriptorSet, 0, nullptr);
+        vkCmdPushConstants(cmdBuffer, pipeline->layout(),
+                          VK_SHADER_STAGE_COMPUTE_BIT,
+                          0, sizeof(PushConstantsI64), &push_constants);
+        uint32_t workgroups = div_wg(steps, devices_[device_id].workgroupSize);
+        vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
         insertComputeOnlyBarrier(cmdBuffer);
         endSingleTimeCommands(cmdBuffer, device_id);
         return output;
@@ -1028,7 +1107,7 @@ auto VulkanBackend::dispatchCat(const std::vector<Tensor>& inputs, int64_t dim) 
 /**
  * @brief Clamp tensor values to [min, max] range
  */
-auto VulkanBackend::dispatchClamp(const Tensor& input, float min_value, float max_value) -> Tensor {
+auto VulkanBackend::dispatchClamp(const Tensor& input, double min_value, double max_value) -> Tensor {
     // Handle empty tensors - no work to do
     if (input.numel() == 0) {
         auto input_shape = input.shape();

@@ -1823,6 +1823,13 @@ auto VulkanBackend::dispatchMaxPool3dBackward(const Tensor& grad_output, const T
 
     if (grad_out_numel == 0) return Tensor({N, C, D_in, H_in, W_in}, grad_output.dtype(), grad_output.device());
 
+    // Float16 scatter-backward via the f16 shader produces zero/garbage grads
+    // (no reliable f16 atomic accumulation). Widen to Float32, compute, narrow.
+    if (grad_output.dtype() == DType::Float16) {
+        auto gi = dispatchMaxPool3dBackward(grad_output.to(DType::Float32), indices, D_in, H_in, W_in);
+        return gi.to(DType::Float16);
+    }
+
     int32_t device_id = grad_output.device().index;
     Tensor grad_input = dispatchZeros({N, C, D_in, H_in, W_in}, grad_output.dtype(), grad_output.device());
 
@@ -2177,6 +2184,13 @@ auto VulkanBackend::dispatchAdaptiveMaxPool3dBackward(const Tensor& grad_output,
     int64_t grad_in_numel = 1;
     for (auto s : input_shape) grad_in_numel *= s;
     if (grad_out_numel == 0) return Tensor(input_shape, grad_output.dtype(), grad_output.device());
+
+    // Float16 scatter-backward via the f16 shader produces zero/garbage grads
+    // (no reliable f16 atomic accumulation). Widen to Float32, compute, narrow.
+    if (grad_output.dtype() == DType::Float16) {
+        auto gi = dispatchAdaptiveMaxPool3dBackward(grad_output.to(DType::Float32), indices, input_shape);
+        return gi.to(DType::Float16);
+    }
 
     int32_t device_id = grad_output.device().index;
     Tensor grad_input = dispatchZeros(input_shape, grad_output.dtype(), grad_output.device());

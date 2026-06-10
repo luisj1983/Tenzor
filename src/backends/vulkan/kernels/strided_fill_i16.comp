@@ -1,0 +1,44 @@
+#version 450
+
+// Strided Fill — 16-bit variant (Int16 / UInt16).
+//
+// Writes the target 16-bit field of its containing 32-bit word using atomic
+// AND/OR. A plain 16-bit store (GL_EXT_shader_16bit_storage) performs a
+// non-atomic read-modify-write of the enclosing 32-bit word on some drivers;
+// when a non-contiguous (e.g. transposed) view has the two halves of a word
+// written by threads that execute concurrently, those RMWs race and silently
+// drop writes. Masked atomics make each 16-bit field update independent and
+// lossless, and preserve any neighbouring element that lies outside the view.
+layout(local_size_x_id = 0) in;
+
+layout(binding = 0) buffer Data { uint data[]; };  // 2x 16-bit elements per word
+
+layout(push_constant) uniform PushConstants {
+    uint n_elements;
+    uint ndim;
+    uint fill_value;   // 16-bit bit pattern in the low 16 bits
+    uint _pad;
+    uint shape_stride[16];
+} params;
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= params.n_elements) return;
+
+    uint physical_offset = 0;
+    uint rem = idx;
+    for (int d = int(params.ndim) - 1; d >= 0; d--) {
+        uint dim_size = params.shape_stride[2 * d];
+        uint dim_stride = params.shape_stride[2 * d + 1];
+        uint coord = rem % dim_size;
+        rem /= dim_size;
+        physical_offset += coord * dim_stride;
+    }
+
+    uint word  = physical_offset >> 1;
+    uint shift = (physical_offset & 1u) * 16u;
+    uint mask  = 0xFFFFu << shift;
+    uint v     = (params.fill_value & 0xFFFFu) << shift;
+    atomicAnd(data[word], ~mask);
+    atomicOr(data[word], v);
+}

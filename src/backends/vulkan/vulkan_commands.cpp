@@ -248,6 +248,11 @@ auto VulkanBackend::synchronize(int32_t device_id) -> void {
     // forward pass.
     if (!ctx.hasPendingWork && ctx.submittedFrames == 0 &&
         ctx.activeCommandBuffer == VK_NULL_HANDLE) {
+        // No in-flight GPU work, but freed buffers may still be parked in the
+        // deferred-free list. The GPU is idle here, so they are safe to return
+        // to the allocator now — without this, a compute-only loop that never
+        // takes the slow path below accumulates deferred frees until OOM.
+        flush_deferred_frees(device_id);
         return;
     }
 
