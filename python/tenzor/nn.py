@@ -159,8 +159,12 @@ class Module(_CppModule):
                     object.__setattr__(self, '_param_cache', None)
                     self.register_parameter(name, value)
                 else:
-                    object.__setattr__(self, '_buffer_cache', None)
-                    self.register_buffer(name, value)
+                    # Tensor/Variable merge: factories return Variables, so a
+                    # requires_grad=False, non-Parameter variable is a plain
+                    # tensor — store as a regular attribute (PyTorch parity:
+                    # plain tensors are NOT auto-registered; use
+                    # self.register_buffer(name, value) for buffer semantics).
+                    object.__setattr__(self, name, value)
             return
 
         # Warn if assigning a list/tuple containing Modules (should use ModuleList)

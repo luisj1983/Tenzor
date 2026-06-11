@@ -17,7 +17,7 @@ Basic usage:
             self.fc1 = tz.nn.Linear(10, 20)
             self.fc2 = tz.nn.Linear(20, 5)
 
-        def forward_impl(self, x):
+        def forward(self, x):
             x = tz.nn.relu(self.fc1(x))
             return self.fc2(x)
 
@@ -353,6 +353,327 @@ for _op_name in (
         globals()[_op_name] = overrides.implements(_op)
 del _op_name, _op
 
+# ----------------------------------------------------------------
+# Ergonomics: `requires_grad=` on tensor-creation functions.
+#
+# PyTorch parity: ``tz.randn([3, 3], requires_grad=True)`` returns a
+# Variable directly instead of requiring the explicit two-step
+# ``tz.Variable(tz.randn([3, 3]), requires_grad=True)``. The C++ factory
+# bindings return plain Tensors; this thin wrapper intercepts the kwarg
+# at the Python boundary (zero overhead when requires_grad is False
+# beyond one kwarg check).
+# ----------------------------------------------------------------
+import functools as _functools
+import builtins as _builtins  # `all`/`any`/`min`/`max` are shadowed by tenzor ops above
+
+
+def _with_requires_grad(fn, variadic_shape: bool = False):
+    @_functools.wraps(fn)
+    def _factory_wrapper(*args, requires_grad: bool = False, **kwargs):
+        # Variadic-shape sugar (``tz.randn(3, 4)`` == ``tz.randn([3, 4])``)
+        # for the pure-shape factories, matching the .pyi stubs and PyTorch.
+        if variadic_shape and args and _builtins.all(
+            isinstance(a, int) and not isinstance(a, bool) for a in args
+        ):
+            args = (list(args),)
+        result = fn(*args, **kwargs)
+        # Tensor/Variable merge: factories ALWAYS return a Variable
+        # (autograd dormant unless requires_grad=True), so
+        #   x = tz.randn(3, 3); x.requires_grad = True
+        # works with object identity preserved — PyTorch 0.4 semantics.
+        from .tenzor_core import Variable as _V
+        if isinstance(result, _V):
+            if requires_grad:
+                result.requires_grad = True
+            return result
+        return _V(result, requires_grad)
+    return _factory_wrapper
+
+
+# Pure-shape factories: every positional argument is a dimension, so the
+# variadic form is unambiguous. (randint/full/arange/... have leading
+# non-shape scalars and keep their list-shape signatures.)
+for _factory_name in ("zeros", "ones", "randn", "rand", "empty"):
+    _factory = globals().get(_factory_name)
+    if _factory is not None and callable(_factory):
+        globals()[_factory_name] = _with_requires_grad(_factory, variadic_shape=True)
+for _factory_name in (
+    "randint", "randperm", "full", "eye", "arange", "linspace", "logspace",
+    "tensor",
+):
+    _factory = globals().get(_factory_name)
+    if _factory is not None and callable(_factory):
+        globals()[_factory_name] = _with_requires_grad(_factory)
+del _factory_name, _factory
+
+# ----------------------------------------------------------------
+# Ergonomics: method-style reductions on Variable.
+#
+# Lets the canonical loss idiom ``(v * v).sum().backward()`` work without
+# reaching for the top-level ``tz.sum(...)``. Delegates to the module-level
+# autograd-aware functions; only attaches names the C++ binding does not
+# already provide.
+# ----------------------------------------------------------------
+def _attach_variable_methods():
+    from .tenzor_core import Variable as _V
+
+    def _make_method(func, name):
+        def _method(self, *args, **kwargs):
+            return func(self, *args, **kwargs)
+        _method.__name__ = name
+        _method.__qualname__ = f"Variable.{name}"
+        _method.__doc__ = (
+            f"Method form of ``tenzor.{name}`` (autograd-aware); "
+            f"equivalent to ``tz.{name}(self, ...)``."
+        )
+        return _method
+
+    for _name in ("sum", "mean", "var", "std", "norm"):
+        _func = globals().get(_name)
+        if _func is not None and callable(_func) and not hasattr(_V, _name):
+            setattr(_V, _name, _make_method(_func, _name))
+
+
+_attach_variable_methods()
+del _attach_variable_methods
+
+# ----------------------------------------------------------------
+# Tensor/Variable merge (PyTorch-0.4-style unification).
+#
+# Three pieces complete the merge started by the factory wrappers above:
+#   1. Variable gains the full Tensor method/property surface by
+#      delegation to its underlying tensor. Non-autograd methods on an
+#      actively-tracking variable FAIL LOUD instead of silently severing
+#      the gradient graph (pure reads like .numpy() are always allowed).
+#   2. The raw Tensor class gains a read-only ``requires_grad`` (False)
+#      so generic code can probe either type uniformly.
+#   3. ``tz.Tensor`` becomes a facade whose isinstance()/issubclass()
+#      accept BOTH the raw C++ Tensor and Variable, so existing
+#      ``isinstance(x, tz.Tensor)`` checks keep passing now that
+#      factories return Variables.
+# ----------------------------------------------------------------
+def _unify_variable_surface():
+    from .tenzor_core import Tensor as _T, Variable as _V
+
+    # Pure reads: safe on any variable, never touch the graph.
+    _SAFE_READONLY = frozenset({
+        "numpy", "item", "tolist", "dim", "size", "ndim", "numel",
+        "is_contiguous", "stride", "storage_offset", "data_ptr",
+        "device_type", "has_names", "names", "memory_format", "version",
+        "is_pinned", "is_quantized", "is_per_channel_quantized",
+        "q_scale", "q_zero_point", "q_per_channel_axis",
+        "q_per_channel_scales", "q_per_channel_zero_points", "int_repr",
+        "dim_index",
+    })
+    # Constructors/statics stay on Tensor (reachable via the tz.Tensor facade).
+    _SKIP = frozenset({"from_numpy", "from_blob"})
+
+    def _wrap_out(out):
+        if isinstance(out, _T):
+            return _V(out, False)
+        if isinstance(out, (list, tuple)):
+            return type(out)(_wrap_out(o) for o in out)
+        return out
+
+    def _make_delegate(name):
+        def _delegate(self, *args, **kwargs):
+            if name not in _SAFE_READONLY and self.requires_grad and is_grad_enabled():
+                raise RuntimeError(
+                    f"Variable.{name}() is not autograd-aware and this "
+                    f"variable has requires_grad=True — the gradient graph "
+                    f"would be silently severed. Use the autograd-aware "
+                    f"tz.{name}(...) if it exists, call .detach() first if "
+                    f"you intend to leave the graph, or wrap the call in "
+                    f"tz.no_grad() (e.g. for in-place parameter init)."
+                )
+            out = getattr(self.tensor(), name)(*args, **kwargs)
+            return out if name in _SAFE_READONLY else _wrap_out(out)
+        _delegate.__name__ = name
+        _delegate.__qualname__ = f"Variable.{name}"
+        _delegate.__doc__ = f"Delegates to Tensor.{name} on the underlying tensor."
+        return _delegate
+
+    def _make_property(name):
+        def fget(self):
+            return _wrap_out(getattr(self.tensor(), name))
+        fget.__name__ = name
+        return property(fget, doc=f"Delegates to Tensor.{name}.")
+
+    for _name in dir(_T):
+        if _name.startswith("_") or _name in _SKIP or hasattr(_V, _name):
+            continue
+        _attr = getattr(_T, _name, None)
+        if isinstance(_attr, property):
+            setattr(_V, _name, _make_property(_name))
+        elif callable(_attr):
+            setattr(_V, _name, _make_delegate(_name))
+
+    # Raw Tensor: uniform requires_grad probe (always False; raw tensors
+    # cannot track gradients — use a factory with requires_grad=True or
+    # tz.Variable(t, True), which preserve/establish a Variable identity).
+    if not hasattr(_T, "requires_grad"):
+        def _t_rg_get(self):
+            return False
+
+        def _t_rg_set(self, value):
+            raise RuntimeError(
+                "Cannot set requires_grad on a raw Tensor: it has no autograd "
+                "state to enable in place. Create it as a Variable instead — "
+                "tz.<factory>(..., requires_grad=True) or "
+                "tz.Variable(tensor, requires_grad=True)."
+            )
+        _T.requires_grad = property(_t_rg_get, _t_rg_set)
+
+
+_unify_variable_surface()
+del _unify_variable_surface
+
+
+# ----------------------------------------------------------------
+# Tensor/Variable merge: unified op outputs and mixed arithmetic.
+#
+# 1. Module-level ops (and tz.fft / tz.linalg) lift raw-Tensor outputs to
+#    dormant Variables, so the user-facing world is uniformly Variable and
+#    chains like ``tz.matmul(a, b) - model(x)`` compose.
+# 2. Variable's binary operators lift raw-Tensor operands to dormant
+#    Variables (``variable - tensor`` works), and the reflected forms keep
+#    autograd when a Variable appears on the right of a raw Tensor.
+# ----------------------------------------------------------------
+def _unify_op_outputs():
+    from .tenzor_core import Tensor as _T, Variable as _V
+    _pyb_fn = type(_V.backward)  # pybind11 builtin-function type proxy
+
+    def _lift(out):
+        if isinstance(out, _T):
+            return _V(out, False)
+        if isinstance(out, tuple):
+            return tuple(_lift(o) for o in out)
+        if isinstance(out, list):
+            return [_lift(o) for o in out]
+        if isinstance(out, dict):
+            return {k: _lift(v) for k, v in out.items()}
+        return out
+
+    def _lifting(fn):
+        @_functools.wraps(fn)
+        def _lifted(*args, **kwargs):
+            return _lift(fn(*args, **kwargs))
+        return _lifted
+
+    def _is_pyb_function(obj):
+        return type(obj).__name__ == "builtin_function_or_method" or \
+            type(obj) is _pyb_fn
+
+    # Top-level callables: pybind functions AND the Python wrappers layered
+    # earlier (overrides.implements, factory wrappers). Lifting an op that
+    # already returns Variables is a no-op passthrough. Classes and modules
+    # are excluded structurally; `jit` is excluded because it is a decorator
+    # whose identity/attributes are part of the API.
+    import types as _types
+    _LIFT_EXCLUDE = {"jit", "initialize", "finalize"}
+    g = globals()
+    for _name in list(g):
+        if _name.startswith("_") or _name in _LIFT_EXCLUDE:
+            continue
+        _obj = g[_name]
+        if isinstance(_obj, type) or isinstance(_obj, _types.ModuleType):
+            continue
+        if _is_pyb_function(_obj) or isinstance(_obj, _types.FunctionType):
+            g[_name] = _lifting(_obj)
+
+    # High-traffic pybind submodules used in math chains.
+    for _mod in (g.get("fft"), g.get("linalg")):
+        if _mod is None:
+            continue
+        for _name in dir(_mod):
+            if _name.startswith("_"):
+                continue
+            _obj = getattr(_mod, _name)
+            if _is_pyb_function(_obj):
+                try:
+                    setattr(_mod, _name, _lifting(_obj))
+                except (AttributeError, TypeError):
+                    pass  # read-only module attribute
+
+    # Mixed Variable <op> Tensor arithmetic: lift the raw-Tensor operand.
+    def _patch_binop(dunder):
+        orig = getattr(_V, dunder, None)
+        if orig is None:
+            return
+
+        def _binop(self, other, _orig=orig):
+            if isinstance(other, _T):
+                other = _V(other, False)
+            return _orig(self, other)
+        _binop.__name__ = dunder
+        _binop.__qualname__ = f"Variable.{dunder}"
+        setattr(_V, dunder, _binop)
+
+    for _dunder in ("__add__", "__radd__", "__sub__", "__rsub__",
+                    "__mul__", "__rmul__", "__truediv__", "__rtruediv__",
+                    "__pow__", "__mod__", "__matmul__", "__rmatmul__"):
+        _patch_binop(_dunder)
+
+    # Raw Tensor <op> Variable: pybind raises TypeError before Python can
+    # try Variable's reflected operator, so route through the (patched)
+    # Variable op directly — lifting the raw tensor preserves autograd when
+    # the Variable operand is tracking.
+    def _patch_tensor_binop(dunder):
+        orig = getattr(_T, dunder, None)
+        if orig is None:
+            return
+
+        def _binop(self, other, _orig=orig, _dunder=dunder):
+            if isinstance(other, _V):
+                return getattr(_V(self, False), _dunder)(other)
+            return _orig(self, other)
+        _binop.__name__ = dunder
+        _binop.__qualname__ = f"Tensor.{dunder}"
+        setattr(_T, dunder, _binop)
+
+    for _dunder in ("__add__", "__sub__", "__mul__", "__truediv__",
+                    "__pow__", "__mod__", "__matmul__"):
+        _patch_tensor_binop(_dunder)
+
+
+_unify_op_outputs()
+del _unify_op_outputs
+
+
+class _TensorFacadeMeta(type):
+    """Metaclass making ``tz.Tensor`` cover both raw Tensor and Variable.
+
+    After the merge, factories return Variables; the facade keeps every
+    existing ``isinstance(x, tz.Tensor)`` / ``issubclass`` check passing for
+    both types, while construction and class attributes (``tz.Tensor(...)``,
+    ``tz.Tensor.from_numpy``) forward to the raw C++ class.
+    """
+
+    def __instancecheck__(cls, instance):
+        from .tenzor_core import Tensor as _T, Variable as _V
+        return isinstance(instance, (_T, _V))
+
+    def __subclasscheck__(cls, subclass):
+        from .tenzor_core import Tensor as _T, Variable as _V
+        if subclass is cls:
+            return True
+        return issubclass(subclass, (_T, _V))
+
+    def __getattr__(cls, name):
+        from .tenzor_core import Tensor as _T
+        return getattr(_T, name)
+
+
+class _TensorFacade(metaclass=_TensorFacadeMeta):
+    def __new__(cls, *args, **kwargs):
+        from .tenzor_core import Tensor as _T
+        return _T(*args, **kwargs)
+
+
+_TensorFacade.__name__ = "Tensor"
+_TensorFacade.__qualname__ = "Tensor"
+Tensor = _TensorFacade
+
 __version__ = "0.1.0"
 
 __all__ = [
@@ -687,3 +1008,15 @@ __all__ = [
 qint8 = dtype.qint8
 quint8 = dtype.quint8
 qint4x2 = dtype.qint4x2
+
+# ----------------------------------------------------------------
+# Auto-initialization (PyTorch parity: ``import tenzor`` is ready to use).
+#
+# ``initialize()`` is idempotent, so existing code that calls
+# ``tz.initialize()`` explicitly keeps working as a no-op. Set
+# TENZOR_AUTO_INIT=0 to defer initialization — useful when environment
+# knobs (TENZOR_BACKEND_DIR, TENZOR_SKIP_BACKENDS, ...) must be set from
+# Python before the backends load; call ``tz.initialize()`` manually after.
+# ----------------------------------------------------------------
+if _os.environ.get("TENZOR_AUTO_INIT", "1") != "0":
+    initialize()

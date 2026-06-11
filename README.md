@@ -25,10 +25,9 @@ A multi-backend tensor computation and deep learning library written in modern C
 ### Python
 
 ```python
-import tenzor as tz
-tz.initialize()  # required once per process before constructing tensors
+import tenzor as tz  # backends auto-initialize on import (set TENZOR_AUTO_INIT=0 to defer)
 
-x = tz.randn([32, 784])
+x = tz.randn(32, 784)
 model = tz.nn.Sequential(
     tz.nn.Linear(784, 128),
     tz.nn.ReLU(),

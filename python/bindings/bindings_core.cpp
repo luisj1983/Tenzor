@@ -833,6 +833,23 @@ Returns:
              py::arg("shape"),
              py::arg("dtype") = tenzor::DType::Float32,
              py::arg("device") = tenzor::Device::cpu())
+        // Tensor/Variable merge: converting constructor (paired with
+        // py::implicitly_convertible<Variable, Tensor> below) lets every
+        // Tensor-taking binding accept a Variable. FAIL-LOUD: a Variable
+        // that is actively tracking gradients refuses silent demotion —
+        // passing it into a non-autograd op would sever the graph and
+        // return zero input grads (documented bug pattern).
+        .def(py::init([](const tenzor::Variable& v) {
+            if (v.requires_grad() && tenzor::is_grad_enabled()) {
+                throw std::runtime_error(
+                    "Cannot implicitly use a requires_grad=True Variable in a "
+                    "non-autograd operation: the gradient graph would be "
+                    "silently severed. Use the autograd-aware variant of the "
+                    "op if one exists, call .detach() if you intend to leave "
+                    "the graph, or wrap the call in tz.no_grad().");
+            }
+            return v.tensor();
+        }), py::arg("variable"))
         .def_static("from_blob", [](py::object obj,
                                      std::vector<int64_t> shape,
                                      tenzor::DType dtype,
@@ -4692,9 +4709,29 @@ Returns:
         .def_property_readonly("is_cpu", [](const tenzor::Variable& self) {
             return self.device().type == tenzor::Device::Type::CPU;
         })
-        // Gradient control
-        .def_property_readonly("requires_grad", &tenzor::Variable::requires_grad,
-             "Check if variable requires gradient")
+        // Device transfer — graph-aware via autograd::to_device (a naive
+        // Variable(tensor().to(device), ...) would sever grad_fn). Accepts
+        // Device or string ("cuda:0") via implicitly_convertible.
+        .def("to", [](const tenzor::Variable& self, tenzor::Device device) {
+            return tenzor::to_device(self, device);
+        }, py::arg("device"),
+           py::call_guard<py::gil_scoped_release>(),
+           "Move to device (autograd-aware); accepts Device or string like \"cuda:0\"")
+        .def("cuda", [](const tenzor::Variable& self, int32_t index) {
+            return tenzor::to_device(self, tenzor::Device::cuda(index));
+        }, py::arg("index") = 0,
+           py::call_guard<py::gil_scoped_release>(),
+           "Move to CUDA device (autograd-aware)")
+        .def("cpu", [](const tenzor::Variable& self) {
+            return tenzor::to_device(self, tenzor::Device::cpu());
+        }, py::call_guard<py::gil_scoped_release>(),
+           "Move to CPU (autograd-aware)")
+        // Gradient control — settable property (PyTorch parity):
+        //   x = tz.randn(3, 3); x.requires_grad = True
+        .def_property("requires_grad",
+             &tenzor::Variable::requires_grad,
+             &tenzor::Variable::set_requires_grad,
+             "Whether this variable tracks gradients (settable)")
         .def("requires_grad_", &tenzor::Variable::set_requires_grad,
              py::arg("requires_grad") = true,
              "Set requires_grad in-place")
@@ -5591,6 +5628,11 @@ Returns:
                 return std::make_shared<tenzor::Variable>(t, requires_grad);
             }
         ));
+
+    // Tensor/Variable merge: every binding taking `const Tensor&` accepts a
+    // Variable transparently (via the guarded converting constructor on the
+    // Tensor class above). Declared here, after both classes are registered.
+    py::implicitly_convertible<tenzor::Variable, tenzor::Tensor>();
 
     // Gradient control functions
     m.def("is_grad_enabled", &tenzor::is_grad_enabled,

@@ -17,10 +17,10 @@ This guide helps PyTorch users transition to Tenzor. The API is intentionally si
 | PyTorch | Tenzor | Notes |
 |---------|--------|-------|
 | `torch.tensor([1, 2, 3])` | `tz.tensor([1, 2, 3])` | |
-| `torch.zeros(3, 4)` | `tz.zeros([3, 4])` | Shape must be a list |
-| `torch.ones(3, 4)` | `tz.ones([3, 4])` | Shape must be a list |
-| `torch.randn(3, 4)` | `tz.randn([3, 4])` | |
-| `torch.empty(3, 4)` | `tz.Tensor([3, 4])` | Uninitialized |
+| `torch.zeros(3, 4)` | `tz.zeros(3, 4)` | List form `tz.zeros([3, 4])` also works |
+| `torch.ones(3, 4)` | `tz.ones(3, 4)` | |
+| `torch.randn(3, 4)` | `tz.randn(3, 4)` | |
+| `torch.empty(3, 4)` | `tz.empty(3, 4)` | Uninitialized |
 | `torch.from_numpy(arr)` | `tz.from_numpy(arr)` | Zero-copy |
 | `torch.Tensor.from_blob(ptr, shape)` | `tz.Tensor.from_blob(buf, shape)` | Wrap external buffer |
 
@@ -28,30 +28,49 @@ This guide helps PyTorch users transition to Tenzor. The API is intentionally si
 
 ### 1. Variable vs Tensor
 
-Tenzor maintains an explicit `Variable` wrapper for autograd, similar to PyTorch pre-0.4:
+Tensor and Variable are merged at the Python level (PyTorch-0.4-style): every
+tensor returned by a factory or top-level op IS a Variable with dormant autograd,
+so the modern PyTorch idioms port unchanged:
 
 ```python
-# PyTorch (modern): Tensor has .requires_grad directly
-x = torch.randn(3, 3, requires_grad=True)
+# Both of these work, exactly like PyTorch:
+x = tz.randn(3, 3, requires_grad=True)
 
-# Tenzor: Use Variable for autograd
-x = tz.Variable(tz.randn([3, 3]), requires_grad=True)
-result = tz.autograd.matmul(x, w)
-result.backward()
+x = tz.randn(3, 3)
+x.requires_grad = True          # settable property, identity preserved
+
+loss = (x * x).sum()            # method-style reductions are autograd-aware
+loss.backward()
+print(x.grad)
+
+# isinstance checks see one unified type:
+isinstance(x, tz.Tensor)        # True
 ```
+
+Safety contract: a `requires_grad=True` variable refuses to silently flow into an
+operation that is not autograd-aware (you get an explicit error instead of a
+silently severed graph and zero gradients). Call `.detach()` to leave the graph
+intentionally, or wrap the call in `tz.no_grad()` (e.g. in-place parameter init).
+
+The explicit wrapper `tz.Variable(tensor, requires_grad=True)` still works for
+raw `Tensor` objects obtained from interop paths.
 
 ### 2. Device Specification
 
-Tenzor uses `Device` objects rather than string shortcuts:
+Tenzor accepts both `Device` objects and PyTorch-style strings everywhere a device is
+expected (`"cpu"`, `"cuda"`, `"cuda:1"`, `"rocm:0"`, `"vulkan"`, `"oneapi"`):
 
 ```python
 # PyTorch
 x = torch.randn(3, 3, device="cuda:0")
 x = x.to("cpu")
 
-# Tenzor
-x = tz.randn([3, 3], device=tz.Device.cuda(0))
-x = x.to(tz.Device.cpu())
+# Tenzor — identical
+x = tz.randn(3, 3, device="cuda:0")
+x = x.to("cpu")
+
+# Device objects work too
+x = x.to(tz.Device.cuda(0))
 
 # DeviceGuard for multi-GPU context
 with tz.DeviceGuard(tz.Device.cuda(1)):

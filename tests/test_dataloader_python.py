@@ -77,14 +77,14 @@ def test_dataloader_shuffle():
     first_epoch_samples = []
     for batch in loader:
         # Get first sample of batch
-        first_sample = batch.inputs.slice(0, 0, 1)
+        first_sample = tz.slice(batch.inputs, 0, 0, 1)
         first_epoch_samples.append(float(first_sample.item()))
 
     # Reset and iterate again
     loader.reset()
     second_epoch_samples = []
     for batch in loader:
-        first_sample = batch.inputs.slice(0, 0, 1)
+        first_sample = tz.slice(batch.inputs, 0, 0, 1)
         second_epoch_samples.append(float(first_sample.item()))
 
     # Check that orders are different (very unlikely to be the same with shuffle)

@@ -1322,6 +1322,10 @@ def _pin_memory_batch(batch):
         # with pin_memory=True. The previous hasattr ternary silently returned the
         # batch unpinned — bypassing the constructor-time hard error.
         return _core.pin_memory(batch)
+    elif isinstance(batch, _core.Variable):
+        # Tensor/Variable merge: batches are typically requires_grad=False
+        # Variables now; pin the underlying tensor, preserve the flag.
+        return _core.Variable(_core.pin_memory(batch.tensor()), batch.requires_grad)
     elif isinstance(batch, (tuple, list)):
         pinned = [_pin_memory_batch(item) for item in batch]
         return type(batch)(pinned)

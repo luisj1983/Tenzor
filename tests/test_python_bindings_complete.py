@@ -12,7 +12,7 @@ import os
 
 # Add the build directory to Python path
 # Assuming we're in tests/ and the built module is in build/python/
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'build', 'python'))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'build', 'python', 'tenzor'))
 
 try:
     import tenzor_core as tz
