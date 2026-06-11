@@ -186,7 +186,7 @@ After PR1+PR2+PR3:
 
 ## Update — 2026-04-28 (audit fix PR1 — functional wiring + grad-flow macro)
 
-PR 1 of the testing-audit fix landed (see `/home/lee/.claude/plans/create-and-implement-a-wild-pearl.md`). Net changes:
+PR 1 of the testing-audit fix landed (see `~/.claude/plans/create-and-implement-a-wild-pearl.md`). Net changes:
 
 - **Live Python-reachable autograd-break bugs fixed** in `src/nn/functional.cpp`:
   - `functional::group_norm`, `functional::instance_norm`, `functional::embedding`

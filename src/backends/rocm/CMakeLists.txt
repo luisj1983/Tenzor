@@ -370,12 +370,15 @@ set_source_files_properties(rocm_backend.cpp PROPERTIES
     COMPILE_FLAGS "-x c++"
 )
 
-# Installation rules
-install(TARGETS tenzor_backend_rocm
-    LIBRARY DESTINATION lib/tenzor/backends
-    RUNTIME DESTINATION bin
-    ARCHIVE DESTINATION lib/tenzor/backends
-)
+# Installation rules (FHS layout only; wheel installs are handled centrally in
+# the root CMakeLists.txt SKBUILD branch)
+if(NOT SKBUILD)
+    install(TARGETS tenzor_backend_rocm
+        LIBRARY DESTINATION lib/tenzor/backends
+        RUNTIME DESTINATION bin
+        ARCHIVE DESTINATION lib/tenzor/backends
+    )
+endif()
 
 # Install header files for ROCm backend if they exist
 if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/rocm_fp16.hpp")

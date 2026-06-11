@@ -461,10 +461,13 @@ if(ONEDNN_MODULE_FOUND AND ONEDNN_FOUND)
     message(STATUS "CPU Backend: Intel oneDNN enabled for optimized DNN primitives")
 endif()
 
-# Installation
-install(TARGETS tenzor_backend_cpu
-    LIBRARY DESTINATION lib/tenzor/backends
-    RUNTIME DESTINATION bin
-)
+# Installation (FHS layout only; wheel installs are handled centrally in the
+# root CMakeLists.txt SKBUILD branch)
+if(NOT SKBUILD)
+    install(TARGETS tenzor_backend_cpu
+        LIBRARY DESTINATION lib/tenzor/backends
+        RUNTIME DESTINATION bin
+    )
+endif()
 
 message(STATUS "CPU Backend: Configured successfully")

@@ -6,10 +6,10 @@ This document summarizes the dtype parameterization coverage for neural network 
 
 ## Files Created
 
-1. `/home/lee/Projects/Tenzor/tests/nn/layers/test_pooling_multidtype.cpp`
-2. `/home/lee/Projects/Tenzor/tests/nn/layers/test_dropout_multidtype.cpp`
-3. `/home/lee/Projects/Tenzor/tests/nn/layers/test_batchnorm2d_multidtype.cpp`
-4. `/home/lee/Projects/Tenzor/tests/nn/layers/test_normalization_multidtype.cpp`
+1. `tests/nn/layers/test_pooling_multidtype.cpp`
+2. `tests/nn/layers/test_dropout_multidtype.cpp`
+3. `tests/nn/layers/test_batchnorm2d_multidtype.cpp`
+4. `tests/nn/layers/test_normalization_multidtype.cpp`
 
 ## Coverage Statistics
 
@@ -192,12 +192,12 @@ Potential areas for expansion:
 
 ## References
 
-- Reference implementation: `/home/lee/Projects/Tenzor/tests/examples/test_multi_param_example.cpp`
+- Reference implementation: `tests/examples/test_multi_param_example.cpp`
 - Original test files:
-  - `/home/lee/Projects/Tenzor/tests/nn/layers/test_pooling.cpp`
-  - `/home/lee/Projects/Tenzor/tests/nn/layers/test_dropout.cpp`
-  - `/home/lee/Projects/Tenzor/tests/nn/layers/test_batchnorm2d.cpp`
-  - `/home/lee/Projects/Tenzor/tests/nn/layers/test_normalization.cpp`
+  - `tests/nn/layers/test_pooling.cpp`
+  - `tests/nn/layers/test_dropout.cpp`
+  - `tests/nn/layers/test_batchnorm2d.cpp`
+  - `tests/nn/layers/test_normalization.cpp`
 
 ---
 

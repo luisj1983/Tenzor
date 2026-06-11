@@ -7,7 +7,7 @@ Successfully converted 3 classic vision model test files to comprehensive multi-
 
 ### 1. test_mobilenet_v2_v3_multidtype.cpp
 **Original**: test_mobilenet_v2_v3.cpp
-**Location**: /home/lee/Projects/Tenzor/tests/unit/
+**Location**: tests/unit/
 
 **Coverage**:
 - MobileNetV2 (all tests converted)
@@ -42,7 +42,7 @@ Successfully converted 3 classic vision model test files to comprehensive multi-
 
 ### 2. test_swin_transformer_multidtype.cpp
 **Original**: test_swin_transformer.cpp
-**Location**: /home/lee/Projects/Tenzor/tests/unit/
+**Location**: tests/unit/
 
 **Coverage**:
 - Swin-Tiny (all tests converted)
@@ -90,7 +90,7 @@ Successfully converted 3 classic vision model test files to comprehensive multi-
 
 ### 3. test_classic_models_multidtype.cpp
 **Original**: test_classic_models.cpp
-**Location**: /home/lee/Projects/Tenzor/tests/unit/
+**Location**: tests/unit/
 
 **Coverage**:
 - VGG Family (VGG-11, 13, 16, 19)
@@ -281,7 +281,7 @@ INSTANTIATE_TEST_SUITE_P(ModelMultiDType, ModelMultiDTypeTest,
 
 ## CMakeLists.txt Integration
 
-Add to `/home/lee/Projects/Tenzor/tests/CMakeLists.txt`:
+Add to `tests/CMakeLists.txt`:
 ```cmake
 # Vision Model Multi-DType Tests
 add_executable(test_mobilenet_v2_v3_multidtype
@@ -310,7 +310,7 @@ add_test(NAME ClassicModelsMultiDType
 
 ```bash
 # Build tests
-cd /home/lee/Projects/Tenzor/tests
+cd tests
 mkdir -p build && cd build
 cmake ..
 make

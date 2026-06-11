@@ -6,7 +6,7 @@ Converted 2 vision and detection component test files to multi-dtype support, ex
 ## Files Converted
 
 ### 1. test_vision_components_multidtype.cpp
-**Location:** `/home/lee/Projects/Tenzor/tests/unit/test_vision_components_multidtype.cpp`
+**Location:** `tests/unit/test_vision_components_multidtype.cpp`
 
 **Original:** test_vision_components.cpp
 - 19 tests × 1 backend (CPU) × 1 dtype (Float32) = 19 scenarios
@@ -48,7 +48,7 @@ Converted 2 vision and detection component test files to multi-dtype support, ex
    - Different dimension configurations (48, 96, 192)
 
 ### 2. test_detection_components_multidtype.cpp
-**Location:** `/home/lee/Projects/Tenzor/tests/unit/test_detection_components_multidtype.cpp`
+**Location:** `tests/unit/test_detection_components_multidtype.cpp`
 
 **Original:** test_detection_components.cpp
 - 16 tests × 1 backend (CPU) × 1 dtype (Float32) = 16 scenarios

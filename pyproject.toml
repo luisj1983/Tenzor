@@ -69,13 +69,6 @@ Repository = "https://github.com/skreamz/Tenzor"
 [tool.scikit-build]
 # CMake configuration
 cmake.build-type = "Release"
-cmake.args = [
-    "-DTENZOR_BUILD_PYTHON=ON",
-    "-DTENZOR_BUILD_TESTS=OFF",
-    "-DTENZOR_BUILD_EXAMPLES=OFF",
-    "-DTENZOR_BUILD_BENCHMARKS=OFF",
-    "-DTENZOR_BUILD_MODEL_HUB=OFF",
-]
 
 # Wheel settings
 wheel.packages = ["python/tenzor"]
@@ -91,12 +84,37 @@ build-dir = "build/{wheel_tag}"
 # Minimum CMake version
 cmake.minimum-version = "3.25"
 
+# Keep internal artifacts, datasets and prebuilt binaries out of source
+# distributions (PyPI sdist size limit is 100 MB; the corpus/checkpoint data
+# alone is ~52 MB and must not be redistributed).
+sdist.exclude = [
+    "data/",
+    "checkpoints/",
+    "reports/",
+    "results/",
+    "Testing/",
+    "bin/",
+    "_deps/",
+    "graphify-out/",
+    "docs/superpowers/",
+    "third_party/iree_dist*",
+    "issues.txt",
+    "currentfailures.txt",
+    "profile_attention.py",
+]
+
 [tool.scikit-build.cmake.define]
 TENZOR_BUILD_PYTHON = "ON"
 TENZOR_BUILD_TESTS = "OFF"
 TENZOR_BUILD_EXAMPLES = "OFF"
 TENZOR_BUILD_BENCHMARKS = "OFF"
 TENZOR_BUILD_MODEL_HUB = "OFF"
+TENZOR_BUILD_TOOLS = "OFF"
+# Never let `pip install` trigger the IREE FetchContent source build
+# (~30-60 min, ~10 GB). Users who want the MLIR JIT in a self-built wheel can
+# override: CMAKE_ARGS="-DTENZOR_USE_MLIR_JIT=ON" pip install . (requires an
+# IREE install discoverable per docs/jit-mlir-setup.md).
+TENZOR_USE_MLIR_JIT = "OFF"
 
 [tool.black]
 line-length = 100

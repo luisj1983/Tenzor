@@ -7,8 +7,9 @@ Verifies that the DataLoader can be used from Python with all features working c
 import sys
 import numpy as np
 
-# Add the build directory to Python path
-sys.path.insert(0, '/home/lee/Projects/Tenzor/build/python')
+# Add the build directory to Python path (relative to this file)
+import os
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'build', 'python'))
 
 import tenzor.tenzor_core as tz
 

@@ -319,10 +319,13 @@ set_target_properties(tenzor_backend_oneapi PROPERTIES
 )
 add_dependencies(tenzor_backend_oneapi tenzor_backend_oneapi_build)
 
-# Installation
-install(FILES ${ONEAPI_SO_OUTPUT}
-    DESTINATION lib/tenzor/backends
-)
+# Installation (FHS layout only; wheel installs are handled centrally in the
+# root CMakeLists.txt SKBUILD branch)
+if(NOT SKBUILD)
+    install(FILES ${ONEAPI_SO_OUTPUT}
+        DESTINATION lib/tenzor/backends
+    )
+endif()
 
 message(STATUS "OneAPI Backend: Configured successfully")
 message(STATUS "  Compiler: ${SYCL_COMPILER}")

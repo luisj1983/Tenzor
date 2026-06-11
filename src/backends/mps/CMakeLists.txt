@@ -79,7 +79,9 @@ if(TARGET mps_shaders)
     add_dependencies(tenzor_backend_mps mps_shaders)
 endif()
 
+if(NOT SKBUILD)
 install(TARGETS tenzor_backend_mps
     LIBRARY DESTINATION lib
     ARCHIVE DESTINATION lib
 )
+endif()

@@ -35,7 +35,9 @@ TESTS_DIR = ROOT / "tests"
 # Files that are allowed to mention BackendDTypeParam (the canonical alias
 # itself lives here). Everything else under tests/ is checked.
 ALLOWED_BACKEND_DTYPE_PARAM_FILES = {
-    TESTS_DIR / "multi_backend_dtype_fixture.hpp",
+    # ROOT-relative: lint_file() reports (and checks) paths relative to ROOT
+    # so the baseline file is portable across machines.
+    Path("tests/multi_backend_dtype_fixture.hpp"),
 }
 
 
@@ -148,11 +150,18 @@ def lint_file(path: Path) -> list[str]:
         text = path.read_text(encoding="utf-8")
     except UnicodeDecodeError:
         return []
+    # Report ROOT-relative paths so baseline entries are machine-independent
+    # (an absolute-path baseline only ever matches on the machine that
+    # generated it — every violation looks NEW everywhere else).
+    try:
+        disp = path.resolve().relative_to(ROOT)
+    except ValueError:
+        disp = path
     errors: list[str] = []
-    errors.extend(check_struct_backend_dtype_param(path, text))
-    errors.extend(check_weak_backward(path, text))
-    errors.extend(check_inline_skip(path, text))
-    errors.extend(check_disabled_tests(path, text))
+    errors.extend(check_struct_backend_dtype_param(disp, text))
+    errors.extend(check_weak_backward(disp, text))
+    errors.extend(check_inline_skip(disp, text))
+    errors.extend(check_disabled_tests(disp, text))
     return errors
 
 

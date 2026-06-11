@@ -12,11 +12,15 @@ set_target_properties(tenzor_serve PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/bin"
 )
 
-add_executable(tenzor_model_converter tenzor_model_converter.cpp)
-target_link_libraries(tenzor_model_converter PRIVATE tenzor_core)
-set_target_properties(tenzor_model_converter PROPERTIES
-    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/bin"
-)
+# Requires ModelHub (tenzor::models::ModelHub lives behind
+# TENZOR_BUILD_MODEL_HUB); linking without it fails with undefined references.
+if(TENZOR_BUILD_MODEL_HUB)
+    add_executable(tenzor_model_converter tenzor_model_converter.cpp)
+    target_link_libraries(tenzor_model_converter PRIVATE tenzor_core)
+    set_target_properties(tenzor_model_converter PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/bin"
+    )
+endif()
 
 # Smoke test: just exercise the CLI argument parsing — full server start-up
 # would need a model repository. tenzor_serve accepts a path + port and
@@ -29,9 +33,11 @@ set_tests_properties(tenzor_serve_smoke PROPERTIES
     WILL_FAIL TRUE
     LABELS "tools")
 
-add_test(NAME tenzor_model_converter_usage
-         COMMAND $<TARGET_FILE:tenzor_model_converter>)
-# Invoking with no args prints usage and returns 1.
-set_tests_properties(tenzor_model_converter_usage PROPERTIES
-    WILL_FAIL TRUE
-    LABELS "tools")
+if(TENZOR_BUILD_MODEL_HUB)
+    add_test(NAME tenzor_model_converter_usage
+             COMMAND $<TARGET_FILE:tenzor_model_converter>)
+    # Invoking with no args prints usage and returns 1.
+    set_tests_properties(tenzor_model_converter_usage PROPERTIES
+        WILL_FAIL TRUE
+        LABELS "tools")
+endif()

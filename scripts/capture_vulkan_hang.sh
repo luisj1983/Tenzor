@@ -8,9 +8,10 @@
 
 set -e
 
-cd /home/lee/Projects/Tenzor/bin
+PROJECT_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+cd "$PROJECT_ROOT/bin"
 
-export LD_LIBRARY_PATH="/home/lee/Projects/Tenzor/bin:/opt/intel/oneapi/2025.2/lib:$LD_LIBRARY_PATH"
+export LD_LIBRARY_PATH="$PROJECT_ROOT/bin:/opt/intel/oneapi/2025.2/lib:$LD_LIBRARY_PATH"
 
 echo "=== Vulkan GPU Hang Debug Script ==="
 echo ""
@@ -29,7 +30,7 @@ if [ "$1" == "--renderdoc" ]; then
 
     renderdoccmd capture \
         -w \
-        -d /home/lee/Projects/Tenzor/bin \
+        -d "$PROJECT_ROOT/bin" \
         -c "Tenzor Vulkan Hang Debug" \
         ./debug_vulkan_hang 2>&1 || true
 

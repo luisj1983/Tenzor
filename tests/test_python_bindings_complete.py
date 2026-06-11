@@ -295,7 +295,7 @@ def print_summary():
     print("  • Shared pointer memory management")
     print("  • No stubs or placeholders")
     print("  • Production-ready quality")
-    print("\nFile: /home/lee/Projects/Tenzor/python/bindings.cpp")
+    print("\nFile: python/bindings.cpp")
     print("Status: PHASE 1, TASK 3 COMPLETE ✓")
     print("="*60 + "\n")
 

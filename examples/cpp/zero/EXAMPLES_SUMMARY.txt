@@ -3,7 +3,7 @@ ZeRO Optimization Examples - Phase 7 Completion Summary
 ================================================================================
 
 Created: 10 comprehensive, production-ready examples + 1 README (3,855+ lines)
-Location: /home/lee/Projects/Tenzor/examples/zero/
+Location: examples/zero/
 
 ================================================================================
 FILES CREATED

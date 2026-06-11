@@ -298,11 +298,14 @@ if(CMAKE_BUILD_TYPE MATCHES "Debug")
     )
 endif()
 
-# Installation
-install(TARGETS tenzor_backend_cuda
-    LIBRARY DESTINATION lib/tenzor/backends
-    RUNTIME DESTINATION bin
-)
+# Installation (FHS layout only; wheel installs are handled centrally in the
+# root CMakeLists.txt SKBUILD branch)
+if(NOT SKBUILD)
+    install(TARGETS tenzor_backend_cuda
+        LIBRARY DESTINATION lib/tenzor/backends
+        RUNTIME DESTINATION bin
+    )
+endif()
 
 message(STATUS "CUDA Backend: Configured successfully")
 message(STATUS "  CUDA Version: ${CUDAToolkit_VERSION}")

@@ -119,12 +119,18 @@ auto initialize() -> void {
         if (auto* env = std::getenv("TENZOR_BACKEND_DIR"))
             return env;
 
-        // 2. Same directory as libtenzor.so (via dladdr)
+        // 2. Relative to the library containing this function (via dladdr).
+        //    Covers both the wheel layout (site-packages/tenzor/lib/ holds
+        //    libtenzor_core.so and all tenzor_backend_*.so side by side) and
+        //    the FHS layout from `cmake --install` (backends one level down
+        //    in lib/tenzor/backends/).
         Dl_info info;
         if (dladdr(reinterpret_cast<void*>(&initialize), &info) && info.dli_fname) {
             auto lib_dir = std::filesystem::path(info.dli_fname).parent_path();
             if (std::filesystem::exists(lib_dir / "tenzor_backend_cpu.so"))
                 return lib_dir;
+            if (std::filesystem::exists(lib_dir / "tenzor" / "backends" / "tenzor_backend_cpu.so"))
+                return lib_dir / "tenzor" / "backends";
         }
 
         // 3. Relative to executable

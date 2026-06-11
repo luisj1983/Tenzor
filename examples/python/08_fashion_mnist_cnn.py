@@ -55,7 +55,7 @@ class Config:
     WEIGHT_DECAY = 1e-4
 
     # Checkpointing
-    CHECKPOINT_DIR = "/home/lee/Projects/Tenzor/examples/python/checkpoints"
+    CHECKPOINT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "checkpoints")
     MODEL_NAME = "fashion_mnist_cnn"
 
     # Device

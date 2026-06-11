@@ -1,0 +1,96 @@
+name: Release (wheels + sdist)
+
+# Builds distributable artifacts:
+#   - sdist (source distribution, internal artifacts excluded via
+#     [tool.scikit-build].sdist.exclude in pyproject.toml)
+#   - manylinux CPU wheels for CPython 3.9-3.13 (x86_64)
+#
+# GPU-enabled wheels (CUDA/ROCm/oneAPI/Vulkan) require the respective SDKs in
+# the build image and are intentionally out of scope for v0.1.x — the CPU
+# wheel is what `pip install tenzor` delivers. macOS/Windows wheels: pending
+# toolchain validation, build from source per INSTALL.md meanwhile.
+#
+# Publishing uses PyPI Trusted Publishing (OIDC) — configure the publisher on
+# PyPI for this repo + the `pypi` environment before the first tagged release.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+jobs:
+  build_sdist:
+    name: Build sdist
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build sdist
+        run: pipx run build --sdist
+
+      - name: Check sdist size (PyPI limit 100 MB)
+        run: |
+          ls -lh dist/
+          size=$(stat -c%s dist/*.tar.gz)
+          if [ "$size" -gt 99000000 ]; then
+            echo "::error::sdist is ${size} bytes — exceeds PyPI's 100 MB limit. Check sdist.exclude in pyproject.toml."
+            exit 1
+          fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sdist
+          path: dist/*.tar.gz
+
+  build_wheels:
+    name: Build manylinux wheels (CPU)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@v2.21
+        env:
+          CIBW_BUILD: "cp39-* cp310-* cp311-* cp312-* cp313-*"
+          CIBW_SKIP: "*-musllinux* *_i686"
+          CIBW_ARCHS_LINUX: "x86_64"
+          # GCC 13+ toolchain for C++23.
+          CIBW_MANYLINUX_X86_64_IMAGE: manylinux_2_28
+          # CPU-only wheel: GPU SDKs are not available in manylinux images.
+          CIBW_ENVIRONMENT: >-
+            CMAKE_ARGS="-DTENZOR_BUILD_CUDA=OFF
+            -DTENZOR_BUILD_ROCM=OFF
+            -DTENZOR_BUILD_ONEAPI=OFF
+            -DTENZOR_BUILD_VULKAN=OFF"
+          # System packages needed inside the build container (extend here if
+          # the build surfaces additional missing dependencies).
+          CIBW_BEFORE_ALL_LINUX: yum install -y libgomp || dnf install -y libgomp
+          # Smoke test: backend discovery + a real op through the dispatch
+          # table proves the backend .so files were bundled and found.
+          CIBW_TEST_COMMAND: >-
+            python -c "import tenzor as tz; tz.initialize();
+            x = tz.ones([2, 3]); y = (x + x).numpy();
+            assert y.shape == (2, 3) and float(y.max()) == 2.0;
+            print('tenzor wheel OK')"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheels-linux-x86_64
+          path: wheelhouse/*.whl
+
+  publish:
+    name: Publish to PyPI
+    needs: [build_sdist, build_wheels]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-24.04
+    environment: pypi
+    permissions:
+      id-token: write  # PyPI Trusted Publishing (OIDC)
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+          path: dist/
+
+      - name: Publish
+        uses: pypa/gh-action-pypi-publish@release/v1

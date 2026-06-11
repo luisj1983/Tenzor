@@ -126,6 +126,6 @@ Comprehensive multi-dtype test suite for Float16 precision behavior, conversions
 
 ## File Information
 
-- **Location:** `/home/lee/Projects/Tenzor/tests/unit/test_fp16_multidtype.cpp`
+- **Location:** `tests/unit/test_fp16_multidtype.cpp`
 - **Lines of code:** ~550
 - **Dependencies:** GTest, tenzor/core/dtype.hpp, tenzor/tenzor.hpp

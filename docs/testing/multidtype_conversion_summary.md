@@ -6,8 +6,8 @@ Successfully converted 3 test files to support multi-dtype parameterized testing
 ## Converted Files
 
 ### 1. test_nn_additional_multidtype.cpp
-**Source:** `/home/lee/Projects/Tenzor/tests/unit/test_nn_additional.cpp`
-**Target:** `/home/lee/Projects/Tenzor/tests/unit/test_nn_additional_multidtype.cpp`
+**Source:** `tests/unit/test_nn_additional.cpp`
+**Target:** `tests/unit/test_nn_additional_multidtype.cpp`
 
 **Coverage:**
 - **Activation Functions Tests** (9 tests)
@@ -59,8 +59,8 @@ Successfully converted 3 test files to support multi-dtype parameterized testing
 ---
 
 ### 2. test_ops_additional_multidtype.cpp
-**Source:** `/home/lee/Projects/Tenzor/tests/unit/test_ops_additional.cpp`
-**Target:** `/home/lee/Projects/Tenzor/tests/unit/test_ops_additional_multidtype.cpp`
+**Source:** `tests/unit/test_ops_additional.cpp`
+**Target:** `tests/unit/test_ops_additional_multidtype.cpp`
 
 **Coverage:**
 - **Reduction Operations** (4 tests)
@@ -107,8 +107,8 @@ Successfully converted 3 test files to support multi-dtype parameterized testing
 ---
 
 ### 3. test_chunk_multidtype.cpp
-**Source:** `/home/lee/Projects/Tenzor/tests/unit/test_chunk.cpp`
-**Target:** `/home/lee/Projects/Tenzor/tests/unit/test_chunk_multidtype.cpp`
+**Source:** `tests/unit/test_chunk.cpp`
+**Target:** `tests/unit/test_chunk_multidtype.cpp`
 
 **Coverage:**
 - BasicChunkEvenDivision
@@ -220,9 +220,9 @@ if (dtype != DType::Float32 && dtype != DType::Float64 && dtype != DType::Float1
 - **Float16**: ~50% (commented out, ready when backend support improves)
 
 ## Files Created
-1. `/home/lee/Projects/Tenzor/tests/unit/test_nn_additional_multidtype.cpp`
-2. `/home/lee/Projects/Tenzor/tests/unit/test_ops_additional_multidtype.cpp`
-3. `/home/lee/Projects/Tenzor/tests/unit/test_chunk_multidtype.cpp`
+1. `tests/unit/test_nn_additional_multidtype.cpp`
+2. `tests/unit/test_ops_additional_multidtype.cpp`
+3. `tests/unit/test_chunk_multidtype.cpp`
 
 ## Next Steps
 To integrate these tests into the build system, add to CMakeLists.txt:

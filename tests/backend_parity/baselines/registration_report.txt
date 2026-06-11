@@ -4,25 +4,25 @@ Running main() from /usr/src/debug/gtest/googletest-1.17.0/googletest/src/gtest_
 [----------] 1 test from RegistrationReport
 [ RUN      ] RegistrationReport.CoverageMatrix
 Initializing Tenzor library v0.1.0
-Loading CPU backend from: "/home/lee/Projects/Tenzor/bin/tenzor_backend_cpu.so"
+Loading CPU backend from: "bin/tenzor_backend_cpu.so"
 CPU backend registered: cpu
 [dispatch_table] WARNING: OpId 156 already registered in a different kernel array
 CPU dispatch table initialized (469 operations registered)
-Loading CUDA backend from: "/home/lee/Projects/Tenzor/bin/tenzor_backend_cuda.so"
+Loading CUDA backend from: "bin/tenzor_backend_cuda.so"
 CUDA backend registered: cuda
 Found 1 CUDA device(s)
 CUDA dispatch table initialized (469 operations registered)
-Loading ROCm backend from: "/home/lee/Projects/Tenzor/bin/tenzor_backend_rocm.so"
+Loading ROCm backend from: "bin/tenzor_backend_rocm.so"
 ROCm backend registered: rocm
 Found 1 ROCm device(s)
 ROCm dispatch table initialized with O(1) lookup
 ROCm dispatch table initialized (469 operations registered)
-Loading OneAPI backend from: "/home/lee/Projects/Tenzor/bin/tenzor_backend_oneapi.so"
+Loading OneAPI backend from: "bin/tenzor_backend_oneapi.so"
 OneAPI backend registered: oneapi
 Found 1 OneAPI device(s)
 [dispatch_table] WARNING: overwriting kernel for OpId 518
 OneAPI dispatch table initialized (469 operations registered)
-Loading Vulkan backend from: "/home/lee/Projects/Tenzor/bin/tenzor_backend_vulkan.so"
+Loading Vulkan backend from: "bin/tenzor_backend_vulkan.so"
 Found dedicated GPU: NVIDIA GeForce RTX 5070 Laptop GPU
 Found integrated GPU: AMD Radeon 890M Graphics (RADV STRIX1)
 Default Vulkan device (index 0): Dedicated GPU

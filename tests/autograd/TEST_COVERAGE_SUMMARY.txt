@@ -5,14 +5,14 @@ GRADCHECK COVERAGE INVESTIGATION - SUMMARY
 DELIVERABLES CREATED:
 ---------------------
 
-1. /home/lee/Projects/Tenzor/tests/autograd/GRADCHECK_COVERAGE_ANALYSIS.md
+1. tests/autograd/GRADCHECK_COVERAGE_ANALYSIS.md
    - Comprehensive 350+ line analysis report
    - Root cause analysis of 0% coverage issue
    - Detailed line-by-line coverage gap identification
    - Instrumentation issue analysis
    - Recommendations and action plan
 
-2. /home/lee/Projects/Tenzor/tests/autograd/test_gradcheck_extended.cpp
+2. tests/autograd/test_gradcheck_extended.cpp
    - Production-ready extended test suite (752 lines)
    - 24 comprehensive test cases
    - Multi-backend parameterized tests

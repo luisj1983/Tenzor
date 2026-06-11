@@ -1,5 +1,5 @@
 #!/bin/bash
-cd /home/lee/Projects/Tenzor/bin
+cd "$(dirname "$0")/bin"
 
 # Run rank 0 in background
 RANK=0 WORLD_SIZE=2 MASTER_ADDR=localhost MASTER_PORT=29500 ./test_distributed --gtest_filter="GlooBackendTest.*" > /tmp/rank0.log 2>&1 &

@@ -93,7 +93,7 @@ void VerifyDataGeneric(const Tensor& t, double expected_value, size_t count) {
 
 ### Build Tests
 ```bash
-cd /home/lee/Projects/Tenzor
+cd .
 mkdir -p build && cd build
 cmake .. -DBUILD_TESTS=ON
 make test_ops_multidtype
@@ -164,6 +164,6 @@ make test_ops_multidtype
 5. **Confidence**: Know that code works for all supported data types
 
 ## File Location
-- **New file**: `/home/lee/Projects/Tenzor/tests/unit/test_ops_multidtype.cpp`
-- **Reference**: `/home/lee/Projects/Tenzor/tests/examples/test_multi_param_example.cpp`
-- **Original**: `/home/lee/Projects/Tenzor/tests/unit/test_ops.cpp` (unchanged)
+- **New file**: `tests/unit/test_ops_multidtype.cpp`
+- **Reference**: `tests/examples/test_multi_param_example.cpp`
+- **Original**: `tests/unit/test_ops.cpp` (unchanged)

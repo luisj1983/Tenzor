@@ -78,8 +78,8 @@ crash-*
 # include files are auto-generated into the build tree by cmake (see
 # tests/CMakeLists.txt:241 — CMAKE_CURRENT_BINARY_DIR). A previous commit
 # (d710e695) accidentally checked in 1492 copies of these files with the
-# original developer's absolute /home/lee/Projects/Tenzor/ paths baked in,
+# the original developer's absolute project paths baked in,
 # which made the EXISTS check fail on every other machine and silently
 # degraded test discovery to *_NOT_BUILT for every test.
-tests/**/*\[1\]_include.cmake
-tests/**/*\[1\]_tests.cmake
+tests/**/*\[*\]_include.cmake
+tests/**/*\[*\]_tests.cmake

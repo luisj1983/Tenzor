@@ -212,8 +212,8 @@ class CoverageAnalyzer:
 
 
 def main():
-    project_root = "/home/lee/Projects/Tenzor"
-    build_dir = "/home/lee/Projects/Tenzor/build"
+    project_root = str(Path(__file__).resolve().parent.parent)
+    build_dir = str(Path(project_root) / "build")
 
     analyzer = CoverageAnalyzer(project_root, build_dir)
 

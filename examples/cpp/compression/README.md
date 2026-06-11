@@ -383,8 +383,8 @@ examples/compression/
 ## API Reference
 
 See header files for detailed API documentation:
-- [pruning.hpp](/home/lee/Projects/Tenzor/include/tenzor/nn/compression/pruning.hpp)
-- [distillation.hpp](/home/lee/Projects/Tenzor/include/tenzor/nn/compression/distillation.hpp)
+- [pruning.hpp](include/tenzor/nn/compression/pruning.hpp)
+- [distillation.hpp](include/tenzor/nn/compression/distillation.hpp)
 
 ## References
 

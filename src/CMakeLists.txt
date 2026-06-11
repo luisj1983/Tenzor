@@ -403,7 +403,11 @@ if(TENZOR_BUILD_MODEL_HUB)
     target_compile_definitions(tenzor_core PRIVATE TENZOR_HAS_MODEL_HUB)
     message(STATUS "Model Hub: Enabled (CURL + OpenSSL)")
 else()
-    message(STATUS "Model Hub: Disabled")
+    # Fail-loud stubs: model factories reference ModelHub unconditionally, so
+    # a hub-less core must still define the symbols (see models/hub_stub.cpp)
+    # or libtenzor_core.so fails at load time with undefined references.
+    target_sources(tenzor_core PRIVATE models/hub_stub.cpp)
+    message(STATUS "Model Hub: Disabled (ModelHub entry points throw)")
 endif()
 
 # Optional serving dependencies (cpp-httplib + gRPC)

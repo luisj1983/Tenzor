@@ -2,7 +2,7 @@
 # Coverage report generation script for Tenzor
 set -e
 
-PROJECT_ROOT="/home/lee/Projects/Tenzor"
+PROJECT_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 BUILD_DIR="$PROJECT_ROOT/build"
 COVERAGE_DIR="$PROJECT_ROOT/coverage_report"
 

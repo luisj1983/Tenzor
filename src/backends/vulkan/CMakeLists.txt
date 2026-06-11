@@ -281,18 +281,21 @@ if(GLSLC)
     add_dependencies(tenzor_backend_vulkan vulkan_shaders vulkan_embedded_shaders)
 endif()
 
-# Installation
-install(TARGETS tenzor_backend_vulkan
-    LIBRARY DESTINATION lib/tenzor/backends
-    RUNTIME DESTINATION bin
-)
-
-# Install shaders
-if(GLSLC)
-    install(DIRECTORY ${SHADER_OUTPUT_DIR}/
-        DESTINATION share/tenzor/shaders/vulkan
-        FILES_MATCHING PATTERN "*.spv"
+# Installation (FHS layout only; wheel installs are handled centrally in the
+# root CMakeLists.txt SKBUILD branch — wheels rely on embedded shaders)
+if(NOT SKBUILD)
+    install(TARGETS tenzor_backend_vulkan
+        LIBRARY DESTINATION lib/tenzor/backends
+        RUNTIME DESTINATION bin
     )
+
+    # Install shaders
+    if(GLSLC)
+        install(DIRECTORY ${SHADER_OUTPUT_DIR}/
+            DESTINATION share/tenzor/shaders/vulkan
+            FILES_MATCHING PATTERN "*.spv"
+        )
+    endif()
 endif()
 
 # Print configuration summary

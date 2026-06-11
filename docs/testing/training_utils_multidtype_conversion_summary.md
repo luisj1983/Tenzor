@@ -7,7 +7,7 @@ Converted 3 training utility test files to multi-dtype support, expanding test c
 
 ### 1. test_losses_advanced_multidtype.cpp
 **Original**: test_losses_advanced.cpp
-**Location**: /home/lee/Projects/Tenzor/tests/unit/test_losses_advanced_multidtype.cpp
+**Location**: tests/unit/test_losses_advanced_multidtype.cpp
 
 **Coverage Impact**:
 - **Original**: 30 tests × 4 backends × 1 dtype = 120 test scenarios
@@ -40,7 +40,7 @@ Converted 3 training utility test files to multi-dtype support, expanding test c
 
 ### 2. test_schedulers_advanced_multidtype.cpp
 **Original**: test_schedulers_advanced.cpp
-**Location**: /home/lee/Projects/Tenzor/tests/unit/test_schedulers_advanced_multidtype.cpp
+**Location**: tests/unit/test_schedulers_advanced_multidtype.cpp
 
 **Coverage Impact**:
 - **Original**: 20 tests × 4 backends × 1 dtype = 80 test scenarios
@@ -73,7 +73,7 @@ Converted 3 training utility test files to multi-dtype support, expanding test c
 
 ### 3. test_optimizers_extended_multidtype.cpp
 **Original**: test_optimizers_extended.cpp
-**Location**: /home/lee/Projects/Tenzor/tests/unit/test_optimizers_extended_multidtype.cpp
+**Location**: tests/unit/test_optimizers_extended_multidtype.cpp
 
 **Coverage Impact**:
 - **Original**: 18 tests × 4 backends × 1 dtype = 72 test scenarios
@@ -233,9 +233,9 @@ struct XxxDTypeParam {
 
 ## Files Created
 
-1. `/home/lee/Projects/Tenzor/tests/unit/test_losses_advanced_multidtype.cpp` (730 lines)
-2. `/home/lee/Projects/Tenzor/tests/unit/test_schedulers_advanced_multidtype.cpp` (602 lines)
-3. `/home/lee/Projects/Tenzor/tests/unit/test_optimizers_extended_multidtype.cpp` (708 lines)
+1. `tests/unit/test_losses_advanced_multidtype.cpp` (730 lines)
+2. `tests/unit/test_schedulers_advanced_multidtype.cpp` (602 lines)
+3. `tests/unit/test_optimizers_extended_multidtype.cpp` (708 lines)
 
 **Total**: 3 files, 2,040 lines of comprehensive multi-dtype test code
 

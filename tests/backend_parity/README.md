@@ -5,7 +5,7 @@ Comprehensive test suite ensuring all Tenzor backends (CPU, CUDA, OneAPI, Vulkan
 ## Quick Start
 
 ```bash
-cd /home/lee/Projects/Tenzor/build
+cd build
 make test_parity_full
 ```
 
@@ -79,8 +79,8 @@ silences a backend across the whole suite.
 
 ## Documentation
 
-- **Full Documentation**: `/home/lee/Projects/Tenzor/docs/BACKEND_PARITY_TESTS_COMPLETE.md`
-- **Implementation Summary**: `/home/lee/Projects/Tenzor/docs/BACKEND_PARITY_IMPLEMENTATION_SUMMARY.md`
+- **Full Documentation**: `docs/BACKEND_PARITY_TESTS_COMPLETE.md`
+- **Implementation Summary**: `docs/BACKEND_PARITY_IMPLEMENTATION_SUMMARY.md`
 
 ## Test Coverage
 
@@ -167,7 +167,7 @@ export that variable so a silently broken backend cannot pass as "skipped".
 To integrate into main build system:
 
 ```cmake
-# In /home/lee/Projects/Tenzor/tests/CMakeLists.txt
+# In tests/CMakeLists.txt
 add_subdirectory(backend_parity)
 ```
 

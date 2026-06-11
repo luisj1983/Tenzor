@@ -6,11 +6,12 @@ Simple direct test of loss bindings using Python C API.
 import sys
 import os
 
-# Test by importing the shared library directly
-sys.path.insert(0, '/home/lee/Projects/Tenzor/build/python')
+# Test by importing the shared library directly (paths relative to this file)
+_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.join(_ROOT, 'build', 'python'))
 
 # Set library path
-os.environ['LD_LIBRARY_PATH'] = '/home/lee/Projects/Tenzor/bin:' + os.environ.get('LD_LIBRARY_PATH', '')
+os.environ['LD_LIBRARY_PATH'] = os.path.join(_ROOT, 'bin') + ':' + os.environ.get('LD_LIBRARY_PATH', '')
 
 try:
     # Try importing tenzor module

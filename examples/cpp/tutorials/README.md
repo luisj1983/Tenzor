@@ -47,7 +47,7 @@ Input (784) → Linear(784→128) → ReLU → Dropout(0.5) → Linear(128→10)
 
 **Build and Run:**
 ```bash
-cd /home/lee/Projects/Tenzor/build
+cd build
 cmake .. && make
 ./bin/mnist_complete
 ```
@@ -113,7 +113,7 @@ Epoch 10/10 | Train Loss: 0.8456 | Train Acc: 72.34% | Val Loss: 0.9123 | Val Ac
 
 **Build and Run:**
 ```bash
-cd /home/lee/Projects/Tenzor/build
+cd build
 cmake .. && make
 ./bin/mnist_with_dataloader
 ```
@@ -197,7 +197,7 @@ Input (784) → Linear(784→256) → ReLU → Dropout(0.3) →
 
 **Build and Run:**
 ```bash
-cd /home/lee/Projects/Tenzor/build
+cd build
 cmake .. && make
 ./bin/custom_training_loop
 ```
@@ -246,7 +246,7 @@ Final validation accuracy: 75.50%
 
 ```bash
 # From project root
-cd /home/lee/Projects/Tenzor
+cd .
 mkdir -p build && cd build
 
 # Configure

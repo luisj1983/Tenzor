@@ -701,6 +701,50 @@ else()
 endif()
 
 # Installation
+#
+# Two install layouts:
+#  - SKBUILD (wheel build via scikit-build-core / pip): everything lands inside
+#    the wheel's tenzor/ package directory. All shared libraries go to
+#    tenzor/lib/ so the backend discovery in src/core/init.cpp (dladdr on
+#    libtenzor_core.so, then look for tenzor_backend_*.so next to it) works
+#    inside a pip-installed wheel without TENZOR_BACKEND_DIR.
+#  - Standard (cmake --install): FHS layout for C++ consumers
+#    (find_package(Tenzor) / pkg-config).
+if(SKBUILD)
+    set_target_properties(tenzor_core PROPERTIES INSTALL_RPATH "$ORIGIN")
+    install(TARGETS tenzor_core LIBRARY DESTINATION lib COMPONENT python)
+
+    foreach(backend cpu cuda rocm oneapi vulkan mps)
+        if(TARGET tenzor_backend_${backend})
+            get_target_property(_imported tenzor_backend_${backend} IMPORTED)
+            if(NOT _imported)
+                set_target_properties(tenzor_backend_${backend}
+                    PROPERTIES INSTALL_RPATH "$ORIGIN")
+                install(TARGETS tenzor_backend_${backend}
+                    LIBRARY DESTINATION lib COMPONENT python)
+            else()
+                # Prebuilt (imported) backend, e.g. the externally-compiled
+                # oneAPI backend: ship the binary as-is when present.
+                get_target_property(_loc tenzor_backend_${backend} IMPORTED_LOCATION)
+                if(_loc AND EXISTS "${_loc}")
+                    install(FILES "${_loc}" DESTINATION lib COMPONENT python)
+                endif()
+            endif()
+        endif()
+    endforeach()
+
+    if(TARGET tenzor_python)
+        # Extension module sits at the package root (site-packages/tenzor/);
+        # $ORIGIN/lib resolves libtenzor_core.so and the directly-linked
+        # backend libraries at import time.
+        set_target_properties(tenzor_python PROPERTIES INSTALL_RPATH "$ORIGIN/lib")
+        install(TARGETS tenzor_python LIBRARY DESTINATION . COMPONENT python)
+    endif()
+else()
+# Relocatable install: $ORIGIN-relative RPATHs instead of the configure-time
+# absolute prefix (CMAKE_INSTALL_RPATH_USE_LINK_PATH still appends external
+# link dirs such as oneAPI/MKL).
+set_target_properties(tenzor_core PROPERTIES INSTALL_RPATH "$ORIGIN")
 install(TARGETS tenzor_core
     EXPORT TenzorTargets
     LIBRARY DESTINATION lib
@@ -719,6 +763,9 @@ foreach(backend cpu cuda rocm oneapi vulkan)
     if(TARGET tenzor_backend_${backend})
         get_target_property(_imported tenzor_backend_${backend} IMPORTED)
         if(NOT _imported)
+            # lib/tenzor/backends -> lib (libtenzor_core.so)
+            set_target_properties(tenzor_backend_${backend}
+                PROPERTIES INSTALL_RPATH "$ORIGIN/../..")
             install(TARGETS tenzor_backend_${backend}
                 EXPORT TenzorTargets
                 LIBRARY DESTINATION lib/tenzor/backends
@@ -766,21 +813,29 @@ install(FILES "${CMAKE_CURRENT_BINARY_DIR}/tenzor.pc"
     DESTINATION lib/pkgconfig
 )
 
-# Python module installation
+# Python module installation (manual cmake --install).
+# Destinations must stay relative: absolute ${CMAKE_INSTALL_PREFIX} paths break
+# staged installs (DESTDIR) and wheel staging.
 if(TENZOR_BUILD_PYTHON AND TARGET tenzor_python)
-    # Install the compiled extension module
+    # Install the compiled extension module.
+    # lib/python/tenzor -> lib (libtenzor_core.so) and lib/tenzor/backends
+    # (directly-linked tenzor_backend_*.so).
+    set_target_properties(tenzor_python PROPERTIES
+        INSTALL_RPATH "$ORIGIN/../..;$ORIGIN/../../tenzor/backends")
     install(TARGETS tenzor_python
-        LIBRARY DESTINATION ${CMAKE_INSTALL_PREFIX}/lib/python/tenzor
+        LIBRARY DESTINATION lib/python/tenzor
         COMPONENT python
     )
-    # Install Python source files
+    # Install Python source files, type stubs and the PEP 561 marker
     install(DIRECTORY python/tenzor/
-        DESTINATION ${CMAKE_INSTALL_PREFIX}/lib/python/tenzor
+        DESTINATION lib/python/tenzor
         COMPONENT python
         FILES_MATCHING
             PATTERN "*.py"
             PATTERN "*.pyi"
+            PATTERN "py.typed"
     )
+endif()
 endif()
 
 # Print configuration summary

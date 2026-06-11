@@ -7,7 +7,7 @@ Comprehensive performance benchmarking suite comparing Tenzor with PyTorch and o
 ### Python Benchmarks (Recommended - Compares with PyTorch)
 
 ```bash
-cd /home/lee/Projects/Tenzor
+cd .
 
 # Quick benchmark (fewer iterations, fast)
 PYTHONPATH=python:$PYTHONPATH python benchmarks/python/run_benchmarks.py --quick
@@ -26,7 +26,7 @@ python benchmarks/python/generate_report.py results/benchmark_*.json
 
 ```bash
 # Build with benchmarks enabled
-cd /home/lee/Projects/Tenzor/build
+cd build
 cmake -DTENZOR_BUILD_BENCHMARKS=ON ..
 cmake --build .
 
@@ -297,7 +297,7 @@ export CUDA_VISIBLE_DEVICES=0
 
 ## Documentation
 
-Full documentation: `/home/lee/Projects/Tenzor/docs/BENCHMARK_SUITE_SUMMARY.md`
+Full documentation: `docs/BENCHMARK_SUITE_SUMMARY.md`
 
 ## File Structure
 

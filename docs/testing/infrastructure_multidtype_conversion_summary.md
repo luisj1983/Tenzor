@@ -220,7 +220,7 @@ static bool isBackendAvailable(Device::Type type) {
 
 ## 📂 File Locations
 
-All files created in: `/home/lee/Projects/Tenzor/tests/unit/`
+All files created in: `tests/unit/`
 
 ```
 tests/unit/

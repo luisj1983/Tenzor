@@ -409,7 +409,7 @@ The tutorials also add valuable features not in the original spec:
 ### Quick Build
 
 ```bash
-cd /home/lee/Projects/Tenzor/build
+cd build
 cmake .. && make
 
 # Run tutorials
@@ -439,7 +439,7 @@ make custom_training_loop
 
 1. **Compile Test:**
    ```bash
-   cd /home/lee/Projects/Tenzor/build
+   cd build
    make mnist_complete mnist_with_dataloader custom_training_loop
    ```
 
@@ -550,6 +550,6 @@ All tutorial examples have been successfully created as **complete, production-r
 ---
 
 **Generated:** October 26, 2025
-**Location:** `/home/lee/Projects/Tenzor/examples/tutorials/`
+**Location:** `examples/tutorials/`
 **Quality:** Production-Ready
 **Status:** Complete ✓
