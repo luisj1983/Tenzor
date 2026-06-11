@@ -83,3 +83,16 @@ crash-*
 # degraded test discovery to *_NOT_BUILT for every test.
 tests/**/*\[*\]_include.cmake
 tests/**/*\[*\]_tests.cmake
+
+# Purged from history for the public release (2026-06) — never re-track:
+# datasets with restrictive licenses, trained checkpoints, and internal
+# tooling/report artifacts.
+data/
+checkpoints/
+reports/
+results/
+graphify-out/
+docs/superpowers/
+issues.txt
+currentfailures.txt
+profile_attention.py
