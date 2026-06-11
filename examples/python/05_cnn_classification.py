@@ -247,10 +247,13 @@ def main():
             # Apply dropout during training (would need dropout layer)
             logits = fc2(h1)
 
-            # Simulate loss computation and backward pass
+            # Loss computation and backward pass (cross-entropy on random
+            # labels — the data is synthetic, but the loss/grad path is real)
+            labels = tz.from_numpy(
+                np.random.randint(0, 10, batch_size).astype(np.int64))
+            loss = tz.nn.cross_entropy(logits, labels)
             optimizer.zero_grad()
-            # In practice: compute actual loss and call backward
-            logits.backward()
+            loss.backward()
             optimizer.step()
 
             n_batches_processed += 1

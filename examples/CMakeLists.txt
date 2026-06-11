@@ -268,3 +268,49 @@ target_link_libraries(automatic_offload_example PRIVATE tenzor_core)
 # ============================================================================
 
 add_subdirectory(cpp/showcase)
+
+# ============================================================================
+# Python examples as tests (examples-as-tests pattern, Python side)
+# ============================================================================
+# Each runnable Python example is registered as a ctest so API drift breaks
+# CI instead of bit-rotting silently. They run against the build-tree Python
+# package (build/python) and need TENZOR_BUILD_PYTHON=ON.
+if(TENZOR_BUILD_PYTHON AND TARGET tenzor_python)
+    find_package(Python COMPONENTS Interpreter QUIET)
+    if(Python_FOUND)
+        set(_PY_EXAMPLES
+            01_tensor_basics
+            02_autograd_basics
+            03_linear_regression
+            04_mnist_mlp
+            05_cnn_classification
+            06_custom_layer
+            09_rnn_text_classification
+            10_distributed_training
+            checkpoint_examples
+            model_hub_example
+            onnx_export_demo
+            onnx_roundtrip_verification
+        )
+        foreach(_ex ${_PY_EXAMPLES})
+            add_test(NAME example_python_${_ex}
+                COMMAND ${Python_EXECUTABLE}
+                    ${CMAKE_CURRENT_SOURCE_DIR}/python/${_ex}.py)
+            set_tests_properties(example_python_${_ex} PROPERTIES
+                ENVIRONMENT "PYTHONPATH=${CMAKE_BINARY_DIR}/python"
+                TIMEOUT 600
+                LABELS "examples;python")
+        endforeach()
+        # Heavier training demos: generous timeout, separate label so quick
+        # CI runs can exclude them (ctest -LE examples_slow).
+        foreach(_ex 07_resnet_cifar10 08_fashion_mnist_cnn)
+            add_test(NAME example_python_${_ex}
+                COMMAND ${Python_EXECUTABLE}
+                    ${CMAKE_CURRENT_SOURCE_DIR}/python/${_ex}.py)
+            set_tests_properties(example_python_${_ex} PROPERTIES
+                ENVIRONMENT "PYTHONPATH=${CMAKE_BINARY_DIR}/python"
+                TIMEOUT 1800
+                LABELS "examples;python;examples_slow")
+        endforeach()
+    endif()
+endif()

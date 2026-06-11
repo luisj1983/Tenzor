@@ -203,15 +203,16 @@ def train_epoch(model: tz.nn.Module, optimizer,
 
         # Forward pass (with autocast if using mixed precision)
         if USE_MIXED_PRECISION and scaler is not None:
-            # Mixed precision forward pass
+            # Mixed precision: canonical GradScaler recipe —
+            # zero_grad -> scale(loss).backward() -> scaler.step -> update.
+            # (scaler.step unscales internally and skips the step on inf/nan;
+            # calling optimizer.step() directly leaves the scaler mid-unscale.)
+            optimizer.zero_grad()
             outputs = model.forward(inputs)
             loss = criterion(outputs, targets)
 
-            # Backward pass with gradient scaling
-            scaled_loss = scaler.scale(loss)
-            scaled_loss.backward()
-            scaler.unscale_(optimizer)
-            optimizer.step()
+            scaler.scale(loss).backward()
+            scaler.step(optimizer)
             scaler.update()
         else:
             # Regular precision

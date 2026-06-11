@@ -45,9 +45,10 @@ class Config:
     IMAGE_SIZE = 28
     CHANNELS = 1
 
-    # Training
+    # Training — sized so the demo finishes in a few minutes on CPU.
+    # For a serious run (real Fashion-MNIST), raise EPOCHS to 20+.
     BATCH_SIZE = 128
-    EPOCHS = 20
+    EPOCHS = 3
     LEARNING_RATE = 0.001
 
     # Regularization
@@ -93,16 +94,17 @@ def download_fashion_mnist() -> Tuple[Tuple[np.ndarray, np.ndarray],
     print("  import torchvision")
     print("  dataset = torchvision.datasets.FashionMNIST(...)")
 
-    # Generate synthetic data
+    # Generate synthetic data at DEMO scale — a CPU CNN over the full
+    # 60k/10k Fashion-MNIST sizes takes far too long for an example run.
+    # With real data, use the full 60,000/10,000 splits.
     np.random.seed(42)
+    n_train, n_test = 4000, 800
 
-    # Training set: 60,000 samples
-    train_images = np.random.rand(60000, 1, 28, 28).astype(np.float32)
-    train_labels = np.random.randint(0, 10, 60000).astype(np.int64)
+    train_images = np.random.rand(n_train, 1, 28, 28).astype(np.float32)
+    train_labels = np.random.randint(0, 10, n_train).astype(np.int64)
 
-    # Test set: 10,000 samples
-    test_images = np.random.rand(10000, 1, 28, 28).astype(np.float32)
-    test_labels = np.random.randint(0, 10, 10000).astype(np.int64)
+    test_images = np.random.rand(n_test, 1, 28, 28).astype(np.float32)
+    test_labels = np.random.randint(0, 10, n_test).astype(np.int64)
 
     print(f"\n✓ Dataset loaded successfully:")
     print(f"  Training samples: {len(train_images):,}")
@@ -351,7 +353,9 @@ class FashionMNISTCNN:
         flat_size = 1
         for dim in x.tensor().shape[1:]:
             flat_size *= dim
-        x = tz.Variable(x.tensor().reshape([batch_size, flat_size]), requires_grad=x.requires_grad())
+        # Autograd-aware reshape keeps the graph connected (rebuilding a
+        # Variable from the raw tensor would sever grad_fn).
+        x = x.reshape([batch_size, flat_size])
 
         # Classifier
         x = self.fc1(x)
@@ -605,37 +609,20 @@ def evaluate(model: FashionMNISTCNN,
 
 def compute_cross_entropy_loss(logits: tz.Variable, labels: np.ndarray) -> tz.Variable:
     """
-    Compute cross-entropy loss.
+    Real autograd-aware cross-entropy loss.
 
-    This is a simplified implementation. In practice, use:
-        criterion = tz.nn.CrossEntropyLoss()
-        loss = criterion(logits, labels)
+    (A previous revision approximated this with an MSE on one-hot targets and
+    rebuilt the loss Variable from a raw tensor — which silently severed the
+    gradient graph, so the model never actually trained.)
 
     Args:
         logits: Model predictions (batch_size, num_classes)
         labels: Ground truth labels (batch_size,)
 
     Returns:
-        Loss value
+        Scalar loss Variable connected to the autograd graph
     """
-    # Simplified loss computation for demonstration
-    # In practice, this would use proper softmax and cross-entropy
-    batch_size = logits.shape()[0]
-
-    # Create one-hot encoded targets
-    targets = np.zeros((batch_size, Config.NUM_CLASSES), dtype=np.float32)
-    targets[np.arange(batch_size), labels] = 1.0
-
-    # MSE loss as approximation (for demo purposes)
-    targets_var = tz.Variable(tz.Tensor.from_numpy(targets), requires_grad=False)
-    diff = logits - targets_var
-    # diff is a Variable, extract tensor for mean operation
-    squared = diff * diff
-    loss_tensor = tz.mean(squared.tensor())
-    # Wrap back in Variable to maintain gradient tracking
-    loss = tz.Variable(loss_tensor, requires_grad=True)
-
-    return loss
+    return tz.nn.cross_entropy(logits, tz.from_numpy(labels.astype(np.int64)))
 
 
 # ============================================================================

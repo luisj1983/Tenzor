@@ -829,16 +829,19 @@ Returns:
 
     // Tensor class
     py::class_<tenzor::Tensor>(m, "Tensor", py::buffer_protocol())
-        .def(py::init<std::vector<int64_t>, tenzor::DType, tenzor::Device>(),
-             py::arg("shape"),
-             py::arg("dtype") = tenzor::DType::Float32,
-             py::arg("device") = tenzor::Device::cpu())
         // Tensor/Variable merge: converting constructor (paired with
         // py::implicitly_convertible<Variable, Tensor> below) lets every
         // Tensor-taking binding accept a Variable. FAIL-LOUD: a Variable
         // that is actively tracking gradients refuses silent demotion —
         // passing it into a non-autograd op would sever the graph and
         // return zero input grads (documented bug pattern).
+        //
+        // ORDER MATTERS: this init MUST be registered before the
+        // (shape, dtype, device) constructor. An integer-dtype Variable
+        // satisfies PySequence_Check, so with the shape ctor first,
+        // Tensor(int64_variable) reinterprets the VALUES as a shape and
+        // silently produces a garbage float tensor (found via
+        // cross_entropy labels becoming "non-integer indices").
         .def(py::init([](const tenzor::Variable& v) {
             if (v.requires_grad() && tenzor::is_grad_enabled()) {
                 throw std::runtime_error(
@@ -850,6 +853,10 @@ Returns:
             }
             return v.tensor();
         }), py::arg("variable"))
+        .def(py::init<std::vector<int64_t>, tenzor::DType, tenzor::Device>(),
+             py::arg("shape"),
+             py::arg("dtype") = tenzor::DType::Float32,
+             py::arg("device") = tenzor::Device::cpu())
         .def_static("from_blob", [](py::object obj,
                                      std::vector<int64_t> shape,
                                      tenzor::DType dtype,
@@ -3740,6 +3747,16 @@ Example::
          py::arg("a"), py::arg("b"),
          py::call_guard<py::gil_scoped_release>());
 
+    // Autograd-aware overload: registered FIRST in pybind's no-conversion
+    // pass for Variable arguments, so tz.matmul(W, X) on Variables builds
+    // the graph instead of fail-loud demotion to the Tensor overload.
+    m.def("matmul", [](const tenzor::Variable& a, const tenzor::Variable& b) {
+         return a.matmul(b);
+         },
+         "Autograd-aware matrix product of two Variables.",
+         py::arg("a"), py::arg("b"),
+         py::call_guard<py::gil_scoped_release>());
+
     m.def("bmm", [](const tenzor::Tensor& a, const tenzor::Tensor& b) {
          return tenzor::bmm(a, b);
          }, "Batched matrix multiplication",
@@ -4681,6 +4698,19 @@ Returns:
 
 
     // Autograd
+    //
+    // Minimal opaque binding for backward-graph nodes. Without it,
+    // `Variable.grad_fn` threw "Unable to convert function return value"
+    // for ANY variable with a graph (tenzor::Function had no Python
+    // registration) — grad_fn was only readable when it was None.
+    py::class_<tenzor::Function, std::shared_ptr<tenzor::Function>>(m, "GradFn",
+        "Opaque autograd graph node (returned by Variable.grad_fn).")
+        .def("name", &tenzor::Function::name,
+             "Name of the backward operation (e.g. 'MatMulBackward').")
+        .def("__repr__", [](const tenzor::Function& f) {
+            return "<" + f.name() + ">";
+        });
+
     py::class_<tenzor::Variable, std::shared_ptr<tenzor::Variable>>(m, "Variable")
         .def(py::init([](tenzor::Tensor data, bool requires_grad) {
             return std::make_shared<tenzor::Variable>(data, requires_grad);
@@ -4867,7 +4897,30 @@ Returns:
         .def("__neg__", [](const tenzor::Variable& a) {
             return a * -1.0;
         }, py::is_operator(), py::call_guard<py::gil_scoped_release>())
+        // Autograd-aware shape/linalg methods (C++ Variable methods that
+        // were never bound; the generic Python delegation would fail loud
+        // on tracking variables, but these preserve the graph).
+        .def("reshape", &tenzor::Variable::reshape,
+             py::arg("shape"),
+             py::call_guard<py::gil_scoped_release>(),
+             "Autograd-aware reshape")
+        .def("transpose", &tenzor::Variable::transpose,
+             py::arg("dim0"), py::arg("dim1"),
+             py::call_guard<py::gil_scoped_release>(),
+             "Autograd-aware transpose")
+        .def("permute", &tenzor::Variable::permute,
+             py::arg("dims"),
+             py::call_guard<py::gil_scoped_release>(),
+             "Autograd-aware permute")
+        .def("squeeze", &tenzor::Variable::squeeze,
+             py::arg("dim"),
+             py::call_guard<py::gil_scoped_release>(),
+             "Autograd-aware squeeze")
         // Matrix multiplication
+        .def("matmul", &tenzor::Variable::matmul,
+             py::arg("other"),
+             py::call_guard<py::gil_scoped_release>(),
+             "Autograd-aware matrix multiplication")
         .def("__matmul__", [](const tenzor::Variable& a, const tenzor::Variable& b) {
             return a.matmul(b);
         }, py::is_operator(), py::call_guard<py::gil_scoped_release>())

@@ -24,21 +24,38 @@ import numpy as np
 tz.initialize()
 
 # Check if distributed training APIs are available
-DISTRIBUTED_AVAILABLE = hasattr(tz.nn.parallel, 'init_process_group')
+DISTRIBUTED_AVAILABLE = hasattr(tz.distributed, 'init_process_group')
 
 def setup_distributed():
-    """Initialize distributed training from environment variables."""
-    rank = int(os.environ.get('RANK', 0))
-    world_size = int(os.environ.get('WORLD_SIZE', 1))
-    master_addr = os.environ.get('MASTER_ADDR', 'localhost')
-    master_port = int(os.environ.get('MASTER_PORT', 29500))
+    """Initialize distributed training from environment variables.
+
+    For a real multi-process run, launch one process per rank with RANK,
+    WORLD_SIZE, MASTER_ADDR and MASTER_PORT set (e.g. via a launcher script).
+    Without them this example falls back to a single-process world so the
+    demo can run standalone.
+    """
+    os.environ.setdefault('RANK', '0')
+    os.environ.setdefault('WORLD_SIZE', '1')
+    os.environ.setdefault('MASTER_ADDR', 'localhost')
+    os.environ.setdefault('MASTER_PORT', '29500')
+
+    rank = int(os.environ['RANK'])
+    world_size = int(os.environ['WORLD_SIZE'])
+    master_addr = os.environ['MASTER_ADDR']
+    master_port = int(os.environ['MASTER_PORT'])
 
     print(f"[Rank {rank}] Initializing process group...")
     print(f"[Rank {rank}] World size: {world_size}")
     print(f"[Rank {rank}] Master: {master_addr}:{master_port}")
 
-    # Create process group
-    process_group = tz.nn.parallel.init_process_group(backend='nccl')
+    # NCCL needs GPUs (one per rank); gloo works on CPU and for the
+    # single-process demo.
+    backend = 'nccl' if tz.cuda_is_available() and world_size > 1 else 'gloo'
+    print(f"[Rank {rank}] Backend: {backend}")
+    process_group = tz.distributed.init_process_group(backend=backend)
+    if process_group is None:
+        # init_process_group registers the group globally; fetch the handle.
+        process_group = tz.distributed.get_process_group()
 
     print(f"[Rank {rank}] Process group initialized successfully!")
     return process_group, rank, world_size
@@ -78,17 +95,13 @@ def main():
 
     # Wrap model with DistributedDataParallel
     print(f"[Rank {rank}] Wrapping model with DDP...")
-    ddp_model = tz.nn.parallel.DistributedDataParallel(
-        model,
-        process_group,
-        device_ids=[rank],
-        output_device=rank,
-        broadcast_buffers=True,
-        find_unused_parameters=False
-    )
+    # Tenzor DDP signature: (module, process_group, bucket_size_bytes=25MB).
+    # Device placement follows the module's device (no device_ids kwarg).
+    ddp_model = tz.distributed.DistributedDataParallel(model, process_group)
 
-    # Create optimizer (on rank 0, parameters are broadcast to all ranks)
-    optimizer = tz.optim.Adam(ddp_model.parameters(), lr=0.001)
+    # Create optimizer over the WRAPPED module's parameters (the DDP wrapper
+    # only owns the communication hooks, not the parameters).
+    optimizer = tz.optim.Adam(model.parameters(), lr=0.001)
     loss_fn = tz.nn.CrossEntropyLoss()
 
     print(f"[Rank {rank}] Starting training...")
@@ -96,9 +109,10 @@ def main():
     # Training loop
     num_epochs = 5
     batch_size = 32
+    use_gpu = tz.cuda_is_available()
 
     for epoch in range(num_epochs):
-        ddp_model.train()
+        model.train()
 
         # Simulate training batches (in real code, use DataLoader)
         num_batches = 10
@@ -107,19 +121,23 @@ def main():
         for batch_idx in range(num_batches):
             # Create dummy data (in real code, load from DataLoader)
             # Each rank gets different data
-            np.random.seed(epoch * num_batches + batch_idx + rank * 1000)
-            inputs = tz.randn([batch_size, 3, 32, 32]).cuda(rank)
-            targets = tz.Tensor([np.random.randint(0, 10) for _ in range(batch_size)]).cuda(rank)
+            rng = np.random.default_rng(epoch * num_batches + batch_idx + rank * 1000)
+            inputs = tz.randn([batch_size, 3, 32, 32])
+            targets = tz.from_numpy(rng.integers(0, 10, batch_size).astype(np.int64))
+            if use_gpu:
+                inputs = inputs.cuda(rank)
+                targets = targets.cuda(rank)
 
-            # Forward pass (DDP handles gradient synchronization automatically)
+            # Forward pass through the DDP wrapper
             optimizer.zero_grad()
-            outputs = ddp_model(tz.Variable(inputs, requires_grad=True))
-            loss = loss_fn(outputs, tz.Variable(targets))
+            outputs = ddp_model.forward(inputs)
+            loss = loss_fn(outputs, targets)
 
-            # Backward pass (gradients are all-reduced across processes)
+            # Backward pass, then all-reduce gradients across ranks
             loss.backward()
+            ddp_model.synchronize_gradients()
 
-            # Optimizer step (each rank updates its local copy)
+            # Optimizer step (each rank applies the synchronized gradients)
             optimizer.step()
 
             total_loss += loss.tensor().item()
@@ -153,7 +171,7 @@ def main():
         print("✅ Barrier synchronization")
 
     # Cleanup
-    tz.nn.parallel.destroy_process_group(process_group)
+    tz.distributed.destroy_process_group()
 
 
 if __name__ == '__main__':
@@ -162,9 +180,9 @@ if __name__ == '__main__':
         print("DISTRIBUTED TRAINING APIs NOT YET IMPLEMENTED")
         print("=" * 60)
         print("\nThis example requires the following APIs which are not yet available:")
-        print("  - tz.nn.parallel.init_process_group()")
-        print("  - tz.nn.parallel.DistributedDataParallel()")
-        print("  - tz.nn.parallel.destroy_process_group()")
+        print("  - tz.distributed.init_process_group()")
+        print("  - tz.distributed.DistributedDataParallel()")
+        print("  - tz.distributed.destroy_process_group()")
         print("\nThese APIs will be added in a future release of Tenzor.")
         print("\nThe example demonstrates the intended usage pattern for when")
         print("distributed training support is implemented.")

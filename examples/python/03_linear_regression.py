@@ -45,12 +45,10 @@ def main():
     print(f"  Input shape: {x_np.shape}")
     print(f"  Target shape: {y_np.shape}")
 
-    # Convert to Tenzor tensors
-    # Note: Since we don't have from_numpy, we'll work with the assumption
-    # that we create tensors and fill them (simplified for demo)
+    # Convert to Tenzor tensors (zero-copy where possible)
     print("\n[1.2] Converting to Tenzor tensors...")
-    x_data = tz.randn([n_samples, 1])
-    y_data = tz.randn([n_samples, 1])
+    x_data = tz.from_numpy(x_np)
+    y_data = tz.from_numpy(y_np)
     print("  ✓ Data prepared")
 
     # ========================================================================
@@ -82,11 +80,9 @@ def main():
     print("  This measures how far our predictions are from true values")
 
     def mse_loss(y_pred, y_true):
-        """Mean Squared Error loss"""
+        """Mean Squared Error loss (scalar)."""
         diff = y_pred - y_true
-        squared = diff * diff
-        # Mean over all samples (simplified - just return squared for demo)
-        return squared
+        return (diff * diff).mean()
 
     print("  ✓ Loss function defined")
 
@@ -97,7 +93,7 @@ def main():
     print("SECTION 4: Stochastic Gradient Descent (SGD) Optimizer")
     print("=" * 70)
 
-    learning_rate = 0.01
+    learning_rate = 0.1
     print(f"\n[4.1] Creating SGD optimizer with lr={learning_rate}")
 
     # Create optimizer with our parameters
@@ -121,13 +117,12 @@ def main():
     print()
 
     for epoch in range(n_epochs):
-        # Forward pass: compute predictions
-        # y_pred = x @ w + b (note: x is [100,1], w is [1,1], so x @ w gives [100,1])
-        wx = tz.Variable(tz.matmul(x_data, w.data), requires_grad=True)
-        y_pred = wx + b
+        # Forward pass: compute predictions through the autograd graph.
+        # y_pred = x @ w + b (x is [100,1], w is [1,1] -> y_pred is [100,1])
+        y_pred = tz.matmul(x_data, w) + b
 
-        # Compute loss
-        loss = mse_loss(y_pred, tz.Variable(y_data, requires_grad=False))
+        # Compute loss (scalar)
+        loss = mse_loss(y_pred, y_data)
 
         # Zero gradients from previous iteration
         optimizer.zero_grad()
@@ -140,7 +135,7 @@ def main():
 
         # Print progress every 10 epochs
         if (epoch + 1) % 10 == 0:
-            print(f"  Epoch [{epoch+1:3d}/{n_epochs}] - Training...")
+            print(f"  Epoch [{epoch+1:3d}/{n_epochs}] - loss: {float(loss.tensor().numpy()):.4f}")
 
     print("\n  ✓ Training complete!")
 
@@ -151,19 +146,23 @@ def main():
     print("SECTION 6: Evaluating Trained Model")
     print("=" * 70)
 
+    learned_w = float(w.tensor().numpy().reshape(-1)[0])
+    learned_b = float(b.tensor().numpy().reshape(-1)[0])
     print(f"\n[6.1] Comparing learned vs true parameters:")
     print(f"  True parameters:    w={true_w:.4f}, b={true_b:.4f}")
-    print(f"  Learned parameters: w=<trained>, b=<trained>")
-    print("  (Note: Actual values depend on tensor data access)")
+    print(f"  Learned parameters: w={learned_w:.4f}, b={learned_b:.4f}")
+    assert abs(learned_w - true_w) < 0.5, "w did not converge toward the true value"
+    assert abs(learned_b - true_b) < 0.5, "b did not converge toward the true value"
+    print("  ✓ Learned parameters converged to the true values")
 
     print("\n[6.2] Making predictions on test data...")
-    # Create test data
+    # Inference: no gradient tracking needed
     x_test = tz.randn([10, 1])
-    wx_test = tz.Variable(tz.matmul(x_test, w.data), requires_grad=False)
-    y_test_pred = wx_test + b
+    with tz.no_grad():
+        y_test_pred = tz.matmul(x_test, w.detach()) + b.detach()
 
     print(f"  Test input shape: {x_test.shape}")
-    print(f"  Predictions shape: {y_test_pred.data.shape}")
+    print(f"  Predictions shape: {y_test_pred.shape}")
     print("  ✓ Model can make predictions on new data")
 
     # ========================================================================
