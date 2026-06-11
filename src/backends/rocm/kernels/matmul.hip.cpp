@@ -8,6 +8,8 @@
 
 #include "rocm_nan_helpers.hip.h"  // E.2: safe_f2h / safe_h2f / safe_f2bf / safe_bf2f
 #include "tenzor/core/tensor.hpp"
+#include "tenzor/ops/math.hpp"      // real, imag, add, sub (for complex matmul)
+#include "tenzor/ops/creation.hpp"  // complex (recombine re/im)
 #include "tenzor/core/dtype.hpp"
 #include <hip/hip_runtime.h>
 #include <rocblas/rocblas.h>
@@ -620,6 +622,21 @@ auto matmul_kernel(const Tensor& a, const Tensor& b, hipStream_t stream) -> Tens
         throw std::runtime_error("matmul: input tensors must have the same dtype");
     }
 
+    // Complex matmul via real-matmul decomposition. rocBLAS exposes cgemm/zgemm,
+    // but plumbing complex through every 2D/batched/vector GEMM path is large;
+    // instead use (Ar+iAi)(Br+iBi) = (Ar·Br - Ai·Bi) + i(Ar·Bi + Ai·Br), which
+    // reuses the (correct) real GEMM and the real/imag/complex ops and naturally
+    // covers 2D, batched (bmm) and vector·matrix shapes.
+    if (a_contig.dtype() == DType::Complex64 || a_contig.dtype() == DType::Complex128) {
+        auto Ar = tenzor::real(a_contig);
+        auto Ai = tenzor::imag(a_contig);
+        auto Br = tenzor::real(b_contig);
+        auto Bi = tenzor::imag(b_contig);
+        auto Re = tenzor::sub(matmul_kernel(Ar, Br, stream), matmul_kernel(Ai, Bi, stream));
+        auto Im = tenzor::add(matmul_kernel(Ar, Bi, stream), matmul_kernel(Ai, Br, stream));
+        return tenzor::complex(Re, Im);
+    }
+
     // FP8 emulation: widen to Float32, matmul, narrow back
     if (a_contig.dtype() == DType::FP8_E4M3 || a_contig.dtype() == DType::FP8_E5M2) {
         DType orig = a_contig.dtype();
@@ -627,6 +644,16 @@ auto matmul_kernel(const Tensor& a, const Tensor& b, hipStream_t stream) -> Tens
         auto b_f32 = cast_kernel(b_contig, DType::Float32, stream);
         auto result_f32 = matmul_kernel(a_f32, b_f32, stream);
         return cast_kernel(result_f32, orig, stream);
+    }
+
+    // Narrow integer types (Int16/UInt16/UInt32/UInt64): widen to Int64, matmul
+    // with the native integer kernel, narrow back. rocBLAS has no integer GEMM.
+    if (a_contig.dtype() == DType::Int16 || a_contig.dtype() == DType::UInt16 ||
+        a_contig.dtype() == DType::UInt32 || a_contig.dtype() == DType::UInt64) {
+        DType orig = a_contig.dtype();
+        auto a64 = cast_kernel(a_contig, DType::Int64, stream);
+        auto b64 = cast_kernel(b_contig, DType::Int64, stream);
+        return cast_kernel(matmul_kernel(a64, b64, stream), orig, stream);
     }
 
     // Support Float32, Float64, Float16, Int32, and Int64

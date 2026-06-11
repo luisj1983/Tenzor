@@ -656,6 +656,12 @@ auto dropout_kernel(const Tensor& input, float p, bool training, hipStream_t str
     Tensor mask(std::vector<int64_t>(input.shape().begin(), input.shape().end()),
                 DType::Float32, input.device());
 
+    // Empty tensor: nothing to do. hiprandGenerateUniform(n=0) and a zero-block
+    // grid would make HIP reject the launch ("invalid configuration argument").
+    if (n == 0) {
+        return {output, mask};
+    }
+
     // Generate random values on device
     Tensor random_values({n}, DType::Float32, input.device());
 

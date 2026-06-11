@@ -95,8 +95,8 @@ namespace rocm {
     auto sign_kernel(const Tensor& input, hipStream_t stream) -> Tensor;
     auto log_kernel(const Tensor& input, hipStream_t stream) -> Tensor;
     auto exp_kernel(const Tensor& input, hipStream_t stream) -> Tensor;
-    auto pow_kernel(const Tensor& input, float exponent, hipStream_t stream) -> Tensor;
-    auto clamp_kernel(const Tensor& input, float min_val, float max_val, hipStream_t stream) -> Tensor;
+    auto pow_kernel(const Tensor& input, double exponent, hipStream_t stream) -> Tensor;
+    auto clamp_kernel(const Tensor& input, double min_val, double max_val, hipStream_t stream) -> Tensor;
     auto reciprocal_kernel(const Tensor& input, hipStream_t stream) -> Tensor;
     auto floor_kernel(const Tensor& input, hipStream_t stream) -> Tensor;
     auto ceil_kernel(const Tensor& input, hipStream_t stream) -> Tensor;
@@ -605,7 +605,7 @@ namespace rocm {
     auto conv_transpose2d_forward_kernel(const Tensor& input, const Tensor& weight, const Tensor* bias,
                                          int64_t stride_h, int64_t stride_w, int64_t padding_h, int64_t padding_w,
                                          int64_t output_padding_h, int64_t output_padding_w,
-                                         int64_t dilation_h, int64_t dilation_w, hipStream_t stream) -> Tensor;
+                                         int64_t dilation_h, int64_t dilation_w, int64_t groups, hipStream_t stream) -> Tensor;
     auto depthwise_conv2d_kernel(const Tensor& input, const Tensor& weight, const Tensor* bias,
                                  int64_t stride_h, int64_t stride_w, int64_t padding_h, int64_t padding_w,
                                  int64_t dilation_h, int64_t dilation_w, hipStream_t stream) -> Tensor;
@@ -742,6 +742,8 @@ namespace rocm {
                                   const Tensor& weight, const Tensor& bias, float eps) -> Tensor;
     auto fused_softmax_cross_entropy_hip(const Tensor& logits, const Tensor& targets,
                                          const std::string& reduction) -> Tensor;
+    auto fused_softmax_cross_entropy_grad_hip(const Tensor& logits, const Tensor& targets)
+                                         -> std::pair<Tensor, Tensor>;
     auto fused_add_relu_hip(const Tensor& a, const Tensor& b) -> Tensor;
     auto fused_gelu_hip(const Tensor& input) -> Tensor;
     auto fused_layer_norm_hip(const Tensor& input, const std::vector<int64_t>& normalized_shape,
@@ -1094,24 +1096,24 @@ void register_rocm_kernels(BackendDispatchTable& table) {
     // Unary Math Operations
     // ========================================================================
     table.register_kernel(OpId::Pow, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        float exponent = static_cast<float>(attrs.get_float(AttrKey::Exponent, 2.0));
+        double exponent = attrs.get_float(AttrKey::Exponent, 2.0);
         return std::vector<Tensor>{rocm::pow_kernel(inputs[0], exponent, get_hip_stream(attrs))};
     });
 
     table.register_kernel(OpId::Clamp, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        float min_val = static_cast<float>(attrs.get_float(AttrKey::Min, -std::numeric_limits<float>::infinity()));
-        float max_val = static_cast<float>(attrs.get_float(AttrKey::Max, std::numeric_limits<float>::infinity()));
+        double min_val = attrs.get_float(AttrKey::Min, -std::numeric_limits<double>::infinity());
+        double max_val = attrs.get_float(AttrKey::Max, std::numeric_limits<double>::infinity());
         return std::vector<Tensor>{rocm::clamp_kernel(inputs[0], min_val, max_val, get_hip_stream(attrs))};
     });
 
     table.register_kernel(OpId::ClampMin, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        float min_val = static_cast<float>(attrs.get_float(AttrKey::Min, -std::numeric_limits<float>::infinity()));
-        return std::vector<Tensor>{rocm::clamp_kernel(inputs[0], min_val, std::numeric_limits<float>::infinity(), get_hip_stream(attrs))};
+        double min_val = attrs.get_float(AttrKey::Min, -std::numeric_limits<double>::infinity());
+        return std::vector<Tensor>{rocm::clamp_kernel(inputs[0], min_val, std::numeric_limits<double>::infinity(), get_hip_stream(attrs))};
     });
 
     table.register_kernel(OpId::ClampMax, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        float max_val = static_cast<float>(attrs.get_float(AttrKey::Max, std::numeric_limits<float>::infinity()));
-        return std::vector<Tensor>{rocm::clamp_kernel(inputs[0], -std::numeric_limits<float>::infinity(), max_val, get_hip_stream(attrs))};
+        double max_val = attrs.get_float(AttrKey::Max, std::numeric_limits<double>::infinity());
+        return std::vector<Tensor>{rocm::clamp_kernel(inputs[0], -std::numeric_limits<double>::infinity(), max_val, get_hip_stream(attrs))};
     });
 
     // ========================================================================
@@ -2011,9 +2013,43 @@ void register_rocm_kernels(BackendDispatchTable& table) {
     // Fused Operations
     // ========================================================================
     table.register_kernel(OpId::FusedSoftmaxCrossEntropy, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        // inputs: logits, targets
+        // inputs: [logits, targets]
         std::string reduction = std::string(attrs.get_string(AttrKey::Reduction, "mean"));
-        return std::vector<Tensor>{rocm::fused_softmax_cross_entropy_hip(inputs[0], inputs[1], reduction)};
+        bool compute_grad = attrs.get_bool(AttrKey::ComputeGrad, false);
+        const Tensor& logits = inputs[0];
+        const Tensor& targets = inputs[1];
+
+        // The kernels operate on rank-2 (batch, C); flatten rank-3 (N, T, C)
+        // logits to (N*T, C) and reshape outputs back.
+        const bool is3d = (logits.ndim() == 3);
+        int64_t N = 0, T = 0, C = 0;
+        Tensor lf = logits, tf = targets;
+        if (is3d) {
+            N = logits.shape()[0]; T = logits.shape()[1]; C = logits.shape()[2];
+            lf = tenzor::reshape(logits.contiguous(), std::vector<int64_t>{N * T, C});
+            tf = tenzor::reshape(targets.contiguous(), std::vector<int64_t>{N * T});
+        }
+
+        if (compute_grad) {
+            // The grad kernel computes in Float32; widen Float16/BFloat16 logits
+            // then narrow grad_logits back to the original dtype.
+            const DType orig_dtype = logits.dtype();
+            const bool is_half = (orig_dtype == DType::Float16 || orig_dtype == DType::BFloat16);
+            Tensor lf32 = is_half ? lf.to(DType::Float32) : lf;
+            auto [loss, grad_logits] = rocm::fused_softmax_cross_entropy_grad_hip(lf32, tf);
+            if (is_half) grad_logits = grad_logits.to(orig_dtype);
+            if (is3d) {
+                loss = tenzor::reshape(loss, std::vector<int64_t>{N, T});
+                grad_logits = tenzor::reshape(grad_logits, std::vector<int64_t>{N, T, C});
+            }
+            return std::vector<Tensor>{loss, grad_logits};
+        }
+
+        auto loss = rocm::fused_softmax_cross_entropy_hip(lf, tf, reduction);
+        if (is3d && reduction == "none") {
+            loss = tenzor::reshape(loss, std::vector<int64_t>{N, T});
+        }
+        return std::vector<Tensor>{loss};
     });
 
     table.register_kernel(OpId::FusedLayerNorm, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
@@ -3196,9 +3232,13 @@ void register_rocm_kernels(BackendDispatchTable& table) {
     // RMSNorm Backward
     // ========================================================================
     table.register_kernel(OpId::RMSNormBackward, [](std::span<const Tensor> inputs, [[maybe_unused]] const OpAttributes& attrs) {
-        // inputs: [grad_output, input, weight, rrms]
+        // inputs: [grad_output, input, rrms, weight] — order set by the autograd
+        // RMSNormBackward (saved [input, rrms, weight]). The wrapper expects
+        // (grad_output, input, weight, rrms), so pass weight=inputs[3], rrms=inputs[2].
+        // (Previously these were swapped — weight and rrms transposed — which
+        // produced wrong grad_input and out-of-bounds reads on the 1-element rrms.)
         auto [grad_input, grad_weight] = rocm::fused_rms_norm_backward_hip(
-            inputs[0], inputs[1], inputs[2], inputs[3]);
+            inputs[0], inputs[1], inputs[3], inputs[2]);
         return std::vector<Tensor>{grad_input, grad_weight};
     });
 
@@ -4082,11 +4122,12 @@ void register_rocm_kernels(BackendDispatchTable& table) {
         const auto padding        = ::tenzor::backend::attrs::padding_2d(attrs);
         const auto output_padding = ::tenzor::backend::attrs::output_padding_2d(attrs);
         const auto dilation       = ::tenzor::backend::attrs::dilation_2d(attrs);
+        const int64_t groups      = attrs.get_int(AttrKey::Groups, 1);
         const Tensor* bias = (inputs.size() > 2 && inputs[2].numel() > 0) ? &inputs[2] : nullptr;
         return rocm::conv_transpose2d_forward_kernel(inputs[0], inputs[1], bias,
             stride[0], stride[1], padding[0], padding[1],
             output_padding[0], output_padding[1],
-            dilation[0], dilation[1],
+            dilation[0], dilation[1], groups,
             get_hip_stream(attrs));
     });
     table.register_single_output_kernel(OpId::ConvTranspose3dForward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {

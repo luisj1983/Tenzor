@@ -1978,7 +1978,6 @@ auto linalg_solve_triangular_kernel(const Tensor& A, const Tensor& B,
 
 auto linalg_geqrf_kernel(const Tensor& A, hipStream_t stream)
     -> std::tuple<Tensor, Tensor> {
-    auto work = A.contiguous().clone();
     auto shape = A.shape();
     auto a_ndim = static_cast<int64_t>(shape.size());
     if (a_ndim < 2) throw std::invalid_argument("linalg::geqrf: input must be at least 2D");
@@ -1986,7 +1985,15 @@ auto linalg_geqrf_kernel(const Tensor& A, hipStream_t stream)
     int64_t m = shape[a_ndim - 2];
     int64_t n_cols = shape[a_ndim - 1];
     int64_t k = std::min(m, n_cols);
-    int64_t nbatch = batch_size(work);
+
+    // rocSOLVER is column-major only. Transpose A so the contiguous buffer IS A
+    // in column-major (lda = m); geqrf then factorizes A (not A^T). The previous
+    // code passed the raw row-major buffer with swapped dims, which factorized
+    // A^T and returned the packed form of the WRONG matrix (the geqrf +
+    // householder_product / ormqr round-trip then failed Q@R == A). Mirrors the
+    // CUDA path. A_col is shape (..., n_cols, m).
+    Tensor A_col = tenzor::transpose(A.contiguous(), -2, -1).contiguous();
+    int64_t nbatch = batch_size(A_col);
 
     std::vector<int64_t> batch_dims;
     for (size_t i = 0; i + 2 < shape.size(); i++) batch_dims.push_back(shape[i]);
@@ -1998,10 +2005,9 @@ auto linalg_geqrf_kernel(const Tensor& A, hipStream_t stream)
     auto handle = RocSOLVERHandlePool::get(stream);
 
     if (A.dtype() == DType::Float32) {
-        float* a_data = work.data<float>();
+        float* a_data = A_col.data<float>();
         float* tau_data = tau_result.data<float>();
 
-        // Allocate tau on device for rocSOLVER (writes directly to device memory)
         size_t tau_bytes = k * sizeof(float);
         auto* d_tau = static_cast<float*>(
             backend::rocm::RocmCachingAllocator::get().allocate(tau_bytes));
@@ -2010,19 +2016,16 @@ auto linalg_geqrf_kernel(const Tensor& A, hipStream_t stream)
             float* a_mat = a_data + b * m * n_cols;
             float* tau_ptr = tau_data + b * k;
 
-            // rocSOLVER geqrf works in column-major. For row-major m x n,
-            // we pass n_cols as m and m as n (treating as A^T in col-major).
-            ROCBLAS_CHECK_LINALG(rocsolver_sgeqrf(handle, n_cols, m,
-                a_mat, n_cols, d_tau));
+            ROCBLAS_CHECK_LINALG(rocsolver_sgeqrf(handle, m, n_cols,
+                a_mat, m, d_tau));
 
-            // Copy tau from device temporary to output tensor
             HIP_CHECK_LINALG(hipMemcpyAsync(tau_ptr, d_tau, tau_bytes,
                 hipMemcpyDeviceToDevice, stream ? stream : nullptr));
         }
 
         backend::rocm::RocmCachingAllocator::get().free(d_tau);
     } else {
-        double* a_data = work.data<double>();
+        double* a_data = A_col.data<double>();
         double* tau_data = tau_result.data<double>();
 
         size_t tau_bytes = k * sizeof(double);
@@ -2033,8 +2036,8 @@ auto linalg_geqrf_kernel(const Tensor& A, hipStream_t stream)
             double* a_mat = a_data + b * m * n_cols;
             double* tau_ptr = tau_data + b * k;
 
-            ROCBLAS_CHECK_LINALG(rocsolver_dgeqrf(handle, n_cols, m,
-                a_mat, n_cols, d_tau));
+            ROCBLAS_CHECK_LINALG(rocsolver_dgeqrf(handle, m, n_cols,
+                a_mat, m, d_tau));
 
             HIP_CHECK_LINALG(hipMemcpyAsync(tau_ptr, d_tau, tau_bytes,
                 hipMemcpyDeviceToDevice, stream ? stream : nullptr));
@@ -2044,7 +2047,11 @@ auto linalg_geqrf_kernel(const Tensor& A, hipStream_t stream)
     }
 
     HIP_CHECK_LINALG(hipStreamSynchronize(stream ? stream : nullptr));
-    return {work, tau_result};
+    // A_col holds the packed factorization in column-major. Transpose back to the
+    // row-major packed convention (R in upper triangle, reflector v_j in column j
+    // below the diagonal) consumed by householder_product / ormqr.
+    Tensor packed = tenzor::transpose(A_col, -2, -1).contiguous();
+    return {packed, tau_result};
 }
 
 // ============================================================================
@@ -2054,98 +2061,16 @@ auto linalg_geqrf_kernel(const Tensor& A, hipStream_t stream)
 auto linalg_ormqr_kernel(const Tensor& reflectors, const Tensor& tau,
                           const Tensor& C, bool left, bool transpose_q,
                           hipStream_t stream) -> Tensor {
-    auto work_c = C.contiguous().clone();
-    auto refl = reflectors.contiguous();
-    auto tau_c = tau.contiguous();
-
-    auto c_shape = C.shape();
-    auto r_shape = reflectors.shape();
-    auto c_ndim = static_cast<int64_t>(c_shape.size());
-    auto r_ndim = static_cast<int64_t>(r_shape.size());
-    if (c_ndim < 2) throw std::invalid_argument("linalg::ormqr: C must be at least 2D");
-    if (r_ndim < 2) throw std::invalid_argument("linalg::ormqr: reflectors must be at least 2D");
-
-    int64_t c_m = c_shape[c_ndim - 2];
-    int64_t c_n = c_shape[c_ndim - 1];
-    int64_t k_refl = tau.shape()[static_cast<int64_t>(tau.shape().size()) - 1];
-    int64_t nbatch = batch_size(work_c);
-
-    int64_t r_m = r_shape[r_ndim - 2];
-    int64_t r_n = r_shape[r_ndim - 1];
-
-    auto handle = RocSOLVERHandlePool::get(stream);
-
-    // rocSOLVER ormqr operates in column-major. Same transposition logic as CUDA:
-    // Row-major left no-trans Q*C  -> col-major Right Trans on C^T
-    // Row-major left trans Q^T*C   -> col-major Right NoTrans on C^T
-    // Row-major right no-trans C*Q -> col-major Left Trans on C^T
-    // Row-major right trans C*Q^T  -> col-major Left NoTrans on C^T
-    rocblas_side side;
-    rocblas_operation trans;
-    if (left && !transpose_q)       { side = rocblas_side_right; trans = rocblas_operation_transpose; }
-    else if (left && transpose_q)   { side = rocblas_side_right; trans = rocblas_operation_none; }
-    else if (!left && !transpose_q) { side = rocblas_side_left;  trans = rocblas_operation_transpose; }
-    else                            { side = rocblas_side_left;  trans = rocblas_operation_none; }
-
-    if (C.dtype() == DType::Float32) {
-        float* c_data = work_c.data<float>();
-        const float* r_data = refl.data<float>();
-        const float* tau_data = tau_c.data<float>();
-
-        // rocSOLVER needs device tau; copy batch tau slice to a temp buffer
-        size_t tau_bytes = k_refl * sizeof(float);
-        auto* d_tau = static_cast<float*>(
-            backend::rocm::RocmCachingAllocator::get().allocate(tau_bytes));
-
-        for (int64_t b = 0; b < nbatch; b++) {
-            const float* r_mat = r_data + b * r_m * r_n;
-            const float* tau_ptr = tau_data + b * k_refl;
-            float* c_mat = c_data + b * c_m * c_n;
-
-            HIP_CHECK_LINALG(hipMemcpyAsync(d_tau, tau_ptr, tau_bytes,
-                hipMemcpyDeviceToDevice, stream ? stream : nullptr));
-
-            ROCBLAS_CHECK_LINALG(rocsolver_sormqr(handle,
-                side, trans,
-                static_cast<rocblas_int>(c_n), static_cast<rocblas_int>(c_m),
-                static_cast<rocblas_int>(k_refl),
-                const_cast<float*>(r_mat), static_cast<rocblas_int>(r_n),
-                d_tau,
-                c_mat, static_cast<rocblas_int>(c_n)));
-        }
-
-        backend::rocm::RocmCachingAllocator::get().free(d_tau);
-    } else {
-        double* c_data = work_c.data<double>();
-        const double* r_data = refl.data<double>();
-        const double* tau_data = tau_c.data<double>();
-
-        size_t tau_bytes = k_refl * sizeof(double);
-        auto* d_tau = static_cast<double*>(
-            backend::rocm::RocmCachingAllocator::get().allocate(tau_bytes));
-
-        for (int64_t b = 0; b < nbatch; b++) {
-            const double* r_mat = r_data + b * r_m * r_n;
-            const double* tau_ptr = tau_data + b * k_refl;
-            double* c_mat = c_data + b * c_m * c_n;
-
-            HIP_CHECK_LINALG(hipMemcpyAsync(d_tau, tau_ptr, tau_bytes,
-                hipMemcpyDeviceToDevice, stream ? stream : nullptr));
-
-            ROCBLAS_CHECK_LINALG(rocsolver_dormqr(handle,
-                side, trans,
-                static_cast<rocblas_int>(c_n), static_cast<rocblas_int>(c_m),
-                static_cast<rocblas_int>(k_refl),
-                const_cast<double*>(r_mat), static_cast<rocblas_int>(r_n),
-                d_tau,
-                c_mat, static_cast<rocblas_int>(c_n)));
-        }
-
-        backend::rocm::RocmCachingAllocator::get().free(d_tau);
-    }
-
-    HIP_CHECK_LINALG(hipStreamSynchronize(stream ? stream : nullptr));
-    return work_c;
+    (void)stream;
+    // geqrf now returns row-major packed reflectors (LAPACK convention,
+    // consistent with householder_product). The previous rocSOLVER ormqr path
+    // assumed a column-major packed layout, so reconstruct Q via
+    // householder_product and apply it directly. For square reflectors Q is the
+    // full m×m orthogonal factor — matches the reference ormqr == Q @ C. Mirrors
+    // the CUDA implementation.
+    Tensor Q = tenzor::linalg::householder_product(reflectors, tau);
+    Tensor Qx = transpose_q ? tenzor::transpose(Q, -2, -1).contiguous() : Q;
+    return left ? tenzor::matmul(Qx, C) : tenzor::matmul(C, Qx);
 }
 
 // =========================================================================

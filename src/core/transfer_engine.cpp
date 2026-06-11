@@ -4,6 +4,7 @@
  */
 
 #include "tenzor/core/transfer_engine.hpp"
+#include "tenzor/core/rocm_transfer.hpp"
 #include "tenzor/ops/creation.hpp"
 #include "tenzor/utils/log.hpp"
 #include <stdexcept>
@@ -252,6 +253,14 @@ TransferState::~TransferState() {
     // exact use-after-free this state exists to prevent (see `source` in the
     // header) — so wait for completion first. For finalized handles the event
     // has already signalled and these waits are no-ops.
+    //
+    // ROCm async path (HIP-isolated): wait for the DMA, then release the event.
+    // No-op if wait() already finalized it (nulls rocm_event) or on non-ROCm
+    // builds (stub). Must precede freeing `source`/`result` below.
+    if (rocm_event != nullptr) {
+        tenzor::rocm_transfer::event_sync(rocm_event);
+        rocm_event = nullptr;
+    }
 #ifdef TENZOR_USE_ONEAPI
     if (has_sycl_event) {
         try { sycl_event.wait(); } catch (...) { /* device teardown */ }
@@ -318,6 +327,15 @@ auto TransferHandle::is_ready() const -> bool {
         return true;
     }
 
+    // ROCm async path (HIP-isolated): non-blocking completion query.
+    if (state_->rocm_event != nullptr) {
+        if (tenzor::rocm_transfer::event_ready(state_->rocm_event)) {
+            state_->completed.store(true, std::memory_order_release);
+            return true;
+        }
+        return false;
+    }
+
 #ifdef TENZOR_USE_CUDA
     if (state_->event) {
         cudaError_t result = cudaEventQuery(state_->event);
@@ -373,6 +391,15 @@ auto TransferHandle::wait() -> void {
     }
 
     if (state_->completed.load(std::memory_order_acquire)) {
+        return;
+    }
+
+    // ROCm async path (HIP-isolated): block on the event, release it, finalize.
+    if (state_->rocm_event != nullptr) {
+        tenzor::rocm_transfer::event_sync(state_->rocm_event);
+        state_->rocm_event = nullptr;
+        state_->completed.store(true, std::memory_order_release);
+        state_->cv.notify_all();
         return;
     }
 
@@ -853,6 +880,13 @@ auto TransferEngine::cpu_to_gpu(const Tensor& cpu_tensor, Device gpu_device) -> 
     }
 #endif
 
+    // ROCm: route through the public Tensor API (dispatches to the ROCm backend's
+    // own HIP memcpy). The direct hipMemcpy path below is gated on TENZOR_USE_ROCM,
+    // which is NOT defined for tenzor_core (HIP/CUDA host headers define conflicting
+    // make_*N helpers in multi-backend builds). When compiled out, the branch left
+    // the freshly-allocated GPU tensor UNFILLED — so offload-restore silently
+    // returned all-zero parameters and models (DeepLabV3Plus etc.) produced
+    // all-zero output. Using .to() fills it correctly regardless of that macro.
 #ifdef TENZOR_USE_ROCM
     if (gpu_device.type == Device::Type::ROCm) {
         HIP_CHECK(hipSetDevice(gpu_device.index));
@@ -862,6 +896,10 @@ auto TransferEngine::cpu_to_gpu(const Tensor& cpu_tensor, Device gpu_device) -> 
             bytes,
             hipMemcpyHostToDevice
         ));
+    }
+#else
+    if (gpu_device.type == Device::Type::ROCm) {
+        gpu_tensor = cpu_tensor.to(gpu_device);
     }
 #endif
 
@@ -913,6 +951,9 @@ auto TransferEngine::gpu_to_cpu(const Tensor& gpu_tensor) -> Tensor {
     }
 #endif
 
+    // ROCm: see cpu_to_gpu — the direct hipMemcpy path is compiled out of core
+    // (TENZOR_USE_ROCM undefined), which left this branch empty and returned an
+    // unfilled (zero) host tensor. Route through .to() so the value is preserved.
 #ifdef TENZOR_USE_ROCM
     if (gpu_tensor.device().type == Device::Type::ROCm) {
         HIP_CHECK(hipSetDevice(gpu_tensor.device().index));
@@ -922,6 +963,10 @@ auto TransferEngine::gpu_to_cpu(const Tensor& gpu_tensor) -> Tensor {
             bytes,
             hipMemcpyDeviceToHost
         ));
+    }
+#else
+    if (gpu_tensor.device().type == Device::Type::ROCm) {
+        cpu_tensor = gpu_tensor.to(Device::cpu());
     }
 #endif
 
@@ -1009,7 +1054,27 @@ auto TransferEngine::cpu_to_gpu_async(
 
         return TransferHandle(state);
 #else
-        throw std::runtime_error("ROCm support not compiled");
+        // The direct HIP host-transfer path is not compiled into tenzor_core
+        // (HIP and CUDA host headers define conflicting make_*N vector helpers
+        // in a multi-backend build). Fall back to a synchronous device copy via
+        // the public Tensor API, which dispatches to the ROCm backend's own
+        // working HIP memcpy. This keeps parameter/activation offload correct on
+        // ROCm (it formerly threw, leaving offloaded params off-device → all-zero
+        // model output); we trade async overlap for correctness.
+        {
+            auto shape_span = cpu_tensor.shape();
+            std::vector<int64_t> shape_vec(shape_span.begin(), shape_span.end());
+            Tensor gpu_tensor = allocate_tensor(shape_vec, cpu_tensor.dtype(), gpu_device);
+            size_t bytes = cpu_tensor.numel() * dtype_size(cpu_tensor.dtype());
+            void* ev = tenzor::rocm_transfer::h2d_async(
+                gpu_tensor.data_ptr(), cpu_tensor.data_ptr(), bytes, gpu_device.index);
+            state->result = gpu_tensor;
+            state->source = cpu_tensor;  // keep alive until the async DMA completes
+            state->rocm_event = ev;
+            if (ev == nullptr) state->completed.store(true, std::memory_order_release);
+            record_transfer(bytes, 0.0, true);
+            return TransferHandle(state);
+        }
 #endif
     }
 
@@ -1141,7 +1206,21 @@ auto TransferEngine::gpu_to_cpu_async(const Tensor& gpu_tensor) -> TransferHandl
 
         return TransferHandle(state);
 #else
-        throw std::runtime_error("ROCm support not compiled");
+        // Async GPU->CPU via the HIP-isolated transfer TU (see cpu_to_gpu_async).
+        {
+            auto shape_span = gpu_tensor.shape();
+            std::vector<int64_t> shape_vec(shape_span.begin(), shape_span.end());
+            Tensor cpu_result = allocate_tensor(shape_vec, gpu_tensor.dtype(), Device::cpu());
+            size_t bytes = gpu_tensor.numel() * dtype_size(gpu_tensor.dtype());
+            void* ev = tenzor::rocm_transfer::d2h_async(
+                cpu_result.data_ptr(), gpu_tensor.data_ptr(), bytes, gpu_tensor.device().index);
+            state->result = cpu_result;
+            state->source = gpu_tensor;  // keep alive until the async DMA completes
+            state->rocm_event = ev;
+            if (ev == nullptr) state->completed.store(true, std::memory_order_release);
+            record_transfer(bytes, 0.0, false);
+            return TransferHandle(state);
+        }
 #endif
     }
 

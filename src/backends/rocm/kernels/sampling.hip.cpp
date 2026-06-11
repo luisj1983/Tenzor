@@ -46,13 +46,14 @@ __global__ void bernoulli_kernel_impl(const float* probs, float* output,
 }
 
 auto bernoulli_kernel(const Tensor& probs, hipStream_t stream) -> Tensor {
+    const DType orig = probs.dtype();
     auto input = probs.contiguous();
     if (input.dtype() != DType::Float32) input = input.to(DType::Float32);
 
     std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
     Tensor result(shape, DType::Float32, input.device());
     int64_t n = input.numel();
-    if (n == 0) return result;
+    if (n == 0) return (orig == DType::Float32) ? result : result.to(orig);
 
     int threads = 256;
     int blocks_n = static_cast<int>((n + threads - 1) / threads);
@@ -62,7 +63,8 @@ auto bernoulli_kernel(const Tensor& probs, hipStream_t stream) -> Tensor {
         dim3(blocks_n), dim3(threads), 0, stream,
         input.data<float>(), result.data<float>(), n, seed);
     HIP_CHECK(hipGetLastError());
-    return result;
+    // Preserve the input dtype (0/1 samples are exact in any float dtype).
+    return (orig == DType::Float32) ? result : result.to(orig);
 }
 
 // =========================================================================
@@ -136,6 +138,7 @@ __global__ void normal_sample_kernel_impl(const float* mean, const float* stddev
 }
 
 auto normal_sample_kernel(const Tensor& mean, const Tensor& stddev, hipStream_t stream) -> Tensor {
+    const DType orig = mean.dtype();
     auto m = mean.contiguous();
     auto s = stddev.contiguous();
     if (m.dtype() != DType::Float32) m = m.to(DType::Float32);
@@ -144,7 +147,7 @@ auto normal_sample_kernel(const Tensor& mean, const Tensor& stddev, hipStream_t 
     std::vector<int64_t> shape(m.shape().begin(), m.shape().end());
     Tensor result(shape, DType::Float32, m.device());
     int64_t n = m.numel();
-    if (n == 0) return result;
+    if (n == 0) return (orig == DType::Float32) ? result : result.to(orig);
 
     int threads = 256;
     int blocks_n = static_cast<int>((n + threads - 1) / threads);
@@ -154,7 +157,9 @@ auto normal_sample_kernel(const Tensor& mean, const Tensor& stddev, hipStream_t 
         dim3(blocks_n), dim3(threads), 0, stream,
         m.data<float>(), s.data<float>(), result.data<float>(), n, seed);
     HIP_CHECK(hipGetLastError());
-    return result;
+    // Preserve the requested dtype (the public API expects normal(mean) to keep
+    // mean's dtype; computing the Box-Muller transform in Float32 is fine).
+    return (orig == DType::Float32) ? result : result.to(orig);
 }
 
 // =========================================================================
@@ -733,7 +738,7 @@ auto trapezoid_kernel(const Tensor& y, int64_t dim, double dx,
         static_cast<uint32_t>(outer), static_cast<uint32_t>(inner),
         static_cast<uint32_t>(n), static_cast<float>(dx), x_ptr != nullptr);
     HIP_CHECK(hipGetLastError());
-    return result;
+    return (y.dtype() == DType::Float32) ? result : result.to(y.dtype());
 }
 
 // ============================================================================
@@ -793,7 +798,7 @@ auto cumulative_trapezoid_kernel(const Tensor& y, int64_t dim, double dx,
         static_cast<uint32_t>(outer), static_cast<uint32_t>(inner),
         static_cast<uint32_t>(n), static_cast<float>(dx), x_ptr != nullptr);
     HIP_CHECK(hipGetLastError());
-    return result;
+    return (y.dtype() == DType::Float32) ? result : result.to(y.dtype());
 }
 
 // ============================================================================
@@ -843,7 +848,7 @@ auto gradient_kernel(const Tensor& input, int64_t dim, double spacing,
         static_cast<uint32_t>(outer), static_cast<uint32_t>(inner),
         static_cast<uint32_t>(n), static_cast<float>(spacing));
     HIP_CHECK(hipGetLastError());
-    return result;
+    return (input.dtype() == DType::Float32) ? result : result.to(input.dtype());
 }
 
 // ============================================================================
@@ -891,7 +896,7 @@ auto pairwise_distance_kernel(const Tensor& x1, const Tensor& x2, double p,
         a.data<float>(), b.data<float>(), result.data<float>(),
         static_cast<uint32_t>(N), static_cast<uint32_t>(D), static_cast<float>(p));
     HIP_CHECK(hipGetLastError());
-    return result;
+    return (x1.dtype() == DType::Float32) ? result : result.to(x1.dtype());
 }
 
 // ============================================================================
@@ -946,7 +951,7 @@ auto pdist_kernel(const Tensor& input, double p, hipStream_t stream) -> Tensor {
         static_cast<uint32_t>(N), static_cast<uint32_t>(D),
         static_cast<uint32_t>(num_pairs), static_cast<float>(p));
     HIP_CHECK(hipGetLastError());
-    return result;
+    return (input.dtype() == DType::Float32) ? result : result.to(input.dtype());
 }
 
 // =========================================================================

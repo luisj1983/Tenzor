@@ -14,6 +14,20 @@
 #include "../rocm_error.hpp"
 #include "tenzor/ops/creation.hpp"
 
+// Plain-old-data copy types for dtype-agnostic indexing/gather/scatter of
+// element widths that have no dedicated arithmetic kernel. Movement ops only
+// copy whole elements, so the value semantics are irrelevant — only the byte
+// width matters. Complex64 == 8 bytes (uint64_t), Complex128 == 16 bytes.
+namespace {
+struct alignas(16) Bytes16 {
+    uint64_t lo; uint64_t hi;
+    // Only present so reduction-capable kernels (scatter) instantiate; movement
+    // ops use plain assignment, so this lane-wise add is never exercised for
+    // Complex128 (which never takes the reduce path).
+    __host__ __device__ Bytes16& operator+=(const Bytes16& o) { lo += o.lo; hi += o.hi; return *this; }
+};
+}
+
 namespace tenzor {
 namespace rocm {
 
@@ -216,6 +230,30 @@ auto gather_hip(
             input.numel(), indices_size, inner_size, dim_size,
             index_dim_size, total_output);
         HIP_POST_LAUNCH_CHECK();
+    } else if (input.dtype() == DType::Int16 || input.dtype() == DType::UInt16) {
+        hipLaunchKernelGGL(gather_kernel<uint16_t>, dim3(blocks), dim3(threads), 0, 0,
+            reinterpret_cast<const uint16_t*>(input.data_ptr()), indices.data<int64_t>(),
+            reinterpret_cast<uint16_t*>(output.data_ptr()),
+            input.numel(), indices_size, inner_size, dim_size, index_dim_size, total_output);
+        HIP_POST_LAUNCH_CHECK();
+    } else if (input.dtype() == DType::UInt32) {
+        hipLaunchKernelGGL(gather_kernel<uint32_t>, dim3(blocks), dim3(threads), 0, 0,
+            reinterpret_cast<const uint32_t*>(input.data_ptr()), indices.data<int64_t>(),
+            reinterpret_cast<uint32_t*>(output.data_ptr()),
+            input.numel(), indices_size, inner_size, dim_size, index_dim_size, total_output);
+        HIP_POST_LAUNCH_CHECK();
+    } else if (input.dtype() == DType::UInt64 || input.dtype() == DType::Complex64) {
+        hipLaunchKernelGGL(gather_kernel<uint64_t>, dim3(blocks), dim3(threads), 0, 0,
+            reinterpret_cast<const uint64_t*>(input.data_ptr()), indices.data<int64_t>(),
+            reinterpret_cast<uint64_t*>(output.data_ptr()),
+            input.numel(), indices_size, inner_size, dim_size, index_dim_size, total_output);
+        HIP_POST_LAUNCH_CHECK();
+    } else if (input.dtype() == DType::Complex128) {
+        hipLaunchKernelGGL(gather_kernel<Bytes16>, dim3(blocks), dim3(threads), 0, 0,
+            reinterpret_cast<const Bytes16*>(input.data_ptr()), indices.data<int64_t>(),
+            reinterpret_cast<Bytes16*>(output.data_ptr()),
+            input.numel(), indices_size, inner_size, dim_size, index_dim_size, total_output);
+        HIP_POST_LAUNCH_CHECK();
     } else {
         throw std::runtime_error("gather_hip: Unsupported dtype");
     }
@@ -228,6 +266,19 @@ auto gather_hip(
 // ==============================================================================
 // Scatter Operation
 // ==============================================================================
+
+// Types for which atomicAddHelper (and thus scatter-with-reduction) is valid.
+// Movement-only element types (Bytes16 for Complex128, uint16_t, etc.) are not
+// listed; scatter_kernel gates the atomic branch on this via `if constexpr`.
+template<typename T> struct scatter_atomic_capable : std::false_type {};
+template<> struct scatter_atomic_capable<float>        : std::true_type {};
+template<> struct scatter_atomic_capable<double>       : std::true_type {};
+template<> struct scatter_atomic_capable<int32_t>      : std::true_type {};
+template<> struct scatter_atomic_capable<int64_t>      : std::true_type {};
+template<> struct scatter_atomic_capable<uint32_t>     : std::true_type {};
+template<> struct scatter_atomic_capable<uint64_t>     : std::true_type {};
+template<> struct scatter_atomic_capable<__half>       : std::true_type {};
+template<> struct scatter_atomic_capable<hip_bfloat16> : std::true_type {};
 
 template<typename T>
 __global__ void scatter_kernel(
@@ -265,7 +316,16 @@ __global__ void scatter_kernel(
                                     inner_idx;
 
             if (reduce_add) {
-                atomicAddHelper(&output[output_offset], src[idx]);
+                // atomicAdd only exists for the arithmetic types below. For
+                // movement-only element types (e.g. Complex128 packed as a
+                // 16-byte POD, where a 128-bit atomic-add doesn't exist), gate
+                // the call out at compile time so the kernel still instantiates
+                // — a pure scatter (overwrite) never takes this branch anyway.
+                if constexpr (scatter_atomic_capable<T>::value) {
+                    atomicAddHelper(&output[output_offset], src[idx]);
+                } else {
+                    output[output_offset] = src[idx];
+                }
             } else {
                 output[output_offset] = src[idx];
             }
@@ -395,6 +455,24 @@ auto scatter_hip(
             total_scatter,
             reduce_add
         );
+        HIP_POST_LAUNCH_CHECK();
+    } else if (output.dtype() == DType::UInt32) {
+        hipLaunchKernelGGL(scatter_kernel<uint32_t>, dim3(blocks), dim3(threads), 0, 0,
+            reinterpret_cast<uint32_t*>(output.data_ptr()), indices.data<int64_t>(),
+            reinterpret_cast<const uint32_t*>(src.data_ptr()),
+            outer_size, dim_size, inner_size, index_dim_size, total_scatter, reduce_add);
+        HIP_POST_LAUNCH_CHECK();
+    } else if (output.dtype() == DType::UInt64 || output.dtype() == DType::Complex64) {
+        hipLaunchKernelGGL(scatter_kernel<uint64_t>, dim3(blocks), dim3(threads), 0, 0,
+            reinterpret_cast<uint64_t*>(output.data_ptr()), indices.data<int64_t>(),
+            reinterpret_cast<const uint64_t*>(src.data_ptr()),
+            outer_size, dim_size, inner_size, index_dim_size, total_scatter, reduce_add);
+        HIP_POST_LAUNCH_CHECK();
+    } else if (output.dtype() == DType::Complex128) {
+        hipLaunchKernelGGL(scatter_kernel<Bytes16>, dim3(blocks), dim3(threads), 0, 0,
+            reinterpret_cast<Bytes16*>(output.data_ptr()), indices.data<int64_t>(),
+            reinterpret_cast<const Bytes16*>(src.data_ptr()),
+            outer_size, dim_size, inner_size, index_dim_size, total_scatter, reduce_add);
         HIP_POST_LAUNCH_CHECK();
     } else {
         throw std::runtime_error("scatter_hip: Unsupported dtype");
@@ -552,6 +630,26 @@ auto index_select_hip(
             num_indices
         );
         HIP_POST_LAUNCH_CHECK();
+    } else if (input.dtype() == DType::Int16 || input.dtype() == DType::UInt16) {
+        hipLaunchKernelGGL(index_select_kernel<uint16_t>, dim3(blocks), dim3(threads), 0, 0,
+            reinterpret_cast<const uint16_t*>(input.data_ptr()), indices.data<int64_t>(),
+            reinterpret_cast<uint16_t*>(output.data_ptr()), outer_size, dim_size, inner_size, num_indices);
+        HIP_POST_LAUNCH_CHECK();
+    } else if (input.dtype() == DType::UInt32) {
+        hipLaunchKernelGGL(index_select_kernel<uint32_t>, dim3(blocks), dim3(threads), 0, 0,
+            reinterpret_cast<const uint32_t*>(input.data_ptr()), indices.data<int64_t>(),
+            reinterpret_cast<uint32_t*>(output.data_ptr()), outer_size, dim_size, inner_size, num_indices);
+        HIP_POST_LAUNCH_CHECK();
+    } else if (input.dtype() == DType::UInt64 || input.dtype() == DType::Complex64) {
+        hipLaunchKernelGGL(index_select_kernel<uint64_t>, dim3(blocks), dim3(threads), 0, 0,
+            reinterpret_cast<const uint64_t*>(input.data_ptr()), indices.data<int64_t>(),
+            reinterpret_cast<uint64_t*>(output.data_ptr()), outer_size, dim_size, inner_size, num_indices);
+        HIP_POST_LAUNCH_CHECK();
+    } else if (input.dtype() == DType::Complex128) {
+        hipLaunchKernelGGL(index_select_kernel<Bytes16>, dim3(blocks), dim3(threads), 0, 0,
+            reinterpret_cast<const Bytes16*>(input.data_ptr()), indices.data<int64_t>(),
+            reinterpret_cast<Bytes16*>(output.data_ptr()), outer_size, dim_size, inner_size, num_indices);
+        HIP_POST_LAUNCH_CHECK();
     } else {
         throw std::runtime_error("index_select_hip: Unsupported dtype");
     }
@@ -646,6 +744,17 @@ auto masked_fill_hip(
             tenzor::rocm::f32_to_bf16_rne(static_cast<float>(value)),
             total_elements
         );
+        HIP_POST_LAUNCH_CHECK();
+    } else if (output.dtype() == DType::Complex64) {
+        // Fill with (value, 0): pack real float bits in the low 32 bits, imag 0
+        // in the high 32 (Complex64 == interleaved 8-byte element).
+        float fr = static_cast<float>(value);
+        uint32_t rbits; std::memcpy(&rbits, &fr, sizeof(float));
+        uint64_t packed = static_cast<uint64_t>(rbits);
+        hipLaunchKernelGGL(masked_fill_kernel<uint64_t>,
+            dim3(blocks), dim3(threads), 0, 0,
+            reinterpret_cast<uint64_t*>(output.data_ptr()),
+            mask.data<bool>(), packed, total_elements);
         HIP_POST_LAUNCH_CHECK();
     } else {
         throw std::runtime_error("masked_fill_hip: Unsupported dtype");
@@ -888,6 +997,16 @@ __global__ void where_kernel(
     }
 }
 
+// Normalise a numeric condition tensor to bool (nonzero -> true). The where()
+// contract accepts a Bool OR numeric condition (see the CPU kernel), e.g. the
+// attention causal mask is built as a Float32 triu-of-ones.
+template<typename T>
+__global__ void cond_to_bool_kernel(const T* in, bool* out, int64_t n) {
+    HIP_KERNEL_LOOP(idx, n) {
+        out[idx] = (in[idx] != T(0));
+    }
+}
+
 auto where_hip(
     const Tensor& condition,
     const Tensor& x,
@@ -904,13 +1023,52 @@ auto where_hip(
     Tensor output = Tensor(std::vector<int64_t>(x.shape().begin(), x.shape().end()), x.dtype(), x.device());
 
     int64_t total_elements = x.numel();
+    // Empty tensor: a zero-block grid makes HIP reject the launch
+    // ("invalid configuration argument"). Return the empty result.
+    if (total_elements == 0) return output;
     int threads = 256;
     int blocks = (total_elements + threads - 1) / threads;
+
+    // Accept a non-Bool (numeric) condition by converting it to a bool buffer
+    // first (nonzero -> true), matching the CPU/CUDA where() contract. We sync
+    // before returning in this branch so the temporary bool buffer outlives the
+    // async where launch.
+    Tensor cond_bool;
+    bool used_temp_cond = false;
+    const bool* cond_ptr;
+    if (condition.dtype() == DType::Bool) {
+        cond_ptr = condition.data<bool>();
+    } else {
+        cond_bool = Tensor(std::vector<int64_t>(condition.shape().begin(), condition.shape().end()),
+                           DType::Bool, condition.device());
+        used_temp_cond = true;
+        int cblocks = (condition.numel() + threads - 1) / threads;
+        if (condition.dtype() == DType::Float32) {
+            hipLaunchKernelGGL(cond_to_bool_kernel<float>, dim3(cblocks), dim3(threads), 0, stream,
+                condition.data<float>(), cond_bool.data<bool>(), condition.numel());
+        } else if (condition.dtype() == DType::Float64) {
+            hipLaunchKernelGGL(cond_to_bool_kernel<double>, dim3(cblocks), dim3(threads), 0, stream,
+                condition.data<double>(), cond_bool.data<bool>(), condition.numel());
+        } else if (condition.dtype() == DType::Int32) {
+            hipLaunchKernelGGL(cond_to_bool_kernel<int32_t>, dim3(cblocks), dim3(threads), 0, stream,
+                condition.data<int32_t>(), cond_bool.data<bool>(), condition.numel());
+        } else if (condition.dtype() == DType::Int64) {
+            hipLaunchKernelGGL(cond_to_bool_kernel<int64_t>, dim3(cblocks), dim3(threads), 0, stream,
+                condition.data<int64_t>(), cond_bool.data<bool>(), condition.numel());
+        } else if (condition.dtype() == DType::UInt8) {
+            hipLaunchKernelGGL(cond_to_bool_kernel<uint8_t>, dim3(cblocks), dim3(threads), 0, stream,
+                condition.data<uint8_t>(), cond_bool.data<bool>(), condition.numel());
+        } else {
+            throw std::runtime_error("where_hip: condition must be Bool or a numeric dtype");
+        }
+        HIP_POST_LAUNCH_CHECK();
+        cond_ptr = cond_bool.data<bool>();
+    }
 
     if (x.dtype() == DType::Float32) {
         hipLaunchKernelGGL(where_kernel<float>,
             dim3(blocks), dim3(threads), 0, stream,
-            condition.data<bool>(),
+            cond_ptr,
             x.data<float>(),
             y.data<float>(),
             output.data<float>(),
@@ -920,7 +1078,7 @@ auto where_hip(
     } else if (x.dtype() == DType::Float64) {
         hipLaunchKernelGGL(where_kernel<double>,
             dim3(blocks), dim3(threads), 0, stream,
-            condition.data<bool>(),
+            cond_ptr,
             x.data<double>(),
             y.data<double>(),
             output.data<double>(),
@@ -930,7 +1088,7 @@ auto where_hip(
     } else if (x.dtype() == DType::Int32) {
         hipLaunchKernelGGL(where_kernel<int32_t>,
             dim3(blocks), dim3(threads), 0, stream,
-            condition.data<bool>(),
+            cond_ptr,
             x.data<int32_t>(),
             y.data<int32_t>(),
             output.data<int32_t>(),
@@ -940,7 +1098,7 @@ auto where_hip(
     } else if (x.dtype() == DType::Int64) {
         hipLaunchKernelGGL(where_kernel<int64_t>,
             dim3(blocks), dim3(threads), 0, stream,
-            condition.data<bool>(),
+            cond_ptr,
             x.data<int64_t>(),
             y.data<int64_t>(),
             output.data<int64_t>(),
@@ -950,7 +1108,7 @@ auto where_hip(
     } else if (x.dtype() == DType::Float16) {
         hipLaunchKernelGGL(where_kernel<__half>,
             dim3(blocks), dim3(threads), 0, stream,
-            condition.data<bool>(),
+            cond_ptr,
             reinterpret_cast<const __half*>(x.data<Float16>()),
             reinterpret_cast<const __half*>(y.data<Float16>()),
             reinterpret_cast<__half*>(output.data<Float16>()),
@@ -960,18 +1118,33 @@ auto where_hip(
     } else if (x.dtype() == DType::BFloat16) {
         hipLaunchKernelGGL(where_kernel<hip_bfloat16>,
             dim3(blocks), dim3(threads), 0, stream,
-            condition.data<bool>(),
+            cond_ptr,
             reinterpret_cast<const hip_bfloat16*>(x.data<BFloat16>()),
             reinterpret_cast<const hip_bfloat16*>(y.data<BFloat16>()),
             reinterpret_cast<hip_bfloat16*>(output.data<BFloat16>()),
             total_elements
         );
         HIP_POST_LAUNCH_CHECK();
+    } else if (x.dtype() == DType::Complex64) {
+        // Complex64 == 8-byte element; where is pure selection/copy.
+        hipLaunchKernelGGL(where_kernel<uint64_t>,
+            dim3(blocks), dim3(threads), 0, stream,
+            cond_ptr,
+            reinterpret_cast<const uint64_t*>(x.data_ptr()),
+            reinterpret_cast<const uint64_t*>(y.data_ptr()),
+            reinterpret_cast<uint64_t*>(output.data_ptr()),
+            total_elements);
+        HIP_POST_LAUNCH_CHECK();
     } else {
         throw std::runtime_error("where_hip: Unsupported dtype");
     }
 
     HIP_POST_LAUNCH_CHECK();
+    // The converted-condition buffer is a function-local temporary; ensure the
+    // where launch (and its conversion launch) complete before it is freed.
+    if (used_temp_cond) {
+        HIP_CHECK(hipStreamSynchronize(stream));
+    }
     return output;
 }
 
@@ -1343,6 +1516,25 @@ auto cat_hip(
             d_dim_sizes
         );
         HIP_POST_LAUNCH_CHECK();
+    } else if (first.dtype() == DType::Complex64) {
+        // Complex64 == 8-byte element; cat is pure byte-wise concatenation.
+        hipLaunchKernelGGL(cat_kernel<uint64_t>,
+            dim3(blocks), dim3(threads), 0, stream,
+            (const uint64_t* const*)d_input_ptrs,
+            d_input_offsets,
+            reinterpret_cast<uint64_t*>(output.data_ptr()),
+            static_cast<int64_t>(cont_tensors.size()),
+            outer_size, total_dim_size, inner_size, d_dim_sizes);
+        HIP_POST_LAUNCH_CHECK();
+    } else if (first.dtype() == DType::Complex128) {
+        hipLaunchKernelGGL(cat_kernel<Bytes16>,
+            dim3(blocks), dim3(threads), 0, stream,
+            (const Bytes16* const*)d_input_ptrs,
+            d_input_offsets,
+            reinterpret_cast<Bytes16*>(output.data_ptr()),
+            static_cast<int64_t>(cont_tensors.size()),
+            outer_size, total_dim_size, inner_size, d_dim_sizes);
+        HIP_POST_LAUNCH_CHECK();
     } else {
         HIP_CHECK(hipFree(d_input_ptrs));
         HIP_CHECK(hipFree(d_dim_sizes));
@@ -1561,6 +1753,30 @@ auto gather_hip(
             input.numel(), indices_size, inner_size, dim_size,
             index_dim_size, total_output);
         HIP_POST_LAUNCH_CHECK();
+    } else if (input.dtype() == DType::Int16 || input.dtype() == DType::UInt16) {
+        hipLaunchKernelGGL(gather_kernel<uint16_t>, dim3(blocks), dim3(threads), 0, stream,
+            reinterpret_cast<const uint16_t*>(input.data_ptr()), indices.data<int64_t>(),
+            reinterpret_cast<uint16_t*>(output.data_ptr()),
+            input.numel(), indices_size, inner_size, dim_size, index_dim_size, total_output);
+        HIP_POST_LAUNCH_CHECK();
+    } else if (input.dtype() == DType::UInt32) {
+        hipLaunchKernelGGL(gather_kernel<uint32_t>, dim3(blocks), dim3(threads), 0, stream,
+            reinterpret_cast<const uint32_t*>(input.data_ptr()), indices.data<int64_t>(),
+            reinterpret_cast<uint32_t*>(output.data_ptr()),
+            input.numel(), indices_size, inner_size, dim_size, index_dim_size, total_output);
+        HIP_POST_LAUNCH_CHECK();
+    } else if (input.dtype() == DType::UInt64 || input.dtype() == DType::Complex64) {
+        hipLaunchKernelGGL(gather_kernel<uint64_t>, dim3(blocks), dim3(threads), 0, stream,
+            reinterpret_cast<const uint64_t*>(input.data_ptr()), indices.data<int64_t>(),
+            reinterpret_cast<uint64_t*>(output.data_ptr()),
+            input.numel(), indices_size, inner_size, dim_size, index_dim_size, total_output);
+        HIP_POST_LAUNCH_CHECK();
+    } else if (input.dtype() == DType::Complex128) {
+        hipLaunchKernelGGL(gather_kernel<Bytes16>, dim3(blocks), dim3(threads), 0, stream,
+            reinterpret_cast<const Bytes16*>(input.data_ptr()), indices.data<int64_t>(),
+            reinterpret_cast<Bytes16*>(output.data_ptr()),
+            input.numel(), indices_size, inner_size, dim_size, index_dim_size, total_output);
+        HIP_POST_LAUNCH_CHECK();
     } else {
         throw std::runtime_error("gather_hip: Unsupported dtype");
     }
@@ -1576,6 +1792,13 @@ auto scatter_hip(
     const Tensor& src,
     hipStream_t stream
 ) -> Tensor {
+    // 16-bit integer types have no HIP atomicAdd (required by the shared scatter
+    // kernel template). Scatter is pure overwrite, so widen to Int32, scatter,
+    // narrow back — the values round-trip exactly.
+    if (input.dtype() == DType::Int16 || input.dtype() == DType::UInt16) {
+        auto r = scatter_hip(input.to(DType::Int32), dim, indices, src.to(DType::Int32), stream);
+        return r.to(input.dtype());
+    }
     Tensor output = input.clone();
     auto output_shape = output.shape();
     auto indices_shape = indices.shape();
@@ -1688,6 +1911,24 @@ auto scatter_hip(
             total_scatter,
             false
         );
+        HIP_POST_LAUNCH_CHECK();
+    } else if (output.dtype() == DType::UInt32) {
+        hipLaunchKernelGGL(scatter_kernel<uint32_t>, dim3(blocks), dim3(threads), 0, stream,
+            reinterpret_cast<uint32_t*>(output.data_ptr()), indices.data<int64_t>(),
+            reinterpret_cast<const uint32_t*>(src.data_ptr()),
+            outer_size, dim_size, inner_size, index_dim_size, total_scatter, false);
+        HIP_POST_LAUNCH_CHECK();
+    } else if (output.dtype() == DType::UInt64 || output.dtype() == DType::Complex64) {
+        hipLaunchKernelGGL(scatter_kernel<uint64_t>, dim3(blocks), dim3(threads), 0, stream,
+            reinterpret_cast<uint64_t*>(output.data_ptr()), indices.data<int64_t>(),
+            reinterpret_cast<const uint64_t*>(src.data_ptr()),
+            outer_size, dim_size, inner_size, index_dim_size, total_scatter, false);
+        HIP_POST_LAUNCH_CHECK();
+    } else if (output.dtype() == DType::Complex128) {
+        hipLaunchKernelGGL(scatter_kernel<Bytes16>, dim3(blocks), dim3(threads), 0, stream,
+            reinterpret_cast<Bytes16*>(output.data_ptr()), indices.data<int64_t>(),
+            reinterpret_cast<const Bytes16*>(src.data_ptr()),
+            outer_size, dim_size, inner_size, index_dim_size, total_scatter, false);
         HIP_POST_LAUNCH_CHECK();
     } else {
         throw std::runtime_error("scatter_hip: Unsupported dtype");
@@ -1806,6 +2047,26 @@ auto index_select_hip(
             num_indices
         );
         HIP_POST_LAUNCH_CHECK();
+    } else if (input.dtype() == DType::Int16 || input.dtype() == DType::UInt16) {
+        hipLaunchKernelGGL(index_select_kernel<uint16_t>, dim3(blocks), dim3(threads), 0, stream,
+            reinterpret_cast<const uint16_t*>(input.data_ptr()), indices.data<int64_t>(),
+            reinterpret_cast<uint16_t*>(output.data_ptr()), outer_size, dim_size, inner_size, num_indices);
+        HIP_POST_LAUNCH_CHECK();
+    } else if (input.dtype() == DType::UInt32) {
+        hipLaunchKernelGGL(index_select_kernel<uint32_t>, dim3(blocks), dim3(threads), 0, stream,
+            reinterpret_cast<const uint32_t*>(input.data_ptr()), indices.data<int64_t>(),
+            reinterpret_cast<uint32_t*>(output.data_ptr()), outer_size, dim_size, inner_size, num_indices);
+        HIP_POST_LAUNCH_CHECK();
+    } else if (input.dtype() == DType::UInt64 || input.dtype() == DType::Complex64) {
+        hipLaunchKernelGGL(index_select_kernel<uint64_t>, dim3(blocks), dim3(threads), 0, stream,
+            reinterpret_cast<const uint64_t*>(input.data_ptr()), indices.data<int64_t>(),
+            reinterpret_cast<uint64_t*>(output.data_ptr()), outer_size, dim_size, inner_size, num_indices);
+        HIP_POST_LAUNCH_CHECK();
+    } else if (input.dtype() == DType::Complex128) {
+        hipLaunchKernelGGL(index_select_kernel<Bytes16>, dim3(blocks), dim3(threads), 0, stream,
+            reinterpret_cast<const Bytes16*>(input.data_ptr()), indices.data<int64_t>(),
+            reinterpret_cast<Bytes16*>(output.data_ptr()), outer_size, dim_size, inner_size, num_indices);
+        HIP_POST_LAUNCH_CHECK();
     } else {
         throw std::runtime_error("index_select_hip: Unsupported dtype");
     }
@@ -1881,6 +2142,16 @@ auto masked_fill_hip(
             total_elements
         );
         HIP_POST_LAUNCH_CHECK();
+    } else if (output.dtype() == DType::Complex64) {
+        // Fill with (value, 0): pack real float bits low, imag 0 high (8 bytes).
+        float fr = static_cast<float>(value);
+        uint32_t rbits; std::memcpy(&rbits, &fr, sizeof(float));
+        uint64_t packed = static_cast<uint64_t>(rbits);
+        hipLaunchKernelGGL(masked_fill_kernel<uint64_t>,
+            dim3(blocks), dim3(threads), 0, stream,
+            reinterpret_cast<uint64_t*>(output.data_ptr()),
+            mask.data<bool>(), packed, total_elements);
+        HIP_POST_LAUNCH_CHECK();
     } else {
         throw std::runtime_error("masked_fill_hip: Unsupported dtype");
     }
@@ -1903,26 +2174,12 @@ auto masked_select_hip(
     int threads = 256;
     int blocks = (total_elements + threads - 1) / threads;
 
-    if (input.dtype() == DType::Float32) {
-        hipLaunchKernelGGL(masked_select_count_kernel<float>,
-            dim3(blocks), dim3(threads), 0, stream,
-            mask.data<bool>(),
-            d_count,
-            total_elements
-        );
-        HIP_POST_LAUNCH_CHECK();
-    } else if (input.dtype() == DType::Float64) {
-        hipLaunchKernelGGL(masked_select_count_kernel<double>,
-            dim3(blocks), dim3(threads), 0, stream,
-            mask.data<bool>(),
-            d_count,
-            total_elements
-        );
-        HIP_POST_LAUNCH_CHECK();
-    } else {
-        HIP_CHECK(hipFree(d_count));
-        throw std::runtime_error("masked_select_hip: Only Float32 and Float64 supported");
-    }
+    // The count pass only inspects the boolean mask, so the element type is
+    // irrelevant — a single instantiation covers every dtype.
+    hipLaunchKernelGGL(masked_select_count_kernel<unsigned char>,
+        dim3(blocks), dim3(threads), 0, stream,
+        mask.data<bool>(), d_count, total_elements);
+    HIP_POST_LAUNCH_CHECK();
 
     HIP_CHECK(hipStreamSynchronize(stream));
 
@@ -1935,27 +2192,39 @@ auto masked_select_hip(
     HIP_CHECK(hipMalloc(&d_output_idx, sizeof(int64_t)));
     HIP_CHECK(hipMemsetAsync(d_output_idx, 0, sizeof(int64_t), stream));
 
-    if (input.dtype() == DType::Float32) {
-        hipLaunchKernelGGL(masked_select_kernel<float>,
-            dim3(blocks), dim3(threads), 0, stream,
-            input.data<float>(),
-            mask.data<bool>(),
-            output.data<float>(),
-            d_output_idx,
-            total_elements
-        );
-        HIP_POST_LAUNCH_CHECK();
-    } else if (input.dtype() == DType::Float64) {
-        hipLaunchKernelGGL(masked_select_kernel<double>,
-            dim3(blocks), dim3(threads), 0, stream,
-            input.data<double>(),
-            mask.data<bool>(),
-            output.data<double>(),
-            d_output_idx,
-            total_elements
-        );
-        HIP_POST_LAUNCH_CHECK();
+    // The copy reproduces raw element bytes, so dispatch by element width: any
+    // same-width integer payload covers float, integer and complex dtypes
+    // (Complex64 = 8 bytes, Complex128 = 16 bytes).
+    const void* in_ptr = input.data_ptr();
+    void* out_ptr = const_cast<void*>(output.data_ptr());
+    const bool* mask_ptr = mask.data<bool>();
+    size_t width = dtype_size(input.dtype());
+    if (width == 1) {
+        hipLaunchKernelGGL(masked_select_kernel<uint8_t>, dim3(blocks), dim3(threads), 0, stream,
+            reinterpret_cast<const uint8_t*>(in_ptr), mask_ptr,
+            reinterpret_cast<uint8_t*>(out_ptr), d_output_idx, total_elements);
+    } else if (width == 2) {
+        hipLaunchKernelGGL(masked_select_kernel<uint16_t>, dim3(blocks), dim3(threads), 0, stream,
+            reinterpret_cast<const uint16_t*>(in_ptr), mask_ptr,
+            reinterpret_cast<uint16_t*>(out_ptr), d_output_idx, total_elements);
+    } else if (width == 4) {
+        hipLaunchKernelGGL(masked_select_kernel<uint32_t>, dim3(blocks), dim3(threads), 0, stream,
+            reinterpret_cast<const uint32_t*>(in_ptr), mask_ptr,
+            reinterpret_cast<uint32_t*>(out_ptr), d_output_idx, total_elements);
+    } else if (width == 8) {
+        hipLaunchKernelGGL(masked_select_kernel<uint64_t>, dim3(blocks), dim3(threads), 0, stream,
+            reinterpret_cast<const uint64_t*>(in_ptr), mask_ptr,
+            reinterpret_cast<uint64_t*>(out_ptr), d_output_idx, total_elements);
+    } else if (width == 16) {
+        hipLaunchKernelGGL(masked_select_kernel<Bytes16>, dim3(blocks), dim3(threads), 0, stream,
+            reinterpret_cast<const Bytes16*>(in_ptr), mask_ptr,
+            reinterpret_cast<Bytes16*>(out_ptr), d_output_idx, total_elements);
+    } else {
+        HIP_CHECK(hipFree(d_count));
+        HIP_CHECK(hipFree(d_output_idx));
+        throw std::runtime_error("masked_select_hip: unsupported element width");
     }
+    HIP_POST_LAUNCH_CHECK();
 
     HIP_CHECK(hipFree(d_count));
     HIP_CHECK(hipFree(d_output_idx));
@@ -2220,6 +2489,18 @@ auto scatter_add_kernel(const Tensor& input, int64_t dim, const Tensor& index,
             }
             output = output_f32.to(input.dtype());
             break;
+        }
+        case DType::UInt32: LAUNCH_SCATTER_ADD_HIP(uint32_t); break;
+        case DType::UInt64: LAUNCH_SCATTER_ADD_HIP(uint64_t); break;
+        case DType::Int16:
+        case DType::UInt16:
+        case DType::Int8:
+        case DType::UInt8: {
+            // No 16/8-bit atomicAdd: accumulate in Int32, then narrow back.
+            HIP_CHECK(hipFree(d_error_flag));
+            auto r = scatter_add_kernel(input.to(DType::Int32), dim, index,
+                                        src.to(DType::Int32), stream);
+            return r.to(input.dtype());
         }
         default: throw std::runtime_error("scatter_add: unsupported dtype " +
                      std::string(dtype_name(input.dtype())));

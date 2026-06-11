@@ -466,6 +466,12 @@ public:
     // Completion flag
     std::atomic<bool> completed{false};
 
+    // Opaque ROCm (HIP) completion event for the async transfer path. Kept as a
+    // void* (not hipEvent_t) so this header stays free of HIP types — the real
+    // HIP work lives in rocm_transfer.hip.cpp. Unconditional (not behind
+    // TENZOR_USE_ROCM) so TransferState has one consistent layout across all TUs.
+    void* rocm_event{nullptr};
+
     // Synchronization
     std::mutex mutex;
     std::condition_variable cv;

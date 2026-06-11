@@ -560,8 +560,10 @@ auto rocm_ifft_kernel(const Tensor& input, int64_t dim, int64_t n,
 
 auto rocm_rfft_kernel(const Tensor& input, int64_t dim, int64_t n,
                       const std::string& norm, hipStream_t stream) -> Tensor {
-    // BFloat16: upcast to Float32, compute rfft, result is Complex64 (no downcast needed)
-    if (input.dtype() == DType::BFloat16) {
+    // Float16/BFloat16: upcast to Float32, compute rfft; result is Complex64
+    // (no downcast needed — rfft always produces complex output). rocFFT has no
+    // half-precision real transform, so a non-widened half input yields zeros.
+    if (input.dtype() == DType::BFloat16 || input.dtype() == DType::Float16) {
         auto input_f32 = input.to(DType::Float32);
         return rocm_rfft_kernel(input_f32, dim, n, norm, stream);
     }
@@ -679,11 +681,17 @@ auto rocm_rfft_kernel(const Tensor& input, int64_t dim, int64_t n,
 
 auto rocm_irfft_kernel(const Tensor& input, int64_t dim, int64_t n,
                        const std::string& norm, hipStream_t stream) -> Tensor {
-    // BFloat16: upcast to Float32 (Complex64), compute irfft, downcast real result
+    // Float16/BFloat16: upcast to Float32 (-> Complex64), compute irfft, then
+    // downcast the real result back to the half dtype.
     if (input.dtype() == DType::BFloat16) {
         auto input_f32 = input.to(DType::Float32);
         auto result_f32 = rocm_irfft_kernel(input_f32, dim, n, norm, stream);
         return result_f32.to(DType::BFloat16);
+    }
+    if (input.dtype() == DType::Float16) {
+        auto input_f32 = input.to(DType::Float32);
+        auto result_f32 = rocm_irfft_kernel(input_f32, dim, n, norm, stream);
+        return result_f32.to(DType::Float16);
     }
     // Real-to-complex promotion. The CPU and CUDA irfft kernels accept Float32
     // or Float64 input by first casting to Complex64/Complex128 (imag = 0),

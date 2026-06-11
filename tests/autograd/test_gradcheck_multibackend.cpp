@@ -1649,10 +1649,19 @@ TEST_P(GradCheckMultiBackendTest, CosineSimilarity) {
 
 TEST_P(GradCheckMultiBackendTest, Renorm) {
     if (should_skip()) { SKIP_WITH_REASON(::tenzor::testing::SkipReason::GradcheckFDPrecision, "gradcheck supports only Float32/Float64"); return; }
-    // 2D input renormalized along dim=1; pick maxnorm small enough that the
-    // norms exceed it and renorm actually does work (otherwise the gradient
-    // is identity).
-    auto x = Variable(randn({3, 4}, dtype(), device()) * 2.0f + 1.0f, true);
+    // 2D input renormalized along dim=1, maxnorm=1. Deterministic input whose
+    // per-row L2 norms (~1.45–1.56) sit comfortably above maxnorm so renorm is
+    // unambiguously active and no finite-difference perturbation crosses the
+    // norm==maxnorm kink. Per-device randn previously drew a row near that kink
+    // on ROCm, producing an invalid central difference despite a correct
+    // kernel; a fixed input identical on every backend keeps this a true parity
+    // check.
+    std::vector<float> rvals = {
+        0.8f, 0.6f, 0.7f, 0.9f,
+        0.5f, 0.9f, 0.4f, 1.1f,
+        1.0f, 0.3f, 0.8f, 0.6f,
+    };
+    auto x = Variable(from_data(rvals.data(), {3, 4}, Device::cpu()).to(dtype()).to(device()), true);
     auto f = [](const Variable& v) -> Variable {
         return tenzor::sum(::tenzor::renorm(v, /*p=*/2.0, /*dim=*/1, /*maxnorm=*/1.0));
     };

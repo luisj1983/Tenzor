@@ -3,6 +3,7 @@
 #include <hip/hip_runtime.h>
 #include <hip/hip_fp16.h>
 #include <hip/hip_bfloat16.h>
+#include <hip/hip_complex.h>
 #include <hipcub/hipcub.hpp>
 #include "tenzor/core/tensor.hpp"
 #include "tenzor/core/dtype.hpp"
@@ -10,6 +11,8 @@
 #include <stdexcept>
 #include <string>
 #include <vector>
+#include <algorithm>
+#include <cmath>
 
 namespace tenzor {
 namespace rocm {
@@ -169,6 +172,36 @@ auto contiguous_kernel(const Tensor& input, hipStream_t stream) -> Tensor {
             dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
             reinterpret_cast<const double2*>(input.data_ptr()),
             reinterpret_cast<double2*>(result.data_ptr()),
+            d_strides, d_shape, ndim, total_elements);
+    } else if (input.dtype() == DType::Int16) {
+        hipLaunchKernelGGL(contiguous_kernel_impl<int16_t>,
+            dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
+            input.data<int16_t>(), result.data<int16_t>(),
+            d_strides, d_shape, ndim, total_elements);
+    } else if (input.dtype() == DType::UInt16) {
+        hipLaunchKernelGGL(contiguous_kernel_impl<uint16_t>,
+            dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
+            input.data<uint16_t>(), result.data<uint16_t>(),
+            d_strides, d_shape, ndim, total_elements);
+    } else if (input.dtype() == DType::UInt32) {
+        hipLaunchKernelGGL(contiguous_kernel_impl<uint32_t>,
+            dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
+            input.data<uint32_t>(), result.data<uint32_t>(),
+            d_strides, d_shape, ndim, total_elements);
+    } else if (input.dtype() == DType::UInt64) {
+        hipLaunchKernelGGL(contiguous_kernel_impl<uint64_t>,
+            dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
+            input.data<uint64_t>(), result.data<uint64_t>(),
+            d_strides, d_shape, ndim, total_elements);
+    } else if (input.dtype() == DType::FP8_E4M3 || input.dtype() == DType::FP8_E5M2 ||
+               input.dtype() == DType::QInt8 || input.dtype() == DType::QUInt8 ||
+               input.dtype() == DType::QInt4x2) {
+        // 1-byte storage types: a raw byte-wise strided copy preserves the value
+        // (and, for QInt4x2, both packed nibbles since strides are byte-granular).
+        hipLaunchKernelGGL(contiguous_kernel_impl<uint8_t>,
+            dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
+            reinterpret_cast<const uint8_t*>(input.data_ptr()),
+            reinterpret_cast<uint8_t*>(result.data_ptr()),
             d_strides, d_shape, ndim, total_elements);
     } else {
         throw std::runtime_error("Contiguous: unsupported dtype");
@@ -718,38 +751,94 @@ auto repeat_kernel(const Tensor& input_in, const std::vector<int64_t>& repeats, 
 // Tile Kernel - tile tensor (like repeat but prepends dimensions if needed)
 // ==============================================================================
 
+// 16-byte POD for tiling Complex128 / 16-byte elements (pure data movement).
+namespace { struct alignas(16) TileBytes16 { uint64_t lo; uint64_t hi; }; }
+
+// Proper tile (numpy.tile / torch.tile): block-repeat the whole tensor along
+// each dim via per-dim modulo gather — NOT element-wise repeat. Each output
+// element maps back to in[ (coord_d % in_shape_d) ... ]. Mirrors the CUDA path;
+// the previous implementation delegated to repeat_kernel (element-wise), which
+// produced [1,1,2,2,3,3] instead of the tiled [1,2,3,1,2,3].
+template<typename T>
+__global__ void tile_kernel_device(const T* __restrict__ in, T* __restrict__ out,
+        int64_t out_numel, int ndim,
+        const int64_t* __restrict__ out_shape,
+        const int64_t* __restrict__ in_shape,
+        const int64_t* __restrict__ in_strides) {
+    HIP_GRID_STRIDE_LOOP(idx, out_numel) {
+        int64_t rem = idx;
+        int64_t in_off = 0;
+        for (int d = ndim - 1; d >= 0; --d) {
+            int64_t coord = rem % out_shape[d];
+            rem /= out_shape[d];
+            in_off += (coord % in_shape[d]) * in_strides[d];
+        }
+        out[idx] = in[in_off];
+    }
+}
+
 auto tile_kernel(const Tensor& input, const std::vector<int64_t>& reps, hipStream_t stream) -> Tensor {
-    auto input_shape = input.shape();
-    int64_t ndim = input_shape.size();
-    int64_t reps_size = reps.size();
+    Tensor in = input.is_contiguous() ? input : input.contiguous();
+    auto ishape = in.shape();
+    int64_t in_ndim = static_cast<int64_t>(ishape.size());
+    int64_t out_ndim = std::max(in_ndim, static_cast<int64_t>(reps.size()));
 
-    // Pad input shape or reps to match
-    std::vector<int64_t> new_input_shape;
-    std::vector<int64_t> new_reps;
+    // Right-align input shape and reps, padding leading dims with 1.
+    std::vector<int64_t> pshape(out_ndim, 1), preps(out_ndim, 1);
+    for (int64_t i = 0; i < in_ndim; ++i) pshape[out_ndim - in_ndim + i] = ishape[i];
+    for (int64_t i = 0; i < static_cast<int64_t>(reps.size()); ++i)
+        preps[out_ndim - static_cast<int64_t>(reps.size()) + i] = reps[i];
 
-    if (reps_size > ndim) {
-        // Prepend 1s to input shape
-        for (int64_t i = 0; i < reps_size - ndim; ++i) {
-            new_input_shape.push_back(1);
-        }
-        for (int64_t i = 0; i < ndim; ++i) {
-            new_input_shape.push_back(input_shape[i]);
-        }
-        new_reps = reps;
-    } else {
-        new_input_shape = std::vector<int64_t>(input_shape.begin(), input_shape.end());
-        // Prepend 1s to reps
-        for (int64_t i = 0; i < ndim - reps_size; ++i) {
-            new_reps.push_back(1);
-        }
-        for (int64_t i = 0; i < reps_size; ++i) {
-            new_reps.push_back(reps[i]);
-        }
+    std::vector<int64_t> out_shape(out_ndim), in_strides(out_ndim);
+    int64_t s = 1;
+    for (int64_t d = out_ndim - 1; d >= 0; --d) {
+        in_strides[d] = s; s *= pshape[d];
+        out_shape[d] = pshape[d] * preps[d];
+    }
+    int64_t out_numel = 1;
+    for (auto v : out_shape) out_numel *= v;
+
+    Tensor output(out_shape, in.dtype(), in.device());
+    if (out_numel == 0) return output;
+
+    std::vector<int64_t> meta;
+    meta.reserve(out_ndim * 3);
+    meta.insert(meta.end(), out_shape.begin(), out_shape.end());
+    meta.insert(meta.end(), pshape.begin(), pshape.end());
+    meta.insert(meta.end(), in_strides.begin(), in_strides.end());
+    int64_t* d_meta = nullptr;
+    HIP_CHECK(hipMalloc(&d_meta, meta.size() * sizeof(int64_t)));
+    HIP_CHECK(hipMemcpyAsync(d_meta, meta.data(), meta.size() * sizeof(int64_t),
+                             hipMemcpyHostToDevice, stream));
+    const int64_t* d_out_shape = d_meta;
+    const int64_t* d_in_shape = d_meta + out_ndim;
+    const int64_t* d_in_strides = d_meta + 2 * out_ndim;
+
+    int num_blocks = get_num_blocks(out_numel);
+    auto launch = [&](auto* tag) {
+        using T = std::remove_pointer_t<decltype(tag)>;
+        hipLaunchKernelGGL(tile_kernel_device<T>, dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
+            reinterpret_cast<const T*>(in.data_ptr()), reinterpret_cast<T*>(output.data_ptr()),
+            out_numel, static_cast<int>(out_ndim), d_out_shape, d_in_shape, d_in_strides);
+        HIP_CHECK(hipGetLastError());
+    };
+
+    // tile is pure data movement; dispatch by element size.
+    switch (dtype_size(in.dtype())) {
+        case 1:  launch(static_cast<uint8_t*>(nullptr));  break;
+        case 2:  launch(static_cast<uint16_t*>(nullptr)); break;
+        case 4:  launch(static_cast<uint32_t*>(nullptr)); break;
+        case 8:  launch(static_cast<uint64_t*>(nullptr)); break;
+        case 16: launch(static_cast<TileBytes16*>(nullptr)); break;
+        default:
+            HIP_CHECK(hipFree(d_meta));
+            throw std::runtime_error("tile: unsupported element size");
     }
 
-    // Use repeat kernel with reshaped input
-    Tensor reshaped = reshape_kernel(input, new_input_shape, stream);
-    return repeat_kernel(reshaped, new_reps, stream);
+    // Sync before freeing d_meta — the async kernel still reads it.
+    HIP_CHECK(hipStreamSynchronize(stream));
+    HIP_CHECK(hipFree(d_meta));
+    return output;
 }
 
 // ==============================================================================
@@ -1486,9 +1575,13 @@ static Tensor cast_from_standard(const Tensor& input, DType target_dtype, int64_
         CAST_CASE(DType::Float32, float);
         CAST_CASE(DType::Float64, double);
         CAST_CASE(DType::Int8, int8_t);
+        CAST_CASE(DType::Int16, int16_t);
         CAST_CASE(DType::Int32, int32_t);
         CAST_CASE(DType::Int64, int64_t);
         CAST_CASE(DType::UInt8, uint8_t);
+        CAST_CASE(DType::UInt16, uint16_t);
+        CAST_CASE(DType::UInt32, uint32_t);
+        CAST_CASE(DType::UInt64, uint64_t);
         CAST_CASE(DType::Bool, bool);
         case DType::Float16:
             hipLaunchKernelGGL((cast_to_f16_kernel<SrcT>),
@@ -1867,12 +1960,20 @@ auto cast_kernel(const Tensor& input, DType target_dtype, hipStream_t stream) ->
             result = cast_from_standard<double>(input, target_dtype, n, num_blocks, BLOCK_SIZE, stream); break;
         case DType::Int8:
             result = cast_from_standard<int8_t>(input, target_dtype, n, num_blocks, BLOCK_SIZE, stream); break;
+        case DType::Int16:
+            result = cast_from_standard<int16_t>(input, target_dtype, n, num_blocks, BLOCK_SIZE, stream); break;
         case DType::Int32:
             result = cast_from_standard<int32_t>(input, target_dtype, n, num_blocks, BLOCK_SIZE, stream); break;
         case DType::Int64:
             result = cast_from_standard<int64_t>(input, target_dtype, n, num_blocks, BLOCK_SIZE, stream); break;
         case DType::UInt8:
             result = cast_from_standard<uint8_t>(input, target_dtype, n, num_blocks, BLOCK_SIZE, stream); break;
+        case DType::UInt16:
+            result = cast_from_standard<uint16_t>(input, target_dtype, n, num_blocks, BLOCK_SIZE, stream); break;
+        case DType::UInt32:
+            result = cast_from_standard<uint32_t>(input, target_dtype, n, num_blocks, BLOCK_SIZE, stream); break;
+        case DType::UInt64:
+            result = cast_from_standard<uint64_t>(input, target_dtype, n, num_blocks, BLOCK_SIZE, stream); break;
         case DType::Bool:
             result = cast_from_standard<bool>(input, target_dtype, n, num_blocks, BLOCK_SIZE, stream); break;
         default:
@@ -1943,12 +2044,65 @@ auto strided_fill_kernel(Tensor& self, double value, hipStream_t stream) -> void
     } else if (self.dtype() == DType::Float16) {
         __half h_value = tenzor::rocm::safe_f2h(static_cast<float>(value));
         launch(reinterpret_cast<__half*>(self.data<Float16>()), h_value);
+    } else if (self.dtype() == DType::BFloat16) {
+        hip_bfloat16 bf_value = tenzor::rocm::f32_to_bf16_rne(static_cast<float>(value));
+        launch(reinterpret_cast<hip_bfloat16*>(self.data<BFloat16>()), bf_value);
     } else if (self.dtype() == DType::Int8) {
         launch(self.data<int8_t>(), static_cast<int8_t>(value));
     } else if (self.dtype() == DType::UInt8) {
         launch(self.data<uint8_t>(), static_cast<uint8_t>(value));
     } else if (self.dtype() == DType::Bool) {
         launch(self.data<bool>(), value != 0.0);
+    } else if (self.dtype() == DType::Int16) {
+        launch(self.data<int16_t>(), static_cast<int16_t>(value));
+    } else if (self.dtype() == DType::UInt16) {
+        launch(self.data<uint16_t>(), static_cast<uint16_t>(value));
+    } else if (self.dtype() == DType::UInt32) {
+        launch(self.data<uint32_t>(), static_cast<uint32_t>(value));
+    } else if (self.dtype() == DType::UInt64) {
+        launch(self.data<uint64_t>(), static_cast<uint64_t>(value));
+    } else if (self.dtype() == DType::Complex64) {
+        launch(reinterpret_cast<hipFloatComplex*>(self.data_ptr()),
+               make_hipFloatComplex(static_cast<float>(value), 0.0f));
+    } else if (self.dtype() == DType::Complex128) {
+        launch(reinterpret_cast<hipDoubleComplex*>(self.data_ptr()),
+               make_hipDoubleComplex(static_cast<double>(value), 0.0));
+    } else if (self.dtype() == DType::FP8_E4M3) {
+        launch(reinterpret_cast<uint8_t*>(self.data_ptr()),
+               FP8_E4M3(static_cast<float>(value)).bits);
+    } else if (self.dtype() == DType::FP8_E5M2) {
+        launch(reinterpret_cast<uint8_t*>(self.data_ptr()),
+               FP8_E5M2(static_cast<float>(value)).bits);
+    } else if (self.dtype() == DType::QInt8) {
+        if (self.q_scale() == 0.0) {
+            HIP_CHECK(hipFree(d_meta));
+            throw std::runtime_error(
+                "fill_ on quantized tensor requires quantization params: "
+                "call set_quantization_params(scale, zero_point) first");
+        }
+        const int64_t qval = static_cast<int64_t>(std::llround(value / self.q_scale())) + self.q_zero_point();
+        launch(self.data<int8_t>(), static_cast<int8_t>(std::clamp<int64_t>(qval, -128, 127)));
+    } else if (self.dtype() == DType::QUInt8) {
+        if (self.q_scale() == 0.0) {
+            HIP_CHECK(hipFree(d_meta));
+            throw std::runtime_error(
+                "fill_ on quantized tensor requires quantization params: "
+                "call set_quantization_params(scale, zero_point) first");
+        }
+        const int64_t qval = static_cast<int64_t>(std::llround(value / self.q_scale())) + self.q_zero_point();
+        launch(reinterpret_cast<uint8_t*>(self.data_ptr()),
+               static_cast<uint8_t>(std::clamp<int64_t>(qval, 0, 255)));
+    } else if (self.dtype() == DType::QInt4x2) {
+        if (self.q_scale() == 0.0) {
+            HIP_CHECK(hipFree(d_meta));
+            throw std::runtime_error(
+                "fill_ on quantized tensor requires quantization params: "
+                "call set_quantization_params(scale, zero_point) first");
+        }
+        const int64_t qval = static_cast<int64_t>(std::llround(value / self.q_scale())) + self.q_zero_point();
+        const int64_t clamped = std::clamp<int64_t>(qval, -8, 7);
+        const uint8_t packed = static_cast<uint8_t>((clamped & 0xF) | ((clamped & 0xF) << 4));
+        launch(reinterpret_cast<uint8_t*>(self.data_ptr()), packed);
     } else {
         HIP_CHECK(hipFree(d_meta));
         throw std::runtime_error("strided_fill: unsupported dtype");

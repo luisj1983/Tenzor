@@ -1,6 +1,17 @@
 #include "tenzor/core/tensor.hpp"
 #include "tenzor/core/dtype.hpp"
-#include "tenzor/ops/creation.hpp"  // for tenzor::get_global_seed
+#include "tenzor/ops/creation.hpp"  // for tenzor::get_global_seed, complex
+
+// Forward-declare the handful of public tensor ops used by the complex dot
+// decomposition. We do NOT include <tenzor/ops/math.hpp> here: it declares
+// tenzor::exp/cos/sin/hypot which would shadow the device-math functions of the
+// same name called inside this file's __global__ kernels.
+namespace tenzor {
+auto real(const Tensor& input) -> Tensor;
+auto imag(const Tensor& input) -> Tensor;
+auto add(const Tensor& a, const Tensor& b) -> Tensor;
+auto sub(const Tensor& a, const Tensor& b) -> Tensor;
+}  // namespace tenzor
 #include <hip/hip_runtime.h>
 #include <hip/hip_fp16.h>
 #include <hip/hip_bfloat16.h>
@@ -2128,7 +2139,7 @@ __global__ void pow_int_kernel(const T* input, T* output, double e, int int_exp,
  * @param stream HIP stream for asynchronous execution
  * @return Result tensor (input^exponent)
  */
-auto pow_kernel(const Tensor& input, float exponent, hipStream_t stream) -> Tensor {
+auto pow_kernel(const Tensor& input, double exponent, hipStream_t stream) -> Tensor {
     int64_t n = input.numel();
     std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
     Tensor result(shape, input.dtype(), input.device());
@@ -2138,17 +2149,18 @@ auto pow_kernel(const Tensor& input, float exponent, hipStream_t stream) -> Tens
 
     if (input.dtype() == DType::Float32) {
         hipLaunchKernelGGL(pow_kernel_f32, grid, block, 0, stream,
-            input.data<float>(), result.data<float>(), exponent, n);
+            input.data<float>(), result.data<float>(), static_cast<float>(exponent), n);
     } else if (input.dtype() == DType::Float64) {
-        double exp_d = static_cast<double>(exponent);
+        // Keep full double precision in the exponent (the scalar arrives as
+        // double; truncating to float here lost ~7 digits — audit P1 2.10).
         hipLaunchKernelGGL(pow_kernel_f64, grid, block, 0, stream,
-            input.data<double>(), result.data<double>(), exp_d, n);
+            input.data<double>(), result.data<double>(), exponent, n);
     } else if (input.dtype() == DType::Float16) {
         hipLaunchKernelGGL(pow_kernel_f16, grid, block, 0, stream,
             reinterpret_cast<const __half*>(input.data<Float16>()),
-            reinterpret_cast<__half*>(result.data<Float16>()), exponent, n);
+            reinterpret_cast<__half*>(result.data<Float16>()), static_cast<float>(exponent), n);
     } else {
-        const double e = static_cast<double>(exponent);
+        const double e = exponent;
         const int int_exp = (e == floor(e) && e >= 0.0) ? 1 : 0;
         const long long k = static_cast<long long>(e);
         TENZOR_HIP_INT_DISPATCH(input.dtype(), "pow",
@@ -2168,7 +2180,7 @@ auto pow_kernel(const Tensor& input, float exponent, hipStream_t stream) -> Tens
  * @param stream HIP stream for asynchronous execution
  * @return Result tensor (clamped values)
  */
-auto clamp_kernel(const Tensor& input, float min_val, float max_val, hipStream_t stream) -> Tensor {
+auto clamp_kernel(const Tensor& input, double min_val, double max_val, hipStream_t stream) -> Tensor {
     int64_t n = input.numel();
     std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
     Tensor result(shape, input.dtype(), input.device());
@@ -2183,16 +2195,18 @@ auto clamp_kernel(const Tensor& input, float min_val, float max_val, hipStream_t
 
     if (input.dtype() == DType::Float32) {
         hipLaunchKernelGGL(clamp_kernel_f32, grid, block, 0, stream,
-            input.data<float>(), result.data<float>(), min_val, max_val, n);
+            input.data<float>(), result.data<float>(),
+            static_cast<float>(min_val), static_cast<float>(max_val), n);
     } else if (input.dtype() == DType::Float64) {
-        double min_d = static_cast<double>(min_val);
-        double max_d = static_cast<double>(max_val);
+        // Preserve full double precision in the bounds (audit P1 2.10): the
+        // scalars arrive as double; truncating to float lost ~7 digits.
         hipLaunchKernelGGL(clamp_kernel_f64, grid, block, 0, stream,
-            input.data<double>(), result.data<double>(), min_d, max_d, n);
+            input.data<double>(), result.data<double>(), min_val, max_val, n);
     } else if (input.dtype() == DType::Float16) {
         hipLaunchKernelGGL(clamp_kernel_f16, grid, block, 0, stream,
             reinterpret_cast<const __half*>(input.data<Float16>()),
-            reinterpret_cast<__half*>(result.data<Float16>()), min_val, max_val, n);
+            reinterpret_cast<__half*>(result.data<Float16>()),
+            static_cast<float>(min_val), static_cast<float>(max_val), n);
     } else if (input.dtype() == DType::BFloat16) {
         auto input_f32 = input.to(DType::Float32);
         auto result_f32 = clamp_kernel(input_f32, min_val, max_val, stream);
@@ -2563,8 +2577,11 @@ auto tan_kernel(const Tensor& input, hipStream_t stream) -> Tensor {
         hipLaunchKernelGGL(tan_kernel_f16, grid, block, 0, stream,
             reinterpret_cast<const __half*>(input.data<Float16>()),
             reinterpret_cast<__half*>(result.data<Float16>()), n);
+    } else if (input.dtype() == DType::BFloat16) {
+        auto in_f32 = cast_kernel(input, DType::Float32, stream);
+        return cast_kernel(tan_kernel(in_f32, stream), DType::BFloat16, stream);
     } else {
-        throw std::runtime_error("tan operation only supports Float32, Float64, and Float16 dtypes");
+        throw std::runtime_error("tan operation only supports Float32, Float64, Float16, and BFloat16 dtypes");
     }
 
     HIP_CHECK(hipGetLastError());
@@ -2591,8 +2608,11 @@ auto asin_kernel(const Tensor& input, hipStream_t stream) -> Tensor {
         hipLaunchKernelGGL(asin_kernel_f16, grid, block, 0, stream,
             reinterpret_cast<const __half*>(input.data<Float16>()),
             reinterpret_cast<__half*>(result.data<Float16>()), n);
+    } else if (input.dtype() == DType::BFloat16) {
+        auto in_f32 = cast_kernel(input, DType::Float32, stream);
+        return cast_kernel(asin_kernel(in_f32, stream), DType::BFloat16, stream);
     } else {
-        throw std::runtime_error("asin operation only supports Float32, Float64, and Float16 dtypes");
+        throw std::runtime_error("asin operation only supports Float32, Float64, Float16, and BFloat16 dtypes");
     }
 
     HIP_CHECK(hipGetLastError());
@@ -2619,8 +2639,11 @@ auto acos_kernel(const Tensor& input, hipStream_t stream) -> Tensor {
         hipLaunchKernelGGL(acos_kernel_f16, grid, block, 0, stream,
             reinterpret_cast<const __half*>(input.data<Float16>()),
             reinterpret_cast<__half*>(result.data<Float16>()), n);
+    } else if (input.dtype() == DType::BFloat16) {
+        auto in_f32 = cast_kernel(input, DType::Float32, stream);
+        return cast_kernel(acos_kernel(in_f32, stream), DType::BFloat16, stream);
     } else {
-        throw std::runtime_error("acos operation only supports Float32, Float64, and Float16 dtypes");
+        throw std::runtime_error("acos operation only supports Float32, Float64, Float16, and BFloat16 dtypes");
     }
 
     HIP_CHECK(hipGetLastError());
@@ -2647,8 +2670,11 @@ auto atan_kernel(const Tensor& input, hipStream_t stream) -> Tensor {
         hipLaunchKernelGGL(atan_kernel_f16, grid, block, 0, stream,
             reinterpret_cast<const __half*>(input.data<Float16>()),
             reinterpret_cast<__half*>(result.data<Float16>()), n);
+    } else if (input.dtype() == DType::BFloat16) {
+        auto in_f32 = cast_kernel(input, DType::Float32, stream);
+        return cast_kernel(atan_kernel(in_f32, stream), DType::BFloat16, stream);
     } else {
-        throw std::runtime_error("atan operation only supports Float32, Float64, and Float16 dtypes");
+        throw std::runtime_error("atan operation only supports Float32, Float64, Float16, and BFloat16 dtypes");
     }
 
     HIP_CHECK(hipGetLastError());
@@ -2675,8 +2701,11 @@ auto sinh_kernel(const Tensor& input, hipStream_t stream) -> Tensor {
         hipLaunchKernelGGL(sinh_kernel_f16, grid, block, 0, stream,
             reinterpret_cast<const __half*>(input.data<Float16>()),
             reinterpret_cast<__half*>(result.data<Float16>()), n);
+    } else if (input.dtype() == DType::BFloat16) {
+        auto in_f32 = cast_kernel(input, DType::Float32, stream);
+        return cast_kernel(sinh_kernel(in_f32, stream), DType::BFloat16, stream);
     } else {
-        throw std::runtime_error("sinh operation only supports Float32, Float64, and Float16 dtypes");
+        throw std::runtime_error("sinh operation only supports Float32, Float64, Float16, and BFloat16 dtypes");
     }
 
     HIP_CHECK(hipGetLastError());
@@ -2703,8 +2732,11 @@ auto cosh_kernel(const Tensor& input, hipStream_t stream) -> Tensor {
         hipLaunchKernelGGL(cosh_kernel_f16, grid, block, 0, stream,
             reinterpret_cast<const __half*>(input.data<Float16>()),
             reinterpret_cast<__half*>(result.data<Float16>()), n);
+    } else if (input.dtype() == DType::BFloat16) {
+        auto in_f32 = cast_kernel(input, DType::Float32, stream);
+        return cast_kernel(cosh_kernel(in_f32, stream), DType::BFloat16, stream);
     } else {
-        throw std::runtime_error("cosh operation only supports Float32, Float64, and Float16 dtypes");
+        throw std::runtime_error("cosh operation only supports Float32, Float64, Float16, and BFloat16 dtypes");
     }
 
     HIP_CHECK(hipGetLastError());
@@ -2735,8 +2767,11 @@ auto reciprocal_kernel(const Tensor& input, hipStream_t stream) -> Tensor {
         hipLaunchKernelGGL(reciprocal_kernel_f16, grid, block, 0, stream,
             reinterpret_cast<const __half*>(input.data<Float16>()),
             reinterpret_cast<__half*>(result.data<Float16>()), n);
+    } else if (input.dtype() == DType::BFloat16) {
+        auto in_f32 = cast_kernel(input, DType::Float32, stream);
+        return cast_kernel(reciprocal_kernel(in_f32, stream), DType::BFloat16, stream);
     } else {
-        throw std::runtime_error("reciprocal operation only supports Float32, Float64, and Float16 dtypes");
+        throw std::runtime_error("reciprocal operation only supports Float32, Float64, Float16, and BFloat16 dtypes");
     }
 
     HIP_CHECK(hipGetLastError());
@@ -2763,8 +2798,11 @@ auto floor_kernel(const Tensor& input, hipStream_t stream) -> Tensor {
         hipLaunchKernelGGL(floor_kernel_f16, grid, block, 0, stream,
             reinterpret_cast<const __half*>(input.data<Float16>()),
             reinterpret_cast<__half*>(result.data<Float16>()), n);
+    } else if (input.dtype() == DType::BFloat16) {
+        auto in_f32 = cast_kernel(input, DType::Float32, stream);
+        return cast_kernel(floor_kernel(in_f32, stream), DType::BFloat16, stream);
     } else {
-        throw std::runtime_error("floor operation only supports Float32, Float64, and Float16 dtypes");
+        throw std::runtime_error("floor operation only supports Float32, Float64, Float16, and BFloat16 dtypes");
     }
 
     HIP_CHECK(hipGetLastError());
@@ -2791,8 +2829,11 @@ auto ceil_kernel(const Tensor& input, hipStream_t stream) -> Tensor {
         hipLaunchKernelGGL(ceil_kernel_f16, grid, block, 0, stream,
             reinterpret_cast<const __half*>(input.data<Float16>()),
             reinterpret_cast<__half*>(result.data<Float16>()), n);
+    } else if (input.dtype() == DType::BFloat16) {
+        auto in_f32 = cast_kernel(input, DType::Float32, stream);
+        return cast_kernel(ceil_kernel(in_f32, stream), DType::BFloat16, stream);
     } else {
-        throw std::runtime_error("ceil operation only supports Float32, Float64, and Float16 dtypes");
+        throw std::runtime_error("ceil operation only supports Float32, Float64, Float16, and BFloat16 dtypes");
     }
 
     HIP_CHECK(hipGetLastError());
@@ -2819,8 +2860,11 @@ auto round_kernel(const Tensor& input, hipStream_t stream) -> Tensor {
         hipLaunchKernelGGL(round_kernel_f16, grid, block, 0, stream,
             reinterpret_cast<const __half*>(input.data<Float16>()),
             reinterpret_cast<__half*>(result.data<Float16>()), n);
+    } else if (input.dtype() == DType::BFloat16) {
+        auto in_f32 = cast_kernel(input, DType::Float32, stream);
+        return cast_kernel(round_kernel(in_f32, stream), DType::BFloat16, stream);
     } else {
-        throw std::runtime_error("round operation only supports Float32, Float64, and Float16 dtypes");
+        throw std::runtime_error("round operation only supports Float32, Float64, Float16, and BFloat16 dtypes");
     }
 
     HIP_CHECK(hipGetLastError());
@@ -2847,8 +2891,11 @@ auto trunc_kernel(const Tensor& input, hipStream_t stream) -> Tensor {
         hipLaunchKernelGGL(trunc_kernel_f16, grid, block, 0, stream,
             reinterpret_cast<const __half*>(input.data<Float16>()),
             reinterpret_cast<__half*>(result.data<Float16>()), n);
+    } else if (input.dtype() == DType::BFloat16) {
+        auto in_f32 = cast_kernel(input, DType::Float32, stream);
+        return cast_kernel(trunc_kernel(in_f32, stream), DType::BFloat16, stream);
     } else {
-        throw std::runtime_error("trunc operation only supports Float32, Float64, and Float16 dtypes");
+        throw std::runtime_error("trunc operation only supports Float32, Float64, Float16, and BFloat16 dtypes");
     }
 
     HIP_CHECK(hipGetLastError());
@@ -3314,8 +3361,38 @@ auto dot_kernel(const Tensor& a, const Tensor& b, hipStream_t stream) -> Tensor 
             d_partial, reinterpret_cast<__half*>(result.data<Float16>()), num_blocks);
         HIP_CHECK(hipGetLastError());
         HIP_CHECK(hipFree(d_partial));
+    } else if (a.dtype() == DType::BFloat16) {
+        auto a_f32 = cast_kernel(a, DType::Float32, stream);
+        auto b_f32 = cast_kernel(b, DType::Float32, stream);
+        return cast_kernel(dot_kernel(a_f32, b_f32, stream), DType::BFloat16, stream);
+    } else if (a.dtype() == DType::Int16 || a.dtype() == DType::Int32 ||
+               a.dtype() == DType::UInt16 || a.dtype() == DType::UInt32 ||
+               a.dtype() == DType::UInt64) {
+        // Integer dot: accumulate in Int64 to avoid overflow, narrow to input dtype.
+        DType orig = a.dtype();
+        auto a64 = cast_kernel(a, DType::Int64, stream);
+        auto b64 = cast_kernel(b, DType::Int64, stream);
+        return cast_kernel(dot_kernel(a64, b64, stream), orig, stream);
+    } else if (a.dtype() == DType::Int64) {
+        int64_t* d_partial;
+        HIP_CHECK(hipMalloc(&d_partial, num_blocks * sizeof(int64_t)));
+        hipLaunchKernelGGL(dot_kernel_device<int64_t>, dim3(num_blocks), dim3(block_size), 0, stream,
+            a.data<int64_t>(), b.data<int64_t>(), d_partial, n);
+        HIP_CHECK(hipGetLastError());
+        hipLaunchKernelGGL(final_reduce_kernel<int64_t>, dim3(1), dim3(block_size), 0, stream,
+            d_partial, result.data<int64_t>(), num_blocks);
+        HIP_CHECK(hipGetLastError());
+        HIP_CHECK(hipFree(d_partial));
+    } else if (a.dtype() == DType::Complex64 || a.dtype() == DType::Complex128) {
+        // Complex dot: Σ a_i·b_i = (Σ ar·br - Σ ai·bi) + i(Σ ar·bi + Σ ai·br),
+        // each Σ a real dot product (matches torch.dot — no conjugation).
+        auto ar = tenzor::real(a); auto ai = tenzor::imag(a);
+        auto br = tenzor::real(b); auto bi = tenzor::imag(b);
+        auto re = tenzor::sub(dot_kernel(ar, br, stream), dot_kernel(ai, bi, stream));
+        auto im = tenzor::add(dot_kernel(ar, bi, stream), dot_kernel(ai, br, stream));
+        return tenzor::complex(re, im);
     } else {
-        throw std::runtime_error("dot operation only supports Float32, Float64, and Float16 dtypes");
+        throw std::runtime_error("dot operation only supports Float32, Float64, Float16, BFloat16, integer, and complex dtypes");
     }
 
     return result;
@@ -3433,6 +3510,18 @@ auto zeros_kernel(const std::vector<int64_t>& shape, DType dtype, Device device,
     } else if (dtype == DType::Int8) {
         hipLaunchKernelGGL(fill_kernel_device<int8_t>, grid, block, 0, stream,
             result.data<int8_t>(), static_cast<int8_t>(0), n);
+    } else if (dtype == DType::Int16) {
+        hipLaunchKernelGGL(fill_kernel_device<int16_t>, grid, block, 0, stream,
+            result.data<int16_t>(), static_cast<int16_t>(0), n);
+    } else if (dtype == DType::UInt16) {
+        hipLaunchKernelGGL(fill_kernel_device<uint16_t>, grid, block, 0, stream,
+            result.data<uint16_t>(), static_cast<uint16_t>(0), n);
+    } else if (dtype == DType::UInt32) {
+        hipLaunchKernelGGL(fill_kernel_device<uint32_t>, grid, block, 0, stream,
+            result.data<uint32_t>(), static_cast<uint32_t>(0), n);
+    } else if (dtype == DType::UInt64) {
+        hipLaunchKernelGGL(fill_kernel_device<uint64_t>, grid, block, 0, stream,
+            result.data<uint64_t>(), static_cast<uint64_t>(0), n);
     } else if (dtype == DType::Float16) {
         hipLaunchKernelGGL(fill_kernel_device<__half>, grid, block, 0, stream,
             reinterpret_cast<__half*>(result.data<Float16>()), tenzor::rocm::safe_f2h(0.0f), n);
@@ -3451,6 +3540,13 @@ auto zeros_kernel(const std::vector<int64_t>& shape, DType dtype, Device device,
         compute_launch_config_1d(n * 2, g2, b2);
         hipLaunchKernelGGL(fill_kernel_device<double>, g2, b2, 0, stream,
             reinterpret_cast<double*>(const_cast<void*>(result.data_ptr())), 0.0, n * 2);
+    } else if (dtype == DType::QInt8 || dtype == DType::QUInt8 || dtype == DType::QInt4x2) {
+        // Quantized types use 1-byte-per-element storage. All-bits-zero is a
+        // valid zeroed buffer (dequantizes to 0 for zero_point=0). QInt4x2
+        // packs two 4-bit values per byte; n equals the byte count here.
+        hipLaunchKernelGGL(fill_kernel_device<uint8_t>, grid, block, 0, stream,
+            reinterpret_cast<uint8_t*>(const_cast<void*>(result.data_ptr())),
+            static_cast<uint8_t>(0), n);
     } else {
         throw std::runtime_error("Unsupported dtype for zeros operation");
     }
@@ -3499,6 +3595,18 @@ auto ones_kernel(const std::vector<int64_t>& shape, DType dtype, Device device, 
     } else if (dtype == DType::Int8) {
         hipLaunchKernelGGL(fill_kernel_device<int8_t>, grid, block, 0, stream,
             result.data<int8_t>(), static_cast<int8_t>(1), n);
+    } else if (dtype == DType::Int16) {
+        hipLaunchKernelGGL(fill_kernel_device<int16_t>, grid, block, 0, stream,
+            result.data<int16_t>(), static_cast<int16_t>(1), n);
+    } else if (dtype == DType::UInt16) {
+        hipLaunchKernelGGL(fill_kernel_device<uint16_t>, grid, block, 0, stream,
+            result.data<uint16_t>(), static_cast<uint16_t>(1), n);
+    } else if (dtype == DType::UInt32) {
+        hipLaunchKernelGGL(fill_kernel_device<uint32_t>, grid, block, 0, stream,
+            result.data<uint32_t>(), static_cast<uint32_t>(1), n);
+    } else if (dtype == DType::UInt64) {
+        hipLaunchKernelGGL(fill_kernel_device<uint64_t>, grid, block, 0, stream,
+            result.data<uint64_t>(), static_cast<uint64_t>(1), n);
     } else if (dtype == DType::Float16) {
         hipLaunchKernelGGL(fill_kernel_device<__half>, grid, block, 0, stream,
             reinterpret_cast<__half*>(result.data<Float16>()), tenzor::rocm::safe_f2h(1.0f), n);
@@ -3572,6 +3680,18 @@ auto full_kernel(const std::vector<int64_t>& shape, double value, DType dtype, D
     } else if (dtype == DType::Int8) {
         hipLaunchKernelGGL(fill_kernel_device<int8_t>, grid, block, 0, stream,
             result.data<int8_t>(), static_cast<int8_t>(value), n);
+    } else if (dtype == DType::Int16) {
+        hipLaunchKernelGGL(fill_kernel_device<int16_t>, grid, block, 0, stream,
+            result.data<int16_t>(), static_cast<int16_t>(value), n);
+    } else if (dtype == DType::UInt16) {
+        hipLaunchKernelGGL(fill_kernel_device<uint16_t>, grid, block, 0, stream,
+            result.data<uint16_t>(), static_cast<uint16_t>(value), n);
+    } else if (dtype == DType::UInt32) {
+        hipLaunchKernelGGL(fill_kernel_device<uint32_t>, grid, block, 0, stream,
+            result.data<uint32_t>(), static_cast<uint32_t>(value), n);
+    } else if (dtype == DType::UInt64) {
+        hipLaunchKernelGGL(fill_kernel_device<uint64_t>, grid, block, 0, stream,
+            result.data<uint64_t>(), static_cast<uint64_t>(value), n);
     } else if (dtype == DType::Float16) {
         hipLaunchKernelGGL(fill_kernel_device<__half>, grid, block, 0, stream,
             reinterpret_cast<__half*>(result.data<Float16>()), tenzor::rocm::safe_f2h(static_cast<float>(value)), n);
@@ -3881,6 +4001,32 @@ __global__ void arange_kernel_impl(T* output, T start, T step, int64_t n) {
     }
 }
 
+// Complex linear ramp (arange/linspace): real axis ramp, imaginary part 0.
+__global__ void ramp_complex64_impl(hipFloatComplex* output, double start, double step, int64_t n) {
+    HIP_KERNEL_LOOP(idx, n) {
+        output[idx] = make_hipFloatComplex(static_cast<float>(start + static_cast<double>(idx) * step), 0.0f);
+    }
+}
+__global__ void ramp_complex128_impl(hipDoubleComplex* output, double start, double step, int64_t n) {
+    HIP_KERNEL_LOOP(idx, n) {
+        output[idx] = make_hipDoubleComplex(start + static_cast<double>(idx) * step, 0.0);
+    }
+}
+__global__ void eye_complex64_impl(hipFloatComplex* output, int64_t n, int64_t m, int64_t k) {
+    int64_t total = n * m;
+    HIP_KERNEL_LOOP(idx, total) {
+        int64_t row = idx / m; int64_t col = idx % m;
+        output[idx] = make_hipFloatComplex((col - row == k) ? 1.0f : 0.0f, 0.0f);
+    }
+}
+__global__ void eye_complex128_impl(hipDoubleComplex* output, int64_t n, int64_t m, int64_t k) {
+    int64_t total = n * m;
+    HIP_KERNEL_LOOP(idx, total) {
+        int64_t row = idx / m; int64_t col = idx % m;
+        output[idx] = make_hipDoubleComplex((col - row == k) ? 1.0 : 0.0, 0.0);
+    }
+}
+
 auto arange_kernel(double start, double end, double step, DType dtype, Device device, hipStream_t stream) -> Tensor {
     // Calculate number of elements
     int64_t n = static_cast<int64_t>(std::ceil((end - start) / step));
@@ -3913,9 +4059,43 @@ auto arange_kernel(double start, double end, double step, DType dtype, Device de
             hipLaunchKernelGGL(arange_kernel_impl<__half>, grid, block, 0, stream,
                 reinterpret_cast<__half*>(result.data<Float16>()), tenzor::rocm::safe_f2h(static_cast<float>(start)), tenzor::rocm::safe_f2h(static_cast<float>(step)), n);
             break;
+        case DType::BFloat16:
+            hipLaunchKernelGGL(arange_kernel_impl<hip_bfloat16>, grid, block, 0, stream,
+                reinterpret_cast<hip_bfloat16*>(result.data<BFloat16>()),
+                tenzor::rocm::f32_to_bf16_rne(static_cast<float>(start)),
+                tenzor::rocm::f32_to_bf16_rne(static_cast<float>(step)), n);
+            break;
         case DType::Int8:
             hipLaunchKernelGGL(arange_kernel_impl<int8_t>, grid, block, 0, stream,
                 result.data<int8_t>(), static_cast<int8_t>(start), static_cast<int8_t>(step), n);
+            break;
+        case DType::Int16:
+            hipLaunchKernelGGL(arange_kernel_impl<int16_t>, grid, block, 0, stream,
+                result.data<int16_t>(), static_cast<int16_t>(start), static_cast<int16_t>(step), n);
+            break;
+        case DType::UInt8:
+            hipLaunchKernelGGL(arange_kernel_impl<uint8_t>, grid, block, 0, stream,
+                result.data<uint8_t>(), static_cast<uint8_t>(start), static_cast<uint8_t>(step), n);
+            break;
+        case DType::UInt16:
+            hipLaunchKernelGGL(arange_kernel_impl<uint16_t>, grid, block, 0, stream,
+                result.data<uint16_t>(), static_cast<uint16_t>(start), static_cast<uint16_t>(step), n);
+            break;
+        case DType::UInt32:
+            hipLaunchKernelGGL(arange_kernel_impl<uint32_t>, grid, block, 0, stream,
+                result.data<uint32_t>(), static_cast<uint32_t>(start), static_cast<uint32_t>(step), n);
+            break;
+        case DType::UInt64:
+            hipLaunchKernelGGL(arange_kernel_impl<uint64_t>, grid, block, 0, stream,
+                result.data<uint64_t>(), static_cast<uint64_t>(start), static_cast<uint64_t>(step), n);
+            break;
+        case DType::Complex64:
+            hipLaunchKernelGGL(ramp_complex64_impl, grid, block, 0, stream,
+                reinterpret_cast<hipFloatComplex*>(result.data_ptr()), start, step, n);
+            break;
+        case DType::Complex128:
+            hipLaunchKernelGGL(ramp_complex128_impl, grid, block, 0, stream,
+                reinterpret_cast<hipDoubleComplex*>(result.data_ptr()), start, step, n);
             break;
         default:
             throw std::runtime_error("arange_kernel: unsupported dtype");
@@ -3967,8 +4147,48 @@ auto linspace_kernel(double start, double end, int64_t steps, DType dtype, Devic
                 tenzor::rocm::f32_to_bf16_rne(static_cast<float>(start)),
                 tenzor::rocm::f32_to_bf16_rne(static_cast<float>(step)), steps);
             break;
+        case DType::Int8:
+            hipLaunchKernelGGL(linspace_kernel_impl<int8_t>, grid, block, 0, stream,
+                result.data<int8_t>(), static_cast<int8_t>(start), static_cast<int8_t>(step), steps);
+            break;
+        case DType::Int16:
+            hipLaunchKernelGGL(linspace_kernel_impl<int16_t>, grid, block, 0, stream,
+                result.data<int16_t>(), static_cast<int16_t>(start), static_cast<int16_t>(step), steps);
+            break;
+        case DType::Int32:
+            hipLaunchKernelGGL(linspace_kernel_impl<int32_t>, grid, block, 0, stream,
+                result.data<int32_t>(), static_cast<int32_t>(start), static_cast<int32_t>(step), steps);
+            break;
+        case DType::Int64:
+            hipLaunchKernelGGL(linspace_kernel_impl<int64_t>, grid, block, 0, stream,
+                result.data<int64_t>(), static_cast<int64_t>(start), static_cast<int64_t>(step), steps);
+            break;
+        case DType::UInt8:
+            hipLaunchKernelGGL(linspace_kernel_impl<uint8_t>, grid, block, 0, stream,
+                result.data<uint8_t>(), static_cast<uint8_t>(start), static_cast<uint8_t>(step), steps);
+            break;
+        case DType::UInt16:
+            hipLaunchKernelGGL(linspace_kernel_impl<uint16_t>, grid, block, 0, stream,
+                result.data<uint16_t>(), static_cast<uint16_t>(start), static_cast<uint16_t>(step), steps);
+            break;
+        case DType::UInt32:
+            hipLaunchKernelGGL(linspace_kernel_impl<uint32_t>, grid, block, 0, stream,
+                result.data<uint32_t>(), static_cast<uint32_t>(start), static_cast<uint32_t>(step), steps);
+            break;
+        case DType::UInt64:
+            hipLaunchKernelGGL(linspace_kernel_impl<uint64_t>, grid, block, 0, stream,
+                result.data<uint64_t>(), static_cast<uint64_t>(start), static_cast<uint64_t>(step), steps);
+            break;
+        case DType::Complex64:
+            hipLaunchKernelGGL(ramp_complex64_impl, grid, block, 0, stream,
+                reinterpret_cast<hipFloatComplex*>(result.data_ptr()), start, step, steps);
+            break;
+        case DType::Complex128:
+            hipLaunchKernelGGL(ramp_complex128_impl, grid, block, 0, stream,
+                reinterpret_cast<hipDoubleComplex*>(result.data_ptr()), start, step, steps);
+            break;
         default:
-            throw std::runtime_error("linspace_kernel: only Float32, Float64, Float16, BFloat16 supported");
+            throw std::runtime_error("linspace_kernel: unsupported dtype");
     }
 
     HIP_CHECK(hipGetLastError());
@@ -4019,9 +4239,41 @@ auto eye_kernel(int64_t n, int64_t m, int64_t k, DType dtype, Device device, hip
             hipLaunchKernelGGL(eye_kernel_impl<__half>, grid, block, 0, stream,
                 reinterpret_cast<__half*>(result.data<Float16>()), n, m, k);
             break;
+        case DType::BFloat16:
+            hipLaunchKernelGGL(eye_kernel_impl<hip_bfloat16>, grid, block, 0, stream,
+                reinterpret_cast<hip_bfloat16*>(result.data<BFloat16>()), n, m, k);
+            break;
         case DType::Int8:
             hipLaunchKernelGGL(eye_kernel_impl<int8_t>, grid, block, 0, stream,
                 result.data<int8_t>(), n, m, k);
+            break;
+        case DType::Int16:
+            hipLaunchKernelGGL(eye_kernel_impl<int16_t>, grid, block, 0, stream,
+                result.data<int16_t>(), n, m, k);
+            break;
+        case DType::UInt8:
+            hipLaunchKernelGGL(eye_kernel_impl<uint8_t>, grid, block, 0, stream,
+                result.data<uint8_t>(), n, m, k);
+            break;
+        case DType::UInt16:
+            hipLaunchKernelGGL(eye_kernel_impl<uint16_t>, grid, block, 0, stream,
+                result.data<uint16_t>(), n, m, k);
+            break;
+        case DType::UInt32:
+            hipLaunchKernelGGL(eye_kernel_impl<uint32_t>, grid, block, 0, stream,
+                result.data<uint32_t>(), n, m, k);
+            break;
+        case DType::UInt64:
+            hipLaunchKernelGGL(eye_kernel_impl<uint64_t>, grid, block, 0, stream,
+                result.data<uint64_t>(), n, m, k);
+            break;
+        case DType::Complex64:
+            hipLaunchKernelGGL(eye_complex64_impl, grid, block, 0, stream,
+                reinterpret_cast<hipFloatComplex*>(result.data_ptr()), n, m, k);
+            break;
+        case DType::Complex128:
+            hipLaunchKernelGGL(eye_complex128_impl, grid, block, 0, stream,
+                reinterpret_cast<hipDoubleComplex*>(result.data_ptr()), n, m, k);
             break;
         default:
             throw std::runtime_error("eye_kernel: unsupported dtype");
@@ -4999,12 +5251,24 @@ auto isfinite_kernel(const Tensor& input, hipStream_t stream) -> Tensor {
 // Host Wrappers: Binary Math Operations (atan2, fmod, remainder)
 // ============================================================================
 
-auto atan2_kernel(const Tensor& a, const Tensor& b, hipStream_t stream) -> Tensor {
-    if (a.dtype() != b.dtype()) {
+auto atan2_kernel(const Tensor& a_in, const Tensor& b_in, hipStream_t stream) -> Tensor {
+    if (a_in.dtype() != b_in.dtype()) {
         throw std::runtime_error("atan2: tensors must have the same dtype");
     }
-    if (a.numel() != b.numel()) {
-        throw std::runtime_error("atan2: tensors must have the same number of elements");
+
+    // NumPy-style broadcasting: expand both operands to the common shape so
+    // the elementwise kernel can run over a single contiguous index range.
+    std::vector<int64_t> a_shape(a_in.shape().begin(), a_in.shape().end());
+    std::vector<int64_t> b_shape(b_in.shape().begin(), b_in.shape().end());
+    Tensor a = a_in;
+    Tensor b = b_in;
+    if (a_shape != b_shape) {
+        std::vector<int64_t> bshape = detail::compute_broadcast_shape(a_shape, b_shape);
+        if (a_shape != bshape) a = tenzor::expand(a_in, bshape).contiguous();
+        if (b_shape != bshape) b = tenzor::expand(b_in, bshape).contiguous();
+    } else {
+        if (!a.is_contiguous()) a = a.contiguous();
+        if (!b.is_contiguous()) b = b.contiguous();
     }
 
     int64_t n = a.numel();
@@ -7580,8 +7844,13 @@ auto addcmul_kernel(const Tensor& input, const Tensor& tensor1, const Tensor& te
             reinterpret_cast<const __half*>(tensor1.data<Float16>()),
             reinterpret_cast<const __half*>(tensor2.data<Float16>()),
             reinterpret_cast<__half*>(result.data<Float16>()), value, n);
+    } else if (input.dtype() == DType::BFloat16) {
+        auto r_f32 = addcmul_kernel(cast_kernel(input, DType::Float32, stream),
+                                    cast_kernel(tensor1, DType::Float32, stream),
+                                    cast_kernel(tensor2, DType::Float32, stream), value, stream);
+        return cast_kernel(r_f32, DType::BFloat16, stream);
     } else {
-        throw std::runtime_error("addcmul operation only supports Float32, Float64, and Float16 dtypes");
+        throw std::runtime_error("addcmul operation only supports Float32, Float64, Float16, and BFloat16 dtypes");
     }
 
     HIP_CHECK(hipGetLastError());
@@ -7619,8 +7888,13 @@ auto addcdiv_kernel(const Tensor& input, const Tensor& tensor1, const Tensor& te
             reinterpret_cast<const __half*>(tensor1.data<Float16>()),
             reinterpret_cast<const __half*>(tensor2.data<Float16>()),
             reinterpret_cast<__half*>(result.data<Float16>()), value, n);
+    } else if (input.dtype() == DType::BFloat16) {
+        auto r_f32 = addcdiv_kernel(cast_kernel(input, DType::Float32, stream),
+                                    cast_kernel(tensor1, DType::Float32, stream),
+                                    cast_kernel(tensor2, DType::Float32, stream), value, stream);
+        return cast_kernel(r_f32, DType::BFloat16, stream);
     } else {
-        throw std::runtime_error("addcdiv operation only supports Float32, Float64, and Float16 dtypes");
+        throw std::runtime_error("addcdiv operation only supports Float32, Float64, Float16, and BFloat16 dtypes");
     }
 
     HIP_CHECK(hipGetLastError());

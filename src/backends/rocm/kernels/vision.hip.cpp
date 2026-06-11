@@ -798,6 +798,14 @@ auto interpolate_backward_kernel(const Tensor& grad_output,
                                   const std::string& mode,
                                   bool align_corners,
                                   hipStream_t stream) -> Tensor {
+    // The scatter backward uses HIP atomicAdd, which has no Float16/BFloat16
+    // overload. Compute the gradient in Float32 and narrow back so half-precision
+    // inputs round-trip (matches the CPU/CUDA dtype-preserving behavior).
+    if (grad_output.dtype() == DType::Float16 || grad_output.dtype() == DType::BFloat16) {
+        auto g32 = interpolate_backward_kernel(grad_output.to(DType::Float32),
+                                               input_size, mode, align_corners, stream);
+        return g32.to(grad_output.dtype());
+    }
     auto shape = grad_output.shape();
 
     // Trilinear backward operates on 5D (N, C, D, H, W).
@@ -958,14 +966,49 @@ __global__ void box_iou_kernel(
 
     T iou = inter_area / (union_area + static_cast<T>(1e-7));
 
-    if (iou_type == 1) {
-        // GIoU
+    // GIoU(1) / DIoU(2) / CIoU(3) all need the smallest enclosing box.
+    if (iou_type >= 1) {
         T enc_x1 = min(x1_1, x1_2);
         T enc_y1 = min(y1_1, y1_2);
         T enc_x2 = max(x2_1, x2_2);
         T enc_y2 = max(y2_1, y2_2);
-        T enc_area = (enc_x2 - enc_x1) * (enc_y2 - enc_y1);
-        iou = iou - (enc_area - union_area) / (enc_area + static_cast<T>(1e-7));
+        T enc_w = enc_x2 - enc_x1;
+        T enc_h = enc_y2 - enc_y1;
+
+        if (iou_type == 1) {
+            // GIoU = IoU - (enclose_area - union_area) / enclose_area
+            T enc_area = enc_w * enc_h;
+            iou = iou - (enc_area - union_area) / (enc_area + static_cast<T>(1e-7));
+        } else {
+            // Center-distance penalty (shared by DIoU and CIoU).
+            T cx1 = (x1_1 + x2_1) * static_cast<T>(0.5);
+            T cy1 = (y1_1 + y2_1) * static_cast<T>(0.5);
+            T cx2 = (x1_2 + x2_2) * static_cast<T>(0.5);
+            T cy2 = (y1_2 + y2_2) * static_cast<T>(0.5);
+            T center_dist_sq = (cx1 - cx2) * (cx1 - cx2) + (cy1 - cy2) * (cy1 - cy2);
+            T diag_dist_sq = enc_w * enc_w + enc_h * enc_h;
+            T dist_penalty = center_dist_sq / (diag_dist_sq + static_cast<T>(1e-7));
+
+            if (iou_type == 2) {
+                // DIoU = IoU - center_dist^2 / diag_dist^2
+                iou = iou - dist_penalty;
+            } else {
+                // CIoU = IoU - center_dist^2/diag^2 - alpha*v, with
+                // v = (4/pi^2)(atan(w1/h1) - atan(w2/h2))^2 and
+                // alpha = v / (1 - IoU + v). alpha/v use the ORIGINAL IoU.
+                double w1 = static_cast<double>(x2_1 - x1_1);
+                double h1 = static_cast<double>(y2_1 - y1_1);
+                double w2 = static_cast<double>(x2_2 - x1_2);
+                double h2 = static_cast<double>(y2_2 - y1_2);
+                const double four_over_pi_sq =
+                    4.0 / (3.14159265358979323846 * 3.14159265358979323846);
+                double ar_diff = atan(w1 / (h1 + 1e-7)) - atan(w2 / (h2 + 1e-7));
+                double v = ar_diff * ar_diff * four_over_pi_sq;
+                double iou_d = static_cast<double>(iou);
+                double alpha = v / (1.0 - iou_d + v + 1e-7);
+                iou = static_cast<T>(iou_d - static_cast<double>(dist_penalty) - alpha * v);
+            }
+        }
     }
 
     output[i * M + j] = iou;

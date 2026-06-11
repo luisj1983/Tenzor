@@ -1831,9 +1831,15 @@ __global__ void conv_transpose2d_forward_kernel(
     int64_t output_padding_h,
     int64_t output_padding_w,
     int64_t dilation_h,
-    int64_t dilation_w
+    int64_t dilation_w,
+    int64_t groups
 ) {
     int64_t total_elements = batch * out_channels * out_h * out_w;
+    // Grouped conv-transpose: weight is [in_channels, out_channels/groups, kH, kW].
+    // Output channel oc belongs to group g and sees only that group's inputs.
+    // groups==1 reduces to the dense case (out_cpg==out_channels, in_cpg==in_channels).
+    const int64_t out_cpg = out_channels / groups;
+    const int64_t in_cpg  = in_channels / groups;
 
     for (int64_t idx = blockIdx.x * blockDim.x + threadIdx.x; idx < total_elements;
          idx += blockDim.x * gridDim.x) {
@@ -1843,12 +1849,16 @@ __global__ void conv_transpose2d_forward_kernel(
         int64_t oc = (idx / (out_w * out_h)) % out_channels;
         int64_t n = idx / (out_w * out_h * out_channels);
 
+        int64_t g = oc / out_cpg;          // group of this output channel
+        int64_t oc_in_g = oc % out_cpg;    // its index within the group
+
         T sum = bias ? bias[oc] : T(0);
 
         // Q.8: honour per-axis dilation. The output position oh/ow maps back to
         // input via (oh + padding_h - kh * dilation_h) / stride_h (and same for
         // W). Setting dilation_h/w=1 reproduces the previous behaviour.
-        for (int64_t ic = 0; ic < in_channels; ++ic) {
+        for (int64_t ic_local = 0; ic_local < in_cpg; ++ic_local) {
+            int64_t ic = g * in_cpg + ic_local;
             for (int64_t kh = 0; kh < kernel_h; ++kh) {
                 for (int64_t kw = 0; kw < kernel_w; ++kw) {
                     // Find corresponding input position
@@ -1863,9 +1873,9 @@ __global__ void conv_transpose2d_forward_kernel(
                     if (ih >= 0 && ih < in_h && iw >= 0 && iw < in_w) {
                         int64_t input_idx = n * (in_channels * in_h * in_w) +
                                            ic * (in_h * in_w) + ih * in_w + iw;
-                        // Weight: [in_channels, out_channels, kh, kw]
-                        int64_t weight_idx = ic * (out_channels * kernel_h * kernel_w) +
-                                            oc * (kernel_h * kernel_w) + kh * kernel_w + kw;
+                        // Weight: [in_channels, out_channels/groups, kh, kw]
+                        int64_t weight_idx = ic * (out_cpg * kernel_h * kernel_w) +
+                                            oc_in_g * (kernel_h * kernel_w) + kh * kernel_w + kw;
                         sum += input[input_idx] * weight[weight_idx];
                     }
                 }
@@ -1888,6 +1898,7 @@ auto conv_transpose2d_forward_kernel(
     int64_t output_padding_w,
     int64_t dilation_h,
     int64_t dilation_w,
+    int64_t groups,
     hipStream_t stream
 ) -> Tensor {
     // Q.8: per-axis dilation_h/w added. PyTorch ConvTranspose2d supports
@@ -1900,7 +1911,11 @@ auto conv_transpose2d_forward_kernel(
     int64_t in_h = input_shape[2];
     int64_t in_w = input_shape[3];
 
-    int64_t out_channels = weight_shape[1];
+    // ConvTranspose weight layout is [in_channels, out_channels/groups, kH, kW],
+    // so the true output-channel count is weight_shape[1] * groups. The previous
+    // code used weight_shape[1] directly, producing out_channels/groups channels
+    // (e.g. 8 instead of 32 for groups=4) and ignoring grouping entirely.
+    int64_t out_channels = weight_shape[1] * groups;
     int64_t kernel_h = weight_shape[2];
     int64_t kernel_w = weight_shape[3];
 
@@ -1923,7 +1938,7 @@ auto conv_transpose2d_forward_kernel(
             batch, in_channels, in_h, in_w, out_channels, out_h, out_w,
             kernel_h, kernel_w, stride_h, stride_w,
             padding_h, padding_w, output_padding_h, output_padding_w,
-            dilation_h, dilation_w);
+            dilation_h, dilation_w, groups);
     } else if (input.dtype() == DType::Float64) {
         hipLaunchKernelGGL(conv_transpose2d_forward_kernel<double>,
             dim3(blocks), dim3(threads), 0, stream,
@@ -1933,7 +1948,7 @@ auto conv_transpose2d_forward_kernel(
             batch, in_channels, in_h, in_w, out_channels, out_h, out_w,
             kernel_h, kernel_w, stride_h, stride_w,
             padding_h, padding_w, output_padding_h, output_padding_w,
-            dilation_h, dilation_w);
+            dilation_h, dilation_w, groups);
     } else if (input.dtype() == DType::Float16) {
         auto input_f32 = input.to(DType::Float32);
         auto weight_f32 = weight.to(DType::Float32);
@@ -1946,7 +1961,7 @@ auto conv_transpose2d_forward_kernel(
         auto result = conv_transpose2d_forward_kernel(input_f32, weight_f32, bias_f32_ptr,
                                                        stride_h, stride_w, padding_h, padding_w,
                                                        output_padding_h, output_padding_w,
-                                                       dilation_h, dilation_w, stream);
+                                                       dilation_h, dilation_w, groups, stream);
         auto result_f16 = result.to(DType::Float16);
         fp16_saturate(result_f16.data_ptr(), result_f16.numel(), stream);
         return result_f16;
@@ -1962,7 +1977,7 @@ auto conv_transpose2d_forward_kernel(
         auto result = conv_transpose2d_forward_kernel(input_f32, weight_f32, bias_f32_ptr,
                                                        stride_h, stride_w, padding_h, padding_w,
                                                        output_padding_h, output_padding_w,
-                                                       dilation_h, dilation_w, stream);
+                                                       dilation_h, dilation_w, groups, stream);
         return result.to(DType::BFloat16);
     } else {
         throw std::runtime_error("conv_transpose2d_forward: unsupported dtype");

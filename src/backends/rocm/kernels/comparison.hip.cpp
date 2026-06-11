@@ -365,6 +365,34 @@ auto lt_kernel(const Tensor& a_in, const Tensor& b_in, hipStream_t stream) -> Te
             auto b_f32 = b.to(DType::Float32);
             return lt_kernel(a_f32, b_f32, stream);
         }
+        case DType::Int8:
+            hipLaunchKernelGGL(lt_kernel<int8_t>, dim3(blocks), dim3(threads), 0, stream,
+                a.data<int8_t>(), b.data<int8_t>(), output.data<bool>(), n);
+            break;
+        case DType::Int16:
+            hipLaunchKernelGGL(lt_kernel<int16_t>, dim3(blocks), dim3(threads), 0, stream,
+                a.data<int16_t>(), b.data<int16_t>(), output.data<bool>(), n);
+            break;
+        case DType::UInt8:
+            hipLaunchKernelGGL(lt_kernel<uint8_t>, dim3(blocks), dim3(threads), 0, stream,
+                a.data<uint8_t>(), b.data<uint8_t>(), output.data<bool>(), n);
+            break;
+        case DType::UInt16:
+            hipLaunchKernelGGL(lt_kernel<uint16_t>, dim3(blocks), dim3(threads), 0, stream,
+                a.data<uint16_t>(), b.data<uint16_t>(), output.data<bool>(), n);
+            break;
+        case DType::UInt32:
+            hipLaunchKernelGGL(lt_kernel<uint32_t>, dim3(blocks), dim3(threads), 0, stream,
+                a.data<uint32_t>(), b.data<uint32_t>(), output.data<bool>(), n);
+            break;
+        case DType::UInt64:
+            hipLaunchKernelGGL(lt_kernel<uint64_t>, dim3(blocks), dim3(threads), 0, stream,
+                a.data<uint64_t>(), b.data<uint64_t>(), output.data<bool>(), n);
+            break;
+        case DType::Bool:
+            hipLaunchKernelGGL(lt_kernel<bool>, dim3(blocks), dim3(threads), 0, stream,
+                a.data<bool>(), b.data<bool>(), output.data<bool>(), n);
+            break;
         default:
             throw std::runtime_error("lt_kernel: unsupported dtype");
     }
@@ -422,6 +450,34 @@ auto le_kernel(const Tensor& a_in, const Tensor& b_in, hipStream_t stream) -> Te
             auto b_f32 = b.to(DType::Float32);
             return le_kernel(a_f32, b_f32, stream);
         }
+        case DType::Int8:
+            hipLaunchKernelGGL(le_kernel<int8_t>, dim3(blocks), dim3(threads), 0, stream,
+                a.data<int8_t>(), b.data<int8_t>(), output.data<bool>(), n);
+            break;
+        case DType::Int16:
+            hipLaunchKernelGGL(le_kernel<int16_t>, dim3(blocks), dim3(threads), 0, stream,
+                a.data<int16_t>(), b.data<int16_t>(), output.data<bool>(), n);
+            break;
+        case DType::UInt8:
+            hipLaunchKernelGGL(le_kernel<uint8_t>, dim3(blocks), dim3(threads), 0, stream,
+                a.data<uint8_t>(), b.data<uint8_t>(), output.data<bool>(), n);
+            break;
+        case DType::UInt16:
+            hipLaunchKernelGGL(le_kernel<uint16_t>, dim3(blocks), dim3(threads), 0, stream,
+                a.data<uint16_t>(), b.data<uint16_t>(), output.data<bool>(), n);
+            break;
+        case DType::UInt32:
+            hipLaunchKernelGGL(le_kernel<uint32_t>, dim3(blocks), dim3(threads), 0, stream,
+                a.data<uint32_t>(), b.data<uint32_t>(), output.data<bool>(), n);
+            break;
+        case DType::UInt64:
+            hipLaunchKernelGGL(le_kernel<uint64_t>, dim3(blocks), dim3(threads), 0, stream,
+                a.data<uint64_t>(), b.data<uint64_t>(), output.data<bool>(), n);
+            break;
+        case DType::Bool:
+            hipLaunchKernelGGL(le_kernel<bool>, dim3(blocks), dim3(threads), 0, stream,
+                a.data<bool>(), b.data<bool>(), output.data<bool>(), n);
+            break;
         default:
             throw std::runtime_error("le_kernel: unsupported dtype");
     }
@@ -479,6 +535,34 @@ auto gt_kernel(const Tensor& a_in, const Tensor& b_in, hipStream_t stream) -> Te
             auto b_f32 = b.to(DType::Float32);
             return gt_kernel(a_f32, b_f32, stream);
         }
+        case DType::Int8:
+            hipLaunchKernelGGL(gt_kernel<int8_t>, dim3(blocks), dim3(threads), 0, stream,
+                a.data<int8_t>(), b.data<int8_t>(), output.data<bool>(), n);
+            break;
+        case DType::Int16:
+            hipLaunchKernelGGL(gt_kernel<int16_t>, dim3(blocks), dim3(threads), 0, stream,
+                a.data<int16_t>(), b.data<int16_t>(), output.data<bool>(), n);
+            break;
+        case DType::UInt8:
+            hipLaunchKernelGGL(gt_kernel<uint8_t>, dim3(blocks), dim3(threads), 0, stream,
+                a.data<uint8_t>(), b.data<uint8_t>(), output.data<bool>(), n);
+            break;
+        case DType::UInt16:
+            hipLaunchKernelGGL(gt_kernel<uint16_t>, dim3(blocks), dim3(threads), 0, stream,
+                a.data<uint16_t>(), b.data<uint16_t>(), output.data<bool>(), n);
+            break;
+        case DType::UInt32:
+            hipLaunchKernelGGL(gt_kernel<uint32_t>, dim3(blocks), dim3(threads), 0, stream,
+                a.data<uint32_t>(), b.data<uint32_t>(), output.data<bool>(), n);
+            break;
+        case DType::UInt64:
+            hipLaunchKernelGGL(gt_kernel<uint64_t>, dim3(blocks), dim3(threads), 0, stream,
+                a.data<uint64_t>(), b.data<uint64_t>(), output.data<bool>(), n);
+            break;
+        case DType::Bool:
+            hipLaunchKernelGGL(gt_kernel<bool>, dim3(blocks), dim3(threads), 0, stream,
+                a.data<bool>(), b.data<bool>(), output.data<bool>(), n);
+            break;
         default:
             throw std::runtime_error("gt_kernel: unsupported dtype");
     }
@@ -536,6 +620,34 @@ auto ge_kernel(const Tensor& a_in, const Tensor& b_in, hipStream_t stream) -> Te
             auto b_f32 = b.to(DType::Float32);
             return ge_kernel(a_f32, b_f32, stream);
         }
+        case DType::Int8:
+            hipLaunchKernelGGL(ge_kernel<int8_t>, dim3(blocks), dim3(threads), 0, stream,
+                a.data<int8_t>(), b.data<int8_t>(), output.data<bool>(), n);
+            break;
+        case DType::Int16:
+            hipLaunchKernelGGL(ge_kernel<int16_t>, dim3(blocks), dim3(threads), 0, stream,
+                a.data<int16_t>(), b.data<int16_t>(), output.data<bool>(), n);
+            break;
+        case DType::UInt8:
+            hipLaunchKernelGGL(ge_kernel<uint8_t>, dim3(blocks), dim3(threads), 0, stream,
+                a.data<uint8_t>(), b.data<uint8_t>(), output.data<bool>(), n);
+            break;
+        case DType::UInt16:
+            hipLaunchKernelGGL(ge_kernel<uint16_t>, dim3(blocks), dim3(threads), 0, stream,
+                a.data<uint16_t>(), b.data<uint16_t>(), output.data<bool>(), n);
+            break;
+        case DType::UInt32:
+            hipLaunchKernelGGL(ge_kernel<uint32_t>, dim3(blocks), dim3(threads), 0, stream,
+                a.data<uint32_t>(), b.data<uint32_t>(), output.data<bool>(), n);
+            break;
+        case DType::UInt64:
+            hipLaunchKernelGGL(ge_kernel<uint64_t>, dim3(blocks), dim3(threads), 0, stream,
+                a.data<uint64_t>(), b.data<uint64_t>(), output.data<bool>(), n);
+            break;
+        case DType::Bool:
+            hipLaunchKernelGGL(ge_kernel<bool>, dim3(blocks), dim3(threads), 0, stream,
+                a.data<bool>(), b.data<bool>(), output.data<bool>(), n);
+            break;
         default:
             throw std::runtime_error("ge_kernel: unsupported dtype");
     }

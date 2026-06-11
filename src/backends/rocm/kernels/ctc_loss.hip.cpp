@@ -242,6 +242,16 @@ auto ctc_loss_forward_kernel(
     bool zero_infinity,
     hipStream_t stream
 ) -> std::vector<Tensor> {
+    // Float64: compute in Float32 on-device (the alpha/beta recursion runs in
+    // log-space where single precision is ample), then narrow loss and grad
+    // back to Float64 so the output dtype matches the input. Stays GPU-resident.
+    if (log_probs.dtype() == DType::Float64) {
+        auto lp32 = log_probs.to(DType::Float32);
+        auto results = ctc_loss_forward_kernel(lp32, targets, input_lengths,
+                                               target_lengths, blank, zero_infinity, stream);
+        for (auto& t : results) t = t.to(DType::Float64);
+        return results;
+    }
     if (log_probs.dtype() != DType::Float32) {
         throw std::invalid_argument(
             "ctc_loss_forward (ROCm): log_probs must be Float32");

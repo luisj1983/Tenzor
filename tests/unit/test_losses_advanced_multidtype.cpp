@@ -759,12 +759,16 @@ TEST_P(LossAdvancedMultiDTypeTest, NTXentLoss_BackwardGradient) {
 }
 
 TEST_P(LossAdvancedMultiDTypeTest, TripletLoss_BackwardGradient) {
-    auto anchor   = Variable(createFull({4, 8}, 0.0), true);
     // Hard triplet: positive far from the anchor, negative close, so the
     // hinge max(0, d_ap - d_an + margin) is ACTIVE and a gradient flows.
-    // (The previous easy triplet satisfied the margin -> loss 0 -> no grad.)
-    auto positive = Variable(createFull({4, 8}, 1.0), false);
-    auto negative = Variable(createFull({4, 8}, 0.1), false);
+    // Use NON-collinear (varied) tensors — with uniform/collinear inputs the
+    // anchor gradient cancels to exactly zero in real arithmetic and only
+    // "flows" through Float32 rounding noise (which ROCm's fast-math flushes
+    // to 0). createVaried gives distinct per-element directions so a genuine
+    // gradient reaches the anchor on every backend.
+    auto anchor   = Variable(createVaried({4, 8}, /*base=*/0.0,  /*step=*/0.37), true);
+    auto positive = Variable(createVaried({4, 8}, /*base=*/1.0,  /*step=*/0.21), false);
+    auto negative = Variable(createVaried({4, 8}, /*base=*/0.05, /*step=*/0.31), false);
 
     auto criterion = TripletLoss(/*margin=*/1.0, /*p=*/2.0, /*swap=*/false,
                                  Reduction::Mean);

@@ -144,7 +144,14 @@ TEST_P(GradCheckComprehensiveTest, Softmax) {
 }
 
 TEST_P(GradCheckComprehensiveTest, LogSoftmax) {
-    auto x = make_centered_var({4, 8}, device);
+    // Deterministic, well-conditioned input that is identical on every backend
+    // (randn is drawn per-device, so each backend otherwise sees different data
+    // — defeating the parity check and occasionally drawing a row that pushes
+    // the Float32 central difference past atol on a single element). log_softmax
+    // is smooth, so a fixed moderate-range input is a clean, reproducible check.
+    std::vector<float> vals(32);
+    for (int i = 0; i < 32; ++i) vals[i] = 0.4f * std::sin(0.7f * static_cast<float>(i));
+    auto x = Variable(from_data(vals.data(), {4, 8}, device), true);
     auto f = [](const Variable& v) { return log_softmax(v, 1); };
     // log_softmax backward involves exp(y) * sum(grad_y), which loses a
     // couple of decimal digits in Float32 for batched data. The default
@@ -172,7 +179,18 @@ TEST_P(GradCheckComprehensiveTest, Mish) {
 }
 
 TEST_P(GradCheckComprehensiveTest, LeakyRelu) {
-    auto x = make_centered_var({4, 6}, device);
+    // leaky_relu has a non-differentiable kink at x==0; central-difference
+    // gradcheck is mathematically invalid for any sample within eps of it.
+    // Use a deterministic input bounded away from zero (|x| >= 0.15, identical
+    // on every backend) that still exercises both the positive (slope 1) and
+    // negative (slope alpha) branches. The previous per-device randn could
+    // draw a value at the kink and fail despite a correct kernel.
+    std::vector<float> vals(24);
+    for (int i = 0; i < 24; ++i) {
+        float mag = 0.15f + 0.07f * static_cast<float>(i % 5);
+        vals[i] = ((i % 2 == 0) ? 1.0f : -1.0f) * mag;
+    }
+    auto x = Variable(from_data(vals.data(), {4, 6}, device), true);
     auto f = [](const Variable& v) { return leaky_relu(v, 0.01f); };
     EXPECT_TRUE(gradcheck(f, x, 1e-4, 1e-3, 1e-2));
 }

@@ -75,11 +75,34 @@ __global__ void elementwise_sqrt_kernel(const T* __restrict__ input, T* __restri
  * @param val Value to reduce
  * @return Reduced max (valid only in lane 0)
  */
+// NaN-propagating max/min combiners. The backend is built with -ffast-math
+// (-ffinite-math-only), so `x != x` / isnan() are optimized to false and CANNOT
+// detect NaN. We use the IEEE-754 bit-pattern check `is_nan_bits` instead (see
+// rocm_nan_helpers.hip.h). Integral types have no NaN, so the check is compiled
+// out via `if constexpr` (is_nan_bits is only defined for float/double/half/bf16).
+template<typename T>
+__device__ __forceinline__ bool reduce_is_nan(T x) {
+    if constexpr (std::is_same_v<T, float> || std::is_same_v<T, double> ||
+                  std::is_same_v<T, __half> || std::is_same_v<T, hip_bfloat16>) {
+        return is_nan_bits(x);
+    } else {
+        return false;
+    }
+}
+template<typename T>
+__device__ __forceinline__ T nan_prop_max(T a, T b) {
+    return reduce_is_nan(b) ? b : (reduce_is_nan(a) ? a : ((a > b) ? a : b));
+}
+template<typename T>
+__device__ __forceinline__ T nan_prop_min(T a, T b) {
+    return reduce_is_nan(b) ? b : (reduce_is_nan(a) ? a : ((a < b) ? a : b));
+}
+
 template<typename T>
 __device__ __forceinline__ T wavefront_reduce_max(T val) {
     for (int offset = warpSize / 2; offset > 0; offset /= 2) {
         T other = __shfl_down(val, offset);
-        val = (val > other) ? val : other;
+        val = nan_prop_max(val, other);
     }
     return val;
 }
@@ -94,7 +117,7 @@ template<typename T>
 __device__ __forceinline__ T wavefront_reduce_min(T val) {
     for (int offset = warpSize / 2; offset > 0; offset /= 2) {
         T other = __shfl_down(val, offset);
-        val = (val < other) ? val : other;
+        val = nan_prop_min(val, other);
     }
     return val;
 }
@@ -133,7 +156,7 @@ __global__ void max_reduce_kernel(const T* input, T* output, int64_t n) {
     // Grid-stride loop
     for (int64_t i = idx + grid_size; i < n; i += grid_size) {
         T val = input[i];
-        thread_max = (val > thread_max) ? val : thread_max;
+        thread_max = nan_prop_max(val, thread_max);
     }
 
     shared[tid] = thread_max;
@@ -143,7 +166,7 @@ __global__ void max_reduce_kernel(const T* input, T* output, int64_t n) {
     for (int stride = blockDim.x / 2; stride >= warpSize; stride >>= 1) {
         if (tid < stride) {
             T other = shared[tid + stride];
-            shared[tid] = (shared[tid] > other) ? shared[tid] : other;
+            shared[tid] = nan_prop_max(shared[tid], other);
         }
         __syncthreads();
     }
@@ -187,7 +210,7 @@ __global__ void min_reduce_kernel(const T* input, T* output, int64_t n) {
     // Grid-stride loop
     for (int64_t i = idx + grid_size; i < n; i += grid_size) {
         T val = input[i];
-        thread_min = (val < thread_min) ? val : thread_min;
+        thread_min = nan_prop_min(val, thread_min);
     }
 
     shared[tid] = thread_min;
@@ -197,7 +220,7 @@ __global__ void min_reduce_kernel(const T* input, T* output, int64_t n) {
     for (int stride = blockDim.x / 2; stride >= warpSize; stride >>= 1) {
         if (tid < stride) {
             T other = shared[tid + stride];
-            shared[tid] = (shared[tid] < other) ? shared[tid] : other;
+            shared[tid] = nan_prop_min(shared[tid], other);
         }
         __syncthreads();
     }
@@ -1237,6 +1260,25 @@ auto sum_kernel(const Tensor& input_raw, int64_t dim, bool keepdim, hipStream_t 
             }
             break;
         }
+        case DType::UInt64: {
+            // Native UInt64 accumulation — small unsigned ints are promoted to
+            // Int64 by the public op, but UInt64 cannot (it would overflow the
+            // signed range), so it reaches the kernel directly.
+            auto* input_data = input.data<uint64_t>();
+            auto* output_data = output.data<uint64_t>();
+
+            if (full_reduction) {
+                launch_full_reduction_sum(input_data, output_data, input.numel(), stream);
+            } else {
+                launch_dim_reduction_sum(
+                    input_data, output_data,
+                    std::vector<int64_t>(input_shape.begin(), input_shape.end()),
+                    std::vector<int64_t>(input_strides.begin(), input_strides.end()),
+                    dim, stream
+                );
+            }
+            break;
+        }
         case DType::Float16: {
             auto* input_data = reinterpret_cast<const __half*>(input.data<Float16>());
             auto* output_data = reinterpret_cast<__half*>(output.data<Float16>());
@@ -1296,6 +1338,16 @@ auto sum_kernel(const Tensor& input_raw, int64_t dim, bool keepdim, hipStream_t 
 auto mean_kernel(const Tensor& input, int64_t dim, bool keepdim, hipStream_t stream) -> Tensor {
     const auto dtype = input.dtype();
     const int64_t ndim = input.ndim();
+
+    // Complex mean = mean(Re) + i·mean(Im): recurse on the real-valued parts
+    // (matches the Complex sum path; Σc_i/n = (ΣRe/n) + i·(ΣIm/n)).
+    if (dtype == DType::Complex64 || dtype == DType::Complex128) {
+        const bool full = (dim == INT64_MIN);
+        const int64_t d = (dim < 0 && dim != INT64_MIN) ? dim + ndim : dim;
+        auto re_mean = mean_kernel(tenzor::real(input), full ? INT64_MIN : d, keepdim, stream);
+        auto im_mean = mean_kernel(tenzor::imag(input), full ? INT64_MIN : d, keepdim, stream);
+        return tenzor::complex(re_mean, im_mean);
+    }
 
     if (dtype != DType::Float32 && dtype != DType::Float64 && dtype != DType::Float16 && dtype != DType::BFloat16) {
         throw std::runtime_error("mean: only Float32, Float64, Float16, and BFloat16 are supported");
@@ -2008,6 +2060,13 @@ auto argmax_kernel(const Tensor& input, int64_t dim, bool keepdim, hipStream_t s
         throw std::runtime_error("argmax: cannot compute argmax of empty tensor");
     }
 
+    // Small integer / Bool inputs are exactly representable in Float32; widen and
+    // recurse so argmax works for every integral dtype (indices are unaffected).
+    if (dtype == DType::Int8 || dtype == DType::Int16 || dtype == DType::UInt8 ||
+        dtype == DType::UInt16 || dtype == DType::Bool) {
+        return argmax_kernel(input.to(DType::Float32), dim, keepdim, stream);
+    }
+
     // Normalize a negative axis index (dim=-1 => last axis); INT64_MIN remains
     // the "reduce all" sentinel handled by the dim<0 branch below.
     if (dim != INT64_MIN && dim < 0) dim += static_cast<int64_t>(input_shape.size());
@@ -2133,6 +2192,13 @@ auto argmin_kernel(const Tensor& input, int64_t dim, bool keepdim, hipStream_t s
         throw std::runtime_error("argmin: cannot compute argmin of empty tensor");
     }
 
+    // Small integer / Bool inputs are exactly representable in Float32; widen and
+    // recurse so argmin works for every integral dtype (indices are unaffected).
+    if (dtype == DType::Int8 || dtype == DType::Int16 || dtype == DType::UInt8 ||
+        dtype == DType::UInt16 || dtype == DType::Bool) {
+        return argmin_kernel(input.to(DType::Float32), dim, keepdim, stream);
+    }
+
     // Normalize a negative axis index (dim=-1 => last axis); INT64_MIN remains
     // the "reduce all" sentinel handled by the dim<0 branch below.
     if (dim != INT64_MIN && dim < 0) dim += static_cast<int64_t>(input_shape.size());
@@ -2250,6 +2316,14 @@ auto prod_kernel(const Tensor& input, int64_t dim, bool keepdim, hipStream_t str
     const auto& device = input.device();
     const auto& input_shape = input.shape();
     int64_t n = input.numel();
+
+    // Narrow integer types: accumulate the product in Int64 (native kernel) and
+    // narrow back, so prod works for every small integral dtype.
+    if (dtype == DType::Int8 || dtype == DType::Int16 || dtype == DType::UInt8 ||
+        dtype == DType::UInt16 || dtype == DType::UInt32) {
+        auto result_i64 = prod_kernel(input.to(DType::Int64), dim, keepdim, stream);
+        return result_i64.to(dtype);
+    }
 
     // Normalize user-specified negative dims (e.g. -1 = last) to positive
     // while leaving INT64_MIN alone — that's the project-wide "reduce all

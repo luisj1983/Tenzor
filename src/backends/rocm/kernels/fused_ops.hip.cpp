@@ -165,6 +165,11 @@ auto fused_linear_relu_hip(
 
     // Launch kernel
     int64_t total_elements = batch_size * out_features;
+    // Empty input/output: skip the launch. A zero-element grid makes HIP reject
+    // the launch with "invalid configuration argument".
+    if (total_elements == 0) {
+        return output;
+    }
     int threads = 256;
     int blocks = (total_elements + threads - 1) / threads;
     blocks = std::min(blocks, 65535);
@@ -402,6 +407,93 @@ auto fused_softmax_cross_entropy_hip(
     } else {
         return losses;
     }
+}
+
+// Grad-returning variant: writes per-row loss AND grad_logits = softmax - onehot.
+template<typename T, int BLOCK_SIZE>
+__global__ void fused_softmax_ce_grad_kernel(
+    const T* logits,
+    const int64_t* targets,
+    T* losses,
+    T* grad_logits,
+    int64_t batch_size,
+    int64_t num_classes
+) {
+    int64_t b = blockIdx.x;
+    if (b >= batch_size) return;
+
+    const T* row = logits + b * num_classes;
+    T* grad_row = grad_logits + b * num_classes;
+    int64_t target = targets[b];
+
+    __shared__ T shared_data[BLOCK_SIZE];
+
+    // Block-wide max for numerical stability.
+    T max_val = std::numeric_limits<T>::lowest();
+    for (int64_t i = threadIdx.x; i < num_classes; i += blockDim.x) {
+        max_val = fmaxf(max_val, row[i]);
+    }
+    shared_data[threadIdx.x] = max_val;
+    __syncthreads();
+    for (int s = blockDim.x / 2; s > 0; s >>= 1) {
+        if (threadIdx.x < s)
+            shared_data[threadIdx.x] = fmaxf(shared_data[threadIdx.x], shared_data[threadIdx.x + s]);
+        __syncthreads();
+    }
+    T global_max = shared_data[0];
+    __syncthreads();
+
+    // Block-wide sum(exp(x - max)).
+    T sum_exp = 0;
+    for (int64_t i = threadIdx.x; i < num_classes; i += blockDim.x) {
+        sum_exp += expf(row[i] - global_max);
+    }
+    shared_data[threadIdx.x] = sum_exp;
+    __syncthreads();
+    for (int s = blockDim.x / 2; s > 0; s >>= 1) {
+        if (threadIdx.x < s) shared_data[threadIdx.x] += shared_data[threadIdx.x + s];
+        __syncthreads();
+    }
+    T total = shared_data[0];
+    __syncthreads();
+
+    // grad_i = softmax_i - [i == target]; per-sample loss = logsumexp - row[target].
+    for (int64_t i = threadIdx.x; i < num_classes; i += blockDim.x) {
+        T p = expf(row[i] - global_max) / total;
+        grad_row[i] = p - (i == target ? T(1) : T(0));
+    }
+    if (threadIdx.x == 0) {
+        losses[b] = (logf(total) + global_max) - row[target];
+    }
+}
+
+// Returns {per-sample loss (batch,), grad_logits (batch, C)} for rank-2 inputs.
+auto fused_softmax_cross_entropy_grad_hip(
+    const Tensor& logits,
+    const Tensor& targets
+) -> std::pair<Tensor, Tensor> {
+    if (logits.dtype() != DType::Float32) {
+        throw std::runtime_error("fused_softmax_cross_entropy_grad_hip: Only Float32 supported");
+    }
+    int64_t batch_size = logits.shape()[0];
+    int64_t num_classes = logits.shape()[1];
+
+    Tensor losses = create_hip_zeros({batch_size}, DType::Float32, logits.device());
+    Tensor grad = create_hip_zeros({batch_size, num_classes}, DType::Float32, logits.device());
+
+    constexpr int BLOCK_SIZE = 256;
+    hipLaunchKernelGGL(
+        HIP_KERNEL_NAME(fused_softmax_ce_grad_kernel<float, BLOCK_SIZE>),
+        dim3(batch_size), dim3(BLOCK_SIZE), 0, 0,
+        logits.data<float>(),
+        targets.data<int64_t>(),
+        losses.data<float>(),
+        grad.data<float>(),
+        batch_size,
+        num_classes
+    );
+    HIP_CHECK(hipGetLastError());
+    return {losses, grad};
 }
 
 // ==============================================================================

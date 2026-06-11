@@ -524,7 +524,8 @@ TEST_P(ConvNeXtMultiDTypeTest, ConvNeXtBaseDepthwiseConsistency) {
     float consistency_tol = atol();
     if ((device().type == Device::Type::CUDA ||
          device().type == Device::Type::OneAPI ||
-         device().type == Device::Type::Vulkan) &&
+         device().type == Device::Type::Vulkan ||
+         device().type == Device::Type::ROCm) &&
         (dtype() == DType::Float64 || dtype() == DType::Float32)) {
         // Library-level run-to-run jitter in deep networks. cuDNN/oneDNN pick
         // convolution algorithms heuristically and use atomic reductions, so

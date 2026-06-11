@@ -584,7 +584,22 @@ if(TENZOR_BUILD_ROCM)
         target_link_libraries(tenzor_core PRIVATE
             hip::host
         )
+        # Real CPU<->GPU DMA lives in this isolated HIP TU (compiled by hipcc)
+        # so HIP's vector-type headers never collide with CUDA's in the host TUs
+        # of tenzor_core. See rocm_transfer.hpp. This restores async ROCm offload
+        # transfers that were previously compiled out (the #ifdef TENZOR_USE_ROCM
+        # paths in transfer_engine.cpp could not be enabled in a CUDA+HIP build).
+        set_source_files_properties(core/rocm_transfer.hip.cpp PROPERTIES LANGUAGE HIP)
+        target_sources(tenzor_core PRIVATE core/rocm_transfer.hip.cpp)
+        set(TENZOR_ROCM_TRANSFER_REAL TRUE)
     endif()
+endif()
+
+# When the real HIP transfer TU is not built, provide a no-op stub so the
+# rocm_transfer:: symbols referenced unconditionally by transfer_engine.cpp
+# (wait/is_ready/~TransferState) still resolve at link time.
+if(NOT TENZOR_ROCM_TRANSFER_REAL)
+    target_sources(tenzor_core PRIVATE core/rocm_transfer_stub.cpp)
 endif()
 
 # Build backends
