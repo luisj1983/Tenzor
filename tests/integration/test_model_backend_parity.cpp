@@ -64,8 +64,8 @@ TEST(ModelBackendParity, SimpleMLP) {
             backends[i].synchronize();
             EXPECT_TENSORS_CLOSE(ref, out, 1e-3f, 1e-3f);
         } catch (const std::exception& e) {
-            std::cerr << "SimpleMLP skipped on "
-                      << backend_name(backends[i]) << ": " << e.what() << std::endl;
+            ADD_FAILURE() << "SimpleMLP failed on "
+                          << backend_name(backends[i]) << ": " << e.what();
         }
     }
 }
@@ -130,8 +130,8 @@ TEST(ModelBackendParity, LeNet5) {
             backends[i].synchronize();
             EXPECT_TENSORS_CLOSE(ref, out, 1e-3f, 1e-3f);
         } catch (const std::exception& e) {
-            std::cerr << "LeNet5 skipped on "
-                      << backend_name(backends[i]) << ": " << e.what() << std::endl;
+            ADD_FAILURE() << "LeNet5 failed on "
+                          << backend_name(backends[i]) << ": " << e.what();
         }
     }
 }
@@ -168,8 +168,8 @@ TEST(ModelBackendParity, TransformerEncoder1Layer) {
             backends[i].synchronize();
             EXPECT_TENSORS_CLOSE(ref, out, 1e-3f, 1e-3f);
         } catch (const std::exception& e) {
-            std::cerr << "TransformerEncoder1Layer skipped on "
-                      << backend_name(backends[i]) << ": " << e.what() << std::endl;
+            ADD_FAILURE() << "TransformerEncoder1Layer failed on "
+                          << backend_name(backends[i]) << ": " << e.what();
         }
     }
 }
@@ -208,8 +208,8 @@ TEST(ModelBackendParity, LSTMSeq2Seq) {
             backends[i].synchronize();
             EXPECT_TENSORS_CLOSE(ref, out, 1e-3f, 1e-3f);
         } catch (const std::exception& e) {
-            std::cerr << "LSTMSeq2Seq skipped on "
-                      << backend_name(backends[i]) << ": " << e.what() << std::endl;
+            ADD_FAILURE() << "LSTMSeq2Seq failed on "
+                          << backend_name(backends[i]) << ": " << e.what();
         }
     }
 }
@@ -256,8 +256,8 @@ TEST(ModelBackendParity, EncoderDecoder) {
             backends[i].synchronize();
             EXPECT_TENSORS_CLOSE(ref, out, 1e-3f, 1e-3f);
         } catch (const std::exception& e) {
-            std::cerr << "EncoderDecoder skipped on "
-                      << backend_name(backends[i]) << ": " << e.what() << std::endl;
+            ADD_FAILURE() << "EncoderDecoder failed on "
+                          << backend_name(backends[i]) << ": " << e.what();
         }
     }
 }

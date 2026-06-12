@@ -83,8 +83,8 @@ TEST_P(LinalgParity, Det) {
             EXPECT_TRUE(tensors_close(ref_flat, res_flat, 1e-3f, 1e-1f))
                 << "Det on " << backend_name(backends[i]);
         } catch (const std::exception& e) {
-            std::cerr << "Det: backend " << backend_name(backends[i])
-                      << " skipped: " << e.what() << std::endl;
+            ADD_FAILURE() << "Det failed on " << backend_name(backends[i])
+                      << ": " << e.what();
         }
     }
 }
@@ -115,8 +115,8 @@ TEST_P(LinalgParity, Inv) {
             backends[i].synchronize();
             EXPECT_TENSORS_CLOSE(product, I, 1e-4f, 1e-5f);
         } catch (const std::exception& e) {
-            std::cerr << "Inv: backend " << backend_name(backends[i])
-                      << " skipped: " << e.what() << std::endl;
+            ADD_FAILURE() << "Inv failed on " << backend_name(backends[i])
+                      << ": " << e.what();
         }
     }
 }
@@ -149,8 +149,8 @@ TEST_P(LinalgParity, Solve) {
             backends[i].synchronize();
             EXPECT_TENSORS_CLOSE(recon, b, 1e-4f, 1e-5f);
         } catch (const std::exception& e) {
-            std::cerr << "Solve: backend " << backend_name(backends[i])
-                      << " skipped: " << e.what() << std::endl;
+            ADD_FAILURE() << "Solve failed on " << backend_name(backends[i])
+                      << ": " << e.what();
         }
     }
 }
@@ -189,8 +189,8 @@ TEST_P(LinalgParity, SVD) {
             EXPECT_TRUE(tensors_close(recon.to(Device::cpu()), A, 1e-3f, 1e-4f))
                 << "SVD reconstruction on " << backend_name(backends[i]);
         } catch (const std::exception& e) {
-            std::cerr << "SVD: backend " << backend_name(backends[i])
-                      << " skipped: " << e.what() << std::endl;
+            ADD_FAILURE() << "SVD failed on " << backend_name(backends[i])
+                      << ": " << e.what();
         }
     }
 }
@@ -221,8 +221,8 @@ TEST_P(LinalgParity, QR) {
             backends[i].synchronize();
             EXPECT_TENSORS_CLOSE(recon, A, 1e-4f, 1e-5f);
         } catch (const std::exception& e) {
-            std::cerr << "QR: backend " << backend_name(backends[i])
-                      << " skipped: " << e.what() << std::endl;
+            ADD_FAILURE() << "QR failed on " << backend_name(backends[i])
+                      << ": " << e.what();
         }
     }
 }
@@ -267,8 +267,8 @@ TEST_P(LinalgParity, Eigh) {
             EXPECT_TRUE(tensors_close(lhs.to(Device::cpu()), rhs.to(Device::cpu()), 1e-3f, 1e-4f))
                 << "Eigh reconstruction on " << backend_name(backends[i]);
         } catch (const std::exception& e) {
-            std::cerr << "Eigh: backend " << backend_name(backends[i])
-                      << " skipped: " << e.what() << std::endl;
+            ADD_FAILURE() << "Eigh failed on " << backend_name(backends[i])
+                      << ": " << e.what();
         }
     }
 }
@@ -314,8 +314,8 @@ TEST_P(LinalgParity, Eigh_LargeBatched) {
             EXPECT_TRUE(tensors_close(lhs.to(Device::cpu()), rhs.to(Device::cpu()), 1e-2f, 1e-3f))
                 << "Eigh_LargeBatched reconstruction on " << backend_name(backends[i]);
         } catch (const std::exception& e) {
-            std::cerr << "Eigh_LargeBatched: backend " << backend_name(backends[i])
-                      << " skipped: " << e.what() << std::endl;
+            ADD_FAILURE() << "Eigh_LargeBatched failed on " << backend_name(backends[i])
+                      << ": " << e.what();
         }
     }
 }
@@ -433,8 +433,8 @@ TEST_P(LinalgParity, Eig_NonSymmetric) {
                     << " on " << backend_name(backends[b]);
             }
         } catch (const std::exception& e) {
-            std::cerr << "Eig_NonSymmetric: backend " << backend_name(backends[b])
-                      << " skipped: " << e.what() << std::endl;
+            ADD_FAILURE() << "Eig_NonSymmetric failed on " << backend_name(backends[b])
+                      << ": " << e.what();
         }
     }
 }
@@ -580,8 +580,8 @@ TEST_P(LinalgParity, Cholesky) {
             backends[i].synchronize();
             EXPECT_TENSORS_CLOSE(recon, A, 1e-4f, 1e-5f);
         } catch (const std::exception& e) {
-            std::cerr << "Cholesky: backend " << backend_name(backends[i])
-                      << " skipped: " << e.what() << std::endl;
+            ADD_FAILURE() << "Cholesky failed on " << backend_name(backends[i])
+                      << ": " << e.what();
         }
     }
 }
@@ -618,8 +618,8 @@ TEST_P(LinalgParity, LU) {
             // L @ U should match across backends (same permuted A)
             EXPECT_TENSORS_CLOSE(ref_recon, recon, 1e-4f, 1e-5f);
         } catch (const std::exception& e) {
-            std::cerr << "LU: backend " << backend_name(backends[i])
-                      << " skipped: " << e.what() << std::endl;
+            ADD_FAILURE() << "LU failed on " << backend_name(backends[i])
+                      << ": " << e.what();
         }
     }
 }
@@ -706,8 +706,8 @@ TEST_P(LinalgParity, SolveTriangular) {
             EXPECT_TRUE(tensors_close(recon.to(Device::cpu()), b, 1e-4f, 1e-5f))
                 << "SolveTriangular on " << backend_name(backends[i]);
         } catch (const std::exception& e) {
-            std::cerr << "SolveTriangular: backend " << backend_name(backends[i])
-                      << " skipped: " << e.what() << std::endl;
+            ADD_FAILURE() << "SolveTriangular failed on " << backend_name(backends[i])
+                      << ": " << e.what();
         }
     }
 }

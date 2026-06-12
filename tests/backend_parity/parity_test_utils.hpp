@@ -1115,9 +1115,9 @@ void test_gradient_parity(
             }
             runs.push_back(std::move(run));
         } catch (const std::exception& e) {
-            std::cerr << test_name << ": backend "
+            ADD_FAILURE() << test_name << ": backend "
                       << backend_name(backend)
-                      << " failed: " << e.what() << std::endl;
+                      << " failed: " << e.what();
         }
     }
 

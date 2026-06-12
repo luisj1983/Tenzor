@@ -58,8 +58,8 @@ TEST(JITBackendParity, LinearChain) {
             backends[i].synchronize();
             EXPECT_TENSORS_CLOSE(ref, out, 1e-3f, 1e-3f);
         } catch (const std::exception& e) {
-            std::cerr << "LinearChain skipped on "
-                      << backend_name(backends[i]) << ": " << e.what() << std::endl;
+            ADD_FAILURE() << "LinearChain failed on "
+                          << backend_name(backends[i]) << ": " << e.what();
         }
     }
 }
@@ -99,8 +99,8 @@ TEST(JITBackendParity, Conv2dBNReLU) {
             backends[i].synchronize();
             EXPECT_TENSORS_CLOSE(ref, out, 1e-3f, 1e-3f);
         } catch (const std::exception& e) {
-            std::cerr << "Conv2dBNReLU skipped on "
-                      << backend_name(backends[i]) << ": " << e.what() << std::endl;
+            ADD_FAILURE() << "Conv2dBNReLU failed on "
+                          << backend_name(backends[i]) << ": " << e.what();
         }
     }
 }
@@ -137,8 +137,8 @@ TEST(JITBackendParity, AttentionBlock) {
             backends[i].synchronize();
             EXPECT_TENSORS_CLOSE(ref, out, 1e-3f, 1e-3f);
         } catch (const std::exception& e) {
-            std::cerr << "AttentionBlock skipped on "
-                      << backend_name(backends[i]) << ": " << e.what() << std::endl;
+            ADD_FAILURE() << "AttentionBlock failed on "
+                          << backend_name(backends[i]) << ": " << e.what();
         }
     }
 }
@@ -197,8 +197,8 @@ TEST(JITBackendParity, ResNetBottleneck) {
             backends[i].synchronize();
             EXPECT_TENSORS_CLOSE(ref, out, 1e-3f, 1e-3f);
         } catch (const std::exception& e) {
-            std::cerr << "ResNetBottleneck skipped on "
-                      << backend_name(backends[i]) << ": " << e.what() << std::endl;
+            ADD_FAILURE() << "ResNetBottleneck failed on "
+                          << backend_name(backends[i]) << ": " << e.what();
         }
     }
 }
@@ -245,8 +245,8 @@ TEST(JITBackendParity, LSTMSequence) {
             backends[i].synchronize();
             EXPECT_TENSORS_CLOSE(ref, out, 1e-3f, 1e-3f);
         } catch (const std::exception& e) {
-            std::cerr << "LSTMSequence skipped on "
-                      << backend_name(backends[i]) << ": " << e.what() << std::endl;
+            ADD_FAILURE() << "LSTMSequence failed on "
+                          << backend_name(backends[i]) << ": " << e.what();
         }
     }
 }
@@ -277,8 +277,8 @@ TEST(JITBackendParity, SoftmaxCrossEntropy) {
             backends[i].synchronize();
             EXPECT_TENSORS_CLOSE(ref, out, 1e-3f, 1e-3f);
         } catch (const std::exception& e) {
-            std::cerr << "SoftmaxCrossEntropy skipped on "
-                      << backend_name(backends[i]) << ": " << e.what() << std::endl;
+            ADD_FAILURE() << "SoftmaxCrossEntropy failed on "
+                          << backend_name(backends[i]) << ": " << e.what();
         }
     }
 }
@@ -321,8 +321,8 @@ TEST(JITBackendParity, LayerNormMLP) {
             backends[i].synchronize();
             EXPECT_TENSORS_CLOSE(ref, out, 1e-3f, 1e-3f);
         } catch (const std::exception& e) {
-            std::cerr << "LayerNormMLP skipped on "
-                      << backend_name(backends[i]) << ": " << e.what() << std::endl;
+            ADD_FAILURE() << "LayerNormMLP failed on "
+                          << backend_name(backends[i]) << ": " << e.what();
         }
     }
 }
@@ -367,8 +367,8 @@ TEST(JITBackendParity, EmbeddingLookup) {
             backends[i].synchronize();
             EXPECT_TENSORS_CLOSE(ref, out, 1e-2f, 1e-2f);
         } catch (const std::exception& e) {
-            std::cerr << "EmbeddingLookup skipped on "
-                      << backend_name(backends[i]) << ": " << e.what() << std::endl;
+            ADD_FAILURE() << "EmbeddingLookup failed on "
+                          << backend_name(backends[i]) << ": " << e.what();
         }
     }
 }
@@ -415,8 +415,8 @@ TEST(JITBackendParity, MultiHeadAttentionBlock) {
             // Tracked in #53.
             EXPECT_TENSORS_CLOSE(ref, out, 1e-1f, 1e-1f);
         } catch (const std::exception& e) {
-            std::cerr << "MultiHeadAttentionBlock skipped on "
-                      << backend_name(backends[i]) << ": " << e.what() << std::endl;
+            ADD_FAILURE() << "MultiHeadAttentionBlock failed on "
+                          << backend_name(backends[i]) << ": " << e.what();
         }
     }
 }
@@ -463,8 +463,8 @@ TEST(JITBackendParity, ConvPool) {
             backends[i].synchronize();
             EXPECT_TENSORS_CLOSE(ref, out, 1e-3f, 1e-3f);
         } catch (const std::exception& e) {
-            std::cerr << "ConvPool skipped on "
-                      << backend_name(backends[i]) << ": " << e.what() << std::endl;
+            ADD_FAILURE() << "ConvPool failed on "
+                          << backend_name(backends[i]) << ": " << e.what();
         }
     }
 }
