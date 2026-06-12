@@ -264,14 +264,26 @@ TEST_P(RobertaTest, GradientFlowSequenceClassification) {
     // Simple loss: sum of all outputs
     auto loss = sum(logits);
 
-    // Backward pass
-    EXPECT_NO_THROW({
-        loss.backward();
-    });
-
-    // Check that gradients were computed
-    auto grad = loss.grad();
-    EXPECT_TRUE((grad.has_value() && grad->numel() > 0) || !loss.requires_grad());
+    // Backward pass — assert at least one model parameter actually receives a
+    // non-zero gradient (severed grad_fn would leave every param at zero, which
+    // the old loss.grad() check could not detect since it only inspected the
+    // loss scalar's own gradient).
+    loss.backward();
+    bool any_param_grad_flows = false;
+    double max_abs_grad = 0.0;
+    for (const auto& p : model.parameters()) {
+        if (!p || !p->requires_grad() || !p->grad().has_value()) continue;
+        auto g_cpu = p->grad().value().cpu().to(DType::Float64);
+        auto g_max = tenzor::max(tenzor::abs(g_cpu)).item<double>();
+        if (g_max > 0.0) {
+            any_param_grad_flows = true;
+            if (g_max > max_abs_grad) max_abs_grad = g_max;
+        }
+    }
+    EXPECT_TRUE(any_param_grad_flows)
+        << "RoBERTa sequence-classification backward produced zero grads for "
+           "every parameter — likely severed grad_fn in the model forward "
+           "(max-abs across all params was " << max_abs_grad << ")";
 }
 
 TEST_P(RobertaTest, NoSegmentEmbeddings) {

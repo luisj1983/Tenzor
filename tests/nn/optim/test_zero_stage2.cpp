@@ -212,8 +212,13 @@ TEST_F(ZeROStage2Test, GradientBucketingWithDefaultSize) {
     // Attach gradients
     attach_gradients(params);
 
-    // Step should handle bucketed gradients correctly
-    EXPECT_NO_THROW(optimizer.step());
+    // Step should handle bucketed gradients correctly, and with non-zero
+    // gradients it must actually move the parameters.
+    auto before = params[0]->tensor().clone();
+    optimizer.step();
+    auto after = params[0]->tensor();
+    auto max_delta = tenzor::max(tenzor::abs((after - before).to(tenzor::DType::Float64))).item<double>();
+    EXPECT_GT(max_delta, 0.0) << "optimizer.step() did not update parameters";
 }
 
 TEST_F(ZeROStage2Test, GradientBucketingWithCustomSize) {
@@ -227,7 +232,11 @@ TEST_F(ZeROStage2Test, GradientBucketingWithCustomSize) {
     ZeROStage1Optimizer optimizer(std::move(base_optimizer), config);
     attach_gradients(params);
 
-    EXPECT_NO_THROW(optimizer.step());
+    auto before = params[0]->tensor().clone();
+    optimizer.step();
+    auto after = params[0]->tensor();
+    auto max_delta = tenzor::max(tenzor::abs((after - before).to(tenzor::DType::Float64))).item<double>();
+    EXPECT_GT(max_delta, 0.0) << "optimizer.step() did not update parameters";
 }
 
 TEST_F(ZeROStage2Test, GradientBucketingWithSmallParameters) {
@@ -239,7 +248,11 @@ TEST_F(ZeROStage2Test, GradientBucketingWithSmallParameters) {
     ZeROStage1Optimizer optimizer(std::move(base_optimizer), config);
 
     attach_gradients(params);
-    EXPECT_NO_THROW(optimizer.step());
+    auto before = params[0]->tensor().clone();
+    optimizer.step();
+    auto after = params[0]->tensor();
+    auto max_delta = tenzor::max(tenzor::abs((after - before).to(tenzor::DType::Float64))).item<double>();
+    EXPECT_GT(max_delta, 0.0) << "optimizer.step() did not update parameters";
 }
 
 TEST_F(ZeROStage2Test, GradientBucketingWithLargeParameters) {
@@ -251,7 +264,11 @@ TEST_F(ZeROStage2Test, GradientBucketingWithLargeParameters) {
     ZeROStage1Optimizer optimizer(std::move(base_optimizer), config);
 
     attach_gradients(params);
-    EXPECT_NO_THROW(optimizer.step());
+    auto before = params[0]->tensor().clone();
+    optimizer.step();
+    auto after = params[0]->tensor();
+    auto max_delta = tenzor::max(tenzor::abs((after - before).to(tenzor::DType::Float64))).item<double>();
+    EXPECT_GT(max_delta, 0.0) << "optimizer.step() did not update parameters";
 }
 
 TEST_F(ZeROStage2Test, GradientBucketingWithMixedSizes) {
@@ -267,7 +284,11 @@ TEST_F(ZeROStage2Test, GradientBucketingWithMixedSizes) {
     ZeROStage1Optimizer optimizer(std::move(base_optimizer), config);
 
     attach_gradients(params);
-    EXPECT_NO_THROW(optimizer.step());
+    auto before = params[0]->tensor().clone();
+    optimizer.step();
+    auto after = params[0]->tensor();
+    auto max_delta = tenzor::max(tenzor::abs((after - before).to(tenzor::DType::Float64))).item<double>();
+    EXPECT_GT(max_delta, 0.0) << "optimizer.step() did not update parameters";
 }
 
 // ============================================================================
@@ -286,8 +307,12 @@ TEST_F(ZeROStage2Test, ReduceScatterGradientsSingleRank) {
     ZeROStage1Optimizer optimizer(std::move(base_optimizer), config);
     attach_gradients(params);
 
-    // Should complete without communication
-    EXPECT_NO_THROW(optimizer.step());
+    // Should complete without communication, and must update the parameters.
+    auto before = params[0]->tensor().clone();
+    optimizer.step();
+    auto after = params[0]->tensor();
+    auto max_delta = tenzor::max(tenzor::abs((after - before).to(tenzor::DType::Float64))).item<double>();
+    EXPECT_GT(max_delta, 0.0) << "optimizer.step() did not update parameters";
 }
 
 TEST_F(ZeROStage2Test, ReduceScatterGradientsCorrectSum) {
@@ -306,8 +331,13 @@ TEST_F(ZeROStage2Test, ReduceScatterGradientsCorrectSum) {
 
     ZeROStage1Optimizer optimizer(std::move(base_optimizer), config);
 
-    // In multi-rank mode, each rank would receive sum of gradients for its partition
-    EXPECT_NO_THROW(optimizer.step());
+    // In multi-rank mode, each rank would receive sum of gradients for its partition.
+    // params[0] has a non-zero gradient (value i+1 == 1), so it must change.
+    auto before = params[0]->tensor().clone();
+    optimizer.step();
+    auto after = params[0]->tensor();
+    auto max_delta = tenzor::max(tenzor::abs((after - before).to(tenzor::DType::Float64))).item<double>();
+    EXPECT_GT(max_delta, 0.0) << "optimizer.step() did not update parameters";
 }
 
 TEST_F(ZeROStage2Test, ReduceScatterGradientsPartitioning) {
@@ -691,7 +721,12 @@ TEST_F(ZeROStage2Test, EdgeCaseSparseGradients) {
         params[i]->set_grad(grad);
     }
 
-    EXPECT_NO_THROW(optimizer.step());
+    // params[0] received a non-zero gradient, so it must be updated.
+    auto before = params[0]->tensor().clone();
+    optimizer.step();
+    auto after = params[0]->tensor();
+    auto max_delta = tenzor::max(tenzor::abs((after - before).to(tenzor::DType::Float64))).item<double>();
+    EXPECT_GT(max_delta, 0.0) << "optimizer.step() did not update parameters";
 }
 
 TEST_F(ZeROStage2Test, EdgeCaseZeroGradients) {
@@ -727,8 +762,12 @@ TEST_F(ZeROStage2Test, EdgeCaseVeryLargeGradients) {
         param->set_grad(grad);
     }
 
-    // Should handle large values without overflow
-    EXPECT_NO_THROW(optimizer.step());
+    // Should handle large values without overflow, and update the parameters.
+    auto before = params[0]->tensor().clone();
+    optimizer.step();
+    auto after = params[0]->tensor();
+    auto max_delta = tenzor::max(tenzor::abs((after - before).to(tenzor::DType::Float64))).item<double>();
+    EXPECT_GT(max_delta, 0.0) << "optimizer.step() did not update parameters";
 }
 
 TEST_F(ZeROStage2Test, EdgeCaseMixedGradientSizes) {
@@ -743,7 +782,11 @@ TEST_F(ZeROStage2Test, EdgeCaseMixedGradientSizes) {
     ZeROStage1Optimizer optimizer(std::move(base_optimizer), config);
 
     attach_gradients(params);
-    EXPECT_NO_THROW(optimizer.step());
+    auto before = params[0]->tensor().clone();
+    optimizer.step();
+    auto after = params[0]->tensor();
+    auto max_delta = tenzor::max(tenzor::abs((after - before).to(tenzor::DType::Float64))).item<double>();
+    EXPECT_GT(max_delta, 0.0) << "optimizer.step() did not update parameters";
 }
 
 TEST_F(ZeROStage2Test, EdgeCaseMultipleSteps) {
@@ -754,10 +797,15 @@ TEST_F(ZeROStage2Test, EdgeCaseMultipleSteps) {
     ZeROStage1Config config = default_config;
     ZeROStage1Optimizer optimizer(std::move(base_optimizer), config);
 
-    // Run multiple steps
+    // Run multiple steps; each step has non-zero gradients so the parameters
+    // must move every iteration.
     for (int step = 0; step < 10; ++step) {
         attach_gradients(params);
-        EXPECT_NO_THROW(optimizer.step());
+        auto before = params[0]->tensor().clone();
+        optimizer.step();
+        auto after = params[0]->tensor();
+        auto max_delta = tenzor::max(tenzor::abs((after - before).to(tenzor::DType::Float64))).item<double>();
+        EXPECT_GT(max_delta, 0.0) << "optimizer.step() did not update parameters at step " << step;
         optimizer.zero_grad();
     }
 }

@@ -475,10 +475,17 @@ TEST_F(ZeROStage3Test, PrefetchSingleParameter) {
     // std::vector<Tensor*> prefetch_params = {params[0].get()};
     // optimizer.prefetch_parameters(prefetch_params);
 
+    attach_gradients(params);
+    auto before = params[0]->tensor().clone();
     EXPECT_NO_THROW({
-        attach_gradients(params);
         optimizer.step();
     });
+    // world_size=1 → all params local; a real Adam step with non-zero grads
+    // must move the parameters.
+    auto after = params[0]->tensor();
+    double max_delta = tenzor::max(tenzor::abs(
+        (after - before).cpu().to(tenzor::DType::Float64))).item<double>();
+    EXPECT_GT(max_delta, 0.0) << "optimizer.step() did not update parameters";
 }
 
 TEST_F(ZeROStage3Test, PrefetchMultipleParameters) {
@@ -498,10 +505,15 @@ TEST_F(ZeROStage3Test, PrefetchMultipleParameters) {
     // }
     // optimizer.prefetch_parameters(prefetch_params);
 
+    attach_gradients(params);
+    auto before = params[0]->tensor().clone();
     EXPECT_NO_THROW({
-        attach_gradients(params);
         optimizer.step();
     });
+    auto after = params[0]->tensor();
+    double max_delta = tenzor::max(tenzor::abs(
+        (after - before).cpu().to(tenzor::DType::Float64))).item<double>();
+    EXPECT_GT(max_delta, 0.0) << "optimizer.step() did not update parameters";
 }
 
 TEST_F(ZeROStage3Test, PrefetchPriorityOrdering) {
@@ -520,10 +532,15 @@ TEST_F(ZeROStage3Test, PrefetchPriorityOrdering) {
     // optimizer.prefetch_parameters({params[30].get()}, /* priority */ 2);
     // Prefetch order should be: 10, 30, 20 (by priority)
 
+    attach_gradients(params);
+    auto before = params[0]->tensor().clone();
     EXPECT_NO_THROW({
-        attach_gradients(params);
         optimizer.step();
     });
+    auto after = params[0]->tensor();
+    double max_delta = tenzor::max(tenzor::abs(
+        (after - before).cpu().to(tenzor::DType::Float64))).item<double>();
+    EXPECT_GT(max_delta, 0.0) << "optimizer.step() did not update parameters";
 }
 
 TEST_F(ZeROStage3Test, PrefetchMemoryBudget) {
@@ -541,10 +558,15 @@ TEST_F(ZeROStage3Test, PrefetchMemoryBudget) {
     // auto stats = optimizer.get_stats();
     // EXPECT_LE(stats.num_cached_params, 5);
 
+    attach_gradients(params);
+    auto before = params[0]->tensor().clone();
     EXPECT_NO_THROW({
-        attach_gradients(params);
         optimizer.step();
     });
+    auto after = params[0]->tensor();
+    double max_delta = tenzor::max(tenzor::abs(
+        (after - before).cpu().to(tenzor::DType::Float64))).item<double>();
+    EXPECT_GT(max_delta, 0.0) << "optimizer.step() did not update parameters";
 }
 
 // ============================================================================
@@ -738,10 +760,15 @@ TEST_F(ZeROStage3Test, MemoryPressureHandling) {
     ZeROStage2Optimizer optimizer(std::move(base_optimizer), config);
 
     // Should handle memory pressure gracefully
+    attach_gradients(params);
+    auto before = params[0]->tensor().clone();
     EXPECT_NO_THROW({
-        attach_gradients(params);
         optimizer.step();
     });
+    auto after = params[0]->tensor();
+    double max_delta = tenzor::max(tenzor::abs(
+        (after - before).cpu().to(tenzor::DType::Float64))).item<double>();
+    EXPECT_GT(max_delta, 0.0) << "optimizer.step() did not update parameters";
 }
 
 // ============================================================================
@@ -969,10 +996,14 @@ TEST_F(ZeROStage3Test, EdgeCaseLargeParameters) {
     ZeROStage2Optimizer optimizer(std::move(base_optimizer), config);
 
     attach_gradients(params);
-
+    auto before = params[0]->tensor().clone();
     EXPECT_NO_THROW({
         optimizer.step();
     });
+    auto after = params[0]->tensor();
+    double max_delta = tenzor::max(tenzor::abs(
+        (after - before).cpu().to(tenzor::DType::Float64))).item<double>();
+    EXPECT_GT(max_delta, 0.0) << "optimizer.step() did not update parameters";
 }
 
 // ============================================================================
@@ -989,6 +1020,7 @@ TEST_F(ZeROStage3Test, MultipleStepsConsistency) {
     ZeROStage2Optimizer optimizer(std::move(base_optimizer), config);
 
     // Run 10 training steps
+    auto before_first = params[0]->tensor().clone();
     for (int step = 0; step < 10; ++step) {
         attach_gradients(params);
         EXPECT_NO_THROW({
@@ -996,6 +1028,12 @@ TEST_F(ZeROStage3Test, MultipleStepsConsistency) {
             optimizer.zero_grad();
         });
     }
+    // world_size=1 → all params local; after 10 Adam steps with non-zero grads
+    // the parameters must have moved.
+    auto after_last = params[0]->tensor();
+    double max_delta = tenzor::max(tenzor::abs(
+        (after_last - before_first).cpu().to(tenzor::DType::Float64))).item<double>();
+    EXPECT_GT(max_delta, 0.0) << "optimizer.step() did not update parameters";
 }
 
 TEST_F(ZeROStage3Test, ParameterCacheHitRate) {
@@ -1062,10 +1100,17 @@ TEST_F(ZeROStage3Test, GradientAccumulation) {
         }
     }
 
+    auto before = params[0]->tensor().clone();
     EXPECT_NO_THROW({
         optimizer.step();
         optimizer.zero_grad();
     });
+    // Grads are attached (last loop iteration), world_size=1 → params local;
+    // the step must update them.
+    auto after = params[0]->tensor();
+    double max_delta = tenzor::max(tenzor::abs(
+        (after - before).cpu().to(tenzor::DType::Float64))).item<double>();
+    EXPECT_GT(max_delta, 0.0) << "optimizer.step() did not update parameters";
 }
 
 TEST_F(ZeROStage3Test, DifferentOptimizerTypes) {
@@ -1153,10 +1198,14 @@ TEST_F(ZeROStage3Test, ConcurrentParameterAccess) {
 
     // Simulate concurrent access (in real implementation with threads)
     attach_gradients(params);
-
+    auto before = params[0]->tensor().clone();
     EXPECT_NO_THROW({
         optimizer.step();
     });
+    auto after = params[0]->tensor();
+    double max_delta = tenzor::max(tenzor::abs(
+        (after - before).cpu().to(tenzor::DType::Float64))).item<double>();
+    EXPECT_GT(max_delta, 0.0) << "optimizer.step() did not update parameters";
 }
 
 TEST_F(ZeROStage3Test, PerformanceDegradation) {

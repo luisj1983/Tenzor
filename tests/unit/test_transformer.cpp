@@ -63,10 +63,12 @@ TEST_P(PositionalEncodingTest, WithDropout) {
 
     Variable input(randn({2, 10, 256}, DType::Float32, device), true);
 
-    // Should not throw
-    EXPECT_NO_THROW({
-        Variable output = pe.forward(input);
-    }) << "Failed on " << device.to_string();
+    Variable output = pe.forward(input);
+    EXPECT_EQ(output.shape()[0], 2) << "Failed on " << device.to_string();
+    EXPECT_EQ(output.shape()[1], 10) << "Failed on " << device.to_string();
+    EXPECT_EQ(output.shape()[2], 256) << "Failed on " << device.to_string();
+    auto pe_m = tenzor::max(tenzor::abs(output.tensor().to(Device::cpu()).to(DType::Float64))).item<double>();
+    EXPECT_TRUE(std::isfinite(pe_m)) << "forward produced NaN/Inf on " << device.to_string();
 }
 
 // ============================================================================
@@ -137,9 +139,12 @@ TEST_P(TransformerEncoderLayerTest, WithMask) {
     Variable src(randn({batch_size, seq_len, 128}, DType::Float32, device), true);
     Tensor mask = create_causal_mask(seq_len, device);
 
-    EXPECT_NO_THROW({
-        Variable output = layer.forward(src, mask);
-    }) << "Failed on " << device.to_string();
+    Variable output = layer.forward(src, mask);
+    EXPECT_EQ(output.shape()[0], batch_size) << "Failed on " << device.to_string();
+    EXPECT_EQ(output.shape()[1], seq_len) << "Failed on " << device.to_string();
+    EXPECT_EQ(output.shape()[2], 128) << "Failed on " << device.to_string();
+    auto mask_m = tenzor::max(tenzor::abs(output.tensor().to(Device::cpu()).to(DType::Float64))).item<double>();
+    EXPECT_TRUE(std::isfinite(mask_m)) << "forward produced NaN/Inf on " << device.to_string();
 }
 
 TEST_P(TransformerEncoderLayerTest, GeLUActivation) {
@@ -266,9 +271,12 @@ TEST_P(TransformerDecoderLayerTest, WithCausalMask) {
 
     Tensor tgt_mask = create_causal_mask(tgt_len, device);
 
-    EXPECT_NO_THROW({
-        Variable output = layer.forward(tgt, memory, tgt_mask);
-    }) << "Failed on " << device.to_string();
+    Variable output = layer.forward(tgt, memory, tgt_mask);
+    EXPECT_EQ(output.shape()[0], batch_size) << "Failed on " << device.to_string();
+    EXPECT_EQ(output.shape()[1], tgt_len) << "Failed on " << device.to_string();
+    EXPECT_EQ(output.shape()[2], 128) << "Failed on " << device.to_string();
+    auto dmask_m = tenzor::max(tenzor::abs(output.tensor().to(Device::cpu()).to(DType::Float64))).item<double>();
+    EXPECT_TRUE(std::isfinite(dmask_m)) << "forward produced NaN/Inf on " << device.to_string();
 }
 
 TEST_P(TransformerDecoderLayerTest, InvalidSingleInputForward) {
@@ -385,9 +393,12 @@ TEST_P(TransformerTest, WithMasks) {
 
     Tensor tgt_mask = create_causal_mask(tgt_len, device);
 
-    EXPECT_NO_THROW({
-        Variable output = model.forward(src, tgt, Tensor{}, tgt_mask);
-    }) << "Failed on " << device.to_string();
+    Variable output = model.forward(src, tgt, Tensor{}, tgt_mask);
+    EXPECT_EQ(output.shape()[0], batch_size) << "Failed on " << device.to_string();
+    EXPECT_EQ(output.shape()[1], tgt_len) << "Failed on " << device.to_string();
+    EXPECT_EQ(output.shape()[2], 128) << "Failed on " << device.to_string();
+    auto tmask_m = tenzor::max(tenzor::abs(output.tensor().to(Device::cpu()).to(DType::Float64))).item<double>();
+    EXPECT_TRUE(std::isfinite(tmask_m)) << "forward produced NaN/Inf on " << device.to_string();
 }
 
 TEST_P(TransformerTest, InvalidSingleInputForward) {
