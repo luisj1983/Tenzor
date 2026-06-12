@@ -101,6 +101,14 @@ TEST_P(NNMultiDTypeTest, ReLU_Gradient) {
         for (int64_t i = 0; i < 9; ++i) {
             EXPECT_NEAR(grad_data[i], 1.0, tolerance);
         }
+    } else if (dtype() == DType::Float16 || dtype() == DType::BFloat16) {
+        // ReLU' = 1 for positive inputs; exactly representable in half. Widen
+        // to Float32 to read, with the dtype-aware half tolerance.
+        auto grad_f32 = grad_cpu.to(DType::Float32);
+        auto grad_data = grad_f32.data<float>();
+        for (int64_t i = 0; i < 9; ++i) {
+            EXPECT_NEAR(grad_data[i], 1.0f, static_cast<float>(tolerance));
+        }
     }
 }
 
@@ -179,6 +187,14 @@ TEST_P(NNMultiDTypeTest, Sigmoid_Range) {
             EXPECT_GE(output_data[i], 0.0);
             EXPECT_LE(output_data[i], 1.0);
         }
+    } else if (dtype() == DType::Float16 || dtype() == DType::BFloat16) {
+        // sigmoid output in [0, 1] is a robust range bound; widen to Float32.
+        auto output_f32 = output_cpu.to(DType::Float32);
+        auto output_data = output_f32.data<float>();
+        for (int64_t i = 0; i < 100; ++i) {
+            EXPECT_GE(output_data[i], 0.0f);
+            EXPECT_LE(output_data[i], 1.0f);
+        }
     }
 }
 
@@ -233,6 +249,20 @@ TEST_P(NNMultiDTypeTest, Tanh_Range) {
             EXPECT_GE(output_data[i], -1.0f);
             EXPECT_LE(output_data[i], 1.0f);
         }
+    } else if (dtype() == DType::Float64) {
+        auto output_data = output_cpu.data<double>();
+        for (int64_t i = 0; i < 100; ++i) {
+            EXPECT_GE(output_data[i], -1.0);
+            EXPECT_LE(output_data[i], 1.0);
+        }
+    } else if (dtype() == DType::Float16 || dtype() == DType::BFloat16) {
+        // Range bound is robust across precision: widen to Float32 to read.
+        auto output_f32 = output_cpu.to(DType::Float32);
+        auto output_data = output_f32.data<float>();
+        for (int64_t i = 0; i < 100; ++i) {
+            EXPECT_GE(output_data[i], -1.0f);
+            EXPECT_LE(output_data[i], 1.0f);
+        }
     }
 }
 
@@ -269,6 +299,19 @@ TEST_P(NNMultiDTypeTest, Softmax_SumToOne) {
         for (int64_t i = 0; i < 4; ++i) {
             EXPECT_NEAR(sum_data[i], 1.0f, tolerance);
         }
+    } else if (dtype() == DType::Float64) {
+        auto sum_data = sum_cpu.data<double>();
+        for (int64_t i = 0; i < 4; ++i) {
+            EXPECT_NEAR(sum_data[i], 1.0, tolerance);
+        }
+    } else if (dtype() == DType::Float16 || dtype() == DType::BFloat16) {
+        // Sum-to-one is robust across precision; widen to Float32 and use the
+        // dtype-aware half tolerance set in SetUp().
+        auto sum_f32 = sum_cpu.to(DType::Float32);
+        auto sum_data = sum_f32.data<float>();
+        for (int64_t i = 0; i < 4; ++i) {
+            EXPECT_NEAR(sum_data[i], 1.0f, static_cast<float>(tolerance));
+        }
     }
 }
 
@@ -287,6 +330,20 @@ TEST_P(NNMultiDTypeTest, Softmax_NumericalStability) {
     auto output_cpu = output.tensor().to(Device::cpu());
     if (dtype() == DType::Float32) {
         auto output_data = output_cpu.data<float>();
+        for (int64_t i = 0; i < 15; ++i) {
+            EXPECT_FALSE(std::isnan(output_data[i]));
+            EXPECT_FALSE(std::isinf(output_data[i]));
+        }
+    } else if (dtype() == DType::Float64) {
+        auto output_data = output_cpu.data<double>();
+        for (int64_t i = 0; i < 15; ++i) {
+            EXPECT_FALSE(std::isnan(output_data[i]));
+            EXPECT_FALSE(std::isinf(output_data[i]));
+        }
+    } else if (dtype() == DType::Float16 || dtype() == DType::BFloat16) {
+        // Finiteness (no overflow) is robust across precision; widen to Float32.
+        auto output_f32 = output_cpu.to(DType::Float32);
+        auto output_data = output_f32.data<float>();
         for (int64_t i = 0; i < 15; ++i) {
             EXPECT_FALSE(std::isnan(output_data[i]));
             EXPECT_FALSE(std::isinf(output_data[i]));
