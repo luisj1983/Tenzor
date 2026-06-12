@@ -228,14 +228,15 @@ def test_device_movement():
     model.cpu()
     print("Moved to CPU")
 
-    # Try to move to CUDA if available (catch exception if not)
-    try:
+    # Move to CUDA only when a CUDA device is actually present. When it is,
+    # the move must succeed — a raised exception is a real bug, not a skip.
+    if tz.cuda_is_available():
         model.cuda()
         print("Moved to CUDA")
         model.cpu()
         print("Moved back to CPU")
-    except Exception as e:
-        print(f"CUDA not available or error: {e}")
+    else:
+        print("Skipping CUDA move (no CUDA device)")
 
     print("PASSED: Device movement works!\n")
 

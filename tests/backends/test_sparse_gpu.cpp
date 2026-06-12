@@ -10,6 +10,7 @@
 #include <tenzor/tenzor.hpp>
 #include <tenzor/sparse/sparse_tensor.hpp>
 #include <tenzor/sparse/sparse_ops.hpp>
+#include "../backend_parity/parity_test_utils.hpp"
 #include <cmath>
 
 using namespace tenzor;
@@ -24,20 +25,24 @@ protected:
     void SetUp() override {
         initialize();
         const auto& name = GetParam();
-        try {
-            if (name == "cuda") {
-                device_ = Device::cuda(0);
-            } else if (name == "rocm") {
-                device_ = Device::rocm(0);
-            } else if (name == "oneapi") {
-                device_ = Device::oneapi(0);
-            } else if (name == "vulkan") {
-                device_ = Device::vulkan(0);
-            } else {
-                FAIL() << "Unknown backend: " << name;
-            }
-            tenzor::zeros({2}, DType::Float32, device_);
-        } catch (...) {
+        // Select the device for this parametrization. A bad param name is a
+        // test-wiring bug and must FAIL (kept outside any catch so it isn't
+        // swallowed into a skip).
+        if (name == "cuda") {
+            device_ = Device::cuda(0);
+        } else if (name == "rocm") {
+            device_ = Device::rocm(0);
+        } else if (name == "oneapi") {
+            device_ = Device::oneapi(0);
+        } else if (name == "vulkan") {
+            device_ = Device::vulkan(0);
+        } else {
+            FAIL() << "Unknown backend: " << name;
+        }
+        // Deterministic availability precondition: skip only when the backend
+        // is genuinely absent. Past this point any sparse-kernel exception is
+        // a real bug and must propagate, not be reclassified as "not available".
+        if (!tenzor::testing::is_backend_name_available(name)) {
             GTEST_SKIP() << "Backend " << name << " not available";
         }
     }

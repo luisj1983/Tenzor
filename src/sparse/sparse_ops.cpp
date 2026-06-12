@@ -1690,6 +1690,17 @@ auto sddmm(const SparseTensor& mask, const Tensor& A, const Tensor& B) -> Sparse
         throw std::runtime_error("sddmm: A and B must have the same dtype");
     }
 
+    // Float16/BFloat16: the CPU sddmm kernel below only instantiates float and
+    // double. Widen the dense operands to Float32, compute, then narrow the
+    // result values back to the original dtype (mirrors sparse_softmax).
+    if (A.dtype() == DType::Float16 || A.dtype() == DType::BFloat16) {
+        const DType orig = A.dtype();
+        auto res = sddmm(mask, A.to(DType::Float32), B.to(DType::Float32));
+        std::vector<int64_t> shp(res.shape().begin(), res.shape().end());
+        return SparseTensor::sparse_csr(res.crow_indices(), res.col_indices(),
+                                        res.values().to(orig), shp);
+    }
+
     // Normalize to CSR for uniform access.
     SparseTensor csr_mask = mask;
     if (csr_mask.layout() != SparseLayout::CSR) {

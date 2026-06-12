@@ -12,6 +12,7 @@
 #include "tenzor/backend/op_attributes.hpp"
 #include "tenzor/backend/fast_dispatch.hpp"
 #include "tenzor/ops/op_id.hpp"
+#include "backend_parity/parity_test_utils.hpp"
 #include <cmath>
 #include <algorithm>
 
@@ -31,12 +32,15 @@ static ::testing::Environment* const vulkan_env =
 class VulkanOpsTest : public ::testing::Test {
 protected:
     void SetUp() override {
-        // Try to get Vulkan device
-        try {
-            vulkan_device = Device::vulkan(0);
-        } catch (...) {
+        // Deterministic availability precondition: has_vulkan() probes the
+        // backend by allocating a small tensor. Skip only when Vulkan is
+        // genuinely absent; past this point any exception in a test body is a
+        // real Vulkan kernel/logic bug and must propagate, not be reclassified
+        // as "backend not available".
+        if (!tenzor::testing::has_vulkan()) {
             GTEST_SKIP() << "Vulkan backend not available";
         }
+        vulkan_device = Device::vulkan(0);
     }
 
     Device vulkan_device;

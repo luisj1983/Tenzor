@@ -304,14 +304,13 @@ TEST_P(SparseParity, SpGEMM) {
     auto backends = get_available_backends();
     REQUIRE_MULTI_BACKEND_OR_SKIP("sparse parity");
 
+    // CPU is the reference backend — a throw here is a real bug, so let it propagate.
     Tensor ref_dense;
-    try {
+    {
         auto A_sparse = tenzor::to_sparse(A_dense);
         auto B_sparse = tenzor::to_sparse(B_dense);
         auto C_sparse = tenzor::sparse::spgemm(A_sparse, B_sparse);
         ref_dense = C_sparse.to_dense();
-    } catch (const std::exception& e) {
-        GTEST_SKIP() << "spgemm CPU reference failed: " << e.what();
     }
 
     for (size_t i = 1; i < backends.size(); ++i) {
@@ -342,12 +341,11 @@ TEST_P(SparseParity, SparseTriangularSolve) {
     auto backends = get_available_backends();
     REQUIRE_MULTI_BACKEND_OR_SKIP("sparse parity");
 
+    // CPU is the reference backend — a throw here is a real bug, so let it propagate.
     Tensor ref;
-    try {
+    {
         auto L_sparse = tenzor::to_sparse(L_dense);
         ref = tenzor::sparse::sparse_triangular_solve(L_sparse, b_dense, false);
-    } catch (const std::exception& e) {
-        GTEST_SKIP() << "sparse_triangular_solve CPU reference failed: " << e.what();
     }
 
     for (size_t i = 1; i < backends.size(); ++i) {
@@ -381,13 +379,11 @@ TEST_P(SparseParity, SparseTriangularSolve_Matrix) {
     auto backends = get_available_backends();
     REQUIRE_MULTI_BACKEND_OR_SKIP("sparse parity");
 
+    // CPU is the reference backend — a throw here is a real bug, so let it propagate.
     Tensor ref;
-    try {
+    {
         auto L_sparse = tenzor::to_sparse(L_dense);
         ref = tenzor::sparse::sparse_triangular_solve(L_sparse, B_dense, false);
-    } catch (const std::exception& e) {
-        GTEST_SKIP() << "matrix sparse_triangular_solve CPU reference failed: "
-                     << e.what();
     }
 
     for (size_t i = 1; i < backends.size(); ++i) {

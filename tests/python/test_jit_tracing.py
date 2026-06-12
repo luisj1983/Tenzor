@@ -68,17 +68,14 @@ def test_jit_graph_execution():
 
     graph = tz.jit.trace(model, dummy)
 
-    # Execute with new input — may return empty if graph has no nodes
-    try:
-        new_input = tz.randn([2, 8])
-        outputs = graph.forward([new_input])
-        if len(outputs) > 0:
-            print(f"  got {len(outputs)} outputs, shape: {outputs[0].shape}")
-        else:
-            print("  graph returned empty (no traced ops)")
-    except Exception as e:
-        # Some models may not produce executable graphs via simple tracing
-        print(f"  graph execution skipped: {e}")
+    # Execute with new input — may return empty if graph has no nodes.
+    # A raised exception here is a real failure: let it propagate.
+    new_input = tz.randn([2, 8])
+    outputs = graph.forward([new_input])
+    if len(outputs) > 0:
+        print(f"  got {len(outputs)} outputs, shape: {outputs[0].shape}")
+    else:
+        print("  graph returned empty (no traced ops)")
     print("  graph execution OK")
 
 
@@ -92,14 +89,12 @@ def test_jit_compiler():
     graph = tz.jit.trace(model, dummy)
 
     original_nodes = graph.num_nodes()
-    try:
-        optimized = compiler.optimize(graph, max_iterations=5)
-        if optimized is not None:
-            print(f"  nodes before: {original_nodes}, after: {optimized.num_nodes()}")
-        else:
-            print(f"  optimizer returned None (original had {original_nodes} nodes)")
-    except Exception as e:
-        print(f"  optimization skipped: {e}")
+    # A raised exception from the optimizer is a real failure: let it propagate.
+    optimized = compiler.optimize(graph, max_iterations=5)
+    if optimized is not None:
+        print(f"  nodes before: {original_nodes}, after: {optimized.num_nodes()}")
+    else:
+        print(f"  optimizer returned None (original had {original_nodes} nodes)")
     print("  JIT compiler OK")
 
 

@@ -176,32 +176,32 @@ TEST_P(DTypeEdgeCaseTest, Float16PrecisionLoss) {
         GTEST_SKIP() << "Test only for Float16";
     }
 
-    // Try to create Float16 tensor - skip if not supported
-    try {
-        // Float16 has ~3-4 decimal digits of precision
-        // Test with value that requires more precision
-        auto a_cpu = full({10}, 3.141592653589793f, DType::Float32, Device::cpu());
-        auto a_f16 = a_cpu.to(DType::Float16);
+    // Audit: previously the conversion body was wrapped in try/catch -> GTEST_SKIP
+    // ("Float16 not supported on <device>"), which reclassified a real Float16
+    // conversion-kernel dispatch failure as a clean skip. The deterministic dtype
+    // predicate above already gates this test; let conversion exceptions propagate
+    // so a missing Float16 dispatch surfaces as a failure.
+    // Float16 has ~3-4 decimal digits of precision
+    // Test with value that requires more precision
+    auto a_cpu = full({10}, 3.141592653589793f, DType::Float32, Device::cpu());
+    auto a_f16 = a_cpu.to(DType::Float16);
 
-        if (device().type != Device::Type::CPU) {
-            a_f16 = a_f16.to(device());
-        }
+    if (device().type != Device::Type::CPU) {
+        a_f16 = a_f16.to(device());
+    }
 
-        // Convert back to Float32 to check precision loss
-        auto a_back = a_f16.to(DType::Float32);
-        auto a_result = a_back.to(Device::cpu());
-        const float* data = a_result.data<float>();
+    // Convert back to Float32 to check precision loss
+    auto a_back = a_f16.to(DType::Float32);
+    auto a_result = a_back.to(Device::cpu());
+    const float* data = a_result.data<float>();
 
-        for (int i = 0; i < 10; ++i) {
-            // Float16 should lose precision beyond ~3-4 digits
-            EXPECT_NEAR(data[i], 3.141592653589793f, 1e-3f)
-                << "Float16 precision at index " << i;
-            // But should NOT be exactly equal to full precision
-            EXPECT_GT(std::abs(data[i] - 3.141592653589793f), 1e-6f)
-                << "Float16 should lose precision at index " << i;
-        }
-    } catch (...) {
-        GTEST_SKIP() << "Float16 not supported on " << device().to_string();
+    for (int i = 0; i < 10; ++i) {
+        // Float16 should lose precision beyond ~3-4 digits
+        EXPECT_NEAR(data[i], 3.141592653589793f, 1e-3f)
+            << "Float16 precision at index " << i;
+        // But should NOT be exactly equal to full precision
+        EXPECT_GT(std::abs(data[i] - 3.141592653589793f), 1e-6f)
+            << "Float16 should lose precision at index " << i;
     }
 }
 
@@ -374,27 +374,25 @@ TEST_P(DTypeEdgeCaseTest, LossyConversionChain) {
     // Step 1: Float64 → Float32
     auto a_f32 = a_f64.to(DType::Float32);
 
-    // Step 2: Float32 → Float16 (if supported)
-    try {
-        auto a_f16 = a_f32.to(DType::Float16);
+    // Step 2: Float32 → Float16
+    // Audit: previously the conversion chain was wrapped in try/catch -> GTEST_SKIP
+    // ("Float16 not supported on <device>"), burying a real Float16 conversion-kernel
+    // dispatch failure as a clean skip. Let conversion exceptions propagate.
+    auto a_f16 = a_f32.to(DType::Float16);
 
-        // Step 3: Float16 → Float32 → Float64
-        auto a_restored_f32 = a_f16.to(DType::Float32);
-        auto a_restored_f64 = a_restored_f32.to(DType::Float64);
+    // Step 3: Float16 → Float32 → Float64
+    auto a_restored_f32 = a_f16.to(DType::Float32);
+    auto a_restored_f64 = a_restored_f32.to(DType::Float64);
 
-        auto result = a_restored_f64.to(Device::cpu());
-        const double* data = result.data<double>();
+    auto result = a_restored_f64.to(Device::cpu());
+    const double* data = result.data<double>();
 
-        // Significant precision loss through the chain
-        for (int i = 0; i < 10; ++i) {
-            EXPECT_NEAR(data[i], 3.14159265358979323846, 1e-2);
-            // But NOT close to original precision
-            EXPECT_GT(std::abs(data[i] - 3.14159265358979323846), 1e-6)
-                << "Should have precision loss at index " << i;
-        }
-    } catch (...) {
-        // Float16 not supported on this backend, skip the test
-        GTEST_SKIP() << "Float16 not supported on " << device().to_string();
+    // Significant precision loss through the chain
+    for (int i = 0; i < 10; ++i) {
+        EXPECT_NEAR(data[i], 3.14159265358979323846, 1e-2);
+        // But NOT close to original precision
+        EXPECT_GT(std::abs(data[i] - 3.14159265358979323846), 1e-6)
+            << "Should have precision loss at index " << i;
     }
 }
 

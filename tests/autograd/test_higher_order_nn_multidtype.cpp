@@ -81,17 +81,17 @@ TEST_P(HigherOrderNNMultiDTypeTest, LSTM_InnerLoop_Gradient) {
     // Simple loss: sum of output
     auto loss = tenzor::sum(output);
 
-    try {
-        loss.backward(std::nullopt, false, true);
-        ASSERT_TRUE(input.grad_variable().has_value())
-            << "LSTM create_graph=true must populate grad_variable()";
-        Variable grad_var = input.grad_variable().value();
-        auto grad_norm = tenzor::sum(grad_var * grad_var);
-        grad_norm.backward();
-        EXPECT_GRAD_FLOWS(input);
-    } catch (const std::runtime_error& e) {
-        GTEST_SKIP() << "LSTM double backward not supported: " << e.what();
-    }
+    // Audit: previously wrapped in try/catch -> GTEST_SKIP("LSTM double
+    // backward not supported"), which reclassified a real second-order
+    // autograd break as a clean skip. Let exceptions propagate so a missing
+    // LSTM double-backward surfaces as a failure.
+    loss.backward(std::nullopt, false, true);
+    ASSERT_TRUE(input.grad_variable().has_value())
+        << "LSTM create_graph=true must populate grad_variable()";
+    Variable grad_var = input.grad_variable().value();
+    auto grad_norm = tenzor::sum(grad_var * grad_var);
+    grad_norm.backward();
+    EXPECT_GRAD_FLOWS(input);
 }
 
 // ============================================================================
@@ -114,17 +114,17 @@ TEST_P(HigherOrderNNMultiDTypeTest, GRU_InnerLoop_Gradient) {
     auto output = gru.forward_impl(input);
     auto loss = tenzor::sum(output);
 
-    try {
-        loss.backward(std::nullopt, false, true);
-        ASSERT_TRUE(input.grad_variable().has_value())
-            << "GRU create_graph=true must populate grad_variable()";
-        Variable grad_var = input.grad_variable().value();
-        auto grad_norm = tenzor::sum(grad_var * grad_var);
-        grad_norm.backward();
-        EXPECT_GRAD_FLOWS(input);
-    } catch (const std::runtime_error& e) {
-        GTEST_SKIP() << "GRU double backward not supported: " << e.what();
-    }
+    // Audit: previously wrapped in try/catch -> GTEST_SKIP("GRU double
+    // backward not supported"), burying a real second-order autograd break
+    // as a clean skip. Let exceptions propagate so a missing GRU
+    // double-backward surfaces as a failure.
+    loss.backward(std::nullopt, false, true);
+    ASSERT_TRUE(input.grad_variable().has_value())
+        << "GRU create_graph=true must populate grad_variable()";
+    Variable grad_var = input.grad_variable().value();
+    auto grad_norm = tenzor::sum(grad_var * grad_var);
+    grad_norm.backward();
+    EXPECT_GRAD_FLOWS(input);
 }
 
 INSTANTIATE_MULTI_BACKEND_DTYPE_TESTS(HigherOrderNNMultiDTypeTest);

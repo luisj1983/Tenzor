@@ -51,12 +51,12 @@ TEST_F(RocmInterpolateNearestBackward, Nearest_MatchesCPU) {
     attrs.set(AttrKey::AlignCorners, false);
 
     std::vector<Tensor> cpu_inputs = {grad_out_cpu};
-    Tensor cpu_out;
-    try {
-        cpu_out = dispatch(OpId::InterpolateBackward, cpu_inputs, attrs)[0];
-    } catch (const std::exception& e) {
-        GTEST_SKIP() << "CPU InterpolateBackward nearest unsupported: " << e.what();
-    }
+    // Audit: previously wrapped in try{...}catch(...){GTEST_SKIP("CPU
+    // InterpolateBackward nearest unsupported")}. The CPU nearest backward IS
+    // the reference for this parity test (file header: ROCm just gained the
+    // native kernel) — a CPU reference failure is a real bug, not a clean skip.
+    // Let it propagate.
+    Tensor cpu_out = dispatch(OpId::InterpolateBackward, cpu_inputs, attrs)[0];
 
     auto grad_out_rocm = grad_out_cpu.to(Device::rocm(0));
     std::vector<Tensor> rocm_inputs = {grad_out_rocm};

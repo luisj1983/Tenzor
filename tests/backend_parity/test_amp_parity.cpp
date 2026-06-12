@@ -28,15 +28,16 @@ TEST_P(AMPParity, ScaleLossMatches) {
     auto backends = get_available_backends();
     REQUIRE_MULTI_BACKEND_OR_SKIP("amp parity");
 
+    // Audit: previously wrapped in try{...}catch(...){GTEST_SKIP("GradScaler.
+    // scale() CPU reference failed")}. The CPU scaler is the parity reference;
+    // a failure here is a real bug, not "feature unavailable". Let it propagate.
     float ref_scaled;
-    try {
+    {
         nn::amp::GradScaler scaler(65536.0f);
         auto x = Variable(input_cpu.clone(), true);
         auto loss = sum(x * x);
         auto scaled = scaler.scale(loss);
         ref_scaled = scaled.tensor().item<float>();
-    } catch (const std::exception& e) {
-        GTEST_SKIP() << "GradScaler.scale() CPU reference failed: " << e.what();
     }
 
     for (size_t i = 1; i < backends.size(); ++i) {
@@ -68,17 +69,18 @@ TEST_P(AMPParity, ScaledBackwardMatches) {
     auto backends = get_available_backends();
     REQUIRE_MULTI_BACKEND_OR_SKIP("amp parity");
 
+    // Audit: previously wrapped in try{...}catch(...){GTEST_SKIP("GradScaler
+    // scaled backward CPU reference failed")}. The CPU scaled backward is the
+    // parity reference; a failure here is a real bug, not "feature
+    // unavailable". Let it propagate.
     Tensor ref_grad;
-    try {
+    {
         nn::amp::GradScaler scaler(1024.0f);  // smaller factor → no overflow
         auto x = Variable(input_cpu.clone(), true);
         auto loss = sum(x * x);
         auto scaled = scaler.scale(loss);
         scaled.backward();
         ref_grad = x.grad().value();
-    } catch (const std::exception& e) {
-        GTEST_SKIP() << "GradScaler scaled backward CPU reference failed: "
-                     << e.what();
     }
 
     for (size_t i = 1; i < backends.size(); ++i) {

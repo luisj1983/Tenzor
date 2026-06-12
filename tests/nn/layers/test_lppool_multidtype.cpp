@@ -60,9 +60,7 @@ TEST_P(LPPool1dMultiDTypeTest, ForwardL2_KnownValue) {
 // LPPool1d now uses Variable-level abs/pow/avg_pool throughout; this test
 // verifies x.grad is populated and non-trivial after backward.
 TEST_P(LPPool1dMultiDTypeTest, BackwardGradientsPropagate) {
-    if (dtype() == DType::Float16 || dtype() == DType::BFloat16) {
-        GTEST_SKIP() << "Skipping gradcheck for low-precision dtype";
-    }
+    // Grad-nonzero only (graph-severed check) — precision-safe for half.
     LPPool1d pool(2, 3, 2);
     auto x = Variable(randn({2, 4, 16}, dtype(), device()), true);
     auto y = pool.forward(x);
@@ -128,9 +126,7 @@ TEST_P(LPPool2dMultiDTypeTest, ForwardL2_AllOnes) {
 
 // LPPool2d now uses Variable-level abs/pow/avg_pool throughout.
 TEST_P(LPPool2dMultiDTypeTest, BackwardGradientsPropagate) {
-    if (dtype() == DType::Float16 || dtype() == DType::BFloat16) {
-        GTEST_SKIP() << "Skipping gradcheck for low-precision dtype";
-    }
+    // Grad-nonzero only (graph-severed check) — precision-safe for half.
     LPPool2d pool(2, 2, 2);
     auto x = Variable(randn({1, 4, 8, 8}, dtype(), device()), true);
     auto y = pool.forward(x);

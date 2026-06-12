@@ -281,11 +281,7 @@ TEST_P(NNConvParity, ConvTranspose1d) {
     Tensor ref_output;
     nn::ConvTranspose1d conv(16, 3, 3, 2, 0);  // stride=2 for upsampling, padding=0
     auto input = randn({1, 16, 16}, DType::Float32, Device::cpu());
-    try {
-        ref_output = conv.forward(Variable(input, false)).tensor();
-    } catch (const std::exception& e) {
-        GTEST_SKIP() << "ConvTranspose1d CPU forward failed: " << e.what();
-    }
+    ref_output = conv.forward(Variable(input, false)).tensor();
 
     for (size_t i = 1; i < backends.size(); ++i) {
         try {
@@ -314,11 +310,7 @@ TEST_P(NNConvParity, ConvTranspose3d) {
     Tensor ref_output;
     nn::ConvTranspose3d conv(16, 3, 3, 2, 0);  // stride=2 for upsampling, padding=0
     auto input = randn({1, 16, 4, 4, 4}, DType::Float32, Device::cpu());
-    try {
-        ref_output = conv.forward(Variable(input, false)).tensor();
-    } catch (const std::exception& e) {
-        GTEST_SKIP() << "ConvTranspose3d CPU forward failed: " << e.what();
-    }
+    ref_output = conv.forward(Variable(input, false)).tensor();
 
     for (size_t i = 1; i < backends.size(); ++i) {
         try {
@@ -412,44 +404,40 @@ TEST_P(NNConvParity, DeformableConv2d) {
     auto backends = get_available_backends();
     REQUIRE_MULTI_BACKEND_OR_SKIP("nn conv parity");
 
-    try {
-        nn::DeformableConv2d conv(3, 16, 3, 1, 1);
-        auto input = randn({1, 3, 8, 8}, DType::Float32, Device::cpu());
+    nn::DeformableConv2d conv(3, 16, 3, 1, 1);
+    auto input = randn({1, 3, 8, 8}, DType::Float32, Device::cpu());
 
-        // DeformableConv2d requires offset tensor: (N, offset_groups*2*kH*kW, H_out, W_out)
-        // With kernel=3, offset_groups=1: shape is (1, 2*3*3, 8, 8) = (1, 18, 8, 8)
-        auto offset = randn({1, 18, 8, 8}, DType::Float32, Device::cpu());
-        // Mask tensor: (N, offset_groups*kH*kW, H_out, W_out) = (1, 9, 8, 8)
-        auto mask = sigmoid(randn({1, 9, 8, 8}, DType::Float32, Device::cpu()));
+    // DeformableConv2d requires offset tensor: (N, offset_groups*2*kH*kW, H_out, W_out)
+    // With kernel=3, offset_groups=1: shape is (1, 2*3*3, 8, 8) = (1, 18, 8, 8)
+    auto offset = randn({1, 18, 8, 8}, DType::Float32, Device::cpu());
+    // Mask tensor: (N, offset_groups*kH*kW, H_out, W_out) = (1, 9, 8, 8)
+    auto mask = sigmoid(randn({1, 9, 8, 8}, DType::Float32, Device::cpu()));
 
-        auto ref_output = conv.forward(Variable(input, false),
-                                        Variable(offset, false),
-                                        Variable(mask, false)).tensor();
+    auto ref_output = conv.forward(Variable(input, false),
+                                    Variable(offset, false),
+                                    Variable(mask, false)).tensor();
 
-        for (size_t i = 1; i < backends.size(); ++i) {
-            try {
-                nn::DeformableConv2d conv_dev(3, 16, 3, 1, 1);
-                auto params = conv.parameters();
-                auto dev_params = conv_dev.parameters();
-                for (size_t p = 0; p < params.size(); ++p) {
-                    dev_params[p]->tensor() = params[p]->tensor().clone();
-                }
-                conv_dev.to(backends[i]);
-                auto input_dev = input.to(backends[i]);
-                auto offset_dev = offset.to(backends[i]);
-                auto mask_dev = mask.to(backends[i]);
-                auto output = conv_dev.forward(Variable(input_dev, false),
-                                                Variable(offset_dev, false),
-                                                Variable(mask_dev, false)).tensor();
-                backends[i].synchronize();
-                EXPECT_TENSORS_CLOSE(ref_output, output, 1e-4f, 1e-5f);
-            } catch (const std::exception& e) {
-                ADD_FAILURE() << "DeformableConv2d failed on " << backend_name(backends[i])
-                          << ": " << e.what() << std::endl;
+    for (size_t i = 1; i < backends.size(); ++i) {
+        try {
+            nn::DeformableConv2d conv_dev(3, 16, 3, 1, 1);
+            auto params = conv.parameters();
+            auto dev_params = conv_dev.parameters();
+            for (size_t p = 0; p < params.size(); ++p) {
+                dev_params[p]->tensor() = params[p]->tensor().clone();
             }
+            conv_dev.to(backends[i]);
+            auto input_dev = input.to(backends[i]);
+            auto offset_dev = offset.to(backends[i]);
+            auto mask_dev = mask.to(backends[i]);
+            auto output = conv_dev.forward(Variable(input_dev, false),
+                                            Variable(offset_dev, false),
+                                            Variable(mask_dev, false)).tensor();
+            backends[i].synchronize();
+            EXPECT_TENSORS_CLOSE(ref_output, output, 1e-4f, 1e-5f);
+        } catch (const std::exception& e) {
+            ADD_FAILURE() << "DeformableConv2d failed on " << backend_name(backends[i])
+                      << ": " << e.what() << std::endl;
         }
-    } catch (const std::exception& e) {
-        GTEST_SKIP() << "DeformableConv2d not supported: " << e.what();
     }
 }
 

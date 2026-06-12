@@ -65,10 +65,9 @@ def _roundtrip_and_compare(model, sample, name):
                 f"{name}: tz.onnx.load returned {type(loaded).__name__} which "
                 f"is not callable; importer needs Module wrapper binding")
 
-        try:
-            loaded_y = loaded(sample)
-        except Exception as e:
-            pytest.skip(f"{name}: loaded model raised on forward: {e}")
+        # The forward pass on the round-tripped model IS the thing under
+        # test — a raised exception here is a real failure, not a skip.
+        loaded_y = loaded(sample)
 
         ok, msg = _allclose(loaded_y, eager_y)
         assert ok, f"{name} ONNX round-trip diverged: {msg}"

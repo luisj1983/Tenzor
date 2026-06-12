@@ -14,17 +14,16 @@ using namespace tenzor::testing;
 class SparseBSRMultiDTypeTest : public MultiBackendDTypeTest {
 protected:
     void skipIfSparseUnavailable() {
-        // Try to create a minimal sparse tensor on the current device.
-        // If sparse ops are not available for this backend, skip.
-        try {
-            auto row_ptr = tenzor::zeros({2}, DType::Int64, device());
-            auto col_ind = tenzor::zeros({0}, DType::Int64, device());
-            auto values = tenzor::zeros({0, 2, 2}, DType::Float32, device());
-            (void)SparseTensor::sparse_bsr(row_ptr, col_ind, values,
-                                            {2, 2}, {2, 2});
-        } catch (...) {
-            GTEST_SKIP() << "Sparse BSR ops not available on " << backend_name();
-        }
+        // Smoke-construct a minimal sparse tensor on the current device.
+        // Backend availability is already gated upstream by the
+        // MultiBackendDTypeTest fixture, so any failure here is a real
+        // sparse_bsr construction bug and must propagate as a test failure
+        // rather than be swallowed as "not available".
+        auto row_ptr = tenzor::zeros({2}, DType::Int64, device());
+        auto col_ind = tenzor::zeros({0}, DType::Int64, device());
+        auto values = tenzor::zeros({0, 2, 2}, DType::Float32, device());
+        (void)SparseTensor::sparse_bsr(row_ptr, col_ind, values,
+                                        {2, 2}, {2, 2});
     }
 };
 

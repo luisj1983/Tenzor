@@ -62,13 +62,10 @@ TEST_P(LinalgParity, Det) {
 
     auto A = make_well_conditioned({8, 8}, 5.0f, 201);
 
-    // Compute reference on CPU
-    Tensor ref;
-    try {
-        ref = linalg::det(A);
-    } catch (const std::exception& e) {
-        GTEST_SKIP() << "linalg::det not available on CPU: " << e.what();
-    }
+    // Compute reference on CPU. The CPU path is ground truth: if linalg::det
+    // throws here it is a real bug (missing kernel / wrong result), so let the
+    // exception propagate as a test failure rather than masking it as a skip.
+    Tensor ref = linalg::det(A);
 
     for (size_t i = 1; i < backends.size(); ++i) {
         try {
@@ -103,13 +100,9 @@ TEST_P(LinalgParity, Inv) {
     auto A = make_well_conditioned({8, 8}, 5.0f, 202);
     auto I = eye(8, std::nullopt, DType::Float32, Device::cpu());
 
-    // CPU reference: verify A @ inv(A) ~= I
-    Tensor ref_inv;
-    try {
-        ref_inv = linalg::inv(A);
-    } catch (const std::exception& e) {
-        GTEST_SKIP() << "linalg::inv not available on CPU: " << e.what();
-    }
+    // CPU reference: verify A @ inv(A) ~= I. CPU is ground truth — a throw here
+    // is a real bug, so let it propagate as a failure.
+    Tensor ref_inv = linalg::inv(A);
     auto ref_product = matmul(A, ref_inv);
     EXPECT_TENSORS_CLOSE(ref_product, I, 1e-4f, 1e-5f);
 
@@ -139,12 +132,8 @@ TEST_P(LinalgParity, Solve) {
     auto A = make_well_conditioned({8, 8}, 5.0f, 203);
     auto b = generate_test_tensor({8, 4}, DType::Float32, Device::cpu(), 204);
 
-    Tensor ref_x;
-    try {
-        ref_x = linalg::solve(A, b);
-    } catch (const std::exception& e) {
-        GTEST_SKIP() << "linalg::solve not available on CPU: " << e.what();
-    }
+    // CPU is ground truth — a throw here is a real bug, so let it propagate.
+    Tensor ref_x = linalg::solve(A, b);
 
     // Verify A @ x ~= b on CPU
     auto reconstructed = matmul(A, ref_x);
@@ -180,12 +169,9 @@ TEST_P(LinalgParity, SVD) {
     // U is [M, K] and Vh is [K, N] with K = min(M, N), letting us reconstruct
     // with a single [K, K] diag(S) — full SVD returns U=[M, M] which won't
     // conform to S_diag's [K, K].
+    // CPU is ground truth — a throw here is a real bug, so let it propagate.
     Tensor ref_U, ref_S, ref_Vh;
-    try {
-        std::tie(ref_U, ref_S, ref_Vh) = linalg::svd(A, /*full_matrices=*/false);
-    } catch (const std::exception& e) {
-        GTEST_SKIP() << "linalg::svd not available on CPU: " << e.what();
-    }
+    std::tie(ref_U, ref_S, ref_Vh) = linalg::svd(A, /*full_matrices=*/false);
 
     // Reconstruct: A ~= U @ diag(S) @ Vh
     auto S_diag = diag(ref_S);
@@ -219,12 +205,9 @@ TEST_P(LinalgParity, QR) {
 
     auto A = generate_test_tensor({8, 6}, DType::Float32, Device::cpu(), 206);
 
+    // CPU is ground truth — a throw here is a real bug, so let it propagate.
     Tensor ref_Q, ref_R;
-    try {
-        std::tie(ref_Q, ref_R) = linalg::qr(A);
-    } catch (const std::exception& e) {
-        GTEST_SKIP() << "linalg::qr not available on CPU: " << e.what();
-    }
+    std::tie(ref_Q, ref_R) = linalg::qr(A);
 
     auto ref_recon = matmul(ref_Q, ref_R);
     EXPECT_TENSORS_CLOSE(ref_recon, A, 1e-4f, 1e-5f);
@@ -255,12 +238,9 @@ TEST_P(LinalgParity, Eigh) {
 
     auto A = make_symmetric(8, 401);
 
+    // CPU is ground truth — a throw here is a real bug, so let it propagate.
     Tensor ref_eigenvalues, ref_eigenvectors;
-    try {
-        std::tie(ref_eigenvalues, ref_eigenvectors) = linalg::eigh(A);
-    } catch (const std::exception& e) {
-        GTEST_SKIP() << "linalg::eigh not available on CPU: " << e.what();
-    }
+    std::tie(ref_eigenvalues, ref_eigenvectors) = linalg::eigh(A);
 
     // Verify A @ V ~= V @ diag(lambda)
     auto Vl = matmul(A, ref_eigenvectors);
@@ -309,12 +289,9 @@ TEST_P(LinalgParity, Eigh_LargeBatched) {
     auto X = generate_test_tensor({batch, n, n}, DType::Float32, Device::cpu(), 911);
     auto A = X + transpose(X, 1, 2);
 
+    // CPU is ground truth — a throw here is a real bug, so let it propagate.
     Tensor ref_vals, ref_vecs;
-    try {
-        std::tie(ref_vals, ref_vecs) = linalg::eigh(A);
-    } catch (const std::exception& e) {
-        GTEST_SKIP() << "linalg::eigh (batched) not available on CPU: " << e.what();
-    }
+    std::tie(ref_vals, ref_vecs) = linalg::eigh(A);
 
     for (size_t i = 1; i < backends.size(); ++i) {
         try {
@@ -366,12 +343,9 @@ TEST_P(LinalgParity, Eig_NonSymmetric) {
                                       : -(1.0f + 0.3f * static_cast<float>(i)));
     }
 
+    // CPU is ground truth — a throw here is a real bug, so let it propagate.
     Tensor WRc, WIc, Vc;
-    try {
-        std::tie(WRc, WIc, Vc) = linalg::eig(A);
-    } catch (const std::exception& e) {
-        GTEST_SKIP() << "linalg::eig not available on CPU: " << e.what();
-    }
+    std::tie(WRc, WIc, Vc) = linalg::eig(A);
 
     auto* Ap = A.data<float>();
     auto eigvals_sorted = [n](const Tensor& wr, const Tensor& wi) {
@@ -559,12 +533,9 @@ TEST_P(LinalgParity, Eig_NonSymmetric_LargeBatched) {
         }
     };
 
+    // CPU is ground truth — a throw here is a real bug, so let it propagate.
     Tensor WRc, WIc, Vc;
-    try {
-        std::tie(WRc, WIc, Vc) = linalg::eig(A);
-    } catch (const std::exception& e) {
-        GTEST_SKIP() << "linalg::eig not available on CPU: " << e.what();
-    }
+    std::tie(WRc, WIc, Vc) = linalg::eig(A);
     residual_ok(WRc, WIc, Vc, "cpu");
 
     for (size_t b = 1; b < backends.size(); ++b) {
@@ -591,12 +562,8 @@ TEST_P(LinalgParity, Cholesky) {
     // Create positive-definite matrix via A^T @ A + 5*I
     auto A = make_spd(8, 5.0f, 301);
 
-    Tensor ref_L;
-    try {
-        ref_L = linalg::cholesky(A);
-    } catch (const std::exception& e) {
-        GTEST_SKIP() << "linalg::cholesky not available on CPU: " << e.what();
-    }
+    // CPU is ground truth — a throw here is a real bug, so let it propagate.
+    Tensor ref_L = linalg::cholesky(A);
 
     // Verify L @ L^T ~= A
     auto Lt = transpose(ref_L, 0, 1);
@@ -630,12 +597,9 @@ TEST_P(LinalgParity, LU) {
 
     auto A = make_well_conditioned({8, 8}, 5.0f, 207);
 
+    // CPU is ground truth — a throw here is a real bug, so let it propagate.
     Tensor ref_L, ref_U, ref_pivots;
-    try {
-        std::tie(ref_L, ref_U, ref_pivots) = linalg::lu(A);
-    } catch (const std::exception& e) {
-        GTEST_SKIP() << "linalg::lu not available on CPU: " << e.what();
-    }
+    std::tie(ref_L, ref_U, ref_pivots) = linalg::lu(A);
 
     // For partial pivoting, L @ U gives a row-permuted version of A.
     // Rather than reconstructing P explicitly, we verify by solving:
@@ -724,12 +688,8 @@ TEST_P(LinalgParity, SolveTriangular) {
     auto A = triu(A_full).contiguous();
     auto b = generate_test_tensor({8, 4}, DType::Float32, Device::cpu(), 218);
 
-    Tensor ref_x;
-    try {
-        ref_x = linalg::solve_triangular(A, b, /*upper=*/true);
-    } catch (const std::exception& e) {
-        GTEST_SKIP() << "linalg::solve_triangular not available on CPU: " << e.what();
-    }
+    // CPU is ground truth — a throw here is a real bug, so let it propagate.
+    Tensor ref_x = linalg::solve_triangular(A, b, /*upper=*/true);
 
     // Verify A @ x ~= b on CPU
     auto reconstructed = matmul(A, ref_x);

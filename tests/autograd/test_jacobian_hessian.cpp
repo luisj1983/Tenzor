@@ -200,13 +200,12 @@ TEST_P(JacobianHessianBackendTest, Jacobian_Runs_CrossBackend) {
     auto f = [](const Variable& x) -> Variable {
         return Variable(tenzor::mul(x.tensor(), x.tensor()), false);
     };
-    try {
-        auto J = tenzor::jacobian(f, Variable(input, false));
-        device.synchronize();
-        EXPECT_GT(J.numel(), 0);
-    } catch (const std::exception& e) {
-        GTEST_SKIP() << "jacobian unsupported on this backend: " << e.what();
-    }
+    // Audit: previously try/catch -> GTEST_SKIP("jacobian unsupported on this
+    // backend"), which buried a real cross-backend jacobian/dispatch break as
+    // a clean skip. Let exceptions propagate so the gap surfaces as a failure.
+    auto J = tenzor::jacobian(f, Variable(input, false));
+    device.synchronize();
+    EXPECT_GT(J.numel(), 0);
 }
 
 INSTANTIATE_BACKEND_TESTS(JacobianHessianBackendTest);

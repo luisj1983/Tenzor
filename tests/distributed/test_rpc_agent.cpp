@@ -110,24 +110,19 @@ TEST(RpcAgentTest, RealStartupAndShutdown) {
 
     // Initialize with a single worker (self). This binds the listen
     // socket and starts the accept thread.
+    //
+    // Audit-5: removed a `try { agent.init(workers); } catch (...) {
+    // GTEST_SKIP("init() failed in single-worker setup"); }` wrapper. This
+    // test's whole purpose is to verify init() brings the agent up and
+    // shutdown() tears it down; swallowing an init() failure as a skip made
+    // a broken single-worker init path invisible. Single-worker init on a
+    // dedicated port is expected to succeed, so let a throw surface.
     std::vector<WorkerInfo> workers = {self};
-    bool init_ok = true;
-    try {
-        agent.init(workers);
-    } catch (const std::exception& e) {
-        // Some builds may require a multi-worker topology. If init fails
-        // due to bind errors or topology validation, skip the liveness
-        // check — construction already exercises most of the API.
-        init_ok = false;
-        GTEST_SKIP() << "TcpRpcAgent.init() failed in single-worker setup: "
-                     << e.what();
-    }
+    agent.init(workers);
 
-    if (init_ok) {
-        EXPECT_TRUE(agent.is_running()) << "Agent should be running after init()";
-        EXPECT_NO_THROW(agent.shutdown());
-        EXPECT_FALSE(agent.is_running()) << "Agent should stop after shutdown()";
-    }
+    EXPECT_TRUE(agent.is_running()) << "Agent should be running after init()";
+    EXPECT_NO_THROW(agent.shutdown());
+    EXPECT_FALSE(agent.is_running()) << "Agent should stop after shutdown()";
 }
 
 // When two agents try to bind the same port, the second init() must
@@ -140,13 +135,13 @@ TEST(RpcAgentTest, InitReportsBindFailure) {
     WorkerInfo b;
     b.name = "worker_b"; b.id = 1; b.address = "127.0.0.1"; b.port = 29581;  // same port
 
+    // Audit-5: removed a `try { agent_a.init({a}); } catch (...) {
+    // GTEST_SKIP("First init failed"); }` wrapper. agent_a binds a dedicated
+    // free port (29581) and must come up for the port-collision contract to
+    // be exercised; a failure here is itself a real bug and should surface
+    // rather than masquerade as "can't verify port-collision surfacing".
     TcpRpcAgent agent_a(a);
-    try {
-        agent_a.init({a});
-    } catch (const std::exception&) {
-        GTEST_SKIP() << "First init failed; can't verify port-collision surfacing";
-        return;
-    }
+    agent_a.init({a});
     ASSERT_TRUE(agent_a.is_running());
 
     TcpRpcAgent agent_b(b);

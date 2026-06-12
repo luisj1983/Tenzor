@@ -42,32 +42,33 @@ TEST_P(GPTQQuantizerMultiDTypeTest, ComputeHessianShape) {
             "GPTQ Hessian is float-only.");
         return;
     }
-    try {
-        auto input_cpu = tenzor::randn({12, 32}, DType::Float32, Device::cpu());
-        auto input = input_cpu.to(dtype_).to(device_);
+    // Audit-5: the body was previously wrapped in
+    // `try { ... } catch (const std::exception&) { GTEST_SKIP(); }`, which
+    // reclassified a real dispatch break (missing kernel, wrong dtype path,
+    // NaN Hessian) as "unsupported on this backend/dtype". The dtype filter
+    // above is the only legitimate precondition; let any exception from the
+    // actual compute_hessian work propagate as a failure.
+    auto input_cpu = tenzor::randn({12, 32}, DType::Float32, Device::cpu());
+    auto input = input_cpu.to(dtype_).to(device_);
 
-        auto hessian = GPTQQuantizer::compute_hessian(input);
-        ASSERT_EQ(hessian.dim(), 2);
-        EXPECT_EQ(hessian.size(0), 32);
-        EXPECT_EQ(hessian.size(1), 32);
+    auto hessian = GPTQQuantizer::compute_hessian(input);
+    ASSERT_EQ(hessian.dim(), 2);
+    EXPECT_EQ(hessian.size(0), 32);
+    EXPECT_EQ(hessian.size(1), 32);
 
-        // Symmetry + positive-diagonal sanity (relax tolerance for the
-        // low-precision dtypes — the upcast to Float32 happens inside
-        // compute_hessian but the input itself has been rounded already).
-        auto h_cpu = hessian.to(Device::cpu()).to(DType::Float32);
-        const float* data = h_cpu.data<float>();
-        const float atol = (dtype_ == DType::Float32) ? 1e-4f : 1e-2f;
-        for (int i = 0; i < 32; ++i) {
-            EXPECT_GT(data[i * 32 + i], 0.0f)
-                << "Hessian diagonal at (" << i << "," << i << ") not positive";
-            for (int j = i + 1; j < 32; ++j) {
-                EXPECT_NEAR(data[i * 32 + j], data[j * 32 + i], atol)
-                    << "Hessian not symmetric at (" << i << "," << j << ")";
-            }
+    // Symmetry + positive-diagonal sanity (relax tolerance for the
+    // low-precision dtypes — the upcast to Float32 happens inside
+    // compute_hessian but the input itself has been rounded already).
+    auto h_cpu = hessian.to(Device::cpu()).to(DType::Float32);
+    const float* data = h_cpu.data<float>();
+    const float atol = (dtype_ == DType::Float32) ? 1e-4f : 1e-2f;
+    for (int i = 0; i < 32; ++i) {
+        EXPECT_GT(data[i * 32 + i], 0.0f)
+            << "Hessian diagonal at (" << i << "," << i << ") not positive";
+        for (int j = i + 1; j < 32; ++j) {
+            EXPECT_NEAR(data[i * 32 + j], data[j * 32 + i], atol)
+                << "Hessian not symmetric at (" << i << "," << j << ")";
         }
-    } catch (const std::exception& e) {
-        GTEST_SKIP() << "GPTQ compute_hessian unsupported on this "
-                     << "backend/dtype combination: " << e.what();
     }
 }
 
@@ -91,28 +92,27 @@ TEST_P(GPTQQuantizerMultiDTypeTest, QuantizeLayerRoundTrip) {
     auto weight_cpu = tenzor::randn({32, 64}, DType::Float32, Device::cpu());
     auto input_cpu  = tenzor::randn({16, 64}, DType::Float32, Device::cpu());
 
-    try {
-        auto weight = weight_cpu.to(dtype_).to(device_);
-        auto input  = input_cpu.to(dtype_).to(device_);
-        auto hessian = GPTQQuantizer::compute_hessian(input);
+    // Audit-5: removed a `try { ... } catch (const std::exception&) {
+    // GTEST_SKIP(); }` wrapper that hid quantize_layer dispatch failures as
+    // "unsupported on this backend/dtype". The dtype filter above is the
+    // legitimate precondition; let exceptions from the work propagate.
+    auto weight = weight_cpu.to(dtype_).to(device_);
+    auto input  = input_cpu.to(dtype_).to(device_);
+    auto hessian = GPTQQuantizer::compute_hessian(input);
 
-        auto result = q.quantize_layer(weight, hessian);
-        ASSERT_EQ(result.packed_weight.dim(), 2);
-        EXPECT_EQ(result.packed_weight.size(0), 32);
-        EXPECT_GT(result.scales.numel(), 0);
+    auto result = q.quantize_layer(weight, hessian);
+    ASSERT_EQ(result.packed_weight.dim(), 2);
+    EXPECT_EQ(result.packed_weight.size(0), 32);
+    EXPECT_GT(result.scales.numel(), 0);
 
-        // Scales must be finite — non-finite values indicate the
-        // internal Float32 pipeline saw a NaN/Inf from the dtype
-        // conversion and silently propagated it.
-        auto s_cpu = result.scales.to(Device::cpu()).to(DType::Float32);
-        const float* sdata = s_cpu.data<float>();
-        for (int64_t i = 0; i < s_cpu.numel(); ++i) {
-            EXPECT_TRUE(std::isfinite(sdata[i]))
-                << "Non-finite GPTQ scale at index " << i;
-        }
-    } catch (const std::exception& e) {
-        GTEST_SKIP() << "GPTQ quantize_layer unsupported on this backend/"
-                     << "dtype combination: " << e.what();
+    // Scales must be finite — non-finite values indicate the
+    // internal Float32 pipeline saw a NaN/Inf from the dtype
+    // conversion and silently propagated it.
+    auto s_cpu = result.scales.to(Device::cpu()).to(DType::Float32);
+    const float* sdata = s_cpu.data<float>();
+    for (int64_t i = 0; i < s_cpu.numel(); ++i) {
+        EXPECT_TRUE(std::isfinite(sdata[i]))
+            << "Non-finite GPTQ scale at index " << i;
     }
 }
 

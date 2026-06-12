@@ -111,11 +111,9 @@ void maxpool3d_halfdtype_parity(PoolMake make_pool,
 
     // CPU Float32 reference.
     Tensor ref;
-    try {
+    {
         auto pool = make_pool();
         ref = pool.forward(Variable(input_f32, false)).tensor();
-    } catch (const std::exception& e) {
-        GTEST_SKIP() << name << " CPU reference failed: " << e.what();
     }
 
     for (size_t i = 1; i < backends.size(); ++i) {
@@ -323,20 +321,14 @@ TEST_P(NNPoolingParity, FractionalMaxPool2d) {
     auto backends = get_available_backends();
     REQUIRE_MULTI_BACKEND_OR_SKIP("nn pooling parity");
 
-    // FractionalMaxPool2d may not exist as a module class in this codebase.
-    // Wrap the entire test in try/catch to skip gracefully.
-    try {
-        auto input = randn({1, 16, 8, 8}, DType::Float32, Device::cpu());
+    auto input = randn({1, 16, 8, 8}, DType::Float32, Device::cpu());
 
-        test_operation_parity([](const std::vector<Tensor>& inputs) {
-            // Attempt to use FractionalMaxPool2d if it exists.
-            // Fall back to MaxPool2d with similar effect if not.
-            nn::MaxPool2d pool(2, 2);  // Fallback: standard 2x2 max pool
-            return pool.forward(Variable(inputs[0], false)).tensor();
-        }, {input}, 1e-7f, 1e-9f, "FractionalMaxPool2d_fallback");
-    } catch (const std::exception& e) {
-        GTEST_SKIP() << "FractionalMaxPool2d not supported: " << e.what();
-    }
+    test_operation_parity([](const std::vector<Tensor>& inputs) {
+        // Attempt to use FractionalMaxPool2d if it exists.
+        // Fall back to MaxPool2d with similar effect if not.
+        nn::MaxPool2d pool(2, 2);  // Fallback: standard 2x2 max pool
+        return pool.forward(Variable(inputs[0], false)).tensor();
+    }, {input}, 1e-7f, 1e-9f, "FractionalMaxPool2d_fallback");
 }
 
 TEST_P(NNPoolingParity, MaxPool2d_WithPadding) {
@@ -366,15 +358,13 @@ void pool_grad_parity(PoolT make_pool,
     REQUIRE_MULTI_BACKEND_OR_SKIP("nn pooling parity");
 
     Tensor ref_out, ref_grad;
-    try {
+    {
         auto pool = make_pool();
         auto v = Variable(input.clone(), true);
         auto out = pool.forward(v);
         out.backward(ones_like(out.tensor()));
         ref_out = out.tensor();
         ref_grad = v.grad().value();
-    } catch (const std::exception& e) {
-        GTEST_SKIP() << name << " CPU reference failed: " << e.what();
     }
 
     for (size_t i = 1; i < backends.size(); ++i) {
@@ -454,14 +444,12 @@ TEST_P(NNPoolingParity, FractionalMaxPool3d) {
     REQUIRE_MULTI_BACKEND_OR_SKIP("nn pooling parity");
 
     Tensor ref;
-    try {
+    {
         auto [out, _] = nn::functional::fractional_max_pool3d(
             Variable(input, false),
             std::make_tuple<int64_t, int64_t, int64_t>(2, 2, 2),
             std::make_tuple<int64_t, int64_t, int64_t>(2, 2, 2));
         ref = out.tensor();
-    } catch (const std::exception& e) {
-        GTEST_SKIP() << "FractionalMaxPool3d CPU reference failed: " << e.what();
     }
 
     for (size_t i = 1; i < backends.size(); ++i) {
@@ -509,13 +497,11 @@ TEST_P(NNPoolingParity, MaxUnpool2d) {
     REQUIRE_MULTI_BACKEND_OR_SKIP("nn pooling parity");
 
     Tensor ref;
-    try {
+    {
         auto un = nn::functional::max_unpool2d(
             Variable(pooled, false), indices,
             std::make_pair<int64_t, int64_t>(2, 2));
         ref = un.tensor();
-    } catch (const std::exception& e) {
-        GTEST_SKIP() << "MaxUnpool2d CPU reference failed: " << e.what();
     }
 
     for (size_t i = 1; i < backends.size(); ++i) {
@@ -553,12 +539,10 @@ TEST_P(NNPoolingParity, MaxUnpool1d) {
     REQUIRE_MULTI_BACKEND_OR_SKIP("nn pooling parity");
 
     Tensor ref;
-    try {
+    {
         auto un = nn::functional::max_unpool1d(
             Variable(pooled, false), indices, /*kernel_size=*/2);
         ref = un.tensor();
-    } catch (const std::exception& e) {
-        GTEST_SKIP() << "MaxUnpool1d CPU reference failed: " << e.what();
     }
 
     for (size_t i = 1; i < backends.size(); ++i) {

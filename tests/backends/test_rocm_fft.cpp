@@ -6,6 +6,7 @@
 #include <gtest/gtest.h>
 #include "tenzor/tenzor.hpp"
 #include "tenzor/ops/fft.hpp"
+#include "../backend_parity/parity_test_utils.hpp"
 #include <cmath>
 
 using namespace tenzor;
@@ -14,15 +15,12 @@ class RocmFFTTest : public ::testing::Test {
 protected:
     void SetUp() override {
         tenzor::initialize();
-        // Skip if no ROCm device or rocFFT not working
-        try {
-            auto t = tenzor::zeros({2}, DType::Float32, Device::rocm(0));
-            // Quick FFT smoke test to verify rocFFT works
-            auto test_fft = tenzor::fft::rfft(tenzor::randn({8}).to(Device::rocm(0)));
-            test_fft.to(Device::cpu());
-        } catch (...) {
-            GTEST_SKIP() << "ROCm device or rocFFT not available/functional";
-        }
+        // Deterministic availability precondition only. The previous version
+        // also ran an rfft smoke test inside a catch-all and reported any
+        // rocFFT failure as "not available" — that buried real rocFFT kernel
+        // bugs. Now only genuine device absence skips; rocFFT failures
+        // surface in the individual tests below.
+        SKIP_IF_NO_ROCM;
     }
 };
 

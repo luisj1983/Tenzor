@@ -553,14 +553,13 @@ TEST_P(JVPBackendTest, JVP_Runs_CrossBackend) {
     auto f = [](const Variable& x) -> Variable {
         return Variable(tenzor::mul(x.tensor(), x.tensor()), false);
     };
-    try {
-        auto [out, t] = tenzor::jvp(f, Variable(input, false), tangent);
-        device.synchronize();
-        EXPECT_EQ(out.tensor().numel(), 4);
-        EXPECT_EQ(t.numel(), 4);
-    } catch (const std::exception& e) {
-        GTEST_SKIP() << "JVP unsupported on this backend: " << e.what();
-    }
+    // Audit: previously try/catch -> GTEST_SKIP("JVP unsupported on this
+    // backend"), which buried a real cross-backend jvp/dispatch break as a
+    // clean skip. Let exceptions propagate so the gap surfaces as a failure.
+    auto [out, t] = tenzor::jvp(f, Variable(input, false), tangent);
+    device.synchronize();
+    EXPECT_EQ(out.tensor().numel(), 4);
+    EXPECT_EQ(t.numel(), 4);
 }
 
 INSTANTIATE_BACKEND_TESTS(JVPBackendTest);

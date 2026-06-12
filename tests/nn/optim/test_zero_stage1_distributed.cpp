@@ -353,14 +353,20 @@ protected:
     void SetUp() override {
         ZeRODistributedTestBase::SetUp();
         if (!::testing::Test::IsSkipped()) {
-            try {
-                // Check GPU availability
-                Device gpu_dev = Device::cuda(rank_);
-                init_process_group("nccl");
-                default_config.process_group = DistributedContext::get_process_group();
-            } catch (...) {
-                GTEST_SKIP() << "CUDA/ROCm not available for NCCL tests";
-            }
+            // Audit-5 (EDGE): this SetUp previously wrapped init_process_group(
+            // "nccl") in `try { ... } catch (...) { GTEST_SKIP("CUDA/ROCm not
+            // available"); }`, a catch-all that made every NCCL init failure
+            // (missing kernel, comm-build error, topology mismatch) look like a
+            // clean "no GPU" skip. The genuine preconditions — RANK/WORLD_SIZE
+            // set and world_size >= 2 — are already enforced in the base
+            // SetUp() above, and this subclass only compiles under
+            // TENZOR_USE_CUDA/ROCM, so a real NCCL backend is expected when we
+            // reach here. Let init_process_group failures propagate as
+            // failures instead of being buried as availability skips.
+            Device gpu_dev = Device::cuda(rank_);
+            (void)gpu_dev;
+            init_process_group("nccl");
+            default_config.process_group = DistributedContext::get_process_group();
         }
     }
 

@@ -29,11 +29,6 @@ TEST_P(HistogramMultiDTypeTest, UniformDataShape) {
 }
 
 TEST_P(HistogramMultiDTypeTest, UniformDataCounts) {
-    // Skip Float16 due to precision
-    if (dtype() == DType::Float16 || dtype() == DType::BFloat16) {
-        GTEST_SKIP() << "Skipping value check for low-precision dtype";
-    }
-
     auto input = tenzor::arange(0.0f, 10.0f, 1.0f, DType::Float32, Device::cpu());
     input = input.to(device());
     if (dtype() != DType::Float32) {
@@ -51,11 +46,6 @@ TEST_P(HistogramMultiDTypeTest, UniformDataCounts) {
 }
 
 TEST_P(HistogramMultiDTypeTest, AutoRangeTotalCount) {
-    // Skip Float16 due to precision
-    if (dtype() == DType::Float16 || dtype() == DType::BFloat16) {
-        GTEST_SKIP() << "Skipping value check for low-precision dtype";
-    }
-
     auto input = tenzor::arange(0.0f, 5.0f, 1.0f, DType::Float32, Device::cpu());
     input = input.to(device());
     if (dtype() != DType::Float32) {

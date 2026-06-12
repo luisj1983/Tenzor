@@ -105,13 +105,17 @@ protected:
     void SetUp() override {
         DistributedTestBase::SetUp();
         if (!::testing::Test::IsSkipped()) {
-            // Check if CUDA/ROCm is available
+            // Deterministic precondition: skip only when no GPU device is
+            // present. The actual NCCL process-group init is NOT wrapped —
+            // a real init_process_group("nccl") failure must propagate as a
+            // test failure rather than masquerade as "CUDA not available".
             try {
                 Device gpu_dev = Device::cuda(0);
-                init_process_group("nccl");
+                (void)gpu_dev;
             } catch (...) {
                 GTEST_SKIP() << "CUDA/ROCm not available for NCCL tests";
             }
+            init_process_group("nccl");
         }
     }
 };

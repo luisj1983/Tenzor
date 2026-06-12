@@ -34,7 +34,12 @@ TEST_P(JITAutogradParity, LinearChain_Backward) {
     auto backends = get_available_backends();
     REQUIRE_MULTI_BACKEND_OR_SKIP("jit autograd parity");
 
-    try {
+    // Audit: previously the whole body (CPU reference + per-backend loop) was
+    // wrapped in try{...}catch(...){GTEST_SKIP(e.what())}, swallowing a broken
+    // CPU reference or any structural failure as a clean skip. The inner loop
+    // already reports per-backend failures via ADD_FAILURE; let everything else
+    // propagate.
+    {
         nn::Linear l1(32, 16);
         nn::Linear l2(16, 8);
         auto input = randn({4, 32}, DType::Float32, Device::cpu());
@@ -80,8 +85,6 @@ TEST_P(JITAutogradParity, LinearChain_Backward) {
                           << std::endl;
             }
         }
-    } catch (const std::exception& e) {
-        GTEST_SKIP() << e.what();
     }
 }
 
@@ -90,7 +93,12 @@ TEST_P(JITAutogradParity, LayerNormMLP_Backward) {
     auto backends = get_available_backends();
     REQUIRE_MULTI_BACKEND_OR_SKIP("jit autograd parity");
 
-    try {
+    // Audit: previously the whole body (CPU reference + per-backend loop) was
+    // wrapped in try{...}catch(...){GTEST_SKIP(e.what())}, swallowing a broken
+    // CPU reference or any structural failure as a clean skip. The inner loop
+    // already reports per-backend failures via ADD_FAILURE; let everything else
+    // propagate.
+    {
         nn::Linear l1(16, 16);
         nn::LayerNorm ln({16});
         nn::Linear l2(16, 8);
@@ -136,8 +144,6 @@ TEST_P(JITAutogradParity, LayerNormMLP_Backward) {
                           << std::endl;
             }
         }
-    } catch (const std::exception& e) {
-        GTEST_SKIP() << e.what();
     }
 }
 

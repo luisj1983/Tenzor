@@ -31,12 +31,11 @@ TEST_P(DistributionsParity, Normal_LogProb) {
     auto backends = get_available_backends();
     REQUIRE_MULTI_BACKEND_OR_SKIP("distributions parity");
 
+    // CPU is the reference backend — a throw here is a real bug, so let it propagate.
     Tensor ref;
-    try {
+    {
         D::Normal n(loc, scale);
         ref = n.log_prob(value);
-    } catch (const std::exception& e) {
-        GTEST_SKIP() << "Normal.log_prob CPU reference failed: " << e.what();
     }
 
     for (size_t i = 1; i < backends.size(); ++i) {
@@ -62,12 +61,11 @@ TEST_P(DistributionsParity, Normal_Entropy) {
     auto backends = get_available_backends();
     REQUIRE_MULTI_BACKEND_OR_SKIP("distributions parity");
 
+    // CPU is the reference backend — a throw here is a real bug, so let it propagate.
     Tensor ref;
-    try {
+    {
         D::Normal n(loc, scale);
         ref = n.entropy();
-    } catch (const std::exception& e) {
-        GTEST_SKIP() << "Normal.entropy CPU reference failed: " << e.what();
     }
 
     for (size_t i = 1; i < backends.size(); ++i) {
@@ -98,12 +96,11 @@ TEST_P(DistributionsParity, Uniform_LogProb) {
     auto backends = get_available_backends();
     REQUIRE_MULTI_BACKEND_OR_SKIP("distributions parity");
 
+    // CPU is the reference backend — a throw here is a real bug, so let it propagate.
     Tensor ref;
-    try {
+    {
         D::Uniform u(low, high);
         ref = u.log_prob(value);
-    } catch (const std::exception& e) {
-        GTEST_SKIP() << "Uniform.log_prob CPU reference failed: " << e.what();
     }
 
     for (size_t i = 1; i < backends.size(); ++i) {
@@ -129,12 +126,11 @@ TEST_P(DistributionsParity, Uniform_Entropy) {
     auto backends = get_available_backends();
     REQUIRE_MULTI_BACKEND_OR_SKIP("distributions parity");
 
+    // CPU is the reference backend — a throw here is a real bug, so let it propagate.
     Tensor ref;
-    try {
+    {
         D::Uniform u(low, high);
         ref = u.entropy();
-    } catch (const std::exception& e) {
-        GTEST_SKIP() << "Uniform.entropy CPU reference failed: " << e.what();
     }
 
     for (size_t i = 1; i < backends.size(); ++i) {
@@ -164,12 +160,11 @@ TEST_P(DistributionsParity, Exponential_LogProb) {
     auto backends = get_available_backends();
     REQUIRE_MULTI_BACKEND_OR_SKIP("distributions parity");
 
+    // CPU is the reference backend — a throw here is a real bug, so let it propagate.
     Tensor ref;
-    try {
+    {
         D::Exponential e(rate);
         ref = e.log_prob(value);
-    } catch (const std::exception& e) {
-        GTEST_SKIP() << "Exponential.log_prob CPU reference failed: " << e.what();
     }
 
     for (size_t i = 1; i < backends.size(); ++i) {

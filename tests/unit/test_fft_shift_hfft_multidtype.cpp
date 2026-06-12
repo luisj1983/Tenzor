@@ -17,7 +17,6 @@ using namespace tenzor::testing;
 class FFTShiftHfftMultiDTypeTest : public MultiBackendDTypeTest {};
 
 TEST_P(FFTShiftHfftMultiDTypeTest, FftshiftEvenLength1D) {
-    if (dtype() == DType::Float16) GTEST_SKIP() << "Float16 imprecise for FFT shift";
     auto x = zeros({4}, DType::Float32, Device::cpu());
     for (int i = 0; i < 4; ++i) x.data<float>()[i] = static_cast<float>(i);
     x = x.to(dtype()).to(device());
@@ -32,7 +31,6 @@ TEST_P(FFTShiftHfftMultiDTypeTest, FftshiftEvenLength1D) {
 }
 
 TEST_P(FFTShiftHfftMultiDTypeTest, FftshiftOddLength1D) {
-    if (dtype() == DType::Float16) GTEST_SKIP() << "Float16 imprecise for FFT shift";
     auto x = zeros({5}, DType::Float32, Device::cpu());
     for (int i = 0; i < 5; ++i) x.data<float>()[i] = static_cast<float>(i);
     x = x.to(dtype()).to(device());
@@ -48,7 +46,6 @@ TEST_P(FFTShiftHfftMultiDTypeTest, FftshiftOddLength1D) {
 }
 
 TEST_P(FFTShiftHfftMultiDTypeTest, IfftshiftInverseFftshift) {
-    if (dtype() == DType::Float16) GTEST_SKIP() << "Float16 imprecise for FFT shift";
     for (int64_t N : {4, 5, 8, 9}) {
         auto x = zeros({N}, DType::Float32, Device::cpu());
         for (int i = 0; i < N; ++i) x.data<float>()[i] = static_cast<float>(i);
@@ -65,7 +62,6 @@ TEST_P(FFTShiftHfftMultiDTypeTest, IfftshiftInverseFftshift) {
 }
 
 TEST_P(FFTShiftHfftMultiDTypeTest, Fftshift2D) {
-    if (dtype() == DType::Float16) GTEST_SKIP() << "Float16 imprecise for FFT shift";
     auto x = zeros({2, 2}, DType::Float32, Device::cpu());
     x.data<float>()[0] = 0.0f;
     x.data<float>()[1] = 1.0f;

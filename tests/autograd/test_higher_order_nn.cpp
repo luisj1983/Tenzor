@@ -149,18 +149,17 @@ TEST_P(HigherOrderNNTest, SyncBatchNorm_DoubleBackward) {
     auto output = sbn.forward(input);
     auto loss = tenzor::sum(output);
 
-    try {
-        loss.backward(std::nullopt, false, /*create_graph=*/true);
-        ASSERT_TRUE(input.grad_variable().has_value())
-            << "SyncBatchNorm with create_graph=true must populate grad_variable()";
-        Variable grad_var = input.grad_variable().value();
-        auto grad_norm = tenzor::sum(grad_var * grad_var);
-        grad_norm.backward();
-        EXPECT_GRAD_FLOWS(input);
-    } catch (const std::runtime_error& e) {
-        // Backend not implementing BN at all on this device should skip.
-        GTEST_SKIP() << "SyncBatchNorm unavailable: " << e.what();
-    }
+    // Audit: previously wrapped in try/catch -> GTEST_SKIP("SyncBatchNorm
+    // unavailable"), which buried a real second-order SyncBN backward break
+    // as a clean skip. Single-process SyncBN now has a Variable-level backward,
+    // so this must produce a real second-order graph; let exceptions propagate.
+    loss.backward(std::nullopt, false, /*create_graph=*/true);
+    ASSERT_TRUE(input.grad_variable().has_value())
+        << "SyncBatchNorm with create_graph=true must populate grad_variable()";
+    Variable grad_var = input.grad_variable().value();
+    auto grad_norm = tenzor::sum(grad_var * grad_var);
+    grad_norm.backward();
+    EXPECT_GRAD_FLOWS(input);
 }
 
 INSTANTIATE_BACKEND_TESTS(HigherOrderNNTest);

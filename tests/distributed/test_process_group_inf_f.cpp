@@ -92,14 +92,15 @@ TEST_F(ProcessGroupInfFTest, GlooSplit_NoColor_ReturnsNull) {
 TEST_F(ProcessGroupInfFTest, GlooSplit_SingleRank_ReturnsSubGroupOfOne) {
     auto pg = try_make_gloo_pg();
     if (!pg) GTEST_SKIP() << "Gloo TCP rendezvous unavailable on this host";
-    std::shared_ptr<ProcessGroupBase> sub;
-    try {
-        sub = pg->split(/*color=*/0, /*key=*/0);
-    } catch (const std::exception& e) {
-        // The split may fail at the child rendezvous step if the derived
-        // TCP port can't be bound; skip rather than fail.
-        GTEST_SKIP() << "Gloo split child rendezvous unavailable: " << e.what();
-    }
+    // Audit-5: removed a `try { sub = pg->split(...); } catch (...) {
+    // GTEST_SKIP("child rendezvous unavailable"); }` wrapper. split() is the
+    // operation under test here — wrapping it turned a real split() bug (bad
+    // subgroup construction, wrong rank/world_size, throw on the single-rank
+    // path) into a silent skip. The parent PG already constructed successfully
+    // via the try_make_gloo_pg() precondition above, so a throw from split()
+    // should surface as a failure. The documented null-return rendezvous-
+    // failure path is still tolerated below.
+    std::shared_ptr<ProcessGroupBase> sub = pg->split(/*color=*/0, /*key=*/0);
     if (!sub) GTEST_SKIP() << "Gloo split returned null (rendezvous failure)";
     EXPECT_EQ(sub->rank(), 0);
     EXPECT_EQ(sub->world_size(), 1);

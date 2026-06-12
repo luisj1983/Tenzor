@@ -86,12 +86,11 @@ TEST_P(MoEHRMParity, HRM_Forward) {
     hrm_cpu.eval();
 
     auto input = randn({1, 8, 32}, DType::Float32, Device::cpu());
-    Tensor ref;
-    try {
-        ref = hrm_cpu.forward(Variable(input, false)).tensor();
-    } catch (const std::exception& e) {
-        GTEST_SKIP() << "HRM CPU reference failed: " << e.what();
-    }
+    // Audit: previously wrapped in try{...}catch(...){GTEST_SKIP("HRM CPU
+    // reference failed")}. The CPU forward is the parity reference (the MoE
+    // forward/backward tests in this file run it un-wrapped); a CPU reference
+    // failure is a real bug, not a "feature unavailable" skip. Let it propagate.
+    Tensor ref = hrm_cpu.forward(Variable(input, false)).tensor();
 
     auto backends = get_available_backends();
     REQUIRE_MULTI_BACKEND_OR_SKIP("moe/hrm parity");

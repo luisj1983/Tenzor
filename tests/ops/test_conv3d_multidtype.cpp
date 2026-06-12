@@ -105,9 +105,6 @@ TEST_P(Conv3dMultiDTypeTest, WeightGradientExists) {
 TEST_P(Conv3dMultiDTypeTest, IdentityConvWithUnitWeight) {
     // A 1x1x1 Conv3d with weight=1 and no bias should preserve the input value.
     // We fill the weight tensor in-place via fill_().
-    if (dtype() == DType::Float16 || dtype() == DType::BFloat16) {
-        GTEST_SKIP() << "Numerical correctness check requires Float32/Float64";
-    }
     nn::Conv3d conv(1, 1, /*kernel_size=*/1, /*stride=*/1, /*padding=*/0,
                     /*dilation=*/1, /*groups=*/1, /*bias=*/false);
     convert_model(conv);
@@ -121,19 +118,23 @@ TEST_P(Conv3dMultiDTypeTest, IdentityConvWithUnitWeight) {
     Variable input_var(input, false);
     auto output = conv.forward(input_var);
 
-    // Output should be all 2.0 (input=1, weight=2, 1x1x1 kernel = elementwise mul)
-    auto cpu_out = output.tensor().to(Device::cpu()).to(DType::Float32).contiguous();
-    auto* data = cpu_out.data<float>();
-    for (int64_t i = 0; i < cpu_out.numel(); ++i) {
-        EXPECT_NEAR(data[i], 2.0f, std::max(atol() * 10.0f, 1e-4f));
+    if (dtype() == DType::Float32 || dtype() == DType::Float64) {
+        // Output should be all 2.0 (input=1, weight=2, 1x1x1 kernel = elementwise mul)
+        auto cpu_out = output.tensor().to(Device::cpu()).to(DType::Float32).contiguous();
+        auto* data = cpu_out.data<float>();
+        for (int64_t i = 0; i < cpu_out.numel(); ++i) {
+            EXPECT_NEAR(data[i], 2.0f, std::max(atol() * 10.0f, 1e-4f));
+        }
+    } else {
+        // Half precision: exercise the kernel/dispatch and assert only what is
+        // precision-safe — correct output dtype and finite (no NaN/Inf).
+        expectDType(output.tensor());
+        expectAllFinite(output.tensor());
     }
 }
 
 TEST_P(Conv3dMultiDTypeTest, ZeroInputProducesBiasOnly) {
     // With zero input, the output should equal the bias broadcast across spatial dims.
-    if (dtype() == DType::Float16 || dtype() == DType::BFloat16) {
-        GTEST_SKIP() << "Numerical correctness check requires Float32/Float64";
-    }
     nn::Conv3d conv(2, 4, 3, 1, 1);
     convert_model(conv);
 
@@ -146,11 +147,18 @@ TEST_P(Conv3dMultiDTypeTest, ZeroInputProducesBiasOnly) {
     Variable input_var(input, false);
     auto output = conv.forward(input_var);
 
-    // All output values should equal the bias (3.0)
-    auto cpu_out = output.tensor().to(Device::cpu()).to(DType::Float32).contiguous();
-    auto* data = cpu_out.data<float>();
-    for (int64_t i = 0; i < cpu_out.numel(); ++i) {
-        EXPECT_NEAR(data[i], 3.0f, std::max(atol() * 10.0f, 1e-4f));
+    if (dtype() == DType::Float32 || dtype() == DType::Float64) {
+        // All output values should equal the bias (3.0)
+        auto cpu_out = output.tensor().to(Device::cpu()).to(DType::Float32).contiguous();
+        auto* data = cpu_out.data<float>();
+        for (int64_t i = 0; i < cpu_out.numel(); ++i) {
+            EXPECT_NEAR(data[i], 3.0f, std::max(atol() * 10.0f, 1e-4f));
+        }
+    } else {
+        // Half precision: exercise the kernel/dispatch and assert only what is
+        // precision-safe — correct output dtype and finite (no NaN/Inf).
+        expectDType(output.tensor());
+        expectAllFinite(output.tensor());
     }
 }
 

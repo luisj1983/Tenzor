@@ -55,17 +55,16 @@ TEST_P(NestedParity, NestedSoftmax_FwdBwd) {
     auto backends = get_available_backends();
     REQUIRE_MULTI_BACKEND_OR_SKIP("nested parity");
 
-    // Reference on CPU
+    // Reference on CPU. CPU is ground truth — a throw here is a real bug, so let
+    // the exception propagate as a failure instead of masking it as a skip.
     Tensor ref_out, ref_grad;
-    try {
+    {
         auto v = Variable(values_cpu.clone(), true);
         auto out = nested_softmax(v, offsets_cpu, /*dim=*/1);
         auto seed = ones_like(out.tensor());
         out.backward(seed);
         ref_out = out.tensor();
         ref_grad = v.grad().value();
-    } catch (const std::exception& e) {
-        GTEST_SKIP() << "nested_softmax CPU reference failed: " << e.what();
     }
 
     for (size_t i = 1; i < backends.size(); ++i) {
@@ -106,8 +105,9 @@ TEST_P(NestedParity, NestedLayerNorm_FwdBwd) {
     auto backends = get_available_backends();
     REQUIRE_MULTI_BACKEND_OR_SKIP("nested parity");
 
+    // CPU is ground truth — a throw here is a real bug, so let it propagate.
     Tensor ref_out, ref_grad_values, ref_grad_weight, ref_grad_bias;
-    try {
+    {
         auto v = Variable(values_cpu.clone(), true);
         auto w = Variable(weight_cpu.clone(), true);
         auto b = Variable(bias_cpu.clone(), true);
@@ -118,8 +118,6 @@ TEST_P(NestedParity, NestedLayerNorm_FwdBwd) {
         ref_grad_values = v.grad().value();
         ref_grad_weight = w.grad().value();
         ref_grad_bias = b.grad().value();
-    } catch (const std::exception& e) {
-        GTEST_SKIP() << "nested_layer_norm CPU reference failed: " << e.what();
     }
 
     for (size_t i = 1; i < backends.size(); ++i) {
@@ -167,12 +165,11 @@ TEST_P(NestedParity, NestedSum) {
     auto backends = get_available_backends();
     REQUIRE_MULTI_BACKEND_OR_SKIP("nested parity");
 
+    // CPU is ground truth — a throw here is a real bug, so let it propagate.
     Tensor ref;
-    try {
+    {
         auto v = Variable(values_cpu, false);
         ref = nested_sum(v, offsets_cpu).tensor();
-    } catch (const std::exception& e) {
-        GTEST_SKIP() << "nested_sum CPU reference failed: " << e.what();
     }
 
     for (size_t i = 1; i < backends.size(); ++i) {
@@ -200,12 +197,11 @@ TEST_P(NestedParity, NestedMean) {
     auto backends = get_available_backends();
     REQUIRE_MULTI_BACKEND_OR_SKIP("nested parity");
 
+    // CPU is ground truth — a throw here is a real bug, so let it propagate.
     Tensor ref;
-    try {
+    {
         auto v = Variable(values_cpu, false);
         ref = nested_mean(v, offsets_cpu).tensor();
-    } catch (const std::exception& e) {
-        GTEST_SKIP() << "nested_mean CPU reference failed: " << e.what();
     }
 
     for (size_t i = 1; i < backends.size(); ++i) {
@@ -244,8 +240,9 @@ TEST_P(NestedParity, NestedAttention_FwdBwd) {
     auto backends = get_available_backends();
     REQUIRE_MULTI_BACKEND_OR_SKIP("nested parity");
 
+    // CPU is ground truth — a throw here is a real bug, so let it propagate.
     Tensor ref_out, ref_q_grad, ref_k_grad, ref_v_grad;
-    try {
+    {
         auto qv = Variable(q_cpu.clone(), true);
         auto kv = Variable(k_cpu.clone(), true);
         auto vv = Variable(v_cpu.clone(), true);
@@ -257,8 +254,6 @@ TEST_P(NestedParity, NestedAttention_FwdBwd) {
         ref_q_grad = qv.grad().value();
         ref_k_grad = kv.grad().value();
         ref_v_grad = vv.grad().value();
-    } catch (const std::exception& e) {
-        GTEST_SKIP() << "nested_attention CPU reference failed: " << e.what();
     }
 
     for (size_t i = 1; i < backends.size(); ++i) {

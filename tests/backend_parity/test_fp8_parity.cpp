@@ -114,14 +114,16 @@ TEST_P(FP8Parity, MatMul_FP8_E4M3) {
     auto backends = get_available_backends();
     REQUIRE_MULTI_BACKEND_OR_SKIP("fp8 matmul parity");
 
+    // Audit: previously wrapped in try{...}catch(...){GTEST_SKIP("FP8 MatMul
+    // CPU reference failed")}. The CPU emulated FP8 matmul is the documented
+    // reference (Phase D.1 comment above); a failure here is a real bug, not a
+    // clean skip. Let it propagate.
     Tensor ref_f32;
-    try {
+    {
         auto a_e4m3 = a_f32.to(DType::FP8_E4M3);
         auto b_e4m3 = b_f32.to(DType::FP8_E4M3);
         auto out_e4m3 = ::tenzor::matmul(a_e4m3, b_e4m3);
         ref_f32 = out_e4m3.to(DType::Float32);
-    } catch (const std::exception& e) {
-        GTEST_SKIP() << "FP8 MatMul CPU reference failed: " << e.what();
     }
 
     for (size_t i = 1; i < backends.size(); ++i) {
@@ -150,14 +152,16 @@ TEST_P(FP8Parity, MatMul_FP8_E5M2) {
     auto backends = get_available_backends();
     REQUIRE_MULTI_BACKEND_OR_SKIP("fp8 matmul parity");
 
+    // Audit: previously wrapped in try{...}catch(...){GTEST_SKIP("FP8 MatMul
+    // CPU reference failed")}. The CPU emulated FP8 matmul is the documented
+    // reference (Phase D.1 comment above); a failure here is a real bug, not a
+    // clean skip. Let it propagate.
     Tensor ref_f32;
-    try {
+    {
         auto a_e5m2 = a_f32.to(DType::FP8_E5M2);
         auto b_e5m2 = b_f32.to(DType::FP8_E5M2);
         auto out_e5m2 = ::tenzor::matmul(a_e5m2, b_e5m2);
         ref_f32 = out_e5m2.to(DType::Float32);
-    } catch (const std::exception& e) {
-        GTEST_SKIP() << "FP8 MatMul CPU reference failed: " << e.what();
     }
 
     for (size_t i = 1; i < backends.size(); ++i) {

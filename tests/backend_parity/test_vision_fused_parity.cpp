@@ -297,12 +297,7 @@ TEST_P(VisionFusedParity, NMS) {
     auto backends = get_available_backends();
     REQUIRE_MULTI_BACKEND_OR_SKIP("vision fused parity");
 
-    Tensor ref;
-    try {
-        ref = ops::nms(boxes, scores, 0.5);
-    } catch (const std::exception& e) {
-        GTEST_SKIP() << "nms CPU reference failed: " << e.what();
-    }
+    Tensor ref = ops::nms(boxes, scores, 0.5);
 
     for (size_t i = 1; i < backends.size(); ++i) {
         try {
@@ -339,14 +334,12 @@ TEST_P(VisionFusedParity, ROIAlign) {
     REQUIRE_MULTI_BACKEND_OR_SKIP("vision fused parity");
 
     Tensor ref;
-    try {
+    {
         nn::detection::ROIAlign roi(/*out_h=*/4, /*out_w=*/4,
                                     /*spatial_scale=*/1.0,
                                     /*sampling_ratio=*/2,
                                     /*aligned=*/true);
         ref = roi.forward(Variable(features, false), rois).tensor();
-    } catch (const std::exception& e) {
-        GTEST_SKIP() << "ROIAlign CPU reference failed: " << e.what();
     }
 
     for (size_t i = 1; i < backends.size(); ++i) {

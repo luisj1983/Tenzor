@@ -80,21 +80,19 @@ TEST_P(GradientUtilsTest, FlattenMultipleTensors) {
 }
 
 TEST_P(GradientUtilsTest, FlattenNonContiguous) {
-    // Skip test if transpose not available in backend
-    try {
-        Tensor t({4, 5}, DType::Float32, device);
-        t.fill_(1.0f);
-        auto t_transposed = t.transpose(0, 1);
+    // Audit-5: removed a `try { ... } catch (const std::exception&) {
+    // GTEST_SKIP(); }` wrapper that excused real failures as "transpose not
+    // available". transpose() is a core op on every backend; a throw here is
+    // a genuine bug, so let exceptions propagate as failures.
+    Tensor t({4, 5}, DType::Float32, device);
+    t.fill_(1.0f);
+    auto t_transposed = t.transpose(0, 1);
 
-        EXPECT_FALSE(t_transposed.is_contiguous());
+    EXPECT_FALSE(t_transposed.is_contiguous());
 
-        // Should still work (internally makes contiguous)
-        auto flat = flatten_tensors({t_transposed});
-        EXPECT_EQ(flat.numel(), 20);
-    } catch (const std::exception& e) {
-        // Backend may not support transpose - skip test
-        GTEST_SKIP() << "Backend does not support transpose operation: " << e.what();
-    }
+    // Should still work (internally makes contiguous)
+    auto flat = flatten_tensors({t_transposed});
+    EXPECT_EQ(flat.numel(), 20);
 }
 
 TEST_P(GradientUtilsTest, FlattenDifferentDtypesFails) {
@@ -492,22 +490,20 @@ TEST_P(GradientUtilsTest, ExtractShapes) {
 }
 
 TEST_P(GradientUtilsTest, MakeContiguous) {
-    // Skip test if transpose not available in backend
-    try {
-        Tensor t1({10, 20}, DType::Float32, device);
-        auto t2 = t1.transpose(0, 1);
+    // Audit-5: removed a `try { ... } catch (const std::exception&) {
+    // GTEST_SKIP(); }` wrapper that excused real failures as "transpose not
+    // available". transpose() is a core op on every backend; a throw here is
+    // a genuine bug, so let exceptions propagate as failures.
+    Tensor t1({10, 20}, DType::Float32, device);
+    auto t2 = t1.transpose(0, 1);
 
-        EXPECT_TRUE(t1.is_contiguous());
-        EXPECT_FALSE(t2.is_contiguous());
+    EXPECT_TRUE(t1.is_contiguous());
+    EXPECT_FALSE(t2.is_contiguous());
 
-        auto contiguous = make_contiguous({t1, t2});
+    auto contiguous = make_contiguous({t1, t2});
 
-        EXPECT_TRUE(contiguous[0].is_contiguous());
-        EXPECT_TRUE(contiguous[1].is_contiguous());
-    } catch (const std::exception& e) {
-        // Backend may not support transpose - skip test
-        GTEST_SKIP() << "Backend does not support transpose operation: " << e.what();
-    }
+    EXPECT_TRUE(contiguous[0].is_contiguous());
+    EXPECT_TRUE(contiguous[1].is_contiguous());
 }
 
 // ============================================================================

@@ -90,10 +90,17 @@ TEST_P(SpecialMathMultiDTypeTest, ErfInvRoundtrip) {
 }
 
 TEST_P(SpecialMathMultiDTypeTest, Sinc) {
-    if (dtype() == DType::Float16) GTEST_SKIP() << "Float16 imprecise for sinc";
     float input[] = {0.0f, 1.0f, 0.5f};
     auto x = make_vec(input, 3, device(), dtype());
     auto result = tenzor::sinc(x);
+
+    if (dtype() == DType::Float16) {
+        // Float16: precision too low for the tight value check, but still
+        // exercise the op/dispatch and assert it is finite (no NaN/Inf).
+        expectAllFinite(result);
+        return;
+    }
+
     auto r_cpu = result.to(Device::cpu()).to(DType::Float32);
     auto* d = r_cpu.data<float>();
     EXPECT_NEAR(d[0], 1.0f, atol());

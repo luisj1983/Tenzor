@@ -49,14 +49,14 @@ TEST_P(GradTransformParity, JVP) {
     auto backends = get_available_backends();
     REQUIRE_MULTI_BACKEND_OR_SKIP("grad transform parity");
 
+    // CPU is the reference backend — if jvp throws here it is a real bug, so let
+    // the exception propagate as a failure instead of masking it as a skip.
     Tensor ref_out, ref_tangent;
-    try {
+    {
         auto [out, t] = tenzor::jvp(f_elem_sq, Variable(input_cpu, false),
                                      tangent_cpu);
         ref_out = out.tensor();
         ref_tangent = t;
-    } catch (const std::exception& e) {
-        GTEST_SKIP() << "jvp CPU reference failed: " << e.what();
     }
 
     for (size_t i = 1; i < backends.size(); ++i) {
@@ -89,14 +89,14 @@ TEST_P(GradTransformParity, VJP) {
     auto backends = get_available_backends();
     REQUIRE_MULTI_BACKEND_OR_SKIP("grad transform parity");
 
+    // CPU is the reference backend — if vjp throws here it is a real bug, so let
+    // the exception propagate as a failure instead of masking it as a skip.
     Tensor ref_out, ref_grad;
-    try {
+    {
         auto [out, g] = tenzor::vjp(f_elem_sq, Variable(input_cpu, false),
                                      cotangent_cpu);
         ref_out = out.tensor();
         ref_grad = g;
-    } catch (const std::exception& e) {
-        GTEST_SKIP() << "vjp CPU reference failed: " << e.what();
     }
 
     for (size_t i = 1; i < backends.size(); ++i) {
@@ -128,12 +128,8 @@ TEST_P(GradTransformParity, Jacobian) {
     auto backends = get_available_backends();
     REQUIRE_MULTI_BACKEND_OR_SKIP("grad transform parity");
 
-    Tensor ref;
-    try {
-        ref = tenzor::jacobian(f_elem_sq, Variable(input_cpu, false));
-    } catch (const std::exception& e) {
-        GTEST_SKIP() << "jacobian CPU reference failed: " << e.what();
-    }
+    // CPU is the reference backend — a throw here is a real bug, so let it propagate.
+    Tensor ref = tenzor::jacobian(f_elem_sq, Variable(input_cpu, false));
 
     for (size_t i = 1; i < backends.size(); ++i) {
         try {
@@ -162,12 +158,8 @@ TEST_P(GradTransformParity, Hessian) {
     auto backends = get_available_backends();
     REQUIRE_MULTI_BACKEND_OR_SKIP("grad transform parity");
 
-    Tensor ref;
-    try {
-        ref = tenzor::hessian(f_sum_sq, Variable(input_cpu, false));
-    } catch (const std::exception& e) {
-        GTEST_SKIP() << "hessian CPU reference failed: " << e.what();
-    }
+    // CPU is the reference backend — a throw here is a real bug, so let it propagate.
+    Tensor ref = tenzor::hessian(f_sum_sq, Variable(input_cpu, false));
 
     for (size_t i = 1; i < backends.size(); ++i) {
         try {
@@ -195,12 +187,11 @@ TEST_P(GradTransformParity, HVP) {
     auto backends = get_available_backends();
     REQUIRE_MULTI_BACKEND_OR_SKIP("grad transform parity");
 
+    // CPU is the reference backend — a throw here is a real bug, so let it propagate.
     Tensor ref_hv;
-    try {
+    {
         auto [_, hv] = tenzor::hvp(f_sum_sq, Variable(input_cpu, false), v_cpu);
         ref_hv = hv;
-    } catch (const std::exception& e) {
-        GTEST_SKIP() << "hvp CPU reference failed: " << e.what();
     }
 
     for (size_t i = 1; i < backends.size(); ++i) {
@@ -230,12 +221,8 @@ TEST_P(GradTransformParity, Vmap_Basic) {
     auto backends = get_available_backends();
     REQUIRE_MULTI_BACKEND_OR_SKIP("grad transform parity");
 
-    Tensor ref;
-    try {
-        ref = tenzor::vmap(f_elem_sq, Variable(input_cpu, false), 0).tensor();
-    } catch (const std::exception& e) {
-        GTEST_SKIP() << "vmap CPU reference failed: " << e.what();
-    }
+    // CPU is the reference backend — a throw here is a real bug, so let it propagate.
+    Tensor ref = tenzor::vmap(f_elem_sq, Variable(input_cpu, false), 0).tensor();
 
     for (size_t i = 1; i < backends.size(); ++i) {
         try {

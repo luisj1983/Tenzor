@@ -60,111 +60,87 @@ TEST_P(NNLossParity, KLDivLoss) {
 
 TEST_P(NNLossParity, CosineEmbeddingLoss) {
 
-    try {
-        auto input1 = randn({4, 32}, DType::Float32, Device::cpu());
-        auto input2 = randn({4, 32}, DType::Float32, Device::cpu());
-        // Target with +1/-1 values
-        auto target_raw = rand({4}, DType::Float32, Device::cpu());
-        auto target = sign(target_raw * 2.0f - 1.0f);
+    auto input1 = randn({4, 32}, DType::Float32, Device::cpu());
+    auto input2 = randn({4, 32}, DType::Float32, Device::cpu());
+    // Target with +1/-1 values
+    auto target_raw = rand({4}, DType::Float32, Device::cpu());
+    auto target = sign(target_raw * 2.0f - 1.0f);
 
-        test_operation_parity_single([](const std::vector<Tensor>& inputs) {
-            nn::CosineEmbeddingLoss loss;
-            return loss.forward(Variable(inputs[0], false),
-                              Variable(inputs[1], false),
-                              Variable(inputs[2], false)).tensor();
-        }, std::vector<Tensor>{input1, input2, target}, device, 1e-5f, 1e-7f, "CosineEmbeddingLoss");
-    } catch (...) {
-        GTEST_SKIP() << "CosineEmbeddingLoss not available";
-    }
+    test_operation_parity_single([](const std::vector<Tensor>& inputs) {
+        nn::CosineEmbeddingLoss loss;
+        return loss.forward(Variable(inputs[0], false),
+                          Variable(inputs[1], false),
+                          Variable(inputs[2], false)).tensor();
+    }, std::vector<Tensor>{input1, input2, target}, device, 1e-5f, 1e-7f, "CosineEmbeddingLoss");
 }
 
 TEST_P(NNLossParity, TripletMarginLoss) {
 
-    try {
-        auto anchor = randn({4, 32}, DType::Float32, Device::cpu());
-        auto positive = randn({4, 32}, DType::Float32, Device::cpu());
-        auto negative = randn({4, 32}, DType::Float32, Device::cpu());
+    auto anchor = randn({4, 32}, DType::Float32, Device::cpu());
+    auto positive = randn({4, 32}, DType::Float32, Device::cpu());
+    auto negative = randn({4, 32}, DType::Float32, Device::cpu());
 
-        test_operation_parity_single([](const std::vector<Tensor>& inputs) {
-            nn::TripletMarginLoss loss;
-            return loss.forward(Variable(inputs[0], false),
-                              Variable(inputs[1], false),
-                              Variable(inputs[2], false)).tensor();
-        }, std::vector<Tensor>{anchor, positive, negative}, device, 1e-5f, 1e-7f, "TripletMarginLoss");
-    } catch (...) {
-        GTEST_SKIP() << "TripletMarginLoss not available";
-    }
+    test_operation_parity_single([](const std::vector<Tensor>& inputs) {
+        nn::TripletMarginLoss loss;
+        return loss.forward(Variable(inputs[0], false),
+                          Variable(inputs[1], false),
+                          Variable(inputs[2], false)).tensor();
+    }, std::vector<Tensor>{anchor, positive, negative}, device, 1e-5f, 1e-7f, "TripletMarginLoss");
 }
 
 TEST_P(NNLossParity, MarginRankingLoss) {
 
-    try {
-        auto input1 = randn({4}, DType::Float32, Device::cpu());
-        auto input2 = randn({4}, DType::Float32, Device::cpu());
-        auto target_raw = rand({4}, DType::Float32, Device::cpu());
-        auto target = sign(target_raw * 2.0f - 1.0f);
+    auto input1 = randn({4}, DType::Float32, Device::cpu());
+    auto input2 = randn({4}, DType::Float32, Device::cpu());
+    auto target_raw = rand({4}, DType::Float32, Device::cpu());
+    auto target = sign(target_raw * 2.0f - 1.0f);
 
-        test_operation_parity_single([](const std::vector<Tensor>& inputs) {
-            nn::MarginRankingLoss loss;
-            return loss.forward(Variable(inputs[0], false),
-                              Variable(inputs[1], false),
-                              Variable(inputs[2], false)).tensor();
-        }, std::vector<Tensor>{input1, input2, target}, device, 1e-5f, 1e-7f, "MarginRankingLoss");
-    } catch (...) {
-        GTEST_SKIP() << "MarginRankingLoss not available";
-    }
+    test_operation_parity_single([](const std::vector<Tensor>& inputs) {
+        nn::MarginRankingLoss loss;
+        return loss.forward(Variable(inputs[0], false),
+                          Variable(inputs[1], false),
+                          Variable(inputs[2], false)).tensor();
+    }, std::vector<Tensor>{input1, input2, target}, device, 1e-5f, 1e-7f, "MarginRankingLoss");
 }
 
 TEST_P(NNLossParity, SoftMarginLoss) {
 
-    try {
-        auto pred = randn({4, 10}, DType::Float32, Device::cpu());
-        auto target_raw = rand({4, 10}, DType::Float32, Device::cpu());
-        auto target = sign(target_raw * 2.0f - 1.0f);
+    auto pred = randn({4, 10}, DType::Float32, Device::cpu());
+    auto target_raw = rand({4, 10}, DType::Float32, Device::cpu());
+    auto target = sign(target_raw * 2.0f - 1.0f);
 
-        test_operation_parity_single([](const std::vector<Tensor>& inputs) {
-            nn::SoftMarginLoss loss;
-            return loss.forward(Variable(inputs[0], false),
-                              Variable(inputs[1], false)).tensor();
-        }, {pred, target}, device, 1e-5f, 1e-7f, "SoftMarginLoss");
-    } catch (...) {
-        GTEST_SKIP() << "SoftMarginLoss not available";
-    }
+    test_operation_parity_single([](const std::vector<Tensor>& inputs) {
+        nn::SoftMarginLoss loss;
+        return loss.forward(Variable(inputs[0], false),
+                          Variable(inputs[1], false)).tensor();
+    }, {pred, target}, device, 1e-5f, 1e-7f, "SoftMarginLoss");
 }
 
 TEST_P(NNLossParity, HingeEmbeddingLoss) {
 
-    try {
-        auto input = randn({4, 10}, DType::Float32, Device::cpu());
-        auto target_raw = rand({4, 10}, DType::Float32, Device::cpu());
-        auto target = sign(target_raw * 2.0f - 1.0f);
+    auto input = randn({4, 10}, DType::Float32, Device::cpu());
+    auto target_raw = rand({4, 10}, DType::Float32, Device::cpu());
+    auto target = sign(target_raw * 2.0f - 1.0f);
 
-        test_operation_parity_single([](const std::vector<Tensor>& inputs) {
-            nn::HingeEmbeddingLoss loss;
-            return loss.forward(Variable(inputs[0], false),
-                              Variable(inputs[1], false)).tensor();
-        }, {input, target}, device, 1e-5f, 1e-7f, "HingeEmbeddingLoss");
-    } catch (...) {
-        GTEST_SKIP() << "HingeEmbeddingLoss not available";
-    }
+    test_operation_parity_single([](const std::vector<Tensor>& inputs) {
+        nn::HingeEmbeddingLoss loss;
+        return loss.forward(Variable(inputs[0], false),
+                          Variable(inputs[1], false)).tensor();
+    }, {input, target}, device, 1e-5f, 1e-7f, "HingeEmbeddingLoss");
 }
 
 TEST_P(NNLossParity, PoissonNLLLoss) {
 
-    try {
-        // pred is log-rates (any real number)
-        auto pred = randn({4, 10}, DType::Float32, Device::cpu());
-        // target is counts (must be positive)
-        auto target = rand({4, 10}, DType::Float32, Device::cpu()) * 5.0f + 0.1f;
+    // pred is log-rates (any real number)
+    auto pred = randn({4, 10}, DType::Float32, Device::cpu());
+    // target is counts (must be positive)
+    auto target = rand({4, 10}, DType::Float32, Device::cpu()) * 5.0f + 0.1f;
 
-        test_operation_parity_single([](const std::vector<Tensor>& inputs) {
-            nn::PoissonNLLLoss loss;
-            return loss.forward(Variable(inputs[0], false),
-                              Variable(inputs[1], false)).tensor();
-        }, {pred, target}, device, 1e-5f, 1e-7f, "PoissonNLLLoss");
-    } catch (...) {
-        GTEST_SKIP() << "PoissonNLLLoss not available";
-    }
+    test_operation_parity_single([](const std::vector<Tensor>& inputs) {
+        nn::PoissonNLLLoss loss;
+        return loss.forward(Variable(inputs[0], false),
+                          Variable(inputs[1], false)).tensor();
+    }, {pred, target}, device, 1e-5f, 1e-7f, "PoissonNLLLoss");
 }
 
 TEST_P(NNLossParity, CTCLoss) {
@@ -198,19 +174,15 @@ TEST_P(NNLossParity, CTCLoss) {
 
 TEST_P(NNLossParity, MultiLabelSoftMarginLoss) {
 
-    try {
-        auto pred = randn({4, 10}, DType::Float32, Device::cpu());
-        // Binary target (0 or 1)
-        auto target = floor(rand({4, 10}, DType::Float32, Device::cpu()) + 0.5f);
+    auto pred = randn({4, 10}, DType::Float32, Device::cpu());
+    // Binary target (0 or 1)
+    auto target = floor(rand({4, 10}, DType::Float32, Device::cpu()) + 0.5f);
 
-        test_operation_parity_single([](const std::vector<Tensor>& inputs) {
-            nn::MultiLabelSoftMarginLoss loss;
-            return loss.forward(Variable(inputs[0], false),
-                              Variable(inputs[1], false)).tensor();
-        }, std::vector<Tensor>{pred, target}, device, 1e-5f, 1e-7f, "MultiLabelSoftMarginLoss");
-    } catch (...) {
-        GTEST_SKIP() << "MultiLabelSoftMarginLoss not available";
-    }
+    test_operation_parity_single([](const std::vector<Tensor>& inputs) {
+        nn::MultiLabelSoftMarginLoss loss;
+        return loss.forward(Variable(inputs[0], false),
+                          Variable(inputs[1], false)).tensor();
+    }, std::vector<Tensor>{pred, target}, device, 1e-5f, 1e-7f, "MultiLabelSoftMarginLoss");
 }
 
 TEST_P(NNLossParity, CIoULoss) {
@@ -220,37 +192,29 @@ TEST_P(NNLossParity, CIoULoss) {
 
 TEST_P(NNLossParity, FocalLoss) {
 
-    try {
-        auto pred = randn({4, 10}, DType::Float32, Device::cpu());
-        // FocalLoss takes Variable target (probabilities / one-hot style)
-        auto target = floor(rand({4, 10}, DType::Float32, Device::cpu()) + 0.5f);
+    auto pred = randn({4, 10}, DType::Float32, Device::cpu());
+    // FocalLoss takes Variable target (probabilities / one-hot style)
+    auto target = floor(rand({4, 10}, DType::Float32, Device::cpu()) + 0.5f);
 
-        test_operation_parity_single([](const std::vector<Tensor>& inputs) {
-            nn::FocalLoss loss(1.0, 2.0);
-            return loss.forward(Variable(inputs[0], false),
-                              Variable(inputs[1], false)).tensor();
-        }, std::vector<Tensor>{pred, target}, device, 1e-5f, 1e-7f, "FocalLoss");
-    } catch (...) {
-        GTEST_SKIP() << "FocalLoss not available";
-    }
+    test_operation_parity_single([](const std::vector<Tensor>& inputs) {
+        nn::FocalLoss loss(1.0, 2.0);
+        return loss.forward(Variable(inputs[0], false),
+                          Variable(inputs[1], false)).tensor();
+    }, std::vector<Tensor>{pred, target}, device, 1e-5f, 1e-7f, "FocalLoss");
 }
 
 TEST_P(NNLossParity, DiceLoss) {
 
-    try {
-        // Input should be probabilities (after sigmoid)
-        auto pred = sigmoid(randn({4, 10}, DType::Float32, Device::cpu()));
-        // Target should be binary masks
-        auto target = floor(rand({4, 10}, DType::Float32, Device::cpu()) + 0.5f);
+    // Input should be probabilities (after sigmoid)
+    auto pred = sigmoid(randn({4, 10}, DType::Float32, Device::cpu()));
+    // Target should be binary masks
+    auto target = floor(rand({4, 10}, DType::Float32, Device::cpu()) + 0.5f);
 
-        test_operation_parity_single([](const std::vector<Tensor>& inputs) {
-            nn::DiceLoss loss;
-            return loss.forward(Variable(inputs[0], false),
-                              Variable(inputs[1], false)).tensor();
-        }, std::vector<Tensor>{pred, target}, device, 1e-5f, 1e-7f, "DiceLoss");
-    } catch (...) {
-        GTEST_SKIP() << "DiceLoss not available";
-    }
+    test_operation_parity_single([](const std::vector<Tensor>& inputs) {
+        nn::DiceLoss loss;
+        return loss.forward(Variable(inputs[0], false),
+                          Variable(inputs[1], false)).tensor();
+    }, std::vector<Tensor>{pred, target}, device, 1e-5f, 1e-7f, "DiceLoss");
 }
 
 // ============================================================================

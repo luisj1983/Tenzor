@@ -52,9 +52,6 @@ TEST_P(DistanceLayersMultiDTypeTest, PairwiseDistance_L2_BackwardGradPopulated) 
 }
 
 TEST_P(DistanceLayersMultiDTypeTest, CosineSimilarity_ForwardShape) {
-    if (dtype() == DType::Float16 || dtype() == DType::BFloat16) {
-        GTEST_SKIP() << "cosine_similarity has no half-precision dispatch";
-    }
     nn::CosineSimilarity cs(/*dim=*/-1);
     Variable x1 = createInput({4, 8}, false);
     Variable x2 = createInput({4, 8}, false);
@@ -63,9 +60,6 @@ TEST_P(DistanceLayersMultiDTypeTest, CosineSimilarity_ForwardShape) {
 }
 
 TEST_P(DistanceLayersMultiDTypeTest, CosineSimilarity_BackwardGradPopulated) {
-    if (dtype() == DType::Float16 || dtype() == DType::BFloat16) {
-        GTEST_SKIP() << "cosine_similarity has no half-precision dispatch";
-    }
     nn::CosineSimilarity cs;
     Variable x1 = createInput({3, 5}, true);
     Variable x2 = createInput({3, 5}, true);

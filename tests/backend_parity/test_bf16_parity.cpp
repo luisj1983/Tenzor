@@ -77,14 +77,11 @@ void test_bf16_op(Op op,
         cpu_bf16_inputs.push_back(t.to(DType::BFloat16));
     }
 
-    Tensor ref;
-    try {
-        ref = op(cpu_bf16_inputs).to(DType::Float32);
-    } catch (const std::exception& e) {
-        // If CPU can't run the op in BF16, skip (missing kernel, etc.)
-        GTEST_SKIP() << name << " not supported on CPU BF16: " << e.what();
-        return;
-    }
+    // Audit: previously wrapped in try{...}catch(...){GTEST_SKIP(name + " not
+    // supported on CPU BF16")}. The CPU BF16 op is the parity reference; a
+    // missing/broken CPU BF16 kernel is a real bug that this parity test exists
+    // to catch, not a clean skip. Let it propagate.
+    Tensor ref = op(cpu_bf16_inputs).to(DType::Float32);
 
     for (const auto& backend : backends) {
         if (backend.type == Device::Type::CPU) continue;

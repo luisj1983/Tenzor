@@ -15,6 +15,7 @@
 #include "tenzor/core/device.hpp"
 #include "tenzor/ops/creation.hpp"
 #include "tenzor/ops/math.hpp"
+#include "../backend_parity/parity_test_utils.hpp"
 #include <memory>
 
 namespace tenzor {
@@ -29,13 +30,15 @@ protected:
         // initialize() is idempotent.
         tenzor::initialize();
 
-        // Skip tests if OneAPI backend is not available
-        try {
-            [[maybe_unused]] Device device = Device::oneapi(0);
-            oneapi_available_ = true;
-        } catch (const std::exception& e) {
-            GTEST_SKIP() << "OneAPI backend not available: " << e.what();
+        // Deterministic availability precondition. has_oneapi() probes the
+        // backend by allocating a small tensor; if that fails the hardware is
+        // genuinely absent and we skip. Past this point any exception is a real
+        // OneAPI kernel/logic bug — the per-test catch blocks below FAIL on it
+        // rather than reclassifying it as "not available".
+        if (!tenzor::testing::has_oneapi()) {
+            GTEST_SKIP() << "OneAPI backend not available";
         }
+        oneapi_available_ = true;
     }
 
     bool oneapi_available_ = false;

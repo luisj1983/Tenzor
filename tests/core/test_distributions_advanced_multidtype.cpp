@@ -111,10 +111,6 @@ TEST_P(DistributionsAdvancedMultiDTypeTest, StudentTMeanApproxZero) {
 // ---------------------------------------------------------------------------
 
 TEST_P(DistributionsAdvancedMultiDTypeTest, MVNSampleShape) {
-    if (dtype() == DType::Float16) {
-        GTEST_SKIP() << "Float16 precision too low for MVN";
-    }
-
     auto loc = tenzor::zeros({3}, dtype(), device());
     auto I = tenzor::zeros({3, 3}, dtype(), device());
     // Set identity via CPU

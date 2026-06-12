@@ -102,8 +102,14 @@ TEST_P(QuantizedKernelParity, CrossBackendParity) {
             results.push_back(out.to(Device::cpu()));
             used.push_back(backend);
         } catch (const std::exception& e) {
-            std::cerr << "Quantized backend " << backend_name(backend)
-                      << " failed: " << e.what() << "\n";
+            // Audit: previously this logged to std::cerr and continued, so a
+            // backend that threw silently dropped out and could make a real
+            // dispatch break look like "only one successful backend". Surface
+            // it as a failure (matching the ADD_FAILURE pattern used by the
+            // other parity loops); the size<2 skip below remains a legitimate
+            // multi-backend precondition.
+            ADD_FAILURE() << "Quantized backend " << backend_name(backend)
+                          << " failed: " << e.what();
         }
     }
     if (results.size() < 2) GTEST_SKIP() << "only one successful backend";

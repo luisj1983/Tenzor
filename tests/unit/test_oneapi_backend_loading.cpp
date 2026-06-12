@@ -48,15 +48,13 @@ protected:
             return;
         }
 
-        // Create the backend instance
-        try {
-            backend_ = create_backend();
-            backend_created_ = true;
-        } catch (const std::exception& e) {
-            dlclose(handle_);
-            handle_ = nullptr;
-            GTEST_SKIP() << "Failed to create backend: " << e.what();
-        }
+        // Create the backend instance. Availability was already established
+        // deterministically above (the .so loaded and create_backend resolved),
+        // so a throw here is a genuine factory/construction bug in the OneAPI
+        // backend — let it propagate and fail the test rather than burying it
+        // as "not available". TearDown() closes handle_ on the failure path.
+        backend_ = create_backend();
+        backend_created_ = true;
     }
 
     void TearDown() override {

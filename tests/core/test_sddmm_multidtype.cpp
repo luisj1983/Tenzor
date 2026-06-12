@@ -36,11 +36,6 @@ protected:
 };
 
 TEST_P(SDDMMMultiDTypeTest, ComputesDotProductsShape) {
-    // Skip Float16 -- SDDMM may not support it, and precision is poor
-    if (dtype() == DType::Float16 || dtype() == DType::BFloat16) {
-        GTEST_SKIP() << "Skipping SDDMM for low-precision dtype";
-    }
-
     // A: 3x2, B: 3x2
     auto A = createZeros({3, 2});
     auto B = createZeros({3, 2});
@@ -65,11 +60,6 @@ TEST_P(SDDMMMultiDTypeTest, ComputesDotProductsShape) {
 }
 
 TEST_P(SDDMMMultiDTypeTest, ComputesDotProductsValues) {
-    // Skip low precision
-    if (dtype() == DType::Float16 || dtype() == DType::BFloat16) {
-        GTEST_SKIP() << "Skipping SDDMM value check for low-precision dtype";
-    }
-
     auto A = createZeros({3, 2});
     auto B = createZeros({3, 2});
 
@@ -93,10 +83,6 @@ TEST_P(SDDMMMultiDTypeTest, ComputesDotProductsValues) {
 }
 
 TEST_P(SDDMMMultiDTypeTest, StructureMatchesMask) {
-    if (dtype() == DType::Float16 || dtype() == DType::BFloat16) {
-        GTEST_SKIP() << "Skipping SDDMM for low-precision dtype";
-    }
-
     auto A = createOnes({3, 2});
     auto B = createOnes({3, 2});
 
@@ -108,10 +94,6 @@ TEST_P(SDDMMMultiDTypeTest, StructureMatchesMask) {
 }
 
 TEST_P(SDDMMMultiDTypeTest, RejectsShapeMismatch) {
-    if (dtype() == DType::Float16 || dtype() == DType::BFloat16) {
-        GTEST_SKIP() << "Skipping SDDMM for low-precision dtype";
-    }
-
     auto mask = make_2x3_csr_mask();
     auto A = createZeros({3, 2});
     auto B_bad = createZeros({3, 3});  // K mismatch

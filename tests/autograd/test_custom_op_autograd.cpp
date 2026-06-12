@@ -259,30 +259,29 @@ TEST_F(CustomOpAutogradTest, MixedWithBuiltinOps) {
 class CustomOpAutogradBackendTest : public tenzor::testing::BackendTest {};
 
 TEST_P(CustomOpAutogradBackendTest, CustomOp_Square_Backward_CrossBackend) {
-    try {
-        auto op_id = register_custom_op_with_backward(
-            std::string("test::square_") + GetParam(),
-            device.type,
-            [](std::span<const Tensor> inputs, const OpAttributes&) -> Tensor {
-                return inputs[0] * inputs[0];
-            },
-            [](std::span<const Tensor> saved, std::span<const Tensor> grads)
-                -> std::vector<Tensor> {
-                return {saved[0] * grads[0] * 2.0f};
-            });
+    // Audit: previously try/catch -> GTEST_SKIP("custom op unsupported on this
+    // backend"), which buried a real custom-op registration/dispatch/backward
+    // break as a clean skip. Let exceptions propagate so the gap surfaces.
+    auto op_id = register_custom_op_with_backward(
+        std::string("test::square_") + GetParam(),
+        device.type,
+        [](std::span<const Tensor> inputs, const OpAttributes&) -> Tensor {
+            return inputs[0] * inputs[0];
+        },
+        [](std::span<const Tensor> saved, std::span<const Tensor> grads)
+            -> std::vector<Tensor> {
+            return {saved[0] * grads[0] * 2.0f};
+        });
 
-        Variable x(Tensor({4}, DType::Float32, device), true);
-        x.tensor().fill_(3.0f);
-        auto y = dispatch_custom_op(op_id, {x});
-        sum(y).backward();
-        device.synchronize();
-        ASSERT_TRUE(x.has_grad());
-        auto grad_cpu = x.grad().value().to(Device::cpu());
-        // d(x^2)/dx = 2x, x=3 => grad=6 per element
-        EXPECT_NEAR(grad_cpu.data<float>()[0], 6.0f, 1e-4f);
-    } catch (const std::exception& e) {
-        GTEST_SKIP() << "custom op unsupported on this backend: " << e.what();
-    }
+    Variable x(Tensor({4}, DType::Float32, device), true);
+    x.tensor().fill_(3.0f);
+    auto y = dispatch_custom_op(op_id, {x});
+    sum(y).backward();
+    device.synchronize();
+    ASSERT_TRUE(x.has_grad());
+    auto grad_cpu = x.grad().value().to(Device::cpu());
+    // d(x^2)/dx = 2x, x=3 => grad=6 per element
+    EXPECT_NEAR(grad_cpu.data<float>()[0], 6.0f, 1e-4f);
 }
 
 INSTANTIATE_BACKEND_TESTS(CustomOpAutogradBackendTest);

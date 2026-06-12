@@ -256,24 +256,13 @@ TEST_P(QuantizationE2ETest, FuseConvBnReluThenQuantizeRuns) {
     m->add_module(std::make_shared<ReLU>());
     m->to(device);
 
-    std::shared_ptr<Module> fused;
-    try {
-        fused = fuse_modules(m);
-    } catch (const std::exception& e) {
-        GTEST_SKIP() << "fuse_modules unimplemented for this pattern: " << e.what();
-    }
+    std::shared_ptr<Module> fused = fuse_modules(m);
     ASSERT_NE(fused, nullptr);
 
     auto calib = make_calibration_fn(/*n_batches=*/2,
                                      {/*B=*/1, /*C=*/3, /*H=*/4, /*W=*/4}, device);
-    std::shared_ptr<Module> q_model;
-    try {
-        q_model = quantize_static(std::dynamic_pointer_cast<Sequential>(fused), calib);
-    } catch (const std::exception& e) {
-        // Fused-conv-bn-relu may not be a quantize_static target yet;
-        // document the gap, don't regress.
-        GTEST_SKIP() << "quantize_static rejects fused module: " << e.what();
-    }
+    std::shared_ptr<Module> q_model =
+        quantize_static(std::dynamic_pointer_cast<Sequential>(fused), calib);
     ASSERT_NE(q_model, nullptr);
 }
 

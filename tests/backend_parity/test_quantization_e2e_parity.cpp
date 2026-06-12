@@ -139,12 +139,11 @@ TEST_F(QuantizationE2EParity, INT8_VulkanMatchesCpu) {
     auto model = make_qmodel();
     auto qmodel = quantize_static(model, make_calib(3));
     auto cpu_out = run_on_device(qmodel, Device::cpu());
-    Tensor vulkan_out;
-    try {
-        vulkan_out = run_on_device(qmodel, Device::vulkan(0));
-    } catch (const std::exception& e) {
-        GTEST_SKIP() << "Vulkan quantized inference not supported: " << e.what();
-    }
+    // Audit: previously wrapped in try{...}catch(...){GTEST_SKIP("Vulkan
+    // quantized inference not supported")}. Vulkan availability is already
+    // gated above; a throw from the actual quantized forward is a real bug, not
+    // an "unsupported" skip. Let it propagate.
+    Tensor vulkan_out = run_on_device(qmodel, Device::vulkan(0));
     ASSERT_EQ(cpu_out.numel(), vulkan_out.numel());
     auto* cp = cpu_out.data<float>();
     auto* gp = vulkan_out.data<float>();
@@ -160,12 +159,11 @@ TEST_F(QuantizationE2EParity, INT8_OneapiMatchesCpu) {
     auto model = make_qmodel();
     auto qmodel = quantize_static(model, make_calib(3));
     auto cpu_out = run_on_device(qmodel, Device::cpu());
-    Tensor oneapi_out;
-    try {
-        oneapi_out = run_on_device(qmodel, Device::oneapi(0));
-    } catch (const std::exception& e) {
-        GTEST_SKIP() << "OneAPI quantized inference not supported: " << e.what();
-    }
+    // Audit: previously wrapped in try{...}catch(...){GTEST_SKIP("OneAPI
+    // quantized inference not supported")}. OneAPI availability is already
+    // gated above; a throw from the actual quantized forward is a real bug, not
+    // an "unsupported" skip. Let it propagate.
+    Tensor oneapi_out = run_on_device(qmodel, Device::oneapi(0));
     ASSERT_EQ(cpu_out.numel(), oneapi_out.numel());
     auto* cp = cpu_out.data<float>();
     auto* gp = oneapi_out.data<float>();

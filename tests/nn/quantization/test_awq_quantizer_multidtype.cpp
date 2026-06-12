@@ -64,22 +64,21 @@ TEST_P(AWQQuantizerMultiDTypeTest, ComputeActScalesShape) {
             "AWQ activation scales are float-only.");
         return;
     }
-    try {
-        auto act_cpu = tenzor::randn({8, 64}, DType::Float32, Device::cpu());
-        auto act = act_cpu.to(dtype_).to(device_);
+    // Audit-5: removed a `try { ... } catch (const std::exception&) {
+    // GTEST_SKIP(); }` wrapper that buried compute_act_scales dispatch
+    // failures as "unsupported on this backend/dtype". The dtype filter above
+    // is the legitimate precondition; let exceptions from the work propagate.
+    auto act_cpu = tenzor::randn({8, 64}, DType::Float32, Device::cpu());
+    auto act = act_cpu.to(dtype_).to(device_);
 
-        auto scales = AWQQuantizer::compute_act_scales(act);
-        ASSERT_EQ(scales.dim(), 1);
-        EXPECT_EQ(scales.size(0), 64);
+    auto scales = AWQQuantizer::compute_act_scales(act);
+    ASSERT_EQ(scales.dim(), 1);
+    EXPECT_EQ(scales.size(0), 64);
 
-        auto scales_cpu = scales.to(Device::cpu()).to(DType::Float32);
-        const float* data = scales_cpu.data<float>();
-        for (int64_t i = 0; i < scales_cpu.numel(); ++i) {
-            EXPECT_GE(data[i], 0.0f) << "scale[" << i << "] is negative";
-        }
-    } catch (const std::exception& e) {
-        GTEST_SKIP() << "AWQ compute_act_scales unsupported on this "
-                     << "backend/dtype combination: " << e.what();
+    auto scales_cpu = scales.to(Device::cpu()).to(DType::Float32);
+    const float* data = scales_cpu.data<float>();
+    for (int64_t i = 0; i < scales_cpu.numel(); ++i) {
+        EXPECT_GE(data[i], 0.0f) << "scale[" << i << "] is negative";
     }
 }
 
@@ -107,18 +106,17 @@ TEST_P(AWQQuantizerMultiDTypeTest, QuantizeLayerRoundTrip) {
     auto scales_cpu = tenzor::abs(tenzor::randn({64}, DType::Float32,
                                                 Device::cpu()));
 
-    try {
-        auto weight = weight_cpu.to(dtype_).to(device_);
-        auto scales = scales_cpu.to(dtype_).to(device_);
+    // Audit-5: removed a `try { ... } catch (const std::exception&) {
+    // GTEST_SKIP(); }` wrapper that hid quantize_layer dispatch failures as
+    // "unsupported on this backend/dtype". The dtype filter above is the
+    // legitimate precondition; let exceptions from the work propagate.
+    auto weight = weight_cpu.to(dtype_).to(device_);
+    auto scales = scales_cpu.to(dtype_).to(device_);
 
-        auto result = q.quantize_layer(weight, scales);
-        ASSERT_EQ(result.quantized_weight.dim(), 2);
-        EXPECT_EQ(result.quantized_weight.size(0), 32);
-        EXPECT_GT(result.scales.numel(), 0);
-    } catch (const std::exception& e) {
-        GTEST_SKIP() << "AWQ quantize_layer unsupported on this backend/"
-                     << "dtype combination: " << e.what();
-    }
+    auto result = q.quantize_layer(weight, scales);
+    ASSERT_EQ(result.quantized_weight.dim(), 2);
+    EXPECT_EQ(result.quantized_weight.size(0), 32);
+    EXPECT_GT(result.scales.numel(), 0);
 
     // Sanity: tolerance table lookup (compile-time guard so this test gets
     // updated if the dtype enum grows new float variants).

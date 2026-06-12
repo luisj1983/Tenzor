@@ -62,11 +62,6 @@ TEST_P(QuantizedDTypeMultiDTypeTest, QuantizePerTensorQInt8) {
 // ---------------------------------------------------------------------------
 
 TEST_P(QuantizedDTypeMultiDTypeTest, DequantizeRoundTrip) {
-    // Skip Float16 for precision-sensitive test
-    if (dtype() == DType::Float16) {
-        GTEST_SKIP() << "Float16 precision too low for quantization round-trip";
-    }
-
     auto input = tenzor::zeros({4}, DType::Float32, Device::cpu());
     float* data = input.data<float>();
     data[0] = 0.0f;

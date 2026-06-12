@@ -136,9 +136,6 @@ TEST_P(EmbeddingBagMultiDTypeTest, ForwardSingleBag) {
 
 TEST_P(EmbeddingBagMultiDTypeTest, SumModeMatchesManualSum) {
     skipIfIntegerDtype();
-    if (dtype() == DType::Float16 || dtype() == DType::BFloat16) {
-        GTEST_SKIP() << "Numerical correctness check requires Float32/Float64";
-    }
     nn::EmbeddingBag emb(5, 3, 0.0, 2.0, false, "sum");
     convert_model(emb);
 
@@ -163,15 +160,22 @@ TEST_P(EmbeddingBagMultiDTypeTest, SumModeMatchesManualSum) {
     auto offsets = makeInt64Tensor({0, 2});
     auto output = emb.forward(Variable(indices, false), Variable(offsets, false));
 
-    auto cpu_out = output.tensor().to(Device::cpu()).to(DType::Float32).contiguous();
-    auto* out_data = cpu_out.data<float>();
-    float tol = std::max(atol() * 100.0f, 1e-3f);
-    EXPECT_NEAR(out_data[0], 1.0f, tol);
-    EXPECT_NEAR(out_data[1], 3.0f, tol);
-    EXPECT_NEAR(out_data[2], 5.0f, tol);
-    EXPECT_NEAR(out_data[3], 9.0f, tol);
-    EXPECT_NEAR(out_data[4], 12.0f, tol);
-    EXPECT_NEAR(out_data[5], 15.0f, tol);
+    if (dtype() == DType::Float32 || dtype() == DType::Float64) {
+        auto cpu_out = output.tensor().to(Device::cpu()).to(DType::Float32).contiguous();
+        auto* out_data = cpu_out.data<float>();
+        float tol = std::max(atol() * 100.0f, 1e-3f);
+        EXPECT_NEAR(out_data[0], 1.0f, tol);
+        EXPECT_NEAR(out_data[1], 3.0f, tol);
+        EXPECT_NEAR(out_data[2], 5.0f, tol);
+        EXPECT_NEAR(out_data[3], 9.0f, tol);
+        EXPECT_NEAR(out_data[4], 12.0f, tol);
+        EXPECT_NEAR(out_data[5], 15.0f, tol);
+    } else {
+        // Half precision: exercise forward/gather-sum and assert only what is
+        // precision-safe — correct output dtype and finite (no NaN/Inf).
+        expectDType(output.tensor());
+        expectAllFinite(output.tensor());
+    }
 }
 
 // ============================================================================

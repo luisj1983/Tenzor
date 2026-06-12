@@ -178,13 +178,13 @@ TEST_F(FlexAttentionUserModParity, Vulkan_Backward_SlidingWindowMatchesCPU) {
     attrs.set(AttrKey::WindowSize, window);
 
     std::vector<Tensor> cpu_inputs = {dO_cpu, Q_cpu, K_cpu, V_cpu, O_cpu};
-    std::vector<Tensor> cpu_grads;
-    try {
-        cpu_grads = dispatch(OpId::FlexAttentionBackward, cpu_inputs, attrs);
-    } catch (const std::exception& e) {
-        GTEST_SKIP() << "CPU FlexAttentionBackward unsupported for sliding window: "
-                     << e.what();
-    }
+    // Audit: previously wrapped in try{...}catch(...){GTEST_SKIP("CPU
+    // FlexAttentionBackward unsupported for sliding window")}. CUDA's composed
+    // backward is the documented reference and the sliding-window CPU/GPU
+    // kernels were landed (file comment: "previously Vulkan/ROCm threw"). A
+    // reference failure here is a real dispatch break, not a clean skip.
+    std::vector<Tensor> cpu_grads =
+        dispatch(OpId::FlexAttentionBackward, cpu_inputs, attrs);
     ASSERT_GE(cpu_grads.size(), 3u);  // dQ, dK, dV
 
     auto dO_gpu = dO_cpu.to(Device::vulkan(0));

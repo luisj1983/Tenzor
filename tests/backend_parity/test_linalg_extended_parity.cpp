@@ -59,12 +59,12 @@ TEST_P(LinalgExtendedParity, LstSq_Residual) {
     auto backends = get_available_backends();
     REQUIRE_MULTI_BACKEND_OR_SKIP("linalg extended parity");
 
+    // CPU is the reference backend — if lstsq throws here it is a real bug, so
+    // let the exception propagate as a failure instead of masking it as a skip.
     Tensor ref_sol;
-    try {
+    {
         auto [sol, _] = tenzor::linalg::lstsq(A, B);
         ref_sol = sol;
-    } catch (const std::exception& e) {
-        GTEST_SKIP() << "lstsq CPU reference failed: " << e.what();
     }
 
     for (size_t i = 1; i < backends.size(); ++i) {

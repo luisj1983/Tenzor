@@ -342,28 +342,26 @@ TEST_F(ModelHubTest, DownloadWeights_FileURL) {
     std::string test_url = "file://" + test_file_path;
     std::string model_name = "test_download_model";
 
-    // Note: file:// URLs may not work with CURL depending on build configuration
-    // This test demonstrates the API, but may be skipped in CI
-    try {
-        std::string downloaded_path = ModelHub::download_weights(
-            model_name,
-            test_url,
-            "",  // No checksum verification
-            false  // No progress display
-        );
+    // Audit: previously the body was wrapped in try/catch -> GTEST_SKIP
+    // ("CURL may not support file:// URLs"). The broad catch also swallowed
+    // real download/caching/content bugs. The sibling DownloadWeights_Caching
+    // already calls download_weights un-wrapped; let exceptions propagate here
+    // so a real failure surfaces instead of being reclassified as a skip.
+    std::string downloaded_path = ModelHub::download_weights(
+        model_name,
+        test_url,
+        "",  // No checksum verification
+        false  // No progress display
+    );
 
-        EXPECT_TRUE(fs::exists(downloaded_path));
-        EXPECT_TRUE(ModelHub::is_cached(model_name));
+    EXPECT_TRUE(fs::exists(downloaded_path));
+    EXPECT_TRUE(ModelHub::is_cached(model_name));
 
-        // Verify content
-        std::ifstream file(downloaded_path);
-        std::string content((std::istreambuf_iterator<char>(file)),
-                           std::istreambuf_iterator<char>());
-        EXPECT_EQ(content, test_file_content);
-    } catch (const std::exception& e) {
-        // Skip if CURL doesn't support file:// URLs
-        GTEST_SKIP() << "CURL may not support file:// URLs: " << e.what();
-    }
+    // Verify content
+    std::ifstream file(downloaded_path);
+    std::string content((std::istreambuf_iterator<char>(file)),
+                       std::istreambuf_iterator<char>());
+    EXPECT_EQ(content, test_file_content);
 }
 
 TEST_F(ModelHubTest, DownloadWeights_Caching) {
@@ -437,12 +435,11 @@ TEST_F(ModelHubTest, ProgressCallback) {
     std::string model_name = "callback_test_model";
     std::string test_url = "file://" + test_file_path;
 
-    try {
-        ModelHub::download_weights(model_name, test_url, "", false, callback);
-        // Callback may or may not be called depending on CURL support
-    } catch (const std::exception& e) {
-        GTEST_SKIP() << "Could not test callback: " << e.what();
-    }
+    // Audit: previously try/catch -> GTEST_SKIP("Could not test callback"),
+    // whose broad catch swallowed real download/callback bugs. Let exceptions
+    // propagate so a failure surfaces instead of being reclassified as a skip.
+    ModelHub::download_weights(model_name, test_url, "", false, callback);
+    // Callback may or may not be called depending on CURL support
 }
 
 // ============================================================================
@@ -454,18 +451,17 @@ TEST_F(ModelHubTest, DownloadStats) {
     std::string model_name = "stats_test_model";
     std::string test_url = "file://" + test_file_path;
 
-    try {
-        ModelHub::download_weights(model_name, test_url, "", false);
+    // Audit: previously try/catch -> GTEST_SKIP("Could not test stats"), whose
+    // broad catch swallowed real download/stats bugs. Let exceptions propagate
+    // so a failure surfaces instead of being reclassified as a skip.
+    ModelHub::download_weights(model_name, test_url, "", false);
 
-        DownloadStats stats = ModelHub::get_last_download_stats();
+    DownloadStats stats = ModelHub::get_last_download_stats();
 
-        EXPECT_GT(stats.total_bytes, 0);
-        EXPECT_GE(stats.bytes_downloaded, 0);
-        EXPECT_GE(stats.download_time, 0.0);
-        EXPECT_GE(stats.average_speed, 0.0);
-    } catch (const std::exception& e) {
-        GTEST_SKIP() << "Could not test stats: " << e.what();
-    }
+    EXPECT_GT(stats.total_bytes, 0);
+    EXPECT_GE(stats.bytes_downloaded, 0);
+    EXPECT_GE(stats.download_time, 0.0);
+    EXPECT_GE(stats.average_speed, 0.0);
 }
 
 // ============================================================================

@@ -77,20 +77,19 @@ def test_cuda_graceful_skip():
     print(f"  CUDA available: {has_cuda}")
 
     if has_cuda:
-        # If CUDA is available, test moving tensor to GPU
+        # CUDA reports available, so the transfer must actually work — a
+        # raised exception here is a real bug, not a graceful skip. Let it
+        # propagate instead of printing "expected".
         t = tz.ones([2, 3])
         cuda_dev = tz.Device(tz.DeviceType.CUDA, 0)
-        try:
-            t_gpu = t.to(cuda_dev)
-            assert t_gpu.device.type == tz.DeviceType.CUDA
-            print("  CUDA tensor creation OK")
+        t_gpu = t.to(cuda_dev)
+        assert t_gpu.device.type == tz.DeviceType.CUDA
+        print("  CUDA tensor creation OK")
 
-            # Test moving back to CPU
-            t_cpu = t_gpu.to(tz.Device(tz.DeviceType.CPU, 0))
-            assert t_cpu.device.type == tz.DeviceType.CPU
-            print("  CUDA->CPU transfer OK")
-        except RuntimeError as e:
-            print(f"  CUDA init failed (expected on some systems): {e}")
+        # Test moving back to CPU
+        t_cpu = t_gpu.to(tz.Device(tz.DeviceType.CPU, 0))
+        assert t_cpu.device.type == tz.DeviceType.CPU
+        print("  CUDA->CPU transfer OK")
     else:
         print("  Skipping CUDA tests (no GPU)")
     print("  CUDA graceful skip OK")

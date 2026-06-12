@@ -46,13 +46,7 @@ TEST_P(SDDMMTest, ComputesDotProductsAtMaskPositions) {
     auto B = B_cpu.to(device);
 
     auto mask = make_2x3_csr_mask();
-    std::optional<SparseTensor> result_opt;
-    try {
-        result_opt = sparse::sddmm(mask, A, B);
-    } catch (const std::exception& e) {
-        GTEST_SKIP() << "sddmm unsupported on this backend: " << e.what();
-    }
-    auto& result = *result_opt;
+    auto result = sparse::sddmm(mask, A, B);
 
     const auto vals_cpu = result.values().to(Device::cpu()).contiguous();
     ASSERT_EQ(vals_cpu.numel(), 2);
@@ -93,13 +87,8 @@ TEST_P(SDDMMTest, Float64Roundtrip) {
     auto B = B_cpu.to(device);
 
     auto mask = make_2x3_csr_mask(DType::Float64);
-    std::optional<SparseTensor> result_opt;
-    try {
-        result_opt = sparse::sddmm(mask, A, B);
-    } catch (const std::exception& e) {
-        GTEST_SKIP() << "sddmm Float64 unsupported on this backend: " << e.what();
-    }
-    auto vals_cpu = result_opt->values().to(Device::cpu()).contiguous();
+    auto result = sparse::sddmm(mask, A, B);
+    auto vals_cpu = result.values().to(Device::cpu()).contiguous();
     ASSERT_EQ(vals_cpu.numel(), 2);
     EXPECT_DOUBLE_EQ(vals_cpu.data<double>()[0], 2.0);
     EXPECT_DOUBLE_EQ(vals_cpu.data<double>()[1], 7.0);

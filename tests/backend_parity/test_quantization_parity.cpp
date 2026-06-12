@@ -254,26 +254,26 @@ TEST_P(QuantizationParity, AWQ_Roundtrip) {
     cfg.bits = 4;
     AWQQuantizer q(cfg);
 
-    try {
-        auto res = q.quantize_layer(weight, act_scales);
+    // Audit: previously wrapped in try{...}catch(...){GTEST_SKIP("AWQ
+    // quantize_layer unavailable")}, which swallowed a real quantizer failure
+    // as a clean skip. AWQQuantizer is compiled into this build; let the call
+    // (and its assertions) propagate.
+    auto res = q.quantize_layer(weight, act_scales);
 
-        // Basic shape invariants: scales/zeros should be (out, num_groups)
-        ASSERT_EQ(res.scales.numel(), 32 * 2);
-        ASSERT_EQ(res.zeros.numel(), 32 * 2);
+    // Basic shape invariants: scales/zeros should be (out, num_groups)
+    ASSERT_EQ(res.scales.numel(), 32 * 2);
+    ASSERT_EQ(res.zeros.numel(), 32 * 2);
 
-        // Reconstruct: dequant(q(w)) should be within quantization error of w.
-        // AWQ 4-bit quantization error is typically < 5% of weight magnitude;
-        // the grid-search keeps error reasonably bounded.
-        auto max_weight = tenzor::max(tenzor::abs(weight)).item<float>();
-        // Without a direct dequantize helper we approximate as: scales dominate
-        // reconstruction noise, so assert scales are finite and non-zero.
-        auto scale_sum = tenzor::sum(tenzor::abs(res.scales)).item<float>();
-        EXPECT_GT(scale_sum, 0.0f);
-        EXPECT_TRUE(std::isfinite(scale_sum));
-        EXPECT_GT(max_weight, 0.0f);
-    } catch (const std::exception& e) {
-        GTEST_SKIP() << "AWQ quantize_layer unavailable: " << e.what();
-    }
+    // Reconstruct: dequant(q(w)) should be within quantization error of w.
+    // AWQ 4-bit quantization error is typically < 5% of weight magnitude;
+    // the grid-search keeps error reasonably bounded.
+    auto max_weight = tenzor::max(tenzor::abs(weight)).item<float>();
+    // Without a direct dequantize helper we approximate as: scales dominate
+    // reconstruction noise, so assert scales are finite and non-zero.
+    auto scale_sum = tenzor::sum(tenzor::abs(res.scales)).item<float>();
+    EXPECT_GT(scale_sum, 0.0f);
+    EXPECT_TRUE(std::isfinite(scale_sum));
+    EXPECT_GT(max_weight, 0.0f);
 }
 
 // Fixed: AWQ::quantize_layer used raw host-pointer loops on device-resident
@@ -294,7 +294,11 @@ TEST_P(QuantizationParity, AWQ_BackendInputParity) {
     cfg.group_size = 16;
     cfg.bits = 4;
 
-    try {
+    // Audit: previously the CPU reference + per-backend loop were wrapped in an
+    // outer try{...}catch(...){GTEST_SKIP("AWQ unavailable")}, hiding a broken
+    // CPU reference. The inner loop already reports per-backend failures via
+    // ADD_FAILURE; let the reference propagate.
+    {
         AWQQuantizer q_ref(cfg);
         auto ref = q_ref.quantize_layer(weight, act_scales);
 
@@ -315,8 +319,6 @@ TEST_P(QuantizationParity, AWQ_BackendInputParity) {
                           << ": " << e.what() << std::endl;
             }
         }
-    } catch (const std::exception& e) {
-        GTEST_SKIP() << "AWQ unavailable: " << e.what();
     }
 }
 
@@ -324,12 +326,11 @@ TEST_P(QuantizationParity, GPTQ_Roundtrip) {
     auto weight = randn({32, 64}, DType::Float32, Device::cpu());
     auto calib = randn({32, 64}, DType::Float32, Device::cpu());
 
-    Tensor hessian;
-    try {
-        hessian = GPTQQuantizer::compute_hessian(calib);
-    } catch (const std::exception& e) {
-        GTEST_SKIP() << "GPTQ compute_hessian unavailable: " << e.what();
-    }
+    // Audit: compute_hessian and quantize_layer were each wrapped in
+    // try{...}catch(...){GTEST_SKIP("... unavailable")}, swallowing real GPTQ
+    // failures as clean skips. GPTQQuantizer is compiled into this build; let
+    // both calls and their assertions propagate.
+    Tensor hessian = GPTQQuantizer::compute_hessian(calib);
 
     GPTQConfig cfg;
     cfg.group_size = 32;
@@ -337,16 +338,12 @@ TEST_P(QuantizationParity, GPTQ_Roundtrip) {
     cfg.damp_percent = 0.1f;  // generous dampening to keep Cholesky happy
     GPTQQuantizer q(cfg);
 
-    try {
-        auto res = q.quantize_layer(weight, hessian);
-        ASSERT_EQ(res.scales.numel(), 32 * 2);
-        // Packed INT4 weight halves the column count for 2-values-per-byte.
-        EXPECT_GT(res.packed_weight.numel(), 0);
-        // When desc_act=false the perm tensor should be empty.
-        EXPECT_EQ(res.perm.numel(), 0);
-    } catch (const std::exception& e) {
-        GTEST_SKIP() << "GPTQ quantize_layer unavailable: " << e.what();
-    }
+    auto res = q.quantize_layer(weight, hessian);
+    ASSERT_EQ(res.scales.numel(), 32 * 2);
+    // Packed INT4 weight halves the column count for 2-values-per-byte.
+    EXPECT_GT(res.packed_weight.numel(), 0);
+    // When desc_act=false the perm tensor should be empty.
+    EXPECT_EQ(res.perm.numel(), 0);
 }
 
 // Fixed alongside AWQ via CPU migration in src/nn/quantization/gptq.cpp.
@@ -357,19 +354,18 @@ TEST_P(QuantizationParity, GPTQ_BackendInputParity) {
     auto weight = randn({16, 32}, DType::Float32, Device::cpu());
     auto calib = randn({16, 32}, DType::Float32, Device::cpu());
 
-    Tensor hessian_cpu;
-    try {
-        hessian_cpu = GPTQQuantizer::compute_hessian(calib);
-    } catch (const std::exception& e) {
-        GTEST_SKIP() << "GPTQ compute_hessian unavailable: " << e.what();
-    }
+    // Audit: compute_hessian and the CPU reference quantize_layer were wrapped
+    // in try{...}catch(...){GTEST_SKIP("GPTQ ... unavailable")}, hiding real
+    // failures as clean skips. The inner per-backend loop already reports
+    // failures via ADD_FAILURE; let the reference path propagate.
+    Tensor hessian_cpu = GPTQQuantizer::compute_hessian(calib);
 
     GPTQConfig cfg;
     cfg.group_size = 16;
     cfg.bits = 4;
     cfg.damp_percent = 0.1f;
 
-    try {
+    {
         GPTQQuantizer q_ref(cfg);
         auto ref = q_ref.quantize_layer(weight, hessian_cpu);
 
@@ -387,7 +383,5 @@ TEST_P(QuantizationParity, GPTQ_BackendInputParity) {
                           << ": " << e.what() << std::endl;
             }
         }
-    } catch (const std::exception& e) {
-        GTEST_SKIP() << "GPTQ unavailable: " << e.what();
     }
 }

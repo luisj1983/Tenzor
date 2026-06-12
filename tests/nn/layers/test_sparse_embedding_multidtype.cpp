@@ -18,13 +18,12 @@ protected:
         MultiBackendDTypeTest::SetUp();
         set_grad_enabled(true);
 
-        // Skip if sparse ops are not available on this backend
-        try {
-            auto test = tenzor::zeros({2, 2}, dtype(), device());
-            (void)test;
-        } catch (...) {
-            GTEST_SKIP() << "Sparse ops not available on " << backend_name();
-        }
+        // Audit-5: removed a `try { tenzor::zeros(...); } catch (...) {
+        // GTEST_SKIP() << "Sparse ops not available"; }` guard. It probed a
+        // trivial dense allocation (not a sparse op at all) and swallowed
+        // every exception as "Sparse ops not available", hiding real backend
+        // failures. Backend availability is handled by the fixture; let any
+        // failure in the actual test body surface as a failure.
     }
 };
 

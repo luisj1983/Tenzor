@@ -17,9 +17,7 @@ using namespace tenzor::testing;
 class DeformableConv2dLayerMultiDTypeTest : public MultiBackendDTypeTest {};
 
 TEST_P(DeformableConv2dLayerMultiDTypeTest, ForwardShape) {
-    if (dtype() == DType::Float16 || dtype() == DType::BFloat16) {
-        GTEST_SKIP() << "deformable_conv2d requires Float32 or Float64";
-    }
+    // Shape + dtype only — precision-safe for Float16/BFloat16.
     nn::DeformableConv2d dcn(/*in=*/2, /*out=*/4, /*k=*/3,
                               /*stride=*/1, /*padding=*/1);
     convert_model(dcn);
@@ -33,9 +31,7 @@ TEST_P(DeformableConv2dLayerMultiDTypeTest, ForwardShape) {
 }
 
 TEST_P(DeformableConv2dLayerMultiDTypeTest, BackwardGradPopulated) {
-    if (dtype() == DType::Float16 || dtype() == DType::BFloat16) {
-        GTEST_SKIP() << "deformable_conv2d requires Float32 or Float64";
-    }
+    // Grad-nonzero only (no tight value compare) — precision-safe for half.
     // Float64 grad magnitudes can be tiny here because CPU kernel uses float
     // accumulators (Phase 1.1-followup #14). Test only that grad is non-zero,
     // which still passes for Float64 even with the precision loss.

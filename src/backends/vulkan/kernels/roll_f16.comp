@@ -1,8 +1,13 @@
 #version 450
 #extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
 
-// Roll operation for Float16: shift elements along a dimension with wrap-around
-// F16 packed buffers (2 Float16 per uint32)
+// Roll operation for Float16: shift elements along a dimension with wrap-around.
+// F16 buffers pack 2 Float16 per uint32. Writing a single element therefore
+// needs a read-modify-write of the shared 32-bit word, which RACES when two
+// invocations update the two halves of the same word concurrently (one clobbers
+// the other, leaving the loser's element as 0). To avoid that, each output WORD
+// is written exactly once: only even-element invocations run, and each gathers
+// both halves and stores the full packed word in a single write.
 layout(local_size_x_id = 0) in;
 
 layout(binding = 0) readonly buffer Input { uint in_data[]; };
@@ -15,37 +20,37 @@ layout(push_constant) uniform PushConstants {
     uint inner_size;     // Product of sizes of dims after the roll dim
 } params;
 
-// Read a single float16 element from packed uint buffer
+// Read a single float16 element from packed uint buffer.
 float readF16(uint element_idx) {
-    uint word_idx = element_idx / 2;
-    uint word_offset = element_idx % 2;
+    uint word_idx = element_idx / 2u;
+    uint word_offset = element_idx % 2u;
     uint packed = in_data[word_idx];
-    uint bits = (packed >> (word_offset * 16)) & 0xFFFFu;
-    return unpackHalf2x16(bits | (bits << 16)).x;
+    uint bits = (packed >> (word_offset * 16u)) & 0xFFFFu;
+    return unpackHalf2x16(bits).x;
 }
 
-// Write a single float16 element to packed uint buffer
-void writeF16(uint element_idx, float val) {
-    uint word_idx = element_idx / 2;
-    uint word_offset = element_idx % 2;
-    uint bits = packHalf2x16(vec2(val, 0.0)) & 0xFFFFu;
-    uint existing = out_data[word_idx];
-    uint mask = 0xFFFFu << (word_offset * 16);
-    out_data[word_idx] = (existing & ~mask) | (bits << (word_offset * 16));
+// Map an output element index to its source element index under the roll.
+uint srcIndex(uint e) {
+    uint inner_idx = e % params.inner_size;
+    uint dim_idx = (e / params.inner_size) % params.dim_size;
+    uint outer_idx = e / (params.inner_size * params.dim_size);
+    uint src_dim_idx = (dim_idx - params.shift + params.dim_size) % params.dim_size;
+    return (outer_idx * params.dim_size + src_dim_idx) * params.inner_size + inner_idx;
 }
 
 void main() {
     uint idx = gl_GlobalInvocationID.x;
     if (idx >= params.n) return;
+    if ((idx & 1u) != 0u) return;  // even invocation owns the whole 32-bit word
 
-    uint inner_idx = idx % params.inner_size;
-    uint dim_idx = (idx / params.inner_size) % params.dim_size;
-    uint outer_idx = idx / (params.inner_size * params.dim_size);
+    float lo = readF16(srcIndex(idx));
+    uint loBits = packHalf2x16(vec2(lo, 0.0)) & 0xFFFFu;
 
-    // Source index with wrap-around
-    uint src_dim_idx = (dim_idx - params.shift + params.dim_size) % params.dim_size;
-    uint src_idx = (outer_idx * params.dim_size + src_dim_idx) * params.inner_size + inner_idx;
+    uint hiBits = 0u;
+    if (idx + 1u < params.n) {
+        float hi = readF16(srcIndex(idx + 1u));
+        hiBits = packHalf2x16(vec2(hi, 0.0)) & 0xFFFFu;
+    }
 
-    float val = readF16(src_idx);
-    writeF16(idx, val);
+    out_data[idx / 2u] = loBits | (hiBits << 16u);
 }

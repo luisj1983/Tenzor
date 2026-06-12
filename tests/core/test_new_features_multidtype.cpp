@@ -84,10 +84,6 @@ TEST_P(NewFeaturesMultiDTypeTest, Weibull_Sample) {
 // ---------------------------------------------------------------------------
 
 TEST_P(NewFeaturesMultiDTypeTest, Kumaraswamy_SampleInUnitInterval) {
-    if (dtype() == DType::Float16) {
-        GTEST_SKIP() << "Float16 precision too low for range checks";
-    }
-
     auto a = tenzor::full({1}, 2.0, dtype(), device());
     auto b = tenzor::full({1}, 5.0, dtype(), device());
     Kumaraswamy dist(a, b);
@@ -106,10 +102,6 @@ TEST_P(NewFeaturesMultiDTypeTest, Kumaraswamy_SampleInUnitInterval) {
 // ---------------------------------------------------------------------------
 
 TEST_P(NewFeaturesMultiDTypeTest, Ndtri_KnownValues) {
-    if (dtype() == DType::Float16) {
-        GTEST_SKIP() << "Float16 precision too low for special functions";
-    }
-
     auto p = tenzor::zeros({3}, dtype(), device());
     // Set values via CPU
     auto p_cpu = p.to(Device::cpu()).to(DType::Float32);
@@ -119,6 +111,14 @@ TEST_P(NewFeaturesMultiDTypeTest, Ndtri_KnownValues) {
     auto p_dev = p_cpu.to(dtype()).to(device());
 
     auto result = tenzor::ndtri(p_dev);
+
+    if (dtype() == DType::Float16) {
+        // Float16: precision too low for the tight value check, but still
+        // exercise the op/dispatch and assert it is finite (no NaN/Inf).
+        expectAllFinite(result);
+        return;
+    }
+
     auto cpu = result.to(Device::cpu()).to(DType::Float32).contiguous();
     const float* r = cpu.data<float>();
 
@@ -132,10 +132,6 @@ TEST_P(NewFeaturesMultiDTypeTest, Ndtri_KnownValues) {
 // ---------------------------------------------------------------------------
 
 TEST_P(NewFeaturesMultiDTypeTest, FunctionalLogSigmoid) {
-    if (dtype() == DType::Float16) {
-        GTEST_SKIP() << "Float16 precision too low for log_sigmoid";
-    }
-
     auto input_t = tenzor::zeros({3}, dtype(), device());
     auto in_cpu = input_t.to(Device::cpu()).to(DType::Float32);
     in_cpu.data<float>()[0] = 0.0f;
@@ -145,6 +141,14 @@ TEST_P(NewFeaturesMultiDTypeTest, FunctionalLogSigmoid) {
 
     auto input = Variable(in_dev, false);
     auto result = nn::functional::log_sigmoid(input);
+
+    if (dtype() == DType::Float16) {
+        // Float16: precision too low for the tight value check, but still
+        // exercise the op/dispatch and assert it is finite (no NaN/Inf).
+        expectAllFinite(result.tensor());
+        return;
+    }
+
     auto cpu = result.tensor().to(Device::cpu()).to(DType::Float32).contiguous();
     const float* r = cpu.data<float>();
 
@@ -161,10 +165,6 @@ TEST_P(NewFeaturesMultiDTypeTest, FunctionalLogSigmoid) {
 // ---------------------------------------------------------------------------
 
 TEST_P(NewFeaturesMultiDTypeTest, GammaincPlusGammaincc) {
-    if (dtype() == DType::Float16) {
-        GTEST_SKIP() << "Float16 precision too low for gamma functions";
-    }
-
     auto a = tenzor::zeros({2}, dtype(), device());
     auto x = tenzor::zeros({2}, dtype(), device());
     // Set via CPU
@@ -183,6 +183,14 @@ TEST_P(NewFeaturesMultiDTypeTest, GammaincPlusGammaincc) {
     auto total = inc + incc;
     auto gamma_a = tenzor::gamma(a_dev);
 
+    if (dtype() == DType::Float16) {
+        // Float16: precision too low for the tight identity check, but still
+        // exercise the ops/dispatch and assert outputs are finite (no NaN/Inf).
+        expectAllFinite(total);
+        expectAllFinite(gamma_a);
+        return;
+    }
+
     auto t_cpu = total.to(Device::cpu()).to(DType::Float32).contiguous();
     auto g_cpu = gamma_a.to(Device::cpu()).to(DType::Float32).contiguous();
 
@@ -196,16 +204,20 @@ TEST_P(NewFeaturesMultiDTypeTest, GammaincPlusGammaincc) {
 // ---------------------------------------------------------------------------
 
 TEST_P(NewFeaturesMultiDTypeTest, Pareto_CDF) {
-    if (dtype() == DType::Float16) {
-        GTEST_SKIP() << "Float16 precision too low for CDF";
-    }
-
     auto scale = tenzor::full({1}, 1.0, dtype(), device());
     auto alpha = tenzor::full({1}, 2.0, dtype(), device());
     Pareto dist(scale, alpha);
 
     auto val = tenzor::full({1}, 2.0, dtype(), device());
     auto c = dist.cdf(val);
+
+    if (dtype() == DType::Float16) {
+        // Float16: precision too low for the tight value check, but still
+        // exercise the CDF/dispatch and assert it is finite (no NaN/Inf).
+        expectAllFinite(c);
+        return;
+    }
+
     // CDF(2) = 1 - (1/2)^2 = 0.75
     EXPECT_NEAR(scalar_val(c), 0.75, 0.02);
 }
