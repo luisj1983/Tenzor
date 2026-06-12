@@ -704,7 +704,10 @@ public:
             }
 
             // Track allocation for proper deallocation
-            allocations_[ptr] = device_id;
+            {
+                std::lock_guard<std::mutex> lock(allocations_mutex_);
+                allocations_[ptr] = device_id;
+            }
 
             return ptr;
         } catch (const sycl::exception& e) {
@@ -719,16 +722,20 @@ public:
             return;
         }
 
-        auto it = allocations_.find(ptr);
-        if (it == allocations_.end()) {
-            throw std::runtime_error("Attempt to free untracked pointer");
+        int32_t device_id;
+        {
+            std::lock_guard<std::mutex> lock(allocations_mutex_);
+            auto it = allocations_.find(ptr);
+            if (it == allocations_.end()) {
+                throw std::runtime_error("Attempt to free untracked pointer");
+            }
+            device_id = it->second;
+            allocations_.erase(it);
         }
 
-        int32_t device_id = it->second;
-
-        // Return memory to caching allocator for reuse
+        // Return memory to caching allocator for reuse (outside the map lock;
+        // the caching allocator has its own synchronization).
         backend::OneAPICachingAllocator::get().free(ptr, device_id);
-        allocations_.erase(it);
     }
 
     auto copy(void* dst, const void* src, size_t bytes, CopyKind kind) -> void override {
@@ -750,8 +757,12 @@ public:
                 if (devices_.empty()) {
                     throw std::runtime_error("No SYCL devices available for copy");
                 }
-                auto dst_it = allocations_.find(dst);
-                int32_t dev_id = (dst_it != allocations_.end()) ? dst_it->second : 0;
+                int32_t dev_id;
+                {
+                    std::lock_guard<std::mutex> lock(allocations_mutex_);
+                    auto dst_it = allocations_.find(dst);
+                    dev_id = (dst_it != allocations_.end()) ? dst_it->second : 0;
+                }
                 if (dev_id < 0 || dev_id >= static_cast<int32_t>(devices_.size())) dev_id = 0;
                 queue_ptr = devices_[dev_id].queue.get();
                 break;
@@ -761,8 +772,12 @@ public:
                 if (devices_.empty()) {
                     throw std::runtime_error("No SYCL devices available for copy");
                 }
-                auto src_it = allocations_.find(const_cast<void*>(src));
-                int32_t dev_id = (src_it != allocations_.end()) ? src_it->second : 0;
+                int32_t dev_id;
+                {
+                    std::lock_guard<std::mutex> lock(allocations_mutex_);
+                    auto src_it = allocations_.find(const_cast<void*>(src));
+                    dev_id = (src_it != allocations_.end()) ? src_it->second : 0;
+                }
                 if (dev_id < 0 || dev_id >= static_cast<int32_t>(devices_.size())) dev_id = 0;
                 queue_ptr = devices_[dev_id].queue.get();
                 break;
@@ -772,8 +787,12 @@ public:
                 if (devices_.empty()) {
                     throw std::runtime_error("No SYCL devices available for copy");
                 }
-                auto dst_it = allocations_.find(dst);
-                int32_t dev_id = (dst_it != allocations_.end()) ? dst_it->second : 0;
+                int32_t dev_id;
+                {
+                    std::lock_guard<std::mutex> lock(allocations_mutex_);
+                    auto dst_it = allocations_.find(dst);
+                    dev_id = (dst_it != allocations_.end()) ? dst_it->second : 0;
+                }
                 if (dev_id < 0 || dev_id >= static_cast<int32_t>(devices_.size())) dev_id = 0;
                 queue_ptr = devices_[dev_id].queue.get();
                 break;
@@ -958,6 +977,12 @@ private:
 
     std::vector<OneAPIDeviceData> devices_;
     std::unordered_map<void*, int32_t> allocations_;
+    // Guards allocations_. allocate()/deallocate()/copy() are called
+    // concurrently from worker threads (e.g. parallel backward), and
+    // std::unordered_map is not safe for concurrent insert+find/erase — a
+    // rehash during another thread's lookup corrupts the table and surfaces
+    // as "Attempt to free untracked pointer".
+    std::mutex allocations_mutex_;
     std::mutex async_errors_mutex_;
     std::vector<std::exception_ptr> async_errors_;
 

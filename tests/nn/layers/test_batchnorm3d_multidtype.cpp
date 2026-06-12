@@ -6,6 +6,7 @@
 #include <gtest/gtest.h>
 #include <tenzor/tenzor.hpp>
 #include "../../multi_backend_dtype_fixture.hpp"
+#include "../../grad_flow_helpers.hpp"
 #include <cmath>
 
 using namespace tenzor;
@@ -97,11 +98,12 @@ TEST_P(BatchNorm3dMultiDTypeTest, BackwardPassGradientFlow) {
 
     auto out_shape = output.shape();
     std::vector<int64_t> shape_vec(out_shape.begin(), out_shape.end());
-    auto grad_seed_cpu = ones(shape_vec, DType::Float32, Device::cpu());
-    auto grad_seed = grad_seed_cpu.to(device()).to(dtype());
+    // Non-uniform grad seed: BatchNorm input/weight grads vanish under a uniform
+    // (all-ones) upstream gradient, so use randn to actually exercise grad flow.
+    auto grad_seed = createRandn(shape_vec);
     output.backward(grad_seed);
 
-    ASSERT_TRUE(input.has_grad());
+    EXPECT_GRAD_FLOWS(input);
     auto input_grad_f32 = input.grad().value().to(Device::cpu()).to(DType::Float32);
     auto grad_data = input_grad_f32.data<float>();
     for (int64_t i = 0; i < input_grad_f32.numel(); ++i) {

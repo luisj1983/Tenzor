@@ -13,6 +13,7 @@
 #include <gtest/gtest.h>
 #include <tenzor/tenzor.hpp>
 #include "../../multi_backend_dtype_fixture.hpp"
+#include "../../grad_flow_helpers.hpp"
 #include <cmath>
 
 using namespace tenzor;
@@ -193,10 +194,10 @@ TEST_P(BatchNorm2dMultiDTypeTest, BackwardPassGradientFlow) {
 
     auto out_shape = output.shape();
     std::vector<int64_t> shape_vec(out_shape.begin(), out_shape.end());
-    auto grad_output = tenzor::ones(shape_vec, dtype(), device());
+    auto grad_output = createRandn(shape_vec);
     output.backward(grad_output);
 
-    EXPECT_TRUE(input.has_grad());
+    EXPECT_GRAD_FLOWS(input);
     EXPECT_EQ(input.grad()->dtype(), dtype());
 
     auto input_grad_f32 = input.grad()->to(Device::cpu()).to(DType::Float32);
@@ -218,14 +219,14 @@ TEST_P(BatchNorm2dMultiDTypeTest, ParameterGradients) {
 
     auto out_shape = output.shape();
     std::vector<int64_t> shape_vec(out_shape.begin(), out_shape.end());
-    auto grad_output = tenzor::ones(shape_vec, dtype(), device());
+    auto grad_output = createRandn(shape_vec);
     output.backward(grad_output);
 
     auto params_vec = bn.parameters();
     ASSERT_GE(params_vec.size(), 2);
 
-    EXPECT_TRUE(params_vec[0]->has_grad());  // weight
-    EXPECT_TRUE(params_vec[1]->has_grad());  // bias
+    EXPECT_GRAD_FLOWS(*params_vec[0]);  // weight
+    EXPECT_GRAD_FLOWS(*params_vec[1]);  // bias
 
     auto weight_grad = params_vec[0]->grad().value();
     auto bias_grad = params_vec[1]->grad().value();

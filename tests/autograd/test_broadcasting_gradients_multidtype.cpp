@@ -9,6 +9,7 @@
 #include <tenzor/autograd/ops.hpp>
 #include <tenzor/ops/creation.hpp>
 #include "../multi_backend_dtype_fixture.hpp"
+#include "../grad_flow_helpers.hpp"
 
 using namespace tenzor;
 using namespace tenzor::testing;
@@ -16,7 +17,7 @@ using namespace tenzor::testing;
 class BroadcastGradientsMultiDTypeTest : public MultiBackendDTypeTest {
 protected:
     void check_grad_shape(const Variable& var, const std::vector<int64_t>& expected_shape) {
-        ASSERT_TRUE(var.grad().has_value()) << "Gradient not computed";
+        EXPECT_GRAD_FLOWS(var);
         auto grad = var.grad().value();
         auto grad_shape = std::vector<int64_t>(grad.shape().begin(), grad.shape().end());
         EXPECT_EQ(grad_shape, expected_shape);

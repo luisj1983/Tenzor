@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 #include "../multi_backend_dtype_fixture.hpp"
+#include "../grad_flow_helpers.hpp"
 #include <cmath>
 
 using namespace tenzor;
@@ -686,7 +687,7 @@ TEST_P(GRUCellMultiDTypeTest, GRUCellBackwardGradPopulated) {
     sum(h1).backward();
 
     ASSERT_TRUE(input.has_grad()) << device().to_string();
-    ASSERT_TRUE(h0.has_grad())    << device().to_string();
+    EXPECT_GRAD_FLOWS(h0);
     EXPECT_EQ(input.grad()->numel(), input.tensor().numel());
     EXPECT_EQ(h0.grad()->numel(),    h0.tensor().numel());
 

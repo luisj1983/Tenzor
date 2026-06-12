@@ -103,7 +103,6 @@ TEST_F(PipelineStageTest, ForwardSupportsAutograd) {
                               DType::Float32, Device::cpu());
     EXPECT_NO_THROW(output.backward(grad));
     EXPECT_GRAD_FLOWS(input);  // W.26
-    EXPECT_TRUE(input.grad().has_value());
 }
 
 TEST_F(PipelineStageTest, MultipleStagesShareInput) {

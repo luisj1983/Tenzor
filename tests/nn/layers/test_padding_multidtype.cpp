@@ -13,6 +13,7 @@
 #include <gtest/gtest.h>
 #include <tenzor/tenzor.hpp>
 #include "../../multi_backend_dtype_fixture.hpp"
+#include "../../grad_flow_helpers.hpp"
 #include <cmath>
 
 using namespace tenzor;
@@ -87,7 +88,7 @@ TEST_P(PaddingMultiDTypeTest, ConstantPad1d_GradientFlow) {
 
     EXPECT_NO_THROW({ output.backward(grad_output); });
 
-    ASSERT_TRUE(input.grad().has_value());
+    EXPECT_GRAD_FLOWS(input);
     auto grad = input.grad().value();
     EXPECT_EQ(grad.shape()[0], 2);
     EXPECT_EQ(grad.shape()[1], 3);
@@ -148,7 +149,7 @@ TEST_P(PaddingMultiDTypeTest, ConstantPad2d_GradientFlow) {
 
     EXPECT_NO_THROW({ output.backward(grad_output); });
 
-    ASSERT_TRUE(input.grad().has_value());
+    EXPECT_GRAD_FLOWS(input);
     auto grad = input.grad().value();
     EXPECT_EQ(grad.shape()[0], 2);
     EXPECT_EQ(grad.shape()[1], 3);
@@ -220,7 +221,7 @@ TEST_P(PaddingMultiDTypeTest, ConstantPad3d_GradientFlow) {
 
     EXPECT_NO_THROW({ output.backward(grad_output); });
 
-    ASSERT_TRUE(input.grad().has_value());
+    EXPECT_GRAD_FLOWS(input);
     auto grad = input.grad().value();
     EXPECT_EQ(grad.shape()[0], 2);
     EXPECT_EQ(grad.shape()[1], 3);
@@ -284,7 +285,7 @@ TEST_P(PaddingMultiDTypeTest, ReflectionPad1d_GradientFlow) {
 
     EXPECT_NO_THROW({ output.backward(grad_output); });
 
-    ASSERT_TRUE(input.grad().has_value());
+    EXPECT_GRAD_FLOWS(input);
     auto grad = input.grad().value();
     EXPECT_EQ(grad.shape()[0], 2);
     EXPECT_EQ(grad.shape()[1], 3);
@@ -354,7 +355,7 @@ TEST_P(PaddingMultiDTypeTest, ReflectionPad2d_GradientFlow) {
 
     EXPECT_NO_THROW({ output.backward(grad_output); });
 
-    ASSERT_TRUE(input.grad().has_value());
+    EXPECT_GRAD_FLOWS(input);
     auto grad = input.grad().value();
     EXPECT_EQ(grad.shape()[0], 2);
     EXPECT_EQ(grad.shape()[1], 3);
@@ -417,7 +418,7 @@ TEST_P(PaddingMultiDTypeTest, ReplicationPad1d_GradientFlow) {
 
     output.backward(grad_output);
 
-    ASSERT_TRUE(input.grad().has_value());
+    EXPECT_GRAD_FLOWS(input);
     auto grad = input.grad().value();
     EXPECT_EQ(grad.shape()[0], 2);
     EXPECT_EQ(grad.shape()[1], 3);
@@ -527,7 +528,7 @@ TEST_P(PaddingMultiDTypeTest, ReplicationPad2d_GradientFlow) {
 
     EXPECT_NO_THROW({ output.backward(grad_output); });
 
-    ASSERT_TRUE(input.grad().has_value());
+    EXPECT_GRAD_FLOWS(input);
     auto grad = input.grad().value();
     EXPECT_EQ(grad.shape()[0], 2);
     EXPECT_EQ(grad.shape()[1], 3);
@@ -595,7 +596,7 @@ TEST_P(PaddingMultiDTypeTest, ReplicationPad3d_GradientFlow) {
 
     EXPECT_NO_THROW({ output.backward(grad_output); });
 
-    ASSERT_TRUE(input.grad().has_value());
+    EXPECT_GRAD_FLOWS(input);
     auto grad = input.grad().value();
     EXPECT_EQ(grad.shape()[0], 2);
     EXPECT_EQ(grad.shape()[1], 3);
@@ -667,7 +668,7 @@ TEST_P(PaddingMultiDTypeTest, ZeroPad2d_GradientFlow) {
 
     EXPECT_NO_THROW({ output.backward(grad_output); });
 
-    ASSERT_TRUE(input.grad().has_value());
+    EXPECT_GRAD_FLOWS(input);
     auto grad = input.grad().value();
     EXPECT_EQ(grad.shape()[0], 2);
     EXPECT_EQ(grad.shape()[1], 3);

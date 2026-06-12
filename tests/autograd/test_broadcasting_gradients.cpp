@@ -14,6 +14,7 @@
 #include "tenzor/ops/creation.hpp"
 #include "tenzor/ops/math.hpp"
 #include "../backend_test_fixture.hpp"
+#include "../grad_flow_helpers.hpp"
 
 using namespace tenzor;
 
@@ -26,7 +27,7 @@ protected:
     }
 
     void check_grad_shape(const Variable& var, const std::vector<int64_t>& expected_shape) {
-        ASSERT_TRUE(var.grad().has_value()) << "Gradient not computed";
+        EXPECT_GRAD_FLOWS(var);
         auto grad = var.grad().value().cpu();
         auto grad_shape = std::vector<int64_t>(grad.shape().begin(), grad.shape().end());
         EXPECT_EQ(grad_shape, expected_shape)

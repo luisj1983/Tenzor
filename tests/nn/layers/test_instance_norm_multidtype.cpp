@@ -14,6 +14,7 @@
 #include <gtest/gtest.h>
 #include <tenzor/tenzor.hpp>
 #include "../../multi_backend_dtype_fixture.hpp"
+#include "../../grad_flow_helpers.hpp"
 #include <cmath>
 
 using namespace tenzor;
@@ -130,7 +131,7 @@ TEST_P(InstanceNormMultiDTypeTest, InstanceNorm2d_BackwardGradientFlow) {
     auto grad_output = tenzor::ones(shape_vec, dtype(), device());
     output.backward(grad_output);
 
-    EXPECT_TRUE(input.has_grad());
+    EXPECT_GRAD_FLOWS(input);
     EXPECT_EQ(input.grad()->dtype(), dtype());
 
     auto input_grad_f32 = input.grad()->to(Device::cpu()).to(DType::Float32);
@@ -190,7 +191,7 @@ TEST_P(InstanceNormMultiDTypeTest, InstanceNorm1d_BackwardGradientFlow) {
     auto grad_output = tenzor::ones(shape_vec, dtype(), device());
     output.backward(grad_output);
 
-    EXPECT_TRUE(input.has_grad());
+    EXPECT_GRAD_FLOWS(input);
     EXPECT_EQ(input.grad()->dtype(), dtype());
 
     auto input_grad_f32 = input.grad()->to(Device::cpu()).to(DType::Float32);
@@ -230,7 +231,7 @@ TEST_P(InstanceNormMultiDTypeTest, InstanceNorm3d_BackwardGradientFlow) {
     auto grad_output = tenzor::ones(shape_vec, dtype(), device());
     output.backward(grad_output);
 
-    EXPECT_TRUE(input.has_grad());
+    EXPECT_GRAD_FLOWS(input);
     EXPECT_EQ(input.grad()->dtype(), dtype());
 
     auto input_grad_f32 = input.grad()->to(Device::cpu()).to(DType::Float32);

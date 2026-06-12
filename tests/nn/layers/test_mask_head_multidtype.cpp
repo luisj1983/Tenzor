@@ -16,6 +16,7 @@
 #include <tenzor/tenzor.hpp>
 #include <tenzor/nn/detection/mask_head.hpp>
 #include "../../multi_backend_dtype_fixture.hpp"
+#include "../../grad_flow_helpers.hpp"
 #include <cmath>
 
 using namespace tenzor;
@@ -99,7 +100,7 @@ TEST_P(MaskHeadMultiDTypeTest, BackwardGradientFlow) {
     auto grad_output = tenzor::ones(shape_vec, dtype(), device());
     output.backward(grad_output);
 
-    ASSERT_TRUE(input.grad().has_value());
+    EXPECT_GRAD_FLOWS(input);
     auto grad = input.grad().value();
 
     // Check gradient shape matches input

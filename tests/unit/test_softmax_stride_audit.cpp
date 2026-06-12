@@ -14,6 +14,7 @@
 #include <gtest/gtest.h>
 #include "tenzor/tenzor.hpp"
 #include "../backend_test_fixture.hpp"
+#include "../grad_flow_helpers.hpp"
 #include <cmath>
 #include <limits>
 
@@ -132,9 +133,6 @@ TEST_P(SoftmaxStrideAudit, BackwardTransposedInputMatchesContiguous) {
     loss_view.backward();
     loss_ref.backward();
 
-    ASSERT_TRUE(x_view.grad().has_value()) << "No gradient on transposed-view input";
-    ASSERT_TRUE(x_ref.grad().has_value())  << "No gradient on contiguous input";
-
     // View's grad is in the transposed (non-contiguous) layout; pack before diff.
     auto gv = x_view.grad().value().contiguous().to(DType::Float64);
     auto gr = x_ref.grad().value().contiguous().to(DType::Float64);
@@ -169,8 +167,8 @@ TEST_P(SoftmaxStrideAudit, BackwardLogSoftmaxTransposedInputMatchesContiguous) {
     loss_view.backward();
     loss_ref.backward();
 
-    ASSERT_TRUE(x_view.grad().has_value()) << "No gradient on transposed-view input";
-    ASSERT_TRUE(x_ref.grad().has_value())  << "No gradient on contiguous input";
+    EXPECT_GRAD_FLOWS(x_view);
+    EXPECT_GRAD_FLOWS(x_ref);
 
     auto gv = x_view.grad().value().contiguous().to(DType::Float64);
     auto gr = x_ref.grad().value().contiguous().to(DType::Float64);

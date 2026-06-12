@@ -15,6 +15,7 @@
 #include "tenzor/autograd/gradcheck.hpp"
 #include "tenzor/tenzor.hpp"
 #include "../multi_backend_dtype_fixture.hpp"
+#include "../grad_flow_helpers.hpp"
 #include <cmath>
 
 using namespace tenzor;
@@ -89,7 +90,7 @@ TEST_P(AutogradAdditionalMultiDTypeTest, VariableRetainGrad) {
     auto loss = sum(y);
     loss.backward();
 
-    EXPECT_TRUE(y.has_grad());
+    EXPECT_GRAD_FLOWS(y);
 }
 
 TEST_P(AutogradAdditionalMultiDTypeTest, VariableDetachRemovesGradFn) {
@@ -109,7 +110,7 @@ TEST_P(AutogradAdditionalMultiDTypeTest, VariableZeroGrad) {
     auto loss = sum(y);
 
     loss.backward();
-    ASSERT_TRUE(x.has_grad());
+    EXPECT_GRAD_FLOWS(x);
 
     x.zero_grad();
     EXPECT_FALSE(x.has_grad());

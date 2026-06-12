@@ -10,6 +10,7 @@
 #include <gtest/gtest.h>
 #include <tenzor/tenzor.hpp>
 #include "../../backend_test_fixture.hpp"
+#include "../../grad_flow_helpers.hpp"
 #include <cmath>
 
 using namespace tenzor;
@@ -128,7 +129,7 @@ TEST_P(BatchNorm3dTest, BackwardPassGradientFlow) {
     std::vector<int64_t> shape_vec(out_shape.begin(), out_shape.end());
     output.backward(ones(shape_vec, DType::Float32, device));
 
-    ASSERT_TRUE(input.has_grad());
+    EXPECT_GRAD_FLOWS(input);
 
     auto input_grad = input.grad().value().cpu();
     auto grad_data = input_grad.data<float>();
@@ -139,8 +140,8 @@ TEST_P(BatchNorm3dTest, BackwardPassGradientFlow) {
 
     auto params = bn.parameters();
     ASSERT_GE(params.size(), 2);
-    EXPECT_TRUE(params[0]->has_grad());
-    EXPECT_TRUE(params[1]->has_grad());
+    EXPECT_GRAD_FLOWS(*params[0]);
+    EXPECT_GRAD_FLOWS(*params[1]);
     EXPECT_EQ(params[0]->grad().value().shape()[0], 4);
     EXPECT_EQ(params[1]->grad().value().shape()[0], 4);
 }

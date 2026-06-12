@@ -11,6 +11,7 @@
 #include <tenzor/tenzor.hpp>
 #include <tenzor/nn/layers/vision.hpp>
 #include "../../multi_backend_dtype_fixture.hpp"
+#include "../../grad_flow_helpers.hpp"
 
 using namespace tenzor;
 using namespace tenzor::testing;
@@ -36,10 +37,8 @@ TEST_P(PatchEmbeddingMultiDTypeTest, BackwardGradPopulated) {
     auto output = pe.forward(input);
     sum(output).backward();
 
-    ASSERT_TRUE(input.has_grad()) << device().to_string();
+    EXPECT_GRAD_FLOWS(input);
     EXPECT_EQ(input.grad()->numel(), input.tensor().numel());
-    auto g_max = max(abs(input.grad()->to(Device::cpu()).to(DType::Float32)));
-    EXPECT_GT(g_max.item<float>(), 0.0f) << "input grad all-zero on " << device().to_string();
 
     // Verify the wrapped Conv2d weights got gradient too.
     int populated = 0;

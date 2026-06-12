@@ -7,6 +7,7 @@
 
 #include <gtest/gtest.h>
 #include "../multi_backend_dtype_fixture.hpp"
+#include "../grad_flow_helpers.hpp"
 #include <tenzor/tenzor.hpp>
 #include <tenzor/distributed/pipeline_parallel.hpp>
 #include <tenzor/nn/layers/linear.hpp>
@@ -80,7 +81,7 @@ TEST_P(PipelineParallelMultiDTypeTest, ForwardSupportsAutograd) {
 
     auto grad = createOnes(std::vector<int64_t>(output.shape().begin(), output.shape().end()));
     EXPECT_NO_THROW(output.backward(grad));
-    EXPECT_TRUE(input.grad().has_value());
+    EXPECT_GRAD_FLOWS(input);
 }
 
 TEST_P(PipelineParallelMultiDTypeTest, MultipleStagesComposable) {

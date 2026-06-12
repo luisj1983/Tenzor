@@ -12,6 +12,7 @@
 #include <gtest/gtest.h>
 #include "tenzor/tenzor.hpp"
 #include "../backend_test_fixture.hpp"
+#include "../grad_flow_helpers.hpp"
 #include <cmath>
 
 using namespace tenzor;
@@ -188,7 +189,7 @@ TEST_P(AutogradEdgeCaseTest, ZeroGradThenBackward) {
     auto loss1 = tenzor::sum(y1);
     loss1.backward();
 
-    ASSERT_TRUE(x.has_grad());
+    EXPECT_GRAD_FLOWS(x);
 
     // Zero grad
     x.zero_grad();
@@ -415,8 +416,8 @@ TEST_P(AutogradEdgeCaseTest, MatmulGradient) {
     auto loss = tenzor::sum(y);
     loss.backward();
 
-    ASSERT_TRUE(x.has_grad());
-    ASSERT_TRUE(w.has_grad());
+    EXPECT_GRAD_FLOWS(x);
+    EXPECT_GRAD_FLOWS(w);
 
     // Check gradient shapes
     auto x_grad = x.grad()->to(Device::cpu());

@@ -9,6 +9,7 @@
 
 #include <gtest/gtest.h>
 #include "../multi_backend_dtype_fixture.hpp"
+#include "../grad_flow_helpers.hpp"
 #include <tenzor/tenzor.hpp>
 #include <tenzor/autograd/variable.hpp>
 #include <tenzor/ops/creation.hpp>
@@ -163,7 +164,7 @@ TEST_P(AutogradFeaturesMultiDTypeTest, RetainGradNotSet) {
     loss.backward();
 
     // Only leaf variable x should have gradient
-    EXPECT_TRUE(x.has_grad());
+    EXPECT_GRAD_FLOWS(x);
 }
 
 // ============================================================================
@@ -291,7 +292,7 @@ TEST_P(AutogradFeaturesMultiDTypeTest, ComplexComputationGraph) {
     // Verify all gradients exist
     EXPECT_TRUE(x.has_grad());
     EXPECT_TRUE(w.has_grad());
-    EXPECT_TRUE(y.has_grad());
+    EXPECT_GRAD_FLOWS(y);
 
     // Verify gradient values
     // dy/dw = x * 2.0 = 1.0 * 2.0 = 2.0

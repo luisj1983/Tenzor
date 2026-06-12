@@ -7,6 +7,7 @@
 #include "../../multi_backend_dtype_fixture.hpp"
 #include <tenzor/nn/layers/moe.hpp>
 #include <tenzor/autograd/variable.hpp>
+#include "../../grad_flow_helpers.hpp"
 
 using namespace tenzor;
 using namespace tenzor::nn;
@@ -99,9 +100,7 @@ TEST_P(MoEMultiDTypeTest, BackwardGradPopulated) {
     auto input = createInput({4, 16}, true);
     auto output = moe.forward(input);
     sum(output).backward();
-    ASSERT_TRUE(input.has_grad()) << device().to_string();
-    auto g_max = max(abs(input.grad()->to(Device::cpu()).to(DType::Float32)));
-    EXPECT_GT(g_max.item<float>(), 0.0f);
+    EXPECT_GRAD_FLOWS(input);
 }
 
 INSTANTIATE_MULTI_BACKEND_DTYPE_TESTS(MoEMultiDTypeTest);

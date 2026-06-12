@@ -15,6 +15,7 @@
 #include <tenzor/tenzor.hpp>
 #include <tenzor/nn/layers/segmentation.hpp>
 #include "../../multi_backend_dtype_fixture.hpp"
+#include "../../grad_flow_helpers.hpp"
 #include <cmath>
 
 using namespace tenzor;
@@ -78,7 +79,7 @@ TEST_P(AtrousSeparableConv2dMultiDTypeTest, GradientFlow) {
     output.backward(grad_output);
 
     // Check gradient exists
-    ASSERT_TRUE(input.grad().has_value());
+    EXPECT_GRAD_FLOWS(input);
     auto grad = input.grad().value();
     EXPECT_EQ(grad.shape()[0], 1);
     EXPECT_EQ(grad.shape()[1], 4);
@@ -186,7 +187,7 @@ TEST_P(ASPPMultiDTypeTest, GradientFlow) {
     auto grad_output = tenzor::ones(shape_vec, dtype(), device());
     output.backward(grad_output);
 
-    ASSERT_TRUE(input.grad().has_value());
+    EXPECT_GRAD_FLOWS(input);
     auto grad = input.grad().value();
     EXPECT_EQ(grad.shape()[0], 1);
     EXPECT_EQ(grad.shape()[1], 32);
@@ -319,7 +320,7 @@ TEST_P(BilinearUpsamplingMultiDTypeTest, GradientFlow) {
     output.backward(grad_output);
 
     // Gradient should exist and have correct shape
-    ASSERT_TRUE(input.grad().has_value());
+    EXPECT_GRAD_FLOWS(input);
     auto grad = input.grad().value();
     EXPECT_EQ(grad.shape()[0], 1);
     EXPECT_EQ(grad.shape()[1], 4);
@@ -374,7 +375,7 @@ TEST_P(BilinearUpsamplingMultiDTypeTest, ASPPWithUpsampling) {
     auto grad = tenzor::ones(shape_vec, dtype(), device());
     upsampled.backward(grad);
 
-    ASSERT_TRUE(input.grad().has_value());
+    EXPECT_GRAD_FLOWS(input);
 }
 
 TEST_P(BilinearUpsamplingMultiDTypeTest, SequentialUpsampling) {
@@ -395,7 +396,7 @@ TEST_P(BilinearUpsamplingMultiDTypeTest, SequentialUpsampling) {
     auto grad = tenzor::ones(shape_vec, dtype(), device());
     output2.backward(grad);
 
-    ASSERT_TRUE(input.grad().has_value());
+    EXPECT_GRAD_FLOWS(input);
 }
 
 TEST_P(BilinearUpsamplingMultiDTypeTest, VariousOutputSizes) {

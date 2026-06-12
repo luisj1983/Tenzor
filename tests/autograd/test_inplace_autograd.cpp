@@ -345,7 +345,7 @@ TEST_P(InplaceAutogradTest, AddBackwardWithVersionTracking) {
 
     // No in-place modification → backward should succeed
     EXPECT_NO_THROW(loss.backward());
-    EXPECT_TRUE(a.has_grad());
+    EXPECT_GRAD_FLOWS(a);
 }
 
 INSTANTIATE_BACKEND_TESTS(InplaceAutogradTest);

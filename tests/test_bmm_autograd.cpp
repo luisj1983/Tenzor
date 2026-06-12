@@ -158,8 +158,8 @@ TEST_P(BmmAutogradTest, LargerBatchSize) {
     loss.backward();
 
     // Verify gradients exist and have correct shapes
-    EXPECT_TRUE(a.has_grad());
-    EXPECT_TRUE(b.has_grad());
+    EXPECT_GRAD_FLOWS(a);
+    EXPECT_GRAD_FLOWS(b);
     EXPECT_EQ(a.grad()->shape()[0], 4);
     EXPECT_EQ(a.grad()->shape()[1], 5);
     EXPECT_EQ(a.grad()->shape()[2], 6);
@@ -202,7 +202,7 @@ TEST_P(BmmAutogradTest, OneInputRequiresGrad) {
     loss.backward();
 
     // Only a should have gradient
-    EXPECT_TRUE(a.has_grad());
+    EXPECT_GRAD_FLOWS(a);
     EXPECT_FALSE(b.has_grad());
 }
 

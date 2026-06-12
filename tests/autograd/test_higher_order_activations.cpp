@@ -58,7 +58,7 @@ TEST_P(HigherOrderActivationsTest, SigmoidDoubleBackwardNonZero) {
 
     // First backward with create_graph=true so grad_x carries a grad_fn.
     loss.backward(std::nullopt, /*retain_graph=*/false, /*create_graph=*/true);
-    ASSERT_TRUE(x.grad().has_value());
+    EXPECT_GRAD_FLOWS(x);
     auto grad_x_t = x.grad().value();
 
     // Re-wrap the gradient as a Variable so we can take a second backward
@@ -244,7 +244,7 @@ TEST_P(HigherOrderActivationsTest, HardswishDoubleBackwardFinite) {
     auto y = tenzor::nn::hardswish(x);
     auto loss = tenzor::sum(y);
     EXPECT_NO_THROW(loss.backward(std::nullopt, false, true));
-    ASSERT_TRUE(x.grad().has_value());
+    EXPECT_GRAD_FLOWS(x);
 
     auto grad_var = Variable(x.grad().value(), true);
     auto grad_norm = tenzor::sum(grad_var * grad_var);
@@ -263,7 +263,7 @@ TEST_P(HigherOrderActivationsTest, HardsigmoidDoubleBackwardFinite) {
     auto y = tenzor::nn::hardsigmoid(x);
     auto loss = tenzor::sum(y);
     EXPECT_NO_THROW(loss.backward(std::nullopt, false, true));
-    ASSERT_TRUE(x.grad().has_value());
+    EXPECT_GRAD_FLOWS(x);
 
     auto grad_var = Variable(x.grad().value(), true);
     auto grad_norm = tenzor::sum(grad_var * grad_var);

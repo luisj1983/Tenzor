@@ -133,7 +133,7 @@ TEST_P(D4Test, GeneralP_Norm_Backward_Smoke) {
     auto x = make_var({1.0f, 2.0f, -3.0f}, {3});
     auto y = vector_norm(x, /*ord=*/3.5);
     EXPECT_NO_THROW(y.backward());
-    ASSERT_TRUE(x.grad().has_value());
+    EXPECT_GRAD_FLOWS(x);
     // Just confirm gradient is finite and non-zero.
     auto grad_cpu = x.grad().value().cpu();
     auto* gp = grad_cpu.data<float>();

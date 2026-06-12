@@ -10,6 +10,7 @@
 #include <tenzor/ops/math.hpp>
 #include <tenzor/ops/reduction.hpp>
 #include "../backend_test_fixture.hpp"
+#include "../grad_flow_helpers.hpp"
 #include <cmath>
 
 using namespace tenzor;
@@ -157,7 +158,7 @@ TEST_P(BackendTest, AutogradFeatures_RetainGradNotSet) {
     loss.backward();
 
     // Only leaf variable x should have gradient
-    EXPECT_TRUE(x.has_grad());
+    EXPECT_GRAD_FLOWS(x);
     // Non-leaf y should not have gradient (not retained)
     // Note: In current implementation, we may still have gradient
     // This test documents the expected behavior
@@ -288,7 +289,7 @@ TEST_P(BackendTest, AutogradFeatures_ComplexComputationGraph) {
     // Verify all gradients exist
     EXPECT_TRUE(x.has_grad());
     EXPECT_TRUE(w.has_grad());
-    EXPECT_TRUE(y.has_grad());
+    EXPECT_GRAD_FLOWS(y);
 
     // Verify gradient values
     // dy/dw = x * 2.0 = 1.0 * 2.0 = 2.0

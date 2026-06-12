@@ -14,6 +14,7 @@
 #include <tenzor/nn/layers/pooling.hpp>
 #include <cmath>
 #include "../../multi_backend_dtype_fixture.hpp"
+#include "../../grad_flow_helpers.hpp"
 
 using namespace tenzor;
 using namespace tenzor::nn;
@@ -66,12 +67,7 @@ TEST_P(LPPool1dMultiDTypeTest, BackwardGradientsPropagate) {
     auto y = pool.forward(x);
     auto loss = tenzor::sum(y);
     loss.backward();
-    ASSERT_TRUE(x.has_grad());
-    auto g = x.grad().value().to(Device::cpu()).to(DType::Float32).contiguous();
-    const float* gp = g.data<float>();
-    float max_abs = 0.0f;
-    for (int64_t i = 0; i < g.numel(); ++i) max_abs = std::max(max_abs, std::abs(gp[i]));
-    EXPECT_GT(max_abs, 0.0f) << "LPPool1d gradient identically zero — graph severed";
+    EXPECT_GRAD_FLOWS(x);
 }
 
 INSTANTIATE_MULTI_BACKEND_DTYPE_TESTS(LPPool1dMultiDTypeTest);
@@ -132,12 +128,7 @@ TEST_P(LPPool2dMultiDTypeTest, BackwardGradientsPropagate) {
     auto y = pool.forward(x);
     auto loss = tenzor::sum(y);
     loss.backward();
-    ASSERT_TRUE(x.has_grad());
-    auto g = x.grad().value().to(Device::cpu()).to(DType::Float32).contiguous();
-    const float* gp = g.data<float>();
-    float max_abs = 0.0f;
-    for (int64_t i = 0; i < g.numel(); ++i) max_abs = std::max(max_abs, std::abs(gp[i]));
-    EXPECT_GT(max_abs, 0.0f) << "LPPool2d gradient identically zero — graph severed";
+    EXPECT_GRAD_FLOWS(x);
 }
 
 INSTANTIATE_MULTI_BACKEND_DTYPE_TESTS(LPPool2dMultiDTypeTest);

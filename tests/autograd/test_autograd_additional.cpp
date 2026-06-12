@@ -16,6 +16,7 @@
 
 #include <gtest/gtest.h>
 #include "../backend_test_fixture.hpp"
+#include "../grad_flow_helpers.hpp"
 #include "tenzor/autograd/variable.hpp"
 #include "tenzor/autograd/function.hpp"
 #include "tenzor/autograd/ops.hpp"
@@ -92,7 +93,7 @@ TEST_P(AutogradAdditionalTest, VariableRetainGrad) {
     loss.backward();
 
     // y should have gradient because retain_grad was called
-    EXPECT_TRUE(y.has_grad()) << "Failed on " << device.to_string();
+    EXPECT_GRAD_FLOWS(y);
 }
 
 TEST_P(AutogradAdditionalTest, VariableDetachRemovesGradFn) {
@@ -112,7 +113,7 @@ TEST_P(AutogradAdditionalTest, VariableZeroGrad) {
     auto loss = sum(y);
 
     loss.backward();
-    ASSERT_TRUE(x.has_grad()) << "Failed on " << device.to_string();
+    EXPECT_GRAD_FLOWS(x);
 
     x.zero_grad();
     EXPECT_FALSE(x.has_grad()) << "Failed on " << device.to_string();
@@ -191,7 +192,7 @@ TEST_P(AutogradAdditionalTest, DeepComputationGraph) {
     auto loss = sum(y);
     loss.backward();
 
-    EXPECT_TRUE(x.has_grad()) << "Failed on " << device.to_string();
+    EXPECT_GRAD_FLOWS(x);
 }
 
 // =============================================================================
@@ -247,7 +248,7 @@ TEST_P(AutogradAdditionalTest, BackwardWithoutRetainGraphClearsGraph) {
     // Second backward should fail or produce different results since graph is cleared
     // (In production code, this might throw an exception)
     // For now, just verify first backward worked
-    EXPECT_TRUE(x.has_grad()) << "Failed on " << device.to_string();
+    EXPECT_GRAD_FLOWS(x);
 }
 
 // =============================================================================
@@ -523,7 +524,7 @@ TEST_P(AutogradAdditionalTest, GradientThroughInPlaceOperationSimulation) {
     auto loss = sum(y);
     loss.backward();
 
-    EXPECT_TRUE(x.has_grad()) << "Failed on " << device.to_string();
+    EXPECT_GRAD_FLOWS(x);
 }
 
 TEST_P(AutogradAdditionalTest, GradientWithLeafTensor) {
@@ -538,7 +539,7 @@ TEST_P(AutogradAdditionalTest, GradientWithLeafTensor) {
     loss.backward();
 
     // Only leaf should accumulate gradient
-    EXPECT_TRUE(x.has_grad()) << "Failed on " << device.to_string();
+    EXPECT_GRAD_FLOWS(x);
 }
 
 TEST_P(AutogradAdditionalTest, UndefinedGradientHandling) {
@@ -638,7 +639,7 @@ TEST_P(AutogradAdditionalTest, LogSoftmaxBackwardCorrectGradients) {
     auto loss = sum(y);
     loss.backward();
 
-    EXPECT_TRUE(x.has_grad()) << "Failed on " << device.to_string();
+    EXPECT_GRAD_FLOWS(x);
 }
 
 // =============================================================================
@@ -653,8 +654,8 @@ TEST_P(AutogradAdditionalTest, MatMulBackwardCorrectGradients) {
     auto loss = sum(c);
     loss.backward();
 
-    ASSERT_TRUE(a.has_grad()) << "Failed on " << device.to_string();
-    ASSERT_TRUE(b.has_grad()) << "Failed on " << device.to_string();
+    EXPECT_GRAD_FLOWS(a);
+    EXPECT_GRAD_FLOWS(b);
 
     // Check gradients have correct shape
     EXPECT_EQ(a.grad()->shape()[0], 3) << "Failed on " << device.to_string();
@@ -737,7 +738,7 @@ TEST_P(AutogradAdditionalTest, MatMulBackwardMemberFunctionOnlyRightGrad) {
     auto loss = sum(z);
     loss.backward();
 
-    ASSERT_TRUE(W.has_grad()) << "W must have grad on " << device.to_string();
+    EXPECT_GRAD_FLOWS(W);
 
     // Shape must be (2, 4) - matching W, not transposed
     EXPECT_EQ(W.grad()->shape()[0], 2) << "W.grad row dim wrong on " << device.to_string();
@@ -755,7 +756,7 @@ TEST_P(AutogradAdditionalTest, MatMulBackwardNeuralNetworkScenario) {
     auto loss = mean(hidden);  // Scalar loss
     loss.backward();
 
-    ASSERT_TRUE(weights.has_grad()) << "weights must have grad on " << device.to_string();
+    EXPECT_GRAD_FLOWS(weights);
 
     // Critical: gradient shape must match weight shape (16, 8)
     EXPECT_EQ(weights.grad()->shape()[0], 16)
@@ -777,7 +778,7 @@ TEST_P(AutogradAdditionalTest, MatMulBackwardChainedOperationsPartialGrad) {
     loss.backward();
 
     // Both weight matrices must have gradients
-    ASSERT_TRUE(W1.has_grad()) << "W1 must have grad on " << device.to_string();
+    EXPECT_GRAD_FLOWS(W1);
     ASSERT_TRUE(W2.has_grad()) << "W2 must have grad on " << device.to_string();
 
     // W1 gradient shape must be (2, 3)
@@ -806,8 +807,8 @@ TEST_P(AutogradAdditionalTest, BmmBackwardCorrectGradients) {
     auto loss = sum(c);
     loss.backward();
 
-    ASSERT_TRUE(a.has_grad()) << "Failed on " << device.to_string();
-    ASSERT_TRUE(b.has_grad()) << "Failed on " << device.to_string();
+    EXPECT_GRAD_FLOWS(a);
+    EXPECT_GRAD_FLOWS(b);
 
     // Check gradients have correct shape
     EXPECT_EQ(a.grad()->shape()[0], 2) << "Failed on " << device.to_string();
@@ -900,8 +901,8 @@ TEST_P(AutogradAdditionalTest, BroadcastingMulBackward) {
     auto loss = sum(c);
     loss.backward();
 
-    EXPECT_TRUE(a.has_grad()) << "Failed on " << device.to_string();
-    EXPECT_TRUE(b.has_grad()) << "Failed on " << device.to_string();
+    EXPECT_GRAD_FLOWS(a);
+    EXPECT_GRAD_FLOWS(b);
 }
 
 // =============================================================================

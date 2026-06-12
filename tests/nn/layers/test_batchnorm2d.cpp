@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 #include <tenzor/tenzor.hpp>
 #include "../../backend_test_fixture.hpp"
+#include "../../grad_flow_helpers.hpp"
 #include <cmath>
 #include <numeric>
 #include <algorithm>
@@ -550,11 +551,17 @@ TEST_P(BatchNorm2dTest, BackwardPassGradientFlow) {
     // Create gradient
     auto out_shape = output.shape();
     std::vector<int64_t> shape_vec(out_shape.begin(), out_shape.end());
-    auto grad_output = ones(shape_vec, DType::Float32, device);
+    // Non-uniform seed: BatchNorm is invariant to a uniform upstream gradient
+    // (with all-ones dy the input- and weight-gradients are mathematically
+    // zero — the Sum(dy) and Sum(dy*x_hat) terms cancel), so a ones() seed
+    // makes a grad-flow test vacuous (it only "passes" on the FP noise that
+    // backends with non-exact reductions happen to leave behind, and fails on
+    // backends that compute the exact zero). randn() gives a genuine gradient.
+    auto grad_output = randn(shape_vec, DType::Float32, device);
     output.backward(grad_output);
 
     // Check that input has gradient
-    EXPECT_TRUE(input.has_grad());
+    EXPECT_GRAD_FLOWS(input);
 
     auto input_grad = input.grad().value();
     EXPECT_EQ(input_grad.shape().size(), 4);
@@ -579,14 +586,20 @@ TEST_P(BatchNorm2dTest, ParameterGradients) {
 
     auto out_shape = output.shape();
     std::vector<int64_t> shape_vec(out_shape.begin(), out_shape.end());
-    auto grad_output = ones(shape_vec, DType::Float32, device);
+    // Non-uniform seed: BatchNorm is invariant to a uniform upstream gradient
+    // (with all-ones dy the input- and weight-gradients are mathematically
+    // zero — the Sum(dy) and Sum(dy*x_hat) terms cancel), so a ones() seed
+    // makes a grad-flow test vacuous (it only "passes" on the FP noise that
+    // backends with non-exact reductions happen to leave behind, and fails on
+    // backends that compute the exact zero). randn() gives a genuine gradient.
+    auto grad_output = randn(shape_vec, DType::Float32, device);
     output.backward(grad_output);
 
     auto params_vec = bn.parameters();
     ASSERT_GE(params_vec.size(), 2);
 
-    EXPECT_TRUE(params_vec[0]->has_grad());  // weight
-    EXPECT_TRUE(params_vec[1]->has_grad());  // bias
+    EXPECT_GRAD_FLOWS(*params_vec[0]);  // weight
+    EXPECT_GRAD_FLOWS(*params_vec[1]);  // bias
 
     auto weight_grad = params_vec[0]->grad().value();
     auto bias_grad = params_vec[1]->grad().value();
@@ -607,7 +620,13 @@ TEST_P(BatchNorm2dTest, GradientCheckingSimple) {
 
     auto out_shape = output.shape();
     std::vector<int64_t> shape_vec(out_shape.begin(), out_shape.end());
-    auto grad_output = ones(shape_vec, DType::Float32, device);
+    // Non-uniform seed: BatchNorm is invariant to a uniform upstream gradient
+    // (with all-ones dy the input- and weight-gradients are mathematically
+    // zero — the Sum(dy) and Sum(dy*x_hat) terms cancel), so a ones() seed
+    // makes a grad-flow test vacuous (it only "passes" on the FP noise that
+    // backends with non-exact reductions happen to leave behind, and fails on
+    // backends that compute the exact zero). randn() gives a genuine gradient.
+    auto grad_output = randn(shape_vec, DType::Float32, device);
     output.backward(grad_output);
 
     EXPECT_TRUE(input.has_grad());
@@ -865,12 +884,12 @@ TEST_P(BatchNorm2dTest, IntegrationWithOtherLayers) {
     bn_output.backward(grad);
 
     // Check gradients exist
-    EXPECT_TRUE(conv_output.has_grad());
+    EXPECT_GRAD_FLOWS(conv_output);
 
     auto params_vec = bn.parameters();
     ASSERT_GE(params_vec.size(), 2);
-    EXPECT_TRUE(params_vec[0]->has_grad());  // weight
-    EXPECT_TRUE(params_vec[1]->has_grad());  // bias
+    EXPECT_GRAD_FLOWS(*params_vec[0]);  // weight
+    EXPECT_GRAD_FLOWS(*params_vec[1]);  // bias
 }
 
 TEST_P(BatchNorm2dTest, MultipleForwardPasses) {

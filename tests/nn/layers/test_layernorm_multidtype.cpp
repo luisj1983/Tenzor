@@ -96,9 +96,6 @@ TEST_P(LayerNormMultiDTypeTest, GradientFlow) {
     auto grad = tenzor::randn({2, 16}, DType::Float32, device_).to(dtype_);
     EXPECT_NO_THROW({ y.backward(grad); });
     EXPECT_GRAD_FLOWS(x);  // W.26
-    ASSERT_TRUE(x.grad().has_value())
-        << "LayerNorm backward did not populate input grad on "
-        << device().to_string();
     expectShape(*x.grad(), {2, 16});
 }
 

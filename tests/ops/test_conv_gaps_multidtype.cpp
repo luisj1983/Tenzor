@@ -10,6 +10,7 @@
 #include <tenzor/nn/layers/conv.hpp>
 #include <tenzor/autograd/variable.hpp>
 #include "../multi_backend_dtype_fixture.hpp"
+#include "../grad_flow_helpers.hpp"
 
 using namespace tenzor;
 using namespace tenzor::testing;
@@ -61,8 +62,7 @@ TEST_P(ConvGapsMultiDTypeTest, Conv1dBackward) {
     auto grad_output = tenzor::ones(out_shape_vec, dtype(), device());
 
     output.backward(grad_output);
-    ASSERT_TRUE(input.grad().has_value())
-        << "Backward produced no gradient on " << device().to_string();
+    EXPECT_GRAD_FLOWS(input);
     expectShape(*input.grad(), {1, 3, 10});
 }
 
@@ -95,8 +95,7 @@ TEST_P(ConvGapsMultiDTypeTest, ConvTranspose1dBackward) {
     auto grad_output = tenzor::ones(out_shape_vec, dtype(), device());
 
     output.backward(grad_output);
-    ASSERT_TRUE(input.grad().has_value())
-        << "Backward produced no gradient on " << device().to_string();
+    EXPECT_GRAD_FLOWS(input);
     expectShape(*input.grad(), {1, 3, 8});
 }
 
@@ -133,8 +132,7 @@ TEST_P(ConvGapsMultiDTypeTest, ConvTranspose2dBackward) {
     auto grad_output = tenzor::ones(out_shape_vec, dtype(), device());
 
     output.backward(grad_output);
-    ASSERT_TRUE(input.grad().has_value())
-        << "Backward produced no gradient on " << device().to_string();
+    EXPECT_GRAD_FLOWS(input);
     expectShape(*input.grad(), {1, 3, 8, 8});
 }
 
@@ -176,8 +174,7 @@ TEST_P(ConvGapsMultiDTypeTest, ConvTranspose3dBackward) {
                << " on " << device().to_string();
     }
 
-    ASSERT_TRUE(input.grad().has_value())
-        << "ConvTranspose3d backward did not produce gradient on " << device().to_string();
+    EXPECT_GRAD_FLOWS(input);
     expectShape(*input.grad(), {1, 2, 4, 4, 4});
 }
 

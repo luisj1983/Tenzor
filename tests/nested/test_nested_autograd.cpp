@@ -18,6 +18,7 @@
 #include <tenzor/autograd/ops.hpp>
 #include <tenzor/ops/creation.hpp>
 #include "../backend_test_fixture.hpp"
+#include "../grad_flow_helpers.hpp"
 #include <cmath>
 #include <vector>
 
@@ -156,8 +157,8 @@ TEST_P(NestedAutogradTest, NestedLinearGradient) {
     loss.backward();
 
     // All inputs should have gradients
-    ASSERT_TRUE(values.has_grad());
-    ASSERT_TRUE(weight.has_grad());
+    EXPECT_GRAD_FLOWS(values);
+    EXPECT_GRAD_FLOWS(weight);
     ASSERT_TRUE(bias.has_grad());
 
     // Bias gradient: sum of ones over 8 rows = 8 per output dim... but
@@ -199,9 +200,9 @@ TEST_P(NestedAutogradTest, NestedAttentionGradient) {
     loss.backward();
 
     // All Q, K, V should have gradients
-    ASSERT_TRUE(Q.has_grad());
-    ASSERT_TRUE(K.has_grad());
-    ASSERT_TRUE(V.has_grad());
+    EXPECT_GRAD_FLOWS(Q);
+    EXPECT_GRAD_FLOWS(K);
+    EXPECT_GRAD_FLOWS(V);
 
     // Gradients should be finite
     auto q_grad = (*Q.grad()).cpu();

@@ -18,6 +18,7 @@
 #include <memory>
 #include "../../include/tenzor/models/deeplabv3plus.hpp"
 #include "../multi_backend_dtype_fixture.hpp"
+#include "../grad_flow_helpers.hpp"
 
 using namespace tenzor;
 using namespace tenzor::models;
@@ -137,8 +138,7 @@ TEST_P(DeepLabV3PlusMultiDTypeTest, ResNet50GradientFlow) {
     Variable loss = tenzor::sum(output);
     loss.backward();
 
-    EXPECT_TRUE(images.grad().has_value())
-        << "Gradient not computed on " << backend_name();
+    EXPECT_GRAD_FLOWS(images);
     auto params = model->parameters();
     EXPECT_GT(params.size(), 0)
         << "No parameters found on " << backend_name();
@@ -187,8 +187,7 @@ TEST_P(DeepLabV3PlusMultiDTypeTest, ResNet101GradientFlow) {
     Variable loss = tenzor::sum(output);
     loss.backward();
 
-    EXPECT_TRUE(images.grad().has_value())
-        << "Gradient not computed on " << backend_name();
+    EXPECT_GRAD_FLOWS(images);
     EXPECT_EQ(images.grad()->dtype(), dtype())
         << "Gradient dtype mismatch on " << backend_name();
 }
@@ -232,8 +231,7 @@ TEST_P(DeepLabV3PlusMultiDTypeTest, MobileNetGradientFlow) {
     Variable loss = tenzor::sum(output);
     loss.backward();
 
-    EXPECT_TRUE(images.grad().has_value())
-        << "Gradient not computed on " << backend_name();
+    EXPECT_GRAD_FLOWS(images);
     EXPECT_EQ(images.grad()->dtype(), dtype())
         << "Gradient dtype mismatch on " << backend_name();
 }
@@ -335,8 +333,7 @@ TEST_P(DeepLabV3PlusMultiDTypeTest, DecoderSkipConnections) {
     loss.backward();
 
     // Skip connections should allow gradient flow
-    EXPECT_TRUE(images.grad().has_value())
-        << "Skip connection gradient flow failed on " << backend_name();
+    EXPECT_GRAD_FLOWS(images);
     expectFiniteNonZero(output.tensor());
 }
 

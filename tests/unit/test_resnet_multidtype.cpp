@@ -10,6 +10,7 @@
 
 #include <gtest/gtest.h>
 #include "../multi_backend_dtype_fixture.hpp"
+#include "../grad_flow_helpers.hpp"
 #include "../../include/tenzor/models/resnet.hpp"
 #include <cmath>
 
@@ -77,15 +78,14 @@ TEST_P(ResNetMultiDTypeTest, BasicBlockGradientFlow) {
     convert_model(block);
     block->train();
 
-    Variable input(Tensor({2, 64, 56, 56}, dtype(), device()), true);
+    Variable input = createInput({2, 64, 56, 56}, true);
     Variable output = block->forward(input);
 
     Variable loss = tenzor::sum(output * output);
     loss.backward();
 
     // Check that input has gradients
-    EXPECT_TRUE(input.grad().has_value())
-        << "Gradients should flow through residual connections to input";
+    EXPECT_GRAD_FLOWS(input);
 
     auto grad_shape = input.grad()->shape();
     auto input_shape = input.tensor().shape();
@@ -179,21 +179,19 @@ TEST_P(ResNetMultiDTypeTest, BottleneckGradientFlow) {
     convert_model(block);
     block->train();
 
-    Variable input(Tensor({2, 256, 56, 56}, dtype(), device()), true);
+    Variable input = createInput({2, 256, 56, 56}, true);
     Variable output = block->forward(input);
 
     Variable loss = tenzor::sum(output * output);
     loss.backward();
 
-    EXPECT_TRUE(input.grad().has_value())
-        << "Gradients should flow through Bottleneck to input";
+    EXPECT_GRAD_FLOWS(input);
 
     auto params = block->parameters();
     EXPECT_GT(params.size(), 0) << "Bottleneck should have parameters";
 
     for (const auto& param : params) {
-        EXPECT_TRUE(param->grad().has_value())
-            << "All Bottleneck parameters should have gradients";
+        EXPECT_GRAD_FLOWS(*param);
     }
 }
 
@@ -803,15 +801,14 @@ TEST_P(ResNetMultiDTypeTest, ResidualConnectionIdentity) {
     convert_model(model);
     model->train();
 
-    Variable input(Tensor({2, 3, 224, 224}, dtype(), device()), true);
+    Variable input = createInput({2, 3, 224, 224}, true);
     Variable output = model->forward(input);
 
     Variable loss = tenzor::sum(output * output);
     loss.backward();
 
     // Input should have gradients (critical for residual connections)
-    EXPECT_TRUE(input.grad().has_value())
-        << "Residual connections should enable gradient flow to input";
+    EXPECT_GRAD_FLOWS(input);
 }
 
 TEST_P(ResNetMultiDTypeTest, DeepNetworkGradientFlow) {

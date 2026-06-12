@@ -11,6 +11,7 @@
 #include <tenzor/tenzor.hpp>
 #include <tenzor/nn/layers/distance.hpp>
 #include "../../multi_backend_dtype_fixture.hpp"
+#include "../../grad_flow_helpers.hpp"
 
 using namespace tenzor;
 using namespace tenzor::testing;
@@ -66,7 +67,7 @@ TEST_P(DistanceLayersMultiDTypeTest, CosineSimilarity_BackwardGradPopulated) {
     auto out = cs.forward(x1, x2);
     sum(out).backward();
     ASSERT_TRUE(x1.has_grad());
-    ASSERT_TRUE(x2.has_grad());
+    EXPECT_GRAD_FLOWS(x2);
     auto g1 = max(abs(x1.grad()->to(Device::cpu()).to(DType::Float32)));
     EXPECT_GT(g1.item<float>(), 0.0f);
 }

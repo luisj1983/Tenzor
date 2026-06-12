@@ -60,8 +60,8 @@ TEST_P(InterpolateBackward, BilinearGradMatchesUpsampleBilinear) {
     auto out_b = nn::functional::interpolate(b, {6, 6}, "bilinear", false);
     tenzor::sum(out_b).backward();
 
-    ASSERT_TRUE(a.has_grad());
-    ASSERT_TRUE(b.has_grad());
+    EXPECT_GRAD_FLOWS(a);
+    EXPECT_GRAD_FLOWS(b);
     auto ga = a.grad().value().cpu().to(DType::Float32).contiguous();
     auto gb = b.grad().value().cpu().to(DType::Float32).contiguous();
     ASSERT_EQ(ga.numel(), gb.numel());

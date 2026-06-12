@@ -16,6 +16,7 @@
 #include <tenzor/nn/layers/normalization.hpp>
 #include <cmath>
 #include "../../multi_backend_dtype_fixture.hpp"
+#include "../../grad_flow_helpers.hpp"
 
 using namespace tenzor;
 using namespace tenzor::nn;
@@ -70,14 +71,7 @@ TEST_P(LocalResponseNormMultiDTypeTest, BackwardGradientsPropagate) {
     auto y = lrn.forward(x);
     auto loss = tenzor::sum(y);
     loss.backward();
-    ASSERT_TRUE(x.has_grad()) << "LRN must propagate gradients to its input";
-    auto g_cpu = x.grad().value().to(Device::cpu()).to(DType::Float32).contiguous();
-    const float* gp = g_cpu.data<float>();
-    float max_abs = 0.0f;
-    for (int64_t i = 0; i < g_cpu.numel(); ++i) {
-        if (std::abs(gp[i]) > max_abs) max_abs = std::abs(gp[i]);
-    }
-    EXPECT_GT(max_abs, 0.0f) << "LRN gradient is identically zero — graph is still severed";
+    EXPECT_GRAD_FLOWS(x);
 }
 
 INSTANTIATE_MULTI_BACKEND_DTYPE_TESTS(LocalResponseNormMultiDTypeTest);

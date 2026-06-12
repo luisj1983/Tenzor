@@ -42,7 +42,7 @@ TEST_P(HigherOrderNNTest, Conv2d_DoubleBackward) {
 
     loss.backward(std::nullopt, /*retain_graph=*/false, /*create_graph=*/true);
 
-    ASSERT_TRUE(input.grad().has_value());
+    EXPECT_GRAD_FLOWS(input);
     ASSERT_TRUE(input.grad_variable().has_value())
         << "create_graph=true must populate grad_variable()";
 
@@ -84,8 +84,7 @@ TEST_P(HigherOrderNNTest, LSTM_InnerLoop_Gradient) {
 
     loss.backward(std::nullopt, /*retain_graph=*/false, /*create_graph=*/true);
 
-    ASSERT_TRUE(input.grad().has_value())
-        << "LSTM create_graph=true must produce a first-order input grad";
+    EXPECT_GRAD_FLOWS(input);
     ASSERT_TRUE(input.grad_variable().has_value())
         << "LSTM create_graph=true must populate grad_variable()";
 
@@ -121,8 +120,7 @@ TEST_P(HigherOrderNNTest, GRU_InnerLoop_Gradient) {
 
     loss.backward(std::nullopt, /*retain_graph=*/false, /*create_graph=*/true);
 
-    ASSERT_TRUE(input.grad().has_value())
-        << "GRU create_graph=true must produce a first-order input grad";
+    EXPECT_GRAD_FLOWS(input);
     ASSERT_TRUE(input.grad_variable().has_value())
         << "GRU create_graph=true must populate grad_variable()";
 

@@ -13,6 +13,7 @@
 #include <gtest/gtest.h>
 #include <tenzor/tenzor.hpp>
 #include "../multi_backend_dtype_fixture.hpp"
+#include "../grad_flow_helpers.hpp"
 #include <cmath>
 
 using namespace tenzor;
@@ -358,7 +359,7 @@ TEST_P(RNNMultiDTypeTest, RNNCellBackwardGradPopulated) {
     sum(h1).backward();
 
     ASSERT_TRUE(input.has_grad());
-    ASSERT_TRUE(h0.has_grad());
+    EXPECT_GRAD_FLOWS(h0);
     EXPECT_EQ(input.grad()->numel(), input.tensor().numel());
     EXPECT_EQ(h0.grad()->numel(),    h0.tensor().numel());
 

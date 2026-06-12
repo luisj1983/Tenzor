@@ -32,6 +32,7 @@
 #include <tenzor/autograd/variable.hpp>
 #include <tenzor/nn/functional.hpp>
 #include "../backend_test_fixture.hpp"
+#include "../grad_flow_helpers.hpp"
 
 using namespace tenzor;
 
@@ -58,7 +59,7 @@ TEST_P(RequiresGradFalse, AddDoesNotPopulateRhsGrad) {
     Variable b(randn({4, 4}, DType::Float32, device), /*requires_grad=*/false);
     auto loss = sum(a + b);
     loss.backward();
-    EXPECT_TRUE(a.has_grad());
+    EXPECT_GRAD_FLOWS(a);
     EXPECT_FALSE(b.has_grad()) << "requires_grad=false input received a grad";
 }
 
@@ -67,7 +68,7 @@ TEST_P(RequiresGradFalse, MatMulDoesNotPopulateWeightGrad) {
     Variable w(randn({8, 4}, DType::Float32, device), false);
     auto loss = sum(matmul(x, w));
     loss.backward();
-    EXPECT_TRUE(x.has_grad());
+    EXPECT_GRAD_FLOWS(x);
     EXPECT_FALSE(w.has_grad()) << "non-trainable weight received a grad";
 }
 
@@ -80,7 +81,7 @@ TEST_P(RequiresGradFalse, ReluOnNonGradLeafLeavesItUngradded) {
     auto loss = sum(y * w);
     loss.backward();
     EXPECT_FALSE(x.has_grad());
-    EXPECT_TRUE(w.has_grad());
+    EXPECT_GRAD_FLOWS(w);
 }
 
 TEST_P(RequiresGradFalse, OutputOfNonGradOpHasNoGradFn) {
@@ -106,8 +107,7 @@ TEST_P(Detach, BlocksGradientPropagation) {
     loss.backward();
     EXPECT_FALSE(x.has_grad())
         << "detach() did not block grad propagation — x got a gradient";
-    EXPECT_TRUE(w.has_grad())
-        << "w is independent of the detach point and must still receive grad";
+    EXPECT_GRAD_FLOWS(w);
 }
 
 TEST_P(Detach, DetachedOutputHasNoGradFn) {
@@ -127,8 +127,7 @@ TEST_P(Detach, DetachDoesNotModifyOriginal) {
     auto y_detached = y.detach();
     auto loss = sum(y);  // go through original y, NOT detached.
     loss.backward();
-    EXPECT_TRUE(x.has_grad())
-        << "detach() should not have disturbed the original graph";
+    EXPECT_GRAD_FLOWS(x);
 }
 
 TEST_P(Detach, FrozenTeacherPattern) {
@@ -145,8 +144,8 @@ TEST_P(Detach, FrozenTeacherPattern) {
     auto loss = sum((student_out - teacher_out) * (student_out - teacher_out));
     loss.backward();
 
-    EXPECT_TRUE(student_input.has_grad());
-    EXPECT_TRUE(student_w.has_grad());
+    EXPECT_GRAD_FLOWS(student_input);
+    EXPECT_GRAD_FLOWS(student_w);
     EXPECT_FALSE(teacher_input.has_grad())
         << "teacher input (frozen) must not receive a gradient";
     EXPECT_FALSE(teacher_w.has_grad())

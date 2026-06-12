@@ -20,6 +20,7 @@
 #include "tenzor/autograd/ops.hpp"
 #include "tenzor/autograd/variable.hpp"
 #include "../backend_test_fixture.hpp"
+#include "../grad_flow_helpers.hpp"
 
 using namespace tenzor;
 
@@ -110,8 +111,7 @@ TEST_P(ChunkSplitTest, ChunkNonEmptyDimPartitionsAndPreservesGrad) {
     // graph carries from output through to input (V.10 contract).
     auto sum_chunk = tenzor::sum(pieces[0]);
     sum_chunk.backward();
-    ASSERT_TRUE(input.grad().has_value());
-    EXPECT_GT(input.grad().value().numel(), 0);
+    EXPECT_GRAD_FLOWS(input);
 }
 
 TEST_P(ChunkSplitTest, SplitNonEmptyDimPartitions) {

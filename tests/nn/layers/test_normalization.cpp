@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 #include "../../backend_test_fixture.hpp"
+#include "../../grad_flow_helpers.hpp"
 #include "tenzor/nn/layers/normalization.hpp"
 #include "tenzor/ops/creation.hpp"
 #include "tenzor/ops/math.hpp"
@@ -345,7 +346,7 @@ TEST_P(RMSNormTest, BackwardGradientFlow) {
     auto grad_output = ones({1, 4}, DType::Float32, device);
     output.backward(grad_output);
 
-    EXPECT_TRUE(input.has_grad());
+    EXPECT_GRAD_FLOWS(input);
     auto params = rn.parameters();
     for (auto& param : params) {
         EXPECT_TRUE(param->has_grad());

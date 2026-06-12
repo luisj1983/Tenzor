@@ -15,6 +15,7 @@
 #include <tenzor/tenzor.hpp>
 #include <tenzor/nn/detection/roi_head.hpp>
 #include "../../multi_backend_dtype_fixture.hpp"
+#include "../../grad_flow_helpers.hpp"
 #include <cmath>
 
 using namespace tenzor;
@@ -91,8 +92,7 @@ TEST_P(RoIHeadMultiDTypeTest, BoxHead_BackwardGradientFlow) {
     class_logits.backward(grad_output);
 
     // Input should have gradients
-    EXPECT_TRUE(roi_features.has_grad())
-        << "Input should have gradients after backward pass";
+    EXPECT_GRAD_FLOWS(roi_features);
 }
 
 TEST_P(RoIHeadMultiDTypeTest, BoxHead_OutputsFinite) {

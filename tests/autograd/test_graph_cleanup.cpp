@@ -13,6 +13,7 @@
 #include "tenzor/autograd/variable.hpp"
 #include "tenzor/autograd/ops.hpp"
 #include "tenzor/ops/creation.hpp"
+#include "../grad_flow_helpers.hpp"
 
 using namespace tenzor;
 
@@ -53,7 +54,7 @@ TEST_F(GraphCleanupTest, LeafGradientsPreservedAfterCleanup) {
 
     loss.backward();
 
-    ASSERT_TRUE(x.has_grad());
+    EXPECT_GRAD_FLOWS(x);
     // dy/dx = 2x + 1
     auto grad = x.grad().value();
     EXPECT_EQ(grad.numel(), 6);
@@ -79,7 +80,7 @@ TEST_F(GraphCleanupTest, DeepGraphCleanup) {
     EXPECT_EQ(loss.grad_fn(), nullptr);
 
     // Leaf variable should have gradient
-    ASSERT_TRUE(x.has_grad());
+    EXPECT_GRAD_FLOWS(x);
 }
 
 // With retain_graph=true, grad_fn should NOT be cleared
@@ -101,7 +102,7 @@ TEST_F(GraphCleanupTest, RetainGraphPreservesGradFn) {
     x.zero_grad();
     loss.backward(std::nullopt, /*retain_graph=*/false);
 
-    ASSERT_TRUE(x.has_grad());
+    EXPECT_GRAD_FLOWS(x);
 }
 
 // Diamond graph: x feeds into two paths that merge
@@ -115,7 +116,7 @@ TEST_F(GraphCleanupTest, DiamondGraphCleanup) {
     loss.backward();
 
     EXPECT_EQ(loss.grad_fn(), nullptr);
-    ASSERT_TRUE(x.has_grad());
+    EXPECT_GRAD_FLOWS(x);
 
     // Gradient should be dy/dx = 2x + 2 (from x^2 and 2x)
     auto grad = x.grad().value();
@@ -130,7 +131,7 @@ TEST_F(GraphCleanupTest, MultipleBackwardCalls) {
     y1.backward();
 
     // x.grad() should have the gradient from y1
-    ASSERT_TRUE(x.has_grad());
+    EXPECT_GRAD_FLOWS(x);
     auto grad1 = x.grad().value();
 
     // Build a new graph and backward again (gradient accumulates)
@@ -138,5 +139,5 @@ TEST_F(GraphCleanupTest, MultipleBackwardCalls) {
     y2.backward();
 
     // Gradient should have accumulated
-    ASSERT_TRUE(x.has_grad());
+    EXPECT_GRAD_FLOWS(x);
 }
