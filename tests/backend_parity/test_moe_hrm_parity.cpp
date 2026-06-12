@@ -12,6 +12,7 @@
 #include <tenzor/nn/layers/hrm.hpp>
 #include <unordered_map>
 #include "../backend_test_fixture.hpp"
+#include "../grad_flow_helpers.hpp"
 #include "parity_test_utils.hpp"
 
 using namespace tenzor;
@@ -146,7 +147,7 @@ TEST_P(MoEHRMParity, MixtureOfExperts_Backward) {
     Variable input_cpu(randn({2, 8, 16}, DType::Float32, Device::cpu()), true);
     auto out_cpu = moe_cpu.forward(input_cpu);
     sum(out_cpu).backward();
-    ASSERT_TRUE(input_cpu.has_grad()) << "CPU reference backward produced no grad";
+    EXPECT_GRAD_FLOWS(input_cpu);
     auto ref_grad = input_cpu.grad()->contiguous();
 
     auto backends = get_available_backends();

@@ -11,6 +11,7 @@
 #include <tenzor/tenzor.hpp>
 #include <tenzor/nn/functional.hpp>
 #include "../backend_test_fixture.hpp"
+#include "../grad_flow_helpers.hpp"
 
 using namespace tenzor;
 using namespace tenzor::testing;
@@ -54,7 +55,7 @@ protected:
         auto x_grad_cpu = x_cpu.grad().value();
 
         if (device.type == Device::Type::CPU) {
-            ASSERT_TRUE(x_cpu.has_grad());
+            EXPECT_GRAD_FLOWS(x_cpu);
             return;
         }
 
@@ -82,7 +83,8 @@ protected:
         loss_cpu.backward();
 
         if (device.type == Device::Type::CPU) {
-            ASSERT_TRUE(a_cpu.has_grad());
+            EXPECT_GRAD_FLOWS(a_cpu);
+            EXPECT_GRAD_FLOWS(b_cpu);
             return;
         }
 
@@ -126,7 +128,7 @@ TEST_P(GradLinalgParityTest, LinearBackward) {
     auto grad_cpu = x_cpu.grad().value();
 
     if (device.type == Device::Type::CPU) {
-        ASSERT_TRUE(x_cpu.has_grad());
+        EXPECT_GRAD_FLOWS(x_cpu);
         return;
     }
 
@@ -163,7 +165,7 @@ TEST_P(GradLinalgParityTest, AddmmBackward) {
     loss_cpu.backward();
 
     if (device.type == Device::Type::CPU) {
-        ASSERT_TRUE(a_cpu.has_grad());
+        EXPECT_GRAD_FLOWS(a_cpu);
         return;
     }
 
@@ -193,7 +195,7 @@ TEST_P(GradLinalgParityTest, DetBackward) {
     auto x_grad_cpu = x_cpu.grad().value();
 
     if (device.type == Device::Type::CPU) {
-        ASSERT_TRUE(x_cpu.has_grad());
+        EXPECT_GRAD_FLOWS(x_cpu);
         return;
     }
 
@@ -219,7 +221,7 @@ TEST_P(GradLinalgParityTest, SolveBackward) {
     loss_cpu.backward();
 
     if (device.type == Device::Type::CPU) {
-        ASSERT_TRUE(a_cpu.has_grad());
+        EXPECT_GRAD_FLOWS(a_cpu);
         return;
     }
 
@@ -247,7 +249,7 @@ TEST_P(GradLinalgParityTest, CholeskyBackward) {
     loss_cpu.backward();
 
     if (device.type == Device::Type::CPU) {
-        ASSERT_TRUE(x_cpu.has_grad());
+        EXPECT_GRAD_FLOWS(x_cpu);
         return;
     }
 
@@ -277,8 +279,8 @@ TEST_P(GradLinalgParityTest, BilinearBackward) {
     auto grad2_cpu = x2_cpu.grad().value();
 
     if (device.type == Device::Type::CPU) {
-        ASSERT_TRUE(x1_cpu.has_grad());
-        ASSERT_TRUE(x2_cpu.has_grad());
+        EXPECT_GRAD_FLOWS(x1_cpu);
+        EXPECT_GRAD_FLOWS(x2_cpu);
         return;
     }
 

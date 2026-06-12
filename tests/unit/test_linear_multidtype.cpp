@@ -13,6 +13,7 @@
 #include <gtest/gtest.h>
 #include <tenzor/tenzor.hpp>
 #include "../multi_backend_dtype_fixture.hpp"
+#include "../grad_flow_helpers.hpp"
 #include <cmath>
 
 using namespace tenzor;
@@ -168,19 +169,19 @@ TEST_P(LinearMultiDTypeTest, BackwardGradientFlow) {
     });
 
     // Check input gradient
-    EXPECT_TRUE(input.has_grad());
+    EXPECT_GRAD_FLOWS(input);
     EXPECT_EQ(input.grad()->dtype(), dtype());
     EXPECT_FALSE(has_invalid_values(*input.grad()));
 
     // Check weight gradient
     auto weight = linear.weight();
-    EXPECT_TRUE(weight->has_grad());
+    EXPECT_GRAD_FLOWS(*weight);
     EXPECT_EQ(weight->grad()->dtype(), dtype());
     EXPECT_FALSE(has_invalid_values(weight->grad().value()));
 
     // Check bias gradient
     auto bias = linear.bias();
-    EXPECT_TRUE(bias->has_grad());
+    EXPECT_GRAD_FLOWS(*bias);
     EXPECT_EQ(bias->grad()->dtype(), dtype());
     EXPECT_FALSE(has_invalid_values(bias->grad().value()));
 }
@@ -226,8 +227,8 @@ TEST_P(LinearMultiDTypeTest, BackwardNoBias) {
         output.backward(grad_output);
     });
 
-    EXPECT_TRUE(input.has_grad());
-    EXPECT_TRUE(linear.weight()->has_grad());
+    EXPECT_GRAD_FLOWS(input);
+    EXPECT_GRAD_FLOWS(*linear.weight());
     EXPECT_EQ(linear.bias(), nullptr);
 }
 

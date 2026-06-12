@@ -13,6 +13,7 @@
 #include <tenzor/nn/layers/dropout.hpp>
 #include <tenzor/nn/layers/pooling.hpp>
 #include "../backend_test_fixture.hpp"
+#include "../grad_flow_helpers.hpp"
 
 using namespace tenzor;
 using namespace tenzor::testing;
@@ -56,7 +57,7 @@ protected:
         auto x_grad_cpu = x_cpu.grad().value();
 
         if (device.type == Device::Type::CPU) {
-            ASSERT_TRUE(x_cpu.has_grad());
+            EXPECT_GRAD_FLOWS(x_cpu);
             return;
         }
 
@@ -83,7 +84,7 @@ protected:
         loss_cpu.backward();
 
         if (device.type == Device::Type::CPU) {
-            ASSERT_TRUE(a_cpu.has_grad());
+            EXPECT_GRAD_FLOWS(a_cpu);
             return;
         }
 
@@ -115,7 +116,7 @@ TEST_P(GradNNParityTest, Conv2dBackward) {
     auto grad_cpu = x_cpu.grad().value();
 
     if (device.type == Device::Type::CPU) {
-        ASSERT_TRUE(x_cpu.has_grad());
+        EXPECT_GRAD_FLOWS(x_cpu);
         return;
     }
 
@@ -149,7 +150,7 @@ TEST_P(GradNNParityTest, Conv1dBackward) {
     auto grad_cpu = x_cpu.grad().value();
 
     if (device.type == Device::Type::CPU) {
-        ASSERT_TRUE(x_cpu.has_grad());
+        EXPECT_GRAD_FLOWS(x_cpu);
         return;
     }
 
@@ -182,7 +183,7 @@ TEST_P(GradNNParityTest, Conv3dBackward) {
     auto grad_cpu = x_cpu.grad().value();
 
     if (device.type == Device::Type::CPU) {
-        ASSERT_TRUE(x_cpu.has_grad());
+        EXPECT_GRAD_FLOWS(x_cpu);
         return;
     }
 
@@ -214,7 +215,7 @@ TEST_P(GradNNParityTest, MaxPool2dBackward) {
     auto grad_cpu = x_cpu.grad().value();
 
     if (device.type == Device::Type::CPU) {
-        ASSERT_TRUE(x_cpu.has_grad());
+        EXPECT_GRAD_FLOWS(x_cpu);
         return;
     }
 
@@ -239,7 +240,7 @@ TEST_P(GradNNParityTest, AvgPool2dBackward) {
     auto grad_cpu = x_cpu.grad().value();
 
     if (device.type == Device::Type::CPU) {
-        ASSERT_TRUE(x_cpu.has_grad());
+        EXPECT_GRAD_FLOWS(x_cpu);
         return;
     }
 
@@ -373,7 +374,7 @@ TEST_P(GradNNParityTest, EmbeddingBackward) {
     auto weight_grad_cpu = weight_params[0]->grad().value();
 
     if (device.type == Device::Type::CPU) {
-        ASSERT_TRUE(weight_params[0]->has_grad());
+        EXPECT_GRAD_FLOWS(*weight_params[0]);
         return;
     }
 
@@ -411,7 +412,7 @@ TEST_P(GradNNParityTest, LSTMCellBackward) {
     auto grad_cpu = x_cpu.grad().value();
 
     if (device.type == Device::Type::CPU) {
-        ASSERT_TRUE(x_cpu.has_grad());
+        EXPECT_GRAD_FLOWS(x_cpu);
         return;
     }
 
@@ -448,7 +449,7 @@ TEST_P(GradNNParityTest, GRUCellBackward) {
     auto grad_cpu = x_cpu.grad().value();
 
     if (device.type == Device::Type::CPU) {
-        ASSERT_TRUE(x_cpu.has_grad());
+        EXPECT_GRAD_FLOWS(x_cpu);
         return;
     }
 
@@ -515,7 +516,7 @@ TEST_P(GradNNParityTest, ConvTranspose2dBackward) {
     auto w_cpu = Variable(weight_data.clone(), false);
     auto out_cpu = tenzor::nn::functional::conv_transpose2d(x_cpu, w_cpu);
     tenzor::sum(out_cpu).backward();
-    ASSERT_TRUE(x_cpu.has_grad());
+    EXPECT_GRAD_FLOWS(x_cpu);
     auto grad_cpu = x_cpu.grad().value();
 
     if (device.type == Device::Type::CPU) return;
@@ -536,7 +537,7 @@ TEST_P(GradNNParityTest, AdaptiveAvgPool2dBackward) {
     auto x_cpu = Variable(input_data.clone(), true);
     auto out_cpu = tenzor::nn::functional::adaptive_avg_pool2d(x_cpu, {4, 4});
     tenzor::sum(out_cpu).backward();
-    ASSERT_TRUE(x_cpu.has_grad());
+    EXPECT_GRAD_FLOWS(x_cpu);
     auto grad_cpu = x_cpu.grad().value();
 
     if (device.type == Device::Type::CPU) return;
@@ -566,7 +567,7 @@ TEST_P(GradNNParityTest, DropoutEvalBackward) {
     auto dc_cpu = make_dropout_eval();
     auto out_cpu = dc_cpu.forward(x_cpu);
     tenzor::sum(out_cpu).backward();
-    ASSERT_TRUE(x_cpu.has_grad());
+    EXPECT_GRAD_FLOWS(x_cpu);
     auto grad_cpu = x_cpu.grad().value();
 
     if (device.type == Device::Type::CPU) return;
@@ -596,7 +597,7 @@ TEST_P(GradNNParityTest, MaxPool1dBackward) {
     ::tenzor::nn::MaxPool1d pool(/*kernel=*/2, /*stride=*/2, /*padding=*/0);
     auto out_cpu = pool.forward(x_cpu);
     tenzor::sum(out_cpu).backward();
-    ASSERT_TRUE(x_cpu.has_grad());
+    EXPECT_GRAD_FLOWS(x_cpu);
     auto grad_cpu = x_cpu.grad().value();
 
     if (device.type == Device::Type::CPU) return;
@@ -619,7 +620,7 @@ TEST_P(GradNNParityTest, AvgPool1dBackward) {
     ::tenzor::nn::AvgPool1d pool(/*kernel=*/2, /*stride=*/2, /*padding=*/0);
     auto out_cpu = pool.forward(x_cpu);
     tenzor::sum(out_cpu).backward();
-    ASSERT_TRUE(x_cpu.has_grad());
+    EXPECT_GRAD_FLOWS(x_cpu);
     auto grad_cpu = x_cpu.grad().value();
 
     if (device.type == Device::Type::CPU) return;
@@ -644,7 +645,7 @@ TEST_P(GradNNParityTest, SoftmaxBackward) {
     // sum(loss).backward() isn't identically zero.
     auto w = randn({4, 8}, DType::Float32, Device::cpu());
     tenzor::sum(out_cpu * Variable(w, false)).backward();
-    ASSERT_TRUE(x_cpu.has_grad());
+    EXPECT_GRAD_FLOWS(x_cpu);
     auto grad_cpu = x_cpu.grad().value();
 
     if (device.type == Device::Type::CPU) return;
@@ -664,7 +665,7 @@ TEST_P(GradNNParityTest, LogSoftmaxBackward) {
     auto x_cpu = Variable(input_data.clone(), true);
     auto out_cpu = tenzor::log_softmax(x_cpu, /*dim=*/-1);
     tenzor::sum(out_cpu).backward();
-    ASSERT_TRUE(x_cpu.has_grad());
+    EXPECT_GRAD_FLOWS(x_cpu);
     auto grad_cpu = x_cpu.grad().value();
 
     if (device.type == Device::Type::CPU) return;
@@ -684,7 +685,7 @@ TEST_P(GradNNParityTest, GeluBackward) {
     auto x_cpu = Variable(input_data.clone(), true);
     auto out_cpu = tenzor::gelu(x_cpu);
     tenzor::sum(out_cpu).backward();
-    ASSERT_TRUE(x_cpu.has_grad());
+    EXPECT_GRAD_FLOWS(x_cpu);
     auto grad_cpu = x_cpu.grad().value();
 
     if (device.type == Device::Type::CPU) return;

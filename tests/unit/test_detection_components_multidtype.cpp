@@ -8,6 +8,7 @@
 
 #include <gtest/gtest.h>
 #include "../multi_backend_dtype_fixture.hpp"
+#include "../grad_flow_helpers.hpp"
 #include <tenzor/tenzor.hpp>
 #include "tenzor/nn/detection/anchors.hpp"
 #include "tenzor/nn/detection/roi_ops.hpp"
@@ -302,7 +303,7 @@ TEST_P(DetectionComponentsMultiDTypeTest, ROIAlignGradient) {
     });
 
     // Check that gradients were computed
-    EXPECT_TRUE(features_var.has_grad());
+    EXPECT_GRAD_FLOWS(features_var);
     if (features_var.has_grad()) {
         auto grad_shape = features_var.grad()->shape();
         auto feat_shape = features.shape();

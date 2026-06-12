@@ -12,6 +12,7 @@
 #include <iostream>
 #include <tenzor/tenzor.hpp>
 #include "../backend_test_fixture.hpp"
+#include "../grad_flow_helpers.hpp"
 #include "parity_test_utils.hpp"
 
 using namespace tenzor;
@@ -48,7 +49,7 @@ TEST_P(JITAutogradParity, LinearChain_Backward) {
         auto h = nn::relu(l1.forward(x_ref));
         auto y = sum(l2.forward(h));
         y.backward();
-        ASSERT_TRUE(x_ref.has_grad());
+        EXPECT_GRAD_FLOWS(x_ref);
         Tensor ref_grad = x_ref.grad().value();
 
         for (size_t i = 1; i < backends.size(); ++i) {
@@ -109,7 +110,7 @@ TEST_P(JITAutogradParity, LayerNormMLP_Backward) {
         h = nn::relu(h);
         auto y = sum(l2.forward(h));
         y.backward();
-        ASSERT_TRUE(x_ref.has_grad());
+        EXPECT_GRAD_FLOWS(x_ref);
         Tensor ref_grad = x_ref.grad().value();
 
         for (size_t i = 1; i < backends.size(); ++i) {

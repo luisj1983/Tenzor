@@ -13,6 +13,7 @@
 #include <tenzor/tenzor.hpp>
 #include <tenzor/ops/custom_op.hpp>
 #include "../backend_test_fixture.hpp"
+#include "../grad_flow_helpers.hpp"
 #include "parity_test_utils.hpp"
 
 using namespace tenzor;
@@ -107,7 +108,7 @@ TEST_P(CustomOpParity, Squared_Backward_MultiBackend) {
     auto x_cpu = Variable(input_cpu.clone(), true);
     auto y_cpu = dispatch_custom_op(op_id, {x_cpu});
     sum(y_cpu).backward();
-    ASSERT_TRUE(x_cpu.has_grad());
+    EXPECT_GRAD_FLOWS(x_cpu);
     Tensor ref_out = y_cpu.tensor();
     Tensor ref_grad = x_cpu.grad().value();
 

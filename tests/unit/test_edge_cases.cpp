@@ -729,8 +729,8 @@ TEST_P(EdgeCaseTest, CallingOperationsInWrongOrder_Backward) {
     auto y_sum = sum(y);  // Reduce to scalar
     y_sum.backward();
 
-    // Now grad should exist
-    EXPECT_TRUE(x.grad().has_value()) << "Grad should exist after backward";
+    // Now grad should exist and carry signal (d(sum(x+x))/dx = 2)
+    EXPECT_GRAD_FLOWS(x);
 }
 
 TEST_P(EdgeCaseTest, OptimizerStepBeforeBackward) {

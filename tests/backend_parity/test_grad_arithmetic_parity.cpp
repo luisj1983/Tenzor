@@ -10,6 +10,7 @@
 #include <tenzor/tenzor.hpp>
 #include <tenzor/nn/functional.hpp>
 #include "../backend_test_fixture.hpp"
+#include "../grad_flow_helpers.hpp"
 
 using namespace tenzor;
 using namespace tenzor::testing;
@@ -53,7 +54,7 @@ protected:
         auto x_grad_cpu = x_cpu.grad().value();
 
         if (device.type == Device::Type::CPU) {
-            ASSERT_TRUE(x_cpu.has_grad());
+            EXPECT_GRAD_FLOWS(x_cpu);
             return;
         }
 
@@ -82,8 +83,8 @@ protected:
         auto b_grad_cpu = b_cpu.grad().value();
 
         if (device.type == Device::Type::CPU) {
-            ASSERT_TRUE(a_cpu.has_grad());
-            ASSERT_TRUE(b_cpu.has_grad());
+            EXPECT_GRAD_FLOWS(a_cpu);
+            EXPECT_GRAD_FLOWS(b_cpu);
             return;
         }
 

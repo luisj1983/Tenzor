@@ -40,7 +40,17 @@ protected:
     // Helper to check gradient flow (templated for different model types)
     template<typename ModelType>
     void checkGradientFlow(const Variable& input, const std::shared_ptr<ModelType>& model) {
-        EXPECT_TRUE(input.grad().has_value());
+        // MobileNet is very deep; in Float16/BFloat16 the input gradient
+        // legitimately underflows to zero (the product of many <1 local
+        // gradients falls below the half-precision representable range), so a
+        // magnitude assertion would false-fail. Assert genuine grad flow at
+        // full precision, where it's meaningful; assert presence for half.
+        if (dtype() == DType::Float16 || dtype() == DType::BFloat16) {
+            ASSERT_TRUE(input.grad().has_value())
+                << "input grad missing after backward";
+        } else {
+            EXPECT_GRAD_FLOWS(input);
+        }
         auto params = model->parameters();
         EXPECT_GT(params.size(), 0);
 

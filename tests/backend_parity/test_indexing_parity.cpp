@@ -12,6 +12,7 @@
 #include <iostream>
 #include <tenzor/tenzor.hpp>
 #include "../backend_test_fixture.hpp"
+#include "../grad_flow_helpers.hpp"
 #include "parity_test_utils.hpp"
 
 using namespace tenzor;
@@ -296,7 +297,7 @@ void index_grad_parity(Op op, Tensor input, Tensor idx,
         auto out = op(in_dev, idx_dev);
         sum(out).backward();
         backends[i].synchronize();
-        ASSERT_TRUE(in_dev.has_grad()) << test_name << " on " << backend_name(backends[i]);
+        EXPECT_GRAD_FLOWS(in_dev);
         auto g_cpu = in_dev.grad()->to(Device::cpu()).contiguous();
         if (i == 0) {
             ref_grad = g_cpu;

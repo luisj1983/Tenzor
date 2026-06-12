@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 #include "../backend_test_fixture.hpp"
+#include "../grad_flow_helpers.hpp"
 #include <tenzor/nn/layers/transformer.hpp>
 #include <tenzor/nn/layers/attention.hpp>
 #include <cmath>
@@ -457,8 +458,13 @@ TEST_P(TransformerIntegrationTest, ForwardBackward) {
         loss.backward();
     }) << "Failed on " << device.to_string();
 
-    EXPECT_TRUE(src.has_grad()) << "Failed on " << device.to_string();
-    EXPECT_TRUE(tgt.has_grad()) << "Failed on " << device.to_string();
+    // NOTE: not EXPECT_GRAD_FLOWS — through a 2+2-layer Transformer with a
+    // mean() loss the input gradient genuinely vanishes (~1e-11 in fp32, and
+    // it rounds to an exact 0 on some backends), so a magnitude assertion is a
+    // vanishing-gradient false-positive, not a severed graph. Assert presence
+    // (backward populated a grad without throwing) — the point of this test.
+    EXPECT_TRUE(src.has_grad());
+    EXPECT_TRUE(tgt.has_grad());
 }
 
 TEST_P(TransformerIntegrationTest, ParameterCount) {

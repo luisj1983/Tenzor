@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 #include "../backend_test_fixture.hpp"
+#include "../grad_flow_helpers.hpp"
 #include <tenzor/nn/layers/attention.hpp>
 #include <cmath>
 #include <iostream>
@@ -365,7 +366,7 @@ TEST_P(AttentionIntegrationTest, ForwardBackward) {
     }) << "Failed on " << device.to_string();
 
     // Query should have gradients
-    EXPECT_TRUE(query.has_grad()) << "Failed on " << device.to_string();
+    EXPECT_GRAD_FLOWS(query);
 }
 
 TEST_P(AttentionIntegrationTest, ParameterCount) {

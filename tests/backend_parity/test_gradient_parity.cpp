@@ -10,6 +10,7 @@
 #include <tenzor/tenzor.hpp>
 #include <tenzor/nn/functional.hpp>
 #include "../backend_test_fixture.hpp"
+#include "../grad_flow_helpers.hpp"
 
 using namespace tenzor;
 using namespace tenzor::testing;
@@ -64,9 +65,9 @@ protected:
         auto b_grad_cpu = b_cpu.grad().value();
 
         if (device.type == Device::Type::CPU) {
-            // We already have the CPU result; just verify grad exists
-            ASSERT_TRUE(a_cpu.has_grad());
-            ASSERT_TRUE(b_cpu.has_grad());
+            // We already have the CPU result; just verify grad flowed
+            EXPECT_GRAD_FLOWS(a_cpu);
+            EXPECT_GRAD_FLOWS(b_cpu);
             return;
         }
 
@@ -145,8 +146,8 @@ TEST_P(GradientParityBackendTest, MatMulBackward) {
     loss_cpu.backward();
 
     if (device.type == Device::Type::CPU) {
-        ASSERT_TRUE(a_cpu.has_grad());
-        ASSERT_TRUE(b_cpu.has_grad());
+        EXPECT_GRAD_FLOWS(a_cpu);
+        EXPECT_GRAD_FLOWS(b_cpu);
         return;
     }
 
@@ -229,7 +230,7 @@ TEST_P(GradientParityBackendTest, Conv2dBackward) {
     auto input_cpu = run(Device::cpu());
 
     if (device.type == Device::Type::CPU) {
-        ASSERT_TRUE(input_cpu.has_grad());
+        EXPECT_GRAD_FLOWS(input_cpu);
         return;
     }
 
@@ -264,7 +265,7 @@ TEST_P(GradientParityBackendTest, MSELossBackward) {
     loss_cpu.backward();
 
     if (device.type == Device::Type::CPU) {
-        ASSERT_TRUE(pred_cpu.has_grad());
+        EXPECT_GRAD_FLOWS(pred_cpu);
         return;
     }
 
@@ -292,7 +293,7 @@ TEST_P(GradientParityBackendTest, CrossEntropyLossBackward) {
     loss_cpu.backward();
 
     if (device.type == Device::Type::CPU) {
-        ASSERT_TRUE(logits_cpu.has_grad());
+        EXPECT_GRAD_FLOWS(logits_cpu);
         return;
     }
 
@@ -324,7 +325,7 @@ TEST_P(GradientParityBackendTest, ChainedOperations) {
     loss_cpu.backward();
 
     if (device.type == Device::Type::CPU) {
-        ASSERT_TRUE(x_cpu.has_grad());
+        EXPECT_GRAD_FLOWS(x_cpu);
         return;
     }
 

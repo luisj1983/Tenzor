@@ -11,6 +11,7 @@
 #include <tenzor/tenzor.hpp>
 #include <tenzor/nn/functional.hpp>
 #include "../backend_test_fixture.hpp"
+#include "../grad_flow_helpers.hpp"
 
 using namespace tenzor;
 using namespace tenzor::testing;
@@ -54,7 +55,7 @@ protected:
         auto x_grad_cpu = x_cpu.grad().value();
 
         if (device.type == Device::Type::CPU) {
-            ASSERT_TRUE(x_cpu.has_grad());
+            EXPECT_GRAD_FLOWS(x_cpu);
             return;
         }
 
@@ -81,7 +82,7 @@ protected:
         loss_cpu.backward();
 
         if (device.type == Device::Type::CPU) {
-            ASSERT_TRUE(a_cpu.has_grad());
+            EXPECT_GRAD_FLOWS(a_cpu);
             return;
         }
 
@@ -210,8 +211,8 @@ TEST_P(GradShapeParityTest, WhereBackward) {
     loss_cpu.backward();
 
     if (device.type == Device::Type::CPU) {
-        ASSERT_TRUE(x_cpu.has_grad());
-        ASSERT_TRUE(y_cpu.has_grad());
+        EXPECT_GRAD_FLOWS(x_cpu);
+        EXPECT_GRAD_FLOWS(y_cpu);
         return;
     }
 
@@ -240,8 +241,8 @@ TEST_P(GradShapeParityTest, CatBackward) {
     loss_cpu.backward();
 
     if (device.type == Device::Type::CPU) {
-        ASSERT_TRUE(x_cpu.has_grad());
-        ASSERT_TRUE(y_cpu.has_grad());
+        EXPECT_GRAD_FLOWS(x_cpu);
+        EXPECT_GRAD_FLOWS(y_cpu);
         return;
     }
 
