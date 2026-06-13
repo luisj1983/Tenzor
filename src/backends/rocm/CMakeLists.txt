@@ -108,6 +108,20 @@ set_source_files_properties(kernels/ctc_loss.hip.cpp
     PROPERTIES COMPILE_FLAGS "-fno-fast-math"
 )
 
+# math.hip.cpp implements element-wise division, whose IEEE contract the test
+# suite checks: x/0 → ±Inf (x≠0) and 0/0 → NaN (DivisionByZero edge case).
+# -ffast-math implies -ffinite-math-only, which lets the compiler assume no op
+# produces Inf/NaN and therefore *eliminates* the explicit zero-divisor branch
+# in ieee_div() (same mechanism documented for ctc_loss above). For Float64 the
+# fallthrough hardware divide (reciprocal + Newton-Raphson) then returns a
+# finite/indefinite-NaN value instead of ±Inf. We disable ONLY -ffinite-math-only
+# here — not all of -ffast-math — so the approximate transcendentals / FMA
+# contraction on this hot element-wise file keep their fast-math codegen while
+# Inf/NaN semantics are honoured.
+set_source_files_properties(kernels/math.hip.cpp
+    PROPERTIES COMPILE_FLAGS "-fno-finite-math-only"
+)
+
 # Create HIP kernels library (static, internal use only)
 add_library(tenzor_rocm_kernels STATIC ${ROCM_HIP_SOURCES})
 

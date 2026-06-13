@@ -178,8 +178,12 @@ TEST_P(OptimizerHolesTest, HRMParticipationRatioVaries) {
     EXPECT_GE(pr_uniform,      0.0);
     EXPECT_GE(pr_concentrated, 0.0);
 
-    // Uniform variance => effective dimensionality near the full D.
-    EXPECT_NEAR(pr_uniform, static_cast<double>(D), 0.5)
+    // Uniform variance => effective dimensionality near the full D. Every
+    // feature column here is byte-identical, so all per-feature variances are
+    // equal and PR_diag = (sum s^2)^2 / sum s^4 collapses to exactly D,
+    // independent of the variance magnitude — only float64 reduction round-off
+    // separates it from the integer D, so the tolerance can be tight.
+    EXPECT_NEAR(pr_uniform, static_cast<double>(D), 1e-6)
         << "Uniform per-feature variance should give PR ≈ D=" << D
         << ", got " << pr_uniform;
 

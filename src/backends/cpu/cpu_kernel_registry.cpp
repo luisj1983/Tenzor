@@ -17,6 +17,7 @@
 #include "tenzor/ops/transform.hpp"
 #include "tenzor/ops/linalg.hpp"
 #include "tenzor/ops/math.hpp"
+#include "tenzor/ops/indexing.hpp"  // tenzor::where for attention masking
 #include "tenzor/ops/creation.hpp"
 #include "tenzor/ops/reduction.hpp"
 #include "tenzor/ops/detection.hpp"
@@ -3312,10 +3313,15 @@ static void register_cpu_kernels_rmsnorm_etc(BackendDispatchTable& table) {
 
         // Apply a positional Bool mask (true → -inf), broadcasted over batch/head.
         auto apply_neg_inf_mask = [&](const Tensor& mask_2d) {
+            // where(mask, -inf, scores): set -inf ONLY at masked positions.
+            // The old `scores + mask.to(float)*(-inf)` form computed 0 * -inf
+            // = NaN at every *unmasked* position (mask is 0 there), which then
+            // poisons the whole row through softmax. where() keeps the IEEE
+            // -inf contract at masked positions without any 0*inf product.
             Tensor neg_inf = tenzor::full(scores_shape,
                 -std::numeric_limits<float>::infinity(),
                 scores.dtype(), scores.device());
-            scores = scores + (mask_2d.to(scores.dtype()) * neg_inf);
+            scores = tenzor::where(mask_2d.to(DType::Bool), neg_inf, scores);
         };
 
         if (score_mod_id == 2 || score_mod_id == 6) {
@@ -3482,13 +3488,17 @@ static void register_cpu_kernels_rmsnorm_etc(BackendDispatchTable& table) {
                 return {rows_2d, cols_2d};
             };
             auto apply_neg_inf_mask = [&](const Tensor& mask_2d) {
-                // Use -INFINITY per attention-contract; softmax-grad
-                // (attn * (dAttn - sum)) drives `attn` to 0 at masked positions,
-                // so 0 * (anything) = 0 without NaN risk.
+                // where(mask, -inf, scores): apply the -INFINITY attention mask
+                // ONLY at masked positions. The old `scores + mask*(-inf)` form
+                // computed 0 * -inf = NaN at every *unmasked* position (mask is
+                // 0 there), so the replayed scores were all-NaN and every
+                // gradient came back NaN (CPU↔Vulkan sliding-window backward
+                // parity). where() keeps the -inf contract with no 0*inf product;
+                // softmax then drives `attn` to 0 at the masked positions.
                 Tensor neg_inf = tenzor::full(scores_shape,
                     -std::numeric_limits<float>::infinity(),
                     scores.dtype(), scores.device());
-                scores = scores + (mask_2d.to(scores.dtype()) * neg_inf);
+                scores = tenzor::where(mask_2d.to(DType::Bool), neg_inf, scores);
             };
 
             if (score_mod_id == 2 || score_mod_id == 6) {

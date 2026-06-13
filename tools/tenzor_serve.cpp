@@ -11,6 +11,7 @@
 #include <tenzor/serving/server.hpp>
 
 #include <cstdlib>
+#include <filesystem>
 #include <iostream>
 #include <csignal>
 
@@ -37,6 +38,24 @@ int main(int argc, char** argv) {
 
     std::signal(SIGINT, signal_handler);
     std::signal(SIGTERM, signal_handler);
+
+    // Fail fast on startup misconfiguration. Without these checks the
+    // process hangs forever: serve_loop() in a transport-less build idles
+    // until stop(), which nothing in this CLI ever calls, and wait() joins
+    // that never-ending thread (found via tenzor_serve_smoke hanging).
+    if (!tenzor::serving::InferenceServer::has_http_transport()) {
+        std::cerr << "tenzor_serve: this build has no HTTP transport "
+                     "(TENZOR_BUILD_SERVING=OFF); refusing to start a server "
+                     "that cannot serve. Reconfigure with "
+                     "-DTENZOR_BUILD_SERVING=ON." << std::endl;
+        return 1;
+    }
+    if (!std::filesystem::is_directory(config.model_repository_path)) {
+        std::cerr << "tenzor_serve: model repository path does not exist or "
+                     "is not a directory: " << config.model_repository_path
+                  << std::endl;
+        return 1;
+    }
 
     tenzor::serving::InferenceServer server(config);
     server.start();

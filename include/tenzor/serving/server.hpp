@@ -285,6 +285,17 @@ public:
     auto wait_for(std::chrono::milliseconds timeout) -> bool;
 
     /**
+     * @brief Whether this build can actually serve HTTP requests.
+     *
+     * False when compiled without httplib (TENZOR_BUILD_SERVING=OFF): the
+     * lifecycle API (start/stop/wait) still works, but serve_loop() only
+     * idles. Standalone entry points (tenzor_serve) should check this and
+     * exit non-zero instead of wait()-ing on a loop that never serves and
+     * never terminates.
+     */
+    static auto has_http_transport() -> bool;
+
+    /**
      * @brief Get the model repository.
      */
     auto repository() -> ModelRepository& { return repository_; }

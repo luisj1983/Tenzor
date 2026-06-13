@@ -101,8 +101,16 @@ def _split_top_level_args(arglist: str) -> list[str]:
     args: list[str] = []
     depth = 0
     current: list[str] = []
+    prev = ""
     for ch in arglist:
-        if ch in "([{<":
+        if ch == ">" and prev == "-":
+            # C++ member-access arrow (ptr->member): this '>' is NOT a closing
+            # angle bracket. Without this guard, depth underflows and the loop
+            # breaks on the very common EXPECT_NEAR(obj->method(), expected, tol)
+            # form, so arg[2] is never reached and the legacy first-literal
+            # fallback mis-attributes the *expected* value as the tolerance.
+            current.append(ch)
+        elif ch in "([{<":
             depth += 1
             current.append(ch)
         elif ch in ")]}>":
@@ -115,6 +123,7 @@ def _split_top_level_args(arglist: str) -> list[str]:
             current = []
         else:
             current.append(ch)
+        prev = ch
     if current:
         args.append("".join(current).strip())
     return args

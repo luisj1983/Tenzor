@@ -4756,6 +4756,18 @@ Returns:
             return tenzor::to_device(self, tenzor::Device::cpu());
         }, py::call_guard<py::gil_scoped_release>(),
            "Move to CPU (autograd-aware)")
+        // Autograd-aware detach. Returns a fresh dormant Variable that shares
+        // storage with the source but carries no grad_fn and requires_grad=False
+        // (audit-10 OO.1). Bound explicitly so the Tensor/Variable-merge delegate
+        // does NOT install a graph-severing guard over it: detach() is the
+        // intended, sanctioned way to leave the graph (PyTorch parity).
+        .def("detach", &tenzor::Variable::detach,
+             "Return a new Variable detached from the computation graph "
+             "(shares storage, requires_grad=False)")
+        .def("detach_", [](tenzor::Variable& self) -> tenzor::Variable& {
+            self.detach_();
+            return self;
+        }, "Detach this Variable from the graph in-place; returns self")
         // Gradient control — settable property (PyTorch parity):
         //   x = tz.randn(3, 3); x.requires_grad = True
         .def_property("requires_grad",

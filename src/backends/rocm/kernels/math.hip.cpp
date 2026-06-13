@@ -297,18 +297,69 @@ struct MulOp {
 };
 
 /**
+ * @brief IEEE-754 division robust under -ffast-math.
+ *
+ * This TU is compiled with -ffast-math (see src/backends/rocm/CMakeLists.txt),
+ * which implies -ffinite-math-only and -freciprocal-math. For Float64 that
+ * breaks x/0: the divide is lowered to a software reciprocal (v_rcp_f64) plus
+ * Newton-Raphson refinement, and rcp(0) yields a large *finite* approximation
+ * instead of +Inf — so 1.0/0.0 came back finite (DivisionByZero/ROCm_Float64).
+ * Float32 escapes this because v_rcp_f32(0) is +Inf in hardware.
+ *
+ * Equality against zero is still exact under fast-math, so we special-case a
+ * zero divisor and emit the IEEE result as a raw bit pattern (which
+ * -ffinite-math-only cannot fold away — same idiom as the NaN/Inf constants
+ * elsewhere in this file). The fast hardware divide is kept for b != 0.
+ *
+ * Full IEEE contract for b == ±0:
+ *   a == ±0 or a == NaN  -> NaN   (preserves the 0/0 → NaN that the old
+ *                                  `if (b==0) return huge_val` shortcut broke)
+ *   otherwise            -> ±Inf, sign = sign(a) XOR sign(b)
+ */
+__device__ inline double ieee_div(double a, double b) {
+    if (b == 0.0) {
+        const long long abits = __double_as_longlong(a);
+        const long long amag  = abits & 0x7FFFFFFFFFFFFFFFLL;  // strip sign
+        if (amag == 0LL || amag > 0x7FF0000000000000LL) {      // ±0 or NaN
+            return __longlong_as_double(0x7FF8000000000000LL); // quiet NaN
+        }
+        const long long sign = (abits ^ __double_as_longlong(b))
+                               & static_cast<long long>(0x8000000000000000ULL);
+        return __longlong_as_double(sign | 0x7FF0000000000000LL);  // ±Inf
+    }
+    return a / b;
+}
+__device__ inline float ieee_div(float a, float b) {
+    if (b == 0.0f) {
+        const int abits = __float_as_int(a);
+        const int amag  = abits & 0x7FFFFFFF;                  // strip sign
+        if (amag == 0 || amag > 0x7F800000) {                 // ±0 or NaN
+            return __int_as_float(0x7FC00000);                // quiet NaN
+        }
+        const int sign = (abits ^ __float_as_int(b)) & static_cast<int>(0x80000000U);
+        return __int_as_float(sign | 0x7F800000);             // ±Inf
+    }
+    return a / b;
+}
+
+/**
  * @brief Division operation functor.
  *
- * Floating-point div delegates to hardware so IEEE 754 semantics hold:
- * x/0 → ±Inf for x ≠ 0, and 0/0 → NaN. The previous
+ * Floating-point div uses ieee_div() (above) so IEEE 754 semantics hold even
+ * under this TU's -ffast-math: x/0 → ±Inf for x ≠ 0, and 0/0 → NaN. The old
  * `if (b == 0) return huge_valf();` shortcut turned 0/0 into +Inf and broke
- * NaN_Propagation on ROCm (test_numerical_stability). Integer specializations
- * below still need an explicit check because integer div-by-zero is UB in C++.
+ * NaN_Propagation on ROCm (test_numerical_stability); ieee_div keeps 0/0 NaN.
+ * Integer specializations below still need an explicit check because integer
+ * div-by-zero is UB in C++.
  */
 struct DivOp {
     template<typename T>
     __device__ T operator()(T a, T b) const {
-        return a / b;
+        if constexpr (std::is_floating_point_v<T>) {
+            return ieee_div(a, b);
+        } else {
+            return a / b;
+        }
     }
 };
 template<> __device__ inline int32_t DivOp::operator()(int32_t a, int32_t b) const {
@@ -348,10 +399,17 @@ __global__ void mul_kernel_device(const T* a, const T* b, T* c, int64_t n) {
  */
 template<typename T>
 __global__ void div_kernel_device(const T* a, const T* b, T* c, int64_t n) {
-    // Hardware float divide gives IEEE 754 semantics (0/0 → NaN, x/0 → ±Inf
-    // for x ≠ 0). The previous explicit branch silently mapped 0/0 to +Inf.
+    // Floating types route through ieee_div() so x/0 → ±Inf and 0/0 → NaN
+    // survive this TU's -ffast-math (which otherwise yields a finite value for
+    // the Float64 reciprocal-refined divide). Integer T keeps plain divide
+    // (int div-by-zero is UB and intentionally not special-cased here; the
+    // int32/int64 DivOp specializations guard the broadcast path).
     HIP_KERNEL_LOOP(idx, n) {
-        c[idx] = a[idx] / b[idx];
+        if constexpr (std::is_floating_point_v<T>) {
+            c[idx] = ieee_div(a[idx], b[idx]);
+        } else {
+            c[idx] = a[idx] / b[idx];
+        }
     }
 }
 

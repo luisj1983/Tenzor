@@ -244,6 +244,23 @@ tests/unit/test_strided_fill_dtype_coverage.cpp
 # wiring, not dtype-specific numerics.
 tests/autograd/test_chunk_split.cpp                   # dtype-agnostic: tests chunk/split slice semantics on empty/non-empty dims, not arithmetic
 tests/autograd/test_save_backward_multi_device.cpp    # multi-device-only by construction (GPU↔CPU traversal); dtype-orthogonal
+
+# Release-prep S-stream regression suites (added 2026-06). Every entry below
+# already runs cross-backend via the BackendTest TEST_P fixture (all 5
+# backends) — the multidtype convention's *backend* axis is already covered.
+# The per-file note explains why a separate {F32,F64,F16} *_multidtype.cpp
+# companion would add no coverage (dtype-orthogonal behaviour, the dtype axis
+# already exercised in-file, or an inapplicable F16 path).
+tests/autograd/test_typed_stub_backwards.cpp   # cross-backend (BackendTest); validates the differentiability *contract* of 5 formerly-NonDifferentiable typed stubs (ROIAlign/DeformableConv2d/MelScale/DCT/MFCC) — asserts grads finite & non-zero. dtype-orthogonal; per-dtype numerics of the underlying ops are covered by their own op tests.
+tests/nn/test_optimizer_holes.cpp              # cross-backend (BackendTest); four dtype-orthogonal regression items (LBFGS state-dict key validation, LazyLinear pre-forward .to(device), HRM participation-ratio rank structure, Adam sparse-grad densify dispatch). Same rationale as test_adamw — optimizer/diagnostic state is dtype-agnostic.
+tests/nn/test_parametrize_lifetime.cpp         # no tensors/backends/dtypes — pure Module UID / parametrize-registry lifetime test (heap-address reuse must not leak parametrization state). A dtype sweep is meaningless.
+tests/nn/test_quantization_s20.cpp             # cross-backend (BackendTest); INT8 quantization fixes (HistogramObserver re-bin, QuantizedConv1d real-INT8, QuantStub Q/DQ + STE backward). The relevant dtype axis is the INT8 quant path itself; a {F32,F64,F16} float sweep does not apply. Same rationale as test_quantization_conversion.
+tests/nn/test_s5_surgical_fixes.cpp            # cross-backend (BackendTest); autograd-graph-severance / diagnostic regressions (DataParallel gather grad-chain, PANet single-input diagnostic, DeepLabV3+ decoder non-identity). Structural/contract, dtype-orthogonal.
+tests/nn/test_severance_sweep.cpp              # cross-backend (BackendTest); grad-flow severance sweep — each layer asserts EXPECT_GRAD_FLOWS after a forward/backward round-trip. Tests graph connectivity, not per-dtype numerics; dtype-orthogonal by construction.
+tests/ops/test_griffin_lim.cpp                 # cross-backend (BackendTest); already exercises BOTH Float32 and Float64 (AcceptsFloat64Magnitude round-trips F64 through the algorithm). Float16 is not a supported dtype for iterative STFT/ISTFT phase reconstruction, so a {F32,F64,F16} companion adds nothing.
+tests/ops/test_linalg_norm_ords.cpp            # cross-backend (BackendTest); already covers Float32 + Float64 explicitly (Frobenius F32/F64, L0 exact-count F32/F64, F64 gradchecks). The spectral/nuclear ords route through SVD, which has no Float16 path, so the only missing companion axis (F16) is inapplicable.
+tests/test_fused_conv_activation_dtype.cpp     # THIS FILE IS the dtype-coverage test: it sweeps Float16 AND BFloat16 against a Float32 reference for fused conv+{ReLU,Sigmoid,Tanh,Swish} across all backends (BackendTest). A separate *_multidtype.cpp companion would be fully redundant.
+tests/test_math_half_dispatch.cpp              # THIS FILE IS the dtype-coverage test: regression net asserting ~40 math ops accept Float16 AND BFloat16 (vs a Float32 reference) across all backends (BackendTest). The half-precision dtype axis is the whole point; a companion would duplicate it.
 <!-- KNOWN-INTENTIONAL-END -->
 
 ## How to add a companion

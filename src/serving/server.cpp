@@ -328,6 +328,14 @@ auto InferenceServer::wait_for(std::chrono::milliseconds timeout) -> bool {
     return true;
 }
 
+auto InferenceServer::has_http_transport() -> bool {
+#ifdef TENZOR_HAS_HTTPLIB
+    return true;
+#else
+    return false;
+#endif
+}
+
 auto InferenceServer::serve_loop() -> void {
 #ifdef TENZOR_HAS_HTTPLIB
     using nlohmann::json;

@@ -31,6 +31,7 @@ add_test(NAME tenzor_serve_smoke
          COMMAND $<TARGET_FILE:tenzor_serve> /nonexistent_repo_dir 0)
 set_tests_properties(tenzor_serve_smoke PROPERTIES
     WILL_FAIL TRUE
+    TIMEOUT 30
     LABELS "tools")
 
 if(TENZOR_BUILD_MODEL_HUB)
@@ -39,5 +40,6 @@ if(TENZOR_BUILD_MODEL_HUB)
     # Invoking with no args prints usage and returns 1.
     set_tests_properties(tenzor_model_converter_usage PROPERTIES
         WILL_FAIL TRUE
+        TIMEOUT 30
         LABELS "tools")
 endif()

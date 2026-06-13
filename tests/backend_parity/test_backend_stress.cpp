@@ -48,9 +48,16 @@ TEST(BackendStress, LargeTensor_MatMul) {
     auto a = randn({2048, 2048}, DType::Float32, Device::cpu());
     auto b = randn({2048, 2048}, DType::Float32, Device::cpu());
 
+    // Full-FP32 GEMM forward-error bound is O(K * eps * |a||b|); at K=2048 two
+    // correct GEMMs that accumulate in a different blocked order (cuBLAS vs MKL)
+    // legitimately differ by ~2e-4 on near-zero (catastrophically cancelled)
+    // outputs, where rtol gives no slack — measured 2.05e-4 cuBLAS-vs-MKL. atol
+    // must absorb that (TF32 is already disabled via EnsureInitialized in main,
+    // so this is genuine FP32 rounding, not a tensor-core downgrade). Matches
+    // the atol the BackendStressParity.LargeTensor_MatMul sibling uses for K=1024.
     test_operation_parity([](const std::vector<Tensor>& inputs) {
         return matmul(inputs[0], inputs[1]);
-    }, {a, b}, 1e-3f, 1e-5f, "Large MatMul 2048x2048");
+    }, {a, b}, 1e-3f, 5e-4f, "Large MatMul 2048x2048");
 }
 
 // II.16: LargeBatch_Conv2d, DeepGraph_100Layers, DeepGraph_Residual,
@@ -110,11 +117,24 @@ TEST(BackendStress, MemoryPressure_AllocDealloc) {
 
     auto x = randn({64, 64}, DType::Float32, Device::cpu());
 
-    test_operation_parity([](const std::vector<Tensor>& inputs) {
+    // Pre-generate the per-iteration tensors ONCE on the host. Drawing them
+    // inside the parity lambda with randn(..., inputs[0].device()) made each
+    // backend consume a *different* RNG stream (device RNGs are independent of
+    // the CPU RNG and of each other), so the "parity" compared unrelated random
+    // sums — a spurious ~0.48 mismatch. Transferring the same host tensors to
+    // each device keeps the inputs identical while still exercising the
+    // per-iteration alloc/dealloc churn this test targets.
+    std::vector<Tensor> temps;
+    temps.reserve(100);
+    for (int i = 0; i < 100; ++i) {
+        temps.push_back(randn({64, 64}, DType::Float32, Device::cpu()));
+    }
+
+    test_operation_parity([temps](const std::vector<Tensor>& inputs) {
         auto result = inputs[0];
         // Repeatedly allocate and deallocate
         for (int i = 0; i < 100; ++i) {
-            auto temp = randn({64, 64}, DType::Float32, inputs[0].device());
+            auto temp = temps[i].to(inputs[0].device());
             result = result + temp * 0.01f;
             // temp will be deallocated at end of iteration
         }
@@ -398,7 +418,13 @@ int main(int argc, char** argv) {
 
     try {
         if (!::testing::GTEST_FLAG(list_tests)) {
-            tenzor::initialize();
+            // Use EnsureInitialized (NOT tenzor::initialize() directly): it sets
+            // TENZOR_DISABLE_TF32=1 before bring-up so cuBLAS runs FP32 matmul in
+            // full IEEE 754 precision rather than silently downgrading to TF32 on
+            // Ampere+. The plain TEST(BackendStress, *) cases here don't inherit
+            // BackendTest, so without this the TF32 path blows the CPU↔CUDA
+            // matmul parity tolerances (LargeTensor_MatMul, ComplexChain_MathOps).
+            tenzor::testing::EnsureInitialized();
         }
     } catch (const std::exception& e) {
         std::cerr << "Failed to initialize Tenzor: " << e.what() << std::endl;
