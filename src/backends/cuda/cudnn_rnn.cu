@@ -19,12 +19,12 @@
 #include "tenzor/core/device.hpp"
 #include "cuda_error.hpp"
 #include "cuda_stream_pool.hpp"
+#include "tenzor/backend/cuda_config.hpp"
 
 #include <cuda_runtime.h>
 #include <cudnn.h>
 
 #include <algorithm>
-#include <atomic>
 #include <cstring>
 #include <stdexcept>
 #include <string>
@@ -48,15 +48,13 @@ cudnnDataType_t to_cudnn_dtype_rnn(DType dtype) {
     }
 }
 
-// cuDNN TF32 toggle for RNN matmuls, mirroring torch.backends.cudnn.allow_tf32.
-// Default ON to match PyTorch's default precision/perf (PyTorch enables TF32 for
-// cuDNN by default). With it on, Float32 RNNs use TF32 tensor-core math
-// (10-bit mantissa) — ~1.3x faster — falling back to FP32 elementwise math.
-// Set to false for full-FP32 precision.
-std::atomic<bool> g_cudnn_rnn_allow_tf32{true};
-
+// TF32 for Float32 RNN matmuls, gated by the unified backend toggle
+// (tenzor::cuda::matmul::allow_tf32() / TENZOR_DISABLE_TF32) that conv2d and
+// matmul already honor. Default is ON, matching PyTorch
+// (torch.backends.cudnn.allow_tf32=True): TF32 tensor-core math (~1.3x faster)
+// with FP32 fallback. Float64 always uses full precision.
 cudnnMathType_t rnn_math_type(DType dtype) {
-    if (dtype == DType::Float32 && g_cudnn_rnn_allow_tf32.load(std::memory_order_relaxed)) {
+    if (dtype == DType::Float32 && ::tenzor::cuda::matmul::allow_tf32()) {
         return CUDNN_TENSOR_OP_MATH_ALLOW_CONVERSION;
     }
     return CUDNN_DEFAULT_MATH;
