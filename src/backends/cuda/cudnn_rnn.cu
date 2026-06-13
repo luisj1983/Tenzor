@@ -24,6 +24,7 @@
 #include <cudnn.h>
 
 #include <algorithm>
+#include <atomic>
 #include <cstring>
 #include <stdexcept>
 #include <string>
@@ -45,6 +46,20 @@ cudnnDataType_t to_cudnn_dtype_rnn(DType dtype) {
                 std::string("cuDNN RNN: unsupported dtype ") +
                 std::string(dtype_name(dtype)));
     }
+}
+
+// cuDNN TF32 toggle for RNN matmuls, mirroring torch.backends.cudnn.allow_tf32.
+// Default ON to match PyTorch's default precision/perf (PyTorch enables TF32 for
+// cuDNN by default). With it on, Float32 RNNs use TF32 tensor-core math
+// (10-bit mantissa) — ~1.3x faster — falling back to FP32 elementwise math.
+// Set to false for full-FP32 precision.
+std::atomic<bool> g_cudnn_rnn_allow_tf32{true};
+
+cudnnMathType_t rnn_math_type(DType dtype) {
+    if (dtype == DType::Float32 && g_cudnn_rnn_allow_tf32.load(std::memory_order_relaxed)) {
+        return CUDNN_TENSOR_OP_MATH_ALLOW_CONVERSION;
+    }
+    return CUDNN_DEFAULT_MATH;
 }
 
 cudnnDataType_t math_prec_for(DType dtype) {
@@ -550,7 +565,7 @@ ForwardResult run_forward(
                           static_cast<int>(num_layers),
                           bidirectional,
                           dropout_desc.get(),
-                          cudnn_dtype, math_prec);
+                          cudnn_dtype, math_prec, rnn_math_type(dtype));
     } else if (cell_mode == CUDNN_GRU) {
         rnn_desc.set_gru(handle,
                         static_cast<int>(input_size),
@@ -558,7 +573,7 @@ ForwardResult run_forward(
                         static_cast<int>(num_layers),
                         bidirectional,
                         dropout_desc.get(),
-                        cudnn_dtype, math_prec);
+                        cudnn_dtype, math_prec, rnn_math_type(dtype));
     } else {
         rnn_desc.set_rnn(handle,
                         static_cast<int>(input_size),
@@ -566,7 +581,7 @@ ForwardResult run_forward(
                         static_cast<int>(num_layers),
                         bidirectional,
                         dropout_desc.get(),
-                        cudnn_dtype, cell_mode, math_prec);
+                        cudnn_dtype, cell_mode, math_prec, rnn_math_type(dtype));
     }
 
     // Sequence layout: time-major unpacked. All samples have the same
@@ -765,7 +780,7 @@ BackwardResult run_backward(
                           static_cast<int>(num_layers),
                           bidirectional,
                           dropout_desc.get(),
-                          cudnn_dtype, math_prec);
+                          cudnn_dtype, math_prec, rnn_math_type(dtype));
     } else if (cell_mode == CUDNN_GRU) {
         rnn_desc.set_gru(handle,
                         static_cast<int>(input_size),
@@ -773,7 +788,7 @@ BackwardResult run_backward(
                         static_cast<int>(num_layers),
                         bidirectional,
                         dropout_desc.get(),
-                        cudnn_dtype, math_prec);
+                        cudnn_dtype, math_prec, rnn_math_type(dtype));
     } else {
         rnn_desc.set_rnn(handle,
                         static_cast<int>(input_size),
@@ -781,7 +796,7 @@ BackwardResult run_backward(
                         static_cast<int>(num_layers),
                         bidirectional,
                         dropout_desc.get(),
-                        cudnn_dtype, cell_mode, math_prec);
+                        cudnn_dtype, cell_mode, math_prec, rnn_math_type(dtype));
     }
 
     auto seq_lens = make_seq_lengths(static_cast<int>(batch),
