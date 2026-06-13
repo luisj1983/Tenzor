@@ -106,12 +106,17 @@ def benchmark_tenzor_lstm(
                 output, (h_n, c_n) = layer.forward(xv)
                 return output
 
-            times = run_benchmark(
-                lstm_fn,
-                warmup_iterations=config.warmup_iterations,
-                benchmark_iterations=config.benchmark_iterations,
-                sync_fn=sync_fn,
-            )
+            # Match PyTorch's benchmark, which times the forward under
+            # torch.no_grad(). Without disabling grad here Tenzor builds the
+            # full autograd graph (and skips the fused inference kernel),
+            # which is not what an inference benchmark should measure.
+            with tz.no_grad():
+                times = run_benchmark(
+                    lstm_fn,
+                    warmup_iterations=config.warmup_iterations,
+                    benchmark_iterations=config.benchmark_iterations,
+                    sync_fn=sync_fn,
+                )
 
             flops = calculate_lstm_flops(batch, seq_len, input_size, hidden_size, num_layers)
             if bidirectional:
@@ -247,12 +252,15 @@ def benchmark_tenzor_gru(
                 output, h_n = layer.forward(xv)
                 return output
 
-            times = run_benchmark(
-                gru_fn,
-                warmup_iterations=config.warmup_iterations,
-                benchmark_iterations=config.benchmark_iterations,
-                sync_fn=sync_fn,
-            )
+            # Match PyTorch's benchmark, which times the forward under
+            # torch.no_grad() (see lstm benchmark above for rationale).
+            with tz.no_grad():
+                times = run_benchmark(
+                    gru_fn,
+                    warmup_iterations=config.warmup_iterations,
+                    benchmark_iterations=config.benchmark_iterations,
+                    sync_fn=sync_fn,
+                )
 
             # GRU has 3 gates vs LSTM's 4, so roughly 75% of LSTM FLOPs
             flops = int(calculate_lstm_flops(batch, seq_len, input_size, hidden_size, num_layers) * 0.75)

@@ -300,6 +300,19 @@ namespace cuda {
                              const Tensor& W_ih_bwd, const Tensor& W_hh_bwd,
                              const Tensor& bias_ih_bwd, const Tensor& bias_hh_bwd,
                              const Tensor& h0, const Tensor& c0) -> std::vector<Tensor>;
+#ifdef TENZOR_HAS_CUDNN
+    // Fused cuDNN LSTM training forward/backward (single-layer, unidirectional).
+    std::vector<Tensor> lstm_train_forward_cudnn(
+        const Tensor& input, const Tensor& h0, const Tensor& c0,
+        const Tensor& W_ih, const Tensor& W_hh,
+        const Tensor& bias_ih, const Tensor& bias_hh);
+    std::vector<Tensor> lstm_backward_cudnn_wrap(
+        const Tensor& grad_out, const Tensor& grad_hy, const Tensor& grad_cy,
+        const Tensor& input, const Tensor& h0, const Tensor& c0, const Tensor& output,
+        const Tensor& weight_space, const Tensor& reserve_space,
+        const Tensor& W_ih, const Tensor& W_hh,
+        const Tensor& bias_ih, const Tensor& bias_hh);
+#endif
 
     // Vision/Interpolation operations
     auto grid_sample_cuda(const Tensor& input, const Tensor& grid,
@@ -3963,6 +3976,25 @@ void register_cuda_kernels(BackendDispatchTable& table) {
         return cuda::lstm_forward_cuda(inputs[0], inputs[1], inputs[2],
                                        inputs[3], inputs[4], inputs[5], inputs[6]);
     });
+
+#ifdef TENZOR_HAS_CUDNN
+    // Fused cuDNN LSTM TRAINING forward.
+    // inputs: [input, h0, c0, W_ih, W_hh, bias_ih, bias_hh]
+    // outputs: [output, hy, cy, reserve_space, weight_space]
+    table.register_kernel(OpId::LSTMCudnnTrainForward, [](std::span<const Tensor> inputs, const OpAttributes&) {
+        return cuda::lstm_train_forward_cudnn(inputs[0], inputs[1], inputs[2],
+                                              inputs[3], inputs[4], inputs[5], inputs[6]);
+    });
+    // Fused cuDNN LSTM backward.
+    // inputs: [grad_out, grad_hy, grad_cy, input, h0, c0, output,
+    //          weight_space, reserve_space, W_ih, W_hh, bias_ih, bias_hh]
+    // outputs: [grad_input, grad_hx, grad_cx, grad_W_ih, grad_W_hh, grad_b_ih, grad_b_hh]
+    table.register_kernel(OpId::LSTMCudnnBackward, [](std::span<const Tensor> inputs, const OpAttributes&) {
+        return cuda::lstm_backward_cudnn_wrap(
+            inputs[0], inputs[1], inputs[2], inputs[3], inputs[4], inputs[5],
+            inputs[6], inputs[7], inputs[8], inputs[9], inputs[10], inputs[11], inputs[12]);
+    });
+#endif
 
     // inputs: [input, W_ih, W_hh, bias_ih, h0, bias_hh?]
     // bias_hh is optional (legacy 5-input callers still work) but required

@@ -113,6 +113,22 @@ static inline int get_optimal_threads() {
 
 namespace tenzor::nn {
 
+// Thread count for the memory-bound normalization kernels (LayerNorm / RMSNorm).
+// These are bandwidth-limited: aggregate memory bandwidth scales with the number
+// of cores engaging memory channels, so PyTorch threads them across all cores and
+// so do we. Default to the full logical-core count; `TENZOR_NORM_THREADS` allows
+// overriding for tuning experiments.
+static inline int norm_kernel_threads() {
+    static const int n = []() {
+        if (const char* env = std::getenv("TENZOR_NORM_THREADS")) {
+            int v = std::atoi(env);
+            if (v > 0) return v;
+        }
+        return static_cast<int>(std::max(1u, std::thread::hardware_concurrency()));
+    }();
+    return n;
+}
+
 // ============================================================================
 // SIMD-Optimized Fused LayerNorm (computes output + mean + rstd in single pass)
 // ============================================================================
@@ -134,13 +150,19 @@ static void fused_layer_norm_f32(
 {
     const float inv_n = 1.0f / static_cast<float>(norm_size);
 
-    // LayerNorm is memory-bound, so parallelization only helps for very large data
-    // Single-threaded SIMD achieves ~50 GB/s, close to single-core memory bandwidth
-    // Parallelization overhead is ~100-500us, so only use for >4M elements (~16MB)
-    // Also limit thread count to avoid cache thrashing
+    // LayerNorm is memory-bound, but aggregate memory bandwidth on a multi-core
+    // CPU scales well past a single core (multiple memory channels / CCDs), so
+    // PyTorch parallelizes across all cores and so do we. The previous 4M-element
+    // gate left common transformer shapes (e.g. 8x512x768 = 3.1M) single-threaded,
+    // costing ~8x vs PyTorch which used every core. Parallelize across rows once
+    // there is enough work to amortize the thread-launch cost, using the full
+    // physical-core pool (bounded by the number of rows so we never spawn idle
+    // threads).
     const int64_t total_elements = batch_size * norm_size;
-    const bool use_parallel = total_elements > 4 * 1024 * 1024;  // 4M elements
-    const int max_threads = use_parallel ? std::min(4, static_cast<int>(batch_size / 256)) : 1;
+    const bool use_parallel = total_elements > 65536 && batch_size > 1;
+    const int max_threads = use_parallel
+        ? std::max(1, std::min(norm_kernel_threads(), static_cast<int>(batch_size)))
+        : 1;
 
     #pragma omp parallel for if(use_parallel) num_threads(std::max(1, max_threads))
     for (int64_t b = 0; b < batch_size; b++) {
@@ -331,12 +353,17 @@ static void fused_rms_norm_f32(
     float eps
 ) {
     const float inv_n = 1.0f / static_cast<float>(norm_size);
-    const int nthreads = get_optimal_threads();
 
-    // Use fewer threads for memory-bound operations to avoid synchronization overhead
-    const int effective_threads = std::min({nthreads, static_cast<int>(batch_size / 128), 4});
-    const int final_threads = std::max(1, effective_threads);
-    #pragma omp parallel for num_threads(final_threads)
+    // Memory-bound: aggregate bandwidth scales with cores (more memory channels
+    // engaged), so use the shared norm thread pool like PyTorch rather than the
+    // old hard cap of 4 — that cap left common transformer shapes ~2x slower.
+    // Bound by the number of rows, and skip threading for tiny inputs where
+    // fork-join overhead would dominate.
+    const int64_t total_elements = batch_size * norm_size;
+    const int final_threads = (total_elements > 65536 && batch_size > 1)
+        ? std::max(1, std::min(norm_kernel_threads(), static_cast<int>(batch_size)))
+        : 1;
+    #pragma omp parallel for if(final_threads > 1) num_threads(final_threads)
     for (int64_t b = 0; b < batch_size; b++) {
         const float* in_ptr = input + b * norm_size;
         float* out_ptr = output + b * norm_size;

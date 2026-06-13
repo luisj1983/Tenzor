@@ -783,7 +783,12 @@ private:
             math_type,
             input_size,
             hidden_size,
-            proj_size,
+            // cuDNN 9.x rejects projSize==0 with BAD_PARAM (cuDNN 8 accepted it
+            // as "no projection"). The documented way to disable the recurrent
+            // projection is projSize==hiddenSize — which needs no W_hr weight,
+            // matching how the no-projection weight packing works. Map our
+            // proj_size==0 sentinel onto that.
+            (proj_size > 0 ? proj_size : hidden_size),
             num_layers,
             dropout_desc,
             /*auxFlags=*/CUDNN_RNN_PADDED_IO_DISABLED));

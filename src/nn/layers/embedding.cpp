@@ -45,6 +45,7 @@ inline auto jit_record_embedding(const ::tenzor::Tensor& weight,
 #include <cmath>
 #include <cstring>
 #include <iostream>
+#include <thread>
 
 namespace tenzor {
 namespace nn {
@@ -835,21 +836,11 @@ auto Embedding::forward_impl(const Variable& input) -> Variable {
                            ? weight_tensor : weight_tensor.to(target_device);
         Tensor indices_dev = input_tensor;
 
-        // Validate indices on CPU before GPU dispatch to catch
-        // out-of-bounds errors early with clear error messages.
-        // Always enabled — GPU out-of-bounds reads cause silent corruption or crashes.
-        {
-            Tensor indices_cpu = input_tensor.to(Device::cpu());
-            auto idx_ptr = indices_cpu.data<int64_t>();
-            int64_t num_idx = indices_cpu.numel();
-            for (int64_t i = 0; i < num_idx; ++i) {
-                if (idx_ptr[i] < 0 || idx_ptr[i] >= num_embeddings_) {
-                    throw std::out_of_range(
-                        "Embedding index out of range: " + std::to_string(idx_ptr[i]) +
-                        " not in [0, " + std::to_string(num_embeddings_) + ")");
-                }
-            }
-        }
+        // Out-of-bounds indices are validated device-side inside the embedding
+        // kernel (it flags OOB and the host throws std::out_of_range after a
+        // single 1-int readback). The previous host-side validation copied ALL
+        // indices to the CPU and looped over them before dispatch — a full D2H +
+        // serial scan that serialized the GPU path on every forward.
 
         // Apply max_norm if specified. renorm_embeddings now runs entirely
         // through device-aware op composition (index_select + per-row norm
@@ -920,44 +911,44 @@ auto Embedding::forward_impl(const Variable& input) -> Variable {
         output_shape.push_back(embedding_dim_);
 
         DType weight_dtype = weight_cpu.dtype();
-        Tensor output(output_shape, weight_dtype, weight_cpu.device());
-
-        if (weight_dtype == DType::Float32) {
-            auto output_ptr = output.data<float>();
-            auto weight_ptr = weight_cpu.data<float>();
-            for (int64_t i = 0; i < num_indices; ++i) {
-                auto idx = input_ptr[i];
-                for (int64_t j = 0; j < embedding_dim_; ++j) {
-                    output_ptr[i * embedding_dim_ + j] = weight_ptr[idx * embedding_dim_ + j];
-                }
-            }
-        } else if (weight_dtype == DType::Float64) {
-            auto output_ptr = output.data<double>();
-            auto weight_ptr = weight_cpu.data<double>();
-            for (int64_t i = 0; i < num_indices; ++i) {
-                auto idx = input_ptr[i];
-                for (int64_t j = 0; j < embedding_dim_; ++j) {
-                    output_ptr[i * embedding_dim_ + j] = weight_ptr[idx * embedding_dim_ + j];
-                }
-            }
-        } else if (weight_dtype == DType::Float16 || weight_dtype == DType::BFloat16) {
-            // Convert to Float32 for computation, convert back
-            auto weight_f32 = weight_cpu.to(DType::Float32);
-            auto output_f32 = zeros(output_shape, DType::Float32);
-
-            auto weight_ptr = weight_f32.data<float>();
-            auto output_ptr = output_f32.data<float>();
-            for (int64_t i = 0; i < num_indices; ++i) {
-                auto idx = input_ptr[i];
-                for (int64_t j = 0; j < embedding_dim_; ++j) {
-                    output_ptr[i * embedding_dim_ + j] = weight_ptr[idx * embedding_dim_ + j];
-                }
-            }
-
-            output = output_f32.to(weight_dtype);
-        } else {
+        if (weight_dtype != DType::Float32 && weight_dtype != DType::Float64 &&
+            weight_dtype != DType::Float16 && weight_dtype != DType::BFloat16) {
             throw std::runtime_error("Embedding: Unsupported weight dtype: " +
                                      std::to_string(static_cast<int>(weight_dtype)));
+        }
+
+        // A gather copies whole embedding rows verbatim, so it is dtype-agnostic:
+        // memcpy each contiguous row by its byte span. This replaces the previous
+        // single-threaded, element-by-element scalar copy (and the pointless
+        // Float16/BFloat16 widen→narrow round-trip, which never changed values).
+        // The lookup is memory-bound, so parallelize across the gathered rows
+        // using the full logical-core pool — matching PyTorch, which threads this
+        // gather. The old serial loop was ~16x slower than PyTorch.
+        Tensor weight_contig = weight_cpu.is_contiguous() ? weight_cpu : weight_cpu.contiguous();
+        // Every byte of `output` is overwritten by the gather below, so skip the
+        // zero-initialization a plain Tensor ctor would do (a wasted ~output-sized
+        // memset on the memory-bound critical path).
+        Tensor output = Tensor::empty_uninitialized(output_shape, weight_dtype,
+                                                    weight_contig.device());
+
+        const int64_t row_bytes =
+            embedding_dim_ * static_cast<int64_t>(weight_contig.dtype_size());
+        const char* weight_bytes = static_cast<const char*>(weight_contig.data_ptr());
+        char* output_bytes = static_cast<char*>(output.data_ptr());
+
+        static const int kLogicalCores =
+            std::max(1u, std::thread::hardware_concurrency());
+        const bool parallel =
+            num_indices > 1 && num_indices * embedding_dim_ > 65536;
+        const int nthreads = parallel
+            ? std::max(1, std::min(kLogicalCores, static_cast<int>(num_indices)))
+            : 1;
+        #pragma omp parallel for if(parallel) num_threads(nthreads) schedule(static)
+        for (int64_t i = 0; i < num_indices; ++i) {
+            const int64_t idx = input_ptr[i];
+            std::memcpy(output_bytes + i * row_bytes,
+                        weight_bytes + idx * row_bytes,
+                        static_cast<size_t>(row_bytes));
         }
 
         jit_record_embedding(weight_cpu, input_tensor, output);

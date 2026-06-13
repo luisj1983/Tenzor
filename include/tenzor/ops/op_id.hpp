@@ -509,10 +509,15 @@ enum class OpId : uint16_t {
     Polar,                     // Construct complex from magnitude and phase
 
     // =========================================================================
-    // (450-459 previously reserved LSTMBackward/GRUBackward/BiLSTMBackward/
-    // RNNForward — removed as unused. Autograd uses cell-level backward ops
-    // LSTMCellBackward / GRUCellBackward / RNNCellBackward instead.)
+    // Fused cuDNN full-sequence LSTM training forward/backward (450-459 range,
+    // previously reserved). These wrap cuDNN's RNN TRAINING forward (which
+    // produces a reserve_space) and its backward, so the whole sequence is a
+    // single autograd node instead of a per-timestep cell loop — used by
+    // nn::LSTM on CUDA when grad is enabled. Cell-level ops below are still used
+    // for non-cuDNN backends / unsupported configs.
     // =========================================================================
+    LSTMCudnnTrainForward = 450,  // [input,h0,c0,W_ih,W_hh,b_ih,b_hh] -> [out,hy,cy,reserve,weight_space]
+    LSTMCudnnBackward = 451,      // [grad_out,grad_hy,grad_cy,input,h0,c0,out,weight_space,reserve,W_ih,W_hh,b_ih,b_hh] -> [grad_in,grad_hx,grad_cx,grad_W_ih,grad_W_hh,grad_b_ih,grad_b_hh]
 
     // =========================================================================
     // Sparse Tensor Operations (460-469)

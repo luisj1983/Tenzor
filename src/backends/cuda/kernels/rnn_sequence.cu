@@ -22,6 +22,25 @@
 namespace tenzor {
 namespace cuda {
 
+#ifdef TENZOR_HAS_CUDNN
+// Defined in cudnn_rnn.cu (kept there so cuDNN-typed args resolve in the TU
+// that includes <cudnn.h> first — avoids an NVCC mangling mismatch on
+// cudnnForwardMode_t across TUs). Single fused cuDNN inference kernel; Float32.
+std::vector<Tensor> lstm_forward_cudnn_inference(
+    const Tensor& input, const Tensor& W_ih, const Tensor& W_hh,
+    const Tensor& bias_ih, const Tensor& bias_hh,
+    const Tensor& h0, const Tensor& c0);
+std::vector<Tensor> lstm_multi_layer_forward_cudnn_inference(
+    const Tensor& input,
+    const std::vector<Tensor>& W_ih_list,
+    const std::vector<Tensor>& W_hh_list,
+    const std::vector<Tensor>& bias_list,
+    const Tensor& h0, const Tensor& c0);
+std::vector<Tensor> gru_forward_cudnn_inference(
+    const Tensor& input, const Tensor& W_ih, const Tensor& W_hh,
+    const Tensor& bias_ih, const Tensor& h0, const Tensor& bias_hh);
+#endif
+
 // Numerically stable sigmoid: clamp input to [-20, 20] to prevent exp overflow
 template<typename T>
 __device__ __forceinline__ T stable_sigmoid(T x) {
@@ -141,6 +160,17 @@ auto lstm_forward_cuda(
     int64_t hidden = h0.shape()[1];
     int64_t gate_size = 4 * hidden;
 
+#ifdef TENZOR_HAS_CUDNN
+    // Fast path: one fused cuDNN RNN kernel replaces the per-timestep cuBLAS +
+    // cell-kernel loop below (~2*seq_len kernel launches whose overhead is why
+    // PyTorch's cuDNN LSTM was several times faster). Float32 inference only;
+    // other dtypes / gradient-tracking fall through to the portable loop.
+    if (input.dtype() == DType::Float32) {
+        return lstm_forward_cudnn_inference(input, W_ih, W_hh,
+                                            bias_ih, bias_hh, h0, c0);
+    }
+#endif
+
     int device_id = input.device().index;
     auto stream_guard = CUDAStreamPool::instance().acquire_guard(device_id);
     cudaStream_t stream = stream_guard.get();
@@ -248,6 +278,16 @@ auto gru_forward_cuda(
     int64_t input_size = shape[2];
     int64_t hidden = h0.shape()[1];
     int64_t gate_size = 3 * hidden;
+
+#ifdef TENZOR_HAS_CUDNN
+    // Fast path: one fused cuDNN GRU kernel (CUDNN_GRU + DOUBLE_BIAS matches
+    // PyTorch's formula). Float32 inference only; the earlier divergence was an
+    // nn-layer weight-wiring bug (now fixed via named accessors), not a cuDNN
+    // convention mismatch.
+    if (input.dtype() == DType::Float32) {
+        return gru_forward_cudnn_inference(input, W_ih, W_hh, bias, h0, bias_hh);
+    }
+#endif
 
     int device_id = input.device().index;
     auto stream_guard = CUDAStreamPool::instance().acquire_guard(device_id);
@@ -375,6 +415,15 @@ auto lstm_multi_layer_forward_cuda(
     int64_t seq_len = shape[0];
     int64_t batch = shape[1];
     int64_t hidden = h0.shape()[2];
+
+#ifdef TENZOR_HAS_CUDNN
+    // Fast path: one fused cuDNN call covering all stacked layers, instead of a
+    // per-layer loop of separate cuDNN calls. Float32 inference only.
+    if (input.dtype() == DType::Float32) {
+        return lstm_multi_layer_forward_cudnn_inference(
+            input, W_ih_list, W_hh_list, bias_list, h0, c0);
+    }
+#endif
 
     int device_id = input.device().index;
     auto stream_guard = CUDAStreamPool::instance().acquire_guard(device_id);

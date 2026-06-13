@@ -18,6 +18,7 @@
 #include "tenzor/core/dtype.hpp"
 #include "tenzor/core/device.hpp"
 #include "cuda_error.hpp"
+#include "cuda_stream_pool.hpp"
 
 #include <cuda_runtime.h>
 #include <cudnn.h>
@@ -884,13 +885,17 @@ BackwardResult run_backward(
         // unavoidable here because Tensor::data_ptr() const returns const.
         const_cast<void*>(reserve_space.data_ptr())));
 
-    // Weight gradients next. SET mode zeroes the buffer for us.
+    // Weight gradients next. cudnnRNNBackwardWeights_v8 only supports
+    // CUDNN_WGRAD_MODE_ADD (accumulate) — WGRAD_MODE_SET returns
+    // CUDNN_STATUS_NOT_SUPPORTED — so we zero the buffer first, then accumulate.
     Tensor grad_weight_space({weight_space.numel()},
                              DType::UInt8, device);
+    CUDA_CHECK(cudaMemsetAsync(grad_weight_space.data_ptr(), 0,
+                               static_cast<size_t>(grad_weight_space.numel()), stream));
     CUDNN_CHECK(cudnnRNNBackwardWeights_v8(
         handle,
         rnn_desc.get(),
-        CUDNN_WGRAD_MODE_SET,
+        CUDNN_WGRAD_MODE_ADD,
         seq_lens.device_ptr(),
         x_desc.get(), input.data_ptr(),
         h_desc.get(), hx_resolved.data_ptr(),
@@ -945,6 +950,167 @@ auto cudnn_lstm_forward(
     out.reserve_space = raw.reserve_space;
     out.weight_space = raw.weight_space;
     return out;
+}
+
+// Tensor-only inference wrapper for the registered single-layer LSTMForward
+// kernel (see rnn_sequence.cu). Lives here so the cudnnForwardMode_t argument
+// is resolved in the TU that includes <cudnn.h> first. Single layer, one
+// direction, no projection. Returns {output (seq,batch,hidden),
+// hy (batch,hidden), cy (batch,hidden)} to match the per-timestep kernel.
+std::vector<Tensor> lstm_forward_cudnn_inference(
+    const Tensor& input, const Tensor& W_ih, const Tensor& W_hh,
+    const Tensor& bias_ih, const Tensor& bias_hh,
+    const Tensor& h0, const Tensor& c0) {
+    const int64_t batch = h0.shape()[0];
+    const int64_t hidden = h0.shape()[1];
+
+    auto guard = CUDAStreamPool::instance().acquire_guard(input.device().index);
+    cudaStream_t stream = guard.get();
+
+    Tensor hx = h0.contiguous().reshape({1, batch, hidden});
+    Tensor cx = c0.contiguous().reshape({1, batch, hidden});
+    Tensor b_ih = bias_ih.numel() > 0 ? bias_ih : Tensor{};
+    Tensor b_hh = bias_hh.numel() > 0 ? bias_hh : Tensor{};
+
+    auto out = cudnn_lstm_forward(
+        input.contiguous(), hx, cx,
+        {W_ih}, {W_hh}, {b_ih}, {b_hh}, /*weights_hr=*/{},
+        hidden, /*proj_size=*/0, /*num_layers=*/1,
+        /*bidirectional=*/false, /*dropout=*/0.0f,
+        CUDNN_FWD_MODE_INFERENCE, stream);
+
+    return { out.output,
+             out.hy.reshape({batch, hidden}),
+             out.cy.reshape({batch, hidden}) };
+}
+
+// GRU inference via cuDNN. cuDNN's CUDNN_GRU with CUDNN_RNN_DOUBLE_BIAS uses
+// PyTorch's exact formula (n = tanh(W_in x + b_in + r*(W_hn h + b_hn))), so it
+// matches the autograd cell-loop. Returns {output (seq,batch,hidden),
+// hy (batch,hidden)}.
+std::vector<Tensor> gru_forward_cudnn_inference(
+    const Tensor& input, const Tensor& W_ih, const Tensor& W_hh,
+    const Tensor& bias_ih, const Tensor& h0, const Tensor& bias_hh) {
+    const int64_t batch = h0.shape()[0];
+    const int64_t hidden = h0.shape()[1];
+
+    auto guard = CUDAStreamPool::instance().acquire_guard(input.device().index);
+    cudaStream_t stream = guard.get();
+
+    Tensor hx = h0.contiguous().reshape({1, batch, hidden});
+    Tensor b_ih = bias_ih.numel() > 0 ? bias_ih : Tensor{};
+    Tensor b_hh = bias_hh.numel() > 0 ? bias_hh : Tensor{};
+
+    auto out = cudnn_gru_forward(
+        input.contiguous(), hx,
+        {W_ih}, {W_hh}, {b_ih}, {b_hh},
+        hidden, /*num_layers=*/1, /*bidirectional=*/false, /*dropout=*/0.0f,
+        CUDNN_FWD_MODE_INFERENCE, stream);
+
+    return { out.output, out.hy.reshape({batch, hidden}) };
+}
+
+// Multi-layer (stacked, unidirectional) LSTM inference in a single fused cuDNN
+// call, replacing the previous per-layer loop of separate cuDNN calls. Each
+// bias_list[l] is the combined 8*hidden bias (4*hidden bias_ih ++ 4*hidden
+// bias_hh) — split exactly as the per-layer path does. h0/c0 are
+// (num_layers, batch, hidden), which already matches cuDNN's hx/cx layout.
+std::vector<Tensor> lstm_multi_layer_forward_cudnn_inference(
+    const Tensor& input,
+    const std::vector<Tensor>& W_ih_list,
+    const std::vector<Tensor>& W_hh_list,
+    const std::vector<Tensor>& bias_list,
+    const Tensor& h0, const Tensor& c0) {
+    const int64_t num_layers = static_cast<int64_t>(W_ih_list.size());
+    const int64_t hidden = h0.shape()[2];
+
+    auto guard = CUDAStreamPool::instance().acquire_guard(input.device().index);
+    cudaStream_t stream = guard.get();
+
+    std::vector<Tensor> biases_ih, biases_hh;
+    biases_ih.reserve(num_layers);
+    biases_hh.reserve(num_layers);
+    for (int64_t l = 0; l < num_layers; ++l) {
+        if (bias_list[l].numel() > 0) {
+            const int64_t half = bias_list[l].numel() / 2;
+            biases_ih.push_back(bias_list[l].slice(0, 0, half).contiguous());
+            biases_hh.push_back(bias_list[l].slice(0, half, 2 * half).contiguous());
+        } else {
+            biases_ih.push_back(Tensor{});
+            biases_hh.push_back(Tensor{});
+        }
+    }
+
+    auto out = cudnn_lstm_forward(
+        input.contiguous(), h0.contiguous(), c0.contiguous(),
+        W_ih_list, W_hh_list, biases_ih, biases_hh, /*weights_hr=*/{},
+        hidden, /*proj_size=*/0, num_layers,
+        /*bidirectional=*/false, /*dropout=*/0.0f,
+        CUDNN_FWD_MODE_INFERENCE, stream);
+
+    // out.hy / out.cy are already (num_layers, batch, hidden).
+    return { out.output, out.hy, out.cy };
+}
+
+// ---- Fused training forward/backward wrappers (single-layer, unidirectional,
+// no projection). Tensor-only signatures so the registry TU can call them
+// without the cudnnForwardMode_t mangling issue. States are (batch, hidden) on
+// the boundary (matching the LSTMForward contract) and reshaped internally. ----
+std::vector<Tensor> lstm_train_forward_cudnn(
+    const Tensor& input, const Tensor& h0, const Tensor& c0,
+    const Tensor& W_ih, const Tensor& W_hh,
+    const Tensor& bias_ih, const Tensor& bias_hh) {
+    const int64_t batch = h0.shape()[0];
+    const int64_t hidden = h0.shape()[1];
+    auto guard = CUDAStreamPool::instance().acquire_guard(input.device().index);
+    cudaStream_t stream = guard.get();
+    Tensor hx = h0.contiguous().reshape({1, batch, hidden});
+    Tensor cx = c0.contiguous().reshape({1, batch, hidden});
+    Tensor b_ih = bias_ih.numel() > 0 ? bias_ih : Tensor{};
+    Tensor b_hh = bias_hh.numel() > 0 ? bias_hh : Tensor{};
+    auto out = cudnn_lstm_forward(
+        input.contiguous(), hx, cx, {W_ih}, {W_hh}, {b_ih}, {b_hh}, {},
+        hidden, /*proj_size=*/0, /*num_layers=*/1, /*bidirectional=*/false,
+        /*dropout=*/0.0f, CUDNN_FWD_MODE_TRAINING, stream);
+    return { out.output, out.hy.reshape({batch, hidden}),
+             out.cy.reshape({batch, hidden}), out.reserve_space, out.weight_space };
+}
+
+std::vector<Tensor> lstm_backward_cudnn_wrap(
+    const Tensor& grad_out, const Tensor& grad_hy, const Tensor& grad_cy,
+    const Tensor& input, const Tensor& h0, const Tensor& c0, const Tensor& output,
+    const Tensor& weight_space, const Tensor& reserve_space,
+    const Tensor& W_ih, const Tensor& W_hh,
+    const Tensor& bias_ih, const Tensor& bias_hh) {
+    const int64_t batch = h0.shape()[0];
+    const int64_t hidden = h0.shape()[1];
+    const int64_t input_size = W_ih.shape()[1];
+    auto guard = CUDAStreamPool::instance().acquire_guard(input.device().index);
+    cudaStream_t stream = guard.get();
+    Tensor hx = h0.contiguous().reshape({1, batch, hidden});
+    Tensor cx = c0.contiguous().reshape({1, batch, hidden});
+    // Absent grads use a 0-size INITIALIZED tensor (not Tensor{}): run_backward
+    // calls .numel() on grad_hy/grad_cy, which throws on an uninitialized handle.
+    Tensor zero0({0}, grad_out.dtype(), grad_out.device());
+    Tensor ghy = grad_hy.numel() > 0 ? grad_hy.contiguous().reshape({1, batch, hidden}) : zero0;
+    Tensor gcy = grad_cy.numel() > 0 ? grad_cy.contiguous().reshape({1, batch, hidden}) : zero0;
+    auto grads = cudnn_lstm_backward(
+        grad_out.contiguous(), ghy, gcy, input.contiguous(), hx, cx,
+        output.contiguous(), weight_space, reserve_space,
+        hidden, /*proj_size=*/0, /*num_layers=*/1, /*bidirectional=*/false,
+        /*dropout=*/0.0f, stream);
+    std::vector<Tensor> gW_ih, gW_hh, gb_ih, gb_hh, gW_hr;
+    cudnn_lstm_unpack_weight_grads(grads.grad_weight_space, input_size, hidden,
+                                   /*proj_size=*/0, /*num_layers=*/1,
+                                   /*bidirectional=*/false,
+                                   gW_ih, gW_hh, gb_ih, gb_hh, gW_hr, stream);
+    Tensor grad_hx = grads.grad_hx.numel() ? grads.grad_hx.reshape({batch, hidden}) : Tensor{};
+    Tensor grad_cx = grads.grad_cx.numel() ? grads.grad_cx.reshape({batch, hidden}) : Tensor{};
+    return { grads.grad_input, grad_hx, grad_cx,
+             gW_ih.empty() ? Tensor{} : gW_ih[0],
+             gW_hh.empty() ? Tensor{} : gW_hh[0],
+             (bias_ih.numel() > 0 && !gb_ih.empty()) ? gb_ih[0] : Tensor{},
+             (bias_hh.numel() > 0 && !gb_hh.empty()) ? gb_hh[0] : Tensor{} };
 }
 
 auto cudnn_lstm_backward(

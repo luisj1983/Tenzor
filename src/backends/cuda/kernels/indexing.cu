@@ -1444,7 +1444,9 @@ __global__ void embedding_kernel_impl(
     const IndexT* indices,     // [*] (any shape of indices)
     T* output,                 // [*, embedding_dim]
     int64_t num_indices,
-    int64_t embedding_dim) {
+    int64_t embedding_dim,
+    int64_t num_embeddings,
+    int* error_flag) {
 
     int64_t total_elements = num_indices * embedding_dim;
 
@@ -1453,6 +1455,15 @@ __global__ void embedding_kernel_impl(
         int64_t j = idx % embedding_dim;  // which embedding dimension
 
         int64_t token_idx = static_cast<int64_t>(indices[i]);
+        // Device-side bounds check: flag out-of-range ids and skip the OOB read
+        // (which would corrupt memory or fault). The host reads the flag once
+        // after launch and throws — replacing the previous host-side D2H of all
+        // indices + serial validation loop that serialized the GPU path.
+        if (token_idx < 0 || token_idx >= num_embeddings) {
+            atomicExch(error_flag, 1);
+            output[idx] = T{};
+            continue;
+        }
         output[idx] = weight[token_idx * embedding_dim + j];
     }
 }
@@ -1467,6 +1478,7 @@ auto embedding_kernel(const Tensor& weight, const Tensor& indices,
     auto idx_shape = indices.shape();
 
     int64_t embedding_dim = w_shape[1];
+    int64_t num_embeddings = w_shape[0];
     int64_t num_indices = indices.numel();
 
     // Build output shape: indices shape + embedding_dim
@@ -1485,20 +1497,27 @@ auto embedding_kernel(const Tensor& weight, const Tensor& indices,
         throw std::invalid_argument("embedding: indices must be Int32 or Int64");
     }
 
+    // 1-int device flag for device-side OOB detection. (Measured: neither a
+    // persistent thread-local flag nor cudaMallocAsync beat this simple
+    // CudaBuffer here — the residual overhead vs PyTorch is the mandatory sync
+    // for the catchable OOB throw, not the allocation.)
+    CudaBuffer error_buf(sizeof(int));
+    CUDA_CHECK(cudaMemsetAsync(error_buf.as<int>(), 0, sizeof(int), stream));
+
     #define LAUNCH_EMBEDDING(T) \
         if (idx_is_int32) { \
             auto [grid_size, block_size] = optimal_launch_config( \
                 embedding_kernel_impl<T, int32_t>, total_elements); \
             embedding_kernel_impl<T, int32_t><<<grid_size, block_size, 0, stream>>>( \
                 weight.data<T>(), indices.data<int32_t>(), output.data<T>(), \
-                num_indices, embedding_dim); \
+                num_indices, embedding_dim, num_embeddings, error_buf.as<int>()); \
             CUDA_CHECK(cudaGetLastError()); \
         } else { \
             auto [grid_size, block_size] = optimal_launch_config( \
                 embedding_kernel_impl<T, int64_t>, total_elements); \
             embedding_kernel_impl<T, int64_t><<<grid_size, block_size, 0, stream>>>( \
                 weight.data<T>(), indices.data<int64_t>(), output.data<T>(), \
-                num_indices, embedding_dim); \
+                num_indices, embedding_dim, num_embeddings, error_buf.as<int>()); \
             CUDA_CHECK(cudaGetLastError()); \
         }
 
@@ -1513,7 +1532,7 @@ auto embedding_kernel(const Tensor& weight, const Tensor& indices,
                     reinterpret_cast<const __half*>(weight.data_ptr()),
                     indices.data<int32_t>(),
                     reinterpret_cast<__half*>(output.data_ptr()),
-                    num_indices, embedding_dim);
+                    num_indices, embedding_dim, num_embeddings, error_buf.as<int>());
                 CUDA_CHECK(cudaGetLastError());
             } else {
                 auto [grid_size, block_size] = optimal_launch_config(
@@ -1522,7 +1541,7 @@ auto embedding_kernel(const Tensor& weight, const Tensor& indices,
                     reinterpret_cast<const __half*>(weight.data_ptr()),
                     indices.data<int64_t>(),
                     reinterpret_cast<__half*>(output.data_ptr()),
-                    num_indices, embedding_dim);
+                    num_indices, embedding_dim, num_embeddings, error_buf.as<int>());
                 CUDA_CHECK(cudaGetLastError());
             }
             break;
@@ -1534,7 +1553,7 @@ auto embedding_kernel(const Tensor& weight, const Tensor& indices,
                     reinterpret_cast<const __nv_bfloat16*>(weight.data_ptr()),
                     indices.data<int32_t>(),
                     reinterpret_cast<__nv_bfloat16*>(output.data_ptr()),
-                    num_indices, embedding_dim);
+                    num_indices, embedding_dim, num_embeddings, error_buf.as<int>());
                 CUDA_CHECK(cudaGetLastError());
             } else {
                 auto [grid_size, block_size] = optimal_launch_config(
@@ -1543,7 +1562,7 @@ auto embedding_kernel(const Tensor& weight, const Tensor& indices,
                     reinterpret_cast<const __nv_bfloat16*>(weight.data_ptr()),
                     indices.data<int64_t>(),
                     reinterpret_cast<__nv_bfloat16*>(output.data_ptr()),
-                    num_indices, embedding_dim);
+                    num_indices, embedding_dim, num_embeddings, error_buf.as<int>());
                 CUDA_CHECK(cudaGetLastError());
             }
             break;
@@ -1554,6 +1573,19 @@ auto embedding_kernel(const Tensor& weight, const Tensor& indices,
     #undef LAUNCH_EMBEDDING
 
     CUDA_CHECK(cudaGetLastError());
+
+    // Read the out-of-bounds flag once (cheap 1-int D2H) and surface a catchable
+    // exception, matching index_select. This is the only host sync on the path.
+    int host_error = 0;
+    CUDA_CHECK(cudaMemcpyAsync(&host_error, error_buf.as<int>(), sizeof(int),
+                               cudaMemcpyDeviceToHost, stream));
+    CUDA_CHECK(cudaStreamSynchronize(stream));
+    if (host_error) {
+        throw std::out_of_range(
+            "Embedding index out of range [0, " +
+            std::to_string(num_embeddings) + ")");
+    }
+
     return output;
 }
 

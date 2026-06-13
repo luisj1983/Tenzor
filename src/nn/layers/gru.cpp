@@ -283,16 +283,13 @@ auto GRU::forward(const Variable& input, const Variable& hx,
     // both the input and the GRU's own parameters in one shot.
     // CPU SIMD applies bias_ih / bias_hh at PyTorch-correct positions;
     // CUDA's gru_forward_cuda does the same.
-    bool can_use_fused =
+    // Fused inference fast-path: enabled when grad is globally off and the
+    // input doesn't require grad (PyTorch no_grad semantics — the grad-free
+    // leaf output is correct). The earlier wrong-output bug here was the fused
+    // path sourcing W_hh / bias_hh via positional cell->parameters() indices;
+    // fixed below by using named accessors (see the layer loop).
+    const bool can_use_fused =
         !x.requires_grad() && !tenzor::is_grad_enabled();
-    // Walk our own parameters: if any of them requires grad and grad is
-    // globally enabled, we must take the autograd-aware slow path.
-    if (can_use_fused) {
-        for (const auto& [name, p] : named_parameters()) {
-            (void)name;
-            if (p->requires_grad()) { can_use_fused = false; break; }
-        }
-    }
 
     if (can_use_fused) {
         // Prepare input tensor for kernel. The fused GRU kernels (CPU
@@ -362,24 +359,25 @@ auto GRU::forward(const Variable& input, const Variable& hx,
         for (int64_t layer = 0; layer < num_layers_; ++layer) {
             auto& cell = forward_cells_[layer];
             auto W_ih_linear = cell->weight_ih();
-            auto cell_params = cell->parameters();
+            auto W_hh_linear = cell->weight_hh();
 
-            // Get weight tensors
+            // Get weight tensors via NAMED accessors. The previous code used
+            // positional cell->parameters() indices ([2]=W_hh weight, [3]=W_hh
+            // bias), assuming the order [W_ih_w, W_ih_b, W_hh_w, W_hh_b]. That
+            // order is not guaranteed, and when it differed the fused path
+            // silently fed the wrong tensors as W_hh / bias_hh — producing
+            // materially incorrect GRU output. LSTM already uses named
+            // accessors; mirror that here.
             auto W_ih_params = W_ih_linear->parameters();
+            auto W_hh_params = W_hh_linear->parameters();
             Tensor W_ih_tensor = W_ih_params[0]->tensor().contiguous();
-            Tensor W_hh_tensor = cell_params[2]->tensor().contiguous();
+            Tensor W_hh_tensor = W_hh_params[0]->tensor().contiguous();
 
-            // Bias: pass bias_ih and bias_hh separately so the kernel can
-            // apply them at the correct positions (PyTorch's GRU has
-            // asymmetric bias placement for the n gate). cell_params
-            // layout is [W_ih_w, W_ih_b, W_hh_w, W_hh_b]. The 6-input
-            // dispatch (Phase 8.5) preserves the legacy 5-input form for
-            // backwards compat.
             Tensor bias_ih_tensor;
             Tensor bias_hh_tensor;
-            if (W_ih_params.size() > 1 && cell_params.size() > 3) {
+            if (W_ih_params.size() > 1 && W_hh_params.size() > 1) {
                 bias_ih_tensor = W_ih_params[1]->tensor().contiguous();
-                bias_hh_tensor = cell_params[3]->tensor().contiguous();
+                bias_hh_tensor = W_hh_params[1]->tensor().contiguous();
             } else if (W_ih_params.size() > 1) {
                 bias_ih_tensor = W_ih_params[1]->tensor().contiguous();
                 bias_hh_tensor = empty({0}, DType::Float32, input.device());
