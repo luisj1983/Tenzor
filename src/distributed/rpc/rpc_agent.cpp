@@ -171,6 +171,10 @@ std::optional<Message> deserialize_message(int fd) {
 
     uint32_t fn_len;
     if (!take(&fn_len, 4)) return std::nullopt;
+    // Bound the variable-length field against the remaining buffer BEFORE the
+    // assign (subtraction form avoids integer overflow). A peer controls
+    // fn_len/extra_len, so without this the assign reads arbitrary heap past buf.
+    if (fn_len > buf.size() - off) return std::nullopt;
     m.payload.function_name.assign(
         reinterpret_cast<const char*>(buf.data() + off),
         reinterpret_cast<const char*>(buf.data() + off + fn_len));
@@ -178,6 +182,7 @@ std::optional<Message> deserialize_message(int fd) {
 
     uint32_t extra_len;
     if (!take(&extra_len, 4)) return std::nullopt;
+    if (extra_len > buf.size() - off) return std::nullopt;
     m.payload.bytes.assign(buf.data() + off, buf.data() + off + extra_len);
     off += extra_len;
 
@@ -186,15 +191,29 @@ std::optional<Message> deserialize_message(int fd) {
     for (uint32_t i = 0; i < nt; ++i) {
         uint32_t dtype, ndim;
         if (!take(&dtype, 4) || !take(&ndim, 4)) return std::nullopt;
+        if (ndim > 4096) return std::nullopt;  // implausible rank
         std::vector<int64_t> shape(ndim);
         for (uint32_t k = 0; k < ndim; ++k) {
             if (!take(&shape[k], 8)) return std::nullopt;
         }
+        // Validate dims and compute the expected byte size with checked math so
+        // a crafted shape/nbytes can't desync from the allocation.
+        int64_t numel = 1;
+        for (int64_t d : shape) {
+            if (d < 0) return std::nullopt;
+            if (__builtin_mul_overflow(numel, d, &numel)) return std::nullopt;
+        }
         uint64_t nbytes;
         if (!take(&nbytes, 8)) return std::nullopt;
+        // Subtraction form: off <= buf.size(), so this cannot overflow (unlike
+        // off + nbytes, which wraps for nbytes near UINT64_MAX and bypassed the
+        // bound, then memcpy'd ~exabytes out of buf).
+        if (nbytes > buf.size() - off) return std::nullopt;
+        uint64_t expected = static_cast<uint64_t>(numel) *
+                            static_cast<uint64_t>(dtype_size(static_cast<DType>(dtype)));
+        if (nbytes != expected) return std::nullopt;
         Tensor t(shape, static_cast<DType>(dtype), Device::cpu());
         if (nbytes > 0) {
-            if (off + nbytes > buf.size()) return std::nullopt;
             std::memcpy(t.data_ptr(), buf.data() + off, nbytes);
             off += nbytes;
         }
@@ -318,13 +337,25 @@ auto TcpRpcAgent::send(Message msg) -> Message {
 auto TcpRpcAgent::send_async(Message msg, std::function<void(Message)> callback) -> void {
     // Simple implementation: run send() on a detached thread. For our test
     // coverage this is sufficient; a production agent would pipeline writes.
-    std::thread([this, msg = std::move(msg), callback = std::move(callback)]() mutable {
+    const int64_t request_id = msg.payload.request_id;  // capture before move
+    std::thread([this, msg = std::move(msg), callback = std::move(callback),
+                 request_id]() mutable {
         try {
             auto response = send(std::move(msg));
             callback(std::move(response));
+        } catch (const std::exception& e) {
+            // Propagate the request id and diagnostic so the callback can
+            // correlate and report the failure (the old empty RPC_ERROR lost both).
+            Message err;
+            err.type = MessageType::RPC_ERROR;
+            err.payload.request_id = request_id;
+            const std::string what = e.what();
+            err.payload.bytes.assign(what.begin(), what.end());
+            callback(std::move(err));
         } catch (...) {
             Message err;
             err.type = MessageType::RPC_ERROR;
+            err.payload.request_id = request_id;
             callback(std::move(err));
         }
     }).detach();

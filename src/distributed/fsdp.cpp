@@ -124,6 +124,20 @@ auto FSDPUnit::flatten_params() -> void {
     auto device = original_params_[0]->tensor().device();
     auto dtype = original_params_[0]->tensor().dtype();
 
+    // The whole unit is flattened into ONE buffer of this (dtype, device). A
+    // mixed-dtype/device unit (e.g. fp16 weights + fp32 norms) would be silently
+    // mis-cast/mis-placed by slice_scatter, corrupting the gathered weights and
+    // gradients. Require homogeneity (DDP groups by (dtype,device) instead).
+    for (const auto& param : original_params_) {
+        if (!param) continue;
+        if (param->tensor().dtype() != dtype ||
+            param->tensor().device() != device) {
+            throw std::runtime_error(
+                "FSDP: all parameters in a unit must share dtype and device; "
+                "mixed-precision / multi-device units are not supported");
+        }
+    }
+
     // Allocate flat buffer and copy parameter data into it using slice_scatter
     // — device-agnostic, unlike std::memcpy which is invalid for GPU pointers.
     flat_param_ = zeros({static_cast<int64_t>(total_numel_)}, dtype, device);

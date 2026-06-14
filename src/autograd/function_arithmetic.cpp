@@ -521,17 +521,31 @@ auto LinearBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<T
         return dispatch<OpId::LinearBackward>(inputs);
     }
 
-    // Fallback for other backends/types using tensor operations
+    // Fallback for other backends/types using tensor operations.
+    // For CPU Float16/BFloat16, widen to Float32 first: half-precision matmul
+    // accumulation overflows (>65504 -> Inf) and loses mantissa precision,
+    // exactly as the GPU path above guards against. Compute in F32, narrow back.
+    DType fb_dt = grad_out.dtype();
+    bool fb_half = (fb_dt == DType::Float16 || fb_dt == DType::BFloat16);
+    const Tensor go = fb_half ? grad_out.to(DType::Float32) : grad_out;
+    const Tensor xf = fb_half ? x.to(DType::Float32) : x;
+    const Tensor wf = fb_half ? w.to(DType::Float32) : w;
+
     // grad_input = grad_out @ W
-    auto grad_x = matmul(grad_out, w);
+    auto grad_x = matmul(go, wf);
 
     // grad_weight = grad_out.T @ x
-    auto grad_out_t = transpose(grad_out, 0, 1);  // (out, batch)
-    auto grad_w = matmul(grad_out_t, x);          // (out, in)
+    auto grad_out_t = transpose(go, 0, 1);  // (out, batch)
+    auto grad_w = matmul(grad_out_t, xf);   // (out, in)
 
     // grad_bias = sum(grad_out, dim=0)
-    auto grad_b = tenzor::sum(grad_out, 0, false);  // (out,)
+    auto grad_b = tenzor::sum(go, 0, false);  // (out,)
 
+    if (fb_half) {
+        grad_x = grad_x.to(fb_dt);
+        grad_w = grad_w.to(fb_dt);
+        grad_b = grad_b.to(fb_dt);
+    }
     return {grad_x, grad_w, grad_b};
 }
 

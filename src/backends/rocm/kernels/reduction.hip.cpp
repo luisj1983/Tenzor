@@ -805,6 +805,25 @@ static void launch_full_reduction_min(const T* d_input, T* d_output, int64_t n, 
  * @brief Launch dimensional reduction sum
  * @tparam T Data type
  */
+// Per-thread persistent device scratch for the reduction shape/strides metadata.
+// Max rank is 8 (enforced by the ndim>8 guards), so 16 int64 (8 shape + 8
+// strides) suffices. Reused across calls to avoid a per-call hipMalloc/hipFree
+// pair; each launcher hipStreamSynchronize's before returning, so the buffer is
+// safe to overwrite on the next call. Freed by the OS at process exit.
+static int64_t* reduction_meta_scratch() {
+    static thread_local int64_t* buf = []() -> int64_t* {
+        int64_t* p = nullptr;
+        hipError_t e = hipMalloc(&p, 16 * sizeof(int64_t));
+        if (e != hipSuccess) {
+            throw std::runtime_error(
+                std::string("rocm reduction scratch alloc failed: ") +
+                hipGetErrorString(e));
+        }
+        return p;
+    }();
+    return buf;
+}
+
 template<typename T>
 static void launch_dim_reduction_sum(
     const T* d_input,
@@ -816,6 +835,9 @@ static void launch_dim_reduction_sum(
 ) {
     const int64_t ndim = input_shape.size();
     const int64_t dim_size = input_shape[dim];
+    if (ndim > 8) {  // on-device index buffers are fixed at 8 dims
+        throw std::runtime_error("rocm reduction: tensor rank > 8 is unsupported");
+    }
 
     // Compute output size
     int64_t output_size = 1;
@@ -832,8 +854,8 @@ static void launch_dim_reduction_sum(
     // Copy shape and strides to device
     int64_t* d_shape;
     int64_t* d_strides;
-    HIP_CHECK(hipMalloc(&d_shape, ndim * sizeof(int64_t)));
-    HIP_CHECK(hipMalloc(&d_strides, ndim * sizeof(int64_t)));
+    d_shape = reduction_meta_scratch();  // persistent per-thread scratch
+    d_strides = d_shape + 8;  // strides occupy scratch[8..15]
     HIP_CHECK(hipMemcpy(d_shape, input_shape.data(), ndim * sizeof(int64_t), hipMemcpyHostToDevice));
     HIP_CHECK(hipMemcpy(d_strides, input_strides.data(), ndim * sizeof(int64_t), hipMemcpyHostToDevice));
 
@@ -844,8 +866,6 @@ static void launch_dim_reduction_sum(
 
     // Must wait for kernel to complete before freeing device memory it uses
     HIP_CHECK(hipStreamSynchronize(stream));
-    HIP_CHECK(hipFree(d_shape));
-    HIP_CHECK(hipFree(d_strides));
 }
 
 /**
@@ -864,6 +884,9 @@ static void launch_dim_reduction_var(
 ) {
     const int64_t ndim = input_shape.size();
     const int64_t dim_size = input_shape[dim];
+    if (ndim > 8) {  // on-device index buffers are fixed at 8 dims
+        throw std::runtime_error("rocm reduction: tensor rank > 8 is unsupported");
+    }
 
     // Compute output size
     int64_t output_size = 1;
@@ -880,8 +903,8 @@ static void launch_dim_reduction_var(
     // Copy shape and strides to device
     int64_t* d_shape;
     int64_t* d_strides;
-    HIP_CHECK(hipMalloc(&d_shape, ndim * sizeof(int64_t)));
-    HIP_CHECK(hipMalloc(&d_strides, ndim * sizeof(int64_t)));
+    d_shape = reduction_meta_scratch();  // persistent per-thread scratch
+    d_strides = d_shape + 8;  // strides occupy scratch[8..15]
     HIP_CHECK(hipMemcpy(d_shape, input_shape.data(), ndim * sizeof(int64_t), hipMemcpyHostToDevice));
     HIP_CHECK(hipMemcpy(d_strides, input_strides.data(), ndim * sizeof(int64_t), hipMemcpyHostToDevice));
 
@@ -892,8 +915,6 @@ static void launch_dim_reduction_var(
 
     // Must wait for kernel to complete before freeing device memory it uses
     HIP_CHECK(hipStreamSynchronize(stream));
-    HIP_CHECK(hipFree(d_shape));
-    HIP_CHECK(hipFree(d_strides));
 }
 
 /**
@@ -912,6 +933,9 @@ static void launch_dim_reduction_norm(
 ) {
     const int64_t ndim = input_shape.size();
     const int64_t dim_size = input_shape[dim];
+    if (ndim > 8) {  // on-device index buffers are fixed at 8 dims
+        throw std::runtime_error("rocm reduction: tensor rank > 8 is unsupported");
+    }
 
     // Compute output size
     int64_t output_size = 1;
@@ -928,8 +952,8 @@ static void launch_dim_reduction_norm(
     // Copy shape and strides to device
     int64_t* d_shape;
     int64_t* d_strides;
-    HIP_CHECK(hipMalloc(&d_shape, ndim * sizeof(int64_t)));
-    HIP_CHECK(hipMalloc(&d_strides, ndim * sizeof(int64_t)));
+    d_shape = reduction_meta_scratch();  // persistent per-thread scratch
+    d_strides = d_shape + 8;  // strides occupy scratch[8..15]
     HIP_CHECK(hipMemcpy(d_shape, input_shape.data(), ndim * sizeof(int64_t), hipMemcpyHostToDevice));
     HIP_CHECK(hipMemcpy(d_strides, input_strides.data(), ndim * sizeof(int64_t), hipMemcpyHostToDevice));
 
@@ -940,8 +964,6 @@ static void launch_dim_reduction_norm(
 
     // Must wait for kernel to complete before freeing device memory it uses
     HIP_CHECK(hipStreamSynchronize(stream));
-    HIP_CHECK(hipFree(d_shape));
-    HIP_CHECK(hipFree(d_strides));
 }
 
 /**
@@ -959,6 +981,9 @@ static void launch_dim_reduction_max(
 ) {
     const int64_t ndim = input_shape.size();
     const int64_t dim_size = input_shape[dim];
+    if (ndim > 8) {  // on-device index buffers are fixed at 8 dims
+        throw std::runtime_error("rocm reduction: tensor rank > 8 is unsupported");
+    }
 
     int64_t output_size = 1;
     for (int64_t i = 0; i < ndim; i++) {
@@ -973,8 +998,8 @@ static void launch_dim_reduction_max(
 
     int64_t* d_shape;
     int64_t* d_strides;
-    HIP_CHECK(hipMalloc(&d_shape, ndim * sizeof(int64_t)));
-    HIP_CHECK(hipMalloc(&d_strides, ndim * sizeof(int64_t)));
+    d_shape = reduction_meta_scratch();  // persistent per-thread scratch
+    d_strides = d_shape + 8;  // strides occupy scratch[8..15]
     HIP_CHECK(hipMemcpy(d_shape, input_shape.data(), ndim * sizeof(int64_t), hipMemcpyHostToDevice));
     HIP_CHECK(hipMemcpy(d_strides, input_strides.data(), ndim * sizeof(int64_t), hipMemcpyHostToDevice));
 
@@ -984,8 +1009,6 @@ static void launch_dim_reduction_max(
 
     // Must wait for kernel to complete before freeing device memory it uses
     HIP_CHECK(hipStreamSynchronize(stream));
-    HIP_CHECK(hipFree(d_shape));
-    HIP_CHECK(hipFree(d_strides));
 }
 
 /**
@@ -1003,6 +1026,9 @@ static void launch_dim_reduction_min(
 ) {
     const int64_t ndim = input_shape.size();
     const int64_t dim_size = input_shape[dim];
+    if (ndim > 8) {  // on-device index buffers are fixed at 8 dims
+        throw std::runtime_error("rocm reduction: tensor rank > 8 is unsupported");
+    }
 
     int64_t output_size = 1;
     for (int64_t i = 0; i < ndim; i++) {
@@ -1017,8 +1043,8 @@ static void launch_dim_reduction_min(
 
     int64_t* d_shape;
     int64_t* d_strides;
-    HIP_CHECK(hipMalloc(&d_shape, ndim * sizeof(int64_t)));
-    HIP_CHECK(hipMalloc(&d_strides, ndim * sizeof(int64_t)));
+    d_shape = reduction_meta_scratch();  // persistent per-thread scratch
+    d_strides = d_shape + 8;  // strides occupy scratch[8..15]
     HIP_CHECK(hipMemcpy(d_shape, input_shape.data(), ndim * sizeof(int64_t), hipMemcpyHostToDevice));
     HIP_CHECK(hipMemcpy(d_strides, input_strides.data(), ndim * sizeof(int64_t), hipMemcpyHostToDevice));
 
@@ -1028,8 +1054,6 @@ static void launch_dim_reduction_min(
 
     // Must wait for kernel to complete before freeing device memory it uses
     HIP_CHECK(hipStreamSynchronize(stream));
-    HIP_CHECK(hipFree(d_shape));
-    HIP_CHECK(hipFree(d_strides));
 }
 
 /**
@@ -1047,6 +1071,9 @@ static void launch_dim_argmax(
 ) {
     const int64_t ndim = input_shape.size();
     const int64_t dim_size = input_shape[dim];
+    if (ndim > 8) {  // on-device index buffers are fixed at 8 dims
+        throw std::runtime_error("rocm reduction: tensor rank > 8 is unsupported");
+    }
 
     int64_t output_size = 1;
     for (int64_t i = 0; i < ndim; i++) {
@@ -1061,8 +1088,8 @@ static void launch_dim_argmax(
 
     int64_t* d_shape;
     int64_t* d_strides;
-    HIP_CHECK(hipMalloc(&d_shape, ndim * sizeof(int64_t)));
-    HIP_CHECK(hipMalloc(&d_strides, ndim * sizeof(int64_t)));
+    d_shape = reduction_meta_scratch();  // persistent per-thread scratch
+    d_strides = d_shape + 8;  // strides occupy scratch[8..15]
     HIP_CHECK(hipMemcpy(d_shape, input_shape.data(), ndim * sizeof(int64_t), hipMemcpyHostToDevice));
     HIP_CHECK(hipMemcpy(d_strides, input_strides.data(), ndim * sizeof(int64_t), hipMemcpyHostToDevice));
 
@@ -1071,8 +1098,6 @@ static void launch_dim_argmax(
         d_input, d_output, d_shape, d_strides, ndim, dim, output_size, dim_size);
 
     HIP_CHECK(hipStreamSynchronize(stream));
-    HIP_CHECK(hipFree(d_shape));
-    HIP_CHECK(hipFree(d_strides));
 }
 
 /**
@@ -1090,6 +1115,9 @@ static void launch_dim_argmin(
 ) {
     const int64_t ndim = input_shape.size();
     const int64_t dim_size = input_shape[dim];
+    if (ndim > 8) {  // on-device index buffers are fixed at 8 dims
+        throw std::runtime_error("rocm reduction: tensor rank > 8 is unsupported");
+    }
 
     int64_t output_size = 1;
     for (int64_t i = 0; i < ndim; i++) {
@@ -1104,8 +1132,8 @@ static void launch_dim_argmin(
 
     int64_t* d_shape;
     int64_t* d_strides;
-    HIP_CHECK(hipMalloc(&d_shape, ndim * sizeof(int64_t)));
-    HIP_CHECK(hipMalloc(&d_strides, ndim * sizeof(int64_t)));
+    d_shape = reduction_meta_scratch();  // persistent per-thread scratch
+    d_strides = d_shape + 8;  // strides occupy scratch[8..15]
     HIP_CHECK(hipMemcpy(d_shape, input_shape.data(), ndim * sizeof(int64_t), hipMemcpyHostToDevice));
     HIP_CHECK(hipMemcpy(d_strides, input_strides.data(), ndim * sizeof(int64_t), hipMemcpyHostToDevice));
 
@@ -1114,8 +1142,6 @@ static void launch_dim_argmin(
         d_input, d_output, d_shape, d_strides, ndim, dim, output_size, dim_size);
 
     HIP_CHECK(hipStreamSynchronize(stream));
-    HIP_CHECK(hipFree(d_shape));
-    HIP_CHECK(hipFree(d_strides));
 }
 
 /**
@@ -1133,6 +1159,9 @@ static void launch_dim_prod(
 ) {
     const int64_t ndim = input_shape.size();
     const int64_t dim_size = input_shape[dim];
+    if (ndim > 8) {  // on-device index buffers are fixed at 8 dims
+        throw std::runtime_error("rocm reduction: tensor rank > 8 is unsupported");
+    }
 
     int64_t output_size = 1;
     for (int64_t i = 0; i < ndim; i++) {
@@ -1147,8 +1176,8 @@ static void launch_dim_prod(
 
     int64_t* d_shape;
     int64_t* d_strides;
-    HIP_CHECK(hipMalloc(&d_shape, ndim * sizeof(int64_t)));
-    HIP_CHECK(hipMalloc(&d_strides, ndim * sizeof(int64_t)));
+    d_shape = reduction_meta_scratch();  // persistent per-thread scratch
+    d_strides = d_shape + 8;  // strides occupy scratch[8..15]
     HIP_CHECK(hipMemcpy(d_shape, input_shape.data(), ndim * sizeof(int64_t), hipMemcpyHostToDevice));
     HIP_CHECK(hipMemcpy(d_strides, input_strides.data(), ndim * sizeof(int64_t), hipMemcpyHostToDevice));
 
@@ -1157,8 +1186,6 @@ static void launch_dim_prod(
         d_input, d_output, d_shape, d_strides, ndim, dim, output_size, dim_size);
 
     HIP_CHECK(hipStreamSynchronize(stream));
-    HIP_CHECK(hipFree(d_shape));
-    HIP_CHECK(hipFree(d_strides));
 }
 
 // ============================================================================
@@ -1280,20 +1307,13 @@ auto sum_kernel(const Tensor& input_raw, int64_t dim, bool keepdim, hipStream_t 
             break;
         }
         case DType::Float16: {
-            auto* input_data = reinterpret_cast<const __half*>(input.data<Float16>());
-            auto* output_data = reinterpret_cast<__half*>(output.data<Float16>());
-
-            if (full_reduction) {
-                launch_full_reduction_sum(input_data, output_data, input.numel(), stream);
-            } else {
-                launch_dim_reduction_sum(
-                    input_data, output_data,
-                    std::vector<int64_t>(input_shape.begin(), input_shape.end()),
-                    std::vector<int64_t>(input_strides.begin(), input_strides.end()),
-                    dim, stream
-                );
-            }
-            break;
+            // Accumulate in Float32: the __half reduction kernels accumulate in
+            // the element type, so fp16 sums lose precision and saturate to +Inf
+            // past 65504. Mirror the BFloat16 path (widen, sum, narrow) for parity
+            // with mean/var and the CPU/CUDA backends.
+            auto input_f32 = input.to(DType::Float32);
+            auto result_f32 = sum_kernel(input_f32, full_reduction ? INT64_MIN : dim, keepdim, stream);
+            return result_f32.to(DType::Float16);
         }
         case DType::BFloat16: {
             auto input_f32 = input.to(DType::Float32);
@@ -3009,6 +3029,9 @@ static void launch_dim_any(
 ) {
     const int64_t ndim = input_shape.size();
     const int64_t dim_size = input_shape[dim];
+    if (ndim > 8) {  // on-device index buffers are fixed at 8 dims
+        throw std::runtime_error("rocm reduction: tensor rank > 8 is unsupported");
+    }
 
     int64_t output_size = 1;
     for (int64_t i = 0; i < ndim; i++) {
@@ -3023,8 +3046,8 @@ static void launch_dim_any(
 
     int64_t* d_shape;
     int64_t* d_strides;
-    HIP_CHECK(hipMalloc(&d_shape, ndim * sizeof(int64_t)));
-    HIP_CHECK(hipMalloc(&d_strides, ndim * sizeof(int64_t)));
+    d_shape = reduction_meta_scratch();  // persistent per-thread scratch
+    d_strides = d_shape + 8;  // strides occupy scratch[8..15]
     HIP_CHECK(hipMemcpy(d_shape, input_shape.data(), ndim * sizeof(int64_t), hipMemcpyHostToDevice));
     HIP_CHECK(hipMemcpy(d_strides, input_strides.data(), ndim * sizeof(int64_t), hipMemcpyHostToDevice));
 
@@ -3033,8 +3056,6 @@ static void launch_dim_any(
         d_input, d_output, d_shape, d_strides, ndim, dim, output_size, dim_size);
 
     HIP_CHECK(hipStreamSynchronize(stream));
-    HIP_CHECK(hipFree(d_shape));
-    HIP_CHECK(hipFree(d_strides));
 }
 
 /**
@@ -3052,6 +3073,9 @@ static void launch_dim_all(
 ) {
     const int64_t ndim = input_shape.size();
     const int64_t dim_size = input_shape[dim];
+    if (ndim > 8) {  // on-device index buffers are fixed at 8 dims
+        throw std::runtime_error("rocm reduction: tensor rank > 8 is unsupported");
+    }
 
     int64_t output_size = 1;
     for (int64_t i = 0; i < ndim; i++) {
@@ -3066,8 +3090,8 @@ static void launch_dim_all(
 
     int64_t* d_shape;
     int64_t* d_strides;
-    HIP_CHECK(hipMalloc(&d_shape, ndim * sizeof(int64_t)));
-    HIP_CHECK(hipMalloc(&d_strides, ndim * sizeof(int64_t)));
+    d_shape = reduction_meta_scratch();  // persistent per-thread scratch
+    d_strides = d_shape + 8;  // strides occupy scratch[8..15]
     HIP_CHECK(hipMemcpy(d_shape, input_shape.data(), ndim * sizeof(int64_t), hipMemcpyHostToDevice));
     HIP_CHECK(hipMemcpy(d_strides, input_strides.data(), ndim * sizeof(int64_t), hipMemcpyHostToDevice));
 
@@ -3076,8 +3100,6 @@ static void launch_dim_all(
         d_input, d_output, d_shape, d_strides, ndim, dim, output_size, dim_size);
 
     HIP_CHECK(hipStreamSynchronize(stream));
-    HIP_CHECK(hipFree(d_shape));
-    HIP_CHECK(hipFree(d_strides));
 }
 
 /**
@@ -3525,8 +3547,8 @@ auto logsumexp_kernel(const Tensor& input, int64_t dim, bool keepdim, hipStream_
         // Copy shape and strides to device
         int64_t* d_shape;
         int64_t* d_strides;
-        HIP_CHECK(hipMalloc(&d_shape, ndim * sizeof(int64_t)));
-        HIP_CHECK(hipMalloc(&d_strides, ndim * sizeof(int64_t)));
+        d_shape = reduction_meta_scratch();  // persistent per-thread scratch
+        d_strides = d_shape + 8;  // strides occupy scratch[8..15]
         HIP_CHECK(hipMemcpy(d_shape, shape_vec.data(), ndim * sizeof(int64_t), hipMemcpyHostToDevice));
         HIP_CHECK(hipMemcpy(d_strides, strides_vec.data(), ndim * sizeof(int64_t), hipMemcpyHostToDevice));
 
@@ -3581,8 +3603,6 @@ auto logsumexp_kernel(const Tensor& input, int64_t dim, bool keepdim, hipStream_
 
         // Must wait for kernels to complete before freeing device memory they use
         HIP_CHECK(hipStreamSynchronize(stream));
-        HIP_CHECK(hipFree(d_shape));
-        HIP_CHECK(hipFree(d_strides));
     }
 
     hipError_t err = hipGetLastError();
@@ -3702,8 +3722,8 @@ auto median_kernel(const Tensor& input, int64_t dim, bool keepdim, hipStream_t s
     // Copy shape and strides to device
     int64_t* d_shape;
     int64_t* d_strides;
-    HIP_CHECK(hipMalloc(&d_shape, ndim * sizeof(int64_t)));
-    HIP_CHECK(hipMalloc(&d_strides, ndim * sizeof(int64_t)));
+    d_shape = reduction_meta_scratch();  // persistent per-thread scratch
+    d_strides = d_shape + 8;  // strides occupy scratch[8..15]
 
     std::vector<int64_t> shape_vec(input_shape.begin(), input_shape.end());
     std::vector<int64_t> strides_vec(input.strides().begin(), input.strides().end());
@@ -3731,16 +3751,12 @@ auto median_kernel(const Tensor& input, int64_t dim, bool keepdim, hipStream_t s
             auto result = median_kernel(input_f32, dim, keepdim, stream);
             result[0] = result[0].to(dtype);
             HIP_CHECK(hipStreamSynchronize(stream));
-            HIP_CHECK(hipFree(d_shape));
-            HIP_CHECK(hipFree(d_strides));
             return result;
         }
         default: throw std::runtime_error("median_kernel: unsupported dtype");
     }
 
     HIP_CHECK(hipStreamSynchronize(stream));
-    HIP_CHECK(hipFree(d_shape));
-    HIP_CHECK(hipFree(d_strides));
 
     hipError_t err = hipGetLastError();
     if (err != hipSuccess) {
@@ -3851,8 +3867,8 @@ auto mode_kernel(const Tensor& input, int64_t dim, bool keepdim, hipStream_t str
 
     int64_t* d_shape;
     int64_t* d_strides;
-    HIP_CHECK(hipMalloc(&d_shape, ndim * sizeof(int64_t)));
-    HIP_CHECK(hipMalloc(&d_strides, ndim * sizeof(int64_t)));
+    d_shape = reduction_meta_scratch();  // persistent per-thread scratch
+    d_strides = d_shape + 8;  // strides occupy scratch[8..15]
 
     std::vector<int64_t> shape_vec(input_shape.begin(), input_shape.end());
     std::vector<int64_t> strides_vec(input.strides().begin(), input.strides().end());
@@ -3880,16 +3896,12 @@ auto mode_kernel(const Tensor& input, int64_t dim, bool keepdim, hipStream_t str
             auto result = mode_kernel(input_f32, dim, keepdim, stream);
             result[0] = result[0].to(dtype);
             HIP_CHECK(hipStreamSynchronize(stream));
-            HIP_CHECK(hipFree(d_shape));
-            HIP_CHECK(hipFree(d_strides));
             return result;
         }
         default: throw std::runtime_error("mode_kernel: unsupported dtype");
     }
 
     HIP_CHECK(hipStreamSynchronize(stream));
-    HIP_CHECK(hipFree(d_shape));
-    HIP_CHECK(hipFree(d_strides));
 
     hipError_t err = hipGetLastError();
     if (err != hipSuccess) {
@@ -3993,6 +4005,9 @@ static void launch_dim_count_nonzero(
 ) {
     const int64_t ndim = input_shape.size();
     const int64_t dim_size = input_shape[dim];
+    if (ndim > 8) {  // on-device index buffers are fixed at 8 dims
+        throw std::runtime_error("rocm reduction: tensor rank > 8 is unsupported");
+    }
 
     int64_t output_size = 1;
     for (int64_t i = 0; i < ndim; i++) {
@@ -4003,8 +4018,8 @@ static void launch_dim_count_nonzero(
     // Copy shape and strides to device
     int64_t* d_shape;
     int64_t* d_strides;
-    HIP_CHECK(hipMalloc(&d_shape, ndim * sizeof(int64_t)));
-    HIP_CHECK(hipMalloc(&d_strides, ndim * sizeof(int64_t)));
+    d_shape = reduction_meta_scratch();  // persistent per-thread scratch
+    d_strides = d_shape + 8;  // strides occupy scratch[8..15]
     HIP_CHECK(hipMemcpy(d_shape, input_shape.data(), ndim * sizeof(int64_t), hipMemcpyHostToDevice));
     HIP_CHECK(hipMemcpy(d_strides, input_strides.data(), ndim * sizeof(int64_t), hipMemcpyHostToDevice));
 
@@ -4014,8 +4029,6 @@ static void launch_dim_count_nonzero(
 
     // Must wait for kernel to complete before freeing device memory it uses
     HIP_CHECK(hipStreamSynchronize(stream));
-    HIP_CHECK(hipFree(d_shape));
-    HIP_CHECK(hipFree(d_strides));
 }
 
 auto count_nonzero_dim_kernel(const Tensor& input, int64_t dim, hipStream_t stream) -> Tensor {

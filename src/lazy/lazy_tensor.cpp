@@ -343,6 +343,13 @@ static auto matmul_shape(const std::vector<int64_t>& a,
 // ============================================================================
 
 static auto binary_lazy_op(OpId op, const LazyTensor& a, const LazyTensor& b) -> LazyTensor {
+    // Validate device at graph-build time so a mismatch is a clear error here
+    // rather than a confusing failure deep inside execute_node's dispatch.
+    if (a.device() != b.device()) {
+        throw std::runtime_error(
+            "LazyTensor binary op: operands are on different devices (" +
+            a.device().to_string() + " vs " + b.device().to_string() + ")");
+    }
     auto graph = merge_graphs(a, b);
     auto out_shape = broadcast_shape(a.shape(), b.shape());
     // B.7: use the real type-promotion table from core/dtype.hpp so e.g.
@@ -376,6 +383,11 @@ auto div(const LazyTensor& a, const LazyTensor& b) -> LazyTensor {
 }
 
 auto matmul(const LazyTensor& a, const LazyTensor& b) -> LazyTensor {
+    if (a.device() != b.device()) {
+        throw std::runtime_error(
+            "LazyTensor matmul: operands are on different devices (" +
+            a.device().to_string() + " vs " + b.device().to_string() + ")");
+    }
     auto graph = merge_graphs(a, b);
     auto out_shape = matmul_shape(a.shape(), b.shape());
     auto out_dtype = promote_types(a.dtype(), b.dtype());

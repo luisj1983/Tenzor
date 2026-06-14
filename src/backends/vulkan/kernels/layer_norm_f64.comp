@@ -11,8 +11,8 @@ layout(binding = 2) buffer Gamma { double gamma_data[]; };    // Optional affine
 layout(binding = 3) buffer Beta { double beta_data[]; };      // Optional affine parameter
 // Saved-stats outputs (Float32 contract, one per batch element) — required by
 // LayerNormBackward. Without these the backward read rstd=0 and produced zero grad.
-layout(binding = 4) buffer MeanOut { float mean_out[]; };
-layout(binding = 5) buffer RstdOut { float rstd_out[]; };
+layout(binding = 4) buffer MeanOut { double mean_out[]; };
+layout(binding = 5) buffer RstdOut { double rstd_out[]; };
 
 layout(push_constant) uniform PushConstants {
     uint batch_size;
@@ -75,8 +75,8 @@ void main() {
 
     // Persist saved stats (one thread per batch element) for the backward pass.
     if (tid == 0) {
-        mean_out[batch_idx] = float(mean);
-        rstd_out[batch_idx] = float(inv_std);
+        mean_out[batch_idx] = mean;
+        rstd_out[batch_idx] = inv_std;
     }
     barrier();
 

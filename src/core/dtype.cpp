@@ -23,52 +23,55 @@ Float16::Float16(float f) {
     uint32_t f_bits;
     std::memcpy(&f_bits, &f, sizeof(float));
 
-    // Extract sign, exponent, and mantissa from float32
-    uint32_t sign = (f_bits >> 31) & 0x1;
-    uint32_t exp = (f_bits >> 23) & 0xFF;
-    uint32_t mantissa = f_bits & 0x7FFFFF;
+    // Half sign bit (bit 31 of float -> bit 15 of half)
+    uint16_t sign = static_cast<uint16_t>((f_bits >> 16) & 0x8000);
+    int32_t  exp  = static_cast<int32_t>((f_bits >> 23) & 0xFF);
+    uint32_t mant = f_bits & 0x7FFFFF;
 
-    uint16_t h_sign = static_cast<uint16_t>(sign);
-    uint16_t h_exp;
-    uint16_t h_mantissa;
-
-    // Handle special cases
     if (exp == 0xFF) {
-        // Infinity or NaN
-        h_exp = 0x1F;
-        h_mantissa = mantissa ? 0x3FF : 0;  // Preserve NaN, zero for infinity
-    } else if (exp == 0) {
-        // Zero or denormalized number
-        h_exp = 0;
-        h_mantissa = 0;
-    } else {
-        // Normalized number
-        int32_t new_exp = static_cast<int32_t>(exp) - 127 + 15;
-
-        if (new_exp >= 0x1F) {
-            // Overflow to infinity
-            h_exp = 0x1F;
-            h_mantissa = 0;
-        } else if (new_exp <= 0) {
-            // Underflow to zero or denormalized
-            if (new_exp >= -10) {
-                // Denormalized number
-                uint32_t m = (mantissa | 0x800000) >> (1 - new_exp);
-                h_mantissa = static_cast<uint16_t>((m >> 13) & 0x3FF);
-                h_exp = 0;
-            } else {
-                // Complete underflow to zero
-                h_exp = 0;
-                h_mantissa = 0;
-            }
-        } else {
-            // Normal case
-            h_exp = static_cast<uint16_t>(new_exp);
-            h_mantissa = static_cast<uint16_t>((mantissa >> 13) & 0x3FF);
-        }
+        // Inf (mant==0) or NaN (mant!=0); keep a non-zero mantissa for NaN.
+        bits = static_cast<uint16_t>(sign | 0x7C00 | (mant ? 0x0200 : 0));
+        return;
     }
 
-    bits = (h_sign << 15) | (h_exp << 10) | h_mantissa;
+    // Rebias exponent from float (127) to half (15).
+    int32_t e = exp - 127 + 15;
+
+    if (e >= 0x1F) {
+        // Overflow -> signed infinity.
+        bits = static_cast<uint16_t>(sign | 0x7C00);
+        return;
+    }
+
+    if (e <= 0) {
+        // Subnormal half or underflow to (signed) zero, round-to-nearest-even.
+        if (e < -10) {
+            bits = sign;  // magnitude too small to represent
+            return;
+        }
+        mant |= 0x800000;            // restore implicit leading 1
+        int32_t shift = 14 - e;      // discards `shift` low bits -> 10-bit field
+        uint32_t half_mant = mant >> shift;
+        uint32_t remainder = mant & ((1u << shift) - 1);
+        uint32_t halfway = 1u << (shift - 1);
+        if (remainder > halfway || (remainder == halfway && (half_mant & 1))) {
+            half_mant++;  // may carry subnormal -> smallest normal (exp field 1)
+        }
+        bits = static_cast<uint16_t>(sign | half_mant);
+        return;
+    }
+
+    // Normal case, round-to-nearest-even on the 13 discarded mantissa bits.
+    uint32_t half_mant = mant >> 13;
+    uint32_t remainder = mant & 0x1FFF;
+    uint16_t h = static_cast<uint16_t>(
+        sign | (static_cast<uint32_t>(e) << 10) | half_mant);
+    if (remainder > 0x1000 || (remainder == 0x1000 && (half_mant & 1))) {
+        // Increment propagates a mantissa carry into the exponent; if the
+        // exponent was 0x1E this correctly overflows to 0x7C00 (infinity).
+        h++;
+    }
+    bits = h;
 }
 
 /**

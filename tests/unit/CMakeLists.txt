@@ -6,6 +6,19 @@
 add_executable(test_embedding test_embedding.cpp)
 target_link_libraries(test_embedding PRIVATE tenzor_core GTest::gtest_main)
 
+# Per-layer quantization config (layer_overrides / skip_layers) regression.
+# Uses its own main() that calls tenzor::initialize(), so link plain gtest.
+add_executable(test_quantize_per_layer_config test_quantize_per_layer_config.cpp)
+target_link_libraries(test_quantize_per_layer_config PRIVATE tenzor_core GTest::gtest)
+tenzor_discover_tests(test_quantize_per_layer_config DISCOVERY_TIMEOUT 60 BACKENDS cpu LABELS "unit;quantization")
+
+# Metal-independent C++ logic of the MPS fixes (mps-1 broadcast, mps-2 dtype
+# rejection, mps-3 buffer lookup). The Metal kernel dispatch itself is
+# Apple-only; this exercises the decision logic that contains the fixes.
+add_executable(test_mps_fix_logic test_mps_fix_logic.cpp)
+target_link_libraries(test_mps_fix_logic PRIVATE tenzor_core GTest::gtest)
+tenzor_discover_tests(test_mps_fix_logic DISCOVERY_TIMEOUT 60 BACKENDS cpu LABELS "unit;mps")
+
 add_executable(test_op_id_names test_op_id_names.cpp)
 target_link_libraries(test_op_id_names PRIVATE tenzor_core GTest::gtest_main)
 tenzor_discover_tests(test_op_id_names DISCOVERY_TIMEOUT 60 BACKENDS cpu LABELS "unit;opid")

@@ -102,15 +102,56 @@ void CachingAllocator::free(void* ptr, int device) {
         dev_alloc = &device_allocators_[device];
     }
 
-    std::lock_guard<std::mutex> lock(dev_alloc->mutex);
+    bool not_found = false;
+    {
+        std::lock_guard<std::mutex> lock(dev_alloc->mutex);
 
-    dev_alloc->stats.num_frees++;
+        dev_alloc->stats.num_frees++;
 
-    // Find the block
-    auto it = dev_alloc->all_blocks.find(ptr);
-    if (it == dev_alloc->all_blocks.end()) {
-        ALLOC_DEBUG("FREE ERROR: ptr=" << ptr << " device=" << device << " NOT FOUND in all_blocks!");
-        // Check all devices (need map lock for iteration)
+        // Find the block
+        auto it = dev_alloc->all_blocks.find(ptr);
+        if (it == dev_alloc->all_blocks.end()) {
+            ALLOC_DEBUG("FREE ERROR: ptr=" << ptr << " device=" << device << " NOT FOUND in all_blocks!");
+            not_found = true;
+        } else {
+            Block* block = it->second.get();
+            if (!block->allocated) {
+                ALLOC_DEBUG("FREE ERROR: ptr=" << ptr << " DOUBLE FREE!");
+                throw std::runtime_error("Attempted to free already freed pointer");
+            }
+
+            ALLOC_DEBUG("FREE: ptr=" << ptr << " size=" << block->size << " device=" << device);
+
+            // Mark as free
+            block->allocated = false;
+
+            // Update statistics
+            if (dev_alloc->stats.allocated_bytes >= block->size) {
+                dev_alloc->stats.allocated_bytes -= block->size;
+            }
+            dev_alloc->stats.cached_bytes += block->size;
+
+            // Try to merge with adjacent blocks
+            if (merge_enabled_) {
+                try_merge_blocks(block);
+            }
+
+            // Add to free blocks set
+            dev_alloc->free_blocks.insert(block);
+
+            // Enforce cache limit if set
+            if (max_cached_memory_ > 0) {
+                enforce_cache_limit(device);
+            }
+        }
+    }  // device mutex released
+
+    if (not_found) {
+        // Diagnostic cross-device scan. Performed AFTER releasing this device's
+        // mutex so it obeys the global lock order (map_mutex_ before any device
+        // mutex). Acquiring map_mutex_ while still holding dev_alloc->mutex was
+        // a device->map inversion that could deadlock against empty_cache() /
+        // stats (which take map->device).
         {
             std::lock_guard<std::mutex> map_lock(map_mutex_);
             for (const auto& [dev_id, da] : device_allocators_) {
@@ -123,36 +164,6 @@ void CachingAllocator::free(void* ptr, int device) {
             }
         }
         throw std::runtime_error("Attempted to free pointer not allocated by CachingAllocator");
-    }
-
-    Block* block = it->second.get();
-    if (!block->allocated) {
-        ALLOC_DEBUG("FREE ERROR: ptr=" << ptr << " DOUBLE FREE!");
-        throw std::runtime_error("Attempted to free already freed pointer");
-    }
-
-    ALLOC_DEBUG("FREE: ptr=" << ptr << " size=" << block->size << " device=" << device);
-
-    // Mark as free
-    block->allocated = false;
-
-    // Update statistics
-    if (dev_alloc->stats.allocated_bytes >= block->size) {
-        dev_alloc->stats.allocated_bytes -= block->size;
-    }
-    dev_alloc->stats.cached_bytes += block->size;
-
-    // Try to merge with adjacent blocks
-    if (merge_enabled_) {
-        try_merge_blocks(block);
-    }
-
-    // Add to free blocks set
-    dev_alloc->free_blocks.insert(block);
-
-    // Enforce cache limit if set
-    if (max_cached_memory_ > 0) {
-        enforce_cache_limit(device);
     }
 }
 
@@ -367,8 +378,9 @@ Block* CachingAllocator::allocate_new_block(size_t size, int device, cudaStream_
     auto block = std::make_unique<Block>(ptr, size, device, stream);
     Block* block_ptr = block.get();
 
-    // Add to all_blocks
+    // Add to all_blocks (and the address-ordered index)
     device_alloc.all_blocks[ptr] = std::move(block);
+    device_alloc.blocks_by_addr[ptr] = block_ptr;
 
     // Update statistics
     device_alloc.stats.reserved_bytes += size;
@@ -397,8 +409,9 @@ bool CachingAllocator::split_block(Block* block, size_t size) {
     new_block->original_ptr = block->original_ptr;  // Inherit from parent for merge tracking
     Block* new_block_ptr = new_block.get();
 
-    // Add to all_blocks
+    // Add to all_blocks (and the address-ordered index)
     device_alloc.all_blocks[new_ptr] = std::move(new_block);
+    device_alloc.blocks_by_addr[new_ptr] = new_block_ptr;
 
     // Add to free blocks
     device_alloc.free_blocks.insert(new_block_ptr);
@@ -442,7 +455,8 @@ bool CachingAllocator::try_merge_blocks(Block* block) {
             // Expand current block
             block->size += next_block->size;
 
-            // Remove next block
+            // Remove next block (and its address-index entry)
+            device_alloc.blocks_by_addr.erase(next_ptr);
             device_alloc.all_blocks.erase(next_it);
 
             device_alloc.stats.num_merges++;
@@ -450,10 +464,55 @@ bool CachingAllocator::try_merge_blocks(Block* block) {
         }
     }
 
-    // Try to find a block before this one (more complex)
-    // We'd need to iterate through all blocks to find predecessor
-    // For efficiency, we skip backward merging in this implementation
-    // A more sophisticated approach would maintain a sorted map by address
+    // Backward merge: find the immediately-preceding block via the address
+    // index (O(log n)). `block` must remain the surviving object because the
+    // caller still references it, so we absorb the predecessor INTO `block` and
+    // re-key it to the predecessor's (lower) address.
+    {
+        auto addr_it = device_alloc.blocks_by_addr.find(block->ptr);
+        if (addr_it != device_alloc.blocks_by_addr.end() &&
+            addr_it != device_alloc.blocks_by_addr.begin()) {
+            auto prev_it = std::prev(addr_it);
+            Block* prev_block = prev_it->second;
+            void* prev_end = static_cast<char*>(prev_block->ptr) + prev_block->size;
+            if (prev_end == block->ptr && !prev_block->allocated &&
+                prev_block->original_ptr == block->original_ptr) {
+                ALLOC_DEBUG("MERGE(prev): prev_ptr=" << prev_block->ptr
+                            << " prev_size=" << prev_block->size
+                            << " + block_ptr=" << block->ptr
+                            << " block_size=" << block->size);
+
+                void* old_ptr = block->ptr;
+                void* new_ptr = prev_block->ptr;
+                size_t prev_size = prev_block->size;
+
+                // prev_block is currently a free block; mirror the forward-merge
+                // accounting (subtract the absorbed block's cached bytes).
+                device_alloc.free_blocks.erase(prev_block);
+                if (device_alloc.stats.cached_bytes >= prev_size) {
+                    device_alloc.stats.cached_bytes -= prev_size;
+                }
+
+                // Grow `block` downward to cover the predecessor's range.
+                block->ptr = new_ptr;
+                block->size += prev_size;
+
+                // Move `block`'s owning entry from old_ptr -> new_ptr and drop
+                // the predecessor's entry (destroying the prev Block object).
+                auto node = device_alloc.all_blocks.extract(old_ptr);
+                device_alloc.all_blocks.erase(new_ptr);  // destroys prev_block
+                node.key() = new_ptr;
+                device_alloc.all_blocks.insert(std::move(node));
+
+                // Update the address index to match.
+                device_alloc.blocks_by_addr.erase(old_ptr);
+                device_alloc.blocks_by_addr[new_ptr] = block;
+
+                device_alloc.stats.num_merges++;
+                merged = true;
+            }
+        }
+    }
 
     return merged;
 }
@@ -500,7 +559,8 @@ void CachingAllocator::release_block(Block* block) {
         device_alloc.stats.cached_bytes -= block->size;
     }
 
-    // Remove from all_blocks
+    // Remove from all_blocks (and the address-ordered index)
+    device_alloc.blocks_by_addr.erase(block->ptr);
     device_alloc.all_blocks.erase(block->ptr);
 }
 

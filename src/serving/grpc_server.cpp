@@ -8,6 +8,7 @@
 
 #ifdef TENZOR_HAS_GRPC
 
+#include <filesystem>
 #include "tenzor/serving/server.hpp"
 #include "tenzor/autograd/variable.hpp"
 #include "tenzor/ops/creation.hpp"
@@ -61,10 +62,35 @@ public:
             std::vector<int64_t> shape(tensor_data.shape().begin(), tensor_data.shape().end());
             DType dtype = tenzor::dtype_from_string(tensor_data.dtype());
 
-            auto input = tenzor::from_data(
-                reinterpret_cast<const float*>(tensor_data.data().data()),
-                shape, model->device
-            );
+            // Validate dims and buffer length before copying out of the
+            // protobuf-owned buffer. The old code reinterpret_cast the bytes as
+            // float and memcpy'd numel*sizeof(float) with NO length check, so a
+            // client sending shape=[1e9] with a few bytes triggered a massive
+            // OOB read. Honor the declared dtype instead of always reading float.
+            int64_t numel = 1;
+            for (int64_t d : shape) {
+                if (d < 0) {
+                    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT,
+                                        "negative tensor dimension");
+                }
+                if (__builtin_mul_overflow(numel, d, &numel)) {
+                    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT,
+                                        "tensor shape too large");
+                }
+            }
+            size_t required = static_cast<size_t>(numel) * tenzor::dtype_size(dtype);
+            if (tensor_data.data().size() < required) {
+                return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT,
+                                    "input data length does not match shape * dtype size");
+            }
+            auto host_input = tenzor::empty(shape, dtype, tenzor::Device::cpu());
+            if (required > 0) {
+                std::memcpy(host_input.storage()->data(),
+                            tensor_data.data().data(), required);
+            }
+            auto input = (model->device.type == tenzor::Device::Type::CPU)
+                             ? host_input
+                             : host_input.to(model->device);
 
             // Run inference via batcher
             auto future = model->batcher->submit(input);
@@ -123,7 +149,18 @@ public:
                            const LoadModelRequest* request,
                            LoadModelResponse* response) override {
         try {
-            repository_.load_model(request->model_name(), request->model_path(), Device::cpu());
+            // Reject absolute paths and '..' traversal so a client cannot make
+            // the server open/deserialize an arbitrary host file via the
+            // untrusted-input graph/state loader.
+            const std::string& mp = request->model_path();
+            if (std::filesystem::path(mp).is_absolute() ||
+                mp.find("..") != std::string::npos) {
+                response->set_success(false);
+                response->set_message(
+                    "model_path must be a relative path without '..'");
+                return grpc::Status::OK;
+            }
+            repository_.load_model(request->model_name(), mp, Device::cpu());
             response->set_success(true);
             response->set_message("Model loaded successfully");
             return grpc::Status::OK;

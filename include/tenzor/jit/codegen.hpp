@@ -129,7 +129,8 @@ public:
     static auto generate(const FusionGroup& group) -> std::string;
 
 private:
-    static auto emit_op(const ElemStep& step, const std::string& var_prefix) -> std::string;
+    static auto emit_op(const ElemStep& step, const std::string& var_prefix,
+                        DType dtype = DType::Float32) -> std::string;
     static auto dtype_to_cuda_type(DType dtype) -> std::string;
 };
 

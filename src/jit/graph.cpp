@@ -19,6 +19,7 @@
 #include <algorithm>
 #include <numeric>
 #include <queue>
+#include <unordered_map>
 #include <sstream>
 #include <stdexcept>
 
@@ -289,6 +290,14 @@ auto Graph::topological_sort() -> void {
         }
     }
 
+    // Map raw Node* -> shared_ptr once so the Kahn loop recovers the owning
+    // pointer in O(1) instead of an O(N) scan per popped node (was O(N^2)).
+    std::unordered_map<Node*, std::shared_ptr<Node>> node_ptrs;
+    node_ptrs.reserve(nodes_.size());
+    for (const auto& n : nodes_) {
+        node_ptrs.emplace(n.get(), n);
+    }
+
     // Kahn's algorithm for topological sort
     std::queue<Node*> zero_in_degree;
     for (const auto& node : nodes_) {
@@ -302,12 +311,9 @@ auto Graph::topological_sort() -> void {
         auto node = zero_in_degree.front();
         zero_in_degree.pop();
 
-        // Find the shared_ptr for this node
-        for (const auto& n : nodes_) {
-            if (n.get() == node) {
-                sorted.push_back(n);
-                break;
-            }
+        // Recover the shared_ptr for this node (O(1)).
+        if (auto it = node_ptrs.find(node); it != node_ptrs.end()) {
+            sorted.push_back(it->second);
         }
 
         // Reduce in-degree for successors

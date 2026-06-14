@@ -2072,6 +2072,26 @@ auto cast_kernel(const Tensor& input, DType target_dtype, sycl::queue& queue) ->
         queue.parallel_for(sycl::range<1>(numel * 2), [=](sycl::id<1> i) {
             out[i[0]] = static_cast<float>(in[i[0]]);
         });
+    } else if (src == DType::Float64 && dst == DType::Complex64) {
+        // Direct Float64 -> Complex64: narrow the real value ONCE. The generic
+        // two-hop fallback would go Float64 -> Float32 -> Complex64, discarding
+        // ~29 mantissa bits before the complex result is even formed.
+        const double* in = get_data_ptr<const double>(input);
+        float* out = reinterpret_cast<float*>(const_cast<void*>(output.data_ptr()));
+        queue.parallel_for(sycl::range<1>(numel), [=](sycl::id<1> i) {
+            int64_t k = i[0];
+            out[2 * k]     = static_cast<float>(in[k]);
+            out[2 * k + 1] = 0.0f;
+        });
+    } else if (src == DType::Float32 && dst == DType::Complex128) {
+        // Direct Float32 -> Complex128: widen the real value, no lossy hop.
+        const float* in = get_data_ptr<const float>(input);
+        double* out = reinterpret_cast<double*>(const_cast<void*>(output.data_ptr()));
+        queue.parallel_for(sycl::range<1>(numel), [=](sycl::id<1> i) {
+            int64_t k = i[0];
+            out[2 * k]     = static_cast<double>(in[k]);
+            out[2 * k + 1] = 0.0;
+        });
     } else {
         // Two-hop: src -> Float32 -> dst
         if (src != DType::Float32) {

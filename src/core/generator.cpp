@@ -2,6 +2,7 @@
 #include "tenzor/ops/creation.hpp"  // tenzor::manual_seed (for global RNG restore)
 #include <chrono>
 #include <sstream>
+#include <unordered_map>
 
 namespace tenzor {
 
@@ -73,7 +74,9 @@ auto Generator::clone() const -> std::unique_ptr<Generator> {
 }
 
 auto Generator::engine() -> std::mt19937_64& {
-    std::lock_guard lock(mutex_);
+    // No lock: the lock_guard here would be released before the caller uses the
+    // returned reference, providing a false sense of safety. Callers needing
+    // thread safety must use with_engine().
     return engine_;
 }
 
@@ -103,14 +106,19 @@ auto Generator::set_state(const GeneratorState& state) -> void {
 }
 
 auto default_generator(Device device) -> Generator& {
-    // One default generator per device type + index, thread-local
-    static thread_local Generator cpu_gen(Device::cpu());
-    static thread_local Generator cuda_gen(Device::cuda(0));
-
-    if (device.type == Device::Type::CPU) {
-        return cpu_gen;
+    // One default generator per (device type, index), thread-local so each
+    // thread has an independent RNG stream without locking. Keying only by
+    // type previously aliased rocm:0/oneapi/vulkan/mps/cuda:1 all onto the
+    // single cuda:0 generator, giving the wrong device() identity and a shared
+    // stream across physically distinct devices.
+    static thread_local std::unordered_map<uint64_t, std::unique_ptr<Generator>> gens;
+    const uint64_t key = (static_cast<uint64_t>(device.type) << 32) |
+                         static_cast<uint32_t>(device.index);
+    auto it = gens.find(key);
+    if (it == gens.end()) {
+        it = gens.emplace(key, std::make_unique<Generator>(device)).first;
     }
-    return cuda_gen;
+    return *it->second;
 }
 
 namespace {

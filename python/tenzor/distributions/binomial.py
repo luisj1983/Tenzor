@@ -77,6 +77,16 @@ class Binomial(Distribution):
         # Per-element scalar fall-back keeps memory bounded.
         if not np.any(nontrivial):
             return _wrap_numpy(out)
+        # Bound peak memory: the exact PMF materializes p.size * (n+1) float64
+        # values. For large total_count (or large batch) this is multi-GB, so
+        # fall back to the Normal/Stirling entropy approximation
+        # 0.5*log(2*pi*e*n*p*(1-p)), which is accurate precisely in the large-n
+        # regime where the exact path is infeasible.
+        if p.size * (n_int + 1) > 10_000_000:
+            with np.errstate(divide="ignore", invalid="ignore"):
+                approx = 0.5 * np.log(2.0 * np.pi * np.e * n_int * p * (1.0 - p))
+            out = np.where(nontrivial, approx, 0.0)
+            return _wrap_numpy(out)
         # General path.
         log_p = np.log(np.where(nontrivial, p, 0.5))
         log_1mp = np.log(np.where(nontrivial, 1.0 - p, 0.5))

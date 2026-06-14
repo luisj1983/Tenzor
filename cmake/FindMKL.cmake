@@ -12,6 +12,13 @@
 # which causes undefined behavior when mixed with libgomp
 set(MKL_THREADING gnu_thread CACHE STRING "MKL threading layer")
 
+# Use the LP64 interface (32-bit MKL_INT) consistently in BOTH the CMake-config
+# and manual-fallback paths. The call sites pass plain `int`/`MKL_INT` to cblas_*,
+# so an ILP64 (64-bit MKL_INT) interface would misread GEMM dimensions/strides.
+# This must be set before find_package(MKL) so MKL::MKL picks the LP64 variant
+# rather than its default.
+set(MKL_INTERFACE_FULL intel_lp64 CACHE STRING "MKL integer interface (LP64 = 32-bit MKL_INT)")
+
 # First try to find via CMake config (Intel oneAPI)
 find_package(MKL CONFIG QUIET)
 
@@ -52,9 +59,10 @@ find_library(MKL_CORE_LIBRARY
     PATH_SUFFIXES ${MKL_LIB_DIR_SUFFIX}
 )
 
-# Find interface library (ILP64 for 64-bit integers)
+# Find interface library (LP64 = 32-bit MKL_INT, matching the config path and
+# the plain-int cblas_* call sites; ILP64 would silently misread dimensions).
 find_library(MKL_INTERFACE_LIBRARY
-    NAMES mkl_intel_ilp64
+    NAMES mkl_intel_lp64
     PATHS ${MKL_SEARCH_PATHS}
     PATH_SUFFIXES ${MKL_LIB_DIR_SUFFIX}
 )

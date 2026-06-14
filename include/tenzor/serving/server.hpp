@@ -217,12 +217,16 @@ struct ModelMetrics {
 
     // Latency percentile tracking (ring buffer of recent latencies)
     static constexpr size_t kLatencyWindowSize = 1000;
-    std::array<uint64_t, kLatencyWindowSize> latency_window{};
+    // Atomic elements: record_latency() writes from request-handler threads
+    // while format_prometheus() reads concurrently during a /metrics scrape.
+    // A plain array was a data race (UB); per-element atomics make both sides
+    // well-defined (relaxed ordering is sufficient for a best-effort window).
+    std::array<std::atomic<uint64_t>, kLatencyWindowSize> latency_window{};
     std::atomic<size_t> latency_idx{0};
 
     auto record_latency(uint64_t latency_us) -> void {
         auto idx = latency_idx.fetch_add(1, std::memory_order_relaxed) % kLatencyWindowSize;
-        latency_window[idx] = latency_us;
+        latency_window[idx].store(latency_us, std::memory_order_relaxed);
     }
 };
 

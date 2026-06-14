@@ -201,19 +201,23 @@ auto tensor_to_torch(const Tensor& tensor, bool requires_grad) -> torch::Tensor 
         // The capture-by-value `storage_ticket` parameter in the deleter
         // closure cannot move, so we use the raw-ptr-and-delete idiom.
         auto* storage_ticket = new intrusive_ptr<Storage>(tensor.storage());
+        // Tell PyTorch which DEVICE the blob lives on. Previously the options
+        // only set dtype, so a CUDA device pointer was wrapped as a CPU tensor
+        // and the subsequent .to(cuda) dereferenced the device pointer as host
+        // memory (illegal access / garbage). Setting .device() makes from_blob
+        // wrap the CUDA pointer in place — true zero-copy, no host deref.
+        auto options = torch::TensorOptions().dtype(torch_dtype);
+        if (device.type == Device::Type::CUDA) {
+            options = options.device(torch_device);
+        }
         torch_tensor = torch::from_blob(
             const_cast<void*>(tensor.data<void>()),
             torch_shape,
             /*deleter=*/[storage_ticket](void* /*data*/) {
                 delete storage_ticket;
             },
-            torch::TensorOptions().dtype(torch_dtype)
+            options
         );
-
-        // If CUDA, move to correct device
-        if (device.type == Device::Type::CUDA) {
-            torch_tensor = torch_tensor.to(torch_device);
-        }
     } else {
         // Need to copy data
         // First make tensor contiguous

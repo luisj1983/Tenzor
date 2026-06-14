@@ -98,44 +98,49 @@ auto MixtureOfExperts::forward_with_loss(const Variable& input)
         input.requires_grad());
 
     for (int64_t e = 0; e < num_experts_; ++e) {
+        // Per-row combined routing weight for expert e: sum over the top_k slots
+        // of (this row routes to e) * its routing coefficient. Non-routed rows
+        // are exactly 0. Routing weights are constants (load balancing flows via
+        // aux_loss), so this stays at the Tensor level.
+        Tensor w_e = tenzor::zeros({N}, input.tensor().dtype(),
+                                   input.tensor().device());
         for (int64_t k = 0; k < top_k_; ++k) {
-            auto idx_col = topk_idx.slice(1, k, k + 1).squeeze(1);
-            auto weight_col = topk_weights.slice(1, k, k + 1).squeeze(1);
-
-            auto expert_scalar = tenzor::full({1}, static_cast<double>(e),
-                                              idx_col.dtype(), idx_col.device());
-            auto mask = tenzor::eq(idx_col, expert_scalar);
-
-            // Skip if no tokens route to this expert at this position
-            Tensor mask_count = tenzor::sum(mask.to(DType::Float32)).to(Device::cpu());
-            float mc_val = mask_count.template item<float>();
-            if (mc_val == 0.0f) continue;
-
-            auto mask_f = mask.to(input.tensor().dtype());
-
-            // Variable-level masked input: flat * mask. The mask is treated
-            // as a constant (no gradient flows through indicator selection),
-            // wrap it in a no-grad Variable so the multiplication graph still
-            // includes `flat` on the differentiable side.
-            auto mask_var = Variable(mask_f.unsqueeze(1), /*requires_grad=*/false);
-            auto masked_input = flat * mask_var;
-
-            // Expert forward: up -> relu -> down. All Variable-level so the
-            // chain stays connected from input → flat → masked_input → hidden
-            // → expert_out.
-            auto hidden = up_[e]->forward(masked_input);
-            hidden = relu(hidden);
-            if (dropout_) hidden = dropout_->forward(hidden);
-            auto expert_out = down_[e]->forward(hidden);
-
-            // Weight by the routing coefficients (Variable * Variable so the
-            // graph picks up the expert path).
-            auto wm = (weight_col * mask_f).unsqueeze(1);
-            auto wm_var = Variable(wm, /*requires_grad=*/false);
-            auto weighted = expert_out * wm_var;
-
-            output = output + weighted;
+            auto idx_col = topk_idx.slice(1, k, k + 1).squeeze(1);        // [N] int
+            auto weight_col = topk_weights.slice(1, k, k + 1).squeeze(1); // [N]
+            auto e_scalar = tenzor::full({1}, static_cast<double>(e),
+                                         idx_col.dtype(), idx_col.device());
+            auto mask_f = tenzor::eq(idx_col, e_scalar).to(input.tensor().dtype());
+            w_e = w_e + mask_f * weight_col;
         }
+
+        // Rows routed to expert e (and only those). nonzero materializes the
+        // count, so M is known host-side without a separate reduction/sync.
+        Tensor routed = tenzor::nonzero(w_e);   // [M, 1] int64
+        const int64_t M = routed.shape()[0];
+        if (M == 0) continue;                   // expert unused for this batch
+        Tensor routed_idx = tenzor::reshape(routed, std::vector<int64_t>{M});
+
+        // Gather ONLY the routed rows and run the expert FFN on that subset —
+        // O(top_k * N) work total instead of O(num_experts * N). index_select is
+        // autograd-aware (grad: index_add), so gradients flow back to `flat`.
+        Variable sub = tenzor::index_select(flat, 0, routed_idx);  // [M, D]
+        auto hidden = up_[e]->forward(sub);
+        hidden = relu(hidden);
+        if (dropout_) hidden = dropout_->forward(hidden);
+        auto expert_out = down_[e]->forward(hidden);               // [M, D]
+
+        // Weight each routed row by its (constant) routing coefficient.
+        Tensor w_sub = tenzor::index_select(w_e, 0, routed_idx);   // [M]
+        auto w_sub_var = Variable(
+            tenzor::reshape(w_sub, std::vector<int64_t>{M, 1}), /*requires_grad=*/false);
+        auto weighted = expert_out * w_sub_var;                    // [M, D]
+
+        // Scatter-add the weighted outputs back to their original rows.
+        // scatter_add is autograd-aware (grad: identity for `output`, gather for
+        // `weighted`), keeping the graph connected end to end.
+        Tensor idx_md = tenzor::reshape(routed_idx, std::vector<int64_t>{M, 1});
+        idx_md = tenzor::expand(idx_md, std::vector<int64_t>{M, D}).contiguous();
+        output = tenzor::scatter_add(output, 0, idx_md, weighted);
     }
 
     // Reshape back through Variable-level reshape.

@@ -20,7 +20,12 @@ auto StateSync::sync_model(nn::Module& module, ProcessGroup& pg,
     auto params = module.parameters();
 
     for (auto& param : params) {
-        auto data = param->tensor();
+        // Bind a REFERENCE to the parameter's stored tensor (as DDP does). For a
+        // GPU tensor, broadcast()/recv_tensor rebinds the passed reference's impl
+        // (cpu_tensor.to(device)); a local copy would leave the parameter holding
+        // stale GPU weights on non-source ranks. The CPU case worked only by luck
+        // because the copy shared storage.
+        Tensor& data = param->tensor();
         pg.broadcast(data, source_rank);
     }
 }

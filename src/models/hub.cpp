@@ -264,7 +264,30 @@ public:
 
     // Get cache file path for model
     std::string get_cache_path(const std::string& model_name) const {
-        return (fs::path(config.cache_dir) / (model_name + ".pt")).string();
+        // Sanitize: a model_name like "../../.bashrc" or an absolute path would
+        // escape cache_dir, turning download_weights' write/rename/remove into an
+        // arbitrary-file primitive. Allow only a conservative charset (no path
+        // separators), reject '..', then confirm the resolved path stays inside
+        // the cache directory.
+        if (model_name.empty() ||
+            model_name.find("..") != std::string::npos) {
+            throw std::runtime_error("ModelHub: invalid model name '" + model_name + "'");
+        }
+        for (char c : model_name) {
+            if (!(std::isalnum(static_cast<unsigned char>(c)) ||
+                  c == '_' || c == '-' || c == '.')) {
+                throw std::runtime_error(
+                    "ModelHub: model name contains an invalid character: '" +
+                    model_name + "'");
+            }
+        }
+        fs::path cache_root = fs::weakly_canonical(fs::path(config.cache_dir));
+        fs::path resolved = fs::weakly_canonical(cache_root / (model_name + ".pt"));
+        const std::string root = cache_root.string();
+        if (resolved.string().compare(0, root.size(), root) != 0) {
+            throw std::runtime_error("ModelHub: model name escapes the cache directory");
+        }
+        return resolved.string();
     }
 
     // Clean cache to fit within size limit
@@ -401,6 +424,15 @@ std::string ModelHub::download_weights(
             fs::remove(temp_path);
             throw std::runtime_error("Checksum verification failed for " + model_name);
         }
+    } else if (expected_sha256.empty() && impl_->config.verify_checksums) {
+        // Make the integrity downgrade VISIBLE instead of silent: e.g. the
+        // safetensors-mirror path passes no checksum, so those weights were
+        // accepted with zero verification while the .pt path enforced sha256.
+        TENZOR_LOG_WARN(
+            "ModelHub: '{}' downloaded WITHOUT checksum verification (no expected "
+            "sha256 registered for this URL: {}). Transport TLS still applies, but "
+            "a compromised/typo'd mirror would not be detected.",
+            model_name, url);
     }
 
     // Move to final location

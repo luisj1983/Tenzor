@@ -211,6 +211,32 @@ auto DistributedDataParallel::reset_buckets() -> void {
         bucket.ready = false;
         bucket.pending_count = 0;
     }
+
+    // Pre-mark KNOWN-unused parameters as already accounted for, so a bucket can
+    // still reach params.size() and fire its async all-reduce from the
+    // contributing params alone — preserving comm/compute overlap. Without this,
+    // an unused param's backward hook never fires, the bucket never reaches the
+    // count, and the overlapped reduce silently degrades to the synchronous
+    // force-reduce in synchronize_gradients().
+    //
+    // Gated on `unused_detection_cached_`: the unused set is only stable (and
+    // thus safe to pre-count) once detected. The first iteration runs without
+    // overlap (like PyTorch's reducer warmup), and dynamic graphs that call
+    // invalidate_unused_cache() clear the flag, so a param that becomes used
+    // again is never both pre-counted AND hook-fired (which would fire a bucket
+    // before all live grads are ready).
+    if (find_unused_parameters_ && unused_detection_cached_) {
+        auto params = module_.parameters();
+        for (size_t i : cached_unused_indices_) {
+            if (i >= params.size() || !params[i]) continue;
+            const void* ptr = params[i]->tensor().data_ptr();
+            auto it = param_to_bucket_.find(ptr);
+            if (it != param_to_bucket_.end()) {
+                buckets_[it->second].pending_count++;
+            }
+        }
+    }
+
     // Audit N.1: release-store so a subsequent acquire-load in
     // sync_comm()/all_reduce_bucket_async observes the reset.
     pending_async_ops_.store(0, std::memory_order_release);

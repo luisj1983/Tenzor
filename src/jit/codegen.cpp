@@ -14,6 +14,7 @@
 #include "tenzor/ops/op_id.hpp"
 #include <sstream>
 #include <stdexcept>
+#include <mutex>
 #include "tenzor/utils/error.hpp"  // NotImplementedError (S25 / audit-12)
 #include <iostream>
 #include <functional>
@@ -101,7 +102,8 @@ auto KernelCodegen::dtype_to_cuda_type(DType dtype) -> std::string {
     }
 }
 
-auto KernelCodegen::emit_op(const ElemStep& step, const std::string& vp) -> std::string {
+auto KernelCodegen::emit_op(const ElemStep& step, const std::string& vp,
+                            DType dtype) -> std::string {
     // vp = variable prefix. step.input_idx refers to either an input array or
     // the previous result (if -1, means "previous result" = vp + "val")
     auto input = [&](int idx) -> std::string {
@@ -111,14 +113,21 @@ auto KernelCodegen::emit_op(const ElemStep& step, const std::string& vp) -> std:
 
     auto a = input(step.input_idx);
     auto b = input(step.second_input_idx);
-    std::string s = std::to_string(step.scalar);
+    // For a Float64 kernel, emit literals WITHOUT the 'f' suffix and with full
+    // double precision; an 'f'-suffixed constant in a double kernel is rounded
+    // to single precision (~7 digits), defeating the f64 path.
+    const bool f64 = (dtype == DType::Float64);
+    const std::string F = f64 ? "" : "f";          // float-literal suffix
+    const std::string ZERO = "0.0" + F;
+    const std::string ONE = "1.0" + F;
+    std::string s = std::to_string(step.scalar);   // scalar operand literal
 
     switch (step.op) {
         // Unary
         case ElemOp::Neg:        return vp + "val = -" + a + ";";
         case ElemOp::Abs:        return vp + "val = fabs(" + a + ");";
         case ElemOp::Sign:       return vp + "val = (" + a + " > 0) - (" + a + " < 0);";
-        case ElemOp::Reciprocal: return vp + "val = 1.0f / " + a + ";";
+        case ElemOp::Reciprocal: return vp + "val = " + ONE + " / " + a + ";";
         case ElemOp::Exp:        return vp + "val = exp(" + a + ");";
         case ElemOp::Log:        return vp + "val = log(" + a + ");";
         case ElemOp::Sqrt:       return vp + "val = sqrt(" + a + ");";
@@ -132,20 +141,20 @@ auto KernelCodegen::emit_op(const ElemStep& step, const std::string& vp) -> std:
         case ElemOp::Sinh:       return vp + "val = sinh(" + a + ");";
         case ElemOp::Cosh:       return vp + "val = cosh(" + a + ");";
         case ElemOp::Tanh:       return vp + "val = tanh(" + a + ");";
-        case ElemOp::Sigmoid:    return vp + "val = 1.0f / (1.0f + exp(-" + a + "));";
-        case ElemOp::Relu:       return vp + "val = fmax(" + a + ", 0.0f);";
-        case ElemOp::LeakyRelu:  return vp + "val = " + a + " > 0 ? " + a + " : " + s + "f * " + a + ";";
-        case ElemOp::Elu:        return vp + "val = " + a + " > 0 ? " + a + " : " + s + "f * (exp(" + a + ") - 1.0f);";
+        case ElemOp::Sigmoid:    return vp + "val = " + ONE + " / (" + ONE + " + exp(-" + a + "));";
+        case ElemOp::Relu:       return vp + "val = fmax(" + a + ", " + ZERO + ");";
+        case ElemOp::LeakyRelu:  return vp + "val = " + a + " > 0 ? " + a + " : " + s + F + " * " + a + ";";
+        case ElemOp::Elu:        return vp + "val = " + a + " > 0 ? " + a + " : " + s + F + " * (exp(" + a + ") - " + ONE + ");";
         case ElemOp::Selu: {
-            std::string lam = "1.0507009873554805f";
-            std::string alp = "1.6732632423543772f";
-            return vp + "val = " + a + " > 0 ? " + lam + " * " + a + " : " + lam + " * " + alp + " * (exp(" + a + ") - 1.0f);";
+            std::string lam = "1.0507009873554805" + F;
+            std::string alp = "1.6732632423543772" + F;
+            return vp + "val = " + a + " > 0 ? " + lam + " * " + a + " : " + lam + " * " + alp + " * (exp(" + a + ") - " + ONE + ");";
         }
         case ElemOp::Gelu:
-            return vp + "val = 0.5f * " + a + " * (1.0f + tanh(0.7978845608f * (" + a + " + 0.044715f * " + a + " * " + a + " * " + a + ")));";
+            return vp + "val = 0.5" + F + " * " + a + " * (" + ONE + " + tanh(0.7978845608028654" + F + " * (" + a + " + 0.044715" + F + " * " + a + " * " + a + " * " + a + ")));";
         case ElemOp::Mish:
-            return vp + "val = " + a + " * tanh(log(1.0f + exp(" + a + ")));";
-        case ElemOp::Softplus:   return vp + "val = log(1.0f + exp(" + a + "));";
+            return vp + "val = " + a + " * tanh(log(" + ONE + " + exp(" + a + ")));";
+        case ElemOp::Softplus:   return vp + "val = log(" + ONE + " + exp(" + a + "));";
         case ElemOp::Erf:        return vp + "val = erf(" + a + ");";
         case ElemOp::Erfc:       return vp + "val = erfc(" + a + ");";
         case ElemOp::Log2:       return vp + "val = log2(" + a + ");";
@@ -167,11 +176,11 @@ auto KernelCodegen::emit_op(const ElemStep& step, const std::string& vp) -> std:
         case ElemOp::Fmod: return vp + "val = fmod(" + a + ", " + b + ");";
 
         // Scalar ops
-        case ElemOp::AddScalar:  return vp + "val = " + a + " + " + s + "f;";
-        case ElemOp::MulScalar:  return vp + "val = " + a + " * " + s + "f;";
-        case ElemOp::PowScalar:  return vp + "val = pow(" + a + ", " + s + "f);";
-        case ElemOp::ClampMin:   return vp + "val = fmax(" + a + ", " + s + "f);";
-        case ElemOp::ClampMax:   return vp + "val = fmin(" + a + ", " + s + "f);";
+        case ElemOp::AddScalar:  return vp + "val = " + a + " + " + s + F + ";";
+        case ElemOp::MulScalar:  return vp + "val = " + a + " * " + s + F + ";";
+        case ElemOp::PowScalar:  return vp + "val = pow(" + a + ", " + s + F + ");";
+        case ElemOp::ClampMin:   return vp + "val = fmax(" + a + ", " + s + F + ");";
+        case ElemOp::ClampMax:   return vp + "val = fmin(" + a + ", " + s + F + ");";
 
         default: return vp + "val = " + a + "; // unknown op";
     }
@@ -203,7 +212,7 @@ auto KernelCodegen::generate(const FusionGroup& group) -> std::string {
     // Emit operations
     ss << "        " << ctype << " val;\n";
     for (size_t s = 0; s < group.steps.size(); ++s) {
-        ss << "        " << emit_op(group.steps[s], "") << "\n";
+        ss << "        " << emit_op(group.steps[s], "", group.dtype) << "\n";
     }
 
     // Store result
@@ -333,8 +342,17 @@ auto KernelCache::compile(const std::string& source, const std::string& kernel_n
     CUcontext cu_context = nullptr;
     cuCtxGetCurrent(&cu_context);
     if (!cu_context) {
-        // Use primary context (compatible with CUDA runtime API)
-        CU_CHECK(cuDevicePrimaryCtxRetain(&cu_context, cu_device));
+        // Retain the device primary context EXACTLY ONCE for the process. The
+        // primary context is reference-counted and process-lived; the old code
+        // retained on every context-less compile, accumulating unbalanced
+        // references. A single process-wide retain matches the intended pattern
+        // (and how the CUDA runtime itself holds the primary context).
+        static std::once_flag ctx_once;
+        static CUcontext primary_ctx = nullptr;
+        std::call_once(ctx_once, [&]() {
+            CU_CHECK(cuDevicePrimaryCtxRetain(&primary_ctx, cu_device));
+        });
+        cu_context = primary_ctx;
         CU_CHECK(cuCtxSetCurrent(cu_context));
     }
 
@@ -475,6 +493,16 @@ auto execute_fused(const FusionGroup& group,
     std::vector<int64_t> shape(inputs[0].shape().begin(), inputs[0].shape().end());
     Tensor output(shape, group.dtype, gpu_device);
 
+    // The generated kernel only implements Float32/Float64 math. Reject any
+    // other dtype instead of reinterpreting its bytes as float (which silently
+    // produced garbage / OOB for Int32/Int64 whose element size differs).
+    if (group.dtype != DType::Float32 && group.dtype != DType::Float64) {
+        throw std::runtime_error(
+            "KernelCodegen::execute_fused: fused GPU codegen only supports "
+            "Float32/Float64; got " + std::string(dtype_name(group.dtype)) +
+            " — route this dtype through the eager fallback");
+    }
+
     // Collect input data pointers (now on GPU)
     std::vector<const void*> input_ptrs;
     input_ptrs.reserve(gpu_inputs.size());
@@ -482,21 +510,14 @@ auto execute_fused(const FusionGroup& group,
         auto c = inp.contiguous();
         if (group.dtype == DType::Float32) {
             input_ptrs.push_back(c.data<float>());
-        } else if (group.dtype == DType::Float64) {
+        } else {  // Float64 (guarded above)
             input_ptrs.push_back(c.data<double>());
-        } else {
-            input_ptrs.push_back(c.data<float>());
         }
     }
 
-    void* output_ptr = nullptr;
-    if (group.dtype == DType::Float32) {
-        output_ptr = output.data<float>();
-    } else if (group.dtype == DType::Float64) {
-        output_ptr = output.data<double>();
-    } else {
-        output_ptr = output.data<float>();
-    }
+    void* output_ptr = (group.dtype == DType::Float32)
+                           ? static_cast<void*>(output.data<float>())
+                           : static_cast<void*>(output.data<double>());
 
     // Launch on default stream
     kernel->launch(input_ptrs, output_ptr, numel, nullptr);

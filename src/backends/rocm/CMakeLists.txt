@@ -148,6 +148,14 @@ target_include_directories(tenzor_rocm_kernels PRIVATE
 # Note: Removed -fgpu-rdc to avoid relocatable device code linking issues
 target_compile_options(tenzor_rocm_kernels PRIVATE
     $<$<COMPILE_LANGUAGE:HIP>:-ffast-math>
+    # Keep IEEE Inf/NaN semantics for the WHOLE kernels library so any kernel
+    # using isinf()/isnan()/-inf sentinels is correct by default. -ffast-math
+    # otherwise implies -ffinite-math-only, which folds those to constants and
+    # silently produces NaN — previously each affected file had to opt out by
+    # hand (a fragile, easy-to-forget allow-list). The remaining per-file
+    # -fno-fast-math overrides above stay for their OTHER reasons (fp-contract /
+    # approximate rsqrt / a compiler ICE), which this flag does not address.
+    $<$<COMPILE_LANGUAGE:HIP>:-fno-finite-math-only>
     $<$<COMPILE_LANGUAGE:HIP>:-munsafe-fp-atomics>
     $<$<AND:$<CONFIG:Release>,$<COMPILE_LANGUAGE:HIP>>:-O3>
     $<$<AND:$<CONFIG:Debug>,$<COMPILE_LANGUAGE:HIP>>:-g -ggdb>

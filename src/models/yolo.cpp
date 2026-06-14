@@ -636,10 +636,11 @@ auto CSPBottleneck::forward_impl(const Variable& input) -> Variable {
         x2 = x2 + identity;  // Skip connection
     }
 
-    // Concatenate and merge
-    std::vector<Tensor> to_concat = {x1.tensor(), x2.tensor()};
-    auto concat = tenzor::cat(to_concat, 1);
-    auto merged = conv_merge_->forward(Variable(concat));
+    // Concatenate and merge. Use the autograd (Variable) cat overload so the
+    // graph stays connected: cat over raw .tensor() + Variable(concat) severed
+    // grad_fn, giving zero gradients to the CSP branches during training.
+    auto concat = tenzor::cat(std::vector<Variable>{x1, x2}, 1);
+    auto merged = conv_merge_->forward(concat);
     merged = bn_merge_->forward(merged);
     merged = act.forward(merged);
 

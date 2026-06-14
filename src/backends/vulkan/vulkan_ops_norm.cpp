@@ -653,9 +653,15 @@ auto VulkanBackend::dispatchLayerNorm(const Tensor& input, int64_t normalized_sh
     // per batch element. Vulkan's contract now matches CPU/CUDA/OneAPI:
     // forward returns {output, mean, rstd} so backward can read them
     // without re-deriving from input.
-    Tensor mean({batch_size}, DType::Float32, input.device());
-    Tensor rstd({batch_size}, DType::Float32, input.device());
-    size_t stat_buffer_size = batch_size * sizeof(float);
+    // For Float64 input, keep the saved stats in Float64 so the f64 backward
+    // reads full-precision mean/rstd. The f64 forward shader writes `double`
+    // mean_out/rstd_out; storing them as Float32 truncated to ~1e-7 relative
+    // error (visible as f64 gradcheck failures). Other dtypes keep Float32 (the
+    // saved-stats contract shared with CPU/CUDA).
+    DType stat_dtype = is_float64 ? DType::Float64 : DType::Float32;
+    Tensor mean({batch_size}, stat_dtype, input.device());
+    Tensor rstd({batch_size}, stat_dtype, input.device());
+    size_t stat_buffer_size = batch_size * (is_float64 ? sizeof(double) : sizeof(float));
 
     // Get VkBuffer handles
     const void* buffer_input = input.data_ptr();

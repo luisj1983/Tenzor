@@ -69,13 +69,25 @@ auto DeviceStorage::pin() -> bool {
 
 DeviceStorage::DeviceStorage(DeviceStorage&& other) noexcept
     : device_ptr_(other.device_ptr_), size_(other.size_),
-      device_(other.device_) {
+      device_(other.device_), pinned_(other.pinned_) {
+    // Transfer the pinned flag so the moved-to object's destructor performs the
+    // matching cudaHostUnregister; otherwise the page-locked registration leaks
+    // and is_pinned() would lie. Clear it on the moved-from object whose pointer
+    // is now null (its destructor early-returns).
     other.device_ptr_ = nullptr;
+    other.pinned_ = false;
 }
 
 DeviceStorage& DeviceStorage::operator=(DeviceStorage&& other) noexcept {
     if (this != &other) {
         if (device_ptr_) {
+#ifdef TENZOR_USE_CUDA
+            // Unregister the existing target buffer if it was pinned before we
+            // overwrite the pointer, else its page-locked registration leaks.
+            if (pinned_ && device_.type == Device::Type::CPU) {
+                cudaHostUnregister(device_ptr_);
+            }
+#endif
             Backend* current_backend = try_get_backend(device_.type);
             if (current_backend) {
                 current_backend->deallocate(device_ptr_);
@@ -84,7 +96,9 @@ DeviceStorage& DeviceStorage::operator=(DeviceStorage&& other) noexcept {
         device_ptr_ = other.device_ptr_;
         size_ = other.size_;
         device_ = other.device_;
+        pinned_ = other.pinned_;
         other.device_ptr_ = nullptr;
+        other.pinned_ = false;
     }
     return *this;
 }

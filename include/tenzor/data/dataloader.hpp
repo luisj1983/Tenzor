@@ -108,10 +108,13 @@ public:
     // Prevent copying
     DataLoader(const DataLoader&) = delete;
     DataLoader& operator=(const DataLoader&) = delete;
+    // Non-movable: worker threads are bound to `this`. Moving a running loader
+    // would leave its threads executing on the moved-from object (accessing its
+    // now-null dataset_ / moved-from queue) — a data race / use-after-move that
+    // a constructor cannot avoid (the member-init list runs before any stop).
 
-    // Allow moving
-    DataLoader(DataLoader&&) noexcept;
-    DataLoader& operator=(DataLoader&&) noexcept;
+    DataLoader(DataLoader&&) = delete;
+    DataLoader& operator=(DataLoader&&) = delete;
 
     /**
      * @brief Iterator for DataLoader

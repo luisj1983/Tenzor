@@ -105,10 +105,13 @@ auto Variable::grad_variable() const -> const std::optional<Variable>& {
     using OptVar = std::optional<Variable>;
     auto populate_cache = [&]() -> const std::optional<Variable>& {
         if (!impl_->grad_with_graph_cache_storage_) {
-            impl_->grad_with_graph_cache_storage_.reset(
-                reinterpret_cast<char*>(new OptVar{}));
+            // make_shared<OptVar> records OptVar's destructor in the control
+            // block, so the type-erased shared_ptr<void> destroys the contained
+            // optional<Variable> correctly (no mismatched new/delete[], no
+            // leaked second-order graph).
+            impl_->grad_with_graph_cache_storage_ = std::make_shared<OptVar>();
         }
-        auto* cache = reinterpret_cast<OptVar*>(
+        auto* cache = static_cast<OptVar*>(
             impl_->grad_with_graph_cache_storage_.get());
         if (impl_->grad_with_graph_impl_) {
             if (!cache->has_value() ||

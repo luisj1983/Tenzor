@@ -1445,15 +1445,26 @@ auto AlgebraicSimplificationPass::simplify_binary_op(std::shared_ptr<Node> node,
 
     if (!is_const0 && !is_const1) return false;
 
+    // Only redirect consumers to a surviving operand when that operand already
+    // has the node's OUTPUT shape. Otherwise the identity/absorbing operand is
+    // the broadcasting one (e.g. x:(3,4) * 0:scalar), and redirecting to it
+    // would silently change the result's shape. In that case we conservatively
+    // skip the rewrite rather than corrupt the graph.
+    if (node->outputs().empty()) return false;
+    const auto& out_shape = node->outputs()[0]->shape();
+    auto same_shape = [&](const std::shared_ptr<Value>& v) -> bool {
+        return v && v->shape() == out_shape;
+    };
+
     switch (node->op_type()) {
         case OpType::Add:
             // x + 0 = x
-            if (is_const1 && is_all_zeros(*producer1)) {
+            if (is_const1 && is_all_zeros(*producer1) && same_shape(input0)) {
                 graph.replace_node_with_value(node, input0->id());
                 return true;
             }
             // 0 + x = x
-            if (is_const0 && is_all_zeros(*producer0)) {
+            if (is_const0 && is_all_zeros(*producer0) && same_shape(input1)) {
                 graph.replace_node_with_value(node, input1->id());
                 return true;
             }
@@ -1461,7 +1472,7 @@ auto AlgebraicSimplificationPass::simplify_binary_op(std::shared_ptr<Node> node,
 
         case OpType::Sub:
             // x - 0 = x
-            if (is_const1 && is_all_zeros(*producer1)) {
+            if (is_const1 && is_all_zeros(*producer1) && same_shape(input0)) {
                 graph.replace_node_with_value(node, input0->id());
                 return true;
             }
@@ -1469,22 +1480,23 @@ auto AlgebraicSimplificationPass::simplify_binary_op(std::shared_ptr<Node> node,
 
         case OpType::Mul:
             // x * 1 = x
-            if (is_const1 && is_all_ones(*producer1)) {
+            if (is_const1 && is_all_ones(*producer1) && same_shape(input0)) {
                 graph.replace_node_with_value(node, input0->id());
                 return true;
             }
             // 1 * x = x
-            if (is_const0 && is_all_ones(*producer0)) {
+            if (is_const0 && is_all_ones(*producer0) && same_shape(input1)) {
                 graph.replace_node_with_value(node, input1->id());
                 return true;
             }
-            // x * 0 = 0 (redirect to the zero constant)
-            if (is_const1 && is_all_zeros(*producer1)) {
+            // x * 0 = 0 (redirect to the zero constant only if it is already the
+            // output shape; a broadcasting scalar zero must not replace x:(M,N))
+            if (is_const1 && is_all_zeros(*producer1) && same_shape(input1)) {
                 graph.replace_node_with_value(node, input1->id());
                 return true;
             }
             // 0 * x = 0
-            if (is_const0 && is_all_zeros(*producer0)) {
+            if (is_const0 && is_all_zeros(*producer0) && same_shape(input0)) {
                 graph.replace_node_with_value(node, input0->id());
                 return true;
             }
@@ -1492,7 +1504,7 @@ auto AlgebraicSimplificationPass::simplify_binary_op(std::shared_ptr<Node> node,
 
         case OpType::Div:
             // x / 1 = x
-            if (is_const1 && is_all_ones(*producer1)) {
+            if (is_const1 && is_all_ones(*producer1) && same_shape(input0)) {
                 graph.replace_node_with_value(node, input0->id());
                 return true;
             }

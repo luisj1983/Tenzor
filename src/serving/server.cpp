@@ -16,6 +16,7 @@
 #include <chrono>
 #include <unordered_map>
 #include <mutex>
+#include <filesystem>
 #ifdef TENZOR_HAS_HTTPLIB
 #include <httplib.h>
 #endif
@@ -239,21 +240,35 @@ auto MetricsRegistry::format_prometheus() const -> std::string {
     std::lock_guard<std::mutex> lock(mutex_);
     std::ostringstream ss;
 
+    // Escape Prometheus label values: model names come from the URL and may
+    // contain quotes/backslashes/newlines that would corrupt the exposition
+    // format or inject arbitrary metric lines.
+    auto escape_label = [](const std::string& in) {
+        std::string out;
+        out.reserve(in.size());
+        for (char c : in) {
+            if (c == '\\' || c == '"') { out.push_back('\\'); out.push_back(c); }
+            else if (c == '\n') { out += "\\n"; }
+            else { out.push_back(c); }
+        }
+        return out;
+    };
     for (auto& [name, m] : metrics_) {
+        const std::string esc_name = escape_label(name);
         auto total = m->total_requests.load(std::memory_order_relaxed);
         auto latency = m->total_latency_us.load(std::memory_order_relaxed);
         auto errors = m->error_count.load(std::memory_order_relaxed);
         auto batches = m->total_batch_count.load(std::memory_order_relaxed);
 
-        ss << "tenzor_requests_total{model=\"" << name << "\"} " << total << "\n";
-        ss << "tenzor_errors_total{model=\"" << name << "\"} " << errors << "\n";
+        ss << "tenzor_requests_total{model=\"" << esc_name << "\"} " << total << "\n";
+        ss << "tenzor_errors_total{model=\"" << esc_name << "\"} " << errors << "\n";
         if (total > 0) {
-            ss << "tenzor_latency_avg_us{model=\"" << name << "\"} "
+            ss << "tenzor_latency_avg_us{model=\"" << esc_name << "\"} "
                << (latency / total) << "\n";
         }
         if (batches > 0) {
             auto batch_sum = m->total_batch_size.load(std::memory_order_relaxed);
-            ss << "tenzor_batch_size_avg{model=\"" << name << "\"} "
+            ss << "tenzor_batch_size_avg{model=\"" << esc_name << "\"} "
                << (batch_sum / batches) << "\n";
         }
 
@@ -262,15 +277,15 @@ auto MetricsRegistry::format_prometheus() const -> std::string {
             auto count = std::min(total, static_cast<uint64_t>(ModelMetrics::kLatencyWindowSize));
             std::vector<uint64_t> latencies(count);
             for (uint64_t i = 0; i < count; ++i) {
-                latencies[i] = m->latency_window[i];
+                latencies[i] = m->latency_window[i].load(std::memory_order_relaxed);
             }
             std::sort(latencies.begin(), latencies.end());
             auto p50 = latencies[static_cast<size_t>(count * 0.50)];
             auto p95 = latencies[static_cast<size_t>(count * 0.95)];
             auto p99 = latencies[static_cast<size_t>(std::min(count - 1, static_cast<uint64_t>(count * 0.99)))];
-            ss << "tenzor_latency_p50_us{model=\"" << name << "\"} " << p50 << "\n";
-            ss << "tenzor_latency_p95_us{model=\"" << name << "\"} " << p95 << "\n";
-            ss << "tenzor_latency_p99_us{model=\"" << name << "\"} " << p99 << "\n";
+            ss << "tenzor_latency_p50_us{model=\"" << esc_name << "\"} " << p50 << "\n";
+            ss << "tenzor_latency_p95_us{model=\"" << esc_name << "\"} " << p95 << "\n";
+            ss << "tenzor_latency_p99_us{model=\"" << esc_name << "\"} " << p99 << "\n";
         }
     }
 
@@ -537,9 +552,22 @@ auto InferenceServer::serve_loop() -> void {
             if (token.substr(0, 7) == "Bearer ") {
                 token = token.substr(7);
             }
+            // Constant-time comparison so the response time does not leak how
+            // many leading bytes of a guessed key are correct. Compare against
+            // every configured key without an early break to keep timing uniform.
+            auto ct_eq = [](const std::string& a, const std::string& b) -> bool {
+                unsigned diff = static_cast<unsigned>(a.size() ^ b.size());
+                size_t n = std::max(a.size(), b.size());
+                for (size_t i = 0; i < n; ++i) {
+                    unsigned ca = i < a.size() ? static_cast<unsigned char>(a[i]) : 0u;
+                    unsigned cb = i < b.size() ? static_cast<unsigned char>(b[i]) : 0u;
+                    diff |= ca ^ cb;
+                }
+                return diff == 0;
+            };
             bool valid = false;
             for (const auto& key : config_.api_keys) {
-                if (token == key) { valid = true; break; }
+                valid |= ct_eq(token, key);
             }
             if (!valid) {
                 res.status = 403;
@@ -620,6 +648,32 @@ auto InferenceServer::serve_loop() -> void {
         }
         std::string model_path = body["model_path"].get<std::string>();
 
+        // Sandbox the path: a client must not be able to make the server open and
+        // deserialize an ARBITRARY host file (the graph/state loader is itself an
+        // untrusted-input parser). Reject absolute paths and '..' traversal, then
+        // confirm the resolved path stays inside the configured repository root.
+        {
+            namespace fs = std::filesystem;
+            fs::path requested(model_path);
+            if (requested.is_absolute() ||
+                model_path.find("..") != std::string::npos) {
+                json_error(res, 400,
+                    "model_path must be a relative path within the model repository");
+                return;
+            }
+            fs::path root = config_.model_repository_path.empty()
+                                ? fs::path(".")
+                                : fs::path(config_.model_repository_path);
+            fs::path root_canon = fs::weakly_canonical(root);
+            fs::path resolved = fs::weakly_canonical(root / requested);
+            const std::string rc = root_canon.string();
+            if (resolved.string().compare(0, rc.size(), rc) != 0) {
+                json_error(res, 400, "model_path escapes the model repository");
+                return;
+            }
+            model_path = resolved.string();
+        }
+
         Device target_device = Device::cpu();
         if (body.contains("device") && body["device"].is_string()) {
             target_device = Device::from_string(body["device"].get<std::string>());
@@ -665,6 +719,19 @@ auto InferenceServer::serve_loop() -> void {
             auto client_ip = req.remote_addr;
             std::lock_guard<std::mutex> lock(rate_limit_mutex);
             auto now = std::chrono::steady_clock::now();
+            // Bound memory: an attacker spoofing many source IPs would otherwise
+            // grow this map without limit. When it gets large, evict buckets that
+            // are idle past a TTL (they will have fully refilled anyway).
+            if (rate_limit_buckets.size() > 10000) {
+                const auto ttl = std::chrono::seconds(300);
+                for (auto it = rate_limit_buckets.begin(); it != rate_limit_buckets.end();) {
+                    if (now - it->second.last_refill > ttl) {
+                        it = rate_limit_buckets.erase(it);
+                    } else {
+                        ++it;
+                    }
+                }
+            }
             auto& bucket = rate_limit_buckets[client_ip];
             if (bucket.tokens == 0 && bucket.last_refill == std::chrono::steady_clock::time_point{}) {
                 // Initialize new bucket

@@ -34,14 +34,22 @@ template<typename KernelFunc>
 inline std::pair<int, int> optimal_launch_config(
     KernelFunc kernel, int64_t num_elements, size_t dynamic_smem = 0)
 {
-    // Cache block size per kernel function pointer to avoid repeated
-    // cudaOccupancyMaxPotentialBlockSize calls (~10-100us each)
-    static thread_local std::unordered_map<const void*, int> block_cache;
+    // Cache block size per (kernel function pointer, device) to avoid repeated
+    // cudaOccupancyMaxPotentialBlockSize calls (~10-100us each). The optimal
+    // block size is architecture-dependent, so on heterogeneous multi-GPU hosts
+    // the cache must be keyed by device, not just the kernel pointer.
+    static thread_local std::unordered_map<const void*,
+                                           std::unordered_map<int, int>> block_cache;
     const void* key = reinterpret_cast<const void*>(kernel);
+    int cur_device = 0;
+    cudaGetDevice(&cur_device);
 
     int block_size;
-    auto it = block_cache.find(key);
-    if (it != block_cache.end()) {
+    auto kit = block_cache.find(key);
+    auto it = (kit != block_cache.end()) ? kit->second.find(cur_device)
+                                         : std::unordered_map<int, int>::iterator{};
+    bool found = (kit != block_cache.end()) && (it != kit->second.end());
+    if (found) {
         block_size = it->second;
     } else {
         int min_grid_size = 0;
@@ -51,7 +59,7 @@ inline std::pair<int, int> optimal_launch_config(
         if (err != cudaSuccess) {
             block_size = 256;  // fallback on error
         }
-        block_cache[key] = block_size;
+        block_cache[key][cur_device] = block_size;
     }
 
     int num_blocks = static_cast<int>(

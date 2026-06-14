@@ -98,45 +98,8 @@ DataLoader::~DataLoader() {
     stop_workers();
 }
 
-// Move constructor
-DataLoader::DataLoader(DataLoader&& other) noexcept
-    : dataset_(std::move(other.dataset_)),
-      config_(other.config_),
-      indices_(std::move(other.indices_)),
-      rng_(std::move(other.rng_)),
-      current_index_(other.current_index_),
-      workers_(std::move(other.workers_)),
-      batch_queue_(std::move(other.batch_queue_)),
-      stop_workers_(other.stop_workers_.load()),
-      epoch_done_(other.epoch_done_.load()),
-      next_batch_idx_(other.next_batch_idx_.load()),
-      active_workers_(other.active_workers_.load()),
-      num_batches_(other.num_batches_) {
-    other.dataset_ = nullptr;
-}
-
-// Move assignment
-DataLoader& DataLoader::operator=(DataLoader&& other) noexcept {
-    if (this != &other) {
-        stop_workers();
-
-        dataset_ = std::move(other.dataset_);
-        config_ = other.config_;
-        indices_ = std::move(other.indices_);
-        rng_ = std::move(other.rng_);
-        current_index_ = other.current_index_;
-        workers_ = std::move(other.workers_);
-        batch_queue_ = std::move(other.batch_queue_);
-        stop_workers_ = other.stop_workers_.load();
-        epoch_done_ = other.epoch_done_.load();
-        next_batch_idx_ = other.next_batch_idx_.load();
-        active_workers_ = other.active_workers_.load();
-        num_batches_ = other.num_batches_;
-
-        other.dataset_ = nullptr;
-    }
-    return *this;
-}
+// DataLoader is non-movable (worker threads are bound to `this`); the move
+// operations are = delete in the header. See the comment there.
 
 // Initialize indices
 void DataLoader::init_indices() {

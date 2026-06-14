@@ -20,6 +20,13 @@ auto slice(const Tensor& input, int64_t dim, int64_t start,
 }
 
 auto index_select(const Tensor& input, int64_t dim, const Tensor& index) -> Tensor {
+    // audit-6 BB.1: normalise negative dim at the dispatcher so backends that
+    // index `shape[dim]` without their own normalisation don't underflow.
+    const int64_t ndim = static_cast<int64_t>(input.shape().size());
+    if (dim < 0) dim += ndim;
+    if (dim < 0 || dim >= ndim) {
+        throw std::out_of_range("index_select: dim out of range");
+    }
     NewOpAttributes attrs;
     attrs.set(AttrKey::Dim, dim);
     std::vector<Tensor> inputs = {input, index};
@@ -27,6 +34,11 @@ auto index_select(const Tensor& input, int64_t dim, const Tensor& index) -> Tens
 }
 
 auto gather(const Tensor& input, int64_t dim, const Tensor& index) -> Tensor {
+    const int64_t ndim = static_cast<int64_t>(input.shape().size());
+    if (dim < 0) dim += ndim;
+    if (dim < 0 || dim >= ndim) {
+        throw std::out_of_range("gather: dim out of range");
+    }
     NewOpAttributes attrs;
     attrs.set(AttrKey::Dim, dim);
     std::vector<Tensor> inputs = {input, index};
@@ -34,6 +46,11 @@ auto gather(const Tensor& input, int64_t dim, const Tensor& index) -> Tensor {
 }
 
 auto scatter(const Tensor& input, int64_t dim, const Tensor& index, const Tensor& src) -> Tensor {
+    const int64_t ndim = static_cast<int64_t>(input.shape().size());
+    if (dim < 0) dim += ndim;
+    if (dim < 0 || dim >= ndim) {
+        throw std::out_of_range("scatter: dim out of range");
+    }
     NewOpAttributes attrs;
     attrs.set(AttrKey::Dim, dim);
     std::vector<Tensor> inputs = {input, index, src};

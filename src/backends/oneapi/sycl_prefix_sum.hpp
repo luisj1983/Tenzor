@@ -3,6 +3,7 @@
 #include <sycl/sycl.hpp>
 #include <cstdint>
 #include <type_traits>
+#include "sycl_buffer_guard.hpp"
 
 #ifdef TENZOR_HAS_ONEDPL
 #include <oneapi/dpl/algorithm>
@@ -37,8 +38,10 @@ inline int64_t sycl_exclusive_prefix_sum(T* data, int64_t n, sycl::queue& queue)
 #ifdef TENZOR_HAS_ONEDPL
     auto policy = ::oneapi::dpl::execution::make_device_policy(queue);
 
-    // Allocate temp buffer for inclusive scan result
-    T* d_inclusive = sycl::malloc_device<T>(n, queue);
+    // Allocate temp buffer for inclusive scan result (RAII: freed on any throw,
+    // including a SYCL async exception surfaced by .wait()).
+    SyclDeviceBuffer<T> inclusive_buf(n, queue);
+    T* d_inclusive = inclusive_buf.get();
     ::oneapi::dpl::inclusive_scan(policy, data, data + n, d_inclusive);
 
     // Read total count from last element
@@ -50,12 +53,12 @@ inline int64_t sycl_exclusive_prefix_sum(T* data, int64_t n, sycl::queue& queue)
         data[i] = (i == 0) ? static_cast<T>(0) : d_inclusive[i - 1];
     }).wait();
 
-    sycl::free(d_inclusive, queue);
     return static_cast<int64_t>(total);
 #else
     // Without oneDPL: simple sequential scan on device (still avoids D2H roundtrip for data)
     // For moderate sizes this is fine; the bottleneck was the full data transfer, not the scan
-    T* d_total = sycl::malloc_device<T>(1, queue);
+    SyclDeviceBuffer<T> total_buf(1, queue);
+    T* d_total = total_buf.get();
 
     queue.single_task([=]() {
         T sum = 0;
@@ -69,7 +72,6 @@ inline int64_t sycl_exclusive_prefix_sum(T* data, int64_t n, sycl::queue& queue)
 
     T total = 0;
     queue.memcpy(&total, d_total, sizeof(T)).wait();
-    sycl::free(d_total, queue);
     return static_cast<int64_t>(total);
 #endif
 }

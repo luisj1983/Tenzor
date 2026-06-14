@@ -15,6 +15,7 @@
 #include "tenzor/ops/reduction.hpp"
 #include <chrono>
 #include <iostream>
+#include <cstdlib>
 #include <memory>
 #include <stdexcept>
 
@@ -125,6 +126,15 @@ private:
 };
 
 // Forward declarations for helper functions
+// Library code must stay silent on stdout by default (it corrupts piped /
+// serialized output of embedding applications). Progress messages route through
+// this sink: discarded unless TENZOR_QUANT_VERBOSE is set, then sent to stderr.
+inline auto qlog() -> std::ostream& {
+    static const bool verbose = (std::getenv("TENZOR_QUANT_VERBOSE") != nullptr);
+    static std::ostream null_sink(nullptr);
+    return verbose ? std::cerr : null_sink;
+}
+
 auto convert_module_to_quantized_recursive(
     std::shared_ptr<nn::Module> module,
     const QConfig& qconfig,
@@ -154,12 +164,23 @@ auto quantize_dynamic(
         throw std::runtime_error("Cannot quantize null model");
     }
 
-    std::cout << "[Quantization] Starting dynamic quantization..." << std::endl;
+    // Honor weight_dtype instead of silently ignoring it. The dynamic-quant
+    // default qconfig uses INT8 symmetric weights; reject anything it cannot
+    // actually produce rather than quietly quantizing to INT8. activation_dtype
+    // is intentionally unused: dynamic quantization keeps activations in FP32
+    // (matching PyTorch), so it has no effect here.
+    if (weight_dtype != QuantDType::INT8) {
+        throw std::runtime_error(
+            "quantize_dynamic(weight_dtype): only INT8 weights are supported by "
+            "this entry point; pass a QuantizationConfig for other weight dtypes");
+    }
 
-    // Create quantization config for dynamic quantization
+    qlog() << "[Quantization] Starting dynamic quantization..." << std::endl;
+
+    // Create quantization config for dynamic quantization (INT8 weights).
     auto qconfig = DefaultQConfigs::fast_qconfig();
 
-    std::cout << "[Quantization] Quantizing weights to "
+    qlog() << "[Quantization] Quantizing weights to "
               << (weight_dtype == QuantDType::INT8 ? "INT8" : "UINT8") << std::endl;
 
     // Traverse model and build a NEW quantized module tree: a fresh Sequential
@@ -169,7 +190,7 @@ auto quantize_dynamic(
     // matching PyTorch's copy semantics.
     auto quantized_model = convert_module_to_quantized_recursive(model, qconfig);
 
-    std::cout << "[Quantization] Dynamic quantization complete" << std::endl;
+    qlog() << "[Quantization] Dynamic quantization complete" << std::endl;
 
     return quantized_model;
 }
@@ -197,7 +218,7 @@ auto quantize_static(
     // 3. Calculate quantization parameters from collected statistics
     // 4. Convert to quantized model using calculated parameters
 
-    std::cout << "[Quantization] Preparing model with observers..." << std::endl;
+    qlog() << "[Quantization] Preparing model with observers..." << std::endl;
 
     // Set model to eval mode for calibration
     model->eval();
@@ -205,9 +226,9 @@ auto quantize_static(
     // Attach observers by preparing the model with FakeQuantize modules
     auto prepared_model = prepare_module_for_qat_recursive(model, qconfig);
 
-    std::cout << "[Quantization] Observers attached to quantizable layers" << std::endl;
+    qlog() << "[Quantization] Observers attached to quantizable layers" << std::endl;
 
-    std::cout << "[Quantization] Running calibration..." << std::endl;
+    qlog() << "[Quantization] Running calibration..." << std::endl;
     try {
         // Run forward passes — FakeQuantize observers collect min/max stats
         calibration_fn(*prepared_model);
@@ -215,14 +236,14 @@ auto quantize_static(
         throw std::runtime_error(std::string("Calibration failed: ") + e.what());
     }
 
-    std::cout << "[Quantization] Calculating quantization parameters from observers..." << std::endl;
+    qlog() << "[Quantization] Calculating quantization parameters from observers..." << std::endl;
     // FakeQuantize modules have collected statistics during calibration
     // Now freeze their qparams and convert to real quantized model
 
-    std::cout << "[Quantization] Converting to quantized model..." << std::endl;
+    qlog() << "[Quantization] Converting to quantized model..." << std::endl;
     auto quantized_model = convert_module_to_quantized_recursive(prepared_model, qconfig);
 
-    std::cout << "[Quantization] Static quantization complete!" << std::endl;
+    qlog() << "[Quantization] Static quantization complete!" << std::endl;
 
     return quantized_model;
 }
@@ -239,7 +260,7 @@ auto prepare_qat(
         throw std::runtime_error("Cannot prepare null model for QAT");
     }
 
-    std::cout << "[QAT] Preparing model with fake quantization modules..." << std::endl;
+    qlog() << "[QAT] Preparing model with fake quantization modules..." << std::endl;
 
     // Set model to training mode for QAT
     model->train();
@@ -256,8 +277,8 @@ auto prepare_qat(
     // Insert FakeQuantize modules into the model structure
     auto qat_module = prepare_module_for_qat_recursive(model, qconfig);
 
-    std::cout << "[QAT] Model prepared. Train normally to learn quantization-robust weights." << std::endl;
-    std::cout << "[QAT] After training, use convert_qat() to get quantized model." << std::endl;
+    qlog() << "[QAT] Model prepared. Train normally to learn quantization-robust weights." << std::endl;
+    qlog() << "[QAT] After training, use convert_qat() to get quantized model." << std::endl;
 
     return qat_module;
 }
@@ -267,7 +288,7 @@ auto convert_qat(std::shared_ptr<nn::Module> qat_model) -> std::shared_ptr<nn::M
         throw std::runtime_error("Cannot convert null QAT model");
     }
 
-    std::cout << "[QAT] Converting fake quantization to real quantization..." << std::endl;
+    qlog() << "[QAT] Converting fake quantization to real quantization..." << std::endl;
 
     // Set to eval mode before conversion
     qat_model->eval();
@@ -278,7 +299,7 @@ auto convert_qat(std::shared_ptr<nn::Module> qat_model) -> std::shared_ptr<nn::M
 
     auto quantized_model = convert_module_to_quantized_recursive(qat_model, qconfig);
 
-    std::cout << "[QAT] Conversion complete. Model ready for INT8 inference." << std::endl;
+    qlog() << "[QAT] Conversion complete. Model ready for INT8 inference." << std::endl;
 
     return quantized_model;
 }
@@ -293,7 +314,7 @@ auto calibrate(
 ) -> std::unordered_map<std::string, QuantizationParams> {
     std::unordered_map<std::string, QuantizationParams> params_map;
 
-    std::cout << "[Calibration] Processing " << calibration_data.size()
+    qlog() << "[Calibration] Processing " << calibration_data.size()
               << " calibration batches..." << std::endl;
 
     // Run forward passes and collect statistics
@@ -301,7 +322,7 @@ auto calibrate(
 
     for (size_t i = 0; i < calibration_data.size(); ++i) {
         if (i % 10 == 0) {
-            std::cout << "[Calibration] Batch " << i << "/" << calibration_data.size() << std::endl;
+            qlog() << "[Calibration] Batch " << i << "/" << calibration_data.size() << std::endl;
         }
 
         // Forward pass (observers collect statistics)
@@ -357,7 +378,7 @@ auto calibrate(
         }
     }
 
-    std::cout << "[Calibration] Complete! Extracted " << params_map.size()
+    qlog() << "[Calibration] Complete! Extracted " << params_map.size()
               << " quantization parameter sets" << std::endl;
 
     return params_map;
@@ -372,7 +393,7 @@ auto fuse_modules(std::shared_ptr<nn::Module> model) -> std::shared_ptr<nn::Modu
     // - Conv2d + BatchNorm2d + ReLU -> QuantizedConv2dBnReLU
     // - Conv2d + ReLU -> QuantizedConv2dReLU
 
-    std::cout << "[Fusion] Fusing compatible layer sequences..." << std::endl;
+    qlog() << "[Fusion] Fusing compatible layer sequences..." << std::endl;
 
     // Handle Sequential containers for pattern matching.
     // For non-Sequential models, recursively fuse within each submodule
@@ -389,7 +410,7 @@ auto fuse_modules(std::shared_ptr<nn::Module> model) -> std::shared_ptr<nn::Modu
             }
         }
         if (!any_fused) {
-            std::cout << "[Fusion] No Sequential submodules found for fusion" << std::endl;
+            qlog() << "[Fusion] No Sequential submodules found for fusion" << std::endl;
         }
         return model;
     }
@@ -420,7 +441,7 @@ auto fuse_modules(std::shared_ptr<nn::Module> model) -> std::shared_ptr<nn::Modu
             }
 
             if (conv && bn && is_relu) {
-                std::cout << "[Fusion] Fusing Conv2d + BatchNorm2d + ReLU at position " << i << std::endl;
+                qlog() << "[Fusion] Fusing Conv2d + BatchNorm2d + ReLU at position " << i << std::endl;
                 auto fused_layer = nn::quantization::QuantizedConv2dBnReLU::from_float(
                     *conv, *bn, qconfig
                 );
@@ -441,7 +462,7 @@ auto fuse_modules(std::shared_ptr<nn::Module> model) -> std::shared_ptr<nn::Modu
                     std::dynamic_pointer_cast<nn::LeakyReLU>(modules[i + 1]) != nullptr;
 
                 if (is_relu) {
-                    std::cout << "[Fusion] Fusing Conv2d + ReLU at position " << i << std::endl;
+                    qlog() << "[Fusion] Fusing Conv2d + ReLU at position " << i << std::endl;
                     auto fused_layer = nn::quantization::QuantizedConv2dReLU::from_float(
                         *conv, qconfig
                     );
@@ -458,7 +479,7 @@ auto fuse_modules(std::shared_ptr<nn::Module> model) -> std::shared_ptr<nn::Modu
         i++;
     }
 
-    std::cout << "[Fusion] " << fusions_performed << " fusions performed" << std::endl;
+    qlog() << "[Fusion] " << fusions_performed << " fusions performed" << std::endl;
     return fused_seq;
 }
 
@@ -590,10 +611,10 @@ auto benchmark_quantization(
     // Memory reduction (4x for FP32 -> INT8)
     float memory_reduction = 4.0f;
 
-    std::cout << "[Benchmark] FP32 inference: " << fp32_time << " ms" << std::endl;
-    std::cout << "[Benchmark] INT8 inference: " << quant_time << " ms" << std::endl;
-    std::cout << "[Benchmark] Speedup: " << speedup << "x" << std::endl;
-    std::cout << "[Benchmark] Memory reduction: " << memory_reduction << "x" << std::endl;
+    qlog() << "[Benchmark] FP32 inference: " << fp32_time << " ms" << std::endl;
+    qlog() << "[Benchmark] INT8 inference: " << quant_time << " ms" << std::endl;
+    qlog() << "[Benchmark] Speedup: " << speedup << "x" << std::endl;
+    qlog() << "[Benchmark] Memory reduction: " << memory_reduction << "x" << std::endl;
 
     return {fp32_time, quant_time, speedup, memory_reduction};
 }
@@ -615,26 +636,48 @@ auto benchmark_quantization(
 // node; if the override is empty (config.config_for returns nullopt), the
 // node is skipped and recursion continues with children. Children may still
 // have their own overrides.
-static void apply_per_layer_quant_recursive(
+// Path-aware conversion: build ONE new module tree, consulting
+// config.config_for(path) at each quantizable leaf so overrides and skip_layers
+// are honored. ModuleConverter is non-mutating (it returns fresh modules), so we
+// must STITCH the converted children into rebuilt parents rather than discard
+// them. Sequential children are named by positional index (PyTorch convention),
+// which is what users put in layer_overrides / skip_layers.
+static std::shared_ptr<nn::Module> convert_path_aware(
     std::shared_ptr<nn::Module> module,
     const QuantizationConfig& config,
     const std::string& current_path
 ) {
-    if (!module) return;
-    auto override_at_path = config.config_for(current_path);
-    if (override_at_path.has_value()) {
-        // Apply this override to the entire subtree rooted at `module`. We
-        // don't recurse deeper here because convert_module_to_quantized_recursive
-        // walks the subtree itself with this qconfig.
-        convert_module_to_quantized_recursive(module, override_at_path.value());
-        return;
+    if (!module) return nullptr;
+
+    // Container: rebuild with each child converted at its own path.
+    if (auto seq = std::dynamic_pointer_cast<nn::Sequential>(module)) {
+        auto out = std::make_shared<nn::Sequential>();
+        int64_t idx = 0;
+        for (const auto& child : seq->modules()) {
+            std::string child_path = current_path.empty()
+                ? std::to_string(idx)
+                : current_path + "." + std::to_string(idx);
+            out->add_module(convert_path_aware(child, config, child_path));
+            ++idx;
+        }
+        return out;
     }
-    // No override at this exact path — recurse to find overrides on children.
-    for (const auto& [child_name, child] : module->get_submodules()) {
-        std::string child_path = current_path.empty()
-            ? child_name : current_path + "." + child_name;
-        apply_per_layer_quant_recursive(child, config, child_path);
+
+    // Quantizable leaf: config_for() returns nullopt for skip_layers (keep
+    // FP32), the override for layer_overrides, else the default qconfig.
+    const bool quantizable =
+        std::dynamic_pointer_cast<nn::Linear>(module) != nullptr ||
+        std::dynamic_pointer_cast<nn::Conv2d>(module) != nullptr;
+    if (quantizable) {
+        auto qcfg = config.config_for(current_path);
+        if (!qcfg.has_value()) {
+            return module;  // explicitly skipped -> leave in FP32
+        }
+        return convert_module_to_quantized_recursive(module, qcfg.value());
     }
+
+    // Non-quantizable / non-container (ReLU, custom modules): return unchanged.
+    return module;
 }
 
 auto quantize_dynamic(
@@ -644,17 +687,9 @@ auto quantize_dynamic(
     if (!model) {
         throw std::runtime_error("Cannot quantize null model");
     }
-
-    // Audit J2: real recursive per-layer walk. The previous implementation
-    // iterated only `model->get_submodules()` (top-level), so overrides on
-    // deeper paths like "encoder.layer.5.attention" silently never fired.
-    apply_per_layer_quant_recursive(model, config, /*current_path=*/"");
-
-    // Apply the default qconfig to any remaining un-overridden submodules at
-    // the root level. The recursive call above handled subtrees with explicit
-    // overrides; this final pass quantizes the rest using the default.
-    auto quantized_model = convert_module_to_quantized_recursive(model, config.default_config);
-    return quantized_model;
+    // Single path-aware pass that honors per-layer overrides AND skip_layers,
+    // stitching the (non-mutating) converted submodules into a rebuilt tree.
+    return convert_path_aware(model, config, /*current_path=*/"");
 }
 
 auto quantize_static(
@@ -662,8 +697,16 @@ auto quantize_static(
     std::function<void(nn::Module&)> calibration_fn,
     const QuantizationConfig& config
 ) -> std::shared_ptr<nn::Module> {
-    // Delegate to single-config version with the default config,
-    // skipping layers as specified
+    // The static (calibration-based) path applies a single qconfig uniformly; it
+    // cannot yet honor per-layer overrides/skip during observer insertion. Fail
+    // loudly instead of SILENTLY dropping them (the old behavior advertised
+    // "skipping layers as specified" but ignored both maps).
+    if (!config.layer_overrides.empty() || !config.skip_layers.empty()) {
+        throw std::runtime_error(
+            "quantize_static: per-layer layer_overrides / skip_layers are not "
+            "supported by the static (calibration) path; use quantize_dynamic "
+            "with the QuantizationConfig, or a uniform QConfig here");
+    }
     return quantize_static(model, calibration_fn, config.default_config);
 }
 

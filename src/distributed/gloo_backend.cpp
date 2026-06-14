@@ -19,6 +19,7 @@
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <unistd.h>
+#include <sys/stat.h>
 #include <netdb.h>
 #include <fcntl.h>
 #include <fstream>
@@ -490,6 +491,12 @@ auto GlooBackend::reduce(Tensor& tensor, int dst_rank, ReduceOp op) -> void {
                 apply_reduce_op(tensor, received, op);
             }
         }
+        // apply_reduce_op treats AVG as SUM (it has no world_size context), so
+        // finish the average here. Without this, reduce(AVG) returned the
+        // unaveraged sum (off by world_size); ring_all_reduce divides similarly.
+        if (op == ReduceOp::AVG && world_size_ > 0) {
+            tensor = tenzor::div(tensor, static_cast<double>(world_size_));
+        }
     } else {
         // Send to destination
         send_tensor(tensor, dst_rank);
@@ -872,8 +879,18 @@ auto GlooBackend::connect_to_rank(int peer_rank) -> std::shared_ptr<TCPConnectio
 }
 
 auto GlooBackend::write_port_to_store(int rank, int port) -> void {
-    std::string store_path = "/tmp/tenzor_rendezvous_" + std::to_string(master_port_);
+    // Per-user, owner-only rendezvous dir. A fixed world-accessible
+    // /tmp/tenzor_rendezvous_<port> let any local user pre-create the dir or
+    // rank files to inject a bogus port (MITM the handshake) or DoS it.
+    std::string store_path;
+    if (const char* xdg = std::getenv("XDG_RUNTIME_DIR"); xdg && xdg[0]) {
+        store_path = std::string(xdg) + "/tenzor_rendezvous_" + std::to_string(master_port_);
+    } else {
+        store_path = "/tmp/tenzor_rendezvous_" + std::to_string(getuid()) +
+                     "_" + std::to_string(master_port_);
+    }
     std::filesystem::create_directories(store_path);
+    ::chmod(store_path.c_str(), 0700);
 
     std::string rank_file = store_path + "/rank_" + std::to_string(rank);
     std::ofstream file(rank_file);
@@ -885,7 +902,14 @@ auto GlooBackend::write_port_to_store(int rank, int port) -> void {
 }
 
 auto GlooBackend::read_port_from_store(int rank) -> int {
-    std::string store_path = "/tmp/tenzor_rendezvous_" + std::to_string(master_port_);
+    // Must match write_port_to_store()'s per-user path exactly.
+    std::string store_path;
+    if (const char* xdg = std::getenv("XDG_RUNTIME_DIR"); xdg && xdg[0]) {
+        store_path = std::string(xdg) + "/tenzor_rendezvous_" + std::to_string(master_port_);
+    } else {
+        store_path = "/tmp/tenzor_rendezvous_" + std::to_string(getuid()) +
+                     "_" + std::to_string(master_port_);
+    }
     std::string rank_file = store_path + "/rank_" + std::to_string(rank);
 
     // Wait for file to appear (with timeout)

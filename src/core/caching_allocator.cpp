@@ -243,6 +243,9 @@ auto CachingAllocator::find_free_block(size_t bytes) -> void* {
 }
 
 auto CachingAllocator::size_of(void* ptr) const -> size_t {
+    // Lock like the other accessors: a concurrent allocate()/deallocate() can
+    // rehash allocated_blocks_ and invalidate a lock-free find().
+    std::lock_guard<std::mutex> lock(mutex_);
     auto it = allocated_blocks_.find(ptr);
     if (it == allocated_blocks_.end()) {
         throw std::runtime_error(

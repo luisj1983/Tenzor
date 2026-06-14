@@ -36,6 +36,24 @@ struct MPSBackend::Impl {
 
 thread_local int MPSBackend::Impl::current_device_id = 0;
 
+// Active backend Impl for cross-TU buffer reuse. There is a single MPS backend
+// instance; the element-wise kernels (a separate translation unit) use this to
+// fetch the allocator's MTLBuffer for a tensor instead of wrapping a throwaway
+// newBufferWithBytesNoCopy buffer per operand per op.
+static MPSBackend::Impl* g_active_mps_impl = nullptr;
+
+// Returns the allocator's MTLBuffer whose contents pointer is exactly `ptr`
+// (i.e. a tensor that owns its allocation — contiguous tensors), or nil. Views
+// (ptr offset into an allocation) miss and the caller falls back to a no-copy
+// wrapper. Buffers are released from buffer_map on deallocate(), so a returned
+// buffer is always live for an in-use tensor.
+id<MTLBuffer> pooled_buffer_for(void* ptr) {
+    if (!g_active_mps_impl || !ptr) return nil;
+    std::lock_guard<std::mutex> lock(g_active_mps_impl->buffer_mutex);
+    auto it = g_active_mps_impl->buffer_map.find(ptr);
+    return (it != g_active_mps_impl->buffer_map.end()) ? it->second : nil;
+}
+
 MPSBackend::MPSBackend() : impl_(std::make_unique<Impl>()) {
     @autoreleasepool {
         impl_->device = MTLCreateSystemDefaultDevice();
@@ -47,6 +65,8 @@ MPSBackend::MPSBackend() : impl_(std::make_unique<Impl>()) {
             throw std::runtime_error("MPS: Failed to create command queue");
         }
     }
+    // Publish this instance's allocator map for cross-TU buffer reuse.
+    g_active_mps_impl = impl_.get();
 }
 
 MPSBackend::~MPSBackend() {
@@ -59,6 +79,9 @@ MPSBackend::~MPSBackend() {
         }
         // Release all tracked buffers
         impl_->buffer_map.clear();
+    }
+    if (g_active_mps_impl == impl_.get()) {
+        g_active_mps_impl = nullptr;
     }
 }
 

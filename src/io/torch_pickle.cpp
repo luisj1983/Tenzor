@@ -395,9 +395,31 @@ auto build_tensor_from_storage(const ZipReader& zip,
     }
     auto view = zip.read_view(full);
 
+    // Reject negative offset/dims and use checked arithmetic. A negative
+    // storage_offset or an overflowed (negative) numel could make
+    // (storage_offset+numel) small enough to pass the bounds check while
+    // copy_bytes/src_byte below point far outside the view (wild pointer /
+    // huge copy). .pth/.pt are untrusted by design.
+    if (storage_offset < 0) {
+        throw std::runtime_error("torch_pickle: negative storage_offset");
+    }
     int64_t numel = 1;
-    for (auto d : shape) numel *= d;
-    size_t required_bytes = static_cast<size_t>(storage_offset + numel) * elem_size;
+    for (auto d : shape) {
+        if (static_cast<int64_t>(d) < 0) {
+            throw std::runtime_error("torch_pickle: negative tensor dimension");
+        }
+        if (__builtin_mul_overflow(numel, static_cast<int64_t>(d), &numel)) {
+            throw std::runtime_error("torch_pickle: tensor element count overflows int64");
+        }
+    }
+    size_t copy_bytes;
+    size_t offset_bytes;
+    size_t required_bytes;
+    if (__builtin_mul_overflow(static_cast<size_t>(numel), elem_size, &copy_bytes) ||
+        __builtin_mul_overflow(static_cast<size_t>(storage_offset), elem_size, &offset_bytes) ||
+        __builtin_add_overflow(offset_bytes, copy_bytes, &required_bytes)) {
+        throw std::runtime_error("torch_pickle: storage byte size overflow");
+    }
     if (required_bytes > view.size()) {
         throw std::runtime_error(
             "torch_pickle: storage " + storage_key + " too small for tensor "
@@ -422,11 +444,9 @@ auto build_tensor_from_storage(const ZipReader& zip,
         }
     }
 
-    // Allocate a fresh CPU tensor and memcpy the bytes.
+    // Allocate a fresh CPU tensor and memcpy the bytes (sizes validated above).
     Tensor t(std::vector<int64_t>(shape.begin(), shape.end()), dtype, Device::cpu());
-    const size_t copy_bytes = static_cast<size_t>(numel) * elem_size;
-    const char* src_byte = view.data() +
-                            static_cast<size_t>(storage_offset) * elem_size;
+    const char* src_byte = view.data() + offset_bytes;
     std::memcpy(t.data_ptr(), src_byte, copy_bytes);
     return t;
 }

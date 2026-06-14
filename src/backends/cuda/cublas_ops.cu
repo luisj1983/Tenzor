@@ -50,21 +50,29 @@ cudaDataType_t dtype_to_cuda(DType dtype) {
     }
 }
 
-// Select optimal compute type based on input/output types
-cudaDataType_t select_compute_type(DType input_dtype) {
+// Select the cuBLAS *compute type* (NOT a cudaDataType_t) for the GemmEx APIs.
+// The cublasGemmEx / cublasGemmStridedBatchedEx computeType parameter is a
+// cublasComputeType_t; passing a cudaDataType_t silently selected the wrong
+// precision (CUDA_R_32F==0 aliases CUBLAS_COMPUTE_16F==0, i.e. FP16 accumulation
+// for an FP32 GEMM).
+cublasComputeType_t select_compute_type(DType input_dtype) {
     switch (input_dtype) {
         case DType::Float32:
+            // Honor the global TF32 toggle, matching the FP32 paths below.
+            return ::tenzor::cuda::matmul::allow_tf32()
+                       ? CUBLAS_COMPUTE_32F_FAST_TF32
+                       : CUBLAS_COMPUTE_32F;
         case DType::Float64:
-            return dtype_to_cuda(input_dtype);
+            return CUBLAS_COMPUTE_64F;
         case DType::Float16:
         case DType::BFloat16:
-            // Use FP32 accumulation for FP16/BF16 Tensor Cores
-            return CUDA_R_32F;
+            // FP32 accumulation for FP16/BF16 Tensor Cores
+            return CUBLAS_COMPUTE_32F;
         case DType::Int8:
-            // Use INT32 accumulation for INT8 Tensor Cores
-            return CUDA_R_32I;
+            // INT32 accumulation for INT8 Tensor Cores
+            return CUBLAS_COMPUTE_32I;
         default:
-            return CUDA_R_32F;
+            return CUBLAS_COMPUTE_32F;
     }
 }
 
@@ -114,7 +122,7 @@ void cublas_gemm_ex(
 
     // Convert data types
     cudaDataType_t cuda_dtype = dtype_to_cuda(dtype);
-    cudaDataType_t compute_type = select_compute_type(dtype);
+    cublasComputeType_t compute_type = select_compute_type(dtype);
 
     // Set alpha and beta
     // Note: We use FP32 alpha/beta even for FP16 operations (cuBLAS requirement)
@@ -216,7 +224,7 @@ void cublas_batched_gemm_ex(
 
     // Convert data types
     cudaDataType_t cuda_dtype = dtype_to_cuda(dtype);
-    cudaDataType_t compute_type = select_compute_type(dtype);
+    cublasComputeType_t compute_type = select_compute_type(dtype);
 
     // Set alpha and beta (same as non-batched version)
     const float alpha_f = 1.0f;
@@ -310,7 +318,7 @@ void cublas_batched_gemm_scaled(
     cublasHandle_t handle = CuBLASHandlePool::get(stream);
 
     cudaDataType_t cuda_dtype = dtype_to_cuda(dtype);
-    cudaDataType_t compute_type = select_compute_type(dtype);
+    cublasComputeType_t compute_type = select_compute_type(dtype);
 
     // Apply scale as alpha parameter
     const float alpha_f = scale;

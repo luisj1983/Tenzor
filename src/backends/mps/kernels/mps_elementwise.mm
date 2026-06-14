@@ -13,7 +13,10 @@
 
 #include "../mps_backend.hpp"
 #include "tenzor/core/tensor.hpp"
+#include "tenzor/core/shape.hpp"
 #include "tenzor/ops/creation.hpp"
+#include "tenzor/ops/transform.hpp"
+#include <algorithm>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
@@ -81,10 +84,22 @@ id<MTLComputePipelineState> get_pipeline(const std::string& name) {
     return pipeline;
 }
 
-// Get or create MTLBuffer for a tensor's data
+// Forward declaration: the allocator's buffer lookup lives in mps_backend.mm.
+id<MTLBuffer> pooled_buffer_for(void* ptr);
+
+// Get the MTLBuffer for a tensor's data. Prefer reusing the allocator's own
+// buffer (contiguous tensors: data_ptr() == allocation base, so the returned
+// buffer is used at offset 0). This avoids churning a throwaway MTLBuffer per
+// operand per op and the page-alignment fragility of newBufferWithBytesNoCopy.
+// Views (offset into an allocation) miss the lookup and fall back to the no-copy
+// wrapper.
 id<MTLBuffer> get_buffer(const Tensor& tensor) {
+    void* ptr = const_cast<void*>(tensor.data_ptr());
+    if (id<MTLBuffer> pooled = pooled_buffer_for(ptr)) {
+        return pooled;
+    }
     size_t bytes = tensor.numel() * dtype_size(tensor.dtype());
-    return [g_device newBufferWithBytesNoCopy:const_cast<void*>(tensor.data_ptr())
+    return [g_device newBufferWithBytesNoCopy:ptr
                                        length:bytes
                                       options:MTLResourceStorageModeShared
                                   deallocator:nil];
@@ -99,17 +114,41 @@ static std::string shader_name_for_dtype(const std::string& base, DType dtype) {
     switch (dtype) {
         case DType::Float32: return base;
         case DType::Float16: return base + "_f16";
-        default:             return base;  // caller will fail at get_pipeline
+        default:
+            // Do NOT silently fall through to the float32 shader: integer dtypes
+            // have a valid f32 pipeline name, so get_pipeline would succeed and
+            // reinterpret the integer bytes as IEEE-754 float (silent garbage).
+            // Reject explicitly until typed integer variants exist.
+            throw std::runtime_error(
+                "MPS: element-wise op '" + base + "' unsupported for dtype " +
+                std::string(dtype_name(dtype)) + " (only Float32/Float16 implemented)");
     }
 }
 
 // Dispatch a binary element-wise operation
 Tensor dispatch_binary(const std::string& shader_name,
-                       const Tensor& a, const Tensor& b) {
-    auto shape = a.shape();
-    std::vector<int64_t> shape_vec(shape.begin(), shape.end());
-    Tensor output(shape_vec, a.dtype(), a.device());
-    size_t numel = a.numel();
+                       const Tensor& a_in, const Tensor& b_in) {
+    // The element-wise Metal kernels index a[id]/b[id] over the output numel and
+    // assume both operands are contiguous with the output shape. So we must
+    // broadcast-and-materialize first; otherwise b[id] reads past the end of a
+    // smaller operand (OOB / silently wrong math) — this hit every broadcast
+    // (e.g. {4,5}+{5}) AND every tensor+scalar (b is a 1-element tensor).
+    std::vector<int64_t> out_shape =
+        ::tenzor::broadcast_shapes(a_in.shape(), b_in.shape());
+
+    auto matches = [&](const Tensor& t) {
+        auto s = t.shape();
+        return t.is_contiguous() &&
+               s.size() == out_shape.size() &&
+               std::equal(s.begin(), s.end(), out_shape.begin());
+    };
+    Tensor a = matches(a_in) ? a_in
+                             : ::tenzor::broadcast_to(a_in, out_shape).contiguous();
+    Tensor b = matches(b_in) ? b_in
+                             : ::tenzor::broadcast_to(b_in, out_shape).contiguous();
+
+    Tensor output(out_shape, a.dtype(), a.device());
+    size_t numel = output.numel();
 
     auto pipeline = get_pipeline(shader_name_for_dtype(shader_name, a.dtype()));
     id<MTLBuffer> buf_a = get_buffer(a);

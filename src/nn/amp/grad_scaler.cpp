@@ -134,6 +134,11 @@ auto GradScaler::unscale_(optim::Optimizer& optimizer) -> void {
 }
 
 auto GradScaler::check_inf_nan_(const optim::Optimizer& optimizer) const -> bool {
+    // Accumulate the per-parameter inf/nan flags into a single DEVICE tensor and
+    // perform exactly ONE device->host sync at the end (PyTorch's found_inf
+    // pattern), instead of a D2H copy + implicit stream sync per parameter which
+    // serialized the step on many tiny transfers for large models.
+    std::optional<Tensor> found_inf;
     for (const auto& param : optimizer.parameters()) {
         if (!param->has_grad()) {
             continue;
@@ -155,15 +160,16 @@ auto GradScaler::check_inf_nan_(const optim::Optimizer& optimizer) const -> bool
                                   ? it->second
                                   : *grad;
 
-        // Use fused kernel — stays on device, no per-param D2H transfer
-        auto result = has_inf_nan(probe);
-        // Single D2H transfer of 1 bool
-        if (result.cpu().data<bool>()[0]) {
-            return true;
-        }
+        // has_inf_nan stays on device; OR the flags together on-device.
+        Tensor flag = has_inf_nan(probe).to(DType::Float32);
+        found_inf = found_inf.has_value() ? (*found_inf + flag) : flag;
     }
 
-    return false;
+    if (!found_inf.has_value()) {
+        return false;
+    }
+    // The single host sync for the whole optimizer.
+    return found_inf->cpu().data<float>()[0] > 0.5f;
 }
 
 auto GradScaler::step(optim::Optimizer& optimizer) -> bool {
@@ -219,8 +225,14 @@ auto GradScaler::update() -> void {
         if (growth_tracker_ >= growth_interval_) {
             scale_ *= growth_factor_;
 
-            // Ensure scale doesn't become too large
-            scale_ = std::min(scale_, static_cast<float>(1ULL << 24));
+            // Cap growth only to prevent the NEXT multiply from overflowing to
+            // +Inf. The old fixed 2^24 (~1.6e7) cap sat below common init scales
+            // (PyTorch defaults to 2^16 and grows well past 2^24), silently
+            // clamping the scale and creating an asymmetry with reset()'s
+            // init_scale_. This bound is always >= any realistic init_scale_.
+            const float max_scale =
+                std::numeric_limits<float>::max() / growth_factor_;
+            scale_ = std::min(scale_, max_scale);
 
             // Reset growth tracker
             growth_tracker_ = 0;

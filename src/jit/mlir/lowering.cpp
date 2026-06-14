@@ -151,7 +151,13 @@ auto scalar_literal(double value, ::tenzor::DType d) -> std::string {
     using ::tenzor::DType;
     std::ostringstream s;
     if (is_float_dtype(d)) {
-        s << std::scientific << std::setprecision(9) << value;
+        // Use enough significant digits to round-trip the target type: Float64
+        // carries ~17, Float32 ~9, Float16/BFloat16 fewer. A fixed precision of
+        // 9 truncated Float64 splat constants to single-precision resolution.
+        int prec = (d == DType::Float64) ? 17
+                 : (d == DType::Float32) ? 9
+                 : 5;  // Float16 / BFloat16
+        s << std::scientific << std::setprecision(prec) << value;
         return s.str();
     }
     if (is_int_dtype(d)) {

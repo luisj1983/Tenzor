@@ -1477,6 +1477,15 @@ public:
         , device(other.device)
         , requires_grad(other.requires_grad)
         , names_(other.names_)
+        // Preserve quantization metadata so views/transpose/slice/detach of a
+        // quantized tensor keep their scale/zero-point (dequantize() reads these;
+        // dropping them produced all-zeros / garbage). view_base_ is re-set by
+        // each view caller, so it is intentionally not copied here.
+        , q_scale_(other.q_scale_)
+        , q_zero_point_(other.q_zero_point_)
+        , q_scales_(other.q_scales_)
+        , q_zero_points_(other.q_zero_points_)
+        , q_axis_(other.q_axis_)
         , is_contiguous_cache_(other.is_contiguous_cache_.load(std::memory_order_relaxed))
         , memory_format_cache_(other.memory_format_cache_.load(std::memory_order_relaxed))
         , version_counter_(other.version_counter_.load(std::memory_order_relaxed))

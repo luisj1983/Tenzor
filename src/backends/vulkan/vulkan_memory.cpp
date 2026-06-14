@@ -243,9 +243,14 @@ auto VulkanBackend::copy(void* dst, const void* src, size_t bytes,
         // for DeviceToDevice, either works
         const void* device_ptr = (kind == CopyKind::DeviceToHost) ? src : dst;
         auto it = allocations_.find(const_cast<void*>(device_ptr));
-        if (it != allocations_.end()) {
-            device_id = it->second.second;
+        if (it == allocations_.end()) {
+            // Don't silently fall back to device 0 — on a multi-GPU host that
+            // would submit the staging copy on the wrong device's queue.
+            throw std::runtime_error(
+                "VulkanBackend::copy: device pointer not found in allocations; "
+                "cannot determine the owning device");
         }
+        device_id = it->second.second;
     }
 
     // Lock per-device mutex for GPU command submission

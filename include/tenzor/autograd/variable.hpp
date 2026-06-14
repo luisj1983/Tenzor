@@ -55,6 +55,7 @@ struct VariableImpl {
     VariableImpl(const VariableImpl& other)
         : data_(other.data_),
           grad_(other.grad_),
+          grad_with_graph_impl_(other.grad_with_graph_impl_),
           sparse_grad_(other.sparse_grad_),
           grad_fn_(other.grad_fn_),
           requires_grad_(other.requires_grad_.load(std::memory_order_acquire)),
@@ -70,6 +71,7 @@ struct VariableImpl {
     VariableImpl(VariableImpl&& other) noexcept
         : data_(std::move(other.data_)),
           grad_(std::move(other.grad_)),
+          grad_with_graph_impl_(std::move(other.grad_with_graph_impl_)),
           sparse_grad_(std::move(other.sparse_grad_)),
           grad_fn_(std::move(other.grad_fn_)),
           requires_grad_(other.requires_grad_.load(std::memory_order_acquire)),
@@ -79,6 +81,7 @@ struct VariableImpl {
           next_hook_id_(other.next_hook_id_.load(std::memory_order_acquire)),
           grad_mutex_(std::move(other.grad_mutex_)),
           thread_safe_(other.thread_safe_.load(std::memory_order_acquire)),
+          creation_metadata_(std::move(other.creation_metadata_)),
           preserve_grad_dtype_(other.preserve_grad_dtype_.load(std::memory_order_acquire)) {}
 
     VariableImpl& operator=(const VariableImpl& other) {
@@ -92,8 +95,13 @@ struct VariableImpl {
 
             data_ = other.data_;
             grad_ = other.grad_;
+            grad_with_graph_impl_ = other.grad_with_graph_impl_;
+            // Drop the lazy cache handle; grad_variable() rebuilds it on demand
+            // from grad_with_graph_impl_ (never bit-copy the owning buffer).
+            grad_with_graph_cache_storage_.reset();
             sparse_grad_ = other.sparse_grad_;
             grad_fn_ = other.grad_fn_;
+            creation_metadata_ = other.creation_metadata_;
             requires_grad_.store(other.requires_grad_.load(std::memory_order_relaxed), std::memory_order_relaxed);
             retain_grad_.store(other.retain_grad_.load(std::memory_order_relaxed), std::memory_order_relaxed);
             was_non_leaf_.store(other.was_non_leaf_.load(std::memory_order_relaxed), std::memory_order_relaxed);
@@ -118,8 +126,13 @@ struct VariableImpl {
 
             data_ = std::move(other.data_);
             grad_ = std::move(other.grad_);
+            grad_with_graph_impl_ = std::move(other.grad_with_graph_impl_);
+            // Drop the lazy cache handle; grad_variable() rebuilds it on demand
+            // from grad_with_graph_impl_ (never bit-copy the owning buffer).
+            grad_with_graph_cache_storage_.reset();
             sparse_grad_ = std::move(other.sparse_grad_);
             grad_fn_ = std::move(other.grad_fn_);
+            creation_metadata_ = std::move(other.creation_metadata_);
             requires_grad_.store(other.requires_grad_.load(std::memory_order_relaxed), std::memory_order_relaxed);
             retain_grad_.store(other.retain_grad_.load(std::memory_order_relaxed), std::memory_order_relaxed);
             was_non_leaf_.store(other.was_non_leaf_.load(std::memory_order_relaxed), std::memory_order_relaxed);
@@ -153,9 +166,13 @@ struct VariableImpl {
     std::shared_ptr<VariableImpl> grad_with_graph_impl_;
 
     /// Lazy Variable handle wrapping grad_with_graph_impl_ so grad_variable()
-    /// can return a stable reference. Held via a raw buffer because Variable
-    /// is forward-declared here; constructed lazily by grad_variable().
-    mutable std::unique_ptr<char[]> grad_with_graph_cache_storage_;
+    /// can return a stable reference. Held via type-erased std::shared_ptr<void>
+    /// because Variable is forward-declared here; constructed lazily by
+    /// grad_variable() as std::make_shared<std::optional<Variable>>(), which
+    /// records the correct destructor in the control block (so the contained
+    /// optional<Variable> — and the second-order graph it pins — is properly
+    /// destroyed, with no mismatched new/delete[]).
+    mutable std::shared_ptr<void> grad_with_graph_cache_storage_;
 
     /// Accumulated sparse gradient (for embeddings and sparse parameters).
     /// When set, this takes precedence over grad_ for sparse-aware optimizers.

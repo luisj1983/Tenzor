@@ -22,11 +22,22 @@ auto load_cifar_batch(const std::string& path, std::vector<uint8_t>& images,
     for (int64_t i = 0; i < kSamplesPerBatch; ++i) {
         uint8_t label;
         file.read(reinterpret_cast<char*>(&label), 1);
+        if (file.gcount() != 1) {
+            throw std::runtime_error(
+                "CIFAR: truncated file " + path + " (expected " +
+                std::to_string(kSamplesPerBatch) + " records, got " +
+                std::to_string(i) + ")");
+        }
         labels.push_back(label);
 
         size_t offset = images.size();
         images.resize(offset + kImageBytes);
         file.read(reinterpret_cast<char*>(images.data() + offset), kImageBytes);
+        if (file.gcount() != static_cast<std::streamsize>(kImageBytes)) {
+            throw std::runtime_error(
+                "CIFAR: truncated image data in " + path + " at record " +
+                std::to_string(i));
+        }
     }
 }
 
@@ -107,11 +118,19 @@ CIFAR100::CIFAR100(const std::string& root_dir, bool train, bool normalize) {
         uint8_t coarse_label, fine_label;
         file.read(reinterpret_cast<char*>(&coarse_label), 1);
         file.read(reinterpret_cast<char*>(&fine_label), 1);
+        if (file.gcount() != 1) {
+            throw std::runtime_error(
+                "CIFAR100: truncated file at record " + std::to_string(i));
+        }
         lbl_data.push_back(fine_label);  // Use fine label (100 classes)
 
         size_t offset = img_data.size();
         img_data.resize(offset + kImageBytes);
         file.read(reinterpret_cast<char*>(img_data.data() + offset), kImageBytes);
+        if (file.gcount() != static_cast<std::streamsize>(kImageBytes)) {
+            throw std::runtime_error(
+                "CIFAR100: truncated image data at record " + std::to_string(i));
+        }
     }
 
     auto [imgs, lbls] = build_tensors(img_data, lbl_data,

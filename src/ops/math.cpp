@@ -127,48 +127,55 @@ auto div(const Tensor& a, const Tensor& b) -> Tensor {
 // Creates a size-{1} scalar tensor once and delegates to the tensor overload,
 // but backends can optimize this path internally.
 
+namespace {
+// Dispatch a tensor-scalar elementwise op. The materialized scalar tensor and
+// the ScalarB attribute must encode the SAME value, else backends diverge
+// depending on which they read. We also apply PyTorch scalar type-promotion: a
+// non-integral scalar applied to an integer tensor promotes to the default
+// float dtype instead of silently truncating the fraction (e.g. int + 0.5).
+auto dispatch_scalar_binop(OpId op, const Tensor& a, double scalar) -> Tensor {
+    DType rdt = a.dtype();
+    const bool scalar_is_integral =
+        std::isfinite(scalar) && scalar == std::floor(scalar);
+    if (is_integer_type(rdt) && !scalar_is_integral) {
+        rdt = DType::Float32;
+    }
+    Tensor a_use = (a.dtype() != rdt) ? a.to(rdt) : a;
+    a_use = a_use.is_contiguous() ? a_use : a_use.contiguous();
+    Tensor scalar_tensor = full({1}, scalar, rdt, a.device());
+    std::vector<Tensor> inputs = {a_use, scalar_tensor};
+    NewOpAttributes attrs;
+    attrs.set(AttrKey::ScalarB, scalar);
+    return dispatch(op, inputs, attrs)[0];
+}
+}  // namespace
+
 auto add(const Tensor& a, double scalar) -> Tensor {
     if (!a.impl()) {
         throw std::runtime_error("Cannot add to uninitialized tensor");
     }
-    auto scalar_tensor = full({1}, scalar, a.dtype(), a.device());
-    std::vector<Tensor> inputs = {a.is_contiguous() ? a : a.contiguous(), scalar_tensor};
-    NewOpAttributes attrs;
-    attrs.set(AttrKey::ScalarB, scalar);
-    return dispatch(OpId::Add, inputs, attrs)[0];
+    return dispatch_scalar_binop(OpId::Add, a, scalar);
 }
 
 auto sub(const Tensor& a, double scalar) -> Tensor {
     if (!a.impl()) {
         throw std::runtime_error("Cannot subtract from uninitialized tensor");
     }
-    auto scalar_tensor = full({1}, scalar, a.dtype(), a.device());
-    std::vector<Tensor> inputs = {a.is_contiguous() ? a : a.contiguous(), scalar_tensor};
-    NewOpAttributes attrs;
-    attrs.set(AttrKey::ScalarB, scalar);
-    return dispatch(OpId::Sub, inputs, attrs)[0];
+    return dispatch_scalar_binop(OpId::Sub, a, scalar);
 }
 
 auto mul(const Tensor& a, double scalar) -> Tensor {
     if (!a.impl()) {
         throw std::runtime_error("Cannot multiply uninitialized tensor");
     }
-    auto scalar_tensor = full({1}, scalar, a.dtype(), a.device());
-    std::vector<Tensor> inputs = {a.is_contiguous() ? a : a.contiguous(), scalar_tensor};
-    NewOpAttributes attrs;
-    attrs.set(AttrKey::ScalarB, scalar);
-    return dispatch(OpId::Mul, inputs, attrs)[0];
+    return dispatch_scalar_binop(OpId::Mul, a, scalar);
 }
 
 auto div(const Tensor& a, double scalar) -> Tensor {
     if (!a.impl()) {
         throw std::runtime_error("Cannot divide uninitialized tensor");
     }
-    auto scalar_tensor = full({1}, scalar, a.dtype(), a.device());
-    std::vector<Tensor> inputs = {a.is_contiguous() ? a : a.contiguous(), scalar_tensor};
-    NewOpAttributes attrs;
-    attrs.set(AttrKey::ScalarB, scalar);
-    return dispatch(OpId::Div, inputs, attrs)[0];
+    return dispatch_scalar_binop(OpId::Div, a, scalar);
 }
 
 auto matmul(const Tensor& a, const Tensor& b) -> Tensor {
@@ -230,6 +237,16 @@ auto matmul(const Tensor& a, const Tensor& b) -> Tensor {
         }
         return bmm(ac, bc);
     }
+    // 2D @ 2D: validate the contracted dimension at the op layer so a mismatch
+    // is a uniform error rather than a backend-specific failure (bmm and the
+    // 4D+ path above already validate; this keeps the contract consistent).
+    if (ap.ndim() == 2 && bp.ndim() == 2 && ap.shape()[1] != bp.shape()[0]) {
+        throw std::runtime_error(
+            "matmul: inner dimensions don't match (" +
+            std::to_string(ap.shape()[0]) + "x" + std::to_string(ap.shape()[1]) +
+            " @ " + std::to_string(bp.shape()[0]) + "x" +
+            std::to_string(bp.shape()[1]) + ")");
+    }
     auto ac = ap.is_contiguous() ? ap : ap.contiguous();
     auto bc = bp.is_contiguous() ? bp : bp.contiguous();
     std::array<Tensor, 2> inputs = {ac, bc};
@@ -290,6 +307,23 @@ auto addmm(const Tensor& input, const Tensor& mat1, const Tensor& mat2,
             std::to_string(m1p.shape()[1]) + ") and mat2 (" +
             std::to_string(m2p.shape()[0]) + "x" + std::to_string(m2p.shape()[1]) +
             ") inner dimensions don't match");
+    }
+    // `input` must be broadcast-compatible with the (M, N) result.
+    {
+        const int64_t M = m1p.shape()[0];
+        const int64_t N = m2p.shape()[1];
+        const auto& is = inp.shape();
+        bool ok = is.size() <= 2;
+        if (ok) {
+            const int64_t in_n = is.empty() ? 1 : is.back();
+            const int64_t in_m = (is.size() == 2) ? is[0] : 1;
+            ok = (in_n == N || in_n == 1) && (in_m == M || in_m == 1);
+        }
+        if (!ok) {
+            throw std::runtime_error(
+                "addmm: input shape is not broadcastable to the result (" +
+                std::to_string(M) + "x" + std::to_string(N) + ")");
+        }
     }
 
     auto ic = inp.is_contiguous() ? inp : inp.contiguous();

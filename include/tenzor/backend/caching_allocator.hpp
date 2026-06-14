@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstddef>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <set>
@@ -252,6 +253,10 @@ private:
 
         // All blocks (free and allocated) by pointer
         std::unordered_map<void*, std::unique_ptr<Block>> all_blocks;
+
+        // Address-ordered index (non-owning) into all_blocks, enabling O(log n)
+        // predecessor lookup for backward coalescing on free().
+        std::map<void*, Block*> blocks_by_addr;
 
         // Statistics
         MemoryStats stats;

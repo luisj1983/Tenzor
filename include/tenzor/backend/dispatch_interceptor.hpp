@@ -132,10 +132,14 @@ private:
         if (idx >= s.size()) {
             return terminal(op, inputs, attrs);
         }
-        // Build the "next" callable that invokes the rest of the chain
-        DispatchNext next = [&s, idx, &terminal](
+        // Build the "next" callable that invokes the rest of the chain.
+        // Capture `terminal` BY VALUE and forward a copy on each call so an
+        // interceptor that invokes next() more than once (retry/fan-out) does
+        // not move from an already-moved-from std::function (which would call an
+        // empty function -> std::bad_function_call).
+        DispatchNext next = [&s, idx, terminal](
             OpId o, std::span<const Tensor> i, const OpAttributes& a) {
-            return run_chain_(s, idx + 1, o, i, a, std::move(terminal));
+            return run_chain_(s, idx + 1, o, i, a, terminal);
         };
         return s[idx](op, inputs, attrs, std::move(next));
     }

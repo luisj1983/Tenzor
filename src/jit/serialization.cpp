@@ -467,8 +467,22 @@ auto GraphReader::read_bool() -> bool {
 
 auto GraphReader::read_string() -> std::string {
     uint64_t size = read_uint64();
+    // Bound the size against the remaining file length so a crafted huge size
+    // can't trigger an enormous allocation (DoS) before the read fails.
+    std::streampos cur = file_.tellg();
+    file_.seekg(0, std::ios::end);
+    std::streampos end = file_.tellg();
+    file_.seekg(cur);
+    if (cur < 0 || end < 0 ||
+        size > static_cast<uint64_t>(end - cur)) {
+        throw std::runtime_error(
+            "GraphReader::read_string: declared size exceeds remaining file");
+    }
     std::string str(size, '\0');
-    file_.read(&str[0], size);
+    file_.read(&str[0], static_cast<std::streamsize>(size));
+    if (!file_) {
+        throw std::runtime_error("GraphReader::read_string: truncated string");
+    }
     return str;
 }
 
@@ -484,8 +498,22 @@ auto GraphReader::read_tensor() -> Tensor {
     // to the recorded device if needed.
     Tensor tensor(shape, dtype, Device::cpu());
 
+    // The file provides a SEPARATE data_size; it MUST equal the tensor's own
+    // byte size or the read overflows (or under-fills) the allocated buffer.
+    // This is the entry point for untrusted .graph files.
     uint64_t data_size = read_uint64();
-    file_.read(reinterpret_cast<char*>(tensor.data_ptr()), data_size);
+    uint64_t expected = static_cast<uint64_t>(tensor.numel()) *
+                        static_cast<uint64_t>(dtype_size(dtype));
+    if (data_size != expected) {
+        throw std::runtime_error(
+            "GraphReader::read_tensor: data_size (" + std::to_string(data_size) +
+            ") does not match tensor byte size (" + std::to_string(expected) + ")");
+    }
+    file_.read(reinterpret_cast<char*>(tensor.data_ptr()),
+               static_cast<std::streamsize>(data_size));
+    if (!file_) {
+        throw std::runtime_error("GraphReader::read_tensor: truncated tensor data");
+    }
 
     if (original_device.type != Device::Type::CPU) {
         tensor = tensor.to(original_device);

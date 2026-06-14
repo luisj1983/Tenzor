@@ -31,14 +31,25 @@ namespace {
 // TensorBoard event format helpers
 constexpr uint32_t kMaskedCrc32c = 0xA282EAD8;
 
-// CRC32C implementation for record validation
-uint32_t masked_crc32c(const uint8_t* data, size_t length) {
-    // Simplified CRC32 for TensorBoard compatibility
-    uint32_t crc = 0;
+// CRC-32C (Castagnoli, reflected polynomial 0x82F63B78). The TFRecord framing
+// REQUIRES this exact CRC; the previous hand-rolled formula was neither CRC32
+// nor CRC32C, so real TensorBoard rejected every record and showed no data.
+uint32_t crc32c(const uint8_t* data, size_t length) {
+    uint32_t crc = 0xFFFFFFFFu;
     for (size_t i = 0; i < length; ++i) {
-        crc = ((crc >> 8) ^ data[i]) | (crc << 24);
+        crc ^= data[i];
+        for (int k = 0; k < 8; ++k) {
+            crc = (crc & 1u) ? (crc >> 1) ^ 0x82F63B78u : (crc >> 1);
+        }
     }
-    return crc;
+    return crc ^ 0xFFFFFFFFu;
+}
+
+// TensorFlow's masked CRC used in the TFRecord frame:
+//   masked = ((crc >> 15) | (crc << 17)) + 0xa282ead8
+uint32_t masked_crc32c(const uint8_t* data, size_t length) {
+    uint32_t crc = crc32c(data, length);
+    return ((crc >> 15) | (crc << 17)) + kMaskedCrc32c;
 }
 
 // Write little-endian uint64

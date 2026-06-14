@@ -67,12 +67,23 @@ struct QuantizationParams {
  */
 class QuantizedTensor {
 public:
-    QuantizedTensor(Tensor data, QuantizationParams params, DType original_dtype = DType::Float32)
-        : data_(std::move(data)), params_(std::move(params)), original_dtype_(original_dtype) {}
+    QuantizedTensor(Tensor data, QuantizationParams params, DType original_dtype = DType::Float32,
+                    std::vector<int64_t> original_shape = {})
+        : data_(std::move(data)), params_(std::move(params)), original_dtype_(original_dtype),
+          original_shape_(std::move(original_shape)) {
+        // For non-packed dtypes the data tensor already has the original shape;
+        // INT4/UINT4 packs 2 elements per byte so it must be supplied explicitly
+        // (it cannot be recovered from the packed byte count when a dim is odd).
+        if (original_shape_.empty()) {
+            const auto s = data_.shape();
+            original_shape_.assign(s.begin(), s.end());
+        }
+    }
 
     auto data() const -> const Tensor& { return data_; }
     auto params() const -> const QuantizationParams& { return params_; }
     auto original_dtype() const -> DType { return original_dtype_; }
+    auto original_shape() const -> const std::vector<int64_t>& { return original_shape_; }
 
     /**
      * @brief Dequantize tensor back to floating point.
@@ -95,6 +106,7 @@ private:
     Tensor data_;                    ///< Quantized integer data
     QuantizationParams params_;      ///< Quantization parameters
     DType original_dtype_;           ///< Original floating-point dtype before quantization
+    std::vector<int64_t> original_shape_;  ///< Logical (unpacked) shape; needed for INT4 dequant
 };
 
 /**

@@ -358,17 +358,42 @@ auto SafeTensorsSerializer::load(const std::string& path)
     result.reserve(tensor_metas.size());
 
     for (const auto& [name, meta] : tensor_metas) {
-        // Validate offsets
+        // Validate offsets (all header fields are attacker-controlled).
+        if (meta.data_end < meta.data_start) {
+            throw std::runtime_error("SafeTensors: tensor '" + name +
+                                      "' has data_end < data_start");
+        }
         size_t data_size = meta.data_end - meta.data_start;
-        if (data_section_start + meta.data_end > static_cast<size_t>(file_size)) {
+        // Both start and end must lie within the file's data section. Compute the
+        // available span without overflow, then require data_end <= avail.
+        size_t avail = (static_cast<size_t>(file_size) >= data_section_start)
+                           ? static_cast<size_t>(file_size) - data_section_start
+                           : 0;
+        if (meta.data_end > avail) {
             throw std::runtime_error("SafeTensors: tensor '" + name +
                                       "' data extends past end of file");
         }
 
-        // Validate size matches shape * dtype_size
+        // Validate size matches shape * dtype_size, with checked multiplication
+        // and rejection of negative dims (overflow could otherwise make
+        // expected_size collide with a crafted data_size).
         int64_t numel = 1;
-        for (auto dim : meta.shape) numel *= dim;
-        size_t expected_size = static_cast<size_t>(numel) * dtype_size(meta.dtype);
+        for (auto dim : meta.shape) {
+            if (dim < 0) {
+                throw std::runtime_error("SafeTensors: tensor '" + name +
+                                          "' has a negative dimension");
+            }
+            if (__builtin_mul_overflow(numel, dim, &numel)) {
+                throw std::runtime_error("SafeTensors: tensor '" + name +
+                                          "' element count overflows int64");
+            }
+        }
+        size_t expected_size;
+        if (__builtin_mul_overflow(static_cast<size_t>(numel),
+                                   dtype_size(meta.dtype), &expected_size)) {
+            throw std::runtime_error("SafeTensors: tensor '" + name +
+                                      "' byte size overflows size_t");
+        }
         if (data_size != expected_size) {
             throw std::runtime_error("SafeTensors: tensor '" + name +
                                       "' data size mismatch (header: " +

@@ -909,4 +909,70 @@ auto NCCLBackend::close_socket(int socket_fd) -> void {
 } // namespace distributed
 } // namespace tenzor
 
+#else  // !TENZOR_HAS_NCCL
+
+// Stub implementation for builds without NCCL. The class still links so it can
+// be instantiated and feature-detected; every collective throws
+// NotImplementedError. This mirrors the MPIBackend stub branch and is what lets
+// test_nccl_backend_smoke construct the backend and skip cleanly when NCCL is
+// unavailable (its try_init catches the initialize() throw).
+namespace tenzor {
+namespace distributed {
+
+NCCLBackend::NCCLBackend() = default;
+NCCLBackend::~NCCLBackend() = default;
+
+auto NCCLBackend::initialize(int, int, const std::string&, int) -> void {
+    throw NotImplementedError("NCCLBackend: NCCL not available");
+}
+auto NCCLBackend::broadcast(Tensor&, int) -> void {
+    throw NotImplementedError("NCCLBackend: NCCL not available");
+}
+auto NCCLBackend::all_reduce(Tensor&, ReduceOp) -> void {
+    throw NotImplementedError("NCCLBackend: NCCL not available");
+}
+auto NCCLBackend::all_reduce_async(Tensor&, ReduceOp, void*) -> void {
+    throw NotImplementedError("NCCLBackend: NCCL not available");
+}
+auto NCCLBackend::reduce(Tensor&, int, ReduceOp) -> void {
+    throw NotImplementedError("NCCLBackend: NCCL not available");
+}
+auto NCCLBackend::all_gather(const Tensor&, std::vector<Tensor>&) -> void {
+    throw NotImplementedError("NCCLBackend: NCCL not available");
+}
+auto NCCLBackend::all_gather_async(const Tensor&, std::vector<Tensor>&, void*) -> void {
+    throw NotImplementedError("NCCLBackend: NCCL not available");
+}
+auto NCCLBackend::gather(const Tensor&, std::vector<Tensor>&, int) -> void {
+    throw NotImplementedError("NCCLBackend: NCCL not available");
+}
+auto NCCLBackend::scatter(const std::vector<Tensor>&, Tensor&, int) -> void {
+    throw NotImplementedError("NCCLBackend: NCCL not available");
+}
+auto NCCLBackend::reduce_scatter(const std::vector<Tensor>&, Tensor&, ReduceOp) -> void {
+    throw NotImplementedError("NCCLBackend: NCCL not available");
+}
+auto NCCLBackend::reduce_scatter_async(const std::vector<Tensor>&, Tensor&, ReduceOp, void*) -> void {
+    throw NotImplementedError("NCCLBackend: NCCL not available");
+}
+auto NCCLBackend::send(const Tensor&, int) -> void {
+    throw NotImplementedError("NCCLBackend: NCCL not available");
+}
+auto NCCLBackend::recv(Tensor&, int) -> void {
+    throw NotImplementedError("NCCLBackend: NCCL not available");
+}
+auto NCCLBackend::all_to_all_single(Tensor&, const Tensor&) -> void {
+    throw NotImplementedError("NCCLBackend: NCCL not available");
+}
+auto NCCLBackend::barrier() -> void {
+    throw NotImplementedError("NCCLBackend: NCCL not available");
+}
+auto NCCLBackend::finalize() -> void {}
+auto NCCLBackend::supports_device(Device::Type) const -> bool {
+    return false;
+}
+
+} // namespace distributed
+} // namespace tenzor
+
 #endif // TENZOR_HAS_NCCL

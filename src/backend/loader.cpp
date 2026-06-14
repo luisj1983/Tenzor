@@ -13,6 +13,7 @@
 #include <signal.h>
 #include <unistd.h>
 #include <fcntl.h>
+#include <sys/stat.h>
 #endif
 
 namespace tenzor {
@@ -126,17 +127,42 @@ auto BackendLoader::load_backend(const std::filesystem::path& library_path,
     auto lib_filename = library_path.filename().string();
     auto lib_mtime = std::filesystem::last_write_time(library_path);
     auto mtime_val = lib_mtime.time_since_epoch().count();
-    std::string cache_file = "/tmp/tenzor_probe_" + lib_filename + "_" +
+
+    // Per-user, owner-only probe-cache directory. A predictable world-writable
+    // /tmp path let any local user pre-create the file to suppress the safety
+    // probe ('0') or fake a failure ('1'/'2') for a healthy backend.
+    std::string cache_dir;
+    if (const char* xdg = std::getenv("XDG_CACHE_HOME"); xdg && xdg[0]) {
+        cache_dir = std::string(xdg) + "/tenzor";
+    } else if (const char* home = std::getenv("HOME"); home && home[0]) {
+        cache_dir = std::string(home) + "/.cache/tenzor";
+    } else {
+        cache_dir = "/tmp/tenzor-probe-" + std::to_string(getuid());
+    }
+    {
+        std::error_code mkec;
+        std::filesystem::create_directories(cache_dir, mkec);
+        ::chmod(cache_dir.c_str(), 0700);  // best-effort owner-only
+    }
+    std::string cache_file = cache_dir + "/probe_" + lib_filename + "_" +
                              std::to_string(mtime_val);
 
     // Check cache first
     int cached_result = -1;  // -1 = no cache, 0 = ok, 1 = failed, 2 = hung
     {
-        int cache_fd = open(cache_file.c_str(), O_RDONLY);
+        // O_NOFOLLOW: refuse to follow a symlink another user may have planted.
+        int cache_fd = open(cache_file.c_str(), O_RDONLY | O_NOFOLLOW);
         if (cache_fd >= 0) {
-            char buf[2] = {};
-            if (read(cache_fd, buf, 1) == 1) {
-                cached_result = buf[0] - '0';
+            struct stat st{};
+            // Only trust a regular file owned by us that is not group/world
+            // writable — otherwise treat as no-cache and re-probe.
+            if (fstat(cache_fd, &st) == 0 && S_ISREG(st.st_mode) &&
+                st.st_uid == getuid() &&
+                (st.st_mode & (S_IWGRP | S_IWOTH)) == 0) {
+                char buf[2] = {};
+                if (read(cache_fd, buf, 1) == 1) {
+                    cached_result = buf[0] - '0';
+                }
             }
             close(cache_fd);
         }
@@ -179,7 +205,8 @@ auto BackendLoader::load_backend(const std::filesystem::path& library_path,
 
             // Write cache result
             auto write_cache = [&](char result) {
-                int fd = open(cache_file.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
+                int fd = open(cache_file.c_str(),
+                              O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW, 0600);
                 if (fd >= 0) {
                     [[maybe_unused]] auto _ = write(fd, &result, 1);
                     close(fd);

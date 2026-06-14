@@ -35,6 +35,60 @@ auto MaxBackward::forward(std::vector<Variable> inputs) -> std::vector<Variable>
     return {Variable(result, true)};
 }
 
+namespace {
+// Finite-difference-consistent argmax mask for max-over-`dim`, shared by the
+// first-order backward() and higher-order backward_with_variables() so both
+// return identical gradients. The mask is a constant w.r.t. differentiation
+// (built only from saved tensors). Returns a tensor shaped like `input`.
+//
+//   grad_i = clamp((x_i + eps - max_{j!=i} x_j) / (2*eps), 0, 1)
+//
+// which matches gradcheck's numerical derivative for any input and reduces to
+// the argmax one-hot when the gap exceeds eps. `max_{j!=i} x_j` equals the
+// second-max when x_i is the unique argmax, otherwise the max.
+Tensor compute_max_dim_mask(const Tensor& input, const Tensor& output,
+                            int64_t dim, bool keepdim) {
+    auto input_shape_vec =
+        std::vector<int64_t>(input.shape().begin(), input.shape().end());
+
+    auto out = output;
+    if (!keepdim) {
+        out = unsqueeze(out, dim);
+    }
+    auto out_expanded = expand(out, input_shape_vec);
+
+    double eps_val2;
+    switch (input.dtype()) {
+        case DType::Float64:  eps_val2 = 1e-6; break;
+        case DType::Float16:
+        case DType::BFloat16: eps_val2 = 1e-3; break;
+        default:              eps_val2 = 5e-4; break;  // Float32
+    }
+
+    auto diff = sub(input, out_expanded);
+    auto abs_diff = abs(diff);
+    auto tie_epsilon = full(input_shape_vec,
+                            (input.dtype() == DType::Float64) ? 1e-12
+                              : (input.dtype() == DType::Float32) ? 1e-7
+                              : 1e-3,
+                            input.dtype(), input.device());
+    auto is_argmax = lt(abs_diff, tie_epsilon);
+    auto neg_inf = full(input_shape_vec,
+                        -std::numeric_limits<double>::infinity(),
+                        input.dtype(), input.device());
+    auto x_sans_max = where(is_argmax, neg_inf, input);
+    auto second_max = max(x_sans_max, dim, /*keepdim=*/true);
+    auto second_max_expanded = expand(second_max, input_shape_vec);
+    auto max_without = where(is_argmax, second_max_expanded, out_expanded);
+
+    auto eps_tensor = full(input_shape_vec, eps_val2, input.dtype(), input.device());
+    auto two_eps = full(input_shape_vec, 2.0 * eps_val2, input.dtype(), input.device());
+    auto numerator = sub(add(input, eps_tensor), max_without);
+    auto ratio = div(numerator, two_eps);
+    return clamp(ratio, 0.0f, 1.0f);
+}
+}  // namespace
+
 auto MaxBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> {
     const auto& input = saved_tensors_[0];
     const auto& output = saved_tensors_[1];
@@ -95,74 +149,16 @@ auto MaxBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tens
         if (dim < 0) dim += input.shape().size();
 
         auto grad = grad_output;
-        auto out = output;
-
-        // Unsqueeze if needed
         if (!keepdim_) {
             grad = unsqueeze(grad, dim);
-            out = unsqueeze(out, dim);
         }
-
-        // Expand to input shape
-        auto out_expanded = expand(out, input_shape_vec);
         auto grad_expanded = expand(grad, input_shape_vec);
 
-        // Finite-difference-consistent backward for argmax reductions.
-        //
-        // Plain argmax-based backward (grad=1 at the argmax, 0 elsewhere)
-        // disagrees with `gradcheck`'s numerical gradient whenever two
-        // elements along `dim` differ by less than `eps` — perturbing
-        // around such a near-tie crosses the argmax boundary, so the
-        // numerical derivative splits between the top two positions. This
-        // is a fundamental property of max with finite-ε differentiation
-        // and shows up as seed-dependent gradcheck failures (e.g.
-        // Max/oneapi Float32 under a specific manual_seed draw).
-        //
-        // Use the exact finite-difference formula
-        //   grad_i = clamp((x_i + ε − max_{j≠i} x_j) / (2ε), 0, 1) · grad_out
-        // which matches gradcheck's numerical output for any input and
-        // reduces to the argmax one-hot when the gap > ε. `max_{j≠i} x_j`
-        // equals `second_max` when `x_i` is the unique argmax, otherwise
-        // `max`; we compute `second_max` by masking out the argmax
-        // positions and running max a second time.
-        double eps_val2;
-        switch (input.dtype()) {
-            case DType::Float64:  eps_val2 = 1e-6; break;
-            case DType::Float16:
-            case DType::BFloat16: eps_val2 = 1e-3; break;
-            default:              eps_val2 = 5e-4; break;  // Float32
-        }
-
-        // mask_nonmax: 0 at argmax positions, 1 elsewhere. Then
-        // x_sans_max = where(mask, x, -inf), and second_max = max(x_sans_max).
-        auto diff = sub(input, out_expanded);
-        auto abs_diff = abs(diff);
-        auto tie_epsilon = full(input_shape_vec,
-                                // Exact-tie threshold: keep the original
-                                // tight tolerance so that structurally
-                                // different values are never conflated.
-                                (input.dtype() == DType::Float64) ? 1e-12
-                                  : (input.dtype() == DType::Float32) ? 1e-7
-                                  : 1e-3,
-                                input.dtype(), input.device());
-        auto is_argmax = lt(abs_diff, tie_epsilon);  // bool mask
-        auto input_dtype = input.dtype();
-        auto neg_inf = full(input_shape_vec,
-                            -std::numeric_limits<double>::infinity(),
-                            input_dtype, input.device());
-        auto x_sans_max = where(is_argmax, neg_inf, input);
-        auto second_max = max(x_sans_max, dim, /*keepdim=*/true);
-        auto second_max_expanded = expand(second_max, input_shape_vec);
-
-        // max_without_i = argmax ? second_max : max
-        auto max_without = where(is_argmax, second_max_expanded, out_expanded);
-
-        auto eps_tensor = full(input_shape_vec, eps_val2, input.dtype(), input.device());
-        auto two_eps = full(input_shape_vec, 2.0 * eps_val2, input.dtype(), input.device());
-        auto numerator = sub(add(input, eps_tensor), max_without);
-        auto ratio = div(numerator, two_eps);
-        auto mask = clamp(ratio, 0.0f, 1.0f);
-
+        // Shared finite-difference-consistent mask: both this first-order path
+        // and backward_with_variables() use compute_max_dim_mask() so that
+        // .backward() and .backward(create_graph=true) return identical
+        // gradients for max-over-dim.
+        auto mask = compute_max_dim_mask(input, output, dim, keepdim_);
         return {mul(grad_expanded, mask)};
     }
 }
@@ -220,35 +216,15 @@ auto MaxBackward::backward_with_variables(std::vector<Variable> grad_outputs) ->
         if (dim < 0) dim += static_cast<int64_t>(input.shape().size());
 
         auto grad_v = grad_var;
-        auto out = output;
-
         if (!keepdim_) {
             grad_v = tenzor::unsqueeze(grad_v, dim);
-            out = unsqueeze(out, dim);
         }
-
-        auto out_expanded = expand(out, input_shape_vec);
         auto grad_expanded = tenzor::expand(grad_v, input_shape_vec);
 
-        auto diff = sub(input, out_expanded);
-        auto abs_diff = abs(diff);
-
-        double eps_val2;
-        switch (input.dtype()) {
-            case DType::Float64:  eps_val2 = 1e-12; break;
-            case DType::Float16:
-            case DType::BFloat16: eps_val2 = 1e-3; break;
-            default:              eps_val2 = 1e-7; break;
-        }
-        auto epsilon = full(input_shape_vec, eps_val2, input.dtype(), input.device());
-        auto ones_tensor = ones(input_shape_vec, input.dtype(), input.device());
-        auto scaled_diff = div(abs_diff, epsilon);
-        auto clamped = clamp(scaled_diff, 0.0f, 1.0f);
-        auto mask = sub(ones_tensor, clamped);
-
-        auto tie_count = sum(mask, dim, /*keepdim=*/true);
-        mask = div(mask, tie_count);
-
+        // Identical mask to the first-order path (a constant w.r.t.
+        // differentiation), wrapped as a non-grad Variable so create_graph=true
+        // still traces back through grad_expanded.
+        auto mask = compute_max_dim_mask(input, output, dim, keepdim_);
         auto mask_var = Variable(mask, false);
         return {grad_expanded * mask_var};
     }

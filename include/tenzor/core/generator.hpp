@@ -95,12 +95,29 @@ public:
     /**
      * @brief Access the underlying engine (for backend use).
      *
-     * Thread-safe: acquires an internal lock. Prefer using the
-     * seed() method when possible to avoid lock contention.
+     * NOT thread-safe: returns a bare reference to the engine. The caller must
+     * not use the returned reference concurrently with next_seed()/get_state()/
+     * set_state() on the same Generator. For thread-safe generation that draws
+     * many values, use with_engine() which holds the lock for the whole draw.
      *
      * @return Reference to the mt19937_64 engine
      */
     auto engine() -> std::mt19937_64&;
+
+    /**
+     * @brief Invoke `f(engine)` while holding the generator's lock.
+     *
+     * This is the thread-safe way to draw one or many values: the mutex is held
+     * for the entire callback, so concurrent next_seed()/get_state()/set_state()
+     * cannot tear the engine state mid-draw.
+     *
+     * @return Whatever `f` returns.
+     */
+    template <typename F>
+    auto with_engine(F&& f) -> decltype(auto) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return std::forward<F>(f)(engine_);
+    }
 
     /**
      * @brief Get the next seed from this generator's stream.

@@ -428,7 +428,11 @@ auto nested_cat(std::span<const NestedTensor> tensors,
 
     auto cat_values = tenzor::cat(all_values, 0);
 
-    auto new_offsets = tenzor::zeros({total_batch + 1}, DType::Int64, ref_device);
+    // Build offsets on the HOST: data<int64_t>() returns a device pointer when
+    // ref_device is a GPU, so the host writes below would be UB (segfault or a
+    // silent no-op leaving offsets all-zero). Mirror nested_sum/nested_mean:
+    // fill on CPU, then move to ref_device before from_jagged.
+    auto new_offsets = tenzor::zeros({total_batch + 1}, DType::Int64, Device::cpu());
     auto* noff_ptr = new_offsets.data<int64_t>();
     int64_t idx = 0;
     noff_ptr[0] = 0;
@@ -445,6 +449,9 @@ auto nested_cat(std::span<const NestedTensor> tensors,
         }
     }
 
+    if (ref_device.type != Device::Type::CPU) {
+        new_offsets = new_offsets.to(ref_device);
+    }
     return NestedTensor::from_jagged(cat_values, new_offsets, ref_ragged_dim);
 }
 

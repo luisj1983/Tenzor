@@ -1264,7 +1264,12 @@ auto mul(const SparseTensor& sparse, double scalar) -> SparseTensor {
 
     auto shape_vec = std::vector<int64_t>(sparse.shape().begin(), sparse.shape().end());
     if (sparse.layout() == SparseLayout::COO) {
-        return SparseTensor::sparse_coo(sparse.indices(), new_values, shape_vec);
+        auto result = SparseTensor::sparse_coo(sparse.indices(), new_values, shape_vec);
+        // A scalar rescale preserves the index structure, so a coalesced input
+        // stays coalesced; propagate the flag to avoid a redundant re-coalesce
+        // on the next to_csr/to_dense/spmm. (sparse_coo defaults to false.)
+        result.mark_coalesced(sparse.is_coalesced());
+        return result;
     } else {
         return SparseTensor::sparse_csr(sparse.crow_indices(), sparse.col_indices(), new_values, shape_vec);
     }

@@ -92,6 +92,7 @@ auto gather_kernel(const Tensor& input, int64_t dim, const Tensor& index, sycl::
     // Copy vectors to arrays for device copyability (max 8 dimensions)
     int64_t input_shape_arr[8], input_strides_arr[8], index_strides_arr[8];
     const size_t ndims = index_shape.size();
+    if (ndims > 8) throw std::invalid_argument("oneapi indexing: tensor rank > 8 is unsupported (on-device stride arrays are fixed at 8 dims)");
     for (size_t i = 0; i < ndims && i < 8; ++i) {
         input_shape_arr[i] = input_shape[i];
         input_strides_arr[i] = input_strides[i];
@@ -296,6 +297,7 @@ auto scatter_kernel(const Tensor& input, int64_t dim, const Tensor& index,
     // Copy vectors to arrays for device copyability (max 8 dimensions)
     int64_t input_shape_arr[8], input_strides_arr[8], index_strides_arr[8];
     const size_t ndims = index_shape.size();
+    if (ndims > 8) throw std::invalid_argument("oneapi indexing: tensor rank > 8 is unsupported (on-device stride arrays are fixed at 8 dims)");
     for (size_t i = 0; i < ndims && i < 8; ++i) {
         input_shape_arr[i] = input_shape[i];
         input_strides_arr[i] = input_strides[i];
@@ -398,6 +400,7 @@ auto index_select_kernel(const Tensor& input, int64_t dim, const Tensor& index, 
     // Copy vectors to arrays for device copyability (max 8 dimensions)
     int64_t input_shape_arr[8], input_strides_arr[8], output_strides_arr[8];
     const size_t ndims = output_shape.size();
+    if (ndims > 8) throw std::invalid_argument("oneapi indexing: tensor rank > 8 is unsupported (on-device stride arrays are fixed at 8 dims)");
     for (size_t i = 0; i < ndims && i < 8; ++i) {
         input_shape_arr[i] = input_shape[i];
         input_strides_arr[i] = input_strides[i];

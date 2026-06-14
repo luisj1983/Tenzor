@@ -16,23 +16,27 @@ Stat::Stat(std::string name, Aggregation agg)
     : name_(std::move(name)), agg_(agg) {}
 
 auto Stat::add(double value) -> void {
-    count_.fetch_add(1, std::memory_order_relaxed);
-
     switch (agg_) {
         case Aggregation::Sum:
         case Aggregation::Mean: {
-            // Atomic add for doubles via CAS loop
+            // Atomic add for doubles via CAS loop. Publish count_ AFTER value_
+            // (release), so a concurrent get() that reads count_ (acquire) then
+            // value_ never observes a count ahead of the accumulated value — the
+            // torn read that previously skewed the mean. (Still best-effort: the
+            // value may transiently lead the count, never the reverse.)
             double old = value_.load(std::memory_order_relaxed);
             while (!value_.compare_exchange_weak(
                 old, old + value,
                 std::memory_order_release, std::memory_order_relaxed)) {
             }
+            count_.fetch_add(1, std::memory_order_release);
             break;
         }
         case Aggregation::Count:
-            // count_ is already incremented above; nothing else to do.
+            count_.fetch_add(1, std::memory_order_relaxed);
             break;
         case Aggregation::MinMax: {
+            count_.fetch_add(1, std::memory_order_relaxed);
             // Update min
             double old_min = min_.load(std::memory_order_relaxed);
             while (value < old_min &&
@@ -50,6 +54,7 @@ auto Stat::add(double value) -> void {
             break;
         }
         case Aggregation::Value:
+            count_.fetch_add(1, std::memory_order_relaxed);
             value_.store(value, std::memory_order_release);
             break;
     }

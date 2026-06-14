@@ -109,16 +109,37 @@ auto read_int64(std::ifstream& f) -> int64_t {
 
 auto read_string(std::ifstream& f) -> std::string {
     uint64_t len = read_uint64(f);
+    // Bound against the remaining file length so a crafted huge len can't
+    // trigger an enormous allocation before the read fails.
+    std::streampos cur = f.tellg();
+    f.seekg(0, std::ios::end);
+    std::streampos end = f.tellg();
+    f.seekg(cur);
+    if (cur < 0 || end < 0 || len > static_cast<uint64_t>(end - cur)) {
+        throw std::runtime_error("TZEP read_string: declared size exceeds remaining file");
+    }
     std::string s(len, '\0');
     f.read(s.data(), static_cast<std::streamsize>(len));
+    if (!f) {
+        throw std::runtime_error("TZEP read_string: truncated string");
+    }
     return s;
 }
 
 auto read_tensor(std::ifstream& f,
                  const std::optional<Device>& map_location) -> Tensor {
     uint64_t ndim = read_uint64(f);
+    // Cap ndim so a hostile/corrupt file can't request a giant shape vector.
+    if (ndim > 4096) {
+        throw std::runtime_error("TZEP read_tensor: implausible tensor rank");
+    }
     std::vector<int64_t> shape(ndim);
-    for (uint64_t i = 0; i < ndim; ++i) shape[i] = read_int64(f);
+    for (uint64_t i = 0; i < ndim; ++i) {
+        shape[i] = read_int64(f);
+        if (shape[i] < 0) {
+            throw std::runtime_error("TZEP read_tensor: negative dimension");
+        }
+    }
 
     DType dtype = static_cast<DType>(read_uint32(f));
     auto dev_type = static_cast<Device::Type>(read_uint32(f));
@@ -131,9 +152,21 @@ auto read_tensor(std::ifstream& f,
     // the read is a pure host-side memcpy that doesn't require the saved
     // device to be available on this machine.
     Tensor host_tensor(shape, dtype, Device::cpu());
+    // The file provides a SEPARATE byte count; it MUST equal the tensor's own
+    // byte size, else f.read overflows (or under-fills) the allocated buffer.
     uint64_t bytes = read_uint64(f);
+    uint64_t expected = static_cast<uint64_t>(host_tensor.numel()) *
+                        static_cast<uint64_t>(dtype_size(dtype));
+    if (bytes != expected) {
+        throw std::runtime_error(
+            "TZEP read_tensor: byte count (" + std::to_string(bytes) +
+            ") does not match tensor size (" + std::to_string(expected) + ")");
+    }
     f.read(reinterpret_cast<char*>(host_tensor.data_ptr()),
            static_cast<std::streamsize>(bytes));
+    if (!f) {
+        throw std::runtime_error("TZEP read_tensor: truncated tensor data");
+    }
 
     Device target = map_location.value_or(saved_device);
     if (target.type == Device::Type::CPU) {
@@ -318,16 +351,18 @@ auto export_model(nn::Module& module,
     // with that. For multi-input models, we trace a lambda.
     std::shared_ptr<jit::Graph> graph;
 
-    if (example_inputs.size() == 1) {
-        Variable input_var(example_inputs[0], /*requires_grad=*/false);
-        jit::TracingGuard guard;
-        Variable output = module.forward(input_var);
-        graph = guard.get_graph({input_var}, {output});
-    } else {
-        // Wrap all inputs as Variables, trace through a lambda that calls
-        // forward with the first input (Module::forward takes one Variable).
-        // This is a limitation of the current Module API; future versions
-        // may support multi-input forward.
+    if (example_inputs.size() != 1) {
+        // Module::forward takes a single Variable, so tracing can only consume
+        // one input. The old code silently traced only example_inputs[0] yet
+        // recorded n_inputs = example_inputs.size(), producing a program that
+        // advertised N inputs but mis-handled all but the first. Fail loudly
+        // instead of exporting a broken program.
+        throw std::runtime_error(
+            "export_model: multi-input export is not supported (got " +
+            std::to_string(example_inputs.size()) +
+            " inputs); the traced Module::forward consumes a single input");
+    }
+    {
         Variable input_var(example_inputs[0], /*requires_grad=*/false);
         jit::TracingGuard guard;
         Variable output = module.forward(input_var);

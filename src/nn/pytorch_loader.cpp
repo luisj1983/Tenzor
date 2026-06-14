@@ -115,7 +115,15 @@ public:
         }
 
         const auto& entry = it->second;
+        // Re-validate against the actual buffer: the header fields are untrusted.
+        if (entry.offset > data_.size() ||
+            entry.compressed_size > data_.size() - entry.offset) {
+            throw std::runtime_error("ZIP entry '" + name + "': data range out of bounds");
+        }
         if (entry.compression == 0) {  // stored / uncompressed
+            if (entry.uncompressed_size > data_.size() - entry.offset) {
+                throw std::runtime_error("ZIP entry '" + name + "': size out of bounds");
+            }
             std::vector<uint8_t> result(entry.uncompressed_size);
             std::memcpy(result.data(), data_.data() + entry.offset, entry.uncompressed_size);
             return result;
@@ -144,6 +152,11 @@ public:
         if (entry.compression != 0) {
             return {nullptr, 0};
         }
+        // Refuse to hand out a pointer/size that escapes the mapped buffer.
+        if (entry.offset > data_.size() ||
+            entry.uncompressed_size > data_.size() - entry.offset) {
+            return {nullptr, 0};
+        }
         return {data_.data() + entry.offset, static_cast<size_t>(entry.uncompressed_size)};
     }
 
@@ -170,8 +183,18 @@ private:
             uint16_t name_len = read_u16(data_.data() + pos + 26);
             uint16_t extra_len = read_u16(data_.data() + pos + 28);
 
-            std::string name(reinterpret_cast<const char*>(data_.data() + pos + 30), name_len);
+            // Validate the variable-length header region lies within the mapped
+            // buffer BEFORE constructing the name string (the fields are
+            // attacker-controlled in a malicious .pt). Use subtraction to avoid
+            // integer overflow.
+            if (name_len > size_ - (pos + 30)) break;
             uint64_t data_offset = pos + 30 + name_len + extra_len;
+            if (data_offset > size_) break;
+
+            std::string name(reinterpret_cast<const char*>(data_.data() + pos + 30), name_len);
+
+            // The entry's stored bytes must lie within the buffer.
+            if (compressed > size_ - data_offset) break;
 
             ZipEntry entry;
             entry.name = name;

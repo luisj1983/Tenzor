@@ -3,6 +3,7 @@
  * @brief CUDA pooling kernel implementations (fallback when cuDNN is not available)
  */
 
+#include <limits>
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
 #include <cuda_bf16.h>
@@ -91,7 +92,7 @@ __global__ void maxpool2d_forward_impl(
         int64_t h_start = oh * stride - padding;
         int64_t w_start = ow * stride - padding;
 
-        Compute max_val = Compute(-1e38);
+        Compute max_val = -std::numeric_limits<Compute>::infinity();
         int64_t max_idx = 0;
 
         for (int64_t kh = 0; kh < kernel_size; ++kh) {
@@ -662,7 +663,7 @@ __global__ void maxpool1d_forward_impl(
 
         int64_t l_start = ol * stride - padding;
 
-        Compute max_val = Compute(-1e38);
+        Compute max_val = -std::numeric_limits<Compute>::infinity();
         int64_t max_idx = 0;
 
         for (int64_t k = 0; k < kernel_size; ++k) {
@@ -1171,7 +1172,7 @@ __global__ void adaptive_maxpool1d_forward_impl(
         int64_t l_start = (ol * L_in) / L_out;
         int64_t l_end   = ((ol + 1) * L_in) / L_out;
 
-        Compute max_val = Compute(-1e38);
+        Compute max_val = -std::numeric_limits<Compute>::infinity();
         int64_t max_idx = l_start;
 
         for (int64_t l = l_start; l < l_end; ++l) {
@@ -1527,7 +1528,7 @@ __global__ void maxpool3d_forward_impl(
         int64_t h_start = oh * sH - pH;
         int64_t w_start = ow * sW - pW;
 
-        Compute max_val = Compute(-1e38);
+        Compute max_val = -std::numeric_limits<Compute>::infinity();
         int64_t max_idx = 0;
 
         for (int64_t kd = 0; kd < kD; ++kd) {
@@ -2120,7 +2121,7 @@ __global__ void adaptive_maxpool3d_forward_impl(
         int64_t w_start = (ow * W_in) / W_out;
         int64_t w_end   = ((ow + 1) * W_in) / W_out;
 
-        Compute max_val = Compute(-1e38);
+        Compute max_val = -std::numeric_limits<Compute>::infinity();
         int64_t max_idx = d_start * H_in * W_in + h_start * W_in + w_start;
 
         for (int64_t d = d_start; d < d_end; ++d) {
@@ -2461,7 +2462,7 @@ __global__ void fractional_maxpool2d_forward_impl(
         if (h_end <= h_start) h_end = min(h_start + 1, H);
         if (w_end <= w_start) w_end = min(w_start + 1, W);
 
-        float max_val = -1e38f;
+        float max_val = -std::numeric_limits<float>::infinity();
         int64_t max_idx = h_start * W + w_start;
 
         for (int64_t h = h_start; h < h_end; ++h) {
@@ -2785,7 +2786,7 @@ __global__ void fractional_maxpool3d_forward_impl(
         if (h_end <= h_start) h_end = min(h_start + 1, H);
         if (w_end <= w_start) w_end = min(w_start + 1, W);
 
-        float max_val = -1e38f;
+        float max_val = -std::numeric_limits<float>::infinity();
         int64_t max_idx = d_start * H * W + h_start * W + w_start;
 
         for (int64_t d = d_start; d < d_end; ++d) {

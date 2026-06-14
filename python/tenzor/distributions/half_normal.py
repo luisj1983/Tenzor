@@ -67,9 +67,11 @@ class HalfNormal(Distribution):
                   - _tz.log(self.scale) - 0.5 * z * z)
         cond = Variable(value >= 0, False)  # bool mask Tensor -> Variable
         sm_shape = tuple(smooth.shape)
+        # np.full(sm_shape, ...) yields a valid 0-d array for scalar params; the
+        # old `if sm_shape else (1,)` promoted scalar log_prob to shape (1,),
+        # inconsistent with the other distributions and PyTorch.
         neg_inf = Variable(
-            Tensor.from_numpy(np.full(sm_shape if sm_shape else (1,),
-                                      -np.inf, dtype=np.float32)),
+            Tensor.from_numpy(np.full(sm_shape, -np.inf, dtype=np.float32)),
             False)
         return _tz.where(cond, smooth, neg_inf)
 

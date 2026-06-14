@@ -69,7 +69,7 @@ auto bernoulli_kernel(const Tensor& probs, sycl::queue& queue) -> Tensor {
 
     const float* in_ptr = get_data_ptr<const float>(input);
     float* out_ptr = get_data_ptr<float>(result);
-    uint64_t seed = std::chrono::high_resolution_clock::now().time_since_epoch().count();
+    uint64_t seed = ::tenzor::get_global_seed();
 
     queue.parallel_for<BernoulliKernelTag>(sycl::range<1>(n), [=](sycl::id<1> idx_) {
         int64_t i = static_cast<int64_t>(idx_);
@@ -144,7 +144,7 @@ auto multinomial_kernel(const Tensor& probs, int64_t num_samples,
     Tensor result(std::vector<int64_t>{batch_size, num_samples}, DType::Int64, input.device());
     Tensor cdf_buf(std::vector<int64_t>{batch_size, num_categories}, DType::Float32, input.device());
 
-    uint64_t seed = std::chrono::high_resolution_clock::now().time_since_epoch().count();
+    uint64_t seed = ::tenzor::get_global_seed();
 
     const float* in_base = get_data_ptr<const float>(input);
     float* cdf_base = get_data_ptr<float>(cdf_buf);
@@ -694,7 +694,7 @@ auto poisson_sample_kernel(const Tensor& rates, sycl::queue& queue) -> Tensor {
 
     const float* in_ptr = get_data_ptr<const float>(input);
     int64_t* out_ptr = get_data_ptr<int64_t>(result);
-    uint64_t seed = std::chrono::high_resolution_clock::now().time_since_epoch().count();
+    uint64_t seed = ::tenzor::get_global_seed();
 
     queue.parallel_for<PoissonSampleKernelTag>(sycl::range<1>(n), [=](sycl::id<1> idx_) {
         int64_t i = static_cast<int64_t>(idx_);
@@ -748,7 +748,7 @@ auto normal_sample_kernel(const Tensor& mean, const Tensor& stddev, sycl::queue&
     const float* mean_ptr = get_data_ptr<const float>(m);
     const float* std_ptr = get_data_ptr<const float>(s);
     float* out_ptr = get_data_ptr<float>(result);
-    uint64_t seed = std::chrono::high_resolution_clock::now().time_since_epoch().count();
+    uint64_t seed = ::tenzor::get_global_seed();
 
     queue.parallel_for<NormalSampleKernelTag>(sycl::range<1>(n), [=](sycl::id<1> idx_) {
         int64_t i = static_cast<int64_t>(idx_);
@@ -792,7 +792,7 @@ auto exponential_sample_kernel(const Tensor& rate, sycl::queue& queue) -> Tensor
 
     const float* rate_ptr = get_data_ptr<const float>(input);
     float* out_ptr = get_data_ptr<float>(result);
-    uint64_t seed = std::chrono::high_resolution_clock::now().time_since_epoch().count();
+    uint64_t seed = ::tenzor::get_global_seed();
 
     queue.parallel_for<ExponentialSampleKernelTag>(sycl::range<1>(n), [=](sycl::id<1> idx_) {
         int64_t i = static_cast<int64_t>(idx_);
@@ -839,7 +839,7 @@ auto gamma_sample_kernel(const Tensor& concentration, const Tensor& rate,
     const float* a_ptr = get_data_ptr<const float>(a);
     const float* b_ptr = get_data_ptr<const float>(b);
     float* out_ptr = get_data_ptr<float>(result);
-    uint64_t seed = std::chrono::high_resolution_clock::now().time_since_epoch().count();
+    uint64_t seed = ::tenzor::get_global_seed();
 
     queue.parallel_for<GammaSampleKernelTag>(sycl::range<1>(n), [=](sycl::id<1> idx_) {
         int64_t i = static_cast<int64_t>(idx_);

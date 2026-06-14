@@ -1707,17 +1707,26 @@ __global__ void embedding_backward_fp16_kernel_impl(
 #if __CUDA_ARCH__ >= 700
             atomicAdd(&grad_weight[flat], go[j]);
 #else
-            // Fallback for older architectures: compare-and-swap based atomic add
+            // Fallback for older architectures: compare-and-swap based atomic add.
+            // The 32-bit CAS touches two packed halves; pick a 4-byte-aligned
+            // window that stays in bounds so the partner half is never OOB.
             float val = __half2float(go[j]);
-            unsigned int* addr = reinterpret_cast<unsigned int*>(&grad_weight[flat & ~1]);
+            const int64_t total = num_embeddings * embedding_dim;
+            int64_t base = flat & ~1;            // word covers [base, base+1]
+            int lane = static_cast<int>(flat & 1);
+            if (base + 1 >= total && base >= 1) {
+                base -= 1;                       // slide window down; our half is high
+                lane = 1;
+            }
+            unsigned int* addr = reinterpret_cast<unsigned int*>(&grad_weight[base]);
             unsigned int old_val, new_val;
             do {
                 old_val = atomicCAS(addr, 0u, 0u);  // Atomic initial read
                 __half* h = reinterpret_cast<__half*>(&old_val);
                 // W.7: NaN-preserving conversion.
-                __half result = ::tenzor::cuda::safe_f2half(::tenzor::cuda::safe_half2f(h[flat & 1]) + val);
+                __half result = ::tenzor::cuda::safe_f2half(::tenzor::cuda::safe_half2f(h[lane]) + val);
                 new_val = old_val;
-                reinterpret_cast<__half*>(&new_val)[flat & 1] = result;
+                reinterpret_cast<__half*>(&new_val)[lane] = result;
             } while (atomicCAS(addr, old_val, new_val) != old_val);
 #endif
         }
@@ -1743,17 +1752,26 @@ __global__ void embedding_backward_bf16_kernel_impl(
 #if __CUDA_ARCH__ >= 800
             atomicAdd(&grad_weight[flat], go[j]);
 #else
-            // Fallback for SM < 80: CAS-based atomic add via float conversion
+            // Fallback for SM < 80: CAS-based atomic add via float conversion.
+            // The 32-bit CAS touches two packed halves; pick a 4-byte-aligned
+            // window that stays in bounds so the partner half is never OOB.
             float val = __bfloat162float(go[j]);
-            unsigned int* addr = reinterpret_cast<unsigned int*>(&grad_weight[flat & ~1]);
+            const int64_t total = num_embeddings * embedding_dim;
+            int64_t base = flat & ~1;            // word covers [base, base+1]
+            int lane = static_cast<int>(flat & 1);
+            if (base + 1 >= total && base >= 1) {
+                base -= 1;                       // slide window down; our half is high
+                lane = 1;
+            }
+            unsigned int* addr = reinterpret_cast<unsigned int*>(&grad_weight[base]);
             unsigned int old_val, new_val;
             do {
                 old_val = atomicCAS(addr, 0u, 0u);  // Atomic initial read (avoids data race)
                 __nv_bfloat16* h = reinterpret_cast<__nv_bfloat16*>(&old_val);
                 // W.7: NaN-preserving conversion.
-                __nv_bfloat16 result = ::tenzor::cuda::safe_f2bf16(::tenzor::cuda::safe_bf162f(h[flat & 1]) + val);
+                __nv_bfloat16 result = ::tenzor::cuda::safe_f2bf16(::tenzor::cuda::safe_bf162f(h[lane]) + val);
                 new_val = old_val;
-                reinterpret_cast<__nv_bfloat16*>(&new_val)[flat & 1] = result;
+                reinterpret_cast<__nv_bfloat16*>(&new_val)[lane] = result;
             } while (atomicCAS(addr, old_val, new_val) != old_val);
 #endif
         }

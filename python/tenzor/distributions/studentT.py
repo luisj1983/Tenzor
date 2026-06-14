@@ -68,7 +68,10 @@ class StudentT(Distribution):
         loc_t = self.loc.tensor() if hasattr(self.loc, "tensor") else self.loc
         scale_t = self.scale.tensor() if hasattr(self.scale, "tensor") else self.scale
         inv_sqrt = _tz.exp(-0.5 * _tz.log(v / df_t))
-        return loc_t + scale_t * z * inv_sqrt
+        # Reshape to the canonical output shape (sample_shape + batch_shape).
+        # loc/scale are stored as (1,) tensors even for scalar params, so the
+        # broadcast result is (1,); for scalar params the correct shape is ().
+        return _tz.reshape(loc_t + scale_t * z * inv_sqrt, list(out_shape))
 
     def rsample(self, sample_shape=()):
         # T = loc + scale * Z / sqrt(V/df), Z ~ N(0,1) (noise), V ~ Chi2(df).
@@ -76,11 +79,16 @@ class StudentT(Distribution):
         # through V (reparameterised Chi2) and the explicit /df.
         from .chi2 import Chi2
         out_shape = tuple(sample_shape) + self._batch_shape
-        z_np = np.random.standard_normal(out_shape if out_shape else 1).astype(np.float32)
+        # Draw a 0-d sample for scalar params (empty out_shape); passing 1 here
+        # forced a (1,) result, disagreeing in shape with sample() and PyTorch.
+        z_np = np.random.standard_normal(out_shape).astype(np.float32)
         z = Variable(Tensor.from_numpy(np.ascontiguousarray(z_np)), False)
         v = Chi2(self.df).rsample(sample_shape)
         inv_sqrt = _tz.exp(-0.5 * _tz.log(v / self.df))
-        return self.loc + self.scale * z * inv_sqrt
+        # Reshape to the canonical (sample_shape + batch_shape); scalar -> ().
+        # _tz.reshape stays autograd-aware so the reparameterised gradient path
+        # through z and V is preserved.
+        return _tz.reshape(self.loc + self.scale * z * inv_sqrt, list(out_shape))
 
     def log_prob(self, value):
         # Autograd-aware (lgamma/log Variable overloads): gradient flows to df,

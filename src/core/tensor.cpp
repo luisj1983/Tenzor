@@ -878,6 +878,10 @@ auto Tensor::to(DType dtype) const -> Tensor {
         const SrcT* src_ptr = cpu_tensor.data<SrcT>();
         DstT* dst_ptr = result.data<DstT>();
 
+        // Each element converts independently; parallelize for large buffers
+        // (mixed-precision pipelines cast big contiguous tensors on this path).
+        // The pragma is a no-op when built without OpenMP.
+        #pragma omp parallel for schedule(static) if (n >= 65536)
         for (int64_t i = 0; i < n; ++i) {
             if constexpr (std::is_same_v<SrcT, DstT>) {
                 dst_ptr[i] = src_ptr[i];

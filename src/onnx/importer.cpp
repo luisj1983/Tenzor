@@ -353,11 +353,19 @@ auto onnx_to_dtype(ONNXDataType onnx_dtype) -> DType {
 
 auto ONNXTensorData::to_tensor(Device device) const -> Tensor {
     auto tenzor_dtype = onnx_to_dtype(dtype);
+    // Validate the shape (rejects negative dims / numel overflow) BEFORE
+    // allocating the tensor from attacker-controlled proto dims.
+    int64_t n = numel();
     Tensor tensor(shape, tenzor_dtype, device);
 
     // Copy raw data
     if (!raw_data.empty()) {
-        size_t expected_bytes = numel() * tensor.dtype_size();
+        size_t expected_bytes;
+        if (__builtin_mul_overflow(static_cast<size_t>(n),
+                                   tensor.dtype_size(), &expected_bytes)) {
+            throw std::runtime_error(
+                "ONNX tensor '" + name + "' byte size overflows size_t");
+        }
         if (raw_data.size() != expected_bytes) {
             throw std::runtime_error(
                 "ONNX tensor '" + name + "' has mismatched data size. Expected " +
@@ -382,7 +390,14 @@ auto ONNXTensorData::to_tensor(Device device) const -> Tensor {
 auto ONNXTensorData::numel() const -> int64_t {
     int64_t result = 1;
     for (int64_t dim : shape) {
-        result *= dim;
+        if (dim < 0) {
+            throw std::runtime_error(
+                "ONNX tensor '" + name + "' has a negative dimension");
+        }
+        if (__builtin_mul_overflow(result, dim, &result)) {
+            throw std::runtime_error(
+                "ONNX tensor '" + name + "' element count overflows int64");
+        }
     }
     return result;
 }

@@ -279,6 +279,15 @@ auto can_zero_copy_numpy_to_tensor(const py::array& arr) -> bool {
     if (!(flags & py::array::c_style)) {
         return false;
     }
+    // Reject read-only arrays: the zero-copy Tensor aliases the NumPy buffer, so
+    // an in-place Tensor op would mutate memory NumPy considers immutable
+    // (violating torch.from_numpy-style semantics). Fall through to the copy.
+    // pybind11 exposes no named writeable flag, so use the stable numpy C-API
+    // constant NPY_ARRAY_WRITEABLE (0x0400).
+    constexpr int kNpyArrayWriteable = 0x0400;
+    if (!(flags & kNpyArrayWriteable)) {
+        return false;
+    }
     // 5th-audit B5: explicitly reject negative-stride (reversed slice) and
     // zero-stride (broadcasted) arrays. A naive memcpy past these strides
     // either reads backwards or repeatedly reads the same byte — both

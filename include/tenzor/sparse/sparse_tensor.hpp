@@ -102,6 +102,11 @@ public:
     auto dense_dim() const -> int64_t { return dense_dim_; }
     auto is_coalesced() const -> bool { return coalesced_; }
 
+    /// Internal: mark this tensor's coalesced state. Use only when a structure-
+    /// preserving transform (e.g. a scalar value rescale) keeps the index
+    /// ordering/uniqueness invariant, to avoid a redundant re-coalesce.
+    auto mark_coalesced(bool v) -> void { coalesced_ = v; }
+
     // COO accessors
     auto indices() const -> const Tensor& { return indices_; }
     auto values() const -> const Tensor& { return values_; }
