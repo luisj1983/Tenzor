@@ -1520,23 +1520,23 @@ __global__ void embedding_kernel_impl(
     int64_t num_embeddings,
     int* error_flag) {
 
-    int64_t total_elements = num_indices * embedding_dim;
-
-    TENZOR_CUDA_KERNEL_LOOP(idx, total_elements) {
-        int64_t i = idx / embedding_dim;  // which index
-        int64_t j = idx % embedding_dim;  // which embedding dimension
-
+    // Row-oriented gather: one block per index row, threads stride over
+    // embedding_dim. Removes the per-element int64 div/mod of the old
+    // element-parallel loop (which dominated this bandwidth-bound kernel) and
+    // computes the row base offset once. OOB ids set the device error flag and
+    // write a zero row (memory-safe); the catchable throw is raised later at the
+    // next device sync (see cuda_drain_index_errors).
+    for (int64_t i = blockIdx.x; i < num_indices; i += gridDim.x) {
         int64_t token_idx = static_cast<int64_t>(indices[i]);
-        // Device-side bounds check: flag out-of-range ids and skip the OOB read
-        // (which would corrupt memory or fault). The host reads the flag once
-        // after launch and throws — replacing the previous host-side D2H of all
-        // indices + serial validation loop that serialized the GPU path.
-        if (token_idx < 0 || token_idx >= num_embeddings) {
+        const bool ok = (token_idx >= 0 && token_idx < num_embeddings);
+        if (!ok && threadIdx.x == 0) {
             atomicExch(error_flag, 1);
-            output[idx] = T{};
-            continue;
         }
-        output[idx] = weight[token_idx * embedding_dim + j];
+        T* dst = output + i * embedding_dim;
+        const T* src = ok ? (weight + token_idx * embedding_dim) : nullptr;
+        for (int64_t j = threadIdx.x; j < embedding_dim; j += blockDim.x) {
+            dst[j] = ok ? src[j] : T{};
+        }
     }
 }
 
@@ -1583,18 +1583,23 @@ auto embedding_kernel(const Tensor& weight, const Tensor& indices,
         err_flag = get_index_error_flag(err_dev).d_flag;
     }
 
+    // Row-per-block launch: one block per index row, block sized to the
+    // embedding dim (warp-rounded, capped at 256). Matches the gather kernel's
+    // row-oriented loop and avoids wasting a 256-thread block on small dims.
+    (void)total_elements;
+    const int emb_block = static_cast<int>(
+        std::min<int64_t>(256, std::max<int64_t>(32, ((embedding_dim + 31) / 32) * 32)));
+    int emb_grid = static_cast<int>(std::min<int64_t>(num_indices, 2147483647LL));
+    if (emb_grid < 1) emb_grid = 1;
+
     #define LAUNCH_EMBEDDING(T) \
         if (idx_is_int32) { \
-            auto [grid_size, block_size] = optimal_launch_config( \
-                embedding_kernel_impl<T, int32_t>, total_elements); \
-            embedding_kernel_impl<T, int32_t><<<grid_size, block_size, 0, stream>>>( \
+            embedding_kernel_impl<T, int32_t><<<emb_grid, emb_block, 0, stream>>>( \
                 weight.data<T>(), indices.data<int32_t>(), output.data<T>(), \
                 num_indices, embedding_dim, num_embeddings, err_flag); \
             CUDA_CHECK(cudaGetLastError()); \
         } else { \
-            auto [grid_size, block_size] = optimal_launch_config( \
-                embedding_kernel_impl<T, int64_t>, total_elements); \
-            embedding_kernel_impl<T, int64_t><<<grid_size, block_size, 0, stream>>>( \
+            embedding_kernel_impl<T, int64_t><<<emb_grid, emb_block, 0, stream>>>( \
                 weight.data<T>(), indices.data<int64_t>(), output.data<T>(), \
                 num_indices, embedding_dim, num_embeddings, err_flag); \
             CUDA_CHECK(cudaGetLastError()); \
@@ -1605,18 +1610,14 @@ auto embedding_kernel(const Tensor& weight, const Tensor& indices,
         case DType::Float64: LAUNCH_EMBEDDING(double); break;
         case DType::Float16:
             if (idx_is_int32) {
-                auto [grid_size, block_size] = optimal_launch_config(
-                    embedding_kernel_impl<__half, int32_t>, total_elements);
-                embedding_kernel_impl<__half, int32_t><<<grid_size, block_size, 0, stream>>>(
+                embedding_kernel_impl<__half, int32_t><<<emb_grid, emb_block, 0, stream>>>(
                     reinterpret_cast<const __half*>(weight.data_ptr()),
                     indices.data<int32_t>(),
                     reinterpret_cast<__half*>(output.data_ptr()),
                     num_indices, embedding_dim, num_embeddings, err_flag);
                 CUDA_CHECK(cudaGetLastError());
             } else {
-                auto [grid_size, block_size] = optimal_launch_config(
-                    embedding_kernel_impl<__half, int64_t>, total_elements);
-                embedding_kernel_impl<__half, int64_t><<<grid_size, block_size, 0, stream>>>(
+                embedding_kernel_impl<__half, int64_t><<<emb_grid, emb_block, 0, stream>>>(
                     reinterpret_cast<const __half*>(weight.data_ptr()),
                     indices.data<int64_t>(),
                     reinterpret_cast<__half*>(output.data_ptr()),
@@ -1626,18 +1627,14 @@ auto embedding_kernel(const Tensor& weight, const Tensor& indices,
             break;
         case DType::BFloat16:
             if (idx_is_int32) {
-                auto [grid_size, block_size] = optimal_launch_config(
-                    embedding_kernel_impl<__nv_bfloat16, int32_t>, total_elements);
-                embedding_kernel_impl<__nv_bfloat16, int32_t><<<grid_size, block_size, 0, stream>>>(
+                embedding_kernel_impl<__nv_bfloat16, int32_t><<<emb_grid, emb_block, 0, stream>>>(
                     reinterpret_cast<const __nv_bfloat16*>(weight.data_ptr()),
                     indices.data<int32_t>(),
                     reinterpret_cast<__nv_bfloat16*>(output.data_ptr()),
                     num_indices, embedding_dim, num_embeddings, err_flag);
                 CUDA_CHECK(cudaGetLastError());
             } else {
-                auto [grid_size, block_size] = optimal_launch_config(
-                    embedding_kernel_impl<__nv_bfloat16, int64_t>, total_elements);
-                embedding_kernel_impl<__nv_bfloat16, int64_t><<<grid_size, block_size, 0, stream>>>(
+                embedding_kernel_impl<__nv_bfloat16, int64_t><<<emb_grid, emb_block, 0, stream>>>(
                     reinterpret_cast<const __nv_bfloat16*>(weight.data_ptr()),
                     indices.data<int64_t>(),
                     reinterpret_cast<__nv_bfloat16*>(output.data_ptr()),
