@@ -383,8 +383,12 @@ def benchmark_tenzor_lstm_backward(
 
             x_var = tz.Variable(x, True)
 
-            # Use default args to capture current loop values (fixes closure bug)
+            # Use default args to capture current loop values (fixes closure bug).
+            # zero_grad each iteration to match the PyTorch harness — otherwise
+            # the param grads re-accumulate across iterations (an extra add the
+            # PyTorch side avoids), making the comparison unfair.
             def lstm_backward_fn(layer=lstm, xv=x_var):
+                layer.zero_grad()
                 output, _ = layer.forward(xv)
                 loss = tz.sum(output)
                 loss.backward()
