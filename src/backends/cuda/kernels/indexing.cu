@@ -1593,6 +1593,11 @@ auto embedding_kernel(const Tensor& weight, const Tensor& indices,
 // embedding_backward kernel (gradient accumulation)
 // ============================================================================
 
+// Row-oriented backward: one block per index row, threads stride over
+// embedding_dim. This eliminates the per-element int64 div/mod of the old
+// element-parallel kernel (which dominated runtime), keeps grad_output reads
+// and grad_weight atomics fully coalesced, and computes each row's base
+// offsets once. atomicAdd handles overlapping (repeated) indices.
 template<typename T, typename IndexT>
 __global__ void embedding_backward_kernel_impl(
     const T* grad_output,      // [*, embedding_dim]
@@ -1602,15 +1607,13 @@ __global__ void embedding_backward_kernel_impl(
     int64_t embedding_dim,
     int64_t num_embeddings) {
 
-    int64_t total_elements = num_indices * embedding_dim;
-
-    TENZOR_CUDA_KERNEL_LOOP(idx, total_elements) {
-        int64_t i = idx / embedding_dim;  // which index
-        int64_t j = idx % embedding_dim;  // which embedding dimension
-
+    for (int64_t i = blockIdx.x; i < num_indices; i += gridDim.x) {
         int64_t token_idx = static_cast<int64_t>(indices[i]);
-        if (token_idx >= 0 && token_idx < num_embeddings) {
-            atomicAdd(&grad_weight[token_idx * embedding_dim + j], grad_output[idx]);
+        if (token_idx < 0 || token_idx >= num_embeddings) continue;
+        const T* go = grad_output + i * embedding_dim;
+        T* gw = grad_weight + token_idx * embedding_dim;
+        for (int64_t j = threadIdx.x; j < embedding_dim; j += blockDim.x) {
+            atomicAdd(&gw[j], go[j]);
         }
     }
 }
@@ -1625,30 +1628,29 @@ __global__ void embedding_backward_fp16_kernel_impl(
     int64_t embedding_dim,
     int64_t num_embeddings) {
 
-    int64_t total_elements = num_indices * embedding_dim;
-
-    TENZOR_CUDA_KERNEL_LOOP(idx, total_elements) {
-        int64_t i = idx / embedding_dim;
-        int64_t j = idx % embedding_dim;
-
+    for (int64_t i = blockIdx.x; i < num_indices; i += gridDim.x) {
         int64_t token_idx = static_cast<int64_t>(indices[i]);
         if (token_idx < 0 || token_idx >= num_embeddings) continue;
+        const __half* go = grad_output + i * embedding_dim;
+        for (int64_t j = threadIdx.x; j < embedding_dim; j += blockDim.x) {
+            int64_t flat = token_idx * embedding_dim + j;
 #if __CUDA_ARCH__ >= 700
-        atomicAdd(&grad_weight[token_idx * embedding_dim + j], grad_output[idx]);
+            atomicAdd(&grad_weight[flat], go[j]);
 #else
-        // Fallback for older architectures: compare-and-swap based atomic add
-        float val = __half2float(grad_output[idx]);
-        unsigned int* addr = reinterpret_cast<unsigned int*>(&grad_weight[(token_idx * embedding_dim + j) & ~1]);
-        unsigned int old_val, new_val;
-        do {
-            old_val = atomicCAS(addr, 0u, 0u);  // Atomic initial read
-            __half* h = reinterpret_cast<__half*>(&old_val);
-            // W.7: NaN-preserving conversion.
-            __half result = ::tenzor::cuda::safe_f2half(::tenzor::cuda::safe_half2f(h[(token_idx * embedding_dim + j) & 1]) + val);
-            new_val = old_val;
-            reinterpret_cast<__half*>(&new_val)[(token_idx * embedding_dim + j) & 1] = result;
-        } while (atomicCAS(addr, old_val, new_val) != old_val);
+            // Fallback for older architectures: compare-and-swap based atomic add
+            float val = __half2float(go[j]);
+            unsigned int* addr = reinterpret_cast<unsigned int*>(&grad_weight[flat & ~1]);
+            unsigned int old_val, new_val;
+            do {
+                old_val = atomicCAS(addr, 0u, 0u);  // Atomic initial read
+                __half* h = reinterpret_cast<__half*>(&old_val);
+                // W.7: NaN-preserving conversion.
+                __half result = ::tenzor::cuda::safe_f2half(::tenzor::cuda::safe_half2f(h[flat & 1]) + val);
+                new_val = old_val;
+                reinterpret_cast<__half*>(&new_val)[flat & 1] = result;
+            } while (atomicCAS(addr, old_val, new_val) != old_val);
 #endif
+        }
     }
 }
 
@@ -1662,30 +1664,29 @@ __global__ void embedding_backward_bf16_kernel_impl(
     int64_t embedding_dim,
     int64_t num_embeddings) {
 
-    int64_t total_elements = num_indices * embedding_dim;
-
-    TENZOR_CUDA_KERNEL_LOOP(idx, total_elements) {
-        int64_t i = idx / embedding_dim;
-        int64_t j = idx % embedding_dim;
-
+    for (int64_t i = blockIdx.x; i < num_indices; i += gridDim.x) {
         int64_t token_idx = static_cast<int64_t>(indices[i]);
         if (token_idx < 0 || token_idx >= num_embeddings) continue;
+        const __nv_bfloat16* go = grad_output + i * embedding_dim;
+        for (int64_t j = threadIdx.x; j < embedding_dim; j += blockDim.x) {
+            int64_t flat = token_idx * embedding_dim + j;
 #if __CUDA_ARCH__ >= 800
-        atomicAdd(&grad_weight[token_idx * embedding_dim + j], grad_output[idx]);
+            atomicAdd(&grad_weight[flat], go[j]);
 #else
-        // Fallback for SM < 80: CAS-based atomic add via float conversion
-        float val = __bfloat162float(grad_output[idx]);
-        unsigned int* addr = reinterpret_cast<unsigned int*>(&grad_weight[(token_idx * embedding_dim + j) & ~1]);
-        unsigned int old_val, new_val;
-        do {
-            old_val = atomicCAS(addr, 0u, 0u);  // Atomic initial read (avoids data race)
-            __nv_bfloat16* h = reinterpret_cast<__nv_bfloat16*>(&old_val);
-            // W.7: NaN-preserving conversion.
-            __nv_bfloat16 result = ::tenzor::cuda::safe_f2bf16(::tenzor::cuda::safe_bf162f(h[(token_idx * embedding_dim + j) & 1]) + val);
-            new_val = old_val;
-            reinterpret_cast<__nv_bfloat16*>(&new_val)[(token_idx * embedding_dim + j) & 1] = result;
-        } while (atomicCAS(addr, old_val, new_val) != old_val);
+            // Fallback for SM < 80: CAS-based atomic add via float conversion
+            float val = __bfloat162float(go[j]);
+            unsigned int* addr = reinterpret_cast<unsigned int*>(&grad_weight[flat & ~1]);
+            unsigned int old_val, new_val;
+            do {
+                old_val = atomicCAS(addr, 0u, 0u);  // Atomic initial read (avoids data race)
+                __nv_bfloat16* h = reinterpret_cast<__nv_bfloat16*>(&old_val);
+                // W.7: NaN-preserving conversion.
+                __nv_bfloat16 result = ::tenzor::cuda::safe_f2bf16(::tenzor::cuda::safe_bf162f(h[flat & 1]) + val);
+                new_val = old_val;
+                reinterpret_cast<__nv_bfloat16*>(&new_val)[flat & 1] = result;
+            } while (atomicCAS(addr, old_val, new_val) != old_val);
 #endif
+        }
     }
 }
 
@@ -1708,8 +1709,14 @@ auto embedding_backward_kernel(const Tensor& grad_output, const Tensor& indices,
 
     if (num_indices == 0) return grad_weight;
 
-    int64_t total_elements = num_indices * embedding_dim;
-    int num_blocks = get_num_blocks(total_elements);
+    // Row-per-block launch: one block per index row, block sized to the
+    // embedding dim (warp-rounded, capped at 256) so small dims don't waste a
+    // full 256-thread block, and the grid spans the index rows (grid-stride
+    // covers any overflow).
+    int block_size = static_cast<int>(
+        std::min<int64_t>(256, std::max<int64_t>(32, ((embedding_dim + 31) / 32) * 32)));
+    int num_blocks = static_cast<int>(std::min<int64_t>(num_indices, 2147483647LL));
+    if (num_blocks < 1) num_blocks = 1;
 
     bool idx_is_int32 = (indices.dtype() == DType::Int32);
     bool idx_is_int64 = (indices.dtype() == DType::Int64);
@@ -1719,11 +1726,11 @@ auto embedding_backward_kernel(const Tensor& grad_output, const Tensor& indices,
 
     #define LAUNCH_EMBEDDING_BWD(T) \
         if (idx_is_int32) \
-            embedding_backward_kernel_impl<T, int32_t><<<num_blocks, BLOCK_SIZE, 0, stream>>>( \
+            embedding_backward_kernel_impl<T, int32_t><<<num_blocks, block_size, 0, stream>>>( \
                 grad_output.data<T>(), indices.data<int32_t>(), grad_weight.data<T>(), \
                 num_indices, embedding_dim, num_embeddings); \
         else \
-            embedding_backward_kernel_impl<T, int64_t><<<num_blocks, BLOCK_SIZE, 0, stream>>>( \
+            embedding_backward_kernel_impl<T, int64_t><<<num_blocks, block_size, 0, stream>>>( \
                 grad_output.data<T>(), indices.data<int64_t>(), grad_weight.data<T>(), \
                 num_indices, embedding_dim, num_embeddings); \
         CUDA_CHECK(cudaGetLastError())
@@ -1733,13 +1740,13 @@ auto embedding_backward_kernel(const Tensor& grad_output, const Tensor& indices,
         case DType::Float64: LAUNCH_EMBEDDING_BWD(double); break;
         case DType::Float16:
             if (idx_is_int32)
-                embedding_backward_fp16_kernel_impl<int32_t><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
+                embedding_backward_fp16_kernel_impl<int32_t><<<num_blocks, block_size, 0, stream>>>(
                     reinterpret_cast<const __half*>(grad_output.data_ptr()),
                     indices.data<int32_t>(),
                     reinterpret_cast<__half*>(grad_weight.data_ptr()),
                     num_indices, embedding_dim, num_embeddings);
             else
-                embedding_backward_fp16_kernel_impl<int64_t><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
+                embedding_backward_fp16_kernel_impl<int64_t><<<num_blocks, block_size, 0, stream>>>(
                     reinterpret_cast<const __half*>(grad_output.data_ptr()),
                     indices.data<int64_t>(),
                     reinterpret_cast<__half*>(grad_weight.data_ptr()),
@@ -1748,13 +1755,13 @@ auto embedding_backward_kernel(const Tensor& grad_output, const Tensor& indices,
             break;
         case DType::BFloat16:
             if (idx_is_int32)
-                embedding_backward_bf16_kernel_impl<int32_t><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
+                embedding_backward_bf16_kernel_impl<int32_t><<<num_blocks, block_size, 0, stream>>>(
                     reinterpret_cast<const __nv_bfloat16*>(grad_output.data_ptr()),
                     indices.data<int32_t>(),
                     reinterpret_cast<__nv_bfloat16*>(grad_weight.data_ptr()),
                     num_indices, embedding_dim, num_embeddings);
             else
-                embedding_backward_bf16_kernel_impl<int64_t><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
+                embedding_backward_bf16_kernel_impl<int64_t><<<num_blocks, block_size, 0, stream>>>(
                     reinterpret_cast<const __nv_bfloat16*>(grad_output.data_ptr()),
                     indices.data<int64_t>(),
                     reinterpret_cast<__nv_bfloat16*>(grad_weight.data_ptr()),

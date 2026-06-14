@@ -293,6 +293,28 @@ __global__ void add_kernel_device(const T* a, const T* b, T* c, int64_t n) {
     }
 }
 
+// 16-byte alignment check for opting into vectorized loads/stores.
+__host__ __device__ inline bool tz_is_aligned16(const void* p) {
+    return (reinterpret_cast<uintptr_t>(p) & 15) == 0;
+}
+
+// Vectorized same-shape add: 4 floats (float4) / 2 doubles (double2) per thread.
+// Halves the instruction count and issues 128-bit memory transactions, lifting
+// this bandwidth-bound kernel closer to peak. Guarded at the launch site by a
+// divisibility + 16-byte-alignment check; the scalar kernel handles the rest.
+__global__ void add_kernel_f32_vec4(const float4* a, const float4* b, float4* c, int64_t n4) {
+    TENZOR_CUDA_KERNEL_LOOP(i, n4) {
+        float4 av = a[i], bv = b[i];
+        c[i] = make_float4(av.x + bv.x, av.y + bv.y, av.z + bv.z, av.w + bv.w);
+    }
+}
+__global__ void add_kernel_f64_vec2(const double2* a, const double2* b, double2* c, int64_t n2) {
+    TENZOR_CUDA_KERNEL_LOOP(i, n2) {
+        double2 av = a[i], bv = b[i];
+        c[i] = make_double2(av.x + bv.x, av.y + bv.y);
+    }
+}
+
 // Metadata struct passed by value to broadcast kernels (avoids cudaMalloc for small arrays)
 // Audit F.12: rank cap lifted from 8 → 16 across CUDA broadcast/expand kernels.
 // Matches DIM_META_MAX_RANK in reduction.cu/activations.cu and the maximum
@@ -1186,12 +1208,28 @@ auto add_kernel(const Tensor& a, const Tensor& b, cudaStream_t stream) -> Tensor
         compute_launch_config_1d(n, grid, block);
 
         if (a.dtype() == DType::Float32) {
-            add_kernel_device<<<grid, block, 0, stream>>>(
-                a.data<float>(), b.data<float>(), result.data<float>(), n);
+            const float* ap = a.data<float>(); const float* bp = b.data<float>();
+            float* cp = result.data<float>();
+            if ((n & 3) == 0 && tz_is_aligned16(ap) && tz_is_aligned16(bp) && tz_is_aligned16(cp)) {
+                int64_t n4 = n / 4; dim3 g, bl; compute_launch_config_1d(n4, g, bl);
+                add_kernel_f32_vec4<<<g, bl, 0, stream>>>(
+                    reinterpret_cast<const float4*>(ap), reinterpret_cast<const float4*>(bp),
+                    reinterpret_cast<float4*>(cp), n4);
+            } else {
+                add_kernel_device<<<grid, block, 0, stream>>>(ap, bp, cp, n);
+            }
             CUDA_CHECK(cudaGetLastError());
         } else if (a.dtype() == DType::Float64) {
-            add_kernel_device<<<grid, block, 0, stream>>>(
-                a.data<double>(), b.data<double>(), result.data<double>(), n);
+            const double* ap = a.data<double>(); const double* bp = b.data<double>();
+            double* cp = result.data<double>();
+            if ((n & 1) == 0 && tz_is_aligned16(ap) && tz_is_aligned16(bp) && tz_is_aligned16(cp)) {
+                int64_t n2 = n / 2; dim3 g, bl; compute_launch_config_1d(n2, g, bl);
+                add_kernel_f64_vec2<<<g, bl, 0, stream>>>(
+                    reinterpret_cast<const double2*>(ap), reinterpret_cast<const double2*>(bp),
+                    reinterpret_cast<double2*>(cp), n2);
+            } else {
+                add_kernel_device<<<grid, block, 0, stream>>>(ap, bp, cp, n);
+            }
             CUDA_CHECK(cudaGetLastError());
         } else if (a.dtype() == DType::Int32) {
             add_kernel_device<<<grid, block, 0, stream>>>(
@@ -2652,6 +2690,22 @@ __global__ void div_inplace_kernel_bf16(__nv_bfloat16* data, const __nv_bfloat16
     }
 }
 
+// Vectorized in-place add (float4 / double2). Same guard scheme as the
+// out-of-place vectorized add. Grad accumulation (grad += new) on large dense
+// tensors goes through here, so this is the hot path for embedding/training.
+__global__ void add_inplace_kernel_f32_vec4(float4* data, const float4* other, int64_t n4) {
+    TENZOR_CUDA_KERNEL_LOOP(i, n4) {
+        float4 d = data[i], o = other[i];
+        data[i] = make_float4(d.x + o.x, d.y + o.y, d.z + o.z, d.w + o.w);
+    }
+}
+__global__ void add_inplace_kernel_f64_vec2(double2* data, const double2* other, int64_t n2) {
+    TENZOR_CUDA_KERNEL_LOOP(i, n2) {
+        double2 d = data[i], o = other[i];
+        data[i] = make_double2(d.x + o.x, d.y + o.y);
+    }
+}
+
 auto add_inplace_kernel(Tensor& inout, const Tensor& other, cudaStream_t stream) -> Tensor {
     int64_t n = inout.numel();
     bool same_shape = detail::have_same_shape(inout, other);
@@ -2662,10 +2716,24 @@ auto add_inplace_kernel(Tensor& inout, const Tensor& other, cudaStream_t stream)
     if (same_shape) {
         // Fast path: same shape, element-wise operation
         if (inout.dtype() == DType::Float32) {
-            add_inplace_kernel_impl<<<grid, block, 0, stream>>>(inout.data<float>(), other.data<float>(), n);
+            float* dp = inout.data<float>(); const float* op = other.data<float>();
+            if ((n & 3) == 0 && tz_is_aligned16(dp) && tz_is_aligned16(op)) {
+                int64_t n4 = n / 4; dim3 g, bl; compute_launch_config_1d(n4, g, bl);
+                add_inplace_kernel_f32_vec4<<<g, bl, 0, stream>>>(
+                    reinterpret_cast<float4*>(dp), reinterpret_cast<const float4*>(op), n4);
+            } else {
+                add_inplace_kernel_impl<<<grid, block, 0, stream>>>(dp, op, n);
+            }
             CUDA_CHECK(cudaGetLastError());
         } else if (inout.dtype() == DType::Float64) {
-            add_inplace_kernel_impl<<<grid, block, 0, stream>>>(inout.data<double>(), other.data<double>(), n);
+            double* dp = inout.data<double>(); const double* op = other.data<double>();
+            if ((n & 1) == 0 && tz_is_aligned16(dp) && tz_is_aligned16(op)) {
+                int64_t n2 = n / 2; dim3 g, bl; compute_launch_config_1d(n2, g, bl);
+                add_inplace_kernel_f64_vec2<<<g, bl, 0, stream>>>(
+                    reinterpret_cast<double2*>(dp), reinterpret_cast<const double2*>(op), n2);
+            } else {
+                add_inplace_kernel_impl<<<grid, block, 0, stream>>>(dp, op, n);
+            }
             CUDA_CHECK(cudaGetLastError());
         } else if (inout.dtype() == DType::Float16) {
             add_inplace_kernel_f16<<<grid, block, 0, stream>>>(

@@ -58,13 +58,20 @@ def benchmark_tenzor_embedding(
             else:
                 indices = tz.randint(0, vocab_size, [batch, seq_len])
 
+            # Match the PyTorch harness: inference forward under no_grad (so we
+            # don't build an autograd graph we never use) and synchronize each
+            # iteration so async kernel launches are actually timed.
+            sync_fn = get_tenzor_sync_fn(device)
+
             def embed_fn():
-                return embedding.forward(indices)
+                with tz.no_grad():
+                    return embedding.forward(indices)
 
             times = run_benchmark(
                 embed_fn,
                 warmup_iterations=config.warmup_iterations,
                 benchmark_iterations=config.benchmark_iterations,
+                sync_fn=sync_fn,
             )
 
             # Bytes accessed: indices (int64) + output (float32)
@@ -171,7 +178,14 @@ def benchmark_tenzor_embedding_backward(
             else:
                 indices = tz.randint(0, vocab_size, [batch, seq_len])
 
+            # Match the PyTorch harness: zero grads each iteration (otherwise the
+            # weight grad re-accumulates a full [vocab, dim] add every step,
+            # which PyTorch's zero_grad avoids via assign-on-first-grad) and
+            # synchronize so the backward kernels are actually timed.
+            sync_fn = get_tenzor_sync_fn(device)
+
             def embed_backward_fn():
+                embedding.zero_grad()
                 output = embedding.forward(indices)
                 loss = tz.sum(output)
                 loss.backward()
@@ -181,6 +195,7 @@ def benchmark_tenzor_embedding_backward(
                 embed_backward_fn,
                 warmup_iterations=config.warmup_iterations,
                 benchmark_iterations=config.benchmark_iterations,
+                sync_fn=sync_fn,
             )
 
             result = compute_statistics(
