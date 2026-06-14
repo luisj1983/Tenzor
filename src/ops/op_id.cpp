@@ -192,6 +192,7 @@ constexpr std::array<std::string_view, OP_COUNT> op_names = []() {
     names[static_cast<size_t>(OpId::DepthwiseConv2d)] = "depthwise_conv2d";
     names[static_cast<size_t>(OpId::DepthwiseConv1d)] = "depthwise_conv1d";
     names[static_cast<size_t>(OpId::DepthwiseConv3d)] = "depthwise_conv3d";
+    names[static_cast<size_t>(OpId::ConvTranspose1dForward)] = "conv_transpose1d_forward";
     names[static_cast<size_t>(OpId::DeformableConv2dForward)] = "deformable_conv2d_forward";
     names[static_cast<size_t>(OpId::DeformableConv2dBackwardInput)] = "deformable_conv2d_backward_input";
     names[static_cast<size_t>(OpId::DeformableConv2dBackwardWeight)] = "deformable_conv2d_backward_weight";
@@ -221,6 +222,8 @@ constexpr std::array<std::string_view, OP_COUNT> op_names = []() {
     names[static_cast<size_t>(OpId::AffineGrid)] = "affine_grid";
     names[static_cast<size_t>(OpId::GridSampleBackward)] = "grid_sample_backward";
     names[static_cast<size_t>(OpId::AffineGridBackward)] = "affine_grid_backward";
+    names[static_cast<size_t>(OpId::FlexAttention)] = "flex_attention";
+    names[static_cast<size_t>(OpId::FlexAttentionBackward)] = "flex_attention_backward";
 
     // Fused operations
     names[static_cast<size_t>(OpId::FusedLinearReLU)] = "fused_linear_relu";
@@ -378,6 +381,9 @@ constexpr std::array<std::string_view, OP_COUNT> op_names = []() {
     names[static_cast<size_t>(OpId::IndexAdd)] = "index_add";
     names[static_cast<size_t>(OpId::IndexCopy)] = "index_copy";
     names[static_cast<size_t>(OpId::IndexFill)] = "index_fill";
+    names[static_cast<size_t>(OpId::SelectScatter)] = "select_scatter";
+    names[static_cast<size_t>(OpId::SliceScatter)] = "slice_scatter";
+    names[static_cast<size_t>(OpId::DiagonalScatter)] = "diagonal_scatter";
 
     // Linear Algebra Operations
     names[static_cast<size_t>(OpId::LinalgDet)] = "linalg_det";
@@ -396,6 +402,10 @@ constexpr std::array<std::string_view, OP_COUNT> op_names = []() {
     names[static_cast<size_t>(OpId::HasInfNan)] = "has_inf_nan";
     names[static_cast<size_t>(OpId::EmbeddingBagForward)] = "embedding_bag_forward";
     names[static_cast<size_t>(OpId::EmbeddingBagBackward)] = "embedding_bag_backward";
+    names[static_cast<size_t>(OpId::LSTMCudnnTrainForward)] = "lstm_cudnn_train_forward";
+    names[static_cast<size_t>(OpId::LSTMCudnnBackward)] = "lstm_cudnn_backward";
+    names[static_cast<size_t>(OpId::GRUCudnnTrainForward)] = "gru_cudnn_train_forward";
+    names[static_cast<size_t>(OpId::GRUCudnnBackward)] = "gru_cudnn_backward";
 
     // Complex operations
     names[static_cast<size_t>(OpId::Conj)] = "conj";
@@ -422,6 +432,7 @@ constexpr std::array<std::string_view, OP_COUNT> op_names = []() {
     names[static_cast<size_t>(OpId::PoissonSample)] = "poisson_sample";
     names[static_cast<size_t>(OpId::ExponentialSample)] = "exponential_sample";
     names[static_cast<size_t>(OpId::Histogramdd)] = "histogramdd";
+    names[static_cast<size_t>(OpId::GammaSample)] = "gamma_sample";
 
     // Special Math Functions
     names[static_cast<size_t>(OpId::Gamma)] = "gamma";
@@ -449,6 +460,8 @@ constexpr std::array<std::string_view, OP_COUNT> op_names = []() {
     names[static_cast<size_t>(OpId::SparseSpGEMM)] = "sparse_spgemm";
     names[static_cast<size_t>(OpId::SparseTrsv)] = "sparse_trsv";
     names[static_cast<size_t>(OpId::SparseTrsm)] = "sparse_trsm";
+    names[static_cast<size_t>(OpId::SparseSoftmax)] = "sparse_softmax";
+    names[static_cast<size_t>(OpId::SparseLogSoftmax)] = "sparse_log_softmax";
 
     // Bitwise operations
     names[static_cast<size_t>(OpId::BitwiseAnd)] = "bitwise_and";
@@ -549,6 +562,8 @@ constexpr std::array<std::string_view, OP_COUNT> op_names = []() {
     names[static_cast<size_t>(OpId::MaxUnpool2dBackward)] = "max_unpool2d_backward";
     names[static_cast<size_t>(OpId::MaxUnpool3dForward)] = "max_unpool3d_forward";
     names[static_cast<size_t>(OpId::MaxUnpool3dBackward)] = "max_unpool3d_backward";
+    names[static_cast<size_t>(OpId::MaxUnpool1dForward)] = "max_unpool1d_forward";
+    names[static_cast<size_t>(OpId::MaxUnpool1dBackward)] = "max_unpool1d_backward";
     names[static_cast<size_t>(OpId::NanVar)] = "nanvar";
     names[static_cast<size_t>(OpId::NanStd)] = "nanstd";
     names[static_cast<size_t>(OpId::Deg2Rad)] = "deg2rad";
@@ -606,7 +621,7 @@ constexpr size_t count_named_ops() {
 
 // Count of actual OpId enum values (excluding gap slots).
 // Update this when adding new OpIds to catch missing name entries at compile time.
-inline constexpr size_t EXPECTED_NAMED_OPS = 470;  // 449 + 13 new + 1 (AffineGrid disambiguated to 695) + 1 (CTCLossForward at 696) + 2 (Hardswish, Hardsigmoid) + 2 (GridSampleBackward, AffineGridBackward — audit Q.4) + 2 (DepthwiseConv1d, DepthwiseConv3d — audit CC.5)
+inline constexpr size_t EXPECTED_NAMED_OPS = 485;
 
 // If this fires, a new OpId was added without a corresponding name in op_names above
 static_assert(count_named_ops() == EXPECTED_NAMED_OPS,

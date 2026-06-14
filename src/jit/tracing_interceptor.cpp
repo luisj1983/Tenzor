@@ -225,6 +225,7 @@ auto make_tracing_interceptor(
             if (attrs.has(k)) traced.bool_attrs[name] = attrs.get_bool(k, false);
         };
         copy_bool(AttrKey::Keepdim, "keepdim");
+        copy_bool(AttrKey::AlignCorners, "align_corners");
         // Slice indices: Start/End/Step are scalar ints used by Slice and
         // a handful of indexing ops. The MLIR lowerer needs them to
         // emit stablehlo.slice.
@@ -242,9 +243,24 @@ auto make_tracing_interceptor(
             }
         };
         copy_int_list_to_vec(AttrKey::Shape, "shape");
+        copy_int_list_to_vec(AttrKey::OutputSize, "output_size");
         copy_int_list_to_vec(AttrKey::Dims,  "dims");
         copy_int_list_to_vec(AttrKey::Starts, "starts");
         copy_int_list_to_vec(AttrKey::Ends,   "ends");
+        if (attrs.has(AttrKey::Mode)) {
+            const auto mode = attrs.get_string(AttrKey::Mode, "bilinear");
+            if (mode == "nearest") {
+                traced.int_attrs["mode"] = 0;
+            } else if (mode == "bilinear") {
+                traced.int_attrs["mode"] = 1;
+            } else if (mode == "bicubic") {
+                traced.int_attrs["mode"] = 2;
+            } else if (mode == "trilinear") {
+                traced.int_attrs["mode"] = 3;
+            } else {
+                traced.int_attrs["mode"] = -1;
+            }
+        }
         copy_int(AttrKey::KernelSize,  "kernel_size");
         copy_int(AttrKey::Stride,      "stride");
         copy_int(AttrKey::Padding,     "padding");

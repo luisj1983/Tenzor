@@ -2,7 +2,7 @@
 
 A multi-backend tensor computation and deep learning library written in modern C++23, with full reverse-mode autograd and a PyTorch-like API exposed in both C++ and Python.
 
-> **Status: alpha (v0.1.0).** Single-developer research project. The API is reasonably stable but has had no public-CI exposure on GPU hardware yet, and benchmarks against PyTorch on CPU are competitive in some shapes and slower in others (see [reports/combined_benchmark.md](reports/combined_benchmark.md)). Treat it as experimental, not as a production replacement for PyTorch or TensorFlow.
+> **Status: alpha (v0.1.0).** Single-developer research project. The API is reasonably stable but has had no public-CI exposure on GPU hardware yet. Treat it as experimental, not as a production replacement for PyTorch or TensorFlow.
 
 [![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 [![C++](https://img.shields.io/badge/C%2B%2B-23-blue)]()
@@ -10,7 +10,7 @@ A multi-backend tensor computation and deep learning library written in modern C
 
 ## What's in the box
 
-- **Multi-backend autograd** with op-count parity across CPU, CUDA, ROCm, OneAPI, and Vulkan — CPU registers **479** ops, every GPU backend registers **477** (the 2-op delta is the CPU-only `sparse_solve_triangular` / `sparse_cholesky` linear-algebra pair; see `audit/op_coverage_baseline_post_hardening.txt`). Current per-backend registration counts are recorded in [`audit/op_coverage_baseline_post_hardening.txt`](audit/op_coverage_baseline_post_hardening.txt), and the historical pre-hardening snapshot lives at [`audit/op_coverage_baseline_pre_hardening.txt`](audit/op_coverage_baseline_pre_hardening.txt) (see [`audit/README.md`](audit/README.md) for the OpId-enum vs registered-op-count breakdown).
+- **Multi-backend autograd** with native dispatch tables across CPU, CUDA, ROCm, OneAPI, and Vulkan. Generate current per-backend registration counts with `bin/op_coverage_report --json` after configuring the backend set you want to inspect.
 - **Multi-dtype dispatch**: Float32/64/16, BFloat16, Int8/16/32/64, UInt8/16/32/64, Bool, Complex64/128.
 - **NN module library**: Linear, Conv1d/2d/3d, BatchNorm/LayerNorm/GroupNorm/RMSNorm, MaxPool/AvgPool/Adaptive, RNN/LSTM/GRU (bidirectional), MultiheadAttention/ScaledDotProductAttention, dropout variants, embedding/embedding-bag, activations, sequential containers.
 - **Optimizers and schedulers**: SGD (+ Nesterov), Adam, AdamW, AdamAtan2, RMSprop, Adagrad. StepLR, MultiStepLR, ExponentialLR, CosineAnnealing(WarmRestarts), OneCycleLR, ReduceLROnPlateau, polynomial/linear warmup.
@@ -85,7 +85,6 @@ git clone https://github.com/skreamz/Tenzor.git
 cd Tenzor
 cmake -B build -G Ninja \
     -DCMAKE_BUILD_TYPE=Release \
-    -DTENZOR_BUILD_CUDA=ON \
     -DTENZOR_BUILD_PYTHON=ON \
     -DTENZOR_BUILD_TESTS=ON
 cmake --build build -j
@@ -95,13 +94,14 @@ cmake --build build -j
 
 | Option | Default | Notes |
 |---|---|---|
-| `TENZOR_BUILD_CUDA`       | ON  | Requires CUDA Toolkit |
-| `TENZOR_BUILD_ROCM`       | ON  | Requires ROCm + HIP   |
-| `TENZOR_BUILD_ONEAPI`     | ON  | Requires Intel oneAPI |
-| `TENZOR_BUILD_VULKAN`     | ON  | Requires Vulkan SDK + glslc |
+| `TENZOR_BUILD_CUDA`       | OFF | Requires CUDA Toolkit |
+| `TENZOR_BUILD_ROCM`       | OFF | Requires ROCm + HIP   |
+| `TENZOR_BUILD_ONEAPI`     | OFF | Requires Intel oneAPI |
+| `TENZOR_BUILD_VULKAN`     | OFF | Requires Vulkan SDK + glslc |
 | `TENZOR_BUILD_PYTHON`     | ON  | Requires Python dev headers |
 | `TENZOR_BUILD_TESTS`      | ON  | GoogleTest (fetched automatically) |
 | `TENZOR_BUILD_BENCHMARKS` | OFF | |
+| `TENZOR_USE_MLIR_JIT`     | OFF | Requires IREE compiler/runtime |
 
 See [INSTALL.md](INSTALL.md) for per-backend setup details.
 
@@ -114,33 +114,12 @@ See [INSTALL.md](INSTALL.md) for per-backend setup details.
 - [FAQ](docs/FAQ.md)
 - [Contributing](CONTRIBUTING.md)
 - [Changelog](CHANGELOG.md)
-- [Pre-release hardening audit](audit/README.md) — what's covered, what's deferred
 
 ## Performance
 
-Measured against PyTorch 2.11 on a single RTX 5070 Laptop (Blackwell, sm_120, CUDA 13.2). Full per-shape numbers and methodology in [`reports/combined_benchmark.md`](reports/combined_benchmark.md).
+The benchmark harness is available in `scripts/ci_benchmark.sh` and `tools/regen_perf_baseline.py`. Publish benchmark reports from generated artifacts for the exact hardware, backend options, and dependency versions used.
 
-**CUDA, 99 paired benchmarks (post-v0.1.0 fixes):** Tenzor wins 21 (21%); average speedup 1.01× vs PyTorch.
-
-| Category | Tenzor vs PyTorch | Wins |
-|---|---|---|
-| RMSNorm           | **3.82×** | 4 / 4 |
-| BatchNorm         | 1.88× | 2 / 14 |
-| LayerNorm         | 1.54× | 3 / 4 |
-| MatMul            | 1.51× | 2 / 2 |
-| Linear            | 1.30× | 4 / 6 |
-| Batched MatMul    | 1.17× | 1 / 2 |
-| Training (mixed)  | 0.92× | 4 / 12 |
-| Conv2D            | 0.81× | 0 / 18 |
-| MLP (combined)    | 0.69× | 0 / 8 |
-| GRU forward       | 0.57× | 0 / 2 |
-| Activation        | 0.41× | 0 / 12 |
-| Transformer (e2e) | 0.33× | 0 / 2 |
-| LSTM forward      | 0.21× | 0 / 6 |
-| Attention         | 0.10× | 0 / 4 |
-| LSTM training     | **0.02×** | 0 / 3 |
-
-**Honest read:** Tenzor is competitive on the unfused-compute primitives (MatMul, Linear, normalization layers) and notably wins on RMSNorm. It has real regressions on the fused / highly-optimized paths PyTorch covers via cuDNN+SDPA: LSTM/GRU forward (~5× slower than cuDNN's fused RNN), attention (~10× slower on Blackwell — FP32 cuDNN SDPA is in the codebase but gated off pending an upstream Blackwell stability fix), and Conv2D (~20% slower). LSTM training on CUDA is ~50× slower because it falls through to a per-timestep autograd path — cuDNN RNN integration is the v0.2 milestone. All documented in [`reports/combined_benchmark.md`](reports/combined_benchmark.md) and [`CHANGELOG.md`](CHANGELOG.md).
+**Honest read:** Tenzor is competitive on some unfused-compute primitives, but fused and vendor-library-heavy paths need per-backend benchmarking before making broad performance claims. See [`CHANGELOG.md`](CHANGELOG.md) for release-specific performance notes.
 
 If you need raw production throughput today, use PyTorch. If you want a clean, hackable C++23 codebase that's competitive on bread-and-butter linear algebra and that you can extend — Tenzor is for you.
 
@@ -165,7 +144,7 @@ See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the full diagram and dispat
 ## Known limitations
 
 - **No public CI proof for GPU backends.** GitHub Actions runs CPU smoke tests only; CUDA/ROCm/OneAPI/Vulkan are tested locally on the maintainer's hardware.
-- **Vulkan STFT/ISTFT** currently dispatch to a CPU fallback; the native compute pipeline is in the build but a forward-pass shape-value bug is being investigated. See [`audit/README.md`](audit/README.md) Phase 4.3.
+- **GPU backend ops are expected to be native.** Backend gaps should fail clearly rather than silently dispatching through CPU behavior.
 - **MPS backend** (Apple Metal) is partial. Not yet at parity with the four primary GPU backends.
 - **CPU performance** is below PyTorch on the published benchmark suite. Conv2D in particular has a regression that needs investigation (one shape measures 0.07× — almost certainly a dispatch/warmup artifact).
 - **Pretrained weights** are not distributed. The model files in `src/models/` are architectures only.

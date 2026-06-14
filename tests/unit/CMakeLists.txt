@@ -6,6 +6,10 @@
 add_executable(test_embedding test_embedding.cpp)
 target_link_libraries(test_embedding PRIVATE tenzor_core GTest::gtest_main)
 
+add_executable(test_op_id_names test_op_id_names.cpp)
+target_link_libraries(test_op_id_names PRIVATE tenzor_core GTest::gtest_main)
+tenzor_discover_tests(test_op_id_names DISCOVERY_TIMEOUT 60 BACKENDS cpu LABELS "unit;opid")
+
 # Embedding multi-dtype tests
 add_executable(test_embedding_multidtype test_embedding_multidtype.cpp)
 target_link_libraries(test_embedding_multidtype PRIVATE tenzor_core GTest::gtest_main)

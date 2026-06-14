@@ -25,10 +25,11 @@ if(EXISTS "${_ROCM_ROOT}/bin/hipcc")
 endif()
 
 
-# Set TENZOR_BUILD_ROCM before project() - use cache to preserve user preference
-# Default to ON only if ROCm is available on the system
+# Set TENZOR_BUILD_ROCM before project() - use cache to preserve user preference.
+# Source builds keep heavyweight GPU SDKs opt-in; enabling this option must
+# build a real ROCm backend or fail during configure/build.
 if(NOT DEFINED TENZOR_BUILD_ROCM)
-    option(TENZOR_BUILD_ROCM "Build ROCm backend" ON)
+    option(TENZOR_BUILD_ROCM "Build ROCm backend" OFF)
 endif()
 
 # Set up HIP architectures if building ROCm backend
@@ -84,10 +85,10 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
 # Build options
-option(TENZOR_BUILD_CUDA "Build CUDA backend" ON)
+option(TENZOR_BUILD_CUDA "Build CUDA backend" OFF)
 # Note: TENZOR_BUILD_ROCM is set before project() to enable HIP language
-option(TENZOR_BUILD_ONEAPI "Build OneAPI backend" ON)
-option(TENZOR_BUILD_VULKAN "Build Vulkan backend" ON)
+option(TENZOR_BUILD_ONEAPI "Build OneAPI backend" OFF)
+option(TENZOR_BUILD_VULKAN "Build Vulkan backend" OFF)
 if(APPLE)
     option(TENZOR_BUILD_MPS "Build Apple Metal/MPS backend" ON)
 endif()
@@ -129,7 +130,7 @@ option(TENZOR_REQUIRE_MKL "Require Intel MKL (FATAL_ERROR if not found)" OFF)
 option(TENZOR_ENABLE_PROFILING "Enable NVTX/ROCTX profiling annotations" OFF)
 
 # MLIR/StableHLO/IREE JIT pipeline (Phase 13)
-option(TENZOR_USE_MLIR_JIT "Enable MLIR/StableHLO JIT (Phase 13)" ON)
+option(TENZOR_USE_MLIR_JIT "Enable MLIR/StableHLO JIT (Phase 13)" OFF)
 option(TENZOR_USE_INPROCESS_IREE "Link IREE compiler in-process (Phase 3C)" OFF)
 
 # Pinned version — IREE distribution bundles MLIR + StableHLO. The 2026-05-19
@@ -539,18 +540,10 @@ if(TENZOR_BUILD_PYTHON)
             ${CMAKE_CURRENT_SOURCE_DIR}/python/tenzor/special/*.py)
         file(GLOB _PY_DISTRIBUTIONS_SOURCES CONFIGURE_DEPENDS
             ${CMAKE_CURRENT_SOURCE_DIR}/python/tenzor/distributions/*.py)
-        set(_PY_STUBS
-            ${CMAKE_CURRENT_SOURCE_DIR}/python/tenzor/py.typed
-            ${CMAKE_CURRENT_SOURCE_DIR}/python/tenzor/__init__.pyi
-            ${CMAKE_CURRENT_SOURCE_DIR}/python/tenzor/nn.pyi
-            ${CMAKE_CURRENT_SOURCE_DIR}/python/tenzor/functional.pyi
-            ${CMAKE_CURRENT_SOURCE_DIR}/python/tenzor/optim.pyi
-            ${CMAKE_CURRENT_SOURCE_DIR}/python/tenzor/torch_interop.pyi
-            # Audit-8 II.12: typed-exception namespace stub.
-            ${CMAKE_CURRENT_SOURCE_DIR}/python/tenzor/exceptions.pyi
-            # audit-10 OO.12: composable function transforms stub.
-            ${CMAKE_CURRENT_SOURCE_DIR}/python/tenzor/func.pyi
-        )
+        file(GLOB _PY_STUBS CONFIGURE_DEPENDS
+            ${CMAKE_CURRENT_SOURCE_DIR}/python/tenzor/*.pyi)
+        list(APPEND _PY_STUBS
+            ${CMAKE_CURRENT_SOURCE_DIR}/python/tenzor/py.typed)
         set(_PY_ALL_INPUTS ${_PY_SOURCES} ${_PY_STUBS})
 
         # Build list of expected outputs in the build directory

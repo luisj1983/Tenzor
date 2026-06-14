@@ -84,6 +84,34 @@ OPTIONAL_RUNTIME_STUBS: set[str] = {
 }
 
 
+def check_build_tree_stubs() -> list[str]:
+    """Verify configured build/python trees contain every source stub.
+
+    CMake developer builds copy ``python/tenzor`` into ``build/python`` for
+    local ``PYTHONPATH=build/python`` workflows. If that copy list drifts from
+    the source tree, runtime imports still work but editors/type checkers see a
+    partial typed package. Treat any existing build tree as authoritative and
+    fail when it is missing a source ``.pyi`` or ``py.typed`` file.
+    """
+    build_pkg = REPO_ROOT / "build" / "python" / "tenzor"
+    if not build_pkg.exists():
+        return []
+
+    expected = {p.name for p in PY_DIR.glob("*.pyi")}
+    expected.add("py.typed")
+    actual = {p.name for p in build_pkg.glob("*.pyi")}
+    if (build_pkg / "py.typed").exists():
+        actual.add("py.typed")
+
+    missing = sorted(expected - actual)
+    if missing:
+        return [
+            "build/python/tenzor is missing typed-package files: " +
+            ", ".join(missing)
+        ]
+    return []
+
+
 # Names that legitimately appear in __init__.pyi but are not on the
 # ``tenzor`` runtime namespace (or vice versa). Each entry MUST include a
 # justification comment. Adding to this list should be a last resort; the
@@ -340,6 +368,11 @@ def main(argv: Iterable[str] | None = None) -> int:
             f"\ncheck_pyi_parity: DRIFT in {drift_count}/{checked} stub(s). "
             f"See messages above."
         )
+        return 1
+    build_tree_messages = check_build_tree_stubs()
+    if build_tree_messages:
+        for m in build_tree_messages:
+            print(m)
         return 1
     print(f"check_pyi_parity: OK — {checked} stub(s) match runtime.")
     return 0

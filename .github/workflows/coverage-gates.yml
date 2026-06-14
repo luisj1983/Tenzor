@@ -38,7 +38,7 @@ jobs:
       - uses: actions/checkout@v4
       - name: Report OpId coverage
         run: |
-          python3 scripts/audit_op_coverage.py --json op-coverage.json
+          python3 scripts/audit_op_coverage.py --json op-coverage.json --require-all
       - name: Upload coverage JSON
         uses: actions/upload-artifact@v4
         with:
@@ -80,6 +80,8 @@ jobs:
             -DTENZOR_BUILD_TESTS=ON
       - name: scan_audit_markers.py — orphaned audit markers
         run: python3 tools/scan_audit_markers.py
+      - name: check_readme_links.py — local README links
+        run: python3 tools/check_readme_links.py
       - name: check_pyi_drift.py — .py / .pyi parity
         run: python3 tools/check_pyi_drift.py
       - name: check_multidtype_coverage.py — multi-dtype gaps

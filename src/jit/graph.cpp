@@ -9,18 +9,128 @@
 #include "../../include/tenzor/ops/math.hpp"
 #include "../../include/tenzor/ops/reduction.hpp"
 #include "../../include/tenzor/ops/transform.hpp"
+#include "../../include/tenzor/ops/indexing.hpp"
+#include "../../include/tenzor/ops/vision.hpp"
 #include "../../include/tenzor/ops/linalg.hpp"
 #include "../../include/tenzor/autograd/ops.hpp"
 #include "../../include/tenzor/nn/functional.hpp"
 #include "../../include/tenzor/backend/fast_dispatch.hpp"
 #include "../../include/tenzor/core/shape.hpp"
 #include <algorithm>
+#include <numeric>
 #include <queue>
 #include <sstream>
 #include <stdexcept>
 
 namespace tenzor {
 namespace jit {
+
+namespace {
+
+auto product_dims(const std::vector<int64_t>& dims) -> int64_t {
+    return std::accumulate(dims.begin(), dims.end(), int64_t{1},
+                           [](int64_t a, int64_t b) { return a * b; });
+}
+
+auto normalize_dim_for_rank(int64_t dim, size_t rank, bool allow_end = false) -> int64_t {
+    const auto limit = static_cast<int64_t>(rank) + (allow_end ? 1 : 0);
+    if (dim < 0) dim += limit;
+    if (dim < 0 || dim >= limit) {
+        throw std::out_of_range("JIT graph dimension out of range");
+    }
+    return dim;
+}
+
+auto attr_vec_or_scalar(const Node& node, const char* name, size_t rank,
+                        int64_t default_value) -> std::vector<int64_t> {
+    auto values = node.get_vec_attr(name);
+    if (!values.empty()) {
+        if (values.size() == 1 && rank > 1) {
+            values.resize(rank, values[0]);
+        }
+        return values;
+    }
+    if (node.has_int_attr(name)) {
+        return std::vector<int64_t>(rank, node.get_int_attr(name));
+    }
+    return std::vector<int64_t>(rank, default_value);
+}
+
+auto conv_transpose_output_shape(const Node& node,
+                                 const std::vector<std::vector<int64_t>>& input_shapes)
+        -> std::vector<int64_t> {
+    if (input_shapes.size() < 2 || input_shapes[0].size() < 3 ||
+        input_shapes[1].size() < 3) {
+        return {};
+    }
+
+    const auto spatial_rank = input_shapes[0].size() - 2;
+    if (input_shapes[1].size() != spatial_rank + 2) {
+        return {};
+    }
+
+    const int64_t groups = node.has_attr("groups") ? node.get_int_attr("groups") : 1;
+    auto stride = attr_vec_or_scalar(node, "stride", spatial_rank, 1);
+    auto padding = attr_vec_or_scalar(node, "padding", spatial_rank, 0);
+    auto dilation = attr_vec_or_scalar(node, "dilation", spatial_rank, 1);
+    auto output_padding = attr_vec_or_scalar(node, "output_padding", spatial_rank, 0);
+
+    std::vector<int64_t> out;
+    out.reserve(input_shapes[0].size());
+    out.push_back(input_shapes[0][0]);
+    out.push_back(input_shapes[1][1] * groups);
+    for (size_t i = 0; i < spatial_rank; ++i) {
+        const auto in_size = input_shapes[0][i + 2];
+        const auto kernel = input_shapes[1][i + 2];
+        out.push_back((in_size - 1) * stride[i] - 2 * padding[i] +
+                      dilation[i] * (kernel - 1) + output_padding[i] + 1);
+    }
+    return out;
+}
+
+auto mode_attr_to_string(const Node& node) -> std::string {
+    if (!node.has_int_attr("mode")) return "bilinear";
+    switch (node.get_int_attr("mode")) {
+        case 0: return "nearest";
+        case 1: return "bilinear";
+        case 2: return "bicubic";
+        case 3: return "trilinear";
+        default:
+            throw std::runtime_error("JIT graph contains unsupported interpolate mode");
+    }
+}
+
+auto set_conv_attrs_from_node(const Node& node, OpAttributes& attrs, size_t spatial_rank) -> void {
+    const auto stride = attr_vec_or_scalar(node, "stride", spatial_rank, 1);
+    const auto padding = attr_vec_or_scalar(node, "padding", spatial_rank, 0);
+    const auto dilation = attr_vec_or_scalar(node, "dilation", spatial_rank, 1);
+    const auto output_padding = attr_vec_or_scalar(node, "output_padding", spatial_rank, 0);
+
+    attrs.set(AttrKey::Stride, stride[0]);
+    attrs.set(AttrKey::Padding, padding[0]);
+    attrs.set(AttrKey::Dilation, dilation[0]);
+    attrs.set(AttrKey::OutputPadding, output_padding[0]);
+    if (spatial_rank >= 2) {
+        attrs.set(AttrKey::StrideH, stride[spatial_rank - 2]);
+        attrs.set(AttrKey::StrideW, stride[spatial_rank - 1]);
+        attrs.set(AttrKey::PaddingH, padding[spatial_rank - 2]);
+        attrs.set(AttrKey::PaddingW, padding[spatial_rank - 1]);
+        attrs.set(AttrKey::DilationH, dilation[spatial_rank - 2]);
+        attrs.set(AttrKey::DilationW, dilation[spatial_rank - 1]);
+        attrs.set(AttrKey::OutputPaddingH, output_padding[spatial_rank - 2]);
+        attrs.set(AttrKey::OutputPaddingW, output_padding[spatial_rank - 1]);
+    }
+    if (spatial_rank == 3) {
+        attrs.set(AttrKey::StrideD, stride[0]);
+        attrs.set(AttrKey::PaddingD, padding[0]);
+        attrs.set(AttrKey::DilationD, dilation[0]);
+        attrs.set(AttrKey::OutputPaddingD, output_padding[0]);
+    }
+    attrs.set(AttrKey::Groups,
+              node.has_attr("groups") ? node.get_int_attr("groups") : int64_t{1});
+}
+
+} // namespace
 
 // ============================================================================
 // Node implementation
@@ -275,6 +385,9 @@ auto Graph::infer_types() -> void {
             case OpType::Neg:
             case OpType::Clamp:
             case OpType::Dropout:
+            case OpType::SiLU:
+            case OpType::RMSNorm:
+            case OpType::RoPE:
                 if (!input_shapes.empty()) {
                     output_shapes.push_back(input_shapes[0]);
                 }
@@ -454,6 +567,13 @@ auto Graph::infer_types() -> void {
                 }
                 break;
 
+            case OpType::ConvTranspose:
+                if (auto shape = conv_transpose_output_shape(*node, input_shapes);
+                    !shape.empty()) {
+                    output_shapes.push_back(std::move(shape));
+                }
+                break;
+
             // ================================================================
             // Pooling
             // ================================================================
@@ -551,6 +671,60 @@ auto Graph::infer_types() -> void {
                         out_shape[dim] = total;
                     }
                     output_shapes.push_back(out_shape);
+                }
+                break;
+
+            case OpType::Stack:
+                if (!input_shapes.empty()) {
+                    auto out_shape = input_shapes[0];
+                    int64_t dim = node->has_attr("dim") ? node->get_int_attr("dim") : 0;
+                    dim = normalize_dim_for_rank(dim, out_shape.size(), true);
+                    out_shape.insert(out_shape.begin() + dim,
+                                     static_cast<int64_t>(input_shapes.size()));
+                    output_shapes.push_back(std::move(out_shape));
+                }
+                break;
+
+            case OpType::Broadcast:
+                if (!input_shapes.empty()) {
+                    auto target = node->get_vec_attr("shape");
+                    output_shapes.push_back(target.empty() ? input_shapes[0] : std::move(target));
+                }
+                break;
+
+            case OpType::Where:
+                if (input_shapes.size() >= 3) {
+                    output_shapes.push_back(
+                        broadcast_shapes(input_shapes[1], input_shapes[2]));
+                }
+                break;
+
+            case OpType::IndexSelect:
+                if (input_shapes.size() >= 2) {
+                    auto out_shape = input_shapes[0];
+                    int64_t dim = node->has_attr("dim") ? node->get_int_attr("dim") : 0;
+                    dim = normalize_dim_for_rank(dim, out_shape.size());
+                    out_shape[dim] = product_dims(input_shapes[1]);
+                    output_shapes.push_back(std::move(out_shape));
+                }
+                break;
+
+            case OpType::Interpolate:
+                if (!input_shapes.empty()) {
+                    auto out_shape = input_shapes[0];
+                    auto size = node->get_vec_attr("output_size");
+                    if (!size.empty() && out_shape.size() >= size.size() + 2) {
+                        std::copy(size.begin(), size.end(),
+                                  out_shape.end() - static_cast<std::ptrdiff_t>(size.size()));
+                    }
+                    output_shapes.push_back(std::move(out_shape));
+                }
+                break;
+
+            case OpType::Padding:
+            case OpType::GQA:
+                if (!input_shapes.empty()) {
+                    output_shapes.push_back(input_shapes[0]);
                 }
                 break;
 
@@ -766,6 +940,17 @@ auto Graph::infer_types() -> void {
                     output_shapes.push_back(input_shapes[0]);
                 }
                 break;
+
+            case OpType::QuantizedLinear:
+            case OpType::QuantizedConv2d:
+            case OpType::Dequantize:
+            case OpType::Quantize:
+            case OpType::SparseMatMul:
+            case OpType::DenseToSparse:
+                if (!input_shapes.empty()) {
+                    output_shapes.push_back(input_shapes[0]);
+                }
+                break;
         }
 
         // Update output shapes
@@ -863,6 +1048,9 @@ auto Graph::infer_symbolic_types() -> void {
             case OpType::Neg:
             case OpType::Clamp:
             case OpType::Dropout:
+            case OpType::SiLU:
+            case OpType::RMSNorm:
+            case OpType::RoPE:
                 if (!input_sym_shapes.empty()) {
                     output_sym_shapes.push_back(input_sym_shapes[0]);
                 }
@@ -1038,6 +1226,36 @@ auto Graph::infer_symbolic_types() -> void {
                 }
                 break;
 
+            case OpType::ConvTranspose:
+                if (input_sym_shapes.size() >= 2 &&
+                    input_sym_shapes[0].rank() >= 3 &&
+                    input_sym_shapes[1].rank() == input_sym_shapes[0].rank()) {
+                    const auto spatial_rank = input_sym_shapes[0].rank() - 2;
+                    const int64_t groups = node->has_attr("groups") ?
+                        node->get_int_attr("groups") : 1;
+                    auto stride = attr_vec_or_scalar(*node, "stride", spatial_rank, 1);
+                    auto padding = attr_vec_or_scalar(*node, "padding", spatial_rank, 0);
+                    auto dilation = attr_vec_or_scalar(*node, "dilation", spatial_rank, 1);
+                    auto output_padding =
+                        attr_vec_or_scalar(*node, "output_padding", spatial_rank, 0);
+                    std::vector<SymbolicDim> dims;
+                    dims.reserve(input_sym_shapes[0].rank());
+                    dims.push_back(input_sym_shapes[0][0]);
+                    dims.push_back(input_sym_shapes[1][1] * SymbolicDim::concrete(groups));
+                    for (size_t i = 0; i < spatial_rank; ++i) {
+                        auto in_size = input_sym_shapes[0][i + 2];
+                        auto kernel = input_sym_shapes[1][i + 2];
+                        dims.push_back((in_size - SymbolicDim::concrete(1)) *
+                                       SymbolicDim::concrete(stride[i]) -
+                                       SymbolicDim::concrete(2 * padding[i]) +
+                                       SymbolicDim::concrete(dilation[i]) *
+                                       (kernel - SymbolicDim::concrete(1)) +
+                                       SymbolicDim::concrete(output_padding[i] + 1));
+                    }
+                    output_sym_shapes.push_back(SymbolicShape(std::move(dims)));
+                }
+                break;
+
             // ================================================================
             // Pooling
             // ================================================================
@@ -1151,12 +1369,76 @@ auto Graph::infer_symbolic_types() -> void {
                         out_shape[static_cast<size_t>(dim)] = total;
                     }
                     output_sym_shapes.push_back(std::move(out_shape));
-                }
-                break;
+	                }
+	                break;
 
-            // ================================================================
-            // GELU: preserve shape (element-wise activation)
-            // ================================================================
+	            case OpType::Stack:
+	                if (!input_sym_shapes.empty()) {
+	                    auto sym_shape = input_sym_shapes[0];
+	                    int64_t dim = node->has_attr("dim") ? node->get_int_attr("dim") : 0;
+	                    dim = normalize_dim_for_rank(dim, sym_shape.rank(), true);
+	                    sym_shape.insert(static_cast<size_t>(dim),
+	                                     SymbolicDim::concrete(
+	                                         static_cast<int64_t>(input_sym_shapes.size())));
+	                    output_sym_shapes.push_back(std::move(sym_shape));
+	                }
+	                break;
+
+	            case OpType::Broadcast:
+	                if (!input_sym_shapes.empty()) {
+	                    auto target = node->get_vec_attr("shape");
+	                    output_sym_shapes.push_back(
+	                        target.empty() ? input_sym_shapes[0]
+	                                       : SymbolicShape::from_concrete(target));
+	                }
+	                break;
+
+	            case OpType::Where:
+	                if (input_sym_shapes.size() >= 3) {
+	                    output_sym_shapes.push_back(
+	                        broadcast_symbolic_shapes(input_sym_shapes[1],
+	                                                  input_sym_shapes[2]));
+	                }
+	                break;
+
+	            case OpType::IndexSelect:
+	                if (input_sym_shapes.size() >= 2) {
+	                    auto out_shape = input_sym_shapes[0];
+	                    int64_t dim = node->has_attr("dim") ? node->get_int_attr("dim") : 0;
+	                    dim = normalize_dim_for_rank(dim, out_shape.rank());
+	                    SymbolicDim selected = SymbolicDim::concrete(1);
+	                    for (size_t i = 0; i < input_sym_shapes[1].rank(); ++i) {
+	                        selected = selected * input_sym_shapes[1][i];
+	                    }
+	                    out_shape[static_cast<size_t>(dim)] = selected;
+	                    output_sym_shapes.push_back(std::move(out_shape));
+	                }
+	                break;
+
+	            case OpType::Interpolate:
+	                if (!input_sym_shapes.empty()) {
+	                    auto out_shape = input_sym_shapes[0];
+	                    auto size = node->get_vec_attr("output_size");
+	                    if (!size.empty() && out_shape.rank() >= size.size() + 2) {
+	                        const auto offset = out_shape.rank() - size.size();
+	                        for (size_t i = 0; i < size.size(); ++i) {
+	                            out_shape[offset + i] = SymbolicDim::concrete(size[i]);
+	                        }
+	                    }
+	                    output_sym_shapes.push_back(std::move(out_shape));
+	                }
+	                break;
+
+	            case OpType::Padding:
+	            case OpType::GQA:
+	                if (!input_sym_shapes.empty()) {
+	                    output_sym_shapes.push_back(input_sym_shapes[0]);
+	                }
+	                break;
+
+	            // ================================================================
+	            // GELU: preserve shape (element-wise activation)
+	            // ================================================================
             case OpType::GELU:
                 if (!input_sym_shapes.empty()) {
                     output_sym_shapes.push_back(input_sym_shapes[0]);
@@ -1371,6 +1653,17 @@ auto Graph::infer_symbolic_types() -> void {
             case OpType::LayoutConvert:
             case OpType::Cast:
                 // Shape-preserving: output has same shape as input
+                if (!input_sym_shapes.empty()) {
+                    output_sym_shapes.push_back(input_sym_shapes[0]);
+                }
+                break;
+
+            case OpType::QuantizedLinear:
+            case OpType::QuantizedConv2d:
+            case OpType::Dequantize:
+            case OpType::Quantize:
+            case OpType::SparseMatMul:
+            case OpType::DenseToSparse:
                 if (!input_sym_shapes.empty()) {
                     output_sym_shapes.push_back(input_sym_shapes[0]);
                 }
@@ -1641,6 +1934,29 @@ auto Graph::execute_node(const std::shared_ptr<Node>& node,
             }
             break;
 
+        case OpType::ConvTranspose:
+            if (input_vars.size() >= 2) {
+                const auto rank = input_vars[0].tensor().shape().size();
+                if (rank < 3 || rank > 5) {
+                    throw std::runtime_error("ConvTranspose expects 3D, 4D, or 5D input");
+                }
+                const auto spatial_rank = rank - 2;
+                OpAttributes attrs;
+                set_conv_attrs_from_node(*node, attrs, spatial_rank);
+                std::vector<Tensor> inputs = {input_vars[0].tensor(), input_vars[1].tensor()};
+                if (input_vars.size() >= 3) {
+                    inputs.push_back(input_vars[2].tensor());
+                }
+                const OpId op = spatial_rank == 1 ? OpId::ConvTranspose1dForward
+                              : spatial_rank == 2 ? OpId::ConvTranspose2dForward
+                                                  : OpId::ConvTranspose3dForward;
+                auto result = dispatch(op, inputs, attrs);
+                if (!result.empty()) {
+                    outputs.push_back(Variable(result[0], false));
+                }
+            }
+            break;
+
         // ====================================================================
         // Normalization (dispatch to backend kernels)
         // ====================================================================
@@ -1731,6 +2047,30 @@ auto Graph::execute_node(const std::shared_ptr<Node>& node,
                 int64_t end_dim = node->has_attr("end_dim") ? node->get_int_attr("end_dim") : -1;
                 auto result = input_vars[0].tensor().flatten(start_dim, end_dim);
                 outputs.push_back(Variable(result, false));
+            }
+            break;
+
+        case OpType::Stack:
+            if (!input_vars.empty()) {
+                int64_t dim = node->has_attr("dim") ? node->get_int_attr("dim") : 0;
+                std::vector<Tensor> tensors;
+                tensors.reserve(input_vars.size());
+                for (const auto& v : input_vars) {
+                    tensors.push_back(v.tensor());
+                }
+                auto result = tenzor::stack(std::span<const Tensor>(tensors), dim);
+                outputs.push_back(Variable(result, false));
+            }
+            break;
+
+        case OpType::Broadcast:
+            if (!input_vars.empty()) {
+                auto shape = node->get_vec_attr("shape");
+                if (shape.empty()) {
+                    outputs.push_back(input_vars[0]);
+                } else {
+                    outputs.push_back(tenzor::expand(input_vars[0], shape));
+                }
             }
             break;
 
@@ -1858,6 +2198,54 @@ auto Graph::execute_node(const std::shared_ptr<Node>& node,
             }
             break;
 
+        case OpType::Where:
+            if (input_vars.size() >= 3) {
+                outputs.push_back(tenzor::where(input_vars[0], input_vars[1], input_vars[2]));
+            }
+            break;
+
+        case OpType::IndexSelect:
+            if (input_vars.size() >= 2) {
+                int64_t dim = node->has_attr("dim") ? node->get_int_attr("dim") : 0;
+                outputs.push_back(tenzor::index_select(input_vars[0], dim, input_vars[1].tensor()));
+            }
+            break;
+
+        case OpType::Interpolate:
+            if (!input_vars.empty()) {
+                auto size = node->get_vec_attr("output_size");
+                if (size.empty()) {
+                    throw std::runtime_error("Interpolate JIT node is missing output_size");
+                }
+                std::string size_str;
+                for (size_t i = 0; i < size.size(); ++i) {
+                    if (i > 0) size_str += ',';
+                    size_str += std::to_string(size[i]);
+                }
+                OpAttributes attrs;
+                attrs.set(AttrKey::OutputSize, std::string_view(size_str));
+                attrs.set(AttrKey::Mode, mode_attr_to_string(*node));
+                attrs.set(AttrKey::AlignCorners,
+                          node->has_attr("align_corners") &&
+                          node->get_bool_attr("align_corners"));
+                if (size.size() == 1) {
+                    attrs.set(AttrKey::OutputSizeW, size[0]);
+                } else if (size.size() == 2) {
+                    attrs.set(AttrKey::OutputSizeH, size[0]);
+                    attrs.set(AttrKey::OutputSizeW, size[1]);
+                } else if (size.size() == 3) {
+                    attrs.set(AttrKey::OutputSizeD, size[0]);
+                    attrs.set(AttrKey::OutputSizeH, size[1]);
+                    attrs.set(AttrKey::OutputSizeW, size[2]);
+                }
+                std::vector<Tensor> inputs = {input_vars[0].tensor()};
+                auto result = dispatch(OpId::Interpolate, inputs, attrs);
+                if (!result.empty()) {
+                    outputs.push_back(Variable(result[0], false));
+                }
+            }
+            break;
+
         // ====================================================================
         // Other
         // ====================================================================
@@ -1896,9 +2284,40 @@ auto Graph::execute_node(const std::shared_ptr<Node>& node,
             }
             break;
 
+        case OpType::SiLU:
+            if (!input_vars.empty()) {
+                outputs.push_back(input_vars[0] * nn::sigmoid(input_vars[0]));
+            }
+            break;
+
+        case OpType::RMSNorm:
+            if (!input_vars.empty()) {
+                OpAttributes attrs;
+                attrs.set(AttrKey::Eps, node->has_attr("eps") ?
+                    static_cast<double>(node->get_attr("eps")) : 1e-5);
+                std::vector<Tensor> inputs;
+                inputs.reserve(input_vars.size());
+                for (const auto& v : input_vars) {
+                    inputs.push_back(v.tensor());
+                }
+                auto result = dispatch(OpId::RMSNorm, inputs, attrs);
+                if (!result.empty()) {
+                    outputs.push_back(Variable(result[0], false));
+                }
+            }
+            break;
+
         // ====================================================================
         // Linear algebra operations
         // ====================================================================
+        case OpType::GQA:
+        case OpType::RoPE:
+        case OpType::Padding:
+            throw std::runtime_error(
+                "JIT interpreter does not execute compiler-dialect op " +
+                op_type_to_string(node->op_type()) +
+                "; lower this graph through the MLIR/IREE path");
+
         case OpType::Det:
             if (!input_vars.empty()) {
                 auto result = tenzor::linalg::det(input_vars[0].tensor());
@@ -2213,16 +2632,16 @@ auto Graph::execute_node(const std::shared_ptr<Node>& node,
             break;
         }
 
-        // Quantized and sparse ops — handled by specialized codegen, not
-        // interpreted here.  Fall through with no outputs so the executor
-        // raises a clear error if these reach the interpreter path.
         case OpType::QuantizedLinear:
         case OpType::QuantizedConv2d:
         case OpType::Dequantize:
         case OpType::Quantize:
         case OpType::SparseMatMul:
         case OpType::DenseToSparse:
-            break;
+            throw std::runtime_error(
+                "JIT interpreter does not execute specialized op " +
+                op_type_to_string(node->op_type()) +
+                "; lower this graph through a backend compiler/codegen path");
     }
 
     // Store outputs in value map

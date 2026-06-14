@@ -23,6 +23,7 @@
 #include <set>
 #include <string>
 #include <vector>
+#include <unistd.h>
 
 using namespace tenzor;
 
@@ -37,6 +38,31 @@ static const std::vector<BackendInfo> backends = {
     {"ROCm",   Device::Type::ROCm},
     {"Vulkan", Device::Type::Vulkan},
     {"OneAPI", Device::Type::OneAPI},
+};
+
+class ScopedStdoutToStderr {
+public:
+    ScopedStdoutToStderr() {
+        std::fflush(stdout);
+        saved_stdout_ = dup(STDOUT_FILENO);
+        if (saved_stdout_ >= 0) {
+            dup2(STDERR_FILENO, STDOUT_FILENO);
+        }
+    }
+
+    ~ScopedStdoutToStderr() {
+        std::fflush(stdout);
+        if (saved_stdout_ >= 0) {
+            dup2(saved_stdout_, STDOUT_FILENO);
+            close(saved_stdout_);
+        }
+    }
+
+    ScopedStdoutToStderr(const ScopedStdoutToStderr&) = delete;
+    auto operator=(const ScopedStdoutToStderr&) -> ScopedStdoutToStderr& = delete;
+
+private:
+    int saved_stdout_{-1};
 };
 
 static void print_table() {
@@ -159,16 +185,28 @@ static int check_baseline(const char* baseline_path) {
 }
 
 int main(int argc, char* argv[]) {
-    tenzor::initialize();
+    const bool json_mode = argc >= 2 && std::strcmp(argv[1], "--json") == 0;
+    if (json_mode) {
+        ScopedStdoutToStderr redirect;
+        tenzor::initialize();
+    } else {
+        tenzor::initialize();
+    }
 
-    if (argc >= 2 && std::strcmp(argv[1], "--json") == 0) {
+    int exit_code = 0;
+    if (json_mode) {
         print_json();
     } else if (argc >= 3 && std::strcmp(argv[1], "--check") == 0) {
-        return check_baseline(argv[2]);
+        exit_code = check_baseline(argv[2]);
     } else {
         print_table();
     }
 
-    tenzor::finalize();
-    return 0;
+    if (json_mode) {
+        ScopedStdoutToStderr redirect;
+        tenzor::finalize();
+    } else {
+        tenzor::finalize();
+    }
+    return exit_code;
 }
