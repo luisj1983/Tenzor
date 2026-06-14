@@ -1292,7 +1292,17 @@ auto scaled_dot_product_attention(
     bool device_supports_dropout = (dev_t == Device::Type::CPU);
     bool dropout_path_ok = (opts.dropout_p <= 0.0) || device_supports_dropout;
 
-    if (is_4d && no_mask && supported_dtype && causal_path_ok && dropout_path_ok) {
+    // CUDA's fused_attention_cuda is a scalar (non-tensor-core) tiled flash
+    // kernel: at seq=512 it measures ~12ms vs ~3ms for the cuBLAS-TF32 BMM
+    // path below (and ~1ms for PyTorch's CUTLASS mem-efficient kernel). For
+    // Float32 on CUDA it is never the fast choice, so skip it and use the BMM
+    // path. (FP16/BF16 keep the existing path; revisit when a tensor-core
+    // fused kernel exists.)
+    bool cuda_flash_slow = (dev_t == Device::Type::CUDA &&
+                            query.tensor().dtype() == DType::Float32);
+
+    if (is_4d && no_mask && supported_dtype && causal_path_ok && dropout_path_ok &&
+        !cuda_flash_slow) {
         try {
             // Backend FlashAttention kernels disagree on input rank: CPU's
             // flash_attention_forward expects 4D [B, H, L, E], but CUDA's

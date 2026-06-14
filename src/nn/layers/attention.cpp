@@ -380,6 +380,18 @@ auto MultiheadAttention::scaled_dot_product_attention(
     auto key_3d = autograd::reshape(key_compute, reshaped_k_shape);
     auto value_3d = autograd::reshape(value_compute, reshaped_v_shape);
 
+    // Fold the 1/sqrt(head_dim) scale into Q here rather than scaling the
+    // materialized scores matrix below: Q is (B*H, Sq, D) while scores is
+    // (B*H, Sq, Sk) — for seq>>head_dim that's ~Sk/D fewer elements to touch
+    // (e.g. 8x at seq=512, head_dim=64), and it drops a full scores-sized
+    // intermediate from the autograd graph. Mathematically identical:
+    // (scale*Q) @ K^T == scale * (Q @ K^T).
+    {
+        Tensor q_scale = full({1}, static_cast<float>(scale),
+                              query_3d.dtype(), query.device());
+        query_3d = query_3d * Variable(q_scale, false);
+    }
+
     // Transpose key: (batch*num_heads, seq_len_k, head_dim) -> (batch*num_heads, head_dim, seq_len_k)
     std::vector<int64_t> key_perm = {0, 2, 1};
     auto key_transposed = autograd::permute(key_3d, key_perm);
@@ -393,12 +405,8 @@ auto MultiheadAttention::scaled_dot_product_attention(
     std::vector<int64_t> scores_4d_shape = {batch_size, num_heads, seq_len_q, seq_len_k};
     scores = autograd::reshape(scores, scores_4d_shape);
 
-    // Scale scores (use Float32 for reduced-precision types)
+    // Scale already folded into Q above (scores now carry the 1/sqrt(d) factor).
     DType score_dtype = needs_attn_upcast ? DType::Float32 : orig_dtype;
-    Tensor scale_tensor = full({1}, static_cast<float>(scale), score_dtype, query.device());
-    Variable scale_var(scale_tensor, false);
-
-    scores = scores * scale_var;
 
     // Apply relative position bias if provided
     // position_bias shape: (num_heads, seq_len_q, seq_len_k) or (1, num_heads, seq_len_q, seq_len_k)
