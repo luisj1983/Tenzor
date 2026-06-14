@@ -12,6 +12,7 @@
 #include <cuda_fp16.h>
 #include <cuda_bf16.h>
 #include <algorithm>
+#include <mutex>
 #include <limits>
 #include <optional>
 #include <stdexcept>

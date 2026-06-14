@@ -105,12 +105,17 @@ public:
         size_t free_mem = 0, total_mem = 0;
         cudaMemGetInfo(&free_mem, &total_mem);
 
-        // Use 10% of free memory for workspace, leaving 90% for model tensors
-        // This allows good algorithm selection while avoiding OOM
-        size_t dynamic_max = free_mem / 10;
+        // Workspace budget for cuDNN algorithm search/selection. The previous
+        // free/10 + 1GB cap was too small: cudnnFindConvolutionForwardAlgorithmEx
+        // only returns algorithms whose workspace fits the budget, so a tight
+        // budget excluded the fastest algos and forced a slower one. On a
+        // Float32 k3s1 @224 conv (Winograd/implicit-GEMM territory) this cost
+        // ~25% vs PyTorch (which allows a larger workspace). Allow up to half of
+        // free memory, capped at 2GB — enough to reach the fast algos while
+        // self-limiting under memory pressure (free shrinks as tensors grow).
+        size_t dynamic_max = free_mem / 2;
 
-        // Cap at 1GB - larger workspaces rarely provide better algorithms
-        constexpr size_t kMaxCap = 1024ULL * 1024 * 1024;  // 1 GB
+        constexpr size_t kMaxCap = 2048ULL * 1024 * 1024;  // 2 GB
         // Minimum 64MB to ensure basic algorithms work
         constexpr size_t kMinWorkspace = 64ULL * 1024 * 1024;  // 64 MB
 
