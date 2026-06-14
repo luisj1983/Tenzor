@@ -560,8 +560,18 @@ static void linear_backward_impl(
     }
 }
 
-auto linear_backward_kernel(const Tensor& grad_output, const Tensor& input,
-                             const Tensor& weight) -> std::vector<Tensor> {
+auto linear_backward_kernel(const Tensor& grad_output_in, const Tensor& input_in,
+                             const Tensor& weight_in) -> std::vector<Tensor> {
+    // The GEMM calls and scalar fallbacks below index the raw buffers as
+    // row-major contiguous. A non-contiguous operand — e.g. the transposed
+    // view an LSTM batch_first path feeds per timestep — would be read with the
+    // wrong strides, silently corrupting grad_weight (grad_input stays correct
+    // because it is written into a fresh contiguous buffer). Contiguize up
+    // front, as PyTorch does before its GEMMs.
+    Tensor grad_output = grad_output_in.is_contiguous() ? grad_output_in : grad_output_in.contiguous();
+    Tensor input = input_in.is_contiguous() ? input_in : input_in.contiguous();
+    Tensor weight = weight_in.is_contiguous() ? weight_in : weight_in.contiguous();
+
     auto in_shape = input.shape();
     auto w_shape = weight.shape();
 
