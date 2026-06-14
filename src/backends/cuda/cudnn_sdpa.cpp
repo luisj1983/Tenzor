@@ -472,8 +472,12 @@ auto cudnn_sdpa_forward(
         case DType::BFloat16: io_dtype = fe::DataType_t::BFLOAT16; break;
         case DType::Float32:
             if (current_sm_arch() >= 100) {
+                // cuDNN FP32 SDPA is broken on Blackwell (sm_120): enabling it
+                // triggers an illegal memory access (verified). Throw so MHA
+                // falls back to the materialized BMM path, which is correct and
+                // — measured — faster than the custom FP32 flash kernel here.
                 throw std::runtime_error(
-                    "cuDNN FP32 SDPA not yet stable on Blackwell — falling through to BMM");
+                    "cuDNN FP32 SDPA not stable on Blackwell — falling through to BMM");
             }
             io_dtype = fe::DataType_t::FLOAT;
             break;
