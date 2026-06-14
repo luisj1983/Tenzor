@@ -1404,6 +1404,61 @@ void cudnn_rnn_unpack_weight_grads(
                  stream);
 }
 
+// ---- Fused GRU training forward/backward wrappers (single-layer,
+// unidirectional). Tensor-only signatures so the registry TU can call them
+// without the cudnnForwardMode_t mangling issue. h state is (batch, hidden)
+// on the boundary (matching the GRUForward contract) and reshaped internally.
+// Mirrors the LSTM wrappers; GRU has no cell state. ----
+std::vector<Tensor> gru_train_forward_cudnn(
+    const Tensor& input, const Tensor& h0,
+    const Tensor& W_ih, const Tensor& W_hh,
+    const Tensor& bias_ih, const Tensor& bias_hh) {
+    const int64_t batch = h0.shape()[0];
+    const int64_t hidden = h0.shape()[1];
+    auto guard = CUDAStreamPool::instance().acquire_guard(input.device().index);
+    cudaStream_t stream = guard.get();
+    Tensor hx = h0.contiguous().reshape({1, batch, hidden});
+    Tensor b_ih = bias_ih.numel() > 0 ? bias_ih : Tensor{};
+    Tensor b_hh = bias_hh.numel() > 0 ? bias_hh : Tensor{};
+    auto out = cudnn_gru_forward(
+        input.contiguous(), hx, {W_ih}, {W_hh}, {b_ih}, {b_hh},
+        hidden, /*num_layers=*/1, /*bidirectional=*/false, /*dropout=*/0.0f,
+        CUDNN_FWD_MODE_TRAINING, stream);
+    return { out.output, out.hy.reshape({batch, hidden}),
+             out.reserve_space, out.weight_space };
+}
+
+std::vector<Tensor> gru_backward_cudnn_wrap(
+    const Tensor& grad_out, const Tensor& grad_hy,
+    const Tensor& input, const Tensor& h0, const Tensor& output,
+    const Tensor& weight_space, const Tensor& reserve_space,
+    const Tensor& W_ih, const Tensor& W_hh,
+    const Tensor& bias_ih, const Tensor& bias_hh) {
+    const int64_t batch = h0.shape()[0];
+    const int64_t hidden = h0.shape()[1];
+    const int64_t input_size = W_ih.shape()[1];
+    auto guard = CUDAStreamPool::instance().acquire_guard(input.device().index);
+    cudaStream_t stream = guard.get();
+    Tensor hx = h0.contiguous().reshape({1, batch, hidden});
+    // Absent grad uses a 0-size INITIALIZED tensor (run_backward calls .numel()).
+    Tensor zero0({0}, grad_out.dtype(), grad_out.device());
+    Tensor ghy = grad_hy.numel() > 0 ? grad_hy.contiguous().reshape({1, batch, hidden}) : zero0;
+    auto grads = cudnn_gru_backward(
+        grad_out.contiguous(), ghy, input.contiguous(), hx,
+        output.contiguous(), weight_space, reserve_space,
+        hidden, /*num_layers=*/1, /*bidirectional=*/false, /*dropout=*/0.0f, stream);
+    std::vector<Tensor> gW_ih, gW_hh, gb_ih, gb_hh;
+    cudnn_rnn_unpack_weight_grads(grads.grad_weight_space, input_size, hidden,
+                                  /*num_layers=*/1, /*bidirectional=*/false, CUDNN_GRU,
+                                  gW_ih, gW_hh, gb_ih, gb_hh, stream);
+    Tensor grad_hx = grads.grad_hx.numel() ? grads.grad_hx.reshape({batch, hidden}) : Tensor{};
+    return { grads.grad_input, grad_hx,
+             gW_ih.empty() ? Tensor{} : gW_ih[0],
+             gW_hh.empty() ? Tensor{} : gW_hh[0],
+             (bias_ih.numel() > 0 && !gb_ih.empty()) ? gb_ih[0] : Tensor{},
+             (bias_hh.numel() > 0 && !gb_hh.empty()) ? gb_hh[0] : Tensor{} };
+}
+
 }  // namespace cuda
 }  // namespace tenzor
 

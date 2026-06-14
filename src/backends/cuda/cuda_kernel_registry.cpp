@@ -312,6 +312,17 @@ namespace cuda {
         const Tensor& weight_space, const Tensor& reserve_space,
         const Tensor& W_ih, const Tensor& W_hh,
         const Tensor& bias_ih, const Tensor& bias_hh);
+    // Fused cuDNN GRU training forward/backward (single-layer, unidirectional).
+    std::vector<Tensor> gru_train_forward_cudnn(
+        const Tensor& input, const Tensor& h0,
+        const Tensor& W_ih, const Tensor& W_hh,
+        const Tensor& bias_ih, const Tensor& bias_hh);
+    std::vector<Tensor> gru_backward_cudnn_wrap(
+        const Tensor& grad_out, const Tensor& grad_hy,
+        const Tensor& input, const Tensor& h0, const Tensor& output,
+        const Tensor& weight_space, const Tensor& reserve_space,
+        const Tensor& W_ih, const Tensor& W_hh,
+        const Tensor& bias_ih, const Tensor& bias_hh);
 #endif
 
     // Vision/Interpolation operations
@@ -3993,6 +4004,22 @@ void register_cuda_kernels(BackendDispatchTable& table) {
         return cuda::lstm_backward_cudnn_wrap(
             inputs[0], inputs[1], inputs[2], inputs[3], inputs[4], inputs[5],
             inputs[6], inputs[7], inputs[8], inputs[9], inputs[10], inputs[11], inputs[12]);
+    });
+    // Fused cuDNN GRU training forward.
+    // inputs: [input, h0, W_ih, W_hh, bias_ih, bias_hh]
+    // outputs: [output, hy, reserve_space, weight_space]
+    table.register_kernel(OpId::GRUCudnnTrainForward, [](std::span<const Tensor> inputs, const OpAttributes&) {
+        return cuda::gru_train_forward_cudnn(inputs[0], inputs[1], inputs[2],
+                                             inputs[3], inputs[4], inputs[5]);
+    });
+    // Fused cuDNN GRU backward.
+    // inputs: [grad_out, grad_hy, input, h0, output, weight_space, reserve_space,
+    //          W_ih, W_hh, bias_ih, bias_hh]
+    // outputs: [grad_input, grad_hx, grad_W_ih, grad_W_hh, grad_b_ih, grad_b_hh]
+    table.register_kernel(OpId::GRUCudnnBackward, [](std::span<const Tensor> inputs, const OpAttributes&) {
+        return cuda::gru_backward_cudnn_wrap(
+            inputs[0], inputs[1], inputs[2], inputs[3], inputs[4], inputs[5],
+            inputs[6], inputs[7], inputs[8], inputs[9], inputs[10]);
     });
 #endif
 

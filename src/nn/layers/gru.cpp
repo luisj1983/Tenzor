@@ -14,6 +14,7 @@
 #include <sstream>
 #include <iostream>
 #include <mutex>
+#include <cstdlib>
 
 namespace tenzor::nn {
 
@@ -198,6 +199,47 @@ GRU::GRU(int64_t input_size, int64_t hidden_size, int64_t num_layers,
         register_module("dropout", dropout_);
     }
 }
+
+// Backward node for the fused cuDNN GRU training path. GRU has no cell state,
+// so output is the only node that needs a grad_fn; h_n is an autograd-aware
+// slice of output (its gradient routes into output's last timestep, and cuDNN
+// sums dy[last]+dhy internally). Mirrors CudnnLSTMTrainBackward.
+class CudnnGRUTrainBackward : public Function {
+public:
+    CudnnGRUTrainBackward(bool has_bias_ih, bool has_bias_hh,
+                          std::vector<Tensor> saved)
+        : has_bias_ih_(has_bias_ih), has_bias_hh_(has_bias_hh) {
+        save_for_backward(std::move(saved));
+    }
+    auto forward(std::vector<Variable>) -> std::vector<Variable> override {
+        throw std::runtime_error("CudnnGRUTrainBackward::forward should not be called");
+    }
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override {
+        auto sv = saved_tensors();
+        // saved: [input,h0,W_ih,W_hh,b_ih,b_hh,output,weight_space,reserve_space]
+        const Tensor& input = sv[0]; const Tensor& h0 = sv[1];
+        const Tensor& W_ih = sv[2]; const Tensor& W_hh = sv[3];
+        const Tensor& b_ih = sv[4]; const Tensor& b_hh = sv[5];
+        const Tensor& output = sv[6]; const Tensor& weight_space = sv[7];
+        const Tensor& reserve_space = sv[8];
+        const Tensor& g = grad_outputs[0];
+        Tensor zero0 = empty({0}, output.dtype(), output.device());
+        std::vector<Tensor> ins = {g, zero0, input, h0, output,
+                                   weight_space, reserve_space,
+                                   W_ih, W_hh, b_ih, b_hh};
+        auto grads = dispatch<OpId::GRUCudnnBackward>(ins);
+        // grads: [grad_input,grad_hx,grad_W_ih,grad_W_hh,grad_b_ih,grad_b_hh]
+        // Order must mirror the forward wiring of next_functions/input_variables:
+        // [input, W_ih, W_hh, (b_ih if present), (b_hh if present)].
+        std::vector<Tensor> result = {grads[0], grads[2], grads[3]};
+        if (has_bias_ih_) result.push_back(grads[4]);
+        if (has_bias_hh_) result.push_back(grads[5]);
+        return result;
+    }
+private:
+    bool has_bias_ih_;
+    bool has_bias_hh_;
+};
 
 auto GRU::forward(const Variable& input, const Variable& hx,
                   const Tensor& lengths)
@@ -421,6 +463,90 @@ auto GRU::forward(const Variable& input, const Variable& hx,
         Variable h_final(stack(std::span<const Tensor>(final_h_states), 0), false);
 
         return {output, h_final};
+    }
+
+    // =========================================================================
+    // FUSED cuDNN TRAINING PATH (unidirectional, Float32/CUDA). Verified vs
+    // PyTorch. Enabled by default; set TENZOR_DISABLE_FUSED_GRU_TRAIN to fall
+    // back to the per-timestep autograd loop. Multi-layer chains the verified
+    // single-layer fused step per layer (output_var feeds the next layer);
+    // h_n is an autograd-aware slice of each layer's output. Mirrors the LSTM
+    // fused training path; GRU has no cell state.
+    // =========================================================================
+    if (std::getenv("TENZOR_DISABLE_FUSED_GRU_TRAIN") == nullptr &&
+        is_op_supported(OpId::GRUCudnnTrainForward, input.device().type) &&
+        input.dtype() == DType::Float32 &&
+        !bidirectional_ &&
+        tenzor::is_grad_enabled()) {
+
+        const int64_t kb = x.shape()[1];
+        std::vector<Variable> h_n_layers;
+        h_n_layers.reserve(static_cast<size_t>(num_layers_));
+
+        Variable layer_in = x;  // (seq, batch, feat) seq-major; later (seq, batch, hidden)
+        for (int64_t layer = 0; layer < num_layers_; ++layer) {
+            auto& cell = forward_cells_[layer];
+            auto W_ih_var = cell->weight_ih()->weight();
+            auto W_hh_var = cell->weight_hh()->weight();
+            const bool has_bias_ih = cell->weight_ih()->has_bias();
+            const bool has_bias_hh = cell->weight_hh()->has_bias();
+            std::shared_ptr<Variable> b_ih_var, b_hh_var;
+            Tensor b_ih_t, b_hh_t;
+            if (has_bias_ih) {
+                b_ih_var = cell->weight_ih()->bias();
+                b_ih_t = b_ih_var->tensor();
+            } else {
+                b_ih_t = empty({0}, DType::Float32, input.device());
+            }
+            if (has_bias_hh) {
+                b_hh_var = cell->weight_hh()->bias();
+                b_hh_t = b_hh_var->tensor();
+            } else {
+                b_hh_t = empty({0}, DType::Float32, input.device());
+            }
+
+            Tensor x_t = layer_in.tensor().contiguous();  // (seq, batch, in)
+            Tensor h0_t = h.tensor().slice(0, layer, layer + 1)
+                              .reshape({kb, hidden_size_}).contiguous();
+
+            std::vector<Tensor> fwd_in = {x_t, h0_t,
+                                          W_ih_var->tensor(), W_hh_var->tensor(),
+                                          b_ih_t, b_hh_t};
+            auto outs = dispatch<OpId::GRUCudnnTrainForward>(fwd_in);
+            Tensor output_t = outs[0];      // (seq, batch, hidden)
+            Tensor reserve  = outs[2];
+            Tensor wspace   = outs[3];
+
+            std::vector<Tensor> saved = {x_t, h0_t,
+                                         W_ih_var->tensor(), W_hh_var->tensor(),
+                                         b_ih_t, b_hh_t, output_t, wspace, reserve};
+
+            std::vector<std::shared_ptr<Function>> next_funcs = {
+                layer_in.grad_fn(), W_ih_var->grad_fn(), W_hh_var->grad_fn()};
+            std::vector<Variable> in_vars = {layer_in, *W_ih_var, *W_hh_var};
+            if (has_bias_ih) {
+                next_funcs.push_back(b_ih_var->grad_fn());
+                in_vars.push_back(*b_ih_var);
+            }
+            if (has_bias_hh) {
+                next_funcs.push_back(b_hh_var->grad_fn());
+                in_vars.push_back(*b_hh_var);
+            }
+
+            auto gfn_out = std::make_shared<CudnnGRUTrainBackward>(has_bias_ih, has_bias_hh, saved);
+            Variable output_var(output_t, true);
+            gfn_out->set_next_functions(next_funcs);
+            gfn_out->set_input_variables(in_vars);
+            output_var.set_grad_fn(gfn_out);
+
+            h_n_layers.push_back(::tenzor::slice(output_var, 0, seq_len - 1, seq_len));
+            layer_in = output_var;
+        }
+
+        Variable output_var = layer_in;
+        Variable output_out = batch_first_ ? ::tenzor::transpose(output_var, 0, 1) : output_var;
+        Variable h_n = num_layers_ == 1 ? h_n_layers[0] : ::tenzor::cat(h_n_layers, 0);
+        return {output_out, h_n};
     }
 
     // =========================================================================
