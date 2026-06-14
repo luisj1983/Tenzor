@@ -201,8 +201,14 @@ TEST_P(EmbeddingTest, OutOfRangeIndex) {
 
     auto input = Variable(input_data, false);
 
-    // Should throw exception
-    EXPECT_THROW(embedding->forward(input), std::out_of_range) << "Failed on " << device.to_string();
+    // Should throw on the out-of-range id. CPU validates inline (throws from
+    // forward); CUDA detects on-device and raises the catchable error at the
+    // next device synchronization (async-error semantics) — so wrap both the
+    // forward and a sync in the EXPECT_THROW.
+    EXPECT_THROW({
+        auto out = embedding->forward(input);
+        device.synchronize();
+    }, std::out_of_range) << "Failed on " << device.to_string();
 }
 
 TEST_P(EmbeddingTest, WeightAccess) {

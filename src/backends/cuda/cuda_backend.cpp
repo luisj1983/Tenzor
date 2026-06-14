@@ -24,6 +24,11 @@
 
 namespace tenzor {
 
+// Defined in kernels/indexing.cu. Surfaces a deferred index-out-of-range error
+// (from the embedding forward's async OOB flag) as a catchable std::out_of_range
+// at the next device synchronization. No-op when no OOB occurred.
+namespace cuda { void cuda_drain_index_errors(); }
+
 // ============================================================================
 // Runtime cuDNN Availability Detection
 // ============================================================================
@@ -520,6 +525,9 @@ public:
     auto synchronize(int32_t device_id) -> void override {
         cudaSetDevice(device_id);
         cudaDeviceSynchronize();
+        // Surface any deferred index-out-of-range error now that all device
+        // work (incl. the embedding OOB flag copy) has completed.
+        cuda::cuda_drain_index_errors();
     }
 
     auto create_stream(int32_t device_id) -> StreamHandle override {
@@ -536,6 +544,7 @@ public:
 
     auto synchronize_stream(StreamHandle stream) -> void override {
         cudaStreamSynchronize(static_cast<cudaStream_t>(stream));
+        cuda::cuda_drain_index_errors();
     }
 
     auto create_event(int32_t device_id, bool enable_timing = true) -> EventHandle override {

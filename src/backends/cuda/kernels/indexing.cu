@@ -21,6 +21,8 @@
 #include "cuda_launch_utils.cuh"
 #include <stdexcept>
 #include <vector>
+#include <mutex>
+#include <unordered_map>
 #include <cub/cub.cuh>
 #include "tenzor/utils/config.hpp"
 #include <thrust/iterator/counting_iterator.h>
@@ -1435,6 +1437,76 @@ auto where_kernel(const Tensor& condition, const Tensor& x, const Tensor& y,
 }
 
 // ============================================================================
+// Deferred index-out-of-range error flag (per device).
+//
+// Bounds-checked index kernels (embedding) write a device flag on OOB and the
+// kernel itself stays memory-safe (writes 0 for the bad row, never reads OOB).
+// Instead of a blocking cudaStreamSynchronize per call to surface the throw
+// — which dominated runtime for these tiny kernels and which PyTorch doesn't
+// pay (it does no bounds check at all) — we copy the flag to pinned host memory
+// asynchronously and let the error surface at the next device synchronization
+// (`cuda_drain_index_errors`, called from the backend's synchronize()). This
+// matches CUDA/PyTorch async-error semantics: the kernel is safe; the catchable
+// std::out_of_range is raised at the next sync rather than inline.
+// ============================================================================
+namespace {
+struct IndexErrorFlag {
+    int* d_flag = nullptr;   // device-side, set by the kernel on OOB
+    int* h_flag = nullptr;   // pinned host mirror, updated async after each call
+};
+std::mutex g_index_err_mutex;
+std::unordered_map<int, IndexErrorFlag> g_index_err_flags;
+
+IndexErrorFlag& get_index_error_flag(int device) {
+    // caller holds g_index_err_mutex
+    auto& f = g_index_err_flags[device];
+    if (!f.d_flag) {
+        int prev = 0; cudaGetDevice(&prev);
+        cudaSetDevice(device);
+        cudaMalloc(&f.d_flag, sizeof(int));
+        cudaMemset(f.d_flag, 0, sizeof(int));
+        cudaMallocHost(&f.h_flag, sizeof(int));
+        *f.h_flag = 0;
+        cudaSetDevice(prev);
+    }
+    return f;
+}
+}  // namespace
+
+// Enqueue (no sync) the async copy of the device OOB flag to its pinned host
+// mirror on `stream`, after a bounds-checked kernel launch on the same stream.
+void record_index_error_async(int device, cudaStream_t stream) {
+    std::lock_guard<std::mutex> lk(g_index_err_mutex);
+    auto& f = get_index_error_flag(device);
+    cudaMemcpyAsync(f.h_flag, f.d_flag, sizeof(int), cudaMemcpyDeviceToHost, stream);
+}
+
+// Surface any pending out-of-range error as a catchable exception. Safe to call
+// only at a point where the relevant stream work has completed (the backend
+// calls it right after cudaDeviceSynchronize), so the pinned host mirror is
+// valid. Resets the flags before throwing so the next op starts clean.
+void cuda_drain_index_errors() {
+    int bad_device = -1;
+    {
+        std::lock_guard<std::mutex> lk(g_index_err_mutex);
+        for (auto& [dev, f] : g_index_err_flags) {
+            if (f.h_flag && *f.h_flag != 0) {
+                *f.h_flag = 0;
+                int prev = 0; cudaGetDevice(&prev);
+                cudaSetDevice(dev);
+                cudaMemset(f.d_flag, 0, sizeof(int));
+                cudaSetDevice(prev);
+                bad_device = dev;
+                break;
+            }
+        }
+    }
+    if (bad_device >= 0) {
+        throw std::out_of_range("Embedding index out of range (detected at synchronization)");
+    }
+}
+
+// ============================================================================
 // embedding kernel (lookup table for token IDs)
 // ============================================================================
 
@@ -1497,12 +1569,19 @@ auto embedding_kernel(const Tensor& weight, const Tensor& indices,
         throw std::invalid_argument("embedding: indices must be Int32 or Int64");
     }
 
-    // 1-int device flag for device-side OOB detection. (Measured: neither a
-    // persistent thread-local flag nor cudaMallocAsync beat this simple
-    // CudaBuffer here — the residual overhead vs PyTorch is the mandatory sync
-    // for the catchable OOB throw, not the allocation.)
-    CudaBuffer error_buf(sizeof(int));
-    CUDA_CHECK(cudaMemsetAsync(error_buf.as<int>(), 0, sizeof(int), stream));
+    // Persistent per-device device-side OOB flag. The kernel sets it on an
+    // out-of-range id (and writes a zero row — no illegal access). We do NOT
+    // synchronize here: the flag is async-copied to pinned host below and the
+    // catchable std::out_of_range is raised at the next device sync via
+    // cuda_drain_index_errors(). This removes the per-call cudaMalloc/cudaFree
+    // (the old CudaBuffer) AND the blocking cudaStreamSynchronize, matching
+    // PyTorch's no-per-call-sync forward.
+    const int err_dev = weight.device().index;
+    int* err_flag = nullptr;
+    {
+        std::lock_guard<std::mutex> lk(g_index_err_mutex);
+        err_flag = get_index_error_flag(err_dev).d_flag;
+    }
 
     #define LAUNCH_EMBEDDING(T) \
         if (idx_is_int32) { \
@@ -1510,14 +1589,14 @@ auto embedding_kernel(const Tensor& weight, const Tensor& indices,
                 embedding_kernel_impl<T, int32_t>, total_elements); \
             embedding_kernel_impl<T, int32_t><<<grid_size, block_size, 0, stream>>>( \
                 weight.data<T>(), indices.data<int32_t>(), output.data<T>(), \
-                num_indices, embedding_dim, num_embeddings, error_buf.as<int>()); \
+                num_indices, embedding_dim, num_embeddings, err_flag); \
             CUDA_CHECK(cudaGetLastError()); \
         } else { \
             auto [grid_size, block_size] = optimal_launch_config( \
                 embedding_kernel_impl<T, int64_t>, total_elements); \
             embedding_kernel_impl<T, int64_t><<<grid_size, block_size, 0, stream>>>( \
                 weight.data<T>(), indices.data<int64_t>(), output.data<T>(), \
-                num_indices, embedding_dim, num_embeddings, error_buf.as<int>()); \
+                num_indices, embedding_dim, num_embeddings, err_flag); \
             CUDA_CHECK(cudaGetLastError()); \
         }
 
@@ -1532,7 +1611,7 @@ auto embedding_kernel(const Tensor& weight, const Tensor& indices,
                     reinterpret_cast<const __half*>(weight.data_ptr()),
                     indices.data<int32_t>(),
                     reinterpret_cast<__half*>(output.data_ptr()),
-                    num_indices, embedding_dim, num_embeddings, error_buf.as<int>());
+                    num_indices, embedding_dim, num_embeddings, err_flag);
                 CUDA_CHECK(cudaGetLastError());
             } else {
                 auto [grid_size, block_size] = optimal_launch_config(
@@ -1541,7 +1620,7 @@ auto embedding_kernel(const Tensor& weight, const Tensor& indices,
                     reinterpret_cast<const __half*>(weight.data_ptr()),
                     indices.data<int64_t>(),
                     reinterpret_cast<__half*>(output.data_ptr()),
-                    num_indices, embedding_dim, num_embeddings, error_buf.as<int>());
+                    num_indices, embedding_dim, num_embeddings, err_flag);
                 CUDA_CHECK(cudaGetLastError());
             }
             break;
@@ -1553,7 +1632,7 @@ auto embedding_kernel(const Tensor& weight, const Tensor& indices,
                     reinterpret_cast<const __nv_bfloat16*>(weight.data_ptr()),
                     indices.data<int32_t>(),
                     reinterpret_cast<__nv_bfloat16*>(output.data_ptr()),
-                    num_indices, embedding_dim, num_embeddings, error_buf.as<int>());
+                    num_indices, embedding_dim, num_embeddings, err_flag);
                 CUDA_CHECK(cudaGetLastError());
             } else {
                 auto [grid_size, block_size] = optimal_launch_config(
@@ -1562,7 +1641,7 @@ auto embedding_kernel(const Tensor& weight, const Tensor& indices,
                     reinterpret_cast<const __nv_bfloat16*>(weight.data_ptr()),
                     indices.data<int64_t>(),
                     reinterpret_cast<__nv_bfloat16*>(output.data_ptr()),
-                    num_indices, embedding_dim, num_embeddings, error_buf.as<int>());
+                    num_indices, embedding_dim, num_embeddings, err_flag);
                 CUDA_CHECK(cudaGetLastError());
             }
             break;
@@ -1574,17 +1653,11 @@ auto embedding_kernel(const Tensor& weight, const Tensor& indices,
 
     CUDA_CHECK(cudaGetLastError());
 
-    // Read the out-of-bounds flag once (cheap 1-int D2H) and surface a catchable
-    // exception, matching index_select. This is the only host sync on the path.
-    int host_error = 0;
-    CUDA_CHECK(cudaMemcpyAsync(&host_error, error_buf.as<int>(), sizeof(int),
-                               cudaMemcpyDeviceToHost, stream));
-    CUDA_CHECK(cudaStreamSynchronize(stream));
-    if (host_error) {
-        throw std::out_of_range(
-            "Embedding index out of range [0, " +
-            std::to_string(num_embeddings) + ")");
-    }
+    // Async-copy the OOB flag to its pinned host mirror on the same stream and
+    // return WITHOUT synchronizing. A pending out-of-range id is raised as a
+    // catchable std::out_of_range at the next device sync via
+    // cuda_drain_index_errors() (CUDA async-error semantics).
+    record_index_error_async(err_dev, stream);
 
     return output;
 }
