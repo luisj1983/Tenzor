@@ -247,6 +247,14 @@ auto parse_tval_payload(const uint8_t* buffer, size_t size)
     for (uint32_t i = 0; i < count; ++i) {
         TensorValue tv;
         read_pod(buffer, size, offset, tv.tensor_id);
+        // tensor_id is a signed int16_t read verbatim from an untrusted file.
+        // A negative id is invalid and, if it reached index_tensor_values or
+        // any table indexing, would wrap a static_cast<size_t> into a huge
+        // value (OOB). Reject up front at parse time.
+        if (tv.tensor_id < 0) {
+            throw std::runtime_error(
+                "TZLiteReader: negative tensor_id in TVAL section");
+        }
         uint8_t src = 0;
         read_pod(buffer, size, offset, src);
         tv.source = static_cast<TensorSource>(src);
@@ -287,11 +295,25 @@ auto parse_iosp_payload(const uint8_t* buffer, size_t size)
     uint32_t ni = 0;
     read_pod(buffer, size, offset, ni);
     out.first.resize(ni);
-    for (uint32_t i = 0; i < ni; ++i) read_pod(buffer, size, offset, out.first[i]);
+    for (uint32_t i = 0; i < ni; ++i) {
+        read_pod(buffer, size, offset, out.first[i]);
+        // I/O ids index the runtime tensor table; a negative id wraps the
+        // static_cast<size_t> lookup into a huge value (OOB). Reject here.
+        if (out.first[i] < 0) {
+            throw std::runtime_error(
+                "TZLiteReader: negative input tensor_id in IOSP section");
+        }
+    }
     uint32_t no = 0;
     read_pod(buffer, size, offset, no);
     out.second.resize(no);
-    for (uint32_t i = 0; i < no; ++i) read_pod(buffer, size, offset, out.second[i]);
+    for (uint32_t i = 0; i < no; ++i) {
+        read_pod(buffer, size, offset, out.second[i]);
+        if (out.second[i] < 0) {
+            throw std::runtime_error(
+                "TZLiteReader: negative output tensor_id in IOSP section");
+        }
+    }
     return out;
 }
 
@@ -339,7 +361,11 @@ auto parse_meta_payload(const uint8_t* buffer, size_t size)
 auto build_mmpl_payload(const MmplPlan& plan) -> std::vector<uint8_t> {
     std::vector<uint8_t> out;
     out.reserve(16 + plan.pool_sizes.size() * 8 + plan.placements.size() * 16);
-    append_pod<uint8_t>(out, static_cast<uint8_t>(plan.alignment));
+    // Serialise alignment at full uint64 width. Previously this truncated to
+    // uint8_t, silently corrupting any alignment >= 256 (256->0->64, 320->64),
+    // so the arena was allocated with a different alignment than the placement
+    // offsets were computed against.
+    append_pod<uint64_t>(out, plan.alignment);
     append_pod<uint32_t>(out, static_cast<uint32_t>(plan.pool_sizes.size()));
     for (uint64_t s : plan.pool_sizes) append_pod(out, s);
     append_pod<uint32_t>(out, static_cast<uint32_t>(plan.placements.size()));
@@ -354,7 +380,7 @@ auto build_mmpl_payload(const MmplPlan& plan) -> std::vector<uint8_t> {
 auto parse_mmpl_payload(const uint8_t* buffer, size_t size) -> MmplPlan {
     MmplPlan plan;
     size_t offset = 0;
-    uint8_t alignment = 0;
+    uint64_t alignment = 0;
     read_pod(buffer, size, offset, alignment);
     plan.alignment = alignment ? alignment : 64;
     uint32_t num_pools = 0;
@@ -369,6 +395,12 @@ auto parse_mmpl_payload(const uint8_t* buffer, size_t size) -> MmplPlan {
     for (uint32_t i = 0; i < num_placements; ++i) {
         auto& p = plan.placements[i];
         read_pod(buffer, size, offset, p.tensor_id);
+        // Placement tensor_ids index the planned arena; a negative id wraps a
+        // static_cast<size_t> into a huge value (OOB). Reject at parse time.
+        if (p.tensor_id < 0) {
+            throw std::runtime_error(
+                "TZLiteReader: negative tensor_id in MMPL placement");
+        }
         read_pod(buffer, size, offset, p.pool_index);
         read_pod(buffer, size, offset, p.offset);
     }

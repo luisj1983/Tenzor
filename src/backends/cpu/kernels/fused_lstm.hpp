@@ -26,6 +26,7 @@
 #include <algorithm>
 #include <limits>
 #include <atomic>
+#include <optional>
 
 #include "buffer_pool.hpp"
 #include "tenzor/utils/log.hpp"
@@ -694,7 +695,12 @@ inline void lstm_forward_bidirectional(
     // thread for the duration of the parallel region so total = 2 * 1 = 2 threads
     // (the two OMP sections) instead of 2 * N.
     {
-        MklLocalThreads _mkl_guard(1);
+        // Only throttle MKL when the two sections actually run concurrently
+        // (batch >= 2). For batch == 1 the sections run serially, so pinning MKL
+        // to 1 thread would needlessly single-thread the dominant GEMMs — leave
+        // MKL at its default thread count in that case.
+        std::optional<MklLocalThreads> _mkl_guard;
+        if (batch >= 2) _mkl_guard.emplace(1);
     #pragma omp parallel sections if(batch >= 2)
     {
         #pragma omp section

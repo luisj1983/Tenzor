@@ -37,7 +37,7 @@ void main() {
             res = val_a * val_b;
             break;
         case 3: // div
-            res = val_a / val_b;
+            res = (val_b != int64_t(0)) ? (val_a / val_b) : int64_t(0);
             break;
         case 7: // neg (unary)
             res = -val_a;

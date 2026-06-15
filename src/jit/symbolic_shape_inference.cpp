@@ -299,23 +299,51 @@ auto SymbolicShapeInference::infer_reduction(const Node* node) -> std::vector<Sy
 
     auto sym_shape = input_shapes[0];
 
-    if (node->has_attr("dim")) {
-        auto dim = node->get_int_attr("dim");
-        auto keepdim = node->get_bool_attr("keepdim");
+    auto keepdim = node->get_bool_attr("keepdim");
+    auto rank = static_cast<int64_t>(sym_shape.rank());
 
+    if (node->has_int_attr("dim")) {
+        // Single-axis reduction recorded via the scalar "dim" attr.
+        auto dim = node->get_int_attr("dim");
         if (dim < 0) {
-            dim += static_cast<int64_t>(sym_shape.rank());
+            dim += rank;
         }
 
-        if (dim >= 0 && dim < static_cast<int64_t>(sym_shape.rank())) {
+        if (dim >= 0 && dim < rank) {
             if (keepdim) {
                 sym_shape[static_cast<size_t>(dim)] = SymbolicDim::concrete(1);
             } else {
                 sym_shape.erase(static_cast<size_t>(dim));
             }
         }
+    } else if (node->has_vec_attr("dims")) {
+        // Multi-axis reduction: the tracing interceptor emits the axis list as
+        // a vec attr "dims" (copy_int_list_to_vec(AttrKey::Dims,"dims")) with no
+        // scalar "dim". Previously this fell into the else branch below and was
+        // mis-inferred as a full reduce-to-scalar. Normalize each axis and
+        // either set it to 1 (keepdim) or erase it. Erase from highest index to
+        // lowest so earlier erasures don't shift the indices still to remove.
+        auto dims = node->get_vec_attr("dims");
+        std::vector<int64_t> norm;
+        norm.reserve(dims.size());
+        for (auto d : dims) {
+            if (d < 0) d += rank;
+            if (d >= 0 && d < rank) norm.push_back(d);
+        }
+        std::sort(norm.begin(), norm.end());
+        norm.erase(std::unique(norm.begin(), norm.end()), norm.end());
+
+        if (keepdim) {
+            for (auto d : norm) {
+                sym_shape[static_cast<size_t>(d)] = SymbolicDim::concrete(1);
+            }
+        } else {
+            for (auto it = norm.rbegin(); it != norm.rend(); ++it) {
+                sym_shape.erase(static_cast<size_t>(*it));
+            }
+        }
     } else {
-        // Reduce all dimensions: scalar output
+        // No "dim" and no "dims": full reduction over all axes -> scalar output.
         sym_shape = SymbolicShape();
     }
 
@@ -333,18 +361,31 @@ auto SymbolicShapeInference::infer_transpose(const Node* node) -> std::vector<Sy
     }
 
     auto sym_shape = input_shapes[0];
-    auto dim0 = node->get_int_attr("dim0");
-    auto dim1 = node->get_int_attr("dim1");
+    auto rank = static_cast<int64_t>(sym_shape.rank());
 
-    if (dim0 < 0) {
-        dim0 += static_cast<int64_t>(sym_shape.rank());
-    }
-    if (dim1 < 0) {
-        dim1 += static_cast<int64_t>(sym_shape.rank());
+    int64_t dim0;
+    int64_t dim1;
+    if (node->has_int_attr("dim0") && node->has_int_attr("dim1")) {
+        dim0 = node->get_int_attr("dim0");
+        dim1 = node->get_int_attr("dim1");
+        if (dim0 < 0) dim0 += rank;
+        if (dim1 < 0) dim1 += rank;
+    } else {
+        // The tracing interceptor copies AttrKey::Dim->"dim" but does not emit
+        // the "dim0"/"dim1" string keys, so a traced Transpose node lacks them.
+        // get_int_attr would silently return 0 for both, making the swap a
+        // no-op (the symbolic shape would equal the input — transpose not
+        // reflected) and corrupting downstream matmul/linear shape checks.
+        // Fall back to swapping the last two dims, matching the concrete
+        // graph executor and MLIR lowering (lowering.cpp:1251-1257).
+        if (rank < 2) {
+            return {std::move(sym_shape)};
+        }
+        dim0 = rank - 2;
+        dim1 = rank - 1;
     }
 
-    if (dim0 >= 0 && dim0 < static_cast<int64_t>(sym_shape.rank()) &&
-        dim1 >= 0 && dim1 < static_cast<int64_t>(sym_shape.rank())) {
+    if (dim0 >= 0 && dim0 < rank && dim1 >= 0 && dim1 < rank) {
         std::swap(sym_shape[static_cast<size_t>(dim0)],
                   sym_shape[static_cast<size_t>(dim1)]);
     }

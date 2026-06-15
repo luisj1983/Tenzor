@@ -738,93 +738,10 @@ __global__ void masked_fill_kernel(
     }
 }
 
-auto masked_fill_hip(
-    Tensor& input,
-    const Tensor& mask,
-    float value
-) -> Tensor {
-
-    Tensor output = input.clone();
-
-    int64_t total_elements = output.numel();
-    int threads = 256;
-    int blocks = (total_elements + threads - 1) / threads;
-
-    if (output.dtype() == DType::Float32) {
-        hipLaunchKernelGGL(masked_fill_kernel<float>,
-            dim3(blocks), dim3(threads), 0, 0,
-            output.data<float>(),
-            mask.data<bool>(),
-            static_cast<float>(value),
-            total_elements
-        );
-        HIP_POST_LAUNCH_CHECK();
-    } else if (output.dtype() == DType::Float64) {
-        hipLaunchKernelGGL(masked_fill_kernel<double>,
-            dim3(blocks), dim3(threads), 0, 0,
-            output.data<double>(),
-            mask.data<bool>(),
-            static_cast<double>(value),
-            total_elements
-        );
-        HIP_POST_LAUNCH_CHECK();
-    } else if (output.dtype() == DType::Int32) {
-        hipLaunchKernelGGL(masked_fill_kernel<int32_t>,
-            dim3(blocks), dim3(threads), 0, 0,
-            output.data<int32_t>(),
-            mask.data<bool>(),
-            static_cast<int32_t>(value),
-            total_elements
-        );
-        HIP_POST_LAUNCH_CHECK();
-    } else if (output.dtype() == DType::Int64) {
-        hipLaunchKernelGGL(masked_fill_kernel<int64_t>,
-            dim3(blocks), dim3(threads), 0, 0,
-            output.data<int64_t>(),
-            mask.data<bool>(),
-            static_cast<int64_t>(value),
-            total_elements
-        );
-        HIP_POST_LAUNCH_CHECK();
-    } else if (output.dtype() == DType::Float16) {
-        hipLaunchKernelGGL(masked_fill_kernel<__half>,
-            dim3(blocks), dim3(threads), 0, 0,
-            reinterpret_cast<__half*>(output.data<Float16>()),
-            mask.data<bool>(),
-            tenzor::rocm::safe_f2h(static_cast<float>(value)),
-            total_elements
-        );
-        HIP_POST_LAUNCH_CHECK();
-    } else if (output.dtype() == DType::BFloat16) {
-        hipLaunchKernelGGL(masked_fill_kernel<hip_bfloat16>,
-            dim3(blocks), dim3(threads), 0, 0,
-            reinterpret_cast<hip_bfloat16*>(output.data<BFloat16>()),
-            mask.data<bool>(),
-            // S.10: RNE-round so a Float64 user-supplied fill value doesn't
-            // truncate its low mantissa silently.
-            tenzor::rocm::f32_to_bf16_rne(static_cast<float>(value)),
-            total_elements
-        );
-        HIP_POST_LAUNCH_CHECK();
-    } else if (output.dtype() == DType::Complex64) {
-        // Fill with (value, 0): pack real float bits in the low 32 bits, imag 0
-        // in the high 32 (Complex64 == interleaved 8-byte element).
-        float fr = static_cast<float>(value);
-        uint32_t rbits; std::memcpy(&rbits, &fr, sizeof(float));
-        uint64_t packed = static_cast<uint64_t>(rbits);
-        hipLaunchKernelGGL(masked_fill_kernel<uint64_t>,
-            dim3(blocks), dim3(threads), 0, 0,
-            reinterpret_cast<uint64_t*>(output.data_ptr()),
-            mask.data<bool>(), packed, total_elements);
-        HIP_POST_LAUNCH_CHECK();
-    } else {
-        throw std::runtime_error("masked_fill_hip: Unsupported dtype");
-    }
-
-    HIP_POST_LAUNCH_CHECK();
-
-    return output;
-}
+// NOTE: the dead float-value masked_fill_hip overload was removed (it lost
+// Float64/Complex mantissa via static_cast<double>(float)). The live overload
+// below takes `double value` + stream and is the one declared/dispatched in
+// rocm_kernel_registry.cpp.
 
 // ==============================================================================
 // Masked Select Operation
@@ -2965,13 +2882,20 @@ __global__ void one_hot_kernel_impl(
     const IndexT* indices,
     float* output,
     int64_t batch_size,
-    int64_t num_classes) {
+    int64_t num_classes,
+    int* error_flag) {
 
     int64_t total = batch_size * num_classes;
     HIP_KERNEL_LOOP(idx, total) {
         int64_t batch = idx / num_classes;
         int64_t cls = idx % num_classes;
-        output[idx] = (static_cast<int64_t>(indices[batch]) == cls) ? 1.0f : 0.0f;
+        int64_t label = static_cast<int64_t>(indices[batch]);
+        // PyTorch raises on out-of-range / negative labels rather than silently
+        // emitting an all-zero (non-one-hot) row. Flag it for the host to throw.
+        if (label < 0 || label >= num_classes) {
+            atomicExch(error_flag, 1);
+        }
+        output[idx] = (label == cls) ? 1.0f : 0.0f;
     }
 }
 
@@ -2987,24 +2911,44 @@ auto one_hot_kernel(const Tensor& indices, int64_t num_classes,
     constexpr int BLOCK_SIZE = 256;
     int num_blocks = (total + BLOCK_SIZE - 1) / BLOCK_SIZE;
 
+    int* d_error_flag = nullptr;
+    HIP_CHECK(hipMalloc(&d_error_flag, sizeof(int)));
+    HIP_CHECK(hipMemsetAsync(d_error_flag, 0, sizeof(int), stream));
+
     switch (indices.dtype()) {
         case DType::Int32:
             hipLaunchKernelGGL(one_hot_kernel_impl<int32_t>,
                 dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
-                indices.data<int32_t>(), output.data<float>(), batch_size, num_classes);
+                indices.data<int32_t>(), output.data<float>(), batch_size, num_classes,
+                d_error_flag);
             HIP_POST_LAUNCH_CHECK();
             break;
         case DType::Int64:
             hipLaunchKernelGGL(one_hot_kernel_impl<int64_t>,
                 dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
-                indices.data<int64_t>(), output.data<float>(), batch_size, num_classes);
+                indices.data<int64_t>(), output.data<float>(), batch_size, num_classes,
+                d_error_flag);
             HIP_POST_LAUNCH_CHECK();
             break;
         default:
+            HIP_CHECK(hipFree(d_error_flag));
             throw std::runtime_error("one_hot: unsupported index dtype (expected Int32 or Int64)");
     }
 
     HIP_POST_LAUNCH_CHECK();
+
+    // Surface out-of-range / negative labels as an error (PyTorch parity).
+    int host_error = 0;
+    HIP_CHECK(hipMemcpyAsync(&host_error, d_error_flag, sizeof(int),
+                             hipMemcpyDeviceToHost, stream));
+    HIP_CHECK(hipStreamSynchronize(stream));
+    HIP_CHECK(hipFree(d_error_flag));
+
+    if (host_error) {
+        throw std::out_of_range(
+            "one_hot: index out of range [0, " + std::to_string(num_classes) + ")");
+    }
+
     return output;
 }
 

@@ -289,7 +289,8 @@ auto ElectraForPreTraining::compute_loss(const Variable& gen_logits,
                                          const Variable& disc_logits,
                                          const Tensor& is_replaced,
                                          [[maybe_unused]] const Tensor& masked_positions,
-                                         const Tensor& original_tokens) -> Variable {
+                                         const Tensor& original_tokens,
+                                         const Tensor& attention_mask) -> Variable {
     int64_t batch_size = gen_logits.shape()[0];
     int64_t seq_len = gen_logits.shape()[1];
     int64_t vocab_size = gen_logits.shape()[2];
@@ -333,18 +334,50 @@ auto ElectraForPreTraining::compute_loss(const Variable& gen_logits,
     Variable is_replaced_var(is_replaced, false);
 
     // Compute binary cross-entropy: -[y*log(p) + (1-y)*log(1-p)]
-    // where p = sigmoid(disc_logits)
-    auto sigmoid_logits = nn::sigmoid(disc_logits);
-    auto log_prob_real = tenzor::log(sigmoid_logits);
-    auto ones_var = Variable(ones_like(sigmoid_logits.tensor()), false);
-    auto log_prob_fake = tenzor::log(ones_var - sigmoid_logits);
+    // where p = sigmoid(disc_logits), y = is_replaced.
+    //
+    // Numerically stable formulation via log-sigmoid (avoids log(sigmoid(x))
+    // and log(1 - sigmoid(x)) which overflow to log(0) = -inf for saturated
+    // logits and poison the disc_loss_weight-scaled loss). Using the identities
+    //   log(sigmoid(x))     = log_sigmoid(x)
+    //   log(1 - sigmoid(x)) = log_sigmoid(-x)
+    // both branches stay finite for any logit magnitude.
+    auto log_prob_real = nn::log_sigmoid(disc_logits);             // log(p)
+    auto log_prob_fake = nn::log_sigmoid(tenzor::neg(disc_logits)); // log(1 - p)
 
     auto ones_repl = Variable(ones_like(is_replaced), false);
-    auto disc_loss = tenzor::neg(is_replaced_var * log_prob_fake +
+    auto disc_loss_per_tok = tenzor::neg(is_replaced_var * log_prob_fake +
                        (ones_repl - is_replaced_var) * log_prob_real);
 
-    // Mean over all tokens
-    disc_loss = tenzor::mean(disc_loss);
+    // Discriminator RTD loss reduction.
+    //
+    // When a valid (B, T) attention_mask is supplied, average the per-token
+    // disc loss over the *valid* (non-padding) tokens only. Padding positions
+    // otherwise dominate the mean for short sequences in a padded batch,
+    // shrinking the effective RTD signal toward log(2). Masked reduction:
+    //   disc_loss = sum(per_tok * mask) / max(sum(mask), 1)
+    // Empty/invalid mask → plain mean over all positions (backward compatible).
+    // `disc_loss_per_tok` and `disc_logits` are [batch, seq_len]; reshape the
+    // attention_mask to match so the elementwise multiply broadcasts correctly.
+    Variable disc_loss;
+    const int64_t disc_n = batch_size * seq_len;
+    if (attention_mask.is_valid() && attention_mask.numel() == disc_n) {
+        Tensor disc_mask = attention_mask.reshape({batch_size, seq_len})
+                               .to(disc_logits.tensor().dtype())
+                               .to(disc_logits.tensor().device());
+        Variable disc_mask_var(disc_mask, false);
+
+        auto masked_disc = disc_loss_per_tok * disc_mask_var;       // [batch, seq_len]
+        Variable disc_sum = tenzor::sum(masked_disc);               // scalar
+
+        Tensor mask_count_cpu = tenzor::sum(disc_mask).to(Device::cpu()).to(DType::Float32);
+        float valid_tokens = mask_count_cpu.item<float>();
+        double disc_divisor = static_cast<double>(std::max(valid_tokens, 1.0f));
+        disc_loss = disc_sum * (1.0 / disc_divisor);
+    } else {
+        // Mean over all tokens
+        disc_loss = tenzor::mean(disc_loss_per_tok);
+    }
 
     // Audit G13: real MLM loss on masked positions only.
     //
@@ -522,58 +555,14 @@ auto ElectraForQuestionAnswering::forward(const Variable& input_ids,
     // Predict start and end logits
     auto logits = qa_outputs_->forward(sequence_output);
 
-    // Split into start and end logits while preserving gradients
-    // logits: [batch, seq_len, 2]
-    auto shape = logits.shape();
-    int64_t batch_size = shape[0];
-    int64_t seq_len = shape[1];
-
-    // Reshape to [batch * seq_len, 2]
-    auto reshaped = tenzor::reshape(logits, {batch_size * seq_len, 2});
-
-    // Create selection matrices to extract start and end logits
-    // Use the same dtype as logits for consistency
-    auto dtype = logits.tensor().dtype();
-    Device target_device = logits.tensor().device();
-
-    // Start logits: multiply by [1, 0] - create on CPU first, then transfer
-    Tensor start_selector_cpu(std::vector<int64_t>{2, 1}, dtype, Device::cpu());
-    start_selector_cpu.zero_();
-    if (dtype == DType::Float32) {
-        start_selector_cpu.data<float>()[0] = 1.0f;
-    } else if (dtype == DType::Float64) {
-        start_selector_cpu.data<double>()[0] = 1.0;
-    } else if (dtype == DType::Float16) {
-        start_selector_cpu.data<Float16>()[0] = Float16(static_cast<uint16_t>(0x3C00));  // Float16 representation of 1.0
-    }
-    Tensor start_selector = (target_device == Device::cpu())
-        ? start_selector_cpu
-        : start_selector_cpu.to(target_device);
-
-    // End logits: multiply by [0, 1] - create on CPU first, then transfer
-    Tensor end_selector_cpu(std::vector<int64_t>{2, 1}, dtype, Device::cpu());
-    end_selector_cpu.zero_();
-    if (dtype == DType::Float32) {
-        end_selector_cpu.data<float>()[1] = 1.0f;
-    } else if (dtype == DType::Float64) {
-        end_selector_cpu.data<double>()[1] = 1.0;
-    } else if (dtype == DType::Float16) {
-        end_selector_cpu.data<Float16>()[1] = Float16(static_cast<uint16_t>(0x3C00));  // Float16 representation of 1.0
-    }
-    Tensor end_selector = (target_device == Device::cpu())
-        ? end_selector_cpu
-        : end_selector_cpu.to(target_device);
-
-    // Use matmul to select: [batch*seq_len, 2] @ [2, 1] = [batch*seq_len, 1]
-    Variable start_selector_var(start_selector, false);
-    Variable end_selector_var(end_selector, false);
-
-    auto start_flat = tenzor::matmul(reshaped, start_selector_var);  // [batch*seq_len, 1]
-    auto end_flat = tenzor::matmul(reshaped, end_selector_var);      // [batch*seq_len, 1]
-
-    // Reshape back to [batch, seq_len]
-    auto start_logits = tenzor::reshape(start_flat, {batch_size, seq_len});
-    auto end_logits = tenzor::reshape(end_flat, {batch_size, seq_len});
+    // Split into start and end logits while preserving gradients.
+    // logits: [batch, seq_len, 2]. Extract channel 0 (start) and channel 1
+    // (end) via autograd-aware slice + squeeze on the last dim. This both
+    // preserves the grad_fn chain and sidesteps the old selection-matrix path,
+    // which only filled Float32/Float64/Float16 selectors and therefore
+    // produced an all-zero selector (and all-zero logits) for BFloat16.
+    auto start_logits = tenzor::squeeze(tenzor::slice(logits, 2, 0, 1), 2);  // [batch, seq_len]
+    auto end_logits   = tenzor::squeeze(tenzor::slice(logits, 2, 1, 2), 2);  // [batch, seq_len]
 
     // Call forward post-hooks (enables CPU-start offloading)
     call_forward_post_hooks();

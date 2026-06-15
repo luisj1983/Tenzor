@@ -11,8 +11,10 @@ vec2 unpackBF16x2(uint packed) {
 uint packBF16x2(vec2 v) {
     uint b0 = floatBitsToUint(v.x);
     uint b1 = floatBitsToUint(v.y);
-    uint bf0 = (b0 + 0x7FFFu + ((b0 >> 16) & 1u)) >> 16;
-    uint bf1 = (b1 + 0x7FFFu + ((b1 >> 16) & 1u)) >> 16;
+    // Mask to 16 bits: the RNE bias can carry into bit 16 (e.g. negative-NaN
+    // payloads), which would corrupt the adjacent packed element otherwise.
+    uint bf0 = ((b0 + 0x7FFFu + ((b0 >> 16) & 1u)) >> 16) & 0xFFFFu;
+    uint bf1 = ((b1 + 0x7FFFu + ((b1 >> 16) & 1u)) >> 16) & 0xFFFFu;
     return bf0 | (bf1 << 16);
 }
 
@@ -43,7 +45,7 @@ float readBF16Source(uint element_idx) {
 void writeBF16(uint element_idx, float value) {
     uint word_idx = element_idx / 2;
     uint half_offset = (element_idx % 2) * 16;
-    uint new_bits = ((floatBitsToUint(value) + 0x7FFFu + ((floatBitsToUint(value) >> 16) & 1u)) >> 16);
+    uint new_bits = ((floatBitsToUint(value) + 0x7FFFu + ((floatBitsToUint(value) >> 16) & 1u)) >> 16) & 0xFFFFu;
     uint mask = 0xFFFFu << half_offset;
 
     uint old_word = output_data[word_idx];
@@ -66,7 +68,7 @@ void atomicAddBF16(uint element_idx, float val) {
         uint old_bits = (old_word >> half_offset) & 0xFFFFu;
         float old_val = unpackBF16x2(old_bits).x;
         float new_val = old_val + val;
-        uint new_bits = ((floatBitsToUint(new_val) + 0x7FFFu + ((floatBitsToUint(new_val) >> 16) & 1u)) >> 16);
+        uint new_bits = ((floatBitsToUint(new_val) + 0x7FFFu + ((floatBitsToUint(new_val) >> 16) & 1u)) >> 16) & 0xFFFFu;
 
         // Build new word with updated half
         uint new_word = (old_word & ~(0xFFFFu << half_offset)) | (new_bits << half_offset);

@@ -3143,6 +3143,14 @@ auto ONNXExporter::export_to_file(const std::string& filepath,
         }
     }
     data_out.close();
+    // close() flushes; an error here (e.g. ENOSPC) means the sidecar is
+    // incomplete. Fail and remove it rather than leaving a truncated .data file.
+    if (!data_out) {
+        std::error_code ec;
+        fs::remove(data_path, ec);
+        throw std::runtime_error(
+            "Failed to flush external-data sidecar: " + data_path.string());
+    }
 
     auto build_value_info = [](tenzor_onnx::ValueInfoProto* vi,
                                const ONNXExportValueInfo& src) {
@@ -3179,6 +3187,17 @@ auto ONNXExporter::export_to_file(const std::string& filepath,
         throw std::runtime_error("Failed to open file for writing: " + filepath);
     }
     proto_out.write(out_bytes.data(), static_cast<std::streamsize>(out_bytes.size()));
+    proto_out.close();
+    // A mid-write proto failure (or a flush error on close) leaves a truncated
+    // model file beside the sidecar. Detect it and remove BOTH so the export is
+    // all-or-nothing rather than silently leaving an orphaned/partial pair.
+    if (!proto_out) {
+        std::error_code ec;
+        fs::remove(filepath, ec);
+        fs::remove(data_path, ec);
+        throw std::runtime_error(
+            "Failed to write ONNX proto to: " + filepath);
+    }
 #else
     (void)filepath;
     (void)use_external_data;

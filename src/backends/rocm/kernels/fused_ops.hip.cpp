@@ -1473,6 +1473,10 @@ __global__ void flash_attention_v2_kernel_hip(
                 score = -INFINITY;  // Beyond seq_len_k OR causally masked
             }
             scores_shared[j] = score;
+            // Stash the score in reduce_buf (Bc slots) so the exp pass can read
+            // it back after the in-place max reduction clobbers scores_shared —
+            // avoids recomputing the full Q·K dot product a second time.
+            reduce_buf[j] = score;
         }
         __syncthreads();
 
@@ -1496,23 +1500,12 @@ __global__ void flash_attention_v2_kernel_hip(
         float tile_max = scores_shared[0];
         __syncthreads();
 
-        // Recompute scores from K_tile so scores_shared can be repopulated for
-        // the exp pass — the max reduction destroyed the original score values.
-        // (Same arithmetic as the score-load loop above; reuses Q_shared and K_tile
-        // which are still valid in shared memory.)
+        // Restore scores into scores_shared for the exp pass. The max reduction
+        // destroyed the original values, but reduce_buf still holds the saved
+        // scores from the score-compute loop above — a plain copy instead of a
+        // second Q·K recompute (which would double the dominant score FLOP).
         for (int j = tid; j < Bc; j += BLOCK_SIZE) {
-            float score;
-            int kv_pos = kv_start + j;
-            if (j < kv_end_actual && !(causal && kv_pos > q_row)) {
-                score = 0.0f;
-                for (int d = 0; d < HEAD_DIM; ++d) {
-                    score += Q_shared[d] * K_tile[j * K_STRIDE + d];
-                }
-                score *= scale;
-            } else {
-                score = -INFINITY;
-            }
-            scores_shared[j] = score;
+            scores_shared[j] = reduce_buf[j];
         }
         __syncthreads();
 

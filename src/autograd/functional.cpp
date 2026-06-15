@@ -286,11 +286,23 @@ auto jvp(std::function<Variable(const Variable&)> func,
 
     const double eps = 1e-4;
 
-    auto perturbed_data = tenzor::add(input.tensor(), tenzor::mul(tangent, eps));
+    // Half-precision eps=1e-4 is below representable resolution — the
+    // perturbation quantises to zero and the tangent collapses to ~0/garbage.
+    // Widen the FD step to Float32 and cast the tangent back at the end,
+    // mirroring hvp/vhp. The primal `output` was already computed above at the
+    // caller's native dtype, so it is returned unchanged.
+    const DType orig_dtype = input.tensor().dtype();
+    const bool widen = (orig_dtype == DType::Float16 ||
+                        orig_dtype == DType::BFloat16);
+
+    Tensor probe_input = widen ? input.tensor().to(DType::Float32) : input.tensor();
+    Tensor probe_tangent = widen ? tangent.to(DType::Float32) : tangent;
+
+    auto perturbed_data = tenzor::add(probe_input, tenzor::mul(probe_tangent, eps));
     Variable perturbed_input(perturbed_data, false);
     auto perturbed_output_fwd = func(perturbed_input);
 
-    auto perturbed_data_bwd = tenzor::sub(input.tensor(), tenzor::mul(tangent, eps));
+    auto perturbed_data_bwd = tenzor::sub(probe_input, tenzor::mul(probe_tangent, eps));
     Variable perturbed_input_bwd(perturbed_data_bwd, false);
     auto perturbed_output_bwd = func(perturbed_input_bwd);
 
@@ -298,6 +310,8 @@ auto jvp(std::function<Variable(const Variable&)> func,
         tenzor::sub(perturbed_output_fwd.tensor(), perturbed_output_bwd.tensor()),
         1.0 / (2.0 * eps)
     );
+
+    if (widen) tangent_output = tangent_output.to(orig_dtype);
 
     return {output, tangent_output};
 }

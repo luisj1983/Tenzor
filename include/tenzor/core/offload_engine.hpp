@@ -449,6 +449,16 @@ private:
     std::vector<InFlightPrefetch> in_flight_prefetches_;
     std::mutex in_flight_mutex_;
 
+    // Serializes every reassignment of a user-owned Tensor (`*tensor = ...` in
+    // check_and_offload, `*f.target = ...` in wait_for_prefetch). A given
+    // Tensor* may be both register_auto_offload'd (written by the monitoring
+    // thread) and prefetch_to_gpu'd (written by wait_for_prefetch on another
+    // thread); without a shared lock those two assignments race on the
+    // intrusive_ptr refcount of the assigned-from/assigned-to storage,
+    // risking use-after-free/leak and an indeterminate final device. Held only
+    // across the assignment itself, never across a PCIe transfer.
+    std::mutex tensor_assign_mutex_;
+
     // Monitoring thread for automatic offload
     std::thread monitoring_thread_;
     std::atomic<bool> stop_monitoring_{false};

@@ -17,51 +17,9 @@ namespace tenzor {
 namespace nn {
 namespace detection {
 
-// Helper function: bilinear interpolation at (y, x). Templated on the compute
-// type so a Float64 input can be processed entirely in double precision,
-// matching the double-precision GPU backends (a Float32-only path diverged for
-// Float64 and produced gradcheck failures that looked like backward bugs).
-template <typename T>
-static inline T bilinear_interpolate(const T* data, int64_t height,
-                                     int64_t width, T y, T x) {
-    // Handle out of bounds
-    if (y < static_cast<T>(-1) || y > static_cast<T>(height) ||
-        x < static_cast<T>(-1) || x > static_cast<T>(width)) {
-        return static_cast<T>(0);
-    }
-
-    // Clamp to valid range
-    y = std::max(static_cast<T>(0), std::min(y, static_cast<T>(height - 1)));
-    x = std::max(static_cast<T>(0), std::min(x, static_cast<T>(width - 1)));
-
-    // Integer coordinates
-    int64_t y_low = static_cast<int64_t>(std::floor(y));
-    int64_t x_low = static_cast<int64_t>(std::floor(x));
-    int64_t y_high = std::min(y_low + 1, height - 1);
-    int64_t x_high = std::min(x_low + 1, width - 1);
-
-    // Interpolation weights
-    T ly = y - static_cast<T>(y_low);
-    T lx = x - static_cast<T>(x_low);
-    T hy = static_cast<T>(1) - ly;
-    T hx = static_cast<T>(1) - lx;
-
-    // Get values at four corners
-    T v1 = data[y_low * width + x_low];
-    T v2 = data[y_low * width + x_high];
-    T v3 = data[y_high * width + x_low];
-    T v4 = data[y_high * width + x_high];
-
-    // Bilinear interpolation
-    T w1 = hy * hx;
-    T w2 = hy * lx;
-    T w3 = ly * hx;
-    T w4 = ly * lx;
-
-    return w1 * v1 + w2 * v2 + w3 * v3 + w4 * v4;
-}
-
-// Forward implementation (GPU dispatch for non-CPU, CPU fallback)
+// Forward implementation: routes all devices through dispatch<OpId::ROIAlignForward>,
+// which lands on the registered backend kernel (CPU kernel is dtype-preserving
+// and Float64-correct, matching the GPU backends).
 auto ROIAlignOp::apply(const Tensor& features, const Tensor& rois,
                        int64_t output_h, int64_t output_w,
                        double spatial_scale, int64_t sampling_ratio,
@@ -73,285 +31,48 @@ auto ROIAlignOp::apply(const Tensor& features, const Tensor& rois,
         throw std::invalid_argument("ROIs must be (num_rois, 5) tensor");
     }
 
-    // Dispatch to GPU backend if not on CPU
-    if (features.device().type != Device::Type::CPU) {
-        OpAttributes attrs;
-        attrs.set(AttrKey::OutputSizeH, output_h);
-        attrs.set(AttrKey::OutputSizeW, output_w);
-        attrs.set(AttrKey::SpatialScale, spatial_scale);
-        attrs.set(AttrKey::SamplingRatio, sampling_ratio);
-        attrs.set(AttrKey::Aligned, aligned);
+    // Route every device (CPU included) through the registered backend kernel
+    // via dispatch. The CPU kernel (cpu::roi_align_forward_kernel) keeps Float32
+    // inputs in Float32 and Float64 inputs in Float64, matching the
+    // double-precision GPU backends. The previous inline CPU loop forced all
+    // sampling/interpolation through Float32, diverging from the GPU path and
+    // from its own registered kernel — a second, lower-precision implementation
+    // of the same op. There is now a single source of truth.
+    OpAttributes attrs;
+    attrs.set(AttrKey::OutputSizeH, output_h);
+    attrs.set(AttrKey::OutputSizeW, output_w);
+    attrs.set(AttrKey::SpatialScale, spatial_scale);
+    attrs.set(AttrKey::SamplingRatio, sampling_ratio);
+    attrs.set(AttrKey::Aligned, aligned);
 
-        std::array<Tensor, 2> inputs = {features, rois};
-        auto results = dispatch<OpId::ROIAlignForward>(inputs, attrs);
-        return results[0];
-    }
-
-    // CPU path below
-    const int64_t num_rois = rois.shape()[0];
-    const int64_t channels = features.shape()[1];
-    const int64_t feat_height = features.shape()[2];
-    const int64_t feat_width = features.shape()[3];
-
-    // Remember original device and dtype
-    Device original_device = features.device();
-    DType original_dtype = features.dtype();
-
-    // Process on CPU in Float32 for numerical stability
-    auto features_cpu = features.to(Device::cpu()).to(DType::Float32);
-    auto rois_cpu = rois.to(Device::cpu()).to(DType::Float32);
-
-    // Create output tensor on CPU for processing (in Float32)
-    auto output = tenzor::zeros({num_rois, channels, output_h, output_w},
-                                 DType::Float32, Device::cpu());
-
-    const float* features_data = features_cpu.data<float>();
-    const float* rois_data = rois_cpu.data<float>();
-    float* output_data = output.data<float>();
-
-    const float spatial_scale_f = static_cast<float>(spatial_scale);
-
-    const int64_t num_batches = features.shape()[0];
-
-    // Process each ROI
-    for (int64_t roi_idx = 0; roi_idx < num_rois; ++roi_idx) {
-        const float* roi = rois_data + roi_idx * 5;
-        const int64_t batch_idx = static_cast<int64_t>(roi[0]);
-
-        // The batch index comes from the ROI tensor; an out-of-range value
-        // would index outside the feature buffer (OOB read). Reject it.
-        if (batch_idx < 0 || batch_idx >= num_batches) {
-            throw std::out_of_range(
-                "ROIAlign: ROI batch index " + std::to_string(batch_idx) +
-                " out of range [0, " + std::to_string(num_batches) + ")");
-        }
-
-        // Scale ROI coordinates
-        float roi_x1 = roi[1] * spatial_scale_f;
-        float roi_y1 = roi[2] * spatial_scale_f;
-        float roi_x2 = roi[3] * spatial_scale_f;
-        float roi_y2 = roi[4] * spatial_scale_f;
-
-        // Handle aligned coordinates
-        if (aligned) {
-            // Aligned mode: shift by 0.5 pixel
-            roi_x1 -= 0.5f;
-            roi_y1 -= 0.5f;
-            roi_x2 -= 0.5f;
-            roi_y2 -= 0.5f;
-        }
-
-        // ROI dimensions
-        float roi_width = roi_x2 - roi_x1;
-        float roi_height = roi_y2 - roi_y1;
-
-        // Bin dimensions
-        float bin_size_h = roi_height / static_cast<float>(output_h);
-        float bin_size_w = roi_width / static_cast<float>(output_w);
-
-        // Determine sampling grid
-        int64_t roi_bin_grid_h = (sampling_ratio > 0)
-                                      ? sampling_ratio
-                                      : std::max<int64_t>(1, static_cast<int64_t>(std::ceil(bin_size_h)));
-        int64_t roi_bin_grid_w = (sampling_ratio > 0)
-                                      ? sampling_ratio
-                                      : std::max<int64_t>(1, static_cast<int64_t>(std::ceil(bin_size_w)));
-
-        const int64_t count = roi_bin_grid_h * roi_bin_grid_w;
-
-        // Get feature map for this batch
-        const float* batch_features = features_data +
-                                       batch_idx * channels * feat_height * feat_width;
-
-        // Process each output bin
-        for (int64_t ph = 0; ph < output_h; ++ph) {
-            for (int64_t pw = 0; pw < output_w; ++pw) {
-                // Process each channel
-                for (int64_t c = 0; c < channels; ++c) {
-                    // Accumulate in double regardless of storage dtype so the
-                    // per-bin reduction does not lose precision relative to the
-                    // double-precision GPU backends.
-                    double sum = 0.0;
-
-                    // Sample points in this bin
-                    for (int64_t iy = 0; iy < roi_bin_grid_h; ++iy) {
-                        for (int64_t ix = 0; ix < roi_bin_grid_w; ++ix) {
-                            // Compute sample position
-                            float y = roi_y1 + static_cast<float>(ph) * bin_size_h +
-                                      (static_cast<float>(iy) + 0.5f) * bin_size_h /
-                                          static_cast<float>(roi_bin_grid_h);
-                            float x = roi_x1 + static_cast<float>(pw) * bin_size_w +
-                                      (static_cast<float>(ix) + 0.5f) * bin_size_w /
-                                          static_cast<float>(roi_bin_grid_w);
-
-                            // Bilinear interpolation
-                            const float* channel_data =
-                                batch_features + c * feat_height * feat_width;
-                            sum += static_cast<double>(bilinear_interpolate(
-                                channel_data, feat_height, feat_width, y, x));
-                        }
-                    }
-
-                    // Average over samples
-                    int64_t output_idx = roi_idx * channels * output_h * output_w +
-                                         c * output_h * output_w + ph * output_w + pw;
-                    output_data[output_idx] =
-                        static_cast<float>(sum / static_cast<double>(count));
-                }
-            }
-        }
-    }
-
-    // Move output back to original dtype and device
-    return output.to(original_dtype).to(original_device);
+    std::array<Tensor, 2> inputs = {features, rois};
+    auto results = dispatch<OpId::ROIAlignForward>(inputs, attrs);
+    return results[0];
 }
 
-// Backward implementation (GPU dispatch for non-CPU, CPU fallback)
+// Backward implementation: routes all devices through dispatch<OpId::ROIAlignBackward>,
+// which lands on the registered backend kernel (CPU kernel is dtype-preserving
+// and Float64-correct, matching the GPU backends).
 auto ROIAlignOp::apply_backward(const Tensor& grad_output, const Tensor& features,
                                 const Tensor& rois, double spatial_scale,
                                 int64_t sampling_ratio, bool aligned) -> Tensor {
-    // Dispatch to GPU backend if not on CPU
-    if (grad_output.device().type != Device::Type::CPU) {
-        OpAttributes attrs;
-        attrs.set(AttrKey::BatchSize, features.shape()[0]);
-        attrs.set(AttrKey::FeatHeight, features.shape()[2]);
-        attrs.set(AttrKey::FeatWidth, features.shape()[3]);
-        attrs.set(AttrKey::SpatialScale, spatial_scale);
-        attrs.set(AttrKey::SamplingRatio, sampling_ratio);
-        attrs.set(AttrKey::Aligned, aligned);
+    // Route every device (CPU included) through the registered backend kernel
+    // via dispatch. cpu::roi_align_backward_kernel preserves the input dtype
+    // (Float64 stays Float64), matching the double-precision GPU backends. The
+    // previous inline CPU loop computed the scatter in Float32 only, diverging
+    // from both the GPU path and its own registered kernel. Single source of
+    // truth now.
+    OpAttributes attrs;
+    attrs.set(AttrKey::BatchSize, features.shape()[0]);
+    attrs.set(AttrKey::FeatHeight, features.shape()[2]);
+    attrs.set(AttrKey::FeatWidth, features.shape()[3]);
+    attrs.set(AttrKey::SpatialScale, spatial_scale);
+    attrs.set(AttrKey::SamplingRatio, sampling_ratio);
+    attrs.set(AttrKey::Aligned, aligned);
 
-        std::array<Tensor, 2> inputs = {grad_output, rois};
-        auto results = dispatch<OpId::ROIAlignBackward>(inputs, attrs);
-        return results[0];
-    }
-
-    // CPU path below
-    const int64_t num_rois = rois.shape()[0];
-    const int64_t channels = features.shape()[1];
-    const int64_t feat_height = features.shape()[2];
-    const int64_t feat_width = features.shape()[3];
-    const int64_t output_h = grad_output.shape()[2];
-    const int64_t output_w = grad_output.shape()[3];
-
-    // Remember original device and dtype
-    Device original_device = features.device();
-    DType original_dtype = features.dtype();
-
-    // Move to CPU and convert to Float32 for processing
-    auto grad_output_cpu = grad_output.to(Device::cpu()).to(DType::Float32);
-    auto rois_cpu = rois.to(Device::cpu()).to(DType::Float32);
-
-    // Create gradient tensor on CPU in Float32 (same shape as features)
-    auto grad_features = tenzor::zeros({features.shape()[0], channels, feat_height, feat_width},
-                                       DType::Float32, Device::cpu());
-
-    const float* grad_output_data = grad_output_cpu.data<float>();
-    const float* rois_data = rois_cpu.data<float>();
-    float* grad_features_data = grad_features.data<float>();
-
-    const float spatial_scale_f = static_cast<float>(spatial_scale);
-
-    const int64_t num_batches = features.shape()[0];
-
-    // Process each ROI
-    for (int64_t roi_idx = 0; roi_idx < num_rois; ++roi_idx) {
-        const float* roi = rois_data + roi_idx * 5;
-        const int64_t batch_idx = static_cast<int64_t>(roi[0]);
-
-        // Reject out-of-range batch indices to prevent OOB writes into
-        // grad_features (mirrors the forward bounds check).
-        if (batch_idx < 0 || batch_idx >= num_batches) {
-            throw std::out_of_range(
-                "ROIAlign backward: ROI batch index " + std::to_string(batch_idx) +
-                " out of range [0, " + std::to_string(num_batches) + ")");
-        }
-
-        // Scale ROI coordinates
-        float roi_x1 = roi[1] * spatial_scale_f;
-        float roi_y1 = roi[2] * spatial_scale_f;
-        float roi_x2 = roi[3] * spatial_scale_f;
-        float roi_y2 = roi[4] * spatial_scale_f;
-
-        if (aligned) {
-            roi_x1 -= 0.5f;
-            roi_y1 -= 0.5f;
-            roi_x2 -= 0.5f;
-            roi_y2 -= 0.5f;
-        }
-
-        float roi_width = roi_x2 - roi_x1;
-        float roi_height = roi_y2 - roi_y1;
-
-        float bin_size_h = roi_height / static_cast<float>(output_h);
-        float bin_size_w = roi_width / static_cast<float>(output_w);
-
-        int64_t roi_bin_grid_h = (sampling_ratio > 0)
-                                      ? sampling_ratio
-                                      : std::max<int64_t>(1, static_cast<int64_t>(std::ceil(bin_size_h)));
-        int64_t roi_bin_grid_w = (sampling_ratio > 0)
-                                      ? sampling_ratio
-                                      : std::max<int64_t>(1, static_cast<int64_t>(std::ceil(bin_size_w)));
-
-        const int64_t count = roi_bin_grid_h * roi_bin_grid_w;
-        const float grad_scale = 1.0f / static_cast<float>(count);
-
-        // Get gradient for this batch
-        float* batch_grad = grad_features_data +
-                            batch_idx * channels * feat_height * feat_width;
-
-        // Distribute gradient from each output bin
-        for (int64_t ph = 0; ph < output_h; ++ph) {
-            for (int64_t pw = 0; pw < output_w; ++pw) {
-                for (int64_t c = 0; c < channels; ++c) {
-                    int64_t grad_idx = roi_idx * channels * output_h * output_w +
-                                       c * output_h * output_w + ph * output_w + pw;
-                    float grad_val = grad_output_data[grad_idx] * grad_scale;
-
-                    // Distribute to sampled points
-                    for (int64_t iy = 0; iy < roi_bin_grid_h; ++iy) {
-                        for (int64_t ix = 0; ix < roi_bin_grid_w; ++ix) {
-                            float y = roi_y1 + static_cast<float>(ph) * bin_size_h +
-                                      (static_cast<float>(iy) + 0.5f) * bin_size_h /
-                                          static_cast<float>(roi_bin_grid_h);
-                            float x = roi_x1 + static_cast<float>(pw) * bin_size_w +
-                                      (static_cast<float>(ix) + 0.5f) * bin_size_w /
-                                          static_cast<float>(roi_bin_grid_w);
-
-                            // Distribute gradient via bilinear weights
-                            if (y < -1.0f || y > feat_height || x < -1.0f ||
-                                x > feat_width) {
-                                continue;
-                            }
-
-                            y = std::max(0.0f, std::min(y, static_cast<float>(feat_height - 1)));
-                            x = std::max(0.0f, std::min(x, static_cast<float>(feat_width - 1)));
-
-                            int64_t y_low = static_cast<int64_t>(std::floor(y));
-                            int64_t x_low = static_cast<int64_t>(std::floor(x));
-                            int64_t y_high = std::min(y_low + 1, feat_height - 1);
-                            int64_t x_high = std::min(x_low + 1, feat_width - 1);
-
-                            float ly = y - static_cast<float>(y_low);
-                            float lx = x - static_cast<float>(x_low);
-                            float hy = 1.0f - ly;
-                            float hx = 1.0f - lx;
-
-                            float* channel_grad = batch_grad + c * feat_height * feat_width;
-
-                            // Atomic-like accumulation (single-threaded here)
-                            channel_grad[y_low * feat_width + x_low] += grad_val * hy * hx;
-                            channel_grad[y_low * feat_width + x_high] += grad_val * hy * lx;
-                            channel_grad[y_high * feat_width + x_low] += grad_val * ly * hx;
-                            channel_grad[y_high * feat_width + x_high] += grad_val * ly * lx;
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    // Move gradient back to original dtype and device
-    return grad_features.to(original_dtype).to(original_device);
+    std::array<Tensor, 2> inputs = {grad_output, rois};
+    auto results = dispatch<OpId::ROIAlignBackward>(inputs, attrs);
+    return results[0];
 }
 
 // ROIAlign module implementation

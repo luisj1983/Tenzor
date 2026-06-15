@@ -54,8 +54,14 @@ public:
     /**
      * @brief Serialize the exported program to a binary file.
      *
-     * Format: TZEP magic (0x545A4550) | version | graph (via JIT serializer)
-     *         | num_state_dict_entries | [name_len, name, tensor]...
+     * On-disk layout (all integers little-endian via write_uint32/uint64):
+     *   magic (0x545A4550) | version | n_inputs (u64) | n_outputs (u64)
+     *   | num_state_dict_entries (u64) | [name, tensor]...
+     *   | graph_size (u64) | graph blob (via the JIT GraphWriter serializer)
+     *
+     * Note the graph blob is written LAST (after the state dict), and the
+     * n_inputs/n_outputs counts precede the state dict — external tooling must
+     * parse in this order.
      *
      * @param path Output file path
      */

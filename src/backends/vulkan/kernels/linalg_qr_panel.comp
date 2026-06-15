@@ -32,16 +32,10 @@ void main() {
     for (uint k = 0; k < panel_cols; k++) {
         uint col = col_start + k;
 
-        // Load column below diagonal into shared memory
-        float local_sum = 0.0;
-        for (uint r = k + tid; r < panel_rows; r += 256) {
-            float v = A[base + (col_start + r) * n + col];
-            col_data[r < 256 ? r : 0] = v;  // only need first 256 rows in smem
-            local_sum += v * v;
-        }
-
-        // Reduce norm_sq
-        // Simple reduction for shared float
+        // norm_sq is computed serially from global A below; the previous
+        // parallel pre-load into col_data was dead (local_sum was never read)
+        // and contained an unsynchronized many-writer race on col_data[0]
+        // for panel_rows > 256, so it has been removed.
         if (tid == 0) {
             norm_sq = 0.0;
             for (uint r = k; r < min(panel_rows, 256u); r++) {

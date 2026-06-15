@@ -49,8 +49,12 @@ void main() {
             count[wid] = shared_count[0];
         }
     } else {
-        // Pass 1: Sum workgroup counts to get total
-        uint n_workgroups = (params.n_elements + 255) / 256;
+        // Pass 1: Sum workgroup counts to get total.
+        // Pass 0 launched div_wg(n, WORKGROUP_SIZE) workgroups (host uses the
+        // same spec-constant workgroup size), so the reduction bound must use
+        // WORKGROUP_SIZE here, not a hardcoded 256 — otherwise it reads
+        // uninitialized/OOB count[] entries.
+        uint n_workgroups = (params.n_elements + WORKGROUP_SIZE - 1u) / WORKGROUP_SIZE;
 
         uint local_sum = 0;
         for (uint i = tid; i < n_workgroups; i += WORKGROUP_SIZE) {

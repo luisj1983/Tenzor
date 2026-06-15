@@ -74,30 +74,6 @@ auto dim_shifted_passthrough(AttrKey dim_attr_key) -> BatchingRule {
     return [dim_attr_key](const std::function<Variable(const Variable&)>& func,
                           const Variable& batched_input,
                           int64_t batch_dim) -> Variable {
-        auto input_tensor = batched_input.tensor();
-        int64_t batched_ndim = static_cast<int64_t>(input_tensor.shape().size());
-        int64_t unbatched_ndim = batched_ndim - 1;
-
-        // Probe: run the user function on the first slice to discover the
-        // forward OpId / saved attributes. We don't reuse the probe result
-        // for the output — its shape is the per-element shape, not the
-        // batched shape — but it's the only generic way to recover the
-        // op identity inside a batching rule (the rule doesn't carry the
-        // OpId itself; it's installed by name/OpId from outside).
-        auto probe_slice = tenzor::select(input_tensor, batch_dim, 0);
-        Variable probe(probe_slice, batched_input.requires_grad());
-        auto probe_result = func(probe);
-        auto grad_fn = probe_result.grad_fn();
-
-        // Without a grad_fn we have nothing to inspect — fall back to
-        // loop-and-stack. This also catches the case where the user's
-        // function uses raw tensor ops (no autograd) — those naturally
-        // work via the loop fallback.
-        if (!grad_fn) {
-            return vmap_loop_and_stack(func, batched_input, batch_dim);
-        }
-
-        (void)unbatched_ndim;
         (void)dim_attr_key;
         // Audit (graph-severing fix): the previous fast path re-ran the op
         // via the raw `dispatch()` (reading the saved dim attribute, shifting
@@ -107,14 +83,17 @@ auto dim_shifted_passthrough(AttrKey dim_attr_key) -> BatchingRule {
         // Mean, Prod, Var, Std, Max, Min, Softmax, LogSoftmax, TopK, Sort,
         // ArgSort, CumSum, CumProd, Roll): backward through a vmap of these
         // yielded zero/absent input grads and lost second-order graphs under
-        // create_graph. We instead fall back to vmap_loop_and_stack, which
-        // calls the user's `func` per slice (so the user's own `dim` already
-        // indexes the correct unbatched axis) and stitches the per-slice
-        // results with Variable-level autograd::unsqueeze + autograd::cat —
-        // preserving the grad_fn chain at the cost of B sequential dispatches.
-        // The probe above (grad_fn presence) is still useful to confirm the
-        // op is autograd-tracked before committing to the loop; un-tracked
-        // raw-tensor callers already fell back above.
+        // create_graph. We instead use vmap_loop_and_stack, which calls the
+        // user's `func` per slice (so the user's own `dim` already indexes the
+        // correct unbatched axis) and stitches the per-slice results with
+        // Variable-level autograd::unsqueeze + autograd::cat — preserving the
+        // grad_fn chain at the cost of B sequential dispatches.
+        //
+        // Audit (probe removal): both branches of the former probe (grad_fn
+        // present or absent) returned vmap_loop_and_stack, so probing via an
+        // extra `func(slice0)` never changed the path — it just ran the user
+        // function one redundant time (and the vmap dispatcher already probed
+        // once upstream). Drop the probe and call loop-and-stack directly.
         return vmap_loop_and_stack(func, batched_input, batch_dim);
     };
 }
@@ -196,13 +175,13 @@ void init_builtin_batching_rules() {
             // Already batch-first: matmul naturally handles leading batch dims
             return func(batched_input);
         }
-        // Move batch_dim to front, apply, move back. Use the Variable-level
-        // autograd::transpose on the trailing transpose so the output keeps
-        // result.grad_fn() — the raw `Variable(perm_out, requires_grad)`
-        // rewrap severed the chain, killing higher-order grads under vmap
-        // (audit-5 X.2).
-        auto perm_in = tenzor::transpose(batched_input.tensor(), 0, batch_dim);
-        Variable permuted(perm_in, batched_input.requires_grad());
+        // Move batch_dim to front, apply, move back. BOTH transposes must use
+        // the Variable-level autograd::transpose so the chain stays intact: the
+        // leading move on the raw tensor (`Variable(transpose(input.tensor()),
+        // requires_grad)`) produced a fresh leaf with no grad_fn back to
+        // batched_input, so backward accumulated into a discarded accumulator
+        // and batched_input.grad() stayed empty (audit-5 X.2 follow-up).
+        Variable permuted = tenzor::transpose(batched_input, 0, batch_dim);
         auto result = func(permuted);
         return tenzor::transpose(result, 0, batch_dim);
     });
@@ -225,13 +204,14 @@ void init_builtin_batching_rules() {
         if (batch_dim == 0) {
             return func(batched_input);
         }
-        // Move batch to front, apply, move back. The trailing transpose must
-        // use the Variable-level autograd::transpose so the output keeps
-        // result.grad_fn() across ~25 shape ops (Conv1/2/3d, BN, LN, GN, IN,
-        // attention variants, pool variants, RNN/LSTM/GRU cells, padding
-        // variants). Raw rewrap severed the chain (audit-5 X.2).
-        auto perm_in = tenzor::transpose(batched_input.tensor(), 0, batch_dim);
-        Variable permuted(perm_in, batched_input.requires_grad());
+        // Move batch to front, apply, move back. BOTH transposes must use the
+        // Variable-level autograd::transpose so the chain stays intact across
+        // ~25 shape ops (Conv1/2/3d, BN, LN, GN, IN, attention variants, pool
+        // variants, RNN/LSTM/GRU cells, padding variants). Doing the leading
+        // move on the raw tensor and rewrapping as a fresh leaf severed the
+        // chain back to batched_input, so backward never reached it
+        // (audit-5 X.2 follow-up).
+        Variable permuted = tenzor::transpose(batched_input, 0, batch_dim);
         auto result = func(permuted);
         return tenzor::transpose(result, 0, batch_dim);
     };
@@ -551,17 +531,29 @@ static auto vmap_loop_and_stack(const std::function<Variable(const Variable&)>& 
     std::vector<Variable> per_slice_outputs;
     per_slice_outputs.reserve(batch_size);
 
+    // The insertion axis must be valid for the per-slice OUTPUT rank, which can
+    // be smaller than the input rank for rank-reducing funcs (e.g. a full
+    // reduction to a scalar). `unsqueeze(output, batch_dim)` throws when
+    // batch_dim >= output.ndim()+1, so clamp the insertion axis to the output
+    // rank. batch_dim is interpreted against the input rank; for rank-dropping
+    // funcs we stack along the highest valid output axis instead. All slices
+    // share the same output rank, so a single clamped axis is consistent for
+    // both the unsqueeze and the cat.
+    int64_t insert_axis = batch_dim;
     for (int64_t i = 0; i < batch_size; ++i) {
         auto slice = tenzor::select(input_tensor, batch_dim, i);
         Variable slice_var(slice, batched_input.requires_grad());
         auto output = func(slice_var);
-        // Add a unit-size batch axis at the requested position so a single
+        if (i == 0) {
+            insert_axis = std::min<int64_t>(batch_dim, output.tensor().ndim());
+        }
+        // Add a unit-size batch axis at the (clamped) position so a single
         // `cat` along that axis reconstructs the batched layout that the
         // raw `tenzor::stack` would have produced.
-        per_slice_outputs.push_back(tenzor::unsqueeze(output, batch_dim));
+        per_slice_outputs.push_back(tenzor::unsqueeze(output, insert_axis));
     }
 
-    return tenzor::cat(per_slice_outputs, batch_dim);
+    return tenzor::cat(per_slice_outputs, insert_axis);
 }
 
 auto vmap(std::function<Variable(const Variable&)> func,

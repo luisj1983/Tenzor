@@ -225,25 +225,6 @@ enum class TensorUID : int64_t {
 // build / check_support cost on every call when we know cuDNN won't accept
 // the configuration (e.g. on a brand new GPU arch with limited SDPA tuning).
 // ============================================================================
-struct SDPACapKey {
-    DType dtype;
-    int64_t head_dim;
-    int sm_arch;
-
-    bool operator==(const SDPACapKey& other) const noexcept {
-        return dtype == other.dtype && head_dim == other.head_dim && sm_arch == other.sm_arch;
-    }
-};
-
-struct SDPACapKeyHash {
-    size_t operator()(const SDPACapKey& k) const noexcept {
-        size_t h = std::hash<uint8_t>{}(static_cast<uint8_t>(k.dtype));
-        h ^= std::hash<int64_t>{}(k.head_dim) << 1;
-        h ^= std::hash<int>{}(k.sm_arch) << 2;
-        return h;
-    }
-};
-
 class SDPACapCache {
 public:
     static SDPACapCache& instance() {
@@ -251,20 +232,26 @@ public:
         return cache;
     }
 
-    // Returns true if this (dtype, head_dim, sm) combo is known unsupported.
-    bool is_known_unsupported(const SDPACapKey& key) {
+    // Returns true if this EXACT shape (full SDPACacheKey) is known unsupported.
+    // The negative cache is keyed by the full shape/scale/causal key rather than
+    // by the coarse {dtype, head_dim, sm} triple: create_sdpa_graph can throw for
+    // reasons specific to a single shape (heuristic/build/check_support), and
+    // poisoning every shape sharing the triple would needlessly force otherwise-
+    // acceptable shapes onto the slower custom-flash fallback for the process
+    // lifetime.
+    bool is_known_unsupported(const SDPACacheKey& key) {
         std::lock_guard<std::mutex> lock(mutex_);
         auto it = unsupported_.find(key);
         return it != unsupported_.end();
     }
 
-    void mark_unsupported(const SDPACapKey& key) {
+    void mark_unsupported(const SDPACacheKey& key) {
         std::lock_guard<std::mutex> lock(mutex_);
         unsupported_.insert(key);
     }
 
 private:
-    std::unordered_set<SDPACapKey, SDPACapKeyHash> unsupported_;
+    std::unordered_set<SDPACacheKey, SDPACacheKeyHash> unsupported_;
     std::mutex mutex_;
 };
 
@@ -509,28 +496,28 @@ auto cudnn_sdpa_forward(
         seq_len_k = K.shape()[2];
     }
 
-    // Capability cache: if cuDNN previously failed validation/build for this
-    // (dtype, head_dim, sm_arch) combo on this device, skip the (expensive)
-    // graph build entirely and fall back to the custom kernel.
-    SDPACapKey cap_key{Q.dtype(), head_dim, current_sm_arch()};
-    if (SDPACapCache::instance().is_known_unsupported(cap_key)) {
+    // Key for this exact shape + dtype + scale + causal. The causal flag changes
+    // the cuDNN graph (mask op fused into softmax), so it must key the cache to
+    // avoid silently reusing a non-causal graph for a causal call.
+    SDPACacheKey cache_key{batch, num_heads, seq_len_q, seq_len_k, head_dim, Q.dtype(), scale, causal};
+
+    // Negative cache: if cuDNN previously failed validation/build for THIS exact
+    // shape, skip the (expensive) graph build and fall back to the custom kernel.
+    // Keyed by the full shape (not the coarse {dtype, head_dim, sm} triple) so a
+    // shape-specific build failure does not poison every shape sharing the triple.
+    if (SDPACapCache::instance().is_known_unsupported(cache_key)) {
         return fused_attention_fallback(Q, K, V, scale, causal);
     }
 
     cudnnHandle_t handle = SDPACuDNNHandle::get();
     std::vector<int64_t> q_shape_vec(q_shape.begin(), q_shape.end());
 
-    // Check graph cache for this exact shape + dtype + scale + causal.
-    // Causal flag changes the cuDNN graph (mask op fused into softmax), so it
-    // must key the cache to avoid silently reusing a non-causal graph for a
-    // causal call — the audit's C4/M5 manifestation in the cache layer.
-    SDPACacheKey cache_key{batch, num_heads, seq_len_q, seq_len_k, head_dim, Q.dtype(), scale, causal};
     SDPACacheEntry cache_entry;
 
     if (!SDPAGraphCache::instance().get(cache_key, cache_entry)) {
-        // Build new graph. Wrap in try/catch so any cuDNN validation failure
-        // (e.g. FP32 SDPA not tuned on this arch) records the cap miss and
-        // falls back instead of poisoning every future call.
+        // Build new graph. Wrap in try/catch so any cuDNN validation/build
+        // failure records the negative-cache miss for this shape and falls back
+        // instead of repeatedly retrying an expensive build that cannot succeed.
         try {
             auto [graph, workspace_size] = create_sdpa_graph(
                 handle, batch, num_heads, seq_len_q, seq_len_k, head_dim, scale, io_dtype, causal);
@@ -538,7 +525,7 @@ auto cudnn_sdpa_forward(
             cache_entry.workspace_size = workspace_size;
             SDPAGraphCache::instance().set(cache_key, cache_entry);
         } catch (const std::exception&) {
-            SDPACapCache::instance().mark_unsupported(cap_key);
+            SDPACapCache::instance().mark_unsupported(cache_key);
             // Composed fallback below uses fused_attention_cuda which now also
             // honors causal; passing it through preserves contract.
             return fused_attention_fallback(Q, K, V, scale, causal);

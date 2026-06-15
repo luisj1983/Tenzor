@@ -477,16 +477,23 @@ public:
             // Skip leading whitespace
             size_t trimmed = start;
             while (trimmed < end && str[trimmed] == ' ') ++trimmed;
-            if (trimmed < end) {
-                int64_t val;
-                auto [ptr, ec] = std::from_chars(str.data() + trimmed, str.data() + end, val);
-                if (ec == std::errc{}) {
-                    result.push_back(val);
-                } else {
-                    throw std::invalid_argument(
-                        "get_int_list: malformed integer '" +
-                        str.substr(trimmed, end - trimmed) + "' in attribute value '" + str + "'");
-                }
+            // An empty field (e.g. '2,,3', leading ',3', or trailing '2,') is
+            // malformed: silently dropping it would yield a shorter list than
+            // the caller wrote, and downstream per-axis readers would default
+            // the missing entry, changing op semantics. Fail fast, mirroring
+            // the non-numeric path below.
+            if (trimmed >= end) {
+                throw std::invalid_argument(
+                    "get_int_list: empty field in attribute value '" + str + "'");
+            }
+            int64_t val;
+            auto [ptr, ec] = std::from_chars(str.data() + trimmed, str.data() + end, val);
+            if (ec == std::errc{}) {
+                result.push_back(val);
+            } else {
+                throw std::invalid_argument(
+                    "get_int_list: malformed integer '" +
+                    str.substr(trimmed, end - trimmed) + "' in attribute value '" + str + "'");
             }
             start = end + 1;
             end = str.find(',', start);

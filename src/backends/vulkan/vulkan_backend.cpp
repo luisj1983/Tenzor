@@ -1140,6 +1140,18 @@ vulkan::ComputePipeline* VulkanBackend::getPipelineSpecialized(
     // Determine push constant size via SPIR-V reflection
     std::vector<VkPushConstantRange> pushConstants;
     uint32_t pushConstantSize = vulkan::reflectPushConstantSize(shaderCode);
+    // Same validation as getPipeline: a misaligned or over-256-byte block would
+    // otherwise surface as an opaque driver error here.
+    if (pushConstantSize % 4 != 0) {
+        throw std::runtime_error("Vulkan pipeline '" + shader_name +
+            "': push constant size (" + std::to_string(pushConstantSize) +
+            ") must be 4-byte aligned (SPIR-V reflection error)");
+    }
+    if (pushConstantSize > 256) {
+        throw std::runtime_error("Vulkan pipeline '" + shader_name +
+            "': push constant size (" + std::to_string(pushConstantSize) +
+            ") exceeds 256-byte Vulkan limit");
+    }
     if (pushConstantSize > 0) {
         VkPushConstantRange push_range{};
         push_range.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;

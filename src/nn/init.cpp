@@ -139,8 +139,13 @@ void fill_tensor(Tensor& tensor, Generator gen) {
         if (tensor.device().type == Device::Type::CPU) {
             std::memcpy(tensor.data_ptr(), result.data_ptr(), byte_size);
         } else {
-            // For GPU: replace the tensor data
-            tensor = result;
+            // GPU: write into the existing storage rather than rebinding the
+            // Tensor handle (R.18). Rebinding (`tensor = result`) swaps the
+            // TensorImpl/Storage pointer and orphans any aliasing view (FSDP2
+            // shards, saved-for-backward captures). Zero-then-add preserves the
+            // live Storage handle, matching Module::load_state_dict's pattern.
+            tensor.zero_();
+            add_(tensor, result);
         }
     }
 }
@@ -300,7 +305,10 @@ auto orthogonal_(Tensor& tensor, double gain) -> Tensor& {
         int64_t byte_size = tensor.numel() * dtype_size(tensor.dtype());
         std::memcpy(tensor.data_ptr(), result.data_ptr(), byte_size);
     } else {
-        tensor = result;
+        // GPU: write into existing storage (R.18) instead of rebinding the
+        // handle, so aliasing views keep seeing the new bytes.
+        tensor.zero_();
+        add_(tensor, result);
     }
 
     return tensor;
@@ -482,7 +490,12 @@ auto dirac_(Tensor& tensor, int64_t groups) -> Tensor& {
     }
 
     if (needs_device_transfer) {
-        tensor = work_tensor.to(tensor.device());
+        // GPU: write into existing storage (R.18) instead of rebinding the
+        // handle. `tensor` was already zeroed above, but zero again so the
+        // add_ below produces exactly work_tensor's contents regardless.
+        Tensor result = work_tensor.to(tensor.device());
+        tensor.zero_();
+        add_(tensor, result);
     }
 
     return tensor;
@@ -543,7 +556,11 @@ auto sparse_(Tensor& tensor, double sparsity, double std) -> Tensor& {
     }
 
     if (needs_device_transfer) {
-        tensor = work_tensor.to(tensor.device());
+        // GPU: write into existing storage (R.18) instead of rebinding the
+        // handle, so aliasing views keep seeing the new bytes.
+        Tensor result = work_tensor.to(tensor.device());
+        tensor.zero_();
+        add_(tensor, result);
     }
 
     return tensor;

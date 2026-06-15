@@ -173,7 +173,7 @@ void adaptive_avgpool2d_forward_f32(
                     }
 
                     float total = _mm512_reduce_add_ps(vsum) + scalar_sum;
-                    out_ptr[ow] = total / static_cast<float>(count);
+                    out_ptr[ow] = count > 0 ? total / static_cast<float>(count) : 0.0f;
                 }
             }
         }

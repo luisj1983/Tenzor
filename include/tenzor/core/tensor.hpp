@@ -1166,7 +1166,8 @@ public:
     auto is_signed() const noexcept -> bool {
         auto dt = dtype();
         return dt != DType::UInt8 && dt != DType::UInt16 &&
-               dt != DType::UInt32 && dt != DType::UInt64 && dt != DType::Bool;
+               dt != DType::UInt32 && dt != DType::UInt64 && dt != DType::Bool &&
+               dt != DType::QUInt8;
     }
 
     /**

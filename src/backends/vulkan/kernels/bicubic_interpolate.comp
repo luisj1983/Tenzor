@@ -1,0 +1,74 @@
+#version 450
+
+// Bicubic Interpolation Forward Pass (4D)
+// Resizes input tensor to target size using bicubic (Catmull-Rom, a = -0.5)
+// interpolation. Coordinate mapping and cubic weights mirror
+// interpolate_bicubic_backward.comp exactly so that forward and backward use
+// matching kernels (consistent autograd) and match the CPU/CUDA/ROCm/OneAPI
+// bicubic implementations.
+// Input shape: (N, C, H_in, W_in)
+// Output shape: (N, C, H_out, W_out)
+
+layout(local_size_x_id = 0) in;
+
+layout(binding = 0) buffer Input { float input_data[]; };
+layout(binding = 1) buffer Output { float output_data[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint n_elements;     // Total output elements
+    uint batch;          // N
+    uint channels;       // C
+    uint in_height;      // H_in
+    uint in_width;       // W_in
+    uint out_height;     // H_out
+    uint out_width;      // W_out
+    uint align_corners;  // 1 if align_corners, 0 otherwise
+} params;
+
+float cubic_w(float x) {
+    float a = abs(x);
+    if (a <= 1.0) return 1.5 * a * a * a - 2.5 * a * a + 1.0;
+    if (a < 2.0)  return -0.5 * a * a * a + 2.5 * a * a - 4.0 * a + 2.0;
+    return 0.0;
+}
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= params.n_elements) {
+        return;
+    }
+
+    // Decode flat index to (n, c, h_out, w_out)
+    uint temp = idx;
+    uint ow = temp % params.out_width;  temp /= params.out_width;
+    uint oh = temp % params.out_height; temp /= params.out_height;
+    uint c  = temp % params.channels;   temp /= params.channels;
+    uint b  = temp;
+
+    float scale_h = (params.align_corners != 0u && params.out_height > 1u)
+        ? float(params.in_height - 1u) / float(params.out_height - 1u)
+        : float(params.in_height) / float(params.out_height);
+    float scale_w = (params.align_corners != 0u && params.out_width > 1u)
+        ? float(params.in_width - 1u) / float(params.out_width - 1u)
+        : float(params.in_width) / float(params.out_width);
+    float src_h = (params.align_corners != 0u) ? float(oh) * scale_h : (float(oh) + 0.5) * scale_h - 0.5;
+    float src_w = (params.align_corners != 0u) ? float(ow) * scale_w : (float(ow) + 0.5) * scale_w - 0.5;
+    int hi = int(floor(src_h));
+    int wi = int(floor(src_w));
+
+    uint base = b * (params.channels * params.in_height * params.in_width)
+              + c * (params.in_height * params.in_width);
+
+    float result = 0.0;
+    for (int dy = -1; dy <= 2; ++dy) {
+        int iy = clamp(hi + dy, 0, int(params.in_height) - 1);
+        float wy = cubic_w(src_h - float(hi + dy));
+        for (int dx = -1; dx <= 2; ++dx) {
+            int ix = clamp(wi + dx, 0, int(params.in_width) - 1);
+            float wx = cubic_w(src_w - float(wi + dx));
+            result += wy * wx * input_data[base + uint(iy) * params.in_width + uint(ix)];
+        }
+    }
+
+    output_data[idx] = result;
+}

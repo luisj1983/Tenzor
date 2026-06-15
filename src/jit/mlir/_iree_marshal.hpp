@@ -24,15 +24,31 @@
 namespace tenzor::jit::mlir_jit::marshal {
 
 inline auto dtype_to_iree(::tenzor::DType d) -> iree_hal_element_type_t {
+    // Must cover the same element types iree_to_dtype() / the Subprocess path
+    // handle; otherwise the InProcess @main input marshaller and the plugin
+    // result path throw at the boundary for any non-F32/F64/I32/I64 dtype
+    // (e.g. Float16/BFloat16 attention/RMSNorm activations), aborting the VM
+    // invoke even though the output side claims full support.
     switch (d) {
-        case ::tenzor::DType::Float32: return IREE_HAL_ELEMENT_TYPE_FLOAT_32;
-        case ::tenzor::DType::Float64: return IREE_HAL_ELEMENT_TYPE_FLOAT_64;
-        case ::tenzor::DType::Int32:   return IREE_HAL_ELEMENT_TYPE_INT_32;
-        case ::tenzor::DType::Int64:   return IREE_HAL_ELEMENT_TYPE_INT_64;
+        case ::tenzor::DType::Float32:    return IREE_HAL_ELEMENT_TYPE_FLOAT_32;
+        case ::tenzor::DType::Float64:    return IREE_HAL_ELEMENT_TYPE_FLOAT_64;
+        case ::tenzor::DType::Float16:    return IREE_HAL_ELEMENT_TYPE_FLOAT_16;
+        case ::tenzor::DType::BFloat16:   return IREE_HAL_ELEMENT_TYPE_BFLOAT_16;
+        case ::tenzor::DType::Int8:       return IREE_HAL_ELEMENT_TYPE_INT_8;
+        case ::tenzor::DType::Int16:      return IREE_HAL_ELEMENT_TYPE_INT_16;
+        case ::tenzor::DType::Int32:      return IREE_HAL_ELEMENT_TYPE_INT_32;
+        case ::tenzor::DType::Int64:      return IREE_HAL_ELEMENT_TYPE_INT_64;
+        case ::tenzor::DType::UInt8:      return IREE_HAL_ELEMENT_TYPE_UINT_8;
+        case ::tenzor::DType::UInt16:     return IREE_HAL_ELEMENT_TYPE_UINT_16;
+        case ::tenzor::DType::UInt32:     return IREE_HAL_ELEMENT_TYPE_UINT_32;
+        case ::tenzor::DType::UInt64:     return IREE_HAL_ELEMENT_TYPE_UINT_64;
+        case ::tenzor::DType::Bool:       return IREE_HAL_ELEMENT_TYPE_BOOL_8;
+        case ::tenzor::DType::Complex64:  return IREE_HAL_ELEMENT_TYPE_COMPLEX_FLOAT_64;
+        case ::tenzor::DType::Complex128: return IREE_HAL_ELEMENT_TYPE_COMPLEX_FLOAT_128;
         default: break;
     }
     throw std::invalid_argument(
-        "IREE marshal: unsupported DType (only Float32/64, Int32/64). value=" +
+        "IREE marshal: unsupported DType. value=" +
         std::to_string(static_cast<int>(d)));
 }
 

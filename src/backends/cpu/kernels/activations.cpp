@@ -1132,7 +1132,10 @@ auto swish_backward_kernel(const Tensor& grad_output_raw, const Tensor& input_ra
 // ============================================================================
 
 // Forward: x if x > 0 else alpha * x
-auto leaky_relu_kernel(const Tensor& input, double alpha) -> Tensor {
+auto leaky_relu_kernel(const Tensor& input_raw, double alpha) -> Tensor {
+    // Flat-pointer iteration requires contiguous input; a non-contiguous
+    // slice/transpose/expand view would otherwise read the wrong elements.
+    auto input = input_raw.contiguous();
     auto output = Tensor(std::vector<int64_t>(input.shape().begin(), input.shape().end()), input.dtype(), input.device());
 
     if (input.dtype() == DType::Float32) {
@@ -2569,7 +2572,10 @@ auto mish_backward_kernel(const Tensor& grad_output_raw, const Tensor& input_raw
 // Softplus Activation: softplus(x) = ln(1 + exp(x))
 // ============================================================================
 
-auto softplus_kernel(const Tensor& input, float beta, float threshold) -> Tensor {
+auto softplus_kernel(const Tensor& input_raw, float beta, float threshold) -> Tensor {
+    // Flat-pointer iteration requires contiguous input; a non-contiguous
+    // slice/transpose/expand view would otherwise read the wrong elements.
+    auto input = input_raw.contiguous();
     auto shape_vec = std::vector<int64_t>(input.shape().begin(), input.shape().end());
     Tensor output = empty(shape_vec, input.dtype(), input.device());
 
@@ -2944,7 +2950,10 @@ auto gelu_inplace_kernel(Tensor& input) -> void {
 //
 // Float16 / BFloat16 follow the widen-narrow pattern (compute in float).
 
-auto hardswish_kernel(const Tensor& input) -> Tensor {
+auto hardswish_kernel(const Tensor& input_raw) -> Tensor {
+    // Flat-pointer iteration requires contiguous input; a non-contiguous
+    // slice/transpose/expand view would otherwise read the wrong elements.
+    auto input = input_raw.contiguous();
     auto output = Tensor(std::vector<int64_t>(input.shape().begin(), input.shape().end()),
                          input.dtype(), input.device());
     auto compute_f32 = [](float x) -> float {
@@ -2997,7 +3006,10 @@ auto hardswish_kernel(const Tensor& input) -> Tensor {
 //   -3 < x < 3:  (x + 3) / 6
 //   x >= 3:  1
 
-auto hardsigmoid_kernel(const Tensor& input) -> Tensor {
+auto hardsigmoid_kernel(const Tensor& input_raw) -> Tensor {
+    // Flat-pointer iteration requires contiguous input; a non-contiguous
+    // slice/transpose/expand view would otherwise read the wrong elements.
+    auto input = input_raw.contiguous();
     auto output = Tensor(std::vector<int64_t>(input.shape().begin(), input.shape().end()),
                          input.dtype(), input.device());
     auto compute_f32 = [](float x) -> float {

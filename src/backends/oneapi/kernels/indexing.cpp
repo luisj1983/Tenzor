@@ -1128,21 +1128,31 @@ class ScatterAddKernelInt64;
 
 auto scatter_add_kernel(const Tensor& self, int64_t dim, const Tensor& index, const Tensor& src,
                         sycl::queue& queue) -> Tensor {
-    auto self_shape_span = self.shape();
+    // Force operands contiguous: this kernel computes strides purely from
+    // shape() and indexes data_ptr() by those strides, so a non-contiguous
+    // self/index/src (transposed view, slice, or upstream grad from
+    // gather/sort/take_along_dim/FFT backward) would otherwise read the wrong
+    // elements. Mirror the sibling indexing kernels (gather/scatter/
+    // index_select), which all force contiguity first.
+    Tensor self_c  = self.is_contiguous()  ? self  : self.contiguous();
+    Tensor index_c = index.is_contiguous() ? index : index.contiguous();
+    Tensor src_c   = src.is_contiguous()   ? src   : src.contiguous();
+
+    auto self_shape_span = self_c.shape();
     std::vector<int64_t> shape(self_shape_span.begin(), self_shape_span.end());
     int64_t ndim = shape.size();
     if (dim < 0) dim += ndim;
 
     // Clone self as output (scatter_add modifies in-place semantically)
-    Tensor output(shape, self.dtype(), self.device());
-    queue.memcpy(const_cast<void*>(output.data_ptr()), self.data_ptr(),
-                 self.numel() * self.dtype_size());
+    Tensor output(shape, self_c.dtype(), self_c.device());
+    queue.memcpy(const_cast<void*>(output.data_ptr()), self_c.data_ptr(),
+                 self_c.numel() * self_c.dtype_size());
 
     // Host-side implementation for atomicity correctness
-    int64_t idx_numel = index.numel();
+    int64_t idx_numel = index_c.numel();
     if (idx_numel == 0) return output;
 
-    auto idx_shape = index.shape();
+    auto idx_shape = index_c.shape();
     std::vector<int64_t> idx_shape_vec(idx_shape.begin(), idx_shape.end());
 
     // Compute strides for self/output
@@ -1151,10 +1161,10 @@ auto scatter_add_kernel(const Tensor& self, int64_t dim, const Tensor& index, co
     std::vector<int64_t> idx_strides(ndim);
     { int64_t s = 1; for (int64_t i = ndim - 1; i >= 0; --i) { idx_strides[i] = s; s *= idx_shape_vec[i]; } }
 
-    if (self.dtype() == DType::Float32) {
+    if (self_c.dtype() == DType::Float32) {
         float* out_ptr = get_data_ptr<float>(output);
-        const float* src_ptr = get_data_ptr<const float>(src);
-        const int64_t* idx_ptr = get_data_ptr<const int64_t>(index);
+        const float* src_ptr = get_data_ptr<const float>(src_c);
+        const int64_t* idx_ptr = get_data_ptr<const int64_t>(index_c);
 
         std::array<int64_t, 8> d_out_strides{}, d_idx_strides{};
         for (int64_t d = 0; d < ndim; ++d) {
@@ -1181,10 +1191,10 @@ auto scatter_add_kernel(const Tensor& self, int64_t dim, const Tensor& index, co
                 atomic_out(out_ptr[out_offset]);
             atomic_out.fetch_add(src_ptr[flat]);
         }).wait();
-    } else if (self.dtype() == DType::Float64) {
+    } else if (self_c.dtype() == DType::Float64) {
         double* out_ptr = get_data_ptr<double>(output);
-        const double* src_ptr = get_data_ptr<const double>(src);
-        const int64_t* idx_ptr = get_data_ptr<const int64_t>(index);
+        const double* src_ptr = get_data_ptr<const double>(src_c);
+        const int64_t* idx_ptr = get_data_ptr<const int64_t>(index_c);
 
         std::array<int64_t, 8> d_out_strides{}, d_idx_strides{};
         for (int64_t d = 0; d < ndim; ++d) {
@@ -1211,10 +1221,10 @@ auto scatter_add_kernel(const Tensor& self, int64_t dim, const Tensor& index, co
                 atomic_out(out_ptr[out_offset]);
             atomic_out.fetch_add(src_ptr[flat]);
         }).wait();
-    } else if (self.dtype() == DType::Int32) {
+    } else if (self_c.dtype() == DType::Int32) {
         int32_t* out_ptr = get_data_ptr<int32_t>(output);
-        const int32_t* src_ptr = get_data_ptr<const int32_t>(src);
-        const int64_t* idx_ptr = get_data_ptr<const int64_t>(index);
+        const int32_t* src_ptr = get_data_ptr<const int32_t>(src_c);
+        const int64_t* idx_ptr = get_data_ptr<const int64_t>(index_c);
 
         std::array<int64_t, 8> d_out_strides{}, d_idx_strides{};
         for (int64_t d = 0; d < ndim; ++d) {
@@ -1241,10 +1251,10 @@ auto scatter_add_kernel(const Tensor& self, int64_t dim, const Tensor& index, co
                 atomic_out(out_ptr[out_offset]);
             atomic_out.fetch_add(src_ptr[flat]);
         }).wait();
-    } else if (self.dtype() == DType::Int64) {
+    } else if (self_c.dtype() == DType::Int64) {
         int64_t* out_ptr = get_data_ptr<int64_t>(output);
-        const int64_t* src_ptr = get_data_ptr<const int64_t>(src);
-        const int64_t* idx_ptr = get_data_ptr<const int64_t>(index);
+        const int64_t* src_ptr = get_data_ptr<const int64_t>(src_c);
+        const int64_t* idx_ptr = get_data_ptr<const int64_t>(index_c);
 
         std::array<int64_t, 8> d_out_strides{}, d_idx_strides{};
         for (int64_t d = 0; d < ndim; ++d) {
@@ -1271,14 +1281,14 @@ auto scatter_add_kernel(const Tensor& self, int64_t dim, const Tensor& index, co
                 atomic_out(out_ptr[out_offset]);
             atomic_out.fetch_add(src_ptr[flat]);
         }).wait();
-    } else if (self.dtype() == DType::UInt32 || self.dtype() == DType::UInt64) {
+    } else if (self_c.dtype() == DType::UInt32 || self_c.dtype() == DType::UInt64) {
         std::array<int64_t, 8> d_out_strides{}, d_idx_strides{};
         for (int64_t d = 0; d < ndim; ++d) { d_out_strides[d] = out_strides[d]; d_idx_strides[d] = idx_strides[d]; }
-        const int64_t* idx_ptr = get_data_ptr<const int64_t>(index);
+        const int64_t* idx_ptr = get_data_ptr<const int64_t>(index_c);
         const int64_t nd = ndim, dm = dim, inum = idx_numel;
         auto run_u = [&]<typename T>() {
             T* out_ptr = get_data_ptr<T>(output);
-            const T* src_ptr = get_data_ptr<const T>(src);
+            const T* src_ptr = get_data_ptr<const T>(src_c);
             queue.parallel_for(sycl::range<1>(inum), [=](sycl::id<1> id) {
                 int64_t flat = id[0], remaining = flat, out_offset = 0;
                 for (int64_t d = 0; d < nd; ++d) {
@@ -1291,19 +1301,19 @@ auto scatter_add_kernel(const Tensor& self, int64_t dim, const Tensor& index, co
                 atomic_out.fetch_add(src_ptr[flat]);
             }).wait();
         };
-        if (self.dtype() == DType::UInt32) run_u.template operator()<uint32_t>();
+        if (self_c.dtype() == DType::UInt32) run_u.template operator()<uint32_t>();
         else run_u.template operator()<uint64_t>();
-    } else if (self.dtype() == DType::Int16 || self.dtype() == DType::UInt16) {
+    } else if (self_c.dtype() == DType::Int16 || self_c.dtype() == DType::UInt16) {
         // 16-bit lacks atomic_ref support; accumulate in a 32-bit device buffer.
-        const int64_t total = self.numel();
+        const int64_t total = self_c.numel();
         int32_t* acc = sycl::malloc_device<int32_t>(total, queue);
         std::array<int64_t, 8> d_out_strides{}, d_idx_strides{};
         for (int64_t d = 0; d < ndim; ++d) { d_out_strides[d] = out_strides[d]; d_idx_strides[d] = idx_strides[d]; }
-        const int64_t* idx_ptr = get_data_ptr<const int64_t>(index);
+        const int64_t* idx_ptr = get_data_ptr<const int64_t>(index_c);
         const int64_t nd = ndim, dm = dim, inum = idx_numel;
         auto run16 = [&]<typename T>() {
             T* out_ptr = get_data_ptr<T>(output);
-            const T* src_ptr = get_data_ptr<const T>(src);
+            const T* src_ptr = get_data_ptr<const T>(src_c);
             queue.parallel_for(sycl::range<1>(total), [=](sycl::id<1> i) { acc[i] = static_cast<int32_t>(out_ptr[i]); }).wait();
             queue.parallel_for(sycl::range<1>(inum), [=](sycl::id<1> id) {
                 int64_t flat = id[0], remaining = flat, out_offset = 0;
@@ -1318,20 +1328,20 @@ auto scatter_add_kernel(const Tensor& self, int64_t dim, const Tensor& index, co
             }).wait();
             queue.parallel_for(sycl::range<1>(total), [=](sycl::id<1> i) { out_ptr[i] = static_cast<T>(acc[i]); }).wait();
         };
-        if (self.dtype() == DType::Int16) run16.template operator()<int16_t>();
+        if (self_c.dtype() == DType::Int16) run16.template operator()<int16_t>();
         else run16.template operator()<uint16_t>();
         sycl::free(acc, queue);
-    } else if (self.dtype() == DType::Float16) {
+    } else if (self_c.dtype() == DType::Float16) {
         // Float16: use float32 accumulator since atomic_ref<half> not widely supported
-        float* acc = sycl::malloc_device<float>(self.numel(), queue);
+        float* acc = sycl::malloc_device<float>(self_c.numel(), queue);
         const sycl::half* self_ptr = get_data_ptr<const sycl::half>(output);
         // Convert output to float32
-        queue.parallel_for(sycl::range<1>(self.numel()), [=](sycl::id<1> i) {
+        queue.parallel_for(sycl::range<1>(self_c.numel()), [=](sycl::id<1> i) {
             acc[i] = static_cast<float>(self_ptr[i]);
         }).wait();
 
-        const sycl::half* src_ptr = get_data_ptr<const sycl::half>(src);
-        const int64_t* idx_ptr = get_data_ptr<const int64_t>(index);
+        const sycl::half* src_ptr = get_data_ptr<const sycl::half>(src_c);
+        const int64_t* idx_ptr = get_data_ptr<const int64_t>(index_c);
         std::array<int64_t, 8> d_out_strides{}, d_idx_strides{};
         for (int64_t d = 0; d < ndim; ++d) {
             d_out_strides[d] = out_strides[d];
@@ -1360,19 +1370,19 @@ auto scatter_add_kernel(const Tensor& self, int64_t dim, const Tensor& index, co
 
         // Convert back to half
         sycl::half* out_ptr = get_data_ptr<sycl::half>(output);
-        queue.parallel_for<ScatterAddKernelFloat16Convert>(sycl::range<1>(self.numel()), [=](sycl::id<1> i) {
+        queue.parallel_for<ScatterAddKernelFloat16Convert>(sycl::range<1>(self_c.numel()), [=](sycl::id<1> i) {
             out_ptr[i] = sycl::half(acc[i]);
         }).wait();
         sycl::free(acc, queue);
-    } else if (self.dtype() == DType::BFloat16) {
-        float* acc = sycl::malloc_device<float>(self.numel(), queue);
+    } else if (self_c.dtype() == DType::BFloat16) {
+        float* acc = sycl::malloc_device<float>(self_c.numel(), queue);
         const uint16_t* self_ptr = get_data_ptr<const uint16_t>(output);
-        queue.parallel_for(sycl::range<1>(self.numel()), [=](sycl::id<1> i) {
+        queue.parallel_for(sycl::range<1>(self_c.numel()), [=](sycl::id<1> i) {
             acc[i] = bf16_to_f32(self_ptr[i]);
         }).wait();
 
-        const uint16_t* src_ptr = get_data_ptr<const uint16_t>(src);
-        const int64_t* idx_ptr = get_data_ptr<const int64_t>(index);
+        const uint16_t* src_ptr = get_data_ptr<const uint16_t>(src_c);
+        const int64_t* idx_ptr = get_data_ptr<const int64_t>(index_c);
         std::array<int64_t, 8> d_out_strides{}, d_idx_strides{};
         for (int64_t d = 0; d < ndim; ++d) {
             d_out_strides[d] = out_strides[d];
@@ -1400,7 +1410,7 @@ auto scatter_add_kernel(const Tensor& self, int64_t dim, const Tensor& index, co
         }).wait();
 
         uint16_t* out_ptr = get_data_ptr<uint16_t>(output);
-        queue.parallel_for<ScatterAddKernelBFloat16Convert>(sycl::range<1>(self.numel()), [=](sycl::id<1> i) {
+        queue.parallel_for<ScatterAddKernelBFloat16Convert>(sycl::range<1>(self_c.numel()), [=](sycl::id<1> i) {
             out_ptr[i] = f32_to_bf16(acc[i]);
         }).wait();
         sycl::free(acc, queue);

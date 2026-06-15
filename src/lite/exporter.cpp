@@ -323,8 +323,14 @@ auto emit_layernorm(nn::LayerNorm& ln, GraphBuilder& b, int16_t in_id)
     // from the weight tensor's shape (which always matches normalized_shape).
     auto w_shape = ln.get_parameter("weight")->tensor().shape();
     node.attrs.extra_i.assign(w_shape.begin(), w_shape.end());
-    auto out_id = b.fresh();
-    node.output_ids = {out_id};
+    // LayerNorm kernel returns {output, mean, rstd}; allocate all three IDs so
+    // the node's declared output count matches what the kernel produces (the
+    // lite runtime's per-node arity check rejects a mismatch). Downstream nodes
+    // only consume the output id; mean/rstd are unread intermediates.
+    auto out_id  = b.fresh();
+    auto mean_id = b.fresh();
+    auto rstd_id = b.fresh();
+    node.output_ids = {out_id, mean_id, rstd_id};
     b.graph.add_node(std::move(node));
     return out_id;
 }
@@ -342,8 +348,14 @@ auto emit_groupnorm(nn::GroupNorm& gn, GraphBuilder& b, int16_t in_id)
     node.input_ids = {in_id, w_id, bias_id};
     node.attrs.f[0] = static_cast<float>(gn.eps());
     node.attrs.i[0] = gn.num_groups();
-    auto out_id = b.fresh();
-    node.output_ids = {out_id};
+    // GroupNorm kernel returns {output, mean, rstd}; allocate all three IDs so
+    // the node's declared output count matches what the kernel produces (the
+    // lite runtime's per-node arity check rejects a mismatch). Downstream nodes
+    // only consume the output id; mean/rstd are unread intermediates.
+    auto out_id  = b.fresh();
+    auto mean_id = b.fresh();
+    auto rstd_id = b.fresh();
+    node.output_ids = {out_id, mean_id, rstd_id};
     b.graph.add_node(std::move(node));
     return out_id;
 }

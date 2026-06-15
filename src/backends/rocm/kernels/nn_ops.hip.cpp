@@ -16,6 +16,35 @@ namespace rocm {
 
 constexpr int BLOCK_SIZE = 256;
 
+// Throw on any non-success hiprand status (matches the HIP_CHECK/ROCBLAS_CHECK
+// discipline used throughout the backend).
+#define HIPRAND_CHECK(call)                                                       \
+    do {                                                                          \
+        hiprandStatus_t _hiprand_status = (call);                                 \
+        if (_hiprand_status != HIPRAND_STATUS_SUCCESS) {                          \
+            throw std::runtime_error("hiprand error (" +                          \
+                std::to_string(static_cast<int>(_hiprand_status)) + ") at " +     \
+                __FILE__ ":" + std::to_string(__LINE__));                         \
+        }                                                                         \
+    } while (0)
+
+// RAII wrapper for a hiprand generator so it is destroyed on every exit path,
+// including exceptions thrown by an intervening HIP/HIPRAND check.
+class HiprandGeneratorGuard {
+public:
+    explicit HiprandGeneratorGuard(hiprandRngType_t rng_type) {
+        HIPRAND_CHECK(hiprandCreateGenerator(&gen_, rng_type));
+    }
+    ~HiprandGeneratorGuard() {
+        if (gen_) hiprandDestroyGenerator(gen_);
+    }
+    HiprandGeneratorGuard(const HiprandGeneratorGuard&) = delete;
+    HiprandGeneratorGuard& operator=(const HiprandGeneratorGuard&) = delete;
+    hiprandGenerator_t get() const { return gen_; }
+private:
+    hiprandGenerator_t gen_ = nullptr;
+};
+
 // RAII wrapper for rocBLAS handle to prevent leaks on exceptions
 class RocBLASHandleGuard {
 public:
@@ -66,8 +95,9 @@ inline int get_num_blocks(int64_t n, int block_size = BLOCK_SIZE) {
 template<typename T>
 __global__ void add_bias_to_output_kernel(const T* __restrict__ bias, T* __restrict__ output,
                                           int64_t batch, int64_t features) {
-    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx < batch * features) {
+    int64_t total = batch * features;
+    for (int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+         idx < total; idx += static_cast<int64_t>(blockDim.x) * gridDim.x) {
         int64_t f = idx % features;
         output[idx] += bias[f];
     }
@@ -90,8 +120,9 @@ __global__ void sum_over_batch_kernel(const T* __restrict__ grad, T* __restrict_
 // Float16 bias kernel
 __global__ void add_bias_to_output_kernel_fp16(const __half* __restrict__ bias, __half* __restrict__ output,
                                                 int64_t batch, int64_t features) {
-    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx < batch * features) {
+    int64_t total = batch * features;
+    for (int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+         idx < total; idx += static_cast<int64_t>(blockDim.x) * gridDim.x) {
         int64_t f = idx % features;
         output[idx] = tenzor::rocm::safe_f2h(tenzor::rocm::safe_h2f(output[idx]) + tenzor::rocm::safe_h2f(bias[f]));
     }
@@ -121,10 +152,9 @@ __global__ void embedding_kernel_hip(
     int64_t embedding_dim,
     int64_t num_embeddings) {
 
-    int64_t tid = blockIdx.x * blockDim.x + threadIdx.x;
     int64_t total_elements = num_indices * embedding_dim;
-
-    if (tid < total_elements) {
+    for (int64_t tid = blockIdx.x * blockDim.x + threadIdx.x;
+         tid < total_elements; tid += static_cast<int64_t>(blockDim.x) * gridDim.x) {
         int64_t idx = tid / embedding_dim;
         int64_t dim = tid % embedding_dim;
         int64_t embedding_idx = indices[idx];
@@ -132,7 +162,7 @@ __global__ void embedding_kernel_hip(
         // instead of reading out of the weight buffer.
         if (embedding_idx < 0 || embedding_idx >= num_embeddings) {
             output[tid] = T(0);
-            return;
+            continue;
         }
         output[tid] = weight[embedding_idx * embedding_dim + dim];
     }
@@ -147,16 +177,15 @@ __global__ void embedding_backward_kernel_hip(
     int64_t embedding_dim,
     int64_t num_embeddings) {
 
-    int64_t tid = blockIdx.x * blockDim.x + threadIdx.x;
     int64_t total_elements = num_indices * embedding_dim;
-
-    if (tid < total_elements) {
+    for (int64_t tid = blockIdx.x * blockDim.x + threadIdx.x;
+         tid < total_elements; tid += static_cast<int64_t>(blockDim.x) * gridDim.x) {
         int64_t idx = tid / embedding_dim;
         int64_t dim = tid % embedding_dim;
         int64_t embedding_idx = indices[idx];
         // Skip out-of-range indices to avoid OOB atomic writes.
         if (embedding_idx < 0 || embedding_idx >= num_embeddings) {
-            return;
+            continue;
         }
         // Atomic add for accumulating gradients
         atomicAdd(&grad_weight[embedding_idx * embedding_dim + dim], grad_output[tid]);
@@ -172,16 +201,15 @@ __global__ void embedding_kernel_hip_fp16(
     int64_t embedding_dim,
     int64_t num_embeddings) {
 
-    int64_t tid = blockIdx.x * blockDim.x + threadIdx.x;
     int64_t total_elements = num_indices * embedding_dim;
-
-    if (tid < total_elements) {
+    for (int64_t tid = blockIdx.x * blockDim.x + threadIdx.x;
+         tid < total_elements; tid += static_cast<int64_t>(blockDim.x) * gridDim.x) {
         int64_t idx = tid / embedding_dim;
         int64_t dim = tid % embedding_dim;
         int64_t embedding_idx = indices[idx];
         if (embedding_idx < 0 || embedding_idx >= num_embeddings) {
             output[tid] = __float2half(0.0f);
-            return;
+            continue;
         }
         output[tid] = weight[embedding_idx * embedding_dim + dim];
     }
@@ -196,15 +224,14 @@ __global__ void embedding_backward_kernel_hip_fp16(
     int64_t embedding_dim,
     int64_t num_embeddings) {
 
-    int64_t tid = blockIdx.x * blockDim.x + threadIdx.x;
     int64_t total_elements = num_indices * embedding_dim;
-
-    if (tid < total_elements) {
+    for (int64_t tid = blockIdx.x * blockDim.x + threadIdx.x;
+         tid < total_elements; tid += static_cast<int64_t>(blockDim.x) * gridDim.x) {
         int64_t idx = tid / embedding_dim;
         int64_t dim = tid % embedding_dim;
         int64_t embedding_idx = indices[idx];
         if (embedding_idx < 0 || embedding_idx >= num_embeddings) {
-            return;
+            continue;
         }
         atomicAdd(&grad_weight_f32[embedding_idx * embedding_dim + dim], tenzor::rocm::safe_h2f(grad_output[tid]));
     }
@@ -212,8 +239,8 @@ __global__ void embedding_backward_kernel_hip_fp16(
 
 // Convert float gradients to Float16
 __global__ void convert_f32_to_f16_kernel(const float* __restrict__ src, __half* __restrict__ dst, int64_t n) {
-    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx < n) {
+    for (int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+         idx < n; idx += static_cast<int64_t>(blockDim.x) * gridDim.x) {
         dst[idx] = tenzor::rocm::safe_f2h(src[idx]);
     }
 }
@@ -613,8 +640,8 @@ __global__ void dropout_forward_kernel(
     float p,
     float scale) {
 
-    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx < n) {
+    for (int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+         idx < n; idx += static_cast<int64_t>(blockDim.x) * gridDim.x) {
         float r = random_values[idx];
         if (r < p) {
             mask[idx] = 0.0f;
@@ -634,8 +661,8 @@ __global__ void dropout_backward_kernel_hip(
     int64_t n,
     float scale) {
 
-    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx < n) {
+    for (int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+         idx < n; idx += static_cast<int64_t>(blockDim.x) * gridDim.x) {
         grad_input[idx] = grad_output[idx] * T(mask[idx]) * T(scale);
     }
 }
@@ -650,8 +677,8 @@ __global__ void dropout_forward_kernel_fp16(
     float p,
     float scale) {
 
-    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx < n) {
+    for (int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+         idx < n; idx += static_cast<int64_t>(blockDim.x) * gridDim.x) {
         float r = random_values[idx];
         if (r < p) {
             mask[idx] = 0.0f;
@@ -671,8 +698,8 @@ __global__ void dropout_backward_kernel_hip_fp16(
     int64_t n,
     float scale) {
 
-    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx < n) {
+    for (int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+         idx < n; idx += static_cast<int64_t>(blockDim.x) * gridDim.x) {
         grad_input[idx] = tenzor::rocm::safe_f2h(tenzor::rocm::safe_h2f(grad_output[idx]) * mask[idx] * scale);
     }
 }
@@ -700,10 +727,10 @@ auto dropout_kernel(const Tensor& input, float p, bool training, hipStream_t str
     // Generate random values on device
     Tensor random_values({n}, DType::Float32, input.device());
 
-    hiprandGenerator_t gen;
-    hiprandCreateGenerator(&gen, HIPRAND_RNG_PSEUDO_DEFAULT);
-    hiprandSetStream(gen, stream);
-    hiprandGenerateUniform(gen, random_values.data<float>(), n);
+    HiprandGeneratorGuard gen_guard(HIPRAND_RNG_PSEUDO_DEFAULT);
+    hiprandGenerator_t gen = gen_guard.get();
+    HIPRAND_CHECK(hiprandSetStream(gen, stream));
+    HIPRAND_CHECK(hiprandGenerateUniform(gen, random_values.data<float>(), n));
 
     float scale = 1.0f / (1.0f - p);
     int num_blocks = get_num_blocks(n);
@@ -733,16 +760,14 @@ auto dropout_kernel(const Tensor& input, float p, bool training, hipStream_t str
             mask.data<float>(),
             n, p, scale);
     } else if (input.dtype() == DType::BFloat16) {
-        hiprandDestroyGenerator(gen);
+        // gen_guard frees the generator when it goes out of scope on return.
         auto input_f32 = input.to(DType::Float32);
         auto [output_f32, mask_out] = dropout_kernel(input_f32, p, training, stream);
         return {output_f32.to(DType::BFloat16), mask_out};
     } else {
-        hiprandDestroyGenerator(gen);
         throw std::runtime_error("Dropout only supports Float32, Float64, Float16, and BFloat16");
     }
 
-    hiprandDestroyGenerator(gen);
     HIP_CHECK(hipGetLastError());
     return {output, mask};
 }

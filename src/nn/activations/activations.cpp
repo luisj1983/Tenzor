@@ -151,11 +151,11 @@ auto gelu(const Variable& input, const std::string& approximate) -> Variable {
     if (approximate == "tanh") {
         auto x = input;
         auto x_cubed = x * x * x;
-        Tensor coef_t = full({1}, 0.044715f, input.tensor().dtype(), input.tensor().device());
-        Tensor sqrt_2_pi_t = full({1}, static_cast<float>(std::sqrt(2.0 / M_PI)),
+        Tensor coef_t = full({1}, 0.044715, input.tensor().dtype(), input.tensor().device());
+        Tensor sqrt_2_pi_t = full({1}, std::sqrt(2.0 / M_PI),
                                   input.tensor().dtype(), input.tensor().device());
-        Tensor half_t = full({1}, 0.5f, input.tensor().dtype(), input.tensor().device());
-        Tensor one_t = full({1}, 1.0f, input.tensor().dtype(), input.tensor().device());
+        Tensor half_t = full({1}, 0.5, input.tensor().dtype(), input.tensor().device());
+        Tensor one_t = full({1}, 1.0, input.tensor().dtype(), input.tensor().device());
         Variable coef(coef_t, false);
         Variable sqrt_2_pi(sqrt_2_pi_t, false);
         Variable half(half_t, false);
@@ -337,7 +337,20 @@ auto PReLU::forward_impl(const Variable& input) -> Variable {
     auto relu_x = relu(input);
     auto neg_part = input - relu_x;  // min(0, x)
 
-    // weight has shape [num_parameters], broadcasts with input
+    // The learnable weight has shape [num_parameters]. With right-aligned
+    // broadcasting a per-channel weight [C] would align with the LAST input
+    // axis (W for [N,C,H,W]) instead of the channel dim. Reshape it to
+    // [1, C, 1, ..., 1] (rank == input.ndim()) so it broadcasts along dim 1,
+    // matching PyTorch's per-channel PReLU. Single-parameter weights ([1])
+    // broadcast against every element regardless, so leave them untouched.
+    if (num_parameters_ > 1 && input.tensor().ndim() > 2) {
+        std::vector<int64_t> wshape(input.tensor().ndim(), 1);
+        wshape[1] = num_parameters_;
+        auto weight_bcast = ::tenzor::reshape(weight, wshape);
+        return relu_x + weight_bcast * neg_part;
+    }
+
+    // [N, C] (or num_parameters_ == 1): right-aligned broadcasting is correct.
     return relu_x + weight * neg_part;
 }
 

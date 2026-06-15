@@ -46,12 +46,13 @@ void main() {
         int new_exp = int(exp) - 127 + 7;
 
         if (new_exp >= 15) {
-            // Overflow -> max finite value (E4M3 has no infinity)
-            // exp=15, mantissa=0 is valid number (448), exp=15 mantissa=7 is NaN
-            // Clamp to exp=14, mantissa=7 = largest non-NaN value with exp<15
-            // Or exp=15, mantissa=0 = 448 (valid). Use exp=15, mantissa=0 for max.
+            // Overflow -> max finite value (E4M3 has no infinity).
+            // In E4M3 (OCP fp8): exp=15 (0xF) with mantissa 0..6 are finite,
+            // mantissa=7 (0x7) is reserved for NaN. The largest finite value is
+            // therefore exp=15, mantissa=6 = 448.0 — matching the CPU converter
+            // (src/core/dtype.cpp). (exp=15, mantissa=0 would only be 256.0.)
             h_exp = 0xFu;
-            h_mantissa = 0u;
+            h_mantissa = 0x6u;
         } else if (new_exp <= 0) {
             // Denormalized or underflow
             if (new_exp >= -3) {

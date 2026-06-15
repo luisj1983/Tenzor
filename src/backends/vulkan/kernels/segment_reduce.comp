@@ -5,6 +5,7 @@
 // Push constants encode the reduce mode:
 //   0 = sum, 1 = mean, 2 = max, 3 = min, 4 = prod
 layout(local_size_x_id = 0) in;
+layout(constant_id = 0) const uint WORKGROUP_SIZE = 256;
 
 layout(binding = 0) readonly buffer Data    { float data_buf[]; };
 layout(binding = 1) readonly buffer Offsets { int   offsets_buf[]; };
@@ -18,7 +19,9 @@ layout(push_constant) uniform PushConstants {
     uint inner_size;
 } params;
 
-shared float sdata[256];  // Shared memory for workgroup reduction
+// Sized by the actual workgroup size (spec constant). A hardcoded [256] would
+// overflow the accumulation/tree-reduction loops on devices with wgSize > 256.
+shared float sdata[WORKGROUP_SIZE];
 
 void main() {
     uint wg_id = gl_WorkGroupID.x;

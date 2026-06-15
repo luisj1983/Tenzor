@@ -828,12 +828,16 @@ protected:
      * @param lr Learning rate
      * @param momentum_coef Momentum coefficient
      * @param weight_decay Weight decay coefficient
+     * @param dampening Dampening for momentum
+     * @param nesterov Whether to use Nesterov momentum
      */
     auto update_partition_sgd(
         StatePartition& partition,
         double lr,
         double momentum_coef,
-        double weight_decay
+        double weight_decay,
+        double dampening = 0.0,
+        bool nesterov = false
     ) -> void;
 
     /**
@@ -1824,6 +1828,19 @@ public:
      * @return true if parameter should be offloaded to CPU
      */
     auto should_offload_parameter(Tensor* param) -> bool;
+
+    /**
+     * @brief should_offload_parameter variant that assumes the caller already
+     *        holds param_states_mutex_.
+     *
+     * The public should_offload_parameter() snapshots param state under
+     * param_states_mutex_. adaptive_offload_decision() iterates param_states_
+     * while holding that mutex, so calling the public variant from there would
+     * re-acquire the non-recursive param_states_mutex_ on the same thread and
+     * self-deadlock. This variant reads the already-locked state directly and
+     * only acquires adaptive_mutex_ (a distinct mutex).
+     */
+    auto should_offload_parameter_locked(Tensor* param) -> bool;
 
     /**
      * @brief Make adaptive offload decision based on current memory state

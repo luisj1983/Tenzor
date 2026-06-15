@@ -798,6 +798,48 @@ auto mean_kernel(const Tensor& input, int64_t dim, bool keepdim, sycl::queue& qu
                 out_ptr[outer_idx * inner_size + inner_idx] = f32_to_bf16(sum * scale);
             });
         }
+        else if (in_cont.dtype() == DType::Complex64) {
+            const float* in_ptr = reinterpret_cast<const float*>(in_cont.data_ptr());
+            float* out_ptr = reinterpret_cast<float*>(const_cast<void*>(output.data_ptr()));
+            const float scale = 1.0f / static_cast<float>(dim_size);
+
+            queue.parallel_for(sycl::range<2>(outer_size, inner_size), [=](sycl::id<2> idx) {
+                const int64_t outer_idx = idx[0];
+                const int64_t inner_idx = idx[1];
+                const int64_t base_offset = outer_idx * dim_size * inner_size + inner_idx;
+                float re = 0.0f;
+                float im = 0.0f;
+                for (int64_t d = 0; d < dim_size; ++d) {
+                    int64_t src = 2 * (base_offset + d * inner_size);
+                    re += in_ptr[src];
+                    im += in_ptr[src + 1];
+                }
+                int64_t dst = 2 * (outer_idx * inner_size + inner_idx);
+                out_ptr[dst]     = re * scale;
+                out_ptr[dst + 1] = im * scale;
+            });
+        }
+        else if (in_cont.dtype() == DType::Complex128) {
+            const double* in_ptr = reinterpret_cast<const double*>(in_cont.data_ptr());
+            double* out_ptr = reinterpret_cast<double*>(const_cast<void*>(output.data_ptr()));
+            const double scale = 1.0 / static_cast<double>(dim_size);
+
+            queue.parallel_for(sycl::range<2>(outer_size, inner_size), [=](sycl::id<2> idx) {
+                const int64_t outer_idx = idx[0];
+                const int64_t inner_idx = idx[1];
+                const int64_t base_offset = outer_idx * dim_size * inner_size + inner_idx;
+                double re = 0.0;
+                double im = 0.0;
+                for (int64_t d = 0; d < dim_size; ++d) {
+                    int64_t src = 2 * (base_offset + d * inner_size);
+                    re += in_ptr[src];
+                    im += in_ptr[src + 1];
+                }
+                int64_t dst = 2 * (outer_idx * inner_size + inner_idx);
+                out_ptr[dst]     = re * scale;
+                out_ptr[dst + 1] = im * scale;
+            });
+        }
         else {
             throw std::runtime_error("Unsupported dtype for mean reduction");
         }
@@ -1296,7 +1338,10 @@ static void sycl_arg_reduce_full(const ReadT* in_ptr, int64_t* out_ptr,
                 } else {
                     best_val = std::numeric_limits<T>::max();
                 }
-                int64_t best_idx = 0;
+                // INT64_MAX sentinel: a thread whose grid-stride range is empty
+                // (gid >= total_size) never wins a value-tie against a real
+                // element on the index tie-break below.
+                int64_t best_idx = std::numeric_limits<int64_t>::max();
 
                 for (int64_t i = gid; i < total_size; i += num_wgs * WG_SIZE) {
                     T val;
@@ -1317,18 +1362,24 @@ static void sycl_arg_reduce_full(const ReadT* in_ptr, int64_t* out_ptr,
                 local_idxs[lid] = best_idx;
                 sycl::group_barrier(item.get_group());
 
-                // Tree reduction in shared memory
+                // Tree reduction in shared memory. Tie-break by smaller flat
+                // index so the result matches the CPU reference (first
+                // occurrence) regardless of which thread held the duplicate.
                 for (int64_t stride = WG_SIZE / 2; stride > 0; stride >>= 1) {
                     if (lid < stride) {
+                        const T ov = local_vals[lid + stride];
+                        const int64_t oidx = local_idxs[lid + stride];
                         if constexpr (IsMax) {
-                            if (local_vals[lid + stride] > local_vals[lid]) {
-                                local_vals[lid] = local_vals[lid + stride];
-                                local_idxs[lid] = local_idxs[lid + stride];
+                            if (ov > local_vals[lid] ||
+                                (ov == local_vals[lid] && oidx < local_idxs[lid])) {
+                                local_vals[lid] = ov;
+                                local_idxs[lid] = oidx;
                             }
                         } else {
-                            if (local_vals[lid + stride] < local_vals[lid]) {
-                                local_vals[lid] = local_vals[lid + stride];
-                                local_idxs[lid] = local_idxs[lid + stride];
+                            if (ov < local_vals[lid] ||
+                                (ov == local_vals[lid] && oidx < local_idxs[lid])) {
+                                local_vals[lid] = ov;
+                                local_idxs[lid] = oidx;
                             }
                         }
                     }
@@ -1342,11 +1393,20 @@ static void sycl_arg_reduce_full(const ReadT* in_ptr, int64_t* out_ptr,
             });
     });
 
-    // Phase 2: Single work-group reduces partial results
-    // Use a work-group size that covers all partials (round up to power of 2)
-    int64_t phase2_wg = 1;
-    while (phase2_wg < num_wgs) phase2_wg <<= 1;
-    if (phase2_wg > WG_SIZE) phase2_wg = WG_SIZE; // cap at WG_SIZE
+    // Phase 2: A single work-group reduces ALL `num_wgs` partial results.
+    //
+    // The work-group is always WG_SIZE wide; each thread first folds an
+    // arbitrary number of partials via a grid-stride loop (lid, lid+WG_SIZE,
+    // lid+2*WG_SIZE, ...). This guarantees every partial is consumed even when
+    // num_wgs > WG_SIZE (input > WG_SIZE*WG_SIZE = 65536 elements) — the old
+    // code capped the work-group at WG_SIZE and read only the first WG_SIZE
+    // partials via `local_vals[lid] = partial_vals[lid]`, silently dropping the
+    // tail and returning a wrong index for large tensors.
+    //
+    // Tie-breaking matches the CPU reference (first occurrence = smallest flat
+    // index): on equal values we keep the candidate with the smaller stored
+    // index, in both the grid-stride fold and the in-group tree reduction.
+    const int64_t phase2_wg = WG_SIZE;
 
     queue.submit([&](sycl::handler& cgh) {
         cgh.depends_on(phase1_event);
@@ -1360,30 +1420,49 @@ static void sycl_arg_reduce_full(const ReadT* in_ptr, int64_t* out_ptr,
             [=](sycl::nd_item<1> item) {
                 const int64_t lid = item.get_local_id(0);
 
-                if (lid < n_partials) {
-                    local_vals[lid] = partial_vals[lid];
-                    local_idxs[lid] = partial_idxs[lid];
+                T best_val;
+                if constexpr (IsMax) {
+                    best_val = std::numeric_limits<T>::lowest();
                 } else {
-                    if constexpr (IsMax) {
-                        local_vals[lid] = std::numeric_limits<T>::lowest();
-                    } else {
-                        local_vals[lid] = std::numeric_limits<T>::max();
-                    }
-                    local_idxs[lid] = 0;
+                    best_val = std::numeric_limits<T>::max();
                 }
+                int64_t best_idx = std::numeric_limits<int64_t>::max();
+
+                // Grid-stride fold: every partial in [0, n_partials) is visited
+                // by exactly one thread, regardless of how large n_partials is.
+                for (int64_t p = lid; p < n_partials; p += phase2_wg) {
+                    const T v = partial_vals[p];
+                    const int64_t pidx = partial_idxs[p];
+                    if constexpr (IsMax) {
+                        if (v > best_val || (v == best_val && pidx < best_idx)) {
+                            best_val = v; best_idx = pidx;
+                        }
+                    } else {
+                        if (v < best_val || (v == best_val && pidx < best_idx)) {
+                            best_val = v; best_idx = pidx;
+                        }
+                    }
+                }
+
+                local_vals[lid] = best_val;
+                local_idxs[lid] = best_idx;
                 sycl::group_barrier(item.get_group());
 
                 for (int64_t stride = phase2_wg / 2; stride > 0; stride >>= 1) {
                     if (lid < stride) {
+                        const T ov = local_vals[lid + stride];
+                        const int64_t oidx = local_idxs[lid + stride];
                         if constexpr (IsMax) {
-                            if (local_vals[lid + stride] > local_vals[lid]) {
-                                local_vals[lid] = local_vals[lid + stride];
-                                local_idxs[lid] = local_idxs[lid + stride];
+                            if (ov > local_vals[lid] ||
+                                (ov == local_vals[lid] && oidx < local_idxs[lid])) {
+                                local_vals[lid] = ov;
+                                local_idxs[lid] = oidx;
                             }
                         } else {
-                            if (local_vals[lid + stride] < local_vals[lid]) {
-                                local_vals[lid] = local_vals[lid + stride];
-                                local_idxs[lid] = local_idxs[lid + stride];
+                            if (ov < local_vals[lid] ||
+                                (ov == local_vals[lid] && oidx < local_idxs[lid])) {
+                                local_vals[lid] = ov;
+                                local_idxs[lid] = oidx;
                             }
                         }
                     }

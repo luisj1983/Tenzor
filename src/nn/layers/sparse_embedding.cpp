@@ -1,5 +1,6 @@
 #include "tenzor/nn/layers/sparse_embedding.hpp"
 #include "tenzor/ops/creation.hpp"
+#include "tenzor/ops/indexing.hpp"
 #include "tenzor/ops/op_id.hpp"
 #include "tenzor/backend/fast_dispatch.hpp"
 #include "tenzor/backend/op_attributes.hpp"
@@ -31,13 +32,18 @@ public:
         std::array<Tensor, 2> inputs = {grad, indices_};
         auto result = dispatch_single<OpId::EmbeddingBackward>(inputs, attrs);
 
-        // Zero out padding_idx gradient if applicable
-        if (padding_idx_ >= 0) {
-            auto result_data = result.data_ptr();
-            auto elem_size = result.element_size();
-            std::memset(
-                static_cast<char*>(result_data) + padding_idx_ * embedding_dim_ * elem_size,
-                0, embedding_dim_ * elem_size);
+        // Zero out padding_idx gradient if applicable. EmbeddingBackward is
+        // registered on every GPU backend, so `result` may live on a device;
+        // a host std::memset on its data pointer is UB on GPU. Zero the row
+        // device-agnostically via index_fill along dim 0 (dispatches to the
+        // backend), building the index on CPU and moving it to the grad device.
+        if (padding_idx_ >= 0 && padding_idx_ < num_embeddings_) {
+            Tensor pad_index_host = zeros({1}, DType::Int64, Device::cpu());
+            pad_index_host.data<int64_t>()[0] = padding_idx_;
+            Tensor pad_index = (result.device() == Device::cpu())
+                                 ? pad_index_host
+                                 : pad_index_host.to(result.device());
+            result = tenzor::index_fill(result, 0, pad_index, 0.0);
         }
 
         return {result};

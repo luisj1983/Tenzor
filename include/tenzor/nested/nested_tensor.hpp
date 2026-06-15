@@ -78,8 +78,13 @@ public:
      *
      * @param values Contiguous values buffer [total_len, *regular_dims]
      * @param offsets Cumulative offsets [B+1], Int64
-     * @param ragged_dim Ragged dimension index (default: 1)
+     * @param ragged_dim Ragged dimension index. Only the default value of 1 is
+     *        supported: the layout is a single leading ragged axis
+     *        ([total_len, *regular_dims]), and select()/unbind()/
+     *        to_padded_tensor() all assume ragged_dim == 1. Passing any other
+     *        value throws std::runtime_error.
      * @return NestedTensor
+     * @throws std::runtime_error if ragged_dim != 1.
      */
     static auto from_jagged(Tensor values, Tensor offsets,
                             int64_t ragged_dim = 1) -> NestedTensor;

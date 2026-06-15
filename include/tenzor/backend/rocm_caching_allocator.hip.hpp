@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstddef>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <set>
@@ -309,9 +310,16 @@ private:
     /**
      * @brief Release a block back to device
      *
+     * Only a block that still owns its original hipMalloc pointer
+     * (`ptr == original_ptr`) may be device-freed; interior split-remainder
+     * blocks are skipped (returns false) and reclaimed only once merging
+     * reassembles the full allocation.
+     *
      * @param block Block to release
+     * @return True if the block was device-freed, false if it was an interior
+     *         sub-block that cannot be freed standalone.
      */
-    void release_block(Block* block);
+    bool release_block(Block* block);
 
     /**
      * @brief Initialize device properties
@@ -351,6 +359,11 @@ private:
 
         // All blocks (free and allocated) by pointer
         std::unordered_map<void*, std::unique_ptr<Block>> all_blocks;
+
+        // Address-ordered index (non-owning) into all_blocks, enabling O(log n)
+        // predecessor lookup for backward coalescing on free(). Mirrors the
+        // CUDA reference allocator.
+        std::map<void*, Block*> blocks_by_addr;
 
         // Statistics
         MemoryStats stats;

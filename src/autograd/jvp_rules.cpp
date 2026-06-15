@@ -1205,9 +1205,17 @@ auto jvp_norm(const DualTensor& x, double p, std::optional<int64_t> dim, bool ke
     // The public `tenzor::norm` API takes `float p` today; we keep the helper's
     // contract as `double` (audit-5 Y.1) so users on Float64 don't lose precision
     // in the `|x|^(p-1)` path which is computed at double width below.
-    auto y_kd = tenzor::norm(x.primal(), static_cast<float>(p), dim, /*keepdim=*/true);
     auto abs_x = tenzor::abs(x.primal());
     auto sgn   = tenzor::sign(x.primal());
+    // Compute the PRIMAL norm via the same closed-form composition the tangent
+    // uses (abs -> pow(p) -> sum -> pow(1/p)), so the exponent stays full-double
+    // p. Routing the primal through `tenzor::norm(static_cast<float>(p), ...)`
+    // would float-round the exponent (e.g. p=2.1) while the tangent terms below
+    // use the exact double p, yielding inconsistent halves of the DualTensor
+    // on Float64. `tenzor::pow` takes a double exponent, matching lines below.
+    auto y_kd = tenzor::pow(
+        tenzor::sum(tenzor::pow(abs_x, p), dim, /*keepdim=*/true),
+        1.0 / p);
     auto pow_abs = tenzor::pow(abs_x, p - 1.0);
     // Guard against the p<1 singularity at x=0: |x|^(p-1) is +inf there, and
     // sign(0)=0 makes the product NaN. The contribution at exactly x=0 should
@@ -6686,25 +6694,37 @@ JvpResult jvp_adapter_cosine_similarity_s15(std::span<const Tensor> primals,
     auto primal_out = tenzor::dispatch(OpId::CosineSimilarity,
         std::vector<Tensor>{a, b}, attrs)[0];
 
+    // Match the primal kernel's denominator exactly (math.cpp cosine kernel):
+    //   D = sqrt(na2) * sqrt(nb2) + eps          (eps added once to the product)
+    // The earlier form sqrt(na2+eps^2)*sqrt(nb2+eps^2) differentiates a
+    // different function than the primal, breaking forward-mode gradcheck for
+    // small-magnitude inputs. Here primal = dot / D and
+    //   tangent = (d_dot - primal * dD) / D,
+    //   dD = na' * sqrt(nb2) + sqrt(na2) * nb',
+    //   na' = sum(a*da) / sqrt(na2), nb' = sum(b*db) / sqrt(nb2).
+    // A tiny floor guards the divisions by the norms (the sqrt of a sum of
+    // squares can be exactly zero for a zero input vector).
     auto dot = tenzor::sum(tenzor::mul(a, b), dim, false);
     auto na2 = tenzor::sum(tenzor::mul(a, a), dim, false);
     auto nb2 = tenzor::sum(tenzor::mul(b, b), dim, false);
-    auto na = tenzor::sqrt(tenzor::add(na2,
-        tenzor::full({}, eps * eps, a.dtype(), a.device())));
-    auto nb = tenzor::sqrt(tenzor::add(nb2,
-        tenzor::full({}, eps * eps, b.dtype(), b.device())));
+    const double kNormFloor = 1e-30;
+    auto norm_a = tenzor::sqrt(tenzor::add(na2,
+        tenzor::full({}, kNormFloor, a.dtype(), a.device())));
+    auto norm_b = tenzor::sqrt(tenzor::add(nb2,
+        tenzor::full({}, kNormFloor, b.dtype(), b.device())));
+
+    auto D = tenzor::add(tenzor::mul(norm_a, norm_b),
+        tenzor::full({}, eps, a.dtype(), a.device()));
 
     auto d_dot = tenzor::sum(
         tenzor::add(tenzor::mul(da, b), tenzor::mul(a, db)), dim, false);
-    auto d_na  = tenzor::div(tenzor::sum(tenzor::mul(a, da), dim, false), na);
-    auto d_nb  = tenzor::div(tenzor::sum(tenzor::mul(b, db), dim, false), nb);
+    auto d_na  = tenzor::div(tenzor::sum(tenzor::mul(a, da), dim, false), norm_a);
+    auto d_nb  = tenzor::div(tenzor::sum(tenzor::mul(b, db), dim, false), norm_b);
 
-    auto nxny = tenzor::mul(na, nb);
-    auto tangent_out = tenzor::sub(
-        tenzor::div(d_dot, nxny),
-        tenzor::mul(primal_out, tenzor::add(
-            tenzor::div(d_na, na),
-            tenzor::div(d_nb, nb))));
+    auto dD = tenzor::add(tenzor::mul(d_na, norm_b), tenzor::mul(norm_a, d_nb));
+
+    auto tangent_out = tenzor::div(
+        tenzor::sub(d_dot, tenzor::mul(primal_out, dD)), D);
     return JvpResult{std::move(primal_out), std::move(tangent_out)};
 }
 

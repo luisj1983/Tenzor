@@ -153,32 +153,91 @@ RendezvousStore::~RendezvousStore() {
     }
 }
 
+namespace {
+
+// Upper bound on a master-supplied response length. Rendezvous responses are
+// small numeric/string values (counts, ports, host:pid keys); 16 MiB is far
+// more than any legitimate payload and small enough that a corrupt/hostile
+// length cannot trigger a multi-gigabyte allocation.
+constexpr uint32_t kMaxRendezvousResponse = 16u * 1024u * 1024u;
+
+// Write exactly `len` bytes; throw on short write or error so a desync of the
+// length-prefixed protocol fails loudly instead of silently corrupting it.
+auto send_all(int fd, const void* data, size_t len, const char* what) -> void {
+    const char* p = static_cast<const char*>(data);
+    size_t sent = 0;
+    while (sent < len) {
+        ssize_t n = ::send(fd, p + sent, len - sent, 0);
+        if (n < 0) {
+            if (errno == EINTR) continue;
+            throw std::runtime_error(
+                std::string("RendezvousStore: send failed (") + what + "): " +
+                std::strerror(errno));
+        }
+        if (n == 0) {
+            throw std::runtime_error(
+                std::string("RendezvousStore: short send (") + what + ")");
+        }
+        sent += static_cast<size_t>(n);
+    }
+}
+
+// Read exactly `len` bytes; throw on short read / EOF / error.
+auto recv_all(int fd, void* data, size_t len, const char* what) -> void {
+    char* p = static_cast<char*>(data);
+    size_t got = 0;
+    while (got < len) {
+        ssize_t n = ::recv(fd, p + got, len - got, MSG_WAITALL);
+        if (n < 0) {
+            if (errno == EINTR) continue;
+            throw std::runtime_error(
+                std::string("RendezvousStore: recv failed (") + what + "): " +
+                std::strerror(errno));
+        }
+        if (n == 0) {
+            throw std::runtime_error(
+                std::string("RendezvousStore: peer closed during recv (") +
+                what + ")");
+        }
+        got += static_cast<size_t>(n);
+    }
+}
+
+} // anonymous namespace
+
 auto RendezvousStore::set(const std::string& key, const std::string& value) -> void {
     connect_to_master();
 
-    // Send SET command
+    // Send SET command. Verify the full byte count so a short write cannot
+    // desync the master's length-prefixed protocol.
     std::string command = "SET:" + key + ":" + value;
-    uint32_t len = command.size();
-    ::send(socket_fd_, &len, sizeof(len), 0);
-    ::send(socket_fd_, command.c_str(), len, 0);
+    uint32_t len = static_cast<uint32_t>(command.size());
+    send_all(socket_fd_, &len, sizeof(len), "set len");
+    send_all(socket_fd_, command.c_str(), len, "set payload");
 }
 
 auto RendezvousStore::get(const std::string& key) -> std::string {
     connect_to_master();
 
-    // Send GET command
+    // Send GET command (full byte count verified).
     std::string command = "GET:" + key;
-    uint32_t len = command.size();
-    ::send(socket_fd_, &len, sizeof(len), 0);
-    ::send(socket_fd_, command.c_str(), len, 0);
+    uint32_t len = static_cast<uint32_t>(command.size());
+    send_all(socket_fd_, &len, sizeof(len), "get len");
+    send_all(socket_fd_, command.c_str(), len, "get payload");
 
-    // Receive response
-    uint32_t response_len;
-    ::recv(socket_fd_, &response_len, sizeof(response_len), MSG_WAITALL);
-
+    // Receive response. response_len is peer-controlled, so bound it before
+    // allocating and verify the full body arrives.
+    uint32_t response_len = 0;
+    recv_all(socket_fd_, &response_len, sizeof(response_len), "get response len");
+    if (response_len > kMaxRendezvousResponse) {
+        throw std::runtime_error(
+            "RendezvousStore::get: implausible response length " +
+            std::to_string(response_len));
+    }
     std::string response(response_len, '\0');
-    ::recv(socket_fd_, &response[0], response_len, MSG_WAITALL);
-
+    if (response_len > 0) {
+        recv_all(socket_fd_, &response[0], response_len, "get response body");
+    }
     return response;
 }
 
@@ -230,21 +289,32 @@ auto RendezvousStore::add(const std::string& key, int64_t delta) -> int64_t {
     connect_to_master();
 
     std::string command = "ADD:" + key + ":" + std::to_string(delta);
-    uint32_t len = command.size();
-    ::send(socket_fd_, &len, sizeof(len), 0);
-    ::send(socket_fd_, command.c_str(), len, 0);
+    uint32_t len = static_cast<uint32_t>(command.size());
+    send_all(socket_fd_, &len, sizeof(len), "add len");
+    send_all(socket_fd_, command.c_str(), len, "add payload");
 
     uint32_t response_len = 0;
-    if (::recv(socket_fd_, &response_len, sizeof(response_len), MSG_WAITALL)
-            != static_cast<ssize_t>(sizeof(response_len))) {
-        throw std::runtime_error("RendezvousStore::add: no response from master");
+    recv_all(socket_fd_, &response_len, sizeof(response_len), "add response len");
+    if (response_len > kMaxRendezvousResponse) {
+        throw std::runtime_error(
+            "RendezvousStore::add: implausible response length " +
+            std::to_string(response_len));
     }
     std::string response(response_len, '\0');
     if (response_len > 0) {
-        ::recv(socket_fd_, &response[0], response_len, MSG_WAITALL);
+        // Verify the full body arrives: a short read would leave trailing NULs
+        // and std::stoll would silently parse a truncated count.
+        recv_all(socket_fd_, &response[0], response_len, "add response body");
     }
     try {
-        return std::stoll(response);
+        size_t consumed = 0;
+        int64_t value = std::stoll(response, &consumed);
+        // Require the entire response to be numeric so a truncated/garbage body
+        // can't yield a partially-parsed slot/count.
+        if (consumed != response.size()) {
+            throw std::invalid_argument("non-numeric trailing data");
+        }
+        return value;
     } catch (...) {
         throw std::runtime_error("RendezvousStore::add: invalid response '" + response + "'");
     }

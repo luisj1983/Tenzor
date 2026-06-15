@@ -7,6 +7,7 @@
 #include "tenzor/ops/math.hpp"
 #include "tenzor/ops/reduction.hpp"
 #include "tenzor/ops/creation.hpp"
+#include "tenzor/ops/indexing.hpp"
 #include <algorithm>
 #include <atomic>
 #include <cmath>
@@ -377,9 +378,28 @@ auto prune_channels(
     // Try to cast to Conv2d
     auto conv = std::dynamic_pointer_cast<Conv2d>(module);
     if (!conv) {
-        // Not a Conv2d layer, apply unstructured pruning fallback
+        // Not a Conv2d layer: fall back to unstructured (magnitude) pruning.
+        //
+        // The Conv2d branch builds a brand-new module and never mutates the
+        // source weights. We cannot reconstruct an arbitrary module type here
+        // (Module is abstract and exposes no generic clone), so we cannot
+        // hand back a structurally-new object. We can, however, honour the
+        // "do not mutate the caller's tensors in place" half of the contract:
+        // clone every parameter before masking so the source Tensor storage
+        // (and any alias the caller still holds) is left byte-for-byte intact.
+        // apply_pruning_masks() then rebinds each parameter Variable to the
+        // freshly-masked clone rather than overwriting the original buffer.
         auto config = prune_unstructured(module, sparsity, criterion, false);
-        apply_pruning_masks(module, config);
+        for (auto& [name, param] : module->named_parameters()) {
+            auto it = config.masks.find(name);
+            if (it == config.masks.end()) {
+                continue;
+            }
+            // Clone first so the multiply reads from (and the rebind replaces)
+            // an independent buffer, leaving the pre-call storage untouched.
+            Tensor cloned = param->tensor().clone();
+            param->tensor() = it->second.apply(cloned);
+        }
         return module;
     }
 
@@ -473,61 +493,38 @@ auto prune_channels(
         has_bias
     );
 
-    // Copy weights for kept channels
-    auto pruned_params = pruned_conv->named_parameters();
-    Tensor new_weight;
-    Tensor new_bias;
+    // Write the surviving channels' parameters from the SOURCE conv into the
+    // new conv. The copy must be dtype- and device-agnostic: the importance
+    // scan above widened a host copy to Float32 only to rank channels, but the
+    // actual parameter transfer has to preserve the source's true dtype and
+    // device (otherwise a GPU / Float16 / BFloat16 conv would keep its random
+    // init weights). We do this entirely with tensor ops — build an Int64
+    // index of the kept output channels on the weight's own device and
+    // `index_select` along dim 0 — so the gathered tensor already lives on the
+    // correct device with the correct dtype, then assign it into the new conv's
+    // parameter Variable's tensor in place.
+    Tensor keep_idx_cpu({channels_to_keep}, DType::Int64, Device::cpu());
+    auto* keep_idx_data = keep_idx_cpu.data<int64_t>();
+    for (int64_t i = 0; i < channels_to_keep; ++i) {
+        keep_idx_data[i] = keep_indices[i];
+    }
 
+    auto pruned_params = pruned_conv->named_parameters();
     for (auto& [name, param] : pruned_params) {
         if (name.find("weight") != std::string::npos) {
-            new_weight = param->tensor();
-        } else if (name.find("bias") != std::string::npos) {
-            new_bias = param->tensor();
-        }
-    }
-
-    // Move new_weight to CPU first if on GPU, then convert to Float32 for data access
-    Tensor new_weight_cpu = new_weight;
-    if (new_weight.device() != Device::cpu()) {
-        new_weight_cpu = new_weight.to(Device::cpu());
-    }
-    if (new_weight_cpu.dtype() != DType::Float32) {
-        new_weight_cpu = new_weight_cpu.to(DType::Float32);
-    }
-    auto* new_weight_data = new_weight_cpu.data<float>();
-    int64_t channel_size = in_channels_per_group * kernel_h * kernel_w;
-
-    for (int64_t i = 0; i < channels_to_keep; ++i) {
-        int64_t old_channel_idx = keep_indices[i];
-        int64_t old_offset = old_channel_idx * channel_size;
-        int64_t new_offset = i * channel_size;
-
-        std::copy_n(weight_data + old_offset, channel_size, new_weight_data + new_offset);
-    }
-
-    // Copy bias if present
-    if (has_bias) {
-        // Move bias to CPU first if on GPU, then convert to Float32
-        Tensor bias_cpu = bias;
-        if (bias.device() != Device::cpu()) {
-            bias_cpu = bias.to(Device::cpu());
-        }
-        if (bias_cpu.dtype() != DType::Float32) {
-            bias_cpu = bias_cpu.to(DType::Float32);
-        }
-        // Move new_bias to CPU first if on GPU, then convert to Float32
-        Tensor new_bias_cpu = new_bias;
-        if (new_bias.device() != Device::cpu()) {
-            new_bias_cpu = new_bias.to(Device::cpu());
-        }
-        if (new_bias_cpu.dtype() != DType::Float32) {
-            new_bias_cpu = new_bias_cpu.to(DType::Float32);
-        }
-        auto* bias_data = bias_cpu.data<float>();
-        auto* new_bias_data = new_bias_cpu.data<float>();
-
-        for (int64_t i = 0; i < channels_to_keep; ++i) {
-            new_bias_data[i] = bias_data[keep_indices[i]];
+            // Select kept output channels (dim 0) from the source weight. The
+            // index tensor is moved onto the weight's device so dispatch lands
+            // on the same backend as the weight.
+            Tensor idx = (weight.device() == Device::cpu())
+                             ? keep_idx_cpu
+                             : keep_idx_cpu.to(weight.device());
+            param->tensor() = index_select(weight, 0, idx);
+        } else if (name.find("bias") != std::string::npos && has_bias) {
+            // Bias is indexed by output channel along its single axis (dim 0).
+            Tensor idx = (bias.device() == Device::cpu())
+                             ? keep_idx_cpu
+                             : keep_idx_cpu.to(bias.device());
+            param->tensor() = index_select(bias, 0, idx);
         }
     }
 
@@ -903,7 +900,7 @@ auto sensitivity_analysis(
 
 auto find_lottery_ticket(
     std::shared_ptr<Module> module,
-    [[maybe_unused]] const std::unordered_map<std::string, Tensor>& initial_weights,
+    const std::unordered_map<std::string, Tensor>& initial_weights,
     float target_sparsity,
     int num_rounds
 ) -> PruningConfig {
@@ -935,8 +932,54 @@ auto find_lottery_ticket(
         for (auto& [name, mask] : round_config.masks) {
             config.masks[name] = mask;
         }
+    }
 
-        // Reset remaining weights to initialization (caller's responsibility to retrain)
+    // Lottery Ticket Hypothesis: reset the surviving weights to their original
+    // initialization values, then re-apply the final merged mask. The caller
+    // retrains from this masked-initial state. Without this reset the returned
+    // config would describe the right sparsity pattern but the live module
+    // would still hold the fully-trained (and now repeatedly pruned) weights.
+    for (auto& [name, param] : module->named_parameters()) {
+        auto init_it = initial_weights.find(name);
+        if (init_it == initial_weights.end()) {
+            continue;  // No recorded initialization for this parameter.
+        }
+
+        Tensor& live = param->tensor();
+        const Tensor& init = init_it->second;
+
+        // Shape must match exactly; a mismatch indicates the recorded
+        // initialization does not belong to this parameter. std::span is not
+        // equality-comparable, so compare element-wise.
+        auto live_shape = live.shape();
+        auto init_shape = init.shape();
+        if (live_shape.size() != init_shape.size() ||
+            !std::equal(live_shape.begin(), live_shape.end(), init_shape.begin())) {
+            throw std::runtime_error(
+                "find_lottery_ticket: initial_weights shape mismatch for '" +
+                name + "'");
+        }
+
+        // Adapt the recorded initialization to the live parameter's dtype and
+        // device before applying the mask.
+        Tensor reset = init;
+        if (reset.dtype() != live.dtype()) {
+            reset = reset.to(live.dtype());
+        }
+        if (reset.device() != live.device()) {
+            reset = reset.to(live.device());
+        }
+
+        // Apply the final merged mask so pruned positions stay zero.
+        auto mask_it = config.masks.find(name);
+        if (mask_it != config.masks.end()) {
+            reset = mask_it->second.apply(reset);
+        }
+
+        // R.18-preserving in-place write: zero then add, so the live Tensor's
+        // Storage handle (and any aliasing views) is preserved.
+        live.zero_();
+        add_(live, reset);
     }
 
     return config;

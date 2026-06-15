@@ -1143,6 +1143,14 @@ auto cartesian_prod(std::span<const Tensor> tensors) -> Tensor {
         total *= t.shape()[0];
     }
 
+    // If any input is empty, the cartesian product is empty. Returning before
+    // the column loop also avoids integer division-by-zero (SIGFPE) at
+    // total / (n * repeat_inner) when some n == 0.
+    if (total == 0) {
+        return zeros({0, static_cast<int64_t>(tensors.size())},
+                     tensors[0].dtype(), tensors[0].device());
+    }
+
     // Build each column using repeat+tile pattern, then stack
     std::vector<Tensor> columns;
     int64_t repeat_inner = 1;

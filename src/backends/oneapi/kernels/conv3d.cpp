@@ -259,27 +259,60 @@ void col3im_grouped_3d_kernel(const sycl::half* data_col, int64_t total_channels
                                sycl::half* data_im, sycl::queue& queue) {
     const int64_t col_size = channels_per_group * kD * kH * kW * out_d * out_h * out_w;
 
-    queue.parallel_for<Conv3dGroupedCol3imKernelFloat16>(sycl::range<1>(col_size), [=](sycl::id<1> index) {
-        int64_t tmp = index;
-        int64_t ow = tmp % out_w; tmp /= out_w;
-        int64_t oh = tmp % out_h; tmp /= out_h;
-        int64_t od = tmp % out_d; tmp /= out_d;
-        int64_t kw = tmp % kW; tmp /= kW;
-        int64_t kh = tmp % kH; tmp /= kH;
-        int64_t kd = tmp % kD; tmp /= kD;
-        int64_t c_local = tmp;
-        int64_t c_global = channel_offset + c_local;
+    // Mirror conv2d.cpp Audit-F10: the previous non-atomic read-modify-write
+    // (`data_im[im_idx] = sycl::half(... + val)`) raced when multiple work-items
+    // mapped to the same im_idx (any kernel extent > 1), silently dropping
+    // gradient contributions. atomic_ref<sycl::half> isn't portable, so we
+    // accumulate into a Float32 USM scratch (widened from data_im), atomically
+    // fetch_add into it, then narrow the merged result back into data_im.
+    const int64_t im_total = total_channels * depth * height * width;
+    float* scratch = sycl::malloc_device<float>(static_cast<size_t>(im_total), queue);
+    if (scratch == nullptr) {
+        throw std::runtime_error("col3im_grouped_3d_kernel(F16): failed to allocate scratch USM");
+    }
 
-        int64_t id = od * stride_d - pad_d + kd * dil_d;
-        int64_t ih = oh * stride_h - pad_h + kh * dil_h;
-        int64_t iw = ow * stride_w - pad_w + kw * dil_w;
+    sycl::half* data_im_ptr = data_im;  // capture by value into the lambda
+    try {
+        // Widen current data_im contents into the float scratch.
+        queue.parallel_for(sycl::range<1>(im_total), [=](sycl::id<1> i) {
+            scratch[i] = static_cast<float>(data_im_ptr[i]);
+        }).wait();
 
-        if (id >= 0 && id < depth && ih >= 0 && ih < height && iw >= 0 && iw < width) {
-            int64_t im_idx = (c_global * depth + id) * height * width + ih * width + iw;
-            float val = static_cast<float>(data_col[index]);
-            data_im[im_idx] = sycl::half(static_cast<float>(data_im[im_idx]) + val);
-        }
-    });
+        // Accumulate atomically into scratch.
+        queue.parallel_for<Conv3dGroupedCol3imKernelFloat16>(sycl::range<1>(col_size), [=](sycl::id<1> index) {
+            int64_t tmp = index;
+            int64_t ow = tmp % out_w; tmp /= out_w;
+            int64_t oh = tmp % out_h; tmp /= out_h;
+            int64_t od = tmp % out_d; tmp /= out_d;
+            int64_t kw = tmp % kW; tmp /= kW;
+            int64_t kh = tmp % kH; tmp /= kH;
+            int64_t kd = tmp % kD; tmp /= kD;
+            int64_t c_local = tmp;
+            int64_t c_global = channel_offset + c_local;
+
+            int64_t id = od * stride_d - pad_d + kd * dil_d;
+            int64_t ih = oh * stride_h - pad_h + kh * dil_h;
+            int64_t iw = ow * stride_w - pad_w + kw * dil_w;
+
+            if (id >= 0 && id < depth && ih >= 0 && ih < height && iw >= 0 && iw < width) {
+                int64_t im_idx = (c_global * depth + id) * height * width + ih * width + iw;
+                float val = static_cast<float>(data_col[index]);
+                sycl::atomic_ref<float, sycl::memory_order::relaxed, sycl::memory_scope::device>
+                    atomic_val(scratch[im_idx]);
+                atomic_val.fetch_add(val);
+            }
+        }).wait();
+
+        // Narrow the merged scratch back into data_im.
+        queue.parallel_for(sycl::range<1>(im_total), [=](sycl::id<1> i) {
+            data_im_ptr[i] = sycl::half(scratch[i]);
+        }).wait();
+    } catch (...) {
+        sycl::free(scratch, queue);
+        throw;
+    }
+
+    sycl::free(scratch, queue);
 }
 
 #ifdef TENZOR_HAS_ONEDNN

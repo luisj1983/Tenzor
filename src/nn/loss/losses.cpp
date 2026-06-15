@@ -35,8 +35,14 @@ auto MSELoss::forward(const Variable& input, const Variable& target) -> Variable
             return mean(squared);
         case Reduction::Sum:
             return sum(squared);
-        case Reduction::BatchMean:
-            return sum(squared) / static_cast<float>(squared.tensor().shape()[0]);
+        case Reduction::BatchMean: {
+            const auto& shp = squared.tensor().shape();
+            int64_t bs = (!shp.empty()) ? shp[0] : 0;
+            if (bs > 0) {
+                return sum(squared) / static_cast<float>(bs);
+            }
+            return mean(squared);
+        }
     }
     return squared;
 }
@@ -145,9 +151,14 @@ auto BCEWithLogitsLoss::forward(const Variable& input, const Variable& target) -
         case Reduction::Sum:
             reduced = sum(loss_unreduced);
             break;
-        case Reduction::BatchMean:
-            reduced = sum(loss_unreduced) / static_cast<float>(loss_unreduced.tensor().shape()[0]);
+        case Reduction::BatchMean: {
+            const auto& shp = loss_unreduced.tensor().shape();
+            int64_t bs = (!shp.empty()) ? shp[0] : 0;
+            reduced = (bs > 0)
+                ? (sum(loss_unreduced) / static_cast<float>(bs))
+                : mean(loss_unreduced);
             break;
+        }
     }
     if (needs_upcast) {
         reduced = tenzor::nn::variable_cast(reduced, orig_dtype);
@@ -306,8 +317,14 @@ auto CrossEntropyLoss::forward(const Variable& input, const Tensor& target) -> V
         }
         case Reduction::Sum:
             return finalize(sum(neg_selected));
-        case Reduction::BatchMean:
-            return finalize(sum(neg_selected) / static_cast<float>(neg_selected.tensor().shape()[0]));
+        case Reduction::BatchMean: {
+            const auto& shp = neg_selected.tensor().shape();
+            int64_t bs = (!shp.empty()) ? shp[0] : 0;
+            if (bs > 0) {
+                return finalize(sum(neg_selected) / static_cast<float>(bs));
+            }
+            return finalize(mean(neg_selected));
+        }
     }
     return finalize(neg_selected);
 }
@@ -456,15 +473,29 @@ auto L1Loss::forward(const Variable& input, const Variable& target) -> Variable 
             return mean(abs_diff);
         case Reduction::Sum:
             return sum(abs_diff);
-        case Reduction::BatchMean:
-            return sum(abs_diff) / static_cast<float>(abs_diff.tensor().shape()[0]);
+        case Reduction::BatchMean: {
+            const auto& shp = abs_diff.tensor().shape();
+            int64_t bs = (!shp.empty()) ? shp[0] : 0;
+            if (bs > 0) {
+                return sum(abs_diff) / static_cast<float>(bs);
+            }
+            return mean(abs_diff);
+        }
     }
     return abs_diff;
 }
 
 // SmoothL1Loss implementation
 SmoothL1Loss::SmoothL1Loss(Reduction reduction, double beta)
-    : reduction_(reduction), beta_(beta) {}
+    : reduction_(reduction), beta_(beta) {
+    // A negative beta is meaningless (the transition threshold cannot be < 0)
+    // and would produce NaN/garbage. beta == 0 is permitted and degenerates to
+    // L1Loss (matching PyTorch semantics); it is handled in forward().
+    if (beta_ < 0.0) {
+        throw std::invalid_argument(
+            "SmoothL1Loss: beta must be >= 0 (got " + std::to_string(beta_) + ")");
+    }
+}
 
 auto SmoothL1Loss::forward(const Variable& input, const Variable& target) -> Variable {
     auto diff = input - target;
@@ -474,13 +505,21 @@ auto SmoothL1Loss::forward(const Variable& input, const Variable& target) -> Var
     // loss = 0.5 * (diff^2) / beta,           if |diff| < beta
     // loss = |diff| - 0.5 * beta,             otherwise
 
-    // Exact SmoothL1Loss (Huber loss) without branching:
-    //   loss = 0.5 * min(|diff|, beta)^2 / beta + max(|diff| - beta, 0)
-    // When |diff| < beta:  0.5 * |diff|^2 / beta + 0
-    // When |diff| >= beta: 0.5 * beta + |diff| - beta = |diff| - 0.5 * beta
-    auto clamped_abs = clamp(abs_diff, 0.0f, static_cast<float>(beta_));
-    auto excess = abs_diff - clamped_abs;  // max(|diff| - beta, 0)
-    auto loss_unreduced = (clamped_abs * clamped_abs * 0.5f) / static_cast<float>(beta_) + excess;
+    // beta == 0 degenerates to L1Loss (PyTorch semantics). The Huber formula
+    // below divides by beta, so the beta == 0 case would otherwise yield NaN
+    // (0/0). Fall back to |diff| directly.
+    Variable loss_unreduced = [&]() -> Variable {
+        if (beta_ == 0.0) {
+            return abs_diff;
+        }
+        // Exact SmoothL1Loss (Huber loss) without branching:
+        //   loss = 0.5 * min(|diff|, beta)^2 / beta + max(|diff| - beta, 0)
+        // When |diff| < beta:  0.5 * |diff|^2 / beta + 0
+        // When |diff| >= beta: 0.5 * beta + |diff| - beta = |diff| - 0.5 * beta
+        auto clamped_abs = clamp(abs_diff, 0.0f, static_cast<float>(beta_));
+        auto excess = abs_diff - clamped_abs;  // max(|diff| - beta, 0)
+        return (clamped_abs * clamped_abs * 0.5f) / static_cast<float>(beta_) + excess;
+    }();
 
     switch (reduction_) {
         case Reduction::None:
@@ -489,8 +528,14 @@ auto SmoothL1Loss::forward(const Variable& input, const Variable& target) -> Var
             return mean(loss_unreduced);
         case Reduction::Sum:
             return sum(loss_unreduced);
-        case Reduction::BatchMean:
-            return sum(loss_unreduced) / static_cast<float>(loss_unreduced.tensor().shape()[0]);
+        case Reduction::BatchMean: {
+            const auto& shp = loss_unreduced.tensor().shape();
+            int64_t bs = (!shp.empty()) ? shp[0] : 0;
+            if (bs > 0) {
+                return sum(loss_unreduced) / static_cast<float>(bs);
+            }
+            return mean(loss_unreduced);
+        }
     }
     return loss_unreduced;
 }
@@ -544,8 +589,14 @@ auto MarginRankingLoss::forward(const Variable& input1, const Variable& input2,
             return mean(loss);
         case Reduction::Sum:
             return sum(loss);
-        case Reduction::BatchMean:
-            return sum(loss) / static_cast<float>(loss.tensor().shape()[0]);
+        case Reduction::BatchMean: {
+            const auto& shp = loss.tensor().shape();
+            int64_t bs = (!shp.empty()) ? shp[0] : 0;
+            if (bs > 0) {
+                return sum(loss) / static_cast<float>(bs);
+            }
+            return mean(loss);
+        }
     }
     return loss;
 }

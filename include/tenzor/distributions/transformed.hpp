@@ -64,24 +64,28 @@ public:
             std::vector<int64_t>(value.shape().begin(), value.shape().end()),
             value.dtype(), value.device());
 
-        int64_t event_dim = 0;
         for (auto it = transforms_.rbegin(); it != transforms_.rend(); ++it) {
             Tensor prev = (*it)->inv(x);
             log_det = log_det + (*it)->log_abs_det_jacobian(prev, x);
-            event_dim = std::max(event_dim, (*it)->event_dim());
             x = prev;
         }
 
-        // Sum the per-element log-det over the transform's trailing event dims
-        // so its rank matches a base whose log_prob already reduced those dims
-        // (multivariate / Independent-wrapped). For element-wise transforms
-        // event_dim == 0, so this is a no-op. Mirrors PyTorch, which sums
-        // log_abs_det_jacobian over event_dim before subtracting.
-        for (int64_t i = 0; i < event_dim && log_det.ndim() > 0; ++i) {
+        // `base_->log_prob(x)` is already reduced over the base distribution's
+        // event dimensions (e.g. a multivariate / Independent-wrapped base
+        // reduces the trailing event dims). `log_det` is built at the full
+        // `value` rank, so before subtracting we must sum it over exactly the
+        // same trailing event dims — i.e. rank(value) - rank(base_lp). Reducing
+        // over the transforms' event_dim() is wrong: all shipped element-wise
+        // transforms report event_dim()==0, so the old reduction never fired
+        // and a multivariate base broadcast a full-rank log_det against a
+        // reduced base log_prob, yielding a wrong-rank, wrong-valued density.
+        Tensor base_lp = base_->log_prob(x);
+        int64_t reduce_dims = log_det.ndim() - base_lp.ndim();
+        for (int64_t i = 0; i < reduce_dims && log_det.ndim() > 0; ++i) {
             log_det = tenzor::sum(log_det, /*dim=*/-1, /*keepdim=*/false);
         }
 
-        return base_->log_prob(x) - log_det;
+        return base_lp - log_det;
     }
 
 
@@ -137,9 +141,16 @@ public:
                                         log_det_terms.size()), /*dim=*/0);
             auto E_logdet = tenzor::mean(stacked, /*dim=*/0, /*keepdim=*/false);
             return base_H + E_logdet;
-        } catch (const std::runtime_error&) {
-            // Base distribution has no closed-form entropy; fall back to MC
-            // directly on the transformed distribution.
+        } catch (const ::tenzor::NotImplementedError&) {
+            return distributions::detail::mc_entropy(
+                [this]() { return this->sample({}); },
+                [this](const Tensor& s) { return this->log_prob(s); });
+        } catch (const ::tenzor::error::DistributionMethodUndefined&) {
+            // Base distribution (or a transform) has no closed-form entropy /
+            // log_abs_det_jacobian; fall back to MC directly on the transformed
+            // distribution. Only this narrow signal triggers the fallback so
+            // genuine DType/Shape/Backend errors propagate instead of being
+            // masked as a harder-to-diagnose MC failure.
             return distributions::detail::mc_entropy(
                 [this]() { return this->sample({}); },
                 [this](const Tensor& s) { return this->log_prob(s); });

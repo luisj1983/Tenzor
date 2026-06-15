@@ -38,6 +38,28 @@ float readB(uint element_idx) {
     return float(uintBitsToFloat(bits << 16));
 }
 
+// Atomic half-word writer for the packed BFloat16 output. A blind whole-word
+// store (c[word]=bits0|bits1<<16) assumes row*N is even; for odd N + odd row
+// the element belongs in the high half so the truncated word_idx writes the
+// wrong slot and clobbers the neighbour. Write each element independently with
+// element_idx&1 + atomicCompSwap, matching matmul_f16::writeC. RNE-round to
+// bf16 and mask to 16 bits (the bias can carry into bit 16 on NaN payloads).
+void writeC(uint element_idx, float value) {
+    uint word_idx = element_idx >> 1u;
+    uint shift = (element_idx & 1u) * 16u;
+    uint bits = floatBitsToUint(value);
+    uint new_bits = ((bits + 0x7FFFu + ((bits >> 16) & 1u)) >> 16) & 0xFFFFu;
+    uint mask = 0xFFFFu << shift;
+
+    uint old_val = c[word_idx];
+    for (uint iter = 0u; iter < 65536u; iter++) {
+        uint expected = old_val;
+        uint new_val = (expected & ~mask) | (new_bits << shift);
+        old_val = atomicCompSwap(c[word_idx], expected, new_val);
+        if (old_val == expected) return;
+    }
+}
+
 void main() {
     uint row = gl_GlobalInvocationID.y;
     // Each thread processes 2 adjacent columns to write a complete packed word
@@ -96,15 +118,12 @@ void main() {
         barrier();
     }
 
-    // Write both results as a packed pair - no race condition!
+    // Write each result element independently via atomic half-word merge so
+    // odd N / odd row never clobbers a neighbouring element's half.
     if (row < params.M && col0 < params.N) {
-        uint out_idx = row * params.N + col0;
-        uint word_idx = out_idx / 2;
-
-        // Pack both bfloat16 values into one uint32 (convert from float32 accumulator)
-        uint bits0 = ((floatBitsToUint(sum0) + 0x7FFFu + ((floatBitsToUint(sum0) >> 16) & 1u)) >> 16);
-        uint bits1 = (col1 < params.N) ? (((floatBitsToUint(sum1) + 0x7FFFu + ((floatBitsToUint(sum1) >> 16) & 1u)) >> 16)) : 0u;
-
-        c[word_idx] = bits0 | (bits1 << 16);
+        writeC(row * params.N + col0, sum0);
+    }
+    if (row < params.M && col1 < params.N) {
+        writeC(row * params.N + col1, sum1);
     }
 }

@@ -1179,30 +1179,39 @@ auto bilstm_forward_kernel(
     HIP_CHECK(hipMemcpyAsync(h0_fwd.data_ptr(), h0.data_ptr(), state_bytes, hipMemcpyDeviceToDevice, stream));
     HIP_CHECK(hipMemcpyAsync(c0_fwd.data_ptr(), c0.data_ptr(), state_bytes, hipMemcpyDeviceToDevice, stream));
 
-    // Combine biases for forward
+    // Combine biases for forward.
+    // PyTorch LSTM uses a single fused bias = bias_ih + bias_hh. A cell may
+    // provide only one half (single-bias LSTM), so guard with OR and zero-fill
+    // the missing half: allocate a zero-initialized combined bias and add
+    // whichever halves are present. (add_bias_kernel accumulates with +=, so the
+    // buffer MUST be zeroed first.)
     Tensor bias_fwd;
-    if (bias_ih_fwd.numel() > 0 && bias_hh_fwd.numel() > 0) {
-        // For the ROCm lstm_forward_kernel, bias is a single combined bias
-        // We'll create a temporary combined bias by adding them
-        bias_fwd = Tensor({bias_ih_fwd.numel()}, input.dtype(), input.device());
-        // Simple addition kernel
-        int64_t total_bias = bias_ih_fwd.numel();
+    if (bias_ih_fwd.numel() > 0 || bias_hh_fwd.numel() > 0) {
+        int64_t total_bias = (bias_ih_fwd.numel() > 0) ? bias_ih_fwd.numel()
+                                                        : bias_hh_fwd.numel();
+        bias_fwd = Tensor({total_bias}, input.dtype(), input.device());
+        HIP_CHECK(hipMemsetAsync(bias_fwd.data_ptr(), 0,
+                                 total_bias * dtype_size(input.dtype()), stream));
         int block = 256;
         int grid = (total_bias + block - 1) / block;
         if (input.dtype() == DType::Float32) {
-            hipLaunchKernelGGL(add_bias_kernel<float>,
-                dim3(grid), dim3(block), 0, stream,
-                bias_ih_fwd.data<float>(), bias_fwd.data<float>(), 1, total_bias);
-            hipLaunchKernelGGL(add_bias_kernel<float>,
-                dim3(grid), dim3(block), 0, stream,
-                bias_hh_fwd.data<float>(), bias_fwd.data<float>(), 1, total_bias);
+            if (bias_ih_fwd.numel() > 0)
+                hipLaunchKernelGGL(add_bias_kernel<float>,
+                    dim3(grid), dim3(block), 0, stream,
+                    bias_ih_fwd.data<float>(), bias_fwd.data<float>(), 1, total_bias);
+            if (bias_hh_fwd.numel() > 0)
+                hipLaunchKernelGGL(add_bias_kernel<float>,
+                    dim3(grid), dim3(block), 0, stream,
+                    bias_hh_fwd.data<float>(), bias_fwd.data<float>(), 1, total_bias);
         } else if (input.dtype() == DType::Float64) {
-            hipLaunchKernelGGL(add_bias_kernel<double>,
-                dim3(grid), dim3(block), 0, stream,
-                bias_ih_fwd.data<double>(), bias_fwd.data<double>(), 1, total_bias);
-            hipLaunchKernelGGL(add_bias_kernel<double>,
-                dim3(grid), dim3(block), 0, stream,
-                bias_hh_fwd.data<double>(), bias_fwd.data<double>(), 1, total_bias);
+            if (bias_ih_fwd.numel() > 0)
+                hipLaunchKernelGGL(add_bias_kernel<double>,
+                    dim3(grid), dim3(block), 0, stream,
+                    bias_ih_fwd.data<double>(), bias_fwd.data<double>(), 1, total_bias);
+            if (bias_hh_fwd.numel() > 0)
+                hipLaunchKernelGGL(add_bias_kernel<double>,
+                    dim3(grid), dim3(block), 0, stream,
+                    bias_hh_fwd.data<double>(), bias_fwd.data<double>(), 1, total_bias);
         }
     }
 
@@ -1235,25 +1244,33 @@ auto bilstm_forward_kernel(
                    static_cast<const char*>(c0.data_ptr()) + state_bytes,
                    state_bytes, hipMemcpyDeviceToDevice, stream));
 
+    // Same OR-guard + zero-fill semantics as the forward direction above.
     Tensor bias_bwd;
-    if (bias_ih_bwd.numel() > 0 && bias_hh_bwd.numel() > 0) {
-        bias_bwd = Tensor({bias_ih_bwd.numel()}, input.dtype(), input.device());
-        int64_t total_bias = bias_ih_bwd.numel();
+    if (bias_ih_bwd.numel() > 0 || bias_hh_bwd.numel() > 0) {
+        int64_t total_bias = (bias_ih_bwd.numel() > 0) ? bias_ih_bwd.numel()
+                                                        : bias_hh_bwd.numel();
+        bias_bwd = Tensor({total_bias}, input.dtype(), input.device());
+        HIP_CHECK(hipMemsetAsync(bias_bwd.data_ptr(), 0,
+                                 total_bias * dtype_size(input.dtype()), stream));
         int bgrid = (total_bias + block - 1) / block;
         if (input.dtype() == DType::Float32) {
-            hipLaunchKernelGGL(add_bias_kernel<float>,
-                dim3(bgrid), dim3(block), 0, stream,
-                bias_ih_bwd.data<float>(), bias_bwd.data<float>(), 1, total_bias);
-            hipLaunchKernelGGL(add_bias_kernel<float>,
-                dim3(bgrid), dim3(block), 0, stream,
-                bias_hh_bwd.data<float>(), bias_bwd.data<float>(), 1, total_bias);
+            if (bias_ih_bwd.numel() > 0)
+                hipLaunchKernelGGL(add_bias_kernel<float>,
+                    dim3(bgrid), dim3(block), 0, stream,
+                    bias_ih_bwd.data<float>(), bias_bwd.data<float>(), 1, total_bias);
+            if (bias_hh_bwd.numel() > 0)
+                hipLaunchKernelGGL(add_bias_kernel<float>,
+                    dim3(bgrid), dim3(block), 0, stream,
+                    bias_hh_bwd.data<float>(), bias_bwd.data<float>(), 1, total_bias);
         } else if (input.dtype() == DType::Float64) {
-            hipLaunchKernelGGL(add_bias_kernel<double>,
-                dim3(bgrid), dim3(block), 0, stream,
-                bias_ih_bwd.data<double>(), bias_bwd.data<double>(), 1, total_bias);
-            hipLaunchKernelGGL(add_bias_kernel<double>,
-                dim3(bgrid), dim3(block), 0, stream,
-                bias_hh_bwd.data<double>(), bias_bwd.data<double>(), 1, total_bias);
+            if (bias_ih_bwd.numel() > 0)
+                hipLaunchKernelGGL(add_bias_kernel<double>,
+                    dim3(bgrid), dim3(block), 0, stream,
+                    bias_ih_bwd.data<double>(), bias_bwd.data<double>(), 1, total_bias);
+            if (bias_hh_bwd.numel() > 0)
+                hipLaunchKernelGGL(add_bias_kernel<double>,
+                    dim3(bgrid), dim3(block), 0, stream,
+                    bias_hh_bwd.data<double>(), bias_bwd.data<double>(), 1, total_bias);
         }
     }
 

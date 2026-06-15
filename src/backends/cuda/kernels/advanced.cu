@@ -3965,12 +3965,11 @@ __global__ void unique_consecutive_counts_kernel(const int64_t* __restrict__ inv
                                                   int64_t* __restrict__ counts,
                                                   int64_t n, int64_t num_unique)
 {
-    // Zero counts
-    for (int64_t idx = blockIdx.x * blockDim.x + threadIdx.x; idx < num_unique;
-         idx += blockDim.x * gridDim.x) {
-        counts[idx] = 0;
-    }
-    __syncthreads();
+    // counts[] is zeroed by a grid-safe cudaMemsetAsync on the same stream
+    // before this kernel launches. Do NOT re-zero in-kernel: a grid-stride
+    // zeroing loop is only block-synced (__syncthreads is block-scoped), so a
+    // thread in one block could zero counts[j] after a thread in another block
+    // has already atomicAdd'd into it, wiping the contribution (grid-wide race).
     // Count occurrences
     for (int64_t idx = blockIdx.x * blockDim.x + threadIdx.x; idx < n;
          idx += blockDim.x * gridDim.x) {

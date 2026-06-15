@@ -83,7 +83,13 @@ public:
         , next_hook_id_(other.next_hook_id_.load())
         , has_forward_hooks_(other.has_forward_hooks_)
         , has_backward_hooks_(other.has_backward_hooks_)
-    {}
+    {
+        // Transfer UID ownership to the moved-to shell. The moved-from shell
+        // must be invalidated (0 == reserved no-module sentinel) so that its
+        // ~Module() does NOT unregister this still-live module's parametrizations
+        // (WeightNorm/SpectralNorm) — both shells previously shared one id_.
+        other.id_ = 0;
+    }
     Module& operator=(Module&&) = delete;
     Module(const Module&) = delete;
     Module& operator=(const Module&) = delete;

@@ -19,6 +19,7 @@ auto pack_padded_sequence(const Tensor& input, const Tensor& lengths,
     Tensor seq_input = batch_first ? input.permute({1, 0, 2}) : input;
     // seq_input shape: (seq_len, batch, features)
     auto shape = seq_input.shape();
+    int64_t seq_len = shape[0];
     int64_t batch_size = shape[1];
     int64_t features = shape[2];
 
@@ -36,6 +37,15 @@ auto pack_padded_sequence(const Tensor& input, const Tensor& lengths,
     auto* len_data = lengths_int64.data<int64_t>();
     for (int64_t i = 0; i < batch_size; ++i) {
         len_vec[i] = len_data[i];
+        // The pack loop indexes seq_input along the time axis up to len_vec[i];
+        // a length exceeding the real time extent (shape[0]) — or a negative
+        // length — would read past the input buffer. Validate against seq_len.
+        if (len_vec[i] < 0 || len_vec[i] > seq_len) {
+            throw std::invalid_argument(
+                "pack_padded_sequence: length " + std::to_string(len_vec[i]) +
+                " at batch index " + std::to_string(i) +
+                " is out of range [0, " + std::to_string(seq_len) + "]");
+        }
     }
 
     // Create sort indices (descending by length)

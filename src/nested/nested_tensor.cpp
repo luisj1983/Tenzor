@@ -201,6 +201,17 @@ auto NestedTensor::from_jagged(Tensor values, Tensor offsets,
         throw std::runtime_error(
             "NestedTensor::from_jagged: offsets must be 1D with at least 2 elements");
     }
+    // The class layout is hardwired to a leading ragged axis: values_ is
+    // [total_ragged_len, *regular_dims], and select()/unbind()/to_padded_tensor()
+    // all slice dim 0 / build regular_shape_ from dims 1.. A ragged_dim other
+    // than 1 would be stored verbatim yet computed as if it were 1, silently
+    // producing wrong shapes/slices. Reject it until those paths are generalized.
+    if (ragged_dim != 1) {
+        throw std::runtime_error(
+            "NestedTensor::from_jagged: only ragged_dim == 1 is supported "
+            "(the layout uses a single leading ragged axis); got ragged_dim = " +
+            std::to_string(ragged_dim));
+    }
 
     int64_t B = offsets.numel() - 1;
 

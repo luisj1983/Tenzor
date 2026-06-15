@@ -146,10 +146,14 @@ auto Adagrad::on_parameters_appended_(size_t old_count, size_t new_count) -> voi
 }
 
 auto Adagrad::effective_lr() const -> double {
+    // Must match step_impl()'s decay indexing exactly: the update applied on
+    // step N (after step_count_ was bumped to N at the top of step_impl) uses
+    // lr / (1 + (N-1) * lr_decay). Reporting step_count_*lr_decay here was an
+    // off-by-one decay step versus the LR actually applied.
     if (lr_decay_ == 0.0 || step_count_ == 0) {
         return lr_;
     }
-    return lr_ / (1.0 + step_count_ * lr_decay_);
+    return lr_ / (1.0 + static_cast<double>(step_count_ - 1) * lr_decay_);
 }
 
 auto Adagrad::step_impl() -> void {

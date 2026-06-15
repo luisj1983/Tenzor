@@ -394,11 +394,15 @@ auto RMSprop::state_dict() const -> std::unordered_map<std::string, Tensor> {
         std::string prefix = "param_" + std::to_string(i);
         state[prefix + ".square_avg"] = square_avg_[i];
 
-        if (centered_ && i < grad_avg_.size()) {
+        // Gate on actual slot population rather than the optimizer-wide
+        // centered_/momentum_ flags: buffers are allocated per-group (a group
+        // may enable centered/momentum against an off default), so an empty
+        // optimizer-wide flag would drop a populated group buffer on save.
+        if (i < grad_avg_.size() && grad_avg_[i].numel() > 0) {
             state[prefix + ".grad_avg"] = grad_avg_[i];
         }
 
-        if (momentum_ > 0.0 && i < momentum_buffer_.size()) {
+        if (i < momentum_buffer_.size() && momentum_buffer_[i].numel() > 0) {
             state[prefix + ".momentum_buffer"] = momentum_buffer_[i];
         }
     }
@@ -448,18 +452,17 @@ auto RMSprop::load_state_dict(const std::unordered_map<std::string, Tensor>& sta
             square_avg_[i] = it->second.to(state_dt);
         }
 
-        if (centered_) {
-            it = state.find(prefix + ".grad_avg");
-            if (it != state.end() && i < grad_avg_.size()) {
-                grad_avg_[i] = it->second.to(state_dt);
-            }
+        // Restore whatever per-parameter buffers were serialized, regardless
+        // of the optimizer-wide centered_/momentum_ flags: a per-group buffer
+        // must round-trip even when the optimizer default is off.
+        it = state.find(prefix + ".grad_avg");
+        if (it != state.end() && i < grad_avg_.size()) {
+            grad_avg_[i] = it->second.to(state_dt);
         }
 
-        if (momentum_ > 0.0) {
-            it = state.find(prefix + ".momentum_buffer");
-            if (it != state.end() && i < momentum_buffer_.size()) {
-                momentum_buffer_[i] = it->second.to(state_dt);
-            }
+        it = state.find(prefix + ".momentum_buffer");
+        if (it != state.end() && i < momentum_buffer_.size()) {
+            momentum_buffer_[i] = it->second.to(state_dt);
         }
     }
 }

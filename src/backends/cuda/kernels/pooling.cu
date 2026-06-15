@@ -199,7 +199,15 @@ __global__ void maxpool2d_backward_f32(
         // Warp-level pre-reduction: find threads targeting the same in_idx
         // and sum their values before atomicAdd, reducing contention.
         // Uses low 32 bits of in_idx for matching (safe for tensors < 2B elements).
-        unsigned int peers = __match_any_sync(0xFFFFFFFF, static_cast<unsigned int>(in_idx));
+        // Use __activemask() — NOT the full 0xFFFFFFFF mask — because this is a
+        // grid-stride loop: optimal_launch_config rounds the grid up, so the
+        // warp straddling the idx==total boundary has lanes that already exited
+        // the loop. Naming non-participating lanes in an explicit full mask is
+        // UB on Volta+ (dropped/duplicated grads or deadlock). __activemask()
+        // captures exactly the lanes converged here; pass it to both the match
+        // and the shuffles so only live lanes participate.
+        unsigned int active = __activemask();
+        unsigned int peers = __match_any_sync(active, static_cast<unsigned int>(in_idx));
         int leader = __ffs(peers) - 1;
         int lane = threadIdx.x & 31;
 
@@ -248,7 +256,15 @@ __global__ void maxpool2d_backward_f64(
         // Warp-level pre-reduction: find threads targeting the same in_idx
         // and sum their values before atomicAdd, reducing contention.
         // Uses low 32 bits of in_idx for matching (safe for tensors < 2B elements).
-        unsigned int peers = __match_any_sync(0xFFFFFFFF, static_cast<unsigned int>(in_idx));
+        // Use __activemask() — NOT the full 0xFFFFFFFF mask — because this is a
+        // grid-stride loop: optimal_launch_config rounds the grid up, so the
+        // warp straddling the idx==total boundary has lanes that already exited
+        // the loop. Naming non-participating lanes in an explicit full mask is
+        // UB on Volta+ (dropped/duplicated grads or deadlock). __activemask()
+        // captures exactly the lanes converged here; pass it to both the match
+        // and the shuffles so only live lanes participate.
+        unsigned int active = __activemask();
+        unsigned int peers = __match_any_sync(active, static_cast<unsigned int>(in_idx));
         int leader = __ffs(peers) - 1;
         int lane = threadIdx.x & 31;
 
@@ -764,7 +780,15 @@ __global__ void maxpool1d_backward_f32(
         float grad_val = grad_output[idx];
 
 #if __CUDA_ARCH__ >= 700
-        unsigned int peers = __match_any_sync(0xFFFFFFFF, static_cast<unsigned int>(in_idx));
+        // Use __activemask() — NOT the full 0xFFFFFFFF mask — because this is a
+        // grid-stride loop: optimal_launch_config rounds the grid up, so the
+        // warp straddling the idx==total boundary has lanes that already exited
+        // the loop. Naming non-participating lanes in an explicit full mask is
+        // UB on Volta+ (dropped/duplicated grads or deadlock). __activemask()
+        // captures exactly the lanes converged here; pass it to both the match
+        // and the shuffles so only live lanes participate.
+        unsigned int active = __activemask();
+        unsigned int peers = __match_any_sync(active, static_cast<unsigned int>(in_idx));
         int leader = __ffs(peers) - 1;
         int lane = threadIdx.x & 31;
 
@@ -806,7 +830,15 @@ __global__ void maxpool1d_backward_f64(
         double grad_val = grad_output[idx];
 
 #if __CUDA_ARCH__ >= 700
-        unsigned int peers = __match_any_sync(0xFFFFFFFF, static_cast<unsigned int>(in_idx));
+        // Use __activemask() — NOT the full 0xFFFFFFFF mask — because this is a
+        // grid-stride loop: optimal_launch_config rounds the grid up, so the
+        // warp straddling the idx==total boundary has lanes that already exited
+        // the loop. Naming non-participating lanes in an explicit full mask is
+        // UB on Volta+ (dropped/duplicated grads or deadlock). __activemask()
+        // captures exactly the lanes converged here; pass it to both the match
+        // and the shuffles so only live lanes participate.
+        unsigned int active = __activemask();
+        unsigned int peers = __match_any_sync(active, static_cast<unsigned int>(in_idx));
         int leader = __ffs(peers) - 1;
         int lane = threadIdx.x & 31;
 
@@ -1646,7 +1678,15 @@ __global__ void maxpool3d_backward_f32(
         float grad_val = grad_output[idx];
 
 #if __CUDA_ARCH__ >= 700
-        unsigned int peers = __match_any_sync(0xFFFFFFFF, static_cast<unsigned int>(in_idx));
+        // Use __activemask() — NOT the full 0xFFFFFFFF mask — because this is a
+        // grid-stride loop: optimal_launch_config rounds the grid up, so the
+        // warp straddling the idx==total boundary has lanes that already exited
+        // the loop. Naming non-participating lanes in an explicit full mask is
+        // UB on Volta+ (dropped/duplicated grads or deadlock). __activemask()
+        // captures exactly the lanes converged here; pass it to both the match
+        // and the shuffles so only live lanes participate.
+        unsigned int active = __activemask();
+        unsigned int peers = __match_any_sync(active, static_cast<unsigned int>(in_idx));
         int leader = __ffs(peers) - 1;
         int lane = threadIdx.x & 31;
 
@@ -1689,7 +1729,15 @@ __global__ void maxpool3d_backward_f64(
         double grad_val = grad_output[idx];
 
 #if __CUDA_ARCH__ >= 700
-        unsigned int peers = __match_any_sync(0xFFFFFFFF, static_cast<unsigned int>(in_idx));
+        // Use __activemask() — NOT the full 0xFFFFFFFF mask — because this is a
+        // grid-stride loop: optimal_launch_config rounds the grid up, so the
+        // warp straddling the idx==total boundary has lanes that already exited
+        // the loop. Naming non-participating lanes in an explicit full mask is
+        // UB on Volta+ (dropped/duplicated grads or deadlock). __activemask()
+        // captures exactly the lanes converged here; pass it to both the match
+        // and the shuffles so only live lanes participate.
+        unsigned int active = __activemask();
+        unsigned int peers = __match_any_sync(active, static_cast<unsigned int>(in_idx));
         int leader = __ffs(peers) - 1;
         int lane = threadIdx.x & 31;
 

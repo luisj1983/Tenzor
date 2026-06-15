@@ -1,5 +1,6 @@
 #include "tenzor/core/tensor.hpp"
 #include "tenzor/core/dtype.hpp"
+#include "tenzor/backend/loader_fwd.hpp"
 #include <hip/hip_runtime.h>
 #include <hip/hip_fp16.h>
 #include <rocblas/rocblas.h>
@@ -9,6 +10,7 @@
 #include <stdexcept>
 #include <vector>
 #include <iostream>
+#include <type_traits>
 #include "fp16_saturate.h"
 #include "../rocm_error.hpp"
 #include "../miopen_guards.hpp"
@@ -27,28 +29,32 @@ namespace rocm {
 } while(0)
 #endif
 
-// RAII wrapper for rocBLAS handle to prevent leaks on exceptions
-class RocBLASHandleGuard {
-public:
-    RocBLASHandleGuard() {
-        ROCBLAS_CHECK(rocblas_create_handle(&handle_));
-    }
-    ~RocBLASHandleGuard() {
-        if (handle_) {
-            rocblas_destroy_handle(handle_);
+// Thread-local cached rocBLAS handle for the conv2d forward/backward paths.
+// rocblas_create_handle is expensive (device workspace alloc + property
+// queries) and is meant to be reused. Creating/destroying one per conv call —
+// i.e. every conv layer, every training step — was pure overhead, so we keep a
+// single handle alive per thread and only rebind the stream per invocation.
+namespace {
+struct CachedConvHandle {
+    rocblas_handle handle = nullptr;
+    ~CachedConvHandle() {
+        // Guard teardown: destroying after the backend library has unloaded
+        // calls into freed code (mirrors the rocSPARSE/rocSOLVER/quant pools).
+        if (handle && tenzor::is_backend_registry_alive()) {
+            rocblas_destroy_handle(handle);
+            handle = nullptr;
         }
     }
-    RocBLASHandleGuard(const RocBLASHandleGuard&) = delete;
-    RocBLASHandleGuard& operator=(const RocBLASHandleGuard&) = delete;
-
-    rocblas_handle get() const { return handle_; }
-
-    void set_stream(hipStream_t stream) {
-        ROCBLAS_CHECK(rocblas_set_stream(handle_, stream));
-    }
-private:
-    rocblas_handle handle_ = nullptr;
 };
+inline rocblas_handle get_cached_conv_handle(hipStream_t stream) {
+    thread_local CachedConvHandle cached;
+    if (cached.handle == nullptr) {
+        ROCBLAS_CHECK(rocblas_create_handle(&cached.handle));
+    }
+    ROCBLAS_CHECK(rocblas_set_stream(cached.handle, stream));
+    return cached.handle;
+}
+}  // namespace
 
 // ============================================================================
 // Kernel Launch Helpers - Optimized for AMD GPUs
@@ -432,20 +438,24 @@ __global__ void sum_bias_grad_kernel_wave_reduce(
     int64_t channels,
     int64_t spatial_size
 ) {
-    __shared__ float shared_data[256];
+    // Accumulate in an accumulator type wide enough for T: double for Float64,
+    // float otherwise. Hardcoding float would truncate every Float64 grad_output
+    // value to single precision, degrading Float64 bias gradients to ~7 digits.
+    using Acc = std::conditional_t<std::is_same_v<T, double>, double, float>;
+    __shared__ Acc shared_data[256];
 
     int64_t c = blockIdx.x;
     if (c < channels) {
         int64_t tid = threadIdx.x;
         int64_t block_size = blockDim.x;
 
-        // Each thread accumulates multiple values (accumulate in float for precision)
-        float local_sum = 0.0f;
+        // Each thread accumulates multiple values (accumulate in Acc for precision)
+        Acc local_sum = Acc(0);
         for (int64_t idx = tid; idx < batch * spatial_size; idx += block_size) {
             int64_t b = idx / spatial_size;
             int64_t s = idx % spatial_size;
             int64_t grad_idx = b * (channels * spatial_size) + c * spatial_size + s;
-            local_sum += static_cast<float>(grad_output[grad_idx]);
+            local_sum += static_cast<Acc>(grad_output[grad_idx]);
         }
 
         // Store in shared memory
@@ -815,10 +825,9 @@ auto conv2d_forward_kernel(
                        (dtype == DType::Float16) ? sizeof(__half) : sizeof(float);
     HIP_CHECK(hipMemsetAsync(output.data_ptr(), 0, output.numel() * elem_size, stream));
 
-    // Create rocBLAS handle (RAII ensures cleanup on exceptions)
-    RocBLASHandleGuard rocblas_guard;
-    rocblas_handle rocblas_handle = rocblas_guard.get();
-    rocblas_guard.set_stream(stream);
+    // Cached per-thread rocBLAS handle; stream rebound per call (no per-conv
+    // create/destroy).
+    rocblas_handle rocblas_handle = get_cached_conv_handle(stream);
 
     // Process each group separately
     int64_t out_channels_per_group = out_channels / groups;
@@ -1227,10 +1236,8 @@ auto conv2d_backward_kernel(
         HIP_CHECK(hipMemsetAsync(grad_bias.data_ptr(), 0, grad_bias.numel() * elem_size, stream));
     }
 
-    // Create rocBLAS handle (RAII ensures cleanup on exceptions)
-    RocBLASHandleGuard rocblas_guard2;
-    rocblas_handle rocblas_handle = rocblas_guard2.get();
-    rocblas_guard2.set_stream(stream);
+    // Cached per-thread rocBLAS handle; stream rebound per call.
+    rocblas_handle rocblas_handle = get_cached_conv_handle(stream);
 
     int64_t out_channels_per_group = out_channels / groups;
     int64_t col_rows = batch * out_h * out_w;
@@ -2647,55 +2654,60 @@ auto deformable_conv2d_backward_weight_kernel(
 template <typename T>
 __global__ void depthwise_conv1d_fwd_kernel(
     const T* __restrict__ in, const T* __restrict__ w, const T* __restrict__ bias,
-    T* __restrict__ out, int N, int C, int L, int kL, int Lo,
-    int stride, int pad, int dil) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    int total = N * C * Lo;
-    if (idx >= total) return;
-    int ol = idx % Lo;
-    int c  = (idx / Lo) % C;
-    int n  = idx / (C * Lo);
-    const T* in_nc = in + (n * C + c) * L;
-    const T* w_c   = w + c * kL;
-    T acc = bias ? bias[c] : T(0);
-    for (int k = 0; k < kL; ++k) {
-        int il = ol * stride - pad + k * dil;
-        if (il >= 0 && il < L) acc += in_nc[il] * w_c[k];
+    T* __restrict__ out, int64_t N, int64_t C, int64_t L, int64_t kL, int64_t Lo,
+    int64_t stride, int64_t pad, int64_t dil) {
+    // int64_t indices/counts/offsets: element counts (N*C*Lo) and derived input
+    // offsets can exceed 2^31 for large tensors; grid-stride loop covers any size.
+    int64_t total = N * C * Lo;
+    for (int64_t idx = blockIdx.x * blockDim.x + threadIdx.x; idx < total;
+         idx += static_cast<int64_t>(blockDim.x) * gridDim.x) {
+        int64_t ol = idx % Lo;
+        int64_t c  = (idx / Lo) % C;
+        int64_t n  = idx / (C * Lo);
+        const T* in_nc = in + (n * C + c) * L;
+        const T* w_c   = w + c * kL;
+        T acc = bias ? bias[c] : T(0);
+        for (int64_t k = 0; k < kL; ++k) {
+            int64_t il = ol * stride - pad + k * dil;
+            if (il >= 0 && il < L) acc += in_nc[il] * w_c[k];
+        }
+        out[(n * C + c) * Lo + ol] = acc;
     }
-    out[(n * C + c) * Lo + ol] = acc;
 }
 
 template <typename T>
 __global__ void depthwise_conv3d_fwd_kernel(
     const T* __restrict__ in, const T* __restrict__ w, const T* __restrict__ bias,
-    T* __restrict__ out, int N, int C, int Di, int Hi, int Wi,
-    int kD, int kH, int kW, int Do, int Ho, int Wo,
-    int sD, int sH, int sW, int pD, int pH, int pW, int dD, int dH, int dW) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    int total = N * C * Do * Ho * Wo;
-    if (idx >= total) return;
-    int ow = idx % Wo;
-    int oh = (idx / Wo) % Ho;
-    int od = (idx / (Wo * Ho)) % Do;
-    int c  = (idx / (Wo * Ho * Do)) % C;
-    int n  = idx / (C * Do * Ho * Wo);
-    const T* in_nc = in + (n * C + c) * Di * Hi * Wi;
-    const T* w_c   = w + c * kD * kH * kW;
-    T acc = bias ? bias[c] : T(0);
-    for (int kd = 0; kd < kD; ++kd) {
-        int id = od * sD - pD + kd * dD;
-        if (id < 0 || id >= Di) continue;
-        for (int kh = 0; kh < kH; ++kh) {
-            int ih = oh * sH - pH + kh * dH;
-            if (ih < 0 || ih >= Hi) continue;
-            for (int kw = 0; kw < kW; ++kw) {
-                int iw = ow * sW - pW + kw * dW;
-                if (iw < 0 || iw >= Wi) continue;
-                acc += in_nc[(id * Hi + ih) * Wi + iw] * w_c[(kd * kH + kh) * kW + kw];
+    T* __restrict__ out, int64_t N, int64_t C, int64_t Di, int64_t Hi, int64_t Wi,
+    int64_t kD, int64_t kH, int64_t kW, int64_t Do, int64_t Ho, int64_t Wo,
+    int64_t sD, int64_t sH, int64_t sW, int64_t pD, int64_t pH, int64_t pW,
+    int64_t dD, int64_t dH, int64_t dW) {
+    int64_t total = N * C * Do * Ho * Wo;
+    for (int64_t idx = blockIdx.x * blockDim.x + threadIdx.x; idx < total;
+         idx += static_cast<int64_t>(blockDim.x) * gridDim.x) {
+        int64_t ow = idx % Wo;
+        int64_t oh = (idx / Wo) % Ho;
+        int64_t od = (idx / (Wo * Ho)) % Do;
+        int64_t c  = (idx / (Wo * Ho * Do)) % C;
+        int64_t n  = idx / (C * Do * Ho * Wo);
+        const T* in_nc = in + (n * C + c) * Di * Hi * Wi;
+        const T* w_c   = w + c * kD * kH * kW;
+        T acc = bias ? bias[c] : T(0);
+        for (int64_t kd = 0; kd < kD; ++kd) {
+            int64_t id = od * sD - pD + kd * dD;
+            if (id < 0 || id >= Di) continue;
+            for (int64_t kh = 0; kh < kH; ++kh) {
+                int64_t ih = oh * sH - pH + kh * dH;
+                if (ih < 0 || ih >= Hi) continue;
+                for (int64_t kw = 0; kw < kW; ++kw) {
+                    int64_t iw = ow * sW - pW + kw * dW;
+                    if (iw < 0 || iw >= Wi) continue;
+                    acc += in_nc[(id * Hi + ih) * Wi + iw] * w_c[(kd * kH + kh) * kW + kw];
+                }
             }
         }
+        out[(((n * C + c) * Do + od) * Ho + oh) * Wo + ow] = acc;
     }
-    out[(((n * C + c) * Do + od) * Ho + oh) * Wo + ow] = acc;
 }
 
 auto depthwise_conv1d_kernel(const Tensor& input, const Tensor& weight, const Tensor* bias,
@@ -2703,8 +2715,8 @@ auto depthwise_conv1d_kernel(const Tensor& input, const Tensor& weight, const Te
                              hipStream_t stream) -> Tensor {
     auto is = input.shape();
     auto ws = weight.shape();
-    int N = (int)is[0], C = (int)is[1], L = (int)is[3], kL = (int)ws[3];
-    int Lo = (int)((L + 2 * padding - dilation * (kL - 1) - 1) / stride + 1);
+    int64_t N = is[0], C = is[1], L = is[3], kL = ws[3];
+    int64_t Lo = (L + 2 * padding - dilation * (kL - 1) - 1) / stride + 1;
     if (Lo <= 0) throw std::runtime_error("depthwise_conv1d (ROCm): non-positive output length");
 
     auto run = [&](DType dt) {
@@ -2712,16 +2724,18 @@ auto depthwise_conv1d_kernel(const Tensor& input, const Tensor& weight, const Te
         Tensor w  = weight.dtype() == dt ? weight.contiguous() : weight.to(dt);
         Tensor b; const void* bptr = nullptr;
         if (bias) { b = bias->dtype() == dt ? bias->contiguous() : bias->to(dt); bptr = b.data_ptr(); }
-        Tensor out({(int64_t)N, (int64_t)C, 1, (int64_t)Lo}, dt, input.device());
-        int total = N * C * Lo, blocks = (total + 255) / 256;
+        Tensor out({N, C, 1, Lo}, dt, input.device());
+        int64_t total = N * C * Lo;
+        int64_t want_blocks = (total + 255) / 256;
+        int blocks = static_cast<int>(want_blocks < 65535 ? want_blocks : 65535);
         if (dt == DType::Float64) {
             hipLaunchKernelGGL(depthwise_conv1d_fwd_kernel<double>, dim3(blocks), dim3(256), 0, stream,
                 in.data<double>(), w.data<double>(), (const double*)bptr, out.data<double>(),
-                N, C, L, kL, Lo, (int)stride, (int)padding, (int)dilation);
+                N, C, L, kL, Lo, stride, padding, dilation);
         } else {
             hipLaunchKernelGGL(depthwise_conv1d_fwd_kernel<float>, dim3(blocks), dim3(256), 0, stream,
                 in.data<float>(), w.data<float>(), (const float*)bptr, out.data<float>(),
-                N, C, L, kL, Lo, (int)stride, (int)padding, (int)dilation);
+                N, C, L, kL, Lo, stride, padding, dilation);
         }
         HIP_CHECK(hipGetLastError());
         return out;
@@ -2741,11 +2755,11 @@ auto depthwise_conv3d_kernel(const Tensor& input, const Tensor& weight, const Te
                              hipStream_t stream) -> Tensor {
     auto is = input.shape();
     auto ws = weight.shape();
-    int N = (int)is[0], C = (int)is[1], Di = (int)is[2], Hi = (int)is[3], Wi = (int)is[4];
-    int kD = (int)ws[2], kH = (int)ws[3], kW = (int)ws[4];
-    int Do = (int)((Di + 2 * pD - dD * (kD - 1) - 1) / sD + 1);
-    int Ho = (int)((Hi + 2 * pH - dH * (kH - 1) - 1) / sH + 1);
-    int Wo = (int)((Wi + 2 * pW - dW * (kW - 1) - 1) / sW + 1);
+    int64_t N = is[0], C = is[1], Di = is[2], Hi = is[3], Wi = is[4];
+    int64_t kD = ws[2], kH = ws[3], kW = ws[4];
+    int64_t Do = (Di + 2 * pD - dD * (kD - 1) - 1) / sD + 1;
+    int64_t Ho = (Hi + 2 * pH - dH * (kH - 1) - 1) / sH + 1;
+    int64_t Wo = (Wi + 2 * pW - dW * (kW - 1) - 1) / sW + 1;
     if (Do <= 0 || Ho <= 0 || Wo <= 0) throw std::runtime_error("depthwise_conv3d (ROCm): non-positive output size");
 
     auto run = [&](DType dt) {
@@ -2753,18 +2767,20 @@ auto depthwise_conv3d_kernel(const Tensor& input, const Tensor& weight, const Te
         Tensor w  = weight.dtype() == dt ? weight.contiguous() : weight.to(dt);
         Tensor b; const void* bptr = nullptr;
         if (bias) { b = bias->dtype() == dt ? bias->contiguous() : bias->to(dt); bptr = b.data_ptr(); }
-        Tensor out({(int64_t)N, (int64_t)C, (int64_t)Do, (int64_t)Ho, (int64_t)Wo}, dt, input.device());
-        int total = N * C * Do * Ho * Wo, blocks = (total + 255) / 256;
+        Tensor out({N, C, Do, Ho, Wo}, dt, input.device());
+        int64_t total = N * C * Do * Ho * Wo;
+        int64_t want_blocks = (total + 255) / 256;
+        int blocks = static_cast<int>(want_blocks < 65535 ? want_blocks : 65535);
         if (dt == DType::Float64) {
             hipLaunchKernelGGL(depthwise_conv3d_fwd_kernel<double>, dim3(blocks), dim3(256), 0, stream,
                 in.data<double>(), w.data<double>(), (const double*)bptr, out.data<double>(),
                 N, C, Di, Hi, Wi, kD, kH, kW, Do, Ho, Wo,
-                (int)sD,(int)sH,(int)sW,(int)pD,(int)pH,(int)pW,(int)dD,(int)dH,(int)dW);
+                sD, sH, sW, pD, pH, pW, dD, dH, dW);
         } else {
             hipLaunchKernelGGL(depthwise_conv3d_fwd_kernel<float>, dim3(blocks), dim3(256), 0, stream,
                 in.data<float>(), w.data<float>(), (const float*)bptr, out.data<float>(),
                 N, C, Di, Hi, Wi, kD, kH, kW, Do, Ho, Wo,
-                (int)sD,(int)sH,(int)sW,(int)pD,(int)pH,(int)pW,(int)dD,(int)dH,(int)dW);
+                sD, sH, sW, pD, pH, pW, dD, dH, dW);
         }
         HIP_CHECK(hipGetLastError());
         return out;

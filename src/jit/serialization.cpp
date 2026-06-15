@@ -8,6 +8,7 @@
 #include <stdexcept>
 #include <sstream>
 #include <iomanip>
+#include <limits>
 
 namespace tenzor {
 namespace jit {
@@ -432,36 +433,54 @@ auto GraphReader::read_constants(Graph& graph) -> void {
 auto GraphReader::read_uint32() -> uint32_t {
     uint32_t val;
     file_.read(reinterpret_cast<char*>(&val), sizeof(val));
+    if (!file_) {
+        throw std::runtime_error("GraphReader::read_uint32: truncated file");
+    }
     return val;
 }
 
 auto GraphReader::read_uint64() -> uint64_t {
     uint64_t val;
     file_.read(reinterpret_cast<char*>(&val), sizeof(val));
+    if (!file_) {
+        throw std::runtime_error("GraphReader::read_uint64: truncated file");
+    }
     return val;
 }
 
 auto GraphReader::read_int64() -> int64_t {
     int64_t val;
     file_.read(reinterpret_cast<char*>(&val), sizeof(val));
+    if (!file_) {
+        throw std::runtime_error("GraphReader::read_int64: truncated file");
+    }
     return val;
 }
 
 auto GraphReader::read_float() -> float {
     float val;
     file_.read(reinterpret_cast<char*>(&val), sizeof(val));
+    if (!file_) {
+        throw std::runtime_error("GraphReader::read_float: truncated file");
+    }
     return val;
 }
 
 auto GraphReader::read_double() -> double {
     double val;
     file_.read(reinterpret_cast<char*>(&val), sizeof(val));
+    if (!file_) {
+        throw std::runtime_error("GraphReader::read_double: truncated file");
+    }
     return val;
 }
 
 auto GraphReader::read_bool() -> bool {
     uint8_t byte;
     file_.read(reinterpret_cast<char*>(&byte), sizeof(byte));
+    if (!file_) {
+        throw std::runtime_error("GraphReader::read_bool: truncated file");
+    }
     return byte != 0;
 }
 
@@ -493,22 +512,48 @@ auto GraphReader::read_tensor() -> Tensor {
     int64_t dev_index = read_int64();
     Device original_device(dev_type, dev_index);
 
-    // Mirror write_tensor: bytes were serialized from a CPU copy. Read into
-    // a CPU tensor first (fstream::read needs a host pointer), then migrate
-    // to the recorded device if needed.
-    Tensor tensor(shape, dtype, Device::cpu());
-
     // The file provides a SEPARATE data_size; it MUST equal the tensor's own
     // byte size or the read overflows (or under-fills) the allocated buffer.
-    // This is the entry point for untrusted .graph files.
+    // This is the entry point for untrusted .graph files, so the consistency
+    // check MUST run BEFORE allocating the tensor: otherwise a crafted shape
+    // (e.g. {1000000,1000000}, only 16 declared bytes) drives a multi-TB host
+    // allocation (bad_alloc / OOM DoS) before the data_size mismatch is caught.
     uint64_t data_size = read_uint64();
-    uint64_t expected = static_cast<uint64_t>(tensor.numel()) *
-                        static_cast<uint64_t>(dtype_size(dtype));
+
+    // Compute numel from the declared shape with overflow-safe arithmetic.
+    // A negative dim is invalid; the running product must not exceed the
+    // declared data_size once multiplied by the element size.
+    uint64_t numel = 1;
+    for (int64_t d : shape) {
+        if (d < 0) {
+            throw std::runtime_error(
+                "GraphReader::read_tensor: negative dimension in shape");
+        }
+        auto ud = static_cast<uint64_t>(d);
+        if (ud != 0 && numel > std::numeric_limits<uint64_t>::max() / ud) {
+            throw std::runtime_error(
+                "GraphReader::read_tensor: shape product overflows uint64");
+        }
+        numel *= ud;
+    }
+    const auto elem_size = static_cast<uint64_t>(dtype_size(dtype));
+    if (elem_size != 0 && numel > std::numeric_limits<uint64_t>::max() / elem_size) {
+        throw std::runtime_error(
+            "GraphReader::read_tensor: byte size overflows uint64");
+    }
+    uint64_t expected = numel * elem_size;
     if (data_size != expected) {
         throw std::runtime_error(
             "GraphReader::read_tensor: data_size (" + std::to_string(data_size) +
             ") does not match tensor byte size (" + std::to_string(expected) + ")");
     }
+
+    // Mirror write_tensor: bytes were serialized from a CPU copy. Read into
+    // a CPU tensor first (fstream::read needs a host pointer), then migrate
+    // to the recorded device if needed. Allocation happens only after the
+    // size check above has validated the declared shape against data_size.
+    Tensor tensor(shape, dtype, Device::cpu());
+
     file_.read(reinterpret_cast<char*>(tensor.data_ptr()),
                static_cast<std::streamsize>(data_size));
     if (!file_) {

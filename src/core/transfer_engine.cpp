@@ -878,10 +878,14 @@ auto TransferEngine::cpu_to_gpu(const Tensor& cpu_tensor, Device gpu_device) -> 
 
 #ifdef TENZOR_USE_CUDA
     if (gpu_device.type == Device::Type::CUDA) {
+        // The raw-byte memcpy below reads a flat run from data_ptr(); for a
+        // non-contiguous source (transpose/slice view) that run is the wrong
+        // elements. Contiguify first so the flat copy matches logical order.
+        Tensor src = cpu_tensor.contiguous();
         CUDA_CHECK(cudaSetDevice(gpu_device.index));
         CUDA_CHECK(cudaMemcpy(
             gpu_tensor.data_ptr(),
-            cpu_tensor.data_ptr(),
+            src.data_ptr(),
             bytes,
             cudaMemcpyHostToDevice
         ));
@@ -949,10 +953,13 @@ auto TransferEngine::gpu_to_cpu(const Tensor& gpu_tensor) -> Tensor {
 
 #ifdef TENZOR_USE_CUDA
     if (gpu_tensor.device().type == Device::Type::CUDA) {
+        // Contiguify the (possibly strided) GPU source so the flat byte copy
+        // into the fresh contiguous host tensor reads logical element order.
+        Tensor src = gpu_tensor.contiguous();
         CUDA_CHECK(cudaSetDevice(gpu_tensor.device().index));
         CUDA_CHECK(cudaMemcpy(
             cpu_tensor.data_ptr(),
-            gpu_tensor.data_ptr(),
+            src.data_ptr(),
             bytes,
             cudaMemcpyDeviceToHost
         ));
@@ -1343,15 +1350,22 @@ auto TransferEngine::process_transfer(const TransferRequest& request) -> void {
 
     size_t bytes = request.source.numel() * dtype_size(request.source.dtype());
 
+    // Contiguify the source so the flat raw-byte memcpys below read logical
+    // element order; a strided view's data_ptr() base would otherwise corrupt.
+    // Anchor it in state->source so the (possibly freshly-allocated) contiguous
+    // buffer stays alive until the async DMA completes.
+    Tensor source = request.source.contiguous();
+    request.state->source = source;
+
     if (request.type == TransferRequest::Type::CPU_TO_GPU) {
         Device gpu_device = request.target_device;
         CUDA_CHECK(cudaSetDevice(gpu_device.index));
 
-        auto shape_span = request.source.shape();
+        auto shape_span = source.shape();
         std::vector<int64_t> shape_vec(shape_span.begin(), shape_span.end());
-        Tensor gpu_tensor = allocate_tensor(shape_vec, request.source.dtype(), gpu_device);
+        Tensor gpu_tensor = allocate_tensor(shape_vec, source.dtype(), gpu_device);
 
-        const void* src_ptr = request.source.data_ptr();
+        const void* src_ptr = source.data_ptr();
         void* dst_ptr = gpu_tensor.data_ptr();
 
         if (config_.use_pinned_memory) {
@@ -1380,13 +1394,13 @@ auto TransferEngine::process_transfer(const TransferRequest& request) -> void {
         record_transfer(bytes, time_ms, true);
 
     } else {
-        CUDA_CHECK(cudaSetDevice(request.source.device().index));
+        CUDA_CHECK(cudaSetDevice(source.device().index));
 
-        auto shape_span = request.source.shape();
+        auto shape_span = source.shape();
         std::vector<int64_t> shape_vec(shape_span.begin(), shape_span.end());
-        Tensor cpu_tensor = allocate_tensor(shape_vec, request.source.dtype(), Device::cpu());
+        Tensor cpu_tensor = allocate_tensor(shape_vec, source.dtype(), Device::cpu());
 
-        const void* src_ptr = request.source.data_ptr();
+        const void* src_ptr = source.data_ptr();
         void* dst_ptr = cpu_tensor.data_ptr();
 
         if (config_.use_pinned_memory) {

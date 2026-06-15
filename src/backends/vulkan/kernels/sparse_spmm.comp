@@ -25,7 +25,7 @@ void main() {
     uint row_end = uint(row_offsets[row + 1]);
 
     // Each thread handles a subset of output columns
-    for (uint col = tid; col < n_cols; col += 256) {
+    for (uint col = tid; col < n_cols; col += gl_WorkGroupSize.x) {
         float sum = 0.0;
         for (uint i = row_start; i < row_end; i++) {
             sum += values[i] * B[uint(col_indices[i]) * n_cols + col];

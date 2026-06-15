@@ -202,19 +202,41 @@ auto AdamAtan2::step_impl() -> void {
     }
 }
 
+// EE.16 fix: a ParamGroup may request amsgrad=true even when the
+// optimiser-wide amsgrad_ default is false. The max_exp_avg_sq_ slot must
+// be allocated whenever the *resolved* per-param amsgrad is true, otherwise
+// step_impl()'s `i < max_exp_avg_sq_.size()` guard silently skips the
+// AMSGrad correction. Resolve per-param at buffer-init time, mirroring
+// step_impl()'s resolve() lambda.
+namespace {
+inline bool resolve_amsgrad(const ParamGroup* g, bool default_amsgrad) {
+    return g ? ParamGroup::or_else(g->amsgrad, default_amsgrad) : default_amsgrad;
+}
+}  // namespace
+
 auto AdamAtan2::initialize_buffers() -> void {
     exp_avg_.clear();
     exp_avg_sq_.clear();
     max_exp_avg_sq_.clear();
+    max_exp_avg_sq_.reserve(parameters_.size());
 
-    for (auto& param : parameters_) {
+    for (size_t i = 0; i < parameters_.size(); ++i) {
+        auto& param = parameters_[i];
         if (param) {
             // R.16: half-precision params get Float32 state buffers.
             exp_avg_.push_back(make_optim_state(param->tensor()));
             exp_avg_sq_.push_back(make_optim_state(param->tensor()));
-            if (amsgrad_) {
+            // EE.16: allocate the AMSGrad slot for ANY param whose resolved
+            // amsgrad is true (per-group override or optimiser default).
+            if (resolve_amsgrad(find_group_for_param(i), amsgrad_)) {
                 max_exp_avg_sq_.push_back(make_optim_state(param->tensor()));
+            } else {
+                max_exp_avg_sq_.push_back(Tensor{});
             }
+        } else {
+            exp_avg_.push_back(Tensor{});
+            exp_avg_sq_.push_back(Tensor{});
+            max_exp_avg_sq_.push_back(Tensor{});
         }
     }
 }
@@ -224,20 +246,25 @@ auto AdamAtan2::initialize_buffers() -> void {
 auto AdamAtan2::on_parameters_appended_(size_t old_count, size_t new_count) -> void {
     exp_avg_.reserve(new_count);
     exp_avg_sq_.reserve(new_count);
-    if (amsgrad_) max_exp_avg_sq_.reserve(new_count);
+    max_exp_avg_sq_.reserve(new_count);
     for (size_t i = old_count; i < new_count; ++i) {
         const auto& param = parameters_[i];
         if (param) {
             // R.16: see AdamAtan2::initialize_buffers for dtype rationale.
             exp_avg_.push_back(make_optim_state(param->tensor()));
             exp_avg_sq_.push_back(make_optim_state(param->tensor()));
-            if (amsgrad_) {
+            // EE.16: allocate the AMSGrad slot per resolved per-group amsgrad,
+            // not just the optimiser-wide amsgrad_, and keep max_exp_avg_sq_
+            // index-aligned with exp_avg_ via a placeholder when off.
+            if (resolve_amsgrad(find_group_for_param(i), amsgrad_)) {
                 max_exp_avg_sq_.push_back(make_optim_state(param->tensor()));
+            } else {
+                max_exp_avg_sq_.push_back(Tensor{});
             }
         } else {
             exp_avg_.push_back(Tensor{});
             exp_avg_sq_.push_back(Tensor{});
-            if (amsgrad_) max_exp_avg_sq_.push_back(Tensor{});
+            max_exp_avg_sq_.push_back(Tensor{});
         }
     }
 }
@@ -284,7 +311,10 @@ auto AdamAtan2::state_dict() const -> std::unordered_map<std::string, Tensor> {
     for (size_t i = 0; i < exp_avg_.size(); ++i) {
         state["exp_avg_" + std::to_string(i)] = exp_avg_[i].clone();
         state["exp_avg_sq_" + std::to_string(i)] = exp_avg_sq_[i].clone();
-        if (amsgrad_ && i < max_exp_avg_sq_.size()) {
+        // EE.16: gate on actual slot population, not the optimiser-wide
+        // amsgrad_ flag — a per-group amsgrad=true buffer must round-trip
+        // even when the optimiser default is false.
+        if (i < max_exp_avg_sq_.size() && max_exp_avg_sq_[i].numel() > 0) {
             state["max_exp_avg_sq_" + std::to_string(i)] = max_exp_avg_sq_[i].clone();
         }
     }
@@ -335,7 +365,9 @@ auto AdamAtan2::load_state_dict(const std::unordered_map<std::string, Tensor>& s
             exp_avg_sq_[i] = state.at(exp_avg_sq_key).to(state_dt);
         }
 
-        if (amsgrad_ && state.count(max_key) && i < max_exp_avg_sq_.size()) {
+        // EE.16: restore whatever AMSGrad buffer was serialized, regardless of
+        // the optimiser-wide amsgrad_ flag, so a per-group buffer round-trips.
+        if (state.count(max_key) && i < max_exp_avg_sq_.size()) {
             max_exp_avg_sq_[i] = state.at(max_key).to(state_dt);
         }
     }
@@ -358,13 +390,11 @@ auto LinearWarmup::update(int64_t step) -> void {
         current_lr_ = base_lr_;
     }
 
-    // Update optimizer's learning rate
-    // This requires the optimizer to have a set_lr method
-    // We use dynamic dispatch via dynamic_cast
-    if (auto* adam_atan2 = dynamic_cast<AdamAtan2*>(&optimizer_)) {
-        adam_atan2->set_lr(current_lr_);
-    }
-    // Add other optimizer types as needed
+    // Update optimizer's learning rate. Optimizer::set_lr is virtual and
+    // overridden by every concrete optimizer, so dispatch through the base
+    // reference directly — the previous AdamAtan2-only dynamic_cast silently
+    // no-op'd warmup for SGD/Adam/AdamW/etc.
+    optimizer_.set_lr(current_lr_);
 }
 
 } // namespace tenzor::optim

@@ -109,6 +109,16 @@ GlooProcessGroup::GlooProcessGroup(int rank, int world_size,
         );
     }
 
+    // Validate the port before it reaches htons() in the rendezvous socket
+    // setup; an out-of-range value would otherwise be silently truncated to 16
+    // bits, routing the group to an unintended/colliding port.
+    if (master_port < 1 || master_port > 65535) {
+        throw std::invalid_argument(
+            "GlooProcessGroup: master_port " + std::to_string(master_port) +
+            " out of range [1, 65535]"
+        );
+    }
+
     // Create the underlying ProcessGroup using Gloo backend
     pg_ = ProcessGroup::create_process_group(
         Backend::GLOO, rank, world_size, master_addr, master_port
@@ -282,6 +292,19 @@ auto GlooProcessGroup::split(int color, int key)
     // Use a large enough stride (10000) so colors within one split don't
     // collide with the next split's color-0.
     const int new_port = master_port_ + 1000 + my_split_id * 10000 + color;
+
+    // Validate the derived port fits in a TCP port (uint16). With stride 10000,
+    // only a few splits exhaust the range from the default 29500; previously the
+    // out-of-range value was silently truncated by htons() in the child PG's
+    // sockaddr, routing it to an unintended/colliding port (hang or collision).
+    // Fail fast instead, mirroring the NCCL bootstrap path's [1,65535] guard.
+    if (new_port < 1 || new_port > 65535) {
+        throw std::runtime_error(
+            "GlooProcessGroup::split: derived port " + std::to_string(new_port) +
+            " out of range [1, 65535] (master_port=" + std::to_string(master_port_) +
+            ", split_id=" + std::to_string(my_split_id) + ", color=" +
+            std::to_string(color) + "); too many splits for the available port range");
+    }
 
     return std::make_shared<GlooProcessGroup>(
         new_rank, new_world_size, master_addr_, new_port);
@@ -670,8 +693,15 @@ auto NCCLProcessGroup::all_reduce(Tensor& tensor, ReduceOp op) -> void {
     NCCL_PG_GPU_CHECK(cudaDeviceSynchronize());
 
     // AVG = SUM followed by division
-    if (op == ReduceOp::AVG) {
-        tensor = tensor / static_cast<float>(world_size_);
+    if (op == ReduceOp::AVG && world_size_ > 1) {
+        // H6 fix (mirroring MPIProcessGroup::all_reduce): in-place divide
+        // preserves the caller's storage pointer so any aliased Variable /
+        // view / external buffer (the common DDP gradient-averaging case)
+        // observes the averaged result. Construct a dtype/device-matched
+        // scalar divisor so Float64 keeps full precision; `/=` writes through.
+        auto scalar = tenzor::full({1}, static_cast<double>(world_size_),
+                                    tensor.dtype(), tensor.device());
+        tensor /= scalar;
     }
 #else
     (void)tensor;

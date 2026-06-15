@@ -219,6 +219,33 @@ auto ctc_loss_forward_kernel(
     int64_t blank = attrs.get_int(AttrKey::Blank, 0);
     bool zero_infinity = attrs.get_bool(AttrKey::ZeroInfinity, false);
 
+    // Validate the blank label and every active target label up front.
+    // ext_label[i] (== blank or a target label) is used directly as a channel
+    // index into log_probs / grad; an out-of-range value would cause an OOB
+    // read of log_probs or an OOB write into grad (heap corruption).
+    if (blank < 0 || blank >= C) {
+        throw std::invalid_argument(
+            "ctc_loss_forward (CPU): blank index " + std::to_string(blank) +
+            " out of range [0, " + std::to_string(C) + ")");
+    }
+    for (int64_t n = 0; n < N; ++n) {
+        int64_t T_n = il_data[n];
+        int64_t S_n = tl_data[n];
+        if (T_n <= 0 || S_n <= 0 || T_n > T_max || S_n > S_max) {
+            continue;  // inactive sample; skipped by the compute loops too
+        }
+        const int32_t* tgt_n = tgt_data + n * S_max;
+        for (int64_t s = 0; s < S_n; ++s) {
+            const int64_t label = static_cast<int64_t>(tgt_n[s]);
+            if (label < 0 || label >= C) {
+                throw std::invalid_argument(
+                    "ctc_loss_forward (CPU): target label " +
+                    std::to_string(label) + " out of range [0, " +
+                    std::to_string(C) + ")");
+            }
+        }
+    }
+
     Tensor loss_out({N}, compute_dtype, log_probs.device());
     Tensor grad_out({T_max, N, C}, compute_dtype, log_probs.device());
 

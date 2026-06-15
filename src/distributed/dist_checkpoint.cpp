@@ -52,19 +52,22 @@ void write_bytes(std::vector<uint8_t>& buf, const void* data, size_t len) {
     std::memcpy(buf.data() + offset, data, len);
 }
 
-auto dtype_to_element_size(DType dtype) -> size_t {
-    switch (dtype) {
-        case DType::Float32:  return 4;
-        case DType::Float64:  return 8;
-        case DType::Float16:  return 2;
-        case DType::BFloat16: return 2;
-        case DType::Int8:     return 1;
-        case DType::Int16:    return 2;
-        case DType::Int32:    return 4;
-        case DType::Int64:    return 8;
-        case DType::Bool:     return 1;
-        default:              return 4;
+// Validate an untrusted dtype field read off disk. DType enumerators are
+// contiguous in [0, QInt4x2]; an out-of-range value would make dtype_size()
+// return 0 and then divide-by-zero inside empty(). Throw before that happens.
+auto checked_dtype(uint32_t raw, const std::string& name) -> DType {
+    if (raw > static_cast<uint32_t>(DType::QInt4x2)) {
+        throw std::runtime_error(
+            "DistributedCheckpoint: invalid dtype value " + std::to_string(raw) +
+            " for tensor '" + name + "'");
     }
+    auto dt = static_cast<DType>(raw);
+    if (dtype_size(dt) == 0) {
+        throw std::runtime_error(
+            "DistributedCheckpoint: unsupported (zero-size) dtype for tensor '" +
+            name + "'");
+    }
+    return dt;
 }
 
 } // anonymous namespace
@@ -122,6 +125,20 @@ auto DistributedCheckpoint::load(
     const std::string& path,
     int64_t rank,
     int64_t world_size) -> std::unordered_map<std::string, Tensor> {
+
+    // Validate rank/world_size before any resharding arithmetic. An
+    // uninitialized process group (world_size==0) would otherwise divide by
+    // zero, and an out-of-range rank would produce a degenerate/OOB slice.
+    if (world_size < 1) {
+        throw std::invalid_argument(
+            "DistributedCheckpoint::load: world_size must be >= 1, got " +
+            std::to_string(world_size));
+    }
+    if (rank < 0 || rank >= world_size) {
+        throw std::invalid_argument(
+            "DistributedCheckpoint::load: rank " + std::to_string(rank) +
+            " out of range [0, " + std::to_string(world_size) + ")");
+    }
 
     // First, try to read this rank's own shard file
     auto own_shard = shard_path(path, rank);
@@ -233,11 +250,29 @@ auto DistributedCheckpoint::load(
         }
         auto full = cat(chunks, 0);
 
-        // Now slice for this rank's portion in the new world_size
+        // Now slice for this rank's portion in the new world_size.
+        //
+        // Use a balanced partition: the first (total % world_size) ranks get
+        // one extra row each, instead of the old floor-division scheme that
+        // dumped every remainder row onto the last rank (and handed empty
+        // slices to ranks 0..ws-2 whenever world_size > total). A tensor whose
+        // dim-0 is smaller than world_size cannot be resharded without empty
+        // shards, so reject that case explicitly rather than silently
+        // concentrating data on one rank.
         auto total = full.shape()[0];
-        auto shard_size = total / world_size;
-        auto start = rank * shard_size;
-        auto end = (rank == world_size - 1) ? total : start + shard_size;
+        if (world_size > total) {
+            throw std::runtime_error(
+                "DistributedCheckpoint: cannot reshard '" + name + "' (dim-0 = " +
+                std::to_string(total) + ") across world_size " +
+                std::to_string(world_size) + " without empty shards");
+        }
+        auto base = total / world_size;
+        auto rem = total % world_size;
+        // start = rank*base + min(rank, rem); each of the first `rem` ranks
+        // carries one extra row.
+        auto start = rank * base + std::min<int64_t>(rank, rem);
+        auto count = base + (rank < rem ? 1 : 0);
+        auto end = start + count;
 
         result[name] = full.slice(0, start, end);
     }
@@ -283,7 +318,7 @@ auto DistributedCheckpoint::serialize_state(
         write_val(buf, static_cast<uint32_t>(cpu_tensor.dtype()));
 
         // Data
-        auto elem_size = dtype_to_element_size(cpu_tensor.dtype());
+        auto elem_size = dtype_size(cpu_tensor.dtype());
         auto data_bytes = static_cast<int64_t>(cpu_tensor.numel() * elem_size);
         write_val(buf, data_bytes);
         write_bytes(buf, cpu_tensor.data_ptr(), static_cast<size_t>(data_bytes));
@@ -364,8 +399,10 @@ auto DistributedCheckpoint::deserialize_state(const std::vector<uint8_t>& data) 
             numel *= shape[d];
         }
 
-        // DType
-        auto dtype = static_cast<DType>(read_val<uint32_t>(ptr, end));
+        // DType — validated against the known enumerator set so an untrusted
+        // out-of-range value cannot reach empty()/dtype_size() (which would
+        // divide by a zero element size → SIGFPE).
+        auto dtype = checked_dtype(read_val<uint32_t>(ptr, end), name);
 
         // Data
         auto data_bytes = read_val<int64_t>(ptr, end);
@@ -375,7 +412,7 @@ auto DistributedCheckpoint::deserialize_state(const std::vector<uint8_t>& data) 
         // malformed and copying could overflow the heap allocation.
         auto tensor = empty(shape, dtype, Device::cpu());
         auto expected_bytes = static_cast<int64_t>(
-            tensor.numel() * dtype_to_element_size(tensor.dtype()));
+            tensor.numel() * dtype_size(tensor.dtype()));
         if (data_bytes != expected_bytes) {
             throw std::runtime_error(
                 "DistributedCheckpoint: data size mismatch for '" + name +

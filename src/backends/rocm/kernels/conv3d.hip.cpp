@@ -5,8 +5,10 @@
 #include <rocblas/rocblas.h>
 #include <stdexcept>
 #include <vector>
+#include <type_traits>
 #include "../rocm_error.hpp"
 #include "../hip_buffer.hpp"
+#include "rocm_nan_helpers.hip.h"
 
 namespace tenzor {
 namespace rocm {
@@ -1105,10 +1107,93 @@ auto conv_transpose3d_forward_hip(
     return output;
 }
 
-// ConvTranspose3d backward input: this is a regular conv3d forward
+// ============================================================================
+// ConvTranspose3d backward-input: dedicated kernel.
+//
+// Mirrors CPU conv_transpose3d_backward_input_impl. For transposed conv the
+// forward relation is  od = id*stride - pad + kd*dil  (note: + kd*dil, the
+// inverse-stride relation, NOT conv3d-forward's id = od*stride - pad + kd*dil),
+// so backward-input gathers grad_output at that od/oh/ow for each grad_input
+// element. Weight layout is the transpose weight (C_in, C_out/groups, kD,kH,kW)
+// — channel roles are NOT the same as a conv3d-forward weight.
+//
+//   grad_input[b][g*icpg+icl][id,ih,iw] =
+//       sum_{ocl,kd,kh,kw} weight[(g*icpg+icl)][ocl][kd,kh,kw]
+//                          * grad_output[b][g*ocpg+ocl][od,oh,ow]
+// over taps where (od,oh,ow) lands in-bounds.
+// ============================================================================
+template<typename T>
+__global__ void conv_transpose3d_backward_input_kernel(
+    const T* __restrict__ grad_output,   // (N, C_out, D_out, H_out, W_out)
+    const T* __restrict__ weight,        // (C_in, C_out/groups, kD, kH, kW)
+    T* __restrict__ grad_input,          // (N, C_in, D_in, H_in, W_in)
+    int64_t batch,
+    int64_t in_channels, int64_t in_d, int64_t in_h, int64_t in_w,
+    int64_t out_channels, int64_t out_d, int64_t out_h, int64_t out_w,
+    int64_t kD, int64_t kH, int64_t kW,
+    int64_t stride_d, int64_t stride_h, int64_t stride_w,
+    int64_t pad_d, int64_t pad_h, int64_t pad_w,
+    int64_t dil_d, int64_t dil_h, int64_t dil_w,
+    int64_t groups
+) {
+    int64_t in_channels_per_group = in_channels / groups;
+    int64_t out_channels_per_group = out_channels / groups;
+    int64_t total = batch * in_channels * in_d * in_h * in_w;
+
+    HIP_KERNEL_LOOP_CONV3D(idx, total) {
+        int64_t iw = idx % in_w;
+        int64_t ih = (idx / in_w) % in_h;
+        int64_t id = (idx / (in_w * in_h)) % in_d;
+        int64_t ic = (idx / (in_w * in_h * in_d)) % in_channels;
+        int64_t n  = idx / (in_w * in_h * in_d * in_channels);
+
+        int64_t g = ic / in_channels_per_group;
+        // weight first-dim index is the global input channel (ic); second dim is
+        // the in-group output channel.
+        const T* w_ic = weight + ic * (out_channels_per_group * kD * kH * kW);
+
+        // Float accumulator for half precision; native otherwise (double stays double).
+        using Acc = std::conditional_t<std::is_same_v<T, __half>, float, T>;
+        Acc acc = Acc(0);
+
+        for (int64_t ocl = 0; ocl < out_channels_per_group; ++ocl) {
+            int64_t oc = g * out_channels_per_group + ocl;
+            const T* go_oc = grad_output
+                + ((n * out_channels + oc) * out_d) * (out_h * out_w);
+            const T* w_oc = w_ic + ocl * (kD * kH * kW);
+            for (int64_t kd = 0; kd < kD; ++kd) {
+                int64_t od = id * stride_d - pad_d + kd * dil_d;
+                if (od < 0 || od >= out_d) continue;
+                for (int64_t kh = 0; kh < kH; ++kh) {
+                    int64_t oh = ih * stride_h - pad_h + kh * dil_h;
+                    if (oh < 0 || oh >= out_h) continue;
+                    for (int64_t kw = 0; kw < kW; ++kw) {
+                        int64_t ow = iw * stride_w - pad_w + kw * dil_w;
+                        if (ow < 0 || ow >= out_w) continue;
+                        T gv = go_oc[(od * out_h + oh) * out_w + ow];
+                        T wv = w_oc[(kd * kH + kh) * kW + kw];
+                        if constexpr (std::is_same_v<T, __half>) {
+                            acc += tenzor::rocm::safe_h2f(gv) * tenzor::rocm::safe_h2f(wv);
+                        } else {
+                            acc += gv * wv;
+                        }
+                    }
+                }
+            }
+        }
+
+        if constexpr (std::is_same_v<T, __half>) {
+            grad_input[idx] = tenzor::rocm::safe_f2h(acc);
+        } else {
+            grad_input[idx] = static_cast<T>(acc);
+        }
+    }
+}
+
+// ConvTranspose3d backward input
 auto conv_transpose3d_backward_input_hip(
     const Tensor& grad_output,
-    const Tensor& weight,        // (C_in, C_out, kD, kH, kW) - transposed weight
+    const Tensor& weight,        // (C_in, C_out/groups, kD, kH, kW) - transposed weight
     const std::vector<int64_t>& input_shape,
     const std::vector<int64_t>& stride,
     const std::vector<int64_t>& padding,
@@ -1116,41 +1201,232 @@ auto conv_transpose3d_backward_input_hip(
     int64_t groups,
     hipStream_t stream
 ) -> Tensor {
-    // ConvTranspose3d backward w.r.t. input is a regular Conv3d forward
-    // with weight transposed (C_out and C_in swapped)
-    // We need to permute weight from (C_in, C_out, kD, kH, kW) to (C_out, C_in, kD, kH, kW)
-    // But since we're calling conv3d_forward with the weight as-is and the shapes work out,
-    // we use the forward conv with appropriate shapes
-    auto weight_shape = weight.shape();
-    const int64_t C_in_orig = weight_shape[0];
-    const int64_t C_out_orig = weight_shape[1];
+    // BFloat16: upcast to Float32, compute, convert back.
+    if (grad_output.dtype() == DType::BFloat16) {
+        auto go_f32 = grad_output.to(DType::Float32);
+        auto w_f32 = weight.to(DType::Float32);
+        auto result = conv_transpose3d_backward_input_hip(
+            go_f32, w_f32, input_shape, stride, padding, dilation, groups, stream);
+        return result.to(DType::BFloat16);
+    }
 
-    // For backward of ConvTranspose3d, grad_input = conv3d(grad_output, weight_transposed)
-    // where weight_transposed has shape (C_in, C_out/groups, kD, kH, kW) -> (C_in, C_out/groups, kD, kH, kW)
-    // The weight is already in (C_in, C_out, kD, kH, kW) format for transpose conv
-    // For the backward, we need conv3d with weight (C_in, C_out/groups, kD, kH, kW)
-    // treating C_in as the output channels of the forward conv
+    auto go_shape = grad_output.shape();
+    auto w_shape = weight.shape();
 
-    // Use conv3d_forward_hip with swapped channels interpretation
-    Tensor empty_bias;
-    return conv3d_forward_hip(grad_output, weight, empty_bias, stride, padding, dilation, groups, stream);
+    const int64_t N = go_shape[0];
+    const int64_t C_out = go_shape[1];
+    const int64_t D_out = go_shape[2], H_out = go_shape[3], W_out = go_shape[4];
+
+    const int64_t C_in = input_shape[1];
+    const int64_t D_in = input_shape[2], H_in = input_shape[3], W_in = input_shape[4];
+
+    const int64_t kD = w_shape[2], kH = w_shape[3], kW = w_shape[4];
+
+    const int64_t stride_d = stride.size() > 0 ? stride[0] : 1;
+    const int64_t stride_h = stride.size() > 1 ? stride[1] : stride_d;
+    const int64_t stride_w = stride.size() > 2 ? stride[2] : stride_h;
+
+    const int64_t pad_d = padding.size() > 0 ? padding[0] : 0;
+    const int64_t pad_h = padding.size() > 1 ? padding[1] : pad_d;
+    const int64_t pad_w = padding.size() > 2 ? padding[2] : pad_h;
+
+    const int64_t dil_d = dilation.size() > 0 ? dilation[0] : 1;
+    const int64_t dil_h = dilation.size() > 1 ? dilation[1] : dil_d;
+    const int64_t dil_w = dilation.size() > 2 ? dilation[2] : dil_h;
+
+    Tensor grad_input(std::vector<int64_t>(input_shape.begin(), input_shape.end()),
+                      grad_output.dtype(), grad_output.device());
+
+    int64_t total = grad_input.numel();
+    dim3 grid, block;
+    compute_launch_config_conv3d(total, grid, block);
+
+    if (grad_output.dtype() == DType::Float32) {
+        hipLaunchKernelGGL(conv_transpose3d_backward_input_kernel<float>,
+            grid, block, 0, stream,
+            grad_output.data<float>(), weight.data<float>(), grad_input.data<float>(),
+            N, C_in, D_in, H_in, W_in, C_out, D_out, H_out, W_out,
+            kD, kH, kW, stride_d, stride_h, stride_w,
+            pad_d, pad_h, pad_w, dil_d, dil_h, dil_w, groups);
+    } else if (grad_output.dtype() == DType::Float64) {
+        hipLaunchKernelGGL(conv_transpose3d_backward_input_kernel<double>,
+            grid, block, 0, stream,
+            grad_output.data<double>(), weight.data<double>(), grad_input.data<double>(),
+            N, C_in, D_in, H_in, W_in, C_out, D_out, H_out, W_out,
+            kD, kH, kW, stride_d, stride_h, stride_w,
+            pad_d, pad_h, pad_w, dil_d, dil_h, dil_w, groups);
+    } else if (grad_output.dtype() == DType::Float16) {
+        hipLaunchKernelGGL(conv_transpose3d_backward_input_kernel<__half>,
+            grid, block, 0, stream,
+            reinterpret_cast<const __half*>(grad_output.data<Float16>()),
+            reinterpret_cast<const __half*>(weight.data<Float16>()),
+            reinterpret_cast<__half*>(grad_input.data<Float16>()),
+            N, C_in, D_in, H_in, W_in, C_out, D_out, H_out, W_out,
+            kD, kH, kW, stride_d, stride_h, stride_w,
+            pad_d, pad_h, pad_w, dil_d, dil_h, dil_w, groups);
+    } else {
+        throw std::runtime_error("ConvTranspose3d backward input: unsupported dtype");
+    }
+
+    HIP_CHECK(hipGetLastError());
+    return grad_input;
+}
+
+// ============================================================================
+// ConvTranspose3d backward-weight: dedicated kernel.
+//
+// Mirrors CPU conv_transpose3d_backward_weight_impl. grad_weight has the
+// transpose layout (C_in, C_out/groups, kD, kH, kW). Using the same inverse
+// stride relation od = id*stride - pad + kd*dil:
+//
+//   grad_weight[g*icpg+icl][ocl][kd,kh,kw] =
+//       sum_{b,id,ih,iw} input[b][g*icpg+icl][id,ih,iw]
+//                        * grad_output[b][g*ocpg+ocl][od,oh,ow]
+// One thread per grad_weight element.
+// ============================================================================
+template<typename T>
+__global__ void conv_transpose3d_backward_weight_kernel(
+    const T* __restrict__ grad_output,   // (N, C_out, D_out, H_out, W_out)
+    const T* __restrict__ input,         // (N, C_in, D_in, H_in, W_in)
+    T* __restrict__ grad_weight,         // (C_in, C_out/groups, kD, kH, kW)
+    int64_t batch,
+    int64_t in_channels, int64_t in_d, int64_t in_h, int64_t in_w,
+    int64_t out_channels, int64_t out_d, int64_t out_h, int64_t out_w,
+    int64_t kD, int64_t kH, int64_t kW,
+    int64_t stride_d, int64_t stride_h, int64_t stride_w,
+    int64_t pad_d, int64_t pad_h, int64_t pad_w,
+    int64_t dil_d, int64_t dil_h, int64_t dil_w,
+    int64_t groups
+) {
+    int64_t in_channels_per_group = in_channels / groups;
+    int64_t out_channels_per_group = out_channels / groups;
+    int64_t total = in_channels * out_channels_per_group * kD * kH * kW;
+
+    HIP_KERNEL_LOOP_CONV3D(idx, total) {
+        int64_t kw  = idx % kW;
+        int64_t kh  = (idx / kW) % kH;
+        int64_t kd  = (idx / (kW * kH)) % kD;
+        int64_t ocl = (idx / (kW * kH * kD)) % out_channels_per_group;
+        int64_t ic  = idx / (kW * kH * kD * out_channels_per_group);  // global input channel
+
+        int64_t g = ic / in_channels_per_group;
+        int64_t oc = g * out_channels_per_group + ocl;
+
+        using Acc = std::conditional_t<std::is_same_v<T, __half>, float, T>;
+        Acc acc = Acc(0);
+
+        for (int64_t b = 0; b < batch; ++b) {
+            const T* in_ic = input + ((b * in_channels + ic) * in_d) * (in_h * in_w);
+            const T* go_oc = grad_output + ((b * out_channels + oc) * out_d) * (out_h * out_w);
+            for (int64_t id = 0; id < in_d; ++id) {
+                int64_t od = id * stride_d - pad_d + kd * dil_d;
+                if (od < 0 || od >= out_d) continue;
+                for (int64_t ih = 0; ih < in_h; ++ih) {
+                    int64_t oh = ih * stride_h - pad_h + kh * dil_h;
+                    if (oh < 0 || oh >= out_h) continue;
+                    for (int64_t iw = 0; iw < in_w; ++iw) {
+                        int64_t ow = iw * stride_w - pad_w + kw * dil_w;
+                        if (ow < 0 || ow >= out_w) continue;
+                        T inv = in_ic[(id * in_h + ih) * in_w + iw];
+                        T gv  = go_oc[(od * out_h + oh) * out_w + ow];
+                        if constexpr (std::is_same_v<T, __half>) {
+                            acc += tenzor::rocm::safe_h2f(inv) * tenzor::rocm::safe_h2f(gv);
+                        } else {
+                            acc += inv * gv;
+                        }
+                    }
+                }
+            }
+        }
+
+        if constexpr (std::is_same_v<T, __half>) {
+            grad_weight[idx] = tenzor::rocm::safe_f2h(acc);
+        } else {
+            grad_weight[idx] = static_cast<T>(acc);
+        }
+    }
 }
 
 // ConvTranspose3d backward weight
 auto conv_transpose3d_backward_weight_hip(
     const Tensor& grad_output,
     const Tensor& input,
-    const std::vector<int64_t>& weight_shape,
+    const std::vector<int64_t>& weight_shape,  // (C_in, C_out/groups, kD, kH, kW)
     const std::vector<int64_t>& stride,
     const std::vector<int64_t>& padding,
     const std::vector<int64_t>& dilation,
     int64_t groups,
     hipStream_t stream
 ) -> Tensor {
-    // For ConvTranspose3d, backward weight is similar but with swapped roles
-    // weight_shape: (C_in, C_out, kD, kH, kW)
-    // grad_weight = input^T @ im3col(grad_output)
-    return conv3d_backward_weight_hip(grad_output, input, weight_shape, stride, padding, dilation, groups, stream);
+    // BFloat16: upcast to Float32, compute, convert back.
+    if (grad_output.dtype() == DType::BFloat16) {
+        auto go_f32 = grad_output.to(DType::Float32);
+        auto in_f32 = input.to(DType::Float32);
+        auto result = conv_transpose3d_backward_weight_hip(
+            go_f32, in_f32, weight_shape, stride, padding, dilation, groups, stream);
+        return result.to(DType::BFloat16);
+    }
+
+    auto go_shape = grad_output.shape();
+    auto in_shape = input.shape();
+
+    const int64_t N = go_shape[0];
+    const int64_t C_out = go_shape[1];
+    const int64_t D_out = go_shape[2], H_out = go_shape[3], W_out = go_shape[4];
+
+    const int64_t C_in = in_shape[1];
+    const int64_t D_in = in_shape[2], H_in = in_shape[3], W_in = in_shape[4];
+
+    const int64_t kD = weight_shape[2], kH = weight_shape[3], kW = weight_shape[4];
+
+    const int64_t stride_d = stride.size() > 0 ? stride[0] : 1;
+    const int64_t stride_h = stride.size() > 1 ? stride[1] : stride_d;
+    const int64_t stride_w = stride.size() > 2 ? stride[2] : stride_h;
+
+    const int64_t pad_d = padding.size() > 0 ? padding[0] : 0;
+    const int64_t pad_h = padding.size() > 1 ? padding[1] : pad_d;
+    const int64_t pad_w = padding.size() > 2 ? padding[2] : pad_h;
+
+    const int64_t dil_d = dilation.size() > 0 ? dilation[0] : 1;
+    const int64_t dil_h = dilation.size() > 1 ? dilation[1] : dil_d;
+    const int64_t dil_w = dilation.size() > 2 ? dilation[2] : dil_h;
+
+    Tensor grad_weight(std::vector<int64_t>(weight_shape.begin(), weight_shape.end()),
+                       grad_output.dtype(), grad_output.device());
+
+    int64_t total = grad_weight.numel();
+    dim3 grid, block;
+    compute_launch_config_conv3d(total, grid, block);
+
+    if (grad_output.dtype() == DType::Float32) {
+        hipLaunchKernelGGL(conv_transpose3d_backward_weight_kernel<float>,
+            grid, block, 0, stream,
+            grad_output.data<float>(), input.data<float>(), grad_weight.data<float>(),
+            N, C_in, D_in, H_in, W_in, C_out, D_out, H_out, W_out,
+            kD, kH, kW, stride_d, stride_h, stride_w,
+            pad_d, pad_h, pad_w, dil_d, dil_h, dil_w, groups);
+    } else if (grad_output.dtype() == DType::Float64) {
+        hipLaunchKernelGGL(conv_transpose3d_backward_weight_kernel<double>,
+            grid, block, 0, stream,
+            grad_output.data<double>(), input.data<double>(), grad_weight.data<double>(),
+            N, C_in, D_in, H_in, W_in, C_out, D_out, H_out, W_out,
+            kD, kH, kW, stride_d, stride_h, stride_w,
+            pad_d, pad_h, pad_w, dil_d, dil_h, dil_w, groups);
+    } else if (grad_output.dtype() == DType::Float16) {
+        hipLaunchKernelGGL(conv_transpose3d_backward_weight_kernel<__half>,
+            grid, block, 0, stream,
+            reinterpret_cast<const __half*>(grad_output.data<Float16>()),
+            reinterpret_cast<const __half*>(input.data<Float16>()),
+            reinterpret_cast<__half*>(grad_weight.data<Float16>()),
+            N, C_in, D_in, H_in, W_in, C_out, D_out, H_out, W_out,
+            kD, kH, kW, stride_d, stride_h, stride_w,
+            pad_d, pad_h, pad_w, dil_d, dil_h, dil_w, groups);
+    } else {
+        throw std::runtime_error("ConvTranspose3d backward weight: unsupported dtype");
+    }
+
+    HIP_CHECK(hipGetLastError());
+    return grad_weight;
 }
 
 // ConvTranspose3d backward bias = same as Conv3d backward bias

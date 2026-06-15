@@ -58,7 +58,10 @@ struct SerializedPayload {
  * @brief Complete RPC message (header + payload).
  */
 struct Message {
-    MessageType type;
+    /// Default to RPC_ERROR so a default-constructed Message fails closed: a
+    /// path that serializes/dispatches before assigning `type` routes to the
+    /// error branch rather than reading an indeterminate enum (UB).
+    MessageType type{MessageType::RPC_ERROR};
     int32_t src_worker{-1};          ///< Sender worker ID
     int32_t dst_worker{-1};          ///< Destination worker ID
     SerializedPayload payload;

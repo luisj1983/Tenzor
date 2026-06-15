@@ -63,15 +63,21 @@ struct OpPattern {
  * warning. Used for reporting and debugging.
  */
 struct OptimizationStats {
-    size_t linear_relu_fused{0};      ///< Number of linear+relu fusions
-    size_t conv_batchnorm_fused{0};   ///< Number of conv+batchnorm fusions
-    size_t conv_relu_fused{0};        ///< Number of conv+relu fusions
-    size_t batchnorm_relu_fused{0};   ///< Number of batchnorm+relu fusions
-    size_t linear_gelu_fused{0};      ///< Number of linear+gelu fusions
-    size_t conv_bn_relu_fused{0};     ///< Number of conv+bn+relu fusions
-    size_t transpose_pairs_eliminated{0}; ///< Number of transpose pairs eliminated
-    size_t reshape_chains_collapsed{0};   ///< Number of reshape chains collapsed
-    size_t dead_nodes_removed{0};     ///< Number of dead code nodes removed
+    size_t linear_relu_fused{0};      ///< Number of linear+relu fusions (REWRITES the graph)
+    // The following counters correspond to ANALYSIS-ONLY passes that currently
+    // only *detect* the pattern and never rewrite the graph. Their passes
+    // deliberately do NOT update these fields (so they stay 0 and never inflate
+    // total()/total_optimizations with optimizations that never happened); the
+    // passes still return the detected count for diagnostics. They are retained
+    // for when the actual fused-kernel rewrites are implemented.
+    size_t conv_batchnorm_fused{0};   ///< analysis-only: conv+batchnorm detections (not rewritten)
+    size_t conv_relu_fused{0};        ///< analysis-only: conv+relu detections (not rewritten)
+    size_t batchnorm_relu_fused{0};   ///< analysis-only: batchnorm+relu detections (not rewritten)
+    size_t linear_gelu_fused{0};      ///< analysis-only: linear+gelu detections (not rewritten)
+    size_t conv_bn_relu_fused{0};     ///< analysis-only: conv+bn+relu detections (not rewritten)
+    size_t transpose_pairs_eliminated{0}; ///< analysis-only: transpose-pair detections (not rewritten)
+    size_t reshape_chains_collapsed{0};   ///< analysis-only: reshape-chain detections (not rewritten)
+    size_t dead_nodes_removed{0};     ///< Number of dead code nodes removed (REWRITES the graph)
     size_t total_optimizations{0};    ///< Total optimizations applied
 
     auto total() const -> size_t {

@@ -9,6 +9,7 @@
 #include "tenzor/ops/transform.hpp"
 #include <stdexcept>
 #include <cstring>
+#include <algorithm>
 
 namespace tenzor::nn::utils {
 
@@ -57,8 +58,45 @@ auto KVCache::update(int64_t layer, const Tensor& new_k, const Tensor& new_v, in
             " out of range [0, " + std::to_string(config_.num_layers) + ")");
     }
 
+    // Validate input ranks/shapes against the cache configuration before
+    // deriving any offsets. update() copies new_k/new_v block-by-block using
+    // src/dst offsets computed purely from config_ (B, H, D); if the supplied
+    // tensors do not match {batch_size, num_kv_heads, *, head_dim} the memcpy
+    // would over-read the source and write the wrong cache region (OOB).
+    if (new_k.ndim() != 4 || new_v.ndim() != 4) {
+        throw std::invalid_argument(
+            "KVCache::update: new_k/new_v must be 4-D [batch, num_kv_heads, "
+            "new_seq_len, head_dim]; got new_k.ndim()=" +
+            std::to_string(new_k.ndim()) + ", new_v.ndim()=" +
+            std::to_string(new_v.ndim()));
+    }
+
     auto new_shape = new_k.shape();
+    if (new_shape[0] != config_.batch_size || new_shape[1] != config_.num_kv_heads ||
+        new_shape[3] != config_.head_dim) {
+        throw std::invalid_argument(
+            "KVCache::update: new_k shape [" + std::to_string(new_shape[0]) + ", " +
+            std::to_string(new_shape[1]) + ", " + std::to_string(new_shape[2]) + ", " +
+            std::to_string(new_shape[3]) + "] does not match cache config {batch_size=" +
+            std::to_string(config_.batch_size) + ", num_kv_heads=" +
+            std::to_string(config_.num_kv_heads) + ", *, head_dim=" +
+            std::to_string(config_.head_dim) + "}");
+    }
+    auto v_shape = new_v.shape();
+    if (!std::ranges::equal(v_shape, new_shape)) {
+        throw std::invalid_argument(
+            "KVCache::update: new_v shape must equal new_k shape");
+    }
+
     int64_t new_seq_len = new_shape[2];  // (batch, num_kv_heads, new_seq_len, head_dim)
+
+    // Reject negative positions/lengths: dst offsets promote to size_t and a
+    // negative pos becomes a huge index, writing far out of bounds.
+    if (pos < 0 || new_seq_len < 0) {
+        throw std::out_of_range(
+            "KVCache::update: pos (" + std::to_string(pos) + ") and new_seq_len (" +
+            std::to_string(new_seq_len) + ") must be non-negative");
+    }
 
     if (pos + new_seq_len > config_.max_seq_len) {
         throw std::runtime_error(

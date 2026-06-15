@@ -22,6 +22,7 @@
 #include <iostream>
 #include <memory>
 #include <string>
+#include <stdexcept>
 
 namespace tenzor {
 namespace serving {
@@ -78,7 +79,17 @@ public:
                                         "tensor shape too large");
                 }
             }
-            size_t required = static_cast<size_t>(numel) * tenzor::dtype_size(dtype);
+            // The int64 numel guard above does NOT bound `numel * dtype_size`:
+            // a shape with numel ~2^61 passes the int64 check, then the size_t
+            // byte-size multiply wraps small, the length check passes for a tiny
+            // payload, and tenzor::empty() allocates from the full shape
+            // (bad_alloc DoS). Use a checked multiply and reject on overflow.
+            size_t required = 0;
+            if (__builtin_mul_overflow(static_cast<size_t>(numel),
+                                       tenzor::dtype_size(dtype), &required)) {
+                return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT,
+                                    "tensor byte size overflows size_t");
+            }
             if (tensor_data.data().size() < required) {
                 return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT,
                                     "input data length does not match shape * dtype size");
@@ -158,15 +169,22 @@ public:
                            const LoadModelRequest* request,
                            LoadModelResponse* response) override {
         try {
-            // Reject absolute paths and '..' traversal so a client cannot make
-            // the server open/deserialize an arbitrary host file via the
-            // untrusted-input graph/state loader.
-            const std::string& mp = request->model_path();
-            if (std::filesystem::path(mp).is_absolute() ||
-                mp.find("..") != std::string::npos) {
+            // Confine the client-supplied path to the repository root via the
+            // SAME helper the HTTP handler uses (single source of truth), so a
+            // client cannot make the server open/deserialize an arbitrary host
+            // file through the untrusted-input graph/state loader. This catches
+            // absolute paths, real ".." traversal components, and symlink
+            // escapes — while still accepting filenames that merely contain the
+            // substring ".." (e.g. "model..v2.tz"). The gRPC server has no
+            // configured repository root, so it resolves relative to the
+            // current directory.
+            std::string mp;
+            try {
+                mp = tenzor::serving::sanitize_repository_path(
+                    request->model_path(), /*root_dir=*/"");
+            } catch (const std::invalid_argument& e) {
                 response->set_success(false);
-                response->set_message(
-                    "model_path must be a relative path without '..'");
+                response->set_message(e.what());
                 return grpc::Status::OK;
             }
             repository_.load_model(request->model_name(), mp, Device::cpu());

@@ -1299,11 +1299,47 @@ auto VulkanBackend::dispatchReduction(const std::string& op_name,
     if (input.numel() == 0) {
         // For empty tensors, return identity value
         // sum: 0, mean: 0, max: -inf, min: +inf
-        float identity_value = 0.0f;
+        // dispatchFull narrows the value to the target dtype; casting a float
+        // infinity to an integer dtype is UB (commonly INT_MIN regardless of
+        // sign), so for integer dtypes use the dtype's representable extreme,
+        // matching CPU semantics (empty min -> dtype max, empty max -> dtype min).
+        double identity_value = 0.0;
+        const DType out_dtype = input.dtype();
+        const bool is_integer =
+            (out_dtype == DType::Int8 || out_dtype == DType::Int16 ||
+             out_dtype == DType::Int32 || out_dtype == DType::Int64 ||
+             out_dtype == DType::UInt8 || out_dtype == DType::UInt16 ||
+             out_dtype == DType::UInt32 || out_dtype == DType::UInt64);
         if (op_name == "max") {
-            identity_value = -std::numeric_limits<float>::infinity();
+            if (is_integer) {
+                // Identity for max is the smallest representable value.
+                switch (out_dtype) {
+                    case DType::Int8:   identity_value = static_cast<double>(std::numeric_limits<int8_t>::min()); break;
+                    case DType::Int16:  identity_value = static_cast<double>(std::numeric_limits<int16_t>::min()); break;
+                    case DType::Int32:  identity_value = static_cast<double>(std::numeric_limits<int32_t>::min()); break;
+                    case DType::Int64:  identity_value = static_cast<double>(std::numeric_limits<int64_t>::min()); break;
+                    default:            identity_value = 0.0; break;  // unsigned: min is 0
+                }
+            } else {
+                identity_value = -std::numeric_limits<double>::infinity();
+            }
         } else if (op_name == "min") {
-            identity_value = std::numeric_limits<float>::infinity();
+            if (is_integer) {
+                // Identity for min is the largest representable value.
+                switch (out_dtype) {
+                    case DType::Int8:   identity_value = static_cast<double>(std::numeric_limits<int8_t>::max()); break;
+                    case DType::Int16:  identity_value = static_cast<double>(std::numeric_limits<int16_t>::max()); break;
+                    case DType::Int32:  identity_value = static_cast<double>(std::numeric_limits<int32_t>::max()); break;
+                    case DType::Int64:  identity_value = static_cast<double>(std::numeric_limits<int64_t>::max()); break;
+                    case DType::UInt8:  identity_value = static_cast<double>(std::numeric_limits<uint8_t>::max()); break;
+                    case DType::UInt16: identity_value = static_cast<double>(std::numeric_limits<uint16_t>::max()); break;
+                    case DType::UInt32: identity_value = static_cast<double>(std::numeric_limits<uint32_t>::max()); break;
+                    case DType::UInt64: identity_value = static_cast<double>(std::numeric_limits<uint64_t>::max()); break;
+                    default:            identity_value = 0.0; break;
+                }
+            } else {
+                identity_value = std::numeric_limits<double>::infinity();
+            }
         }
 
         // Calculate output shape
@@ -1931,6 +1967,17 @@ auto VulkanBackend::dispatchBmm(const Tensor& a, const Tensor& b) -> Tensor {
         size_t buffer_size_a = a_contig ? a.numel() * dtype_sz : compute_extent(a);
         size_t buffer_size_b = b_contig ? b.numel() * dtype_sz : compute_extent(b);
         size_t buffer_size_c = output.numel() * dtype_sz;
+
+        // The bmm_strided_f16/bf16 shaders treat all buffers as packed uint[]
+        // (word = elem/2 loads, 32-bit atomicCompSwap RMW on output). For odd
+        // element counts the final word extends 2 bytes past an un-rounded
+        // descriptor range -> OOB. Round F16/BF16 sizes up to a 4-byte
+        // boundary, mirroring the contiguous path.
+        if (is_float16 || is_bfloat16) {
+            buffer_size_a = (buffer_size_a + 3) & ~size_t{3};
+            buffer_size_b = (buffer_size_b + 3) & ~size_t{3};
+            buffer_size_c = (buffer_size_c + 3) & ~size_t{3};
+        }
 
         std::vector<std::pair<uint32_t, const void*>> bindings = {
             {0, buffer_a}, {1, buffer_b}, {2, buffer_c}

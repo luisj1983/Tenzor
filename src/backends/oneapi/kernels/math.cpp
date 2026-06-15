@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cmath>
 #include <complex>
+#include <limits>
 #include <stdexcept>
 
 #ifdef TENZOR_HAS_ONEMKL
@@ -8192,6 +8193,11 @@ static auto segment_reduce_sycl_impl(const Tensor& data, const Tensor& offsets,
 
     int64_t total_work = outer_size * num_segments * inner_size;
 
+    // Host-computed, type-correct identities for max/min so integer dtypes do
+    // not suffer out-of-range float->int conversion UB (e.g. T(1e38) for int64).
+    const T max_identity = std::numeric_limits<T>::lowest();  // identity for max
+    const T min_identity = std::numeric_limits<T>::max();     // identity for min
+
     queue.submit([&](sycl::handler& h) {
         h.parallel_for<SegmentReduceKernelTag<T>>(
             sycl::range<1>(total_work), [=](sycl::id<1> idx) {
@@ -8207,8 +8213,8 @@ static auto segment_reduce_sycl_impl(const Tensor& data, const Tensor& offsets,
                 T identity;
                 if (mode == 0 || mode == 1) identity = T(0);
                 else if (mode == 4) identity = T(1);
-                else if (mode == 2) identity = T(-1e38);
-                else identity = T(1e38);
+                else if (mode == 2) identity = max_identity;
+                else identity = min_identity;
 
                 T acc = identity;
                 for (int64_t d = seg_start; d < seg_end; ++d) {

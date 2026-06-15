@@ -195,7 +195,16 @@ auto AutotuneCache::load(const std::string& path) -> void {
             ++pos;
         }
         if (start == pos) return 0.0;
-        return std::stod(content.substr(start, pos - start));
+        // The character filter above admits substrings that are not valid
+        // doubles (e.g. "-", ".", "e", "+", "1e", "--"); std::stod would throw
+        // on those. A corrupted/truncated cache file must degrade to an empty
+        // cache rather than crash, so swallow the parse error and treat the
+        // value as 0.0.
+        try {
+            return std::stod(content.substr(start, pos - start));
+        } catch (const std::exception&) {
+            return 0.0;
+        }
     };
 
     if (!expect_char('{')) return;

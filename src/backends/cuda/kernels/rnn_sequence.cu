@@ -160,6 +160,27 @@ auto lstm_forward_cuda(
     int64_t hidden = h0.shape()[1];
     int64_t gate_size = 4 * hidden;
 
+    // The portable per-timestep path below only launches the LSTM cell and the
+    // bias adds for Float32/Float64. A Float16/BFloat16 LSTM would otherwise
+    // silently drop bias_ih/bias_hh (the launch_add_bias branches have no
+    // half/bf16 case). Widen to Float32 up-front (on-GPU), run the real LSTM,
+    // and narrow the {output, h_n, c_n} results back, mirroring gru_forward_cuda.
+    if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) {
+        DType orig = input.dtype();
+        auto results = lstm_forward_cuda(
+            input.to(DType::Float32),
+            W_ih.to(DType::Float32),
+            W_hh.to(DType::Float32),
+            bias_ih.numel() > 0 ? bias_ih.to(DType::Float32) : bias_ih,
+            bias_hh.numel() > 0 ? bias_hh.to(DType::Float32) : bias_hh,
+            h0.to(DType::Float32),
+            c0.to(DType::Float32));
+        for (auto& r : results) {
+            r = r.to(orig);
+        }
+        return results;
+    }
+
 #ifdef TENZOR_HAS_CUDNN
     // Fast path: one fused cuDNN RNN kernel replaces the per-timestep cuBLAS +
     // cell-kernel loop below (~2*seq_len kernel launches whose overhead is why
@@ -278,6 +299,27 @@ auto gru_forward_cuda(
     int64_t input_size = shape[2];
     int64_t hidden = h0.shape()[1];
     int64_t gate_size = 3 * hidden;
+
+    // The portable per-timestep path below only launches gru_cell_fused_kernel
+    // for Float32/Float64, and the cuDNN fast path is Float32-only. A
+    // Float16/BFloat16 GRU would otherwise skip the bias add, launch no cell
+    // kernel, and copy the never-written (uninitialized) h_out into output —
+    // silent garbage. Widen to Float32 up-front (on-GPU), run the real GRU, and
+    // narrow results back to the input dtype.
+    if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) {
+        DType orig = input.dtype();
+        auto results = gru_forward_cuda(
+            input.to(DType::Float32),
+            W_ih.to(DType::Float32),
+            W_hh.to(DType::Float32),
+            bias.numel() > 0 ? bias.to(DType::Float32) : bias,
+            h0.to(DType::Float32),
+            bias_hh.numel() > 0 ? bias_hh.to(DType::Float32) : bias_hh);
+        for (auto& r : results) {
+            r = r.to(orig);
+        }
+        return results;
+    }
 
 #ifdef TENZOR_HAS_CUDNN
     // Fast path: one fused cuDNN GRU kernel (CUDNN_GRU + DOUBLE_BIAS matches

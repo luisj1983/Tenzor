@@ -584,7 +584,7 @@ static int stbi_write_tga_core(stbi__write_context *s, int x, int y, int comp, v
                   }
                } else {
                   for (k = i + 2; k < x && len < 128; ++k) {
-                     if (!memcmp(begin, row + k * comp, comp)) {
+                     if (!memcmp(begin, row + (size_t)k * (size_t)comp, comp)) {
                         ++len;
                      } else {
                         break;

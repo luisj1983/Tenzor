@@ -203,10 +203,22 @@ auto MemoryPlanner::greedy_assign(std::vector<LiveRange>& live_ranges)
         // Try to find an existing slot that:
         //   1. Has no overlapping live range
         //   2. Has sufficient size (or can be grown)
-        // Among candidates, prefer the one with the smallest high-water mark
-        // that is >= aligned_size (best-fit), to minimize wasted space.
-        size_t best_slot = SIZE_MAX;
-        size_t best_hwm = SIZE_MAX;
+        // Among candidates, prefer the smallest slot whose high-water mark
+        // already fits aligned_size (best-fit, no growth). Only if no fitting
+        // slot exists do we grow the largest non-fitting slot (least growth).
+        //
+        // Tracking the two candidate classes separately is required for
+        // correctness of the heuristic: a single best_slot/best_hwm pair (as a
+        // prior version used) lets a non-fitting slot encountered first lock in
+        // best_hwm < aligned_size, after which a later fitting slot — which by
+        // definition has slot_hwm >= aligned_size > best_hwm — can never win the
+        // `slot_hwm < best_hwm` test, so the planner would grow the smaller
+        // fallback instead of reusing an already-large-enough slot, inflating
+        // the total pool order-dependently.
+        size_t best_fit_slot = SIZE_MAX;     // smallest slot with hwm >= aligned_size
+        size_t best_fit_hwm = SIZE_MAX;
+        size_t best_grow_slot = SIZE_MAX;    // largest slot with hwm < aligned_size
+        size_t best_grow_hwm = 0;
 
         for (size_t s = 0; s < slots.size(); ++s) {
             // Check for time overlap with any interval in this slot
@@ -219,27 +231,26 @@ auto MemoryPlanner::greedy_assign(std::vector<LiveRange>& live_ranges)
             }
             if (overlaps) continue;
 
-            // This slot is available. Prefer the smallest slot that already
-            // fits (best-fit), which avoids growing small slots unnecessarily.
             size_t slot_hwm = slots[s].high_water_mark;
             if (slot_hwm >= aligned_size) {
-                // Fits without growth - prefer smallest such slot
-                if (best_slot == SIZE_MAX || slot_hwm < best_hwm) {
-                    best_slot = s;
-                    best_hwm = slot_hwm;
+                // Fits without growth - keep the smallest such slot.
+                if (best_fit_slot == SIZE_MAX || slot_hwm < best_fit_hwm) {
+                    best_fit_slot = s;
+                    best_fit_hwm = slot_hwm;
                 }
-            } else if (best_slot == SIZE_MAX) {
-                // Doesn't fit but no fitting slot found yet - track as fallback
-                // We'll grow this slot. Prefer the one closest to our size
-                // (to minimize growth).
-                best_slot = s;
-                best_hwm = slot_hwm;
-            } else if (best_hwm < aligned_size && slot_hwm > best_hwm) {
-                // Both don't fit, prefer the larger one (less growth needed)
-                best_slot = s;
-                best_hwm = slot_hwm;
+            } else {
+                // Doesn't fit - track the largest as the growth fallback
+                // (minimizes the growth amount).
+                if (best_grow_slot == SIZE_MAX || slot_hwm > best_grow_hwm) {
+                    best_grow_slot = s;
+                    best_grow_hwm = slot_hwm;
+                }
             }
         }
+
+        // Always prefer a fitting slot; fall back to growth only if none fits.
+        size_t best_slot = (best_fit_slot != SIZE_MAX) ? best_fit_slot
+                                                        : best_grow_slot;
 
         if (best_slot != SIZE_MAX) {
             // Reuse existing slot
@@ -498,9 +509,11 @@ auto RematerializationPlanner::apply(
         }
 
         std::shared_ptr<Node> last_consumer;
+        size_t live_consumer_count = 0;
         for (const auto& use : value->uses()) {
             auto user = use.lock();
             if (user && node_index.count(user.get())) {
+                ++live_consumer_count;
                 size_t idx = node_index[user.get()];
                 if (idx >= last_use_idx) {
                     last_use_idx = idx;
@@ -510,6 +523,17 @@ auto RematerializationPlanner::apply(
         }
 
         if (!last_consumer) continue;
+
+        // Only rematerialize values with a single live consumer. We redirect
+        // exactly ONE consumer (the last) to the recomputed output; for a
+        // multi-consumer value the original still feeds the earlier consumers
+        // and therefore stays live until its penultimate use — it is NOT freed,
+        // so crediting candidate.memory_saved (the full value byte size) would
+        // over-report the saving and let the budget loop stop early having
+        // reclaimed far less than reported, while still paying the duplicate
+        // recompute FLOPs/buffer. With a single consumer, redirecting it makes
+        // the original immediately dead, so the full credit is accurate.
+        if (live_consumer_count != 1) continue;
 
         // Insert a recompute node (duplicate of the producer) just before the
         // last consumer. The recompute node takes the same inputs and produces

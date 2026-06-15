@@ -325,7 +325,12 @@ auto IndexSelectBackward::forward(std::vector<Variable>) -> std::vector<Variable
 }
 
 auto IndexSelectBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> {
-    const auto& grad = grad_outputs[0];
+    // The scatter_add kernels on CUDA/ROCm/OneAPI/Vulkan read `src` with raw
+    // pointer arithmetic and ignore strides, so a non-contiguous grad (e.g. a
+    // slice view from CatBackward along a non-last dim) would scatter the wrong
+    // values. Materialise a contiguous copy first, mirroring SliceBackward.
+    auto grad = grad_outputs[0].is_contiguous() ? grad_outputs[0]
+                                                : grad_outputs[0].contiguous();
 
     // saved_tensors_[0] = dim (scalar Int64)
     // saved_tensors_[1] = index (1D Int64)
@@ -370,7 +375,17 @@ auto IndexSelectBackward::backward(std::vector<Tensor> grad_outputs) -> std::vec
 }
 
 auto IndexSelectBackward::backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> {
-    const auto& grad_var = grad_outputs[0];
+    // Mirror SliceBackward: the scatter_add kernels read `src` with raw pointer
+    // arithmetic and ignore strides, so a non-contiguous grad would scatter
+    // wrong values. Materialise contiguous; only re-wrap (losing the grad_fn,
+    // which is acceptable since the non-contiguous path is the buggy one) when
+    // the contiguity copy actually changed the buffer.
+    const Variable& grad_out_var = grad_outputs[0];
+    const Tensor& grad_raw = grad_out_var.tensor();
+    Tensor grad_t = grad_raw.is_contiguous() ? grad_raw : grad_raw.contiguous();
+    Variable grad_var = grad_t.data_ptr() == grad_raw.data_ptr()
+                            ? grad_out_var
+                            : Variable(grad_t, grad_out_var.requires_grad());
 
     int64_t dim = saved_tensors_[0].data<int64_t>()[0];
     const auto& index = saved_tensors_[1];
@@ -469,7 +484,11 @@ auto NarrowBackward::forward(std::vector<Variable>) -> std::vector<Variable> {
 }
 
 auto NarrowBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> {
-    const auto& grad = grad_outputs[0];
+    // The scatter kernels on CUDA/ROCm/OneAPI/Vulkan read `src` with raw pointer
+    // arithmetic and ignore strides, so a non-contiguous grad would scatter the
+    // wrong values. Materialise a contiguous copy first, mirroring SliceBackward.
+    auto grad = grad_outputs[0].is_contiguous() ? grad_outputs[0]
+                                                : grad_outputs[0].contiguous();
 
     // saved_tensors_[0] = dim (scalar Int64)
     // saved_tensors_[1] = start (scalar Int64)
@@ -515,7 +534,16 @@ auto NarrowBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<T
 auto NarrowBackward::backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> {
     // Narrow is a zero-padded slice; backward is scatter into a zero tensor of
     // the original shape. Use Variable-level scatter so grad threads through.
-    const auto& grad_var = grad_outputs[0];
+    // Mirror SliceBackward: the scatter kernels read `src` with raw pointer
+    // arithmetic and ignore strides, so materialise a contiguous grad first;
+    // only re-wrap (losing grad_fn, acceptable for the buggy non-contiguous
+    // path) when the contiguity copy actually changed the buffer.
+    const Variable& grad_out_var = grad_outputs[0];
+    const Tensor& grad_raw = grad_out_var.tensor();
+    Tensor grad_t = grad_raw.is_contiguous() ? grad_raw : grad_raw.contiguous();
+    Variable grad_var = grad_t.data_ptr() == grad_raw.data_ptr()
+                            ? grad_out_var
+                            : Variable(grad_t, grad_out_var.requires_grad());
 
     int64_t dim = saved_tensors_[0].data<int64_t>()[0];
     int64_t start = saved_tensors_[1].data<int64_t>()[0];

@@ -108,6 +108,17 @@ void validate_image_dims(int width, int height, int channels) {
     if (width <= 0 || height <= 0 || channels <= 0) {
         throw std::invalid_argument("write_image: dimensions must be positive");
     }
+    // stb_image_write only writes 1 (grey), 3 (RGB) or 4 (RGBA) channels for the
+    // formats we expose. A channel count outside {1,3,4} (e.g. a (5,H,W) tensor)
+    // is passed straight through as `comp` and produces a structurally INVALID
+    // file while stb still returns success — a silent malformed write. Reject it
+    // here, before any encoder is reached. (This also excludes comp==2, which
+    // JPEG in particular cannot represent.)
+    if (channels != 1 && channels != 3 && channels != 4) {
+        throw std::invalid_argument(
+            "write_image: channel count must be 1 (grey), 3 (RGB) or 4 (RGBA), "
+            "got " + std::to_string(channels));
+    }
     const int64_t w = width, h = height, n = channels;
     // PNG filtered-scanline buffer: (x*n + 1) * y.
     const int64_t png_bytes = (w * n + 1) * h;

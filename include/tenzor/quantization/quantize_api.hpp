@@ -141,7 +141,16 @@ auto quantize_static(
     const nn::quantization::QConfig& qconfig = nn::quantization::DefaultQConfigs::default_qconfig()
 ) -> std::shared_ptr<nn::Module>;
 
-/// Overload with per-layer config.
+/// Overload accepting a QuantizationConfig.
+///
+/// @note The static (calibration-based) path currently applies only
+///       `config.default_config` uniformly to all quantizable layers. Per-layer
+///       customization is NOT yet supported here: if `config.layer_overrides`
+///       or `config.skip_layers` is non-empty, this overload throws
+///       std::runtime_error rather than silently ignoring them. For per-layer
+///       overrides / skips use quantize_dynamic, which honors them.
+/// @throws std::runtime_error if config.layer_overrides or config.skip_layers
+///         is non-empty.
 auto quantize_static(
     std::shared_ptr<nn::Module> model,
     std::function<void(nn::Module&)> calibration_fn,

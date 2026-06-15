@@ -810,8 +810,28 @@ auto MaskRCNN::forward_test(const Variable& images)
     const DType box_dtype = bbox_deltas.tensor().dtype();
     const bool half_boxes =
         (box_dtype == DType::Float16 || box_dtype == DType::BFloat16);
-    Tensor deltas_t = half_boxes ? bbox_deltas.tensor().to(DType::Float32)
-                                 : bbox_deltas.tensor();
+
+    // bbox_pred_ emits class-specific deltas of shape (N, (num_classes+1)*4).
+    // Select the (N, 4) deltas belonging to each detection's predicted class
+    // before decoding — otherwise every box is decoded with the background
+    // class deltas (columns 0..3) regardless of the predicted label, producing
+    // systematically wrong inference boxes. `labels` is 0-based over the real
+    // classes (background column was sliced off above), so the column block in
+    // the (num_classes+1) layout is `label + 1`.
+    Tensor deltas_raw = half_boxes ? bbox_deltas.tensor().to(DType::Float32)
+                                   : bbox_deltas.tensor();
+    const int64_t num_boxes = deltas_raw.shape()[0];
+    auto deltas_per_class =
+        tenzor::reshape(deltas_raw, {num_boxes, num_classes_ + 1, 4});  // (N, C+1, 4)
+
+    // gather along the class dim with (label + 1), broadcast over the 4 coords.
+    // `labels` is Int64 (from argmax); keep the index Int64 for gather.
+    auto class_idx = tenzor::add(labels.to(DType::Int64), 1.0).to(DType::Int64);  // (N,)
+    Tensor gather_idx = tenzor::reshape(class_idx, {num_boxes, 1, 1});
+    gather_idx = tenzor::expand(gather_idx, {num_boxes, 1, 4}).contiguous();
+    auto gathered_deltas = tenzor::gather(deltas_per_class, /*dim=*/1, gather_idx);
+    Tensor deltas_t = tenzor::reshape(gathered_deltas, {num_boxes, 4});  // (N, 4)
+
     Tensor props_t = half_boxes ? proposal_boxes.to(DType::Float32)
                                 : proposal_boxes;
     auto boxes = decode_boxes(deltas_t, props_t);

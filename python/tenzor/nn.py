@@ -575,7 +575,9 @@ _LOSS_TYPES = tuple(
 )
 # The walrus target `obj` above binds in this (module) scope, leaking a stray
 # `tenzor.nn.obj` symbol into the public surface (.pyi parity drift). Drop it.
-del obj
+# Use pop (not `del obj`): in a build that exposes no `*Loss` type the walrus
+# never executes, so `obj` is unbound and `del obj` would raise NameError.
+globals().pop("obj", None)
 
 
 class _LossMeta(type(Module)):

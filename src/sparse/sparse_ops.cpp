@@ -540,15 +540,21 @@ void fallback_coo_spmv(const int64_t* idx_ptr, const T* vals, const T* x, T* y,
         // accumulates `y[row] += ...` regardless of order.)
     }
     // Serial fallback (small nnz, or M=0 from a legacy caller).
+    // Skip out-of-range rows to stay consistent with the parallel row-partition
+    // path (which drops r<0 || r>=M). Otherwise the same bad input would be
+    // silently dropped on one path and cause an out-of-bounds write here. Row
+    // bounds are only known when the caller supplied a row count (M>0).
     if constexpr (std::is_same_v<T, Acc>) {
         for (int64_t i = 0; i < nnz; ++i) {
             int64_t row = idx_ptr[i];
+            if (M > 0 && (row < 0 || row >= M)) continue;
             int64_t col = idx_ptr[nnz + i];
             y[row] += vals[i] * x[col];
         }
     } else {
         for (int64_t i = 0; i < nnz; ++i) {
             int64_t row = idx_ptr[i];
+            if (M > 0 && (row < 0 || row >= M)) continue;
             int64_t col = idx_ptr[nnz + i];
             Acc cur = static_cast<Acc>(y[row]);
             cur += static_cast<Acc>(vals[i]) * static_cast<Acc>(x[col]);
@@ -617,10 +623,14 @@ void fallback_coo_spmm(const int64_t* idx_ptr, const T* vals, const T* B, T* C,
         }
         // Unsorted COO — fall through to serial path.
     }
-    // Serial fallback.
+    // Serial fallback. Skip out-of-range rows to match the parallel
+    // row-partition path (which drops r<0 || r>=M); otherwise the same bad
+    // input would be silently dropped on one path and cause an out-of-bounds
+    // write here. Row bounds are only known when the caller supplied M>0.
     if constexpr (std::is_same_v<T, Acc>) {
         for (int64_t i = 0; i < nnz; ++i) {
             int64_t row = idx_ptr[i];
+            if (M > 0 && (row < 0 || row >= M)) continue;
             int64_t col = idx_ptr[nnz + i];
             T val = vals[i];
             for (int64_t n = 0; n < N; ++n) {
@@ -630,6 +640,7 @@ void fallback_coo_spmm(const int64_t* idx_ptr, const T* vals, const T* B, T* C,
     } else {
         for (int64_t i = 0; i < nnz; ++i) {
             int64_t row = idx_ptr[i];
+            if (M > 0 && (row < 0 || row >= M)) continue;
             int64_t col = idx_ptr[nnz + i];
             Acc val = static_cast<Acc>(vals[i]);
             for (int64_t n = 0; n < N; ++n) {

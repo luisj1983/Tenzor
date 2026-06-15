@@ -204,17 +204,25 @@ public:
     /**
      * @brief Inf-E4: Load a model by mmap'ing the file.
      *
-     * Equivalent to `load(path)` but uses POSIX mmap(2) to map the WGTS
-     * payload into the address space as a non-owning view. Weights are
-     * served via `Tensor::from_blob` with a no-op deleter — no per-call
-     * copy, no heap allocation for the weight blob. The mapping lives
-     * for the lifetime of the runtime; the destructor calls `munmap`.
+     * Currently behaviour-identical to `load(path)`: the file is mapped via
+     * POSIX mmap(2) only transiently to feed `load(data, size)`, which copies
+     * the WGTS bytes into a heap-owned `weight_blob`, after which the mapping
+     * is `munmap`'d before returning. There is therefore NO lifetime mapping
+     * and NO `munmap` in the destructor — the runtime owns a heap copy of the
+     * weights exactly as `load(path)` does.
+     *
+     * True zero-copy mmap-backed views (weights served via `Tensor::from_blob`
+     * over the live mapping, mapping retained for the runtime's lifetime) would
+     * require `LoadedModel::weight_blob` to become a non-owning span; that is a
+     * deeper refactor tracked separately. Until then, prefer `load_mmap` only
+     * for the (minor) benefit of avoiding an explicit file read into a vector.
      *
      * On Windows or when mmap fails, falls back transparently to the
      * heap-buffered `load(path)` path.
      *
      * @param path Path to the .tzlite model file
-     * @return Runtime with mmap-backed weights when supported
+     * @return Runtime equivalent to `load(path)` (transient mapping, heap-owned
+     *         weight copy)
      */
     static auto load_mmap(const std::string& path) -> std::unique_ptr<LiteRuntime>;
 

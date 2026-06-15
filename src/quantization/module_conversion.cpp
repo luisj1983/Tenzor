@@ -13,6 +13,7 @@
 #include <iostream>
 #include <typeinfo>
 #include <stdexcept>
+#include <cstdlib>
 
 namespace tenzor {
 namespace quantization {
@@ -21,6 +22,16 @@ using namespace nn;
 using namespace nn::quantization;
 
 namespace {
+
+// Library code must stay silent on stdout by default (it corrupts piped /
+// serialized output of embedding applications). Progress messages route through
+// this sink: discarded unless TENZOR_QUANT_VERBOSE is set, then sent to stderr.
+// Mirrors the qlog() sink in quantize_api.cpp.
+inline auto qlog() -> std::ostream& {
+    static const bool verbose = (std::getenv("TENZOR_QUANT_VERBOSE") != nullptr);
+    static std::ostream null_sink(nullptr);
+    return verbose ? std::cerr : null_sink;
+}
 
 /**
  * @brief Module visitor for converting float modules to quantized
@@ -153,13 +164,23 @@ public:
                     std::dynamic_pointer_cast<Conv2d>(child) != nullptr;
 
                 if (is_quantizable) {
+                    // The post-layer FakeQuantize observes ACTIVATIONS, so it must
+                    // use the activation dtype/scheme — not the weight settings.
+                    // Mirror ModuleConverter::prepare_for_qat (the maintained
+                    // path): activation quantization is per-tensor by convention
+                    // (axis = -1) unless the config selects a per-channel
+                    // activation scheme.
+                    const auto ascheme = qconfig_.activation_scheme();
+                    const bool per_channel =
+                        ascheme == QuantizationScheme::PerChannelSymmetric ||
+                        ascheme == QuantizationScheme::PerChannelAsymmetric;
+                    const int64_t axis = per_channel ? 1 : -1;
                     auto fake_quant = std::make_shared<FakeQuantize>(
-                        qconfig_.weight_dtype(),
-                        qconfig_.activation_scheme(),
-                        false,   // not learnable
-                        true,    // observer enabled
-                        -1       // per-tensor
-                    );
+                        qconfig_.activation_dtype(),
+                        ascheme,
+                        /*learnable=*/false,
+                        /*observer_enabled=*/true,
+                        axis);
                     qat_seq->add_module(fake_quant);
                 }
             }
@@ -184,6 +205,17 @@ private:
             // quant-static-02 — previously the calibrated stats were discarded).
             if (i + 1 < mods.size()) {
                 if (auto fq = std::dynamic_pointer_cast<FakeQuantize>(mods[i + 1])) {
+                    // Only freeze qparams if the observer actually received
+                    // calibration data. calculate_qparams() throws on an
+                    // uncalibrated observer, so a prepared-but-uncalibrated (or
+                    // partially calibrated) model would crash here. Mirror
+                    // ModuleConverter::extract_activation_qparams and skip the
+                    // FakeQuantize without absorbing when there is no data.
+                    if (!fq->observer() || !fq->observer()->has_data()) {
+                        quantized_seq->add_module(converted);
+                        ++i;  // drop the uncalibrated FakeQuantize
+                        continue;
+                    }
                     fq->calculate_qparams();
                     const auto& aq = fq->get_qparams();
                     bool absorbed = false;
@@ -233,12 +265,12 @@ auto convert_to_quantized(
         throw std::runtime_error("Cannot convert null module to quantized");
     }
 
-    std::cout << "[Quantization] Converting module to quantized..." << std::endl;
+    qlog() << "[Quantization] Converting module to quantized..." << std::endl;
 
     ModuleQuantizer quantizer(qconfig);
     auto quantized = quantizer.convert_to_quantized(module);
 
-    std::cout << "[Quantization] Module conversion complete" << std::endl;
+    qlog() << "[Quantization] Module conversion complete" << std::endl;
 
     return quantized;
 }
@@ -253,7 +285,7 @@ auto convert_from_quantized(
         throw std::runtime_error("Cannot convert null quantized module");
     }
 
-    std::cout << "[Quantization] Converting quantized module to float..." << std::endl;
+    qlog() << "[Quantization] Converting quantized module to float..." << std::endl;
 
     // Use default qconfig (won't be used for dequantization)
     auto qconfig = DefaultQConfigs::default_qconfig();
@@ -261,7 +293,7 @@ auto convert_from_quantized(
 
     auto float_module = quantizer.convert_from_quantized(quantized_module);
 
-    std::cout << "[Quantization] Dequantization complete" << std::endl;
+    qlog() << "[Quantization] Dequantization complete" << std::endl;
 
     return float_module;
 }

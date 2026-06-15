@@ -30,6 +30,7 @@
 #include <cstdlib>
 #include <climits>
 #include <cstdint>
+#include <limits>
 #include <tuple>
 
 namespace tenzor {
@@ -1537,7 +1538,9 @@ static void register_cpu_kernels_shape(BackendDispatchTable& table) {
     });
 
     table.register_single_output_kernel(OpId::Squeeze, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
-        int64_t dim = attrs.get_int(AttrKey::Dim, -1);
+        // Use a sentinel that cannot collide with a real (possibly negative)
+        // axis so that squeeze(-1)/squeeze(-2) are NOT mistaken for squeeze-all.
+        int64_t dim = attrs.get_int(AttrKey::Dim, std::numeric_limits<int64_t>::min());
         return cpu::squeeze_kernel(inputs[0], dim);
     });
 

@@ -55,24 +55,39 @@ class Multinomial(Distribution):
         K = self._num_events
         n = self.total_count
         # Vectorised draw: a Multinomial(n, p) count vector is the histogram of
-        # n i.i.d. Categorical(p) draws. Build the per-row CDF once and draw all
-        # batch*sample*n categorical indices via a single broadcast inverse-CDF,
-        # then tally them per event with one bincount — no per-row Python loop.
+        # n i.i.d. Categorical(p) draws. Build the per-row CDF once, then map
+        # uniforms to event indices with np.searchsorted (O(n log K), no
+        # K-sized comparison intermediate) and tally with a single bincount.
+        # We chunk over the (batch*sample) rows so the largest live array is
+        # bounded regardless of total_count / num_events / batch — the old
+        # (batch, n_samples, n, K) boolean tensor could OOM at NLP scales.
         cdf = np.cumsum(probs_2d.astype(np.float64), axis=-1)
         cdf[:, -1] = 1.0  # guard against fp drift at the final bin
-        # (batch, n_samples, n) uniforms.
-        u = np.random.random_sample((batch_size, n_samples, n))
-        # Per-row inverse-CDF compare-and-count over the event axis.
-        idx = (u[:, :, :, None] >= cdf[:, None, None, :]).sum(axis=-1)
-        np.clip(idx, 0, K - 1, out=idx)
-        # Tally counts per (batch, sample) row into K bins. Offset each row's
-        # indices into a disjoint range so a single bincount separates them.
         rows = batch_size * n_samples
-        idx_flat = idx.reshape(rows, n)
-        row_offset = (np.arange(rows, dtype=np.int64) * K)[:, None]
-        binned = np.bincount((idx_flat + row_offset).ravel(),
-                             minlength=rows * K)
-        out = binned.reshape(batch_size, n_samples, K).astype(np.int64)
+        out = np.empty((rows, K), dtype=np.int64)
+        # Cap each chunk's index buffer (chunk_rows * n int64) at ~10M elements,
+        # mirroring Binomial.entropy's memory guard; always at least one row.
+        rows_per_chunk = max(1, 10_000_000 // max(1, n))
+        # Map a flat row index r -> its batch index (probs_2d / cdf is indexed
+        # by batch, replicated across the n_samples for that batch).
+        # Row layout below is (batch, n_samples) flattened C-order.
+        for start in range(0, rows, rows_per_chunk):
+            stop = min(start + rows_per_chunk, rows)
+            chunk_rows = stop - start
+            batch_idx = (np.arange(start, stop, dtype=np.int64)
+                         // max(1, n_samples))
+            u = np.random.random_sample((chunk_rows, n))
+            # Per-row inverse-CDF: searchsorted on each row's monotone CDF.
+            idx = np.empty((chunk_rows, n), dtype=np.int64)
+            for i in range(chunk_rows):
+                idx[i] = np.searchsorted(cdf[batch_idx[i]], u[i], side="right")
+            np.clip(idx, 0, K - 1, out=idx)
+            # Tally counts per row into K bins via one offset bincount.
+            row_offset = (np.arange(chunk_rows, dtype=np.int64) * K)[:, None]
+            binned = np.bincount((idx + row_offset).ravel(),
+                                 minlength=chunk_rows * K)
+            out[start:stop] = binned.reshape(chunk_rows, K)
+        out = out.reshape(batch_size, n_samples, K)
         # Reshape to out_shape (sample, batch, K).  out is (batch, sample, K).
         out_t = out.transpose(1, 0, 2).reshape(out_shape)
         return _wrap_numpy_int(out_t)

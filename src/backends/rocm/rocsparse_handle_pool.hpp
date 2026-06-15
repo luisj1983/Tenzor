@@ -14,6 +14,7 @@
 
 #include <rocsparse/rocsparse.h>
 #include <hip/hip_runtime.h>
+#include <cstdint>
 #include <stdexcept>
 #include <string>
 
@@ -40,7 +41,13 @@ public:
     /// Returns a per-thread rocSPARSE handle, optionally bound to the given stream.
     static rocsparse_handle get(hipStream_t stream = nullptr) {
         ensure_initialized();
-        if (stream && stream != last_stream()) {
+        // Rebind whenever the requested stream differs from the last bound one.
+        // last_stream is seeded with an impossible sentinel (not nullptr) so that
+        // the very first request — including a request for the default stream
+        // (nullptr) — actually binds, and a later switch back to the default
+        // stream is not silently skipped (which would leave work on a stale,
+        // non-default stream — a stream-ordering race).
+        if (stream != last_stream()) {
             ROCSPARSE_CHECK(rocsparse_set_stream(handle(), stream));
             last_stream() = stream;
         }
@@ -50,7 +57,10 @@ public:
 private:
     struct HandleGuard {
         rocsparse_handle handle = nullptr;
-        hipStream_t last_stream = nullptr;
+        // Impossible sentinel so the first get() — even for the default (nullptr)
+        // stream — performs the bind, and switching back to the default stream is
+        // never skipped.
+        hipStream_t last_stream = reinterpret_cast<hipStream_t>(~uintptr_t(0));
         ~HandleGuard() noexcept {
             if (handle && is_backend_registry_alive()) {
                 try { rocsparse_destroy_handle(handle); }

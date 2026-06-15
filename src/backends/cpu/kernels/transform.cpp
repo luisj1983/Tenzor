@@ -4,6 +4,8 @@
 #include <algorithm>
 #include <cstring>
 #include <iostream>
+#include <limits>
+#include <stdexcept>
 #include <omp.h>
 #include <immintrin.h>
 #include "tenzor/backend/omp_thresholds.hpp"
@@ -248,12 +250,29 @@ auto permute_kernel(const Tensor& input, const std::vector<int64_t>& dims) -> Te
     return result;
 }
 
+// Sentinel meaning "squeeze every size-1 axis". A distinct value (not -1) is
+// required so that a legitimate negative axis like squeeze(-1)/squeeze(-2) is
+// not silently misinterpreted as squeeze-all.
+constexpr int64_t SQUEEZE_ALL = std::numeric_limits<int64_t>::min();
+
 auto squeeze_kernel(const Tensor& input, int64_t dim) -> Tensor {
     Tensor result;
     TensorAccessor::get_impl_mutable(result) = make_intrusive<TensorImpl>(*TensorAccessor::get_impl(input));
 
-    if (dim >= 0) {
-        // Squeeze specific dimension
+    const int64_t ndim = input.ndim();
+
+    if (dim != SQUEEZE_ALL) {
+        // Squeeze a specific dimension. Normalize negatives and validate range
+        // and that the axis is actually size 1 (mirrors Tensor::squeeze and the
+        // oneAPI squeeze_kernel).
+        if (dim < 0) dim += ndim;
+        if (dim < 0 || dim >= ndim) {
+            throw std::out_of_range("squeeze: dim out of range");
+        }
+        if (input.shape()[dim] != 1) {
+            // PyTorch leaves a non-size-1 axis untouched; return an unchanged view.
+            return result;
+        }
         auto& r_shape = result.mutable_shape();
         auto& r_strides = result.mutable_strides();
         r_shape.erase(r_shape.begin() + dim);
@@ -263,7 +282,7 @@ auto squeeze_kernel(const Tensor& input, int64_t dim) -> Tensor {
         std::vector<int64_t> new_shape;
         std::vector<int64_t> new_strides;
 
-        for (int64_t i = 0; i < input.ndim(); ++i) {
+        for (int64_t i = 0; i < ndim; ++i) {
             if (input.shape()[i] != 1) {
                 new_shape.push_back(input.shape()[i]);
                 new_strides.push_back(input.strides()[i]);

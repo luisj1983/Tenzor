@@ -61,6 +61,12 @@ auto VulkanBackend::dispatchEmbedding(const Tensor& weight, const Tensor& indice
         vkCmdDispatch(cast_cmd, div_wg(indices.numel(), devices_[device_id].workgroupSize), 1, 1);
         insertComputeBarrier(cast_cmd);
         endSingleTimeCommands(cast_cmd, device_id);
+        // Under USE_COMMAND_BATCHING the embedding kernel records into a
+        // separate command buffer, so the intra-buffer barrier above does not
+        // order the cross-buffer dependency on indices_i32. Force completion of
+        // the cast before the kernel reads it (matches dispatchGather /
+        // dispatchIndexSelect / dispatchScatter siblings).
+        synchronize(device_id);
     }
 
     // Get VkBuffer handles

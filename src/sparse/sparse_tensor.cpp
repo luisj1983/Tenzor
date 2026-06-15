@@ -769,17 +769,26 @@ auto SparseTensor::transpose() const -> SparseTensor {
 
     if (layout_ == SparseLayout::COO) {
         // Swap row and column indices: indices_ is [2, nnz]
-        // Row 0 = row indices, Row 1 = col indices
-        auto idx = indices_.contiguous();
+        // Row 0 = row indices, Row 1 = col indices.
+        // The swap below is a host for-loop, so stage the indices to CPU first
+        // (idx may live on a GPU device; dereferencing a device pointer on the
+        // host is UB/segfault). Build the swapped indices on CPU, then move
+        // back to the values' device before constructing the COO tensor.
+        auto idx = indices_.contiguous().to(Device::cpu());
         auto* idx_ptr = idx.data<int64_t>();
 
-        auto new_indices = Tensor({int64_t(2), nnz_}, DType::Int64, values_.device());
+        auto new_indices = Tensor({int64_t(2), nnz_}, DType::Int64, Device::cpu());
         auto* new_ptr = new_indices.data<int64_t>();
 
         // New row indices = old col indices, new col indices = old row indices
         for (int64_t i = 0; i < nnz_; ++i) {
             new_ptr[i] = idx_ptr[nnz_ + i];          // new row = old col
             new_ptr[nnz_ + i] = idx_ptr[i];           // new col = old row
+        }
+
+        if (new_indices.device().type != values_.device().type ||
+            new_indices.device().index != values_.device().index) {
+            new_indices = new_indices.to(values_.device());
         }
 
         // The transposed COO is not coalesced (ordering changed)
@@ -1302,8 +1311,14 @@ auto SparseTensor::to_bsr(std::pair<int64_t, int64_t> block_size) const -> Spars
                     blk_idx = it->second;
                 }
                 int64_t offset = blk_idx * block_stride + rr * bw + cc;
-                if (is_f32) block_vals_f32[offset] = vp_f32[k];
-                else        block_vals_f64[offset] = vp_f64[k];
+                // Accumulate (+=) rather than overwrite: a legally-constructed
+                // CSR may contain duplicate (row,col) entries (sparse_csr() does
+                // not enforce per-row column uniqueness). to_dense()'s CSR path
+                // and the COO densify backstop both accumulate, so this fast path
+                // must too, otherwise CSR->BSR diverges from CSR->dense for
+                // duplicate-column input.
+                if (is_f32) block_vals_f32[offset] += vp_f32[k];
+                else        block_vals_f64[offset] += vp_f64[k];
             }
         }
 

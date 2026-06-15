@@ -123,10 +123,13 @@ void main() {
             sdiag[k] = -s * new_dk1 + c * new_ek;
 
             if (k + 1 < q) {
-                sdiag[k] = -s * new_dk1 + c * new_ek;
-                y = sdiag[k];
-                z = -s * sdiag[k + 1];
-                sdiag[k] = c * sdiag[k];
+                // See f32 variant: carry exactly one (y,z) pair. The left
+                // rotation mixes column k+2's surviving superdiagonal with a
+                // zero, producing a new bulge (-s*e_{k+1}) on row k.
+                float64_t ek1 = sdiag[k + 1];
+                sdiag[k + 1] = c * ek1;   // surviving superdiagonal
+                y = sdiag[k];             // top of next right-rotation column
+                z = -s * ek1;             // bulge to be chased next iteration
             }
 
             u_rot[total_rots * 2] = c;

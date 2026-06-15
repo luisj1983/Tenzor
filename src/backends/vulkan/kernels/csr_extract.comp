@@ -30,7 +30,11 @@ void main() {
     }
     barrier();
 
-    for (uint col = tid; col < n_cols; col += 256) {
+    // Stride by the actual workgroup size (spec constant via local_size_x_id=0),
+    // not a hardcoded 256: with wgSize>256 a literal 256 stride makes tid and
+    // tid+256 claim the same column (corrupting CSR); with wgSize<256 columns
+    // in [wgSize,256) are never scanned (dropped nonzeros).
+    for (uint col = tid; col < n_cols; col += gl_WorkGroupSize.x) {
         float val = dense[row * n_cols + col];
         if (val != 0.0) {
             uint slot = atomicAdd(write_offset, 1);

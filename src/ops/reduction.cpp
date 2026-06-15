@@ -170,6 +170,9 @@ auto logsumexp(const Tensor& input, int64_t dim, bool keepdim) -> Tensor {
         // For empty input, result shape collapses dim to 1 (keepdim) or removes it
         auto shape = std::vector<int64_t>(input.shape().begin(), input.shape().end());
         if (dim < 0) dim += static_cast<int64_t>(shape.size());
+        if (dim < 0 || dim >= static_cast<int64_t>(shape.size())) {
+            throw std::out_of_range("logsumexp: dim out of range");
+        }
         if (keepdim) {
             shape[dim] = 1;
         } else {

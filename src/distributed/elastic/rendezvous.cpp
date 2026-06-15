@@ -108,7 +108,15 @@ auto C10dRendezvous::join() -> RendezvousResult {
     // it. Read with a parse-retry loop: a transient empty response under
     // concurrent store access must not be mistaken for a missing value.
     if (slot == 0) {
-        store.set(world_size_key, std::to_string(count));
+        // Clamp to max_workers: concurrent joiners can claim slots between two
+        // 25ms polls, so the live counter can overshoot max_workers before the
+        // barrier loop observes it. Freezing the raw count would produce
+        // world_size > max_workers, inconsistent with ensure_store() (which
+        // sizes the store to max_workers) and the fixed-size downstream
+        // collectives.
+        const int64_t frozen =
+            std::min<int64_t>(count, static_cast<int64_t>(config_.max_workers));
+        store.set(world_size_key, std::to_string(frozen));
     }
     int64_t world_size = 0;
     for (;;) {

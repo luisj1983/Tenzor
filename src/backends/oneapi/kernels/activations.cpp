@@ -97,6 +97,9 @@ class RReLUKernelFloat64;
 class RReLUKernelFloat16;
 class RReLUKernelBFloat16;
 class RReLUTrainKernelFloat32;
+class RReLUTrainKernelFloat64;
+class RReLUTrainKernelFloat16;
+class RReLUTrainKernelBFloat16;
 class RReLUBackwardKernelFloat32;
 class RReLUBackwardKernelFloat64;
 class RReLUBackwardKernelFloat16;
@@ -436,13 +439,14 @@ auto tanh_backward_kernel(const Tensor& grad_output, const Tensor& output, sycl:
 
 // GELU activation (Gaussian Error Linear Unit)
 auto gelu_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
-    Tensor output(std::vector<int64_t>(input.shape().begin(), input.shape().end()),
-                  input.dtype(), input.device());
+    Tensor in_cont = input.is_contiguous() ? input : contiguous_kernel(input, queue);
+    Tensor output(std::vector<int64_t>(in_cont.shape().begin(), in_cont.shape().end()),
+                  in_cont.dtype(), in_cont.device());
 
-    const int64_t numel = input.numel();
+    const int64_t numel = in_cont.numel();
 
-    if (input.dtype() == DType::Float32) {
-        const float* in_ptr = get_data_ptr<const float>(input);
+    if (in_cont.dtype() == DType::Float32) {
+        const float* in_ptr = get_data_ptr<const float>(in_cont);
         float* out_ptr = get_data_ptr<float>(output);
 
         // Exact erf GELU: 0.5 * x * (1 + erf(x / sqrt(2))) (PyTorch 'none').
@@ -453,8 +457,8 @@ auto gelu_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
             out_ptr[idx] = 0.5f * x * (1.0f + sycl::erf(x * inv_sqrt2));
         });
     }
-    else if (input.dtype() == DType::Float64) {
-        const double* in_ptr = get_data_ptr<const double>(input);
+    else if (in_cont.dtype() == DType::Float64) {
+        const double* in_ptr = get_data_ptr<const double>(in_cont);
         double* out_ptr = get_data_ptr<double>(output);
 
         const double inv_sqrt2 = 0.70710678118654752;
@@ -464,8 +468,8 @@ auto gelu_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
             out_ptr[idx] = 0.5 * x * (1.0 + sycl::erf(x * inv_sqrt2));
         });
     }
-    else if (input.dtype() == DType::Float16) {
-        const sycl::half* in_ptr = get_data_ptr<const sycl::half>(input);
+    else if (in_cont.dtype() == DType::Float16) {
+        const sycl::half* in_ptr = get_data_ptr<const sycl::half>(in_cont);
         sycl::half* out_ptr = get_data_ptr<sycl::half>(output);
 
         const float inv_sqrt2 = 0.70710678f;
@@ -475,8 +479,8 @@ auto gelu_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
             out_ptr[idx] = sycl::half(0.5f * x * (1.0f + sycl::erf(x * inv_sqrt2)));
         });
     }
-    else if (input.dtype() == DType::BFloat16) {
-        const uint16_t* in_ptr = get_data_ptr<const uint16_t>(input);
+    else if (in_cont.dtype() == DType::BFloat16) {
+        const uint16_t* in_ptr = get_data_ptr<const uint16_t>(in_cont);
         uint16_t* out_ptr = get_data_ptr<uint16_t>(output);
 
         const float inv_sqrt2 = 0.70710678f;
@@ -495,14 +499,16 @@ auto gelu_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
 
 // GELU backward
 auto gelu_backward_kernel(const Tensor& grad_output, const Tensor& input, sycl::queue& queue) -> Tensor {
-    Tensor grad_input(std::vector<int64_t>(input.shape().begin(), input.shape().end()),
-                      input.dtype(), input.device());
+    Tensor grad_cont = grad_output.is_contiguous() ? grad_output : contiguous_kernel(grad_output, queue);
+    Tensor in_cont = input.is_contiguous() ? input : contiguous_kernel(input, queue);
+    Tensor grad_input(std::vector<int64_t>(in_cont.shape().begin(), in_cont.shape().end()),
+                      in_cont.dtype(), in_cont.device());
 
-    const int64_t numel = input.numel();
+    const int64_t numel = in_cont.numel();
 
-    if (input.dtype() == DType::Float32) {
-        const float* grad_out_ptr = get_data_ptr<const float>(grad_output);
-        const float* in_ptr = get_data_ptr<const float>(input);
+    if (in_cont.dtype() == DType::Float32) {
+        const float* grad_out_ptr = get_data_ptr<const float>(grad_cont);
+        const float* in_ptr = get_data_ptr<const float>(in_cont);
         float* grad_in_ptr = get_data_ptr<float>(grad_input);
 
         // Exact erf GELU derivative: 0.5*(1+erf(x/√2)) + x*(1/√2π)*exp(-x²/2).
@@ -516,9 +522,9 @@ auto gelu_backward_kernel(const Tensor& grad_output, const Tensor& input, sycl::
             grad_in_ptr[idx] = grad_out_ptr[idx] * (cdf + x * pdf);
         });
     }
-    else if (input.dtype() == DType::Float64) {
-        const double* grad_out_ptr = get_data_ptr<const double>(grad_output);
-        const double* in_ptr = get_data_ptr<const double>(input);
+    else if (in_cont.dtype() == DType::Float64) {
+        const double* grad_out_ptr = get_data_ptr<const double>(grad_cont);
+        const double* in_ptr = get_data_ptr<const double>(in_cont);
         double* grad_in_ptr = get_data_ptr<double>(grad_input);
 
         const double inv_sqrt2 = 0.70710678118654752;
@@ -531,9 +537,9 @@ auto gelu_backward_kernel(const Tensor& grad_output, const Tensor& input, sycl::
             grad_in_ptr[idx] = grad_out_ptr[idx] * (cdf + x * pdf);
         });
     }
-    else if (input.dtype() == DType::Float16) {
-        const sycl::half* grad_out_ptr = get_data_ptr<const sycl::half>(grad_output);
-        const sycl::half* in_ptr = get_data_ptr<const sycl::half>(input);
+    else if (in_cont.dtype() == DType::Float16) {
+        const sycl::half* grad_out_ptr = get_data_ptr<const sycl::half>(grad_cont);
+        const sycl::half* in_ptr = get_data_ptr<const sycl::half>(in_cont);
         sycl::half* grad_in_ptr = get_data_ptr<sycl::half>(grad_input);
 
         const float inv_sqrt2 = 0.70710678f;
@@ -546,9 +552,9 @@ auto gelu_backward_kernel(const Tensor& grad_output, const Tensor& input, sycl::
             grad_in_ptr[idx] = sycl::half(static_cast<float>(grad_out_ptr[idx]) * (cdf + x * pdf));
         });
     }
-    else if (input.dtype() == DType::BFloat16) {
-        const uint16_t* grad_out_ptr = get_data_ptr<const uint16_t>(grad_output);
-        const uint16_t* in_ptr = get_data_ptr<const uint16_t>(input);
+    else if (in_cont.dtype() == DType::BFloat16) {
+        const uint16_t* grad_out_ptr = get_data_ptr<const uint16_t>(grad_cont);
+        const uint16_t* in_ptr = get_data_ptr<const uint16_t>(in_cont);
         uint16_t* grad_in_ptr = get_data_ptr<uint16_t>(grad_input);
 
         const float inv_sqrt2 = 0.70710678f;
@@ -838,13 +844,14 @@ auto softmax_backward_kernel(const Tensor& grad_output, const Tensor& output, in
 
 // Leaky ReLU activation
 auto leaky_relu_kernel(const Tensor& input, double alpha, sycl::queue& queue) -> Tensor {
-    Tensor output(std::vector<int64_t>(input.shape().begin(), input.shape().end()),
-                  input.dtype(), input.device());
+    Tensor in_cont = input.is_contiguous() ? input : contiguous_kernel(input, queue);
+    Tensor output(std::vector<int64_t>(in_cont.shape().begin(), in_cont.shape().end()),
+                  in_cont.dtype(), in_cont.device());
 
-    const int64_t numel = input.numel();
+    const int64_t numel = in_cont.numel();
 
-    if (input.dtype() == DType::Float32) {
-        const float* in_ptr = get_data_ptr<const float>(input);
+    if (in_cont.dtype() == DType::Float32) {
+        const float* in_ptr = get_data_ptr<const float>(in_cont);
         float* out_ptr = get_data_ptr<float>(output);
 
         queue.parallel_for<LeakyReLUKernelFloat32>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
@@ -852,8 +859,8 @@ auto leaky_relu_kernel(const Tensor& input, double alpha, sycl::queue& queue) ->
             out_ptr[idx] = x > 0.0f ? x : static_cast<float>(alpha) * x;
         });
     }
-    else if (input.dtype() == DType::Float64) {
-        const double* in_ptr = get_data_ptr<const double>(input);
+    else if (in_cont.dtype() == DType::Float64) {
+        const double* in_ptr = get_data_ptr<const double>(in_cont);
         double* out_ptr = get_data_ptr<double>(output);
         const double alpha_d = static_cast<double>(alpha);
 
@@ -862,8 +869,8 @@ auto leaky_relu_kernel(const Tensor& input, double alpha, sycl::queue& queue) ->
             out_ptr[idx] = x > 0.0 ? x : alpha_d * x;
         });
     }
-    else if (input.dtype() == DType::Float16) {
-        const sycl::half* in_ptr = get_data_ptr<const sycl::half>(input);
+    else if (in_cont.dtype() == DType::Float16) {
+        const sycl::half* in_ptr = get_data_ptr<const sycl::half>(in_cont);
         sycl::half* out_ptr = get_data_ptr<sycl::half>(output);
 
         queue.parallel_for<LeakyReLUKernelFloat16>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
@@ -871,8 +878,8 @@ auto leaky_relu_kernel(const Tensor& input, double alpha, sycl::queue& queue) ->
             out_ptr[idx] = sycl::half(x > 0.0f ? x : static_cast<float>(alpha) * x);
         });
     }
-    else if (input.dtype() == DType::BFloat16) {
-        const uint16_t* in_ptr = get_data_ptr<const uint16_t>(input);
+    else if (in_cont.dtype() == DType::BFloat16) {
+        const uint16_t* in_ptr = get_data_ptr<const uint16_t>(in_cont);
         uint16_t* out_ptr = get_data_ptr<uint16_t>(output);
 
         queue.parallel_for<LeakyReLUKernelBFloat16>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
@@ -889,23 +896,25 @@ auto leaky_relu_kernel(const Tensor& input, double alpha, sycl::queue& queue) ->
 
 // Leaky ReLU backward
 auto leaky_relu_backward_kernel(const Tensor& grad_output, const Tensor& input, double alpha, sycl::queue& queue) -> Tensor {
-    Tensor grad_input(std::vector<int64_t>(input.shape().begin(), input.shape().end()),
-                      input.dtype(), input.device());
+    Tensor grad_cont = grad_output.is_contiguous() ? grad_output : contiguous_kernel(grad_output, queue);
+    Tensor in_cont = input.is_contiguous() ? input : contiguous_kernel(input, queue);
+    Tensor grad_input(std::vector<int64_t>(in_cont.shape().begin(), in_cont.shape().end()),
+                      in_cont.dtype(), in_cont.device());
 
-    const int64_t numel = input.numel();
+    const int64_t numel = in_cont.numel();
 
-    if (input.dtype() == DType::Float32) {
-        const float* grad_out_ptr = get_data_ptr<const float>(grad_output);
-        const float* in_ptr = get_data_ptr<const float>(input);
+    if (in_cont.dtype() == DType::Float32) {
+        const float* grad_out_ptr = get_data_ptr<const float>(grad_cont);
+        const float* in_ptr = get_data_ptr<const float>(in_cont);
         float* grad_in_ptr = get_data_ptr<float>(grad_input);
 
         queue.parallel_for<LeakyReLUBackwardKernelFloat32>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
             grad_in_ptr[idx] = in_ptr[idx] > 0.0f ? grad_out_ptr[idx] : static_cast<float>(alpha) * grad_out_ptr[idx];
         });
     }
-    else if (input.dtype() == DType::Float64) {
-        const double* grad_out_ptr = get_data_ptr<const double>(grad_output);
-        const double* in_ptr = get_data_ptr<const double>(input);
+    else if (in_cont.dtype() == DType::Float64) {
+        const double* grad_out_ptr = get_data_ptr<const double>(grad_cont);
+        const double* in_ptr = get_data_ptr<const double>(in_cont);
         double* grad_in_ptr = get_data_ptr<double>(grad_input);
         const double alpha_d = static_cast<double>(alpha);
 
@@ -913,9 +922,9 @@ auto leaky_relu_backward_kernel(const Tensor& grad_output, const Tensor& input, 
             grad_in_ptr[idx] = in_ptr[idx] > 0.0 ? grad_out_ptr[idx] : alpha_d * grad_out_ptr[idx];
         });
     }
-    else if (input.dtype() == DType::Float16) {
-        const sycl::half* grad_out_ptr = get_data_ptr<const sycl::half>(grad_output);
-        const sycl::half* in_ptr = get_data_ptr<const sycl::half>(input);
+    else if (in_cont.dtype() == DType::Float16) {
+        const sycl::half* grad_out_ptr = get_data_ptr<const sycl::half>(grad_cont);
+        const sycl::half* in_ptr = get_data_ptr<const sycl::half>(in_cont);
         sycl::half* grad_in_ptr = get_data_ptr<sycl::half>(grad_input);
 
         queue.parallel_for<LeakyReLUBackwardKernelFloat16>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
@@ -924,9 +933,9 @@ auto leaky_relu_backward_kernel(const Tensor& grad_output, const Tensor& input, 
             grad_in_ptr[idx] = sycl::half(in_val > 0.0f ? grad_out_val : static_cast<float>(alpha) * grad_out_val);
         });
     }
-    else if (input.dtype() == DType::BFloat16) {
-        const uint16_t* grad_out_ptr = get_data_ptr<const uint16_t>(grad_output);
-        const uint16_t* in_ptr = get_data_ptr<const uint16_t>(input);
+    else if (in_cont.dtype() == DType::BFloat16) {
+        const uint16_t* grad_out_ptr = get_data_ptr<const uint16_t>(grad_cont);
+        const uint16_t* in_ptr = get_data_ptr<const uint16_t>(in_cont);
         uint16_t* grad_in_ptr = get_data_ptr<uint16_t>(grad_input);
 
         queue.parallel_for<LeakyReLUBackwardKernelBFloat16>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
@@ -1329,13 +1338,14 @@ auto log_softmax_backward_kernel(const Tensor& grad_output, const Tensor& output
 // Swish activation (also known as SiLU)
 // swish(x) = x * sigmoid(x) = x / (1 + exp(-x))
 auto swish_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
-    Tensor output(std::vector<int64_t>(input.shape().begin(), input.shape().end()),
-                  input.dtype(), input.device());
+    Tensor in_cont = input.is_contiguous() ? input : contiguous_kernel(input, queue);
+    Tensor output(std::vector<int64_t>(in_cont.shape().begin(), in_cont.shape().end()),
+                  in_cont.dtype(), in_cont.device());
 
-    const int64_t numel = input.numel();
+    const int64_t numel = in_cont.numel();
 
-    if (input.dtype() == DType::Float32) {
-        const float* in_ptr = get_data_ptr<const float>(input);
+    if (in_cont.dtype() == DType::Float32) {
+        const float* in_ptr = get_data_ptr<const float>(in_cont);
         float* out_ptr = get_data_ptr<float>(output);
 
         queue.parallel_for<SwishKernelFloat32>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
@@ -1344,8 +1354,8 @@ auto swish_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
             out_ptr[idx] = x * sigmoid;
         });
     }
-    else if (input.dtype() == DType::Float64) {
-        const double* in_ptr = get_data_ptr<const double>(input);
+    else if (in_cont.dtype() == DType::Float64) {
+        const double* in_ptr = get_data_ptr<const double>(in_cont);
         double* out_ptr = get_data_ptr<double>(output);
 
         queue.parallel_for<SwishKernelFloat64>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
@@ -1354,8 +1364,8 @@ auto swish_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
             out_ptr[idx] = x * sigmoid;
         });
     }
-    else if (input.dtype() == DType::Float16) {
-        const sycl::half* in_ptr = get_data_ptr<const sycl::half>(input);
+    else if (in_cont.dtype() == DType::Float16) {
+        const sycl::half* in_ptr = get_data_ptr<const sycl::half>(in_cont);
         sycl::half* out_ptr = get_data_ptr<sycl::half>(output);
 
         queue.parallel_for<SwishKernelFloat16>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
@@ -1364,8 +1374,8 @@ auto swish_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
             out_ptr[idx] = sycl::half(x * sigmoid);
         });
     }
-    else if (input.dtype() == DType::BFloat16) {
-        const uint16_t* in_ptr = get_data_ptr<const uint16_t>(input);
+    else if (in_cont.dtype() == DType::BFloat16) {
+        const uint16_t* in_ptr = get_data_ptr<const uint16_t>(in_cont);
         uint16_t* out_ptr = get_data_ptr<uint16_t>(output);
 
         queue.parallel_for<SwishKernelBFloat16>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
@@ -1385,14 +1395,16 @@ auto swish_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
 // swish'(x) = sigmoid(x) + x * sigmoid(x) * (1 - sigmoid(x))
 //           = sigmoid(x) * (1 + x * (1 - sigmoid(x)))
 auto swish_backward_kernel(const Tensor& grad_output, const Tensor& input, sycl::queue& queue) -> Tensor {
-    Tensor grad_input(std::vector<int64_t>(input.shape().begin(), input.shape().end()),
-                      input.dtype(), input.device());
+    Tensor grad_cont = grad_output.is_contiguous() ? grad_output : contiguous_kernel(grad_output, queue);
+    Tensor in_cont = input.is_contiguous() ? input : contiguous_kernel(input, queue);
+    Tensor grad_input(std::vector<int64_t>(in_cont.shape().begin(), in_cont.shape().end()),
+                      in_cont.dtype(), in_cont.device());
 
-    const int64_t numel = input.numel();
+    const int64_t numel = in_cont.numel();
 
-    if (input.dtype() == DType::Float32) {
-        const float* grad_out_ptr = get_data_ptr<const float>(grad_output);
-        const float* in_ptr = get_data_ptr<const float>(input);
+    if (in_cont.dtype() == DType::Float32) {
+        const float* grad_out_ptr = get_data_ptr<const float>(grad_cont);
+        const float* in_ptr = get_data_ptr<const float>(in_cont);
         float* grad_in_ptr = get_data_ptr<float>(grad_input);
 
         queue.parallel_for<SwishBackwardKernelFloat32>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
@@ -1406,9 +1418,9 @@ auto swish_backward_kernel(const Tensor& grad_output, const Tensor& input, sycl:
             grad_in_ptr[idx] = g_out * swish_grad;
         });
     }
-    else if (input.dtype() == DType::Float64) {
-        const double* grad_out_ptr = get_data_ptr<const double>(grad_output);
-        const double* in_ptr = get_data_ptr<const double>(input);
+    else if (in_cont.dtype() == DType::Float64) {
+        const double* grad_out_ptr = get_data_ptr<const double>(grad_cont);
+        const double* in_ptr = get_data_ptr<const double>(in_cont);
         double* grad_in_ptr = get_data_ptr<double>(grad_input);
 
         queue.parallel_for<SwishBackwardKernelFloat64>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
@@ -1421,9 +1433,9 @@ auto swish_backward_kernel(const Tensor& grad_output, const Tensor& input, sycl:
             grad_in_ptr[idx] = g_out * swish_grad;
         });
     }
-    else if (input.dtype() == DType::Float16) {
-        const sycl::half* grad_out_ptr = get_data_ptr<const sycl::half>(grad_output);
-        const sycl::half* in_ptr = get_data_ptr<const sycl::half>(input);
+    else if (in_cont.dtype() == DType::Float16) {
+        const sycl::half* grad_out_ptr = get_data_ptr<const sycl::half>(grad_cont);
+        const sycl::half* in_ptr = get_data_ptr<const sycl::half>(in_cont);
         sycl::half* grad_in_ptr = get_data_ptr<sycl::half>(grad_input);
 
         queue.parallel_for<SwishBackwardKernelFloat16>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
@@ -1436,9 +1448,9 @@ auto swish_backward_kernel(const Tensor& grad_output, const Tensor& input, sycl:
             grad_in_ptr[idx] = sycl::half(g_out * swish_grad);
         });
     }
-    else if (input.dtype() == DType::BFloat16) {
-        const uint16_t* grad_out_ptr = get_data_ptr<const uint16_t>(grad_output);
-        const uint16_t* in_ptr = get_data_ptr<const uint16_t>(input);
+    else if (in_cont.dtype() == DType::BFloat16) {
+        const uint16_t* grad_out_ptr = get_data_ptr<const uint16_t>(grad_cont);
+        const uint16_t* in_ptr = get_data_ptr<const uint16_t>(in_cont);
         uint16_t* grad_in_ptr = get_data_ptr<uint16_t>(grad_input);
 
         queue.parallel_for<SwishBackwardKernelBFloat16>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
@@ -2890,7 +2902,12 @@ auto instance_norm_backward_kernel(const Tensor& grad_output, const Tensor& inpu
                                     const Tensor& mean, const Tensor& rstd,
                                     const Tensor& weight,
                                     sycl::queue& queue) -> std::vector<Tensor> {
-    auto shape = input.shape();
+    // The flat-offset addressing below assumes contiguous grad_output/input;
+    // materialize contiguous copies (forward instance_norm_kernel does the same).
+    Tensor grad_cont = grad_output.is_contiguous() ? grad_output : contiguous_kernel(grad_output, queue);
+    Tensor in_cont = input.is_contiguous() ? input : contiguous_kernel(input, queue);
+
+    auto shape = in_cont.shape();
     int64_t N = shape[0];
     int64_t C = shape[1];
     int64_t spatial_size = 1;
@@ -2899,7 +2916,7 @@ auto instance_norm_backward_kernel(const Tensor& grad_output, const Tensor& inpu
     }
 
     Tensor grad_input(std::vector<int64_t>(shape.begin(), shape.end()),
-                      input.dtype(), input.device());
+                      in_cont.dtype(), in_cont.device());
     // grad_weight and grad_bias need atomic reduction across N
     // Compute grad_input, grad_weight, grad_bias on device
     Tensor grad_weight({C}, weight.dtype(), weight.device());
@@ -2909,9 +2926,9 @@ auto instance_norm_backward_kernel(const Tensor& grad_output, const Tensor& inpu
     const float* mean_ptr = get_data_ptr<const float>(mean);
     const float* rstd_ptr = get_data_ptr<const float>(rstd);
 
-    if (input.dtype() == DType::Float32) {
-        const float* in_ptr = get_data_ptr<const float>(input);
-        const float* g_ptr = get_data_ptr<const float>(grad_output);
+    if (in_cont.dtype() == DType::Float32) {
+        const float* in_ptr = get_data_ptr<const float>(in_cont);
+        const float* g_ptr = get_data_ptr<const float>(grad_cont);
         const float* w_ptr = has_weight ? get_data_ptr<const float>(weight) : nullptr;
         float* gi_ptr = get_data_ptr<float>(grad_input);
 
@@ -2964,9 +2981,9 @@ auto instance_norm_backward_kernel(const Tensor& grad_output, const Tensor& inpu
             gb_ptr[c] = gb_sum;
         });
     }
-    else if (input.dtype() == DType::Float64) {
-        const double* in_ptr = get_data_ptr<const double>(input);
-        const double* g_ptr = get_data_ptr<const double>(grad_output);
+    else if (in_cont.dtype() == DType::Float64) {
+        const double* in_ptr = get_data_ptr<const double>(in_cont);
+        const double* g_ptr = get_data_ptr<const double>(grad_cont);
         const double* w_ptr = has_weight ? get_data_ptr<const double>(weight) : nullptr;
         double* gi_ptr = get_data_ptr<double>(grad_input);
 
@@ -3022,9 +3039,9 @@ auto instance_norm_backward_kernel(const Tensor& grad_output, const Tensor& inpu
     }
     else {
         // Float16/BFloat16: upcast to Float32, compute, downcast
-        DType orig_dtype = input.dtype();
-        Tensor in_f32 = cast_kernel(input, DType::Float32, queue);
-        Tensor go_f32 = cast_kernel(grad_output, DType::Float32, queue);
+        DType orig_dtype = in_cont.dtype();
+        Tensor in_f32 = cast_kernel(in_cont, DType::Float32, queue);
+        Tensor go_f32 = cast_kernel(grad_cont, DType::Float32, queue);
         Tensor w_f32 = (has_weight && weight.dtype() != DType::Float32)
             ? cast_kernel(weight, DType::Float32, queue) : weight;
         auto results = instance_norm_backward_kernel(go_f32, in_f32, mean, rstd, w_f32, queue);
@@ -3079,28 +3096,76 @@ auto rrelu_kernel(const Tensor& input, float lower, float upper, bool training, 
         double* out_ptr = get_data_ptr<double>(output);
         const double mid_d = static_cast<double>(mid);
 
-        queue.parallel_for<RReLUKernelFloat64>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
-            double x = in_ptr[idx];
-            out_ptr[idx] = (x >= 0.0) ? x : mid_d * x;
-        });
+        if (training) {
+            uint64_t seed = tenzor::get_global_seed();
+            queue.parallel_for<RReLUTrainKernelFloat64>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+                double x = in_ptr[idx];
+                if (x >= 0.0) {
+                    out_ptr[idx] = x;
+                } else {
+                    uint64_t state = seed + static_cast<uint64_t>(idx[0]) * 6364136223846793005ULL;
+                    state = state * 6364136223846793005ULL + 1442695040888963407ULL;
+                    float u = static_cast<float>(state >> 33) / static_cast<float>(1ULL << 31);
+                    double slope = static_cast<double>(lower) + static_cast<double>(u) * static_cast<double>(upper - lower);
+                    out_ptr[idx] = slope * x;
+                }
+            });
+        } else {
+            queue.parallel_for<RReLUKernelFloat64>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+                double x = in_ptr[idx];
+                out_ptr[idx] = (x >= 0.0) ? x : mid_d * x;
+            });
+        }
     }
     else if (input.dtype() == DType::Float16) {
         const sycl::half* in_ptr = get_data_ptr<const sycl::half>(input);
         sycl::half* out_ptr = get_data_ptr<sycl::half>(output);
 
-        queue.parallel_for<RReLUKernelFloat16>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
-            float x = static_cast<float>(in_ptr[idx]);
-            out_ptr[idx] = sycl::half((x >= 0.0f) ? x : mid * x);
-        });
+        if (training) {
+            uint64_t seed = tenzor::get_global_seed();
+            queue.parallel_for<RReLUTrainKernelFloat16>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+                float x = static_cast<float>(in_ptr[idx]);
+                if (x >= 0.0f) {
+                    out_ptr[idx] = sycl::half(x);
+                } else {
+                    uint64_t state = seed + static_cast<uint64_t>(idx[0]) * 6364136223846793005ULL;
+                    state = state * 6364136223846793005ULL + 1442695040888963407ULL;
+                    float u = static_cast<float>(state >> 33) / static_cast<float>(1ULL << 31);
+                    float slope = lower + u * (upper - lower);
+                    out_ptr[idx] = sycl::half(slope * x);
+                }
+            });
+        } else {
+            queue.parallel_for<RReLUKernelFloat16>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+                float x = static_cast<float>(in_ptr[idx]);
+                out_ptr[idx] = sycl::half((x >= 0.0f) ? x : mid * x);
+            });
+        }
     }
     else if (input.dtype() == DType::BFloat16) {
         const uint16_t* in_ptr = get_data_ptr<const uint16_t>(input);
         uint16_t* out_ptr = get_data_ptr<uint16_t>(output);
 
-        queue.parallel_for<RReLUKernelBFloat16>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
-            float x = bf16_to_f32(in_ptr[idx]);
-            out_ptr[idx] = f32_to_bf16((x >= 0.0f) ? x : mid * x);
-        });
+        if (training) {
+            uint64_t seed = tenzor::get_global_seed();
+            queue.parallel_for<RReLUTrainKernelBFloat16>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+                float x = bf16_to_f32(in_ptr[idx]);
+                if (x >= 0.0f) {
+                    out_ptr[idx] = f32_to_bf16(x);
+                } else {
+                    uint64_t state = seed + static_cast<uint64_t>(idx[0]) * 6364136223846793005ULL;
+                    state = state * 6364136223846793005ULL + 1442695040888963407ULL;
+                    float u = static_cast<float>(state >> 33) / static_cast<float>(1ULL << 31);
+                    float slope = lower + u * (upper - lower);
+                    out_ptr[idx] = f32_to_bf16(slope * x);
+                }
+            });
+        } else {
+            queue.parallel_for<RReLUKernelBFloat16>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+                float x = bf16_to_f32(in_ptr[idx]);
+                out_ptr[idx] = f32_to_bf16((x >= 0.0f) ? x : mid * x);
+            });
+        }
     }
     else {
         throw std::runtime_error("Unsupported dtype for rrelu");

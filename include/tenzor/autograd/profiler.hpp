@@ -112,6 +112,22 @@ public:
     /// kDefaultMaxTraceEvents.
     auto set_max_trace_events(size_t max_events) -> void {
         max_trace_events_.store(max_events, std::memory_order_release);
+        // Shrink the buffer immediately so size() never exceeds the active
+        // (non-zero) cap. Without this, lowering the cap below the current
+        // buffer size would leak the oversized vector and export stale events
+        // in slots [max_events, size). A value of 0 means "unbounded" and
+        // leaves the buffer untouched.
+        if (max_events == 0) {
+            return;
+        }
+        std::lock_guard lock(mutex_);
+        if (trace_events_.size() > max_events) {
+            trace_events_.resize(max_events);
+            trace_events_.shrink_to_fit();
+        }
+        if (trace_write_pos_ >= max_events) {
+            trace_write_pos_ = 0;
+        }
     }
 
     /// Current maximum trace-event retention (0 == unbounded).
@@ -167,6 +183,16 @@ public:
             // Buffer full: overwrite the oldest event (ring buffer). Each event
             // carries its absolute start time, so export still recovers the
             // correct time origin via min_element regardless of slot order.
+            // Defensively trim if the buffer somehow exceeds the active cap
+            // (e.g. cap was lowered concurrently) so size() never stays above
+            // cap and no stale events linger in slots [cap, size).
+            if (trace_events_.size() > cap) {
+                trace_events_.resize(cap);
+                trace_events_.shrink_to_fit();
+            }
+            if (trace_write_pos_ >= cap) {
+                trace_write_pos_ = 0;
+            }
             trace_events_[trace_write_pos_] = std::move(evt);
             trace_write_pos_ = (trace_write_pos_ + 1) % cap;
         }

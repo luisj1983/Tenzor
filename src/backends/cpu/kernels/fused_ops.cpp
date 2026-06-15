@@ -468,6 +468,24 @@ auto fused_softmax_cross_entropy_kernel(
         grad_logits = zeros(logits_shape, logits.dtype(), logits.device());
     }
 
+    // Validate target ranges in a cheap serial pre-pass BEFORE the compute
+    // loops. Doing this here (rather than via a NaN-loss sentinel checked after
+    // the loop) keeps out-of-range targets distinct from NaN losses that arise
+    // from legitimately NaN/Inf logits, so the two failure modes are not
+    // conflated in the error message.
+    {
+        const int64_t* targets_data = targets.data<int64_t>();
+        for (int64_t i = 0; i < batch_size; ++i) {
+            const int64_t target = targets_data[i];
+            if (target < 0 || target >= num_classes) {
+                throw std::runtime_error(
+                    "fused_softmax_cross_entropy: target index " + std::to_string(target) +
+                    " at row " + std::to_string(i) + " out of range [0, " +
+                    std::to_string(num_classes) + ")");
+            }
+        }
+    }
+
     if (logits.dtype() == DType::Float32) {
         const float* logits_data = logits.data<float>();
         const int64_t* targets_data = targets.data<int64_t>();
@@ -491,14 +509,8 @@ auto fused_softmax_cross_entropy_kernel(
             }
             float log_sum_exp = std::log(sum_exp) + max_logit;
 
-            // Compute loss for target class
+            // Compute loss for target class (target range validated above).
             int64_t target = targets_data[i];
-            if (target < 0 || target >= num_classes) {
-                // Can't throw from OpenMP parallel region safely,
-                // store sentinel and check after
-                losses_data[i] = std::numeric_limits<float>::quiet_NaN();
-                continue;
-            }
             losses_data[i] = log_sum_exp - row[target];
 
             // Compute gradient: softmax(logits) - one_hot(target)
@@ -518,14 +530,6 @@ auto fused_softmax_cross_entropy_kernel(
                 }
                 // "sum": scale=1.0 (no scaling needed)
                 // "none": per-sample gradients (no scaling needed)
-            }
-        }
-        // Check for out-of-range targets (from OpenMP region)
-        for (int64_t i = 0; i < batch_size; ++i) {
-            if (std::isnan(losses_data[i])) {
-                throw std::runtime_error(
-                    "fused_softmax_cross_entropy: target index out of range"
-                );
             }
         }
     } else if (logits.dtype() == DType::Float64) {
@@ -549,11 +553,7 @@ auto fused_softmax_cross_entropy_kernel(
             }
             double log_sum_exp = std::log(sum_exp) + max_logit;
 
-            int64_t target = targets_data[i];
-            if (target < 0 || target >= num_classes) {
-                losses_data[i] = std::numeric_limits<double>::quiet_NaN();
-                continue;
-            }
+            int64_t target = targets_data[i];  // range validated above
             losses_data[i] = log_sum_exp - row[target];
 
             if (compute_grad) {
@@ -569,13 +569,6 @@ auto fused_softmax_cross_entropy_kernel(
                         grad_row[j] *= scale;
                     }
                 }
-            }
-        }
-        for (int64_t i = 0; i < batch_size; ++i) {
-            if (std::isnan(losses_data[i])) {
-                throw std::runtime_error(
-                    "fused_softmax_cross_entropy: target index out of range"
-                );
             }
         }
     } else {

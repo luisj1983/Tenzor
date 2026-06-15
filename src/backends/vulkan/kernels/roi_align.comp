@@ -96,12 +96,15 @@ void main() {
     float bin_size_w = roi_width / float(params.output_w);
 
     // Determine sampling grid
+    // Clamp the adaptive grid to a minimum of 1 (matching torchvision): a
+    // degenerate/zero-area ROI gives bin_size <= 0 -> ceil() == 0 -> count == 0
+    // -> 0/0 NaN below. max(1u, ...) keeps at least one sample.
     uint roi_bin_grid_h = (params.sampling_ratio > 0)
         ? params.sampling_ratio
-        : uint(ceil(bin_size_h));
+        : max(1u, uint(ceil(bin_size_h)));
     uint roi_bin_grid_w = (params.sampling_ratio > 0)
         ? params.sampling_ratio
-        : uint(ceil(bin_size_w));
+        : max(1u, uint(ceil(bin_size_w)));
 
     uint count = roi_bin_grid_h * roi_bin_grid_w;
 

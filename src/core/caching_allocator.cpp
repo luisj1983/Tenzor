@@ -106,6 +106,11 @@ auto CachingAllocator::allocate(size_t bytes) -> void* {
     void* result_ptr = find_free_block(bytes);
     if (result_ptr) {
         ++cache_hits_;
+        // The reused block becomes live again; record it with the memory
+        // profiler so on_allocate/on_deallocate stay balanced across reuse
+        // (deallocate() always emits on_deallocate). Use the actual block
+        // size that find_free_block recorded in allocated_blocks_.
+        MemoryProfiler::instance().on_allocate(allocated_blocks_[result_ptr]);
     } else {
         // No suitable cached block, allocate from backend
         try {

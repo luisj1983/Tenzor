@@ -98,7 +98,9 @@ auto Rprop::step_impl() -> void {
             new_steps = where(neg_mask, new_steps * scalar(hp.eta_minus), new_steps);
 
             // Clamp step sizes
-            new_steps = clamp(new_steps, static_cast<float>(hp.step_min), static_cast<float>(hp.step_max));
+            // clamp() takes double bounds; pass hp.step_min/max directly so
+            // Float64 step bounds aren't rounded to ~7 significant digits.
+            new_steps = clamp(new_steps, hp.step_min, hp.step_max);
             step_sizes_[i] = new_steps;
 
             // Where sign flipped, zero out the gradient (don't use it this step)

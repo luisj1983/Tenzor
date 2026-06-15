@@ -92,6 +92,18 @@ void check_rocsolver_info(rocblas_int* d_info, const std::string& op_name) {
     }
 }
 
+/// Validate only the *argument* status (negative info) of a getrf call.
+/// Unlike check_rocsolver_info, a positive info (singular factor) is tolerated:
+/// callers like det() treat a zero pivot as a legitimate det == 0 result.
+void check_rocsolver_getrf_arg(rocblas_int* d_info, const std::string& op_name) {
+    rocblas_int h_info = 0;
+    HIP_CHECK_LINALG(hipMemcpy(&h_info, d_info, sizeof(rocblas_int), hipMemcpyDeviceToHost));
+    if (h_info < 0) {
+        throw std::runtime_error("linalg::" + op_name + ": invalid argument to getrf (info=" +
+                                 std::to_string(h_info) + ")");
+    }
+}
+
 /// RAII wrapper for a device-side rocblas_int (for rocSOLVER info output).
 struct DeviceInfo {
     rocblas_int* ptr = nullptr;
@@ -348,6 +360,11 @@ auto linalg_det_kernel(const Tensor& A, hipStream_t stream) -> Tensor {
 
             // rocSOLVER manages workspace internally
             ROCBLAS_CHECK_LINALG(rocsolver_sgetrf(handle, n, n, mat, n, piv, d_info.ptr));
+            // Validate the factorization status. NOTE: a *positive* info means a
+            // zero pivot (singular matrix), which is a legitimate det == 0 case
+            // handled correctly by det_from_lu — so only a *negative* info
+            // (invalid argument) is an error here.
+            check_rocsolver_getrf_arg(d_info.ptr, "det");
         }
 
         int threads = 256;
@@ -362,6 +379,7 @@ auto linalg_det_kernel(const Tensor& A, hipStream_t stream) -> Tensor {
             rocblas_int* piv = d_ipiv + b * n;
 
             ROCBLAS_CHECK_LINALG(rocsolver_dgetrf(handle, n, n, mat, n, piv, d_info.ptr));
+            check_rocsolver_getrf_arg(d_info.ptr, "det");  // negative-info only (see f32 path)
         }
 
         int threads = 256;
@@ -634,15 +652,23 @@ auto linalg_lu_solve_kernel(const Tensor& LU_data, const Tensor& pivots,
     auto b_shape = B.shape();
     auto lu_ndim = static_cast<int64_t>(lu_shape.size());
     auto b_ndim = static_cast<int64_t>(b_shape.size());
-    if (lu_ndim < 2 || b_ndim < 2) {
-        throw std::invalid_argument("linalg::lu_solve: inputs must be at least 2D");
+    // Accept 1D B (single RHS) the same way the native-HIP fallback does, so
+    // behavior does not diverge across build configs. A 1D B of shape (n,) is
+    // treated as nrhs=1 and the result is squeezed back to 1D on return.
+    if (lu_ndim < 2 || b_ndim < 1) {
+        throw std::invalid_argument("linalg::lu_solve: LU must be >=2D and B >=1D");
     }
     int64_t n = lu_shape[lu_ndim - 1];
     if (lu_shape[lu_ndim - 2] != n) {
         throw std::invalid_argument("linalg::lu_solve: LU_data must be square");
     }
-    int64_t nrhs = b_shape[b_ndim - 1];
+    const bool b_is_1d = (b_ndim < 2);
+    int64_t nrhs = b_is_1d ? 1 : b_shape[b_ndim - 1];
     int64_t nbatch = batch_size(LU_data);
+
+    // Materialize B as a (..., n, nrhs) tensor so the transpose-to-col-major
+    // trick below is well-defined even for 1D B (reshaped to (n, 1)).
+    Tensor B2 = b_is_1d ? B.reshape({n, 1}) : B;
 
     // Convert row-major packed LU into column-major form for rocSOLVER getrs:
     // transposing the row-major tensor produces storage that, viewed as
@@ -650,7 +676,7 @@ auto linalg_lu_solve_kernel(const Tensor& LU_data, const Tensor& pivots,
     auto lu_cm = tenzor::transpose(LU_data, -2, -1).contiguous();
     // Same trick for B: row-major (n, nrhs) → transpose to (nrhs, n) row-major,
     // whose storage interpreted col-major is the (n, nrhs) col-major form of B.
-    auto b_cm = tenzor::transpose(B, -2, -1).contiguous();
+    auto b_cm = tenzor::transpose(B2, -2, -1).contiguous();
 
     // Pivots: rocSOLVER expects rocblas_int*. Our pivots are Int32; copy to
     // a device-side rocblas_int buffer (widths match by static_assert above).
@@ -691,7 +717,12 @@ auto linalg_lu_solve_kernel(const Tensor& LU_data, const Tensor& pivots,
     HIP_CHECK_LINALG(hipStreamSynchronize(stream ? stream : nullptr));
     backend::rocm::RocmCachingAllocator::get().free(d_ipiv_base);
     // b_cm has shape (..., nrhs, n) row-major; transpose back to (..., n, nrhs).
-    return tenzor::transpose(b_cm, -2, -1).contiguous();
+    auto result = tenzor::transpose(b_cm, -2, -1).contiguous();
+    // Restore the original 1D shape for a 1D RHS (matches the fallback path).
+    if (b_is_1d) {
+        return result.reshape({n});
+    }
+    return result;
 }
 
 // ============================================================================

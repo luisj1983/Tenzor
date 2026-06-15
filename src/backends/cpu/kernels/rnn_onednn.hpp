@@ -125,27 +125,79 @@ struct LSTMCachedPrimitive {
 // FNV-1a over the full W_ih/W_hh buffers is fast enough to run per call and
 // detects any content change. The two buffers are folded into distinct lanes so
 // swapping content between them still changes the digest.
+// Implementation note: the original implementation ran a scalar FNV-1a over
+// every byte of both weight buffers serially on every call, BEFORE the
+// need_rebuild decision — so the full O(weight_bytes) pass ran even on the
+// steady-state cache-hit path. We still hash full content (a strided sample
+// could collide after an in-place optimizer write, serving stale weights —
+// audit B6), but the fold is now word-wise and chunk-parallel: each chunk is
+// hashed into a local digest seeded by its chunk index (keeping the result
+// content- and order-sensitive), then the per-chunk digests are combined
+// sequentially. The combine loop is O(num_chunks), negligible vs the data pass.
 inline uint64_t compute_weight_fingerprint(const float* W_ih, const float* W_hh,
                                             int64_t ih_size, int64_t hh_size) {
     constexpr uint64_t FNV_OFFSET = 1469598103934665603ULL;
     constexpr uint64_t FNV_PRIME  = 1099511628211ULL;
-    uint64_t hash = FNV_OFFSET;
-    auto fold = [&](const float* W, int64_t count) {
-        const auto* bytes = reinterpret_cast<const unsigned char*>(W);
-        const int64_t nbytes = count * static_cast<int64_t>(sizeof(float));
-        // Mix the element count first so two buffers differing only in length
-        // (and otherwise byte-identical prefixes) still diverge.
-        for (int s = 0; s < 8; ++s) {
-            hash ^= static_cast<unsigned char>((count >> (s * 8)) & 0xFF);
+
+    // Hash one contiguous word-aligned buffer into a single FNV digest, mixing
+    // the element count first so two buffers differing only in length still
+    // diverge. Reads 8 bytes at a time; handles the trailing partial word.
+    auto fold_chunk = [](const float* W, int64_t start_elem, int64_t count_elems,
+                         uint64_t seed) -> uint64_t {
+        uint64_t hash = seed;
+        // sizeof(float)==4, so two floats pack into one uint64_t word.
+        const int64_t start_byte = start_elem * static_cast<int64_t>(sizeof(float));
+        const int64_t nbytes = count_elems * static_cast<int64_t>(sizeof(float));
+        const auto* base = reinterpret_cast<const unsigned char*>(W) + start_byte;
+        int64_t i = 0;
+        for (; i + 8 <= nbytes; i += 8) {
+            uint64_t w;
+            std::memcpy(&w, base + i, 8);
+            hash ^= w;
             hash *= FNV_PRIME;
         }
-        for (int64_t i = 0; i < nbytes; ++i) {
-            hash ^= bytes[i];
+        for (; i < nbytes; ++i) {
+            hash ^= base[i];
             hash *= FNV_PRIME;
         }
+        return hash;
     };
-    if (ih_size > 0) fold(W_ih, ih_size);
-    if (hh_size > 0) fold(W_hh, hh_size);
+
+    auto fold_buffer = [&](const float* W, int64_t count, uint64_t lane_seed) -> uint64_t {
+        // Seed with element count so length differences diverge.
+        uint64_t seed = lane_seed ^ static_cast<uint64_t>(count);
+        seed *= FNV_PRIME;
+        if (count <= 0) return seed;
+
+        // Chunk in whole-word (2-float) units so chunks stay 8-byte aligned.
+        constexpr int64_t MIN_PARALLEL_ELEMS = 1 << 16;  // ~256 KB before threading
+        constexpr int64_t CHUNK_ELEMS = 1 << 14;          // 64 KB per chunk
+        const int64_t num_chunks = (count + CHUNK_ELEMS - 1) / CHUNK_ELEMS;
+
+        std::vector<uint64_t> digests(static_cast<size_t>(num_chunks));
+        #ifdef _OPENMP
+        #pragma omp parallel for if(count > MIN_PARALLEL_ELEMS) schedule(static)
+        #endif
+        for (int64_t c = 0; c < num_chunks; ++c) {
+            const int64_t s = c * CHUNK_ELEMS;
+            const int64_t cnt = std::min(CHUNK_ELEMS, count - s);
+            // Seed each chunk with its index so chunk order matters.
+            uint64_t chunk_seed = (FNV_OFFSET ^ static_cast<uint64_t>(c)) * FNV_PRIME;
+            digests[static_cast<size_t>(c)] = fold_chunk(W, s, cnt, chunk_seed);
+        }
+        // Deterministic sequential combine in chunk order.
+        uint64_t hash = seed;
+        for (int64_t c = 0; c < num_chunks; ++c) {
+            hash ^= digests[static_cast<size_t>(c)];
+            hash *= FNV_PRIME;
+        }
+        return hash;
+    };
+
+    uint64_t hash = FNV_OFFSET;
+    if (ih_size > 0) hash ^= fold_buffer(W_ih, ih_size, hash);
+    hash *= FNV_PRIME;
+    if (hh_size > 0) hash ^= fold_buffer(W_hh, hh_size, hash);
     return hash;
 }
 

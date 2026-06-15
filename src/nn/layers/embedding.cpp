@@ -173,6 +173,58 @@ public:
             std::vector<Tensor> inputs_vec = {grad_output, indices_dev};
             auto results = dispatch<OpId::EmbeddingBackward>(inputs_vec, attrs);
 
+            // Backend parity: the GPU EmbeddingBackward kernel returns only the
+            // raw dense gradient; it does NOT honour padding_idx_ or
+            // scale_grad_by_freq_ (the CPU path below applies both). Apply the
+            // identical corrections post-hoc, device-agnostically, so every
+            // backend produces the same weight gradient. results[0] is the
+            // dense grad of shape {num_embeddings_, embedding_dim_}.
+            if (!results.empty() &&
+                (scale_grad_by_freq_ ||
+                 (padding_idx_ >= 0 && padding_idx_ < num_embeddings_))) {
+                Tensor grad_weight_dev = results[0];
+
+                if (scale_grad_by_freq_) {
+                    // Count index frequencies on host, build a per-row inverse
+                    // frequency column [num_embeddings_, 1] (1.0 for unused
+                    // rows — their grad is already zero, so the multiply is a
+                    // no-op), move to the grad device and broadcast-multiply.
+                    Tensor indices_host = (indices_.device() == Device::cpu())
+                                            ? indices_ : indices_.to(Device::cpu());
+                    int64_t num_indices = indices_host.numel();
+                    auto* idx_ptr = indices_host.data<int64_t>();
+
+                    auto inv_freq = zeros({num_embeddings_}, DType::Float32);
+                    auto* freq_ptr = inv_freq.data<float>();
+                    for (int64_t i = 0; i < num_indices; ++i) {
+                        freq_ptr[idx_ptr[i]] += 1.0f;
+                    }
+                    for (int64_t r = 0; r < num_embeddings_; ++r) {
+                        freq_ptr[r] = (freq_ptr[r] > 0.0f) ? (1.0f / freq_ptr[r]) : 1.0f;
+                    }
+
+                    Tensor inv_freq_col = inv_freq.reshape({num_embeddings_, 1})
+                                                  .to(grad_weight_dev.dtype())
+                                                  .to(grad_weight_dev.device());
+                    grad_weight_dev = grad_weight_dev * inv_freq_col;
+                }
+
+                if (padding_idx_ >= 0 && padding_idx_ < num_embeddings_) {
+                    // Zero the padding row via index_fill along dim 0 (dispatches
+                    // to the backend, so it is valid on any device). Build the
+                    // index on CPU (host-writable), then move to the grad device.
+                    Tensor pad_index_host = zeros({1}, DType::Int64, Device::cpu());
+                    pad_index_host.data<int64_t>()[0] = padding_idx_;
+                    Tensor pad_index_dev = (grad_weight_dev.device() == Device::cpu())
+                                             ? pad_index_host
+                                             : pad_index_host.to(grad_weight_dev.device());
+                    grad_weight_dev =
+                        tenzor::index_fill(grad_weight_dev, 0, pad_index_dev, 0.0);
+                }
+
+                results[0] = grad_weight_dev;
+            }
+
             // R.19: GPU path previously returned only the dense gradient and
             // never populated weight.sparse_grad, so sparse-aware optimisers
             // (SparseAdam, etc.) saw an empty sparse buffer and silently fell
@@ -273,6 +325,18 @@ public:
                                 gw_ptr[r * embedding_dim_ + j] *= inv;
                         }
                     }
+                } else if (grad_dtype == DType::Float16 || grad_dtype == DType::BFloat16) {
+                    // Widen to Float32 for scaling, then narrow back.
+                    auto gw_f32 = grad_weight.to(DType::Float32);
+                    auto* gw_ptr = gw_f32.data<float>();
+                    for (int64_t r = 0; r < num_embeddings_; ++r) {
+                        if (freq_ptr[r] > 0.0f) {
+                            float inv = 1.0f / freq_ptr[r];
+                            for (int64_t j = 0; j < embedding_dim_; ++j)
+                                gw_ptr[r * embedding_dim_ + j] *= inv;
+                        }
+                    }
+                    grad_weight = gw_f32.to(grad_dtype);
                 }
             }
 
@@ -287,6 +351,12 @@ public:
                     auto* ptr = grad_weight.data<double>();
                     for (int64_t j = 0; j < embedding_dim_; ++j)
                         ptr[padding_idx_ * embedding_dim_ + j] = 0.0;
+                } else if (grad_dtype == DType::Float16 || grad_dtype == DType::BFloat16) {
+                    auto gw_f32 = grad_weight.to(DType::Float32);
+                    auto* ptr = gw_f32.data<float>();
+                    for (int64_t j = 0; j < embedding_dim_; ++j)
+                        ptr[padding_idx_ * embedding_dim_ + j] = 0.0f;
+                    grad_weight = gw_f32.to(grad_dtype);
                 }
             }
             return {grad_weight};
@@ -366,7 +436,7 @@ public:
                         }
                     }
                 }
-            } else if (grad_dtype == DType::Float16) {
+            } else if (grad_dtype == DType::Float16 || grad_dtype == DType::BFloat16) {
                 // grad_weight was computed in Float32 and converted — reconvert for scaling
                 auto gw_f32 = grad_weight.to(DType::Float32);
                 auto* gw_ptr = gw_f32.data<float>();
@@ -378,7 +448,7 @@ public:
                         }
                     }
                 }
-                grad_weight = gw_f32.to(DType::Float16);
+                grad_weight = gw_f32.to(grad_dtype);
             }
         }
 
@@ -395,15 +465,15 @@ public:
                     ptr[padding_idx_ * embedding_dim_ + j] = 0.0;
                 }
             }
-            // Float16 grad_weight was converted from Float32 where padding row
+            // Float16/BFloat16 grad_weight was converted from Float32 where padding row
             // was already accumulated — zero it after conversion
-            else if (grad_dtype == DType::Float16) {
+            else if (grad_dtype == DType::Float16 || grad_dtype == DType::BFloat16) {
                 auto grad_f32 = grad_weight.to(DType::Float32);
                 auto* ptr = grad_f32.data<float>();
                 for (int64_t j = 0; j < embedding_dim_; ++j) {
                     ptr[padding_idx_ * embedding_dim_ + j] = 0.0f;
                 }
-                grad_weight = grad_f32.to(DType::Float16);
+                grad_weight = grad_f32.to(grad_dtype);
             }
         }
 
@@ -1001,11 +1071,12 @@ auto Embedding::renorm_embeddings(const Tensor& indices) -> void {
     const Device dev = weight.device();
     const DType wt_dtype = weight.dtype();
 
-    if (wt_dtype != DType::Float32 && wt_dtype != DType::Float64) {
+    if (wt_dtype != DType::Float32 && wt_dtype != DType::Float64 &&
+        wt_dtype != DType::Float16 && wt_dtype != DType::BFloat16) {
         throw std::runtime_error(
             "Embedding::renorm_embeddings: unsupported weight dtype " +
             std::string(tenzor::dtype_name(wt_dtype)) +
-            " (only Float32/Float64 supported)");
+            " (only Float32/Float64/Float16/BFloat16 supported)");
     }
 
     // Flatten indices and ensure they're Int64 on the weight's device.

@@ -377,7 +377,7 @@ auto linspace(double start, double end, int64_t steps,
  * @param device Target device (default: CPU)
  * @return 1-D tensor of size `steps`
  */
-auto logspace(float start, float end, int64_t steps, double base = 10.0,
+auto logspace(double start, double end, int64_t steps, double base = 10.0,
               DType dtype = DType::Float32,
               Device device = Device::cpu()) -> Tensor;
 

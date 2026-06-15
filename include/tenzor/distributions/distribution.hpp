@@ -213,11 +213,15 @@ public:
     auto probs() const -> const Tensor& { return probs_; }
 
     static auto from_logits(const Tensor& logits) -> Categorical {
-        // Softmax to convert logits to probabilities
-        auto max_val = tenzor::max(logits);
+        // Per-row softmax over the last (category) dim. Using full-tensor
+        // scalar reductions would normalize across the whole batch, so for
+        // batched (B, K) logits the per-row probs would not sum to 1. Reduce
+        // over the last dim with keepdim so broadcasting subtracts/divides
+        // per row.
+        auto max_val = tenzor::max(logits, /*dim=*/-1, /*keepdim=*/true);
         auto shifted = logits - max_val;
         auto exp_vals = tenzor::exp(shifted);
-        auto sum_exp = tenzor::sum(exp_vals);
+        auto sum_exp = tenzor::sum(exp_vals, /*dim=*/-1, /*keepdim=*/true);
         return Categorical(exp_vals / sum_exp);
     }
 
@@ -481,18 +485,26 @@ private:
 
 namespace detail {
 
-/// Shared PRNG for per-sample rejection algorithms. Seeded once on first use.
+/// Shared fallback PRNG for per-sample rejection algorithms, used only when no
+/// Generator is threaded through. Seeded once on first use.
 inline auto& distribution_rng() {
     static thread_local std::mt19937_64 rng(std::random_device{}());
     return rng;
 }
 
+/// Resolve the engine to draw from: the supplied Generator's engine when one is
+/// active (so seeding a Generator makes Gamma/Beta/Dirichlet/StudentT/Poisson
+/// reproducible), otherwise the thread-local fallback.
+inline auto rng_for(Generator* gen) -> std::mt19937_64& {
+    return gen ? gen->engine() : distribution_rng();
+}
+
 /// Marsaglia–Tsang (2000) rejection sampler for Gamma(shape >= 1).
 /// For shape < 1, use the boosting trick gamma(s) = gamma(s+1) * U^(1/s).
 /// `shape` is the concentration parameter (a.k.a. alpha, k).
+/// Draws from the supplied engine for reproducibility.
 template <typename T>
-inline auto sample_gamma_scalar(T shape_alpha, T rate_beta) -> T {
-    auto& rng = distribution_rng();
+inline auto sample_gamma_scalar(T shape_alpha, T rate_beta, std::mt19937_64& rng) -> T {
     std::normal_distribution<double> normal(0.0, 1.0);
     std::uniform_real_distribution<double> uniform(0.0, 1.0);
 
@@ -532,8 +544,8 @@ inline auto sample_gamma_scalar(T shape_alpha, T rate_beta) -> T {
 }
 
 /// Knuth (small λ) / transformed-rejection (large λ) sampler for Poisson.
-inline auto sample_poisson_scalar(double lambda) -> int64_t {
-    auto& rng = detail::distribution_rng();
+/// Draws from the supplied engine for reproducibility.
+inline auto sample_poisson_scalar(double lambda, std::mt19937_64& rng) -> int64_t {
     if (lambda <= 0.0) return 0;
     if (lambda < 10.0) {
         // Knuth's algorithm.
@@ -569,7 +581,7 @@ inline auto sample_poisson_scalar(double lambda) -> int64_t {
 /// Broadcast-compatible element-wise CPU fill for Gamma sampling.
 /// concentration and rate are broadcast to the output shape.
 inline auto fill_gamma_cpu(const Tensor& concentration, const Tensor& rate,
-                           std::vector<int64_t> shape) -> Tensor {
+                           std::vector<int64_t> shape, std::mt19937_64& rng) -> Tensor {
     // Float16/BFloat16: sample in Float32 (FP16 lacks the range/precision
     // for the Marsaglia+Tsang squeeze-and-trickle; tail Gammas overflow to
     // inf at scale > 65504). Same widen-narrow pattern used by the CPU
@@ -578,7 +590,7 @@ inline auto fill_gamma_cpu(const Tensor& concentration, const Tensor& rate,
         auto orig = concentration.dtype();
         auto sampled = fill_gamma_cpu(concentration.to(DType::Float32),
                                       rate.to(DType::Float32),
-                                      shape);
+                                      shape, rng);
         return sampled.to(orig);
     }
 
@@ -600,7 +612,7 @@ inline auto fill_gamma_cpu(const Tensor& concentration, const Tensor& rate,
         for (int64_t i = 0; i < n; ++i) {
             float conc = (conc_n == 1) ? cp[0] : cp[i % conc_n];
             float rate_v = (rate_n == 1) ? rp[0] : rp[i % rate_n];
-            op[i] = sample_gamma_scalar<float>(conc, rate_v);
+            op[i] = sample_gamma_scalar<float>(conc, rate_v, rng);
         }
     } else if (out.dtype() == DType::Float64) {
         double* op = out.data<double>();
@@ -609,7 +621,7 @@ inline auto fill_gamma_cpu(const Tensor& concentration, const Tensor& rate,
         for (int64_t i = 0; i < n; ++i) {
             double conc = (conc_n == 1) ? cp[0] : cp[i % conc_n];
             double rate_v = (rate_n == 1) ? rp[0] : rp[i % rate_n];
-            op[i] = sample_gamma_scalar<double>(conc, rate_v);
+            op[i] = sample_gamma_scalar<double>(conc, rate_v, rng);
         }
     } else {
         throw std::runtime_error("Gamma: only Float32 and Float64 supported");
@@ -691,7 +703,7 @@ public:
         auto shape = sample_shape.empty()
             ? std::vector<int64_t>(concentration_.shape().begin(), concentration_.shape().end())
             : sample_shape;
-        auto result = detail::fill_gamma_cpu(concentration_, rate_, shape);
+        auto result = detail::fill_gamma_cpu(concentration_, rate_, shape, detail::rng_for(generator_));
         return result.to(concentration_.device());
     }
 
@@ -808,8 +820,8 @@ public:
             ? std::vector<int64_t>(c1_.shape().begin(), c1_.shape().end())
             : sample_shape;
         auto one = full({1}, 1.0, c1_.dtype(), Device::cpu());
-        auto x = detail::fill_gamma_cpu(c1_, one, shape);
-        auto y = detail::fill_gamma_cpu(c0_, one, shape);
+        auto x = detail::fill_gamma_cpu(c1_, one, shape, detail::rng_for(generator_));
+        auto y = detail::fill_gamma_cpu(c0_, one, shape, detail::rng_for(generator_));
         auto result = x / (x + y);
         return result.to(c1_.device());
     }
@@ -921,7 +933,7 @@ public:
             ? std::vector<int64_t>(concentration_.shape().begin(), concentration_.shape().end())
             : sample_shape;
         auto one = full({1}, 1.0, concentration_.dtype(), Device::cpu());
-        auto gammas = detail::fill_gamma_cpu(concentration_, one, shape);
+        auto gammas = detail::fill_gamma_cpu(concentration_, one, shape, detail::rng_for(generator_));
 
         // Normalize along the last dim.
         // sum over last dim, keepdim to broadcast.
@@ -1029,7 +1041,7 @@ public:
         auto half = full({1}, 0.5, df_.dtype(), Device::cpu());
         auto alpha = df_.to(Device::cpu()) * half;
         auto rate  = half;
-        auto chi2 = detail::fill_gamma_cpu(alpha, rate, shape);
+        auto chi2 = detail::fill_gamma_cpu(alpha, rate, shape, detail::rng_for(generator_));
 
         auto df_cpu = df_.to(Device::cpu());
         auto scaled = z / tenzor::sqrt(chi2 / df_cpu);
@@ -1126,18 +1138,19 @@ public:
         int64_t n = out.numel();
         const int64_t rate_n = rate_cpu.numel();
         int64_t* op = out.data<int64_t>();
+        auto& rng = detail::rng_for(generator_);
 
         if (rate_cpu.dtype() == DType::Float32) {
             const float* rp = rate_cpu.data<float>();
             for (int64_t i = 0; i < n; ++i) {
                 double lam = (rate_n == 1) ? rp[0] : rp[i % rate_n];
-                op[i] = detail::sample_poisson_scalar(lam);
+                op[i] = detail::sample_poisson_scalar(lam, rng);
             }
         } else if (rate_cpu.dtype() == DType::Float64) {
             const double* rp = rate_cpu.data<double>();
             for (int64_t i = 0; i < n; ++i) {
                 double lam = (rate_n == 1) ? rp[0] : rp[i % rate_n];
-                op[i] = detail::sample_poisson_scalar(lam);
+                op[i] = detail::sample_poisson_scalar(lam, rng);
             }
         } else {
             throw std::runtime_error("Poisson: rate must be Float32 or Float64");
@@ -2119,8 +2132,8 @@ public:
             ? std::vector<int64_t>(df1_.shape().begin(), df1_.shape().end())
             : sample_shape;
         auto one = full({1}, 1.0f, df1_.dtype(), Device::cpu());
-        auto x1 = detail::fill_gamma_cpu(df1_.to(Device::cpu()) * 0.5f, one, shape);
-        auto x2 = detail::fill_gamma_cpu(df2_.to(Device::cpu()) * 0.5f, one, shape);
+        auto x1 = detail::fill_gamma_cpu(df1_.to(Device::cpu()) * 0.5f, one, shape, detail::rng_for(generator_));
+        auto x2 = detail::fill_gamma_cpu(df2_.to(Device::cpu()) * 0.5f, one, shape, detail::rng_for(generator_));
         auto result = (x1 / df1_.to(Device::cpu())) / (x2 / df2_.to(Device::cpu()));
         return result.to(df1_.device());
     }
@@ -2209,10 +2222,11 @@ public:
         auto eps = 1e-7f;
         auto p_clamped = tenzor::clamp(probs_, eps, 1.0f - eps);
         auto gamma_rate = p_clamped / (1.0f - p_clamped);
+        auto& rng = detail::rng_for(generator_);
         auto rate_samples = detail::fill_gamma_cpu(
             total_count_.to(Device::cpu()),
             tenzor::reciprocal(gamma_rate.to(Device::cpu())),  // Gamma uses rate param
-            shape);
+            shape, rng);
 
         // Draw Poisson(rate) counts
         auto rate_cpu = rate_samples.contiguous();
@@ -2229,13 +2243,13 @@ public:
             const float* rp = rate_cpu.data<float>();
             for (int64_t i = 0; i < n; ++i) {
                 double lam = (rate_n == 1) ? rp[0] : rp[i % rate_n];
-                op[i] = detail::sample_poisson_scalar(std::max(lam, 0.0));
+                op[i] = detail::sample_poisson_scalar(std::max(lam, 0.0), rng);
             }
         } else if (rate_cpu.dtype() == DType::Float64) {
             const double* rp = rate_cpu.data<double>();
             for (int64_t i = 0; i < n; ++i) {
                 double lam = (rate_n == 1) ? rp[0] : rp[i % rate_n];
-                op[i] = detail::sample_poisson_scalar(std::max(lam, 0.0));
+                op[i] = detail::sample_poisson_scalar(std::max(lam, 0.0), rng);
             }
         } else {
             throw std::runtime_error("NegativeBinomial: probs must be Float32 or Float64");
@@ -2464,7 +2478,7 @@ public:
         const int64_t kappa_n = kappa_cpu.numel();
         const int64_t loc_n = loc_cpu.numel();
 
-        auto& rng = detail::distribution_rng();
+        auto& rng = detail::rng_for(generator_);
         std::uniform_real_distribution<double> uniform(0.0, 1.0);
 
         if (out.dtype() == DType::Float32) {
@@ -3003,7 +3017,7 @@ public:
         // Build lower-triangular Bartlett factor L on CPU
         auto L = zeros({p_, p_}, dtype, Device::cpu());
 
-        auto& rng = detail::distribution_rng();
+        auto& rng = detail::rng_for(generator_);
         std::normal_distribution<double> normal(0.0, 1.0);
 
         if (dtype == DType::Float32) {
@@ -3012,7 +3026,7 @@ public:
                 // Diagonal: sqrt(Chi2(df - i)) = sqrt(Gamma((df-i)/2, 0.5) * 2)
                 // Equivalently, sample Chi2(df - i) via Gamma((df-i)/2, 0.5)
                 double chi2_val = detail::sample_gamma_scalar<double>(
-                    (df_val - static_cast<double>(i)) / 2.0, 0.5);
+                    (df_val - static_cast<double>(i)) / 2.0, 0.5, rng);
                 lp[i * p_ + i] = static_cast<float>(std::sqrt(chi2_val));
                 // Below diagonal: standard normal
                 for (int64_t j = 0; j < i; ++j) {
@@ -3023,7 +3037,7 @@ public:
             double* lp = L.data<double>();
             for (int64_t i = 0; i < p_; ++i) {
                 double chi2_val = detail::sample_gamma_scalar<double>(
-                    (df_val - static_cast<double>(i)) / 2.0, 0.5);
+                    (df_val - static_cast<double>(i)) / 2.0, 0.5, rng);
                 lp[i * p_ + i] = std::sqrt(chi2_val);
                 for (int64_t j = 0; j < i; ++j) {
                     lp[i * p_ + j] = normal(rng);

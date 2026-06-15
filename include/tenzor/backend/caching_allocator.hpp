@@ -237,11 +237,17 @@ private:
     void enforce_cache_limit(int device);
 
     /**
-     * @brief Release a block back to device
+     * @brief Release a block back to the device.
+     *
+     * Only frees the underlying allocation when @p block still owns the
+     * original cudaMalloc pointer (ptr == original_ptr). Interior split
+     * remainder blocks are left tracked and not freed.
      *
      * @param block Block to release
+     * @return true if the device allocation was actually freed, false if the
+     *         block was an interior sub-block and skipped.
      */
-    void release_block(Block* block);
+    bool release_block(Block* block);
 
     // Per-device data structures
     struct DeviceAllocator {

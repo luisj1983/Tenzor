@@ -9,6 +9,10 @@ namespace tenzor {
 
 static constexpr int64_t MAX_SMALL_LINALG_SIZE = 32;  // single-workgroup (shared-mem [32][32]) shader limit; larger N uses the tiled path
 static constexpr int64_t TILED_BLOCK_SIZE = 32;        // panel width for blocked algorithms
+// The blocked LU / Cholesky / bidiag panel shaders declare a fixed-size shared
+// panel (panel[256][32] / col_data[256]) and index it by row up to n-1, so n
+// must not exceed 256 or the load/store loops read/write out of bounds (UB).
+static constexpr int64_t MAX_BLOCKED_LINALG_SIZE = 256;
 
 // =============================================================================
 // Linear Algebra Operations — Native Vulkan shaders for small matrices,
@@ -22,6 +26,12 @@ static constexpr int64_t TILED_BLOCK_SIZE = 32;        // panel width for blocke
 // ---------------------------------------------------------------------------
 void VulkanBackend::runBlockedLU(Tensor& A, Tensor& pivots, int64_t n,
                                   int64_t batch_size, int32_t device_id, bool is_f64, bool is_f16) {
+    if (n > MAX_BLOCKED_LINALG_SIZE) {
+        throw std::runtime_error(
+            "Vulkan blocked LU: matrix dimension " + std::to_string(n) +
+            " exceeds the supported maximum of " + std::to_string(MAX_BLOCKED_LINALG_SIZE) +
+            " (linalg_lu_panel uses a fixed shared panel[256][32]).");
+    }
     size_t elem_size = is_f64 ? 8 : is_f16 ? 2 : 4;
     auto f16_buf = [&](size_t numel) -> size_t { return ((numel + 1) / 2) * 4; };
     size_t mat_numel = static_cast<size_t>(batch_size) * n * n;
@@ -111,6 +121,12 @@ void VulkanBackend::runBlockedLU(Tensor& A, Tensor& pivots, int64_t n,
 // ---------------------------------------------------------------------------
 void VulkanBackend::runBlockedCholesky(Tensor& A, int64_t n,
                                         int64_t batch_size, int32_t device_id, bool is_f64, bool is_f16) {
+    if (n > MAX_BLOCKED_LINALG_SIZE) {
+        throw std::runtime_error(
+            "Vulkan blocked Cholesky: matrix dimension " + std::to_string(n) +
+            " exceeds the supported maximum of " + std::to_string(MAX_BLOCKED_LINALG_SIZE) +
+            " (linalg_cholesky_tiled uses a fixed shared panel[256][32]).");
+    }
     size_t elem_size = is_f64 ? 8 : is_f16 ? 2 : 4;
     auto f16_buf = [&](size_t numel) -> size_t { return ((numel + 1) / 2) * 4; };
     size_t mat_numel = static_cast<size_t>(batch_size) * n * n;
@@ -292,6 +308,12 @@ void VulkanBackend::runBlockedQR(Tensor& A, Tensor& tau, int64_t m, int64_t n,
 
 void VulkanBackend::runBlockedBidiag(Tensor& A, Tensor& tau_l, Tensor& tau_r, int64_t n,
                                       int64_t batch_size, int32_t device_id, bool is_f64, bool is_f16) {
+    if (n > MAX_BLOCKED_LINALG_SIZE) {
+        throw std::runtime_error(
+            "Vulkan blocked bidiagonalization: matrix dimension " + std::to_string(n) +
+            " exceeds the supported maximum of " + std::to_string(MAX_BLOCKED_LINALG_SIZE) +
+            " (linalg_bidiag_panel uses a fixed shared col_data[256]).");
+    }
     size_t elem_size = is_f64 ? 8 : is_f16 ? 2 : 4;
     auto f16_buf = [&](size_t numel) -> size_t { return ((numel + 1) / 2) * 4; };
     size_t mat_numel = static_cast<size_t>(batch_size) * n * n;
@@ -1124,50 +1146,21 @@ void VulkanBackend::runBlockedTridiag(Tensor& A, Tensor& tau, int64_t n,
             endSingleTimeCommands(cmd, device_id);
         }
 
-        // --- Apply reflections to trailing submatrix ---
-        int64_t trail_start = col_start + panel_cols;
-        if (trail_start < k) {
-            int64_t trail_rows = n - trail_start;
-
-            for (int64_t b = 0; b < batch_size; ++b) {
-                std::string shader = is_f64 ? "linalg_tridiag_update_f64" : is_f16 ? "linalg_tridiag_update_f16" : "linalg_tridiag_update";
-                auto* pipeline = getPipeline(shader, device_id);
-
-                // Allocate V and W workspace for WY representation
-                size_t vw_numel = static_cast<size_t>(panel_cols) * n;
-                size_t vw_size = is_f16 ? f16_buf(vw_numel) : vw_numel * elem_size;
-                Tensor v_work({panel_cols, n}, A.dtype(), A.device());
-                Tensor w_work({panel_cols, n}, A.dtype(), A.device());
-
-                struct PushConstants {
-                    uint32_t n;
-                    uint32_t col_start;
-                    uint32_t panel_cols;
-                    uint32_t batch_idx;
-                } pc;
-                pc.n = static_cast<uint32_t>(n);
-                pc.col_start = static_cast<uint32_t>(col_start);
-                pc.panel_cols = static_cast<uint32_t>(panel_cols);
-                pc.batch_idx = static_cast<uint32_t>(b);
-
-                std::vector<std::pair<uint32_t, const void*>> bindings = {
-                    {0, A.data_ptr()}, {1, tau.data_ptr()},
-                    {2, v_work.data_ptr()}, {3, w_work.data_ptr()}
-                };
-                std::vector<size_t> sizes = {mat_size, tau_size, vw_size, vw_size};
-                VkDescriptorSet ds = allocateAndWriteDescriptorSet(device_id, pipeline, bindings, sizes);
-
-                VkCommandBuffer cmd = beginSingleTimeCommands(device_id);
-                vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
-                vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
-                                       pipeline->layout(), 0, 1, &ds, 0, nullptr);
-                vkCmdPushConstants(cmd, pipeline->layout(), VK_SHADER_STAGE_COMPUTE_BIT,
-                                  0, sizeof(pc), &pc);
-                vkCmdDispatch(cmd, static_cast<uint32_t>(trail_rows), 1, 1);
-                insertComputeOnlyBarrier(cmd);
-                endSingleTimeCommands(cmd, device_id);
-            }
-        }
+        // --- NO separate trailing-submatrix update ---
+        // The panel shader (linalg_tridiag_panel{,_f64,_f16}.comp) already applies
+        // each Householder reflection as a full two-sided symmetric rank-2 update
+        // A <- H*A*H^T over the ENTIRE remaining submatrix [col+1, n) x [col+1, n)
+        // (see the rank-2 update loop, which ranges r,c over [col+1, n) with no
+        // panel-column restriction). After the panel completes columns
+        // [col_start, col_start+panel_cols), the trailing block [trail_start, n)
+        // has therefore ALREADY had all panel reflections applied on both sides.
+        //
+        // Dispatching linalg_tridiag_update here would re-apply every reflection a
+        // second time, destroying symmetry and corrupting later panels (the
+        // symmetric eigendecomposition was wrong for n > one panel). The correct,
+        // self-consistent design is: the panel is an unblocked reduction over the
+        // full trailing region, and there is no separate trailing update. The next
+        // panel iteration simply continues from the (already fully updated) matrix.
     }
 }
 
@@ -3023,8 +3016,11 @@ auto VulkanBackend::dispatchSparseTrsv(const Tensor& crow_indices, const Tensor&
                            pipeline->layout(), 0, 1, &ds, 0, nullptr);
     vkCmdPushConstants(cmd, pipeline->layout(), VK_SHADER_STAGE_COMPUTE_BIT,
                       0, sizeof(pc), &pc);
-    // One thread per row
-    vkCmdDispatch(cmd, static_cast<uint32_t>(N), 1, 1);
+    // Single (1,1,1) workgroup: the shader now performs the entire triangular
+    // solve sequentially from one invocation. The previous N-workgroup,
+    // one-row-per-workgroup spin-wait could deadlock (no Vulkan cross-workgroup
+    // forward-progress guarantee).
+    vkCmdDispatch(cmd, 1, 1, 1);
     insertComputeOnlyBarrier(cmd);
     endSingleTimeCommands(cmd, device_id);
 

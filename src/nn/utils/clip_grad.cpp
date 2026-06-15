@@ -89,8 +89,9 @@ auto clip_grad_norm_(std::vector<std::shared_ptr<Variable>> parameters,
     if (clip_coef < 1.0) {
         for (auto& p : parameters) {
             if (p && p->has_grad()) {
-                auto scaled = tenzor::mul(p->grad().value(),
-                                          static_cast<float>(clip_coef));
+                // mul() takes a double scalar; pass clip_coef directly so
+                // Float64 grads aren't scaled by a float-truncated coefficient.
+                auto scaled = tenzor::mul(p->grad().value(), clip_coef);
                 p->set_grad(scaled);
             }
         }
@@ -103,9 +104,11 @@ void clip_grad_value_(std::vector<std::shared_ptr<Variable>> parameters,
                       double clip_value) {
     for (auto& p : parameters) {
         if (p && p->has_grad()) {
+            // clamp() takes double bounds; pass ±clip_value directly so
+            // Float64 grads aren't clamped to float-truncated bounds.
             auto clamped = tenzor::clamp(p->grad().value(),
-                                         static_cast<float>(-clip_value),
-                                         static_cast<float>(clip_value));
+                                         -clip_value,
+                                         clip_value);
             p->set_grad(clamped);
         }
     }

@@ -777,8 +777,11 @@ auto QuantStub::forward_impl(const Variable& input) -> Variable {
     const float scale = qparams_.scale.numel() > 0
         ? qparams_.scale.cpu().data<float>()[0]
         : 1.0f;
+    // zero_point is always DType::Int32 (quantize.cpp / fake_quantize.cpp).
+    // Reading it as int64_t throws DTypeException on the dtype mismatch, so the
+    // QAT-through-QuantStub forward would deterministically throw. Read int32_t.
     const float zero_point = qparams_.zero_point.numel() > 0
-        ? static_cast<float>(qparams_.zero_point.cpu().data<int64_t>()[0])
+        ? static_cast<float>(qparams_.zero_point.cpu().data<int32_t>()[0])
         : 0.0f;
     float qmin = -128.0f, qmax = 127.0f;
     switch (qparams_.dtype) {
@@ -2358,82 +2361,36 @@ auto QuantizedConvTranspose2d::forward_impl(const Variable& input) -> Variable {
 }
 
 auto QuantizedConvTranspose2d::forward_quantized(const QuantizedTensor& input) -> Tensor {
-    // Dequantize and run FP32 transposed conv2d
+    // Dequantize and delegate to the functional transposed-conv2d kernel
+    // (im2col + GEMM, parallelized), mirroring QuantizedConv3d, instead of a
+    // naive 7-deep scalar scatter loop.
     Tensor fp_input = input.dequantize();
     Tensor fp_weight = weight_.dequantize();
 
-    auto input_shape = fp_input.shape();
-    int64_t batch = input_shape[0];
-    int64_t h_in = input_shape[2];
-    int64_t w_in = input_shape[3];
+    Variable v_input(fp_input, /*requires_grad=*/false);
+    Variable v_weight(fp_weight, /*requires_grad=*/false);
 
-    // Transposed conv output dims:
-    // H_out = (H_in - 1) * stride - 2*padding + kernel_size + output_padding
-    int64_t h_out = (h_in - 1) * stride_ - 2 * padding_ + kernel_size_ + output_padding_;
-    int64_t w_out = (w_in - 1) * stride_ - 2 * padding_ + kernel_size_ + output_padding_;
-
-    auto original_device = fp_input.device();
-    Tensor output = zeros({batch, out_channels_, h_out, w_out}, DType::Float32, Device::cpu());
-
-    auto fp_input_cpu = (fp_input.device() == Device::cpu()) ? fp_input : fp_input.to(Device::cpu());
-    auto fp_weight_cpu = (fp_weight.device() == Device::cpu()) ? fp_weight : fp_weight.to(Device::cpu());
-
-    const float* in_data = fp_input_cpu.data<float>();
-    const float* w_data = fp_weight_cpu.data<float>();
-    float* out_data = output.data<float>();
-
-    int64_t in_c_per_group = in_channels_ / groups_;
-    int64_t out_c_per_group = out_channels_ / groups_;
-
-    // Transposed convolution: scatter input through flipped kernel
-    for (int64_t n = 0; n < batch; ++n) {
-        for (int64_t g = 0; g < groups_; ++g) {
-            for (int64_t ic = 0; ic < in_c_per_group; ++ic) {
-                int64_t ic_abs = g * in_c_per_group + ic;
-                for (int64_t ih = 0; ih < h_in; ++ih) {
-                    for (int64_t iw = 0; iw < w_in; ++iw) {
-                        float in_val = in_data[((n * in_channels_ + ic_abs) * h_in + ih) * w_in + iw];
-
-                        for (int64_t oc = 0; oc < out_c_per_group; ++oc) {
-                            int64_t oc_abs = g * out_c_per_group + oc;
-                            for (int64_t kh = 0; kh < kernel_size_; ++kh) {
-                                for (int64_t kw = 0; kw < kernel_size_; ++kw) {
-                                    int64_t oh = ih * stride_ - padding_ + kh;
-                                    int64_t ow = iw * stride_ - padding_ + kw;
-
-                                    if (oh >= 0 && oh < h_out && ow >= 0 && ow < w_out) {
-                                        // Weight layout: [in_channels, out_channels/groups, kH, kW]
-                                        int64_t w_idx = ((ic_abs * out_c_per_group + oc) * kernel_size_ + kh) * kernel_size_ + kw;
-                                        int64_t out_idx = ((n * out_channels_ + oc_abs) * h_out + oh) * w_out + ow;
-                                        out_data[out_idx] += in_val * w_data[w_idx];
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    // Add bias
+    std::optional<Variable> v_bias;
     if (bias_.has_value()) {
-        Tensor bias_cpu = *bias_;
-        if (bias_cpu.device() != Device::cpu()) bias_cpu = bias_cpu.to(Device::cpu());
-        const float* b_data = bias_cpu.data<const float>();
-        int64_t spatial = h_out * w_out;
-        for (int64_t n = 0; n < batch; ++n) {
-            for (int64_t c = 0; c < out_channels_; ++c) {
-                float b = b_data[c];
-                float* ch_data = out_data + (n * out_channels_ + c) * spatial;
-                for (int64_t i = 0; i < spatial; ++i) {
-                    ch_data[i] += b;
-                }
-            }
+        Tensor b = *bias_;
+        if (b.dtype() != DType::Float32) {
+            b = b.to(DType::Float32);
         }
+        if (b.device() != fp_input.device()) {
+            b = b.to(fp_input.device());
+        }
+        v_bias = Variable(b, /*requires_grad=*/false);
     }
 
-    return output.to(original_device);
+    Variable v_out = ::tenzor::nn::functional::conv_transpose2d(
+        v_input, v_weight, v_bias,
+        {stride_, stride_},
+        {padding_, padding_},
+        {output_padding_, output_padding_},
+        groups_,
+        {1, 1});
+
+    return v_out.tensor();
 }
 
 auto QuantizedConvTranspose2d::set_weight(const QuantizedTensor& weights) -> void {

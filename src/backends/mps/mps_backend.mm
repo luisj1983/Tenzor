@@ -15,7 +15,6 @@
 #include <unordered_map>
 #include <mutex>
 #include <stdexcept>
-#include "mps_cmd_check.h"
 
 namespace tenzor {
 namespace mps {
@@ -23,8 +22,6 @@ namespace mps {
 struct MPSBackend::Impl {
     id<MTLDevice> device{nil};
     id<MTLCommandQueue> command_queue{nil};
-    id<MTLCommandBuffer> current_command_buffer{nil};
-    size_t operations_in_batch{0};
 
     // Buffer tracking: void* -> MTLBuffer
     std::unordered_map<void*, id<MTLBuffer>> buffer_map;
@@ -71,12 +68,8 @@ MPSBackend::MPSBackend() : impl_(std::make_unique<Impl>()) {
 
 MPSBackend::~MPSBackend() {
     @autoreleasepool {
-        // Synchronize any pending work
-        if (impl_->current_command_buffer) {
-            [impl_->current_command_buffer commit];
-            [impl_->current_command_buffer waitUntilCompleted];
-            ::tenzor::mps::mps_cmd_check(impl_->current_command_buffer, __func__);
-        }
+        // Each kernel commits and waits on its own command buffer, so there is
+        // no pending batched work to flush here.
         // Release all tracked buffers
         impl_->buffer_map.clear();
     }
@@ -148,15 +141,9 @@ auto MPSBackend::memset(void* ptr, int value, size_t bytes,
 }
 
 auto MPSBackend::synchronize([[maybe_unused]] int32_t device_id) -> void {
-    @autoreleasepool {
-        if (impl_->current_command_buffer) {
-            [impl_->current_command_buffer commit];
-            [impl_->current_command_buffer waitUntilCompleted];
-            ::tenzor::mps::mps_cmd_check(impl_->current_command_buffer, __func__);
-            impl_->current_command_buffer = nil;
-            impl_->operations_in_batch = 0;
-        }
-    }
+    // Each kernel creates, commits, and waits on its own command buffer
+    // (per-op synchronous execution), so all submitted work is already
+    // complete by the time control returns to the caller. Nothing to flush.
 }
 
 auto MPSBackend::set_device(int32_t device_id) -> void {

@@ -143,26 +143,16 @@ void main() {
             sdiag[k] = -s * new_dk1 + c * new_ek;
 
             if (k + 1 < q) {
+                // The left rotation (c,s) on rows k,k+1 also mixes the two
+                // entries of column k+2: the surviving superdiagonal sdiag[k+1]
+                // (= e_{k+1}, on row k+1) and a zero below it. This produces a
+                // new bulge on row k (-s*e_{k+1}) and scales sdiag[k+1] by c.
+                // Golub & Van Loan Alg. 8.6.1: carry exactly one (y,z) pair —
+                // y = the just-finished superdiagonal sdiag[k], z = new bulge.
                 float ek1 = sdiag[k + 1];
-                y = sdiag[k];
-                z = -s * ek1;
-                sdiag[k + 1] = c * ek1;
-                // Next iteration continues the chase
-                y = diag[k + 1];
-                z = -s * sdiag[k + 1];
-                // Re-derive for next step
-                y = sdiag[k];
-                z = -s * sdiag[k + 1];
-                sdiag[k] = c * sdiag[k];
-
-                // Correct: after left rotation, bulge appears in sdiag[k+1]
-                // Actually recompute properly:
-                sdiag[k] = -s * new_dk1 + c * new_ek;
-                y = c * sdiag[k + 1];
-                z = s * sdiag[k + 1];
-                // This will be chased in next iteration of k
-                y = sdiag[k];
-                z = -s * sdiag[k + 1];
+                sdiag[k + 1] = c * ek1;   // surviving superdiagonal
+                y = sdiag[k];             // top of next right-rotation column
+                z = -s * ek1;             // bulge to be chased next iteration
             }
 
             // Store left rotation

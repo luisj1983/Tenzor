@@ -147,14 +147,19 @@ public:
      * @param hidden_states Query input [batch, seq_len, d_model]
      * @param key_value_states Key/value input for cross-attention (optional)
      * @param attention_mask Attention mask (optional)
-     * @param position_bias Pre-computed position bias (optional, reused from first layer)
-     * @return Tuple of (attention_output, position_bias)
+     * @param position_bias Pre-computed position bias (optional, reused from
+     *        first layer). Threaded as a grad-tracked Variable (NOT a detached
+     *        tensor) so gradients from every layer accumulate into the layer-0
+     *        relative_attention_bias_ embedding.
+     * @return Tuple of (attention_output, position_bias). The returned bias is
+     *         the grad-tracked Variable computed in layer 0, reusable by later
+     *         layers without severing the autograd graph.
      */
     auto forward(const Variable& hidden_states,
                 const Variable& key_value_states = Variable{},
                 const Tensor& attention_mask = Tensor{},
-                const Tensor& position_bias = Tensor{})
-        -> std::tuple<Variable, Tensor>;
+                const Variable& position_bias = Variable{})
+        -> std::tuple<Variable, Variable>;
 
     /**
      * @brief Required by Module base class
@@ -256,17 +261,19 @@ public:
      * @param encoder_hidden_states Encoder outputs for cross-attention (decoder only)
      * @param attention_mask Self-attention mask
      * @param encoder_attention_mask Cross-attention mask
-     * @param position_bias Self-attention position bias (reused from first layer)
-     * @param encoder_position_bias Cross-attention position bias (reused from first layer)
+     * @param position_bias Self-attention position bias (grad-tracked Variable,
+     *        reused from first layer)
+     * @param encoder_position_bias Cross-attention position bias (grad-tracked
+     *        Variable, reused from first layer)
      * @return Tuple of (output, self_attn_position_bias, cross_attn_position_bias)
      */
     auto forward(const Variable& hidden_states,
                 const Variable& encoder_hidden_states = Variable{},
                 const Tensor& attention_mask = Tensor{},
                 const Tensor& encoder_attention_mask = Tensor{},
-                const Tensor& position_bias = Tensor{},
-                const Tensor& encoder_position_bias = Tensor{})
-        -> std::tuple<Variable, Tensor, Tensor>;
+                const Variable& position_bias = Variable{},
+                const Variable& encoder_position_bias = Variable{})
+        -> std::tuple<Variable, Variable, Variable>;
 
     /**
      * @brief Required by Module base class
@@ -423,6 +430,16 @@ public:
      * @brief Get model configuration
      */
     auto config() const -> const T5Config& { return config_; }
+
+    /**
+     * @brief Access the encoder/decoder stacks directly.
+     *
+     * Enables incremental decoding (e.g. generation) where the encoder is run
+     * once and its output is cached, then fed to the decoder each step —
+     * avoiding the O(steps) re-encode of a combined encoder-decoder forward.
+     */
+    auto encoder() const -> std::shared_ptr<T5Encoder> { return encoder_; }
+    auto decoder() const -> std::shared_ptr<T5Decoder> { return decoder_; }
 
     /// Load pretrained weights via ModelHub (audit H4). See AlbertModel.
     auto load_pretrained(const std::string& path, bool strict = true) -> void;

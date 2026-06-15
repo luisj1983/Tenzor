@@ -1740,7 +1740,35 @@ auto LoopUnrollingPass::run(Graph& graph) -> bool {
         auto bound_producer = bound_value->node();
         if (!bound_producer || bound_producer->op_type() != OpType::Constant) continue;
 
-        int64_t trip_count = bound_producer->get_int_attr("value");
+        // JIT Constant nodes store their payload as a TENSOR attr named
+        // "value" (see set_tensor_attr/get_tensor_attr everywhere else), not as
+        // an int attr — int and tensor attrs live in separate maps. Reading
+        // get_int_attr("value") here always returned 0, so the guard below
+        // always continued and no loop was ever unrolled. Read the scalar from
+        // the tensor attr instead, handling integer and floating payloads.
+        const Tensor& bound_tensor = bound_producer->get_tensor_attr("value");
+        if (bound_tensor.numel() != 1) continue;
+        int64_t trip_count = 0;
+        try {
+            switch (bound_tensor.dtype()) {
+                case DType::Int64:
+                    trip_count = bound_tensor.item<int64_t>();
+                    break;
+                case DType::Int32:
+                    trip_count = static_cast<int64_t>(bound_tensor.item<int32_t>());
+                    break;
+                case DType::Float32:
+                    trip_count = static_cast<int64_t>(bound_tensor.item<float>());
+                    break;
+                case DType::Float64:
+                    trip_count = static_cast<int64_t>(bound_tensor.item<double>());
+                    break;
+                default:
+                    continue;  // Unsupported bound dtype — leave the loop intact.
+            }
+        } catch (...) {
+            continue;
+        }
         if (trip_count <= 0 || trip_count > max_unroll_) continue;
 
         auto body = loop_node->body();
@@ -2309,20 +2337,34 @@ auto DTypeOptimizationPass::run(Graph& graph) -> bool {
         auto op = node->op_type();
 
         if (is_compute_heavy(op)) {
-            // Downcast inputs to target_dtype for compute-heavy ops
+            // Downcast inputs to target_dtype for compute-heavy ops. An input
+            // cast is inserted only for Float32 inputs (or inputs already in
+            // the downcast set). A Float64 (or other non-F32) input gets NO
+            // cast, so the kernel still produces its original dtype.
+            bool any_input_downcast = false;
             for (size_t i = 0; i < node->inputs().size(); ++i) {
                 auto& input_val = node->inputs()[i];
-                if (input_val->dtype() == DType::Float32 &&
-                    downcast_values.count(input_val->id()) == 0) {
+                if (downcast_values.count(input_val->id()) > 0) {
+                    // Already downcast upstream — output will be in target dtype.
+                    any_input_downcast = true;
+                } else if (input_val->dtype() == DType::Float32) {
                     insertions.push_back({input_val, node, i, target_dtype_});
+                    any_input_downcast = true;
                 }
             }
-            // Mark outputs as downcast
-            for (auto& output : node->outputs()) {
-                output->set_dtype(target_dtype_);
-                downcast_values.insert(output->id());
+            // Only relabel the output (and treat it as downcast downstream) when
+            // at least one input was actually cast to target_dtype. Relabeling
+            // unconditionally would desync the value's dtype label from what the
+            // kernel produces for ops with no Float32 input (e.g. a pure Float64
+            // matmul), corrupting downstream upcast / output-cast decisions that
+            // key off downcast_values.
+            if (any_input_downcast) {
+                for (auto& output : node->outputs()) {
+                    output->set_dtype(target_dtype_);
+                    downcast_values.insert(output->id());
+                }
+                changed = true;
             }
-            changed = true;
         } else if (is_stability_critical(op)) {
             // Upcast any downcast inputs back to Float32
             for (size_t i = 0; i < node->inputs().size(); ++i) {

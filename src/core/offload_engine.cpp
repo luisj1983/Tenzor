@@ -425,7 +425,12 @@ auto OffloadEngine::check_and_offload() -> size_t {
             // immediately by handle.wait() and handle.get_tensor() — that's the same as
             // sync with two extra allocations. Just call the sync version.
             Tensor cpu_tensor = transfer_engine_->gpu_to_cpu(*tensor);
-            *tensor = cpu_tensor;
+            {
+                // Serialize the user-tensor reassignment w.r.t. prefetch commits
+                // so the intrusive_ptr refcount updates can't race.
+                std::lock_guard<std::mutex> assign_lock(tensor_assign_mutex_);
+                *tensor = cpu_tensor;
+            }
 
             if (memory_manager_) {
                 memory_manager_->update_tensor_location(tensor, Device::cpu());
@@ -508,6 +513,9 @@ auto OffloadEngine::wait_for_prefetch() -> void {
         try {
             Tensor result = f.handle.get_tensor();  // implicit wait
             if (f.target != nullptr) {
+                // Serialize w.r.t. check_and_offload's `*tensor = cpu_tensor`
+                // so concurrent refcount updates on the same Tensor are atomic.
+                std::lock_guard<std::mutex> assign_lock(tensor_assign_mutex_);
                 *f.target = result;
             }
         } catch (const std::exception&) {

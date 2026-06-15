@@ -25,9 +25,6 @@ struct ROIAlignKernelFloat64 {};
 struct ROIAlignKernelFloat16 {};
 struct ROIAlignBackwardKernelFloat32 {};
 struct ROIAlignBackwardKernelFloat64 {};
-struct ROIAlignBackwardKernelFloat16 {};
-struct ROIAlignBackwardF16AccumKernel {};
-struct ROIAlignBackwardF16ConvertKernel {};
 struct GatherRelativePositionBiasKernelFloat32 {};
 struct GatherRelativePositionBiasKernelFloat64 {};
 struct GatherRelativePositionBiasKernelFloat16 {};
@@ -41,8 +38,6 @@ struct InterpolateBicubicKernelFloat32 {};
 struct InterpolateBicubicKernelFloat64 {};
 struct InterpolateBicubicKernelFloat16 {};
 struct ROIAlignKernelBFloat16 {};
-struct ROIAlignBackwardBF16AccumKernel {};
-struct ROIAlignBackwardBF16ConvertKernel {};
 struct GatherRelativePositionBiasKernelBFloat16 {};
 struct InterpolateNearestKernelBFloat16 {};
 struct InterpolateBilinearKernelBFloat16 {};
@@ -124,17 +119,36 @@ auto nms_kernel(
             }
         }).wait();
 
+        // Bitonic sort over the power-of-two-padded score array. Padding
+        // entries are -inf so they always sink to the tail, leaving the first
+        // num_boxes entries in strict descending-by-score order.
+        //
+        // Each of the padded/2 work-items owns exactly one compare-exchange
+        // pair (l, r) for the current (k, j) stage. The partner index uses the
+        // canonical bitonic mapping
+        //     l = 2*tid - (tid & (j-1));   r = l + j;
+        // which enumerates the low element of every j-block across the FULL
+        // array — including the upper half. The previous formula
+        // `l = tid | (tid & ~(j-1))` collapses to `l = tid`, so for
+        // j >= padded/2 the upper half was never touched and the `r <= l`
+        // guard dropped half the comparisons, corrupting the order for every
+        // non-trivial length. With this mapping l<r and l+j<padded always
+        // hold, so no bounds guard is needed.
+        //
+        // Direction: in a block whose k-bit is clear we keep the LARGER value
+        // first (swap on lv<rv); in its mirror we keep the smaller first. After
+        // the final stage (k==padded) the whole array is globally DESCENDING.
         for (int64_t k = 2; k <= padded; k <<= 1) {
             for (int64_t j = k >> 1; j > 0; j >>= 1) {
-                queue.parallel_for(sycl::range<1>(padded / 2),
+                int64_t half = padded / 2;
+                queue.parallel_for(sycl::range<1>(half),
                     [=](sycl::id<1> gid) {
                         int64_t tid = static_cast<int64_t>(gid[0]);
-                        int64_t l = tid | (tid & ~(j - 1));
-                        int64_t r = l ^ j;
-                        if (r <= l) return;
-                        bool ascending_half = ((l & k) == 0);
+                        int64_t l = 2 * tid - (tid & (j - 1));
+                        int64_t r = l + j;
+                        bool keep_larger_first = ((l & k) == 0);
                         float lv = d_scores[l], rv = d_scores[r];
-                        bool should_swap = ascending_half ? (lv < rv) : (lv > rv);
+                        bool should_swap = keep_larger_first ? (lv < rv) : (lv > rv);
                         if (should_swap) {
                             d_scores[l] = rv;
                             d_scores[r] = lv;
@@ -1049,216 +1063,6 @@ auto roi_align_backward_kernel(
             }
         );
     }
-    else if (grad_output.dtype() == DType::Float16) {
-        const sycl::half* grad_out_ptr = get_data_ptr<const sycl::half>(grad_output);
-        const sycl::half* rois_ptr = get_data_ptr<const sycl::half>(rois);
-        sycl::half* grad_feat_ptr = get_data_ptr<sycl::half>(grad_features);
-
-        // Accumulate in float32 since sycl::half doesn't support atomic operations
-        float* accum_ptr = sycl::malloc_device<float>(feat_size, queue);
-        queue.fill(accum_ptr, 0.0f, feat_size).wait();
-
-        const float offset = aligned ? 0.5f : 0.0f;
-
-        queue.parallel_for<ROIAlignBackwardF16AccumKernel>(
-            sycl::range<1>(total_elements),
-            [=](sycl::id<1> idx) {
-                int64_t pw = idx % output_width;
-                int64_t ph = (idx / output_width) % output_height;
-                int64_t c = (idx / output_width / output_height) % channels;
-                int64_t n = idx / output_width / output_height / channels;
-
-                const sycl::half* roi = rois_ptr + n * 5;
-                int64_t batch_idx = static_cast<int64_t>(float(roi[0]));
-                float roi_x1 = float(roi[1]) * spatial_scale - offset;
-                float roi_y1 = float(roi[2]) * spatial_scale - offset;
-                float roi_x2 = float(roi[3]) * spatial_scale - offset;
-                float roi_y2 = float(roi[4]) * spatial_scale - offset;
-
-                float roi_width = roi_x2 - roi_x1;
-                float roi_height = roi_y2 - roi_y1;
-                if (!aligned) {
-                    roi_width = sycl::fmax(roi_width, 1.0f);
-                    roi_height = sycl::fmax(roi_height, 1.0f);
-                }
-
-                float bin_size_h = roi_height / static_cast<float>(output_height);
-                float bin_size_w = roi_width / static_cast<float>(output_width);
-
-                int64_t roi_bin_grid_h = sampling_ratio > 0 ? sampling_ratio
-                    : static_cast<int64_t>(sycl::ceil(roi_height / output_height));
-                int64_t roi_bin_grid_w = sampling_ratio > 0 ? sampling_ratio
-                    : static_cast<int64_t>(sycl::ceil(roi_width / output_width));
-
-                // Clamp each bin grid to at least 1 so a zero-area / inverted
-                // ROI (possible when aligned=true skips the roi_w/h clamp)
-                // never yields count==0 and a divide-by-zero NaN/Inf, matching
-                // the CPU reference and PyTorch.
-                roi_bin_grid_h = sycl::max(roi_bin_grid_h, int64_t(1));
-                roi_bin_grid_w = sycl::max(roi_bin_grid_w, int64_t(1));
-                const float count = roi_bin_grid_h * roi_bin_grid_w;
-                const float grad_val = float(grad_out_ptr[idx]) / count;
-
-                for (int64_t iy = 0; iy < roi_bin_grid_h; ++iy) {
-                    float y = roi_y1 + ph * bin_size_h + (iy + 0.5f) * bin_size_h / roi_bin_grid_h;
-                    for (int64_t ix = 0; ix < roi_bin_grid_w; ++ix) {
-                        float x = roi_x1 + pw * bin_size_w + (ix + 0.5f) * bin_size_w / roi_bin_grid_w;
-
-                        if (y < -1.0f || y > feat_height || x < -1.0f || x > feat_width) continue;
-
-                        y = sycl::fmax(y, 0.0f);
-                        x = sycl::fmax(x, 0.0f);
-
-                        int64_t y_low = static_cast<int64_t>(y);
-                        int64_t x_low = static_cast<int64_t>(x);
-                        int64_t y_high = y_low + 1;
-                        int64_t x_high = x_low + 1;
-
-                        if (y_low >= feat_height - 1) { y_high = y_low = feat_height - 1; y = static_cast<float>(y_low); }
-                        if (x_low >= feat_width - 1) { x_high = x_low = feat_width - 1; x = static_cast<float>(x_low); }
-
-                        float ly = y - y_low;
-                        float lx = x - x_low;
-                        float hy = 1.0f - ly;
-                        float hx = 1.0f - lx;
-
-                        int64_t base = batch_idx * channels * feat_height * feat_width + c * feat_height * feat_width;
-
-                        sycl::atomic_ref<float, sycl::memory_order::relaxed, sycl::memory_scope::device>
-                            a1(accum_ptr[base + y_low * feat_width + x_low]);
-                        a1 += hy * hx * grad_val;
-
-                        sycl::atomic_ref<float, sycl::memory_order::relaxed, sycl::memory_scope::device>
-                            a2(accum_ptr[base + y_low * feat_width + x_high]);
-                        a2 += hy * lx * grad_val;
-
-                        sycl::atomic_ref<float, sycl::memory_order::relaxed, sycl::memory_scope::device>
-                            a3(accum_ptr[base + y_high * feat_width + x_low]);
-                        a3 += ly * hx * grad_val;
-
-                        sycl::atomic_ref<float, sycl::memory_order::relaxed, sycl::memory_scope::device>
-                            a4(accum_ptr[base + y_high * feat_width + x_high]);
-                        a4 += ly * lx * grad_val;
-                    }
-                }
-            }
-        ).wait();
-
-        // Convert float32 accumulation buffer back to half
-        queue.parallel_for<ROIAlignBackwardF16ConvertKernel>(
-            sycl::range<1>(feat_size),
-            [=](sycl::id<1> i) {
-                grad_feat_ptr[i] = sycl::half(accum_ptr[i]);
-            }
-        ).wait();
-
-        sycl::free(accum_ptr, queue);
-    }
-    else if (grad_output.dtype() == DType::BFloat16) {
-        const uint16_t* grad_out_ptr = get_data_ptr<const uint16_t>(grad_output);
-        const uint16_t* rois_ptr = get_data_ptr<const uint16_t>(rois);
-        uint16_t* grad_feat_ptr = get_data_ptr<uint16_t>(grad_features);
-
-        // Accumulate in float32 since BFloat16 doesn't support atomic operations
-        float* accum_ptr = sycl::malloc_device<float>(feat_size, queue);
-        queue.fill(accum_ptr, 0.0f, feat_size);
-
-        const float offset = aligned ? 0.5f : 0.0f;
-
-        queue.parallel_for<ROIAlignBackwardBF16AccumKernel>(
-            sycl::range<1>(total_elements),
-            [=](sycl::id<1> idx) {
-                int64_t pw = idx % output_width;
-                int64_t ph = (idx / output_width) % output_height;
-                int64_t c = (idx / output_width / output_height) % channels;
-                int64_t n = idx / output_width / output_height / channels;
-
-                const uint16_t* roi = rois_ptr + n * 5;
-                int64_t batch_idx = static_cast<int64_t>(bf16_to_f32(roi[0]));
-                float roi_x1 = bf16_to_f32(roi[1]) * spatial_scale - offset;
-                float roi_y1 = bf16_to_f32(roi[2]) * spatial_scale - offset;
-                float roi_x2 = bf16_to_f32(roi[3]) * spatial_scale - offset;
-                float roi_y2 = bf16_to_f32(roi[4]) * spatial_scale - offset;
-
-                float roi_width = roi_x2 - roi_x1;
-                float roi_height = roi_y2 - roi_y1;
-                if (!aligned) {
-                    roi_width = sycl::fmax(roi_width, 1.0f);
-                    roi_height = sycl::fmax(roi_height, 1.0f);
-                }
-
-                float bin_size_h = roi_height / static_cast<float>(output_height);
-                float bin_size_w = roi_width / static_cast<float>(output_width);
-
-                int64_t roi_bin_grid_h = sampling_ratio > 0 ? sampling_ratio
-                    : static_cast<int64_t>(sycl::ceil(roi_height / output_height));
-                int64_t roi_bin_grid_w = sampling_ratio > 0 ? sampling_ratio
-                    : static_cast<int64_t>(sycl::ceil(roi_width / output_width));
-
-                // Clamp each bin grid to at least 1 so a zero-area / inverted
-                // ROI (possible when aligned=true skips the roi_w/h clamp)
-                // never yields count==0 and a divide-by-zero NaN/Inf, matching
-                // the CPU reference and PyTorch.
-                roi_bin_grid_h = sycl::max(roi_bin_grid_h, int64_t(1));
-                roi_bin_grid_w = sycl::max(roi_bin_grid_w, int64_t(1));
-                const float count = roi_bin_grid_h * roi_bin_grid_w;
-                const float grad_val = bf16_to_f32(grad_out_ptr[idx]) / count;
-
-                for (int64_t iy = 0; iy < roi_bin_grid_h; ++iy) {
-                    float y = roi_y1 + ph * bin_size_h + (iy + 0.5f) * bin_size_h / roi_bin_grid_h;
-                    for (int64_t ix = 0; ix < roi_bin_grid_w; ++ix) {
-                        float x = roi_x1 + pw * bin_size_w + (ix + 0.5f) * bin_size_w / roi_bin_grid_w;
-
-                        if (y < -1.0f || y > feat_height || x < -1.0f || x > feat_width) continue;
-
-                        y = sycl::fmax(y, 0.0f);
-                        x = sycl::fmax(x, 0.0f);
-
-                        int64_t y_low = static_cast<int64_t>(y);
-                        int64_t x_low = static_cast<int64_t>(x);
-                        int64_t y_high = y_low + 1;
-                        int64_t x_high = x_low + 1;
-
-                        if (y_low >= feat_height - 1) { y_high = y_low = feat_height - 1; y = static_cast<float>(y_low); }
-                        if (x_low >= feat_width - 1) { x_high = x_low = feat_width - 1; x = static_cast<float>(x_low); }
-
-                        float ly = y - y_low;
-                        float lx = x - x_low;
-                        float hy = 1.0f - ly;
-                        float hx = 1.0f - lx;
-
-                        int64_t base = batch_idx * channels * feat_height * feat_width + c * feat_height * feat_width;
-
-                        sycl::atomic_ref<float, sycl::memory_order::relaxed, sycl::memory_scope::device>
-                            a1(accum_ptr[base + y_low * feat_width + x_low]);
-                        a1 += hy * hx * grad_val;
-
-                        sycl::atomic_ref<float, sycl::memory_order::relaxed, sycl::memory_scope::device>
-                            a2(accum_ptr[base + y_low * feat_width + x_high]);
-                        a2 += hy * lx * grad_val;
-
-                        sycl::atomic_ref<float, sycl::memory_order::relaxed, sycl::memory_scope::device>
-                            a3(accum_ptr[base + y_high * feat_width + x_low]);
-                        a3 += ly * hx * grad_val;
-
-                        sycl::atomic_ref<float, sycl::memory_order::relaxed, sycl::memory_scope::device>
-                            a4(accum_ptr[base + y_high * feat_width + x_high]);
-                        a4 += ly * lx * grad_val;
-                    }
-                }
-            }
-        );
-
-        // Convert float32 accumulation buffer back to BFloat16
-        queue.parallel_for<ROIAlignBackwardBF16ConvertKernel>(
-            sycl::range<1>(feat_size),
-            [=](sycl::id<1> i) {
-                grad_feat_ptr[i] = f32_to_bf16(accum_ptr[i]);
-            }
-        ).wait();
-
-        sycl::free(accum_ptr, queue);
-    }
     else {
         throw std::runtime_error("roi_align_backward: unsupported dtype");
     }
@@ -1379,19 +1183,6 @@ auto gather_relative_position_bias_kernel(
 // ============================================================================
 // Interpolate (resize) operation
 // ============================================================================
-
-/**
- * @brief Cubic interpolation weight using Catmull-Rom spline
- */
-inline float cubic_weight(float x) {
-    x = std::abs(x);
-    if (x < 1.0f) {
-        return ((1.5f * x - 2.5f) * x) * x + 1.0f;
-    } else if (x < 2.0f) {
-        return ((-0.5f * x + 2.5f) * x - 4.0f) * x + 2.0f;
-    }
-    return 0.0f;
-}
 
 /**
  * @brief Interpolate (resize) operation supporting nearest, bilinear, and bicubic modes
@@ -1762,7 +1553,7 @@ auto interpolate_kernel(
                     float val = 0.0f;
                     for (int64_t dh = -1; dh <= 2; ++dh) {
                         int64_t hi = sycl::clamp(h_floor + dh, int64_t(0), H_in - 1);
-                        float h_w = 1.5f * sycl::fabs(h_real - (h_floor + dh));
+                        float h_w = sycl::fabs(h_real - (h_floor + dh));
                         float hw;
                         if (h_w < 1.0f) {
                             hw = ((1.5f * h_w - 2.5f) * h_w) * h_w + 1.0f;
@@ -2178,6 +1969,31 @@ auto box_iou_kernel(
                 float enc_y2 = sycl::fmax(y2_1, y2_2);
                 float enc_area = (enc_x2 - enc_x1) * (enc_y2 - enc_y1);
                 iou = iou - (enc_area - union_area) / (enc_area + 1e-7f);
+            } else if (iou_type == 2 || iou_type == 3) {
+                // DIoU (2) / CIoU (3): center-distance (+ aspect-ratio) penalty,
+                // computed in float accumulation. Matches the Float32 path/CPU.
+                float enc_x1 = sycl::fmin(x1_1, x1_2);
+                float enc_y1 = sycl::fmin(y1_1, y1_2);
+                float enc_x2 = sycl::fmax(x2_1, x2_2);
+                float enc_y2 = sycl::fmax(y2_1, y2_2);
+                float enc_w = enc_x2 - enc_x1;
+                float enc_h = enc_y2 - enc_y1;
+                float cx1 = (x1_1 + x2_1) * 0.5f, cy1 = (y1_1 + y2_1) * 0.5f;
+                float cx2 = (x1_2 + x2_2) * 0.5f, cy2 = (y1_2 + y2_2) * 0.5f;
+                float center_dist_sq = (cx1 - cx2) * (cx1 - cx2) + (cy1 - cy2) * (cy1 - cy2);
+                float diag_dist_sq = enc_w * enc_w + enc_h * enc_h;
+                float result = iou - center_dist_sq / (diag_dist_sq + 1e-7f);
+                if (iou_type == 3) {
+                    const float four_over_pi_sq =
+                        4.0f / (3.14159265358979323846f * 3.14159265358979323846f);
+                    float w1 = x2_1 - x1_1, h1 = y2_1 - y1_1;
+                    float w2 = x2_2 - x1_2, h2 = y2_2 - y1_2;
+                    float at = sycl::atan(w2 / (h2 + 1e-7f)) - sycl::atan(w1 / (h1 + 1e-7f));
+                    float v = four_over_pi_sq * at * at;
+                    float alpha = v / (1.0f - iou + v + 1e-7f);  // raw iou
+                    result = result - alpha * v;
+                }
+                iou = result;
             }
 
             out_ptr[i * M + j] = sycl::half(iou);
@@ -2223,6 +2039,31 @@ auto box_iou_kernel(
                 float enc_y2 = sycl::fmax(y2_1, y2_2);
                 float enc_area = (enc_x2 - enc_x1) * (enc_y2 - enc_y1);
                 iou = iou - (enc_area - union_area) / (enc_area + 1e-7f);
+            } else if (iou_type == 2 || iou_type == 3) {
+                // DIoU (2) / CIoU (3): center-distance (+ aspect-ratio) penalty,
+                // computed in float accumulation. Matches the Float32 path/CPU.
+                float enc_x1 = sycl::fmin(x1_1, x1_2);
+                float enc_y1 = sycl::fmin(y1_1, y1_2);
+                float enc_x2 = sycl::fmax(x2_1, x2_2);
+                float enc_y2 = sycl::fmax(y2_1, y2_2);
+                float enc_w = enc_x2 - enc_x1;
+                float enc_h = enc_y2 - enc_y1;
+                float cx1 = (x1_1 + x2_1) * 0.5f, cy1 = (y1_1 + y2_1) * 0.5f;
+                float cx2 = (x1_2 + x2_2) * 0.5f, cy2 = (y1_2 + y2_2) * 0.5f;
+                float center_dist_sq = (cx1 - cx2) * (cx1 - cx2) + (cy1 - cy2) * (cy1 - cy2);
+                float diag_dist_sq = enc_w * enc_w + enc_h * enc_h;
+                float result = iou - center_dist_sq / (diag_dist_sq + 1e-7f);
+                if (iou_type == 3) {
+                    const float four_over_pi_sq =
+                        4.0f / (3.14159265358979323846f * 3.14159265358979323846f);
+                    float w1 = x2_1 - x1_1, h1 = y2_1 - y1_1;
+                    float w2 = x2_2 - x1_2, h2 = y2_2 - y1_2;
+                    float at = sycl::atan(w2 / (h2 + 1e-7f)) - sycl::atan(w1 / (h1 + 1e-7f));
+                    float v = four_over_pi_sq * at * at;
+                    float alpha = v / (1.0f - iou + v + 1e-7f);  // raw iou
+                    result = result - alpha * v;
+                }
+                iou = result;
             }
 
             out_ptr[i * M + j] = f32_to_bf16(iou);

@@ -163,7 +163,11 @@ auto LSTMCell::forward_with_precomputed_ih(const Tensor& gates_ih, const Variabl
     Variable c = cx;
 
     if (!h.is_initialized() || h.tensor().numel() == 0) {
-        h = Variable(zeros({batch_size, hidden_size_},
+        // h feeds weight_hh_, which expects recurrent_size_ columns. With LSTMP
+        // (projection) recurrent_size_ != hidden_size_, so initialising h with
+        // hidden_size_ would build a matmul-incompatible zero state. Match the
+        // canonical forward() which uses recurrent_size_.
+        h = Variable(zeros({batch_size, recurrent_size_},
                           gates_ih.dtype(), gates_ih.device()), false);
     }
     if (!c.is_initialized() || c.tensor().numel() == 0) {

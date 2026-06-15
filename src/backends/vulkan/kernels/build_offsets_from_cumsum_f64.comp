@@ -1,0 +1,27 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_float64 : require
+
+// Build int32 offsets array from a Float64 cumulative sum:
+//   offsets[0] = 0
+//   offsets[i+1] = int(cumsum[i])  for i in [0, n)
+// Float64 prefix sums stay integer-exact up to 2^53, so repeat-interleave
+// totals above 2^24 (the Float32 exactness limit) no longer round and
+// mis-populate the per-row offsets. Single-thread sequential scan — n
+// (the dim along which repeat_interleave operates) is typically small.
+layout(local_size_x = 1) in;
+
+layout(set = 0, binding = 0) readonly  buffer CumSum  { float64_t cumsum[]; };
+layout(set = 0, binding = 1) writeonly buffer Offsets  { int       offsets[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint n;   // number of elements in cumsum (= dim_size)
+};
+
+void main() {
+    if (gl_GlobalInvocationID.x != 0) return;
+
+    offsets[0] = 0;
+    for (uint i = 0; i < n; ++i) {
+        offsets[i + 1] = int(cumsum[i]);
+    }
+}

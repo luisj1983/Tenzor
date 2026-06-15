@@ -301,7 +301,17 @@ auto nested_layer_norm(const NestedTensor& input, const Tensor& weight,
 auto nested_sum(const NestedTensor& input, int64_t dim,
                 bool keepdim) -> NestedTensor {
     if (dim < 0) dim += input.ndim();
+    if (dim == 0) {
+        // Layout is [batch(0), ragged(1), regular(2..)]; the batch axis is
+        // interleaved into values dim 0 and cannot be reduced by the regular-dim
+        // mapping (which would compute values_dim = -1 and silently reduce the
+        // last regular dim instead). Reject rather than return a wrong result.
+        throw std::runtime_error(
+            "nested_sum: reduction over the batch dim (dim=0) is not supported");
+    }
     if (dim != input.ragged_dim()) {
+        // values_dim maps an outer dim onto the packed values tensor; only valid
+        // for dims beyond the ragged axis (dim > ragged_dim, i.e. dim >= 2).
         int64_t values_dim = dim - 1;
         auto result = tenzor::sum(input.values(), values_dim, keepdim);
         return NestedTensor::from_jagged(result, input.offsets(),
@@ -329,12 +339,14 @@ auto nested_sum(const NestedTensor& input, int64_t dim,
     attrs.set(AttrKey::Keepdim, keepdim);
     std::vector<Tensor> inputs = {input.values(), input.offsets()};
     auto reduced = dispatch<OpId::NestedSum>(inputs, attrs)[0];
-    // The kernel always yields [B, *regular]; the public contract adds a unit
-    // axis when keepdim is requested so callers see [B, 1, *regular].
-    if (keepdim) {
-        reduced = reduced.unsqueeze(1);
-    }
-
+    // The kernel always yields [B, *regular]. The collapsed ragged dim is
+    // already represented by the unit offsets (one row per batch element), so
+    // we must NOT unsqueeze a [B, 1, *regular] axis before from_jagged:
+    // from_jagged derives regular_shape_ from values dims 1.., which would
+    // absorb the unit axis into regular_shape_ ([1, *regular]) and inflate
+    // ndim() by one, producing a structurally inconsistent NestedTensor. The
+    // keepdim contract (a unit ragged axis) is faithfully encoded by the unit
+    // offsets themselves for both keepdim=true and keepdim=false.
     auto new_offsets = make_unit_offsets(B, input.device());
     return NestedTensor::from_jagged(reduced, new_offsets,
                                      input.ragged_dim());
@@ -343,6 +355,12 @@ auto nested_sum(const NestedTensor& input, int64_t dim,
 auto nested_mean(const NestedTensor& input, int64_t dim,
                  bool keepdim) -> NestedTensor {
     if (dim < 0) dim += input.ndim();
+    if (dim == 0) {
+        // See nested_sum: the batch axis cannot be reduced via the regular-dim
+        // mapping; reject instead of silently reducing the last regular dim.
+        throw std::runtime_error(
+            "nested_mean: reduction over the batch dim (dim=0) is not supported");
+    }
     if (dim != input.ragged_dim()) {
         int64_t values_dim = dim - 1;
         auto result = tenzor::mean(input.values(), values_dim, keepdim);
@@ -370,10 +388,9 @@ auto nested_mean(const NestedTensor& input, int64_t dim,
     attrs.set(AttrKey::Keepdim, keepdim);
     std::vector<Tensor> inputs = {input.values(), input.offsets()};
     auto reduced = dispatch<OpId::NestedMean>(inputs, attrs)[0];
-    if (keepdim) {
-        reduced = reduced.unsqueeze(1);
-    }
-
+    // See nested_sum: do not unsqueeze a unit ragged axis before from_jagged.
+    // from_jagged would absorb it into regular_shape_, producing an inconsistent
+    // representation. The collapsed ragged dim is encoded by the unit offsets.
     auto new_offsets = make_unit_offsets(B, input.device());
     return NestedTensor::from_jagged(reduced, new_offsets,
                                      input.ragged_dim());
@@ -461,12 +478,26 @@ auto nested_attention(const NestedTensor& query, const NestedTensor& key,
             std::vector<Tensor> tril_inputs = {mask};
             OpAttributes tril_attrs;
             auto tril_mask = dispatch_single(OpId::Tril, tril_inputs, tril_attrs);
-            // scores = where(tril_mask > 0, scores, -inf)
-            auto neg_inf_tensor = tenzor::full({seq_len, seq_len}, -1e9,
-                                                scores.dtype(), scores.device());
+            // Mask out the upper triangle by *adding* a large negative bias to
+            // disallowed positions. Two correctness requirements:
+            //  1. Use a dtype-aware FINITE large-negative value. -1e9 overflows
+            //     the Float16 range and the float->half conversion yields -inf,
+            //     not a saturated finite value.
+            //  2. Apply the bias additively (scores + (1 - tril) * neg) rather
+            //     than multiplicatively (scores * tril + neg * (1 - tril)). The
+            //     multiplicative form computes neg * 0 at KEPT positions, which
+            //     is -inf * 0 = NaN for fp16 and poisons the whole softmax row.
+            double neg_bias = -1e9;
+            if (scores.dtype() == DType::Float16) {
+                neg_bias = -3e4;  // safely within fp16 finite range (~-65504)
+            } else if (scores.dtype() == DType::BFloat16) {
+                neg_bias = -1e9;  // bf16 has fp32-like exponent range; finite
+            }
             auto ones_sq = tenzor::ones({seq_len, seq_len},
                                          scores.dtype(), scores.device());
-            scores = scores * tril_mask + neg_inf_tensor * (ones_sq - tril_mask);
+            auto neg_inf_tensor = tenzor::full({seq_len, seq_len}, neg_bias,
+                                                scores.dtype(), scores.device());
+            scores = scores + neg_inf_tensor * (ones_sq - tril_mask);
         }
 
         // attn_weights = softmax(scores, dim=-1)

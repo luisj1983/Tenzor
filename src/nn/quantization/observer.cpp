@@ -31,13 +31,14 @@ auto MinMaxObserver::observe(const Tensor& tensor) -> void {
     // Helper: reshape to [num_channels, -1] for per-channel reduction
     auto per_channel_reduce = [&](const Tensor& t, bool is_min) -> Tensor {
         auto shape = t.shape();
-        int64_t num_channels = shape[axis_];
+        const int64_t ax = axis_ < 0 ? axis_ + t.ndim() : axis_;
+        int64_t num_channels = shape[ax];
         int64_t rest = t.numel() / num_channels;
         Tensor reshaped;
-        if (axis_ == 0) {
+        if (ax == 0) {
             reshaped = t.reshape({num_channels, rest});
         } else {
-            reshaped = t.transpose(0, axis_).contiguous().reshape({num_channels, rest});
+            reshaped = t.transpose(0, ax).contiguous().reshape({num_channels, rest});
         }
         return is_min ? tenzor::min(reshaped, 1, false) : tenzor::max(reshaped, 1, false);
     };
@@ -122,13 +123,14 @@ auto MovingAverageMinMaxObserver::observe(const Tensor& tensor) -> void {
     // Helper: reshape to [num_channels, -1] for per-channel reduction
     auto per_channel_reduce = [&](const Tensor& t, bool is_min) -> Tensor {
         auto shape = t.shape();
-        int64_t num_channels = shape[axis_];
+        const int64_t ax = axis_ < 0 ? axis_ + t.ndim() : axis_;
+        int64_t num_channels = shape[ax];
         int64_t rest = t.numel() / num_channels;
         Tensor reshaped;
-        if (axis_ == 0) {
+        if (ax == 0) {
             reshaped = t.reshape({num_channels, rest});
         } else {
-            reshaped = t.transpose(0, axis_).contiguous().reshape({num_channels, rest});
+            reshaped = t.transpose(0, ax).contiguous().reshape({num_channels, rest});
         }
         return is_min ? tenzor::min(reshaped, 1, false) : tenzor::max(reshaped, 1, false);
     };
@@ -386,7 +388,8 @@ auto PerChannelHistogramObserver::observe(const Tensor& tensor) -> void {
     }
 
     auto shape = tensor_f32.shape();
-    int64_t num_channels = shape[axis_];
+    const int64_t ax = axis_ < 0 ? axis_ + tensor_f32.ndim() : axis_;
+    int64_t num_channels = shape[ax];
 
     // Initialize observers if needed
     if (channel_observers_.empty()) {

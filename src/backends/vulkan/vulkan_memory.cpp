@@ -243,14 +243,33 @@ auto VulkanBackend::copy(void* dst, const void* src, size_t bytes,
         // for DeviceToDevice, either works
         const void* device_ptr = (kind == CopyKind::DeviceToHost) ? src : dst;
         auto it = allocations_.find(const_cast<void*>(device_ptr));
-        if (it == allocations_.end()) {
-            // Don't silently fall back to device 0 — on a multi-GPU host that
-            // would submit the staging copy on the wrong device's queue.
-            throw std::runtime_error(
-                "VulkanBackend::copy: device pointer not found in allocations; "
-                "cannot determine the owning device");
+        if (it != allocations_.end()) {
+            device_id = it->second.second;
+        } else {
+            // The pointer may be a view into the middle of an allocation
+            // (sliced / in-place target). Mirror getVulkanBufferAndOffset and
+            // memset: range-scan for the allocation whose [base, base+size)
+            // contains device_ptr and use its owning device.
+            const auto* view_ptr = static_cast<const char*>(device_ptr);
+            bool found = false;
+            for (const auto& [alloc_base, info] : allocations_) {
+                const auto* base = static_cast<const char*>(alloc_base);
+                size_t alloc_size = info.first;
+                if (view_ptr >= base && view_ptr < base + alloc_size) {
+                    device_id = info.second;
+                    found = true;
+                    break;
+                }
+            }
+            if (!found) {
+                // Don't silently fall back to device 0 — on a multi-GPU host
+                // that would submit the staging copy on the wrong device's
+                // queue.
+                throw std::runtime_error(
+                    "VulkanBackend::copy: device pointer not found in "
+                    "allocations; cannot determine the owning device");
+            }
         }
-        device_id = it->second.second;
     }
 
     // Lock per-device mutex for GPU command submission

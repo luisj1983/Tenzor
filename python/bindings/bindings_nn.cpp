@@ -24,6 +24,7 @@
 #include <tenzor/nn/layers/lazy_linear.hpp>
 #include <tenzor/nn/layers/lazy_conv.hpp>
 #include <tenzor/nn/layers/sync_batchnorm.hpp>
+#include <tenzor/distributed/process_group.hpp>  // ProcessGroupBase (SyncBatchNorm ctor)
 #include <tenzor/nn/layers/alibi.hpp>
 #include <tenzor/nn/layers/gqa_attention.hpp>
 #include <tenzor/nn/layers/drop_path.hpp>
@@ -809,6 +810,20 @@ void register_nn(py::module_& m) {
              py::arg("momentum") = 0.1,
              py::arg("affine") = true,
              py::arg("track_running_stats") = true)
+        // Non-deprecated ProcessGroup-based constructor (audit C1): keeps the
+        // gradient-side all-reduce inside the autograd graph, so
+        // create_graph=True / double-backward through SyncBatchNorm produces a
+        // real second-order graph even for world_size > 1. The legacy
+        // AllReduceFn ctor above degrades to a higher-order stub in that case.
+        .def(py::init<int64_t, std::shared_ptr<tenzor::distributed::ProcessGroupBase>,
+                      int, double, double, bool, bool>(),
+             py::arg("num_features"),
+             py::arg("process_group"),
+             py::arg("world_size") = 0,
+             py::arg("eps") = 1e-5,
+             py::arg("momentum") = 0.1,
+             py::arg("affine") = true,
+             py::arg("track_running_stats") = true)
         .def("__repr__", [](const tenzor::nn::SyncBatchNorm& self) {
             return "SyncBatchNorm(" + self.extra_repr() + ")";
         });
@@ -1069,15 +1084,21 @@ void register_nn(py::module_& m) {
         .def("__len__", [](const tenzor::nn::Sequential& self) {
             return self.get_submodules().size();
         }, "Return number of modules in sequence")
-        .def("__getitem__", [](tenzor::nn::Sequential& self, size_t idx) {
+        .def("__getitem__", [](tenzor::nn::Sequential& self, int64_t idx) {
             auto& submodules = self.get_submodules();
+            int64_t n = static_cast<int64_t>(submodules.size());
+            // PyTorch-style negative indexing: seq[-1] is the last module.
+            if (idx < 0) idx += n;
+            if (idx < 0 || idx >= n) {
+                throw py::index_error("Index out of range");
+            }
             std::string key = "module_" + std::to_string(idx);
             auto it = submodules.find(key);
             if (it == submodules.end()) {
                 throw py::index_error("Index out of range");
             }
             return it->second;
-        }, py::arg("index"), "Get module at index")
+        }, py::arg("index"), "Get module at index (supports negative indexing)")
         .def("append", [](tenzor::nn::Sequential& self, std::shared_ptr<tenzor::nn::Module> module) {
             self.add_module(module);
             return; // No chaining for append (PyTorch-compatible)
@@ -1102,7 +1123,15 @@ void register_nn(py::module_& m) {
             }
         }, py::arg("modules"), "Extend with a list of modules")
         .def("__len__", &tenzor::nn::ModuleList::size, "Return number of modules")
-        .def("__getitem__", &tenzor::nn::ModuleList::at, py::arg("index"), "Get module at index")
+        .def("__getitem__", [](tenzor::nn::ModuleList& self, int64_t idx) {
+            int64_t n = static_cast<int64_t>(self.size());
+            // PyTorch-style negative indexing: ml[-1] is the last module.
+            if (idx < 0) idx += n;
+            if (idx < 0 || idx >= n) {
+                throw py::index_error("ModuleList index out of range");
+            }
+            return self.at(static_cast<size_t>(idx));
+        }, py::arg("index"), "Get module at index (supports negative indexing)")
         .def("__iter__", [](tenzor::nn::ModuleList& self) {
             return py::make_iterator(self.begin(), self.end());
         }, py::keep_alive<0, 1>(), "Iterate over modules");
@@ -2671,10 +2700,38 @@ void register_nn(py::module_& m) {
         // their tensors and copy back after forward; when they did not, the
         // layer's internal stats are just allocated, updated, and dropped
         // when this binding returns.
-        tenzor::nn::BatchNorm2d layer(num_features, eps, momentum,
-                                      /*affine=*/false,
-                                      /*track_running_stats=*/true);
-        layer.train(training);
+        //
+        // Dispatch the transient layer by input rank so F.batch_norm matches
+        // PyTorch (2D/3D -> BatchNorm1d, 4D -> BatchNorm2d, 5D -> BatchNorm3d).
+        // Each forward_impl is rank-strict, so the wrong class would throw on a
+        // (N,C) MLP activation matrix. forward_impl / get_buffer / train are all
+        // on the Module base, so a base-class pointer drives all three uniformly.
+        const size_t in_rank = input.tensor().shape().size();
+        std::unique_ptr<tenzor::nn::Module> layer;
+        switch (in_rank) {
+            case 2:
+            case 3:
+                layer = std::make_unique<tenzor::nn::BatchNorm1d>(
+                    num_features, eps, momentum, /*affine=*/false,
+                    /*track_running_stats=*/true);
+                break;
+            case 4:
+                layer = std::make_unique<tenzor::nn::BatchNorm2d>(
+                    num_features, eps, momentum, /*affine=*/false,
+                    /*track_running_stats=*/true);
+                break;
+            case 5:
+                layer = std::make_unique<tenzor::nn::BatchNorm3d>(
+                    num_features, eps, momentum, /*affine=*/false,
+                    /*track_running_stats=*/true);
+                break;
+            default:
+                throw std::invalid_argument(
+                    "F.batch_norm: input must be 2D (N,C), 3D (N,C,L), "
+                    "4D (N,C,H,W) or 5D (N,C,D,H,W); got rank " +
+                    std::to_string(in_rank) + ".");
+        }
+        layer->train(training);
 
         // Helper: in-place byte copy from src into dst, casting through
         // dst.dtype() / dst.device() as needed. Mirrors the semantics of
@@ -2712,19 +2769,19 @@ void register_nn(py::module_& m) {
             // buffer (Float32/CPU at construction) matches what the layer
             // expects throughout forward_impl. Device / dtype conversion is
             // handled inside copy_into.
-            copy_into(layer.get_buffer("running_mean")->tensor(), *running_mean);
-            copy_into(layer.get_buffer("running_var")->tensor(), *running_var);
+            copy_into(layer->get_buffer("running_mean")->tensor(), *running_mean);
+            copy_into(layer->get_buffer("running_var")->tensor(), *running_var);
         }
 
-        auto y = layer.forward_impl(input);
+        auto y = layer->forward_impl(input);
 
         if (has_stats && training) {
             // The layer reassigned its internal buffers to the updated
             // stats (and stored them as Float32). Mirror them back into the
             // caller's tensors in-place so PyTorch's semantic of "running
             // stats are updated under the user's eyes" holds.
-            copy_into(*running_mean, layer.get_buffer("running_mean")->tensor());
-            copy_into(*running_var, layer.get_buffer("running_var")->tensor());
+            copy_into(*running_mean, layer->get_buffer("running_mean")->tensor());
+            copy_into(*running_var, layer->get_buffer("running_var")->tensor());
         }
 
         return apply_affine_channel_first(y, weight, bias);
@@ -2780,8 +2837,32 @@ void register_nn(py::module_& m) {
             std::optional<tenzor::Variable> bias) -> tenzor::Variable {
         // Y.24: ignore the legacy ``affine`` bool — caller controls affine
         // explicitly by supplying ``weight`` / ``bias``.
-        tenzor::nn::InstanceNorm2d layer(num_features, eps, /*affine=*/false);
-        auto y = layer.forward_impl(input);
+        //
+        // Dispatch the transient layer by input rank so F.instance_norm matches
+        // PyTorch (3D (N,C,L) -> InstanceNorm1d, 4D -> InstanceNorm2d,
+        // 5D (N,C,D,H,W) -> InstanceNorm3d). Each forward_impl is rank-strict, so
+        // a 3D temporal feature map would otherwise throw against the 4D layer.
+        const size_t in_rank = input.tensor().shape().size();
+        std::unique_ptr<tenzor::nn::Module> layer;
+        switch (in_rank) {
+            case 3:
+                layer = std::make_unique<tenzor::nn::InstanceNorm1d>(
+                    num_features, eps, /*affine=*/false);
+                break;
+            case 4:
+                layer = std::make_unique<tenzor::nn::InstanceNorm2d>(
+                    num_features, eps, /*affine=*/false);
+                break;
+            case 5:
+                layer = std::make_unique<tenzor::nn::InstanceNorm3d>(
+                    num_features, eps, /*affine=*/false);
+                break;
+            default:
+                throw std::invalid_argument(
+                    "F.instance_norm: input must be 3D (N,C,L), 4D (N,C,H,W) "
+                    "or 5D (N,C,D,H,W); got rank " + std::to_string(in_rank) + ".");
+        }
+        auto y = layer->forward_impl(input);
         return apply_affine_channel_first(y, weight, bias);
     }, py::arg("input"), py::arg("num_features"),
        py::arg("eps") = 1e-5, py::arg("affine") = false,

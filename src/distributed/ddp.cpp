@@ -488,11 +488,11 @@ auto DistributedDataParallel::all_reduce_bucket_async(
 
     for (auto& grp : bucket.dtype_groups) {
         // Launch NCCL all-reduce asynchronously on this bucket's
-        // dedicated communication stream.  Use ReduceOp::AVG so NCCL
-        // (ncclAvg) fuses the divide-by-world_size into the kernel; the
-        // sync (CPU) path divides manually instead since some backends
-        // don't support AVG.
-        pg_->all_reduce_async(grp.flat, ReduceOp::AVG, this_bucket_stream);
+        // dedicated communication stream.  ReduceOp::AVG maps to ncclSum
+        // (to_nccl_reduce_op) and all_reduce_async does NOT divide, so the
+        // flat buffer holds an undivided SUM; sync_comm() divides by
+        // world_size when unpacking, mirroring the synchronous path.
+        pg_->all_reduce_async(grp.flat, ReduceOp::SUM, this_bucket_stream);
     }
 
     // Record a CUDA event on THIS bucket's stream after its
@@ -577,12 +577,17 @@ auto DistributedDataParallel::sync_comm() -> void {
     }
 
     // QQ.13: scatter each bucket's reduced flat buffer back into its
-    // per-parameter grads.  The all-reduce used ReduceOp::AVG (NCCL
-    // ncclAvg) so the buffer already holds the averaged gradient — pass
-    // scale=1.0 to unpack_bucket_flat.
+    // per-parameter grads.  The async all-reduce maps ReduceOp::AVG to
+    // ncclSum (to_nccl_reduce_op) and NCCLProcessGroup::all_reduce_async
+    // deliberately does NOT divide (it cannot do tensor math safely on an
+    // async stream), so the buffer holds an undivided SUM. Divide here by
+    // world_size to obtain the averaged gradient, matching the synchronous
+    // path's scale = 1.0/ws in all_reduce_bucket().
+    const int ws = pg_->world_size();
+    const double scale = (ws > 1) ? (1.0 / static_cast<double>(ws)) : 1.0;
     for (auto& bucket : buckets_) {
         if (!bucket.dtype_groups.empty()) {
-            unpack_bucket_flat(bucket, /*scale=*/1.0);
+            unpack_bucket_flat(bucket, scale);
         }
     }
 

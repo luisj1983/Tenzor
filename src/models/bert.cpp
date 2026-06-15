@@ -196,61 +196,14 @@ BertPooler::BertPooler(const BertConfig& config) {
 }
 
 auto BertPooler::forward_impl(const Variable& hidden_states) -> Variable {
-    // Extract [CLS] token (first token) representation
-    // hidden_states: [batch, seq_len, hidden_size]
-    // We need to extract the first token while preserving gradients
-
-    auto shape = hidden_states.shape();
-    int64_t batch_size = shape[0];
-    int64_t seq_len = shape[1];
-    int64_t hidden_size = shape[2];
-
-    // Approach: Use reshape to reorganize then use autograd-aware operations
-    // Reshape to [batch, seq_len, hidden_size] -> [batch * seq_len, hidden_size]
-    auto reshaped = tenzor::reshape(hidden_states, {batch_size * seq_len, hidden_size});
-
-    // Create a mask tensor for selecting first tokens: [batch * seq_len]
-    // We want indices [0, seq_len, 2*seq_len, ..., (batch-1)*seq_len]
-    // Instead of using indexing, we'll create a weighted sum where only first tokens have weight 1
-
-    // Alternative: Manually build a selection matrix and use matmul
-    // Create selection matrix [batch, batch * seq_len] where each row has 1 at position b*seq_len
-    // Use the same dtype as hidden_states for consistency
-    auto dtype = hidden_states.tensor().dtype();
-    auto target_device = hidden_states.tensor().device();
-
-    // Create on CPU for data filling, then transfer to device
-    Tensor selection_matrix_cpu(std::vector<int64_t>{batch_size, batch_size * seq_len},
-                                dtype, Device::cpu());
-    selection_matrix_cpu.zero_();
-
-    // Fill the selection matrix with appropriate dtype
-    if (dtype == DType::Float32) {
-        float* sel_data = selection_matrix_cpu.data<float>();
-        for (int64_t b = 0; b < batch_size; ++b) {
-            sel_data[b * (batch_size * seq_len) + b * seq_len] = 1.0f;
-        }
-    } else if (dtype == DType::Float64) {
-        double* sel_data = selection_matrix_cpu.data<double>();
-        for (int64_t b = 0; b < batch_size; ++b) {
-            sel_data[b * (batch_size * seq_len) + b * seq_len] = 1.0;
-        }
-    } else if (dtype == DType::Float16) {
-        // Float16 data needs special handling
-        auto* sel_data = selection_matrix_cpu.data<Float16>();
-        Float16 one_f16(1.0f);
-        for (int64_t b = 0; b < batch_size; ++b) {
-            sel_data[b * (batch_size * seq_len) + b * seq_len] = one_f16;
-        }
-    }
-
-    // Transfer to target device if needed
-    Tensor selection_matrix = (target_device == Device::cpu()) ?
-                               selection_matrix_cpu : selection_matrix_cpu.to(target_device);
-
-    // Now: selection_matrix @ reshaped gives us [batch, hidden_size] with first tokens
-    Variable selection_var(selection_matrix, false);  // No grad needed for constant matrix
-    auto cls_token = tenzor::matmul(selection_var, reshaped);  // [batch, hidden_size]
+    // Extract the [CLS] token (first token) directly via autograd-aware
+    // slice + squeeze on the sequence dim, matching AlbertPooler. This avoids
+    // the old O(batch^2 * seq_len) [batch, batch*seq_len] selection-matrix
+    // matmul, preserves the grad_fn chain, and works for every dtype (the old
+    // selection-matrix fill only handled Float32/Float64/Float16, producing an
+    // all-zero selector — and all-zero pooled output — for BFloat16).
+    // hidden_states: [batch, seq_len, hidden_size] -> [batch, hidden_size]
+    auto cls_token = tenzor::squeeze(tenzor::slice(hidden_states, 1, 0, 1), 1);
 
     // Apply linear transformation
     auto pooled = dense_->forward(cls_token);
@@ -444,56 +397,14 @@ auto BertForQuestionAnswering::forward(const Variable& input_ids,
     // Predict start and end logits
     auto logits = qa_outputs_->forward(sequence_output);
 
-    // Split into start and end logits while preserving gradients
-    // logits: [batch, seq_len, 2]
-    auto shape = logits.shape();
-    int64_t batch_size = shape[0];
-    int64_t seq_len = shape[1];
-
-    // Reshape to [batch * seq_len, 2]
-    auto reshaped = tenzor::reshape(logits, {batch_size * seq_len, 2});
-
-    // Create selection matrices to extract start and end logits
-    // Use the same dtype as logits for consistency
-    auto dtype = logits.tensor().dtype();
-    auto target_device = logits.tensor().device();
-
-    // Start logits: multiply by [1, 0] - create on CPU first
-    Tensor start_selector_cpu(std::vector<int64_t>{2, 1}, dtype, Device::cpu());
-    start_selector_cpu.zero_();
-    if (dtype == DType::Float32) {
-        start_selector_cpu.data<float>()[0] = 1.0f;
-    } else if (dtype == DType::Float64) {
-        start_selector_cpu.data<double>()[0] = 1.0;
-    } else if (dtype == DType::Float16) {
-        start_selector_cpu.data<Float16>()[0] = Float16(1.0f);
-    }
-    Tensor start_selector = (target_device == Device::cpu()) ?
-                            start_selector_cpu : start_selector_cpu.to(target_device);
-
-    // End logits: multiply by [0, 1] - create on CPU first
-    Tensor end_selector_cpu(std::vector<int64_t>{2, 1}, dtype, Device::cpu());
-    end_selector_cpu.zero_();
-    if (dtype == DType::Float32) {
-        end_selector_cpu.data<float>()[1] = 1.0f;
-    } else if (dtype == DType::Float64) {
-        end_selector_cpu.data<double>()[1] = 1.0;
-    } else if (dtype == DType::Float16) {
-        end_selector_cpu.data<Float16>()[1] = Float16(1.0f);
-    }
-    Tensor end_selector = (target_device == Device::cpu()) ?
-                          end_selector_cpu : end_selector_cpu.to(target_device);
-
-    // Use matmul to select: [batch*seq_len, 2] @ [2, 1] = [batch*seq_len, 1]
-    Variable start_selector_var(start_selector, false);
-    Variable end_selector_var(end_selector, false);
-
-    auto start_flat = tenzor::matmul(reshaped, start_selector_var);  // [batch*seq_len, 1]
-    auto end_flat = tenzor::matmul(reshaped, end_selector_var);      // [batch*seq_len, 1]
-
-    // Reshape back to [batch, seq_len]
-    auto start_logits = tenzor::reshape(start_flat, {batch_size, seq_len});
-    auto end_logits = tenzor::reshape(end_flat, {batch_size, seq_len});
+    // Split into start and end logits while preserving gradients.
+    // logits: [batch, seq_len, 2]. Extract channel 0 (start) and channel 1
+    // (end) via autograd-aware slice + squeeze on the last dim. This preserves
+    // the grad_fn chain and sidesteps the old selection-matrix path, which only
+    // filled Float32/Float64/Float16 selectors and therefore produced an
+    // all-zero selector (and all-zero logits) for BFloat16.
+    auto start_logits = tenzor::squeeze(tenzor::slice(logits, 2, 0, 1), 2);  // [batch, seq_len]
+    auto end_logits   = tenzor::squeeze(tenzor::slice(logits, 2, 1, 2), 2);  // [batch, seq_len]
 
     // Call forward post-hooks (enables CPU-start offloading)
     call_forward_post_hooks();

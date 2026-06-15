@@ -48,14 +48,14 @@ auto GradScaler::validate_config_() const -> void {
     }
 }
 
-// audit-10 OO.7: detect nested `scaler.scale(loss)` calls issued from inside
-// the closure passed to `scaler.step(opt, closure)`.  The outer step() runs
-// unscale_() on the optimizer before invoking the closure; that sets the
-// per-optimizer flag in `unscaled_for_`.  If the closure now calls
-// scale(loss) and backward()s through it, the resulting scaled grads are
-// added on top of the already-unscaled ones, silently corrupting the step.
-// PyTorch raises a RuntimeError in this scenario; do the same here so the
-// caller gets a fail-loud diagnostic instead of a numerically wrong update.
+// audit-10 OO.7: detect a scale(loss) call issued while an optimizer is still
+// mid-unscale.  A direct unscale_(optimizer) sets the per-optimizer flag in
+// `unscaled_for_`; that flag is only cleared by the matching step()/update()
+// cycle.  If the caller instead calls scale(loss) again (and backward()s
+// through it) before stepping, the resulting scaled grads are added on top of
+// the already-unscaled ones, silently corrupting the step.  PyTorch raises a
+// RuntimeError in this scenario; do the same here so the caller gets a
+// fail-loud diagnostic instead of a numerically wrong update.
 auto GradScaler::scale(const Variable& loss) -> Variable {
     if (!unscaled_for_.empty()) {
         throw std::runtime_error(
@@ -86,14 +86,14 @@ auto GradScaler::unscale_(optim::Optimizer& optimizer) -> void {
     }
 
     // audit-7 FF.16: scope the F32 unscaled-grad side-table to *this*
-    // unscale_() invocation.  The side-table is keyed by raw param pointer,
-    // but a GradScaler instance may be shared across multiple optimizers
-    // (or the same optimizer may have param_groups added/removed between
-    // steps).  Relying on the trailing clear in step() leaves stale entries
-    // visible to check_inf_nan_() if a caller invokes unscale_() directly
-    // for a different optimizer without an intervening step().  Clear here
-    // before rebuilding the table for the current optimizer's params.
-    f32_unscaled_grads_.clear();
+    // optimizer's sub-map. The side-table is keyed per (optimizer, param):
+    // a GradScaler instance may be shared across multiple optimizers, so
+    // clearing the whole map here would wipe another optimizer's probe
+    // entries (which its later step() still needs) and force check_inf_nan_()
+    // back onto the saturated half-precision grad. Clear only THIS optimizer's
+    // sub-map before rebuilding it for the current params.
+    auto& opt_unscaled = f32_unscaled_grads_[&optimizer];
+    opt_unscaled.clear();
 
     // U.8: build inv_scale in Float32. For scale = 2^17 the F16
     // representation of 1/scale ≈ 7.6e-6 is denormal (rounds to zero),
@@ -131,7 +131,7 @@ auto GradScaler::unscale_(optim::Optimizer& optimizer) -> void {
             // that fit in F32 yet round to inf on cast-back must NOT
             // trigger a spurious overflow event — those should be detected
             // against the pre-cast F32 representation here.
-            f32_unscaled_grads_[param.get()] = unscaled;
+            opt_unscaled[param.get()] = unscaled;
             param->set_grad(unscaled.to(grad_dt));
         } else {
             auto inv_scale = full({1}, inv_scale_f32,
@@ -149,6 +149,11 @@ auto GradScaler::check_inf_nan_(const optim::Optimizer& optimizer) const -> bool
     // pattern), instead of a D2H copy + implicit stream sync per parameter which
     // serialized the step on many tiny transfers for large models.
     std::optional<Tensor> found_inf;
+    // Per-optimizer probe sub-map (may be absent if no F16/BF16 params were
+    // unscaled for this optimizer).
+    auto opt_it = f32_unscaled_grads_.find(const_cast<optim::Optimizer*>(&optimizer));
+    const std::unordered_map<Variable*, Tensor>* opt_unscaled =
+        (opt_it != f32_unscaled_grads_.end()) ? &opt_it->second : nullptr;
     for (const auto& param : optimizer.parameters()) {
         if (!param->has_grad()) {
             continue;
@@ -165,10 +170,14 @@ auto GradScaler::check_inf_nan_(const optim::Optimizer& optimizer) const -> bool
         // post-unscale value — instead. A finite F32 unscaled grad should
         // not trigger backoff just because its half-precision representation
         // saturated.
-        auto it = f32_unscaled_grads_.find(param.get());
-        const Tensor& probe = (it != f32_unscaled_grads_.end())
-                                  ? it->second
-                                  : *grad;
+        const Tensor* probe_ptr = &*grad;  // grad.has_value() guaranteed above
+        if (opt_unscaled) {
+            auto it = opt_unscaled->find(param.get());
+            if (it != opt_unscaled->end()) {
+                probe_ptr = &it->second;
+            }
+        }
+        const Tensor& probe = *probe_ptr;
 
         // has_inf_nan stays on device; OR the flags together on-device.
         Tensor flag = has_inf_nan(probe).to(DType::Float32);
@@ -200,7 +209,7 @@ auto GradScaler::step(optim::Optimizer& optimizer) -> bool {
         // Skip optimizer step due to overflow.  Clear *only this optimizer's*
         // unscale flag; siblings sharing the scaler keep their state intact.
         unscaled_for_.erase(&optimizer);
-        f32_unscaled_grads_.clear();  // Y.32: drop the side-table.
+        f32_unscaled_grads_.erase(&optimizer);  // Y.32: drop only this opt's probes.
         return false;
     }
 
@@ -209,7 +218,7 @@ auto GradScaler::step(optim::Optimizer& optimizer) -> bool {
 
     // Reset unscale flag for this optimizer; siblings unaffected (GG.6).
     unscaled_for_.erase(&optimizer);
-    f32_unscaled_grads_.clear();  // Y.32: side-table only lives for one step.
+    f32_unscaled_grads_.erase(&optimizer);  // Y.32: this opt's probes live one step.
 
     return true;
 }
@@ -304,12 +313,16 @@ auto GradScaler::clip_grad_norm_(optim::Optimizer& optimizer, double max_norm, d
     // introduced clipped-to-inf value. Re-sync the side-table from the
     // post-clip grad so check_inf_nan_ sees the same numbers the optimizer
     // will step against.
-    for (auto& param : optimizer.parameters()) {
-        if (!param || !param->has_grad()) continue;
-        if (f32_unscaled_grads_.find(param.get()) == f32_unscaled_grads_.end()) {
-            continue;
+    auto opt_it = f32_unscaled_grads_.find(&optimizer);
+    if (opt_it != f32_unscaled_grads_.end()) {
+        auto& opt_unscaled = opt_it->second;
+        for (auto& param : optimizer.parameters()) {
+            if (!param || !param->has_grad()) continue;
+            if (opt_unscaled.find(param.get()) == opt_unscaled.end()) {
+                continue;
+            }
+            opt_unscaled[param.get()] = param->grad().value().to(DType::Float32);
         }
-        f32_unscaled_grads_[param.get()] = param->grad().value().to(DType::Float32);
     }
 
     return result;
@@ -330,12 +343,16 @@ auto GradScaler::clip_grad_value_(optim::Optimizer& optimizer, double clip_value
 
     // BB.13: re-sync the F32 side-table after the in-place value clip — see
     // the comment in clip_grad_norm_ above for the rationale.
-    for (auto& param : optimizer.parameters()) {
-        if (!param || !param->has_grad()) continue;
-        if (f32_unscaled_grads_.find(param.get()) == f32_unscaled_grads_.end()) {
-            continue;
+    auto opt_it = f32_unscaled_grads_.find(&optimizer);
+    if (opt_it != f32_unscaled_grads_.end()) {
+        auto& opt_unscaled = opt_it->second;
+        for (auto& param : optimizer.parameters()) {
+            if (!param || !param->has_grad()) continue;
+            if (opt_unscaled.find(param.get()) == opt_unscaled.end()) {
+                continue;
+            }
+            opt_unscaled[param.get()] = param->grad().value().to(DType::Float32);
         }
-        f32_unscaled_grads_[param.get()] = param->grad().value().to(DType::Float32);
     }
 }
 

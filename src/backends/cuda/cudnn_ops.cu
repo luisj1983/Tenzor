@@ -388,6 +388,46 @@ auto to_memory_format_kernel(const Tensor& input, MemoryFormat format, void* str
         return output;
     }
 
+    // The packed-layout conversion kernels below decode a linear index against
+    // the *implied* NCHW/NHWC packing and read input[idx] directly, ignoring
+    // strides. They are only correct when the source genuinely has that packed
+    // layout. If the input is neither NHWC-strided nor fully contiguous (e.g. a
+    // permute()/transpose view), both flags above are false and feeding such a
+    // view to nhwc_to_nchw_kernel emits garbage (stride-from-shape bug). Coerce
+    // the input to a packed layout first.
+    if (!input_is_nhwc && !input_is_nchw) {
+        if (format != MemoryFormat::ChannelsLast) {
+            // Target Contiguous (NCHW): a contiguous materialization of the
+            // logical [N,C,H,W] tensor already *is* the desired output.
+            return input.contiguous();
+        }
+        // Target ChannelsLast: materialize a contiguous NCHW copy so the
+        // NCHW -> NHWC kernel reads a valid packed source, then fall through.
+        Tensor contig = input.contiguous();
+        const int64_t total = N * C * H * W;
+        if (contig.dtype() == DType::Float32) {
+            auto [grid_size, block_size] = optimal_launch_config(nchw_to_nhwc_kernel<float>, total);
+            nchw_to_nhwc_kernel<float><<<grid_size, block_size, 0, stream>>>(
+                contig.data<float>(), output.data<float>(), N, C, H, W);
+        } else if (contig.dtype() == DType::Float16) {
+            auto [grid_size, block_size] = optimal_launch_config(nchw_to_nhwc_kernel<Float16>, total);
+            nchw_to_nhwc_kernel<Float16><<<grid_size, block_size, 0, stream>>>(
+                contig.data<Float16>(), output.data<Float16>(), N, C, H, W);
+        } else if (contig.dtype() == DType::Float64) {
+            auto [grid_size, block_size] = optimal_launch_config(nchw_to_nhwc_kernel<double>, total);
+            nchw_to_nhwc_kernel<double><<<grid_size, block_size, 0, stream>>>(
+                contig.data<double>(), output.data<double>(), N, C, H, W);
+        } else if (contig.dtype() == DType::BFloat16) {
+            auto [grid_size, block_size] = optimal_launch_config(nchw_to_nhwc_kernel<BFloat16>, total);
+            nchw_to_nhwc_kernel<BFloat16><<<grid_size, block_size, 0, stream>>>(
+                contig.data<BFloat16>(), output.data<BFloat16>(), N, C, H, W);
+        } else {
+            throw std::runtime_error("to_memory_format_kernel: unsupported dtype for ChannelsLast");
+        }
+        CUDA_CHECK(cudaGetLastError());
+        return output;
+    }
+
     const int64_t total = N * C * H * W;
 
     // Choose conversion direction based on actual input layout

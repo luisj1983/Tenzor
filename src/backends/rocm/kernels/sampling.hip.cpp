@@ -337,11 +337,21 @@ auto multinomial_kernel(const Tensor& probs, int64_t num_samples,
     int64_t batch_size = input.shape()[0];
     int64_t num_categories = input.shape()[1];
 
+    // Defensive guard: without replacement, topk(num_samples) would run out of
+    // candidates and leave best_pos == -1, emitting -1 indices that later index
+    // probability rows out of bounds. Fail loudly instead. (The op layer should
+    // also validate, but this keeps the backend safe on its own.)
+    if (!replacement && num_samples > num_categories) {
+        throw std::invalid_argument(
+            "multinomial: num_samples (" + std::to_string(num_samples) +
+            ") cannot exceed the number of categories (" +
+            std::to_string(num_categories) + ") when replacement=false");
+    }
+
     uint64_t seed = std::chrono::high_resolution_clock::now().time_since_epoch().count();
 
     if (!replacement) {
         // Gumbel top-k trick: log(p_i) + -log(-log(U_i)), then sort descending.
-        // num_samples must be ≤ num_categories; caller is expected to validate.
         Tensor keys({batch_size, num_categories}, DType::Float32, input.device());
         int threads = 256;
         int blocks_cat = static_cast<int>((num_categories + threads - 1) / threads);

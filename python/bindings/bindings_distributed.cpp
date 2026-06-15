@@ -9,6 +9,7 @@
 #include <pybind11/stl.h>
 
 #include <tenzor/distributed/distributed.hpp>
+#include <tenzor/distributed/process_group.hpp>  // ProcessGroupBase (abstract)
 #include <tenzor/distributed/ddp.hpp>
 #include <tenzor/distributed/fsdp.hpp>
 #include <tenzor/distributed/gradient_compression.hpp>
@@ -77,6 +78,27 @@ void register_distributed(py::module_& m) {
         "Broadcast tensor from source rank",
         py::arg("tensor"), py::arg("src_rank") = 0,
         py::call_guard<py::gil_scoped_release>());
+
+    // Abstract autograd-aware process-group interface. Concrete backends
+    // (NCCL/MPI/Gloo) subclass this; it is exposed as a holder type (no
+    // constructor) so a ``shared_ptr<ProcessGroupBase>`` can cross the Python
+    // boundary — e.g. into the ProcessGroup-based SyncBatchNorm constructor,
+    // which keeps the gradient-side all-reduce inside the autograd graph for
+    // correct double-backward.
+    py::class_<tenzor::distributed::ProcessGroupBase,
+               std::shared_ptr<tenzor::distributed::ProcessGroupBase>>(
+        distributed, "ProcessGroupBase",
+        "Abstract autograd-aware process group (NCCL/MPI/Gloo backends).")
+        .def_property_readonly("rank", &tenzor::distributed::ProcessGroupBase::rank)
+        .def_property_readonly("world_size", &tenzor::distributed::ProcessGroupBase::world_size)
+        .def("all_reduce", &tenzor::distributed::ProcessGroupBase::all_reduce,
+             py::arg("tensor"), py::arg("op") = tenzor::distributed::ReduceOp::SUM,
+             py::call_guard<py::gil_scoped_release>())
+        .def("broadcast", &tenzor::distributed::ProcessGroupBase::broadcast,
+             py::arg("tensor"), py::arg("src_rank"),
+             py::call_guard<py::gil_scoped_release>())
+        .def("barrier", &tenzor::distributed::ProcessGroupBase::barrier,
+             py::call_guard<py::gil_scoped_release>());
 
     py::class_<tenzor::distributed::ProcessGroup, std::shared_ptr<tenzor::distributed::ProcessGroup>>(
         distributed, "ProcessGroup")

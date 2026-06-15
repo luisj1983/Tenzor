@@ -25,6 +25,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <new>
+#include <optional>
 #include <fstream>
 #include <sstream>
 #include <stdexcept>
@@ -149,6 +150,11 @@ struct LiteRuntime::Impl {
     //     forward() call. Phase 5 can swap this for an mmap-backed span.
     std::vector<TensorValue> tensor_values_by_id;  ///< indexed by tensor_id
     std::vector<uint8_t> weight_blob;
+
+    // Inf-E1: parsed MMPL plan, retained so the loaded placement layout is
+    // available to (and validated against) the runtime rather than computed
+    // and discarded. Empty when the file shipped no MMPL section.
+    std::optional<MmplPlan> memory_plan;
 };
 
 LiteRuntime::~LiteRuntime() = default;
@@ -188,9 +194,24 @@ namespace {
 // keep their default-constructed (Intermediate) TensorValue.
 auto index_tensor_values(const std::vector<TensorValue>& tvs)
     -> std::vector<TensorValue> {
+    // tensor_id is a signed int16_t read verbatim from an untrusted file.
+    // A negative id would wrap the static_cast<size_t> below into a huge value
+    // (OOB write); if every id were negative, max_id would stay -1, sizing the
+    // table to 0 and making any write OOB. Validate up front.
     int16_t max_id = -1;
-    for (const auto& tv : tvs) max_id = std::max(max_id, tv.tensor_id);
-    std::vector<TensorValue> out(static_cast<size_t>(max_id + 1));
+    for (const auto& tv : tvs) {
+        if (tv.tensor_id < 0) {
+            throw std::runtime_error(
+                "LiteRuntime: negative tensor_id (" +
+                std::to_string(tv.tensor_id) + ") in model");
+        }
+        max_id = std::max(max_id, tv.tensor_id);
+    }
+    if (max_id < 0) {
+        // No tensor values: return an empty table.
+        return {};
+    }
+    std::vector<TensorValue> out(static_cast<size_t>(max_id) + 1);
     for (size_t i = 0; i < out.size(); ++i) {
         out[i].tensor_id = static_cast<int16_t>(i);
     }
@@ -266,15 +287,45 @@ auto LiteRuntime::load(const void* data, size_t size) -> std::unique_ptr<LiteRun
     // Inf-E4: when the file ships with an MMPL section, size the arena
     // exactly from the precomputed plan. v1 files (no MMPL) keep the
     // pre-Inf-E behaviour: kernels allocate their own outputs from heap.
+    //
+    // NOTE: LiteGraph::execute does NOT yet place node outputs into this
+    // arena — kernels still heap-allocate their own outputs via global
+    // dispatch (a true arena-backed execution path requires the dispatch
+    // layer to write into caller-provided buffers, tracked separately). To
+    // ensure the plan is not silently computed-and-ignored, the parsed plan
+    // is retained on Impl and validated here against the graph: every
+    // placement must reference a real pool and lie within its bounds, so a
+    // corrupt or mismatched MMPL fails loudly at load rather than being
+    // dead weight.
     if (model.memory_plan) {
+        const MmplPlan& plan = *model.memory_plan;
+        for (const auto& p : plan.placements) {
+            if (static_cast<size_t>(p.pool_index) >= plan.pool_sizes.size()) {
+                throw std::runtime_error(
+                    "LiteRuntime::load: MMPL placement for tensor_id " +
+                    std::to_string(p.tensor_id) +
+                    " references pool_index " + std::to_string(p.pool_index) +
+                    " but the plan declares only " +
+                    std::to_string(plan.pool_sizes.size()) + " pool(s)");
+            }
+            const uint64_t pool_bytes = plan.pool_sizes[p.pool_index];
+            if (p.offset > pool_bytes) {
+                throw std::runtime_error(
+                    "LiteRuntime::load: MMPL placement for tensor_id " +
+                    std::to_string(p.tensor_id) + " offset " +
+                    std::to_string(p.offset) + " exceeds pool size " +
+                    std::to_string(pool_bytes));
+            }
+        }
+
         std::vector<size_t> pool_sizes;
-        pool_sizes.reserve(model.memory_plan->pool_sizes.size());
-        for (uint64_t s : model.memory_plan->pool_sizes) {
+        pool_sizes.reserve(plan.pool_sizes.size());
+        for (uint64_t s : plan.pool_sizes) {
             pool_sizes.push_back(static_cast<size_t>(s));
         }
         runtime->impl_->allocator = std::make_unique<LiteAllocator>(
-            pool_sizes,
-            static_cast<size_t>(model.memory_plan->alignment));
+            pool_sizes, static_cast<size_t>(plan.alignment));
+        runtime->impl_->memory_plan = plan;
     } else {
         runtime->impl_->allocator = std::make_unique<LiteAllocator>(
             std::vector<size_t>{}, 64);
@@ -359,7 +410,13 @@ auto LiteRuntime::forward(const std::vector<LiteTensor>& inputs) -> std::vector<
     if (!impl_->tensor_values_by_id.empty() && !impl_->weight_blob.empty()) {
         for (const auto& tv : impl_->tensor_values_by_id) {
             if (tv.source != TensorSource::Weight) continue;
-            if (tv.weight_offset + tv.weight_nbytes > impl_->weight_blob.size()) {
+            // Both operands are uint64_t read verbatim from an untrusted file;
+            // the 64-bit add `offset + nbytes` can wrap and pass a naive check,
+            // then `data() + offset` yields a wild OOB pointer. Use the
+            // overflow-safe form (matching read_pod in model_format.cpp).
+            const size_t blob_size = impl_->weight_blob.size();
+            if (tv.weight_offset > blob_size ||
+                tv.weight_nbytes > blob_size - tv.weight_offset) {
                 throw std::runtime_error(
                     "LiteRuntime::forward: weight for tensor_id " +
                     std::to_string(tv.tensor_id) +

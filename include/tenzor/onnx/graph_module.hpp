@@ -80,8 +80,12 @@ public:
     void set_output_names(std::vector<std::string> names);
 
     /**
-     * @brief Execute the graph.
+     * @brief Execute the graph with a single input.
      * Input variable's tensor is bound to the first input name.
+     *
+     * @note This single-Variable entry point can only seed input_names_[0]. A
+     *       graph declaring more than one input throws here — supply all inputs
+     *       via the std::vector<Variable> overload of forward_multi() instead.
      *
      * @note nn::Module::forward returns a single Variable, so this returns only
      *       the FIRST output (output_names_[0]). For multi-output ONNX models,
@@ -96,8 +100,21 @@ public:
      * Unlike forward_impl (which can only return one Variable), this returns one
      * Variable per name in set_output_names(), in declaration order. Use this
      * for multi-output models.
+     *
+     * @note Single-input convenience overload — binds only input_names_[0] and
+     *       throws if the graph declares more than one input. Use the
+     *       std::vector<Variable> overload for multi-input graphs.
      */
     auto forward_multi(const Variable& input) -> std::vector<Variable>;
+
+    /**
+     * @brief Execute the graph with multiple inputs, returning ALL outputs.
+     *
+     * Binds inputs[i] to input_names_[i] in order. The number of supplied
+     * inputs must exactly match the number of declared input names.
+     */
+    auto forward_multi(const std::vector<Variable>& inputs)
+        -> std::vector<Variable>;
 
     // Override the virtual repr customization point on nn::Module so this is
     // surfaced polymorphically through an nn::Module& (the base has no virtual
@@ -107,6 +124,16 @@ public:
     auto num_ops() const -> size_t { return ops_.size(); }
 
 private:
+    /**
+     * @brief Execute every op once and return the populated value map.
+     *
+     * Shared by all forward entry points so the graph (and any stateful
+     * submodules such as Dropout/BatchNorm) executes exactly once per call.
+     * Binds inputs[i] to input_names_[i]; the count must match.
+     */
+    auto run_graph(const std::vector<Variable>& inputs)
+        -> std::unordered_map<std::string, Variable>;
+
     std::vector<GraphOp> ops_;
     std::unordered_map<std::string, Tensor> constants_;
     std::vector<std::string> input_names_;

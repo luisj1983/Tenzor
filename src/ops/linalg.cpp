@@ -1677,11 +1677,21 @@ auto lstsq(const Tensor& A, const Tensor& B) -> std::tuple<Tensor, Tensor> {
         x = tenzor::linalg::solve_triangular(
             R, QTB, /*upper=*/true, /*unitriangular=*/false);    // (n, nrhs)
 
-        // Residual per column: sum over m of (A x − B)². Empty for m == n.
+        // Residual per column: sum over m of |A x − B|². Empty for m == n.
+        // numpy.linalg.lstsq returns REAL residuals = sum(|A x - B|^2). For
+        // complex inputs |z|^2 = z·conj(z); sum(z^2) would yield a complex,
+        // wrong-magnitude value. real(diff·conj(diff)) gives the squared
+        // magnitude and a real-typed result.
         if (m > n) {
             Tensor Ax    = tenzor::matmul(A_c, x);
             Tensor diff  = tenzor::sub(Ax, B_c);
-            Tensor sq    = tenzor::mul(diff, diff);
+            Tensor sq;
+            if (is_complex) {
+                Tensor mag2 = tenzor::real(tenzor::mul(diff, tenzor::conj(diff)));
+                sq = mag2;
+            } else {
+                sq = tenzor::mul(diff, diff);
+            }
             Tensor sumsq = tenzor::sum(sq, /*dim=*/0, /*keepdim=*/false);
             residuals = tenzor::reshape(sumsq, {nrhs});
         } else {

@@ -282,39 +282,12 @@ auto ViT::forward_vit(const Variable& pixel_values) -> ViTOutput {
     // Extract [CLS] token and pool
     Variable pooled_output;
     if (add_pooling_layer_) {
-        // Extract [CLS] token (first token in sequence)
-        auto shape = sequence_output.shape();
-        int64_t batch_size = shape[0];
-        int64_t seq_len = shape[1];
-        int64_t hidden_size = shape[2];
-        DType dtype = sequence_output.tensor().dtype();
-
-        // Reshape and extract first token using matrix multiplication trick
-        auto reshaped = tenzor::reshape(sequence_output, {batch_size * seq_len, hidden_size});
-
-        // Create selection matrix to extract first tokens
-        Tensor selection_matrix({batch_size, batch_size * seq_len},
-                               dtype, sequence_output.tensor().device());
-        selection_matrix.zero_();
-
-        // Set selection values using template lambda for multi-dtype
-        auto set_selection = [&]<typename T>(T one_val) {
-            T* sel_data = selection_matrix.data<T>();
-            for (int64_t b = 0; b < batch_size; ++b) {
-                sel_data[b * (batch_size * seq_len) + b * seq_len] = one_val;
-            }
-        };
-
-        if (dtype == DType::Float32) {
-            set_selection.template operator()<float>(1.0f);
-        } else if (dtype == DType::Float64) {
-            set_selection.template operator()<double>(1.0);
-        } else if (dtype == DType::Float16) {
-            set_selection.template operator()<Float16>(Float16(1.0f));
-        }
-
-        Variable selection_var(selection_matrix, false);
-        auto cls_token = tenzor::matmul(selection_var, reshaped);  // [batch, hidden_size]
+        // Extract [CLS] token (first token in sequence) directly via
+        // autograd-aware slice + squeeze on the sequence dim. This replaces the
+        // old O(batch^2 * seq_len) [batch, batch*seq_len] selection-matrix
+        // matmul, preserves the grad_fn chain, and works for every dtype.
+        // sequence_output: [batch, seq_len, hidden] -> [batch, hidden]
+        auto cls_token = tenzor::squeeze(tenzor::slice(sequence_output, 1, 0, 1), 1);
 
         // Apply pooler (linear + tanh)
         pooled_output = pooler_->forward(cls_token);
@@ -350,48 +323,12 @@ auto ViTForImageClassification::forward_impl(const Variable& pixel_values) -> Va
     auto outputs = vit_->forward_vit(pixel_values);
     auto sequence_output = outputs.last_hidden_state;
 
-    // Extract [CLS] token (first token)
-    auto shape = sequence_output.shape();
-    int64_t batch_size = shape[0];
-    int64_t seq_len = shape[1];
-    int64_t hidden_size = shape[2];
-    DType dtype = sequence_output.tensor().dtype();
-    auto target_device = sequence_output.tensor().device();
-
-    // Use selection matrix approach to preserve gradient flow
-    // Reshape: [batch, seq_len, hidden] -> [batch * seq_len, hidden]
-    auto reshaped = tenzor::reshape(sequence_output, {batch_size * seq_len, hidden_size});
-
-    // Create selection matrix on CPU then transfer to device
-    Tensor selection_matrix_cpu({batch_size, batch_size * seq_len}, dtype, Device::cpu());
-    selection_matrix_cpu.zero_();
-
-    // Fill selection matrix with appropriate dtype
-    if (dtype == DType::Float32) {
-        float* sel_data = selection_matrix_cpu.data<float>();
-        for (int64_t b = 0; b < batch_size; ++b) {
-            sel_data[b * (batch_size * seq_len) + b * seq_len] = 1.0f;
-        }
-    } else if (dtype == DType::Float64) {
-        double* sel_data = selection_matrix_cpu.data<double>();
-        for (int64_t b = 0; b < batch_size; ++b) {
-            sel_data[b * (batch_size * seq_len) + b * seq_len] = 1.0;
-        }
-    } else if (dtype == DType::Float16) {
-        auto* sel_data = selection_matrix_cpu.data<Float16>();
-        Float16 one_f16(1.0f);
-        for (int64_t b = 0; b < batch_size; ++b) {
-            sel_data[b * (batch_size * seq_len) + b * seq_len] = one_f16;
-        }
-    }
-
-    // Transfer to target device if needed
-    Tensor selection_matrix = (target_device == Device::cpu()) ?
-                               selection_matrix_cpu : selection_matrix_cpu.to(target_device);
-
-    // Use matmul to select: [batch, batch*seq_len] @ [batch*seq_len, hidden] = [batch, hidden]
-    Variable selection_var(selection_matrix, false);  // No grad needed for constant matrix
-    auto cls_output = tenzor::matmul(selection_var, reshaped);  // [batch, hidden_size]
+    // Extract [CLS] token (first token) directly via autograd-aware slice +
+    // squeeze on the sequence dim. This replaces the old O(batch^2 * seq_len)
+    // [batch, batch*seq_len] selection-matrix matmul, preserves the grad_fn
+    // chain, and works for every dtype.
+    // sequence_output: [batch, seq_len, hidden] -> [batch, hidden]
+    auto cls_output = tenzor::squeeze(tenzor::slice(sequence_output, 1, 0, 1), 1);
 
     // Classify
     auto logits = classifier_->forward(cls_output);

@@ -28,22 +28,33 @@ void main() {
     uint gid = gl_GlobalInvocationID.x;
     uint wg_id = gl_WorkGroupID.x;
 
-    // Clear local histogram
-    local_histo[lid] = 0;
+    // Clear local histogram. The histogram always has exactly 256 bins, but
+    // the workgroup size is a runtime spec constant (local_size_x_id=0) that
+    // can be <256 or >256, so clear all 256 bins via a strided loop rather
+    // than one-bin-per-thread (which would leave bins uncleared for wgSize<256
+    // and write past local_histo[256] for wgSize>256).
+    for (uint b = lid; b < 256u; b += gl_WorkGroupSize.x) {
+        local_histo[b] = 0u;
+    }
     barrier();
 
-    // Count digits in this workgroup's tile
+    // Count digits in this workgroup's tile, striding by the actual workgroup
+    // size (not a hardcoded 256) so every element is counted exactly once.
     uint tile_size = (n + n_wgs - 1) / n_wgs;
     uint tile_start = wg_id * tile_size;
     uint tile_end = min(tile_start + tile_size, n);
 
-    for (uint i = tile_start + lid; i < tile_end; i += 256) {
+    for (uint i = tile_start + lid; i < tile_end; i += gl_WorkGroupSize.x) {
         uint sortable = float_to_sortable(keys[i]);
         uint digit_val = (sortable >> (digit * 8)) & 0xFFu;
         atomicAdd(local_histo[digit_val], 1);
     }
     barrier();
 
-    // Write local histogram to global histogram matrix (column-major for prefix sum)
-    histos[lid * n_wgs + wg_id] = local_histo[lid];
+    // Write local histogram to global histogram matrix (column-major for prefix
+    // sum). Only the first 256 lanes own a bin; guard so wgSize>256 lanes don't
+    // write past the [256 * n_wgs] global buffer.
+    if (lid < 256u) {
+        histos[lid * n_wgs + wg_id] = local_histo[lid];
+    }
 }

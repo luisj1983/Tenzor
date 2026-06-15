@@ -1236,10 +1236,22 @@ private:
 class PermuteBackward : public Function {
 public:
     PermuteBackward(std::vector<int64_t> dims) : dims_(std::move(dims)) {
-        // Compute inverse permutation
+        // Normalize negative dims against the rank (== number of permutation
+        // entries) before computing the inverse permutation. The autograd
+        // permute wrapper passes user dims verbatim, while the forward
+        // Tensor::permute normalizes negatives; without normalization here
+        // inv_dims_[dims_[i]] would be an out-of-bounds write for negative
+        // dims (and yield a wrong inverse even if it survived).
+        const int64_t n = static_cast<int64_t>(dims_.size());
         inv_dims_.resize(dims_.size());
         for (size_t i = 0; i < dims_.size(); ++i) {
-            inv_dims_[dims_[i]] = static_cast<int64_t>(i);
+            int64_t d = dims_[i] < 0 ? dims_[i] + n : dims_[i];
+            if (d < 0 || d >= n) {
+                throw std::out_of_range(
+                    "PermuteBackward: permutation dim out of range");
+            }
+            dims_[i] = d;  // store the normalized dim
+            inv_dims_[static_cast<size_t>(d)] = static_cast<int64_t>(i);
         }
     }
     auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;

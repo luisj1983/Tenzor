@@ -1493,14 +1493,43 @@ auto take_along_dim_kernel(const Tensor& input, const Tensor& indices, int64_t d
 // =============================================================================
 
 auto masked_scatter_kernel(const Tensor& input, const Tensor& mask, const Tensor& source) -> Tensor {
+    // The scatter copies source elements through input's C++ type, so source
+    // must share input's dtype or its bytes would be reinterpreted as garbage.
+    if (source.dtype() != input.dtype()) {
+        char msg[256];
+        snprintf(msg, sizeof(msg),
+                 "masked_scatter: source dtype (%d) must match input dtype (%d)",
+                 static_cast<int>(source.dtype()), static_cast<int>(input.dtype()));
+        throw std::invalid_argument(msg);
+    }
+
     Tensor output = input.clone();
     int64_t numel = input.numel();
-    const bool* mask_ptr = mask.data<bool>();
+
+    // Support both Bool and Float32 masks (CUDA may convert Bool to Float32
+    // during device transfers), mirroring masked_select/masked_fill/where.
+    const bool use_float_mask = (mask.dtype() == DType::Float32);
+    const bool* bool_mask_ptr = nullptr;
+    const float* float_mask_ptr = nullptr;
+    if (mask.dtype() == DType::Bool) {
+        bool_mask_ptr = mask.data<bool>();
+    } else if (use_float_mask) {
+        float_mask_ptr = mask.data<float>();
+    } else {
+        char msg[256];
+        snprintf(msg, sizeof(msg),
+                 "masked_scatter: mask tensor must have dtype Bool or Float32, but got dtype %d",
+                 static_cast<int>(mask.dtype()));
+        throw std::invalid_argument(msg);
+    }
+    auto is_mask_true = [use_float_mask, bool_mask_ptr, float_mask_ptr](int64_t i) -> bool {
+        return use_float_mask ? (float_mask_ptr[i] != 0.0f) : bool_mask_ptr[i];
+    };
 
     auto scatter_values = [&](auto* out_ptr, const auto* src_ptr, int64_t src_numel) {
         int64_t src_idx = 0;
         for (int64_t i = 0; i < numel; ++i) {
-            if (mask_ptr[i]) {
+            if (is_mask_true(i)) {
                 if (src_idx >= src_numel) {
                     throw std::runtime_error("masked_scatter: source has fewer elements than mask true count");
                 }

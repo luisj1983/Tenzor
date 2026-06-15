@@ -688,17 +688,67 @@ auto gradgradcheck_detailed(
             }
         }
 
-        result.max_abs_error = max_abs;
+        // Off-diagonal symmetry spot-check. The finite-difference comparison
+        // above only validates the Hessian *diagonal* (H[i,i]); a transposed or
+        // mis-stacked Hessian with correct diagonal would still pass. The true
+        // Hessian of a scalar function is symmetric (Schwarz's theorem), so we
+        // spot-check H[i,j] == H[j,i] for a bounded number of off-diagonal
+        // pairs. This catches index-transposition / mis-stacking bugs without
+        // the O(n^2) cost of a full finite-difference Hessian.
+        double max_asym = 0.0;
+        int64_t asym_failing = 0;
+        if (n >= 2) {
+            const int64_t kMaxPairs = 32;
+            int64_t pairs_checked = 0;
+            // Symmetry tolerance: H is computed analytically, so a non-trivial
+            // asymmetry signals a real layout/transposition bug rather than FD
+            // noise. Use the same atol/rtol contract against the symmetric mean.
+            for (int64_t i = 0; i < n && pairs_checked < kMaxPairs; ++i) {
+                for (int64_t j = i + 1; j < n && pairs_checked < kMaxPairs; ++j) {
+                    double h_ij, h_ji;
+                    if (H.dtype() == DType::Float32) {
+                        h_ij = static_cast<double>(H_cpu.data<float>()[i * n + j]);
+                        h_ji = static_cast<double>(H_cpu.data<float>()[j * n + i]);
+                    } else {
+                        h_ij = H_cpu.data<double>()[i * n + j];
+                        h_ji = H_cpu.data<double>()[j * n + i];
+                    }
+                    double adiff = std::abs(h_ij - h_ji);
+                    double sym_scale = 0.5 * (std::abs(h_ij) + std::abs(h_ji));
+                    double sym_threshold = atol + rtol * sym_scale;
+                    if (adiff > max_asym) max_asym = adiff;
+                    if (adiff > sym_threshold) {
+                        asym_failing++;
+                        if (result.fail_indices.size() < 10) {
+                            result.fail_indices.push_back(i * n + j);
+                        }
+                    }
+                    ++pairs_checked;
+                }
+            }
+        }
+
+        if (max_asym > max_abs) result.max_abs_error = max_asym;
+        else result.max_abs_error = max_abs;
         result.max_rel_error = max_rel;
+        failing += asym_failing;
         result.failing_elements = failing;
         result.passed = (failing == 0);
         if (!result.passed) {
             result.error_message =
-                "Hessian diagonal disagrees with finite-difference 2nd derivative. "
-                "max_abs=" + std::to_string(max_abs) +
-                " failing=" + std::to_string(failing) + "/" + std::to_string(n);
+                "Second-derivative check failed (diagonal FD + off-diagonal "
+                "symmetry spot-check). max_abs=" + std::to_string(max_abs) +
+                " diag_failing=" + std::to_string(failing - asym_failing) +
+                "/" + std::to_string(n) +
+                " sym_failing=" + std::to_string(asym_failing) +
+                " max_asymmetry=" + std::to_string(max_asym);
         } else {
-            result.error_message = "Second-derivative check passed";
+            // Be explicit that the FD comparison covered only the diagonal;
+            // off-diagonal entries were validated for symmetry only, not value.
+            result.error_message =
+                "Second-derivative check passed (diagonal validated against "
+                "finite differences; off-diagonal entries validated for "
+                "symmetry only, not magnitude)";
         }
         return result;
     } catch (const std::exception& e) {

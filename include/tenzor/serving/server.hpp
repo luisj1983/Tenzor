@@ -36,6 +36,29 @@ namespace tenzor {
 namespace serving {
 
 // ============================================================================
+// Path sandboxing
+// ============================================================================
+
+/**
+ * @brief Resolve a client-supplied model path and confine it to a repository
+ *        root, defeating absolute-path and `..` traversal (including symlink
+ *        escapes resolved by weakly_canonical).
+ *
+ * Single source of truth shared by the HTTP and gRPC LoadModel handlers so the
+ * two transports cannot apply inconsistent policy. Rejects absolute paths and
+ * any path whose canonicalised form escapes `root_dir`. A relative path
+ * component that merely *contains* the substring ".." (e.g. "model..v2.tz") is
+ * accepted — only a real ".." path component is treated as traversal.
+ *
+ * @param requested  Client-supplied, untrusted relative model path.
+ * @param root_dir   Repository root to confine to (empty → current directory).
+ * @return The resolved, contained absolute path (as a string).
+ * @throws std::invalid_argument if the path is absolute or escapes the root.
+ */
+auto sanitize_repository_path(const std::string& requested,
+                              const std::string& root_dir) -> std::string;
+
+// ============================================================================
 // Configuration
 // ============================================================================
 

@@ -14,9 +14,15 @@
 #include "../../include/tenzor/autograd/variable.hpp"
 #include "../../include/tenzor/backend/loader.hpp"
 #include "../../include/tenzor/backend/backend.hpp"
+#include <atomic>
+#include <chrono>
+#include <filesystem>
 #include <fstream>
+#include <functional>
 #include <limits>
+#include <sstream>
 #include <stdexcept>
+#include <thread>
 
 namespace tenzor {
 namespace export_ {
@@ -45,6 +51,36 @@ struct ExportedProgram::Impl {
 // ============================================================================
 
 namespace {
+
+// Build a process/thread-unique sibling temp path so concurrent save()/load()
+// on the same target path cannot collide on a fixed ".graph.tmp" name.
+auto make_unique_graph_tmp(const std::string& path) -> std::string {
+    static std::atomic<uint64_t> counter{0};
+    std::ostringstream oss;
+    oss << path << ".graph."
+        << std::chrono::steady_clock::now().time_since_epoch().count() << "."
+        << std::hash<std::thread::id>{}(std::this_thread::get_id()) << "."
+        << counter.fetch_add(1, std::memory_order_relaxed) << ".tmp";
+    return oss.str();
+}
+
+// RAII guard that removes a temp file on scope exit (success OR exception), so a
+// throw between create and the explicit cleanup never leaks the file. Uses
+// std::filesystem::remove with an error_code (ignoring "already gone").
+struct TempFileGuard {
+    std::string path;
+    explicit TempFileGuard(std::string p) : path(std::move(p)) {}
+    ~TempFileGuard() {
+        if (!path.empty()) {
+            std::error_code ec;
+            std::filesystem::remove(path, ec);
+        }
+    }
+    // Release: drop responsibility (e.g. after a checked manual remove).
+    void dismiss() { path.clear(); }
+    TempFileGuard(const TempFileGuard&) = delete;
+    auto operator=(const TempFileGuard&) -> TempFileGuard& = delete;
+};
 
 auto write_uint32(std::ofstream& f, uint32_t v) -> void {
     f.write(reinterpret_cast<const char*>(&v), sizeof(v));
@@ -256,9 +292,12 @@ auto ExportedProgram::save(const std::string& path) const -> void {
         throw std::runtime_error("ExportedProgram::save: program is empty");
     }
 
-    // 1. Write the JIT graph to a temporary path using the existing
-    //    GraphWriter so we don't reimplement the graph format.
-    std::string graph_tmp = path + ".graph.tmp";
+    // 1. Write the JIT graph to a unique temporary path using the existing
+    //    GraphWriter so we don't reimplement the graph format. The RAII guard
+    //    removes the temp file on every exit path (including a throw from the
+    //    GraphWriter or the read-back below), so it is never leaked.
+    std::string graph_tmp = make_unique_graph_tmp(path);
+    TempFileGuard tmp_guard(graph_tmp);
     {
         jit::GraphWriter gw(graph_tmp);
         gw.write(*impl_->graph);
@@ -274,7 +313,7 @@ auto ExportedProgram::save(const std::string& path) const -> void {
     std::vector<char> graph_bytes(graph_size);
     graph_in.read(graph_bytes.data(), static_cast<std::streamsize>(graph_size));
     graph_in.close();
-    std::remove(graph_tmp.c_str());
+    // tmp_guard removes graph_tmp at function exit.
 
     // 2. Write the TZEP file.
     std::ofstream file(path, std::ios::binary);
@@ -356,7 +395,11 @@ auto ExportedProgram::load(const std::string& path,
         throw std::runtime_error("ExportedProgram::load: truncated graph blob");
     }
 
-    std::string graph_tmp = path + ".graph.tmp";
+    // Unique temp path + RAII guard: concurrent load()/save() on the same path
+    // cannot collide, and a throw from the ofstream open or GraphReader::read
+    // below no longer leaks the temp file.
+    std::string graph_tmp = make_unique_graph_tmp(path);
+    TempFileGuard tmp_guard(graph_tmp);
     {
         std::ofstream graph_out(graph_tmp, std::ios::binary);
         if (!graph_out.is_open()) {
@@ -367,7 +410,31 @@ auto ExportedProgram::load(const std::string& path,
 
     jit::GraphReader gr(graph_tmp);
     impl->graph = gr.read();
-    std::remove(graph_tmp.c_str());
+    // tmp_guard removes graph_tmp at function exit (and on any throw above).
+
+    // Audit D.2 (graph constants): run() executes against the graph's captured
+    // constants (weights/bias), which GraphReader restores onto their saved
+    // device. map_location must relocate these too — otherwise a CUDA-saved
+    // program either fails to load on a CPU-only machine or silently runs on
+    // CUDA despite map_location=cpu. Mirror read_tensor's device-availability
+    // handling: when map_location is set, move every constant to it.
+    if (map_location.has_value() && impl->graph) {
+        const Device target = map_location.value();
+        // Snapshot the (id, tensor) pairs first since set_constant mutates the
+        // underlying map.
+        std::vector<std::pair<std::string, Tensor>> relocated;
+        relocated.reserve(impl->graph->constants().size());
+        for (const auto& [value_id, tensor] : impl->graph->constants()) {
+            if (tensor.device().type == target.type &&
+                tensor.device().index == target.index) {
+                continue;  // already on target device
+            }
+            relocated.emplace_back(value_id, tensor.to(target));
+        }
+        for (auto& [value_id, tensor] : relocated) {
+            impl->graph->set_constant(value_id, tensor);
+        }
+    }
 
     ExportedProgram ep;
     ep.impl_ = std::move(impl);
@@ -470,6 +537,18 @@ auto export_model(nn::Module& module,
     }
 
     // Capture the module's state dict.
+    //
+    // Design note (intentional duplication): the traced graph's constants_
+    // already hold the captured parameter tensors that run() executes against,
+    // while state_dict() is the named public parameter view consumed by
+    // callers that want to inspect/transfer weights. These two are deliberately
+    // kept as separate sources of truth: run() must not depend on the public
+    // state-dict naming staying stable, and state_dict() must return the same
+    // named layout PyTorch users expect regardless of how tracing happened to
+    // capture constants. The on-disk file therefore stores both; a future
+    // format revision that name-references constants into the state dict (so
+    // the weight bytes are stored once) is tracked as a format-version bump,
+    // not changed here to avoid breaking existing .tzep files.
     auto state = module.state_dict();
 
     // Build the ExportedProgram.

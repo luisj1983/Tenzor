@@ -346,56 +346,14 @@ auto GRU::forward(const Variable& input, const Variable& hx,
         // invalid argument" at the bench shape (Phase 8.5).
         Tensor layer_input = x.tensor().contiguous();
 
-        // For multi-layer GRU without dropout, use fused kernel
-        // Dropout requires per-layer execution
-        // F.2: force the per-layer fused path. The legacy multi-layer fast
-        // path packs only one bias per layer (bias_ih), dropping bias_hh
-        // — this matches a pre-existing shared bug across backends. The
-        // per-layer GRUForward op packs both biases (6-input convention)
-        // and routes to PyTorch-correct kernels in each backend.
-        bool use_multilayer_fused = false;
-
-        if (use_multilayer_fused) {
-            // Collect weights from all layers
-            // Input format: [input, h0, W_ih_0, W_hh_0, bias_0, W_ih_1, ...]
-            std::vector<Tensor> kernel_inputs;
-            kernel_inputs.push_back(layer_input);
-            kernel_inputs.push_back(h.tensor().contiguous());
-
-            for (int64_t layer = 0; layer < num_layers_; ++layer) {
-                auto& cell = forward_cells_[layer];
-                auto W_ih_linear = cell->weight_ih();
-                auto cell_params = cell->parameters();
-
-                auto W_ih_params = W_ih_linear->parameters();
-                kernel_inputs.push_back(W_ih_params[0]->tensor());  // W_ih
-                kernel_inputs.push_back(cell_params[2]->tensor());  // W_hh
-
-                // Bias or empty tensor
-                if (W_ih_params.size() > 1) {
-                    kernel_inputs.push_back(W_ih_params[1]->tensor());
-                } else {
-                    kernel_inputs.push_back(empty({0}, DType::Float32, input.device()));
-                }
-            }
-
-            // Call fused multi-layer kernel
-            OpAttributes attrs;
-            attrs.set(AttrKey::NumLayers, num_layers_);
-            auto outputs = dispatch<OpId::GRUMultiLayerForward>(kernel_inputs, attrs);
-
-            // Reshape output
-            Variable output(outputs[0], false);
-            if (batch_first_) {
-                output = Variable(output.tensor().transpose(0, 1), false);
-            }
-
-            Variable h_final(outputs[1], false);
-
-            return {output, h_final};
-        }
-
-        // Single-layer or dropout case: process layers sequentially using fused kernels
+        // Always process layers sequentially using the per-layer fused
+        // GRUForward op. The legacy multi-layer fast path (GRUMultiLayerForward)
+        // packed only one bias per layer (bias_ih), dropping bias_hh — a shared
+        // bug across backends — so it was permanently disabled and is now
+        // removed. The per-layer op packs both biases (6-input convention) and
+        // routes to PyTorch-correct kernels in each backend.
+        //
+        // Process layers sequentially using fused kernels
         std::vector<Tensor> final_h_states;
 
         for (int64_t layer = 0; layer < num_layers_; ++layer) {

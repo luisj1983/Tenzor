@@ -1,6 +1,7 @@
 #version 450
 #extension GL_EXT_shader_explicit_arithmetic_types_float64 : require
-#extension GL_EXT_shader_atomic_float : enable
+#extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
+#extension GL_EXT_shader_atomic_int64 : require
 
 // Deformable Conv2d Backward Input — gradients w.r.t. input, offset, and mask.
 //
@@ -22,7 +23,10 @@ layout(binding = 1) buffer Input      { double input_data[];  };  // (N, C_in, H
 layout(binding = 2) buffer Offset     { double offset_data[]; };  // (N, og*kH*kW*2, H_out, W_out)
 layout(binding = 3) buffer Weight     { double weight_data[]; };  // (C_out, C_in/groups, kH, kW)
 layout(binding = 4) buffer Mask       { double mask_data[];   };  // (N, og*kH*kW, H_out, W_out)
-layout(binding = 5) buffer GradInput  { double grad_input[];  };  // (N, C_in, H, W)
+// grad_input uses a uint64 view so we can accumulate via int64-CAS atomics.
+// Native fp64 buffer atomicAdd (GL_EXT_shader_atomic_float2) is rarely
+// available; the CAS loop below works wherever shaderBufferInt64Atomics does.
+layout(binding = 5) buffer GradInput  { uint64_t grad_input[]; };  // (N, C_in, H, W)
 layout(binding = 6) buffer GradOffset { double grad_offset[]; };  // (N, og*kH*kW*2, H_out, W_out)
 layout(binding = 7) buffer GradMask   { double grad_mask[];   };  // (N, og*kH*kW, H_out, W_out)
 
@@ -47,6 +51,21 @@ layout(push_constant) uniform PushConstants {
     uint use_mask;
     uint n_elements;         // offset_groups * kH * kW * H_out * W_out * batch
 } params;
+
+// CAS-based fp64 atomic add into the uint64-typed grad_input buffer.
+void atomicAddF64(uint idx, double val) {
+    uint64_t old_bits = grad_input[idx];
+    uint64_t new_bits;
+    for (int attempt = 0; attempt < 65536; ++attempt) {
+        double old_val = packDouble2x32(uvec2(uint(old_bits), uint(old_bits >> 32u)));
+        uvec2 nb = unpackDouble2x32(old_val + val);
+        new_bits = uint64_t(nb.x) | (uint64_t(nb.y) << 32u);
+        uint64_t result = atomicCompSwap(grad_input[idx], old_bits, new_bits);
+        if (result == old_bits) return;
+        old_bits = result;
+    }
+    grad_input[idx] = new_bits;
+}
 
 // Bilinear interpolation (same as forward)
 double bilinear_interp(uint base_idx, double h, double w) {
@@ -201,13 +220,13 @@ void main() {
                 // Atomic adds because multiple threads may write to same input pixel
                 uint gi_base = (n * params.in_channels + ic) * params.H * params.W;
                 if (h_low >= 0 && w_low >= 0)
-                    atomicAdd(grad_input[gi_base + uint(h_low) * params.W + uint(w_low)],   grad_val * hh * hw);
+                    atomicAddF64(gi_base + uint(h_low) * params.W + uint(w_low),   grad_val * hh * hw);
                 if (h_low >= 0 && w_high < int(params.W))
-                    atomicAdd(grad_input[gi_base + uint(h_low) * params.W + uint(w_high)],  grad_val * hh * lw);
+                    atomicAddF64(gi_base + uint(h_low) * params.W + uint(w_high),  grad_val * hh * lw);
                 if (h_high < int(params.H) && w_low >= 0)
-                    atomicAdd(grad_input[gi_base + uint(h_high) * params.W + uint(w_low)],  grad_val * lh * hw);
+                    atomicAddF64(gi_base + uint(h_high) * params.W + uint(w_low),  grad_val * lh * hw);
                 if (h_high < int(params.H) && w_high < int(params.W))
-                    atomicAdd(grad_input[gi_base + uint(h_high) * params.W + uint(w_high)], grad_val * lh * lw);
+                    atomicAddF64(gi_base + uint(h_high) * params.W + uint(w_high), grad_val * lh * lw);
             }
         }
     }

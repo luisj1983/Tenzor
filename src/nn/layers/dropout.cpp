@@ -4,6 +4,7 @@
 #include "tenzor/ops/indexing.hpp"
 #include "tenzor/ops/transform.hpp"
 #include "tenzor/autograd/function.hpp"
+#include <algorithm>
 #include <stdexcept>
 
 namespace tenzor::nn {
@@ -498,7 +499,34 @@ auto VariationalDropout::forward_impl(const Variable& input) -> Variable {
 
     double scale = 1.0 / (1.0 - p_);
 
-    // Generate mask on first call after reset (or first call ever)
+    // A cached mask is reused across calls (same mask per sequence, by design).
+    // But if the current input is no longer broadcast-compatible with the cached
+    // mask (e.g. a different batch size or feature width on a later call), the
+    // mul() below would either throw or silently misbroadcast. Detect that and
+    // regenerate the mask for the new shape rather than reusing a stale one.
+    if (mask_valid_) {
+        const auto& mask_shape = mask_.shape();
+        // NumPy/Tenzor broadcasting: align shapes from the trailing dimension;
+        // each pair of dims must be equal or one of them must be 1.
+        bool compatible = true;
+        const int64_t mn = static_cast<int64_t>(mask_shape.size());
+        const int64_t in = static_cast<int64_t>(shape_vec.size());
+        const int64_t n = std::max(mn, in);
+        for (int64_t i = 1; i <= n; ++i) {
+            int64_t md = (i <= mn) ? mask_shape[mn - i] : 1;
+            int64_t id = (i <= in) ? shape_vec[in - i] : 1;
+            if (md != id && md != 1 && id != 1) {
+                compatible = false;
+                break;
+            }
+        }
+        if (!compatible) {
+            mask_valid_ = false;
+        }
+    }
+
+    // Generate mask on first call after reset (or first call ever), or when the
+    // cached mask was invalidated above due to a shape change.
     if (!mask_valid_) {
         // For 3D input (T, B, F): mask shape is (1, B, F) to broadcast over time
         // For 2D input (B, F): mask shape is (B, F)

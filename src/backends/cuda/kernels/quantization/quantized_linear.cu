@@ -34,7 +34,8 @@ __global__ void quantized_linear_cuda_kernel(
     int64_t out_features,
     float combined_scale,
     int32_t input_zp,
-    int32_t weight_zp
+    int32_t weight_zp,
+    bool use_vectorized
 ) {
     // Thread block computes one output element
     int64_t b = blockIdx.y;
@@ -54,29 +55,43 @@ __global__ void quantized_linear_cuda_kernel(
     const int8_t* input_row = input + b * in_features;
     const int8_t* weight_row = weight + o * in_features;
 
-    // Vectorized loading with int4 (16 bytes = 16 int8 values)
-    const int VEC_SIZE = 16;
-    int64_t vec_steps = in_features / VEC_SIZE;
+    // Vectorized int4 loads (16 bytes = 16 int8 values) require both row
+    // pointers to be 16-byte aligned. A row pointer is `base + r*in_features`,
+    // so its alignment depends on BOTH the base allocation alignment and on
+    // `in_features` being a multiple of 16 (otherwise odd rows fall off the
+    // 16-byte boundary and a hardware misaligned-address fault aborts the
+    // kernel). The host computes this precondition once and passes it in via
+    // `use_vectorized`; when it is false we take a fully scalar path that is
+    // correct for every `in_features` value and every base alignment.
+    int64_t i = 0;
+    if (use_vectorized) {
+        // Vectorized loading with int4 (16 bytes = 16 int8 values).
+        const int VEC_SIZE = 16;
+        int64_t vec_steps = in_features / VEC_SIZE;
 
-    for (int64_t v = 0; v < vec_steps; ++v) {
-        int4 input_vec = reinterpret_cast<const int4*>(input_row)[v];
-        int4 weight_vec = reinterpret_cast<const int4*>(weight_row)[v];
+        for (int64_t v = 0; v < vec_steps; ++v) {
+            int4 input_vec = reinterpret_cast<const int4*>(input_row)[v];
+            int4 weight_vec = reinterpret_cast<const int4*>(weight_row)[v];
 
-        int8_t* input_bytes = reinterpret_cast<int8_t*>(&input_vec);
-        int8_t* weight_bytes = reinterpret_cast<int8_t*>(&weight_vec);
+            int8_t* input_bytes = reinterpret_cast<int8_t*>(&input_vec);
+            int8_t* weight_bytes = reinterpret_cast<int8_t*>(&weight_vec);
 
-        #pragma unroll
-        for (int i = 0; i < VEC_SIZE; ++i) {
-            int32_t qi = static_cast<int32_t>(input_bytes[i]);
-            int32_t qw = static_cast<int32_t>(weight_bytes[i]);
-            acc += qi * qw;
-            sum_i += qi;
-            sum_w += qw;
+            #pragma unroll
+            for (int j = 0; j < VEC_SIZE; ++j) {
+                int32_t qi = static_cast<int32_t>(input_bytes[j]);
+                int32_t qw = static_cast<int32_t>(weight_bytes[j]);
+                acc += qi * qw;
+                sum_i += qi;
+                sum_w += qw;
+            }
         }
+        i = vec_steps * VEC_SIZE;
     }
 
-    // Process remaining elements
-    for (int64_t i = vec_steps * VEC_SIZE; i < in_features; ++i) {
+    // Process remaining elements with scalar byte loads. When use_vectorized
+    // is false this covers the entire row (i == 0); otherwise it handles the
+    // in_features % 16 tail.
+    for (; i < in_features; ++i) {
         int32_t qi = static_cast<int32_t>(input_row[i]);
         int32_t qw = static_cast<int32_t>(weight_row[i]);
         acc += qi * qw;
@@ -120,6 +135,22 @@ auto quantized_linear_cuda(
 ) -> void {
     float combined_scale = input_scale * weight_scale / output_scale;
 
+    // Precondition for the int4 (16-byte) vectorized load path. Each row
+    // pointer is `base + r * in_features`. A 16-byte int4 load requires every
+    // such pointer to be 16-byte aligned, which holds iff:
+    //   (1) in_features % 16 == 0  -> r * in_features is a multiple of 16 for
+    //       every row index r, so all rows share the base's alignment, AND
+    //   (2) the base input/weight pointers are themselves 16-byte aligned.
+    // CUDA device allocations are at least 256-byte aligned, so (2) normally
+    // holds for the start of a tensor; we still check it explicitly so the
+    // guard remains correct for any (e.g. offset/view) buffer. When the
+    // precondition fails the kernel uses a scalar byte path that is correct
+    // for all in_features values and all alignments.
+    const bool use_vectorized =
+        (in_features % 16 == 0) &&
+        (reinterpret_cast<uintptr_t>(input) % 16 == 0) &&
+        (reinterpret_cast<uintptr_t>(weight) % 16 == 0);
+
     // Launch configuration
     const int THREADS = 256;
     dim3 blocks((out_features + THREADS - 1) / THREADS, batch_size);
@@ -128,106 +159,20 @@ auto quantized_linear_cuda(
     quantized_linear_cuda_kernel<<<blocks, threads, 0, stream>>>(
         input, weight, bias, output,
         batch_size, in_features, out_features,
-        combined_scale, input_zp, weight_zp
+        combined_scale, input_zp, weight_zp, use_vectorized
     );
     TENZOR_CUDA_POST_LAUNCH_CHECK();
 }
 
-/**
- * @brief Optimized kernel using CUDA Tensor Cores (WMMA API).
- *
- * Requires Turing+ architecture. Uses WMMA (Warp Matrix Multiply Accumulate)
- * for maximum INT8 performance.
- */
-#if __CUDA_ARCH__ >= 750 || !defined(__CUDA_ARCH__)
-
-__global__ void quantized_linear_wmma_kernel(
-    const int8_t* __restrict__ input,
-    const int8_t* __restrict__ weight,
-    const float* __restrict__ bias,
-    float* __restrict__ output,
-    int64_t batch_size,
-    int64_t in_features,
-    int64_t out_features,
-    float combined_scale,
-    int32_t input_zp,
-    int32_t weight_zp
-) {
-    // WMMA tile sizes for INT8 on Turing+: M=8, N=32, K=16
-    const int M = 8;
-    const int N = 32;
-    const int K = 16;
-
-    // Warp index
-    int warp_id = (threadIdx.x + blockIdx.x * blockDim.x) / 32;
-
-    // Compute which output tile this warp handles
-    int batch_tile = warp_id / ((out_features + N - 1) / N);
-    int out_tile = warp_id % ((out_features + N - 1) / N);
-
-    if (batch_tile >= (batch_size + M - 1) / M) return;
-
-    // Declare WMMA fragments for INT8 (use signed char for INT8)
-    nvcuda::wmma::fragment<nvcuda::wmma::matrix_a, M, N, K, signed char, nvcuda::wmma::row_major> a_frag;
-    nvcuda::wmma::fragment<nvcuda::wmma::matrix_b, M, N, K, signed char, nvcuda::wmma::col_major> b_frag;
-    nvcuda::wmma::fragment<nvcuda::wmma::accumulator, M, N, K, int32_t> acc_frag;
-
-    // Initialize accumulator to zero
-    nvcuda::wmma::fill_fragment(acc_frag, 0);
-
-    // Loop over K dimension
-    for (int k_tile = 0; k_tile < (in_features + K - 1) / K; ++k_tile) {
-        // Load input tile (A matrix)
-        int batch_offset = batch_tile * M;
-        int k_offset = k_tile * K;
-
-        if (batch_offset < batch_size && k_offset < in_features) {
-            nvcuda::wmma::load_matrix_sync(a_frag,
-                                  input + batch_offset * in_features + k_offset,
-                                  in_features);
-
-            // Load weight tile (B matrix)
-            int out_offset = out_tile * N;
-            if (out_offset < out_features) {
-                nvcuda::wmma::load_matrix_sync(b_frag,
-                                      weight + out_offset * in_features + k_offset,
-                                      in_features);
-
-                // Perform matrix multiplication
-                nvcuda::wmma::mma_sync(acc_frag, a_frag, b_frag, acc_frag);
-            }
-        }
-    }
-
-    // Store result
-    int batch_offset = batch_tile * M;
-    int out_offset = out_tile * N;
-
-    if (batch_offset < batch_size && out_offset < out_features) {
-        // Convert accumulator to float, apply scaling and bias
-        int32_t acc_values[M * N];
-        nvcuda::wmma::store_matrix_sync(acc_values, acc_frag, N, nvcuda::wmma::mem_row_major);
-
-        for (int i = 0; i < M && batch_offset + i < batch_size; ++i) {
-            for (int j = 0; j < N && out_offset + j < out_features; ++j) {
-                int32_t acc = acc_values[i * N + j];
-
-                // Zero point correction
-                acc -= input_zp * weight_zp * in_features;
-
-                // Dequantize and add bias
-                float result = static_cast<float>(acc) * combined_scale;
-                if (bias != nullptr) {
-                    result += bias[out_offset + j];
-                }
-
-                output[(batch_offset + i) * out_features + (out_offset + j)] = result;
-            }
-        }
-    }
-}
-
-#endif // __CUDA_ARCH__ >= 750
+// NOTE: An unused quantized_linear_wmma_kernel was removed here. It was dead code
+// (never registered — the live kernel is quantized_linear_cuda at
+// cuda_kernel_registry.cpp) and had an incomplete zero-point correction: it
+// applied only acc -= input_zp*weight_zp*in_features (in int32, overflow-prone
+// for large K) and omitted the -weight_zp*sum_i and -input_zp*sum_w cross terms
+// that the live kernel and the CPU reference include — so it would have produced
+// wrong results under non-zero zero-points if wired up. Reintroduce only with the
+// full asymmetric zero-point correction (per-row sum_i / per-col sum_w computed in
+// int64) and a parity test before registering.
 
 } // namespace kernels
 } // namespace quantization

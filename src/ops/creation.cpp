@@ -1253,8 +1253,8 @@ auto randint(int64_t low, int64_t high, std::vector<int64_t> shape,
         attrs.set(AttrKey::Shape, shape_to_string(shape));
         attrs.set(AttrKey::Dtype, dtype_to_string(dtype));
         attrs.set(AttrKey::Device, static_cast<int64_t>(device.index));
-        attrs.set(AttrKey::Low, low);
-        attrs.set(AttrKey::High, high);
+        attrs.set(AttrKey::Start, low);
+        attrs.set(AttrKey::End, high);
         attrs.set(AttrKey::Seed, static_cast<int64_t>(generator.next_seed()));
         return dispatch_to_device(OpId::Randint, device.type, {}, attrs)[0];
     }
@@ -1362,7 +1362,7 @@ auto randperm(int64_t n, Device device, Generator& generator) -> Tensor {
     return argsort(keys, /*dim=*/0, /*descending=*/false).to(DType::Int64);
 }
 
-auto logspace(float start, float end, int64_t steps, double base,
+auto logspace(double start, double end, int64_t steps, double base,
               DType dtype, Device device) -> Tensor {
     // Carry the intermediates (linspace, log(base), exp) in a floating compute
     // dtype so integer/half outputs are not corrupted: an integer dtype would

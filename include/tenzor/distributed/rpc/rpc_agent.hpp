@@ -184,7 +184,11 @@ private:
     // interleaving under concurrent send() calls. Returns false on write
     // failure (connection dropped).
     bool send_framed_locked(int fd, const Message& msg);
-    auto dispatch_message(Message msg) -> void;
+    // Dispatch an inbound/loopback message. `inbound_fd` is the socket the
+    // message arrived on (>=0 from receive_loop), so a remote request's response
+    // can be written back on that same connection instead of dialing a fresh
+    // outbound one; -1 (the default) means no inbound socket (self-loopback).
+    auto dispatch_message(Message msg, int inbound_fd = -1) -> void;
     auto handle_rpc_call(const Message& msg) -> Message;
 };
 

@@ -139,6 +139,45 @@ public:
     ) : name_(name), num_warmup_(num_warmup), num_runs_(num_runs) {}
 
     /**
+     * @brief Construct a benchmark bound to a workload.
+     *
+     * The stored workload is what BenchmarkSuite::run_all() executes; without
+     * it run_all() can only time loop overhead.
+     *
+     * @param name Benchmark name
+     * @param workload Function under test
+     * @param num_warmup Number of warmup iterations
+     * @param num_runs Number of measured iterations
+     */
+    Benchmark(
+        const std::string& name,
+        std::function<void()> workload,
+        size_t num_warmup = 5,
+        size_t num_runs = 100
+    ) : name_(name), num_warmup_(num_warmup), num_runs_(num_runs),
+        workload_(std::move(workload)) {}
+
+    /**
+     * @brief Associate the workload to be benchmarked by run_stored()/run_all().
+     */
+    auto set_workload(std::function<void()> workload) -> Benchmark& {
+        workload_ = std::move(workload);
+        return *this;
+    }
+
+    /**
+     * @brief Whether a workload has been associated with this benchmark.
+     */
+    auto has_workload() const -> bool { return static_cast<bool>(workload_); }
+
+    /**
+     * @brief Run the stored workload and collect statistics.
+     *
+     * @return Benchmark result with statistics
+     */
+    auto run_stored() -> BenchmarkResult;
+
+    /**
      * @brief Run benchmark and collect statistics
      *
      * @param fn Function to benchmark
@@ -182,6 +221,7 @@ private:
     size_t num_runs_;
     size_t num_flops_{0};
     size_t num_bytes_{0};
+    std::function<void()> workload_{};
 
     /**
      * @brief Compute statistics from timing samples

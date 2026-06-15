@@ -94,9 +94,10 @@ auto VulkanBackend::dispatchFull(const std::vector<int64_t>& shape, double value
     // For Float16, the shader works with uint32 (packed pairs), so descriptor size needs
     // to cover the full uint32 writes. Even for 1 element, shader writes a full uint32.
     size_t buffer_size_out = output.numel() * output.dtype_size();
-    if (is_float16 || is_int16) {
+    if (is_float16 || is_int16 || is_bfloat16) {
         // 16-bit elements are packed 2 per uint32; round up to a 4-byte
         // boundary so the descriptor covers the shader's full uint32 writes.
+        // (full_bf16 packs 2 BF16 per word just like full_f16/full_i16.)
         size_t num_pairs = (output.numel() + 1) / 2;
         buffer_size_out = num_pairs * 4;
     } else if (is_fp8) {
@@ -414,7 +415,13 @@ auto VulkanBackend::dispatchFull(const std::vector<int64_t>& shape, double value
                       VK_SHADER_STAGE_COMPUTE_BIT,
                       0, sizeof(PushConstants), &push_constants);
 
-    uint32_t workgroups = div_wg(output.numel(), devices_[device_id].workgroupSize);
+    // full_bf16 packs 2 BF16 per uint32 word, so it only needs ceil(numel/2)
+    // invocations — dispatching numel() would be a 2x over-dispatch (matching
+    // the Float16 path which uses num_pairs).
+    uint32_t dispatch_n = is_bfloat16
+        ? static_cast<uint32_t>((output.numel() + 1) / 2)
+        : static_cast<uint32_t>(output.numel());
+    uint32_t workgroups = div_wg(dispatch_n, devices_[device_id].workgroupSize);
     vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
     // Add memory barrier
@@ -1251,6 +1258,15 @@ auto VulkanBackend::dispatchInterpolate(const Tensor& input, const OpAttributes&
     std::string mode(attrs.get_string(AttrKey::Mode));
     bool align_corners = attrs.get_bool(AttrKey::AlignCorners, false);
 
+    // Bicubic forward has a single Float32 shader (matching the f32-only
+    // bicubic backward). Widen non-F32 inputs to F32, compute, and narrow back
+    // — same discipline as dispatchInterpolateBackward — so forward and
+    // backward use matching bicubic kernels for every dtype.
+    if (mode == "bicubic" && input.dtype() != DType::Float32) {
+        const DType orig = input.dtype();
+        return dispatchInterpolate(input.to(DType::Float32), attrs).to(orig);
+    }
+
     // Parse output size from comma-separated string
     std::string size_str(attrs.get_string(AttrKey::OutputSize));
     auto comma_pos = size_str.find(',');
@@ -1277,7 +1293,11 @@ auto VulkanBackend::dispatchInterpolate(const Tensor& input, const OpAttributes&
 
     // Select shader based on mode and dtype
     std::string shader_name;
-    if (mode == "bilinear" || mode == "bicubic") {
+    if (mode == "bicubic") {
+        // Bicubic uses a dedicated true-bicubic forward shader (f32 only; non-F32
+        // was widened to F32 above). Matches the bicubic backward kernel.
+        shader_name = "bicubic_interpolate";
+    } else if (mode == "bilinear") {
         shader_name = is_float64 ? "bilinear_interpolate_f64" :
                       is_float16 ? "bilinear_interpolate_f16" : "bilinear_interpolate";
     } else {
@@ -2201,14 +2221,18 @@ auto VulkanBackend::dispatchCast(const Tensor& input, DType target_dtype) -> Ten
                (target_dtype == DType::FP8_E4M3 || target_dtype == DType::FP8_E5M2)) {
         // non-Float32 -> FP8: two-step via Float32
         two_step = true;
+    } else if (src_dtype == DType::Int16 && target_dtype == DType::Int32) {
+        // Direct widening cast. Must precede the generic non-Float32 two-step
+        // catch-all below, which would otherwise shadow this dedicated shader.
+        shader_name = "cast_i16_i32";
+    } else if (src_dtype == DType::Int32 && target_dtype == DType::Int16) {
+        // Modular-truncating direct cast (PyTorch / numpy semantics). Routing
+        // through Float32 would lose precision for |Int32| > 2^24, violating
+        // the modular-truncating contract — so this must precede the catch-all.
+        shader_name = "cast_i32_i16";
     } else if (src_dtype != DType::Float32 && target_dtype != DType::Float32) {
         // Generic two-step via Float32 for any remaining dtype pair
         two_step = true;
-    } else if (src_dtype == DType::Int16 && target_dtype == DType::Int32) {
-        shader_name = "cast_i16_i32";
-    } else if (src_dtype == DType::Int32 && target_dtype == DType::Int16) {
-        // Modular-truncating direct cast (PyTorch / numpy semantics).
-        shader_name = "cast_i32_i16";
     } else if (src_dtype == DType::Int16 && target_dtype == DType::Float32) {
         shader_name = "cast_i16_f32";
     } else if (src_dtype == DType::Float32 && target_dtype == DType::Int16) {
@@ -4717,25 +4741,39 @@ auto VulkanBackend::dispatchIndexAdd(const Tensor& self, int64_t dim,
     // Int32 (sparse counts/indices are within range).
     {
         const DType d = self.dtype();
-        // Narrow / 64-bit integers widen (or narrow) to Int32 and recurse; Int32
-        // itself runs the native index_add_i32 shader directly (no recursion).
-        bool is_int_to_widen = (d == DType::Int8 || d == DType::Int16 ||
-                                d == DType::Int64 || d == DType::UInt8 ||
-                                d == DType::UInt16 || d == DType::UInt32 ||
-                                d == DType::UInt64 || d == DType::Bool);
-        if (is_int_to_widen) {
-            auto self_i32 = self.to(DType::Int32);
-            auto src_i32 = src.to(DType::Int32);
-            auto result_i32 = dispatchIndexAdd(self_i32, dim, index, src_i32);
-            return result_i32.to(d);
-        }
-        // Float16/BFloat16 and any other non-Float32/Float64/Int32 dtype:
-        // accumulate in Float32 (matches the F16 scatter_add path).
-        if (d != DType::Float32 && d != DType::Float64 && d != DType::Int32) {
-            auto self_f32 = self.to(DType::Float32);
-            auto src_f32 = src.to(DType::Float32);
-            auto result_f32 = dispatchIndexAdd(self_f32, dim, index, src_f32);
-            return result_f32.to(d);
+        // Int64 / UInt64 must NOT be narrowed to Int32 — that silently truncates
+        // magnitudes > 2^31-1 and accumulates in 32-bit, diverging from CPU.
+        // Route them to the native int64-atomic shader when the device supports
+        // GL_EXT_shader_atomic_int64; otherwise throw (mirroring Float64 below).
+        // UInt64 shares Int64's two's-complement add (bit-identical), so the
+        // signed accumulation shader is correct for both.
+        if (d == DType::Int64 || d == DType::UInt64) {
+            if (!devices_[device_id].hasAtomicInt64) {
+                throw std::runtime_error(
+                    "IndexAdd with Int64/UInt64 requires VK_KHR_shader_atomic_int64 "
+                    "support. Use CPU backend or a narrower integer dtype.");
+            }
+            // Fall through to the dispatch below with the native int64 shader.
+        } else {
+            // Narrow integers widen losslessly to Int32 and recurse; Int32 itself
+            // runs the native index_add_i32 shader directly (no recursion).
+            bool is_int_to_widen = (d == DType::Int8 || d == DType::Int16 ||
+                                    d == DType::UInt8 || d == DType::UInt16 ||
+                                    d == DType::UInt32 || d == DType::Bool);
+            if (is_int_to_widen) {
+                auto self_i32 = self.to(DType::Int32);
+                auto src_i32 = src.to(DType::Int32);
+                auto result_i32 = dispatchIndexAdd(self_i32, dim, index, src_i32);
+                return result_i32.to(d);
+            }
+            // Float16/BFloat16 and any other non-Float32/Float64/Int32 dtype:
+            // accumulate in Float32 (matches the F16 scatter_add path).
+            if (d != DType::Float32 && d != DType::Float64 && d != DType::Int32) {
+                auto self_f32 = self.to(DType::Float32);
+                auto src_f32 = src.to(DType::Float32);
+                auto result_f32 = dispatchIndexAdd(self_f32, dim, index, src_f32);
+                return result_f32.to(d);
+            }
         }
     }
 
@@ -4748,6 +4786,7 @@ auto VulkanBackend::dispatchIndexAdd(const Tensor& self, int64_t dim,
 
     const char* add_shader =
         (self.dtype() == DType::Float64) ? "index_add_f64"
+        : (self.dtype() == DType::Int64 || self.dtype() == DType::UInt64) ? "index_add_i64"
         : (self.dtype() == DType::Int32) ? "index_add_i32"
         : "index_add";
     auto* pipeline = getPipeline(add_shader, device_id);

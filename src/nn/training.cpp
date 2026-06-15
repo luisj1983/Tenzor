@@ -5,6 +5,7 @@
 
 #include <tenzor/nn/training.hpp>
 #include <tenzor/autograd/variable.hpp>
+#include <tenzor/autograd/ops.hpp>
 #include <tenzor/ops/reduction.hpp>
 #include <stdexcept>
 #include <iostream>
@@ -48,8 +49,13 @@ auto NeuralNetwork::train_step(const Variable& input, const Variable& target) ->
     // 5. Zero gradients before backward pass
     optimizer_->zero_grad();
 
-    // 6. Backward pass - compute gradients
-    loss.backward();
+    // 6. Backward pass - compute gradients.
+    // The autograd engine requires a scalar root: it throws when numel() != 1.
+    // A loss_fn configured with Reduction::None (or any non-scalar output)
+    // would otherwise crash here, so reduce to a scalar via the Variable-level
+    // autograd mean, preserving the grad_fn chain back to the parameters.
+    Variable scalar_loss = (loss.tensor().numel() == 1) ? loss : tenzor::mean(loss);
+    scalar_loss.backward();
 
     // 7. Update parameters
     optimizer_->step();

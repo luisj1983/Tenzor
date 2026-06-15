@@ -558,14 +558,29 @@ public:
     }
 
     ~OneAPIBackend() override {
-        // Wait for all in-flight work to finish.
+        // Wait for all in-flight work to finish. A pending async SYCL error
+        // would be rethrown by wait_and_throw(); since destructors are
+        // implicitly noexcept, an escaping throw would call std::terminate()
+        // AND skip the USM cleanup below, leaking every allocation. Swallow any
+        // teardown exception (using the non-throwing wait()) and always run the
+        // release_all()/devices_.clear() cleanup.
         for (size_t i = 0; i < devices_.size(); ++i) {
-            devices_[i].queue->wait_and_throw();
+            try {
+                devices_[i].queue->wait();
+            } catch (...) {
+                // Best-effort: a hung/errored kernel at shutdown must not
+                // prevent the remaining queues from draining or the USM from
+                // being released.
+            }
         }
 
         // Release ALL USM allocations (cached and in-use) while SYCL
-        // queues are still alive.
-        backend::OneAPICachingAllocator::get().release_all();
+        // queues are still alive. Guarded so a failure here cannot escape the
+        // destructor either.
+        try {
+            backend::OneAPICachingAllocator::get().release_all();
+        } catch (...) {
+        }
 
         devices_.clear();
     }
@@ -635,6 +650,10 @@ public:
                     best = *std::min_element(sub_group_sizes.begin(), sub_group_sizes.end());
                 }
                 info.warp_size = static_cast<int>(best);
+            } else {
+                // Query succeeded but returned no sizes: keep a sane default so
+                // downstream reduction/tile sizing never divides by zero.
+                info.warp_size = 32;
             }
         }
 #ifdef TENZOR_HAS_ONEMKL
@@ -1055,42 +1074,6 @@ private:
         }
     }
 
-    auto parse_shape(const std::string& shape_str) const -> std::vector<int64_t> {
-        std::vector<int64_t> shape;
-        std::string str = shape_str;
-        size_t pos = 0;
-        while ((pos = str.find(',')) != std::string::npos) {
-            shape.push_back(std::stoll(str.substr(0, pos)));
-            str.erase(0, pos + 1);
-        }
-        if (!str.empty()) {
-            shape.push_back(std::stoll(str));
-        }
-        return shape;
-    }
-
-    auto parse_dtype(const OpAttributes& attrs) const -> DType {
-        if (!attrs.has(AttrKey::Dtype)) {
-            return DType::Float32;
-        }
-
-        const auto& dtype_str = std::string(attrs.get_string(AttrKey::Dtype));
-        if (dtype_str == "float32") return DType::Float32;
-        if (dtype_str == "float64") return DType::Float64;
-        if (dtype_str == "float16") return DType::Float16;
-        if (dtype_str == "bfloat16") return DType::BFloat16;
-        if (dtype_str == "int8") return DType::Int8;
-        if (dtype_str == "int16") return DType::Int16;
-        if (dtype_str == "int32") return DType::Int32;
-        if (dtype_str == "int64") return DType::Int64;
-        if (dtype_str == "uint8") return DType::UInt8;
-        if (dtype_str == "uint16") return DType::UInt16;
-        if (dtype_str == "uint32") return DType::UInt32;
-        if (dtype_str == "uint64") return DType::UInt64;
-        if (dtype_str == "bool") return DType::Bool;
-
-        return DType::Float32;
-    }
 };
 
 // Library-level constructor: runs at dlopen() time, BEFORE create_backend().

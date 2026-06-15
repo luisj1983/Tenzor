@@ -467,6 +467,11 @@ auto TextGenerator::greedy_search(const Tensor& input_ids) -> Tensor {
         }
     }
 
+    // Per-row finished flags for EOS early-stop: once a row emits
+    // eos_token_id we stop updating it (pad with eos) and break the whole
+    // loop once every row has finished.
+    std::vector<bool> finished(batch_size, false);
+
     // Generate tokens autoregressively
     for (int64_t step = current_len; step < config_.max_length; ++step) {
         // Get current sequence and move to GPU for forward pass
@@ -489,6 +494,13 @@ auto TextGenerator::greedy_search(const Tensor& input_ids) -> Tensor {
         auto vocab_size = last_logits.shape()[last_logits.ndim() - 1];
 
         for (int64_t b = 0; b < batch_size; ++b) {
+            if (finished[b]) {
+                // Row already emitted EOS — keep it stable by repeating the
+                // EOS token rather than decoding garbage past the end.
+                output_data[b * config_.max_length + step] = config_.eos_token_id;
+                continue;
+            }
+
             int64_t max_idx = 0;
             float max_val = logits_data[b * vocab_size];
 
@@ -502,10 +514,16 @@ auto TextGenerator::greedy_search(const Tensor& input_ids) -> Tensor {
 
             output_data[b * config_.max_length + step] = max_idx;
 
-            // Check for EOS token
+            // EOS early-stop: mark this row finished once it emits eos_token_id.
             if (config_.eos_token_id >= 0 && max_idx == config_.eos_token_id) {
-                // Could implement early stopping here
+                finished[b] = true;
             }
+        }
+
+        // Stop generating entirely once every row has emitted EOS.
+        if (config_.eos_token_id >= 0 &&
+            std::all_of(finished.begin(), finished.end(), [](bool f) { return f; })) {
+            break;
         }
     }
 
@@ -539,6 +557,9 @@ auto TextGenerator::top_k_sampling(const Tensor& input_ids, int64_t top_k, doubl
         }
     }
 
+    // Per-row finished flags for EOS early-stop (see greedy_search).
+    std::vector<bool> finished(batch_size, false);
+
     // Generate tokens with top-k sampling
     for (int64_t step = current_len; step < config_.max_length; ++step) {
         // Move current sequence to GPU for forward pass
@@ -555,6 +576,11 @@ auto TextGenerator::top_k_sampling(const Tensor& input_ids, int64_t top_k, doubl
         }
 
         for (int64_t b = 0; b < batch_size; ++b) {
+            if (finished[b]) {
+                output_data[b * config_.max_length + step] = config_.eos_token_id;
+                continue;
+            }
+
             // Get logits for this batch item (on CPU)
             auto batch_start = b * last_logits.shape()[last_logits.ndim() - 1];
             Tensor batch_logits(std::vector<int64_t>{last_logits.shape()[last_logits.ndim() - 1]},
@@ -577,6 +603,17 @@ auto TextGenerator::top_k_sampling(const Tensor& input_ids, int64_t top_k, doubl
             int64_t token_id = indices_cpu.data<int64_t>()[sampled_idx];
 
             output_data[b * config_.max_length + step] = token_id;
+
+            // EOS early-stop: mark this row finished once it emits eos_token_id.
+            if (config_.eos_token_id >= 0 && token_id == config_.eos_token_id) {
+                finished[b] = true;
+            }
+        }
+
+        // Stop generating entirely once every row has emitted EOS.
+        if (config_.eos_token_id >= 0 &&
+            std::all_of(finished.begin(), finished.end(), [](bool f) { return f; })) {
+            break;
         }
     }
 
@@ -610,6 +647,9 @@ auto TextGenerator::top_p_sampling(const Tensor& input_ids, double top_p, double
         }
     }
 
+    // Per-row finished flags for EOS early-stop (see greedy_search).
+    std::vector<bool> finished(batch_size, false);
+
     // Generate tokens with top-p (nucleus) sampling
     for (int64_t step = current_len; step < config_.max_length; ++step) {
         // Move current sequence to GPU for forward pass
@@ -626,6 +666,11 @@ auto TextGenerator::top_p_sampling(const Tensor& input_ids, double top_p, double
         }
 
         for (int64_t b = 0; b < batch_size; ++b) {
+            if (finished[b]) {
+                output_data[b * config_.max_length + step] = config_.eos_token_id;
+                continue;
+            }
+
             // Get logits for this batch item (on CPU)
             auto batch_start = b * last_logits.shape()[last_logits.ndim() - 1];
             Tensor batch_logits(std::vector<int64_t>{last_logits.shape()[last_logits.ndim() - 1]},
@@ -648,6 +693,17 @@ auto TextGenerator::top_p_sampling(const Tensor& input_ids, double top_p, double
             int64_t token_id = indices_cpu.data<int64_t>()[sampled_idx];
 
             output_data[b * config_.max_length + step] = token_id;
+
+            // EOS early-stop: mark this row finished once it emits eos_token_id.
+            if (config_.eos_token_id >= 0 && token_id == config_.eos_token_id) {
+                finished[b] = true;
+            }
+        }
+
+        // Stop generating entirely once every row has emitted EOS.
+        if (config_.eos_token_id >= 0 &&
+            std::all_of(finished.begin(), finished.end(), [](bool f) { return f; })) {
+            break;
         }
     }
 

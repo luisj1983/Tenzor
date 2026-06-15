@@ -115,7 +115,13 @@ auto masked_select(const Tensor& input, const Tensor& mask) -> Tensor {
 auto masked_fill(const Tensor& input, const Tensor& mask, double value) -> Tensor {
     NewOpAttributes attrs;
     attrs.set(AttrKey::Value, value);
-    std::vector<Tensor> inputs = {input, mask};
+    // CPU/GPU MaskedFill kernels read elements via data<T>()[i] in linear
+    // (physical) order and do not contiguify; a non-contiguous view (e.g. a
+    // transpose/permute) would be read in the wrong order. Normalize here so
+    // every backend sees contiguous logical layout.
+    Tensor input_c = input.is_contiguous() ? input : input.contiguous();
+    Tensor mask_c  = mask.is_contiguous()  ? mask  : mask.contiguous();
+    std::vector<Tensor> inputs = {input_c, mask_c};
     return dispatch(OpId::MaskedFill, inputs, attrs)[0];
 }
 
@@ -141,7 +147,14 @@ auto where(const Tensor& condition, const Tensor& x, const Tensor& y) -> Tensor 
         std::equal(cs.begin(), cs.end(), ys.begin());
 
     if (same_shape) {
-        std::vector<Tensor> inputs = {condition, x, y};
+        // The CPU/GPU Where kernels access elements via data<T>()[i] in linear
+        // (physical) order, so same-shape but non-contiguous views (transposed
+        // / permuted) would be read in the wrong order. Force contiguity here,
+        // mirroring the broadcast path below.
+        Tensor cond_c = condition.is_contiguous() ? condition : contiguous(condition);
+        Tensor x_c    = x.is_contiguous()         ? x         : contiguous(x);
+        Tensor y_c    = y.is_contiguous()         ? y         : contiguous(y);
+        std::vector<Tensor> inputs = {cond_c, x_c, y_c};
         return dispatch(OpId::Where, inputs)[0];
     }
 

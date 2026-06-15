@@ -155,10 +155,15 @@ void cublas_gemm_ex(
     // transpose_a=true asks cuBLAS to transpose A — i.e. OP_T on the second
     // operand (cuBLAS-B = A_user); same for transpose_b on cuBLAS-A.
 
-    // Leading dimensions: col-major leading dim = trailing row-major dim.
-    int64_t lda = transpose_a ? M : K;  // leading dim of A_user col-major view
-    int64_t ldb = transpose_b ? K : N;  // leading dim of B_user col-major view
-    int64_t ldc = N;                    // leading dim of C col-major (output is N×M)
+    // Leading dimensions: a cuBLAS leading dimension is the PHYSICAL trailing
+    // row-major stride of the stored matrix (K for A_user, N for B_user). It is
+    // a property of the memory layout, NOT of the OP_T/OP_N flag — the OP flags
+    // (set on the cublasGemmEx call below) alone select logical transpose. The
+    // previous `transpose_a ? M : K` / `transpose_b ? K : N` would pass the
+    // wrong stride whenever a transpose flag was set.
+    int64_t lda = K;   // physical leading dim of A_user col-major view
+    int64_t ldb = N;   // physical leading dim of B_user col-major view
+    int64_t ldc = N;   // leading dim of C col-major (output is N×M)
 
     // Use cublasGemmEx for Tensor Core acceleration
     TENZOR_CUBLAS_CHECK(cublasGemmEx(
@@ -316,6 +321,16 @@ void cublas_batched_gemm_scaled(
     cudaStream_t stream = nullptr
 ) {
     cublasHandle_t handle = CuBLASHandlePool::get(stream);
+
+    // A float scale factor is only well-defined for floating-point GEMM. An
+    // integer dtype selects CUBLAS_COMPUTE_32I, which requires int32 alpha/beta;
+    // passing a float scale alongside it is a type mismatch (and a scaled
+    // integer GEMM with a fractional scale is ill-defined). Reject up-front.
+    if (dtype == DType::Int8 || dtype == DType::Int32) {
+        throw std::runtime_error(
+            "cublas_batched_gemm_scaled: a float scale factor is not supported for "
+            "integer dtypes (Int8/Int32); use the unscaled integer batched GEMM instead");
+    }
 
     cudaDataType_t cuda_dtype = dtype_to_cuda(dtype);
     cublasComputeType_t compute_type = select_compute_type(dtype);

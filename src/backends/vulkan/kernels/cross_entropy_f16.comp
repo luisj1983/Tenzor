@@ -37,46 +37,47 @@ void writeF16Loss(uint element_idx, float val) {
     losses[word_idx] = (existing & ~mask) | (bits << (word_offset * 16));
 }
 
+float sample_loss(uint s_idx) {
+    int target = targets[s_idx];
+    if (target >= 0 && target < int(params.num_classes)) {
+        // Cross entropy: -log(p[target]). Read packed F16, compute in float32.
+        return -readF16(s_idx * params.num_classes + uint(target));
+    }
+    return 0.0;
+}
+
 void main() {
     uint idx = gl_GlobalInvocationID.x;
     uint tid = gl_LocalInvocationID.x;
 
-    float loss_val = 0.0;
-
-    if (idx < params.batch_size) {
-        int target = targets[idx];
-        if (target >= 0 && target < int(params.num_classes)) {
-            // Cross entropy: -log(p[target]). Read from packed F16, compute
-            // in float32.
-            float log_p = readF16(idx * params.num_classes + uint(target));
-            loss_val = -log_p;
+    if (params.reduction == 0) {
+        if (idx < params.batch_size) {
+            writeF16Loss(idx, sample_loss(idx));
         }
-        // See cross_entropy.comp: only write per-sample loss for reduction=0.
-        if (params.reduction == 0) {
-            writeF16Loss(idx, loss_val);
-        }
+        return;
     }
 
-    // Reduction
-    if (params.reduction > 0) {
-        shared_sum[tid] = (idx < params.batch_size) ? loss_val : 0.0;
+    // Reduction (mean/sum): host launches ONE workgroup, so each thread must
+    // block-stride over the whole batch before the tree reduction.
+    float acc = 0.0;
+    for (uint i = tid; i < params.batch_size; i += WORKGROUP_SIZE) {
+        acc += sample_loss(i);
+    }
+    shared_sum[tid] = acc;
+    barrier();
+
+    for (uint s = WORKGROUP_SIZE / 2; s > 0; s >>= 1) {
+        if (tid < s) {
+            shared_sum[tid] += shared_sum[tid + s];
+        }
         barrier();
+    }
 
-        // Parallel reduction — use WORKGROUP_SIZE spec constant.
-        for (uint s = WORKGROUP_SIZE / 2; s > 0; s >>= 1) {
-            if (tid < s) {
-                shared_sum[tid] += shared_sum[tid + s];
-            }
-            barrier();
+    if (tid == 0) {
+        float total = shared_sum[0];
+        if (params.reduction == 1) { // mean
+            total /= float(params.batch_size);
         }
-
-        if (tid == 0) {
-            float total = shared_sum[0];
-            if (params.reduction == 1) { // mean
-                total /= float(params.batch_size);
-            }
-            // Store result in first element
-            writeF16Loss(0, total);
-        }
+        writeF16Loss(0, total);
     }
 }

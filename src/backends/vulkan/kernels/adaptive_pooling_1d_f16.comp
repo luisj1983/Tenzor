@@ -47,7 +47,10 @@ int start_index(int a, int b, int c) {
 }
 
 int end_index(int a, int b, int c) {
-    return int(ceil(float((a + 1) * c) / float(b)));
+    // Floor end-index (integer division) to match the CPU adaptive-pooling
+    // convention and Vulkan's floor-based backward; ceil-end diverged for
+    // non-divisible shapes.
+    return int((a + 1) * c) / int(b);
 }
 
 void main() {

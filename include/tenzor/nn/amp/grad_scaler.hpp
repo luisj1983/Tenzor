@@ -109,10 +109,10 @@ public:
      *
      * @note (audit-10 OO.7) Throws std::runtime_error if called while any
      * optimiser is mid-unscale (i.e. unscaled_for_ is non-empty). This
-     * detects nested `scaler.scale(loss)` calls inside the closure passed
-     * to `scaler.step(opt, closure)` — without the check, the closure's
-     * subsequent backward would write scaled grads on top of already
-     * unscaled ones. Matches PyTorch's behaviour.
+     * happens when scale() is called after a direct unscale_(optimizer)
+     * without an intervening step()/update() to clear the mid-unscale flag
+     * — without the check, a subsequent backward would write scaled grads on
+     * top of the already-unscaled ones. Matches PyTorch's behaviour.
      *
      * @code
      * auto loss = criterion(output, target);
@@ -316,7 +316,17 @@ private:
     /// so overflow detection sees the value that fits in F32, not the
     /// potentially-saturated half-precision cast-back stored on the
     /// Variable. Cleared at ``step()`` time after the check.
-    std::unordered_map<Variable*, Tensor> f32_unscaled_grads_;
+    ///
+    /// Keyed PER (optimizer, param): a single ``GradScaler`` may be shared
+    /// across optimizers (GAN, multi-head distill). A single flat map keyed by
+    /// ``Variable*`` was cleared wholesale at the top of every ``unscale_()``,
+    /// so ``unscale_(a)`` then ``unscale_(b)`` wiped a's entries; a later
+    /// ``step(a)`` short-circuits re-unscaling (``unscaled_for_`` still holds a)
+    /// and ``check_inf_nan_`` then falls back to the saturated half-precision
+    /// grad, triggering spurious overflow backoff. Scoping per optimizer keeps
+    /// each optimizer's probe entries alive until its own ``step()`` clears them.
+    std::unordered_map<optim::Optimizer*,
+                       std::unordered_map<Variable*, Tensor>> f32_unscaled_grads_;
 
     /**
      * @brief Check if any parameter gradients contain inf or nan

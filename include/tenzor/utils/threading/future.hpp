@@ -33,6 +33,43 @@ public:
     SharedState() = default;
 
     /**
+     * @brief Drain any pending continuations on destruction.
+     *
+     * If the state was never satisfied (the owning Promise was abandoned),
+     * mark it broken and run the registered continuations so chained futures
+     * receive a broken_promise exception instead of leaking. Because the
+     * continuations are invoked with a pointer to `this` rather than capturing
+     * a shared_ptr back to this state, there is no reference cycle to break and
+     * `this` is still fully alive for the duration of the destructor body.
+     */
+    ~SharedState() {
+        break_if_pending();
+    }
+
+    /**
+     * @brief Mark an unsatisfied state as broken (idempotent).
+     *
+     * Called from the abandoning Promise's destructor (so blocked waiters and
+     * chained continuations are released promptly) and as a last resort from
+     * this state's own destructor. If the state is already ready this is a
+     * no-op. Wakes get() waiters and drains continuations with a
+     * broken_promise exception.
+     */
+    void break_if_pending() {
+        {
+            std::unique_lock lock(mutex_);
+            if (ready_) {
+                return;
+            }
+            exception_ = std::make_exception_ptr(
+                std::future_error(std::future_errc::broken_promise));
+            ready_ = true;
+        }
+        cv_.notify_all();
+        execute_continuations();
+    }
+
+    /**
      * @brief Set the result value
      * @param value Result to store
      * @throws std::logic_error if already set
@@ -86,6 +123,21 @@ public:
     }
 
     /**
+     * @brief Move the result out of a state already known to be ready.
+     *
+     * Used by continuations, which only run once the state is ready, to avoid
+     * the redundant condition-variable wait plus value copy that get() incurs.
+     * Rethrows the stored exception if one is set.
+     */
+    T take() {
+        std::unique_lock lock(mutex_);
+        if (exception_) {
+            std::rethrow_exception(exception_);
+        }
+        return std::move(value_);
+    }
+
+    /**
      * @brief Check if result is ready
      * @return true if computation completed
      */
@@ -95,14 +147,20 @@ public:
 
     /**
      * @brief Add continuation callback
+     *
+     * The callback receives a pointer to this ready state so it can take the
+     * value directly without re-locking through get(). Storing the callback
+     * here (rather than having it capture a shared_ptr back to this state)
+     * avoids a self-referential ownership cycle.
+     *
      * @param callback Function to call when ready
      */
-    void add_continuation(std::function<void()> callback) {
+    void add_continuation(std::function<void(SharedState*)> callback) {
         std::unique_lock lock(mutex_);
         if (ready_) {
             // Already ready, execute immediately
             lock.unlock();
-            callback();
+            callback(this);
         } else {
             continuations_.push_back(std::move(callback));
         }
@@ -115,7 +173,7 @@ private:
         lock.unlock();
 
         for (auto& callback : callbacks) {
-            callback();
+            callback(this);
         }
     }
 
@@ -124,7 +182,7 @@ private:
     std::atomic<bool> ready_{false};
     std::mutex mutex_;
     std::condition_variable cv_;
-    std::vector<std::function<void()>> continuations_;
+    std::vector<std::function<void(SharedState*)>> continuations_;
 };
 
 /**
@@ -141,6 +199,22 @@ public:
      * @brief Construct Promise with shared state
      */
     Promise() : state_(std::make_shared<SharedState<T>>()) {}
+
+    // Move-only: a single producer owns the obligation to satisfy the state, so
+    // its destruction (without satisfying it) breaks the promise exactly once.
+    Promise(const Promise&) = delete;
+    Promise& operator=(const Promise&) = delete;
+    Promise(Promise&&) noexcept = default;
+    Promise& operator=(Promise&&) noexcept = default;
+
+    /**
+     * @brief Break the shared state if this producer is abandoned unsatisfied.
+     */
+    ~Promise() {
+        if (state_) {
+            state_->break_if_pending();
+        }
+    }
 
     /**
      * @brief Set the promise value
@@ -267,10 +341,12 @@ public:
         auto promise = std::make_shared<Promise<R>>();
         auto next_state = promise->get_state();
 
-        state_->add_continuation([state = state_, promise, callback = std::forward<F>(callback)]() {
+        state_->add_continuation([promise, callback = std::forward<F>(callback)](SharedState<T>* st) mutable {
             try {
-                // Get the value (this will rethrow if there was an exception)
-                T value = state->get();
+                // Take the value directly; the state is ready by the time a
+                // continuation runs, so this avoids get()'s cv wait + copy and
+                // rethrows any stored exception.
+                T value = st->take();
 
                 // Execute callback and set result
                 if constexpr (std::is_void_v<R>) {
@@ -333,6 +409,24 @@ class SharedState<void> {
 public:
     SharedState() = default;
 
+    ~SharedState() {
+        break_if_pending();
+    }
+
+    void break_if_pending() {
+        {
+            std::unique_lock lock(mutex_);
+            if (ready_) {
+                return;
+            }
+            exception_ = std::make_exception_ptr(
+                std::future_error(std::future_errc::broken_promise));
+            ready_ = true;
+        }
+        cv_.notify_all();
+        execute_continuations();
+    }
+
     void set_value() {
         std::unique_lock lock(mutex_);
         if (ready_) {
@@ -365,15 +459,27 @@ public:
         }
     }
 
+    /**
+     * @brief Rethrow the stored exception (if any) for an already-ready state.
+     *
+     * Used by continuations to skip get()'s condition-variable wait.
+     */
+    void take() {
+        std::unique_lock lock(mutex_);
+        if (exception_) {
+            std::rethrow_exception(exception_);
+        }
+    }
+
     bool is_ready() const {
         return ready_.load();
     }
 
-    void add_continuation(std::function<void()> callback) {
+    void add_continuation(std::function<void(SharedState*)> callback) {
         std::unique_lock lock(mutex_);
         if (ready_) {
             lock.unlock();
-            callback();
+            callback(this);
         } else {
             continuations_.push_back(std::move(callback));
         }
@@ -386,7 +492,7 @@ private:
         lock.unlock();
 
         for (auto& callback : callbacks) {
-            callback();
+            callback(this);
         }
     }
 
@@ -394,7 +500,7 @@ private:
     std::atomic<bool> ready_{false};
     std::mutex mutex_;
     std::condition_variable cv_;
-    std::vector<std::function<void()>> continuations_;
+    std::vector<std::function<void(SharedState*)>> continuations_;
 };
 
 /**
@@ -404,6 +510,17 @@ template<>
 class Promise<void> {
 public:
     Promise() : state_(std::make_shared<SharedState<void>>()) {}
+
+    Promise(const Promise&) = delete;
+    Promise& operator=(const Promise&) = delete;
+    Promise(Promise&&) noexcept = default;
+    Promise& operator=(Promise&&) noexcept = default;
+
+    ~Promise() {
+        if (state_) {
+            state_->break_if_pending();
+        }
+    }
 
     void set_value() {
         state_->set_value();
@@ -444,9 +561,9 @@ public:
         auto promise = std::make_shared<Promise<R>>();
         auto next_state = promise->get_state();
 
-        state_->add_continuation([state = state_, promise, callback = std::forward<F>(callback)]() {
+        state_->add_continuation([promise, callback = std::forward<F>(callback)](SharedState<void>* st) mutable {
             try {
-                state->get();
+                st->take();
 
                 if constexpr (std::is_void_v<R>) {
                     callback();

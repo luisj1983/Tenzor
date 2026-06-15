@@ -198,6 +198,27 @@ public:
      */
     auto eval() -> void override;
 
+    /**
+     * @brief Reduce per-replica gradients onto the master parameters.
+     *
+     * Most paths reduce gradients automatically during backward() via the
+     * hooks installed by `register_grad_hooks()` (shared-module accumulation
+     * and the ProcessGroup all-reduce), and calling this method on those
+     * paths is a no-op.
+     *
+     * The factory/independent-replica path WITHOUT a ProcessGroup is the
+     * exception: each replica owns its own parameter Variables, so their
+     * gradients are invisible to the master after backward(). For that path
+     * the training loop MUST call this method after `loss.backward()` and
+     * before `optimizer.step()`. It sums every replica's per-parameter
+     * gradient onto the corresponding master parameter (positional
+     * correspondence established in `replicate()`), then normalizes per the
+     * configured `reduce_op_` (AVG divides by the number of replicas; SUM
+     * leaves the sum unchanged), so the optimizer steps on the correct
+     * full-batch gradient.
+     */
+    auto synchronize_gradients() -> void;
+
 private:
     std::shared_ptr<Module> module_;           ///< Original module (master)
     std::vector<int> device_ids_;              ///< GPU device IDs
@@ -210,6 +231,20 @@ private:
 
     // Parameters to synchronize gradients across devices
     std::vector<std::shared_ptr<Variable>> parameters_to_sync_;
+
+    // Per-replica parameter lists (factory/independent-replica path only),
+    // aligned 1:1 with replicas_/device_ids_. The master-device slot stores an
+    // empty list because it aliases module_ (its grad is the master parameter's
+    // own grad). Each non-master slot holds that replica's parameters() in the
+    // same order as parameters_to_sync_, giving positional replica->master
+    // correspondence for synchronize_gradients(). Populated by replicate().
+    std::vector<std::vector<std::shared_ptr<Variable>>> replica_parameters_;
+
+    // True only for the factory/independent-replica path WITHOUT a ProcessGroup,
+    // where synchronize_gradients() must explicitly sum replica grads onto the
+    // master (the per-parameter hooks cannot, and would mis-normalize). Set in
+    // replicate().
+    bool independent_replica_sync_{false};
 
     mutable std::mutex replicas_mutex_;        ///< Protect replica creation
 
@@ -276,18 +311,6 @@ private:
      * @return Concatenated output on master device
      */
     auto gather(const std::vector<Variable>& outputs) -> Variable;
-
-    /**
-     * @brief Synchronize gradients across devices.
-     *
-     * After backward pass, all-reduces gradients from all replicas
-     * into the master module's parameters using the configured `reduce_op_`.
-     *
-     * Wired into the autograd engine via `register_grad_hooks()` — fires
-     * automatically when each parameter's gradient lands during backward().
-     * Private: callers should not need to invoke this manually.
-     */
-    auto synchronize_gradients() -> void;
 
     /**
      * @brief Wire automatic gradient sync into the autograd engine.

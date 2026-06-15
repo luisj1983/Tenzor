@@ -165,6 +165,17 @@ auto ElasticTrainer::check_and_recover() -> bool {
     } catch (const std::exception& e) {
         // Audit I.4: route to unified logger.
         TENZOR_LOG_ERROR("[ElasticTrainer] Re-rendezvous failed: {}", e.what());
+        // leave() has already zeroed rank_/world_size_ inside the rendezvous
+        // object, so this rank is no longer a member. Restore a consistent
+        // state: stop the still-running monitor (which is probing the stale
+        // pre-leave worker set) and reset current_* to the sentinels so a later
+        // check_and_recover() does not recompute worker_ids from a world this
+        // rank already left.
+        if (health_monitor_) {
+            health_monitor_->stop();
+        }
+        current_rank_ = -1;
+        current_world_size_ = 0;
         return false;
     }
 

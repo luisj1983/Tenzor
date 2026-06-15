@@ -453,6 +453,21 @@ auto parse_output_line(const std::string& shape_and_data)
             p[i] = std::complex<double>(re, im);
         }
     }
+
+    // Short-read guard: iree-run-module elides large outputs (the middle is
+    // replaced with an ellipsis when the element count exceeds
+    // --output_max_element_count). The stream's first extraction past the
+    // non-numeric sentinel sets failbit, after which every remaining `is >> p[i]`
+    // is a no-op leaving the buffer tail at the zero-init value. numel comes from
+    // the header shape, not the count actually printed, so without this check a
+    // truncated output is silently returned as a correctly-shaped tensor with a
+    // zero tail. A complete parse leaves the stream non-failed (eofbit is fine).
+    if (numel > 0 && is.fail()) {
+        throw JitInvokeError(
+            "iree-run-module output for a tensor of " + std::to_string(numel) +
+            " elements was truncated (short read while parsing values) — raise "
+            "--output_max_element_count to cover the output size");
+    }
     return out;
 }
 
@@ -594,7 +609,12 @@ auto invoke_subprocess(IreeInvoker& self,
                                                          : device));
     argv.push_back("--module=" + vmfb_path);
     argv.push_back("--function=main");
-    argv.push_back("--output_max_element_count=1048576");
+    // 1M was far too small (a single 512x2048 activation already hits the cap),
+    // causing iree-run-module to elide the middle of larger outputs and the
+    // parser to silently zero-pad the tail. Raise it well past any realistic
+    // output size so full tensors are always printed; the short-read guard in
+    // parse_output_line still catches any unexpected truncation.
+    argv.push_back("--output_max_element_count=2147483647");
     for (const auto& t : inputs) {
         argv.push_back(render_input_flag(t));
     }

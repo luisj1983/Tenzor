@@ -11,12 +11,22 @@
 #include <iomanip>
 #include <sstream>
 #include <fstream>
+#include <stdexcept>
 
 namespace tenzor {
 namespace benchmark {
 
 auto Benchmark::run(const std::function<void()>& fn) -> BenchmarkResult {
     return run([](){}, fn, [](){});
+}
+
+auto Benchmark::run_stored() -> BenchmarkResult {
+    if (!workload_) {
+        throw std::runtime_error(
+            "Benchmark::run_stored: no workload associated with benchmark '" +
+            name_ + "'. Construct it with a workload or call set_workload().");
+    }
+    return run([](){}, workload_, [](){});
 }
 
 auto Benchmark::run(
@@ -189,7 +199,15 @@ auto BenchmarkSuite::run_all() -> std::vector<BenchmarkResult> {
     std::cout << "========================================\n";
 
     for (auto& benchmark : benchmarks_) {
-        auto result = benchmark.run([](){});
+        // Run the benchmark's stored workload. Benchmarks added without a
+        // workload have nothing to measure, so skip them with a clear notice
+        // rather than silently timing an empty lambda (which reported
+        // meaningless loop-overhead statistics).
+        if (!benchmark.has_workload()) {
+            std::cout << "[skip] benchmark has no associated workload\n";
+            continue;
+        }
+        auto result = benchmark.run_stored();
         result.print();
         results.push_back(result);
     }

@@ -1185,12 +1185,12 @@ auto linalg_eig_kernel(const Tensor& input, sycl::queue& queue) -> std::tuple<Te
             float* vl = v_data + b * n * n;
 
             auto sp = ::oneapi::mkl::lapack::geev_scratchpad_size<float>(
-                queue, ::oneapi::mkl::compvl::vec, ::oneapi::mkl::compvr::novec,
+                queue, ::oneapi::mkl::job::vec, ::oneapi::mkl::job::novec,
                 n, n);
             SyclDeviceBuffer<float> scratch(sp, queue);
 
             ::oneapi::mkl::lapack::geev(
-                queue, ::oneapi::mkl::compvl::vec, ::oneapi::mkl::compvr::novec,
+                queue, ::oneapi::mkl::job::vec, ::oneapi::mkl::job::novec,
                 n, mat, n, wr_vec, wi_vec,
                 vl, n,       // VL (left eigenvectors of A^T = right of A)
                 nullptr, n,  // VR (not computed)
@@ -1209,12 +1209,12 @@ auto linalg_eig_kernel(const Tensor& input, sycl::queue& queue) -> std::tuple<Te
             double* vl = v_data + b * n * n;
 
             auto sp = ::oneapi::mkl::lapack::geev_scratchpad_size<double>(
-                queue, ::oneapi::mkl::compvl::vec, ::oneapi::mkl::compvr::novec,
+                queue, ::oneapi::mkl::job::vec, ::oneapi::mkl::job::novec,
                 n, n);
             SyclDeviceBuffer<double> scratch(sp, queue);
 
             ::oneapi::mkl::lapack::geev(
-                queue, ::oneapi::mkl::compvl::vec, ::oneapi::mkl::compvr::novec,
+                queue, ::oneapi::mkl::job::vec, ::oneapi::mkl::job::novec,
                 n, mat, n, wr_vec, wi_vec,
                 vl, n,
                 nullptr, n,

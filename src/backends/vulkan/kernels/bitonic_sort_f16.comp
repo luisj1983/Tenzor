@@ -28,20 +28,24 @@ float readF16(uint elem_idx) {
     return unpackHalf2x16(bits | (bits << 16)).x;
 }
 
-// Write a float value back as float16 into the packed buffer
+// Write a float value back as float16 into the packed buffer.
+// Two packed elements share one uint word, and concurrent threads (gid and
+// gid+1) may update the two halves of the same word in the same pass, so the
+// half-word merge must be an atomic CAS retry loop — a plain read-modify-write
+// store would lose one update. Mirrors bilinear_interpolate_f16::writeF16Element.
 void writeF16(uint elem_idx, float val) {
     uint word_idx = elem_idx / 2;
-    uint half_idx = elem_idx % 2;
+    uint half_offset = (elem_idx % 2) * 16;
     uint new_bits = packHalf2x16(vec2(val, 0.0)) & 0xFFFFu;
+    uint mask = 0xFFFFu << half_offset;
 
-    uint old_packed = values[word_idx];
-    uint new_packed;
-    if (half_idx == 0) {
-        new_packed = (old_packed & 0xFFFF0000u) | new_bits;
-    } else {
-        new_packed = (old_packed & 0x0000FFFFu) | (new_bits << 16);
+    uint old_word = values[word_idx];
+    for (int attempt = 0; attempt < 65536; ++attempt) {
+        uint new_word = (old_word & ~mask) | (new_bits << half_offset);
+        uint result = atomicCompSwap(values[word_idx], old_word, new_word);
+        if (result == old_word) return;
+        old_word = result;
     }
-    values[word_idx] = new_packed;
 }
 
 void main() {

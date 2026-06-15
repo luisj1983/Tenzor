@@ -142,24 +142,31 @@ auto LazyGraph::merge_graphs(const std::shared_ptr<LazyGraph>& a,
                               const std::shared_ptr<LazyGraph>& b)
     -> std::shared_ptr<LazyGraph> {
     if (a == b) return a;
-    auto merged = std::make_shared<LazyGraph>();
-    std::unordered_set<LazyNode*> seen;
-    seen.reserve(a->nodes_.size() + b->nodes_.size());
 
-    auto absorb = [&](const std::shared_ptr<LazyGraph>& g) {
-        for (const auto& n : g->nodes_) {
-            if (seen.insert(n.get()).second) {
-                // Edges are preserved automatically: each LazyNode keeps
-                // shared_ptr references to its input nodes, so we simply add
-                // every node once to the merged graph and the topology
-                // survives intact.
-                merged->nodes_.push_back(n);
-            }
+    // Pick the larger graph as the base and append the smaller graph's nodes
+    // into it (in place). Appending never invalidates existing nodes or their
+    // cached results — each LazyNode holds shared_ptr references to its inputs,
+    // so the topology survives intact — and it turns the common chaining
+    // pattern (N binary ops, each new leaf in its own from_tensor graph) from
+    // O(N^2) total node copies (a fresh union allocated and fully repopulated
+    // at every step) into O(N): each step appends only the new leaf's nodes to
+    // the already-large base. If the smaller graph's nodes are already all
+    // present in the base (e.g. both operands derive from the same graph), the
+    // append loop simply skips them and returns the base unchanged.
+    auto& base = (a->nodes_.size() >= b->nodes_.size()) ? a : b;
+    const auto& other = (a->nodes_.size() >= b->nodes_.size()) ? b : a;
+
+    std::unordered_set<LazyNode*> seen;
+    seen.reserve(base->nodes_.size() + other->nodes_.size());
+    for (const auto& n : base->nodes_) {
+        seen.insert(n.get());
+    }
+    for (const auto& n : other->nodes_) {
+        if (seen.insert(n.get()).second) {
+            base->nodes_.push_back(n);
         }
-    };
-    absorb(a);
-    absorb(b);
-    return merged;
+    }
+    return base;
 }
 
 void LazyGraph::flush() {
@@ -189,17 +196,50 @@ auto LazyGraph::execute(const std::shared_ptr<LazyNode>& target) -> Tensor {
         return target->materialized();
     }
 
-    // Materialize inputs recursively (depth-first)
-    for (auto& input : target->inputs()) {
-        if (!input->is_materialized()) {
-            execute(input);
+    // Iterative post-order traversal with an explicit worklist. A previous
+    // implementation recursed into each input before executing the node, so
+    // recursion depth equalled graph depth (thousands of nodes for a long
+    // sequential network or unary-op chain) and could overflow the native
+    // stack. The explicit stack below bounds native stack usage to O(1)
+    // regardless of graph depth while preserving the "materialize only the
+    // transitive inputs of `target`" semantics (unlike flush(), which would
+    // materialize every node in the graph).
+    //
+    // Each stack frame is visited twice: the first visit pushes the node back
+    // with `expanded=true` after pushing its not-yet-materialized inputs; the
+    // second visit (after all inputs are materialized) executes the node.
+    // Each frame carries the owning shared_ptr (so the node stays alive and
+    // execute_node receives a valid handle) plus an `expanded` flag. A node's
+    // inputs() already returns shared_ptr handles, so no lookup is needed.
+    std::vector<std::pair<std::shared_ptr<LazyNode>, bool>> stack;
+    stack.emplace_back(target, false);
+    std::unordered_set<LazyNode*> in_progress;
+
+    while (!stack.empty()) {
+        auto [node, expanded] = std::move(stack.back());
+        stack.pop_back();
+
+        if (node->is_materialized()) continue;
+
+        if (!expanded) {
+            // Re-push this node to be executed after its inputs.
+            stack.emplace_back(node, true);
+            in_progress.insert(node.get());
+            for (auto& input : node->inputs()) {
+                if (!input->is_materialized() &&
+                    in_progress.find(input.get()) == in_progress.end()) {
+                    stack.emplace_back(input, false);
+                }
+            }
+        } else {
+            // All inputs are materialized at this point.
+            auto result = execute_node(node);
+            node->set_materialized(std::move(result));
+            in_progress.erase(node.get());
         }
     }
 
-    // Execute this node
-    auto result = execute_node(target);
-    target->set_materialized(result);
-    return result;
+    return target->materialized();
 }
 
 auto LazyGraph::execute_node(const std::shared_ptr<LazyNode>& node) -> Tensor {
@@ -234,6 +274,17 @@ auto LazyGraph::execute_node(const std::shared_ptr<LazyNode>& node) -> Tensor {
         if (promoted != in) {
             input_tensors[0] = input_tensors[0].to(promoted);
         }
+    }
+
+    // Mirror eager matmul exactly: lazy::matmul records output dtype via
+    // promote_types() and shape via matmul_shape() (which supports broadcasted
+    // batch dims), so the graph accepts mixed-dtype and 3D/4D batched inputs.
+    // The raw cpu::matmul_kernel does NOT do dtype promotion or bmm
+    // decomposition — it throws on dtype mismatch and ndim != 2. Route through
+    // tenzor::matmul (which promotes inputs and dispatches 3D+ through bmm) so
+    // materialization matches the recorded node and the eager result.
+    if (op == OpId::MatMul && input_tensors.size() == 2) {
+        return tenzor::matmul(input_tensors[0], input_tensors[1]);
     }
 
     try {
@@ -516,11 +567,13 @@ auto sum(const LazyTensor& a, std::optional<int64_t> dim) -> LazyTensor {
             throw std::out_of_range("LazyTensor::sum: dim out of range");
         }
         out_shape.erase(out_shape.begin() + d);
-        if (out_shape.empty()) out_shape.push_back(1);
+        // keepdim=false: removing the last/only axis yields a 0-D scalar {},
+        // matching compute_reduction_shape. No {1} fallback (that would record
+        // ndim 1 while materialize() yields ndim 0).
         attrs.set(AttrKey::Dim, d);
     } else {
-        out_shape = {1};  // full reduction — Sum kernel sentinel is the
-                          // default LLONG_MIN, no AttrKey::Dim needed.
+        out_shape = {};  // full reduction -> 0-D scalar (Sum kernel sentinel is
+                         // the default LLONG_MIN, no AttrKey::Dim needed).
     }
     attrs.set(AttrKey::Keepdim, false);
     // Record the promoted output dtype (small-int -> Int64) so LazyTensor::dtype()
@@ -544,10 +597,11 @@ auto mean(const LazyTensor& a, std::optional<int64_t> dim) -> LazyTensor {
             throw std::out_of_range("LazyTensor::mean: dim out of range");
         }
         out_shape.erase(out_shape.begin() + d);
-        if (out_shape.empty()) out_shape.push_back(1);
+        // keepdim=false: removing the last/only axis yields a 0-D scalar {},
+        // matching compute_reduction_shape. No {1} fallback.
         attrs.set(AttrKey::Dim, d);
     } else {
-        out_shape = {1};
+        out_shape = {};  // full reduction -> 0-D scalar
     }
     attrs.set(AttrKey::Keepdim, false);
     // Record the promoted output dtype (integer/bool -> Float32) so it matches

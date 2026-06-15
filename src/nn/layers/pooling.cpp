@@ -152,6 +152,19 @@ auto MaxPool2d::forward_impl(const Variable& input) -> Variable {
     fwd_attrs.set(AttrKey::KernelSize, kernel_size_h_);
     fwd_attrs.set(AttrKey::Stride,     stride_h_);
     fwd_attrs.set(AttrKey::Padding,    padding_h_);
+    // Propagate ceil_mode so backends that honor it (Vulkan, MPS) size the
+    // output with the ceil formula. CPU/CUDA(cuDNN)/ROCm/OneAPI pooling kernels
+    // use the floor formula and ignore this attr, so reject ceil_mode=true on
+    // those backends rather than silently producing a floor-sized output.
+    fwd_attrs.set(AttrKey::CeilMode, ceil_mode_ ? int64_t{1} : int64_t{0});
+    if (ceil_mode_) {
+        const auto dt = contig_input.tensor().device().type;
+        if (dt != Device::Type::Vulkan && dt != Device::Type::MPS) {
+            throw std::runtime_error(
+                "MaxPool2d: ceil_mode=true is not supported on this backend "
+                "(only Vulkan and MPS honor it); use ceil_mode=false");
+        }
+    }
 
     auto dispatch_result = dispatch_to_device(OpId::MaxPool2dForward,
         contig_input.tensor().device().type, inputs, fwd_attrs);
@@ -376,6 +389,60 @@ public:
                     }
                 }
             }
+        } else if (dtype == DType::BFloat16) {
+            // BFloat16 widen/compute(F32)/narrow: the forward CPU kernel handles
+            // BFloat16, but without this branch the backward fell through and
+            // returned the all-zero `grad_input`, silently killing training.
+            // Accumulate in Float32 against an F32 grad_output view, then cast
+            // the result back to BFloat16.
+            Tensor grad_out_f32 = grad_output.to(DType::Float32);
+            Tensor grad_in_f32 = zeros({N, C, H_in_, W_in_}, DType::Float32,
+                                       grad_output.device());
+            float* grad_input_data = grad_in_f32.data<float>();
+            const float* grad_output_data = grad_out_f32.data<float>();
+
+            for (int64_t n = 0; n < N; ++n) {
+                for (int64_t c = 0; c < C; ++c) {
+                    for (int64_t h_out = 0; h_out < H_out; ++h_out) {
+                        for (int64_t w_out = 0; w_out < W_out; ++w_out) {
+                            int64_t h_start = h_out * stride_h_ - padding_h_;
+                            int64_t w_start = w_out * stride_w_ - padding_w_;
+                            int64_t h_end = h_start + kernel_h_;
+                            int64_t w_end = w_start + kernel_w_;
+
+                            int64_t valid_count = 0;
+                            for (int64_t h = h_start; h < h_end; ++h) {
+                                for (int64_t w = w_start; w < w_end; ++w) {
+                                    if (h >= 0 && h < H_in_ && w >= 0 && w < W_in_) {
+                                        valid_count++;
+                                    }
+                                }
+                            }
+                            int64_t divisor = count_include_pad_
+                                ? (kernel_h_ * kernel_w_)
+                                : valid_count;
+                            if (divisor <= 0) continue;
+
+                            int64_t out_idx = ((n * C + c) * H_out + h_out) * W_out + w_out;
+                            float grad_val = grad_output_data[out_idx] / static_cast<float>(divisor);
+
+                            for (int64_t h = h_start; h < h_end; ++h) {
+                                for (int64_t w = w_start; w < w_end; ++w) {
+                                    if (h >= 0 && h < H_in_ && w >= 0 && w < W_in_) {
+                                        int64_t input_idx = ((n * C + c) * H_in_ + h) * W_in_ + w;
+                                        grad_input_data[input_idx] += grad_val;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            grad_input = grad_in_f32.to(DType::BFloat16);
+        } else {
+            throw std::runtime_error(
+                "AvgPool2dBackward (CPU): unsupported gradient dtype");
         }
 
         return {grad_input};
@@ -607,7 +674,10 @@ public:
                     }
                 }
             }
-        } else if (dtype == DType::Float16) {
+        } else if (dtype == DType::Float16 || dtype == DType::BFloat16) {
+            // Widen to Float32 for accumulation, then narrow back to the
+            // original half-precision dtype (forward accepts BFloat16, so the
+            // backward must too).
             auto grad_output_f32 = grad_output_cpu.to(DType::Float32);
             auto grad_input_f32 = zeros({N, C, H_in_, W_in_}, DType::Float32, Device::cpu());
 
@@ -638,7 +708,7 @@ public:
                 }
             }
 
-            grad_input = grad_input_f32.to(DType::Float16);
+            grad_input = grad_input_f32.to(dtype);
         } else {
             throw std::runtime_error("AdaptiveAvgPool2dBackward: Unsupported dtype");
         }
@@ -1117,6 +1187,17 @@ auto MaxPool3d::forward_impl(const Variable& input) -> Variable {
     fwd_attrs.set(AttrKey::PaddingD, padding_d_);
     fwd_attrs.set(AttrKey::PaddingH, padding_h_);
     fwd_attrs.set(AttrKey::PaddingW, padding_w_);
+    // Propagate ceil_mode so backends that honor it (Vulkan, MPS) size the
+    // output with the ceil formula. CPU/CUDA(cuDNN)/ROCm/OneAPI pooling kernels
+    // use the floor formula and ignore this attr, so reject ceil_mode=true on
+    // those backends rather than silently producing a floor-sized output.
+    fwd_attrs.set(AttrKey::CeilMode, ceil_mode_ ? int64_t{1} : int64_t{0});
+    if (ceil_mode_ && device.type != Device::Type::Vulkan &&
+        device.type != Device::Type::MPS) {
+        throw std::runtime_error(
+            "MaxPool3d: ceil_mode=true is not supported on this backend "
+            "(only Vulkan and MPS honor it); use ceil_mode=false");
+    }
 
     std::vector<Tensor> inputs = {input.tensor()};
     auto fwd_result = dispatch_to_device(OpId::MaxPool3dForward, device.type, inputs, fwd_attrs);
@@ -1239,6 +1320,17 @@ auto MaxPool1d::forward_impl(const Variable& input) -> Variable {
     fwd_attrs.set(AttrKey::KernelSize, kernel_size_);
     fwd_attrs.set(AttrKey::Stride, stride_);
     fwd_attrs.set(AttrKey::Padding, padding_);
+    // Propagate ceil_mode so backends that honor it (Vulkan, MPS) size the
+    // output with the ceil formula. CPU/CUDA(cuDNN)/ROCm/OneAPI pooling kernels
+    // use the floor formula and ignore this attr, so reject ceil_mode=true on
+    // those backends rather than silently producing a floor-sized output.
+    fwd_attrs.set(AttrKey::CeilMode, ceil_mode_ ? int64_t{1} : int64_t{0});
+    if (ceil_mode_ && device.type != Device::Type::Vulkan &&
+        device.type != Device::Type::MPS) {
+        throw std::runtime_error(
+            "MaxPool1d: ceil_mode=true is not supported on this backend "
+            "(only Vulkan and MPS honor it); use ceil_mode=false");
+    }
 
     std::vector<Tensor> inputs = {input.tensor()};
     auto fwd_result = dispatch_to_device(OpId::MaxPool1dForward, device.type, inputs, fwd_attrs);

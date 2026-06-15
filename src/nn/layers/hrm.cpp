@@ -320,35 +320,35 @@ auto RotaryPositionEmbedding::forward(const Variable& x, int64_t seq_offset) -> 
     auto cos_slice = cos_cache_.slice(0, seq_offset, seq_offset + seq_len).to(device);
     auto sin_slice = sin_cache_.slice(0, seq_offset, seq_offset + seq_len).to(device);
 
-    // Split x into two halves for rotation
-    // x1, x2 = x[..., :dim/2], x[..., dim/2:]
-    auto x_data = x.tensor();
+    // Build the entire rotation on the autograd Variable path so grad_fn is
+    // preserved end-to-end. cos/sin are constant (no-grad) Variables.
+    const int64_t half = head_dim / 2;
 
-    // Reshape for rotation: treat last dim as (dim/2, 2)
-    auto x_reshaped = x_data.view({batch, seq_len, n_heads, head_dim / 2, 2});
+    // Reshape for rotation: treat last dim as (dim/2, 2) — autograd-aware.
+    auto x_reshaped = tenzor::reshape(x, {batch, seq_len, n_heads, half, 2});
 
-    // Get x1 (even indices) and x2 (odd indices)
-    // Using tenzor::select function instead of member function
-    auto x1 = tenzor::select(x_reshaped, -1, 0);  // [..., 0]
-    auto x2 = tenzor::select(x_reshaped, -1, 1);  // [..., 1]
+    // Get x1 (index 0) and x2 (index 1) along the trailing pair axis (dim 4),
+    // keeping grad_fn via autograd slice + squeeze.
+    auto x1 = tenzor::squeeze(tenzor::slice(x_reshaped, 4, 0, 1), 4);  // (b,s,h,half)
+    auto x2 = tenzor::squeeze(tenzor::slice(x_reshaped, 4, 1, 2), 4);  // (b,s,h,half)
 
-    // Broadcast cos/sin to match x shape
-    // cos_slice: (seq_len, dim/2) -> (1, seq_len, 1, dim/2)
-    auto cos_broadcast = tenzor::unsqueeze(tenzor::unsqueeze(cos_slice, 0), 2);
-    auto sin_broadcast = tenzor::unsqueeze(tenzor::unsqueeze(sin_slice, 0), 2);
+    // Broadcast cos/sin to match x shape:
+    // cos_slice: (seq_len, half) -> (1, seq_len, 1, half)
+    Variable cos_v(cos_slice, /*requires_grad=*/false);
+    Variable sin_v(sin_slice, /*requires_grad=*/false);
+    auto cos_broadcast = tenzor::unsqueeze(tenzor::unsqueeze(cos_v, 0), 2);
+    auto sin_broadcast = tenzor::unsqueeze(tenzor::unsqueeze(sin_v, 0), 2);
 
-    // Apply rotation:
+    // Apply rotation (Variable arithmetic, autograd-aware):
     // x_rotated[..., 0] = x1 * cos - x2 * sin
     // x_rotated[..., 1] = x1 * sin + x2 * cos
-    auto rot1 = x1 * cos_broadcast - x2 * sin_broadcast;
-    auto rot2 = x1 * sin_broadcast + x2 * cos_broadcast;
+    auto rot1 = x1 * cos_broadcast - x2 * sin_broadcast;  // (b,s,h,half)
+    auto rot2 = x1 * sin_broadcast + x2 * cos_broadcast;  // (b,s,h,half)
 
-    // Stack back together
-    std::vector<Tensor> to_stack = {rot1, rot2};
-    auto rotated = tenzor::stack(to_stack, -1);
-    auto result = rotated.view({batch, seq_len, n_heads, head_dim});
-
-    return Variable(result, x.requires_grad());
+    // Stack back together along a new trailing pair axis, then flatten to
+    // head_dim. cat of two (b,s,h,half,1) tensors along dim 4 -> (b,s,h,half,2).
+    auto rotated = tenzor::cat({tenzor::unsqueeze(rot1, 4), tenzor::unsqueeze(rot2, 4)}, 4);
+    return tenzor::reshape(rotated, {batch, seq_len, n_heads, head_dim});
 }
 
 auto RotaryPositionEmbedding::forward_impl(const Variable& input) -> Variable {

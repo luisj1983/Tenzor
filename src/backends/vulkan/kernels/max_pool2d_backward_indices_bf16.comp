@@ -6,7 +6,7 @@
 layout(local_size_x_id = 0) in;
 
 layout(binding = 0) buffer GradOutput { uint grad_output[]; };   // Packed bfloat16 pairs
-layout(binding = 1) buffer Indices { uint indices_data[]; };     // Packed bfloat16 pairs
+layout(binding = 1) buffer Indices { int indices_data[]; };      // Int32 argmax indices (forward stores Int32)
 layout(binding = 2) buffer GradInput { float grad_input[]; };    // Work in float32 for atomic ops
 
 layout(push_constant) uniform PushConstants {
@@ -54,12 +54,8 @@ void main() {
     uint grad_half = (grad_half_idx == 0) ? (grad_packed & 0xFFFFu) : (grad_packed >> 16);
     float grad = half_to_float(grad_half);
 
-    // Read index from packed bfloat16
-    uint idx_word_idx = idx / 2;
-    uint idx_half_idx = idx % 2;
-    uint idx_packed = indices_data[idx_word_idx];
-    uint idx_half = (idx_half_idx == 0) ? (idx_packed & 0xFFFFu) : (idx_packed >> 16);
-    int target_idx = int(half_to_float(idx_half));
+    // Read Int32 index directly (forward creates an Int32 indices tensor)
+    int target_idx = indices_data[idx];
 
     if (target_idx >= 0 && target_idx < int(params.grad_input_size)) {
         atomicAdd(grad_input[target_idx], grad);

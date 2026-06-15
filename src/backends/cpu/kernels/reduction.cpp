@@ -6,6 +6,7 @@
 #include <limits>
 #include <stdexcept>
 #include <cmath>
+#include <type_traits>
 #include <vector>
 
 #ifdef _OPENMP
@@ -451,7 +452,11 @@ static double simd_min_f64_avx2(const double* data, int64_t n) {
 // Parallel SIMD sum for Float64
 static double parallel_simd_sum_f64(const double* data, int64_t n) {
     if (n == 0) return 0.0;
-    if (n < REDUCTION_OMP_THRESHOLD) {
+    // Deterministic mode: force the single-threaded path for bit-identical
+    // results regardless of OMP_NUM_THREADS. Parallel floating-point reductions
+    // are non-associative; different thread partitionings produce different
+    // rounding (matches parallel_simd_sum_f32).
+    if (n < REDUCTION_OMP_THRESHOLD || ::tenzor::is_deterministic()) {
 #ifdef TENZOR_REDUCTION_AVX512
         return simd_sum_f64_avx512(data, n);
 #elif defined(TENZOR_REDUCTION_AVX2)
@@ -1460,18 +1465,37 @@ void max_along_dim(const T* input_data,
             in_idx += indices[d] * input_strides[d];
         }
         T max_val = input_data[in_idx];
-
-        for (int64_t i = 1; i < dim_size; i++) {
-            indices[dim] = i;
-            in_idx = 0;
-            for (int64_t d = 0; d < ndim; d++) {
-                in_idx += indices[d] * input_strides[d];
+        // For floating-point types propagate NaN to match the full-reduction
+        // and Float16/BFloat16 dimensional paths; `x > max_val` is false for
+        // any NaN so a bare comparison would silently drop NaN elements.
+        if constexpr (std::is_floating_point_v<T>) {
+            bool saw_nan = std::isnan(max_val);
+            for (int64_t i = 1; i < dim_size && !saw_nan; i++) {
+                indices[dim] = i;
+                in_idx = 0;
+                for (int64_t d = 0; d < ndim; d++) {
+                    in_idx += indices[d] * input_strides[d];
+                }
+                const T v = input_data[in_idx];
+                if (std::isnan(v)) { saw_nan = true; break; }
+                if (v > max_val) {
+                    max_val = v;
+                }
             }
-            if (input_data[in_idx] > max_val) {
-                max_val = input_data[in_idx];
+            output_data[out_idx] = saw_nan ? std::numeric_limits<T>::quiet_NaN() : max_val;
+        } else {
+            for (int64_t i = 1; i < dim_size; i++) {
+                indices[dim] = i;
+                in_idx = 0;
+                for (int64_t d = 0; d < ndim; d++) {
+                    in_idx += indices[d] * input_strides[d];
+                }
+                if (input_data[in_idx] > max_val) {
+                    max_val = input_data[in_idx];
+                }
             }
+            output_data[out_idx] = max_val;
         }
-        output_data[out_idx] = max_val;
     }
 }
 
@@ -1731,18 +1755,37 @@ void min_along_dim(const T* input_data,
             in_idx += indices[d] * input_strides[d];
         }
         T min_val = input_data[in_idx];
-
-        for (int64_t i = 1; i < dim_size; i++) {
-            indices[dim] = i;
-            in_idx = 0;
-            for (int64_t d = 0; d < ndim; d++) {
-                in_idx += indices[d] * input_strides[d];
+        // For floating-point types propagate NaN to match the full-reduction
+        // and Float16/BFloat16 dimensional paths; `x < min_val` is false for
+        // any NaN so a bare comparison would silently drop NaN elements.
+        if constexpr (std::is_floating_point_v<T>) {
+            bool saw_nan = std::isnan(min_val);
+            for (int64_t i = 1; i < dim_size && !saw_nan; i++) {
+                indices[dim] = i;
+                in_idx = 0;
+                for (int64_t d = 0; d < ndim; d++) {
+                    in_idx += indices[d] * input_strides[d];
+                }
+                const T v = input_data[in_idx];
+                if (std::isnan(v)) { saw_nan = true; break; }
+                if (v < min_val) {
+                    min_val = v;
+                }
             }
-            if (input_data[in_idx] < min_val) {
-                min_val = input_data[in_idx];
+            output_data[out_idx] = saw_nan ? std::numeric_limits<T>::quiet_NaN() : min_val;
+        } else {
+            for (int64_t i = 1; i < dim_size; i++) {
+                indices[dim] = i;
+                in_idx = 0;
+                for (int64_t d = 0; d < ndim; d++) {
+                    in_idx += indices[d] * input_strides[d];
+                }
+                if (input_data[in_idx] < min_val) {
+                    min_val = input_data[in_idx];
+                }
             }
+            output_data[out_idx] = min_val;
         }
-        output_data[out_idx] = min_val;
     }
 }
 

@@ -658,12 +658,24 @@ auto spgemm_kernel(const SparseTensor& A, const SparseTensor& B,
     int64_t* d_col_ub = sycl::malloc_device<int64_t>(total_nnz_ub, queue);
     int64_t* d_actual_nnz = sycl::malloc_device<int64_t>(M, queue);
 
-    // Pass 3 + Compact: Fill with dedup (templated by dtype)
+    // Pass 3 + Compact: Fill with dedup (templated by dtype).
+    //
+    // Dedup uses a per-(row,col) dense marker rather than a linear scan over the
+    // already-written columns. The old scan was O(K^2) per row (K = distinct
+    // output columns); with the marker each product term costs O(1), so a row is
+    // O(nnz_products). Each (row,col) cell is owned by exactly one work-item
+    // (one row per item), so the M*N marker needs no per-row reset and no atomics.
+    // d_col_marker[row*N + col] holds (relative write slot + 1), 0 meaning unseen.
+    int64_t* d_col_marker = sycl::malloc_device<int64_t>(M * N, queue);
+    queue.memset(d_col_marker, 0, static_cast<size_t>(M * N) * sizeof(int64_t)).wait();
+
     auto run_fill_and_compact = [&]<typename T>() {
         T* d_vals_ub = sycl::malloc_device<T>(total_nnz_ub, queue);
         const T* av = a_vals.data<T>();
         const T* bv = b_vals.data<T>();
         const int64_t* bcol = b_col.data<int64_t>();
+        int64_t* col_marker = d_col_marker;
+        const int64_t cols = N;
 
         queue.parallel_for(sycl::range<1>(M), [=](sycl::id<1> idx) {
             int64_t row = idx[0];
@@ -671,6 +683,7 @@ auto spgemm_kernel(const SparseTensor& A, const SparseTensor& B,
             int64_t a_start = ac[row];
             int64_t a_end = ac[row + 1];
             int64_t write_pos = c_start;
+            int64_t marker_base = row * cols;
 
             for (int64_t ja = a_start; ja < a_end; ++ja) {
                 int64_t k = acol[ja];
@@ -682,17 +695,14 @@ auto spgemm_kernel(const SparseTensor& A, const SparseTensor& B,
                     int64_t col = bcol[jb];
                     T val = a_val * bv[jb];
 
-                    bool found = false;
-                    for (int64_t p = c_start; p < write_pos; ++p) {
-                        if (d_col_ub[p] == col) {
-                            d_vals_ub[p] += val;
-                            found = true;
-                            break;
-                        }
-                    }
-                    if (!found) {
+                    int64_t slot = col_marker[marker_base + col];
+                    if (slot != 0) {
+                        // Already written this column in this row: accumulate.
+                        d_vals_ub[slot - 1] += val;
+                    } else {
                         d_col_ub[write_pos] = col;
                         d_vals_ub[write_pos] = val;
+                        col_marker[marker_base + col] = write_pos + 1;
                         write_pos++;
                     }
                 }
@@ -751,6 +761,7 @@ auto spgemm_kernel(const SparseTensor& A, const SparseTensor& B,
     sycl::free(d_crow_ub, queue);
     sycl::free(d_col_ub, queue);
     sycl::free(d_actual_nnz, queue);
+    sycl::free(d_col_marker, queue);
 
     return result;
 #endif

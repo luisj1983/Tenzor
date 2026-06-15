@@ -547,21 +547,20 @@ auto adaptive_avg_pool2d(const Variable& input,
     int64_t out_h = output_size.first;
     int64_t out_w = output_size.second;
 
-    // Compute adaptive kernel_size and stride
-    int64_t kernel_h = in_h - (out_h - 1) * (in_h / out_h);
-    int64_t kernel_w = in_w - (out_w - 1) * (in_w / out_w);
+    // Validate output size up front: the kernel/stride computation below
+    // divides by out_h/out_w, so a non-positive output size would trigger an
+    // integer divide-by-zero (SIGFPE) or produce a nonsensical negative stride.
+    if (out_h <= 0 || out_w <= 0) {
+        throw std::invalid_argument(
+            "F::adaptive_avg_pool2d expects positive output_size (H > 0, W > 0)");
+    }
+
+    // Use kernel_size = ceil(in/out), stride = floor(in/out) for exact output size.
+    // Division is now safe because out_h/out_w are guaranteed positive above.
     int64_t stride_h = in_h / out_h;
     int64_t stride_w = in_w / out_w;
-
-    // Use kernel_size = ceil(in/out), stride = floor(in/out) for exact output size
-    if (out_h > 0) {
-        stride_h = in_h / out_h;
-        kernel_h = in_h - (out_h - 1) * stride_h;
-    }
-    if (out_w > 0) {
-        stride_w = in_w / out_w;
-        kernel_w = in_w - (out_w - 1) * stride_w;
-    }
+    int64_t kernel_h = in_h - (out_h - 1) * stride_h;
+    int64_t kernel_w = in_w - (out_w - 1) * stride_w;
 
     return avg_pool2d(input, {kernel_h, kernel_w}, {stride_h, stride_w}, {0, 0});
 }

@@ -3965,7 +3965,11 @@ auto var_kernel(const Tensor& input, int64_t dim, bool keepdim, int64_t correcti
                 output_shape.push_back(input_shape[d]);
             }
         }
-        if (output_shape.empty()) output_shape.push_back(1);
+        // Rank-collapse-to-scalar (reducing the only dim with keepdim=false)
+        // must yield a scalar shape {} — matching var full-reduction and
+        // sum/mean/compute_reduction_shape and the CPU convention — NOT {1}.
+        // A scalar tensor still has numel 1 (empty-product), so output_size
+        // below is correctly 1 for the single-output kernel launch.
 
         int64_t output_size = 1;
         for (auto s : output_shape) output_size *= s;
@@ -4397,7 +4401,9 @@ auto norm_kernel(const Tensor& input, float p, int64_t dim, bool keepdim, cudaSt
                 output_shape.push_back(shape_span[d]);
             }
         }
-        if (output_shape.empty()) output_shape.push_back(1);
+        // Rank-collapse-to-scalar (reducing the only dim, keepdim=false) yields
+        // a scalar shape {} to match sum/mean/var and the CPU convention. A
+        // scalar tensor has numel 1 (empty-product), so output_size is 1.
 
         int64_t output_size = 1;
         for (auto s : output_shape) output_size *= s;
@@ -4435,7 +4441,7 @@ auto norm_kernel(const Tensor& input, float p, int64_t dim, bool keepdim, cudaSt
     if (keepdim) {
         output_shape.resize(shape.size(), 1);
     } else {
-        output_shape = {1};
+        output_shape = {};  // Scalar, matching sum/mean/var full-reduction
     }
 
     Tensor output(output_shape, dtype, device);
@@ -4688,6 +4694,128 @@ static void launch_argsort(const T* d_input, int64_t* d_output, int64_t n, bool 
 }
 
 
+// Gather the dim slices of a (possibly strided-logical but contiguous-input)
+// tensor into a segment-major buffer [num_slices * dim_size], where slice
+// s = outer*inner_size + inner holds the dim_size elements
+// input[outer*dim_size*inner_size + i*inner_size + inner], and seed per-slice
+// local indices 0..dim_size-1. This lets cub::DeviceSegmentedRadixSort sort
+// each slice independently and produce *local* (per-axis) indices, matching the
+// CPU argsort_along_dim contract.
+template<typename T>
+__global__ void argsort_gather_kernel(const T* __restrict__ input,
+                                      T* __restrict__ gathered,
+                                      int64_t* __restrict__ local_idx,
+                                      int64_t outer_size, int64_t dim_size,
+                                      int64_t inner_size) {
+    const int64_t total = outer_size * dim_size * inner_size;
+    for (int64_t g = blockIdx.x * blockDim.x + threadIdx.x; g < total;
+         g += blockDim.x * gridDim.x) {
+        // g indexes the segment-major buffer: segment = g / dim_size, i = g % dim_size
+        int64_t seg = g / dim_size;
+        int64_t i = g % dim_size;
+        int64_t outer = seg / inner_size;
+        int64_t inner = seg % inner_size;
+        int64_t in_off = outer * dim_size * inner_size + i * inner_size + inner;
+        gathered[g] = input[in_off];
+        local_idx[g] = i;
+    }
+}
+
+// Scatter the per-segment sorted local indices back to the strided output
+// positions (same layout as the input slices).
+__global__ void argsort_scatter_kernel(const int64_t* __restrict__ sorted_local,
+                                       int64_t* __restrict__ output,
+                                       int64_t outer_size, int64_t dim_size,
+                                       int64_t inner_size) {
+    const int64_t total = outer_size * dim_size * inner_size;
+    for (int64_t g = blockIdx.x * blockDim.x + threadIdx.x; g < total;
+         g += blockDim.x * gridDim.x) {
+        int64_t seg = g / dim_size;
+        int64_t i = g % dim_size;
+        int64_t outer = seg / inner_size;
+        int64_t inner = seg % inner_size;
+        int64_t out_off = outer * dim_size * inner_size + i * inner_size + inner;
+        output[out_off] = sorted_local[g];
+    }
+}
+
+__global__ void argsort_segment_offsets_kernel(int* __restrict__ offsets,
+                                               int64_t num_segments,
+                                               int64_t dim_size) {
+    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx <= num_segments) {
+        offsets[idx] = static_cast<int>(idx * dim_size);
+    }
+}
+
+// Per-dim argsort: sort each length-dim_size slice independently, emitting
+// per-slice local indices in [0, dim_size).
+template<typename T>
+static void launch_argsort_along_dim(const T* d_input, int64_t* d_output,
+                                     int64_t outer_size, int64_t dim_size,
+                                     int64_t inner_size, bool descending,
+                                     cudaStream_t stream) {
+    const int64_t num_segments = outer_size * inner_size;
+    const int64_t total = num_segments * dim_size;
+    if (total == 0) return;
+    if (dim_size == 1) {
+        // Each slice trivially sorts to local index 0.
+        CUDA_CHECK(cudaMemsetAsync(d_output, 0, total * sizeof(int64_t), stream));
+        return;
+    }
+
+    backend::CachedMemoryGuard gathered_guard(total * sizeof(T));
+    auto* d_gathered = static_cast<T*>(gathered_guard.get());
+    backend::CachedMemoryGuard local_idx_guard(total * sizeof(int64_t));
+    auto* d_local_idx = static_cast<int64_t*>(local_idx_guard.get());
+    backend::CachedMemoryGuard keys_out_guard(total * sizeof(T));
+    auto* d_keys_out = static_cast<T*>(keys_out_guard.get());
+    backend::CachedMemoryGuard sorted_local_guard(total * sizeof(int64_t));
+    auto* d_sorted_local = static_cast<int64_t*>(sorted_local_guard.get());
+    backend::CachedMemoryGuard offsets_guard((num_segments + 1) * sizeof(int));
+    auto* d_offsets = static_cast<int*>(offsets_guard.get());
+
+    int gather_blocks = static_cast<int>((total + REDUCTION_BLOCK_SIZE - 1) / REDUCTION_BLOCK_SIZE);
+    argsort_gather_kernel<T><<<gather_blocks, REDUCTION_BLOCK_SIZE, 0, stream>>>(
+        d_input, d_gathered, d_local_idx, outer_size, dim_size, inner_size);
+    CUDA_CHECK(cudaGetLastError());
+
+    int off_blocks = static_cast<int>((num_segments + 1 + REDUCTION_BLOCK_SIZE - 1) / REDUCTION_BLOCK_SIZE);
+    argsort_segment_offsets_kernel<<<off_blocks, REDUCTION_BLOCK_SIZE, 0, stream>>>(
+        d_offsets, num_segments, dim_size);
+    CUDA_CHECK(cudaGetLastError());
+
+    void* d_temp = nullptr;
+    size_t temp_bytes = 0;
+    if (descending) {
+        cub::DeviceSegmentedRadixSort::SortPairsDescending(
+            d_temp, temp_bytes, d_gathered, d_keys_out, d_local_idx, d_sorted_local,
+            static_cast<int>(total), static_cast<int>(num_segments),
+            d_offsets, d_offsets + 1, 0, sizeof(T) * 8, stream);
+        backend::CachedMemoryGuard temp_guard(temp_bytes);
+        d_temp = temp_guard.get();
+        cub::DeviceSegmentedRadixSort::SortPairsDescending(
+            d_temp, temp_bytes, d_gathered, d_keys_out, d_local_idx, d_sorted_local,
+            static_cast<int>(total), static_cast<int>(num_segments),
+            d_offsets, d_offsets + 1, 0, sizeof(T) * 8, stream);
+    } else {
+        cub::DeviceSegmentedRadixSort::SortPairs(
+            d_temp, temp_bytes, d_gathered, d_keys_out, d_local_idx, d_sorted_local,
+            static_cast<int>(total), static_cast<int>(num_segments),
+            d_offsets, d_offsets + 1, 0, sizeof(T) * 8, stream);
+        backend::CachedMemoryGuard temp_guard(temp_bytes);
+        d_temp = temp_guard.get();
+        cub::DeviceSegmentedRadixSort::SortPairs(
+            d_temp, temp_bytes, d_gathered, d_keys_out, d_local_idx, d_sorted_local,
+            static_cast<int>(total), static_cast<int>(num_segments),
+            d_offsets, d_offsets + 1, 0, sizeof(T) * 8, stream);
+    }
+
+    argsort_scatter_kernel<<<gather_blocks, REDUCTION_BLOCK_SIZE, 0, stream>>>(
+        d_sorted_local, d_output, outer_size, dim_size, inner_size);
+    CUDA_CHECK(cudaGetLastError());
+}
+
 auto argsort_kernel(const Tensor& input, int64_t dim, bool descending, cudaStream_t stream) -> Tensor {
     auto [resolved_stream, stream_guard] = resolve_stream(stream, input);
     stream = resolved_stream;
@@ -4695,28 +4823,62 @@ auto argsort_kernel(const Tensor& input, int64_t dim, bool descending, cudaStrea
     const auto dtype = input.dtype();
     const auto& device = input.device();
     const auto& input_shape = input.shape();
+    const int64_t ndim = static_cast<int64_t>(input_shape.size());
     const int64_t n = input.numel();
 
-    // Currently only supports sorting the flattened tensor (dim=-1 or single dimension)
-    // For multi-dim support, would need to sort along a specific axis
+    // Normalize and validate dim, mirroring the CPU argsort contract.
+    if (dim < 0) dim += ndim;
+    if (ndim == 0 || dim < 0 || dim >= ndim) {
+        throw std::out_of_range("argsort: dimension out of range");
+    }
+
+    // CUB radix sort consumes a contiguous buffer; the gather/scatter offsets
+    // below assume packed input strides.
+    Tensor input_cont = input.is_contiguous() ? input : input.contiguous();
+
     Tensor output(std::vector<int64_t>(input_shape.begin(), input_shape.end()), DType::Int64, device);
+
+    // Decompose into outer/dim/inner. For the common case where the sort axis is
+    // the only non-trivial dimension (1-D, or all other dims size 1), the
+    // segment-major gather is the identity and flat indices already equal the
+    // per-axis indices, so we keep the simpler whole-buffer radix sort path.
+    const int64_t dim_size = input_shape[dim];
+    int64_t inner_size = 1;
+    for (int64_t d = dim + 1; d < ndim; ++d) inner_size *= input_shape[d];
+    const int64_t outer_size = (dim_size == 0) ? 0 : (n / (dim_size * (inner_size == 0 ? 1 : inner_size)));
+    const bool single_slice = (n == dim_size);  // exactly one slice spans the whole tensor
 
     switch (dtype) {
         case DType::Float32:
-            launch_argsort(input.data<float>(), output.data<int64_t>(), n, descending, stream);
+            if (single_slice) {
+                launch_argsort(input_cont.data<float>(), output.data<int64_t>(), n, descending, stream);
+            } else {
+                launch_argsort_along_dim(input_cont.data<float>(), output.data<int64_t>(),
+                                         outer_size, dim_size, inner_size, descending, stream);
+            }
             break;
         case DType::Float64:
-            launch_argsort(input.data<double>(), output.data<int64_t>(), n, descending, stream);
+            if (single_slice) {
+                launch_argsort(input_cont.data<double>(), output.data<int64_t>(), n, descending, stream);
+            } else {
+                launch_argsort_along_dim(input_cont.data<double>(), output.data<int64_t>(),
+                                         outer_size, dim_size, inner_size, descending, stream);
+            }
             break;
         case DType::Float16: {
             // CUB RadixSort doesn't support __half, so convert to float32 and sort that
             backend::CachedMemoryGuard d_float_buf_guard(n * sizeof(float));
             auto* d_float_buf = static_cast<float*>(d_float_buf_guard.get());
-            const __half* d_half = reinterpret_cast<const __half*>(input.data_ptr());
+            const __half* d_half = reinterpret_cast<const __half*>(input_cont.data_ptr());
             int blocks = (n + REDUCTION_BLOCK_SIZE - 1) / REDUCTION_BLOCK_SIZE;
             half_to_float_kernel<<<blocks, REDUCTION_BLOCK_SIZE, 0, stream>>>(d_half, d_float_buf, n);
             CUDA_CHECK(cudaGetLastError());
-            launch_argsort(d_float_buf, output.data<int64_t>(), n, descending, stream);
+            if (single_slice) {
+                launch_argsort(d_float_buf, output.data<int64_t>(), n, descending, stream);
+            } else {
+                launch_argsort_along_dim(d_float_buf, output.data<int64_t>(),
+                                         outer_size, dim_size, inner_size, descending, stream);
+            }
             break;
         }
         default:

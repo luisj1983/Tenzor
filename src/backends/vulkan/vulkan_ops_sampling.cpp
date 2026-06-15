@@ -1038,16 +1038,18 @@ auto VulkanBackend::dispatchNestedAttentionBackward(
                             : dispatchCast(kv_offsets.contiguous(), DType::Int32);
 
     int64_t head_dim = Q_f32.shape().back();
+    int64_t head_v = V_f32.shape().back();   // V's last dim can differ from K/Q's
     int64_t total_q = Q_f32.shape()[0];
     int64_t total_kv = K_f32.shape()[0];
     uint32_t B = static_cast<uint32_t>(q_off_i32.numel() - 1);
 
     std::vector<int64_t> q_shape(Q_f32.shape().begin(), Q_f32.shape().end());
     std::vector<int64_t> kv_shape(K_f32.shape().begin(), K_f32.shape().end());
+    std::vector<int64_t> v_shape(V_f32.shape().begin(), V_f32.shape().end());
 
     Tensor grad_Q = tenzor::zeros(q_shape, DType::Float32, Q.device());
     Tensor grad_K = tenzor::zeros(kv_shape, DType::Float32, K.device());
-    Tensor grad_V = tenzor::zeros(kv_shape, DType::Float32, V.device());
+    Tensor grad_V = tenzor::zeros(v_shape, DType::Float32, V.device());  // V's shape, not K's
 
     if (total_q == 0 || total_kv == 0 || B == 0) return {grad_Q, grad_K, grad_V};
 
@@ -1059,9 +1061,10 @@ auto VulkanBackend::dispatchNestedAttentionBackward(
         uint32_t head_dim;
         float scale;
         uint32_t causal;
+        uint32_t head_v;     // V / grad_output dim, separate from head_dim
     };
     NestedAttentionBackwardPC pc{B, static_cast<uint32_t>(head_dim), scale,
-                                  causal ? 1u : 0u};
+                                  causal ? 1u : 0u, static_cast<uint32_t>(head_v)};
 
     std::vector<std::pair<uint32_t, const void*>> bindings = {
         {0, dO_f32.data_ptr()},
@@ -1075,13 +1078,13 @@ auto VulkanBackend::dispatchNestedAttentionBackward(
         {8, kv_off_i32.data_ptr()},
     };
     std::vector<size_t> sizes = {
-        static_cast<size_t>(total_q) * static_cast<size_t>(head_dim) * sizeof(float),
-        static_cast<size_t>(total_q) * static_cast<size_t>(head_dim) * sizeof(float),
-        static_cast<size_t>(total_kv) * static_cast<size_t>(head_dim) * sizeof(float),
-        static_cast<size_t>(total_kv) * static_cast<size_t>(head_dim) * sizeof(float),
-        static_cast<size_t>(total_q) * static_cast<size_t>(head_dim) * sizeof(float),
-        static_cast<size_t>(total_kv) * static_cast<size_t>(head_dim) * sizeof(float),
-        static_cast<size_t>(total_kv) * static_cast<size_t>(head_dim) * sizeof(float),
+        static_cast<size_t>(total_q) * static_cast<size_t>(head_v) * sizeof(float),    // 0: grad_out (dO) sized by head_v
+        static_cast<size_t>(total_q) * static_cast<size_t>(head_dim) * sizeof(float),  // 1: Q
+        static_cast<size_t>(total_kv) * static_cast<size_t>(head_dim) * sizeof(float), // 2: K
+        static_cast<size_t>(total_kv) * static_cast<size_t>(head_v) * sizeof(float),   // 3: V sized by head_v
+        static_cast<size_t>(total_q) * static_cast<size_t>(head_dim) * sizeof(float),  // 4: grad_Q
+        static_cast<size_t>(total_kv) * static_cast<size_t>(head_dim) * sizeof(float), // 5: grad_K
+        static_cast<size_t>(total_kv) * static_cast<size_t>(head_v) * sizeof(float),   // 6: grad_V sized by head_v
         static_cast<size_t>(q_off_i32.numel()) * sizeof(int32_t),
         static_cast<size_t>(kv_off_i32.numel()) * sizeof(int32_t),
     };

@@ -194,10 +194,13 @@ auto GraphOptimizer::fuse_conv_batchnorm(ComputationGraph& graph) -> size_t {
         fusion_count++;
     }
 
-    // Update statistics
-    stats_.conv_batchnorm_fused += fusion_count;
-    stats_.total_optimizations += fusion_count;
-
+    // ANALYSIS-ONLY: this pass only *detects* Conv->BatchNorm patterns; it does
+    // not yet rewrite the graph (no replace_nodes/remove_node). Returning the
+    // detected count is useful for diagnostics, but we must NOT bump
+    // stats_.conv_batchnorm_fused / stats_.total_optimizations, since doing so
+    // would make OptimizationStats over-report optimizations that never
+    // happened. (Only fuse_linear_relu and eliminate_dead_code actually mutate
+    // the graph and update stats.)
     return fusion_count;
 }
 
@@ -219,8 +222,8 @@ auto GraphOptimizer::fuse_conv_relu(ComputationGraph& graph) -> size_t {
         count++;
     }
 
-    stats_.conv_relu_fused += count;
-    stats_.total_optimizations += count;
+    // ANALYSIS-ONLY: detects Conv->ReLU but does not rewrite the graph; do not
+    // pollute stats with optimizations that never happened.
     return count;
 }
 
@@ -242,8 +245,8 @@ auto GraphOptimizer::fuse_batchnorm_relu(ComputationGraph& graph) -> size_t {
         count++;
     }
 
-    stats_.batchnorm_relu_fused += count;
-    stats_.total_optimizations += count;
+    // ANALYSIS-ONLY: detects BatchNorm->ReLU but does not rewrite the graph; do
+    // not pollute stats with optimizations that never happened.
     return count;
 }
 
@@ -268,8 +271,8 @@ auto GraphOptimizer::fuse_linear_gelu(ComputationGraph& graph) -> size_t {
         count++;
     }
 
-    stats_.linear_gelu_fused += count;
-    stats_.total_optimizations += count;
+    // ANALYSIS-ONLY: detects Linear->GELU but does not rewrite the graph; do
+    // not pollute stats with optimizations that never happened.
     return count;
 }
 
@@ -297,8 +300,8 @@ auto GraphOptimizer::fuse_conv_batchnorm_relu(ComputationGraph& graph) -> size_t
         count++;
     }
 
-    stats_.conv_bn_relu_fused += count;
-    stats_.total_optimizations += count;
+    // ANALYSIS-ONLY: detects Conv->BatchNorm->ReLU but does not rewrite the
+    // graph; do not pollute stats with optimizations that never happened.
     return count;
 }
 
@@ -324,8 +327,8 @@ auto GraphOptimizer::eliminate_transpose_pairs(ComputationGraph& graph) -> size_
         count++;
     }
 
-    stats_.transpose_pairs_eliminated += count;
-    stats_.total_optimizations += count;
+    // ANALYSIS-ONLY: detects transpose pairs but does not rewrite the graph; do
+    // not pollute stats with optimizations that never happened.
     return count;
 }
 
@@ -349,8 +352,8 @@ auto GraphOptimizer::collapse_reshape_chains(ComputationGraph& graph) -> size_t 
         count++;
     }
 
-    stats_.reshape_chains_collapsed += count;
-    stats_.total_optimizations += count;
+    // ANALYSIS-ONLY: detects reshape chains but does not rewrite the graph; do
+    // not pollute stats with optimizations that never happened.
     return count;
 }
 
@@ -572,12 +575,20 @@ auto GraphOptimizer::replace_nodes(const std::vector<std::shared_ptr<GraphNode>>
     auto first = nodes.front();
     auto last = nodes.back();
 
-    // 1. Fused node inherits the last node's outgoing edges (consumers)
-    fused_node->next_nodes = last->next_nodes;
+    // Snapshot the last node's outgoing edges (the real downstream consumers)
+    // BEFORE any mutation, since remove_node below would clear them.
+    auto consumer_edges = last->next_nodes;
 
-    // 2. Replace the first node with the fused node in the graph
-    //    This updates all nodes that pointed to 'first' to now point to 'fused_node'
+    // 1. Replace the first node with the fused node in the graph.
+    //    This updates all nodes that pointed to 'first' to now point to
+    //    'fused_node'. NOTE: replace_node move-assigns first->next_nodes onto
+    //    fused_node->next_nodes (graph.cpp), so we MUST set the real consumer
+    //    edges AFTER this call, otherwise they get clobbered with the first
+    //    node's (intermediate) edges and the graph is severed downstream.
     graph.replace_node(first, fused_node);
+
+    // 2. Fused node inherits the last node's outgoing edges (consumers).
+    fused_node->next_nodes = consumer_edges;
 
     // 3. Remove intermediate and last nodes from the graph
     for (size_t i = 1; i < nodes.size(); ++i) {

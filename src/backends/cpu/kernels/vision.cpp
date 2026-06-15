@@ -593,18 +593,25 @@ static void interpolate_bilinear_backward_impl(
             const T* go = grad_out + ((n * C + c) * out_h * out_w);
             T* gi = grad_in + ((n * C + c) * in_h * in_w);
             for (int64_t h = 0; h < out_h; ++h) {
-                const Compute src_h = align_corners
+                Compute src_h = align_corners
                     ? static_cast<Compute>(h) * scale_h
                     : (static_cast<Compute>(h) + Compute(0.5)) * scale_h - Compute(0.5);
-                const int64_t h0 = static_cast<int64_t>(std::floor(src_h));
-                const int64_t h1 = h0 + 1;
+                // Mirror the forward: clamp source coord to [0, in-1] before
+                // computing the base index and fractional weight so the
+                // backward is the exact transpose at the borders. Otherwise the
+                // (1-fh)/(1-fw) mass the forward assigns entirely to row/col 0
+                // would be scattered to a dropped out-of-range tap.
+                src_h = std::clamp(src_h, Compute(0), static_cast<Compute>(in_h - 1));
+                const int64_t h0 = static_cast<int64_t>(src_h);
+                const int64_t h1 = std::min(h0 + 1, in_h - 1);
                 const Compute fh = src_h - static_cast<Compute>(h0);
                 for (int64_t w = 0; w < out_w; ++w) {
-                    const Compute src_w = align_corners
+                    Compute src_w = align_corners
                         ? static_cast<Compute>(w) * scale_w
                         : (static_cast<Compute>(w) + Compute(0.5)) * scale_w - Compute(0.5);
-                    const int64_t w0 = static_cast<int64_t>(std::floor(src_w));
-                    const int64_t w1 = w0 + 1;
+                    src_w = std::clamp(src_w, Compute(0), static_cast<Compute>(in_w - 1));
+                    const int64_t w0 = static_cast<int64_t>(src_w);
+                    const int64_t w1 = std::min(w0 + 1, in_w - 1);
                     const Compute fw = src_w - static_cast<Compute>(w0);
                     const Compute g_val = static_cast<Compute>(go[h * out_w + w]);
 
@@ -733,15 +740,20 @@ void interpolate_bicubic_backward_impl(
             const T* go = grad_out + ((n * C + c) * out_h * out_w);
             T* gi = grad_in + ((n * C + c) * in_h * in_w);
             for (int64_t h = 0; h < out_h; ++h) {
-                const Compute src_h = align_corners
+                Compute src_h = align_corners
                     ? static_cast<Compute>(h) * scale_h
                     : (static_cast<Compute>(h) + Compute(0.5)) * scale_h - Compute(0.5);
-                const int64_t hi = static_cast<int64_t>(std::floor(src_h));
+                // Mirror the forward: clamp source coord to [0, in-1] before
+                // taking the integer base, so the backward is the exact
+                // transpose of the forward at the borders.
+                src_h = std::clamp(src_h, Compute(0), static_cast<Compute>(in_h - 1));
+                const int64_t hi = static_cast<int64_t>(src_h);
                 for (int64_t w = 0; w < out_w; ++w) {
-                    const Compute src_w = align_corners
+                    Compute src_w = align_corners
                         ? static_cast<Compute>(w) * scale_w
                         : (static_cast<Compute>(w) + Compute(0.5)) * scale_w - Compute(0.5);
-                    const int64_t wi = static_cast<int64_t>(std::floor(src_w));
+                    src_w = std::clamp(src_w, Compute(0), static_cast<Compute>(in_w - 1));
+                    const int64_t wi = static_cast<int64_t>(src_w);
                     const Compute g_val = static_cast<Compute>(go[h * out_w + w]);
                     for (int64_t dy = -1; dy <= 2; ++dy) {
                         const int64_t iy = std::clamp<int64_t>(hi + dy, 0, in_h - 1);
@@ -876,77 +888,6 @@ void nearest_backward_axis_scatter(
     }
 }
 
-// ----- area backward (adaptive average pooling adjoint), any rank -----
-// Forward `area` divides each output cell's weight uniformly over the input
-// pixels whose centers fall inside the output cell's bin. Adjoint scatters
-// `grad_out / area` uniformly back to those same input pixels.
-template<typename T>
-void area_backward_impl(
-    const T* grad_out, T* grad_in,
-    int64_t N, int64_t C,
-    const std::vector<int64_t>& in_spatial,
-    const std::vector<int64_t>& out_spatial)
-{
-    using Compute = interp_acc_t<T>;
-    const int64_t spatial_dims = static_cast<int64_t>(in_spatial.size());
-    int64_t out_total = 1, in_total = 1;
-    for (int64_t s : out_spatial) out_total *= s;
-    for (int64_t s : in_spatial) in_total *= s;
-
-    for (int64_t n = 0; n < N; ++n) {
-        for (int64_t c = 0; c < C; ++c) {
-            const T* go = grad_out + ((n * C + c) * out_total);
-            T* gi = grad_in + ((n * C + c) * in_total);
-            for (int64_t out_idx = 0; out_idx < out_total; ++out_idx) {
-                // Decode out_idx into per-dim indices.
-                std::vector<int64_t> dst(spatial_dims);
-                int64_t tmp = out_idx;
-                for (int64_t d = spatial_dims - 1; d >= 0; --d) {
-                    dst[d] = tmp % out_spatial[d];
-                    tmp /= out_spatial[d];
-                }
-                // For each spatial dim, compute the [start, end) input range
-                // that maps to this output cell. PyTorch convention:
-                //   start = floor(d * in/out), end = ceil((d+1) * in/out)
-                std::vector<int64_t> starts(spatial_dims), ends(spatial_dims);
-                int64_t area = 1;
-                for (int64_t d = 0; d < spatial_dims; ++d) {
-                    const Compute ratio_lo = static_cast<Compute>(dst[d]) *
-                        static_cast<Compute>(in_spatial[d]) / static_cast<Compute>(out_spatial[d]);
-                    const Compute ratio_hi = static_cast<Compute>(dst[d] + 1) *
-                        static_cast<Compute>(in_spatial[d]) / static_cast<Compute>(out_spatial[d]);
-                    starts[d] = std::max<int64_t>(0,
-                        static_cast<int64_t>(std::floor(ratio_lo)));
-                    ends[d] = std::min<int64_t>(in_spatial[d],
-                        static_cast<int64_t>(std::ceil(ratio_hi)));
-                    area *= std::max<int64_t>(1, ends[d] - starts[d]);
-                }
-                const Compute g_val = static_cast<Compute>(go[out_idx]) /
-                                      static_cast<Compute>(area);
-                // Iterate over the input region and accumulate.
-                std::vector<int64_t> it = starts;
-                while (true) {
-                    int64_t in_idx = 0, in_stride = 1;
-                    for (int64_t d = spatial_dims - 1; d >= 0; --d) {
-                        in_idx += it[d] * in_stride;
-                        in_stride *= in_spatial[d];
-                    }
-                    gi[in_idx] = static_cast<T>(static_cast<Compute>(gi[in_idx]) + g_val);
-                    // Advance: rightmost iterator first.
-                    int64_t d = spatial_dims - 1;
-                    while (d >= 0) {
-                        ++it[d];
-                        if (it[d] < ends[d]) break;
-                        it[d] = starts[d];
-                        --d;
-                    }
-                    if (d < 0) break;
-                }
-            }
-        }
-    }
-}
-
 }  // anonymous namespace
 
 auto interpolate_backward_kernel(const Tensor& grad_output,
@@ -980,13 +921,16 @@ auto interpolate_backward_kernel(const Tensor& grad_output,
     const bool is_bilinear       = (mode == "bilinear");      // 4D only
     const bool is_bicubic        = (mode == "bicubic");       // 4D only
     const bool is_trilinear      = (mode == "trilinear");     // 5D only
-    const bool is_area           = (mode == "area");
+    // NOTE: 'area' is intentionally unsupported here. The forward
+    // interpolate_kernel has no 'area' path, so an area adjoint cannot be
+    // gradcheck-validated and would silently drift from any future forward.
+    // The backward is omitted until the forward exists (paired with a test).
     if (!is_nearest && !is_nearest_exact && !is_linear && !is_bilinear &&
-        !is_bicubic && !is_trilinear && !is_area) {
+        !is_bicubic && !is_trilinear) {
         throw std::runtime_error(
             "interpolate_backward_kernel: unsupported mode '" + mode +
             "'. Supported: nearest, nearest-exact, linear (3D), bilinear (4D), "
-            "bicubic (4D), trilinear (5D), area.");
+            "bicubic (4D), trilinear (5D).");
     }
     if (is_linear && spatial_dims != 1) {
         throw std::runtime_error("interpolate_backward_kernel: mode 'linear' requires 3D input.");
@@ -1011,10 +955,6 @@ auto interpolate_backward_kernel(const Tensor& grad_output,
         if (is_nearest || is_nearest_exact) {
             nearest_backward_axis_scatter<T>(
                 go, gi, N, C, input_size, out_spatial, is_nearest_exact);
-            return;
-        }
-        if (is_area) {
-            area_backward_impl<T>(go, gi, N, C, input_size, out_spatial);
             return;
         }
         if (is_linear) {
@@ -1387,6 +1327,14 @@ auto box_iou_kernel(const Tensor& boxes1, const Tensor& boxes2, int iou_type) ->
         for (int64_t i = 0; i < M * 4; ++i) dst2[i] = static_cast<float>(src2[i]);
     }
 
+    // Validate iou_type before the parallel region (throwing across an OpenMP
+    // region is undefined behaviour). 0=IoU, 1=GIoU, 2=DIoU, 3=CIoU.
+    if (iou_type < 0 || iou_type > 3) {
+        throw std::runtime_error(
+            "box_iou: unsupported iou_type " + std::to_string(iou_type) +
+            " (expected 0=IoU, 1=GIoU, 2=DIoU, 3=CIoU)");
+    }
+
     Tensor output({N, M}, DType::Float32, boxes1.device());
     const float* b1 = b1_f32.data<float>();
     const float* b2 = b2_f32.data<float>();
@@ -1418,7 +1366,41 @@ auto box_iou_kernel(const Tensor& boxes1, const Tensor& boxes2, int iou_type) ->
                 float enclose_y2 = std::max(b1[i * 4 + 3], b2[j * 4 + 3]);
                 float enclose_area = (enclose_x2 - enclose_x1) * (enclose_y2 - enclose_y1);
                 iou = iou - (enclose_area - union_area) / std::max(enclose_area, 1e-7f);
+            } else if (iou_type == 2 || iou_type == 3) {
+                // DIoU (2) / CIoU (3): subtract the normalized squared center
+                // distance (and, for CIoU, the aspect-ratio penalty). Mirrors
+                // the CUDA backend (vision.cu box_iou_kernel) so CPU and CUDA
+                // agree numerically.
+                float cx1 = (b1[i * 4 + 0] + b1[i * 4 + 2]) * 0.5f;
+                float cy1 = (b1[i * 4 + 1] + b1[i * 4 + 3]) * 0.5f;
+                float cx2 = (b2[j * 4 + 0] + b2[j * 4 + 2]) * 0.5f;
+                float cy2 = (b2[j * 4 + 1] + b2[j * 4 + 3]) * 0.5f;
+                float center_dist_sq = (cx1 - cx2) * (cx1 - cx2) + (cy1 - cy2) * (cy1 - cy2);
+
+                float enc_x1 = std::min(b1[i * 4 + 0], b2[j * 4 + 0]);
+                float enc_y1 = std::min(b1[i * 4 + 1], b2[j * 4 + 1]);
+                float enc_x2 = std::max(b1[i * 4 + 2], b2[j * 4 + 2]);
+                float enc_y2 = std::max(b1[i * 4 + 3], b2[j * 4 + 3]);
+                float enc_w = enc_x2 - enc_x1;
+                float enc_h = enc_y2 - enc_y1;
+                float diag_dist_sq = enc_w * enc_w + enc_h * enc_h;
+
+                float result = iou - center_dist_sq / (diag_dist_sq + 1e-7f);
+                if (iou_type == 3) {
+                    float w1 = b1[i * 4 + 2] - b1[i * 4 + 0];
+                    float h1 = b1[i * 4 + 3] - b1[i * 4 + 1];
+                    float w2 = b2[j * 4 + 2] - b2[j * 4 + 0];
+                    float h2 = b2[j * 4 + 3] - b2[j * 4 + 1];
+                    const float four_over_pi_sq =
+                        static_cast<float>(4.0 / (3.14159265358979323846 * 3.14159265358979323846));
+                    float diff = std::atan(w2 / (h2 + 1e-7f)) - std::atan(w1 / (h1 + 1e-7f));
+                    float v = four_over_pi_sq * diff * diff;
+                    float alpha = v / (1.0f - iou + v + 1e-7f);  // original IoU
+                    result = result - alpha * v;
+                }
+                iou = result;
             }
+            // iou_type == 0 is plain IoU (no penalty); validated above.
 
             out[i * M + j] = iou;
         }

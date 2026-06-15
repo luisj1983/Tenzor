@@ -242,10 +242,13 @@ MobileNetV2::MobileNetV2(int64_t num_classes,
     auto first_conv = std::make_shared<nn::Conv2d>(
         3, input_channels, 3, 2, 1, 1, 1, false);
     auto first_bn = std::make_shared<nn::BatchNorm2d>(input_channels);
-    // ReLU6 activation
 
     features_->add_module(first_conv);
     features_->add_module(first_bn);
+    // ReLU6 activation on the stem (conv-bn-relu6), matching the canonical
+    // MobileNetV2 architecture. low_level_end_idx_ below is captured from the
+    // live module count after stage 1, so it accounts for this extra module.
+    features_->add_module(std::make_shared<nn::ReLU6>());
 
     // Inverted residual blocks
     for (std::size_t stage_idx = 0; stage_idx < inverted_residual_settings.size(); ++stage_idx) {
@@ -287,10 +290,13 @@ MobileNetV2::MobileNetV2(int64_t num_classes,
     auto last_conv = std::make_shared<nn::Conv2d>(
         input_channels, last_channels, 1, 1, 0, 1, 1, false);
     auto last_bn = std::make_shared<nn::BatchNorm2d>(last_channels);
-    // ReLU6
 
     features_->add_module(last_conv);
     features_->add_module(last_bn);
+    // ReLU6 activation on the head 1x1 conv (conv-bn-relu6), matching the
+    // canonical MobileNetV2 architecture. This is after the low-level cutoff
+    // so it does not affect low_level_end_idx_.
+    features_->add_module(std::make_shared<nn::ReLU6>());
     high_level_channels_ = last_channels;
 
     register_module("features", features_);

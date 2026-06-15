@@ -10,6 +10,7 @@
 #include <cstring>
 #include <cmath>
 #include <algorithm>
+#include <string>
 
 // Platform-specific includes for SIMD intrinsics
 #if defined(__x86_64__) || defined(_M_X64) || defined(__i386__) || defined(_M_IX86)
@@ -159,28 +160,33 @@ bool cpu_supports_neon() {
 }
 
 const char* get_cpu_features() {
-    static char buffer[256];
-    const auto& features = get_cpu_features_impl();
+    // Build the feature string exactly once into a function-local static
+    // std::string (thread-safe initialization under C++11 magic statics). The
+    // detected feature set is deterministic, so the value never changes after
+    // the first call; returning its c_str() avoids the previous shared mutable
+    // `static char buffer[256]` that concurrent callers raced on (torn string
+    // / dangling-on-overwrite return). The string lives for the program's
+    // lifetime, so the returned pointer stays valid.
+    static const std::string features_str = [] {
+        const auto& features = get_cpu_features_impl();
+        std::string result;
+        auto append = [&](const char* name) {
+            if (!result.empty()) result += ", ";
+            result += name;
+        };
 
-    buffer[0] = '\0';
-    bool first = true;
+        if (features.avx512) append("AVX-512");
+        if (features.avx2) append("AVX2");
+        if (features.sse42) append("SSE4.2");
+        if (features.neon) append("NEON");
 
-    auto append = [&](const char* name) {
-        if (!first) strcat(buffer, ", ");
-        strcat(buffer, name);
-        first = false;
-    };
+        if (result.empty()) {
+            result = "Scalar (no SIMD)";
+        }
+        return result;
+    }();
 
-    if (features.avx512) append("AVX-512");
-    if (features.avx2) append("AVX2");
-    if (features.sse42) append("SSE4.2");
-    if (features.neon) append("NEON");
-
-    if (first) {
-        strcpy(buffer, "Scalar (no SIMD)");
-    }
-
-    return buffer;
+    return features_str.c_str();
 }
 
 // ============================================================================

@@ -107,8 +107,11 @@ auto LiteGraph::execute(
         }
     }
 
-    // Gather outputs as owning LiteTensors. Phase 2 makes this zero-copy
-    // via the arena memory plan.
+    // Gather outputs as owning LiteTensors. NOTE: execution currently runs
+    // each op via global dispatch, which heap-allocates its own outputs; the
+    // loaded MMPL arena is sized and validated at load but not yet used to
+    // place these intermediates (a true arena-backed path requires dispatch
+    // to write into caller-provided buffers, tracked separately).
     std::vector<LiteTensor> result;
     result.reserve(output_ids_.size());
     for (auto out_id : output_ids_) {

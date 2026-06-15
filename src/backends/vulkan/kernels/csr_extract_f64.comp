@@ -26,7 +26,10 @@ void main() {
     }
     barrier();
 
-    for (uint col = tid; col < n_cols; col += 256) {
+    // Stride by the actual workgroup size (spec constant via local_size_x_id=0),
+    // not a hardcoded 256 — avoids duplicate column claims (wgSize>256) and
+    // dropped nonzeros (wgSize<256).
+    for (uint col = tid; col < n_cols; col += gl_WorkGroupSize.x) {
         float64_t val = dense[row * n_cols + col];
         if (val != 0.0lf) {
             uint slot = atomicAdd(write_offset, 1);

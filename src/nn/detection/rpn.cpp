@@ -349,6 +349,13 @@ auto RegionProposalNetwork::forward_proposals(
         if (is_training() && targets != nullptr && static_cast<size_t>(i) < targets->size()) {
             auto gt_boxes = (*targets)[i];
 
+            // Autograd-aware per-image slices: feed the losses from the Variable
+            // predictions (not objectness.tensor()) so gradients reach conv_/
+            // cls_logits_/bbox_pred_. The raw-tensor img_objectness/img_box_reg
+            // above are only used for (non-differentiable) proposal generation.
+            auto img_objectness_v = tenzor::squeeze(tenzor::slice(objectness, 0, i, i + 1), 0);
+            auto img_box_reg_v    = tenzor::squeeze(tenzor::slice(box_regression, 0, i, i + 1), 0);
+
             // Assign anchors to ground truth
             auto [labels, matched_gt_boxes] = assign_anchors_to_gt(
                 anchors, gt_boxes
@@ -369,8 +376,9 @@ auto RegionProposalNetwork::forward_proposals(
             BCEWithLogitsLoss bce_loss;
             // Convert labels to same dtype as objectness for BCE loss
             auto sampled_labels_float = sampled_labels.to(sampled_objectness.dtype());
+            auto sampled_objectness_v = tenzor::index_select(img_objectness_v, 0, sampled_indices);
             auto cls_loss = bce_loss(
-                Variable(sampled_objectness, true),
+                sampled_objectness_v,
                 Variable(sampled_labels_float, false)
             );
 
@@ -385,8 +393,10 @@ auto RegionProposalNetwork::forward_proposals(
 
             Variable reg_loss;
             if (num_positives > 0) {
-                auto pos_box_reg = ops::index_select(
-                    ops::index_select(img_box_reg, 0, sampled_indices),
+                // Autograd-aware: select from the Variable prediction so the
+                // regression loss backprops into bbox_pred_.
+                auto pos_box_reg_v = tenzor::index_select(
+                    tenzor::index_select(img_box_reg_v, 0, sampled_indices),
                     0, pos_indices
                 );
                 auto pos_matched_gt = ops::index_select(
@@ -405,7 +415,7 @@ auto RegionProposalNetwork::forward_proposals(
 
                 SmoothL1Loss smooth_l1;
                 reg_loss = smooth_l1(
-                    Variable(pos_box_reg, true),
+                    pos_box_reg_v,
                     Variable(target_deltas, false)
                 );
             } else {

@@ -1,6 +1,14 @@
 #version 450
 
-// Blocked tridiagonalization — trailing matrix update — Float16 variant
+// Blocked tridiagonalization — trailing-submatrix update (Float16): NO-OP.
+//
+// See linalg_tridiag_update.comp for the full rationale. The panel shader
+// linalg_tridiag_panel_f16.comp applies each Householder reflection as a full
+// two-sided symmetric rank-2 update A <- H*A*H^T over the entire remaining
+// submatrix [col+1, n) x [col+1, n), so the trailing block is already fully
+// updated. A separate trailing update would double-apply each reflection and
+// destroy symmetry. The host no longer dispatches this shader; it is retained
+// as a no-op only to preserve the build target and descriptor-set layout.
 layout(local_size_x_id = 0) in;
 
 layout(set = 0, binding = 0) buffer MatrixA { uint A[]; };
@@ -15,65 +23,6 @@ layout(push_constant) uniform PushConstants {
     uint batch_idx;
 };
 
-shared float dot_val;
-
-float f16_load_a(uint idx) {
-    uint word = A[idx >> 1];
-    uint bits = ((idx & 1u) == 0u) ? (word & 0xFFFFu) : (word >> 16);
-    return unpackHalf2x16(bits | (bits << 16)).x;
-}
-
-void f16_store_a(uint idx, float val) {
-    uint bits = packHalf2x16(vec2(val, 0.0));
-    uint word_idx = idx >> 1;
-    uint old_word = A[word_idx];
-    if ((idx & 1u) == 0u) {
-        A[word_idx] = (old_word & 0xFFFF0000u) | (bits & 0xFFFFu);
-    } else {
-        A[word_idx] = (old_word & 0x0000FFFFu) | ((bits & 0xFFFFu) << 16);
-    }
-}
-
-float tau_load(uint idx) {
-    uint word = tau_buf[idx >> 1];
-    uint bits = ((idx & 1u) == 0u) ? (word & 0xFFFFu) : (word >> 16);
-    return unpackHalf2x16(bits | (bits << 16)).x;
-}
-
 void main() {
-    uint tid = gl_LocalInvocationID.x;
-    uint base = batch_idx * n * n;
-    uint tau_base = batch_idx * n;
-    uint trail_start = col_start + panel_cols;
-
-    uint r = trail_start + gl_WorkGroupID.x;
-    if (r >= n) return;
-
-    for (uint k = 0; k < panel_cols; k++) {
-        uint col = col_start + k;
-        float tau_k = tau_load(tau_base + col);
-        if (abs(tau_k) < 1e-10) continue;
-
-        if (tid == 0) {
-            float dot = f16_load_a(base + r * n + (col + 1));
-            for (uint c = col + 2; c < n; c++) {
-                dot += f16_load_a(base + c * n + col) * f16_load_a(base + r * n + c);
-            }
-            dot_val = dot;
-        }
-        barrier();
-
-        float dot = dot_val;
-
-        for (uint c = trail_start + tid; c < n; c += 256) {
-            float v_c = (c == col + 1) ? 1.0 : ((c > col + 1) ? f16_load_a(base + c * n + col) : 0.0);
-            float old_val = f16_load_a(base + r * n + c);
-            f16_store_a(base + r * n + c, old_val - tau_k * dot * v_c);
-        }
-        if (tid == 0 && col + 1 >= trail_start) {
-            float old_val = f16_load_a(base + r * n + (col + 1));
-            f16_store_a(base + r * n + (col + 1), old_val - tau_k * dot);
-        }
-        barrier();
-    }
+    // No-op: the panel already performed the full two-sided trailing update.
 }

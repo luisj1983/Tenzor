@@ -21,12 +21,18 @@ extern "C" {
 #endif
 
 #define DLPACK_VERSION 80
-#define DLPACK_ABI_VERSION 1
 
 /*!
  * \brief The device type in DLDevice.
+ *
+ * Pinned to int32_t under C++ (mirroring the canonical DLPack header), since
+ * DLDevice embeds it and is exchanged across libraries — its width is ABI.
  */
+#ifdef __cplusplus
+typedef enum : int32_t {
+#else
 typedef enum {
+#endif
     kDLCPU = 1,
     kDLCUDA = 2,
     kDLCUDAHost = 3,

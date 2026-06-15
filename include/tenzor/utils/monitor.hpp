@@ -41,6 +41,12 @@ enum class Aggregation { Sum, Mean, Count, MinMax, Value };
  * Values are added via add() and the current aggregate is retrieved
  * via get(). The interpretation of get() depends on the Aggregation
  * strategy chosen at construction time.
+ *
+ * Thread safety: add() and reset() serialize on an internal mutex, so a
+ * reset() is atomic with respect to a concurrent add() (observers never see a
+ * partially-reset stat). The lock-free get()/count()/get_min() readers see
+ * each field's most recent atomic store and may briefly observe fields from
+ * different add()/reset() epochs, but never a torn value.
  */
 class Stat {
 public:
@@ -65,7 +71,8 @@ public:
     /// The name this stat was registered under.
     [[nodiscard]] auto name() const -> const std::string&;
 
-    /// Reset this statistic to its initial state.
+    /// Reset this statistic to its initial state. Atomic with respect to a
+    /// concurrent add() (both serialize on the internal mutex).
     auto reset() -> void;
 
 private:

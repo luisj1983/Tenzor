@@ -524,7 +524,12 @@ size_t CachingAllocator::round_size(size_t size) const {
 void CachingAllocator::enforce_cache_limit(int device) {
     auto& device_alloc = device_allocators_[device];
 
-    // Release blocks until we're under the limit
+    // Release blocks until we're under the limit. Only blocks that still own
+    // their original cudaMalloc pointer can actually be freed; interior split
+    // remainder blocks are skipped (release_block returns false) — collect them
+    // and re-insert afterwards so the largest-first scan makes progress instead
+    // of repeatedly picking the same un-freeable interior block.
+    std::vector<Block*> skipped;
     while (device_alloc.stats.cached_bytes > max_cached_memory_ &&
            !device_alloc.free_blocks.empty()) {
         // Release largest block first
@@ -535,20 +540,43 @@ void CachingAllocator::enforce_cache_limit(int device) {
         auto forward_it = std::next(it).base();
         device_alloc.free_blocks.erase(forward_it);
 
-        release_block(block);
+        if (!release_block(block)) {
+            // Interior sub-block: cannot be freed standalone. Hold it aside so
+            // we don't re-select it on the next iteration.
+            skipped.push_back(block);
+        }
+    }
+    // Restore the interior blocks we set aside so they remain available for
+    // future coalescing.
+    for (Block* block : skipped) {
+        device_alloc.free_blocks.insert(block);
     }
 }
 
-void CachingAllocator::release_block(Block* block) {
+bool CachingAllocator::release_block(Block* block) {
     auto& device_alloc = device_allocators_[block->device];
+
+    // Only the block that still owns the original cudaMalloc pointer may be
+    // device-freed. A split remainder block has `ptr = original_ptr + offset`
+    // (an interior pointer): calling cudaFree on it is an invalid free, and
+    // freeing it would orphan/leak the rest of the underlying allocation that
+    // sibling blocks still reference. Such interior sub-blocks are only ever
+    // reclaimed by try_merge_blocks reassembling the full allocation back into
+    // a single block whose ptr == original_ptr (backward merges re-key to the
+    // lowest address). Skip interior blocks here, leaving them tracked.
+    if (block->ptr != block->original_ptr) {
+        return false;
+    }
 
     // Remove from free blocks if present
     device_alloc.free_blocks.erase(block);
 
-    // Free device memory
+    // Free device memory. Surface the error rather than silently swallowing it
+    // (a failed cudaFree means the underlying allocation leaks).
     cudaError_t err = cudaFree(block->ptr);
     if (err != cudaSuccess) {
-        // Log error but don't throw in destructor context
+        ALLOC_DEBUG("cudaFree failed for ptr=" << block->ptr
+                    << " err=" << static_cast<int>(err));
     }
 
     // Update statistics
@@ -562,6 +590,7 @@ void CachingAllocator::release_block(Block* block) {
     // Remove from all_blocks (and the address-ordered index)
     device_alloc.blocks_by_addr.erase(block->ptr);
     device_alloc.all_blocks.erase(block->ptr);
+    return true;
 }
 
 } // namespace backend

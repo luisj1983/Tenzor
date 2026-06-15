@@ -483,7 +483,13 @@ include(${CMAKE_SOURCE_DIR}/cmake/FindMKL.cmake OPTIONAL RESULT_VARIABLE _MKL_MO
 if(_MKL_MODULE_FOUND AND MKL_FOUND)
     target_link_libraries(tenzor_core PRIVATE ${MKL_LIBRARIES})
     target_include_directories(tenzor_core PRIVATE ${MKL_INCLUDE_DIRS})
-    target_compile_definitions(tenzor_core PRIVATE TENZOR_USE_MKL MKL_ILP64)
+    # NOTE: must NOT define MKL_ILP64 here — FindMKL links the LP64 interface
+    # (mkl_intel_lp64, 32-bit MKL_INT) and the cblas_* call sites pass plain int.
+    # Defining MKL_ILP64 made <mkl_lapacke.h> declare lapack_int as 64-bit while
+    # the linked LP64 library writes 32-bit pivots, silently corrupting every
+    # LAPACKE pivot array (getrf/sytrf → det/lu/ldl/inv/solve/svd/qr/eigh). The
+    # interface width is selected by FindMKL (MKL_INTERFACE_FULL=intel_lp64).
+    target_compile_definitions(tenzor_core PRIVATE TENZOR_USE_MKL)
 else()
     if(TENZOR_REQUIRE_MKL)
         message(FATAL_ERROR "MKL required (TENZOR_REQUIRE_MKL=ON) but not found. "

@@ -118,6 +118,14 @@ private:
     /// Check if a node's single output is consumed only by nodes in the candidate set.
     static auto has_single_use(const std::shared_ptr<Node>& node) -> bool;
 
+    /// Verify there is a real data edge from `producer` to `consumer`:
+    /// i.e. at least one of `producer`'s output values appears among
+    /// `consumer`'s inputs. Used by the linear-chain matchers so a pattern
+    /// fires only when consecutive matched nodes are actually connected,
+    /// rather than merely positionally adjacent in the node vector.
+    static auto consumes_output(const std::shared_ptr<Node>& producer,
+                                const std::shared_ptr<Node>& consumer) -> bool;
+
     /// Check if a node is an element-wise unary or binary op.
     static auto is_elementwise(OpType op) -> bool;
 

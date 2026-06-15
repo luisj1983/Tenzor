@@ -166,7 +166,16 @@ auto Autocast::get_autocast_dtype(const std::string& op_name, DType input_dtype)
     // Float64 is preserved - if user is using Float64, they need the higher precision
     // Only Float32 gets autocast to the target dtype (Float16/BFloat16)
     if (input_dtype == DType::Float32) {
-        if (should_autocast(op_name, Device::cuda(0))) {
+        // Probe should_autocast with this scope's own target device, not a
+        // hardcoded cuda(0). should_autocast() returns false when the queried
+        // device type does not match device_type_, so passing cuda(0) for a
+        // CPU/ROCm/OneAPI scope would always report "no autocast" and silently
+        // leave Float32 untouched. When no device type is pinned, fall back to
+        // a CPU device (should_autocast handles the backward-compat gate).
+        Device target_device = device_type_.has_value()
+                                   ? Device{device_type_.value(), 0}
+                                   : Device::cpu();
+        if (should_autocast(op_name, target_device)) {
             return dtype_.value();
         }
     }

@@ -1812,11 +1812,13 @@ auto VulkanBackend::dispatchMaxPool3dBackward(const Tensor& grad_output, const T
 
     if (grad_out_numel == 0) return Tensor({N, C, D_in, H_in, W_in}, grad_output.dtype(), grad_output.device());
 
-    // Float16 scatter-backward via the f16 shader produces zero/garbage grads
-    // (no reliable f16 atomic accumulation). Widen to Float32, compute, narrow.
-    if (grad_output.dtype() == DType::Float16) {
+    // Float16/BFloat16 scatter-backward produce zero/garbage grads — the f32
+    // shader would write 4-byte floats into a 2-byte buffer (OOB) and there is
+    // no reliable 16-bit atomic accumulation. Widen to Float32, compute, narrow.
+    if (grad_output.dtype() == DType::Float16 || grad_output.dtype() == DType::BFloat16) {
+        const DType orig = grad_output.dtype();
         auto gi = dispatchMaxPool3dBackward(grad_output.to(DType::Float32), indices, D_in, H_in, W_in);
-        return gi.to(DType::Float16);
+        return gi.to(orig);
     }
 
     int32_t device_id = grad_output.device().index;
@@ -1824,8 +1826,6 @@ auto VulkanBackend::dispatchMaxPool3dBackward(const Tensor& grad_output, const T
 
     std::string shader_name = "max_pool3d_backward";
     if (grad_output.dtype() == DType::Float64) shader_name = "max_pool3d_backward_f64";
-    else if (grad_output.dtype() == DType::Float16) shader_name = "max_pool3d_backward_f16";
-    else if (grad_output.dtype() == DType::BFloat16) shader_name = "max_pool3d_backward_bf16";
     auto* pipeline = getPipeline(shader_name, device_id);
 
     std::vector<std::pair<uint32_t, const void*>> bindings = {
@@ -2174,11 +2174,13 @@ auto VulkanBackend::dispatchAdaptiveMaxPool3dBackward(const Tensor& grad_output,
     for (auto s : input_shape) grad_in_numel *= s;
     if (grad_out_numel == 0) return Tensor(input_shape, grad_output.dtype(), grad_output.device());
 
-    // Float16 scatter-backward via the f16 shader produces zero/garbage grads
-    // (no reliable f16 atomic accumulation). Widen to Float32, compute, narrow.
-    if (grad_output.dtype() == DType::Float16) {
+    // Float16/BFloat16 scatter-backward produce zero/garbage grads — the f32
+    // shader would write 4-byte floats into a 2-byte buffer (OOB) and there is
+    // no reliable 16-bit atomic accumulation. Widen to Float32, compute, narrow.
+    if (grad_output.dtype() == DType::Float16 || grad_output.dtype() == DType::BFloat16) {
+        const DType orig = grad_output.dtype();
         auto gi = dispatchAdaptiveMaxPool3dBackward(grad_output.to(DType::Float32), indices, input_shape);
-        return gi.to(DType::Float16);
+        return gi.to(orig);
     }
 
     int32_t device_id = grad_output.device().index;
@@ -2186,8 +2188,6 @@ auto VulkanBackend::dispatchAdaptiveMaxPool3dBackward(const Tensor& grad_output,
 
     std::string shader_name = "max_pool3d_backward";
     if (grad_output.dtype() == DType::Float64) shader_name = "max_pool3d_backward_f64";
-    else if (grad_output.dtype() == DType::Float16) shader_name = "max_pool3d_backward_f16";
-    else if (grad_output.dtype() == DType::BFloat16) shader_name = "max_pool3d_backward_bf16";
     auto* pipeline = getPipeline(shader_name, device_id);
 
     std::vector<std::pair<uint32_t, const void*>> bindings = {

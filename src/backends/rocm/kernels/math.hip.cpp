@@ -425,29 +425,38 @@ __global__ void div_kernel_device(const T* a, const T* b, T* c, int64_t n) {
  * the bit-pattern check below catches both cases and reroutes them to the
  * canonical Float16 NaN payload (0x7E00) or signed Inf (sign | 0x7C00).
  */
+// Divide two Float16 values via Float32, emitting NaN / ±Inf as explicit
+// Float16 bit patterns rather than relying on safe_f2h(NaN) to forward the
+// special value through (some HIP builds silently canonicalise NaN to a finite
+// value). 0/0 → quiet NaN (0x7E00), x/0 (x≠0) → signed Inf (sign | 0x7C00).
+// Shared by both the same-shape and the broadcasting Float16 div kernels so the
+// special-value semantics never diverge depending on whether broadcasting fired.
+__device__ __forceinline__ __half f16_div_ieee(__half ha, __half hb) {
+    float fa = tenzor::rocm::safe_h2f(ha);
+    float fb = tenzor::rocm::safe_h2f(hb);
+    float fv = fa / fb;
+    unsigned int vb = __float_as_uint(fv);
+    unsigned int exp  = (vb >> 23) & 0xFFu;
+    unsigned int mant =  vb        & 0x7FFFFFu;
+    if (exp == 0xFFu) {
+        // NaN or Inf in Float32 — emit Float16 special-value bits directly.
+        unsigned short bits16;
+        if (mant != 0u) {
+            bits16 = 0x7E00u;                                           // quiet NaN
+        } else {
+            unsigned int sign16 = (vb >> 16) & 0x8000u;
+            bits16 = static_cast<unsigned short>(sign16 | 0x7C00u);     // ±Inf
+        }
+        __half h;
+        *reinterpret_cast<unsigned short*>(&h) = bits16;
+        return h;
+    }
+    return tenzor::rocm::safe_f2h(fv);
+}
+
 __global__ void div_kernel_f16(const __half* a, const __half* b, __half* c, int64_t n) {
     HIP_KERNEL_LOOP(idx, n) {
-        float fa = tenzor::rocm::safe_h2f(a[idx]);
-        float fb = tenzor::rocm::safe_h2f(b[idx]);
-        float fv = fa / fb;
-        unsigned int vb = __float_as_uint(fv);
-        unsigned int exp  = (vb >> 23) & 0xFFu;
-        unsigned int mant =  vb        & 0x7FFFFFu;
-        unsigned short bits16;
-        if (exp == 0xFFu) {
-            // NaN or Inf in Float32 — emit Float16 special-value bits directly.
-            if (mant != 0u) {
-                bits16 = 0x7E00u;                                           // quiet NaN
-            } else {
-                unsigned int sign16 = (vb >> 16) & 0x8000u;
-                bits16 = static_cast<unsigned short>(sign16 | 0x7C00u);     // ±Inf
-            }
-            __half h;
-            *reinterpret_cast<unsigned short*>(&h) = bits16;
-            c[idx] = h;
-        } else {
-            c[idx] = tenzor::rocm::safe_f2h(fv);
-        }
+        c[idx] = f16_div_ieee(a[idx], b[idx]);
     }
 }
 
@@ -473,8 +482,9 @@ __global__ void broadcast_div_kernel_f16(
             idx_b += coord * strides_b[i];
         }
 
-        // IEEE 754 div semantics: 0/0 → NaN, x/0 → ±Inf for x ≠ 0.
-        c[out_idx] = tenzor::rocm::safe_f2h(tenzor::rocm::safe_h2f(a[idx_a]) / tenzor::rocm::safe_h2f(b[idx_b]));
+        // IEEE 754 div semantics via the shared bit-pattern helper: 0/0 → NaN,
+        // x/0 → ±Inf for x ≠ 0 (matches the same-shape div_kernel_f16 path).
+        c[out_idx] = f16_div_ieee(a[idx_a], b[idx_b]);
     }
 }
 
@@ -564,8 +574,10 @@ __global__ void complex_div_kernel(const T* a, const T* b, T* c, int64_t n) {
         T ar = a[base], ai = a[base + 1];
         T br = b[base], bi = b[base + 1];
         T denom = br * br + bi * bi;
-        c[base]     = (ar * br + ai * bi) / denom;
-        c[base + 1] = (ai * br - ar * bi) / denom;
+        // Use ieee_div so a zero denominator yields IEEE Inf/NaN rather than the
+        // finite garbage that -freciprocal-math produces for Float64 (see ieee_div).
+        c[base]     = ieee_div(ar * br + ai * bi, denom);
+        c[base + 1] = ieee_div(ai * br - ar * bi, denom);
     }
 }
 
@@ -646,8 +658,9 @@ __global__ void broadcast_complex_div_kernel(
         T ar = a[a_base], ai = a[a_base + 1];
         T br = b[b_base], bi = b[b_base + 1];
         T denom = br * br + bi * bi;
-        c[c_base]     = (ar * br + ai * bi) / denom;
-        c[c_base + 1] = (ai * br - ar * bi) / denom;
+        // See complex_div_kernel: ieee_div restores IEEE Inf/NaN on zero denom.
+        c[c_base]     = ieee_div(ar * br + ai * bi, denom);
+        c[c_base + 1] = ieee_div(ai * br - ar * bi, denom);
     }
 }
 
@@ -1290,6 +1303,17 @@ auto add_kernel(const Tensor& a_in, const Tensor& b_in, hipStream_t stream) -> T
 
     int64_t n = result.numel();
     int64_t ndim = output_shape.size();
+
+    // Empty broadcast output (e.g. [0,3] op [1,3] -> [0,3]) reaches this path
+    // because the same-shape fast path was skipped. HIP rejects zero-grid
+    // launches, so free the broadcast metadata and return the empty result.
+    if (n == 0) {
+        hipFree(d_strides_a);
+        hipFree(d_strides_b);
+        hipFree(d_output_shape);
+        return result;
+    }
+
     dim3 grid, block;
     compute_launch_config_1d(n, grid, block);
 
@@ -1485,6 +1509,17 @@ auto sub_kernel(const Tensor& a_in, const Tensor& b_in, hipStream_t stream) -> T
 
     int64_t n = result.numel();
     int64_t ndim = output_shape.size();
+
+    // Empty broadcast output (e.g. [0,3] op [1,3] -> [0,3]) reaches this path
+    // because the same-shape fast path was skipped. HIP rejects zero-grid
+    // launches, so free the broadcast metadata and return the empty result.
+    if (n == 0) {
+        hipFree(d_strides_a);
+        hipFree(d_strides_b);
+        hipFree(d_output_shape);
+        return result;
+    }
+
     dim3 grid, block;
     compute_launch_config_1d(n, grid, block);
 
@@ -1677,6 +1712,17 @@ auto mul_kernel(const Tensor& a_in, const Tensor& b_in, hipStream_t stream) -> T
 
     int64_t n = result.numel();
     int64_t ndim = output_shape.size();
+
+    // Empty broadcast output (e.g. [0,3] op [1,3] -> [0,3]) reaches this path
+    // because the same-shape fast path was skipped. HIP rejects zero-grid
+    // launches, so free the broadcast metadata and return the empty result.
+    if (n == 0) {
+        hipFree(d_strides_a);
+        hipFree(d_strides_b);
+        hipFree(d_output_shape);
+        return result;
+    }
+
     dim3 grid, block;
     compute_launch_config_1d(n, grid, block);
 
@@ -1867,6 +1913,17 @@ auto div_kernel(const Tensor& a_in, const Tensor& b_in, hipStream_t stream) -> T
 
     int64_t n = result.numel();
     int64_t ndim = output_shape.size();
+
+    // Empty broadcast output (e.g. [0,3] op [1,3] -> [0,3]) reaches this path
+    // because the same-shape fast path was skipped. HIP rejects zero-grid
+    // launches, so free the broadcast metadata and return the empty result.
+    if (n == 0) {
+        hipFree(d_strides_a);
+        hipFree(d_strides_b);
+        hipFree(d_output_shape);
+        return result;
+    }
+
     dim3 grid, block;
     compute_launch_config_1d(n, grid, block);
 
@@ -7455,39 +7512,112 @@ __device__ inline double device_igamma_series_f64(double a, double x) {
     return exp(-x + a * log(x) - lgamma(a)) * sum;
 }
 
+// Upper regularized incomplete gamma via continued fraction (modified Lentz),
+// matching CPU igammac_cf. Well-conditioned for x >= a+1, where the ascending
+// series for P(a,x) (and thus 1-P for Q) loses all significant digits.
+__device__ inline float device_igammac_cf_f32(float a, float x) {
+    const float tiny = 1e-30f;
+    const float eps  = 1e-7f;
+    const int max_iter = 200;
+    float prefix = expf(-x + a * logf(x) - lgammaf(a));
+
+    float f = x + 1.0f - a;
+    if (fabsf(f) < tiny) f = tiny;
+    float C = f;
+    float D = 0.0f;
+    for (int nn = 1; nn <= max_iter; ++nn) {
+        float an_val = -static_cast<float>(nn) * (static_cast<float>(nn) - a);
+        float bn_val = x + static_cast<float>(2 * nn + 1) - a;
+        D = bn_val + an_val * D;
+        if (fabsf(D) < tiny) D = tiny;
+        C = bn_val + an_val / C;
+        if (fabsf(C) < tiny) C = tiny;
+        D = 1.0f / D;
+        float delta = C * D;
+        f *= delta;
+        if (fabsf(delta - 1.0f) < eps) break;
+    }
+    return prefix / f;
+}
+
+__device__ inline double device_igammac_cf_f64(double a, double x) {
+    const double tiny = 1e-300;
+    const double eps  = 1e-15;
+    const int max_iter = 200;
+    double prefix = exp(-x + a * log(x) - lgamma(a));
+
+    double f = x + 1.0 - a;
+    if (fabs(f) < tiny) f = tiny;
+    double C = f;
+    double D = 0.0;
+    for (int nn = 1; nn <= max_iter; ++nn) {
+        double an_val = -static_cast<double>(nn) * (static_cast<double>(nn) - a);
+        double bn_val = x + static_cast<double>(2 * nn + 1) - a;
+        D = bn_val + an_val * D;
+        if (fabs(D) < tiny) D = tiny;
+        C = bn_val + an_val / C;
+        if (fabs(C) < tiny) C = tiny;
+        D = 1.0 / D;
+        double delta = C * D;
+        f *= delta;
+        if (fabs(delta - 1.0) < eps) break;
+    }
+    return prefix / f;
+}
+
+// P(a,x): series for x < a+1, else 1 - CF (matches CPU igamma_kernel).
+__device__ inline float device_igamma_f32(float a, float x) {
+    if (x < a + 1.0f) return device_igamma_series_f32(a, x);
+    return 1.0f - device_igammac_cf_f32(a, x);
+}
+__device__ inline double device_igamma_f64(double a, double x) {
+    if (x < a + 1.0) return device_igamma_series_f64(a, x);
+    return 1.0 - device_igammac_cf_f64(a, x);
+}
+
+// Q(a,x): 1 - series for x < a+1, else CF (matches CPU igammac_kernel).
+__device__ inline float device_igammac_f32(float a, float x) {
+    if (x < a + 1.0f) return 1.0f - device_igamma_series_f32(a, x);
+    return device_igammac_cf_f32(a, x);
+}
+__device__ inline double device_igammac_f64(double a, double x) {
+    if (x < a + 1.0) return 1.0 - device_igamma_series_f64(a, x);
+    return device_igammac_cf_f64(a, x);
+}
+
 __global__ void igamma_kernel_f32(const float* a, const float* x, float* output, int64_t n) {
     HIP_KERNEL_LOOP(idx, n) {
-        output[idx] = device_igamma_series_f32(a[idx], x[idx]);
+        output[idx] = device_igamma_f32(a[idx], x[idx]);
     }
 }
 
 __global__ void igamma_kernel_f64(const double* a, const double* x, double* output, int64_t n) {
     HIP_KERNEL_LOOP(idx, n) {
-        output[idx] = device_igamma_series_f64(a[idx], x[idx]);
+        output[idx] = device_igamma_f64(a[idx], x[idx]);
     }
 }
 
 __global__ void igamma_kernel_f16(const __half* a, const __half* x, __half* output, int64_t n) {
     HIP_KERNEL_LOOP(idx, n) {
-        output[idx] = tenzor::rocm::safe_f2h(device_igamma_series_f32(tenzor::rocm::safe_h2f(a[idx]), tenzor::rocm::safe_h2f(x[idx])));
+        output[idx] = tenzor::rocm::safe_f2h(device_igamma_f32(tenzor::rocm::safe_h2f(a[idx]), tenzor::rocm::safe_h2f(x[idx])));
     }
 }
 
 __global__ void igammac_kernel_f32(const float* a, const float* x, float* output, int64_t n) {
     HIP_KERNEL_LOOP(idx, n) {
-        output[idx] = 1.0f - device_igamma_series_f32(a[idx], x[idx]);
+        output[idx] = device_igammac_f32(a[idx], x[idx]);
     }
 }
 
 __global__ void igammac_kernel_f64(const double* a, const double* x, double* output, int64_t n) {
     HIP_KERNEL_LOOP(idx, n) {
-        output[idx] = 1.0 - device_igamma_series_f64(a[idx], x[idx]);
+        output[idx] = device_igammac_f64(a[idx], x[idx]);
     }
 }
 
 __global__ void igammac_kernel_f16(const __half* a, const __half* x, __half* output, int64_t n) {
     HIP_KERNEL_LOOP(idx, n) {
-        output[idx] = tenzor::rocm::safe_f2h(1.0f - device_igamma_series_f32(tenzor::rocm::safe_h2f(a[idx]), tenzor::rocm::safe_h2f(x[idx])));
+        output[idx] = tenzor::rocm::safe_f2h(device_igammac_f32(tenzor::rocm::safe_h2f(a[idx]), tenzor::rocm::safe_h2f(x[idx])));
     }
 }
 

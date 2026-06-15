@@ -560,142 +560,15 @@ void matmul_f16(
     cudaStream_t stream);
 
 // ============================================================================
-// FP16 Conv2d Forward with Tensor Cores
-// ============================================================================
-
-// Complete FP16 Conv2d forward pass using Tensor Core matmul
-auto conv2d_forward_f16(
-    const Tensor& input,
-    const Tensor& weight,
-    const Tensor* bias,
-    int64_t stride,
-    int64_t padding,
-    int64_t dilation,
-    int64_t groups,
-    cudaStream_t stream
-) -> Tensor {
-    // Extract dimensions
-    auto input_shape = input.shape();
-    auto weight_shape = weight.shape();
-
-    int64_t batch = input_shape[0];
-    int64_t in_channels = input_shape[1];
-    int64_t height = input_shape[2];
-    int64_t width = input_shape[3];
-
-    int64_t out_channels = weight_shape[0];
-    int64_t in_channels_per_group = weight_shape[1];
-    int64_t kernel_h = weight_shape[2];
-    int64_t kernel_w = weight_shape[3];
-
-    // Validate parameters
-    if (stride == 0 || groups == 0) {
-        throw std::invalid_argument("Conv2d: stride and groups cannot be zero");
-    }
-
-    // Calculate output dimensions
-    int64_t out_h = calculate_output_size(height, kernel_h, stride, padding, dilation);
-    int64_t out_w = calculate_output_size(width, kernel_w, stride, padding, dilation);
-
-    // Create output tensor
-    std::vector<int64_t> output_shape = {batch, out_channels, out_h, out_w};
-    Tensor output(output_shape, DType::Float16, input.device());
-
-    // Initialize output to zeros
-    TENZOR_CUDA_CHECK(cudaMemsetAsync(output.data<Float16>(), 0,
-                               output.numel() * sizeof(Float16), stream));
-
-    // Process each group
-    int64_t out_channels_per_group = out_channels / groups;
-
-    for (int64_t g = 0; g < groups; ++g) {
-        int64_t in_start = g * in_channels_per_group;
-        int64_t out_start = g * out_channels_per_group;
-
-        // Allocate im2col buffer for FP16
-        int64_t col_rows = batch * out_h * out_w;
-        int64_t col_cols = in_channels_per_group * kernel_h * kernel_w;
-        backend::CachedMemoryGuard col_buffer_guard(col_rows * col_cols * sizeof(__half));
-        auto* col_buffer = static_cast<__half*>(col_buffer_guard.get());
-
-        // Apply im2col transformation for FP16
-        dim3 grid, block;
-        int64_t total_elements = batch * out_h * out_w * in_channels_per_group * kernel_h * kernel_w;
-        compute_launch_config_1d(total_elements, grid, block);
-
-        // Cast Float16* to __half* for kernel
-        const __half* input_ptr = reinterpret_cast<const __half*>(
-            input.data<Float16>() + in_start * height * width
-        );
-
-        im2col_kernel_f16<<<grid, block, 0, stream>>>(
-            input_ptr,
-            col_buffer,
-            batch,
-            in_channels_per_group,
-            height,
-            width,
-            kernel_h,
-            kernel_w,
-            stride,
-            padding,
-            dilation,
-            out_h,
-            out_w
-        );
-        TENZOR_CUDA_POST_LAUNCH_CHECK();
-
-        // Matrix multiplication using FP16 Tensor Cores
-        // weight_group: (out_channels_per_group, in_channels_per_group * kernel_h * kernel_w)
-        // col_buffer: (batch * out_h * out_w, in_channels_per_group * kernel_h * kernel_w)
-        // output: (batch * out_h * out_w, out_channels_per_group)
-        //
-        // Compute: output = col_buffer @ weight_group^T
-        // In practice: output^T = weight_group @ col_buffer^T
-
-        int64_t M = out_channels_per_group;
-        int64_t K = col_cols;
-        int64_t N = col_rows;
-
-        const __half* weight_ptr = reinterpret_cast<const __half*>(
-            weight.data<Float16>() + out_start * in_channels_per_group * kernel_h * kernel_w
-        );
-        __half* output_ptr = reinterpret_cast<__half*>(
-            output.data<Float16>() + out_start * out_h * out_w
-        );
-
-        // Reshape for matrix multiplication: We want C = A @ B^T
-        // Where A is col_buffer (N, K) and B is weight (M, K)
-        // Result C is (N, M) which we need to transpose to (M, N)
-        //
-        // Approach: Compute C^T = B @ A^T
-        // This gives us (M, N) directly
-        matmul_f16(weight_ptr, col_buffer, output_ptr, M, N, K, stream);
-
-    }
-
-    // Add bias if present
-    if (bias != nullptr) {
-        int64_t spatial_size = out_h * out_w;
-        const __half* bias_data = reinterpret_cast<const __half*>(bias->data<Float16>());
-        __half* output_data = reinterpret_cast<__half*>(output.data<Float16>());
-
-        dim3 grid, block;
-        int64_t total = batch * out_channels * out_h * out_w;
-        compute_launch_config_1d(total, grid, block);
-
-        add_bias_kernel_f16<<<grid, block, 0, stream>>>(
-            output_data, bias_data, batch, out_channels, spatial_size, total
-        );
-        TENZOR_CUDA_POST_LAUNCH_CHECK();
-    }
-
-    return output;
-}
-
-// ============================================================================
 // Conv2d Forward GPU Implementation
 // ============================================================================
+//
+// NOTE: A standalone conv2d_forward_f16() helper was removed here. It was dead
+// code (never declared in any header, never called — the live FP16 conv2d path
+// uses cublas GemmEx followed by nhwc_to_nchw_kernel). It wrote the raw
+// (out_channels_per_group, batch*out_h*out_w) GEMM result directly into the
+// NCHW output WITHOUT the nhwc_to_nchw transpose, so it produced wrong layout
+// for batch>1 — a latent trap if it had ever been wired up.
 
 // Conv2d forward using im2col + cuBLAS gemm
 auto conv2d_forward_kernel(

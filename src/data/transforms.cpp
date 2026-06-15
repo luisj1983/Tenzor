@@ -1362,13 +1362,24 @@ auto MixUp::operator()(const Tensor& input1, const Tensor& target1,
     float y = gamma_dist(rng);
     float lambda = x / (x + y);
 
+    // Normalise both operands to CPU/Float32/contiguous so the raw float*
+    // reads/writes below are valid for any input dtype/device.
+    TransformDomain in_orig{};
+    TransformDomain tgt_orig{};
+    Tensor in1 = enter_host_float32(input1, in_orig);
+    TransformDomain in2_orig{};
+    Tensor in2 = enter_host_float32(input2, in2_orig);
+    Tensor tg1 = enter_host_float32(target1, tgt_orig);
+    TransformDomain tg2_orig{};
+    Tensor tg2 = enter_host_float32(target2, tg2_orig);
+
     // mixed_input = lambda * input1 + (1 - lambda) * input2
-    int64_t numel = input1.numel();
+    int64_t numel = in1.numel();
     Tensor mixed_input = zeros(
-        std::vector<int64_t>(input1.shape().begin(), input1.shape().end()),
-        input1.dtype());
-    const float* src1 = static_cast<const float*>(input1.data_ptr());
-    const float* src2 = static_cast<const float*>(input2.data_ptr());
+        std::vector<int64_t>(in1.shape().begin(), in1.shape().end()),
+        DType::Float32);
+    const float* src1 = static_cast<const float*>(in1.data_ptr());
+    const float* src2 = static_cast<const float*>(in2.data_ptr());
     float* dst = static_cast<float*>(mixed_input.data_ptr());
 
     for (int64_t i = 0; i < numel; ++i) {
@@ -1376,19 +1387,20 @@ auto MixUp::operator()(const Tensor& input1, const Tensor& target1,
     }
 
     // mixed_target = lambda * target1 + (1 - lambda) * target2
-    int64_t tgt_numel = target1.numel();
+    int64_t tgt_numel = tg1.numel();
     Tensor mixed_target = zeros(
-        std::vector<int64_t>(target1.shape().begin(), target1.shape().end()),
-        target1.dtype());
-    const float* tsrc1 = static_cast<const float*>(target1.data_ptr());
-    const float* tsrc2 = static_cast<const float*>(target2.data_ptr());
+        std::vector<int64_t>(tg1.shape().begin(), tg1.shape().end()),
+        DType::Float32);
+    const float* tsrc1 = static_cast<const float*>(tg1.data_ptr());
+    const float* tsrc2 = static_cast<const float*>(tg2.data_ptr());
     float* tdst = static_cast<float*>(mixed_target.data_ptr());
 
     for (int64_t i = 0; i < tgt_numel; ++i) {
         tdst[i] = lambda * tsrc1[i] + (1.0f - lambda) * tsrc2[i];
     }
 
-    return {mixed_input, mixed_target};
+    return {leave_host_float32(std::move(mixed_input), in_orig),
+            leave_host_float32(std::move(mixed_target), tgt_orig)};
 }
 
 // ============================================================================
@@ -1404,10 +1416,22 @@ CutMix::CutMix(float alpha) : alpha_(alpha) {
 auto CutMix::operator()(const Tensor& input1, const Tensor& target1,
                          const Tensor& input2, const Tensor& target2)
     -> std::pair<Tensor, Tensor> {
-    const auto& shape = input1.shape();
-    if (shape.size() != 3) {
+    if (input1.shape().size() != 3) {
         throw std::invalid_argument("CutMix requires 3D input (C, H, W)");
     }
+
+    // Normalise both operands to CPU/Float32/contiguous so the raw float*
+    // reads/writes below are valid for any input dtype/device.
+    TransformDomain in_orig{};
+    TransformDomain tgt_orig{};
+    Tensor in1 = enter_host_float32(input1, in_orig);
+    TransformDomain in2_orig{};
+    Tensor in2 = enter_host_float32(input2, in2_orig);
+    Tensor tg1 = enter_host_float32(target1, tgt_orig);
+    TransformDomain tg2_orig{};
+    Tensor tg2 = enter_host_float32(target2, tg2_orig);
+
+    const auto& shape = in1.shape();
 
     // B.2: deterministic when tenzor::manual_seed() is called; otherwise the
     // seed is drawn from the shared thread-local engine (advances per call) so
@@ -1444,11 +1468,11 @@ auto CutMix::operator()(const Tensor& input1, const Tensor& target1,
     int64_t x2 = x1 + cut_w;
 
     // Copy input1, paste region from input2
-    // Independent deep copy of input1: assignment shares storage and the patch
-    // write below would corrupt the caller's input1 tensor in place.
-    Tensor mixed_input = input1.clone();
+    // Independent deep copy of in1: assignment shares storage and the patch
+    // write below would corrupt the normalised input1 tensor in place.
+    Tensor mixed_input = in1.clone();
     float* dst = static_cast<float*>(mixed_input.data_ptr());
-    const float* src2 = static_cast<const float*>(input2.data_ptr());
+    const float* src2 = static_cast<const float*>(in2.data_ptr());
 
     for (int64_t c = 0; c < C; ++c) {
         for (int64_t row = y1; row < y2; ++row) {
@@ -1463,19 +1487,20 @@ auto CutMix::operator()(const Tensor& input1, const Tensor& target1,
                                  / static_cast<float>(H * W);
 
     // Mixed target
-    int64_t tgt_numel = target1.numel();
+    int64_t tgt_numel = tg1.numel();
     Tensor mixed_target = zeros(
-        std::vector<int64_t>(target1.shape().begin(), target1.shape().end()),
-        target1.dtype());
-    const float* tsrc1 = static_cast<const float*>(target1.data_ptr());
-    const float* tsrc2 = static_cast<const float*>(target2.data_ptr());
+        std::vector<int64_t>(tg1.shape().begin(), tg1.shape().end()),
+        DType::Float32);
+    const float* tsrc1 = static_cast<const float*>(tg1.data_ptr());
+    const float* tsrc2 = static_cast<const float*>(tg2.data_ptr());
     float* tdst = static_cast<float*>(mixed_target.data_ptr());
 
     for (int64_t i = 0; i < tgt_numel; ++i) {
         tdst[i] = actual_lambda * tsrc1[i] + (1.0f - actual_lambda) * tsrc2[i];
     }
 
-    return {mixed_input, mixed_target};
+    return {leave_host_float32(std::move(mixed_input), in_orig),
+            leave_host_float32(std::move(mixed_target), tgt_orig)};
 }
 
 // ============================================================================

@@ -30,9 +30,11 @@ inline int64_t sycl_exclusive_prefix_sum(T* data, int64_t n, sycl::queue& queue)
     static_assert(std::is_integral_v<T>, "sycl_exclusive_prefix_sum requires an integral type");
     if (n == 0) return 0;
 
-    // Read last element before scan (for inclusive total = exclusive_last + original_last)
-    T last_val = 0;
-    queue.memcpy(&last_val, data + n - 1, sizeof(T)).wait();
+    // Both branches below obtain the true total directly from the scan output
+    // (d_inclusive[n-1] for oneDPL, d_total for the fallback), so there is no
+    // need for the prior blocking D2H read of the last input element — that
+    // stalled the in-order queue on every call (hot path for nonzero /
+    // masked_select / sparse index building) for a value that was never used.
 
     // Use oneDPL if available for device-side inclusive scan, then shift
 #ifdef TENZOR_HAS_ONEDPL

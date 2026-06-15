@@ -77,8 +77,8 @@ auto Logger::instance() -> Logger& {
 
 auto Logger::log(LogLevel level, std::string_view message,
                 [[maybe_unused]] const std::source_location& location) -> void {
+    if (level < level_.load(std::memory_order_relaxed)) return;
     std::lock_guard<std::mutex> lock(mutex_);
-    if (level < level_) return;
 
     // Legacy contract: each line is
     //   [YYYY-MM-DD HH:MM:SS.mmm] [LEVEL] message
@@ -127,12 +127,11 @@ auto Logger::fatal(std::string_view message, const std::source_location& locatio
 }
 
 auto Logger::set_level(LogLevel level) -> void {
-    std::lock_guard<std::mutex> lock(mutex_);
-    level_ = level;
+    level_.store(level, std::memory_order_relaxed);
 }
 
 auto Logger::get_level() const -> LogLevel {
-    return level_;
+    return level_.load(std::memory_order_relaxed);
 }
 
 auto Logger::set_output_file(std::string_view path) -> void {

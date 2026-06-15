@@ -148,7 +148,6 @@ auto cat_kernel(std::span<const Tensor> tensors, int64_t dim, sycl::queue& queue
             // Calculate stride sizes
             const int64_t src_slice_stride = elements_per_slice * tensor_size_in_dim;
             const int64_t dst_slice_stride = elements_per_slice * out_shape[dim];
-            const int64_t dst_offset = offset_in_concat_dim * elements_per_slice;
 
             queue.parallel_for<CatKernelFloat32>(
                 sycl::range<1>(num_slices * tensor_size_in_dim * elements_per_slice),
@@ -178,7 +177,6 @@ auto cat_kernel(std::span<const Tensor> tensors, int64_t dim, sycl::queue& queue
 
             const int64_t src_slice_stride = elements_per_slice * tensor_size_in_dim;
             const int64_t dst_slice_stride = elements_per_slice * out_shape[dim];
-            const int64_t dst_offset = offset_in_concat_dim * elements_per_slice;
 
             queue.parallel_for<CatKernelFloat64>(
                 sycl::range<1>(num_slices * tensor_size_in_dim * elements_per_slice),
@@ -204,7 +202,6 @@ auto cat_kernel(std::span<const Tensor> tensors, int64_t dim, sycl::queue& queue
 
             const int64_t src_slice_stride = elements_per_slice * tensor_size_in_dim;
             const int64_t dst_slice_stride = elements_per_slice * out_shape[dim];
-            const int64_t dst_offset = offset_in_concat_dim * elements_per_slice;
 
             queue.parallel_for<CatKernelFloat16>(
                 sycl::range<1>(num_slices * tensor_size_in_dim * elements_per_slice),
@@ -256,7 +253,6 @@ auto cat_kernel(std::span<const Tensor> tensors, int64_t dim, sycl::queue& queue
 
             const int64_t src_slice_stride = elements_per_slice * tensor_size_in_dim;
             const int64_t dst_slice_stride = elements_per_slice * out_shape[dim];
-            const int64_t dst_offset = offset_in_concat_dim * elements_per_slice;
 
             queue.parallel_for<CatKernelInt32>(
                 sycl::range<1>(num_slices * tensor_size_in_dim * elements_per_slice),

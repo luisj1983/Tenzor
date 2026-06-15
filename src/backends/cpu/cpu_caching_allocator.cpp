@@ -370,6 +370,14 @@ void CPUCachingAllocator::deallocate(void* ptr) {
             Block block = git->second;
             global_allocated_blocks_.erase(git);
 
+            // Capture the size of THIS block before any sibling coalescing
+            // enlarges block.size.  Stats must be updated with the original
+            // size: the absorbed siblings were already counted in cached_bytes
+            // when they were freed, and were never part of allocated_bytes, so
+            // using the post-merge size would double-count cached_bytes and
+            // over-decrement (underflow) allocated_bytes.
+            const size_t orig_size = block.size;
+
             // Update global root allocation tracking
             auto root_it = global_root_allocations_.find(block.root_ptr);
             if (root_it != global_root_allocations_.end()) {
@@ -386,11 +394,11 @@ void CPUCachingAllocator::deallocate(void* ptr) {
             }
             global_free_blocks_.insert({block.size, block});
 
-            // Update stats
+            // Update stats using the original (pre-merge) block size.
             {
                 std::lock_guard<std::mutex> slock(stats_mutex_);
-                global_stats_.allocated_bytes -= block.size;
-                global_stats_.cached_bytes += block.size;
+                global_stats_.allocated_bytes -= orig_size;
+                global_stats_.cached_bytes += orig_size;
             }
 
             // Audit P0 #8: queue a pending decrement for the originating

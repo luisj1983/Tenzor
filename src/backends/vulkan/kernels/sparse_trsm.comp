@@ -45,7 +45,7 @@ void main() {
     uint rs = uint(row_offsets[row]);
     uint re = uint(row_offsets[row + 1]);
 
-    for (uint c = tid; c < k_rhs; c += 256) {
+    for (uint c = tid; c < k_rhs; c += gl_WorkGroupSize.x) {
         float rhs = B[row * k_rhs + c];
         float diag = 1.0;
 

@@ -128,7 +128,11 @@ public:
                 "; only STORED (0) is supported");
         }
         size_t data_off = local_data_offset(e);
-        if (data_off + e.uncompressed_size > data_.size()) {
+        // Overflow-safe bound: data_off and uncompressed_size derive from
+        // untrusted ZIP fields, so `data_off + uncompressed_size` can wrap and
+        // pass a naive check, after which data_.data()+data_off is a wild ptr.
+        if (data_off > data_.size() ||
+            e.uncompressed_size > data_.size() - data_off) {
             throw std::runtime_error(
                 "torch_pickle: entry " + name + " data extends past EOF");
         }
@@ -194,7 +198,10 @@ private:
 
     auto local_data_offset(const ZipEntry& e) const -> size_t {
         // Local file header is 30 bytes + variable name/extra fields.
-        if (e.local_header_offset + 30 > data_.size()) {
+        // Overflow-safe: local_header_offset is an untrusted uint64; bound it
+        // before adding 30 so a near-UINT64_MAX value can't wrap past the guard.
+        if (e.local_header_offset > data_.size() ||
+            30 > data_.size() - e.local_header_offset) {
             throw std::runtime_error("torch_pickle: truncated local header");
         }
         const uint8_t* p = data_.data() + e.local_header_offset;
@@ -215,7 +222,9 @@ private:
                 "; only STORED (0) is supported");
         }
         size_t off = local_data_offset(e);
-        if (off + e.uncompressed_size > data_.size()) {
+        // Overflow-safe bound (see read_view): untrusted offset/size.
+        if (off > data_.size() ||
+            e.uncompressed_size > data_.size() - off) {
             throw std::runtime_error(
                 "torch_pickle: entry " + e.name + " data past EOF");
         }
@@ -271,7 +280,10 @@ private:
                     "(corrupt >4GB archive): " + path);
             }
             uint64_t zip64_eocd_off = read_u64(loc + 8);
-            if (zip64_eocd_off + 56 > data_.size()) {
+            // Overflow-safe: zip64_eocd_off comes from the untrusted ZIP64 EOCD
+            // locator; bound it before adding 56 to avoid a wraparound bypass.
+            if (zip64_eocd_off > data_.size() ||
+                56 > data_.size() - zip64_eocd_off) {
                 throw std::runtime_error(
                     "torch_pickle: ZIP64 EOCD record past EOF: " + path);
             }
@@ -519,6 +531,15 @@ auto build_tensor_from_storage(const ZipReader& zip,
 
     // Verify stride matches row-major contiguous; throw with a clear
     // pointer to the future "support arbitrary strides" followup.
+    // shape and stride are parsed by independent passes that impose no length
+    // relationship, so a crafted/corrupt .pth can carry a stride vector shorter
+    // than shape — indexing stride[i] up to shape.size()-1 would be an OOB read.
+    if (!stride.empty() && stride.size() != shape.size()) {
+        throw std::runtime_error(
+            "torch_pickle: stride rank (" + std::to_string(stride.size()) +
+            ") does not match shape rank (" + std::to_string(shape.size()) +
+            ") in saved tensor");
+    }
     if (!stride.empty()) {
         int64_t expected = 1;
         for (int64_t i = static_cast<int64_t>(shape.size()) - 1; i >= 0; --i) {
@@ -1113,17 +1134,34 @@ void flatten_state_dict(const PValuePtr& node,
     switch (node->kind) {
         case PValue::Kind::Dict: {
             for (auto& [k, v] : node->dict_entries) {
-                std::string name = (k->kind == PValue::Kind::String) ? k->s
-                                  : (k->kind == PValue::Kind::Bytes)  ? k->s
-                                  : "";
+                // A state-dict spine key must be a string/bytes name. Coercing a
+                // non-string key to "" would collapse distinct subtrees onto the
+                // same prefix and make tensors silently overwrite each other —
+                // fail loudly instead.
+                if (k->kind != PValue::Kind::String &&
+                    k->kind != PValue::Kind::Bytes) {
+                    throw std::runtime_error(
+                        "torch_pickle: state-dict key is not a string/bytes name "
+                        "(cannot build a flattened parameter name)");
+                }
+                const std::string& name = k->s;
                 std::string sub = prefix.empty() ? name : prefix + "." + name;
                 flatten_state_dict(v, sub, out);
             }
             break;
         }
-        case PValue::Kind::TensorObj:
-            out.emplace(prefix, node->tensor);
+        case PValue::Kind::TensorObj: {
+            // insert (not emplace) and detect collisions: two tensors flattening
+            // to the same name must not silently drop the second, which would
+            // return a partial state_dict that looks complete.
+            auto [it, inserted] = out.insert({prefix, node->tensor});
+            if (!inserted) {
+                throw std::runtime_error(
+                    "torch_pickle: duplicate flattened tensor name '" + prefix +
+                    "' in state dict");
+            }
             break;
+        }
         default:
             // Skip non-tensor values silently (PyTorch state_dicts sometimes
             // include scalars or version markers).

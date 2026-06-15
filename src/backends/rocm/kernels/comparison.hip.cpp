@@ -158,33 +158,6 @@ __global__ void ge_scalar_kernel(const T* a, T scalar, bool* output, int64_t n) 
 }
 
 // ==============================================================================
-// Broadcast comparison kernels
-// ==============================================================================
-
-template<typename T>
-__global__ void eq_broadcast_kernel(
-    const T* a, const T* b, bool* output,
-    const int64_t* a_strides, const int64_t* b_strides,
-    const int64_t* out_shape, int64_t ndim, int64_t n
-) {
-    HIP_KERNEL_LOOP(idx, n) {
-        // Convert linear index to multi-dimensional indices
-        int64_t tmp = idx;
-        int64_t a_offset = 0;
-        int64_t b_offset = 0;
-
-        for (int64_t d = ndim - 1; d >= 0; --d) {
-            int64_t coord = tmp % out_shape[d];
-            tmp /= out_shape[d];
-            a_offset += coord * a_strides[d];
-            b_offset += coord * b_strides[d];
-        }
-
-        output[idx] = (a[a_offset] == b[b_offset]);
-    }
-}
-
-// ==============================================================================
 // Public API - Tensor vs Tensor comparisons
 // ==============================================================================
 

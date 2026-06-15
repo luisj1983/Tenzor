@@ -297,13 +297,19 @@ public:
      * @param is_replaced Binary mask of replaced tokens
      * @param masked_positions Binary mask of masked positions
      * @param original_tokens Original tokens
+     * @param attention_mask Optional (B, T) padding mask (1=valid, 0=pad). When
+     *        valid, the discriminator RTD loss is averaged over valid tokens
+     *        only instead of over every (batch, seq) position; padding no longer
+     *        dominates the mean for short sequences. Empty/invalid falls back to
+     *        the plain mean over all positions (backward compatible).
      * @return Combined loss (weighted sum of generator and discriminator losses)
      */
     auto compute_loss(const Variable& gen_logits,
                      const Variable& disc_logits,
                      const Tensor& is_replaced,
                      const Tensor& masked_positions,
-                     const Tensor& original_tokens) -> Variable;
+                     const Tensor& original_tokens,
+                     const Tensor& attention_mask = Tensor{}) -> Variable;
 
     /**
      * @brief Get generator (useful for debugging)

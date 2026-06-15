@@ -16,6 +16,7 @@
 #include <stdexcept>
 #include <cstdlib>
 #include <cstring>
+#include <limits>
 #include <iostream>  // D.2: dtor error logging
 #include "tenzor/utils/log.hpp"  // D.1: TENZOR_LOG_ERROR
 
@@ -39,6 +40,25 @@ namespace distributed {
             ); \
         } \
     } while (0)
+
+namespace {
+
+// MPI's classic collective APIs take the per-rank element count as an `int`.
+// tensor.numel() is int64; for >2^31-element tensors the narrowing cast would
+// silently truncate and MPI would transfer fewer elements, corrupting the
+// result with no error. Validate the range and throw a clear message instead.
+auto checked_mpi_count(int64_t numel, const char* op) -> int {
+    if (numel < 0 || numel > static_cast<int64_t>(std::numeric_limits<int>::max())) {
+        throw std::runtime_error(
+            std::string("MPIBackend::") + op + ": element count " +
+            std::to_string(numel) + " exceeds INT_MAX; tensors with more than " +
+            std::to_string(std::numeric_limits<int>::max()) +
+            " elements require MPI large-count APIs or chunking");
+    }
+    return static_cast<int>(numel);
+}
+
+} // anonymous namespace
 
 // ============================================================================
 // Construction / destruction
@@ -218,12 +238,13 @@ auto MPIBackend::all_gather(const Tensor& tensor, std::vector<Tensor>& output) -
         Device::cpu()
     );
 
+    const int gather_count = checked_mpi_count(tensor.numel(), "all_gather");
     MPI_CHECK(MPI_Allgather(
         send_ptr,
-        static_cast<int>(tensor.numel()),
+        gather_count,
         to_mpi_datatype(tensor.dtype()),
         recv_buf.data_ptr(),
-        static_cast<int>(tensor.numel()),
+        gather_count,
         to_mpi_datatype(tensor.dtype()),
         comm_
     ));
@@ -270,12 +291,13 @@ auto MPIBackend::gather(const Tensor& tensor, std::vector<Tensor>& output,
             Device::cpu()
         );
 
+        const int gather_count = checked_mpi_count(tensor.numel(), "gather");
         MPI_CHECK(MPI_Gather(
             send_ptr,
-            static_cast<int>(tensor.numel()),
+            gather_count,
             to_mpi_datatype(tensor.dtype()),
             recv_buf.data_ptr(),
-            static_cast<int>(tensor.numel()),
+            gather_count,
             to_mpi_datatype(tensor.dtype()),
             dst_rank,
             comm_
@@ -297,7 +319,7 @@ auto MPIBackend::gather(const Tensor& tensor, std::vector<Tensor>& output,
     } else {
         MPI_CHECK(MPI_Gather(
             send_ptr,
-            static_cast<int>(tensor.numel()),
+            checked_mpi_count(tensor.numel(), "gather"),
             to_mpi_datatype(tensor.dtype()),
             nullptr,
             0,
@@ -347,12 +369,13 @@ auto MPIBackend::scatter(const std::vector<Tensor>& tensors, Tensor& output,
             );
         }
 
+        const int scatter_count = checked_mpi_count(output.numel(), "scatter");
         MPI_CHECK(MPI_Scatter(
             send_buf.data_ptr(),
-            static_cast<int>(output.numel()),
+            scatter_count,
             to_mpi_datatype(output.dtype()),
             recv_ptr,
-            static_cast<int>(output.numel()),
+            scatter_count,
             to_mpi_datatype(output.dtype()),
             src_rank,
             comm_
@@ -363,7 +386,7 @@ auto MPIBackend::scatter(const std::vector<Tensor>& tensors, Tensor& output,
             0,
             to_mpi_datatype(output.dtype()),
             recv_ptr,
-            static_cast<int>(output.numel()),
+            checked_mpi_count(output.numel(), "scatter"),
             to_mpi_datatype(output.dtype()),
             src_rank,
             comm_

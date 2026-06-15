@@ -97,12 +97,17 @@ auto quantized_linear_int4_kernel(
     // features this multiplied mismatched operands and returned silently wrong
     // results. It has been removed in favour of this single correct path, which
     // is SIMD-accelerated for all batch sizes.
-    #pragma omp parallel for
-    for (int64_t o = 0; o < out_features; ++o) {
+    #pragma omp parallel
+    {
+        // Per-thread scratch buffer (~in_features bytes, 4KB for 4096,
+        // L1-resident), allocated ONCE per thread and reused for every output
+        // channel — not reallocated per `o` iteration.
+        std::vector<int8_t> unpacked_weights(static_cast<size_t>(in_features));
+
+        #pragma omp for
+        for (int64_t o = 0; o < out_features; ++o) {
         const uint8_t* weight_row = weight_packed + o * packed_features;
 
-        // Per-(thread, o) heap buffer; ~in_features bytes (4KB for 4096), L1-resident.
-        std::vector<int8_t> unpacked_weights(static_cast<size_t>(in_features));
         for (int64_t p = 0; p < packed_features; ++p) {
             tenzor::cpu::unpack_int4(weight_row[p], unpacked_weights[p * 2], unpacked_weights[p * 2 + 1]);
         }
@@ -157,7 +162,8 @@ auto quantized_linear_int4_kernel(
             }
             output[b * out_features + o] = result;
         }
-    }
+        }  // omp for
+    }  // omp parallel
 }
 
 } // namespace kernels

@@ -2842,6 +2842,17 @@ Returns:
                                 throw std::out_of_range("Too many indices");
                             }
                             if (idx < 0) idx += shape[dim_cursor];
+                            // Bounds check BEFORE slicing: slice() re-normalises
+                            // start/end a second time, so an index more negative
+                            // than -dim_size would silently clamp to row 0 instead
+                            // of raising.  Match the single-key Int and Variable
+                            // tuple Int paths which both throw here.
+                            if (idx < 0 || idx >= shape[dim_cursor]) {
+                                throw std::out_of_range(
+                                    "Index " + std::to_string(entry.int_val) +
+                                    " out of range for dimension " + std::to_string(dim_cursor) +
+                                    " with size " + std::to_string(shape[dim_cursor]));
+                            }
                             result = result.slice(dim_cursor, idx, idx + 1);
                             auto new_shape = result.shape();
                             if (dim_cursor < new_shape.size() && new_shape[dim_cursor] == 1) {
@@ -3106,28 +3117,49 @@ Returns:
                 auto dst_shape = dst.shape();
                 auto src_shape = src.shape();
 
-                // If source is scalar, broadcast to fill destination
+                // If source is scalar, broadcast to fill destination.
+                // Dtype-agnostic fast path: cast the 1-element source to the
+                // destination dtype, expand to the destination shape (broadcast
+                // view, no data copy), materialise, then byte-copy — the same
+                // mechanism used by the general broadcast path below. The old
+                // fill_(double) route only handled Float32/Float64/Int32/Int64
+                // and threw for Float16/BFloat16/Int8/16/UInt*/Complex
+                // destinations even though make_scalar_tensor materialises them.
                 if (src.numel() == 1) {
-                    // Get scalar value from source
-                    auto src_cpu = (src.device().type == tenzor::Device::Type::CPU) ? src : src.cpu();
-                    double scalar_value;
-                    switch (src.dtype()) {
-                        case tenzor::DType::Float32:
-                            scalar_value = static_cast<double>(*src_cpu.data<float>());
-                            break;
-                        case tenzor::DType::Float64:
-                            scalar_value = *src_cpu.data<double>();
-                            break;
-                        case tenzor::DType::Int32:
-                            scalar_value = static_cast<double>(*src_cpu.data<int32_t>());
-                            break;
-                        case tenzor::DType::Int64:
-                            scalar_value = static_cast<double>(*src_cpu.data<int64_t>());
-                            break;
-                        default:
-                            throw std::runtime_error("Unsupported dtype for scalar broadcast in __setitem__");
+                    auto src_cast = (src.dtype() == dst.dtype()) ? src : src.to(dst.dtype());
+                    auto dst_shape_vec = std::vector<int64_t>(dst_shape.begin(), dst_shape.end());
+                    auto expanded = tenzor::expand(src_cast, dst_shape_vec).contiguous();
+                    if (dst.is_contiguous()) {
+                        size_t bytes = dst.numel() * dst.dtype_size();
+                        if (dst.device().type == tenzor::Device::Type::CPU) {
+                            std::memcpy(dst.data_ptr(), expanded.data_ptr(), bytes);
+                        } else {
+                            auto* backend = tenzor::backend_registry().get_backend(dst.device().type);
+                            if (backend) {
+                                backend->copy(dst.data_ptr(), expanded.data_ptr(), bytes,
+                                            tenzor::CopyKind::DeviceToDevice);
+                            }
+                        }
+                    } else {
+                        // Non-contiguous destination: element-wise copy using strides.
+                        auto dst_strides = dst.strides();
+                        size_t total_elements = dst.numel();
+                        std::vector<int64_t> indices(dst_shape_vec.size(), 0);
+                        for (size_t i = 0; i < total_elements; ++i) {
+                            size_t temp = i;
+                            for (int64_t dim = static_cast<int64_t>(dst_shape_vec.size()) - 1; dim >= 0; --dim) {
+                                indices[dim] = temp % dst_shape_vec[dim];
+                                temp /= dst_shape_vec[dim];
+                            }
+                            size_t offset = 0;
+                            for (size_t d = 0; d < indices.size(); ++d) {
+                                offset += indices[d] * dst_strides[d];
+                            }
+                            void* dst_ptr = static_cast<char*>(dst.data_ptr()) + offset * dst.dtype_size();
+                            void* src_ptr = static_cast<char*>(expanded.data_ptr()) + i * expanded.dtype_size();
+                            std::memcpy(dst_ptr, src_ptr, dst.dtype_size());
+                        }
                     }
-                    dst.fill_(scalar_value);
                     return;
                 }
 
@@ -4259,7 +4291,7 @@ Returns:
          return tenzor::broadcast_tensors(tensors);
          }, "Broadcast all tensors to a common shape",
          py::arg("tensors"), py::call_guard<py::gil_scoped_release>());
-    m.def("logspace", [](float start, float end, int64_t steps, double base,
+    m.def("logspace", [](double start, double end, int64_t steps, double base,
                           tenzor::DType dtype, tenzor::Device device) {
          return tenzor::logspace(start, end, steps, base, dtype, device);
          }, "Logarithmically spaced values",

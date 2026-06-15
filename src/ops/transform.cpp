@@ -465,43 +465,32 @@ auto tile(const Tensor& input, std::vector<int64_t> reps) -> Tensor {
         in_stride *= padded_shape[i];
     }
 
-    // Helper lambda to perform the copy for any dtype
-    auto do_tile = [&]<typename T>() {
-        const T* input_data = input_cont.data<T>();
-        T* output_data = output.data<T>();
+    // tile is a pure element-wise memory remap, so it is dtype-agnostic: copy
+    // each element by its byte size (mirroring repeat() above). This supports
+    // every dtype (including unsigned ints, bool, and complex) without
+    // enumerating them, matching expand()/repeat() and the non-CPU dispatch.
+    const size_t esz = dtype_size(input.dtype());
+    const char* in_base = static_cast<const char*>(input_cont.data_ptr());
+    char* out_base = static_cast<char*>(output.data_ptr());
 
-        for (int64_t out_idx = 0; out_idx < total_out; ++out_idx) {
-            // Calculate output coordinates
-            int64_t temp = out_idx;
-            std::vector<int64_t> out_coords(out_ndim);
-            for (int64_t i = out_ndim - 1; i >= 0; --i) {
-                out_coords[i] = temp % out_shape[i];
-                temp /= out_shape[i];
-            }
-
-            // Map to input coordinates (modulo by input shape)
-            int64_t in_idx = 0;
-            for (int64_t i = 0; i < out_ndim; ++i) {
-                int64_t in_coord = out_coords[i] % padded_shape[i];
-                in_idx += in_coord * in_strides[i];
-            }
-
-            output_data[out_idx] = input_data[in_idx];
+    for (int64_t out_idx = 0; out_idx < total_out; ++out_idx) {
+        // Calculate output coordinates
+        int64_t temp = out_idx;
+        std::vector<int64_t> out_coords(out_ndim);
+        for (int64_t i = out_ndim - 1; i >= 0; --i) {
+            out_coords[i] = temp % out_shape[i];
+            temp /= out_shape[i];
         }
-    };
 
-    // Dispatch based on dtype
-    switch (input.dtype()) {
-        case DType::Float32: do_tile.template operator()<float>(); break;
-        case DType::Float64: do_tile.template operator()<double>(); break;
-        case DType::Float16: do_tile.template operator()<Float16>(); break;
-        case DType::BFloat16: do_tile.template operator()<BFloat16>(); break;
-        case DType::Int8: do_tile.template operator()<int8_t>(); break;
-        case DType::Int16: do_tile.template operator()<int16_t>(); break;
-        case DType::Int32: do_tile.template operator()<int32_t>(); break;
-        case DType::Int64: do_tile.template operator()<int64_t>(); break;
-        default:
-            throw std::runtime_error("Unsupported dtype for tile operation");
+        // Map to input coordinates (modulo by input shape)
+        int64_t in_idx = 0;
+        for (int64_t i = 0; i < out_ndim; ++i) {
+            int64_t in_coord = out_coords[i] % padded_shape[i];
+            in_idx += in_coord * in_strides[i];
+        }
+
+        std::memcpy(out_base + static_cast<size_t>(out_idx) * esz,
+                    in_base + static_cast<size_t>(in_idx) * esz, esz);
     }
 
     return output;
@@ -1370,6 +1359,20 @@ auto view_as_complex(const Tensor& t) -> Tensor {
     auto strides = t.strides();
     if (strides.back() != 1) {
         throw std::runtime_error("view_as_complex: last dimension must be contiguous (stride 1)");
+    }
+    // The complex view halves the (real,imag)-pair layout: each outer stride
+    // and the storage offset must be divisible by 2, otherwise integer
+    // division would silently truncate toward zero and read wrong elements.
+    // (Odd outer strides/offsets are constructable via as_strided.)
+    for (size_t i = 0; i + 1 < strides.size(); ++i) {
+        if (strides[i] % 2 != 0) {
+            throw std::runtime_error(
+                "view_as_complex: tensor layout is not compatible (outer strides/offset must be even)");
+        }
+    }
+    if (t.offset() % 2 != 0) {
+        throw std::runtime_error(
+            "view_as_complex: tensor layout is not compatible (outer strides/offset must be even)");
     }
 
     DType complex_dtype = (t.dtype() == DType::Float32) ? DType::Complex64 : DType::Complex128;

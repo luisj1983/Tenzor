@@ -24,6 +24,11 @@ namespace rocm {
 // Bilinear interpolation on device
 __device__ inline float bilinear_interpolate_hip(const float* data, int64_t height,
                                                    int64_t width, float y, float x) {
+    // Empty feature map: clamping below would yield y_low=x_low=0 and read
+    // data[0] from a zero-element buffer (OOB). Bail before any indexing.
+    if (height <= 0 || width <= 0) {
+        return 0.0f;
+    }
     // Handle out of bounds
     if (y < -1.0f || y > height || x < -1.0f || x > width) {
         return 0.0f;
@@ -266,6 +271,16 @@ auto roi_align_forward(const Tensor& features, const Tensor& rois,
 
     int64_t total_outputs = num_rois * channels * output_h * output_w;
     if (total_outputs == 0) return output;
+
+    // Empty feature map (feat_height/width == 0) with a non-empty ROI grid:
+    // every sample reads from a zero-element buffer. Return an all-zero output
+    // (matching the bilinear-interpolate "out of bounds -> 0" contract) instead
+    // of launching the kernel over OOB reads.
+    if (feat_height == 0 || feat_width == 0) {
+        HIP_ROI_CHECK(hipMemsetAsync(output.data_ptr(), 0,
+                                     total_outputs * sizeof(float), stream));
+        return output;
+    }
 
     // ROI coordinates always processed as Float32
     const Tensor rois_f32 = (rois.dtype() == DType::Float32) ? rois : rois.to(DType::Float32);

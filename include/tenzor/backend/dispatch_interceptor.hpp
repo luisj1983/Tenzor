@@ -23,6 +23,7 @@
 
 #include <functional>
 #include <span>
+#include <stdexcept>
 #include <vector>
 #include "../core/tensor.hpp"
 #include "../ops/op_id.hpp"
@@ -107,7 +108,15 @@ public:
             return std::vector<Tensor>{t(o, i, a)};
         };
         auto result = run_chain_(s, 0, op, inputs, attrs, std::move(wrapped));
-        return result.empty() ? Tensor() : std::move(result[0]);
+        // An interceptor short-circuiting with no output is a programming
+        // error. Throw a clear message rather than returning a null-storage
+        // Tensor that surfaces as a confusing downstream failure — mirroring
+        // BackendDispatchTable::dispatch_single.
+        if (result.empty()) {
+            throw std::runtime_error(
+                "DispatchInterceptorStack::run_single: interceptor chain returned empty result");
+        }
+        return std::move(result[0]);
     }
 
 private:

@@ -22,6 +22,7 @@ shared float col_data[256];
 shared float norm_sq;
 shared float alpha;
 shared float tau_k;
+shared float vhead;  // v_k = a_kk - alpha, used to normalize the stored reflector tail
 
 // Read Float16 from matrix A
 float readF16(uint element_idx) {
@@ -93,6 +94,7 @@ void main() {
             float a_kk = readF16(elem_base + (col_start + k) * n + col);
             alpha = -sign(a_kk) * sqrt(norm_sq);
             float v_k = a_kk - alpha;
+            vhead = v_k;  // publish for the normalization loop below
 
             if (abs(v_k) < 1e-30) {
                 tau_k = 0.0;
@@ -102,13 +104,31 @@ void main() {
                 tau_k = 2.0 / tau_k;
             }
 
-            // Set R diagonal and store tau
+            // Set R diagonal and store tau. NOTE: a_kk is overwritten with
+            // alpha here, so the sub-diagonal normalization below must use the
+            // shared vhead snapshot (v_k), not a fresh read of A[k,col].
             writeF16(elem_base + (col_start + k) * n + col, alpha);
             writeF16Tau(batch_idx * n + col, tau_k);
         }
         barrier();
 
         if (abs(tau_k) < 1e-30) continue;
+
+        // Normalize the below-diagonal Householder entries in place:
+        //   v[r] = x[r] / (x[k] - alpha)   for r > k,  with v[k] = 1 implicit.
+        // tau was derived for this v[k]=1 convention, and both this shader's
+        // apply loop and linalg_qr_update_f16.comp read the stored sub-diagonal
+        // as v[k+1:]; without this division the reflectors are inconsistent
+        // with tau and Q@R does not reconstruct A (mirrors linalg_qr_panel.comp
+        // lines 84-86, the F32 reference).
+        {
+            float vh = vhead;
+            for (uint r = k + 1 + tid; r < panel_rows; r += 256) {
+                uint idx = elem_base + (col_start + r) * n + col;
+                writeF16(idx, readF16(idx) / vh);
+            }
+        }
+        barrier();
 
         // Apply reflection to remaining columns: A[:,j] -= tau * v * (v^T * A[:,j])
         for (uint j = col + 1; j < min(col_start + panel_cols, n); j++) {

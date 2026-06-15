@@ -440,6 +440,11 @@ __global__ void max_along_dim_kernel(
             in_idx += indices[d] * input_strides[d];
         }
         T val = input[in_idx];
+        // NOTE: dimensional max DROPS NaN (plain `>`), unlike the full-tensor
+        // reduction which uses nan_prop_max. This is intentional and matches the
+        // CPU dimensional reduction (cpu/kernels/reduction.cpp max_along_dim),
+        // preserving cross-backend parity. Do NOT switch to nan_prop_max here
+        // without changing the CPU kernel in lockstep (see review note).
         max_val = (val > max_val) ? val : max_val;
     }
 
@@ -493,6 +498,10 @@ __global__ void min_along_dim_kernel(
             in_idx += indices[d] * input_strides[d];
         }
         T val = input[in_idx];
+        // NOTE: dimensional min DROPS NaN (plain `<`), unlike the full-tensor
+        // reduction which uses nan_prop_min. Intentional and matches the CPU
+        // dimensional reduction (cross-backend parity). Do NOT switch to
+        // nan_prop_min here without changing the CPU kernel in lockstep.
         min_val = (val < min_val) ? val : min_val;
     }
 

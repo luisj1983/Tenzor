@@ -34,7 +34,12 @@ Module::~Module() {
     // We *must* do this here rather than relying on the user to call
     // remove_parametrizations() because the registry's lifetime is global
     // and otherwise outlives every Module that ever registered into it.
-    utils::unregister_parametrization_for_module(id_);
+    //
+    // id_ == 0 marks a moved-from shell whose UID now belongs to another live
+    // Module; unregistering would tear down the live module's parametrizations.
+    if (id_ != 0) {
+        utils::unregister_parametrization_for_module(id_);
+    }
 }
 
 auto Module::parameters() -> std::vector<std::shared_ptr<Variable>> {
@@ -398,16 +403,16 @@ auto Module::load_state_dict(const std::unordered_map<std::string, Tensor>& stat
             !std::equal(dst.shape().begin(), dst.shape().end(), src.shape().begin())) {
             throw std::runtime_error(std::string("Shape mismatch for ") + kind + " '" + name + "'");
         }
-        // Strict load: a dtype mismatch is an error, mirroring the shape
-        // check above. Silently casting the checkpoint tensor to the live
-        // dtype would mask precision/format mistakes (e.g. loading a Float64
-        // checkpoint into a Float32 model), so reject it explicitly.
-        if (src.dtype() != dst.dtype()) {
-            throw std::runtime_error(std::string("DType mismatch for ") + kind +
-                " '" + name + "': checkpoint dtype does not match the model's " +
-                kind + " dtype");
-        }
+        // Adapt the checkpoint payload to the live tensor's dtype + device.
+        // This realises the advertised mixed-precision flow: an F32 checkpoint
+        // can be loaded into an F16 inference model (and vice-versa) by casting
+        // the source to the live parameter's dtype before the copy. Shapes
+        // still must match exactly (checked above) -- only dtype/device are
+        // adapted, never the element layout.
         Tensor adapted = src;
+        if (adapted.dtype() != dst.dtype()) {
+            adapted = adapted.to(dst.dtype());
+        }
         if (adapted.device() != dst.device()) {
             adapted = adapted.to(dst.device());
         }

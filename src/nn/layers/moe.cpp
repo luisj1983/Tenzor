@@ -29,6 +29,14 @@ MixtureOfExperts::MixtureOfExperts(int64_t input_dim, int64_t hidden_dim,
       capacity_factor_(capacity_factor),
       aux_loss_weight_(aux_loss_weight) {
 
+    // Routing selects top_k experts per token; it must lie in [1, num_experts].
+    // top_k < 1 routes to nothing; top_k > num_experts overruns the topk call.
+    if (top_k < 1 || top_k > num_experts) {
+        throw std::invalid_argument(
+            "MixtureOfExperts: top_k must satisfy 1 <= top_k <= num_experts (got top_k=" +
+            std::to_string(top_k) + ", num_experts=" + std::to_string(num_experts) + ")");
+    }
+
     // Router: maps input to expert logits
     router_ = std::make_shared<Linear>(input_dim, num_experts, /*bias=*/false);
     register_module("router", router_);

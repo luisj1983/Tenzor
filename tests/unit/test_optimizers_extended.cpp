@@ -243,12 +243,18 @@ TEST_P(OptimizersExtendedTest, AdagradLearningRateDecay) {
     // Initial learning rate
     EXPECT_FLOAT_EQ(optimizer.get_lr(), 0.1);
 
-    // After first step
+    // After the first step the effective lr is lr / (1 + (step-1)*lr_decay)
+    // = 0.1 / (1 + 0*0.1) = 0.1 — Adagrad applies no decay on the first step
+    // (matches PyTorch; decay begins from the second step).
     param1_->set_grad(ones({2, 3}, DType::Float32, device));
     param2_->set_grad(ones({4}, DType::Float32, device));
     optimizer.step();
+    EXPECT_FLOAT_EQ(optimizer.get_lr(), 0.1);
 
-    // Learning rate should decay
+    // After the second step decay kicks in: 0.1 / (1 + 1*0.1) ≈ 0.0909 < 0.1.
+    param1_->set_grad(ones({2, 3}, DType::Float32, device));
+    param2_->set_grad(ones({4}, DType::Float32, device));
+    optimizer.step();
     EXPECT_LT(optimizer.get_lr(), 0.1);
 }
 

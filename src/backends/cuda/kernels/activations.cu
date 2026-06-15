@@ -1368,26 +1368,33 @@ __global__ void softmax_forward_kernel(const T* input, T* output,
     __syncthreads();
     max_val = shared[0];
 
-    // Step 2: Compute exp(x - max) and sum
-    T sum_exp = T(0);
+    // Step 2: Compute exp(x - max) and sum.
+    // Accumulate the exp-sum in AccumType<T> (float for half/bf16) so that the
+    // reduction does not saturate or lose precision in narrow dtypes; mirrors
+    // nansum_along_dim_kernel. A dedicated Acc-typed shared buffer is used so we
+    // do not alias the T-typed `shared` array (which has a smaller element size
+    // for half/bf16). blockDim.x <= 1024 -> at most 32 warps.
+    using Acc = typename AccumType<T>::type;
+    __shared__ Acc acc_shared[32];
+    Acc sum_exp = Acc(0);
     for (int64_t i = threadIdx.x; i < dim_size; i += blockDim.x) {
-        T exp_val = device_exp(input_row[i] - max_val);
-        output_row[i] = exp_val;
+        Acc exp_val = device_exp(static_cast<Acc>(input_row[i]) - static_cast<Acc>(max_val));
+        output_row[i] = static_cast<T>(exp_val);
         sum_exp += exp_val;
     }
-    sum_exp = block_reduce_sum(sum_exp, shared);
+    sum_exp = block_reduce_sum<Acc>(sum_exp, acc_shared);
     __syncthreads();
 
     // Broadcast sum to all threads
     if (threadIdx.x == 0) {
-        shared[0] = sum_exp;
+        acc_shared[0] = sum_exp;
     }
     __syncthreads();
-    sum_exp = shared[0];
+    sum_exp = acc_shared[0];
 
     // Step 3: Normalize
     for (int64_t i = threadIdx.x; i < dim_size; i += blockDim.x) {
-        output_row[i] /= sum_exp;
+        output_row[i] = static_cast<T>(static_cast<Acc>(output_row[i]) / sum_exp);
     }
 }
 
@@ -1505,24 +1512,28 @@ __global__ void log_softmax_forward_kernel(const T* input, T* output,
     __syncthreads();
     max_val = shared[0];
 
-    // Step 2: Compute sum(exp(x - max))
-    T sum_exp = T(0);
+    // Step 2: Compute sum(exp(x - max)).
+    // Accumulate and reduce in AccumType<T> (float for half/bf16) to avoid
+    // narrow-dtype saturation/precision loss; mirrors nansum_along_dim_kernel.
+    using Acc = typename AccumType<T>::type;
+    __shared__ Acc acc_shared[32];
+    Acc sum_exp = Acc(0);
     for (int64_t i = threadIdx.x; i < dim_size; i += blockDim.x) {
-        sum_exp += device_exp(input_row[i] - max_val);
+        sum_exp += device_exp(static_cast<Acc>(input_row[i]) - static_cast<Acc>(max_val));
     }
-    sum_exp = block_reduce_sum(sum_exp, shared);
+    sum_exp = block_reduce_sum<Acc>(sum_exp, acc_shared);
     __syncthreads();
 
-    // Broadcast sum to all threads
+    // Broadcast log-sum to all threads (computed in Acc precision)
     if (threadIdx.x == 0) {
-        shared[0] = (sum_exp > T(0)) ? device_log(sum_exp) : T(-1e30);
+        acc_shared[0] = (sum_exp > Acc(0)) ? device_log(sum_exp) : Acc(-1e30);
     }
     __syncthreads();
-    T log_sum_exp = shared[0];
+    Acc log_sum_exp = acc_shared[0];
 
     // Step 3: Compute log_softmax = x - max - log_sum_exp
     for (int64_t i = threadIdx.x; i < dim_size; i += blockDim.x) {
-        output_row[i] = input_row[i] - max_val - log_sum_exp;
+        output_row[i] = static_cast<T>(static_cast<Acc>(input_row[i]) - static_cast<Acc>(max_val) - log_sum_exp);
     }
 }
 
@@ -3930,8 +3941,18 @@ Tensor rrelu_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs)
 
     if (inputs[0].dtype() == DType::Float32) {
         if (training) {
-            unsigned long long seed = static_cast<unsigned long long>(
-                std::chrono::high_resolution_clock::now().time_since_epoch().count());
+            // Seed from the library's global RNG so manual_seed is honored /
+            // RReLU is reproducible. Fold in a process-wide monotonic counter
+            // with SplitMix64 mixing so two invocations within the same clock
+            // tick cannot collide, exactly as dropout_forward_kernel does.
+            static std::atomic<uint64_t> rrelu_call_counter{0};
+            uint64_t mix = rrelu_call_counter.fetch_add(1, std::memory_order_relaxed);
+            mix = (mix + 0x9E3779B97F4A7C15ULL);
+            mix = (mix ^ (mix >> 30)) * 0xBF58476D1CE4E5B9ULL;
+            mix = (mix ^ (mix >> 27)) * 0x94D049BB133111EBULL;
+            mix = mix ^ (mix >> 31);
+            unsigned long long seed =
+                static_cast<unsigned long long>(::tenzor::get_global_seed() ^ mix);
             rrelu_train_f32<<<grid, block, 0, stream>>>(
                 inputs[0].data<float>(), result.data<float>(), n, lower, upper, seed);
         } else {
@@ -4012,6 +4033,22 @@ __global__ void count_nonzero_all_f32(const float* input, int64_t* output, int64
     int64_t local_count = 0;
     TENZOR_CUDA_KERNEL_LOOP(idx, n) {
         if (input[idx] != 0.0f) local_count++;
+    }
+    atomicAdd(reinterpret_cast<unsigned long long*>(&scount), static_cast<unsigned long long>(local_count));
+    __syncthreads();
+    if (threadIdx.x == 0) output[0] = scount;
+}
+
+// Native (no-downcast) full-reduction count-nonzero so Float64/Int32/Int64 do
+// not lose precision via a Float32 cast (a tiny double would underflow to 0.0f).
+template <typename T>
+__global__ void count_nonzero_all_native(const T* input, int64_t* output, int64_t n) {
+    __shared__ int64_t scount;
+    if (threadIdx.x == 0) scount = 0;
+    __syncthreads();
+    int64_t local_count = 0;
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) {
+        if (input[idx] != T(0)) local_count++;
     }
     atomicAdd(reinterpret_cast<unsigned long long*>(&scount), static_cast<unsigned long long>(local_count));
     __syncthreads();
@@ -4152,14 +4189,37 @@ Tensor count_nonzero_dispatch(std::span<const Tensor> inputs, const OpAttributes
     auto stream = get_stream(attrs);
     int64_t dim = attrs.get_int(AttrKey::Dim, -1);
     if (dim < 0) {
-        // Full reduction: upcast to Float32 on GPU if needed, then run kernel
+        // Full reduction. Keep Float64/Int32/Int64 native so a value below the
+        // float subnormal range is not underflowed to 0.0f by a downcast; only
+        // upcast genuinely lower-precision dtypes to Float32. Mirrors the
+        // dim-specific branch below.
         Tensor input = inputs[0];
-        if (input.dtype() != DType::Float32) {
-            input = input.to(DType::Float32);
-        }
         int64_t n = input.numel();
         Tensor result({1}, DType::Int64, input.device());
-        count_nonzero_all_f32<<<1, 256, 0, stream>>>(input.data<float>(), result.data<int64_t>(), n);
+        switch (input.dtype()) {
+            case DType::Float64:
+                count_nonzero_all_native<double><<<1, 256, 0, stream>>>(
+                    input.data<double>(), result.data<int64_t>(), n);
+                break;
+            case DType::Int32:
+                count_nonzero_all_native<int32_t><<<1, 256, 0, stream>>>(
+                    input.data<int32_t>(), result.data<int64_t>(), n);
+                break;
+            case DType::Int64:
+                count_nonzero_all_native<int64_t><<<1, 256, 0, stream>>>(
+                    input.data<int64_t>(), result.data<int64_t>(), n);
+                break;
+            case DType::Float32:
+                count_nonzero_all_f32<<<1, 256, 0, stream>>>(
+                    input.data<float>(), result.data<int64_t>(), n);
+                break;
+            default: {
+                Tensor f32 = input.to(DType::Float32);
+                count_nonzero_all_f32<<<1, 256, 0, stream>>>(
+                    f32.data<float>(), result.data<int64_t>(), n);
+                break;
+            }
+        }
         CUDA_CHECK(cudaGetLastError());
         return result;
     }
@@ -4215,13 +4275,38 @@ __global__ void nansum_all_f32(const float* input, float* output, int64_t n) {
     if (threadIdx.x == 0) output[0] = ssum;
 }
 
+// Native double full-reduction nansum so Float64 does not lose ~8 significant
+// digits via a Float32 downcast.
+__global__ void nansum_all_f64(const double* input, double* output, int64_t n) {
+    __shared__ double ssum;
+    if (threadIdx.x == 0) ssum = 0.0;
+    __syncthreads();
+    double local_sum = 0.0;
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) {
+        double v = input[idx];
+        if (!isnan(v)) local_sum += v;
+    }
+    atomicAdd(&ssum, local_sum);
+    __syncthreads();
+    if (threadIdx.x == 0) output[0] = ssum;
+}
+
 Tensor nansum_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs) {
     auto stream = get_stream(attrs);
     int64_t dim = attrs.get_int(AttrKey::Dim, -1);
     if (dim < 0) {
-        // Full reduction: upcast to Float32 on GPU if needed, then run kernel
+        // Full reduction. Preserve Float64 natively (a Float32 downcast would
+        // drop ~8 significant digits); only upcast genuinely lower-precision
+        // dtypes to Float32. Mirrors the dim-specific branch below.
         DType orig_dtype = inputs[0].dtype();
         Tensor input = inputs[0];
+        if (input.dtype() == DType::Float64) {
+            Tensor result({1}, DType::Float64, input.device());
+            nansum_all_f64<<<1, 256, 0, stream>>>(
+                input.data<double>(), result.data<double>(), input.numel());
+            CUDA_CHECK(cudaGetLastError());
+            return result;
+        }
         if (input.dtype() != DType::Float32) {
             input = input.to(DType::Float32);
         }
@@ -4585,14 +4670,11 @@ Tensor scatter_reduce_dispatch(std::span<const Tensor> inputs, const OpAttribute
     if (mode == 2) {
         int64_t out_numel = output.numel();
         count_tensor = Tensor({out_numel}, DType::Int32, output.device());
-        // Zero-initialize counts
+        // Zero-initialize counts. counts[] holds ONLY the number of scattered
+        // contributions per position; the +1 for include_self is applied in
+        // scatter_reduce_mean_div_f32's divisor (c+1 vs c), so counts must NOT
+        // be pre-seeded to 1 here (that would divide by c+2).
         CUDA_CHECK(cudaMemsetAsync(count_tensor.data<int>(), 0, out_numel * sizeof(int), stream));
-        if (include_self) {
-            // Set all counts to 1 (include self)
-            dim3 init_grid((out_numel + 255) / 256);
-            // Use a simple kernel or just memset + add 1 via a trivial kernel
-            // For simplicity, fill with 1s via the host pattern
-        }
         count_ptr = count_tensor.data<int>();
     }
 

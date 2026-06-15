@@ -1,6 +1,7 @@
 #include "tenzor/nn/serialize.hpp"
 #include "tenzor/core/device.hpp"
 #include <algorithm>
+#include <exception>
 #include <stdexcept>
 #include <cstring>
 #include <cstdint>
@@ -104,15 +105,21 @@ auto Serializer::is_valid_file(const std::string& path) -> bool {
         return false;
     }
 
-    // Check magic number
-    uint32_t magic = read_value<uint32_t>(file);
-    if (magic != TENZOR_MAGIC) {
-        return false;
-    }
+    // Read the magic + version. read_value throws on a short read, so a
+    // truncated file (< 8 bytes) would otherwise propagate an exception out of
+    // a predicate that is supposed to simply report validity. Catch it and
+    // report the file as invalid instead.
+    try {
+        uint32_t magic = read_value<uint32_t>(file);
+        if (magic != TENZOR_MAGIC) {
+            return false;
+        }
 
-    // Check version
-    uint32_t version = read_value<uint32_t>(file);
-    if (version != TENZOR_SERIALIZE_VERSION) {
+        uint32_t version = read_value<uint32_t>(file);
+        if (version != TENZOR_SERIALIZE_VERSION) {
+            return false;
+        }
+    } catch (const std::exception&) {
         return false;
     }
 

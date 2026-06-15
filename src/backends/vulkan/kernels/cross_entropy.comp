@@ -16,48 +16,53 @@ layout(push_constant) uniform PushConstants {
 
 shared float shared_sum[WORKGROUP_SIZE];
 
+float sample_loss(uint s_idx) {
+    int target = targets[s_idx];
+    if (target >= 0 && target < int(params.num_classes)) {
+        // Cross entropy: -log(p[target])
+        return -log_probs[s_idx * params.num_classes + uint(target)];
+    }
+    return 0.0;
+}
+
 void main() {
     uint idx = gl_GlobalInvocationID.x;
     uint tid = gl_LocalInvocationID.x;
 
-    float loss_val = 0.0;
-
-    if (idx < params.batch_size) {
-        int target = targets[idx];
-        if (target >= 0 && target < int(params.num_classes)) {
-            // Cross entropy: -log(p[target])
-            loss_val = -log_probs[idx * params.num_classes + uint(target)];
+    if (params.reduction == 0) {
+        // No reduction: one element per sample. The host launches enough
+        // workgroups to cover the batch, so use the global index directly.
+        if (idx < params.batch_size) {
+            losses[idx] = sample_loss(idx);
         }
-        // Only write per-sample loss when no reduction is requested: with
-        // reduction=mean or sum the output tensor is shape [1], so writing
-        // losses[idx] for idx>0 would run off the end of the device buffer.
-        if (params.reduction == 0) {
-            losses[idx] = loss_val;
-        }
+        return;
     }
 
-    // Reduction
-    if (params.reduction > 0) {
-        shared_sum[tid] = (idx < params.batch_size) ? loss_val : 0.0;
+    // Reduction (mean/sum): the host launches exactly ONE workgroup, so each
+    // thread must block-stride over the whole batch before the tree reduction.
+    // (Previously only samples with idx < WORKGROUP_SIZE were summed, so the
+    // total under-counted while mean still divided by the full batch_size.)
+    float acc = 0.0;
+    for (uint i = tid; i < params.batch_size; i += WORKGROUP_SIZE) {
+        acc += sample_loss(i);
+    }
+    shared_sum[tid] = acc;
+    barrier();
+
+    // Parallel tree reduction over the workgroup (spec-constant size).
+    for (uint s = WORKGROUP_SIZE / 2; s > 0; s >>= 1) {
+        if (tid < s) {
+            shared_sum[tid] += shared_sum[tid + s];
+        }
         barrier();
+    }
 
-        // Parallel reduction. Use the shader's actual workgroup size (which
-        // is a specialization constant) rather than the hardcoded 256, so
-        // reduction is correct when the device picks e.g. 1024.
-        for (uint s = WORKGROUP_SIZE / 2; s > 0; s >>= 1) {
-            if (tid < s) {
-                shared_sum[tid] += shared_sum[tid + s];
-            }
-            barrier();
+    if (tid == 0) {
+        float total = shared_sum[0];
+        if (params.reduction == 1) { // mean
+            total /= float(params.batch_size);
         }
-
-        if (tid == 0) {
-            float total = shared_sum[0];
-            if (params.reduction == 1) { // mean
-                total /= float(params.batch_size);
-            }
-            losses[0] = total;
-        }
+        losses[0] = total;
     }
 }
 

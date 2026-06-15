@@ -606,7 +606,8 @@ void adaptive_avgpool2d_impl(const T* in_data, T* out_data,
                         }
                     }
 
-                    out_data[((n * C + c) * output_h + oh) * output_w + ow] = static_cast<T>(sum / count);
+                    out_data[((n * C + c) * output_h + oh) * output_w + ow] =
+                        count > 0 ? static_cast<T>(sum / count) : T{};
                 }
             }
         }
@@ -659,6 +660,7 @@ void adaptive_avgpool2d_backward_impl(const T* grad_out_data, T* grad_in_data,
                     int64_t w_end = ((ow + 1) * W) / output_w;
 
                     int64_t count = (h_end - h_start) * (w_end - w_start);
+                    if (count <= 0) continue;
                     float grad_val = static_cast<float>(grad_out_data[((n * C + c) * output_h + oh) * output_w + ow]) / count;
 
                     for (int64_t h = h_start; h < h_end; ++h) {
@@ -1116,7 +1118,8 @@ void adaptive_avgpool1d_impl(const T* in_data, T* out_data,
                     sum += static_cast<Compute>(in_data[(n * C + c) * L + l]);
                 }
 
-                out_data[(n * C + c) * L_out + ol] = static_cast<T>(sum / count);
+                out_data[(n * C + c) * L_out + ol] =
+                    count > 0 ? static_cast<T>(sum / count) : T{};
             }
         }
     }
@@ -1157,6 +1160,7 @@ void adaptive_avgpool1d_backward_impl(const T* grad_out_data, T* grad_in_data,
                 int64_t l_end = ((ol + 1) * L) / L_out;
 
                 int64_t count = l_end - l_start;
+                if (count <= 0) continue;
                 float grad_val = static_cast<float>(grad_out_data[(n * C + c) * L_out + ol]) / count;
 
                 for (int64_t l = l_start; l < l_end; ++l) {
@@ -1890,6 +1894,7 @@ void adaptive_avgpool3d_backward_impl(const T* grad_out_data, T* grad_in_data,
                         int64_t w_end = ((ow + 1) * W) / W_out;
 
                         int64_t count = (d_end - d_start) * (h_end - h_start) * (w_end - w_start);
+                        if (count <= 0) continue;
                         int64_t out_idx = ((n * C + c) * D_out + od) * H_out * W_out + oh * W_out + ow;
                         float grad_val = static_cast<float>(grad_out_data[out_idx]) / count;
 

@@ -386,8 +386,11 @@ include(${CMAKE_SOURCE_DIR}/cmake/FindMKL.cmake OPTIONAL RESULT_VARIABLE MKL_MOD
 if(MKL_MODULE_FOUND AND MKL_FOUND)
     target_link_libraries(tenzor_backend_cpu PRIVATE ${MKL_LIBRARIES})
     target_include_directories(tenzor_backend_cpu PRIVATE ${MKL_INCLUDE_DIRS})
-    # MKL_ILP64 is required when linking against libmkl_intel_ilp64 (64-bit integers)
-    target_compile_definitions(tenzor_backend_cpu PRIVATE TENZOR_USE_MKL TENZOR_HAS_BLAS MKL_ILP64)
+    # Do NOT define MKL_ILP64: FindMKL links the LP64 interface (mkl_intel_lp64,
+    # 32-bit MKL_INT). Defining MKL_ILP64 makes the MKL headers' MKL_INT 64-bit,
+    # mismatching the linked LP64 library (only by-value cblas_* args survive the
+    # ABI mismatch; any pointer/array MKL_INT would be corrupted).
+    target_compile_definitions(tenzor_backend_cpu PRIVATE TENZOR_USE_MKL TENZOR_HAS_BLAS)
     message(STATUS "CPU Backend: Intel MKL enabled for optimized GEMM")
 else()
     # Fallback: Link against generic BLAS library (OpenBLAS, etc.)

@@ -224,6 +224,18 @@ public:
 private:
     VulkanVMAAllocator() = default;
     ~VulkanVMAAllocator() {
+        // Destroy every outstanding buffer with its owning device's allocator
+        // BEFORE destroying the allocators themselves. Skipping this (the old
+        // behavior) triggers a VMA leak/assertion in debug builds and leaks the
+        // VkBuffer/VmaAllocation pairs in release. Mirrors shutdown_device().
+        for (auto& [ptr, info] : alloc_map_) {
+            auto alloc_it = allocators_.find(info.device);
+            if (alloc_it != allocators_.end()) {
+                vmaDestroyBuffer(alloc_it->second, info.buffer, info.allocation);
+            }
+        }
+        alloc_map_.clear();
+
         for (auto& [device, allocator] : allocators_) {
             vmaDestroyAllocator(allocator);
         }

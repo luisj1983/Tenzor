@@ -1032,13 +1032,35 @@ auto CholeskyBackward::backward_with_variables(std::vector<Variable> grad_output
 
 auto SvdBackward::backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> {
     // SVD backward using Variable-level ops for higher-order gradient support.
-    // Formula from Ionescu et al. 2015:
-    //   dA = U @ (diag(grad_S) + (F * (Ut@gU)) @ S + S @ (F * (gVh@V))) @ Vh
-    // where F_{ij} = 1/(s_j^2 - s_i^2) for i != j, 0 on diagonal
-
-    auto grad_U_var = grad_outputs[0];
-    auto grad_S_var = grad_outputs[1];
-    auto grad_Vh_var = grad_outputs[2];
+    // Mirrors the first-order Tensor path (antisymmetric skew form + non-square
+    // projector terms). SVD wires three per-output SvdBackward instances
+    // (slots 0/1/2), and the engine pushes exactly one accumulated grad per
+    // instance, so grad_outputs.size()==1 here. Route that single grad to its
+    // proper slot and zero the others (the formula is linear in
+    // (grad_U, grad_S, grad_Vh), so the engine summing per-slot input grads
+    // reconstructs the full gradient and second-order graphs chain through).
+    // A legacy combined path (output_slot_ < 0) keeps all three.
+    Variable grad_U_var, grad_S_var, grad_Vh_var;
+    if (output_slot_ == 0) {
+        grad_U_var  = grad_outputs[0];
+        grad_S_var  = Variable(zeros_like(saved_tensors_[1]), false);
+        grad_Vh_var = Variable(zeros_like(saved_tensors_[2]), false);
+    } else if (output_slot_ == 1) {
+        grad_U_var  = Variable(zeros_like(saved_tensors_[0]), false);
+        grad_S_var  = grad_outputs[0];
+        grad_Vh_var = Variable(zeros_like(saved_tensors_[2]), false);
+    } else if (output_slot_ == 2) {
+        grad_U_var  = Variable(zeros_like(saved_tensors_[0]), false);
+        grad_S_var  = Variable(zeros_like(saved_tensors_[1]), false);
+        grad_Vh_var = grad_outputs[0];
+    } else {
+        grad_U_var  = grad_outputs.size() > 0 ? grad_outputs[0]
+                        : Variable(zeros_like(saved_tensors_[0]), false);
+        grad_S_var  = grad_outputs.size() > 1 ? grad_outputs[1]
+                        : Variable(zeros_like(saved_tensors_[1]), false);
+        grad_Vh_var = grad_outputs.size() > 2 ? grad_outputs[2]
+                        : Variable(zeros_like(saved_tensors_[2]), false);
+    }
 
     // Wrap saved tensors as non-grad Variables
     auto U = Variable(saved_tensors_[0], false);   // (..., M, K)
@@ -1048,14 +1070,8 @@ auto SvdBackward::backward_with_variables(std::vector<Variable> grad_outputs) ->
     auto ndim = saved_tensors_[0].ndim();
     auto K = saved_tensors_[1].shape()[saved_tensors_[1].ndim() - 1];
 
-    // Compute F matrix from singular values (constant — no grad needed)
-    // F_{ij} = 1/(s_j^2 - s_i^2) for i != j, 0 on diagonal
-    //
-    // Batch-aware build mirroring the first-order Tensor path (B.8): for S
-    // shaped (..., K) we form F shaped (..., K, K) via trailing-dim unsqueeze
-    // + broadcast. The previous reshape({1,K})/{K,1} hard-coded a single
-    // (K,K) layout and threw on ndim>2 inputs, making second-order grads of
-    // batched SVD unavailable under create_graph.
+    // F matrix from singular values (constant — no grad needed). Batch-aware
+    // build mirroring the first-order Tensor path (B.8).
     const auto& S_tensor = saved_tensors_[1];
     auto S_sq = mul(S_tensor, S_tensor);                  // (..., K)
     auto S_row = unsqueeze(S_sq, S_sq.ndim() - 1);        // (..., 1, K)  varies over j
@@ -1078,24 +1094,57 @@ auto SvdBackward::backward_with_variables(std::vector<Variable> grad_outputs) ->
     // S_diag as Variable — batch-aware diag_embed (S may be (..., K)).
     auto S_diag = diag_embed_var(S);  // (..., K, K)
 
-    // U^T and V
     auto Ut = tenzor::transpose(U, ndim - 2, ndim - 1);
     auto V = tenzor::transpose(Vh, saved_tensors_[2].ndim() - 2, saved_tensors_[2].ndim() - 1);
 
-    // Variable-level computations
-    auto UtgU = tenzor::matmul(Ut, grad_U_var);       // (K, K)
-    auto gVhV = tenzor::matmul(grad_Vh_var, V);       // (K, K)
+    auto UtgU = tenzor::matmul(Ut, grad_U_var);       // (..., K, K)
+    auto gVhV = tenzor::matmul(grad_Vh_var, V);       // (..., K, K)
 
-    auto F_UtgU = F * UtgU;
-    auto F_gVhV = F * gVhV;
+    // Antisymmetric (skew) parts — must match the Tensor path; using
+    // F ⊙ (U^T grad_U) directly mixes the symmetric (constrained) component in
+    // and breaks gradcheck.
+    //   skew_U = U^T grad_U - (U^T grad_U)^T
+    //   skew_V = (grad_Vh V)^T - (grad_Vh V)
+    auto UtgU_t = tenzor::transpose(UtgU, ndim - 2, ndim - 1);
+    auto gVhV_t = tenzor::transpose(gVhV, ndim - 2, ndim - 1);
+    auto skew_U = UtgU - UtgU_t;
+    auto skew_V = gVhV_t - gVhV;
+
+    auto F_UtgU = F * skew_U;
+    auto F_gVhV = F * skew_V;
 
     auto term1 = diag_embed_var(grad_S_var);           // diag(grad_S), (..., K, K)
-    auto term2 = tenzor::matmul(F_UtgU, S_diag);       // F*(Ut@gU) @ S
-    auto term3 = tenzor::matmul(S_diag, F_gVhV);       // S @ F*(gVh@V)
+    auto term2 = tenzor::matmul(F_UtgU, S_diag);       // F*(skew_U) @ S
+    auto term3 = tenzor::matmul(S_diag, F_gVhV);       // S @ F*(skew_V)
 
     auto middle = term1 + term2 + term3;
 
     auto grad_A = tenzor::matmul(tenzor::matmul(U, middle), Vh);
+
+    // Non-square projector terms (full_matrices = false, M != N), mirroring the
+    // Tensor path: tall U (M > K) adds (I - U U^T) grad_U S^{-1} Vh; wide V
+    // (N > K) adds U S^{-1} grad_Vh (I - V V^T).
+    int64_t M = saved_tensors_[0].shape()[ndim - 2];
+    int64_t N = saved_tensors_[2].shape()[saved_tensors_[2].ndim() - 1];
+    if (M > K || N > K) {
+        auto S_inv = reciprocal(S);
+        auto S_inv_diag = diag_embed_var(S_inv);
+        if (M > K) {
+            auto eye_M = Variable(eye(M, std::nullopt, S_tensor.dtype(), S_tensor.device()), false);
+            auto UUt = tenzor::matmul(U, Ut);
+            auto proj_M = eye_M - UUt;
+            grad_A = grad_A + tenzor::matmul(
+                tenzor::matmul(tenzor::matmul(proj_M, grad_U_var), S_inv_diag), Vh);
+        }
+        if (N > K) {
+            auto eye_N = Variable(eye(N, std::nullopt, S_tensor.dtype(), S_tensor.device()), false);
+            auto Vt = tenzor::transpose(V, ndim - 2, ndim - 1);
+            auto VVt = tenzor::matmul(V, Vt);
+            auto proj_N = eye_N - VVt;
+            grad_A = grad_A + tenzor::matmul(
+                tenzor::matmul(tenzor::matmul(U, S_inv_diag), grad_Vh_var), proj_N);
+        }
+    }
 
     return {grad_A};
 }

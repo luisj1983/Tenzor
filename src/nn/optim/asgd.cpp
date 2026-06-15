@@ -29,6 +29,13 @@ ASGD::ASGD(std::vector<optim::ParamGroup> groups,
 }
 
 auto ASGD::step_impl() -> void {
+    // Increment the global step at the TOP (matching AdamAtan2's convention)
+    // so the very first step uses step_count_ == 1: the eta decay term and
+    // the mu running-average weight both engage from step 1 instead of being
+    // skipped (eta == lr, mu == 1) on the first step as they were when the
+    // counter was bumped at the bottom.
+    step_count_++;
+
     // Audit D.4: per-parameter hyperparameters resolve from the
     // active ParamGroup (when one was set up) or fall through to
     // the optimiser-wide defaults stored on this ASGD instance.
@@ -98,8 +105,6 @@ auto ASGD::step_impl() -> void {
         double inv_mu = 1.0 / mu;
         ax_buffers_[i] = ax_buffers_[i] * scalar(1.0 - inv_mu) + param_hi * scalar(inv_mu);
     }
-
-    step_count_++;
 }
 
 auto ASGD::set_lr(double lr) -> void {

@@ -65,13 +65,13 @@ void main() {
             res = val_a * val_b;
             break;
         case 3: // div
-            res = val_a / val_b;
+            res = (val_b != int64_t(0)) ? (val_a / val_b) : int64_t(0);
             break;
         case 24: // fmod / remainder (trunc-based) for integers
-            res = val_a % val_b;
+            res = (val_b != int64_t(0)) ? (val_a % val_b) : int64_t(0);
             break;
         case 25: { // remainder - IEEE-style (round-half-to-even would be truncation for int)
-            int64_t r = val_a % val_b;
+            int64_t r = (val_b != int64_t(0)) ? (val_a % val_b) : int64_t(0);
             res = r;
             break;
         }

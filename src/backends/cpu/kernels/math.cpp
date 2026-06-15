@@ -4128,7 +4128,11 @@ auto gt_kernel(const Tensor& a, const Tensor& b) -> Tensor {
                 c_data[i] = (a_data[i] > b_data[i]);
             }
         } else {
-            throw std::runtime_error("Unsupported dtype for gt operation");
+            TENZOR_DISPATCH_INTEGER_TYPES(a.dtype(), "gt", [&]() {
+                const scalar_t* a_data = a.data<scalar_t>();
+                const scalar_t* b_data = b.data<scalar_t>();
+                for (size_t i = 0; i < n; ++i) { c_data[i] = (a_data[i] > b_data[i]); }
+            });
         }
     } else {
         bool* c_data = result.data<bool>();
@@ -4168,7 +4172,12 @@ auto gt_kernel(const Tensor& a, const Tensor& b) -> Tensor {
             detail::broadcast_op<bool, bool>(a_data, b_data, c_data, shape_a_vec, shape_b_vec, output_shape,
                                 [](bool x, bool y) { return x > y; });
         } else {
-            throw std::runtime_error("Unsupported dtype for gt operation");
+            TENZOR_DISPATCH_INTEGER_TYPES(a.dtype(), "gt_broadcast", [&]() {
+                const scalar_t* a_data = a.data<scalar_t>();
+                const scalar_t* b_data = b.data<scalar_t>();
+                detail::broadcast_op<scalar_t, bool>(a_data, b_data, c_data, shape_a_vec, shape_b_vec, output_shape,
+                                    [](scalar_t x, scalar_t y) { return x > y; });
+            });
         }
     }
 
@@ -4220,7 +4229,11 @@ auto ge_kernel(const Tensor& a, const Tensor& b) -> Tensor {
             const bool* b_data = b.data<bool>();
             for (size_t i = 0; i < n; ++i) { c_data[i] = (a_data[i] >= b_data[i]); }
         } else {
-            throw std::runtime_error("Unsupported dtype for ge operation");
+            TENZOR_DISPATCH_INTEGER_TYPES(a.dtype(), "ge", [&]() {
+                const scalar_t* a_data = a.data<scalar_t>();
+                const scalar_t* b_data = b.data<scalar_t>();
+                for (size_t i = 0; i < n; ++i) { c_data[i] = (a_data[i] >= b_data[i]); }
+            });
         }
     } else {
         bool* c_data = result.data<bool>();
@@ -4255,7 +4268,12 @@ auto ge_kernel(const Tensor& a, const Tensor& b) -> Tensor {
             detail::broadcast_op<bool, bool>(a_data, b_data, c_data, shape_a_vec, shape_b_vec, output_shape,
                                 [](bool x, bool y) { return x >= y; });
         } else {
-            throw std::runtime_error("Unsupported dtype for ge operation");
+            TENZOR_DISPATCH_INTEGER_TYPES(a.dtype(), "ge_broadcast", [&]() {
+                const scalar_t* a_data = a.data<scalar_t>();
+                const scalar_t* b_data = b.data<scalar_t>();
+                detail::broadcast_op<scalar_t, bool>(a_data, b_data, c_data, shape_a_vec, shape_b_vec, output_shape,
+                                    [](scalar_t x, scalar_t y) { return x >= y; });
+            });
         }
     }
 
@@ -5149,19 +5167,23 @@ auto unary_math_kernel(const Tensor& input, F32Fn f32_fn, F64Fn f64_fn,
     if (input.dtype() == DType::Float32) {
         const float* in_data = input.data<float>();
         float* out_data = result.data<float>();
+        #pragma omp parallel for if(n > OMP_THRESHOLD_MEDIUM)
         for (size_t i = 0; i < n; ++i) out_data[i] = f32_fn(in_data[i]);
     } else if (input.dtype() == DType::Float64) {
         const double* in_data = input.data<double>();
         double* out_data = result.data<double>();
+        #pragma omp parallel for if(n > OMP_THRESHOLD_MEDIUM)
         for (size_t i = 0; i < n; ++i) out_data[i] = f64_fn(in_data[i]);
     } else if (input.dtype() == DType::Float16) {
         const Float16* in_data = input.data<Float16>();
         Float16* out_data = result.data<Float16>();
+        #pragma omp parallel for if(n > OMP_THRESHOLD_MEDIUM)
         for (size_t i = 0; i < n; ++i)
             out_data[i] = Float16(f32_fn(static_cast<float>(in_data[i])));
     } else if (input.dtype() == DType::BFloat16) {
         const BFloat16* in_data = input.data<BFloat16>();
         BFloat16* out_data = result.data<BFloat16>();
+        #pragma omp parallel for if(n > OMP_THRESHOLD_MEDIUM)
         for (size_t i = 0; i < n; ++i)
             out_data[i] = BFloat16(f32_fn(static_cast<float>(in_data[i])));
     } else {
@@ -5254,16 +5276,20 @@ auto unary_bool_kernel(const Tensor& input, F32Fn f32_fn, F64Fn f64_fn,
     } else if (input.dtype() == DType::BFloat16) {
         const BFloat16* in_data = input.data<BFloat16>();
         for (size_t i = 0; i < n; ++i) out_data[i] = f32_fn(static_cast<float>(in_data[i]));
-    } else if (input.dtype() == DType::Int32 || input.dtype() == DType::Int64) {
-        // Integers are always finite, never NaN/Inf
-        bool val_isnan = false;
-        bool val_isinf = false;
-        bool val_isfinite = true;
-        // Determine which function this is by testing a known value
-        bool is_nan_fn = f32_fn(std::numeric_limits<float>::quiet_NaN());
-        bool is_inf_fn = f32_fn(std::numeric_limits<float>::infinity());
-        bool fill_val = is_nan_fn ? val_isnan : (is_inf_fn ? val_isinf : val_isfinite);
-        for (size_t i = 0; i < n; ++i) out_data[i] = fill_val;
+    } else if (input.dtype() == DType::Int8  || input.dtype() == DType::UInt8 ||
+               input.dtype() == DType::Int16 || input.dtype() == DType::Int32 ||
+               input.dtype() == DType::Int64) {
+        // Evaluate the predicate per element so value-dependent predicates
+        // (e.g. signbit) are correct. Integer values are exactly representable
+        // in double, so f64_fn yields the correct result for every integer
+        // type: signbit reflects the actual sign, while isnan/isinf are always
+        // false and isfinite always true. (Matches the integer widths covered
+        // by TENZOR_DISPATCH_INTEGER_TYPES.)
+        TENZOR_DISPATCH_INTEGER_TYPES(input.dtype(), op_name, [&]() {
+            const scalar_t* in_data = input.data<scalar_t>();
+            for (size_t i = 0; i < n; ++i)
+                out_data[i] = f64_fn(static_cast<double>(in_data[i]));
+        });
     } else {
         throw std::runtime_error(std::string(op_name) + ": unsupported dtype");
     }
@@ -6215,7 +6241,16 @@ auto betainc_kernel(std::span<const Tensor> inputs) -> Tensor {
         return betainc_kernel(upcast).to(orig_dtype);
     }
 
-    // Element-wise ternary operation
+    // Element-wise ternary operation. The loops index b and x with a's element
+    // count, so all three operands must have identical shape (no broadcasting).
+    if (!std::ranges::equal(a_t.shape(), b_t.shape()) ||
+        !std::ranges::equal(a_t.shape(), x_t.shape())) {
+        throw std::invalid_argument(
+            "betainc: a, b and x must have identical shapes (no broadcasting); got "
+            "a.numel=" + std::to_string(a_t.numel()) +
+            ", b.numel=" + std::to_string(b_t.numel()) +
+            ", x.numel=" + std::to_string(x_t.numel()));
+    }
     auto out_shape = a_t.shape();
     Tensor result(std::vector<int64_t>(out_shape.begin(), out_shape.end()), a_t.dtype(), a_t.device());
     size_t n = static_cast<size_t>(a_t.numel());
@@ -7177,6 +7212,11 @@ auto index_add_kernel(const Tensor& input, int64_t dim, const Tensor& index, con
         for (int64_t o = 0; o < outer; o++) {
             for (int64_t k = 0; k < idx_n; k++) {
                 int64_t dst_idx = idx_data[k];
+                if (dst_idx < 0) dst_idx += dim_size;
+                if (dst_idx < 0 || dst_idx >= dim_size) {
+                    throw std::out_of_range("index_add: index " + std::to_string(idx_data[k]) +
+                                            " out of range for dim of size " + std::to_string(dim_size));
+                }
                 for (int64_t j = 0; j < inner; j++) {
                     out_data[(o * dim_size + dst_idx) * inner + j] +=
                         src_data[(o * idx_n + k) * inner + j];
@@ -7222,6 +7262,11 @@ auto index_copy_kernel(const Tensor& input, int64_t dim, const Tensor& index, co
         for (int64_t o = 0; o < outer; o++) {
             for (int64_t k = 0; k < idx_n; k++) {
                 int64_t dst_idx = idx_data[k];
+                if (dst_idx < 0) dst_idx += dim_size;
+                if (dst_idx < 0 || dst_idx >= dim_size) {
+                    throw std::out_of_range("index_copy: index " + std::to_string(idx_data[k]) +
+                                            " out of range for dim of size " + std::to_string(dim_size));
+                }
                 for (int64_t j = 0; j < inner; j++) {
                     out_data[(o * dim_size + dst_idx) * inner + j] =
                         src_data[(o * idx_n + k) * inner + j];
@@ -7257,6 +7302,11 @@ auto index_fill_kernel(const Tensor& input, int64_t dim, const Tensor& index, do
         for (int64_t o = 0; o < outer; o++) {
             for (int64_t k = 0; k < idx_n; k++) {
                 int64_t dst_idx = idx_data[k];
+                if (dst_idx < 0) dst_idx += dim_size;
+                if (dst_idx < 0 || dst_idx >= dim_size) {
+                    throw std::out_of_range("index_fill: index " + std::to_string(idx_data[k]) +
+                                            " out of range for dim of size " + std::to_string(dim_size));
+                }
                 for (int64_t j = 0; j < inner; j++) {
                     out_data[(o * dim_size + dst_idx) * inner + j] = fill_val;
                 }

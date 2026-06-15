@@ -2580,16 +2580,39 @@ auto Graph::execute_node(const std::shared_ptr<Node>& node,
         // Fused operations — dispatch to fused kernel implementations
         // ====================================================================
         case OpType::FlashAttention: {
-            // Fused multi-head attention: softmax(Q*K^T / sqrt(d_k)) * V
+            // Fused multi-head attention: softmax(scale * Q*K^T [+ mask]) * V
             // Inputs: [Q, K, V] or [Q, K, V, mask]
             if (input_vars.size() >= 3) {
                 auto& Q = input_vars[0];
                 auto& K = input_vars[1];
                 auto& V = input_vars[2];
-                // Fallback: compute as standard attention
-                auto d_k = static_cast<float>(K.tensor().shape().back());
+
+                // FuseAttentionPass matches MatMul -> Mul(scale) -> [Add(mask)]
+                // -> Softmax -> MatMul and accepts ANY scalar constant as the
+                // scale (temperature / learned), storing it as the "scale"
+                // attr. Honour that recorded value rather than recomputing
+                // 1/sqrt(d_k) — otherwise a traced model using a non-1/sqrt(d_k)
+                // scale silently diverges from eager.
+                float scale;
+                if (node->has_float_attr("scale")) {
+                    scale = node->get_attr("scale");
+                } else {
+                    auto d_k = static_cast<float>(K.tensor().shape().back());
+                    scale = 1.0f / std::sqrt(d_k);
+                }
+
                 auto scores = tenzor::matmul(Q, K.transpose(-2, -1));
-                auto scaled = scores * Variable(tenzor::full({1}, 1.0f / std::sqrt(d_k), DType::Float32), false);
+                auto scaled = scores * Variable(
+                    tenzor::full({1}, scale, DType::Float32), false);
+
+                // Add the additive mask (4th input) before softmax when the
+                // matched pattern attached one (FuseAttentionPass appends it as
+                // input[3] and sets has_mask). Either signal suffices; the 4th
+                // input is authoritative.
+                if (input_vars.size() >= 4) {
+                    scaled = scaled + input_vars[3];
+                }
+
                 auto attn = nn::softmax(scaled, -1);
                 outputs.push_back(tenzor::matmul(attn, V));
             }
@@ -2598,13 +2621,49 @@ auto Graph::execute_node(const std::shared_ptr<Node>& node,
 
         case OpType::FusedFFN: {
             // Fused feed-forward: Linear -> Activation -> Linear
-            // Inputs: [x, w1, b1, w2, b2]
-            if (input_vars.size() >= 5) {
-                auto h = tenzor::matmul(input_vars[0], input_vars[1].transpose(-2, -1));
-                h = h + input_vars[2];
-                h = nn::gelu(h);  // Default activation
-                auto out = tenzor::matmul(h, input_vars[3].transpose(-2, -1));
-                out = out + input_vars[4];
+            // Inputs may arrive either as [x, w1, b1, w2, b2] (all graph inputs)
+            // or as [x] with w1/b1/w2/b2 carried as tensor attrs (the form
+            // FuseFFNPass::fuse_triple emits — it transfers only linear1's data
+            // input and stores the weights as attrs). Support both so the fused
+            // node is actually executable.
+            if (!input_vars.empty()) {
+                Variable x = input_vars[0];
+                Variable w1, b1, w2, b2;
+                bool have_b1 = false, have_b2 = false;
+
+                if (input_vars.size() >= 5) {
+                    w1 = input_vars[1];
+                    b1 = input_vars[2]; have_b1 = true;
+                    w2 = input_vars[3];
+                    b2 = input_vars[4]; have_b2 = true;
+                } else {
+                    // Pull weights/biases from the node's tensor attrs.
+                    w1 = Variable(node->get_tensor_attr("weight1"), false);
+                    w2 = Variable(node->get_tensor_attr("weight2"), false);
+                    if (node->has_tensor_attr("bias1") &&
+                        node->get_tensor_attr("bias1").numel() > 0) {
+                        b1 = Variable(node->get_tensor_attr("bias1"), false);
+                        have_b1 = true;
+                    }
+                    if (node->has_tensor_attr("bias2") &&
+                        node->get_tensor_attr("bias2").numel() > 0) {
+                        b2 = Variable(node->get_tensor_attr("bias2"), false);
+                        have_b2 = true;
+                    }
+                }
+
+                auto h = tenzor::matmul(x, w1.transpose(-2, -1));
+                if (have_b1) h = h + b1;
+
+                // activation_type: 1 = ReLU, 2 = GELU (default). Set by
+                // FuseFFNPass; default to GELU when absent.
+                int64_t act = node->has_attr("activation_type")
+                                  ? node->get_int_attr("activation_type")
+                                  : 2;
+                h = (act == 1) ? nn::relu(h) : nn::gelu(h);
+
+                auto out = tenzor::matmul(h, w2.transpose(-2, -1));
+                if (have_b2) out = out + b2;
                 outputs.push_back(out);
             }
             break;

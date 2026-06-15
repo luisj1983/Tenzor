@@ -326,12 +326,22 @@ auto unsqueeze_kernel(const Tensor& input, int64_t dim, cudaStream_t stream) -> 
     Tensor result;
     CUDAKernelAccess::get_impl_mutable(result) = make_intrusive<TensorImpl>(*CUDAKernelAccess::get_impl(input));
 
+    // Normalize/validate dim against the OUTPUT rank (ndim+1), mirroring the
+    // CPU kernel. A negative or out-of-range dim would otherwise produce an
+    // out-of-range vector::insert offset (UB).
+    const int64_t in_ndim = input.ndim();
+    const int64_t out_ndim = in_ndim + 1;
+    if (dim < 0) dim += out_ndim;
+    if (dim < 0 || dim > in_ndim) {
+        throw std::runtime_error("unsqueeze: dimension out of range");
+    }
+
     auto& r_shape = result.mutable_shape();
     auto& r_strides = result.mutable_strides();
     r_shape.insert(r_shape.begin() + dim, 1);
 
-    // Compute stride for new dimension
-    int64_t new_stride = (dim < input.ndim()) ? input.strides()[dim] : 1;
+    // Compute stride for new dimension (use the normalized dim)
+    int64_t new_stride = (dim < in_ndim) ? input.strides()[dim] : 1;
     r_strides.insert(r_strides.begin() + dim, new_stride);
 
     return result;

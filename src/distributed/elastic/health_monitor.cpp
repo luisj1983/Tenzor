@@ -26,6 +26,12 @@ HealthMonitor::~HealthMonitor() {
 auto HealthMonitor::start(const std::vector<int32_t>& worker_ids) -> void {
     {
         std::lock_guard<std::mutex> lock(state_mutex_);
+        // Reset monitored set to exactly `worker_ids`. After a membership shrink
+        // (e.g. elastic re-rendezvous into a smaller world) ranks are reassigned
+        // contiguously, so a stale top rank id would otherwise linger here
+        // permanently DEAD and keep being probed/reported by dead_workers().
+        states_.clear();
+        miss_counts_.clear();
         for (auto id : worker_ids) {
             states_[id] = WorkerState::ALIVE;
             miss_counts_[id] = 0;
@@ -119,18 +125,28 @@ auto HealthMonitor::monitor_loop() -> void {
             }
         }
 
-        // Collect results.
+        // Wait on the probe futures WITHOUT holding state_mutex_. Each future
+        // is only fulfilled when send_async's callback fires, which for an
+        // unresponsive peer happens only after send() blocks for the full RPC
+        // timeout. Blocking here under the lock would serialize concurrent
+        // get_state()/dead_workers() readers (including check_and_recover()'s
+        // poll) behind the worst-case timeout each cycle.
+        std::vector<bool> alive_results(workers_to_check.size(), false);
+        for (size_t i = 0; i < workers_to_check.size(); ++i) {
+            try {
+                alive_results[i] = futures[i].get();
+            } catch (...) {
+                alive_results[i] = false;
+            }
+        }
+
+        // Apply the state transitions under the lock; this is now non-blocking.
         std::vector<std::pair<int32_t, WorkerState>> changes;
         {
             std::lock_guard<std::mutex> lock(state_mutex_);
             for (size_t i = 0; i < workers_to_check.size(); ++i) {
                 int32_t worker_id = workers_to_check[i];
-                bool alive = false;
-                try {
-                    alive = futures[i].get();
-                } catch (...) {
-                    alive = false;
-                }
+                bool alive = alive_results[i];
 
                 if (alive) {
                     miss_counts_[worker_id] = 0;

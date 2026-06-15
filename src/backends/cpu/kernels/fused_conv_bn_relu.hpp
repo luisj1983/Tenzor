@@ -378,25 +378,29 @@ inline void conv_bn_relu_training(
     // Compute batch statistics
     #pragma omp parallel for if(out_channels > 16)
     for (int64_t oc = 0; oc < out_channels; ++oc) {
-        // Compute mean
-        float sum = 0.0f;
+        // Compute mean. Accumulate in double: a float accumulator over
+        // batch*spatial_size (tens of thousands of) elements loses precision,
+        // diverging from the double-accumulated reference used by the other
+        // BatchNorm normalization paths.
+        double sum = 0.0;
         for (int64_t b = 0; b < batch; ++b) {
             for (int64_t s = 0; s < spatial_size; ++s) {
-                sum += conv_out[b * out_channels * spatial_size + oc * spatial_size + s];
+                sum += static_cast<double>(conv_out[b * out_channels * spatial_size + oc * spatial_size + s]);
             }
         }
-        float mean = sum / static_cast<float>(samples_per_channel);
+        double mean_d = sum / static_cast<double>(samples_per_channel);
+        float mean = static_cast<float>(mean_d);
         batch_mean[oc] = mean;
 
-        // Compute variance
-        float var_sum = 0.0f;
+        // Compute variance (double accumulator, two-pass).
+        double var_sum = 0.0;
         for (int64_t b = 0; b < batch; ++b) {
             for (int64_t s = 0; s < spatial_size; ++s) {
-                float diff = conv_out[b * out_channels * spatial_size + oc * spatial_size + s] - mean;
+                double diff = static_cast<double>(conv_out[b * out_channels * spatial_size + oc * spatial_size + s]) - mean_d;
                 var_sum += diff * diff;
             }
         }
-        float var = var_sum / static_cast<float>(samples_per_channel);
+        float var = static_cast<float>(var_sum / static_cast<double>(samples_per_channel));
         batch_var[oc] = var;
 
         // Update running statistics

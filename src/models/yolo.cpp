@@ -9,6 +9,7 @@
 #include "../../include/tenzor/nn/checkpoint.hpp"
 #include "../../include/tenzor/autograd/ops.hpp"
 #include "../../include/tenzor/nn/utils/variable_cast.hpp"
+#include "../../include/tenzor/nn/layers/segmentation.hpp"  // nn::upsample_bilinear (autograd-aware)
 #include "../../include/tenzor/ops/detection.hpp"
 #include "../../include/tenzor/ops/transform.hpp"
 #include "../../include/tenzor/ops/math.hpp"
@@ -24,6 +25,64 @@ namespace models {
 using namespace nn;
 
 using namespace ops;
+
+namespace {
+
+// Pack per-image NMS detections into one [total_dets, 7] tensor laid out as
+// [image_index, x1, y1, x2, y2, score, label]. Used by both YOLOv3 and YOLOv5
+// forward_impl so a single returned Variable carries every kept detection from
+// every image in the batch (boxes + scores + labels), instead of silently
+// dropping all but the first image's boxes.
+auto pack_detections(
+    const std::vector<std::tuple<Tensor, Tensor, Tensor>>& detections) -> Tensor {
+    // Count total kept detections across all images.
+    int64_t total = 0;
+    for (const auto& det : detections) {
+        const Tensor& bx = std::get<0>(det);
+        if (bx.numel() > 0) total += bx.shape()[0];
+    }
+
+    Tensor packed({total, 7}, DType::Float32, Device::cpu());
+    if (total == 0) {
+        return packed;  // Empty [0, 7] — no detections in any image.
+    }
+    float* out = packed.data<float>();
+
+    int64_t row = 0;
+    for (size_t img = 0; img < detections.size(); ++img) {
+        const Tensor& boxes_t  = std::get<0>(detections[img]);
+        const Tensor& scores_t = std::get<1>(detections[img]);
+        const Tensor& labels_t = std::get<2>(detections[img]);
+        if (boxes_t.numel() == 0) continue;
+
+        const int64_t n = boxes_t.shape()[0];
+
+        // Normalize everything to Float32 on CPU for uniform host access.
+        Tensor boxes_cpu  = boxes_t.to(Device::cpu()).to(DType::Float32);
+        Tensor scores_cpu = scores_t.to(Device::cpu()).to(DType::Float32);
+        Tensor labels_cpu = labels_t.to(Device::cpu()).to(DType::Float32);
+
+        const float* bx = boxes_cpu.data<float>();   // [n, 4]
+        const float* sc = scores_cpu.data<float>();   // [n]
+        const float* lb = labels_cpu.data<float>();   // [n]
+
+        for (int64_t i = 0; i < n; ++i) {
+            float* r = out + (row + i) * 7;
+            r[0] = static_cast<float>(img);   // image index
+            r[1] = bx[i * 4 + 0];             // x1
+            r[2] = bx[i * 4 + 1];             // y1
+            r[3] = bx[i * 4 + 2];             // x2
+            r[4] = bx[i * 4 + 3];             // y2
+            r[5] = sc[i];                     // score
+            r[6] = lb[i];                     // label
+        }
+        row += n;
+    }
+
+    return packed;
+}
+
+}  // namespace
 
 // ============================================================================
 // YOLOv3 Components Implementation
@@ -366,8 +425,14 @@ auto YOLOv3::forward_impl(const Variable& input) -> Variable {
     // Apply post-processing
     auto detections = postprocess(boxes, scores);
 
-    // Return first batch's detections as Variable
-    return Variable(std::get<0>(detections[0]));
+    // Return ALL images' detections (not just the first image's boxes, which
+    // dropped every other image plus all scores/labels). forward_impl must
+    // return a single Variable, so we pack every kept detection from every
+    // image into one [total_dets, 7] tensor laid out as
+    //   [image_index, x1, y1, x2, y2, score, label]
+    // Callers demultiplex per image via column 0. This preserves all boxes,
+    // scores, and labels across the whole batch.
+    return Variable(pack_detections(detections));
 }
 
 auto YOLOv3::forward_raw(const Variable& input) -> std::vector<Variable> {
@@ -385,8 +450,9 @@ auto YOLOv3::forward_raw(const Variable& input) -> std::vector<Variable> {
     auto p5_shape = feat_medium.tensor().shape();
     int64_t target_h = p5_shape[2];
     int64_t target_w = p5_shape[3];
-    auto p5_up_tensor = ops::interpolate(p5_up.tensor(), {target_h, target_w}, "bilinear", false);
-    p5_up = Variable(p5_up_tensor, p5_up.requires_grad());
+    // Autograd-aware bilinear upsample: keep grad_fn intact so the FPN/PANet
+    // upsample path backpropagates into fpn_upsample1_ and the backbone.
+    p5_up = nn::upsample_bilinear(p5_up, target_h, target_w);
 
     auto p4_lateral = fpn_lateral1_->forward(feat_medium);
     auto p4 = p5_up + p4_lateral;
@@ -397,16 +463,25 @@ auto YOLOv3::forward_raw(const Variable& input) -> std::vector<Variable> {
     auto p3_shape = feat_small.tensor().shape();
     target_h = p3_shape[2];
     target_w = p3_shape[3];
-    auto p4_up_tensor = ops::interpolate(p4_up.tensor(), {target_h, target_w}, "bilinear", false);
-    p4_up = Variable(p4_up_tensor, p4_up.requires_grad());
+    p4_up = nn::upsample_bilinear(p4_up, target_h, target_w);
 
     auto p3_lateral = fpn_lateral2_->forward(feat_small);
     auto p3 = p4_up + p3_lateral;
 
-    // Apply detection heads
-    auto pred_large = head_large_->forward(feat_large);   // 13x13
-    auto pred_medium = head_medium_->forward(p4);         // 26x26
-    auto pred_small = head_small_->forward(p3);           // 52x52
+    // Apply detection heads.
+    //
+    // Intentional design note: the large-scale (13x13) head consumes the raw
+    // backbone feature `feat_large` directly, whereas the medium/small heads
+    // consume the top-down FPN-fused tensors `p4`/`p3`. This is by design here:
+    // in this FPN the large branch IS the top of the pyramid (P5) — there is no
+    // higher-resolution feature to fuse into it, and `fpn_upsample1_` is the
+    // 1x1 lateral that feeds P5 *downward* into the medium branch rather than a
+    // neck conv-set for the large head itself. No separate large-branch
+    // conv-set module/weights exist, so feeding feat_large straight into
+    // head_large_ keeps weight loading consistent with the registered modules.
+    auto pred_large = head_large_->forward(feat_large);   // 13x13 (P5, no lateral fuse-in)
+    auto pred_medium = head_medium_->forward(p4);         // 26x26 (P4, FPN-fused)
+    auto pred_small = head_small_->forward(p3);           // 52x52 (P3, FPN-fused)
 
     return {pred_large, pred_medium, pred_small};
 }
@@ -824,10 +899,10 @@ auto PANet::forward_multi(const std::vector<Variable>& features) -> std::vector<
     p5_up = bn1_->forward(p5_up);
     p5_up = act.forward(p5_up);
 
-    // Upsample p5_up to match p4 size
+    // Upsample p5_up to match p4 size (autograd-aware: preserves grad_fn through
+    // the PANet top-down upsample so the neck/backbone receive gradients).
     auto p4_shape = p4.tensor().shape();
-    auto p5_up_tensor = ops::interpolate(p5_up.tensor(), {p4_shape[2], p4_shape[3]}, "bilinear", false);
-    p5_up = Variable(p5_up_tensor, p5_up.requires_grad());
+    p5_up = nn::upsample_bilinear(p5_up, p4_shape[2], p4_shape[3]);
 
     auto p4_fused = p4 + p5_up;
 
@@ -836,10 +911,9 @@ auto PANet::forward_multi(const std::vector<Variable>& features) -> std::vector<
     p4_up = bn2_->forward(p4_up);
     p4_up = act.forward(p4_up);
 
-    // Upsample p4_up to match p3 size
+    // Upsample p4_up to match p3 size (autograd-aware).
     auto p3_shape = p3.tensor().shape();
-    auto p4_up_tensor = ops::interpolate(p4_up.tensor(), {p3_shape[2], p3_shape[3]}, "bilinear", false);
-    p4_up = Variable(p4_up_tensor, p4_up.requires_grad());
+    p4_up = nn::upsample_bilinear(p4_up, p3_shape[2], p3_shape[3]);
 
     auto p3_fused = p3 + p4_up;
 
@@ -1098,7 +1172,9 @@ auto YOLOv5::forward_impl(const Variable& input) -> Variable {
     auto scores = tenzor::cat(all_scores, 1);
 
     auto detections = postprocess(boxes, scores);
-    return Variable(std::get<0>(detections[0]));
+    // Pack every image's kept detections into one [total_dets, 7] tensor
+    // ([image_index, x1, y1, x2, y2, score, label]); see YOLOv3::forward_impl.
+    return Variable(pack_detections(detections));
 }
 
 auto YOLOv5::forward_raw(const Variable& input) -> std::vector<Variable> {

@@ -99,7 +99,12 @@ static void im2col_int8(
     const int8_t pad_q = static_cast<int8_t>(input_zp);
     const int64_t col_width = in_channels * kernel_h * kernel_w;
 
-    #pragma omp parallel for if(h_out * w_out > 256)
+    // NOTE: this runs inside the `#pragma omp parallel` region of
+    // quantized_conv2d_kernel / quantized_conv2d_per_channel_kernel (which
+    // parallelize over batch). Opening a nested `parallel for` here is dead
+    // (serial) with nested parallelism off — the default — and would cause
+    // threads^2 oversubscription if nesting were ever enabled. Keep this loop
+    // serial; the outer batch loop provides the parallelism.
     for (int64_t out_idx = 0; out_idx < h_out * w_out; ++out_idx) {
         int64_t oh = out_idx / w_out;
         int64_t ow = out_idx % w_out;

@@ -78,7 +78,14 @@ def _gamma_reparam():
                 return g * np.exp(-lga)
 
             h = 1e-4
-            dP_da = (_P(a + h) - _P(a - h)) / (2.0 * h)
+            # Guard the lower stencil point so gammainc/lgamma are never
+            # evaluated at alpha <= 0 (valid sub-unit concentrations occur in
+            # sparse Dirichlet priors via Gamma.rsample). Clamp a-h to a tiny
+            # positive value and divide by the actual spacing; this degrades to
+            # a forward difference when a <= h.
+            tiny = 1e-12
+            a_lo = np.maximum(a - h, tiny)
+            dP_da = (_P(a + h) - _P(a_lo)) / ((a + h) - a_lo)
             lg = np.asarray(_tz.lgamma(Tensor.from_numpy(np.ascontiguousarray(a))),
                             dtype=np.float64)
             pdf = np.exp((a - 1.0) * np.log(zu) - zu - lg)

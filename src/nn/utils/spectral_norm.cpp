@@ -44,7 +44,16 @@ SpectralNorm::SpectralNorm(std::shared_ptr<Module> module,
     : module_(std::move(module))
     , param_name_(std::move(name))
     , n_power_iterations_(n_power_iterations)
-    , eps_(eps) {}
+    , eps_(eps) {
+    // At least one power iteration is required to produce a meaningful spectral
+    // norm estimate; n <= 0 would skip the u/v refinement loop and leave the
+    // estimate at its (garbage) initial value.
+    if (n_power_iterations_ < 1) {
+        throw std::invalid_argument(
+            "SpectralNorm: n_power_iterations must be >= 1 (got " +
+            std::to_string(n_power_iterations_) + ")");
+    }
+}
 
 auto SpectralNorm::apply(std::shared_ptr<Module> module,
                          const std::string& name,

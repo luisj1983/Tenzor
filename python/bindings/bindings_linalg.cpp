@@ -213,13 +213,21 @@ void register_linalg(py::module_& m) {
     linalg_mod.def("lobpcg", [](const tenzor::Tensor& A, const tenzor::Tensor& X0,
                                 int64_t k, const tenzor::Tensor& B,
                                 int64_t max_iter, double tol) {
-        auto [evals, evecs] = tenzor::linalg::lobpcg(A, X0, k, B, max_iter, tol);
+        // Multi-output op: release the GIL only around the C++ computation,
+        // then build the tuple with the GIL re-held (see NOTE above). Using
+        // py::call_guard here would run py::make_tuple without the GIL and
+        // crash on refcount manipulation.
+        std::pair<tenzor::Tensor, tenzor::Tensor> result;
+        {
+            py::gil_scoped_release release;
+            result = tenzor::linalg::lobpcg(A, X0, k, B, max_iter, tol);
+        }
+        auto [evals, evecs] = std::move(result);
         return py::make_tuple(evals, evecs);
     }, "LOBPCG: find k smallest eigenvalues/vectors of a large sparse symmetric matrix",
        py::arg("A"), py::arg("X0"), py::arg("k"),
        py::arg("B") = tenzor::Tensor(),
-       py::arg("max_iter") = 100, py::arg("tol") = 1e-6,
-       py::call_guard<py::gil_scoped_release>());
+       py::arg("max_iter") = 100, py::arg("tol") = 1e-6);
 }
 
 } // namespace tenzor::python

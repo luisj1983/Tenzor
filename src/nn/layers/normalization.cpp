@@ -944,10 +944,11 @@ auto LayerNorm::forward_impl(const Variable& input_orig) -> Variable {
         auto* output_data = output.data<float>();
 
         // Scratch buffers for per-row statistics. For small batches the buffers
-        // live on the stack; the 64KB of stack arrays are only reserved inside
-        // the small-batch branch rather than on every call (including the heap
-        // path used for large batches).
-        constexpr int64_t STACK_THRESHOLD = 8192;
+        // live on the stack; the stack arrays are only reserved inside the
+        // small-batch branch rather than on every call (including the heap
+        // path used for large batches). Threshold kept at 1024 so the two
+        // stack buffers total at most ~8KB (2 * 1024 * 4 bytes).
+        constexpr int64_t STACK_THRESHOLD = 1024;
 
         auto run_layer_norm = [&](float* mean_scratch, float* rstd_scratch) {
 #if defined(__x86_64__) || defined(_M_X64)
@@ -1716,47 +1717,59 @@ public:
         for (int64_t n = 0; n < N; n++) {
             for (int64_t g = 0; g < num_groups_; g++) {
                 int64_t group_idx = n * num_groups_ + g;
-                float mu = mean_data[group_idx];
-                float inv_std = rstd_data[group_idx];
+                double mu = static_cast<double>(mean_data[group_idx]);
+                double inv_std = static_cast<double>(rstd_data[group_idx]);
 
                 int64_t c_start = g * group_size_;
                 int64_t c_end = c_start + group_size_;
 
-                // Compute intermediate sums for this group
-                float sum_grad_out = 0.0f;
-                float sum_grad_out_normalized = 0.0f;
+                // S.15 (mirrored from LayerNormBackward): the forward computes
+                // mean/variance in double, so the backward reduction must also
+                // accumulate in double — mixing float reductions with a double
+                // mean/var gives 4–7% drift on F32 gradchecks. The grad_input
+                // recomputation below is likewise done in double, cast back to
+                // F32 only on store.
+                double sum_grad_out = 0.0;
+                double sum_grad_out_normalized = 0.0;
                 int64_t group_numel = group_size_ * spatial_size;
 
                 for (int64_t c = c_start; c < c_end; c++) {
                     for (int64_t h = 0; h < H; h++) {
                         for (int64_t w = 0; w < W; w++) {
                             int64_t idx = ((n * C + c) * H + h) * W + w;
-                            float x_normalized = (input_data[idx] - mu) * inv_std;
-                            float grad_out = grad_out_data[idx] * weight_data[c];
+                            double x_normalized =
+                                (static_cast<double>(input_data[idx]) - mu) * inv_std;
+                            double grad_out = static_cast<double>(grad_out_data[idx]) *
+                                              static_cast<double>(weight_data[c]);
 
                             sum_grad_out += grad_out;
                             sum_grad_out_normalized += grad_out * x_normalized;
 
                             // Accumulate weight and bias gradients
-                            grad_weight_data[c] += grad_out_data[idx] * x_normalized;
+                            grad_weight_data[c] += static_cast<float>(
+                                static_cast<double>(grad_out_data[idx]) * x_normalized);
                             grad_bias_data[c] += grad_out_data[idx];
                         }
                     }
                 }
 
                 // Compute input gradients
-                float mean_grad_out = sum_grad_out / group_numel;
-                float mean_grad_out_normalized = sum_grad_out_normalized / group_numel;
+                double mean_grad_out = sum_grad_out / static_cast<double>(group_numel);
+                double mean_grad_out_normalized =
+                    sum_grad_out_normalized / static_cast<double>(group_numel);
 
                 for (int64_t c = c_start; c < c_end; c++) {
                     for (int64_t h = 0; h < H; h++) {
                         for (int64_t w = 0; w < W; w++) {
                             int64_t idx = ((n * C + c) * H + h) * W + w;
-                            float x_normalized = (input_data[idx] - mu) * inv_std;
-                            float grad_out = grad_out_data[idx] * weight_data[c];
+                            double x_normalized =
+                                (static_cast<double>(input_data[idx]) - mu) * inv_std;
+                            double grad_out = static_cast<double>(grad_out_data[idx]) *
+                                              static_cast<double>(weight_data[c]);
 
-                            grad_in_data[idx] = (grad_out - mean_grad_out -
-                                                x_normalized * mean_grad_out_normalized) * inv_std;
+                            grad_in_data[idx] = static_cast<float>(
+                                (grad_out - mean_grad_out -
+                                 x_normalized * mean_grad_out_normalized) * inv_std);
                         }
                     }
                 }
@@ -3067,37 +3080,44 @@ auto RMSNorm::forward_impl(const Variable& input) -> Variable {
             DType::Float32, Device::cpu());
         auto* output_data = output.data<float>();
 
-        // Use stack allocation for rrms scratch buffer
-        constexpr int64_t STACK_THRESHOLD = 8192;
-        float stack_rrms[STACK_THRESHOLD];
-        float* rrms_scratch = (batch_size <= STACK_THRESHOLD) ? stack_rrms : new float[batch_size];
+        // Scratch buffer for per-row rrms. The stack array (4KB at threshold
+        // 1024) is reserved only inside the small-batch branch, so the heap
+        // path for large batches no longer pays any stack cost. Threshold
+        // matches the LayerNorm fast path.
+        constexpr int64_t STACK_THRESHOLD = 1024;
 
+        auto run_rms_norm = [&](float* rrms_scratch) {
 #if defined(__x86_64__) || defined(_M_X64)
-        fused_rms_norm_f32(
-            input_data, weight_data, output_data, rrms_scratch,
-            batch_size, N, static_cast<float>(eps_)
-        );
+            fused_rms_norm_f32(
+                input_data, weight_data, output_data, rrms_scratch,
+                batch_size, N, static_cast<float>(eps_)
+            );
 #else
-        const int nthreads = get_optimal_threads();
-        #pragma omp parallel for num_threads(nthreads)
-        for (int64_t b = 0; b < batch_size; b++) {
-            float sum_sq = 0.0f;
-            for (int64_t i = 0; i < N; i++) {
-                float val = input_data[b * N + i];
-                sum_sq += val * val;
-            }
-            float rrms = 1.0f / std::sqrt(sum_sq / N + static_cast<float>(eps_));
-            rrms_scratch[b] = rrms;
+            const int nthreads = get_optimal_threads();
+            #pragma omp parallel for num_threads(nthreads)
+            for (int64_t b = 0; b < batch_size; b++) {
+                float sum_sq = 0.0f;
+                for (int64_t i = 0; i < N; i++) {
+                    float val = input_data[b * N + i];
+                    sum_sq += val * val;
+                }
+                float rrms = 1.0f / std::sqrt(sum_sq / N + static_cast<float>(eps_));
+                rrms_scratch[b] = rrms;
 
-            for (int64_t i = 0; i < N; i++) {
-                int64_t idx = b * N + i;
-                output_data[idx] = input_data[idx] * rrms * weight_data[i];
+                for (int64_t i = 0; i < N; i++) {
+                    int64_t idx = b * N + i;
+                    output_data[idx] = input_data[idx] * rrms * weight_data[i];
+                }
             }
-        }
 #endif
+        };
 
-        if (batch_size > STACK_THRESHOLD) {
-            delete[] rrms_scratch;
+        if (batch_size <= STACK_THRESHOLD) {
+            float stack_rrms[STACK_THRESHOLD];
+            run_rms_norm(stack_rrms);
+        } else {
+            std::unique_ptr<float[]> rrms_scratch(new float[batch_size]);
+            run_rms_norm(rrms_scratch.get());
         }
 
         jit_record_rms_norm(input.tensor(), weight_tensor, output, eps_,

@@ -23,6 +23,7 @@
 #include <array>
 #include <algorithm>
 #include <memory>
+#include <unordered_map>
 
 #ifdef _WIN32
     #include <malloc.h>

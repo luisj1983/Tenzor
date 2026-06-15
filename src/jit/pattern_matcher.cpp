@@ -20,6 +20,19 @@ auto PatternMatcher::has_single_use(const std::shared_ptr<Node>& node) -> bool {
     return node->outputs()[0]->uses().size() == 1;
 }
 
+auto PatternMatcher::consumes_output(const std::shared_ptr<Node>& producer,
+                                     const std::shared_ptr<Node>& consumer) -> bool {
+    if (!producer || !consumer) return false;
+    std::unordered_set<Value*> producer_outputs;
+    for (const auto& out : producer->outputs()) {
+        if (out) producer_outputs.insert(out.get());
+    }
+    for (const auto& inp : consumer->inputs()) {
+        if (inp && producer_outputs.count(inp.get())) return true;
+    }
+    return false;
+}
+
 auto PatternMatcher::estimate_elements(
     const std::vector<std::shared_ptr<Value>>& inputs) -> int64_t {
     if (inputs.empty()) return FusionMatch::kUnknownElements;
@@ -188,26 +201,34 @@ auto PatternMatcher::match_softmax(const Graph& graph, size_t start_idx,
     auto& n0 = nodes[start_idx];
     if (n0->op_type() != OpType::Max || used.count(n0.get())) return std::nullopt;
 
-    // Look for Sub(input, max_result) immediately after
+    // Look for Sub(input, max_result) immediately after. Beyond op-type and
+    // single-use, require a real data edge n0->n1 so a positionally-adjacent
+    // but data-independent Sub does not spuriously match.
     auto& n1 = nodes[start_idx + 1];
     if (n1->op_type() != OpType::Sub || used.count(n1.get())) return std::nullopt;
     if (!has_single_use(n0)) return std::nullopt;
+    if (!consumes_output(n0, n1)) return std::nullopt;
 
     // Exp after Sub
     auto& n2 = nodes[start_idx + 2];
     if (n2->op_type() != OpType::Exp || used.count(n2.get())) return std::nullopt;
     if (!has_single_use(n1)) return std::nullopt;
+    if (!consumes_output(n1, n2)) return std::nullopt;
 
     // Sum after Exp
     auto& n3 = nodes[start_idx + 3];
     if (n3->op_type() != OpType::Sum || used.count(n3.get())) return std::nullopt;
     if (!has_single_use(n2)) return std::nullopt;
+    if (!consumes_output(n2, n3)) return std::nullopt;
 
     // Div after Sum
     if (start_idx + 4 >= nodes.size()) return std::nullopt;
     auto& n4 = nodes[start_idx + 4];
     if (n4->op_type() != OpType::Div || used.count(n4.get())) return std::nullopt;
     if (!has_single_use(n3)) return std::nullopt;
+    // Div consumes both Exp's output (numerator) and Sum's output (denominator);
+    // require the n3->n4 (denominator) edge.
+    if (!consumes_output(n3, n4)) return std::nullopt;
 
     FusionMatch match;
     match.kind = FusionKind::Softmax;
@@ -424,9 +445,11 @@ auto PatternMatcher::match_small_mlp(const Graph& graph, size_t start_idx,
     auto& n1 = nodes[start_idx + 1];
     if (!is_activation(n1->op_type()) || used.count(n1.get())) return std::nullopt;
     if (!has_single_use(n1)) return std::nullopt;
+    if (!consumes_output(n0, n1)) return std::nullopt;
 
     auto& n2 = nodes[start_idx + 2];
     if (n2->op_type() != OpType::Linear || used.count(n2.get())) return std::nullopt;
+    if (!consumes_output(n1, n2)) return std::nullopt;
 
     // Check hidden dimension constraint
     if (!n0->outputs().empty()) {
@@ -529,21 +552,25 @@ auto PatternMatcher::match_swiglu(const Graph& graph, size_t start_idx,
     // Slice (split the linear output into two halves)
     auto& n1 = nodes[start_idx + 1];
     if (n1->op_type() != OpType::Slice || used.count(n1.get())) return std::nullopt;
+    if (!consumes_output(n0, n1)) return std::nullopt;
 
     // Sigmoid (the SiLU activation component: silu(x) = x * sigmoid(x))
     auto& n2 = nodes[start_idx + 2];
     if (n2->op_type() != OpType::Sigmoid || used.count(n2.get())) return std::nullopt;
     if (!has_single_use(n1)) return std::nullopt;
+    if (!consumes_output(n1, n2)) return std::nullopt;
 
     // Mul (gating: element-wise product of the two split halves after activation)
     auto& n3 = nodes[start_idx + 3];
     if (n3->op_type() != OpType::Mul || used.count(n3.get())) return std::nullopt;
     if (!has_single_use(n2)) return std::nullopt;
+    if (!consumes_output(n2, n3)) return std::nullopt;
 
     // Final Linear projection
     auto& n4 = nodes[start_idx + 4];
     if (n4->op_type() != OpType::Linear || used.count(n4.get())) return std::nullopt;
     if (!has_single_use(n3)) return std::nullopt;
+    if (!consumes_output(n3, n4)) return std::nullopt;
 
     FusionMatch match;
     match.kind = FusionKind::SwiGLU;
@@ -576,11 +603,13 @@ auto PatternMatcher::match_gelu_variant(const Graph& graph, size_t start_idx,
     auto& n1 = nodes[start_idx + 1];
     if (n1->op_type() != OpType::Mul || used.count(n1.get())) return std::nullopt;
     if (!has_single_use(n0)) return std::nullopt;
+    if (!consumes_output(n0, n1)) return std::nullopt;
 
     // Add (x + 0.044715 * x^3)
     auto& n2 = nodes[start_idx + 2];
     if (n2->op_type() != OpType::Add || used.count(n2.get())) return std::nullopt;
     if (!has_single_use(n1)) return std::nullopt;
+    if (!consumes_output(n1, n2)) return std::nullopt;
 
     // Mul (scale by sqrt(2/pi)) or Tanh directly if pre-scaled
     size_t next = start_idx + 3;
@@ -652,29 +681,34 @@ auto PatternMatcher::match_rotary_embedding(const Graph& graph, size_t start_idx
     auto& n0 = nodes[start_idx];
     if (n0->op_type() != OpType::Slice || used.count(n0.get())) return std::nullopt;
 
-    // Mul (x_even * cos(theta))
+    // Mul (x_even * cos(theta)) — consumes the even-slice output.
     auto& n1 = nodes[start_idx + 1];
     if (n1->op_type() != OpType::Mul || used.count(n1.get())) return std::nullopt;
     if (!has_single_use(n0)) return std::nullopt;
+    if (!consumes_output(n0, n1)) return std::nullopt;
 
-    // Slice (extract odd-indexed elements or second half)
+    // Slice (extract odd-indexed elements or second half) — a separate branch,
+    // not fed by n1, so no n1->n2 data edge is expected.
     auto& n2 = nodes[start_idx + 2];
     if (n2->op_type() != OpType::Slice || used.count(n2.get())) return std::nullopt;
 
-    // Neg (negate for the rotation)
+    // Neg (negate for the rotation) — consumes the odd-slice output.
     auto& n3 = nodes[start_idx + 3];
     if (n3->op_type() != OpType::Neg || used.count(n3.get())) return std::nullopt;
     if (!has_single_use(n2)) return std::nullopt;
+    if (!consumes_output(n2, n3)) return std::nullopt;
 
-    // Mul ((-x_odd) * sin(theta))
+    // Mul ((-x_odd) * sin(theta)) — consumes the negated odd slice.
     auto& n4 = nodes[start_idx + 4];
     if (n4->op_type() != OpType::Mul || used.count(n4.get())) return std::nullopt;
     if (!has_single_use(n3)) return std::nullopt;
+    if (!consumes_output(n3, n4)) return std::nullopt;
 
-    // Add (combine the two rotated components)
+    // Add (combine the two rotated components) — consumes n4's output.
     auto& n5 = nodes[start_idx + 5];
     if (n5->op_type() != OpType::Add || used.count(n5.get())) return std::nullopt;
     if (!has_single_use(n4)) return std::nullopt;
+    if (!consumes_output(n4, n5)) return std::nullopt;
 
     // Optionally consume a second rotation half (odd output):
     // Slice -> Mul -> Slice -> Mul -> Add

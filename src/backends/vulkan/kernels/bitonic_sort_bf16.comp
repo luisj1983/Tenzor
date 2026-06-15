@@ -27,20 +27,24 @@ float readBF16(uint elem_idx) {
     return uintBitsToFloat(bits << 16);
 }
 
-// Write a float value back as bfloat16 into the packed buffer
+// Write a float value back as bfloat16 into the packed buffer.
+// Two packed elements share one uint word; concurrent threads may update the
+// two halves of the same word in the same pass, so use an atomic CAS retry
+// loop instead of a plain read-modify-write store. The RNE bias can produce a
+// 17-bit value (e.g. negative-NaN inputs) so mask to 16 bits before merging.
 void writeBF16(uint elem_idx, float val) {
     uint word_idx = elem_idx / 2;
-    uint half_idx = elem_idx % 2;
-    uint new_bits = ((floatBitsToUint(val) + 0x7FFFu + ((floatBitsToUint(val) >> 16) & 1u)) >> 16);
+    uint half_offset = (elem_idx % 2) * 16;
+    uint new_bits = ((floatBitsToUint(val) + 0x7FFFu + ((floatBitsToUint(val) >> 16) & 1u)) >> 16) & 0xFFFFu;
+    uint mask = 0xFFFFu << half_offset;
 
-    uint old_packed = values[word_idx];
-    uint new_packed;
-    if (half_idx == 0) {
-        new_packed = (old_packed & 0xFFFF0000u) | new_bits;
-    } else {
-        new_packed = (old_packed & 0x0000FFFFu) | (new_bits << 16);
+    uint old_word = values[word_idx];
+    for (int attempt = 0; attempt < 65536; ++attempt) {
+        uint new_word = (old_word & ~mask) | (new_bits << half_offset);
+        uint result = atomicCompSwap(values[word_idx], old_word, new_word);
+        if (result == old_word) return;
+        old_word = result;
     }
-    values[word_idx] = new_packed;
 }
 
 void main() {

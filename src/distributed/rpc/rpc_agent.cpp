@@ -24,6 +24,7 @@
 #include "tenzor/distributed/rpc/rref.hpp"
 #include "tenzor/core/tensor.hpp"
 #include "tenzor/core/device.hpp"
+#include "tenzor/utils/log.hpp"
 #include <cstring>
 #include <stdexcept>
 #include <chrono>
@@ -100,26 +101,12 @@ void append_tensor(std::vector<uint8_t>& out, const Tensor& in) {
     ap(cpu.data_ptr(), nbytes);
 }
 
-std::optional<Tensor> read_tensor(int fd) {
-    uint32_t dtype = 0, ndim = 0;
-    if (!read_exact(fd, &dtype, sizeof(dtype))) return std::nullopt;
-    if (!read_exact(fd, &ndim, sizeof(ndim))) return std::nullopt;
-    std::vector<int64_t> shape(ndim);
-    for (uint32_t i = 0; i < ndim; ++i) {
-        if (!read_exact(fd, &shape[i], sizeof(int64_t))) return std::nullopt;
-    }
-    uint64_t nbytes = 0;
-    if (!read_exact(fd, &nbytes, sizeof(nbytes))) return std::nullopt;
-    // Reject out-of-range dtypes before constructing the Tensor: dtype_size()
-    // returns 0 only for an invalid DType, which would otherwise build a Tensor
-    // with a garbage enum that crashes downstream kernel dispatch.
-    if (dtype_size(static_cast<DType>(dtype)) == 0) return std::nullopt;
-    Tensor t(shape, static_cast<DType>(dtype), Device::cpu());
-    if (nbytes > 0) {
-        if (!read_exact(fd, t.data_ptr(), nbytes)) return std::nullopt;
-    }
-    return t;
-}
+// NOTE: a standalone read_tensor(int fd) helper used to live here but had zero
+// callers and diverged from the hardened inline parse in deserialize_message()
+// (it lacked the rank bound, negative-dim rejection, numel-overflow guard, and
+// numel*elem_size == nbytes consistency check). It was deleted so the only
+// tensor parser is the bounds-checked path in deserialize_message(); any future
+// socket tensor read must go through that function.
 
 void serialize_message(std::vector<uint8_t>& out, const Message& m) {
     uint8_t type = static_cast<uint8_t>(m.type);
@@ -267,6 +254,11 @@ auto TcpRpcAgent::init(const std::vector<WorkerInfo>& all_workers) -> void {
             ack.type = MessageType::HEARTBEAT_ACK;
             ack.src_worker = self_.id;
             ack.dst_worker = msg.src_worker;
+            // Echo the request_id so dispatch_message can correlate this ACK
+            // with the originating send()'s pending_ entry; otherwise every
+            // heartbeat past the first (id 0) misses pending_ and blocks until
+            // timeout, falsely reporting live peers dead.
+            ack.payload.request_id = msg.payload.request_id;
             return ack;
         });
     // RRef remote-fetch: the rref_id rides in payload.bytes (8 bytes) because
@@ -412,16 +404,19 @@ auto TcpRpcAgent::send_async(Message msg, std::function<void(Message)> callback)
         } catch (const std::exception& e) {
             // Propagate the request id and diagnostic so the callback can
             // correlate and report the failure (the old empty RPC_ERROR lost both).
+            // The diagnostic MUST go in function_name: every RPC_ERROR consumer
+            // (rpc_async / rpc_sync) reads the error text from function_name, not
+            // from payload.bytes, so writing it to bytes silently dropped the cause.
             Message err;
             err.type = MessageType::RPC_ERROR;
             err.payload.request_id = request_id;
-            const std::string what = e.what();
-            err.payload.bytes.assign(what.begin(), what.end());
+            err.payload.function_name = e.what();
             callback(std::move(err));
         } catch (...) {
             Message err;
             err.type = MessageType::RPC_ERROR;
             err.payload.request_id = request_id;
+            err.payload.function_name = "unknown RPC send error";
             callback(std::move(err));
         }
     }).detach();
@@ -438,18 +433,42 @@ auto TcpRpcAgent::shutdown() -> void {
         listen_fd_ = -1;
     }
     {
-        std::lock_guard<std::mutex> lock(connections_mutex_);
-        for (auto& [id, fd] : connections_) {
-            ::shutdown(fd, SHUT_RDWR);
-            ::close(fd);
+        // Collect all fds and their per-fd write-mutexes, then erase the maps,
+        // all under connections_mutex_. We must NOT hold connections_mutex_
+        // while acquiring a write-mutex below: an in-flight send_framed_locked()
+        // holds the write-mutex first and then re-acquires connections_mutex_,
+        // so the reverse order here would deadlock.
+        std::vector<std::pair<int, std::shared_ptr<std::mutex>>> to_close;
+        {
+            std::lock_guard<std::mutex> lock(connections_mutex_);
+            auto collect = [&](int fd) {
+                std::shared_ptr<std::mutex> mtx;
+                auto it = fd_write_mutexes_.find(fd);
+                if (it != fd_write_mutexes_.end()) mtx = it->second;
+                to_close.emplace_back(fd, std::move(mtx));
+            };
+            for (auto& [id, fd] : connections_) collect(fd);
+            for (auto& [id, fd] : inbound_connections_) collect(fd);
+            // Erase the maps now: a writer that has not yet acquired its
+            // write-mutex will, once it does, find its entry gone and abort
+            // before touching the (about-to-be-closed) fd.
+            connections_.clear();
+            inbound_connections_.clear();
+            fd_write_mutexes_.clear();
         }
-        connections_.clear();
-        for (auto& [id, fd] : inbound_connections_) {
-            ::shutdown(fd, SHUT_RDWR);
-            ::close(fd);
+        // Drain in-flight writers per fd, then close. Locking the write-mutex
+        // waits for any writer mid-send_framed() to finish before we close the
+        // fd, preventing use-after-close / fd-integer reuse.
+        for (auto& [fd, mtx] : to_close) {
+            if (mtx) {
+                std::lock_guard<std::mutex> wlock(*mtx);
+                ::shutdown(fd, SHUT_RDWR);
+                ::close(fd);
+            } else {
+                ::shutdown(fd, SHUT_RDWR);
+                ::close(fd);
+            }
         }
-        inbound_connections_.clear();
-        fd_write_mutexes_.clear();
     }
 #endif
 
@@ -496,7 +515,7 @@ auto TcpRpcAgent::register_handler(MessageType type,
     handlers_[type] = std::move(handler);
 }
 
-auto TcpRpcAgent::dispatch_message(Message msg) -> void {
+auto TcpRpcAgent::dispatch_message(Message msg, int inbound_fd) -> void {
     // Response messages (RPC_RESPONSE / RPC_ERROR / HEARTBEAT_ACK) are
     // correlated with a pending request and delivered via the promise.
     if (msg.type == MessageType::RPC_RESPONSE || msg.type == MessageType::RPC_ERROR ||
@@ -533,9 +552,29 @@ auto TcpRpcAgent::dispatch_message(Message msg) -> void {
     }
 
 #if defined(__linux__) || defined(__APPLE__)
-    // Send the response back to the originating worker over the same mesh.
-    int fd = get_or_connect(msg.src_worker);
-    if (fd >= 0) send_framed_locked(fd, response);
+    // Reply on the inbound socket that carried the request when available: it is
+    // already connected and avoids requiring a symmetric, fully reachable mesh
+    // (the requester need not be dialable as an outbound peer). Fall back to
+    // dialing the originating worker only if there is no inbound fd or the
+    // inbound write fails. If the response cannot be delivered at all, log it so
+    // the requester's blocked send() — which will time out — has a diagnostic
+    // instead of failing silently.
+    bool sent = false;
+    if (inbound_fd >= 0) {
+        sent = send_framed_locked(inbound_fd, response);
+    }
+    if (!sent) {
+        int fd = get_or_connect(msg.src_worker);
+        if (fd >= 0) {
+            sent = send_framed_locked(fd, response);
+        }
+    }
+    if (!sent) {
+        TENZOR_LOG_ERROR(
+            "TcpRpcAgent: failed to deliver RPC response to worker {} "
+            "(request {}); peer will block until timeout",
+            msg.src_worker, msg.payload.request_id);
+    }
 #endif
 }
 
@@ -571,11 +610,25 @@ bool TcpRpcAgent::send_framed_locked(int fd, const Message& msg) {
         if (it != fd_write_mutexes_.end()) mtx = it->second;
     }
     if (!mtx) {
-        // No mutex registered — a vestigial fd or a unit-test path.
-        // Fall through to an unlocked write; safer than dropping.
-        return send_framed(fd, msg);
+        // No write-mutex registered for this fd. Either the connection was
+        // never tracked, or shutdown() has already closed and erased it. In
+        // the latter case the integer fd may have been reused by the OS for an
+        // unrelated descriptor, so writing here would corrupt that target and
+        // bypass interleave protection. Fail closed rather than write blind.
+        return false;
     }
+    // Hold the per-fd write-mutex for the whole write. shutdown() acquires the
+    // same mutex before ::close()ing the fd, so an in-flight writer either
+    // completes first (shutdown waits) or, if shutdown ran first, finds the
+    // mutex gone above and aborts — closing the use-after-close/fd-reuse TOCTOU.
     std::lock_guard<std::mutex> wlock(*mtx);
+    // Re-verify the fd is still registered now that we hold the write-mutex:
+    // shutdown() erases fd_write_mutexes_ under connections_mutex_ before
+    // closing, so a vanished entry means the fd is being torn down.
+    {
+        std::lock_guard<std::mutex> lock(connections_mutex_);
+        if (fd_write_mutexes_.find(fd) == fd_write_mutexes_.end()) return false;
+    }
     return send_framed(fd, msg);
 #else
     (void)fd; (void)msg;
@@ -751,7 +804,9 @@ void TcpRpcAgent::receive_loop(int fd, int32_t peer_id) {
         if (!msg) break;
         // Requests with request_id == -1 are handshake-only; skip dispatch.
         if (msg->payload.request_id < 0 && msg->type == MessageType::HEARTBEAT) continue;
-        dispatch_message(std::move(*msg));
+        // Pass the inbound fd so dispatch_message can reply on this same
+        // connection rather than dialing a fresh outbound one.
+        dispatch_message(std::move(*msg), fd);
     }
 }
 

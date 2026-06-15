@@ -1102,8 +1102,12 @@ std::vector<Tensor> lstm_backward_cudnn_wrap(
     cudaStream_t stream = guard.get();
     Tensor hx = h0.contiguous().reshape({1, batch, hidden});
     Tensor cx = c0.contiguous().reshape({1, batch, hidden});
-    // Absent grads use a 0-size INITIALIZED tensor (not Tensor{}): run_backward
-    // calls .numel() on grad_hy/grad_cy, which throws on an uninitialized handle.
+    // Absent grads use a 0-size INITIALIZED tensor carrying the right
+    // dtype/device so the downstream cudnn_lstm_backward call (ghy/gcy below)
+    // receives a properly-typed handle on the correct device. (Tensor::numel()
+    // is itself null-safe — it returns 0 when !impl_ — which is exactly why the
+    // `grad_hy.numel() > 0` presence checks below work; the typed zero0 is for
+    // device/dtype propagation, not to dodge a non-existent throw.)
     Tensor zero0({0}, grad_out.dtype(), grad_out.device());
     Tensor ghy = grad_hy.numel() > 0 ? grad_hy.contiguous().reshape({1, batch, hidden}) : zero0;
     Tensor gcy = grad_cy.numel() > 0 ? grad_cy.contiguous().reshape({1, batch, hidden}) : zero0;

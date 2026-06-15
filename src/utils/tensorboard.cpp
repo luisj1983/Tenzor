@@ -224,6 +224,12 @@ auto SummaryWriter::add_histogram(std::string_view tag,
         throw TensorBoardException("SummaryWriter is closed");
     }
 
+    // Validate the caller-controlled bin count before any allocation/copy:
+    // bins <= 0 leads to OOB writes / huge allocations in serialize_histogram.
+    if (bins < 1) {
+        throw TensorBoardException("Histogram bins must be >= 1");
+    }
+
     // Ensure tensor is on CPU
     Tensor cpu_tensor = tensor.device().type == Device::Type::CPU ?
                         tensor : tensor.cpu();
@@ -415,10 +421,17 @@ auto SummaryWriter::add_graph(std::string_view model_name,
     uint32_t length_crc = masked_crc32c(length_bytes.data(), length_bytes.size());
     uint32_t data_crc = masked_crc32c(event.data(), event.size());
 
+    // CRC words must be little-endian per the TFRecord spec; serialize through
+    // write_uint32_le rather than dumping host-order bytes of the uint32.
+    std::vector<uint8_t> length_crc_bytes;
+    write_uint32_le(length_crc_bytes, length_crc);
+    std::vector<uint8_t> data_crc_bytes;
+    write_uint32_le(data_crc_bytes, data_crc);
+
     impl_->event_file.write(reinterpret_cast<const char*>(length_bytes.data()), 8);
-    impl_->event_file.write(reinterpret_cast<const char*>(&length_crc), 4);
+    impl_->event_file.write(reinterpret_cast<const char*>(length_crc_bytes.data()), 4);
     impl_->event_file.write(reinterpret_cast<const char*>(event.data()), event.size());
-    impl_->event_file.write(reinterpret_cast<const char*>(&data_crc), 4);
+    impl_->event_file.write(reinterpret_cast<const char*>(data_crc_bytes.data()), 4);
 
     TENZOR_LOG_INFO(std::format("TensorBoard: Added graph for {} ({} nodes, {} bytes)",
                                 model_name,
@@ -533,11 +546,18 @@ auto SummaryWriter::write_event(std::string_view tag,
 
     uint32_t data_crc = masked_crc32c(event.data(), event.size());
 
+    // CRC words must be little-endian per the TFRecord spec; serialize through
+    // write_uint32_le rather than dumping host-order bytes of the uint32.
+    std::vector<uint8_t> length_crc_bytes;
+    write_uint32_le(length_crc_bytes, length_crc);
+    std::vector<uint8_t> data_crc_bytes;
+    write_uint32_le(data_crc_bytes, data_crc);
+
     // Write record
     impl_->event_file.write(reinterpret_cast<const char*>(length_bytes.data()), 8);
-    impl_->event_file.write(reinterpret_cast<const char*>(&length_crc), 4);
+    impl_->event_file.write(reinterpret_cast<const char*>(length_crc_bytes.data()), 4);
     impl_->event_file.write(reinterpret_cast<const char*>(event.data()), event.size());
-    impl_->event_file.write(reinterpret_cast<const char*>(&data_crc), 4);
+    impl_->event_file.write(reinterpret_cast<const char*>(data_crc_bytes.data()), 4);
 }
 
 auto SummaryWriter::serialize_scalar(float value) -> std::vector<uint8_t> {
@@ -552,6 +572,14 @@ auto SummaryWriter::serialize_scalar(float value) -> std::vector<uint8_t> {
 }
 
 auto SummaryWriter::serialize_histogram(const Tensor& tensor, int bins) -> std::vector<uint8_t> {
+    // Validate bins before allocating: bins <= 0 would make counts[] zero-length
+    // (the all-equal branch then writes counts[0] OOB, and the clamp
+    // min(max(bin,0), bins-1) == -1 writes counts[-1]), while a negative bins
+    // requests a huge std::vector<double> allocation.
+    if (bins < 1) {
+        throw TensorBoardException("Histogram bins must be >= 1");
+    }
+
     // Calculate histogram statistics
     const float* data = tensor.data<float>();
     size_t numel = static_cast<size_t>(tensor.numel());
@@ -717,20 +745,43 @@ auto SummaryWriter::serialize_image(const Tensor& tensor) -> std::vector<uint8_t
     size_t numel = static_cast<size_t>(tensor.numel());
 
     // Decide normalization from the tensor's GLOBAL value range, not per pixel
-    // (per-pixel scaling mixes scales within one image). If every value is in
-    // [0, 1] we treat the image as normalized and scale by 255; otherwise we
-    // assume it is already in [0, 255].
-    float global_max = 0.0f;
+    // (per-pixel scaling mixes scales within one image). Track BOTH the min and
+    // the max: tracking only the max black-clamps negative-valued images (e.g.
+    // tanh/GAN outputs in [-1, 1]) because the negative half clamps to 0.
+    float global_min = numel > 0 ? data[0] : 0.0f;
+    float global_max = numel > 0 ? data[0] : 0.0f;
     for (size_t i = 0; i < numel; ++i) {
+        global_min = std::min(global_min, data[i]);
         global_max = std::max(global_max, data[i]);
     }
-    const bool normalized = (global_max <= 1.0f);
-    const float scale = normalized ? 255.0f : 1.0f;
+
+    // Affine map x -> x * gain + bias chosen so the source range lands in
+    // [0, 255]:
+    //   [0, 1]    normalized        -> x * 255
+    //   [-1, 1]   signed normalized -> (x + 1) / 2 * 255
+    //   [0, 255]  already byte-range -> x
+    //   otherwise general [min, max] -> [0, 255] rescale
+    float gain;
+    float bias;
+    if (global_min >= 0.0f && global_max <= 1.0f) {
+        gain = 255.0f;
+        bias = 0.0f;
+    } else if (global_min >= -1.0f && global_max <= 1.0f) {
+        gain = 127.5f;
+        bias = 127.5f;
+    } else if (global_min >= 0.0f && global_max <= 255.0f) {
+        gain = 1.0f;
+        bias = 0.0f;
+    } else {
+        const float range = global_max - global_min;
+        gain = range > 0.0f ? 255.0f / range : 0.0f;
+        bias = -global_min * gain;
+    }
 
     // Convert to a contiguous uint8 CHW buffer, then encode as PNG.
     std::vector<uint8_t> pixels(numel);
     for (size_t i = 0; i < numel; ++i) {
-        pixels[i] = static_cast<uint8_t>(std::clamp(data[i] * scale, 0.0f, 255.0f));
+        pixels[i] = static_cast<uint8_t>(std::clamp(data[i] * gain + bias, 0.0f, 255.0f));
     }
 
     // Wrap the uint8 buffer as a CHW UInt8 tensor (non-owning view) and encode.

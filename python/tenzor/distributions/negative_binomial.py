@@ -95,7 +95,12 @@ class NegativeBinomial(Distribution):
         s = self.sample((n_samples,), rng=rng)
         v_np = np.asarray(s, dtype=np.float64)
         lp_np = np.asarray(self.log_prob(s), dtype=np.float64)
-        return _wrap_numpy(np.asarray([-lp_np.mean()], dtype=np.float32).reshape(()))
+        # log_prob has shape (n_samples,) + batch_shape. Average ONLY over the
+        # sample axis so the entropy keeps batch_shape (one value per
+        # distribution in the batch); averaging over every axis would collapse
+        # the whole batch into a single scalar.
+        ent = -lp_np.mean(axis=0)
+        return _wrap_numpy(ent.astype(np.float32))
 
     def support(self):
         return "{0, 1, 2, ...}"

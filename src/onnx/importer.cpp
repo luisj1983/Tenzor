@@ -31,6 +31,7 @@
 #include "../../include/tenzor/ops/indexing.hpp"
 #include "../../include/tenzor/ops/vision.hpp"
 #include "../../include/tenzor/ops/linalg.hpp"   // custom-domain linalg re-import
+#include <array>
 #include <cstring>
 #include <sstream>
 #include <algorithm>
@@ -1342,16 +1343,16 @@ auto ONNXImporter::convert_conv(const ONNXImportNode& node) -> std::shared_ptr<n
             in_channels, out_channels, kpair, spair, ppair, dpair,
             groups, bias.has_value());
     } else {  // spatial_dims == 3
-        // Audit I5: Conv3d now supports per-axis kernel/stride/padding/dilation.
-        // Asymmetric ONNX pads still go through ConstantPad3d (a pre-pad), but
-        // anisotropic (per-axis differing) values now flow through Conv3d's
-        // per-axis ctor directly. The previous "non-cubic/non-isotropic not
-        // supported" guards are removed.
-        bool isotropic_pad = symmetric && pads[0] == pads[1] && pads[1] == pads[2];
-        int64_t conv_pD = isotropic_pad ? pads[0] : 0;
-        int64_t conv_pH = isotropic_pad ? pads[1] : 0;
-        int64_t conv_pW = isotropic_pad ? pads[2] : 0;
-        if (!isotropic_pad) {
+        // Audit I5: Conv3d supports per-axis kernel/stride/padding/dilation.
+        // Any SYMMETRIC padding (begin==end on every axis) — including
+        // symmetric-but-anisotropic values like [1,2,2,1,2,2] — flows through
+        // Conv3d's per-axis padding ctor directly, mirroring the 2-D path.
+        // Only truly asymmetric pads (begin!=end on some axis) need a
+        // ConstantPad3d pre-pad with its extra allocation/copy per forward.
+        int64_t conv_pD = symmetric ? pads[0] : 0;
+        int64_t conv_pH = symmetric ? pads[1] : 0;
+        int64_t conv_pW = symmetric ? pads[2] : 0;
+        if (!symmetric) {
             pre_pad = std::make_shared<nn::ConstantPad3d>(std::vector<int64_t>{
                 /*left=*/pads[2], /*right=*/pads[5],
                 /*top=*/pads[1], /*bottom=*/pads[4],
@@ -1693,11 +1694,29 @@ Tensor reorder_rnn_gates(const Tensor& w_2d, int64_t hidden, const std::vector<i
 // Combine ONNX W-bias + R-bias (each [gates*H]) into a single bias [gates*H]
 // in tenzor's gate order. PyTorch convention has separate bias_ih and bias_hh
 // — tenzor's `weight_hh` is constructed without bias, so we collapse the two
-// onto `weight_ih.bias` via simple sum (PyTorch eval-time math also sums them).
+// onto `weight_ih.bias`.
+//
+// For LSTM/vanilla-RNN gates the eval-time math is `act(X·W + Wb + H·R + Rb)`,
+// so `Wb + Rb` is an exact equivalent and we simply sum.
+//
+// GRU is different. Tenzor's GRUCell implements `linear_before_reset=1`
+// semantics: `n_t = tanh(n_i + r_t ⊙ (H·Rn))` where `n_i = X·Wn + bias_ih_n`.
+// Under that mode the recurrent new-gate bias Rbn belongs INSIDE the reset
+// multiply: `r_t ⊙ (H·Rn + Rbn)` — it is NOT equivalent to a pre-summed
+// `Wbn + Rbn` on the input side. (Summing remains valid for the z and r
+// gates, whose Rb is added before the nonlinearity, not gated by r_t.)
+// Tenzor's weight_hh carries no bias, so there is no place to put Rbn inside
+// the reset; pre-summing it would silently miscompute the new gate. We
+// therefore sum only the valid gates and, for the GRU n-gate, keep only Wbn,
+// rejecting a non-zero Rbn rather than producing a wrong result.
+//
+// `gru_n_gate_onnx_slot` selects the ONNX gate slot that is the GRU new/h
+// gate (2 for ONNX [z,r,h]); pass -1 for LSTM/RNN to sum every gate.
 Tensor combine_and_reorder_rnn_bias(const Tensor& bias_2H,
                                      int64_t hidden,
                                      int64_t gates,
-                                     const std::vector<int64_t>& perm) {
+                                     const std::vector<int64_t>& perm,
+                                     int64_t gru_n_gate_onnx_slot = -1) {
     // bias_2H has length 2 * gates * hidden = concat(W_bias, R_bias).
     auto bshape = bias_2H.shape();
     if (bshape.size() != 1 || bshape[0] != 2 * gates * hidden) {
@@ -1707,7 +1726,39 @@ Tensor combine_and_reorder_rnn_bias(const Tensor& bias_2H,
     }
     Tensor w_bias = ::tenzor::slice(bias_2H, 0, 0,           gates * hidden);
     Tensor r_bias = ::tenzor::slice(bias_2H, 0, gates * hidden, 2 * gates * hidden);
-    Tensor summed = ::tenzor::add(w_bias, r_bias);  // PyTorch: bias_ih + bias_hh
+    Tensor summed = ::tenzor::add(w_bias, r_bias);  // bias_ih + bias_hh
+
+    if (gru_n_gate_onnx_slot >= 0) {
+        // GRU under linear_before_reset=1: the new/h gate must not pre-sum Rbn.
+        const int64_t s = gru_n_gate_onnx_slot;
+        // Reject a non-zero recurrent new-gate bias we cannot represent.
+        Tensor rbn = ::tenzor::slice(r_bias, 0, s * hidden, (s + 1) * hidden);
+        double rbn_l1 =
+            ::tenzor::sum(::tenzor::abs(rbn.to(DType::Float64))).item<double>();
+        if (rbn_l1 != 0.0) {
+            throw std::runtime_error(
+                "ONNX GRU import: model has a non-zero recurrent new-gate bias "
+                "(Rbh) with linear_before_reset=1, which Tenzor's GRUCell "
+                "cannot represent (weight_hh has no bias; Rbh must be applied "
+                "inside the reset multiply). Re-export with a zero new-gate Rbh "
+                "or with linear_before_reset=0.");
+        }
+        // Overwrite the new-gate slot of `summed` with Wbn only (Rbn == 0 here,
+        // so this matches; the explicit write documents the intent and stays
+        // correct even if the zero-check tolerance is ever loosened).
+        Tensor wbn = ::tenzor::slice(w_bias, 0, s * hidden, (s + 1) * hidden);
+        std::vector<Tensor> gate_chunks;
+        gate_chunks.reserve(gates);
+        for (int64_t g = 0; g < gates; ++g) {
+            if (g == s) {
+                gate_chunks.push_back(wbn);
+            } else {
+                gate_chunks.push_back(
+                    ::tenzor::slice(summed, 0, g * hidden, (g + 1) * hidden));
+            }
+        }
+        summed = ::tenzor::cat(gate_chunks, 0);
+    }
 
     if (perm.size() == 1 && perm[0] == 0) {
         return summed;  // vanilla RNN: no remap
@@ -1732,13 +1783,15 @@ bool load_rnn_direction_weights(nn::Module& module,
                                   const Tensor* B_dir,  // [2*gates*H] or null
                                   int64_t hidden,
                                   int64_t gates,
-                                  const std::vector<int64_t>& perm) {
+                                  const std::vector<int64_t>& perm,
+                                  int64_t gru_n_gate_onnx_slot = -1) {
     Tensor w_ih_t = reorder_rnn_gates(W_dir, hidden, perm);
     Tensor w_hh_t = reorder_rnn_gates(R_dir, hidden, perm);
     Tensor bias_t;
     bool has_bias = (B_dir != nullptr && B_dir->is_valid() && B_dir->numel() > 0);
     if (has_bias) {
-        bias_t = combine_and_reorder_rnn_bias(*B_dir, hidden, gates, perm);
+        bias_t = combine_and_reorder_rnn_bias(*B_dir, hidden, gates, perm,
+                                              gru_n_gate_onnx_slot);
     }
 
     bool matched_any = false;
@@ -1847,6 +1900,16 @@ auto ONNXImporter::convert_gru(const ONNXImportNode& node) -> std::shared_ptr<nn
     //   tenzor slot 2 (n) ← ONNX slot 2 (h)
     const std::vector<int64_t> gru_perm = {1, 0, 2};
 
+    // ONNX GRU `linear_before_reset` selects where the recurrent new-gate bias
+    // (Rbh) is applied. Tenzor's GRUCell only implements the mode==1 layout
+    // (Rbh inside the reset multiply, which our cell cannot bias), so under
+    // mode==1 the n-gate bias must NOT be pre-summed onto the input side. The
+    // ONNX default is 0, but the Tenzor exporter writes 1; we mark the n-gate
+    // ONNX slot (2 = "h") for special handling only when mode != 0.
+    int64_t linear_before_reset =
+        node.get_attr("linear_before_reset").value_or(ONNXAttribute{}).get_int(0);
+    const int64_t gru_n_gate_slot = (linear_before_reset != 0) ? 2 : -1;
+
     Tensor W_fwd = ::tenzor::slice(W, 0, 0, 1);
     W_fwd = ::tenzor::reshape(W_fwd, std::vector<int64_t>{3 * dims.hidden_size, dims.input_size});
     Tensor R_fwd = ::tenzor::slice(R, 0, 0, 1);
@@ -1861,7 +1924,8 @@ auto ONNXImporter::convert_gru(const ONNXImportNode& node) -> std::shared_ptr<nn
     }
     load_rnn_direction_weights(*gru, "forward_cell_0.", W_fwd, R_fwd,
                                 has_bias ? &B_fwd : nullptr,
-                                dims.hidden_size, /*gates=*/3, gru_perm);
+                                dims.hidden_size, /*gates=*/3, gru_perm,
+                                gru_n_gate_slot);
 
     if (bidirectional) {
         Tensor W_bwd = ::tenzor::slice(W, 0, 1, 2);
@@ -1876,7 +1940,8 @@ auto ONNXImporter::convert_gru(const ONNXImportNode& node) -> std::shared_ptr<nn
         }
         load_rnn_direction_weights(*gru, "backward_cell_0.", W_bwd, R_bwd,
                                     has_bias ? &B_bwd : nullptr,
-                                    dims.hidden_size, /*gates=*/3, gru_perm);
+                                    dims.hidden_size, /*gates=*/3, gru_perm,
+                                    gru_n_gate_slot);
     }
 
     return gru;
@@ -2041,42 +2106,70 @@ auto ONNXImporter::convert_selu(const ONNXImportNode&)
 // ============================================================================
 
 auto ONNXImporter::convert_maxpool(const ONNXImportNode& node) -> std::shared_ptr<nn::Module> {
-    auto kernel_shape = node.get_attr("kernel_shape")->get_ints();
-    auto strides = node.get_attr("strides").value_or(ONNXAttribute{}).get_ints({1, 1});
-    auto pads = node.get_attr("pads").value_or(ONNXAttribute{}).get_ints({0, 0, 0, 0});
+    // kernel_shape is required; use value_or() + emptiness check rather than a
+    // raw operator-> on the optional (which is UB if the attribute is absent,
+    // e.g. a mis-routed Global* op).
+    auto kernel_shape = node.get_attr("kernel_shape").value_or(ONNXAttribute{}).get_ints({});
+    if (kernel_shape.empty()) {
+        throw std::runtime_error("ONNX MaxPool: missing required 'kernel_shape' attribute");
+    }
 
     if (kernel_shape.size() == 2) {
-        // MaxPool2d - assuming square kernels
-        int64_t kernel_size = kernel_shape[0];
-        int64_t stride = strides[0];
-        int64_t padding = pads[0];
+        // Per-axis kernel/stride/pad — anisotropic pooling must not be
+        // collapsed to the H-axis values only.
+        auto strides = node.get_attr("strides").value_or(ONNXAttribute{}).get_ints(
+            {kernel_shape[0], kernel_shape[1]});
+        auto pads = node.get_attr("pads").value_or(ONNXAttribute{}).get_ints({0, 0, 0, 0});
+        bool ceil_mode = node.get_attr("ceil_mode").value_or(ONNXAttribute{}).get_int(0) != 0;
 
-        auto pool = std::make_shared<nn::MaxPool2d>(
-            kernel_size, stride, padding
-        );
+        if (pads.size() != 4) {
+            throw std::runtime_error("ONNX MaxPool2d: 'pads' must have 4 entries "
+                                     "[begin_h, begin_w, end_h, end_w]");
+        }
+        // ONNX pads layout: [begin_h, begin_w, end_h, end_w]. Pooling layers
+        // only support symmetric (begin==end) per-axis padding.
+        if (!pads_are_symmetric(pads, 2)) {
+            throw std::runtime_error("ONNX MaxPool2d: asymmetric padding "
+                                     "(begin != end on an axis) is not supported");
+        }
 
-        return pool;
+        std::array<int64_t, 2> k = {kernel_shape[0], kernel_shape[1]};
+        std::array<int64_t, 2> s = {strides[0], strides[1]};
+        std::array<int64_t, 2> p = {pads[0], pads[1]};
+        return std::make_shared<nn::MaxPool2d>(k, s, p, ceil_mode, /*return_indices=*/false);
     } else {
         throw std::runtime_error("Unsupported MaxPool dimension: " + std::to_string(kernel_shape.size()));
     }
 }
 
 auto ONNXImporter::convert_avgpool(const ONNXImportNode& node) -> std::shared_ptr<nn::Module> {
-    auto kernel_shape = node.get_attr("kernel_shape")->get_ints();
-    auto strides = node.get_attr("strides").value_or(ONNXAttribute{}).get_ints({1, 1});
-    auto pads = node.get_attr("pads").value_or(ONNXAttribute{}).get_ints({0, 0, 0, 0});
+    auto kernel_shape = node.get_attr("kernel_shape").value_or(ONNXAttribute{}).get_ints({});
+    if (kernel_shape.empty()) {
+        throw std::runtime_error("ONNX AveragePool: missing required 'kernel_shape' attribute");
+    }
 
     if (kernel_shape.size() == 2) {
-        // AvgPool2d - assuming square kernels
-        int64_t kernel_size = kernel_shape[0];
-        int64_t stride = strides[0];
-        int64_t padding = pads[0];
+        auto strides = node.get_attr("strides").value_or(ONNXAttribute{}).get_ints(
+            {kernel_shape[0], kernel_shape[1]});
+        auto pads = node.get_attr("pads").value_or(ONNXAttribute{}).get_ints({0, 0, 0, 0});
+        // ONNX default count_include_pad is 0 (exclude pad), unlike PyTorch's
+        // AvgPool2d default of true.
+        bool count_include_pad =
+            node.get_attr("count_include_pad").value_or(ONNXAttribute{}).get_int(0) != 0;
 
-        auto pool = std::make_shared<nn::AvgPool2d>(
-            kernel_size, stride, padding
-        );
+        if (pads.size() != 4) {
+            throw std::runtime_error("ONNX AvgPool2d: 'pads' must have 4 entries "
+                                     "[begin_h, begin_w, end_h, end_w]");
+        }
+        if (!pads_are_symmetric(pads, 2)) {
+            throw std::runtime_error("ONNX AvgPool2d: asymmetric padding "
+                                     "(begin != end on an axis) is not supported");
+        }
 
-        return pool;
+        std::array<int64_t, 2> k = {kernel_shape[0], kernel_shape[1]};
+        std::array<int64_t, 2> s = {strides[0], strides[1]};
+        std::array<int64_t, 2> p = {pads[0], pads[1]};
+        return std::make_shared<nn::AvgPool2d>(k, s, p, count_include_pad);
     } else {
         throw std::runtime_error("Unsupported AvgPool dimension: " + std::to_string(kernel_shape.size()));
     }
@@ -2220,8 +2313,11 @@ auto ONNXImporter::convert_pad(const ONNXImportNode& node) -> void {
     if (node.inputs.size() > 2) {
         auto value_t = get_input(node.inputs[2]);
         if (value_t.numel() > 0) {
-            value = static_cast<double>(
-                *static_cast<const float*>(value_t.to(DType::Float32).data_ptr()));
+            // Read through Float64 (not Float32): the pad API takes a double,
+            // so widening via Float64 is lossless for Float64 models and for
+            // integer pad constants beyond float's exact-integer range (>2^24).
+            value = *static_cast<const double*>(
+                value_t.to(DType::Float64).data_ptr());
         }
     } else if (auto value_attr = node.get_attr("value")) {
         // Legacy Pad-2..10 attribute form.
@@ -2286,19 +2382,22 @@ auto ONNXImporter::convert_gather(const ONNXImportNode& node) -> void {
 auto ONNXImporter::convert_clip(const ONNXImportNode& node) -> void {
     auto input = get_input(node.inputs[0]);
 
-    float min_val = -std::numeric_limits<float>::infinity();
-    float max_val = std::numeric_limits<float>::infinity();
+    // Read bounds through Float64 (not Float32): tenzor::clamp takes double, so
+    // widening via Float64 is lossless for Float64 inputs and for Int64 bounds
+    // beyond float's exact-integer range (>2^24) that Float32 would round.
+    double min_val = -std::numeric_limits<double>::infinity();
+    double max_val = std::numeric_limits<double>::infinity();
 
     if (node.inputs.size() > 1 && !node.inputs[1].empty()) {
         auto min_t = get_input(node.inputs[1]);
         if (min_t.numel() > 0) {
-            min_val = *static_cast<const float*>(min_t.to(DType::Float32).data_ptr());
+            min_val = *static_cast<const double*>(min_t.to(DType::Float64).data_ptr());
         }
     }
     if (node.inputs.size() > 2 && !node.inputs[2].empty()) {
         auto max_t = get_input(node.inputs[2]);
         if (max_t.numel() > 0) {
-            max_val = *static_cast<const float*>(max_t.to(DType::Float32).data_ptr());
+            max_val = *static_cast<const double*>(max_t.to(DType::Float64).data_ptr());
         }
     }
 
@@ -2546,17 +2645,26 @@ auto ONNXImporter::convert_constant_of_shape(const ONNXImportNode& node) -> void
     const int64_t* shape_data = shape_tensor.data<int64_t>();
     std::vector<int64_t> shape(shape_data, shape_data + shape_tensor.numel());
 
-    float value = 0.0f;
+    // The `value` attribute tensor's dtype determines the output dtype (ONNX
+    // commonly uses Int64 ConstantOfShape to build shape/index/range/mask
+    // constants). Defaulting to Float32 would silently mistype those, breaking
+    // downstream gather/index/compare ops. Per ONNX spec the default value is a
+    // single Float32 zero when the attribute is absent.
+    double value = 0.0;
+    DType out_dtype = DType::Float32;
     auto value_attr = node.get_attr("value");
     if (value_attr.has_value() && value_attr->tensor.has_value()) {
-        // value is a tensor attribute — extract scalar
         auto val_tensor = value_attr->tensor->to_tensor();
+        out_dtype = val_tensor.dtype();
         if (val_tensor.numel() > 0) {
-            value = *static_cast<const float*>(val_tensor.to(DType::Float32).data_ptr());
+            // Extract the scalar via Float64 (lossless for the int/float dtypes
+            // ONNX uses here); tenzor::full re-narrows to out_dtype.
+            value = *static_cast<const double*>(
+                val_tensor.to(DType::Float64).data_ptr());
         }
     }
 
-    auto result = tenzor::full(shape, value, DType::Float32, Device::cpu());
+    auto result = tenzor::full(shape, value, out_dtype, Device::cpu());
     register_output(node.outputs[0], result);
 }
 

@@ -167,101 +167,17 @@ auto quantized_conv2d_cuda(
     TENZOR_CUDA_POST_LAUNCH_CHECK();
 }
 
-/**
- * @brief Optimized implicit GEMM convolution using shared memory.
- *
- * Uses implicit GEMM formulation with shared memory tiling for better
- * memory bandwidth utilization.
- */
-__global__ void quantized_conv2d_implicit_gemm_kernel(
-    const int8_t* __restrict__ input,
-    const int8_t* __restrict__ weight,
-    const float* __restrict__ bias,
-    float* __restrict__ output,
-    int64_t batch,
-    int64_t in_channels,
-    int64_t out_channels,
-    int64_t h_in,
-    int64_t w_in,
-    int64_t h_out,
-    int64_t w_out,
-    int64_t kernel_size,
-    int64_t stride,
-    int64_t padding,
-    float combined_scale,
-    int32_t input_zp,
-    int32_t weight_zp
-) {
-    // Shared memory for tiling
-    __shared__ int8_t shared_input[32][32];
-    __shared__ int8_t shared_weight[32][32];
-
-    int tx = threadIdx.x;
-    int ty = threadIdx.y;
-
-    int64_t ow = blockIdx.x * blockDim.x + tx;
-    int64_t oh = blockIdx.y * blockDim.y + ty;
-    int64_t oc = blockIdx.z % out_channels;
-    int64_t b = blockIdx.z / out_channels;
-
-    if (b >= batch || oc >= out_channels || oh >= h_out || ow >= w_out) return;
-
-    int32_t acc = 0;
-
-    // Tile over input channels and kernel
-    const int TILE_SIZE = 32;
-    int64_t total_k = in_channels * kernel_size * kernel_size;
-
-    for (int64_t k_base = 0; k_base < total_k; k_base += TILE_SIZE) {
-        // Load input tile into shared memory
-        int64_t k = k_base + tx;
-        if (k < total_k) {
-            int64_t ic = k / (kernel_size * kernel_size);
-            int64_t k_spatial = k % (kernel_size * kernel_size);
-            int64_t kh = k_spatial / kernel_size;
-            int64_t kw = k_spatial % kernel_size;
-
-            int64_t ih = oh * stride + kh - padding;
-            int64_t iw = ow * stride + kw - padding;
-
-            if (ih >= 0 && ih < h_in && iw >= 0 && iw < w_in) {
-                int64_t input_idx = ((b * in_channels + ic) * h_in + ih) * w_in + iw;
-                shared_input[ty][tx] = input[input_idx];
-            } else {
-                shared_input[ty][tx] = 0;  // Padding
-            }
-
-            // Load weight tile
-            int64_t weight_idx = oc * total_k + k;
-            if (weight_idx < out_channels * total_k) {
-                shared_weight[ty][tx] = weight[weight_idx];
-            }
-        }
-
-        __syncthreads();
-
-        // Compute partial dot product
-        #pragma unroll
-        for (int i = 0; i < TILE_SIZE && k_base + i < total_k; ++i) {
-            acc += static_cast<int32_t>(shared_input[ty][i]) *
-                   static_cast<int32_t>(shared_weight[ty][i]);
-        }
-
-        __syncthreads();
-    }
-
-    // Zero point correction
-    acc -= input_zp * weight_zp * total_k;
-
-    // Dequantize and add bias
-    float result = static_cast<float>(acc) * combined_scale;
-    if (bias != nullptr) {
-        result += bias[oc];
-    }
-
-    int64_t output_idx = ((b * out_channels + oc) * h_out + oh) * w_out + ow;
-    output[output_idx] = result;
-}
+// NOTE: An unused quantized_conv2d_implicit_gemm_kernel was removed here. It was
+// dead code (never registered — the live kernel is quantized_conv2d_cuda at
+// cuda_kernel_registry.cpp) and functionally wrong: it used a 32-bit int32_t
+// accumulator (overflow vs the int64 live kernel), an incomplete zero-point
+// correction (only -input_zp*weight_zp*total_k, omitting the -weight_zp*sum_i
+// and -input_zp*sum_w cross terms), had no groups/dilation support, and placed
+// its early-return guard before the shared-memory load + __syncthreads (divergent
+// __syncthreads is UB and survivors could read stale tiles). It would have
+// shipped wrong results if wired up. Reintroduce only with the live kernel's
+// int64 accumulator, full asymmetric zero-point correction, group/dilation
+// support, non-divergent __syncthreads, and a parity test.
 
 } // namespace kernels
 } // namespace quantization

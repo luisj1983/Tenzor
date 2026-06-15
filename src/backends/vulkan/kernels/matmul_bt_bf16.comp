@@ -38,6 +38,26 @@ float readBF16B(uint element_idx) {
     return uintBitsToFloat(bits << 16);
 }
 
+// Atomic half-word writer for the packed BFloat16 output. The previous
+// non-atomic read-modify-write merge let two threads writing the two halves of
+// the same word each read a stale 'existing' and lose one update. Use an
+// atomicCompSwap retry loop instead, masking the RNE result to 16 bits.
+void writeC(uint element_idx, float value) {
+    uint word_idx = element_idx >> 1u;
+    uint shift = (element_idx & 1u) * 16u;
+    uint vbits = floatBitsToUint(value);
+    uint new_bits = ((vbits + 0x7FFFu + ((vbits >> 16) & 1u)) >> 16) & 0xFFFFu;
+    uint mask = 0xFFFFu << shift;
+
+    uint old_val = c[word_idx];
+    for (uint iter = 0u; iter < 65536u; iter++) {
+        uint expected = old_val;
+        uint new_val = (expected & ~mask) | (new_bits << shift);
+        old_val = atomicCompSwap(c[word_idx], expected, new_val);
+        if (old_val == expected) return;
+    }
+}
+
 void main() {
     uint row = gl_GlobalInvocationID.y;
     uint col = gl_GlobalInvocationID.x;
@@ -85,14 +105,8 @@ void main() {
         barrier();
     }
 
-    // Write result (packed BF16)
+    // Write result (packed BF16) via atomic half-word merge.
     if (row < params.M && col < params.N) {
-        uint out_elem = row * params.N + col;
-        uint out_word = out_elem / 2;
-        uint out_off = out_elem % 2;
-        uint bits = ((floatBitsToUint(sum) + 0x7FFFu + ((floatBitsToUint(sum) >> 16) & 1u)) >> 16);
-        uint existing = c[out_word];
-        uint mask = 0xFFFFu << (out_off * 16);
-        c[out_word] = (existing & ~mask) | (bits << (out_off * 16));
+        writeC(row * params.N + col, sum);
     }
 }

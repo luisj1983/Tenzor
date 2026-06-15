@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <cstdint>
 
 #ifdef _OPENMP
 #include <omp.h>
@@ -241,9 +242,26 @@ auto randn_kernel(const std::vector<int64_t>& shape, DType dtype, const Device& 
 auto randint_kernel(int64_t low, int64_t high, const std::vector<int64_t>& shape,
                     DType dtype, const Device& device) -> Tensor {
     // Audit J14: widen smaller integer dtypes to Int32, generate, then narrow.
-    // Range validation: caller must pass `low`/`high` that fit the target.
+    // Validate that the generated range [low, high) fits the target dtype's
+    // representable range before widening, otherwise `.to(dtype)` would wrap
+    // modulo the target width and silently produce out-of-range values.
     if (dtype == DType::Int8 || dtype == DType::UInt8 ||
         dtype == DType::Int16 || dtype == DType::UInt16) {
+        int64_t type_min = 0, type_max = 0;
+        switch (dtype) {
+            case DType::Int8:   type_min = INT8_MIN;  type_max = INT8_MAX;  break;
+            case DType::UInt8:  type_min = 0;         type_max = UINT8_MAX; break;
+            case DType::Int16:  type_min = INT16_MIN; type_max = INT16_MAX; break;
+            case DType::UInt16: type_min = 0;         type_max = UINT16_MAX; break;
+            default: break;  // unreachable
+        }
+        // Values are generated in [low, high-1]; require both endpoints to fit.
+        if (high <= low || low < type_min || (high - 1) > type_max) {
+            throw std::runtime_error(
+                "randint: range [" + std::to_string(low) + ", " + std::to_string(high) +
+                ") does not fit the requested dtype's representable range [" +
+                std::to_string(type_min) + ", " + std::to_string(type_max) + "]");
+        }
         Tensor tmp = randint_kernel(low, high, shape, DType::Int32, device);
         return tmp.to(dtype);
     }

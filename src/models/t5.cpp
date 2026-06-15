@@ -127,8 +127,8 @@ auto T5Attention::compute_bias(int64_t query_length, int64_t key_length) -> Vari
 auto T5Attention::forward(const Variable& hidden_states,
                            const Variable& key_value_states,
                            const Tensor& attention_mask,
-                           const Tensor& position_bias)
-    -> std::tuple<Variable, Tensor> {
+                           const Variable& position_bias)
+    -> std::tuple<Variable, Variable> {
     // Call forward pre-hooks (enables CPU-start offloading)
     // NOTE: This is necessary because this multi-argument forward bypasses Module::forward()
     call_forward_pre_hooks();
@@ -175,21 +175,29 @@ auto T5Attention::forward(const Variable& hidden_states,
     scores = scores * scale;
 
     // Add relative position bias.
-    // Returned bias tensor (2nd tuple element) is the detached values, cached by the
-    // encoder/decoder and re-fed to later layers (which only have the bias in layer 0).
-    Tensor bias = position_bias;
-    if ((!position_bias.is_valid() || !position_bias.numel()) && has_relative_attention_bias_) {
-        // Freshly compute bias as an autograd-tracked Variable so gradients reach the
-        // learnable relative_attention_bias_ embedding. Unsqueeze to [1, num_heads, q, kv]
-        // and rely on broadcasting over the batch dimension.
+    //
+    // The bias (2nd tuple element) is threaded through as a *grad-tracked
+    // Variable*, cached by the encoder/decoder after layer 0 and re-fed to
+    // later layers (which carry the learnable embedding only in layer 0).
+    // Keeping it a Variable — rather than the previous detached `.tensor()` —
+    // means gradients from EVERY layer's `scores + bias` accumulate back into
+    // the single layer-0 relative_attention_bias_ embedding, instead of only
+    // layer 0 contributing.
+    Variable bias = position_bias;
+    const bool have_incoming_bias =
+        position_bias.is_initialized() && position_bias.tensor().numel() > 0;
+    if (!have_incoming_bias && has_relative_attention_bias_) {
+        // Layer 0: freshly compute bias as an autograd-tracked Variable so
+        // gradients reach the learnable relative_attention_bias_ embedding.
+        // Unsqueeze to [1, num_heads, q, kv] and broadcast over the batch dim.
         Variable bias_var = compute_bias(seq_len, kv_seq_len);
         Variable bias_4d = tenzor::unsqueeze(bias_var, 0);
         scores = scores + bias_4d;
-        bias = bias_var.tensor();  // cache detached values for reuse by subsequent layers
-    } else if (bias.is_valid() && bias.numel() > 0) {
-        // Reused bias from the first layer: add detached (gradient already flows through
-        // the first layer's autograd-tracked compute_bias path). Unsqueeze for broadcast.
-        Variable bias_4d = tenzor::unsqueeze(Variable(bias, false), 0);
+        bias = bias_var;  // cache grad-tracked bias for reuse by later layers
+    } else if (have_incoming_bias) {
+        // Reused bias from the first layer: add it WITH gradient tracking so
+        // this layer's contribution also flows back into the layer-0 embedding.
+        Variable bias_4d = tenzor::unsqueeze(bias, 0);
         scores = scores + bias_4d;
     }
 
@@ -225,7 +233,7 @@ auto T5Attention::forward(const Variable& hidden_states,
 }
 
 auto T5Attention::forward_impl(const Variable& input) -> Variable {
-    auto [output, bias] = forward(input, Variable{}, Tensor{}, Tensor{});
+    auto [output, bias] = forward(input, Variable{}, Tensor{}, Variable{});
     return output;
 }
 
@@ -310,15 +318,15 @@ auto T5Block::forward(const Variable& hidden_states,
                        const Variable& encoder_hidden_states,
                        const Tensor& attention_mask,
                        const Tensor& encoder_attention_mask,
-                       const Tensor& position_bias,
-                       const Tensor& encoder_position_bias)
-    -> std::tuple<Variable, Tensor, Tensor> {
+                       const Variable& position_bias,
+                       const Variable& encoder_position_bias)
+    -> std::tuple<Variable, Variable, Variable> {
     // Call forward pre-hooks (enables CPU-start offloading)
     // NOTE: This is necessary because this multi-argument forward bypasses Module::forward()
     call_forward_pre_hooks();
 
-    Tensor self_attn_bias;
-    Tensor cross_attn_bias;
+    Variable self_attn_bias;
+    Variable cross_attn_bias;
 
     // Pre-norm: normalize BEFORE self-attention
     Variable residual = hidden_states;  // Explicitly mutable copy
@@ -357,7 +365,7 @@ auto T5Block::forward(const Variable& hidden_states,
 
 auto T5Block::forward_impl(const Variable& input) -> Variable {
     auto [output, self_bias, cross_bias] = forward(
-        input, Variable{}, Tensor{}, Tensor{}, Tensor{}, Tensor{}
+        input, Variable{}, Tensor{}, Tensor{}, Variable{}, Variable{}
     );
     return output;
 }
@@ -395,15 +403,17 @@ auto T5Encoder::forward(const Variable& input_ids,
     auto hidden_states = shared_embeddings_->forward(input_ids);
     hidden_states = dropout_->forward(hidden_states);
 
-    // Pass through encoder blocks
-    Tensor position_bias;  // Computed in first layer, reused in rest
+    // Pass through encoder blocks. position_bias is computed (grad-tracked) in
+    // the first layer and threaded as a Variable into every later layer so all
+    // layers' gradients accumulate into the layer-0 relative bias embedding.
+    Variable position_bias;  // Computed in first layer, reused in rest
     for (size_t i = 0; i < blocks_.size(); ++i) {
         auto [output, self_bias, cross_bias] = blocks_[i]->forward(
-            hidden_states, Variable{}, attention_mask, Tensor{}, position_bias, Tensor{}
+            hidden_states, Variable{}, attention_mask, Tensor{}, position_bias, Variable{}
         );
         hidden_states = output;
         if (i == 0) {
-            position_bias = self_bias;  // Save bias from first layer
+            position_bias = self_bias;  // Save grad-tracked bias from first layer
         }
     }
 
@@ -532,9 +542,12 @@ auto T5Decoder::forward(const Variable& decoder_input_ids,
         combined_mask = causal_4d + pad_additive;  // (B, 1, T, T) via broadcast
     }
 
-    // Pass through decoder blocks
-    Tensor position_bias;         // Self-attention bias
-    Tensor encoder_position_bias; // Cross-attention bias
+    // Pass through decoder blocks. Both biases are grad-tracked Variables
+    // threaded from layer 0 so every layer's gradient reaches the layer-0
+    // relative bias embedding (self-attention bias; cross-attention has no
+    // relative bias in T5, so encoder_position_bias stays empty).
+    Variable position_bias;         // Self-attention bias
+    Variable encoder_position_bias; // Cross-attention bias
     for (size_t i = 0; i < blocks_.size(); ++i) {
         auto [output, self_bias, cross_bias] = blocks_[i]->forward(
             hidden_states, encoder_hidden_states, combined_mask,
@@ -676,9 +689,26 @@ auto T5ForConditionalGeneration::generate(const Variable& input_ids,
     for (int64_t b = 0; b < batch_size; ++b) gp[b] = start_token;
     Tensor generated = (device == Device::cpu()) ? generated_cpu : generated_cpu.to(device);
 
+    // Encoder caching: the encoder output depends only on input_ids, so run the
+    // encoder ONCE up front and feed the cached memory into the decoder every
+    // step. Previously generate() called the combined encoder-decoder forward
+    // each iteration, re-running the full encoder O(max_length) times.
+    auto encoder_output = t5_->encoder()->forward(input_ids, Tensor{});
+    auto decoder = t5_->decoder();
+
+    // Per-row EOS early-stop. Once a row emits eos_token_id it is "finished";
+    // we stop appending real tokens to it (pad with eos) and break the whole
+    // decode loop once every row has finished, instead of always running the
+    // full max_length steps.
+    const int64_t eos_id = config_.eos_token_id;
+    std::vector<bool> finished(batch_size, false);
+
     for (int64_t i = 0; i < max_length; ++i) {
         Variable decoder_ids(generated, false);
-        auto logits = forward(input_ids, decoder_ids, Tensor{}, Tensor{});
+        // Decode against the cached encoder memory, then project with the LM
+        // head — equivalent to the combined forward() but without re-encoding.
+        auto decoder_output = decoder->forward(decoder_ids, encoder_output, Tensor{}, Tensor{});
+        auto logits = lm_head_->forward(decoder_output);
 
         // Get logits for last position
         auto last_logits_shape = logits.shape();
@@ -783,6 +813,19 @@ auto T5ForConditionalGeneration::generate(const Variable& input_ids,
             }
         }
 
+        // EOS early-stop bookkeeping. For rows already finished, keep emitting
+        // eos (rather than continued decoding) so the sequence stays stable;
+        // for active rows that just emitted eos, mark them finished.
+        if (eos_id >= 0) {
+            for (int64_t b = 0; b < batch_size; ++b) {
+                if (finished[b]) {
+                    tokens_data[b] = eos_id;
+                } else if (tokens_data[b] == eos_id) {
+                    finished[b] = true;
+                }
+            }
+        }
+
         // Append to generated. Build on CPU (host pointer loop) then move back
         // to the compute device for the next decoder forward.
         Tensor generated_host = (generated.device().type != Device::Type::CPU)
@@ -797,6 +840,12 @@ auto T5ForConditionalGeneration::generate(const Variable& input_ids,
             gen_dst[b * (i + 2) + i + 1] = next_data[b];
         }
         generated = (device == Device::cpu()) ? new_generated : new_generated.to(device);
+
+        // Stop decoding entirely once every row has emitted EOS.
+        if (eos_id >= 0 &&
+            std::all_of(finished.begin(), finished.end(), [](bool f) { return f; })) {
+            break;
+        }
     }
 
     return generated;

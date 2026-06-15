@@ -1287,15 +1287,18 @@ auto VulkanBackend::dispatchRepeatInterleaveTensor(const Tensor& input, const Te
     Tensor int_repeats = (repeats.dtype() != DType::Int32)
         ? dispatchCast(repeats, DType::Int32) : repeats;
 
-    // Compute exclusive prefix sum of repeats on GPU using cumsum
-    // Then read total from the last element to determine output size
-    Tensor prefix_sum = dispatchCumSum(int_repeats.to(DType::Float32), 0);
+    // Compute exclusive prefix sum of repeats on GPU using cumsum.
+    // Accumulate in Float64 (exact to 2^53) rather than Float32 (exact only to
+    // 2^24): both the output row count and the per-row offsets are derived from
+    // this prefix sum, so a Float32 round above 16.7M rows would silently
+    // mis-size and mis-populate the result.
+    Tensor prefix_sum = dispatchCumSum(int_repeats.to(DType::Float64), 0);
     // We need an offsets array of size (dim_size + 1) with offsets[0] = 0
     // The prefix sum gives us offsets[1..dim_size]
     // Minimal scalar readback: only the total (last element) for output allocation
     int64_t dim_size = input_shape[dim];
     Tensor total_scalar = prefix_sum.slice(0, dim_size - 1, dim_size).to(Device::cpu());
-    float total_f = static_cast<const float*>(total_scalar.data_ptr())[0];
+    double total_f = static_cast<const double*>(total_scalar.data_ptr())[0];
     int64_t total_repeats = static_cast<int64_t>(total_f);
 
     if (total_repeats == 0 || input.numel() == 0) {
@@ -1307,8 +1310,8 @@ auto VulkanBackend::dispatchRepeatInterleaveTensor(const Tensor& input, const Te
     // Build offsets on GPU: offsets[0] = 0, offsets[i+1] = int(cumsum[i])
     Tensor offsets = dispatchZeros({dim_size + 1}, DType::Int32, input.device());
     {
-        auto* ofs_pipeline = getPipeline("build_offsets_from_cumsum", device_id);
-        size_t cs_size = prefix_sum.numel() * sizeof(float);
+        auto* ofs_pipeline = getPipeline("build_offsets_from_cumsum_f64", device_id);
+        size_t cs_size = prefix_sum.numel() * sizeof(double);
         size_t of_size = offsets.numel() * sizeof(int32_t);
         std::vector<std::pair<uint32_t, const void*>> ofs_bindings = {
             {0, prefix_sum.data_ptr()}, {1, offsets.data_ptr()},

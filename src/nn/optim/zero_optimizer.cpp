@@ -1603,31 +1603,28 @@ auto ZeROStage1Optimizer::update_local_partition() -> void {
                                adamw_opt->get_eps(),
                                adamw_opt->get_weight_decay());
     } else if (sgd_opt) {
-        // Apply SGD update to local partition
-        update_partition_sgd(partition, sgd_opt->get_lr(), 0.9, 0.0);
+        // GG.5 (SGD): read the user's configured SGD hyperparameters from
+        // defaults() instead of hardcoding momentum=0.9 / weight_decay=0.0.
+        // The hardcoded values forced momentum on and dropped weight decay,
+        // diverging from non-ZeRO SGD.
+        auto d = sgd_opt->defaults();
+        update_partition_sgd(partition,
+                             d.at("lr"),
+                             d.at("momentum"),
+                             d.at("weight_decay"),
+                             d.at("dampening"),
+                             d.at("nesterov") != 0.0);
     } else {
-        // Fallback: Try to use base optimizer's step() directly on local partition
-        // This may not be optimal but maintains compatibility with unknown optimizer types
-
-        // Store original parameters
-        auto original_params = parameters_;
-
-        // Temporarily set only local partition parameters
-        parameters_ = partition.params;
-
-        // Call base optimizer step
-        try {
-            base_optimizer_->step();
-        } catch (const std::exception& e) {
-            // Restore original parameters and rethrow
-            parameters_ = original_params;
-            throw std::runtime_error(
-                std::string("Failed to update local partition with base optimizer: ") + e.what()
-            );
-        }
-
-        // Restore original parameters
-        parameters_ = original_params;
+        // GG.5 (fallback): the previous code tried to "step the local partition"
+        // by temporarily swapping ZeRO's own parameters_ member to the partition
+        // params and calling base_optimizer_->step(). That was a no-op-on-the-
+        // partition / footgun: the base optimizer iterates its OWN parameters_
+        // (the full, unpartitioned model), so this silently stepped the entire
+        // model on every rank — corrupting training under ZeRO partitioning.
+        // Mirror the element-mode path and refuse unsupported base optimizers
+        // rather than silently doing the wrong thing.
+        throw std::runtime_error(
+            "ZeRO Stage 1 currently supports Adam, AdamW, SGD base optimizers only");
     }
 }
 
@@ -1702,13 +1699,25 @@ auto ZeROStage1Optimizer::update_local_partition_element_mode() -> void {
         const double wd     = adam_opt ? adam_opt->get_weight_decay() : adamw_opt->get_weight_decay();
         step_count_++;
 
+        // Plain Adam couples weight decay as an L2 term folded into the
+        // gradient (grad_eff = grad + wd*param), whereas AdamW applies decoupled
+        // decay to the parameter (handled below). The element-mode path
+        // previously consumed wd only in the AdamW branch, silently dropping
+        // weight decay for a plain-Adam base — diverging from update_partition_adam
+        // and non-ZeRO Adam. Fold it into grad_slice here for the Adam case.
+        Tensor grad_eff = grad_slice;
+        if (adam_opt && wd != 0.0) {
+            grad_eff = grad_slice + target * wd;
+        }
+
         // m = beta1*m + (1-beta1)*g
         mul_(m, scalar_like(beta1, m));
-        Tensor scaled_g = grad_slice * (1.0 - beta1);
+        Tensor scaled_g = grad_eff * (1.0 - beta1);
         add_(m, scaled_g);
-        // v = beta2*v + (1-beta2)*g^2
+        // v = beta2*v + (1-beta2)*g_eff^2 (g_eff folds Adam's L2 decay, matching
+        // update_partition_adam which uses grad_with_decay for both moments).
         mul_(v, scalar_like(beta2, v));
-        Tensor g_sq = grad_slice * grad_slice;
+        Tensor g_sq = grad_eff * grad_eff;
         mul_(g_sq, scalar_like(1.0 - beta2, g_sq));
         add_(v, g_sq);
 
@@ -1724,14 +1733,40 @@ auto ZeROStage1Optimizer::update_local_partition_element_mode() -> void {
         }
         target = target - (m_hat / denom) * lr;
     } else if (sgd_opt) {
-        const double lr = sgd_opt->get_lr();
-        const double momentum_coef = 0.9;
+        // GG.5 (SGD): read the user's configured SGD hyperparameters instead of
+        // hardcoding momentum=0.9 / weight_decay=0.0. The hardcoded values
+        // forced momentum on and dropped weight decay, diverging from non-ZeRO
+        // SGD and the param-level update_partition_sgd above.
+        auto d = sgd_opt->defaults();
+        const double lr            = d.at("lr");
+        const double momentum_coef = d.at("momentum");
+        const double weight_decay  = d.at("weight_decay");
+        const double dampening     = d.at("dampening");
+        const bool   nesterov      = d.at("nesterov") != 0.0;
+        step_count_++;
+
+        // L2-coupled weight decay: g_eff = g + wd*param.
+        Tensor grad_eff = grad_slice;
+        if (weight_decay != 0.0) {
+            grad_eff = grad_slice + target * weight_decay;
+        }
+
         if (momentum_coef != 0.0) {
+            const bool first_momentum_step = (step_count_ == 1);
             mul_(m, scalar_like(momentum_coef, m));
-            add_(m, grad_slice);
-            target = target - m * lr;
+            if (first_momentum_step || dampening == 0.0) {
+                add_(m, grad_eff);
+            } else {
+                add_(m, grad_eff * (1.0 - dampening));
+            }
+            if (nesterov) {
+                Tensor update_dir = grad_eff + m * momentum_coef;
+                target = target - update_dir * lr;
+            } else {
+                target = target - m * lr;
+            }
         } else {
-            target = target - grad_slice * lr;
+            target = target - grad_eff * lr;
         }
     } else {
         throw std::runtime_error(
@@ -2036,7 +2071,9 @@ auto ZeROStage1Optimizer::update_partition_sgd(
     StatePartition& partition,
     double lr,
     double momentum_coef,
-    double weight_decay
+    double weight_decay,
+    double dampening,
+    bool nesterov
 ) -> void {
     for (size_t i = 0; i < partition.params.size(); ++i) {
         auto& param = partition.params[i];
@@ -2069,10 +2106,26 @@ auto ZeROStage1Optimizer::update_partition_sgd(
         if (momentum_coef != 0.0) {
             // SGD with momentum (in-place buffer update; param update via legacy OoP form
             // because in-place ops on the parameter tensor are blocked by requires_grad).
+            // PyTorch semantics: buf = momentum*buf + (1 - dampening)*grad. On the
+            // very first momentum step the buffer is seeded with grad (no
+            // dampening); the partition.momentum buffers start at zero, so the
+            // mul_ leaves them at zero and we add the (un-dampened) grad on the
+            // first step. After that, dampening applies.
             Tensor& momentum = partition.momentum[i];
+            const bool first_momentum_step = (step_count_ == 0);
             mul_(momentum, scalar_like(momentum_coef, momentum));
-            add_(momentum, grad_with_decay);
-            target = target - momentum * lr;
+            if (first_momentum_step || dampening == 0.0) {
+                add_(momentum, grad_with_decay);
+            } else {
+                add_(momentum, grad_with_decay * (1.0 - dampening));
+            }
+            if (nesterov) {
+                // Nesterov: update direction = grad + momentum * buf.
+                Tensor update_dir = grad_with_decay + momentum * momentum_coef;
+                target = target - update_dir * lr;
+            } else {
+                target = target - momentum * lr;
+            }
         } else {
             // Vanilla SGD
             target = target - grad_with_decay * lr;
@@ -2082,6 +2135,10 @@ auto ZeROStage1Optimizer::update_partition_sgd(
             param->tensor() = target.to(param->tensor().dtype());
         }
     }
+
+    // Advance the global step so the momentum-buffer "first step" detection
+    // above works on subsequent calls (Adam/AdamW paths increment likewise).
+    step_count_++;
 }
 
 auto ZeROStage1Optimizer::fetch_states_to_gpu() -> void {
@@ -5388,11 +5445,23 @@ auto ZeROStage3Optimizer::should_offload_parameter(Tensor* param) -> bool {
     // everywhere else by param_states_mutex_; reading it under adaptive_mutex_
     // only was a data race that could rehash the map concurrently. Take the two
     // locks separately (never nested) so no lock-ordering deadlock is possible.
+    {
+        std::lock_guard<std::mutex> ps_lock(param_states_mutex_);
+        return should_offload_parameter_locked(param);
+    }
+}
+
+auto ZeROStage3Optimizer::should_offload_parameter_locked(Tensor* param) -> bool {
+    // Caller must already hold param_states_mutex_. Reads the parameter state
+    // directly (no re-lock) and acquires only adaptive_mutex_.
+    if (!stage3_config_.enable_adaptive_offload) {
+        return false;
+    }
+
     bool pinned_in_memory = false;
     int ref_count = 0;
     size_t size_bytes = 0;
     {
-        std::lock_guard<std::mutex> ps_lock(param_states_mutex_);
         auto it = param_states_.find(param);
         if (it == param_states_.end()) {
             return false;  // Parameter not registered
@@ -5469,7 +5538,9 @@ auto ZeROStage3Optimizer::adaptive_offload_decision() -> void {
     std::vector<Tensor*> candidates_to_offload;
 
     for (auto& [param, state] : param_states_) {
-        if (should_offload_parameter(param)) {
+        // param_states_mutex_ is held here; use the _locked variant so we do
+        // not re-acquire the non-recursive mutex and self-deadlock.
+        if (should_offload_parameter_locked(param)) {
             candidates_to_offload.push_back(param);
         }
     }

@@ -788,11 +788,17 @@ auto VulkanBackend::dispatchClone(const Tensor& input) -> Tensor {
 /**
  * @brief Expand tensor to larger size using broadcasting
  */
-auto VulkanBackend::dispatchExpand(const Tensor& input_in, const std::vector<int64_t>& shape) -> Tensor {
+auto VulkanBackend::dispatchExpand(const Tensor& input_in, const std::vector<int64_t>& shape_in) -> Tensor {
     // Validate broadcast-compatibility up-front, matching cpu::expand_kernel.
     // Without this, expand(t({2,3}), {4,3}) silently produced a (4,3) tensor
     // full of garbage because the shader assumed the caller had already
     // checked shape compatibility.
+    //
+    // We also resolve any -1 ("keep this dim") entries to the input dim here:
+    // the op/binding layers forward the raw target shape (with -1 intact) on
+    // non-CPU devices. Leaving -1 in place would build a 0xFFFFFFFF-sized
+    // output tensor and corrupt the push-constant output_shape.
+    std::vector<int64_t> shape(shape_in.begin(), shape_in.end());
     {
         auto in_shape = input_in.shape();
         int64_t ndim_out = static_cast<int64_t>(shape.size());
@@ -803,10 +809,21 @@ auto VulkanBackend::dispatchExpand(const Tensor& input_in, const std::vector<int
         int64_t dim_diff = ndim_out - ndim_in;
         for (int64_t i = 0; i < ndim_out; ++i) {
             int64_t in_idx = i - dim_diff;
-            if (in_idx < 0) continue;  // New leading dim
+            if (in_idx < 0) {
+                // New leading dim: -1 is not allowed (no input dim to copy).
+                if (shape[i] == -1) {
+                    throw std::runtime_error("expand: -1 not allowed on a new leading dimension");
+                }
+                continue;
+            }
             int64_t in_dim = in_shape[in_idx];
             int64_t tgt_dim = shape[i];
-            if (in_dim != tgt_dim && in_dim != 1 && tgt_dim != -1) {
+            if (tgt_dim == -1) {
+                // "keep this dim": substitute the input size.
+                shape[i] = in_dim;
+                continue;
+            }
+            if (in_dim != tgt_dim && in_dim != 1) {
                 throw std::runtime_error("expand: incompatible shapes — cannot expand dim "
                     + std::to_string(in_idx) + " of size " + std::to_string(in_dim)
                     + " to size " + std::to_string(tgt_dim));
@@ -1562,10 +1579,25 @@ auto VulkanBackend::dispatchSwishBackward(const Tensor& grad_output,
                                            const Tensor& input) -> Tensor {
     int32_t device_id = grad_output.device().index;
 
-    // Select correct pipeline based on dtype
+    // Select correct pipeline based on dtype.
+    // BF16 has a dedicated packed shader (swish_backward_bf16). Without this
+    // branch BF16 fell through to the Float32 shader, which treats the 2-byte
+    // BF16 buffers as 4-byte floats and reads/writes 2x past the buffer bounds.
     bool is_float64 = (grad_output.dtype() == DType::Float64);
     bool is_float16 = (grad_output.dtype() == DType::Float16);
-    std::string shader_name = is_float64 ? "swish_backward_f64" : (is_float16 ? "swish_backward_f16" : "swish_backward");
+    bool is_bfloat16 = (grad_output.dtype() == DType::BFloat16);
+    std::string shader_name;
+    if (is_float64) {
+        shader_name = "swish_backward_f64";
+    } else if (is_float16) {
+        shader_name = "swish_backward_f16";
+    } else if (is_bfloat16) {
+        shader_name = "swish_backward_bf16";
+    } else {
+        shader_name = "swish_backward";
+    }
+    // F16 / BF16 use packed buffers: 2 elements per uint32, one pair per thread.
+    const bool is_packed_half = (is_float16 || is_bfloat16);
     auto* pipeline = getPipeline(shader_name, device_id);
 
     // Create output tensor
@@ -1589,6 +1621,18 @@ auto VulkanBackend::dispatchSwishBackward(const Tensor& grad_output,
     size_t buffer_size_grad_out = grad_output.numel() * grad_output.dtype_size();
     size_t buffer_size_input = input.numel() * input.dtype_size();
     size_t buffer_size_grad_in = grad_input.numel() * grad_input.dtype_size();
+    if (is_packed_half) {
+        // F16 / BF16 are packed 2 elements per uint32 — round up to the 4-byte
+        // boundary the shader actually indexes (pair_idx over uint32[]). For an
+        // odd element count numel*2 would under-size the buffer and the shader
+        // would read/write past the end.
+        size_t go_pairs = (grad_output.numel() + 1) / 2;
+        size_t in_pairs = (input.numel() + 1) / 2;
+        size_t gi_pairs = (grad_input.numel() + 1) / 2;
+        buffer_size_grad_out = go_pairs * 4;
+        buffer_size_input = in_pairs * 4;
+        buffer_size_grad_in = gi_pairs * 4;
+    }
 
     // Setup descriptor set
     // Binding 0: grad_output, Binding 1: input, Binding 2: grad_input
@@ -1611,8 +1655,12 @@ auto VulkanBackend::dispatchSwishBackward(const Tensor& grad_output,
                       VK_SHADER_STAGE_COMPUTE_BIT,
                       0, sizeof(PushConstants), &push_constants);
 
-    // Dispatch compute workgroups
-    uint32_t workgroups = div_wg(grad_output.numel(), devices_[device_id].workgroupSize);
+    // Dispatch compute workgroups.
+    // F16 / BF16 shaders process 2 elements (one packed pair) per thread.
+    uint32_t num_threads = is_packed_half
+        ? static_cast<uint32_t>((grad_output.numel() + 1) / 2)
+        : static_cast<uint32_t>(grad_output.numel());
+    uint32_t workgroups = div_wg(num_threads, devices_[device_id].workgroupSize);
     vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
     // Add memory barrier

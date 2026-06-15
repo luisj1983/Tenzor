@@ -1268,7 +1268,8 @@ auto gru_multi_layer_forward_kernel(
     const Tensor& input,
     const std::vector<Tensor>& W_ih_list,
     const std::vector<Tensor>& W_hh_list,
-    const std::vector<Tensor>& bias_list,
+    const std::vector<Tensor>& bias_list,      // per-layer b_ih (input-hidden bias)
+    const std::vector<Tensor>& bias_hh_list,   // per-layer b_hh (hidden-hidden bias)
     const Tensor& h0,    // (num_layers, batch, hidden)
     hipStream_t stream) -> std::vector<Tensor> {
 
@@ -1289,9 +1290,13 @@ auto gru_multi_layer_forward_kernel(
                        static_cast<const char*>(h0.data_ptr()) + l * layer_bytes,
                        layer_bytes, hipMemcpyDeviceToDevice, stream));
 
+        // Forward the per-layer b_hh so the reset-gated new-gate term gets its
+        // hidden-hidden bias (PyTorch GRU semantics). Empty when not provided.
+        const Tensor& bias_hh_l =
+            (l < static_cast<int64_t>(bias_hh_list.size())) ? bias_hh_list[l] : Tensor{};
         auto result = gru_forward_kernel(
             layer_input, W_ih_list[l], W_hh_list[l],
-            bias_list[l], h_l, Tensor{}, stream);
+            bias_list[l], h_l, bias_hh_l, stream);
 
         layer_input = result[0];
 

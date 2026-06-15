@@ -3,16 +3,11 @@
 #ifdef __HIP_PLATFORM_AMD__
 #include <hip/hip_runtime.h>
 #else
-// HIP runtime fallback implementations for builds without HIP
+// HIP runtime fallback implementations for builds without HIP.
+// Struct definitions must precede the stub functions that reference them,
+// otherwise C++ rejects the undeclared parameter types (forward-reference
+// compile error).
 typedef enum { hipSuccess = 0, hipErrorOutOfMemory = 2 } hipError_t;
-inline hipError_t hipSetDevice(int) { return hipSuccess; }
-inline hipError_t hipMalloc(void** ptr, size_t) { *ptr = nullptr; return hipSuccess; }
-inline hipError_t hipFree(void*) { return hipSuccess; }
-inline const char* hipGetErrorString(hipError_t) { return "HIP not available"; }
-inline hipError_t hipMemGetInfo(size_t* free, size_t* total) { *free = 0; *total = 0; return hipSuccess; }
-inline hipError_t hipStreamSynchronize(hipStream_t) { return hipSuccess; }
-inline hipError_t hipDeviceSynchronize() { return hipSuccess; }
-inline hipError_t hipGetDeviceProperties(hipDeviceProp_t*, int) { return hipSuccess; }
 
 struct hipDeviceProp_t {
     char name[256];
@@ -25,6 +20,15 @@ struct hipDeviceProp_t {
 struct hipPointerAttribute_t {
     int device;
 };
+
+inline hipError_t hipSetDevice(int) { return hipSuccess; }
+inline hipError_t hipMalloc(void** ptr, size_t) { *ptr = nullptr; return hipSuccess; }
+inline hipError_t hipFree(void*) { return hipSuccess; }
+inline const char* hipGetErrorString(hipError_t) { return "HIP not available"; }
+inline hipError_t hipMemGetInfo(size_t* free, size_t* total) { *free = 0; *total = 0; return hipSuccess; }
+inline hipError_t hipStreamSynchronize(hipStream_t) { return hipSuccess; }
+inline hipError_t hipDeviceSynchronize() { return hipSuccess; }
+inline hipError_t hipGetDeviceProperties(hipDeviceProp_t*, int) { return hipSuccess; }
 inline hipError_t hipPointerGetAttributes(hipPointerAttribute_t* attr, const void*) {
     attr->device = 0;
     return hipSuccess;
@@ -36,6 +40,7 @@ inline hipError_t hipPointerGetAttributes(hipPointerAttribute_t* attr, const voi
 #include <sstream>
 #include <iostream>
 #include <cstring>
+#include <cstdint>
 
 namespace tenzor {
 namespace backend {
@@ -271,8 +276,13 @@ void RocmCachingAllocator::garbage_collect(int device, bool aggressive) {
                                device_alloc.stats.cached_bytes > max_cached_memory_);
 
             if (should_free) {
-                release_block(block);
-                freed_bytes += block->size;
+                // release_block returns false for interior split-remainder
+                // blocks that cannot be freed standalone; only count bytes that
+                // were actually returned to the device.
+                size_t block_size = block->size;
+                if (release_block(block)) {
+                    freed_bytes += block_size;
+                }
             }
         }
 
@@ -512,8 +522,9 @@ Block* RocmCachingAllocator::allocate_new_block(size_t size, int device, hipStre
     auto block = std::make_unique<Block>(ptr, size, device, stream, alignment);
     Block* block_ptr = block.get();
 
-    // Add to all_blocks
+    // Add to all_blocks (and the address-ordered index)
     device_alloc.all_blocks[ptr] = std::move(block);
+    device_alloc.blocks_by_addr[ptr] = block_ptr;
 
     // Update statistics
     device_alloc.stats.reserved_bytes += size;
@@ -539,8 +550,9 @@ bool RocmCachingAllocator::split_block(Block* block, size_t size) {
     new_block->original_ptr = block->original_ptr;  // Inherit from parent for merge tracking
     Block* new_block_ptr = new_block.get();
 
-    // Add to all_blocks
+    // Add to all_blocks (and the address-ordered index)
     device_alloc.all_blocks[new_ptr] = std::move(new_block);
+    device_alloc.blocks_by_addr[new_ptr] = new_block_ptr;
 
     // Add to free blocks
     device_alloc.free_blocks.insert(new_block_ptr);
@@ -584,11 +596,60 @@ bool RocmCachingAllocator::try_merge_blocks(Block* block) {
             // Expand current block
             block->size += next_block->size;
 
-            // Remove next block
+            // Remove next block (and its address-index entry)
+            device_alloc.blocks_by_addr.erase(next_ptr);
             device_alloc.all_blocks.erase(next_it);
 
             device_alloc.stats.num_merges++;
             merged = true;
+        }
+    }
+
+    // Backward merge: find the immediately-preceding block via the address
+    // index (O(log n)). `block` must remain the surviving object because the
+    // caller still references it, so we absorb the predecessor INTO `block` and
+    // re-key it to the predecessor's (lower) address. Mirrors the CUDA
+    // reference allocator (caching_allocator.cpp:467-515).
+    {
+        auto addr_it = device_alloc.blocks_by_addr.find(block->ptr);
+        if (addr_it != device_alloc.blocks_by_addr.end() &&
+            addr_it != device_alloc.blocks_by_addr.begin()) {
+            auto prev_it = std::prev(addr_it);
+            Block* prev_block = prev_it->second;
+            void* prev_end = static_cast<char*>(prev_block->ptr) + prev_block->size;
+            // Only coalesce a truly adjacent, free predecessor from the same
+            // original hipMalloc allocation (gate on original_ptr adjacency).
+            if (prev_end == block->ptr && !prev_block->allocated &&
+                prev_block->original_ptr == block->original_ptr) {
+                void* old_ptr = block->ptr;
+                void* new_ptr = prev_block->ptr;
+                size_t prev_size = prev_block->size;
+
+                // prev_block is currently a free block; mirror the forward-merge
+                // accounting (subtract the absorbed block's cached bytes).
+                device_alloc.free_blocks.erase(prev_block);
+                if (device_alloc.stats.cached_bytes >= prev_size) {
+                    device_alloc.stats.cached_bytes -= prev_size;
+                }
+
+                // Grow `block` downward to cover the predecessor's range.
+                block->ptr = new_ptr;
+                block->size += prev_size;
+
+                // Move `block`'s owning entry from old_ptr -> new_ptr and drop
+                // the predecessor's entry (destroying the prev Block object).
+                auto node = device_alloc.all_blocks.extract(old_ptr);
+                device_alloc.all_blocks.erase(new_ptr);  // destroys prev_block
+                node.key() = new_ptr;
+                device_alloc.all_blocks.insert(std::move(node));
+
+                // Update the address index to match.
+                device_alloc.blocks_by_addr.erase(old_ptr);
+                device_alloc.blocks_by_addr[new_ptr] = block;
+
+                device_alloc.stats.num_merges++;
+                merged = true;
+            }
         }
     }
 
@@ -602,7 +663,12 @@ size_t RocmCachingAllocator::round_size(size_t size) const {
 void RocmCachingAllocator::enforce_cache_limit(int device) {
     auto& device_alloc = device_allocators_[device];
 
-    // Release blocks until we're under the limit
+    // Release blocks until we're under the limit. Only blocks that still own
+    // their original hipMalloc pointer can actually be freed; interior split
+    // remainder blocks are skipped (release_block returns false) — collect them
+    // and re-insert afterwards so the largest-first scan makes progress instead
+    // of repeatedly picking the same un-freeable interior block (infinite loop).
+    std::vector<Block*> skipped;
     while (device_alloc.stats.cached_bytes > max_cached_memory_ &&
            !device_alloc.free_blocks.empty()) {
         // Release largest block first
@@ -613,21 +679,46 @@ void RocmCachingAllocator::enforce_cache_limit(int device) {
         auto forward_it = std::next(it).base();
         device_alloc.free_blocks.erase(forward_it);
 
-        release_block(block);
+        if (!release_block(block)) {
+            // Interior sub-block: cannot be freed standalone. Hold it aside so
+            // we don't re-select it on the next iteration.
+            skipped.push_back(block);
+        }
+    }
+    // Restore the interior blocks we set aside so they remain available for
+    // future coalescing.
+    for (Block* block : skipped) {
+        device_alloc.free_blocks.insert(block);
     }
 }
 
-void RocmCachingAllocator::release_block(Block* block) {
+bool RocmCachingAllocator::release_block(Block* block) {
     auto& device_alloc = device_allocators_[block->device];
+
+    // Only the block that still owns the original hipMalloc pointer may be
+    // device-freed. A split remainder block has `ptr = original_ptr + offset`
+    // (an interior pointer): calling hipFree on it returns hipErrorInvalidValue,
+    // and freeing it would orphan/leak the rest of the underlying allocation
+    // that sibling blocks still reference. Such interior sub-blocks are only
+    // ever reclaimed by try_merge_blocks reassembling the full allocation back
+    // into a single block whose ptr == original_ptr (backward merges re-key to
+    // the lowest address). Skip interior blocks here, leaving them tracked.
+    if (block->ptr != block->original_ptr) {
+        return false;
+    }
 
     // Remove from free blocks if present
     device_alloc.free_blocks.erase(block);
 
-    // Free device memory
+    // Free device memory. Surface the error rather than silently swallowing it
+    // (a failed hipFree means the underlying allocation leaks).
     hipError_t err = hipFree(block->ptr);
     if (err != hipSuccess) {
-        // Log error but don't throw in destructor context
-        log_message("Warning: hipFree failed: " + std::string(hipGetErrorString(err)));
+        // Log error but don't throw — release_block runs in destructor/cache
+        // teardown contexts where throwing would terminate.
+        log_message("Warning: hipFree failed for ptr=" +
+                    std::to_string(reinterpret_cast<uintptr_t>(block->ptr)) +
+                    ": " + std::string(hipGetErrorString(err)));
     }
 
     // Update statistics
@@ -638,8 +729,10 @@ void RocmCachingAllocator::release_block(Block* block) {
         device_alloc.stats.cached_bytes -= block->size;
     }
 
-    // Remove from all_blocks
+    // Remove from all_blocks (and the address-ordered index)
+    device_alloc.blocks_by_addr.erase(block->ptr);
     device_alloc.all_blocks.erase(block->ptr);
+    return true;
 }
 
 void RocmCachingAllocator::initialize_device_properties(int device) {

@@ -387,8 +387,45 @@ auto ChainedScheduler::step() -> void {
         return;
     }
 
-    const double initial_lr = opt->get_lr();
-    if (initial_lr == 0.0) {
+    // G-fix: the chained LR is base_lr * product_k(factor_k), where each
+    // child's factor_k is taken relative to THAT CHILD'S OWN captured
+    // base_lr_ — not relative to the optimizer's current (already-composed)
+    // LR.  Absolute-LR children (StepLR / ExponentialLR / CosineAnnealingLR)
+    // compute child_lr = base_lr_ * f(epoch) against the base they captured
+    // at construction and ignore the optimizer's live LR.  The previous code
+    // computed factor = child_lr / opt->get_lr(); after the first step
+    // opt->get_lr() is the composed product, so the recovered factor drifted
+    // and the chain diverged.
+    //
+    // All children were constructed against the same optimizer before any
+    // stepping, so they share a single base value B = the optimizer's LR at
+    // the moment the chain was assembled.  We capture B once (on the first
+    // step, before any child runs) and reuse it every step.  We restore the
+    // optimizer to B before each child so a child that DOES re-read the
+    // optimizer LR (multiplicative-style) still composes correctly, then take
+    // factor_k = child_lr / B for every child.  The cumulative product is
+    // applied to B exactly once.
+    //
+    // The captured base lives in the chain's own chained_base_lr_ member
+    // (sentinel < 0 == not yet captured). We defer caching a degenerate zero
+    // base: if the optimizer happens to sit at LR 0 on this step, retry capture
+    // on a later (non-zero) step rather than pinning the chain to a zero base.
+    if (chained_base_lr_ < 0.0) {
+        const double live = opt->get_lr();
+        if (live == 0.0) {
+            // Can't recover factors against a zero base yet; run children in
+            // order this step and try to capture next step.
+            for (auto& scheduler : schedulers_) {
+                if (scheduler) scheduler->step();
+            }
+            last_lr_ = opt->get_lr();
+            return;
+        }
+        chained_base_lr_ = live;
+    }
+    const double base_lr = chained_base_lr_;
+
+    if (base_lr == 0.0) {
         // Degenerate: no factor can be recovered relative to zero.  Just
         // run the children in order and let whoever wins, win.
         for (auto& scheduler : schedulers_) {
@@ -401,17 +438,17 @@ auto ChainedScheduler::step() -> void {
     double cumulative_factor = 1.0;
     for (auto& scheduler : schedulers_) {
         if (!scheduler) continue;
-        // Restore the snapshot before each child runs so every child sees
-        // the SAME baseline and reports its own factor (rather than seeing
-        // a previously-multiplied LR and reporting the wrong factor).
-        opt->set_lr(initial_lr);
+        // Restore the captured base before each child runs so every child
+        // sees the SAME baseline B and reports its own factor relative to B
+        // (rather than seeing a previously-multiplied LR).
+        opt->set_lr(base_lr);
         scheduler->step();
         const double child_lr = opt->get_lr();
-        const double factor   = child_lr / initial_lr;
+        const double factor   = child_lr / base_lr;
         cumulative_factor    *= factor;
     }
 
-    const double final_lr = initial_lr * cumulative_factor;
+    const double final_lr = base_lr * cumulative_factor;
     opt->set_lr(final_lr);
     // Cache the LR actually written so get_last_lr() agrees with the optimizer
     // (the product of all child factors), not just the last child's factor.
@@ -678,6 +715,14 @@ auto SequentialLR::load_state_dict(
 auto ChainedScheduler::state_dict() const -> std::unordered_map<std::string, Tensor> {
     auto state = LRScheduler::state_dict();
     state["scheduler_type"] = make_scheduler_type_tensor("ChainedScheduler");
+    {
+        // Persist the captured single base LR so a resumed chain composes
+        // child factors against the same baseline rather than re-capturing
+        // from a mid-trajectory (already-composed) optimizer LR.
+        Tensor base_t({1}, DType::Float64, Device::cpu());
+        base_t.data<double>()[0] = chained_base_lr_;
+        state["chained_base_lr"] = std::move(base_t);
+    }
     for (size_t i = 0; i < schedulers_.size(); ++i) {
         if (!schedulers_[i]) continue;
         auto child = schedulers_[i]->state_dict();
@@ -693,6 +738,9 @@ auto ChainedScheduler::load_state_dict(
     const std::unordered_map<std::string, Tensor>& state) -> void {
     check_scheduler_type(state, "ChainedScheduler", /*force=*/false);
     LRScheduler::load_state_dict(state);
+    if (auto it = state.find("chained_base_lr"); it != state.end() && it->second.numel() >= 1) {
+        chained_base_lr_ = it->second.to(DType::Float64).to(Device::cpu()).data<double>()[0];
+    }
     for (size_t i = 0; i < schedulers_.size(); ++i) {
         if (!schedulers_[i]) continue;
         std::unordered_map<std::string, Tensor> child;

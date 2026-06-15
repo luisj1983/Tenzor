@@ -7,7 +7,8 @@
  *
  * Key design decisions:
  * - Uses MTLResourceStorageModeShared on Apple Silicon (unified memory)
- * - Command batching (32 ops per batch) to reduce submission overhead
+ * - Per-op synchronous execution: each kernel creates, commits, and waits on
+ *   its own command buffer (no cross-op command batching)
  * - Thread-local device tracking (Metal has no global current device)
  */
 
@@ -61,9 +62,6 @@ public:
     // Not a Backend virtual (the loader resolves the free function
     // register_mps_kernels via dlsym); a plain member, no `override`.
     auto register_kernels(BackendDispatchTable& table) -> void;
-
-    // Command batching
-    static constexpr size_t BATCH_SIZE_THRESHOLD = 32;
 
 private:
     struct Impl;

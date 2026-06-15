@@ -94,7 +94,7 @@ auto tanh(const float* a, float* out, size_t size) -> void;
  * @brief Vectorized GELU: out[i] = a[i] * Phi(a[i])
  *
  * where Phi(x) is the cumulative distribution function of the standard normal distribution.
- * Uses approximation: GELU(x) ≈ 0.5 * x * (1 + tanh(sqrt(2/π) * (x + 0.044715 * x^3)))
+ * Computes the exact erf form: GELU(x) = 0.5 * x * (1 + erf(x / sqrt(2))).
  */
 auto gelu(const float* a, float* out, size_t size) -> void;
 

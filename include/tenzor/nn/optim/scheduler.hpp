@@ -1239,6 +1239,12 @@ private:
     // (initial_lr * product-of-child-factors). get_last_lr() returns this so
     // it agrees with the optimizer, rather than the last child's single factor.
     double last_lr_ = 0.0;
+    // Single base learning rate B captured at chain-assembly time (the
+    // optimizer LR before any child runs). Each child reports a factor relative
+    // to its own base, and the cumulative product is applied to B exactly once
+    // per step. Captured lazily on the first step where the optimizer LR is
+    // non-zero (sentinel < 0 means "not yet captured").
+    double chained_base_lr_ = -1.0;
 };
 
 } // namespace optim

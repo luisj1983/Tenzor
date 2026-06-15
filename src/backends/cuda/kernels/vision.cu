@@ -790,11 +790,16 @@ __global__ void interpolate_nearest_backward_kernel(
         int64_t c  = temp % channels; temp /= channels;
         int64_t b  = temp;
 
-        // PyTorch nearest forward: oh -> floor(oh * in_h / out_h).
-        int64_t y = (oh * in_h) / out_h;
-        int64_t x = (ow * in_w) / out_w;
-        if (y > in_h - 1) y = in_h - 1;
-        if (x > in_w - 1) x = in_w - 1;
+        // Use the IDENTICAL source-pixel mapping as the forward kernel
+        // (float scale then truncate); float `oh*scale` and integer floor of
+        // `oh*in_h/out_h` can disagree at integer boundaries, which would land
+        // the gradient on the wrong input pixel and break parity.
+        float scale_h = static_cast<float>(in_h) / out_h;
+        float scale_w = static_cast<float>(in_w) / out_w;
+        int64_t y = static_cast<int64_t>(oh * scale_h);
+        int64_t x = static_cast<int64_t>(ow * scale_w);
+        y = min(max(y, int64_t(0)), in_h - 1);
+        x = min(max(x, int64_t(0)), in_w - 1);
 
         int64_t base_idx = b * (channels * in_h * in_w) + c * (in_h * in_w);
         atomicAdd(&grad_in[base_idx + y * in_w + x], grad_out[idx]);

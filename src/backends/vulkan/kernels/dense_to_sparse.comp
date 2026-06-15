@@ -23,7 +23,10 @@ void main() {
     if (tid == 0) local_count = 0;
     barrier();
 
-    for (uint col = tid; col < n_cols; col += 256) {
+    // Stride by the actual workgroup size (spec constant via local_size_x_id=0),
+    // not a hardcoded 256 — avoids double-counting columns (wgSize>256) and
+    // dropping nonzeros (wgSize<256), which would over/under-size the CSR.
+    for (uint col = tid; col < n_cols; col += gl_WorkGroupSize.x) {
         if (dense[row * n_cols + col] != 0.0) {
             atomicAdd(local_count, 1);
         }

@@ -18,6 +18,11 @@ Stat::Stat(std::string name, Aggregation agg)
     : name_(std::move(name)), agg_(agg) {}
 
 auto Stat::add(double value) -> void {
+    // Hold mutex_ so a concurrent reset() cannot interleave between the
+    // multi-field updates below (e.g. clearing count_ after value_ but before
+    // min_/max_), giving reset() true atomicity w.r.t. an in-flight add().
+    // The atomics still provide lock-free visibility to get()/count() readers.
+    std::lock_guard<std::mutex> lock(mutex_);
     switch (agg_) {
         case Aggregation::Sum:
         case Aggregation::Mean: {
@@ -98,6 +103,10 @@ auto Stat::name() const -> const std::string& {
 }
 
 auto Stat::reset() -> void {
+    // Serialize with add() so the reset is atomic w.r.t. a concurrent add():
+    // observers never see a partially-reset stat (e.g. count_ cleared while
+    // value_ still holds the old sum).
+    std::lock_guard<std::mutex> lock(mutex_);
     value_.store(0.0, std::memory_order_release);
     min_.store(std::numeric_limits<double>::max(), std::memory_order_release);
     max_.store(std::numeric_limits<double>::lowest(), std::memory_order_release);

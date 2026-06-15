@@ -90,6 +90,35 @@ inline bool is_autocast_stability_critical(OpId op) {
     }
 }
 
+/// Resolve an op's autocast classification through the SINGLE source of
+/// truth: the user-mutable AutocastPolicyRegistry takes precedence (so
+/// register_compute_heavy / register_stability_critical / unregister actually
+/// drive dispatch — previously they only mutated their own string sets and
+/// never affected casting). The OpId switches above act as the built-in
+/// fallback for ops the registry has no opinion on (e.g. names that the
+/// registry was never seeded with, or ops with no string name).
+inline bool autocast_is_compute_heavy(OpId op) {
+    const auto& reg = nn::amp::AutocastPolicyRegistry::instance();
+    std::string name(::tenzor::op_id_to_name(op));
+    if (!name.empty()) {
+        if (reg.is_compute_heavy(name)) return true;
+        // An explicit stability-critical registration must win over the
+        // built-in compute-heavy default for the same op.
+        if (reg.is_stability_critical(name)) return false;
+    }
+    return is_autocast_compute_heavy(op);
+}
+
+inline bool autocast_is_stability_critical(OpId op) {
+    const auto& reg = nn::amp::AutocastPolicyRegistry::instance();
+    std::string name(::tenzor::op_id_to_name(op));
+    if (!name.empty()) {
+        if (reg.is_stability_critical(name)) return true;
+        if (reg.is_compute_heavy(name)) return false;
+    }
+    return is_autocast_stability_critical(op);
+}
+
 /// Apply autocast to inputs: returns a vector of (possibly cast) tensors.
 /// Only allocates if casting is actually needed.
 inline std::vector<Tensor> autocast_inputs(
@@ -105,7 +134,7 @@ inline std::vector<Tensor> autocast_inputs(
     }
 
     // Stability-critical: promote all half-precision inputs to Float32
-    if (is_autocast_stability_critical(op)) {
+    if (autocast_is_stability_critical(op)) {
         bool needs_promote = false;
         for (const auto& t : inputs) {
             if (t.dtype() == DType::Float16 || t.dtype() == DType::BFloat16) {
@@ -128,7 +157,7 @@ inline std::vector<Tensor> autocast_inputs(
     }
 
     // Compute-heavy: cast Float32 inputs to target half-precision dtype
-    if (is_autocast_compute_heavy(op)) {
+    if (autocast_is_compute_heavy(op)) {
         DType target = target_dtype.value();
         bool needs_cast = false;
         for (const auto& t : inputs) {

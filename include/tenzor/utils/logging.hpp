@@ -25,6 +25,7 @@
 
 #include "tenzor/utils/log.hpp"
 
+#include <atomic>
 #include <fstream>
 #include <mutex>
 #include <string>
@@ -87,7 +88,9 @@ public:
 private:
     Logger() = default;
 
-    LogLevel level_{LogLevel::Info};
+    // Atomic so get_level()/set_level()/log() can read and write the threshold
+    // without racing (get_level() is const and does not take mutex_).
+    std::atomic<LogLevel> level_{LogLevel::Info};
     bool console_enabled_{true};
     std::string output_file_;
     std::ofstream file_stream_;

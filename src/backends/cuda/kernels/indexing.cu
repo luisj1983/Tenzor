@@ -2956,24 +2956,27 @@ auto masked_scatter_kernel(const Tensor& input, const Tensor& mask,
                   input.dtype(), input.device());
     if (numel == 0) return output;
 
-    // Build exclusive prefix sum of mask to get write positions
-    int64_t* d_int_mask = nullptr;
-    int64_t* d_prefix = nullptr;
-    CUDA_CHECK(cudaMallocAsync(&d_int_mask, numel * sizeof(int64_t), stream));
-    CUDA_CHECK(cudaMallocAsync(&d_prefix, numel * sizeof(int64_t), stream));
+    // Build exclusive prefix sum of mask to get write positions. All temporary
+    // device buffers are owned by CachedMemoryGuard so they are released on any
+    // exception path (e.g. a throwing CUDA_CHECK during the scan or launch),
+    // matching nonzero_kernel / masked_select_kernel in this file.
+    backend::CachedMemoryGuard d_int_mask_guard(numel * sizeof(int64_t));
+    backend::CachedMemoryGuard d_prefix_guard(numel * sizeof(int64_t));
+    int64_t* d_int_mask = static_cast<int64_t*>(d_int_mask_guard.get());
+    int64_t* d_prefix = static_cast<int64_t*>(d_prefix_guard.get());
 
     int blocks = get_num_blocks(numel);
     mask_to_int64_kernel<<<blocks, BLOCK_SIZE, 0, stream>>>(mask.data<bool>(), d_int_mask, numel);
 
-    // Simple sequential prefix sum via thrust-style scan
-    // Use CUB for exclusive scan
-    void* d_temp = nullptr;
-    size_t temp_bytes = 0;
-    cub::DeviceScan::ExclusiveSum(d_temp, temp_bytes, d_int_mask, d_prefix, numel, stream);
-    CUDA_CHECK(cudaMallocAsync(&d_temp, temp_bytes, stream));
-    cub::DeviceScan::ExclusiveSum(d_temp, temp_bytes, d_int_mask, d_prefix, numel, stream);
-    CUDA_CHECK(cudaFreeAsync(d_temp, stream));
-    CUDA_CHECK(cudaFreeAsync(d_int_mask, stream));
+    // Exclusive scan via CUB (two-call pattern: query temp size, then run).
+    {
+        void* d_temp = nullptr;
+        size_t temp_bytes = 0;
+        cub::DeviceScan::ExclusiveSum(d_temp, temp_bytes, d_int_mask, d_prefix, numel, stream);
+        backend::CachedMemoryGuard d_temp_guard(temp_bytes);
+        d_temp = d_temp_guard.get();
+        cub::DeviceScan::ExclusiveSum(d_temp, temp_bytes, d_int_mask, d_prefix, numel, stream);
+    }
 
     switch (input.dtype()) {
         case DType::Float32:
@@ -2997,11 +3000,9 @@ auto masked_scatter_kernel(const Tensor& input, const Tensor& mask,
                 d_prefix, output.data<int64_t>(), numel);
             break;
         default:
-            CUDA_CHECK(cudaFreeAsync(d_prefix, stream));
             throw std::runtime_error("masked_scatter CUDA: unsupported dtype");
     }
     CUDA_CHECK(cudaGetLastError());
-    CUDA_CHECK(cudaFreeAsync(d_prefix, stream));
     return output;
 }
 

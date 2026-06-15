@@ -196,12 +196,18 @@ auto DataParallel::forward_impl(const Variable& input) -> Variable {
     // Gather outputs
     auto result = gather(outputs);
 
-    // Gradient sync is wired into autograd via `register_grad_hooks()`
-    // (called from `replicate()` once the master parameter list is built).
-    // Each parameter has a `Variable::register_hook` that fires when its
-    // gradient is computed during backward(), triggering the configured
-    // all-reduce automatically. Callers do not need to call
-    // `synchronize_gradients()` manually after `loss.backward()`.
+    // Gradient sync wiring depends on the path:
+    //  - Shared-module path: replica backwards route into the same master
+    //    Variables, so accumulation already reduces; the per-parameter hooks
+    //    (register_grad_hooks()) apply only the AVG normalization. Automatic.
+    //  - ProcessGroup path: the hooks all_reduce each grad as it lands during
+    //    backward(). Automatic.
+    //  - Factory/independent-replica path WITHOUT a ProcessGroup: each replica
+    //    owns its own parameter Variables, so their grads are invisible to the
+    //    master after backward() and cannot be reduced from a per-parameter
+    //    hook. For this path the caller MUST call `synchronize_gradients()`
+    //    after `loss.backward()` and before `optimizer.step()`; it sums each
+    //    replica's grad onto the master and applies `reduce_op_`.
 
     return result;
 }
@@ -275,6 +281,47 @@ auto DataParallel::replicate() -> void {
     // gather from per-device replicas and reduce onto the master.
     parameters_to_sync_ = module_->parameters();
 
+    // Determine whether this is the factory/independent-replica path that needs
+    // an explicit cross-replica gradient reduction. This is true exactly when a
+    // module factory built genuinely separate replicas AND there is no real
+    // ProcessGroup to all-reduce through. In that case each non-master replica
+    // owns its own parameter Variables whose gradients are *not* visible to the
+    // master's parameters after backward(); they must be summed onto the master
+    // explicitly (see synchronize_gradients()).
+    independent_replica_sync_ =
+        static_cast<bool>(module_factory_) && !pg_ && device_ids_.size() > 1;
+
+    if (independent_replica_sync_) {
+        // Cache each non-master replica's parameter list so synchronize_gradients()
+        // can reduce per-parameter by positional correspondence. Replicas are all
+        // built from the same factory and share the master's architecture (loaded
+        // via load_state_dict), so parameters() ordering is stable and aligns
+        // 1:1 with parameters_to_sync_. Validate that invariant up front rather
+        // than silently mis-reducing if a replica's parameter count diverges.
+        replica_parameters_.clear();
+        replica_parameters_.reserve(replicas_.size());
+        for (size_t i = 0; i < replicas_.size(); ++i) {
+            auto& replica = replicas_[i];
+            // The master device's slot aliases module_ (same Variables as
+            // parameters_to_sync_), so it carries no separate gradient to add;
+            // skip it by storing an empty list, keeping indices aligned with
+            // replicas_/device_ids_.
+            if (replica == module_) {
+                replica_parameters_.emplace_back();
+                continue;
+            }
+            auto rparams = replica->parameters();
+            if (rparams.size() != parameters_to_sync_.size()) {
+                throw std::runtime_error(
+                    "DataParallel::replicate: replica parameter count (" +
+                    std::to_string(rparams.size()) + ") does not match master (" +
+                    std::to_string(parameters_to_sync_.size()) +
+                    "); cannot establish replica->master gradient correspondence");
+            }
+            replica_parameters_.push_back(std::move(rparams));
+        }
+    }
+
     // Wire backward hooks on every master parameter so the configured
     // all-reduce fires automatically when each grad lands during backward().
     register_grad_hooks();
@@ -288,6 +335,20 @@ auto DataParallel::register_grad_hooks() -> void {
     }
     // Single-device path or empty parameter set: nothing to sync.
     if (device_ids_.size() <= 1 || parameters_to_sync_.empty()) {
+        return;
+    }
+
+    // Factory/independent-replica path without a ProcessGroup: each replica owns
+    // its own parameter Variables, so a per-master-parameter hook cannot perform
+    // the cross-replica reduction (the other replicas' gradients are not even
+    // computed yet when an individual master grad lands during backward, and the
+    // hook only sees the master shard's gradient). Worse, the shared-module
+    // normalization below would divide the *master-only* gradient by N, which is
+    // exactly the silent-wrong-gradient bug. For this path we leave the master
+    // grads untouched during backward() and perform the real summation +
+    // normalization in synchronize_gradients(), which the caller invokes after
+    // loss.backward(). Skip hook installation entirely.
+    if (independent_replica_sync_) {
         return;
     }
 
@@ -436,11 +497,19 @@ auto DataParallel::parallel_apply(const std::vector<Variable>& inputs) -> std::v
     outputs.reserve(inputs.size());
 
 #ifdef TENZOR_USE_CUDA
-    // Strategy: Execute forward passes in parallel using CUDA streams
-    // Each device runs its forward pass concurrently
-
-    // Check every CUDA return code and throw via the project error convention
-    // instead of silently using invalid handles.
+    // Strategy: run each replica's forward on its own device, sequentially.
+    //
+    // The op-dispatch layer does not expose a per-call stream binding, so
+    // replicas_[i]->forward() necessarily issues its kernels on the active
+    // device's default stream. The previous implementation created per-device
+    // streams and recorded start/end events on them, but the forward was never
+    // bound to those streams (no StreamGuard / set_stream). Consequently the
+    // launches were already sequential, the events tracked *empty* streams, and
+    // cudaEventSynchronize(end_events[i]) could complete before the forward's
+    // real work on the default stream finished — a no-op barrier that risked
+    // gather() reading incomplete results. We replace that misleading machinery
+    // with an honest per-device synchronize on the stream the forward actually
+    // used (the default stream), via cudaDeviceSynchronize.
     auto cuda_check = [](cudaError_t err, const char* what) {
         if (err != cudaSuccess) {
             throw std::runtime_error(
@@ -449,69 +518,24 @@ auto DataParallel::parallel_apply(const std::vector<Variable>& inputs) -> std::v
         }
     };
 
-    std::vector<cudaStream_t> streams(device_ids_.size(), nullptr);
-    std::vector<cudaEvent_t> start_events(device_ids_.size(), nullptr);
-    std::vector<cudaEvent_t> end_events(device_ids_.size(), nullptr);
-
-    // RAII cleanup so a throw anywhere below (including replicas_[i]->forward)
-    // still destroys every stream/event instead of leaking them. Destroy errors
-    // are ignored during unwinding.
-    auto destroy_all = [&]() noexcept {
-        for (size_t i = 0; i < device_ids_.size(); ++i) {
-            cudaSetDevice(device_ids_[i]);
-            if (streams[i]) cudaStreamDestroy(streams[i]);
-            if (start_events[i]) cudaEventDestroy(start_events[i]);
-            if (end_events[i]) cudaEventDestroy(end_events[i]);
-        }
-    };
-    struct ScopeGuard {
-        std::function<void()> fn;
-        ~ScopeGuard() { if (fn) fn(); }
-    } guard{destroy_all};
-
-    // Create streams and events for async execution
-    for (size_t i = 0; i < device_ids_.size(); ++i) {
-        cuda_check(cudaSetDevice(device_ids_[i]), "cudaSetDevice");
-        cuda_check(cudaStreamCreate(&streams[i]), "cudaStreamCreate");
-        cuda_check(cudaEventCreate(&start_events[i]), "cudaEventCreate(start)");
-        cuda_check(cudaEventCreate(&end_events[i]), "cudaEventCreate(end)");
-    }
-
-    // Pre-allocate output vector (will be filled in parallel)
     outputs.resize(device_ids_.size());
 
-    // Launch forward passes asynchronously on all devices
     for (size_t i = 0; i < device_ids_.size(); ++i) {
+        // Make device i current so its forward dispatches there, then block
+        // until that device's default-stream work completes before moving on.
         cuda_check(cudaSetDevice(device_ids_[i]), "cudaSetDevice");
-
-        // Record start event
-        cuda_check(cudaEventRecord(start_events[i], streams[i]),
-                   "cudaEventRecord(start)");
-
-        // Execute forward pass on this device. If this throws, the ScopeGuard
-        // above tears down all streams/events.
         outputs[i] = replicas_[i]->forward(inputs[i]);
-
-        // Record completion event
-        cuda_check(cudaEventRecord(end_events[i], streams[i]),
-                   "cudaEventRecord(end)");
+        cuda_check(cudaDeviceSynchronize(), "cudaDeviceSynchronize");
     }
 
-    // Synchronize all devices to ensure forward passes complete
-    for (size_t i = 0; i < device_ids_.size(); ++i) {
-        cuda_check(cudaSetDevice(device_ids_[i]), "cudaSetDevice");
-        cuda_check(cudaEventSynchronize(end_events[i]), "cudaEventSynchronize");
-    }
-
-    // Reset to master device (cleanup of streams/events runs via ScopeGuard).
+    // Reset to master device for the subsequent gather().
     cuda_check(cudaSetDevice(output_device_), "cudaSetDevice(output)");
 #else
-    // CPU fallback: sequential execution
-    // In a CPU multi-threaded version, we could use std::thread or parallel algorithms
-    for (size_t i = 0; i < inputs.size(); ++i) {
-        auto output = replicas_[i]->forward(inputs[i]);
-        outputs.push_back(output);
-    }
+    // DataParallel requires CUDA for multi-device execution. validate_devices()
+    // (called by both constructors) already throws when CUDA is disabled, so this
+    // branch is unreachable; keep an explicit throw rather than a misleading CPU
+    // "fallback" that falsely implies CPU multi-device support.
+    throw std::runtime_error("DataParallel: CUDA support not enabled");
 #endif
 
     return outputs;
@@ -560,20 +584,86 @@ auto DataParallel::gather(const std::vector<Variable>& outputs) -> Variable {
 }
 
 auto DataParallel::synchronize_gradients() -> void {
-    // Gradient reduction is performed inline by the per-parameter
-    // `register_hook` callbacks installed in `register_grad_hooks()` —
-    // those fire during backward() and apply the configured `reduce_op_`
-    // to the freshly-computed gradient before it lands in param->grad().
-    //
-    // This method remains as a private no-op so legacy code paths that
-    // call it (or test fixtures, debug invocations) compile without
-    // emitting a spurious double-reduce. The early-out below documents
-    // the invariant: when num_devices_ == 1 or no params are tracked,
-    // there is nothing to do regardless of which path triggered the call.
     if (device_ids_.size() == 1 || parameters_to_sync_.empty()) {
         return;
     }
-    // No-op: hooks already applied `reduce_op_` per-parameter during backward.
+
+    if (!independent_replica_sync_) {
+        // Shared-module and ProcessGroup paths: gradient reduction is performed
+        // inline by the per-parameter `register_hook` callbacks installed in
+        // `register_grad_hooks()` — those fire during backward() and apply the
+        // configured `reduce_op_` before the grad lands in param->grad(). Calling
+        // this method on those paths is a deliberate no-op (no double-reduce).
+        return;
+    }
+
+    // Factory/independent-replica path (module_factory_ set, no ProcessGroup):
+    // each non-master replica computed gradients on its OWN parameter Variables
+    // during backward(). Those gradients are invisible to the master's
+    // parameters, so we explicitly reduce them onto the master here. After this
+    // call the master parameter's gradient equals the SUM (reduce_op_ == SUM) or
+    // AVG (reduce_op_ == AVG, sum divided by the number of replicas) of all
+    // replicas' gradients for that parameter — the correct full-batch gradient
+    // the optimizer must step on.
+    const size_t num_params = parameters_to_sync_.size();
+    const auto num_devices = static_cast<double>(device_ids_.size());
+
+    for (size_t p = 0; p < num_params; ++p) {
+        auto& master = parameters_to_sync_[p];
+        if (!master || !master->requires_grad()) {
+            continue;
+        }
+
+        // Accumulate every replica's gradient for this parameter onto the
+        // master. Start from the master's own shard gradient (if any), then add
+        // each non-master replica's gradient, moving cross-device tensors onto
+        // the master parameter's device first so the elementwise add is valid.
+        const Device& master_dev = master->tensor().device();
+        std::optional<Tensor> summed;
+        if (master->has_grad() && master->grad().has_value()) {
+            summed = *master->grad();
+        }
+
+        for (size_t i = 0; i < replica_parameters_.size(); ++i) {
+            const auto& rparams = replica_parameters_[i];
+            if (rparams.empty()) {
+                // Master-device slot (aliases module_): its gradient is already
+                // the `summed` seed above; do not double-count.
+                continue;
+            }
+            const auto& rparam = rparams[p];
+            if (!rparam || !rparam->has_grad() || !rparam->grad().has_value()) {
+                continue;
+            }
+            Tensor g = *rparam->grad();
+            if (g.device() != master_dev) {
+                g = g.to(master_dev);
+            }
+            summed = summed.has_value() ? (*summed + g) : g;
+        }
+
+        if (!summed.has_value()) {
+            // No replica produced a gradient for this parameter (e.g. unused in
+            // this batch) — leave the master grad untouched.
+            continue;
+        }
+
+        switch (reduce_op_) {
+            case ::tenzor::distributed::ReduceOp::SUM:
+                master->set_grad(*summed);
+                break;
+            case ::tenzor::distributed::ReduceOp::AVG:
+                master->set_grad(*summed * (1.0 / num_devices));
+                break;
+            default:
+                // validate_reduce_op() already rejects everything but SUM/AVG on
+                // the no-ProcessGroup path; this is defensive only.
+                throw std::invalid_argument(
+                    "DataParallel::synchronize_gradients: reduce_op MAX/MIN/"
+                    "PRODUCT/bitwise require a ProcessGroup; the factory path "
+                    "without a ProcessGroup only supports SUM and AVG");
+        }
+    }
 }
 
 auto DataParallel::validate_devices() -> void {

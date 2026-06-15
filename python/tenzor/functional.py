@@ -2253,7 +2253,7 @@ def dropout2d(input: Variable, p: float = 0.5,
     scale = 1.0 / (1.0 - p)
     # Q.13 / J.3: multiply at Variable level so autograd records the
     # dropout mask as a constant cotangent multiplier (grad_fn survives).
-    scaled_mask = Variable(mask * scale, requires_grad=False)
+    scaled_mask = tz.Variable(mask * scale, requires_grad=False)
     return tz.mul(input, scaled_mask)
 
 
@@ -2285,8 +2285,8 @@ def alpha_dropout(input: Variable, p: float = 0.5,
     # multiplication through tz.mul so autograd records the dropout mask
     # as a constant cotangent multiplier (Q.13 / J.3).
     one_minus_keep = tz.full(x_shape, 1.0, dtype=x_dtype) - keep
-    mul_coeff = Variable(a * keep, requires_grad=False)
-    bias_term = Variable(a * (one_minus_keep * alpha) + b, requires_grad=False)
+    mul_coeff = tz.Variable(a * keep, requires_grad=False)
+    bias_term = tz.Variable(a * (one_minus_keep * alpha) + b, requires_grad=False)
     return tz.add(tz.mul(input, mul_coeff), bias_term)
 
 

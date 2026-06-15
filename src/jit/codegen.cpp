@@ -122,6 +122,15 @@ auto KernelCodegen::emit_op(const ElemStep& step, const std::string& vp,
     const std::string ONE = "1.0" + F;
     std::string s = std::to_string(step.scalar);   // scalar operand literal
 
+    // Activation scalars default to their PyTorch nn.functional values when the
+    // step records 0.0 (no explicit slope/alpha). Mirror execute_fused_cpu
+    // (LeakyRelu -> 0.01, Elu -> 1.0); without this the negative branch would
+    // collapse to 0 (LeakyRelu) or use a 0 coefficient (Elu), diverging from
+    // the CPU fallback for the same fused group.
+    auto activation_scalar = [&](double dflt) -> std::string {
+        return std::to_string(step.scalar != 0.0 ? step.scalar : dflt);
+    };
+
     switch (step.op) {
         // Unary
         case ElemOp::Neg:        return vp + "val = -" + a + ";";
@@ -143,8 +152,8 @@ auto KernelCodegen::emit_op(const ElemStep& step, const std::string& vp,
         case ElemOp::Tanh:       return vp + "val = tanh(" + a + ");";
         case ElemOp::Sigmoid:    return vp + "val = " + ONE + " / (" + ONE + " + exp(-" + a + "));";
         case ElemOp::Relu:       return vp + "val = fmax(" + a + ", " + ZERO + ");";
-        case ElemOp::LeakyRelu:  return vp + "val = " + a + " > 0 ? " + a + " : " + s + F + " * " + a + ";";
-        case ElemOp::Elu:        return vp + "val = " + a + " > 0 ? " + a + " : " + s + F + " * (exp(" + a + ") - " + ONE + ");";
+        case ElemOp::LeakyRelu:  return vp + "val = " + a + " > 0 ? " + a + " : " + activation_scalar(0.01) + F + " * " + a + ";";
+        case ElemOp::Elu:        return vp + "val = " + a + " > 0 ? " + a + " : " + activation_scalar(1.0) + F + " * (exp(" + a + ") - " + ONE + ");";
         case ElemOp::Selu: {
             std::string lam = "1.0507009873554805" + F;
             std::string alp = "1.6732632423543772" + F;

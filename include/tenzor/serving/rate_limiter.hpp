@@ -4,7 +4,9 @@
  */
 #pragma once
 
+#include <algorithm>
 #include <chrono>
+#include <cstddef>
 #include <mutex>
 #include <string>
 #include <unordered_map>
@@ -27,6 +29,23 @@ public:
 
         std::lock_guard<std::mutex> lock(mutex_);
         auto now = std::chrono::steady_clock::now();
+
+        // Bound memory: a client spoofing many distinct client_ids would
+        // otherwise grow this map without limit (memory-exhaustion DoS). When
+        // the map gets large, evict buckets idle past a TTL — they will have
+        // fully refilled anyway, so eviction is behaviour-neutral. Matches the
+        // server's live path (server.cpp) so the two cannot drift.
+        if (buckets_.size() > kMaxBuckets) {
+            const auto ttl = std::chrono::seconds(300);
+            for (auto it = buckets_.begin(); it != buckets_.end();) {
+                if (now - it->second.last_refill > ttl) {
+                    it = buckets_.erase(it);
+                } else {
+                    ++it;
+                }
+            }
+        }
+
         auto& bucket = buckets_[client_id];
 
         // Initialize new buckets. Match the server's live guard exactly
@@ -55,6 +74,9 @@ private:
         double tokens{0};
         std::chrono::steady_clock::time_point last_refill{};
     };
+
+    /// Map-size threshold above which idle buckets are swept (matches server).
+    static constexpr std::size_t kMaxBuckets = 10000;
 
     RateLimitConfig config_;
     std::mutex mutex_;

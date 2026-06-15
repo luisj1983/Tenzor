@@ -370,37 +370,11 @@ inline __m256 leaky_relu_avx2(__m256 x, float alpha = 0.01f) {
     return _mm256_blendv_ps(scaled, x, mask);
 }
 
-/**
- * @brief AVX2 vectorized GELU
- * GELU(x) = 0.5 * x * (1 + tanh(sqrt(2/π) * (x + 0.044715 * x³)))
- */
-inline __m256 gelu_avx2(__m256 x) {
-    __m256 half = _mm256_set1_ps(0.5f);
-    __m256 one = _mm256_set1_ps(1.0f);
-    __m256 sqrt_2_over_pi = _mm256_set1_ps(0.7978845608f);
-    __m256 coeff = _mm256_set1_ps(0.044715f);
-
-    // x³
-    __m256 x2 = _mm256_mul_ps(x, x);
-    __m256 x3 = _mm256_mul_ps(x2, x);
-
-    // inner = sqrt(2/π) * (x + 0.044715 * x³)
-#ifdef TENZOR_FAST_MATH_FMA
-    __m256 inner = _mm256_fmadd_ps(coeff, x3, x);
-#else
-    __m256 inner = _mm256_add_ps(x, _mm256_mul_ps(coeff, x3));
-#endif
-    inner = _mm256_mul_ps(sqrt_2_over_pi, inner);
-
-    // tanh(inner)
-    __m256 th = tanh_avx2(inner);
-
-    // 0.5 * x * (1 + tanh(...))
-    __m256 result = _mm256_mul_ps(half, x);
-    result = _mm256_mul_ps(result, _mm256_add_ps(one, th));
-
-    return result;
-}
+// NOTE: a tanh-approximation GELU helper (gelu_avx2) was removed here: it was
+// dead code (no callers) and described the tanh approximation, whereas every
+// live GELU path in the codebase computes the EXACT erf GELU
+// 0.5*x*(1+erf(x/sqrt2)). Keeping it risked confusion about which formula the
+// backend uses. Re-add a dedicated approximate='tanh' kernel only when wired up.
 
 #endif // TENZOR_FAST_MATH_AVX2
 
@@ -535,28 +509,9 @@ inline __m512 sigmoid_avx512(__m512 x) {
     return _mm512_mask_blend_ps(mask, sig_neg, sig_pos);
 }
 
-/**
- * @brief AVX-512 vectorized GELU
- */
-inline __m512 gelu_avx512(__m512 x) {
-    __m512 half = _mm512_set1_ps(0.5f);
-    __m512 one = _mm512_set1_ps(1.0f);
-    __m512 sqrt_2_over_pi = _mm512_set1_ps(0.7978845608f);
-    __m512 coeff = _mm512_set1_ps(0.044715f);
-
-    __m512 x2 = _mm512_mul_ps(x, x);
-    __m512 x3 = _mm512_mul_ps(x2, x);
-
-    __m512 inner = _mm512_fmadd_ps(coeff, x3, x);
-    inner = _mm512_mul_ps(sqrt_2_over_pi, inner);
-
-    __m512 th = tanh_avx512(inner);
-
-    __m512 result = _mm512_mul_ps(half, x);
-    result = _mm512_mul_ps(result, _mm512_add_ps(one, th));
-
-    return result;
-}
+// NOTE: a tanh-approximation GELU helper (gelu_avx512) was removed here for the
+// same reason as gelu_avx2 above: dead code describing the tanh approximation
+// while the live GELU paths all compute the exact erf GELU.
 
 /**
  * @brief AVX-512 vectorized pow: x^y = exp(y * log(x))

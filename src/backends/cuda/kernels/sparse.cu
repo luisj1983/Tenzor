@@ -1014,7 +1014,7 @@ SparseTensor cuda_coalesce(const SparseTensor& sparse) {
                        thrust::device_pointer_cast(si_ptr + d * nnz));
     }
 
-    // Gather values
+    // Gather values (native per-dtype: Float32/Float64/Int32/Int64).
     Tensor sorted_vals = zeros({nnz}, values.dtype(), Device::cuda());
     if (values.dtype() == DType::Float32) {
         thrust::gather(thrust::cuda::par,
@@ -1028,6 +1028,22 @@ SparseTensor cuda_coalesce(const SparseTensor& sparse) {
                        thrust::device_pointer_cast(perm_ptr + nnz),
                        thrust::device_pointer_cast(values.data<double>()),
                        thrust::device_pointer_cast(sorted_vals.data<double>()));
+    } else if (values.dtype() == DType::Int32) {
+        thrust::gather(thrust::cuda::par,
+                       thrust::device_pointer_cast(perm_ptr),
+                       thrust::device_pointer_cast(perm_ptr + nnz),
+                       thrust::device_pointer_cast(values.data<int32_t>()),
+                       thrust::device_pointer_cast(sorted_vals.data<int32_t>()));
+    } else if (values.dtype() == DType::Int64) {
+        thrust::gather(thrust::cuda::par,
+                       thrust::device_pointer_cast(perm_ptr),
+                       thrust::device_pointer_cast(perm_ptr + nnz),
+                       thrust::device_pointer_cast(values.data<int64_t>()),
+                       thrust::device_pointer_cast(sorted_vals.data<int64_t>()));
+    } else {
+        throw std::runtime_error(
+            "cuda_coalesce: unsupported value dtype (supported: Float32, Float64, "
+            "Int32, Int64, Complex64, Complex128)");
     }
 
     // Detect unique keys and sum duplicates using thrust::reduce_by_key
@@ -1056,6 +1072,24 @@ SparseTensor cuda_coalesce(const SparseTensor& sparse) {
             thrust::device_pointer_cast(ok_ptr),
             thrust::device_pointer_cast(out_vals.data<double>()));
         new_nnz = end.first - thrust::device_pointer_cast(ok_ptr);
+    } else if (values.dtype() == DType::Int32) {
+        auto end = thrust::reduce_by_key(
+            thrust::cuda::par,
+            thrust::device_pointer_cast(keys_ptr),
+            thrust::device_pointer_cast(keys_ptr + nnz),
+            thrust::device_pointer_cast(sorted_vals.data<int32_t>()),
+            thrust::device_pointer_cast(ok_ptr),
+            thrust::device_pointer_cast(out_vals.data<int32_t>()));
+        new_nnz = end.first - thrust::device_pointer_cast(ok_ptr);
+    } else if (values.dtype() == DType::Int64) {
+        auto end = thrust::reduce_by_key(
+            thrust::cuda::par,
+            thrust::device_pointer_cast(keys_ptr),
+            thrust::device_pointer_cast(keys_ptr + nnz),
+            thrust::device_pointer_cast(sorted_vals.data<int64_t>()),
+            thrust::device_pointer_cast(ok_ptr),
+            thrust::device_pointer_cast(out_vals.data<int64_t>()));
+        new_nnz = end.first - thrust::device_pointer_cast(ok_ptr);
     }
 
     // Reconstruct unique indices from unique keys
@@ -1063,25 +1097,20 @@ SparseTensor cuda_coalesce(const SparseTensor& sparse) {
     Tensor new_indices = zeros({sparse_dim, new_nnz}, DType::Int64, Device::cuda());
     int64_t* ni_ptr = new_indices.data<int64_t>();
     for (int64_t d = 0; d < sparse_dim; ++d) {
+        // idx[d] = (key / stride[d]) % extent[d]. The modulus MUST be the extent
+        // of dim d (sp_shape[d]), not stride[d]/stride[d+1] (== sp_shape[d+1]),
+        // which is the *next* dim's extent — wrong for tall/non-square (M>K) or
+        // sparse_dim>2 tensors (would wrap any index >= the next dim's extent).
         int64_t stride = h_strides[d];
+        int64_t extent = sp_shape[d];
         auto ok_dptr = thrust::device_pointer_cast(ok_ptr);
         auto ni_dptr = thrust::device_pointer_cast(ni_ptr + d * new_nnz);
-        if (d < sparse_dim - 1) {
-            int64_t next_stride = h_strides[d + 1];
-            thrust::transform(thrust::cuda::par,
-                              ok_dptr, ok_dptr + new_nnz,
-                              ni_dptr,
-                              [stride, next_stride] __device__ (int64_t key) {
-                                  return (key / stride) % (stride / next_stride);
-                              });
-        } else {
-            thrust::transform(thrust::cuda::par,
-                              ok_dptr, ok_dptr + new_nnz,
-                              ni_dptr,
-                              [stride] __device__ (int64_t key) {
-                                  return key % stride;  // stride == 1 for last dim
-                              });
-        }
+        thrust::transform(thrust::cuda::par,
+                          ok_dptr, ok_dptr + new_nnz,
+                          ni_dptr,
+                          [stride, extent] __device__ (int64_t key) {
+                              return (key / stride) % extent;
+                          });
     }
 
     // Trim output values to new_nnz
@@ -1093,6 +1122,12 @@ SparseTensor cuda_coalesce(const SparseTensor& sparse) {
     } else if (values.dtype() == DType::Float64) {
         CUDA_CHECK_SPARSE(cudaMemcpy(final_vals.data<double>(), out_vals.data<double>(),
                                      new_nnz * sizeof(double), cudaMemcpyDeviceToDevice));
+    } else if (values.dtype() == DType::Int32) {
+        CUDA_CHECK_SPARSE(cudaMemcpy(final_vals.data<int32_t>(), out_vals.data<int32_t>(),
+                                     new_nnz * sizeof(int32_t), cudaMemcpyDeviceToDevice));
+    } else if (values.dtype() == DType::Int64) {
+        CUDA_CHECK_SPARSE(cudaMemcpy(final_vals.data<int64_t>(), out_vals.data<int64_t>(),
+                                     new_nnz * sizeof(int64_t), cudaMemcpyDeviceToDevice));
     }
 
     return SparseTensor::sparse_coo(new_indices, final_vals,

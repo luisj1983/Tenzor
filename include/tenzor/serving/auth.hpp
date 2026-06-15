@@ -31,6 +31,18 @@ inline bool ct_eq(const std::string& a, const std::string& b) {
     return diff == 0;
 }
 
+/// Strip a leading "Bearer " prefix from an Authorization header value.
+/// substr(0,7) is well-defined on strings shorter than 7 chars (it yields the
+/// whole string), so the comparison is safe without a length guard. Shared by
+/// validate_token and the server's live auth path so both treat the exact
+/// "Bearer " (7-char) boundary identically.
+inline std::string strip_bearer(const std::string& header_value) {
+    if (header_value.substr(0, 7) == "Bearer ") {
+        return header_value.substr(7);
+    }
+    return header_value;
+}
+
 /// Validate a Bearer token against the configured API keys.
 ///
 /// Uses a constant-time comparison against EVERY configured key (no early break)
@@ -40,10 +52,11 @@ inline bool ct_eq(const std::string& a, const std::string& b) {
 inline bool validate_token(const AuthConfig& config, const std::string& header_value) {
     if (!config.enabled || config.api_keys.empty()) return true;
 
-    std::string token = header_value;
-    if (token.size() > 7 && token.substr(0, 7) == "Bearer ") {
-        token = token.substr(7);
-    }
+    // Strip the "Bearer " prefix whenever present. substr(0,7) is safe on
+    // shorter strings (returns the whole string), so no length guard is needed —
+    // and adding one would diverge from server.cpp, which strips for exactly
+    // "Bearer " (7 chars) too.
+    std::string token = strip_bearer(header_value);
     bool valid = false;
     for (const auto& key : config.api_keys) {
         valid |= ct_eq(token, key);

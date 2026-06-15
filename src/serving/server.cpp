@@ -4,6 +4,7 @@
  */
 
 #include "tenzor/serving/server.hpp"
+#include "tenzor/serving/auth.hpp"
 #include "tenzor/jit/serialization.hpp"
 #include "tenzor/autograd/variable.hpp"
 #include "tenzor/ops/transform.hpp"
@@ -17,6 +18,7 @@
 #include <unordered_map>
 #include <mutex>
 #include <filesystem>
+#include <stdexcept>
 #ifdef TENZOR_HAS_HTTPLIB
 #include <httplib.h>
 #endif
@@ -41,6 +43,43 @@ static_assert(false,
 
 namespace tenzor {
 namespace serving {
+
+// ============================================================================
+// Path sandboxing (shared by HTTP and gRPC LoadModel handlers)
+// ============================================================================
+
+auto sanitize_repository_path(const std::string& requested,
+                              const std::string& root_dir) -> std::string {
+    namespace fs = std::filesystem;
+    fs::path req(requested);
+    if (req.is_absolute()) {
+        throw std::invalid_argument(
+            "model_path must be a relative path within the model repository");
+    }
+    // Reject only REAL ".." path components — not filenames that merely contain
+    // the substring "..", e.g. "model..v2.tz" (which has no traversal).
+    for (const auto& part : req) {
+        if (part == "..") {
+            throw std::invalid_argument(
+                "model_path must not contain a '..' path component");
+        }
+    }
+    fs::path root = root_dir.empty() ? fs::path(".") : fs::path(root_dir);
+    fs::path root_canon = fs::weakly_canonical(root);
+    fs::path resolved = fs::weakly_canonical(root / req);
+    // A raw string-prefix compare has no path-separator boundary, so a root of
+    // "/srv/models" would accept "/srv/models-evil/x". Use fs::relative and
+    // reject if it escapes (error, empty, or first component ".."), which also
+    // accounts for symlinks resolved by weakly_canonical above.
+    std::error_code ec;
+    fs::path rel = fs::relative(resolved, root_canon, ec);
+    bool escapes = ec || rel.empty() ||
+                   (rel.begin() != rel.end() && *rel.begin() == "..");
+    if (escapes) {
+        throw std::invalid_argument("model_path escapes the model repository");
+    }
+    return resolved.string();
+}
 
 // ============================================================================
 // DynamicBatcher
@@ -149,17 +188,47 @@ auto DynamicBatcher::execute_batch(
             tenzor::Variable batched_var(batched_input, false);
             auto batched_output = model_->forward(batched_var);
 
-            // Split the batched output by each request's actual row count so
-            // every request gets its full sub-tensor back.
-            auto split_outputs = tenzor::split_with_sizes(
-                batched_output.tensor(), row_counts, /*dim=*/0);
-            for (size_t i = 0; i < batch.size(); ++i) {
-                if (i < split_outputs.size()) {
-                    batch[i]->result.set_value(split_outputs[i]);
-                } else {
-                    batch[i]->result.set_exception(
-                        std::make_exception_ptr(std::runtime_error(
-                            "Batch output split mismatch")));
+            // split_with_sizes assumes the model preserved the dim-0 row count.
+            // Models that pool/reduce the batch dimension (or emit a fixed-size
+            // output) break that assumption: the split would throw and the
+            // outer catch would fail EVERY co-batched request — even though
+            // each would succeed run individually. Validate the row count first
+            // and, on mismatch, fall back to per-request execution so batching
+            // never changes correctness/availability versus unbatched.
+            int64_t total_rows = 0;
+            for (int64_t rc : row_counts) total_rows += rc;
+            const auto& out_shape = batched_output.tensor().shape();
+            bool batch_dim_preserved =
+                !out_shape.empty() && out_shape[0] == total_rows;
+
+            if (batch_dim_preserved) {
+                // Split the batched output by each request's actual row count so
+                // every request gets its full sub-tensor back.
+                auto split_outputs = tenzor::split_with_sizes(
+                    batched_output.tensor(), row_counts, /*dim=*/0);
+                for (size_t i = 0; i < batch.size(); ++i) {
+                    if (i < split_outputs.size()) {
+                        batch[i]->result.set_value(split_outputs[i]);
+                    } else {
+                        batch[i]->result.set_exception(
+                            std::make_exception_ptr(std::runtime_error(
+                                "Batch output split mismatch")));
+                    }
+                }
+            } else {
+                // Output does not preserve the batch row count — run each
+                // request on its own so a batch-collapsing model still serves
+                // correct results. Each request's failure is isolated to that
+                // request rather than poisoning the whole batch.
+                for (auto& req : batch) {
+                    try {
+                        tenzor::Variable iv(req->input, false);
+                        req->result.set_value(model_->forward(iv).tensor());
+                    } catch (...) {
+                        try {
+                            req->result.set_exception(std::current_exception());
+                        } catch (...) {}
+                    }
                 }
             }
         }
@@ -562,24 +631,14 @@ auto InferenceServer::serve_loop() -> void {
                 res.set_content(json{{"error","missing authentication header"}}.dump(), "application/json");
                 return httplib::Server::HandlerResponse::Handled;
             }
-            // Extract Bearer token
-            std::string token = it->second;
-            if (token.substr(0, 7) == "Bearer ") {
-                token = token.substr(7);
-            }
-            // Constant-time comparison so the response time does not leak how
-            // many leading bytes of a guessed key are correct. Compare against
-            // every configured key without an early break to keep timing uniform.
-            auto ct_eq = [](const std::string& a, const std::string& b) -> bool {
-                unsigned diff = static_cast<unsigned>(a.size() ^ b.size());
-                size_t n = std::max(a.size(), b.size());
-                for (size_t i = 0; i < n; ++i) {
-                    unsigned ca = i < a.size() ? static_cast<unsigned char>(a[i]) : 0u;
-                    unsigned cb = i < b.size() ? static_cast<unsigned char>(b[i]) : 0u;
-                    diff |= ca ^ cb;
-                }
-                return diff == 0;
-            };
+            // Extract Bearer token and validate via the SHARED helpers in
+            // serving/auth.hpp (single source of truth) so the live path and
+            // the reusable header cannot drift on the Bearer-strip boundary or
+            // the constant-time comparison.
+            std::string token = strip_bearer(it->second);
+            // Constant-time comparison against every configured key (no early
+            // break) so response time does not leak how many leading bytes of a
+            // guessed key are correct.
             bool valid = false;
             for (const auto& key : config_.api_keys) {
                 valid |= ct_eq(token, key);
@@ -665,38 +724,15 @@ auto InferenceServer::serve_loop() -> void {
 
         // Sandbox the path: a client must not be able to make the server open and
         // deserialize an ARBITRARY host file (the graph/state loader is itself an
-        // untrusted-input parser). Reject absolute paths and '..' traversal, then
-        // confirm the resolved path stays inside the configured repository root.
-        {
-            namespace fs = std::filesystem;
-            fs::path requested(model_path);
-            if (requested.is_absolute() ||
-                model_path.find("..") != std::string::npos) {
-                json_error(res, 400,
-                    "model_path must be a relative path within the model repository");
-                return;
-            }
-            fs::path root = config_.model_repository_path.empty()
-                                ? fs::path(".")
-                                : fs::path(config_.model_repository_path);
-            fs::path root_canon = fs::weakly_canonical(root);
-            fs::path resolved = fs::weakly_canonical(root / requested);
-            // A raw string-prefix compare has no path-separator boundary, so a
-            // root of "/srv/models" would accept "/srv/models-evil/x" or
-            // "/srv/modelsX". Use fs::relative and reject if it escapes (empty,
-            // or a first component of ".."), which also accounts for symlinks
-            // resolved by weakly_canonical above.
-            std::error_code ec;
-            fs::path rel = fs::relative(resolved, root_canon, ec);
-            // Containment holds iff the relative path is non-empty and its FIRST
-            // component is not "..". (rel == "." means resolved == root_canon.)
-            bool escapes = ec || rel.empty() ||
-                           (rel.begin() != rel.end() && *rel.begin() == "..");
-            if (escapes) {
-                json_error(res, 400, "model_path escapes the model repository");
-                return;
-            }
-            model_path = resolved.string();
+        // untrusted-input parser). Confine the resolved path inside the
+        // configured repository root via the shared helper (same policy as the
+        // gRPC LoadModel handler — single source of truth).
+        try {
+            model_path = sanitize_repository_path(model_path,
+                                                  config_.model_repository_path);
+        } catch (const std::invalid_argument& e) {
+            json_error(res, 400, e.what());
+            return;
         }
 
         Device target_device = Device::cpu();

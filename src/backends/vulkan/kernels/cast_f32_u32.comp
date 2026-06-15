@@ -18,6 +18,15 @@ layout(push_constant) uniform PushConstants {
 void main() {
     uint idx = gl_GlobalInvocationID.x;
     if (idx >= pc.num_elements) return;
-    float v = clamp(input_buf.data[idx], 0.0, 4294967295.0);
-    output_buf.data[idx] = uint(v);
+    // 4294967295.0 (UINT_MAX) is not representable in float32 and rounds up to
+    // 2^32, making uint(v) an out-of-range conversion (UB, commonly wraps to 0).
+    // Clamp to the largest float32 strictly below 2^32 (0xFFFFFF00) and
+    // special-case values at/above 2^32 to saturate to UINT_MAX.
+    float v = input_buf.data[idx];
+    if (v >= 4294967296.0) {
+        output_buf.data[idx] = 0xFFFFFFFFu;
+    } else {
+        v = clamp(v, 0.0, 4294967040.0);
+        output_buf.data[idx] = uint(v);
+    }
 }

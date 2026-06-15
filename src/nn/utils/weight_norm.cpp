@@ -117,9 +117,10 @@ auto WeightNorm::apply(std::shared_ptr<Module> module,
     // Mirror the BF16 widen-narrow trick used in compute_weight_variable
     // so this also works for backends that lack a BF16 sqrt.
     Tensor g_tensor;
-    if (weight.dtype() == DType::BFloat16) {
+    if (weight.dtype() == DType::BFloat16 || weight.dtype() == DType::Float16) {
+        const DType orig = weight.dtype();
         Tensor w32 = weight.to(DType::Float32);
-        g_tensor = v_norm_tensor(w32, dim).to(DType::BFloat16);
+        g_tensor = v_norm_tensor(w32, dim).to(orig);
     } else {
         g_tensor = v_norm_tensor(weight, dim);
     }
@@ -181,7 +182,7 @@ auto WeightNorm::compute_weight_variable() -> Variable {
     // is BF16 (or any future "narrow" type) and cast back so the resulting
     // weight matches the original dtype.
     DType orig_dtype = weight_v_->tensor().dtype();
-    bool widen = (orig_dtype == DType::BFloat16);
+    bool widen = (orig_dtype == DType::BFloat16 || orig_dtype == DType::Float16);
 
     Variable g_eff = widen ? tenzor::nn::variable_cast(*weight_g_, DType::Float32) : *weight_g_;
     Variable v_eff = widen ? tenzor::nn::variable_cast(*weight_v_, DType::Float32) : *weight_v_;

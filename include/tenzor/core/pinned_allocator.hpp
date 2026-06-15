@@ -50,11 +50,13 @@ struct PinnedMemoryStats {
  * @brief Fast pinned memory allocator for CPU<->GPU transfers
  *
  * Uses cudaHostAlloc to pre-allocate a large pool of pinned (page-locked)
- * memory. Provides O(1) allocation using a best-fit free-list algorithm.
+ * memory. Provides allocation using a best-fit free-list algorithm
+ * (an O(n) scan over block_map_ for the smallest fitting free block, with an
+ * early exit on an exact-size match).
  * Thread-safe with automatic coalescing of adjacent free blocks.
  *
  * Key features:
- * - Fast O(1) allocation from pre-allocated pool
+ * - Best-fit allocation from a pre-allocated pool (O(n) scan over block_map_)
  * - Automatic coalescing of adjacent free blocks
  * - Thread-safe operations
  * - Defragmentation support

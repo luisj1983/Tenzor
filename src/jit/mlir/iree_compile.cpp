@@ -150,6 +150,82 @@ auto cache_file_is_trustworthy(const fs::path& file, bool is_shared_temp)
     return st.st_uid == ::getuid();
 }
 
+/// Verify that a .vmfb on disk carries the expected container magic. IREE
+/// emits vmfb artifacts as ZIP containers, whose first four bytes are the
+/// local-file-header signature "PK\x03\x04". A crash mid-write or a race
+/// between two processes on the same cache key can persist a truncated but
+/// non-empty file; the previous "size > 0" gate would then accept it as a
+/// cache hit and fail later at module-load with an opaque error. Checking the
+/// magic lets compile_mlir treat such a file as a miss and recompile.
+auto vmfb_has_valid_magic(const fs::path& file) -> bool {
+    std::ifstream f(file, std::ios::binary);
+    if (!f) {
+        return false;
+    }
+    char magic[4] = {0, 0, 0, 0};
+    f.read(magic, sizeof(magic));
+    if (f.gcount() != static_cast<std::streamsize>(sizeof(magic))) {
+        return false;
+    }
+    return magic[0] == 'P' && magic[1] == 'K' &&
+           magic[2] == '\x03' && magic[3] == '\x04';
+}
+
+/// Compile into a unique temp file in `dir` then atomically rename it into
+/// `final_path`. The writer is invoked with the temp path; on success the
+/// rename publishes a fully-written artifact in one step, so a reader never
+/// observes a partial file and concurrent writers cannot corrupt the cache
+/// entry. On any failure the temp file is removed and the exception
+/// propagates. Returns the temp path actually used (already renamed away).
+template <typename Writer>
+auto write_vmfb_atomically(const fs::path& final_path,
+                           const fs::path& dir,
+                           Writer&& writer) -> void {
+    const std::string tmpl =
+        (dir / (final_path.filename().string() + ".tmpXXXXXX")).string();
+    std::vector<char> tmp_buf(tmpl.begin(), tmpl.end());
+    tmp_buf.push_back('\0');
+    int fd = ::mkstemp(tmp_buf.data());
+    if (fd < 0) {
+        throw JitCompileError(
+            std::string("mkstemp for vmfb output failed: ") +
+                std::strerror(errno),
+            final_path);
+    }
+    // The writer reopens/owns the file by path; close our descriptor so it
+    // isn't left dangling. The file already exists with the secure mkstemp
+    // permissions (0600).
+    ::close(fd);
+    const fs::path tmp_path(tmp_buf.data());
+
+    try {
+        writer(tmp_path);
+    } catch (...) {
+        std::error_code ec;
+        fs::remove(tmp_path, ec);
+        throw;
+    }
+
+    if (!fs::exists(tmp_path) || fs::file_size(tmp_path) == 0 ||
+        !vmfb_has_valid_magic(tmp_path)) {
+        std::error_code ec;
+        fs::remove(tmp_path, ec);
+        throw JitCompileError(
+            "compile produced an empty or malformed vmfb at " +
+                tmp_path.string(),
+            final_path);
+    }
+
+    std::error_code ec;
+    fs::rename(tmp_path, final_path, ec);
+    if (ec) {
+        fs::remove(tmp_path, ec);
+        throw JitCompileError(
+            "atomic rename of vmfb into place failed: " + ec.message(),
+            final_path);
+    }
+}
+
 /// RAII wrapper for the IREE compiler error type so `throw` doesn't leak.
 struct CompilerError {
     iree_compiler_error_t* ptr = nullptr;
@@ -530,7 +606,8 @@ auto compile_mlir(const std::string& mlir_text,
     }
 
     if (fs::exists(vmfb_path) && fs::file_size(vmfb_path) > 0 &&
-        cache_file_is_trustworthy(vmfb_path, is_shared_temp)) {
+        cache_file_is_trustworthy(vmfb_path, is_shared_temp) &&
+        vmfb_has_valid_magic(vmfb_path)) {
         return CompiledArtifact{vmfb_path, opts.target};
     }
 
@@ -562,7 +639,10 @@ auto compile_mlir(const std::string& mlir_text,
                     ". Subprocess-available targets=" + available.str(),
                 mlir_path);
         }
-        compile_via_subprocess(mlir_text, opts.target, vmfb_path, mlir_path);
+        write_vmfb_atomically(vmfb_path, cache_dir,
+                              [&](const fs::path& tmp_out) {
+            compile_via_subprocess(mlir_text, opts.target, tmp_out, mlir_path);
+        });
         const auto compile_t1 = std::chrono::steady_clock::now();
         const double compile_ms =
             std::chrono::duration<double, std::milli>(compile_t1 - compile_t0)
@@ -669,32 +749,84 @@ auto compile_mlir(const std::string& mlir_text,
             mlir_path);
     }
 
+    // Write to a unique temp file in the cache dir, then atomically rename it
+    // into the final vmfb path only after a successful, verified write. This
+    // prevents a crash mid-write or two racing processes from persisting a
+    // truncated-but-nonzero artifact that a later run would accept as a cache
+    // hit (and then fail at module-load).
+    const std::string tmpl =
+        (cache_dir / (vmfb_path.filename().string() + ".tmpXXXXXX")).string();
+    std::vector<char> tmp_buf(tmpl.begin(), tmpl.end());
+    tmp_buf.push_back('\0');
+    int tmp_fd = ::mkstemp(tmp_buf.data());
+    if (tmp_fd < 0) {
+        throw JitCompileError(
+            std::string("mkstemp for vmfb output failed: ") +
+                std::strerror(errno),
+            mlir_path);
+    }
+    ::close(tmp_fd);
+    const fs::path tmp_vmfb(tmp_buf.data());
+    // Remove the temp file on any error path below.
+    struct TmpFileGuard {
+        fs::path path;
+        bool armed = true;
+        ~TmpFileGuard() {
+            if (armed) {
+                std::error_code ec;
+                fs::remove(path, ec);
+            }
+        }
+    } tmp_guard{tmp_vmfb};
+
     iree_compiler_output_t* output = nullptr;
-    const std::string vmfb_path_str = vmfb_path.string();
-    if (auto* out_err = ireeCompilerOutputOpenFile(vmfb_path_str.c_str(),
+    const std::string tmp_vmfb_str = tmp_vmfb.string();
+    if (auto* out_err = ireeCompilerOutputOpenFile(tmp_vmfb_str.c_str(),
                                                    &output);
         out_err != nullptr) {
         CompilerError err{out_err};
         throw JitCompileError(
-            "ireeCompilerOutputOpenFile(" + vmfb_path_str +
+            "ireeCompilerOutputOpenFile(" + tmp_vmfb_str +
                 ") failed: " + err.message(),
             mlir_path);
     }
-    struct OutputGuard {
-        iree_compiler_output_t* o;
-        ~OutputGuard() { ireeCompilerOutputDestroy(o); }
-    } output_guard{output};
+    {
+        struct OutputGuard {
+            iree_compiler_output_t* o;
+            ~OutputGuard() { ireeCompilerOutputDestroy(o); }
+        } output_guard{output};
 
-    if (auto* vmb_err =
-            ireeCompilerInvocationOutputVMBytecode(inv, output);
-        vmb_err != nullptr) {
-        CompilerError err{vmb_err};
+        if (auto* vmb_err =
+                ireeCompilerInvocationOutputVMBytecode(inv, output);
+            vmb_err != nullptr) {
+            CompilerError err{vmb_err};
+            throw JitCompileError(
+                "ireeCompilerInvocationOutputVMBytecode failed: " +
+                    err.message() + "\nDiagnostics:\n" + diag_buffer,
+                mlir_path);
+        }
+        ireeCompilerOutputKeep(output);
+        // output_guard destructor here flushes/closes the temp file before we
+        // verify and rename it.
+    }
+
+    if (!fs::exists(tmp_vmfb) || fs::file_size(tmp_vmfb) == 0 ||
+        !vmfb_has_valid_magic(tmp_vmfb)) {
         throw JitCompileError(
-            "ireeCompilerInvocationOutputVMBytecode failed: " + err.message() +
-                "\nDiagnostics:\n" + diag_buffer,
+            "in-process compile produced an empty or malformed vmfb at " +
+                tmp_vmfb_str,
             mlir_path);
     }
-    ireeCompilerOutputKeep(output);
+    {
+        std::error_code ec;
+        fs::rename(tmp_vmfb, vmfb_path, ec);
+        if (ec) {
+            throw JitCompileError(
+                "atomic rename of vmfb into place failed: " + ec.message(),
+                mlir_path);
+        }
+    }
+    tmp_guard.armed = false;  // renamed away; nothing to clean up.
 
     const auto compile_t1 = std::chrono::steady_clock::now();
     const double compile_ms =

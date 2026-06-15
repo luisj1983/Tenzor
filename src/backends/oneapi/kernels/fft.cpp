@@ -1059,6 +1059,56 @@ inline bool is_power_of_2(int64_t n) {
     return n > 0 && (n & (n - 1)) == 0;
 }
 
+// Pad (zero-fill) or truncate `input` along axis `dim` so that shape[dim] == n,
+// entirely on-device. Matches the oneMKL path's pad/truncate semantics so the
+// fallback honors a caller-requested transform length n != shape[dim]. Returns
+// `input` unchanged when no resize is needed. Works for any dtype/element size:
+// each (outer, dim-index) position owns `inner * dtype_size` contiguous bytes,
+// where inner is the product of the dimensions after `dim`.
+inline Tensor fft_pad_or_truncate(const Tensor& input, int64_t dim, int64_t n,
+                                  sycl::queue& queue) {
+    auto shape_span = input.shape();
+    std::vector<int64_t> shape(shape_span.begin(), shape_span.end());
+    const int64_t ndim = static_cast<int64_t>(shape.size());
+    const int64_t signal_len = shape[dim];
+    if (n == signal_len) return input;
+
+    std::vector<int64_t> new_shape = shape;
+    new_shape[dim] = n;
+
+    int64_t outer = 1;
+    for (int64_t i = 0; i < dim; ++i) outer *= shape[i];
+    int64_t inner = 1;
+    for (int64_t i = dim + 1; i < ndim; ++i) inner *= shape[i];
+
+    const int64_t elem_bytes = static_cast<int64_t>(input.dtype_size());
+    const int64_t slice_bytes = inner * elem_bytes;       // bytes per dim-index slice
+    const int64_t copy_len = std::min(signal_len, n);
+
+    Tensor out(new_shape, input.dtype(), input.device());
+    // Zero the whole buffer so any padding region is zero-filled.
+    queue.memset(const_cast<void*>(out.data_ptr()), 0,
+                 static_cast<size_t>(out.numel() * elem_bytes)).wait();
+
+    const char* src = static_cast<const char*>(input.data_ptr());
+    char* dst = static_cast<char*>(const_cast<void*>(out.data_ptr()));
+    const int64_t old_dim = signal_len;
+    const int64_t new_dim = n;
+    const int64_t total_bytes = outer * copy_len * slice_bytes;
+    queue.parallel_for(sycl::range<1>(total_bytes), [=](sycl::id<1> idx) {
+        int64_t b = idx[0];
+        int64_t byte_in_slice = b % slice_bytes;
+        int64_t pos = b / slice_bytes;          // (outer, dim-index) flattened
+        int64_t d = pos % copy_len;
+        int64_t o = pos / copy_len;
+        int64_t src_off = (o * old_dim + d) * slice_bytes + byte_in_slice;
+        int64_t dst_off = (o * new_dim + d) * slice_bytes + byte_in_slice;
+        dst[dst_off] = src[src_off];
+    }).wait();
+
+    return out;
+}
+
 // Templated Cooley-Tukey FFT on device using SYCL parallel_for kernels.
 // Operates on interleaved complex data: [re0, im0, re1, im1, ...].
 // Supports batched execution: data contains batch_size independent FFTs,
@@ -1388,12 +1438,17 @@ void bluestein_fft_complex_sycl(const T* d_in, T* d_out,
 // ============================================================================
 // FFT - 1D Forward FFT (Cooley-Tukey for power-of-2, Bluestein otherwise)
 // ============================================================================
-auto fft_kernel(const Tensor& input, int64_t dim, int64_t n,
+auto fft_kernel(const Tensor& input_arg, int64_t dim, int64_t n,
                 const std::string& norm, sycl::queue& queue) -> Tensor {
+    int64_t ndim = static_cast<int64_t>(input_arg.shape().size());
+    if (dim < 0) dim += ndim;
+
+    // Honor a caller-requested transform length: pad/truncate along dim to n,
+    // matching the oneMKL path (and CPU/CUDA) instead of silently using shape[dim].
+    Tensor input = fft_pad_or_truncate(input_arg, dim, n, queue);
+
     auto shape_span = input.shape();
     std::vector<int64_t> shape(shape_span.begin(), shape_span.end());
-    int64_t ndim = shape.size();
-    if (dim < 0) dim += ndim;
 
     int64_t signal_len = shape[dim];
 
@@ -1539,16 +1594,21 @@ auto fft_kernel(const Tensor& input, int64_t dim, int64_t n,
 // ============================================================================
 // IFFT - 1D Complex-to-Complex Inverse FFT (device-side Cooley-Tukey / Bluestein)
 // ============================================================================
-auto ifft_kernel(const Tensor& input, int64_t dim, int64_t n,
+auto ifft_kernel(const Tensor& input_arg, int64_t dim, int64_t n,
                  const std::string& norm, sycl::queue& queue) -> Tensor {
-    auto shape_span = input.shape();
-    std::vector<int64_t> shape(shape_span.begin(), shape_span.end());
-    int64_t ndim = shape.size();
+    int64_t ndim = static_cast<int64_t>(input_arg.shape().size());
     if (dim < 0) dim += ndim;
 
-    if (shape[ndim - 1] != 2) {
+    if (input_arg.shape()[ndim - 1] != 2) {
         throw std::runtime_error("ifft_kernel: expected complex input (last dim = 2)");
     }
+
+    // Honor a caller-requested transform length: pad/truncate the complex signal
+    // along dim to n (the trailing complex pair rides along as inner elements).
+    Tensor input = fft_pad_or_truncate(input_arg, dim, n, queue);
+
+    auto shape_span = input.shape();
+    std::vector<int64_t> shape(shape_span.begin(), shape_span.end());
 
     int64_t signal_len = shape[dim];
     int64_t batch_size = 1;
@@ -1687,12 +1747,17 @@ auto ifft_kernel(const Tensor& input, int64_t dim, int64_t n,
 // ============================================================================
 // RFFT - 1D Real-to-Complex Forward FFT (device-side Cooley-Tukey / Bluestein)
 // ============================================================================
-auto rfft_kernel(const Tensor& input, int64_t dim, int64_t n,
+auto rfft_kernel(const Tensor& input_arg, int64_t dim, int64_t n,
                  const std::string& norm, sycl::queue& queue) -> Tensor {
+    int64_t ndim = static_cast<int64_t>(input_arg.shape().size());
+    if (dim < 0) dim += ndim;
+
+    // Honor a caller-requested transform length: pad/truncate along dim to n so
+    // out_len = n/2+1, matching the oneMKL path (and CPU/CUDA).
+    Tensor input = fft_pad_or_truncate(input_arg, dim, n, queue);
+
     auto shape_span = input.shape();
     std::vector<int64_t> shape(shape_span.begin(), shape_span.end());
-    int64_t ndim = shape.size();
-    if (dim < 0) dim += ndim;
 
     int64_t signal_len = shape[dim];
     int64_t out_len = signal_len / 2 + 1;

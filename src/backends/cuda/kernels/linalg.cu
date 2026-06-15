@@ -1309,6 +1309,18 @@ auto linalg_det_kernel(const Tensor& A, cudaStream_t stream) -> Tensor {
 // ============================================================================
 
 auto linalg_inv_kernel(const Tensor& A, cudaStream_t stream) -> Tensor {
+    // cuSOLVER getrf/getrs only support Float32/Float64/Complex. Widen
+    // Float16/BFloat16 to Float32, invert, then narrow back — mirroring the
+    // det kernel (1232) and the non-cuSOLVER fallback (4638). Without this the
+    // dtype falls through every branch below and the all-zeros `identity` is
+    // returned as the "inverse" (silent wrong result).
+    if (A.dtype() == DType::Float16) {
+        return linalg_inv_kernel(A.to(DType::Float32), stream).to(DType::Float16);
+    }
+    if (A.dtype() == DType::BFloat16) {
+        return linalg_inv_kernel(A.to(DType::Float32), stream).to(DType::BFloat16);
+    }
+
     auto work = A.contiguous().clone();
     auto [n, ndim] = check_square(work);
     int64_t nbatch = batch_size(work);
@@ -1425,6 +1437,10 @@ auto linalg_inv_kernel(const Tensor& A, cudaStream_t stream) -> Tensor {
                 mat, n, d_ipiv, id_mat, n, d_info.ptr));
             check_cusolver_info(d_info.ptr, "inv");
         }
+    } else {
+        throw std::runtime_error(
+            "linalg_inv_kernel: unsupported dtype (supported: Float32, Float64, "
+            "Complex64, Complex128; Float16/BFloat16 auto-widened to Float32)");
     }
 
     // (Phase 7.2) No trailing cudaStreamSynchronize needed: check_cusolver_info
@@ -1544,6 +1560,12 @@ auto linalg_solve_kernel(const Tensor& A, const Tensor& B, cudaStream_t stream) 
 
 auto linalg_svd_kernel(const Tensor& A, bool full_matrices, cudaStream_t stream)
     -> std::tuple<Tensor, Tensor, Tensor> {
+    // Widen Float16/BFloat16 to Float32 up-front (cuSOLVER has no half path and
+    // Tensor::data<double>() below would throw on a half input). Mirrors the
+    // !TENZOR_HAS_CUSOLVER fallback and the cuSOLVER det/cholesky kernels.
+    if (A.dtype() == DType::Float16 || A.dtype() == DType::BFloat16) {
+        return linalg_svd_kernel(A.to(DType::Float32), full_matrices, stream);
+    }
     auto shape = A.shape();
     auto a_ndim = static_cast<int64_t>(shape.size());
     if (a_ndim < 2) throw std::invalid_argument("linalg::svd: input must be at least 2D");
@@ -1700,6 +1722,12 @@ auto linalg_svd_kernel(const Tensor& A, bool full_matrices, cudaStream_t stream)
 
 auto linalg_qr_kernel(const Tensor& A, cudaStream_t stream)
     -> std::tuple<Tensor, Tensor> {
+    // Widen Float16/BFloat16 to Float32 (cuSOLVER has no half path; the
+    // double-typed data accessors below would throw on a half input). Mirrors
+    // the !TENZOR_HAS_CUSOLVER fallback and the cuSOLVER det/cholesky kernels.
+    if (A.dtype() == DType::Float16 || A.dtype() == DType::BFloat16) {
+        return linalg_qr_kernel(A.to(DType::Float32), stream);
+    }
     auto shape = A.shape();
     auto a_ndim = static_cast<int64_t>(shape.size());
     if (a_ndim < 2) throw std::invalid_argument("linalg::qr: input must be at least 2D");
@@ -1824,6 +1852,12 @@ auto linalg_qr_kernel(const Tensor& A, cudaStream_t stream)
 
 auto linalg_eigh_kernel(const Tensor& A, cudaStream_t stream)
     -> std::tuple<Tensor, Tensor> {
+    // Widen Float16/BFloat16 to Float32 (cuSOLVER has no half path; the
+    // double-typed data accessors below would throw on a half input). Mirrors
+    // the !TENZOR_HAS_CUSOLVER fallback and the cuSOLVER det/cholesky kernels.
+    if (A.dtype() == DType::Float16 || A.dtype() == DType::BFloat16) {
+        return linalg_eigh_kernel(A.to(DType::Float32), stream);
+    }
     auto work = A.contiguous().clone();
     auto [n, ndim] = check_square(work);
     int64_t nbatch = batch_size(work);

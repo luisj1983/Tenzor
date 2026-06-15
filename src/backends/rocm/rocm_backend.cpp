@@ -290,13 +290,17 @@ auto ROCmBackend::copy(void* dst, const void* src, size_t bytes, CopyKind kind) 
             std::string("HIP async copy failed: ") + hipGetErrorString(err)
         );
     }
-    // Only synchronize for D2H copies where caller expects data to be available
-    // H2D and D2D can remain async on the default stream
-    if (kind == CopyKind::DeviceToHost) {
+    // copy() is documented as synchronous (backend.hpp). Host-visible copies must
+    // therefore complete before returning: DeviceToHost (caller reads dst on the
+    // host immediately) and HostToHost (an async H2H returns before completion, so
+    // an immediate read of dst, or freeing/reusing src, would see stale/partial
+    // data or hit a use-after-free). H2D and D2D are async-by-design on the default
+    // stream and need no sync here.
+    if (kind == CopyKind::DeviceToHost || kind == CopyKind::HostToHost) {
         err = hipStreamSynchronize(nullptr);
         if (err != hipSuccess) {
             throw std::runtime_error(
-                std::string("HIP stream sync after D2H copy failed: ") + hipGetErrorString(err)
+                std::string("HIP stream sync after host-visible copy failed: ") + hipGetErrorString(err)
             );
         }
     }

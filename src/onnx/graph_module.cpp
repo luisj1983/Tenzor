@@ -24,10 +24,16 @@ void GraphModule::set_output_names(std::vector<std::string> names) {
     output_names_ = std::move(names);
 }
 
-auto GraphModule::forward_impl(const Variable& input) -> Variable {
+auto GraphModule::run_graph(const std::vector<Variable>& inputs)
+    -> std::unordered_map<std::string, Variable> {
     // Value map: name -> Variable. Keeping Variables (not bare Tensors)
     // preserves the autograd grad_fn chain across both module-based and
     // functional ops, so gradients flow back through submodules and params.
+    //
+    // Single source of truth for graph execution: every forward entry point
+    // calls this exactly once, so the graph (and any stateful submodules such
+    // as Dropout / BatchNorm running stats) executes once per forward — never
+    // twice as the old duplicated forward_multi loop did.
     std::unordered_map<std::string, Variable> values;
 
     // Seed constants (graph-internal weights/constants do not require grad).
@@ -35,14 +41,21 @@ auto GraphModule::forward_impl(const Variable& input) -> Variable {
         values[name] = Variable(tensor, false);
     }
 
-    // Seed graph inputs (propagate the real input's requires_grad).
-    if (!input_names_.empty()) {
-        values[input_names_[0]] = input;
+    // Bind every supplied input to its declared name in order. The count must
+    // match exactly so a missing/extra input is reported here rather than as a
+    // confusing "value not found" mid-execution.
+    if (inputs.size() != input_names_.size()) {
+        throw std::runtime_error(
+            "GraphModule: graph declares " + std::to_string(input_names_.size()) +
+            " input(s) but " + std::to_string(inputs.size()) +
+            " were supplied");
+    }
+    for (size_t i = 0; i < input_names_.size(); ++i) {
+        values[input_names_[i]] = inputs[i];
     }
 
-    // Execute ops in topological order
+    // Execute ops in topological order.
     for (auto& op : ops_) {
-        // Gather input Variables
         std::vector<Variable> input_vars;
         input_vars.reserve(op.inputs.size());
         for (auto& input_name : op.inputs) {
@@ -55,9 +68,7 @@ auto GraphModule::forward_impl(const Variable& input) -> Variable {
             input_vars.push_back(it->second);
         }
 
-        // Execute
         std::vector<Variable> output_vars;
-
         if (op.module) {
             // Module-based op: nn::Module::forward takes a single Variable.
             // Multi-input module ops are not representable, so reject them
@@ -69,8 +80,7 @@ auto GraphModule::forward_impl(const Variable& input) -> Variable {
                     " inputs but nn::Module::forward accepts exactly 1; route "
                     "multi-input ops through compute_fn instead");
             }
-            auto var_output = op.module->forward(input_vars[0]);
-            output_vars.push_back(var_output);
+            output_vars.push_back(op.module->forward(input_vars[0]));
         } else if (op.compute_fn) {
             // Functional op (operates on/returns Variables, preserving grad_fn)
             output_vars = op.compute_fn(input_vars);
@@ -79,78 +89,54 @@ auto GraphModule::forward_impl(const Variable& input) -> Variable {
                 "GraphModule: op '" + op.name + "' has neither module nor compute_fn");
         }
 
-        // Store outputs
         for (size_t i = 0; i < op.outputs.size() && i < output_vars.size(); ++i) {
             values[op.outputs[i]] = output_vars[i];
         }
     }
 
-    // Collect graph output
+    return values;
+}
+
+auto GraphModule::forward_impl(const Variable& input) -> Variable {
+    // Single-Variable entry point can only seed input_names_[0]; reject graphs
+    // with more inputs instead of silently leaving inputs[1..] unbound (which
+    // surfaced as a confusing "value not found" at the first consuming op).
+    if (input_names_.size() > 1) {
+        throw std::runtime_error(
+            "GraphModule: graph has " + std::to_string(input_names_.size()) +
+            " inputs; call forward_multi(std::vector<Variable>) to supply them all");
+    }
+
+    // A graph with no declared inputs ignores the supplied Variable (constants
+    // only), matching the prior behaviour that seeded inputs only when present.
+    auto values = input_names_.empty() ? run_graph({}) : run_graph({input});
+
     if (output_names_.empty()) {
         throw std::runtime_error("GraphModule: no output names set");
     }
-
     auto it = values.find(output_names_[0]);
     if (it == values.end()) {
         throw std::runtime_error(
             "GraphModule: output '" + output_names_[0] + "' not found after execution");
     }
-
-    // Return the computed output Variable directly, preserving its grad_fn.
-    // (Single-output contract of nn::Module::forward; use forward_multi for the
-    // remaining outputs of a multi-output graph.)
+    // Return the first output, preserving its grad_fn. Use forward_multi for the
+    // remaining outputs of a multi-output graph.
     return it->second;
 }
 
 auto GraphModule::forward_multi(const Variable& input) -> std::vector<Variable> {
-    // Reuse the single-output forward to execute the graph once, then look up
-    // every declared output by name. forward_impl already validates the graph
-    // and binds output_names_[0]; here we additionally surface outputs[1..].
-    // We re-run the execution loop so all outputs are collected from the same
-    // value map rather than relying on side state.
-    std::unordered_map<std::string, Variable> values;
-
-    for (auto& [name, tensor] : constants_) {
-        values[name] = Variable(tensor, false);
+    if (input_names_.size() > 1) {
+        throw std::runtime_error(
+            "GraphModule: graph has " + std::to_string(input_names_.size()) +
+            " inputs; call forward_multi(std::vector<Variable>) to supply them all");
     }
-    if (!input_names_.empty()) {
-        values[input_names_[0]] = input;
-    }
+    return forward_multi(input_names_.empty() ? std::vector<Variable>{}
+                                              : std::vector<Variable>{input});
+}
 
-    for (auto& op : ops_) {
-        std::vector<Variable> input_vars;
-        input_vars.reserve(op.inputs.size());
-        for (auto& input_name : op.inputs) {
-            auto it = values.find(input_name);
-            if (it == values.end()) {
-                throw std::runtime_error(
-                    "GraphModule: value '" + input_name + "' not found when "
-                    "executing op '" + op.name + "' (" + op.op_type + ")");
-            }
-            input_vars.push_back(it->second);
-        }
-
-        std::vector<Variable> output_vars;
-        if (op.module) {
-            if (input_vars.size() != 1) {
-                throw std::runtime_error(
-                    "GraphModule: module op '" + op.name + "' (" + op.op_type +
-                    ") has " + std::to_string(input_vars.size()) +
-                    " inputs but nn::Module::forward accepts exactly 1; route "
-                    "multi-input ops through compute_fn instead");
-            }
-            output_vars.push_back(op.module->forward(input_vars[0]));
-        } else if (op.compute_fn) {
-            output_vars = op.compute_fn(input_vars);
-        } else {
-            throw std::runtime_error(
-                "GraphModule: op '" + op.name + "' has neither module nor compute_fn");
-        }
-
-        for (size_t i = 0; i < op.outputs.size() && i < output_vars.size(); ++i) {
-            values[op.outputs[i]] = output_vars[i];
-        }
-    }
+auto GraphModule::forward_multi(const std::vector<Variable>& inputs)
+    -> std::vector<Variable> {
+    auto values = run_graph(inputs);
 
     if (output_names_.empty()) {
         throw std::runtime_error("GraphModule: no output names set");

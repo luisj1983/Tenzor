@@ -56,9 +56,12 @@ auto PipelineStage::forward(const Variable& input) -> Variable {
 namespace {
 
 /**
- * @brief Split a Variable into num_microbatches chunks along dimension 0.
+ * @brief Split a Variable into exactly num_microbatches chunks along dim 0.
  *
- * If the batch size is not evenly divisible, the last chunk is smaller.
+ * Uses a balanced partition: when the batch size is not evenly divisible the
+ * first (batch_size % num_microbatches) chunks carry one extra row. Always
+ * returns exactly num_microbatches non-empty chunks (requires
+ * batch_size >= num_microbatches).
  */
 auto split_microbatches(const Variable& input, int num_microbatches)
     -> std::vector<Variable>
@@ -78,8 +81,32 @@ auto split_microbatches(const Variable& input, int num_microbatches)
         );
     }
 
-    int64_t chunk_size = (batch_size + num_microbatches - 1) / num_microbatches;
-    auto chunks = split(tensor, chunk_size, /*dim=*/0);
+    // Build a balanced partition that yields EXACTLY num_microbatches
+    // non-empty chunks. A fixed-size split (split / tensor_split with a
+    // ceil chunk_size) produces ceil(batch_size / chunk_size) chunks, which
+    // is fewer than num_microbatches whenever the batch is not a near
+    // multiple (e.g. batch=5, mb=4 -> chunk_size=2 -> only 3 chunks). The
+    // GPipe / 1F1B loops index micro_inputs[mb] for mb in [0,
+    // num_microbatches), so a short vector is an out-of-bounds read.
+    //
+    // base = floor(batch / mb) >= 1 (guaranteed by batch_size >=
+    // num_microbatches above); the first `remainder` chunks get one extra
+    // row. Sizes sum to batch_size and count is exactly num_microbatches.
+    int64_t base = batch_size / num_microbatches;
+    int64_t remainder = batch_size % num_microbatches;
+    std::vector<int64_t> split_sizes;
+    split_sizes.reserve(static_cast<size_t>(num_microbatches));
+    for (int64_t i = 0; i < num_microbatches; ++i) {
+        split_sizes.push_back(base + (i < remainder ? 1 : 0));
+    }
+
+    auto chunks = split_with_sizes(tensor, split_sizes, /*dim=*/0);
+
+    if (static_cast<int64_t>(chunks.size()) != num_microbatches) {
+        throw std::runtime_error(
+            "split_microbatches: produced " + std::to_string(chunks.size()) +
+            " chunks, expected " + std::to_string(num_microbatches));
+    }
 
     std::vector<Variable> result;
     result.reserve(chunks.size());
