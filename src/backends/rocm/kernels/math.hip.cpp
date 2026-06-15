@@ -2004,6 +2004,8 @@ auto neg_kernel(const Tensor& input, hipStream_t stream) -> Tensor {
     std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
     Tensor result(shape, input.dtype(), input.device());
 
+    if (n == 0) return result;  // empty tensor: zero-grid launch would fail on HIP
+
     dim3 grid, block;
     compute_launch_config_1d(n, grid, block);
 
@@ -2056,6 +2058,7 @@ auto abs_kernel(const Tensor& input, hipStream_t stream) -> Tensor {
     // Complex inputs: |z| = hypot(re, im); output is real-valued.
     if (input.dtype() == DType::Complex64) {
         Tensor result(shape, DType::Float32, input.device());
+        if (n == 0) return result;  // empty tensor: zero-grid launch would fail on HIP
         dim3 grid, block;
         compute_launch_config_1d(n, grid, block);
         hipLaunchKernelGGL(abs_kernel_complex64, grid, block, 0, stream,
@@ -2066,6 +2069,7 @@ auto abs_kernel(const Tensor& input, hipStream_t stream) -> Tensor {
     }
     if (input.dtype() == DType::Complex128) {
         Tensor result(shape, DType::Float64, input.device());
+        if (n == 0) return result;  // empty tensor: zero-grid launch would fail on HIP
         dim3 grid, block;
         compute_launch_config_1d(n, grid, block);
         hipLaunchKernelGGL(abs_kernel_complex128, grid, block, 0, stream,
@@ -2076,6 +2080,8 @@ auto abs_kernel(const Tensor& input, hipStream_t stream) -> Tensor {
     }
 
     Tensor result(shape, input.dtype(), input.device());
+
+    if (n == 0) return result;  // empty tensor: zero-grid launch would fail on HIP
 
     dim3 grid, block;
     compute_launch_config_1d(n, grid, block);
@@ -2119,6 +2125,8 @@ auto sqrt_kernel(const Tensor& input, hipStream_t stream) -> Tensor {
     std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
     Tensor result(shape, input.dtype(), input.device());
 
+    if (n == 0) return result;  // empty tensor: zero-grid launch would fail on HIP
+
     dim3 grid, block;
     compute_launch_config_1d(n, grid, block);
 
@@ -2159,6 +2167,8 @@ auto exp_kernel(const Tensor& input, hipStream_t stream) -> Tensor {
     std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
     Tensor result(shape, input.dtype(), input.device());
 
+    if (n == 0) return result;  // empty tensor: zero-grid launch would fail on HIP
+
     dim3 grid, block;
     compute_launch_config_1d(n, grid, block);
 
@@ -2198,6 +2208,8 @@ auto log_kernel(const Tensor& input, hipStream_t stream) -> Tensor {
     int64_t n = input.numel();
     std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
     Tensor result(shape, input.dtype(), input.device());
+
+    if (n == 0) return result;  // empty tensor: zero-grid launch would fail on HIP
 
     dim3 grid, block;
     compute_launch_config_1d(n, grid, block);
@@ -2283,6 +2295,8 @@ auto pow_kernel(const Tensor& input, double exponent, hipStream_t stream) -> Ten
     int64_t n = input.numel();
     std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
     Tensor result(shape, input.dtype(), input.device());
+
+    if (n == 0) return result;  // empty tensor: zero-grid launch would fail on HIP
 
     dim3 grid, block;
     compute_launch_config_1d(n, grid, block);
@@ -2372,6 +2386,8 @@ auto sign_kernel(const Tensor& input, hipStream_t stream) -> Tensor {
     int64_t n = input.numel();
     std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
     Tensor result(shape, input.dtype(), input.device());
+
+    if (n == 0) return result;  // empty tensor: zero-grid launch would fail on HIP
 
     dim3 grid, block;
     compute_launch_config_1d(n, grid, block);
@@ -6443,7 +6459,7 @@ __device__ inline double betainc_dev_f64(double a, double b, double x) {
     }                                                                                         \
     __global__ void NAME##_kernel_bf16(const hip_bfloat16* in, hip_bfloat16* out, int64_t n) { \
         HIP_KERNEL_LOOP(idx, n) {                                                             \
-            float x = static_cast<float>(in[idx]);                                            \
+            float x = tenzor::rocm::safe_bf2f(in[idx]);                                       \
             /* S.10 / R.11: RNE round on float32 → bf16 narrowing. */                         \
             out[idx] = tenzor::rocm::f32_to_bf16_rne(FN_F32_EXPR);                            \
         }                                                                                     \

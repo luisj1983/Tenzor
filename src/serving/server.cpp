@@ -19,6 +19,7 @@
 #include <mutex>
 #include <filesystem>
 #include <stdexcept>
+#include <vector>
 #ifdef TENZOR_HAS_HTTPLIB
 #include <httplib.h>
 #endif
@@ -790,6 +791,43 @@ auto InferenceServer::serve_loop() -> void {
                         it = rate_limit_buckets.erase(it);
                     } else {
                         ++it;
+                    }
+                }
+                // The TTL sweep only reclaims *idle* buckets. An attacker
+                // spoofing one source IP per request every <TTL keeps every
+                // bucket "recently refilled", so the sweep frees nothing and the
+                // map grows without bound — an active-id memory-exhaustion DoS.
+                // Enforce a hard absolute cap by evicting the least-recently-
+                // refilled entries down to kHardMaxBuckets. Evicting a stale
+                // bucket only resets its tokens to full burst, so it can never
+                // let a throttled client exceed its rate. Matches the library
+                // limiter (include/tenzor/serving/rate_limiter.hpp).
+                constexpr std::size_t kHardMaxBuckets = 100000;
+                if (rate_limit_buckets.size() > kHardMaxBuckets) {
+                    std::vector<std::chrono::steady_clock::time_point> refills;
+                    refills.reserve(rate_limit_buckets.size());
+                    for (const auto& kv : rate_limit_buckets) {
+                        refills.push_back(kv.second.last_refill);
+                    }
+                    const std::size_t to_evict =
+                        rate_limit_buckets.size() - kHardMaxBuckets;
+                    std::nth_element(refills.begin(), refills.begin() + to_evict,
+                                     refills.end());
+                    const auto cutoff = refills[to_evict];
+                    std::size_t evicted = 0;
+                    for (auto it = rate_limit_buckets.begin();
+                         it != rate_limit_buckets.end() && evicted < to_evict;) {
+                        if (it->second.last_refill < cutoff) {
+                            it = rate_limit_buckets.erase(it);
+                            ++evicted;
+                        } else {
+                            ++it;
+                        }
+                    }
+                    for (auto it = rate_limit_buckets.begin();
+                         it != rate_limit_buckets.end() &&
+                         rate_limit_buckets.size() > kHardMaxBuckets;) {
+                        it = rate_limit_buckets.erase(it);
                     }
                 }
             }

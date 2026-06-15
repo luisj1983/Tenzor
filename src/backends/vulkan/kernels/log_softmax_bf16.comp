@@ -26,18 +26,28 @@ float readBF16(uint element_idx) {
     return uintBitsToFloat(bits << 16);
 }
 
-// Write a single bfloat16 value to packed output buffer
+// Write a single bfloat16 value to the packed output buffer using atomic CAS.
+// Adjacent threads write the two halves of the same 32-bit word, so a plain
+// read-modify-write would clobber the neighbour's half-word. Use a bounded
+// atomicCompSwap loop (mirrors softmax_bf16.comp / softmax_f16.comp).
 void writeBF16(uint element_idx, float value) {
     uint word_idx = element_idx / 2;
-    uint word_offset = element_idx % 2;
-    uint bits = ((floatBitsToUint(value) + 0x7FFFu + ((floatBitsToUint(value) >> 16) & 1u)) >> 16);
-    if (word_offset == 0) {
-        uint existing = output_data[word_idx] & 0xFFFF0000u;
-        output_data[word_idx] = existing | bits;
-    } else {
-        uint existing = output_data[word_idx] & 0x0000FFFFu;
-        output_data[word_idx] = existing | (bits << 16);
+    uint half_idx = element_idx % 2;
+    uint fbits = floatBitsToUint(value);
+    uint bits = ((fbits + 0x7FFFu + ((fbits >> 16) & 1u)) >> 16) & 0xFFFFu;
+    uint shift = half_idx * 16;
+    uint mask = 0xFFFFu << shift;
+
+    uint old_val = output_data[word_idx];
+    uint new_val, expected;
+    for (uint iter = 0u; iter < 65536u; iter++) {
+        expected = old_val;
+        new_val = (expected & ~mask) | (bits << shift);
+        old_val = atomicCompSwap(output_data[word_idx], expected, new_val);
+        if (old_val == expected) return;
     }
+    // Saturation: do NOT add a non-atomic fallback store — it would clobber the
+    // neighbouring packed half-word.
 }
 
 void main() {

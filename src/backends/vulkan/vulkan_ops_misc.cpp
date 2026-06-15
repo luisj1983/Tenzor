@@ -261,9 +261,27 @@ auto VulkanBackend::dispatchFull(const std::vector<int64_t>& shape, double value
         push_constants_i64.n_elements = static_cast<uint32_t>(output.numel());
         // Convert the fill value to its 64-bit bit pattern (Int64 or UInt64)
         // and split into two uint32 halves for the push constant.
-        uint64_t bits64 = (dtype == DType::UInt64)
-            ? static_cast<uint64_t>(value)
-            : static_cast<uint64_t>(static_cast<int64_t>(value));
+        //
+        // `value` is a double. INT64_MAX (2^63-1) rounds up to exactly 2^63 in
+        // double, and casting 2^63 to int64_t is undefined behaviour (often
+        // wraps to INT64_MIN). Clamp the double to the representable signed
+        // range first so the common sort-padding sentinel (INT64_MAX) maps to
+        // the true maximum rather than wrapping negative. The same care covers
+        // UInt64's upper extreme (2^64).
+        uint64_t bits64;
+        if (dtype == DType::UInt64) {
+            constexpr double kUMax = 18446744073709551615.0;  // 2^64 - 1 (rounds to 2^64)
+            bits64 = (value >= kUMax) ? std::numeric_limits<uint64_t>::max()
+                   : (value <= 0.0)   ? 0u
+                   : static_cast<uint64_t>(value);
+        } else {
+            constexpr double kIMax = 9223372036854775807.0;   // INT64_MAX (rounds to 2^63)
+            constexpr double kIMin = -9223372036854775808.0;  // INT64_MIN (exactly representable)
+            int64_t iv = (value >= kIMax) ? std::numeric_limits<int64_t>::max()
+                       : (value <= kIMin) ? std::numeric_limits<int64_t>::min()
+                       : static_cast<int64_t>(value);
+            bits64 = static_cast<uint64_t>(iv);
+        }
         push_constants_i64.value_low = static_cast<uint32_t>(bits64 & 0xFFFFFFFFu);
         push_constants_i64.value_high = static_cast<uint32_t>((bits64 >> 32) & 0xFFFFFFFFu);
 
@@ -1738,13 +1756,44 @@ auto VulkanBackend::dispatchArgSort(const Tensor& input, int64_t dim, bool desce
         return dispatchContiguous(dispatchPermute(indices_t, inv_perm));
     }
 
-    // For large arrays (> 65K), use GPU radix sort instead of bitonic
+    // For large arrays (> 65K), use GPU radix sort instead of bitonic.
     if (sort_size > 65536) {
-        // Flatten last dim, radix sort, unflatten
-        auto flat = input.contiguous();
-        auto [sorted_vals, sorted_indices] = dispatchRadixSort(flat, descending);
-        // The radix sort returns Int64 indices already
-        return sorted_indices;
+        Tensor contig = input.contiguous();
+
+        // Number of independent slices (everything before the last dim).
+        int64_t n_slices = 1;
+        for (int i = 0; i < ndim - 1; ++i) n_slices *= input_shape[i];
+
+        std::vector<int64_t> shape_vec(input_shape.begin(), input_shape.end());
+        Tensor out_indices(shape_vec, DType::Int64, input.device());
+
+        if (n_slices == 1) {
+            // Effectively 1-D: a single radix sort over the whole buffer is
+            // exactly the per-slice result.
+            auto [sorted_vals, sorted_indices] = dispatchRadixSort(contig, descending);
+            return sorted_indices;  // radix sort returns slice-local Int64 indices
+        }
+
+        // Multi-row with last dim > 65536: radix-sort each slice independently
+        // so rows never mix and indices stay slice-local. Sorting the whole
+        // flattened buffer would interleave rows and return global indices.
+        int32_t device_id = input.device().index;
+        size_t slice_val_bytes = static_cast<size_t>(sort_size) * dtype_size(input.dtype());
+        size_t slice_idx_bytes = static_cast<size_t>(sort_size) * sizeof(int64_t);
+        for (int64_t slice = 0; slice < n_slices; ++slice) {
+            Tensor slice_data({sort_size}, input.dtype(), input.device());
+            copy(slice_data.data_ptr(),
+                 static_cast<const char*>(contig.data_ptr()) + slice * slice_val_bytes,
+                 slice_val_bytes, CopyKind::DeviceToDevice);
+            synchronize(device_id);
+
+            auto [sv, si] = dispatchRadixSort(slice_data, descending);
+
+            copy(static_cast<char*>(out_indices.data_ptr()) + slice * slice_idx_bytes,
+                 si.data_ptr(), slice_idx_bytes, CopyKind::DeviceToDevice);
+            synchronize(device_id);
+        }
+        return out_indices;
     }
 
     if (sort_size <= 1) {
@@ -1777,16 +1826,19 @@ auto VulkanBackend::dispatchArgSort(const Tensor& input, int64_t dim, bool desce
     Tensor work_values({static_cast<int64_t>(padded_n)}, work_dtype, input.device());
     Tensor work_indices({static_cast<int64_t>(padded_n)}, DType::Int32, input.device());
 
-    float pad_value = descending ? -std::numeric_limits<float>::infinity()
-                                 : std::numeric_limits<float>::infinity();
-    // For integer types, use max/min as pad value (float approximation is fine
-    // for padding — padded elements just need to sort to the end)
+    // Keep the pad value as a double so integer sentinels survive without the
+    // extra float-truncation step (float can't represent INT64_MAX/MIN
+    // exactly, and 2^63 cast back to int64 is UB → INT64_MIN, which would sort
+    // ascending padding to the *front*). dispatchFill now routes Int64 through
+    // dispatchFull's full_i64 path, which writes the exact 64-bit sentinel.
+    double pad_value = descending ? -std::numeric_limits<double>::infinity()
+                                  : std::numeric_limits<double>::infinity();
     if (work_dtype == DType::Int32) {
-        pad_value = descending ? static_cast<float>(std::numeric_limits<int32_t>::min())
-                               : static_cast<float>(std::numeric_limits<int32_t>::max());
+        pad_value = descending ? static_cast<double>(std::numeric_limits<int32_t>::min())
+                               : static_cast<double>(std::numeric_limits<int32_t>::max());
     } else if (work_dtype == DType::Int64) {
-        pad_value = descending ? static_cast<float>(std::numeric_limits<int64_t>::min())
-                               : static_cast<float>(std::numeric_limits<int64_t>::max());
+        pad_value = descending ? static_cast<double>(std::numeric_limits<int64_t>::min())
+                               : static_cast<double>(std::numeric_limits<int64_t>::max());
     }
 
     size_t values_bytes = padded_n * elem_size;

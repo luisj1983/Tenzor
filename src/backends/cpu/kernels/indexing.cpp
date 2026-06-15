@@ -74,6 +74,27 @@ void index_select_impl(const T* in_data, T* out_data,
     }
 }
 
+// Validate PyTorch's gather/scatter shape contract: index.size(d) <= self.size(d)
+// for every non-(gather/scatter) dimension d. Without this, the flat-index
+// arithmetic (output_idx += coord * input_strides[d], coord in [0, index_shape[d]))
+// can run past the input/output buffer and corrupt the heap (OOB read/write).
+inline void validate_index_within_input(const std::string& op_name,
+                                        const std::vector<int64_t>& input_shape,
+                                        const std::vector<int64_t>& index_shape,
+                                        int64_t dim) {
+    for (size_t d = 0; d < index_shape.size(); ++d) {
+        if (static_cast<int64_t>(d) == dim) continue;
+        if (index_shape[d] > input_shape[d]) {
+            throw std::out_of_range(
+                op_name + ": index.size(" + std::to_string(d) + ")=" +
+                std::to_string(index_shape[d]) +
+                " exceeds self.size(" + std::to_string(d) + ")=" +
+                std::to_string(input_shape[d]) +
+                " (index extent must be <= input extent on non-scatter/gather dims)");
+        }
+    }
+}
+
 // Template helper for gather inner loop
 template<typename T>
 void gather_impl(const T* input_ptr, T* output_ptr,
@@ -328,6 +349,9 @@ auto gather_kernel(const Tensor& input, int64_t dim, const Tensor& index) -> Ten
         throw std::invalid_argument("gather: input and index must have same number of dimensions");
     }
 
+    // Enforce index.size(d) <= self.size(d) for d != dim to prevent OOB reads.
+    detail::validate_index_within_input("gather", input_shape, index_shape, dim);
+
     // Output has same shape as index
     Tensor output(index_shape, input_c.dtype(), input_c.device());
 
@@ -404,6 +428,9 @@ auto scatter_kernel(const Tensor& input, int64_t dim, const Tensor& index, const
         throw std::invalid_argument("scatter: input and index must have same number of dimensions");
     }
 
+    // Enforce index.size(d) <= self.size(d) for d != dim to prevent OOB writes.
+    detail::validate_index_within_input("scatter", input_shape, index_shape, dim);
+
     // Create output as copy of input
     Tensor output(input_shape, input_c.dtype(), input_c.device());
 
@@ -474,6 +501,9 @@ auto scatter_add_kernel(const Tensor& input, int64_t dim, const Tensor& index, c
     if (input_shape.size() != index_shape.size()) {
         throw std::invalid_argument("scatter_add: input and index must have same number of dimensions");
     }
+
+    // Enforce index.size(d) <= self.size(d) for d != dim to prevent OOB writes.
+    detail::validate_index_within_input("scatter_add", input_shape, index_shape, dim);
 
     Tensor output(input_shape, input_c.dtype(), input_c.device());
 
@@ -599,6 +629,9 @@ auto scatter_reduce_kernel(const Tensor& input, int64_t dim, const Tensor& index
     if (input_shape.size() != index_shape.size()) {
         throw std::invalid_argument("scatter_reduce: input and index must have same number of dimensions");
     }
+
+    // Enforce index.size(d) <= self.size(d) for d != dim to prevent OOB writes.
+    detail::validate_index_within_input("scatter_reduce", input_shape, index_shape, dim);
 
     // Validate reduce mode early
     if (reduce != "sum" && reduce != "prod" && reduce != "mean" &&
@@ -1198,10 +1231,22 @@ auto put_kernel(Tensor& input, const Tensor& indices, const Tensor& source,
     const int64_t input_numel = input.numel();
     const int64_t* idx_data = indices.data<int64_t>();
 
+    // PyTorch's Tensor.put_ requires source to have at least as many elements as
+    // indices; a smaller source would cause an OOB read of source (src_*[i] /
+    // src_data + i*elem_size for i in [0, num_indices)).
+    if (source.numel() < num_indices) {
+        throw std::out_of_range("put: source has fewer elements (" +
+            std::to_string(source.numel()) + ") than indices (" +
+            std::to_string(num_indices) + ")");
+    }
+
     Tensor result = input.is_contiguous() ? input : input.contiguous();
+    // Source is read in flat order; a non-contiguous source view would be read
+    // with the wrong layout, so materialize a contiguous copy.
+    Tensor source_c = source.is_contiguous() ? source : source.contiguous();
     const size_t elem_size = dtype_size(result.dtype());
     auto* dst = result.data<uint8_t>();
-    const auto* src_data = static_cast<const uint8_t*>(source.data<uint8_t>());
+    const auto* src_data = static_cast<const uint8_t*>(source_c.data<uint8_t>());
 
     // Pre-validate all indices sequentially to avoid OOB writes.
     for (int64_t i = 0; i < num_indices; ++i) {
@@ -1216,7 +1261,7 @@ auto put_kernel(Tensor& input, const Tensor& indices, const Tensor& source,
 
     if (accumulate && result.dtype() == DType::Float32) {
         float* dst_f = result.data<float>();
-        const float* src_f = source.data<float>();
+        const float* src_f = source_c.data<float>();
         for (int64_t i = 0; i < num_indices; ++i) {
             int64_t idx = idx_data[i];
             if (idx < 0) idx += input_numel;
@@ -1224,7 +1269,7 @@ auto put_kernel(Tensor& input, const Tensor& indices, const Tensor& source,
         }
     } else if (accumulate && result.dtype() == DType::Float64) {
         double* dst_d = result.data<double>();
-        const double* src_d = source.data<double>();
+        const double* src_d = source_c.data<double>();
         for (int64_t i = 0; i < num_indices; ++i) {
             int64_t idx = idx_data[i];
             if (idx < 0) idx += input_numel;
@@ -1362,6 +1407,16 @@ auto bincount_kernel(const Tensor& input, const Tensor* weights, int64_t minleng
     Tensor output({output_size}, out_dtype, input.device());
 
     if (has_weights) {
+        // PyTorch requires weights and input to have the same shape; a smaller
+        // weights buffer would cause an OOB read of w[i] for i in [0, n).
+        if (weights->numel() != n) {
+            throw std::runtime_error("bincount: weights must have the same length as input (" +
+                std::to_string(weights->numel()) + " vs " + std::to_string(n) + ")");
+        }
+        // Weights are read in flat order; force contiguous so a non-contiguous
+        // view is not read with the wrong layout.
+        Tensor weights_c = weights->is_contiguous() ? *weights : weights->contiguous();
+
         auto* out = output.data<double>();
         std::memset(out, 0, static_cast<size_t>(output_size) * sizeof(double));
 
@@ -1372,19 +1427,19 @@ auto bincount_kernel(const Tensor& input, const Tensor* weights, int64_t minleng
             return static_cast<int64_t>(input.data<int32_t>()[i]);
         };
 
-        if (weights->dtype() == DType::Float32) {
-            const auto* w = weights->data<float>();
+        if (weights_c.dtype() == DType::Float32) {
+            const auto* w = weights_c.data<float>();
             for (int64_t i = 0; i < n; ++i) {
                 out[get_idx(i)] += static_cast<double>(w[i]);
             }
-        } else if (weights->dtype() == DType::Float64) {
-            const auto* w = weights->data<double>();
+        } else if (weights_c.dtype() == DType::Float64) {
+            const auto* w = weights_c.data<double>();
             for (int64_t i = 0; i < n; ++i) {
                 out[get_idx(i)] += w[i];
             }
         } else {
             // Convert weights to Float64
-            auto w_f64 = weights->to(DType::Float64);
+            auto w_f64 = weights_c.to(DType::Float64);
             const auto* w = w_f64.data<double>();
             for (int64_t i = 0; i < n; ++i) {
                 out[get_idx(i)] += w[i];

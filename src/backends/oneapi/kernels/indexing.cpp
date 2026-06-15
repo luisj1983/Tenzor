@@ -305,60 +305,70 @@ auto scatter_kernel(const Tensor& input, int64_t dim, const Tensor& index_in,
     const int64_t numel = index.numel();
 
     // Copy vectors to arrays for device copyability (max 8 dimensions)
-    int64_t input_shape_arr[8], input_strides_arr[8], index_strides_arr[8];
+    int64_t input_strides_arr[8], index_strides_arr[8];
     const size_t ndims = index_shape.size();
     if (ndims > 8) throw std::invalid_argument("oneapi indexing: tensor rank > 8 is unsupported (on-device stride arrays are fixed at 8 dims)");
+    if (input_shape.size() != ndims) {
+        throw std::invalid_argument("scatter: index and self must have the same number of dimensions");
+    }
     for (size_t i = 0; i < ndims && i < 8; ++i) {
-        input_shape_arr[i] = input_shape[i];
         input_strides_arr[i] = input_strides[i];
         index_strides_arr[i] = index_strides[i];
     }
 
-    // Deterministic scatter: one work-item per OUTPUT scatter-dim position.
-    // For each (outer, inner, out_dim) triple, scan forward over the
-    // index's scatter dimension and keep the LAST matching src entry — this
-    // matches PyTorch's "last write wins" semantics and, critically,
-    // produces deterministic output even when the index tensor contains
-    // duplicates (which would race under the previous src-iteration
-    // kernel and break gradcheck numerical/analytical parity).
-    const int64_t index_dim_size = index_shape[dim];
     const int64_t input_dim_size = input_shape[dim];
-
-    // Compute outer_size (product of dims before dim) and inner_size (after dim)
-    int64_t outer_size = 1;
-    for (int64_t d = 0; d < dim; ++d) outer_size *= input_shape[d];
-    int64_t inner_size = 1;
-    for (size_t d = dim + 1; d < ndims; ++d) inner_size *= input_shape[d];
+    const int64_t index_dim_size = index_shape[dim];
+    const int64_t idx_dim_stride = index_strides[dim];
+    const int64_t ndim = static_cast<int64_t>(ndims);
 
     const int64_t* index_ptr = get_data_ptr<const int64_t>(index);
 
+    // Deterministic scatter: one work-item per INDEX element. Addressing the
+    // index/src buffers uses the INDEX's own (smaller-or-equal) extents and
+    // strides — never the input's — so an index/src smaller than self along any
+    // non-scatter dim is handled correctly with no out-of-bounds reads. Each
+    // item decomposes its flat position into per-dim coords via index strides,
+    // maps the non-scatter coords directly onto the output (they share dim
+    // order, index.size(d) <= self.size(d)) and uses the index value for the
+    // scatter dim. For PyTorch "last write wins" determinism with duplicate
+    // targets, an item only writes if no LATER element along the index scatter
+    // dim in the same column targets the same output slot.
     auto run = [&]<typename T>() {
         T* output_ptr = get_data_ptr<T>(output);
         const T* src_ptr = get_data_ptr<const T>(src);
         queue.parallel_for(
-            sycl::range<3>(static_cast<size_t>(outer_size),
-                           static_cast<size_t>(input_dim_size),
-                           static_cast<size_t>(inner_size)),
-            [=](sycl::id<3> id) {
-                int64_t o = id[0];
-                int64_t out_d = id[1];
-                int64_t inner = id[2];
-                int64_t out_pos = (o * input_dim_size + out_d) * inner_size + inner;
+            sycl::range<1>(static_cast<size_t>(numel)),
+            [=](sycl::id<1> id) {
+                const int64_t flat = id[0];
 
-                // Scan over the index scatter dim; remember the last k whose
-                // idx[o, k, inner] == out_d so the result is deterministic.
-                int64_t last_k = -1;
-                for (int64_t k = 0; k < index_dim_size; ++k) {
-                    int64_t idx_pos = (o * index_dim_size + k) * inner_size + inner;
-                    int64_t v = index_ptr[idx_pos];
-                    if (v < 0) v += input_dim_size;
-                    if (v == out_d) last_k = k;
+                // Decompose flat index position into per-dim coords (index strides)
+                // and accumulate the output offset (input strides). The scatter-dim
+                // coordinate k and the target value v are tracked separately.
+                int64_t remaining = flat;
+                int64_t out_offset = 0;
+                int64_t k = 0;
+                for (int64_t d = 0; d < ndim; ++d) {
+                    int64_t coord = remaining / index_strides_arr[d];
+                    remaining %= index_strides_arr[d];
+                    if (d == dim) {
+                        k = coord;
+                    } else {
+                        out_offset += coord * input_strides_arr[d];
+                    }
                 }
-                if (last_k >= 0) {
-                    int64_t src_pos = (o * index_dim_size + last_k) * inner_size + inner;
-                    output_ptr[out_pos] = src_ptr[src_pos];
+
+                int64_t v = index_ptr[flat];
+                if (v < 0) v += input_dim_size;
+
+                // Last-write-wins: skip if a later k' in the same column targets v.
+                for (int64_t kp = k + 1; kp < index_dim_size; ++kp) {
+                    int64_t vp = index_ptr[flat + (kp - k) * idx_dim_stride];
+                    if (vp < 0) vp += input_dim_size;
+                    if (vp == v) return;  // a later element wins
                 }
-                // else: output_ptr[out_pos] already holds the memcpy'd input value
+
+                out_offset += v * input_strides_arr[dim];
+                output_ptr[out_offset] = src_ptr[flat];
             }).wait();
     };
 

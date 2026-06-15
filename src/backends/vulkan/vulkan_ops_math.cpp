@@ -95,13 +95,21 @@ auto VulkanBackend::dispatchBinaryOp(const std::string& op_name,
     if ((is_complex64 || is_complex128) && opcode <= 3) {
         Tensor output(output_shape, a.dtype(), a.device());
 
+        // The complex shaders (same-shape and broadcast) index from physical
+        // offset 0 and, in the broadcast path, derive strides purely from the
+        // logical shape — i.e. they assume a contiguous, zero-offset layout.
+        // Sliced/permuted views would otherwise read the wrong elements, so
+        // materialize contiguous operands before binding.
+        Tensor a_cx = (a.offset() != 0 || !a.is_contiguous()) ? dispatchContiguous(a) : a;
+        Tensor b_cx = (b.offset() != 0 || !b.is_contiguous()) ? dispatchContiguous(b) : b;
+
         // Buffer sizes: complex elements are stored as interleaved real/imag pairs
-        size_t buffer_size_a = a.numel() * a.dtype_size();
-        size_t buffer_size_b = b.numel() * b.dtype_size();
+        size_t buffer_size_a = a_cx.numel() * a_cx.dtype_size();
+        size_t buffer_size_b = b_cx.numel() * b_cx.dtype_size();
         size_t buffer_size_out = out_numel * output.dtype_size();
 
-        const void* buffer_a = a.data_ptr();
-        const void* buffer_b = b.data_ptr();
+        const void* buffer_a = a_cx.data_ptr();
+        const void* buffer_b = b_cx.data_ptr();
         const void* buffer_out = output.data_ptr();
 
         if (!same_shape) {
@@ -391,21 +399,26 @@ auto VulkanBackend::dispatchBinaryOp(const std::string& op_name,
             push_constants.shape_out[i] = static_cast<uint32_t>(output_shape[i]);
         }
 
-        // Get VkBuffer handles
-        const void* buffer_a = a.data_ptr();
-        const void* buffer_b = b.data_ptr();
+        // Get VkBuffer handles.  The broadcast shader derives physical strides
+        // purely from the logical shape (compute_broadcast_strides above), i.e.
+        // it assumes a contiguous, zero-offset layout.  A sliced/permuted view
+        // would be indexed at the wrong physical elements, so bind the
+        // contiguous, zero-offset operands (a_op/b_op) materialized earlier,
+        // mirroring the same-shape fast path.
+        const void* buffer_a = a_op.data_ptr();
+        const void* buffer_b = b_op.data_ptr();
         const void* buffer_out = output.data_ptr();
 
         // Calculate buffer sizes
         // For Float16, the shader works with uint32 (packed pairs), so descriptor size needs
         // to cover the full uint32 reads/writes
-        size_t buffer_size_a = a.numel() * a.dtype_size();
-        size_t buffer_size_b = b.numel() * b.dtype_size();
+        size_t buffer_size_a = a_op.numel() * a_op.dtype_size();
+        size_t buffer_size_b = b_op.numel() * b_op.dtype_size();
         size_t buffer_size_out = output_numel * output.dtype_size();
         if (is_float16 || is_bfloat16_bc) {
             // Round up to 4-byte boundary (minimum uint32 size for shader access)
-            size_t a_pairs = (a.numel() + 1) / 2;
-            size_t b_pairs = (b.numel() + 1) / 2;
+            size_t a_pairs = (a_op.numel() + 1) / 2;
+            size_t b_pairs = (b_op.numel() + 1) / 2;
             size_t out_pairs = (output_numel + 1) / 2;
             buffer_size_a = a_pairs * 4;
             buffer_size_b = b_pairs * 4;

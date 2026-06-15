@@ -645,33 +645,44 @@ auto bucketize_kernel(const Tensor& input, const Tensor& boundaries, bool right)
         throw std::runtime_error("bucketize: boundaries must be 1D");
     }
 
-    Tensor input_f32 = (input.dtype() != DType::Float32) ? input.to(DType::Float32) : input;
-    Tensor bound_f32 = (boundaries.dtype() != DType::Float32) ? boundaries.to(DType::Float32) : boundaries;
-
-    const float* in_data = input_f32.data<float>();
-    const float* b_data = bound_f32.data<float>();
-    int64_t n = input_f32.numel();
-    int64_t nb = bound_f32.numel();
-
     Tensor result(std::vector<int64_t>(input.shape().begin(), input.shape().end()),
                   DType::Int64, input.device());
     int64_t* out_data = result.data<int64_t>();
 
-    #pragma omp parallel for schedule(static) if(n > ::tenzor::OmpThresholds::simple())
-    for (int64_t i = 0; i < n; ++i) {
-        float val = in_data[i];
-        // Binary search
-        int64_t lo = 0, hi = nb;
-        while (lo < hi) {
-            int64_t mid = lo + (hi - lo) / 2;
-            bool go_right = right ? (b_data[mid] <= val) : (b_data[mid] < val);
-            if (go_right) {
-                lo = mid + 1;
-            } else {
-                hi = mid;
+    // Templated binary search; searching in the native dtype avoids the
+    // Float32 down-cast that collapses tightly-spaced Float64 values/boundaries
+    // (PyTorch performs the search at the input precision).
+    auto search = [&](const auto* in_data, const auto* b_data, int64_t n, int64_t nb) {
+        #pragma omp parallel for schedule(static) if(n > ::tenzor::OmpThresholds::simple())
+        for (int64_t i = 0; i < n; ++i) {
+            auto val = in_data[i];
+            int64_t lo = 0, hi = nb;
+            while (lo < hi) {
+                int64_t mid = lo + (hi - lo) / 2;
+                bool go_right = right ? (b_data[mid] <= val) : (b_data[mid] < val);
+                if (go_right) {
+                    lo = mid + 1;
+                } else {
+                    hi = mid;
+                }
             }
+            out_data[i] = lo;
         }
-        out_data[i] = lo;
+    };
+
+    if (input.dtype() == DType::Float64 || boundaries.dtype() == DType::Float64) {
+        // Native Float64 path: widen both operands to double (lossless for
+        // Float32/integer inputs) and search at double precision.
+        Tensor input_f64 = (input.dtype() != DType::Float64) ? input.to(DType::Float64) : input;
+        Tensor bound_f64 = (boundaries.dtype() != DType::Float64) ? boundaries.to(DType::Float64) : boundaries;
+        search(input_f64.data<double>(), bound_f64.data<double>(),
+               input_f64.numel(), bound_f64.numel());
+    } else {
+        // Float32/Float16/BFloat16/integer: search in Float32.
+        Tensor input_f32 = (input.dtype() != DType::Float32) ? input.to(DType::Float32) : input;
+        Tensor bound_f32 = (boundaries.dtype() != DType::Float32) ? boundaries.to(DType::Float32) : boundaries;
+        search(input_f32.data<float>(), bound_f32.data<float>(),
+               input_f32.numel(), bound_f32.numel());
     }
 
     return result;
@@ -1288,42 +1299,52 @@ auto histc_kernel(const Tensor& input, int64_t bins, double min_val, double max_
         throw std::runtime_error("histc: bins must be positive");
     }
     Tensor cont = input.is_contiguous() ? input : input.contiguous();
-    Tensor input_f32 = (cont.dtype() != DType::Float32) ? cont.to(DType::Float32) : cont;
 
-    const float* data = input_f32.data<float>();
-    int64_t n = input_f32.numel();
-
-    // Auto-detect min/max if both are zero (PyTorch convention)
-    float lo = static_cast<float>(min_val);
-    float hi = static_cast<float>(max_val);
-    if (lo == 0.0f && hi == 0.0f) {
-        lo = std::numeric_limits<float>::max();
-        hi = std::numeric_limits<float>::lowest();
-        for (int64_t i = 0; i < n; ++i) {
-            if (data[i] < lo) lo = data[i];
-            if (data[i] > hi) hi = data[i];
+    // PyTorch's torch.histc returns a tensor of the input dtype and bins at the
+    // input precision. Use a native Float64 path for Float64 input so values
+    // near bin edges or beyond float32 precision land in the correct bin and the
+    // returned dtype matches; keep the Float32 path for Float32/half inputs.
+    auto histogram = [&]<typename T>(const T* data, int64_t n, T* out_data) {
+        // Auto-detect min/max if both are zero (PyTorch convention)
+        T lo = static_cast<T>(min_val);
+        T hi = static_cast<T>(max_val);
+        if (lo == T(0) && hi == T(0)) {
+            lo = std::numeric_limits<T>::max();
+            hi = std::numeric_limits<T>::lowest();
+            for (int64_t i = 0; i < n; ++i) {
+                if (data[i] < lo) lo = data[i];
+                if (data[i] > hi) hi = data[i];
+            }
         }
+
+        if (lo >= hi) {
+            // When min == max, all elements go into the first bin
+            hi = lo + T(1);
+        }
+
+        std::memset(out_data, 0, bins * sizeof(T));
+        T bin_width = (hi - lo) / static_cast<T>(bins);
+
+        for (int64_t i = 0; i < n; ++i) {
+            T val = data[i];
+            if (val < lo || val > hi) continue;
+            int64_t bin = static_cast<int64_t>((val - lo) / bin_width);
+            if (bin >= bins) bin = bins - 1;  // clamp right edge
+            out_data[bin] += T(1);
+        }
+    };
+
+    if (cont.dtype() == DType::Float64) {
+        Tensor output({bins}, DType::Float64, input.device());
+        histogram.template operator()<double>(cont.data<double>(), cont.numel(),
+                                               output.data<double>());
+        return output;
     }
 
-    if (lo >= hi) {
-        // When min == max, all elements go into the first bin
-        hi = lo + 1.0f;
-    }
-
+    Tensor input_f32 = (cont.dtype() != DType::Float32) ? cont.to(DType::Float32) : cont;
     Tensor output({bins}, DType::Float32, input.device());
-    float* out_data = output.data<float>();
-    std::memset(out_data, 0, bins * sizeof(float));
-
-    float bin_width = (hi - lo) / static_cast<float>(bins);
-
-    for (int64_t i = 0; i < n; ++i) {
-        float val = data[i];
-        if (val < lo || val > hi) continue;
-        int64_t bin = static_cast<int64_t>((val - lo) / bin_width);
-        if (bin >= bins) bin = bins - 1;  // clamp right edge
-        out_data[bin] += 1.0f;
-    }
-
+    histogram.template operator()<float>(input_f32.data<float>(), input_f32.numel(),
+                                         output.data<float>());
     return output;
 }
 

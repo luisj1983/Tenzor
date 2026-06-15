@@ -43,9 +43,15 @@ foreach(SHADER_FILE ${SHADER_FILES})
     # HH.9: 'conv2d' is the dead pre-im2col path with a mismatched
     # 18-uint push-constant struct — moved to kernels/_disabled/, but
     # guard the embed list so accidental re-adds don't trap getPipeline.
+    # linalg_bidiag_svd{,_f64} are the abandoned Golub-Kahan bidiagonal SVD
+    # pipelines: the SVD dispatch uses Jacobi (linalg_svd / linalg_svd_global),
+    # so these had no caller and shipped unvalidated. Moved to kernels/_disabled/;
+    # guard here too against accidental re-adds.
     if(NOT SHADER_NAME STREQUAL "reduction_subgroup" AND
        NOT SHADER_NAME STREQUAL "reduction_tree" AND
-       NOT SHADER_NAME STREQUAL "conv2d")
+       NOT SHADER_NAME STREQUAL "conv2d" AND
+       NOT SHADER_NAME STREQUAL "linalg_bidiag_svd" AND
+       NOT SHADER_NAME STREQUAL "linalg_bidiag_svd_f64")
         list(APPEND SHADERS ${SHADER_NAME})
     endif()
 endforeach()

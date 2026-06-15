@@ -236,7 +236,7 @@ __global__ void fused_batchnorm_relu_kernel(
         int64_t c = (idx / spatial_size) % num_features;
         int64_t n = idx / (spatial_size * num_features);
 
-        T normalized = (input[idx] - mean[c]) * rsqrtf(var[c] + eps);
+        T normalized = (input[idx] - mean[c]) * (T(1) / sqrt(var[c] + eps));
         T scaled = normalized * gamma[c] + beta[c];
 
         // ReLU
@@ -899,7 +899,7 @@ __global__ void fused_conv_batchnorm_relu_kernel(
         int64_t n = idx / (spatial_size * num_features);
 
         // BatchNorm
-        T normalized = (conv_output[idx] - mean[c]) * rsqrtf(var[c] + eps);
+        T normalized = (conv_output[idx] - mean[c]) * (T(1) / sqrt(var[c] + eps));
         T scaled = normalized * gamma[c] + beta[c];
 
         // ReLU
@@ -2385,33 +2385,34 @@ __global__ void fused_sgd_kernel(
     bool nesterov,
     bool has_momentum_buffer
 ) {
-    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx >= numel) return;
+    const int64_t stride = int64_t(blockDim.x) * gridDim.x;
+    for (int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+         idx < numel; idx += stride) {
+        T g = grad[idx];
+        T p = param[idx];
 
-    T g = grad[idx];
-    T p = param[idx];
-
-    // Apply weight decay
-    if (weight_decay > 0.0f) {
-        g = g + T(weight_decay) * p;
-    }
-
-    if (has_momentum_buffer && momentum > 0.0f) {
-        T v = momentum_buffer[idx];
-
-        // Update momentum buffer
-        v = T(momentum) * v + T(1.0f - dampening) * g;
-        momentum_buffer[idx] = v;
-
-        if (nesterov) {
-            g = g + T(momentum) * v;
-        } else {
-            g = v;
+        // Apply weight decay
+        if (weight_decay > 0.0f) {
+            g = g + T(weight_decay) * p;
         }
-    }
 
-    // Update parameter
-    param[idx] = p - T(lr) * g;
+        if (has_momentum_buffer && momentum > 0.0f) {
+            T v = momentum_buffer[idx];
+
+            // Update momentum buffer
+            v = T(momentum) * v + T(1.0f - dampening) * g;
+            momentum_buffer[idx] = v;
+
+            if (nesterov) {
+                g = g + T(momentum) * v;
+            } else {
+                g = v;
+            }
+        }
+
+        // Update parameter
+        param[idx] = p - T(lr) * g;
+    }
 }
 
 auto fused_sgd_step_hip(
@@ -2499,50 +2500,51 @@ __global__ void fused_adam_kernel(
     bool amsgrad,
     bool decoupled_weight_decay
 ) {
-    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx >= numel) return;
-
-    T g = grad[idx];
-    T p = param[idx];
-    T m = exp_avg[idx];
-    T v = exp_avg_sq[idx];
-
     double step_size = lr / bias_correction1;
     double bc2_inv = 1.0 / bias_correction2;
 
-    // L2 regularization (added to grad)
-    if (weight_decay > 0.0 && !decoupled_weight_decay) {
-        g = g + T(weight_decay) * p;
+    const int64_t stride = int64_t(blockDim.x) * gridDim.x;
+    for (int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+         idx < numel; idx += stride) {
+        T g = grad[idx];
+        T p = param[idx];
+        T m = exp_avg[idx];
+        T v = exp_avg_sq[idx];
+
+        // L2 regularization (added to grad)
+        if (weight_decay > 0.0 && !decoupled_weight_decay) {
+            g = g + T(weight_decay) * p;
+        }
+
+        // Update biased first moment estimate
+        m = T(beta1) * m + T(1.0 - beta1) * g;
+
+        // Update biased second raw moment estimate
+        v = T(beta2) * v + T(1.0 - beta2) * g * g;
+
+        // Bias-corrected second moment
+        T v_hat = v * T(bc2_inv);
+
+        if (amsgrad && max_exp_avg_sq) {
+            T max_v = max_exp_avg_sq[idx];
+            if (v_hat > max_v) max_v = v_hat;
+            max_exp_avg_sq[idx] = max_v;
+            v_hat = max_v;
+        }
+
+        // Decoupled weight decay (AdamW)
+        if (weight_decay > 0.0 && decoupled_weight_decay) {
+            p = p * T(1.0 - lr * weight_decay);
+        }
+
+        // Update parameter
+        p = p - T(step_size) * m / (sqrt(v_hat) + T(eps));
+
+        // Store
+        param[idx] = p;
+        exp_avg[idx] = m;
+        exp_avg_sq[idx] = v;
     }
-
-    // Update biased first moment estimate
-    m = T(beta1) * m + T(1.0 - beta1) * g;
-
-    // Update biased second raw moment estimate
-    v = T(beta2) * v + T(1.0 - beta2) * g * g;
-
-    // Bias-corrected second moment
-    T v_hat = v * T(bc2_inv);
-
-    if (amsgrad && max_exp_avg_sq) {
-        T max_v = max_exp_avg_sq[idx];
-        if (v_hat > max_v) max_v = v_hat;
-        max_exp_avg_sq[idx] = max_v;
-        v_hat = max_v;
-    }
-
-    // Decoupled weight decay (AdamW)
-    if (weight_decay > 0.0 && decoupled_weight_decay) {
-        p = p * T(1.0 - lr * weight_decay);
-    }
-
-    // Update parameter
-    p = p - T(step_size) * m / (sqrt(v_hat) + T(eps));
-
-    // Store
-    param[idx] = p;
-    exp_avg[idx] = m;
-    exp_avg_sq[idx] = v;
 }
 
 auto fused_adam_step_hip(
@@ -2896,39 +2898,40 @@ __global__ void fused_adam_atan2_kernel(
     float bias_correction2,
     bool amsgrad
 ) {
-    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx >= numel) return;
+    const int64_t stride = int64_t(blockDim.x) * gridDim.x;
+    for (int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+         idx < numel; idx += stride) {
+        T g = grad[idx];
+        T p = param[idx];
+        T m = exp_avg[idx];
+        T v = exp_avg_sq[idx];
 
-    T g = grad[idx];
-    T p = param[idx];
-    T m = exp_avg[idx];
-    T v = exp_avg_sq[idx];
+        m = T(beta1) * m + T(1.0f - beta1) * g;
+        v = T(beta2) * v + T(1.0f - beta2) * g * g;
 
-    m = T(beta1) * m + T(1.0f - beta1) * g;
-    v = T(beta2) * v + T(1.0f - beta2) * g * g;
+        T m_hat = m / T(bias_correction1);
+        T v_hat = v / T(bias_correction2);
 
-    T m_hat = m / T(bias_correction1);
-    T v_hat = v / T(bias_correction2);
+        if (amsgrad && max_exp_avg_sq != nullptr) {
+            T max_v = max_exp_avg_sq[idx];
+            if (v_hat > max_v) max_v = v_hat;
+            max_exp_avg_sq[idx] = max_v;
+            v_hat = max_v;
+        }
 
-    if (amsgrad && max_exp_avg_sq != nullptr) {
-        T max_v = max_exp_avg_sq[idx];
-        if (v_hat > max_v) max_v = v_hat;
-        max_exp_avg_sq[idx] = max_v;
-        v_hat = max_v;
+        if (weight_decay > 0.0f) {
+            p = p * (T(1) - T(lr) * T(weight_decay));
+        }
+
+        T denom = sqrt(v_hat) + T(eps);
+        T update = atan2(m_hat, denom);
+
+        p = p - T(lr) * update;
+
+        param[idx] = p;
+        exp_avg[idx] = m;
+        exp_avg_sq[idx] = v;
     }
-
-    if (weight_decay > 0.0f) {
-        p = p * (T(1) - T(lr) * T(weight_decay));
-    }
-
-    T denom = sqrt(v_hat) + T(eps);
-    T update = atan2(m_hat, denom);
-
-    p = p - T(lr) * update;
-
-    param[idx] = p;
-    exp_avg[idx] = m;
-    exp_avg_sq[idx] = v;
 }
 
 auto fused_adam_atan2_step_hip(

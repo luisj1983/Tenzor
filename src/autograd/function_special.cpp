@@ -51,8 +51,14 @@ auto FusedLinearReLUBackward::backward(std::vector<Tensor> grad_outputs) -> std:
     auto relu_mask = gt(relu_output_, zero_tensor);
     auto masked_grad = mul(grad_output, relu_mask.to(grad_output.dtype()));
 
-    // grad_input = masked_grad @ W (for the input gradient)
-    auto grad_input = matmul(masked_grad, weight);
+    // grad_input = masked_grad @ W^T (for the input gradient).
+    // The fused node replaces MatMul(out = x @ W) -> ReLU. For out = a @ b the
+    // input gradient is grad_a = grad_out @ b^T (cf. MatMulBackward, which
+    // transposes b on its last two axes). The previous code omitted the
+    // transpose: for x[B,in] @ W[in,out] that is a shape mismatch (out vs in)
+    // and for a square W it silently produced a wrong gradient.
+    auto weight_t = weight.transpose(weight.ndim() - 2, weight.ndim() - 1);
+    auto grad_input = matmul(masked_grad, weight_t);
 
     // grad_weight = input^T @ masked_grad (for the weight gradient)
     auto input_t = input.transpose(input.ndim() - 2, input.ndim() - 1);
@@ -70,12 +76,10 @@ auto FusedLinearReLUBackward::backward_with_variables(std::vector<Variable> grad
     // grad_fn — silently severing the graph for `create_graph=true`. Now we
     // compose with autograd-level ops so higher-order grads flow through.
     //
-    // Forward:  z = ReLU(x @ W.T + b)  (PyTorch convention: W shape [out, in])
-    //           but this op stores W as [out, in] and computes
-    //           grad_input = (grad_out * mask) @ W   directly.
+    // Forward:  z = ReLU(x @ W)
     // Backward (linear in grad_out):
     //   masked_grad = grad_out * (z > 0)
-    //   grad_input  = masked_grad @ W
+    //   grad_input  = masked_grad @ W^T   (input gradient for out = x @ W)
     //   grad_weight = x^T @ masked_grad
     //
     // The ReLU mask `(z > 0)` is a non-differentiable constant w.r.t. the
@@ -104,8 +108,13 @@ auto FusedLinearReLUBackward::backward_with_variables(std::vector<Variable> grad
     // masked_grad has grad_fn through grad_out (mask is a constant Variable).
     Variable masked_grad = grad_out * mask_var;
 
-    // grad_input = masked_grad @ W
-    Variable grad_input = matmul(masked_grad, W_var);
+    // grad_input = masked_grad @ W^T. For out = x @ W the input gradient is
+    // grad_x = grad_out @ W^T; transpose W on its last two axes (mirrors
+    // MatMulBackward). Done at the Variable level so the grad_fn chain is
+    // preserved for higher-order (create_graph=true).
+    int64_t Wnd = static_cast<int64_t>(W_var.shape().size());
+    Variable W_t = transpose(W_var, Wnd - 2, Wnd - 1);
+    Variable grad_input = matmul(masked_grad, W_t);
 
     // grad_weight = x^T @ masked_grad
     int64_t xnd = static_cast<int64_t>(x_var.shape().size());

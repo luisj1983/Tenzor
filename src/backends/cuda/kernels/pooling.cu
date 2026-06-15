@@ -198,7 +198,8 @@ __global__ void maxpool2d_backward_f32(
 #if __CUDA_ARCH__ >= 700
         // Warp-level pre-reduction: find threads targeting the same in_idx
         // and sum their values before atomicAdd, reducing contention.
-        // Uses low 32 bits of in_idx for matching (safe for tensors < 2B elements).
+        // Matches on the FULL 64-bit in_idx (low and high halves) so it is
+        // correct for tensors with > 2^32 elements.
         // Use __activemask() — NOT the full 0xFFFFFFFF mask — because this is a
         // grid-stride loop: optimal_launch_config rounds the grid up, so the
         // warp straddling the idx==total boundary has lanes that already exited
@@ -207,7 +208,14 @@ __global__ void maxpool2d_backward_f32(
         // captures exactly the lanes converged here; pass it to both the match
         // and the shuffles so only live lanes participate.
         unsigned int active = __activemask();
-        unsigned int peers = __match_any_sync(active, static_cast<unsigned int>(in_idx));
+        // 64-bit-safe peer grouping: matching only the low 32 bits of the int64
+        // flat index would merge two distinct in_idx values that share their low
+        // 32 bits (possible when grad_input has > 2^32 elements, ~16 GB for f32),
+        // causing the leader to write a combined sum to its in_idx and silently
+        // drop the other element's gradient. Intersect the low- and high-half
+        // matches so only lanes whose FULL 64-bit in_idx is equal are peers.
+        unsigned int peers = __match_any_sync(active, static_cast<unsigned int>(in_idx)) &
+                             __match_any_sync(active, static_cast<unsigned int>(in_idx >> 32));
         int leader = __ffs(peers) - 1;
         int lane = threadIdx.x & 31;
 
@@ -255,7 +263,8 @@ __global__ void maxpool2d_backward_f64(
 #if __CUDA_ARCH__ >= 700
         // Warp-level pre-reduction: find threads targeting the same in_idx
         // and sum their values before atomicAdd, reducing contention.
-        // Uses low 32 bits of in_idx for matching (safe for tensors < 2B elements).
+        // Matches on the FULL 64-bit in_idx (low and high halves) so it is
+        // correct for tensors with > 2^32 elements.
         // Use __activemask() — NOT the full 0xFFFFFFFF mask — because this is a
         // grid-stride loop: optimal_launch_config rounds the grid up, so the
         // warp straddling the idx==total boundary has lanes that already exited
@@ -264,7 +273,14 @@ __global__ void maxpool2d_backward_f64(
         // captures exactly the lanes converged here; pass it to both the match
         // and the shuffles so only live lanes participate.
         unsigned int active = __activemask();
-        unsigned int peers = __match_any_sync(active, static_cast<unsigned int>(in_idx));
+        // 64-bit-safe peer grouping: matching only the low 32 bits of the int64
+        // flat index would merge two distinct in_idx values that share their low
+        // 32 bits (possible when grad_input has > 2^32 elements, ~16 GB for f32),
+        // causing the leader to write a combined sum to its in_idx and silently
+        // drop the other element's gradient. Intersect the low- and high-half
+        // matches so only lanes whose FULL 64-bit in_idx is equal are peers.
+        unsigned int peers = __match_any_sync(active, static_cast<unsigned int>(in_idx)) &
+                             __match_any_sync(active, static_cast<unsigned int>(in_idx >> 32));
         int leader = __ffs(peers) - 1;
         int lane = threadIdx.x & 31;
 
@@ -788,7 +804,14 @@ __global__ void maxpool1d_backward_f32(
         // captures exactly the lanes converged here; pass it to both the match
         // and the shuffles so only live lanes participate.
         unsigned int active = __activemask();
-        unsigned int peers = __match_any_sync(active, static_cast<unsigned int>(in_idx));
+        // 64-bit-safe peer grouping: matching only the low 32 bits of the int64
+        // flat index would merge two distinct in_idx values that share their low
+        // 32 bits (possible when grad_input has > 2^32 elements, ~16 GB for f32),
+        // causing the leader to write a combined sum to its in_idx and silently
+        // drop the other element's gradient. Intersect the low- and high-half
+        // matches so only lanes whose FULL 64-bit in_idx is equal are peers.
+        unsigned int peers = __match_any_sync(active, static_cast<unsigned int>(in_idx)) &
+                             __match_any_sync(active, static_cast<unsigned int>(in_idx >> 32));
         int leader = __ffs(peers) - 1;
         int lane = threadIdx.x & 31;
 
@@ -838,7 +861,14 @@ __global__ void maxpool1d_backward_f64(
         // captures exactly the lanes converged here; pass it to both the match
         // and the shuffles so only live lanes participate.
         unsigned int active = __activemask();
-        unsigned int peers = __match_any_sync(active, static_cast<unsigned int>(in_idx));
+        // 64-bit-safe peer grouping: matching only the low 32 bits of the int64
+        // flat index would merge two distinct in_idx values that share their low
+        // 32 bits (possible when grad_input has > 2^32 elements, ~16 GB for f32),
+        // causing the leader to write a combined sum to its in_idx and silently
+        // drop the other element's gradient. Intersect the low- and high-half
+        // matches so only lanes whose FULL 64-bit in_idx is equal are peers.
+        unsigned int peers = __match_any_sync(active, static_cast<unsigned int>(in_idx)) &
+                             __match_any_sync(active, static_cast<unsigned int>(in_idx >> 32));
         int leader = __ffs(peers) - 1;
         int lane = threadIdx.x & 31;
 
@@ -1686,7 +1716,14 @@ __global__ void maxpool3d_backward_f32(
         // captures exactly the lanes converged here; pass it to both the match
         // and the shuffles so only live lanes participate.
         unsigned int active = __activemask();
-        unsigned int peers = __match_any_sync(active, static_cast<unsigned int>(in_idx));
+        // 64-bit-safe peer grouping: matching only the low 32 bits of the int64
+        // flat index would merge two distinct in_idx values that share their low
+        // 32 bits (possible when grad_input has > 2^32 elements, ~16 GB for f32),
+        // causing the leader to write a combined sum to its in_idx and silently
+        // drop the other element's gradient. Intersect the low- and high-half
+        // matches so only lanes whose FULL 64-bit in_idx is equal are peers.
+        unsigned int peers = __match_any_sync(active, static_cast<unsigned int>(in_idx)) &
+                             __match_any_sync(active, static_cast<unsigned int>(in_idx >> 32));
         int leader = __ffs(peers) - 1;
         int lane = threadIdx.x & 31;
 
@@ -1737,7 +1774,14 @@ __global__ void maxpool3d_backward_f64(
         // captures exactly the lanes converged here; pass it to both the match
         // and the shuffles so only live lanes participate.
         unsigned int active = __activemask();
-        unsigned int peers = __match_any_sync(active, static_cast<unsigned int>(in_idx));
+        // 64-bit-safe peer grouping: matching only the low 32 bits of the int64
+        // flat index would merge two distinct in_idx values that share their low
+        // 32 bits (possible when grad_input has > 2^32 elements, ~16 GB for f32),
+        // causing the leader to write a combined sum to its in_idx and silently
+        // drop the other element's gradient. Intersect the low- and high-half
+        // matches so only lanes whose FULL 64-bit in_idx is equal are peers.
+        unsigned int peers = __match_any_sync(active, static_cast<unsigned int>(in_idx)) &
+                             __match_any_sync(active, static_cast<unsigned int>(in_idx >> 32));
         int leader = __ffs(peers) - 1;
         int lane = threadIdx.x & 31;
 

@@ -166,21 +166,35 @@ auto numerical_gradient(
             if (!sum_plus_cpu.is_contiguous())  sum_plus_cpu  = sum_plus_cpu.contiguous();
             if (!sum_minus_cpu.is_contiguous()) sum_minus_cpu = sum_minus_cpu.contiguous();
 
-            if (f_plus.dtype() == DType::Float32) {
+            // Reduced-precision outputs (e.g. a func that casts a Float32 input
+            // down to Float16/BFloat16) have no dedicated summation branch
+            // below. Widen the CPU copy to Float32 first (widen-narrow pattern)
+            // so total_plus/total_minus are actually populated; otherwise both
+            // stay 0 and the numerical gradient is silently zero for every
+            // element. The output dtype is otherwise unconstrained (the input
+            // guard only restricts the INPUT to Float32/Float64).
+            DType out_dtype = f_plus.dtype();
+            if (out_dtype == DType::Float16 || out_dtype == DType::BFloat16) {
+                sum_plus_cpu  = sum_plus_cpu.to(DType::Float32);
+                sum_minus_cpu = sum_minus_cpu.to(DType::Float32);
+                out_dtype = DType::Float32;
+            }
+
+            if (out_dtype == DType::Float32) {
                 const float* data_p = sum_plus_cpu.data<float>();
                 const float* data_m = sum_minus_cpu.data<float>();
                 for (int64_t j = 0; j < n; ++j) {
                     total_plus += data_p[j];
                     total_minus += data_m[j];
                 }
-            } else if (f_plus.dtype() == DType::Float64) {
+            } else if (out_dtype == DType::Float64) {
                 const double* data_p = sum_plus_cpu.data<double>();
                 const double* data_m = sum_minus_cpu.data<double>();
                 for (int64_t j = 0; j < n; ++j) {
                     total_plus += data_p[j];
                     total_minus += data_m[j];
                 }
-            } else if (f_plus.dtype() == DType::Complex64) {
+            } else if (out_dtype == DType::Complex64) {
                 // For a real-valued input x producing complex y = f(x),
                 // gradcheck reduces y to a real scalar by summing both
                 // real and imaginary parts. Equivalent to evaluating
@@ -194,7 +208,7 @@ auto numerical_gradient(
                     total_minus += static_cast<double>(data_m[j].real())
                                  + static_cast<double>(data_m[j].imag());
                 }
-            } else if (f_plus.dtype() == DType::Complex128) {
+            } else if (out_dtype == DType::Complex128) {
                 const auto* data_p = sum_plus_cpu.data<std::complex<double>>();
                 const auto* data_m = sum_minus_cpu.data<std::complex<double>>();
                 for (int64_t j = 0; j < n; ++j) {

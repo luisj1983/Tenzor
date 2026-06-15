@@ -37,6 +37,19 @@ namespace fe = cudnn_frontend;
 } while(0)
 #endif
 
+// CUDA runtime error checking macro (local to this TU).
+#ifndef TENZOR_SDPA_CUDA_CHECK
+#define TENZOR_SDPA_CUDA_CHECK(call) do { \
+    cudaError_t err = call; \
+    if (err != cudaSuccess) { \
+        throw std::runtime_error( \
+            std::string("CUDA error: ") + cudaGetErrorString(err) + \
+            " at " + __FILE__ + ":" + std::to_string(__LINE__) \
+        ); \
+    } \
+} while(0)
+#endif
+
 namespace tenzor {
 namespace cuda {
 
@@ -46,23 +59,43 @@ namespace {
 // Singleton cuDNN Handle for SDPA operations
 // ============================================================================
 
+// A cuDNN handle is bound to the CUDA device that is current at cudnnCreate()
+// time, and its internal scratch lives on that device. A single global handle
+// created on device 0 is therefore unusable for SDPA that runs on device 1+.
+// We keep one handle per device (lazily created with that device made current),
+// so the handle, its workspace, and the SDPA tensors all share a device.
 class SDPACuDNNHandle {
 public:
-    static cudnnHandle_t get() {
-        static SDPACuDNNHandle instance;
-        return instance.handle_;
+    // Returns the cuDNN handle for `device`, creating it (with `device` made
+    // current) on first use. The caller is responsible for restoring/leaving
+    // the desired current device; cudnn_sdpa_forward sets the device explicitly.
+    static cudnnHandle_t get(int device) {
+        static thread_local std::unordered_map<int, SDPACuDNNHandle> handles;
+        auto it = handles.find(device);
+        if (it == handles.end()) {
+            it = handles.emplace(std::piecewise_construct,
+                                 std::forward_as_tuple(device),
+                                 std::forward_as_tuple(device)).first;
+        }
+        return it->second.handle_;
     }
 
-    static void set_stream(cudaStream_t stream) {
-        CUDNN_CHECK(cudnnSetStream(get(), stream));
+    static void set_stream(int device, cudaStream_t stream) {
+        CUDNN_CHECK(cudnnSetStream(get(device), stream));
     }
 
     SDPACuDNNHandle(const SDPACuDNNHandle&) = delete;
     SDPACuDNNHandle& operator=(const SDPACuDNNHandle&) = delete;
+    SDPACuDNNHandle(SDPACuDNNHandle&& other) noexcept : handle_(other.handle_) {
+        other.handle_ = nullptr;
+    }
 
-private:
-    SDPACuDNNHandle() {
+    explicit SDPACuDNNHandle(int device) {
+        int prev = 0;
+        TENZOR_SDPA_CUDA_CHECK(cudaGetDevice(&prev));
+        TENZOR_SDPA_CUDA_CHECK(cudaSetDevice(device));
         CUDNN_CHECK(cudnnCreate(&handle_));
+        TENZOR_SDPA_CUDA_CHECK(cudaSetDevice(prev));
     }
 
     ~SDPACuDNNHandle() {
@@ -71,6 +104,7 @@ private:
         }
     }
 
+private:
     cudnnHandle_t handle_ = nullptr;
 };
 
@@ -179,34 +213,44 @@ private:
 // eliminating the data race where one thread frees the buffer while another
 // thread's kernel is still using it. Routes through the caching allocator
 // to avoid raw cudaMalloc/cudaFree overhead.
+//
+// The workspace MUST live on the same CUDA device as the SDPA tensors. The
+// caching allocator defaults to device 0, so on a multi-GPU run where attention
+// executes on a non-zero device, a device-0 workspace handed to cuDNN's
+// graph->execute() causes an illegal access / silently wrong output. We
+// therefore key the per-thread buffer by device and (re)allocate on the
+// requested device whenever the device or size changes.
 class SDPAWorkspace {
 public:
-    static void* get(size_t required_size) {
+    static void* get(size_t required_size, int device) {
         static thread_local SDPAWorkspace instance;
-        if (required_size > instance.size_) {
-            instance.resize(required_size);
+        if (device != instance.device_ || required_size > instance.size_) {
+            instance.resize(required_size, device);
         }
         return instance.buffer_;
     }
 
 private:
-    SDPAWorkspace() : buffer_(nullptr), size_(0) {}
+    SDPAWorkspace() : buffer_(nullptr), size_(0), device_(-1) {}
     ~SDPAWorkspace() {
         if (buffer_) {
-            backend::CachingAllocator::get().free(buffer_);
+            backend::CachingAllocator::get().free(buffer_, device_);
         }
     }
 
-    void resize(size_t new_size) {
+    void resize(size_t new_size, int device) {
         if (buffer_) {
-            backend::CachingAllocator::get().free(buffer_);
+            backend::CachingAllocator::get().free(buffer_, device_);
+            buffer_ = nullptr;
         }
+        device_ = device;
         size_ = new_size + (new_size / 4);  // 25% headroom
-        buffer_ = backend::CachingAllocator::get().allocate(size_);
+        buffer_ = backend::CachingAllocator::get().allocate(size_, device_);
     }
 
     void* buffer_;
     size_t size_;
+    int device_;
 };
 
 // Unique IDs for graph tensors
@@ -434,7 +478,8 @@ auto cudnn_sdpa_forward(
     const Tensor& K_in,
     const Tensor& V_in,
     float scale,
-    bool causal
+    bool causal,
+    cudaStream_t stream
 ) -> Tensor {
     // Per docs/internals/attention-contract.md, the host helper must enforce
     // contiguity at entry — cuDNN's stride descriptors are computed assuming
@@ -509,7 +554,28 @@ auto cudnn_sdpa_forward(
         return fused_attention_fallback(Q, K, V, scale, causal);
     }
 
-    cudnnHandle_t handle = SDPACuDNNHandle::get();
+    // Run the cuDNN graph on the SAME device as the tensors. Make that device
+    // current (cuDNN allocates internal scratch on the current device at create
+    // time and references the current device at execute time), fetch the
+    // per-device handle, and restore the previous current device on exit.
+    const int sdpa_device = Q.device().index;
+    int prev_device = 0;
+    TENZOR_SDPA_CUDA_CHECK(cudaGetDevice(&prev_device));
+    if (sdpa_device != prev_device) {
+        TENZOR_SDPA_CUDA_CHECK(cudaSetDevice(sdpa_device));
+    }
+    struct DeviceRestore {
+        int prev;
+        int cur;
+        ~DeviceRestore() { if (prev != cur) cudaSetDevice(prev); }
+    } device_restore{prev_device, sdpa_device};
+
+    cudnnHandle_t handle = SDPACuDNNHandle::get(sdpa_device);
+    // Bind the requested stream to the handle so the SDPA work and the output's
+    // allocation/consumers stay ordered on one stream (avoids a read-before-write
+    // race when scheduled on a pooled non-default stream). nullptr selects the
+    // default stream, matching prior behaviour.
+    CUDNN_CHECK(cudnnSetStream(handle, stream));
     std::vector<int64_t> q_shape_vec(q_shape.begin(), q_shape.end());
 
     SDPACacheEntry cache_entry;
@@ -532,7 +598,7 @@ auto cudnn_sdpa_forward(
         }
     }
 
-    void* workspace = SDPAWorkspace::get(cache_entry.workspace_size);
+    void* workspace = SDPAWorkspace::get(cache_entry.workspace_size, sdpa_device);
 
     // Output dtype matches input (cuDNN frontend honors set_io_data_type).
     Tensor o_output(q_shape_vec, Q.dtype(), Q.device());

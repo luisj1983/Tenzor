@@ -247,7 +247,28 @@ auto GlooProcessGroup::split(int color, int key)
         members.push_back({g[0], g[1], g[2]});
     }
 
-    // Opt-out path: this rank doesn't participate.
+    // M3 fix: previously used `master_port_ + 1000 + color` which collides
+    // on nested splits or same-color splits from sibling parent PGs. Now
+    // derive an offset that depends on both the parent's port AND a
+    // process-local counter of splits performed so far, so every split-
+    // derived child PG gets a unique port within the process.
+    //
+    // For multi-process distribution the counter is process-local but the
+    // sequence is identical across ranks (since they all execute split()
+    // collectively in the same order) — so the derived port matches.
+    //
+    // CRITICAL: every rank MUST advance this counter in lockstep, INCLUDING
+    // ranks that opt out (color < 0). If the opt-out early-return below
+    // skipped the fetch_add, an opting-out rank's counter would lag, and on
+    // the next collective split() the participating ranks would compute a
+    // different my_split_id (hence a different child port) than they did on
+    // ranks that took this same split — colliding/mismatched ports and a
+    // hung child rendezvous. Increment BEFORE the opt-out check.
+    static std::atomic<int> split_counter{0};
+    const int my_split_id = split_counter.fetch_add(1, std::memory_order_relaxed);
+
+    // Opt-out path: this rank doesn't participate. The counter was already
+    // advanced above so this rank stays in sync with participating peers.
     if (color < 0) {
         return nullptr;
     }
@@ -278,17 +299,6 @@ auto GlooProcessGroup::split(int color, int key)
     }
     int new_world_size = static_cast<int>(my_group.size());
 
-    // M3 fix: previously used `master_port_ + 1000 + color` which collides
-    // on nested splits or same-color splits from sibling parent PGs. Now
-    // derive an offset that depends on both the parent's port AND a
-    // process-local counter of splits performed so far, so every split-
-    // derived child PG gets a unique port within the process.
-    //
-    // For multi-process distribution the counter is process-local but the
-    // sequence is identical across ranks (since they all execute split()
-    // collectively in the same order) — so the derived port matches.
-    static std::atomic<int> split_counter{0};
-    const int my_split_id = split_counter.fetch_add(1, std::memory_order_relaxed);
     // Use a large enough stride (10000) so colors within one split don't
     // collide with the next split's color-0.
     const int new_port = master_port_ + 1000 + my_split_id * 10000 + color;

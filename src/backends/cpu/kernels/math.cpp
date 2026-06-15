@@ -3872,7 +3872,15 @@ auto lt_kernel(const Tensor& a, const Tensor& b) -> Tensor {
                 c_data[i] = (a_data[i] < b_data[i]);
             }
         } else {
-            throw std::runtime_error("Unsupported dtype for lt operation");
+            // Int8/UInt8/Int16/UInt16/UInt32/UInt64: match gt/ge/le/ne and lt's
+            // broadcast path, which all support the integer dtypes.
+            TENZOR_DISPATCH_INTEGER_TYPES(a.dtype(), "lt", [&]() {
+                const scalar_t* a_data = a.data<scalar_t>();
+                const scalar_t* b_data = b.data<scalar_t>();
+                for (size_t i = 0; i < n; ++i) {
+                    c_data[i] = (a_data[i] < b_data[i]);
+                }
+            });
         }
     } else {
         bool* c_data = result.data<bool>();

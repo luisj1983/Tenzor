@@ -31,7 +31,11 @@ auto MinMaxObserver::observe(const Tensor& tensor) -> void {
     // Helper: reshape to [num_channels, -1] for per-channel reduction
     auto per_channel_reduce = [&](const Tensor& t, bool is_min) -> Tensor {
         auto shape = t.shape();
-        const int64_t ax = axis_ < 0 ? axis_ + t.ndim() : axis_;
+        // Normalize a negative axis once the rank is known and persist it so
+        // calculate_qparams() can report the correct axis (idempotent for an
+        // already-normalized non-negative axis).
+        axis_ = axis_ < 0 ? axis_ + t.ndim() : axis_;
+        const int64_t ax = axis_;
         int64_t num_channels = shape[ax];
         int64_t rest = t.numel() / num_channels;
         Tensor reshaped;
@@ -91,7 +95,12 @@ auto MinMaxObserver::calculate_qparams(QuantDType dtype, QuantizationScheme sche
         throw std::runtime_error("Cannot calculate qparams without observed data");
     }
 
-    return compute_quantization_params(min_val_, max_val_, dtype, scheme);
+    auto params = compute_quantization_params(min_val_, max_val_, dtype, scheme);
+    // compute_quantization_params hardcodes axis=0 for per-channel schemes; set
+    // the observer's (normalized) channel axis so downstream quantize/dequantize
+    // map elements to the correct channel (matches PerChannelHistogramObserver).
+    params.axis = per_channel_ ? axis_ : -1;
+    return params;
 }
 
 auto MinMaxObserver::reset() -> void {
@@ -123,7 +132,11 @@ auto MovingAverageMinMaxObserver::observe(const Tensor& tensor) -> void {
     // Helper: reshape to [num_channels, -1] for per-channel reduction
     auto per_channel_reduce = [&](const Tensor& t, bool is_min) -> Tensor {
         auto shape = t.shape();
-        const int64_t ax = axis_ < 0 ? axis_ + t.ndim() : axis_;
+        // Normalize a negative axis once the rank is known and persist it so
+        // calculate_qparams() can report the correct axis (idempotent for an
+        // already-normalized non-negative axis).
+        axis_ = axis_ < 0 ? axis_ + t.ndim() : axis_;
+        const int64_t ax = axis_;
         int64_t num_channels = shape[ax];
         int64_t rest = t.numel() / num_channels;
         Tensor reshaped;
@@ -182,7 +195,12 @@ auto MovingAverageMinMaxObserver::calculate_qparams(QuantDType dtype, Quantizati
         throw std::runtime_error("Cannot calculate qparams without observed data");
     }
 
-    return compute_quantization_params(min_val_, max_val_, dtype, scheme);
+    auto params = compute_quantization_params(min_val_, max_val_, dtype, scheme);
+    // compute_quantization_params hardcodes axis=0 for per-channel schemes; set
+    // the observer's (normalized) channel axis so downstream quantize/dequantize
+    // map elements to the correct channel (matches PerChannelHistogramObserver).
+    params.axis = per_channel_ ? axis_ : -1;
+    return params;
 }
 
 auto MovingAverageMinMaxObserver::reset() -> void {

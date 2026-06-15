@@ -427,8 +427,17 @@ public:
      * @param input_size Size of input features
      * @param hidden_size Size of hidden state
      * @param bias If true, add learnable bias (default: true)
+     * @param linear_before_reset Selects the new-gate ("n"/"h") formulation:
+     *   - true (default, preserves historical Tenzor behavior == ONNX
+     *     linear_before_reset=1): the reset gate multiplies the recurrent
+     *     matmul RESULT, n_t = tanh(Xt·Wn + Wbn + r_t ⊙ (Ht-1·Rn + Rbn)).
+     *   - false (== ONNX default linear_before_reset=0): the reset gate
+     *     multiplies the hidden state BEFORE the recurrent matmul,
+     *     n_t = tanh(Xt·Wn + Wbn + (r_t ⊙ Ht-1)·Rn + Rbn).
+     *   The z and r gates are identical in both modes.
      */
-    GRUCell(int64_t input_size, int64_t hidden_size, bool bias = true);
+    GRUCell(int64_t input_size, int64_t hidden_size, bool bias = true,
+            bool linear_before_reset = true);
 
     /**
      * @brief Forward pass through GRU cell.
@@ -468,9 +477,13 @@ public:
     /** @brief Get hidden size */
     int64_t hidden_size() const { return hidden_size_; }
 
+    /** @brief Whether the cell uses the linear_before_reset=1 new-gate form. */
+    bool linear_before_reset() const { return linear_before_reset_; }
+
 private:
     int64_t input_size_;
     int64_t hidden_size_;
+    bool linear_before_reset_;  ///< true == mode 1 (default), false == ONNX mode 0
     // Combined weight matrices for all 3 gates (reset, update, new)
     // More efficient: 2 linear layers instead of 6
     std::shared_ptr<Linear> weight_ih_;    ///< (3*hidden, input) for all gates
@@ -514,10 +527,16 @@ public:
      * @param batch_first If true, input is (batch, seq_len, features) (default: false)
      * @param dropout Dropout probability between layers (default: 0.0)
      * @param bidirectional If true, process sequence in both directions (default: false)
+     * @param linear_before_reset Selects the new-gate formulation for every
+     *   cell (see GRUCell). true (default) preserves historical Tenzor
+     *   behavior (== ONNX linear_before_reset=1); false selects the ONNX
+     *   default (linear_before_reset=0). Note: the fused inference / cuDNN
+     *   training fast paths only implement mode 1; when mode 0 is selected the
+     *   GRU forces the per-timestep autograd path.
      */
     GRU(int64_t input_size, int64_t hidden_size, int64_t num_layers = 1,
         bool bias = true, bool batch_first = false, double dropout = 0.0,
-        bool bidirectional = false);
+        bool bidirectional = false, bool linear_before_reset = true);
 
     /**
      * @brief Forward pass through GRU.
@@ -553,6 +572,7 @@ private:
     bool batch_first_;
     bool bidirectional_;
     double dropout_p_;
+    bool linear_before_reset_;  ///< true == mode 1 (default), false == ONNX mode 0
 
     std::vector<std::shared_ptr<GRUCell>> forward_cells_;
     std::vector<std::shared_ptr<GRUCell>> backward_cells_;  // For bidirectional

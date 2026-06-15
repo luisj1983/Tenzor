@@ -21,45 +21,14 @@
 #include <mkl_spblas.h>
 #endif
 
-// Forward declarations for CUDA sparse kernels (defined in kernels/sparse.cu).
-// These symbols live in the tenzor_backend_cuda.so shared object, which is
-// loaded dynamically at runtime via dlopen. sparse_ops.cpp compiles into
-// tenzor_core.so; direct calls to the `tenzor::cuda::*` kernels here would
-// be unresolved external references at tenzor_core link time. Instead, all
-// CUDA sparse dispatch goes through the OpId dispatch table (see the
-// should_use_cuda branch in each top-level sparse op below). The lambdas
-// registered in src/backends/cuda/cuda_kernel_registry.cpp sit on the
-// correct side of the dynamic boundary and call the kernels directly.
-#ifdef TENZOR_HAS_CUSPARSE
-namespace tenzor {
-namespace cuda {
-Tensor cuda_spmm_kernel(const SparseTensor& sparse, const Tensor& dense);
-Tensor cuda_spmv_kernel(const SparseTensor& sparse, const Tensor& vec);
-} // namespace cuda
-} // namespace tenzor
-#endif
-
-// Forward declarations for ROCm sparse kernels (defined in kernels/sparse.hip.cpp)
-// Available with or without rocSPARSE (native HIP fallback when rocSPARSE absent)
-#ifdef TENZOR_ROCM_BACKEND
-namespace tenzor {
-namespace rocm {
-Tensor rocm_spmm_kernel(const SparseTensor& sparse, const Tensor& dense);
-Tensor rocm_spmv_kernel(const SparseTensor& sparse, const Tensor& vec);
-} // namespace rocm
-} // namespace tenzor
-#endif
-
-// Forward declarations for OneAPI sparse kernels (defined in oneapi/kernels/sparse.cpp)
-#ifdef TENZOR_HAS_ONEMKL
-namespace tenzor {
-namespace oneapi {
-Tensor oneapi_spmm_kernel(const SparseTensor& sparse, const Tensor& dense);
-Tensor oneapi_spmv_kernel(const SparseTensor& sparse, const Tensor& vec);
-} // namespace oneapi
-} // namespace tenzor
-#endif
-
+// GPU sparse kernels (CUDA/ROCm/OneAPI/Vulkan) live in their respective backend
+// shared objects (e.g. tenzor_backend_cuda.so), loaded dynamically at runtime.
+// sparse_ops.cpp compiles into tenzor_core.so, so it cannot call those kernels
+// directly — the symbols would be unresolved at tenzor_core link time. Instead,
+// every GPU sparse op routes through the OpId dispatch table (the
+// dispatch_gpu_spmm/spmv/add lambdas in each top-level op below). The kernels
+// register into that table from src/backends/<be>/*_kernel_registry.cpp, on the
+// correct side of the dynamic boundary.
 namespace tenzor {
 namespace sparse {
 
@@ -94,63 +63,6 @@ DType compute_dtype_for(DType dtype) {
     }
 }
 
-/// Return true if sparse/dense are on CUDA and cuSPARSE is available.
-[[maybe_unused]] bool should_use_cuda(const SparseTensor& sparse, const Tensor& dense) {
-#ifdef TENZOR_HAS_CUSPARSE
-    return (dense.device().type == Device::Type::CUDA ||
-            sparse.device().type == Device::Type::CUDA);
-#else
-    (void)sparse;
-    (void)dense;
-    return false;
-#endif
-}
-
-[[maybe_unused]] bool should_use_cuda_vec(const SparseTensor& sparse, const Tensor& vec) {
-#ifdef TENZOR_HAS_CUSPARSE
-    return (vec.device().type == Device::Type::CUDA ||
-            sparse.device().type == Device::Type::CUDA);
-#else
-    (void)sparse;
-    (void)vec;
-    return false;
-#endif
-}
-
-/// Return true if sparse/dense are on ROCm and rocSPARSE is available.
-[[maybe_unused]] bool should_use_rocm(const SparseTensor& sparse, const Tensor& dense) {
-#ifdef TENZOR_HAS_ROCSPARSE
-    return (dense.device().type == Device::Type::ROCm ||
-            sparse.device().type == Device::Type::ROCm);
-#else
-    (void)sparse;
-    (void)dense;
-    return false;
-#endif
-}
-
-[[maybe_unused]] bool should_use_rocm_vec(const SparseTensor& sparse, const Tensor& vec) {
-#ifdef TENZOR_HAS_ROCSPARSE
-    return (vec.device().type == Device::Type::ROCm ||
-            sparse.device().type == Device::Type::ROCm);
-#else
-    (void)sparse;
-    (void)vec;
-    return false;
-#endif
-}
-
-/// Return true if sparse/dense are on Vulkan.
-[[maybe_unused]] bool should_use_vulkan(const SparseTensor& sparse, const Tensor& dense) {
-    return (dense.device().type == Device::Type::Vulkan ||
-            sparse.device().type == Device::Type::Vulkan);
-}
-
-[[maybe_unused]] bool should_use_vulkan_vec(const SparseTensor& sparse, const Tensor& vec) {
-    return (vec.device().type == Device::Type::Vulkan ||
-            sparse.device().type == Device::Type::Vulkan);
-}
-
 /// Extract a SparseTensor as CSR components (crow_indices, col_indices, values)
 /// for dispatch-table routing. SparseTensor::to_csr() dispatches to GPU-native
 /// conversion (cusparseXcoo2csr / rocsparse_coo2csr) when on CUDA/ROCm, and
@@ -167,29 +79,6 @@ struct CsrComponents {
     // without forcing a CPU round-trip.
     const SparseTensor csr = sparse.to_csr();
     return {csr.crow_indices(), csr.col_indices(), csr.values()};
-}
-
-/// Return true if sparse/dense are on OneAPI/SYCL and oneMKL sparse is available.
-[[maybe_unused]] bool should_use_oneapi(const SparseTensor& sparse, const Tensor& dense) {
-#ifdef TENZOR_HAS_ONEMKL
-    return (dense.device().type == Device::Type::OneAPI ||
-            sparse.device().type == Device::Type::OneAPI);
-#else
-    (void)sparse;
-    (void)dense;
-    return false;
-#endif
-}
-
-[[maybe_unused]] bool should_use_oneapi_vec(const SparseTensor& sparse, const Tensor& vec) {
-#ifdef TENZOR_HAS_ONEMKL
-    return (vec.device().type == Device::Type::OneAPI ||
-            sparse.device().type == Device::Type::OneAPI);
-#else
-    (void)sparse;
-    (void)vec;
-    return false;
-#endif
 }
 
 // ============================================================================
@@ -934,14 +823,11 @@ auto spmm(const SparseTensor& sparse, const Tensor& dense) -> Tensor {
     Tensor dense_compute = (orig_dtype != comp_dtype) ? dense.to(comp_dtype) : dense;
     SparseTensor sparse_compute = sparse;
     if (sparse.dtype() != comp_dtype) {
-        // Rebuild the sparse tensor with cast values
-        auto new_vals = sparse.values().to(comp_dtype);
-        auto shape_vec = std::vector<int64_t>(sp_shape.begin(), sp_shape.end());
-        if (sparse.layout() == SparseLayout::COO) {
-            sparse_compute = SparseTensor::sparse_coo(sparse.indices(), new_vals, shape_vec);
-        } else {
-            sparse_compute = SparseTensor::sparse_csr(sparse.crow_indices(), sparse.col_indices(), new_vals, shape_vec);
-        }
+        // Cast only the value buffer; the sparsity structure is unchanged.
+        // with_values() preserves the layout and its index members for every
+        // layout (COO/CSR/CSC/BSR) — the old CSR-only else-branch threw on
+        // CSC/BSR inputs with default-constructed crow/col members.
+        sparse_compute = sparse.with_values(sparse.values().to(comp_dtype));
     }
 
     // GPU paths — CUDA / ROCm / OneAPI / Vulkan all route through their
@@ -1035,13 +921,10 @@ auto spmv(const SparseTensor& sparse, const Tensor& vec) -> Tensor {
     Tensor vec_compute = (orig_dtype != comp_dtype) ? vec.to(comp_dtype) : vec;
     SparseTensor sparse_compute = sparse;
     if (sparse.dtype() != comp_dtype) {
-        auto new_vals = sparse.values().to(comp_dtype);
-        auto shape_vec = std::vector<int64_t>(sp_shape.begin(), sp_shape.end());
-        if (sparse.layout() == SparseLayout::COO) {
-            sparse_compute = SparseTensor::sparse_coo(sparse.indices(), new_vals, shape_vec);
-        } else {
-            sparse_compute = SparseTensor::sparse_csr(sparse.crow_indices(), sparse.col_indices(), new_vals, shape_vec);
-        }
+        // Cast only the value buffer; structure is preserved. with_values()
+        // keeps the correct index members for every layout (COO/CSR/CSC/BSR),
+        // unlike the old CSR-only branch which threw on CSC/BSR inputs.
+        sparse_compute = sparse.with_values(sparse.values().to(comp_dtype));
     }
 
     // GPU path for spmv — symmetric to spmm above. See the long comment
@@ -1285,17 +1168,13 @@ auto mul(const SparseTensor& sparse, double scalar) -> SparseTensor {
     // covers every dtype, so there is no host pointer math on device memory.
     Tensor new_values = tenzor::mul(vals, scalar);
 
-    auto shape_vec = std::vector<int64_t>(sparse.shape().begin(), sparse.shape().end());
-    if (sparse.layout() == SparseLayout::COO) {
-        auto result = SparseTensor::sparse_coo(sparse.indices(), new_values, shape_vec);
-        // A scalar rescale preserves the index structure, so a coalesced input
-        // stays coalesced; propagate the flag to avoid a redundant re-coalesce
-        // on the next to_csr/to_dense/spmm. (sparse_coo defaults to false.)
-        result.mark_coalesced(sparse.is_coalesced());
-        return result;
-    } else {
-        return SparseTensor::sparse_csr(sparse.crow_indices(), sparse.col_indices(), new_values, shape_vec);
-    }
+    // A scalar rescale preserves the index structure for every layout
+    // (COO/CSR/CSC/BSR), so swap only the value buffer and keep the existing
+    // index members intact. with_values() copies *this, so the coalesced flag
+    // (and all layout metadata) is propagated automatically — the previous
+    // CSR-only else-branch threw on CSC/BSR inputs whose crow/col members are
+    // default-constructed.
+    return sparse.with_values(new_values);
 }
 
 // ============================================================================
@@ -1799,6 +1678,17 @@ auto sparse_softmax(const SparseTensor& sparse) -> SparseTensor {
         throw std::runtime_error("sparse_softmax: input must be 2D");
     }
 
+    // Refuse CPU fallback for GPU tensors (mirrors spmm/spmv/add). There is no
+    // registered GPU sparse-softmax kernel; the host loop below dereferences
+    // values()/crow_indices() via .data<T>(), which is UB on device memory.
+    // Round-tripping silently through the host would be a hidden CPU fallback,
+    // exactly what the rest of the sparse subsystem refuses — so fail loudly.
+    if (sparse.device().type != Device::Type::CPU) {
+        throw std::runtime_error(
+            "sparse::sparse_softmax: GPU tensor but no GPU sparse-softmax kernel — "
+            "refusing CPU fallback (move tensors to CPU explicitly)");
+    }
+
     // Float16/BFloat16: widen values to Float32, softmax, narrow back.
     if (sparse.values().dtype() == DType::Float16 || sparse.values().dtype() == DType::BFloat16) {
         const DType orig = sparse.values().dtype();
@@ -1815,10 +1705,10 @@ auto sparse_softmax(const SparseTensor& sparse) -> SparseTensor {
     auto col = sparse.col_indices();
     auto vals = sparse.values();
 
-    // Work on CPU (dispatch to GPU backends via OpId for GPU tensors)
-    auto crow_cpu = (crow.device().type != Device::Type::CPU) ? crow.to(Device::cpu()) : crow;
-    auto vals_cpu = (vals.device().type != Device::Type::CPU) ? vals.to(Device::cpu()) : vals;
-    auto col_cpu = (col.device().type != Device::Type::CPU) ? col.to(Device::cpu()) : col;
+    // CPU-only compute (GPU inputs were rejected above). Operate directly on
+    // the host buffers — no device round-trip.
+    auto crow_cpu = crow.contiguous();
+    auto vals_cpu = vals.contiguous();
 
     int64_t nnz = vals_cpu.numel();
     Tensor out_vals = tenzor::zeros({nnz}, vals_cpu.dtype(), Device::cpu());
@@ -1882,11 +1772,6 @@ auto sparse_softmax(const SparseTensor& sparse) -> SparseTensor {
         throw std::runtime_error("sparse_softmax: unsupported dtype");
     }
 
-    // Transfer back to original device if needed
-    if (vals.device().type != Device::Type::CPU) {
-        out_vals = out_vals.to(vals.device());
-    }
-
     return SparseTensor::sparse_csr(crow, col, out_vals, shape);
 }
 
@@ -1901,6 +1786,15 @@ auto sparse_log_softmax(const SparseTensor& sparse) -> SparseTensor {
     auto shape = sparse.shape();
     if (shape.size() != 2) {
         throw std::runtime_error("sparse_log_softmax: input must be 2D");
+    }
+
+    // Refuse CPU fallback for GPU tensors (mirrors spmm/spmv/add). There is no
+    // registered GPU sparse-log-softmax kernel; the host loop below dereferences
+    // values()/crow_indices() via .data<T>(), which is UB on device memory.
+    if (sparse.device().type != Device::Type::CPU) {
+        throw std::runtime_error(
+            "sparse::sparse_log_softmax: GPU tensor but no GPU sparse-softmax kernel — "
+            "refusing CPU fallback (move tensors to CPU explicitly)");
     }
 
     // Float16/BFloat16: widen values to Float32, log-softmax, narrow back.
@@ -1919,9 +1813,10 @@ auto sparse_log_softmax(const SparseTensor& sparse) -> SparseTensor {
     auto col = sparse.col_indices();
     auto vals = sparse.values();
 
-    auto crow_cpu = (crow.device().type != Device::Type::CPU) ? crow.to(Device::cpu()) : crow;
-    auto vals_cpu = (vals.device().type != Device::Type::CPU) ? vals.to(Device::cpu()) : vals;
-    auto col_cpu = (col.device().type != Device::Type::CPU) ? col.to(Device::cpu()) : col;
+    // CPU-only compute (GPU inputs were rejected above). Operate directly on
+    // the host buffers — no device round-trip.
+    auto crow_cpu = crow.contiguous();
+    auto vals_cpu = vals.contiguous();
 
     int64_t nnz = vals_cpu.numel();
     Tensor out_vals = tenzor::zeros({nnz}, vals_cpu.dtype(), Device::cpu());
@@ -1981,10 +1876,6 @@ auto sparse_log_softmax(const SparseTensor& sparse) -> SparseTensor {
         }
     } else {
         throw std::runtime_error("sparse_log_softmax: unsupported dtype");
-    }
-
-    if (vals.device().type != Device::Type::CPU) {
-        out_vals = out_vals.to(vals.device());
     }
 
     return SparseTensor::sparse_csr(crow, col, out_vals, shape);

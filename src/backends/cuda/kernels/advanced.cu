@@ -1844,13 +1844,18 @@ auto bucketize_kernel(const Tensor& input, const Tensor& boundaries,
 // Histogram kernel
 // ============================================================================
 
-__global__ void histogram_kernel_impl(const float* input, int64_t* counts,
+// Templated on scalar type T (float or double) so Float64 input bins at native
+// precision, matching the CPU reference (which selects ctype = Float64 for
+// Float64 input); the previous Float32-forcing truncated bin assignment near
+// edges for Float64 tensors.
+template<typename T>
+__global__ void histogram_kernel_impl(const T* input, int64_t* counts,
                                        int64_t n, int64_t num_bins,
-                                       float min_val, float max_val, float bin_width) {
+                                       T min_val, T max_val, T bin_width) {
     int64_t tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= n) return;
 
-    float val = input[tid];
+    T val = input[tid];
     // Match CPU semantics: drop out-of-range samples rather than clamping
     // them into the end bins. The previous clamp inflated edge-bin counts
     // by the number of samples outside [min, max].
@@ -1865,85 +1870,109 @@ __global__ void histogram_kernel_impl(const float* input, int64_t* counts,
 }
 
 // Fill bin-edge tensor on device: edges[i] = min + i * bin_width
-__global__ void fill_bin_edges_kernel(float* edges, float min_val, float bin_width, int64_t num_edges) {
+template<typename T>
+__global__ void fill_bin_edges_kernel(T* edges, T min_val, T bin_width, int64_t num_edges) {
     int64_t i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= num_edges) return;
-    edges[i] = min_val + static_cast<float>(i) * bin_width;
+    edges[i] = min_val + static_cast<T>(i) * bin_width;
 }
 
 auto histogram_kernel(const Tensor& input, int64_t bins,
                       double min_val, double max_val,
                       cudaStream_t stream) -> std::pair<Tensor, Tensor> {
+    // Mirror the CPU policy (src/backends/cpu/kernels/reduction.cpp): compute at
+    // native precision for Float64 input (ctype = Float64), otherwise Float32
+    // (which also widens Float16/BFloat16). The previous Float32-forcing returned
+    // a Float32 `edges` tensor for Float64 input (dtype mismatch vs CPU) and
+    // truncated bin membership near edges to single precision.
+    DType ctype = (input.dtype() == DType::Float64) ? DType::Float64 : DType::Float32;
+
     auto in_contig = input.contiguous();
-    if (in_contig.dtype() != DType::Float32) {
-        in_contig = in_contig.to(DType::Float32);
+    if (in_contig.dtype() != ctype) {
+        in_contig = in_contig.to(ctype);
     }
 
     int64_t n = in_contig.numel();
 
-    // Auto-detect range if not specified — compute min/max on device via CUB,
-    // then read 2 scalars back to host (necessary metadata, not a CPU fallback).
-    if (min_val == 0.0 && max_val == 0.0 && n > 0) {
-        backend::CachedMemoryGuard scratch_guard(2 * sizeof(float));
-        float* d_min_max = static_cast<float*>(scratch_guard.get());
+    auto run = [&](auto dummy) -> std::pair<Tensor, Tensor> {
+        using T = decltype(dummy);
 
-        // CUB Min reduction
-        size_t temp_min = 0;
-        cub::DeviceReduce::Min(nullptr, temp_min, in_contig.data<float>(), d_min_max,
-                               static_cast<int>(n), stream);
-        backend::CachedMemoryGuard min_temp_guard(temp_min);
-        cub::DeviceReduce::Min(min_temp_guard.get(), temp_min, in_contig.data<float>(), d_min_max,
-                               static_cast<int>(n), stream);
+        // Auto-detect range if not specified — compute min/max on device via CUB,
+        // then read 2 scalars back to host (necessary metadata, not a CPU fallback).
+        if (min_val == 0.0 && max_val == 0.0 && n > 0) {
+            backend::CachedMemoryGuard scratch_guard(2 * sizeof(T));
+            T* d_min_max = static_cast<T*>(scratch_guard.get());
 
-        // CUB Max reduction
-        size_t temp_max = 0;
-        cub::DeviceReduce::Max(nullptr, temp_max, in_contig.data<float>(), d_min_max + 1,
-                               static_cast<int>(n), stream);
-        backend::CachedMemoryGuard max_temp_guard(temp_max);
-        cub::DeviceReduce::Max(max_temp_guard.get(), temp_max, in_contig.data<float>(), d_min_max + 1,
-                               static_cast<int>(n), stream);
+            // CUB Min reduction
+            size_t temp_min = 0;
+            cub::DeviceReduce::Min(nullptr, temp_min, in_contig.data<T>(), d_min_max,
+                                   static_cast<int>(n), stream);
+            backend::CachedMemoryGuard min_temp_guard(temp_min);
+            cub::DeviceReduce::Min(min_temp_guard.get(), temp_min, in_contig.data<T>(), d_min_max,
+                                   static_cast<int>(n), stream);
 
-        // Scalar readback (2 floats) — unavoidable to compute bin_width on host
-        float h_min_max[2];
-        TENZOR_CUDA_CHECK(cudaMemcpyAsync(h_min_max, d_min_max, 2 * sizeof(float),
-                                          cudaMemcpyDeviceToHost, stream));
-        TENZOR_CUDA_CHECK(cudaStreamSynchronize(stream));
-        min_val = h_min_max[0];
-        max_val = h_min_max[1];
+            // CUB Max reduction
+            size_t temp_max = 0;
+            cub::DeviceReduce::Max(nullptr, temp_max, in_contig.data<T>(), d_min_max + 1,
+                                   static_cast<int>(n), stream);
+            backend::CachedMemoryGuard max_temp_guard(temp_max);
+            cub::DeviceReduce::Max(max_temp_guard.get(), temp_max, in_contig.data<T>(), d_min_max + 1,
+                                   static_cast<int>(n), stream);
+
+            // Scalar readback (2 values) — unavoidable to compute bin_width on host
+            T h_min_max[2];
+            TENZOR_CUDA_CHECK(cudaMemcpyAsync(h_min_max, d_min_max, 2 * sizeof(T),
+                                              cudaMemcpyDeviceToHost, stream));
+            TENZOR_CUDA_CHECK(cudaStreamSynchronize(stream));
+            min_val = static_cast<double>(h_min_max[0]);
+            max_val = static_cast<double>(h_min_max[1]);
+        }
+        if (max_val <= min_val) max_val = min_val + 1.0;
+
+        // Keep bin_width in double for Float64; cast to T for the kernels.
+        double bin_width_d = (max_val - min_val) / static_cast<double>(bins);
+        T bin_width = static_cast<T>(bin_width_d);
+
+        auto counts = tenzor::zeros({bins}, DType::Int64, in_contig.device());
+
+        if (n > 0) {
+            int threads = 256;
+            int blocks_n = (n + threads - 1) / threads;
+            histogram_kernel_impl<T><<<blocks_n, threads, 0, stream>>>(
+                in_contig.data<T>(), counts.data<int64_t>(),
+                n, bins, static_cast<T>(min_val), static_cast<T>(max_val), bin_width);
+        }
+
+        // Compute bin edges on-device at compute precision (ctype).
+        auto edges = Tensor({bins + 1}, ctype, in_contig.device());
+        {
+            int64_t num_edges = bins + 1;
+            int threads_e = 128;
+            int blocks_e = static_cast<int>((num_edges + threads_e - 1) / threads_e);
+            fill_bin_edges_kernel<T><<<blocks_e, threads_e, 0, stream>>>(
+                edges.data<T>(), static_cast<T>(min_val), bin_width, num_edges);
+        }
+
+        return {counts, edges};
+    };
+
+    if (ctype == DType::Float64) {
+        return run(double{});
     }
-    if (max_val <= min_val) max_val = min_val + 1.0;
-
-    float bin_width = static_cast<float>((max_val - min_val) / bins);
-
-    auto counts = tenzor::zeros({bins}, DType::Int64, in_contig.device());
-
-    if (n > 0) {
-        int threads = 256;
-        int blocks_n = (n + threads - 1) / threads;
-        histogram_kernel_impl<<<blocks_n, threads, 0, stream>>>(
-            in_contig.data<float>(), counts.data<int64_t>(),
-            n, bins, static_cast<float>(min_val), static_cast<float>(max_val), bin_width);
-    }
-
-    // Compute bin edges on-device
-    auto edges = Tensor({bins + 1}, DType::Float32, in_contig.device());
-    {
-        int64_t num_edges = bins + 1;
-        int threads_e = 128;
-        int blocks_e = static_cast<int>((num_edges + threads_e - 1) / threads_e);
-        fill_bin_edges_kernel<<<blocks_e, threads_e, 0, stream>>>(
-            edges.data<float>(), static_cast<float>(min_val), bin_width, num_edges);
-    }
-
-    return {counts, edges};
+    return run(float{});
 }
 
 // ============================================================================
 // CDist (pairwise distance) kernel
 // ============================================================================
 
-__global__ void cdist_l2_kernel_impl(const float* x1, const float* x2,
-                                      float* output,
+// Templated on scalar type T (float or double) so Float64 inputs accumulate and
+// reduce in double, matching the CPU reference (which selects compute_dtype =
+// Float64 for Float64 input). The float overloads of fabs/pow/sqrt are selected
+// for T=float and the double overloads for T=double.
+template<typename T>
+__global__ void cdist_l2_kernel_impl(const T* x1, const T* x2,
+                                      T* output,
                                       int64_t B, int64_t P, int64_t R, int64_t M) {
     // x1: (B, P, M), x2: (B, R, M), output: (B, P, R)
     // Block: (R, P) tiles per batch; gridDim.z = B
@@ -1952,65 +1981,70 @@ __global__ void cdist_l2_kernel_impl(const float* x1, const float* x2,
     int64_t r = blockIdx.x * blockDim.x + threadIdx.x;
     if (b >= B || p >= P || r >= R) return;
 
-    const float* a_b = x1 + b * P * M;
-    const float* b_b = x2 + b * R * M;
-    float sum = 0.0f;
+    const T* a_b = x1 + b * P * M;
+    const T* b_b = x2 + b * R * M;
+    T sum = T(0);
     for (int64_t m = 0; m < M; ++m) {
-        float diff = a_b[p * M + m] - b_b[r * M + m];
+        T diff = a_b[p * M + m] - b_b[r * M + m];
         sum += diff * diff;
     }
-    output[(b * P + p) * R + r] = sqrtf(sum);
+    output[(b * P + p) * R + r] = ::sqrt(sum);
 }
 
 // Generic Lp distance kernel: sum_m |a[m] - b[m]|^p, take p-th root.
 // Specializations for p=1.0 (Manhattan) and p=inf would be faster but the
 // generic path is correct for all finite p >= 1.
-__global__ void cdist_lp_kernel_impl(const float* x1, const float* x2,
-                                      float* output, float p,
+template<typename T>
+__global__ void cdist_lp_kernel_impl(const T* x1, const T* x2,
+                                      T* output, T p,
                                       int64_t B, int64_t P, int64_t R, int64_t M) {
     int64_t b = blockIdx.z;
     int64_t p_idx = blockIdx.y * blockDim.y + threadIdx.y;
     int64_t r = blockIdx.x * blockDim.x + threadIdx.x;
     if (b >= B || p_idx >= P || r >= R) return;
 
-    const float* a_b = x1 + b * P * M;
-    const float* b_b = x2 + b * R * M;
-    float sum = 0.0f;
+    const T* a_b = x1 + b * P * M;
+    const T* b_b = x2 + b * R * M;
+    T sum = T(0);
     for (int64_t m = 0; m < M; ++m) {
-        float diff = fabsf(a_b[p_idx * M + m] - b_b[r * M + m]);
-        sum += powf(diff, p);
+        T diff = ::fabs(a_b[p_idx * M + m] - b_b[r * M + m]);
+        sum += ::pow(diff, p);
     }
-    output[(b * P + p_idx) * R + r] = powf(sum, 1.0f / p);
+    output[(b * P + p_idx) * R + r] = ::pow(sum, T(1) / p);
 }
 
 // L1 specialization — skips the pow() calls for the common Manhattan case.
-__global__ void cdist_l1_kernel_impl(const float* x1, const float* x2,
-                                      float* output,
+template<typename T>
+__global__ void cdist_l1_kernel_impl(const T* x1, const T* x2,
+                                      T* output,
                                       int64_t B, int64_t P, int64_t R, int64_t M) {
     int64_t b = blockIdx.z;
     int64_t p_idx = blockIdx.y * blockDim.y + threadIdx.y;
     int64_t r = blockIdx.x * blockDim.x + threadIdx.x;
     if (b >= B || p_idx >= P || r >= R) return;
 
-    const float* a_b = x1 + b * P * M;
-    const float* b_b = x2 + b * R * M;
-    float sum = 0.0f;
+    const T* a_b = x1 + b * P * M;
+    const T* b_b = x2 + b * R * M;
+    T sum = T(0);
     for (int64_t m = 0; m < M; ++m) {
-        sum += fabsf(a_b[p_idx * M + m] - b_b[r * M + m]);
+        sum += fabs(a_b[p_idx * M + m] - b_b[r * M + m]);
     }
     output[(b * P + p_idx) * R + r] = sum;
 }
 
 auto cdist_kernel(const Tensor& x1, const Tensor& x2, double p,
                   cudaStream_t stream) -> Tensor {
-    // Compute the kernel in Float32 for numerical stability across lower
-    // precisions, then cast back so the output dtype matches the input dtype.
+    // Mirror the CPU policy (src/backends/cpu/kernels/math.cpp): compute in
+    // Float64 when the input is Float64 so the distance/accumulation keeps full
+    // double precision; otherwise compute in Float32 (which also widens
+    // Float16/BFloat16). Cast the result back to the input dtype on return.
     DType out_dtype = x1.dtype();
+    DType compute_dtype = (x1.dtype() == DType::Float64) ? DType::Float64 : DType::Float32;
 
     auto a = x1.contiguous();
     auto b = x2.contiguous();
-    if (a.dtype() != DType::Float32) a = a.to(DType::Float32);
-    if (b.dtype() != DType::Float32) b = b.to(DType::Float32);
+    if (a.dtype() != compute_dtype) a = a.to(compute_dtype);
+    if (b.dtype() != compute_dtype) b = b.to(compute_dtype);
 
     // Accept either 2D (P, M) or 3D (B, P, M). The 2D case is treated as B=1.
     int64_t B, P, M, R;
@@ -2034,29 +2068,37 @@ auto cdist_kernel(const Tensor& x1, const Tensor& x2, double p,
     std::vector<int64_t> result_shape;
     if (a.ndim() == 2) result_shape = {P, R};
     else               result_shape = {B, P, R};
-    auto result_f32 = Tensor(result_shape, DType::Float32, a.device());
+    auto result = Tensor(result_shape, compute_dtype, a.device());
 
     if (B == 0 || P == 0 || R == 0) {
-        return out_dtype == DType::Float32 ? result_f32 : result_f32.to(out_dtype);
+        return out_dtype == compute_dtype ? result : result.to(out_dtype);
     }
 
     dim3 threads(16, 16, 1);
     dim3 blocks((R + 15) / 16, (P + 15) / 16, B);
     // Specialize p=2.0 (L2, most common) and p=1.0 (Manhattan, second most
     // common) to avoid the per-element pow() in the generic kernel.
-    if (p == 2.0) {
-        cdist_l2_kernel_impl<<<blocks, threads, 0, stream>>>(
-            a.data<float>(), b.data<float>(), result_f32.data<float>(), B, P, R, M);
-    } else if (p == 1.0) {
-        cdist_l1_kernel_impl<<<blocks, threads, 0, stream>>>(
-            a.data<float>(), b.data<float>(), result_f32.data<float>(), B, P, R, M);
+    auto launch = [&](auto dummy) {
+        using T = decltype(dummy);
+        if (p == 2.0) {
+            cdist_l2_kernel_impl<T><<<blocks, threads, 0, stream>>>(
+                a.data<T>(), b.data<T>(), result.data<T>(), B, P, R, M);
+        } else if (p == 1.0) {
+            cdist_l1_kernel_impl<T><<<blocks, threads, 0, stream>>>(
+                a.data<T>(), b.data<T>(), result.data<T>(), B, P, R, M);
+        } else {
+            cdist_lp_kernel_impl<T><<<blocks, threads, 0, stream>>>(
+                a.data<T>(), b.data<T>(), result.data<T>(),
+                static_cast<T>(p), B, P, R, M);
+        }
+    };
+    if (compute_dtype == DType::Float64) {
+        launch(double{});
     } else {
-        cdist_lp_kernel_impl<<<blocks, threads, 0, stream>>>(
-            a.data<float>(), b.data<float>(), result_f32.data<float>(),
-            static_cast<float>(p), B, P, R, M);
+        launch(float{});
     }
 
-    return out_dtype == DType::Float32 ? result_f32 : result_f32.to(out_dtype);
+    return out_dtype == compute_dtype ? result : result.to(out_dtype);
 }
 
 // ============================================================================

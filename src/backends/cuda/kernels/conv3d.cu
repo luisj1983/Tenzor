@@ -965,7 +965,11 @@ auto conv_transpose3d_forward_kernel(
 
     switch (input.dtype()) {
         case DType::Float32:
-            launch_conv_transpose3d_forward<float, float>(
+            // Accumulate Float32 ConvTranspose3d in double, matching the Conv3d
+            // decision (a float accumulator drifts O(sqrt(N)) ULPs over the
+            // Cin_per_g*kD*kH*kW reduction and pushes the cross-backend rtol=1e-3
+            // parity test over threshold).
+            launch_conv_transpose3d_forward<float, double>(
                 input, weight, bias, output, N, Cin, D, H, W, Cout, Cout_per_g,
                 kD, kH, kW, oD, oH, oW, s, p, d, groups, stream);
             break;
@@ -1023,7 +1027,8 @@ auto conv_transpose3d_backward_input_kernel(
 
     switch (input.dtype()) {
         case DType::Float32:
-            launch_conv_transpose3d_backward_input<float, float>(
+            // Double accumulator for Float32 (cross-backend parity); see fwd note.
+            launch_conv_transpose3d_backward_input<float, double>(
                 grad_output, weight, grad_input, N, Cin, D, H, W, Cout, Cout_per_g,
                 kD, kH, kW, oD, oH, oW, s, p, d, groups, stream);
             break;
@@ -1077,7 +1082,8 @@ auto conv_transpose3d_backward_weight_kernel(
 
     switch (input.dtype()) {
         case DType::Float32:
-            launch_conv_transpose3d_backward_weight<float, float>(
+            // Double accumulator for Float32 (cross-backend parity); see fwd note.
+            launch_conv_transpose3d_backward_weight<float, double>(
                 grad_output, input, grad_weight, N, Cin, D, H, W, Cout, Cout_per_g,
                 kD, kH, kW, oD, oH, oW, s, p, d, groups, stream);
             break;

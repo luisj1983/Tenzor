@@ -27,18 +27,27 @@ float readF16From(uint buf_id, uint element_idx) {
     return unpackHalf2x16(bits | (bits << 16)).x;
 }
 
-// Write a single float16 value to grad_input buffer
+// Write a single float16 value to grad_input using atomic CAS. With odd
+// dim_size the last element of thread g and the first element of thread g+1
+// fall in the same 32-bit word and are written concurrently; a plain
+// read-modify-write would drop one half-word. Use a bounded atomicCompSwap.
 void writeF16(uint element_idx, float value) {
     uint word_idx = element_idx / 2;
-    uint word_offset = element_idx % 2;
+    uint half_idx = element_idx % 2;
     uint bits = packHalf2x16(vec2(value, 0.0)) & 0xFFFFu;
-    if (word_offset == 0) {
-        uint existing = grad_input[word_idx] & 0xFFFF0000u;
-        grad_input[word_idx] = existing | bits;
-    } else {
-        uint existing = grad_input[word_idx] & 0x0000FFFFu;
-        grad_input[word_idx] = existing | (bits << 16);
+    uint shift = half_idx * 16;
+    uint mask = 0xFFFFu << shift;
+
+    uint old_val = grad_input[word_idx];
+    uint new_val, expected;
+    for (uint iter = 0u; iter < 65536u; iter++) {
+        expected = old_val;
+        new_val = (expected & ~mask) | (bits << shift);
+        old_val = atomicCompSwap(grad_input[word_idx], expected, new_val);
+        if (old_val == expected) return;
     }
+    // Saturation: do NOT add a non-atomic fallback store — it would clobber the
+    // neighbouring packed half-word.
 }
 
 void main() {

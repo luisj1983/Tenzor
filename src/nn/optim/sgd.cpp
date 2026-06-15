@@ -202,6 +202,11 @@ auto SGD::initialize_buffers() -> void {
         if (param) {
             // R.16: half-precision params get Float32 velocity buffers.
             velocity_buffers_.push_back(make_optim_state(param->tensor()));
+        } else {
+            // Keep velocity_buffers_ index-aligned with parameters_ so a null
+            // param preceding a valid one doesn't shift later state buffers
+            // (matches on_parameters_appended_ and RMSprop/AdamAtan2).
+            velocity_buffers_.push_back(Tensor{});
         }
     }
 }

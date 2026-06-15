@@ -22,8 +22,10 @@ namespace tenzor::nn {
 // GRUCell Implementation
 // ============================================================================
 
-GRUCell::GRUCell(int64_t input_size, int64_t hidden_size, bool bias)
-    : input_size_(input_size), hidden_size_(hidden_size) {
+GRUCell::GRUCell(int64_t input_size, int64_t hidden_size, bool bias,
+                 bool linear_before_reset)
+    : input_size_(input_size), hidden_size_(hidden_size),
+      linear_before_reset_(linear_before_reset) {
 
     // GRU has 3 gates (reset, update, new)
     // PyTorch-style GRU with combined weight matrices for efficiency:
@@ -91,7 +93,6 @@ auto GRUCell::forward(const Variable& input, const Variable& hx) -> Variable {
     auto n_i = ::tenzor::slice(gates_ih, 1, 2*H, 3*H);
     auto r_h = ::tenzor::slice(gates_hh, 1, 0,     H);
     auto z_h = ::tenzor::slice(gates_hh, 1, H,   2*H);
-    auto n_h = ::tenzor::slice(gates_hh, 1, 2*H, 3*H);
 
     // Reset gate: r_t = σ(r_i + r_h)
     auto r_t = ::tenzor::sigmoid(r_i + r_h);
@@ -99,8 +100,27 @@ auto GRUCell::forward(const Variable& input, const Variable& hx) -> Variable {
     // Update gate: z_t = σ(z_i + z_h)
     auto z_t = ::tenzor::sigmoid(z_i + z_h);
 
-    // New gate: n_t = tanh(n_i + r_t ⊙ n_h)
-    auto n_t = ::tenzor::tanh(n_i + r_t * n_h);
+    // New gate:
+    //   mode 1 (linear_before_reset_ == true, default, ONNX lbr=1):
+    //       n_t = tanh(n_i + r_t ⊙ n_h)
+    //     where n_h = (H·Rn + recurrent_bias_n) is the recurrent matmul RESULT
+    //     and the reset gate multiplies that whole result.
+    //   mode 0 (linear_before_reset_ == false, ONNX default lbr=0):
+    //       n_t = tanh(n_i + (r_t ⊙ H)·Rn + recurrent_bias_n)
+    //     where the reset gate multiplies the hidden state BEFORE the
+    //     recurrent matmul; the recurrent new-gate bias is added after the
+    //     matmul. We obtain this by re-running weight_hh_ on (r_t ⊙ H) and
+    //     slicing its n-gate column (the Linear adds its bias post-matmul,
+    //     matching ONNX). All ops stay Variable-level to keep autograd intact.
+    Variable n_t;
+    if (linear_before_reset_) {
+        auto n_h = ::tenzor::slice(gates_hh, 1, 2*H, 3*H);
+        n_t = ::tenzor::tanh(n_i + r_t * n_h);
+    } else {
+        auto gates_hh_reset = weight_hh_->forward(r_t * h);  // (batch, 3*H)
+        auto n_h0 = ::tenzor::slice(gates_hh_reset, 1, 2*H, 3*H);
+        n_t = ::tenzor::tanh(n_i + n_h0);
+    }
 
     // h_new = (1 - z_t) ⊙ n_t + z_t ⊙ h
     //       = n_t + z_t ⊙ (h - n_t)
@@ -144,12 +164,24 @@ auto GRUCell::forward_with_precomputed_ih(const Tensor& gates_ih, const Variable
     auto n_i = ::tenzor::slice(gates_ih_var, 1, 2*H, 3*H);
     auto r_h = ::tenzor::slice(gates_hh,     1, 0,     H);
     auto z_h = ::tenzor::slice(gates_hh,     1, H,   2*H);
-    auto n_h = ::tenzor::slice(gates_hh,     1, 2*H, 3*H);
 
     // Gates. Variable + Variable + sigmoid/tanh keeps the graph connected.
     auto r_t = nn::sigmoid(r_i + r_h);
     auto z_t = nn::sigmoid(z_i + z_h);
-    auto n_t = nn::tanh(n_i + r_t * n_h);
+
+    // New gate — same mode-0/mode-1 split as GRUCell::forward (see the comment
+    // there). mode 0 re-runs weight_hh_ on (r_t ⊙ H) so the reset gate is
+    // applied before the recurrent matmul and the recurrent new-gate bias is
+    // added after it.
+    Variable n_t;
+    if (linear_before_reset_) {
+        auto n_h = ::tenzor::slice(gates_hh, 1, 2*H, 3*H);
+        n_t = nn::tanh(n_i + r_t * n_h);
+    } else {
+        auto gates_hh_reset = weight_hh_->forward(r_t * h);  // (batch, 3*H)
+        auto n_h0 = ::tenzor::slice(gates_hh_reset, 1, 2*H, 3*H);
+        n_t = nn::tanh(n_i + n_h0);
+    }
 
     // h_new = (1 - z_t) * n_t + z_t * h   ≡   n_t + z_t * (h - n_t)
     return n_t + z_t * (h - n_t);
@@ -160,13 +192,15 @@ auto GRUCell::forward_with_precomputed_ih(const Tensor& gates_ih, const Variable
 // ============================================================================
 
 GRU::GRU(int64_t input_size, int64_t hidden_size, int64_t num_layers,
-         bool bias, bool batch_first, double dropout, bool bidirectional)
+         bool bias, bool batch_first, double dropout, bool bidirectional,
+         bool linear_before_reset)
     : input_size_(input_size),
       hidden_size_(hidden_size),
       num_layers_(num_layers),
       batch_first_(batch_first),
       bidirectional_(bidirectional),
-      dropout_p_(dropout) {
+      dropout_p_(dropout),
+      linear_before_reset_(linear_before_reset) {
 
     if (num_layers < 1) {
         throw std::invalid_argument("GRU: num_layers must be >= 1");
@@ -178,7 +212,8 @@ GRU::GRU(int64_t input_size, int64_t hidden_size, int64_t num_layers,
     // Create forward cells
     for (int64_t i = 0; i < num_layers; ++i) {
         int64_t layer_input_size = (i == 0) ? input_size : hidden_size * (bidirectional_ ? 2 : 1);
-        auto cell = std::make_shared<GRUCell>(layer_input_size, hidden_size, bias);
+        auto cell = std::make_shared<GRUCell>(layer_input_size, hidden_size, bias,
+                                              linear_before_reset);
         forward_cells_.push_back(cell);
         register_module("forward_cell_" + std::to_string(i), cell);
     }
@@ -187,7 +222,8 @@ GRU::GRU(int64_t input_size, int64_t hidden_size, int64_t num_layers,
     if (bidirectional_) {
         for (int64_t i = 0; i < num_layers; ++i) {
             int64_t layer_input_size = (i == 0) ? input_size : hidden_size * 2;
-            auto cell = std::make_shared<GRUCell>(layer_input_size, hidden_size, bias);
+            auto cell = std::make_shared<GRUCell>(layer_input_size, hidden_size, bias,
+                                              linear_before_reset);
             backward_cells_.push_back(cell);
             register_module("backward_cell_" + std::to_string(i), cell);
         }
@@ -330,7 +366,12 @@ auto GRU::forward(const Variable& input, const Variable& hx,
     // leaf output is correct). The earlier wrong-output bug here was the fused
     // path sourcing W_hh / bias_hh via positional cell->parameters() indices;
     // fixed below by using named accessors (see the layer loop).
+    // The fused inference kernels (GRUForward) and the cuDNN training path
+    // below only implement the linear_before_reset=1 new-gate math. When the
+    // GRU is configured for mode 0 we must fall through to the per-timestep
+    // autograd path, whose GRUCell::forward honors linear_before_reset_.
     const bool can_use_fused =
+        linear_before_reset_ &&
         !x.requires_grad() && !tenzor::is_grad_enabled();
 
     if (can_use_fused) {
@@ -432,6 +473,7 @@ auto GRU::forward(const Variable& input, const Variable& hx,
     // fused training path; GRU has no cell state.
     // =========================================================================
     if (std::getenv("TENZOR_DISABLE_FUSED_GRU_TRAIN") == nullptr &&
+        linear_before_reset_ &&
         is_op_supported(OpId::GRUCudnnTrainForward, input.device().type) &&
         input.dtype() == DType::Float32 &&
         !bidirectional_ &&

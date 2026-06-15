@@ -252,7 +252,11 @@ __global__ void csr_sparse_add_kernel(
     int64_t row_start = crow_ptr[row];
     int64_t row_end = crow_ptr[row + 1];
     for (int64_t j = row_start; j < row_end; ++j) {
-        out_ptr[row * ncols + col_ptr[j]] += val_ptr[j];
+        // Guard against malformed/untrusted CSR col indices: an out-of-range
+        // column would be an out-of-bounds device write into out_ptr.
+        int64_t c = col_ptr[j];
+        if (c < 0 || c >= ncols) continue;
+        out_ptr[row * ncols + c] += val_ptr[j];
     }
 }
 
@@ -1449,7 +1453,12 @@ __global__ void csr_spmv_kernel(
     int64_t row_start = crow_ptr[row];
     int64_t row_end = crow_ptr[row + 1];
     for (int64_t j = row_start; j < row_end; ++j) {
-        sum += val_ptr[j] * x_ptr[col_ptr[j]];
+        // x_ptr has length == the CSR column count (trusted contract: col index
+        // < ncols). Guard the lower bound here; a negative col index would be an
+        // out-of-bounds device read of x_ptr.
+        int64_t k = col_ptr[j];
+        if (k < 0) continue;
+        sum += val_ptr[j] * x_ptr[k];
     }
     y_ptr[row] = sum;
 }
@@ -1473,7 +1482,12 @@ __global__ void csr_spmm_kernel(
     int64_t row_start = crow_ptr[row];
     int64_t row_end = crow_ptr[row + 1];
     for (int64_t j = row_start; j < row_end; ++j) {
-        sum += val_ptr[j] * b_ptr[col_ptr[j] * ncols_b + col];
+        // Guard against malformed/untrusted CSR col indices: an out-of-range
+        // column would be an out-of-bounds device read of b_ptr. The CSR column
+        // count equals B's row count (ncols_b's matrix has nrows_b == ncols_a).
+        int64_t k = col_ptr[j];
+        if (k < 0) continue;
+        sum += val_ptr[j] * b_ptr[k * ncols_b + col];
     }
     c_ptr[row * ncols_b + col] = sum;
 }
@@ -1492,7 +1506,11 @@ __global__ void csr_sparse_add_kernel(
     int64_t row_start = crow_ptr[row];
     int64_t row_end = crow_ptr[row + 1];
     for (int64_t j = row_start; j < row_end; ++j) {
-        out_ptr[row * ncols + col_ptr[j]] += val_ptr[j];
+        // Guard against malformed/untrusted CSR col indices: an out-of-range
+        // column would be an out-of-bounds device write into out_ptr.
+        int64_t c = col_ptr[j];
+        if (c < 0 || c >= ncols) continue;
+        out_ptr[row * ncols + c] += val_ptr[j];
     }
 }
 

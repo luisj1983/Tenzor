@@ -2624,6 +2624,39 @@ __global__ void embedding_bag_sum_kernel_hip_bf16(
     }
 }
 
+// Float16 needs the same F32-accumulator treatment as BFloat16: accumulating
+// an entire bag sum in fp16 (T acc = T(0); acc += ...) loses precision and
+// drifts for large bags / many summands. Load as __half, accumulate/divide in
+// float, store via safe_f2h (NaN-preserving, RNE narrowing).
+__global__ void embedding_bag_sum_kernel_hip_f16(
+    const __half* embeddings,
+    const int64_t* offsets,
+    __half* output,
+    int64_t num_bags,
+    int64_t total_elements,
+    int64_t embedding_dim,
+    int64_t offsets_size,
+    bool divide_by_count)
+{
+    int64_t bag = blockIdx.x;
+    if (bag >= num_bags) return;
+
+    int64_t start = offsets[bag];
+    int64_t end = (bag + 1 < offsets_size) ? offsets[bag + 1] : total_elements;
+    int64_t bag_size = end - start;
+
+    for (int64_t j = threadIdx.x; j < embedding_dim; j += blockDim.x) {
+        float acc = 0.0f;
+        for (int64_t i = start; i < end; ++i) {
+            acc += tenzor::rocm::safe_h2f(embeddings[i * embedding_dim + j]);
+        }
+        if (divide_by_count && bag_size > 0) {
+            acc /= static_cast<float>(bag_size);
+        }
+        output[bag * embedding_dim + j] = tenzor::rocm::safe_f2h(acc);
+    }
+}
+
 __global__ void embedding_bag_max_kernel_hip_bf16(
     const hip_bfloat16* embeddings,
     const int64_t* offsets,
@@ -2733,7 +2766,8 @@ auto embedding_bag_forward_kernel(const Tensor& embeddings, const Tensor& offset
                     argmax_ptr, num_bags, total_elements, embedding_dim, offsets_size);
                 HIP_POST_LAUNCH_CHECK();
             } else {
-                hipLaunchKernelGGL(embedding_bag_sum_kernel_hip<__half>,
+                // F32-accumulator kernel: fp16 bag-sum accumulation drifts.
+                hipLaunchKernelGGL(embedding_bag_sum_kernel_hip_f16,
                     dim3(blocks), dim3(threads), 0, stream,
                     reinterpret_cast<const __half*>(embeddings.data_ptr()),
                     offsets.data<int64_t>(),
@@ -3522,6 +3556,13 @@ __global__ void take_along_dim_hip_kernel(
 
         int64_t src_idx = indices[i];
         if (src_idx < 0) src_idx += in_dim_size;
+
+        // Bounds-check after negative normalization (matches gather/index_select):
+        // an out-of-range index would otherwise be an out-of-bounds device read.
+        if (src_idx < 0 || src_idx >= in_dim_size) {
+            output[i] = T(0);
+            continue;
+        }
 
         int64_t in_offset = outer * (in_dim_size * inner_size) + src_idx * inner_size + inner;
         output[i] = input[in_offset];

@@ -2052,13 +2052,43 @@ auto diag_embed(const Tensor& input, int64_t offset, int64_t dim1, int64_t dim2)
     // diagonal for both 1D and (..., N) inputs). The previous inline path only
     // filled data for 1D input and returned an all-zeros tensor for any
     // ndim>1 (batched) case.
+    //
+    // Backend kernels only correctly honor the *default* placement, where the
+    // two new size-N matrix axes are the trailing two axes of the output
+    // (dim1 = -2, dim2 = -1). Some backends (e.g. CUDA) ignore the dim1/dim2
+    // attributes entirely and always emit the matrix on the trailing axes,
+    // while the CPU kernel builds a dim1/dim2-aware shape but fills as if the
+    // matrix were trailing — so non-default placements diverged across
+    // backends. To guarantee identical results everywhere, always dispatch the
+    // kernel with the default trailing-axis placement and rearrange the two
+    // matrix axes into the requested dim1/dim2 positions here in the op layer.
     OpAttributes attrs;
     attrs.set(AttrKey::Diagonal, offset);
-    attrs.set(AttrKey::Dim0, dim1);
-    attrs.set(AttrKey::Dim1, dim2);
+    // Request the default trailing-axis placement from every backend.
+    attrs.set(AttrKey::Dim0, static_cast<int64_t>(-2));
+    attrs.set(AttrKey::Dim1, static_cast<int64_t>(-1));
 
     std::array<Tensor, 1> inputs = {input};
-    return dispatch_single(OpId::DiagEmbed, inputs, attrs);
+    Tensor result = dispatch_single(OpId::DiagEmbed, inputs, attrs);
+
+    // Output rank = input rank + 1. Normalize the requested dim1/dim2 against
+    // the output rank, then move the trailing two axes (where the kernel placed
+    // the N x N matrix) to those positions.
+    const int64_t out_ndim = static_cast<int64_t>(result.shape().size());
+    int64_t d1 = dim1 < 0 ? dim1 + out_ndim : dim1;
+    int64_t d2 = dim2 < 0 ? dim2 + out_ndim : dim2;
+
+    const int64_t last0 = out_ndim - 2;  // first matrix axis as emitted
+    const int64_t last1 = out_ndim - 1;  // second matrix axis as emitted
+
+    // Already in the requested (default) placement: nothing to rearrange.
+    if (d1 == last0 && d2 == last1) {
+        return result;
+    }
+
+    // Move the two trailing matrix axes to the requested destinations. movedim
+    // handles all distinct ordered placements (including d1 > d2) correctly.
+    return tenzor::movedim(result, {last0, last1}, {d1, d2});
 }
 
 auto diagflat(const Tensor& input, int64_t offset) -> Tensor {

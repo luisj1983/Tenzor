@@ -6181,7 +6181,8 @@ __global__ void renorm_scale_kernel(
     const T* input,
     T* output,
     const T* norms,
-    DimMeta meta,
+    DimMeta meta,            // shape + INPUT strides (for the load)
+    DimMeta out_meta,        // contiguous OUTPUT strides (for the store)
     int64_t ndim,
     int64_t dim,
     int64_t num_slices,       // == shape[dim]
@@ -6202,15 +6203,21 @@ __global__ void renorm_scale_kernel(
             tmp /= meta.shape[d];
         }
 
+        // Load from the (possibly non-contiguous) input using its strides, but
+        // store to the freshly allocated, contiguous output using the output's
+        // own strides. Using input strides for the write scatters values to the
+        // wrong offsets (and can write out of bounds) for non-contiguous input.
         int64_t in_idx = 0;
+        int64_t out_idx = 0;
         for (int64_t d = 0; d < ndim; ++d) {
             in_idx += indices[d] * meta.strides[d];
+            out_idx += indices[d] * out_meta.strides[d];
         }
 
         T norm_val = norms[slice_idx];
         T mn = static_cast<T>(maxnorm);
         T scale = (norm_val > mn) ? (mn / norm_val) : T(1);
-        output[in_idx] = input[in_idx] * scale;
+        output[out_idx] = input[in_idx] * scale;
     }
 }
 
@@ -6250,6 +6257,16 @@ auto renorm_kernel(const Tensor& input, double p, int64_t dim, double maxnorm, c
     std::vector<int64_t> strides_vec(strides_span.begin(), strides_span.end());
     DimMeta meta = make_dim_meta(shape_vec, strides_vec);
 
+    // Output has same shape as input and is freshly allocated -> contiguous
+    // (row-major) layout. The scale kernel reads input via its (possibly
+    // non-contiguous) strides but must store using the output's contiguous
+    // strides; otherwise non-contiguous input scatters to wrong offsets.
+    std::vector<int64_t> out_strides_vec(ndim, 1);
+    for (int64_t d = ndim - 2; d >= 0; --d) {
+        out_strides_vec[d] = out_strides_vec[d + 1] * shape_vec[d + 1];
+    }
+    DimMeta out_meta = make_dim_meta(shape_vec, out_strides_vec);
+
     // Output has same shape as input
     Tensor output(shape_vec, input.dtype(), input.device());
 
@@ -6272,7 +6289,7 @@ auto renorm_kernel(const Tensor& input, double p, int64_t dim, double maxnorm, c
         compute_launch_config_1d(total, grid, block);
         renorm_scale_kernel<scalar_t><<<grid, block, 0, stream>>>(
             input.data<scalar_t>(), output.data<scalar_t>(), norms.data<scalar_t>(),
-            meta, ndim, actual_dim, num_slices, slice_size, static_cast<float>(maxnorm));
+            meta, out_meta, ndim, actual_dim, num_slices, slice_size, static_cast<float>(maxnorm));
         CUDA_CHECK(cudaGetLastError());
     });
 

@@ -415,6 +415,16 @@ auto RendezvousStore::run_master_server() -> void {
                 continue;
             }
 
+            // cmd_len is fully attacker-controlled: any local process can connect
+            // to the INADDR_ANY-bound rendezvous port. Bound it before allocating
+            // so a value near UINT32_MAX can't force a multi-GiB allocation (OOM
+            // DoS), mirroring the client-side kMaxRendezvousResponse guard in
+            // get()/add(). Fail fast on an implausible length.
+            if (cmd_len > kMaxRendezvousResponse) {
+                ::close(client_fd);
+                continue;
+            }
+
             std::string command(cmd_len, '\0');
             if (::recv(client_fd, &command[0], cmd_len, MSG_WAITALL) != static_cast<ssize_t>(cmd_len)) {
                 ::close(client_fd);
@@ -1077,17 +1087,32 @@ auto GlooBackend::recv_tensor(Tensor& tensor, int peer_rank) -> void {
     conn->recv(&numel, sizeof(numel));
     conn->recv(&dtype, sizeof(dtype));
 
-    // Receive data - use dtype from metadata, not cpu_tensor.dtype()
     Tensor cpu_tensor = get_cpu_buffer(tensor);
-    size_t data_size = numel * dtype_size(static_cast<DType>(dtype));
 
-    // Validate tensor size matches
+    // Validate element count matches the local buffer.
     if (cpu_tensor.numel() != static_cast<int64_t>(numel)) {
         throw std::runtime_error(
             "recv_tensor: size mismatch - expected " + std::to_string(numel) +
             " elements, but tensor has " + std::to_string(cpu_tensor.numel())
         );
     }
+
+    // Validate the peer-supplied dtype matches the LOCAL buffer's dtype. The
+    // destination buffer was allocated for cpu_tensor.dtype() * numel bytes; if
+    // the peer reported a wider dtype (e.g. Float64=8B into a Float32=4B buffer)
+    // with matching numel, sizing the recv by the peer dtype would overflow the
+    // heap allocation. Reject the mismatch and always size the recv by the
+    // local buffer's own capacity, never the peer's.
+    if (static_cast<DType>(dtype) != cpu_tensor.dtype()) {
+        throw std::runtime_error(
+            "recv_tensor: dtype mismatch - peer sent dtype " +
+            std::to_string(dtype) + " but local buffer dtype is " +
+            std::to_string(static_cast<uint32_t>(cpu_tensor.dtype()))
+        );
+    }
+
+    // Size the recv by the local buffer's capacity (peer dtype now verified equal).
+    size_t data_size = cpu_tensor.numel() * dtype_size(cpu_tensor.dtype());
 
     conn->recv(cpu_tensor.data_ptr(), data_size);
 

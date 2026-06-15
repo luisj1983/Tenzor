@@ -241,6 +241,15 @@ private:
      * @return Loaded vector
      */
     auto read_int64_vector() -> std::vector<int64_t>;
+
+    /**
+     * @brief Remaining unread bytes from the current get position.
+     *
+     * Used to bound untrusted declared element/record counts before
+     * allocating or reserving, guarding against OOM-DoS on crafted files.
+     * Returns 0 if the stream position is unavailable.
+     */
+    auto remaining_bytes() -> uint64_t;
 };
 
 /**

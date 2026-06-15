@@ -1052,6 +1052,19 @@ auto ONNXImporter::convert_gemm(const ONNXImportNode& node) -> std::shared_ptr<n
     float alpha    = node.get_attr("alpha").value_or(ONNXAttribute{}).get_float(1.0f);
     float beta     = node.get_attr("beta").value_or(ONNXAttribute{}).get_float(1.0f);
     int64_t transB = node.get_attr("transB").value_or(ONNXAttribute{}).get_int(0);
+    int64_t transA = node.get_attr("transA").value_or(ONNXAttribute{}).get_int(0);
+
+    // ONNX Gemm computes Y = α*(A_eff @ B_eff) + β*C where A_eff = A^T when
+    // transA=1. A is the runtime activation, so transA cannot be folded into
+    // the Linear weights/bias the way transB and α/β can. Mapping a transA=1
+    // Gemm onto nn::Linear (Y = X @ W^T + b) would silently use A untransposed
+    // and produce wrong math. Reject rather than ignore.
+    if (transA != 0) {
+        throw std::runtime_error(
+            "ONNX Gemm: transA=1 not representable through nn::Linear "
+            "(the activation A would need a runtime transpose). Re-export "
+            "the graph with transA=0 or insert an explicit Transpose.");
+    }
 
     // Audit I4: real `alpha * (A @ B) + beta * C` support by folding the
     // scalars into the Linear weights/bias at import time. Previously this
@@ -1888,11 +1901,25 @@ auto ONNXImporter::convert_gru(const ONNXImportNode& node) -> std::shared_ptr<nn
     }
     bool has_bias = node.inputs.size() > 3 && !node.inputs[3].empty();
 
+    // ONNX GRU `linear_before_reset` selects the new-gate ("n"/"h")
+    // formulation. The ONNX default is 0:
+    //   mode 0: n_t = tanh(Xt·Wn + Wbn + (r_t ⊙ Ht-1)·Rn + Rbn)
+    //           (reset gate multiplies Ht-1 BEFORE the recurrent matmul; the
+    //            recurrent new-gate bias Rbn is a normal post-matmul bias)
+    //   mode 1: n_t = tanh(Xt·Wn + Wbn + r_t ⊙ (Ht-1·Rn + Rbn))
+    //           (reset gate multiplies the recurrent matmul RESULT)
+    // Both modes are now implemented by Tenzor's GRUCell, selected via the
+    // linear_before_reset flag. (Default attr value 0 → mode 0 → flag false.)
+    int64_t linear_before_reset =
+        node.get_attr("linear_before_reset").value_or(ONNXAttribute{}).get_int(0);
+    const bool lbr = (linear_before_reset != 0);
+
     auto gru = std::make_shared<nn::GRU>(
         dims.input_size, dims.hidden_size,
         /*num_layers=*/1, /*bias=*/has_bias,
         /*batch_first=*/false, /*dropout=*/0.0,
-        /*bidirectional=*/bidirectional);
+        /*bidirectional=*/bidirectional,
+        /*linear_before_reset=*/lbr);
 
     // Gate-order remap: ONNX [z, r, h] → tenzor [r, z, n]. perm[k] = ONNX slot.
     //   tenzor slot 0 (r) ← ONNX slot 1 (r)
@@ -1900,15 +1927,23 @@ auto ONNXImporter::convert_gru(const ONNXImportNode& node) -> std::shared_ptr<nn
     //   tenzor slot 2 (n) ← ONNX slot 2 (h)
     const std::vector<int64_t> gru_perm = {1, 0, 2};
 
-    // ONNX GRU `linear_before_reset` selects where the recurrent new-gate bias
-    // (Rbh) is applied. Tenzor's GRUCell only implements the mode==1 layout
-    // (Rbh inside the reset multiply, which our cell cannot bias), so under
-    // mode==1 the n-gate bias must NOT be pre-summed onto the input side. The
-    // ONNX default is 0, but the Tenzor exporter writes 1; we mark the n-gate
-    // ONNX slot (2 = "h") for special handling only when mode != 0.
-    int64_t linear_before_reset =
-        node.get_attr("linear_before_reset").value_or(ONNXAttribute{}).get_int(0);
-    const int64_t gru_n_gate_slot = (linear_before_reset != 0) ? 2 : -1;
+    // Bias handling differs by mode (the recurrent new-gate bias Rbn):
+    //
+    //   mode 1 (lbr == true): Rbn lives INSIDE the reset multiply,
+    //     r_t ⊙ (Ht-1·Rn + Rbn). Tenzor's weight_hh carries no bias (all
+    //     biases are collapsed onto weight_ih.bias), so there is nowhere to
+    //     place Rbn inside the reset. We therefore keep only Wbn on the n-gate
+    //     and reject a non-zero Rbn (combine_and_reorder_rnn_bias does this
+    //     when passed the n-gate slot). Mark the ONNX n-gate slot (2 = "h").
+    //
+    //   mode 0 (lbr == false): Rbn is a normal post-matmul bias,
+    //     ... + (r_t ⊙ Ht-1)·Rn + Rbn. Summing Wbn + Rbn onto weight_ih.bias is
+    //     exactly equivalent here, because GRUCell (mode 0) adds the recurrent
+    //     bias after the matmul and the input-side bias is folded into n_i:
+    //       n_t = tanh(Xt·Wn + (Wbn+Rbn) + (r_t ⊙ Ht-1)·Rn)
+    //     which matches the ONNX definition. So we sum every gate (slot = -1),
+    //     identical to the LSTM/RNN bias handling.
+    const int64_t gru_n_gate_slot = lbr ? 2 : -1;
 
     Tensor W_fwd = ::tenzor::slice(W, 0, 0, 1);
     W_fwd = ::tenzor::reshape(W_fwd, std::vector<int64_t>{3 * dims.hidden_size, dims.input_size});
@@ -2198,7 +2233,8 @@ auto ONNXImporter::convert_squeeze(const ONNXImportNode& node) -> void {
         }
     } else if (node.inputs.size() > 1) {
         // ONNX opset 13+: axes as second input tensor
-        auto axes_tensor = get_input(node.inputs[1]);
+        // ONNX permits axes as int32 or int64; cast to Int64 before reading.
+        auto axes_tensor = get_input(node.inputs[1]).to(DType::Int64);
         const int64_t* axes_data = axes_tensor.data<int64_t>();
         std::vector<int64_t> axes(axes_data, axes_data + axes_tensor.numel());
         std::sort(axes.begin(), axes.end(), std::greater<>());
@@ -2217,7 +2253,8 @@ auto ONNXImporter::convert_unsqueeze(const ONNXImportNode& node) -> void {
     std::vector<int64_t> axes;
     if (node.inputs.size() > 1) {
         // ONNX opset 13+: axes as second input tensor
-        auto axes_tensor = get_input(node.inputs[1]);
+        // ONNX permits axes as int32 or int64; cast to Int64 before reading.
+        auto axes_tensor = get_input(node.inputs[1]).to(DType::Int64);
         const int64_t* axes_data = axes_tensor.data<int64_t>();
         axes.assign(axes_data, axes_data + axes_tensor.numel());
     } else {
@@ -2242,8 +2279,11 @@ auto ONNXImporter::convert_slice(const ONNXImportNode& node) -> void {
     // Control tensors (starts/ends/axes/steps) are read on the host below, so
     // force them to CPU first — they may be initializers placed on a GPU device
     // (dereferencing a device pointer on the host crashes).
-    auto starts_t = get_host_input(node.inputs[1]);
-    auto ends_t = get_host_input(node.inputs[2]);
+    // ONNX Slice permits starts/ends/axes/steps as tensor(int32) OR
+    // tensor(int64). Tensor::data<int64_t>() enforces the dtype and throws on
+    // int32, so cast every control tensor to Int64 before reading.
+    auto starts_t = get_host_input(node.inputs[1]).to(DType::Int64);
+    auto ends_t = get_host_input(node.inputs[2]).to(DType::Int64);
 
     const int64_t* starts = starts_t.data<int64_t>();
     const int64_t* ends = ends_t.data<int64_t>();
@@ -2253,7 +2293,7 @@ auto ONNXImporter::convert_slice(const ONNXImportNode& node) -> void {
     std::vector<int64_t> steps_vec;
 
     if (node.inputs.size() > 3) {
-        auto axes_t = get_host_input(node.inputs[3]);
+        auto axes_t = get_host_input(node.inputs[3]).to(DType::Int64);
         const int64_t* axes_data = axes_t.data<int64_t>();
         axes_vec.assign(axes_data, axes_data + axes_t.numel());
     } else {
@@ -2261,7 +2301,7 @@ auto ONNXImporter::convert_slice(const ONNXImportNode& node) -> void {
     }
 
     if (node.inputs.size() > 4) {
-        auto steps_t = get_host_input(node.inputs[4]);
+        auto steps_t = get_host_input(node.inputs[4]).to(DType::Int64);
         const int64_t* steps_data = steps_t.data<int64_t>();
         steps_vec.assign(steps_data, steps_data + steps_t.numel());
     } else {
@@ -2447,7 +2487,7 @@ auto ONNXImporter::convert_resize(const ONNXImportNode& node) -> void {
     std::vector<int64_t> output_size;
 
     if (node.inputs.size() > 3 && !node.inputs[3].empty()) {
-        auto sizes_t = get_host_input(node.inputs[3]);
+        auto sizes_t = get_host_input(node.inputs[3]).to(DType::Int64);
         const int64_t* sizes_data = sizes_t.data<int64_t>();
         // sizes includes batch and channel dims — take only spatial
         int64_t ndim = sizes_t.numel();

@@ -849,7 +849,11 @@ auto mean_kernel(const Tensor& input, int64_t dim, bool keepdim, sycl::queue& qu
 }
 
 // Max reduction kernel
-auto max_kernel(const Tensor& input, int64_t dim, bool keepdim, sycl::queue& queue) -> Tensor {
+auto max_kernel(const Tensor& input_raw, int64_t dim, bool keepdim, sycl::queue& queue) -> Tensor {
+    // Ensure contiguous input: the shape-derived offset math below assumes row-major
+    // contiguous layout, so a non-contiguous (transpose/permute/slice) view must be
+    // materialized first to avoid reading the wrong elements.
+    Tensor input = input_raw.is_contiguous() ? input_raw : contiguous_kernel(input_raw, queue);
     auto shape = input.shape();
     std::vector<int64_t> shape_vec(shape.begin(), shape.end());
 
@@ -1073,7 +1077,10 @@ auto max_kernel(const Tensor& input, int64_t dim, bool keepdim, sycl::queue& que
 }
 
 // Min reduction kernel
-auto min_kernel(const Tensor& input, int64_t dim, bool keepdim, sycl::queue& queue) -> Tensor {
+auto min_kernel(const Tensor& input_raw, int64_t dim, bool keepdim, sycl::queue& queue) -> Tensor {
+    // Ensure contiguous input: the shape-derived offset math below assumes row-major
+    // contiguous layout, so a non-contiguous view must be materialized first.
+    Tensor input = input_raw.is_contiguous() ? input_raw : contiguous_kernel(input_raw, queue);
     auto shape = input.shape();
     std::vector<int64_t> shape_vec(shape.begin(), shape.end());
 
@@ -1491,24 +1498,27 @@ static void sycl_arg_reduce_full(const ReadT* in_ptr, int64_t* out_ptr,
  * @param queue SYCL queue for execution
  * @return Tensor containing indices (Int64 dtype)
  */
-auto argmax_kernel(const Tensor& input, int64_t dim, bool keepdim, sycl::queue& queue) -> Tensor {
+auto argmax_kernel(const Tensor& input_raw, int64_t dim, bool keepdim, sycl::queue& queue) -> Tensor {
     // Argmax returns INDICES, invariant under a lossless integer widen. oneAPI
     // has native argmax kernels only for {F32,F64,F16,Int32}; widen the narrow
     // integer / Bool types to Int32 (exact) so they're supported.
     {
-        const DType dt = input.dtype();
+        const DType dt = input_raw.dtype();
         if (dt == DType::Int8 || dt == DType::UInt8 || dt == DType::Bool) {
-            return argmax_kernel(input.to(DType::Int32), dim, keepdim, queue);
+            return argmax_kernel(input_raw.to(DType::Int32), dim, keepdim, queue);
         }
         if (dt == DType::Int16 || dt == DType::UInt16) {
             // A *device* 16-bit integer cast crashes the Intel oneAPI runtime
             // ("submit a bug report to Intel"); the cast must happen on the host.
             // Device<->host memcpy and host casts of 16-bit ints are both safe,
             // so widen on CPU (lossless), then run the Int32 argmax ON DEVICE.
-            Tensor as_i32 = input.to(Device::cpu()).to(DType::Int32).to(input.device());
+            Tensor as_i32 = input_raw.to(Device::cpu()).to(DType::Int32).to(input_raw.device());
             return argmax_kernel(as_i32, dim, keepdim, queue);
         }
     }
+    // Ensure contiguous input: the shape-derived offset math below assumes row-major
+    // contiguous layout, so a non-contiguous view must be materialized first.
+    Tensor input = input_raw.is_contiguous() ? input_raw : contiguous_kernel(input_raw, queue);
     const auto& shape = input.shape();
 
     // For full reduction (dim=-1)
@@ -1671,20 +1681,23 @@ auto argmax_kernel(const Tensor& input, int64_t dim, bool keepdim, sycl::queue& 
  * @param queue SYCL queue for execution
  * @return Tensor containing indices (Int64 dtype)
  */
-auto argmin_kernel(const Tensor& input, int64_t dim, bool keepdim, sycl::queue& queue) -> Tensor {
+auto argmin_kernel(const Tensor& input_raw, int64_t dim, bool keepdim, sycl::queue& queue) -> Tensor {
     // See argmax_kernel: widen narrow-int / bool to Int32 (exact, index-
     // invariant). 16-bit casts must be done on the host (device 16-bit cast
     // crashes the Intel oneAPI runtime); the argmin itself stays on device.
     {
-        const DType dt = input.dtype();
+        const DType dt = input_raw.dtype();
         if (dt == DType::Int8 || dt == DType::UInt8 || dt == DType::Bool) {
-            return argmin_kernel(input.to(DType::Int32), dim, keepdim, queue);
+            return argmin_kernel(input_raw.to(DType::Int32), dim, keepdim, queue);
         }
         if (dt == DType::Int16 || dt == DType::UInt16) {
-            Tensor as_i32 = input.to(Device::cpu()).to(DType::Int32).to(input.device());
+            Tensor as_i32 = input_raw.to(Device::cpu()).to(DType::Int32).to(input_raw.device());
             return argmin_kernel(as_i32, dim, keepdim, queue);
         }
     }
+    // Ensure contiguous input: the shape-derived offset math below assumes row-major
+    // contiguous layout, so a non-contiguous view must be materialized first.
+    Tensor input = input_raw.is_contiguous() ? input_raw : contiguous_kernel(input_raw, queue);
     const auto& shape = input.shape();
 
     // For full reduction (dim=-1) — two-phase device-side reduction

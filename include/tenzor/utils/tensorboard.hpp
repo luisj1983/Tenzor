@@ -279,7 +279,13 @@ private:
     std::unique_ptr<Impl> impl_;
 
     // Helper methods
-    auto write_event(std::string_view tag, const std::vector<uint8_t>& data, int64_t step) -> void;
+    // is_scalar selects the Summary.Value encoding explicitly: when true, data
+    // is the raw 4-byte float payload to wrap as simple_value (wire_type 5);
+    // when false, data is a pre-wrapped field body (histogram/image/etc.) that
+    // is appended verbatim. The encoding intent must never be inferred from the
+    // payload length, which would silently mis-encode any 4-byte non-scalar.
+    auto write_event(std::string_view tag, const std::vector<uint8_t>& data, int64_t step,
+                     bool is_scalar = false) -> void;
     auto serialize_scalar(float value) -> std::vector<uint8_t>;
     auto serialize_histogram(const Tensor& tensor, int bins) -> std::vector<uint8_t>;
     auto serialize_image(const Tensor& tensor) -> std::vector<uint8_t>;

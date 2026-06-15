@@ -123,18 +123,22 @@ public:
     }
 
     /**
-     * @brief Move the result out of a state already known to be ready.
+     * @brief Read the result of a state already known to be ready.
      *
      * Used by continuations, which only run once the state is ready, to avoid
-     * the redundant condition-variable wait plus value copy that get() incurs.
-     * Rethrows the stored exception if one is set.
+     * the redundant condition-variable wait that get() incurs. Returns a copy
+     * of the stored value rather than moving it out: a single shared state may
+     * fan out to multiple continuations (and may additionally be observed via
+     * get()/wait()), so every consumer must see the real result. Moving the
+     * value out would corrupt the second and later consumers. Rethrows the
+     * stored exception if one is set.
      */
     T take() {
         std::unique_lock lock(mutex_);
         if (exception_) {
             std::rethrow_exception(exception_);
         }
-        return std::move(value_);
+        return value_;
     }
 
     /**

@@ -705,6 +705,20 @@ auto VulkanBackend::dispatchFill(const Tensor& input, double value) -> Tensor {
         return output;
     }
 
+    // Every dtype other than Float32/Int32 needs dtype-specific handling: the
+    // generic 32-bit `fill` shader below writes one uint32 per element slot and
+    // the value-to-bits conversion only knows Int32/Float32. For Int64/UInt64
+    // (8 bytes/elem) it would leave the high word uninitialised AND store a
+    // float bit pattern; for BFloat16/Int16/Int8/Bool (packed sub-word) it
+    // would over- or mis-write. dispatchFull already carries complete,
+    // correct per-dtype coverage (full_i64 split low/high, full_i16, full_i8,
+    // full_uint8/bool, full_f16/bf16, full_f64, complex), so delegate to it.
+    // This is reachable from dispatchArgSort, which fills an Int64 pad buffer
+    // with INT64_MAX/MIN sentinels that must round-trip exactly.
+    if (input.dtype() != DType::Float32 && input.dtype() != DType::Int32) {
+        return dispatchFull(out_shape, value, input.dtype());
+    }
+
     auto* pipeline = getPipeline("fill", device_id);
 
     std::vector<std::pair<uint32_t, const void*>> bindings = {

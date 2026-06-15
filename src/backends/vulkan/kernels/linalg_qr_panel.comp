@@ -82,31 +82,35 @@ void main() {
 
         // Apply reflection to remaining columns: A[:,j] -= tau * v * (v^T * A[:,j])
         for (uint j = col + 1; j < min(col_start + panel_cols, n); j++) {
-            // Compute dot = v^T * A[:,j]
+            // Compute dot = v^T * A[:,j] in parallel: each thread accumulates a
+            // strided partial sum over the sub-diagonal rows (v[k]=1 implicit,
+            // so thread 0 adds the head term A[k,j]), then a shared-memory tree
+            // reduction combines them.
             float local_dot = 0.0;
             for (uint r = k + 1 + tid; r < panel_rows; r += 256) {
                 float v_r = A[base + (col_start + r) * n + col];
                 local_dot += v_r * A[base + (col_start + r) * n + j];
             }
-            // Thread 0 also adds v[k] * A[k,j]
             if (tid == 0) {
-                // v[k] contribution (using un-normalized stored value before alpha overwrite)
-                // Since we already overwrote A[k,col] with alpha, we use v_k = 1
+                // v[k]=1 contribution (A[k,col] already overwritten with alpha)
                 local_dot += A[base + (col_start + k) * n + j];
             }
-
-            // Reduce dot product (simple serial for correctness)
-            if (tid == 0) {
-                float dot = A[base + (col_start + k) * n + j];
-                for (uint r = k + 1; r < panel_rows; r++) {
-                    float v_r = A[base + (col_start + r) * n + col];
-                    dot += v_r * A[base + (col_start + r) * n + j];
-                }
-                col_data[0] = dot;
-            }
+            col_data[tid] = local_dot;
             barrier();
 
+            // Tree reduction over the workgroup. Round the active extent up to
+            // a power of two so non-power-of-two workgroup sizes still reduce
+            // correctly; entries at/above gl_WorkGroupSize.x are treated as 0.
+            for (uint s = 256u / 2u; s > 0u; s >>= 1) {
+                if (tid < s) {
+                    float other = (tid + s < gl_WorkGroupSize.x) ? col_data[tid + s] : 0.0;
+                    col_data[tid] += other;
+                }
+                barrier();
+            }
+
             float dot = col_data[0];
+            barrier();
 
             // Update: A[r,j] -= tau * v[r] * dot
             for (uint r = k + 1 + tid; r < panel_rows; r += 256) {

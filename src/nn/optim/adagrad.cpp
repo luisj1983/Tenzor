@@ -88,7 +88,13 @@ auto Adagrad::initialize_buffers() -> void {
     sum_.clear();
 
     for (auto& param : parameters_) {
-        if (!param) continue;
+        if (!param) {
+            // Keep sum_ index-aligned with parameters_ (matches
+            // on_parameters_appended_); a null param preceding a valid one
+            // must not shift later accumulators.
+            sum_.push_back(Tensor{});
+            continue;
+        }
         const auto& param_data = param->tensor();
         auto original_device = param_data.device();
         // R.16: half-precision params get Float32 state.

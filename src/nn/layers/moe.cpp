@@ -157,7 +157,6 @@ auto MixtureOfExperts::forward_with_loss(const Variable& input)
     // Auxiliary load balancing loss (separate path; doesn't need to flow
     // through the expert outputs to remain useful, but it does need to flow
     // through `probs_v` so the router learns).
-    auto probs_mean = tenzor::mean(probs_t, /*dim=*/0, /*keepdim=*/false);
     auto top1_idx = topk_idx.slice(1, 0, 1).squeeze(1);
 
     auto expert_counts = tenzor::zeros({num_experts_}, DType::Float32, input.tensor().device());

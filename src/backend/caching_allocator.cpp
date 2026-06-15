@@ -430,45 +430,51 @@ bool CachingAllocator::try_merge_blocks(Block* block) {
     auto& device_alloc = device_allocators_[block->device];
     bool merged = false;
 
-    // Try to find adjacent blocks to merge
-    // Check if there's a block right after this one
-    void* next_ptr = static_cast<char*>(block->ptr) + block->size;
-    auto next_it = device_alloc.all_blocks.find(next_ptr);
+    // Repeat until no further coalescing is possible so a freed block fully
+    // absorbs ALL contiguous free neighbors on both sides in one call (not just
+    // the single immediate predecessor/successor). Each successful merge can
+    // expose a new neighbor that the next pass picks up.
+    bool merged_this_pass = true;
+    while (merged_this_pass) {
+        merged_this_pass = false;
 
-    if (next_it != device_alloc.all_blocks.end()) {
-        Block* next_block = next_it->second.get();
-        // Only merge blocks from the same original cudaMalloc allocation
-        if (!next_block->allocated && next_block->original_ptr == block->original_ptr) {
-            ALLOC_DEBUG("MERGE: block_ptr=" << block->ptr << " block_size=" << block->size
-                        << " + next_ptr=" << next_block->ptr << " next_size=" << next_block->size
-                        << " -> merged_size=" << (block->size + next_block->size));
+        // Forward merge: absorb the immediately-following contiguous free block.
+        void* next_ptr = static_cast<char*>(block->ptr) + block->size;
+        auto next_it = device_alloc.all_blocks.find(next_ptr);
+        if (next_it != device_alloc.all_blocks.end()) {
+            Block* next_block = next_it->second.get();
+            // Only merge blocks from the same original cudaMalloc allocation
+            if (!next_block->allocated && next_block->original_ptr == block->original_ptr) {
+                ALLOC_DEBUG("MERGE: block_ptr=" << block->ptr << " block_size=" << block->size
+                            << " + next_ptr=" << next_block->ptr << " next_size=" << next_block->size
+                            << " -> merged_size=" << (block->size + next_block->size));
 
-            // Merge with next block
-            device_alloc.free_blocks.erase(next_block);
+                // Merge with next block
+                device_alloc.free_blocks.erase(next_block);
 
-            // When merging, next_block's size was already in cached_bytes
-            // Subtract it before expanding the current block to avoid double-counting
-            if (device_alloc.stats.cached_bytes >= next_block->size) {
-                device_alloc.stats.cached_bytes -= next_block->size;
+                // When merging, next_block's size was already in cached_bytes
+                // Subtract it before expanding the current block to avoid double-counting
+                if (device_alloc.stats.cached_bytes >= next_block->size) {
+                    device_alloc.stats.cached_bytes -= next_block->size;
+                }
+
+                // Expand current block
+                block->size += next_block->size;
+
+                // Remove next block (and its address-index entry)
+                device_alloc.blocks_by_addr.erase(next_ptr);
+                device_alloc.all_blocks.erase(next_it);
+
+                device_alloc.stats.num_merges++;
+                merged = true;
+                merged_this_pass = true;
             }
-
-            // Expand current block
-            block->size += next_block->size;
-
-            // Remove next block (and its address-index entry)
-            device_alloc.blocks_by_addr.erase(next_ptr);
-            device_alloc.all_blocks.erase(next_it);
-
-            device_alloc.stats.num_merges++;
-            merged = true;
         }
-    }
 
-    // Backward merge: find the immediately-preceding block via the address
-    // index (O(log n)). `block` must remain the surviving object because the
-    // caller still references it, so we absorb the predecessor INTO `block` and
-    // re-key it to the predecessor's (lower) address.
-    {
+        // Backward merge: find the immediately-preceding block via the address
+        // index (O(log n)). `block` must remain the surviving object because the
+        // caller still references it, so we absorb the predecessor INTO `block`
+        // and re-key it to the predecessor's (lower) address.
         auto addr_it = device_alloc.blocks_by_addr.find(block->ptr);
         if (addr_it != device_alloc.blocks_by_addr.end() &&
             addr_it != device_alloc.blocks_by_addr.begin()) {
@@ -510,6 +516,7 @@ bool CachingAllocator::try_merge_blocks(Block* block) {
 
                 device_alloc.stats.num_merges++;
                 merged = true;
+                merged_this_pass = true;
             }
         }
     }
@@ -566,6 +573,25 @@ bool CachingAllocator::release_block(Block* block) {
     // lowest address). Skip interior blocks here, leaving them tracked.
     if (block->ptr != block->original_ptr) {
         return false;
+    }
+
+    // Even the lower split block keeps ptr == original_ptr (split_block only
+    // shrinks its size and creates a remainder at original_ptr + size that
+    // inherits the same original_ptr). cudaFree(original_ptr) frees the ENTIRE
+    // underlying allocation, so device-freeing the lower block while a remainder
+    // sibling is still tracked would leave that sibling dangling (use-after-free
+    // if handed back out) and leak the remainder's reserved accounting. This
+    // normally cannot happen because try_merge_blocks reassembles the full block
+    // first, but with merging disabled (set_merge_enabled(false)) the lower block
+    // is still selectable by enforce_cache_limit/empty_cache. Refuse to free
+    // unless this block is the SOLE block for its original allocation.
+    for (const auto& [addr, other] : device_alloc.all_blocks) {
+        if (other.get() != block && other->original_ptr == block->original_ptr) {
+            // A sibling (remainder or another split fragment) still references
+            // this allocation. Leave the block cached so it can be coalesced
+            // later rather than freeing memory still in use.
+            return false;
+        }
     }
 
     // Remove from free blocks if present

@@ -333,6 +333,16 @@ auto full(std::vector<int64_t> shape, double value, DType dtype, Device device) 
             std::fill(ptr, ptr + numel, std::complex<double>(value, 0.0));
             break;
         }
+        case DType::FP8_E4M3: {
+            FP8_E4M3* ptr = static_cast<FP8_E4M3*>(data);
+            std::fill(ptr, ptr + numel, FP8_E4M3(static_cast<float>(value)));
+            break;
+        }
+        case DType::FP8_E5M2: {
+            FP8_E5M2* ptr = static_cast<FP8_E5M2*>(data);
+            std::fill(ptr, ptr + numel, FP8_E5M2(static_cast<float>(value)));
+            break;
+        }
         default:
             throw std::runtime_error("Unsupported dtype for full()");
     }

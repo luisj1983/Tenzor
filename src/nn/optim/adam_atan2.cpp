@@ -307,6 +307,17 @@ auto AdamAtan2::state_dict() const -> std::unordered_map<std::string, Tensor> {
     state["weight_decay"] = Tensor({1}, DType::Float64, Device::cpu());
     state["weight_decay"].data<double>()[0] = weight_decay_;
 
+    // Persist the amsgrad flag and parameter count so the checkpoint round-trips
+    // the optimiser configuration (matches RMSprop/Adagrad/Adadelta siblings).
+    // Without amsgrad, a checkpoint saved with amsgrad=true loaded into an
+    // optimiser built with amsgrad=false would restore the max buffers yet
+    // step_impl() would ignore them, silently changing the trajectory.
+    state["amsgrad"] = Tensor({1}, DType::Int64, Device::cpu());
+    state["amsgrad"].data<int64_t>()[0] = amsgrad_ ? 1 : 0;
+
+    state["num_params"] = Tensor({1}, DType::Int64, Device::cpu());
+    state["num_params"].data<int64_t>()[0] = static_cast<int64_t>(parameters_.size());
+
     // Save momentum buffers
     for (size_t i = 0; i < exp_avg_.size(); ++i) {
         state["exp_avg_" + std::to_string(i)] = exp_avg_[i].clone();
@@ -323,9 +334,28 @@ auto AdamAtan2::state_dict() const -> std::unordered_map<std::string, Tensor> {
 }
 
 auto AdamAtan2::load_state_dict(const std::unordered_map<std::string, Tensor>& state) -> void {
+    // Parameter-count validation (matches RMSprop/Adagrad): reject a checkpoint
+    // from a differently-sized model rather than silently leaving trailing
+    // buffers stale.
+    if (state.count("num_params")) {
+        const int64_t expected_n = state.at("num_params").data<int64_t>()[0];
+        if (expected_n != static_cast<int64_t>(parameters_.size())) {
+            throw std::runtime_error(
+                "AdamAtan2::load_state_dict: parameter count mismatch (state has " +
+                std::to_string(expected_n) + ", optimiser has " +
+                std::to_string(parameters_.size()) + ")");
+        }
+    }
+
     // Load optimizer configuration
     if (state.count("step_count")) {
         step_count_ = state.at("step_count").data<int64_t>()[0];
+    }
+
+    // Restore amsgrad_ before reading buffers so step_impl() honours the saved
+    // configuration and any restored max_exp_avg_sq_ buffers are actually used.
+    if (state.count("amsgrad")) {
+        amsgrad_ = (state.at("amsgrad").data<int64_t>()[0] != 0);
     }
 
     if (state.count("lr")) {

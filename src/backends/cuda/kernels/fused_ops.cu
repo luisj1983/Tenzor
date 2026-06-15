@@ -3772,10 +3772,10 @@ __global__ void fused_sgd_kernel(
     const T* __restrict__ grad,
     T* __restrict__ momentum_buffer,
     int64_t numel,
-    float lr,
-    float momentum,
-    float weight_decay,
-    float dampening,
+    double lr,
+    double momentum,
+    double weight_decay,
+    double dampening,
     bool nesterov,
     bool has_momentum_buffer
 ) {
@@ -3786,15 +3786,15 @@ __global__ void fused_sgd_kernel(
     T p = param[idx];
 
     // Apply weight decay
-    if (weight_decay > 0.0f) {
+    if (weight_decay > 0.0) {
         g = g + T(weight_decay) * p;
     }
 
-    if (has_momentum_buffer && momentum > 0.0f) {
+    if (has_momentum_buffer && momentum > 0.0) {
         T v = momentum_buffer[idx];
 
         // Update momentum buffer
-        v = T(momentum) * v + T(1.0f - dampening) * g;
+        v = T(momentum) * v + T(1.0 - dampening) * g;
         momentum_buffer[idx] = v;
 
         if (nesterov) {
@@ -3812,10 +3812,10 @@ auto fused_sgd_step_cuda(
     Tensor& param,
     const Tensor& grad,
     Tensor* momentum_buffer,
-    float lr,
-    float momentum,
-    float weight_decay,
-    float dampening,
+    double lr,
+    double momentum,
+    double weight_decay,
+    double dampening,
     bool nesterov,
     cudaStream_t stream
 ) -> void {
@@ -4005,8 +4005,8 @@ __global__ void fused_rmsprop_step_kernel(
     T* __restrict__ square_avg,
     T* __restrict__ grad_avg,       // For centered RMSProp, nullptr otherwise
     T* __restrict__ momentum_buffer, // For momentum, nullptr otherwise
-    float lr, float alpha, float eps,
-    float weight_decay, float momentum,
+    double lr, double alpha, double eps,
+    double weight_decay, double momentum,
     bool centered,
     int64_t n) {
 
@@ -4016,27 +4016,27 @@ __global__ void fused_rmsprop_step_kernel(
     T g = grad[idx];
 
     // Weight decay
-    if (weight_decay != 0.0f) {
+    if (weight_decay != 0.0) {
         g = g + T(weight_decay) * param[idx];
     }
 
     // Update square average: v = alpha * v + (1 - alpha) * g^2
     T sq = square_avg[idx];
-    sq = T(alpha) * sq + T(1.0f - alpha) * g * g;
+    sq = T(alpha) * sq + T(1.0 - alpha) * g * g;
     square_avg[idx] = sq;
 
     T avg;
     if (centered && grad_avg) {
         // Update grad average: g_avg = alpha * g_avg + (1 - alpha) * g
         T ga = grad_avg[idx];
-        ga = T(alpha) * ga + T(1.0f - alpha) * g;
+        ga = T(alpha) * ga + T(1.0 - alpha) * g;
         grad_avg[idx] = ga;
         avg = sqrt(sq - ga * ga + T(eps));
     } else {
         avg = sqrt(sq + T(eps));
     }
 
-    if (momentum > 0.0f && momentum_buffer) {
+    if (momentum > 0.0 && momentum_buffer) {
         T buf = momentum_buffer[idx];
         buf = T(momentum) * buf + g / avg;
         momentum_buffer[idx] = buf;
@@ -4052,8 +4052,8 @@ auto fused_rmsprop_step_cuda(
     Tensor& square_avg,
     Tensor* grad_avg,
     Tensor* momentum_buffer,
-    float lr, float alpha, float eps,
-    float weight_decay, float momentum,
+    double lr, double alpha, double eps,
+    double weight_decay, double momentum,
     bool centered,
     cudaStream_t stream
 ) -> void {
@@ -4065,14 +4065,14 @@ auto fused_rmsprop_step_cuda(
         fused_rmsprop_step_kernel<float><<<num_blocks, block_size, 0, stream>>>(
             param.data<float>(), grad.data<float>(), square_avg.data<float>(),
             (centered && grad_avg) ? grad_avg->data<float>() : nullptr,
-            (momentum > 0.0f && momentum_buffer) ? momentum_buffer->data<float>() : nullptr,
+            (momentum > 0.0 && momentum_buffer) ? momentum_buffer->data<float>() : nullptr,
             lr, alpha, eps, weight_decay, momentum, centered, n);
         TENZOR_CUDA_POST_LAUNCH_CHECK();
     } else if (param.dtype() == DType::Float64) {
         fused_rmsprop_step_kernel<double><<<num_blocks, block_size, 0, stream>>>(
             param.data<double>(), grad.data<double>(), square_avg.data<double>(),
             (centered && grad_avg) ? grad_avg->data<double>() : nullptr,
-            (momentum > 0.0f && momentum_buffer) ? momentum_buffer->data<double>() : nullptr,
+            (momentum > 0.0 && momentum_buffer) ? momentum_buffer->data<double>() : nullptr,
             lr, alpha, eps, weight_decay, momentum, centered, n);
         TENZOR_CUDA_POST_LAUNCH_CHECK();
     } else {
@@ -4091,20 +4091,20 @@ __global__ void fused_adadelta_step_kernel(
     const T* __restrict__ grad,
     T* __restrict__ square_avg,
     T* __restrict__ acc_delta,
-    float rho, float eps, float lr, float weight_decay,
+    double rho, double eps, double lr, double weight_decay,
     int64_t n) {
 
     int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= n) return;
 
     T g = grad[idx];
-    if (weight_decay != 0.0f) {
+    if (weight_decay != 0.0) {
         g = g + T(weight_decay) * param[idx];
     }
 
     // v = rho * v + (1 - rho) * g^2
     T sq = square_avg[idx];
-    sq = T(rho) * sq + T(1.0f - rho) * g * g;
+    sq = T(rho) * sq + T(1.0 - rho) * g * g;
     square_avg[idx] = sq;
 
     // delta = sqrt(acc_delta + eps) / sqrt(sq + eps) * g
@@ -4112,7 +4112,7 @@ __global__ void fused_adadelta_step_kernel(
     T delta = sqrt(acc_delta[idx] + T(eps)) / std_val * g;
 
     // acc_delta = rho * acc_delta + (1 - rho) * delta^2
-    acc_delta[idx] = T(rho) * acc_delta[idx] + T(1.0f - rho) * delta * delta;
+    acc_delta[idx] = T(rho) * acc_delta[idx] + T(1.0 - rho) * delta * delta;
 
     param[idx] = param[idx] - T(lr) * delta;
 }
@@ -4155,7 +4155,7 @@ auto fused_adadelta_step_cuda(
     const Tensor& grad,
     Tensor& square_avg,
     Tensor& acc_delta,
-    float rho, float eps, float lr, float weight_decay,
+    double rho, double eps, double lr, double weight_decay,
     cudaStream_t stream
 ) -> void {
     int64_t n = param.numel();
@@ -4181,7 +4181,8 @@ auto fused_adadelta_step_cuda(
             reinterpret_cast<const __half*>(grad_h.data<Float16>()),
             reinterpret_cast<__half*>(square_avg.data<Float16>()),
             reinterpret_cast<__half*>(acc_delta.data<Float16>()),
-            rho, eps, lr, weight_decay, n);
+            static_cast<float>(rho), static_cast<float>(eps),
+            static_cast<float>(lr), static_cast<float>(weight_decay), n);
         TENZOR_CUDA_POST_LAUNCH_CHECK();
     } else if (param.dtype() == DType::BFloat16) {
         Tensor grad_h = (grad.dtype() == DType::BFloat16) ? grad : grad.to(DType::BFloat16);
@@ -4190,7 +4191,8 @@ auto fused_adadelta_step_cuda(
             reinterpret_cast<const __nv_bfloat16*>(grad_h.data<BFloat16>()),
             reinterpret_cast<__nv_bfloat16*>(square_avg.data<BFloat16>()),
             reinterpret_cast<__nv_bfloat16*>(acc_delta.data<BFloat16>()),
-            rho, eps, lr, weight_decay, n);
+            static_cast<float>(rho), static_cast<float>(eps),
+            static_cast<float>(lr), static_cast<float>(weight_decay), n);
         TENZOR_CUDA_POST_LAUNCH_CHECK();
     } else {
         throw std::runtime_error("fused_adadelta_step: unsupported dtype");
@@ -4207,32 +4209,34 @@ __global__ void fused_adagrad_step_kernel(
     T* __restrict__ param,
     const T* __restrict__ grad,
     T* __restrict__ sum_sq,
-    float lr, float lr_decay, float eps, float weight_decay,
+    double lr, double lr_decay, double eps, double weight_decay,
     int64_t step, int64_t n) {
 
     int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= n) return;
 
     T g = grad[idx];
-    if (weight_decay != 0.0f) {
+    if (weight_decay != 0.0) {
         g = g + T(weight_decay) * param[idx];
     }
 
-    float clr = lr / (T(1) + T(step - 1) * T(lr_decay));
+    // Effective learning rate, computed in the parameter's compute type so that
+    // Float64 params keep full double precision (matches CPU/Vulkan contract).
+    T clr = T(lr) / (T(1) + T(step - 1) * T(lr_decay));
 
     // sum_sq += g^2
     T sq = sum_sq[idx] + g * g;
     sum_sq[idx] = sq;
 
     // param -= clr * g / (sqrt(sum_sq) + eps)
-    param[idx] = param[idx] - T(clr) * g / (sqrt(sq) + T(eps));
+    param[idx] = param[idx] - clr * g / (sqrt(sq) + T(eps));
 }
 
 auto fused_adagrad_step_cuda(
     Tensor& param,
     const Tensor& grad,
     Tensor& sum_sq,
-    float lr, float lr_decay, float eps, float weight_decay,
+    double lr, double lr_decay, double eps, double weight_decay,
     int64_t step,
     cudaStream_t stream
 ) -> void {
@@ -4267,13 +4271,13 @@ __global__ void fused_adam_atan2_kernel(
     T* __restrict__ exp_avg_sq,
     T* __restrict__ max_exp_avg_sq,  // nullptr if !amsgrad
     int64_t numel,
-    float lr,
-    float beta1,
-    float beta2,
-    float eps,
-    float weight_decay,
-    float bias_correction1,
-    float bias_correction2,
+    double lr,
+    double beta1,
+    double beta2,
+    double eps,
+    double weight_decay,
+    double bias_correction1,
+    double bias_correction2,
     bool amsgrad
 ) {
     int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
@@ -4285,10 +4289,10 @@ __global__ void fused_adam_atan2_kernel(
     T v = exp_avg_sq[idx];
 
     // Update biased first moment estimate
-    m = T(beta1) * m + T(1.0f - beta1) * g;
+    m = T(beta1) * m + T(1.0 - beta1) * g;
 
     // Update biased second raw moment estimate
-    v = T(beta2) * v + T(1.0f - beta2) * g * g;
+    v = T(beta2) * v + T(1.0 - beta2) * g * g;
 
     // Bias-corrected estimates
     T m_hat = m / T(bias_correction1);
@@ -4303,7 +4307,7 @@ __global__ void fused_adam_atan2_kernel(
     }
 
     // Decoupled weight decay (like AdamW) before update
-    if (weight_decay > 0.0f) {
+    if (weight_decay > 0.0) {
         p = p * (T(1) - T(lr) * T(weight_decay));
     }
 
@@ -4326,11 +4330,11 @@ auto fused_adam_atan2_step_cuda(
     Tensor& exp_avg,
     Tensor& exp_avg_sq,
     Tensor* max_exp_avg_sq,
-    float lr,
-    float beta1,
-    float beta2,
-    float eps,
-    float weight_decay,
+    double lr,
+    double beta1,
+    double beta2,
+    double eps,
+    double weight_decay,
     int64_t step,
     bool amsgrad,
     cudaStream_t stream
@@ -4340,8 +4344,8 @@ auto fused_adam_atan2_step_cuda(
     int blocks = (numel + BLOCK_SIZE - 1) / BLOCK_SIZE;
     blocks = clamp_blocks(blocks);
 
-    float bias_correction1 = 1.0f - std::pow(beta1, static_cast<float>(step));
-    float bias_correction2 = 1.0f - std::pow(beta2, static_cast<float>(step));
+    double bias_correction1 = 1.0 - std::pow(beta1, static_cast<double>(step));
+    double bias_correction2 = 1.0 - std::pow(beta2, static_cast<double>(step));
 
     if (param.dtype() == DType::Float32) {
         float* max_sq_ptr = (amsgrad && max_exp_avg_sq) ? max_exp_avg_sq->data<float>() : nullptr;

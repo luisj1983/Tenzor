@@ -1564,7 +1564,12 @@ auto linalg_svd_kernel(const Tensor& A, bool full_matrices, cudaStream_t stream)
     // Tensor::data<double>() below would throw on a half input). Mirrors the
     // !TENZOR_HAS_CUSOLVER fallback and the cuSOLVER det/cholesky kernels.
     if (A.dtype() == DType::Float16 || A.dtype() == DType::BFloat16) {
-        return linalg_svd_kernel(A.to(DType::Float32), full_matrices, stream);
+        // Narrow the Float32 decomposition back to the original half dtype so a
+        // Float16/BFloat16 input yields Float16/BFloat16 outputs, matching det/
+        // inv/cholesky here and the ROCm backend (cross-backend dtype parity).
+        DType orig = A.dtype();
+        auto [U, S, Vt] = linalg_svd_kernel(A.to(DType::Float32), full_matrices, stream);
+        return {U.to(orig), S.to(orig), Vt.to(orig)};
     }
     auto shape = A.shape();
     auto a_ndim = static_cast<int64_t>(shape.size());
@@ -1726,7 +1731,11 @@ auto linalg_qr_kernel(const Tensor& A, cudaStream_t stream)
     // double-typed data accessors below would throw on a half input). Mirrors
     // the !TENZOR_HAS_CUSOLVER fallback and the cuSOLVER det/cholesky kernels.
     if (A.dtype() == DType::Float16 || A.dtype() == DType::BFloat16) {
-        return linalg_qr_kernel(A.to(DType::Float32), stream);
+        // Narrow the Float32 decomposition back to the original half dtype
+        // (matches det/inv/cholesky here and the ROCm backend).
+        DType orig = A.dtype();
+        auto [Q, R] = linalg_qr_kernel(A.to(DType::Float32), stream);
+        return {Q.to(orig), R.to(orig)};
     }
     auto shape = A.shape();
     auto a_ndim = static_cast<int64_t>(shape.size());
@@ -1856,7 +1865,11 @@ auto linalg_eigh_kernel(const Tensor& A, cudaStream_t stream)
     // double-typed data accessors below would throw on a half input). Mirrors
     // the !TENZOR_HAS_CUSOLVER fallback and the cuSOLVER det/cholesky kernels.
     if (A.dtype() == DType::Float16 || A.dtype() == DType::BFloat16) {
-        return linalg_eigh_kernel(A.to(DType::Float32), stream);
+        // Narrow the Float32 decomposition back to the original half dtype
+        // (matches det/inv/cholesky here and the ROCm backend).
+        DType orig = A.dtype();
+        auto [W, V] = linalg_eigh_kernel(A.to(DType::Float32), stream);
+        return {W.to(orig), V.to(orig)};
     }
     auto work = A.contiguous().clone();
     auto [n, ndim] = check_square(work);
@@ -1945,13 +1958,12 @@ auto linalg_eig_kernel(const Tensor& A, cudaStream_t stream)
     // real→complex contract does not honour LAPACK adjacent-conjugate-pair
     // ordering, which misclassifies real vs complex eigenvalues for general
     // matrices and would diverge from the other backends.)
-    if (A.dtype() == DType::Float16) {
+    if (A.dtype() == DType::Float16 || A.dtype() == DType::BFloat16) {
+        // Narrow back to the original half dtype for cross-backend (ROCm) parity,
+        // consistent with svd/qr/eigh/det/inv above.
+        DType orig = A.dtype();
         auto [wr, wi, V] = linalg_eig_kernel(A.to(DType::Float32), stream);
-        return {wr, wi, V};
-    }
-    if (A.dtype() == DType::BFloat16) {
-        auto [wr, wi, V] = linalg_eig_kernel(A.to(DType::Float32), stream);
-        return {wr, wi, V};
+        return {wr.to(orig), wi.to(orig), V.to(orig)};
     }
     if (A.dtype() != DType::Float32 && A.dtype() != DType::Float64) {
         throw std::runtime_error("eig: only Float32 and Float64 supported");
@@ -4793,13 +4805,11 @@ auto linalg_solve_kernel(const Tensor& A, const Tensor& B, cudaStream_t stream) 
 auto linalg_svd_kernel(const Tensor& A, bool full_matrices, cudaStream_t stream)
     -> std::tuple<Tensor, Tensor, Tensor> {
     validate_linalg_dtype(A, "svd");
-    if (A.dtype() == DType::Float16) {
+    if (A.dtype() == DType::Float16 || A.dtype() == DType::BFloat16) {
+        // Narrow back to the original half dtype for cross-backend (ROCm) parity.
+        DType orig = A.dtype();
         auto [U, S, Vt] = linalg_svd_kernel(A.to(DType::Float32), full_matrices, stream);
-        return {U, S, Vt};  // Keep as Float32
-    }
-    if (A.dtype() == DType::BFloat16) {
-        auto [U, S, Vt] = linalg_svd_kernel(A.to(DType::Float32), full_matrices, stream);
-        return {U, S, Vt};
+        return {U.to(orig), S.to(orig), Vt.to(orig)};
     }
 
     auto work = A.contiguous().clone();
@@ -4864,13 +4874,11 @@ auto linalg_svd_kernel(const Tensor& A, bool full_matrices, cudaStream_t stream)
 auto linalg_qr_kernel(const Tensor& A, cudaStream_t stream)
     -> std::tuple<Tensor, Tensor> {
     validate_linalg_dtype(A, "qr");
-    if (A.dtype() == DType::Float16) {
+    if (A.dtype() == DType::Float16 || A.dtype() == DType::BFloat16) {
+        // Narrow back to the original half dtype for cross-backend (ROCm) parity.
+        DType orig = A.dtype();
         auto [Q, R] = linalg_qr_kernel(A.to(DType::Float32), stream);
-        return {Q, R};
-    }
-    if (A.dtype() == DType::BFloat16) {
-        auto [Q, R] = linalg_qr_kernel(A.to(DType::Float32), stream);
-        return {Q, R};
+        return {Q.to(orig), R.to(orig)};
     }
 
     auto work = A.contiguous().clone();
@@ -4924,13 +4932,11 @@ auto linalg_qr_kernel(const Tensor& A, cudaStream_t stream)
 auto linalg_eigh_kernel(const Tensor& A, cudaStream_t stream)
     -> std::tuple<Tensor, Tensor> {
     validate_linalg_dtype(A, "eigh");
-    if (A.dtype() == DType::Float16) {
+    if (A.dtype() == DType::Float16 || A.dtype() == DType::BFloat16) {
+        // Narrow back to the original half dtype for cross-backend (ROCm) parity.
+        DType orig = A.dtype();
         auto [W, V] = linalg_eigh_kernel(A.to(DType::Float32), stream);
-        return {W, V};
-    }
-    if (A.dtype() == DType::BFloat16) {
-        auto [W, V] = linalg_eigh_kernel(A.to(DType::Float32), stream);
-        return {W, V};
+        return {W.to(orig), V.to(orig)};
     }
 
     auto work = A.contiguous().clone();
@@ -4975,13 +4981,11 @@ auto linalg_eigh_kernel(const Tensor& A, cudaStream_t stream)
 auto linalg_eig_kernel(const Tensor& A, cudaStream_t stream)
     -> std::tuple<Tensor, Tensor, Tensor> {
     validate_linalg_dtype(A, "eig");
-    if (A.dtype() == DType::Float16) {
+    if (A.dtype() == DType::Float16 || A.dtype() == DType::BFloat16) {
+        // Narrow back to the original half dtype for cross-backend (ROCm) parity.
+        DType orig = A.dtype();
         auto [wr, wi, V] = linalg_eig_kernel(A.to(DType::Float32), stream);
-        return {wr, wi, V};
-    }
-    if (A.dtype() == DType::BFloat16) {
-        auto [wr, wi, V] = linalg_eig_kernel(A.to(DType::Float32), stream);
-        return {wr, wi, V};
+        return {wr.to(orig), wi.to(orig), V.to(orig)};
     }
 
     auto work = A.contiguous().clone();

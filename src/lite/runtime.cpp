@@ -24,6 +24,7 @@
 #include <algorithm>
 #include <cstdlib>
 #include <cstring>
+#include <limits>
 #include <new>
 #include <optional>
 #include <fstream>
@@ -309,12 +310,59 @@ auto LiteRuntime::load(const void* data, size_t size) -> std::unique_ptr<LiteRun
                     std::to_string(plan.pool_sizes.size()) + " pool(s)");
             }
             const uint64_t pool_bytes = plan.pool_sizes[p.pool_index];
-            if (p.offset > pool_bytes) {
+            // Resolve the placed tensor's byte footprint from its TVAL
+            // (shape * dtype_size) so the fit check covers the whole span, not
+            // just the start offset. tensor_id is validated non-negative by
+            // index_tensor_values; bound it against the dense table.
+            const auto& tvs = runtime->impl_->tensor_values_by_id;
+            if (p.tensor_id < 0 ||
+                static_cast<size_t>(p.tensor_id) >= tvs.size()) {
+                throw std::runtime_error(
+                    "LiteRuntime::load: MMPL placement references unknown "
+                    "tensor_id " + std::to_string(p.tensor_id));
+            }
+            const TensorValue& tv = tvs[static_cast<size_t>(p.tensor_id)];
+            const size_t elem_size = dtype_size(tv.dtype);
+            if (elem_size == 0) {
                 throw std::runtime_error(
                     "LiteRuntime::load: MMPL placement for tensor_id " +
-                    std::to_string(p.tensor_id) + " offset " +
-                    std::to_string(p.offset) + " exceeds pool size " +
-                    std::to_string(pool_bytes));
+                    std::to_string(p.tensor_id) +
+                    " has an unknown/unsupported dtype");
+            }
+            uint64_t tensor_numel = 1;
+            for (int64_t dim : tv.shape) {
+                if (dim < 0) {
+                    throw std::runtime_error(
+                        "LiteRuntime::load: MMPL placement for tensor_id " +
+                        std::to_string(p.tensor_id) +
+                        " has a negative shape dimension");
+                }
+                const uint64_t udim = static_cast<uint64_t>(dim);
+                if (udim != 0 &&
+                    tensor_numel > std::numeric_limits<uint64_t>::max() / udim) {
+                    throw std::runtime_error(
+                        "LiteRuntime::load: MMPL placement for tensor_id " +
+                        std::to_string(p.tensor_id) +
+                        " shape element count overflows");
+                }
+                tensor_numel *= udim;
+            }
+            if (tensor_numel > std::numeric_limits<uint64_t>::max() / elem_size) {
+                throw std::runtime_error(
+                    "LiteRuntime::load: MMPL placement for tensor_id " +
+                    std::to_string(p.tensor_id) + " byte size overflows");
+            }
+            const uint64_t tensor_bytes = tensor_numel * elem_size;
+            // Overflow-safe fit: offset + tensor_bytes <= pool_bytes, written so
+            // the addition can never wrap on attacker-controlled offsets.
+            if (p.offset > pool_bytes ||
+                tensor_bytes > pool_bytes - p.offset) {
+                throw std::runtime_error(
+                    "LiteRuntime::load: MMPL placement for tensor_id " +
+                    std::to_string(p.tensor_id) + " (offset " +
+                    std::to_string(p.offset) + " + " +
+                    std::to_string(tensor_bytes) + " bytes) does not fit in "
+                    "pool of size " + std::to_string(pool_bytes));
             }
         }
 
@@ -421,6 +469,56 @@ auto LiteRuntime::forward(const std::vector<LiteTensor>& inputs) -> std::vector<
                     "LiteRuntime::forward: weight for tensor_id " +
                     std::to_string(tv.tensor_id) +
                     " refers to bytes past end of WGTS payload");
+            }
+            // The bound check above only validates [weight_offset, weight_nbytes)
+            // against the blob. The Tensor view, however, reads
+            // product(tv.shape) * dtype_size(tv.dtype) bytes — fields parsed
+            // independently of weight_nbytes (model_format.cpp parse_tval_payload).
+            // Without enforcing their relationship, a crafted .tzlite can declare
+            // weight_nbytes=0 (passes the bound) but shape=[1<<20] dtype=Float32,
+            // producing a view that reads megabytes past the validated region —
+            // an OOB read on untrusted input. Mirror the TZEP loader
+            // (export.cpp read_tensor): compute the expected byte count with
+            // overflow-checked multiplication, reject an out-of-range dtype and
+            // negative dims, and require it to equal weight_nbytes.
+            const size_t elem_size = dtype_size(tv.dtype);
+            if (elem_size == 0) {
+                throw std::runtime_error(
+                    "LiteRuntime::forward: weight for tensor_id " +
+                    std::to_string(tv.tensor_id) +
+                    " has an unknown/unsupported dtype");
+            }
+            uint64_t numel = 1;
+            for (int64_t dim : tv.shape) {
+                if (dim < 0) {
+                    throw std::runtime_error(
+                        "LiteRuntime::forward: weight for tensor_id " +
+                        std::to_string(tv.tensor_id) +
+                        " has a negative shape dimension");
+                }
+                const uint64_t udim = static_cast<uint64_t>(dim);
+                if (udim != 0 &&
+                    numel > std::numeric_limits<uint64_t>::max() / udim) {
+                    throw std::runtime_error(
+                        "LiteRuntime::forward: weight for tensor_id " +
+                        std::to_string(tv.tensor_id) +
+                        " shape element count overflows");
+                }
+                numel *= udim;
+            }
+            if (numel > std::numeric_limits<uint64_t>::max() / elem_size) {
+                throw std::runtime_error(
+                    "LiteRuntime::forward: weight for tensor_id " +
+                    std::to_string(tv.tensor_id) + " byte size overflows");
+            }
+            const uint64_t expected_bytes = numel * elem_size;
+            if (expected_bytes != tv.weight_nbytes) {
+                throw std::runtime_error(
+                    "LiteRuntime::forward: weight for tensor_id " +
+                    std::to_string(tv.tensor_id) + " declared byte count (" +
+                    std::to_string(tv.weight_nbytes) +
+                    ") does not match shape*dtype size (" +
+                    std::to_string(expected_bytes) + ")");
             }
             void* data = impl_->weight_blob.data() + tv.weight_offset;
             constants.emplace(

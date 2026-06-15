@@ -92,6 +92,18 @@ auto FakeQuantize::forward_impl(const Variable& input) -> Variable {
             case QuantDType::UINT4: quant_min =    0.0f; quant_max =  15.0f; break;
         }
 
+        // Match quantize_tensor's symmetric range: INT8 symmetric uses [-127,127]
+        // and INT4 symmetric uses [-7,7] (compute_symmetric_scale divides by the
+        // positive max). Without this, the STE could emit -128/-8, a level the
+        // real quantized inference path clamps away — a train/inference mismatch.
+        const bool symmetric = (scheme_ == QuantizationScheme::PerTensorSymmetric ||
+                                scheme_ == QuantizationScheme::PerChannelSymmetric);
+        if (symmetric && dtype_ == QuantDType::INT8) {
+            quant_min = -127.0f;
+        } else if (symmetric && dtype_ == QuantDType::INT4) {
+            quant_min = -7.0f;
+        }
+
         bool per_tensor = (scheme_ == QuantizationScheme::PerTensorSymmetric ||
                            scheme_ == QuantizationScheme::PerTensorAsymmetric);
         if (per_tensor) {

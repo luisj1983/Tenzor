@@ -482,10 +482,18 @@ auto VulkanBackend::dispatchCrossEntropy(const Tensor& log_probs, const Tensor& 
         ? targets_in.to(DType::Int32)
         : targets_in;
 
-    // Select shader based on dtype
+    // Select shader based on dtype. BFloat16 has its own packed shader; without
+    // a dedicated branch it would fall through to the Float32 'cross_entropy'
+    // shader and reinterpret the 2-byte-packed BF16 buffer as 4-byte float
+    // (reading the wrong words → garbage losses). The FusedSoftmaxCrossEntropy
+    // path feeds BFloat16 log_probs straight from dispatchLogSoftmax.
     bool is_float64 = (log_probs.dtype() == DType::Float64);
     bool is_float16 = (log_probs.dtype() == DType::Float16);
-    std::string shader_name = is_float64 ? "cross_entropy_f64" : (is_float16 ? "cross_entropy_f16" : "cross_entropy");
+    bool is_bfloat16 = (log_probs.dtype() == DType::BFloat16);
+    std::string shader_name = is_float64 ? "cross_entropy_f64"
+                            : is_float16 ? "cross_entropy_f16"
+                            : is_bfloat16 ? "cross_entropy_bf16"
+                            : "cross_entropy";
     auto* pipeline = getPipeline(shader_name, device_id);
 
     auto log_probs_shape = log_probs.shape();
@@ -512,10 +520,16 @@ auto VulkanBackend::dispatchCrossEntropy(const Tensor& log_probs, const Tensor& 
     const void* buffer_targets = targets.data_ptr();
     const void* buffer_output = output.data_ptr();
 
-    // Calculate buffer sizes
+    // Calculate buffer sizes. F16/BF16 buffers are packed 2 elements per
+    // uint32 and the shaders read/write whole uint32 words, so round the
+    // packed buffer spans up to a 4-byte boundary to cover the final word.
     size_t size_log_probs = log_probs.numel() * log_probs.dtype_size();
     size_t size_targets = targets.numel() * dtype_size(targets.dtype());
     size_t size_output = output.numel() * output.dtype_size();
+    if (is_float16 || is_bfloat16) {
+        size_log_probs = ((log_probs.numel() + 1) / 2) * sizeof(uint32_t);
+        size_output = ((output.numel() + 1) / 2) * sizeof(uint32_t);
+    }
 
     // Bind buffers (binding 0: log_probs, 1: targets, 2: output)
     std::vector<std::pair<uint32_t, const void*>> bindings = {

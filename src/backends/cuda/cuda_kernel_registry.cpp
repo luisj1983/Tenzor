@@ -503,10 +503,10 @@ namespace cuda {
         Tensor& param,
         const Tensor& grad,
         Tensor* momentum_buffer,
-        float lr,
-        float momentum,
-        float weight_decay,
-        float dampening,
+        double lr,
+        double momentum,
+        double weight_decay,
+        double dampening,
         bool nesterov,
         cudaStream_t stream
     ) -> void;
@@ -534,11 +534,11 @@ namespace cuda {
         Tensor& exp_avg,
         Tensor& exp_avg_sq,
         Tensor* max_exp_avg_sq,
-        float lr,
-        float beta1,
-        float beta2,
-        float eps,
-        float weight_decay,
+        double lr,
+        double beta1,
+        double beta2,
+        double eps,
+        double weight_decay,
         int64_t step,
         bool amsgrad,
         cudaStream_t stream
@@ -742,9 +742,9 @@ namespace cuda {
     auto fused_softmax_cross_entropy_cuda(const Tensor& logits, const Tensor& targets, const std::string& reduction) -> Tensor;
 
     // Fused optimizer steps
-    auto fused_rmsprop_step_cuda(Tensor& param, const Tensor& grad, Tensor& square_avg, Tensor* grad_avg, Tensor* momentum_buffer, float lr, float alpha, float eps, float weight_decay, float momentum, bool centered, cudaStream_t stream) -> void;
-    auto fused_adadelta_step_cuda(Tensor& param, const Tensor& grad, Tensor& square_avg, Tensor& acc_delta, float rho, float eps, float lr, float weight_decay, cudaStream_t stream) -> void;
-    auto fused_adagrad_step_cuda(Tensor& param, const Tensor& grad, Tensor& sum_sq, float lr, float lr_decay, float eps, float weight_decay, int64_t step, cudaStream_t stream) -> void;
+    auto fused_rmsprop_step_cuda(Tensor& param, const Tensor& grad, Tensor& square_avg, Tensor* grad_avg, Tensor* momentum_buffer, double lr, double alpha, double eps, double weight_decay, double momentum, bool centered, cudaStream_t stream) -> void;
+    auto fused_adadelta_step_cuda(Tensor& param, const Tensor& grad, Tensor& square_avg, Tensor& acc_delta, double rho, double eps, double lr, double weight_decay, cudaStream_t stream) -> void;
+    auto fused_adagrad_step_cuda(Tensor& param, const Tensor& grad, Tensor& sum_sq, double lr, double lr_decay, double eps, double weight_decay, int64_t step, cudaStream_t stream) -> void;
 
     // Nested tensor operations
     auto nested_softmax_cuda(const Tensor& values, const Tensor& offsets, int64_t dim, cudaStream_t stream) -> Tensor;
@@ -1866,7 +1866,11 @@ void register_cuda_kernels(BackendDispatchTable& table) {
         // build never silently serves a causal call.
         bool use_cudnn_sdpa = attrs.get_bool(AttrKey::UseCudnnSdpa, false);
         if (use_cudnn_sdpa && inputs[0].shape().size() == 4) {
-            auto output = cuda::cudnn_sdpa_forward(inputs[0], inputs[1], inputs[2], scale, causal_attr);
+            // Thread the dispatch stream (if any) into cuDNN SDPA so its work
+            // is ordered with the output's consumers on the same stream. When no
+            // explicit stream is provided, nullptr selects the default stream.
+            cudaStream_t sdpa_stream = get_cuda_stream(attrs);
+            auto output = cuda::cudnn_sdpa_forward(inputs[0], inputs[1], inputs[2], scale, causal_attr, sdpa_stream);
             return std::vector<Tensor>{output};
         }
 #endif
@@ -2514,15 +2518,15 @@ void register_cuda_kernels(BackendDispatchTable& table) {
         // inputs: [param, grad, momentum_buffer (optional)]
         // attrs: lr, momentum, weight_decay, dampening, nesterov
         // Note: param and momentum_buffer are modified in-place
-        float lr = static_cast<float>(attrs.get_float(AttrKey::Lr, 0.01));
-        float momentum = static_cast<float>(attrs.get_float(AttrKey::Momentum, 0.0));
-        float weight_decay = static_cast<float>(attrs.get_float(AttrKey::WeightDecay, 0.0));
-        float dampening = static_cast<float>(attrs.get_float(AttrKey::Dampening, 0.0));
+        double lr = attrs.get_float(AttrKey::Lr, 0.01);
+        double momentum = attrs.get_float(AttrKey::Momentum, 0.0);
+        double weight_decay = attrs.get_float(AttrKey::WeightDecay, 0.0);
+        double dampening = attrs.get_float(AttrKey::Dampening, 0.0);
         bool nesterov = attrs.get_bool(AttrKey::Nesterov, false);
 
         // Cast away const for in-place modification (safe because we control the API)
         Tensor& param = const_cast<Tensor&>(inputs[0]);
-        Tensor* momentum_buffer = (inputs.size() > 2 && momentum > 0.0f)
+        Tensor* momentum_buffer = (inputs.size() > 2 && momentum > 0.0)
             ? &const_cast<Tensor&>(inputs[2]) : nullptr;
 
         cuda::fused_sgd_step_cuda(
@@ -3929,11 +3933,11 @@ void register_cuda_kernels(BackendDispatchTable& table) {
     // =========================================================================
     table.register_kernel(OpId::FusedRMSPropStep, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
         // inputs: [param, grad, square_avg, grad_avg (optional), momentum_buffer (optional)]
-        float lr = static_cast<float>(attrs.get_float(AttrKey::Lr, 0.01));
-        float alpha = static_cast<float>(attrs.get_float(AttrKey::Alpha, 0.99));
-        float eps = static_cast<float>(attrs.get_float(AttrKey::Eps, 1e-8));
-        float weight_decay = static_cast<float>(attrs.get_float(AttrKey::WeightDecay, 0.0));
-        float momentum = static_cast<float>(attrs.get_float(AttrKey::Momentum, 0.0));
+        double lr = attrs.get_float(AttrKey::Lr, 0.01);
+        double alpha = attrs.get_float(AttrKey::Alpha, 0.99);
+        double eps = attrs.get_float(AttrKey::Eps, 1e-8);
+        double weight_decay = attrs.get_float(AttrKey::WeightDecay, 0.0);
+        double momentum = attrs.get_float(AttrKey::Momentum, 0.0);
         bool centered = attrs.get_bool(AttrKey::Centered, false);
 
         Tensor& param = const_cast<Tensor&>(inputs[0]);
@@ -3944,7 +3948,7 @@ void register_cuda_kernels(BackendDispatchTable& table) {
         // for the common (centered=false, momentum>0) case → momentum ignored.
         Tensor* grad_avg = (centered && inputs.size() > 3) ? &const_cast<Tensor&>(inputs[3]) : nullptr;
         const size_t mb_idx = centered ? 4u : 3u;
-        Tensor* momentum_buffer = (momentum > 0.0f && inputs.size() > mb_idx)
+        Tensor* momentum_buffer = (momentum > 0.0 && inputs.size() > mb_idx)
             ? &const_cast<Tensor&>(inputs[mb_idx]) : nullptr;
 
         cuda::fused_rmsprop_step_cuda(param, inputs[1], square_avg, grad_avg, momentum_buffer,
@@ -3954,10 +3958,10 @@ void register_cuda_kernels(BackendDispatchTable& table) {
 
     table.register_kernel(OpId::FusedAdadeltaStep, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
         // inputs: [param, grad, square_avg, acc_delta]
-        float rho = static_cast<float>(attrs.get_float(AttrKey::Rho, 0.9));
-        float eps = static_cast<float>(attrs.get_float(AttrKey::Eps, 1e-6));
-        float lr = static_cast<float>(attrs.get_float(AttrKey::Lr, 1.0));
-        float weight_decay = static_cast<float>(attrs.get_float(AttrKey::WeightDecay, 0.0));
+        double rho = attrs.get_float(AttrKey::Rho, 0.9);
+        double eps = attrs.get_float(AttrKey::Eps, 1e-6);
+        double lr = attrs.get_float(AttrKey::Lr, 1.0);
+        double weight_decay = attrs.get_float(AttrKey::WeightDecay, 0.0);
 
         Tensor& param = const_cast<Tensor&>(inputs[0]);
         Tensor& square_avg = const_cast<Tensor&>(inputs[2]);
@@ -3970,10 +3974,10 @@ void register_cuda_kernels(BackendDispatchTable& table) {
 
     table.register_kernel(OpId::FusedAdagradStep, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
         // inputs: [param, grad, sum_sq]
-        float lr = static_cast<float>(attrs.get_float(AttrKey::Lr, 0.01));
-        float lr_decay = static_cast<float>(attrs.get_float(AttrKey::LrDecay, 0.0));
-        float eps = static_cast<float>(attrs.get_float(AttrKey::Eps, 1e-10));
-        float weight_decay = static_cast<float>(attrs.get_float(AttrKey::WeightDecay, 0.0));
+        double lr = attrs.get_float(AttrKey::Lr, 0.01);
+        double lr_decay = attrs.get_float(AttrKey::LrDecay, 0.0);
+        double eps = attrs.get_float(AttrKey::Eps, 1e-10);
+        double weight_decay = attrs.get_float(AttrKey::WeightDecay, 0.0);
         int64_t step = attrs.get_int(AttrKey::Step, 1);
 
         Tensor& param = const_cast<Tensor&>(inputs[0]);
@@ -3990,11 +3994,11 @@ void register_cuda_kernels(BackendDispatchTable& table) {
     table.register_kernel(OpId::FusedAdamAtan2Step, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
         // inputs: [param, grad, exp_avg, exp_avg_sq, max_exp_avg_sq (optional)]
         // attrs: lr, beta1, beta2, eps, weight_decay, step, amsgrad
-        float lr = static_cast<float>(attrs.get_float(AttrKey::Lr, 0.001));
-        float beta1 = static_cast<float>(attrs.get_float(AttrKey::Beta1, 0.9));
-        float beta2 = static_cast<float>(attrs.get_float(AttrKey::Beta2, 0.999));
-        float eps = static_cast<float>(attrs.get_float(AttrKey::Eps, 1e-8));
-        float weight_decay = static_cast<float>(attrs.get_float(AttrKey::WeightDecay, 0.0));
+        double lr = attrs.get_float(AttrKey::Lr, 0.001);
+        double beta1 = attrs.get_float(AttrKey::Beta1, 0.9);
+        double beta2 = attrs.get_float(AttrKey::Beta2, 0.999);
+        double eps = attrs.get_float(AttrKey::Eps, 1e-8);
+        double weight_decay = attrs.get_float(AttrKey::WeightDecay, 0.0);
         int64_t step = attrs.get_int(AttrKey::Step, 1);
         bool amsgrad = attrs.get_bool(AttrKey::Amsgrad, false);
 

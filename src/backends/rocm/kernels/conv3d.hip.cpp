@@ -226,19 +226,23 @@ __global__ void sum_bias_grad_3d_kernel(
     int64_t channels,
     int64_t spatial_size
 ) {
-    __shared__ float shared_data[256];
+    // Accumulate in an accumulator type wide enough for T: double for Float64,
+    // float otherwise. Hardcoding float would truncate every Float64 grad_output
+    // value to single precision, degrading Float64 bias gradients to ~7 digits.
+    using Acc = std::conditional_t<std::is_same_v<T, double>, double, float>;
+    __shared__ Acc shared_data[256];
 
     int64_t c = blockIdx.x;
     if (c < channels) {
         int64_t tid = threadIdx.x;
         int64_t block_size = blockDim.x;
 
-        float local_sum = 0.0f;
+        Acc local_sum = Acc(0);
         for (int64_t idx = tid; idx < batch * spatial_size; idx += block_size) {
             int64_t b = idx / spatial_size;
             int64_t s = idx % spatial_size;
             int64_t grad_idx = b * (channels * spatial_size) + c * spatial_size + s;
-            local_sum += static_cast<float>(grad_output[grad_idx]);
+            local_sum += static_cast<Acc>(grad_output[grad_idx]);
         }
 
         shared_data[tid] = local_sum;

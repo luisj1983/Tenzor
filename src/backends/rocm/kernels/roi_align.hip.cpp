@@ -325,6 +325,13 @@ auto roi_align_backward(const Tensor& grad_output, const Tensor& rois,
 
     if (total_grads == 0) return grad_features;
 
+    // Empty feature map (feat_height/width == 0) with a non-empty ROI grid:
+    // grad_features has 0 elements but the kernel would clamp coordinates to 0
+    // and atomicAdd into a zero-element buffer (OOB write). grad_features is
+    // already zero-memset, so just return it without launching the kernel,
+    // matching the forward path's empty-feature-map guard.
+    if (feat_height == 0 || feat_width == 0) return grad_features;
+
     // ROI coordinates always processed as Float32
     const Tensor rois_f32 = (rois.dtype() == DType::Float32) ? rois : rois.to(DType::Float32);
     const float* rois_ptr = rois_f32.data<float>();

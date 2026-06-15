@@ -77,6 +77,25 @@ auto topk(const Tensor& input,
         return {values_f32.to(orig), indices};
     }
 
+    // Narrow integer / boolean / unsigned dtypes are not natively supported on
+    // every backend (nor on the CPU reference switch below). Widen losslessly,
+    // run topk, then narrow the values back; indices are Int64 and pass through
+    // unchanged. This keeps topk dtype coverage identical to sort across all
+    // backends.
+    if (input.dtype() == DType::Int8 || input.dtype() == DType::Int16 ||
+        input.dtype() == DType::UInt8 || input.dtype() == DType::UInt16 ||
+        input.dtype() == DType::Bool) {
+        const DType orig = input.dtype();
+        auto [values_i32, indices] =
+            topk(input.to(DType::Int32), k, dim, largest, sorted);
+        return {values_i32.to(orig), indices};
+    }
+    if (input.dtype() == DType::UInt32) {
+        auto [values_i64, indices] =
+            topk(input.to(DType::Int64), k, dim, largest, sorted);
+        return {values_i64.to(DType::UInt32), indices};
+    }
+
     // For non-CPU tensors, dispatch to backend kernel
     if (input.device().type != Device::Type::CPU) {
         OpAttributes attrs;

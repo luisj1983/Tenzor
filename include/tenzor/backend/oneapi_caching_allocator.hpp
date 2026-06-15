@@ -19,7 +19,14 @@ namespace backend {
  */
 struct OneAPIBlock {
     void* ptr;                  // USM pointer
-    size_t size;                // Block size in bytes
+    size_t size;                // Physical block size in bytes (USM allocation size)
+    size_t requested_size{0};   // Rounded user-requested size for the CURRENT owner.
+                                // Because USM blocks cannot be subdivided (split_block
+                                // is a no-op), an oversized cached block may satisfy a
+                                // much smaller request. Memory statistics are accounted
+                                // against requested_size (real user demand) rather than
+                                // the physical `size`, so memory_allocated()/peak stay
+                                // accurate for profiling. Updated on each allocate.
     bool allocated;             // Whether block is currently allocated
     int device;                 // Device index
     bool is_shared;             // Whether this is shared memory (vs device-only)
@@ -323,6 +330,12 @@ private:
     size_t min_split_size_;
     size_t large_allocation_threshold_;
     bool merge_enabled_;
+
+    // Set once release_all() has sycl::free'd and forgotten every tracked USM
+    // block (backend shutdown). After this point a free() of an untracked
+    // pointer is a no-op rather than a hard error: a Storage outliving the
+    // backend must not throw out of its (noexcept) destructor -> std::terminate.
+    bool released_{false};
 };
 
 /**

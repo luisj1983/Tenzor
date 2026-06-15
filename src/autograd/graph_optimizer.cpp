@@ -70,13 +70,6 @@ auto GraphOptimizer::fuse_linear_relu(ComputationGraph& graph) -> size_t {
     // Get all nodes in the graph
     auto all_nodes = get_all_nodes(graph);
 
-    // Pattern: MatMul -> ReLU
-    OpPattern pattern({"MatMulBackward", "ReLUBackward"}, "FusedLinearReLU");
-
-    // Track nodes to remove (can't modify during iteration)
-    std::vector<std::shared_ptr<GraphNode>> nodes_to_remove;
-    std::vector<std::pair<std::shared_ptr<GraphNode>, std::shared_ptr<GraphNode>>> fusions;
-
     // Find all MatMul nodes that are followed by ReLU
     for (const auto& node : all_nodes) {
         if (!node || !node->function) continue;
@@ -97,55 +90,27 @@ auto GraphOptimizer::fuse_linear_relu(ComputationGraph& graph) -> size_t {
         if (!is_operation_type(next_node, "ReLUBackward")) continue;
 
         // Found a fusion opportunity: MatMul -> ReLU
-        fusions.push_back({node, next_node});
         fusion_count++;
     }
 
-    // Apply fusions: replace each MatMul+ReLU pair with FusedLinearReLUBackward
-    for (auto& [matmul_node, relu_node] : fusions) {
-        // Audit fix (LOW): FusedLinearReLUBackward::backward()/backward_with_variables()
-        // unconditionally dereference relu_output_ and saved_tensors_[0/1] (input,
-        // weight). Previously the fused node was created without these, leaving
-        // relu_output_ a null Tensor and no saved tensors — executing it would fault.
-        // Populate the mask source (ReLU's saved output) and the linear operands
-        // (MatMul's saved input/weight) at fusion time so the node is self-consistent.
-        if (!matmul_node->function || !relu_node->function) continue;
-
-        // ReLUBackward saves the pre-ReLU input as its sole saved tensor. The
-        // ReLU gate mask (z > 0) is identical whether evaluated on the input or
-        // the output (output > 0 iff input > 0), so this serves as the mask
-        // source consumed by FusedLinearReLUBackward as relu_output_.
-        const auto& relu_saved = relu_node->function->saved_tensors();
-        if (relu_saved.empty()) continue;
-
-        // MatMulBackward saves input (x) and weight (W) as saved_tensors_[0/1].
-        const auto& matmul_saved = matmul_node->function->saved_tensors();
-        if (matmul_saved.size() < 2) continue;
-
-        auto fused_fn = std::make_shared<FusedLinearReLUBackward>();
-
-        // Mask source for the ReLU gate.
-        fused_fn->set_relu_output(relu_saved[0]);
-
-        // Linear operands consumed by backward as saved_tensors_[0]=x, [1]=W.
-        fused_fn->save_for_backward({matmul_saved[0], matmul_saved[1]});
-
-        // Transfer the matmul's next_functions (input gradient chains)
-        fused_fn->set_next_functions(matmul_node->function->next_functions());
-        fused_fn->input_variables() = matmul_node->function->input_variables();
-
-        // Create fused graph node
-        auto fused_graph_node = std::make_shared<GraphNode>();
-        fused_graph_node->function = fused_fn;
-
-        // Replace: remove relu node, replace matmul node with fused
-        replace_nodes({matmul_node, relu_node}, fused_graph_node, graph);
-    }
-
-    // Update statistics
-    stats_.linear_relu_fused += fusion_count;
-    stats_.total_optimizations += fusion_count;
-
+    // ANALYSIS-ONLY: this pass *detects* MatMul->ReLU fusion opportunities but
+    // does NOT apply them to the executable autograd graph.
+    //
+    // optimize_variable() builds a throwaway ComputationGraph from the live
+    // grad_fn chain; replace_nodes() (below, formerly invoked here) only mutates
+    // that ComputationGraph's GraphNode adjacency. The backward engine
+    // (src/autograd/engine.cpp) traverses Function::next_functions() directly and
+    // never references ComputationGraph/GraphNode. It does not rewrite the
+    // consumer Function's next_functions to point at the fused node, nor update
+    // root.grad_fn(), so a FusedLinearReLUBackward node would be unreachable from
+    // the live graph and never executed by .backward(). Bumping
+    // stats_.linear_relu_fused / stats_.total_optimizations here therefore
+    // over-reported optimizations that never happened — the exact defect the
+    // sibling passes (fuse_conv_*, fuse_batchnorm_relu, fuse_linear_gelu,
+    // eliminate_transpose_pairs, collapse_reshape_chains) were corrected to
+    // avoid. We mirror those passes: detect and return the count for diagnostics,
+    // but do not mutate the graph and do not bump stats. (Only eliminate_dead_code
+    // actually mutates the ComputationGraph and updates stats.)
     return fusion_count;
 }
 

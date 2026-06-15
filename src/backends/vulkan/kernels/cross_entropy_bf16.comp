@@ -26,14 +26,28 @@ float readBF16(uint element_idx) {
     return uintBitsToFloat(bits << 16);
 }
 
-// Write a single bfloat16 element to the losses buffer
+// Write a single bfloat16 element to the losses buffer using atomic CAS.
+// Adjacent samples idx and idx+1 share one 32-bit word and run concurrently,
+// so a plain read-modify-write would clobber a neighbour's half-word. Use a
+// bounded atomicCompSwap loop.
 void writeBF16Loss(uint element_idx, float val) {
     uint word_idx = element_idx / 2;
-    uint word_offset = element_idx % 2;
-    uint bits = ((floatBitsToUint(val) + 0x7FFFu + ((floatBitsToUint(val) >> 16) & 1u)) >> 16);
-    uint existing = losses[word_idx];
-    uint mask = 0xFFFFu << (word_offset * 16);
-    losses[word_idx] = (existing & ~mask) | (bits << (word_offset * 16));
+    uint half_idx = element_idx % 2;
+    uint fbits = floatBitsToUint(val);
+    uint bits = ((fbits + 0x7FFFu + ((fbits >> 16) & 1u)) >> 16) & 0xFFFFu;
+    uint shift = half_idx * 16;
+    uint mask = 0xFFFFu << shift;
+
+    uint old_val = losses[word_idx];
+    uint new_val, expected;
+    for (uint iter = 0u; iter < 65536u; iter++) {
+        expected = old_val;
+        new_val = (expected & ~mask) | (bits << shift);
+        old_val = atomicCompSwap(losses[word_idx], expected, new_val);
+        if (old_val == expected) return;
+    }
+    // Saturation: do NOT add a non-atomic fallback store — it would clobber the
+    // neighbouring packed half-word.
 }
 
 void main() {

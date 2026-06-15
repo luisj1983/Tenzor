@@ -582,6 +582,15 @@ public:
         } catch (...) {
         }
 
+        // release_all() has sycl::free'd and forgotten every USM block, so our
+        // own tracking now points at freed memory. Clear it: any Storage that
+        // outlives the backend will hit deallocate()'s untracked-pointer no-op
+        // path instead of double-freeing.
+        {
+            std::lock_guard<std::mutex> lock(allocations_mutex_);
+            allocations_.clear();
+        }
+
         devices_.clear();
     }
 
@@ -746,7 +755,16 @@ public:
             std::lock_guard<std::mutex> lock(allocations_mutex_);
             auto it = allocations_.find(ptr);
             if (it == allocations_.end()) {
-                throw std::runtime_error("Attempt to free untracked pointer");
+                // Untracked pointer. This is reachable during/after shutdown:
+                // ~OneAPIBackend calls release_all() which sycl::free's and
+                // forgets every USM block, but a Storage/Tensor that outlives the
+                // backend (a static/global, or cross-TU teardown ordering) will
+                // still call deallocate() on its now-freed pointer. Throwing here
+                // would propagate out of a noexcept Storage destructor and call
+                // std::terminate(). The memory was already reclaimed by
+                // release_all() (and the OS reclaims everything at exit), so treat
+                // an untracked free as a no-op rather than a hard error.
+                return;
             }
             device_id = it->second;
             allocations_.erase(it);

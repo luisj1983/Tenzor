@@ -1012,6 +1012,23 @@ auto SparseTensor::to(Device device) const -> SparseTensor {
     return result;
 }
 
+auto SparseTensor::with_values(const Tensor& new_values) const -> SparseTensor {
+    // The leading extent of the value buffer is the structural entry count:
+    // nnz for COO/CSR/CSC, nnzb (number of blocks) for BSR. A structure-
+    // preserving transform must keep that count intact.
+    const int64_t cur_lead = values_.numel() > 0 ? values_.shape()[0] : 0;
+    const int64_t new_lead = new_values.numel() > 0 ? new_values.shape()[0] : 0;
+    if (new_lead != cur_lead) {
+        throw std::runtime_error(
+            "SparseTensor::with_values: new_values leading extent (" +
+            std::to_string(new_lead) + ") must match current value buffer (" +
+            std::to_string(cur_lead) + ")");
+    }
+    SparseTensor result = *this;
+    result.values_ = new_values;
+    return result;
+}
+
 auto SparseTensor::sparse_csc(const Tensor& ccol_indices, const Tensor& row_indices,
                                const Tensor& values, std::vector<int64_t> shape) -> SparseTensor {
     if (shape.size() != 2) {

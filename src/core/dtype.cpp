@@ -210,18 +210,48 @@ FP8_E4M3::FP8_E4M3(float f) {
             h_exp = 0xF;
             h_mantissa = 0x6;
         } else if (new_exp <= 0) {
-            // Denormalized E4M3 or underflow
+            // Denormalized E4M3 or underflow, round-to-nearest-even.
+            // Shift the implicit-1 mantissa down into the subnormal 3-bit field.
+            // At new_exp == -3 the magnitude sits at half the smallest subnormal,
+            // so RNE may round it up (ties-to-even keeps zero); below that it
+            // underflows to (signed) zero.
             if (new_exp >= -3) {
                 uint32_t m = (mantissa | 0x800000) >> (1 - new_exp);
-                h_mantissa = static_cast<uint8_t>((m >> 20) & 0x7);
-                h_exp = 0;
+                // Keep the top 3 bits, round-to-nearest-even on the discarded 20.
+                uint32_t kept = (m >> 20) & 0x7;
+                uint32_t remainder = m & 0xFFFFF;          // low 20 bits
+                uint32_t halfway = 0x80000;                // 1 << 19
+                if (remainder > halfway || (remainder == halfway && (kept & 1))) {
+                    kept++;  // may carry subnormal -> smallest normal (exp field 1)
+                }
+                // kept can be 0x8 after carry: that promotes to exp=1, mant=0,
+                // which the packed (h_exp<<3)|h_mantissa layout encodes naturally.
+                h_exp = static_cast<uint8_t>(kept >> 3);
+                h_mantissa = static_cast<uint8_t>(kept & 0x7);
             } else {
                 h_exp = 0;
                 h_mantissa = 0;
             }
         } else {
-            h_exp = static_cast<uint8_t>(new_exp);
-            h_mantissa = static_cast<uint8_t>((mantissa >> 20) & 0x7);
+            // Normalized, round-to-nearest-even on the 20 discarded mantissa bits.
+            uint32_t kept = (mantissa >> 20) & 0x7;
+            uint32_t remainder = mantissa & 0xFFFFF;       // low 20 bits
+            uint32_t halfway = 0x80000;                    // 1 << 19
+            // Pack so a mantissa carry propagates into the exponent.
+            uint32_t packed = (static_cast<uint32_t>(new_exp) << 3) | kept;
+            if (remainder > halfway || (remainder == halfway && (kept & 1))) {
+                packed++;
+            }
+            uint32_t r_exp = packed >> 3;
+            uint32_t r_mant = packed & 0x7;
+            // Clamp to the max finite E4M3 value (exp=0xF, mant=0x6 = 448).
+            // exp==0xF with mant>=0x7 would be NaN; saturate per NVIDIA's RN.
+            if (r_exp > 0xF || (r_exp == 0xF && r_mant >= 0x7)) {
+                r_exp = 0xF;
+                r_mant = 0x6;
+            }
+            h_exp = static_cast<uint8_t>(r_exp);
+            h_mantissa = static_cast<uint8_t>(r_mant);
         }
     }
 
@@ -316,17 +346,35 @@ FP8_E5M2::FP8_E5M2(float f) {
             h_exp = 0x1F;
             h_mantissa = 0;
         } else if (new_exp <= 0) {
+            // Denormalized E5M2 or underflow, round-to-nearest-even.
             if (new_exp >= -2) {
                 uint32_t m = (mantissa | 0x800000) >> (1 - new_exp);
-                h_mantissa = static_cast<uint8_t>((m >> 21) & 0x3);
-                h_exp = 0;
+                // Keep the top 2 bits, round-to-nearest-even on the discarded 21.
+                uint32_t kept = (m >> 21) & 0x3;
+                uint32_t remainder = m & 0x1FFFFF;         // low 21 bits
+                uint32_t halfway = 0x100000;               // 1 << 20
+                if (remainder > halfway || (remainder == halfway && (kept & 1))) {
+                    kept++;  // may carry subnormal -> smallest normal (exp field 1)
+                }
+                h_exp = static_cast<uint8_t>(kept >> 2);
+                h_mantissa = static_cast<uint8_t>(kept & 0x3);
             } else {
                 h_exp = 0;
                 h_mantissa = 0;
             }
         } else {
-            h_exp = static_cast<uint8_t>(new_exp);
-            h_mantissa = static_cast<uint8_t>((mantissa >> 21) & 0x3);
+            // Normalized, round-to-nearest-even on the 21 discarded mantissa bits.
+            uint32_t kept = (mantissa >> 21) & 0x3;
+            uint32_t remainder = mantissa & 0x1FFFFF;      // low 21 bits
+            uint32_t halfway = 0x100000;                   // 1 << 20
+            // Pack so a mantissa carry propagates into the exponent; if it pushes
+            // the exponent to 0x1F (mantissa 0) the result is correctly infinity.
+            uint32_t packed = (static_cast<uint32_t>(new_exp) << 2) | kept;
+            if (remainder > halfway || (remainder == halfway && (kept & 1))) {
+                packed++;
+            }
+            h_exp = static_cast<uint8_t>(packed >> 2);
+            h_mantissa = static_cast<uint8_t>(packed & 0x3);
         }
     }
 

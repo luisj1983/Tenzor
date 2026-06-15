@@ -1835,14 +1835,19 @@ auto ONNXExporter::export_gru(const Tensor& input,
 
     // Helper lambda to reorder gates from Tenzor [r,z,n] -> ONNX [z,r,h]
     auto reorder_gru_gates = [&](const Tensor& w) -> Tensor {
-        Tensor cpu_w = w.cpu().contiguous();
+        // The reorder/memcpy below reads and writes raw float. GRU weights may
+        // be Float64/Float16/BFloat16; data<float>() enforces the dtype and
+        // would throw. Convert to Float32 (the export element type) first so
+        // the read, the reordered buffer, and the emitted initializer are all
+        // consistently Float32.
+        Tensor cpu_w = w.cpu().contiguous().to(DType::Float32);
         auto shape = cpu_w.shape();
         int64_t H = hidden_size;
         int64_t cols = (shape.size() > 1) ? shape[1] : 1;
         bool is_1d = (shape.size() == 1);
 
         std::vector<int64_t> shape_vec(shape.begin(), shape.end());
-        Tensor reordered(shape_vec, cpu_w.dtype(), Device::cpu());
+        Tensor reordered(shape_vec, DType::Float32, Device::cpu());
 
         const auto* src = cpu_w.data<float>();
         auto* dst = reordered.data<float>();
@@ -3021,6 +3026,16 @@ auto ONNXExporter::export_to_file(const std::string& filepath,
             throw std::runtime_error("Failed to open file for writing: " + filepath);
         }
         file.write(reinterpret_cast<const char*>(bytes.data()), bytes.size());
+        // Mirror the external-data path's all-or-nothing handling: flush and
+        // verify before declaring success. On an I/O failure (ENOSPC, quota,
+        // network FS error) the stream goes bad here; without the check we
+        // would silently leave a truncated/corrupt .onnx on disk.
+        file.close();
+        if (!file) {
+            std::error_code ec;
+            std::filesystem::remove(filepath, ec);
+            throw std::runtime_error("Failed to write ONNX proto to: " + filepath);
+        }
         return;
     }
 

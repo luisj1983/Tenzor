@@ -11,6 +11,7 @@
 #include <sstream>
 #include <string>
 #include <atomic>
+#include <optional>
 
 namespace tenzor {
 
@@ -259,6 +260,30 @@ auto ROCmBackend::deallocate(void* ptr) -> void {
     check_hip_error(hipFree(ptr), "hipFree");
 }
 
+namespace {
+// Enable (and cache) unidirectional peer access src_device -> dst_device so a
+// cross-device hipMemcpyPeerAsync can route over the P2P link instead of
+// silently staging through host. Returns true if peer access is available.
+// Must be called with dst_device current (DeviceGuard active).
+auto ensure_peer_access(int src_device, int dst_device) -> bool {
+    int can_access = 0;
+    if (hipDeviceCanAccessPeer(&can_access, dst_device, src_device) != hipSuccess ||
+        can_access == 0) {
+        return false;
+    }
+    // hipDeviceEnablePeerAccess enables access FROM the current device TO peer.
+    // dst_device is current; we want dst to read src's memory, so enable peer
+    // access to src_device. Idempotent: hipErrorPeerAccessAlreadyEnabled is fine.
+    hipError_t err = hipDeviceEnablePeerAccess(src_device, 0);
+    if (err != hipSuccess && err != hipErrorPeerAccessAlreadyEnabled) {
+        // Clear the sticky error so a later HIP_CHECK does not misattribute it.
+        (void)hipGetLastError();
+        return false;
+    }
+    return true;
+}
+}  // namespace
+
 auto ROCmBackend::copy(void* dst, const void* src, size_t bytes, CopyKind kind) -> void {
     // Handle empty tensors
     if (bytes == 0) {
@@ -283,26 +308,61 @@ auto ROCmBackend::copy(void* dst, const void* src, size_t bytes, CopyKind kind) 
             throw std::runtime_error("Unknown CopyKind in ROCm copy");
     }
 
-    // Use async copy on the default stream for non-blocking transfers
+    if (kind == CopyKind::HostToDevice || kind == CopyKind::DeviceToDevice) {
+        // Bind the calling thread to dst's device before the async transfer.
+        // Without this, on a multi-GPU host the copy runs on the wrong device's
+        // default stream and is not ordered against kernels launched on dst's
+        // stream. A scoped DeviceGuard restores the caller's device on return.
+        int dst_device = -1, src_device = -1;
+        std::optional<DeviceGuard> device_guard;
+        hipPointerAttribute_t dst_attrs;
+        if (hipPointerGetAttributes(&dst_attrs, dst) == hipSuccess && dst_attrs.device >= 0) {
+            dst_device = dst_attrs.device;
+            device_guard.emplace(Device::rocm(dst_device));
+        }
+
+        if (kind == CopyKind::DeviceToDevice) {
+            hipPointerAttribute_t src_attrs;
+            if (hipPointerGetAttributes(&src_attrs, src) == hipSuccess && src_attrs.device >= 0) {
+                src_device = src_attrs.device;
+            }
+            // Cross-device copy: route over P2P when available.
+            if (src_device >= 0 && dst_device >= 0 && src_device != dst_device &&
+                ensure_peer_access(src_device, dst_device)) {
+                hipError_t perr = hipMemcpyPeerAsync(dst, dst_device, src, src_device,
+                                                     bytes, nullptr);
+                if (perr != hipSuccess) {
+                    throw std::runtime_error(
+                        std::string("HIP peer copy failed: ") + hipGetErrorString(perr));
+                }
+                return;
+            }
+        }
+
+        hipError_t err = hipMemcpyAsync(dst, src, bytes, hip_kind, nullptr);
+        if (err != hipSuccess) {
+            throw std::runtime_error(
+                std::string("HIP async copy failed: ") + hipGetErrorString(err));
+        }
+        // H2D and D2D are async-by-design on the default stream; no sync here.
+        return;
+    }
+
+    // DeviceToHost / HostToHost: copy() is documented as synchronous
+    // (backend.hpp). The caller reads dst on the host immediately (or frees/
+    // reuses src), so an async copy returning before completion would expose
+    // stale/partial data or a use-after-free. Use a synchronous copy.
     hipError_t err = hipMemcpyAsync(dst, src, bytes, hip_kind, nullptr);
     if (err != hipSuccess) {
         throw std::runtime_error(
             std::string("HIP async copy failed: ") + hipGetErrorString(err)
         );
     }
-    // copy() is documented as synchronous (backend.hpp). Host-visible copies must
-    // therefore complete before returning: DeviceToHost (caller reads dst on the
-    // host immediately) and HostToHost (an async H2H returns before completion, so
-    // an immediate read of dst, or freeing/reusing src, would see stale/partial
-    // data or hit a use-after-free). H2D and D2D are async-by-design on the default
-    // stream and need no sync here.
-    if (kind == CopyKind::DeviceToHost || kind == CopyKind::HostToHost) {
-        err = hipStreamSynchronize(nullptr);
-        if (err != hipSuccess) {
-            throw std::runtime_error(
-                std::string("HIP stream sync after host-visible copy failed: ") + hipGetErrorString(err)
-            );
-        }
+    err = hipStreamSynchronize(nullptr);
+    if (err != hipSuccess) {
+        throw std::runtime_error(
+            std::string("HIP stream sync after host-visible copy failed: ") + hipGetErrorString(err)
+        );
     }
 }
 

@@ -138,8 +138,12 @@ public:
      *
      * @param config T5 configuration
      * @param has_relative_attention_bias If true, computes relative position bias (first layer only)
+     * @param is_decoder If true, self-attention uses the unidirectional
+     *        (decoder) relative-position bucketing; encoder self-attention is
+     *        bidirectional. Matches HuggingFace T5Attention semantics.
      */
-    T5Attention(const T5Config& config, bool has_relative_attention_bias);
+    T5Attention(const T5Config& config, bool has_relative_attention_bias,
+                bool is_decoder = false);
 
     /**
      * @brief Forward pass through attention
@@ -169,6 +173,7 @@ public:
 private:
     T5Config config_;
     bool has_relative_attention_bias_;
+    bool is_decoder_;  ///< Decoder self-attention uses unidirectional bucketing
     std::shared_ptr<nn::Linear> q_proj_;
     std::shared_ptr<nn::Linear> k_proj_;
     std::shared_ptr<nn::Linear> v_proj_;
@@ -177,10 +182,15 @@ private:
 
     /**
      * @brief Compute relative position bucket for a relative position
+     *
+     * @param bidirectional Encoder self-attention (true) splits buckets into a
+     *        past and a future half; decoder self-attention (false) allocates
+     *        all buckets to the past direction and clamps future positions to 0.
      */
     auto relative_position_bucket(int64_t relative_position,
                                   int64_t num_buckets,
-                                  int64_t max_distance) -> int64_t;
+                                  int64_t max_distance,
+                                  bool bidirectional) -> int64_t;
 
     /**
      * @brief Compute relative position bias matrix

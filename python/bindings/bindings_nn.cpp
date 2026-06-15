@@ -1499,18 +1499,20 @@ void register_nn(py::module_& m) {
         .def("__repr__", [](const tenzor::nn::LSTM&) { return "LSTM()"; });
 
     py::class_<tenzor::nn::GRUCell, tenzor::nn::Module, std::shared_ptr<tenzor::nn::GRUCell>>(nn, "GRUCell")
-        .def(py::init<int64_t, int64_t, bool>(),
-             py::arg("input_size"), py::arg("hidden_size"), py::arg("bias") = true)
+        .def(py::init<int64_t, int64_t, bool, bool>(),
+             py::arg("input_size"), py::arg("hidden_size"), py::arg("bias") = true,
+             py::arg("linear_before_reset") = true)
         .def("forward", [](tenzor::nn::GRUCell& self, const tenzor::Variable& input, const tenzor::Variable& hx) {
             return self.forward(input, hx);
         }, py::arg("input"), py::arg("hx") = tenzor::Variable{},
            py::call_guard<py::gil_scoped_release>());
 
     py::class_<tenzor::nn::GRU, tenzor::nn::Module, std::shared_ptr<tenzor::nn::GRU>>(nn, "GRU")
-        .def(py::init<int64_t, int64_t, int64_t, bool, bool, double, bool>(),
+        .def(py::init<int64_t, int64_t, int64_t, bool, bool, double, bool, bool>(),
              py::arg("input_size"), py::arg("hidden_size"), py::arg("num_layers") = 1,
              py::arg("bias") = true, py::arg("batch_first") = false,
-             py::arg("dropout") = 0.0, py::arg("bidirectional") = false)
+             py::arg("dropout") = 0.0, py::arg("bidirectional") = false,
+             py::arg("linear_before_reset") = true)
         .def("forward", [](tenzor::nn::GRU& self, const tenzor::Variable& input, const tenzor::Variable& hx) {
             return self.forward(input, hx);
         }, py::arg("input"), py::arg("hx") = tenzor::Variable{},

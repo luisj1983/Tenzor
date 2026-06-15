@@ -2812,21 +2812,19 @@ void register_rocm_kernels(BackendDispatchTable& table) {
         const Tensor& input = inputs[0];
         const Tensor& h0 = inputs[1];
 
-        // Per-layer tensor count: 4 (W_ih, W_hh, b_ih, b_hh) if the caller packs
-        // a separate hidden-hidden bias, else 3 (combined / single bias). The
-        // 4-per-layer form forwards b_hh so the reset-gated new-gate term is
-        // correct (PyTorch GRU semantics); the 3-per-layer form leaves b_hh empty.
-        const int64_t per_layer = (num_layers > 0)
-            ? static_cast<int64_t>((inputs.size() - 2) / num_layers) : 3;
-        const int64_t stride = (per_layer >= 4) ? 4 : 3;
+        // Fixed layout shared by every backend (cpu/cuda) and the canonical
+        // {x, h0, then per-layer W_ih, W_hh, bias} packing: stride 3, no
+        // hidden-hidden bias. Deriving stride from (inputs.size()-2)/num_layers
+        // risked a silent mis-slice (integer division) if a stray tensor were
+        // ever appended; the fixed stride matches the other backends exactly.
+        constexpr size_t stride = 3;
 
         std::vector<Tensor> W_ih_list, W_hh_list, bias_list, bias_hh_list;
         for (int64_t l = 0; l < num_layers; ++l) {
-            size_t base_idx = 2 + l * stride;
+            size_t base_idx = 2 + static_cast<size_t>(l) * stride;
             W_ih_list.push_back(inputs[base_idx]);
             W_hh_list.push_back(inputs[base_idx + 1]);
             bias_list.push_back(inputs[base_idx + 2]);
-            bias_hh_list.push_back(stride >= 4 ? inputs[base_idx + 3] : Tensor{});
         }
 
         return rocm::gru_multi_layer_forward_kernel(input, W_ih_list, W_hh_list, bias_list, bias_hh_list, h0, get_hip_stream(attrs));

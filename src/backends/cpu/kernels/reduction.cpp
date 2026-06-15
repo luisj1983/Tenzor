@@ -488,22 +488,31 @@ static double parallel_simd_sum_f64(const double* data, int64_t n) {
     return total_sum;
 }
 
-// Parallel SIMD max for Float64
+// Parallel SIMD max for Float64.
+// NaN propagation: if any element is NaN, returns NaN (PyTorch/NumPy semantics).
+// The SIMD/scalar max ignores NaN (unordered compares), so we fold an any_nan
+// scan into the reduction — mirroring parallel_simd_max_f32.
 static double parallel_simd_max_f64(const double* data, int64_t n) {
     if (n == 0) return -std::numeric_limits<double>::infinity();
     if (n < REDUCTION_OMP_THRESHOLD) {
+        double result;
 #ifdef TENZOR_REDUCTION_AVX512
-        return simd_max_f64_avx512(data, n);
+        result = simd_max_f64_avx512(data, n);
 #elif defined(TENZOR_REDUCTION_AVX2)
-        return simd_max_f64_avx2(data, n);
+        result = simd_max_f64_avx2(data, n);
 #else
-        double max_val = data[0];
-        for (int64_t i = 1; i < n; i++) if (data[i] > max_val) max_val = data[i];
-        return max_val;
+        result = data[0];
+        for (int64_t i = 1; i < n; i++) if (data[i] > result) result = data[i];
 #endif
+        if (std::isnan(result)) return std::numeric_limits<double>::quiet_NaN();
+        for (int64_t i = 0; i < n; ++i) {
+            if (std::isnan(data[i])) return std::numeric_limits<double>::quiet_NaN();
+        }
+        return result;
     }
+    bool any_nan = false;
     double global_max = -std::numeric_limits<double>::infinity();
-    #pragma omp parallel reduction(max:global_max)
+    #pragma omp parallel reduction(max:global_max) reduction(||:any_nan)
     {
         int tid = omp_get_thread_num();
         int nthreads = omp_get_num_threads();
@@ -519,27 +528,41 @@ static double parallel_simd_max_f64(const double* data, int64_t n) {
             global_max = data[start];
             for (int64_t i = start + 1; i < end; i++) if (data[i] > global_max) global_max = data[i];
 #endif
+            for (int64_t i = start; i < end; i++) {
+                if (std::isnan(data[i])) { any_nan = true; break; }
+            }
         }
+    }
+    if (any_nan || std::isnan(global_max)) {
+        return std::numeric_limits<double>::quiet_NaN();
     }
     return global_max;
 }
 
-// Parallel SIMD min for Float64
+// Parallel SIMD min for Float64.
+// NaN propagation: if any element is NaN, returns NaN (PyTorch/NumPy semantics).
+// See parallel_simd_max_f64 for the NaN-handling rationale.
 static double parallel_simd_min_f64(const double* data, int64_t n) {
     if (n == 0) return std::numeric_limits<double>::infinity();
     if (n < REDUCTION_OMP_THRESHOLD) {
+        double result;
 #ifdef TENZOR_REDUCTION_AVX512
-        return simd_min_f64_avx512(data, n);
+        result = simd_min_f64_avx512(data, n);
 #elif defined(TENZOR_REDUCTION_AVX2)
-        return simd_min_f64_avx2(data, n);
+        result = simd_min_f64_avx2(data, n);
 #else
-        double min_val = data[0];
-        for (int64_t i = 1; i < n; i++) if (data[i] < min_val) min_val = data[i];
-        return min_val;
+        result = data[0];
+        for (int64_t i = 1; i < n; i++) if (data[i] < result) result = data[i];
 #endif
+        if (std::isnan(result)) return std::numeric_limits<double>::quiet_NaN();
+        for (int64_t i = 0; i < n; ++i) {
+            if (std::isnan(data[i])) return std::numeric_limits<double>::quiet_NaN();
+        }
+        return result;
     }
+    bool any_nan = false;
     double global_min = std::numeric_limits<double>::infinity();
-    #pragma omp parallel reduction(min:global_min)
+    #pragma omp parallel reduction(min:global_min) reduction(||:any_nan)
     {
         int tid = omp_get_thread_num();
         int nthreads = omp_get_num_threads();
@@ -555,7 +578,13 @@ static double parallel_simd_min_f64(const double* data, int64_t n) {
             global_min = data[start];
             for (int64_t i = start + 1; i < end; i++) if (data[i] < global_min) global_min = data[i];
 #endif
+            for (int64_t i = start; i < end; i++) {
+                if (std::isnan(data[i])) { any_nan = true; break; }
+            }
         }
+    }
+    if (any_nan || std::isnan(global_min)) {
+        return std::numeric_limits<double>::quiet_NaN();
     }
     return global_min;
 }

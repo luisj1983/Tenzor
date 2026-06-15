@@ -591,16 +591,70 @@ auto ifft_kernel(const Tensor& input, int64_t dim, int64_t n,
 // beyond labelling the dtype correctly — we just avoid introducing a
 // trailing length-2 dim that breaks backend parity with the CPU kernel.
 // ============================================================================
-auto rfft_kernel(const Tensor& input, int64_t dim, int64_t n,
+auto rfft_kernel(const Tensor& input_raw, int64_t dim, int64_t n,
                  const std::string& norm, sycl::queue& queue) -> Tensor {
     namespace dft = ::oneapi::mkl::dft;
 
-    auto shape_span = input.shape();
+    auto shape_span = input_raw.shape();
     std::vector<int64_t> shape(shape_span.begin(), shape_span.end());
     int64_t ndim = shape.size();
     if (dim < 0) dim += ndim;
 
     int64_t signal_len = shape[dim];
+
+    // On-device pad/truncate the REAL input to the requested transform length n
+    // along `dim`, mirroring fft_kernel. PyTorch's rfft(x, n=K) zero-pads or
+    // truncates the signal to K before transforming; without this the kernel
+    // would transform the wrong length and use a wrong normalization factor.
+    // Float16/BFloat16 are handled by the recursion below (which re-enters the
+    // Float32 path with the same n), so we only pad the real F32/F64 buffers.
+    Tensor input = input_raw;  // default: no copy needed
+    if (n != signal_len &&
+        (input_raw.dtype() == DType::Float32 || input_raw.dtype() == DType::Float64)) {
+        std::vector<int64_t> new_shape(shape.begin(), shape.end());
+        new_shape[dim] = n;
+
+        int64_t outer = 1, inner = 1;
+        for (int64_t i = 0; i < dim; ++i) outer *= shape[i];
+        for (int64_t i = dim + 1; i < ndim; ++i) inner *= shape[i];
+        int64_t copy_len = std::min(signal_len, n);
+
+        input = Tensor(new_shape, input_raw.dtype(), input_raw.device());
+        int64_t total_bytes = input.numel() * input.dtype_size();
+        queue.memset(const_cast<void*>(input.data_ptr()), 0,
+                     static_cast<size_t>(total_bytes)).wait();
+
+        int64_t old_dim = signal_len;
+        int64_t new_dim = n;
+        int64_t total_copies = outer * copy_len * inner;
+        if (input_raw.dtype() == DType::Float32) {
+            const float* src = get_data_ptr<const float>(input_raw);
+            float* dst = reinterpret_cast<float*>(const_cast<void*>(input.data_ptr()));
+            queue.parallel_for(sycl::range<1>(total_copies), [=](sycl::id<1> idx_) {
+                int64_t flat = idx_[0];
+                int64_t o = flat / (copy_len * inner);
+                int64_t rem = flat % (copy_len * inner);
+                int64_t d = rem / inner;
+                int64_t i = rem % inner;
+                dst[o * new_dim * inner + d * inner + i] = src[o * old_dim * inner + d * inner + i];
+            }).wait();
+        } else {  // Float64
+            const double* src = get_data_ptr<const double>(input_raw);
+            double* dst = reinterpret_cast<double*>(const_cast<void*>(input.data_ptr()));
+            queue.parallel_for(sycl::range<1>(total_copies), [=](sycl::id<1> idx_) {
+                int64_t flat = idx_[0];
+                int64_t o = flat / (copy_len * inner);
+                int64_t rem = flat % (copy_len * inner);
+                int64_t d = rem / inner;
+                int64_t i = rem % inner;
+                dst[o * new_dim * inner + d * inner + i] = src[o * old_dim * inner + d * inner + i];
+            }).wait();
+        }
+
+        shape = new_shape;
+        signal_len = n;
+    }
+
     int64_t out_len = signal_len / 2 + 1;
 
     int64_t batch_size = 1;
@@ -826,8 +880,20 @@ auto irfft_kernel(const Tensor& input, int64_t dim, int64_t n,
             "irfft_kernel: expected real or complex input");
     }
 
-    int64_t complex_len = shape[dim]; // N/2 + 1
+    int64_t complex_len = shape[dim]; // N/2 + 1 (provided complex bins)
     int64_t output_len = n;           // Full real output length
+
+    // oneMKL's C2R backward transform of size output_len reads exactly
+    // output_len/2+1 complex inputs per transform. If the caller passes an
+    // explicit n whose half-spectrum is LARGER than the provided bins
+    // (output_len/2+1 > complex_len), we must zero-pad the frequency axis up to
+    // expected_complex; otherwise oneMKL reads past the gathered data (OOB).
+    // PyTorch zero-pads the frequency axis to n/2+1 in this case. The truncation
+    // case (complex_len > expected_complex) is benign — we copy only the bins
+    // the transform consumes.
+    const int64_t expected_complex = output_len / 2 + 1;
+    const int64_t gathered_len = std::max(complex_len, expected_complex);
+    const int64_t copy_bins = std::min(complex_len, expected_complex);
 
     int64_t batch_size = 1;
     for (int64_t i = 0; i < dim; ++i) batch_size *= shape[i];
@@ -844,32 +910,35 @@ auto irfft_kernel(const Tensor& input, int64_t dim, int64_t n,
     if (input.dtype() == DType::Complex64) {
         int64_t total_transforms = batch_size * inner_size;
 
-        // Allocate contiguous complex input buffer and real output buffer
-        SyclDevicePtr<float> complex_buf_owner(total_transforms * complex_len * 2, queue);
+        // Allocate contiguous complex input buffer (per-transform length
+        // gathered_len so oneMKL can read its expected_complex bins) and real
+        // output buffer. Zero-fill so any padding bins are 0.
+        SyclDevicePtr<float> complex_buf_owner(total_transforms * gathered_len * 2, queue);
         float* complex_buf = complex_buf_owner.get();
         SyclDevicePtr<float> real_buf_owner(total_transforms * output_len, queue);
         float* real_buf = real_buf_owner.get();
+        const int64_t g_len = gathered_len;
+        const int64_t c_bins = copy_bins;
+
+        queue.memset(complex_buf, 0,
+                     total_transforms * gathered_len * 2 * sizeof(float)).wait();
 
         // Read Complex64 input as interleaved (re, im) floats.
         const float* in_ptr = reinterpret_cast<const float*>(input.data_ptr());
 
-        // Gather complex input into contiguous per-transform layout
-        if (dim == ndim - 1 && inner_size == 1) {
-            queue.memcpy(complex_buf, in_ptr,
-                         total_transforms * complex_len * 2 * sizeof(float));
-        } else {
-            queue.parallel_for(sycl::range<1>(total_transforms * complex_len),
-                [=](sycl::id<1> flat_idx) {
-                    int64_t idx = flat_idx[0];
-                    int64_t t = idx / complex_len;
-                    int64_t j = idx % complex_len;
-                    int64_t b = t / inner_size;
-                    int64_t inner = t % inner_size;
-                    int64_t in_idx = (b * complex_len * inner_size + j * inner_size + inner) * 2;
-                    complex_buf[2 * idx] = in_ptr[in_idx];
-                    complex_buf[2 * idx + 1] = in_ptr[in_idx + 1];
-                });
-        }
+        // Gather copy_bins complex values per transform into the gathered_len-strided buffer.
+        queue.parallel_for(sycl::range<1>(total_transforms * c_bins),
+            [=](sycl::id<1> flat_idx) {
+                int64_t idx = flat_idx[0];
+                int64_t t = idx / c_bins;
+                int64_t j = idx % c_bins;
+                int64_t b = t / inner_size;
+                int64_t inner = t % inner_size;
+                int64_t in_idx = (b * complex_len * inner_size + j * inner_size + inner) * 2;
+                int64_t buf_idx = t * g_len + j;
+                complex_buf[2 * buf_idx]     = in_ptr[in_idx];
+                complex_buf[2 * buf_idx + 1] = in_ptr[in_idx + 1];
+            });
 
         // oneMKL C2R via backward transform with domain::REAL
         // The descriptor size is the REAL output length (output_len),
@@ -883,10 +952,12 @@ auto irfft_kernel(const Tensor& input, int64_t dim, int64_t n,
         desc.set_value(dft::config_param::FWD_STRIDES, fwd_strides);
         desc.set_value(dft::config_param::FWD_DISTANCE, output_len);
 
-        // Backward (complex) strides — for the complex input side
+        // Backward (complex) strides — for the complex input side.
+        // Per-transform distance is gathered_len (= expected_complex when padding,
+        // matching the output_len/2+1 bins oneMKL consumes per transform).
         std::vector<std::int64_t> bwd_strides = {0, 1};
         desc.set_value(dft::config_param::BWD_STRIDES, bwd_strides);
-        desc.set_value(dft::config_param::BWD_DISTANCE, complex_len);
+        desc.set_value(dft::config_param::BWD_DISTANCE, gathered_len);
 
         desc.commit(queue);
 
@@ -926,29 +997,31 @@ auto irfft_kernel(const Tensor& input, int64_t dim, int64_t n,
     } else if (input.dtype() == DType::Complex128) {
         int64_t total_transforms = batch_size * inner_size;
 
-        SyclDevicePtr<double> complex_buf_owner(total_transforms * complex_len * 2, queue);
+        SyclDevicePtr<double> complex_buf_owner(total_transforms * gathered_len * 2, queue);
         double* complex_buf = complex_buf_owner.get();
         SyclDevicePtr<double> real_buf_owner(total_transforms * output_len, queue);
         double* real_buf = real_buf_owner.get();
+        const int64_t g_len = gathered_len;
+        const int64_t c_bins = copy_bins;
+
+        queue.memset(complex_buf, 0,
+                     total_transforms * gathered_len * 2 * sizeof(double)).wait();
 
         const double* in_ptr = reinterpret_cast<const double*>(input.data_ptr());
 
-        if (dim == ndim - 1 && inner_size == 1) {
-            queue.memcpy(complex_buf, in_ptr,
-                         total_transforms * complex_len * 2 * sizeof(double));
-        } else {
-            queue.parallel_for(sycl::range<1>(total_transforms * complex_len),
-                [=](sycl::id<1> flat_idx) {
-                    int64_t idx = flat_idx[0];
-                    int64_t t = idx / complex_len;
-                    int64_t j = idx % complex_len;
-                    int64_t b = t / inner_size;
-                    int64_t inner = t % inner_size;
-                    int64_t in_idx = (b * complex_len * inner_size + j * inner_size + inner) * 2;
-                    complex_buf[2 * idx] = in_ptr[in_idx];
-                    complex_buf[2 * idx + 1] = in_ptr[in_idx + 1];
-                });
-        }
+        // Gather copy_bins complex values per transform into the gathered_len-strided buffer.
+        queue.parallel_for(sycl::range<1>(total_transforms * c_bins),
+            [=](sycl::id<1> flat_idx) {
+                int64_t idx = flat_idx[0];
+                int64_t t = idx / c_bins;
+                int64_t j = idx % c_bins;
+                int64_t b = t / inner_size;
+                int64_t inner = t % inner_size;
+                int64_t in_idx = (b * complex_len * inner_size + j * inner_size + inner) * 2;
+                int64_t buf_idx = t * g_len + j;
+                complex_buf[2 * buf_idx]     = in_ptr[in_idx];
+                complex_buf[2 * buf_idx + 1] = in_ptr[in_idx + 1];
+            });
 
         dft::descriptor<dft::precision::DOUBLE, dft::domain::REAL> desc(output_len);
         desc.set_value(dft::config_param::NUMBER_OF_TRANSFORMS, total_transforms);
@@ -960,7 +1033,7 @@ auto irfft_kernel(const Tensor& input, int64_t dim, int64_t n,
 
         std::vector<std::int64_t> bwd_strides = {0, 1};
         desc.set_value(dft::config_param::BWD_STRIDES, bwd_strides);
-        desc.set_value(dft::config_param::BWD_DISTANCE, complex_len);
+        desc.set_value(dft::config_param::BWD_DISTANCE, gathered_len);
 
         desc.commit(queue);
 

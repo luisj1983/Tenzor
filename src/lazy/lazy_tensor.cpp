@@ -175,6 +175,9 @@ void LazyGraph::flush() {
     // node that references it), iterating nodes_ in insertion order is a
     // valid topological order. Each node's inputs are guaranteed to already
     // be materialised by the time we reach it.
+    // Graph-level lock: serialise against execute() so a node is computed at
+    // most once even if another thread is materialising concurrently.
+    std::lock_guard<std::mutex> exec_lock(execute_mutex_);
     for (auto& node : nodes_) {
         if (node->is_materialized()) continue;
         if (node->is_input() || !node->op()) {
@@ -192,6 +195,14 @@ void LazyGraph::flush() {
 }
 
 auto LazyGraph::execute(const std::shared_ptr<LazyNode>& target) -> Tensor {
+    // Graph-level lock closes the check-then-act TOCTOU window: between the
+    // is_materialized() test below and set_materialized() during traversal,
+    // two concurrent materialize() callers on LazyTensors sharing this graph
+    // would otherwise both execute the same node. The per-node
+    // materialize_mutex_ only guards the optional, not the compute itself, so
+    // serialising the whole traversal here is what actually guarantees
+    // at-most-once execution. flush() takes the same lock.
+    std::lock_guard<std::mutex> exec_lock(execute_mutex_);
     if (target->is_materialized()) {
         return target->materialized();
     }
@@ -544,6 +555,35 @@ auto reshape(const LazyTensor& a, std::vector<int64_t> shape) -> LazyTensor {
                 " is not divisible by " + std::to_string(known_product) + ")");
         }
         shape[neg_idx] = total / known_product;
+    } else {
+        // No -1 to infer: the requested shape must have exactly the same number
+        // of elements as the input. Eager Tensor::reshape enforces this (and
+        // throws) before dispatch; the lazy path previously skipped it, so a
+        // mismatched shape (e.g. {4,4} over a 15-element {3,5} input) was
+        // recorded verbatim. At materialization cpu::reshape_kernel performs no
+        // validation — it reinterprets the SAME storage with the new shape — so
+        // the resulting Tensor advertises more elements than it owns, producing
+        // out-of-bounds reads / heap corruption on any downstream access.
+        int64_t total = 1;
+        for (auto d : a.shape()) total *= d;
+        int64_t requested = 1;
+        for (auto d : shape) requested *= d;
+        if (requested != total) {
+            auto shape_str = [](const std::vector<int64_t>& s) {
+                std::string out = "[";
+                for (size_t i = 0; i < s.size(); ++i) {
+                    out += std::to_string(s[i]);
+                    if (i + 1 < s.size()) out += ", ";
+                }
+                out += "]";
+                return out;
+            };
+            throw std::invalid_argument(
+                "LazyTensor::reshape: shape incompatible with number of "
+                "elements: trying to reshape " + shape_str(a.shape()) +
+                " (numel=" + std::to_string(total) + ") to " + shape_str(shape) +
+                " (total=" + std::to_string(requested) + ")");
+        }
     }
 
     OpAttributes attrs;

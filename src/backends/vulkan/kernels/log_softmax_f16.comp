@@ -27,18 +27,28 @@ float readF16(uint element_idx) {
     return unpackHalf2x16(bits | (bits << 16)).x;
 }
 
-// Write a single float16 value to packed output buffer
+// Write a single float16 value to the packed output buffer using atomic CAS.
+// Two adjacent threads in a row write the two halves of the same 32-bit word
+// (element 0 → low half, element 1 → high half). A plain read-modify-write
+// would let the last writer clobber the neighbour's half-word, so we must use
+// a bounded atomicCompSwap loop (mirrors softmax_f16.comp).
 void writeF16(uint element_idx, float value) {
     uint word_idx = element_idx / 2;
-    uint word_offset = element_idx % 2;
+    uint half_idx = element_idx % 2;
     uint bits = packHalf2x16(vec2(value, 0.0)) & 0xFFFFu;
-    if (word_offset == 0) {
-        uint existing = output_data[word_idx] & 0xFFFF0000u;
-        output_data[word_idx] = existing | bits;
-    } else {
-        uint existing = output_data[word_idx] & 0x0000FFFFu;
-        output_data[word_idx] = existing | (bits << 16);
+    uint shift = half_idx * 16;
+    uint mask = 0xFFFFu << shift;
+
+    uint old_val = output_data[word_idx];
+    uint new_val, expected;
+    for (uint iter = 0u; iter < 65536u; iter++) {
+        expected = old_val;
+        new_val = (expected & ~mask) | (bits << shift);
+        old_val = atomicCompSwap(output_data[word_idx], expected, new_val);
+        if (old_val == expected) return;
     }
+    // Saturation: do NOT add a non-atomic fallback store — it would clobber the
+    // neighbouring packed half-word.
 }
 
 void main() {

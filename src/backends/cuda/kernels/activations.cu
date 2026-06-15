@@ -1403,9 +1403,8 @@ template<typename T>
 __global__ void softmax_backward_kernel(const T* grad_output, const T* output,
                                        T* grad_input,
                                        int64_t batch_size, int64_t dim_size) {
-    extern __shared__ __align__(sizeof(T)) unsigned char shared_mem[];
-    T* shared = reinterpret_cast<T*>(shared_mem);
-
+    // The reduction below uses a statically-allocated Acc-typed shared buffer
+    // (acc_shared); the dynamic shared-mem launch param is unused here.
     int64_t row = blockIdx.x;
     if (row >= batch_size) return;
 
@@ -1413,24 +1412,30 @@ __global__ void softmax_backward_kernel(const T* grad_output, const T* output,
     const T* out_row = output + row * dim_size;
     T* grad_in_row = grad_input + row * dim_size;
 
-    // Compute sum(grad_output * softmax)
-    T sum = T(0);
+    // Compute sum(grad_output * softmax) in AccumType<T> (float for half/bf16)
+    // so the per-row reduction does not saturate or lose precision in narrow
+    // dtypes; mirrors softmax_forward_kernel's Acc handling. A dedicated
+    // Acc-typed shared buffer avoids aliasing the (smaller) T-typed `shared`.
+    using Acc = typename AccumType<T>::type;
+    __shared__ Acc acc_shared[32];
+    Acc sum = Acc(0);
     for (int64_t i = threadIdx.x; i < dim_size; i += blockDim.x) {
-        sum += grad_out_row[i] * out_row[i];
+        sum += static_cast<Acc>(grad_out_row[i]) * static_cast<Acc>(out_row[i]);
     }
-    sum = block_reduce_sum(sum, shared);
+    sum = block_reduce_sum<Acc>(sum, acc_shared);
     __syncthreads();
 
     // Broadcast sum to all threads
     if (threadIdx.x == 0) {
-        shared[0] = sum;
+        acc_shared[0] = sum;
     }
     __syncthreads();
-    sum = shared[0];
+    sum = acc_shared[0];
 
     // Compute gradient: softmax[i] * (grad_output[i] - sum)
     for (int64_t i = threadIdx.x; i < dim_size; i += blockDim.x) {
-        grad_in_row[i] = out_row[i] * (grad_out_row[i] - sum);
+        grad_in_row[i] = static_cast<T>(static_cast<Acc>(out_row[i]) *
+                                        (static_cast<Acc>(grad_out_row[i]) - sum));
     }
 }
 
@@ -1542,9 +1547,8 @@ template<typename T>
 __global__ void log_softmax_backward_kernel(const T* grad_output, const T* output,
                                            T* grad_input,
                                            int64_t batch_size, int64_t dim_size) {
-    extern __shared__ __align__(sizeof(T)) unsigned char shared_mem[];
-    T* shared = reinterpret_cast<T*>(shared_mem);
-
+    // The reduction below uses a statically-allocated Acc-typed shared buffer
+    // (acc_shared); the dynamic shared-mem launch param is unused here.
     int64_t row = blockIdx.x;
     if (row >= batch_size) return;
 
@@ -1552,24 +1556,30 @@ __global__ void log_softmax_backward_kernel(const T* grad_output, const T* outpu
     const T* out_row = output + row * dim_size;
     T* grad_in_row = grad_input + row * dim_size;
 
-    // Compute sum(grad_output)
-    T sum_grad = T(0);
+    // Compute sum(grad_output) in AccumType<T> (float for half/bf16) so the
+    // grad-sum reduction and the exp() are done in widened precision, avoiding
+    // narrow-dtype saturation/precision loss on large dims; mirrors
+    // log_softmax_forward_kernel's Acc handling.
+    using Acc = typename AccumType<T>::type;
+    __shared__ Acc acc_shared[32];
+    Acc sum_grad = Acc(0);
     for (int64_t i = threadIdx.x; i < dim_size; i += blockDim.x) {
-        sum_grad += grad_out_row[i];
+        sum_grad += static_cast<Acc>(grad_out_row[i]);
     }
-    sum_grad = block_reduce_sum(sum_grad, shared);
+    sum_grad = block_reduce_sum<Acc>(sum_grad, acc_shared);
     __syncthreads();
 
     // Broadcast sum to all threads
     if (threadIdx.x == 0) {
-        shared[0] = sum_grad;
+        acc_shared[0] = sum_grad;
     }
     __syncthreads();
-    sum_grad = shared[0];
+    sum_grad = acc_shared[0];
 
     // Compute gradient: grad_output - exp(log_softmax) * sum_grad
     for (int64_t i = threadIdx.x; i < dim_size; i += blockDim.x) {
-        grad_in_row[i] = grad_out_row[i] - device_exp(out_row[i]) * sum_grad;
+        grad_in_row[i] = static_cast<T>(static_cast<Acc>(grad_out_row[i]) -
+                                        device_exp(static_cast<Acc>(out_row[i])) * sum_grad);
     }
 }
 

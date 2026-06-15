@@ -297,13 +297,22 @@ private:
             cd_offset     = read_u64(z + 48);
         }
 
-        if (cd_offset + cd_size > data_.size()) {
+        // Overflow-safe: cd_offset and cd_size may be attacker-controlled 64-bit
+        // values read from the ZIP64 EOCD record. A naive `cd_offset + cd_size`
+        // can wrap (e.g. cd_offset=0xFFFF...F0, cd_size=0x20 wraps to 0x10) and
+        // bypass the bound, after which `cursor = cd_offset` yields a wild
+        // pointer. Bound each operand against data_.size() with subtraction.
+        if (cd_offset > data_.size() ||
+            cd_size > data_.size() - cd_offset) {
             throw std::runtime_error(
                 "torch_pickle: ZIP central directory past EOF");
         }
-        size_t cursor = cd_offset;
+        // cd_end is now known-safe (<= data_.size()), so comparisons of the form
+        // `delta > cd_end - cursor` cannot wrap as long as cursor <= cd_end.
+        const uint64_t cd_end = cd_offset + cd_size;
+        uint64_t cursor = cd_offset;
         for (uint64_t i = 0; i < total_entries; ++i) {
-            if (cursor + 46 > cd_offset + cd_size) {
+            if (cursor > cd_end || 46 > cd_end - cursor) {
                 throw std::runtime_error(
                     "torch_pickle: ZIP central directory entry truncated");
             }
@@ -321,7 +330,13 @@ private:
             uint16_t comment_len = read_u16(cd + 32);
             uint32_t lh_off = read_u32(cd + 42);
 
-            if (cursor + 46 + name_len + extra_len > cd_offset + cd_size) {
+            // Overflow-safe variable-length-record bound. cursor <= cd_end and
+            // 46 <= cd_end - cursor are already established above, so
+            // `cd_end - cursor - 46` does not wrap; comparing the (uint16+uint16,
+            // max ~131070) name+extra span against it cannot overflow either.
+            const uint64_t var_len =
+                static_cast<uint64_t>(name_len) + static_cast<uint64_t>(extra_len);
+            if (var_len > cd_end - cursor - 46) {
                 throw std::runtime_error(
                     "torch_pickle: ZIP central directory entry truncated");
             }

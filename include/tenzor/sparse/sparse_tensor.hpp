@@ -178,6 +178,23 @@ public:
     auto coalesce() const -> SparseTensor;
 
     /**
+     * @brief Return a copy of this tensor with the value buffer replaced.
+     *
+     * The sparsity structure (all index tensors and layout metadata) is
+     * preserved exactly; only the nnz value buffer is swapped. This is the
+     * layout-agnostic way to apply a structure-preserving transform (e.g. a
+     * scalar rescale or a dtype cast of the values) to any layout — COO, CSR,
+     * CSC or BSR — without reconstructing the wrong index members.
+     *
+     * @param new_values Replacement value buffer; must have the same leading
+     *                    (nnz / nnzb) extent as the current values.
+     * @return Copy of *this with values_ replaced by new_values.
+     * @throws std::runtime_error if new_values' leading extent disagrees with
+     *         the current value buffer.
+     */
+    auto with_values(const Tensor& new_values) const -> SparseTensor;
+
+    /**
      * @brief Transfer to different device.
      */
     auto to(Device device) const -> SparseTensor;

@@ -1037,8 +1037,13 @@ auto TransferEngine::cpu_to_gpu_async(
         std::vector<int64_t> shape_vec(shape_span.begin(), shape_span.end());
         Tensor gpu_tensor = allocate_tensor(shape_vec, cpu_tensor.dtype(), gpu_device);
 
-        size_t bytes = cpu_tensor.numel() * dtype_size(cpu_tensor.dtype());
-        const void* src_ptr = cpu_tensor.data_ptr();
+        // The async byte memcpy reads a flat run from data_ptr(); for a
+        // non-contiguous source (transpose/slice view) that run is the wrong
+        // elements. Contiguify first and anchor in state->source so the buffer
+        // stays alive until the DMA completes (mirrors the sync path).
+        Tensor src = cpu_tensor.contiguous();
+        size_t bytes = src.numel() * dtype_size(src.dtype());
+        const void* src_ptr = src.data_ptr();
         void* dst_ptr = gpu_tensor.data_ptr();
 
         if (config_.use_pinned_memory) {
@@ -1058,7 +1063,7 @@ auto TransferEngine::cpu_to_gpu_async(
         HIP_CHECK(hipEventRecord(event, stream));
 
         state->result = gpu_tensor;
-        state->source = cpu_tensor;  // keep source alive until DMA completes
+        state->source = src;  // keep contiguous source alive until DMA completes
         state->hip_event = event;
         state->hip_stream = stream;
 
@@ -1080,11 +1085,14 @@ auto TransferEngine::cpu_to_gpu_async(
             auto shape_span = cpu_tensor.shape();
             std::vector<int64_t> shape_vec(shape_span.begin(), shape_span.end());
             Tensor gpu_tensor = allocate_tensor(shape_vec, cpu_tensor.dtype(), gpu_device);
-            size_t bytes = cpu_tensor.numel() * dtype_size(cpu_tensor.dtype());
+            // Contiguify so the flat byte DMA reads logical element order; anchor
+            // the contiguous buffer in state->source until the async DMA completes.
+            Tensor src = cpu_tensor.contiguous();
+            size_t bytes = src.numel() * dtype_size(src.dtype());
             void* ev = tenzor::rocm_transfer::h2d_async(
-                gpu_tensor.data_ptr(), cpu_tensor.data_ptr(), bytes, gpu_device.index);
+                gpu_tensor.data_ptr(), src.data_ptr(), bytes, gpu_device.index);
             state->result = gpu_tensor;
-            state->source = cpu_tensor;  // keep alive until the async DMA completes
+            state->source = src;  // keep contiguous source alive until DMA completes
             state->rocm_event = ev;
             if (ev == nullptr) state->completed.store(true, std::memory_order_release);
             record_transfer(bytes, 0.0, true);
@@ -1102,12 +1110,15 @@ auto TransferEngine::cpu_to_gpu_async(
         std::vector<int64_t> shape_vec(shape_span.begin(), shape_span.end());
         Tensor gpu_tensor = allocate_tensor(shape_vec, cpu_tensor.dtype(), gpu_device);
 
-        size_t bytes = cpu_tensor.numel() * dtype_size(cpu_tensor.dtype());
+        // Contiguify so the flat byte DMA reads logical element order; anchor the
+        // contiguous buffer in state->source until the async DMA completes.
+        Tensor src = cpu_tensor.contiguous();
+        size_t bytes = src.numel() * dtype_size(src.dtype());
 
         try {
-            sycl::event event = queue.memcpy(gpu_tensor.data_ptr(), cpu_tensor.data_ptr(), bytes);
+            sycl::event event = queue.memcpy(gpu_tensor.data_ptr(), src.data_ptr(), bytes);
             state->result = gpu_tensor;
-        state->source = cpu_tensor;  // keep source alive until DMA completes
+        state->source = src;  // keep contiguous source alive until DMA completes
             state->sycl_event = event;
             state->has_sycl_event = true;
 
@@ -1167,12 +1178,17 @@ auto TransferEngine::gpu_to_cpu_async(const Tensor& gpu_tensor) -> TransferHandl
 
         HIP_CHECK(hipSetDevice(gpu_tensor.device().index));
 
-        auto shape_span = gpu_tensor.shape();
-        std::vector<int64_t> shape_vec(shape_span.begin(), shape_span.end());
-        Tensor cpu_result = allocate_tensor(shape_vec, gpu_tensor.dtype(), Device::cpu());
+        // Contiguify the (possibly strided) GPU source so the flat byte DMA into
+        // the fresh contiguous host tensor reads logical element order. Anchor the
+        // contiguous GPU buffer in state->source until the DMA completes.
+        Tensor src = gpu_tensor.contiguous();
 
-        size_t bytes = gpu_tensor.numel() * dtype_size(gpu_tensor.dtype());
-        const void* src_ptr = gpu_tensor.data_ptr();
+        auto shape_span = src.shape();
+        std::vector<int64_t> shape_vec(shape_span.begin(), shape_span.end());
+        Tensor cpu_result = allocate_tensor(shape_vec, src.dtype(), Device::cpu());
+
+        size_t bytes = src.numel() * dtype_size(src.dtype());
+        const void* src_ptr = src.data_ptr();
         void* dst_ptr = cpu_result.data_ptr();
 
         if (config_.use_pinned_memory) {
@@ -1189,7 +1205,7 @@ auto TransferEngine::gpu_to_cpu_async(const Tensor& gpu_tensor) -> TransferHandl
                 return_hip_event(event);
                 state->pinned_buffer = pinned;
                 state->result = cpu_result;
-        state->source = gpu_tensor;  // keep source alive until DMA completes
+        state->source = src;  // keep contiguous source alive until DMA completes
                 state->completed.store(true, std::memory_order_release);
             } else {
                 HIP_CHECK(hipMemcpyAsync(dst_ptr, src_ptr, bytes, hipMemcpyDeviceToHost, stream));
@@ -1198,7 +1214,7 @@ auto TransferEngine::gpu_to_cpu_async(const Tensor& gpu_tensor) -> TransferHandl
                 HIP_CHECK(hipEventRecord(event, stream));
 
                 state->result = cpu_result;
-        state->source = gpu_tensor;  // keep source alive until DMA completes
+        state->source = src;  // keep contiguous source alive until DMA completes
                 state->hip_event = event;
                 state->hip_stream = stream;
             }
@@ -1209,7 +1225,7 @@ auto TransferEngine::gpu_to_cpu_async(const Tensor& gpu_tensor) -> TransferHandl
             HIP_CHECK(hipEventRecord(event, stream));
 
             state->result = cpu_result;
-        state->source = gpu_tensor;  // keep source alive until DMA completes
+        state->source = src;  // keep contiguous source alive until DMA completes
             state->hip_event = event;
             state->hip_stream = stream;
         }
@@ -1223,14 +1239,17 @@ auto TransferEngine::gpu_to_cpu_async(const Tensor& gpu_tensor) -> TransferHandl
 #else
         // Async GPU->CPU via the HIP-isolated transfer TU (see cpu_to_gpu_async).
         {
-            auto shape_span = gpu_tensor.shape();
+            // Contiguify the GPU source so the flat byte DMA reads logical element
+            // order; anchor the contiguous buffer until the async DMA completes.
+            Tensor src = gpu_tensor.contiguous();
+            auto shape_span = src.shape();
             std::vector<int64_t> shape_vec(shape_span.begin(), shape_span.end());
-            Tensor cpu_result = allocate_tensor(shape_vec, gpu_tensor.dtype(), Device::cpu());
-            size_t bytes = gpu_tensor.numel() * dtype_size(gpu_tensor.dtype());
+            Tensor cpu_result = allocate_tensor(shape_vec, src.dtype(), Device::cpu());
+            size_t bytes = src.numel() * dtype_size(src.dtype());
             void* ev = tenzor::rocm_transfer::d2h_async(
-                cpu_result.data_ptr(), gpu_tensor.data_ptr(), bytes, gpu_tensor.device().index);
+                cpu_result.data_ptr(), src.data_ptr(), bytes, src.device().index);
             state->result = cpu_result;
-            state->source = gpu_tensor;  // keep alive until the async DMA completes
+            state->source = src;  // keep contiguous source alive until DMA completes
             state->rocm_event = ev;
             if (ev == nullptr) state->completed.store(true, std::memory_order_release);
             record_transfer(bytes, 0.0, false);
@@ -1244,16 +1263,19 @@ auto TransferEngine::gpu_to_cpu_async(const Tensor& gpu_tensor) -> TransferHandl
         int queue_idx = next_stream_.fetch_add(1, std::memory_order_relaxed) % config_.num_streams;
         auto& queue = get_sycl_queue(queue_idx);
 
-        auto shape_span = gpu_tensor.shape();
+        // Contiguify the GPU source so the flat byte DMA reads logical element
+        // order; anchor the contiguous buffer until the async DMA completes.
+        Tensor src = gpu_tensor.contiguous();
+        auto shape_span = src.shape();
         std::vector<int64_t> shape_vec(shape_span.begin(), shape_span.end());
-        Tensor cpu_result = allocate_tensor(shape_vec, gpu_tensor.dtype(), Device::cpu());
+        Tensor cpu_result = allocate_tensor(shape_vec, src.dtype(), Device::cpu());
 
-        size_t bytes = gpu_tensor.numel() * dtype_size(gpu_tensor.dtype());
+        size_t bytes = src.numel() * dtype_size(src.dtype());
 
         try {
-            sycl::event event = queue.memcpy(cpu_result.data_ptr(), gpu_tensor.data_ptr(), bytes);
+            sycl::event event = queue.memcpy(cpu_result.data_ptr(), src.data_ptr(), bytes);
             state->result = cpu_result;
-        state->source = gpu_tensor;  // keep source alive until DMA completes
+        state->source = src;  // keep contiguous source alive until DMA completes
             state->sycl_event = event;
             state->has_sycl_event = true;
 

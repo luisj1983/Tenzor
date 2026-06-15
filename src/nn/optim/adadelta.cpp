@@ -58,7 +58,14 @@ auto Adadelta::initialize_buffers() -> void {
     acc_delta_.clear();
 
     for (auto& param : parameters_) {
-        if (!param) continue;
+        if (!param) {
+            // Keep square_avg_/acc_delta_ index-aligned with parameters_
+            // (matches on_parameters_appended_); a null param preceding a
+            // valid one must not shift later state buffers.
+            square_avg_.push_back(Tensor{});
+            acc_delta_.push_back(Tensor{});
+            continue;
+        }
         const auto& param_data = param->tensor();
 
         // R.16: half-precision params get Float32 state buffers.

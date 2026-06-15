@@ -480,21 +480,44 @@ auto SvdBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tens
     auto S_col = unsqueeze(S_sq, S_sq.ndim());       // (..., K, 1)  varies over i
     auto diffs = sub(S_row, S_col);                  // diffs[..., i, j] = s_j^2 - s_i^2
 
-    // Clamp small |s_j^2 - s_i^2| to epsilon for near-degenerate singular
-    // values. eps_t/mask shapes broadcast against the batched diffs.
-    auto eps_val   = detail::dtype_epsilon(S.dtype());
-    auto eps_t     = full({K, K}, eps_val, S.dtype(), S.device());
+    // Near-degenerate singular values make 1/(s_j^2 - s_i^2) blow up. The old
+    // code "clamped" |diff| to detail::dtype_epsilon (1e-30 for fp32/fp64) via
+    // where(lt(abs_diffs, eps), sign(diffs)*eps, diffs): for fp32/fp64 the
+    // 1e-30 guard only fires at essentially exact zero, and there sign(0)=0
+    // leaves safe_diffs=0, so reciprocal(0)=+inf and grad_A becomes inf/NaN at
+    // exact degeneracy. Mirror the forward-mode eigh JVP rule (jvp_rules.cpp):
+    // build an is_small mask (relative threshold, capturing exact zeros too),
+    // set the denominator to 1 there, reciprocate, then ZERO those F entries.
+    // This yields finite F at exactly-degenerate roots instead of inf.
+    //
+    // NOTE (shared-header): detail::dtype_epsilon returns 1e-30 for fp32/fp64
+    // which is not a meaningful clamp magnitude. That helper lives in
+    // include/tenzor/utils/safe_math.hpp (outside this task's edit scope), so
+    // we compute a meaningful relative tolerance locally here.
+    double rel_eps;
+    switch (S.dtype()) {
+        case DType::Float16:
+        case DType::BFloat16: rel_eps = 1e-2; break;
+        case DType::Float64:  rel_eps = 1e-12; break;
+        default:              rel_eps = 1e-6; break;  // Float32
+    }
     auto abs_diffs = abs(diffs);
-    auto safe_diffs = where(lt(abs_diffs, eps_t), mul(sign(diffs), eps_t), diffs);
+    // Relative threshold scaled by the largest |s^2| so the clamp is
+    // dimensionally meaningful regardless of the singular-value magnitudes.
+    auto max_scale = tenzor::max(abs(S_sq));  // scalar, broadcasts over (..., K, K)
+    auto tol = add(mul(max_scale, rel_eps), rel_eps);  // rel_eps*(max|s^2| + 1)
+    auto is_small = lt(abs_diffs, tol);
 
-    // Replace diagonal with 1 to avoid division by zero (broadcasts over batch).
-    auto mask = eye(K, std::nullopt, S.dtype(), S.device());
-    safe_diffs = add(safe_diffs, mask);
+    // Replace near-degenerate off-diagonal denominators (and the diagonal,
+    // which is always exactly zero) with 1 to avoid division by zero.
+    auto ones_kk = ones({K, K}, S.dtype(), S.device());
+    auto safe_diffs = where(is_small, ones_kk, diffs);
 
-    // F = 1/safe_diffs, then zero out diagonal
+    // F = 1/safe_diffs, then zero out the small/degenerate entries (this also
+    // zeros the diagonal, since diffs is exactly 0 there → is_small is true).
     auto F = reciprocal(safe_diffs);
-    auto anti_mask = sub(ones({K, K}, S.dtype(), S.device()), mask);
-    F = mul(F, anti_mask);  // Zero out diagonal
+    auto zero_kk = full({K, K}, 0.0f, S.dtype(), S.device());
+    F = where(is_small, zero_kk, F);
 
     // Core SVD backward formula:
     // dL/dA = U @ (diag(dL/dS) + F * (Ut @ dL/dU) @ S_diag + S_diag @ F * (dL/dVh @ V)) @ Vh
@@ -694,19 +717,38 @@ auto EighBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Ten
     auto W_col = unsqueeze(W, W.ndim());      // (..., N, 1)  varies over i
     auto diffs = sub(W_row, W_col);           // diffs[..., i, j] = w_j - w_i
 
-    // Clamp small |w_j - w_i| to epsilon to avoid singularity from degenerate eigenvalues
-    auto eps_val = detail::dtype_epsilon(W.dtype());
-    auto eps_t = full({N, N}, eps_val, W.dtype(), W.device());
+    // Near-degenerate eigenvalues make 1/(w_j - w_i) blow up. The old code
+    // "clamped" |diff| to detail::dtype_epsilon (1e-30 for fp32/fp64) via
+    // where(lt(abs_diffs, eps), sign(diffs)*eps, diffs), which only fires at
+    // essentially exact zero where sign(0)=0 leaves safe_diffs=0, so
+    // reciprocal(0)=+inf and grad_A becomes inf/NaN at exact degeneracy. Mirror
+    // the forward-mode eigh JVP rule: build an is_small mask (relative
+    // threshold, capturing exact zeros too), set the denominator to 1 there,
+    // reciprocate, then ZERO those F entries — finite F at degenerate roots.
+    //
+    // NOTE (shared-header): detail::dtype_epsilon (1e-30 for fp32/fp64) is not
+    // a meaningful clamp magnitude; that helper is in safe_math.hpp (outside
+    // edit scope), so the relative tolerance is computed locally here.
+    double rel_eps;
+    switch (W.dtype()) {
+        case DType::Float16:
+        case DType::BFloat16: rel_eps = 1e-2; break;
+        case DType::Float64:  rel_eps = 1e-12; break;
+        default:              rel_eps = 1e-6; break;  // Float32
+    }
     auto abs_diffs = abs(diffs);
-    auto safe_diffs = where(lt(abs_diffs, eps_t), mul(sign(diffs), eps_t), diffs);
+    auto max_scale = tenzor::max(abs(W));  // scalar, broadcasts over (..., N, N)
+    auto tol = add(mul(max_scale, rel_eps), rel_eps);  // rel_eps*(max|w| + 1)
+    auto is_small = lt(abs_diffs, tol);
 
-    // Replace diagonal with 1 to avoid division by zero
-    auto mask = eye(N, std::nullopt, W.dtype(), W.device());
-    safe_diffs = add(safe_diffs, mask);
+    // Replace near-degenerate off-diagonal denominators (and the always-zero
+    // diagonal) with 1 to avoid division by zero.
+    auto ones_nn = ones({N, N}, W.dtype(), W.device());
+    auto safe_diffs = where(is_small, ones_nn, diffs);
 
     auto F = reciprocal(safe_diffs);
-    auto anti_mask = sub(ones({N, N}, W.dtype(), W.device()), mask);
-    F = mul(F, anti_mask);  // Zero out diagonal
+    auto zero_nn = full({N, N}, 0.0f, W.dtype(), W.device());
+    F = where(is_small, zero_nn, F);  // finite + diagonal/degenerate zeroed
 
     auto Vt = transpose(V, V.ndim() - 2, V.ndim() - 1);
 
@@ -1078,16 +1120,28 @@ auto SvdBackward::backward_with_variables(std::vector<Variable> grad_outputs) ->
     auto S_col = unsqueeze(S_sq, S_sq.ndim());            // (..., K, 1)  varies over i
     auto diffs = sub(S_row, S_col);                       // (..., K, K)
 
-    auto eps_val = detail::dtype_epsilon(S_tensor.dtype());
-    auto eps_t = full({K, K}, eps_val, S_tensor.dtype(), S_tensor.device());
+    // Degenerate-root safe F (see SvdBackward::backward): the old eps=1e-30
+    // sign-based clamp left reciprocal(0)=inf at exact degeneracy. Build an
+    // is_small mask, set denom to 1 there, reciprocate, then zero those F
+    // entries (also zeros the always-zero diagonal) → finite F. rel_eps is a
+    // meaningful per-dtype tolerance (safe_math.hpp's 1e-30 is not, and is
+    // outside this task's edit scope).
+    double rel_eps;
+    switch (S_tensor.dtype()) {
+        case DType::Float16:
+        case DType::BFloat16: rel_eps = 1e-2; break;
+        case DType::Float64:  rel_eps = 1e-12; break;
+        default:              rel_eps = 1e-6; break;  // Float32
+    }
     auto abs_diffs = abs(diffs);
-    auto safe_diffs = where(lt(abs_diffs, eps_t), mul(sign(diffs), eps_t), diffs);
-
-    auto mask = eye(K, std::nullopt, S_tensor.dtype(), S_tensor.device());
-    safe_diffs = add(safe_diffs, mask);
+    auto max_scale = tenzor::max(abs(S_sq));  // scalar
+    auto tol = add(mul(max_scale, rel_eps), rel_eps);
+    auto is_small = lt(abs_diffs, tol);
+    auto ones_kk = ones({K, K}, S_tensor.dtype(), S_tensor.device());
+    auto safe_diffs = where(is_small, ones_kk, diffs);
     auto F_tensor = reciprocal(safe_diffs);
-    auto anti_mask = sub(ones({K, K}, S_tensor.dtype(), S_tensor.device()), mask);
-    F_tensor = mul(F_tensor, anti_mask);
+    auto zero_kk = full({K, K}, 0.0f, S_tensor.dtype(), S_tensor.device());
+    F_tensor = where(is_small, zero_kk, F_tensor);
 
     auto F = Variable(F_tensor, false);
 
@@ -1237,16 +1291,28 @@ auto EighBackward::backward_with_variables(std::vector<Variable> grad_outputs) -
     auto W_col = unsqueeze(W_tensor, W_tensor.ndim());      // (..., N, 1) varies over i
     auto diffs = sub(W_row, W_col);                         // (..., N, N)
 
-    auto eps_val = detail::dtype_epsilon(W_tensor.dtype());
-    auto eps_t = full({N, N}, eps_val, W_tensor.dtype(), W_tensor.device());
+    // Degenerate-root safe F (see EighBackward::backward): the old eps=1e-30
+    // sign-based clamp left reciprocal(0)=inf at exact degeneracy. Build an
+    // is_small mask, set denom to 1 there, reciprocate, then zero those F
+    // entries (also zeros the always-zero diagonal) → finite F. rel_eps is a
+    // meaningful per-dtype tolerance (safe_math.hpp's 1e-30 is not, and is
+    // outside this task's edit scope).
+    double rel_eps;
+    switch (W_tensor.dtype()) {
+        case DType::Float16:
+        case DType::BFloat16: rel_eps = 1e-2; break;
+        case DType::Float64:  rel_eps = 1e-12; break;
+        default:              rel_eps = 1e-6; break;  // Float32
+    }
     auto abs_diffs = abs(diffs);
-    auto safe_diffs = where(lt(abs_diffs, eps_t), mul(sign(diffs), eps_t), diffs);
-
-    auto mask = eye(N, std::nullopt, W_tensor.dtype(), W_tensor.device());
-    safe_diffs = add(safe_diffs, mask);
+    auto max_scale = tenzor::max(abs(W_tensor));  // scalar
+    auto tol = add(mul(max_scale, rel_eps), rel_eps);
+    auto is_small = lt(abs_diffs, tol);
+    auto ones_nn = ones({N, N}, W_tensor.dtype(), W_tensor.device());
+    auto safe_diffs = where(is_small, ones_nn, diffs);
     auto F_tensor = reciprocal(safe_diffs);
-    auto anti_mask = sub(ones({N, N}, W_tensor.dtype(), W_tensor.device()), mask);
-    F_tensor = mul(F_tensor, anti_mask);
+    auto zero_nn = full({N, N}, 0.0f, W_tensor.dtype(), W_tensor.device());
+    F_tensor = where(is_small, zero_nn, F_tensor);
 
     auto F = Variable(F_tensor, false);
 

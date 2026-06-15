@@ -152,6 +152,12 @@ auto Rprop::initialize_buffers() -> void {
             // Initialize step sizes to the initial learning rate
             step_sizes_.push_back(full(shape, lr_, state_dt, pt.device()));
             prev_grads_.push_back(make_optim_state(pt));
+        } else {
+            // Keep step_sizes_/prev_grads_ index-aligned with parameters_
+            // (matches on_parameters_appended_); a null param preceding a
+            // valid one must not shift later buffers.
+            step_sizes_.push_back(Tensor{});
+            prev_grads_.push_back(Tensor{});
         }
     }
 }

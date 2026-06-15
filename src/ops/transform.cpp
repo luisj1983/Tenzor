@@ -1092,7 +1092,15 @@ auto tensor_split(const Tensor& input, std::vector<int64_t> indices, int64_t dim
     std::vector<Tensor> result;
     int64_t prev = 0;
     for (auto idx : indices) {
+        // Match torch.tensor_split: negative split points count from the end.
+        if (idx < 0) idx += dim_size;
+        // Clamp into [0, dim_size] so out-of-range points yield empty chunks
+        // rather than negative-length slices.
+        if (idx < 0) idx = 0;
         if (idx > dim_size) idx = dim_size;
+        // A split point before the previous one produces an empty chunk; keep
+        // prev monotonic so the slice end never precedes its start.
+        if (idx < prev) idx = prev;
         result.push_back(input.slice(dim, prev, idx));
         prev = idx;
     }

@@ -181,6 +181,10 @@ auto flash_attention_backward_cuda(
  * @param V Value tensor [batch, num_heads, seq_len_k, head_dim] (forced contiguous)
  * @param scale Scaling factor (multiplicative; typically 1/sqrt(head_dim))
  * @param causal If true, apply causal mask via cuDNN's set_causal_mask_bottom_right(true)
+ * @param stream CUDA stream to bind to the cuDNN handle before graph execution.
+ *               If nullptr, the default stream is used. Must match the stream on
+ *               which the output is subsequently consumed to avoid a read-before-
+ *               write race on the returned tensor.
  * @return Output tensor with same shape as Q
  */
 auto cudnn_sdpa_forward(
@@ -188,7 +192,8 @@ auto cudnn_sdpa_forward(
     const Tensor& K,
     const Tensor& V,
     float scale,
-    bool causal = false
+    bool causal = false,
+    cudaStream_t stream = nullptr
 ) -> Tensor;
 
 /**

@@ -43,7 +43,8 @@ namespace {
 // constant and carries a zero tangent.
 auto try_traverse_jvp(const std::shared_ptr<Function>& out_grad_fn,
                       const void* user_input_ptr,
-                      const Tensor& seed_tangent) -> std::optional<Tensor> {
+                      const Tensor& seed_tangent,
+                      const void* output_data_ptr) -> std::optional<Tensor> {
     if (!out_grad_fn) return std::nullopt;
 
     // 1. Collect every Function reachable from the output in DFS post-order.
@@ -213,13 +214,36 @@ auto try_traverse_jvp(const std::shared_ptr<Function>& out_grad_fn,
     }
 
     // 4. The output tangent is the tangent computed for the root Function.
-    //    For multi-output roots, the root Variable is whichever output the
-    //    caller's `func` returned. If the caller returned the y-output of
-    //    LayerNorm/BN2d (the typical case), output-0 is correct. For Eigh
-    //    callers returning V, the root's grad_fn is shared between W and V;
-    //    the user's `func` doesn't tell us which one — defaulting to W
-    //    (output 0) here. Multi-output root with non-zero slot needs an
-    //    extension to `jvp()`'s API (e.g. caller passes output_idx).
+    //    For multi-output roots the root grad_fn is shared across all output
+    //    Variables (e.g. EighBackward is the grad_fn of both W and V), so we
+    //    must recover WHICH output slot `func` actually returned. We do this
+    //    exactly like consumer-input resolution: match the returned output's
+    //    data_ptr against the root Function's saved tensors and map the
+    //    matching saved-slot to its output index via
+    //    `jvp_saved_tensor_to_output_idx`. When the matched slot is non-zero
+    //    we return that slot's tangent from `node_tangents_multi`; otherwise
+    //    output-0 (the canonical single-output table) is correct.
+    if (output_data_ptr != nullptr) {
+        const auto& root_saved =
+            const_cast<Function*>(out_grad_fn.get())->saved_tensors();
+        for (size_t i = 0; i < root_saved.size(); ++i) {
+            if (root_saved[i].data_ptr() == output_data_ptr) {
+                size_t out_idx =
+                    out_grad_fn->jvp_saved_tensor_to_output_idx(i);
+                if (out_idx != 0) {
+                    auto it_m =
+                        node_tangents_multi.find({out_grad_fn.get(), out_idx});
+                    if (it_m != node_tangents_multi.end()) return it_m->second;
+                    // Root is a multi-output op and `func` returned a non-zero
+                    // slot, but that slot's tangent was not published. Returning
+                    // the output-0 tangent here would be a silent wrong-output
+                    // result, so bail to the finite-difference fallback instead.
+                    return std::nullopt;
+                }
+                break;  // matched output-0; canonical table below is correct.
+            }
+        }
+    }
     auto it = node_tangents.find(out_grad_fn.get());
     if (it == node_tangents.end()) return std::nullopt;
     return it->second;
@@ -270,7 +294,8 @@ auto jvp(std::function<Variable(const Variable&)> func,
     // ---- Fast path: walk the autograd graph -------------------------------
     if (auto grad_fn = output.grad_fn()) {
         const void* user_ptr = input.tensor().data_ptr();
-        if (auto tangent_opt = try_traverse_jvp(grad_fn, user_ptr, tangent)) {
+        const void* output_ptr = output.tensor().data_ptr();
+        if (auto tangent_opt = try_traverse_jvp(grad_fn, user_ptr, tangent, output_ptr)) {
             return {output, std::move(*tangent_opt)};
         }
     }

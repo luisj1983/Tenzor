@@ -132,6 +132,11 @@ auto ASGD::initialize_buffers() -> void {
             const auto& pt = param->tensor();
             const DType state_dt = optim_state_dtype(pt.dtype());
             ax_buffers_.push_back(state_dt == pt.dtype() ? pt.clone() : pt.to(state_dt));
+        } else {
+            // Keep ax_buffers_ index-aligned with parameters_ (matches
+            // on_parameters_appended_); a null param preceding a valid one
+            // must not shift later buffers.
+            ax_buffers_.push_back(Tensor{});
         }
     }
 }

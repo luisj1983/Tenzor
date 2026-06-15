@@ -187,9 +187,36 @@ auto recv_activation(int src_rank, ProcessGroup& pg, const Device& device,
             "pipeline_parallel: received activation metadata with invalid rank " +
             std::to_string(ndim));
     }
+    // Validate the peer-supplied dtype: dtype_size() returns 0 only for an
+    // out-of-range DType enum. Without this, a garbage h[1] reaches empty()/
+    // dtype_size() and yields a divide-by-zero (SIGFPE) or a Tensor with a
+    // bogus enum that later hits UB in dispatch. Mirror rpc_agent.cpp's check.
     auto dtype = static_cast<DType>(h[1]);
+    if (dtype_size(dtype) == 0) {
+        throw std::runtime_error(
+            "pipeline_parallel: received activation metadata with invalid dtype " +
+            std::to_string(h[1]));
+    }
+
+    // Copy dims with validation: reject negative dims and detect numel overflow
+    // via checked multiplication before allocating, so a crafted header can't
+    // produce a negative-extent or wrapped-size buffer.
     std::vector<int64_t> shape(static_cast<size_t>(ndim));
-    for (int64_t d = 0; d < ndim; ++d) shape[static_cast<size_t>(d)] = h[2 + d];
+    int64_t numel = 1;
+    for (int64_t d = 0; d < ndim; ++d) {
+        int64_t dim = h[2 + d];
+        if (dim < 0) {
+            throw std::runtime_error(
+                "pipeline_parallel: received activation metadata with negative "
+                "dim at index " + std::to_string(d));
+        }
+        if (__builtin_mul_overflow(numel, dim, &numel)) {
+            throw std::runtime_error(
+                "pipeline_parallel: received activation metadata with numel "
+                "overflow");
+        }
+        shape[static_cast<size_t>(d)] = dim;
+    }
 
     Tensor buf = empty(shape, dtype, device);
     pg.recv(buf, src_rank);

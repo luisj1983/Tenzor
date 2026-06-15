@@ -17,6 +17,7 @@
 #include <cublas_v2.h>
 #include <vector>
 #include <stdexcept>
+#include <algorithm>
 #include "../cuda_stream_pool.hpp"
 
 namespace tenzor {
@@ -71,9 +72,12 @@ __global__ void add_bias_kernel(
     int64_t batch_size,
     int64_t feature_size
 ) {
-    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
     int64_t total = batch_size * feature_size;
-    if (idx < total) {
+    // Grid-stride loop so a grid clamped to the device's maxGridSize still
+    // covers tensors whose element count exceeds grid_size * block_size.
+    int64_t stride = static_cast<int64_t>(gridDim.x) * blockDim.x;
+    for (int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+         idx < total; idx += stride) {
         int64_t col = idx % feature_size;
         output[idx] += bias[col];
     }
@@ -84,7 +88,17 @@ static void launch_add_bias(T* output, const T* bias,
                             int64_t batch, int64_t features, cudaStream_t stream) {
     int64_t total = batch * features;
     int block = 256;
-    int grid = (total + block - 1) / block;
+    // Compute the grid in 64-bit then clamp to the device's maxGridSize so the
+    // launch dimension never overflows the int grid argument for very large
+    // total = (seq_len*batch) * gate_size. The kernel uses a grid-stride loop,
+    // so a clamped grid still covers all elements.
+    int64_t grid64 = (total + block - 1) / block;
+    int device_id = 0;
+    cudaGetDevice(&device_id);
+    int max_grid_x = 65535;
+    cudaDeviceGetAttribute(&max_grid_x, cudaDevAttrMaxGridDimX, device_id);
+    int grid = static_cast<int>(std::min<int64_t>(grid64, static_cast<int64_t>(max_grid_x)));
+    if (grid < 1) grid = 1;
     add_bias_kernel<<<grid, block, 0, stream>>>(output, bias, batch, features);
     TENZOR_CUDA_POST_LAUNCH_CHECK();
 }
@@ -264,6 +278,12 @@ auto lstm_forward_cuda(
         c_prev = c_out;
     }
 
+    // All per-timestep work (cuBLAS, cell kernels, async D2D copies into
+    // `output`) was queued on the acquired pool stream. The StreamGuard only
+    // releases the stream back to the pool on destruction — it does NOT
+    // synchronize. Sync here so the returned tensors are safe for a consumer
+    // running on a different (default/dispatch) stream, matching GRU's contract.
+    TENZOR_CUDA_CHECK(cudaStreamSynchronize(stream));
     return {output, h_prev, c_prev};
 }
 

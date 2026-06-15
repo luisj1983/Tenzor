@@ -699,18 +699,26 @@ inline void lstm_forward_bidirectional(
         // (batch >= 2). For batch == 1 the sections run serially, so pinning MKL
         // to 1 thread would needlessly single-thread the dominant GEMMs — leave
         // MKL at its default thread count in that case.
-        std::optional<MklLocalThreads> _mkl_guard;
-        if (batch >= 2) _mkl_guard.emplace(1);
+        //
+        // mkl_set_num_threads_local affects ONLY the calling thread, so the guard
+        // must be constructed inside each omp section (i.e. on the worker thread
+        // that actually issues the GEMMs); a guard built on the master thread
+        // before the parallel region has no effect on the section workers.
+        const bool throttle = (batch >= 2);
     #pragma omp parallel sections if(batch >= 2)
     {
         #pragma omp section
         {
+            std::optional<MklLocalThreads> _mkl_guard;
+            if (throttle) _mkl_guard.emplace(1);
             lstm_forward(input, W_ih_fwd, W_hh_fwd, bias_fwd,
                         h0_fwd, c0_fwd, fwd_output, h_n_fwd, c_n_fwd,
                         seq_len, batch, input_size, hidden);
         }
         #pragma omp section
         {
+            std::optional<MklLocalThreads> _mkl_guard;
+            if (throttle) _mkl_guard.emplace(1);
             // Backward: reverse input order
             auto input_rev_buf = acquire_buffer<float>(seq_len * batch * input_size);
             float* input_rev = input_rev_buf.data();
@@ -727,7 +735,7 @@ inline void lstm_forward_bidirectional(
                         seq_len, batch, input_size, hidden);
         }
     }
-    } // end MklLocalThreads scope — restores MKL thread count
+    } // end throttle scope
 
     // Concatenate forward and backward outputs
     #pragma omp parallel for if(seq_len * batch > 16)

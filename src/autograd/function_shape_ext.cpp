@@ -377,15 +377,16 @@ auto IndexSelectBackward::backward(std::vector<Tensor> grad_outputs) -> std::vec
 auto IndexSelectBackward::backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> {
     // Mirror SliceBackward: the scatter_add kernels read `src` with raw pointer
     // arithmetic and ignore strides, so a non-contiguous grad would scatter
-    // wrong values. Materialise contiguous; only re-wrap (losing the grad_fn,
-    // which is acceptable since the non-contiguous path is the buggy one) when
-    // the contiguity copy actually changed the buffer.
+    // wrong values. Materialise contiguous via the Variable-level identity op
+    // `clone` (implemented as input * 1.0 → fresh contiguous storage from
+    // MulBackward) so the grad_fn chain is PRESERVED. The previous code
+    // re-wrapped grad_raw.contiguous() as a fresh Variable, severing grad_fn
+    // and silently dropping the second-order contribution from grad_output's
+    // producers under create_graph=true.
     const Variable& grad_out_var = grad_outputs[0];
     const Tensor& grad_raw = grad_out_var.tensor();
-    Tensor grad_t = grad_raw.is_contiguous() ? grad_raw : grad_raw.contiguous();
-    Variable grad_var = grad_t.data_ptr() == grad_raw.data_ptr()
-                            ? grad_out_var
-                            : Variable(grad_t, grad_out_var.requires_grad());
+    Variable grad_var = grad_raw.is_contiguous() ? grad_out_var
+                                                 : clone(grad_out_var);
 
     int64_t dim = saved_tensors_[0].data<int64_t>()[0];
     const auto& index = saved_tensors_[1];
@@ -535,15 +536,16 @@ auto NarrowBackward::backward_with_variables(std::vector<Variable> grad_outputs)
     // Narrow is a zero-padded slice; backward is scatter into a zero tensor of
     // the original shape. Use Variable-level scatter so grad threads through.
     // Mirror SliceBackward: the scatter kernels read `src` with raw pointer
-    // arithmetic and ignore strides, so materialise a contiguous grad first;
-    // only re-wrap (losing grad_fn, acceptable for the buggy non-contiguous
-    // path) when the contiguity copy actually changed the buffer.
+    // arithmetic and ignore strides, so materialise a contiguous grad first via
+    // the Variable-level identity op `clone` (input * 1.0 → fresh contiguous
+    // storage from MulBackward), PRESERVING grad_fn. The previous code
+    // re-wrapped grad_raw.contiguous() as a fresh Variable, severing grad_fn
+    // and silently dropping higher-order contributions from grad_output's
+    // producers under create_graph=true.
     const Variable& grad_out_var = grad_outputs[0];
     const Tensor& grad_raw = grad_out_var.tensor();
-    Tensor grad_t = grad_raw.is_contiguous() ? grad_raw : grad_raw.contiguous();
-    Variable grad_var = grad_t.data_ptr() == grad_raw.data_ptr()
-                            ? grad_out_var
-                            : Variable(grad_t, grad_out_var.requires_grad());
+    Variable grad_var = grad_raw.is_contiguous() ? grad_out_var
+                                                 : clone(grad_out_var);
 
     int64_t dim = saved_tensors_[0].data<int64_t>()[0];
     int64_t start = saved_tensors_[1].data<int64_t>()[0];

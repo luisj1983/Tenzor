@@ -3079,8 +3079,11 @@ auto VulkanBackend::dispatchSparseTrsm(const Tensor& crow_indices, const Tensor&
                            pipeline->layout(), 0, 1, &ds, 0, nullptr);
     vkCmdPushConstants(cmd, pipeline->layout(), VK_SHADER_STAGE_COMPUTE_BIT,
                       0, sizeof(pc), &pc);
-    // One workgroup per row
-    vkCmdDispatch(cmd, static_cast<uint32_t>(N), 1, 1);
+    // Single-workgroup sequential solve (matches sparse_trsv): the shader
+    // processes rows in strict dependency order within one workgroup, so we
+    // must dispatch exactly one workgroup. Dispatching N workgroups would
+    // reintroduce the cross-workgroup spin-wait deadlock.
+    vkCmdDispatch(cmd, 1, 1, 1);
     insertComputeOnlyBarrier(cmd);
     endSingleTimeCommands(cmd, device_id);
 

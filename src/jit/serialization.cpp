@@ -399,7 +399,16 @@ auto GraphReader::read_tensors(Graph& graph) -> void {
 // set_outputs — otherwise Graph::forward() has no idea which Values
 // are inputs vs. intermediates.
 auto GraphReader::read_io_lists(Graph& graph) -> void {
+    // Each list entry is at least an 8-byte string-length header (read_string
+    // reads a uint64 first). Bound the declared count against the remaining
+    // file length before reserving, mirroring read_string / read_int64_vector.
+    // Without this a crafted count (e.g. 2^63) drives an ~exabyte reserve
+    // (bad_alloc / OOM DoS) before the per-element read loop can fail.
     uint64_t num_inputs = read_uint64();
+    if (num_inputs > remaining_bytes() / sizeof(uint64_t)) {
+        throw std::runtime_error(
+            "GraphReader::read_io_lists: num_inputs exceeds remaining file");
+    }
     std::vector<std::shared_ptr<Value>> ins;
     ins.reserve(num_inputs);
     for (uint64_t i = 0; i < num_inputs; ++i) {
@@ -410,6 +419,10 @@ auto GraphReader::read_io_lists(Graph& graph) -> void {
     graph.set_inputs(std::move(ins));
 
     uint64_t num_outputs = read_uint64();
+    if (num_outputs > remaining_bytes() / sizeof(uint64_t)) {
+        throw std::runtime_error(
+            "GraphReader::read_io_lists: num_outputs exceeds remaining file");
+    }
     std::vector<std::shared_ptr<Value>> outs;
     outs.reserve(num_outputs);
     for (uint64_t i = 0; i < num_outputs; ++i) {
@@ -422,12 +435,33 @@ auto GraphReader::read_io_lists(Graph& graph) -> void {
 
 // v2: read the captured-parameter constants map.
 auto GraphReader::read_constants(Graph& graph) -> void {
+    // Each constant is at least a string header (8 bytes); the loop body does
+    // real reads, but bound the count anyway so a crafted huge count can't be
+    // used to spin or pre-size internal structures past the file's reach.
     uint64_t num_constants = read_uint64();
+    if (num_constants > remaining_bytes() / sizeof(uint64_t)) {
+        throw std::runtime_error(
+            "GraphReader::read_constants: num_constants exceeds remaining file");
+    }
     for (uint64_t i = 0; i < num_constants; ++i) {
         std::string id = read_string();
         Tensor tensor = read_tensor();
         graph.set_constant(id, tensor);
     }
+}
+
+// Remaining unread bytes in the file from the current get position. Used to
+// bound untrusted declared counts before allocation. Returns 0 if the stream
+// position is unavailable (treated as "no budget", which forces a throw).
+auto GraphReader::remaining_bytes() -> uint64_t {
+    std::streampos cur = file_.tellg();
+    file_.seekg(0, std::ios::end);
+    std::streampos end = file_.tellg();
+    file_.seekg(cur);
+    if (cur < 0 || end < 0 || end < cur) {
+        return 0;
+    }
+    return static_cast<uint64_t>(end - cur);
 }
 
 auto GraphReader::read_uint32() -> uint32_t {

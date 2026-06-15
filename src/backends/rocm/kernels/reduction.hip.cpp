@@ -4181,8 +4181,60 @@ __global__ void nanmean_div_f32(const float* __restrict__ sum,
     }
 }
 
+// Float64 counterparts: keep full double precision (no Float32 round-trip).
+__global__ void count_non_nan_all_f64(const double* __restrict__ input,
+                                      int64_t* __restrict__ output, int64_t n) {
+    __shared__ int64_t scount;
+    if (threadIdx.x == 0) scount = 0;
+    __syncthreads();
+
+    int64_t local_count = 0;
+    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int64_t grid_size = blockDim.x * gridDim.x;
+    for (int64_t i = idx; i < n; i += grid_size) {
+        if (!tenzor::rocm::is_nan_bits(input[i])) local_count++;
+    }
+    atomicAdd(reinterpret_cast<unsigned long long*>(&scount),
+              static_cast<unsigned long long>(local_count));
+    __syncthreads();
+    if (threadIdx.x == 0) output[0] = scount;
+}
+
+__global__ void nanmean_div_f64(const double* __restrict__ sum,
+                                const int64_t* __restrict__ count,
+                                double* __restrict__ output) {
+    if (threadIdx.x == 0) {
+        int64_t c = count[0];
+        output[0] = (c > 0) ? sum[0] / static_cast<double>(c) : 0.0;
+    }
+}
+
 auto nanmean_kernel(const Tensor& input, hipStream_t stream) -> Tensor {
     DType orig_dtype = input.dtype();
+
+    if (orig_dtype == DType::Float64) {
+        // Full Float64 precision path (mirrors nansum_kernel's f64 path).
+        int64_t n = input.numel();
+        Tensor sum_result({1}, DType::Float64, input.device());
+        hipLaunchKernelGGL(nansum_all_f64,
+                           dim3(1), dim3(REDUCTION_BLOCK_SIZE), 0, stream,
+                           input.data<double>(), sum_result.data<double>(), n);
+
+        Tensor count_result({1}, DType::Int64, input.device());
+        hipLaunchKernelGGL(count_non_nan_all_f64,
+                           dim3(1), dim3(REDUCTION_BLOCK_SIZE), 0, stream,
+                           input.data<double>(), count_result.data<int64_t>(), n);
+
+        Tensor result({1}, DType::Float64, input.device());
+        hipLaunchKernelGGL(nanmean_div_f64,
+                           dim3(1), dim3(1), 0, stream,
+                           sum_result.data<double>(), count_result.data<int64_t>(),
+                           result.data<double>());
+        HIP_CHECK(hipGetLastError());
+        HIP_CHECK(hipStreamSynchronize(stream));
+        return result;
+    }
+
     Tensor in = input;
     if (in.dtype() != DType::Float32) {
         in = in.to(DType::Float32);
@@ -4381,8 +4433,93 @@ __global__ void nanvar_finalize_f32(const float* __restrict__ sum_sq,
     }
 }
 
+// Float64 counterparts: accumulate squared deviations in double.
+__global__ void nanvar_all_f64(const double* __restrict__ input,
+                               const double* __restrict__ mean,
+                               double* __restrict__ output,
+                               int64_t* __restrict__ count_out,
+                               int64_t n) {
+    __shared__ double ssum;
+    __shared__ int64_t scount;
+    if (threadIdx.x == 0) { ssum = 0.0; scount = 0; }
+    __syncthreads();
+
+    double local_sum = 0.0;
+    int64_t local_count = 0;
+    double m = mean[0];
+    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int64_t grid_size = blockDim.x * gridDim.x;
+    for (int64_t i = idx; i < n; i += grid_size) {
+        double v = input[i];
+        if (!tenzor::rocm::is_nan_bits(v)) {
+            double diff = v - m;
+            local_sum += diff * diff;
+            local_count++;
+        }
+    }
+    atomicAdd(&ssum, local_sum);
+    atomicAdd(reinterpret_cast<unsigned long long*>(&scount),
+              static_cast<unsigned long long>(local_count));
+    __syncthreads();
+    if (threadIdx.x == 0) {
+        output[0] = ssum;
+        count_out[0] = scount;
+    }
+}
+
+__global__ void nanvar_finalize_f64(const double* __restrict__ sum_sq,
+                                    const int64_t* __restrict__ count,
+                                    double* __restrict__ output,
+                                    int64_t correction) {
+    if (threadIdx.x == 0) {
+        int64_t c = count[0];
+        int64_t denom = c - correction;
+        output[0] = (denom > 0) ? sum_sq[0] / static_cast<double>(denom) : 0.0;
+    }
+}
+
 auto nanvar_kernel(const Tensor& input, bool unbiased, hipStream_t stream) -> Tensor {
     DType orig_dtype = input.dtype();
+
+    if (orig_dtype == DType::Float64) {
+        // Full Float64 precision path: mean and squared-deviation sum in double.
+        int64_t n = input.numel();
+
+        Tensor sum_result({1}, DType::Float64, input.device());
+        hipLaunchKernelGGL(nansum_all_f64,
+                           dim3(1), dim3(REDUCTION_BLOCK_SIZE), 0, stream,
+                           input.data<double>(), sum_result.data<double>(), n);
+
+        Tensor count_result({1}, DType::Int64, input.device());
+        hipLaunchKernelGGL(count_non_nan_all_f64,
+                           dim3(1), dim3(REDUCTION_BLOCK_SIZE), 0, stream,
+                           input.data<double>(), count_result.data<int64_t>(), n);
+
+        Tensor mean_result({1}, DType::Float64, input.device());
+        hipLaunchKernelGGL(nanmean_div_f64,
+                           dim3(1), dim3(1), 0, stream,
+                           sum_result.data<double>(), count_result.data<int64_t>(),
+                           mean_result.data<double>());
+
+        Tensor sum_sq({1}, DType::Float64, input.device());
+        Tensor count2({1}, DType::Int64, input.device());
+        hipLaunchKernelGGL(nanvar_all_f64,
+                           dim3(1), dim3(REDUCTION_BLOCK_SIZE), 0, stream,
+                           input.data<double>(), mean_result.data<double>(),
+                           sum_sq.data<double>(), count2.data<int64_t>(), n);
+
+        int64_t correction = unbiased ? 1 : 0;
+        Tensor result({1}, DType::Float64, input.device());
+        hipLaunchKernelGGL(nanvar_finalize_f64,
+                           dim3(1), dim3(1), 0, stream,
+                           sum_sq.data<double>(), count2.data<int64_t>(),
+                           result.data<double>(), correction);
+
+        HIP_CHECK(hipGetLastError());
+        HIP_CHECK(hipStreamSynchronize(stream));
+        return result;
+    }
+
     Tensor in = input;
     if (in.dtype() != DType::Float32) {
         in = in.to(DType::Float32);
@@ -4437,11 +4574,28 @@ __global__ void sqrt_scalar_f32(const float* input, float* output) {
     }
 }
 
+__global__ void sqrt_scalar_f64(const double* input, double* output) {
+    if (threadIdx.x == 0) {
+        output[0] = sqrt(input[0]);
+    }
+}
+
 auto nanstd_kernel(const Tensor& input, bool unbiased, hipStream_t stream) -> Tensor {
     DType orig_dtype = input.dtype();
     Tensor var_result = nanvar_kernel(input, unbiased, stream);
-    // var_result is Float32
 
+    if (orig_dtype == DType::Float64) {
+        // var_result is Float64; sqrt in double to preserve precision.
+        Tensor result({1}, DType::Float64, var_result.device());
+        hipLaunchKernelGGL(sqrt_scalar_f64,
+                           dim3(1), dim3(1), 0, stream,
+                           var_result.data<double>(), result.data<double>());
+        HIP_CHECK(hipGetLastError());
+        HIP_CHECK(hipStreamSynchronize(stream));
+        return result;
+    }
+
+    // var_result is Float32
     Tensor result({1}, DType::Float32, var_result.device());
     hipLaunchKernelGGL(sqrt_scalar_f32,
                        dim3(1), dim3(1), 0, stream,

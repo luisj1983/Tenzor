@@ -3,8 +3,22 @@
 // Sparse triangular solve: L*X = B (lower) or U*X = B (upper)
 // L/U is a CSR sparse matrix (N x N), B and X are dense matrices (N x K_rhs).
 //
-// Same level-set approach as sparse_trsv but solves for multiple RHS columns.
-// Each workgroup handles one row, with threads cooperating across RHS columns.
+// Strategy: single-workgroup SEQUENTIAL row substitution, threads parallel
+// across the RHS columns.
+//
+// The previous implementation dispatched N workgroups (one row each) and had
+// each consumer spin-wait (while atomicOr(solved[col],0)==0) on its producer
+// rows. Vulkan provides NO cross-workgroup forward-progress guarantee, so when
+// N exceeds the device's co-resident workgroup capacity a waiting consumer can
+// occupy a slot while its producer is never scheduled -> hard deadlock. This is
+// exactly the hazard sparse_trsv was rewritten to remove. We now process rows
+// in strict dependency order from a single workgroup; an in-workgroup barrier()
+// between rows guarantees every dependency x[j] is visible before the next row
+// reads it, so the solved[] spin-wait is gone entirely. The host dispatches a
+// single (1,1,1) workgroup.
+//
+// For lower triangular: process rows 0..N-1 (row i depends on j < i).
+// For upper triangular: process rows N-1..0 (row i depends on j > i).
 
 layout(local_size_x_id = 0) in;
 
@@ -13,6 +27,7 @@ layout(set = 0, binding = 1) readonly buffer ColIndices { int col_indices[]; };
 layout(set = 0, binding = 2) readonly buffer Values     { float values[];     };
 layout(set = 0, binding = 3) readonly buffer RHS        { float B[];          };
 layout(set = 0, binding = 4) buffer Output              { float X[];          };
+// Retained for descriptor-set compatibility with the host (now unused).
 layout(set = 0, binding = 5) buffer SolvedCounter        { int solved[];       };
 
 layout(push_constant) uniform PushConstants {
@@ -21,34 +36,16 @@ layout(push_constant) uniform PushConstants {
     uint upper;   // 0 = lower triangular, 1 = upper triangular
 };
 
-void main() {
-    uint wg = gl_WorkGroupID.x;    // maps to processing order index
-    uint tid = gl_LocalInvocationID.x;
-    if (wg >= n) return;
-
-    uint row = (upper != 0u) ? (n - 1u - wg) : wg;
-
-    // Wait for dependency rows
-    if (wg > 0u) {
-        uint rs = uint(row_offsets[row]);
-        uint re = uint(row_offsets[row + 1]);
-        for (uint i = rs; i < re; i++) {
-            uint col = uint(col_indices[i]);
-            bool is_dep = (upper == 0u) ? (col < row) : (col > row);
-            if (is_dep) {
-                while (atomicOr(solved[col], 0) == 0) { }
-            }
-        }
-    }
-
-    // Solve row for each RHS column this thread handles
+void solve_row(uint row, uint tid) {
     uint rs = uint(row_offsets[row]);
-    uint re = uint(row_offsets[row + 1]);
+    uint re = uint(row_offsets[row + 1u]);
 
+    // Threads partition the RHS columns. Every dependency x[col] was written
+    // by a previous solve_row() call and made visible by the barrier() between
+    // rows in main(), so no inter-row synchronization is needed here.
     for (uint c = tid; c < k_rhs; c += gl_WorkGroupSize.x) {
         float rhs = B[row * k_rhs + c];
         float diag = 1.0;
-
         for (uint i = rs; i < re; i++) {
             uint col = uint(col_indices[i]);
             if (col == row) {
@@ -57,15 +54,22 @@ void main() {
                 rhs -= values[i] * X[col * k_rhs + c];
             }
         }
-
         X[row * k_rhs + c] = rhs / diag;
     }
+}
 
-    // Ensure all threads in this workgroup have written before signaling
-    barrier();
+void main() {
+    uint tid = gl_LocalInvocationID.x;
 
-    // Signal row completion (only one thread per workgroup)
-    if (tid == 0u) {
-        atomicExchange(solved[row], 1);
+    if (upper == 0u) {
+        for (uint row = 0u; row < n; row++) {
+            solve_row(row, tid);
+            barrier();  // publish X[row,*] before any later row consumes it
+        }
+    } else {
+        for (uint t = 0u; t < n; t++) {
+            solve_row(n - 1u - t, tid);
+            barrier();
+        }
     }
 }

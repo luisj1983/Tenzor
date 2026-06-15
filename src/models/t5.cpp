@@ -21,8 +21,10 @@ namespace models {
 // T5Attention Implementation
 // ============================================================================
 
-T5Attention::T5Attention(const T5Config& config, bool has_relative_attention_bias)
-    : config_(config), has_relative_attention_bias_(has_relative_attention_bias) {
+T5Attention::T5Attention(const T5Config& config, bool has_relative_attention_bias,
+                          bool is_decoder)
+    : config_(config), has_relative_attention_bias_(has_relative_attention_bias),
+      is_decoder_(is_decoder) {
 
     int64_t inner_dim = config.num_heads * config.d_kv;
 
@@ -49,36 +51,45 @@ T5Attention::T5Attention(const T5Config& config, bool has_relative_attention_bia
 
 auto T5Attention::relative_position_bucket(int64_t relative_position,
                                             int64_t num_buckets,
-                                            int64_t max_distance) -> int64_t {
-    // T5 uses bidirectional relative attention buckets
-    // Half the buckets are for negative positions, half for positive
-    int64_t num_buckets_per_direction = num_buckets / 2;
+                                            int64_t max_distance,
+                                            bool bidirectional) -> int64_t {
+    // Mirrors HuggingFace T5Attention._relative_position_bucket.
+    // `relative_position` here is (query_index - key_index), i.e. the negation
+    // of HF's (key - query) convention; the past direction is therefore
+    // relative_position > 0 and the future direction is relative_position < 0.
     int64_t bucket = 0;
+    int64_t num_buckets_per_direction = num_buckets;
 
-    // Determine if position is negative and get absolute value
-    int64_t n = std::abs(relative_position);
+    if (bidirectional) {
+        // Encoder self-attention: split buckets into a past half and a future
+        // half, offsetting the future direction into the second half.
+        num_buckets_per_direction = num_buckets / 2;
+        if (relative_position < 0) {
+            bucket += num_buckets_per_direction;
+        }
+    }
 
-    // Half buckets for exact positions (small distances)
-    // Half for logarithmic buckets (large distances)
+    // Distance magnitude. For the unidirectional (decoder) case future
+    // positions (relative_position < 0) are clamped to 0 so they all map to
+    // bucket 0; the causal mask hides them anyway.
+    int64_t n = bidirectional ? std::abs(relative_position)
+                              : std::max<int64_t>(relative_position, 0);
+
+    // Half of a direction's buckets cover exact (small) distances, the other
+    // half cover logarithmically-spaced larger distances.
     int64_t max_exact = num_buckets_per_direction / 2;
     bool is_small = n < max_exact;
 
     if (is_small) {
-        bucket = n;
+        bucket += n;
     } else {
-        // Logarithmic bucketing for larger distances
-        int64_t num_exact_buckets = num_buckets_per_direction / 2;
-        int64_t scale = (num_buckets_per_direction - num_exact_buckets);
-        bucket = num_exact_buckets + static_cast<int64_t>(
+        int64_t scale = num_buckets_per_direction - max_exact;
+        int64_t large_bucket = max_exact + static_cast<int64_t>(
             std::log(static_cast<double>(n) / max_exact) /
             std::log(static_cast<double>(max_distance) / max_exact) * scale
         );
-        bucket = std::min(bucket, num_buckets_per_direction - 1);
-    }
-
-    // Add offset for negative positions (use second half of buckets)
-    if (relative_position < 0) {
-        bucket = num_buckets_per_direction + bucket;
+        large_bucket = std::min(large_bucket, num_buckets_per_direction - 1);
+        bucket += large_bucket;
     }
 
     return bucket;
@@ -102,7 +113,8 @@ auto T5Attention::compute_bias(int64_t query_length, int64_t key_length) -> Vari
                 buckets[i * key_length + j] = relative_position_bucket(
                     relative_position,
                     config_.relative_attention_num_buckets,
-                    config_.relative_attention_max_distance
+                    config_.relative_attention_max_distance,
+                    /*bidirectional=*/!is_decoder_
                 );
             }
         }
@@ -292,12 +304,12 @@ T5Block::T5Block(const T5Config& config, bool has_relative_attention_bias, bool 
 
     // Self-attention
     layer_norm_1_ = std::make_shared<T5LayerNorm>(config.d_model, config.layer_norm_epsilon);
-    self_attention_ = std::make_shared<T5Attention>(config, has_relative_attention_bias);
+    self_attention_ = std::make_shared<T5Attention>(config, has_relative_attention_bias, is_decoder);
 
     // Cross-attention (decoder only)
     if (is_decoder_) {
         layer_norm_2_ = std::make_shared<T5LayerNorm>(config.d_model, config.layer_norm_epsilon);
-        cross_attention_ = std::make_shared<T5Attention>(config, false);
+        cross_attention_ = std::make_shared<T5Attention>(config, false, /*is_decoder=*/false);
         register_module("layer_norm_2", layer_norm_2_);
         register_module("cross_attention", cross_attention_);
     }

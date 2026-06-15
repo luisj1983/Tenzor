@@ -267,6 +267,18 @@ auto QuantizedLinear::set_bias(const Tensor& bias) -> void {
 
 auto QuantizedLinear::from_float(const Linear& fp_linear, const QConfig& qconfig)
     -> std::shared_ptr<QuantizedLinear> {
+    // forward_quantized reads the weight buffer as contiguous int8. INT4/UINT4
+    // pack two values per byte (ceil(numel/2) bytes) stored as Int8/UInt8, so an
+    // INT4 weight qconfig would cause out-of-bounds reads at inference (the
+    // QInt4x2 dequant path never triggers because quantize_tensor emits packed
+    // Int8/UInt8, not QInt4x2). Reject it here, matching Conv1d/ConvTranspose2d.
+    if (qconfig.weight_dtype() != QuantDType::INT8 &&
+        qconfig.weight_dtype() != QuantDType::UINT8) {
+        throw std::invalid_argument(
+            "QuantizedLinear::from_float: only INT8/UINT8 weight quantization is "
+            "supported; INT4/UINT4 packing is incompatible with the int8 weight reader");
+    }
+
     // Quantize weights
     auto weight_tensor = fp_linear.weight()->tensor();
     auto weight_observer = qconfig.create_weight_observer();
@@ -465,6 +477,17 @@ auto QuantizedConv2d::set_bias(const Tensor& bias) -> void {
 
 auto QuantizedConv2d::from_float(const Conv2d& fp_conv, const QConfig& qconfig)
     -> std::shared_ptr<QuantizedConv2d> {
+    // forward_quantized reads the weight buffer as contiguous int8. INT4/UINT4
+    // pack two values per byte (ceil(numel/2) bytes) stored as Int8/UInt8, so an
+    // INT4 weight qconfig would cause out-of-bounds reads at inference. Reject
+    // it here, matching Conv1d/ConvTranspose2d.
+    if (qconfig.weight_dtype() != QuantDType::INT8 &&
+        qconfig.weight_dtype() != QuantDType::UINT8) {
+        throw std::invalid_argument(
+            "QuantizedConv2d::from_float: only INT8/UINT8 weight quantization is "
+            "supported; INT4/UINT4 packing is incompatible with the int8 weight reader");
+    }
+
     // Extract weight and bias from float Conv2d
     auto state_dict = fp_conv.state_dict();
 
@@ -789,6 +812,16 @@ auto QuantStub::forward_impl(const Variable& input) -> Variable {
         case QuantDType::UINT8:  qmin =    0.0f; qmax = 255.0f;  break;
         case QuantDType::INT4:   qmin =   -8.0f; qmax =   7.0f;  break;
         case QuantDType::UINT4:  qmin =    0.0f; qmax =  15.0f;  break;
+    }
+    // Match quantize_tensor's symmetric range: INT8 symmetric uses [-127,127]
+    // and INT4 symmetric uses [-7,7], so the QAT STE never simulates the -128/-8
+    // level that real quantized inference clamps away.
+    const bool symmetric = (qparams_.scheme == QuantizationScheme::PerTensorSymmetric ||
+                            qparams_.scheme == QuantizationScheme::PerChannelSymmetric);
+    if (symmetric && qparams_.dtype == QuantDType::INT8) {
+        qmin = -127.0f;
+    } else if (symmetric && qparams_.dtype == QuantDType::INT4) {
+        qmin = -7.0f;
     }
     return ::tenzor::nn::quantization::fake_quantize_with_grad(
         input, scale, zero_point, qmin, qmax);

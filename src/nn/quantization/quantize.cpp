@@ -248,19 +248,32 @@ auto quantize_tensor(const Tensor& input, const QuantizationParams& params)
 
     if (is_int4) {
         // INT4/UINT4 flat packing: low nibble = even flat index, high = odd.
-        // Each element uses its own channel's scale (channel_of(idx)).
-        int8_t* out_data = quantized_cpu.data<int8_t>();
-        for (int64_t i = 0; i < n; i += 2) {
+        // Each element uses its own channel's scale (channel_of(idx)). The
+        // packed-byte arithmetic is identical for both, but the typed accessor
+        // must match the storage dtype: UINT4 storage is UInt8 (data<uint8_t>),
+        // INT4 storage is Int8 (data<int8_t>). Reading UInt8 storage via
+        // data<int8_t>() throws, which previously made UINT4 unusable.
+        auto pack = [&](int64_t i) -> uint8_t {
             int64_t c0 = channel_of(i);
-            int8_t lo = static_cast<int8_t>(
-                quantize_val(input_data[i], 1.0f / scale_data[c0], zp_data[c0]));
-            int8_t hi = 0;
+            int32_t lo =
+                quantize_val(input_data[i], 1.0f / scale_data[c0], zp_data[c0]);
+            int32_t hi = 0;
             if (i + 1 < n) {
                 int64_t c1 = channel_of(i + 1);
-                hi = static_cast<int8_t>(
-                    quantize_val(input_data[i + 1], 1.0f / scale_data[c1], zp_data[c1]));
+                hi = quantize_val(input_data[i + 1], 1.0f / scale_data[c1], zp_data[c1]);
             }
-            out_data[i / 2] = static_cast<int8_t>((lo & 0x0F) | ((hi & 0x0F) << 4));
+            return static_cast<uint8_t>((lo & 0x0F) | ((hi & 0x0F) << 4));
+        };
+        if (params.dtype == QuantDType::UINT4) {
+            uint8_t* out_data = quantized_cpu.data<uint8_t>();
+            for (int64_t i = 0; i < n; i += 2) {
+                out_data[i / 2] = pack(i);
+            }
+        } else {  // INT4 — storage is Int8
+            int8_t* out_data = quantized_cpu.data<int8_t>();
+            for (int64_t i = 0; i < n; i += 2) {
+                out_data[i / 2] = static_cast<int8_t>(pack(i));
+            }
         }
     } else if (params.dtype == QuantDType::INT8) {
         int8_t* out_data = quantized_cpu.data<int8_t>();
@@ -443,13 +456,28 @@ auto dequantize_tensor(const QuantizedTensor& quantized) -> Tensor {
 
     if (is_int4) {
         // INT4/UINT4 flat unpacking: low nibble = even flat index, high = odd.
-        // Each element is dequantized with ITS OWN channel scale.
-        const int8_t* q_ptr = q_data_cpu.data<int8_t>();
-        bool is_signed = (params.dtype == QuantDType::INT4);
+        // Each element is dequantized with ITS OWN channel scale. The typed
+        // accessor must match the storage dtype: UINT4 storage is UInt8, INT4
+        // storage is Int8. Reading UInt8 storage via data<int8_t>() throws,
+        // which previously made UINT4 dequantize unusable. Copy the packed
+        // bytes to a uint8 view so the nibble math (on raw bits) is uniform.
+        const bool is_signed = (params.dtype == QuantDType::INT4);
+        const int64_t num_bytes = (n + 1) / 2;
+        std::vector<uint8_t> packed_bytes(static_cast<size_t>(num_bytes));
+        if (params.dtype == QuantDType::UINT4) {
+            const uint8_t* q_ptr = q_data_cpu.data<uint8_t>();
+            for (int64_t b = 0; b < num_bytes; ++b) packed_bytes[b] = q_ptr[b];
+        } else {  // INT4 — storage is Int8
+            const int8_t* q_ptr = q_data_cpu.data<int8_t>();
+            for (int64_t b = 0; b < num_bytes; ++b) {
+                packed_bytes[b] = static_cast<uint8_t>(q_ptr[b]);
+            }
+        }
 
         for (int64_t i = 0; i < n; ++i) {
-            int8_t packed = q_ptr[i / 2];
-            int8_t nib = (i % 2 == 0) ? (packed & 0x0F) : ((packed >> 4) & 0x0F);
+            uint8_t packed = packed_bytes[static_cast<size_t>(i / 2)];
+            int8_t nib = static_cast<int8_t>((i % 2 == 0) ? (packed & 0x0F)
+                                                          : ((packed >> 4) & 0x0F));
             if (is_signed && (nib & 0x08)) nib |= static_cast<int8_t>(0xF0);
             int64_t c = deq_channel_of(i);
             out_data[i] = (static_cast<float>(nib) - zp_data[c]) * scale_data[c];

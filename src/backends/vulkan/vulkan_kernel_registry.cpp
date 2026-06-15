@@ -314,14 +314,26 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
             attrs.get_int(AttrKey::Dim, LLONG_MIN), attrs.get_bool(AttrKey::Keepdim, false))};
     });
 
+    // ArgMax/ArgMin: dispatchArgmax/dispatchArgmin treat `dim < 0` as the
+    // "full reduction" sentinel, which collides with valid negative dims
+    // (-1, -2…) that refer to axes from the back. The op layer passes the raw
+    // user dim without normalizing negatives, so mirror the Prod/Var/Std
+    // pattern: default to INT64_MIN, normalize user-specified negative dims to
+    // positive, and only pass -1 (full reduction) when no dim was specified.
     table.register_kernel(OpId::ArgMax, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        int64_t dim = attrs.get_int(AttrKey::Dim, INT64_MIN);
+        if (dim != INT64_MIN && dim < 0) dim += static_cast<int64_t>(inputs[0].ndim());
+        if (dim == INT64_MIN) dim = -1;
         return std::vector<Tensor>{get_vulkan_backend()->dispatchArgmax(inputs[0],
-            attrs.get_int(AttrKey::Dim, -1), attrs.get_bool(AttrKey::Keepdim, false))};
+            dim, attrs.get_bool(AttrKey::Keepdim, false))};
     });
 
     table.register_kernel(OpId::ArgMin, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        int64_t dim = attrs.get_int(AttrKey::Dim, INT64_MIN);
+        if (dim != INT64_MIN && dim < 0) dim += static_cast<int64_t>(inputs[0].ndim());
+        if (dim == INT64_MIN) dim = -1;
         return std::vector<Tensor>{get_vulkan_backend()->dispatchArgmin(inputs[0],
-            attrs.get_int(AttrKey::Dim, -1), attrs.get_bool(AttrKey::Keepdim, false))};
+            dim, attrs.get_bool(AttrKey::Keepdim, false))};
     });
 
     // Vulkan reduction kernels use `dim < 0` as the "full reduction"

@@ -42,6 +42,24 @@ auto normalize_dim_for_rank(int64_t dim, size_t rank, bool allow_end = false) ->
     return dim;
 }
 
+// Normalize a multi-axis reduction "dims" list against a tensor rank: convert
+// negatives, drop out-of-range entries, sort ascending and deduplicate. Mirrors
+// resolve_reduce_dims (mlir/lowering.cpp) and SymbolicShapeInference::
+// infer_reduction (symbolic_shape_inference.cpp) so the native executor and
+// shape inference agree with the MLIR lowering path.
+auto normalize_reduce_dims(const std::vector<int64_t>& dims, int64_t rank)
+    -> std::vector<int64_t> {
+    std::vector<int64_t> norm;
+    norm.reserve(dims.size());
+    for (auto d : dims) {
+        if (d < 0) d += rank;
+        if (d >= 0 && d < rank) norm.push_back(d);
+    }
+    std::sort(norm.begin(), norm.end());
+    norm.erase(std::unique(norm.begin(), norm.end()), norm.end());
+    return norm;
+}
+
 auto attr_vec_or_scalar(const Node& node, const char* name, size_t rank,
                         int64_t default_value) -> std::vector<int64_t> {
     auto values = node.get_vec_attr(name);
@@ -499,15 +517,29 @@ auto Graph::infer_types() -> void {
             case OpType::Min:
                 if (!input_shapes.empty()) {
                     auto shape = input_shapes[0];
-                    if (node->has_attr("dim")) {
+                    bool keepdim = node->get_bool_attr("keepdim");
+                    if (node->has_int_attr("dim")) {
                         int64_t dim = node->get_int_attr("dim");
-                        bool keepdim = node->get_bool_attr("keepdim");
                         if (dim < 0) dim += static_cast<int64_t>(shape.size());
                         if (dim >= 0 && dim < static_cast<int64_t>(shape.size())) {
                             if (keepdim) {
                                 shape[dim] = 1;
                             } else {
                                 shape.erase(shape.begin() + dim);
+                            }
+                        }
+                    } else if (node->has_vec_attr("dims")) {
+                        // Multi-axis reduction (tracing interceptor emits
+                        // "dims" with no scalar "dim"). Set each axis to 1
+                        // (keepdim) or erase highest-to-lowest.
+                        auto norm = normalize_reduce_dims(
+                            node->get_vec_attr("dims"),
+                            static_cast<int64_t>(shape.size()));
+                        if (keepdim) {
+                            for (auto d : norm) shape[d] = 1;
+                        } else {
+                            for (auto it = norm.rbegin(); it != norm.rend(); ++it) {
+                                shape.erase(shape.begin() + *it);
                             }
                         }
                     } else {
@@ -1182,15 +1214,30 @@ auto Graph::infer_symbolic_types() -> void {
             case OpType::Min:
                 if (!input_sym_shapes.empty()) {
                     auto sym_shape = input_sym_shapes[0];
-                    if (node->has_attr("dim")) {
+                    bool keepdim = node->get_bool_attr("keepdim");
+                    if (node->has_int_attr("dim")) {
                         int64_t dim = node->get_int_attr("dim");
-                        bool keepdim = node->get_bool_attr("keepdim");
                         if (dim < 0) dim += static_cast<int64_t>(sym_shape.rank());
                         if (dim >= 0 && dim < static_cast<int64_t>(sym_shape.rank())) {
                             if (keepdim) {
                                 sym_shape[static_cast<size_t>(dim)] = SymbolicDim::concrete(1);
                             } else {
                                 sym_shape.erase(static_cast<size_t>(dim));
+                            }
+                        }
+                    } else if (node->has_vec_attr("dims")) {
+                        // Multi-axis reduction (tracing interceptor emits
+                        // "dims" with no scalar "dim").
+                        auto norm = normalize_reduce_dims(
+                            node->get_vec_attr("dims"),
+                            static_cast<int64_t>(sym_shape.rank()));
+                        if (keepdim) {
+                            for (auto d : norm) {
+                                sym_shape[static_cast<size_t>(d)] = SymbolicDim::concrete(1);
+                            }
+                        } else {
+                            for (auto it = norm.rbegin(); it != norm.rend(); ++it) {
+                                sym_shape.erase(static_cast<size_t>(*it));
                             }
                         }
                     } else {
@@ -2142,10 +2189,24 @@ auto Graph::execute_node(const std::shared_ptr<Node>& node,
         // ====================================================================
         case OpType::Sum:
             if (!input_vars.empty()) {
-                if (node->has_attr("dim")) {
+                bool keepdim = node->has_attr("keepdim") ? node->get_bool_attr("keepdim") : false;
+                if (node->has_int_attr("dim")) {
                     int64_t dim = node->get_int_attr("dim");
-                    bool keepdim = node->has_attr("keepdim") ? node->get_bool_attr("keepdim") : false;
                     outputs.push_back(tenzor::sum(input_vars[0], dim, keepdim));
+                } else if (node->has_vec_attr("dims")) {
+                    // Multi-axis reduction: reduce sequentially. Mirror
+                    // resolve_reduce_dims (lowering.cpp) / infer_reduction
+                    // (symbolic_shape_inference.cpp). Reduce highest axis first
+                    // (non-keepdim) so earlier reductions don't shift the
+                    // indices still to remove.
+                    auto norm = normalize_reduce_dims(
+                        node->get_vec_attr("dims"),
+                        static_cast<int64_t>(input_vars[0].tensor().shape().size()));
+                    Variable acc = input_vars[0];
+                    for (auto it = norm.rbegin(); it != norm.rend(); ++it) {
+                        acc = tenzor::sum(acc, *it, keepdim);
+                    }
+                    outputs.push_back(acc);
                 } else {
                     outputs.push_back(tenzor::sum(input_vars[0]));
                 }
@@ -2154,10 +2215,19 @@ auto Graph::execute_node(const std::shared_ptr<Node>& node,
 
         case OpType::Mean:
             if (!input_vars.empty()) {
-                if (node->has_attr("dim")) {
+                bool keepdim = node->has_attr("keepdim") ? node->get_bool_attr("keepdim") : false;
+                if (node->has_int_attr("dim")) {
                     int64_t dim = node->get_int_attr("dim");
-                    bool keepdim = node->has_attr("keepdim") ? node->get_bool_attr("keepdim") : false;
                     outputs.push_back(tenzor::mean(input_vars[0], dim, keepdim));
+                } else if (node->has_vec_attr("dims")) {
+                    auto norm = normalize_reduce_dims(
+                        node->get_vec_attr("dims"),
+                        static_cast<int64_t>(input_vars[0].tensor().shape().size()));
+                    Variable acc = input_vars[0];
+                    for (auto it = norm.rbegin(); it != norm.rend(); ++it) {
+                        acc = tenzor::mean(acc, *it, keepdim);
+                    }
+                    outputs.push_back(acc);
                 } else {
                     outputs.push_back(tenzor::mean(input_vars[0]));
                 }
@@ -2166,10 +2236,19 @@ auto Graph::execute_node(const std::shared_ptr<Node>& node,
 
         case OpType::Max:
             if (!input_vars.empty()) {
-                if (node->has_attr("dim")) {
+                bool keepdim = node->has_attr("keepdim") ? node->get_bool_attr("keepdim") : false;
+                if (node->has_int_attr("dim")) {
                     int64_t dim = node->get_int_attr("dim");
-                    bool keepdim = node->has_attr("keepdim") ? node->get_bool_attr("keepdim") : false;
                     outputs.push_back(tenzor::max(input_vars[0], dim, keepdim));
+                } else if (node->has_vec_attr("dims")) {
+                    auto norm = normalize_reduce_dims(
+                        node->get_vec_attr("dims"),
+                        static_cast<int64_t>(input_vars[0].tensor().shape().size()));
+                    Variable acc = input_vars[0];
+                    for (auto it = norm.rbegin(); it != norm.rend(); ++it) {
+                        acc = tenzor::max(acc, *it, keepdim);
+                    }
+                    outputs.push_back(acc);
                 } else {
                     outputs.push_back(tenzor::max(input_vars[0]));
                 }
@@ -2179,11 +2258,20 @@ auto Graph::execute_node(const std::shared_ptr<Node>& node,
         case OpType::Min:
             if (!input_vars.empty()) {
                 // No autograd min — use raw tensor op and wrap
-                if (node->has_attr("dim")) {
+                bool keepdim = node->has_attr("keepdim") ? node->get_bool_attr("keepdim") : false;
+                if (node->has_int_attr("dim")) {
                     int64_t dim = node->get_int_attr("dim");
-                    bool keepdim = node->has_attr("keepdim") ? node->get_bool_attr("keepdim") : false;
                     auto result = tenzor::min(input_vars[0].tensor(), dim, keepdim);
                     outputs.push_back(Variable(result, false));
+                } else if (node->has_vec_attr("dims")) {
+                    auto norm = normalize_reduce_dims(
+                        node->get_vec_attr("dims"),
+                        static_cast<int64_t>(input_vars[0].tensor().shape().size()));
+                    Tensor acc = input_vars[0].tensor();
+                    for (auto it = norm.rbegin(); it != norm.rend(); ++it) {
+                        acc = tenzor::min(acc, *it, keepdim);
+                    }
+                    outputs.push_back(Variable(acc, false));
                 } else {
                     auto result = tenzor::min(input_vars[0].tensor());
                     outputs.push_back(Variable(result, false));

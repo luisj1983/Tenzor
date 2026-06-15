@@ -1378,27 +1378,35 @@ void cublas_fp8_gemm(
             throw std::runtime_error("Failed to create cublasLt matmul descriptor");
         }
 
-        // Row-major: C = A @ B => cuBLAS col-major: C^T = B^T @ A^T
-        // B^T is (N x K), A^T is (K x M), C^T is (N x M)
-        cublasOperation_t transA = CUBLAS_OP_T;  // Transpose for row-major B
-        cublasOperation_t transB = CUBLAS_OP_T;  // Transpose for row-major A
+        // Row-major C = A @ B is computed as the column-major problem
+        //   C^T (N x M) = B^T (N x K) @ A^T (K x M).
+        // Following the same convention as the cublasGemmEx path above, we pass
+        // B as cuBLAS "A" and A as cuBLAS "B" and describe each operand by the
+        // column-major VIEW of its row-major storage. That column-major view is
+        // already the logical transpose of the row-major operand, so NO extra
+        // transpose flag is needed: both ops are OP_N. Setting OP_T here (as the
+        // previous code did) would transpose the already-transposed layouts —
+        // a double transpose that contradicts C = A @ B.
+        //
+        // NOTE: FP8 cublasLt has a "TN" format restriction on some toolkit
+        // versions. Before this path is wired to a caller, validate against a
+        // reference GEMM (see cublas_fp8_matmul) on the target arch/toolkit; if
+        // TN is enforced, the operands must be re-laid-out accordingly rather
+        // than reintroducing the double transpose.
+        cublasOperation_t transA = CUBLAS_OP_N;  // cuBLAS "A" (= our B), col-major view
+        cublasOperation_t transB = CUBLAS_OP_N;  // cuBLAS "B" (= our A), col-major view
 
         cublasLtMatmulDescSetAttribute(matmulDesc, CUBLASLT_MATMUL_DESC_TRANSA,
                                         &transA, sizeof(transA));
         cublasLtMatmulDescSetAttribute(matmulDesc, CUBLASLT_MATMUL_DESC_TRANSB,
                                         &transB, sizeof(transB));
 
-        // Create matrix layouts (column-major storage for row-major data)
-        // A in row-major (M x K) -> column-major: leading dim = K
-        // B in row-major (K x N) -> column-major: leading dim = N
-        // C in row-major (M x N) -> column-major: leading dim = N
-
-        // In the transposed computation:
-        // cuBLAS A = B (row-major K x N), layout: N x K col-major, ld = N
+        // Matrix layouts are the column-major views of the row-major operands.
+        // cuBLAS A = B (row-major K x N) -> col-major N x K, ld = N
         cublasLtMatrixLayoutCreate(&layoutA, cuda_b_dtype, N, K, N);
-        // cuBLAS B = A (row-major M x K), layout: K x M col-major, ld = K
+        // cuBLAS B = A (row-major M x K) -> col-major K x M, ld = K
         cublasLtMatrixLayoutCreate(&layoutB, cuda_a_dtype, K, M, K);
-        // cuBLAS C = C (row-major M x N), layout: N x M col-major, ld = N
+        // cuBLAS C = C (row-major M x N) -> col-major N x M, ld = N
         cublasLtMatrixLayoutCreate(&layoutC, cuda_out_dtype, N, M, N);
 
         // Perform the FP8 GEMM

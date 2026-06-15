@@ -2122,6 +2122,12 @@ auto strided_fill_kernel(Tensor& self, double value, sycl::queue& queue) -> void
     auto strides_span = self.strides();
     size_t ndim = shape_span.size();
 
+    // The strided path uses fixed-size 8-element stack arrays for shape/strides;
+    // the device loop indexes them with d < ndim, so >8-D would read/write OOB.
+    if (ndim > 8) {
+        throw std::runtime_error("strided_fill: tensors with more than 8 dimensions are not supported");
+    }
+
     if (self.is_contiguous()) {
         if (self.dtype() == DType::Float32) {
             float val = static_cast<float>(value);

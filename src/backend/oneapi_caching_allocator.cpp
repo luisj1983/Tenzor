@@ -98,21 +98,28 @@ void* OneAPICachingAllocator::allocate_impl(size_t size, int device, bool shared
     // Mark block as allocated
     block->allocated = true;
 
+    // First undo the cached_bytes contribution recorded when this block was
+    // freed — that was the PREVIOUS owner's requested_size, still on the block.
+    if (from_cache && device_alloc.stats.cached_bytes >= block->requested_size) {
+        device_alloc.stats.cached_bytes -= block->requested_size;
+    }
+
+    // Account statistics against the rounded user request, NOT the physical
+    // block size: an oversized cached block (split_block is a no-op for USM)
+    // would otherwise inflate allocated/peak/cached bytes (e.g. a 64-byte
+    // request served from a 1 GB cached block counting as 1 GB).
+    block->requested_size = size;
+
     // Update statistics
-    device_alloc.stats.allocated_bytes += block->size;
+    device_alloc.stats.allocated_bytes += block->requested_size;
     if (device_alloc.stats.allocated_bytes > device_alloc.stats.peak_allocated) {
         device_alloc.stats.peak_allocated = device_alloc.stats.allocated_bytes;
     }
 
     if (shared) {
-        device_alloc.stats.shared_memory_bytes += block->size;
+        device_alloc.stats.shared_memory_bytes += block->requested_size;
     } else {
-        device_alloc.stats.device_memory_bytes += block->size;
-    }
-
-    // Only subtract from cached_bytes if we got the block from cache
-    if (from_cache && device_alloc.stats.cached_bytes >= block->size) {
-        device_alloc.stats.cached_bytes -= block->size;
+        device_alloc.stats.device_memory_bytes += block->requested_size;
     }
 
     return block->ptr;
@@ -142,6 +149,14 @@ void OneAPICachingAllocator::free(void* ptr, int device) {
     // Find the block
     auto it = device_alloc.all_blocks.find(ptr);
     if (it == device_alloc.all_blocks.end()) {
+        // After release_all() (backend shutdown) every block has already been
+        // sycl::free'd and forgotten. A Storage that outlives the backend will
+        // still call free() on its now-stale pointer; throwing here would
+        // escape a noexcept Storage destructor and call std::terminate(). The
+        // memory is already gone, so treat the late free as a no-op.
+        if (released_) {
+            return;
+        }
         throw std::runtime_error("OneAPICachingAllocator: Attempted to free pointer not allocated by this allocator");
     }
 
@@ -165,28 +180,34 @@ void OneAPICachingAllocator::free(void* ptr, int device) {
         }
     }
 
-    // Update statistics
-    if (device_alloc.stats.allocated_bytes >= block->size) {
-        device_alloc.stats.allocated_bytes -= block->size;
+    // Update statistics against the owner's requested_size (what allocate_impl
+    // added), not the physical block size — keeps the counters balanced for
+    // oversized cached blocks.
+    if (device_alloc.stats.allocated_bytes >= block->requested_size) {
+        device_alloc.stats.allocated_bytes -= block->requested_size;
     }
 
     if (block->is_shared) {
-        if (device_alloc.stats.shared_memory_bytes >= block->size) {
-            device_alloc.stats.shared_memory_bytes -= block->size;
+        if (device_alloc.stats.shared_memory_bytes >= block->requested_size) {
+            device_alloc.stats.shared_memory_bytes -= block->requested_size;
         }
     } else {
-        if (device_alloc.stats.device_memory_bytes >= block->size) {
-            device_alloc.stats.device_memory_bytes -= block->size;
+        if (device_alloc.stats.device_memory_bytes >= block->requested_size) {
+            device_alloc.stats.device_memory_bytes -= block->requested_size;
         }
     }
 
-    // For very large allocations, release immediately rather than caching
+    // For very large allocations, release immediately rather than caching.
+    // (Threshold compares the PHYSICAL block size — this is about reclaiming
+    // physical USM, independent of how much the user requested.)
     if (block->size >= large_allocation_threshold_) {
         release_block(block);
         return;
     }
 
-    device_alloc.stats.cached_bytes += block->size;
+    // Cache the block. Record its requested_size as the cached contribution so
+    // allocate_impl can undo exactly this amount on reuse.
+    device_alloc.stats.cached_bytes += block->requested_size;
 
     // Try to merge with adjacent blocks
     if (merge_enabled_) {
@@ -278,6 +299,10 @@ void OneAPICachingAllocator::release_all() {
         device_alloc.free_device_blocks.clear();
         device_alloc.stats = OneAPIMemoryStats{};
     }
+
+    // Mark released: subsequent free() calls for now-forgotten pointers become
+    // no-ops instead of throwing out of (noexcept) Storage destructors.
+    released_ = true;
 }
 
 void OneAPICachingAllocator::garbage_collect(int device, bool aggressive) {
@@ -458,20 +483,26 @@ OneAPIBlock* OneAPICachingAllocator::try_allocate_from_cache(size_t size, int de
     // Select appropriate free blocks set
     auto& free_blocks = shared ? device_alloc.free_shared_blocks : device_alloc.free_device_blocks;
 
-    // Find smallest free block that fits (best-fit)
+    // Find smallest free block that fits (best-fit), then scan forward over the
+    // larger ready blocks.
     OneAPIBlock search_block(nullptr, size, device, shared);
-    auto it = free_blocks.lower_bound(&search_block);
 
-    if (it != free_blocks.end()) {
+    // The previous owner's enqueued work must be complete before this memory
+    // gets a new owner (see OneAPIBlock::release_fence). Use a NON-blocking
+    // completeness check: a blocking wait would stall every cached-block reuse
+    // on the whole in-order queue (measured: DeepLab GradientFlow went from
+    // seconds to a 1200 s timeout with a blocking wait).
+    //
+    // Critically, do NOT give up after the first best-fit block: in a tight
+    // train loop the just-freed best-fit block's release fence is almost always
+    // still in flight at the next same-size request, so returning nullptr here
+    // would bypass the cache entirely and accumulate fresh USM blocks forever.
+    // Instead, scan forward (towards larger blocks) for the first one whose
+    // fence has already signalled and reuse that, only falling back to a fresh
+    // allocation when every fitting cached block is still busy.
+    for (auto it = free_blocks.lower_bound(&search_block); it != free_blocks.end(); ) {
         OneAPIBlock* block = *it;
 
-        // The previous owner's enqueued work must be complete before this
-        // memory gets a new owner (see OneAPIBlock::release_fence). Use a
-        // NON-blocking completeness check: waiting here would stall every
-        // cached-block reuse on the whole in-order queue (measured: DeepLab
-        // GradientFlow went from seconds to a 1200 s timeout with a blocking
-        // wait). If the fence hasn't signalled, leave the block cached and
-        // let the caller allocate fresh memory instead.
         if (block->release_fence) {
             auto* ev = static_cast<sycl::event*>(block->release_fence);
             bool complete = false;
@@ -482,7 +513,8 @@ OneAPIBlock* OneAPICachingAllocator::try_allocate_from_cache(size_t size, int de
                 complete = true;  // device teardown — nothing left in flight
             }
             if (!complete) {
-                return nullptr;  // still in flight: skip reuse, keep cached
+                ++it;            // still in flight: try the next (larger) ready block
+                continue;
             }
             delete ev;
             block->release_fence = nullptr;
@@ -585,11 +617,15 @@ void OneAPICachingAllocator::release_block(OneAPIBlock* block) {
     auto& device_alloc = device_allocators_[block->device];
     sycl::queue* queue = static_cast<sycl::queue*>(device_alloc.queue);
 
-    // Remove from free blocks if present
+    // Remove from free blocks if present. The erase count tells us whether this
+    // block was actually cached (and thus contributing to cached_bytes): the
+    // free() large-allocation fast path releases a block that was never added
+    // to a free set, so we must not subtract its size from cached_bytes.
+    size_t was_cached = 0;
     if (block->is_shared) {
-        device_alloc.free_shared_blocks.erase(block);
+        was_cached = device_alloc.free_shared_blocks.erase(block);
     } else {
-        device_alloc.free_device_blocks.erase(block);
+        was_cached = device_alloc.free_device_blocks.erase(block);
     }
 
     // Free SYCL memory — only after any work enqueued before the free has
@@ -604,12 +640,14 @@ void OneAPICachingAllocator::release_block(OneAPIBlock* block) {
         }
     }
 
-    // Update statistics
+    // reserved_bytes tracks PHYSICAL USM, so subtract the physical block size.
     if (device_alloc.stats.reserved_bytes >= block->size) {
         device_alloc.stats.reserved_bytes -= block->size;
     }
-    if (device_alloc.stats.cached_bytes >= block->size) {
-        device_alloc.stats.cached_bytes -= block->size;
+    // cached_bytes was incremented by requested_size when the block was cached;
+    // only undo it if the block was in fact cached.
+    if (was_cached && device_alloc.stats.cached_bytes >= block->requested_size) {
+        device_alloc.stats.cached_bytes -= block->requested_size;
     }
 
     // Remove from all_blocks

@@ -185,7 +185,19 @@ auto DistributedCheckpoint::load(
         auto fname = entry.path().filename().string();
         if (fname.starts_with("rank_") && fname.ends_with(".ckpt")) {
             auto rank_str = fname.substr(5, fname.size() - 10);  // strip "rank_" and ".ckpt"
-            saved_ranks.push_back(std::stoll(rank_str));
+            // The rank component may be empty ("rank_.ckpt") or non-numeric
+            // ("rank_abc.ckpt"); std::stoll would throw and abort the whole
+            // load. Parse defensively and skip any filename whose rank does
+            // not fully parse to an integer, rather than propagating.
+            try {
+                size_t consumed = 0;
+                int64_t parsed = std::stoll(rank_str, &consumed);
+                if (consumed == rank_str.size()) {
+                    saved_ranks.push_back(parsed);
+                }
+            } catch (...) {
+                // malformed rank component — skip this file
+            }
         }
     }
     std::sort(saved_ranks.begin(), saved_ranks.end());

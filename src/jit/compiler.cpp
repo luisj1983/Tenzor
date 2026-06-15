@@ -357,25 +357,35 @@ auto ConstantFoldingPass::can_fold(const Node& node) -> bool {
     // Phase 2 (J5-followup): Sum/Mean/Max/Min reductions (with dim+keepdim
     // attrs), Pow (via tenzor::float_power Tensor,Tensor overload), Reshape
     // (when the shape input is itself a constant).
+    // Verify arity before declaring foldable. can_fold's loop above only
+    // checks that *existing* inputs are constants; it does not verify the node
+    // has the expected number of inputs. evaluate_constant unconditionally
+    // accesses inputs[1] for binary ops, so a malformed 1-input Add (etc.)
+    // would otherwise index a 1-element vector out of bounds (operator[] UB,
+    // not contained by the surrounding try/catch).
+    const size_t arity = node.inputs().size();
     switch (node.op_type()) {
+        // Binary ops: require at least 2 inputs (read inputs[0] and inputs[1]).
         case OpType::Add:
         case OpType::Sub:
         case OpType::Mul:
         case OpType::Div:
+        case OpType::MatMul:
+        case OpType::Bmm:
+        case OpType::Pow:
+        case OpType::Reshape:
+            return arity >= 2;
+        // Unary / reduction ops: require at least 1 input (read inputs[0]).
         case OpType::Exp:
         case OpType::Log:
         case OpType::Sqrt:
         case OpType::Neg:
         case OpType::Abs:
-        case OpType::MatMul:
-        case OpType::Bmm:
         case OpType::Sum:
         case OpType::Mean:
         case OpType::Max:
         case OpType::Min:
-        case OpType::Pow:
-        case OpType::Reshape:
-            return true;
+            return arity >= 1;
         default:
             return false;
     }
@@ -2451,8 +2461,12 @@ auto DTypeOptimizationPass::run(Graph& graph) -> bool {
         cast_node->set_int_attr("target_dtype", static_cast<int64_t>(ins.target_dtype));
         cast_output->set_node(cast_node);
 
+        // replace_input already registers `cast_output`'s use of the consumer
+        // (Node::replace_input calls val->add_use). A second add_use here would
+        // double-count, inflating cast_output->uses().size() to 2 for a single
+        // real consumer and breaking single-use checks (PatternMatcher::
+        // has_single_use) that suppress legitimate cast-chain fusion/elimination.
         ins.consumer->replace_input(ins.input_index, cast_output);
-        cast_output->add_use(ins.consumer);
 
         graph.add_node(cast_node);
     }

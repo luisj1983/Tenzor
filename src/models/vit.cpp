@@ -9,6 +9,7 @@
 #include "tenzor/autograd/variable.hpp"
 #include "tenzor/autograd/ops.hpp"
 #include "tenzor/nn/activations/activations.hpp"
+#include "tenzor/nn/utils/variable_cast.hpp"
 #include "tenzor/ops/transform.hpp"
 #include <cmath>
 #include <random>
@@ -163,14 +164,16 @@ auto ViTEmbeddings::forward_impl(const Variable& pixel_values) -> Variable {
     Variable cls_var = cls_token;
 
     // Ensure cls_token is on the same device and dtype as the input. Module::to()
-    // normally keeps these in sync, so these branches are usually no-ops; when they
-    // do fire we rewrap (device/dtype conversion is not part of the differentiable
-    // path here, the parameter itself is the leaf that must receive gradients).
+    // normally keeps these in sync, so these branches are usually no-ops; when
+    // they fire (mixed-device / autocast training where input != parameter) we
+    // must use autograd-aware conversions so the grad chain back to the
+    // registered cls_token_ leaf is preserved. A raw Variable(tensor.to(...))
+    // would create a fresh leaf and silently stop training the parameter.
     if (cls_var.tensor().device() != device) {
-        cls_var = Variable(cls_var.tensor().to(device), cls_var.requires_grad());
+        cls_var = tenzor::to_device(cls_var, device);
     }
     if (cls_var.tensor().dtype() != dtype) {
-        cls_var = Variable(cls_var.tensor().to(dtype), cls_var.requires_grad());
+        cls_var = nn::variable_cast(cls_var, dtype);
     }
 
     // Expand the [CLS] token to batch size using the autograd-aware repeat so the
@@ -187,15 +190,15 @@ auto ViTEmbeddings::forward_impl(const Variable& pixel_values) -> Variable {
     // Get position_embeddings from parameters map (this gets the dtype-converted version)
     auto& pos_embeddings = *parameters_["position_embeddings"];
 
-    // Ensure position embeddings are on the same device and dtype as input
+    // Ensure position embeddings are on the same device and dtype as input.
+    // Use autograd-aware conversions so gradients still reach the registered
+    // position_embeddings_ leaf (a raw Variable(tensor.to(...)) would sever it).
     Variable pos_var = pos_embeddings;
     if (pos_var.tensor().device() != device) {
-        Tensor pos_tensor = pos_var.tensor().to(device);
-        pos_var = Variable(pos_tensor, pos_var.requires_grad());
+        pos_var = tenzor::to_device(pos_var, device);
     }
     if (pos_var.tensor().dtype() != dtype) {
-        Tensor pos_tensor = pos_var.tensor().to(dtype);
-        pos_var = Variable(pos_tensor, pos_var.requires_grad());
+        pos_var = nn::variable_cast(pos_var, dtype);
     }
 
     // Add position embeddings

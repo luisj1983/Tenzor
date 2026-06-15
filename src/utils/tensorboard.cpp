@@ -206,7 +206,7 @@ auto SummaryWriter::add_scalar(std::string_view tag, float value, int64_t step) 
     std::lock_guard<std::mutex> lock(impl_->mutex);
 
     auto data = serialize_scalar(value);
-    write_event(tag, data, step);
+    write_event(tag, data, step, /*is_scalar=*/true);
 
     // Auto-flush if needed
     impl_->event_count++;
@@ -470,7 +470,8 @@ auto SummaryWriter::is_open() const -> bool {
 
 auto SummaryWriter::write_event(std::string_view tag,
                                 const std::vector<uint8_t>& data,
-                                int64_t step) -> void {
+                                int64_t step,
+                                bool is_scalar) -> void {
     // Build complete event
     std::vector<uint8_t> event;
 
@@ -507,8 +508,12 @@ auto SummaryWriter::write_event(std::string_view tag,
     write_field_header(value, 1, 2);
     write_string(value, tag);
 
-    // simple_value (float) or other data
-    if (data.size() == 4) {
+    // simple_value (float) or other data. The encoding is selected by the
+    // explicit is_scalar flag passed from the caller (add_scalar vs.
+    // add_histogram/add_image), never inferred from data.size(): a scalar
+    // payload is the raw 4-byte float to wrap as simple_value, while any other
+    // payload is a pre-wrapped field body appended verbatim.
+    if (is_scalar) {
         // Scalar value
         write_field_header(value, 2, 5); // simple_value (float, wire_type=5)
         value.insert(value.end(), data.begin(), data.end());

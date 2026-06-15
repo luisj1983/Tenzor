@@ -27,14 +27,27 @@ float readF16(uint element_idx) {
     return unpackHalf2x16(bits | (bits << 16)).x;
 }
 
-// Write a single float16 element to the losses buffer
+// Write a single float16 element to the losses buffer using atomic CAS.
+// For reduction==none, adjacent samples idx and idx+1 share one 32-bit word
+// (word = idx/2) and run concurrently, so a plain read-modify-write would let
+// one sample clobber the other's half-word. Use a bounded atomicCompSwap loop.
 void writeF16Loss(uint element_idx, float val) {
     uint word_idx = element_idx / 2;
-    uint word_offset = element_idx % 2;
+    uint half_idx = element_idx % 2;
     uint bits = packHalf2x16(vec2(val, 0.0)) & 0xFFFFu;
-    uint existing = losses[word_idx];
-    uint mask = 0xFFFFu << (word_offset * 16);
-    losses[word_idx] = (existing & ~mask) | (bits << (word_offset * 16));
+    uint shift = half_idx * 16;
+    uint mask = 0xFFFFu << shift;
+
+    uint old_val = losses[word_idx];
+    uint new_val, expected;
+    for (uint iter = 0u; iter < 65536u; iter++) {
+        expected = old_val;
+        new_val = (expected & ~mask) | (bits << shift);
+        old_val = atomicCompSwap(losses[word_idx], expected, new_val);
+        if (old_val == expected) return;
+    }
+    // Saturation: do NOT add a non-atomic fallback store — it would clobber the
+    // neighbouring packed half-word.
 }
 
 float sample_loss(uint s_idx) {
