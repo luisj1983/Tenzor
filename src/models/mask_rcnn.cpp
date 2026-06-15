@@ -204,21 +204,27 @@ auto assign_anchors_to_targets(
 } // anonymous namespace
 
 // Forward declarations for loss computation functions
+//
+// Autograd fix: the differentiable head outputs are passed as Variables (NOT
+// raw Tensors) so the grad_fn chain from each loss back through the RPN / ROI /
+// mask heads and the backbone stays intact. Passing `.tensor()` here, or
+// re-wrapping inside the helpers with a fresh `Variable(t, true)`, severs the
+// graph and backward() then produces zero gradients for those parameters.
 auto compute_rpn_loss(
-    const Tensor& objectness_logits,
-    const Tensor& box_regression,
+    const Variable& objectness_logits,
+    const Variable& box_regression,
     const std::vector<Tensor>& targets,
     const Tensor& anchors
 ) -> std::tuple<Variable, Variable>;
 
 auto compute_roi_head_loss(
-    const Tensor& class_logits,
-    const Tensor& box_regression,
+    const Variable& class_logits,
+    const Variable& box_regression,
     const std::vector<Tensor>& targets
 ) -> std::tuple<Variable, Variable>;
 
 auto compute_mask_loss(
-    const Tensor& mask_logits,
+    const Variable& mask_logits,
     const std::vector<Tensor>& targets
 ) -> Variable;
 
@@ -494,8 +500,8 @@ auto MaskRCNN::forward_train(const Variable& images,
     }
 
     auto [rpn_cls_loss, rpn_bbox_loss] = compute_rpn_loss(
-        rpn_cls_logits.tensor(),
-        rpn_bbox_deltas.tensor(),
+        rpn_cls_logits,    // Variable — keeps grad_fn back into the RPN head
+        rpn_bbox_deltas,   // Variable — keeps grad_fn back into the RPN head
         rpn_targets,
         anchors
     );
@@ -643,8 +649,8 @@ auto MaskRCNN::forward_train(const Variable& images,
     // Compute ROI head losses
     std::vector<Tensor> roi_targets = {sampled_labels, sampled_target_deltas};
     auto [roi_cls_loss, roi_bbox_loss] = compute_roi_head_loss(
-        cls_logits.tensor(),
-        bbox_deltas.tensor(),
+        cls_logits,    // Variable — keeps grad_fn back into the ROI box head
+        bbox_deltas,   // Variable — keeps grad_fn back into the ROI box head
         roi_targets
     );
 
@@ -742,7 +748,10 @@ auto MaskRCNN::forward_train(const Variable& images,
         auto pos_masks = pos_masks_cpu.to(mask_logits.tensor().dtype()).to(original_device);
         auto pos_labels = pos_labels_cpu.to(original_device);
         std::vector<Tensor> mask_targets = {pos_masks, pos_labels};
-        mask_loss_val = compute_mask_loss(mask_logits.tensor(), mask_targets);
+        // mask_logits is a Variable carrying grad_fn back through the mask head;
+        // compute_mask_loss forwards it straight into nn::detection::mask_loss
+        // (already autograd-aware via gather+squeeze) without re-severing.
+        mask_loss_val = compute_mask_loss(mask_logits, mask_targets);
     }
 
     return std::make_tuple(
@@ -829,18 +838,18 @@ auto MaskRCNN::forward_test(const Variable& images)
 }
 
 auto compute_rpn_loss(
-    const Tensor& objectness_logits,
-    const Tensor& box_regression,
+    const Variable& objectness_logits,
+    const Variable& box_regression,
     const std::vector<Tensor>& targets,
     const Tensor& anchors
 ) -> std::tuple<Variable, Variable> {
-    // objectness_logits: (N, num_anchors*H*W, 2)
-    // box_regression: (N, num_anchors*H*W, 4)
+    // objectness_logits: (N, num_anchors*H*W, 2)  -- Variable (RPN cls head)
+    // box_regression: (N, num_anchors*H*W, 4)     -- Variable (RPN box head)
     // targets: vector of {boxes, labels} per image
     // anchors: (num_anchors*H*W, 4)
 
-    auto batch_size = objectness_logits.shape()[0];
-    auto device = objectness_logits.device();
+    auto batch_size = objectness_logits.tensor().shape()[0];
+    auto device = objectness_logits.tensor().device();
 
     // Collect losses for all images in batch (keep as Variables for gradient tracking)
     std::vector<Variable> cls_losses;
@@ -864,9 +873,16 @@ auto compute_rpn_loss(
             anchors_typed, gt_boxes, 0.7f, 0.3f
         );
 
-        // Get objectness and bbox predictions for this image
-        auto obj_logits_b = tenzor::select(objectness_logits, 0, b);  // (num_anchors, 2)
-        auto bbox_reg_b = tenzor::select(box_regression, 0, b);  // (num_anchors, 4)
+        // Get objectness and bbox predictions for this image.
+        // Variable-level select-along-dim-0 = index_select(1 row) + squeeze, so
+        // the grad_fn back into the RPN head is preserved (a raw tenzor::select
+        // on .tensor() would sever it).
+        Tensor batch_idx_b = Tensor({1}, DType::Int64, Device::cpu()).fill_(
+            static_cast<double>(b)).to(device);
+        auto obj_logits_b = tenzor::squeeze(
+            tenzor::index_select(objectness_logits, 0, batch_idx_b), 0);  // (num_anchors, 2)
+        auto bbox_reg_b = tenzor::squeeze(
+            tenzor::index_select(box_regression, 0, batch_idx_b), 0);     // (num_anchors, 4)
 
         // Classification loss: Binary cross-entropy for objectness
         // Move labels to CPU for data access
@@ -920,14 +936,19 @@ auto compute_rpn_loss(
         }
         auto indices_tensor = indices_tensor_cpu.to(device);
 
-        // Select sampled objectness logits and labels
-        auto sampled_logits = tenzor::index_select(obj_logits_b, 0, indices_tensor);
+        // Select sampled objectness logits and labels.
+        // obj_logits_b is a Variable, so this resolves to the autograd
+        // index_select overload and keeps the grad_fn chain. Labels are plain
+        // (non-differentiable) targets and stay a Tensor.
+        Variable sampled_logits = tenzor::index_select(obj_logits_b, 0, indices_tensor);
         auto sampled_labels_full = tenzor::index_select(labels, 0, indices_tensor);
 
-        // Compute classification loss: cross-entropy
+        // Compute classification loss: cross-entropy. Pass the Variable
+        // directly — wrapping it in a fresh Variable(..., true) would discard
+        // grad_fn and zero out RPN-head gradients.
         nn::CrossEntropyLoss ce_loss;
         auto cls_loss_var = ce_loss.forward(
-            Variable(sampled_logits, true),  // requires_grad=true for gradient tracking
+            sampled_logits,
             sampled_labels_full
         );
         cls_losses.push_back(cls_loss_var);
@@ -949,20 +970,23 @@ auto compute_rpn_loss(
             }
             auto pos_indices_tensor = pos_indices_tensor_cpu.to(device);
 
-            // Get predicted deltas for positive anchors
-            auto pos_bbox_pred = tenzor::index_select(bbox_reg_b, 0, pos_indices_tensor);
+            // Get predicted deltas for positive anchors (bbox_reg_b is a
+            // Variable -> autograd index_select preserves grad_fn).
+            Variable pos_bbox_pred = tenzor::index_select(bbox_reg_b, 0, pos_indices_tensor);
 
-            // Get matched GT boxes for positive anchors
+            // Get matched GT boxes for positive anchors (targets — plain Tensors)
             auto pos_matched_boxes = tenzor::index_select(matched_boxes, 0, pos_indices_tensor);
             auto pos_anchors = tenzor::index_select(anchors, 0, pos_indices_tensor);
 
             // Encode GT boxes as regression targets
             auto bbox_targets = encode_boxes(pos_matched_boxes, pos_anchors);
 
-            // Compute Smooth L1 loss using nn::SmoothL1Loss for gradient tracking
+            // Compute Smooth L1 loss. Pass the prediction Variable directly so
+            // the grad_fn back into the RPN box head survives; only the target
+            // is a fresh non-differentiable Variable.
             nn::SmoothL1Loss smooth_l1(nn::Reduction::Mean, 1.0);
             auto bbox_loss_var = smooth_l1.forward(
-                Variable(pos_bbox_pred, true),
+                pos_bbox_pred,
                 Variable(bbox_targets, false)
             );
             bbox_losses.push_back(bbox_loss_var);
@@ -981,7 +1005,7 @@ auto compute_rpn_loss(
         cls_loss_final = cls_loss_final / static_cast<float>(cls_losses.size());
     } else {
         // Even with no samples, return differentiable zero for gradient flow
-        cls_loss_final = Variable(Tensor({}, objectness_logits.dtype(), device).fill_(0.0), true);
+        cls_loss_final = Variable(Tensor({}, objectness_logits.tensor().dtype(), device).fill_(0.0), true);
     }
 
     if (!bbox_losses.empty()) {
@@ -992,39 +1016,41 @@ auto compute_rpn_loss(
         bbox_loss_final = bbox_loss_final / static_cast<float>(bbox_losses.size());
     } else {
         // Even with no positive samples, return differentiable zero for gradient flow
-        bbox_loss_final = Variable(Tensor({}, objectness_logits.dtype(), device).fill_(0.0), true);
+        bbox_loss_final = Variable(Tensor({}, objectness_logits.tensor().dtype(), device).fill_(0.0), true);
     }
 
     return std::make_tuple(cls_loss_final, bbox_loss_final);
 }
 
 auto compute_roi_head_loss(
-    const Tensor& class_logits,
-    const Tensor& box_regression,
+    const Variable& class_logits,
+    const Variable& box_regression,
     const std::vector<Tensor>& targets
 ) -> std::tuple<Variable, Variable> {
-    // class_logits: (num_rois, num_classes+1)
-    // box_regression: (num_rois, (num_classes+1)*4)
+    // class_logits: (num_rois, num_classes+1)        -- Variable (ROI cls head)
+    // box_regression: (num_rois, (num_classes+1)*4)  -- Variable (ROI box head)
     // targets: vector containing {labels, target_boxes} for sampled ROIs
 
-    auto num_rois = class_logits.shape()[0];
-    auto device = class_logits.device();
+    auto num_rois = class_logits.tensor().shape()[0];
+    auto device = class_logits.tensor().device();
 
     if (num_rois == 0 || targets.empty()) {
         // Return differentiable zero for gradient flow
-        auto zero_loss = Variable(Tensor({}, class_logits.dtype(), device).fill_(0.0), true);
+        auto zero_loss = Variable(Tensor({}, class_logits.tensor().dtype(), device).fill_(0.0), true);
         return std::make_tuple(zero_loss, zero_loss);
     }
 
     // For simplicity, assume targets[0] is labels, targets[1] is target boxes
     // In a full implementation, this would come from ROI sampling
     auto roi_labels = targets[0];  // (num_rois,)
-    auto roi_target_boxes = targets.size() > 1 ? targets[1] : Tensor({num_rois, 4}, box_regression.dtype(), device);
+    auto roi_target_boxes = targets.size() > 1 ? targets[1] : Tensor({num_rois, 4}, box_regression.tensor().dtype(), device);
 
-    // Classification loss: multi-class cross-entropy
+    // Classification loss: multi-class cross-entropy. Pass the class_logits
+    // Variable directly so grad_fn back into the ROI cls head is preserved
+    // (a fresh Variable(class_logits, true) would sever it).
     nn::CrossEntropyLoss ce_loss;
     auto cls_loss = ce_loss.forward(
-        Variable(class_logits, true),  // requires_grad=true for gradient tracking
+        class_logits,
         roi_labels
     );
 
@@ -1050,64 +1076,75 @@ auto compute_roi_head_loss(
         }
         auto fg_idx_tensor = fg_idx_tensor_cpu.to(device);
 
-        // Get foreground box predictions and targets
-        auto fg_box_regression = tenzor::index_select(box_regression, 0, fg_idx_tensor);
+        // Get foreground box predictions and targets. box_regression is a
+        // Variable -> autograd index_select keeps grad_fn into the ROI box head.
+        Variable fg_box_regression = tenzor::index_select(box_regression, 0, fg_idx_tensor);
         auto fg_target_boxes = tenzor::index_select(roi_target_boxes, 0, fg_idx_tensor);
         auto fg_labels = tenzor::index_select(roi_labels, 0, fg_idx_tensor);
         auto fg_labels_cpu = fg_labels.to(Device::cpu());
 
-        // Extract box deltas for the predicted class
-        auto num_fg = fg_box_regression.shape()[0];
-        std::vector<Tensor> selected_deltas;
+        // Extract box deltas for the predicted class, staying on the autograd
+        // graph: each row is sliced with the Variable-level autograd slice and
+        // the per-row (1, 4) deltas are concatenated with autograd cat. The
+        // earlier tenzor::select + Tensor.slice + ops::stack path operated on
+        // raw tensors and severed the chain.
+        auto num_fg = fg_box_regression.tensor().shape()[0];
+        std::vector<Variable> selected_deltas;
+        selected_deltas.reserve(static_cast<size_t>(num_fg));
 
         for (int64_t i = 0; i < num_fg; ++i) {
-            auto fg_row = tenzor::select(fg_box_regression, 0, i);
+            // fg_row: (1, (num_classes+1)*4)
+            Variable fg_row = tenzor::slice(fg_box_regression, 0, i, i + 1);
             int64_t class_idx = fg_labels_cpu.data<int64_t>()[i];
 
-            // Select 4 values for this class
+            // Select 4 values for this class -> (1, 4)
             auto start_idx = class_idx * 4;
-            auto delta_slice = fg_row.slice(0, start_idx, start_idx + 4);
+            Variable delta_slice = tenzor::slice(fg_row, 1, start_idx, start_idx + 4);
             selected_deltas.push_back(delta_slice);
         }
 
-        auto fg_selected_deltas = ops::stack(selected_deltas, 0);  // (num_fg, 4)
+        Variable fg_selected_deltas = tenzor::cat(selected_deltas, 0);  // (num_fg, 4)
 
-        // Compute Smooth L1 loss using nn::SmoothL1Loss for gradient tracking
+        // Compute Smooth L1 loss. Pass the prediction Variable directly so the
+        // grad_fn back into the ROI box head survives.
         nn::SmoothL1Loss smooth_l1(nn::Reduction::Mean, 1.0);
         bbox_loss = smooth_l1.forward(
-            Variable(fg_selected_deltas, true),
+            fg_selected_deltas,
             Variable(fg_target_boxes, false)
         );
     } else {
         // Return differentiable zero for gradient flow
-        bbox_loss = Variable(Tensor({}, class_logits.dtype(), device).fill_(0.0), true);
+        bbox_loss = Variable(Tensor({}, class_logits.tensor().dtype(), device).fill_(0.0), true);
     }
 
     return std::make_tuple(cls_loss, bbox_loss);
 }
 
 auto compute_mask_loss(
-    const Tensor& mask_logits,
+    const Variable& mask_logits,
     const std::vector<Tensor>& targets
 ) -> Variable {
     // This is a wrapper around the existing nn::detection::mask_loss
-    // mask_logits: (num_rois, num_classes, H, W)
+    // mask_logits: (num_rois, num_classes, H, W)  -- Variable (mask head)
     // targets: vector containing {mask_targets, class_labels}
 
-    auto num_rois = mask_logits.shape()[0];
-    auto device = mask_logits.device();
+    auto num_rois = mask_logits.tensor().shape()[0];
+    auto device = mask_logits.tensor().device();
 
     if (num_rois == 0 || targets.size() < 2) {
         // Return differentiable zero for gradient flow
-        return Variable(Tensor({}, mask_logits.dtype(), device).fill_(0.0), true);
+        return Variable(Tensor({}, mask_logits.tensor().dtype(), device).fill_(0.0), true);
     }
 
     auto mask_targets = targets[0];  // (num_rois, H, W)
     auto class_labels = targets[1];  // (num_rois,)
 
-    // Use the existing mask_loss function from mask_head
+    // Use the existing mask_loss function from mask_head. It is already
+    // autograd-aware (gather + squeeze), so forwarding the Variable directly —
+    // rather than re-wrapping with Variable(mask_logits, true) — keeps the
+    // grad_fn chain back through the mask head and backbone intact.
     auto loss = nn::detection::mask_loss(
-        Variable(mask_logits, true),  // requires_grad=true for gradient tracking
+        mask_logits,
         mask_targets,
         class_labels
     );
@@ -1439,8 +1476,10 @@ auto mask_rcnn_resnet50_fpn(int64_t num_classes, bool pretrained)
 auto mask_rcnn_resnet101_fpn(int64_t num_classes, bool pretrained)
     -> std::shared_ptr<MaskRCNN> {
 
-    // Create ResNet-101 backbone
-    auto backbone = resnet101(1000, pretrained);
+    // Backbone is kept unpretrained: a pretrained Mask R-CNN would supply the
+    // full COCO state_dict (backbone + FPN + RPN + ROI/mask heads) as one unit,
+    // so downloading ImageNet backbone weights here would only be overwritten.
+    auto backbone = resnet101(1000, /*pretrained=*/false);
 
     // Create Mask R-CNN model
     auto model = std::make_shared<MaskRCNN>(
@@ -1459,8 +1498,14 @@ auto mask_rcnn_resnet101_fpn(int64_t num_classes, bool pretrained)
     );
 
     if (pretrained) {
-        // Load pretrained COCO weights
-        // model->load_pretrained("mask_rcnn_resnet101_fpn_coco.pth");
+        // No unified COCO checkpoint is registered for the ResNet-101 variant
+        // (unlike mask_rcnn_resnet50_fpn). Returning a model with randomly
+        // initialized head/RPN/mask weights while the caller believes a
+        // pretrained detector was requested would be silently wrong, so fail
+        // loudly instead.
+        throw std::runtime_error(
+            "mask_rcnn_resnet101_fpn: pretrained COCO weights are not available; "
+            "construct with pretrained=false or use mask_rcnn_resnet50_fpn");
     }
 
     return model;

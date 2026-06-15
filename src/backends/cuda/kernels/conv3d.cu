@@ -814,7 +814,11 @@ auto conv3d_forward_kernel(
 
     switch (input.dtype()) {
         case DType::Float32:
-            launch_conv3d_forward<float, float>(
+            // Upgrade the f32 accumulator to double, matching conv3d_backward.
+            // The forward reduction sums Cin_per_g*kD*kH*kW MACs; a float
+            // accumulator drifts O(sqrt(N)) ULPs and diverges from the CPU
+            // reference past the cross-backend rtol=1e-3.
+            launch_conv3d_forward<float, double>(
                 input, weight, bias, output, N, Cin, D, H, W, Cout, Cin_per_g,
                 kD, kH, kW, oD, oH, oW, sD, sH, sW, pD, pH, pW, dD, dH, dW, groups, stream);
             break;

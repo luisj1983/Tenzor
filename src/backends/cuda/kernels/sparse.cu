@@ -886,47 +886,41 @@ Tensor cuda_sparse_trsm_kernel(const SparseTensor& L, const Tensor& B,
     // analysis across calls for the same L would eliminate the overhead.
     auto B_t = B_gpu;  // alias
     for (int64_t k = 0; k < K; ++k) {
-        // Extract B[:, k] into a dense 1-D tensor on GPU.
+        // Extract B[:, k] (strided by K in the row-major buffer) into a dense
+        // contiguous 1-D tensor with a single strided 2D copy instead of N tiny
+        // per-element memcpys. Matches sparse_trsm_standalone.
         Tensor b_col = zeros(std::vector<int64_t>{N}, B.dtype(), Device::cuda());
         if (B.dtype() == DType::Float32) {
-            auto* dst = b_col.data<float>();
-            const auto* src = B_t.data<float>();
-            for (int64_t i = 0; i < N; ++i) {
-                CUDA_CHECK_SPARSE(cudaMemcpyAsync(
-                    dst + i, src + i * K + k, sizeof(float),
-                    cudaMemcpyDeviceToDevice, stream));
-            }
+            CUDA_CHECK_SPARSE(cudaMemcpy2DAsync(
+                b_col.data<float>(), sizeof(float),
+                B_t.data<float>() + k, K * sizeof(float),
+                sizeof(float), N,
+                cudaMemcpyDeviceToDevice, stream));
         } else if (B.dtype() == DType::Float64) {
-            auto* dst = b_col.data<double>();
-            const auto* src = B_t.data<double>();
-            for (int64_t i = 0; i < N; ++i) {
-                CUDA_CHECK_SPARSE(cudaMemcpyAsync(
-                    dst + i, src + i * K + k, sizeof(double),
-                    cudaMemcpyDeviceToDevice, stream));
-            }
+            CUDA_CHECK_SPARSE(cudaMemcpy2DAsync(
+                b_col.data<double>(), sizeof(double),
+                B_t.data<double>() + k, K * sizeof(double),
+                sizeof(double), N,
+                cudaMemcpyDeviceToDevice, stream));
         } else {
             throw std::runtime_error("cuda_sparse_trsm: only Float32/Float64 supported");
         }
 
         auto x_col = cuda_sparse_trsv_kernel(L, b_col, upper, stream_opaque);
 
-        // Scatter x_col back to X[:, k].
+        // Scatter x_col back into X[:, k] with a single strided 2D copy.
         if (B.dtype() == DType::Float32) {
-            auto* dst = X.data<float>();
-            const auto* src = x_col.data<float>();
-            for (int64_t i = 0; i < N; ++i) {
-                CUDA_CHECK_SPARSE(cudaMemcpyAsync(
-                    dst + i * K + k, src + i, sizeof(float),
-                    cudaMemcpyDeviceToDevice, stream));
-            }
+            CUDA_CHECK_SPARSE(cudaMemcpy2DAsync(
+                X.data<float>() + k, K * sizeof(float),
+                x_col.data<float>(), sizeof(float),
+                sizeof(float), N,
+                cudaMemcpyDeviceToDevice, stream));
         } else {
-            auto* dst = X.data<double>();
-            const auto* src = x_col.data<double>();
-            for (int64_t i = 0; i < N; ++i) {
-                CUDA_CHECK_SPARSE(cudaMemcpyAsync(
-                    dst + i * K + k, src + i, sizeof(double),
-                    cudaMemcpyDeviceToDevice, stream));
-            }
+            CUDA_CHECK_SPARSE(cudaMemcpy2DAsync(
+                X.data<double>() + k, K * sizeof(double),
+                x_col.data<double>(), sizeof(double),
+                sizeof(double), N,
+                cudaMemcpyDeviceToDevice, stream));
         }
     }
 
@@ -1654,11 +1648,21 @@ __global__ void spgemm_fill_kernel(
     if (row >= M) return;
 
     int64_t c_start = c_crow[row];
+    int64_t c_end   = c_crow[row + 1];
+    int64_t cap     = c_end - c_start;   // upper-bound nnz capacity for this row
     int64_t a_start = a_crow[row];
     int64_t a_end = a_crow[row + 1];
 
-    int64_t write_pos = c_start;
+    if (cap <= 0) {
+        c_row_nnz[row] = 0;
+        return;
+    }
 
+    // Use the over-allocated output region [c_start, c_end) as an open-addressing
+    // hash table keyed by column, replacing the previous O(row_nnz^2) linear
+    // rescan with amortized O(1) probing. c_col was pre-filled with the sentinel
+    // -1 (empty). cap is >= the number of distinct columns (it is the sum of the
+    // contributing B-row lengths), so linear probing always finds a free slot.
     for (int64_t ja = a_start; ja < a_end; ++ja) {
         int64_t k = a_col[ja];
         T a_val = a_vals[ja];
@@ -1669,20 +1673,39 @@ __global__ void spgemm_fill_kernel(
             int64_t col = b_col[jb];
             T val = a_val * b_vals[jb];
 
-            // Check if col already exists in this row's output (linear scan)
-            bool found = false;
-            for (int64_t p = c_start; p < write_pos; ++p) {
-                if (c_col[p] == col) {
+            // Hash the column into the row's slot range and linear-probe.
+            uint64_t h = static_cast<uint64_t>(col) * 0x9E3779B97F4A7C15ULL;
+            int64_t slot = static_cast<int64_t>(h % static_cast<uint64_t>(cap));
+            for (int64_t probe = 0; probe < cap; ++probe) {
+                int64_t p = c_start + slot;
+                int64_t existing = c_col[p];
+                if (existing == col) {
                     c_vals[p] += val;
-                    found = true;
                     break;
                 }
+                if (existing < 0) {  // empty sentinel
+                    c_col[p] = col;
+                    c_vals[p] = val;
+                    break;
+                }
+                slot = (slot + 1) % cap;
             }
-            if (!found) {
+        }
+    }
+
+    // Stable-compact the populated (non-sentinel) slots to the front of the row
+    // so the downstream compact kernel (which copies the first row_nnz entries)
+    // sees a contiguous run.
+    int64_t write_pos = c_start;
+    for (int64_t p = c_start; p < c_end; ++p) {
+        int64_t col = c_col[p];
+        if (col >= 0) {
+            if (p != write_pos) {
                 c_col[write_pos] = col;
-                c_vals[write_pos] = val;
-                write_pos++;
+                c_vals[write_pos] = c_vals[p];
+                c_col[p] = -1;
             }
+            write_pos++;
         }
     }
 
@@ -1766,7 +1789,12 @@ auto spgemm_standalone_typed(
     CUDA_CHECK_SPARSE_STANDALONE(cudaMallocAsync(&d_col_ub, total_nnz_ub * sizeof(int64_t), stream));
     CUDA_CHECK_SPARSE_STANDALONE(cudaMallocAsync(&d_vals_ub, total_nnz_ub * sizeof(T), stream));
 
-    // Pass 3: Fill with deduplication
+    // Pass 3: Fill with deduplication. Pre-fill the column buffer with the
+    // empty sentinel (-1) so the in-kernel open-addressing hash table can detect
+    // free slots. 0xFF bytes -> int64_t(-1).
+    CUDA_CHECK_SPARSE_STANDALONE(cudaMemsetAsync(d_col_ub, 0xFF,
+        total_nnz_ub * sizeof(int64_t), stream));
+
     int64_t* d_actual_nnz = nullptr;
     CUDA_CHECK_SPARSE_STANDALONE(cudaMallocAsync(&d_actual_nnz, M * sizeof(int64_t), stream));
 
@@ -1843,55 +1871,54 @@ auto spgemm_standalone(std::span<const Tensor> inputs, const OpAttributes& attrs
 }
 
 // ============================================================================
-// Sparse Triangular Solve: level-set parallelism with atomics
+// Sparse Triangular Solve: deterministic single-thread sequential GPU kernel.
+//
+// The previous version mapped one thread per row and spin-waited on
+// `atomicOr(&solved[c], 0)` until dependency rows were solved by threads in
+// other blocks. CUDA gives no forward-progress guarantee that a not-yet-
+// scheduled block holding dependency `c` will run while this block spins on an
+// SM, so for N large enough that the grid's blocks cannot all be co-resident
+// the solve can hang. (The same hazard is documented for the ROCm SIMT trsv,
+// which was switched to a sequential kernel for correctness.)
+//
+// We solve sequentially in dependency order on a single thread: forward
+// substitution (row 0..N-1) for lower-triangular, backward (N-1..0) for
+// upper-triangular. Each row's dependencies are already computed when it is
+// processed, so no cross-block synchronization is needed and forward progress
+// is guaranteed.
 // ============================================================================
 
 template <typename T>
-__global__ void sparse_trsv_kernel(
+__global__ void sparse_trsv_seq_kernel(
     const int64_t* __restrict__ crow,    // [N+1]
     const int64_t* __restrict__ col,     // [nnz]
     const T* __restrict__ vals,          // [nnz]
     const T* __restrict__ b,             // [N]
     T* __restrict__ x,                   // [N] output
-    int* __restrict__ solved,            // [N] atomic flags
     int64_t N, bool upper)
 {
-    int64_t tid = blockIdx.x * blockDim.x + threadIdx.x;
-    if (tid >= N) return;
+    // Single thread drives the whole solve in dependency order.
+    if (blockIdx.x != 0 || threadIdx.x != 0) return;
 
-    // Map thread to row: lower tri processes row=tid, upper tri processes row=N-1-tid
-    int64_t row = upper ? (N - 1 - tid) : tid;
+    for (int64_t step = 0; step < N; ++step) {
+        int64_t row = upper ? (N - 1 - step) : step;
 
-    int64_t row_start = crow[row];
-    int64_t row_end = crow[row + 1];
+        int64_t row_start = crow[row];
+        int64_t row_end = crow[row + 1];
 
-    // Wait for dependencies (lower: cols < row; upper: cols > row)
-    if (tid > 0) {
+        // x[row] = (b[row] - sum(A[row,c]*x[c] for dependent c)) / A[row,row]
+        T rhs = b[row];
+        T diag = T(1);
         for (int64_t j = row_start; j < row_end; ++j) {
             int64_t c = col[j];
-            if (upper ? (c > row) : (c < row)) {
-                while (atomicOr(&solved[c], 0) == 0) {
-                    // Spin-wait for dependency
-                }
+            if (c == row) {
+                diag = vals[j];
+            } else if (upper ? (c > row) : (c < row)) {
+                rhs -= vals[j] * x[c];
             }
         }
+        x[row] = rhs / diag;
     }
-
-    // Compute: x[row] = (b[row] - sum(A[row,c]*x[c] for dependent c)) / A[row,row]
-    T rhs = b[row];
-    T diag = T(1);
-    for (int64_t j = row_start; j < row_end; ++j) {
-        int64_t c = col[j];
-        if (c == row) {
-            diag = vals[j];
-        } else if (upper ? (c > row) : (c < row)) {
-            rhs -= vals[j] * x[c];
-        }
-    }
-    x[row] = rhs / diag;
-
-    // Signal completion
-    atomicExch(&solved[row], 1);
 }
 
 auto sparse_trsv_standalone(
@@ -1900,29 +1927,19 @@ auto sparse_trsv_standalone(
 {
     auto x = tenzor::zeros({N}, vals.dtype(), vals.device());
 
-    // Allocate and zero solved flags
-    int* d_solved = nullptr;
-    CUDA_CHECK_SPARSE_STANDALONE(cudaMallocAsync(&d_solved, N * sizeof(int), stream));
-    CUDA_CHECK_SPARSE_STANDALONE(cudaMemsetAsync(d_solved, 0, N * sizeof(int), stream));
-
-    constexpr int BLOCK = 256;
-    int64_t blocks = (N + BLOCK - 1) / BLOCK;
-
     if (vals.dtype() == DType::Float32) {
-        sparse_trsv_kernel<float><<<blocks, BLOCK, 0, stream>>>(
+        sparse_trsv_seq_kernel<float><<<1, 1, 0, stream>>>(
             crow.data<int64_t>(), col_idx.data<int64_t>(), vals.data<float>(),
-            b.data<float>(), x.data<float>(), d_solved, N, upper);
+            b.data<float>(), x.data<float>(), N, upper);
     } else if (vals.dtype() == DType::Float64) {
-        sparse_trsv_kernel<double><<<blocks, BLOCK, 0, stream>>>(
+        sparse_trsv_seq_kernel<double><<<1, 1, 0, stream>>>(
             crow.data<int64_t>(), col_idx.data<int64_t>(), vals.data<double>(),
-            b.data<double>(), x.data<double>(), d_solved, N, upper);
+            b.data<double>(), x.data<double>(), N, upper);
     } else {
-        CUDA_CHECK_SPARSE_STANDALONE(cudaFreeAsync(d_solved, stream));
         throw std::runtime_error("sparse_trsv_standalone: only Float32/Float64 supported");
     }
 
     CUDA_CHECK_SPARSE_STANDALONE(cudaGetLastError());
-    CUDA_CHECK_SPARSE_STANDALONE(cudaFreeAsync(d_solved, stream));
     return x;
 }
 

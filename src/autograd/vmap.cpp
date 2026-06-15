@@ -97,46 +97,25 @@ auto dim_shifted_passthrough(AttrKey dim_attr_key) -> BatchingRule {
             return vmap_loop_and_stack(func, batched_input, batch_dim);
         }
 
-        OpId op = grad_fn->op_id();
-        if (op == OpId::Unknown) {
-            return vmap_loop_and_stack(func, batched_input, batch_dim);
-        }
-
-        OpAttributes attrs = grad_fn->saved_attributes();
-        if (!attrs.has(dim_attr_key)) {
-            // No explicit dim recorded → full reduction (or the op was
-            // installed by an older subclass that doesn't yet override
-            // saved_attributes). Either way, there's no single-axis
-            // shift that gives per-sample results; loop-and-stack is
-            // the only correct fallback.
-            return vmap_loop_and_stack(func, batched_input, batch_dim);
-        }
-
-        int64_t dim = attrs.get_int(dim_attr_key);
-        // Normalise negative dim against the *unbatched* ndim — that's
-        // the view the user's `func` operates in.
-        if (dim < 0) {
-            dim += unbatched_ndim;
-        }
-        // Shift past the batch axis so we hit the user's intended axis
-        // in the batched tensor.
-        int64_t new_dim = (dim >= batch_dim) ? dim + 1 : dim;
-        attrs.set(dim_attr_key, new_dim);
-
-        std::vector<Tensor> inputs = {input_tensor};
-        auto outputs = dispatch(op, inputs, attrs);
-        if (outputs.empty()) {
-            return vmap_loop_and_stack(func, batched_input, batch_dim);
-        }
-        // Single-output ops (Sum/Mean/Prod/Var/Std/Max/Min): just outputs[0].
-        // Multi-output ops (TopK, Sort): the user's `func` returned one
-        // of the tuple branches; the probe's grad_fn doesn't tell us
-        // which slot. We mirror the probe's output count and pick the
-        // same slot as the probe_result. Without an output-index hook
-        // we default to slot 0 (values branch for TopK/Sort), which is
-        // the differentiable branch and matches what `func` returns in
-        // the common case.
-        return Variable(outputs[0], batched_input.requires_grad());
+        (void)unbatched_ndim;
+        (void)dim_attr_key;
+        // Audit (graph-severing fix): the previous fast path re-ran the op
+        // via the raw `dispatch()` (reading the saved dim attribute, shifting
+        // it past the batch axis, redispatching) and rewrapped the result as
+        // `Variable(outputs[0], requires_grad)` with NO grad_fn. That severed
+        // autograd for every dim-carrying op routed through this rule (Sum,
+        // Mean, Prod, Var, Std, Max, Min, Softmax, LogSoftmax, TopK, Sort,
+        // ArgSort, CumSum, CumProd, Roll): backward through a vmap of these
+        // yielded zero/absent input grads and lost second-order graphs under
+        // create_graph. We instead fall back to vmap_loop_and_stack, which
+        // calls the user's `func` per slice (so the user's own `dim` already
+        // indexes the correct unbatched axis) and stitches the per-slice
+        // results with Variable-level autograd::unsqueeze + autograd::cat —
+        // preserving the grad_fn chain at the cost of B sequential dispatches.
+        // The probe above (grad_fn presence) is still useful to confirm the
+        // op is autograd-tracked before committing to the loop; un-tracked
+        // raw-tensor callers already fell back above.
+        return vmap_loop_and_stack(func, batched_input, batch_dim);
     };
 }
 

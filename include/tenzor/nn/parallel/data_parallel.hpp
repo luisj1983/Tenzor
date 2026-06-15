@@ -95,6 +95,33 @@ public:
     );
 
     /**
+     * @brief Construct DataParallel with a real replication factory and/or a
+     *        ProcessGroup for gradient all-reduce.
+     *
+     * The legacy ctor leaves `module_factory_` and `pg_` null, so replicate()
+     * aliases one shared module across devices and the PG all-reduce path
+     * (and MAX/MIN reductions) are dead. This ctor wires both, enabling true
+     * per-device replicas and real all-reduce.
+     *
+     * @param module Master module to replicate
+     * @param module_factory Factory that materializes an independent replica
+     * @param pg Optional process group (NCCL/Gloo/MPI) for grad all-reduce
+     * @param device_ids List of GPU device IDs to use
+     * @param output_device Master GPU device ID (default: device_ids[0])
+     * @param dim Batch dimension to split (default: 0)
+     * @param reduce_op Gradient reduction op
+     */
+    DataParallel(
+        std::shared_ptr<Module> module,
+        ModuleFactory module_factory,
+        std::shared_ptr<::tenzor::distributed::ProcessGroupBase> pg,
+        std::vector<int> device_ids = {},
+        int output_device = -1,
+        int dim = 0,
+        ::tenzor::distributed::ReduceOp reduce_op = ::tenzor::distributed::ReduceOp::AVG
+    );
+
+    /**
      * @brief Destructor.
      */
     ~DataParallel() override = default;
@@ -164,12 +191,12 @@ public:
      *
      * @param mode Training mode flag
      */
-    auto train(bool mode = true) -> void;
+    auto train(bool mode = true) -> void override;
 
     /**
      * @brief Set module to evaluation mode.
      */
-    auto eval() -> void;
+    auto eval() -> void override;
 
 private:
     std::shared_ptr<Module> module_;           ///< Original module (master)
@@ -282,6 +309,14 @@ private:
      * @throws std::runtime_error if CUDA not available or device invalid
      */
     auto validate_devices() -> void;
+
+    /**
+     * @brief Validate reduce_op_ against the available reduction path.
+     *
+     * Without a ProcessGroup only SUM/AVG are realizable; MAX/MIN/PRODUCT/etc.
+     * are rejected at construction rather than throwing on first backward().
+     */
+    auto validate_reduce_op() const -> void;
 
     /**
      * @brief Check if input batch can be split.

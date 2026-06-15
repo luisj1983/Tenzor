@@ -3287,18 +3287,21 @@ auto ONNXExporter::jit_op_type_to_onnx(jit::OpType op_type) -> std::string {
         case jit::OpType::Embedding:        return "Gather";
         case jit::OpType::GELU:             return "Gelu";
 
-        // Linear algebra (ONNX doesn't have native ops for most of these,
-        // but some may be representable via custom ops or com.microsoft domain)
+        // Linear algebra. ONNX has no native ops for most of these, so they go
+        // under the tenzor custom domain. These op_type strings MUST match the
+        // OpId-visitor mapping (op_id_to_onnx_type, "Linalg*" names) so the two
+        // export paths emit identical, re-importable nodes; importer.cpp has
+        // matching cases for the custom-domain names.
         case jit::OpType::Det:              return "Det";
-        case jit::OpType::Inv:              return "Inverse";
-        case jit::OpType::Solve:            return "com.microsoft.Solve";
-        case jit::OpType::Cholesky:         return "com.microsoft.Cholesky";
-        case jit::OpType::Svd:              return "com.microsoft.SVD";
-        case jit::OpType::Qr:              return "com.microsoft.QR";
-        case jit::OpType::Eigh:             return "com.microsoft.Eigh";
-        case jit::OpType::Eigvalsh:         return "com.microsoft.Eigvalsh";
-        case jit::OpType::Norm:             return "com.microsoft.MatrixNorm";
-        case jit::OpType::Slogdet:          return "com.microsoft.Slogdet";
+        case jit::OpType::Inv:              return "LinalgInv";
+        case jit::OpType::Solve:            return "LinalgSolve";
+        case jit::OpType::Cholesky:         return "LinalgCholesky";
+        case jit::OpType::Svd:              return "LinalgSVD";
+        case jit::OpType::Qr:               return "LinalgQR";
+        case jit::OpType::Eigh:             return "LinalgEigh";
+        case jit::OpType::Eigvalsh:         return "LinalgEigvalsh";
+        case jit::OpType::Norm:             return "LinalgMatrixNorm";
+        case jit::OpType::Slogdet:          return "LinalgSlogdet";
 
         // Constant / Input / Output are structural, not ONNX ops
         case jit::OpType::Constant:         return "Constant";

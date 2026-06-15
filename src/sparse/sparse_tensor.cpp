@@ -470,6 +470,51 @@ auto SparseTensor::to_dense() const -> Tensor {
                     int64_t col = idx_ptr[nnz_count + i];
                     r[row * ncols + col] += v[i];
                 }
+            } else {
+                throw std::runtime_error(
+                    "SparseTensor::to_dense (host COO): unsupported value dtype " +
+                    std::string(dtype_name(vals.dtype())));
+            }
+        } else {
+            // General / partial-sparse COO: sparse_dim_ leading index rows
+            // select a position in the leading slab; the remaining dense_dim_
+            // dimensions of `values` are a contiguous block scattered into the
+            // trailing dims of the dense result. (Previously this case matched
+            // no branch and silently returned an all-zero result.)
+            int64_t ndim = static_cast<int64_t>(shape_.size());
+            // Row-major strides of the dense result.
+            std::vector<int64_t> strides(ndim);
+            strides[ndim - 1] = 1;
+            for (int64_t d = ndim - 2; d >= 0; --d) {
+                strides[d] = strides[d + 1] * shape_[d + 1];
+            }
+            // Number of contiguous dense elements stored per nnz entry =
+            // product of the trailing dense dims (== values numel / nnz).
+            int64_t block = (nnz_count > 0)
+                ? vals.numel() / nnz_count : 0;
+
+            auto scatter_blocks = [&](auto* r, const auto* v) {
+                for (int64_t i = 0; i < nnz_count; ++i) {
+                    // Fold the sparse coords into a base flat offset.
+                    int64_t base = 0;
+                    for (int64_t d = 0; d < sparse_dim_; ++d) {
+                        base += idx_ptr[d * nnz_count + i] * strides[d];
+                    }
+                    const auto* vblk = v + i * block;
+                    for (int64_t e = 0; e < block; ++e) {
+                        r[base + e] += vblk[e];
+                    }
+                }
+            };
+            if (vals.dtype() == DType::Float32) {
+                scatter_blocks(result.data<float>(), vals.data<float>());
+            } else if (vals.dtype() == DType::Float64) {
+                scatter_blocks(result.data<double>(), vals.data<double>());
+            } else {
+                throw std::runtime_error(
+                    "SparseTensor::to_dense (host partial-sparse COO): "
+                    "unsupported value dtype " +
+                    std::string(dtype_name(vals.dtype())));
             }
         }
     } else if (layout_ == SparseLayout::CSR) {
@@ -497,6 +542,10 @@ auto SparseTensor::to_dense() const -> Tensor {
                     r[row * ncols + col_ptr[j]] += v[j];
                 }
             }
+        } else {
+            throw std::runtime_error(
+                "SparseTensor::to_dense (host CSR): unsupported value dtype " +
+                std::string(dtype_name(vals.dtype())));
         }
     } else if (layout_ == SparseLayout::CSC) {
         auto ccol = ccol_indices_.contiguous();
@@ -522,6 +571,10 @@ auto SparseTensor::to_dense() const -> Tensor {
                     r[row_ptr[j] * ncols + col] += v[j];
                 }
             }
+        } else {
+            throw std::runtime_error(
+                "SparseTensor::to_dense (host CSC): unsupported value dtype " +
+                std::string(dtype_name(vals.dtype())));
         }
     } else if (layout_ == SparseLayout::BSR) {
         auto rp = bsr_row_ptr_.contiguous();
@@ -568,6 +621,10 @@ auto SparseTensor::to_dense() const -> Tensor {
                     }
                 }
             }
+        } else {
+            throw std::runtime_error(
+                "SparseTensor::to_dense (host BSR): unsupported value dtype " +
+                std::string(dtype_name(vals.dtype())));
         }
     }
 

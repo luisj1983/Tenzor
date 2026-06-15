@@ -125,6 +125,10 @@ target_link_libraries(test_mixed_precision PRIVATE tenzor_core GTest::gtest_main
 add_executable(test_dataloader test_dataloader.cpp)
 target_link_libraries(test_dataloader PRIVATE tenzor_core GTest::gtest_main)
 
+# Data-augmentation in-place mutation regression tests
+add_executable(test_data_augment test_data_augment.cpp)
+target_link_libraries(test_data_augment PRIVATE tenzor_core GTest::gtest_main)
+
 # Float16/BFloat16 tests
 add_executable(test_fp16 test_fp16.cpp)
 target_link_libraries(test_fp16 PRIVATE tenzor_core GTest::gtest_main)
@@ -657,6 +661,7 @@ tenzor_discover_tests(test_autocast DISCOVERY_TIMEOUT 60)
 tenzor_discover_tests(test_autocast_multidtype DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
 tenzor_discover_tests(test_mixed_precision DISCOVERY_TIMEOUT 60)
 tenzor_discover_tests(test_dataloader DISCOVERY_TIMEOUT 60)
+tenzor_discover_tests(test_data_augment DISCOVERY_TIMEOUT 60)
 tenzor_discover_tests(test_fp16 DISCOVERY_TIMEOUT 60)
 tenzor_discover_tests(test_gradient_checkpoint DISCOVERY_TIMEOUT 60)
 tenzor_discover_tests(test_checkpoint_multidtype DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST BACKENDS multi)

@@ -143,17 +143,13 @@ auto GPTQQuantizer::quantize_layer(const Tensor& weight, const Tensor& hessian)
                               H.device()) * damp;
     H = H + damp_diag;
 
-    // Compute H_inv = inv(H), then Cholesky decomposition of H_inv
-    // GPTQ uses the Cholesky of H_inv for the error compensation
+    // Compute H_inv = inv(H). The error-compensation loop below reads H_inv
+    // entries directly via hinv_ptr (H_inv[j,j] and H_inv[j, j+1:]); it does
+    // not use a Cholesky factor or a precomputed diagonal, so neither is
+    // materialised here. (A previous version computed cholesky(H_inv) and
+    // diag(H_inv) that were never referenced — an O(n^3) waste that could also
+    // spuriously throw on a borderline-PD H_inv.)
     auto H_inv = linalg::inv(H);
-
-    // Cholesky decomposition of H_inv (upper triangular)
-    // H_inv = U^T * U where U is upper triangular
-    auto Hinv_chol = linalg::cholesky(H_inv, /*upper=*/true);
-
-    // Extract diagonal of H_inv for the error update formula
-    // We need H_inv[j,j] and H_inv[j, j+1:] for each column j
-    auto H_inv_diag = ops::diag(H_inv);
 
     // Prepare output tensors
     int64_t num_groups = (in_features + config_.group_size - 1) / config_.group_size;
@@ -243,13 +239,20 @@ auto GPTQQuantizer::quantize_layer(const Tensor& weight, const Tensor& hessian)
         }
     }
 
-    // If desc_act was used, permute quantized weights back to original order
-    if (config_.desc_act) {
-        Q = ops::index_select(Q, 1, inv_perm);
-        // Also need to rearrange scales/zeros to match the original column groups
-        // Since groups map to permuted columns, we need to recompute or store
-        // the permutation for the caller to use during inference
-    }
+    // desc_act consistency: when desc_act is on, columns of W/H were permuted
+    // by `perm`, and the per-group scales/zeros were computed indexed by the
+    // *permuted* column groups. Previously Q was un-permuted back to original
+    // column order here while scales/zeros were left in permuted-group order —
+    // so dequant used the wrong group's scale/zero for every column whose
+    // original group differs from its permuted group, corrupting the result.
+    //
+    // We now keep Q, scales and zeros all in permuted (activation) order so
+    // they are mutually consistent: column k of Q dequantizes with group
+    // k/group_size of scales/zeros. The returned `perm` lets the caller apply
+    // the same permutation to input activations at inference time (and
+    // inv_perm to outputs), which is the standard GPTQ desc_act protocol.
+    // (inv_perm intentionally unused now that Q stays permuted.)
+    (void)inv_perm;
 
     // Pack INT4 weights if using 4-bit quantization
     Tensor packed;
@@ -281,6 +284,7 @@ auto GPTQQuantizer::quantize_layer(const Tensor& weight, const Tensor& hessian)
 
     return GPTQResult{
         .packed_weight = std::move(packed),
+        .in_features = in_features,
         .scales = std::move(scales),
         .zeros = std::move(zeros_tensor),
         .perm = std::move(result_perm)

@@ -44,6 +44,9 @@ struct AWQConfig {
  */
 struct AWQResult {
     Tensor quantized_weight;  ///< Packed INT4/INT8 weight tensor
+    int64_t in_features = 0;  ///< Logical (unpacked) in_features. For INT4 the packed
+                              ///< tensor has ceil(in_features/2) columns, so this records
+                              ///< the true (possibly odd) column count for unambiguous unpack.
     Tensor scales;            ///< Per-group dequant scales, shape (out_features, num_groups)
     Tensor zeros;             ///< Per-group zero points, shape (out_features, num_groups)
     Tensor act_scales;        ///< Per-input-channel AWQ scale factors s[j], shape

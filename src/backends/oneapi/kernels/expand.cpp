@@ -9,6 +9,10 @@
 namespace tenzor {
 namespace oneapi {
 
+// Maximum number of dimensions supported by the fixed-size stack arrays used
+// to capture shape/stride metadata into the SYCL kernels below.
+static constexpr int64_t kExpandMaxDims = 16;
+
 // Kernel class declarations for expand operation (separate classes per dtype to avoid ODR violations)
 struct ExpandKernelFloat32 {};
 struct ExpandKernelFloat64 {};
@@ -92,10 +96,15 @@ void expand_kernel_impl(const T* input_data, T* output_data,
                                             ExpandKernelFloat32,
                                             ExpandKernelFloat64>;
 
+    if (ndim > kExpandMaxDims) {
+        throw std::invalid_argument(
+            "expand: tensor rank exceeds maximum supported dimensions (16)");
+    }
+
     // Copy shape and stride info to arrays for kernel capture
-    int64_t input_shape_arr[16];   // Maximum 16 dimensions
-    int64_t output_shape_arr[16];
-    int64_t input_strides_arr[16];
+    int64_t input_shape_arr[kExpandMaxDims];   // Maximum 16 dimensions
+    int64_t output_shape_arr[kExpandMaxDims];
+    int64_t input_strides_arr[kExpandMaxDims];
 
     for (int64_t i = 0; i < ndim; ++i) {
         input_shape_arr[i] = input_shape[i];
@@ -204,6 +213,14 @@ auto expand_kernel(const Tensor& input_in, const OpAttributes& attrs, sycl::queu
 
     int64_t ndim = static_cast<int64_t>(input_shape.size());
 
+    // The dtype branches below capture shape/stride metadata into fixed-size
+    // stack arrays sized to kExpandMaxDims. Guard against the caller-controlled
+    // target shape exceeding that bound to avoid a stack buffer overflow.
+    if (ndim > kExpandMaxDims) {
+        throw std::invalid_argument(
+            "expand: tensor rank exceeds maximum supported dimensions (16)");
+    }
+
     // Dispatch based on dtype
     if (input.dtype() == DType::Float32) {
         const float* input_ptr = get_data_ptr<const float>(input);
@@ -224,9 +241,9 @@ auto expand_kernel(const Tensor& input_in, const OpAttributes& attrs, sycl::queu
         sycl::half* output_ptr = get_data_ptr<sycl::half>(output);
 
         // Copy shape and stride info to arrays for kernel capture
-        int64_t input_shape_arr[16];
-        int64_t output_shape_arr[16];
-        int64_t input_strides_arr[16];
+        int64_t input_shape_arr[kExpandMaxDims];
+        int64_t output_shape_arr[kExpandMaxDims];
+        int64_t input_strides_arr[kExpandMaxDims];
 
         for (int64_t i = 0; i < ndim; ++i) {
             input_shape_arr[i] = input_shape[i];
@@ -256,9 +273,9 @@ auto expand_kernel(const Tensor& input_in, const OpAttributes& attrs, sycl::queu
         uint16_t* output_ptr = get_data_ptr<uint16_t>(output);
 
         // Copy shape and stride info to arrays for kernel capture
-        int64_t input_shape_arr[16];
-        int64_t output_shape_arr[16];
-        int64_t input_strides_arr[16];
+        int64_t input_shape_arr[kExpandMaxDims];
+        int64_t output_shape_arr[kExpandMaxDims];
+        int64_t input_strides_arr[kExpandMaxDims];
 
         for (int64_t i = 0; i < ndim; ++i) {
             input_shape_arr[i] = input_shape[i];
@@ -286,9 +303,9 @@ auto expand_kernel(const Tensor& input_in, const OpAttributes& attrs, sycl::queu
         const int32_t* input_ptr = get_data_ptr<const int32_t>(input);
         int32_t* output_ptr = get_data_ptr<int32_t>(output);
 
-        int64_t input_shape_arr[16];
-        int64_t output_shape_arr[16];
-        int64_t input_strides_arr[16];
+        int64_t input_shape_arr[kExpandMaxDims];
+        int64_t output_shape_arr[kExpandMaxDims];
+        int64_t input_strides_arr[kExpandMaxDims];
 
         for (int64_t i = 0; i < ndim; ++i) {
             input_shape_arr[i] = input_shape[i];
@@ -316,9 +333,9 @@ auto expand_kernel(const Tensor& input_in, const OpAttributes& attrs, sycl::queu
         const int64_t* input_ptr = get_data_ptr<const int64_t>(input);
         int64_t* output_ptr = get_data_ptr<int64_t>(output);
 
-        int64_t input_shape_arr[16];
-        int64_t output_shape_arr[16];
-        int64_t input_strides_arr[16];
+        int64_t input_shape_arr[kExpandMaxDims];
+        int64_t output_shape_arr[kExpandMaxDims];
+        int64_t input_strides_arr[kExpandMaxDims];
 
         for (int64_t i = 0; i < ndim; ++i) {
             input_shape_arr[i] = input_shape[i];
@@ -346,9 +363,9 @@ auto expand_kernel(const Tensor& input_in, const OpAttributes& attrs, sycl::queu
         const uint8_t* input_ptr = get_data_ptr<const uint8_t>(input);
         uint8_t* output_ptr = get_data_ptr<uint8_t>(output);
 
-        int64_t input_shape_arr[16];
-        int64_t output_shape_arr[16];
-        int64_t input_strides_arr[16];
+        int64_t input_shape_arr[kExpandMaxDims];
+        int64_t output_shape_arr[kExpandMaxDims];
+        int64_t input_strides_arr[kExpandMaxDims];
 
         for (int64_t i = 0; i < ndim; ++i) {
             input_shape_arr[i] = input_shape[i];
@@ -380,9 +397,9 @@ auto expand_kernel(const Tensor& input_in, const OpAttributes& attrs, sycl::queu
         const void* in_ptr_raw = input.data_ptr();
         void* out_ptr_raw = const_cast<void*>(output.data_ptr());
 
-        int64_t input_shape_arr[16];
-        int64_t output_shape_arr[16];
-        int64_t input_strides_arr[16];
+        int64_t input_shape_arr[kExpandMaxDims];
+        int64_t output_shape_arr[kExpandMaxDims];
+        int64_t input_strides_arr[kExpandMaxDims];
         for (int64_t i = 0; i < ndim; ++i) {
             input_shape_arr[i] = input_shape[i];
             output_shape_arr[i] = target_shape[i];

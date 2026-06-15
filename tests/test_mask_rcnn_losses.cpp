@@ -382,8 +382,8 @@ TEST_P(MaskRCNNLossTest, GradientFlow) {
 
     Tensor gt_boxes_cpu({1, 2, 4}, DType::Float32, Device::cpu());
     auto* boxes_data = gt_boxes_cpu.data<float>();
-    boxes_data[0] = 100.0f; boxes_data[1] = 100.0f; boxes_data[2] = 200.0f; boxes_data[3] = 200.0f;
-    boxes_data[4] = 300.0f; boxes_data[5] = 300.0f; boxes_data[6] = 400.0f; boxes_data[7] = 400.0f;
+    boxes_data[0] = 100.0f; boxes_data[1] = 100.0f; boxes_data[2] = 300.0f; boxes_data[3] = 300.0f;
+    boxes_data[4] = 400.0f; boxes_data[5] = 400.0f; boxes_data[6] = 600.0f; boxes_data[7] = 600.0f;
     Tensor gt_boxes = gt_boxes_cpu.to(device);
 
     Tensor gt_labels_cpu({1, 2}, DType::Int64, Device::cpu());
@@ -391,33 +391,80 @@ TEST_P(MaskRCNNLossTest, GradientFlow) {
     labels_data[0] = 1; labels_data[1] = 2;
     Tensor gt_labels = gt_labels_cpu.to(device);
 
+    // Non-trivial mask regions so the mask-branch loss is meaningfully non-zero
+    // whenever positive ROIs are sampled — required for the mask-head gradient
+    // assertion below to be a genuine regression guard rather than a no-op.
     Tensor gt_masks_cpu({1, 2, 800, 800}, DType::Float32, Device::cpu());
-    gt_masks_cpu.fill_(0.0f);
+    {
+        auto* masks_data = gt_masks_cpu.data<float>();
+        std::fill(masks_data, masks_data + gt_masks_cpu.numel(), 0.0f);
+        for (int64_t h = 100; h < 300; ++h) {
+            for (int64_t w = 100; w < 300; ++w) {
+                masks_data[0 * 800 * 800 + h * 800 + w] = 1.0f;  // object 0
+            }
+        }
+        for (int64_t h = 400; h < 600; ++h) {
+            for (int64_t w = 400; w < 600; ++w) {
+                masks_data[1 * 800 * 800 + h * 800 + w] = 1.0f;  // object 1
+            }
+        }
+    }
     Tensor gt_masks = gt_masks_cpu.to(device);
 
     auto [rpn_cls_loss, rpn_box_loss, roi_cls_loss, roi_box_loss, mask_loss] =
         model->forward_train(images, gt_boxes, gt_labels, gt_masks);
 
-    // Create total loss with gradient tracking
-    auto total_loss_tensor =
-        rpn_cls_loss.tensor() + rpn_box_loss.tensor() +
-        roi_cls_loss.tensor() + roi_box_loss.tensor() +
-        mask_loss.tensor();
-
-    Variable total_loss(total_loss_tensor, true);
+    // Build the total loss by SUMMING THE VARIABLES — Variable::operator+ is
+    // autograd-aware, so the grad_fn chains of all five head losses are merged
+    // into a single graph back to every parameter. (The old test rebuilt this
+    // from raw .tensor() values, which severed the graph and made backward a
+    // no-op — that is exactly the bug this test now guards against.)
+    Variable total_loss =
+        rpn_cls_loss + rpn_box_loss + roi_cls_loss + roi_box_loss + mask_loss;
 
     // Verify loss is a valid scalar
     EXPECT_EQ(total_loss.tensor().ndim(), 0);  // Scalar
     float total = total_loss.tensor().cpu().item<float>();
     EXPECT_GT(total, 0.0f);
 
-    // In a real training scenario, we would:
-    // 1. Call total_loss.backward() to compute gradients
-    // 2. Verify gradients are non-zero for parameters
-    // 3. Update parameters with optimizer
+    // Backpropagate through the whole detector.
+    total_loss.backward();
 
-    auto params = model->parameters();
-    EXPECT_GT(params.size(), 0);
+    // Group model parameters by the registered submodule prefix
+    // (backbone.* / rpn.* / roi_head.* / mask_head.*) and assert that each
+    // head — and the backbone — receives a genuinely non-zero gradient. If any
+    // loss severs its grad_fn chain, the corresponding group gets no gradient
+    // and this test FAILS (the regression guard).
+    auto named = model->named_parameters();
+    ASSERT_GT(named.size(), 0u);
+
+    auto group_has_nonzero_grad = [&](const std::string& prefix) -> bool {
+        for (auto& [name, param] : named) {
+            if (name.rfind(prefix, 0) != 0) continue;          // not in this group
+            const auto& grad_opt = param->grad();
+            if (!grad_opt.has_value()) continue;
+            if (grad_opt.value().numel() == 0) continue;
+            auto g_max = ::tenzor::max(
+                             ::tenzor::abs(grad_opt.value().cpu()
+                                               .to(::tenzor::DType::Float64)))
+                             .item<double>();
+            if (g_max > 0.0) return true;
+        }
+        return false;
+    };
+
+    EXPECT_TRUE(group_has_nonzero_grad("backbone."))
+        << "no backbone parameter received a gradient — grad_fn severed "
+           "before the backbone";
+    EXPECT_TRUE(group_has_nonzero_grad("rpn."))
+        << "no RPN-head parameter received a gradient — RPN loss severed its "
+           "grad_fn chain";
+    EXPECT_TRUE(group_has_nonzero_grad("roi_head."))
+        << "no ROI-head parameter received a gradient — ROI loss severed its "
+           "grad_fn chain";
+    EXPECT_TRUE(group_has_nonzero_grad("mask_head."))
+        << "no mask-head parameter received a gradient — mask loss severed its "
+           "grad_fn chain";
 }
 
 TEST_P(MaskRCNNLossTest, LossReasonableValues) {

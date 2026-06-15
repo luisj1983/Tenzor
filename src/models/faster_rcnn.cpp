@@ -38,7 +38,8 @@ FasterRCNN::FasterRCNN(
     double roi_positive_fraction,
     double roi_score_thresh,
     double roi_nms_thresh,
-    int64_t roi_detections_per_img)
+    int64_t roi_detections_per_img,
+    int64_t backbone_out_channels)
     : num_classes_(num_classes),
       backbone_(std::move(backbone)) {
 
@@ -57,18 +58,25 @@ FasterRCNN::FasterRCNN(
     // instead of hard-coding 2048 for every variant. The previous code
     // silently sized the RPN for Bottleneck (2048 ch) even when the backbone
     // was ResNet-18/34 (BasicBlock, 512 ch) — which would cause a Conv2d
-    // shape mismatch at the first RPN forward pass. For non-ResNet backbones
-    // we keep the 2048 default; users wiring a custom backbone should swap
-    // in the appropriate value (G8-followup: parameter-shape introspection
-    // for arbitrary Module backbones).
-    int64_t backbone_out_channels = 2048;
-    if (auto resnet = std::dynamic_pointer_cast<ResNet>(backbone_)) {
-        backbone_out_channels = resnet->out_channels();
+    // shape mismatch at the first RPN forward pass.
+    //
+    // Resolution order:
+    //   1. An explicit caller-supplied channel count (backbone_out_channels >= 0)
+    //      always wins — this is the only correct path for non-ResNet custom
+    //      backbones whose channels cannot be introspected.
+    //   2. Otherwise introspect a ResNet backbone via out_channels().
+    //   3. Otherwise fall back to 2048 (Bottleneck default).
+    int64_t resolved_out_channels = backbone_out_channels;
+    if (resolved_out_channels < 0) {
+        resolved_out_channels = 2048;
+        if (auto resnet = std::dynamic_pointer_cast<ResNet>(backbone_)) {
+            resolved_out_channels = resnet->out_channels();
+        }
     }
 
     // Create RPN
     rpn_ = std::make_shared<nn::detection::RegionProposalNetwork>(
-        backbone_out_channels,
+        resolved_out_channels,
         anchor_generator,
         rpn_fg_iou_thresh,
         rpn_bg_iou_thresh,
@@ -83,7 +91,7 @@ FasterRCNN::FasterRCNN(
 
     // Create ROI Head
     roi_head_ = std::make_shared<nn::detection::RoIHead>(
-        backbone_out_channels,
+        resolved_out_channels,
         num_classes,
         roi_output_size,
         roi_spatial_scale,
@@ -361,11 +369,14 @@ auto faster_rcnn_resnet101(
 
 auto faster_rcnn_custom(
     std::shared_ptr<nn::Module> backbone,
-    [[maybe_unused]] int64_t backbone_out_channels,
+    int64_t backbone_out_channels,
     int64_t num_classes)
     -> std::shared_ptr<FasterRCNN> {
 
-    // Create Faster R-CNN with custom backbone
+    // Create Faster R-CNN with custom backbone. The caller-supplied channel
+    // count is threaded through so the RPN/ROIHead Conv2d are sized for the
+    // actual backbone output (the whole point of the custom factory) rather
+    // than the hard-coded 2048 ResNet-Bottleneck default.
     auto model = std::make_shared<FasterRCNN>(
         backbone,
         num_classes,
@@ -373,7 +384,8 @@ auto faster_rcnn_custom(
         std::vector<float>{0.5f, 1.0f, 2.0f},
         0.7, 0.3, 256, 0.5, 2000, 1000, 0.7,
         7, 1.0 / 16.0, 2,
-        0.5, 0.5, 512, 0.25, 0.05, 0.5, 100
+        0.5, 0.5, 512, 0.25, 0.05, 0.5, 100,
+        backbone_out_channels
     );
 
     return model;

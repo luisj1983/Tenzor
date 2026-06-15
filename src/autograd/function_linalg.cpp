@@ -92,6 +92,30 @@ inline auto pad_tuple_grad_outputs(
     return out;
 }
 
+// Variable-level, batch-aware diag_embed for the higher-order (create_graph)
+// linalg backward paths. Given a Variable vector v of shape (..., K) it
+// returns (..., K, K) with v on the main diagonal and zeros elsewhere,
+// keeping v's grad_fn chain intact (so second-order autograd flows through).
+//
+// The plain Tensor `tenzor::diag` / Variable `tenzor::diag` only accept 1-D
+// or 2-D inputs and throw on ndim>2, which is exactly the batched case the
+// create_graph SVD/Eigh paths hit. We avoid a dedicated DiagEmbedBackward
+// Function by composing the embedding from existing batch-aware Variable ops:
+//   diag_embed(v)[..., i, j] = unsqueeze(v, -1)[..., i, 0] * I[i, j]
+// i.e. broadcast (..., K, 1) against a constant (K, K) identity. unsqueeze and
+// mul both have proper reverse-mode rules, so the backward of this is the
+// (correct) extract-diagonal operation.
+inline auto diag_embed_var(const Variable& v) -> Variable {
+    const auto& vshape = v.tensor().shape();
+    const int64_t vndim = static_cast<int64_t>(vshape.size());
+    const int64_t K = vshape[vndim - 1];
+    auto eye_t = eye(K, std::nullopt, v.tensor().dtype(), v.tensor().device());
+    Variable eye_v(eye_t, false);  // constant identity, no grad
+    // (..., K) -> (..., K, 1); broadcasting against (K, K) yields (..., K, K).
+    auto v_col = tenzor::unsqueeze(v, vndim);
+    return v_col * eye_v;
+}
+
 } // anonymous namespace
 
 // =========================================================================
@@ -572,9 +596,25 @@ auto QrBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tenso
     // gradcheck when we hand it a non-contiguous input).
     const auto Q = saved_tensors_[0].contiguous();   // Q, (..., M, N)
     const auto R = saved_tensors_[1].contiguous();   // R, (..., N, N)
-    grad_outputs = pad_tuple_grad_outputs(std::move(grad_outputs), {Q, R});
-    const auto grad_Q = grad_outputs[0].contiguous();   // dL/dQ, (..., M, N)
-    const auto grad_R = grad_outputs[1].contiguous();   // dL/dR, (..., N, N)
+    // audit — when output_slot_ is set, only one of {Q, R} received an
+    // upstream gradient at this per-output instance; route the single grad to
+    // its proper slot and zero the other (the formula is linear in
+    // (grad_Q, grad_R), so the engine summing the per-slot input grads
+    // reconstructs the full gradient).
+    Tensor grad_Q_t, grad_R_t;
+    if (output_slot_ == 0) {
+        grad_Q_t = grad_outputs[0];
+        grad_R_t = zeros_like(R);
+    } else if (output_slot_ == 1) {
+        grad_Q_t = zeros_like(Q);
+        grad_R_t = grad_outputs[0];
+    } else {
+        grad_outputs = pad_tuple_grad_outputs(std::move(grad_outputs), {Q, R});
+        grad_Q_t = grad_outputs[0];
+        grad_R_t = grad_outputs[1];
+    }
+    const auto grad_Q = grad_Q_t.contiguous();   // dL/dQ, (..., M, N)
+    const auto grad_R = grad_R_t.contiguous();   // dL/dR, (..., N, N)
 
     auto ndim = R.ndim();
     auto Rt = transpose(R, ndim - 2, ndim - 1);
@@ -624,9 +664,23 @@ auto EighBackward::forward(std::vector<Variable>) -> std::vector<Variable> {
 auto EighBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> {
     const auto& W = saved_tensors_[0];      // eigenvalues, (..., N)
     const auto& V = saved_tensors_[1];      // eigenvectors, (..., N, N)
-    grad_outputs = pad_tuple_grad_outputs(std::move(grad_outputs), {W, V});
-    const auto& grad_W = grad_outputs[0];   // dL/dW, (..., N)
-    const auto& grad_V = grad_outputs[1];   // dL/dV, (..., N, N)
+    // audit — route the single incoming grad to its proper slot when this is a
+    // per-output instance; the formula is linear in (grad_W, grad_V) so the
+    // engine summing the per-slot input grads reconstructs the full gradient.
+    Tensor grad_W_t, grad_V_t;
+    if (output_slot_ == 0) {
+        grad_W_t = grad_outputs[0];
+        grad_V_t = zeros_like(V);
+    } else if (output_slot_ == 1) {
+        grad_W_t = zeros_like(W);
+        grad_V_t = grad_outputs[0];
+    } else {
+        grad_outputs = pad_tuple_grad_outputs(std::move(grad_outputs), {W, V});
+        grad_W_t = grad_outputs[0];
+        grad_V_t = grad_outputs[1];
+    }
+    const auto& grad_W = grad_W_t;          // dL/dW, (..., N)
+    const auto& grad_V = grad_V_t;          // dL/dV, (..., N, N)
 
     auto N = W.shape()[W.ndim() - 1];
 
@@ -901,8 +955,9 @@ auto EigvalshBackward::backward_with_variables(std::vector<Variable> grad_output
     auto ndim = V_tensor.ndim();
     auto Vt = tenzor::transpose(V, ndim - 2, ndim - 1);
 
-    // Variable-level diag and matmul
-    auto grad_diag = tenzor::diag(grad_outputs[0]);  // (N, N)
+    // Variable-level batch-aware diag_embed and matmul (grad_W may be
+    // (..., N); plain diag throws on ndim>2).
+    auto grad_diag = diag_embed_var(grad_outputs[0]);  // (..., N, N)
     auto grad_A = tenzor::matmul(tenzor::matmul(V, grad_diag), Vt);
 
     // Symmetrize (since A is symmetric)
@@ -995,11 +1050,17 @@ auto SvdBackward::backward_with_variables(std::vector<Variable> grad_outputs) ->
 
     // Compute F matrix from singular values (constant — no grad needed)
     // F_{ij} = 1/(s_j^2 - s_i^2) for i != j, 0 on diagonal
+    //
+    // Batch-aware build mirroring the first-order Tensor path (B.8): for S
+    // shaped (..., K) we form F shaped (..., K, K) via trailing-dim unsqueeze
+    // + broadcast. The previous reshape({1,K})/{K,1} hard-coded a single
+    // (K,K) layout and threw on ndim>2 inputs, making second-order grads of
+    // batched SVD unavailable under create_graph.
     const auto& S_tensor = saved_tensors_[1];
-    auto S_sq = mul(S_tensor, S_tensor);
-    auto S_row = reshape(S_sq, {1, K});
-    auto S_col = reshape(S_sq, {K, 1});
-    auto diffs = sub(S_row, S_col);
+    auto S_sq = mul(S_tensor, S_tensor);                  // (..., K)
+    auto S_row = unsqueeze(S_sq, S_sq.ndim() - 1);        // (..., 1, K)  varies over j
+    auto S_col = unsqueeze(S_sq, S_sq.ndim());            // (..., K, 1)  varies over i
+    auto diffs = sub(S_row, S_col);                       // (..., K, K)
 
     auto eps_val = detail::dtype_epsilon(S_tensor.dtype());
     auto eps_t = full({K, K}, eps_val, S_tensor.dtype(), S_tensor.device());
@@ -1014,8 +1075,8 @@ auto SvdBackward::backward_with_variables(std::vector<Variable> grad_outputs) ->
 
     auto F = Variable(F_tensor, false);
 
-    // S_diag as Variable
-    auto S_diag = tenzor::diag(S);  // (..., K, K)
+    // S_diag as Variable — batch-aware diag_embed (S may be (..., K)).
+    auto S_diag = diag_embed_var(S);  // (..., K, K)
 
     // U^T and V
     auto Ut = tenzor::transpose(U, ndim - 2, ndim - 1);
@@ -1028,7 +1089,7 @@ auto SvdBackward::backward_with_variables(std::vector<Variable> grad_outputs) ->
     auto F_UtgU = F * UtgU;
     auto F_gVhV = F * gVhV;
 
-    auto term1 = tenzor::diag(grad_S_var);             // diag(grad_S), (K, K)
+    auto term1 = diag_embed_var(grad_S_var);           // diag(grad_S), (..., K, K)
     auto term2 = tenzor::matmul(F_UtgU, S_diag);       // F*(Ut@gU) @ S
     auto term3 = tenzor::matmul(S_diag, F_gVhV);       // S @ F*(gVh@V)
 
@@ -1046,11 +1107,24 @@ auto QrBackward::backward_with_variables(std::vector<Variable> grad_outputs) -> 
     //   copyltu(M) = tril(M) + tril(M, -1)^T
     //   dL/dA = (grad_Q + Q @ copyltu(M)) @ R^{-T}
 
-    auto grad_Q_var = grad_outputs[0];
-    auto grad_R_var = grad_outputs[1];
-
     auto Q = Variable(saved_tensors_[0], false);
     auto R = Variable(saved_tensors_[1], false);
+
+    // audit — route the single incoming grad to its proper slot when this is a
+    // per-output instance, zeroing the other (the formula is linear in
+    // (grad_Q, grad_R), so the engine summing per-slot input grads
+    // reconstructs the full gradient and second-order graphs chain through).
+    Variable grad_Q_var, grad_R_var;
+    if (output_slot_ == 0) {
+        grad_Q_var = grad_outputs[0];
+        grad_R_var = Variable(zeros_like(saved_tensors_[1]), false);
+    } else if (output_slot_ == 1) {
+        grad_Q_var = Variable(zeros_like(saved_tensors_[0]), false);
+        grad_R_var = grad_outputs[0];
+    } else {
+        grad_Q_var = grad_outputs[0];
+        grad_R_var = grad_outputs[1];
+    }
 
     auto ndim = saved_tensors_[1].ndim();
     auto Rt = tenzor::transpose(R, ndim - 2, ndim - 1);
@@ -1083,19 +1157,36 @@ auto EighBackward::backward_with_variables(std::vector<Variable> grad_outputs) -
     // Formula: dL/dA = V @ (F * (V^T @ dL/dV) + diag(dL/dW)) @ V^T, symmetrized
     // F_{ij} = 1/(w_j - w_i) for i != j, 0 on diagonal
 
-    auto grad_W_var = grad_outputs[0];
-    auto grad_V_var = grad_outputs[1];
-
     const auto& W_tensor = saved_tensors_[0];  // eigenvalues, (..., N)
     const auto& V_tensor = saved_tensors_[1];  // eigenvectors, (..., N, N)
+
+    // audit — route the single incoming grad to its proper slot when this is a
+    // per-output instance, zeroing the other (the formula is linear in
+    // (grad_W, grad_V), so the engine summing per-slot input grads
+    // reconstructs the full gradient and second-order graphs chain through).
+    Variable grad_W_var, grad_V_var;
+    if (output_slot_ == 0) {
+        grad_W_var = grad_outputs[0];
+        grad_V_var = Variable(zeros_like(V_tensor), false);
+    } else if (output_slot_ == 1) {
+        grad_W_var = Variable(zeros_like(W_tensor), false);
+        grad_V_var = grad_outputs[0];
+    } else {
+        grad_W_var = grad_outputs[0];
+        grad_V_var = grad_outputs[1];
+    }
 
     auto V = Variable(V_tensor, false);
     auto N = W_tensor.shape()[W_tensor.ndim() - 1];
 
-    // Compute F matrix (constant — from eigenvalues)
-    auto W_row = reshape(W_tensor, {1, N});
-    auto W_col = reshape(W_tensor, {N, 1});
-    auto diffs = sub(W_row, W_col);
+    // Compute F matrix (constant — from eigenvalues). Batch-aware build
+    // mirroring the first-order path (B.8/GG.7): for W shaped (..., N) form
+    // F shaped (..., N, N) via trailing-dim unsqueeze + broadcast. The prior
+    // reshape({1,N})/{N,1} hard-coded a single (N,N) layout and threw on
+    // ndim>2, so second-order grads of batched eigh were unavailable.
+    auto W_row = unsqueeze(W_tensor, W_tensor.ndim() - 1);  // (..., 1, N) varies over j
+    auto W_col = unsqueeze(W_tensor, W_tensor.ndim());      // (..., N, 1) varies over i
+    auto diffs = sub(W_row, W_col);                         // (..., N, N)
 
     auto eps_val = detail::dtype_epsilon(W_tensor.dtype());
     auto eps_t = full({N, N}, eps_val, W_tensor.dtype(), W_tensor.device());
@@ -1116,8 +1207,9 @@ auto EighBackward::backward_with_variables(std::vector<Variable> grad_outputs) -
     // V^T @ dL/dV (Variable-level)
     auto VtgV = tenzor::matmul(Vt, grad_V_var);
 
-    // F * (V^T @ dL/dV) + diag(dL/dW)
-    auto middle = F * VtgV + tenzor::diag(grad_W_var);
+    // F * (V^T @ dL/dV) + diag(dL/dW) — batch-aware diag_embed (grad_W may
+    // be (..., N)).
+    auto middle = F * VtgV + diag_embed_var(grad_W_var);
 
     // dL/dA = V @ middle @ V^T
     auto grad_A = tenzor::matmul(tenzor::matmul(V, middle), Vt);
@@ -1366,8 +1458,9 @@ auto CholeskySolveBackward::backward_with_variables(std::vector<Variable> grad_o
 // ============================================================================
 // LUSolveBackward — audit-2026-05-03 Phase 8.
 // Forward: X = lu_solve(LU, pivots, B). Treats LU/pivots as fixed.
-// Backward: dL/dB = solve(A^T, dL/dX) where A = lu_to_dense(LU, pivots).
-// Saves the reconstructed A for backward.
+// Backward: dL/dB = A^{-T} dL/dX. The wrapper saves A^{-1} (= lu_solve(LU,
+// pivots, eye)), so the gradient is just (A^{-1})^T @ grad — a matmul, with
+// no extra factor-solve or inversion at backward time.
 // ============================================================================
 auto LUSolveBackward::forward(std::vector<Variable>) -> std::vector<Variable> {
     throw std::runtime_error("LUSolveBackward::forward should not be called directly");
@@ -1375,10 +1468,10 @@ auto LUSolveBackward::forward(std::vector<Variable>) -> std::vector<Variable> {
 
 auto LUSolveBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> {
     const auto& grad = grad_outputs[0];
-    const auto& A = saved_tensors_[0];
-    auto ndim = A.ndim();
-    auto At = transpose(A, ndim - 2, ndim - 1).contiguous();
-    return {tenzor::linalg::solve(At, grad)};
+    const auto& A_inv = saved_tensors_[0];
+    auto ndim = A_inv.ndim();
+    auto A_inv_t = transpose(A_inv, ndim - 2, ndim - 1).contiguous();
+    return {tenzor::matmul(A_inv_t, grad)};
 }
 
 // ============================================================================
@@ -1604,14 +1697,34 @@ auto EigBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tens
     const auto& W_imag = saved_tensors_[1];
     const auto& V      = saved_tensors_[2];
 
-    // Pad missing grad outputs with zeros so we can index uniformly.
-    while (grad_outputs.size() < 3) {
-        const auto& tmpl = (grad_outputs.size() < 2) ? W_real : V;
-        grad_outputs.push_back(zeros_like(tmpl));
+    // audit — with per-output Function instances the engine hands this
+    // instance a single grad in grad_outputs[0] for the output identified by
+    // output_slot_ (0=W_real, 1=W_imag, 2=V). Build the full {grad_W_real,
+    // grad_W_imag, grad_V} triple by routing that grad to its slot and zeroing
+    // the rest; the formula is linear in the three grads, so the engine
+    // summing the per-slot input grads reconstructs the full gradient. The
+    // legacy combined path (output_slot_ < 0) keeps the old zero-padding.
+    Tensor grad_W_real_t, grad_W_imag_t, grad_V_t;
+    if (output_slot_ == 0 || output_slot_ == 1 || output_slot_ == 2) {
+        grad_W_real_t = zeros_like(W_real);
+        grad_W_imag_t = zeros_like(W_imag);
+        grad_V_t      = zeros_like(V);
+        if (output_slot_ == 0)      grad_W_real_t = grad_outputs[0];
+        else if (output_slot_ == 1) grad_W_imag_t = grad_outputs[0];
+        else                        grad_V_t      = grad_outputs[0];
+    } else {
+        // Legacy combined path: pad missing grad outputs with zeros.
+        while (grad_outputs.size() < 3) {
+            const auto& tmpl = (grad_outputs.size() < 2) ? W_real : V;
+            grad_outputs.push_back(zeros_like(tmpl));
+        }
+        grad_W_real_t = grad_outputs[0];
+        grad_W_imag_t = grad_outputs[1];
+        grad_V_t      = grad_outputs[2];
     }
-    const auto& grad_W_real = grad_outputs[0];
-    const auto& grad_W_imag = grad_outputs[1];
-    const auto& grad_V      = grad_outputs[2];
+    const auto& grad_W_real = grad_W_real_t;
+    const auto& grad_W_imag = grad_W_imag_t;
+    const auto& grad_V      = grad_V_t;
 
     // Decide between the real-eigenvalue fast path and the complex path.
     // Threshold matches scipy.linalg's "treat as real" convention; LAPACK

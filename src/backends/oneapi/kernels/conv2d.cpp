@@ -905,44 +905,56 @@ void col2im_grouped_kernel(const sycl::half* data_col, int64_t total_channels, i
     // `data_im` across batches/groups, we initialise scratch from the
     // current `data_im` contents and write back the merged result.
     const int64_t im_total = total_channels * height * width;
-    Tensor scratch_tensor({im_total}, DType::Float32,
-                          Device{Device::Type::OneAPI, 0});  // queue's device — single-device OneAPI build
-    float* scratch = get_data_ptr<float>(scratch_tensor);
+    // Allocate the Float32 atomic scratch directly as USM on the queue's own
+    // device/context. Previously this allocated a Tensor on a hardcoded
+    // Device{OneAPI, 0}, which on a multi-device config could place scratch on
+    // a different device than the queue/data, causing cross-device access.
+    float* scratch = sycl::malloc_device<float>(static_cast<size_t>(im_total), queue);
+    if (scratch == nullptr) {
+        throw std::runtime_error("col2im_grouped_kernel(F16): failed to allocate scratch USM");
+    }
 
     // Initialise scratch from current data_im (widen). One thread per pixel.
     sycl::half* data_im_ptr = data_im;  // capture by value into the lambda
-    queue.parallel_for(sycl::range<1>(im_total), [=](sycl::id<1> i) {
-        scratch[i] = static_cast<float>(data_im_ptr[i]);
-    }).wait();
-
-    // Accumulate atomically into scratch.
-    queue.parallel_for<Conv2dGroupedCol2imKernelFloat16>(
-        sycl::range<1>(channels_per_group * kernel_h * kernel_w * output_h * output_w),
-        [=](sycl::id<1> index) {
-            int64_t w_out = index % output_w;
-            int64_t idx = index / output_w;
-            int64_t h_out = idx % output_h;
-            idx /= output_h;
-            int64_t kw = idx % kernel_w;
-            idx /= kernel_w;
-            int64_t kh = idx % kernel_h;
-            int64_t c_local = idx / kernel_h;
-            int64_t c_global = channel_offset + c_local;
-            int64_t h_in = h_out * stride_h - pad_h + kh * dilation_h;
-            int64_t w_in = w_out * stride_w - pad_w + kw * dilation_w;
-            if (h_in >= 0 && w_in >= 0 && h_in < height && w_in < width) {
-                int64_t im_idx = (c_global * height + h_in) * width + w_in;
-                float val = static_cast<float>(data_col[index]);
-                sycl::atomic_ref<float, sycl::memory_order::relaxed, sycl::memory_scope::device>
-                    atomic_val(scratch[im_idx]);
-                atomic_val.fetch_add(val);
-            }
+    try {
+        queue.parallel_for(sycl::range<1>(im_total), [=](sycl::id<1> i) {
+            scratch[i] = static_cast<float>(data_im_ptr[i]);
         }).wait();
 
-    // Narrow scratch back into data_im.
-    queue.parallel_for(sycl::range<1>(im_total), [=](sycl::id<1> i) {
-        data_im_ptr[i] = sycl::half(scratch[i]);
-    }).wait();
+        // Accumulate atomically into scratch.
+        queue.parallel_for<Conv2dGroupedCol2imKernelFloat16>(
+            sycl::range<1>(channels_per_group * kernel_h * kernel_w * output_h * output_w),
+            [=](sycl::id<1> index) {
+                int64_t w_out = index % output_w;
+                int64_t idx = index / output_w;
+                int64_t h_out = idx % output_h;
+                idx /= output_h;
+                int64_t kw = idx % kernel_w;
+                idx /= kernel_w;
+                int64_t kh = idx % kernel_h;
+                int64_t c_local = idx / kernel_h;
+                int64_t c_global = channel_offset + c_local;
+                int64_t h_in = h_out * stride_h - pad_h + kh * dilation_h;
+                int64_t w_in = w_out * stride_w - pad_w + kw * dilation_w;
+                if (h_in >= 0 && w_in >= 0 && h_in < height && w_in < width) {
+                    int64_t im_idx = (c_global * height + h_in) * width + w_in;
+                    float val = static_cast<float>(data_col[index]);
+                    sycl::atomic_ref<float, sycl::memory_order::relaxed, sycl::memory_scope::device>
+                        atomic_val(scratch[im_idx]);
+                    atomic_val.fetch_add(val);
+                }
+            }).wait();
+
+        // Narrow scratch back into data_im.
+        queue.parallel_for(sycl::range<1>(im_total), [=](sycl::id<1> i) {
+            data_im_ptr[i] = sycl::half(scratch[i]);
+        }).wait();
+    } catch (...) {
+        sycl::free(scratch, queue);
+        throw;
+    }
+
+    sycl::free(scratch, queue);
 }
 
 // Audit J.2: per-axis stride/padding/dilation for the im2col+GEMM fallback path.

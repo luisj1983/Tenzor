@@ -29,8 +29,11 @@ public:
         auto now = std::chrono::steady_clock::now();
         auto& bucket = buckets_[client_id];
 
-        // Initialize new buckets
-        if (bucket.last_refill == std::chrono::steady_clock::time_point{}) {
+        // Initialize new buckets. Match the server's live guard exactly
+        // (tokens == 0 AND last_refill unset) so the two implementations of this
+        // security-sensitive feature cannot drift.
+        if (bucket.tokens == 0 &&
+            bucket.last_refill == std::chrono::steady_clock::time_point{}) {
             bucket.tokens = static_cast<double>(config_.burst_size);
             bucket.last_refill = now;
         }

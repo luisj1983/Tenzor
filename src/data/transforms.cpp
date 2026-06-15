@@ -10,6 +10,73 @@ namespace tenzor {
 namespace data {
 namespace transforms {
 
+namespace {
+
+// The raw-pointer vision transforms below read/write through data_ptr() with
+// `static_cast<float*>`. That cast is only valid for a CPU, Float32, contiguous
+// tensor:
+//   * Non-CPU input: data_ptr() is a device pointer; a host dereference crashes.
+//   * Non-Float32 input (Float64/Float16/BFloat16): the bytes are reinterpreted
+//     as 4-byte floats, silently corrupting the data.
+// These helpers normalise the input to a CPU/Float32/contiguous tensor for the
+// host math and convert the result back to the caller's original dtype/device,
+// mirroring the explicit host-move ColorJitter already documented.
+
+struct TransformDomain {
+    Device   device;
+    DType    dtype;
+};
+
+// Capture the caller's original domain and return a CPU/Float32/contiguous view
+// suitable for raw float* access.
+inline auto enter_host_float32(const Tensor& input, TransformDomain& orig) -> Tensor {
+    orig.device = input.device();
+    orig.dtype  = input.dtype();
+    Tensor host = (orig.device.type != Device::Type::CPU)
+        ? input.to(Device::cpu())
+        : input;
+    if (host.dtype() != DType::Float32) {
+        host = host.to(DType::Float32);
+    }
+    return host.contiguous();
+}
+
+// Convert a Float32/CPU result back to the original dtype and device.
+inline auto leave_host_float32(Tensor output, const TransformDomain& orig) -> Tensor {
+    if (output.dtype() != orig.dtype) {
+        output = output.to(orig.dtype);
+    }
+    if (output.device().type != orig.device.type ||
+        output.device().index != orig.device.index) {
+        output = output.to(orig.device);
+    }
+    return output;
+}
+
+// Construct a per-call mt19937 for a vision transform.
+//
+// When tenzor::manual_seed() is set, pull a deterministic seed from
+// get_global_seed() (which advances per call) so two runs with the same seed
+// produce bit-identical augmentations.
+//
+// When NO manual seed is set, seed from the shared thread-local global RNG
+// engine rather than re-seeding a fresh mt19937 from the wall clock. Reseeding
+// from high_resolution_clock made transforms executing within the same clock
+// tick (e.g. two flips in a Compose) draw from identically-seeded generators
+// and make correlated/identical "random" decisions. Drawing the seed from the
+// shared engine advances that engine per call, so successive transforms get
+// distinct, decorrelated seeds.
+inline auto make_transform_rng() -> std::mt19937 {
+    if (tenzor::detail::get_global_manual_seed_set()) {
+        return std::mt19937(
+            static_cast<std::mt19937::result_type>(tenzor::get_global_seed()));
+    }
+    auto& engine = tenzor::detail::get_global_rng_engine();
+    return std::mt19937(engine());
+}
+
+} // anonymous namespace
+
 // ============================================================================
 // RandomRotation
 // ============================================================================
@@ -30,14 +97,17 @@ auto RandomRotation::operator()(const Tensor& input, const Tensor& target)
             "RandomRotation requires at least 2D input (H, W)");
     }
 
+    // Normalise to CPU/Float32/contiguous for the raw float* loop below; the
+    // result is converted back to the caller's dtype/device on return.
+    TransformDomain orig;
+    Tensor in = enter_host_float32(input, orig);
+
     // Generate random angle in [min_degrees_, max_degrees_]
-    // B.2: deterministic when tenzor::manual_seed() is called. Each transform
-    // call pulls a fresh seed from the global generator (advances per call),
-    // so two runs with the same manual_seed produce bit-identical outputs
-    // across vision augments. When no manual_seed is set, get_global_seed()
-    // falls back to a time-based seed (matches PyTorch's behaviour).
-    std::mt19937 rng(static_cast<std::mt19937::result_type>(
-        tenzor::get_global_seed()));
+    // B.2: deterministic when tenzor::manual_seed() is called; otherwise the
+    // seed is drawn from the shared thread-local engine (advances per call) so
+    // transforms in the same Compose/clock tick are not correlated. See
+    // make_transform_rng().
+    std::mt19937 rng = make_transform_rng();
     std::uniform_real_distribution<float> dist(min_degrees_, max_degrees_);
     float angle_deg = dist(rng);
     float angle_rad = angle_deg * static_cast<float>(M_PI) / 180.0f;
@@ -51,9 +121,9 @@ auto RandomRotation::operator()(const Tensor& input, const Tensor& target)
     float cx = static_cast<float>(W) / 2.0f;
     float cy = static_cast<float>(H) / 2.0f;
 
-    // Create output tensor filled with zeros (same shape and dtype)
+    // Create output tensor filled with zeros (Float32 host buffer)
     Tensor output = zeros(std::vector<int64_t>(shape.begin(), shape.end()),
-                          input.dtype());
+                          DType::Float32);
 
     // Compute total number of "images" (product of all dims except H, W)
     int64_t num_images = 1;
@@ -63,7 +133,7 @@ auto RandomRotation::operator()(const Tensor& input, const Tensor& target)
 
     // Nearest-neighbor rotation via inverse mapping
     // For each pixel (y, x) in output, find source pixel in input
-    const float* src_ptr = static_cast<const float*>(input.data_ptr());
+    const float* src_ptr = static_cast<const float*>(in.data_ptr());
     float* dst_ptr = static_cast<float*>(output.data_ptr());
     int64_t image_size = H * W;
 
@@ -90,7 +160,7 @@ auto RandomRotation::operator()(const Tensor& input, const Tensor& target)
         }
     }
 
-    return {output, target};
+    return {leave_host_float32(std::move(output), orig), target};
 }
 
 // ============================================================================
@@ -114,13 +184,11 @@ auto ColorJitter::operator()(const Tensor& input, const Tensor& target)
         return {input, target};
     }
 
-    // B.2: deterministic when tenzor::manual_seed() is called. Each transform
-    // call pulls a fresh seed from the global generator (advances per call),
-    // so two runs with the same manual_seed produce bit-identical outputs
-    // across vision augments. When no manual_seed is set, get_global_seed()
-    // falls back to a time-based seed (matches PyTorch's behaviour).
-    std::mt19937 rng(static_cast<std::mt19937::result_type>(
-        tenzor::get_global_seed()));
+    // B.2: deterministic when tenzor::manual_seed() is called; otherwise the
+    // seed is drawn from the shared thread-local engine (advances per call) so
+    // transforms in the same Compose/clock tick are not correlated. See
+    // make_transform_rng().
+    std::mt19937 rng = make_transform_rng();
 
     // Work with a copy to avoid modifying the original. The pixel math below
     // is host-side (raw float* loops), so a non-CPU input must be moved to the
@@ -345,20 +413,19 @@ auto Cutout::operator()(const Tensor& input, const Tensor& target)
             "Cutout requires at least 2D input (H, W)");
     }
 
-    // B.2: deterministic when tenzor::manual_seed() is called. Each transform
-    // call pulls a fresh seed from the global generator (advances per call),
-    // so two runs with the same manual_seed produce bit-identical outputs
-    // across vision augments. When no manual_seed is set, get_global_seed()
-    // falls back to a time-based seed (matches PyTorch's behaviour).
-    std::mt19937 rng(static_cast<std::mt19937::result_type>(
-        tenzor::get_global_seed()));
+    // B.2: deterministic when tenzor::manual_seed() is called; otherwise the
+    // seed is drawn from the shared thread-local engine (advances per call) so
+    // transforms in the same Compose/clock tick are not correlated. See
+    // make_transform_rng().
+    std::mt19937 rng = make_transform_rng();
 
     // Assume last two dims are H, W
     int64_t H = shape[shape.size() - 2];
     int64_t W = shape[shape.size() - 1];
 
-    // Work with a copy
-    Tensor output = input;
+    // Work with an independent deep copy; assignment shares storage, which would
+    // mutate the caller's input tensor in place.
+    Tensor output = input.clone();
     float* data = static_cast<float*>(output.data_ptr());
 
     // Total elements per spatial plane
@@ -401,26 +468,29 @@ auto RandomVerticalFlip::operator()(const Tensor& input, const Tensor& target)
         return {input, target};
     }
 
-    // B.2: deterministic when tenzor::manual_seed() is called. Each transform
-    // call pulls a fresh seed from the global generator (advances per call),
-    // so two runs with the same manual_seed produce bit-identical outputs
-    // across vision augments. When no manual_seed is set, get_global_seed()
-    // falls back to a time-based seed (matches PyTorch's behaviour).
-    std::mt19937 rng(static_cast<std::mt19937::result_type>(
-        tenzor::get_global_seed()));
+    // B.2: deterministic when tenzor::manual_seed() is called; otherwise the
+    // seed is drawn from the shared thread-local engine (advances per call) so
+    // transforms in the same Compose/clock tick are not correlated. See
+    // make_transform_rng().
+    std::mt19937 rng = make_transform_rng();
     std::uniform_real_distribution<float> dist(0.0f, 1.0f);
 
     if (dist(rng) >= p_) {
         return {input, target};
     }
 
+    // Normalise to CPU/Float32/contiguous for the raw float* loop below; the
+    // result is converted back to the caller's dtype/device on return.
+    TransformDomain orig;
+    Tensor in = enter_host_float32(input, orig);
+
     int64_t H = shape[shape.size() - 2];
     int64_t W = shape[shape.size() - 1];
 
-    Tensor output = zeros(std::vector<int64_t>(shape.begin(), shape.end()), input.dtype());
+    Tensor output = zeros(std::vector<int64_t>(shape.begin(), shape.end()), DType::Float32);
     int64_t num_planes = output.numel() / (H * W);
 
-    const float* src = static_cast<const float*>(input.data_ptr());
+    const float* src = static_cast<const float*>(in.data_ptr());
     float* dst = static_cast<float*>(output.data_ptr());
 
     for (int64_t plane = 0; plane < num_planes; ++plane) {
@@ -432,7 +502,7 @@ auto RandomVerticalFlip::operator()(const Tensor& input, const Tensor& target)
         }
     }
 
-    return {output, target};
+    return {leave_host_float32(std::move(output), orig), target};
 }
 
 // ============================================================================
@@ -446,13 +516,11 @@ auto RandomHorizontalFlip::operator()(const Tensor& input, const Tensor& target)
         return {input, target};
     }
 
-    // B.2: deterministic when tenzor::manual_seed() is called. Each transform
-    // call pulls a fresh seed from the global generator (advances per call),
-    // so two runs with the same manual_seed produce bit-identical outputs
-    // across vision augments. When no manual_seed is set, get_global_seed()
-    // falls back to a time-based seed (matches PyTorch's behaviour).
-    std::mt19937 rng(static_cast<std::mt19937::result_type>(
-        tenzor::get_global_seed()));
+    // B.2: deterministic when tenzor::manual_seed() is called; otherwise the
+    // seed is drawn from the shared thread-local engine (advances per call) so
+    // transforms in the same Compose/clock tick are not correlated. See
+    // make_transform_rng().
+    std::mt19937 rng = make_transform_rng();
     std::uniform_real_distribution<float> dist(0.0f, 1.0f);
 
     if (dist(rng) >= p_) {
@@ -487,15 +555,20 @@ auto CenterCrop::operator()(const Tensor& input, const Tensor& target)
     int64_t top = (H - height_) / 2;
     int64_t left = (W - width_) / 2;
 
+    // Normalise to CPU/Float32/contiguous for the raw float* loop below; the
+    // result is converted back to the caller's dtype/device on return.
+    TransformDomain orig;
+    Tensor in = enter_host_float32(input, orig);
+
     // Build output shape
     std::vector<int64_t> out_shape(shape.begin(), shape.end());
     out_shape[shape.size() - 2] = height_;
     out_shape[shape.size() - 1] = width_;
 
-    Tensor output = zeros(out_shape, input.dtype());
+    Tensor output = zeros(out_shape, DType::Float32);
     int64_t num_planes = output.numel() / (height_ * width_);
 
-    const float* src = static_cast<const float*>(input.data_ptr());
+    const float* src = static_cast<const float*>(in.data_ptr());
     float* dst = static_cast<float*>(output.data_ptr());
 
     for (int64_t plane = 0; plane < num_planes; ++plane) {
@@ -507,7 +580,7 @@ auto CenterCrop::operator()(const Tensor& input, const Tensor& target)
         }
     }
 
-    return {output, target};
+    return {leave_host_float32(std::move(output), orig), target};
 }
 
 // ============================================================================
@@ -528,13 +601,11 @@ auto RandomCrop::operator()(const Tensor& input, const Tensor& target)
         throw std::invalid_argument("RandomCrop size exceeds (padded) input dimensions");
     }
 
-    // B.2: deterministic when tenzor::manual_seed() is called. Each transform
-    // call pulls a fresh seed from the global generator (advances per call),
-    // so two runs with the same manual_seed produce bit-identical outputs
-    // across vision augments. When no manual_seed is set, get_global_seed()
-    // falls back to a time-based seed (matches PyTorch's behaviour).
-    std::mt19937 rng(static_cast<std::mt19937::result_type>(
-        tenzor::get_global_seed()));
+    // B.2: deterministic when tenzor::manual_seed() is called; otherwise the
+    // seed is drawn from the shared thread-local engine (advances per call) so
+    // transforms in the same Compose/clock tick are not correlated. See
+    // make_transform_rng().
+    std::mt19937 rng = make_transform_rng();
     std::uniform_int_distribution<int64_t> dist_y(0, H - height_);
     std::uniform_int_distribution<int64_t> dist_x(0, W - width_);
 
@@ -544,14 +615,19 @@ auto RandomCrop::operator()(const Tensor& input, const Tensor& target)
     int64_t orig_H = shape[shape.size() - 2];
     int64_t orig_W = shape[shape.size() - 1];
 
+    // Normalise to CPU/Float32/contiguous for the raw float* loop below; the
+    // result is converted back to the caller's dtype/device on return.
+    TransformDomain orig;
+    Tensor in = enter_host_float32(input, orig);
+
     std::vector<int64_t> out_shape(shape.begin(), shape.end());
     out_shape[shape.size() - 2] = height_;
     out_shape[shape.size() - 1] = width_;
 
-    Tensor output = zeros(out_shape, input.dtype());
+    Tensor output = zeros(out_shape, DType::Float32);
     int64_t num_planes = output.numel() / (height_ * width_);
 
-    const float* src = static_cast<const float*>(input.data_ptr());
+    const float* src = static_cast<const float*>(in.data_ptr());
     float* dst = static_cast<float*>(output.data_ptr());
 
     for (int64_t plane = 0; plane < num_planes; ++plane) {
@@ -568,7 +644,7 @@ auto RandomCrop::operator()(const Tensor& input, const Tensor& target)
         }
     }
 
-    return {output, target};
+    return {leave_host_float32(std::move(output), orig), target};
 }
 
 // ============================================================================
@@ -585,14 +661,19 @@ auto Resize::operator()(const Tensor& input, const Tensor& target)
     int64_t H = shape[shape.size() - 2];
     int64_t W = shape[shape.size() - 1];
 
+    // Normalise to CPU/Float32/contiguous for the raw float* loop below; the
+    // result is converted back to the caller's dtype/device on return.
+    TransformDomain orig;
+    Tensor in = enter_host_float32(input, orig);
+
     std::vector<int64_t> out_shape(shape.begin(), shape.end());
     out_shape[shape.size() - 2] = height_;
     out_shape[shape.size() - 1] = width_;
 
-    Tensor output = zeros(out_shape, input.dtype());
+    Tensor output = zeros(out_shape, DType::Float32);
     int64_t num_planes = output.numel() / (height_ * width_);
 
-    const float* src = static_cast<const float*>(input.data_ptr());
+    const float* src = static_cast<const float*>(in.data_ptr());
     float* dst = static_cast<float*>(output.data_ptr());
 
     float scale_y = static_cast<float>(H) / static_cast<float>(height_);
@@ -609,7 +690,7 @@ auto Resize::operator()(const Tensor& input, const Tensor& target)
         }
     }
 
-    return {output, target};
+    return {leave_host_float32(std::move(output), orig), target};
 }
 
 // ============================================================================
@@ -627,13 +708,16 @@ auto RandomResizedCrop::operator()(const Tensor& input, const Tensor& target)
     int64_t W = shape[shape.size() - 1];
     float area = static_cast<float>(H * W);
 
-    // B.2: deterministic when tenzor::manual_seed() is called. Each transform
-    // call pulls a fresh seed from the global generator (advances per call),
-    // so two runs with the same manual_seed produce bit-identical outputs
-    // across vision augments. When no manual_seed is set, get_global_seed()
-    // falls back to a time-based seed (matches PyTorch's behaviour).
-    std::mt19937 rng(static_cast<std::mt19937::result_type>(
-        tenzor::get_global_seed()));
+    // Normalise to CPU/Float32/contiguous for the raw float* loop below; the
+    // result is converted back to the caller's dtype/device on return.
+    TransformDomain orig;
+    Tensor in = enter_host_float32(input, orig);
+
+    // B.2: deterministic when tenzor::manual_seed() is called; otherwise the
+    // seed is drawn from the shared thread-local engine (advances per call) so
+    // transforms in the same Compose/clock tick are not correlated. See
+    // make_transform_rng().
+    std::mt19937 rng = make_transform_rng();
     std::uniform_real_distribution<float> scale_dist(scale_min_, scale_max_);
     std::uniform_real_distribution<float> ratio_dist(std::log(ratio_min_), std::log(ratio_max_));
 
@@ -667,10 +751,10 @@ auto RandomResizedCrop::operator()(const Tensor& input, const Tensor& target)
     out_shape[shape.size() - 2] = height_;
     out_shape[shape.size() - 1] = width_;
 
-    Tensor output = zeros(out_shape, input.dtype());
+    Tensor output = zeros(out_shape, DType::Float32);
     int64_t num_planes = output.numel() / (height_ * width_);
 
-    const float* src = static_cast<const float*>(input.data_ptr());
+    const float* src = static_cast<const float*>(in.data_ptr());
     float* dst = static_cast<float*>(output.data_ptr());
 
     float scale_y = static_cast<float>(crop_h) / static_cast<float>(height_);
@@ -687,7 +771,7 @@ auto RandomResizedCrop::operator()(const Tensor& input, const Tensor& target)
         }
     }
 
-    return {output, target};
+    return {leave_host_float32(std::move(output), orig), target};
 }
 
 // ============================================================================
@@ -701,13 +785,16 @@ auto GaussianBlur::operator()(const Tensor& input, const Tensor& target)
         throw std::invalid_argument("GaussianBlur requires at least 2D input");
     }
 
-    // B.2: deterministic when tenzor::manual_seed() is called. Each transform
-    // call pulls a fresh seed from the global generator (advances per call),
-    // so two runs with the same manual_seed produce bit-identical outputs
-    // across vision augments. When no manual_seed is set, get_global_seed()
-    // falls back to a time-based seed (matches PyTorch's behaviour).
-    std::mt19937 rng(static_cast<std::mt19937::result_type>(
-        tenzor::get_global_seed()));
+    // Normalise to CPU/Float32/contiguous for the raw float* loop below; the
+    // result is converted back to the caller's dtype/device on return.
+    TransformDomain orig;
+    Tensor in = enter_host_float32(input, orig);
+
+    // B.2: deterministic when tenzor::manual_seed() is called; otherwise the
+    // seed is drawn from the shared thread-local engine (advances per call) so
+    // transforms in the same Compose/clock tick are not correlated. See
+    // make_transform_rng().
+    std::mt19937 rng = make_transform_rng();
     std::uniform_real_distribution<float> sigma_dist(sigma_min_, sigma_max_);
     float sigma = sigma_dist(rng);
 
@@ -726,11 +813,11 @@ auto GaussianBlur::operator()(const Tensor& input, const Tensor& target)
     int64_t H = shape[shape.size() - 2];
     int64_t W = shape[shape.size() - 1];
 
-    Tensor output = zeros(std::vector<int64_t>(shape.begin(), shape.end()), input.dtype());
-    Tensor temp = zeros(std::vector<int64_t>(shape.begin(), shape.end()), input.dtype());
+    Tensor output = zeros(std::vector<int64_t>(shape.begin(), shape.end()), DType::Float32);
+    Tensor temp = zeros(std::vector<int64_t>(shape.begin(), shape.end()), DType::Float32);
     int64_t num_planes = output.numel() / (H * W);
 
-    const float* src = static_cast<const float*>(input.data_ptr());
+    const float* src = static_cast<const float*>(in.data_ptr());
     float* tmp = static_cast<float*>(temp.data_ptr());
     float* dst = static_cast<float*>(output.data_ptr());
 
@@ -764,7 +851,7 @@ auto GaussianBlur::operator()(const Tensor& input, const Tensor& target)
         }
     }
 
-    return {output, target};
+    return {leave_host_float32(std::move(output), orig), target};
 }
 
 // ============================================================================
@@ -778,13 +865,16 @@ auto RandomAffine::operator()(const Tensor& input, const Tensor& target)
         throw std::invalid_argument("RandomAffine requires at least 2D input (H, W)");
     }
 
-    // B.2: deterministic when tenzor::manual_seed() is called. Each transform
-    // call pulls a fresh seed from the global generator (advances per call),
-    // so two runs with the same manual_seed produce bit-identical outputs
-    // across vision augments. When no manual_seed is set, get_global_seed()
-    // falls back to a time-based seed (matches PyTorch's behaviour).
-    std::mt19937 rng(static_cast<std::mt19937::result_type>(
-        tenzor::get_global_seed()));
+    // Normalise to CPU/Float32/contiguous for the raw float* loop below; the
+    // result is converted back to the caller's dtype/device on return.
+    TransformDomain orig;
+    Tensor in = enter_host_float32(input, orig);
+
+    // B.2: deterministic when tenzor::manual_seed() is called; otherwise the
+    // seed is drawn from the shared thread-local engine (advances per call) so
+    // transforms in the same Compose/clock tick are not correlated. See
+    // make_transform_rng().
+    std::mt19937 rng = make_transform_rng();
 
     int64_t H = shape[shape.size() - 2];
     int64_t W = shape[shape.size() - 1];
@@ -816,10 +906,10 @@ auto RandomAffine::operator()(const Tensor& input, const Tensor& target)
     float m10 = s * sin_a;
     float m11 = s * cos_a;
 
-    Tensor output = zeros(std::vector<int64_t>(shape.begin(), shape.end()), input.dtype());
+    Tensor output = zeros(std::vector<int64_t>(shape.begin(), shape.end()), DType::Float32);
     int64_t num_planes = output.numel() / (H * W);
 
-    const float* src = static_cast<const float*>(input.data_ptr());
+    const float* src = static_cast<const float*>(in.data_ptr());
     float* dst = static_cast<float*>(output.data_ptr());
     int64_t image_size = H * W;
 
@@ -851,7 +941,7 @@ auto RandomAffine::operator()(const Tensor& input, const Tensor& target)
         }
     }
 
-    return {output, target};
+    return {leave_host_float32(std::move(output), orig), target};
 }
 
 // ============================================================================
@@ -880,13 +970,11 @@ auto RandomErasing::operator()(const Tensor& input, const Tensor& target)
         throw std::invalid_argument("RandomErasing requires 3D input (C, H, W)");
     }
 
-    // B.2: deterministic when tenzor::manual_seed() is called. Each transform
-    // call pulls a fresh seed from the global generator (advances per call),
-    // so two runs with the same manual_seed produce bit-identical outputs
-    // across vision augments. When no manual_seed is set, get_global_seed()
-    // falls back to a time-based seed (matches PyTorch's behaviour).
-    std::mt19937 rng(static_cast<std::mt19937::result_type>(
-        tenzor::get_global_seed()));
+    // B.2: deterministic when tenzor::manual_seed() is called; otherwise the
+    // seed is drawn from the shared thread-local engine (advances per call) so
+    // transforms in the same Compose/clock tick are not correlated. See
+    // make_transform_rng().
+    std::mt19937 rng = make_transform_rng();
     std::uniform_real_distribution<float> coin(0.0f, 1.0f);
 
     if (coin(rng) >= p_) {
@@ -898,7 +986,9 @@ auto RandomErasing::operator()(const Tensor& input, const Tensor& target)
     int64_t W = shape[2];
     float area = static_cast<float>(H * W);
 
-    Tensor output = input;
+    // Independent deep copy: assignment shares storage and would erase regions of
+    // the caller's input tensor in place.
+    Tensor output = input.clone();
     float* data = static_cast<float*>(output.data_ptr());
 
     std::uniform_real_distribution<float> scale_dist(scale_min_, scale_max_);
@@ -955,13 +1045,16 @@ auto RandomPerspective::operator()(const Tensor& input, const Tensor& target)
         throw std::invalid_argument("RandomPerspective requires 3D input (C, H, W)");
     }
 
-    // B.2: deterministic when tenzor::manual_seed() is called. Each transform
-    // call pulls a fresh seed from the global generator (advances per call),
-    // so two runs with the same manual_seed produce bit-identical outputs
-    // across vision augments. When no manual_seed is set, get_global_seed()
-    // falls back to a time-based seed (matches PyTorch's behaviour).
-    std::mt19937 rng(static_cast<std::mt19937::result_type>(
-        tenzor::get_global_seed()));
+    // Normalise to CPU/Float32/contiguous for the raw float* loop below; the
+    // result is converted back to the caller's dtype/device on return.
+    TransformDomain orig;
+    Tensor in = enter_host_float32(input, orig);
+
+    // B.2: deterministic when tenzor::manual_seed() is called; otherwise the
+    // seed is drawn from the shared thread-local engine (advances per call) so
+    // transforms in the same Compose/clock tick are not correlated. See
+    // make_transform_rng().
+    std::mt19937 rng = make_transform_rng();
     std::uniform_real_distribution<float> coin(0.0f, 1.0f);
 
     if (coin(rng) >= p_) {
@@ -1053,8 +1146,8 @@ auto RandomPerspective::operator()(const Tensor& input, const Tensor& target)
     float d = coeffs[3], e = coeffs[4], f = coeffs[5];
     float g = coeffs[6], h = coeffs[7];
 
-    Tensor output = zeros(std::vector<int64_t>(shape.begin(), shape.end()), input.dtype());
-    const float* src_ptr = static_cast<const float*>(input.data_ptr());
+    Tensor output = zeros(std::vector<int64_t>(shape.begin(), shape.end()), DType::Float32);
+    const float* src_ptr = static_cast<const float*>(in.data_ptr());
     float* dst_ptr = static_cast<float*>(output.data_ptr());
 
     for (int64_t ch = 0; ch < C; ++ch) {
@@ -1097,7 +1190,7 @@ auto RandomPerspective::operator()(const Tensor& input, const Tensor& target)
         }
     }
 
-    return {output, target};
+    return {leave_host_float32(std::move(output), orig), target};
 }
 
 // ============================================================================
@@ -1121,13 +1214,16 @@ auto ElasticTransform::operator()(const Tensor& input, const Tensor& target)
         throw std::invalid_argument("ElasticTransform requires 3D input (C, H, W)");
     }
 
-    // B.2: deterministic when tenzor::manual_seed() is called. Each transform
-    // call pulls a fresh seed from the global generator (advances per call),
-    // so two runs with the same manual_seed produce bit-identical outputs
-    // across vision augments. When no manual_seed is set, get_global_seed()
-    // falls back to a time-based seed (matches PyTorch's behaviour).
-    std::mt19937 rng(static_cast<std::mt19937::result_type>(
-        tenzor::get_global_seed()));
+    // Normalise to CPU/Float32/contiguous for the raw float* loop below; the
+    // result is converted back to the caller's dtype/device on return.
+    TransformDomain orig;
+    Tensor in = enter_host_float32(input, orig);
+
+    // B.2: deterministic when tenzor::manual_seed() is called; otherwise the
+    // seed is drawn from the shared thread-local engine (advances per call) so
+    // transforms in the same Compose/clock tick are not correlated. See
+    // make_transform_rng().
+    std::mt19937 rng = make_transform_rng();
     std::uniform_real_distribution<float> coin(0.0f, 1.0f);
 
     if (coin(rng) >= p_) {
@@ -1200,8 +1296,8 @@ auto ElasticTransform::operator()(const Tensor& input, const Tensor& target)
     }
 
     // Apply displacements with bilinear interpolation
-    Tensor output = zeros(std::vector<int64_t>(shape.begin(), shape.end()), input.dtype());
-    const float* src_ptr = static_cast<const float*>(input.data_ptr());
+    Tensor output = zeros(std::vector<int64_t>(shape.begin(), shape.end()), DType::Float32);
+    const float* src_ptr = static_cast<const float*>(in.data_ptr());
     float* dst_ptr = static_cast<float*>(output.data_ptr());
 
     for (int64_t ch = 0; ch < C; ++ch) {
@@ -1238,7 +1334,7 @@ auto ElasticTransform::operator()(const Tensor& input, const Tensor& target)
         }
     }
 
-    return {output, target};
+    return {leave_host_float32(std::move(output), orig), target};
 }
 
 // ============================================================================
@@ -1254,13 +1350,11 @@ MixUp::MixUp(float alpha) : alpha_(alpha) {
 auto MixUp::operator()(const Tensor& input1, const Tensor& target1,
                         const Tensor& input2, const Tensor& target2)
     -> std::pair<Tensor, Tensor> {
-    // B.2: deterministic when tenzor::manual_seed() is called. Each transform
-    // call pulls a fresh seed from the global generator (advances per call),
-    // so two runs with the same manual_seed produce bit-identical outputs
-    // across vision augments. When no manual_seed is set, get_global_seed()
-    // falls back to a time-based seed (matches PyTorch's behaviour).
-    std::mt19937 rng(static_cast<std::mt19937::result_type>(
-        tenzor::get_global_seed()));
+    // B.2: deterministic when tenzor::manual_seed() is called; otherwise the
+    // seed is drawn from the shared thread-local engine (advances per call) so
+    // transforms in the same Compose/clock tick are not correlated. See
+    // make_transform_rng().
+    std::mt19937 rng = make_transform_rng();
 
     // Sample lambda from Beta(alpha, alpha) using gamma variates
     std::gamma_distribution<float> gamma_dist(alpha_, 1.0f);
@@ -1315,13 +1409,11 @@ auto CutMix::operator()(const Tensor& input1, const Tensor& target1,
         throw std::invalid_argument("CutMix requires 3D input (C, H, W)");
     }
 
-    // B.2: deterministic when tenzor::manual_seed() is called. Each transform
-    // call pulls a fresh seed from the global generator (advances per call),
-    // so two runs with the same manual_seed produce bit-identical outputs
-    // across vision augments. When no manual_seed is set, get_global_seed()
-    // falls back to a time-based seed (matches PyTorch's behaviour).
-    std::mt19937 rng(static_cast<std::mt19937::result_type>(
-        tenzor::get_global_seed()));
+    // B.2: deterministic when tenzor::manual_seed() is called; otherwise the
+    // seed is drawn from the shared thread-local engine (advances per call) so
+    // transforms in the same Compose/clock tick are not correlated. See
+    // make_transform_rng().
+    std::mt19937 rng = make_transform_rng();
 
     // Sample lambda from Beta(alpha, alpha)
     std::gamma_distribution<float> gamma_dist(alpha_, 1.0f);
@@ -1352,7 +1444,9 @@ auto CutMix::operator()(const Tensor& input1, const Tensor& target1,
     int64_t x2 = x1 + cut_w;
 
     // Copy input1, paste region from input2
-    Tensor mixed_input = input1;
+    // Independent deep copy of input1: assignment shares storage and the patch
+    // write below would corrupt the caller's input1 tensor in place.
+    Tensor mixed_input = input1.clone();
     float* dst = static_cast<float*>(mixed_input.data_ptr());
     const float* src2 = static_cast<const float*>(input2.data_ptr());
 
@@ -1662,13 +1756,16 @@ auto RandAugment::operator()(const Tensor& input, const Tensor& target)
         throw std::invalid_argument("RandAugment requires 3D input (C, H, W)");
     }
 
-    // B.2: deterministic when tenzor::manual_seed() is called. Each transform
-    // call pulls a fresh seed from the global generator (advances per call),
-    // so two runs with the same manual_seed produce bit-identical outputs
-    // across vision augments. When no manual_seed is set, get_global_seed()
-    // falls back to a time-based seed (matches PyTorch's behaviour).
-    std::mt19937 rng(static_cast<std::mt19937::result_type>(
-        tenzor::get_global_seed()));
+    // Normalise to CPU/Float32/contiguous for the raw float* loop below; the
+    // result is converted back to the caller's dtype/device on return.
+    TransformDomain orig;
+    Tensor in = enter_host_float32(input, orig);
+
+    // B.2: deterministic when tenzor::manual_seed() is called; otherwise the
+    // seed is drawn from the shared thread-local engine (advances per call) so
+    // transforms in the same Compose/clock tick are not correlated. See
+    // make_transform_rng().
+    std::mt19937 rng = make_transform_rng();
 
     int64_t C = shape[0];
     int64_t H = shape[1];
@@ -1676,8 +1773,8 @@ auto RandAugment::operator()(const Tensor& input, const Tensor& target)
     int64_t total = C * H * W;
 
     // Copy input data
-    Tensor output = zeros(std::vector<int64_t>(shape.begin(), shape.end()), input.dtype());
-    const float* src = static_cast<const float*>(input.data_ptr());
+    Tensor output = zeros(std::vector<int64_t>(shape.begin(), shape.end()), DType::Float32);
+    const float* src = static_cast<const float*>(in.data_ptr());
     float* dst = static_cast<float*>(output.data_ptr());
     std::copy(src, src + total, dst);
 
@@ -1695,7 +1792,7 @@ auto RandAugment::operator()(const Tensor& input, const Tensor& target)
         apply_aug_op(op, normalized_mag, dst, C, H, W, rng);
     }
 
-    return {output, target};
+    return {leave_host_float32(std::move(output), orig), target};
 }
 
 // ============================================================================
@@ -1716,13 +1813,16 @@ auto TrivialAugmentWide::operator()(const Tensor& input, const Tensor& target)
         throw std::invalid_argument("TrivialAugmentWide requires 3D input (C, H, W)");
     }
 
-    // B.2: deterministic when tenzor::manual_seed() is called. Each transform
-    // call pulls a fresh seed from the global generator (advances per call),
-    // so two runs with the same manual_seed produce bit-identical outputs
-    // across vision augments. When no manual_seed is set, get_global_seed()
-    // falls back to a time-based seed (matches PyTorch's behaviour).
-    std::mt19937 rng(static_cast<std::mt19937::result_type>(
-        tenzor::get_global_seed()));
+    // Normalise to CPU/Float32/contiguous for the raw float* loop below; the
+    // result is converted back to the caller's dtype/device on return.
+    TransformDomain orig;
+    Tensor in = enter_host_float32(input, orig);
+
+    // B.2: deterministic when tenzor::manual_seed() is called; otherwise the
+    // seed is drawn from the shared thread-local engine (advances per call) so
+    // transforms in the same Compose/clock tick are not correlated. See
+    // make_transform_rng().
+    std::mt19937 rng = make_transform_rng();
 
     int64_t C = shape[0];
     int64_t H = shape[1];
@@ -1730,8 +1830,8 @@ auto TrivialAugmentWide::operator()(const Tensor& input, const Tensor& target)
     int64_t total = C * H * W;
 
     // Copy input data
-    Tensor output = zeros(std::vector<int64_t>(shape.begin(), shape.end()), input.dtype());
-    const float* src = static_cast<const float*>(input.data_ptr());
+    Tensor output = zeros(std::vector<int64_t>(shape.begin(), shape.end()), DType::Float32);
+    const float* src = static_cast<const float*>(in.data_ptr());
     float* dst = static_cast<float*>(output.data_ptr());
     std::copy(src, src + total, dst);
 
@@ -1746,7 +1846,7 @@ auto TrivialAugmentWide::operator()(const Tensor& input, const Tensor& target)
 
     apply_aug_op(op, normalized_mag, dst, C, H, W, rng);
 
-    return {output, target};
+    return {leave_host_float32(std::move(output), orig), target};
 }
 
 // ============================================================================
@@ -1773,20 +1873,23 @@ auto AugMix::operator()(const Tensor& input, const Tensor& target)
         throw std::invalid_argument("AugMix requires 3D input (C, H, W)");
     }
 
-    // B.2: deterministic when tenzor::manual_seed() is called. Each transform
-    // call pulls a fresh seed from the global generator (advances per call),
-    // so two runs with the same manual_seed produce bit-identical outputs
-    // across vision augments. When no manual_seed is set, get_global_seed()
-    // falls back to a time-based seed (matches PyTorch's behaviour).
-    std::mt19937 rng(static_cast<std::mt19937::result_type>(
-        tenzor::get_global_seed()));
+    // Normalise to CPU/Float32/contiguous for the raw float* loop below; the
+    // result is converted back to the caller's dtype/device on return.
+    TransformDomain orig;
+    Tensor in = enter_host_float32(input, orig);
+
+    // B.2: deterministic when tenzor::manual_seed() is called; otherwise the
+    // seed is drawn from the shared thread-local engine (advances per call) so
+    // transforms in the same Compose/clock tick are not correlated. See
+    // make_transform_rng().
+    std::mt19937 rng = make_transform_rng();
 
     int64_t C = shape[0];
     int64_t H = shape[1];
     int64_t W = shape[2];
     int64_t total = C * H * W;
 
-    const float* src = static_cast<const float*>(input.data_ptr());
+    const float* src = static_cast<const float*>(in.data_ptr());
 
     // Normalized magnitude from severity
     float normalized_mag = severity_ / 10.0f;
@@ -1830,14 +1933,14 @@ auto AugMix::operator()(const Tensor& input, const Tensor& target)
     }
 
     // Final mix: output = m * original + (1 - m) * mixed
-    Tensor output = zeros(std::vector<int64_t>(shape.begin(), shape.end()), input.dtype());
+    Tensor output = zeros(std::vector<int64_t>(shape.begin(), shape.end()), DType::Float32);
     float* dst = static_cast<float*>(output.data_ptr());
 
     for (int64_t i = 0; i < total; ++i) {
         dst[i] = m * src[i] + (1.0f - m) * mixed[i];
     }
 
-    return {output, target};
+    return {leave_host_float32(std::move(output), orig), target};
 }
 
 } // namespace transforms

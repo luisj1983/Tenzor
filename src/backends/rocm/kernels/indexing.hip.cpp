@@ -333,6 +333,45 @@ __global__ void scatter_kernel(
     }
 }
 
+// Complex scatter-with-reduce="add". A complex element is two contiguous reals
+// (RealT == float for Complex64, double for Complex128). A 64/128-bit integer
+// atomicAdd over the packed bits is mathematically wrong (carry crosses the
+// real/imag boundary), so accumulate the real and imaginary scalars with two
+// independent real atomicAdds. `output`/`src` point at the underlying real
+// scalar arrays (2 reals per logical element).
+template<typename RealT>
+__global__ void scatter_complex_add_kernel(
+    RealT* output,
+    const int64_t* indices,
+    const RealT* src,
+    int64_t outer_size,
+    int64_t dim_size,
+    int64_t inner_size,
+    int64_t index_dim_size,
+    int64_t total_scatter
+) {
+    HIP_KERNEL_LOOP(idx, total_scatter) {
+        int64_t inner_idx = idx % inner_size;
+        int64_t temp = idx / inner_size;
+        int64_t index_pos = temp % index_dim_size;
+        int64_t outer_idx = temp / index_dim_size;
+
+        int64_t index_offset = outer_idx * index_dim_size * inner_size +
+                               index_pos * inner_size + inner_idx;
+        int64_t scatter_idx = indices[index_offset];
+        if (scatter_idx < 0) {
+            scatter_idx += dim_size;
+        }
+        if (scatter_idx >= 0 && scatter_idx < dim_size) {
+            int64_t output_offset = outer_idx * dim_size * inner_size +
+                                    scatter_idx * inner_size +
+                                    inner_idx;
+            atomicAddHelper(&output[2 * output_offset + 0], src[2 * idx + 0]);
+            atomicAddHelper(&output[2 * output_offset + 1], src[2 * idx + 1]);
+        }
+    }
+}
+
 auto scatter_hip(
     Tensor& output,
     int64_t dim,
@@ -462,17 +501,39 @@ auto scatter_hip(
             reinterpret_cast<const uint32_t*>(src.data_ptr()),
             outer_size, dim_size, inner_size, index_dim_size, total_scatter, reduce_add);
         HIP_POST_LAUNCH_CHECK();
-    } else if (output.dtype() == DType::UInt64 || output.dtype() == DType::Complex64) {
+    } else if (output.dtype() == DType::Complex64) {
+        if (reduce_add) {
+            // Componentwise real/imag atomicAdd; a packed 64-bit integer add
+            // would carry across the real/imag boundary (wrong result).
+            hipLaunchKernelGGL(scatter_complex_add_kernel<float>, dim3(blocks), dim3(threads), 0, 0,
+                reinterpret_cast<float*>(output.data_ptr()), indices.data<int64_t>(),
+                reinterpret_cast<const float*>(src.data_ptr()),
+                outer_size, dim_size, inner_size, index_dim_size, total_scatter);
+        } else {
+            hipLaunchKernelGGL(scatter_kernel<uint64_t>, dim3(blocks), dim3(threads), 0, 0,
+                reinterpret_cast<uint64_t*>(output.data_ptr()), indices.data<int64_t>(),
+                reinterpret_cast<const uint64_t*>(src.data_ptr()),
+                outer_size, dim_size, inner_size, index_dim_size, total_scatter, reduce_add);
+        }
+        HIP_POST_LAUNCH_CHECK();
+    } else if (output.dtype() == DType::UInt64) {
         hipLaunchKernelGGL(scatter_kernel<uint64_t>, dim3(blocks), dim3(threads), 0, 0,
             reinterpret_cast<uint64_t*>(output.data_ptr()), indices.data<int64_t>(),
             reinterpret_cast<const uint64_t*>(src.data_ptr()),
             outer_size, dim_size, inner_size, index_dim_size, total_scatter, reduce_add);
         HIP_POST_LAUNCH_CHECK();
     } else if (output.dtype() == DType::Complex128) {
-        hipLaunchKernelGGL(scatter_kernel<Bytes16>, dim3(blocks), dim3(threads), 0, 0,
-            reinterpret_cast<Bytes16*>(output.data_ptr()), indices.data<int64_t>(),
-            reinterpret_cast<const Bytes16*>(src.data_ptr()),
-            outer_size, dim_size, inner_size, index_dim_size, total_scatter, reduce_add);
+        if (reduce_add) {
+            hipLaunchKernelGGL(scatter_complex_add_kernel<double>, dim3(blocks), dim3(threads), 0, 0,
+                reinterpret_cast<double*>(output.data_ptr()), indices.data<int64_t>(),
+                reinterpret_cast<const double*>(src.data_ptr()),
+                outer_size, dim_size, inner_size, index_dim_size, total_scatter);
+        } else {
+            hipLaunchKernelGGL(scatter_kernel<Bytes16>, dim3(blocks), dim3(threads), 0, 0,
+                reinterpret_cast<Bytes16*>(output.data_ptr()), indices.data<int64_t>(),
+                reinterpret_cast<const Bytes16*>(src.data_ptr()),
+                outer_size, dim_size, inner_size, index_dim_size, total_scatter, reduce_add);
+        }
         HIP_POST_LAUNCH_CHECK();
     } else {
         throw std::runtime_error("scatter_hip: Unsupported dtype");
@@ -2160,6 +2221,27 @@ auto masked_fill_hip(
     return output;
 }
 
+// Order-preserving stream compaction via hipcub DeviceSelect::Flagged. Unlike
+// the atomic-counter compaction this replaced, Flagged writes selected elements
+// in their original flattened (row-major) order, matching CPU and CUDA so
+// positional consumers see identical results across backends.
+template<typename T>
+static void masked_select_flagged(const T* d_in, const bool* d_flags, T* d_out,
+                                  int64_t* d_num_selected, int64_t total_elements,
+                                  hipStream_t stream) {
+    void* d_temp = nullptr;
+    size_t temp_bytes = 0;
+    HIP_CHECK(hipcub::DeviceSelect::Flagged(
+        d_temp, temp_bytes, d_in, d_flags, d_out, d_num_selected,
+        static_cast<int>(total_elements), stream));
+    HIP_CHECK(hipMalloc(&d_temp, temp_bytes));
+    HIP_CHECK(hipcub::DeviceSelect::Flagged(
+        d_temp, temp_bytes, d_in, d_flags, d_out, d_num_selected,
+        static_cast<int>(total_elements), stream));
+    HIP_CHECK(hipStreamSynchronize(stream));
+    HIP_CHECK(hipFree(d_temp));
+}
+
 auto masked_select_hip(
     const Tensor& input,
     const Tensor& mask,
@@ -2188,10 +2270,9 @@ auto masked_select_hip(
 
     Tensor output = Tensor({h_count}, input.dtype(), input.device());
 
-    int64_t* d_output_idx;
-    HIP_CHECK(hipMalloc(&d_output_idx, sizeof(int64_t)));
-    HIP_CHECK(hipMemsetAsync(d_output_idx, 0, sizeof(int64_t), stream));
-
+    // Order-preserving compaction. DeviceSelect::Flagged also reports the number
+    // selected; we already know it (h_count) but the API requires the output, so
+    // reuse d_count as the d_num_selected scratch.
     // The copy reproduces raw element bytes, so dispatch by element width: any
     // same-width integer payload covers float, integer and complex dtypes
     // (Complex64 = 8 bytes, Complex128 = 16 bytes).
@@ -2200,34 +2281,26 @@ auto masked_select_hip(
     const bool* mask_ptr = mask.data<bool>();
     size_t width = dtype_size(input.dtype());
     if (width == 1) {
-        hipLaunchKernelGGL(masked_select_kernel<uint8_t>, dim3(blocks), dim3(threads), 0, stream,
-            reinterpret_cast<const uint8_t*>(in_ptr), mask_ptr,
-            reinterpret_cast<uint8_t*>(out_ptr), d_output_idx, total_elements);
+        masked_select_flagged(reinterpret_cast<const uint8_t*>(in_ptr), mask_ptr,
+            reinterpret_cast<uint8_t*>(out_ptr), d_count, total_elements, stream);
     } else if (width == 2) {
-        hipLaunchKernelGGL(masked_select_kernel<uint16_t>, dim3(blocks), dim3(threads), 0, stream,
-            reinterpret_cast<const uint16_t*>(in_ptr), mask_ptr,
-            reinterpret_cast<uint16_t*>(out_ptr), d_output_idx, total_elements);
+        masked_select_flagged(reinterpret_cast<const uint16_t*>(in_ptr), mask_ptr,
+            reinterpret_cast<uint16_t*>(out_ptr), d_count, total_elements, stream);
     } else if (width == 4) {
-        hipLaunchKernelGGL(masked_select_kernel<uint32_t>, dim3(blocks), dim3(threads), 0, stream,
-            reinterpret_cast<const uint32_t*>(in_ptr), mask_ptr,
-            reinterpret_cast<uint32_t*>(out_ptr), d_output_idx, total_elements);
+        masked_select_flagged(reinterpret_cast<const uint32_t*>(in_ptr), mask_ptr,
+            reinterpret_cast<uint32_t*>(out_ptr), d_count, total_elements, stream);
     } else if (width == 8) {
-        hipLaunchKernelGGL(masked_select_kernel<uint64_t>, dim3(blocks), dim3(threads), 0, stream,
-            reinterpret_cast<const uint64_t*>(in_ptr), mask_ptr,
-            reinterpret_cast<uint64_t*>(out_ptr), d_output_idx, total_elements);
+        masked_select_flagged(reinterpret_cast<const uint64_t*>(in_ptr), mask_ptr,
+            reinterpret_cast<uint64_t*>(out_ptr), d_count, total_elements, stream);
     } else if (width == 16) {
-        hipLaunchKernelGGL(masked_select_kernel<Bytes16>, dim3(blocks), dim3(threads), 0, stream,
-            reinterpret_cast<const Bytes16*>(in_ptr), mask_ptr,
-            reinterpret_cast<Bytes16*>(out_ptr), d_output_idx, total_elements);
+        masked_select_flagged(reinterpret_cast<const Bytes16*>(in_ptr), mask_ptr,
+            reinterpret_cast<Bytes16*>(out_ptr), d_count, total_elements, stream);
     } else {
         HIP_CHECK(hipFree(d_count));
-        HIP_CHECK(hipFree(d_output_idx));
         throw std::runtime_error("masked_select_hip: unsupported element width");
     }
-    HIP_POST_LAUNCH_CHECK();
 
     HIP_CHECK(hipFree(d_count));
-    HIP_CHECK(hipFree(d_output_idx));
     HIP_POST_LAUNCH_CHECK();
 
     return output;
@@ -2301,7 +2374,8 @@ auto take_hip(
 template<typename T>
 __global__ void gather_2d_kernel(
     const T* table, const int64_t* indices, T* output,
-    int64_t num_positions, int64_t num_heads, int64_t table_stride) {
+    int64_t num_positions, int64_t num_heads, int64_t table_stride,
+    int64_t num_table_rows) {
 
     int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
     int64_t total = num_positions * num_positions * num_heads;
@@ -2313,6 +2387,12 @@ __global__ void gather_2d_kernel(
     int64_t i = idx / (num_heads * num_positions);
 
     int64_t table_idx = indices[i * num_positions + j];
+    // Bounds-check the table row index from a (possibly untrusted) index tensor
+    // to avoid an out-of-bounds device read; out-of-range entries gather 0.
+    if (table_idx < 0 || table_idx >= num_table_rows) {
+        output[idx] = T(0);
+        return;
+    }
     output[idx] = table[table_idx * num_heads + h];
 }
 
@@ -2332,17 +2412,20 @@ auto gather_relative_position_bias_kernel(const Tensor& table, const Tensor& ind
     // Ensure indices are on the same device
     Tensor indices_device = indices.device() == table.device() ? indices : indices.to(table.device());
 
+    // Number of rows in the table for bounds-checking the gathered index.
+    int64_t num_table_rows = table.shape().empty() ? 0 : table.shape()[0];
+
     if (table.dtype() == DType::Float32) {
         hipLaunchKernelGGL(gather_2d_kernel<float>,
             dim3(blocks), dim3(threads), 0, stream,
             table.data<float>(), indices_device.data<int64_t>(), output.data<float>(),
-            num_positions, num_heads, num_heads);
+            num_positions, num_heads, num_heads, num_table_rows);
             HIP_POST_LAUNCH_CHECK();
     } else if (table.dtype() == DType::Float64) {
         hipLaunchKernelGGL(gather_2d_kernel<double>,
             dim3(blocks), dim3(threads), 0, stream,
             table.data<double>(), indices_device.data<int64_t>(), output.data<double>(),
-            num_positions, num_heads, num_heads);
+            num_positions, num_heads, num_heads, num_table_rows);
             HIP_POST_LAUNCH_CHECK();
     } else if (table.dtype() == DType::Float16) {
         hipLaunchKernelGGL(gather_2d_kernel<__half>,
@@ -2350,7 +2433,7 @@ auto gather_relative_position_bias_kernel(const Tensor& table, const Tensor& ind
             reinterpret_cast<const __half*>(table.data<Float16>()),
             indices_device.data<int64_t>(),
             reinterpret_cast<__half*>(output.data<Float16>()),
-            num_positions, num_heads, num_heads);
+            num_positions, num_heads, num_heads, num_table_rows);
             HIP_POST_LAUNCH_CHECK();
     } else {
         throw std::runtime_error("gather_relative_position_bias: unsupported dtype");

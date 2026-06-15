@@ -16,6 +16,8 @@
 #include <fstream>
 #include <iostream>
 #include <unordered_map>
+#include <unordered_set>
+#include <functional>
 #include <cstdio>
 
 namespace tenzor {
@@ -123,8 +125,8 @@ inline uint32_t reflectPushConstantSize(const std::vector<uint32_t>& spirv) {
 
     // Type size info: maps SPIR-V result ID to its size in bytes
     std::unordered_map<uint32_t, uint32_t> type_sizes;
-    // Constant values: maps SPIR-V result ID to its uint32_t value
-    std::unordered_map<uint32_t, uint32_t> constants;
+    // Constant values: maps SPIR-V result ID to its (up to 64-bit) value
+    std::unordered_map<uint32_t, uint64_t> constants;
     // Struct member type IDs: maps struct ID to vector of member type IDs
     std::unordered_map<uint32_t, std::vector<uint32_t>> struct_members;
     // Pointer types: maps pointer result ID to {storage_class, pointee_type_id}
@@ -195,10 +197,22 @@ inline uint32_t reflectPushConstantSize(const std::vector<uint32_t>& spirv) {
             }
             case SpvOpConstant: {
                 // OpConstant result_type result_id value...
+                // The literal occupies one word for 32-bit (and narrower) result
+                // types, but two words (low then high) for a 64-bit result type.
+                // Consult the result type's byte width so 64-bit array-length
+                // constants are not truncated to their low 32 bits.
                 if (word_count >= 4) {
+                    uint32_t result_type = spirv[i + 1];
                     uint32_t id = spirv[i + 2];
-                    uint32_t value = spirv[i + 3];
-                    constants[id] = value;
+                    auto width_it = type_sizes.find(result_type);
+                    if (width_it != type_sizes.end() && width_it->second == 8 &&
+                        word_count >= 5) {
+                        uint64_t low = spirv[i + 3];
+                        uint64_t high = spirv[i + 4];
+                        constants[id] = (high << 32) | low;
+                    } else {
+                        constants[id] = static_cast<uint64_t>(spirv[i + 3]);
+                    }
                 }
                 break;
             }
@@ -211,7 +225,8 @@ inline uint32_t reflectPushConstantSize(const std::vector<uint32_t>& spirv) {
                     auto elem_it = type_sizes.find(element_type);
                     auto len_it = constants.find(length_id);
                     if (elem_it != type_sizes.end() && len_it != constants.end()) {
-                        type_sizes[id] = elem_it->second * len_it->second;
+                        type_sizes[id] = static_cast<uint32_t>(
+                            static_cast<uint64_t>(elem_it->second) * len_it->second);
                     }
                 }
                 break;
@@ -286,8 +301,42 @@ inline uint32_t reflectPushConstantSize(const std::vector<uint32_t>& spirv) {
     }
 
     const auto& members = struct_it->second;
-    uint32_t max_extent = 0;
 
+    // Resolve the byte size of a type ID, recursing into nested structs of
+    // arbitrary depth. type_sizes only holds scalar/vector/matrix/array sizes,
+    // so struct members (and structs nested inside them) must be sized by
+    // walking their members' Offset decorations + sizes. `visited` guards
+    // against cyclic type graphs (which valid SPIR-V should not produce, but a
+    // malformed module could).
+    std::function<uint32_t(uint32_t, std::unordered_set<uint32_t>&)> type_extent =
+        [&](uint32_t type_id, std::unordered_set<uint32_t>& visited) -> uint32_t {
+        auto size_it = type_sizes.find(type_id);
+        if (size_it != type_sizes.end()) {
+            return size_it->second;
+        }
+        auto nested_it = struct_members.find(type_id);
+        if (nested_it == struct_members.end()) {
+            return 0;  // Unknown / unsupported type
+        }
+        if (!visited.insert(type_id).second) {
+            return 0;  // Cycle — stop recursing
+        }
+        uint32_t extent = 0;
+        const auto& nested_members = nested_it->second;
+        for (uint32_t nm = 0; nm < nested_members.size(); ++nm) {
+            uint64_t nkey = (static_cast<uint64_t>(type_id) << 32) | nm;
+            auto noff_it = member_offsets.find(nkey);
+            if (noff_it == member_offsets.end()) {
+                continue;
+            }
+            uint32_t nsize = type_extent(nested_members[nm], visited);
+            extent = std::max(extent, noff_it->second + nsize);
+        }
+        visited.erase(type_id);
+        return extent;
+    };
+
+    uint32_t max_extent = 0;
     for (uint32_t m = 0; m < members.size(); ++m) {
         uint64_t key = (static_cast<uint64_t>(push_constant_struct_id) << 32) | m;
         auto off_it = member_offsets.find(key);
@@ -295,31 +344,9 @@ inline uint32_t reflectPushConstantSize(const std::vector<uint32_t>& spirv) {
             continue;  // No offset decoration for this member
         }
 
-        uint32_t offset = off_it->second;
-        uint32_t member_size = 0;
-
-        auto size_it = type_sizes.find(members[m]);
-        if (size_it != type_sizes.end()) {
-            member_size = size_it->second;
-        } else {
-            // Check if it's a nested struct
-            auto nested_struct_it = struct_members.find(members[m]);
-            if (nested_struct_it != struct_members.end()) {
-                // Compute nested struct size recursively (find max extent)
-                uint32_t nested_max = 0;
-                for (uint32_t nm = 0; nm < nested_struct_it->second.size(); ++nm) {
-                    uint64_t nkey = (static_cast<uint64_t>(members[m]) << 32) | nm;
-                    auto noff_it = member_offsets.find(nkey);
-                    auto nsize_it = type_sizes.find(nested_struct_it->second[nm]);
-                    if (noff_it != member_offsets.end() && nsize_it != type_sizes.end()) {
-                        nested_max = std::max(nested_max, noff_it->second + nsize_it->second);
-                    }
-                }
-                member_size = nested_max;
-            }
-        }
-
-        max_extent = std::max(max_extent, offset + member_size);
+        std::unordered_set<uint32_t> visited;
+        uint32_t member_size = type_extent(members[m], visited);
+        max_extent = std::max(max_extent, off_it->second + member_size);
     }
 
     // Round up to 4-byte alignment (Vulkan push constant requirement)
@@ -439,7 +466,7 @@ private:
         vkGetPhysicalDeviceMemoryProperties(physicalDevice, &memProperties);
 
         for (uint32_t i = 0; i < memProperties.memoryTypeCount; i++) {
-            if ((typeFilter & (1 << i)) &&
+            if ((typeFilter & (1u << i)) &&
                 (memProperties.memoryTypes[i].propertyFlags & properties) == properties) {
                 return i;
             }

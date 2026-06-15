@@ -14,6 +14,8 @@
 #include <stdexcept>
 #include <string>
 
+#include "tenzor/backend/loader_fwd.hpp"
+
 namespace tenzor {
 namespace rocm {
 
@@ -46,9 +48,13 @@ private:
     struct HandleGuard {
         rocblas_handle handle = nullptr;
         hipStream_t last_stream = nullptr;
-        ~HandleGuard() {
-            if (handle) {
-                rocblas_destroy_handle(handle);
+        // Guard teardown with the backend-alive check (mirrors RocSPARSEHandlePool):
+        // destroying a rocBLAS handle after the backend library has unloaded calls
+        // into freed code. noexcept + try/catch because destructors must not throw.
+        ~HandleGuard() noexcept {
+            if (handle && is_backend_registry_alive()) {
+                try { rocblas_destroy_handle(handle); }
+                catch (...) { /* destructor must not throw */ }
                 handle = nullptr;
             }
         }

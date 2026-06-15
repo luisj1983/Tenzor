@@ -34,8 +34,8 @@ TEST(RpcAgentTest, RegisterAndLookupFunction) {
     });
 
     EXPECT_TRUE(reg.has_function("test_add"));
-    auto* fn = reg.get_function("test_add");
-    EXPECT_NE(fn, nullptr);
+    auto fn = reg.get_function("test_add");
+    EXPECT_TRUE(fn.has_value());
 }
 
 TEST(RpcAgentTest, ExecuteRegisteredFunction) {
@@ -44,8 +44,8 @@ TEST(RpcAgentTest, ExecuteRegisteredFunction) {
         return {args[0] * 2.0f};
     });
 
-    auto* fn = reg.get_function("test_mul2");
-    ASSERT_NE(fn, nullptr);
+    auto fn = reg.get_function("test_mul2");
+    ASSERT_TRUE(fn.has_value());
 
     auto input = tenzor::ones({3}, DType::Float32, Device::cpu());
     auto result = (*fn)({input});

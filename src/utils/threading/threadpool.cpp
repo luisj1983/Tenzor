@@ -1,13 +1,19 @@
 #include "tenzor/utils/threading/threadpool.hpp"
 
+#include <algorithm>
+
 namespace tenzor {
 
 ThreadPool::ThreadPool(size_t num_threads)
-    : num_threads_(num_threads) {
+    // std::thread::hardware_concurrency() is allowed to return 0 (some
+    // containers/cgroups/CI). With 0 workers there is no consumer for the task
+    // queue, so any future returned by submit() would block forever. Clamp to a
+    // minimum of one worker so the pool always makes progress.
+    : num_threads_(std::max<size_t>(1, num_threads)) {
 
-    workers_.reserve(num_threads);
+    workers_.reserve(num_threads_);
 
-    for (size_t i = 0; i < num_threads; ++i) {
+    for (size_t i = 0; i < num_threads_; ++i) {
         workers_.emplace_back(&ThreadPool::worker_thread, this);
     }
 }
@@ -46,9 +52,7 @@ auto ThreadPool::worker_thread() -> void {
             tasks_.pop();
         }
 
-        active_threads_++;
         task();
-        active_threads_--;
     }
 }
 

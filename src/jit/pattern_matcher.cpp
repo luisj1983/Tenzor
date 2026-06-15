@@ -20,6 +20,22 @@ auto PatternMatcher::has_single_use(const std::shared_ptr<Node>& node) -> bool {
     return node->outputs()[0]->uses().size() == 1;
 }
 
+auto PatternMatcher::estimate_elements(
+    const std::vector<std::shared_ptr<Value>>& inputs) -> int64_t {
+    if (inputs.empty()) return FusionMatch::kUnknownElements;
+    const auto& shape = inputs[0]->shape();
+    if (shape.empty()) return FusionMatch::kUnknownElements;
+    int64_t elements = 1;
+    for (auto d : shape) {
+        // <= 0 encodes a dynamic/unknown/invalid dim; a real element count
+        // cannot be computed, so report it as unknown rather than letting a
+        // 0 or negative placeholder propagate into the cost model.
+        if (d <= 0) return FusionMatch::kUnknownElements;
+        elements *= d;
+    }
+    return elements;
+}
+
 auto PatternMatcher::is_elementwise(OpType op) -> bool {
     switch (op) {
         case OpType::Add: case OpType::Sub: case OpType::Mul: case OpType::Div:
@@ -198,11 +214,7 @@ auto PatternMatcher::match_softmax(const Graph& graph, size_t start_idx,
     match.nodes = {n0, n1, n2, n3, n4};
     match.inputs = collect_external_inputs(match.nodes);
     match.outputs = collect_external_outputs(match.nodes);
-    if (!match.inputs.empty()) {
-        auto& shape = match.inputs[0]->shape();
-        match.estimated_elements = 1;
-        for (auto d : shape) match.estimated_elements *= d;
-    }
+    match.estimated_elements = estimate_elements(match.inputs);
     match.compute_signature();
     return match;
 }
@@ -276,11 +288,7 @@ auto PatternMatcher::match_layer_norm(const Graph& graph, size_t start_idx,
     match.nodes = std::move(matched);
     match.inputs = collect_external_inputs(match.nodes);
     match.outputs = collect_external_outputs(match.nodes);
-    if (!match.inputs.empty()) {
-        auto& shape = match.inputs[0]->shape();
-        match.estimated_elements = 1;
-        for (auto d : shape) match.estimated_elements *= d;
-    }
+    match.estimated_elements = estimate_elements(match.inputs);
     match.compute_signature();
     return match;
 }
@@ -345,11 +353,7 @@ auto PatternMatcher::match_rms_norm(const Graph& graph, size_t start_idx,
     match.nodes = std::move(matched);
     match.inputs = collect_external_inputs(match.nodes);
     match.outputs = collect_external_outputs(match.nodes);
-    if (!match.inputs.empty()) {
-        auto& shape = match.inputs[0]->shape();
-        match.estimated_elements = 1;
-        for (auto d : shape) match.estimated_elements *= d;
-    }
+    match.estimated_elements = estimate_elements(match.inputs);
     match.compute_signature();
     return match;
 }
@@ -398,11 +402,7 @@ auto PatternMatcher::match_gemm_epilogue(const Graph& graph, size_t start_idx,
     match.nodes = std::move(matched);
     match.inputs = collect_external_inputs(match.nodes);
     match.outputs = collect_external_outputs(match.nodes);
-    if (!match.inputs.empty()) {
-        auto& shape = match.inputs[0]->shape();
-        match.estimated_elements = 1;
-        for (auto d : shape) match.estimated_elements *= d;
-    }
+    match.estimated_elements = estimate_elements(match.inputs);
     match.compute_signature();
     return match;
 }
@@ -442,11 +442,7 @@ auto PatternMatcher::match_small_mlp(const Graph& graph, size_t start_idx,
     match.nodes = {n0, n1, n2};
     match.inputs = collect_external_inputs(match.nodes);
     match.outputs = collect_external_outputs(match.nodes);
-    if (!match.inputs.empty()) {
-        auto& shape = match.inputs[0]->shape();
-        match.estimated_elements = 1;
-        for (auto d : shape) match.estimated_elements *= d;
-    }
+    match.estimated_elements = estimate_elements(match.inputs);
     match.compute_signature();
     return match;
 }
@@ -509,11 +505,7 @@ auto PatternMatcher::match_reduction_chain(const Graph& graph, size_t start_idx,
     match.nodes = std::move(matched);
     match.inputs = collect_external_inputs(match.nodes);
     match.outputs = collect_external_outputs(match.nodes);
-    if (!match.inputs.empty()) {
-        auto& shape = match.inputs[0]->shape();
-        match.estimated_elements = 1;
-        for (auto d : shape) match.estimated_elements *= d;
-    }
+    match.estimated_elements = estimate_elements(match.inputs);
     match.compute_signature();
     return match;
 }
@@ -558,11 +550,7 @@ auto PatternMatcher::match_swiglu(const Graph& graph, size_t start_idx,
     match.nodes = {n0, n1, n2, n3, n4};
     match.inputs = collect_external_inputs(match.nodes);
     match.outputs = collect_external_outputs(match.nodes);
-    if (!match.inputs.empty()) {
-        auto& shape = match.inputs[0]->shape();
-        match.estimated_elements = 1;
-        for (auto d : shape) match.estimated_elements *= d;
-    }
+    match.estimated_elements = estimate_elements(match.inputs);
     match.compute_signature();
     return match;
 }
@@ -641,11 +629,7 @@ auto PatternMatcher::match_gelu_variant(const Graph& graph, size_t start_idx,
     match.nodes = std::move(matched);
     match.inputs = collect_external_inputs(match.nodes);
     match.outputs = collect_external_outputs(match.nodes);
-    if (!match.inputs.empty()) {
-        auto& shape = match.inputs[0]->shape();
-        match.estimated_elements = 1;
-        for (auto d : shape) match.estimated_elements *= d;
-    }
+    match.estimated_elements = estimate_elements(match.inputs);
     match.compute_signature();
     return match;
 }
@@ -730,11 +714,7 @@ auto PatternMatcher::match_rotary_embedding(const Graph& graph, size_t start_idx
     match.nodes = std::move(matched);
     match.inputs = collect_external_inputs(match.nodes);
     match.outputs = collect_external_outputs(match.nodes);
-    if (!match.inputs.empty()) {
-        auto& shape = match.inputs[0]->shape();
-        match.estimated_elements = 1;
-        for (auto d : shape) match.estimated_elements *= d;
-    }
+    match.estimated_elements = estimate_elements(match.inputs);
     match.compute_signature();
     return match;
 }

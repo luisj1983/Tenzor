@@ -1331,11 +1331,15 @@ __global__ void adaptive_avgpool1d_forward_impl(
         int64_t l_end   = ((ol + 1) * L_in) / L_out;
 
         Compute sum = Compute(0);
+        int64_t count = 0;
         for (int64_t l = l_start; l < l_end; ++l) {
             sum += dev_load_compute(input, (n * C + c) * L_in + l);
+            count++;
         }
 
-        dev_store_compute(output, idx, sum / (l_end - l_start));
+        // Guard against empty windows (output_size > input_size): mirror the 3D
+        // forward kernel and emit 0 rather than dividing by zero -> inf/NaN.
+        dev_store_compute(output, idx, count > 0 ? sum / count : Compute(0));
     }
 }
 
@@ -1403,7 +1407,9 @@ __global__ void adaptive_avgpool1d_backward_impl(
         int64_t l_start = (ol * L_in) / L_out;
         int64_t l_end   = ((ol + 1) * L_in) / L_out;
 
-        float grad_val = dev_load(grad_output, idx) / static_cast<float>(l_end - l_start);
+        int64_t count = l_end - l_start;
+        if (count <= 0) continue;  // empty window: no gradient to scatter
+        float grad_val = dev_load(grad_output, idx) / static_cast<float>(count);
 
         for (int64_t l = l_start; l < l_end; ++l) {
             int64_t in_idx = (n * C + c) * L_in + l;
@@ -2325,6 +2331,7 @@ __global__ void adaptive_avgpool3d_backward_impl(
         int64_t w_end   = ((ow + 1) * W_in) / W_out;
 
         int count = static_cast<int>((d_end - d_start) * (h_end - h_start) * (w_end - w_start));
+        if (count <= 0) continue;  // empty window: no gradient to scatter
         float grad_val = dev_load(grad_output, idx) / static_cast<float>(count);
 
         for (int64_t d = d_start; d < d_end; ++d) {

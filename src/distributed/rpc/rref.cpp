@@ -5,9 +5,22 @@
 
 #include "tenzor/distributed/rpc/rref.hpp"
 
+#include <cstring>
+
 namespace tenzor {
 namespace distributed {
 namespace rpc {
+
+namespace {
+// Encode an rref id into a message's payload.bytes. The wire's request_id field
+// is reserved for request/response correlation (send() overwrites it), so the
+// rref id is carried as 8 bytes in payload.bytes instead.
+auto encode_rref_id(int64_t rref_id) -> std::vector<uint8_t> {
+    std::vector<uint8_t> bytes(sizeof(int64_t));
+    std::memcpy(bytes.data(), &rref_id, sizeof(int64_t));
+    return bytes;
+}
+}  // namespace
 
 // ============================================================================
 // RRef
@@ -24,16 +37,8 @@ RRef::RRef(RRef&& other) noexcept
 
 auto RRef::operator=(RRef&& other) noexcept -> RRef& {
     if (this != &other) {
-        // Send delete for current ref if valid
-        if (valid_ && agent_ && !is_owner()) {
-            try {
-                Message msg;
-                msg.type = MessageType::RREF_DELETE;
-                msg.dst_worker = owner_id_;
-                msg.payload.request_id = rref_id_;
-                agent_->send_async(std::move(msg), [](Message) {});
-            } catch (...) {}
-        }
+        // Release the storage this RRef currently holds before adopting other's.
+        release();
 
         owner_id_ = other.owner_id_;
         rref_id_ = other.rref_id_;
@@ -45,16 +50,28 @@ auto RRef::operator=(RRef&& other) noexcept -> RRef& {
 }
 
 RRef::~RRef() {
-    if (valid_ && agent_ && !is_owner()) {
-        try {
+    release();
+}
+
+auto RRef::release() noexcept -> void {
+    if (!valid_ || !agent_) return;
+    valid_ = false;  // idempotent: subsequent release() calls are no-ops
+    try {
+        if (is_owner()) {
+            // Eager-fetch model: the value lives in this worker's local store.
+            // Erase it so the store does not grow unbounded for the process
+            // lifetime.
+            RRefStore::instance().remove(rref_id_);
+        } else {
+            // Remote GC: tell the owner to drop its stored tensor.
             Message msg;
             msg.type = MessageType::RREF_DELETE;
             msg.dst_worker = owner_id_;
-            msg.payload.request_id = rref_id_;
+            msg.payload.bytes = encode_rref_id(rref_id_);
             agent_->send_async(std::move(msg), [](Message) {});
-        } catch (...) {
-            // Suppress exceptions in destructor
         }
+    } catch (...) {
+        // Suppress exceptions during teardown.
     }
 }
 
@@ -72,7 +89,7 @@ auto RRef::to_here() -> Tensor {
     Message msg;
     msg.type = MessageType::RREF_FETCH;
     msg.dst_worker = owner_id_;
-    msg.payload.request_id = rref_id_;
+    msg.payload.bytes = encode_rref_id(rref_id_);
 
     auto response = agent_->send(std::move(msg));
     if (response.type == MessageType::RPC_ERROR) {

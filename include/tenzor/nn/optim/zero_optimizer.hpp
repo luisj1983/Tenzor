@@ -351,7 +351,7 @@ public:
     /**
      * @brief Zero all parameter gradients (QQ.14: see Optimizer::zero_grad).
      */
-    auto zero_grad(bool set_to_none = true) -> void;
+    auto zero_grad(bool set_to_none = true) -> void override;
 
     /**
      * @brief Get optimizer state dictionary
@@ -1542,7 +1542,7 @@ public:
      * Only zeros local partition of gradients.
      * QQ.14: see Optimizer::zero_grad for set_to_none semantics.
      */
-    auto zero_grad(bool set_to_none = true) -> void;
+    auto zero_grad(bool set_to_none = true) -> void override;
 
     // ========================================================================
     // State Management
@@ -1835,6 +1835,17 @@ public:
     auto adaptive_offload_decision() -> void;
 
 private:
+    // ------------------------------------------------------------------------
+    // Lock-free cores of the adaptive-tuning helpers. These assume the caller
+    // already holds adaptive_mutex_. The public methods above acquire the lock
+    // and delegate here; internal callers that already hold the lock call these
+    // directly. This avoids re-locking the non-recursive adaptive_mutex_, which
+    // would self-deadlock.
+    // ------------------------------------------------------------------------
+    auto calculate_optimal_prefetch_depth_locked() -> int;
+    auto calculate_optimal_bucket_size_locked() -> size_t;
+    auto check_memory_pressure_locked() -> double;
+
     // ========================================================================
     // Internal State Structures
     // ========================================================================

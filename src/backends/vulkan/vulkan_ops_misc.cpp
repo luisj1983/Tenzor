@@ -598,11 +598,11 @@ auto VulkanBackend::dispatchOnes(const std::vector<int64_t>& shape, DType dtype)
 
     push_constants.n_elements = static_cast<uint32_t>(output.numel());
 
-    // Convert value 1.0 or 1 to bits based on dtype
+    // Convert value 1.0 or 1 to bits based on dtype. Int64/UInt64 (and every
+    // other multi-byte/non-Float32 dtype) are intercepted earlier and routed to
+    // dispatchFull; this generic path only ever sees Float32 and Int32, so a
+    // 32-bit one_value_bits slot is exact here.
     if (dtype == DType::Int32) {
-        int32_t int_value = 1;
-        std::memcpy(&push_constants.one_value_bits, &int_value, sizeof(uint32_t));
-    } else if (dtype == DType::Int64) {
         int32_t int_value = 1;
         std::memcpy(&push_constants.one_value_bits, &int_value, sizeof(uint32_t));
     } else {
@@ -676,7 +676,12 @@ auto VulkanBackend::dispatchRand(const std::vector<int64_t>& shape, DType dtype)
         device_id, pipeline, bindings, sizes);
 
     // Honor `tenzor::manual_seed`; falls back to time-based when unset.
-    static std::atomic<uint32_t> offset_counter{0};
+    // The Philox offset is derived deterministically from the seed (which
+    // already increments per call via get_global_seed()), NOT from a
+    // process-global static counter. A static counter advanced past
+    // manual_seed() with no reset hook made `manual_seed(s); rand(...)`
+    // non-reproducible. With offset==0 the sequence is fully determined by
+    // the seed, matching the manual_seed contract and other backends.
 
     struct PushConstants {
         uint32_t n_elements;
@@ -687,7 +692,7 @@ auto VulkanBackend::dispatchRand(const std::vector<int64_t>& shape, DType dtype)
 
     push_constants.n_elements = static_cast<uint32_t>(numel);
     push_constants.seed = static_cast<uint32_t>(::tenzor::get_global_seed());
-    push_constants.offset = offset_counter.fetch_add(static_cast<uint32_t>(numel));
+    push_constants.offset = 0;
     push_constants.distribution = 0;  // uniform
 
     VkCommandBuffer cmdBuffer = beginSingleTimeCommands(device_id);
@@ -755,7 +760,9 @@ auto VulkanBackend::dispatchRandn(const std::vector<int64_t>& shape, DType dtype
         device_id, pipeline, bindings, sizes);
 
     // Honor `tenzor::manual_seed`; falls back to time-based when unset.
-    static std::atomic<uint32_t> offset_counter{0};
+    // Offset derived deterministically from the (per-call incrementing) seed
+    // rather than a process-global static counter — see dispatchRand for the
+    // reproducibility rationale.
 
     struct PushConstants {
         uint32_t n_elements;
@@ -766,7 +773,7 @@ auto VulkanBackend::dispatchRandn(const std::vector<int64_t>& shape, DType dtype
 
     push_constants.n_elements = static_cast<uint32_t>(numel);
     push_constants.seed = static_cast<uint32_t>(::tenzor::get_global_seed());
-    push_constants.offset = offset_counter.fetch_add(static_cast<uint32_t>(numel));
+    push_constants.offset = 0;
     push_constants.distribution = 1;  // normal
 
     VkCommandBuffer cmdBuffer = beginSingleTimeCommands(device_id);
@@ -823,30 +830,56 @@ auto VulkanBackend::dispatchRandint(int64_t low, int64_t high,
     VkDescriptorSet descriptorSet = allocateAndWriteDescriptorSet(
         device_id, pipeline, bindings, sizes);
 
-    // Honor `tenzor::manual_seed`; falls back to time-based when unset.
-    static std::atomic<uint32_t> offset_counter{0};
-
-    struct RandintPC {
-        uint32_t n;
-        int32_t low;
-        int32_t high;
-        uint32_t seed;
-        uint32_t offset;
-    } push_constants;
-
-    push_constants.n = static_cast<uint32_t>(numel);
-    push_constants.low = static_cast<int32_t>(low);
-    push_constants.high = static_cast<int32_t>(high);
-    push_constants.seed = static_cast<uint32_t>(::tenzor::get_global_seed());
-    push_constants.offset = offset_counter.fetch_add(static_cast<uint32_t>(numel));
+    // Honor `tenzor::manual_seed`; the Philox offset is derived deterministically
+    // from the (per-call incrementing) seed rather than a process-global static
+    // counter — see dispatchRand for the reproducibility rationale.
+    uint32_t seed = static_cast<uint32_t>(::tenzor::get_global_seed());
 
     VkCommandBuffer cmdBuffer = beginSingleTimeCommands(device_id);
     vkCmdBindPipeline(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
     vkCmdBindDescriptorSets(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE,
                            pipeline->layout(), 0, 1, &descriptorSet, 0, nullptr);
-    vkCmdPushConstants(cmdBuffer, pipeline->layout(),
-                      VK_SHADER_STAGE_COMPUTE_BIT,
-                      0, sizeof(RandintPC), &push_constants);
+
+    if (dtype == DType::Int64) {
+        // Int64: pass low/high as full 64-bit values split into uint32 halves so
+        // ranges exceeding int32 are not truncated (randint_i64 shader layout).
+        struct RandintPCI64 {
+            uint32_t n;
+            uint32_t low_lo;
+            uint32_t low_hi;
+            uint32_t high_lo;
+            uint32_t high_hi;
+            uint32_t seed;
+            uint32_t offset;
+        } pc;
+        uint64_t low_bits = static_cast<uint64_t>(low);
+        uint64_t high_bits = static_cast<uint64_t>(high);
+        pc.n = static_cast<uint32_t>(numel);
+        pc.low_lo = static_cast<uint32_t>(low_bits & 0xFFFFFFFFu);
+        pc.low_hi = static_cast<uint32_t>((low_bits >> 32) & 0xFFFFFFFFu);
+        pc.high_lo = static_cast<uint32_t>(high_bits & 0xFFFFFFFFu);
+        pc.high_hi = static_cast<uint32_t>((high_bits >> 32) & 0xFFFFFFFFu);
+        pc.seed = seed;
+        pc.offset = 0;
+        vkCmdPushConstants(cmdBuffer, pipeline->layout(),
+                          VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(RandintPCI64), &pc);
+    } else {
+        // Int32: keep the compact int32 low/high layout.
+        struct RandintPC {
+            uint32_t n;
+            int32_t low;
+            int32_t high;
+            uint32_t seed;
+            uint32_t offset;
+        } pc;
+        pc.n = static_cast<uint32_t>(numel);
+        pc.low = static_cast<int32_t>(low);
+        pc.high = static_cast<int32_t>(high);
+        pc.seed = seed;
+        pc.offset = 0;
+        vkCmdPushConstants(cmdBuffer, pipeline->layout(),
+                          VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(RandintPC), &pc);
+    }
 
     uint32_t workgroups = div_wg(numel, devices_[device_id].workgroupSize);
     vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
@@ -3481,11 +3514,19 @@ auto VulkanBackend::dispatchCumSum(const Tensor& input, int64_t dim) -> Tensor {
 
     // No native int shaders — the default path reads int bytes as float and
     // silently produces zero (int 1 reinterpreted as float = denormal ~0).
-    // Promote to Float32, cumsum, cast back. NMS relied on this path for
+    // Promote to a float dtype, cumsum, cast back. NMS relied on this path for
     // its prefix-sum compaction; empty output = int cumsum returning 0s.
+    // Int32/Int64 must promote to Float64 (53 mantissa bits, exact below 2^53);
+    // Float32's 24 mantissa bits round values above 2^24 before the cumulative
+    // op, corrupting large integer prefix sums. Smaller integer types are exact
+    // in Float32.
     DType src_dtype = input.dtype();
-    if (src_dtype == DType::Int32 || src_dtype == DType::Int64 ||
-        src_dtype == DType::Int16 || src_dtype == DType::Int8 ||
+    if (src_dtype == DType::Int32 || src_dtype == DType::Int64) {
+        auto f64 = input.to(DType::Float64);
+        auto out_f64 = dispatchCumSum(f64, dim);
+        return out_f64.to(src_dtype);
+    }
+    if (src_dtype == DType::Int16 || src_dtype == DType::Int8 ||
         src_dtype == DType::UInt8 || src_dtype == DType::Bool) {
         auto f32 = input.to(DType::Float32);
         auto out_f32 = dispatchCumSum(f32, dim);
@@ -3566,10 +3607,15 @@ auto VulkanBackend::dispatchCumProd(const Tensor& input, int64_t dim) -> Tensor 
 
     // Same int-dtype fall-through issue as dispatchCumSum: the default float
     // shader reads int bytes as float and yields denormal/NaN garbage.
-    // Promote to Float32, compute, cast back.
+    // Int32/Int64 promote to Float64 (exact below 2^53); smaller integers are
+    // exact in Float32.
     DType src_dtype = input.dtype();
-    if (src_dtype == DType::Int32 || src_dtype == DType::Int64 ||
-        src_dtype == DType::Int16 || src_dtype == DType::Int8 ||
+    if (src_dtype == DType::Int32 || src_dtype == DType::Int64) {
+        auto f64 = input.to(DType::Float64);
+        auto out_f64 = dispatchCumProd(f64, dim);
+        return out_f64.to(src_dtype);
+    }
+    if (src_dtype == DType::Int16 || src_dtype == DType::Int8 ||
         src_dtype == DType::UInt8 || src_dtype == DType::Bool) {
         auto f32 = input.to(DType::Float32);
         auto out_f32 = dispatchCumProd(f32, dim);
@@ -3719,10 +3765,12 @@ auto VulkanBackend::dispatchBincount(const Tensor& input, const std::optional<Te
     // We need the max value from the input. Use a reduction.
     int64_t num_bins = minlength;
     if (input.numel() > 0) {
-        // Get max value by moving a small result to CPU
-        Tensor max_val = dispatchReduction("max", int_input.to(DType::Float32), -1, false);
+        // Take the max on the Int32 input directly (native integer reduction).
+        // A Float32 reduction would round maxima above 2^24, under-sizing
+        // num_bins and dropping/overflowing counts for large integer inputs.
+        Tensor max_val = dispatchReduction("max", int_input, -1, false);
         Tensor max_cpu = max_val.to(Device::cpu());
-        int64_t max_v = static_cast<int64_t>(static_cast<const float*>(max_cpu.data_ptr())[0]);
+        int64_t max_v = static_cast<int64_t>(static_cast<const int32_t*>(max_cpu.data_ptr())[0]);
         num_bins = std::max(num_bins, max_v + 1);
     }
 
@@ -4375,13 +4423,40 @@ auto VulkanBackend::dispatchScatterReduce(const Tensor& self, int64_t dim,
 
     int32_t device_id = self.device().index;
 
-    // Non-Float32: upcast, compute, downcast
-    if (self.dtype() != DType::Float32) {
-        DType orig_dtype = self.dtype();
-        auto self_f32 = self.to(DType::Float32);
-        auto src_f32 = src.to(DType::Float32);
-        auto result_f32 = dispatchScatterReduce(self_f32, dim, index, src_f32, reduce, include_self);
-        return result_f32.to(orig_dtype);
+    // Mirror dispatchScatterAdd: route integers through native Int32 shaders and
+    // Float64 through native Float64 shaders, so Int64 / Float64 are not rounded
+    // through Float32 (24 mantissa bits drop precision above 2^24). Narrow
+    // integers widen losslessly to Int32; Int64 narrows to Int32 (sparse
+    // counts/indices are within range).
+    {
+        const DType d = self.dtype();
+        // Narrow / 64-bit integers widen (or narrow) to Int32 and recurse; Int32
+        // itself runs the native scatter_reduce_i32 family directly (no recursion).
+        bool is_int_to_widen = (d == DType::Int8 || d == DType::Int16 ||
+                                d == DType::Int64 || d == DType::UInt8 ||
+                                d == DType::UInt16 || d == DType::UInt32 ||
+                                d == DType::UInt64 || d == DType::Bool);
+        if (is_int_to_widen) {
+            auto self_i32 = self.to(DType::Int32);
+            auto src_i32 = src.to(DType::Int32);
+            auto result_i32 = dispatchScatterReduce(self_i32, dim, index, src_i32, reduce, include_self);
+            return result_i32.to(d);
+        }
+        // Float16/BFloat16 and any other non-Float32/Float64/Int32 dtype: compute
+        // in Float32.
+        if (d != DType::Float32 && d != DType::Float64 && d != DType::Int32) {
+            auto self_f32 = self.to(DType::Float32);
+            auto src_f32 = src.to(DType::Float32);
+            auto result_f32 = dispatchScatterReduce(self_f32, dim, index, src_f32, reduce, include_self);
+            return result_f32.to(d);
+        }
+    }
+
+    // Float64 reduction requires int64 atomics for the CAS-loop accumulation.
+    if (self.dtype() == DType::Float64 && !devices_[device_id].hasAtomicInt64) {
+        throw std::runtime_error(
+            "ScatterReduce with Float64 requires VK_KHR_shader_atomic_int64 support. "
+            "Use CPU backend or Float32 for this device.");
     }
 
     // Determine mode
@@ -4393,7 +4468,20 @@ auto VulkanBackend::dispatchScatterReduce(const Tensor& self, int64_t dim,
     else if (reduce == "amin") mode = 4;
     else throw std::invalid_argument("scatter_reduce: unknown reduce mode '" + reduce + "'");
 
-    auto* pipeline = getPipeline("scatter_reduce", device_id);
+    // Width-matched shader family: i32 for Int32, f64 for Float64, generic float
+    // otherwise. The init / main / mean-div passes must all use the same family.
+    const bool sr_is_i32 = (self.dtype() == DType::Int32);
+    const bool sr_is_f64 = (self.dtype() == DType::Float64);
+    const char* main_shader = sr_is_i32 ? "scatter_reduce_i32"
+                            : sr_is_f64 ? "scatter_reduce_f64"
+                            : "scatter_reduce";
+    const char* init_shader = sr_is_i32 ? "scatter_reduce_init_i32"
+                            : sr_is_f64 ? "scatter_reduce_init_f64"
+                            : "scatter_reduce_init";
+    const char* mean_div_shader = sr_is_i32 ? "scatter_reduce_mean_div_i32"
+                                : sr_is_f64 ? "scatter_reduce_mean_div_f64"
+                                : "scatter_reduce_mean_div";
+    auto* pipeline = getPipeline(main_shader, device_id);
 
     // Normalize dimension
     int64_t ndim = self.ndim();
@@ -4474,13 +4562,13 @@ auto VulkanBackend::dispatchScatterReduce(const Tensor& self, int64_t dim,
     // setting it to the mode's identity. Uses the just-built `index_int32`
     // (cast above).
     if (!include_self) {
-        auto* init_pipeline = getPipeline("scatter_reduce_init", device_id);
+        auto* init_pipeline = getPipeline(init_shader, device_id);
         std::vector<std::pair<uint32_t, const void*>> init_bindings = {
             {0, output.data_ptr()},
             {1, index_int32.data_ptr()},
         };
         std::vector<size_t> init_sizes = {
-            static_cast<size_t>(output.numel()) * sizeof(float),
+            static_cast<size_t>(output.numel()) * output.dtype_size(),
             static_cast<size_t>(index_int32.numel()) * sizeof(int32_t),
         };
         VkDescriptorSet init_ds = allocateAndWriteDescriptorSet(
@@ -4569,13 +4657,13 @@ auto VulkanBackend::dispatchScatterReduce(const Tensor& self, int64_t dim,
     // its scatter count (+1 if include_self). Mirrors the CUDA / ROCm /
     // OneAPI post-pass.
     if (mode == 2) {
-        auto* div_pipeline = getPipeline("scatter_reduce_mean_div", device_id);
+        auto* div_pipeline = getPipeline(mean_div_shader, device_id);
         std::vector<std::pair<uint32_t, const void*>> div_bindings = {
             {0, output.data_ptr()},
             {1, count_tensor.data_ptr()},
         };
         std::vector<size_t> div_sizes = {
-            static_cast<size_t>(out_numel) * sizeof(float),
+            static_cast<size_t>(out_numel) * output.dtype_size(),
             static_cast<size_t>(out_numel) * sizeof(int32_t),
         };
         VkDescriptorSet div_ds = allocateAndWriteDescriptorSet(
@@ -4622,16 +4710,47 @@ auto VulkanBackend::dispatchIndexAdd(const Tensor& self, int64_t dim,
 
     int32_t device_id = self.device().index;
 
-    // Non-Float32: upcast, compute, downcast
-    if (self.dtype() != DType::Float32) {
-        DType orig_dtype = self.dtype();
-        auto self_f32 = self.to(DType::Float32);
-        auto src_f32 = src.to(DType::Float32);
-        auto result_f32 = dispatchIndexAdd(self_f32, dim, index, src_f32);
-        return result_f32.to(orig_dtype);
+    // Mirror dispatchScatterAdd: route integers through the native Int32 atomic
+    // shader and Float64 through the native Float64 atomic shader, so Int64 /
+    // Float64 are not rounded through Float32 (24 mantissa bits drop precision
+    // above 2^24). Narrow integers widen losslessly to Int32; Int64 narrows to
+    // Int32 (sparse counts/indices are within range).
+    {
+        const DType d = self.dtype();
+        // Narrow / 64-bit integers widen (or narrow) to Int32 and recurse; Int32
+        // itself runs the native index_add_i32 shader directly (no recursion).
+        bool is_int_to_widen = (d == DType::Int8 || d == DType::Int16 ||
+                                d == DType::Int64 || d == DType::UInt8 ||
+                                d == DType::UInt16 || d == DType::UInt32 ||
+                                d == DType::UInt64 || d == DType::Bool);
+        if (is_int_to_widen) {
+            auto self_i32 = self.to(DType::Int32);
+            auto src_i32 = src.to(DType::Int32);
+            auto result_i32 = dispatchIndexAdd(self_i32, dim, index, src_i32);
+            return result_i32.to(d);
+        }
+        // Float16/BFloat16 and any other non-Float32/Float64/Int32 dtype:
+        // accumulate in Float32 (matches the F16 scatter_add path).
+        if (d != DType::Float32 && d != DType::Float64 && d != DType::Int32) {
+            auto self_f32 = self.to(DType::Float32);
+            auto src_f32 = src.to(DType::Float32);
+            auto result_f32 = dispatchIndexAdd(self_f32, dim, index, src_f32);
+            return result_f32.to(d);
+        }
     }
 
-    auto* pipeline = getPipeline("index_add", device_id);
+    // Float64 requires int64 atomics for the CAS-loop accumulation.
+    if (self.dtype() == DType::Float64 && !devices_[device_id].hasAtomicInt64) {
+        throw std::runtime_error(
+            "IndexAdd with Float64 requires VK_KHR_shader_atomic_int64 support. "
+            "Use CPU backend or Float32 for this device.");
+    }
+
+    const char* add_shader =
+        (self.dtype() == DType::Float64) ? "index_add_f64"
+        : (self.dtype() == DType::Int32) ? "index_add_i32"
+        : "index_add";
+    auto* pipeline = getPipeline(add_shader, device_id);
 
     // Normalize dimension
     int64_t ndim = self.ndim();
@@ -4748,16 +4867,49 @@ auto VulkanBackend::dispatchIndexCopy(const Tensor& self, int64_t dim,
 
     int32_t device_id = self.device().index;
 
-    // Non-Float32: upcast, compute, downcast
-    if (self.dtype() != DType::Float32) {
-        DType orig_dtype = self.dtype();
-        auto self_f32 = self.to(DType::Float32);
-        auto src_f32 = src.to(DType::Float32);
-        auto result_f32 = dispatchIndexCopy(self_f32, dim, index, src_f32);
-        return result_f32.to(orig_dtype);
+    // index_copy is a pure (bit-exact) data move, so values must NOT be rounded
+    // through Float32 (24 mantissa bits drop Int64/Float64 precision above 2^24).
+    // Narrow integers (Int8/16, UInt8/16/32, Bool) widen losslessly to Int32 and
+    // run the Int32 bit-copy shader. Int32, Int64/UInt64 (8-byte) and Float64
+    // (8-byte) run dedicated width-matched bit-copy shaders directly.
+    // Float16/BFloat16 and any remaining dtypes use a Float32 round-trip
+    // (half->float->half is lossless).
+    {
+        const DType d = self.dtype();
+        if (d == DType::Int8 || d == DType::Int16 ||
+            d == DType::UInt8 || d == DType::UInt16 || d == DType::UInt32 ||
+            d == DType::Bool) {
+            auto self_i32 = self.to(DType::Int32);
+            auto src_i32 = src.to(DType::Int32);
+            auto result_i32 = dispatchIndexCopy(self_i32, dim, index, src_i32);
+            return result_i32.to(d);
+        }
+        if (d == DType::Float16 || d == DType::BFloat16) {
+            auto self_f32 = self.to(DType::Float32);
+            auto src_f32 = src.to(DType::Float32);
+            auto result_f32 = dispatchIndexCopy(self_f32, dim, index, src_f32);
+            return result_f32.to(d);
+        }
+        if (d != DType::Float32 && d != DType::Int32 &&
+            d != DType::Int64 && d != DType::UInt64 && d != DType::Float64) {
+            // Complex and any other dtype: widen through Float32 (last resort).
+            auto self_f32 = self.to(DType::Float32);
+            auto src_f32 = src.to(DType::Float32);
+            auto result_f32 = dispatchIndexCopy(self_f32, dim, index, src_f32);
+            return result_f32.to(d);
+        }
     }
 
-    auto* pipeline = getPipeline("index_copy", device_id);
+    // Width-matched bit-copy shader for the directly-supported dtypes. The rest of
+    // the body indexes buffers by the tensor's own dtype_size(), so it is correct
+    // for 4-byte (Float32/Int32) and 8-byte (Int64/UInt64/Float64) elements alike.
+    const DType cdt = self.dtype();
+    const char* copy_shader =
+        (cdt == DType::Int64 || cdt == DType::UInt64) ? "index_copy_i64"
+        : (cdt == DType::Float64) ? "index_copy_f64"
+        : (cdt == DType::Int32) ? "index_copy_i32"
+        : "index_copy";
+    auto* pipeline = getPipeline(copy_shader, device_id);
 
     int64_t ndim = self.ndim();
     if (dim < 0) dim += ndim;
@@ -5164,10 +5316,15 @@ auto VulkanBackend::dispatchCumMax(const Tensor& input, int64_t dim) -> std::pai
     if (dim < 0) dim += ndim;
 
     // Same int-dtype fall-through as cumsum/cumprod: only Float32/Float64
-    // shaders exist. Promote integer inputs so bytes aren't reinterpreted.
+    // shaders exist. Int32/Int64 promote to Float64 so values above 2^24
+    // survive the round-trip exactly; smaller integers are exact in Float32.
     DType src_dtype = input.dtype();
-    if (src_dtype == DType::Int32 || src_dtype == DType::Int64 ||
-        src_dtype == DType::Int16 || src_dtype == DType::Int8 ||
+    if (src_dtype == DType::Int32 || src_dtype == DType::Int64) {
+        auto f64 = input.to(DType::Float64);
+        auto [v_f64, idx] = dispatchCumMax(f64, dim);
+        return {v_f64.to(src_dtype), idx};
+    }
+    if (src_dtype == DType::Int16 || src_dtype == DType::Int8 ||
         src_dtype == DType::UInt8 || src_dtype == DType::Bool) {
         auto f32 = input.to(DType::Float32);
         auto [v_f32, idx] = dispatchCumMax(f32, dim);
@@ -5229,9 +5386,15 @@ auto VulkanBackend::dispatchCumMin(const Tensor& input, int64_t dim) -> std::pai
     if (dim < 0) dim += ndim;
 
     // Same int-dtype fall-through — only Float32/Float64 shaders exist.
+    // Int32/Int64 promote to Float64 so values above 2^24 survive the
+    // round-trip exactly; smaller integers are exact in Float32.
     DType src_dtype = input.dtype();
-    if (src_dtype == DType::Int32 || src_dtype == DType::Int64 ||
-        src_dtype == DType::Int16 || src_dtype == DType::Int8 ||
+    if (src_dtype == DType::Int32 || src_dtype == DType::Int64) {
+        auto f64 = input.to(DType::Float64);
+        auto [v_f64, idx] = dispatchCumMin(f64, dim);
+        return {v_f64.to(src_dtype), idx};
+    }
+    if (src_dtype == DType::Int16 || src_dtype == DType::Int8 ||
         src_dtype == DType::UInt8 || src_dtype == DType::Bool) {
         auto f32 = input.to(DType::Float32);
         auto [v_f32, idx] = dispatchCumMin(f32, dim);

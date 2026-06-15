@@ -1508,6 +1508,9 @@ auto fold_kernel(const Tensor& input, const std::vector<int64_t>& output_size,
     int64_t N = shape[0];
     int64_t H_out = output_size[0], W_out = output_size[1];
     int64_t cols_per_channel = kh * kw;
+    if (cols_per_channel <= 0 || shape[1] % cols_per_channel != 0) {
+        throw std::runtime_error("fold: dim 1 (C*kh*kw) must be divisible by kh*kw");
+    }
     int64_t C = shape[1] / cols_per_channel;
 
     int64_t H_col = (H_out + 2 * ph - dh * (kh - 1) - 1) / sh + 1;
@@ -1583,6 +1586,21 @@ auto gather_relative_position_bias_kernel(const Tensor& bias_table, const Tensor
 
     const int64_t* idx_data = rel_pos_index.data<int64_t>();
     int64_t table_stride = bias_table.shape()[1]; // second dim of bias table
+
+    // Bounds-check every relative-position index up front (sequentially, so we
+    // can throw cleanly rather than from inside the OpenMP region below). Each
+    // idx is used as an unchecked offset into bias_table; an out-of-range or
+    // negative value (e.g. from an untrusted checkpoint or mismatched shapes)
+    // would otherwise be an OOB read / information-disclosure vector.
+    int64_t num_index = rel_pos_index.numel();
+    for (int64_t pos = 0; pos < num_index; ++pos) {
+        int64_t idx = idx_data[pos];
+        if (idx < 0 || idx >= table_stride) {
+            throw std::out_of_range(
+                "gather_relative_position_bias: rel_pos_index value " + std::to_string(idx) +
+                " out of range [0, " + std::to_string(table_stride) + ")");
+        }
+    }
 
     TENZOR_DISPATCH_FLOATING_TYPES(bias_table.dtype(), "gather_rel_pos_bias", [&]() {
         const scalar_t* table_data = bias_table.data<scalar_t>();

@@ -13,6 +13,7 @@
 #include <cstring>
 #include <cstdlib>
 #include <stdexcept>
+#include <mutex>
 
 namespace tenzor {
 namespace rocm {
@@ -94,6 +95,9 @@ inline auto get_cached_info(int device_id) -> const CachedDeviceInfo& {
     // Support up to 16 devices; static array avoids dynamic allocation.
     static constexpr int kMaxDevices = 16;
     static CachedDeviceInfo cache[kMaxDevices];
+    // One once_flag per device guards the lazy init so concurrent first calls
+    // for the same device cannot race on the std::string / bool writes.
+    static std::once_flag init_flags[kMaxDevices];
 
     if (device_id < 0 || device_id >= kMaxDevices) {
         throw std::runtime_error(
@@ -102,7 +106,7 @@ inline auto get_cached_info(int device_id) -> const CachedDeviceInfo& {
     }
 
     auto& info = cache[device_id];
-    if (!info.initialized) {
+    std::call_once(init_flags[device_id], [device_id, &info]() {
         hipDeviceProp_t props;
         hipError_t err = hipGetDeviceProperties(&props, device_id);
         if (err != hipSuccess) {
@@ -121,7 +125,7 @@ inline auto get_cached_info(int device_id) -> const CachedDeviceInfo& {
             : name;
 
         info.initialized = true;
-    }
+    });
     return info;
 }
 

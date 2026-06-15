@@ -222,6 +222,10 @@ auto transpose_kernel(const Tensor& input, int64_t dim0, int64_t dim1) -> Tensor
 auto permute_kernel(const Tensor& input, const std::vector<int64_t>& dims) -> Tensor {
     const int64_t ndim = input.ndim();
 
+    if (static_cast<int64_t>(dims.size()) != ndim) {
+        throw std::out_of_range("permute: number of dims must match tensor rank");
+    }
+
     Tensor result;
     TensorAccessor::get_impl_mutable(result) = make_intrusive<TensorImpl>(*TensorAccessor::get_impl(input));
 
@@ -229,8 +233,13 @@ auto permute_kernel(const Tensor& input, const std::vector<int64_t>& dims) -> Te
     std::vector<int64_t> new_strides(ndim);
 
     for (int64_t i = 0; i < ndim; ++i) {
-        new_shape[i] = input.shape()[dims[i]];
-        new_strides[i] = input.strides()[dims[i]];
+        int64_t d = dims[i];
+        if (d < 0) d += ndim;
+        if (d < 0 || d >= ndim) {
+            throw std::out_of_range("permute: dim out of range");
+        }
+        new_shape[i] = input.shape()[d];
+        new_strides[i] = input.strides()[d];
     }
 
     result.mutable_shape() = std::move(new_shape);
@@ -274,6 +283,12 @@ auto squeeze_kernel(const Tensor& input, int64_t dim) -> Tensor {
 }
 
 auto unsqueeze_kernel(const Tensor& input, int64_t dim) -> Tensor {
+    // Normalize/validate dim: a size-1 axis can be inserted at any position in
+    // [0, ndim], so the valid range after normalization is [0, ndim].
+    int64_t ndim = input.ndim();
+    if (dim < 0) dim += ndim + 1;
+    if (dim < 0 || dim > ndim) throw std::out_of_range("unsqueeze: dim out of range");
+
     Tensor result;
     TensorAccessor::get_impl_mutable(result) = make_intrusive<TensorImpl>(*TensorAccessor::get_impl(input));
 
@@ -737,6 +752,9 @@ auto stack_kernel(const std::vector<Tensor>& tensors, int64_t dim) -> Tensor {
 }
 
 auto split_kernel(const Tensor& input, int64_t split_size, int64_t dim) -> std::vector<Tensor> {
+    if (split_size <= 0) {
+        throw std::runtime_error("split: split_size must be positive");
+    }
     const auto& shape = input.shape();
     int64_t ndim = input.ndim();
     if (dim < 0) dim += ndim;
@@ -774,6 +792,9 @@ auto split_kernel(const Tensor& input, int64_t split_size, int64_t dim) -> std::
 }
 
 auto chunk_kernel(const Tensor& input, int64_t chunks, int64_t dim) -> std::vector<Tensor> {
+    if (chunks <= 0) {
+        throw std::runtime_error("chunk: chunks must be positive");
+    }
     const auto& shape = input.shape();
     if (dim < 0) dim += input.ndim();
     int64_t dim_size = shape[dim];

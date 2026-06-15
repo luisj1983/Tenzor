@@ -45,6 +45,16 @@ private:
     rocblas_handle handle_ = nullptr;
 };
 
+// Return a thread-local rocBLAS handle, lazily constructed on first use.
+// rocblas_create_handle() is expensive (pinned host alloc, device probe), so
+// the hot linear forward/backward paths reuse one handle per thread and only
+// swap the stream (a cheap pointer store), mirroring matmul.hip.cpp.
+static RocBLASHandleGuard& cached_rocblas_handle(hipStream_t stream) {
+    thread_local RocBLASHandleGuard h;
+    h.set_stream(stream);
+    return h;
+}
+
 inline int get_num_blocks(int64_t n, int block_size = BLOCK_SIZE) {
     return std::min(static_cast<int64_t>((n + block_size - 1) / block_size), static_cast<int64_t>(65535));
 }
@@ -63,12 +73,17 @@ __global__ void add_bias_to_output_kernel(const T* __restrict__ bias, T* __restr
     }
 }
 
+// Reduce grad_output (batch x features) over the batch dimension into
+// grad_bias[features] in a single grid-strided launch (one atomicAdd per
+// element) instead of launching one tiny kernel per batch row.
 template<typename T>
 __global__ void sum_over_batch_kernel(const T* __restrict__ grad, T* __restrict__ grad_bias,
-                                       int64_t batch_offset, int64_t features) {
-    int64_t f = blockIdx.x * blockDim.x + threadIdx.x;
-    if (f < features) {
-        atomicAdd(&grad_bias[f], grad[batch_offset + f]);
+                                       int64_t batch, int64_t features) {
+    int64_t total = batch * features;
+    for (int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+         idx < total; idx += blockDim.x * gridDim.x) {
+        int64_t f = idx % features;
+        atomicAdd(&grad_bias[f], grad[idx]);
     }
 }
 
@@ -84,10 +99,12 @@ __global__ void add_bias_to_output_kernel_fp16(const __half* __restrict__ bias, 
 
 // Float16 sum over batch kernel (accumulate in float)
 __global__ void sum_over_batch_kernel_fp16(const __half* __restrict__ grad, float* __restrict__ grad_bias_f32,
-                                            int64_t batch_offset, int64_t features) {
-    int64_t f = blockIdx.x * blockDim.x + threadIdx.x;
-    if (f < features) {
-        atomicAdd(&grad_bias_f32[f], tenzor::rocm::safe_h2f(grad[batch_offset + f]));
+                                            int64_t batch, int64_t features) {
+    int64_t total = batch * features;
+    for (int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+         idx < total; idx += blockDim.x * gridDim.x) {
+        int64_t f = idx % features;
+        atomicAdd(&grad_bias_f32[f], tenzor::rocm::safe_h2f(grad[idx]));
     }
 }
 
@@ -101,7 +118,8 @@ __global__ void embedding_kernel_hip(
     const int64_t* __restrict__ indices,
     T* __restrict__ output,
     int64_t num_indices,
-    int64_t embedding_dim) {
+    int64_t embedding_dim,
+    int64_t num_embeddings) {
 
     int64_t tid = blockIdx.x * blockDim.x + threadIdx.x;
     int64_t total_elements = num_indices * embedding_dim;
@@ -110,6 +128,12 @@ __global__ void embedding_kernel_hip(
         int64_t idx = tid / embedding_dim;
         int64_t dim = tid % embedding_dim;
         int64_t embedding_idx = indices[idx];
+        // Bounds check: out-of-range (e.g. negative padding) indices write 0
+        // instead of reading out of the weight buffer.
+        if (embedding_idx < 0 || embedding_idx >= num_embeddings) {
+            output[tid] = T(0);
+            return;
+        }
         output[tid] = weight[embedding_idx * embedding_dim + dim];
     }
 }
@@ -120,7 +144,8 @@ __global__ void embedding_backward_kernel_hip(
     const int64_t* __restrict__ indices,
     T* __restrict__ grad_weight,
     int64_t num_indices,
-    int64_t embedding_dim) {
+    int64_t embedding_dim,
+    int64_t num_embeddings) {
 
     int64_t tid = blockIdx.x * blockDim.x + threadIdx.x;
     int64_t total_elements = num_indices * embedding_dim;
@@ -129,6 +154,10 @@ __global__ void embedding_backward_kernel_hip(
         int64_t idx = tid / embedding_dim;
         int64_t dim = tid % embedding_dim;
         int64_t embedding_idx = indices[idx];
+        // Skip out-of-range indices to avoid OOB atomic writes.
+        if (embedding_idx < 0 || embedding_idx >= num_embeddings) {
+            return;
+        }
         // Atomic add for accumulating gradients
         atomicAdd(&grad_weight[embedding_idx * embedding_dim + dim], grad_output[tid]);
     }
@@ -140,7 +169,8 @@ __global__ void embedding_kernel_hip_fp16(
     const int64_t* __restrict__ indices,
     __half* __restrict__ output,
     int64_t num_indices,
-    int64_t embedding_dim) {
+    int64_t embedding_dim,
+    int64_t num_embeddings) {
 
     int64_t tid = blockIdx.x * blockDim.x + threadIdx.x;
     int64_t total_elements = num_indices * embedding_dim;
@@ -149,6 +179,10 @@ __global__ void embedding_kernel_hip_fp16(
         int64_t idx = tid / embedding_dim;
         int64_t dim = tid % embedding_dim;
         int64_t embedding_idx = indices[idx];
+        if (embedding_idx < 0 || embedding_idx >= num_embeddings) {
+            output[tid] = __float2half(0.0f);
+            return;
+        }
         output[tid] = weight[embedding_idx * embedding_dim + dim];
     }
 }
@@ -159,7 +193,8 @@ __global__ void embedding_backward_kernel_hip_fp16(
     const int64_t* __restrict__ indices,
     float* __restrict__ grad_weight_f32,  // accumulate in float
     int64_t num_indices,
-    int64_t embedding_dim) {
+    int64_t embedding_dim,
+    int64_t num_embeddings) {
 
     int64_t tid = blockIdx.x * blockDim.x + threadIdx.x;
     int64_t total_elements = num_indices * embedding_dim;
@@ -168,6 +203,9 @@ __global__ void embedding_backward_kernel_hip_fp16(
         int64_t idx = tid / embedding_dim;
         int64_t dim = tid % embedding_dim;
         int64_t embedding_idx = indices[idx];
+        if (embedding_idx < 0 || embedding_idx >= num_embeddings) {
+            return;
+        }
         atomicAdd(&grad_weight_f32[embedding_idx * embedding_dim + dim], tenzor::rocm::safe_h2f(grad_output[tid]));
     }
 }
@@ -189,6 +227,7 @@ auto embedding_kernel(const Tensor& weight, const Tensor& indices, hipStream_t s
     auto idx_shape = indices.shape();
 
     int64_t embedding_dim = w_shape[1];
+    int64_t num_embeddings = w_shape[0];
     int64_t num_indices = indices.numel();
 
     std::vector<int64_t> out_shape(idx_shape.begin(), idx_shape.end());
@@ -210,7 +249,8 @@ auto embedding_kernel(const Tensor& weight, const Tensor& indices, hipStream_t s
             indices.data<int64_t>(),
             output.data<float>(),
             num_indices,
-            embedding_dim);
+            embedding_dim,
+            num_embeddings);
     } else if (weight.dtype() == DType::Float64) {
         hipLaunchKernelGGL(embedding_kernel_hip<double>,
             dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
@@ -218,7 +258,8 @@ auto embedding_kernel(const Tensor& weight, const Tensor& indices, hipStream_t s
             indices.data<int64_t>(),
             output.data<double>(),
             num_indices,
-            embedding_dim);
+            embedding_dim,
+            num_embeddings);
     } else if (weight.dtype() == DType::Float16) {
         hipLaunchKernelGGL(embedding_kernel_hip_fp16,
             dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
@@ -226,7 +267,8 @@ auto embedding_kernel(const Tensor& weight, const Tensor& indices, hipStream_t s
             indices.data<int64_t>(),
             reinterpret_cast<__half*>(output.data<Float16>()),
             num_indices,
-            embedding_dim);
+            embedding_dim,
+            num_embeddings);
     } else if (weight.dtype() == DType::BFloat16) {
         auto weight_f32 = weight.to(DType::Float32);
         auto result_f32 = embedding_kernel(weight_f32, indices, stream);
@@ -260,7 +302,8 @@ auto embedding_backward_kernel(const Tensor& grad_output, const Tensor& indices,
             indices.data<int64_t>(),
             grad_weight.data<float>(),
             num_indices,
-            embedding_dim);
+            embedding_dim,
+            num_embeddings);
     } else if (grad_output.dtype() == DType::Float64) {
         hipLaunchKernelGGL(embedding_backward_kernel_hip<double>,
             dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
@@ -268,7 +311,8 @@ auto embedding_backward_kernel(const Tensor& grad_output, const Tensor& indices,
             indices.data<int64_t>(),
             grad_weight.data<double>(),
             num_indices,
-            embedding_dim);
+            embedding_dim,
+            num_embeddings);
     } else if (grad_output.dtype() == DType::Float16) {
         // For Float16, accumulate gradients in float, then convert back
         int64_t grad_weight_size = num_embeddings * embedding_dim;
@@ -281,7 +325,8 @@ auto embedding_backward_kernel(const Tensor& grad_output, const Tensor& indices,
             indices.data<int64_t>(),
             grad_weight_f32.data<float>(),
             num_indices,
-            embedding_dim);
+            embedding_dim,
+            num_embeddings);
 
         // Convert float gradients to Float16
         int convert_blocks = get_num_blocks(grad_weight_size);
@@ -330,9 +375,7 @@ auto linear_kernel(const Tensor& input, const Tensor& weight, const Tensor* bias
     Tensor output(out_shape, input.dtype(), input.device());
 
     // Use rocBLAS for matrix multiply: output = input @ weight.T
-    RocBLASHandleGuard handle_guard;
-    rocblas_handle handle = handle_guard.get();
-    handle_guard.set_stream(stream);
+    rocblas_handle handle = cached_rocblas_handle(stream).get();
 
     if (input.dtype() == DType::Float32) {
         const float alpha = 1.0f;
@@ -445,9 +488,7 @@ auto linear_backward_kernel(const Tensor& grad_output, const Tensor& input, cons
     Tensor grad_weight(std::vector<int64_t>(w_shape.begin(), w_shape.end()), weight.dtype(), weight.device());
     Tensor grad_bias({out_features}, input.dtype(), input.device());
 
-    RocBLASHandleGuard handle_guard2;
-    rocblas_handle handle = handle_guard2.get();
-    handle_guard2.set_stream(stream);
+    rocblas_handle handle = cached_rocblas_handle(stream).get();
 
     if (input.dtype() == DType::Float32) {
         const float alpha = 1.0f;
@@ -473,15 +514,12 @@ auto linear_backward_kernel(const Tensor& grad_output, const Tensor& input, cons
             &beta,
             grad_weight.data<float>(), in_features));
 
-        // grad_bias = sum over batch dimension
+        // grad_bias = sum over batch dimension (single reduction launch)
         HIP_CHECK(hipMemsetAsync(grad_bias.data<float>(), 0, out_features * sizeof(float), stream));
-        int num_blocks = get_num_blocks(out_features);
-        // Sum over batch dimension for each output feature
-        for (int64_t b = 0; b < batch_size; ++b) {
-            hipLaunchKernelGGL(sum_over_batch_kernel<float>,
-                dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
-                grad_output.data<float>(), grad_bias.data<float>(), b * out_features, out_features);
-        }
+        int num_blocks = get_num_blocks(batch_size * out_features);
+        hipLaunchKernelGGL(sum_over_batch_kernel<float>,
+            dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
+            grad_output.data<float>(), grad_bias.data<float>(), batch_size, out_features);
     } else if (input.dtype() == DType::Float64) {
         const double alpha = 1.0;
         const double beta = 0.0;
@@ -505,12 +543,10 @@ auto linear_backward_kernel(const Tensor& grad_output, const Tensor& input, cons
             grad_weight.data<double>(), in_features));
 
         HIP_CHECK(hipMemsetAsync(grad_bias.data<double>(), 0, out_features * sizeof(double), stream));
-        int num_blocks = get_num_blocks(out_features);
-        for (int64_t b = 0; b < batch_size; ++b) {
-            hipLaunchKernelGGL(sum_over_batch_kernel<double>,
-                dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
-                grad_output.data<double>(), grad_bias.data<double>(), b * out_features, out_features);
-        }
+        int num_blocks = get_num_blocks(batch_size * out_features);
+        hipLaunchKernelGGL(sum_over_batch_kernel<double>,
+            dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
+            grad_output.data<double>(), grad_bias.data<double>(), batch_size, out_features);
     } else if (input.dtype() == DType::Float16) {
         const rocblas_half alpha = rocblas_half(1.0f);
         const rocblas_half beta = rocblas_half(0.0f);
@@ -538,15 +574,14 @@ auto linear_backward_kernel(const Tensor& grad_output, const Tensor& input, cons
         // grad_bias = sum over batch dimension (accumulate in float, then convert)
         Tensor grad_bias_f32({out_features}, DType::Float32, input.device());
         HIP_CHECK(hipMemsetAsync(grad_bias_f32.data<float>(), 0, out_features * sizeof(float), stream));
-        int num_blocks = get_num_blocks(out_features);
-        for (int64_t b = 0; b < batch_size; ++b) {
-            hipLaunchKernelGGL(sum_over_batch_kernel_fp16,
-                dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
-                reinterpret_cast<const __half*>(grad_output.data<Float16>()), grad_bias_f32.data<float>(), b * out_features, out_features);
-        }
-        // Convert float grad_bias to Float16
-        hipLaunchKernelGGL(convert_f32_to_f16_kernel,
+        int num_blocks = get_num_blocks(batch_size * out_features);
+        hipLaunchKernelGGL(sum_over_batch_kernel_fp16,
             dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
+            reinterpret_cast<const __half*>(grad_output.data<Float16>()), grad_bias_f32.data<float>(), batch_size, out_features);
+        // Convert float grad_bias to Float16
+        int convert_blocks = get_num_blocks(out_features);
+        hipLaunchKernelGGL(convert_f32_to_f16_kernel,
+            dim3(convert_blocks), dim3(BLOCK_SIZE), 0, stream,
             grad_bias_f32.data<float>(),
             reinterpret_cast<__half*>(grad_bias.data<Float16>()),
             out_features);

@@ -3062,7 +3062,12 @@ auto IgammaBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<T
     auto deriv = tenzor::exp(log_deriv);
 
     auto grad_a = zeros(a_shape, a.dtype(), a.device());
-    auto grad_x = mul(grad_outputs[0], deriv);
+    // grad_x is output-shaped (deriv broadcasts a/x together); reduce back to
+    // x's original shape when x was the broadcast operand.
+    auto grad_x_full = mul(grad_outputs[0], deriv);
+    auto grad_x = input_shape_x_.empty()
+                      ? grad_x_full
+                      : reduce_grad_for_broadcasting(grad_x_full, input_shape_x_);
     return {grad_a, grad_x};
 }
 
@@ -3086,7 +3091,12 @@ auto IgammacBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<
     auto deriv = neg(tenzor::exp(log_pos));
 
     auto grad_a = zeros(a_shape, a.dtype(), a.device());
-    auto grad_x = mul(grad_outputs[0], deriv);
+    // grad_x is output-shaped (deriv broadcasts a/x together); reduce back to
+    // x's original shape when x was the broadcast operand.
+    auto grad_x_full = mul(grad_outputs[0], deriv);
+    auto grad_x = input_shape_x_.empty()
+                      ? grad_x_full
+                      : reduce_grad_for_broadcasting(grad_x_full, input_shape_x_);
     return {grad_a, grad_x};
 }
 

@@ -294,8 +294,11 @@ public:
      * @code
      * model.train();  // Enable training
      * @endcode
+     *
+     * @note virtual so wrappers (e.g. DataParallel) can override and propagate
+     *       the mode switch to wrapped/replicated modules through a base ref.
      */
-    auto train(bool mode = true) -> void;
+    virtual auto train(bool mode = true) -> void;
 
     /**
      * @brief Set module to evaluation mode.
@@ -306,7 +309,7 @@ public:
      * model.eval();  // Disable training for inference
      * @endcode
      */
-    auto eval() -> void;
+    virtual auto eval() -> void;
 
     /**
      * @brief Check if module is in training mode.

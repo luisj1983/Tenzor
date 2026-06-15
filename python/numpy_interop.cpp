@@ -368,6 +368,25 @@ auto create_numpy_array(const Tensor& tensor, DType original_dtype,
         return apply_bfloat16_dtype(result, original_dtype);
     }
 
+    // Misalignment / negative-stride guard. numpy_to_tensor forces a
+    // contiguous copy on the opposite direction; mirror that here so the two
+    // directions are consistent and the zero-copy view is only built when it
+    // is actually safe. In practice the allocator yields aligned pointers, so
+    // this fallback is rarely taken.
+    if (!can_zero_copy_tensor_to_numpy(tensor)) {
+        if (want_no_copy) {
+            throw py::value_error(
+                "Unable to avoid copy: tensor data is misaligned or has "
+                "negative strides and requires a contiguous copy");
+        }
+        Tensor contiguous = tensor.contiguous();
+        py::array result(np_dtype, np_shape);
+        void* src = const_cast<void*>(contiguous.storage()->data());
+        void* dst = result.mutable_data();
+        std::memcpy(dst, src, contiguous.numel() * element_size);
+        return apply_bfloat16_dtype(result, original_dtype);
+    }
+
     // Account for storage offset
     auto* base_ptr = static_cast<char*>(
         const_cast<void*>(tensor.storage()->data()));

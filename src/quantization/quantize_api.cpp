@@ -17,6 +17,7 @@
 #include <iostream>
 #include <cstdlib>
 #include <memory>
+#include <optional>
 #include <stdexcept>
 
 namespace tenzor {
@@ -55,6 +56,14 @@ public:
             return nn::quantization::QuantizedConv2d::from_float(*conv2d, qconfig_);
         }
 
+        // A FakeQuantize reaching this point has no preceding quantizable layer
+        // to absorb its observed activation qparams (the Sequential walker bakes
+        // and removes the ones that do). It is a calibration-only artifact, never
+        // part of a clean quantized inference model — drop it.
+        if (std::dynamic_pointer_cast<nn::quantization::FakeQuantize>(module)) {
+            return nullptr;
+        }
+
         // Return as-is for non-quantizable layers (ReLU, MaxPool, etc.)
         return module;
     }
@@ -81,20 +90,24 @@ public:
                     std::dynamic_pointer_cast<nn::Conv2d>(child) != nullptr;
 
                 if (is_quantizable) {
-                    // B.1: honour the QConfig's weight_scheme rather than
-                    // hardcoding per-tensor. PerChannel schemes quantize the
-                    // OUTPUT-channel axis of the weight tensor, which by
-                    // PyTorch convention is axis 0 for Linear (out_features
-                    // x in_features) and Conv2d (out_channels x in_channels
-                    // x kH x kW). Per-tensor schemes use axis = -1.
-                    const auto wscheme = qconfig_.weight_scheme();
+                    // These FakeQuantize modules sit AFTER the layer and observe
+                    // its OUTPUT activations, so they must use the QConfig's
+                    // ACTIVATION dtype/scheme — not the weight settings. Weights
+                    // are quantized directly from the layer's parameters inside
+                    // QuantizedLinear/QuantizedConv2d::from_float(); the observer
+                    // here is purely for activation calibration. Activation
+                    // quantization is per-tensor by convention (per-channel along
+                    // a batch-varying axis is meaningless), so axis = -1 unless
+                    // the config explicitly selects a per-channel activation
+                    // scheme.
+                    const auto ascheme = qconfig_.activation_scheme();
                     const bool per_channel =
-                        wscheme == nn::quantization::QuantizationScheme::PerChannelSymmetric ||
-                        wscheme == nn::quantization::QuantizationScheme::PerChannelAsymmetric;
-                    const int64_t axis = per_channel ? 0 : -1;
+                        ascheme == nn::quantization::QuantizationScheme::PerChannelSymmetric ||
+                        ascheme == nn::quantization::QuantizationScheme::PerChannelAsymmetric;
+                    const int64_t axis = per_channel ? 1 : -1;
                     auto fake_quant = std::make_shared<nn::quantization::FakeQuantize>(
-                        qconfig_.weight_dtype(),
-                        wscheme,
+                        qconfig_.activation_dtype(),
+                        ascheme,
                         /*learnable=*/false,
                         /*observer_enabled=*/true,
                         axis);
@@ -109,14 +122,72 @@ public:
     }
 
 private:
+    // Extract the calibrated activation qparams from a FakeQuantize that
+    // collected statistics during calibration. Returns nullopt when the module
+    // is not a FakeQuantize or its observer never saw data (e.g. the dynamic
+    // path, which inserts no observers). The activation qparams use the
+    // QConfig's ACTIVATION dtype/scheme (distinct from the weight settings the
+    // FakeQuantize was constructed with): the observer only stores raw min/max,
+    // and calculate_qparams() applies whichever (dtype, scheme) we request.
+    auto extract_activation_qparams(const std::shared_ptr<nn::Module>& module)
+        -> std::optional<QuantizationParams> {
+        auto fq = std::dynamic_pointer_cast<nn::quantization::FakeQuantize>(module);
+        if (!fq) return std::nullopt;
+        auto* obs = fq->observer();
+        if (!obs || !obs->has_data()) return std::nullopt;
+        return obs->calculate_qparams(qconfig_.activation_dtype(),
+                                      qconfig_.activation_scheme());
+    }
+
     auto convert_sequential_to_quantized(std::shared_ptr<nn::Sequential> seq)
         -> std::shared_ptr<nn::Sequential> {
         auto quantized_seq = std::make_shared<nn::Sequential>();
 
-        // Iterate through the Sequential's module list and convert each
-        for (const auto& module : seq->modules()) {
+        const auto& modules = seq->modules();
+        for (size_t i = 0; i < modules.size(); ++i) {
+            const auto& module = modules[i];
+
+            // The static-quant calibration path inserts a FakeQuantize directly
+            // after each quantizable layer (see prepare_for_qat). That observer
+            // collected the layer's OUTPUT activation statistics. Bake those
+            // calibrated qparams into the produced quantized layer and DROP the
+            // FakeQuantize so the returned tree is a clean quantized model.
+            //
+            // When no such FakeQuantize follows (dynamic quant: no observers
+            // were ever inserted), the layer is converted exactly as before and
+            // simply carries no activation qparams — leaving the existing
+            // recompute-per-call behavior intact.
+            const bool quantizable =
+                std::dynamic_pointer_cast<nn::Linear>(module) != nullptr ||
+                std::dynamic_pointer_cast<nn::Conv2d>(module) != nullptr;
+
+            std::optional<QuantizationParams> act_qparams;
+            if (quantizable && i + 1 < modules.size()) {
+                act_qparams = extract_activation_qparams(modules[i + 1]);
+            }
+
             auto converted = to_quantized(module);
-            quantized_seq->add_module(converted);
+
+            if (act_qparams.has_value()) {
+                if (auto ql = std::dynamic_pointer_cast<
+                        nn::quantization::QuantizedLinear>(converted)) {
+                    ql->set_activation_qparams(*act_qparams);
+                } else if (auto qc = std::dynamic_pointer_cast<
+                               nn::quantization::QuantizedConv2d>(converted)) {
+                    qc->set_activation_qparams(*act_qparams);
+                }
+                // The next module is the consumed FakeQuantize: skip it so it
+                // never appears in the output model.
+                ++i;
+            }
+
+            // to_quantized() returns nullptr for a FakeQuantize that was NOT
+            // consumed above (no preceding quantizable layer, or its observer
+            // had no data). Drop those rather than re-inserting a calibration
+            // artifact into the clean quantized tree.
+            if (converted) {
+                quantized_seq->add_module(converted);
+            }
         }
 
         return quantized_seq;
@@ -157,8 +228,7 @@ auto prepare_module_for_qat_recursive(
 
 auto quantize_dynamic(
     std::shared_ptr<nn::Module> model,
-    QuantDType weight_dtype,
-    [[maybe_unused]] QuantDType activation_dtype
+    QuantDType weight_dtype
 ) -> std::shared_ptr<nn::Module> {
     if (!model) {
         throw std::runtime_error("Cannot quantize null model");
@@ -166,9 +236,9 @@ auto quantize_dynamic(
 
     // Honor weight_dtype instead of silently ignoring it. The dynamic-quant
     // default qconfig uses INT8 symmetric weights; reject anything it cannot
-    // actually produce rather than quietly quantizing to INT8. activation_dtype
-    // is intentionally unused: dynamic quantization keeps activations in FP32
-    // (matching PyTorch), so it has no effect here.
+    // actually produce rather than quietly quantizing to INT8. There is no
+    // activation_dtype parameter: dynamic quantization keeps activations in
+    // FP32 by definition (matching PyTorch).
     if (weight_dtype != QuantDType::INT8) {
         throw std::runtime_error(
             "quantize_dynamic(weight_dtype): only INT8 weights are supported by "
@@ -573,6 +643,11 @@ auto benchmark_quantization(
     const std::vector<int64_t>& input_shape,
     int num_iterations
 ) -> std::tuple<float, float, float, float> {
+    if (num_iterations <= 0) {
+        throw std::invalid_argument(
+            "benchmark_quantization: num_iterations must be > 0");
+    }
+
     fp32_model.eval();
     quantized_model.eval();
 
@@ -605,8 +680,9 @@ auto benchmark_quantization(
     float quant_time = std::chrono::duration<float, std::milli>(quant_end - quant_start).count();
     quant_time /= num_iterations;
 
-    // Calculate speedup
-    float speedup = fp32_time / quant_time;
+    // Calculate speedup. Guard against a zero quant_time (e.g. a degenerate
+    // model whose forward is optimized away) which would otherwise yield inf.
+    float speedup = (quant_time > 0.0f) ? (fp32_time / quant_time) : 0.0f;
 
     // Memory reduction (4x for FP32 -> INT8)
     float memory_reduction = 4.0f;

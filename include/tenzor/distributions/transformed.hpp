@@ -11,6 +11,8 @@
 #include "distribution.hpp"
 #include "transforms.hpp"
 #include "../ops/reduction.hpp"
+#include <algorithm>
+#include <cstdint>
 #include <memory>
 #include <vector>
 
@@ -62,10 +64,21 @@ public:
             std::vector<int64_t>(value.shape().begin(), value.shape().end()),
             value.dtype(), value.device());
 
+        int64_t event_dim = 0;
         for (auto it = transforms_.rbegin(); it != transforms_.rend(); ++it) {
             Tensor prev = (*it)->inv(x);
             log_det = log_det + (*it)->log_abs_det_jacobian(prev, x);
+            event_dim = std::max(event_dim, (*it)->event_dim());
             x = prev;
+        }
+
+        // Sum the per-element log-det over the transform's trailing event dims
+        // so its rank matches a base whose log_prob already reduced those dims
+        // (multivariate / Independent-wrapped). For element-wise transforms
+        // event_dim == 0, so this is a no-op. Mirrors PyTorch, which sums
+        // log_abs_det_jacobian over event_dim before subtracting.
+        for (int64_t i = 0; i < event_dim && log_det.ndim() > 0; ++i) {
+            log_det = tenzor::sum(log_det, /*dim=*/-1, /*keepdim=*/false);
         }
 
         return base_->log_prob(x) - log_det;

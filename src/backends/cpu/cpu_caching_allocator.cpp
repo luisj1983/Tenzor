@@ -415,35 +415,63 @@ bool CPUCachingAllocator::is_fully_coalesced(const RootAllocation& root) const {
 }
 
 void CPUCachingAllocator::release_cached_memory() {
+    // Mirror check_memory_pressure()'s safety invariant. A root must only be
+    // freed when ALL of its bytes are confirmed in the GLOBAL free pool. The
+    // old code gated on is_fully_coalesced() alone (freed_size == size), but
+    // freed_size counts blocks returned to ANY pool — including other live
+    // threads' local pools, which this function never scans. A root whose free
+    // blocks live in other threads' pools would pass that gate and be returned
+    // to the OS while those threads still hold Blocks into it (use-after-free /
+    // double-free). So: (1) migrate the calling thread's local pool to global
+    // first, (2) only free roots with global_freed == root.size and no
+    // allocated blocks, (3) verify reclaimed bytes match the root size before
+    // freeing, recording a tracking inconsistency and skipping otherwise.
+
+    // Migrate THIS thread's local free blocks to the global pool so they become
+    // reclaimable. We can only safely touch the calling thread's pool. This must
+    // run BEFORE taking global_mutex_ (migrate_to_global acquires it too).
+    if (tl_pool_wrapper_.valid) {
+        migrate_to_global(get_local_pool(), /*migrate_all=*/true);
+    }
+
     std::lock_guard<std::mutex> lock(global_mutex_);
 
-    // Find all fully coalesced root allocations that can be freed
+    // Compute how much of each root's size currently lives in the global FREE
+    // pool, and which roots still have ALLOCATED blocks.
+    std::unordered_map<void*, size_t> global_freed_per_root;
+    for (auto& [size, block] : global_free_blocks_) {
+        global_freed_per_root[block.root_ptr] += block.size;
+    }
+    std::unordered_set<void*> roots_with_allocated_blocks;
+    for (auto& [ptr, block] : global_allocated_blocks_) {
+        roots_with_allocated_blocks.insert(block.root_ptr);
+    }
+
+    // Select roots that are fully coalesced, have no allocated blocks, and have
+    // ALL their bytes in the global free pool (global_freed == root.size).
     std::vector<void*> roots_to_free;
     for (auto& [root_ptr, root] : global_root_allocations_) {
-        if (is_fully_coalesced(root)) {
+        if (roots_with_allocated_blocks.count(root_ptr) > 0) {
+            continue;
+        }
+        if (!is_fully_coalesced(root)) {
+            continue;
+        }
+        auto git = global_freed_per_root.find(root_ptr);
+        size_t global_freed = (git != global_freed_per_root.end()) ? git->second : 0;
+        if (global_freed == root.size) {
             roots_to_free.push_back(root_ptr);
         }
     }
 
-    // Free fully coalesced allocations and remove their blocks from all pools
+    // Free selected roots, removing their blocks only from the global free pool.
     for (void* root_ptr : roots_to_free) {
-        size_t freed_bytes = 0;
-
-        // Remove blocks from thread-local free pool
-        if (tl_pool_wrapper_.valid) {
-            auto& local = get_local_pool();
-            for (auto it = local.free_blocks.begin(); it != local.free_blocks.end(); ) {
-                if (it->second.root_ptr == root_ptr) {
-                    freed_bytes += it->second.size;
-                    local.cached_bytes -= it->second.size;
-                    it = local.free_blocks.erase(it);
-                } else {
-                    ++it;
-                }
-            }
+        auto root_it = global_root_allocations_.find(root_ptr);
+        if (root_it == global_root_allocations_.end()) {
+            continue;  // Removed concurrently
         }
 
-        // Remove blocks from global free pool
+        size_t freed_bytes = 0;
         for (auto it = global_free_blocks_.begin(); it != global_free_blocks_.end(); ) {
             if (it->second.root_ptr == root_ptr) {
                 freed_bytes += it->second.size;
@@ -451,6 +479,22 @@ void CPUCachingAllocator::release_cached_memory() {
             } else {
                 ++it;
             }
+        }
+
+        // Verify reclaimed bytes match the root size before freeing. If they
+        // don't, there's a tracking bug — surface it loudly (S16/A2) and leak
+        // the root rather than risk corruption / cached_bytes underflow.
+        if (freed_bytes != root_it->second.size) {
+            {
+                std::lock_guard<std::mutex> slock(stats_mutex_);
+                global_stats_.tracking_inconsistencies++;
+            }
+            TENZOR_WARN_ONCE(
+                "CPUCachingAllocator: root-size tracking inconsistency detected in "
+                "release_cached_memory() — the reclaimed free-pool bytes for a root did "
+                "not match its recorded size; root leaked to avoid potential corruption. "
+                "See Stats::tracking_inconsistencies for the cumulative count.");
+            continue;
         }
 
         // Free the root allocation

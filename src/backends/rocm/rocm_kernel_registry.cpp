@@ -976,7 +976,7 @@ namespace rocm {
     auto segment_reduce_kernel(const Tensor& data, const Tensor& offsets, const std::string& reduce, int64_t axis, hipStream_t stream) -> Tensor;
 
     // BoxIoU (vision.hip.cpp)
-    auto box_iou_hip(const Tensor& boxes1, const Tensor& boxes2, int iou_type) -> Tensor;
+    auto box_iou_hip(const Tensor& boxes1, const Tensor& boxes2, int iou_type, hipStream_t stream) -> Tensor;
 
     // NMS (nms.hip.cpp)
     auto nms_forward(const Tensor& boxes, const Tensor& scores, float iou_threshold, hipStream_t stream) -> Tensor;
@@ -4359,7 +4359,7 @@ void register_rocm_kernels(BackendDispatchTable& table) {
     });
     table.register_single_output_kernel(OpId::BoxIoU, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
         int iou_type = static_cast<int>(attrs.get_int(AttrKey::IouType, 0));
-        return rocm::box_iou_hip(inputs[0], inputs[1], iou_type);
+        return rocm::box_iou_hip(inputs[0], inputs[1], iou_type, get_hip_stream(attrs));
     });
 
     // GridSample / AffineGrid — native ROCm kernels

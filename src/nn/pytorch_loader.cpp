@@ -337,6 +337,39 @@ public:
     }
 
 private:
+    // Bounds-checked reads. The whole .pkl is untrusted, so every multi-byte
+    // read and every string/bytes payload must verify it stays within the
+    // buffer (mirroring the LONG4 guard) or throw, rather than reading past
+    // the end of `data_`.
+    void need(size_t n) const {
+        if (n > size_ || pos_ > size_ - n) {
+            throw std::runtime_error(
+                "pytorch_loader: truncated/corrupt pickle stream (read past end)");
+        }
+    }
+    uint8_t read_byte() {
+        need(1);
+        return data_[pos_++];
+    }
+    uint16_t read_u16_() {
+        need(2);
+        uint16_t v = read_u16(data_ + pos_);
+        pos_ += 2;
+        return v;
+    }
+    uint32_t read_u32_() {
+        need(4);
+        uint32_t v = read_u32(data_ + pos_);
+        pos_ += 4;
+        return v;
+    }
+    std::string read_payload(size_t len) {
+        need(len);
+        std::string s(reinterpret_cast<const char*>(data_ + pos_), len);
+        pos_ += len;
+        return s;
+    }
+
     void run() {
         while (pos_ < size_) {
             uint8_t op = data_[pos_++];
@@ -379,32 +412,28 @@ private:
                 }
 
                 case PICKLE_SHORT_BINUNICODE: {
-                    uint8_t len = data_[pos_++];
+                    uint8_t len = read_byte();
                     PickleValue v;
                     v.type = PVal::String;
-                    v.str_val = std::string(reinterpret_cast<const char*>(data_ + pos_), len);
-                    pos_ += len;
+                    v.str_val = read_payload(len);
                     stack_.push_back(std::move(v));
                     break;
                 }
 
                 case PICKLE_BINUNICODE: {
-                    uint32_t len = read_u32(data_ + pos_);
-                    pos_ += 4;
+                    uint32_t len = read_u32_();
                     PickleValue v;
                     v.type = PVal::String;
-                    v.str_val = std::string(reinterpret_cast<const char*>(data_ + pos_), len);
-                    pos_ += len;
+                    v.str_val = read_payload(len);
                     stack_.push_back(std::move(v));
                     break;
                 }
 
                 case PICKLE_SHORT_BINSTRING: {
-                    uint8_t len = data_[pos_++];
+                    uint8_t len = read_byte();
                     PickleValue v;
                     v.type = PVal::String;
-                    v.str_val = std::string(reinterpret_cast<const char*>(data_ + pos_), len);
-                    pos_ += len;
+                    v.str_val = read_payload(len);
                     stack_.push_back(std::move(v));
                     break;
                 }
@@ -470,24 +499,26 @@ private:
                 }
 
                 case PICKLE_BINPUT: {
-                    uint8_t idx = data_[pos_++];
+                    uint8_t idx = read_byte();
                     if (!stack_.empty()) {
                         memo_[idx] = stack_.back();
                     }
+                    next_memo_id_ = std::max(next_memo_id_,
+                                             static_cast<uint32_t>(idx) + 1);
                     break;
                 }
 
                 case PICKLE_LONG_BINPUT: {
-                    uint32_t idx = read_u32(data_ + pos_);
-                    pos_ += 4;
+                    uint32_t idx = read_u32_();
                     if (!stack_.empty()) {
                         memo_[idx] = stack_.back();
                     }
+                    next_memo_id_ = std::max(next_memo_id_, idx + 1);
                     break;
                 }
 
                 case PICKLE_BINGET: {
-                    uint8_t idx = data_[pos_++];
+                    uint8_t idx = read_byte();
                     auto it = memo_.find(idx);
                     if (it != memo_.end()) {
                         stack_.push_back(it->second);
@@ -498,8 +529,7 @@ private:
                 }
 
                 case PICKLE_LONG_BINGET: {
-                    uint32_t idx = read_u32(data_ + pos_);
-                    pos_ += 4;
+                    uint32_t idx = read_u32_();
                     auto it = memo_.find(idx);
                     if (it != memo_.end()) {
                         stack_.push_back(it->second);
@@ -597,7 +627,7 @@ private:
                 case PICKLE_BININT1: {
                     PickleValue v;
                     v.type = PVal::Int;
-                    v.int_val = data_[pos_++];
+                    v.int_val = read_byte();
                     stack_.push_back(std::move(v));
                     break;
                 }
@@ -605,8 +635,7 @@ private:
                 case PICKLE_BININT2: {
                     PickleValue v;
                     v.type = PVal::Int;
-                    v.int_val = read_u16(data_ + pos_);
-                    pos_ += 2;
+                    v.int_val = read_u16_();
                     stack_.push_back(std::move(v));
                     break;
                 }
@@ -614,20 +643,23 @@ private:
                 case PICKLE_BININT: {
                     PickleValue v;
                     v.type = PVal::Int;
-                    v.int_val = static_cast<int32_t>(read_u32(data_ + pos_));
-                    pos_ += 4;
+                    v.int_val = static_cast<int32_t>(read_u32_());
                     stack_.push_back(std::move(v));
                     break;
                 }
 
                 case PICKLE_LONG1: {
-                    uint8_t nbytes = data_[pos_++];
+                    uint8_t nbytes = read_byte();
+                    need(nbytes);
                     int64_t val = 0;
-                    for (uint8_t i = 0; i < nbytes && i < 8; ++i) {
-                        val |= static_cast<int64_t>(data_[pos_++]) << (i * 8);
+                    uint8_t last = 0;
+                    for (uint8_t i = 0; i < nbytes; ++i) {
+                        uint8_t b = data_[pos_++];
+                        last = b;
+                        if (i < 8) val |= static_cast<int64_t>(b) << (i * 8);
                     }
                     // Sign-extend if needed
-                    if (nbytes > 0 && nbytes < 8 && (data_[pos_ - 1] & 0x80)) {
+                    if (nbytes > 0 && nbytes < 8 && (last & 0x80)) {
                         for (uint8_t i = nbytes; i < 8; ++i) {
                             val |= static_cast<int64_t>(0xFF) << (i * 8);
                         }
@@ -641,6 +673,7 @@ private:
 
                 case PICKLE_BINFLOAT: {
                     double val;
+                    need(8);
                     // Big-endian double
                     uint8_t buf[8];
                     for (int i = 0; i < 8; ++i) buf[7 - i] = data_[pos_++];
@@ -687,46 +720,46 @@ private:
                 }
 
                 case PICKLE_BINBYTES: {
-                    uint32_t len = read_u32(data_ + pos_);
-                    pos_ += 4;
+                    uint32_t len = read_u32_();
                     PickleValue v;
                     v.type = PVal::String;
-                    v.str_val = std::string(reinterpret_cast<const char*>(data_ + pos_), len);
-                    pos_ += len;
+                    v.str_val = read_payload(len);
                     stack_.push_back(std::move(v));
                     break;
                 }
 
                 case PICKLE_SHORT_BINBYTES: {
-                    uint8_t len = data_[pos_++];
+                    uint8_t len = read_byte();
                     PickleValue v;
                     v.type = PVal::String;
-                    v.str_val = std::string(reinterpret_cast<const char*>(data_ + pos_), len);
-                    pos_ += len;
+                    v.str_val = read_payload(len);
                     stack_.push_back(std::move(v));
                     break;
                 }
 
                 case PICKLE_FRAME: {
+                    need(8);
                     pos_ += 8;  // Skip 8-byte frame length
                     break;
                 }
 
                 case PICKLE_MEMOIZE: {
                     // Audit C.8: Python 3.4+ default protocol 4 emits MEMOIZE
-                    // after every memoised value: pop nothing, push memo_[n]
-                    // = stack.back() where n is the next memo slot.
+                    // after every memoised value: pop nothing, store
+                    // stack.back() at the next sequential slot. Use a dedicated
+                    // monotonic counter (not memo_.size()) so it stays correct
+                    // when BINPUT/LONG_BINPUT have written explicit indices.
                     if (!stack_.empty()) {
-                        memo_[static_cast<uint32_t>(memo_.size())] = stack_.back();
+                        memo_[next_memo_id_] = stack_.back();
                     }
+                    ++next_memo_id_;
                     break;
                 }
 
                 case PICKLE_LONG4: {
                     // 4-byte little-endian length prefix, then that many bytes
                     // encoding a signed integer (little-endian, two's complement).
-                    uint32_t len = read_u32(data_ + pos_);
-                    pos_ += 4;
+                    uint32_t len = read_u32_();
                     int64_t val = 0;
                     if (len > 0 && pos_ + len <= size_) {
                         // Sign-extend from the high byte.
@@ -833,6 +866,13 @@ private:
     std::vector<PickleValue> stack_;
     std::vector<size_t> marks_;
     std::map<uint32_t, PickleValue> memo_;
+    // Next sequential slot index for MEMOIZE. CPython's unpickler assigns the
+    // current memo length as the MEMOIZE slot, but because BINPUT/LONG_BINPUT
+    // write explicit (and possibly larger) indices into the same memo, using
+    // memo_.size() as the index aliases previously-written slots. Track the
+    // next free id monotonically: MEMOIZE consumes it, and explicit puts bump
+    // it past their index so a later MEMOIZE never reuses an occupied slot.
+    uint32_t next_memo_id_ = 0;
 
     // Result: tensor_name -> (storage, shape)
     std::map<std::string, std::pair<StorageDesc, std::vector<int64_t>>> result_;

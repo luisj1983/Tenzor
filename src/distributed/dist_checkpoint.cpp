@@ -17,6 +17,7 @@
 #include <cstring>
 #include <algorithm>
 #include <numeric>
+#include <limits>
 
 namespace tenzor::distributed {
 
@@ -34,7 +35,11 @@ void write_val(std::vector<uint8_t>& buf, T val) {
 }
 
 template <typename T>
-auto read_val(const uint8_t*& ptr) -> T {
+auto read_val(const uint8_t*& ptr, const uint8_t* end) -> T {
+    if (ptr > end || static_cast<size_t>(end - ptr) < sizeof(T)) {
+        throw std::runtime_error(
+            "DistributedCheckpoint: truncated checkpoint (unexpected end of data)");
+    }
     T val;
     std::memcpy(&val, ptr, sizeof(T));
     ptr += sizeof(T);
@@ -294,49 +299,91 @@ auto DistributedCheckpoint::deserialize_state(const std::vector<uint8_t>& data) 
     const uint8_t* end = ptr + data.size();
 
     // Header
-    auto magic = read_val<uint32_t>(ptr);
+    auto magic = read_val<uint32_t>(ptr, end);
     if (magic != MAGIC) {
         throw std::runtime_error(
             "DistributedCheckpoint: invalid checkpoint magic number");
     }
 
-    auto version = read_val<uint32_t>(ptr);
+    auto version = read_val<uint32_t>(ptr, end);
     if (version != VERSION) {
         throw std::runtime_error(
             "DistributedCheckpoint: unsupported checkpoint version " +
             std::to_string(version));
     }
 
-    auto world_size = read_val<int64_t>(ptr);
-    auto num_entries = read_val<int64_t>(ptr);
+    auto world_size = read_val<int64_t>(ptr, end);
+    auto num_entries = read_val<int64_t>(ptr, end);
+    if (num_entries < 0) {
+        throw std::runtime_error(
+            "DistributedCheckpoint: negative entry count in checkpoint");
+    }
 
     std::unordered_map<std::string, Tensor> state;
-    state.reserve(static_cast<size_t>(num_entries));
+    // Each entry needs at least name_len + ndim + dtype + data_bytes headers, so
+    // num_entries cannot exceed the remaining byte count. Cap the reservation to
+    // avoid an attacker-controlled count triggering a huge allocation.
+    state.reserve(static_cast<size_t>(
+        std::min<int64_t>(num_entries, static_cast<int64_t>(data.size() / 8))));
 
     for (int64_t i = 0; i < num_entries; ++i) {
         // Name
-        auto name_len = read_val<int64_t>(ptr);
+        auto name_len = read_val<int64_t>(ptr, end);
+        if (name_len < 0 || static_cast<size_t>(end - ptr) < static_cast<size_t>(name_len)) {
+            throw std::runtime_error(
+                "DistributedCheckpoint: invalid or truncated tensor name");
+        }
         std::string name(reinterpret_cast<const char*>(ptr),
                          static_cast<size_t>(name_len));
         ptr += name_len;
 
         // Shape
-        auto ndim = read_val<int64_t>(ptr);
+        auto ndim = read_val<int64_t>(ptr, end);
+        // Each dimension consumes 8 bytes; bound ndim by the remaining data so a
+        // bogus value cannot drive a huge std::vector allocation.
+        if (ndim < 0 || static_cast<size_t>(end - ptr) < static_cast<size_t>(ndim) * sizeof(int64_t)) {
+            throw std::runtime_error(
+                "DistributedCheckpoint: invalid or truncated tensor shape for '" +
+                name + "'");
+        }
         std::vector<int64_t> shape(static_cast<size_t>(ndim));
+        int64_t numel = 1;
         for (int64_t d = 0; d < ndim; ++d) {
-            shape[d] = read_val<int64_t>(ptr);
+            shape[d] = read_val<int64_t>(ptr, end);
+            if (shape[d] < 0) {
+                throw std::runtime_error(
+                    "DistributedCheckpoint: negative dimension in shape for '" +
+                    name + "'");
+            }
+            // Checked multiply to detect numel overflow.
+            if (shape[d] != 0 && numel > std::numeric_limits<int64_t>::max() / shape[d]) {
+                throw std::runtime_error(
+                    "DistributedCheckpoint: tensor element count overflow for '" +
+                    name + "'");
+            }
+            numel *= shape[d];
         }
 
         // DType
-        auto dtype = static_cast<DType>(read_val<uint32_t>(ptr));
+        auto dtype = static_cast<DType>(read_val<uint32_t>(ptr, end));
 
         // Data
-        auto data_bytes = read_val<int64_t>(ptr);
+        auto data_bytes = read_val<int64_t>(ptr, end);
 
-        // Create tensor and copy data into it
+        // Create tensor and copy data into it. The serialized byte count must
+        // exactly match the destination tensor's capacity; otherwise the file is
+        // malformed and copying could overflow the heap allocation.
         auto tensor = empty(shape, dtype, Device::cpu());
+        auto expected_bytes = static_cast<int64_t>(
+            tensor.numel() * dtype_to_element_size(tensor.dtype()));
+        if (data_bytes != expected_bytes) {
+            throw std::runtime_error(
+                "DistributedCheckpoint: data size mismatch for '" + name +
+                "' (expected " + std::to_string(expected_bytes) + ", got " +
+                std::to_string(data_bytes) + ")");
+        }
         if (data_bytes > 0) {
-            if (ptr + data_bytes > end) {
+            if (static_cast<size_t>(end - ptr) < static_cast<size_t>(data_bytes)) {
                 throw std::runtime_error(
                     "DistributedCheckpoint: truncated checkpoint data for '" +
                     name + "'");

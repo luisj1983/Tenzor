@@ -13,6 +13,8 @@
 #include "tenzor/distributed/distributed.hpp"     // ReduceOp enum
 #include <stdexcept>
 #include <algorithm>
+#include <string>
+#include <functional>
 
 #ifdef TENZOR_USE_CUDA
 #include <cuda_runtime.h>
@@ -65,6 +67,82 @@ DataParallel::DataParallel(
 
     // Validate devices
     validate_devices();
+
+    // No process group on the legacy ctor: only SUM/AVG are realizable via
+    // gradient accumulation across the shared module. Reject MAX/MIN/etc. up
+    // front (they would otherwise compile but throw on the first backward()).
+    validate_reduce_op();
+}
+
+DataParallel::DataParallel(
+    std::shared_ptr<Module> module,
+    ModuleFactory module_factory,
+    std::shared_ptr<::tenzor::distributed::ProcessGroupBase> pg,
+    std::vector<int> device_ids,
+    int output_device,
+    int dim,
+    ::tenzor::distributed::ReduceOp reduce_op
+) : module_(std::move(module)), device_ids_(std::move(device_ids)),
+    output_device_(output_device), dim_(dim), reduce_op_(reduce_op),
+    module_factory_(std::move(module_factory)), pg_(std::move(pg)) {
+    if (!module_) {
+        throw std::invalid_argument("DataParallel: module cannot be null");
+    }
+    if (device_ids_.empty()) {
+#ifdef TENZOR_USE_CUDA
+        int device_count = 0;
+        cudaError_t err = cudaGetDeviceCount(&device_count);
+        if (err != cudaSuccess || device_count == 0) {
+            throw std::runtime_error("DataParallel: No CUDA devices available");
+        }
+        for (int i = 0; i < device_count; ++i) {
+            device_ids_.push_back(i);
+        }
+#else
+        throw std::runtime_error("DataParallel: CUDA not available, cannot auto-detect devices");
+#endif
+    }
+    if (device_ids_.empty()) {
+        throw std::invalid_argument("DataParallel: device_ids cannot be empty");
+    }
+    if (output_device_ == -1) {
+        output_device_ = device_ids_[0];
+    }
+    if (std::find(device_ids_.begin(), device_ids_.end(), output_device_) == device_ids_.end()) {
+        throw std::invalid_argument("DataParallel: output_device must be in device_ids");
+    }
+    validate_devices();
+    // With pg_ set, MAX/MIN are realizable via real all_reduce; validation
+    // accounts for that.
+    validate_reduce_op();
+}
+
+auto DataParallel::validate_reduce_op() const -> void {
+    if (pg_) {
+        // Real process group: SUM/AVG/MAX/MIN are all valid all_reduce ops;
+        // only the non-gradient reductions are rejected.
+        switch (reduce_op_) {
+            case ::tenzor::distributed::ReduceOp::SUM:
+            case ::tenzor::distributed::ReduceOp::AVG:
+            case ::tenzor::distributed::ReduceOp::MAX:
+            case ::tenzor::distributed::ReduceOp::MIN:
+                return;
+            default:
+                throw std::invalid_argument(
+                    "DataParallel: reduce_op PRODUCT/BAND/BOR/BXOR are not valid "
+                    "for gradient reduction");
+        }
+    }
+    switch (reduce_op_) {
+        case ::tenzor::distributed::ReduceOp::SUM:
+        case ::tenzor::distributed::ReduceOp::AVG:
+            return;
+        default:
+            throw std::invalid_argument(
+                "DataParallel: reduce_op MAX/MIN/PRODUCT/bitwise require a "
+                "ProcessGroup (use the factory/ProcessGroup ctor); the "
+                "shared-module path only supports SUM and AVG");
+    }
 }
 
 
@@ -80,7 +158,19 @@ auto DataParallel::forward_impl(const Variable& input) -> Variable {
         throw std::runtime_error("DataParallel: input must have at least one dimension");
     }
 
-    int64_t batch_size = input_shape[dim_];
+    // Normalize the (possibly negative) batch dimension against the input rank
+    // and bounds-check it. dim_ is stored verbatim; a negative dim_ (-1 is a
+    // valid PyTorch convention) or dim_ >= rank would index input_shape (a span
+    // indexed by size_t) out of bounds.
+    const int64_t rank = static_cast<int64_t>(input_shape.size());
+    int64_t norm_dim = (dim_ < 0) ? dim_ + rank : dim_;
+    if (norm_dim < 0 || norm_dim >= rank) {
+        throw std::out_of_range(
+            "DataParallel: batch dim " + std::to_string(dim_) +
+            " out of range for input rank " + std::to_string(rank));
+    }
+
+    int64_t batch_size = input_shape[norm_dim];
     if (!can_split_batch(batch_size)) {
         throw std::runtime_error(
             "DataParallel: batch size (" + std::to_string(batch_size) +
@@ -294,9 +384,17 @@ auto DataParallel::scatter(const Variable& input) -> std::vector<Variable> {
     std::vector<Variable> scattered_inputs;
     scattered_inputs.reserve(device_ids_.size());
 
-    auto input_tensor = input.tensor();
-    auto input_shape = input_tensor.shape();
-    int64_t batch_size = input_shape[dim_];
+    auto input_shape = input.tensor().shape();
+    // Normalize and bounds-check the batch dim (see forward_impl). Use the
+    // normalized value for both the batch-size read and the narrow below.
+    const int64_t in_rank = static_cast<int64_t>(input_shape.size());
+    const int64_t norm_dim = (dim_ < 0) ? dim_ + in_rank : dim_;
+    if (norm_dim < 0 || norm_dim >= in_rank) {
+        throw std::out_of_range(
+            "DataParallel::scatter: batch dim " + std::to_string(dim_) +
+            " out of range for input rank " + std::to_string(in_rank));
+    }
+    int64_t batch_size = input_shape[norm_dim];
     int num_devices = static_cast<int>(device_ids_.size());
 
     // Calculate chunk size for each device
@@ -307,19 +405,23 @@ auto DataParallel::scatter(const Variable& input) -> std::vector<Variable> {
     for (int i = 0; i < num_devices; ++i) {
         // First 'remainder' chunks get one extra element
         int64_t current_chunk_size = chunk_size + (i < remainder ? 1 : 0);
-        int64_t end = start + current_chunk_size;
 
-        // Slice input along batch dimension
-        auto chunk = input_tensor.slice(dim_, start, end);
+        // Slice the input *Variable* along the batch dimension with the
+        // autograd-aware narrow (registers NarrowBackward) so gradients flow
+        // back into the original input. The previous implementation sliced the
+        // raw Tensor and re-wrapped each chunk via the leaf Variable(Tensor)
+        // ctor — a disconnected leaf, so input.grad() was silently zero after
+        // backward. This mirrors gather()'s wrap_preserving_grad round-trip.
+        Variable chunk = ::tenzor::narrow(input, norm_dim, start, current_chunk_size);
 
-        // Move chunk to target device
+        // Move chunk to target device, preserving grad_fn/requires_grad/hooks.
         int device_id = device_ids_[i];
         if (device_id != output_device_) {
-            chunk = chunk.cuda(device_id);
+            utils::wrap_preserving_grad(chunk, chunk.tensor().cuda(device_id));
         }
 
-        scattered_inputs.emplace_back(chunk);
-        start = end;
+        scattered_inputs.push_back(std::move(chunk));
+        start += current_chunk_size;
     }
 
     return scattered_inputs;
@@ -337,16 +439,42 @@ auto DataParallel::parallel_apply(const std::vector<Variable>& inputs) -> std::v
     // Strategy: Execute forward passes in parallel using CUDA streams
     // Each device runs its forward pass concurrently
 
-    std::vector<cudaStream_t> streams(device_ids_.size());
-    std::vector<cudaEvent_t> start_events(device_ids_.size());
-    std::vector<cudaEvent_t> end_events(device_ids_.size());
+    // Check every CUDA return code and throw via the project error convention
+    // instead of silently using invalid handles.
+    auto cuda_check = [](cudaError_t err, const char* what) {
+        if (err != cudaSuccess) {
+            throw std::runtime_error(
+                std::string("DataParallel::parallel_apply: ") + what + " - " +
+                cudaGetErrorString(err));
+        }
+    };
+
+    std::vector<cudaStream_t> streams(device_ids_.size(), nullptr);
+    std::vector<cudaEvent_t> start_events(device_ids_.size(), nullptr);
+    std::vector<cudaEvent_t> end_events(device_ids_.size(), nullptr);
+
+    // RAII cleanup so a throw anywhere below (including replicas_[i]->forward)
+    // still destroys every stream/event instead of leaking them. Destroy errors
+    // are ignored during unwinding.
+    auto destroy_all = [&]() noexcept {
+        for (size_t i = 0; i < device_ids_.size(); ++i) {
+            cudaSetDevice(device_ids_[i]);
+            if (streams[i]) cudaStreamDestroy(streams[i]);
+            if (start_events[i]) cudaEventDestroy(start_events[i]);
+            if (end_events[i]) cudaEventDestroy(end_events[i]);
+        }
+    };
+    struct ScopeGuard {
+        std::function<void()> fn;
+        ~ScopeGuard() { if (fn) fn(); }
+    } guard{destroy_all};
 
     // Create streams and events for async execution
     for (size_t i = 0; i < device_ids_.size(); ++i) {
-        cudaSetDevice(device_ids_[i]);
-        cudaStreamCreate(&streams[i]);
-        cudaEventCreate(&start_events[i]);
-        cudaEventCreate(&end_events[i]);
+        cuda_check(cudaSetDevice(device_ids_[i]), "cudaSetDevice");
+        cuda_check(cudaStreamCreate(&streams[i]), "cudaStreamCreate");
+        cuda_check(cudaEventCreate(&start_events[i]), "cudaEventCreate(start)");
+        cuda_check(cudaEventCreate(&end_events[i]), "cudaEventCreate(end)");
     }
 
     // Pre-allocate output vector (will be filled in parallel)
@@ -354,40 +482,29 @@ auto DataParallel::parallel_apply(const std::vector<Variable>& inputs) -> std::v
 
     // Launch forward passes asynchronously on all devices
     for (size_t i = 0; i < device_ids_.size(); ++i) {
-        cudaSetDevice(device_ids_[i]);
+        cuda_check(cudaSetDevice(device_ids_[i]), "cudaSetDevice");
 
         // Record start event
-        cudaEventRecord(start_events[i], streams[i]);
+        cuda_check(cudaEventRecord(start_events[i], streams[i]),
+                   "cudaEventRecord(start)");
 
-        // Execute forward pass on this device
-        // Note: The actual computation happens on the default stream for now
-        // In a more advanced implementation, we would pass the stream to kernels
+        // Execute forward pass on this device. If this throws, the ScopeGuard
+        // above tears down all streams/events.
         outputs[i] = replicas_[i]->forward(inputs[i]);
 
         // Record completion event
-        cudaEventRecord(end_events[i], streams[i]);
+        cuda_check(cudaEventRecord(end_events[i], streams[i]),
+                   "cudaEventRecord(end)");
     }
 
     // Synchronize all devices to ensure forward passes complete
     for (size_t i = 0; i < device_ids_.size(); ++i) {
-        cudaSetDevice(device_ids_[i]);
-        cudaEventSynchronize(end_events[i]);
-
-        // Optional: Check execution time for profiling
-        // float ms = 0;
-        // cudaEventElapsedTime(&ms, start_events[i], end_events[i]);
+        cuda_check(cudaSetDevice(device_ids_[i]), "cudaSetDevice");
+        cuda_check(cudaEventSynchronize(end_events[i]), "cudaEventSynchronize");
     }
 
-    // Cleanup resources
-    for (size_t i = 0; i < device_ids_.size(); ++i) {
-        cudaSetDevice(device_ids_[i]);
-        cudaStreamDestroy(streams[i]);
-        cudaEventDestroy(start_events[i]);
-        cudaEventDestroy(end_events[i]);
-    }
-
-    // Reset to master device
-    cudaSetDevice(output_device_);
+    // Reset to master device (cleanup of streams/events runs via ScopeGuard).
+    cuda_check(cudaSetDevice(output_device_), "cudaSetDevice(output)");
 #else
     // CPU fallback: sequential execution
     // In a CPU multi-threaded version, we could use std::thread or parallel algorithms

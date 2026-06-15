@@ -6,13 +6,21 @@ layout(local_size_x_id = 0) in;
 
 layout(binding = 0) buffer Output { int64_t output_data[]; };
 
+// low/high are passed as 64-bit values split into two uint32 halves so the
+// full Int64 range is representable. (The Int32 randint shader keeps int low/high.)
 layout(push_constant) uniform PushConstants {
     uint n;
-    int low;
-    int high;
+    uint low_lo;
+    uint low_hi;
+    uint high_lo;
+    uint high_hi;
     uint seed;
     uint offset;
 } params;
+
+int64_t pack_i64(uint lo, uint hi) {
+    return int64_t((uint64_t(hi) << 32u) | uint64_t(lo));
+}
 
 // Philox constants
 const uint PHILOX_M0 = 0xD2511F53u;
@@ -63,11 +71,24 @@ void main() {
 
     uvec4 rand_vals = philox4x32(ctr, key);
 
-    int range = params.high - params.low;
-    int result = params.low + int(float(rand_vals.x >> 8) * (1.0 / 16777216.0) * float(range));
+    int64_t low  = pack_i64(params.low_lo, params.low_hi);
+    int64_t high = pack_i64(params.high_lo, params.high_hi);
 
-    if (result >= params.high) result = params.high - 1;
-    if (result < params.low) result = params.low;
+    // Combine two 32-bit Philox words into a 64-bit uniform value, then reduce
+    // modulo the (unsigned) range. Modulo avoids float precision loss across the
+    // full 64-bit range; a small modulo bias is acceptable for randint.
+    uint64_t rand64 = (uint64_t(rand_vals.y) << 32u) | uint64_t(rand_vals.x);
+    uint64_t range = uint64_t(high - low);
 
-    output_data[idx] = int64_t(result);
+    int64_t result;
+    if (range == uint64_t(0)) {
+        result = low;  // empty/degenerate range guard
+    } else {
+        result = low + int64_t(rand64 % range);
+    }
+
+    if (result >= high) result = high - 1;
+    if (result < low) result = low;
+
+    output_data[idx] = result;
 }

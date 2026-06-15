@@ -18,6 +18,7 @@
 #include "callbacks.hpp"
 #include "metrics.hpp"
 #include <tenzor/autograd/variable.hpp>
+#include <tenzor/ops/transform.hpp>
 
 namespace tenzor {
 namespace nn {
@@ -70,14 +71,31 @@ public:
         }
 
         auto operator*() const -> std::pair<Tensor, Tensor> {
-            size_t start = index_ * loader_->batch_size_;
-
-            // For simplicity, return first sample in batch
-            // In production, you'd concatenate all samples in the batch
-            if (start < loader_->data_.size()) {
-                return loader_->data_[start];
+            const size_t start = index_ * loader_->batch_size_;
+            const size_t total = loader_->data_.size();
+            if (start >= total) {
+                // Out-of-range iteration; return the first sample as a degenerate
+                // single-element batch rather than reading OOB.
+                std::vector<Tensor> in0{loader_->data_[0].first};
+                std::vector<Tensor> tg0{loader_->data_[0].second};
+                return {tenzor::stack(in0, 0), tenzor::stack(tg0, 0)};
             }
-            return loader_->data_[0];  // Fallback
+
+            // Build a real batch by stacking every sample in
+            // [start, start + batch_size) along a new leading dimension,
+            // handling the short final batch. Previously only the first sample
+            // of each batch was returned, so training silently used
+            // 1/batch_size of the data.
+            const size_t end = std::min(start + loader_->batch_size_, total);
+            std::vector<Tensor> inputs;
+            std::vector<Tensor> targets;
+            inputs.reserve(end - start);
+            targets.reserve(end - start);
+            for (size_t s = start; s < end; ++s) {
+                inputs.push_back(loader_->data_[s].first);
+                targets.push_back(loader_->data_[s].second);
+            }
+            return {tenzor::stack(inputs, 0), tenzor::stack(targets, 0)};
         }
 
     private:

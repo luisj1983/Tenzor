@@ -5960,6 +5960,33 @@ TENZOR_JVP_NONDIFF(jvp_adapter_nondiff_dense_to_sparse,
 TENZOR_JVP_NONDIFF(jvp_adapter_nondiff_sparse_spgemm,
     "SparseSpGEMM JVP not implemented: the result-pattern depends on the "
     "operand patterns, so values-only tangents are not sufficient.")
+
+// Ops whose former _s15 adapters built a fixed-eps (1e-3) central finite
+// difference as the "tangent". A fixed-step FD is not a true JVP — it ignores
+// the tangent magnitude, is only O(eps^2)-accurate, and for the piecewise-
+// constant quantile/median family returns meaningless boundary values — so it
+// fails gradcheck at tight tolerance. Registered NonDifferentiable until an
+// exact closed-form JVP is derived (per-segment SDPA/LayerNorm differentials
+// for the nested ops; argquantile gather for the quantile family).
+TENZOR_JVP_NONDIFF(jvp_adapter_nondiff_nested_layer_norm,
+    "NestedLayerNorm JVP not implemented: requires a per-segment LayerNorm "
+    "differential; a fixed-eps finite-difference probe is not a valid JVP.")
+TENZOR_JVP_NONDIFF(jvp_adapter_nondiff_nested_attention_fwd,
+    "NestedAttention JVP not implemented: requires a per-segment SDPA "
+    "differential; a fixed-eps finite-difference probe is not a valid JVP.")
+TENZOR_JVP_NONDIFF(jvp_adapter_nondiff_ctc_loss_forward,
+    "CTCLossForward JVP not implemented: the alpha-beta DP recurrence is not a "
+    "composition of primitives; a fixed-eps finite-difference probe is not a "
+    "valid JVP.")
+TENZOR_JVP_NONDIFF(jvp_adapter_nondiff_quantile,
+    "Quantile JVP not implemented: piecewise-constant in x; a fixed-eps "
+    "finite-difference probe is not a valid JVP (needs an argquantile gather).")
+TENZOR_JVP_NONDIFF(jvp_adapter_nondiff_nanquantile,
+    "Nanquantile JVP not implemented: piecewise-constant in x; a fixed-eps "
+    "finite-difference probe is not a valid JVP (needs an argquantile gather).")
+TENZOR_JVP_NONDIFF(jvp_adapter_nondiff_nanmedian,
+    "Nanmedian JVP not implemented: piecewise-constant in x; a fixed-eps "
+    "finite-difference probe is not a valid JVP (needs an argquantile gather).")
 TENZOR_JVP_NONDIFF(jvp_adapter_nondiff_sparse_trsv,
     "SparseTrsv JVP not implemented: triangular solve requires an A-side "
     "tangent contribution mirroring the dense LinalgSolve case.")
@@ -6168,39 +6195,97 @@ JvpResult jvp_adapter_nanmean(std::span<const Tensor> primals,
     auto x  = make_dual(primals[0], tangents[0]);
     auto primal = tenzor::dispatch(OpId::Nanmean,
                                    std::vector<Tensor>{x.primal()}, attrs)[0];
-    auto masked_dx = nan_mask_apply(x.tangent(), x.primal());
-    // Tangent uses the same reduction as nanmean: nanmean of dx where x is
-    // not NaN. dx at NaN positions are masked to 0, but nanmean's divisor
-    // counts only finite positions — so we re-dispatch Nanmean on the
-    // masked tangent (NaN positions of x carry 0 tangent contribution and
-    // the divisor matches the primal's finite count).
-    auto tangent = tenzor::dispatch(OpId::Nanmean,
-                                    std::vector<Tensor>{masked_dx}, attrs)[0];
+    // d/dt nanmean(x) = sum_{finite}(dx) / finite_count(x). dx at NaN-x
+    // positions contribute 0. Re-dispatching Nanmean on the masked tangent is
+    // WRONG: the masked tangent has no NaNs, so Nanmean divides by the FULL
+    // element count N rather than x's finite count, mis-scaling the tangent by
+    // finite_count/N. Instead reduce the masked tangent with plain Sum and
+    // divide by x's finite count over the same axes.
+    std::optional<int64_t> dim;
+    if (attrs.has(AttrKey::Dim)) {
+        dim = attrs.get_int(AttrKey::Dim);
+    }
+    bool keepdim = attrs.get_bool(AttrKey::Keepdim, false);
+
+    auto is_nan = tenzor::isnan(x.primal());
+    auto mask = tenzor::where(is_nan, tenzor::zeros_like(x.primal()),
+                              tenzor::ones_like(x.primal()));
+    auto dx0 = tenzor::where(is_nan, tenzor::zeros_like(x.tangent()), x.tangent());
+
+    auto numer = tenzor::sum(dx0, dim, keepdim);
+    auto nfin  = tenzor::sum(mask, dim, keepdim);   // x's finite count
+    auto tangent = tenzor::div(numer, nfin);
     return JvpResult{std::move(primal), std::move(tangent)};
 }
+// Closed-form NaN-masked variance differential, shared by NanVar/NanStd.
+//
+// Variance is quadratic in x, so its JVP is the *linear* directional
+// derivative (mirroring jvp_var), NaN-masked over the same axes the primal
+// reduces and using the finite-count divisor:
+//   mask = ~isnan(x)
+//   nfin = sum(mask)                       (per reduced region)
+//   mu   = sum(mask*x) / nfin              (= nanmean(x))
+//   dmu  = sum(mask*dx) / nfin             (= nanmean(dx), NaN positions = 0)
+//   dvar = 2 * sum(mask*(x-mu)*(dx-dmu)) / (nfin - correction)
+// All NaN positions contribute 0 (masked) so no NaN leaks into the result.
+// Returns dvar reduced with the caller's Dim/Keepdim.
+inline auto nanvar_differential(const Tensor& x_in, const Tensor& dx_in,
+                                const OpAttributes& attrs) -> Tensor {
+    std::optional<int64_t> dim;
+    if (attrs.has(AttrKey::Dim)) {
+        dim = attrs.get_int(AttrKey::Dim);
+    }
+    bool keepdim = attrs.get_bool(AttrKey::Keepdim, false);
+    // nanvar/nanstd set BOTH AttrKey::Unbiased (bool) and AttrKey::Correction
+    // (int). Prefer the explicit integer correction (covers ddof != {0,1});
+    // fall back to the bool when only Unbiased is present.
+    int64_t correction = attrs.has(AttrKey::Correction)
+        ? attrs.get_int(AttrKey::Correction)
+        : (attrs.get_bool(AttrKey::Unbiased, false) ? 1 : 0);
+
+    // is_nan[i] = true where x is NaN; finite positions are its complement.
+    auto is_nan = tenzor::isnan(x_in);
+    // mask is a {0,1} tensor in x's dtype: 1 at finite positions, 0 at NaN.
+    auto mask = tenzor::where(is_nan, tenzor::zeros_like(x_in),
+                              tenzor::ones_like(x_in));
+    // x / dx with NaN positions replaced by 0 so masked products are finite.
+    auto x0 = tenzor::where(is_nan, tenzor::zeros_like(x_in), x_in);
+    auto dx0 = tenzor::where(is_nan, tenzor::zeros_like(dx_in), dx_in);
+
+    // Finite count per reduced region (keepdim for broadcasting).
+    auto nfin = tenzor::sum(mask, dim, /*keepdim=*/true);          // >= 0
+    auto mu  = tenzor::div(tenzor::sum(x0, dim, /*keepdim=*/true), nfin);
+    auto dmu = tenzor::div(tenzor::sum(dx0, dim, /*keepdim=*/true), nfin);
+
+    auto centered_p = tenzor::mul(mask, tenzor::sub(x0, mu));      // 0 at NaN
+    auto centered_t = tenzor::mul(mask, tenzor::sub(dx0, dmu));    // 0 at NaN
+    auto numer = tenzor::sum(tenzor::mul(centered_p, centered_t), dim, keepdim);
+
+    // Divisor matches the primal nanvar: finite_count - correction.
+    auto nfin_red = keepdim ? nfin : tenzor::sum(mask, dim, /*keepdim=*/false);
+    Tensor denom = nfin_red;
+    if (correction != 0) {
+        auto corr = tenzor::full({1}, static_cast<double>(correction),
+                                 x_in.dtype(), x_in.device());
+        denom = tenzor::sub(nfin_red, corr);
+    }
+    auto tangent = tenzor::div(tenzor::mul(numer, 2.0), denom);
+    return tangent;
+}
+
 JvpResult jvp_adapter_nanvar(std::span<const Tensor> primals,
                              std::span<const Tensor> tangents,
                              const OpAttributes& attrs) {
     if (primals.size() != 1 || tangents.size() != 1) {
         throw std::runtime_error("jvp_adapter_nanvar: expected 1 input");
     }
-    // For non-NaN x, var = E[(x-μ)²]; d/dt = 2·E_finite[(x-μ)·(dx-dμ)].
-    // We compute the NaN-masked primal/tangent contributions directly.
     auto x  = make_dual(primals[0], tangents[0]);
     auto primal = tenzor::dispatch(OpId::NanVar,
                                    std::vector<Tensor>{x.primal()}, attrs)[0];
-    // For correctness we need the saved finite-count and mean — neither is
-    // exposed by NanVar — so use the kernel as a black-box: the tangent of
-    // a NaN-ignoring variance equals 2·NanMean((x-μ)·(dx_masked - dμ_masked))
-    // and computing μ requires NanMean on x, then broadcasting via Sub. This
-    // path requires per-axis reductions matching the attrs' Dim/Keepdim;
-    // delegate to the existing Var rule applied to NaN-masked tangents.
-    auto masked_dx = nan_mask_apply(x.tangent(), x.primal());
-    // Build a dual where the tangent is the masked dx and re-use the
-    // existing Var JVP path (jvp_var) by dispatch.
-    OpAttributes var_attrs = attrs;
-    auto tangent = tenzor::dispatch(OpId::NanVar,
-                                    std::vector<Tensor>{masked_dx}, var_attrs)[0];
+    // Linear variance differential (the previous NanVar(masked_dx) returned
+    // the *variance of dx* — quadratic, always non-negative, and not the
+    // directional derivative).
+    auto tangent = nanvar_differential(x.primal(), x.tangent(), attrs);
     return JvpResult{std::move(primal), std::move(tangent)};
 }
 JvpResult jvp_adapter_nanstd(std::span<const Tensor> primals,
@@ -6209,13 +6294,11 @@ JvpResult jvp_adapter_nanstd(std::span<const Tensor> primals,
     if (primals.size() != 1 || tangents.size() != 1) {
         throw std::runtime_error("jvp_adapter_nanstd: expected 1 input");
     }
-    // nanstd = sqrt(nanvar); d/dt = (1/(2·nanstd)) · d(nanvar).
+    // nanstd = sqrt(nanvar); d/dt = d(nanvar) / (2·nanstd).
     auto x = make_dual(primals[0], tangents[0]);
     auto primal = tenzor::dispatch(OpId::NanStd,
                                    std::vector<Tensor>{x.primal()}, attrs)[0];
-    auto masked_dx = nan_mask_apply(x.tangent(), x.primal());
-    auto d_var = tenzor::dispatch(OpId::NanVar,
-                                  std::vector<Tensor>{masked_dx}, attrs)[0];
+    auto d_var = nanvar_differential(x.primal(), x.tangent(), attrs);
     auto two_std = tenzor::mul(primal, 2.0);
     auto tangent = tenzor::div(d_var, two_std);
     return JvpResult{std::move(primal), std::move(tangent)};
@@ -6296,9 +6379,14 @@ inline auto zeros_like_tensor(const Tensor& ref) -> Tensor {
 }
 
 inline auto tangent_or_zeros(const Tensor& primal, const Tensor& tangent) -> Tensor {
-    return (tangent.numel() == primal.numel())
-        ? tangent
-        : zeros_like_tensor(primal);
+    // Match make_dual's absent-tangent convention: a tangent is "absent" iff it
+    // is the empty sentinel (numel()==0) for a non-empty primal. Using a numel
+    // *equality* test instead silently dropped genuinely-supplied broadcastable
+    // or scalar tangents (numel differs from primal) and mis-classified an
+    // absent tangent on an empty primal as present.
+    return (tangent.numel() == 0 && primal.numel() != 0)
+        ? zeros_like_tensor(primal)
+        : tangent;
 }
 
 // ---- Linear forward adapters (re-dispatch on tangent) ---------------------
@@ -6476,43 +6564,12 @@ JvpResult jvp_adapter_sparse_to_dense_s15(std::span<const Tensor> primals,
     return JvpResult{std::move(primal), std::move(tangent)};
 }
 
-// DenseToSparse is multi-output {crow, col, values} but the dispatch surface
-// expects single-output. The structural pattern (crow/col) is constant under
-// infinitesimal perturbation that keeps non-zero set fixed; the values
-// tangent is just dx scattered into the same pattern. Since the dispatch
-// table returns a vector, we recompute the primal multi-output via the
-// kernel and produce tangents for each output.
-//
-// NOTE: this rule is registered as a SINGLE-OUTPUT rule (matching the
-// existing surface), so we return only the values-tangent in JvpResult.
-// Multi-output sparse construction is handled separately at higher levels.
-JvpResult jvp_adapter_dense_to_sparse_s15(std::span<const Tensor> primals,
-                                          std::span<const Tensor> tangents,
-                                          const OpAttributes& attrs) {
-    if (primals.size() != 1 || tangents.size() != 1) {
-        throw std::runtime_error(
-            "jvp_adapter_dense_to_sparse_s15: expected 1 input (dense)");
-    }
-    // Primal: dispatch returns {crow, col, values} via multi-output, but the
-    // single-output dispatch returns the first slot which is `crow_indices`.
-    // We follow the existing single-output convention and return `values`.
-    auto outs = tenzor::dispatch(OpId::DenseToSparse,
-        std::vector<Tensor>{primals[0]}, attrs);
-    // For JVP rule contract, the "primal" returned is just outs[0]. Tangent
-    // is computed by sampling dx at the same nonzero locations as primals[0].
-    // We approximate via: dvalues = nonzero_mask * dx (sparse representation
-    // not constructed at this layer). Return outs[0] as primal and zero
-    // tangent for the index outputs (we cannot return values tangent through
-    // single-output JVP since outs[0] is crow_indices).
-    auto dx = tangent_or_zeros(primals[0], tangents[0]);
-    Tensor primal = outs[0];
-    // tangent for crow_indices is zero (structural).
-    Tensor tangent = tenzor::zeros(
-        std::vector<int64_t>(primal.shape().begin(), primal.shape().end()),
-        primal.dtype(), primal.device());
-    (void)dx;
-    return JvpResult{std::move(primal), std::move(tangent)};
-}
+// DenseToSparse: the differentiable values-tangent (dx gathered at the nonzero
+// pattern) cannot be returned through the single-output JVP surface because
+// outs[0] is the integer crow_indices structural tensor. It is registered as
+// NonDifferentiable (jvp_adapter_nondiff_dense_to_sparse) rather than
+// fabricating a zero crow_indices-shaped tangent. A multi-output JVP path would
+// be required to surface the values tangent.
 
 // ---- Nonlinear adapters via closed-form chain rule ------------------------
 
@@ -7099,27 +7156,77 @@ JvpResult jvp_adapter_sparse_trsm_s15(std::span<const Tensor> primals,
 }
 
 // SparseSoftmax / SparseLogSoftmax operate on `values` only (per-row softmax
-// over nonzero values in CSR layout). Same algebraic JVP as dense softmax:
-//   dy = y * (dvalues - sum_row(y * dvalues))
-// But the row-sum reduction requires the row pointer (crow_indices), so we
-// approximate by treating the entire `values` tensor as a single row (the
-// kernel handles row segmentation internally). To stay correct, we
-// re-dispatch SparseSoftmax once on the input and once on a synthesised
-// perturbed input to derive the tangent.
+// over nonzero values in CSR layout). The exact forward-mode tangents are:
+//   softmax:     dy = P * (dv - rowsum(P * dv))
+//   log-softmax: dy = dv - P * rowsum(dv)            (P = exp(log-softmax))
+// where rowsum(x) is the sum of x over the nonzeros of each CSR row, broadcast
+// back to every nonzero position in that row. The previous adapters dropped
+// the rowsum correction entirely (softmax returned P*dv; log-softmax returned
+// dv), which is wrong for any CSR row with more than one nonzero.
 //
-// Practical approach: use a small chain-rule via the kernel itself —
-// p_values = sparse_softmax(values); for each row r, t_values_r =
-// p_values_r * (dvalues_r - sum_r(p_values_r * dvalues_r)). Without crow
-// access in JVP we cannot do per-row reductions safely. Since the kernel
-// guarantees row-restricted softmax and our tangent shape matches the
-// values tensor, the simplest correct path is to keep the kernel and use
-// a numerical Jacobian-vector product: compute
-//   y_plus  = sparse_softmax(values + eps*dvalues, ...)
-//   y_minus = sparse_softmax(values - eps*dvalues, ...)
-//   tangent = (y_plus - y_minus) / (2*eps)
-// This is forward-mode AD as a black box but is numerically faithful to
-// the kernel's row semantics and avoids unwiring the CSR row indexing
-// outside the kernel. The error is O(eps^2).
+// We compute the per-row sum directly from crow_indices (the CSR row pointer)
+// and scatter it back to each nonzero's position. The reduction is done on a
+// CPU copy of the per-value tensor (Float32/Float64; Float16/BFloat16 widen to
+// Float32, then narrow back to the values dtype), mirroring the sparse_softmax
+// kernel's own CSR loop, and the result is moved back to the values device.
+//
+// csr_row_broadcast_sum(crow, x) -> y, where y[j] = sum over all nonzeros k in
+// the same CSR row as j of x[k]. crow has length M+1 (M = number of rows);
+// x and y are 1-D of length nnz.
+inline auto csr_row_broadcast_sum(const Tensor& crow, const Tensor& x) -> Tensor {
+    // Widen reduced dtypes to Float32 so the segment reduction stays exact for
+    // the half-precision sparse paths; narrow the result back at the end.
+    const DType orig_dtype = x.dtype();
+    const bool widen = (orig_dtype == DType::Float16 || orig_dtype == DType::BFloat16);
+    Tensor x_work = widen ? x.to(DType::Float32) : x;
+
+    auto crow_cpu = (crow.device().type != Device::Type::CPU) ? crow.to(Device::cpu()) : crow;
+    auto x_cpu = (x_work.device().type != Device::Type::CPU) ? x_work.to(Device::cpu()) : x_work;
+
+    const int64_t nnz = x_cpu.numel();
+    const int64_t M = crow_cpu.numel() - 1;
+    Tensor out = tenzor::zeros({nnz}, x_cpu.dtype(), Device::cpu());
+    const int64_t* row_ptr = crow_cpu.data<int64_t>();
+
+    if (x_cpu.dtype() == DType::Float32) {
+        const float* xv = x_cpu.data<float>();
+        float* ov = out.data<float>();
+        for (int64_t i = 0; i < M; ++i) {
+            int64_t start = row_ptr[i];
+            int64_t end = row_ptr[i + 1];
+            if (start == end) continue;
+            float s = 0.0f;
+            for (int64_t j = start; j < end; ++j) s += xv[j];
+            for (int64_t j = start; j < end; ++j) ov[j] = s;
+        }
+    } else if (x_cpu.dtype() == DType::Float64) {
+        const double* xv = x_cpu.data<double>();
+        double* ov = out.data<double>();
+        for (int64_t i = 0; i < M; ++i) {
+            int64_t start = row_ptr[i];
+            int64_t end = row_ptr[i + 1];
+            if (start == end) continue;
+            double s = 0.0;
+            for (int64_t j = start; j < end; ++j) s += xv[j];
+            for (int64_t j = start; j < end; ++j) ov[j] = s;
+        }
+    } else {
+        throw std::runtime_error(
+            "csr_row_broadcast_sum: unsupported values dtype for sparse "
+            "softmax/log-softmax JVP");
+    }
+
+    // Restore original device and dtype.
+    if (x.device().type != Device::Type::CPU) {
+        out = out.to(x.device());
+    }
+    if (widen) {
+        out = out.to(orig_dtype);
+    }
+    return out;
+}
+
+// SparseSoftmax: dy = P * (dv - rowsum(P * dv)).
 JvpResult jvp_adapter_sparse_softmax_s15(std::span<const Tensor> primals,
                                          std::span<const Tensor> tangents,
                                          const OpAttributes& attrs) {
@@ -7130,21 +7237,14 @@ JvpResult jvp_adapter_sparse_softmax_s15(std::span<const Tensor> primals,
     auto primal = tenzor::dispatch(OpId::SparseSoftmax,
         std::vector<Tensor>{primals[0], primals[1], primals[2]}, attrs)[0];
     auto dvalues = tangent_or_zeros(primals[2], tangents[2]);
-    // p = softmax(v); dp = p*(dv - row_sum(p*dv)). row_sum is opaque to us;
-    // we approximate by treating the whole values tensor as a single row.
+    // P = primal (softmax values). dy = P * (dv - rowsum(P * dv)).
     auto p_times_dv = tenzor::mul(primal, dvalues);
-    // Without explicit row indexing, approximate the row sum as 0 for the
-    // perturbation direction (correct when each row has a single non-zero,
-    // or when the row sums of p*dv happen to be small). Caller is warned
-    // that for densely-populated rows this differs from the true JVP by a
-    // per-row correction term. The full closed form requires crow_indices
-    // routing not exposed here.
-    auto tangent = tenzor::mul(primal, dvalues);
+    auto rowsum = csr_row_broadcast_sum(primals[0], p_times_dv);
+    auto tangent = tenzor::mul(primal, tenzor::sub(dvalues, rowsum));
     return JvpResult{std::move(primal), std::move(tangent)};
 }
 
-// SparseLogSoftmax: log of softmax. Tangent: d_log = dvalues - softmax * sum_row(dvalues).
-// Same caveat as SparseSoftmax on row sums.
+// SparseLogSoftmax: dy = dv - P * rowsum(dv), where P = exp(log-softmax).
 JvpResult jvp_adapter_sparse_log_softmax_s15(std::span<const Tensor> primals,
                                              std::span<const Tensor> tangents,
                                              const OpAttributes& attrs) {
@@ -7155,7 +7255,10 @@ JvpResult jvp_adapter_sparse_log_softmax_s15(std::span<const Tensor> primals,
     auto primal = tenzor::dispatch(OpId::SparseLogSoftmax,
         std::vector<Tensor>{primals[0], primals[1], primals[2]}, attrs)[0];
     auto dvalues = tangent_or_zeros(primals[2], tangents[2]);
-    auto tangent = dvalues;
+    // P = exp(log-softmax). dy = dv - P * rowsum(dv).
+    auto P = tenzor::exp(primal);
+    auto rowsum = csr_row_broadcast_sum(primals[0], dvalues);
+    auto tangent = tenzor::sub(dvalues, tenzor::mul(P, rowsum));
     return JvpResult{std::move(primal), std::move(tangent)};
 }
 
@@ -7244,188 +7347,6 @@ JvpMultiResult jvp_adapter_batchnorm2d_fused_training_s15(
         tangent_outs.push_back(zeros_like_tensor(primal_outs[i]));
     }
     return JvpMultiResult{std::move(primal_outs), std::move(tangent_outs)};
-}
-
-// ---- NestedLayerNorm ------------------------------------------------------
-// NestedLayerNorm operates piecewise per-segment over a packed values
-// tensor governed by offsets. The algebraic shape is the same as dense
-// LayerNorm applied per-segment. Without per-segment mean/rstd exposed,
-// we treat each segment as equally-shaped and compute the tangent by
-// composition (recompute the per-segment stats inline using NestedSum).
-// Inputs: [values, offsets, weight?, bias?]
-JvpResult jvp_adapter_nested_layer_norm_s15(std::span<const Tensor> primals,
-                                            std::span<const Tensor> tangents,
-                                            const OpAttributes& attrs) {
-    if (primals.size() < 2 || tangents.size() != primals.size()) {
-        throw std::runtime_error(
-            "jvp_adapter_nested_layer_norm_s15: expected at least 2 inputs");
-    }
-    // For a complete closed-form we'd need to access nested-segment
-    // structure; instead, re-dispatch the kernel for the primal and compute
-    // the tangent as a finite-difference forward-mode probe in the
-    // direction of the values tangent. Caller is warned that this is an
-    // approximation.
-    auto primal = tenzor::dispatch(OpId::NestedLayerNorm,
-        std::vector<Tensor>(primals.begin(), primals.end()), attrs)[0];
-    auto dvalues = tangent_or_zeros(primals[0], tangents[0]);
-    auto tangent = tenzor::sub(
-        tenzor::dispatch(OpId::NestedLayerNorm,
-            [&]() {
-                std::vector<Tensor> in(primals.begin(), primals.end());
-                in[0] = tenzor::add(primals[0],
-                    tenzor::mul(dvalues,
-                        tenzor::full({}, 1e-3, primals[0].dtype(), primals[0].device())));
-                return in;
-            }(), attrs)[0],
-        tenzor::dispatch(OpId::NestedLayerNorm,
-            [&]() {
-                std::vector<Tensor> in(primals.begin(), primals.end());
-                in[0] = tenzor::sub(primals[0],
-                    tenzor::mul(dvalues,
-                        tenzor::full({}, 1e-3, primals[0].dtype(), primals[0].device())));
-                return in;
-            }(), attrs)[0]);
-    auto scale = tenzor::full({}, 1.0 / (2.0 * 1e-3), primal.dtype(), primal.device());
-    tangent = tenzor::mul(tangent, scale);
-    return JvpResult{std::move(primal), std::move(tangent)};
-}
-
-// ---- NestedAttention -------------------------------------------------------
-// Per-segment SDPA over packed Q/K/V values and offsets. Same FD-style
-// approximation along the Q-tangent direction.
-JvpResult jvp_adapter_nested_attention_s15(std::span<const Tensor> primals,
-                                           std::span<const Tensor> tangents,
-                                           const OpAttributes& attrs) {
-    if (primals.size() < 4) {
-        throw std::runtime_error(
-            "jvp_adapter_nested_attention_s15: expected at least 4 inputs "
-            "(Q_vals, K_vals, V_vals, offsets[, mask])");
-    }
-    auto primal = tenzor::dispatch(OpId::NestedAttention,
-        std::vector<Tensor>(primals.begin(), primals.end()), attrs)[0];
-    // Compose tangent as JVP per-input via FD probe combining all three
-    // value-tangent directions (Q, K, V).
-    auto dQ = tangent_or_zeros(primals[0], tangents.size() > 0 ? tangents[0] : Tensor());
-    auto dK = tangent_or_zeros(primals[1], tangents.size() > 1 ? tangents[1] : Tensor());
-    auto dV = tangent_or_zeros(primals[2], tangents.size() > 2 ? tangents[2] : Tensor());
-    auto eps_t = tenzor::full({}, 1e-3, primals[0].dtype(), primals[0].device());
-    auto in_plus = std::vector<Tensor>(primals.begin(), primals.end());
-    in_plus[0] = tenzor::add(primals[0], tenzor::mul(dQ, eps_t));
-    in_plus[1] = tenzor::add(primals[1], tenzor::mul(dK, eps_t));
-    in_plus[2] = tenzor::add(primals[2], tenzor::mul(dV, eps_t));
-    auto in_minus = std::vector<Tensor>(primals.begin(), primals.end());
-    in_minus[0] = tenzor::sub(primals[0], tenzor::mul(dQ, eps_t));
-    in_minus[1] = tenzor::sub(primals[1], tenzor::mul(dK, eps_t));
-    in_minus[2] = tenzor::sub(primals[2], tenzor::mul(dV, eps_t));
-    auto y_plus  = tenzor::dispatch(OpId::NestedAttention, in_plus,  attrs)[0];
-    auto y_minus = tenzor::dispatch(OpId::NestedAttention, in_minus, attrs)[0];
-    auto scale = tenzor::full({}, 1.0 / (2.0 * 1e-3), primal.dtype(), primal.device());
-    auto tangent = tenzor::mul(tenzor::sub(y_plus, y_minus), scale);
-    return JvpResult{std::move(primal), std::move(tangent)};
-}
-
-// ---- CTCLossForward --------------------------------------------------------
-// CTCLossForward(log_probs, targets, input_lengths, target_lengths) ->
-//   loss (a scalar or per-batch vector).
-// The dynamic-programming alpha-beta recurrence is not a composition of
-// primitives. We use the documented "smooth-extension" convention: at
-// almost-every input the loss is differentiable; at ties the JVP is 0.
-// Pragmatic implementation: use central finite differences along the
-// log_probs tangent direction.
-JvpResult jvp_adapter_ctc_loss_forward_s15(std::span<const Tensor> primals,
-                                           std::span<const Tensor> tangents,
-                                           const OpAttributes& attrs) {
-    if (primals.empty()) {
-        throw std::runtime_error("jvp_adapter_ctc_loss_forward_s15: expected at least 1 input");
-    }
-    auto outs = tenzor::dispatch(OpId::CTCLossForward,
-        std::vector<Tensor>(primals.begin(), primals.end()), attrs);
-    Tensor primal = outs[0];
-    auto dlog = tangent_or_zeros(primals[0], tangents[0]);
-    auto eps_t = tenzor::full({}, 1e-3, primals[0].dtype(), primals[0].device());
-    auto in_plus = std::vector<Tensor>(primals.begin(), primals.end());
-    in_plus[0] = tenzor::add(primals[0], tenzor::mul(dlog, eps_t));
-    auto in_minus = std::vector<Tensor>(primals.begin(), primals.end());
-    in_minus[0] = tenzor::sub(primals[0], tenzor::mul(dlog, eps_t));
-    auto y_plus  = tenzor::dispatch(OpId::CTCLossForward, in_plus,  attrs)[0];
-    auto y_minus = tenzor::dispatch(OpId::CTCLossForward, in_minus, attrs)[0];
-    auto scale = tenzor::full({}, 1.0 / (2.0 * 1e-3), primal.dtype(), primal.device());
-    auto tangent = tenzor::mul(tenzor::sub(y_plus, y_minus), scale);
-    return JvpResult{std::move(primal), std::move(tangent)};
-}
-
-// ---- Quantile / Nanquantile / Nanmedian -----------------------------------
-// At almost-every input, the q-quantile is one specific element. Without
-// argquantile exposed, we compute the JVP by argsort: sort x and gather
-// the tangent at the index that the kernel would have chosen.
-//
-// For interior-quantile interpolation, we approximate as the gather at the
-// floor index — the error is at most the linear-interpolation weight (in
-// [0, 1)), and the test tolerance allows it.
-JvpResult jvp_adapter_quantile_s15(std::span<const Tensor> primals,
-                                   std::span<const Tensor> tangents,
-                                   const OpAttributes& attrs) {
-    if (primals.empty()) {
-        throw std::runtime_error("jvp_adapter_quantile_s15: expected at least 1 input");
-    }
-    auto outs = tenzor::dispatch(OpId::Quantile,
-        std::vector<Tensor>(primals.begin(), primals.end()), attrs);
-    Tensor primal = outs[0];
-    auto dx = tangent_or_zeros(primals[0], tangents[0]);
-    auto eps_t = tenzor::full({}, 1e-3, primals[0].dtype(), primals[0].device());
-    auto in_plus = std::vector<Tensor>(primals.begin(), primals.end());
-    in_plus[0] = tenzor::add(primals[0], tenzor::mul(dx, eps_t));
-    auto in_minus = std::vector<Tensor>(primals.begin(), primals.end());
-    in_minus[0] = tenzor::sub(primals[0], tenzor::mul(dx, eps_t));
-    auto y_plus  = tenzor::dispatch(OpId::Quantile, in_plus,  attrs)[0];
-    auto y_minus = tenzor::dispatch(OpId::Quantile, in_minus, attrs)[0];
-    auto scale = tenzor::full({}, 1.0 / (2.0 * 1e-3), primal.dtype(), primal.device());
-    auto tangent = tenzor::mul(tenzor::sub(y_plus, y_minus), scale);
-    return JvpResult{std::move(primal), std::move(tangent)};
-}
-
-JvpResult jvp_adapter_nanquantile_s15(std::span<const Tensor> primals,
-                                      std::span<const Tensor> tangents,
-                                      const OpAttributes& attrs) {
-    if (primals.empty()) {
-        throw std::runtime_error("jvp_adapter_nanquantile_s15: expected at least 1 input");
-    }
-    auto outs = tenzor::dispatch(OpId::Nanquantile,
-        std::vector<Tensor>(primals.begin(), primals.end()), attrs);
-    Tensor primal = outs[0];
-    auto dx = tangent_or_zeros(primals[0], tangents[0]);
-    auto eps_t = tenzor::full({}, 1e-3, primals[0].dtype(), primals[0].device());
-    auto in_plus = std::vector<Tensor>(primals.begin(), primals.end());
-    in_plus[0] = tenzor::add(primals[0], tenzor::mul(dx, eps_t));
-    auto in_minus = std::vector<Tensor>(primals.begin(), primals.end());
-    in_minus[0] = tenzor::sub(primals[0], tenzor::mul(dx, eps_t));
-    auto y_plus  = tenzor::dispatch(OpId::Nanquantile, in_plus,  attrs)[0];
-    auto y_minus = tenzor::dispatch(OpId::Nanquantile, in_minus, attrs)[0];
-    auto scale = tenzor::full({}, 1.0 / (2.0 * 1e-3), primal.dtype(), primal.device());
-    auto tangent = tenzor::mul(tenzor::sub(y_plus, y_minus), scale);
-    return JvpResult{std::move(primal), std::move(tangent)};
-}
-
-JvpResult jvp_adapter_nanmedian_s15(std::span<const Tensor> primals,
-                                    std::span<const Tensor> tangents,
-                                    const OpAttributes& attrs) {
-    if (primals.empty()) {
-        throw std::runtime_error("jvp_adapter_nanmedian_s15: expected at least 1 input");
-    }
-    auto outs = tenzor::dispatch(OpId::Nanmedian,
-        std::vector<Tensor>(primals.begin(), primals.end()), attrs);
-    Tensor primal = outs[0];
-    auto dx = tangent_or_zeros(primals[0], tangents[0]);
-    auto eps_t = tenzor::full({}, 1e-3, primals[0].dtype(), primals[0].device());
-    auto in_plus = std::vector<Tensor>(primals.begin(), primals.end());
-    in_plus[0] = tenzor::add(primals[0], tenzor::mul(dx, eps_t));
-    auto in_minus = std::vector<Tensor>(primals.begin(), primals.end());
-    in_minus[0] = tenzor::sub(primals[0], tenzor::mul(dx, eps_t));
-    auto y_plus  = tenzor::dispatch(OpId::Nanmedian, in_plus,  attrs)[0];
-    auto y_minus = tenzor::dispatch(OpId::Nanmedian, in_minus, attrs)[0];
-    auto scale = tenzor::full({}, 1.0 / (2.0 * 1e-3), primal.dtype(), primal.device());
-    auto tangent = tenzor::mul(tenzor::sub(y_plus, y_minus), scale);
-    return JvpResult{std::move(primal), std::move(tangent)};
 }
 
 } // anonymous (S15 batch)
@@ -9089,13 +9010,13 @@ void register_builtin_jvp_rules() {
     register_jvp_rule(OpId::FlashAttention,  &jvp_adapter_flash_attention);
     register_jvp_rule(OpId::FusedAttention,  &jvp_adapter_fused_attention);
     register_jvp_rule(OpId::FlexAttention,   &jvp_adapter_flex_attention);
-    register_jvp_rule(OpId::NestedAttention, &jvp_adapter_nested_attention_s15);
+    register_jvp_rule(OpId::NestedAttention, &jvp_adapter_nondiff_nested_attention_fwd);
 
     // Losses. CTCLossForward is structurally non-differentiable at this
     // layer (dynamic-programming alpha/beta lattice).
     register_jvp_rule(OpId::FusedSoftmaxCrossEntropy,
                       &jvp_adapter_fused_softmax_cross_entropy);
-    register_jvp_rule(OpId::CTCLossForward, &jvp_adapter_ctc_loss_forward_s15);
+    register_jvp_rule(OpId::CTCLossForward, &jvp_adapter_nondiff_ctc_loss_forward);
 
     // Adaptive max pool: multi-output {values, indices}; tangent = gather
     // (take_along_dim) on flattened spatial dims using saved indices.
@@ -9114,16 +9035,16 @@ void register_builtin_jvp_rules() {
 
     // Quantile / Nanquantile / Nanmedian: NonDifferentiable (interpolation
     // indices/weights not exposed; NaN-mask-dependent selection is discontinuous).
-    register_jvp_rule(OpId::Quantile,    &jvp_adapter_quantile_s15);
-    register_jvp_rule(OpId::Nanquantile, &jvp_adapter_nanquantile_s15);
-    register_jvp_rule(OpId::Nanmedian,   &jvp_adapter_nanmedian_s15);
+    register_jvp_rule(OpId::Quantile,    &jvp_adapter_nondiff_quantile);
+    register_jvp_rule(OpId::Nanquantile, &jvp_adapter_nondiff_nanquantile);
+    register_jvp_rule(OpId::Nanmedian,   &jvp_adapter_nondiff_nanmedian);
 
     // Nested softmax / log-softmax: per-segment JVP using the nested
     // kernels plus NestedSum for the per-segment reduction.
     register_jvp_rule(OpId::NestedSoftmax,    &jvp_adapter_nested_softmax);
     register_jvp_rule(OpId::NestedLogSoftmax, &jvp_adapter_nested_log_softmax);
     // NestedLayerNorm: NonDifferentiable (per-segment mean/rstd not exposed).
-    register_jvp_rule(OpId::NestedLayerNorm,  &jvp_adapter_nested_layer_norm_s15);
+    register_jvp_rule(OpId::NestedLayerNorm,  &jvp_adapter_nondiff_nested_layer_norm);
 
     // ---------------- Audit A.4 batch 9 ------------------
     //
@@ -9478,7 +9399,13 @@ void register_builtin_jvp_rules() {
     // S15: replaced NonDifferentiable stubs with JVP rules
     // (sparsity pattern held fixed; tangent on values only).
     register_jvp_rule(OpId::SparseToDense,    &jvp_adapter_sparse_to_dense_s15);
-    register_jvp_rule(OpId::DenseToSparse,    &jvp_adapter_dense_to_sparse_s15);
+    // DenseToSparse cannot carry a meaningful values-tangent through the
+    // single-output JVP surface (outs[0] is the integer crow_indices). The
+    // former _s15 adapter fabricated a zero tangent of crow_indices shape,
+    // silently claiming differentiability while dropping the real values
+    // tangent. Register as NonDifferentiable until a multi-output JVP path
+    // exists to return the values tangent (gather of dx at nonzero positions).
+    register_jvp_rule(OpId::DenseToSparse,    &jvp_adapter_nondiff_dense_to_sparse);
     register_jvp_rule(OpId::SparseSpGEMM,     &jvp_adapter_sparse_spgemm_s15);
     register_jvp_rule(OpId::SparseTrsv,       &jvp_adapter_sparse_trsv_s15);
     register_jvp_rule(OpId::SparseTrsm,       &jvp_adapter_sparse_trsm_s15);

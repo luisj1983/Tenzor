@@ -12,6 +12,12 @@
 #include "tenzor/backend/omp_thresholds.hpp"
 #endif
 
+// Intel MKL BLAS for the Float64 im2col-GEMM path (cblas_dgemm); the float path
+// uses SIMD micro-kernels and Float64 would otherwise fall to the scalar loop.
+#ifdef TENZOR_USE_MKL
+#include <mkl.h>
+#endif
+
 namespace tenzor {
 namespace cpu {
 
@@ -167,6 +173,26 @@ void gemm_local<float>(const float* A, const float* B, float* C,
         gemm::gemm_optimized(A, B, C, M, N, K);
     }
 }
+
+#ifdef TENZOR_USE_MKL
+// Float64 specialization using MKL cblas_dgemm. A is (M, K) row-major; for
+// transB, B is (N, K) and we compute A @ B^T, else B is (K, N) and A @ B.
+template<>
+void gemm_local<double>(const double* A, const double* B, double* C,
+                         int64_t M, int64_t N, int64_t K, bool transB) {
+    if (transB) {
+        cblas_dgemm(CblasRowMajor, CblasNoTrans, CblasTrans,
+                    static_cast<int>(M), static_cast<int>(N), static_cast<int>(K),
+                    1.0, A, static_cast<int>(K), B, static_cast<int>(K),
+                    0.0, C, static_cast<int>(N));
+    } else {
+        cblas_dgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
+                    static_cast<int>(M), static_cast<int>(N), static_cast<int>(K),
+                    1.0, A, static_cast<int>(K), B, static_cast<int>(N),
+                    0.0, C, static_cast<int>(N));
+    }
+}
+#endif // TENZOR_USE_MKL
 
 // ============================================================================
 // Conv3d Forward Implementation (template) — audit I5: per-axis.

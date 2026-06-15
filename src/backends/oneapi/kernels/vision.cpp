@@ -409,6 +409,12 @@ auto roi_align_kernel(
                 int64_t roi_bin_grid_w = sampling_ratio > 0 ? sampling_ratio
                     : static_cast<int64_t>(sycl::ceil(roi_width / output_width));
 
+                // Clamp each bin grid to at least 1 so a zero-area / inverted
+                // ROI (possible when aligned=true skips the roi_w/h clamp)
+                // never yields count==0 and a divide-by-zero NaN/Inf, matching
+                // the CPU reference and PyTorch.
+                roi_bin_grid_h = sycl::max(roi_bin_grid_h, int64_t(1));
+                roi_bin_grid_w = sycl::max(roi_bin_grid_w, int64_t(1));
                 const float count = roi_bin_grid_h * roi_bin_grid_w;
 
                 float output_val = 0.0f;
@@ -504,6 +510,12 @@ auto roi_align_kernel(
                 int64_t roi_bin_grid_w = sampling_ratio > 0 ? sampling_ratio
                     : static_cast<int64_t>(sycl::ceil(roi_width / output_width));
 
+                // Clamp each bin grid to at least 1 so a zero-area / inverted
+                // ROI (possible when aligned=true skips the roi_w/h clamp)
+                // never yields count==0 and a divide-by-zero NaN/Inf, matching
+                // the CPU reference and PyTorch.
+                roi_bin_grid_h = sycl::max(roi_bin_grid_h, int64_t(1));
+                roi_bin_grid_w = sycl::max(roi_bin_grid_w, int64_t(1));
                 const double count = roi_bin_grid_h * roi_bin_grid_w;
 
                 double output_val = 0.0;
@@ -598,6 +610,12 @@ auto roi_align_kernel(
                 int64_t roi_bin_grid_w = sampling_ratio > 0 ? sampling_ratio
                     : static_cast<int64_t>(sycl::ceil(roi_width / output_width));
 
+                // Clamp each bin grid to at least 1 so a zero-area / inverted
+                // ROI (possible when aligned=true skips the roi_w/h clamp)
+                // never yields count==0 and a divide-by-zero NaN/Inf, matching
+                // the CPU reference and PyTorch.
+                roi_bin_grid_h = sycl::max(roi_bin_grid_h, int64_t(1));
+                roi_bin_grid_w = sycl::max(roi_bin_grid_w, int64_t(1));
                 const float count = roi_bin_grid_h * roi_bin_grid_w;
 
                 float output_val = 0.0f;
@@ -692,6 +710,12 @@ auto roi_align_kernel(
                 int64_t roi_bin_grid_w = sampling_ratio > 0 ? sampling_ratio
                     : static_cast<int64_t>(sycl::ceil(roi_width / output_width));
 
+                // Clamp each bin grid to at least 1 so a zero-area / inverted
+                // ROI (possible when aligned=true skips the roi_w/h clamp)
+                // never yields count==0 and a divide-by-zero NaN/Inf, matching
+                // the CPU reference and PyTorch.
+                roi_bin_grid_h = sycl::max(roi_bin_grid_h, int64_t(1));
+                roi_bin_grid_w = sycl::max(roi_bin_grid_w, int64_t(1));
                 const float count = roi_bin_grid_h * roi_bin_grid_w;
 
                 float output_val = 0.0f;
@@ -878,6 +902,12 @@ auto roi_align_backward_kernel(
                 int64_t roi_bin_grid_w = sampling_ratio > 0 ? sampling_ratio
                     : static_cast<int64_t>(sycl::ceil(roi_width / output_width));
 
+                // Clamp each bin grid to at least 1 so a zero-area / inverted
+                // ROI (possible when aligned=true skips the roi_w/h clamp)
+                // never yields count==0 and a divide-by-zero NaN/Inf, matching
+                // the CPU reference and PyTorch.
+                roi_bin_grid_h = sycl::max(roi_bin_grid_h, int64_t(1));
+                roi_bin_grid_w = sycl::max(roi_bin_grid_w, int64_t(1));
                 const float count = roi_bin_grid_h * roi_bin_grid_w;
                 const float grad_val = grad_out_ptr[idx] / count;
 
@@ -965,6 +995,12 @@ auto roi_align_backward_kernel(
                 int64_t roi_bin_grid_w = sampling_ratio > 0 ? sampling_ratio
                     : static_cast<int64_t>(sycl::ceil(roi_width / output_width));
 
+                // Clamp each bin grid to at least 1 so a zero-area / inverted
+                // ROI (possible when aligned=true skips the roi_w/h clamp)
+                // never yields count==0 and a divide-by-zero NaN/Inf, matching
+                // the CPU reference and PyTorch.
+                roi_bin_grid_h = sycl::max(roi_bin_grid_h, int64_t(1));
+                roi_bin_grid_w = sycl::max(roi_bin_grid_w, int64_t(1));
                 const double count = roi_bin_grid_h * roi_bin_grid_w;
                 const double grad_val = grad_out_ptr[idx] / count;
 
@@ -1054,6 +1090,12 @@ auto roi_align_backward_kernel(
                 int64_t roi_bin_grid_w = sampling_ratio > 0 ? sampling_ratio
                     : static_cast<int64_t>(sycl::ceil(roi_width / output_width));
 
+                // Clamp each bin grid to at least 1 so a zero-area / inverted
+                // ROI (possible when aligned=true skips the roi_w/h clamp)
+                // never yields count==0 and a divide-by-zero NaN/Inf, matching
+                // the CPU reference and PyTorch.
+                roi_bin_grid_h = sycl::max(roi_bin_grid_h, int64_t(1));
+                roi_bin_grid_w = sycl::max(roi_bin_grid_w, int64_t(1));
                 const float count = roi_bin_grid_h * roi_bin_grid_w;
                 const float grad_val = float(grad_out_ptr[idx]) / count;
 
@@ -1153,6 +1195,12 @@ auto roi_align_backward_kernel(
                 int64_t roi_bin_grid_w = sampling_ratio > 0 ? sampling_ratio
                     : static_cast<int64_t>(sycl::ceil(roi_width / output_width));
 
+                // Clamp each bin grid to at least 1 so a zero-area / inverted
+                // ROI (possible when aligned=true skips the roi_w/h clamp)
+                // never yields count==0 and a divide-by-zero NaN/Inf, matching
+                // the CPU reference and PyTorch.
+                roi_bin_grid_h = sycl::max(roi_bin_grid_h, int64_t(1));
+                roi_bin_grid_w = sycl::max(roi_bin_grid_w, int64_t(1));
                 const float count = roi_bin_grid_h * roi_bin_grid_w;
                 const float grad_val = bf16_to_f32(grad_out_ptr[idx]) / count;
 

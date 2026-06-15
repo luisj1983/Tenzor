@@ -181,15 +181,19 @@ auto TopKCompressor::compress(Tensor& gradient) -> CompressedGradient {
                     gradient.numel() * gradient.dtype_size(),
                     kind);
             } else {
-                // No backend — fall back to assignment (loses residual
-                // tracking, but at least we don't crash).
+                // No backend — fall back to assignment. This changes
+                // gradient.data_ptr(), so re-key the residual under the new
+                // pointer; otherwise the next call's lookup misses and the
+                // accumulated error-feedback residual is silently dropped.
                 gradient = compressed_reshaped;
+                rekey_residual(grad_key, gradient.data_ptr());
             }
         } else {
-            // Shape/dtype/device mismatch — caller will see the new buffer
-            // and the residual cache is effectively reset, which is the
-            // best we can do here.
+            // Shape/dtype/device mismatch — assignment changes
+            // gradient.data_ptr(), so re-key the residual under the new
+            // pointer to preserve error feedback across iterations.
             gradient = compressed_reshaped;
+            rekey_residual(grad_key, gradient.data_ptr());
         }
     }
     result.data = gradient;
@@ -222,6 +226,20 @@ auto TopKCompressor::decompress(CompressedGradient& compressed) -> Tensor {
     }
 
     return result;
+}
+
+auto TopKCompressor::rekey_residual(const void* old_key,
+                                    const void* new_key) -> void {
+    if (old_key == new_key) {
+        return;
+    }
+    auto it = residuals_.find(old_key);
+    if (it == residuals_.end()) {
+        return;
+    }
+    Tensor residual = std::move(it->second);
+    residuals_.erase(it);
+    residuals_[new_key] = std::move(residual);
 }
 
 auto TopKCompressor::reset() -> void {

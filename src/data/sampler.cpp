@@ -56,9 +56,24 @@ WeightedRandomSampler::WeightedRandomSampler(
             throw std::invalid_argument("weights must be non-negative");
         }
     }
-    if (!replacement_ && num_samples_ > static_cast<int64_t>(weights_.size())) {
-        throw std::invalid_argument(
-            "num_samples must be <= number of weights when sampling without replacement");
+    if (!replacement_) {
+        // Without replacement, each draw permanently zeroes the selected
+        // index's weight. Once the strictly-positive weights are exhausted the
+        // remaining distribution has zero total weight, which std::discrete_-
+        // distribution treats as uniform (returning duplicate / zero-weight
+        // indices and violating the without-replacement contract). Require that
+        // there are at least num_samples_ strictly-positive weights.
+        int64_t positive_count = 0;
+        for (auto w : weights_) {
+            if (w > 0.0) {
+                ++positive_count;
+            }
+        }
+        if (num_samples_ > positive_count) {
+            throw std::invalid_argument(
+                "num_samples must be <= number of strictly-positive weights "
+                "when sampling without replacement");
+        }
     }
 
     reset();

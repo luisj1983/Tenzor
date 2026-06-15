@@ -40,9 +40,19 @@ TEST(LiteTensorTest, Numel) {
 }
 
 TEST(LiteTensorTest, NumelEmpty) {
+    // A genuinely empty tensor has a zero-sized dimension -> numel 0.
+    LiteTensor tensor;
+    tensor.ndim = 1;
+    tensor.shape[0] = 0;
+    EXPECT_EQ(tensor.numel(), 0);
+}
+
+TEST(LiteTensorTest, NumelScalar) {
+    // A rank-0 scalar has exactly one element (empty product over zero dims),
+    // matching to_lite_tensor() which allocates real data for a scalar.
     LiteTensor tensor;
     tensor.ndim = 0;
-    EXPECT_EQ(tensor.numel(), 0);
+    EXPECT_EQ(tensor.numel(), 1);
 }
 
 TEST(LiteAllocatorTest, Construction) {

@@ -65,16 +65,6 @@ struct Message {
 };
 
 /**
- * @brief Result type for async RPC calls.
- */
-struct RpcResult {
-    std::vector<Tensor> tensors;     ///< Result tensors
-    std::string error;               ///< Error message (empty on success)
-
-    auto is_error() const -> bool { return !error.empty(); }
-};
-
-/**
  * @brief Type signature for registered RPC functions.
  */
 using RpcFunction = std::function<std::vector<Tensor>(const std::vector<Tensor>&)>;

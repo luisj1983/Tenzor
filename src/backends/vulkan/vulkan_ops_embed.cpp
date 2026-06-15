@@ -366,10 +366,17 @@ auto VulkanBackend::dispatchEmbeddingBagBackward(const Tensor& grad_output,
                                                    bool include_last_offset) -> Tensor {
     int32_t device_id = grad_output.device().index;
 
-    // For Float16, accumulate in Float32 and convert back
+    // For Float16/BFloat16, accumulate in Float32 and convert back.
+    //
+    // The bf16 shader (embedding_bag_backward_bf16.comp) declares grad_output and
+    // grad_weight as 32-bit float and accumulates in f32, exactly like the f16
+    // shader. So grad_weight must be allocated as Float32 (not BFloat16) and the
+    // bf16 grad_output must be promoted to a Float32 staging buffer before binding —
+    // otherwise 2-byte buffers are bound to a 4-byte-float shader, reading/writing
+    // past the buffers and reinterpreting BF16 bit patterns as float32.
     bool is_f16 = (grad_output.dtype() == DType::Float16);
     bool is_bf16 = (grad_output.dtype() == DType::BFloat16);
-    DType weight_dtype = is_f16 ? DType::Float32 : grad_output.dtype();
+    DType weight_dtype = (is_f16 || is_bf16) ? DType::Float32 : grad_output.dtype();
 
     // Select shader based on dtype
     std::string shader_name = "embedding_bag_backward";
@@ -460,15 +467,20 @@ auto VulkanBackend::dispatchEmbeddingBagBackward(const Tensor& grad_output,
     Tensor grad_weight({num_embeddings, embedding_dim}, weight_dtype, grad_output.device());
     grad_weight = dispatchFill(grad_weight, 0.0f);
 
-    size_t go_elem_size = grad_output.dtype_size();
+    // The bf16 shader reads grad_output as 32-bit float, so promote the bf16
+    // grad_output to a Float32 staging buffer before binding. The f16 shader reads
+    // packed float16_t directly, so f16 grad_output is bound as-is.
+    Tensor grad_output_bound = is_bf16 ? grad_output.to(DType::Float32) : grad_output;
+
+    size_t go_elem_size = grad_output_bound.dtype_size();
     size_t gw_elem_size = grad_weight.dtype_size();
-    size_t go_buf_size = grad_output.numel() * go_elem_size;
+    size_t go_buf_size = grad_output_bound.numel() * go_elem_size;
     size_t idx_buf_size = indices_i32.numel() * sizeof(int32_t);
     size_t offs_buf_size = offsets_i32.numel() * sizeof(int32_t);
     size_t gw_buf_size = grad_weight.numel() * gw_elem_size;
 
     std::vector<std::pair<uint32_t, const void*>> bindings = {
-        {0, grad_output.data_ptr()},
+        {0, grad_output_bound.data_ptr()},
         {1, indices_i32.data_ptr()},
         {2, offsets_i32.data_ptr()},
         {3, grad_weight.data_ptr()},
@@ -508,9 +520,12 @@ auto VulkanBackend::dispatchEmbeddingBagBackward(const Tensor& grad_output,
     insertComputeOnlyBarrier(cmdBuffer);
     endSingleTimeCommands(cmdBuffer, device_id);
 
-    // For Float16, convert accumulated Float32 result back
+    // For Float16/BFloat16, convert accumulated Float32 result back
     if (is_f16) {
         return grad_weight.to(DType::Float16);
+    }
+    if (is_bf16) {
+        return grad_weight.to(DType::BFloat16);
     }
 
     return grad_weight;

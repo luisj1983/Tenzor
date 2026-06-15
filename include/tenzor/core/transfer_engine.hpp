@@ -292,6 +292,11 @@ private:
     struct {
         std::atomic<size_t> total_transfers{0};
         std::atomic<size_t> bytes_transferred{0};
+        // Bytes only from transfers that recorded a real (non-zero) duration.
+        // Async/queued transfers report an empty timing window (~0 ms), so
+        // counting their bytes against ~0 time would inflate the average
+        // bandwidth into meaninglessly large values; they are excluded here.
+        std::atomic<size_t> timed_bytes_transferred{0};
         std::atomic<size_t> cpu_to_gpu_count{0};
         std::atomic<size_t> gpu_to_cpu_count{0};
         std::atomic<double> total_time_ms{0.0};

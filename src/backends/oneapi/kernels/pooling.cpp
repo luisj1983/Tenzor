@@ -37,8 +37,6 @@ class AdaptiveAvgPool2dBackwardKernelFloat16;
 class AvgPool2dBackwardKernelFloat32;
 class AvgPool2dBackwardKernelFloat64;
 class AvgPool2dBackwardKernelFloat16;
-class MaxPool2dBackwardKernelFloat32;
-class MaxPool2dBackwardKernelFloat64;
 class MaxPool2dBackwardWithIndicesKernelFloat32;
 class MaxPool2dBackwardWithIndicesKernelFloat64;
 class MaxPool2dBackwardWithIndicesKernelFloat16;
@@ -48,7 +46,6 @@ class AdaptiveAvgPool2dKernelBFloat16;
 class AdaptiveMaxPool2dKernelBFloat16;
 class AdaptiveAvgPool2dBackwardKernelBFloat16;
 class AvgPool2dBackwardKernelBFloat16;
-class MaxPool2dBackwardKernelBFloat16;
 class MaxPool2dBackwardWithIndicesKernelBFloat16;
 class AdaptiveMaxPool2dBackwardKernelFloat32;
 class AdaptiveMaxPool2dBackwardKernelFloat64;
@@ -2020,232 +2017,6 @@ auto avg_pool2d_backward_kernel(const Tensor& grad_output, const Tensor& input,
 }
 
 /**
- * @brief Max pooling 2D backward operation.
- *
- * Computes gradients for max pooling by routing gradient only to the
- * maximum element in each pooling window. Max positions are recomputed
- * from the original input.
- *
- * @param grad_output Gradient from next layer (4D: batch, channels, height_out, width_out)
- * @param input Original input tensor (used to find max positions)
- * @param attrs Operation attributes containing kernel_size, stride, padding, dilation
- * @param queue SYCL queue for execution
- * @return Tensor Gradient with respect to input
- */
-auto max_pool2d_backward_kernel(const Tensor& grad_output, const Tensor& input,
-                                const OpAttributes& attrs, sycl::queue& queue) -> Tensor {
-    if (grad_output.dtype() == DType::Float64 || grad_output.dtype() == DType::Float16 ||
-        grad_output.dtype() == DType::BFloat16) {
-        const DType orig = grad_output.dtype();
-        return max_pool2d_backward_kernel(grad_output.to(DType::Float32),
-                                          input.to(DType::Float32), attrs, queue).to(orig);
-    }
-    if (!attrs.has(AttrKey::KernelSize) && !attrs.has(AttrKey::KernelSizeH) && !attrs.has(AttrKey::KernelSizeW)) {
-        throw std::invalid_argument("max_pool2d_backward: 'kernel_size' attribute is required");
-    }
-
-    auto grad_shape = grad_output.shape();
-    auto input_shape = input.shape();
-
-    if (grad_shape.size() != 4 || input_shape.size() != 4) {
-        throw std::invalid_argument("max_pool2d_backward requires 4D inputs (N, C, H, W)");
-    }
-
-    // Per-axis with scalar fallback.
-    const int64_t k_scalar = attrs.get_int(AttrKey::KernelSize, 1);
-    const int64_t kernel_h = attrs.get_int(AttrKey::KernelSizeH, k_scalar);
-    const int64_t kernel_w = attrs.get_int(AttrKey::KernelSizeW, k_scalar);
-    const int64_t s_scalar = attrs.get_int(AttrKey::Stride, k_scalar);
-    const int64_t stride_h = attrs.get_int(AttrKey::StrideH, s_scalar);
-    const int64_t stride_w = attrs.get_int(AttrKey::StrideW, s_scalar);
-    const int64_t p_scalar = attrs.get_int(AttrKey::Padding, 0);
-    const int64_t padding_h = attrs.get_int(AttrKey::PaddingH, p_scalar);
-    const int64_t padding_w = attrs.get_int(AttrKey::PaddingW, p_scalar);
-    const int64_t d_scalar = attrs.get_int(AttrKey::Dilation, 1);
-    const int64_t dilation_h = attrs.get_int(AttrKey::DilationH, d_scalar);
-    const int64_t dilation_w = attrs.get_int(AttrKey::DilationW, d_scalar);
-
-    const int64_t N = input_shape[0];
-    const int64_t C = input_shape[1];
-    const int64_t H_in = input_shape[2];
-    const int64_t W_in = input_shape[3];
-
-    const int64_t H_out = grad_shape[2];
-    const int64_t W_out = grad_shape[3];
-
-    // Create gradient input tensor (same shape as original input)
-    Tensor grad_input({N, C, H_in, W_in}, input.dtype(), input.device());
-
-    if (input.dtype() == DType::Float32) {
-        const float* in_ptr = get_data_ptr<const float>(input);
-        const float* grad_out_ptr = get_data_ptr<const float>(grad_output);
-        float* grad_in_ptr = get_data_ptr<float>(grad_input);
-
-        // Initialize grad_input to zero
-        const int64_t input_size = N * C * H_in * W_in;
-        queue.fill(grad_in_ptr, 0.0f, input_size).wait();
-
-        // For each output position, find max and route gradient
-        const int64_t total_output_size = N * C * H_out * W_out;
-        queue.parallel_for<MaxPool2dBackwardKernelFloat32>(sycl::range<1>(total_output_size),
-            [=](sycl::id<1> flat_idx) {
-                int64_t temp = flat_idx;
-                const int64_t w_out = temp % W_out;
-                temp /= W_out;
-                const int64_t h_out = temp % H_out;
-                temp /= H_out;
-                const int64_t c = temp % C;
-                const int64_t n = temp / C;
-
-                const float grad_val = grad_out_ptr[((n * C + c) * H_out + h_out) * W_out + w_out];
-
-                // Find max position in pooling window
-                float max_val = -3.4028235e+38f;
-                int64_t max_h = -1;
-                int64_t max_w = -1;
-
-                for (int64_t kh = 0; kh < kernel_h; ++kh) {
-                    for (int64_t kw = 0; kw < kernel_w; ++kw) {
-                        int64_t h_in = h_out * stride_h - padding_h + kh * dilation_h;
-                        int64_t w_in = w_out * stride_w - padding_w + kw * dilation_w;
-
-                        if (h_in >= 0 && h_in < H_in && w_in >= 0 && w_in < W_in) {
-                            float val = in_ptr[((n * C + c) * H_in + h_in) * W_in + w_in];
-                            if (val > max_val) {
-                                max_val = val;
-                                max_h = h_in;
-                                max_w = w_in;
-                            }
-                        }
-                    }
-                }
-
-                // Route gradient to max position
-                if (max_h >= 0 && max_w >= 0) {
-                    int64_t input_idx = ((n * C + c) * H_in + max_h) * W_in + max_w;
-                    sycl::atomic_ref<float, sycl::memory_order::relaxed,
-                                   sycl::memory_scope::device> atomic_grad(grad_in_ptr[input_idx]);
-                    atomic_grad += grad_val;
-                }
-        });
-    }
-    else if (input.dtype() == DType::Float64) {
-        const double* in_ptr = get_data_ptr<const double>(input);
-        const double* grad_out_ptr = get_data_ptr<const double>(grad_output);
-        double* grad_in_ptr = get_data_ptr<double>(grad_input);
-
-        const int64_t input_size = N * C * H_in * W_in;
-        queue.fill(grad_in_ptr, 0.0, input_size).wait();
-
-        const int64_t total_output_size = N * C * H_out * W_out;
-        queue.parallel_for<MaxPool2dBackwardKernelFloat64>(sycl::range<1>(total_output_size),
-            [=](sycl::id<1> flat_idx) {
-                int64_t temp = flat_idx;
-                const int64_t w_out = temp % W_out;
-                temp /= W_out;
-                const int64_t h_out = temp % H_out;
-                temp /= H_out;
-                const int64_t c = temp % C;
-                const int64_t n = temp / C;
-
-                const double grad_val = grad_out_ptr[((n * C + c) * H_out + h_out) * W_out + w_out];
-
-                double max_val = -1.7976931348623157e+308;
-                int64_t max_h = -1;
-                int64_t max_w = -1;
-
-                for (int64_t kh = 0; kh < kernel_h; ++kh) {
-                    for (int64_t kw = 0; kw < kernel_w; ++kw) {
-                        int64_t h_in = h_out * stride_h - padding_h + kh * dilation_h;
-                        int64_t w_in = w_out * stride_w - padding_w + kw * dilation_w;
-
-                        if (h_in >= 0 && h_in < H_in && w_in >= 0 && w_in < W_in) {
-                            double val = in_ptr[((n * C + c) * H_in + h_in) * W_in + w_in];
-                            if (val > max_val) {
-                                max_val = val;
-                                max_h = h_in;
-                                max_w = w_in;
-                            }
-                        }
-                    }
-                }
-
-                if (max_h >= 0 && max_w >= 0) {
-                    int64_t input_idx = ((n * C + c) * H_in + max_h) * W_in + max_w;
-                    sycl::atomic_ref<double, sycl::memory_order::relaxed,
-                                   sycl::memory_scope::device> atomic_grad(grad_in_ptr[input_idx]);
-                    atomic_grad += grad_val;
-                }
-        });
-    }
-    else if (input.dtype() == DType::BFloat16) {
-        const uint16_t* in_ptr = get_data_ptr<const uint16_t>(input);
-        const uint16_t* grad_out_ptr = get_data_ptr<const uint16_t>(grad_output);
-        uint16_t* grad_in_ptr = get_data_ptr<uint16_t>(grad_input);
-
-        // Use float32 intermediate buffer for atomic accumulation
-        const int64_t input_size = N * C * H_in * W_in;
-        float* acc_ptr = sycl::malloc_device<float>(input_size, queue);
-        queue.fill(acc_ptr, 0.0f, input_size).wait();
-
-        const int64_t total_output_size = N * C * H_out * W_out;
-        queue.parallel_for<MaxPool2dBackwardKernelBFloat16>(sycl::range<1>(total_output_size),
-            [=](sycl::id<1> flat_idx) {
-                int64_t temp = flat_idx;
-                const int64_t w_out = temp % W_out;
-                temp /= W_out;
-                const int64_t h_out = temp % H_out;
-                temp /= H_out;
-                const int64_t c = temp % C;
-                const int64_t n = temp / C;
-
-                const float grad_val = bf16_to_f32(grad_out_ptr[((n * C + c) * H_out + h_out) * W_out + w_out]);
-
-                // Find max position in pooling window
-                float max_val = -3.4028235e+38f;
-                int64_t max_h = -1;
-                int64_t max_w = -1;
-
-                for (int64_t kh = 0; kh < kernel_h; ++kh) {
-                    for (int64_t kw = 0; kw < kernel_w; ++kw) {
-                        int64_t h_in = h_out * stride_h - padding_h + kh * dilation_h;
-                        int64_t w_in = w_out * stride_w - padding_w + kw * dilation_w;
-
-                        if (h_in >= 0 && h_in < H_in && w_in >= 0 && w_in < W_in) {
-                            float val = bf16_to_f32(in_ptr[((n * C + c) * H_in + h_in) * W_in + w_in]);
-                            if (val > max_val) {
-                                max_val = val;
-                                max_h = h_in;
-                                max_w = w_in;
-                            }
-                        }
-                    }
-                }
-
-                // Route gradient to max position
-                if (max_h >= 0 && max_w >= 0) {
-                    int64_t input_idx = ((n * C + c) * H_in + max_h) * W_in + max_w;
-                    sycl::atomic_ref<float, sycl::memory_order::relaxed,
-                                   sycl::memory_scope::device> atomic_grad(acc_ptr[input_idx]);
-                    atomic_grad += grad_val;
-                }
-        });
-
-        // Convert float32 accumulator back to BFloat16
-        queue.parallel_for(sycl::range<1>(input_size), [=](sycl::id<1> idx) {
-            grad_in_ptr[idx] = f32_to_bf16(acc_ptr[idx]);
-        });
-
-        sycl::free(acc_ptr, queue);
-    }
-    else {
-        throw std::runtime_error("Unsupported dtype for max_pool2d_backward");
-    }
-
-    return grad_input;
-}
-
-/**
  * @brief Adaptive average pooling 2D backward operation wrapper.
  *
  * Computes gradients for adaptive average pooling.
@@ -4200,9 +3971,8 @@ auto fractional_maxpool2d_backward_kernel(const Tensor& grad_output,
         const double* go = get_data_ptr<const double>(grad_output);
         const int64_t* idx = get_data_ptr<const int64_t>(indices);
 
-        queue.fill(gi, 0.0, in_size).wait();
-
-        // For Float64, use float accumulator + atomic since some devices lack f64 atomics
+        // For Float64, use float accumulator + atomic since some devices lack f64 atomics.
+        // No need to pre-zero `gi`: the acc->gi copy below writes every element.
         float* acc = sycl::malloc_device<float>(in_size, queue);
         queue.fill(acc, 0.0f, in_size).wait();
 
@@ -4227,8 +3997,7 @@ auto fractional_maxpool2d_backward_kernel(const Tensor& grad_output,
         const sycl::half* go = get_data_ptr<const sycl::half>(grad_output);
         const int64_t* idx = get_data_ptr<const int64_t>(indices);
 
-        queue.fill(gi, sycl::half(0.0f), in_size).wait();
-
+        // No need to pre-zero `gi`: the acc->gi copy below writes every element.
         float* acc = sycl::malloc_device<float>(in_size, queue);
         queue.fill(acc, 0.0f, in_size).wait();
 
@@ -4510,8 +4279,7 @@ auto fractional_maxpool3d_backward_kernel(const Tensor& grad_output,
         const double* go = get_data_ptr<const double>(grad_output);
         const int64_t* idx = get_data_ptr<const int64_t>(indices);
 
-        queue.fill(gi, 0.0, in_size).wait();
-
+        // No need to pre-zero `gi`: the acc->gi copy below writes every element.
         float* acc = sycl::malloc_device<float>(in_size, queue);
         queue.fill(acc, 0.0f, in_size).wait();
 
@@ -4535,8 +4303,7 @@ auto fractional_maxpool3d_backward_kernel(const Tensor& grad_output,
         const sycl::half* go = get_data_ptr<const sycl::half>(grad_output);
         const int64_t* idx = get_data_ptr<const int64_t>(indices);
 
-        queue.fill(gi, sycl::half(0.0f), in_size).wait();
-
+        // No need to pre-zero `gi`: the acc->gi copy below writes every element.
         float* acc = sycl::malloc_device<float>(in_size, queue);
         queue.fill(acc, 0.0f, in_size).wait();
 

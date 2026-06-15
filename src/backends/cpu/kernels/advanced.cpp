@@ -1053,6 +1053,13 @@ auto quantile_impl(const T* data, int64_t dim_size,
     #pragma omp parallel for if(outer_size * inner_size > 1024)
     for (int64_t outer = 0; outer < outer_size; ++outer) {
         for (int64_t inner = 0; inner < inner_size; ++inner) {
+            // A zero-length reduction axis has no values to interpolate; emit NaN
+            // instead of indexing the empty slice (negative/OOB access).
+            if (dim_size == 0) {
+                out_values[outer * inner_size + inner] =
+                    std::numeric_limits<T>::quiet_NaN();
+                continue;
+            }
             std::vector<T> slice(dim_size);
             for (int64_t d = 0; d < dim_size; ++d) {
                 slice[d] = data[(outer * dim_size + d) * inner_size + inner];
@@ -1277,6 +1284,9 @@ auto nanmedian_kernel(const Tensor& input, int64_t dim) -> Tensor {
 // ============================================================================
 
 auto histc_kernel(const Tensor& input, int64_t bins, double min_val, double max_val) -> Tensor {
+    if (bins <= 0) {
+        throw std::runtime_error("histc: bins must be positive");
+    }
     Tensor cont = input.is_contiguous() ? input : input.contiguous();
     Tensor input_f32 = (cont.dtype() != DType::Float32) ? cont.to(DType::Float32) : cont;
 

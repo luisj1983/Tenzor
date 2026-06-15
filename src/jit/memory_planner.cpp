@@ -54,7 +54,9 @@ auto MemoryPlanner::plan(Graph& graph) -> MemoryPlan {
     }
     for (const auto& [buffer_id, count] : buffer_use_counts) {
         if (count > 1) {
-            num_reused += count;
+            // The first occupant of a buffer did not reuse previously-owned
+            // memory; only the remaining (count - 1) values actually reuse it.
+            num_reused += count - 1;
         }
     }
 

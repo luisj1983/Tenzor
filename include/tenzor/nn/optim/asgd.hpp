@@ -103,10 +103,10 @@ public:
     auto step_impl() -> void override;
 
     /** @brief Set new learning rate */
-    auto set_lr(double lr) -> void;
+    auto set_lr(double lr) -> void override;
 
     /** @brief Get current learning rate */
-    auto get_lr() const -> double;
+    auto get_lr() const -> double override;
 
     /** @brief Get optimizer state (averaged buffers, step count) for serialization */
     auto state_dict() const -> std::unordered_map<std::string, Tensor> override;

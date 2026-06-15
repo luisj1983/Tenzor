@@ -10,22 +10,29 @@
 #include "tenzor/ops/op_id.hpp"
 #include <cmath>
 #include <algorithm>
+#include <stdexcept>
+#include <string>
 
 namespace tenzor {
 namespace nn {
 namespace detection {
 
-// Helper function: bilinear interpolation at (y, x)
-static inline float bilinear_interpolate(const float* data, int64_t height,
-                                          int64_t width, float y, float x) {
+// Helper function: bilinear interpolation at (y, x). Templated on the compute
+// type so a Float64 input can be processed entirely in double precision,
+// matching the double-precision GPU backends (a Float32-only path diverged for
+// Float64 and produced gradcheck failures that looked like backward bugs).
+template <typename T>
+static inline T bilinear_interpolate(const T* data, int64_t height,
+                                     int64_t width, T y, T x) {
     // Handle out of bounds
-    if (y < -1.0f || y > height || x < -1.0f || x > width) {
-        return 0.0f;
+    if (y < static_cast<T>(-1) || y > static_cast<T>(height) ||
+        x < static_cast<T>(-1) || x > static_cast<T>(width)) {
+        return static_cast<T>(0);
     }
 
     // Clamp to valid range
-    y = std::max(0.0f, std::min(y, static_cast<float>(height - 1)));
-    x = std::max(0.0f, std::min(x, static_cast<float>(width - 1)));
+    y = std::max(static_cast<T>(0), std::min(y, static_cast<T>(height - 1)));
+    x = std::max(static_cast<T>(0), std::min(x, static_cast<T>(width - 1)));
 
     // Integer coordinates
     int64_t y_low = static_cast<int64_t>(std::floor(y));
@@ -34,22 +41,22 @@ static inline float bilinear_interpolate(const float* data, int64_t height,
     int64_t x_high = std::min(x_low + 1, width - 1);
 
     // Interpolation weights
-    float ly = y - static_cast<float>(y_low);
-    float lx = x - static_cast<float>(x_low);
-    float hy = 1.0f - ly;
-    float hx = 1.0f - lx;
+    T ly = y - static_cast<T>(y_low);
+    T lx = x - static_cast<T>(x_low);
+    T hy = static_cast<T>(1) - ly;
+    T hx = static_cast<T>(1) - lx;
 
     // Get values at four corners
-    float v1 = data[y_low * width + x_low];
-    float v2 = data[y_low * width + x_high];
-    float v3 = data[y_high * width + x_low];
-    float v4 = data[y_high * width + x_high];
+    T v1 = data[y_low * width + x_low];
+    T v2 = data[y_low * width + x_high];
+    T v3 = data[y_high * width + x_low];
+    T v4 = data[y_high * width + x_high];
 
     // Bilinear interpolation
-    float w1 = hy * hx;
-    float w2 = hy * lx;
-    float w3 = ly * hx;
-    float w4 = ly * lx;
+    T w1 = hy * hx;
+    T w2 = hy * lx;
+    T w3 = ly * hx;
+    T w4 = ly * lx;
 
     return w1 * v1 + w2 * v2 + w3 * v3 + w4 * v4;
 }
@@ -104,10 +111,20 @@ auto ROIAlignOp::apply(const Tensor& features, const Tensor& rois,
 
     const float spatial_scale_f = static_cast<float>(spatial_scale);
 
+    const int64_t num_batches = features.shape()[0];
+
     // Process each ROI
     for (int64_t roi_idx = 0; roi_idx < num_rois; ++roi_idx) {
         const float* roi = rois_data + roi_idx * 5;
         const int64_t batch_idx = static_cast<int64_t>(roi[0]);
+
+        // The batch index comes from the ROI tensor; an out-of-range value
+        // would index outside the feature buffer (OOB read). Reject it.
+        if (batch_idx < 0 || batch_idx >= num_batches) {
+            throw std::out_of_range(
+                "ROIAlign: ROI batch index " + std::to_string(batch_idx) +
+                " out of range [0, " + std::to_string(num_batches) + ")");
+        }
 
         // Scale ROI coordinates
         float roi_x1 = roi[1] * spatial_scale_f;
@@ -135,10 +152,10 @@ auto ROIAlignOp::apply(const Tensor& features, const Tensor& rois,
         // Determine sampling grid
         int64_t roi_bin_grid_h = (sampling_ratio > 0)
                                       ? sampling_ratio
-                                      : static_cast<int64_t>(std::ceil(bin_size_h));
+                                      : std::max<int64_t>(1, static_cast<int64_t>(std::ceil(bin_size_h)));
         int64_t roi_bin_grid_w = (sampling_ratio > 0)
                                       ? sampling_ratio
-                                      : static_cast<int64_t>(std::ceil(bin_size_w));
+                                      : std::max<int64_t>(1, static_cast<int64_t>(std::ceil(bin_size_w)));
 
         const int64_t count = roi_bin_grid_h * roi_bin_grid_w;
 
@@ -151,7 +168,10 @@ auto ROIAlignOp::apply(const Tensor& features, const Tensor& rois,
             for (int64_t pw = 0; pw < output_w; ++pw) {
                 // Process each channel
                 for (int64_t c = 0; c < channels; ++c) {
-                    float sum = 0.0f;
+                    // Accumulate in double regardless of storage dtype so the
+                    // per-bin reduction does not lose precision relative to the
+                    // double-precision GPU backends.
+                    double sum = 0.0;
 
                     // Sample points in this bin
                     for (int64_t iy = 0; iy < roi_bin_grid_h; ++iy) {
@@ -167,15 +187,16 @@ auto ROIAlignOp::apply(const Tensor& features, const Tensor& rois,
                             // Bilinear interpolation
                             const float* channel_data =
                                 batch_features + c * feat_height * feat_width;
-                            sum += bilinear_interpolate(channel_data, feat_height,
-                                                         feat_width, y, x);
+                            sum += static_cast<double>(bilinear_interpolate(
+                                channel_data, feat_height, feat_width, y, x));
                         }
                     }
 
                     // Average over samples
                     int64_t output_idx = roi_idx * channels * output_h * output_w +
                                          c * output_h * output_w + ph * output_w + pw;
-                    output_data[output_idx] = sum / static_cast<float>(count);
+                    output_data[output_idx] =
+                        static_cast<float>(sum / static_cast<double>(count));
                 }
             }
         }
@@ -230,10 +251,20 @@ auto ROIAlignOp::apply_backward(const Tensor& grad_output, const Tensor& feature
 
     const float spatial_scale_f = static_cast<float>(spatial_scale);
 
+    const int64_t num_batches = features.shape()[0];
+
     // Process each ROI
     for (int64_t roi_idx = 0; roi_idx < num_rois; ++roi_idx) {
         const float* roi = rois_data + roi_idx * 5;
         const int64_t batch_idx = static_cast<int64_t>(roi[0]);
+
+        // Reject out-of-range batch indices to prevent OOB writes into
+        // grad_features (mirrors the forward bounds check).
+        if (batch_idx < 0 || batch_idx >= num_batches) {
+            throw std::out_of_range(
+                "ROIAlign backward: ROI batch index " + std::to_string(batch_idx) +
+                " out of range [0, " + std::to_string(num_batches) + ")");
+        }
 
         // Scale ROI coordinates
         float roi_x1 = roi[1] * spatial_scale_f;
@@ -256,10 +287,10 @@ auto ROIAlignOp::apply_backward(const Tensor& grad_output, const Tensor& feature
 
         int64_t roi_bin_grid_h = (sampling_ratio > 0)
                                       ? sampling_ratio
-                                      : static_cast<int64_t>(std::ceil(bin_size_h));
+                                      : std::max<int64_t>(1, static_cast<int64_t>(std::ceil(bin_size_h)));
         int64_t roi_bin_grid_w = (sampling_ratio > 0)
                                       ? sampling_ratio
-                                      : static_cast<int64_t>(std::ceil(bin_size_w));
+                                      : std::max<int64_t>(1, static_cast<int64_t>(std::ceil(bin_size_w)));
 
         const int64_t count = roi_bin_grid_h * roi_bin_grid_w;
         const float grad_scale = 1.0f / static_cast<float>(count);

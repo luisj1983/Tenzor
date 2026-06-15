@@ -1,6 +1,7 @@
 #include <hip/hip_runtime.h>
 #include <rocblas/rocblas.h>
 #include "tenzor/core/tensor.hpp"
+#include "tenzor/backend/loader_fwd.hpp"
 #include <stdexcept>
 #include <cstdint>
 
@@ -145,6 +146,32 @@ auto quantized_linear_hip(
         ); \
     } \
 } while(0)
+
+// Thread-local cached rocBLAS handle. rocblas_create_handle is expensive
+// (device workspace alloc, property queries) and meant to be reused, so the
+// hot quantized-conv path keeps one handle alive per thread and only sets the
+// stream per call instead of create/destroy on every invocation.
+namespace {
+struct CachedQuantHandle {
+    rocblas_handle handle = nullptr;
+    ~CachedQuantHandle() {
+        // Guard teardown: destroying after the backend library has unloaded
+        // calls into freed code (mirrors the rocSPARSE/rocSOLVER pools).
+        if (handle && is_backend_registry_alive()) {
+            rocblas_destroy_handle(handle);
+            handle = nullptr;
+        }
+    }
+};
+inline rocblas_handle get_cached_quant_handle(hipStream_t stream) {
+    thread_local CachedQuantHandle cached;
+    if (cached.handle == nullptr) {
+        ROCBLAS_CHECK(rocblas_create_handle(&cached.handle));
+    }
+    ROCBLAS_CHECK(rocblas_set_stream(cached.handle, stream));
+    return cached.handle;
+}
+}  // namespace
 
 /**
  * @brief im2col kernel for Int8 input: unfolds input patches into a column matrix.
@@ -384,9 +411,7 @@ auto quantized_conv2d_hip(
     int32_t* gemm_output = nullptr;
     HIP_CHECK(hipMalloc(&gemm_output, M * N * sizeof(int32_t)));
 
-    rocblas_handle handle;
-    ROCBLAS_CHECK(rocblas_create_handle(&handle));
-    ROCBLAS_CHECK(rocblas_set_stream(handle, stream));
+    rocblas_handle handle = get_cached_quant_handle(stream);
 
     int32_t alpha_i32 = 1;
     int32_t beta_i32 = 0;
@@ -417,7 +442,7 @@ auto quantized_conv2d_hip(
         0, 0                            // solution index, flags
     ));
 
-    ROCBLAS_CHECK(rocblas_destroy_handle(handle));
+    // Handle is cached thread-locally; do not destroy it here.
 
     // audit-8 GG.3: rocblas_gemm_ex is async on `stream` and reads col_buffer
     // as operand A.  Without this sync, hipFree(col_buffer) may execute (and

@@ -566,15 +566,13 @@ __global__ void mul_kernel_bf16(const __nv_bfloat16* a, const __nv_bfloat16* b, 
     }
 }
 
-// BFloat16 division kernel (with div-by-zero protection, matching FP16 pattern)
+// BFloat16 division kernel — delegate to hardware float divide so the IEEE-754
+// contract holds: 0/0 -> NaN, +x/0 -> +Inf, -x/0 -> -Inf. float2bfloat16_sat
+// passes NaN/Inf through unchanged. (A manual fb==0 special-case wrongly mapped
+// every x/0 to +Inf.)
 __global__ void div_kernel_bf16(const __nv_bfloat16* a, const __nv_bfloat16* b, __nv_bfloat16* c, int64_t n) {
     TENZOR_CUDA_KERNEL_LOOP(idx, n) {
-        float fb = __bfloat162float(b[idx]);
-        if (fb == 0.0f) {
-            c[idx] = __float2bfloat16(INFINITY);
-        } else {
-            c[idx] = float2bfloat16_sat(__bfloat162float(a[idx]) / fb);
-        }
+        c[idx] = float2bfloat16_sat(__bfloat162float(a[idx]) / __bfloat162float(b[idx]));
     }
 }
 
@@ -1263,6 +1261,18 @@ auto add_kernel(const Tensor& a, const Tensor& b, cudaStream_t stream) -> Tensor
             add_kernel_device<<<grid, block, 0, stream>>>(
                 a.data<int16_t>(), b.data<int16_t>(), result.data<int16_t>(), n);
             CUDA_CHECK(cudaGetLastError());
+        } else if (a.dtype() == DType::UInt16) {
+            add_kernel_device<<<grid, block, 0, stream>>>(
+                a.data<uint16_t>(), b.data<uint16_t>(), result.data<uint16_t>(), n);
+            CUDA_CHECK(cudaGetLastError());
+        } else if (a.dtype() == DType::UInt32) {
+            add_kernel_device<<<grid, block, 0, stream>>>(
+                a.data<uint32_t>(), b.data<uint32_t>(), result.data<uint32_t>(), n);
+            CUDA_CHECK(cudaGetLastError());
+        } else if (a.dtype() == DType::UInt64) {
+            add_kernel_device<<<grid, block, 0, stream>>>(
+                a.data<uint64_t>(), b.data<uint64_t>(), result.data<uint64_t>(), n);
+            CUDA_CHECK(cudaGetLastError());
         } else if (a.dtype() == DType::Bool) {
             add_kernel_device<<<grid, block, 0, stream>>>(
                 a.data<bool>(), b.data<bool>(), result.data<bool>(), n);
@@ -1354,6 +1364,21 @@ auto add_kernel(const Tensor& a, const Tensor& b, cudaStream_t stream) -> Tensor
     } else if (a.dtype() == DType::Int16) {
         broadcast_kernel<<<grid, block, 0, stream>>>(
             a.data<int16_t>(), b.data<int16_t>(), result.data<int16_t>(),
+            meta, ndim, n, AddOp());
+        CUDA_CHECK(cudaGetLastError());
+    } else if (a.dtype() == DType::UInt16) {
+        broadcast_kernel<<<grid, block, 0, stream>>>(
+            a.data<uint16_t>(), b.data<uint16_t>(), result.data<uint16_t>(),
+            meta, ndim, n, AddOp());
+        CUDA_CHECK(cudaGetLastError());
+    } else if (a.dtype() == DType::UInt32) {
+        broadcast_kernel<<<grid, block, 0, stream>>>(
+            a.data<uint32_t>(), b.data<uint32_t>(), result.data<uint32_t>(),
+            meta, ndim, n, AddOp());
+        CUDA_CHECK(cudaGetLastError());
+    } else if (a.dtype() == DType::UInt64) {
+        broadcast_kernel<<<grid, block, 0, stream>>>(
+            a.data<uint64_t>(), b.data<uint64_t>(), result.data<uint64_t>(),
             meta, ndim, n, AddOp());
         CUDA_CHECK(cudaGetLastError());
     } else if (a.dtype() == DType::Bool) {
@@ -2681,12 +2706,9 @@ __global__ void mul_inplace_kernel_bf16(__nv_bfloat16* data, const __nv_bfloat16
 
 __global__ void div_inplace_kernel_bf16(__nv_bfloat16* data, const __nv_bfloat16* other, int64_t n) {
     TENZOR_CUDA_KERNEL_LOOP(idx, n) {
-        float fb = __bfloat162float(other[idx]);
-        if (fb == 0.0f) {
-            data[idx] = __float2bfloat16(INFINITY);
-        } else {
-            data[idx] = float2bfloat16_sat(__bfloat162float(data[idx]) / fb);
-        }
+        // Hardware float divide so IEEE-754 holds: 0/0 -> NaN, +x/0 -> +Inf,
+        // -x/0 -> -Inf. float2bfloat16_sat passes NaN/Inf through.
+        data[idx] = float2bfloat16_sat(__bfloat162float(data[idx]) / __bfloat162float(other[idx]));
     }
 }
 
@@ -4319,6 +4341,51 @@ __global__ void dot_product_kernel(const T* a, const T* b, T* output, int64_t n)
     }
 }
 
+// Plain sum reduction over the per-block partial sums produced by
+// dot_product_kernel. Phase 2 of the two-phase dot reduction MUST simply add
+// the partials together; it must NOT feed the partials back through
+// dot_product_kernel as both operands (that would square each partial and
+// return sum_i partial[i]^2 instead of sum_i partial[i]).
+template<typename T>
+__global__ void dot_partials_sum_kernel(const T* partials, T* output, int64_t n) {
+    __shared__ T shared[256];
+
+    int tid = threadIdx.x;
+    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int64_t grid_size = blockDim.x * gridDim.x;
+
+    // Grid-stride loop summing the partial sums (no multiply).
+    T thread_sum = 0;
+    for (int64_t i = idx; i < n; i += grid_size) {
+        thread_sum += partials[i];
+    }
+
+    shared[tid] = thread_sum;
+    __syncthreads();
+
+    // Block-level reduction
+    for (int stride = blockDim.x / 2; stride >= 32; stride >>= 1) {
+        if (tid < stride) {
+            shared[tid] += shared[tid + stride];
+        }
+        __syncthreads();
+    }
+    __syncthreads();
+
+    // Warp-level reduction
+    if (tid < 32) {
+        T val = shared[tid];
+        #pragma unroll
+        for (int offset = 16; offset > 0; offset /= 2) {
+            val += __shfl_down_sync(0xffffffff, val, offset);
+        }
+
+        if (tid == 0) {
+            output[blockIdx.x] = val;
+        }
+    }
+}
+
 // Dot product launcher
 auto dot_kernel(const Tensor& a, const Tensor& b, cudaStream_t stream) -> Tensor {
     // Verify both tensors are 1D
@@ -4359,7 +4426,8 @@ auto dot_kernel(const Tensor& a, const Tensor& b, cudaStream_t stream) -> Tensor
                 auto* d_temp = static_cast<float*>(d_temp_guard.get());
                 dot_product_kernel<<<num_blocks, block_size, 0, stream>>>(a_data, b_data, d_temp, n);
                 CUDA_CHECK(cudaGetLastError());
-                dot_product_kernel<<<1, block_size, 0, stream>>>(d_temp, d_temp, output_data, num_blocks);
+                // Phase 2: plain summation of the per-block partials.
+                dot_partials_sum_kernel<<<1, block_size, 0, stream>>>(d_temp, output_data, num_blocks);
                 CUDA_CHECK(cudaGetLastError());
             }
             break;
@@ -4378,7 +4446,8 @@ auto dot_kernel(const Tensor& a, const Tensor& b, cudaStream_t stream) -> Tensor
                 auto* d_temp = static_cast<double*>(d_temp_guard.get());
                 dot_product_kernel<<<num_blocks, block_size, 0, stream>>>(a_data, b_data, d_temp, n);
                 CUDA_CHECK(cudaGetLastError());
-                dot_product_kernel<<<1, block_size, 0, stream>>>(d_temp, d_temp, output_data, num_blocks);
+                // Phase 2: plain summation of the per-block partials (double).
+                dot_partials_sum_kernel<<<1, block_size, 0, stream>>>(d_temp, output_data, num_blocks);
                 CUDA_CHECK(cudaGetLastError());
             }
             break;
@@ -4915,21 +4984,27 @@ __global__ void avg_pool2d_forward_kernel(
     int64_t h_end = h_start + kernel_size;
     int64_t w_end = w_start + kernel_size;
 
-    // Compute average value
-    T sum = T(0);
+    // Compute average value. Accumulate in float for half/bfloat16 storage so a
+    // large pooling window does not overflow the ~65504 Float16 range -> inf ->
+    // NaN. Float32/Float64 keep their native accumulator. Mirrors
+    // adaptive_avg_pool2d_forward_kernel.
+    using Acc = typename std::conditional<
+        std::is_same<T, __half>::value || std::is_same<T, __nv_bfloat16>::value,
+        float, T>::type;
+    Acc sum = Acc(0);
     int64_t count = 0;
 
     for (int64_t h = h_start; h < h_end; ++h) {
         for (int64_t w = w_start; w < w_end; ++w) {
             if (h >= 0 && h < H_in && w >= 0 && w < W_in) {
                 int64_t input_idx = ((n * C + c) * H_in + h) * W_in + w;
-                sum += input[input_idx];
+                sum += static_cast<Acc>(input[input_idx]);
                 count++;
             }
         }
     }
 
-    output[idx] = count > 0 ? sum / T(count) : T(0);
+    output[idx] = count > 0 ? static_cast<T>(sum / static_cast<Acc>(count)) : T(0);
 }
 
 // Backward kernel for average pooling

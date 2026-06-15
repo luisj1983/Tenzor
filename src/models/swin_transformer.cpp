@@ -99,19 +99,6 @@ SwinTransformerBlock::SwinTransformerBlock(
     int64_t mlp_hidden_dim = static_cast<int64_t>(dim * mlp_ratio);
     mlp_ = std::make_shared<SwinMLP>(dim, mlp_hidden_dim, dim, drop);
     register_module("mlp", mlp_);
-
-    // Compute attention mask for shifted windows
-    if (shift_size_ > 0) {
-        compute_attention_mask();
-    }
-}
-
-auto SwinTransformerBlock::compute_attention_mask() -> void {
-    int64_t H = input_resolution_.first;
-    int64_t W = input_resolution_.second;
-
-    // Create attention mask for SW-MSA
-    attn_mask_ = create_shifted_window_mask(H, W, window_size_, shift_size_);
 }
 
 auto SwinTransformerBlock::forward_impl(const Variable& input) -> Variable {
@@ -439,7 +426,8 @@ SwinTransformer::SwinTransformer(int64_t img_size,
     double total_depth = 0;
     for (auto d : depths) total_depth += d;
 
-    double dpr_increment = drop_path_rate / (total_depth - 1);
+    double denom = std::max(total_depth - 1.0, 1.0);
+    double dpr_increment = drop_path_rate / denom;
     double current_dpr = 0.0;
     for (int64_t i = 0; i < total_depth; ++i) {
         dpr.push_back(current_dpr);

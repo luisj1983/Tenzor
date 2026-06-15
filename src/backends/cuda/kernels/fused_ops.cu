@@ -454,6 +454,17 @@ __global__ void fused_softmax_cross_entropy_kernel(
     const T* row = logits + b * num_classes;
     int64_t target = targets[b];
 
+    // Guard against out-of-range / sentinel (e.g. ignore_index = -100) labels.
+    // Reading row[target] unconditionally for such a target is an OOB device
+    // read; emit a zero loss for this element instead (matching ignore_index
+    // semantics) without touching out-of-bounds memory.
+    if (target < 0 || target >= num_classes) {
+        if (threadIdx.x == 0) {
+            losses[b] = static_cast<T>(0);
+        }
+        return;
+    }
+
     // Shared memory accumulator in Acc (F32 for F16/BF16) so block-wide
     // reductions don't lose precision or overflow.
     __shared__ Acc shared_data[BLOCK_SIZE];
@@ -3859,6 +3870,25 @@ __global__ void fused_softmax_cross_entropy_kernel(
 
     int64_t b = blockIdx.x;
     if (b >= batch_size) return;
+
+    // Guard against out-of-range / sentinel (e.g. ignore_index = -100) labels.
+    // For such a target we must not read logits_row[target] (OOB device read);
+    // emit zero loss and, if requested, a zero gradient row for this element.
+    {
+        int64_t target_check = targets[b];
+        if (target_check < 0 || target_check >= num_classes) {
+            if (threadIdx.x == 0) {
+                loss[b] = static_cast<T>(0);
+            }
+            if (compute_grad && grad_logits) {
+                T* grad_row = grad_logits + b * num_classes;
+                for (int64_t c = threadIdx.x; c < num_classes; c += blockDim.x) {
+                    grad_row[c] = T(0);
+                }
+            }
+            return;
+        }
+    }
 
     const T* logits_row = logits + b * num_classes;
 

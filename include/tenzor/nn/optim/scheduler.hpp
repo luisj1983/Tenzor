@@ -407,6 +407,19 @@ public:
                      double min_lr = 0.0,
                      double eps = 1e-8);
 
+    // Generic constructor for any Optimizer (uses virtual set_lr/get_lr).
+    // Lets RMSprop/Adagrad/Adadelta/NAdam/RAdam/Adamax/ASGD/LAMB/Lion/ZeRO/etc.
+    // be scheduled, matching StepLR's Optimizer& API.
+    ReduceLROnPlateau(Optimizer& optimizer,
+                     const std::string& mode = "min",
+                     double factor = 0.1,
+                     int64_t patience = 10,
+                     double threshold = 1e-4,
+                     const std::string& threshold_mode = "rel",
+                     int64_t cooldown = 0,
+                     double min_lr = 0.0,
+                     double eps = 1e-8);
+
     // Metric-based step (not epoch-based!)
     auto step(double metric) -> void;
 
@@ -428,12 +441,13 @@ public:
         const std::unordered_map<std::string, Tensor>& state) -> void override;
 
 private:
-    enum class OptimizerType { SGD, Adam, AdamW };
+    enum class OptimizerType { SGD, Adam, AdamW, Generic };
 
     union OptimizerPtr {
         SGD* sgd;
         Adam* adam;
         AdamW* adamw;
+        Optimizer* generic;  ///< Any Optimizer via virtual set_lr/get_lr
         OptimizerPtr() : sgd(nullptr) {}
     };
 
@@ -542,6 +556,16 @@ public:
              double scale_fn = 1.0,
              const std::string& scale_mode = "cycle");
 
+    // Generic constructor for any Optimizer (uses virtual set_lr/get_lr).
+    CyclicLR(Optimizer& optimizer,
+             double base_lr, double max_lr,
+             int64_t step_size_up = 2000,
+             int64_t step_size_down = -1,
+             const std::string& mode = "triangular",
+             double gamma = 1.0,
+             double scale_fn = 1.0,
+             const std::string& scale_mode = "cycle");
+
     auto step() -> void override;
     auto get_last_lr() const -> double override { return last_lr_; }
 
@@ -556,12 +580,13 @@ public:
         const std::unordered_map<std::string, Tensor>& state) -> void override;
 
 private:
-    enum class OptimizerType { SGD, Adam, AdamW };
+    enum class OptimizerType { SGD, Adam, AdamW, Generic };
 
     union OptimizerPtr {
         SGD* sgd;
         Adam* adam;
         AdamW* adamw;
+        Optimizer* generic;  ///< Any Optimizer via virtual set_lr/get_lr
         OptimizerPtr() : sgd(nullptr) {}
     };
 
@@ -674,6 +699,17 @@ public:
                double div_factor = 25.0,
                double final_div_factor = 1e4);
 
+    // Generic constructor for any Optimizer (uses virtual set_lr/get_lr).
+    OneCycleLR(Optimizer& optimizer,
+               double max_lr,
+               int64_t total_steps,
+               int64_t epochs = -1,
+               int64_t steps_per_epoch = -1,
+               double pct_start = 0.3,
+               const std::string& anneal_strategy = "cos",
+               double div_factor = 25.0,
+               double final_div_factor = 1e4);
+
     auto step() -> void override;
     auto get_last_lr() const -> double override { return last_lr_; }
 
@@ -685,12 +721,13 @@ public:
         const std::unordered_map<std::string, Tensor>& state) -> void override;
 
 private:
-    enum class OptimizerType { SGD, Adam, AdamW };
+    enum class OptimizerType { SGD, Adam, AdamW, Generic };
 
     union OptimizerPtr {
         SGD* sgd;
         Adam* adam;
         AdamW* adamw;
+        Optimizer* generic;  ///< Any Optimizer via virtual set_lr/get_lr
         OptimizerPtr() : sgd(nullptr) {}
     };
 
@@ -777,6 +814,12 @@ public:
                                int64_t T_mult = 1,
                                double eta_min = 0.0);
 
+    // Generic constructor for any Optimizer (uses virtual set_lr/get_lr).
+    CosineAnnealingWarmRestarts(Optimizer& optimizer,
+                               int64_t T_0,
+                               int64_t T_mult = 1,
+                               double eta_min = 0.0);
+
     auto step() -> void override;
     auto get_last_lr() const -> double override { return last_lr_; }
 
@@ -791,12 +834,13 @@ public:
         const std::unordered_map<std::string, Tensor>& state) -> void override;
 
 private:
-    enum class OptimizerType { SGD, Adam, AdamW };
+    enum class OptimizerType { SGD, Adam, AdamW, Generic };
 
     union OptimizerPtr {
         SGD* sgd;
         Adam* adam;
         AdamW* adamw;
+        Optimizer* generic;  ///< Any Optimizer via virtual set_lr/get_lr
         OptimizerPtr() : sgd(nullptr) {}
     };
 
@@ -1191,6 +1235,10 @@ public:
 
 private:
     std::vector<std::shared_ptr<LRScheduler>> schedulers_;
+    // Cached LR actually written to the optimizer by the most recent step()
+    // (initial_lr * product-of-child-factors). get_last_lr() returns this so
+    // it agrees with the optimizer, rather than the last child's single factor.
+    double last_lr_ = 0.0;
 };
 
 } // namespace optim

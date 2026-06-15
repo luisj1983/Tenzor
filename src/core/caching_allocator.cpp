@@ -256,17 +256,15 @@ auto CachingAllocator::size_of(void* ptr) const -> size_t {
 }
 
 auto CachingAllocator::free_cached_blocks() -> void {
-    // Free all blocks in the free pool
+    // Free all blocks in the free pool. deallocate() erases the pointer from
+    // allocated_blocks_ before inserting it into free_blocks_, so the two maps
+    // are disjoint here — looking the pointer up in allocated_blocks_ would
+    // always miss and leave total_allocated_bytes_ growing monotonically.
+    // Subtract using the size key already held by the free_blocks_ entry.
     for (const auto& [size, ptr] : free_blocks_) {
         if (ptr && backend_) {
             backend_->deallocate(ptr);
-
-            // Remove from allocated_blocks_
-            auto alloc_it = allocated_blocks_.find(ptr);
-            if (alloc_it != allocated_blocks_.end()) {
-                total_allocated_bytes_ -= alloc_it->second;
-                allocated_blocks_.erase(alloc_it);
-            }
+            total_allocated_bytes_ -= size;
         }
     }
 

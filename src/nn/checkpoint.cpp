@@ -16,8 +16,114 @@
 #include <algorithm>
 #include <set>
 #include <unordered_set>
+#include <cstdint>
+#include <limits>
 
 namespace tenzor {
+
+namespace {
+
+// Bytes remaining between the current get position and end of stream. Used to
+// bound untrusted length/size fields so a corrupt or malicious checkpoint file
+// cannot drive huge allocations or reads past the end of the file.
+auto ckpt_stream_remaining(std::ifstream& file) -> std::uintmax_t {
+    const auto cur = file.tellg();
+    if (cur < 0) {
+        return 0;
+    }
+    file.seekg(0, std::ios::end);
+    const auto endpos = file.tellg();
+    file.seekg(cur, std::ios::beg);
+    if (endpos < 0 || endpos < cur) {
+        return 0;
+    }
+    return static_cast<std::uintmax_t>(endpos - cur);
+}
+
+// Read a uint32 length, validating it against the bytes left in the file.
+auto ckpt_read_length(std::ifstream& file) -> uint32_t {
+    uint32_t len = 0;
+    file.read(reinterpret_cast<char*>(&len), sizeof(len));
+    if (!file) {
+        throw std::runtime_error("Checkpoint: unexpected end of file reading length");
+    }
+    if (static_cast<std::uintmax_t>(len) > ckpt_stream_remaining(file)) {
+        throw std::runtime_error("Checkpoint: length field exceeds remaining file size");
+    }
+    return len;
+}
+
+auto ckpt_read_string(std::ifstream& file) -> std::string {
+    const uint32_t len = ckpt_read_length(file);
+    std::string s(len, '\0');
+    file.read(s.data(), static_cast<std::streamsize>(len));
+    if (!file) {
+        throw std::runtime_error("Checkpoint: unexpected end of file reading string");
+    }
+    return s;
+}
+
+// Read a tensor (shape, dtype, data) with full validation of shape rank,
+// per-dimension non-negativity, element-count overflow, dtype validity, and
+// that the data payload fits within the remaining file bytes.
+auto ckpt_read_tensor(std::ifstream& file) -> Tensor {
+    uint32_t ndim = 0;
+    file.read(reinterpret_cast<char*>(&ndim), sizeof(ndim));
+    if (!file) {
+        throw std::runtime_error("Checkpoint: unexpected end of file reading rank");
+    }
+    if (static_cast<std::uintmax_t>(ndim) * sizeof(int64_t) > ckpt_stream_remaining(file)) {
+        throw std::runtime_error("Checkpoint: shape rank exceeds remaining file size");
+    }
+    std::vector<int64_t> shape(ndim);
+    file.read(reinterpret_cast<char*>(shape.data()),
+              static_cast<std::streamsize>(ndim * sizeof(int64_t)));
+    if (!file) {
+        throw std::runtime_error("Checkpoint: unexpected end of file reading shape");
+    }
+    int64_t numel = 1;
+    for (uint32_t d = 0; d < ndim; ++d) {
+        if (shape[d] < 0) {
+            throw std::runtime_error("Checkpoint: negative dimension in shape");
+        }
+        if (shape[d] != 0 && numel > std::numeric_limits<int64_t>::max() / shape[d]) {
+            throw std::runtime_error("Checkpoint: tensor element count overflow");
+        }
+        numel *= shape[d];
+    }
+
+    uint8_t dtype_byte = 0;
+    file.read(reinterpret_cast<char*>(&dtype_byte), sizeof(dtype_byte));
+    if (!file) {
+        throw std::runtime_error("Checkpoint: unexpected end of file reading dtype");
+    }
+    const DType dtype = static_cast<DType>(dtype_byte);
+    switch (dtype) {
+        case DType::Float32: case DType::Float64:
+        case DType::Int32:   case DType::Int64:
+        case DType::UInt8:   case DType::Bool:
+        case DType::Float16: case DType::BFloat16:
+        case DType::Int8:    case DType::Int16:
+            break;
+        default:
+            throw std::runtime_error("Checkpoint: unknown dtype in file: " +
+                std::to_string(static_cast<int>(dtype)));
+    }
+
+    Tensor tensor(shape, dtype, Device::cpu());
+    const size_t data_size = tensor.numel() * tensor.dtype_size();
+    if (static_cast<std::uintmax_t>(data_size) > ckpt_stream_remaining(file)) {
+        throw std::runtime_error("Checkpoint: tensor data exceeds remaining file size");
+    }
+    file.read(reinterpret_cast<char*>(tensor.data_ptr()),
+              static_cast<std::streamsize>(data_size));
+    if (!file) {
+        throw std::runtime_error("Checkpoint: unexpected end of file reading tensor data");
+    }
+    return tensor;
+}
+
+} // namespace
 namespace nn {
 
 // ============================================================================
@@ -627,35 +733,27 @@ auto ModelCheckpoint::read_checkpoint(const std::string& path) -> Checkpoint {
     checkpoint.config.save_scheduler = (config_flags & 2) != 0;
     checkpoint.config.verify_checksum = (config_flags & 4) != 0;
 
+    // When the checkpoint advertises a checksum, verify file integrity up front
+    // (recomputing CRC64 over the content excluding the 8-byte trailer and
+    // comparing against the stored value) before parsing any body bytes.
+    // Previously load()/load_and_apply() went through this path and silently
+    // accepted corrupted/tampered files despite the flag — only the separate
+    // verify_checkpoint() helper actually checked.
+    if (checkpoint.config.verify_checksum) {
+        if (!verify_checkpoint(path)) {
+            throw std::runtime_error(
+                "Checkpoint checksum verification failed (corrupted or tampered "
+                "file): " + path);
+        }
+    }
+
     // ========== Model State ==========
     uint32_t num_model_tensors;
     file.read(reinterpret_cast<char*>(&num_model_tensors), sizeof(num_model_tensors));
 
     for (uint32_t i = 0; i < num_model_tensors; ++i) {
-        // Read parameter name
-        uint32_t name_len;
-        file.read(reinterpret_cast<char*>(&name_len), sizeof(name_len));
-        std::string name(name_len, '\0');
-        file.read(name.data(), name_len);
-
-        // Read tensor shape
-        uint32_t ndim;
-        file.read(reinterpret_cast<char*>(&ndim), sizeof(ndim));
-        std::vector<int64_t> shape(ndim);
-        file.read(reinterpret_cast<char*>(shape.data()), ndim * sizeof(int64_t));
-
-        // Read tensor dtype
-        uint8_t dtype_byte;
-        file.read(reinterpret_cast<char*>(&dtype_byte), sizeof(dtype_byte));
-        DType dtype = static_cast<DType>(dtype_byte);
-
-        // Create tensor and read data
-        Tensor tensor(shape, dtype, Device::cpu());
-        size_t data_size = tensor.numel() * tensor.dtype_size();
-        void* data_ptr = tensor.data_ptr();
-        file.read(reinterpret_cast<char*>(data_ptr), data_size);
-
-        checkpoint.model_state[name] = std::move(tensor);
+        std::string name = ckpt_read_string(file);
+        checkpoint.model_state[name] = ckpt_read_tensor(file);
     }
 
     // ========== Optimizer State ==========
@@ -663,30 +761,8 @@ auto ModelCheckpoint::read_checkpoint(const std::string& path) -> Checkpoint {
     file.read(reinterpret_cast<char*>(&num_optimizer_tensors), sizeof(num_optimizer_tensors));
 
     for (uint32_t i = 0; i < num_optimizer_tensors; ++i) {
-        // Read state name
-        uint32_t name_len;
-        file.read(reinterpret_cast<char*>(&name_len), sizeof(name_len));
-        std::string name(name_len, '\0');
-        file.read(name.data(), name_len);
-
-        // Read tensor shape
-        uint32_t ndim;
-        file.read(reinterpret_cast<char*>(&ndim), sizeof(ndim));
-        std::vector<int64_t> shape(ndim);
-        file.read(reinterpret_cast<char*>(shape.data()), ndim * sizeof(int64_t));
-
-        // Read tensor dtype
-        uint8_t dtype_byte;
-        file.read(reinterpret_cast<char*>(&dtype_byte), sizeof(dtype_byte));
-        DType dtype = static_cast<DType>(dtype_byte);
-
-        // Create tensor and read data
-        Tensor tensor(shape, dtype, Device::cpu());
-        size_t data_size = tensor.numel() * tensor.dtype_size();
-        void* data_ptr = tensor.data_ptr();
-        file.read(reinterpret_cast<char*>(data_ptr), data_size);
-
-        checkpoint.optimizer_state[name] = std::move(tensor);
+        std::string name = ckpt_read_string(file);
+        checkpoint.optimizer_state[name] = ckpt_read_tensor(file);
     }
 
     // ========== Scheduler State ==========
@@ -694,30 +770,8 @@ auto ModelCheckpoint::read_checkpoint(const std::string& path) -> Checkpoint {
     file.read(reinterpret_cast<char*>(&num_scheduler_tensors), sizeof(num_scheduler_tensors));
 
     for (uint32_t i = 0; i < num_scheduler_tensors; ++i) {
-        // Read state name
-        uint32_t name_len;
-        file.read(reinterpret_cast<char*>(&name_len), sizeof(name_len));
-        std::string name(name_len, '\0');
-        file.read(name.data(), name_len);
-
-        // Read tensor shape
-        uint32_t ndim;
-        file.read(reinterpret_cast<char*>(&ndim), sizeof(ndim));
-        std::vector<int64_t> shape(ndim);
-        file.read(reinterpret_cast<char*>(shape.data()), ndim * sizeof(int64_t));
-
-        // Read tensor dtype
-        uint8_t dtype_byte;
-        file.read(reinterpret_cast<char*>(&dtype_byte), sizeof(dtype_byte));
-        DType dtype = static_cast<DType>(dtype_byte);
-
-        // Create tensor and read data
-        Tensor tensor(shape, dtype, Device::cpu());
-        size_t data_size = tensor.numel() * tensor.dtype_size();
-        void* data_ptr = tensor.data_ptr();
-        file.read(reinterpret_cast<char*>(data_ptr), data_size);
-
-        checkpoint.scheduler_state[name] = std::move(tensor);
+        std::string name = ckpt_read_string(file);
+        checkpoint.scheduler_state[name] = ckpt_read_tensor(file);
     }
 
     // ========== RNG State (v2+, audit K.2) ==========
@@ -729,27 +783,8 @@ auto ModelCheckpoint::read_checkpoint(const std::string& path) -> Checkpoint {
         file.read(reinterpret_cast<char*>(&num_rng_tensors), sizeof(num_rng_tensors));
 
         for (uint32_t i = 0; i < num_rng_tensors; ++i) {
-            uint32_t name_len;
-            file.read(reinterpret_cast<char*>(&name_len), sizeof(name_len));
-            std::string name(name_len, '\0');
-            file.read(name.data(), name_len);
-
-            uint32_t ndim;
-            file.read(reinterpret_cast<char*>(&ndim), sizeof(ndim));
-            std::vector<int64_t> shape(ndim);
-            file.read(reinterpret_cast<char*>(shape.data()),
-                      ndim * sizeof(int64_t));
-
-            uint8_t dtype_byte;
-            file.read(reinterpret_cast<char*>(&dtype_byte), sizeof(dtype_byte));
-            DType dtype = static_cast<DType>(dtype_byte);
-
-            Tensor tensor(shape, dtype, Device::cpu());
-            size_t data_size = tensor.numel() * tensor.dtype_size();
-            void* data_ptr = tensor.data_ptr();
-            file.read(reinterpret_cast<char*>(data_ptr), data_size);
-
-            checkpoint.rng_state[name] = std::move(tensor);
+            std::string name = ckpt_read_string(file);
+            checkpoint.rng_state[name] = ckpt_read_tensor(file);
         }
     }
 
@@ -759,28 +794,21 @@ auto ModelCheckpoint::read_checkpoint(const std::string& path) -> Checkpoint {
 
     std::unordered_map<std::string, std::string> metadata_dict;
     for (uint32_t i = 0; i < num_metadata; ++i) {
-        // Read key
-        uint32_t key_len;
-        file.read(reinterpret_cast<char*>(&key_len), sizeof(key_len));
-        std::string key(key_len, '\0');
-        file.read(key.data(), key_len);
-
-        // Read value
-        uint32_t value_len;
-        file.read(reinterpret_cast<char*>(&value_len), sizeof(value_len));
-        std::string value(value_len, '\0');
-        file.read(value.data(), value_len);
-
+        std::string key = ckpt_read_string(file);
+        std::string value = ckpt_read_string(file);
         metadata_dict[key] = value;
     }
 
     checkpoint.metadata.from_dict(metadata_dict);
 
     // ========== Footer ==========
+    // The checksum (if present) was already verified up front against the full
+    // file content via verify_checkpoint(). Consume the trailer here so the
+    // final completeness check below sees a clean stream.
     if (checkpoint.config.verify_checksum) {
         uint64_t stored_checksum;
         file.read(reinterpret_cast<char*>(&stored_checksum), sizeof(stored_checksum));
-        // Checksum verification could be implemented here
+        (void)stored_checksum;
     }
 
     if (!file) {

@@ -163,7 +163,11 @@ auto quantized_linear_kernel(
         float* out_ptr = get_data_ptr<float>(output);
 
         const bool has_bias = (bias != nullptr);
-        const float combined_scale = input_scale * weight_scale;
+        // Match the CPU contract (quantized_linear.cpp): the dequantized result
+        // is scaled by input_scale * weight_scale / output_scale. Ignoring
+        // output_scale here diverged from CPU for any output_scale != 1.0.
+        const float safe_output_scale = (output_scale != 0.0f) ? output_scale : 1.0f;
+        const float combined_scale = input_scale * weight_scale / safe_output_scale;
 
         queue.parallel_for<QuantizedLinearKernelInt8>(
             sycl::range<1>(total_elements),

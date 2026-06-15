@@ -309,31 +309,24 @@ auto rand_kernel(const std::vector<int64_t>& shape, DType dtype, Device device, 
         uint32_t counter = static_cast<uint32_t>(idx[0]);
         uint32_t key = seed_val;
 
-        // Philox 4x32-10 mixing
+        // Philox-2x32-10 (Salmon et al., "Parallel Random Numbers", 2011),
+        // mirroring the randn fallback. Each round multiplies counter lane c0,
+        // mixes the high word with c1 and the key, and advances the key by the
+        // Weyl constant. The previous 4x32 variant had a redundant self-
+        // assignment (c0 = c0) and discarded a lane, producing a biased stream.
         uint32_t c0 = counter;
         uint32_t c1 = ~counter;
         uint32_t k0 = key;
-        uint32_t k1 = ~key;
 
-        constexpr uint32_t M0 = 0xD2511F53u;
-        constexpr uint32_t M1 = 0xCD9E8D57u;
-        constexpr uint32_t BUMP = 0x9E3779B9u;
-        constexpr uint32_t BUMP1 = 0xBB67AE85u;
-
+        constexpr uint32_t PHILOX_M = 0xD256D193u;  // 2x32 multiplier
+        constexpr uint32_t PHILOX_W = 0x9E3779B9u;  // Weyl key increment
         for (int round = 0; round < 10; ++round) {
-            uint32_t hi0 = static_cast<uint32_t>((static_cast<uint64_t>(c0) * M0) >> 32);
-            uint32_t lo0 = c0 * M0;
-            uint32_t hi1 = static_cast<uint32_t>((static_cast<uint64_t>(c1) * M1) >> 32);
-            uint32_t lo1 = c1 * M1;
-
-            c0 = hi1 ^ k0 ^ c0;
-            c1 = lo1;
-            c0 = c0;
-            c1 = hi0 ^ k1 ^ c1;
-            // Use lo0 for next round
-            (void)lo0;
-            k0 += BUMP;
-            k1 += BUMP1;
+            uint32_t hi = static_cast<uint32_t>((static_cast<uint64_t>(c0) * PHILOX_M) >> 32);
+            uint32_t lo = c0 * PHILOX_M;
+            uint32_t new_c0 = hi ^ c1 ^ k0;
+            c1 = lo;
+            c0 = new_c0;
+            k0 += PHILOX_W;
         }
 
         // Convert to uniform [0, 1)

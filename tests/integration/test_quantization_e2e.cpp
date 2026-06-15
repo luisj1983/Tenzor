@@ -102,6 +102,65 @@ TEST_P(QuantizationE2ETest, StaticQuantInt8E2E_ForwardRuns) {
 }
 
 // ----------------------------------------------------------------------------
+// #1b: StaticQuant bakes calibration qparams and removes FakeQuantize.
+//
+// Regression for the bug where quantize_static discarded the calibrated
+// activation qparams and left FakeQuantize modules in the output model.
+// Asserts:
+//   (a) the returned model contains NO FakeQuantize / observer modules, and
+//   (b) every produced quantized layer carries calibrated activation
+//       qparams (non-default scale derived from the calibration data).
+// ----------------------------------------------------------------------------
+TEST_P(QuantizationE2ETest, StaticQuantBakesCalibratedActivationQParams) {
+    auto model = make_simple_model();
+    model->to(device);
+
+    // Calibration pushes known, clearly-non-trivial activations through the
+    // model so the observers record a real min/max range (not the default 1.0
+    // scale a fresh, uncalibrated layer would carry).
+    auto calib = make_calibration_fn(/*n_batches=*/4, {/*B=*/2, /*F=*/16}, device);
+    auto q_model = quantize_static(model, calib);
+    ASSERT_NE(q_model, nullptr);
+
+    auto q_seq = std::dynamic_pointer_cast<Sequential>(q_model);
+    ASSERT_NE(q_seq, nullptr) << "quantize_static must return a Sequential";
+
+    int n_quantized_linear = 0;
+    int n_calibrated = 0;
+    for (const auto& m : q_seq->modules()) {
+        // (a) No FakeQuantize / observer modules may survive into the clean
+        // quantized inference model.
+        EXPECT_EQ(std::dynamic_pointer_cast<FakeQuantize>(m), nullptr)
+            << "FakeQuantize must be removed from the quantized model";
+
+        // (b) Each produced quantized layer must carry the calibrated
+        // activation qparams instead of recomputing fresh/default ones.
+        if (auto ql = std::dynamic_pointer_cast<QuantizedLinear>(m)) {
+            ++n_quantized_linear;
+            EXPECT_TRUE(ql->has_activation_qparams())
+                << "QuantizedLinear must carry calibrated activation qparams";
+            if (ql->has_activation_qparams()) {
+                // The scale must be a real, positive value derived from the
+                // observed activation range — not the default 1.0 a fresh
+                // (uncalibrated) layer would use.
+                const auto& qp = ql->activation_qparams();
+                auto scale_cpu = qp.scale.cpu();
+                ASSERT_GT(scale_cpu.numel(), 0);
+                float s = scale_cpu.data<float>()[0];
+                EXPECT_GT(s, 0.0f) << "Calibrated activation scale must be > 0";
+                EXPECT_NE(s, 1.0f)
+                    << "Calibrated activation scale must differ from the "
+                       "default (uncalibrated) 1.0";
+            }
+        }
+    }
+
+    // The model has two Linear layers; both must be quantized AND calibrated.
+    EXPECT_EQ(n_quantized_linear, 2)
+        << "Both Linear layers should be quantized";
+}
+
+// ----------------------------------------------------------------------------
 // #2: StaticQuantPerChannel — per-channel quantization produces distinct
 // scales across output channels (vs. per-tensor's single scalar).
 // ----------------------------------------------------------------------------

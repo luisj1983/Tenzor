@@ -121,11 +121,13 @@ ElectraForPreTraining::ElectraForPreTraining(const ElectraConfig& config)
 }
 
 auto ElectraForPreTraining::sample_from_distribution(const float* probs, int64_t size) -> int64_t {
-    // Sample token index from probability distribution
-    // Using discrete distribution for sampling
+    // Sample token index from probability distribution using a per-instance,
+    // seeded RNG. The mutex makes concurrent forwards on the same instance
+    // well-defined; reproducibility now depends only on this model's own
+    // sampling history rather than process-global state.
     std::discrete_distribution<int64_t> dist(probs, probs + size);
-    static std::mt19937 gen{42};  // Fixed seed for reproducibility
-    return dist(gen);
+    std::lock_guard<std::mutex> lock(sample_rng_mutex_);
+    return dist(sample_rng_);
 }
 
 auto ElectraForPreTraining::forward(const Variable& input_ids,

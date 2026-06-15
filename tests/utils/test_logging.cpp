@@ -243,25 +243,40 @@ TEST_F(LoggingTest, GenericLogFunction) {
 }
 
 // Test 11: Macros
+//
+// The overlapping severity names (TENZOR_LOG_DEBUG/INFO/ERROR) are owned
+// exclusively by log.hpp's spdlog facade — they do NOT route through the legacy
+// Logger or its output file. Only the legacy-only macros (WARNING / FATAL /
+// WARN_ONCE) and direct Logger calls land in the Logger file. This deliberate
+// split fixes the prior per-TU divergence where the same macro name routed to a
+// different sink depending on include order.
 TEST_F(LoggingTest, ConvenienceMacros) {
     auto& logger = Logger::instance();
     logger.set_output_file(test_log_file_);
     logger.enable_console(false);
     logger.set_level(LogLevel::Debug);
 
+    // These route to spdlog (stderr/registry), not the Logger file — just
+    // verify they compile and don't throw.
     TENZOR_LOG_DEBUG("Debug macro");
     TENZOR_LOG_INFO("Info macro");
-    TENZOR_LOG_WARNING("Warning macro");
     TENZOR_LOG_ERROR("Error macro");
+
+    // These are legacy-only macros backed by the Logger file sink.
+    TENZOR_LOG_WARNING("Warning macro");
     TENZOR_LOG_FATAL("Fatal macro");
 
     std::ifstream file(test_log_file_);
     std::string content((std::istreambuf_iterator<char>(file)),
                         std::istreambuf_iterator<char>());
 
-    EXPECT_NE(content.find("Debug macro"), std::string::npos);
-    EXPECT_NE(content.find("Info macro"), std::string::npos);
+    // DEBUG/INFO/ERROR macros must NOT appear in the legacy Logger file —
+    // they belong to the spdlog facade now.
+    EXPECT_EQ(content.find("Debug macro"), std::string::npos);
+    EXPECT_EQ(content.find("Info macro"), std::string::npos);
+    EXPECT_EQ(content.find("Error macro"), std::string::npos);
+
+    // Legacy-only macros do land in the Logger file.
     EXPECT_NE(content.find("Warning macro"), std::string::npos);
-    EXPECT_NE(content.find("Error macro"), std::string::npos);
     EXPECT_NE(content.find("Fatal macro"), std::string::npos);
 }

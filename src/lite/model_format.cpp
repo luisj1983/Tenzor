@@ -63,6 +63,7 @@
 #include <fstream>
 #include <ios>
 #include <iterator>
+#include <limits>
 #include <stdexcept>
 
 namespace tenzor::lite {
@@ -75,7 +76,7 @@ namespace {
 
 template <typename T>
 auto read_pod(const uint8_t* buffer, size_t size, size_t& offset, T& out) -> void {
-    if (offset + sizeof(T) > size) {
+    if (offset > size || sizeof(T) > size - offset) {
         throw std::runtime_error("TZLiteReader: unexpected end of buffer");
     }
     std::memcpy(&out, buffer + offset, sizeof(T));
@@ -117,7 +118,24 @@ auto write_pod(std::ostream& file, const T& value) -> void {
 auto serialise_node_table(const LiteGraph& graph, uint32_t version) -> std::vector<uint8_t> {
     std::vector<uint8_t> out;
     out.reserve(graph.num_nodes() * 64);
+    // Per-node arities are serialised as uint16_t; tensor_ids as int16_t. A
+    // graph exceeding these on-wire limits would silently truncate/wrap (wrong
+    // arity, aliased ids) and fail or mis-execute on load, so reject it here
+    // with a clear error instead of writing a corrupt file.
+    constexpr size_t kMaxArity = std::numeric_limits<uint16_t>::max();
+    if (graph.max_tensor_id() > std::numeric_limits<int16_t>::max()) {
+        throw std::runtime_error(
+            "TZLiteWriter: graph has a tensor_id exceeding the int16_t wire "
+            "limit (" +
+            std::to_string(std::numeric_limits<int16_t>::max()) + ")");
+    }
     for (const auto& node : graph.nodes()) {
+        if (node.input_ids.size() > kMaxArity ||
+            node.output_ids.size() > kMaxArity) {
+            throw std::runtime_error(
+                "TZLiteWriter: node arity exceeds the uint16_t wire limit (" +
+                std::to_string(kMaxArity) + ")");
+        }
         append_pod<uint16_t>(out, static_cast<uint16_t>(node.op));
 
         auto num_inputs = static_cast<uint16_t>(node.input_ids.size());
@@ -439,7 +457,9 @@ auto TZLiteReader::load_full(const void* data, size_t size) -> LoadedModel {
             uint64_t section_size = 0;
             read_pod(buffer, size, offset, tag);
             read_pod(buffer, size, offset, section_size);
-            if (offset + section_size > size) {
+            // Overflow-safe bounds check: `offset + section_size` would wrap for
+            // an attacker-supplied 64-bit section_size, bypassing the guard.
+            if (offset > size || section_size > size - offset) {
                 throw std::runtime_error(
                     "TZLiteReader: TLV section overruns end of buffer");
             }

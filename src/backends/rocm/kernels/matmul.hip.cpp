@@ -458,6 +458,22 @@ __global__ void matmul_tiled_bf16_kernel(
  * @brief Native HIP matrix multiplication (fallback when rocBLAS unavailable)
  */
 static Tensor matmul_native_hip(const Tensor& a, const Tensor& b, hipStream_t stream) {
+    // The native tiled kernels below only cover Float32/Float64/Int32/Int64.
+    // Half-precision inputs (reached via the rocBLAS catch fallback on e.g.
+    // gfx90c) would otherwise launch no kernel and return uninitialized device
+    // memory. Widen to Float32, run the f32 path, narrow back.
+    if (a.dtype() == DType::Float16 || a.dtype() == DType::BFloat16) {
+        DType orig = a.dtype();
+        auto a_f32 = a.to(DType::Float32);
+        auto b_f32 = b.to(DType::Float32);
+        return matmul_native_hip(a_f32, b_f32, stream).to(orig);
+    }
+    if (a.dtype() != DType::Float32 && a.dtype() != DType::Float64 &&
+        a.dtype() != DType::Int32 && a.dtype() != DType::Int64) {
+        throw std::runtime_error(
+            "matmul_native_hip: unsupported dtype for native HIP matmul");
+    }
+
     auto a_shape = a.shape();
     auto b_shape = b.shape();
 

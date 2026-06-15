@@ -118,21 +118,34 @@ struct LSTMCachedPrimitive {
     }
 };
 
-// Fast weight fingerprint computation (samples key elements for quick hash)
+// Weight fingerprint computation. Must hash ALL weight bytes, not a sampled
+// subset: an in-place optimizer step keeps the same pointer but mutates the
+// values, so a 3-element sample could collide (same first/middle/last element)
+// and produce a false cache hit that serves stale reordered weights (audit B6).
+// FNV-1a over the full W_ih/W_hh buffers is fast enough to run per call and
+// detects any content change. The two buffers are folded into distinct lanes so
+// swapping content between them still changes the digest.
 inline uint64_t compute_weight_fingerprint(const float* W_ih, const float* W_hh,
                                             int64_t ih_size, int64_t hh_size) {
-    uint64_t hash = 0;
-    // Sample first, middle, and last elements from each weight matrix
-    if (ih_size > 0) {
-        hash ^= *reinterpret_cast<const uint32_t*>(W_ih);
-        hash ^= *reinterpret_cast<const uint32_t*>(W_ih + ih_size/2) << 16;
-        hash ^= *reinterpret_cast<const uint32_t*>(W_ih + ih_size - 1) << 8;
-    }
-    if (hh_size > 0) {
-        hash ^= static_cast<uint64_t>(*reinterpret_cast<const uint32_t*>(W_hh)) << 32;
-        hash ^= static_cast<uint64_t>(*reinterpret_cast<const uint32_t*>(W_hh + hh_size/2)) << 48;
-        hash ^= static_cast<uint64_t>(*reinterpret_cast<const uint32_t*>(W_hh + hh_size - 1)) << 40;
-    }
+    constexpr uint64_t FNV_OFFSET = 1469598103934665603ULL;
+    constexpr uint64_t FNV_PRIME  = 1099511628211ULL;
+    uint64_t hash = FNV_OFFSET;
+    auto fold = [&](const float* W, int64_t count) {
+        const auto* bytes = reinterpret_cast<const unsigned char*>(W);
+        const int64_t nbytes = count * static_cast<int64_t>(sizeof(float));
+        // Mix the element count first so two buffers differing only in length
+        // (and otherwise byte-identical prefixes) still diverge.
+        for (int s = 0; s < 8; ++s) {
+            hash ^= static_cast<unsigned char>((count >> (s * 8)) & 0xFF);
+            hash *= FNV_PRIME;
+        }
+        for (int64_t i = 0; i < nbytes; ++i) {
+            hash ^= bytes[i];
+            hash *= FNV_PRIME;
+        }
+    };
+    if (ih_size > 0) fold(W_ih, ih_size);
+    if (hh_size > 0) fold(W_hh, hh_size);
     return hash;
 }
 
@@ -1041,6 +1054,13 @@ inline bool lstm_multilayer_forward_onednn(
     if (num_layers < 1 || W_ih_list.size() != static_cast<size_t>(num_layers)) {
         return false;
     }
+    // bias_list must be empty (no layer has bias) or length-aligned to the layer
+    // count with nullptr entries for bias-less layers. A compacted bias vector
+    // would make the bias_list[l] indexing below select the wrong layer's bias
+    // (and read OOB on the trailing index) for mixed-bias configs.
+    if (!bias_list.empty() && bias_list.size() != static_cast<size_t>(num_layers)) {
+        return false;
+    }
 
     // For single layer, delegate to optimized single-layer kernel
     if (num_layers == 1) {
@@ -1219,6 +1239,13 @@ inline bool gru_multilayer_forward_onednn(
     int64_t hidden_size
 ) {
     if (num_layers < 1 || W_ih_list.size() != static_cast<size_t>(num_layers)) {
+        return false;
+    }
+    // bias_list must be empty or length-aligned to the layer count with nullptr
+    // entries for bias-less layers. A compacted bias vector would make the
+    // bias_list[src_layer] indexing below select the wrong layer's bias and read
+    // OOB on the trailing index for mixed-bias configs.
+    if (!bias_list.empty() && bias_list.size() != static_cast<size_t>(num_layers)) {
         return false;
     }
 

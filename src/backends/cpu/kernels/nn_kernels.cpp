@@ -1017,6 +1017,19 @@ auto embedding_bag_forward_kernel(std::span<const Tensor> inputs,
         num_bags -= 1;
     }
 
+    // Float16/BFloat16: upcast to Float32, compute, downcast the output. The
+    // Int64 argmax indices are dtype-independent and pass through unchanged.
+    // Done before allocating output/max_indices so the recursive Float32 call
+    // owns those buffers and we never allocate (and -1-fill, for max mode) a
+    // throwaway buffer on the half-precision path.
+    if (embeddings.dtype() == DType::Float16 || embeddings.dtype() == DType::BFloat16) {
+        const DType orig = embeddings.dtype();
+        auto emb_f32 = embeddings.to(DType::Float32);
+        std::array<Tensor, 2> f32_inputs = {emb_f32, offsets};
+        auto result = embedding_bag_forward_kernel(f32_inputs, attrs);
+        return {result[0].to(orig), result[1]};
+    }
+
     auto output = zeros({num_bags, embedding_dim}, embeddings.dtype(), embeddings.device());
 
     // For max mode we also produce, per (bag, feature), the GLOBAL element index
@@ -1030,16 +1043,6 @@ auto embedding_bag_forward_kernel(std::span<const Tensor> inputs,
                DType::Int64, embeddings.device())
         : zeros({0}, DType::Int64, embeddings.device());
     int64_t* max_idx_ptr = produce_argmax ? max_indices.data<int64_t>() : nullptr;
-
-    // Float16/BFloat16: upcast to Float32, compute, downcast the output. The
-    // Int64 argmax indices are dtype-independent and pass through unchanged.
-    if (embeddings.dtype() == DType::Float16 || embeddings.dtype() == DType::BFloat16) {
-        const DType orig = embeddings.dtype();
-        auto emb_f32 = embeddings.to(DType::Float32);
-        std::array<Tensor, 2> f32_inputs = {emb_f32, offsets};
-        auto result = embedding_bag_forward_kernel(f32_inputs, attrs);
-        return {result[0].to(orig), result[1]};
-    }
 
     auto run = [&]<typename T>(T*) {
         const T* emb_ptr = embeddings.data<T>();
@@ -1982,40 +1985,49 @@ void group_norm_impl_with_stats(const T2* in_data, T2* out_data, const T2* w_dat
                                  int64_t N, int64_t C, int64_t spatial_size, int64_t num_groups, double eps) {
     int64_t channels_per_group = C / num_groups;
 
+    // Accumulate mean/var in double regardless of T2/Stats so the Float32
+    // (Stats=float) autograd path matches the non-stats inference impl, which
+    // accumulates in double. Narrow only when writing the saved stats / output.
+    // Float16/BFloat16 have no direct conversion to/from double; accumulate them
+    // in float (still wider than the storage type). float/double accumulate in
+    // double for full precision.
+    using Acc = std::conditional_t<
+        std::is_same_v<T2, Float16> || std::is_same_v<T2, BFloat16>, float, double>;
+
     #pragma omp parallel for collapse(2) if(N * num_groups > 16)
     for (int64_t n = 0; n < N; ++n) {
         for (int64_t g = 0; g < num_groups; ++g) {
             int64_t c_start = g * channels_per_group;
             int64_t group_size = channels_per_group * spatial_size;
 
-            Stats mean = Stats(0);
+            Acc mean = Acc(0);
             for (int64_t c = c_start; c < c_start + channels_per_group; ++c) {
                 for (int64_t s = 0; s < spatial_size; ++s) {
-                    mean += static_cast<Stats>(in_data[(n * C + c) * spatial_size + s]);
+                    mean += static_cast<Acc>(in_data[(n * C + c) * spatial_size + s]);
                 }
             }
-            mean /= static_cast<Stats>(group_size);
+            mean /= static_cast<Acc>(group_size);
 
-            Stats var = Stats(0);
+            Acc var = Acc(0);
             for (int64_t c = c_start; c < c_start + channels_per_group; ++c) {
                 for (int64_t s = 0; s < spatial_size; ++s) {
-                    Stats diff = static_cast<Stats>(in_data[(n * C + c) * spatial_size + s]) - mean;
+                    Acc diff = static_cast<Acc>(in_data[(n * C + c) * spatial_size + s]) - mean;
                     var += diff * diff;
                 }
             }
-            var /= static_cast<Stats>(group_size);
+            var /= static_cast<Acc>(group_size);
 
-            Stats inv_std = Stats(1) / std::sqrt(var + static_cast<Stats>(eps));
+            Acc inv_std = Acc(1) / std::sqrt(var + eps);
 
-            // Save stats
-            mean_out[n * num_groups + g] = mean;
-            inv_std_out[n * num_groups + g] = inv_std;
+            // Save stats (narrowed to the saved-stats dtype)
+            mean_out[n * num_groups + g] = static_cast<Stats>(mean);
+            inv_std_out[n * num_groups + g] = static_cast<Stats>(inv_std);
 
             for (int64_t c = c_start; c < c_start + channels_per_group; ++c) {
                 for (int64_t s = 0; s < spatial_size; ++s) {
                     int64_t idx = (n * C + c) * spatial_size + s;
-                    Stats normalized = (static_cast<Stats>(in_data[idx]) - mean) * inv_std;
-                    out_data[idx] = static_cast<T2>(normalized * static_cast<Stats>(w_data[c]) + static_cast<Stats>(b_data[c]));
+                    Acc normalized = (static_cast<Acc>(in_data[idx]) - mean) * inv_std;
+                    out_data[idx] = static_cast<T2>(normalized * static_cast<Acc>(w_data[c]) + static_cast<Acc>(b_data[c]));
                 }
             }
         }
@@ -2075,34 +2087,42 @@ template<typename T, typename Stats>
 void instance_norm_impl_with_stats(const T* in_data, T* out_data, const T* w_data, const T* b_data,
                                     Stats* mean_out, Stats* inv_std_out,
                                     int64_t N, int64_t C, int64_t spatial_size, double eps) {
+    // Accumulate mean/var in double regardless of T/Stats so the Float32
+    // (Stats=float) autograd path matches the non-stats inference impl, which
+    // accumulates in double. Narrow only when writing the saved stats / output.
+    // Float16/BFloat16 have no direct conversion to/from double; accumulate them
+    // in float. float/double accumulate in double for full precision.
+    using Acc = std::conditional_t<
+        std::is_same_v<T, Float16> || std::is_same_v<T, BFloat16>, float, double>;
+
     #pragma omp parallel for collapse(2) if(N * C > 16)
     for (int64_t n = 0; n < N; ++n) {
         for (int64_t c = 0; c < C; ++c) {
-            Stats mean = Stats(0);
+            Acc mean = Acc(0);
             for (int64_t s = 0; s < spatial_size; ++s) {
-                mean += static_cast<Stats>(in_data[(n * C + c) * spatial_size + s]);
+                mean += static_cast<Acc>(in_data[(n * C + c) * spatial_size + s]);
             }
-            mean /= static_cast<Stats>(spatial_size);
+            mean /= static_cast<Acc>(spatial_size);
 
-            Stats var = Stats(0);
+            Acc var = Acc(0);
             for (int64_t s = 0; s < spatial_size; ++s) {
-                Stats diff = static_cast<Stats>(in_data[(n * C + c) * spatial_size + s]) - mean;
+                Acc diff = static_cast<Acc>(in_data[(n * C + c) * spatial_size + s]) - mean;
                 var += diff * diff;
             }
-            var /= static_cast<Stats>(spatial_size);
+            var /= static_cast<Acc>(spatial_size);
 
-            Stats inv_std = Stats(1) / std::sqrt(var + static_cast<Stats>(eps));
+            Acc inv_std = Acc(1) / std::sqrt(var + eps);
 
-            // Save stats
-            mean_out[n * C + c] = mean;
-            inv_std_out[n * C + c] = inv_std;
+            // Save stats (narrowed to the saved-stats dtype)
+            mean_out[n * C + c] = static_cast<Stats>(mean);
+            inv_std_out[n * C + c] = static_cast<Stats>(inv_std);
 
-            Stats w = w_data ? static_cast<Stats>(w_data[c]) : Stats(1);
-            Stats b = b_data ? static_cast<Stats>(b_data[c]) : Stats(0);
+            Acc w = w_data ? static_cast<Acc>(w_data[c]) : Acc(1);
+            Acc b = b_data ? static_cast<Acc>(b_data[c]) : Acc(0);
 
             for (int64_t s = 0; s < spatial_size; ++s) {
                 int64_t idx = (n * C + c) * spatial_size + s;
-                Stats normalized = (static_cast<Stats>(in_data[idx]) - mean) * inv_std;
+                Acc normalized = (static_cast<Acc>(in_data[idx]) - mean) * inv_std;
                 out_data[idx] = static_cast<T>(normalized * w + b);
             }
         }

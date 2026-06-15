@@ -1184,15 +1184,56 @@ std::pair<VkBuffer, VkDeviceSize> VulkanBackend::getVulkanBufferAndOffset(const 
 #else
     auto& allocator = backend::VulkanCachingAllocator::get();
 
-    // First try direct lookup in caching allocator
-    // Find which device this allocation belongs to.
-    //
-    // S.5: catch the *typed* std::out_of_range that the allocator raises
-    // for the expected "ptr lives on a different device" / "ptr not tracked"
-    // miss path. Any other exception type indicates an internal allocator
-    // failure (mutex poisoning, container invariant break, driver crash) —
-    // log + rethrow so the diagnostic isn't silently swallowed. Mirrors L.3.
+    // Resolve the owning device from the tracked allocation ranges first, so we
+    // query only that device's allocator instead of scanning every device twice
+    // and throwing+catching std::out_of_range on every non-owning device (this
+    // function runs per bound buffer for every dispatched op). allocations_ maps
+    // each base pointer to {size, device_id}; a view pointer (base + offset)
+    // satisfies base <= ptr < base + size.
+    int32_t owning_device = -1;
+    {
+        std::lock_guard<std::mutex> lock(allocations_mutex_);
+        // Fast path: exact base-pointer hit.
+        auto it = allocations_.find(const_cast<void*>(ptr));
+        if (it != allocations_.end()) {
+            owning_device = it->second.second;
+        } else {
+            // View pointer: find the allocation whose range contains ptr.
+            const auto* p = static_cast<const char*>(ptr);
+            for (const auto& [base, info] : allocations_) {
+                const auto* b = static_cast<const char*>(base);
+                if (p >= b && p < b + info.first) {
+                    owning_device = info.second;
+                    break;
+                }
+            }
+        }
+    }
+
+    if (owning_device >= 0) {
+        // Direct hit on the owning device's allocator (base pointer).
+        try {
+            VkBuffer buffer = allocator.get_buffer(const_cast<void*>(ptr), owning_device);
+            return {buffer, 0};
+        } catch (const std::out_of_range&) {
+            // ptr is an offset into the allocation rather than its base; resolve
+            // the VkBuffer + byte offset via the allocator's block list.
+        } catch (const std::exception& e) {
+            TENZOR_LOG_ERROR("[VulkanCachingAllocator::get_buffer] unexpected exception {} ({}); rethrowing",
+                             typeid(e).name(), e.what());
+            throw;
+        }
+        auto [buffer, offset] = allocator.find_buffer_and_offset(ptr, owning_device);
+        if (buffer != VK_NULL_HANDLE) {
+            return {buffer, static_cast<VkDeviceSize>(offset)};
+        }
+    }
+
+    // Fallback: allocations_ did not record this pointer (e.g. a buffer tracked
+    // only by the allocator). Preserve the original full-device search so we
+    // never regress lookups, catching the typed std::out_of_range miss path.
     for (int32_t device_id = 0; device_id < device_count(); ++device_id) {
+        if (device_id == owning_device) continue;  // already tried above
         try {
             VkBuffer buffer = allocator.get_buffer(const_cast<void*>(ptr), device_id);
             return {buffer, 0};
@@ -1204,12 +1245,8 @@ std::pair<VkBuffer, VkDeviceSize> VulkanBackend::getVulkanBufferAndOffset(const 
             throw;
         }
     }
-
-    // If not found directly, ptr might be base_ptr + offset (e.g. a sliced tensor
-    // view or an offset write into a larger tensor).  Ask the caching allocator to
-    // search its block list — it knows the ACTUAL block sizes (including slab
-    // sub-allocations) and can find the correct VkBuffer + byte offset.
     for (int32_t device_id = 0; device_id < device_count(); ++device_id) {
+        if (device_id == owning_device) continue;  // already tried above
         auto [buffer, offset] = allocator.find_buffer_and_offset(ptr, device_id);
         if (buffer != VK_NULL_HANDLE) {
             return {buffer, static_cast<VkDeviceSize>(offset)};

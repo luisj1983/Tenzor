@@ -135,6 +135,10 @@ auto pad_packed_sequence(const PackedSequence& packed,
     -> std::pair<Tensor, Tensor> {
 
     auto bs_tensor = packed.batch_sizes;
+    if (bs_tensor.numel() == 0) {
+        throw std::invalid_argument(
+            "pad_packed_sequence: batch_sizes is empty");
+    }
     auto* bs_data = bs_tensor.data<int64_t>();
     int64_t max_seq_len = bs_tensor.numel();
     int64_t batch_size = bs_data[0];  // First timestep has all sequences
@@ -241,11 +245,30 @@ auto pack_sequence(const std::vector<Tensor>& sequences, bool enforce_sorted)
     int64_t features = sequences[0].shape().back();
     int64_t batch_size = static_cast<int64_t>(sequences.size());
 
-    // Find max length
+    // Find max length, validating each sequence's trailing feature width,
+    // dtype and device against sequences[0]. memcpy below uses sequences[0]'s
+    // feature width as the source row stride for every sequence; a mismatch
+    // would over-read (smaller seq) or silently truncate (larger seq).
     int64_t max_len = 0;
     std::vector<int64_t> lengths(batch_size);
     for (int64_t i = 0; i < batch_size; ++i) {
-        lengths[i] = sequences[i].shape()[0];
+        const auto& s = sequences[i];
+        if (s.ndim() != 2) {
+            throw std::invalid_argument(
+                "pack_sequence: each sequence must be 2D [length, features], got "
+                + std::to_string(s.ndim()) + " dims at index " + std::to_string(i));
+        }
+        if (s.shape().back() != features) {
+            throw std::invalid_argument(
+                "pack_sequence: feature size mismatch at index " + std::to_string(i)
+                + " (expected " + std::to_string(features) + ", got "
+                + std::to_string(s.shape().back()) + ")");
+        }
+        if (s.dtype() != sequences[0].dtype() || s.device() != sequences[0].device()) {
+            throw std::invalid_argument(
+                "pack_sequence: dtype/device mismatch at index " + std::to_string(i));
+        }
+        lengths[i] = s.shape()[0];
         max_len = std::max(max_len, lengths[i]);
     }
 
@@ -284,18 +307,33 @@ auto pad_sequence(const std::vector<Tensor>& sequences,
     int64_t max_len = 0;
     int64_t batch_size = static_cast<int64_t>(sequences.size());
 
-    for (const auto& seq : sequences) {
-        if (seq.ndim() == 0) {
-            throw std::invalid_argument("pad_sequence: sequences must have at least 1 dimension");
-        }
-        max_len = std::max(max_len, seq.shape()[0]);
-    }
-
-    // Trailing dimensions (must match across all sequences)
+    // Trailing dimensions are taken from sequences[0] and assumed identical for
+    // every sequence (the memcpy below uses trail_elems derived from
+    // sequences[0] for all sources). Validate this so a mismatched trailing
+    // shape cannot over-read a smaller source buffer or silently truncate.
     auto trailing = std::vector<int64_t>(
         sequences[0].shape().begin() + 1, sequences[0].shape().end());
     int64_t trail_elems = 1;
     for (auto d : trailing) trail_elems *= d;
+
+    for (size_t i = 0; i < sequences.size(); ++i) {
+        const auto& seq = sequences[i];
+        if (seq.ndim() == 0) {
+            throw std::invalid_argument("pad_sequence: sequences must have at least 1 dimension");
+        }
+        std::vector<int64_t> seq_trailing(
+            seq.shape().begin() + 1, seq.shape().end());
+        if (seq_trailing != trailing) {
+            throw std::invalid_argument(
+                "pad_sequence: trailing shape mismatch at index " + std::to_string(i)
+                + " (all sequences must share sequences[0]'s trailing dimensions)");
+        }
+        if (seq.dtype() != sequences[0].dtype() || seq.device() != sequences[0].device()) {
+            throw std::invalid_argument(
+                "pad_sequence: dtype/device mismatch at index " + std::to_string(i));
+        }
+        max_len = std::max(max_len, seq.shape()[0]);
+    }
 
     // Always build batch_first: (batch, max_len, *trailing)
     std::vector<int64_t> padded_shape = {batch_size, max_len};

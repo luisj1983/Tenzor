@@ -14,6 +14,7 @@
 #include "tenzor/autograd/ops.hpp"
 #include "tenzor/autograd/function.hpp"
 #include "tenzor/autograd/variable.hpp"
+#include "tenzor/nn/functional.hpp"
 #include "tenzor/core/dtype.hpp"
 #include <cmath>
 #include <memory>
@@ -125,8 +126,9 @@ public:
         int ws = pg_->world_size();
         std::vector<Tensor> parts(ws);
         std::vector<int64_t> shp(g_local.shape().begin(), g_local.shape().end());
+        // all_gather fully populates every slot, so skip the zero-fill.
         for (int i = 0; i < ws; ++i) {
-            parts[i] = tenzor::zeros(shp, g_local.dtype(), g_local.device());
+            parts[i] = tenzor::empty(shp, g_local.dtype(), g_local.device());
         }
         pg_->all_gather(g_local, parts);
         return {tenzor::cat(parts, dim_)};
@@ -160,8 +162,9 @@ auto tp_gather(const Variable& input, ProcessGroup& pg, int64_t dim) -> Variable
     int64_t pos_dim = normalize_dim(dim, static_cast<int64_t>(shp.size()));
     int64_t local_len = shp.at(pos_dim);
     std::vector<Tensor> parts(ws);
+    // all_gather fully populates every slot, so skip the zero-fill.
     for (int i = 0; i < ws; ++i) {
-        parts[i] = tenzor::zeros(shp, local.dtype(), local.device());
+        parts[i] = tenzor::empty(shp, local.dtype(), local.device());
     }
     pg.all_gather(local, parts);
     Tensor out = tenzor::cat(parts, pos_dim);
@@ -439,6 +442,13 @@ auto ParallelAttention::forward_impl(const Variable& input) -> Variable {
 
     // Softmax along last dimension
     auto attn_weights = autograd::softmax(scores, -1);
+
+    // Attention dropout on the normalized weights (only during training).
+    // Honors the constructor's `dropout` probability advertised in extra_repr().
+    if (dropout_ > 0.0f) {
+        attn_weights = nn::functional::dropout(
+            attn_weights, static_cast<double>(dropout_), is_training());
+    }
 
     // Attention output: weights @ V
     auto attn_output = autograd::matmul(attn_weights, v_3d);  // (batch*heads, seq_len, head_dim)

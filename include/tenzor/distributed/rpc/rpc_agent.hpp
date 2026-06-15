@@ -25,13 +25,32 @@ namespace rpc {
 
 /**
  * @brief Configuration for the RPC agent.
+ *
+ * @note Threading model: TcpRpcAgent does NOT use fixed-size I/O or worker
+ *       thread pools. It spawns exactly one accept thread plus one
+ *       receive_loop thread per peer connection, and runs each send_async()
+ *       on its own short-lived thread. The @ref num_io_threads and
+ *       @ref num_worker_threads fields are therefore currently advisory only
+ *       and are not consumed by the implementation.
+ *
+ * @note Heartbeats: the agent responds to inbound HEARTBEAT messages
+ *       (HEARTBEAT_ACK) but does not run a heartbeat *sender*. Active
+ *       liveness probing is performed by HealthMonitor (see
+ *       elastic/health_monitor.hpp), which has its own interval/threshold
+ *       config. The @ref enable_heartbeat and @ref heartbeat_interval_ms
+ *       fields here are not consumed by TcpRpcAgent; configure liveness via
+ *       HealthMonitorConfig instead.
  */
 struct RpcAgentConfig {
-    int32_t num_io_threads{2};        ///< I/O threads for socket operations
-    int32_t num_worker_threads{4};    ///< Worker threads for RPC execution
+    /// Advisory only; not consumed (one accept thread + one thread per peer).
+    int32_t num_io_threads{2};
+    /// Advisory only; not consumed (per-connection receive_loop threading).
+    int32_t num_worker_threads{4};
     int32_t timeout_ms{60000};        ///< RPC timeout in milliseconds
-    int32_t heartbeat_interval_ms{5000}; ///< Heartbeat interval
-    bool enable_heartbeat{true};      ///< Enable health monitoring
+    /// Advisory only; active probing lives in HealthMonitor, not here.
+    int32_t heartbeat_interval_ms{5000};
+    /// Advisory only; the agent only ACKs heartbeats, it does not send them.
+    bool enable_heartbeat{true};
 };
 
 /**
@@ -39,8 +58,10 @@ struct RpcAgentConfig {
  *
  * Manages inter-worker communication over TCP sockets. Each worker
  * maintains persistent connections to all other workers for low-latency
- * messaging. Separate I/O threads handle socket operations while worker
- * threads execute RPC function bodies.
+ * messaging. A single accept thread handles inbound connections; each
+ * established connection gets its own receive_loop thread that executes RPC
+ * function bodies. (There are no fixed-size I/O/worker pools — see
+ * RpcAgentConfig.)
  *
  * Lifecycle:
  * 1. Construct with local worker info
@@ -129,14 +150,24 @@ private:
     // failed). Used by init() to surface bind failures synchronously.
     std::promise<bool> listen_ready_;
 
-    // Threading
+    // Threading. worker_threads_ is mutated from several threads
+    // (get_or_connect on the caller thread, accept_loop on the io thread) and
+    // iterated/joined by shutdown(), so all access is guarded by threads_mutex_.
+    std::mutex threads_mutex_;
     std::vector<std::thread> io_threads_;
     std::vector<std::thread> worker_threads_;
+
+    // In-flight async sends. send_async() spawns detached worker threads that
+    // dereference `this` for the duration of a blocking send(); shutdown() must
+    // wait for them to drain before members are destroyed or it is a
+    // use-after-free. Tracked via a counter drained under async_mutex_.
+    std::mutex async_mutex_;
+    std::condition_variable async_cv_;
+    int64_t inflight_async_{0};
 
     // Request/response tracking
     struct PendingRequest {
         std::promise<Message> promise;
-        std::chrono::steady_clock::time_point deadline;
     };
     std::mutex pending_mutex_;
     std::unordered_map<int64_t, PendingRequest> pending_;

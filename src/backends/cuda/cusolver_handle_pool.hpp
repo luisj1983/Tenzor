@@ -13,6 +13,7 @@
 #include <cuda_runtime.h>
 #include <stdexcept>
 #include <string>
+#include <cstdint>
 
 namespace tenzor {
 namespace cuda {
@@ -35,7 +36,12 @@ public:
     /// Returns a per-thread cuSOLVER handle, optionally bound to the given stream.
     static cusolverDnHandle_t get(cudaStream_t stream = nullptr) {
         ensure_initialized();
-        if (stream && stream != last_stream()) {
+        // Rebind whenever the requested stream differs from the last one,
+        // including stream==nullptr (the default stream 0). last_stream starts
+        // at an impossible sentinel so the first call always binds. Guarding on
+        // `stream &&` would leave the handle on a stale non-default stream when
+        // a later call requests the default stream.
+        if (stream != last_stream()) {
             CUSOLVER_CHECK(cusolverDnSetStream(handle(), stream));
             last_stream() = stream;
         }
@@ -50,7 +56,9 @@ public:
 private:
     struct HandleGuard {
         cusolverDnHandle_t handle = nullptr;
-        cudaStream_t last_stream = nullptr;
+        // Sentinel that no real stream can equal, so get(nullptr) on first use
+        // still issues the initial cusolverDnSetStream to the default stream.
+        cudaStream_t last_stream = reinterpret_cast<cudaStream_t>(~uintptr_t(0));
         ~HandleGuard() {
             if (handle) {
                 cusolverDnDestroy(handle);

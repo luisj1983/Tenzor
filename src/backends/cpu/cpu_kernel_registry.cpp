@@ -775,9 +775,10 @@ namespace nn::quantization::kernels {
         const int8_t* input, const int8_t* weight, const float* bias,
         float* output, int64_t batch, int64_t in_channels, int64_t out_channels,
         int64_t h_in, int64_t w_in, int64_t h_out, int64_t w_out,
-        int64_t kernel_size, int64_t stride, int64_t padding,
+        int64_t kernel_h, int64_t kernel_w, int64_t stride_h, int64_t stride_w,
+        int64_t pad_h, int64_t pad_w,
         float input_scale, float weight_scale, int32_t input_zp, int32_t weight_zp,
-        int64_t dilation, int64_t groups
+        int64_t dil_h, int64_t dil_w, int64_t groups
     ) -> void;
 
     // Per-channel quantized variants
@@ -792,9 +793,10 @@ namespace nn::quantization::kernels {
         const int8_t* input, const int8_t* weight, const float* bias,
         float* output, int64_t batch, int64_t in_channels, int64_t out_channels,
         int64_t h_in, int64_t w_in, int64_t h_out, int64_t w_out,
-        int64_t kernel_size, int64_t stride, int64_t padding,
+        int64_t kernel_h, int64_t kernel_w, int64_t stride_h, int64_t stride_w,
+        int64_t pad_h, int64_t pad_w,
         float input_scale, const float* weight_scales, int32_t input_zp, const int32_t* weight_zps,
-        int64_t dilation, int64_t groups
+        int64_t dil_h, int64_t dil_w, int64_t groups
     ) -> void;
 } // namespace nn::quantization::kernels
 
@@ -4405,11 +4407,18 @@ static void register_cpu_kernels_quantization(BackendDispatchTable& table) {
 
         auto weight_shape = weight.shape();
         int64_t out_channels = weight_shape[0];
-        int64_t kernel_size = weight_shape[2];
+        // Support rectangular kernels: weight is [out_ch, in_ch/groups, kH, kW].
+        int64_t kernel_h = weight_shape[2];
+        int64_t kernel_w = weight_shape[3];
 
-        int64_t stride = attrs.get_int(AttrKey::Stride, 1);
-        int64_t padding = attrs.get_int(AttrKey::Padding, 0);
-        int64_t dilation = attrs.get_int(AttrKey::Dilation, 1);
+        // Per-axis stride/padding/dilation (falls back to the scalar key for
+        // symmetric configs) so rectangular convs are handled correctly.
+        const auto stride_a   = ::tenzor::backend::attrs::stride_2d(attrs);
+        const auto padding_a  = ::tenzor::backend::attrs::padding_2d(attrs);
+        const auto dilation_a = ::tenzor::backend::attrs::dilation_2d(attrs);
+        int64_t stride_h = stride_a[0], stride_w = stride_a[1];
+        int64_t pad_h = padding_a[0], pad_w = padding_a[1];
+        int64_t dil_h = dilation_a[0], dil_w = dilation_a[1];
         int64_t groups = attrs.get_int(AttrKey::Groups, 1);
 
         float input_scale = static_cast<float>(attrs.get_float(AttrKey::InputScale, 1.0));
@@ -4417,8 +4426,8 @@ static void register_cpu_kernels_quantization(BackendDispatchTable& table) {
         int32_t input_zp = static_cast<int32_t>(attrs.get_int(AttrKey::InputZeroPoint, 0));
         int32_t weight_zp = static_cast<int32_t>(attrs.get_int(AttrKey::WeightZeroPoint, 0));
 
-        int64_t h_out = (h_in + 2 * padding - dilation * (kernel_size - 1) - 1) / stride + 1;
-        int64_t w_out = (w_in + 2 * padding - dilation * (kernel_size - 1) - 1) / stride + 1;
+        int64_t h_out = (h_in + 2 * pad_h - dil_h * (kernel_h - 1) - 1) / stride_h + 1;
+        int64_t w_out = (w_in + 2 * pad_w - dil_w * (kernel_w - 1) - 1) / stride_w + 1;
 
         Tensor output({batch, out_channels, h_out, w_out}, DType::Float32, Device::cpu());
 
@@ -4443,18 +4452,18 @@ static void register_cpu_kernels_quantization(BackendDispatchTable& table) {
                 input_data, weight_data, bias_data, output_data,
                 batch, in_channels, out_channels,
                 h_in, w_in, h_out, w_out,
-                kernel_size, stride, padding,
+                kernel_h, kernel_w, stride_h, stride_w, pad_h, pad_w,
                 input_scale, weight_scales_data, input_zp, weight_zps_data,
-                dilation, groups
+                dil_h, dil_w, groups
             );
         } else {
             nn::quantization::kernels::quantized_conv2d_kernel(
                 input_data, weight_data, bias_data, output_data,
                 batch, in_channels, out_channels,
                 h_in, w_in, h_out, w_out,
-                kernel_size, stride, padding,
+                kernel_h, kernel_w, stride_h, stride_w, pad_h, pad_w,
                 input_scale, weight_scale, input_zp, weight_zp,
-                dilation, groups
+                dil_h, dil_w, groups
             );
         }
 

@@ -39,9 +39,10 @@ namespace kernels {
         const int8_t* input, const int8_t* weight, const float* bias,
         float* output, int64_t batch, int64_t in_channels, int64_t out_channels,
         int64_t h_in, int64_t w_in, int64_t h_out, int64_t w_out,
-        int64_t kernel_size, int64_t stride, int64_t padding,
+        int64_t kernel_h, int64_t kernel_w, int64_t stride_h, int64_t stride_w,
+        int64_t pad_h, int64_t pad_w,
         float input_scale, float weight_scale, int32_t input_zp, int32_t weight_zp,
-        int64_t dilation = 1, int64_t groups = 1
+        int64_t dil_h = 1, int64_t dil_w = 1, int64_t groups = 1
     ) -> void;
 
     // Per-channel quantized variants
@@ -56,9 +57,10 @@ namespace kernels {
         const int8_t* input, const int8_t* weight, const float* bias,
         float* output, int64_t batch, int64_t in_channels, int64_t out_channels,
         int64_t h_in, int64_t w_in, int64_t h_out, int64_t w_out,
-        int64_t kernel_size, int64_t stride, int64_t padding,
+        int64_t kernel_h, int64_t kernel_w, int64_t stride_h, int64_t stride_w,
+        int64_t pad_h, int64_t pad_w,
         float input_scale, const float* weight_scales, int32_t input_zp, const int32_t* weight_zps,
-        int64_t dilation = 1, int64_t groups = 1
+        int64_t dil_h = 1, int64_t dil_w = 1, int64_t groups = 1
     ) -> void;
 }
 
@@ -418,13 +420,15 @@ auto QuantizedConv2d::forward_quantized(const QuantizedTensor& input) -> Tensor 
     if (is_per_channel) {
         const float* weight_scales = weight_scale_cpu.data<const float>();
         const int32_t* weight_zps = weight_zp_cpu.data<int32_t>();
+        // QuantizedConv2d uses square kernel/stride/padding/dilation, so the
+        // per-axis kernel params take the same scalar value for H and W.
         kernels::quantized_conv2d_per_channel_kernel(
             input_data, weight_data, bias_data, output_data,
             batch, in_channels_, out_channels_,
             h_in, w_in, h_out, w_out,
-            kernel_size_, stride_, padding_,
+            kernel_size_, kernel_size_, stride_, stride_, padding_, padding_,
             input_scale, weight_scales, input_zp, weight_zps,
-            dilation_, groups_
+            dilation_, dilation_, groups_
         );
     } else {
         float weight_scale = weight_scale_cpu.data<const float>()[0];
@@ -433,9 +437,9 @@ auto QuantizedConv2d::forward_quantized(const QuantizedTensor& input) -> Tensor 
             input_data, weight_data, bias_data, output_data,
             batch, in_channels_, out_channels_,
             h_in, w_in, h_out, w_out,
-            kernel_size_, stride_, padding_,
+            kernel_size_, kernel_size_, stride_, stride_, padding_, padding_,
             input_scale, weight_scale, input_zp, weight_zp,
-            dilation_, groups_
+            dilation_, dilation_, groups_
         );
     }
 
@@ -2252,6 +2256,16 @@ auto QuantizedConv1d::set_bias(const Tensor& bias) -> void {
 
 auto QuantizedConv1d::from_float(Module& fp_conv, const QConfig& qconfig)
     -> std::shared_ptr<QuantizedConv1d> {
+    // forward_quantized reads the weight buffer as contiguous int8. INT4/UINT4
+    // pack two values per byte (ceil(numel/2) bytes), so an INT4 weight qconfig
+    // would cause out-of-bounds reads at inference. Reject it here.
+    if (qconfig.weight_dtype() != QuantDType::INT8 &&
+        qconfig.weight_dtype() != QuantDType::UINT8) {
+        throw std::invalid_argument(
+            "QuantizedConv1d::from_float: only INT8/UINT8 weight quantization is "
+            "supported; INT4/UINT4 packing is incompatible with the int8 weight reader");
+    }
+
     auto params = fp_conv.named_parameters();
 
     Tensor weight;
@@ -2275,13 +2289,24 @@ auto QuantizedConv1d::from_float(Module& fp_conv, const QConfig& qconfig)
     auto weight_qparams = weight_observer->calculate_qparams(
         qconfig.weight_dtype(), qconfig.weight_scheme());
 
-    // Extract stride/padding/dilation/groups from extra_repr if possible,
-    // or use defaults. The Conv1d state_dict only has weight/bias.
-    // Use default values; caller can override via constructor if needed.
+    // Read the real stride/padding/dilation/groups from the source Conv1d
+    // (matching QuantizedConv3d::from_float) instead of hardcoding defaults,
+    // which silently produced the wrong receptive field / output shape for any
+    // non-default conv.
+    int64_t stride = 1, padding = 0, dilation = 1, groups = 1;
+    int64_t in_channels = in_c_per_group;  // fallback assumes groups=1
+    if (auto* conv1d = dynamic_cast<nn::Conv1d*>(&fp_conv)) {
+        stride = conv1d->stride();
+        padding = conv1d->padding();
+        dilation = conv1d->dilation();
+        groups = conv1d->groups();
+        in_channels = in_c_per_group * groups;  // per-group -> total in_channels
+    }
+
     auto result = std::make_shared<QuantizedConv1d>(
-        in_c_per_group,  // in_channels (assumes groups=1 unless overridden)
+        in_channels,
         out_channels, kernel_size,
-        1, 0, 1, 1,     // stride, padding, dilation, groups defaults
+        stride, padding, dilation, groups,
         weight_qparams);
 
     QuantizedTensor q_weight = quantize_tensor(weight_cpu, weight_qparams);
@@ -2421,6 +2446,16 @@ auto QuantizedConvTranspose2d::set_bias(const Tensor& bias) -> void {
 
 auto QuantizedConvTranspose2d::from_float(Module& fp_conv, const QConfig& qconfig)
     -> std::shared_ptr<QuantizedConvTranspose2d> {
+    // forward_quantized reads the weight buffer as contiguous int8. INT4/UINT4
+    // pack two values per byte (ceil(numel/2) bytes), so an INT4 weight qconfig
+    // would cause out-of-bounds reads at inference. Reject it here.
+    if (qconfig.weight_dtype() != QuantDType::INT8 &&
+        qconfig.weight_dtype() != QuantDType::UINT8) {
+        throw std::invalid_argument(
+            "QuantizedConvTranspose2d::from_float: only INT8/UINT8 weight quantization "
+            "is supported; INT4/UINT4 packing is incompatible with the int8 weight reader");
+    }
+
     auto params = fp_conv.named_parameters();
 
     Tensor weight;
@@ -2436,6 +2471,30 @@ auto QuantizedConvTranspose2d::from_float(Module& fp_conv, const QConfig& qconfi
     int64_t in_channels = shape[0];
     int64_t out_c_per_group = shape[1];
     int64_t kernel_h = shape[2];
+    int64_t kernel_w = shape[3];
+
+    // Read the real stride/padding/output_padding/dilation/groups from the
+    // source ConvTranspose2d instead of hardcoding defaults (which silently
+    // produced the wrong receptive field / output shape). The quantized layer
+    // ctor is square-only, so reject non-square geometry rather than silently
+    // collapsing it.
+    int64_t stride = 1, padding = 0, output_padding = 0, groups = 1;
+    int64_t out_channels = out_c_per_group;  // fallback assumes groups=1
+    if (auto* convt = dynamic_cast<nn::ConvTranspose2d*>(&fp_conv)) {
+        if (convt->stride_h() != convt->stride_w() ||
+            convt->padding_h() != convt->padding_w() ||
+            convt->output_padding_h() != convt->output_padding_w() ||
+            kernel_h != kernel_w) {
+            throw std::runtime_error(
+                "QuantizedConvTranspose2d::from_float: only square "
+                "kernel/stride/padding/output_padding are supported");
+        }
+        stride = convt->stride();
+        padding = convt->padding();
+        output_padding = convt->output_padding();
+        groups = convt->groups();
+        out_channels = out_c_per_group * groups;  // per-group -> total out_channels
+    }
 
     // Quantize weights
     auto weight_cpu = (weight.device() == Device::cpu()) ? weight : weight.to(Device::cpu());
@@ -2444,10 +2503,9 @@ auto QuantizedConvTranspose2d::from_float(Module& fp_conv, const QConfig& qconfi
     auto weight_qparams = weight_observer->calculate_qparams(
         qconfig.weight_dtype(), qconfig.weight_scheme());
 
-    // Use defaults for stride/padding/output_padding/groups
     auto result = std::make_shared<QuantizedConvTranspose2d>(
-        in_channels, out_c_per_group, kernel_h,
-        1, 0, 0, 1,  // stride, padding, output_padding, groups defaults
+        in_channels, out_channels, kernel_h,
+        stride, padding, output_padding, groups,
         weight_qparams);
 
     QuantizedTensor q_weight = quantize_tensor(weight_cpu, weight_qparams);

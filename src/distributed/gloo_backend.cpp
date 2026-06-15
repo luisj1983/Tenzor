@@ -183,14 +183,19 @@ auto RendezvousStore::get(const std::string& key) -> std::string {
 }
 
 auto RendezvousStore::wait(const std::string& key) -> void {
-    // Simple wait implementation: poll until key is available
+    // Poll until the key is present. The master now always replies to GET
+    // (length 0 for a missing key), so a miss returns an empty string rather
+    // than hanging; treat empty as "not yet set" and keep polling.
     for (int i = 0; i < 1000; ++i) {
         try {
-            get(key);
-            return;
+            std::string val = get(key);
+            if (!val.empty() && val != "__deleted__") {
+                return;
+            }
         } catch (...) {
-            usleep(10000);  // 10ms
+            // connection error; fall through to backoff and retry
         }
+        usleep(10000);  // 10ms
     }
     throw std::runtime_error("RendezvousStore: timeout waiting for key " + key);
 }
@@ -274,6 +279,14 @@ auto RendezvousStore::connect_to_master() -> void {
             throw std::runtime_error("Failed to create socket");
         }
         if (connect(socket_fd_, (struct sockaddr*)&addr, sizeof(addr)) == 0) {
+            // Bound blocking recv/send so a stalled or unresponsive master
+            // fails into the retry/poll path instead of hanging the caller
+            // indefinitely (e.g. get() on a key the master never answers).
+            struct timeval tv;
+            tv.tv_sec = 30;
+            tv.tv_usec = 0;
+            ::setsockopt(socket_fd_, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+            ::setsockopt(socket_fd_, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
             return;  // connected
         }
         ::close(socket_fd_);
@@ -369,9 +382,13 @@ auto RendezvousStore::run_master_server() -> void {
                     }
                 }
 
-                if (!value.empty()) {
-                    uint32_t response_len = value.size();
-                    ::send(client_fd, &response_len, sizeof(response_len), 0);
+                // Always reply with a length-prefixed value (length 0 for a
+                // missing key) so the client's blocking recv returns a clean
+                // miss instead of hanging forever waiting for a response that
+                // the old "only reply if non-empty" path never sent.
+                uint32_t response_len = static_cast<uint32_t>(value.size());
+                ::send(client_fd, &response_len, sizeof(response_len), 0);
+                if (response_len > 0) {
                     ::send(client_fd, value.c_str(), value.size(), 0);
                 }
             } else if (op == "DEL") {
@@ -576,35 +593,57 @@ auto GlooBackend::reduce_scatter(const std::vector<Tensor>& tensors, Tensor& out
         throw std::invalid_argument("reduce_scatter: tensors size must equal world_size");
     }
 
-    // Reduce-scatter: each rank provides tensors[i] for all i,
-    // and rank j receives the reduction of all ranks' tensors[j]
+    // Reduce-scatter: each rank provides tensors[i] for all i, and rank j
+    // receives the elementwise reduction across all ranks of their tensors[j].
+    //
+    // Ring reduce-scatter: every rank communicates the equivalent of its input
+    // exactly once (O(N) total), instead of all-reducing every chunk on every
+    // rank (the previous O(W) implementation, which also did a dead throwaway
+    // all_reduce before the loop). This mirrors ring_all_reduce's reduce-scatter
+    // phase and its send-then-recv ordering, which is proven safe on this
+    // transport.
 
-    // Simple but correct implementation: all-reduce each chunk separately
-    // For chunk i, all ranks all-reduce their tensors[i], and rank i keeps the result
+    if (world_size_ == 1) {
+        output = tensors[0].clone();
+        return;
+    }
 
-    // Copy our output chunk
-    output = tensors[rank_].clone();
+    // Working accumulators on CPU (Gloo is CPU-only). accum[i] starts as this
+    // rank's contribution to chunk i and accumulates received contributions.
+    std::vector<Tensor> accum;
+    accum.reserve(world_size_);
+    for (int i = 0; i < world_size_; ++i) {
+        accum.push_back(get_cpu_buffer(tensors[i]).clone());
+    }
 
-    // All-reduce it (all ranks do this for their respective chunks)
-    all_reduce(output, op);
+    const int send_rank = (rank_ + 1) % world_size_;
+    const int recv_rank = (rank_ - 1 + world_size_) % world_size_;
 
-    // Note: This works because:
-    // - Rank 0 all-reduces its tensors[0] -> gets reduction of all ranks' tensors[0]
-    // - Rank 1 all-reduces its tensors[1] -> gets reduction of all ranks' tensors[1]
-    // - etc.
-    // Even though they're all-reducing different data, the all_reduce calls don't interfere
-    // because each rank is doing its own independent all-reduce operation.
+    // Chunk indices are chosen so that, after W-1 steps, accum[rank_] is the
+    // chunk that received a contribution on every step and is therefore the
+    // fully reduced one (each rank receives into all chunks except the one it
+    // only ever sends). send_chunk is the next rank's recv_chunk, keeping the
+    // ring consistent: send_chunk_r(s) == recv_chunk_{r+1}(s).
+    for (int step = 0; step < world_size_ - 1; ++step) {
+        int send_chunk_idx =
+            (rank_ - step - 1 + 2 * world_size_) % world_size_;
+        int recv_chunk_idx =
+            (rank_ - step - 2 + 2 * world_size_) % world_size_;
 
-    // Wait, that's wrong too! All ranks must call all_reduce with the SAME data!
+        Tensor incoming = zeros_like(accum[recv_chunk_idx]);
+        send_tensor(accum[send_chunk_idx], send_rank);
+        recv_tensor(incoming, recv_rank);
 
-    // OK, the REAL correct implementation: do world_size all-reduces, one per chunk
-    for (int chunk_idx = 0; chunk_idx < world_size_; ++chunk_idx) {
-        Tensor temp = tensors[chunk_idx].clone();
-        all_reduce(temp, op);
+        // apply_reduce_op treats AVG as SUM (no world_size context); the final
+        // average is applied below, matching reduce()/ring_all_reduce.
+        apply_reduce_op(accum[recv_chunk_idx], incoming, op);
+    }
 
-        if (chunk_idx == rank_) {
-            output = temp;
-        }
+    // After W-1 steps, accum[rank_] holds the full reduction of chunk rank_.
+    output = accum[rank_];
+
+    if (op == ReduceOp::AVG && world_size_ > 0) {
+        output = tenzor::div(output, static_cast<double>(world_size_));
     }
 }
 

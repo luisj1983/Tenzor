@@ -259,6 +259,12 @@ auto nhwc_to_nchw(const Tensor& input, int64_t channels, cudaStream_t stream) ->
             input.data<double>(), output.data<double>(),
             batch, channels, height, width
         );
+    } else if (input.dtype() == DType::BFloat16) {
+        auto [grid_size, block_size] = optimal_launch_config(nhwc_to_nchw_kernel<BFloat16>, total);
+        nhwc_to_nchw_kernel<BFloat16><<<grid_size, block_size, 0, stream>>>(
+            input.data<BFloat16>(), output.data<BFloat16>(),
+            batch, channels, height, width
+        );
     } else {
         throw std::runtime_error("nhwc_to_nchw: unsupported dtype");
     }
@@ -2170,6 +2176,15 @@ auto cudnn_conv2d_backward_nhwc(
                 conv_desc.get(), algo, workspace, workspace_size,
                 &beta, grad_input_desc.get(), grad_input_nhwc.data<Float16>()
             ));
+        } else if (input.dtype() == DType::BFloat16) {
+            CUDNN_CHECK(cudnnConvolutionBackwardData(
+                handle, &alpha, filter_desc.get(), weight_nhwc.data<BFloat16>(),
+                grad_output_desc.get(), grad_output_nhwc.data<BFloat16>(),
+                conv_desc.get(), algo, workspace, workspace_size,
+                &beta, grad_input_desc.get(), grad_input_nhwc.data<BFloat16>()
+            ));
+        } else {
+            throw std::runtime_error("cuDNN Conv2d backward NHWC (grad_input): unsupported dtype");
         }
 
         // Convert grad_input back to NCHW
@@ -2254,6 +2269,15 @@ auto cudnn_conv2d_backward_nhwc(
                 conv_desc.get(), algo, workspace, workspace_size,
                 &beta, grad_filter_desc.get(), grad_weight_nhwc.data<Float16>()
             ));
+        } else if (input.dtype() == DType::BFloat16) {
+            CUDNN_CHECK(cudnnConvolutionBackwardFilter(
+                handle, &alpha, input_desc.get(), input_nhwc.data<BFloat16>(),
+                grad_output_desc.get(), grad_output_nhwc.data<BFloat16>(),
+                conv_desc.get(), algo, workspace, workspace_size,
+                &beta, grad_filter_desc.get(), grad_weight_nhwc.data<BFloat16>()
+            ));
+        } else {
+            throw std::runtime_error("cuDNN Conv2d backward NHWC (grad_weight): unsupported dtype");
         }
 
         // Convert grad_weight back to NCHW format
@@ -2284,6 +2308,14 @@ auto cudnn_conv2d_backward_nhwc(
                 grad_weight_nhwc.data<double>(), grad_weight.data<double>(),
                 gw_k, gw_c, gw_kh, gw_kw
             );
+        } else if (weight.dtype() == DType::BFloat16) {
+            auto [grid_size, block_size] = optimal_launch_config(nhwc_to_nchw_kernel<BFloat16>, total);
+            nhwc_to_nchw_kernel<BFloat16><<<grid_size, block_size, 0, stream>>>(
+                grad_weight_nhwc.data<BFloat16>(), grad_weight.data<BFloat16>(),
+                gw_k, gw_c, gw_kh, gw_kw
+            );
+        } else {
+            throw std::runtime_error("cuDNN Conv2d backward NHWC (grad_weight NCHW convert): unsupported dtype");
         }
         CUDA_CHECK(cudaGetLastError());
     }
@@ -2309,6 +2341,13 @@ auto cudnn_conv2d_backward_nhwc(
                 handle, &alpha, grad_output_desc.get(), grad_output_nhwc.data<Float16>(),
                 &beta, bias_desc.get(), grad_bias.data<Float16>()
             ));
+        } else if (input.dtype() == DType::BFloat16) {
+            CUDNN_CHECK(cudnnConvolutionBackwardBias(
+                handle, &alpha, grad_output_desc.get(), grad_output_nhwc.data<BFloat16>(),
+                &beta, bias_desc.get(), grad_bias.data<BFloat16>()
+            ));
+        } else {
+            throw std::runtime_error("cuDNN Conv2d backward NHWC (grad_bias): unsupported dtype");
         }
     }
 
@@ -3108,9 +3147,14 @@ __global__ void optimized_layer_norm_kernel(
 
     __shared__ float shared[BLOCK_SIZE / 32];
 
-    // Use vectorized loads when possible
+    // Use vectorized loads only when each per-row base is 16-byte aligned.
+    // cudaMalloc guarantees 256-byte base alignment, but per-row bases are
+    // offset by b*norm_size floats; that offset is a multiple of 16 bytes
+    // (and float4 access is well-defined) only when norm_size % 4 == 0.
+    // Otherwise vec_norm_size is forced to 0 so every element is processed
+    // by the scalar remainder loops (matching the FP16/BF16/FP64 kernels).
     const int vec_size = 4;
-    const int64_t vec_norm_size = norm_size / vec_size;
+    const int64_t vec_norm_size = (norm_size % vec_size == 0) ? (norm_size / vec_size) : 0;
     const int64_t remainder_start = vec_norm_size * vec_size;
 
     // ===== Pass 1: Compute mean =====

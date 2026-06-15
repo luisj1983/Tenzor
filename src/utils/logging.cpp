@@ -80,13 +80,16 @@ auto Logger::log(LogLevel level, std::string_view message,
     std::lock_guard<std::mutex> lock(mutex_);
     if (level < level_) return;
 
-    // Legacy contract (restored): each line is
+    // Legacy contract: each line is
     //   [YYYY-MM-DD HH:MM:SS.mmm] [LEVEL] message
     // with an uppercase severity tag (DEBUG/INFO/WARNING/ERROR/FATAL),
     // emitted to std::cout when the console is enabled and/or to the
     // configured output file, and flushed per line so consumers that read
     // the stream/file immediately after logging (tests, crash handlers)
-    // observe the message.
+    // observe the message. This path backs only the legacy-only macros
+    // (TENZOR_LOG_WARNING/FATAL/WARN_ONCE) and direct Logger::instance()
+    // callers; TENZOR_LOG_DEBUG/INFO/ERROR are owned solely by log.hpp's
+    // spdlog facade so those names have one expansion target process-wide.
     std::string line;
     line.reserve(message.size() + 48);
     line.append("[").append(timestamp_now()).append("] [")

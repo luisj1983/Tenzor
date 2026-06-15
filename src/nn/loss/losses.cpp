@@ -174,8 +174,13 @@ auto CrossEntropyLoss::forward(const Variable& input, const Tensor& target) -> V
     Variable input_c = needs_upcast
         ? tenzor::nn::variable_cast(input, DType::Float32)
         : input;
-    Tensor target_c = (needs_upcast && (target.dtype() == DType::Float16 ||
-                                        target.dtype() == DType::BFloat16))
+    // Upcast a half-precision target to Float32 independently of the input
+    // dtype: a Float32 input combined with a 2-D BFloat16/Float16 one-hot/soft
+    // target must still be recognised as a float (one-hot) target. Gating the
+    // upcast on the input dtype left a BF16 soft target as BF16, which the
+    // dtype probe below then misclassified as integer class indices.
+    Tensor target_c = (target.dtype() == DType::Float16 ||
+                       target.dtype() == DType::BFloat16)
         ? target.to(DType::Float32)
         : target;
 
@@ -192,7 +197,7 @@ auto CrossEntropyLoss::forward(const Variable& input, const Tensor& target) -> V
     // use the upcast target_c (F16/BF16 -> F32) for the dtype probe and the
     // downstream one-hot construction so the smoothed-target arithmetic is
     // entirely Float32.
-    bool is_float_target = (target_c.dtype() == DType::Float32 || target_c.dtype() == DType::Float64 || target_c.dtype() == DType::Float16) && target_c.ndim() == 2;
+    bool is_float_target = (target_c.dtype() == DType::Float32 || target_c.dtype() == DType::Float64 || target_c.dtype() == DType::Float16 || target_c.dtype() == DType::BFloat16) && target_c.ndim() == 2;
 
     // J.5: track which samples to ignore (class-index path only — one-hot
     // / soft targets carry weights directly so ignore_index is N/A there).
@@ -337,8 +342,13 @@ auto NLLLoss::forward(const Variable& input, const Tensor& target) -> Variable {
     Variable input_c = needs_upcast
         ? tenzor::nn::variable_cast(input, DType::Float32)
         : input;
-    Tensor target_c = (needs_upcast && (target.dtype() == DType::Float16 ||
-                                        target.dtype() == DType::BFloat16))
+    // Upcast a half-precision target to Float32 independently of the input
+    // dtype: a Float32 input combined with a 2-D BFloat16/Float16 one-hot/soft
+    // target must still be recognised as a float (one-hot) target. Gating the
+    // upcast on the input dtype left a BF16 soft target as BF16, which the
+    // dtype probe below then misclassified as integer class indices.
+    Tensor target_c = (target.dtype() == DType::Float16 ||
+                       target.dtype() == DType::BFloat16)
         ? target.to(DType::Float32)
         : target;
 
@@ -346,7 +356,8 @@ auto NLLLoss::forward(const Variable& input, const Tensor& target) -> Variable {
 
     const bool is_float_target =
         (target_c.dtype() == DType::Float32 || target_c.dtype() == DType::Float64 ||
-         target_c.dtype() == DType::Float16) && target_c.ndim() == 2;
+         target_c.dtype() == DType::Float16 || target_c.dtype() == DType::BFloat16) &&
+        target_c.ndim() == 2;
 
     Variable one_hot_var;
     std::optional<Tensor> keep_mask;  // populated on class-index path only

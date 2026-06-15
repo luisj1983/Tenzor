@@ -21,7 +21,7 @@ from __future__ import annotations
 from typing import Sequence, Tuple
 
 import tenzor as _tz
-from tenzor.tenzor_core import Tensor, Variable  # type: ignore
+from tenzor.tenzor_core import Tensor  # type: ignore
 
 
 def _shape_tuple(shape: Sequence[int]) -> Tuple[int, ...]:
@@ -84,48 +84,10 @@ def standard_cauchy(shape: Sequence[int], eps: float = 1e-7) -> Tensor:
     return _tz.tan((u - 0.5) * math.pi)
 
 
-def gamma_sample(concentration, rate=None, shape: Sequence[int] = ()) -> Tensor:
-    """Draw a Gamma(α, β) sample via the native Marsaglia-Tsang kernel.
-
-    Uses ``tz.gamma_sample`` (device-side, no NumPy round-trip). concentration
-    and rate are materialised to the requested output ``shape`` (or their
-    broadcast shape) so every draw carries its own (α, β). Returns a detached
-    Tensor on the parameter tensor's device.
-    """
-    def _as_tensor(v):
-        if isinstance(v, Variable):
-            return v.tensor()
-        return v  # Tensor (or scalar handled below)
-
-    a_t = _as_tensor(concentration)
-    b_t = _as_tensor(rate) if rate is not None else None
-
-    # Determine the explicit output shape (caller-supplied wins; else the
-    # broadcast of the two parameter shapes).
-    if shape:
-        out_shape = list(_shape_tuple(shape))
-    else:
-        # Tensor.shape is a property (list), not a method.
-        a_shape = list(a_t.shape) if hasattr(a_t, "shape") else []
-        b_shape = list(b_t.shape) if (b_t is not None and hasattr(b_t, "shape")) else []
-        out_shape = a_shape if len(a_shape) >= len(b_shape) else b_shape
-
-    if out_shape:
-        ones = _tz.ones(out_shape)
-        a_t = a_t * ones
-        b_t = (b_t * ones) if b_t is not None else ones  # rate=None -> β=1
-    elif b_t is None:
-        # Scalar α with no shape and rate=None: β = 1 of matching shape.
-        b_t = _tz.ones(list(a_t.shape) if hasattr(a_t, "shape") else [])
-
-    return _tz.gamma_sample(a_t, b_t)
-
-
 __all__ = [
     "standard_normal",
     "standard_uniform",
     "standard_exponential",
     "standard_gumbel",
     "standard_cauchy",
-    "gamma_sample",
 ]

@@ -97,8 +97,8 @@ auto unflatten_into(const Tensor& flat_tensor,
     for (const auto& shape : shapes) {
         size_t shape_elements = 1;
         for (auto dim : shape) {
-            if (dim <= 0) {
-                throw std::invalid_argument("All shape dimensions must be positive");
+            if (dim < 0) {
+                throw std::invalid_argument("Shape dimensions must be non-negative");
             }
             shape_elements *= dim;
         }

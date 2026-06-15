@@ -35,11 +35,18 @@ enum class QuantizationMode {
  * Allows specifying different QConfigs for different layers, and
  * excluding specific layers from quantization entirely.
  *
+ * Keys are POSITIONAL dotted paths, NOT semantic module names. The path-aware
+ * converter walks Sequential children by index and builds each key from the
+ * zero-based child index joined by '.' (e.g. the second top-level child is
+ * "1"; the first child of the third child is "2.0"). config_for() does an
+ * exact lookup against these positional keys — semantic names like "fc1" will
+ * never match and the layer is quantized with default_config.
+ *
  * @code
  * QuantizationConfig config;
  * config.default_config = DefaultQConfigs::default_qconfig();
- * config.layer_overrides["fc1"] = qconfig_int4;  // INT4 for fc1
- * config.skip_layers.insert("embedding");         // Keep embedding in FP32
+ * config.layer_overrides["1"] = qconfig_int4;  // INT4 for the 2nd child
+ * config.skip_layers.insert("0");               // Keep the 1st child in FP32
  *
  * auto q_model = quantize_dynamic(model, config);
  * @endcode
@@ -67,9 +74,15 @@ struct QuantizationConfig {
  * in FP32. No calibration required, fastest to apply but less performance
  * improvement than static quantization.
  *
+ * Activations are always kept in FP32 by definition of dynamic quantization
+ * (they are quantized on the fly per inference, not stored as INT8), so there
+ * is deliberately no activation_dtype parameter — passing one previously had
+ * no effect and only misrepresented the FP32-activation contract.
+ *
  * @param model Model to quantize
- * @param weight_dtype Weight quantization data type (default: INT8)
- * @param activation_dtype Activation data type (keeps FP32)
+ * @param weight_dtype Weight quantization data type (default: INT8; only INT8
+ *        is supported by this entry point — pass a QuantizationConfig for other
+ *        weight dtypes)
  * @return Quantized model
  *
  * @code
@@ -82,8 +95,7 @@ struct QuantizationConfig {
  */
 auto quantize_dynamic(
     std::shared_ptr<nn::Module> model,
-    nn::quantization::QuantDType weight_dtype = nn::quantization::QuantDType::INT8,
-    nn::quantization::QuantDType activation_dtype = nn::quantization::QuantDType::INT8
+    nn::quantization::QuantDType weight_dtype = nn::quantization::QuantDType::INT8
 ) -> std::shared_ptr<nn::Module>;
 
 /// Overload with per-layer config — allows skipping layers or using different QConfigs.

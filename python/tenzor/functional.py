@@ -2242,13 +2242,14 @@ def dropout2d(input: Variable, p: float = 0.5,
     if not training or p == 0.0:
         return input
     import tenzor as tz
-    shape = list(input.tensor().shape())
+    shape = list(input.tensor().shape)
     if len(shape) < 4:
         raise ValueError(
             "dropout2d expects a 4D input (N, C, H, W); got shape " + str(shape))
     # Bernoulli mask over channels: shape (N, C, 1, 1) so it broadcasts.
     n, c = shape[0], shape[1]
-    mask = (tz.rand([n, c, 1, 1], dtype=input.tensor().dtype()) >= p).to(input.tensor().dtype())
+    x_dtype = input.tensor().dtype
+    mask = (tz.rand([n, c, 1, 1], dtype=x_dtype) >= p).to(x_dtype)
     scale = 1.0 / (1.0 - p)
     # Q.13 / J.3: multiply at Variable level so autograd records the
     # dropout mask as a constant cotangent multiplier (grad_fn survives).
@@ -2271,13 +2272,13 @@ def alpha_dropout(input: Variable, p: float = 0.5,
     import tenzor as tz
     alpha = -1.7580993408473766  # SELU's negative saturation value
     # Bernoulli keep-mask.
-    shape = list(input.tensor().shape())
-    keep = (tz.rand(shape, dtype=input.tensor().dtype()) >= p).to(input.tensor().dtype())
+    x_dtype = input.tensor().dtype
+    x_shape = list(input.tensor().shape)
+    shape = x_shape
+    keep = (tz.rand(shape, dtype=x_dtype) >= p).to(x_dtype)
     # Affine constants: a * (mask * x + (1 - mask) * alpha) + b.
     a = ((1 - p) * (1 + p * alpha * alpha)) ** -0.5
     b = -a * alpha * p
-    x_dtype = input.tensor().dtype()
-    x_shape = list(input.tensor().shape())
     # The closed-form is:
     #   out = (a * keep) * x  +  (a * (1 - keep) * alpha + b)
     # The first term is the only one that depends on the input. Route the
@@ -2393,7 +2394,7 @@ def margin_ranking_loss(input1: Variable, input2: Variable, target: Variable,
 
     Wraps tenzor_core.nn.margin_ranking_loss.
     """
-    return _nn.margin_ranking_loss(input1, input2, target, margin=margin, reduction=reduction)
+    return _nn.margin_ranking_loss(input1, input2, target, margin=margin, reduction=_reduction(reduction))
 
 
 __all__ = [

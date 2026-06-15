@@ -325,6 +325,16 @@ private:
      * @return true if inf or nan found in any gradient
      */
     auto check_inf_nan_(const optim::Optimizer& optimizer) const -> bool;
+
+    /**
+     * @brief Validate the scaling hyper-parameters against their invariants.
+     *
+     * Throws std::invalid_argument if init_scale_ <= 0, growth_factor_ <= 1,
+     * backoff_factor_ not in (0, 1), or growth_interval_ <= 0. Shared by the
+     * constructor and load_state_dict() so a restored state cannot bypass the
+     * same checks the constructor enforces.
+     */
+    auto validate_config_() const -> void;
 };
 
 } // namespace amp

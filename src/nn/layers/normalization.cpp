@@ -63,6 +63,7 @@ inline auto check_norm_outputs(const std::vector<::tenzor::Tensor>& results,
 
 }  // namespace
 #include <cmath>
+#include <memory>
 #include <stdexcept>
 
 // SIMD headers for optimized LayerNorm
@@ -942,51 +943,54 @@ auto LayerNorm::forward_impl(const Variable& input_orig) -> Variable {
             DType::Float32, Device::cpu());
         auto* output_data = output.data<float>();
 
-        // Use thread-local scratch buffers for statistics to avoid allocation
-        // For small batch sizes, use stack allocation
+        // Scratch buffers for per-row statistics. For small batches the buffers
+        // live on the stack; the 64KB of stack arrays are only reserved inside
+        // the small-batch branch rather than on every call (including the heap
+        // path used for large batches).
         constexpr int64_t STACK_THRESHOLD = 8192;
-        float stack_mean[STACK_THRESHOLD];
-        float stack_rstd[STACK_THRESHOLD];
 
-        float* mean_scratch = (batch_size <= STACK_THRESHOLD) ? stack_mean : new float[batch_size];
-        float* rstd_scratch = (batch_size <= STACK_THRESHOLD) ? stack_rstd : new float[batch_size];
-
+        auto run_layer_norm = [&](float* mean_scratch, float* rstd_scratch) {
 #if defined(__x86_64__) || defined(_M_X64)
-        fused_layer_norm_f32(
-            input_data, weight_data, bias_data,
-            output_data, mean_scratch, rstd_scratch,
-            batch_size, N, static_cast<float>(eps_)
-        );
+            fused_layer_norm_f32(
+                input_data, weight_data, bias_data,
+                output_data, mean_scratch, rstd_scratch,
+                batch_size, N, static_cast<float>(eps_)
+            );
 #else
-        const int nthreads = get_optimal_threads();
-        #pragma omp parallel for num_threads(nthreads)
-        for (int64_t b = 0; b < batch_size; b++) {
-            float sum = 0.0f;
-            for (int64_t i = 0; i < N; i++) {
-                sum += input_data[b * N + i];
-            }
-            float mean = sum / N;
-            mean_scratch[b] = mean;
+            const int nthreads = get_optimal_threads();
+            #pragma omp parallel for num_threads(nthreads)
+            for (int64_t b = 0; b < batch_size; b++) {
+                float sum = 0.0f;
+                for (int64_t i = 0; i < N; i++) {
+                    sum += input_data[b * N + i];
+                }
+                float mean = sum / N;
+                mean_scratch[b] = mean;
 
-            float sum_sq = 0.0f;
-            for (int64_t i = 0; i < N; i++) {
-                float diff = input_data[b * N + i] - mean;
-                sum_sq += diff * diff;
-            }
-            float rs = 1.0f / std::sqrt(sum_sq / N + static_cast<float>(eps_));
-            rstd_scratch[b] = rs;
+                float sum_sq = 0.0f;
+                for (int64_t i = 0; i < N; i++) {
+                    float diff = input_data[b * N + i] - mean;
+                    sum_sq += diff * diff;
+                }
+                float rs = 1.0f / std::sqrt(sum_sq / N + static_cast<float>(eps_));
+                rstd_scratch[b] = rs;
 
-            for (int64_t i = 0; i < N; i++) {
-                int64_t idx = b * N + i;
-                output_data[idx] = (input_data[idx] - mean) * rs * weight_data[i] + bias_data[i];
+                for (int64_t i = 0; i < N; i++) {
+                    int64_t idx = b * N + i;
+                    output_data[idx] = (input_data[idx] - mean) * rs * weight_data[i] + bias_data[i];
+                }
             }
-        }
 #endif
+        };
 
-        // Clean up heap allocation if used
-        if (batch_size > STACK_THRESHOLD) {
-            delete[] mean_scratch;
-            delete[] rstd_scratch;
+        if (batch_size <= STACK_THRESHOLD) {
+            float stack_mean[STACK_THRESHOLD];
+            float stack_rstd[STACK_THRESHOLD];
+            run_layer_norm(stack_mean, stack_rstd);
+        } else {
+            std::unique_ptr<float[]> mean_scratch(new float[batch_size]);
+            std::unique_ptr<float[]> rstd_scratch(new float[batch_size]);
+            run_layer_norm(mean_scratch.get(), rstd_scratch.get());
         }
 
         return Variable(output, false);

@@ -196,7 +196,11 @@ private:
 
     // Persistent workers synchronization
     std::condition_variable epoch_start_cv_;  ///< Signals workers to start new epoch
-    std::atomic<bool> new_epoch_ready_;       ///< Flag for new epoch availability
+    /// Monotonic epoch counter. reset() increments it once per epoch so every
+    /// waiting persistent worker observes a change exactly once (a one-shot bool
+    /// is lost-wakeup-prone: the first worker to wake clears it before the rest
+    /// re-check the predicate, collapsing parallelism to a single worker).
+    uint64_t epoch_generation_{0};
 
     // Batch management
     size_t num_batches_;

@@ -2025,7 +2025,7 @@ __global__ void depthwise_conv2d_smem_kernel_f16(
         sum += __half2float(bias[c]);
     }
 
-    output[((n * channels + c) * out_h + oh) * out_w + ow] = __float2half(sum);
+    output[((n * channels + c) * out_h + oh) * out_w + ow] = float2half_sat(sum);
 }
 
 __global__ void depthwise_conv2d_forward_kernel_f16(
@@ -2069,7 +2069,7 @@ __global__ void depthwise_conv2d_forward_kernel_f16(
         sum += __half2float(bias[c]);
     }
 
-    output[idx] = __float2half(sum);
+    output[idx] = float2half_sat(sum);
 }
 
 auto depthwise_conv2d_forward_kernel(

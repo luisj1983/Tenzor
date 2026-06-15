@@ -234,8 +234,10 @@ private:
     /**
      * @brief Free CUDA pinned memory
      * @param ptr Pointer to free
+     * @param size Requested size in bytes used at allocation time (so the full
+     *             locked region can be unlocked on the non-CUDA path)
      */
-    auto free_cuda_pinned(void* ptr) -> void;
+    auto free_cuda_pinned(void* ptr, size_t size) -> void;
 
     /**
      * @brief Calculate fragmentation ratio

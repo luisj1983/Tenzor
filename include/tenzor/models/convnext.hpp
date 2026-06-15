@@ -28,6 +28,7 @@
 #include "../nn/layers/linear.hpp"
 #include "../nn/layers/pooling.hpp"
 #include "../nn/layers/dropout.hpp"
+#include "../nn/layers/drop_path.hpp"
 #include "../nn/activations/activations.hpp"
 
 namespace tenzor {
@@ -117,7 +118,7 @@ private:
     nn::GELU gelu_;                             ///< GELU activation
     std::shared_ptr<nn::Conv2d> pwconv2_;       ///< 1×1 projection conv
     std::shared_ptr<LayerScale> gamma_;         ///< Layer scale module
-    double drop_path_;                          ///< Drop path probability
+    std::shared_ptr<nn::DropPath> drop_path_;   ///< Stochastic depth (per-sample, seedable, train/eval-gated)
 };
 
 /**
@@ -174,12 +175,6 @@ private:
      * @brief Create a ConvNeXt stage with multiple blocks.
      */
     auto make_stage(int64_t dim, int64_t depth, double drop_path_start, double drop_path_end)
-        -> std::shared_ptr<nn::Sequential>;
-
-    /**
-     * @brief Create downsampling layer between stages.
-     */
-    auto make_downsample(int64_t in_dim, int64_t out_dim)
         -> std::shared_ptr<nn::Sequential>;
 
     std::vector<int64_t> depths_;

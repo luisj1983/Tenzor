@@ -3,28 +3,11 @@
 namespace tenzor {
 
 // Normalization operations implementation
-auto VulkanBackend::dispatchBatchNorm2d(const Tensor& input, [[maybe_unused]] const Tensor& mean, [[maybe_unused]] const Tensor& var,
-                                        [[maybe_unused]] const Tensor* gamma, [[maybe_unused]] const Tensor* beta, [[maybe_unused]] float epsilon) -> Tensor {
-    auto input_shape = input.shape();
-    int32_t device_id = input.device().index;
-    auto* pipeline = getPipeline("batch_norm2d", device_id);
-
-    std::vector<int64_t> out_shape(input_shape.begin(), input_shape.end());
-    Tensor output(out_shape, input.dtype(), input.device());
-
-    VkCommandBuffer cmdBuffer = beginSingleTimeCommands(device_id);
-    vkCmdBindPipeline(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
-
-    uint32_t workgroups = div_wg(input.numel(), devices_[device_id].workgroupSize);
-    vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
-
-    // Add memory barrier
-    insertComputeOnlyBarrier(cmdBuffer);
-
-    endSingleTimeCommands(cmdBuffer, device_id);
-
-    return fp16_saturate_if_needed(*this, output);
-}
+//
+// NOTE: the old non-functional `dispatchBatchNorm2d` (which dispatched a
+// pipeline with no descriptor set / push constants / bindings and returned
+// uninitialized memory) has been removed. The working forward path is
+// dispatchBatchNorm2dForward below; backward is dispatchBatchNorm2dBackward.
 
 auto VulkanBackend::dispatchBatchNorm2dBackward(const Tensor& grad_out, const Tensor& input,
                                                  const Tensor& mean, const Tensor& var,

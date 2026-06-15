@@ -44,6 +44,84 @@ auto verify_same_structure(const NestedTensor& a, const NestedTensor& b) -> void
     if (a.device() != b.device()) {
         throw std::runtime_error("nested op: device mismatch");
     }
+    // Compare the full offsets tensors element-wise. Equal batch_size and equal
+    // total values numel are NOT sufficient: two NestedTensors can share both
+    // yet still partition their packed rows into different per-element lengths
+    // (e.g. a.offsets=[0,2,5], b.offsets=[0,3,5]). An element-wise op would then
+    // run positionally on mismatched jagged structures and silently tag the
+    // result with a's offsets. Copy to host (offsets are small, B+1) and verify.
+    const auto& a_off = a.offsets();
+    const auto& b_off = b.offsets();
+    if (a_off.numel() != b_off.numel()) {
+        throw std::runtime_error("nested op: offsets length mismatch (" +
+            std::to_string(a_off.numel()) + " vs " +
+            std::to_string(b_off.numel()) + ")");
+    }
+    auto a_off_cpu = (a_off.device().type != Device::Type::CPU)
+        ? a_off.to(Device::cpu()) : a_off;
+    auto b_off_cpu = (b_off.device().type != Device::Type::CPU)
+        ? b_off.to(Device::cpu()) : b_off;
+    const auto* ap = a_off_cpu.data<int64_t>();
+    const auto* bp = b_off_cpu.data<int64_t>();
+    for (int64_t i = 0; i < a_off_cpu.numel(); ++i) {
+        if (ap[i] != bp[i]) {
+            throw std::runtime_error(
+                "nested op: offsets mismatch (different jagged structure)");
+        }
+    }
+}
+
+/// Verify two NestedTensors share the same ragged structure (batch size, the
+/// full offsets tensor, and device) WITHOUT requiring equal values numel. Used
+/// where only the per-element sequence partitioning must agree but the trailing
+/// regular feature dimension may differ — e.g. attention's value projection,
+/// whose feature dim Dv need not equal the query/key feature dim Dq.
+auto verify_same_offsets(const NestedTensor& a, const NestedTensor& b) -> void {
+    if (a.batch_size() != b.batch_size()) {
+        throw std::runtime_error(
+            "nested op: batch size mismatch (" + std::to_string(a.batch_size()) +
+            " vs " + std::to_string(b.batch_size()) + ")");
+    }
+    if (a.device() != b.device()) {
+        throw std::runtime_error("nested op: device mismatch");
+    }
+    const auto& a_off = a.offsets();
+    const auto& b_off = b.offsets();
+    if (a_off.numel() != b_off.numel()) {
+        throw std::runtime_error("nested op: offsets length mismatch (" +
+            std::to_string(a_off.numel()) + " vs " +
+            std::to_string(b_off.numel()) + ")");
+    }
+    auto a_off_cpu = (a_off.device().type != Device::Type::CPU)
+        ? a_off.to(Device::cpu()) : a_off;
+    auto b_off_cpu = (b_off.device().type != Device::Type::CPU)
+        ? b_off.to(Device::cpu()) : b_off;
+    const auto* ap = a_off_cpu.data<int64_t>();
+    const auto* bp = b_off_cpu.data<int64_t>();
+    for (int64_t i = 0; i < a_off_cpu.numel(); ++i) {
+        if (ap[i] != bp[i]) {
+            throw std::runtime_error(
+                "nested op: offsets mismatch (different jagged structure)");
+        }
+    }
+}
+
+/// Build the contiguous offsets [0, 1, ..., B] for a NestedTensor whose every
+/// batch element holds exactly one row (the result of a ragged-dim reduction:
+/// each segment collapses to a single row, so values has B rows total).
+/// Offsets are constructed on the HOST — data<int64_t>() returns a device
+/// pointer on GPU backends, so host writes there are UB — then moved to the
+/// target device before from_jagged.
+auto make_unit_offsets(int64_t B, Device device) -> Tensor {
+    auto offsets = tenzor::zeros({B + 1}, DType::Int64, Device::cpu());
+    auto* ptr = offsets.data<int64_t>();
+    for (int64_t i = 0; i <= B; ++i) {
+        ptr[i] = i;
+    }
+    if (device.type != Device::Type::CPU) {
+        offsets = offsets.to(device);
+    }
+    return offsets;
 }
 
 /// Helper for segmented per-element operation with a unary function on segments.
@@ -158,6 +236,7 @@ auto nested_mul_scalar(const NestedTensor& a, double scalar) -> NestedTensor {
 // =========================================================================
 
 auto nested_softmax(const NestedTensor& input, int64_t dim) -> NestedTensor {
+    if (dim < 0) dim += input.ndim();
     if (dim != input.ragged_dim()) {
         // Softmax along a regular dim — operate on values directly.
         int64_t values_dim = dim - 1;
@@ -184,6 +263,7 @@ auto nested_softmax(const NestedTensor& input, int64_t dim) -> NestedTensor {
 }
 
 auto nested_log_softmax(const NestedTensor& input, int64_t dim) -> NestedTensor {
+    if (dim < 0) dim += input.ndim();
     if (dim != input.ragged_dim()) {
         int64_t values_dim = dim - 1;
         OpAttributes attrs;
@@ -220,6 +300,7 @@ auto nested_layer_norm(const NestedTensor& input, const Tensor& weight,
 
 auto nested_sum(const NestedTensor& input, int64_t dim,
                 bool keepdim) -> NestedTensor {
+    if (dim < 0) dim += input.ndim();
     if (dim != input.ragged_dim()) {
         int64_t values_dim = dim - 1;
         auto result = tenzor::sum(input.values(), values_dim, keepdim);
@@ -227,20 +308,14 @@ auto nested_sum(const NestedTensor& input, int64_t dim,
                                          input.ragged_dim());
     }
 
-    // Sum along ragged dim — per segment
-    auto offsets_cpu = (input.offsets().device().type != Device::Type::CPU)
-        ? input.offsets().to(Device::cpu()) : input.offsets();
-    const auto* off_ptr = offsets_cpu.data<int64_t>();
+    // Sum along ragged dim — dispatch to the native NestedSum kernel rather than
+    // looping B small reductions on the host (the kernel is the same one the
+    // autograd forward path uses, see nested_autograd_ops). The kernel returns
+    // one row per batch element ([B, *regular]); each batch element then holds a
+    // single row, so offsets are the unit sequence [0, 1, ..., B].
     int64_t B = input.batch_size();
 
-    std::vector<Tensor> results;
-    results.reserve(B);
-    for (int64_t i = 0; i < B; ++i) {
-        auto seg = input.values().slice(0, off_ptr[i], off_ptr[i + 1]);
-        results.push_back(tenzor::sum(seg, 0, keepdim));
-    }
-
-    if (results.empty()) {
+    if (B == 0) {
         std::vector<int64_t> shape = {0};
         shape.insert(shape.end(), input.regular_shape().begin(),
                      input.regular_shape().end());
@@ -249,24 +324,25 @@ auto nested_sum(const NestedTensor& input, int64_t dim,
             input.offsets(), input.ragged_dim());
     }
 
-    auto new_values = tenzor::cat(results, 0);
-    // Build offsets on CPU (host writes) then move to the input's device.
-    // Writing through .data<int64_t>() on a device-resident tensor is a
-    // host-side dereference of GPU memory and segfaults on Vulkan/CUDA/etc.
-    auto new_offsets = tenzor::zeros({B + 1}, DType::Int64, Device::cpu());
-    auto* noff_ptr = new_offsets.data<int64_t>();
-    for (int64_t i = 0; i <= B; ++i) {
-        noff_ptr[i] = i;
+    OpAttributes attrs;
+    attrs.set(AttrKey::Dim, dim);
+    attrs.set(AttrKey::Keepdim, keepdim);
+    std::vector<Tensor> inputs = {input.values(), input.offsets()};
+    auto reduced = dispatch<OpId::NestedSum>(inputs, attrs)[0];
+    // The kernel always yields [B, *regular]; the public contract adds a unit
+    // axis when keepdim is requested so callers see [B, 1, *regular].
+    if (keepdim) {
+        reduced = reduced.unsqueeze(1);
     }
-    if (input.device().type != Device::Type::CPU) {
-        new_offsets = new_offsets.to(input.device());
-    }
-    return NestedTensor::from_jagged(new_values, new_offsets,
+
+    auto new_offsets = make_unit_offsets(B, input.device());
+    return NestedTensor::from_jagged(reduced, new_offsets,
                                      input.ragged_dim());
 }
 
 auto nested_mean(const NestedTensor& input, int64_t dim,
                  bool keepdim) -> NestedTensor {
+    if (dim < 0) dim += input.ndim();
     if (dim != input.ragged_dim()) {
         int64_t values_dim = dim - 1;
         auto result = tenzor::mean(input.values(), values_dim, keepdim);
@@ -274,19 +350,13 @@ auto nested_mean(const NestedTensor& input, int64_t dim,
                                          input.ragged_dim());
     }
 
-    auto offsets_cpu = (input.offsets().device().type != Device::Type::CPU)
-        ? input.offsets().to(Device::cpu()) : input.offsets();
-    const auto* off_ptr = offsets_cpu.data<int64_t>();
+    // Mean along ragged dim — dispatch to the native NestedMean kernel (same
+    // kernel used by the autograd forward path) instead of B host-side slices +
+    // reductions. The kernel returns [B, *regular]; each batch element holds one
+    // row, so offsets are the unit sequence [0, 1, ..., B].
     int64_t B = input.batch_size();
 
-    std::vector<Tensor> results;
-    results.reserve(B);
-    for (int64_t i = 0; i < B; ++i) {
-        auto seg = input.values().slice(0, off_ptr[i], off_ptr[i + 1]);
-        results.push_back(tenzor::mean(seg, 0, keepdim));
-    }
-
-    if (results.empty()) {
+    if (B == 0) {
         std::vector<int64_t> shape = {0};
         shape.insert(shape.end(), input.regular_shape().begin(),
                      input.regular_shape().end());
@@ -295,19 +365,17 @@ auto nested_mean(const NestedTensor& input, int64_t dim,
             input.offsets(), input.ragged_dim());
     }
 
-    auto new_values = tenzor::cat(results, 0);
-    // Build offsets on CPU (host writes) then move to the input's device.
-    // Writing through .data<int64_t>() on a device-resident tensor is a
-    // host-side dereference of GPU memory and segfaults on Vulkan/CUDA/etc.
-    auto new_offsets = tenzor::zeros({B + 1}, DType::Int64, Device::cpu());
-    auto* noff_ptr = new_offsets.data<int64_t>();
-    for (int64_t i = 0; i <= B; ++i) {
-        noff_ptr[i] = i;
+    OpAttributes attrs;
+    attrs.set(AttrKey::Dim, dim);
+    attrs.set(AttrKey::Keepdim, keepdim);
+    std::vector<Tensor> inputs = {input.values(), input.offsets()};
+    auto reduced = dispatch<OpId::NestedMean>(inputs, attrs)[0];
+    if (keepdim) {
+        reduced = reduced.unsqueeze(1);
     }
-    if (input.device().type != Device::Type::CPU) {
-        new_offsets = new_offsets.to(input.device());
-    }
-    return NestedTensor::from_jagged(new_values, new_offsets,
+
+    auto new_offsets = make_unit_offsets(B, input.device());
+    return NestedTensor::from_jagged(reduced, new_offsets,
                                      input.ragged_dim());
 }
 
@@ -335,8 +403,13 @@ auto nested_matmul(const NestedTensor& a, const Tensor& b) -> NestedTensor {
 auto nested_attention(const NestedTensor& query, const NestedTensor& key,
                       const NestedTensor& value, double scale,
                       bool causal) -> NestedTensor {
+    // Key must match query in full (feature dim Dk == Dq is required by the
+    // Q @ K^T score matmul). Value only needs the SAME ragged structure as the
+    // query/key: the attn_weights @ V matmul accepts a distinct value feature
+    // dim Dv, so requiring equal values numel here would wrongly reject valid
+    // value projections to a different dimension.
     verify_same_structure(query, key);
-    verify_same_structure(query, value);
+    verify_same_offsets(query, value);
 
     auto offsets_cpu = (query.offsets().device().type != Device::Type::CPU)
         ? query.offsets().to(Device::cpu()) : query.offsets();
@@ -347,6 +420,25 @@ auto nested_attention(const NestedTensor& query, const NestedTensor& key,
     if (actual_scale < 0.0) {
         int64_t head_dim = query.values().shape().back();
         actual_scale = 1.0 / std::sqrt(static_cast<double>(head_dim));
+    }
+
+    // Fast path: when the value feature dim Dv equals the query/key head dim,
+    // dispatch to the native NestedAttention kernel (same kernel the autograd
+    // forward path uses) instead of issuing B host-side slice+matmul+softmax
+    // ops. The kernel assumes Dv == Dq == Dk, so a distinct value feature dim
+    // (permitted by verify_same_offsets) falls through to the segmented path
+    // below, which handles arbitrary Dv via the explicit attn_weights @ V matmul.
+    if (B > 0 &&
+        value.values().shape().back() == query.values().shape().back()) {
+        OpAttributes attrs;
+        attrs.set(AttrKey::Scale, actual_scale);
+        attrs.set(AttrKey::Causal, causal);
+        std::vector<Tensor> inputs = {query.values(), key.values(),
+                                      value.values(), query.offsets(),
+                                      query.offsets()};
+        auto result = dispatch<OpId::NestedAttention>(inputs, attrs)[0];
+        return NestedTensor::from_jagged(result, query.offsets(),
+                                         query.ragged_dim());
     }
 
     std::vector<Tensor> results;

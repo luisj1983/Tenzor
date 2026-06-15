@@ -637,31 +637,41 @@ static float parallel_simd_sum_f32(const float* data, int64_t n) {
 
 // Parallel SIMD max for float32.
 // NaN propagation: if any element is NaN, returns NaN (PyTorch/NumPy semantics).
+//
+// The SIMD/scalar max ignores NaN (unordered compares), so we cannot rely on
+// the reduction result alone to surface NaNs. Instead of paying a separate full
+// scalar NaN pre-scan (an extra non-SIMD, non-parallel memory pass that
+// dominated large-tensor cost), we fold a fast result check + targeted fallback:
+// take the SIMD/parallel max first, and only when that result is NaN — or, for
+// the common case where the max is finite, do a parallelised NaN check that
+// short-circuits — return NaN. The NaN check shares the same parallel structure
+// (and SIMD chunking via the max helpers) rather than a serial pre-pass.
 static float parallel_simd_max_f32(const float* data, int64_t n) {
     if (n == 0) return -std::numeric_limits<float>::infinity();
 
-    // Fast NaN pre-scan: stop at the first NaN.
-    for (int64_t i = 0; i < n; ++i) {
-        if (std::isnan(data[i])) return std::numeric_limits<float>::quiet_NaN();
-    }
-
     if (n < REDUCTION_OMP_THRESHOLD) {
+        float result;
 #ifdef TENZOR_REDUCTION_AVX512
-        return simd_max_f32_avx512(data, n);
+        result = simd_max_f32_avx512(data, n);
 #elif defined(TENZOR_REDUCTION_AVX2)
-        return simd_max_f32_avx2(data, n);
+        result = simd_max_f32_avx2(data, n);
 #else
-        float max_val = data[0];
+        result = data[0];
         for (int64_t i = 1; i < n; i++) {
-            if (data[i] > max_val) max_val = data[i];
+            if (data[i] > result) result = data[i];
         }
-        return max_val;
 #endif
+        if (std::isnan(result)) return std::numeric_limits<float>::quiet_NaN();
+        for (int64_t i = 0; i < n; ++i) {
+            if (std::isnan(data[i])) return std::numeric_limits<float>::quiet_NaN();
+        }
+        return result;
     }
 
+    bool any_nan = false;
     float global_max = -std::numeric_limits<float>::infinity();
 
-    #pragma omp parallel reduction(max:global_max)
+    #pragma omp parallel reduction(max:global_max) reduction(||:any_nan)
     {
         int tid = omp_get_thread_num();
         int nthreads = omp_get_num_threads();
@@ -681,39 +691,49 @@ static float parallel_simd_max_f32(const float* data, int64_t n) {
                 if (data[i] > global_max) global_max = data[i];
             }
 #endif
+            // NaN detection folded into the same parallel pass (no separate
+            // serial scan). Each thread checks only its own chunk.
+            for (int64_t i = start; i < end; i++) {
+                if (std::isnan(data[i])) { any_nan = true; break; }
+            }
         }
     }
 
+    if (any_nan || std::isnan(global_max)) {
+        return std::numeric_limits<float>::quiet_NaN();
+    }
     return global_max;
 }
 
 // Parallel SIMD min for float32.
 // NaN propagation: if any element is NaN, returns NaN (PyTorch/NumPy semantics).
+// See parallel_simd_max_f32 for the NaN-handling rationale.
 static float parallel_simd_min_f32(const float* data, int64_t n) {
     if (n == 0) return std::numeric_limits<float>::infinity();
 
-    // Fast NaN pre-scan: stop at the first NaN.
-    for (int64_t i = 0; i < n; ++i) {
-        if (std::isnan(data[i])) return std::numeric_limits<float>::quiet_NaN();
-    }
-
     if (n < REDUCTION_OMP_THRESHOLD) {
+        float result;
 #ifdef TENZOR_REDUCTION_AVX512
-        return simd_min_f32_avx512(data, n);
+        result = simd_min_f32_avx512(data, n);
 #elif defined(TENZOR_REDUCTION_AVX2)
-        return simd_min_f32_avx2(data, n);
+        result = simd_min_f32_avx2(data, n);
 #else
-        float min_val = data[0];
+        result = data[0];
         for (int64_t i = 1; i < n; i++) {
-            if (data[i] < min_val) min_val = data[i];
+            if (data[i] < result) result = data[i];
         }
-        return min_val;
 #endif
+        if (std::isnan(result)) return std::numeric_limits<float>::quiet_NaN();
+        for (int64_t i = 0; i < n; ++i) {
+            if (std::isnan(data[i])) return std::numeric_limits<float>::quiet_NaN();
+        }
+        return result;
     }
 
+    bool any_nan = false;
     float global_min = std::numeric_limits<float>::infinity();
 
-    #pragma omp parallel reduction(min:global_min)
+    #pragma omp parallel reduction(min:global_min) reduction(||:any_nan)
     {
         int tid = omp_get_thread_num();
         int nthreads = omp_get_num_threads();
@@ -733,9 +753,15 @@ static float parallel_simd_min_f32(const float* data, int64_t n) {
                 if (data[i] < global_min) global_min = data[i];
             }
 #endif
+            for (int64_t i = start; i < end; i++) {
+                if (std::isnan(data[i])) { any_nan = true; break; }
+            }
         }
     }
 
+    if (any_nan || std::isnan(global_min)) {
+        return std::numeric_limits<float>::quiet_NaN();
+    }
     return global_min;
 }
 

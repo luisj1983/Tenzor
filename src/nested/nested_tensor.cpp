@@ -204,6 +204,37 @@ auto NestedTensor::from_jagged(Tensor values, Tensor offsets,
 
     int64_t B = offsets.numel() - 1;
 
+    // Validate offsets define a well-formed jagged partition. Downstream
+    // consumers (select/unbind slice values_, to_padded_tensor host-memcpy)
+    // trust these as raw slice/copy bounds, so malformed offsets (non-monotonic,
+    // negative, wrong endpoints) yield out-of-bounds reads. Offsets are tiny
+    // (B+1) so a host copy + scan is cheap. The total row count is values'
+    // leading dimension (0 when values is rank-0).
+    {
+        auto offsets_cpu = (offsets.device().type != Device::Type::CPU)
+            ? offsets.to(Device::cpu()) : offsets;
+        const auto* off_ptr = offsets_cpu.data<int64_t>();
+        int64_t total_rows = (values.ndim() > 0) ? values.shape()[0] : 0;
+        if (off_ptr[0] != 0) {
+            throw std::runtime_error(
+                "NestedTensor::from_jagged: offsets[0] must be 0");
+        }
+        for (int64_t i = 0; i < B; ++i) {
+            if (off_ptr[i + 1] < off_ptr[i]) {
+                throw std::runtime_error(
+                    "NestedTensor::from_jagged: offsets must be "
+                    "monotonically non-decreasing");
+            }
+        }
+        if (off_ptr[B] != total_rows) {
+            throw std::runtime_error(
+                "NestedTensor::from_jagged: offsets[B] (" +
+                std::to_string(off_ptr[B]) +
+                ") must equal the number of value rows (" +
+                std::to_string(total_rows) + ")");
+        }
+    }
+
     // Extract regular shape (trailing dims of values beyond dim 0)
     std::vector<int64_t> regular_shape;
     for (int64_t d = 1; d < values.ndim(); ++d) {
@@ -229,10 +260,17 @@ auto NestedTensor::lengths() const -> Tensor {
         ? offsets_.to(Device::cpu()) : offsets_;
     const auto* off_ptr = offsets_cpu.data<int64_t>();
 
-    auto result = tenzor::zeros({batch_size_}, DType::Int64, offsets_.device());
+    // Build the result on CPU (host writes) then move to the offsets' device.
+    // Writing through .data<int64_t>() on a device-resident tensor is a
+    // host-side dereference of GPU memory and segfaults (or silently zeroes)
+    // on Vulkan/CUDA/ROCm/OneAPI.
+    auto result = tenzor::zeros({batch_size_}, DType::Int64, Device::cpu());
     auto* res_ptr = result.data<int64_t>();
     for (int64_t i = 0; i < batch_size_; ++i) {
         res_ptr[i] = off_ptr[i + 1] - off_ptr[i];
+    }
+    if (offsets_.device().type != Device::Type::CPU) {
+        result = result.to(offsets_.device());
     }
     return result;
 }

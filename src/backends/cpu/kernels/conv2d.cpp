@@ -16,6 +16,14 @@
 #include <omp.h>
 #endif
 
+// Intel MKL BLAS for the Float64 im2col-GEMM path (cblas_dgemm). The float
+// path uses hand-written SIMD micro-kernels in gemm_optimized.hpp; oneDNN is
+// Float32-only here, so without this the Float64 conv resolves to the generic
+// scalar triple loop.
+#ifdef TENZOR_USE_MKL
+#include <mkl.h>
+#endif
+
 // Intel oneDNN for optimized convolutions (3-8x faster)
 #ifdef TENZOR_USE_ONEDNN
 #include <dnnl.hpp>
@@ -311,6 +319,30 @@ void gemm_cpu<BFloat16>(
     }
 }
 
+#ifdef TENZOR_USE_MKL
+// Specialization for double using MKL cblas_dgemm. C = A @ B (or A @ B^T).
+// Row-major: A is (M, K). For transpose_B, B is (N, K) and we compute A @ B^T;
+// otherwise B is (K, N) and we compute A @ B.
+template<>
+void gemm_cpu<double>(
+    const double* A, const double* B, double* C,
+    int64_t M, int64_t N, int64_t K,
+    bool transpose_B
+) {
+    if (transpose_B) {
+        cblas_dgemm(CblasRowMajor, CblasNoTrans, CblasTrans,
+                    static_cast<int>(M), static_cast<int>(N), static_cast<int>(K),
+                    1.0, A, static_cast<int>(K), B, static_cast<int>(K),
+                    0.0, C, static_cast<int>(N));
+    } else {
+        cblas_dgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
+                    static_cast<int>(M), static_cast<int>(N), static_cast<int>(K),
+                    1.0, A, static_cast<int>(K), B, static_cast<int>(N),
+                    0.0, C, static_cast<int>(N));
+    }
+}
+#endif // TENZOR_USE_MKL
+
 // Matrix multiplication for C = A^T @ B
 // A: (K, M) row-major (will be transposed)
 // B: (K, N) row-major
@@ -380,6 +412,22 @@ void gemm_transA_cpu<BFloat16>(
         }
     }
 }
+
+#ifdef TENZOR_USE_MKL
+// Specialization for double using MKL cblas_dgemm. C = A^T @ B.
+// Row-major: A is (K, M) so op(A)=Trans with lda=M; B is (K, N) with ldb=N;
+// C is (M, N) with ldc=N.
+template<>
+void gemm_transA_cpu<double>(
+    const double* A, const double* B, double* C,
+    int64_t M, int64_t N, int64_t K
+) {
+    cblas_dgemm(CblasRowMajor, CblasTrans, CblasNoTrans,
+                static_cast<int>(M), static_cast<int>(N), static_cast<int>(K),
+                1.0, A, static_cast<int>(M), B, static_cast<int>(N),
+                0.0, C, static_cast<int>(N));
+}
+#endif // TENZOR_USE_MKL
 
 // ============================================================================
 // Conv2d Forward CPU Implementation
@@ -783,23 +831,23 @@ void conv2d_forward_impl(
             int64_t in_start = g * in_channels_per_group;
             int64_t out_start = g * out_channels_per_group;
 
-            // Process each batch
-            #pragma omp parallel for if(batch * spatial > OmpThresholds::medium())
+            // 1x1 conv reduces to a GEMM per batch/group:
+            //   C[oc, s] = sum_ic weight[oc, ic] * input[ic, s]
+            // Within a group the input channels [in_start, in_start+icpg) and
+            // the output channels [out_start, out_start+ocpg) are contiguous in
+            // the spatial-major NCHW layout, so we can pass sub-pointers
+            // directly. gemm_cpu(..., transpose_B=false) computes A @ B with
+            //   A = weight block (ocpg, icpg)  [K = icpg, contiguous rows]
+            //   B = input block  (icpg, spatial)
+            //   C = output block (ocpg, spatial)
+            // This dispatches to BLAS/optimized kernels for float/double.
+            const T* w_group = weight_data + out_start * in_channels_per_group;
             for (int64_t b = 0; b < batch; ++b) {
-                // For each spatial position
-                for (int64_t s = 0; s < spatial; ++s) {
-                    // Compute dot product: out[c] = sum_k(in[k] * weight[c,k])
-                    for (int64_t oc = 0; oc < out_channels_per_group; ++oc) {
-                        T sum{};  // Value-initialize to zero
-                        for (int64_t ic = 0; ic < in_channels_per_group; ++ic) {
-                            int64_t in_idx = b * (in_channels * spatial) + (in_start + ic) * spatial + s;
-                            int64_t w_idx = (out_start + oc) * in_channels_per_group + ic;
-                            sum += input_data[in_idx] * weight_data[w_idx];
-                        }
-                        int64_t out_idx = b * (out_channels * spatial) + (out_start + oc) * spatial + s;
-                        output_data[out_idx] = sum;
-                    }
-                }
+                const T* in_group = input_data + b * (in_channels * spatial) + in_start * spatial;
+                T* out_group = output_data + b * (out_channels * spatial) + out_start * spatial;
+                gemm_cpu<T>(w_group, in_group, out_group,
+                            out_channels_per_group, spatial, in_channels_per_group,
+                            /*transpose_B=*/false);
             }
         }
 

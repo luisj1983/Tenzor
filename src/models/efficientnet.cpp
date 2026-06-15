@@ -396,8 +396,8 @@ auto efficientnet_b0(int64_t num_classes, bool pretrained) -> std::shared_ptr<Ef
     auto model = std::make_shared<EfficientNet>(config);
 
     if (pretrained) {
-        std::string weights_path = ModelHub::download_pretrained("efficientnet_b0");
-        ModelHub::load_pretrained_weights(*model, weights_path);
+        std::string weights_path = ModelHub::download_pretrained_safetensors("efficientnet_b0");
+        ModelHub::load_pretrained_weights(*model, weights_path, /*strict=*/false);
     }
 
     return model;
@@ -409,8 +409,8 @@ auto efficientnet_b1(int64_t num_classes, bool pretrained) -> std::shared_ptr<Ef
     auto model = std::make_shared<EfficientNet>(config);
 
     if (pretrained) {
-        std::string weights_path = ModelHub::download_pretrained("efficientnet_b1");
-        ModelHub::load_pretrained_weights(*model, weights_path);
+        std::string weights_path = ModelHub::download_pretrained_safetensors("efficientnet_b1");
+        ModelHub::load_pretrained_weights(*model, weights_path, /*strict=*/false);
     }
 
     return model;
@@ -422,8 +422,8 @@ auto efficientnet_b2(int64_t num_classes, bool pretrained) -> std::shared_ptr<Ef
     auto model = std::make_shared<EfficientNet>(config);
 
     if (pretrained) {
-        std::string weights_path = ModelHub::download_pretrained("efficientnet_b2");
-        ModelHub::load_pretrained_weights(*model, weights_path);
+        std::string weights_path = ModelHub::download_pretrained_safetensors("efficientnet_b2");
+        ModelHub::load_pretrained_weights(*model, weights_path, /*strict=*/false);
     }
 
     return model;
@@ -435,8 +435,8 @@ auto efficientnet_b3(int64_t num_classes, bool pretrained) -> std::shared_ptr<Ef
     auto model = std::make_shared<EfficientNet>(config);
 
     if (pretrained) {
-        std::string weights_path = ModelHub::download_pretrained("efficientnet_b3");
-        ModelHub::load_pretrained_weights(*model, weights_path);
+        std::string weights_path = ModelHub::download_pretrained_safetensors("efficientnet_b3");
+        ModelHub::load_pretrained_weights(*model, weights_path, /*strict=*/false);
     }
 
     return model;
@@ -448,8 +448,8 @@ auto efficientnet_b4(int64_t num_classes, bool pretrained) -> std::shared_ptr<Ef
     auto model = std::make_shared<EfficientNet>(config);
 
     if (pretrained) {
-        std::string weights_path = ModelHub::download_pretrained("efficientnet_b4");
-        ModelHub::load_pretrained_weights(*model, weights_path);
+        std::string weights_path = ModelHub::download_pretrained_safetensors("efficientnet_b4");
+        ModelHub::load_pretrained_weights(*model, weights_path, /*strict=*/false);
     }
 
     return model;
@@ -461,8 +461,8 @@ auto efficientnet_b5(int64_t num_classes, bool pretrained) -> std::shared_ptr<Ef
     auto model = std::make_shared<EfficientNet>(config);
 
     if (pretrained) {
-        std::string weights_path = ModelHub::download_pretrained("efficientnet_b5");
-        ModelHub::load_pretrained_weights(*model, weights_path);
+        std::string weights_path = ModelHub::download_pretrained_safetensors("efficientnet_b5");
+        ModelHub::load_pretrained_weights(*model, weights_path, /*strict=*/false);
     }
 
     return model;
@@ -474,8 +474,8 @@ auto efficientnet_b6(int64_t num_classes, bool pretrained) -> std::shared_ptr<Ef
     auto model = std::make_shared<EfficientNet>(config);
 
     if (pretrained) {
-        std::string weights_path = ModelHub::download_pretrained("efficientnet_b6");
-        ModelHub::load_pretrained_weights(*model, weights_path);
+        std::string weights_path = ModelHub::download_pretrained_safetensors("efficientnet_b6");
+        ModelHub::load_pretrained_weights(*model, weights_path, /*strict=*/false);
     }
 
     return model;
@@ -487,8 +487,8 @@ auto efficientnet_b7(int64_t num_classes, bool pretrained) -> std::shared_ptr<Ef
     auto model = std::make_shared<EfficientNet>(config);
 
     if (pretrained) {
-        std::string weights_path = ModelHub::download_pretrained("efficientnet_b7");
-        ModelHub::load_pretrained_weights(*model, weights_path);
+        std::string weights_path = ModelHub::download_pretrained_safetensors("efficientnet_b7");
+        ModelHub::load_pretrained_weights(*model, weights_path, /*strict=*/false);
     }
 
     return model;

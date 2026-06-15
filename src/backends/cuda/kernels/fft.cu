@@ -898,9 +898,8 @@ auto cuda_fftn_kernel(const Tensor& input, const std::vector<int64_t>& dims,
     for (int64_t i = 0; i < ndim - rank; ++i) batch *= shape[i];
 
     // Copy input data into output with proper padding
-    int64_t in_fft_size = 1, out_fft_size = 1;
+    int64_t out_fft_size = 1;
     for (int64_t i = 0; i < rank; ++i) {
-        in_fft_size *= shape[dims[i]];
         out_fft_size *= n_vec[i];
     }
 
@@ -908,26 +907,28 @@ auto cuda_fftn_kernel(const Tensor& input, const std::vector<int64_t>& dims,
     // Simplest approach: copy the minimum slice for each batch.
     int64_t elem_size = dtype_size(out_dtype);
 
-    // For the common case where in and out FFT sizes match:
-    if (in_fft_size == out_fft_size) {
-        // Shapes match in FFT dimensions — direct batch copy
-        bool shapes_match = true;
-        for (int64_t i = 0; i < rank; ++i) {
-            if (shape[dims[i]] != n_vec[i]) { shapes_match = false; break; }
-        }
-        if (shapes_match) {
-            TENZOR_CUDA_CHECK(cudaMemcpyAsync(output.data_ptr(), input.data_ptr(),
-                input.numel() * elem_size, cudaMemcpyDeviceToDevice, stream));
-        }
+    // Determine whether every FFT-dim size already matches the request.
+    bool shapes_match = true;
+    for (int64_t i = 0; i < rank; ++i) {
+        if (shape[dims[i]] != n_vec[i]) { shapes_match = false; break; }
     }
-    // General case: do sequential 1D FFTs (this is simpler and still uses cuFFT)
-    if (in_fft_size != out_fft_size) {
+
+    // General case: any per-dim mismatch (even when the FFT-dim size products
+    // happen to be equal, e.g. [2,8] -> [4,4]) requires real padding/cropping,
+    // so fall back to sequential 1D FFTs. Keying this on !shapes_match rather
+    // than (in_fft_size != out_fft_size) avoids returning all zeros when the
+    // products match but the shapes differ.
+    if (!shapes_match) {
         Tensor result = input;
         for (int64_t i = 0; i < rank; ++i) {
             result = cuda_fft_kernel(result, dims[i], n_vec[i], norm, stream);
         }
         return result;
     }
+
+    // Shapes match exactly — direct batch copy into the output buffer.
+    TENZOR_CUDA_CHECK(cudaMemcpyAsync(output.data_ptr(), input.data_ptr(),
+        input.numel() * elem_size, cudaMemcpyDeviceToDevice, stream));
 
     // Create N-D cuFFT plan
     CuFFTPlan plan;
@@ -1006,31 +1007,32 @@ auto cuda_ifftn_kernel(const Tensor& input, const std::vector<int64_t>& dims,
     int64_t batch = 1;
     for (int64_t i = 0; i < ndim - rank; ++i) batch *= shape[i];
 
-    int64_t in_fft_size = 1, out_fft_size = 1;
+    int64_t out_fft_size = 1;
     for (int64_t i = 0; i < rank; ++i) {
-        in_fft_size *= shape[dims[i]];
         out_fft_size *= n_vec[i];
     }
 
     int64_t elem_size = dtype_size(out_dtype);
 
-    if (in_fft_size == out_fft_size) {
-        bool shapes_match = true;
-        for (int64_t i = 0; i < rank; ++i) {
-            if (shape[dims[i]] != n_vec[i]) { shapes_match = false; break; }
-        }
-        if (shapes_match) {
-            TENZOR_CUDA_CHECK(cudaMemcpyAsync(output.data_ptr(), input.data_ptr(),
-                input.numel() * elem_size, cudaMemcpyDeviceToDevice, stream));
-        }
+    // Determine whether every FFT-dim size already matches the request.
+    bool shapes_match = true;
+    for (int64_t i = 0; i < rank; ++i) {
+        if (shape[dims[i]] != n_vec[i]) { shapes_match = false; break; }
     }
-    if (in_fft_size != out_fft_size) {
+
+    // Any per-dim mismatch (even when the FFT-dim size products are equal)
+    // requires real padding/cropping; fall back to sequential 1D IFFTs.
+    if (!shapes_match) {
         Tensor result = input;
         for (int64_t i = 0; i < rank; ++i) {
             result = cuda_ifft_kernel(result, dims[i], n_vec[i], norm, stream);
         }
         return result;
     }
+
+    // Shapes match exactly — direct batch copy into the output buffer.
+    TENZOR_CUDA_CHECK(cudaMemcpyAsync(output.data_ptr(), input.data_ptr(),
+        input.numel() * elem_size, cudaMemcpyDeviceToDevice, stream));
 
     CuFFTPlan plan;
     plan.create();

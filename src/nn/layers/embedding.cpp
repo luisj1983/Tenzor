@@ -179,7 +179,7 @@ public:
             // back to dense updates. Mirror the CPU branch below: build a COO
             // SparseTensor from indices_ + the dense grad rows and accumulate
             // it onto the weight Variable.
-            if (sparse_ && input_variables_.size() > 1) {
+            if (sparse_ && !input_variables_.empty()) {
                 // Indices come back to CPU for the SparseTensor; matches the
                 // CPU branch's COO production. The optimiser side decides
                 // how/when to move them back to device.
@@ -200,7 +200,7 @@ public:
                 auto sparse_grad = SparseTensor::sparse_coo(
                     idx_tensor, grad_values, {num_embeddings_, embedding_dim_});
 
-                auto& weight_var = input_variables_[1];
+                auto& weight_var = input_variables_[0];
                 weight_var.accumulate_sparse_grad(sparse_grad);
             }
 
@@ -241,7 +241,7 @@ public:
             // called once per path — we must accumulate, not overwrite, to get the
             // correct total gradient.
             // accumulate_sparse_grad() acquires grad_mutex_ internally for thread safety.
-            auto& weight_var = input_variables_[1];
+            auto& weight_var = input_variables_[0];
             weight_var.accumulate_sparse_grad(sparse_grad);
 
             // Convert to dense for the standard backward engine

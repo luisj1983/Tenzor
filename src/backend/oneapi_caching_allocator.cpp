@@ -261,6 +261,10 @@ void OneAPICachingAllocator::release_all() {
         // Free every tracked USM pointer (cached and still-allocated).
         for (auto& [ptr, block] : device_alloc.all_blocks) {
             if (ptr) {
+                // Wait on and reclaim the heap-allocated release_fence event so
+                // pending work is fenced before sycl::free and the event isn't
+                // leaked (release_block() does this; release_all() must too).
+                wait_and_clear_release_fence(block.get());
                 try {
                     sycl::free(ptr, *queue);
                 } catch (const sycl::exception&) {

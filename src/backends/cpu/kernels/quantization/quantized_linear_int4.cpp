@@ -16,6 +16,7 @@
 #include <cstdint>
 #include <algorithm>
 #include <vector>
+#include <stdexcept>
 
 #ifdef _OPENMP
 #include <omp.h>
@@ -40,12 +41,22 @@ namespace kernels {
  *
  * output[b][o] = sum_k(input[b][k] * unpack(weight[o][k/2])) * scale + bias[o]
  *
+ * SYMMETRIC-ONLY CONTRACT: this kernel takes no input/weight zero-points and
+ * computes a pure sum_k(input * weight) accumulator. It is correct ONLY for
+ * symmetric quantization (input_zp == 0 and weight_zp == 0). Feeding an
+ * asymmetrically-quantized activation (input_zp != 0) yields silently wrong
+ * results — apply the INT8 zero-point correction (see quantized_conv2d.cpp) and
+ * extend the signature with input_zp/weight_zp parameters if asymmetric INT4 is
+ * required.
+ *
  * @param input INT8 input data [batch_size, in_features]
  * @param weight_packed Packed INT4 weights [out_features, in_features/2]
  * @param bias Optional FP32 bias [out_features], may be nullptr
  * @param output FP32 output [batch_size, out_features]
  * @param batch_size Number of samples
- * @param in_features Input feature dimension (must be even)
+ * @param in_features Input feature dimension (must be even — two INT4 values
+ *                    pack per byte; odd values are rejected to avoid silently
+ *                    dropping the trailing input feature)
  * @param out_features Output feature dimension
  * @param input_scale Input quantization scale
  * @param weight_scale Weight quantization scale
@@ -63,6 +74,14 @@ auto quantized_linear_int4_kernel(
     float weight_scale,
     float output_scale
 ) -> void {
+    // Two INT4 values pack into one byte; an odd in_features would truncate
+    // packed_features = in_features/2 and leave the last input feature paired
+    // with an unwritten (zero) weight, silently dropping it. Reject it instead.
+    if (in_features % 2 != 0) {
+        throw std::invalid_argument(
+            "quantized_linear_int4_kernel: in_features must be even");
+    }
+
     float combined_scale = input_scale * weight_scale / output_scale;
     int64_t packed_features = in_features / 2;
 

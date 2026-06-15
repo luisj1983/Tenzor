@@ -246,6 +246,10 @@ public:
     explicit GELU(const std::string& approximate = "none");
     auto forward_impl(const Variable& input) -> Variable override;
 
+    /// @brief Approximation mode "none" (exact erf) or "tanh"
+    ///        (exposed for serializers/exporters).
+    auto approximate() const -> const std::string& { return approximate_; }
+
 private:
     std::string approximate_;  ///< "none" or "tanh"
 };

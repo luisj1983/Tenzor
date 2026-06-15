@@ -29,6 +29,7 @@
 #include "tenzor/ops/linalg.hpp"
 #include "tenzor/ops/transform.hpp"
 #include "../rocsolver_handle_pool.hpp"
+#include "../hip_buffer.hpp"
 
 // Forward-declare the tensor math entry points we need — pulling the full
 // math.hpp into this HIP translation unit makes tenzor::sqrt/abs overloads
@@ -1743,8 +1744,10 @@ inline std::pair<double, double> eig_symmetry_metrics(const T* d_A,
                                                       int64_t nbatch,
                                                       int64_t n,
                                                       hipStream_t stream) {
-    double* d_pair = nullptr;
-    HIP_CHECK_LINALG(hipMalloc(&d_pair, 2 * sizeof(double)));
+    // RAII-managed probe buffer so a throwing HIP_CHECK_LINALG below frees it
+    // instead of leaking on every transient device error.
+    HipBuffer pair_buf(2 * sizeof(double));
+    double* d_pair = pair_buf.as<double>();
     double init[2] = {0.0, 0.0};
     HIP_CHECK_LINALG(hipMemcpyAsync(d_pair, init, 2 * sizeof(double),
                                     hipMemcpyHostToDevice, stream));
@@ -1760,7 +1763,6 @@ inline std::pair<double, double> eig_symmetry_metrics(const T* d_A,
     HIP_CHECK_LINALG(hipMemcpyAsync(host_pair, d_pair, 2 * sizeof(double),
                                     hipMemcpyDeviceToHost, stream));
     HIP_CHECK_LINALG(hipStreamSynchronize(stream));
-    HIP_CHECK_LINALG(hipFree(d_pair));
     return {host_pair[0], host_pair[1]};
 }
 
@@ -2837,7 +2839,8 @@ __global__ void lu_inv_kernel(
 template<typename T>
 __global__ void cholesky_kernel(
     T* __restrict__ data,
-    int n, bool upper)
+    int n, bool upper,
+    int* __restrict__ info)
 {
     int batch_idx = blockIdx.x;
     int tid = threadIdx.x;
@@ -2862,7 +2865,11 @@ __global__ void cholesky_kernel(
                 sum -= A[j * n + k] * A[j * n + k];
             }
             if (sum <= T(0)) {
-                // Not positive definite — store what we have and let caller handle
+                // Not positive definite — record the (1-based) failing pivot so
+                // the host can throw, matching rocSOLVER potrf / CPU behaviour.
+                if (info && info[batch_idx] == 0) {
+                    info[batch_idx] = j + 1;
+                }
                 A[j * n + j] = T(0);
                 continue;
             }
@@ -4608,13 +4615,21 @@ auto linalg_cholesky_kernel(const Tensor& A, bool upper, hipStream_t stream) -> 
     auto [n, ndim] = check_square(work);
     int64_t nbatch = batch_size(work);
 
+    // Per-batch info (0 = success; j+1 = first non-positive pivot). Without
+    // this the native fallback silently returns a garbage factor for
+    // indefinite/non-PD input, diverging from rocSOLVER potrf and the CPU
+    // backend which both raise.
+    int* d_info = nullptr;
+    HIP_CHECK_LINALG(hipMalloc(&d_info, nbatch * sizeof(int)));
+    HIP_CHECK_LINALG(hipMemset(d_info, 0, nbatch * sizeof(int)));
+
     if (A.dtype() == DType::Float32) {
         check_size_limit<float>(n, "cholesky");
         size_t smem = n * n * sizeof(float);
         int threads = min(static_cast<int>(n), 128);
         if (threads < 1) threads = 1;
         cholesky_kernel<float><<<nbatch, threads, smem, stream>>>(
-            work.data<float>(), n, upper);
+            work.data<float>(), n, upper, d_info);
         HIP_CHECK_LINALG(hipGetLastError());
     } else {
         check_size_limit<double>(n, "cholesky");
@@ -4622,11 +4637,25 @@ auto linalg_cholesky_kernel(const Tensor& A, bool upper, hipStream_t stream) -> 
         int threads = min(static_cast<int>(n), 128);
         if (threads < 1) threads = 1;
         cholesky_kernel<double><<<nbatch, threads, smem, stream>>>(
-            work.data<double>(), n, upper);
+            work.data<double>(), n, upper, d_info);
         HIP_CHECK_LINALG(hipGetLastError());
     }
 
     HIP_CHECK_LINALG(hipStreamSynchronize(stream ? stream : nullptr));
+
+    std::vector<int> h_info(static_cast<size_t>(nbatch), 0);
+    hipError_t copy_err = hipMemcpy(h_info.data(), d_info,
+                                    nbatch * sizeof(int), hipMemcpyDeviceToHost);
+    hipFree(d_info);
+    HIP_CHECK_LINALG(copy_err);
+    for (int64_t b = 0; b < nbatch; ++b) {
+        if (h_info[b] > 0) {
+            throw std::runtime_error(
+                "linalg::cholesky: computation failed (info=" +
+                std::to_string(h_info[b]) + ") — matrix is not positive definite");
+        }
+    }
+
     return work;
 }
 

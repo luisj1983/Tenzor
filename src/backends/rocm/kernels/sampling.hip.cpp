@@ -9,6 +9,7 @@
 #include "tenzor/core/tensor.hpp"
 #include "tenzor/core/dtype.hpp"
 #include <hip/hip_runtime.h>
+#include <hipcub/hipcub.hpp>
 #include <chrono>
 #include <cmath>
 #include <limits>
@@ -280,27 +281,6 @@ auto gamma_sample_kernel(const Tensor& concentration, const Tensor& rate,
 // Multinomial sampling
 // =========================================================================
 
-__global__ void multinomial_cdf_kernel(const float* probs, float* cdf,
-                                        int64_t num_categories) {
-    extern __shared__ float shared[];
-    int tid = threadIdx.x;
-
-    float val = (tid < num_categories) ? probs[tid] : 0.0f;
-    shared[tid] = val;
-    __syncthreads();
-
-    for (int stride = 1; stride < blockDim.x; stride *= 2) {
-        float tmp = (tid >= stride) ? shared[tid - stride] : 0.0f;
-        __syncthreads();
-        shared[tid] += tmp;
-        __syncthreads();
-    }
-
-    if (tid < num_categories) {
-        cdf[tid] = shared[tid];
-    }
-}
-
 __global__ void multinomial_sample_kernel(const float* cdf, int64_t* output,
                                            int64_t num_categories,
                                            int64_t num_samples, float total,
@@ -384,17 +364,30 @@ auto multinomial_kernel(const Tensor& probs, int64_t num_samples,
     Tensor result({batch_size, num_samples}, DType::Int64, input.device());
     Tensor cdf_buf({batch_size, num_categories}, DType::Float32, input.device());
 
+    // Build the CDF with a grid-wide inclusive scan (hipcub DeviceScan) so it is
+    // correct for any num_categories. The previous single-block kernel capped
+    // the block at 1024 threads, so for num_categories > 1024 only the first
+    // 1024 entries were prefix-summed and the rest of the CDF was uninitialized,
+    // corrupting `total` and the binary search.
+    void* d_temp_storage = nullptr;
+    size_t temp_storage_bytes = 0;
+    {
+        const float* first_in = input.data<float>();
+        float* first_out = cdf_buf.data<float>();
+        HIP_CHECK(hipcub::DeviceScan::InclusiveSum(
+            d_temp_storage, temp_storage_bytes, first_in, first_out,
+            static_cast<int>(num_categories), stream));
+        HIP_CHECK(hipMalloc(&d_temp_storage, temp_storage_bytes));
+    }
+
     for (int64_t b = 0; b < batch_size; ++b) {
         const float* prob_ptr = input.data<float>() + b * num_categories;
         float* cdf_ptr = cdf_buf.data<float>() + b * num_categories;
         int64_t* out_ptr = result.data<int64_t>() + b * num_samples;
 
-        int block_size = 1;
-        while (block_size < num_categories) block_size *= 2;
-        if (block_size > 1024) block_size = 1024;
-        hipLaunchKernelGGL(multinomial_cdf_kernel,
-            dim3(1), dim3(block_size), block_size * sizeof(float), stream,
-            prob_ptr, cdf_ptr, num_categories);
+        HIP_CHECK(hipcub::DeviceScan::InclusiveSum(
+            d_temp_storage, temp_storage_bytes, prob_ptr, cdf_ptr,
+            static_cast<int>(num_categories), stream));
 
         // Read total (CDF[last]) — single scalar metadata sync, not a CPU compute fallback
         float total = 0.0f;
@@ -410,6 +403,9 @@ auto multinomial_kernel(const Tensor& probs, int64_t num_samples,
             cdf_ptr, out_ptr, num_categories, num_samples, total,
             seed + b * 1000003);
     }
+
+    HIP_CHECK(hipStreamSynchronize(stream));
+    HIP_CHECK(hipFree(d_temp_storage));
 
     if (was_1d) result = result.reshape({num_samples});
     return result;

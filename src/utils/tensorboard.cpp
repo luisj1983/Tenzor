@@ -11,6 +11,7 @@
 #include "tenzor/utils/logging.hpp"
 #include "tenzor/autograd/variable.hpp"
 #include "tenzor/autograd/function.hpp"
+#include "tenzor/io/image.hpp"
 #include <filesystem>
 #include <queue>
 #include <unordered_map>
@@ -227,6 +228,14 @@ auto SummaryWriter::add_histogram(std::string_view tag,
     Tensor cpu_tensor = tensor.device().type == Device::Type::CPU ?
                         tensor : tensor.cpu();
 
+    // serialize_histogram reads data<float>() linearly over [0, numel), so the
+    // tensor must be Float32 and contiguous (otherwise data<float>() throws on a
+    // dtype mismatch or reads non-contiguous storage in the wrong order).
+    if (cpu_tensor.dtype() != DType::Float32) {
+        cpu_tensor = cpu_tensor.to(DType::Float32);
+    }
+    cpu_tensor = cpu_tensor.contiguous();
+
     std::lock_guard<std::mutex> lock(impl_->mutex);
 
     auto data = serialize_histogram(cpu_tensor, bins);
@@ -263,6 +272,14 @@ auto SummaryWriter::add_image(std::string_view tag,
     // Ensure tensor is on CPU
     Tensor cpu_tensor = tensor.device().type == Device::Type::CPU ?
                         tensor : tensor.cpu();
+
+    // serialize_image reads data<float>() linearly over [0, numel), so the
+    // tensor must be Float32 and contiguous (otherwise data<float>() throws on a
+    // dtype mismatch or scrambles pixels from a non-contiguous view).
+    if (cpu_tensor.dtype() != DType::Float32) {
+        cpu_tensor = cpu_tensor.to(DType::Float32);
+    }
+    cpu_tensor = cpu_tensor.contiguous();
 
     std::lock_guard<std::mutex> lock(impl_->mutex);
 
@@ -691,23 +708,39 @@ auto SummaryWriter::serialize_image(const Tensor& tensor) -> std::vector<uint8_t
     write_field_header(image, 3, 0);
     image.push_back(static_cast<uint8_t>(channels));
 
-    // encoded_image_string (PNG data)
-    // For simplicity, store raw float data as base64-like encoding
+    // encoded_image_string: TensorBoard's image plugin requires actual encoded
+    // image bytes (PNG/JPEG) in field 4 — raw pixel bytes do not decode and
+    // render nothing.
     write_field_header(image, 4, 2);
 
     const float* data = tensor.data<float>();
     size_t numel = static_cast<size_t>(tensor.numel());
 
-    // Convert to uint8 (assuming values in [0, 1] or [0, 255])
-    std::vector<uint8_t> img_data(numel);
+    // Decide normalization from the tensor's GLOBAL value range, not per pixel
+    // (per-pixel scaling mixes scales within one image). If every value is in
+    // [0, 1] we treat the image as normalized and scale by 255; otherwise we
+    // assume it is already in [0, 255].
+    float global_max = 0.0f;
     for (size_t i = 0; i < numel; ++i) {
-        float val = data[i];
-        // Normalize to [0, 255]
-        if (val <= 1.0f) {
-            val *= 255.0f;
-        }
-        img_data[i] = static_cast<uint8_t>(std::clamp(val, 0.0f, 255.0f));
+        global_max = std::max(global_max, data[i]);
     }
+    const bool normalized = (global_max <= 1.0f);
+    const float scale = normalized ? 255.0f : 1.0f;
+
+    // Convert to a contiguous uint8 CHW buffer, then encode as PNG.
+    std::vector<uint8_t> pixels(numel);
+    for (size_t i = 0; i < numel; ++i) {
+        pixels[i] = static_cast<uint8_t>(std::clamp(data[i] * scale, 0.0f, 255.0f));
+    }
+
+    // Wrap the uint8 buffer as a CHW UInt8 tensor (non-owning view) and encode.
+    Tensor u8 = Tensor::from_blob(
+        pixels.data(),
+        {channels, height, width},
+        DType::UInt8,
+        Device::cpu(),
+        /*deleter=*/[](void*) noexcept {});
+    std::vector<uint8_t> img_data = tenzor::io::encode_png(u8);
 
     // Write image data length and data
     size_t img_len = img_data.size();

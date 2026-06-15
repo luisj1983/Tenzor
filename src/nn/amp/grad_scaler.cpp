@@ -30,16 +30,20 @@ GradScaler::GradScaler(float init_scale,
     , found_inf_nan_(false)
     , unscaled_for_() {
 
-    if (init_scale <= 0.0f) {
+    validate_config_();
+}
+
+auto GradScaler::validate_config_() const -> void {
+    if (init_scale_ <= 0.0f) {
         throw std::invalid_argument("init_scale must be positive");
     }
-    if (growth_factor <= 1.0f) {
+    if (growth_factor_ <= 1.0f) {
         throw std::invalid_argument("growth_factor must be greater than 1.0");
     }
-    if (backoff_factor <= 0.0f || backoff_factor >= 1.0f) {
+    if (backoff_factor_ <= 0.0f || backoff_factor_ >= 1.0f) {
         throw std::invalid_argument("backoff_factor must be in range (0, 1)");
     }
-    if (growth_interval <= 0) {
+    if (growth_interval_ <= 0) {
         throw std::invalid_argument("growth_interval must be positive");
     }
 }
@@ -59,9 +63,15 @@ auto GradScaler::scale(const Variable& loss) -> Variable {
             "nested scale inside loss closures is not supported (PyTorch parity)");
     }
     // Use Variable multiplication to preserve autograd graph
-    // Raw Tensor multiplication would sever the computation graph
+    // Raw Tensor multiplication would sever the computation graph.
+    //
+    // Build the scale tensor in Float32 (never the loss dtype): the default
+    // init_scale 65536.0 exceeds the Float16 max finite value (65504), so a
+    // Float16 loss would otherwise yield an +inf scale tensor → inf scaled
+    // loss → inf/nan grads → update() backs off forever.  Building in Float32
+    // and letting the multiply promote matches PyTorch.
     auto scale_tensor = full({1}, static_cast<float>(scale_),
-                             loss.dtype(), loss.device());
+                             DType::Float32, loss.device());
     Variable scale_var(scale_tensor, false);
     return loss * scale_var;
 }
@@ -264,6 +274,7 @@ auto GradScaler::reset() -> void {
 auto GradScaler::state_dict() const -> std::unordered_map<std::string, float> {
     return {
         {"scale", scale_},
+        {"init_scale", init_scale_},
         {"growth_factor", growth_factor_},
         {"backoff_factor", backoff_factor_},
         {"growth_interval", static_cast<float>(growth_interval_)},
@@ -332,6 +343,11 @@ auto GradScaler::load_state_dict(const std::unordered_map<std::string, float>& s
     if (state.count("scale")) {
         scale_ = state.at("scale");
     }
+    if (state.count("init_scale")) {
+        // Restore init_scale_ so reset() returns to the user-configured initial
+        // scale rather than the constructor default after a save/load round-trip.
+        init_scale_ = state.at("init_scale");
+    }
     if (state.count("growth_factor")) {
         growth_factor_ = state.at("growth_factor");
     }
@@ -344,6 +360,11 @@ auto GradScaler::load_state_dict(const std::unordered_map<std::string, float>& s
     if (state.count("growth_tracker")) {
         growth_tracker_ = static_cast<int>(state.at("growth_tracker"));
     }
+
+    // Re-check invariants: a restored state dict must satisfy the same
+    // constraints the constructor enforces, otherwise subsequent step()s would
+    // operate on an invalid (e.g. non-positive scale) configuration.
+    validate_config_();
 }
 
 } // namespace amp

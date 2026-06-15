@@ -34,8 +34,10 @@ struct GraphOp {
     std::shared_ptr<nn::Module> module;
 
     /// For stateful/functional ops (Add, Reshape, etc.) — a lambda that
-    /// computes outputs from inputs
-    std::function<std::vector<Tensor>(const std::vector<Tensor>&)> compute_fn;
+    /// computes outputs from inputs. Operates on Variables (not bare Tensors)
+    /// so the autograd grad_fn chain is preserved through functional ops; use
+    /// the autograd op overloads (e.g. autograd::add) inside the lambda.
+    std::function<std::vector<Variable>(const std::vector<Variable>&)> compute_fn;
 };
 
 /**
@@ -80,11 +82,27 @@ public:
     /**
      * @brief Execute the graph.
      * Input variable's tensor is bound to the first input name.
-     * Returns the first output value.
+     *
+     * @note nn::Module::forward returns a single Variable, so this returns only
+     *       the FIRST output (output_names_[0]). For multi-output ONNX models,
+     *       call forward_multi() to retrieve every declared output; the
+     *       remaining outputs are otherwise computed but not returned here.
      */
     auto forward_impl(const Variable& input) -> Variable override;
 
-    auto name() const -> std::string { return "GraphModule"; }
+    /**
+     * @brief Execute the graph and return ALL declared outputs.
+     *
+     * Unlike forward_impl (which can only return one Variable), this returns one
+     * Variable per name in set_output_names(), in declaration order. Use this
+     * for multi-output models.
+     */
+    auto forward_multi(const Variable& input) -> std::vector<Variable>;
+
+    // Override the virtual repr customization point on nn::Module so this is
+    // surfaced polymorphically through an nn::Module& (the base has no virtual
+    // name(); its hook is extra_repr()).
+    auto extra_repr() const -> std::string override { return "GraphModule"; }
 
     auto num_ops() const -> size_t { return ops_.size(); }
 

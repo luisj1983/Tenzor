@@ -5,6 +5,8 @@
 
 #include <tenzor/utils/monitor.hpp>
 
+#include <stdexcept>
+
 namespace tenzor {
 namespace monitor {
 
@@ -79,8 +81,16 @@ auto Stat::get() const -> double {
     return 0.0; // unreachable
 }
 
+auto Stat::get_min() const -> double {
+    return min_.load(std::memory_order_acquire);
+}
+
 auto Stat::count() const -> int64_t {
     return count_.load(std::memory_order_acquire);
+}
+
+auto Stat::aggregation() const -> Aggregation {
+    return agg_;
 }
 
 auto Stat::name() const -> const std::string& {
@@ -107,6 +117,15 @@ auto Monitor::register_stat(const std::string& name, Aggregation agg) -> Stat& {
     std::lock_guard lock(mutex_);
     auto it = stats_.find(name);
     if (it != stats_.end()) {
+        // A Stat's aggregation strategy is fixed at construction. Re-registering
+        // the same name with a different strategy would silently return a Stat
+        // computing under the first-registered aggregation, yielding wrong
+        // reported metrics; reject the collision instead.
+        if (it->second->aggregation() != agg) {
+            throw std::invalid_argument(
+                "Monitor::register_stat: stat '" + name +
+                "' already registered with a different aggregation strategy");
+        }
         return *it->second;
     }
     auto [inserted, _] = stats_.emplace(name, std::make_unique<Stat>(name, agg));

@@ -38,10 +38,21 @@ inline auto dtype_to_iree(::tenzor::DType d) -> iree_hal_element_type_t {
 
 inline auto iree_to_dtype(iree_hal_element_type_t e) -> ::tenzor::DType {
     switch (e) {
-        case IREE_HAL_ELEMENT_TYPE_FLOAT_32: return ::tenzor::DType::Float32;
-        case IREE_HAL_ELEMENT_TYPE_FLOAT_64: return ::tenzor::DType::Float64;
-        case IREE_HAL_ELEMENT_TYPE_INT_32:   return ::tenzor::DType::Int32;
-        case IREE_HAL_ELEMENT_TYPE_INT_64:   return ::tenzor::DType::Int64;
+        case IREE_HAL_ELEMENT_TYPE_FLOAT_32:  return ::tenzor::DType::Float32;
+        case IREE_HAL_ELEMENT_TYPE_FLOAT_64:  return ::tenzor::DType::Float64;
+        case IREE_HAL_ELEMENT_TYPE_FLOAT_16:  return ::tenzor::DType::Float16;
+        case IREE_HAL_ELEMENT_TYPE_BFLOAT_16: return ::tenzor::DType::BFloat16;
+        case IREE_HAL_ELEMENT_TYPE_INT_8:     return ::tenzor::DType::Int8;
+        case IREE_HAL_ELEMENT_TYPE_INT_16:    return ::tenzor::DType::Int16;
+        case IREE_HAL_ELEMENT_TYPE_INT_32:    return ::tenzor::DType::Int32;
+        case IREE_HAL_ELEMENT_TYPE_INT_64:    return ::tenzor::DType::Int64;
+        case IREE_HAL_ELEMENT_TYPE_UINT_8:    return ::tenzor::DType::UInt8;
+        case IREE_HAL_ELEMENT_TYPE_UINT_16:   return ::tenzor::DType::UInt16;
+        case IREE_HAL_ELEMENT_TYPE_UINT_32:   return ::tenzor::DType::UInt32;
+        case IREE_HAL_ELEMENT_TYPE_UINT_64:   return ::tenzor::DType::UInt64;
+        case IREE_HAL_ELEMENT_TYPE_BOOL_8:    return ::tenzor::DType::Bool;
+        case IREE_HAL_ELEMENT_TYPE_COMPLEX_FLOAT_64:  return ::tenzor::DType::Complex64;
+        case IREE_HAL_ELEMENT_TYPE_COMPLEX_FLOAT_128: return ::tenzor::DType::Complex128;
         default: break;
     }
     throw std::invalid_argument(
@@ -92,22 +103,14 @@ inline auto buffer_view_to_tensor(iree_hal_buffer_view_t* bv)
     }
     const auto dt = iree_to_dtype(iree_hal_buffer_view_element_type(bv));
 
-    ::tenzor::Tensor out;
-    if (dt == ::tenzor::DType::Float32) {
-        out = ::tenzor::full(shape, 0.0f, dt);
-    } else if (dt == ::tenzor::DType::Float64) {
-        out = ::tenzor::full(shape, 0.0, dt);
-    } else if (dt == ::tenzor::DType::Int32 ||
-               dt == ::tenzor::DType::Int64) {
-        // Allocate via Float32 path and reinterpret the underlying bytes;
-        // ::tenzor::full has no int overload, but the storage size is what
-        // matters for the subsequent memcpy.
-        out = ::tenzor::full(shape, 0.0f, dt);
-    } else {
-        throw std::invalid_argument(
-            "buffer_view_to_tensor: unsupported dtype " +
-            std::to_string(static_cast<int>(dt)));
-    }
+    // Allocate raw storage of the correct dtype directly; the subsequent
+    // host-map / d2h transfer overwrites every byte, so the (uninitialized)
+    // contents don't matter. Using the generic constructor (rather than
+    // ::tenzor::full, which only has float/double scalar overloads) lets every
+    // dtype iree_to_dtype accepts — Float16/BFloat16, the integer/unsigned
+    // types, Bool and complex — round-trip correctly, matching the Subprocess
+    // parser's supported set instead of throwing in the default InProcess mode.
+    ::tenzor::Tensor out(shape, dt, ::tenzor::Device::cpu());
 
     iree_hal_buffer_t* buffer = iree_hal_buffer_view_buffer(bv);
     const iree_device_size_t byte_length =

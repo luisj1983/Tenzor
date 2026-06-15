@@ -7,6 +7,7 @@
 #include "tenzor/nn/layers/conv.hpp"
 #include "tenzor/nn/layers/linear.hpp"
 #include "tenzor/nn/activations/activations.hpp"
+#include "tenzor/nn/init.hpp"
 #include "tenzor/autograd/ops.hpp"
 #include "tenzor/ops/creation.hpp"
 #include "tenzor/ops/math.hpp"
@@ -147,19 +148,12 @@ WindowAttention::WindowAttention(int64_t dim,
     int64_t table_size = 2 * window_size - 1;
     auto bias_table = zeros({table_size, table_size, num_heads}, DType::Float32, Device::cpu());
 
-    // Initialize with truncated normal distribution (mean=0, std=0.02, range=[-2*std, 2*std])
-    auto bias_data = bias_table.data<float>();
-    std::random_device rd;
-    std::mt19937 gen(rd());
-    std::normal_distribution<float> dist(0.0f, 0.02f);
-
-    for (int64_t i = 0; i < table_size * table_size * num_heads; ++i) {
-        float value;
-        do {
-            value = dist(gen);
-        } while (std::abs(value) > 2.0f * 0.02f);  // Truncate to [-2*std, 2*std]
-        bias_data[i] = value;
-    }
+    // Initialize with truncated normal distribution (mean=0, std=0.02, range=[-2*std, 2*std]).
+    // Route through the library's seeded init utility so results are
+    // reproducible under manual_seed instead of a non-deterministic
+    // std::random_device.
+    init::trunc_normal_(bias_table, /*mean=*/0.0, /*std=*/0.02,
+                        /*a=*/-2.0 * 0.02, /*b=*/2.0 * 0.02);
 
     relative_position_bias_table_ = std::make_shared<Variable>(bias_table, true);
     register_parameter("relative_position_bias_table", *relative_position_bias_table_);

@@ -81,6 +81,15 @@ public:
     auto rref_id() const -> int64_t { return rref_id_; }
 
 private:
+    /**
+     * @brief Release the referenced storage.
+     *
+     * For an owner RRef, erases the entry from the local RRefStore. For a
+     * non-owner RRef, sends RREF_DELETE to the owner for remote GC. Idempotent:
+     * a no-op once already released. Called from the destructor and move-assign.
+     */
+    auto release() noexcept -> void;
+
     int32_t owner_id_{-1};
     int64_t rref_id_{-1};
     std::shared_ptr<TcpRpcAgent> agent_;

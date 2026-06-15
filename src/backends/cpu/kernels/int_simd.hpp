@@ -12,6 +12,16 @@
 #include <cstddef>
 #include <algorithm>
 
+// Self-contained ISA detection: this header may be included before any
+// translation unit defines TENZOR_HAS_AVX2 (e.g. math.cpp includes it above its
+// own SIMD macro block). Detect the compiler-provided ISA macros here so the
+// vector paths are not silently compiled out on AVX2/AVX-512 hardware. The
+// kernels below use only AVX2 intrinsics (_mm256_*), which are available on
+// AVX-512 targets too, so gate them on AVX2-or-better.
+#if (defined(__AVX2__) || defined(__AVX512F__)) && !defined(TENZOR_HAS_AVX2)
+#define TENZOR_HAS_AVX2 1
+#endif
+
 #ifdef TENZOR_HAS_AVX2
 #include <immintrin.h>
 #endif

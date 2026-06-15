@@ -5,6 +5,7 @@ import numpy as np
 
 import tenzor as _tz
 from tenzor.tenzor_core import Tensor, Variable  # type: ignore
+from tenzor.tenzor_core import nn as _cpp_nn  # type: ignore
 
 from .distribution import (
     Distribution,
@@ -51,26 +52,29 @@ class Bernoulli(Distribution):
         out = (u_np < p_np).astype(np.float32)
         return _wrap_numpy(out)
 
+    @staticmethod
+    def _clamp_probs(probs, eps):
+        # Autograd-aware clamp of probs into [eps, 1 - eps] via hardtanh,
+        # matching PyTorch (probs.clamp(eps, 1 - eps)).  This keeps the
+        # score d/dp log(p) unbiased for p in the interior and prevents
+        # log of a non-positive number when p drifts to <= 0 or >= 1.
+        return _cpp_nn.hardtanh(probs, eps, 1.0 - eps)
+
     def log_prob(self, value):
         # log p(x) = x*log(p) + (1-x)*log(1-p)
         value = _to_variable(value)
         eps = 1e-7
-        # Clamp via numpy to avoid log(0); the clamped tensor is detached
-        # from the autograd graph of `probs` for safety.  Gradient still
-        # flows through the un-clamped factor.
-        # Strict autograd-friendly clamp: use min(max(p, eps), 1-eps) via
-        # arithmetic — not supported here, so trade autograd through
-        # extreme p for numerical safety.  For p ∈ (eps, 1-eps) the
-        # gradient is correct.
-        log_p = _tz.log(self.probs + eps)
-        log_1mp = _tz.log((1.0 - self.probs) + eps)
+        probs = self._clamp_probs(self.probs, eps)
+        log_p = _tz.log(probs)
+        log_1mp = _tz.log(1.0 - probs)
         return value * log_p + (1.0 - value) * log_1mp
 
     def entropy(self):
         eps = 1e-7
-        log_p = _tz.log(self.probs + eps)
-        log_1mp = _tz.log((1.0 - self.probs) + eps)
-        return -(self.probs * log_p + (1.0 - self.probs) * log_1mp)
+        probs = self._clamp_probs(self.probs, eps)
+        log_p = _tz.log(probs)
+        log_1mp = _tz.log(1.0 - probs)
+        return -(probs * log_p + (1.0 - probs) * log_1mp)
 
     def cdf(self, value):
         value_np = np.asarray(_to_variable(value).tensor(), dtype=np.float64)

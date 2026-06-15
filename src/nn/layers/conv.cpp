@@ -280,17 +280,13 @@ auto Conv2d::forward_impl(const Variable& input_orig) -> Variable {
     // AttrKey::PaddingW) and thread it through to their conv kernel
     // descriptors. CUDA: cuDNN per-axis. ROCm: MIOpen per-axis. OneAPI:
     // oneDNN per-axis. Vulkan: shader push-constants per-axis. CPU: native.
-    // The pre-pad + padding=0 workaround that used to live here is gone —
-    // we pass (padding_h_, padding_w_) directly into the forward attrs.
-    Variable input = input_orig;
-    int64_t effective_pad_h = padding_h_;
-    int64_t effective_pad_w = padding_w_;
+    // We pass (padding_h_, padding_w_) directly into the forward attrs.
+    const Variable& input = input_orig;
 
-    auto post_pad_shape = input.shape();
-    int64_t height = post_pad_shape[2];
-    int64_t width = post_pad_shape[3];
-    int64_t out_h = calculate_output_size(height, kernel_h_, stride_h_, effective_pad_h, dilation_h_);
-    int64_t out_w = calculate_output_size(width, kernel_w_, stride_w_, effective_pad_w, dilation_w_);
+    int64_t height = input_shape[2];
+    int64_t width = input_shape[3];
+    int64_t out_h = calculate_output_size(height, kernel_h_, stride_h_, padding_h_, dilation_h_);
+    int64_t out_w = calculate_output_size(width, kernel_w_, stride_w_, padding_w_, dilation_w_);
 
     if (out_h <= 0 || out_w <= 0) {
         throw std::runtime_error(
@@ -329,17 +325,16 @@ auto Conv2d::forward_impl(const Variable& input_orig) -> Variable {
     }
 
     // Pass both paired and single-value keys for backward compat with backends.
-    // When rectangular padding has already been baked in via pre-pad above,
-    // the conv op itself sees padding=0; the pair keys are likewise zero so
-    // any pair-aware backend reads the same effective values.
+    // The real per-axis padding is threaded straight through; pair-aware
+    // backends read PaddingH/PaddingW while legacy ones read the scalar Padding.
     NewOpAttributes forward_attrs;
     forward_attrs.set(AttrKey::Stride, stride_h_);
-    forward_attrs.set(AttrKey::Padding, effective_pad_h);
+    forward_attrs.set(AttrKey::Padding, padding_h_);
     forward_attrs.set(AttrKey::Dilation, dilation_h_);
     forward_attrs.set(AttrKey::StrideH, stride_h_);
     forward_attrs.set(AttrKey::StrideW, stride_w_);
-    forward_attrs.set(AttrKey::PaddingH, effective_pad_h);
-    forward_attrs.set(AttrKey::PaddingW, effective_pad_w);
+    forward_attrs.set(AttrKey::PaddingH, padding_h_);
+    forward_attrs.set(AttrKey::PaddingW, padding_w_);
     forward_attrs.set(AttrKey::DilationH, dilation_h_);
     forward_attrs.set(AttrKey::DilationW, dilation_w_);
     forward_attrs.set(AttrKey::Groups, groups_);

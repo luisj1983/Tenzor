@@ -3,8 +3,32 @@
 #include <algorithm>
 #include <stdexcept>
 #include <cstring>
+#include <cstdint>
+#include <limits>
 
 namespace tenzor::nn {
+
+namespace {
+
+// Returns the number of bytes remaining between the current get position and the
+// end of the stream. Used to bound untrusted length/size fields read from a
+// (potentially malicious) file so they cannot drive huge allocations or reads
+// past the end of the file.
+auto stream_remaining(std::ifstream& file) -> std::uintmax_t {
+    const auto cur = file.tellg();
+    if (cur < 0) {
+        return 0;
+    }
+    file.seekg(0, std::ios::end);
+    const auto endpos = file.tellg();
+    file.seekg(cur, std::ios::beg);
+    if (endpos < 0 || endpos < cur) {
+        return 0;
+    }
+    return static_cast<std::uintmax_t>(endpos - cur);
+}
+
+} // namespace
 
 // Save state dictionary to binary file
 void Serializer::save(const std::unordered_map<std::string, Tensor>& state_dict,
@@ -26,7 +50,18 @@ void Serializer::save(const std::unordered_map<std::string, Tensor>& state_dict,
         write_tensor(file, name, tensor);
     }
 
+    // Detect write failures (e.g. disk full / I/O error) before reporting
+    // success: an unchecked stream would leave a silently truncated checkpoint.
+    if (!file) {
+        throw std::runtime_error(
+            "Serializer: failed to write checkpoint (I/O error or disk full): " + path);
+    }
+
     file.close();
+    if (file.fail()) {
+        throw std::runtime_error(
+            "Serializer: failed to flush/close checkpoint: " + path);
+    }
 }
 
 // Load state dictionary from binary file
@@ -153,23 +188,53 @@ auto Serializer::read_tensor(std::ifstream& file) -> std::pair<std::string, Tens
     // Read name
     std::string name = read_string(file);
 
-    // Read dtype
+    // Read dtype and validate it is a dtype we can actually deserialize before
+    // it is used to size/allocate anything.
     DType dtype = uint8_to_dtype(read_value<uint8_t>(file));
+    switch (dtype) {
+        case DType::Float32: case DType::Float64:
+        case DType::Int32:   case DType::Int64:
+        case DType::UInt8:   case DType::Bool:
+        case DType::Float16: case DType::BFloat16:
+        case DType::Int8:    case DType::Int16:
+            break;
+        default:
+            throw std::runtime_error("Serializer: unknown dtype in file: " +
+                std::to_string(static_cast<int>(dtype)));
+    }
 
-    // Read number of dimensions
+    // Read number of dimensions. Each dimension consumes 8 bytes, so bound ndim
+    // by the bytes remaining in the file to reject corrupt counts.
     uint32_t ndim = read_value<uint32_t>(file);
+    if (static_cast<std::uintmax_t>(ndim) * sizeof(int64_t) > stream_remaining(file)) {
+        throw std::runtime_error(
+            "Serializer: shape dimension count exceeds remaining file size");
+    }
 
-    // Read shape
+    // Read shape with non-negativity and overflow checks on the element count.
     std::vector<int64_t> shape(ndim);
+    int64_t numel = 1;
     for (uint32_t i = 0; i < ndim; ++i) {
         shape[i] = read_value<int64_t>(file);
+        if (shape[i] < 0) {
+            throw std::runtime_error("Serializer: negative dimension in shape");
+        }
+        if (shape[i] != 0 && numel > std::numeric_limits<int64_t>::max() / shape[i]) {
+            throw std::runtime_error("Serializer: tensor element count overflow");
+        }
+        numel *= shape[i];
     }
 
     // Create tensor
     Tensor tensor(shape, dtype, Device::cpu());
 
-    // Read data
+    // Read data. The destination is sized from the (validated) shape; ensure the
+    // file actually contains that many bytes before reading.
     size_t num_bytes = tensor.numel() * dtype_size(dtype);
+    if (static_cast<std::uintmax_t>(num_bytes) > stream_remaining(file)) {
+        throw std::runtime_error(
+            "Serializer: tensor data exceeds remaining file size");
+    }
     void* data_ptr = nullptr;
 
     switch (dtype) {
@@ -209,6 +274,10 @@ auto Serializer::read_tensor(std::ifstream& file) -> std::pair<std::string, Tens
     }
 
     file.read(static_cast<char*>(data_ptr), num_bytes);
+    if (!file) {
+        throw std::runtime_error(
+            "Serializer: unexpected end of file while reading tensor data");
+    }
 
     return {name, tensor};
 }
@@ -239,8 +308,18 @@ void Serializer::write_string(std::ofstream& file, const std::string& str) {
 // Read string
 auto Serializer::read_string(std::ifstream& file) -> std::string {
     uint32_t size = read_value<uint32_t>(file);
+    // Bound the allocation by the bytes actually left in the file: a corrupt or
+    // malicious length must never trigger a huge allocation or an over-read.
+    if (static_cast<std::uintmax_t>(size) > stream_remaining(file)) {
+        throw std::runtime_error(
+            "Serializer: string length exceeds remaining file size");
+    }
     std::string str(size, '\0');
     file.read(str.data(), size);
+    if (!file) {
+        throw std::runtime_error(
+            "Serializer: unexpected end of file while reading string");
+    }
     return str;
 }
 

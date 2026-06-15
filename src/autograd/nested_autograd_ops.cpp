@@ -214,7 +214,7 @@ public:
             auto seg_mean = tenzor::mean(seg_in, /*dim=*/0, /*keepdim=*/true);  // [1, D]
             auto centered = tenzor::sub(seg_in, seg_mean.expand({L, D}));
             auto var = tenzor::mean(tenzor::mul(centered, centered), /*dim=*/0, /*keepdim=*/true);
-            auto inv_std = tenzor::reciprocal(tenzor::sqrt(tenzor::add(var, tenzor::full({1, D}, static_cast<float>(eps_), var.dtype(), var.device()))));
+            auto inv_std = tenzor::reciprocal(tenzor::sqrt(tenzor::add(var, tenzor::full({1, D}, static_cast<double>(eps_), var.dtype(), var.device()))));
 
             auto normalized = tenzor::mul(centered, inv_std.expand({L, D}));
 
@@ -233,9 +233,9 @@ public:
             auto seg_grad_in = tenzor::mul(
                 inv_std.expand({L, D}),
                 tenzor::mul(
-                    tenzor::full({1}, 1.0f / static_cast<float>(L), var.dtype(), var.device()),
+                    tenzor::full({1}, 1.0 / static_cast<double>(L), var.dtype(), var.device()),
                     tenzor::sub(
-                        tenzor::mul(tenzor::full({1}, static_cast<float>(L), var.dtype(), var.device()), dout_w),
+                        tenzor::mul(tenzor::full({1}, static_cast<double>(L), var.dtype(), var.device()), dout_w),
                         tenzor::add(sum_dout_w, tenzor::mul(normalized, sum_dout_w_norm))
                     )
                 )
@@ -319,7 +319,7 @@ public:
 
             // Recompute attention weights: scores = Qb @ Kb^T * scale
             auto scores = tenzor::mul(tenzor::matmul(Qb, Kb.transpose(0, 1)),
-                                       tenzor::full({1}, static_cast<float>(scale_),
+                                       tenzor::full({1}, static_cast<double>(scale_),
                                                      Q.dtype(), Q.device()));
             // Causal mask: positions (qi, ki) with ki > qi must contribute
             // softmax weight 0 so the recomputed attention matches the
@@ -362,7 +362,7 @@ public:
 
             // Scale the gradient
             d_scores = tenzor::mul(d_scores,
-                tenzor::full({1}, static_cast<float>(scale_), Q.dtype(), Q.device()));
+                tenzor::full({1}, static_cast<double>(scale_), Q.dtype(), Q.device()));
 
             // grad_Q = d_scores @ K
             auto gQ = tenzor::matmul(d_scores, Kb);
@@ -470,7 +470,7 @@ public:
             int64_t end = off[b + 1];
             int64_t L = end - start;
             if (L <= 0) continue;
-            auto scale = tenzor::full({1}, 1.0f / static_cast<float>(L), grad.dtype(), grad.device());
+            auto scale = tenzor::full({1}, 1.0 / static_cast<double>(L), grad.dtype(), grad.device());
             parts.push_back(
                 tenzor::mul(grad.slice(0, b, b + 1), scale).expand({L, D}).contiguous());
         }

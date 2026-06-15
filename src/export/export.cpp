@@ -12,7 +12,10 @@
 #include "../../include/tenzor/jit/graph.hpp"
 #include "../../include/tenzor/jit/serialization.hpp"
 #include "../../include/tenzor/autograd/variable.hpp"
+#include "../../include/tenzor/backend/loader.hpp"
+#include "../../include/tenzor/backend/backend.hpp"
 #include <fstream>
+#include <limits>
 #include <stdexcept>
 
 namespace tenzor {
@@ -90,20 +93,29 @@ auto write_tensor(std::ofstream& f, const Tensor& t) -> void {
 }
 
 auto read_uint32(std::ifstream& f) -> uint32_t {
-    uint32_t v;
+    uint32_t v = 0;
     f.read(reinterpret_cast<char*>(&v), sizeof(v));
+    if (!f || f.gcount() != static_cast<std::streamsize>(sizeof(v))) {
+        throw std::runtime_error("TZEP: truncated file (read_uint32)");
+    }
     return v;
 }
 
 auto read_uint64(std::ifstream& f) -> uint64_t {
-    uint64_t v;
+    uint64_t v = 0;
     f.read(reinterpret_cast<char*>(&v), sizeof(v));
+    if (!f || f.gcount() != static_cast<std::streamsize>(sizeof(v))) {
+        throw std::runtime_error("TZEP: truncated file (read_uint64)");
+    }
     return v;
 }
 
 auto read_int64(std::ifstream& f) -> int64_t {
-    int64_t v;
+    int64_t v = 0;
     f.read(reinterpret_cast<char*>(&v), sizeof(v));
+    if (!f || f.gcount() != static_cast<std::streamsize>(sizeof(v))) {
+        throw std::runtime_error("TZEP: truncated file (read_int64)");
+    }
     return v;
 }
 
@@ -141,10 +153,66 @@ auto read_tensor(std::ifstream& f,
         }
     }
 
-    DType dtype = static_cast<DType>(read_uint32(f));
-    auto dev_type = static_cast<Device::Type>(read_uint32(f));
+    // Validate the raw dtype/device-type integers against the known
+    // enumerators BEFORE they flow into dtype_size()/the Tensor ctor. An
+    // unrecognized DType makes dtype_size() return 0 (so an empty-shape tensor
+    // would slip past the byte-count guard with a bogus dtype), and an
+    // out-of-range Device::Type is undefined behaviour when later dispatched.
+    uint32_t raw_dtype = read_uint32(f);
+    // QInt4x2 is the last enumerator in DType (uint8_t-backed, dense 0..N-1).
+    if (raw_dtype > static_cast<uint32_t>(DType::QInt4x2)) {
+        throw std::runtime_error("TZEP read_tensor: unknown dtype value " +
+                                 std::to_string(raw_dtype));
+    }
+    DType dtype = static_cast<DType>(raw_dtype);
+
+    uint32_t raw_dev = read_uint32(f);
+    if (raw_dev >= static_cast<uint32_t>(Device::Type::COUNT)) {
+        throw std::runtime_error("TZEP read_tensor: unknown device type " +
+                                 std::to_string(raw_dev));
+    }
+    auto dev_type = static_cast<Device::Type>(raw_dev);
     int64_t dev_index = read_int64(f);
     Device saved_device(dev_type, dev_index);
+
+    // Read the SEPARATE byte count and validate it BEFORE allocating the
+    // tensor. A crafted shape (e.g. [1<<40, 1<<40]) passes the ndim/non-negative
+    // checks above but would trigger a massive allocation in the Tensor ctor; so
+    // we must (1) compute the expected element/byte count with overflow checks,
+    // (2) verify it matches the declared byte count, and (3) bound it against
+    // the bytes actually remaining in the file — all before constructing the
+    // host tensor.
+    uint64_t bytes = read_uint64(f);
+
+    uint64_t numel = 1;
+    for (uint64_t i = 0; i < ndim; ++i) {
+        if (shape[i] != 0 &&
+            numel > std::numeric_limits<uint64_t>::max() /
+                        static_cast<uint64_t>(shape[i])) {
+            throw std::runtime_error("TZEP read_tensor: element count overflow");
+        }
+        numel *= static_cast<uint64_t>(shape[i]);
+    }
+    uint64_t elem_size = static_cast<uint64_t>(dtype_size(dtype));
+    if (elem_size != 0 && numel > std::numeric_limits<uint64_t>::max() / elem_size) {
+        throw std::runtime_error("TZEP read_tensor: byte size overflow");
+    }
+    uint64_t expected = numel * elem_size;
+    if (bytes != expected) {
+        throw std::runtime_error(
+            "TZEP read_tensor: byte count (" + std::to_string(bytes) +
+            ") does not match tensor size (" + std::to_string(expected) + ")");
+    }
+    // Bound the declared byte count against the bytes remaining in the file so a
+    // hostile size can't force a huge allocation before the read fails.
+    std::streampos cur = f.tellg();
+    f.seekg(0, std::ios::end);
+    std::streampos end = f.tellg();
+    f.seekg(cur);
+    if (cur < 0 || end < 0 || bytes > static_cast<uint64_t>(end - cur)) {
+        throw std::runtime_error(
+            "TZEP read_tensor: declared byte count exceeds remaining file");
+    }
 
     // Audit D.2: read the host-contiguous bytes into a CPU tensor first,
     // then move to either `map_location` (caller override) or the saved
@@ -152,16 +220,6 @@ auto read_tensor(std::ifstream& f,
     // the read is a pure host-side memcpy that doesn't require the saved
     // device to be available on this machine.
     Tensor host_tensor(shape, dtype, Device::cpu());
-    // The file provides a SEPARATE byte count; it MUST equal the tensor's own
-    // byte size, else f.read overflows (or under-fills) the allocated buffer.
-    uint64_t bytes = read_uint64(f);
-    uint64_t expected = static_cast<uint64_t>(host_tensor.numel()) *
-                        static_cast<uint64_t>(dtype_size(dtype));
-    if (bytes != expected) {
-        throw std::runtime_error(
-            "TZEP read_tensor: byte count (" + std::to_string(bytes) +
-            ") does not match tensor size (" + std::to_string(expected) + ")");
-    }
     f.read(reinterpret_cast<char*>(host_tensor.data_ptr()),
            static_cast<std::streamsize>(bytes));
     if (!f) {
@@ -171,6 +229,18 @@ auto read_tensor(std::ifstream& f,
     Device target = map_location.value_or(saved_device);
     if (target.type == Device::Type::CPU) {
         return host_tensor;
+    }
+    // The documented contract: if map_location is absent and the saved device
+    // is not available on this build/machine, throw a std::runtime_error with a
+    // clear message (rather than letting whatever .to(target) raises propagate).
+    if (!map_location.has_value()) {
+        Backend* backend = backend_registry().get_backend(target.type);
+        if (backend == nullptr || !backend->is_available()) {
+            throw std::runtime_error(
+                "ExportedProgram::load: saved device is not available on this "
+                "build; pass map_location to relocate the program to an "
+                "available device (e.g. Device::cpu())");
+        }
     }
     return host_tensor.to(target);
 }
@@ -267,8 +337,24 @@ auto ExportedProgram::load(const std::string& path,
 
     // Graph blob -> write to temp file so GraphReader can load it.
     uint64_t graph_size = read_uint64(file);
+    // Bound graph_size against the bytes remaining so a crafted huge size can't
+    // force an enormous allocation before any data is read (mirrors read_string).
+    {
+        std::streampos cur = file.tellg();
+        file.seekg(0, std::ios::end);
+        std::streampos end = file.tellg();
+        file.seekg(cur);
+        if (cur < 0 || end < 0 ||
+            graph_size > static_cast<uint64_t>(end - cur)) {
+            throw std::runtime_error(
+                "ExportedProgram::load: declared graph size exceeds remaining file");
+        }
+    }
     std::vector<char> graph_bytes(graph_size);
     file.read(graph_bytes.data(), static_cast<std::streamsize>(graph_size));
+    if (file.gcount() != static_cast<std::streamsize>(graph_size)) {
+        throw std::runtime_error("ExportedProgram::load: truncated graph blob");
+    }
 
     std::string graph_tmp = path + ".graph.tmp";
     {

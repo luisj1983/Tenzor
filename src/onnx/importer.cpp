@@ -30,6 +30,7 @@
 #include "../../include/tenzor/nn/functional.hpp"  // Audit I1: nn::functional::pad
 #include "../../include/tenzor/ops/indexing.hpp"
 #include "../../include/tenzor/ops/vision.hpp"
+#include "../../include/tenzor/ops/linalg.hpp"   // custom-domain linalg re-import
 #include <cstring>
 #include <sstream>
 #include <algorithm>
@@ -668,6 +669,36 @@ auto ONNXImporter::convert_graph(const ONNXGraphData& graph) -> std::shared_ptr<
             if (module.has_value()) {
                 model->add_module(module.value());
                 context_.register_module(node.name, module.value());
+
+                // Register a placeholder output value for this module node so
+                // downstream module converters can resolve their data input by
+                // name (e.g. Conv with auto_pad=SAME reads X's spatial shape,
+                // BatchNormalization picks BatchNorm{1,2,3}d from the input
+                // rank). Functional converters already call register_output();
+                // module converters return an nn::Module and otherwise never
+                // seed the value map, so a Conv->Relu->Conv(SAME) chain would
+                // throw "Input tensor not found" and BN would mis-default to
+                // rank 4. We materialise the shape by running the freshly-built
+                // module on the (already-registered) placeholder input.
+                if (!node.outputs.empty() && !node.outputs[0].empty() &&
+                    !node.inputs.empty() &&
+                    !context_.has_value(node.outputs[0])) {
+                    if (auto data_in = context_.get_value(node.inputs[0]);
+                        data_in.has_value()) {
+                        try {
+                            Variable ph_in(data_in.value(), false);
+                            auto ph_out = module.value()->forward(ph_in);
+                            context_.register_value(node.outputs[0],
+                                                    ph_out.tensor());
+                        } catch (const std::exception&) {
+                            // Best-effort shape propagation: if the placeholder
+                            // forward fails (e.g. unsupported placeholder dims),
+                            // leave the value unregistered rather than aborting
+                            // the import; downstream resolution falls back to
+                            // its existing defaults.
+                        }
+                    }
+                }
             }
         } catch (const std::exception& e) {
             throw std::runtime_error(
@@ -919,6 +950,40 @@ auto ONNXImporter::convert_node(const ONNXImportNode& node) -> std::optional<std
         return std::nullopt;
     }
 
+    // Tenzor custom-domain linear-algebra ops. Both export paths
+    // (jit_op_type_to_onnx and the OpId visitor) now emit the same "Det" /
+    // "Linalg*" op_type strings, so a model exported by either path can be
+    // re-imported. Single-output ops are converted directly here; the
+    // multi-output factorizations remain export-only (see error below).
+    else if (node.op_type == "Det") {
+        register_output(node.outputs[0], linalg::det(get_input(node.inputs[0])));
+        return std::nullopt;
+    } else if (node.op_type == "LinalgInv") {
+        register_output(node.outputs[0], linalg::inv(get_input(node.inputs[0])));
+        return std::nullopt;
+    } else if (node.op_type == "LinalgSolve") {
+        register_output(node.outputs[0],
+                        linalg::solve(get_input(node.inputs[0]),
+                                      get_input(node.inputs[1])));
+        return std::nullopt;
+    } else if (node.op_type == "LinalgCholesky") {
+        bool upper = node.get_attr("upper").value_or(ONNXAttribute{}).get_int(0) != 0;
+        register_output(node.outputs[0],
+                        linalg::cholesky(get_input(node.inputs[0]), upper));
+        return std::nullopt;
+    } else if (node.op_type == "LinalgMatrixNorm") {
+        register_output(node.outputs[0],
+                        linalg::matrix_norm(get_input(node.inputs[0])));
+        return std::nullopt;
+    } else if (node.op_type == "LinalgSVD" || node.op_type == "LinalgQR" ||
+               node.op_type == "LinalgEigh" || node.op_type == "LinalgEigvalsh" ||
+               node.op_type == "LinalgSlogdet") {
+        throw std::runtime_error(
+            "ONNX import: tenzor custom-domain op '" + node.op_type +
+            "' is export-only (multi-output factorization); re-importing it is "
+            "not yet supported");
+    }
+
     else {
         throw std::runtime_error("Unsupported ONNX operator: " + node.op_type);
     }
@@ -1036,7 +1101,10 @@ auto ONNXImporter::convert_gemm(const ONNXImportNode& node) -> std::shared_ptr<n
 
 auto ONNXImporter::convert_reshape(const ONNXImportNode& node) -> void {
     auto input = get_input(node.inputs[0]);
-    auto shape = get_input(node.inputs[1]); // Shape tensor
+    // Read the shape control tensor on the host: get_input() would return it on
+    // the import device, and data<int64_t>() below dereferences the raw storage
+    // pointer (a device pointer for a GPU import) on the host -> crash.
+    auto shape = get_host_input(node.inputs[1]); // Shape tensor
 
     // Extract shape values
     std::vector<int64_t> new_shape;
@@ -1085,10 +1153,18 @@ auto ONNXImporter::convert_split(const ONNXImportNode& node) -> void {
     if (split_attr.has_value() && split_attr->ints.has_value()) {
         split_sizes = split_attr->ints.value();
     } else {
-        // Equal splits
-        int64_t num_outputs = node.outputs.size();
-        int64_t size = input.shape()[axis] / num_outputs;
-        split_sizes.assign(num_outputs, size);
+        // Equal splits. Per the ONNX Split spec, when the axis length is not
+        // evenly divisible by num_outputs the remainder goes to the LAST chunk;
+        // assigning the floor size to every output would silently drop the
+        // trailing (dim - floor*num_outputs) elements.
+        int64_t num_outputs = static_cast<int64_t>(node.outputs.size());
+        if (num_outputs <= 0) {
+            throw std::runtime_error("ONNX Split: node has no outputs");
+        }
+        int64_t dim = input.shape()[axis];
+        int64_t base = dim / num_outputs;
+        split_sizes.assign(num_outputs - 1, base);
+        split_sizes.push_back(dim - base * (num_outputs - 1));
     }
 
     // Manually split the tensor using slice
@@ -2463,7 +2539,10 @@ auto ONNXImporter::convert_shape(const ONNXImportNode& node) -> void {
 }
 
 auto ONNXImporter::convert_constant_of_shape(const ONNXImportNode& node) -> void {
-    auto shape_tensor = get_input(node.inputs[0]);
+    // Host-read the shape control tensor: get_input() returns it on the import
+    // device, and data<int64_t>() dereferences a device pointer on the host
+    // (crash) for a GPU import.
+    auto shape_tensor = get_host_input(node.inputs[0]);
     const int64_t* shape_data = shape_tensor.data<int64_t>();
     std::vector<int64_t> shape(shape_data, shape_data + shape_tensor.numel());
 
@@ -2492,7 +2571,9 @@ auto ONNXImporter::convert_where(const ONNXImportNode& node) -> void {
 
 auto ONNXImporter::convert_expand(const ONNXImportNode& node) -> void {
     auto input = get_input(node.inputs[0]);
-    auto shape_tensor = get_input(node.inputs[1]);
+    // Host-read the shape control tensor (see convert_reshape): data<int64_t>()
+    // would otherwise dereference a device pointer on the host for a GPU import.
+    auto shape_tensor = get_host_input(node.inputs[1]);
     const int64_t* shape_data = shape_tensor.data<int64_t>();
     std::vector<int64_t> shape(shape_data, shape_data + shape_tensor.numel());
 
@@ -2504,14 +2585,43 @@ auto ONNXImporter::convert_pow(const ONNXImportNode& node) -> void {
     auto input = get_input(node.inputs[0]);
     auto exponent = get_input(node.inputs[1]);
 
-    // If exponent is scalar, use the scalar pow
-    if (exponent.numel() == 1) {
-        float exp_val = *static_cast<const float*>(exponent.to(DType::Float32).data_ptr());
-        auto result = tenzor::pow(input, exp_val);
-        register_output(node.outputs[0], result);
-    } else {
-        // Element-wise pow not directly supported — fall back to exp(log(x) * y)
-        auto result = tenzor::exp(tenzor::mul(tenzor::log(input), exponent));
+    // Prefer the scalar pow op (tenzor::pow) whenever the exponent reduces to a
+    // single value: it is a true element-wise power that handles zero/negative
+    // bases per IEEE, unlike the exp(log(x)*y) decomposition which produces
+    // NaN/-inf for any non-positive base (e.g. Pow([-2],[2]) -> NaN instead of 4).
+    //
+    // The common ONNX case is a constant scalar (or a constant tensor of one
+    // repeated value broadcast across the bases); detect that on the host and
+    // route through the scalar path.
+    bool used_scalar = false;
+    if (exponent.numel() >= 1) {
+        // Read the exponent on the host so we can inspect its values without
+        // dereferencing a device pointer.
+        Tensor host_exp =
+            (exponent.device().type == Device::Type::CPU)
+                ? exponent.to(DType::Float32)
+                : exponent.to(Device::cpu()).to(DType::Float32);
+        const float* exp_data = static_cast<const float*>(host_exp.data_ptr());
+        float first = exp_data[0];
+        bool all_equal = true;
+        for (int64_t i = 1; i < host_exp.numel(); ++i) {
+            if (exp_data[i] != first) { all_equal = false; break; }
+        }
+        if (all_equal) {
+            auto result = tenzor::pow(input, first);
+            register_output(node.outputs[0], result);
+            used_scalar = true;
+        }
+    }
+
+    if (!used_scalar) {
+        // Genuine element-wise tensor exponent. Use float_power (Float64
+        // promotion) rather than the naive exp(log(x)*y): float_power avoids
+        // log(0)=-inf by operating on |base|. This still cannot reproduce the
+        // sign of a negative base raised to an odd integer power (no general
+        // tensor-tensor pow op exists), but it no longer corrupts non-negative
+        // bases and degrades gracefully.
+        auto result = tenzor::float_power(input, exponent);
         register_output(node.outputs[0], result);
     }
 }
@@ -2578,7 +2688,9 @@ auto ONNXImporter::convert_topk(const ONNXImportNode& node) -> void {
 auto ONNXImporter::convert_tile(const ONNXImportNode& node) -> void {
     // ONNX Tile: inputs (input, repeats). repeats is an Int64 1-D tensor.
     auto input   = get_input(node.inputs[0]);
-    auto repeats = get_input(node.inputs[1]);
+    // Host-read the repeats control tensor (see convert_reshape): data<int64_t>()
+    // would otherwise dereference a device pointer on the host for a GPU import.
+    auto repeats = get_host_input(node.inputs[1]);
     const int64_t* rp = repeats.data<int64_t>();
     std::vector<int64_t> reps_vec(rp, rp + repeats.numel());
     register_output(node.outputs[0], tenzor::tile(input, reps_vec));
@@ -2661,8 +2773,9 @@ auto ONNXImporter::log(const std::string& message) -> void {
 
 auto ONNXImporter::convert_quantize_linear(const ONNXImportNode& node) -> void {
     // Audit I3: dtype-aware quantization. The output dtype of ONNX
-    // QuantizeLinear is the dtype of `y_zero_point` (or Int8 if zero_point
-    // is omitted). Previous code hard-coded Int8 + [-128, 127] saturation,
+    // QuantizeLinear is the dtype of `y_zero_point` (or UInt8 [0,255], the
+    // ONNX default output type, if zero_point is omitted). Previous code
+    // hard-coded Int8 + [-128, 127] saturation,
     // which silently miscompiled UInt8 quantization (the most common case
     // for INT8 quantized image models) by clipping to negative range.
     //
@@ -2693,8 +2806,10 @@ auto ONNXImporter::convert_quantize_linear(const ONNXImportNode& node) -> void {
     auto rounded = round(scaled);
 
     // Determine output dtype + saturation range from zero_point dtype.
-    DType out_dtype = DType::Int8;          // ONNX default if zero_point absent
-    double sat_lo = -128.0, sat_hi = 127.0;
+    // Per the ONNX QuantizeLinear spec, when y_zero_point is omitted the output
+    // type T2 defaults to tensor(uint8) with range [0, 255] (NOT int8).
+    DType out_dtype = DType::UInt8;         // ONNX default if zero_point absent
+    double sat_lo = 0.0, sat_hi = 255.0;
     if (node.inputs.size() > 2 && !node.inputs[2].empty()) {
         auto y_zero_point = get_input(node.inputs[2]);
         out_dtype = y_zero_point.dtype();

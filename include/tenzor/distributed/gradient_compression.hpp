@@ -247,6 +247,16 @@ public:
     auto ratio() const -> float { return ratio_; }
 
 private:
+    /**
+     * @brief Move the residual stored under @p old_key to @p new_key.
+     *
+     * Called when compress() reassigns the caller's gradient to a freshly
+     * allocated buffer (the fallback paths), which changes data_ptr(). The
+     * residual must follow the new pointer so the next iteration's lookup
+     * hits and the error-feedback accumulation is preserved.
+     */
+    auto rekey_residual(const void* old_key, const void* new_key) -> void;
+
     /** @brief Fraction of gradient values to keep */
     float ratio_;
 

@@ -864,6 +864,29 @@ Returns:
             // Get raw pointer from Python buffer protocol
             py::buffer buf = py::buffer(obj);
             py::buffer_info info = buf.request();
+            // Validate that the buffer is large enough for the requested
+            // shape/dtype before constructing a zero-copy view. Without this,
+            // a small array with a large shape (or a dtype mismatch) yields a
+            // Tensor that reads/writes past the underlying buffer (OOB).
+            int64_t numel = 1;
+            for (int64_t d : shape) {
+                if (d < 0)
+                    throw py::value_error(
+                        "from_blob: negative dimension in shape");
+                numel *= d;
+            }
+            const size_t required_bytes =
+                static_cast<size_t>(numel) * tenzor::dtype_size(dtype);
+            const size_t available_bytes =
+                static_cast<size_t>(info.size) *
+                static_cast<size_t>(info.itemsize);
+            if (required_bytes > available_bytes) {
+                throw py::value_error(
+                    "from_blob: buffer too small for requested shape/dtype "
+                    "(need " + std::to_string(required_bytes) +
+                    " bytes, buffer holds " + std::to_string(available_bytes) +
+                    " bytes)");
+            }
             // Keep the Python object alive by capturing it in the deleter closure.
             // When the last Tensor sharing this storage is destroyed, the shared_ptr
             // to ExternalStorage dies, which destroys the std::function deleter,
@@ -3581,6 +3604,26 @@ Returns:
             values.push_back(py::cast<double>(data));
         }
 
+        // Reject ragged nested sequences. get_shape only recurses into the
+        // first element of each level, so an inconsistent (ragged) input
+        // produces a shape whose product disagrees with the number of leaves
+        // collected by flatten(). Constructing a tensor anyway would leave
+        // elements uninitialized (numel > leaves) or write past the buffer
+        // (numel < leaves). PyTorch/NumPy raise here too.
+        {
+            int64_t numel = 1;
+            for (int64_t d : shape) numel *= d;
+            if (!shape.empty() &&
+                values.size() != static_cast<size_t>(numel)) {
+                throw py::value_error(
+                    "tensor(): ragged nested sequence — expected " +
+                    std::to_string(numel) + " elements for the inferred "
+                    "shape but found " + std::to_string(values.size()) +
+                    ". All sub-sequences at a given depth must have equal "
+                    "length.");
+            }
+        }
+
         auto actual_dtype = dtype.value_or(tenzor::DType::Float32);
 
         if (shape.empty()) {
@@ -4786,6 +4829,12 @@ Returns:
                 py::gil_scoped_acquire acquire;
                 try {
                     py::object result = hook_ref(grad);
+                    // PyTorch semantics: a hook returning None means "do not
+                    // modify the gradient" — leave the incoming grad unchanged
+                    // rather than attempting a cast that would throw.
+                    if (result.is_none()) {
+                        return grad;
+                    }
                     return result.cast<tenzor::Tensor>();
                 } catch (py::error_already_set& e) {
                     throw;  // Re-raise Python exceptions properly

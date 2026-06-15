@@ -25,6 +25,12 @@ namespace jit {
  * @brief A matched fusion pattern with its constituent nodes.
  */
 struct FusionMatch {
+    /// Sentinel for estimated_elements when the element count cannot be
+    /// determined (any input dim is dynamic/unknown, i.e. <= 0). The cost
+    /// model treats this conservatively instead of multiplying through a
+    /// zero or negative placeholder.
+    static constexpr int64_t kUnknownElements = -1;
+
     FusionKind kind;
     std::vector<std::shared_ptr<Node>> nodes;    ///< Nodes in topological order
     std::vector<std::shared_ptr<Value>> inputs;   ///< External inputs to the pattern
@@ -101,6 +107,13 @@ private:
                             const std::unordered_set<Node*>& used) -> std::optional<FusionMatch>;
     auto match_rotary_embedding(const Graph& graph, size_t start_idx,
                                 const std::unordered_set<Node*>& used) -> std::optional<FusionMatch>;
+
+    /// Estimate the element count of a fusion from the shape of its first
+    /// external input. Returns FusionMatch::kUnknownElements if any dimension
+    /// is <= 0 (dynamic/unknown/invalid) so the cost model does not multiply
+    /// through a zero or negative placeholder.
+    static auto estimate_elements(
+        const std::vector<std::shared_ptr<Value>>& inputs) -> int64_t;
 
     /// Check if a node's single output is consumed only by nodes in the candidate set.
     static auto has_single_use(const std::shared_ptr<Node>& node) -> bool;

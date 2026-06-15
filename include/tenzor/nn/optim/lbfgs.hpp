@@ -120,8 +120,8 @@ public:
      */
     auto step(std::function<Variable()> closure) -> Variable;
 
-    auto set_lr(double lr) -> void { lr_ = lr; }
-    auto get_lr() const -> double { return lr_; }
+    auto set_lr(double lr) -> void override { lr_ = lr; }
+    auto get_lr() const -> double override { return lr_; }
 
     auto state_dict() const -> std::unordered_map<std::string, Tensor> override;
     auto load_state_dict(const std::unordered_map<std::string, Tensor>& state) -> void override;

@@ -656,6 +656,17 @@ auto Graph::infer_types() -> void {
                     int64_t end = node->get_int_attr("end");
                     int64_t step = node->has_attr("step") ? node->get_int_attr("step") : 1;
                     if (dim < static_cast<int64_t>(shape.size())) {
+                        const int64_t dim_size = shape[dim];
+                        // Normalize negative indices and clamp to [0, dim_size]
+                        // to mirror Tensor::slice's runtime semantics, so the
+                        // inferred dim never goes oversized or negative.
+                        if (start < 0) start += dim_size;
+                        if (end   < 0) end   += dim_size;
+                        if (start < 0) start = 0;
+                        if (start > dim_size) start = dim_size;
+                        if (end   < start) end = start;
+                        if (end   > dim_size) end = dim_size;
+                        if (step <= 0) step = 1;
                         int64_t len = (end - start + step - 1) / step;
                         shape[dim] = len;
                     }
@@ -1353,8 +1364,31 @@ auto Graph::infer_symbolic_types() -> void {
                     int64_t end = node->get_int_attr("end");
                     int64_t step = node->has_attr("step") ? node->get_int_attr("step") : 1;
                     if (dim < static_cast<int64_t>(sym_shape.rank())) {
-                        int64_t len = (end - start + step - 1) / step;
-                        sym_shape[static_cast<size_t>(dim)] = SymbolicDim::concrete(len);
+                        if (step <= 0) step = 1;
+                        const SymbolicDim& cur = sym_shape[static_cast<size_t>(dim)];
+                        if (cur.is_concrete()) {
+                            const int64_t dim_size = cur.value();
+                            // Normalize negative indices and clamp to
+                            // [0, dim_size] to mirror Tensor::slice.
+                            if (start < 0) start += dim_size;
+                            if (end   < 0) end   += dim_size;
+                            if (start < 0) start = 0;
+                            if (start > dim_size) start = dim_size;
+                            if (end   < start) end = start;
+                            if (end   > dim_size) end = dim_size;
+                            int64_t len = (end - start + step - 1) / step;
+                            sym_shape[static_cast<size_t>(dim)] =
+                                SymbolicDim::concrete(len);
+                        } else if (start >= 0 && end >= start) {
+                            // Dynamic dim but both endpoints are non-negative,
+                            // so the sliced length is a concrete value.
+                            int64_t len = (end - start + step - 1) / step;
+                            sym_shape[static_cast<size_t>(dim)] =
+                                SymbolicDim::concrete(len);
+                        }
+                        // Otherwise the length depends on the unknown dim
+                        // size (negative index against a dynamic dim); leave
+                        // the dim symbolic rather than emit a garbage length.
                     }
                     output_sym_shapes.push_back(std::move(sym_shape));
                 }
@@ -1772,7 +1806,23 @@ auto Graph::execute_node(const std::shared_ptr<Node>& node,
         // ====================================================================
         case OpType::MatMul:
             if (input_vars.size() >= 2) {
-                outputs.push_back(tenzor::matmul(input_vars[0], input_vars[1]));
+                Variable mm_out = tenzor::matmul(input_vars[0], input_vars[1]);
+                // optimize_for_inference (FuseMatMulAddPass / activation fusion)
+                // may fold a following bias-add and/or ReLU into this node and
+                // delete the separate nodes. Honor the markers so the fused ops
+                // are still applied; otherwise the bias/activation are dropped.
+                if (node->get_bool_attr("fused_bias")) {
+                    if (input_vars.size() >= 3) {
+                        mm_out = mm_out + input_vars[2];
+                    } else if (node->has_tensor_attr("fused_bias")) {
+                        mm_out = mm_out +
+                            Variable(node->get_tensor_attr("fused_bias"), false);
+                    }
+                }
+                if (node->get_bool_attr("fused_relu")) {
+                    mm_out = nn::relu(mm_out);
+                }
+                outputs.push_back(mm_out);
             }
             break;
 
@@ -1935,7 +1985,14 @@ auto Graph::execute_node(const std::shared_ptr<Node>& node,
                 }
                 auto result = dispatch(OpId::Conv2dForward, inputs, conv_attrs);
                 if (!result.empty()) {
-                    outputs.push_back(Variable(result[0], false));
+                    Variable conv_out(result[0], false);
+                    // optimize_for_inference (FuseConvReLU / FuseConvBNReLU) may
+                    // fold a following ReLU into this node and delete the ReLU
+                    // node; apply it here so the activation is not dropped.
+                    if (node->get_bool_attr("fused_relu")) {
+                        conv_out = nn::relu(conv_out);
+                    }
+                    outputs.push_back(conv_out);
                 }
             }
             break;
@@ -2264,12 +2321,16 @@ auto Graph::execute_node(const std::shared_ptr<Node>& node,
 
         case OpType::Linear:
             if (input_vars.size() >= 2) {
-                if (input_vars.size() >= 3) {
-                    outputs.push_back(tenzor::linear(input_vars[0], input_vars[1], input_vars[2]));
-                } else {
+                Variable lin_out = (input_vars.size() >= 3)
+                    ? tenzor::linear(input_vars[0], input_vars[1], input_vars[2])
                     // Linear without bias: y = x @ W^T
-                    outputs.push_back(input_vars[0].matmul(input_vars[1].transpose(0, 1)));
+                    : input_vars[0].matmul(input_vars[1].transpose(0, 1));
+                // optimize_for_inference (FuseLinearReLU) may fold a following
+                // ReLU into this node and delete the ReLU node; apply it here.
+                if (node->get_bool_attr("fused_relu")) {
+                    lin_out = nn::relu(lin_out);
                 }
+                outputs.push_back(lin_out);
             }
             break;
 

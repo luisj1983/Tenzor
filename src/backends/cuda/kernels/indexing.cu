@@ -1152,11 +1152,12 @@ auto masked_select_kernel(const Tensor& input, const Tensor& mask,
         return Tensor({0}, input.dtype(), input.device());
     }
 
-    // Convert mask to bool if needed
-    Tensor bool_mask = mask;
-    if (mask.dtype() != DType::Bool) {
-        bool_mask = mask;
-    }
+    // Convert mask to bool if needed. CUB DeviceSelect::Flagged reads one byte
+    // per flag, so a multi-byte mask dtype (e.g. Int32) reinterpreted as bool*
+    // would read flags at the wrong stride and select garbage. Actually cast.
+    Tensor bool_mask = (mask.dtype() != DType::Bool)
+                           ? mask.to(DType::Bool).contiguous()
+                           : mask.contiguous();
 
     const bool* d_flags = reinterpret_cast<const bool*>(bool_mask.data_ptr());
     size_t elem_size = dtype_size(input.dtype());

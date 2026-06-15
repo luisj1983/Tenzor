@@ -78,8 +78,15 @@ auto widen_narrow_compute(const Tensor& a, const Tensor& b, Fn&& fn) -> Tensor {
     const DType orig = a.dtype();
     const bool widen = is_half_precision(orig) || is_half_precision(b.dtype());
     if (widen) {
-        Tensor wa = (a.dtype() == DType::Float32) ? a : a.to(DType::Float32);
-        Tensor wb = (b.dtype() == DType::Float32) ? b : b.to(DType::Float32);
+        // Widen to the HIGHEST-precision float among the inputs, not always
+        // Float32. A Float64 operand paired with a half-precision operand must
+        // compute at Float64, otherwise the result is a Float64-typed tensor
+        // carrying only Float32 precision (the classic silent-accumulator bug).
+        const DType wide = (a.dtype() == DType::Float64 || b.dtype() == DType::Float64)
+                               ? DType::Float64
+                               : DType::Float32;
+        Tensor wa = (a.dtype() == wide) ? a : a.to(wide);
+        Tensor wb = (b.dtype() == wide) ? b : b.to(wide);
         Tensor result = std::forward<Fn>(fn)(wa, wb);
         if (result.dtype() != orig) {
             return result.to(orig);

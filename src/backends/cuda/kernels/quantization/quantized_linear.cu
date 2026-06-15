@@ -42,7 +42,14 @@ __global__ void quantized_linear_cuda_kernel(
 
     if (b >= batch_size || o >= out_features) return;
 
-    int32_t acc = 0;
+    // int64 accumulator: each int8*int8 product fits in int32, but summed over
+    // in_features the running total can exceed INT32_MAX for very wide layers
+    // (K >~ 131072), so accumulate in int64 to avoid silent wraparound.
+    int64_t acc = 0;
+    // Running sums of the quantized operands, needed for the asymmetric
+    // (non-zero zero-point) dequantization correction below.
+    int64_t sum_i = 0;  // sum(q_i)
+    int64_t sum_w = 0;  // sum(q_w)
 
     const int8_t* input_row = input + b * in_features;
     const int8_t* weight_row = weight + o * in_features;
@@ -60,20 +67,32 @@ __global__ void quantized_linear_cuda_kernel(
 
         #pragma unroll
         for (int i = 0; i < VEC_SIZE; ++i) {
-            acc += static_cast<int32_t>(input_bytes[i]) * static_cast<int32_t>(weight_bytes[i]);
+            int32_t qi = static_cast<int32_t>(input_bytes[i]);
+            int32_t qw = static_cast<int32_t>(weight_bytes[i]);
+            acc += qi * qw;
+            sum_i += qi;
+            sum_w += qw;
         }
     }
 
     // Process remaining elements
     for (int64_t i = vec_steps * VEC_SIZE; i < in_features; ++i) {
-        acc += static_cast<int32_t>(input_row[i]) * static_cast<int32_t>(weight_row[i]);
+        int32_t qi = static_cast<int32_t>(input_row[i]);
+        int32_t qw = static_cast<int32_t>(weight_row[i]);
+        acc += qi * qw;
+        sum_i += qi;
+        sum_w += qw;
     }
 
-    // Zero point correction
-    acc -= input_zp * weight_zp * in_features;
+    // Asymmetric zero-point correction (computed in int64 to avoid overflow):
+    //   sum(q_i*q_w) - zp_w*sum(q_i) - zp_i*sum(q_w) + N*zp_i*zp_w
+    int64_t corrected = static_cast<int64_t>(acc)
+                      - static_cast<int64_t>(weight_zp) * sum_i
+                      - static_cast<int64_t>(input_zp) * sum_w
+                      + static_cast<int64_t>(input_zp) * static_cast<int64_t>(weight_zp) * in_features;
 
     // Dequantize and add bias
-    float result = static_cast<float>(acc) * combined_scale;
+    float result = static_cast<float>(corrected) * combined_scale;
     if (bias != nullptr) {
         result += bias[o];
     }

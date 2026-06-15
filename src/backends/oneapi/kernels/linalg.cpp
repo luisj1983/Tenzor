@@ -251,6 +251,10 @@ class SyclDetReduceF32;
 class SyclDetReduceF64;
 class SyclDetCombineF32;
 class SyclDetCombineF64;
+class SyclDetBatchPackF32;
+class SyclDetBatchPackF64;
+class SyclDetBatchReduceF32;
+class SyclDetBatchReduceF64;
 class SyclTransposeGeqrfAF32;
 class SyclTransposeGeqrfAF64;
 class SyclGeqrfExtractF32;
@@ -285,24 +289,69 @@ auto linalg_det_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
         nbatch *= shape[i];
     }
 
-    // For batched input, delegate to native SYCL det kernel which handles batching
+    // For batched input, use oneMKL strided-batched getrf (getrf_batch) plus a
+    // single device reduction kernel. The previous code recursed per batch
+    // element with two blocking memcpy().wait() calls and a per-element device
+    // allocation each, serializing the whole batch on host syncs and defeating
+    // batched LAPACK / device parallelism.
     if (nbatch > 1) {
-        // Use the native SYCL implementation that handles batching
-        // Forward declare the native version at file scope
-        auto work = clone_kernel(input, queue);
         Tensor output(out_shape, input.dtype(), input.device());
-        // Process each batch element individually
-        for (int64_t b = 0; b < nbatch; b++) {
-            // Extract single matrix: shape {n, n}
-            auto batch_data = Tensor({n, n}, input.dtype(), input.device());
-            queue.memcpy(const_cast<void*>(batch_data.data_ptr()),
-                        static_cast<const char*>(input.data_ptr()) + b * n * n * input.dtype_size(),
-                        n * n * input.dtype_size()).wait();
-            // Compute det for single matrix
-            Tensor single_det = linalg_det_kernel(batch_data, queue);
-            // Copy result to output
-            queue.memcpy(static_cast<char*>(const_cast<void*>(output.data_ptr())) + b * input.dtype_size(),
-                        single_det.data_ptr(), input.dtype_size()).wait();
+
+        auto run_batched = [&]<typename T, typename PackName, typename ReduceName>() {
+            const int64_t stride_a = n * n;
+            SyclDeviceBuffer<T> d_a(nbatch * stride_a, queue);
+            SyclDeviceBuffer<std::int64_t> d_ipiv(nbatch * n, queue);
+
+            // Pack each row-major (n x n) matrix into column-major in one kernel
+            // (column-major: a_col[b*nn + j*n + i] = a_row[b*nn + i*n + j]).
+            const T* in_ptr = get_data_ptr<const T>(input);
+            T* a_ptr = d_a.get();
+            const int64_t nn = stride_a;
+            const int64_t nb = nbatch;
+            const int64_t nv = n;
+            queue.parallel_for<PackName>(
+                sycl::range<1>(static_cast<size_t>(nb * nn)),
+                [=](sycl::id<1> gid) {
+                    int64_t g = static_cast<int64_t>(gid[0]);
+                    int64_t b = g / nn;
+                    int64_t rem = g % nn;
+                    int64_t i = rem / nv;   // row
+                    int64_t j = rem % nv;   // col
+                    a_ptr[b * nn + j * nv + i] = in_ptr[b * nn + i * nv + j];
+                }).wait();
+
+            auto scratch_size = ::oneapi::mkl::lapack::getrf_batch_scratchpad_size<T>(
+                queue, n, n, n, stride_a, n, nbatch);
+            SyclDeviceBuffer<T> scratch(scratch_size, queue);
+            ::oneapi::mkl::lapack::getrf_batch(
+                queue, n, n, d_a.get(), n, stride_a, d_ipiv.get(), n, nbatch,
+                scratch.get(), scratch_size).wait();
+
+            // One work-item per batch: product of column-major diagonal entries
+            // times (-1)^(number of pivot swaps).
+            T* out_ptr = static_cast<T*>(const_cast<void*>(output.data_ptr()));
+            const std::int64_t* ipiv_ptr = d_ipiv.get();
+            const T* a_done = d_a.get();
+            queue.parallel_for<ReduceName>(
+                sycl::range<1>(static_cast<size_t>(nb)),
+                [=](sycl::id<1> bid) {
+                    int64_t b = static_cast<int64_t>(bid[0]);
+                    T prod = T(1);
+                    int swaps = 0;
+                    for (int64_t i = 0; i < nv; ++i) {
+                        prod *= a_done[b * nn + i * nv + i];
+                        if (ipiv_ptr[b * nv + i] != i + 1) ++swaps;
+                    }
+                    out_ptr[b] = (swaps % 2) ? -prod : prod;
+                }).wait();
+        };
+
+        if (input.dtype() == DType::Float32) {
+            run_batched.template operator()<float, SyclDetBatchPackF32, SyclDetBatchReduceF32>();
+        } else if (input.dtype() == DType::Float64) {
+            run_batched.template operator()<double, SyclDetBatchPackF64, SyclDetBatchReduceF64>();
+        } else {
+            throw std::runtime_error("linalg_det: only Float32 and Float64 supported");
         }
         return output;
     }

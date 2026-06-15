@@ -158,7 +158,16 @@ auto device_from_torch_string(const std::string& device_str) -> Device {
     }
 
     if (device_str.substr(0, 5) == "cuda:") {
-        int index = std::stoi(device_str.substr(5));
+        const std::string index_str = device_str.substr(5);
+        // std::stoi throws std::invalid_argument / std::out_of_range on a
+        // malformed or empty index ("cuda:", "cuda:abc"), masking the
+        // documented std::runtime_error. Validate first so callers always
+        // get the documented exception that names the offending string.
+        if (index_str.empty() ||
+            index_str.find_first_not_of("0123456789") != std::string::npos) {
+            throw std::runtime_error("Unsupported PyTorch device string: " + device_str);
+        }
+        int index = std::stoi(index_str);
         return Device::cuda(index);
     }
 
@@ -211,7 +220,7 @@ auto tensor_to_torch(const Tensor& tensor, bool requires_grad) -> torch::Tensor 
             options = options.device(torch_device);
         }
         torch_tensor = torch::from_blob(
-            const_cast<void*>(tensor.data<void>()),
+            const_cast<void*>(tensor.data_ptr()),
             torch_shape,
             /*deleter=*/[storage_ticket](void* /*data*/) {
                 delete storage_ticket;
@@ -230,7 +239,7 @@ auto tensor_to_torch(const Tensor& tensor, bool requires_grad) -> torch::Tensor 
 
         if (device.type == Device::Type::CPU && torch_device.is_cpu()) {
             std::memcpy(torch_tensor.data_ptr(),
-                       contiguous_tensor.data<void>(),
+                       contiguous_tensor.data_ptr(),
                        contiguous_tensor.numel() * dtype_size(dtype));
         } else if (contiguous_tensor.device().type == Device::Type::CUDA
                    || torch_device.is_cuda()) {
@@ -251,7 +260,7 @@ auto tensor_to_torch(const Tensor& tensor, bool requires_grad) -> torch::Tensor 
             else if (!src_is_cuda && dst_is_cuda)  kind = cudaMemcpyHostToDevice;
             else                                    kind = cudaMemcpyHostToHost;
             cudaMemcpy(torch_tensor.data_ptr(),
-                      contiguous_tensor.data<void>(),
+                      contiguous_tensor.data_ptr(),
                       contiguous_tensor.numel() * dtype_size(dtype),
                       kind);
         } else {
@@ -265,9 +274,9 @@ auto tensor_to_torch(const Tensor& tensor, bool requires_grad) -> torch::Tensor 
             auto host = contiguous_tensor.cpu().contiguous();
             const size_t bytes = host.numel() * dtype_size(dtype);
             if (torch_device.is_cpu()) {
-                std::memcpy(torch_tensor.data_ptr(), host.data<void>(), bytes);
+                std::memcpy(torch_tensor.data_ptr(), host.data_ptr(), bytes);
             } else if (torch_device.is_cuda()) {
-                cudaMemcpy(torch_tensor.data_ptr(), host.data<void>(),
+                cudaMemcpy(torch_tensor.data_ptr(), host.data_ptr(),
                            bytes, cudaMemcpyHostToDevice);
             } else {
                 throw std::runtime_error(
@@ -325,18 +334,28 @@ auto tensor_from_torch(const torch::Tensor& torch_tensor,
     //   - dtype is one Tenzor's DLPack importer handles (Float32/64/16/
     //     BFloat16/Int8/16/32/64/UInt8/Bool — see src/core/dlpack.cpp).
     if (!target_device.has_value() && torch_tensor.is_contiguous()) {
+        // Hoisted above the try so the catch can free it: at::toDLPack
+        // allocates the DLManagedTensor and bumps the PyTorch storage
+        // refcount BEFORE from_dlpack runs. from_dlpack does NOT take
+        // ownership when it throws (unsupported dtype/device/layout), so the
+        // consumer must invoke the deleter to release both the struct and the
+        // held storage reference — otherwise every rejected handoff leaks.
+        DLManagedTensor* managed = nullptr;
         try {
-            DLManagedTensor* managed = at::toDLPack(torch_tensor);
+            managed = at::toDLPack(torch_tensor);
             Tensor t = tenzor::from_dlpack(managed);
-            // ATen's toDLPack hands ownership to the consumer; Tenzor's
-            // from_dlpack stores the DLManagedTensor* and calls its
-            // `deleter` on destruction. No need to free here.
+            // Success: Tenzor's from_dlpack stored the DLManagedTensor* and
+            // will call its `deleter` on destruction. No need to free here.
             return t;
         } catch (const std::exception& e) {
             // Fall through to the copy path on unsupported dtype / layout —
             // some PyTorch dtypes (Float8E4M3, QInt4) aren't yet in Tenzor's
             // DLPack importer. The copy path still handles those if dtype
-            // round-trips via Tenzor's enum.
+            // round-trips via Tenzor's enum. Release the DLManagedTensor that
+            // from_dlpack rejected (it did not assume ownership on throw).
+            if (managed && managed->deleter) {
+                managed->deleter(managed);
+            }
             (void)e;
         }
     }
@@ -355,17 +374,17 @@ auto tensor_from_torch(const torch::Tensor& torch_tensor,
     if (device.type == Device::Type::CPU) {
         Tensor tensor(shape, dtype, Device::cpu());
         if (src_is_cuda) {
-            cudaMemcpy(tensor.data<void>(), contiguous_torch.data_ptr(),
+            cudaMemcpy(tensor.data_ptr(), contiguous_torch.data_ptr(),
                        bytes, cudaMemcpyDeviceToHost);
         } else {
-            std::memcpy(tensor.data<void>(), contiguous_torch.data_ptr(), bytes);
+            std::memcpy(tensor.data_ptr(), contiguous_torch.data_ptr(), bytes);
         }
         return tensor;
     }
 
     if (device.type == Device::Type::CUDA) {
         Tensor tensor(shape, dtype, device);
-        cudaMemcpy(tensor.data<void>(), contiguous_torch.data_ptr(), bytes,
+        cudaMemcpy(tensor.data_ptr(), contiguous_torch.data_ptr(), bytes,
                    src_is_cuda ? cudaMemcpyDeviceToDevice : cudaMemcpyHostToDevice);
         return tensor;
     }
@@ -377,7 +396,7 @@ auto tensor_from_torch(const torch::Tensor& torch_tensor,
     // not a compute fallback.
     auto host_torch = src_is_cuda ? contiguous_torch.to(torch::kCPU) : contiguous_torch;
     Tensor host_tensor(shape, dtype, Device::cpu());
-    std::memcpy(host_tensor.data<void>(), host_torch.data_ptr(), bytes);
+    std::memcpy(host_tensor.data_ptr(), host_torch.data_ptr(), bytes);
     return host_tensor.to(device);
 }
 

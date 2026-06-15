@@ -132,14 +132,20 @@ public:
     }
 
     auto log_prob(const Tensor& value) -> Tensor override {
+        // Full-precision (double) additive constants. A float literal (`f`
+        // suffix) would silently cap accuracy at ~1e-7 for Float64 inputs even
+        // though the rest of the computation is double — the classic
+        // float32-constant-in-multi-dtype-path regression.
+        constexpr double kLogSqrt2Pi = 0.91893853320467274178; // log(sqrt(2*pi))
         auto var = scale_ * scale_;
         auto log_scale = tenzor::log(scale_);
         auto diff = value - loc_;
-        return tenzor::neg(diff * diff) / (var * 2.0f) - log_scale - 0.9189385332f; // -log(sqrt(2*pi))
+        return tenzor::neg(diff * diff) / (var * 2.0) - log_scale - kLogSqrt2Pi;
     }
 
     auto entropy() -> Tensor override {
-        return tenzor::log(scale_) + 1.4189385332f; // 0.5 * log(2*pi*e)
+        constexpr double kHalfLog2PiE = 1.41893853320467274178; // 0.5*log(2*pi*e)
+        return tenzor::log(scale_) + kHalfLog2PiE;
     }
 
     auto mean() -> Tensor override { return loc_; }

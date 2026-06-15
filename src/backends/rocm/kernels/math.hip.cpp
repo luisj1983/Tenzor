@@ -1351,6 +1351,11 @@ auto add_kernel(const Tensor& a_in, const Tensor& b_in, hipStream_t stream) -> T
         auto a_f32 = cast_kernel(a, DType::Float32, stream);
         auto b_f32 = cast_kernel(b, DType::Float32, stream);
         auto result_f32 = add_kernel(a_f32, b_f32, stream);
+        // Free the broadcast metadata buffers before the early return; the
+        // function-end hipFree block below is unreachable on this path.
+        HIP_CHECK(hipFree(d_strides_a));
+        HIP_CHECK(hipFree(d_strides_b));
+        HIP_CHECK(hipFree(d_output_shape));
         return cast_kernel(result_f32, orig, stream);
     } else {
         throw std::runtime_error("Unsupported dtype for add operation");
@@ -1536,6 +1541,11 @@ auto sub_kernel(const Tensor& a_in, const Tensor& b_in, hipStream_t stream) -> T
         auto a_f32 = cast_kernel(a, DType::Float32, stream);
         auto b_f32 = cast_kernel(b, DType::Float32, stream);
         auto result_f32 = sub_kernel(a_f32, b_f32, stream);
+        // Free the broadcast metadata buffers before the early return; the
+        // function-end hipFree block below is unreachable on this path.
+        HIP_CHECK(hipFree(d_strides_a));
+        HIP_CHECK(hipFree(d_strides_b));
+        HIP_CHECK(hipFree(d_output_shape));
         return cast_kernel(result_f32, orig, stream);
     } else {
         throw std::runtime_error("Unsupported dtype for sub operation");
@@ -1728,6 +1738,11 @@ auto mul_kernel(const Tensor& a_in, const Tensor& b_in, hipStream_t stream) -> T
         auto a_f32 = cast_kernel(a, DType::Float32, stream);
         auto b_f32 = cast_kernel(b, DType::Float32, stream);
         auto result_f32 = mul_kernel(a_f32, b_f32, stream);
+        // Free the broadcast metadata buffers before the early return; the
+        // function-end hipFree block below is unreachable on this path.
+        HIP_CHECK(hipFree(d_strides_a));
+        HIP_CHECK(hipFree(d_strides_b));
+        HIP_CHECK(hipFree(d_output_shape));
         return cast_kernel(result_f32, orig, stream);
     } else {
         throw std::runtime_error("Unsupported dtype for mul operation");
@@ -1775,6 +1790,11 @@ auto div_kernel(const Tensor& a_in, const Tensor& b_in, hipStream_t stream) -> T
     if (detail::have_same_shape(a, b)) {
         int64_t n = a.numel();
         Tensor result(a_shape_vec, a.dtype(), a.device());
+
+        // Empty-tensor fast path — HIP rejects zero-grid launches
+        // ("invalid configuration argument"). Skip the kernel entirely;
+        // the pre-allocated result is already the correct empty shape.
+        if (n == 0) return result;
 
         dim3 grid, block;
         compute_launch_config_1d(n, grid, block);
@@ -1895,6 +1915,11 @@ auto div_kernel(const Tensor& a_in, const Tensor& b_in, hipStream_t stream) -> T
         auto a_f32 = cast_kernel(a, DType::Float32, stream);
         auto b_f32 = cast_kernel(b, DType::Float32, stream);
         auto result_f32 = div_kernel(a_f32, b_f32, stream);
+        // Free the broadcast metadata buffers before the early return; the
+        // function-end hipFree block below is unreachable on this path.
+        HIP_CHECK(hipFree(d_strides_a));
+        HIP_CHECK(hipFree(d_strides_b));
+        HIP_CHECK(hipFree(d_output_shape));
         return cast_kernel(result_f32, orig, stream);
     } else {
         throw std::runtime_error("Unsupported dtype for div operation");
@@ -3490,12 +3515,14 @@ __global__ void fill_strided_kernel(T* output, T value, int64_t n, int64_t strid
 auto fill_kernel(const Tensor& tensor, double value, hipStream_t stream) -> Tensor {
     int64_t n = tensor.numel();
 
-    if (n == 0) {
-        return tensor;
-    }
+    // OpId::Fill is a non-in-place, single-output op. Tensor's copy ctor shares
+    // storage, so `auto result = tensor;` would overwrite the caller's input.
+    // clone() gives an independent deep copy; fill overwrites every element next.
+    Tensor result = tensor.clone();
 
-    // Create a copy to modify
-    auto result = tensor;
+    if (n == 0) {
+        return result;
+    }
 
     dim3 grid, block;
     compute_launch_config_1d(n, grid, block);
@@ -7078,6 +7105,15 @@ __global__ void bincount_find_max_hip(
     }
 }
 
+__global__ void bincount_find_min_hip(
+    const int64_t* __restrict__ input, int64_t* __restrict__ min_val, int64_t n)
+{
+    HIP_KERNEL_LOOP(idx, n) {
+        atomicMin(reinterpret_cast<long long*>(min_val),
+                  static_cast<long long>(input[idx]));
+    }
+}
+
 auto bincount_kernel(const Tensor& input, const Tensor* weights,
                      int64_t minlength, hipStream_t stream) -> Tensor {
     Tensor input_cont = input.is_contiguous() ? input : input.contiguous();
@@ -7087,12 +7123,19 @@ auto bincount_kernel(const Tensor& input, const Tensor* weights,
     int64_t n = input_i64.numel();
     auto device = input.device();
 
-    // Find max value on GPU
+    // Find max and min value on GPU. The min pass lets us reject negative
+    // inputs before launching the accumulation kernels — those index
+    // output[input[idx]] with no lower-bound check, so a negative element
+    // would be an out-of-bounds device write (CPU throws on negatives).
     Tensor max_tensor({1}, DType::Int64, device);
+    Tensor min_tensor({1}, DType::Int64, device);
     int64_t neg_one = -1;
+    int64_t int64_max = std::numeric_limits<int64_t>::max();
     // audit V.15: wrap HIP API calls in HIP_CHECK; previously errors here
     // (OOM, stream invalidation, device lost) were silently swallowed.
     HIP_CHECK(hipMemcpyAsync(max_tensor.data<int64_t>(), &neg_one, sizeof(int64_t),
+                   hipMemcpyHostToDevice, stream));
+    HIP_CHECK(hipMemcpyAsync(min_tensor.data<int64_t>(), &int64_max, sizeof(int64_t),
                    hipMemcpyHostToDevice, stream));
 
     if (n > 0) {
@@ -7101,12 +7144,22 @@ auto bincount_kernel(const Tensor& input, const Tensor* weights,
         hipLaunchKernelGGL(bincount_find_max_hip, grid, block, 0, stream,
             input_i64.data<int64_t>(), max_tensor.data<int64_t>(), n);
         HIP_CHECK(hipGetLastError());
+        hipLaunchKernelGGL(bincount_find_min_hip, grid, block, 0, stream,
+            input_i64.data<int64_t>(), min_tensor.data<int64_t>(), n);
+        HIP_CHECK(hipGetLastError());
     }
 
     int64_t max_val = -1;
+    int64_t min_val = int64_max;
     HIP_CHECK(hipMemcpyAsync(&max_val, max_tensor.data<int64_t>(), sizeof(int64_t),
                    hipMemcpyDeviceToHost, stream));
+    HIP_CHECK(hipMemcpyAsync(&min_val, min_tensor.data<int64_t>(), sizeof(int64_t),
+                   hipMemcpyDeviceToHost, stream));
     HIP_CHECK(hipStreamSynchronize(stream));
+
+    if (n > 0 && min_val < 0) {
+        throw std::runtime_error("bincount: input must contain non-negative integers");
+    }
 
     int64_t output_size = std::max(max_val + 1, minlength);
 

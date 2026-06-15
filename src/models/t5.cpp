@@ -84,77 +84,42 @@ auto T5Attention::relative_position_bucket(int64_t relative_position,
     return bucket;
 }
 
-auto T5Attention::compute_bias(int64_t query_length, int64_t key_length) -> Tensor {
-    // Compute relative position bias matrix
-    // Infer dtype and device from embedding weights to support multi-dtype and multi-device models
-    DType dtype = relative_attention_bias_->weight().tensor().dtype();
+auto T5Attention::compute_bias(int64_t query_length, int64_t key_length) -> Variable {
+    // Compute relative position bias matrix via a single autograd-tracked embedding
+    // lookup so gradients flow into the learnable relative_attention_bias_ table.
     Device target_device = relative_attention_bias_->weight().tensor().device();
 
-    // Create on CPU for data filling, then transfer to target device
-    Tensor position_bias(std::vector<int64_t>{config_.num_heads, query_length, key_length},
-                         dtype, Device::cpu());
-
-    // Zero-initialize (dtype-aware since zero_() may not support all dtypes)
-    if (dtype == DType::Float16) {
-        auto* data = position_bias.data<Float16>();
-        std::fill_n(data, position_bias.numel(), Float16(0.0f));
-    } else if (dtype == DType::Float32) {
-        auto* data = position_bias.data<float>();
-        std::fill_n(data, position_bias.numel(), 0.0f);
-    } else if (dtype == DType::Float64) {
-        auto* data = position_bias.data<double>();
-        std::fill_n(data, position_bias.numel(), 0.0);
-    }
-
-    // Compute bias for each (query_pos, key_pos) pair
-    for (int64_t i = 0; i < query_length; ++i) {
-        for (int64_t j = 0; j < key_length; ++j) {
-            int64_t relative_position = i - j;
-            int64_t bucket = relative_position_bucket(
-                relative_position,
-                config_.relative_attention_num_buckets,
-                config_.relative_attention_max_distance
-            );
-
-            // Look up bias for this bucket
-            // Create bucket tensor on the target device to match embedding weights
-            Tensor bucket_tensor({1}, DType::Int64, Device::cpu());
-            bucket_tensor.data<int64_t>()[0] = bucket;
-            // Move to target device for embedding lookup
-            bucket_tensor = bucket_tensor.to(target_device);
-            auto bias_values = relative_attention_bias_->forward(
-                Variable(bucket_tensor, false)
-            ).tensor();
-            // Move result back to CPU for data access
-            bias_values = bias_values.to(Device::cpu());
-
-            // Assign to all heads (dtype-generic)
-            if (dtype == DType::Float16) {
-                auto* bias_ptr = position_bias.data<Float16>();
-                auto* values_ptr = bias_values.data<Float16>();
-                for (int64_t h = 0; h < config_.num_heads; ++h) {
-                    bias_ptr[h * query_length * key_length + i * key_length + j] = values_ptr[h];
-                }
-            } else if (dtype == DType::Float32) {
-                auto* bias_ptr = position_bias.data<float>();
-                auto* values_ptr = bias_values.data<float>();
-                for (int64_t h = 0; h < config_.num_heads; ++h) {
-                    bias_ptr[h * query_length * key_length + i * key_length + j] = values_ptr[h];
-                }
-            } else if (dtype == DType::Float64) {
-                auto* bias_ptr = position_bias.data<double>();
-                auto* values_ptr = bias_values.data<double>();
-                for (int64_t h = 0; h < config_.num_heads; ++h) {
-                    bias_ptr[h * query_length * key_length + i * key_length + j] = values_ptr[h];
-                }
+    // Build all (query, key) bucket indices into one (query_length*key_length,) Int64
+    // tensor in a single pass, then a single embedding forward/gather. This avoids the
+    // previous O(L*L) embedding launches and host/device round-trips.
+    const int64_t num_pairs = query_length * key_length;
+    Tensor bucket_tensor(std::vector<int64_t>{num_pairs}, DType::Int64, Device::cpu());
+    {
+        auto* buckets = bucket_tensor.data<int64_t>();
+        for (int64_t i = 0; i < query_length; ++i) {
+            for (int64_t j = 0; j < key_length; ++j) {
+                int64_t relative_position = i - j;
+                buckets[i * key_length + j] = relative_position_bucket(
+                    relative_position,
+                    config_.relative_attention_num_buckets,
+                    config_.relative_attention_max_distance
+                );
             }
         }
     }
-
-    // Transfer to target device if needed
+    // Move indices to the embedding's device for the lookup.
     if (target_device != Device::cpu()) {
-        position_bias = position_bias.to(target_device);
+        bucket_tensor = bucket_tensor.to(target_device);
     }
+
+    // Single autograd embedding lookup: [num_pairs] -> [num_pairs, num_heads]
+    Variable bias_values = relative_attention_bias_->forward(Variable(bucket_tensor, false));
+
+    // Reshape to [query_length, key_length, num_heads], then permute to
+    // [num_heads, query_length, key_length] using autograd-aware ops.
+    bias_values = tenzor::reshape(
+        bias_values, std::vector<int64_t>{query_length, key_length, config_.num_heads});
+    Variable position_bias = tenzor::permute(bias_values, std::vector<int64_t>{2, 0, 1});
 
     return position_bias;
 }
@@ -209,47 +174,23 @@ auto T5Attention::forward(const Variable& hidden_states,
     double scale = 1.0 / std::sqrt(static_cast<double>(config_.d_kv));
     scores = scores * scale;
 
-    // Add relative position bias
+    // Add relative position bias.
+    // Returned bias tensor (2nd tuple element) is the detached values, cached by the
+    // encoder/decoder and re-fed to later layers (which only have the bias in layer 0).
     Tensor bias = position_bias;
     if ((!position_bias.is_valid() || !position_bias.numel()) && has_relative_attention_bias_) {
-        bias = compute_bias(seq_len, kv_seq_len);
-    }
-
-    if (bias.is_valid() && bias.numel() > 0) {
-        // Expand bias to batch dimension: [num_heads, q_len, kv_len] -> [batch, num_heads, q_len, kv_len]
-        // Create on CPU for data filling, then transfer to target device
-        Device bias_device = bias.device();
-        Tensor bias_cpu = (bias_device == Device::cpu()) ? bias : bias.to(Device::cpu());
-
-        Tensor expanded_bias_cpu({batch_size, config_.num_heads, seq_len, kv_seq_len},
-                                  bias.dtype(), Device::cpu());
-        int64_t bias_size = config_.num_heads * seq_len * kv_seq_len;
-
-        // Dtype-generic bias expansion
-        if (bias.dtype() == DType::Float16) {
-            auto* bias_ptr = bias_cpu.data<Float16>();
-            auto* expanded_ptr = expanded_bias_cpu.data<Float16>();
-            for (int64_t b = 0; b < batch_size; ++b) {
-                std::copy(bias_ptr, bias_ptr + bias_size, expanded_ptr + b * bias_size);
-            }
-        } else if (bias.dtype() == DType::Float32) {
-            auto* bias_ptr = bias_cpu.data<float>();
-            auto* expanded_ptr = expanded_bias_cpu.data<float>();
-            for (int64_t b = 0; b < batch_size; ++b) {
-                std::copy(bias_ptr, bias_ptr + bias_size, expanded_ptr + b * bias_size);
-            }
-        } else if (bias.dtype() == DType::Float64) {
-            auto* bias_ptr = bias_cpu.data<double>();
-            auto* expanded_ptr = expanded_bias_cpu.data<double>();
-            for (int64_t b = 0; b < batch_size; ++b) {
-                std::copy(bias_ptr, bias_ptr + bias_size, expanded_ptr + b * bias_size);
-            }
-        }
-
-        // Transfer to target device if needed
-        Tensor expanded_bias = (bias_device == Device::cpu()) ?
-                                expanded_bias_cpu : expanded_bias_cpu.to(bias_device);
-        scores = scores + Variable(expanded_bias, false);
+        // Freshly compute bias as an autograd-tracked Variable so gradients reach the
+        // learnable relative_attention_bias_ embedding. Unsqueeze to [1, num_heads, q, kv]
+        // and rely on broadcasting over the batch dimension.
+        Variable bias_var = compute_bias(seq_len, kv_seq_len);
+        Variable bias_4d = tenzor::unsqueeze(bias_var, 0);
+        scores = scores + bias_4d;
+        bias = bias_var.tensor();  // cache detached values for reuse by subsequent layers
+    } else if (bias.is_valid() && bias.numel() > 0) {
+        // Reused bias from the first layer: add detached (gradient already flows through
+        // the first layer's autograd-tracked compute_bias path). Unsqueeze for broadcast.
+        Variable bias_4d = tenzor::unsqueeze(Variable(bias, false), 0);
+        scores = scores + bias_4d;
     }
 
     // Apply attention mask if provided
@@ -533,6 +474,18 @@ auto T5Decoder::create_causal_mask(int64_t seq_len, Device device) -> Tensor {
                 data[i * seq_len + j] = (j <= i) ? 0.0 : -1e9;
             }
         }
+    } else if (dtype == DType::BFloat16) {
+        auto* data = mask_cpu.data<BFloat16>();
+        for (int64_t i = 0; i < seq_len; ++i) {
+            for (int64_t j = 0; j < seq_len; ++j) {
+                data[i * seq_len + j] = (j <= i) ? BFloat16(0.0f) : BFloat16(-1e9f);
+            }
+        }
+    } else {
+        // Never silently return an all-zero (i.e. non-)causal mask for an
+        // unsupported dtype: that would let the decoder attend to future tokens.
+        throw std::runtime_error(
+            "T5Decoder::create_causal_mask: unsupported dtype for causal mask");
     }
 
     // Transfer to target device if needed

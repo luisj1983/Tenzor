@@ -452,6 +452,17 @@ auto DistributedDataParallel::all_reduce_bucket_async(
         return;
     }
 
+    if (compressor_) {
+        // The async/flat-buffer path issues an uncompressed AVG all-reduce and
+        // never consults compressor_. Honour a user-set compressor by routing
+        // this bucket through the synchronous compression path (the only one
+        // that applies the encoder); otherwise the compressor would be a silent
+        // no-op on the GPU/NCCL path, defeating bandwidth reduction and (for
+        // TopK) changing convergence.
+        all_reduce_bucket(bucket);
+        return;
+    }
+
 #if defined(TENZOR_USE_CUDA) || defined(TENZOR_USE_ROCM)
     // Audit D.9: each bucket all-reduces on its OWN dedicated stream
     // (PyTorch DDP reducer.cpp pattern). Distinct buckets' collectives
@@ -603,7 +614,21 @@ auto DistributedDataParallel::all_reduce_bucket(GradBucket& bucket) -> void {
             Tensor grad = param->grad().value();
             comm_stats_.total_bytes_transferred += grad.numel() * dtype_size(grad.dtype());
             auto compressed = compressor_->compress(grad);
+            // Some backends (notably MPI) have no native Float16/BFloat16
+            // collective datatype and throw in all_reduce. Widen a half
+            // payload to Float32 for the reduction and narrow it back so
+            // decompress() still sees the dtype it produced, mirroring the
+            // widen/narrow pattern GlooBackend::all_reduce uses internally.
+            DType payload_dtype = compressed.data.dtype();
+            bool widen_half = (payload_dtype == DType::Float16 ||
+                               payload_dtype == DType::BFloat16);
+            if (widen_half) {
+                compressed.data = compressed.data.to(DType::Float32);
+            }
             pg_->all_reduce(compressed.data, ReduceOp::SUM);
+            if (widen_half) {
+                compressed.data = compressed.data.to(payload_dtype);
+            }
             grad = compressor_->decompress(compressed);
             if (ws > 1) {
                 param->set_grad(grad / static_cast<double>(ws));

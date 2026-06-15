@@ -1382,15 +1382,17 @@ auto matrix_power(const Tensor& A, int64_t n) -> Tensor {
         return tenzor::eye(rows, std::nullopt, A.dtype(), A.device());
     }
 
-    // For negative exponents, invert first then exponentiate
+    // For negative exponents, invert first then exponentiate. Compute the
+    // magnitude unsigned: std::abs(INT64_MIN) is undefined behavior since its
+    // magnitude is not representable as int64_t. The n==0 case returned above.
     Tensor base = (n < 0) ? inv(A) : A;
-    int64_t exp = std::abs(n);
+    uint64_t exp = (n < 0) ? (~static_cast<uint64_t>(n) + 1) : static_cast<uint64_t>(n);
 
     // Binary exponentiation: O(log n) matmuls
     Tensor result = base;
     exp--;
     while (exp > 0) {
-        if (exp & 1) {
+        if (exp & 1u) {
             result = tenzor::matmul(result, base);
         }
         base = tenzor::matmul(base, base);
@@ -1931,7 +1933,12 @@ auto matrix_rank(const Tensor& A, double tol) -> Tensor {
         auto s_max = tenzor::max(S);
         auto shape = A.shape();
         double mn = static_cast<double>(std::max(shape[shape.size()-2], shape[shape.size()-1]));
-        double eps = (A.dtype() == DType::Float64) ? 1e-15 : 1e-6;
+        // Use the true machine epsilon of the compute dtype svdvals returned
+        // (Float16/BFloat16 are widened to Float32), matching
+        // torch.linalg.matrix_rank's default threshold of max(M,N)*eps*max(S).
+        double eps = (S.dtype() == DType::Float64)
+                         ? static_cast<double>(std::numeric_limits<double>::epsilon())
+                         : static_cast<double>(std::numeric_limits<float>::epsilon());
         threshold = tenzor::mul(s_max, tenzor::full({1}, mn * eps, S.dtype(), S.device()));
     } else {
         threshold = tenzor::full({1}, tol, S.dtype(), S.device());
@@ -2030,47 +2037,18 @@ auto multi_dot(const std::vector<Tensor>& tensors) -> Tensor {
 }
 
 auto diag_embed(const Tensor& input, int64_t offset, int64_t dim1, int64_t dim2) -> Tensor {
-    // For the common case (1D input, default dims), delegate to diag()
-    if (input.ndim() == 1 && dim1 == -2 && dim2 == -1) {
-        return tenzor::diag(input, offset);
-    }
+    // Route through the registered OpId::DiagEmbed backend kernel, which is
+    // batch-aware (CPU/CUDA/ROCm/Vulkan/OneAPI all register it and fill the
+    // diagonal for both 1D and (..., N) inputs). The previous inline path only
+    // filled data for 1D input and returned an all-zeros tensor for any
+    // ndim>1 (batched) case.
+    OpAttributes attrs;
+    attrs.set(AttrKey::Diagonal, offset);
+    attrs.set(AttrKey::Dim0, dim1);
+    attrs.set(AttrKey::Dim1, dim2);
 
-    // General batched case: process each batch element
-    int64_t ndim = input.ndim() + 1;
-    if (dim1 < 0) dim1 += ndim;
-    if (dim2 < 0) dim2 += ndim;
-
-    // For batched inputs: last dim of input is the diagonal length
-    int64_t diag_len = input.shape().back();
-    int64_t n = diag_len + std::abs(offset);
-
-    // Build output shape
-    auto in_shape = input.shape();
-    std::vector<int64_t> out_shape;
-    int in_idx = 0;
-    for (int64_t d = 0; d < ndim; d++) {
-        if (d == dim1 || d == dim2) {
-            out_shape.push_back(n);
-        } else {
-            if (in_idx < static_cast<int>(in_shape.size())) {
-                out_shape.push_back(in_shape[in_idx++]);
-            }
-        }
-    }
-
-    auto result = tenzor::zeros(out_shape, input.dtype(), input.device());
-
-    // For 1D input the resulting (n, n) output's data layout is identical
-    // regardless of which axis the caller labels dim1 vs. dim2 — the loop
-    // that used to live here writes a row-major (n, n) matrix exactly the
-    // way tenzor::diag(input, offset) does. Delegate to that registered op
-    // so we get a per-backend kernel for free (CUDA / ROCm / Vulkan / OneAPI
-    // all register OpId::Diag).
-    if (input.ndim() == 1) {
-        return tenzor::diag(input, offset);
-    }
-
-    return result;
+    std::array<Tensor, 1> inputs = {input};
+    return dispatch_single(OpId::DiagEmbed, inputs, attrs);
 }
 
 auto diagflat(const Tensor& input, int64_t offset) -> Tensor {

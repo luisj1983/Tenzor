@@ -523,6 +523,20 @@ auto GraphReader::read_tensor() -> Tensor {
 
 auto GraphReader::read_int64_vector() -> std::vector<int64_t> {
     uint64_t size = read_uint64();
+    // Bound the declared element count against the remaining file length before
+    // allocating size*8 bytes, mirroring read_string()'s guard. Without this a
+    // crafted .graph file with a huge size triggers an enormous allocation
+    // (bad_alloc / OOM) before any element read fails. Dividing the remaining
+    // byte budget by sizeof(int64_t) also avoids size*8 overflow.
+    std::streampos cur = file_.tellg();
+    file_.seekg(0, std::ios::end);
+    std::streampos end = file_.tellg();
+    file_.seekg(cur);
+    if (cur < 0 || end < 0 ||
+        size > static_cast<uint64_t>(end - cur) / sizeof(int64_t)) {
+        throw std::runtime_error(
+            "GraphReader::read_int64_vector: declared size exceeds remaining file");
+    }
     std::vector<int64_t> vec(size);
     for (uint64_t i = 0; i < size; ++i) {
         vec[i] = read_int64();

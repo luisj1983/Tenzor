@@ -9,6 +9,7 @@
  */
 
 #include <tenzor/serving/worker_pool.hpp>
+#include <tenzor/core/device_guard.hpp>
 
 namespace tenzor::serving {
 
@@ -17,6 +18,11 @@ WorkerPool::WorkerPool(int num_workers, Device device) : device_(device) {
     workers_.reserve(static_cast<size_t>(num_workers));
     for (int i = 0; i < num_workers; ++i) {
         workers_.emplace_back([this] {
+            // Bind this worker thread to the pool's device so tensors created
+            // inside submitted tasks default to the correct backend (the
+            // documented WorkerPool contract). Device state is thread-local,
+            // so this affects only this worker thread. CPU is index 0 / no-op.
+            detail::switch_device(device_.type, device_.index);
             for (;;) {
                 std::function<void()> task;
                 {

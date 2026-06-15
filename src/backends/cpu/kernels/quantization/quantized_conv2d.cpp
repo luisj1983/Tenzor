@@ -87,17 +87,17 @@ static void im2col_int8(
     int64_t in_channels,
     int64_t h_in, int64_t w_in,
     int64_t h_out, int64_t w_out,
-    int64_t kernel_size,
-    int64_t stride,
-    int64_t padding,
-    int64_t dilation,
+    int64_t kernel_h, int64_t kernel_w,
+    int64_t stride_h, int64_t stride_w,
+    int64_t pad_h, int64_t pad_w,
+    int64_t dil_h, int64_t dil_w,
     int32_t input_zp      // quantized value of real-zero; used for padding
 ) {
     // Real-zero padding maps to the quantized value input_zp (since
     // x_real = scale*(q - input_zp), x_real==0 <=> q==input_zp). Padding with
     // a raw 0 would inject spurious (0 - input_zp) terms into asymmetric convs.
     const int8_t pad_q = static_cast<int8_t>(input_zp);
-    const int64_t col_width = in_channels * kernel_size * kernel_size;
+    const int64_t col_width = in_channels * kernel_h * kernel_w;
 
     #pragma omp parallel for if(h_out * w_out > 256)
     for (int64_t out_idx = 0; out_idx < h_out * w_out; ++out_idx) {
@@ -107,10 +107,10 @@ static void im2col_int8(
 
         int64_t col_pos = 0;
         for (int64_t ic = 0; ic < in_channels; ++ic) {
-            for (int64_t kh = 0; kh < kernel_size; ++kh) {
-                for (int64_t kw = 0; kw < kernel_size; ++kw) {
-                    int64_t ih = oh * stride + kh * dilation - padding;
-                    int64_t iw = ow * stride + kw * dilation - padding;
+            for (int64_t kh = 0; kh < kernel_h; ++kh) {
+                for (int64_t kw = 0; kw < kernel_w; ++kw) {
+                    int64_t ih = oh * stride_h + kh * dil_h - pad_h;
+                    int64_t iw = ow * stride_w + kw * dil_w - pad_w;
 
                     if (ih >= 0 && ih < h_in && iw >= 0 && iw < w_in) {
                         col_row[col_pos] = input[(ic * h_in + ih) * w_in + iw];
@@ -143,14 +143,18 @@ auto quantized_conv2d_kernel(
     int64_t w_in,
     int64_t h_out,
     int64_t w_out,
-    int64_t kernel_size,
-    int64_t stride,
-    int64_t padding,
+    int64_t kernel_h,
+    int64_t kernel_w,
+    int64_t stride_h,
+    int64_t stride_w,
+    int64_t pad_h,
+    int64_t pad_w,
     float input_scale,
     float weight_scale,
     int32_t input_zp,
     int32_t weight_zp,
-    int64_t dilation,
+    int64_t dil_h,
+    int64_t dil_w,
     int64_t groups
 ) -> void {
     if (in_channels % groups != 0)
@@ -161,7 +165,7 @@ auto quantized_conv2d_kernel(
     float combined_scale = input_scale * weight_scale;
     const int64_t in_channels_per_group = in_channels / groups;
     const int64_t out_channels_per_group = out_channels / groups;
-    const int64_t col_width = in_channels_per_group * kernel_size * kernel_size;
+    const int64_t col_width = in_channels_per_group * kernel_h * kernel_w;
     const int64_t spatial_out = h_out * w_out;
 
     // Per-output-channel weight sums for the asymmetric zero-point correction.
@@ -195,7 +199,8 @@ auto quantized_conv2d_kernel(
                 // Step 1: im2col for this group's input channels
                 im2col_int8(group_input, col_buffer.data(),
                             in_channels_per_group, h_in, w_in, h_out, w_out,
-                            kernel_size, stride, padding, dilation, input_zp);
+                            kernel_h, kernel_w, stride_h, stride_w,
+                            pad_h, pad_w, dil_h, dil_w, input_zp);
 
                 // Per-column activation sums (includes input_zp-padded taps).
                 for (int64_t s = 0; s < spatial_out; ++s) {
@@ -254,14 +259,18 @@ auto quantized_conv2d_per_channel_kernel(
     int64_t w_in,
     int64_t h_out,
     int64_t w_out,
-    int64_t kernel_size,
-    int64_t stride,
-    int64_t padding,
+    int64_t kernel_h,
+    int64_t kernel_w,
+    int64_t stride_h,
+    int64_t stride_w,
+    int64_t pad_h,
+    int64_t pad_w,
     float input_scale,
     const float* weight_scales,     // [out_channels] per-channel scales
     int32_t input_zp,
     const int32_t* weight_zps,      // [out_channels] per-channel zero points (nullable for symmetric)
-    int64_t dilation,
+    int64_t dil_h,
+    int64_t dil_w,
     int64_t groups
 ) -> void {
     if (in_channels % groups != 0)
@@ -271,7 +280,7 @@ auto quantized_conv2d_per_channel_kernel(
 
     const int64_t in_channels_per_group = in_channels / groups;
     const int64_t out_channels_per_group = out_channels / groups;
-    const int64_t col_width = in_channels_per_group * kernel_size * kernel_size;
+    const int64_t col_width = in_channels_per_group * kernel_h * kernel_w;
     const int64_t spatial_out = h_out * w_out;
 
     // Per-output-channel weight sums for the asymmetric zero-point correction.
@@ -297,7 +306,8 @@ auto quantized_conv2d_per_channel_kernel(
 
                 im2col_int8(group_input, col_buffer.data(),
                             in_channels_per_group, h_in, w_in, h_out, w_out,
-                            kernel_size, stride, padding, dilation, input_zp);
+                            kernel_h, kernel_w, stride_h, stride_w,
+                            pad_h, pad_w, dil_h, dil_w, input_zp);
 
                 // Per-column activation sums (includes input_zp-padded taps).
                 for (int64_t s = 0; s < spatial_out; ++s) {

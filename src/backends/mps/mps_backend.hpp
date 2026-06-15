@@ -35,22 +35,32 @@ public:
     MPSBackend();
     ~MPSBackend() override;
 
-    // Backend interface
-    auto name() const -> std::string override { return "mps"; }
-    auto device_count() const -> int override;
+    // Backend interface — signatures MUST match the pure-virtual base
+    // (tenzor::Backend) exactly or the override is ill-formed / the class stays
+    // abstract and cannot be instantiated by create_backend().
+    auto name() const -> std::string_view override { return "mps"; }
+    auto device_count() const -> int32_t override;
     auto is_available() const -> bool override;
-    auto get_device_info(int device_id) const -> DeviceInfo override;
+    auto get_device_info(int32_t device_id) const -> DeviceInfo override;
 
-    auto allocate(size_t size_bytes, int device_id = 0) -> void* override;
+    auto allocate(size_t size_bytes, int32_t device_id = 0) -> void* override;
     auto deallocate(void* ptr) -> void override;
     auto copy(void* dst, const void* src, size_t bytes, CopyKind kind) -> void override;
-    auto memset(void* ptr, int value, size_t bytes) -> void override;
-    auto synchronize(int device_id = 0) -> void override;
+    auto memset(void* ptr, int value, size_t bytes, int32_t device_id = 0) -> void override;
+    auto synchronize(int32_t device_id = 0) -> void override;
 
-    auto set_device(int device_id) -> void override;
-    auto get_current_device() const -> int override;
+    // Stream API (pure virtual in Backend). MPS uses a single implicit command
+    // queue, so there is one logical stream.
+    auto create_stream(int32_t device_id) -> StreamHandle override;
+    auto destroy_stream(StreamHandle stream) -> void override;
+    auto synchronize_stream(StreamHandle stream) -> void override;
 
-    auto register_kernels(BackendDispatchTable& table) -> void override;
+    auto set_device(int32_t device_id) -> void override;
+    auto get_current_device() const -> int32_t override;
+
+    // Not a Backend virtual (the loader resolves the free function
+    // register_mps_kernels via dlsym); a plain member, no `override`.
+    auto register_kernels(BackendDispatchTable& table) -> void;
 
     // Command batching
     static constexpr size_t BATCH_SIZE_THRESHOLD = 32;

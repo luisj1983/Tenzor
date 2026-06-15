@@ -42,10 +42,21 @@ struct GPTQConfig {
  * zero points needed for dequantization at inference time.
  */
 struct GPTQResult {
-    Tensor packed_weight;  ///< Packed INT4/INT8 weight tensor
-    Tensor scales;         ///< Per-group scale factors, shape (out_features, num_groups)
-    Tensor zeros;          ///< Per-group zero points, shape (out_features, num_groups)
-    Tensor perm;           ///< Column permutation (non-empty only when desc_act=true)
+    Tensor packed_weight;  ///< Packed INT4/INT8 weight tensor. With desc_act=true,
+                           ///< columns are in PERMUTED (activation) order.
+    int64_t in_features = 0; ///< Logical (unpacked) in_features. For INT4 the packed
+                           ///< tensor has ceil(in_features/2) columns, so this records
+                           ///< the true (possibly odd) column count for unambiguous unpack.
+    Tensor scales;         ///< Per-group scale factors, shape (out_features, num_groups).
+                           ///< With desc_act=true, groups index PERMUTED columns
+                           ///< (consistent with packed_weight).
+    Tensor zeros;          ///< Per-group zero points, shape (out_features, num_groups).
+                           ///< With desc_act=true, in PERMUTED column-group order.
+    Tensor perm;           ///< Column permutation (non-empty only when desc_act=true).
+                           ///< REQUIRED at inference: permute input activations by
+                           ///< `perm` before matmul (packed_weight/scales/zeros are
+                           ///< all in this permuted order). Outputs need no reorder
+                           ///< since the row (output) dimension is untouched.
 };
 
 /**

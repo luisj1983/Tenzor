@@ -14,6 +14,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <stdexcept>
+#include <unordered_map>
 
 namespace tenzor::cuda {
 
@@ -114,6 +115,7 @@ public:
         for (size_t i = 0; i < pool.streams.size(); ++i) {
             if (pool.available[i]) {
                 pool.available[i] = false;
+                stream_device_[pool.streams[i]] = device_id;
                 return pool.streams[i];
             }
         }
@@ -128,6 +130,7 @@ public:
         }
         pool.streams.push_back(stream);
         pool.available.push_back(false);
+        stream_device_[stream] = device_id;
         return stream;
     }
 
@@ -155,6 +158,41 @@ public:
     }
 
     /**
+     * @brief Release a stream back to the pool without knowing its device.
+     *
+     * Resolves the owning device recorded at acquire() time, so the slot is
+     * correctly marked available even on multi-GPU where the calling thread's
+     * current device differs from the stream's creation device. Falls back to a
+     * scan across all device pools if the stream was not recorded.
+     */
+    void release(cudaStream_t stream) {
+        std::lock_guard<std::recursive_mutex> lock(mutex_);
+        auto it = stream_device_.find(stream);
+        if (it != stream_device_.end()) {
+            int32_t device_id = it->second;
+            if (device_id < static_cast<int32_t>(device_pools_.size())) {
+                auto& pool = device_pools_[device_id];
+                for (size_t i = 0; i < pool.streams.size(); ++i) {
+                    if (pool.streams[i] == stream) {
+                        pool.available[i] = true;
+                        return;
+                    }
+                }
+            }
+            return;
+        }
+        // Unknown stream — scan every device pool as a last resort.
+        for (auto& pool : device_pools_) {
+            for (size_t i = 0; i < pool.streams.size(); ++i) {
+                if (pool.streams[i] == stream) {
+                    pool.available[i] = true;
+                    return;
+                }
+            }
+        }
+    }
+
+    /**
      * @brief Destroy all pooled streams. Call during backend shutdown.
      */
     void shutdown() {
@@ -167,6 +205,7 @@ public:
             pool.available.clear();
         }
         device_pools_.clear();
+        stream_device_.clear();
     }
 
     ~CUDAStreamPool() {
@@ -198,6 +237,10 @@ private:
     };
 
     std::vector<DevicePool> device_pools_;
+    // Maps each handed-out stream to the device it was acquired/created on, so
+    // release(stream) can find the right pool regardless of the caller's
+    // current device.
+    std::unordered_map<cudaStream_t, int32_t> stream_device_;
     std::recursive_mutex mutex_;
 };
 

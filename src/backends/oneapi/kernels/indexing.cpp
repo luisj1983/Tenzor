@@ -67,7 +67,12 @@ class NonzeroScatterIndices;
 
 
 // Gather operation - collect values at specified indices along a dimension
-auto gather_kernel(const Tensor& input, int64_t dim, const Tensor& index, sycl::queue& queue) -> Tensor {
+auto gather_kernel(const Tensor& input_in, int64_t dim, const Tensor& index_in, sycl::queue& queue) -> Tensor {
+    // The kernel indexes input via contiguous strides derived from shape and
+    // reads the index by flat position, so both operands must be contiguous.
+    Tensor input = input_in.is_contiguous() ? input_in : input_in.contiguous();
+    Tensor index = index_in.is_contiguous() ? index_in : index_in.contiguous();
+
     auto input_shape_span = input.shape();
     auto index_shape_span = index.shape();
 
@@ -244,8 +249,13 @@ auto gather_kernel(const Tensor& input, int64_t dim, const Tensor& index, sycl::
 }
 
 // Scatter operation - distribute values at specified indices along a dimension
-auto scatter_kernel(const Tensor& input, int64_t dim, const Tensor& index,
-                    const Tensor& src, sycl::queue& queue) -> Tensor {
+auto scatter_kernel(const Tensor& input, int64_t dim, const Tensor& index_in,
+                    const Tensor& src_in, sycl::queue& queue) -> Tensor {
+    // index and src are read via flat row-major offsets derived from
+    // index_shape, so both must be contiguous to read the correct elements.
+    Tensor index = index_in.is_contiguous() ? index_in : index_in.contiguous();
+    Tensor src = src_in.is_contiguous() ? src_in : src_in.contiguous();
+
     auto input_shape_span = input.shape();
     std::vector<int64_t> input_shape(input_shape_span.begin(), input_shape_span.end());
 
@@ -376,7 +386,12 @@ auto scatter_kernel(const Tensor& input, int64_t dim, const Tensor& index,
 }
 
 // Index select - select elements along dimension using 1D index tensor
-auto index_select_kernel(const Tensor& input, int64_t dim, const Tensor& index, sycl::queue& queue) -> Tensor {
+auto index_select_kernel(const Tensor& input_in, int64_t dim, const Tensor& index_in, sycl::queue& queue) -> Tensor {
+    // The kernel indexes input via contiguous strides derived from shape and
+    // reads the index by flat position, so both operands must be contiguous.
+    Tensor input = input_in.is_contiguous() ? input_in : input_in.contiguous();
+    Tensor index = index_in.is_contiguous() ? index_in : index_in.contiguous();
+
     auto input_shape_span = input.shape();
     std::vector<int64_t> input_shape(input_shape_span.begin(), input_shape_span.end());
 

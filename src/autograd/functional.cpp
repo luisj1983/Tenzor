@@ -346,7 +346,6 @@ auto jacobian(std::function<Variable(const Variable&)> func,
             // Re-evaluate to get fresh computation graph
             Variable inp(input_data, true);
             auto out = func(inp);
-            auto flat_out = tenzor::reshape(out, {m});
 
             // Create gradient vector e_j. Use Float32 for the construction
             // (so data<float>() is valid) and cast to the input dtype after.
@@ -355,11 +354,7 @@ auto jacobian(std::function<Variable(const Variable&)> func,
             auto e_j = e_j_cpu.to(input_data.dtype()).to(input_data.device());
             e_j = tenzor::reshape(e_j, std::vector<int64_t>(out.tensor().shape().begin(), out.tensor().shape().end()));
 
-            // Backward with e_j to get row j of Jacobian
-            Variable reshaped_out(tenzor::reshape(out.tensor(),
-                std::vector<int64_t>(out.tensor().shape().begin(), out.tensor().shape().end())), true);
-            reshaped_out.set_grad_fn(out.grad_fn());
-
+            // Backward with e_j (shaped like out) to get row j of Jacobian.
             out.backward(e_j, /*retain_graph=*/false, /*create_graph=*/false);
 
             if (inp.grad().has_value()) {

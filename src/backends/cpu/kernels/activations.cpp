@@ -281,7 +281,10 @@ static bool onednn_softmax_forward(
 // Forward: max(0, x)
 // Refactored to use TENZOR_DISPATCH_FLOAT_AND_HALF + elementwise_unary helper.
 // Float32 path retains oneDNN fast path via if constexpr.
-auto relu_kernel(const Tensor& input) -> Tensor {
+auto relu_kernel(const Tensor& input_raw) -> Tensor {
+    // Flat-pointer iteration requires contiguous input; a non-contiguous
+    // slice/transpose/expand view would otherwise read the wrong elements.
+    auto input = input_raw.contiguous();
     auto output = Tensor(std::vector<int64_t>(input.shape().begin(), input.shape().end()), input.dtype(), input.device());
     size_t n = input.numel();
 
@@ -306,7 +309,10 @@ auto relu_kernel(const Tensor& input) -> Tensor {
 }
 
 // Backward: grad_out * (x > 0)
-auto relu_backward_kernel(const Tensor& grad_output, const Tensor& input) -> Tensor {
+auto relu_backward_kernel(const Tensor& grad_output_raw, const Tensor& input_raw) -> Tensor {
+    // Flat-pointer iteration requires contiguous inputs.
+    auto grad_output = grad_output_raw.contiguous();
+    auto input = input_raw.contiguous();
     auto grad_input = zeros_like(input);
 
     if (input.dtype() == DType::Float32) {
@@ -316,11 +322,12 @@ auto relu_backward_kernel(const Tensor& grad_output, const Tensor& input) -> Ten
         size_t n = input.numel();
 
 #ifdef TENZOR_HAS_AVX512
-        size_t i = 0;
         const size_t simd_width = 16;
+        const size_t simd_end = (n / simd_width) * simd_width;
         __m512 zero = _mm512_setzero_ps();
 
-        for (; i + simd_width <= n; i += simd_width) {
+        #pragma omp parallel for schedule(static) if(n > ACTIVATION_OMP_THRESHOLD)
+        for (size_t i = 0; i < simd_end; i += simd_width) {
             __m512 x = _mm512_loadu_ps(in_data + i);
             __m512 grad_out = _mm512_loadu_ps(grad_out_data + i);
             __mmask16 mask = _mm512_cmp_ps_mask(x, zero, _CMP_GT_OQ);
@@ -328,15 +335,16 @@ auto relu_backward_kernel(const Tensor& grad_output, const Tensor& input) -> Ten
             _mm512_storeu_ps(grad_in_data + i, grad_in);
         }
 
-        for (; i < n; ++i) {
+        for (size_t i = simd_end; i < n; ++i) {
             grad_in_data[i] = grad_out_data[i] * (in_data[i] > 0.0f ? 1.0f : 0.0f);
         }
 #elif defined(TENZOR_HAS_AVX2)
-        size_t i = 0;
         const size_t simd_width = 8;
+        const size_t simd_end = (n / simd_width) * simd_width;
         __m256 zero = _mm256_setzero_ps();
 
-        for (; i + simd_width <= n; i += simd_width) {
+        #pragma omp parallel for schedule(static) if(n > ACTIVATION_OMP_THRESHOLD)
+        for (size_t i = 0; i < simd_end; i += simd_width) {
             __m256 x = _mm256_loadu_ps(in_data + i);
             __m256 grad_out = _mm256_loadu_ps(grad_out_data + i);
             __m256 mask = _mm256_cmp_ps(x, zero, _CMP_GT_OQ);
@@ -344,10 +352,11 @@ auto relu_backward_kernel(const Tensor& grad_output, const Tensor& input) -> Ten
             _mm256_storeu_ps(grad_in_data + i, grad_in);
         }
 
-        for (; i < n; ++i) {
+        for (size_t i = simd_end; i < n; ++i) {
             grad_in_data[i] = grad_out_data[i] * (in_data[i] > 0.0f ? 1.0f : 0.0f);
         }
 #else
+        #pragma omp parallel for schedule(static) if(n > ACTIVATION_OMP_THRESHOLD)
         for (size_t i = 0; i < n; ++i) {
             grad_in_data[i] = grad_out_data[i] * (in_data[i] > 0.0f ? 1.0f : 0.0f);
         }
@@ -854,7 +863,8 @@ auto tanh_backward_kernel(const Tensor& grad_output, const Tensor& input) -> Ten
 
 // Forward: 0.5 * x * (1 + tanh(sqrt(2/pi) * (x + 0.044715 * x^3)))
 // GELU (Gaussian Error Linear Unit) - exact erf form: 0.5*x*(1+erf(x/sqrt(2)))
-auto gelu_kernel(const Tensor& input) -> Tensor {
+auto gelu_kernel(const Tensor& input_raw) -> Tensor {
+    auto input = input_raw.contiguous();  // flat-pointer iteration requires contiguity
     Tensor output(std::vector<int64_t>(input.shape().begin(), input.shape().end()), input.dtype(), input.device());
 
     // Exact GELU: 0.5 * x * (1 + erf(x / sqrt(2))) — matches PyTorch's default
@@ -920,7 +930,9 @@ auto gelu_kernel(const Tensor& input) -> Tensor {
 // gelu(x) = 0.5 * x * (1 + tanh(u)), where u = sqrt(2/pi) * (x + 0.044715 * x^3)
 // gelu'(x) = 0.5 * (1 + tanh(u)) + 0.5 * x * sech^2(u) * du/dx
 //          = 0.5 * (1 + tanh(u)) + 0.5 * x * (1 - tanh(u)^2) * sqrt(2/pi) * (1 + 3*0.044715*x^2)
-auto gelu_backward_kernel(const Tensor& grad_output, const Tensor& input) -> Tensor {
+auto gelu_backward_kernel(const Tensor& grad_output_raw, const Tensor& input_raw) -> Tensor {
+    auto grad_output = grad_output_raw.contiguous();  // flat-pointer iteration requires contiguity
+    auto input = input_raw.contiguous();
     auto grad_input = zeros_like(input);
 
     // Exact GELU derivative (matches the erf forward):
@@ -996,7 +1008,8 @@ auto gelu_backward_kernel(const Tensor& grad_output, const Tensor& input) -> Ten
 
 // Forward: x * sigmoid(x)
 // Swish (also known as SiLU - Sigmoid Linear Unit)
-auto swish_kernel(const Tensor& input) -> Tensor {
+auto swish_kernel(const Tensor& input_raw) -> Tensor {
+    auto input = input_raw.contiguous();  // flat-pointer iteration requires contiguity
     auto output = Tensor(std::vector<int64_t>(input.shape().begin(), input.shape().end()), input.dtype(), input.device());
 
     if (input.dtype() == DType::Float32) {
@@ -1052,7 +1065,9 @@ auto swish_kernel(const Tensor& input) -> Tensor {
 
 // Backward: grad_out * (sigmoid(x) + x * sigmoid(x) * (1 - sigmoid(x)))
 // Simplified: grad_out * (sigmoid(x) * (1 + x * (1 - sigmoid(x))))
-auto swish_backward_kernel(const Tensor& grad_output, const Tensor& input) -> Tensor {
+auto swish_backward_kernel(const Tensor& grad_output_raw, const Tensor& input_raw) -> Tensor {
+    auto grad_output = grad_output_raw.contiguous();  // flat-pointer iteration requires contiguity
+    auto input = input_raw.contiguous();
     auto grad_input = zeros_like(input);
 
     if (input.dtype() == DType::Float32) {
@@ -1569,9 +1584,13 @@ auto softmax_backward_kernel(const Tensor& grad_output, const Tensor& output, in
 
     auto grad_input = zeros_like(cont_output);
 
-    // Handle negative dimension
+    // Handle negative dimension and validate range (mirrors the forward kernel)
+    int64_t ndim = cont_output.ndim();
     if (dim < 0) {
-        dim += cont_output.ndim();
+        dim += ndim;
+    }
+    if (dim < 0 || dim >= ndim) {
+        throw std::out_of_range("softmax_backward: dim out of range");
     }
 
     if (cont_output.dtype() == DType::Float16) {
@@ -1951,9 +1970,13 @@ auto log_softmax_backward_kernel(const Tensor& grad_output, const Tensor& output
 
     auto grad_input = zeros_like(cont_output);
 
-    // Handle negative dimension
+    // Handle negative dimension and validate range (mirrors the forward kernel)
+    int64_t ndim = cont_output.ndim();
     if (dim < 0) {
-        dim += cont_output.ndim();
+        dim += ndim;
+    }
+    if (dim < 0 || dim >= ndim) {
+        throw std::out_of_range("log_softmax_backward: dim out of range");
     }
 
     if (cont_output.dtype() == DType::Float16) {
@@ -2107,7 +2130,8 @@ auto log_softmax_backward_kernel(const Tensor& grad_output, const Tensor& output
 // ============================================================================
 
 // Forward: x if x > 0 else alpha * (exp(x) - 1)
-auto elu_kernel(const Tensor& input, float alpha) -> Tensor {
+auto elu_kernel(const Tensor& input_raw, float alpha) -> Tensor {
+    auto input = input_raw.contiguous();  // flat-pointer iteration requires contiguity
     auto output = Tensor(std::vector<int64_t>(input.shape().begin(), input.shape().end()), input.dtype(), input.device());
 
     if (input.dtype() == DType::Float32) {
@@ -2160,7 +2184,9 @@ auto elu_kernel(const Tensor& input, float alpha) -> Tensor {
 }
 
 // Backward: grad_out * (1 if x > 0 else alpha * exp(x))
-auto elu_backward_kernel(const Tensor& grad_output, const Tensor& input, float alpha) -> Tensor {
+auto elu_backward_kernel(const Tensor& grad_output_raw, const Tensor& input_raw, float alpha) -> Tensor {
+    auto grad_output = grad_output_raw.contiguous();  // flat-pointer iteration requires contiguity
+    auto input = input_raw.contiguous();
     auto grad_input = zeros_like(input);
 
     if (input.dtype() == DType::Float32) {
@@ -2227,7 +2253,8 @@ constexpr float SELU_ALPHA = 1.6732632423543772848170429916717f;
 constexpr float SELU_SCALE = 1.0507009873554804934193349852946f;
 
 // Forward: scale * (x if x > 0 else alpha * (exp(x) - 1))
-auto selu_kernel(const Tensor& input) -> Tensor {
+auto selu_kernel(const Tensor& input_raw) -> Tensor {
+    auto input = input_raw.contiguous();  // flat-pointer iteration requires contiguity
     auto output = Tensor(std::vector<int64_t>(input.shape().begin(), input.shape().end()), input.dtype(), input.device());
 
     if (input.dtype() == DType::Float32) {
@@ -2281,7 +2308,9 @@ auto selu_kernel(const Tensor& input) -> Tensor {
 }
 
 // Backward: grad_out * scale * (1 if x > 0 else alpha * exp(x))
-auto selu_backward_kernel(const Tensor& grad_output, const Tensor& input) -> Tensor {
+auto selu_backward_kernel(const Tensor& grad_output_raw, const Tensor& input_raw) -> Tensor {
+    auto grad_output = grad_output_raw.contiguous();  // flat-pointer iteration requires contiguity
+    auto input = input_raw.contiguous();
     auto grad_input = zeros_like(input);
 
     if (input.dtype() == DType::Float32) {
@@ -2346,7 +2375,8 @@ auto selu_backward_kernel(const Tensor& grad_output, const Tensor& input) -> Ten
 // ============================================================================
 
 // Forward: x * tanh(softplus(x)) = x * tanh(ln(1 + exp(x)))
-auto mish_kernel(const Tensor& input) -> Tensor {
+auto mish_kernel(const Tensor& input_raw) -> Tensor {
+    auto input = input_raw.contiguous();  // flat-pointer iteration requires contiguity
     auto output = Tensor(std::vector<int64_t>(input.shape().begin(), input.shape().end()), input.dtype(), input.device());
 
     if (input.dtype() == DType::Float32) {
@@ -2433,7 +2463,9 @@ auto mish_kernel(const Tensor& input) -> Tensor {
 
 // Backward: d/dx[x * tanh(softplus(x))]
 // = tanh(softplus(x)) + x * sech^2(softplus(x)) * sigmoid(x)
-auto mish_backward_kernel(const Tensor& grad_output, const Tensor& input) -> Tensor {
+auto mish_backward_kernel(const Tensor& grad_output_raw, const Tensor& input_raw) -> Tensor {
+    auto grad_output = grad_output_raw.contiguous();  // flat-pointer iteration requires contiguity
+    auto input = input_raw.contiguous();
     auto grad_input = zeros_like(input);
 
     if (input.dtype() == DType::Float32) {

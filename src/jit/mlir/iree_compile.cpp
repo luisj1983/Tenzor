@@ -30,7 +30,10 @@
 #include <string>
 #include <vector>
 
+#include <cerrno>
+
 #include <fcntl.h>
+#include <sys/stat.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -67,14 +70,84 @@ auto sha256_hex(const std::string& data) -> std::string {
     return hex_encode(digest, SHA256_DIGEST_LENGTH);
 }
 
-auto default_cache_dir() -> fs::path {
+/// Resolve the default cache directory. Sets `is_shared_temp` when neither
+/// XDG_CACHE_HOME nor HOME is available and we fall back to the world-shared
+/// temp directory — that path needs ownership/permission hardening before any
+/// pre-existing artifact is trusted, since another local user could otherwise
+/// pre-create the deterministically-named .vmfb.
+auto default_cache_dir(bool& is_shared_temp) -> fs::path {
+    is_shared_temp = false;
     if (const char* xdg = std::getenv("XDG_CACHE_HOME"); xdg && *xdg) {
         return fs::path(xdg) / "tenzor" / "jit_mlir";
     }
     if (const char* home = std::getenv("HOME"); home && *home) {
         return fs::path(home) / ".cache" / "tenzor" / "jit_mlir";
     }
-    return fs::temp_directory_path() / "tenzor" / "jit_mlir";
+    is_shared_temp = true;
+    // Per-user subdirectory so distinct users do not share a directory in the
+    // world-writable temp root.
+    const std::string user_dir = "tenzor-" + std::to_string(::getuid());
+    return fs::temp_directory_path() / user_dir / "jit_mlir";
+}
+
+/// Create (if needed) the cache directory and, on the shared-temp fallback,
+/// lock it down to owner-only (0700) and verify the current process owns it.
+/// Throws if an existing directory on the shared path is owned by another user
+/// (a sign of squatting).
+auto secure_cache_dir(const fs::path& dir, bool is_shared_temp) -> void {
+    if (!is_shared_temp) {
+        fs::create_directories(dir);
+        return;
+    }
+
+    // Create the per-user root first so we can chmod it to 0700 before any
+    // nested directory is exposed.
+    const fs::path user_root = dir.parent_path();
+    if (::mkdir(user_root.c_str(), 0700) != 0 && errno != EEXIST) {
+        throw JitCompileError(
+            "compile_mlir: cannot create per-user cache dir " +
+                user_root.string() + ": " + std::strerror(errno),
+            {});
+    }
+
+    struct stat st {};
+    if (::stat(user_root.c_str(), &st) != 0) {
+        throw JitCompileError(
+            "compile_mlir: cannot stat per-user cache dir " +
+                user_root.string() + ": " + std::strerror(errno),
+            {});
+    }
+    if (st.st_uid != ::getuid()) {
+        throw JitCompileError(
+            "compile_mlir: per-user cache dir " + user_root.string() +
+                " is owned by another user (uid " + std::to_string(st.st_uid) +
+                "); refusing to trust shared-temp cache",
+            {});
+    }
+    // Enforce owner-only permissions even if the directory pre-existed.
+    ::chmod(user_root.c_str(), 0700);
+
+    if (::mkdir(dir.c_str(), 0700) != 0 && errno != EEXIST) {
+        throw JitCompileError(
+            "compile_mlir: cannot create cache dir " + dir.string() + ": " +
+                std::strerror(errno),
+            {});
+    }
+    ::chmod(dir.c_str(), 0700);
+}
+
+/// On the shared-temp fallback, verify a pre-existing cached artifact is owned
+/// by the current user before it is trusted/executed.
+auto cache_file_is_trustworthy(const fs::path& file, bool is_shared_temp)
+    -> bool {
+    if (!is_shared_temp) {
+        return true;
+    }
+    struct stat st {};
+    if (::stat(file.c_str(), &st) != 0) {
+        return false;
+    }
+    return st.st_uid == ::getuid();
 }
 
 /// RAII wrapper for the IREE compiler error type so `throw` doesn't leak.
@@ -434,9 +507,15 @@ auto compile_mlir(const std::string& mlir_text,
             "compile_mlir: CompileOptions::target is empty", {});
     }
 
-    const fs::path cache_dir =
-        opts.cache_dir.empty() ? default_cache_dir() : opts.cache_dir;
-    fs::create_directories(cache_dir);
+    bool is_shared_temp = false;
+    fs::path cache_dir;
+    if (opts.cache_dir.empty()) {
+        cache_dir = default_cache_dir(is_shared_temp);
+    } else {
+        // Caller-supplied directory is assumed to be a private location.
+        cache_dir = opts.cache_dir;
+    }
+    secure_cache_dir(cache_dir, is_shared_temp);
 
     const std::string key = compute_cache_key(mlir_text, opts.target);
     const fs::path vmfb_path = cache_dir / (key + ".vmfb");
@@ -450,7 +529,8 @@ auto compile_mlir(const std::string& mlir_text,
                 static_cast<std::streamsize>(mlir_text.size()));
     }
 
-    if (fs::exists(vmfb_path) && fs::file_size(vmfb_path) > 0) {
+    if (fs::exists(vmfb_path) && fs::file_size(vmfb_path) > 0 &&
+        cache_file_is_trustworthy(vmfb_path, is_shared_temp)) {
         return CompiledArtifact{vmfb_path, opts.target};
     }
 

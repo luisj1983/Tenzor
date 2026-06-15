@@ -62,7 +62,11 @@ class Geometric(Distribution):
         eps = 1e-7
         log_p = _tz.log(self.probs + eps)
         log_1mp = _tz.log((1.0 - self.probs) + eps)
-        return -1.0 * (log_p + (1.0 - self.probs) * log_1mp / self.probs)
+        # Divide by an eps-regularised probs to match the eps-guarded logs;
+        # without this the term blows up as p->0 (or is a division by zero
+        # at p == 0), yielding inf/NaN where the logs were deliberately
+        # protected.
+        return -1.0 * (log_p + (1.0 - self.probs) * log_1mp / (self.probs + eps))
 
     def cdf(self, value):
         v_np = np.asarray(_to_variable(value).tensor(), dtype=np.float64)

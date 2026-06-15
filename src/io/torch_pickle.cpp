@@ -49,9 +49,9 @@ namespace {
 
 struct ZipEntry {
     std::string name;
-    uint32_t local_header_offset = 0;
-    uint32_t compressed_size     = 0;
-    uint32_t uncompressed_size   = 0;
+    uint64_t local_header_offset = 0;
+    uint64_t compressed_size     = 0;
+    uint64_t uncompressed_size   = 0;
     uint16_t compression_method  = 0;  // 0 = STORED, 8 = DEFLATE
 };
 
@@ -148,6 +148,49 @@ private:
                (static_cast<uint32_t>(p[2]) << 16) |
                (static_cast<uint32_t>(p[3]) << 24);
     }
+    static auto read_u64(const uint8_t* p) -> uint64_t {
+        return static_cast<uint64_t>(read_u32(p)) |
+               (static_cast<uint64_t>(read_u32(p + 4)) << 32);
+    }
+
+    // Parse the ZIP64 extended-information extra field (header id 0x0001) for a
+    // central-directory entry. The 8-byte 64-bit values appear only for the
+    // fields whose 32-bit slot holds the 0xFFFFFFFF sentinel, in this fixed
+    // order: uncompressed size, compressed size, local header offset, disk
+    // start number. Overwrites e.* with the real 64-bit values in place.
+    static void apply_zip64_extra(ZipEntry& e, const uint8_t* extra,
+                                  uint16_t extra_len, bool need_uncomp,
+                                  bool need_comp, bool need_offset) {
+        size_t pos = 0;
+        while (pos + 4 <= extra_len) {
+            uint16_t id   = read_u16(extra + pos);
+            uint16_t size = read_u16(extra + pos + 2);
+            if (pos + 4 + size > extra_len) {
+                break;  // malformed extra field; leave 32-bit values as-is
+            }
+            if (id == 0x0001) {  // ZIP64 extended information
+                const uint8_t* z = extra + pos + 4;
+                size_t zpos = 0;
+                auto take = [&](bool needed, uint64_t& dst) {
+                    if (needed && zpos + 8 <= size) {
+                        dst = read_u64(z + zpos);
+                        zpos += 8;
+                    }
+                };
+                take(need_uncomp, e.uncompressed_size);
+                take(need_comp,   e.compressed_size);
+                take(need_offset, e.local_header_offset);
+                return;
+            }
+            pos += 4 + size;
+        }
+        if (need_uncomp || need_comp || need_offset) {
+            throw std::runtime_error(
+                "torch_pickle: ZIP entry '" + e.name +
+                "' uses a ZIP64 sentinel but has no ZIP64 extra field "
+                "(unsupported / corrupt >4GB archive)");
+        }
+    }
 
     auto local_data_offset(const ZipEntry& e) const -> size_t {
         // Local file header is 30 bytes + variable name/extra fields.
@@ -206,15 +249,48 @@ private:
                 "safetensors loader has full coverage.  File: " + path);
         }
         const uint8_t* eocd = data_.data() + eocd_pos;
-        uint16_t total_entries  = read_u16(eocd + 10);
-        uint32_t cd_size        = read_u32(eocd + 12);
-        uint32_t cd_offset      = read_u32(eocd + 16);
+        uint64_t total_entries  = read_u16(eocd + 10);
+        uint64_t cd_size        = read_u32(eocd + 12);
+        uint64_t cd_offset      = read_u32(eocd + 16);
+
+        // ZIP64: when the archive exceeds the 16/32-bit limits, the EOCD fields
+        // hold 0xFFFF / 0xFFFFFFFF sentinels and the real 64-bit values live in
+        // the ZIP64 EOCD record, located via the ZIP64 EOCD locator that sits
+        // 20 bytes before the EOCD (signature 0x07064b50).
+        if (total_entries == 0xFFFFu || cd_size == 0xFFFFFFFFu ||
+            cd_offset == 0xFFFFFFFFu) {
+            if (eocd_pos < 20) {
+                throw std::runtime_error(
+                    "torch_pickle: ZIP64 sentinel present but no ZIP64 EOCD "
+                    "locator (corrupt >4GB archive): " + path);
+            }
+            const uint8_t* loc = data_.data() + (eocd_pos - 20);
+            if (read_u32(loc) != 0x07064b50u) {
+                throw std::runtime_error(
+                    "torch_pickle: ZIP64 EOCD locator signature not found "
+                    "(corrupt >4GB archive): " + path);
+            }
+            uint64_t zip64_eocd_off = read_u64(loc + 8);
+            if (zip64_eocd_off + 56 > data_.size()) {
+                throw std::runtime_error(
+                    "torch_pickle: ZIP64 EOCD record past EOF: " + path);
+            }
+            const uint8_t* z = data_.data() + zip64_eocd_off;
+            if (read_u32(z) != 0x06064b50u) {
+                throw std::runtime_error(
+                    "torch_pickle: bad ZIP64 EOCD record signature: " + path);
+            }
+            total_entries = read_u64(z + 32);
+            cd_size       = read_u64(z + 40);
+            cd_offset     = read_u64(z + 48);
+        }
+
         if (cd_offset + cd_size > data_.size()) {
             throw std::runtime_error(
                 "torch_pickle: ZIP central directory past EOF");
         }
         size_t cursor = cd_offset;
-        for (uint16_t i = 0; i < total_entries; ++i) {
+        for (uint64_t i = 0; i < total_entries; ++i) {
             if (cursor + 46 > cd_offset + cd_size) {
                 throw std::runtime_error(
                     "torch_pickle: ZIP central directory entry truncated");
@@ -233,6 +309,10 @@ private:
             uint16_t comment_len = read_u16(cd + 32);
             uint32_t lh_off = read_u32(cd + 42);
 
+            if (cursor + 46 + name_len + extra_len > cd_offset + cd_size) {
+                throw std::runtime_error(
+                    "torch_pickle: ZIP central directory entry truncated");
+            }
             std::string name(reinterpret_cast<const char*>(cd + 46), name_len);
             ZipEntry e;
             e.name = name;
@@ -240,6 +320,16 @@ private:
             e.compressed_size = comp_size;
             e.uncompressed_size = uncomp_size;
             e.compression_method = method;
+
+            // ZIP64: any 32-bit field set to 0xFFFFFFFF means the real 64-bit
+            // value lives in the ZIP64 extended-information extra block.
+            bool need_uncomp = (uncomp_size == 0xFFFFFFFFu);
+            bool need_comp   = (comp_size == 0xFFFFFFFFu);
+            bool need_offset = (lh_off == 0xFFFFFFFFu);
+            if (need_uncomp || need_comp || need_offset) {
+                apply_zip64_extra(e, cd + 46 + name_len, extra_len,
+                                  need_uncomp, need_comp, need_offset);
+            }
             entries_.emplace(std::move(name), std::move(e));
 
             cursor += 46 + name_len + extra_len + comment_len;
@@ -594,9 +684,42 @@ private:
                 "torch_pickle: REDUCE expects a GLOBAL callable on the stack");
         }
         const auto& g = callable->g;
+        // _rebuild_from_type_v2(func, new_type, args, state): the real tensor
+        // rebuild arguments are NOT this call's top-level args — args[0] is the
+        // underlying callable (e.g. _rebuild_tensor_v2), and the (storage,
+        // offset, size, stride, ...) tuple is nested at args[2]. Unwrap it and
+        // dispatch to the underlying rebuild path; treating the top-level args
+        // as a tensor-rebuild list would fail ("arg 0 must be a persistent
+        // storage ID"), breaking any checkpoint using tensor subclasses /
+        // parameter wrapping.
+        if (g.module == "torch._tensor" && g.name == "_rebuild_from_type_v2" &&
+            args->kind == PValue::Kind::Tuple) {
+            const auto& outer = args->seq;
+            if (outer.size() < 3) {
+                throw std::runtime_error(
+                    "torch_pickle: _rebuild_from_type_v2 needs (func, new_type, "
+                    "args, [state]), got " + std::to_string(outer.size()));
+            }
+            if (outer[0]->kind != PValue::Kind::Global) {
+                throw std::runtime_error(
+                    "torch_pickle: _rebuild_from_type_v2 arg 0 must be a GLOBAL "
+                    "callable");
+            }
+            const auto& inner_fn = outer[0]->g;
+            if (outer[2]->kind != PValue::Kind::Tuple &&
+                outer[2]->kind != PValue::Kind::List) {
+                throw std::runtime_error(
+                    "torch_pickle: _rebuild_from_type_v2 arg 2 must be the nested "
+                    "rebuild-args tuple");
+            }
+            auto t = materialise_rebuild_tensor(inner_fn.name, outer[2]->seq);
+            auto v = make(PValue::Kind::TensorObj);
+            v->tensor = std::move(t);
+            push(v);
+            return;
+        }
         bool is_rebuild_tensor =
             (g.module == "torch._utils" && g.name == "_rebuild_tensor_v2") ||
-            (g.module == "torch._tensor" && g.name == "_rebuild_from_type_v2") ||
             (g.module == "torch._utils" && g.name == "_rebuild_tensor");
         if (is_rebuild_tensor && args->kind == PValue::Kind::Tuple) {
             auto t = materialise_rebuild_tensor(g.name, args->seq);
@@ -734,10 +857,32 @@ private:
                 int64_t val = 0;
                 std::vector<uint8_t> buf(n);
                 if (n > 0) read_into(buf.data(), n);
+                // The true sign is the MSB of the highest byte (buf[n-1]), not
+                // buf[7]; a wider-than-64-bit value cannot be represented in an
+                // int64_t.
+                bool negative = (n > 0) && (buf[n - 1] & 0x80);
+                if (n > 8) {
+                    // Bytes above the low 8 must be pure sign-fill (0x00 when
+                    // positive, 0xff when negative); otherwise the value does
+                    // not fit in int64_t and silently truncating would corrupt
+                    // it. Also require bit 63 to already carry the sign so the
+                    // low 8 bytes represent the same signed value.
+                    uint8_t fill = negative ? 0xff : 0x00;
+                    for (size_t i = 8; i < n; ++i) {
+                        if (buf[i] != fill) {
+                            throw std::runtime_error(
+                                "torch_pickle: LONG4 integer too large for int64_t");
+                        }
+                    }
+                    if (negative != ((buf[7] & 0x80) != 0)) {
+                        throw std::runtime_error(
+                            "torch_pickle: LONG4 integer too large for int64_t");
+                    }
+                }
                 for (size_t i = 0; i < std::min<size_t>(n, 8); ++i) {
                     val |= static_cast<int64_t>(buf[i]) << (8 * i);
                 }
-                if (n > 0 && (buf[std::min<size_t>(n, 8) - 1] & 0x80)) {
+                if (negative) {
                     for (size_t i = n; i < 8; ++i) {
                         val |= static_cast<int64_t>(0xff) << (8 * i);
                     }

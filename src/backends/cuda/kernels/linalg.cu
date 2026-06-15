@@ -70,6 +70,18 @@ void check_cusolver_info(int* d_info, const std::string& op_name) {
     }
 }
 
+/// Like check_cusolver_info but only flags argument errors (info<0). Used by det,
+/// where a positive info (singular / zero pivot) is a legitimate result (det=0)
+/// rather than a failure.
+void check_cusolver_info_neg(int* d_info, const std::string& op_name) {
+    int h_info = 0;
+    CUDA_CHECK_LINALG(cudaMemcpy(&h_info, d_info, sizeof(int), cudaMemcpyDeviceToHost));
+    if (h_info < 0) {
+        throw std::runtime_error("linalg::" + op_name + ": invalid argument (info=" +
+                                 std::to_string(h_info) + ")");
+    }
+}
+
 /// Simple RAII wrapper for a device-side int (for cuSOLVER info output).
 /// Routes through the caching allocator to avoid cudaMalloc/cudaFree overhead.
 struct DeviceInt {
@@ -1254,6 +1266,10 @@ auto linalg_det_kernel(const Tensor& A, cudaStream_t stream) -> Tensor {
 
             CUSOLVER_CHECK(cusolverDnSgetrf(handle, n, n, mat, n,
                 static_cast<float*>(workspace.ptr), piv, d_info.ptr));
+            // Catch argument errors (info<0). A positive info (singular / zero
+            // pivot) is benign for det — it simply yields det=0 — so it is not
+            // treated as a failure here.
+            check_cusolver_info_neg(d_info.ptr, "det");
         }
 
         int threads = 256;
@@ -1273,6 +1289,9 @@ auto linalg_det_kernel(const Tensor& A, cudaStream_t stream) -> Tensor {
 
             CUSOLVER_CHECK(cusolverDnDgetrf(handle, n, n, mat, n,
                 static_cast<double*>(workspace.ptr), piv, d_info.ptr));
+            // Catch argument errors (info<0); positive info (singular) is benign
+            // for det (yields det=0).
+            check_cusolver_info_neg(d_info.ptr, "det");
         }
 
         int threads = 256;
@@ -2847,16 +2866,20 @@ std::pair<int64_t, int64_t> check_square(const Tensor& t) {
     return {m, ndim};
 }
 
-/// Validate dtype for linalg ops: Float32, Float64, Float16, BFloat16 only.
+/// Validate dtype for linalg ops in the !TENZOR_HAS_CUSOLVER fallback.
+/// The fallback kernels (det/inv/solve/svd/qr/eigh/cholesky/lu) implement only
+/// real paths (Float32 / data<double>()), so Complex64/Complex128 are NOT
+/// accepted here — advertising them would let a complex tensor pass validation
+/// and then hit a confusing data<double>() DTypeException downstream.
 void validate_linalg_dtype(const Tensor& t, const std::string& op_name) {
     auto dt = t.dtype();
     if (dt != DType::Float32 && dt != DType::Float64 &&
-        dt != DType::Float16 && dt != DType::BFloat16 &&
-        dt != DType::Complex64 && dt != DType::Complex128) {
+        dt != DType::Float16 && dt != DType::BFloat16) {
         throw std::invalid_argument(
             "linalg::" + op_name + ": unsupported dtype " +
             std::string(dtype_name(dt)) +
-            ". Supported: Float32, Float64, Complex64, Complex128 (Float16/BFloat16 auto-upcast to Float32).");
+            ". Supported: Float32, Float64 (Float16/BFloat16 auto-upcast to Float32). "
+            "Complex requires a cuSOLVER build.");
     }
 }
 
@@ -3199,7 +3222,8 @@ __global__ void lu_inv_kernel(
 template<typename T>
 __global__ void cholesky_kernel(
     T* __restrict__ data,
-    int n, bool upper)
+    int n, bool upper,
+    int* __restrict__ info)  // per-batch status: 0 = OK, k(>0) = non-PD at leading minor k
 {
     int batch_idx = blockIdx.x;
     int tid = threadIdx.x;
@@ -3218,13 +3242,16 @@ __global__ void cholesky_kernel(
 
     // Cholesky factorization (thread 0 drives, sequential)
     if (tid == 0) {
+        int fail_col = 0;  // 1-based index of the first non-positive leading minor
         for (int j = 0; j < n; j++) {
             T sum = A[j * n + j];
             for (int k = 0; k < j; k++) {
                 sum -= A[j * n + k] * A[j * n + k];
             }
             if (sum <= T(0)) {
-                // Not positive definite — store what we have and let caller handle
+                // Not positive definite — record the failing minor (LAPACK-style,
+                // 1-based) so the host can throw, matching the cuSOLVER path.
+                if (fail_col == 0) fail_col = j + 1;
                 A[j * n + j] = T(0);
                 continue;
             }
@@ -3239,6 +3266,7 @@ __global__ void cholesky_kernel(
                 A[i * n + j] = s / diag;
             }
         }
+        if (info != nullptr) info[batch_idx] = fail_col;
     }
     __syncthreads();
 
@@ -4976,13 +5004,18 @@ auto linalg_cholesky_kernel(const Tensor& A, bool upper, cudaStream_t stream) ->
     auto [n, ndim] = check_square(work);
     int64_t nbatch = batch_size(work);
 
+    // Per-batch factorization status (0 = OK, k>0 = non-PD at leading minor k).
+    // Mirrors the cuSOLVER path's info handling so a non-positive-definite
+    // input throws on both builds instead of silently returning a NaN factor.
+    auto info = zeros({nbatch}, DType::Int32, work.device());
+
     if (A.dtype() == DType::Float32) {
         check_size_limit<float>(n, "cholesky");
         size_t smem = n * n * sizeof(float);
         int threads = min(static_cast<int>(n), 128);
         if (threads < 1) threads = 1;
         cholesky_kernel<float><<<nbatch, threads, smem, stream>>>(
-            work.data<float>(), n, upper);
+            work.data<float>(), n, upper, info.data<int32_t>());
         CUDA_CHECK_LINALG(cudaGetLastError());
     } else {
         check_size_limit<double>(n, "cholesky");
@@ -4990,11 +5023,24 @@ auto linalg_cholesky_kernel(const Tensor& A, bool upper, cudaStream_t stream) ->
         int threads = min(static_cast<int>(n), 128);
         if (threads < 1) threads = 1;
         cholesky_kernel<double><<<nbatch, threads, smem, stream>>>(
-            work.data<double>(), n, upper);
+            work.data<double>(), n, upper, info.data<int32_t>());
         CUDA_CHECK_LINALG(cudaGetLastError());
     }
 
     CUDA_CHECK_LINALG(cudaStreamSynchronize(stream ? stream : 0));
+
+    // Copy status back and throw on any non-positive-definite batch element.
+    std::vector<int32_t> info_host(static_cast<size_t>(nbatch), 0);
+    CUDA_CHECK_LINALG(cudaMemcpy(info_host.data(), info.data<int32_t>(),
+        static_cast<size_t>(nbatch) * sizeof(int32_t), cudaMemcpyDeviceToHost));
+    for (int64_t b = 0; b < nbatch; ++b) {
+        if (info_host[b] > 0) {
+            throw std::runtime_error(
+                "cholesky: input is not positive definite (leading minor "
+                + std::to_string(info_host[b]) + " is not positive)");
+        }
+    }
+
     return work;
 }
 

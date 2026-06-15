@@ -49,16 +49,30 @@ class Multinomial(Distribution):
     def sample(self, sample_shape=()):
         sample_shape = tuple(int(s) for s in sample_shape)
         out_shape = sample_shape + self._batch_shape + (self._num_events,)
-        # numpy.random.multinomial expects a 1-D probability vector.
-        # Iterate over the leading batch dimensions.
         batch_size = int(np.prod(self._batch_shape)) if self._batch_shape else 1
         probs_2d = self._probs_np.reshape(batch_size, self._num_events)
         n_samples = int(np.prod(sample_shape)) if sample_shape else 1
-        out = np.empty((batch_size, n_samples, self._num_events), dtype=np.int64)
-        for b in range(batch_size):
-            out[b] = np.random.multinomial(self.total_count,
-                                           probs_2d[b],
-                                           size=n_samples)
+        K = self._num_events
+        n = self.total_count
+        # Vectorised draw: a Multinomial(n, p) count vector is the histogram of
+        # n i.i.d. Categorical(p) draws. Build the per-row CDF once and draw all
+        # batch*sample*n categorical indices via a single broadcast inverse-CDF,
+        # then tally them per event with one bincount — no per-row Python loop.
+        cdf = np.cumsum(probs_2d.astype(np.float64), axis=-1)
+        cdf[:, -1] = 1.0  # guard against fp drift at the final bin
+        # (batch, n_samples, n) uniforms.
+        u = np.random.random_sample((batch_size, n_samples, n))
+        # Per-row inverse-CDF compare-and-count over the event axis.
+        idx = (u[:, :, :, None] >= cdf[:, None, None, :]).sum(axis=-1)
+        np.clip(idx, 0, K - 1, out=idx)
+        # Tally counts per (batch, sample) row into K bins. Offset each row's
+        # indices into a disjoint range so a single bincount separates them.
+        rows = batch_size * n_samples
+        idx_flat = idx.reshape(rows, n)
+        row_offset = (np.arange(rows, dtype=np.int64) * K)[:, None]
+        binned = np.bincount((idx_flat + row_offset).ravel(),
+                             minlength=rows * K)
+        out = binned.reshape(batch_size, n_samples, K).astype(np.int64)
         # Reshape to out_shape (sample, batch, K).  out is (batch, sample, K).
         out_t = out.transpose(1, 0, 2).reshape(out_shape)
         return _wrap_numpy_int(out_t)

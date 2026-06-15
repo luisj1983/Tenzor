@@ -208,14 +208,17 @@ __global__ void ctc_forward_backward_kernel(
     }
     __syncthreads();
 
-    if (tid == 0) {
-        for (int64_t t = 0; t < T_n; ++t) {
-            for (int64_t s = 0; s < L_n; ++s) {
-                int32_t c = ext_label(s);
-                float posterior = alpha[t * L_max + s] + beta[t * L_max + s];
-                float& slot = post_n[t * C + c];
-                slot = log_add(slot, posterior);
-            }
+    // Parallelize the log-posterior accumulation over t: each thread owns one
+    // or more distinct t rows of post_n[t,*]. Different t rows touch disjoint
+    // slots, so no atomics/sync are needed; the inner log_add across s stays
+    // thread-private within each t row (multiple s may map to the same c, but a
+    // single thread serializes those updates for its own row).
+    for (int64_t t = tid; t < T_n; t += nthreads) {
+        for (int64_t s = 0; s < L_n; ++s) {
+            int32_t c = ext_label(s);
+            float posterior = alpha[t * L_max + s] + beta[t * L_max + s];
+            float& slot = post_n[t * C + c];
+            slot = log_add(slot, posterior);
         }
     }
     __syncthreads();

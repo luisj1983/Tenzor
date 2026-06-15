@@ -742,7 +742,7 @@ __global__ void max_along_dim_kernel(
     int64_t indices[DIM_META_MAX_RANK];
     int64_t tmp = out_idx;
 
-    for (int64_t d = 0; d < ndim; d++) {
+    for (int64_t d = ndim - 1; d >= 0; --d) {
         if (d == dim) {
             indices[d] = 0;
             continue;
@@ -791,7 +791,7 @@ __global__ void min_along_dim_kernel(
     int64_t indices[DIM_META_MAX_RANK];
     int64_t tmp = out_idx;
 
-    for (int64_t d = 0; d < ndim; d++) {
+    for (int64_t d = ndim - 1; d >= 0; --d) {
         if (d == dim) {
             indices[d] = 0;
             continue;
@@ -839,7 +839,7 @@ __global__ void max_along_dim_kernel_half(
     int64_t indices[DIM_META_MAX_RANK];
     int64_t tmp = out_idx;
 
-    for (int64_t d = 0; d < ndim; d++) {
+    for (int64_t d = ndim - 1; d >= 0; --d) {
         if (d == dim) {
             indices[d] = 0;
             continue;
@@ -887,7 +887,7 @@ __global__ void min_along_dim_kernel_half(
     int64_t indices[DIM_META_MAX_RANK];
     int64_t tmp = out_idx;
 
-    for (int64_t d = 0; d < ndim; d++) {
+    for (int64_t d = ndim - 1; d >= 0; --d) {
         if (d == dim) {
             indices[d] = 0;
             continue;
@@ -935,7 +935,7 @@ __global__ void max_along_dim_kernel_bf16(
     int64_t indices[DIM_META_MAX_RANK];
     int64_t tmp = out_idx;
 
-    for (int64_t d = 0; d < ndim; d++) {
+    for (int64_t d = ndim - 1; d >= 0; --d) {
         if (d == dim) {
             indices[d] = 0;
             continue;
@@ -983,7 +983,7 @@ __global__ void min_along_dim_kernel_bf16(
     int64_t indices[DIM_META_MAX_RANK];
     int64_t tmp = out_idx;
 
-    for (int64_t d = 0; d < ndim; d++) {
+    for (int64_t d = ndim - 1; d >= 0; --d) {
         if (d == dim) {
             indices[d] = 0;
             continue;
@@ -2160,7 +2160,7 @@ __global__ void argmax_along_dim_kernel(
     int64_t indices[DIM_META_MAX_RANK];
     int64_t tmp = out_idx;
 
-    for (int64_t d = 0; d < ndim; d++) {
+    for (int64_t d = ndim - 1; d >= 0; --d) {
         if (d == dim) {
             indices[d] = 0;
             continue;
@@ -2213,7 +2213,7 @@ __global__ void argmin_along_dim_kernel(
     int64_t indices[DIM_META_MAX_RANK];
     int64_t tmp = out_idx;
 
-    for (int64_t d = 0; d < ndim; d++) {
+    for (int64_t d = ndim - 1; d >= 0; --d) {
         if (d == dim) {
             indices[d] = 0;
             continue;
@@ -2387,7 +2387,7 @@ __global__ void argmax_along_dim_kernel_half(
     int64_t indices[DIM_META_MAX_RANK];
     int64_t tmp = out_idx;
 
-    for (int64_t d = 0; d < ndim; d++) {
+    for (int64_t d = ndim - 1; d >= 0; --d) {
         if (d == dim) {
             indices[d] = 0;
             continue;
@@ -2439,7 +2439,7 @@ __global__ void argmin_along_dim_kernel_half(
     int64_t indices[DIM_META_MAX_RANK];
     int64_t tmp = out_idx;
 
-    for (int64_t d = 0; d < ndim; d++) {
+    for (int64_t d = ndim - 1; d >= 0; --d) {
         if (d == dim) {
             indices[d] = 0;
             continue;
@@ -2703,7 +2703,7 @@ __global__ void argmax_along_dim_kernel_bf16(
     int64_t indices[DIM_META_MAX_RANK];
     int64_t tmp = out_idx;
 
-    for (int64_t d = 0; d < ndim; d++) {
+    for (int64_t d = ndim - 1; d >= 0; --d) {
         if (d == dim) {
             indices[d] = 0;
             continue;
@@ -2755,7 +2755,7 @@ __global__ void argmin_along_dim_kernel_bf16(
     int64_t indices[DIM_META_MAX_RANK];
     int64_t tmp = out_idx;
 
-    for (int64_t d = 0; d < ndim; d++) {
+    for (int64_t d = ndim - 1; d >= 0; --d) {
         if (d == dim) {
             indices[d] = 0;
             continue;
@@ -3506,7 +3506,7 @@ __global__ void prod_along_dim_kernel(
     int64_t indices[DIM_META_MAX_RANK];
     int64_t tmp = out_idx;
 
-    for (int64_t d = 0; d < ndim; d++) {
+    for (int64_t d = ndim - 1; d >= 0; --d) {
         if (d == dim) {
             indices[d] = 0;
             continue;
@@ -4307,7 +4307,7 @@ __global__ void norm_along_dim_kernel(
     int64_t indices[DIM_META_MAX_RANK];
     int64_t tmp = out_idx;
 
-    for (int64_t d = 0; d < ndim; d++) {
+    for (int64_t d = ndim - 1; d >= 0; --d) {
         if (d == dim) {
             indices[d] = 0;
             continue;

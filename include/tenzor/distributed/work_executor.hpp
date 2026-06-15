@@ -88,15 +88,24 @@ private:
                 task = std::move(queue_.front());
                 queue_.pop_front();
             }
+            std::exception_ptr task_exc{nullptr};
             try {
                 task();
             } catch (...) {
-                std::lock_guard<std::mutex> lk(mu_);
-                if (!captured_exception_) {
-                    captured_exception_ = std::current_exception();
-                }
+                task_exc = std::current_exception();
             }
-            pending_count_.fetch_sub(1, std::memory_order_release);
+            // Decrement the predicate variable and capture any exception under
+            // mu_ so the predicate transition is visible to a waiter that has
+            // already acquired the lock. Notifying outside the lock is fine, but
+            // the state change MUST be mutex-protected or a notify landing in
+            // wait_pending()'s registration window is lost (missed wakeup).
+            {
+                std::lock_guard<std::mutex> lk(mu_);
+                if (task_exc && !captured_exception_) {
+                    captured_exception_ = task_exc;
+                }
+                pending_count_.fetch_sub(1, std::memory_order_release);
+            }
             done_cv_.notify_all();
         }
     }

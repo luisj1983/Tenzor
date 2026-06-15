@@ -6,6 +6,7 @@
 #include "tenzor/backend/simd_dispatch.hpp"
 #include <mutex>
 #include <atomic>
+#include <cstdint>
 #include <cstring>
 #include <cmath>
 #include <algorithm>
@@ -44,6 +45,27 @@ struct CPUFeatures {
 std::atomic<CPUFeatures*> g_cpu_features{nullptr};
 std::mutex g_cpu_features_mutex;
 
+#ifdef TENZOR_X86
+// Read XCR0 (Extended Control Register 0) via XGETBV. XCR0 indicates which
+// extended CPU state components the OS has enabled for save/restore across
+// context switches. Executing AVX2 (YMM) / AVX-512 (ZMM, opmask) instructions
+// when the OS has NOT enabled the corresponding state raises #UD, even if the
+// CPUID feature bit is set, so this must be checked before selecting those
+// kernels. Mirrors runtime_simd.cpp.
+inline uint64_t simd_xgetbv(uint32_t xcr_index) {
+#if defined(_MSC_VER)
+    return _xgetbv(xcr_index);
+#elif defined(__GNUC__) || defined(__clang__)
+    uint32_t eax, edx;
+    __asm__ __volatile__("xgetbv" : "=a"(eax), "=d"(edx) : "c"(xcr_index));
+    return (static_cast<uint64_t>(edx) << 32) | eax;
+#else
+    (void)xcr_index;
+    return 0;
+#endif
+}
+#endif // TENZOR_X86
+
 void detect_cpu_features() {
     std::lock_guard<std::mutex> lock(g_cpu_features_mutex);
 
@@ -65,15 +87,29 @@ void detect_cpu_features() {
         // SSE4.2: ECX bit 20
         features->sse42 = (ecx & (1 << 20)) != 0;
 
+        // OS extended-state support: OSXSAVE (ECX bit 27) means XGETBV is
+        // usable and the OS manages extended state. Without it, AVX/AVX-512
+        // kernels would #UD regardless of the CPUID feature bits below.
+        const bool osxsave = (ecx & (1 << 27)) != 0;
+        bool os_avx = false;     // OS saves YMM (AVX) state
+        bool os_avx512 = false;  // OS saves ZMM/opmask (AVX-512) state
+        if (osxsave) {
+            const uint64_t xcr0 = simd_xgetbv(0);
+            // Bits 1 (SSE/XMM) and 2 (AVX/YMM) must both be set for AVX2.
+            os_avx = ((xcr0 & 0x6) == 0x6);
+            // Bits 5,6,7 (opmask, ZMM upper, ZMM16-31) for AVX-512.
+            os_avx512 = os_avx && ((xcr0 & 0xE0) == 0xE0);
+        }
+
         // Check extended features (leaf 7)
         if (__get_cpuid_max(0, nullptr) >= 7) {
             __cpuid_count(7, 0, eax, ebx, ecx, edx);
 
-            // AVX2: EBX bit 5
-            features->avx2 = (ebx & (1 << 5)) != 0;
+            // AVX2: EBX bit 5 — gated on OS saving YMM state.
+            features->avx2 = ((ebx & (1 << 5)) != 0) && os_avx;
 
-            // AVX-512F: EBX bit 16
-            features->avx512 = (ebx & (1 << 16)) != 0;
+            // AVX-512F: EBX bit 16 — gated on OS saving ZMM/opmask state.
+            features->avx512 = ((ebx & (1 << 16)) != 0) && os_avx512;
         }
     }
 #endif

@@ -121,6 +121,7 @@ public:
      */
     auto set_activation_qparams(const QuantizationParams& params) -> void { activation_qparams_ = params; }
     auto has_activation_qparams() const -> bool { return activation_qparams_.has_value(); }
+    auto activation_qparams() const -> const QuantizationParams& { return *activation_qparams_; }
 
     /**
      * @brief Create quantized layer from floating-point layer.
@@ -210,6 +211,7 @@ public:
      */
     auto set_activation_qparams(const QuantizationParams& params) -> void { activation_qparams_ = params; }
     auto has_activation_qparams() const -> bool { return activation_qparams_.has_value(); }
+    auto activation_qparams() const -> const QuantizationParams& { return *activation_qparams_; }
 
     static auto from_float(const Conv2d& fp_conv, const QConfig& qconfig)
         -> std::shared_ptr<QuantizedConv2d>;

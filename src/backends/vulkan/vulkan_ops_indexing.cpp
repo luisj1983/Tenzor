@@ -194,9 +194,18 @@ auto VulkanBackend::dispatchGather(const Tensor& input, int64_t dim, const Tenso
     const void* buffer_indices = indices_int32.data_ptr();
     const void* buffer_output = output.data_ptr();
 
-    size_t buffer_size_input = input.numel() * input.dtype_size();
+    // F16/BF16 data buffers are packed two halves per 32-bit word and the shader
+    // reads element e at word e/2 (4-byte read + CAS). For odd numel the last
+    // word's 4-byte span extends 2 bytes past numel*2, so size the SSBO range as
+    // ((numel + 1) / 2) * 4. Indices stay int32. Matches FFT/complex sizing.
+    const bool gather_packed_half = (gdt == DType::Float16 || gdt == DType::BFloat16);
+    size_t buffer_size_input = gather_packed_half
+        ? ((input.numel() + 1) / 2) * 4
+        : input.numel() * input.dtype_size();
     size_t buffer_size_indices = indices_int32.numel() * sizeof(int32_t);
-    size_t buffer_size_output = output.numel() * output.dtype_size();
+    size_t buffer_size_output = gather_packed_half
+        ? ((output.numel() + 1) / 2) * 4
+        : output.numel() * output.dtype_size();
 
     // Set up descriptor set with all buffers
     std::vector<std::pair<uint32_t, const void*>> bindings = {
@@ -356,10 +365,21 @@ auto VulkanBackend::dispatchScatter(const Tensor& input_raw, int64_t dim, const 
     const void* buffer_output = output.data_ptr();
     const void* buffer_values = values.data_ptr();
 
-    size_t buffer_size_input = input.numel() * input.dtype_size();
+    // F16/BF16 data buffers are packed two halves per 32-bit word; the shader
+    // reads element e at word e/2 (4-byte read + CAS). Size SSBO ranges as
+    // ((numel + 1) / 2) * 4 so an odd-numel last word stays in bounds. Indices
+    // remain int32.
+    const bool scatter_packed_half = (sdt == DType::Float16 || sdt == DType::BFloat16);
+    size_t buffer_size_input = scatter_packed_half
+        ? ((input.numel() + 1) / 2) * 4
+        : input.numel() * input.dtype_size();
     size_t buffer_size_indices = indices_int32.numel() * sizeof(int32_t);
-    size_t buffer_size_output = output.numel() * output.dtype_size();
-    size_t buffer_size_values = values.numel() * values.dtype_size();
+    size_t buffer_size_output = scatter_packed_half
+        ? ((output.numel() + 1) / 2) * 4
+        : output.numel() * output.dtype_size();
+    size_t buffer_size_values = scatter_packed_half
+        ? ((values.numel() + 1) / 2) * 4
+        : values.numel() * values.dtype_size();
 
     // Set up descriptor set with all buffers
     std::vector<std::pair<uint32_t, const void*>> bindings = {
@@ -558,10 +578,19 @@ auto VulkanBackend::dispatchIndexSelect(const Tensor& input, int64_t dim, const 
     const void* buffer_indices = indices_int32.data_ptr();
     const void* buffer_output = output.data_ptr();
 
-    // Calculate buffer sizes
-    size_t input_size = input.numel() * input.dtype_size();
+    // Calculate buffer sizes. F16/BF16 use the packed two-halves-per-word shaders
+    // (index_select_f16/bf16), which read element e at word e/2; size the SSBO
+    // ranges as ((numel + 1) / 2) * 4 so an odd-numel last word stays in bounds.
+    // i64/c128 paths move bit-exact via native-width shaders and are unaffected.
+    const bool isel_packed_half =
+        (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16);
+    size_t input_size = isel_packed_half
+        ? ((input.numel() + 1) / 2) * 4
+        : input.numel() * input.dtype_size();
     size_t indices_size = indices_int32.numel() * indices_int32.dtype_size();
-    size_t output_size = output.numel() * output.dtype_size();
+    size_t output_size = isel_packed_half
+        ? ((output.numel() + 1) / 2) * 4
+        : output.numel() * output.dtype_size();
 
     // Allocate and write descriptor set
     std::vector<std::pair<uint32_t, const void*>> bindings = {

@@ -385,69 +385,6 @@ __global__ void col2im_kernel_nhwc(
 }
 
 // ============================================================================
-// LDS (Local Data Share) Optimized col2im for Large Kernels
-// ============================================================================
-
-// For large kernels (5x5, 7x7, etc.), use shared memory to cache col data
-// AMD GPUs have 64KB LDS per compute unit
-template<typename T>
-__global__ void col2im_kernel_lds_optimized(
-    const T* __restrict__ col,
-    T* __restrict__ output,
-    int64_t batch,
-    int64_t channels,
-    int64_t height,
-    int64_t width,
-    int64_t kernel_h,
-    int64_t kernel_w,
-    int64_t stride_h,
-    int64_t stride_w,
-    int64_t pad_h,
-    int64_t pad_w,
-    int64_t dil_h,
-    int64_t dil_w,
-    int64_t out_h,
-    int64_t out_w
-) {
-    // Shared memory for caching col data (tuned for AMD's 64KB LDS)
-    __shared__ T shared_col[256];  // Cache for wavefront
-
-    int64_t total_output = batch * channels * height * width;
-
-    HIP_KERNEL_LOOP(output_idx, total_output) {
-        int64_t temp = output_idx;
-        int64_t iw = temp % width; temp /= width;
-        int64_t ih = temp % height; temp /= height;
-        int64_t c = temp % channels; temp /= channels;
-        int64_t b = temp;
-
-        T sum = T(0);
-
-        for (int64_t kh = 0; kh < kernel_h; ++kh) {
-            for (int64_t kw_iter = 0; kw_iter < kernel_w; ++kw_iter) {
-                int64_t ih_shifted = ih + pad_h - kh * dil_h;
-                int64_t iw_shifted = iw + pad_w - kw_iter * dil_w;
-
-                if (ih_shifted % stride_h == 0 && iw_shifted % stride_w == 0) {
-                    int64_t oh = ih_shifted / stride_h;
-                    int64_t ow = iw_shifted / stride_w;
-
-                    if (oh >= 0 && oh < out_h && ow >= 0 && ow < out_w) {
-                        int64_t col_row = b * out_h * out_w + oh * out_w + ow;
-                        int64_t col_col = c * kernel_h * kernel_w + kh * kernel_w + kw_iter;
-                        int64_t col_idx = col_row * (channels * kernel_h * kernel_w) + col_col;
-
-                        sum += col[col_idx];
-                    }
-                }
-            }
-        }
-
-        output[output_idx] = sum;
-    }
-}
-
-// ============================================================================
 // Bias Addition Kernel
 // ============================================================================
 

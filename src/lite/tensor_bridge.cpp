@@ -21,6 +21,25 @@ auto view_as_tensor(const LiteTensor& lt) -> Tensor {
     for (int32_t i = 0; i < lt.ndim; ++i) {
         shape.push_back(lt.shape[i]);
     }
+
+    // Tensor::from_blob always derives contiguous row-major strides and has no
+    // strides parameter, so a non-contiguous (transposed/sliced) LiteTensor
+    // would be silently reinterpreted as contiguous, reading data in the wrong
+    // element order. Validate that lt.strides match the contiguous row-major
+    // layout for lt.shape and reject otherwise. Strides on dims of extent 0 or
+    // 1 are irrelevant to element order, so they are not checked.
+    {
+        int64_t expected = 1;
+        for (int32_t i = lt.ndim - 1; i >= 0; --i) {
+            if (lt.shape[i] > 1 && lt.strides[i] != expected) {
+                throw std::invalid_argument(
+                    "view_as_tensor: non-contiguous LiteTensor strides are not "
+                    "supported (expected row-major contiguous layout)");
+            }
+            expected *= lt.shape[i];
+        }
+    }
+
     // Empty deleter — the Tensor view does not own LiteTensor's buffer.
     return Tensor::from_blob(
         const_cast<void*>(lt.data),

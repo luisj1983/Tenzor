@@ -1127,9 +1127,11 @@ void register_nn(py::module_& m) {
         .def("__len__", &tenzor::nn::ModuleDict::size, "Return number of modules")
         .def("__contains__", &tenzor::nn::ModuleDict::contains, py::arg("key"), "Check if key exists")
         .def("__iter__", [](tenzor::nn::ModuleDict& self) {
-            auto keys = self.keys();
-            return py::make_iterator(keys.begin(), keys.end());
-        }, py::keep_alive<0, 1>(), "Iterate over keys")
+            // keys() returns a vector by value; make_iterator over a local
+            // temporary would dereference freed memory on each __next__.
+            // Return an iterator over an owning Python list instead.
+            return py::iter(py::cast(self.keys()));
+        }, "Iterate over keys")
         .def("keys", &tenzor::nn::ModuleDict::keys, "Get all keys in insertion order")
         .def("values", &tenzor::nn::ModuleDict::values, "Get all modules in insertion order")
         .def("items", &tenzor::nn::ModuleDict::items, "Get all (key, module) pairs in insertion order");
@@ -1965,7 +1967,8 @@ void register_nn(py::module_& m) {
              py::call_guard<py::gil_scoped_release>())
         .def("__call__", &tenzor::nn::MSELoss::operator(),
              py::arg("input"), py::arg("target"),
-             "Compute MSE loss between input and target");
+             "Compute MSE loss between input and target",
+             py::call_guard<py::gil_scoped_release>());
 
     py::class_<tenzor::nn::L1Loss>(nn, "L1Loss",
         "L1 Loss (Mean Absolute Error) for robust regression")
@@ -1978,7 +1981,8 @@ void register_nn(py::module_& m) {
              py::call_guard<py::gil_scoped_release>())
         .def("__call__", &tenzor::nn::L1Loss::operator(),
              py::arg("input"), py::arg("target"),
-             "Compute L1 loss between input and target");
+             "Compute L1 loss between input and target",
+             py::call_guard<py::gil_scoped_release>());
 
     py::class_<tenzor::nn::SmoothL1Loss>(nn, "SmoothL1Loss",
         "Smooth L1 Loss (Huber Loss) combining L1 and L2 loss properties")
@@ -1992,7 +1996,8 @@ void register_nn(py::module_& m) {
              py::call_guard<py::gil_scoped_release>())
         .def("__call__", &tenzor::nn::SmoothL1Loss::operator(),
              py::arg("input"), py::arg("target"),
-             "Compute Smooth L1 loss between input and target");
+             "Compute Smooth L1 loss between input and target",
+             py::call_guard<py::gil_scoped_release>());
 
     py::class_<tenzor::nn::CrossEntropyLoss>(nn, "CrossEntropyLoss",
         "Cross Entropy Loss for multi-class classification (combines LogSoftmax and NLLLoss)")
@@ -2007,7 +2012,8 @@ void register_nn(py::module_& m) {
              py::call_guard<py::gil_scoped_release>())
         .def("__call__", &tenzor::nn::CrossEntropyLoss::operator(),
              py::arg("input"), py::arg("target"),
-             "Compute cross entropy loss between input logits and target class indices");
+             "Compute cross entropy loss between input logits and target class indices",
+             py::call_guard<py::gil_scoped_release>());
 
     py::class_<tenzor::nn::NLLLoss>(nn, "NLLLoss",
         "Negative Log Likelihood Loss for classification with log-probabilities")
@@ -2021,7 +2027,8 @@ void register_nn(py::module_& m) {
              py::call_guard<py::gil_scoped_release>())
         .def("__call__", &tenzor::nn::NLLLoss::operator(),
              py::arg("input"), py::arg("target"),
-             "Compute NLL loss between input log-probabilities and target class indices");
+             "Compute NLL loss between input log-probabilities and target class indices",
+             py::call_guard<py::gil_scoped_release>());
 
     py::class_<tenzor::nn::BCELoss>(nn, "BCELoss",
         "Binary Cross Entropy Loss for binary classification with probabilities")
@@ -2034,7 +2041,8 @@ void register_nn(py::module_& m) {
              py::call_guard<py::gil_scoped_release>())
         .def("__call__", &tenzor::nn::BCELoss::operator(),
              py::arg("input"), py::arg("target"),
-             "Compute BCE loss between input probabilities and binary targets");
+             "Compute BCE loss between input probabilities and binary targets",
+             py::call_guard<py::gil_scoped_release>());
 
     py::class_<tenzor::nn::BCEWithLogitsLoss>(nn, "BCEWithLogitsLoss",
         "Binary Cross Entropy with Logits Loss (numerically stable version for binary classification)")
@@ -2047,7 +2055,8 @@ void register_nn(py::module_& m) {
              py::call_guard<py::gil_scoped_release>())
         .def("__call__", &tenzor::nn::BCEWithLogitsLoss::operator(),
              py::arg("input"), py::arg("target"),
-             "Compute BCE with logits loss between input logits and binary targets");
+             "Compute BCE with logits loss between input logits and binary targets",
+             py::call_guard<py::gil_scoped_release>());
 
     // Advanced loss functions
     py::class_<tenzor::nn::KLDivLoss>(nn, "KLDivLoss")
@@ -2055,7 +2064,8 @@ void register_nn(py::module_& m) {
              py::arg("reduction") = "mean", py::arg("log_target") = false)
         .def("forward", &tenzor::nn::KLDivLoss::forward,
              py::call_guard<py::gil_scoped_release>())
-        .def("__call__", &tenzor::nn::KLDivLoss::operator());
+        .def("__call__", &tenzor::nn::KLDivLoss::operator(),
+             py::call_guard<py::gil_scoped_release>());
 
     py::class_<tenzor::nn::FocalLoss>(nn, "FocalLoss")
         .def(py::init<double, double, const std::string&>(),
@@ -2063,21 +2073,24 @@ void register_nn(py::module_& m) {
              py::arg("reduction") = "mean")
         .def("forward", &tenzor::nn::FocalLoss::forward,
              py::call_guard<py::gil_scoped_release>())
-        .def("__call__", &tenzor::nn::FocalLoss::operator());
+        .def("__call__", &tenzor::nn::FocalLoss::operator(),
+             py::call_guard<py::gil_scoped_release>());
 
     py::class_<tenzor::nn::DiceLoss>(nn, "DiceLoss")
         .def(py::init<double, const std::string&>(),
              py::arg("smooth") = 1.0, py::arg("reduction") = "mean")
         .def("forward", &tenzor::nn::DiceLoss::forward,
              py::call_guard<py::gil_scoped_release>())
-        .def("__call__", &tenzor::nn::DiceLoss::operator());
+        .def("__call__", &tenzor::nn::DiceLoss::operator(),
+             py::call_guard<py::gil_scoped_release>());
 
     py::class_<tenzor::nn::HuberLoss>(nn, "HuberLoss")
         .def(py::init<double, const std::string&>(),
              py::arg("delta") = 1.0, py::arg("reduction") = "mean")
         .def("forward", &tenzor::nn::HuberLoss::forward,
              py::call_guard<py::gil_scoped_release>())
-        .def("__call__", &tenzor::nn::HuberLoss::operator());
+        .def("__call__", &tenzor::nn::HuberLoss::operator(),
+             py::call_guard<py::gil_scoped_release>());
 
     py::class_<tenzor::nn::CTCLoss>(nn, "CTCLoss",
         "Connectionist Temporal Classification loss for sequence-to-sequence tasks")
@@ -2091,7 +2104,8 @@ void register_nn(py::module_& m) {
              py::call_guard<py::gil_scoped_release>())
         .def("__call__", &tenzor::nn::CTCLoss::operator(),
              py::arg("log_probs"), py::arg("targets"),
-             py::arg("input_lengths"), py::arg("target_lengths"));
+             py::arg("input_lengths"), py::arg("target_lengths"),
+             py::call_guard<py::gil_scoped_release>());
 
     // Contrastive loss functions
     py::class_<tenzor::nn::InfoNCELoss>(nn, "InfoNCELoss",
@@ -2103,7 +2117,8 @@ void register_nn(py::module_& m) {
              py::arg("queries"), py::arg("keys"),
              py::call_guard<py::gil_scoped_release>())
         .def("__call__", &tenzor::nn::InfoNCELoss::operator(),
-             py::arg("queries"), py::arg("keys"));
+             py::arg("queries"), py::arg("keys"),
+             py::call_guard<py::gil_scoped_release>());
 
     py::class_<tenzor::nn::NTXentLoss>(nn, "NTXentLoss",
         "NT-Xent (Normalized Temperature-scaled Cross Entropy) loss for SimCLR")
@@ -2114,7 +2129,8 @@ void register_nn(py::module_& m) {
              py::arg("z_i"), py::arg("z_j"),
              py::call_guard<py::gil_scoped_release>())
         .def("__call__", &tenzor::nn::NTXentLoss::operator(),
-             py::arg("z_i"), py::arg("z_j"));
+             py::arg("z_i"), py::arg("z_j"),
+             py::call_guard<py::gil_scoped_release>());
 
     py::class_<tenzor::nn::TripletLoss>(nn, "TripletLoss",
         "Triplet margin loss for metric learning")
@@ -2126,7 +2142,8 @@ void register_nn(py::module_& m) {
              py::arg("anchor"), py::arg("positive"), py::arg("negative"),
              py::call_guard<py::gil_scoped_release>())
         .def("__call__", &tenzor::nn::TripletLoss::operator(),
-             py::arg("anchor"), py::arg("positive"), py::arg("negative"));
+             py::arg("anchor"), py::arg("positive"), py::arg("negative"),
+             py::call_guard<py::gil_scoped_release>());
 
     py::class_<tenzor::nn::MarginRankingLoss>(nn, "MarginRankingLoss",
         "Margin ranking loss for ranking tasks")
@@ -2137,7 +2154,8 @@ void register_nn(py::module_& m) {
              py::arg("input1"), py::arg("input2"), py::arg("target"),
              py::call_guard<py::gil_scoped_release>())
         .def("__call__", &tenzor::nn::MarginRankingLoss::operator(),
-             py::arg("input1"), py::arg("input2"), py::arg("target"));
+             py::arg("input1"), py::arg("input2"), py::arg("target"),
+             py::call_guard<py::gil_scoped_release>());
 
     py::class_<tenzor::nn::SoftMarginLoss>(nn, "SoftMarginLoss",
         "Two-class soft margin loss: log(1 + exp(-y * x))")
@@ -2147,7 +2165,8 @@ void register_nn(py::module_& m) {
              py::arg("input"), py::arg("target"),
              py::call_guard<py::gil_scoped_release>())
         .def("__call__", &tenzor::nn::SoftMarginLoss::operator(),
-             py::arg("input"), py::arg("target"));
+             py::arg("input"), py::arg("target"),
+             py::call_guard<py::gil_scoped_release>());
 
     py::class_<tenzor::nn::HingeEmbeddingLoss>(nn, "HingeEmbeddingLoss",
         "Hinge embedding loss for similarity/dissimilarity measurement")
@@ -2158,7 +2177,8 @@ void register_nn(py::module_& m) {
              py::arg("input"), py::arg("target"),
              py::call_guard<py::gil_scoped_release>())
         .def("__call__", &tenzor::nn::HingeEmbeddingLoss::operator(),
-             py::arg("input"), py::arg("target"));
+             py::arg("input"), py::arg("target"),
+             py::call_guard<py::gil_scoped_release>());
 
     py::class_<tenzor::nn::PoissonNLLLoss>(nn, "PoissonNLLLoss",
         "Poisson negative log-likelihood loss for count data")
@@ -2171,7 +2191,8 @@ void register_nn(py::module_& m) {
              py::arg("input"), py::arg("target"),
              py::call_guard<py::gil_scoped_release>())
         .def("__call__", &tenzor::nn::PoissonNLLLoss::operator(),
-             py::arg("input"), py::arg("target"));
+             py::arg("input"), py::arg("target"),
+             py::call_guard<py::gil_scoped_release>());
 
     py::class_<tenzor::nn::CosineEmbeddingLoss>(nn, "CosineEmbeddingLoss",
         "Cosine embedding loss using cosine similarity")
@@ -2182,7 +2203,8 @@ void register_nn(py::module_& m) {
              py::arg("input1"), py::arg("input2"), py::arg("target"),
              py::call_guard<py::gil_scoped_release>())
         .def("__call__", &tenzor::nn::CosineEmbeddingLoss::operator(),
-             py::arg("input1"), py::arg("input2"), py::arg("target"));
+             py::arg("input1"), py::arg("input2"), py::arg("target"),
+             py::call_guard<py::gil_scoped_release>());
 
     py::class_<tenzor::nn::TripletMarginLoss>(nn, "TripletMarginLoss",
         "Triplet margin loss with configurable distance norm")
@@ -2195,7 +2217,8 @@ void register_nn(py::module_& m) {
              py::arg("anchor"), py::arg("positive"), py::arg("negative"),
              py::call_guard<py::gil_scoped_release>())
         .def("__call__", &tenzor::nn::TripletMarginLoss::operator(),
-             py::arg("anchor"), py::arg("positive"), py::arg("negative"));
+             py::arg("anchor"), py::arg("positive"), py::arg("negative"),
+             py::call_guard<py::gil_scoped_release>());
 
     py::class_<tenzor::nn::TripletMarginWithDistanceLoss>(nn, "TripletMarginWithDistanceLoss",
         "Triplet margin loss with user-supplied distance function")
@@ -2209,7 +2232,8 @@ void register_nn(py::module_& m) {
              py::arg("anchor"), py::arg("positive"), py::arg("negative"),
              py::call_guard<py::gil_scoped_release>())
         .def("__call__", &tenzor::nn::TripletMarginWithDistanceLoss::operator(),
-             py::arg("anchor"), py::arg("positive"), py::arg("negative"));
+             py::arg("anchor"), py::arg("positive"), py::arg("negative"),
+             py::call_guard<py::gil_scoped_release>());
 
     py::class_<tenzor::nn::CosineSimilarity>(nn, "CosineSimilarity",
         "Cosine similarity module")
@@ -2219,7 +2243,8 @@ void register_nn(py::module_& m) {
              py::arg("x1"), py::arg("x2"),
              py::call_guard<py::gil_scoped_release>())
         .def("__call__", &tenzor::nn::CosineSimilarity::operator(),
-             py::arg("x1"), py::arg("x2"));
+             py::arg("x1"), py::arg("x2"),
+             py::call_guard<py::gil_scoped_release>());
 
     py::class_<tenzor::nn::PairwiseDistance>(nn, "PairwiseDistance",
         "Pairwise distance module")
@@ -2229,7 +2254,8 @@ void register_nn(py::module_& m) {
              py::arg("x1"), py::arg("x2"),
              py::call_guard<py::gil_scoped_release>())
         .def("__call__", &tenzor::nn::PairwiseDistance::operator(),
-             py::arg("x1"), py::arg("x2"));
+             py::arg("x1"), py::arg("x2"),
+             py::call_guard<py::gil_scoped_release>());
 
     py::class_<tenzor::nn::MultiLabelSoftMarginLoss>(nn, "MultiLabelSoftMarginLoss",
         "Multi-label one-versus-all loss based on max-entropy")
@@ -2239,7 +2265,8 @@ void register_nn(py::module_& m) {
              py::arg("input"), py::arg("target"),
              py::call_guard<py::gil_scoped_release>())
         .def("__call__", &tenzor::nn::MultiLabelSoftMarginLoss::operator(),
-             py::arg("input"), py::arg("target"));
+             py::arg("input"), py::arg("target"),
+             py::call_guard<py::gil_scoped_release>());
 
     py::class_<tenzor::nn::MultiMarginLoss>(nn, "MultiMarginLoss",
         "Multi-class classification hinge loss")
@@ -2251,7 +2278,8 @@ void register_nn(py::module_& m) {
              py::arg("input"), py::arg("target"),
              py::call_guard<py::gil_scoped_release>())
         .def("__call__", &tenzor::nn::MultiMarginLoss::operator(),
-             py::arg("input"), py::arg("target"));
+             py::arg("input"), py::arg("target"),
+             py::call_guard<py::gil_scoped_release>());
 
     py::class_<tenzor::nn::GaussianNLLLoss>(nn, "GaussianNLLLoss",
         "Gaussian negative log-likelihood loss for regression with uncertainty")
@@ -2263,7 +2291,8 @@ void register_nn(py::module_& m) {
              py::arg("input"), py::arg("target"), py::arg("var"),
              py::call_guard<py::gil_scoped_release>())
         .def("__call__", &tenzor::nn::GaussianNLLLoss::operator(),
-             py::arg("input"), py::arg("target"), py::arg("var"));
+             py::arg("input"), py::arg("target"), py::arg("var"),
+             py::call_guard<py::gil_scoped_release>());
 
     py::class_<tenzor::nn::MultiLabelMarginLoss>(nn, "MultiLabelMarginLoss",
         "Multi-label classification hinge loss")
@@ -2273,7 +2302,8 @@ void register_nn(py::module_& m) {
              py::arg("input"), py::arg("target"),
              py::call_guard<py::gil_scoped_release>())
         .def("__call__", &tenzor::nn::MultiLabelMarginLoss::operator(),
-             py::arg("input"), py::arg("target"));
+             py::arg("input"), py::arg("target"),
+             py::call_guard<py::gil_scoped_release>());
 
     // Functional loss functions
     nn.def("mse_loss", &tenzor::nn::mse_loss, "MSE loss function",
@@ -2785,8 +2815,14 @@ void register_nn(py::module_& m) {
                                          std::vector<int64_t> size,
                                          const std::string& mode,
                                          bool align_corners) -> tenzor::Variable {
-        auto result = tenzor::ops::interpolate(input.tensor(), size, mode, align_corners);
-        return tenzor::Variable(result, input.requires_grad());
+        if (size.size() != 2) {
+            throw std::invalid_argument(
+                "interpolate: size must have exactly 2 elements (H, W)");
+        }
+        // Use the Variable overload so the autograd graph back to `input`
+        // is preserved (the raw-Tensor ops::interpolate would sever grad_fn).
+        return tenzor::nn::functional::interpolate(
+            input, {size[0], size[1]}, mode, align_corners);
     }, py::arg("input"), py::arg("size"),
        py::arg("mode") = "bilinear", py::arg("align_corners") = false,
        "Interpolate/resize tensor to given size",

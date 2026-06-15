@@ -185,6 +185,26 @@ public:
     auto get_or_compile(const FusionGroup& group) -> std::shared_ptr<CompiledKernel>;
 
     /**
+     * @brief Get or compile a kernel from pre-generated source, keyed by an
+     * explicit signature.
+     *
+     * Used by the extended-fusion path, which generates its own (non
+     * element-wise) kernel source and supplies the entry-point name. Without
+     * this the caller would have to route through get_or_compile(FusionGroup),
+     * which regenerates an unrelated element-wise kernel and discards the
+     * provided source.
+     *
+     * @param signature  Cache key uniquely identifying this kernel
+     * @param source     Complete kernel source to compile
+     * @param kernel_name Entry-point (extern "C" __global__) symbol name
+     * @return Shared pointer to the compiled kernel
+     */
+    auto get_or_compile_source(const std::string& signature,
+                               const std::string& source,
+                               const std::string& kernel_name)
+        -> std::shared_ptr<CompiledKernel>;
+
+    /**
      * @brief Clear all cached kernels.
      */
     auto clear() -> void;

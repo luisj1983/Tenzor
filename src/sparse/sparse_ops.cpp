@@ -220,10 +220,14 @@ std::vector<MKL_INT> to_mkl_int(const int64_t* src, int64_t n) {
 /// Create MKL Float32 CSR handle from SparseTensor.
 sparse_matrix_t create_mkl_csr_f32(const SparseTensor& sparse, MKL_INT nrows, MKL_INT ncols,
                                      std::vector<MKL_INT>& crow_buf,
-                                     std::vector<MKL_INT>& col_buf) {
+                                     std::vector<MKL_INT>& col_buf,
+                                     Tensor& vals_keepalive) {
     auto crow = sparse.crow_indices().contiguous();
     auto col = sparse.col_indices().contiguous();
-    auto vals = sparse.values().contiguous();
+    // MKL stores the values pointer without copying, so the backing tensor must
+    // outlive the handle. Hand it back to the caller via vals_keepalive instead
+    // of letting a function-local tensor free its storage on return.
+    vals_keepalive = sparse.values().contiguous();
 
     crow_buf = to_mkl_int(crow.data<int64_t>(), nrows + 1);
     col_buf = to_mkl_int(col.data<int64_t>(), sparse.nnz());
@@ -236,7 +240,7 @@ sparse_matrix_t create_mkl_csr_f32(const SparseTensor& sparse, MKL_INT nrows, MK
         crow_buf.data(),
         crow_buf.data() + 1,
         col_buf.data(),
-        const_cast<float*>(vals.data<float>())
+        const_cast<float*>(vals_keepalive.data<float>())
     );
 
     if (status != SPARSE_STATUS_SUCCESS) {
@@ -249,10 +253,14 @@ sparse_matrix_t create_mkl_csr_f32(const SparseTensor& sparse, MKL_INT nrows, MK
 /// Create MKL Float64 CSR handle from SparseTensor.
 sparse_matrix_t create_mkl_csr_f64(const SparseTensor& sparse, MKL_INT nrows, MKL_INT ncols,
                                      std::vector<MKL_INT>& crow_buf,
-                                     std::vector<MKL_INT>& col_buf) {
+                                     std::vector<MKL_INT>& col_buf,
+                                     Tensor& vals_keepalive) {
     auto crow = sparse.crow_indices().contiguous();
     auto col = sparse.col_indices().contiguous();
-    auto vals = sparse.values().contiguous();
+    // MKL stores the values pointer without copying, so the backing tensor must
+    // outlive the handle. Hand it back to the caller via vals_keepalive instead
+    // of letting a function-local tensor free its storage on return.
+    vals_keepalive = sparse.values().contiguous();
 
     crow_buf = to_mkl_int(crow.data<int64_t>(), nrows + 1);
     col_buf = to_mkl_int(col.data<int64_t>(), sparse.nnz());
@@ -265,7 +273,7 @@ sparse_matrix_t create_mkl_csr_f64(const SparseTensor& sparse, MKL_INT nrows, MK
         crow_buf.data(),
         crow_buf.data() + 1,
         col_buf.data(),
-        const_cast<double*>(vals.data<double>())
+        const_cast<double*>(vals_keepalive.data<double>())
     );
 
     if (status != SPARSE_STATUS_SUCCESS) {
@@ -279,7 +287,8 @@ sparse_matrix_t create_mkl_csr_f64(const SparseTensor& sparse, MKL_INT nrows, MK
 Tensor mkl_csr_spmv_f32(const SparseTensor& sparse, const Tensor& vec,
                           int64_t M, int64_t K) {
     std::vector<MKL_INT> crow_buf, col_buf;
-    auto handle = create_mkl_csr_f32(sparse, M, K, crow_buf, col_buf);
+    Tensor vals_keepalive;
+    auto handle = create_mkl_csr_f32(sparse, M, K, crow_buf, col_buf, vals_keepalive);
     MklSparseGuard guard(handle);
 
     struct matrix_descr descr;
@@ -305,7 +314,8 @@ Tensor mkl_csr_spmv_f32(const SparseTensor& sparse, const Tensor& vec,
 Tensor mkl_csr_spmv_f64(const SparseTensor& sparse, const Tensor& vec,
                           int64_t M, int64_t K) {
     std::vector<MKL_INT> crow_buf, col_buf;
-    auto handle = create_mkl_csr_f64(sparse, M, K, crow_buf, col_buf);
+    Tensor vals_keepalive;
+    auto handle = create_mkl_csr_f64(sparse, M, K, crow_buf, col_buf, vals_keepalive);
     MklSparseGuard guard(handle);
 
     struct matrix_descr descr;
@@ -331,7 +341,8 @@ Tensor mkl_csr_spmv_f64(const SparseTensor& sparse, const Tensor& vec,
 Tensor mkl_csr_spmm_f32(const SparseTensor& sparse, const Tensor& dense,
                           int64_t M, int64_t K, int64_t N) {
     std::vector<MKL_INT> crow_buf, col_buf;
-    auto handle = create_mkl_csr_f32(sparse, M, K, crow_buf, col_buf);
+    Tensor vals_keepalive;
+    auto handle = create_mkl_csr_f32(sparse, M, K, crow_buf, col_buf, vals_keepalive);
     MklSparseGuard guard(handle);
 
     struct matrix_descr descr;
@@ -361,7 +372,8 @@ Tensor mkl_csr_spmm_f32(const SparseTensor& sparse, const Tensor& dense,
 Tensor mkl_csr_spmm_f64(const SparseTensor& sparse, const Tensor& dense,
                           int64_t M, int64_t K, int64_t N) {
     std::vector<MKL_INT> crow_buf, col_buf;
-    auto handle = create_mkl_csr_f64(sparse, M, K, crow_buf, col_buf);
+    Tensor vals_keepalive;
+    auto handle = create_mkl_csr_f64(sparse, M, K, crow_buf, col_buf, vals_keepalive);
     MklSparseGuard guard(handle);
 
     struct matrix_descr descr;
@@ -1562,6 +1574,13 @@ auto sparse_triangular_solve(const SparseTensor& L, const Tensor& b, bool upper)
     }
     int64_t N = L_shape[0];
 
+    if (L.device().type != b.device().type) {
+        throw std::runtime_error(
+            "sparse_triangular_solve: L and b must be on the same device (L on " +
+            std::string(L.device().to_string()) + ", b on " +
+            std::string(b.device().to_string()) + ")");
+    }
+
     if (b.ndim() == 1) {
         if (b.shape()[0] != N) {
             throw std::runtime_error("sparse_triangular_solve: dimension mismatch");
@@ -1577,11 +1596,18 @@ auto sparse_triangular_solve(const SparseTensor& L, const Tensor& b, bool upper)
     // GPU path: dispatch through the OpId table for any GPU device type.
     auto dev_type = b.device().type;
     if (dev_type != Device::Type::CPU) {
+        // L and b must live on the same device: extract_csr_on_device(L)
+        // returns components on L's own device, and the dispatch is selected by
+        // b's device. If they differ the kernel would receive crow/col/values
+        // on one device and b on another. Reconcile by moving both onto the
+        // device chosen by b (the previous `b.to(b.device())` ternary was a
+        // no-op and never transferred anything).
+        Device target_dev{dev_type, 0};
         auto Lc = extract_csr_on_device(L);
-        Tensor b_gpu = (b.device().type == dev_type)
-                          ? b
-                          : b.to(b.device());
-        std::vector<Tensor> inputs = {Lc.crow, Lc.col, Lc.values, b_gpu};
+        Tensor L_crow = (Lc.crow.device().type == dev_type) ? Lc.crow : Lc.crow.to(target_dev);
+        Tensor L_col  = (Lc.col.device().type  == dev_type) ? Lc.col  : Lc.col.to(target_dev);
+        Tensor L_vals = (Lc.values.device().type == dev_type) ? Lc.values : Lc.values.to(target_dev);
+        std::vector<Tensor> inputs = {L_crow, L_col, L_vals, b};
         OpAttributes attrs;
         attrs.set(AttrKey::N, N);
         attrs.set(AttrKey::Upper, upper);

@@ -4262,7 +4262,12 @@ auto has_inf_nan_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
 // ============================================================================
 // CumSum kernel - cumulative sum along a dimension
 // ============================================================================
-auto cumsum_kernel(const Tensor& input, int64_t dim, sycl::queue& queue) -> Tensor {
+auto cumsum_kernel(const Tensor& input_raw, int64_t dim, sycl::queue& queue) -> Tensor {
+    // Element offsets below are derived purely from logical shape (assuming
+    // row-major contiguous layout), so a non-contiguous view (e.g. a transpose)
+    // would be read/written at the wrong offsets. Materialize contiguous first,
+    // mirroring cummax_kernel and the CUDA backend.
+    Tensor input = input_raw.is_contiguous() ? input_raw : contiguous_kernel(input_raw, queue);
     auto shape_span = input.shape();
     std::vector<int64_t> shape(shape_span.begin(), shape_span.end());
     int64_t ndim = shape.size();
@@ -4343,7 +4348,10 @@ auto cumsum_kernel(const Tensor& input, int64_t dim, sycl::queue& queue) -> Tens
 // ============================================================================
 // CumProd kernel - cumulative product along a dimension
 // ============================================================================
-auto cumprod_kernel(const Tensor& input, int64_t dim, sycl::queue& queue) -> Tensor {
+auto cumprod_kernel(const Tensor& input_raw, int64_t dim, sycl::queue& queue) -> Tensor {
+    // Offsets assume contiguous row-major layout; contiguize non-contiguous
+    // inputs first (mirrors cummax_kernel / CUDA backend).
+    Tensor input = input_raw.is_contiguous() ? input_raw : contiguous_kernel(input_raw, queue);
     auto shape_span = input.shape();
     std::vector<int64_t> shape(shape_span.begin(), shape_span.end());
     int64_t ndim = shape.size();
@@ -5857,7 +5865,10 @@ auto bitwise_right_shift_kernel(const Tensor& input, const Tensor& shift, sycl::
 // ============================================================================
 // Logcumsumexp kernel - log-cumulative-sum-exp along a dimension
 // ============================================================================
-auto logcumsumexp_kernel(const Tensor& input, int64_t dim, sycl::queue& queue) -> Tensor {
+auto logcumsumexp_kernel(const Tensor& input_raw, int64_t dim, sycl::queue& queue) -> Tensor {
+    // Offsets assume contiguous row-major layout; contiguize non-contiguous
+    // inputs first (mirrors cummax_kernel / CUDA backend).
+    Tensor input = input_raw.is_contiguous() ? input_raw : contiguous_kernel(input_raw, queue);
     auto shape_span = input.shape();
     std::vector<int64_t> shape(shape_span.begin(), shape_span.end());
     int64_t ndim = shape.size();

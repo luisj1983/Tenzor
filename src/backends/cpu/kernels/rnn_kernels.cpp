@@ -751,10 +751,15 @@ auto gru_cell_backward_kernel(const Tensor& grad_hy, const Tensor& input, const 
                     t_d_b_hh[g] += d_gates_hh[g];
                 }
                 for (int64_t h_out = 0; h_out < hidden_size; ++h_out) {
+                    // d_gates_hh[2*hidden + h_out] already carries one factor of
+                    // r (set at line 721: dn_pre * r_gate[h_out]). The forward
+                    //   n = tanh(n_ih + r * (W_hn @ hx + b_hn))
+                    // means grad W_hn carries exactly r^1, so do NOT multiply by
+                    // r_gate[h_out] again here (that yielded r^2).
                     T dn_pre = d_gates_hh[2 * hidden_size + h_out];
                     for (int64_t h = 0; h < hidden_size; ++h) {
                         t_d_w_hh[(2 * hidden_size + h_out) * hidden_size + h] +=
-                            dn_pre * r_gate[h_out] * hx_data[b * hidden_size + h];
+                            dn_pre * hx_data[b * hidden_size + h];
                     }
                     t_d_b_hh[2 * hidden_size + h_out] += dn_pre;
                 }
@@ -1331,21 +1336,25 @@ auto lstm_multilayer_forward_kernel(
     Tensor c_n = empty({num_layers, batch, hidden}, dt, input.device());
 
     if (dt == DType::Float32) {
-        std::vector<const float*> W_ih_ptrs, W_hh_ptrs, bias_ptrs;
+        std::vector<const float*> W_ih_ptrs, W_hh_ptrs;
         for (int64_t l = 0; l < num_layers; ++l) {
             W_ih_ptrs.push_back(W_ih_contig[l].data<float>());
             W_hh_ptrs.push_back(W_hh_contig[l].data<float>());
-            if (!bias_list.empty() && bias_list[l].numel() > 0) {
-                // bias_contig is built in the same order; map by counting non-empty entries
-            }
         }
-        // Build bias_ptrs in the same order as bias_contig (only non-empty)
-        size_t bi = 0;
+        // Build a length-num_layers bias pointer vector that is index-aligned to
+        // the layer number: nullptr entries for bias-less layers (do NOT compact,
+        // otherwise lstm_multilayer_forward_onednn's bias_list[l] selects the
+        // wrong layer's bias for mixed-bias configs). bias_contig holds only the
+        // non-empty bias tensors in layer order, so walk it with a running index.
         std::vector<const float*> bias_ptrs_f;
-        for (int64_t l = 0; l < num_layers; ++l) {
-            if (!bias_list.empty() && bias_list[l].numel() > 0) {
-                bias_ptrs_f.push_back(bias_contig[bi].data<float>());
-                ++bi;
+        if (!bias_list.empty()) {
+            bias_ptrs_f.assign(num_layers, nullptr);
+            size_t bi = 0;
+            for (int64_t l = 0; l < num_layers; ++l) {
+                if (bias_list[l].numel() > 0) {
+                    bias_ptrs_f[l] = bias_contig[bi].data<float>();
+                    ++bi;
+                }
             }
         }
 
@@ -1478,11 +1487,18 @@ auto gru_multilayer_forward_kernel(
             W_ih_ptrs.push_back(W_ih_contig[l].data<float>());
             W_hh_ptrs.push_back(W_hh_contig[l].data<float>());
         }
-        size_t bi = 0;
-        for (int64_t l = 0; l < num_layers; ++l) {
-            if (!bias_list.empty() && bias_list[l].numel() > 0) {
-                bias_ptrs.push_back(bias_contig[bi].data<float>());
-                ++bi;
+        // Build a length-num_layers, index-aligned bias pointer vector with
+        // nullptr entries for bias-less layers (do NOT compact, otherwise
+        // gru_multilayer_forward_onednn's bias_list[src_layer] indexing selects
+        // the wrong layer's bias and reads OOB for mixed-bias configs).
+        if (!bias_list.empty()) {
+            bias_ptrs.assign(num_layers, nullptr);
+            size_t bi = 0;
+            for (int64_t l = 0; l < num_layers; ++l) {
+                if (bias_list[l].numel() > 0) {
+                    bias_ptrs[l] = bias_contig[bi].data<float>();
+                    ++bi;
+                }
             }
         }
 

@@ -280,9 +280,21 @@ auto TripletLoss::forward(const Variable& anchor,
             return mean(loss_unreduced);
         case Reduction::Sum:
             return sum(loss_unreduced);
-        default:
+        case Reduction::BatchMean: {
+            // sum(loss) / batch_size. Previously fell through to mean(),
+            // which silently behaved as full Mean for BatchMean.
+            auto summed = sum(loss_unreduced);
+            const auto& shp = loss_unreduced.shape();
+            int64_t bs = (!shp.empty()) ? shp[0] : 0;
+            if (bs > 0) {
+                auto scale_var = scalar_var(1.0f / static_cast<float>(bs),
+                                            anchor.dtype(), anchor.device());
+                return summed * scale_var;
+            }
             return mean(loss_unreduced);
+        }
     }
+    return mean(loss_unreduced);
 }
 
 // ============================================================================

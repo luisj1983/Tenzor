@@ -47,13 +47,27 @@ class NegativeBinomial(Distribution):
                        eps, 1.0 - eps)
         return _wrap_numpy(r_np * p_np / (1.0 - p_np) ** 2)
 
-    def sample(self, sample_shape=()):
+    def sample(self, sample_shape=(), rng=None):
         out_shape = tuple(sample_shape) + self._batch_shape
-        r_np = np.round(np.asarray(self.total_count.tensor(), dtype=np.float64)).astype(int)
-        success_prob = np.clip(1.0 - np.asarray(self.probs.tensor(), dtype=np.float64),
-                               1e-7, 1.0 - 1e-7)
-        s = np.random.negative_binomial(r_np, success_prob,
-                                        size=out_shape or None)
+        eps = 1e-7
+        # Use the supplied Generator for reproducibility; fall back to the
+        # legacy global numpy RNG when none is provided.
+        draw = rng if rng is not None else np.random
+        # Real-valued total_count (r) is supported via a Gamma-Poisson
+        # compound draw: λ ~ Gamma(r, scale=p/(1-p)), x ~ Poisson(λ). This
+        # matches the continuous log_prob/mean/variance (which use lgamma(r))
+        # for fractional r and never raises on r < 0.5, unlike
+        # np.random.negative_binomial(n, ...) which requires integer n > 0.
+        # `probs` is the failure probability p (PyTorch convention), so the
+        # NB-as-Gamma-Poisson scale is p/(1-p).
+        r_np = np.asarray(self.total_count.tensor(), dtype=np.float64)
+        p_np = np.clip(np.asarray(self.probs.tensor(), dtype=np.float64),
+                       eps, 1.0 - eps)
+        r_b = np.broadcast_to(r_np, out_shape) if out_shape else r_np
+        p_b = np.broadcast_to(p_np, out_shape) if out_shape else p_np
+        scale = p_b / (1.0 - p_b)
+        lam = draw.gamma(shape=r_b, scale=scale, size=out_shape or None)
+        s = draw.poisson(lam, size=out_shape or None)
         return _wrap_numpy(np.asarray(s, dtype=np.float32))
 
     def log_prob(self, value):
@@ -76,7 +90,9 @@ class NegativeBinomial(Distribution):
         if rng is None:
             rng = np.random.default_rng()
         # Sample n_samples and compute empirical entropy via -E[log p(x)].
-        s = self.sample((n_samples,))
+        # Thread the Generator through so results are reproducible and the
+        # global numpy RNG state is left untouched.
+        s = self.sample((n_samples,), rng=rng)
         v_np = np.asarray(s, dtype=np.float64)
         lp_np = np.asarray(self.log_prob(s), dtype=np.float64)
         return _wrap_numpy(np.asarray([-lp_np.mean()], dtype=np.float32).reshape(()))

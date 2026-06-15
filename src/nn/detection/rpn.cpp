@@ -17,6 +17,7 @@
 #include "tenzor/core/tensor.hpp"
 #include <stdexcept>
 #include <algorithm>
+#include <cmath>
 #include <vector>
 
 namespace tenzor {
@@ -297,9 +298,22 @@ auto RegionProposalNetwork::forward_proposals(
     auto feat_w = features.shape()[3];
     auto batch_size = features.shape()[0];
 
-    // Generate anchors for this feature map
-    // Assuming stride of 16 (typical for ResNet-50 C4 features)
+    // Generate anchors for this feature map.
+    //
+    // The feature stride is the ratio of the input image size to the feature
+    // map size, not a fixed 16: an FPN level or a non-C4 backbone has a
+    // different stride, and hard-coding 16 places anchor centers at the wrong
+    // image coordinates (cx = (x+0.5)*stride). Derive it from the first image
+    // shape (image_height / feat_h), falling back to 16 if unavailable.
     int64_t stride = 16;
+    if (!image_shapes.empty() && feat_h > 0) {
+        int64_t img_h = image_shapes[0].first;  // (height, width)
+        if (img_h > 0) {
+            stride = std::max<int64_t>(1, static_cast<int64_t>(
+                std::llround(static_cast<double>(img_h) /
+                             static_cast<double>(feat_h))));
+        }
+    }
     auto anchors = anchor_generator_->generate(
         feat_h, feat_w, stride, features.device()
     );
@@ -310,6 +324,20 @@ auto RegionProposalNetwork::forward_proposals(
     }
 
     std::vector<Tensor> all_proposals;
+
+    // Reset the mutable loss accumulators to fresh zero Variables at the start
+    // of every forward. Previously they were keyed on the loop index (i == 0),
+    // so if image 0 had no target the init was skipped and the final average
+    // divided a stale value left over from a prior forward. Track how many
+    // images actually contributed a loss so the average uses the real count.
+    const bool computing_losses = is_training() && targets != nullptr;
+    int64_t num_loss_images = 0;
+    if (computing_losses) {
+        loss_objectness_ = Variable(
+            ops::zeros({1}, features.dtype(), features.device()), true);
+        loss_rpn_box_reg_ = Variable(
+            ops::zeros({1}, features.dtype(), features.device()), true);
+    }
 
     // Process each image in batch
     for (int64_t i = 0; i < batch_size; ++i) {
@@ -386,14 +414,12 @@ auto RegionProposalNetwork::forward_proposals(
                 reg_loss = Variable(zero_tensor, true);
             }
 
-            // Accumulate losses
-            if (i == 0) {
-                loss_objectness_ = cls_loss;
-                loss_rpn_box_reg_ = reg_loss;
-            } else {
-                loss_objectness_ = loss_objectness_ + cls_loss;
-                loss_rpn_box_reg_ = loss_rpn_box_reg_ + reg_loss;
-            }
+            // Accumulate losses unconditionally onto the zero-initialised
+            // accumulators (image index is irrelevant to whether this image
+            // had a target).
+            loss_objectness_ = loss_objectness_ + cls_loss;
+            loss_rpn_box_reg_ = loss_rpn_box_reg_ + reg_loss;
+            ++num_loss_images;
         }
 
         // Generate proposals for this image
@@ -410,12 +436,12 @@ auto RegionProposalNetwork::forward_proposals(
     }
 
 
-    // Average losses over batch
-    if (is_training() && targets != nullptr) {
-
-        loss_objectness_ = loss_objectness_ / static_cast<double>(batch_size);
-
-        loss_rpn_box_reg_ = loss_rpn_box_reg_ / static_cast<double>(batch_size);
+    // Average losses over the number of images that actually had targets
+    // (not the full batch_size, which would scale the loss down when
+    // targets->size() < batch_size).
+    if (computing_losses && num_loss_images > 0) {
+        loss_objectness_ = loss_objectness_ / static_cast<double>(num_loss_images);
+        loss_rpn_box_reg_ = loss_rpn_box_reg_ / static_cast<double>(num_loss_images);
     }
 
 

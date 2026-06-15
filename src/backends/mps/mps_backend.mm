@@ -85,7 +85,7 @@ MPSBackend::~MPSBackend() {
     }
 }
 
-auto MPSBackend::device_count() const -> int {
+auto MPSBackend::device_count() const -> int32_t {
     return 1; // Apple Silicon has one GPU
 }
 
@@ -93,7 +93,7 @@ auto MPSBackend::is_available() const -> bool {
     return impl_->device != nil;
 }
 
-auto MPSBackend::get_device_info(int device_id) const -> DeviceInfo {
+auto MPSBackend::get_device_info([[maybe_unused]] int32_t device_id) const -> DeviceInfo {
     DeviceInfo info;
     @autoreleasepool {
         info.name = [[impl_->device name] UTF8String];
@@ -112,7 +112,7 @@ auto MPSBackend::get_device_info(int device_id) const -> DeviceInfo {
     return info;
 }
 
-auto MPSBackend::allocate(size_t size_bytes, int device_id) -> void* {
+auto MPSBackend::allocate(size_t size_bytes, [[maybe_unused]] int32_t device_id) -> void* {
     @autoreleasepool {
         if (size_bytes == 0) size_bytes = 1; // Metal requires non-zero
         id<MTLBuffer> buffer = [impl_->device
@@ -142,11 +142,12 @@ auto MPSBackend::copy(void* dst, const void* src, size_t bytes, CopyKind kind) -
     std::memcpy(dst, src, bytes);
 }
 
-auto MPSBackend::memset(void* ptr, int value, size_t bytes) -> void {
+auto MPSBackend::memset(void* ptr, int value, size_t bytes,
+                        [[maybe_unused]] int32_t device_id) -> void {
     std::memset(ptr, value, bytes);
 }
 
-auto MPSBackend::synchronize(int device_id) -> void {
+auto MPSBackend::synchronize([[maybe_unused]] int32_t device_id) -> void {
     @autoreleasepool {
         if (impl_->current_command_buffer) {
             [impl_->current_command_buffer commit];
@@ -158,12 +159,28 @@ auto MPSBackend::synchronize(int device_id) -> void {
     }
 }
 
-auto MPSBackend::set_device(int device_id) -> void {
+auto MPSBackend::set_device(int32_t device_id) -> void {
     Impl::current_device_id = device_id;
 }
 
-auto MPSBackend::get_current_device() const -> int {
+auto MPSBackend::get_current_device() const -> int32_t {
     return Impl::current_device_id;
+}
+
+// MPS has a single implicit command queue; there is one logical stream. The
+// stream API is satisfied with a single-stream model: create returns the
+// default (null) handle, destroy is a no-op, and synchronizing a stream flushes
+// the pending command buffer (same as device synchronize).
+auto MPSBackend::create_stream([[maybe_unused]] int32_t device_id) -> StreamHandle {
+    return nullptr;
+}
+
+auto MPSBackend::destroy_stream([[maybe_unused]] StreamHandle stream) -> void {
+    // No-op: the single implicit command queue is owned by the backend.
+}
+
+auto MPSBackend::synchronize_stream([[maybe_unused]] StreamHandle stream) -> void {
+    synchronize(0);
 }
 
 auto MPSBackend::register_kernels(BackendDispatchTable& table) -> void {

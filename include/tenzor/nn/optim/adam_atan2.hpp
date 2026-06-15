@@ -108,13 +108,13 @@ public:
      * @brief Set new learning rate
      * @param lr New learning rate
      */
-    auto set_lr(double lr) -> void;
+    auto set_lr(double lr) -> void override;
 
     /**
      * @brief Get current learning rate
      * @return Current learning rate
      */
-    auto get_lr() const -> double;
+    auto get_lr() const -> double override;
 
     /**
      * @brief Get optimizer state for serialization

@@ -13,6 +13,7 @@
 
 #include <cstddef>
 #include <mutex>
+#include <stdexcept>
 #include <unordered_map>
 #include <vulkan/vulkan.h>
 
@@ -162,30 +163,20 @@ public:
     /**
      * @brief Run defragmentation pass.
      *
-     * VMA can move allocations to reduce fragmentation.
-     * This is a major advantage over the custom caching allocator.
+     * @warning Not implemented. A correct implementation must iterate
+     * `VmaDefragmentationPassMoveInfo::pMoves`, recreate each buffer at its new
+     * allocation, copy the contents via a command buffer, rebind, and update
+     * `alloc_map_` so cached handles stay valid. Applying the VMA moves without
+     * that bookkeeping would leave the handles in `alloc_map_` stale, so
+     * subsequent get_buffer()/free() would use invalid handles. Rather than
+     * silently pretend to defragment (the previous no-op implementation),
+     * this entrypoint throws until real move application is implemented.
      */
-    void defragment(int device = 0) {
-        std::lock_guard<std::mutex> lock(mutex_);
-        auto it = allocators_.find(device);
-        if (it == allocators_.end()) return;
-
-        VmaDefragmentationInfo defrag_info{};
-        defrag_info.flags = VMA_DEFRAGMENTATION_FLAG_ALGORITHM_FAST_BIT;
-
-        VmaDefragmentationContext defrag_ctx = VK_NULL_HANDLE;
-        vmaBeginDefragmentation(it->second, &defrag_info, &defrag_ctx);
-
-        VmaDefragmentationPassMoveInfo pass_info{};
-        VkResult result = vmaBeginDefragmentationPass(it->second, defrag_ctx, &pass_info);
-        if (result == VK_SUCCESS) {
-            // Apply moves (would need to update all buffer references)
-            // For now, just end the pass
-            vmaEndDefragmentationPass(it->second, defrag_ctx, &pass_info);
-        }
-
-        VmaDefragmentationStats stats{};
-        vmaEndDefragmentation(it->second, defrag_ctx, &stats);
+    void defragment(int /*device*/ = 0) {
+        throw std::runtime_error(
+            "VulkanVMAAllocator::defragment: not implemented "
+            "(move application and alloc_map_ rebind are required for "
+            "correctness; the public entrypoint is disabled until then)");
     }
 
     /**

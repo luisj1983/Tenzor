@@ -9,6 +9,7 @@
 
 #include <algorithm>
 #include <cstdlib>
+#include <limits>
 #include <numeric>
 #include <optional>
 #include <stdexcept>
@@ -166,12 +167,23 @@ auto DeviceMesh::process_group_for_dim(const std::string& dim_name) const
     // axes OTHER than `dim_idx` are in the same submesh — encode those
     // other-axis coordinates as a single integer (row-major).
     const auto my_coord = get_coordinate(local_rank_);
-    int color = 0;
+    // Accumulate the row-major encoding of the other-axis coordinates in
+    // int64_t to avoid overflowing `int` when the product of the non-split
+    // mesh dimensions exceeds INT_MAX, then narrow once it is known to fit
+    // the backend's color domain (split() takes an int color/key).
+    int64_t color64 = 0;
     for (int64_t d = 0; d < ndim(); ++d) {
         if (d == dim_idx) continue;
-        color = color * static_cast<int>(mesh_shape_[d]) +
-                static_cast<int>(my_coord[d]);
+        color64 = color64 * mesh_shape_[d] + my_coord[d];
     }
+    if (color64 > std::numeric_limits<int>::max() ||
+        my_coord[dim_idx] > std::numeric_limits<int>::max()) {
+        throw std::overflow_error(
+            "DeviceMesh::process_group_for_dim: sub-PG color/key exceeds the "
+            "int range supported by ProcessGroup::split for axis '" +
+            dim_name + "'");
+    }
+    const int color = static_cast<int>(color64);
     const int key = static_cast<int>(my_coord[dim_idx]);
 
     // ncclCommSplit is collective — every rank in the parent PG must invoke

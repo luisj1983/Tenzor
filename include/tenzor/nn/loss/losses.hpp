@@ -65,7 +65,9 @@ inline auto reduction_to_string(Reduction r) -> std::string {
         case Reduction::Sum: return "sum";
         case Reduction::BatchMean: return "batchmean";
     }
-    return "mean";
+    throw std::invalid_argument(
+        "Unknown reduction mode: " +
+        std::to_string(static_cast<int>(r)));
 }
 
 /**

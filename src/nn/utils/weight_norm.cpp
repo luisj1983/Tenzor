@@ -101,6 +101,18 @@ auto WeightNorm::apply(std::shared_ptr<Module> module,
 
     Tensor weight = orig_param->tensor();
 
+    // Normalize a negative dim (e.g. -1, a valid PyTorch usage) against the
+    // weight's rank, then validate. Without this the reduction-axis builder
+    // (`d != dim`) treats every real axis as a non-`dim` axis and reduces over
+    // ALL dimensions, producing a scalar ‖v‖ and a wrong reparameterization.
+    const int64_t ndim = static_cast<int64_t>(weight.shape().size());
+    if (dim < 0) dim += ndim;
+    if (dim < 0 || dim >= ndim) {
+        throw std::runtime_error("WeightNorm: dim " + std::to_string(dim) +
+            " out of range for weight of rank " + std::to_string(ndim));
+    }
+    wn->dim_ = dim;
+
     // Initialise g = ||w|| (keepdim, non-`dim` axes) and v = w.
     // Mirror the BF16 widen-narrow trick used in compute_weight_variable
     // so this also works for backends that lack a BF16 sqrt.

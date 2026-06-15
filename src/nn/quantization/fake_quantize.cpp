@@ -533,6 +533,15 @@ auto fold_bn(Module& model) -> void {
             fb_data[c] = s_data[c] * (b_old - mean_data[c]) + beta_data[c];
         }
 
+        // Folding BN always produces a bias term. If the source conv was built
+        // with bias=false it has no "bias" parameter registered, so a strict
+        // load_state_dict would reject "bias" as an unexpected key. Register the
+        // bias parameter first so the folded conv can carry it.
+        if (conv_state.find("bias") == conv_state.end()) {
+            conv->register_parameter_shared(
+                "bias", std::make_shared<Variable>(folded_bias, /*requires_grad=*/true));
+        }
+
         // Update conv with folded parameters via state_dict
         std::unordered_map<std::string, Tensor> new_state;
         new_state["weight"] = fw_cpu;
@@ -543,37 +552,32 @@ auto fold_bn(Module& model) -> void {
         skip[i + 1] = true;
     }
 
-    // Rebuild the Sequential without the folded BN modules
+    // Reset the folded BN modules to a true identity transform.
     bool any_folded = false;
     for (bool s : skip) { if (s) { any_folded = true; break; } }
     if (!any_folded) return;
 
-    // Build a new Sequential and swap it
-    auto new_seq = std::make_shared<Sequential>();
-    for (size_t i = 0; i < modules.size(); ++i) {
-        if (!skip[i]) {
-            new_seq->add_module(modules[i]);
-        }
-    }
-
-    // Load the new sequential's state into the original model.
-    // Since we can't swap the internal modules_ vector directly (it's private),
-    // we copy the rebuilt state dict back. The Conv2d weights are already updated
-    // in-place above, so the folding is effective even without removing BN modules.
-    // The BN modules remain but are functionally dead (their params no longer affect output
-    // because conv already has folded weights). In eval mode the BN just applies
-    // scale=1, bias=0 effectively being identity if we update its state:
+    // We can't swap the internal modules_ vector directly (it's private), and the
+    // Conv2d weights are already updated in-place above, so the folding is effective
+    // even without removing the BN modules. The BN modules remain but must become a
+    // genuine identity in eval mode. Eval BN computes y = (x - mean) / sqrt(var + eps),
+    // so to get y == x we need mean=0, weight=1, bias=0, and sqrt(var + eps) == 1,
+    // i.e. running_var = 1 - eps (NOT 1, which would scale by 1/sqrt(1 + eps)).
     for (size_t i = 0; i < modules.size(); ++i) {
         if (skip[i]) {
             auto* bn = dynamic_cast<BatchNorm2d*>(modules[i].get());
             if (bn) {
                 auto bn_sd = bn->state_dict();
                 int64_t num_features = bn_sd.at("weight").shape()[0];
+                double eps = bn->eps();
                 std::unordered_map<std::string, Tensor> identity_state;
                 identity_state["weight"] = ones({num_features}, DType::Float32, Device::cpu());
                 identity_state["bias"] = zeros({num_features}, DType::Float32, Device::cpu());
                 identity_state["running_mean"] = zeros({num_features}, DType::Float32, Device::cpu());
-                identity_state["running_var"] = ones({num_features}, DType::Float32, Device::cpu());
+                // running_var = 1 - eps so that sqrt(running_var + eps) == 1 exactly.
+                identity_state["running_var"] = full(
+                    {num_features}, static_cast<float>(1.0 - eps),
+                    DType::Float32, Device::cpu());
                 bn->load_state_dict(identity_state);
             }
         }

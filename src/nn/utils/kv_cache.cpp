@@ -67,18 +67,52 @@ auto KVCache::update(int64_t layer, const Tensor& new_k, const Tensor& new_v, in
             std::to_string(config_.max_seq_len) + ")");
     }
 
-    // Copy new key/value data into the cache at [pos, pos + new_seq_len) along dim 2.
-    // slice_scatter returns a new tensor with src placed at the target slice — works
-    // uniformly for CPU and GPU without touching raw device pointers.
+    // Write new key/value data into the cache at [pos, pos + new_seq_len) along
+    // dim 2. The previous implementation used slice_scatter, which forces a
+    // contiguous copy and returns a brand-new full-size tensor reassigned back
+    // into k_caches_/v_caches_ — O(max_seq_len) per token, O(max_seq_len^2)
+    // over a generation, defeating the whole point of pre-allocating the cache.
+    //
+    // The cache is pre-allocated contiguous [B, H, max_seq_len, D]. For each
+    // (b, h) the destination block [pos, pos+new_seq_len) x D is contiguous, as
+    // is the matching source block in new_k/new_v [B, H, new_seq_len, D], so the
+    // whole update is a set of plain memcpys into the existing buffer (CPU) with
+    // no allocation. Non-CPU or non-contiguous caches fall back to slice_scatter.
     Tensor new_k_contig = new_k.is_contiguous() ? new_k : new_k.contiguous();
     Tensor new_v_contig = new_v.is_contiguous() ? new_v : new_v.contiguous();
 
-    k_caches_[layer] = tenzor::slice_scatter(
-        k_caches_[layer], new_k_contig, /*dim=*/2, /*start=*/pos,
-        /*end=*/pos + new_seq_len, /*step=*/1);
-    v_caches_[layer] = tenzor::slice_scatter(
-        v_caches_[layer], new_v_contig, /*dim=*/2, /*start=*/pos,
-        /*end=*/pos + new_seq_len, /*step=*/1);
+    const bool can_inplace =
+        config_.device.type == Device::Type::CPU &&
+        k_caches_[layer].is_contiguous() && v_caches_[layer].is_contiguous();
+
+    if (can_inplace) {
+        const int64_t B = config_.batch_size;
+        const int64_t H = config_.num_kv_heads;
+        const int64_t S = config_.max_seq_len;
+        const int64_t D = config_.head_dim;
+        const size_t elem = dtype_size(config_.dtype);
+        const int64_t rows = B * H;                  // (b,h) blocks
+        const size_t block = static_cast<size_t>(new_seq_len) * D * elem;
+
+        auto write_inplace = [&](Tensor& dst, const Tensor& src) {
+            char* dst_base = static_cast<char*>(dst.data_ptr());
+            const char* src_base = static_cast<const char*>(src.data_ptr());
+            for (int64_t r = 0; r < rows; ++r) {
+                size_t dst_off = (static_cast<size_t>(r) * S + pos) * D * elem;
+                size_t src_off = static_cast<size_t>(r) * new_seq_len * D * elem;
+                std::memcpy(dst_base + dst_off, src_base + src_off, block);
+            }
+        };
+        write_inplace(k_caches_[layer], new_k_contig);
+        write_inplace(v_caches_[layer], new_v_contig);
+    } else {
+        k_caches_[layer] = tenzor::slice_scatter(
+            k_caches_[layer], new_k_contig, /*dim=*/2, /*start=*/pos,
+            /*end=*/pos + new_seq_len, /*step=*/1);
+        v_caches_[layer] = tenzor::slice_scatter(
+            v_caches_[layer], new_v_contig, /*dim=*/2, /*start=*/pos,
+            /*end=*/pos + new_seq_len, /*step=*/1);
+    }
 
     // Return sliced views covering [0, pos + new_seq_len)
     int64_t total_len = pos + new_seq_len;

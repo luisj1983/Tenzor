@@ -1,0 +1,63 @@
+#version 450
+
+// ScatterReduce (Int32): scatter integer source values into output along a
+// dimension with reduction. Integer atomics are core Vulkan, so no CAS loop is
+// needed for sum/min/max; prod uses a bounded CAS loop. Narrow integers widen
+// losslessly to Int32 on the host; Int64 narrows to Int32. Previously every
+// integer dtype was routed through the Float32 shader, which rounded values
+// above 2^24 and reinterpreted integer bits as floats.
+// Modes: 0=sum, 1=prod, 2=mean(sum pass), 3=amax, 4=amin
+layout(local_size_x_id = 0) in;
+
+layout(binding = 0) buffer Output { int out_data[]; };       // Output (int atomics)
+layout(binding = 1) buffer Source { int src_data[]; };        // Source values
+layout(binding = 2) buffer Index  { int idx_data[]; };        // 1-D index tensor (int32)
+layout(binding = 3) buffer Counts { int count_data[]; };      // Count buffer (for mean mode)
+
+layout(push_constant) uniform PushConstants {
+    uint outer;         // Product of dims before target dim
+    uint dim_size;      // Size of target dim in output
+    uint idx_n;         // Number of indices
+    uint inner;         // Product of dims after target dim
+    uint mode;          // 0=sum, 1=prod, 2=mean, 3=amax, 4=amin
+} params;
+
+void atomicMulInt(uint pos, int val) {
+    int old_val = out_data[pos];
+    for (int attempt = 0; attempt < 65536; ++attempt) {
+        int new_val = old_val * val;
+        int result = atomicCompSwap(out_data[pos], old_val, new_val);
+        if (result == old_val) return;
+        old_val = result;
+    }
+}
+
+void main() {
+    uint tid = gl_GlobalInvocationID.x;
+    uint total = params.outer * params.idx_n * params.inner;
+    if (tid >= total) return;
+
+    uint j = tid % params.inner;
+    uint k = (tid / params.inner) % params.idx_n;
+    uint o = tid / (params.inner * params.idx_n);
+
+    uint idx_pos = (o * params.idx_n + k) * params.inner + j;
+    int dest_idx = idx_data[idx_pos];
+    if (dest_idx < 0 || dest_idx >= int(params.dim_size)) return;
+
+    uint out_pos = (o * params.dim_size + uint(dest_idx)) * params.inner + j;
+    int val = src_data[idx_pos];
+
+    if (params.mode == 0u || params.mode == 2u) {
+        atomicAdd(out_data[out_pos], val);
+        if (params.mode == 2u) {
+            atomicAdd(count_data[out_pos], 1);
+        }
+    } else if (params.mode == 1u) {
+        atomicMulInt(out_pos, val);
+    } else if (params.mode == 3u) {
+        atomicMax(out_data[out_pos], val);
+    } else if (params.mode == 4u) {
+        atomicMin(out_data[out_pos], val);
+    }
+}

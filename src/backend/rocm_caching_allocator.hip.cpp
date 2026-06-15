@@ -86,6 +86,7 @@ void* RocmCachingAllocator::allocate(size_t size, int device, hipStream_t stream
 
     // Try to find a suitable block in cache
     Block* block = try_allocate_from_cache(size, device, stream);
+    bool from_cache = (block != nullptr);
 
     if (!block) {
         // No suitable cached block, allocate new one
@@ -144,7 +145,7 @@ void* RocmCachingAllocator::allocate(size_t size, int device, hipStream_t stream
 
     log_message("Allocated " + std::to_string(size) + " bytes on device " +
                 std::to_string(device) + " (cache hit: " +
-                std::to_string(block != nullptr && device_alloc.stats.num_cache_hits > 0) + ")");
+                std::to_string(from_cache) + ")");
 
     return block->ptr;
 }
@@ -535,6 +536,7 @@ bool RocmCachingAllocator::split_block(Block* block, size_t size) {
     auto new_block = std::make_unique<Block>(new_ptr, remaining_size,
                                              block->device, block->stream, block->alignment);
     new_block->allocated = false;
+    new_block->original_ptr = block->original_ptr;  // Inherit from parent for merge tracking
     Block* new_block_ptr = new_block.get();
 
     // Add to all_blocks
@@ -564,11 +566,19 @@ bool RocmCachingAllocator::try_merge_blocks(Block* block) {
 
     if (next_it != device_alloc.all_blocks.end()) {
         Block* next_block = next_it->second.get();
-        if (!next_block->allocated) {
+        // Only merge blocks from the same original hipMalloc allocation. Two
+        // address-adjacent blocks from distinct hipMalloc calls must never be
+        // fused: release_block() would only hipFree the first underlying
+        // allocation (leaking the second), and the merged Block would span two
+        // allocations and could be handed out for OOB access past the first.
+        if (!next_block->allocated && next_block->original_ptr == block->original_ptr) {
             // Merge with next block
             device_alloc.free_blocks.erase(next_block);
 
-            // Update statistics
+            // When merging, next_block's size is already counted in cached_bytes
+            // (added by free()). Only subtract it here; do NOT re-add the grown
+            // block->size, or this block's pre-merge bytes get double-counted.
+            // Mirrors the CUDA reference allocator (caching_allocator.cpp:449).
             device_alloc.stats.cached_bytes -= next_block->size;
 
             // Expand current block
@@ -578,7 +588,6 @@ bool RocmCachingAllocator::try_merge_blocks(Block* block) {
             device_alloc.all_blocks.erase(next_it);
 
             device_alloc.stats.num_merges++;
-            device_alloc.stats.cached_bytes += block->size;
             merged = true;
         }
     }

@@ -133,7 +133,12 @@ auto numerical_gradient(
         // Extract scalar values (function should return scalar or we sum it)
         double val_plus, val_minus;
 
-        if (f_plus.tensor().numel() == 1) {
+        // Gate the scalar fast-path on a non-complex dtype: extract_scalar only
+        // handles real dtypes and throws on Complex64/Complex128. A single-
+        // element complex output must take the summation branch below, which
+        // reduces complex values as Re(z)+Im(z) (matching the (1+1i) backward
+        // seed used by the analytical path).
+        if (f_plus.tensor().numel() == 1 && !f_plus.tensor().is_complex()) {
             val_plus = extract_scalar(f_plus.tensor());
             val_minus = extract_scalar(f_minus.tensor());
         } else {

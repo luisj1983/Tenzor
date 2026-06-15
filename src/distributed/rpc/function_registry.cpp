@@ -19,10 +19,15 @@ auto FunctionRegistry::register_function(const std::string& name, RpcFunction fn
     functions_[name] = std::move(fn);
 }
 
-auto FunctionRegistry::get_function(const std::string& name) const -> const RpcFunction* {
+auto FunctionRegistry::get_function(const std::string& name) const -> std::optional<RpcFunction> {
     std::lock_guard<std::mutex> lock(mutex_);
     auto it = functions_.find(name);
-    return it != functions_.end() ? &it->second : nullptr;
+    if (it == functions_.end()) {
+        return std::nullopt;
+    }
+    // Return a copy held under the lock; the caller owns the callable across
+    // the invocation even if a concurrent registration mutates the map.
+    return it->second;
 }
 
 auto FunctionRegistry::has_function(const std::string& name) const -> bool {

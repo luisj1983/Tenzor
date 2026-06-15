@@ -1040,7 +1040,7 @@ namespace nn::quantization::kernels {
         float* output, int64_t batch, int64_t in_channels, int64_t out_channels,
         int64_t h_in, int64_t w_in, int64_t h_out, int64_t w_out,
         int64_t kh_size, int64_t kw_size, int64_t sH, int64_t sW,
-        int64_t pH, int64_t pW, int64_t dH, int64_t dW,
+        int64_t pH, int64_t pW, int64_t dH, int64_t dW, int64_t groups,
         float input_scale, float weight_scale,
         int32_t input_zp, int32_t weight_zp, cudaStream_t stream
     ) -> void;
@@ -4646,7 +4646,6 @@ void register_cuda_kernels(BackendDispatchTable& table) {
         int64_t pH = padding_arr[0], pW = padding_arr[1];
         int64_t dH = dilation_arr[0], dW = dilation_arr[1];
         int64_t groups = attrs.get_int(AttrKey::Groups, 1);
-        (void)groups;  // grouping not modeled by this kernel (pre-existing)
 
         float input_scale = static_cast<float>(attrs.get_float(AttrKey::InputScale, 1.0));
         float weight_scale = static_cast<float>(attrs.get_float(AttrKey::WeightScaleQ, 1.0));
@@ -4671,7 +4670,7 @@ void register_cuda_kernels(BackendDispatchTable& table) {
             input_data, weight_data, bias_data, output_data,
             batch, in_channels, out_channels,
             h_in, w_in, h_out, w_out,
-            kh_size, kw_size, sH, sW, pH, pW, dH, dW,
+            kh_size, kw_size, sH, sW, pH, pW, dH, dW, groups,
             input_scale, weight_scale,
             input_zp, weight_zp, stream
         );

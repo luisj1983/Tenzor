@@ -2646,9 +2646,19 @@ public:
  */
 class EigBackward : public Function {
 public:
+    // audit — output_slot identifies which of {W_real=0, W_imag=1, V=2} this
+    // backward instance accumulates a gradient for. The engine collapses all
+    // per-output gradients of a multi-output Function into a single
+    // accumulator entry keyed by func->id(); sharing one instance across the
+    // three eig outputs sums their (differently shaped) grads into one slot,
+    // throwing or corrupting the gradient. One instance per output keeps the
+    // accumulator slots distinct (mirrors SvdBackward / LUBackward).
+    explicit EigBackward(int output_slot = -1) : output_slot_(output_slot) {}
     auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
     auto name() const -> std::string override { return "EigBackward"; }
+private:
+    int output_slot_;  // 0=W_real, 1=W_imag, 2=V; -1 = legacy combined
 };
 
 /**
@@ -2762,11 +2772,21 @@ private:
  */
 class QrBackward : public Function {
 public:
+    // audit — output_slot identifies which of {Q=0, R=1} this backward
+    // instance accumulates a gradient for. The engine collapses all
+    // per-output gradients of a multi-output Function into a single
+    // accumulator entry keyed by func->id(); sharing one instance across
+    // Q and R sums grad_Q and grad_R (different shapes) into one slot,
+    // throwing or corrupting the gradient. One instance per output (mirroring
+    // SvdBackward / LUBackward) keeps the accumulator slots distinct.
+    explicit QrBackward(int output_slot = -1) : output_slot_(output_slot) {}
     auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
     auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
     auto supports_higher_order() const -> bool override { return true; }
     auto name() const -> std::string override { return "QrBackward"; }
+private:
+    int output_slot_;  // 0=Q, 1=R; -1 = legacy combined (kept for compat)
 };
 
 /**
@@ -2781,6 +2801,12 @@ public:
  */
 class EighBackward : public Function {
 public:
+    // audit — output_slot identifies which of {W=0, V=1} this backward
+    // instance accumulates a gradient for. Sharing one instance across W and
+    // V collapses grad_W (..., N) and grad_V (..., N, N) into one engine
+    // accumulator slot; one instance per output keeps them distinct (mirrors
+    // SvdBackward / LUBackward).
+    explicit EighBackward(int output_slot = -1) : output_slot_(output_slot) {}
     auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
     auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override;
@@ -2800,7 +2826,9 @@ public:
         // saved[0] = W → output 0; saved[1] = V → output 1.
         return saved_idx < 2 ? saved_idx : 0;
     }
-};;;
+private:
+    int output_slot_;  // 0=W, 1=V; -1 = legacy combined (kept for compat)
+};
 
 /**
  * @brief Eigenvalues-only gradient function for symmetric matrices.
@@ -4650,6 +4678,10 @@ public:
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
     auto name() const -> std::string override { return "IgammaBackward"; }
     auto op_id() const -> OpId override { return OpId::Igamma; }
+    // Original (pre-broadcast) input shapes so grad can be reduced back when
+    // a/x were broadcast against each other in the forward.
+    std::vector<int64_t> input_shape_a_;
+    std::vector<int64_t> input_shape_x_;
 };
 
 /**
@@ -4666,6 +4698,10 @@ public:
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
     auto name() const -> std::string override { return "IgammacBackward"; }
     auto op_id() const -> OpId override { return OpId::Igammac; }
+    // Original (pre-broadcast) input shapes so grad can be reduced back when
+    // a/x were broadcast against each other in the forward.
+    std::vector<int64_t> input_shape_a_;
+    std::vector<int64_t> input_shape_x_;
 };
 
 /**

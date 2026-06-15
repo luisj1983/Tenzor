@@ -4752,6 +4752,21 @@ auto ZeROStage3Optimizer::gather_full_state() -> std::unordered_map<std::string,
     auto pg = config_.process_group;
     if (pg && pg->world_size() > 1) {
         for (auto& [name, local_tensor] : local) {
+            // Scalar metadata tensors (rank, world_size, step_count,
+            // stage3_stage, stage3_num_params, per-param partition_offset/size,
+            // and the scalar hyperparameters) are shape-{1} per-rank values, NOT
+            // shardable state. all_gather+cat would turn them into shape
+            // {world_size}, and load_full_state would then slice each rank back
+            // to some *other* rank's scalar (corrupting the rank/world_size
+            // checks) or throw on non-divisible dim0. Pass them through as the
+            // local value instead of gathering.
+            const auto shp = local_tensor.shape();
+            const bool is_scalar_metadata =
+                shp.empty() || (local_tensor.numel() <= 1);
+            if (is_scalar_metadata) {
+                full_state.emplace(name, local_tensor);
+                continue;
+            }
             std::vector<Tensor> gathered(pg->world_size());
             pg->all_gather(local_tensor, gathered);
             // Concat along dim 0 to form the full parameter state.
@@ -4787,13 +4802,20 @@ auto ZeROStage3Optimizer::load_full_state(const std::unordered_map<std::string, 
     std::unordered_map<std::string, Tensor> local;
     local.reserve(full_state.size());
     for (const auto& [name, full] : full_state) {
-        const int64_t full_dim0 = full.shape().empty() ? 0 : full.shape()[0];
-        if (full_dim0 % world_size != 0) {
-            throw std::runtime_error(
-                "ZeROStage3Optimizer::load_full_state: full state '" + name +
-                "' dim0=" + std::to_string(full_dim0) + " is not divisible by "
-                "world_size=" + std::to_string(world_size) +
-                " (gather_full_state concatenates equal-sized shards along dim 0).");
+        // Scalar metadata tensors are stored un-gathered by gather_full_state
+        // (they are per-rank shape-{1} values); pass them straight through so
+        // load_state_dict sees the correct rank/world_size/step_count/etc.
+        if (full.shape().empty() || full.numel() <= 1) {
+            local.emplace(name, full);
+            continue;
+        }
+        const int64_t full_dim0 = full.shape()[0];
+        if (world_size == 0 || full_dim0 % world_size != 0) {
+            // Not an equal-shard tensor (e.g. a checkpoint produced at a
+            // different world size, or a non-shardable tensor that slipped
+            // through). Don't corrupt it by slicing — load it whole.
+            local.emplace(name, full);
+            continue;
         }
         const int64_t shard_len = full_dim0 / world_size;
         // Tensor::slice(dim, start, end) — end-exclusive, mirroring the
@@ -5119,19 +5141,25 @@ auto ZeROStage3Optimizer::update_prefetch_depth() -> void {
 
     std::lock_guard<std::mutex> lock(adaptive_mutex_);
 
-    // Calculate optimal prefetch depth based on current metrics
-    int optimal_depth = calculate_optimal_prefetch_depth();
+    // Calculate optimal prefetch depth based on current metrics (lock already
+    // held; use the lock-free core to avoid re-locking adaptive_mutex_).
+    int optimal_depth = calculate_optimal_prefetch_depth_locked();
 
     // Update if different from current
     if (optimal_depth != adaptive_metrics_.current_prefetch_depth) {
+        // Capture the previous depth BEFORE mutation. Comparing optimal_depth
+        // against stage3_config_.prefetch_depth after assigning it would always
+        // be false, so the improvement/degradation hysteresis never updated.
+        const int previous_depth = adaptive_metrics_.current_prefetch_depth;
+
         adaptive_metrics_.current_prefetch_depth = optimal_depth;
         stage3_config_.prefetch_depth = optimal_depth;
 
-        // Track improvement/degradation
-        if (optimal_depth > stage3_config_.prefetch_depth) {
+        // Track improvement/degradation relative to the previous depth.
+        if (optimal_depth > previous_depth) {
             adaptive_metrics_.consecutive_improvements++;
             adaptive_metrics_.consecutive_degradations = 0;
-        } else if (optimal_depth < stage3_config_.prefetch_depth) {
+        } else if (optimal_depth < previous_depth) {
             adaptive_metrics_.consecutive_degradations++;
             adaptive_metrics_.consecutive_improvements = 0;
         }
@@ -5140,6 +5168,11 @@ auto ZeROStage3Optimizer::update_prefetch_depth() -> void {
 
 auto ZeROStage3Optimizer::calculate_optimal_prefetch_depth() -> int {
     std::lock_guard<std::mutex> lock(adaptive_mutex_);
+    return calculate_optimal_prefetch_depth_locked();
+}
+
+auto ZeROStage3Optimizer::calculate_optimal_prefetch_depth_locked() -> int {
+    // Caller must hold adaptive_mutex_.
 
     // If insufficient data, return current depth
     if (adaptive_metrics_.recent_gather_times_ms.size() < 3) {
@@ -5188,8 +5221,8 @@ auto ZeROStage3Optimizer::calculate_optimal_prefetch_depth() -> int {
         new_depth = std::max(current_depth - 1, stage3_config_.min_prefetch_depth);
     }
 
-    // Check memory pressure - if high, reduce prefetch depth
-    double memory_pressure = check_memory_pressure();
+    // Check memory pressure - if high, reduce prefetch depth (lock already held).
+    double memory_pressure = check_memory_pressure_locked();
     if (memory_pressure > 0.9 && new_depth > stage3_config_.min_prefetch_depth) {
         new_depth = std::max(stage3_config_.min_prefetch_depth, new_depth - 1);
     }
@@ -5204,8 +5237,8 @@ auto ZeROStage3Optimizer::adjust_bucket_size() -> void {
 
     std::lock_guard<std::mutex> lock(adaptive_mutex_);
 
-    // Calculate optimal bucket size
-    size_t optimal_size = calculate_optimal_bucket_size();
+    // Calculate optimal bucket size (lock already held; use the lock-free core).
+    size_t optimal_size = calculate_optimal_bucket_size_locked();
 
     // Update if significantly different from current
     size_t current = adaptive_metrics_.current_bucket_size;
@@ -5220,6 +5253,11 @@ auto ZeROStage3Optimizer::adjust_bucket_size() -> void {
 
 auto ZeROStage3Optimizer::calculate_optimal_bucket_size() -> size_t {
     std::lock_guard<std::mutex> lock(adaptive_mutex_);
+    return calculate_optimal_bucket_size_locked();
+}
+
+auto ZeROStage3Optimizer::calculate_optimal_bucket_size_locked() -> size_t {
+    // Caller must hold adaptive_mutex_.
 
     // If insufficient data, return current size
     if (adaptive_metrics_.recent_comm_efficiency.empty()) {
@@ -5253,8 +5291,8 @@ auto ZeROStage3Optimizer::calculate_optimal_bucket_size() -> size_t {
         new_size = std::max(new_size, stage3_config_.min_bucket_size);
     }
 
-    // Consider memory pressure
-    double memory_pressure = check_memory_pressure();
+    // Consider memory pressure (lock already held).
+    double memory_pressure = check_memory_pressure_locked();
     if (memory_pressure > 0.85) {
         // High memory pressure - reduce bucket size
         new_size = std::max(stage3_config_.min_bucket_size,
@@ -5266,6 +5304,11 @@ auto ZeROStage3Optimizer::calculate_optimal_bucket_size() -> size_t {
 
 auto ZeROStage3Optimizer::check_memory_pressure() -> double {
     std::lock_guard<std::mutex> lock(adaptive_mutex_);
+    return check_memory_pressure_locked();
+}
+
+auto ZeROStage3Optimizer::check_memory_pressure_locked() -> double {
+    // Caller must hold adaptive_mutex_.
 
     auto now = std::chrono::steady_clock::now();
     auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -5340,36 +5383,47 @@ auto ZeROStage3Optimizer::should_offload_parameter(Tensor* param) -> bool {
         return false;  // Adaptive offload disabled
     }
 
+    // Snapshot the parameter state under its own mutex. param_states_ is
+    // mutated by gather_parameter on the async worker thread and is guarded
+    // everywhere else by param_states_mutex_; reading it under adaptive_mutex_
+    // only was a data race that could rehash the map concurrently. Take the two
+    // locks separately (never nested) so no lock-ordering deadlock is possible.
+    bool pinned_in_memory = false;
+    int ref_count = 0;
+    size_t size_bytes = 0;
+    {
+        std::lock_guard<std::mutex> ps_lock(param_states_mutex_);
+        auto it = param_states_.find(param);
+        if (it == param_states_.end()) {
+            return false;  // Parameter not registered
+        }
+        pinned_in_memory = it->second.pinned_in_memory;
+        ref_count = it->second.ref_count;
+        size_bytes = it->second.size_bytes;
+    }
+
     std::lock_guard<std::mutex> lock(adaptive_mutex_);
 
-    // Check memory pressure
-    double pressure = check_memory_pressure();
+    // Check memory pressure (lock already held).
+    double pressure = check_memory_pressure_locked();
 
     // If memory pressure is below threshold, don't offload
     if (pressure < stage3_config_.memory_pressure_threshold) {
         return false;
     }
 
-    // Find parameter state
-    auto it = param_states_.find(param);
-    if (it == param_states_.end()) {
-        return false;  // Parameter not registered
-    }
-
-    const auto& state = it->second;
-
     // Don't offload pinned parameters
-    if (state.pinned_in_memory) {
+    if (pinned_in_memory) {
         return false;
     }
 
     // Don't offload if parameter is currently in use
-    if (state.ref_count > 0) {
+    if (ref_count > 0) {
         return false;
     }
 
     // Don't offload if parameter is small (overhead not worth it)
-    if (state.size_bytes < config_.cpu_offload_threshold) {
+    if (size_bytes < config_.cpu_offload_threshold) {
         return false;
     }
 

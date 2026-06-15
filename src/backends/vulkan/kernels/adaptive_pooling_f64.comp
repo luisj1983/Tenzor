@@ -31,12 +31,20 @@ int end_index(int a, int b, int c) {
 void main() {
     uint out_x = gl_GlobalInvocationID.x;
     uint out_y = gl_GlobalInvocationID.y;
-    uint c = gl_GlobalInvocationID.z;
+    // z packs (batch, channel): z = b * channels + c. Split it back out so
+    // the batch dimension is honoured (host dispatches z = batch*channels).
+    uint bc = gl_GlobalInvocationID.z;
+    uint b = bc / params.channels;
+    uint c = bc % params.channels;
 
     if (out_x >= params.out_width || out_y >= params.out_height ||
-        c >= params.channels) {
+        b >= params.batch) {
         return;
     }
+
+    // Per-batch base offsets (NCHW contiguous)
+    uint in_batch_base = b * params.channels * params.in_height * params.in_width;
+    uint out_batch_base = b * params.channels * params.out_height * params.out_width;
 
     // Compute input window for this output position
     int in_start_y = start_index(int(out_y), int(params.out_height), int(params.in_height));
@@ -59,7 +67,8 @@ void main() {
 
     for (int iy = in_start_y; iy < in_end_y; iy++) {
         for (int ix = in_start_x; ix < in_end_x; ix++) {
-            uint input_idx = c * params.in_height * params.in_width +
+            uint input_idx = in_batch_base +
+                            c * params.in_height * params.in_width +
                             uint(iy) * params.in_width + uint(ix);
             double value = input_data[input_idx];
 
@@ -82,7 +91,8 @@ void main() {
     }
 
     // Write output
-    uint output_idx = c * params.out_height * params.out_width +
+    uint output_idx = out_batch_base +
+                     c * params.out_height * params.out_width +
                      out_y * params.out_width + out_x;
     output_data[output_idx] = result;
 

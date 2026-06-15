@@ -120,20 +120,12 @@ private:
     int64_t shift_size_;
     double mlp_ratio_;
 
-    // Attention mask for shifted window (cached)
-    Tensor attn_mask_;
-
     // Layers
     std::shared_ptr<nn::LayerNorm> norm1_;
     std::shared_ptr<nn::WindowAttention> attn_;
     std::shared_ptr<nn::LayerNorm> norm2_;
     std::shared_ptr<SwinMLP> mlp_;
     std::shared_ptr<nn::DropPath> drop_path_;
-
-    /**
-     * @brief Compute and cache attention mask for shifted windows.
-     */
-    auto compute_attention_mask() -> void;
 };
 
 /**

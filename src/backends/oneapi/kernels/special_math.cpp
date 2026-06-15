@@ -338,6 +338,12 @@ inline float zeta_dev_f32(float s, float a) {
     float aN = a + 12.0f;
     if (s != 1.0f) result += sycl::pow(aN, 1.0f - s) / (s - 1.0f);
     result += 0.5f * sycl::pow(aN, -s);
+    // Leading Euler-Maclaurin Bernoulli corrections, matching the CPU
+    // hurwitz_zeta reference (B2/2!=1/12, B4/4!=-1/720, B6/6!=1/30240).
+    result += (s) * sycl::pow(aN, -s - 1.0f) / 12.0f;
+    result -= (s * (s + 1.0f) * (s + 2.0f)) * sycl::pow(aN, -s - 3.0f) / 720.0f;
+    result += (s * (s + 1.0f) * (s + 2.0f) * (s + 3.0f) * (s + 4.0f))
+              * sycl::pow(aN, -s - 5.0f) / 30240.0f;
     return result;
 }
 inline double zeta_dev_f64(double s, double a) {
@@ -348,6 +354,12 @@ inline double zeta_dev_f64(double s, double a) {
     double aN = a + 12.0;
     if (s != 1.0) result += sycl::pow(aN, 1.0 - s) / (s - 1.0);
     result += 0.5 * sycl::pow(aN, -s);
+    // Leading Euler-Maclaurin Bernoulli corrections, matching the CPU
+    // hurwitz_zeta reference (B2/2!=1/12, B4/4!=-1/720, B6/6!=1/30240).
+    result += (s) * sycl::pow(aN, -s - 1.0) / 12.0;
+    result -= (s * (s + 1.0) * (s + 2.0)) * sycl::pow(aN, -s - 3.0) / 720.0;
+    result += (s * (s + 1.0) * (s + 2.0) * (s + 3.0) * (s + 4.0))
+              * sycl::pow(aN, -s - 5.0) / 30240.0;
     return result;
 }
 

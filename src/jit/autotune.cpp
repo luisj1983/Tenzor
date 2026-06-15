@@ -153,7 +153,8 @@ auto AutotuneCache::load(const std::string& path) -> void {
     // { "key": {"algorithm_id": N, "time_ms": F}, ... }
     size_t pos = 0;
     auto skip_ws = [&]() {
-        while (pos < content.size() && std::isspace(content[pos])) ++pos;
+        while (pos < content.size() &&
+               std::isspace(static_cast<unsigned char>(content[pos]))) ++pos;
     };
 
     auto expect_char = [&](char c) -> bool {
@@ -187,7 +188,8 @@ auto AutotuneCache::load(const std::string& path) -> void {
         skip_ws();
         size_t start = pos;
         while (pos < content.size() &&
-               (std::isdigit(content[pos]) || content[pos] == '.' ||
+               (std::isdigit(static_cast<unsigned char>(content[pos])) ||
+                content[pos] == '.' ||
                 content[pos] == '-' || content[pos] == 'e' || content[pos] == 'E' ||
                 content[pos] == '+')) {
             ++pos;

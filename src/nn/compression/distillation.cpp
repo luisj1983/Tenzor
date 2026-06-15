@@ -9,6 +9,7 @@
 #include "tenzor/ops/math.hpp"
 #include "tenzor/ops/reduction.hpp"
 #include "tenzor/autograd/ops.hpp"
+#include <algorithm>
 #include <cmath>
 #include <stdexcept>
 
@@ -142,10 +143,27 @@ auto distillation_loss(
         // CrossEntropyLoss expects one-hot encoded targets, so convert class indices to one-hot
         Tensor targets_onehot;
         if (targets.value().dtype() == DType::Int64) {
-            // Convert class indices to one-hot encoding
+            // Convert class indices to one-hot encoding.
+            //
+            // This path only supports the classic classification layout:
+            // rank-1 class-index targets (batch,) and rank-2 logits
+            // (batch, num_classes). Dense/segmentation distillation (targets
+            // (N,H,W), logits (N,C,H,W)) would read num_classes from the wrong
+            // dimension and produce a wrong-shaped one-hot, so reject it
+            // explicitly rather than silently mis-encoding.
             auto target_shape = targets.value().shape();
-            int64_t batch_size = target_shape[0];
             auto logits_shape = student_logits_cast.tensor().shape();
+            if (target_shape.size() != 1 || logits_shape.size() != 2) {
+                throw std::invalid_argument(
+                    "distillation_loss: hard-target one-hot conversion requires "
+                    "rank-1 Int64 class-index targets (batch,) and rank-2 logits "
+                    "(batch, num_classes); got targets rank " +
+                    std::to_string(target_shape.size()) + " and logits rank " +
+                    std::to_string(logits_shape.size()) +
+                    ". For dense/segmentation distillation provide float one-hot "
+                    "targets instead.");
+            }
+            int64_t batch_size = target_shape[0];
             int64_t num_classes = logits_shape[1];
 
             // Move targets to CPU for indexing, create one-hot on CPU, then transfer
@@ -164,6 +182,12 @@ auto distillation_loss(
             auto* indices = targets_cpu.data<int64_t>();
             for (int64_t i = 0; i < batch_size; ++i) {
                 int64_t class_idx = indices[i];
+                if (class_idx < 0 || class_idx >= num_classes) {
+                    throw std::out_of_range(
+                        "distillation_loss: class index " +
+                        std::to_string(class_idx) + " out of range [0, " +
+                        std::to_string(num_classes) + ")");
+                }
                 onehot_data[i * num_classes + class_idx] = 1.0f;
             }
 
@@ -355,6 +379,15 @@ auto multi_teacher_distillation(
     std::vector<float> weights;
     if (teacher_weights.has_value()) {
         weights = teacher_weights.value();
+        // The loop below indexes weights[0..teacher_logits_list.size()-1]; a
+        // shorter weights vector would read out of bounds.
+        if (weights.size() != teacher_logits_list.size()) {
+            throw std::invalid_argument(
+                "multi_teacher_distillation: teacher_weights size (" +
+                std::to_string(weights.size()) +
+                ") must match the number of teachers (" +
+                std::to_string(teacher_logits_list.size()) + ")");
+        }
     } else {
         weights.resize(teacher_logits_list.size(), 1.0f / teacher_logits_list.size());
     }
@@ -483,7 +516,13 @@ auto temperature_schedule(
     int total_epochs,
     const std::string& schedule_type
 ) -> float {
+    if (total_epochs <= 0) {
+        throw std::invalid_argument(
+            "temperature_schedule: total_epochs must be positive");
+    }
     float progress = static_cast<float>(current_epoch) / static_cast<float>(total_epochs);
+    // Clamp to [0, 1] so out-of-range epochs cannot extrapolate the schedule.
+    progress = std::max(0.0f, std::min(1.0f, progress));
 
     if (schedule_type == "linear") {
         return initial_temp + (final_temp - initial_temp) * progress;

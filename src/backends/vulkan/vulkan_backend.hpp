@@ -201,9 +201,15 @@ private:
             , descriptorPool(std::move(other.descriptorPool))
             , canPreserveDenormsF32(other.canPreserveDenormsF32)
             , hasAtomicInt64(other.hasAtomicInt64)
+            , hasAtomicFloat(other.hasAtomicFloat)
+            , hasAtomicFloat64(other.hasAtomicFloat64)
+            , hasSubgroupArithmetic(other.hasSubgroupArithmetic)
+            , subgroupSize(other.subgroupSize)
             , workgroupSize(other.workgroupSize)
+            , vendor(other.vendor)
             , maxComputeWorkGroupCount{other.maxComputeWorkGroupCount[0], other.maxComputeWorkGroupCount[1], other.maxComputeWorkGroupCount[2]}
             , pipelineCache(other.pipelineCache)
+            , fence_timeout_ns(other.fence_timeout_ns)
             , pendingFence(other.pendingFence)
             , hasPendingWork(other.hasPendingWork)
             , frameFences(other.frameFences)
@@ -461,10 +467,6 @@ public:
     auto dispatchAdaptiveMaxPool2d(const Tensor& input, int64_t out_h, int64_t out_w) -> std::pair<Tensor, Tensor>;
     auto dispatchAdaptiveAvgPool2d(const Tensor& input, int64_t out_h, int64_t out_w) -> Tensor;
     auto dispatchAdaptiveAvgPool2dBackward(const Tensor& grad_output, int64_t H_in, int64_t W_in) -> Tensor;
-    auto dispatchMaxPool2dBackward(const Tensor& grad_out, const Tensor& input,
-                                   const Tensor& indices, int64_t kernel_h, int64_t kernel_w,
-                                   int64_t stride_h, int64_t stride_w,
-                                   int64_t padding_h, int64_t padding_w) -> Tensor;
     auto dispatchMaxPool2dBackwardWithIndices(const Tensor& grad_output, const Tensor& indices,
                                               int64_t H_in, int64_t W_in) -> Tensor;
 
@@ -499,8 +501,6 @@ public:
     auto dispatchAdaptiveAvgPool3dBackward(const Tensor& grad_output, int64_t D_in, int64_t H_in, int64_t W_in) -> Tensor;
 
     // Normalization operations
-    auto dispatchBatchNorm2d(const Tensor& input, const Tensor& mean, const Tensor& var,
-                            const Tensor* gamma, const Tensor* beta, float epsilon) -> Tensor;
     auto dispatchBatchNorm2dBackward(const Tensor& grad_out, const Tensor& input,
                                      const Tensor& mean, const Tensor& var,
                                      const Tensor* gamma, float epsilon)

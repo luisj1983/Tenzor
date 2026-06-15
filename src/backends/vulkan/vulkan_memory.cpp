@@ -376,21 +376,39 @@ auto VulkanBackend::memset(void* ptr, int value, size_t bytes, int32_t device_id
     // Round size up to 4-byte alignment for vkCmdFillBuffer
     size_t aligned_bytes = (bytes + 3) & ~size_t(3);
 
-    // Verify aligned fill does not exceed the allocation size
+    // Verify aligned fill does not exceed the owning allocation.
+    //
+    // allocations_ is keyed by *base* allocation pointer, so allocations_.find(ptr)
+    // misses for a view pointer (base + offset, e.g. a sliced tensor). Resolve the
+    // owning allocation by locating the tracked range [base, base + size) that
+    // contains ptr, then clamp against (alloc_size - view_offset) where view_offset
+    // is measured from that base. This guards the round-up overrun for views as
+    // well as base pointers — vkCmdFillBuffer with aligned_bytes = (bytes+3)&~3
+    // could otherwise write up to 3 bytes past the underlying allocation when the
+    // view ends at the allocation boundary.
     {
         std::lock_guard<std::mutex> alloc_lock(allocations_mutex_);
-        auto it = allocations_.find(ptr);
-        if (it != allocations_.end()) {
-            size_t alloc_size = it->second.first;
-            if (offset + aligned_bytes > alloc_size) {
-                // Clamp to allocation boundary — the caller only needs 'bytes'
-                // filled, but rounding up could overrun the buffer by up to 3 bytes.
-                aligned_bytes = alloc_size - offset;
-                // Re-align down to 4-byte boundary (vkCmdFillBuffer requirement)
-                aligned_bytes &= ~size_t(3);
-                if (aligned_bytes == 0) {
-                    return;  // Nothing left to fill within alignment constraints
-                }
+        const auto* view_ptr = static_cast<const char*>(ptr);
+        size_t avail = 0;
+        bool found = false;
+        for (const auto& [alloc_base, info] : allocations_) {
+            const auto* base = static_cast<const char*>(alloc_base);
+            size_t alloc_size = info.first;
+            if (view_ptr >= base && view_ptr < base + alloc_size) {
+                size_t view_offset = static_cast<size_t>(view_ptr - base);
+                avail = alloc_size - view_offset;
+                found = true;
+                break;
+            }
+        }
+        if (found && aligned_bytes > avail) {
+            // Clamp to the owning allocation boundary — the caller only needs
+            // 'bytes' filled, but rounding up could overrun the buffer.
+            aligned_bytes = avail;
+            // Re-align down to 4-byte boundary (vkCmdFillBuffer requirement)
+            aligned_bytes &= ~size_t(3);
+            if (aligned_bytes == 0) {
+                return;  // Nothing left to fill within alignment constraints
             }
         }
     }

@@ -21,6 +21,8 @@
 #include <memory>
 #include <string>
 #include <tuple>
+#include <random>
+#include <mutex>
 #include "bert.hpp"
 #include "../nn/module.hpp"
 #include "../core/tensor.hpp"
@@ -329,6 +331,14 @@ private:
      * @return Sampled token ID
      */
     auto sample_from_distribution(const float* probs, int64_t size) -> int64_t;
+
+    // Per-instance RNG for token sampling. Replaces the previous shared
+    // function-local `static std::mt19937` which was a data race under
+    // concurrent forwards and made sampling depend on process-global call
+    // history (non-reproducible per model). Guarded by a mutex so concurrent
+    // forwards on the same instance are well-defined.
+    std::mt19937 sample_rng_{42};
+    std::mutex sample_rng_mutex_;
 };
 
 /**

@@ -36,6 +36,7 @@ __global__ void quantized_conv2d_cuda_kernel(
     int64_t sH, int64_t sW,
     int64_t pH, int64_t pW,
     int64_t dH, int64_t dW,
+    int64_t groups,
     float combined_scale,
     int32_t input_zp,
     int32_t weight_zp
@@ -48,35 +49,62 @@ __global__ void quantized_conv2d_cuda_kernel(
 
     if (b >= batch || oc >= out_channels || oh >= h_out || ow >= w_out) return;
 
-    int32_t acc = 0;
+    // int64 accumulator: each int8*int8 product fits in int32, but summed over
+    // in_channels*kh*kw the running total can exceed INT32_MAX for very wide
+    // layers, so accumulate in int64 to avoid silent wraparound.
+    int64_t acc = 0;
+    // Running sums of the quantized operands for the asymmetric zero-point
+    // correction below.
+    int64_t sum_i = 0;  // sum(q_i) over the receptive field (incl. padding)
+    int64_t sum_w = 0;  // sum(q_w) over the weight slice
 
-    // Convolution over input channels and kernel (per-axis stride/padding/dilation).
-    for (int64_t ic = 0; ic < in_channels; ++ic) {
+    // Grouped convolution: each output channel reads only its group's input
+    // channels. Weight is laid out [out_channels, in_channels/groups, kh, kw].
+    const int64_t in_ch_per_group  = in_channels / groups;
+    const int64_t out_ch_per_group = out_channels / groups;
+    const int64_t group            = oc / out_ch_per_group;
+    const int64_t ic_start         = group * in_ch_per_group;
+
+    // Convolution over this group's input channels and kernel.
+    // Real-zero padding maps to the quantized value input_zp (since
+    // x_real = scale*(q - input_zp) and x_real == 0 <=> q == input_zp); this
+    // matches the CPU reference so padded taps contribute zero post-correction.
+    for (int64_t icg = 0; icg < in_ch_per_group; ++icg) {
+        int64_t ic = ic_start + icg;  // absolute input channel
         for (int64_t kh = 0; kh < kh_size; ++kh) {
             for (int64_t kw = 0; kw < kw_size; ++kw) {
                 int64_t ih = oh * sH + kh * dH - pH;
                 int64_t iw = ow * sW + kw * dW - pW;
 
-                // Check bounds
+                // Weight uses the group-local input-channel index (icg).
+                int64_t weight_idx = ((oc * in_ch_per_group + icg) * kh_size + kh) * kw_size + kw;
+                int32_t weight_val = static_cast<int32_t>(weight[weight_idx]);
+                sum_w += weight_val;
+
+                int32_t input_val;
                 if (ih >= 0 && ih < h_in && iw >= 0 && iw < w_in) {
                     int64_t input_idx = ((b * in_channels + ic) * h_in + ih) * w_in + iw;
-                    int64_t weight_idx = ((oc * in_channels + ic) * kh_size + kh) * kw_size + kw;
-
-                    int32_t input_val = static_cast<int32_t>(input[input_idx]);
-                    int32_t weight_val = static_cast<int32_t>(weight[weight_idx]);
-
-                    acc += input_val * weight_val;
+                    input_val = static_cast<int32_t>(input[input_idx]);
+                } else {
+                    input_val = input_zp;  // real-zero padding
                 }
+
+                acc += input_val * weight_val;
+                sum_i += input_val;
             }
         }
     }
 
-    // Zero point correction
-    int64_t kernel_elements = in_channels * kh_size * kw_size;
-    acc -= input_zp * weight_zp * kernel_elements;
+    // Asymmetric zero-point correction (int64 to avoid overflow):
+    //   sum(q_i*q_w) - zp_w*sum(q_i) - zp_i*sum(q_w) + N*zp_i*zp_w
+    int64_t kernel_elements = in_ch_per_group * kh_size * kw_size;
+    int64_t corrected = static_cast<int64_t>(acc)
+                      - static_cast<int64_t>(weight_zp) * sum_i
+                      - static_cast<int64_t>(input_zp) * sum_w
+                      + static_cast<int64_t>(input_zp) * static_cast<int64_t>(weight_zp) * kernel_elements;
 
     // Dequantize and add bias
-    float result = static_cast<float>(acc) * combined_scale;
+    float result = static_cast<float>(corrected) * combined_scale;
     if (bias != nullptr) {
         result += bias[oc];
     }
@@ -104,12 +132,21 @@ auto quantized_conv2d_cuda(
     int64_t sH, int64_t sW,
     int64_t pH, int64_t pW,
     int64_t dH, int64_t dW,
+    int64_t groups,
     float input_scale,
     float weight_scale,
     int32_t input_zp,
     int32_t weight_zp,
     cudaStream_t stream
 ) -> void {
+    if (groups < 1) {
+        throw std::runtime_error("quantized_conv2d: groups must be >= 1");
+    }
+    if (in_channels % groups != 0 || out_channels % groups != 0) {
+        throw std::runtime_error(
+            "quantized_conv2d: in_channels and out_channels must be divisible by groups");
+    }
+
     float combined_scale = input_scale * weight_scale;
 
     // Launch configuration
@@ -125,7 +162,7 @@ auto quantized_conv2d_cuda(
         batch, in_channels, out_channels,
         h_in, w_in, h_out, w_out,
         kh_size, kw_size, sH, sW, pH, pW, dH, dW,
-        combined_scale, input_zp, weight_zp
+        groups, combined_scale, input_zp, weight_zp
     );
     TENZOR_CUDA_POST_LAUNCH_CHECK();
 }

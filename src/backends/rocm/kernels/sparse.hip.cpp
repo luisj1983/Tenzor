@@ -1101,45 +1101,25 @@ Tensor rocm_sparse_trsm_kernel(const SparseTensor& L, const Tensor& B, bool uppe
     auto X = zeros(std::vector<int64_t>{N, K}, dtype, Device::rocm());
 
     for (int64_t k = 0; k < K; ++k) {
-        // Gather B[:, k] into a contiguous 1D buffer on GPU.
-        Tensor b_col = zeros(std::vector<int64_t>{N}, dtype, Device::rocm());
-        if (dtype == DType::Float32) {
-            auto* dst = b_col.data<float>();
-            const auto* src = B_gpu.data<float>();
-            for (int64_t i = 0; i < N; ++i) {
-                HIP_CHECK_SPARSE(hipMemcpy(
-                    dst + i, src + i * K + k, sizeof(float),
-                    hipMemcpyDeviceToDevice));
-            }
-        } else {
-            auto* dst = b_col.data<double>();
-            const auto* src = B_gpu.data<double>();
-            for (int64_t i = 0; i < N; ++i) {
-                HIP_CHECK_SPARSE(hipMemcpy(
-                    dst + i, src + i * K + k, sizeof(double),
-                    hipMemcpyDeviceToDevice));
-            }
-        }
+        // Gather B[:, k] into a contiguous 1D buffer on GPU. B is (N, K)
+        // row-major, so column k is a strided view; materialise it with a
+        // single contiguous copy instead of one hipMemcpy per element.
+        auto b_col = B_gpu.slice(1, k, k + 1).squeeze(1).contiguous();
 
         auto x_col = rocm_sparse_trsv_kernel(L, b_col, upper);
 
-        // Scatter x_col back into X[:, k].
+        // Scatter x_col back into X[:, k] with a single strided 2D copy
+        // (matching sparse_trsm_standalone_hip) instead of N tiny memcpys.
         if (dtype == DType::Float32) {
-            auto* dst = X.data<float>();
-            const auto* src = x_col.data<float>();
-            for (int64_t i = 0; i < N; ++i) {
-                HIP_CHECK_SPARSE(hipMemcpy(
-                    dst + i * K + k, src + i, sizeof(float),
-                    hipMemcpyDeviceToDevice));
-            }
+            HIP_CHECK_SPARSE(hipMemcpy2DAsync(
+                X.data<float>() + k, K * sizeof(float),
+                x_col.data<float>(), sizeof(float),
+                sizeof(float), N, hipMemcpyDeviceToDevice, 0));
         } else {
-            auto* dst = X.data<double>();
-            const auto* src = x_col.data<double>();
-            for (int64_t i = 0; i < N; ++i) {
-                HIP_CHECK_SPARSE(hipMemcpy(
-                    dst + i * K + k, src + i, sizeof(double),
-                    hipMemcpyDeviceToDevice));
-            }
+            HIP_CHECK_SPARSE(hipMemcpy2DAsync(
+                X.data<double>() + k, K * sizeof(double),
+                x_col.data<double>(), sizeof(double),
+                sizeof(double), N, hipMemcpyDeviceToDevice, 0));
         }
     }
 
@@ -1263,24 +1243,18 @@ SparseTensor rocm_coalesce(const SparseTensor& sparse) {
     int64_t* ni_ptr = new_indices.data<int64_t>();
     for (int64_t d = 0; d < sparse_dim; ++d) {
         int64_t stride = h_strides[d];
+        int64_t extent = sp_shape[d];
         auto ok_dptr = thrust::device_pointer_cast(ok_ptr);
         auto ni_dptr = thrust::device_pointer_cast(ni_ptr + d * new_nnz);
-        if (d < sparse_dim - 1) {
-            int64_t next_stride = h_strides[d + 1];
-            thrust::transform(thrust::hip::par,
-                              ok_dptr, ok_dptr + new_nnz,
-                              ni_dptr,
-                              [stride, next_stride] __device__ (int64_t key) {
-                                  return (key / stride) % (stride / next_stride);
-                              });
-        } else {
-            thrust::transform(thrust::hip::par,
-                              ok_dptr, ok_dptr + new_nnz,
-                              ni_dptr,
-                              [stride] __device__ (int64_t key) {
-                                  return key % stride;
-                              });
-        }
+        // Decode coordinate for dim d as (key / stride_d) % extent_d. Using the
+        // dim's own extent (not the next dim's, nor a degenerate `key % 1` for
+        // the last dim) is required for non-square / multi-dim tensors.
+        thrust::transform(thrust::hip::par,
+                          ok_dptr, ok_dptr + new_nnz,
+                          ni_dptr,
+                          [stride, extent] __device__ (int64_t key) {
+                              return (key / stride) % extent;
+                          });
     }
 
     Tensor final_vals = zeros({new_nnz}, values.dtype(), Device::rocm());

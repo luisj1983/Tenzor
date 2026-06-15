@@ -125,6 +125,29 @@ private:
     std::shared_ptr<ReLU> relu_;
 };
 
+// Linear followed by ReLU: optimize_for_inference fuses these (FuseLinearReLU),
+// marking the Linear node with fused_relu and deleting the ReLU node. The
+// interpreter must still apply the ReLU.
+class LinearReLUModel : public Module {
+public:
+    LinearReLUModel() {
+        fc_ = std::make_shared<Linear>(10, 8);
+        relu_ = std::make_shared<ReLU>();
+        register_module("fc", fc_);
+        register_module("relu", relu_);
+    }
+
+    Variable forward_impl(const Variable& x) override {
+        auto out = fc_->forward(x);
+        out = relu_->forward(out);
+        return out;
+    }
+
+private:
+    std::shared_ptr<Linear> fc_;
+    std::shared_ptr<ReLU> relu_;
+};
+
 // ============================================================================
 // Trace Mode Tests with Multiple DTypes
 // ============================================================================
@@ -181,6 +204,44 @@ TEST_P(JITMultiDTypeTest, TraceWithBatchNorm) {
     auto output = traced->forward(input);
     EXPECT_EQ(output.tensor().shape()[1], 64);
     EXPECT_EQ(output.tensor().dtype(), dtype());
+}
+
+// Regression: optimize_for_inference fuses Linear+ReLU into the Linear node and
+// removes the ReLU node. The JIT interpreter previously ignored the fused_relu
+// marker, silently dropping the activation. The fused output must match the
+// pre-fusion output, and the ReLU must actually clamp some elements.
+TEST_P(JITMultiDTypeTest, OptimizeForInferenceKeepsFusedReLU) {
+    tenzor::manual_seed(42);
+    auto model = std::make_shared<LinearReLUModel>();
+    convert_model(*model);
+    model->eval();
+
+    Variable input = createInput({4, 10}, false);
+
+    auto traced = jit::trace(model, input.tensor());
+    ASSERT_NE(traced, nullptr);
+
+    // Reference output before fusion: ReLU is still a separate node here.
+    auto ref = traced->forward(input).tensor().to(Device::cpu()).to(DType::Float32);
+
+    // Fuse Linear+ReLU and run again.
+    jit::optimize_for_inference(traced);
+    auto fused = traced->forward(input).tensor().to(Device::cpu()).to(DType::Float32);
+
+    ASSERT_EQ(ref.numel(), fused.numel());
+    const float* r = ref.data<float>();
+    const float* f = fused.data<float>();
+    bool saw_clamped = false;
+    for (int i = 0; i < ref.numel(); ++i) {
+        EXPECT_NEAR(r[i], f[i], static_cast<float>(atol()))
+            << "fused-inference output diverged at index " << i
+            << " (fused ReLU likely dropped)";
+        if (r[i] == 0.0f) {
+            saw_clamped = true;
+        }
+    }
+    EXPECT_TRUE(saw_clamped)
+        << "ReLU clamped no elements; test is not exercising the fusion path";
 }
 
 // ============================================================================

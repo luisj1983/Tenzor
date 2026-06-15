@@ -155,15 +155,40 @@ auto SymbolicShapeInference::infer_conv2d(const Node* node) -> std::vector<Symbo
 
     auto& in_shape = input_shapes[0];  // [N, C, H, W]
 
+    // Prefer reading out_channels / kernel_h / kernel_w from the weight tensor's
+    // shape (input 1: [out_channels, in_channels/groups, kernel_h, kernel_w]).
+    // The dispatch tracer never emits the out_channels/kernel_* int attrs (it
+    // records kernel_size/stride/padding/dilation as {h,w} vec attrs), so the
+    // legacy int-attr path is only a fallback for hand-built graphs. This
+    // mirrors the concrete inference in graph.cpp's OpType::Conv2d case.
     auto out_channels = node->get_int_attr("out_channels");
     auto kernel_h = node->get_int_attr("kernel_h");
     auto kernel_w = node->get_int_attr("kernel_w");
-    auto stride_h = node->has_attr("stride_h") ? node->get_int_attr("stride_h") : int64_t{1};
-    auto stride_w = node->has_attr("stride_w") ? node->get_int_attr("stride_w") : int64_t{1};
-    auto padding_h = node->has_attr("padding_h") ? node->get_int_attr("padding_h") : int64_t{0};
-    auto padding_w = node->has_attr("padding_w") ? node->get_int_attr("padding_w") : int64_t{0};
-    auto dilation_h = node->has_attr("dilation_h") ? node->get_int_attr("dilation_h") : int64_t{1};
-    auto dilation_w = node->has_attr("dilation_w") ? node->get_int_attr("dilation_w") : int64_t{1};
+    if (input_shapes.size() >= 2 && input_shapes[1].rank() == 4) {
+        const auto& w_shape = input_shapes[1];
+        if (w_shape[0].is_concrete()) out_channels = w_shape[0].value();
+        if (w_shape[2].is_concrete()) kernel_h = w_shape[2].value();
+        if (w_shape[3].is_concrete()) kernel_w = w_shape[3].value();
+    }
+
+    // Honor both the paired *_h/*_w int attrs and the pair-as-vec form
+    // ("stride"/"padding"/"dilation" = {h, w}) the dispatch interceptor emits.
+    auto pair_from = [&](const char* h_key, const char* w_key,
+                          const char* vec_key,
+                          int64_t default_v) -> std::pair<int64_t, int64_t> {
+        if (node->has_attr(h_key) && node->has_attr(w_key)) {
+            return {node->get_int_attr(h_key), node->get_int_attr(w_key)};
+        }
+        if (node->has_attr(vec_key)) {
+            auto v = node->get_vec_attr(vec_key);
+            if (v.size() == 2) return {v[0], v[1]};
+            if (v.size() == 1) return {v[0], v[0]};
+        }
+        return {default_v, default_v};
+    };
+    auto [stride_h, stride_w]     = pair_from("stride_h",  "stride_w",  "stride",   1);
+    auto [padding_h, padding_w]   = pair_from("padding_h", "padding_w", "padding",  0);
+    auto [dilation_h, dilation_w] = pair_from("dilation_h", "dilation_w", "dilation", 1);
 
     // Batch dim (N) propagates symbolically
     auto N_dim = in_shape[0];

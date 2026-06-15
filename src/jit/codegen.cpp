@@ -326,6 +326,27 @@ auto KernelCache::get_or_compile(const FusionGroup& group) -> std::shared_ptr<Co
     return kernel;
 }
 
+auto KernelCache::get_or_compile_source(const std::string& signature,
+                                        const std::string& source,
+                                        const std::string& kernel_name)
+    -> std::shared_ptr<CompiledKernel> {
+    std::lock_guard<std::mutex> lock(mutex_);
+
+    auto it = cache_.find(signature);
+    if (it != cache_.end()) {
+        cache_hits_++;
+        return it->second;
+    }
+
+    auto kernel = compile(source, kernel_name);
+    if (kernel) {
+        kernel->source = source;
+        cache_[signature] = kernel;
+        compilations_++;
+    }
+    return kernel;
+}
+
 auto KernelCache::compile(const std::string& source, const std::string& kernel_name)
     -> std::shared_ptr<CompiledKernel> {
 #if CODEGEN_AVAILABLE
@@ -474,8 +495,17 @@ auto execute_fused(const FusionGroup& group,
     }
 
 #if CODEGEN_AVAILABLE
-    // Move inputs to GPU if needed (codegen runs on GPU)
+    // Move inputs to GPU if needed (codegen runs on GPU). CODEGEN_AVAILABLE is
+    // set for both CUDA and ROCm builds, so derive the concrete GPU device from
+    // the active backend — directing tensors to a CUDA device on a ROCm build
+    // fails device validation / lands data on the wrong backend.
+#if defined(TENZOR_USE_CUDA)
     auto gpu_device = Device::cuda(0);
+#elif defined(TENZOR_USE_ROCM)
+    auto gpu_device = Device::rocm(0);
+#else
+    auto gpu_device = Device::cuda(0);
+#endif
     std::vector<Tensor> gpu_inputs;
     gpu_inputs.reserve(inputs.size());
     for (const auto& inp : inputs) {
@@ -503,15 +533,21 @@ auto execute_fused(const FusionGroup& group,
             " — route this dtype through the eager fallback");
     }
 
-    // Collect input data pointers (now on GPU)
+    // Collect input data pointers (now on GPU). contiguous() may allocate a
+    // fresh tensor whose storage is NOT shared with gpu_inputs[i]; storing a
+    // pointer into a loop-scoped temporary would dangle once it is destroyed,
+    // so replace each entry in place with its contiguous version and take the
+    // pointer from the long-lived vector element (kept alive until launch).
+    for (auto& inp : gpu_inputs) {
+        inp = inp.contiguous();
+    }
     std::vector<const void*> input_ptrs;
     input_ptrs.reserve(gpu_inputs.size());
     for (auto& inp : gpu_inputs) {
-        auto c = inp.contiguous();
         if (group.dtype == DType::Float32) {
-            input_ptrs.push_back(c.data<float>());
+            input_ptrs.push_back(inp.data<float>());
         } else {  // Float64 (guarded above)
-            input_ptrs.push_back(c.data<double>());
+            input_ptrs.push_back(inp.data<double>());
         }
     }
 

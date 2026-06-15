@@ -1,6 +1,6 @@
 /**
  * @file threadpool.hpp
- * @brief Work-stealing thread pool for parallel tensor operations
+ * @brief FIFO thread pool for parallel tensor operations
  *
  * Provides efficient thread pool implementation for CPU-based parallel computations.
  */
@@ -19,14 +19,15 @@
 namespace tenzor {
 
 /**
- * @brief Work-stealing thread pool for parallel task execution
+ * @brief FIFO thread pool for parallel task execution
  *
- * Maintains a pool of worker threads that execute submitted tasks.
- * Provides efficient work distribution and load balancing.
+ * Maintains a pool of worker threads that execute submitted tasks from a
+ * single shared FIFO queue (one mutex + condition variable). This is a plain
+ * FIFO pool: there are no per-thread deques and no work stealing.
  *
  * **Features:**
  * - Fixed number of threads (typically hardware concurrency)
- * - Task queue with automatic work distribution
+ * - Single shared FIFO task queue
  * - Future-based result retrieval
  * - Graceful shutdown on destruction
  *
@@ -89,7 +90,6 @@ private:
     std::mutex queue_mutex_;
     std::condition_variable condition_;
     std::atomic<bool> stop_{false};
-    std::atomic<size_t> active_threads_{0};
     size_t num_threads_;
 
     auto worker_thread() -> void;

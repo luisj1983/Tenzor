@@ -264,15 +264,24 @@ auto FSDP2::unshard_params() -> void {
         return;
     }
 
+    // Build a name -> Variable index once (O(P)) instead of rescanning
+    // named_parameters() for every sharded param (which was O(P^2) per call).
     auto named_params = module_->named_parameters();
+    std::unordered_map<std::string, std::shared_ptr<Variable>> param_index;
+    param_index.reserve(named_params.size());
+    for (auto& [pname, p] : named_params) {
+        param_index.emplace(pname, p);
+    }
 
     for (auto& [name, dt] : sharded_params_) {
         // Redistribute from Shard(0) -> Replicate (all-gather)
         auto full = dt.full_tensor();
 
-        // Find and update the corresponding module parameter
-        for (auto& [pname, param] : named_params) {
-            if (pname == name && param) {
+        // Find and update the corresponding module parameter (O(1)).
+        auto pit = param_index.find(name);
+        if (pit != param_index.end() && pit->second) {
+            auto& param = pit->second;
+            {
                 // R.18 / V.22: preserve param's TensorImpl/Storage so any
                 // saved-for-backward activation that captured the parameter
                 // sees the updated bytes rather than a stale frozen view.
@@ -341,7 +350,6 @@ auto FSDP2::unshard_params() -> void {
                 // captured the unsharded layout remain valid through the
                 // next forward/backward.
                 param->tensor() = unsharded_dst_[name];
-                break;
             }
         }
     }
@@ -354,12 +362,21 @@ auto FSDP2::reshard_params() -> void {
         return;
     }
 
+    // Build a name -> Variable index once (O(P)) instead of rescanning
+    // named_parameters() for every sharded param (previously O(P^2) per call).
     auto named_params = module_->named_parameters();
+    std::unordered_map<std::string, std::shared_ptr<Variable>> param_index;
+    param_index.reserve(named_params.size());
+    for (auto& [pname, p] : named_params) {
+        param_index.emplace(pname, p);
+    }
 
     for (auto& [name, dt] : sharded_params_) {
-        // Write the local shard back to the module parameter
-        for (auto& [pname, param] : named_params) {
-            if (pname == name && param) {
+        // Write the local shard back to the module parameter (O(1) lookup).
+        auto pit = param_index.find(name);
+        if (pit != param_index.end() && pit->second) {
+            auto& param = pit->second;
+            {
                 // R.18 / V.22: mirror unshard_params -- write into a
                 // persistent sharded-sized slot so the in-place copy path
                 // is reachable on every cycle, not just the first one.
@@ -385,7 +402,6 @@ auto FSDP2::reshard_params() -> void {
                 }
 
                 param->tensor() = sharded_dst_[name];
-                break;
             }
         }
     }

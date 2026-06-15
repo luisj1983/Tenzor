@@ -38,18 +38,20 @@ auto quantized_conv2d_kernel(
     const int8_t* input, const int8_t* weight, const float* bias, float* output,
     int64_t batch, int64_t in_channels, int64_t out_channels,
     int64_t h_in, int64_t w_in, int64_t h_out, int64_t w_out,
-    int64_t kernel_size, int64_t stride, int64_t padding,
+    int64_t kernel_h, int64_t kernel_w, int64_t stride_h, int64_t stride_w,
+    int64_t pad_h, int64_t pad_w,
     float input_scale, float weight_scale,
     int32_t input_zp, int32_t weight_zp,
-    int64_t dilation, int64_t groups) -> void;
+    int64_t dil_h, int64_t dil_w, int64_t groups) -> void;
 auto quantized_conv2d_per_channel_kernel(
     const int8_t* input, const int8_t* weight, const float* bias, float* output,
     int64_t batch, int64_t in_channels, int64_t out_channels,
     int64_t h_in, int64_t w_in, int64_t h_out, int64_t w_out,
-    int64_t kernel_size, int64_t stride, int64_t padding,
+    int64_t kernel_h, int64_t kernel_w, int64_t stride_h, int64_t stride_w,
+    int64_t pad_h, int64_t pad_w,
     float input_scale, const float* weight_scales,
     int32_t input_zp, const int32_t* weight_zps,
-    int64_t dilation, int64_t groups) -> void;
+    int64_t dil_h, int64_t dil_w, int64_t groups) -> void;
 } // namespace kernels
 } // namespace quantization
 } // namespace nn
@@ -138,8 +140,8 @@ TEST(QuantizedConv2dSignedZP, PerTensorAsymmetricMatchesGroundTruth) {
     tenzor::nn::quantization::kernels::quantized_conv2d_kernel(
         input.data(), weight.data(), bias.data(), got.data(),
         kBatch, kInC, kOutC, kHin, kWin, kHout, kWout,
-        kK, kStride, kPad, input_scale, weight_scale, input_zp, weight_zp,
-        kDil, /*groups=*/1);
+        kK, kK, kStride, kStride, kPad, kPad, input_scale, weight_scale,
+        input_zp, weight_zp, kDil, kDil, /*groups=*/1);
 
     conv_reference(input, weight, bias, /*use_bias=*/true, input_scale,
                    {weight_scale}, /*per_channel=*/false, input_zp, {weight_zp}, ref);
@@ -168,7 +170,8 @@ TEST(QuantizedConv2dSignedZP, SymmetricNegativeWeightsMatchesGroundTruth) {
     tenzor::nn::quantization::kernels::quantized_conv2d_kernel(
         input.data(), weight.data(), nullptr, got.data(),
         kBatch, kInC, kOutC, kHin, kWin, kHout, kWout,
-        kK, kStride, kPad, input_scale, weight_scale, 0, 0, kDil, 1);
+        kK, kK, kStride, kStride, kPad, kPad, input_scale, weight_scale,
+        0, 0, kDil, kDil, 1);
 
     conv_reference(input, weight, bias, /*use_bias=*/false, input_scale,
                    {weight_scale}, /*per_channel=*/false, 0, {0}, ref);
@@ -206,8 +209,8 @@ TEST(QuantizedConv2dSignedZP, PerChannelAsymmetricMatchesGroundTruth) {
     tenzor::nn::quantization::kernels::quantized_conv2d_per_channel_kernel(
         input.data(), weight.data(), bias.data(), got.data(),
         kBatch, kInC, kOutC, kHin, kWin, kHout, kWout,
-        kK, kStride, kPad, input_scale, weight_scales.data(),
-        input_zp, weight_zps.data(), kDil, /*groups=*/1);
+        kK, kK, kStride, kStride, kPad, kPad, input_scale, weight_scales.data(),
+        input_zp, weight_zps.data(), kDil, kDil, /*groups=*/1);
 
     conv_reference(input, weight, bias, /*use_bias=*/true, input_scale,
                    weight_scales, /*per_channel=*/true, input_zp, weight_zps, ref);

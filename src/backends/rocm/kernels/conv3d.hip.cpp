@@ -955,7 +955,8 @@ __global__ void conv_transpose3d_forward_kernel(
     int64_t kD, int64_t kH, int64_t kW,
     int64_t stride_d, int64_t stride_h, int64_t stride_w,
     int64_t pad_d, int64_t pad_h, int64_t pad_w,
-    int64_t out_pad_d, int64_t out_pad_h, int64_t out_pad_w
+    int64_t out_pad_d, int64_t out_pad_h, int64_t out_pad_w,
+    int64_t dil_d, int64_t dil_h, int64_t dil_w
 ) {
     int64_t total_elements = batch * out_channels * out_d * out_h * out_w;
 
@@ -972,9 +973,11 @@ __global__ void conv_transpose3d_forward_kernel(
             for (int64_t kd = 0; kd < kD; ++kd) {
                 for (int64_t kh = 0; kh < kH; ++kh) {
                     for (int64_t kw = 0; kw < kW; ++kw) {
-                        int64_t d_offset = od + pad_d - kd;
-                        int64_t h_offset = oh + pad_h - kh;
-                        int64_t w_offset = ow + pad_w - kw;
+                        // Dilated transposed-conv gather: the kernel tap (kd,kh,kw)
+                        // is spaced by the dilation factor.
+                        int64_t d_offset = od + pad_d - kd * dil_d;
+                        int64_t h_offset = oh + pad_h - kh * dil_h;
+                        int64_t w_offset = ow + pad_w - kw * dil_w;
 
                         if (d_offset % stride_d != 0 || h_offset % stride_h != 0 || w_offset % stride_w != 0) continue;
 
@@ -1071,7 +1074,8 @@ auto conv_transpose3d_forward_hip(
             output.data<float>(),
             N, C_in, D_in, H_in, W_in, C_out, D_out, H_out, W_out,
             kD, kH, kW, stride_d, stride_h, stride_w,
-            pad_d, pad_h, pad_w, out_pad_d, out_pad_h, out_pad_w);
+            pad_d, pad_h, pad_w, out_pad_d, out_pad_h, out_pad_w,
+            dil_d, dil_h, dil_w);
     } else if (input.dtype() == DType::Float64) {
         hipLaunchKernelGGL(conv_transpose3d_forward_kernel<double>,
             dim3(blocks), dim3(threads), 0, stream,
@@ -1080,7 +1084,8 @@ auto conv_transpose3d_forward_hip(
             output.data<double>(),
             N, C_in, D_in, H_in, W_in, C_out, D_out, H_out, W_out,
             kD, kH, kW, stride_d, stride_h, stride_w,
-            pad_d, pad_h, pad_w, out_pad_d, out_pad_h, out_pad_w);
+            pad_d, pad_h, pad_w, out_pad_d, out_pad_h, out_pad_w,
+            dil_d, dil_h, dil_w);
     } else if (input.dtype() == DType::Float16) {
         hipLaunchKernelGGL(conv_transpose3d_forward_kernel<__half>,
             dim3(blocks), dim3(threads), 0, stream,
@@ -1090,7 +1095,8 @@ auto conv_transpose3d_forward_hip(
             reinterpret_cast<__half*>(output.data<Float16>()),
             N, C_in, D_in, H_in, W_in, C_out, D_out, H_out, W_out,
             kD, kH, kW, stride_d, stride_h, stride_w,
-            pad_d, pad_h, pad_w, out_pad_d, out_pad_h, out_pad_w);
+            pad_d, pad_h, pad_w, out_pad_d, out_pad_h, out_pad_w,
+            dil_d, dil_h, dil_w);
     } else {
         throw std::runtime_error("ConvTranspose3d forward: unsupported dtype");
     }

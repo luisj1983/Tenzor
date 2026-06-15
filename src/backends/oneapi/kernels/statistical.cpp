@@ -90,42 +90,75 @@ auto std_kernel(const Tensor& input, const OpAttributes& attrs, sycl::queue& que
 
         if (input.dtype() == DType::Float32) {
             const float* in_ptr = get_data_ptr<const float>(input);
-            const float f_total = static_cast<float>(total_size);
+            const double d_total = static_cast<double>(total_size);
             int64_t divisor = total_size - correction;
             if (divisor <= 0) divisor = 1;
-            const float f_divisor = static_cast<float>(divisor);
+            const double d_divisor = static_cast<double>(divisor);
 
-            float* mean_device = sycl::malloc_device<float>(1, queue);
+            // Two-phase work-group reduction with double accumulation, matching
+            // prod/norm. A single float32 global atomic over ~1e6 elements loses
+            // ~20 bits of significance and is order-non-deterministic; the
+            // sum-of-squares is especially lossy. Accumulate in double instead.
+            constexpr int64_t WG_SIZE = 256;
+            const int64_t num_wgs = (total_size + WG_SIZE - 1) / WG_SIZE;
+
+            double* mean_device = sycl::malloc_device<double>(1, queue);
             SyclDeviceGuard mean_guard(mean_device, queue);
-            queue.fill(mean_device, 0.0f, 1);
+            auto sum_partials = sycl::malloc_device<double>(num_wgs, queue);
+            SyclDeviceGuard sum_partials_guard(sum_partials, queue);
 
-            queue.parallel_for<class MeanAllKernelFloat32>(sycl::range<1>(total_size),
-                [=](sycl::id<1> idx) {
-                    sycl::atomic_ref<float, sycl::memory_order::relaxed,
-                                   sycl::memory_scope::device> atomic_mean(mean_device[0]);
-                    atomic_mean += in_ptr[idx];
-            });
+            // Phase 1: each work-group reduces its slice of the sum into a partial.
+            queue.parallel_for<class StdSumPhase1Float32>(
+                sycl::nd_range<1>(num_wgs * WG_SIZE, WG_SIZE),
+                [=](sycl::nd_item<1> item) {
+                    int64_t gid = item.get_global_id(0);
+                    double val = (gid < total_size) ? static_cast<double>(in_ptr[gid]) : 0.0;
+                    double s = sycl::reduce_over_group(item.get_group(), val, 0.0,
+                                                       sycl::plus<double>());
+                    if (item.get_local_id(0) == 0) sum_partials[item.get_group(0)] = s;
+                });
+            // Phase 2: single work-group grid-strides over ALL partials.
+            queue.parallel_for<class StdSumPhase2Float32>(
+                sycl::nd_range<1>(WG_SIZE, WG_SIZE),
+                [=](sycl::nd_item<1> item) {
+                    int64_t lid = item.get_local_id(0);
+                    double val = 0.0;
+                    for (int64_t i = lid; i < num_wgs; i += WG_SIZE) val += sum_partials[i];
+                    double s = sycl::reduce_over_group(item.get_group(), val, 0.0,
+                                                       sycl::plus<double>());
+                    if (lid == 0) mean_device[0] = s / d_total;
+                });
 
-            float* var_device = sycl::malloc_device<float>(1, queue);
-            SyclDeviceGuard var_guard(var_device, queue);
-            queue.fill(var_device, 0.0f, 1);
+            auto var_partials = sycl::malloc_device<double>(num_wgs, queue);
+            SyclDeviceGuard var_partials_guard(var_partials, queue);
 
-            // Read mean from device memory directly — avoids D-to-H round-trip
-            queue.parallel_for<class VarAllKernelFloat32>(sycl::range<1>(total_size),
-                [=](sycl::id<1> idx) {
-                    float mean_val = mean_device[0] / f_total;
-                    float diff = in_ptr[idx] - mean_val;
-                    sycl::atomic_ref<float, sycl::memory_order::relaxed,
-                                   sycl::memory_scope::device> atomic_var(var_device[0]);
-                    atomic_var += diff * diff;
-            });
+            // Phase 1: per-work-group sum of squared deviations from the mean.
+            queue.parallel_for<class StdVarPhase1Float32>(
+                sycl::nd_range<1>(num_wgs * WG_SIZE, WG_SIZE),
+                [=](sycl::nd_item<1> item) {
+                    int64_t gid = item.get_global_id(0);
+                    double diff = 0.0;
+                    if (gid < total_size) diff = static_cast<double>(in_ptr[gid]) - mean_device[0];
+                    double sq = diff * diff;
+                    double s = sycl::reduce_over_group(item.get_group(), sq, 0.0,
+                                                       sycl::plus<double>());
+                    if (item.get_local_id(0) == 0) var_partials[item.get_group(0)] = s;
+                });
 
-            // Compute final std on device and write directly to output
             Tensor output(out_shape, input.dtype(), input.device());
             float* out_ptr = get_data_ptr<float>(output);
-            queue.single_task<class StdFinalizeFloat32>([=]() {
-                out_ptr[0] = sycl::sqrt(var_device[0] / f_divisor + 1e-8f);
-            }).wait();
+            // Phase 2: combine all partials and finalize std = sqrt(var/divisor).
+            queue.parallel_for<class StdVarPhase2Float32>(
+                sycl::nd_range<1>(WG_SIZE, WG_SIZE),
+                [=](sycl::nd_item<1> item) {
+                    int64_t lid = item.get_local_id(0);
+                    double val = 0.0;
+                    for (int64_t i = lid; i < num_wgs; i += WG_SIZE) val += var_partials[i];
+                    double s = sycl::reduce_over_group(item.get_group(), val, 0.0,
+                                                       sycl::plus<double>());
+                    if (lid == 0) out_ptr[0] = static_cast<float>(sycl::sqrt(s / d_divisor));
+                });
+            queue.wait_and_throw();
             return output;
         }
         else if (input.dtype() == DType::Float64) {
@@ -164,7 +197,7 @@ auto std_kernel(const Tensor& input, const OpAttributes& attrs, sycl::queue& que
             Tensor output(out_shape, input.dtype(), input.device());
             double* out_ptr = get_data_ptr<double>(output);
             queue.single_task<class StdFinalizeFloat64>([=]() {
-                out_ptr[0] = sycl::sqrt(var_device[0] / d_divisor + 1e-8);
+                out_ptr[0] = sycl::sqrt(var_device[0] / d_divisor);
             }).wait();
             return output;
         }
@@ -327,42 +360,70 @@ auto var_kernel(const Tensor& input, const OpAttributes& attrs, sycl::queue& que
 
         if (input.dtype() == DType::Float32) {
             const float* in_ptr = get_data_ptr<const float>(input);
-            const float f_total = static_cast<float>(total_size);
+            const double d_total = static_cast<double>(total_size);
             int64_t divisor = total_size - correction;
             if (divisor <= 0) divisor = 1;
-            const float f_divisor = static_cast<float>(divisor);
+            const double d_divisor = static_cast<double>(divisor);
 
-            float* mean_device = sycl::malloc_device<float>(1, queue);
+            // Two-phase work-group reduction with double accumulation, matching
+            // prod/norm and std_kernel. Avoids the precision loss and
+            // non-determinism of a single float32 global atomic over the tensor.
+            constexpr int64_t WG_SIZE = 256;
+            const int64_t num_wgs = (total_size + WG_SIZE - 1) / WG_SIZE;
+
+            double* mean_device = sycl::malloc_device<double>(1, queue);
             SyclDeviceGuard mean_guard(mean_device, queue);
-            queue.fill(mean_device, 0.0f, 1);
+            auto sum_partials = sycl::malloc_device<double>(num_wgs, queue);
+            SyclDeviceGuard sum_partials_guard(sum_partials, queue);
 
-            queue.parallel_for<class MeanVarKernelFloat32>(sycl::range<1>(total_size),
-                [=](sycl::id<1> idx) {
-                    sycl::atomic_ref<float, sycl::memory_order::relaxed,
-                                   sycl::memory_scope::device> atomic_mean(mean_device[0]);
-                    atomic_mean += in_ptr[idx];
-            });
+            queue.parallel_for<class VarSumPhase1Float32>(
+                sycl::nd_range<1>(num_wgs * WG_SIZE, WG_SIZE),
+                [=](sycl::nd_item<1> item) {
+                    int64_t gid = item.get_global_id(0);
+                    double val = (gid < total_size) ? static_cast<double>(in_ptr[gid]) : 0.0;
+                    double s = sycl::reduce_over_group(item.get_group(), val, 0.0,
+                                                       sycl::plus<double>());
+                    if (item.get_local_id(0) == 0) sum_partials[item.get_group(0)] = s;
+                });
+            queue.parallel_for<class VarSumPhase2Float32>(
+                sycl::nd_range<1>(WG_SIZE, WG_SIZE),
+                [=](sycl::nd_item<1> item) {
+                    int64_t lid = item.get_local_id(0);
+                    double val = 0.0;
+                    for (int64_t i = lid; i < num_wgs; i += WG_SIZE) val += sum_partials[i];
+                    double s = sycl::reduce_over_group(item.get_group(), val, 0.0,
+                                                       sycl::plus<double>());
+                    if (lid == 0) mean_device[0] = s / d_total;
+                });
 
-            float* var_device = sycl::malloc_device<float>(1, queue);
-            SyclDeviceGuard var_guard(var_device, queue);
-            queue.fill(var_device, 0.0f, 1);
+            auto var_partials = sycl::malloc_device<double>(num_wgs, queue);
+            SyclDeviceGuard var_partials_guard(var_partials, queue);
 
-            // Read mean from device memory directly — avoids D-to-H round-trip
-            queue.parallel_for<class VarKernelFloat32>(sycl::range<1>(total_size),
-                [=](sycl::id<1> idx) {
-                    float mean_val = mean_device[0] / f_total;
-                    float diff = in_ptr[idx] - mean_val;
-                    sycl::atomic_ref<float, sycl::memory_order::relaxed,
-                                   sycl::memory_scope::device> atomic_var(var_device[0]);
-                    atomic_var += diff * diff;
-            });
+            queue.parallel_for<class VarVarPhase1Float32>(
+                sycl::nd_range<1>(num_wgs * WG_SIZE, WG_SIZE),
+                [=](sycl::nd_item<1> item) {
+                    int64_t gid = item.get_global_id(0);
+                    double diff = 0.0;
+                    if (gid < total_size) diff = static_cast<double>(in_ptr[gid]) - mean_device[0];
+                    double sq = diff * diff;
+                    double s = sycl::reduce_over_group(item.get_group(), sq, 0.0,
+                                                       sycl::plus<double>());
+                    if (item.get_local_id(0) == 0) var_partials[item.get_group(0)] = s;
+                });
 
-            // Compute final variance on device and write directly to output
             Tensor output(out_shape, input.dtype(), input.device());
             float* out_ptr = get_data_ptr<float>(output);
-            queue.single_task<class VarFinalizeFloat32>([=]() {
-                out_ptr[0] = var_device[0] / f_divisor;
-            }).wait();
+            queue.parallel_for<class VarVarPhase2Float32>(
+                sycl::nd_range<1>(WG_SIZE, WG_SIZE),
+                [=](sycl::nd_item<1> item) {
+                    int64_t lid = item.get_local_id(0);
+                    double val = 0.0;
+                    for (int64_t i = lid; i < num_wgs; i += WG_SIZE) val += var_partials[i];
+                    double s = sycl::reduce_over_group(item.get_group(), val, 0.0,
+                                                       sycl::plus<double>());
+                    if (lid == 0) out_ptr[0] = static_cast<float>(s / d_divisor);
+                });
+            queue.wait_and_throw();
             return output;
         }
         else if (input.dtype() == DType::Float64) {
@@ -606,12 +667,18 @@ auto prod_kernel(const Tensor& input, const OpAttributes& attrs, sycl::queue& qu
                 }
             );
 
-            // Phase 2: single work-group reduces partial products
+            // Phase 2: single work-group reduces ALL partial products.
+            // Each work-item grid-strides over partial_buf so any num_wgs
+            // (including > WG_SIZE) is fully combined, then a group reduce
+            // collapses the per-item products.
             queue.parallel_for<ProdReducePhase2Float32>(
                 sycl::nd_range<1>(WG_SIZE, WG_SIZE),
                 [=](sycl::nd_item<1> item) {
                     int64_t lid = item.get_local_id(0);
-                    float val = (lid < num_wgs) ? partial_buf[lid] : 1.0f;
+                    float val = 1.0f;
+                    for (int64_t i = lid; i < num_wgs; i += WG_SIZE) {
+                        val *= partial_buf[i];
+                    }
                     float prod = sycl::reduce_over_group(
                         item.get_group(), val, 1.0f, std::multiplies<float>());
                     if (lid == 0) out_ptr[0] = prod;
@@ -686,12 +753,18 @@ auto prod_kernel(const Tensor& input, const OpAttributes& attrs, sycl::queue& qu
                 }
             );
 
-            // Phase 2: single work-group reduces partial products
+            // Phase 2: single work-group reduces ALL partial products.
+            // Each work-item grid-strides over partial_buf so any num_wgs
+            // (including > WG_SIZE) is fully combined, then a group reduce
+            // collapses the per-item products. Accumulates in double.
             queue.parallel_for<ProdReducePhase2Float64>(
                 sycl::nd_range<1>(WG_SIZE, WG_SIZE),
                 [=](sycl::nd_item<1> item) {
                     int64_t lid = item.get_local_id(0);
-                    double val = (lid < num_wgs) ? partial_buf[lid] : 1.0;
+                    double val = 1.0;
+                    for (int64_t i = lid; i < num_wgs; i += WG_SIZE) {
+                        val *= partial_buf[i];
+                    }
                     double prod = sycl::reduce_over_group(
                         item.get_group(), val, 1.0, std::multiplies<double>());
                     if (lid == 0) out_ptr[0] = prod;
@@ -934,11 +1007,17 @@ auto norm_kernel(const Tensor& input, const OpAttributes& attrs, sycl::queue& qu
                 }
             );
 
+            // Phase 2: single work-group sums ALL partials. Each work-item
+            // grid-strides over partial_buf so any num_wgs (including
+            // > WG_SIZE) is fully combined before the group reduce.
             queue.parallel_for<NormReducePhase2Float32>(
                 sycl::nd_range<1>(WG_SIZE, WG_SIZE),
                 [=](sycl::nd_item<1> item) {
                     int64_t lid = item.get_local_id(0);
-                    float val = (lid < num_wgs) ? partial_buf[lid] : 0.0f;
+                    float val = 0.0f;
+                    for (int64_t i = lid; i < num_wgs; i += WG_SIZE) {
+                        val += partial_buf[i];
+                    }
                     float sum = sycl::reduce_over_group(
                         item.get_group(), val, sycl::plus<float>());
                     if (lid == 0) {
@@ -989,11 +1068,18 @@ auto norm_kernel(const Tensor& input, const OpAttributes& attrs, sycl::queue& qu
                 }
             );
 
+            // Phase 2: single work-group sums ALL partials. Each work-item
+            // grid-strides over partial_buf so any num_wgs (including
+            // > WG_SIZE) is fully combined before the group reduce.
+            // Accumulates in double.
             queue.parallel_for<NormReducePhase2Float64>(
                 sycl::nd_range<1>(WG_SIZE, WG_SIZE),
                 [=](sycl::nd_item<1> item) {
                     int64_t lid = item.get_local_id(0);
-                    double val = (lid < num_wgs) ? partial_buf[lid] : 0.0;
+                    double val = 0.0;
+                    for (int64_t i = lid; i < num_wgs; i += WG_SIZE) {
+                        val += partial_buf[i];
+                    }
                     double sum = sycl::reduce_over_group(
                         item.get_group(), val, sycl::plus<double>());
                     if (lid == 0) {

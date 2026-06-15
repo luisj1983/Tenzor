@@ -18,9 +18,13 @@
 #include "variable.hpp"
 #include "functional.hpp"
 #include "vmap.hpp"
+#include "ops.hpp"
 #include "../core/tensor.hpp"
 #include <functional>
 #include <cstdint>
+#include <numeric>
+#include <stdexcept>
+#include <vector>
 
 namespace tenzor {
 namespace func {
@@ -42,8 +46,29 @@ inline auto grad(Fn f) -> Fn {
     return [f = std::move(f)](const Variable& x) -> Variable {
         Variable x_copy(x.tensor().clone(), true);
         Variable output = f(x_copy);
-        output.backward();
-        return Variable(*x_copy.grad(), false);
+        // create_graph=true so the returned gradient itself carries a grad_fn,
+        // enabling composition of grad with other transforms (grad(grad(f)),
+        // jacrev(grad(f)), ...). Without it the result is detached and yields
+        // zero/non-differentiable second derivatives.
+        output.backward(std::nullopt, /*retain_graph=*/false, /*create_graph=*/true);
+        // Prefer the graph-preserving gradient Variable; fall back to the plain
+        // gradient tensor only if create_graph did not populate it.
+        const auto& gv = x_copy.grad_variable();
+        if (gv) {
+            return *gv;
+        }
+        // Guard against dereferencing an empty optional: when the function
+        // ignores its argument (or routes through a detached path), the
+        // output does not depend on x_copy and backward() leaves grad()
+        // unpopulated. Dereferencing *x_copy.grad() in that case is UB.
+        const auto& g = x_copy.grad();
+        if (!g) {
+            throw std::runtime_error(
+                "func::grad: function output does not depend on its input "
+                "(gradient is undefined). The transformed function must use "
+                "its argument through differentiable ops.");
+        }
+        return Variable(*g, false);
     };
 }
 
@@ -61,8 +86,38 @@ inline auto grad(Fn f) -> Fn {
  */
 inline auto vmap(Fn f, int64_t in_dim = 0, int64_t out_dim = 0) -> Fn {
     return [f = std::move(f), in_dim, out_dim](const Variable& batched_input) -> Variable {
-        // Delegate to the existing vmap implementation
-        return tenzor::vmap(f, batched_input, in_dim);
+        // tenzor::vmap slices the input along in_dim and stacks the per-slice
+        // results back along that same axis, so its output carries the batch
+        // axis at position in_dim. Honour out_dim by moving that batch axis
+        // from in_dim to out_dim. Previously out_dim was captured but never
+        // applied, silently producing a wrong-shape result for out_dim !=
+        // in_dim.
+        Variable result = tenzor::vmap(f, batched_input, in_dim);
+
+        const int64_t ndim = static_cast<int64_t>(result.tensor().shape().size());
+        // Normalise the source/destination positions against the output rank.
+        int64_t src = in_dim < 0 ? in_dim + ndim : in_dim;
+        int64_t dst = out_dim < 0 ? out_dim + ndim : out_dim;
+        if (src == dst || ndim == 0) {
+            return result;
+        }
+        if (src < 0 || src >= ndim || dst < 0 || dst >= ndim) {
+            throw std::runtime_error(
+                "func::vmap: out_dim is out of range for the vmapped output");
+        }
+        // Build the permutation that moves axis `src` to position `dst`,
+        // keeping the relative order of the remaining axes (movedim
+        // semantics). Use the Variable-level autograd::permute so the
+        // grad_fn chain is preserved through the axis move.
+        std::vector<int64_t> order;
+        order.reserve(ndim);
+        for (int64_t d = 0; d < ndim; ++d) {
+            if (d != src) {
+                order.push_back(d);
+            }
+        }
+        order.insert(order.begin() + dst, src);
+        return tenzor::permute(result, order);
     };
 }
 

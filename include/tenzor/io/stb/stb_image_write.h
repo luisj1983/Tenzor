@@ -467,7 +467,9 @@ static void stbiw__write_pixels(stbi__write_context *s, int rgb_dir, int vdir, i
 
    for (; j != j_end; j += vdir) {
       for (i=0; i < x; ++i) {
-         unsigned char *d = (unsigned char *) data + (j*x+i)*comp;
+         // Promote to size_t before multiplying so the source-pixel offset does
+         // not overflow 32-bit int for large images (heap OOB read otherwise).
+         unsigned char *d = (unsigned char *) data + ((size_t)j*(size_t)x+(size_t)i)*(size_t)comp;
          stbiw__write_pixel(s, rgb_dir, comp, write_alpha, expand_mono, d);
       }
       stbiw__write_flush(s);
@@ -557,21 +559,22 @@ static int stbi_write_tga_core(stbi__write_context *s, int x, int y, int comp, v
          jdir = -1;
       }
       for (; j != jend; j += jdir) {
-         unsigned char *row = (unsigned char *) data + j * x * comp;
+         // size_t offsets to avoid 32-bit int overflow on large TGA images.
+         unsigned char *row = (unsigned char *) data + (size_t)j * (size_t)x * (size_t)comp;
          int len;
 
          for (i = 0; i < x; i += len) {
-            unsigned char *begin = row + i * comp;
+            unsigned char *begin = row + (size_t)i * (size_t)comp;
             int diff = 1;
             len = 1;
 
             if (i < x - 1) {
                ++len;
-               diff = memcmp(begin, row + (i + 1) * comp, comp);
+               diff = memcmp(begin, row + (size_t)(i + 1) * (size_t)comp, comp);
                if (diff) {
                   const unsigned char *prev = begin;
                   for (k = i + 2; k < x && len < 128; ++k) {
-                     if (memcmp(prev, row + k * comp, comp)) {
+                     if (memcmp(prev, row + (size_t)k * (size_t)comp, comp)) {
                         prev += comp;
                         ++len;
                      } else {

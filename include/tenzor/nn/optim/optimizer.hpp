@@ -271,7 +271,7 @@ public:
      * optimizer.step();       // Update parameters
      * @endcode
      */
-    auto zero_grad(bool set_to_none = true) -> void;
+    virtual auto zero_grad(bool set_to_none = true) -> void;
 
     /**
      * @brief Get list of parameters being optimized
@@ -485,10 +485,32 @@ protected:
      * the optimizer was constructed from a flat parameter list (no
      * groups) — the caller should fall back to its own defaults.
      *
-     * O(n_groups × n_params_per_group) worst case; with the typical 1–5
-     * groups this is fine.
+     * O(1) average via param_to_group_index_ (built by
+     * rebuild_group_index_() whenever param_groups_ changes), with a
+     * linear-scan fallback if the cache misses (e.g. after a caller
+     * mutated the groups directly through param_groups()).
      */
     auto find_group_for_param(size_t param_index) const -> const ParamGroup*;
+
+private:
+    /**
+     * @brief (Re)build the param → owning-group-index lookup.
+     *
+     * Called whenever param_groups_ is established or mutated (group
+     * constructor, add_param_group()).  Keyed by the raw Variable*
+     * (pointer identity, matching the previous linear scan) and storing
+     * the group *index* rather than a ParamGroup* so the cache stays
+     * valid across param_groups_ reallocation.  When a parameter appears
+     * in multiple groups (degenerate, but possible) the first owning
+     * group wins — identical to the old front-to-back scan order.
+     */
+    auto rebuild_group_index_() -> void;
+
+    // Audit D.4 perf: O(1) lookup from a parameter's Variable* to the
+    // index of its owning ParamGroup in param_groups_.  Avoids the
+    // O(n_groups × n_params) nested scan find_group_for_param() used to
+    // run once per parameter per step (O(P^2) per grouped step).
+    std::unordered_map<const Variable*, size_t> param_to_group_index_;
 };
 
 } // namespace optim

@@ -21,6 +21,19 @@ Optimizer::Optimizer(std::vector<ParamGroup> groups)
             parameters_.push_back(p);
         }
     }
+    rebuild_group_index_();
+}
+
+auto Optimizer::rebuild_group_index_() -> void {
+    param_to_group_index_.clear();
+    param_to_group_index_.reserve(parameters_.size());
+    for (size_t gi = 0; gi < param_groups_.size(); ++gi) {
+        for (const auto& p : param_groups_[gi].params) {
+            // First owning group wins, matching the old front-to-back
+            // scan order for the (degenerate) shared-parameter case.
+            param_to_group_index_.emplace(p.get(), gi);
+        }
+    }
 }
 
 auto Optimizer::step() -> void {
@@ -82,14 +95,23 @@ auto Optimizer::fire_post_step_hooks_() -> void {
 }
 
 auto Optimizer::find_group_for_param(size_t param_index) const -> const ParamGroup* {
-    // Audit D.4: linear lookup of the ParamGroup owning parameters_[i].
-    // For the typical 1–5 param groups this is fine; if profiling shows
-    // it as a hotspot, swap with a cached index built at flatten time.
+    // Audit D.4 perf: O(1) lookup of the ParamGroup owning
+    // parameters_[i] via param_to_group_index_ (built by
+    // rebuild_group_index_() whenever param_groups_ changes).  This
+    // replaces the old O(n_groups × n_params) nested scan that ran once
+    // per parameter per step (O(P^2) per grouped step).
     if (param_index >= parameters_.size()) return nullptr;
-    const auto& target = parameters_[param_index];
+    const Variable* target = parameters_[param_index].get();
+    if (auto it = param_to_group_index_.find(target); it != param_to_group_index_.end()) {
+        return &param_groups_[it->second];
+    }
+    // Fallback linear scan: covers the case where a caller mutated the
+    // groups directly through param_groups() without rebuilding the
+    // cache.  Preserves the original behaviour (first owning group, or
+    // nullptr for a flat parameter list / unmatched parameter).
     for (const auto& g : param_groups_) {
         for (const auto& p : g.params) {
-            if (p.get() == target.get()) {
+            if (p.get() == target) {
                 return &g;
             }
         }
@@ -135,6 +157,10 @@ auto Optimizer::add_param_group(ParamGroup group) -> void {
     }
     const size_t new_count = parameters_.size();
     param_groups_.push_back(std::move(group));
+    // Refresh the param → group-index cache now that param_groups_ has
+    // grown (and may have reallocated).  Rebuilding wholesale keeps the
+    // first-owning-group ordering identical to find_group_for_param().
+    rebuild_group_index_();
     if (new_count > old_count) {
         on_parameters_appended_(old_count, new_count);
     }

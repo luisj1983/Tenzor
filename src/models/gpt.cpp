@@ -332,6 +332,10 @@ auto TextGenerator::top_k_filter(const Tensor& logits, int64_t k) const -> std::
     auto vocab_size = logits.shape()[logits.ndim() - 1];
     auto original_device = logits.device();
 
+    // Clamp k into [1, vocab_size]; otherwise partial_sort(begin()+k) and the copy
+    // loop read past the vocab_size-element logit_pairs buffer (UB for small vocabs).
+    k = std::max<int64_t>(1, std::min<int64_t>(k, vocab_size));
+
     // Move to CPU and convert to Float32 for processing
     Tensor logits_cpu = logits.to(Device::cpu());
     if (logits_cpu.dtype() != DType::Float32) {

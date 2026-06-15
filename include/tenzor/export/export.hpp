@@ -122,9 +122,13 @@ private:
  * returns an ExportedProgram.
  *
  * @param module Module to export (must implement forward_impl)
- * @param example_inputs Example input tensors for tracing
+ * @param example_inputs Example input tensors for tracing. Exactly one input
+ *        must be supplied: the traced `Module::forward` consumes a single
+ *        Variable, so multi-input export is not supported.
  * @param opts Export options (strict mode, etc.)
  * @return ExportedProgram containing the traced graph and state dict
+ * @throws std::runtime_error if `example_inputs.size() != 1`, or if tracing
+ *         produces no graph / detects graph breaks under strict mode.
  *
  * @code
  * auto model = std::make_shared<MyNetwork>();

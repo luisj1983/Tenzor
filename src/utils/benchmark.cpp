@@ -105,10 +105,14 @@ auto Benchmark::compute_stats(const std::vector<double>& times) -> BenchmarkStat
         stats.median = sorted[sorted.size() / 2];
     }
 
-    // Percentiles
+    // Percentiles (linear interpolation between closest ranks so small N does
+    // not bias tail latencies low or collapse p95 == p99).
     auto percentile = [&](double p) -> double {
-        size_t idx = static_cast<size_t>(p * static_cast<double>(sorted.size() - 1));
-        return sorted[idx];
+        double rank = p * static_cast<double>(sorted.size() - 1);
+        size_t lo = static_cast<size_t>(std::floor(rank));
+        size_t hi = std::min(lo + 1, sorted.size() - 1);
+        double frac = rank - static_cast<double>(lo);
+        return sorted[lo] * (1.0 - frac) + sorted[hi] * frac;
     };
 
     stats.p95 = percentile(0.95);

@@ -3110,14 +3110,15 @@ auto diagflat_kernel(const Tensor& input, int64_t offset, hipStream_t stream) ->
     // For diagflat, we flatten to (N,) and produce (M, M)
     Tensor flat_input = input;
     if (input.shape().size() != 1 || input.shape()[0] != n) {
-        // Need to make contiguous 1D view
+        // Need a contiguous 1D view. Materialise the (possibly strided) input
+        // contiguously, then copy the exact byte count for this dtype. The
+        // previous hand-rolled element-size table mis-sized Complex64/Complex128
+        // (copied only 4B/elem), Int16/UInt16 (4B instead of 2B -> OOB), and
+        // the unsigned 32/64-bit types, corrupting the raw byte copy.
+        Tensor src = input.is_contiguous() ? input : input.contiguous();
         flat_input = Tensor(flat_shape, input.dtype(), input.device());
-        int64_t elem_size = 4; // default for Float32
-        if (input.dtype() == DType::Float64 || input.dtype() == DType::Int64) elem_size = 8;
-        else if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) elem_size = 2;
-        else if (input.dtype() == DType::Int8 || input.dtype() == DType::Bool) elem_size = 1;
-        int64_t bytes = n * elem_size;
-        HIP_CHECK(hipMemcpyAsync(flat_input.data_ptr(), input.data_ptr(),
+        int64_t bytes = n * static_cast<int64_t>(dtype_size(input.dtype()));
+        HIP_CHECK(hipMemcpyAsync(flat_input.data_ptr(), src.data_ptr(),
                                   bytes, hipMemcpyDeviceToDevice, stream));
     }
 

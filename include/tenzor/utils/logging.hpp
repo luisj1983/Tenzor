@@ -9,13 +9,16 @@
  *   - `tenzor/utils/logging.hpp` (legacy, custom Logger class)
  *
  * The legacy `Logger` class still exists for source-compatibility with the
- * 22 callers that use `TENZOR_LOG_WARNING`, `TENZOR_LOG_FATAL`, and
- * `TENZOR_WARN_ONCE` (none of which `log.hpp` provides). Its methods are
- * routed through the unified spdlog logger — see `src/utils/logging.cpp`.
+ * callers that use `TENZOR_LOG_WARNING`, `TENZOR_LOG_FATAL`,
+ * `TENZOR_WARN_ONCE`, and direct `Logger::instance()` access (none of which
+ * `log.hpp` provides). It writes timestamped, uppercase-[LEVEL]-tagged lines
+ * to std::cout and/or a configured output file — see `src/utils/logging.cpp`.
  *
- * The legacy macro names that overlap with `log.hpp` (TENZOR_LOG_DEBUG /
- * INFO / ERROR) now forward directly to the spdlog facade so there is only
- * one definition site each.
+ * The macro names that overlap with `log.hpp` (TENZOR_LOG_DEBUG / INFO /
+ * ERROR) are NOT redefined here: they stay owned by `log.hpp`'s spdlog facade
+ * so each has exactly one expansion target process-wide, regardless of include
+ * order. (A previous version re-pointed them at `Logger`, which made the same
+ * macro route to a different sink/format/level per translation unit.)
  */
 
 #pragma once
@@ -119,21 +122,21 @@ inline auto legacy_log_format(std::string_view fmt_str, Args&&... args) -> std::
 
 }  // namespace detail
 
-// String-only severity macros that the unified facade does not provide.
+// Legacy-only severity macros that the unified facade does not provide. These
+// route through `tenzor::Logger` (std::cout / Logger::set_output_file with
+// uppercase [LEVEL] tags) and have no name collision with `log.hpp`.
 #define TENZOR_LOG_WARNING(msg) ::tenzor::Logger::instance().warning(msg)
 #define TENZOR_LOG_FATAL(msg)   ::tenzor::Logger::instance().fatal(msg)
 
-// The overlapping severities are defined by `log.hpp` to target the spdlog
-// facade (stderr). For translation units that include this legacy header,
-// re-point them at the unified `tenzor::Logger` so a single facade owns
-// console (std::cout) and Logger::set_output_file() routing with uppercase
-// [LEVEL] tags. TUs including only log.hpp keep the spdlog definitions.
-#undef TENZOR_LOG_DEBUG
-#undef TENZOR_LOG_INFO
-#undef TENZOR_LOG_ERROR
-#define TENZOR_LOG_DEBUG(...) ::tenzor::Logger::instance().debug(::tenzor::detail::legacy_log_format(__VA_ARGS__))
-#define TENZOR_LOG_INFO(...)  ::tenzor::Logger::instance().info(::tenzor::detail::legacy_log_format(__VA_ARGS__))
-#define TENZOR_LOG_ERROR(...) ::tenzor::Logger::instance().error(::tenzor::detail::legacy_log_format(__VA_ARGS__))
+// IMPORTANT: do NOT redefine TENZOR_LOG_DEBUG / INFO / ERROR here. They are
+// owned exclusively by `log.hpp` (the spdlog facade, included at the top of
+// this header), so they expand to a single target process-wide. A previous
+// version `#undef`'d and re-pointed them at `tenzor::Logger`, which made the
+// same macro name route to a different sink/format/level depending on whether
+// a TU transitively included this header — a per-TU divergence bug. Leaving
+// them to log.hpp guarantees one expansion target for those three names
+// regardless of include order. (WARNING/FATAL/WARN_ONCE are distinct names
+// that log.hpp does not define, so they stay on the legacy Logger.)
 
 // Emit a warning at most once for a given call site over the lifetime of
 // the process. Safe under concurrent calls (std::call_once is thread-safe).

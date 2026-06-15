@@ -52,9 +52,13 @@ public:
             throw std::invalid_argument("Cannot normalize scalar tensor");
         }
 
-        // Assume last dimension is channels
+        // Channels-first (C,H,W) convention, consistent with the other
+        // transforms in this header (RandomErasing, RandomRotation, ...). The
+        // channel axis is the dimension that holds the C channels: index 0 for
+        // a [C,H,W] tensor and index 1 for a batched [N,C,H,W] tensor.
         size_t num_channels = mean_.size();
-        if (static_cast<size_t>(shape.back()) != num_channels && num_channels > 1) {
+        size_t channel_axis = (shape.size() >= 4) ? 1 : 0;
+        if (static_cast<size_t>(shape[channel_axis]) != num_channels && num_channels > 1) {
             throw std::invalid_argument("Input channels must match normalization parameters");
         }
 
@@ -65,12 +69,16 @@ public:
             }
         }
 
-        // Device-agnostic: build mean/std as [C] tensors on the input's device,
-        // then rely on broadcasting. Avoids raw data_ptr() access which is
-        // invalid for GPU tensors.
+        // Device-agnostic: build mean/std as broadcastable tensors on the
+        // input's device, then rely on broadcasting. Reshape to broadcast
+        // against the channel axis (e.g. {C,1,1} for [C,H,W]) rather than the
+        // trailing axis. Avoids raw data_ptr() access which is invalid for GPU
+        // tensors.
         int64_t C = static_cast<int64_t>(num_channels);
-        Tensor mean_t = from_data(mean_.data(), {C}, input.device());
-        Tensor std_t  = from_data(std_.data(),  {C}, input.device());
+        std::vector<int64_t> param_shape(shape.size(), 1);
+        param_shape[channel_axis] = C;
+        Tensor mean_t = from_data(mean_.data(), param_shape, input.device());
+        Tensor std_t  = from_data(std_.data(),  param_shape, input.device());
         if (input.dtype() != DType::Float32) {
             mean_t = mean_t.to(input.dtype());
             std_t  = std_t.to(input.dtype());

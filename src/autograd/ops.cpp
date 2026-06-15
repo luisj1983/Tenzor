@@ -2072,30 +2072,20 @@ auto lu_solve(const Tensor& LU_data, const Tensor& pivots,
         return Variable(tenzor::linalg::lu_solve(LU_data, pivots, B.tensor()), false);
     }
 
-    // Compute X = lu_solve(LU, pivots, B) AND reconstruct A so backward can
-    // call solve(A^T, dL/dX). Reconstruction: A = P^T @ L @ U.
+    // Compute X = lu_solve(LU, pivots, B). The backward needs dL/dB =
+    // A^{-T} dL/dX. Rather than materialise A and solve(A^T, ·) (which the
+    // old code did via lu_solve(LU, eye) -> A^{-1} *plus* an inv() to recover
+    // A, then a solve() in backward — three O(N^3) ops), we save A^{-1}
+    // directly: A^{-1} = lu_solve(LU, pivots, eye) is a single O(N^3) solve,
+    // and backward reduces to grad_B = A^{-T} @ grad = (A^{-1})^T @ grad,
+    // a matmul. This drops both the inv() here and the solve() in backward.
     auto X_tensor = tenzor::linalg::lu_solve(LU_data, pivots, B.tensor());
-    // Reconstruct A by applying lu_solve to identity then inverting:
-    // simpler — use solve(I, B_via_lu) trick. Here we just save LU and
-    // reconstruct on demand. For simplicity compute A via factor extraction.
-    // Pragmatic shortcut: save (LU_data, pivots) directly; backward does
-    // a lu_solve on the transposed system instead of needing A explicitly.
-    // PyTorch uses lu_solve_(transpose=True) for this; we approximate by
-    // reconstructing via lu_solve(LU, pivots, eye()) which gives A^{-1},
-    // then inverting again. Cheaper: derive A by composing tril(LU,-1) +
-    // I + triu(LU, 0) = L + U... but the packed factor layout may differ.
-    //
-    // For correctness, just reconstruct A symbolically via a separate
-    // lu_solve call: A = solve_for_A_st_(LU, pivots).
-    // Since reconstructing is a one-time cost, do it via lu_solve(LU, pivots, eye)
-    // to get A^{-1}, then inv() to get A.
     auto N = LU_data.shape()[LU_data.ndim() - 1];
     auto eye_t = tenzor::eye(N, std::nullopt, LU_data.dtype(), LU_data.device());
     auto A_inv = tenzor::linalg::lu_solve(LU_data, pivots, eye_t);
-    auto A = tenzor::linalg::inv(A_inv);
 
     auto grad_fn = std::make_shared<LUSolveBackward>();
-    grad_fn->save_for_backward({A, X_tensor});
+    grad_fn->save_for_backward({A_inv, X_tensor});
     grad_fn->set_next_functions({B.grad_fn()});
     grad_fn->set_input_variables({B});
 
@@ -2143,21 +2133,27 @@ auto eig(const Variable& A) -> std::tuple<Variable, Variable, Variable> {
 
     auto [W_re_t, W_im_t, V_t] = tenzor::linalg::eig(A.tensor());
 
-    auto grad_fn = std::make_shared<EigBackward>();
+    // audit — per-output Function instances so the engine doesn't collapse the
+    // W_real / W_imag / V gradients into a single accumulator entry (they have
+    // different shapes, so the collapse threw / corrupted the gradient).
     // Save W_real, W_imag, V so the backward can use all of them.
     // Previously only W_real and V were saved, which prevented
     // EigBackward from detecting complex eigenvalues (audit item A.10).
-    grad_fn->save_for_backward({W_re_t, W_im_t, V_t});
-    grad_fn->set_next_functions({A.grad_fn()});
-    grad_fn->set_input_variables({A});
+    auto make_grad_fn = [&](int slot) {
+        auto fn = std::make_shared<EigBackward>(slot);
+        fn->save_for_backward({W_re_t, W_im_t, V_t});
+        fn->set_next_functions({A.grad_fn()});
+        fn->set_input_variables({A});
+        return fn;
+    };
 
     Variable W_re_var(W_re_t, true);
     Variable W_im_var(W_im_t, true);
     Variable V_var(V_t, true);
 
-    W_re_var.set_grad_fn(grad_fn);
-    W_im_var.set_grad_fn(grad_fn);
-    V_var.set_grad_fn(grad_fn);
+    W_re_var.set_grad_fn(make_grad_fn(0));
+    W_im_var.set_grad_fn(make_grad_fn(1));
+    V_var.set_grad_fn(make_grad_fn(2));
 
     return {W_re_var, W_im_var, V_var};
 }
@@ -2311,16 +2307,22 @@ auto qr(const Variable& input) -> std::tuple<Variable, Variable> {
 
     auto [Q_tensor, R_tensor] = tenzor::linalg::qr(input.tensor());
 
-    auto grad_fn = std::make_shared<QrBackward>();
-    grad_fn->save_for_backward({Q_tensor, R_tensor});
-    grad_fn->set_next_functions({input.grad_fn()});
-    grad_fn->set_input_variables({input});
+    // audit — per-output Function instances so the engine doesn't collapse the
+    // Q and R gradients into a single accumulator entry (Q and R have
+    // different shapes, so the collapse threw / corrupted the gradient).
+    auto make_grad_fn = [&](int slot) {
+        auto fn = std::make_shared<QrBackward>(slot);
+        fn->save_for_backward({Q_tensor, R_tensor});
+        fn->set_next_functions({input.grad_fn()});
+        fn->set_input_variables({input});
+        return fn;
+    };
 
     Variable Q_var(Q_tensor, true);
     Variable R_var(R_tensor, true);
 
-    Q_var.set_grad_fn(grad_fn);
-    R_var.set_grad_fn(grad_fn);
+    Q_var.set_grad_fn(make_grad_fn(0));
+    R_var.set_grad_fn(make_grad_fn(1));
 
     return {Q_var, R_var};
 }
@@ -2333,16 +2335,21 @@ auto eigh(const Variable& input) -> std::tuple<Variable, Variable> {
 
     auto [W_tensor, V_tensor] = tenzor::linalg::eigh(input.tensor());
 
-    auto grad_fn = std::make_shared<EighBackward>();
-    grad_fn->save_for_backward({W_tensor, V_tensor});
-    grad_fn->set_next_functions({input.grad_fn()});
-    grad_fn->set_input_variables({input});
+    // audit — per-output Function instances so the engine doesn't collapse the
+    // W (..., N) and V (..., N, N) gradients into a single accumulator entry.
+    auto make_grad_fn = [&](int slot) {
+        auto fn = std::make_shared<EighBackward>(slot);
+        fn->save_for_backward({W_tensor, V_tensor});
+        fn->set_next_functions({input.grad_fn()});
+        fn->set_input_variables({input});
+        return fn;
+    };
 
     Variable W_var(W_tensor, true);
     Variable V_var(V_tensor, true);
 
-    W_var.set_grad_fn(grad_fn);
-    V_var.set_grad_fn(grad_fn);
+    W_var.set_grad_fn(make_grad_fn(0));
+    V_var.set_grad_fn(make_grad_fn(1));
 
     return {W_var, V_var};
 }
@@ -4170,6 +4177,10 @@ auto igamma(const Variable& a, const Variable& x) -> Variable {
     auto result = tenzor::igamma(a.tensor(), x.tensor());
     auto grad_fn = std::make_shared<IgammaBackward>();
     grad_fn->save_for_backward({a.tensor(), x.tensor()});
+    grad_fn->input_shape_a_ =
+        std::vector<int64_t>(a.tensor().shape().begin(), a.tensor().shape().end());
+    grad_fn->input_shape_x_ =
+        std::vector<int64_t>(x.tensor().shape().begin(), x.tensor().shape().end());
     grad_fn->set_next_functions({a.grad_fn(), x.grad_fn()});
     grad_fn->set_input_variables({a, x});
     Variable output(result, true);
@@ -4185,6 +4196,10 @@ auto igammac(const Variable& a, const Variable& x) -> Variable {
     auto result = tenzor::igammac(a.tensor(), x.tensor());
     auto grad_fn = std::make_shared<IgammacBackward>();
     grad_fn->save_for_backward({a.tensor(), x.tensor()});
+    grad_fn->input_shape_a_ =
+        std::vector<int64_t>(a.tensor().shape().begin(), a.tensor().shape().end());
+    grad_fn->input_shape_x_ =
+        std::vector<int64_t>(x.tensor().shape().begin(), x.tensor().shape().end());
     grad_fn->set_next_functions({a.grad_fn(), x.grad_fn()});
     grad_fn->set_input_variables({a, x});
     Variable output(result, true);

@@ -1,0 +1,60 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_float64 : require
+
+// Adaptive Average Pool 3D Backward (Float64).
+// Float64 atomics are not widely supported, so each thread handles one INPUT
+// position and accumulates contributions from every output window that covers it
+// (race-free, no atomics needed).
+layout(local_size_x_id = 0) in;
+
+layout(binding = 0) buffer GradOutput { double grad_output[]; };
+layout(binding = 1) buffer GradInput { double grad_input[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint batch;
+    uint channels;
+    uint D_in;
+    uint H_in;
+    uint W_in;
+    uint D_out;
+    uint H_out;
+    uint W_out;
+} params;
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    uint total_input = params.batch * params.channels * params.D_in * params.H_in * params.W_in;
+    if (idx >= total_input) return;
+
+    // Decode input index
+    uint w_in = idx % params.W_in;
+    uint h_in = (idx / params.W_in) % params.H_in;
+    uint d_in = (idx / (params.W_in * params.H_in)) % params.D_in;
+    uint c = (idx / (params.W_in * params.H_in * params.D_in)) % params.channels;
+    uint n = idx / (params.W_in * params.H_in * params.D_in * params.channels);
+
+    double grad_sum = 0.0lf;
+
+    for (uint d_out = 0; d_out < params.D_out; ++d_out) {
+        uint d_start = (d_out * params.D_in) / params.D_out;
+        uint d_end = ((d_out + 1) * params.D_in) / params.D_out;
+        if (d_in < d_start || d_in >= d_end) continue;
+        for (uint h_out = 0; h_out < params.H_out; ++h_out) {
+            uint h_start = (h_out * params.H_in) / params.H_out;
+            uint h_end = ((h_out + 1) * params.H_in) / params.H_out;
+            if (h_in < h_start || h_in >= h_end) continue;
+            for (uint w_out = 0; w_out < params.W_out; ++w_out) {
+                uint w_start = (w_out * params.W_in) / params.W_out;
+                uint w_end = ((w_out + 1) * params.W_in) / params.W_out;
+                if (w_in < w_start || w_in >= w_end) continue;
+                uint count = (d_end - d_start) * (h_end - h_start) * (w_end - w_start);
+                if (count > 0u) {
+                    uint out_idx = (((n * params.channels + c) * params.D_out + d_out) * params.H_out + h_out) * params.W_out + w_out;
+                    grad_sum += grad_output[out_idx] / double(count);
+                }
+            }
+        }
+    }
+
+    grad_input[idx] = grad_sum;
+}

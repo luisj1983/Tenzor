@@ -99,6 +99,10 @@ public:
      * @param roi_score_thresh Detection score threshold (default: 0.05)
      * @param roi_nms_thresh Detection NMS threshold (default: 0.5)
      * @param roi_detections_per_img Max detections per image (default: 100)
+     * @param backbone_out_channels Number of feature channels produced by the
+     *        backbone. Pass -1 (default) to introspect a ResNet backbone via
+     *        out_channels(); required for non-ResNet custom backbones whose
+     *        channel count cannot be derived automatically.
      */
     FasterRCNN(std::shared_ptr<nn::Module> backbone,
                int64_t num_classes,
@@ -120,7 +124,8 @@ public:
                double roi_positive_fraction = 0.25,
                double roi_score_thresh = 0.05,
                double roi_nms_thresh = 0.5,
-               int64_t roi_detections_per_img = 100);
+               int64_t roi_detections_per_img = 100,
+               int64_t backbone_out_channels = -1);
 
     /**
      * @brief Forward pass for inference.

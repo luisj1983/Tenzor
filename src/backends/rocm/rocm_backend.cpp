@@ -10,6 +10,7 @@
 #include <cstdio>
 #include <sstream>
 #include <string>
+#include <atomic>
 
 namespace tenzor {
 
@@ -137,19 +138,26 @@ auto ROCmBackend::get_device_info(int32_t device_id) const -> DeviceInfo {
 
 // Check at runtime whether hipMallocAsync is available (HIP 5.3+)
 static bool hip_async_alloc_available() {
-    static int result = -1;
-    if (result >= 0) return result != 0;
+    // Use an atomic cache so concurrent first-callers on arbitrary host threads
+    // do not race on the memoized result (benign value, but a real data race
+    // that trips TSan/UB checkers). The probe is idempotent, so racing threads
+    // recomputing the same answer before the cache settles is harmless.
+    static std::atomic<int> result{-1};
+    int cached = result.load(std::memory_order_acquire);
+    if (cached >= 0) return cached != 0;
 
+    int computed;
 #if HIP_VERSION >= 50300000
     // hipMallocAsync available at compile time; verify runtime support
     // by checking if the default memory pool exists
     hipMemPool_t pool = nullptr;
     hipError_t err = hipDeviceGetDefaultMemPool(&pool, 0);
-    result = (err == hipSuccess && pool != nullptr) ? 1 : 0;
+    computed = (err == hipSuccess && pool != nullptr) ? 1 : 0;
 #else
-    result = 0;
+    computed = 0;
 #endif
-    return result != 0;
+    result.store(computed, std::memory_order_release);
+    return computed != 0;
 }
 
 auto ROCmBackend::allocate(size_t bytes, int32_t device_id) -> void* {
@@ -378,11 +386,14 @@ void ROCmBackend::check_hip_error(hipError_t err, const char* operation) const {
 
 auto ROCmBackend::create_hip_graph(int32_t device_id) -> std::unique_ptr<rocm::HIPGraph> {
     int count = device_count();
-    if (count == 0 || device_id >= count) {
+    if (count == 0 || device_id < 0 || device_id >= count) {
         throw std::runtime_error(
             "create_hip_graph: invalid device_id " + std::to_string(device_id) +
             " (available devices: " + std::to_string(count) + ")");
     }
+    // Bind to the requested device before constructing the graph so capture/replay
+    // happens on the intended GPU on multi-GPU hosts (mirrors allocate()).
+    check_hip_error(hipSetDevice(device_id), "hipSetDevice in create_hip_graph");
     return std::make_unique<rocm::HIPGraph>();
 }
 

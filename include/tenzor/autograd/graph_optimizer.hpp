@@ -1,10 +1,24 @@
 /**
  * @file graph_optimizer.hpp
- * @brief Computation graph optimization for automatic differentiation
+ * @brief Computation graph ANALYSIS for automatic differentiation
  *
- * Provides graph-level optimizations such as operation fusion, dead code
- * elimination, and pattern-based transformations to improve performance
- * while preserving gradient computation correctness.
+ * Provides graph-level *analysis* of optimization opportunities such as
+ * operation fusion, dead code elimination, and pattern-based transformations.
+ *
+ * @warning ANALYSIS-ONLY. With the single exception of fuse_linear_relu()
+ * (which rewrites the local ComputationGraph copy via replace_nodes), every
+ * pass here only *counts* matched opportunities; it does NOT mutate the
+ * executable autograd graph. GraphOptimizer operates on a separate
+ * ComputationGraph built from the grad_fn chain (see optimize_variable), whose
+ * weak_ptr next_nodes the backward engine never consults — engine.cpp does not
+ * reference ComputationGraph/GraphOptimizer/optimize_variable at all. Therefore
+ * the real grad_fn chain that backward() walks is left unchanged and backward()
+ * results are identical with or without calling optimize().
+ *
+ * Treat the returned OptimizationStats as a *report of fusion/elimination
+ * opportunities*, not as confirmation that any rewrite was applied. Do not
+ * rely on these passes to change runtime behaviour or gradients. Wiring the
+ * rewrites into the engine's executable grad_fn chain is future work.
  */
 
 #pragma once
@@ -41,10 +55,12 @@ struct OpPattern {
 };
 
 /**
- * @brief Optimization statistics.
+ * @brief Optimization-opportunity statistics.
  *
- * Tracks the number of optimizations applied during a graph optimization pass.
- * Used for reporting and debugging.
+ * Tracks the number of fusion/elimination opportunities *detected* during a
+ * graph analysis pass. These are counts of matched patterns, NOT a count of
+ * rewrites applied to the executable autograd graph — see the file-level
+ * warning. Used for reporting and debugging.
  */
 struct OptimizationStats {
     size_t linear_relu_fused{0};      ///< Number of linear+relu fusions
@@ -90,18 +106,21 @@ struct OptimizationStats {
  * // ... build graph with operations ...
  *
  * GraphOptimizer optimizer;
- * optimizer.optimize(graph);  // Apply all optimizations
+ * optimizer.optimize(graph);  // Analyse fusion/elimination opportunities
  *
- * // Or apply specific optimizations
+ * // Or analyse specific patterns
  * size_t fused = optimizer.fuse_linear_relu(graph);
  * size_t removed = optimizer.eliminate_dead_code(graph);
  *
  * // Get statistics
  * auto stats = optimizer.get_stats();
- * std::cout << "Total optimizations: " << stats.total() << "\n";
+ * std::cout << "Total opportunities: " << stats.total() << "\n";
  * @endcode
  *
- * @note All optimizations preserve the semantics of gradient computation
+ * @warning ANALYSIS-ONLY (see file-level warning): apart from
+ * fuse_linear_relu(), these passes only count opportunities on a local
+ * ComputationGraph copy and do not alter the executable grad_fn chain the
+ * backward engine walks. Gradients are unchanged by calling these methods.
  * @see ComputationGraph for graph representation
  * @see Function for operation definitions
  */
@@ -131,7 +150,10 @@ public:
      * optimizer.optimize(graph);  // Apply all optimizations
      * @endcode
      *
-     * @note This is the recommended way to optimize a graph
+     * @warning ANALYSIS-ONLY: this records opportunity counts in the stats and
+     * (for fuse_linear_relu only) rewrites the passed-in local ComputationGraph
+     * copy; it does NOT change the executable autograd grad_fn chain. See the
+     * file-level warning.
      */
     auto optimize(ComputationGraph& graph) -> void;
 
@@ -143,7 +165,12 @@ public:
      * This is the recommended entry point for users.
      *
      * @param root Variable whose computation graph to optimize
-     * @return Optimization statistics
+     * @return Optimization-opportunity statistics
+     *
+     * @warning ANALYSIS-ONLY: builds a throwaway ComputationGraph from root's
+     * grad_fn chain and analyses it. root's actual grad_fn chain (and hence
+     * backward() behaviour/gradients) is NOT modified. See the file-level
+     * warning.
      */
     auto optimize_variable(Variable& root) -> OptimizationStats;
 
@@ -177,7 +204,12 @@ public:
      * @endcode
      *
      * @note Only adjacent operations are fused (no intermediate consumers)
-     * @note Gradients are computed correctly through the fused operation
+     * @warning ANALYSIS-ONLY in effect: this is the one pass that calls
+     * replace_nodes, but it rewrites only the passed-in throwaway
+     * ComputationGraph copy — NOT the executable autograd grad_fn chain the
+     * backward engine walks, so backward() results are unchanged. The fused
+     * node it builds is also incomplete (no saved relu output/inputs), so it is
+     * not safe to execute. See the file-level warning.
      */
     auto fuse_linear_relu(ComputationGraph& graph) -> size_t;
 
@@ -210,27 +242,28 @@ public:
      * std::cout << "Fused " << fused << " Conv+BatchNorm pairs\n";
      * @endcode
      *
-     * @note Maintains correct gradient flow during training
-     * @note Can enable further optimizations during inference
+     * @warning ANALYSIS-ONLY: this pass only counts Conv+BatchNorm
+     * opportunities; it performs no rewrite of the local graph or the
+     * executable grad_fn chain. See the file-level warning.
      */
     auto fuse_conv_batchnorm(ComputationGraph& graph) -> size_t;
 
-    /** @brief Fuse Conv + ReLU into FusedConv2dReLU. */
+    /** @brief Count Conv + ReLU opportunities. ANALYSIS-ONLY: no rewrite. */
     auto fuse_conv_relu(ComputationGraph& graph) -> size_t;
 
-    /** @brief Fuse BatchNorm + ReLU into FusedBatchNormReLU. */
+    /** @brief Count BatchNorm + ReLU opportunities. ANALYSIS-ONLY: no rewrite. */
     auto fuse_batchnorm_relu(ComputationGraph& graph) -> size_t;
 
-    /** @brief Fuse Linear + GELU into a single fused op. */
+    /** @brief Count Linear + GELU opportunities. ANALYSIS-ONLY: no rewrite. */
     auto fuse_linear_gelu(ComputationGraph& graph) -> size_t;
 
-    /** @brief Fuse Conv + BatchNorm + ReLU into a single fused op. */
+    /** @brief Count Conv + BatchNorm + ReLU opportunities. ANALYSIS-ONLY: no rewrite. */
     auto fuse_conv_batchnorm_relu(ComputationGraph& graph) -> size_t;
 
-    /** @brief Eliminate redundant transpose pairs (A,B followed by B,A). */
+    /** @brief Count redundant transpose pairs (A,B then B,A). ANALYSIS-ONLY: no rewrite. */
     auto eliminate_transpose_pairs(ComputationGraph& graph) -> size_t;
 
-    /** @brief Collapse consecutive reshape operations into one. */
+    /** @brief Count collapsible reshape chains. ANALYSIS-ONLY: no rewrite. */
     auto collapse_reshape_chains(ComputationGraph& graph) -> size_t;
 
     /**

@@ -49,11 +49,18 @@ public:
     /// Accumulate a value into this statistic (thread-safe).
     auto add(double value) -> void;
 
-    /// Retrieve the current aggregate value.
+    /// Retrieve the current aggregate value. For MinMax this returns the max;
+    /// use get_min() for the tracked minimum.
     [[nodiscard]] auto get() const -> double;
+
+    /// Retrieve the tracked minimum (meaningful only for Aggregation::MinMax).
+    [[nodiscard]] auto get_min() const -> double;
 
     /// Number of add() calls since last reset.
     [[nodiscard]] auto count() const -> int64_t;
+
+    /// The aggregation strategy this stat was constructed with.
+    [[nodiscard]] auto aggregation() const -> Aggregation;
 
     /// The name this stat was registered under.
     [[nodiscard]] auto name() const -> const std::string&;

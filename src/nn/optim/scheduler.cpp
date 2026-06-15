@@ -379,6 +379,11 @@ auto ChainedScheduler::step() -> void {
         for (auto& scheduler : schedulers_) {
             if (scheduler) scheduler->step();
         }
+        // Best-effort: report the last child's LR since no shared optimizer
+        // LR is observable here.
+        if (!schedulers_.empty() && schedulers_.back()) {
+            last_lr_ = schedulers_.back()->get_last_lr();
+        }
         return;
     }
 
@@ -389,6 +394,7 @@ auto ChainedScheduler::step() -> void {
         for (auto& scheduler : schedulers_) {
             if (scheduler) scheduler->step();
         }
+        last_lr_ = opt->get_lr();
         return;
     }
 
@@ -405,11 +411,15 @@ auto ChainedScheduler::step() -> void {
         cumulative_factor    *= factor;
     }
 
-    opt->set_lr(initial_lr * cumulative_factor);
+    const double final_lr = initial_lr * cumulative_factor;
+    opt->set_lr(final_lr);
+    // Cache the LR actually written so get_last_lr() agrees with the optimizer
+    // (the product of all child factors), not just the last child's factor.
+    last_lr_ = final_lr;
 }
 
 auto ChainedScheduler::get_last_lr() const -> double {
-    return schedulers_.back()->get_last_lr();
+    return last_lr_;
 }
 
 //==============================================================================

@@ -103,13 +103,36 @@ auto GraphOptimizer::fuse_linear_relu(ComputationGraph& graph) -> size_t {
 
     // Apply fusions: replace each MatMul+ReLU pair with FusedLinearReLUBackward
     for (auto& [matmul_node, relu_node] : fusions) {
+        // Audit fix (LOW): FusedLinearReLUBackward::backward()/backward_with_variables()
+        // unconditionally dereference relu_output_ and saved_tensors_[0/1] (input,
+        // weight). Previously the fused node was created without these, leaving
+        // relu_output_ a null Tensor and no saved tensors — executing it would fault.
+        // Populate the mask source (ReLU's saved output) and the linear operands
+        // (MatMul's saved input/weight) at fusion time so the node is self-consistent.
+        if (!matmul_node->function || !relu_node->function) continue;
+
+        // ReLUBackward saves the pre-ReLU input as its sole saved tensor. The
+        // ReLU gate mask (z > 0) is identical whether evaluated on the input or
+        // the output (output > 0 iff input > 0), so this serves as the mask
+        // source consumed by FusedLinearReLUBackward as relu_output_.
+        const auto& relu_saved = relu_node->function->saved_tensors();
+        if (relu_saved.empty()) continue;
+
+        // MatMulBackward saves input (x) and weight (W) as saved_tensors_[0/1].
+        const auto& matmul_saved = matmul_node->function->saved_tensors();
+        if (matmul_saved.size() < 2) continue;
+
         auto fused_fn = std::make_shared<FusedLinearReLUBackward>();
 
+        // Mask source for the ReLU gate.
+        fused_fn->set_relu_output(relu_saved[0]);
+
+        // Linear operands consumed by backward as saved_tensors_[0]=x, [1]=W.
+        fused_fn->save_for_backward({matmul_saved[0], matmul_saved[1]});
+
         // Transfer the matmul's next_functions (input gradient chains)
-        if (matmul_node->function) {
-            fused_fn->set_next_functions(matmul_node->function->next_functions());
-            fused_fn->input_variables() = matmul_node->function->input_variables();
-        }
+        fused_fn->set_next_functions(matmul_node->function->next_functions());
+        fused_fn->input_variables() = matmul_node->function->input_variables();
 
         // Create fused graph node
         auto fused_graph_node = std::make_shared<GraphNode>();

@@ -156,7 +156,24 @@ public:
 
 private:
     static auto dtype_to_cuda_type(DType dtype) -> std::string;
-    static auto activation_expr(OpType act, const std::string& var) -> std::string;
+    static auto activation_expr(OpType act, const std::string& var, DType dtype)
+        -> std::string;
+
+    /// In-kernel math/accumulation type for a storage dtype. Float64 computes in
+    /// double; Float32 and the 16-bit types (Float16/BFloat16) compute in float
+    /// — half-precision accumulation is numerically wrong and the float math
+    /// intrinsics don't apply to __half/__nv_bfloat16 directly, so values are
+    /// promoted to float for the math and narrowed back to T on store.
+    static auto compute_type(DType dtype) -> std::string;
+
+    /// Float-literal suffix matching compute_type(): "" for double, "f" for
+    /// float (an 'f'-suffixed literal in a double kernel silently rounds to
+    /// single precision; mirrors KernelCodegen::emit_op).
+    static auto literal_suffix(DType dtype) -> std::string;
+
+    /// Math-intrinsic name for compute_type(): e.g. fn_for("exp", dt) returns
+    /// "exp" for double and "expf" for float.
+    static auto fn_for(const std::string& base, DType dtype) -> std::string;
 };
 
 // ============================================================================

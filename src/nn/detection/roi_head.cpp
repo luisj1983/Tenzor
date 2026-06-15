@@ -125,6 +125,13 @@ RoIHead::RoIHead(int64_t in_channels,
         in_channels, roi_output_size, num_classes
     );
     register_module("box_head", box_head_);
+
+    // Initialize loss members to a valid zero scalar Variable so get_losses()
+    // returns usable (zero) Variables after an inference-mode forward (where the
+    // training/gt branch never assigns them). Otherwise callers would deref a
+    // default-constructed Variable wrapping no tensor.
+    loss_classifier_ = Variable(ops::zeros({1}, DType::Float32, Device::cpu()), false);
+    loss_box_reg_ = Variable(ops::zeros({1}, DType::Float32, Device::cpu()), false);
 }
 
 auto RoIHead::forward_impl([[maybe_unused]] const Variable& input) -> Variable {
@@ -165,8 +172,14 @@ auto RoIHead::match_proposals_to_gt(const Tensor& proposals,
     // Assign labels based on IoU thresholds
     // (num_proposals already declared at top of function)
 
-    // Start with all labels as 0 (background)
-    std::vector<int64_t> label_data(num_proposals, 0);
+    // Labels: -1 (ignore), 0 (background), >0 (foreground class index).
+    // Mirrors RPN::assign_anchors_to_gt, which uses both fg_iou_thresh_ and
+    // bg_iou_thresh_ with a -1 ignore band for the [bg, fg) IoU range so those
+    // ambiguous proposals contribute to neither the positive nor the negative
+    // sampling pools (sample_rois selects positives via gt(labels,0) and
+    // negatives via eq(labels,0); a -1 label matches neither and is dropped).
+    // Start with all labels as -1 (ignore).
+    std::vector<int64_t> label_data(num_proposals, -1);
 
     // Get IoU values and matched indices as CPU tensors
     auto max_iou_cpu = max_iou_per_proposal.to(Device::cpu());
@@ -185,12 +198,14 @@ auto RoIHead::match_proposals_to_gt(const Tensor& proposals,
     // Set labels based on IoU thresholds
     // Use actual class labels from matched GT boxes
     for (int64_t i = 0; i < num_proposals; ++i) {
-        if (iou_data[i] >= fg_iou_thresh_) {
+        if (iou_data[i] < bg_iou_thresh_) {
+            label_data[i] = 0;  // background
+        } else if (iou_data[i] >= fg_iou_thresh_) {
             // Assign the actual GT class label
             int64_t matched_idx = matched_idx_data[i];
             label_data[i] = gt_labels_data[matched_idx];  // Use actual class label
         }
-        // else: keep as 0 (background)
+        // else: keep as -1 (ignore) for the [bg_iou_thresh_, fg_iou_thresh_) band
     }
 
     // Create labels tensor and copy data to avoid dangling pointer
@@ -424,13 +439,18 @@ auto RoIHead::forward_detections(
                 continue;  // Skip to next image
             }
 
-            // Get sampled predictions and targets
-            auto sampled_logits = ops::index_select(
-                class_logits.tensor(), 0, sampled_indices
+            // Get sampled predictions and targets. Use the autograd-aware
+            // index_select on the *Variable* outputs of forward_features so the
+            // grad_fn chain reaches fc1_/fc2_/cls_score_/bbox_pred_. Previously
+            // these used class_logits.tensor()/box_deltas.tensor() (raw, no
+            // autograd) and were re-wrapped as leaf Variables, severing the
+            // graph so the ROI head never trained.
+            auto sampled_logits = tenzor::index_select(
+                class_logits, 0, sampled_indices
             );
             auto sampled_labels = ops::index_select(labels, 0, sampled_indices);
-            auto sampled_box_deltas = ops::index_select(
-                box_deltas.tensor(), 0, sampled_indices
+            auto sampled_box_deltas = tenzor::index_select(
+                box_deltas, 0, sampled_indices
             );
             auto sampled_proposals = ops::index_select(
                 img_proposals, 0, sampled_indices
@@ -466,7 +486,7 @@ auto RoIHead::forward_detections(
 
             CrossEntropyLoss ce_loss;
             auto cls_loss = ce_loss.forward(
-                Variable(sampled_logits, true),
+                sampled_logits,
                 one_hot
             );
 
@@ -485,11 +505,15 @@ auto RoIHead::forward_detections(
             num_fg = fg_indices.numel();
 
             if (num_fg > 0) {
-                // Get foreground predictions and targets
-                auto fg_box_deltas = ops::index_select(
+                // Get foreground predictions via the autograd-aware index_select
+                // so the box-reg gradient flows back into bbox_pred_. The
+                // previous raw ops::index_select + Variable(...,true) rewrap
+                // severed the graph.
+                auto fg_box_deltas = tenzor::index_select(
                     sampled_box_deltas, 0, fg_indices
                 );
 
+                // Proposals / matched GT are targets (no grad needed).
                 auto fg_proposals = ops::index_select(
                     sampled_proposals, 0, fg_indices
                 );
@@ -500,27 +524,36 @@ auto RoIHead::forward_detections(
                 // Encode ground truth boxes
                 auto target_deltas = ops::encode_boxes(fg_matched_gt, fg_proposals);
 
-                // For class-specific regression, we need to select the right deltas
-                // Reshape to (num_fg, num_classes, 4) and select based on labels
+                // For class-specific regression, select the right deltas.
+                // Reshape to (num_fg, num_classes, 4) and select based on labels,
+                // staying inside the autograd graph throughout.
                 auto fg_labels = ops::index_select(sampled_labels, 0, fg_indices);
                 auto fg_box_deltas_reshaped = tenzor::reshape(fg_box_deltas,
                                                             {num_fg, num_classes_, 4});
 
-                // Select deltas for ground truth class
-                std::vector<Tensor> selected_deltas;
+                // Select deltas for ground truth class (autograd-aware).
+                std::vector<Variable> selected_deltas;
+                selected_deltas.reserve(num_fg);
                 for (int64_t j = 0; j < num_fg; ++j) {
                     auto label_scalar = ops::select(fg_labels, 0, j).item<int64_t>() - 1;  // 0-indexed
                     label_scalar = std::max(int64_t(0), std::min(label_scalar, num_classes_ - 1));
-                    auto delta = ops::select(fg_box_deltas_reshaped, 1, label_scalar);
-                    selected_deltas.push_back(unsqueeze(
-                        ops::select(delta, 0, j), 0
-                    ));
+                    // Pick class `label_scalar` along dim 1, then row `j` along
+                    // dim 0, both via autograd index_select; result shape (1, 4).
+                    auto cls_idx = ops::full({1}, static_cast<double>(label_scalar),
+                                             DType::Int64, fg_indices.device());
+                    auto row_idx = ops::full({1}, static_cast<double>(j),
+                                             DType::Int64, fg_indices.device());
+                    auto delta_cls = tenzor::index_select(fg_box_deltas_reshaped, 1, cls_idx); // (num_fg,1,4)
+                    auto delta_row = tenzor::index_select(delta_cls, 0, row_idx);              // (1,1,4)
+                    selected_deltas.push_back(
+                        tenzor::reshape(delta_row, {1, 4})
+                    );
                 }
-                auto fg_selected_deltas = ops::cat(selected_deltas, 0);
+                auto fg_selected_deltas = tenzor::cat(selected_deltas, 0);
 
                 SmoothL1Loss smooth_l1;
                 auto reg_loss = smooth_l1(
-                    Variable(fg_selected_deltas, true),
+                    fg_selected_deltas,
                     Variable(target_deltas, false)
                 );
 

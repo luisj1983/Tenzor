@@ -322,108 +322,6 @@ auto gelu_(Tensor& input) -> Tensor& {
     return input;
 }
 
-// Backward function for Hardswish
-// Hardswish(x) = x * clamp(x + 3, 0, 6) / 6
-// d(Hardswish)/dx = 0 if x <= -3, (2x + 3) / 6 if -3 < x < 3, 1 if x >= 3
-class HardswishBackward : public Function {
-public:
-    auto forward([[maybe_unused]] std::vector<Variable> inputs) -> std::vector<Variable> override {
-        throw std::runtime_error("HardswishBackward::forward should not be called");
-    }
-
-    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override {
-        auto& grad_output = grad_outputs[0];
-        const auto& input = saved_tensors()[0];
-
-        auto shape_vec = std::vector<int64_t>(input.shape().begin(), input.shape().end());
-        auto zero = zeros(shape_vec, input.dtype(), input.device());
-        auto one_tensor = ones(shape_vec, input.dtype(), input.device());
-        auto neg3 = full(shape_vec, -3.0f, input.dtype(), input.device());
-        auto pos3 = full(shape_vec, 3.0f, input.dtype(), input.device());
-
-        // Middle region gradient: (2x + 3) / 6
-        auto middle_grad = (input * 2.0f + 3.0f) / 6.0f;
-
-        // Piecewise: 0 for x <= -3, (2x+3)/6 for -3 < x < 3, 1 for x >= 3
-        auto cond_low = gt(input, neg3);   // x > -3
-        auto cond_high = gt(input, pos3);  // x > 3 (actually x >= 3 but close enough)
-
-        // First select middle vs 0, then override with 1 for high region
-        auto grad_hs = where(cond_low, middle_grad, zero);
-        grad_hs = where(cond_high, one_tensor, grad_hs);
-
-        return {grad_output * grad_hs};
-    }
-
-    auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override {
-        const auto& input = saved_tensors()[0];
-        auto shape_vec = std::vector<int64_t>(input.shape().begin(), input.shape().end());
-        auto zero = zeros(shape_vec, input.dtype(), input.device());
-        auto one_tensor = ones(shape_vec, input.dtype(), input.device());
-        auto neg3 = full(shape_vec, -3.0f, input.dtype(), input.device());
-        auto pos3 = full(shape_vec, 3.0f, input.dtype(), input.device());
-        auto middle_grad = (input * 2.0f + 3.0f) / 6.0f;
-        auto cond_low = gt(input, neg3);
-        auto cond_high = gt(input, pos3);
-        auto grad_hs = where(cond_low, middle_grad, zero);
-        grad_hs = where(cond_high, one_tensor, grad_hs);
-        Variable mask_var(grad_hs, false);
-        return {grad_outputs[0] * mask_var};
-    }
-
-    // Hardswish has no dedicated OpId yet (see Inf-D follow-up); keep
-    // the RTTI name match working via name() but leave op_id() at the
-    // default OpId::Unknown.
-    auto name() const -> std::string override { return "HardswishBackward"; }
-};
-
-// Backward function for Hardsigmoid
-// Hardsigmoid(x) = clamp(x + 3, 0, 6) / 6
-// d(Hardsigmoid)/dx = 0 if x <= -3, 1/6 if -3 < x < 3, 0 if x >= 3
-class HardsigmoidBackward : public Function {
-public:
-    auto forward([[maybe_unused]] std::vector<Variable> inputs) -> std::vector<Variable> override {
-        throw std::runtime_error("HardsigmoidBackward::forward should not be called");
-    }
-
-    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override {
-        auto& grad_output = grad_outputs[0];
-        const auto& input = saved_tensors()[0];
-
-        auto shape_vec = std::vector<int64_t>(input.shape().begin(), input.shape().end());
-        auto zero = zeros(shape_vec, input.dtype(), input.device());
-        auto sixth = full(shape_vec, 1.0f / 6.0f, input.dtype(), input.device());
-        auto neg3 = full(shape_vec, -3.0f, input.dtype(), input.device());
-        auto pos3 = full(shape_vec, 3.0f, input.dtype(), input.device());
-
-        // 1/6 when -3 < x < 3, 0 otherwise
-        auto cond_low = gt(input, neg3);
-        auto cond_high = gt(input, pos3);
-        auto grad_hs = where(cond_low, sixth, zero);
-        grad_hs = where(cond_high, zero, grad_hs);
-
-        return {grad_output * grad_hs};
-    }
-
-    auto backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> override {
-        const auto& input = saved_tensors()[0];
-        auto shape_vec = std::vector<int64_t>(input.shape().begin(), input.shape().end());
-        auto zero = zeros(shape_vec, input.dtype(), input.device());
-        auto sixth = full(shape_vec, 1.0f / 6.0f, input.dtype(), input.device());
-        auto neg3 = full(shape_vec, -3.0f, input.dtype(), input.device());
-        auto pos3 = full(shape_vec, 3.0f, input.dtype(), input.device());
-        auto cond_low = gt(input, neg3);
-        auto cond_high = gt(input, pos3);
-        auto grad_hs = where(cond_low, sixth, zero);
-        grad_hs = where(cond_high, zero, grad_hs);
-        Variable mask_var(grad_hs, false);
-        return {grad_outputs[0] * mask_var};
-    }
-
-    // Hardsigmoid has no dedicated OpId yet; same convention as Hardswish.
-    auto name() const -> std::string override { return "HardsigmoidBackward"; }
-};
-
 // PReLU implementation
 PReLU::PReLU(int64_t num_parameters, double init)
     : num_parameters_(num_parameters) {
@@ -667,7 +565,8 @@ auto hardtanh(const Variable& input, double min_val, double max_val) -> Variable
 
 class RReLUBackward : public Function {
 public:
-    RReLUBackward(double lower, double upper) : lower_(lower), upper_(upper) {}
+    RReLUBackward(double lower, double upper, bool training)
+        : lower_(lower), upper_(upper), training_(training) {}
 
     auto forward([[maybe_unused]] std::vector<Variable> inputs) -> std::vector<Variable> override {
         throw std::runtime_error("RReLUBackward::forward should not be called");
@@ -677,6 +576,27 @@ public:
         auto& grad_output = grad_outputs[0];
         const auto& input = saved_tensors()[0];
 
+        if (training_) {
+            // Training draws an independent random slope per negative element in
+            // forward. The kernel-based midpoint backward (below) would apply the
+            // fixed slope (lower+upper)/2 to every negative element, which is NOT
+            // the slope actually applied, making the gradient wrong everywhere
+            // x<=0. The kernel discards the noise mask, so we instead reconstruct
+            // the exact per-element slope from the saved input and output:
+            //   y = x for x>0, y = a*x for x<=0  =>  a = y/x  (x != 0)
+            // slope = 1 for x>0, y/x for x<0, and 0 at the measure-zero kink x==0.
+            const Tensor& output = saved_tensors()[1];
+            Tensor zeros = ::tenzor::zeros_like(input);
+            Tensor ones = ::tenzor::ones_like(input);
+            // Safe denominator avoids div-by-zero at x==0 (masked out below).
+            Tensor safe_input = ::tenzor::where(::tenzor::eq(input, zeros), ones, input);
+            Tensor slope_neg = ::tenzor::div(output, safe_input);
+            Tensor slope = ::tenzor::where(::tenzor::gt(input, zeros), ones, slope_neg);
+            return {::tenzor::mul(grad_output, slope)};
+        }
+
+        // Eval mode: forward uses the deterministic midpoint slope, so the
+        // kernel's midpoint backward is exactly correct.
         OpAttributes attrs;
         attrs.set(AttrKey::Lower, lower_);
         attrs.set(AttrKey::High, upper_);
@@ -698,6 +618,7 @@ public:
 private:
     double lower_;
     double upper_;
+    bool training_;
 };
 
 auto rrelu(const Variable& input, double lower, double upper, bool training) -> Variable {
@@ -713,8 +634,15 @@ auto rrelu(const Variable& input, double lower, double upper, bool training) -> 
         return Variable(result_tensor, false);
     }
 
-    auto grad_fn = std::make_shared<RReLUBackward>(lower, upper);
-    grad_fn->save_for_backward({input.tensor()});
+    auto grad_fn = std::make_shared<RReLUBackward>(lower, upper, training);
+    // In training mode the per-element slope must be reconstructed from the
+    // output (y = a*x for x<=0), so save both input and output. Eval mode only
+    // needs the input for the deterministic midpoint backward.
+    if (training) {
+        grad_fn->save_for_backward({input.tensor(), result_tensor});
+    } else {
+        grad_fn->save_for_backward({input.tensor()});
+    }
 
     std::vector<std::shared_ptr<Function>> next_funcs;
     if (input.grad_fn()) {

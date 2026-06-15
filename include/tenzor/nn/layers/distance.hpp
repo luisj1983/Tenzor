@@ -61,12 +61,13 @@ public:
         // Compute ||x1 - x2||_p via tensor ops with autograd
         using namespace tenzor;
         auto diff = x1 - x2;
-        auto abs_diff = abs(diff);
-        // Add eps for numerical stability
-        auto shape = abs_diff.tensor().shape();
+        // Add eps to the signed difference before taking the norm, matching the
+        // documented formula ||x1 - x2 + eps||_p (PyTorch semantics).
+        auto shape = diff.tensor().shape();
         auto eps_var = Variable(tenzor::full({shape.begin(), shape.end()}, static_cast<float>(eps_),
-                                             abs_diff.tensor().dtype(), abs_diff.tensor().device()), false);
-        abs_diff = abs_diff + eps_var;
+                                             diff.tensor().dtype(), diff.tensor().device()), false);
+        diff = diff + eps_var;
+        auto abs_diff = abs(diff);
 
         if (p_ == 1.0) {
             return sum(abs_diff, -1, keepdim_);

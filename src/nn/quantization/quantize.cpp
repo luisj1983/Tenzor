@@ -526,6 +526,10 @@ auto compute_quantization_error(const Tensor& original, const QuantizedTensor& q
     const float* orig_data = orig_f32.data<const float>();
     const float* deq_data = deq_f32.data<const float>();
     int64_t n = original.numel();
+    if (n == 0) {
+        throw std::invalid_argument(
+            "compute_quantization_error: original tensor is empty (numel == 0)");
+    }
 
     float mae = 0.0f;
     float mse = 0.0f;

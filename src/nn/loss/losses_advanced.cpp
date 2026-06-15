@@ -4,6 +4,7 @@
  */
 
 #include "tenzor/nn/loss/losses.hpp"
+#include "tenzor/nn/loss/contrastive.hpp"
 #include "tenzor/nn/activations/activations.hpp"
 #include "tenzor/ops/math.hpp"
 #include "tenzor/ops/reduction.hpp"
@@ -41,9 +42,19 @@ namespace {
             return sum(loss);
         } else if (reduction == "batchmean") {
             auto summed = sum(loss);
-            if (batch_size > 0) {
+            // When the caller does not pass an explicit batch size, infer it
+            // from the unreduced loss's leading dimension. Previously this fell
+            // through to mean(loss), so "batchmean" silently behaved as full
+            // "mean" (a different scalar) at every call site that omitted the
+            // batch_size argument.
+            int64_t bs = batch_size;
+            if (bs <= 0) {
+                const auto& shp = loss.shape();
+                bs = (!shp.empty()) ? shp[0] : 0;
+            }
+            if (bs > 0) {
                 // Division by batch_size using scalar Variable
-                auto scale = 1.0f / static_cast<float>(batch_size);
+                auto scale = 1.0f / static_cast<float>(bs);
                 auto scale_var = scalar_var(scale, summed);
                 return summed * scale_var;
             }
@@ -840,10 +851,11 @@ auto SoftMarginLoss::forward(const Variable& input, const Variable& target) -> V
     // loss = log(1 + exp(-y * x))
     // Use log1p(exp(-y*x)) for numerical stability when -y*x is large negative
     auto neg_yx = neg(input_c * target_c);
-    // softplus: log(1 + exp(x)) = max(x,0) + log(1 + exp(-|x|))
-    // But since we need autograd, use: log(1 + exp(x))
+    // Numerically stable softplus: log(1 + exp(z)) = relu(z) + log(1 + exp(-|z|))
+    // The direct log(1 + exp(z)) overflows to +inf once z > ~88 even in Float32.
+    // Mirrors BCEWithLogitsLoss.
     auto one = scalar_var(1.0f, neg_yx);
-    auto loss = log(one + exp(neg_yx));
+    auto loss = relu(neg_yx) + log(one + exp(neg(abs(neg_yx))));
 
     auto red_str = reduction_to_string(reduction_);
     Variable reduced = apply_reduction(loss, red_str);
@@ -1066,73 +1078,16 @@ TripletMarginLoss::TripletMarginLoss(double margin, double p, bool swap,
 
 auto TripletMarginLoss::forward(const Variable& anchor, const Variable& positive,
                                 const Variable& negative) -> Variable {
-    // Compute pairwise distances using p-norm
-    // d(a, p) = ||a - p||_p, d(a, n) = ||a - n||_p
-    //
-    // CC.8: the `1e-8f` eps for the L2 sqrt is well below the F16 smallest
-    // normal (~6.1e-5), so on F16/BF16 inputs the additive eps rounds to 0
-    // and sqrt(0) leaves the backward `1/(2*sqrt(...))` term blowing up to
-    // inf wherever anchor==positive or anchor==negative. Widen the diff
-    // tensors to Float32 for the distance computation (mirrors AA.4 FocalLoss
-    // / KLDiv upcast). `variable_cast` wires TypeCastBackward so gradients
-    // flow through the cast, and we downcast d_pos / d_neg back to the
-    // input dtype before the margin/relu/reduction so the loss dtype is
-    // preserved.
-    const DType orig_dtype = anchor.tensor().dtype();
-    const bool needs_upcast = (orig_dtype == DType::Float16 ||
-                               orig_dtype == DType::BFloat16);
-    Variable anchor_c = needs_upcast
-        ? tenzor::nn::variable_cast(anchor, DType::Float32)
-        : anchor;
-    Variable positive_c = needs_upcast
-        ? tenzor::nn::variable_cast(positive, DType::Float32)
-        : positive;
-    Variable negative_c = needs_upcast
-        ? tenzor::nn::variable_cast(negative, DType::Float32)
-        : negative;
-
-    auto diff_pos = anchor_c - positive_c;
-    auto diff_neg = anchor_c - negative_c;
-
-    // For p=2 (L2 norm): sqrt(sum(diff^2, dim=-1))
-    // For p=1 (L1 norm): sum(|diff|, dim=-1)
-    int64_t last_dim = static_cast<int64_t>(anchor.shape().size()) - 1;
-    Variable d_pos, d_neg;
-    auto eps_var = scalar_var(1e-8f, diff_pos);
-
-    if (p_ == 2.0) {
-        d_pos = sqrt(sum(diff_pos * diff_pos, last_dim, false) + eps_var);
-        d_neg = sqrt(sum(diff_neg * diff_neg, last_dim, false) + eps_var);
-    } else {
-        d_pos = sum(abs(diff_pos), last_dim, false);
-        d_neg = sum(abs(diff_neg), last_dim, false);
-    }
-
-    if (swap_) {
-        // Distance swap: use min(d(a,n), d(p,n)) for negative distance
-        auto diff_pn = positive_c - negative_c;
-        Variable d_pn;
-        if (p_ == 2.0) {
-            d_pn = sqrt(sum(diff_pn * diff_pn, last_dim, false) + eps_var);
-        } else {
-            d_pn = sum(abs(diff_pn), last_dim, false);
-        }
-        // d_neg = min(d_neg, d_pn) via: d_neg - relu(d_neg - d_pn)
-        d_neg = d_neg - relu(d_neg - d_pn);
-    }
-
-    // Downcast distances back to the input dtype before margin/relu so the
-    // resulting loss has the user-visible input dtype.
-    if (needs_upcast) {
-        d_pos = tenzor::nn::variable_cast(d_pos, orig_dtype);
-        d_neg = tenzor::nn::variable_cast(d_neg, orig_dtype);
-    }
-
-    auto margin_var = scalar_var(static_cast<float>(margin_), d_pos);
-    auto loss = relu(d_pos - d_neg + margin_var);
-
-    auto red_str = reduction_to_string(reduction_);
-    return apply_reduction(loss, red_str);
+    // TripletMarginLoss is documented as an alias for TripletLoss. Previously
+    // it was a second, hand-maintained implementation that had drifted from
+    // TripletLoss: general-p handling (it treated any p != 2 as L1 instead of a
+    // true Lp norm), and the two could return different numbers for the same
+    // inputs. Delegate to the single TripletLoss implementation (contrastive.cpp)
+    // so the "alias" is real — that path implements true Lp distance via
+    // local_pairwise_distance and already widens F16/BF16 to Float32 for the
+    // distance computation (and casts the loss back).
+    TripletLoss impl(margin_, p_, swap_, reduction_);
+    return impl.forward(anchor, positive, negative);
 }
 
 auto triplet_margin_loss(const Variable& anchor, const Variable& positive,
@@ -1202,10 +1157,12 @@ auto MultiLabelSoftMarginLoss::forward(const Variable& input,
 
     auto one = scalar_var(1.0f, input_c);
     auto neg_input = neg(input_c);
+    auto abs_input = abs(input_c);
 
-    // softplus(x) = log(1 + exp(x))
-    auto sp_pos = log(one + exp(input_c));     // log(1 + exp(x)) = softplus(x)
-    auto sp_neg = log(one + exp(neg_input));   // log(1 + exp(-x)) = softplus(-x)
+    // Numerically stable softplus: log(1 + exp(z)) = relu(z) + log(1 + exp(-|z|)).
+    // The direct log(1 + exp(z)) overflows to +inf once z > ~88 even in Float32.
+    auto sp_pos = relu(input_c) + log(one + exp(neg(abs_input)));     // softplus(x)
+    auto sp_neg = relu(neg_input) + log(one + exp(neg(abs_input)));   // softplus(-x)
 
     // log(sigma(x)) = -softplus(-x), log(1-sigma(x)) = -softplus(x)
     auto loss_per_element = target_c * sp_neg + (one - target_c) * sp_pos;

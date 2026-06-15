@@ -98,8 +98,6 @@ private:
     void* plugin_module_  = nullptr;  ///< iree_vm_module_t* (tenzor_plugin)
 };
 
-/// Thrown when iree-run-module reports a runtime failure. Carries the full
-/// stderr text for debugging.
 /// Probe whether the IREE runtime can create a default device for the
 /// given driver (e.g. "hip", "cuda", "vulkan"). On hosts where the
 /// Tenzor backend for a target isn't loaded but the IREE runtime can
@@ -118,6 +116,8 @@ private:
 auto iree_can_initialize_default_device(const std::string& driver_name)
     -> bool;
 
+/// Thrown when iree-run-module reports a runtime failure. Carries the full
+/// stderr text for debugging.
 class JitInvokeError : public std::runtime_error {
 public:
     using std::runtime_error::runtime_error;

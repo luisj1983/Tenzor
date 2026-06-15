@@ -189,7 +189,6 @@ namespace oneapi {
     auto adaptive_avg_pool2d_kernel(const Tensor& input, const OpAttributes& attrs, sycl::queue& queue) -> Tensor;
     auto adaptive_max_pool2d_kernel(const Tensor& input, const OpAttributes& attrs, sycl::queue& queue) -> Tensor;
     auto avg_pool2d_backward_kernel(const Tensor& grad_output, const Tensor& input, const OpAttributes& attrs, sycl::queue& queue) -> Tensor;
-    auto max_pool2d_backward_kernel(const Tensor& grad_output, const Tensor& input, const OpAttributes& attrs, sycl::queue& queue) -> Tensor;
     auto max_pool2d_backward_with_indices(const Tensor& grad_output, const Tensor& indices, int64_t H_in, int64_t W_in, sycl::queue& queue) -> Tensor;
     auto adaptive_avg_pool2d_backward_kernel(const Tensor& grad_output, const Tensor& input, const OpAttributes& attrs, sycl::queue& queue) -> Tensor;
     auto adaptive_avgpool2d_backward(const Tensor& grad_output, int64_t H_in, int64_t W_in, sycl::queue& queue) -> Tensor;
@@ -491,7 +490,8 @@ public:
                             }
                         }
                     },
-                    sycl::property_list{sycl::property::queue::in_order{}});
+                    sycl::property_list{sycl::property::queue::in_order{},
+                                        sycl::property::queue::enable_profiling{}});
 
                 OneAPIDeviceData dev_data;
                 dev_data.queue = queue;
@@ -757,13 +757,17 @@ public:
                 if (devices_.empty()) {
                     throw std::runtime_error("No SYCL devices available for copy");
                 }
-                int32_t dev_id;
-                {
-                    std::lock_guard<std::mutex> lock(allocations_mutex_);
-                    auto dst_it = allocations_.find(dst);
-                    dev_id = (dst_it != allocations_.end()) ? dst_it->second : 0;
+                // Resolve the owning device of the destination USM pointer.
+                // Falls back to sycl::get_pointer_device when dst is not a
+                // tracked base pointer (sub-buffer/offset/external USM) so the
+                // copy is submitted on the queue for the device that actually
+                // backs the memory, not silently device 0.
+                int32_t dev_id = resolve_device_for_ptr(dst);
+                if (dev_id < 0) {
+                    throw std::runtime_error(
+                        "SYCL H2D copy: destination pointer is not owned by any "
+                        "registered OneAPI device");
                 }
-                if (dev_id < 0 || dev_id >= static_cast<int32_t>(devices_.size())) dev_id = 0;
                 queue_ptr = devices_[dev_id].queue.get();
                 break;
             }
@@ -772,28 +776,30 @@ public:
                 if (devices_.empty()) {
                     throw std::runtime_error("No SYCL devices available for copy");
                 }
-                int32_t dev_id;
-                {
-                    std::lock_guard<std::mutex> lock(allocations_mutex_);
-                    auto src_it = allocations_.find(const_cast<void*>(src));
-                    dev_id = (src_it != allocations_.end()) ? src_it->second : 0;
+                int32_t dev_id = resolve_device_for_ptr(src);
+                if (dev_id < 0) {
+                    throw std::runtime_error(
+                        "SYCL D2H copy: source pointer is not owned by any "
+                        "registered OneAPI device");
                 }
-                if (dev_id < 0 || dev_id >= static_cast<int32_t>(devices_.size())) dev_id = 0;
                 queue_ptr = devices_[dev_id].queue.get();
                 break;
             }
             case CopyKind::DeviceToDevice: {
-                // Use destination device's queue for D2D
+                // Use destination device's queue for D2D, falling back to the
+                // source device if the destination pointer cannot be resolved.
                 if (devices_.empty()) {
                     throw std::runtime_error("No SYCL devices available for copy");
                 }
-                int32_t dev_id;
-                {
-                    std::lock_guard<std::mutex> lock(allocations_mutex_);
-                    auto dst_it = allocations_.find(dst);
-                    dev_id = (dst_it != allocations_.end()) ? dst_it->second : 0;
+                int32_t dev_id = resolve_device_for_ptr(dst);
+                if (dev_id < 0) {
+                    dev_id = resolve_device_for_ptr(src);
                 }
-                if (dev_id < 0 || dev_id >= static_cast<int32_t>(devices_.size())) dev_id = 0;
+                if (dev_id < 0) {
+                    throw std::runtime_error(
+                        "SYCL D2D copy: neither source nor destination pointer "
+                        "is owned by any registered OneAPI device");
+                }
                 queue_ptr = devices_[dev_id].queue.get();
                 break;
             }
@@ -840,7 +846,8 @@ public:
                         }
                     }
                 },
-                sycl::property_list{sycl::property::queue::in_order{}});
+                sycl::property_list{sycl::property::queue::in_order{},
+                                    sycl::property::queue::enable_profiling{}});
             return static_cast<StreamHandle>(queue);
         } catch (const sycl::exception& e) {
             throw std::runtime_error(
@@ -1001,6 +1008,42 @@ private:
         // OneAPIBackendTest.InvalidDeviceIndex).
         validate_device_id(device_id);
         return *devices_[device_id].queue;
+    }
+
+    // Resolve the device index that owns a (possibly untracked) USM device
+    // pointer. First consult allocations_ for the exact base pointer; if that
+    // misses (sub-buffer/offset pointer, or externally allocated USM), query
+    // SYCL via sycl::get_pointer_device against each registered device's
+    // context and match the owning sycl::device. Returns -1 if the pointer is
+    // not device memory owned by any registered device (e.g. a host pointer).
+    auto resolve_device_for_ptr(const void* ptr) -> int32_t {
+        {
+            std::lock_guard<std::mutex> lock(allocations_mutex_);
+            auto it = allocations_.find(const_cast<void*>(ptr));
+            if (it != allocations_.end()) {
+                return it->second;
+            }
+        }
+        // Not a tracked base pointer — ask SYCL which device backs this USM
+        // allocation and map it back to a registered device index.
+        for (size_t i = 0; i < devices_.size(); ++i) {
+            try {
+                const auto& ctx = devices_[i].queue->get_context();
+                auto alloc_kind = sycl::get_pointer_type(ptr, ctx);
+                if (alloc_kind == sycl::usm::alloc::unknown ||
+                    alloc_kind == sycl::usm::alloc::host) {
+                    continue;
+                }
+                sycl::device owner = sycl::get_pointer_device(ptr, ctx);
+                if (owner == devices_[i].device) {
+                    return static_cast<int32_t>(i);
+                }
+            } catch (const sycl::exception&) {
+                // Pointer not associated with this context; try the next.
+                continue;
+            }
+        }
+        return -1;
     }
 
     auto validate_device_id(int32_t device_id) const -> void {

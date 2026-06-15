@@ -49,6 +49,13 @@ struct GraphBuilder {
     // to resolve relative sizes (Upsample.scale_factor) can do so at export
     // time. Captured by declare_input(); empty before that call.
     std::vector<int64_t> input_shape;
+    // True once a layer that CHANGES the spatial dims (conv with stride/pad,
+    // pooling, conv-transpose, flatten, a prior upsample, ...) has been emitted.
+    // A relative scale_factor Upsample is only safe to resolve against
+    // input_shape while this is false; afterwards the spatial dims at the
+    // Upsample input no longer match the graph input, so we must reject it and
+    // require an absolute size rather than emit a silently wrong target size.
+    bool spatial_shape_dirty{false};
 
     auto fresh() -> int16_t { return next_id++; }
 
@@ -182,6 +189,10 @@ auto emit_conv_node(OpId op, nn::Module& m, GraphBuilder& b, int16_t in_id,
     auto out_id = b.fresh();
     node.output_ids = {out_id};
     b.graph.add_node(std::move(node));
+    // Conv / ConvTranspose change the spatial dims (stride/padding/dilation /
+    // output_padding), so a later relative-scale Upsample can no longer trust
+    // the graph-input shape.
+    b.spatial_shape_dirty = true;
     return out_id;
 }
 
@@ -767,6 +778,20 @@ auto emit_upsample(nn::Upsample& up, GraphBuilder& b, int16_t in_id) -> int16_t 
     if (up.size().has_value()) {
         target_size = *up.size();
     } else if (up.scale_factor().has_value()) {
+        // A relative scale_factor can only be resolved against the actual
+        // spatial dims at THIS layer's input. We only track the graph-input
+        // shape, which equals the Upsample input shape ONLY when no
+        // shape-changing layer precedes it. If one does (strided conv, pooling,
+        // conv-transpose — the common decoder/U-Net case), resolving against
+        // input_shape would silently produce a wrong target size, so reject it
+        // and require an absolute size instead.
+        if (b.spatial_shape_dirty) {
+            throw std::runtime_error(
+                "export_to_tzlite: nn::Upsample with a relative scale_factor is "
+                "only supported when it precedes any shape-changing layer "
+                "(conv/pool/etc.); the spatial dims at this Upsample no longer "
+                "match the graph input. Specify an absolute `size` instead.");
+        }
         // Expect input shape (N, C, [D,] H, W); spatial dims = last
         // (rank - 2) axes.  Need at least rank 3.
         if (input_shape.size() < 3) {
@@ -794,6 +819,8 @@ auto emit_upsample(nn::Upsample& up, GraphBuilder& b, int16_t in_id) -> int16_t 
     auto out_id = b.fresh();
     node.output_ids = {out_id};
     b.graph.add_node(std::move(node));
+    // Upsample itself changes the spatial dims.
+    b.spatial_shape_dirty = true;
     return out_id;
 }
 
@@ -841,50 +868,67 @@ auto visit(nn::Module& m, GraphBuilder& b, int16_t in_id) -> int16_t {
         return emit_groupnorm(*gn, b, in_id);
     }
     if (auto* fl = dynamic_cast<nn::Flatten*>(&m)) {
+        // Flatten collapses the spatial dims into one, so a later relative
+        // Upsample can no longer rely on the graph-input spatial shape.
+        b.spatial_shape_dirty = true;
         return emit_flatten(*fl, b, in_id);
     }
     if (dynamic_cast<nn::Dropout*>(&m)) {
         // Inference-only Lite runtime — dropout is identity. Emit nothing
-        // and forward the tensor id (zero-copy passthrough).
+        // and forward the tensor id (zero-copy passthrough). Shape-preserving.
         return in_id;
     }
+    // Pooling and adaptive pooling all change the spatial dims, so they
+    // invalidate the graph-input spatial shape for a later relative Upsample.
     if (auto* mp = dynamic_cast<nn::MaxPool2d*>(&m)) {
+        b.spatial_shape_dirty = true;
         return emit_maxpool2d(*mp, b, in_id);
     }
     if (auto* ap = dynamic_cast<nn::AvgPool2d*>(&m)) {
+        b.spatial_shape_dirty = true;
         return emit_avgpool2d(*ap, b, in_id);
     }
     // Batch 2: 1d / 3d pool, adaptive pool, ConvTranspose, InstanceNorm, Identity.
     if (auto* mp = dynamic_cast<nn::MaxPool1d*>(&m)) {
+        b.spatial_shape_dirty = true;
         return emit_maxpool1d(*mp, b, in_id);
     }
     if (auto* mp = dynamic_cast<nn::MaxPool3d*>(&m)) {
+        b.spatial_shape_dirty = true;
         return emit_maxpool3d(*mp, b, in_id);
     }
     if (auto* ap = dynamic_cast<nn::AvgPool1d*>(&m)) {
+        b.spatial_shape_dirty = true;
         return emit_avgpool1d(*ap, b, in_id);
     }
     if (auto* ap = dynamic_cast<nn::AvgPool3d*>(&m)) {
+        b.spatial_shape_dirty = true;
         return emit_avgpool3d(*ap, b, in_id);
     }
     // Adaptive pools — order: 2d before 3d/1d (concrete first), but the
     // classes share no base so dynamic_cast order is purely cosmetic.
     if (auto* p = dynamic_cast<nn::AdaptiveAvgPool2d*>(&m)) {
+        b.spatial_shape_dirty = true;
         return emit_adaptive_avg_pool2d(*p, b, in_id);
     }
     if (auto* p = dynamic_cast<nn::AdaptiveMaxPool2d*>(&m)) {
+        b.spatial_shape_dirty = true;
         return emit_adaptive_max_pool2d(*p, b, in_id);
     }
     if (auto* p = dynamic_cast<nn::AdaptiveAvgPool1d*>(&m)) {
+        b.spatial_shape_dirty = true;
         return emit_adaptive_avg_pool1d(*p, b, in_id);
     }
     if (auto* p = dynamic_cast<nn::AdaptiveMaxPool1d*>(&m)) {
+        b.spatial_shape_dirty = true;
         return emit_adaptive_max_pool1d(*p, b, in_id);
     }
     if (auto* p = dynamic_cast<nn::AdaptiveAvgPool3d*>(&m)) {
+        b.spatial_shape_dirty = true;
         return emit_adaptive_avg_pool3d(*p, b, in_id);
     }
     if (auto* p = dynamic_cast<nn::AdaptiveMaxPool3d*>(&m)) {
+        b.spatial_shape_dirty = true;
         return emit_adaptive_max_pool3d(*p, b, in_id);
     }
     // ConvTranspose 2d/3d — ConvTranspose1d is deferred: its module wraps
@@ -956,11 +1000,12 @@ auto visit(nn::Module& m, GraphBuilder& b, int16_t in_id) -> int16_t {
         return emit_rmsnorm(*rn, b, in_id);
     }
     // C.3 audit batch 3: Upsample — emits OpId::Interpolate with mode +
-    // align_corners + resolved spatial output_size (we resolve scale
-    // factor against b.input_shape so the runtime needs no shape
-    // inference). Caveat: the resolved size assumes the export-time input
-    // shape; consumers that vary input rank between export and inference
-    // must use the absolute `size` constructor rather than `scale_factor`.
+    // align_corners + resolved spatial output_size. A relative scale_factor
+    // is resolved against b.input_shape, which is only valid while no
+    // shape-changing layer precedes the Upsample; emit_upsample rejects a
+    // relative scale_factor once b.spatial_shape_dirty is set (decoder/U-Net
+    // case) and requires an absolute `size` instead. Consumers that vary input
+    // rank between export and inference must also use the absolute `size`.
     if (auto* up = dynamic_cast<nn::Upsample*>(&m)) {
         return emit_upsample(*up, b, in_id);
     }

@@ -581,7 +581,13 @@ __global__ void layernorm_backward_kernel(const T* grad_output,
     }
     sum = block_reduce_sum(sum, shared);
     __syncthreads();
-    T mean = sum / T(normalized_size);
+    // block_reduce_sum leaves the result valid only in thread 0; broadcast.
+    if (threadIdx.x == 0) {
+        shared[0] = sum / T(normalized_size);
+    }
+    __syncthreads();
+    T mean = shared[0];
+    __syncthreads();
 
     // Compute variance
     T var_sum = T(0);
@@ -591,8 +597,13 @@ __global__ void layernorm_backward_kernel(const T* grad_output,
     }
     var_sum = block_reduce_sum(var_sum, shared);
     __syncthreads();
-    T variance = var_sum / T(normalized_size);
-    T invstd = rsqrt(variance + epsilon);
+    if (threadIdx.x == 0) {
+        T variance = var_sum / T(normalized_size);
+        shared[0] = rsqrt(variance + epsilon);
+    }
+    __syncthreads();
+    T invstd = shared[0];
+    __syncthreads();
 
     // Compute gradient statistics
     T grad_output_sum = T(0);
@@ -608,8 +619,14 @@ __global__ void layernorm_backward_kernel(const T* grad_output,
     grad_output_norm_sum = block_reduce_sum(grad_output_norm_sum, shared);
     __syncthreads();
 
-    T mean_grad = grad_output_sum / T(normalized_size);
-    T mean_grad_norm = grad_output_norm_sum / T(normalized_size);
+    // Broadcast both gradient means from thread 0 to all threads.
+    if (threadIdx.x == 0) {
+        shared[0] = grad_output_sum / T(normalized_size);
+        shared[1] = grad_output_norm_sum / T(normalized_size);
+    }
+    __syncthreads();
+    T mean_grad = shared[0];
+    T mean_grad_norm = shared[1];
 
     // Compute input gradient
     for (int64_t i = threadIdx.x; i < normalized_size; i += blockDim.x) {
@@ -660,7 +677,14 @@ __global__ void instancenorm_forward_kernel(const T* input,
     }
     sum = block_reduce_sum(sum, shared);
     __syncthreads();
-    T mean = sum / T(spatial_size);
+    // block_reduce_sum leaves the result valid only in thread 0; broadcast the
+    // mean to all threads via shared memory before using it below.
+    if (threadIdx.x == 0) {
+        shared[0] = sum / T(spatial_size);
+    }
+    __syncthreads();
+    T mean = shared[0];
+    __syncthreads();
 
     // Compute variance
     T var_sum = T(0);
@@ -670,8 +694,13 @@ __global__ void instancenorm_forward_kernel(const T* input,
     }
     var_sum = block_reduce_sum(var_sum, shared);
     __syncthreads();
-    T variance = var_sum / T(spatial_size);
-    T invstd = rsqrt(variance + epsilon);
+    // Broadcast invstd from thread 0 to all threads.
+    if (threadIdx.x == 0) {
+        T variance = var_sum / T(spatial_size);
+        shared[0] = rsqrt(variance + epsilon);
+    }
+    __syncthreads();
+    T invstd = shared[0];
 
     // Normalize and apply affine
     for (int64_t i = threadIdx.x; i < spatial_size; i += blockDim.x) {
@@ -712,7 +741,13 @@ __global__ void instancenorm_backward_kernel(const T* grad_output,
     }
     sum = block_reduce_sum(sum, shared);
     __syncthreads();
-    T mean = sum / T(spatial_size);
+    // block_reduce_sum leaves the result valid only in thread 0; broadcast.
+    if (threadIdx.x == 0) {
+        shared[0] = sum / T(spatial_size);
+    }
+    __syncthreads();
+    T mean = shared[0];
+    __syncthreads();
 
     T var_sum = T(0);
     for (int64_t i = threadIdx.x; i < spatial_size; i += blockDim.x) {
@@ -721,8 +756,13 @@ __global__ void instancenorm_backward_kernel(const T* grad_output,
     }
     var_sum = block_reduce_sum(var_sum, shared);
     __syncthreads();
-    T variance = var_sum / T(spatial_size);
-    T invstd = rsqrt(variance + epsilon);
+    if (threadIdx.x == 0) {
+        T variance = var_sum / T(spatial_size);
+        shared[0] = rsqrt(variance + epsilon);
+    }
+    __syncthreads();
+    T invstd = shared[0];
+    __syncthreads();
 
     // Compute gradient statistics
     T grad_output_sum = T(0);
@@ -738,8 +778,14 @@ __global__ void instancenorm_backward_kernel(const T* grad_output,
     grad_output_norm_sum = block_reduce_sum(grad_output_norm_sum, shared);
     __syncthreads();
 
-    T mean_grad = grad_output_sum / T(spatial_size);
-    T mean_grad_norm = grad_output_norm_sum / T(spatial_size);
+    // Broadcast both gradient means from thread 0 to all threads.
+    if (threadIdx.x == 0) {
+        shared[0] = grad_output_sum / T(spatial_size);
+        shared[1] = grad_output_norm_sum / T(spatial_size);
+    }
+    __syncthreads();
+    T mean_grad = shared[0];
+    T mean_grad_norm = shared[1];
 
     // Compute gradients
     for (int64_t i = threadIdx.x; i < spatial_size; i += blockDim.x) {
@@ -793,7 +839,14 @@ __global__ void groupnorm_forward_kernel(const T* input,
     }
     sum = block_reduce_sum(sum, shared);
     __syncthreads();
-    T mean = sum / T(group_size);
+    // block_reduce_sum leaves the result valid only in thread 0; broadcast the
+    // mean to all threads via shared memory before using it below.
+    if (threadIdx.x == 0) {
+        shared[0] = sum / T(group_size);
+    }
+    __syncthreads();
+    T mean = shared[0];
+    __syncthreads();
 
     // Compute variance over group
     T var_sum = T(0);
@@ -803,8 +856,13 @@ __global__ void groupnorm_forward_kernel(const T* input,
     }
     var_sum = block_reduce_sum(var_sum, shared);
     __syncthreads();
-    T variance = var_sum / T(group_size);
-    T invstd = rsqrt(variance + epsilon);
+    // Broadcast invstd from thread 0 to all threads.
+    if (threadIdx.x == 0) {
+        T variance = var_sum / T(group_size);
+        shared[0] = rsqrt(variance + epsilon);
+    }
+    __syncthreads();
+    T invstd = shared[0];
 
     // Normalize and apply affine (channel-wise gamma/beta)
     for (int64_t i = threadIdx.x; i < group_size; i += blockDim.x) {
@@ -840,7 +898,13 @@ __global__ void layernorm_backward_kernel_fp16(const __half* grad_output,
     }
     sum = block_reduce_sum(sum, shared);
     __syncthreads();
-    float mean = sum / static_cast<float>(normalized_size);
+    // block_reduce_sum leaves the result valid only in thread 0; broadcast.
+    if (threadIdx.x == 0) {
+        shared[0] = sum / static_cast<float>(normalized_size);
+    }
+    __syncthreads();
+    float mean = shared[0];
+    __syncthreads();
 
     // Compute variance in float
     float var_sum = 0.0f;
@@ -850,8 +914,13 @@ __global__ void layernorm_backward_kernel_fp16(const __half* grad_output,
     }
     var_sum = block_reduce_sum(var_sum, shared);
     __syncthreads();
-    float variance = var_sum / static_cast<float>(normalized_size);
-    float invstd = rsqrtf(variance + epsilon);
+    if (threadIdx.x == 0) {
+        float variance = var_sum / static_cast<float>(normalized_size);
+        shared[0] = rsqrtf(variance + epsilon);
+    }
+    __syncthreads();
+    float invstd = shared[0];
+    __syncthreads();
 
     // Compute gradient statistics
     float grad_output_sum = 0.0f;
@@ -867,8 +936,14 @@ __global__ void layernorm_backward_kernel_fp16(const __half* grad_output,
     grad_output_norm_sum = block_reduce_sum(grad_output_norm_sum, shared);
     __syncthreads();
 
-    float mean_grad = grad_output_sum / static_cast<float>(normalized_size);
-    float mean_grad_norm = grad_output_norm_sum / static_cast<float>(normalized_size);
+    // Broadcast both gradient means from thread 0 to all threads.
+    if (threadIdx.x == 0) {
+        shared[0] = grad_output_sum / static_cast<float>(normalized_size);
+        shared[1] = grad_output_norm_sum / static_cast<float>(normalized_size);
+    }
+    __syncthreads();
+    float mean_grad = shared[0];
+    float mean_grad_norm = shared[1];
 
     // Compute input gradient
     for (int64_t i = threadIdx.x; i < normalized_size; i += blockDim.x) {
@@ -915,7 +990,13 @@ __global__ void instancenorm_backward_kernel_fp16(const __half* grad_output,
     }
     sum = block_reduce_sum(sum, shared);
     __syncthreads();
-    float mean = sum / static_cast<float>(spatial_size);
+    // block_reduce_sum leaves the result valid only in thread 0; broadcast.
+    if (threadIdx.x == 0) {
+        shared[0] = sum / static_cast<float>(spatial_size);
+    }
+    __syncthreads();
+    float mean = shared[0];
+    __syncthreads();
 
     float var_sum = 0.0f;
     for (int64_t i = threadIdx.x; i < spatial_size; i += blockDim.x) {
@@ -924,8 +1005,13 @@ __global__ void instancenorm_backward_kernel_fp16(const __half* grad_output,
     }
     var_sum = block_reduce_sum(var_sum, shared);
     __syncthreads();
-    float variance = var_sum / static_cast<float>(spatial_size);
-    float invstd = rsqrtf(variance + epsilon);
+    if (threadIdx.x == 0) {
+        float variance = var_sum / static_cast<float>(spatial_size);
+        shared[0] = rsqrtf(variance + epsilon);
+    }
+    __syncthreads();
+    float invstd = shared[0];
+    __syncthreads();
 
     // Compute gradient statistics
     float grad_output_sum = 0.0f;
@@ -941,8 +1027,14 @@ __global__ void instancenorm_backward_kernel_fp16(const __half* grad_output,
     grad_output_norm_sum = block_reduce_sum(grad_output_norm_sum, shared);
     __syncthreads();
 
-    float mean_grad = grad_output_sum / static_cast<float>(spatial_size);
-    float mean_grad_norm = grad_output_norm_sum / static_cast<float>(spatial_size);
+    // Broadcast both gradient means from thread 0 to all threads.
+    if (threadIdx.x == 0) {
+        shared[0] = grad_output_sum / static_cast<float>(spatial_size);
+        shared[1] = grad_output_norm_sum / static_cast<float>(spatial_size);
+    }
+    __syncthreads();
+    float mean_grad = shared[0];
+    float mean_grad_norm = shared[1];
 
     float g = tenzor::rocm::safe_h2f(gamma[c]);
 
@@ -993,7 +1085,13 @@ __global__ void groupnorm_backward_kernel_fp16(const __half* grad_output,
     }
     sum = block_reduce_sum(sum, shared);
     __syncthreads();
-    float mean = sum / static_cast<float>(group_size);
+    // block_reduce_sum leaves the result valid only in thread 0; broadcast.
+    if (threadIdx.x == 0) {
+        shared[0] = sum / static_cast<float>(group_size);
+    }
+    __syncthreads();
+    float mean = shared[0];
+    __syncthreads();
 
     float var_sum = 0.0f;
     for (int64_t i = threadIdx.x; i < group_size; i += blockDim.x) {
@@ -1002,8 +1100,13 @@ __global__ void groupnorm_backward_kernel_fp16(const __half* grad_output,
     }
     var_sum = block_reduce_sum(var_sum, shared);
     __syncthreads();
-    float variance = var_sum / static_cast<float>(group_size);
-    float invstd = rsqrtf(variance + epsilon);
+    if (threadIdx.x == 0) {
+        float variance = var_sum / static_cast<float>(group_size);
+        shared[0] = rsqrtf(variance + epsilon);
+    }
+    __syncthreads();
+    float invstd = shared[0];
+    __syncthreads();
 
     // Compute gradient statistics
     float grad_output_sum = 0.0f;
@@ -1019,8 +1122,14 @@ __global__ void groupnorm_backward_kernel_fp16(const __half* grad_output,
     grad_output_norm_sum = block_reduce_sum(grad_output_norm_sum, shared);
     __syncthreads();
 
-    float mean_grad = grad_output_sum / static_cast<float>(group_size);
-    float mean_grad_norm = grad_output_norm_sum / static_cast<float>(group_size);
+    // Broadcast both gradient means from thread 0 to all threads.
+    if (threadIdx.x == 0) {
+        shared[0] = grad_output_sum / static_cast<float>(group_size);
+        shared[1] = grad_output_norm_sum / static_cast<float>(group_size);
+    }
+    __syncthreads();
+    float mean_grad = shared[0];
+    float mean_grad_norm = shared[1];
 
     // Compute gradients
     for (int64_t i = threadIdx.x; i < group_size; i += blockDim.x) {
@@ -1081,7 +1190,13 @@ __global__ void groupnorm_backward_kernel(const T* grad_output,
     }
     sum = block_reduce_sum(sum, shared);
     __syncthreads();
-    T mean = sum / T(group_size);
+    // block_reduce_sum leaves the result valid only in thread 0; broadcast.
+    if (threadIdx.x == 0) {
+        shared[0] = sum / T(group_size);
+    }
+    __syncthreads();
+    T mean = shared[0];
+    __syncthreads();
 
     T var_sum = T(0);
     for (int64_t i = threadIdx.x; i < group_size; i += blockDim.x) {
@@ -1090,8 +1205,13 @@ __global__ void groupnorm_backward_kernel(const T* grad_output,
     }
     var_sum = block_reduce_sum(var_sum, shared);
     __syncthreads();
-    T variance = var_sum / T(group_size);
-    T invstd = rsqrt(variance + epsilon);
+    if (threadIdx.x == 0) {
+        T variance = var_sum / T(group_size);
+        shared[0] = rsqrt(variance + epsilon);
+    }
+    __syncthreads();
+    T invstd = shared[0];
+    __syncthreads();
 
     // Compute gradient statistics
     T grad_output_sum = T(0);
@@ -1109,8 +1229,14 @@ __global__ void groupnorm_backward_kernel(const T* grad_output,
     grad_output_norm_sum = block_reduce_sum(grad_output_norm_sum, shared);
     __syncthreads();
 
-    T mean_grad = grad_output_sum / T(group_size);
-    T mean_grad_norm = grad_output_norm_sum / T(group_size);
+    // Broadcast both gradient means from thread 0 to all threads.
+    if (threadIdx.x == 0) {
+        shared[0] = grad_output_sum / T(group_size);
+        shared[1] = grad_output_norm_sum / T(group_size);
+    }
+    __syncthreads();
+    T mean_grad = shared[0];
+    T mean_grad_norm = shared[1];
 
     // Compute gradients
     for (int64_t i = threadIdx.x; i < group_size; i += blockDim.x) {

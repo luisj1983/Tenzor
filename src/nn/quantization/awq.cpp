@@ -351,6 +351,7 @@ auto AWQQuantizer::quantize_layer(const Tensor& weight, const Tensor& act_scales
 
     return AWQResult{
         .quantized_weight = std::move(packed),
+        .in_features = in_features,
         .scales = std::move(scales),
         .zeros = std::move(zeros_tensor),
         .act_scales = std::move(act_scales_out)

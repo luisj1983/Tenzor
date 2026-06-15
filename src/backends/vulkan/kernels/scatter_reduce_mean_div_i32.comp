@@ -1,0 +1,23 @@
+#version 450
+
+// scatter_reduce mean divisor pass (Int32) — integer-divides each output element
+// by its scatter-count (+1 if include_self). Matches PyTorch integer
+// scatter_reduce "mean", which truncates toward zero.
+layout(local_size_x_id = 0) in;
+
+layout(binding = 0) buffer Output { int out_data[]; };
+layout(binding = 1) buffer Counts { int count_data[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint numel;
+    uint include_self;  // 0 or 1
+} params;
+
+void main() {
+    uint tid = gl_GlobalInvocationID.x;
+    if (tid >= params.numel) return;
+    int c = count_data[tid];
+    if (c <= 0) return;
+    int divisor = (params.include_self != 0u) ? (c + 1) : c;
+    out_data[tid] = out_data[tid] / divisor;
+}

@@ -1364,11 +1364,18 @@ auto randperm(int64_t n, Device device, Generator& generator) -> Tensor {
 
 auto logspace(float start, float end, int64_t steps, double base,
               DType dtype, Device device) -> Tensor {
-    auto exponents = tenzor::linspace(start, end, steps, dtype, device);
+    // Carry the intermediates (linspace, log(base), exp) in a floating compute
+    // dtype so integer/half outputs are not corrupted: an integer dtype would
+    // truncate the exponents and log(base) before exp() (and exp() on an
+    // integer tensor is unsupported). Only cast to the requested dtype at the
+    // end.
+    DType compute = (dtype == DType::Float64) ? DType::Float64 : DType::Float32;
+    auto exponents = tenzor::linspace(start, end, steps, compute, device);
     // base^exponents = exp(log(base) * exponents)
-    float log_base = static_cast<float>(std::log(base));
-    auto scaled = tenzor::mul(exponents, tenzor::full({1}, log_base, dtype, device));
-    return tenzor::exp(scaled);
+    double log_base = std::log(base);
+    auto scaled = tenzor::mul(exponents, tenzor::full({1}, log_base, compute, device));
+    auto result = tenzor::exp(scaled);
+    return (dtype != compute) ? result.to(dtype) : result;
 }
 
 // =========================================================================

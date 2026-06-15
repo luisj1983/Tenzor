@@ -104,16 +104,25 @@ public:
             }
             out_tensor->set_dtype(dtype_to_string(output_cont.dtype()));
             size_t data_bytes = output_cont.numel() * dtype_size(output_cont.dtype());
-            out_tensor->set_data(output_cont.data<float>(), data_bytes);
+            // Serialize raw bytes through the untyped storage pointer (matching
+            // the input side above). data<float>() throws DTypeException for any
+            // dtype != Float32, which would break inference for Float64/Float16/
+            // Int32/Int64 outputs.
+            out_tensor->set_data(output_cont.storage()->data(), data_bytes);
 
             auto end = std::chrono::high_resolution_clock::now();
             float latency_ms = std::chrono::duration<float, std::milli>(end - start).count();
             response->set_latency_ms(latency_ms);
 
-            // Update metrics
+            // Update metrics. Mirror the HTTP path (server.cpp): besides the
+            // running totals, push the sample into the latency ring buffer so
+            // Prometheus p50/p95/p99 gauges are populated for gRPC-only and
+            // mixed HTTP+gRPC deployments (otherwise the percentiles stay 0).
             auto& metrics = MetricsRegistry::instance().get_metrics(request->model_name());
+            auto latency_us = static_cast<uint64_t>(latency_ms * 1000.0f);
             metrics.total_requests.fetch_add(1);
-            metrics.total_latency_us.fetch_add(static_cast<uint64_t>(latency_ms * 1000));
+            metrics.total_latency_us.fetch_add(latency_us);
+            metrics.record_latency(latency_us);
 
             return grpc::Status::OK;
         } catch (const std::exception& e) {

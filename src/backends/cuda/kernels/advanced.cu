@@ -27,6 +27,7 @@
 #include <thrust/gather.h>
 #include <thrust/scan.h>
 #include <cfloat>
+#include <cstdint>  // INT64_MAX
 #include <chrono>
 #include <stdexcept>
 #include <optional>
@@ -476,6 +477,27 @@ __global__ void extract_strided_slice(const T* __restrict__ input, T* __restrict
     for (int64_t i = blockIdx.x * blockDim.x + threadIdx.x; i < dim_size;
          i += gridDim.x * blockDim.x) {
         output[i] = input[outer * dim_size * inner_size + i * inner_size + inner];
+    }
+}
+
+// Batched extract: gather all `total_slices` strided slices into a packed
+// (total_slices, dim_size) workspace in a single launch (one thread per output
+// element) instead of one kernel launch per slice.
+template<typename T>
+__global__ void extract_all_strided_slices(const T* __restrict__ input,
+                                           T* __restrict__ output,
+                                           int64_t dim_size, int64_t inner_size,
+                                           int64_t total_slices)
+{
+    int64_t total = total_slices * dim_size;
+    for (int64_t e = blockIdx.x * blockDim.x + threadIdx.x; e < total;
+         e += gridDim.x * blockDim.x) {
+        int64_t s = e / dim_size;          // slice index
+        int64_t i = e % dim_size;          // position within the reduced dim
+        int64_t outer = s / inner_size;
+        int64_t inner = s % inner_size;
+        output[s * dim_size + i] =
+            input[outer * dim_size * inner_size + i * inner_size + inner];
     }
 }
 
@@ -1268,13 +1290,24 @@ auto mode_kernel(const Tensor& input, int64_t dim, bool keepdim,
 // Bernoulli sampling kernel
 // ============================================================================
 
+// SplitMix64 finalizer: thoroughly mixes (seed, tid) into a well-distributed
+// 64-bit state so neighboring threads do not share correlated high bits the way
+// a single LCG step of `seed + tid*MUL` would. This is the per-thread seed for
+// all the distribution samplers below.
+__device__ __forceinline__ uint64_t splitmix64_seed(uint64_t seed, int64_t tid) {
+    uint64_t z = seed + static_cast<uint64_t>(tid) * 0x9E3779B97F4A7C15ULL;
+    z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ULL;
+    z = (z ^ (z >> 27)) * 0x94D049BB133111EBULL;
+    return z ^ (z >> 31);
+}
+
 __global__ void bernoulli_kernel_impl(const float* probs, float* output,
                                        int64_t n, uint64_t seed) {
     int64_t tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= n) return;
 
-    // Simple LCG-based PRNG per thread (sufficient for sampling)
-    uint64_t state = seed + tid * 6364136223846793005ULL + 1442695040888963407ULL;
+    // SplitMix64-seeded per-thread LCG.
+    uint64_t state = splitmix64_seed(seed, tid);
     state = state * 6364136223846793005ULL + 1442695040888963407ULL;
     float u = static_cast<float>(state >> 33) / static_cast<float>(1ULL << 31);
 
@@ -1294,8 +1327,8 @@ auto bernoulli_kernel(const Tensor& probs, cudaStream_t stream) -> Tensor {
     int threads = 256;
     int blocks_n = (n + threads - 1) / threads;
 
-    // Use a time-based seed
-    uint64_t seed = std::chrono::high_resolution_clock::now().time_since_epoch().count();
+    // Seed from the library's global RNG so manual_seed is honored / reproducible.
+    uint64_t seed = ::tenzor::get_global_seed();
 
     bernoulli_kernel_impl<<<blocks_n, threads, 0, stream>>>(
         input.data<float>(), result.data<float>(), n, seed);
@@ -1306,29 +1339,77 @@ auto bernoulli_kernel(const Tensor& probs, cudaStream_t stream) -> Tensor {
 // Poisson sampling kernel (Knuth algorithm)
 // ============================================================================
 
+__device__ __forceinline__ float poisson_lcg_uniform(uint64_t& state) {
+    state = state * 6364136223846793005ULL + 1442695040888963407ULL;
+    float u = static_cast<float>(state >> 33) / static_cast<float>(1ULL << 31);
+    return fmaxf(u, 1.0e-7f);
+}
+
 __global__ void poisson_kernel_impl(const float* rates, int64_t* output,
                                      int64_t n, uint64_t seed) {
     int64_t tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= n) return;
 
     float lambda = rates[tid];
+    // SplitMix64-seeded per-thread LCG.
+    uint64_t state = splitmix64_seed(seed, tid);
 
-    // Knuth algorithm for Poisson sampling
-    float L = expf(-lambda);
+    if (lambda <= 0.0f) {
+        output[tid] = 0;
+        return;
+    }
+
+    if (lambda < 12.0f) {
+        // Knuth multiply-uniforms. expf(-lambda) is well above the float
+        // underflow threshold for lambda < ~88, and accumulating in double keeps
+        // the product representable across the (rare) long tails. Cap iterations
+        // as a hard safety bound so the kernel always terminates.
+        const double L = ::exp(-static_cast<double>(lambda));
+        int64_t k = 0;
+        double p = 1.0;
+        const int64_t max_iter = 1 << 20;
+        do {
+            k++;
+            p *= static_cast<double>(poisson_lcg_uniform(state));
+        } while (p > L && k < max_iter);
+        output[tid] = k - 1;
+        return;
+    }
+
+    // Transformed rejection (Hörmann PTRS) for moderate/large lambda, where
+    // Knuth's expected iteration count grows linearly and expf(-lambda)
+    // underflows to 0.
+    const double dlam = static_cast<double>(lambda);
+    const double b = 0.931 + 2.53 * ::sqrt(dlam);
+    const double a = -0.059 + 0.02483 * b;
+    const double inv_alpha = 1.1239 + 1.1328 / (b - 3.4);
+    const double v_r = 0.9277 - 3.6224 / (b - 2.0);
+    const double slam = ::sqrt(dlam);
+    const double loglam = ::log(dlam);
+
     int64_t k = 0;
-    float p = 1.0f;
-
-    // Simple LCG-based PRNG per thread (same pattern as bernoulli)
-    uint64_t state = seed + tid * 6364136223846793005ULL + 1442695040888963407ULL;
-
-    do {
-        k++;
-        state = state * 6364136223846793005ULL + 1442695040888963407ULL;
-        float u = static_cast<float>(state >> 33) / static_cast<float>(1ULL << 31);
-        p *= u;
-    } while (p > L);
-
-    output[tid] = k - 1;
+    for (int iter = 0; iter < 1024; ++iter) {
+        double U = static_cast<double>(poisson_lcg_uniform(state)) - 0.5;
+        double V = static_cast<double>(poisson_lcg_uniform(state));
+        double us = 0.5 - fabs(U);
+        double kd = ::floor((2.0 * a / us + b) * U + dlam + 0.43);
+        if (us >= 0.07 && V <= v_r) {
+            k = static_cast<int64_t>(kd);
+            break;
+        }
+        if (kd < 0.0 || (us < 0.013 && V > us)) {
+            continue;
+        }
+        // lgamma(kd+1) = log(kd!)
+        double logV = ::log(V) + ::log(inv_alpha) - ::log(a / (us * us) + b);
+        double rhs = -dlam + kd * loglam - ::lgamma(kd + 1.0);
+        if (logV <= rhs) {
+            k = static_cast<int64_t>(kd);
+            break;
+        }
+        (void)slam;
+    }
+    output[tid] = k;
 }
 
 auto poisson_sample_kernel(const Tensor& rates, cudaStream_t stream) -> Tensor {
@@ -1344,8 +1425,8 @@ auto poisson_sample_kernel(const Tensor& rates, cudaStream_t stream) -> Tensor {
     int threads = 256;
     int blocks_n = (n + threads - 1) / threads;
 
-    // Use a time-based seed
-    uint64_t seed = std::chrono::high_resolution_clock::now().time_since_epoch().count();
+    // Seed from the library's global RNG so manual_seed is honored / reproducible.
+    uint64_t seed = ::tenzor::get_global_seed();
 
     poisson_kernel_impl<<<blocks_n, threads, 0, stream>>>(
         input.data<float>(), result.data<int64_t>(), n, seed);
@@ -1361,8 +1442,8 @@ __global__ void normal_sample_kernel_impl(const float* mean, const float* stddev
     int64_t tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= n) return;
 
-    // LCG-based PRNG per thread (same pattern as bernoulli/poisson)
-    uint64_t state = seed + tid * 6364136223846793005ULL + 1442695040888963407ULL;
+    // SplitMix64-seeded per-thread LCG.
+    uint64_t state = splitmix64_seed(seed, tid);
 
     // Generate two uniform random numbers for Box-Muller
     state = state * 6364136223846793005ULL + 1442695040888963407ULL;
@@ -1392,7 +1473,8 @@ auto normal_sample_kernel(const Tensor& mean, const Tensor& stddev, cudaStream_t
 
     int threads = 256;
     int blocks_n = (n + threads - 1) / threads;
-    uint64_t seed = std::chrono::high_resolution_clock::now().time_since_epoch().count();
+    // Seed from the library's global RNG so manual_seed is honored / reproducible.
+    uint64_t seed = ::tenzor::get_global_seed();
 
     normal_sample_kernel_impl<<<blocks_n, threads, 0, stream>>>(
         m.data<float>(), s.data<float>(), result.data<float>(), n, seed);
@@ -1408,8 +1490,8 @@ __global__ void exponential_sample_kernel_impl(const float* rate, float* output,
     int64_t tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= n) return;
 
-    // LCG-based PRNG per thread
-    uint64_t state = seed + tid * 6364136223846793005ULL + 1442695040888963407ULL;
+    // SplitMix64-seeded per-thread LCG.
+    uint64_t state = splitmix64_seed(seed, tid);
     state = state * 6364136223846793005ULL + 1442695040888963407ULL;
     float u = static_cast<float>(state >> 33) / static_cast<float>(1ULL << 31);
     // Clamp away from 1.0 to avoid log(0)
@@ -1430,7 +1512,8 @@ auto exponential_sample_kernel(const Tensor& rate, cudaStream_t stream) -> Tenso
 
     int threads = 256;
     int blocks_n = (n + threads - 1) / threads;
-    uint64_t seed = std::chrono::high_resolution_clock::now().time_since_epoch().count();
+    // Seed from the library's global RNG so manual_seed is honored / reproducible.
+    uint64_t seed = ::tenzor::get_global_seed();
 
     exponential_sample_kernel_impl<<<blocks_n, threads, 0, stream>>>(
         input.data<float>(), result.data<float>(), n, seed);
@@ -1460,7 +1543,8 @@ __global__ void gamma_sample_kernel_impl(const float* alpha_in, const float* bet
     int64_t tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= n) return;
 
-    uint64_t state = seed + tid * 6364136223846793005ULL + 1442695040888963407ULL;
+    // SplitMix64-seeded per-thread LCG.
+    uint64_t state = splitmix64_seed(seed, tid);
 
     float alpha = alpha_in[tid];
     float beta  = beta_in[tid];
@@ -1509,7 +1593,8 @@ auto gamma_sample_kernel(const Tensor& concentration, const Tensor& rate,
 
     int threads = 256;
     int blocks_n = (n + threads - 1) / threads;
-    uint64_t seed = std::chrono::high_resolution_clock::now().time_since_epoch().count();
+    // Seed from the library's global RNG so manual_seed is honored / reproducible.
+    uint64_t seed = ::tenzor::get_global_seed();
 
     gamma_sample_kernel_impl<<<blocks_n, threads, 0, stream>>>(
         a.data<float>(), b.data<float>(), result.data<float>(), n, seed);
@@ -1654,6 +1739,17 @@ auto multinomial_kernel(const Tensor& probs, int64_t num_samples,
         Tensor result = picked_idx;
         if (was_1d) result = result.reshape({num_samples});
         return result;
+    }
+
+    // The with-replacement CDF is built by a single-block scan whose block
+    // size is capped at 1024. That scan only writes cdf[tid] for tid < 1024,
+    // so for more categories the tail of the CDF stays uninitialized and the
+    // sampler reads garbage. Reject that case explicitly rather than sampling
+    // from a corrupt distribution.
+    if (num_categories > 1024) {
+        throw std::runtime_error(
+            "multinomial: with-replacement sampling supports at most 1024 "
+            "categories on CUDA");
     }
 
     auto result = Tensor({batch_size, num_samples}, DType::Int64, input.device());
@@ -2015,7 +2111,11 @@ __global__ void advanced_index_gather_kernel(
         if (meta.is_indexed[i]) {
             int64_t idx_val = idx_ptrs[i][bc];
             if (idx_val < 0) idx_val += meta.src_shape[i];
-            // Bounds check elided for hot path
+            // Clamp to a valid range to preserve memory safety: an out-of-range
+            // or still-negative user index would otherwise compute an arbitrary
+            // linear offset and read out of bounds.
+            if (idx_val < 0) idx_val = 0;
+            else if (idx_val >= meta.src_shape[i]) idx_val = meta.src_shape[i] - 1;
             src_offset += idx_val * meta.src_strides[i];
         }
     }
@@ -2053,6 +2153,9 @@ __global__ void advanced_index_put_kernel(
         if (meta.is_indexed[i]) {
             int64_t idx_val = idx_ptrs[i][bc];
             if (idx_val < 0) idx_val += meta.src_shape[i];
+            // Clamp to a valid range to preserve memory safety (see gather).
+            if (idx_val < 0) idx_val = 0;
+            else if (idx_val >= meta.src_shape[i]) idx_val = meta.src_shape[i] - 1;
             dst_offset += idx_val * meta.src_strides[i];
         }
     }
@@ -2762,22 +2865,33 @@ __global__ void bincount_weights_f64_kernel(
     atomicAdd(&output[input[idx]], weights[idx]);
 }
 
-__global__ void bincount_find_max_kernel(
-    const int64_t* __restrict__ input, int64_t* __restrict__ max_val, int64_t n)
+// Finds both the maximum and the minimum input value in a single pass.
+// minmax[0] = running max (init -1), minmax[1] = running min (init INT64_MAX).
+// The min is used host-side to reject negative inputs, matching the CPU
+// contract ("bincount: input must contain non-negative integers").
+__global__ void bincount_find_minmax_kernel(
+    const int64_t* __restrict__ input, int64_t* __restrict__ minmax, int64_t n)
 {
     __shared__ int64_t smax;
-    if (threadIdx.x == 0) smax = -1;
+    __shared__ int64_t smin;
+    if (threadIdx.x == 0) {
+        smax = -1;
+        smin = INT64_MAX;
+    }
     __syncthreads();
 
     int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
     if (idx < n) {
-        atomicMax(reinterpret_cast<long long*>(&smax),
-                  static_cast<long long>(input[idx]));
+        long long v = static_cast<long long>(input[idx]);
+        atomicMax(reinterpret_cast<long long*>(&smax), v);
+        atomicMin(reinterpret_cast<long long*>(&smin), v);
     }
     __syncthreads();
     if (threadIdx.x == 0) {
-        atomicMax(reinterpret_cast<long long*>(max_val),
+        atomicMax(reinterpret_cast<long long*>(&minmax[0]),
                   static_cast<long long>(smax));
+        atomicMin(reinterpret_cast<long long*>(&minmax[1]),
+                  static_cast<long long>(smin));
     }
 }
 
@@ -2791,30 +2905,42 @@ auto bincount_kernel(const Tensor& input, const Tensor* weights,
     int64_t n = input_i64.numel();
     auto device = input.device();
 
-    // Find max value on GPU
-    Tensor max_tensor({1}, DType::Int64, device);
-    TENZOR_CUDA_CHECK(cudaMemsetAsync(max_tensor.data<int64_t>(), 0xFF, sizeof(int64_t), stream)); // set to -1
-    // Actually set to -1 properly
-    int64_t neg_one = -1;
+    // Find max and min value on GPU (min is used to reject negative inputs).
+    Tensor minmax_tensor({2}, DType::Int64, device);
+    int64_t init_minmax[2] = {-1, INT64_MAX};  // {max init, min init}
     // audit V.17: wrap both cudaMemcpyAsync sites and the stream sync.
-    TENZOR_CUDA_CHECK(cudaMemcpyAsync(max_tensor.data<int64_t>(), &neg_one, sizeof(int64_t),
-                    cudaMemcpyHostToDevice, stream));
+    TENZOR_CUDA_CHECK(cudaMemcpyAsync(minmax_tensor.data<int64_t>(), init_minmax,
+                    2 * sizeof(int64_t), cudaMemcpyHostToDevice, stream));
 
     if (n > 0) {
         int block = 256;
         int grid = static_cast<int>((n + block - 1) / block);
-        bincount_find_max_kernel<<<grid, block, 0, stream>>>(
-            input_i64.data<int64_t>(), max_tensor.data<int64_t>(), n);
+        bincount_find_minmax_kernel<<<grid, block, 0, stream>>>(
+            input_i64.data<int64_t>(), minmax_tensor.data<int64_t>(), n);
         TENZOR_CUDA_POST_LAUNCH_CHECK();
     }
 
-    // Copy max back to host
-    int64_t max_val = -1;
-    TENZOR_CUDA_CHECK(cudaMemcpyAsync(&max_val, max_tensor.data<int64_t>(), sizeof(int64_t),
-                    cudaMemcpyDeviceToHost, stream));
+    // Copy max/min back to host
+    int64_t minmax_host[2] = {-1, INT64_MAX};
+    TENZOR_CUDA_CHECK(cudaMemcpyAsync(minmax_host, minmax_tensor.data<int64_t>(),
+                    2 * sizeof(int64_t), cudaMemcpyDeviceToHost, stream));
     TENZOR_CUDA_CHECK(cudaStreamSynchronize(stream));
+    int64_t max_val = minmax_host[0];
+    int64_t min_val = minmax_host[1];
+
+    // Match the CPU contract: bincount requires non-negative integer inputs.
+    if (n > 0 && min_val < 0) {
+        throw std::runtime_error("bincount: input must contain non-negative integers");
+    }
 
     int64_t output_size = std::max(max_val + 1, minlength);
+
+    // Bound the output size derived from untrusted input data to avoid an
+    // unbounded allocation (OOM/DoS) driven by a single very large value.
+    constexpr int64_t kMaxBincountSize = static_cast<int64_t>(1) << 31;  // ~2.1B bins
+    if (output_size > kMaxBincountSize) {
+        throw std::runtime_error("bincount: output size exceeds supported limit");
+    }
 
     bool has_weights = (weights != nullptr);
 
@@ -3219,6 +3345,24 @@ auto fmin_kernel(const Tensor& a, const Tensor& b, cudaStream_t stream) -> Tenso
 // Isin kernel — set membership test using sorted array + binary search
 // ============================================================================
 
+// NaN-safe strict-weak-ordering comparator for sorting the test set. The default
+// `operator<` makes every NaN comparison false, violating strict-weak-ordering
+// and leaving the array effectively unsorted around any NaN — which breaks the
+// binary-search invariant in isin_kernel_impl. This total order keeps all finite
+// values correctly ordered and pushes NaNs to the end, so the finite prefix
+// remains a valid sorted run for binary search. (A NaN test element can never
+// equal a finite query, and NaN != NaN, matching PyTorch's isin semantics.)
+template<typename T>
+struct isin_nan_safe_less {
+    __host__ __device__ bool operator()(const T& a, const T& b) const {
+        bool a_nan = (a != a);
+        bool b_nan = (b != b);
+        if (a_nan) return false;        // NaN is never "less than" anything
+        if (b_nan) return true;         // any finite value is "less than" NaN
+        return a < b;
+    }
+};
+
 template<typename T>
 __global__ void isin_kernel_impl(const T* __restrict__ elements, int64_t num_elements,
                                   const T* __restrict__ test_sorted, int64_t num_test,
@@ -3273,7 +3417,8 @@ auto isin_kernel(const Tensor& elements, const Tensor& test_elements, cudaStream
     switch (elem_cont.dtype()) {
         case DType::Float32: {
             thrust::sort(exec_policy, thrust::device_pointer_cast(test_sorted.data<float>()),
-                         thrust::device_pointer_cast(test_sorted.data<float>() + num_test));
+                         thrust::device_pointer_cast(test_sorted.data<float>() + num_test),
+                         isin_nan_safe_less<float>{});
             isin_kernel_impl<float><<<grid_sz, block, 0, stream>>>(
                 elem_cont.data<float>(), num_elements, test_sorted.data<float>(), num_test,
                 reinterpret_cast<bool*>(output.data_ptr()));
@@ -3281,7 +3426,8 @@ auto isin_kernel(const Tensor& elements, const Tensor& test_elements, cudaStream
         }
         case DType::Float64: {
             thrust::sort(exec_policy, thrust::device_pointer_cast(test_sorted.data<double>()),
-                         thrust::device_pointer_cast(test_sorted.data<double>() + num_test));
+                         thrust::device_pointer_cast(test_sorted.data<double>() + num_test),
+                         isin_nan_safe_less<double>{});
             isin_kernel_impl<double><<<grid_sz, block, 0, stream>>>(
                 elem_cont.data<double>(), num_elements, test_sorted.data<double>(), num_test,
                 reinterpret_cast<bool*>(output.data_ptr()));
@@ -3318,7 +3464,7 @@ template<typename T>
 __global__ void kthvalue_kernel_impl(
     const T* __restrict__ input, T* __restrict__ values, int64_t* __restrict__ indices,
     int64_t dim_size, int64_t inner_size, int64_t k, int64_t total_slices,
-    T* __restrict__ workspace)
+    T* __restrict__ workspace, int64_t* __restrict__ idx_workspace)
 {
     int64_t slice_idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
     if (slice_idx >= total_slices) return;
@@ -3326,13 +3472,18 @@ __global__ void kthvalue_kernel_impl(
     int64_t outer = slice_idx / inner_size;
     int64_t inner = slice_idx % inner_size;
 
-    // Copy slice to workspace
+    // Copy slice to workspace, tracking each element's original position so the
+    // emitted index is the position of the element actually placed at rank k
+    // (matches PyTorch/CPU semantics for duplicate values).
     T* ws = workspace + slice_idx * dim_size;
+    int64_t* ws_idx = idx_workspace + slice_idx * dim_size;
     for (int64_t i = 0; i < dim_size; ++i) {
         ws[i] = input[outer * dim_size * inner_size + i * inner_size + inner];
+        ws_idx[i] = i;
     }
 
-    // Partial insertion sort to find k-th smallest
+    // Partial selection sort to find k-th smallest, carrying original indices
+    // alongside values so the rank-k slot retains its source position.
     // For small dim_size this is efficient; for large dims a selection algorithm would be better
     for (int64_t i = 0; i < k; ++i) {
         int64_t min_idx = i;
@@ -3346,20 +3497,14 @@ __global__ void kthvalue_kernel_impl(
         if (min_idx != i) {
             ws[min_idx] = ws[i];
             ws[i] = min_val;
+            int64_t tmp_idx = ws_idx[min_idx];
+            ws_idx[min_idx] = ws_idx[i];
+            ws_idx[i] = tmp_idx;
         }
     }
 
-    T kth_val = ws[k - 1];
-    values[slice_idx] = kth_val;
-
-    // Find original index of k-th value
-    for (int64_t i = 0; i < dim_size; ++i) {
-        T orig = input[outer * dim_size * inner_size + i * inner_size + inner];
-        if (orig == kth_val) {
-            indices[slice_idx] = i;
-            break;
-        }
-    }
+    values[slice_idx] = ws[k - 1];
+    indices[slice_idx] = ws_idx[k - 1];
 }
 
 auto kthvalue_kernel(const Tensor& input, int64_t k, int64_t dim, bool keepdim,
@@ -3402,33 +3547,37 @@ auto kthvalue_kernel(const Tensor& input, int64_t k, int64_t dim, bool keepdim,
     // Allocate workspace for partial sort
     size_t ws_bytes = total_slices * dim_size;
 
+    // Parallel index workspace so selection sort can carry original positions.
+    backend::CachedMemoryGuard idx_ws_guard(ws_bytes * sizeof(int64_t));
+    auto* idx_ws = static_cast<int64_t*>(idx_ws_guard.get());
+
     switch (dtype) {
         case DType::Float32: {
             backend::CachedMemoryGuard ws_guard(ws_bytes * sizeof(float));
             kthvalue_kernel_impl<float><<<grid, block, 0, stream>>>(
                 input_cont.data<float>(), values.data<float>(), indices_out.data<int64_t>(),
-                dim_size, inner_size, k, total_slices, static_cast<float*>(ws_guard.get()));
+                dim_size, inner_size, k, total_slices, static_cast<float*>(ws_guard.get()), idx_ws);
             break;
         }
         case DType::Float64: {
             backend::CachedMemoryGuard ws_guard(ws_bytes * sizeof(double));
             kthvalue_kernel_impl<double><<<grid, block, 0, stream>>>(
                 input_cont.data<double>(), values.data<double>(), indices_out.data<int64_t>(),
-                dim_size, inner_size, k, total_slices, static_cast<double*>(ws_guard.get()));
+                dim_size, inner_size, k, total_slices, static_cast<double*>(ws_guard.get()), idx_ws);
             break;
         }
         case DType::Int32: {
             backend::CachedMemoryGuard ws_guard(ws_bytes * sizeof(int32_t));
             kthvalue_kernel_impl<int32_t><<<grid, block, 0, stream>>>(
                 input_cont.data<int32_t>(), values.data<int32_t>(), indices_out.data<int64_t>(),
-                dim_size, inner_size, k, total_slices, static_cast<int32_t*>(ws_guard.get()));
+                dim_size, inner_size, k, total_slices, static_cast<int32_t*>(ws_guard.get()), idx_ws);
             break;
         }
         case DType::Int64: {
             backend::CachedMemoryGuard ws_guard(ws_bytes * sizeof(int64_t));
             kthvalue_kernel_impl<int64_t><<<grid, block, 0, stream>>>(
                 input_cont.data<int64_t>(), values.data<int64_t>(), indices_out.data<int64_t>(),
-                dim_size, inner_size, k, total_slices, static_cast<int64_t*>(ws_guard.get()));
+                dim_size, inner_size, k, total_slices, static_cast<int64_t*>(ws_guard.get()), idx_ws);
             break;
         }
         default:
@@ -3485,25 +3634,52 @@ auto quantile_kernel(const Tensor& input, double q, int64_t dim, bool keepdim,
     Tensor workspace({total_slices, dim_size}, dtype, device);
 
     int block = 256;
-    int grid_extract = std::min(static_cast<int>((dim_size + block - 1) / block), 1024);
-
-    auto exec_policy = thrust::cuda::par.on(stream);
 
     auto launch = [&]<typename T>() {
-        // Extract slices into workspace
-        for (int64_t s = 0; s < total_slices; ++s) {
-            int64_t outer = s / inner_size;
-            int64_t inner = s % inner_size;
-            extract_strided_slice<T><<<grid_extract, block, 0, stream>>>(
-                input_cont.data<T>(), workspace.data<T>() + s * dim_size,
-                dim_size, inner_size, outer, inner);
+        // Gather every slice into the packed workspace with a single launch
+        // rather than one extract kernel per slice.
+        int64_t total_elems = total_slices * dim_size;
+        int grid_extract = std::min<int>(
+            static_cast<int>((total_elems + block - 1) / block), 65535);
+        if (grid_extract < 1) grid_extract = 1;
+        extract_all_strided_slices<T><<<grid_extract, block, 0, stream>>>(
+            input_cont.data<T>(), workspace.data<T>(),
+            dim_size, inner_size, total_slices);
+        TENZOR_CUDA_POST_LAUNCH_CHECK();
+
+        // Sort all slices in one cub::DeviceSegmentedSort call instead of a
+        // per-slice thrust::sort, eliminating thousands of tiny launches.
+        // Sort in place: a double buffer is required, so use a second workspace.
+        Tensor sorted_ws({total_slices, dim_size}, dtype, device);
+        std::vector<int> offsets_h(total_slices + 1);
+        for (int64_t s = 0; s <= total_slices; ++s) {
+            offsets_h[s] = static_cast<int>(s * dim_size);
         }
-        // Sort each slice
-        for (int64_t s = 0; s < total_slices; ++s) {
-            T* slice = workspace.data<T>() + s * dim_size;
-            thrust::sort(exec_policy, thrust::device_pointer_cast(slice),
-                         thrust::device_pointer_cast(slice + dim_size));
-        }
+        backend::CachedMemoryGuard offsets_guard((total_slices + 1) * sizeof(int));
+        int* d_offsets = static_cast<int*>(offsets_guard.get());
+        TENZOR_CUDA_CHECK(cudaMemcpyAsync(d_offsets, offsets_h.data(),
+            (total_slices + 1) * sizeof(int), cudaMemcpyHostToDevice, stream));
+
+        void* d_temp = nullptr;
+        size_t temp_bytes = 0;
+        cub::DeviceSegmentedSort::SortKeys(
+            d_temp, temp_bytes,
+            workspace.data<T>(), sorted_ws.data<T>(),
+            static_cast<int>(total_elems), static_cast<int>(total_slices),
+            d_offsets, d_offsets + 1, stream);
+        backend::CachedMemoryGuard temp_guard(temp_bytes);
+        d_temp = temp_guard.get();
+        cub::DeviceSegmentedSort::SortKeys(
+            d_temp, temp_bytes,
+            workspace.data<T>(), sorted_ws.data<T>(),
+            static_cast<int>(total_elems), static_cast<int>(total_slices),
+            d_offsets, d_offsets + 1, stream);
+        TENZOR_CUDA_POST_LAUNCH_CHECK();
+
+        // Copy sorted result back into `workspace` so the interpolation kernel
+        // below (which reads `workspace`) sees the sorted data.
+        TENZOR_CUDA_CHECK(cudaMemcpyAsync(workspace.data<T>(), sorted_ws.data<T>(),
+            total_elems * sizeof(T), cudaMemcpyDeviceToDevice, stream));
     };
 
     switch (dtype) {

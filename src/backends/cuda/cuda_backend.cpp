@@ -21,6 +21,7 @@
 #include <tuple>
 #include <unordered_map>
 #include <unordered_set>
+#include <optional>
 
 namespace tenzor {
 
@@ -476,9 +477,13 @@ public:
             cudaPointerAttributes dst_attrs;
             cudaPointerAttributes src_attrs;
             int dst_device = -1, src_device = -1;
+            // Use a scoped DeviceGuard so the calling thread's current device is
+            // restored on return (see get_device_info). A bare cudaSetDevice
+            // would silently leak the device switch into the caller.
+            std::optional<DeviceGuard> device_guard;
             if (cudaPointerGetAttributes(&dst_attrs, dst) == cudaSuccess && dst_attrs.device >= 0) {
                 dst_device = dst_attrs.device;
-                cudaSetDevice(dst_device);
+                device_guard.emplace(Device::cuda(dst_device));
             }
             if (kind == CopyKind::DeviceToDevice) {
                 if (cudaPointerGetAttributes(&src_attrs, src) == cudaSuccess && src_attrs.device >= 0) {
@@ -536,10 +541,11 @@ public:
     }
 
     auto destroy_stream(StreamHandle stream) -> void override {
-        // Return stream to pool instead of destroying it
-        int device_id = 0;
-        cudaGetDevice(&device_id);
-        cuda::CUDAStreamPool::instance().release(device_id, static_cast<cudaStream_t>(stream));
+        // Return stream to pool instead of destroying it. Use the device-less
+        // release overload, which resolves the stream's owning device from the
+        // pool's bookkeeping rather than the caller's current device — the two
+        // can differ on multi-GPU, which would otherwise leak the pool slot.
+        cuda::CUDAStreamPool::instance().release(static_cast<cudaStream_t>(stream));
     }
 
     auto synchronize_stream(StreamHandle stream) -> void override {

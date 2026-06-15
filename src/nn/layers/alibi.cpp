@@ -19,39 +19,38 @@ auto ALiBi::compute_slopes() -> void {
     // Following the original paper's convention
     slopes_.resize(num_heads_);
 
-    // If num_heads is a power of 2, use the simple formula
-    // Otherwise, interpolate between the nearest powers of 2
-    auto closest_power_of_2 = [](int64_t n) -> int64_t {
-        int64_t power = 1;
-        while (power < n) power *= 2;
-        return power;
+    // Geometric slopes for a power-of-2 head count n: m_i = 2^(-8*i/n).
+    auto power_of_2_slopes = [](int64_t n) -> std::vector<float> {
+        double ratio = std::pow(2.0, -8.0 / static_cast<double>(n));
+        std::vector<float> out(n);
+        double m = ratio;
+        for (int64_t i = 0; i < n; ++i) {
+            out[i] = static_cast<float>(m);
+            m *= ratio;
+        }
+        return out;
     };
 
-    int64_t n = closest_power_of_2(num_heads_);
+    auto is_power_of_2 = [](int64_t n) -> bool {
+        return n > 0 && (n & (n - 1)) == 0;
+    };
 
-    if (n == num_heads_) {
-        // Power of 2: simple geometric sequence
-        for (int64_t i = 0; i < num_heads_; ++i) {
-            slopes_[i] = static_cast<float>(
-                std::pow(2.0, -8.0 * static_cast<double>(i + 1) / static_cast<double>(num_heads_)));
-        }
+    if (is_power_of_2(num_heads_)) {
+        // Power of 2: simple geometric sequence.
+        slopes_ = power_of_2_slopes(num_heads_);
     } else {
-        // Not power of 2: interleave slopes from n and n/2
-        // First compute slopes for next power of 2
-        std::vector<float> base_slopes(n);
-        for (int64_t i = 0; i < n; ++i) {
-            base_slopes[i] = static_cast<float>(
-                std::pow(2.0, -8.0 * static_cast<double>(i + 1) / static_cast<double>(n)));
-        }
+        // Canonical ALiBi (see get_slopes in the ALiBi paper / HF transformers):
+        // use the closest power of 2 <= num_heads as the base, then append every
+        // other interpolated slope from the next-higher power of 2 for the
+        // remaining heads.
+        int64_t floor_pow2 = 1;
+        while (floor_pow2 * 2 <= num_heads_) floor_pow2 *= 2;
 
-        // Take alternating slopes to get num_heads slopes
-        // Start with slopes at even indices, then odd indices
-        int64_t idx = 0;
-        for (int64_t i = 0; i < n && idx < num_heads_; i += 2) {
-            slopes_[idx++] = base_slopes[i];
-        }
-        for (int64_t i = 1; i < n && idx < num_heads_; i += 2) {
-            slopes_[idx++] = base_slopes[i];
+        slopes_ = power_of_2_slopes(floor_pow2);
+
+        auto extra = power_of_2_slopes(2 * floor_pow2);
+        for (size_t i = 0; i < extra.size() && static_cast<int64_t>(slopes_.size()) < num_heads_; i += 2) {
+            slopes_.push_back(extra[i]);
         }
     }
 }

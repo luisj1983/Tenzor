@@ -14,8 +14,10 @@
 #include "cuda_common.cuh"
 #include <stdexcept>
 #include <vector>
+#include <atomic>    // For per-call dropout seed counter
 #include <charconv>  // For std::from_chars (dispatch wrappers)
 #include <span>      // For std::span (dispatch wrappers)
+#include "tenzor/ops/creation.hpp"  // For tenzor::get_global_seed (manual_seed reproducibility)
 
 namespace tenzor {
 namespace cuda {
@@ -1896,7 +1898,11 @@ auto gelu_inplace_kernel(Tensor& input, cudaStream_t stream) -> void {
 // ============================================================================
 
 // ReLU wrapper - uses vectorized float4 for 4x memory throughput on Float32
-auto relu_kernel(const Tensor& input, cudaStream_t stream) -> Tensor {
+auto relu_kernel(const Tensor& input_raw, cudaStream_t stream) -> Tensor {
+    // Kernels index linearly (scalar or float4) assuming a packed layout, so
+    // non-contiguous (transposed/strided/view) input must be materialized first
+    // or we read the wrong elements. Mirrors sigmoid_kernel (audit-2026-05-03 #15).
+    auto input = input_raw.contiguous();
     int64_t n = input.numel();
     std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
     Tensor result(shape, input.dtype(), input.device());
@@ -1969,7 +1975,11 @@ auto relu_kernel(const Tensor& input, cudaStream_t stream) -> Tensor {
 }
 
 // ReLU backward wrapper - uses vectorized float4 for 4x memory throughput
-auto relu_backward_kernel(const Tensor& grad_output, const Tensor& input, cudaStream_t stream) -> Tensor {
+auto relu_backward_kernel(const Tensor& grad_output_raw, const Tensor& input_raw, cudaStream_t stream) -> Tensor {
+    // Linear-indexing kernels require packed layouts; contiguify both operands
+    // so strided views read correctly. Mirrors sigmoid_kernel.
+    auto grad_output = grad_output_raw.contiguous();
+    auto input = input_raw.contiguous();
     int64_t n = input.numel();
     std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
     Tensor result(shape, input.dtype(), input.device());
@@ -1985,24 +1995,39 @@ auto relu_backward_kernel(const Tensor& grad_output, const Tensor& input, cudaSt
         const float* input_ptr = input.data<float>();
         float* result_ptr = result.data<float>();
 
-        int64_t n4 = n / 4;  // Number of float4 elements
-        int64_t remainder = n % 4;
+        // Only take the float4 path when all three pointers are 16-byte
+        // aligned (sub-tensor views/offsets can break alignment); otherwise
+        // a float4 access faults. Mirrors sigmoid_backward / relu forward.
+        if (n >= VECTORIZED_THRESHOLD &&
+            reinterpret_cast<uintptr_t>(grad_ptr) % 16 == 0 &&
+            reinterpret_cast<uintptr_t>(input_ptr) % 16 == 0 &&
+            reinterpret_cast<uintptr_t>(result_ptr) % 16 == 0) {
 
-        if (n4 > 0) {
-            int num_blocks = get_num_blocks(n4);
-            relu_backward_vectorized_kernel<<<num_blocks, BLOCK_SIZE, 0, stream>>>(
-                reinterpret_cast<const float4*>(grad_ptr),
-                reinterpret_cast<const float4*>(input_ptr),
-                reinterpret_cast<float4*>(result_ptr), n4);
-            CUDA_CHECK(cudaGetLastError());
-        }
+            int64_t n4 = n / 4;  // Number of float4 elements
+            int64_t remainder = n % 4;
 
-        // Handle remainder elements
-        if (remainder > 0) {
-            int64_t start = n4 * 4;
-            int num_blocks_rem = (remainder + BLOCK_SIZE - 1) / BLOCK_SIZE;
-            relu_backward_remainder_kernel<<<num_blocks_rem, BLOCK_SIZE, 0, stream>>>(
-                grad_ptr, input_ptr, result_ptr, start, n);
+            if (n4 > 0) {
+                int num_blocks = get_num_blocks(n4);
+                relu_backward_vectorized_kernel<<<num_blocks, BLOCK_SIZE, 0, stream>>>(
+                    reinterpret_cast<const float4*>(grad_ptr),
+                    reinterpret_cast<const float4*>(input_ptr),
+                    reinterpret_cast<float4*>(result_ptr), n4);
+                CUDA_CHECK(cudaGetLastError());
+            }
+
+            // Handle remainder elements
+            if (remainder > 0) {
+                int64_t start = n4 * 4;
+                int num_blocks_rem = (remainder + BLOCK_SIZE - 1) / BLOCK_SIZE;
+                relu_backward_remainder_kernel<<<num_blocks_rem, BLOCK_SIZE, 0, stream>>>(
+                    grad_ptr, input_ptr, result_ptr, start, n);
+                CUDA_CHECK(cudaGetLastError());
+            }
+        } else {
+            // Fallback to scalar kernel for small or misaligned tensors
+            int num_blocks = get_num_blocks(n);
+            relu_backward_kernel<float><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
+                grad_ptr, input_ptr, result_ptr, n);
             CUDA_CHECK(cudaGetLastError());
         }
     } else if (input.dtype() == DType::Float64) {
@@ -3751,8 +3776,18 @@ auto dropout_forward_kernel(const Tensor& input, float p, bool training, cudaStr
     int block_size = 256;
     int num_blocks = (n + block_size - 1) / block_size;
 
-    // Generate seed from system entropy
-    uint64_t seed = std::chrono::high_resolution_clock::now().time_since_epoch().count();
+    // Seed from the library's global RNG so manual_seed is honored / dropout is
+    // reproducible. Fold in a process-wide monotonic counter so two invocations
+    // within the same clock tick (the un-seeded, time-based case) cannot collide
+    // and produce identical masks. SplitMix64-style mixing keeps the counter
+    // from merely perturbing the low bits.
+    static std::atomic<uint64_t> dropout_call_counter{0};
+    uint64_t mix = dropout_call_counter.fetch_add(1, std::memory_order_relaxed);
+    mix = (mix + 0x9E3779B97F4A7C15ULL);
+    mix = (mix ^ (mix >> 30)) * 0xBF58476D1CE4E5B9ULL;
+    mix = (mix ^ (mix >> 27)) * 0x94D049BB133111EBULL;
+    mix = mix ^ (mix >> 31);
+    uint64_t seed = ::tenzor::get_global_seed() ^ mix;
 
     switch (input.dtype()) {
         case DType::Float32:

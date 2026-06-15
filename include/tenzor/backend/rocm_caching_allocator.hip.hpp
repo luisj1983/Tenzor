@@ -29,9 +29,11 @@ struct Block {
     int device;             // HIP device ID
     hipStream_t stream;     // Associated stream (for async operations)
     size_t alignment;       // Block alignment for HBM optimization
+    void* original_ptr;     // Original hipMalloc pointer (for merge tracking)
 
     Block(void* p, size_t s, int dev, hipStream_t str = nullptr, size_t align = 256)
-        : ptr(p), size(s), allocated(false), device(dev), stream(str), alignment(align) {}
+        : ptr(p), size(s), allocated(false), device(dev), stream(str),
+          alignment(align), original_ptr(p) {}
 
     // Comparison for ordered containers (by size, then by pointer)
     bool operator<(const Block& other) const {

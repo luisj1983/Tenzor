@@ -42,6 +42,13 @@ auto tensor_to_lite_tensor(const Tensor& t) -> lite::LiteTensor {
     if (src.device().type != Device::Type::CPU) src = src.to(Device::cpu());
     if (!src.is_contiguous()) src = src.contiguous();
 
+    if (src.ndim() > lite::kMaxDims) {
+        throw std::invalid_argument(
+            "tensor_to_lite_tensor: tensor rank " +
+            std::to_string(src.ndim()) + " exceeds lite::kMaxDims (" +
+            std::to_string(lite::kMaxDims) + ")");
+    }
+
     lite::LiteTensor lt;
     lt.ndim = static_cast<int32_t>(src.ndim());
     lt.dtype = src.dtype();

@@ -43,6 +43,18 @@ auto spmv_kernel(const SparseTensor& A, const Tensor& x, sycl::queue& queue) -> 
         throw std::runtime_error("oneapi spmv_kernel requires CSR format");
     }
 
+    // Assert A.values dtype == x dtype before any dtype branch. Each branch
+    // reinterprets x's bytes according to the sparse values dtype, so a
+    // mismatch (e.g. a Float32 x with a BF16 sparse A) would silently misread
+    // x rather than error. Mirrors the spmm_kernel guard below.
+    if (A.values().dtype() != x.dtype()) {
+        throw std::runtime_error(
+            "oneapi spmv_kernel: sparse values dtype (" +
+            std::string(dtype_name(A.values().dtype())) +
+            ") must match dense x dtype (" +
+            std::string(dtype_name(x.dtype())) + ")");
+    }
+
     // E.3: native sycl::half / bfloat16 path. Each work-item loads FP16
     // values, casts to FP32 for accumulation (standard mixed-precision
     // pattern for sparse FP16 — FP16 lacks the dynamic range for row
@@ -839,7 +851,17 @@ auto sparse_trsv_kernel(const SparseTensor& L, const Tensor& b, bool upper,
     return x;
 #else
     // ========================================================================
-    // Standalone SYCL SparseTrsv — level-set parallelism with atomics
+    // Standalone SYCL SparseTrsv — single-work-item sequential solve.
+    //
+    // A device-side spin-wait on a per-row "solved" flag deadlocks under SIMT
+    // lockstep: work-items in the same sub-group execute in lockstep, so a
+    // later row that spins waiting on an earlier row in the SAME sub-group can
+    // block the very work-item that would set the flag, and neither makes
+    // progress. We therefore run the entire triangular solve in a single
+    // work-item that processes rows in strict dependency order
+    // (forward substitution for lower, backward substitution for upper).
+    // This trades parallelism for guaranteed-correct, deadlock-free behavior,
+    // matching the established pattern used by the ROCm backend.
     // ========================================================================
     if (L.layout() != SparseLayout::CSR) {
         throw std::runtime_error("oneapi sparse_trsv_kernel requires CSR format");
@@ -861,59 +883,41 @@ auto sparse_trsv_kernel(const SparseTensor& L, const Tensor& b, bool upper,
 
     auto x = tenzor::zeros({N}, dtype, vals.device());
 
-    int* d_solved = sycl::malloc_device<int>(N, queue);
-    queue.memset(d_solved, 0, N * sizeof(int)).wait();
-
     auto run_trsv = [&]<typename T>() {
         const int64_t* cr = crow.data<int64_t>();
         const int64_t* cl = col.data<int64_t>();
         const T* v = vals.data<T>();
         const T* b_ptr = b.data<T>();
         T* x_ptr = x.data<T>();
-        int* solved = d_solved;
         bool is_upper = upper;
         int64_t n = N;
 
-        queue.parallel_for(sycl::range<1>(N), [=](sycl::id<1> idx) {
-            int64_t tid = idx[0];
-            int64_t row = is_upper ? (n - 1 - tid) : tid;
+        // Single work-item: rows are visited in dependency order so every
+        // x[c] referenced below has already been written. No cross-work-item
+        // synchronization, hence no possibility of an SIMT spin-wait deadlock.
+        queue.single_task([=]() {
+            for (int64_t r = 0; r < n; ++r) {
+                // Lower: forward substitution (rows 0..n-1).
+                // Upper: backward substitution (rows n-1..0).
+                int64_t row = is_upper ? (n - 1 - r) : r;
 
-            int64_t row_start = cr[row];
-            int64_t row_end = cr[row + 1];
+                int64_t row_start = cr[row];
+                int64_t row_end = cr[row + 1];
 
-            // Wait for dependencies
-            if (tid > 0) {
+                // x[row] = (b[row] - sum(L[row,c]*x[c])) / L[row,row]
+                // Missing diagonal entry is treated as unit diagonal.
+                T rhs = b_ptr[row];
+                T diag = T(1);
                 for (int64_t j = row_start; j < row_end; ++j) {
                     int64_t c = cl[j];
-                    if (is_upper ? (c > row) : (c < row)) {
-                        sycl::atomic_ref<int, sycl::memory_order::relaxed,
-                                         sycl::memory_scope::device,
-                                         sycl::access::address_space::global_space> flag(solved[c]);
-                        while (flag.load() == 0) {
-                            // Spin-wait for dependency
-                        }
+                    if (c == row) {
+                        diag = v[j];
+                    } else if (is_upper ? (c > row) : (c < row)) {
+                        rhs -= v[j] * x_ptr[c];
                     }
                 }
+                x_ptr[row] = rhs / diag;
             }
-
-            // Compute: x[row] = (b[row] - sum(L[row,c]*x[c])) / L[row,row]
-            T rhs = b_ptr[row];
-            T diag = T(1);
-            for (int64_t j = row_start; j < row_end; ++j) {
-                int64_t c = cl[j];
-                if (c == row) {
-                    diag = v[j];
-                } else if (is_upper ? (c > row) : (c < row)) {
-                    rhs -= v[j] * x_ptr[c];
-                }
-            }
-            x_ptr[row] = rhs / diag;
-
-            // Signal completion
-            sycl::atomic_ref<int, sycl::memory_order::relaxed,
-                             sycl::memory_scope::device,
-                             sycl::access::address_space::global_space> my_flag(solved[row]);
-            my_flag.store(1);
         }).wait();
     };
 
@@ -922,11 +926,9 @@ auto sparse_trsv_kernel(const SparseTensor& L, const Tensor& b, bool upper,
     } else if (dtype == DType::Float64) {
         run_trsv.template operator()<double>();
     } else {
-        sycl::free(d_solved, queue);
         throw std::runtime_error("oneapi sparse_trsv_kernel: only Float32/Float64 supported");
     }
 
-    sycl::free(d_solved, queue);
     return x;
 #endif
 }

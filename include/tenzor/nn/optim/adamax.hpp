@@ -51,8 +51,8 @@ public:
 
     auto step_impl() -> void override;
 
-    auto set_lr(double lr) -> void;
-    auto get_lr() const -> double;
+    auto set_lr(double lr) -> void override;
+    auto get_lr() const -> double override;
 
     auto state_dict() const -> std::unordered_map<std::string, Tensor> override;
     auto load_state_dict(const std::unordered_map<std::string, Tensor>& state) -> void override;

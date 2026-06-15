@@ -11,6 +11,7 @@
 #include "tenzor/ops/indexing.hpp"
 #include "tenzor/ops/creation.hpp"
 #include "tenzor/nn/loss/losses.hpp"
+#include "tenzor/autograd/ops.hpp"
 #include <stdexcept>
 
 namespace tenzor {
@@ -128,15 +129,23 @@ auto mask_loss(const Variable& mask_logits,
         return zero_loss;
     }
 
-    // Select mask logits for the ground truth class
-    // For each ROI, we only compute loss for the mask of its true class
-    std::vector<Tensor> selected_masks;
-    selected_masks.reserve(num_rois);
+    // Select, for each ROI, the mask channel of its ground-truth class. This MUST
+    // stay on the autograd graph: selecting on the raw tensor and rewrapping in a
+    // fresh Variable severs grad_fn, so no gradient would reach the mask head or
+    // backbone. We build a (num_rois, 1, H, W) gather index and use the
+    // autograd-aware gather, whose backward scatters gradients back to
+    // mask_logits at the selected channels.
+    // Move class labels to CPU and ensure Int64 for data access. Without the
+    // dtype conversion a Float32/Int32 label tensor would be reinterpreted as
+    // int64_t (garbage class indices). GPU data_ptr() access can segfault, hence
+    // the device move too.
+    auto class_labels_cpu = class_labels.to(Device::cpu()).to(DType::Int64);
+    const auto* class_labels_data =
+        static_cast<const int64_t*>(class_labels_cpu.data_ptr());
 
-    // Move class labels to CPU for data access (GPU data_ptr() access causes segfault)
-    auto class_labels_cpu = class_labels.to(Device::cpu());
-    auto* class_labels_data = static_cast<const int64_t*>(class_labels_cpu.data_ptr());
-
+    Tensor gather_index({num_rois, 1, H, W}, DType::Int64, Device::cpu());
+    auto* gather_index_data = static_cast<int64_t*>(gather_index.data_ptr());
+    const int64_t plane = H * W;
     for (int64_t i = 0; i < num_rois; ++i) {
         int64_t class_idx = class_labels_data[i];
 
@@ -148,16 +157,17 @@ auto mask_loss(const Variable& mask_logits,
             );
         }
 
-        // Select mask for this class: (H, W)
-        // Use tensor indexing: mask_logits[i, class_idx, :, :]
-        auto roi_all_masks = tenzor::select(mask_logits.tensor(), 0, i);  // Select ROI i
-        auto roi_mask = tenzor::select(roi_all_masks, 0, class_idx);  // Select class
-        selected_masks.push_back(roi_mask);
+        for (int64_t p = 0; p < plane; ++p) {
+            gather_index_data[i * plane + p] = class_idx;
+        }
+    }
+    if (mask_logits.tensor().device().type != Device::Type::CPU) {
+        gather_index = gather_index.to(mask_logits.tensor().device());
     }
 
-    // Stack selected masks: (num_rois, H, W)
-    auto selected_logits_tensor = ops::stack(selected_masks, 0);
-    auto selected_logits = Variable(selected_logits_tensor, mask_logits.requires_grad());
+    // (num_rois, num_classes, H, W) -> gather class -> (num_rois, 1, H, W)
+    // -> squeeze -> (num_rois, H, W); grad_fn preserved throughout.
+    auto selected_logits = tenzor::squeeze(tenzor::gather(mask_logits, 1, gather_index), 1);
 
     // Reshape for BCE loss computation
     // (num_rois, H, W) -> (num_rois * H * W,)
@@ -196,22 +206,28 @@ auto process_masks(const Tensor& mask_logits,
         );
     }
 
-    // Create output masks tensor: [num_detections, 1, H, W]
-    auto full_masks = Tensor(
+    // Keep track of original device for final output
+    auto original_device = mask_logits.device();
+
+    // Create the output mask buffer on CPU and write every detection into it,
+    // then upload once after the loop. Previously the [num_detections,1,H,W]
+    // buffer was downloaded and re-uploaded on every iteration (O(N^2*H*W)
+    // transfer on GPU).
+    auto full_masks_cpu = Tensor(
         std::vector<int64_t>{num_detections, 1, image_height, image_width},
         DType::UInt8,
-        mask_logits.device()
+        Device::cpu()
     );
-    full_masks.fill_(0);
+    full_masks_cpu.fill_(0);
+    auto* full_data = full_masks_cpu.data<uint8_t>();
 
-    // Move class_labels and boxes to CPU for data access
-    auto class_labels_cpu = class_labels.to(Device::cpu());
+    // Move class_labels and boxes to CPU for data access. class_labels must be
+    // Int64 before pointer reinterpretation (a Float32/Int32 tensor would yield
+    // garbage class indices).
+    auto class_labels_cpu = class_labels.to(Device::cpu()).to(DType::Int64);
     auto boxes_cpu = boxes.to(DType::Float32).to(Device::cpu());
     auto* class_labels_data = class_labels_cpu.data<int64_t>();
     auto* boxes_data = boxes_cpu.data<float>();
-
-    // Keep track of original device for final output
-    auto original_device = mask_logits.device();
 
     for (int64_t i = 0; i < num_detections; ++i) {
         // Get class label and select corresponding mask
@@ -263,10 +279,9 @@ auto process_masks(const Tensor& mask_logits,
         auto threshold_tensor = tenzor::ones_like(resized_mask) * static_cast<float>(threshold);
         auto binary_mask = (resized_mask > threshold_tensor).to(DType::UInt8);
 
-        // Move to CPU for data access
+        // Move only this detection's binary mask to CPU; write directly into
+        // the persistent CPU output buffer (no per-iteration buffer download).
         auto binary_mask_cpu = binary_mask.to(Device::cpu());
-        auto full_masks_cpu = full_masks.to(Device::cpu());
-        auto* full_data = full_masks_cpu.data<uint8_t>();
         auto* binary_data = binary_mask_cpu.data<uint8_t>();
 
         // Paste into full image at ROI location
@@ -279,12 +294,12 @@ auto process_masks(const Tensor& mask_logits,
                 full_data[full_idx] = binary_data[binary_idx];
             }
         }
-
-        // Copy back to original tensor (in-place update)
-        full_masks = full_masks_cpu.to(original_device);
     }
 
-    return full_masks;
+    // Upload the completed mask buffer to the original device once.
+    return (original_device == Device::cpu())
+        ? full_masks_cpu
+        : full_masks_cpu.to(original_device);
 }
 
 } // namespace detection

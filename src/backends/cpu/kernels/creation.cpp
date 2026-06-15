@@ -168,7 +168,7 @@ auto rand_kernel(const std::vector<int64_t>& shape, DType dtype, const Device& d
 
         // Philox keyed by (seed, element_index) — result is identical regardless
         // of OMP_NUM_THREADS, satisfying reproducibility requirements.
-        #pragma omp parallel for schedule(static)
+        #pragma omp parallel for schedule(static) if(n > static_cast<int64_t>(OMP_THRESHOLD))
         for (int64_t i = 0; i < n; ++i) {
             data[i] = philox::philox_uniform_f32(seed, i);
         }
@@ -177,7 +177,7 @@ auto rand_kernel(const std::vector<int64_t>& shape, DType dtype, const Device& d
         double* data = result.data<double>();
         uint64_t seed = static_cast<uint64_t>(detail::get_base_seed());
 
-        #pragma omp parallel for schedule(static)
+        #pragma omp parallel for schedule(static) if(n > static_cast<int64_t>(OMP_THRESHOLD))
         for (int64_t i = 0; i < n; ++i) {
             data[i] = philox::philox_uniform_f64(seed, i);
         }
@@ -209,7 +209,7 @@ auto randn_kernel(const std::vector<int64_t>& shape, DType dtype, const Device& 
 
         // Philox keyed by (seed, element_index) — identical output regardless
         // of OMP_NUM_THREADS, satisfying reproducibility requirements.
-        #pragma omp parallel for schedule(static)
+        #pragma omp parallel for schedule(static) if(n > static_cast<int64_t>(OMP_THRESHOLD))
         for (int64_t i = 0; i < n; ++i) {
             data[i] = philox::philox_normal_f32(seed, i);
         }
@@ -218,7 +218,7 @@ auto randn_kernel(const std::vector<int64_t>& shape, DType dtype, const Device& 
         double* data = result.data<double>();
         uint64_t seed = static_cast<uint64_t>(detail::get_base_seed());
 
-        #pragma omp parallel for schedule(static)
+        #pragma omp parallel for schedule(static) if(n > static_cast<int64_t>(OMP_THRESHOLD))
         for (int64_t i = 0; i < n; ++i) {
             data[i] = philox::philox_normal_f64(seed, i);
         }

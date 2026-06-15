@@ -7,6 +7,7 @@
 #include "tenzor/ops/op_id.hpp"
 #include "tenzor/ops/creation.hpp"
 #include "tenzor/ops/transform.hpp"
+#include "../hip_buffer.hpp"
 // Note: NOT including tenzor/ops/math.hpp here — its tenzor::sqrt/exp/etc.
 // declarations collide with HIP device sqrt/exp inside the __global__ kernels
 // in this TU. Use OpId-based dispatch (tenzor::dispatch + AttrKey) for the
@@ -643,14 +644,15 @@ auto fused_add_relu_hip(const Tensor& a, const Tensor& b) -> Tensor {
 
     Tensor result = create_hip_zeros(output_shape, a.dtype(), a.device());
 
-    // Copy strides and shape to device
-    int64_t* d_strides_a = nullptr;
-    int64_t* d_strides_b = nullptr;
-    int64_t* d_output_shape = nullptr;
+    // Copy strides and shape to device. RAII buffers are freed on any exception
+    // path (e.g. a throwing HIP_CHECK below) instead of leaking.
     size_t meta_bytes = ndim * sizeof(int64_t);
-    HIP_CHECK(hipMalloc(&d_strides_a, meta_bytes));
-    HIP_CHECK(hipMalloc(&d_strides_b, meta_bytes));
-    HIP_CHECK(hipMalloc(&d_output_shape, meta_bytes));
+    HipBuffer strides_a_buf(meta_bytes);
+    HipBuffer strides_b_buf(meta_bytes);
+    HipBuffer output_shape_buf(meta_bytes);
+    int64_t* d_strides_a = strides_a_buf.as<int64_t>();
+    int64_t* d_strides_b = strides_b_buf.as<int64_t>();
+    int64_t* d_output_shape = output_shape_buf.as<int64_t>();
     HIP_CHECK(hipMemcpy(d_strides_a, strides_a.data(), meta_bytes, hipMemcpyHostToDevice));
     HIP_CHECK(hipMemcpy(d_strides_b, strides_b.data(), meta_bytes, hipMemcpyHostToDevice));
     HIP_CHECK(hipMemcpy(d_output_shape, output_shape.data(), meta_bytes, hipMemcpyHostToDevice));
@@ -670,11 +672,9 @@ auto fused_add_relu_hip(const Tensor& a, const Tensor& b) -> Tensor {
             d_strides_a, d_strides_b, d_output_shape, ndim, n);
     }
     HIP_CHECK(hipGetLastError());
+    // Synchronize before the RAII buffers are destroyed at scope exit, since the
+    // kernel reads from them.
     HIP_CHECK(hipDeviceSynchronize());
-
-    HIP_CHECK(hipFree(d_strides_a));
-    HIP_CHECK(hipFree(d_strides_b));
-    HIP_CHECK(hipFree(d_output_shape));
 
     return result;
 }

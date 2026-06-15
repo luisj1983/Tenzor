@@ -62,14 +62,36 @@ auto ExtendedKernelCodegen::dtype_to_cuda_type(DType dtype) -> std::string {
     }
 }
 
-auto ExtendedKernelCodegen::activation_expr(OpType act, const std::string& var) -> std::string {
+auto ExtendedKernelCodegen::compute_type(DType dtype) -> std::string {
+    // Compute/accumulate in double only for Float64; Float32 and the 16-bit
+    // types compute in float (the half types are promoted to float for math).
+    return (dtype == DType::Float64) ? "double" : "float";
+}
+
+auto ExtendedKernelCodegen::literal_suffix(DType dtype) -> std::string {
+    return (dtype == DType::Float64) ? "" : "f";
+}
+
+auto ExtendedKernelCodegen::fn_for(const std::string& base, DType dtype) -> std::string {
+    // double overloads are unsuffixed (exp, sqrt, rsqrt, fabs); the float
+    // variants take the 'f' suffix (expf, sqrtf, rsqrtf, fabsf).
+    return (dtype == DType::Float64) ? base : base + "f";
+}
+
+auto ExtendedKernelCodegen::activation_expr(OpType act, const std::string& var,
+                                            DType dtype) -> std::string {
+    const std::string F = literal_suffix(dtype);
+    const std::string tanh_fn = fn_for("tanh", dtype);
+    const std::string exp_fn = fn_for("exp", dtype);
     switch (act) {
         case OpType::ReLU:    return var + " > 0 ? " + var + " : 0";
-        case OpType::Sigmoid: return "1.0f / (1.0f + expf(-" + var + "))";
-        case OpType::Tanh:    return "tanhf(" + var + ")";
+        case OpType::Sigmoid:
+            return "1.0" + F + " / (1.0" + F + " + " + exp_fn + "(-" + var + "))";
+        case OpType::Tanh:    return tanh_fn + "(" + var + ")";
         case OpType::GELU:
-            return "0.5f * " + var + " * (1.0f + tanhf(0.7978845608f * ("
-                   + var + " + 0.044715f * " + var + " * " + var + " * " + var + ")))";
+            return "0.5" + F + " * " + var + " * (1.0" + F + " + " + tanh_fn +
+                   "(0.7978845608" + F + " * (" + var + " + 0.044715" + F + " * " +
+                   var + " * " + var + " * " + var + ")))";
         default:
             return var;
     }
@@ -98,6 +120,11 @@ auto ExtendedKernelCodegen::generate(const ExtendedFusionGroup& group) -> std::s
 
 auto ExtendedKernelCodegen::generate_reduction(const ExtendedFusionGroup& group) -> std::string {
     auto T = dtype_to_cuda_type(group.dtype);
+    auto C = compute_type(group.dtype);          // accumulate in float/double
+    const std::string F = literal_suffix(group.dtype);
+    const std::string abs_fn = fn_for("fabs", group.dtype);
+    const std::string exp_fn = fn_for("exp", group.dtype);
+    const std::string sqrt_fn = fn_for("sqrt", group.dtype);
     std::ostringstream ss;
 
     ss << R"(
@@ -112,21 +139,22 @@ extern "C" __global__ void fused_reduction_kernel(
     int inner = idx % inner_size;
     if (outer >= outer_size) return;
 
-    // Each block reduces one (outer, inner) slice
-    )" << T << R"( sum = 0;
+    // Each block reduces one (outer, inner) slice. Accumulate in the compute
+    // type (float for the 16-bit storage types) and narrow to T only on store.
+    )" << C << R"( sum = 0;
     for (int r = threadIdx.x; r < reduce_size; r += blockDim.x) {
-        )" << T << R"( val = input[outer * reduce_size * inner_size + r * inner_size + inner];
+        )" << C << R"( val = static_cast<)" << C << R"(>(input[outer * reduce_size * inner_size + r * inner_size + inner]);
 )";
 
     // Inline pre-reduction element-wise ops
     for (auto& op : group.pre_ops) {
         switch (op.op) {
             case ElemOp::Mul:    ss << "        val = val * val;\n"; break;
-            case ElemOp::Abs:    ss << "        val = fabsf(val);\n"; break;
-            case ElemOp::Exp:    ss << "        val = expf(val);\n"; break;
+            case ElemOp::Abs:    ss << "        val = " << abs_fn << "(val);\n"; break;
+            case ElemOp::Exp:    ss << "        val = " << exp_fn << "(val);\n"; break;
             case ElemOp::Neg:    ss << "        val = -val;\n"; break;
             case ElemOp::MulScalar:
-                ss << "        val = val * " << op.scalar << "f;\n"; break;
+                ss << "        val = val * " << op.scalar << F << ";\n"; break;
             default: break;
         }
     }
@@ -140,7 +168,7 @@ extern "C" __global__ void fused_reduction_kernel(
     }
 
     // Block-level reduction via shared memory
-    __shared__ )" << T << R"( shared[32];
+    __shared__ )" << C << R"( shared[32];
     int lane = threadIdx.x % warpSize;
     int warp_id = threadIdx.x / warpSize;
 
@@ -155,24 +183,24 @@ extern "C" __global__ void fused_reduction_kernel(
     }
 
     if (threadIdx.x == 0) {
-        )" << T << R"( result = sum;
+        )" << C << R"( result = sum;
 )";
 
     // Inline post-reduction element-wise ops
     for (auto& op : group.post_ops) {
         switch (op.op) {
-            case ElemOp::Sqrt:     ss << "        result = sqrtf(result);\n"; break;
-            case ElemOp::Reciprocal: ss << "        result = 1.0f / result;\n"; break;
+            case ElemOp::Sqrt:       ss << "        result = " << sqrt_fn << "(result);\n"; break;
+            case ElemOp::Reciprocal: ss << "        result = 1.0" << F << " / result;\n"; break;
             case ElemOp::MulScalar:
-                ss << "        result = result * " << op.scalar << "f;\n"; break;
+                ss << "        result = result * " << op.scalar << F << ";\n"; break;
             case ElemOp::AddScalar:
-                ss << "        result = result + " << op.scalar << "f;\n"; break;
+                ss << "        result = result + " << op.scalar << F << ";\n"; break;
             default: break;
         }
     }
 
-    ss << R"(        output[outer * inner_size + inner] = result;
-    }
+    ss << "        output[outer * inner_size + inner] = static_cast<" << T << ">(result);\n";
+    ss << R"(    }
 }
 )";
 
@@ -185,6 +213,7 @@ extern "C" __global__ void fused_reduction_kernel(
 
 auto ExtendedKernelCodegen::generate_gemm_epilogue(const ExtendedFusionGroup& group) -> std::string {
     auto T = dtype_to_cuda_type(group.dtype);
+    auto C = compute_type(group.dtype);  // float for f32/f16/bf16, double for f64
     std::ostringstream ss;
 
     ss << R"(
@@ -203,18 +232,20 @@ extern "C" __global__ void fused_gemm_epilogue_kernel(
     if (idx >= rows * cols) return;
 
     int col = idx % cols;
-    )" << T << " val = output[idx];\n";
+    // Promote to the compute type so bias add + activation run in float/double
+    // (correct for the 16-bit storage types), then narrow back to T on store.
+    )" << C << " val = static_cast<" << C << ">(output[idx]);\n";
 
     if (group.has_bias) {
-        ss << "    val = val + bias[col];\n";
+        ss << "    val = val + static_cast<" << C << ">(bias[col]);\n";
     }
 
     if (group.has_activation) {
-        ss << "    val = " << activation_expr(group.activation_type, "val") << ";\n";
+        ss << "    val = " << activation_expr(group.activation_type, "val", group.dtype) << ";\n";
     }
 
-    ss << R"(    output[idx] = val;
-}
+    ss << "    output[idx] = static_cast<" << T << ">(val);\n";
+    ss << R"(}
 )";
 
     return ss.str();
@@ -226,6 +257,9 @@ extern "C" __global__ void fused_gemm_epilogue_kernel(
 
 auto ExtendedKernelCodegen::generate_softmax(const ExtendedFusionGroup& group) -> std::string {
     auto T = dtype_to_cuda_type(group.dtype);
+    auto C = compute_type(group.dtype);          // reductions/exp in float/double
+    const std::string F = literal_suffix(group.dtype);
+    const std::string exp_fn = fn_for("exp", group.dtype);
     std::ostringstream ss;
 
     ss << R"(
@@ -241,20 +275,22 @@ extern "C" __global__ void fused_softmax_kernel(
     const )" << T << R"(* row_input = input + row * cols;
     )" << T << R"(* row_output = output + row * cols;
 
-    // Pass 1: find max (for numerical stability)
-    )" << T << R"( thread_max = -1e30f;
+    // Pass 1: find max (for numerical stability). All reductions run in the
+    // compute type (float for the 16-bit storage types); only loads/stores touch
+    // T.
+    )" << C << R"( thread_max = -1e30)" << F << R"(;
     for (int c = threadIdx.x; c < cols; c += blockDim.x) {
-        )" << T << R"( val = row_input[c];
+        )" << C << R"( val = static_cast<)" << C << R"(>(row_input[c]);
         thread_max = val > thread_max ? val : thread_max;
     }
 
     // Warp reduction for max
     for (int offset = warpSize / 2; offset > 0; offset >>= 1) {
-        )" << T << R"( other = __shfl_down_sync(0xffffffff, thread_max, offset);
+        )" << C << R"( other = __shfl_down_sync(0xffffffff, thread_max, offset);
         thread_max = other > thread_max ? other : thread_max;
     }
 
-    __shared__ )" << T << R"( shared_max[32];
+    __shared__ )" << C << R"( shared_max[32];
     int lane = threadIdx.x % warpSize;
     int warp_id = threadIdx.x / warpSize;
 
@@ -262,21 +298,21 @@ extern "C" __global__ void fused_softmax_kernel(
     __syncthreads();
 
     if (warp_id == 0) {
-        thread_max = (lane < blockDim.x / warpSize) ? shared_max[lane] : -1e30f;
+        thread_max = (lane < blockDim.x / warpSize) ? shared_max[lane] : -1e30)" << F << R"(;
         for (int offset = warpSize / 2; offset > 0; offset >>= 1) {
-            )" << T << R"( other = __shfl_down_sync(0xffffffff, thread_max, offset);
+            )" << C << R"( other = __shfl_down_sync(0xffffffff, thread_max, offset);
             thread_max = other > thread_max ? other : thread_max;
         }
         if (lane == 0) shared_max[0] = thread_max;
     }
     __syncthreads();
-    )" << T << R"( row_max = shared_max[0];
+    )" << C << R"( row_max = shared_max[0];
 
     // Pass 2: compute exp(x - max) and sum
-    )" << T << R"( thread_sum = 0;
+    )" << C << R"( thread_sum = 0;
     for (int c = threadIdx.x; c < cols; c += blockDim.x) {
-        )" << T << R"( val = expf(row_input[c] - row_max);
-        row_output[c] = val;  // Store intermediate exp values
+        )" << C << R"( val = )" << exp_fn << R"((static_cast<)" << C << R"(>(row_input[c]) - row_max);
+        row_output[c] = static_cast<)" << T << R"(>(val);  // Store intermediate exp values
         thread_sum += val;
     }
 
@@ -285,7 +321,7 @@ extern "C" __global__ void fused_softmax_kernel(
         thread_sum += __shfl_down_sync(0xffffffff, thread_sum, offset);
     }
 
-    __shared__ )" << T << R"( shared_sum[32];
+    __shared__ )" << C << R"( shared_sum[32];
     if (lane == 0) shared_sum[warp_id] = thread_sum;
     __syncthreads();
 
@@ -297,11 +333,11 @@ extern "C" __global__ void fused_softmax_kernel(
         if (lane == 0) shared_sum[0] = thread_sum;
     }
     __syncthreads();
-    )" << T << R"( inv_sum = 1.0f / shared_sum[0];
+    )" << C << R"( inv_sum = 1.0)" << F << R"( / shared_sum[0];
 
     // Pass 3: normalize
     for (int c = threadIdx.x; c < cols; c += blockDim.x) {
-        row_output[c] = row_output[c] * inv_sum;
+        row_output[c] = static_cast<)" << T << R"(>(static_cast<)" << C << R"(>(row_output[c]) * inv_sum);
     }
 }
 )";
@@ -315,6 +351,8 @@ extern "C" __global__ void fused_softmax_kernel(
 
 auto ExtendedKernelCodegen::generate_layer_norm(const ExtendedFusionGroup& group) -> std::string {
     auto T = dtype_to_cuda_type(group.dtype);
+    auto C = compute_type(group.dtype);  // Welford state in float/double
+    const std::string rsqrt_fn = fn_for("rsqrt", group.dtype);
     std::ostringstream ss;
 
     ss << R"(
@@ -338,28 +376,30 @@ extern "C" __global__ void fused_layer_norm_kernel(
     const )" << T << R"(* x = input + instance * norm_size;
     )" << T << R"(* y = output + instance * norm_size;
 
-    // Welford online mean computation
-    )" << T << R"( mean = 0;
-    )" << T << R"( m2 = 0;
+    // Welford online mean computation (accumulate in compute type; the 16-bit
+    // storage types are promoted to float for the running mean/variance).
+    )" << C << R"( mean = 0;
+    )" << C << R"( m2 = 0;
     int count = 0;
 
     for (int i = threadIdx.x; i < norm_size; i += blockDim.x) {
         count++;
-        )" << T << R"( delta = x[i] - mean;
+        )" << C << R"( xi = static_cast<)" << C << R"(>(x[i]);
+        )" << C << R"( delta = xi - mean;
         mean += delta / count;
-        )" << T << R"( delta2 = x[i] - mean;
+        )" << C << R"( delta2 = xi - mean;
         m2 += delta * delta2;
     }
 
     // Warp-level Welford merge
     for (int offset = warpSize / 2; offset > 0; offset >>= 1) {
-        )" << T << R"( other_mean = __shfl_down_sync(0xffffffff, mean, offset);
-        )" << T << R"( other_m2 = __shfl_down_sync(0xffffffff, m2, offset);
+        )" << C << R"( other_mean = __shfl_down_sync(0xffffffff, mean, offset);
+        )" << C << R"( other_m2 = __shfl_down_sync(0xffffffff, m2, offset);
         int other_count = __shfl_down_sync(0xffffffff, count, offset);
 
         int total = count + other_count;
         if (total > 0) {
-            )" << T << R"( delta = other_mean - mean;
+            )" << C << R"( delta = other_mean - mean;
             mean = (count * mean + other_count * other_mean) / total;
             m2 = m2 + other_m2 + delta * delta * count * other_count / total;
             count = total;
@@ -367,7 +407,7 @@ extern "C" __global__ void fused_layer_norm_kernel(
     }
 
     // Block-level merge via shared memory
-    __shared__ )" << T << R"( s_mean[32], s_m2[32];
+    __shared__ )" << C << R"( s_mean[32], s_m2[32];
     __shared__ int s_count[32];
     int lane = threadIdx.x % warpSize;
     int warp_id = threadIdx.x / warpSize;
@@ -386,13 +426,13 @@ extern "C" __global__ void fused_layer_norm_kernel(
         count = (lane < nwarps) ? s_count[lane] : 0;
 
         for (int offset = warpSize / 2; offset > 0; offset >>= 1) {
-            )" << T << R"( other_mean = __shfl_down_sync(0xffffffff, mean, offset);
-            )" << T << R"( other_m2 = __shfl_down_sync(0xffffffff, m2, offset);
+            )" << C << R"( other_mean = __shfl_down_sync(0xffffffff, mean, offset);
+            )" << C << R"( other_m2 = __shfl_down_sync(0xffffffff, m2, offset);
             int other_count = __shfl_down_sync(0xffffffff, count, offset);
 
             int total = count + other_count;
             if (total > 0) {
-                )" << T << R"( delta = other_mean - mean;
+                )" << C << R"( delta = other_mean - mean;
                 mean = (count * mean + other_count * other_mean) / total;
                 m2 = m2 + other_m2 + delta * delta * count * other_count / total;
                 count = total;
@@ -406,20 +446,20 @@ extern "C" __global__ void fused_layer_norm_kernel(
     }
     __syncthreads();
 
-    )" << T << R"( final_mean = s_mean[0];
-    )" << T << R"( inv_std = rsqrtf(s_m2[0] + eps);
+    )" << C << R"( final_mean = s_mean[0];
+    )" << C << R"( inv_std = )" << rsqrt_fn << R"((s_m2[0] + eps);
 
     // Normalize + affine
     for (int i = threadIdx.x; i < norm_size; i += blockDim.x) {
-        )" << T << R"( val = (x[i] - final_mean) * inv_std;)";
+        )" << C << R"( val = (static_cast<)" << C << R"(>(x[i]) - final_mean) * inv_std;)";
 
     if (group.has_affine) {
         ss << R"(
-        val = val * gamma[i] + beta[i];)";
+        val = val * static_cast<)" << C << R"(>(gamma[i]) + static_cast<)" << C << R"(>(beta[i]);)";
     }
 
     ss << R"(
-        y[i] = val;
+        y[i] = static_cast<)" << T << R"(>(val);
     }
 }
 )";
@@ -433,6 +473,8 @@ extern "C" __global__ void fused_layer_norm_kernel(
 
 auto ExtendedKernelCodegen::generate_rms_norm(const ExtendedFusionGroup& group) -> std::string {
     auto T = dtype_to_cuda_type(group.dtype);
+    auto C = compute_type(group.dtype);  // sum-of-squares in float/double
+    const std::string rsqrt_fn = fn_for("rsqrt", group.dtype);
     std::ostringstream ss;
 
     ss << R"(
@@ -454,10 +496,11 @@ extern "C" __global__ void fused_rms_norm_kernel(
     const )" << T << R"(* x = input + instance * norm_size;
     )" << T << R"(* y = output + instance * norm_size;
 
-    // Compute sum of squares
-    )" << T << R"( sum_sq = 0;
+    // Compute sum of squares (accumulate in compute type; 16-bit storage types
+    // are promoted to float for the reduction).
+    )" << C << R"( sum_sq = 0;
     for (int i = threadIdx.x; i < norm_size; i += blockDim.x) {
-        )" << T << R"( val = x[i];
+        )" << C << R"( val = static_cast<)" << C << R"(>(x[i]);
         sum_sq += val * val;
     }
 
@@ -466,7 +509,7 @@ extern "C" __global__ void fused_rms_norm_kernel(
         sum_sq += __shfl_down_sync(0xffffffff, sum_sq, offset);
     }
 
-    __shared__ )" << T << R"( shared[32];
+    __shared__ )" << C << R"( shared[32];
     int lane = threadIdx.x % warpSize;
     int warp_id = threadIdx.x / warpSize;
 
@@ -482,19 +525,19 @@ extern "C" __global__ void fused_rms_norm_kernel(
     }
     __syncthreads();
 
-    )" << T << R"( rms_inv = rsqrtf(shared[0] / norm_size + eps);
+    )" << C << R"( rms_inv = )" << rsqrt_fn << R"((shared[0] / norm_size + eps);
 
     // Normalize
     for (int i = threadIdx.x; i < norm_size; i += blockDim.x) {
-        )" << T << R"( val = x[i] * rms_inv;)";
+        )" << C << R"( val = static_cast<)" << C << R"(>(x[i]) * rms_inv;)";
 
     if (group.has_affine) {
         ss << R"(
-        val = val * gamma[i];)";
+        val = val * static_cast<)" << C << R"(>(gamma[i]);)";
     }
 
     ss << R"(
-        y[i] = val;
+        y[i] = static_cast<)" << T << R"(>(val);
     }
 }
 )";
@@ -508,6 +551,7 @@ extern "C" __global__ void fused_rms_norm_kernel(
 
 auto ExtendedKernelCodegen::generate_small_mlp(const ExtendedFusionGroup& group) -> std::string {
     auto T = dtype_to_cuda_type(group.dtype);
+    auto C = compute_type(group.dtype);  // GEMM accumulation in float/double
     std::ostringstream ss;
 
     // For small MLPs, we generate a two-stage kernel:
@@ -534,24 +578,26 @@ extern "C" __global__ void fused_small_mlp_kernel(
 
     const )" << T << R"(* x = input + b * in_dim;
 
-    // Stage 1: hidden = activation(x @ W1 + b1)
+    // Stage 1: hidden = activation(x @ W1 + b1). Accumulate the dot product in
+    // the compute type (float for the 16-bit storage types) and narrow to T when
+    // writing the shared-memory intermediate (whose layout is sized in T).
     for (int h = threadIdx.x; h < hidden_dim; h += blockDim.x) {
-        )" << T << R"( acc = b1[h];
+        )" << C << R"( acc = static_cast<)" << C << R"(>(b1[h]);
         for (int i = 0; i < in_dim; ++i) {
-            acc += x[i] * w1[i * hidden_dim + h];
+            acc += static_cast<)" << C << R"(>(x[i]) * static_cast<)" << C << R"(>(w1[i * hidden_dim + h]);
         }
-        hidden[h] = )" << activation_expr(group.mlp_activation, "acc") << R"(;
+        hidden[h] = static_cast<)" << T << R"(>()" << activation_expr(group.mlp_activation, "acc", group.dtype) << R"();
     }
     __syncthreads();
 
     // Stage 2: output = hidden @ W2 + b2
     )" << T << R"(* out = output + b * out_dim;
     for (int o = threadIdx.x; o < out_dim; o += blockDim.x) {
-        )" << T << R"( acc = b2[o];
+        )" << C << R"( acc = static_cast<)" << C << R"(>(b2[o]);
         for (int h = 0; h < hidden_dim; ++h) {
-            acc += hidden[h] * w2[h * out_dim + o];
+            acc += static_cast<)" << C << R"(>(hidden[h]) * static_cast<)" << C << R"(>(w2[h * out_dim + o]);
         }
-        out[o] = acc;
+        out[o] = static_cast<)" << T << R"(>(acc);
     }
 }
 )";
@@ -563,6 +609,24 @@ extern "C" __global__ void fused_small_mlp_kernel(
 // Extended kernel execution
 // ============================================================================
 
+namespace {
+
+// Entry-point symbol name emitted by each generate_* method, keyed by kind.
+// Must stay in sync with the extern "C" __global__ names in the generators.
+auto extended_kernel_name(FusionKind kind) -> std::string {
+    switch (kind) {
+        case FusionKind::Reduction:    return "fused_reduction_kernel";
+        case FusionKind::GemmEpilogue: return "fused_gemm_epilogue_kernel";
+        case FusionKind::Softmax:      return "fused_softmax_kernel";
+        case FusionKind::LayerNorm:    return "fused_layer_norm_kernel";
+        case FusionKind::RMSNorm:      return "fused_rms_norm_kernel";
+        case FusionKind::SmallMLP:     return "fused_small_mlp_kernel";
+    }
+    return "";
+}
+
+} // namespace
+
 auto execute_extended_fused(const ExtendedFusionGroup& group,
                             const std::vector<Tensor>& inputs,
                             const std::vector<Tensor>& params) -> Tensor {
@@ -572,20 +636,23 @@ auto execute_extended_fused(const ExtendedFusionGroup& group,
         throw std::runtime_error("Extended codegen: unsupported fusion kind");
     }
 
-    // Use existing KernelCache for compilation
-    // For now, delegate to the element-wise infrastructure with a custom signature
+    // Compile the EXTENDED kernel source we just generated, keyed by the
+    // extended group's signature. Previously this delegated to
+    // get_or_compile(FusionGroup), which regenerates and compiles an unrelated
+    // element-wise kernel and discards `source` entirely.
     auto& cache = KernelCache::instance();
 
-    // Create a FusionGroup wrapper for the cache key
-    FusionGroup wrapper;
-    wrapper.signature = group.signature.empty()
+    std::string signature = group.signature.empty()
         ? const_cast<ExtendedFusionGroup&>(group).compute_signature()
         : group.signature;
-    wrapper.dtype = group.dtype;
+    std::string kernel_name = extended_kernel_name(group.kind);
+    if (kernel_name.empty()) {
+        throw std::runtime_error("Extended codegen: unsupported fusion kind");
+    }
 
-    auto kernel = cache.get_or_compile(wrapper);
+    auto kernel = cache.get_or_compile_source(signature, source, kernel_name);
     if (!kernel) {
-        throw std::runtime_error("Extended codegen: failed to compile kernel: " + wrapper.signature);
+        throw std::runtime_error("Extended codegen: failed to compile kernel: " + signature);
     }
 
     // Determine output shape based on fusion kind

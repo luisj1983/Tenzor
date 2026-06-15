@@ -24,6 +24,7 @@
 #include <algorithm>
 #include <cstdlib>
 #include <cstring>
+#include <new>
 #include <fstream>
 #include <sstream>
 #include <stdexcept>
@@ -45,7 +46,12 @@ LiteTensor::~LiteTensor() {
 }
 
 auto LiteTensor::numel() const -> int64_t {
-    if (ndim == 0) return 0;
+    // Element count is the product of the dimension extents. A rank-0 scalar has
+    // exactly one element (the empty product over zero dims is 1) — consistent
+    // with to_lite_tensor() in tensor_bridge.cpp, which allocates real data for a
+    // numel==1 scalar. Do NOT special-case ndim == 0 to 0: that under-sizes
+    // nbytes() to zero and drops scalar values. A genuinely empty tensor is one
+    // with a zero-sized dimension (product == 0).
     int64_t n = 1;
     for (int32_t i = 0; i < ndim; ++i) {
         n *= shape[i];
@@ -158,8 +164,19 @@ auto LiteRuntime::load(const std::string& path) -> std::unique_ptr<LiteRuntime> 
     auto size = file.tellg();
     file.seekg(0, std::ios::beg);
 
-    std::vector<uint8_t> data(size);
-    file.read(reinterpret_cast<char*>(data.data()), size);
+    // tellg() returns -1 on failure; converting that to size_t would request a
+    // ~SIZE_MAX allocation, so fail cleanly instead.
+    if (size < 0) {
+        throw std::runtime_error("LiteRuntime: cannot determine file size: " +
+                                 path);
+    }
+
+    std::vector<uint8_t> data(static_cast<size_t>(size));
+    if (size > 0 &&
+        !file.read(reinterpret_cast<char*>(data.data()),
+                   static_cast<std::streamsize>(size))) {
+        throw std::runtime_error("LiteRuntime: cannot read file: " + path);
+    }
 
     return load(data.data(), data.size());
 }
@@ -399,8 +416,17 @@ auto LiteRuntime::model_metadata(const std::string& key) const -> std::string {
 }
 
 auto LiteRuntime::create_input(const std::vector<int64_t>& shape, DType dtype) -> LiteTensor {
+    // Reject (don't silently truncate) shapes with more than kMaxDims dims: a
+    // truncated tensor's numel no longer matches the caller's intent and would
+    // under-size the buffer, letting downstream kernels read past it. Mirrors
+    // to_lite_tensor()'s throw-on-too-many-dims contract.
+    if (shape.size() > static_cast<size_t>(kMaxDims)) {
+        throw std::invalid_argument(
+            "LiteRuntime::create_input: shape has more dims than kMaxDims");
+    }
+
     LiteTensor tensor;
-    tensor.ndim = static_cast<int32_t>(std::min(shape.size(), static_cast<size_t>(kMaxDims)));
+    tensor.ndim = static_cast<int32_t>(shape.size());
     tensor.dtype = dtype;
     tensor.owns_data = true;
 
@@ -416,7 +442,13 @@ auto LiteRuntime::create_input(const std::vector<int64_t>& shape, DType dtype) -
     }
 
     auto bytes = numel * dtype_size(dtype);
-    tensor.data = std::calloc(1, bytes);
+    tensor.data = std::calloc(1, static_cast<size_t>(bytes));
+    // A failed/over-large allocation otherwise yields a LiteTensor with
+    // data==nullptr and owns_data=true that callers write into (null deref).
+    if (bytes > 0 && tensor.data == nullptr) {
+        tensor.owns_data = false;  // nothing to free in the destructor
+        throw std::bad_alloc{};
+    }
 
     return tensor;
 }

@@ -48,6 +48,25 @@ __device__ __forceinline__ T reflect_coord(T coord, int size) {
     return coord;
 }
 
+// d(reflect_coord)/d(coord): +1 or -1 depending on which leg of the reflection
+// fold the (pre-reflection) coordinate lands on. Mirrors reflect_coord's branch
+// structure. The fabs leg flips sign for negative coords; the upper fold flips
+// it again. Returns 0 for the degenerate size<=1 case (constant output).
+template <typename T>
+__device__ __forceinline__ T reflect_coord_grad(T coord, int size) {
+    if (size <= 1) return T(0);
+    T max_val = static_cast<T>(size - 1);
+    T sign = (coord < T(0)) ? T(-1) : T(1);   // d|coord|/dcoord
+    T a;
+    if constexpr (std::is_same_v<T, float>)  a = fabsf(coord);
+    else                                     a = fabs(coord);
+    T period = T(2) * max_val;
+    if constexpr (std::is_same_v<T, float>)  a = fmodf(a, period);
+    else                                     a = fmod(a, period);
+    if (a > max_val) sign = -sign;            // upper fold leg flips the sign
+    return sign;
+}
+
 // ============================================================================
 // Bilinear grid_sample kernel
 // ============================================================================
@@ -461,11 +480,15 @@ __global__ void grid_sample_bilinear_backward_kernel(
     T gx = grid[grid_idx];
     T gy = grid[grid_idx + 1];
 
-    T ix = denormalize_dev<T>(gx, W_in, align_corners);
-    T iy = denormalize_dev<T>(gy, H_in, align_corners);
+    // Unclamped/unreflected denormalized coords; needed to compute the
+    // coordinate-transform (padding) derivative for grad_grid.
+    T ix_raw = denormalize_dev<T>(gx, W_in, align_corners);
+    T iy_raw = denormalize_dev<T>(gy, H_in, align_corners);
+    T ix = ix_raw;
+    T iy = iy_raw;
 
-    bool in_bounds_ix = (ix >= T(0) && ix <= static_cast<T>(W_in - 1));
-    bool in_bounds_iy = (iy >= T(0) && iy <= static_cast<T>(H_in - 1));
+    bool in_bounds_ix = (ix_raw >= T(0) && ix_raw <= static_cast<T>(W_in - 1));
+    bool in_bounds_iy = (iy_raw >= T(0) && iy_raw <= static_cast<T>(H_in - 1));
 
     if (padding_mode == 1) {
         if constexpr (std::is_same_v<T, float>) {
@@ -480,6 +503,10 @@ __global__ void grid_sample_bilinear_backward_kernel(
         iy = reflect_coord<T>(iy, H_in);
     }
 
+    // d(sampled coord)/d(grid): chain rule
+    //   d/dgx = d(pad(ix))/d(ix) * d(ix)/d(gx)
+    // where d(ix)/d(gx) is the (linear) denormalize derivative below, and the
+    // padding (clamp/reflect) derivative is applied as scale_x/scale_y later.
     T dix_dgx, diy_dgy;
     if (align_corners) {
         dix_dgx = T(0.5) * static_cast<T>(W_in - 1);
@@ -535,9 +562,23 @@ __global__ void grid_sample_bilinear_backward_kernel(
         sum_dy += dy_v;
     }
 
-    // 'zeros' padding: out-of-domain samples contribute 0 to grad_grid.
-    T scale_x = (padding_mode == 0 && !in_bounds_ix) ? T(0) : dix_dgx;
-    T scale_y = (padding_mode == 0 && !in_bounds_iy) ? T(0) : diy_dgy;
+    // Apply the padding (coordinate-transform) derivative to grad_grid:
+    //  - zeros (0):  out-of-domain samples contribute 0.
+    //  - border (1): clamp derivative is 0 where the unclamped coord is outside
+    //                [0, size-1] (clamped coord is constant there), else 1.
+    //  - reflection (2): multiply by the fold sign (+/-1).
+    T scale_x = dix_dgx;
+    T scale_y = diy_dgy;
+    if (padding_mode == 0) {
+        if (!in_bounds_ix) scale_x = T(0);
+        if (!in_bounds_iy) scale_y = T(0);
+    } else if (padding_mode == 1) {
+        if (!in_bounds_ix) scale_x = T(0);
+        if (!in_bounds_iy) scale_y = T(0);
+    } else if (padding_mode == 2) {
+        scale_x *= reflect_coord_grad<T>(ix_raw, W_in);
+        scale_y *= reflect_coord_grad<T>(iy_raw, H_in);
+    }
     grad_grid[grid_idx]     = sum_dx * scale_x;
     grad_grid[grid_idx + 1] = sum_dy * scale_y;
 }
@@ -623,8 +664,13 @@ __global__ void grid_sample_bicubic_backward_kernel(
     T gx = grid[grid_idx];
     T gy = grid[grid_idx + 1];
 
-    T ix = denormalize_dev<T>(gx, W_in, align_corners);
-    T iy = denormalize_dev<T>(gy, H_in, align_corners);
+    T ix_raw = denormalize_dev<T>(gx, W_in, align_corners);
+    T iy_raw = denormalize_dev<T>(gy, H_in, align_corners);
+    T ix = ix_raw;
+    T iy = iy_raw;
+
+    bool in_bounds_ix = (ix_raw >= T(0) && ix_raw <= static_cast<T>(W_in - 1));
+    bool in_bounds_iy = (iy_raw >= T(0) && iy_raw <= static_cast<T>(H_in - 1));
 
     if (padding_mode == 1) {
         if constexpr (std::is_same_v<T, float>) {
@@ -711,8 +757,20 @@ __global__ void grid_sample_bicubic_backward_kernel(
         sum_dy += go * dval_diy;
     }
 
-    grad_grid[grid_idx]     = sum_dx * dix_dgx;
-    grad_grid[grid_idx + 1] = sum_dy * diy_dgy;
+    // Apply the padding (coordinate-transform) derivative, matching bilinear
+    // backward: zeros/border zero the per-axis scale where the unclamped coord
+    // is out of bounds; reflection multiplies by the fold sign.
+    T scale_x = dix_dgx;
+    T scale_y = diy_dgy;
+    if (padding_mode == 0 || padding_mode == 1) {
+        if (!in_bounds_ix) scale_x = T(0);
+        if (!in_bounds_iy) scale_y = T(0);
+    } else if (padding_mode == 2) {
+        scale_x *= reflect_coord_grad<T>(ix_raw, W_in);
+        scale_y *= reflect_coord_grad<T>(iy_raw, H_in);
+    }
+    grad_grid[grid_idx]     = sum_dx * scale_x;
+    grad_grid[grid_idx + 1] = sum_dy * scale_y;
 }
 
 template <typename T>

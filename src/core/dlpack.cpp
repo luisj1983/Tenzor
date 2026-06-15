@@ -275,20 +275,50 @@ auto from_dlpack(DLManagedTensor* managed) -> Tensor {
         Tensor out(out_shape, dtype, device);
         auto* dst = static_cast<uint8_t*>(out.data_ptr());
 
+        // DLPack permits negative strides (reverse views): a producer anchors
+        // byte_offset near the end of the buffer and walks backward, so the
+        // per-index element offset is legitimately negative for many indices.
+        // Keep the offset arithmetic signed and compute the minimum reachable
+        // element offset across all index combinations. For each axis the
+        // extreme contributions are stride*0 and stride*(extent-1); a negative
+        // stride contributes its negative extreme to the minimum.
+        int64_t min_elem_off = 0;
+        for (size_t d = 0; d < shape.size(); ++d) {
+            if (shape[d] <= 0) continue;
+            const int64_t extreme = dl.strides[d] * (shape[d] - 1);
+            if (extreme < 0) {
+                min_elem_off += extreme;
+            }
+        }
+
+        // Anchor at the lowest reachable element so all subsequent offsets are
+        // non-negative relative to `base`. data_ptr already includes
+        // byte_offset; shift it down by the (possibly negative) minimum.
+        auto* base = data_ptr + min_elem_off * static_cast<int64_t>(elem_bytes);
+        if (base < data_base) {
+            throw std::runtime_error(
+                "from_dlpack: strided capsule references memory before the "
+                "start of its data buffer (invalid negative offset).");
+        }
+
         // Walk every index of the output (row-major) and dereference the
         // matching strided position in the source.
         int64_t total = 1;
         for (auto s : shape) total *= s;
         std::vector<int64_t> idx(shape.size(), 0);
         for (int64_t lin = 0; lin < total; ++lin) {
-            // Compute source byte offset from per-axis strides (in elements).
-            int64_t src_elem_off = 0;
+            // Compute source element offset from per-axis strides (in elements),
+            // kept signed and rebased against the minimum reachable offset so it
+            // is always non-negative. Casting a genuinely-negative running sum
+            // straight to size_t (the previous code) wrapped to a huge value and
+            // read out of bounds on negative-stride capsules.
+            int64_t src_elem_off = -min_elem_off;
             for (size_t d = 0; d < shape.size(); ++d) {
                 src_elem_off += idx[d] * dl.strides[d];
             }
             const size_t src_byte_off = static_cast<size_t>(src_elem_off) * elem_bytes;
             std::memcpy(dst + static_cast<size_t>(lin) * elem_bytes,
-                        data_ptr + src_byte_off, elem_bytes);
+                        base + src_byte_off, elem_bytes);
 
             // Increment row-major index.
             for (int d = static_cast<int>(shape.size()) - 1; d >= 0; --d) {

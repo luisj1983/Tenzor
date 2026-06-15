@@ -31,10 +31,31 @@ auto read_idx_images(const std::string& path) -> std::pair<std::vector<uint8_t>,
     uint32_t num_images = read_be_uint32(file);
     uint32_t rows = read_be_uint32(file);
     uint32_t cols = read_be_uint32(file);
+    if (!file) {
+        throw std::runtime_error("MNIST: truncated header in " + path);
+    }
 
     size_t total = static_cast<size_t>(num_images) * rows * cols;
+
+    // Sanity-bound the declared element count against the bytes actually
+    // remaining in the file before allocating, so a crafted header cannot
+    // force an enormous allocation.
+    std::streampos cur = file.tellg();
+    file.seekg(0, std::ios::end);
+    std::streampos end = file.tellg();
+    file.seekg(cur);
+    if (cur < 0 || end < 0 ||
+        total > static_cast<size_t>(end - cur)) {
+        throw std::runtime_error("MNIST: declared image data exceeds file size in " + path);
+    }
+
     std::vector<uint8_t> data(total);
     file.read(reinterpret_cast<char*>(data.data()), static_cast<std::streamsize>(total));
+    // A truncated/crafted body would leave the tail silently zero (the output
+    // tensor is pre-zeroed), yielding valid-looking black images. Reject it.
+    if (file.gcount() != static_cast<std::streamsize>(total)) {
+        throw std::runtime_error("MNIST: truncated image data in " + path);
+    }
 
     return {std::move(data), {static_cast<int64_t>(num_images),
                               1, static_cast<int64_t>(rows), static_cast<int64_t>(cols)}};
@@ -52,8 +73,29 @@ auto read_idx_labels(const std::string& path) -> std::pair<std::vector<uint8_t>,
     }
 
     uint32_t num_labels = read_be_uint32(file);
+    if (!file) {
+        throw std::runtime_error("MNIST: truncated header in " + path);
+    }
+
+    // Sanity-bound the declared count against the bytes actually remaining in
+    // the file before allocating, so a crafted header cannot force an enormous
+    // allocation.
+    std::streampos cur = file.tellg();
+    file.seekg(0, std::ios::end);
+    std::streampos end = file.tellg();
+    file.seekg(cur);
+    if (cur < 0 || end < 0 ||
+        static_cast<size_t>(num_labels) > static_cast<size_t>(end - cur)) {
+        throw std::runtime_error("MNIST: declared label data exceeds file size in " + path);
+    }
+
     std::vector<uint8_t> data(num_labels);
     file.read(reinterpret_cast<char*>(data.data()), num_labels);
+    // A truncated/crafted body would leave the tail silently zero (labels_ is
+    // pre-zeroed), turning missing labels into class 0. Reject it.
+    if (file.gcount() != static_cast<std::streamsize>(num_labels)) {
+        throw std::runtime_error("MNIST: truncated label data in " + path);
+    }
 
     return {std::move(data), static_cast<int64_t>(num_labels)};
 }

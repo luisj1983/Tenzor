@@ -4,6 +4,8 @@
  */
 
 #include "tenzor/distributed/elastic/elastic_trainer.hpp"
+#include "tenzor/distributed/rpc/rpc.hpp"
+#include "tenzor/distributed/rpc/rpc_agent.hpp"
 #include "tenzor/utils/log.hpp"
 #include <filesystem>  // Audit J15: checkpoint dir creation
 #include <fstream>     // Audit J15: marker file write
@@ -97,7 +99,30 @@ auto ElasticTrainer::run(TrainFunction train_fn) -> void {
 }
 
 auto ElasticTrainer::check_and_recover() -> bool {
-    if (!health_monitor_) return false;
+    // Lazily construct and start the health monitor on first use. The trainer
+    // doesn't own the RPC agent (the user initializes it via init_rpc()), so we
+    // pull the global agent here. Without an initialized RPC agent there is no
+    // way to probe peers, so recovery is genuinely unavailable — report it once.
+    if (!health_monitor_) {
+        std::shared_ptr<rpc::TcpRpcAgent> agent;
+        try {
+            agent = rpc::get_agent();
+        } catch (const std::exception& e) {
+            TENZOR_LOG_WARN("[ElasticTrainer] check_and_recover() requires an "
+                            "initialized RPC agent (call init_rpc() first): {}",
+                            e.what());
+            return false;
+        }
+        health_monitor_ = std::make_unique<HealthMonitor>(agent, config_.health);
+        // Monitor every peer in the current world except ourselves.
+        std::vector<int32_t> worker_ids;
+        worker_ids.reserve(static_cast<size_t>(
+            current_world_size_ > 0 ? current_world_size_ - 1 : 0));
+        for (int32_t id = 0; id < current_world_size_; ++id) {
+            if (id != current_rank_) worker_ids.push_back(id);
+        }
+        health_monitor_->start(worker_ids);
+    }
 
     auto dead = health_monitor_->dead_workers();
     if (dead.empty()) return false;
@@ -141,6 +166,19 @@ auto ElasticTrainer::check_and_recover() -> bool {
         // Audit I.4: route to unified logger.
         TENZOR_LOG_ERROR("[ElasticTrainer] Re-rendezvous failed: {}", e.what());
         return false;
+    }
+
+    // World membership changed; restart the monitor on the new worker set so it
+    // doesn't keep probing departed ranks or miss newly-joined ones.
+    if (health_monitor_) {
+        health_monitor_->stop();
+        std::vector<int32_t> worker_ids;
+        worker_ids.reserve(static_cast<size_t>(
+            current_world_size_ > 0 ? current_world_size_ - 1 : 0));
+        for (int32_t id = 0; id < current_world_size_; ++id) {
+            if (id != current_rank_) worker_ids.push_back(id);
+        }
+        health_monitor_->start(worker_ids);
     }
 
     ++restart_count_;

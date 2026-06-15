@@ -39,8 +39,7 @@ auto LayerScale::forward_impl(const Variable& input) -> Variable {
 
 ConvNeXtBlock::ConvNeXtBlock(int64_t dim,
                              double drop_path,
-                             double layer_scale_init_value)
-    : drop_path_(drop_path) {
+                             double layer_scale_init_value) {
 
     // Depthwise 7×7 convolution (groups = channels for depthwise)
     dwconv_ = std::make_shared<nn::Conv2d>(
@@ -67,6 +66,14 @@ ConvNeXtBlock::ConvNeXtBlock(int64_t dim,
     // Layer Scale
     gamma_ = std::make_shared<LayerScale>(dim, layer_scale_init_value);
     register_module("gamma", gamma_);
+
+    // Stochastic depth (drop path). Use the shared nn::DropPath module for
+    // per-sample, train/eval-gated, seedable masking (matches EfficientNet/Swin).
+    // Only register one when it would actually drop anything.
+    if (drop_path > 0.0) {
+        drop_path_ = std::make_shared<nn::DropPath>(drop_path);
+        register_module("drop_path", drop_path_);
+    }
 }
 
 auto ConvNeXtBlock::forward_impl(const Variable& input) -> Variable {
@@ -98,20 +105,11 @@ auto ConvNeXtBlock::forward_impl(const Variable& input) -> Variable {
     // Layer Scale
     x = gamma_->forward(x);
 
-    // Stochastic depth (drop path)
-    if (is_training() && drop_path_ > 0.0) {
-        // Simple stochastic depth: randomly drop the entire residual branch
-        auto drop_mask = Tensor({}, DType::Float32, x.device());
-        // Generate random value and compare with drop_path_
-        // For simplicity, we'll implement a basic version
-        // In production, use proper random number generation
-        if (static_cast<double>(rand()) / RAND_MAX < drop_path_) {
-            // Drop the branch - return only shortcut
-            return shortcut;
-        } else {
-            // Keep the branch, scale by survival probability
-            x = x * (1.0 / (1.0 - drop_path_));
-        }
+    // Stochastic depth (drop path) applied to the residual branch.
+    // nn::DropPath handles train/eval gating internally (identity in eval) and
+    // draws an independent per-sample Bernoulli mask scaled by 1/(1-p).
+    if (drop_path_) {
+        x = drop_path_->forward(x);
     }
 
     // Residual connection
@@ -234,24 +232,6 @@ auto ConvNeXt::make_stage(int64_t dim, int64_t depth,
     }
 
     return stage;
-}
-
-auto ConvNeXt::make_downsample(int64_t in_dim, int64_t out_dim)
-    -> std::shared_ptr<nn::Sequential> {
-
-    auto downsample = std::make_shared<nn::Sequential>();
-
-    // LayerNorm
-    auto norm = std::make_shared<nn::LayerNorm>(
-        std::vector<int64_t>{in_dim}, 1e-6, true);
-    downsample->add_module(norm);
-
-    // 2×2 conv with stride 2
-    auto conv = std::make_shared<nn::Conv2d>(
-        in_dim, out_dim, 2, 2, 0, 1, 1, false);
-    downsample->add_module(conv);
-
-    return downsample;
 }
 
 auto ConvNeXt::forward_impl(const Variable& input) -> Variable {

@@ -471,8 +471,9 @@ constexpr auto promote_types(DType a, DType b) -> DType {
                        ? b
                        : DType::Float32;
         }
-        if (is_complex_type(a)) return a;
-        if (is_complex_type(b)) return b;
+        // Complex operands were already fully resolved above (see the
+        // is_complex_type branches before the quantized block), so neither
+        // a nor b can be complex here.
         if (is_quantized(a) && is_quantized(b)) {
             if (a == b) return a;
             return DType::QInt8;  // signed type wins

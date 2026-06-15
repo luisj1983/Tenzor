@@ -326,13 +326,21 @@ auto VulkanBackend::dispatchAdaptiveMaxPool2d(const Tensor& input, int64_t out_h
                       VK_SHADER_STAGE_COMPUTE_BIT,
                       0, sizeof(PushConstants), &push_constants);
 
-    // Dispatch for each batch element
-    for (int64_t b = 0; b < batch; b++) {
-        uint32_t workgroups_x = (out_w + 15) / 16;
-        uint32_t workgroups_y = (out_h + 15) / 16;
-        uint32_t workgroups_z = static_cast<uint32_t>(channels);
-        vkCmdDispatch(cmdBuffer, workgroups_x, workgroups_y, workgroups_z);
-    }
+    // Dispatch with (16, 16) local size shader.
+    //   x = out_width chunks
+    //   y = out_height chunks
+    //   z = batch * channels (the shader decodes z back into (b, c))
+    // The previous code looped over batch on the host but every iteration
+    // issued the SAME dispatch with the SAME push constants/bindings, and
+    // the shader's index math used only the channel index `c` (no batch
+    // stride), so every batch aliased batch 0 and batches 1..N-1 were never
+    // computed — a silent batch>1 correctness bug. Packing the batch into z
+    // and letting the shader split (b, c) is the correct model (mirrors
+    // dispatchMaxPool2d above).
+    uint32_t workgroups_x = static_cast<uint32_t>((out_w + 15) / 16);
+    uint32_t workgroups_y = static_cast<uint32_t>((out_h + 15) / 16);
+    uint32_t workgroups_z = static_cast<uint32_t>(batch * channels);
+    vkCmdDispatch(cmdBuffer, workgroups_x, workgroups_y, workgroups_z);
 
     // Add memory barrier
     insertComputeOnlyBarrier(cmdBuffer);
@@ -424,13 +432,20 @@ auto VulkanBackend::dispatchAdaptiveAvgPool2d(const Tensor& input, int64_t out_h
                       VK_SHADER_STAGE_COMPUTE_BIT,
                       0, sizeof(PushConstants), &push_constants);
 
-    // Dispatch for each batch element
-    for (int64_t b = 0; b < batch; b++) {
-        uint32_t workgroups_x = (out_w + 15) / 16;
-        uint32_t workgroups_y = (out_h + 15) / 16;
-        uint32_t workgroups_z = static_cast<uint32_t>(channels);
-        vkCmdDispatch(cmdBuffer, workgroups_x, workgroups_y, workgroups_z);
-    }
+    // Dispatch with (16, 16) local size shader.
+    //   x = out_width chunks
+    //   y = out_height chunks
+    //   z = batch * channels (the shader decodes z back into (b, c))
+    // The previous code looped over batch on the host but every iteration
+    // issued the SAME dispatch with the SAME push constants/bindings, and
+    // the shader's index math used only the channel index `c` (no batch
+    // stride), so every batch aliased batch 0 and batches 1..N-1 were never
+    // computed — a silent batch>1 correctness bug. Packing the batch into z
+    // and letting the shader split (b, c) is the correct model.
+    uint32_t workgroups_x = static_cast<uint32_t>((out_w + 15) / 16);
+    uint32_t workgroups_y = static_cast<uint32_t>((out_h + 15) / 16);
+    uint32_t workgroups_z = static_cast<uint32_t>(batch * channels);
+    vkCmdDispatch(cmdBuffer, workgroups_x, workgroups_y, workgroups_z);
 
     // Add memory barrier
     insertComputeOnlyBarrier(cmdBuffer);
@@ -583,37 +598,11 @@ auto VulkanBackend::dispatchAdaptiveAvgPool2dBackward(const Tensor& grad_output,
     return grad_input;
 }
 
-auto VulkanBackend::dispatchMaxPool2dBackward([[maybe_unused]] const Tensor& grad_out, const Tensor& input,
-                                               [[maybe_unused]] const Tensor& indices, [[maybe_unused]] int64_t kernel_h, [[maybe_unused]] int64_t kernel_w,
-                                               [[maybe_unused]] int64_t stride_h, [[maybe_unused]] int64_t stride_w,
-                                               [[maybe_unused]] int64_t padding_h, [[maybe_unused]] int64_t padding_w) -> Tensor {
-    auto input_shape = input.shape();
-    int32_t device_id = input.device().index;
-    bool is_f64 = (input.dtype() == DType::Float64);
-    if (is_f64) {
-        // Y.10: max_pool2d_backward_f64 uses GL_EXT_shader_atomic_int64 for
-        // CAS-based double atomicAdd; gate so unsupported devices fail fast.
-        vulkan::ensure_atomic_int64_supported(device_id, "MaxPool2dBackward");
-    }
-    std::string mp1_shader = is_f64 ? "max_pool2d_backward_f64" : "max_pool2d_backward";
-    auto* pipeline = getPipeline(mp1_shader, device_id);
-
-    std::vector<int64_t> grad_in_shape(input_shape.begin(), input_shape.end());
-    Tensor grad_input(grad_in_shape, input.dtype(), input.device());
-
-    VkCommandBuffer cmdBuffer = beginSingleTimeCommands(device_id);
-    vkCmdBindPipeline(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
-
-    uint32_t workgroups = div_wg(input.numel(), devices_[device_id].workgroupSize);
-    vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
-
-    // Add memory barrier
-    insertComputeOnlyBarrier(cmdBuffer);
-
-    endSingleTimeCommands(cmdBuffer, device_id);
-
-    return grad_input;
-}
+// NOTE: the old 9-argument `dispatchMaxPool2dBackward` overload (which
+// allocated grad_input without zeroing, bound no descriptor set / push
+// constants, and dispatched a pipeline with no bound buffers — returning
+// uninitialized gradients) has been removed. The registry uses the working
+// OpAttributes-based overload (dispatchMaxPool2dBackward(grad, input, attrs)).
 
 // ============================================================================
 // Pooling Operations Implementation (OpAttributes versions)
@@ -2251,6 +2240,81 @@ auto VulkanBackend::dispatchAdaptiveAvgPool3dBackward(const Tensor& grad_output,
         Tensor dummy_input(out_shape, grad_output.dtype(), grad_output.device());
         return dispatchAvgPool3dBackward(grad_output, dummy_input, backward_attrs);
     }
+
+    // Non-divisible case: previously fell through and returned the all-zeros
+    // grad_input, silently producing zero gradients (broken training). Distribute
+    // grad_output / window_size over each adaptive window via a dedicated
+    // adaptive_avg_pool3d_backward shader, mirroring the 2D path.
+    auto cont_grad = grad_output.contiguous();
+    int32_t device_id = cont_grad.device().index;
+
+    // Float32 uses atomic float add and iterates over OUTPUT elements; Float64 /
+    // Float16 / BFloat16 lack atomic add, so they iterate over INPUT elements and
+    // accumulate per-input (race-free). grad_input is already zero-initialized
+    // above via dispatchZeros, which the Float32 atomic accumulation requires; the
+    // input-iteration variants overwrite each input position exactly once.
+    const bool is_float64 = (cont_grad.dtype() == DType::Float64);
+    const bool is_float16 = (cont_grad.dtype() == DType::Float16);
+    const bool is_bfloat16 = (cont_grad.dtype() == DType::BFloat16);
+    const bool needs_input_iteration = is_float64 || is_float16 || is_bfloat16;
+
+    std::string shader_name = "adaptive_avg_pool3d_backward";
+    if (is_float64) shader_name = "adaptive_avg_pool3d_backward_f64";
+    else if (is_float16) shader_name = "adaptive_avg_pool3d_backward_f16";
+    else if (is_bfloat16) shader_name = "adaptive_avg_pool3d_backward_bf16";
+    auto* pipeline = getPipeline(shader_name, device_id);
+
+    auto packed_half_words = [](int64_t numel) -> size_t {
+        return static_cast<size_t>((numel + 1) / 2) * 4;
+    };
+    const bool is_packed_half = is_float16 || is_bfloat16;
+    size_t grad_output_size = is_packed_half
+        ? packed_half_words(cont_grad.numel())
+        : static_cast<size_t>(cont_grad.numel()) * cont_grad.dtype_size();
+    size_t grad_input_size = is_packed_half
+        ? packed_half_words(grad_input.numel())
+        : static_cast<size_t>(grad_input.numel()) * grad_input.dtype_size();
+
+    std::vector<std::pair<uint32_t, const void*>> bindings = {
+        {0, cont_grad.data_ptr()},
+        {1, grad_input.data_ptr()}
+    };
+    std::vector<size_t> sizes = {grad_output_size, grad_input_size};
+
+    VkDescriptorSet descriptorSet = allocateAndWriteDescriptorSet(device_id, pipeline, bindings, sizes);
+
+    struct PushConstants {
+        uint32_t batch;
+        uint32_t channels;
+        uint32_t D_in;
+        uint32_t H_in;
+        uint32_t W_in;
+        uint32_t D_out;
+        uint32_t H_out;
+        uint32_t W_out;
+    } pc;
+    pc.batch = static_cast<uint32_t>(batch);
+    pc.channels = static_cast<uint32_t>(channels);
+    pc.D_in = static_cast<uint32_t>(D_in);
+    pc.H_in = static_cast<uint32_t>(H_in);
+    pc.W_in = static_cast<uint32_t>(W_in);
+    pc.D_out = static_cast<uint32_t>(D_out);
+    pc.H_out = static_cast<uint32_t>(H_out);
+    pc.W_out = static_cast<uint32_t>(W_out);
+
+    uint32_t total_elements = needs_input_iteration
+        ? static_cast<uint32_t>(batch * channels * D_in * H_in * W_in)
+        : static_cast<uint32_t>(batch * channels * D_out * H_out * W_out);
+    uint32_t workgroups = div_wg(total_elements, devices_[device_id].workgroupSize);
+
+    VkCommandBuffer cmdBuffer = beginSingleTimeCommands(device_id);
+    vkCmdBindPipeline(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
+    vkCmdBindDescriptorSets(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE,
+                           pipeline->layout(), 0, 1, &descriptorSet, 0, nullptr);
+    vkCmdPushConstants(cmdBuffer, pipeline->layout(), VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), &pc);
+    vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
+    insertComputeOnlyBarrier(cmdBuffer);
+    endSingleTimeCommands(cmdBuffer, device_id);
 
     return grad_input;
 }

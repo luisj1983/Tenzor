@@ -6,6 +6,7 @@
 #pragma once
 
 #include <mutex>
+#include <optional>
 #include <string>
 #include <unordered_map>
 #include "types.hpp"
@@ -35,10 +36,15 @@ public:
     /**
      * @brief Look up a registered function.
      *
+     * Returns a *copy* of the registered function taken under the lock, so
+     * the caller owns a stable callable for the duration of the invocation.
+     * Returning a raw pointer into functions_ would dangle if a concurrent
+     * register_function() rehashes the map or overwrites the entry.
+     *
      * @param name Function name
-     * @return Function pointer, or nullptr if not found
+     * @return The function, or std::nullopt if not found
      */
-    auto get_function(const std::string& name) const -> const RpcFunction*;
+    auto get_function(const std::string& name) const -> std::optional<RpcFunction>;
 
     /**
      * @brief Check if a function is registered.

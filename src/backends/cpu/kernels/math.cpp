@@ -39,6 +39,12 @@
 
 #ifdef _OPENMP
 #include <omp.h>
+#else
+// OpenMP is optional (CMake find_package without REQUIRED). Without _OPENMP the
+// omp.h identifiers are undeclared, so provide serial fallbacks: a `#pragma omp
+// parallel` block then runs exactly once as the single (master) thread.
+static inline int omp_get_thread_num() { return 0; }
+static inline int omp_get_num_threads() { return 1; }
 #endif
 
 // Intel MKL for optimized BLAS (5-10x faster GEMM) and VML transcendentals
@@ -3621,24 +3627,8 @@ auto eq_kernel(const Tensor& a, const Tensor& b) -> Tensor {
             const int64_t* b_data = b.data<int64_t>();
             #pragma omp parallel for if(n > OMP_THRESHOLD_SIMPLE)
             for (size_t i = 0; i < n; ++i) { c_data[i] = (a_data[i] == b_data[i]); }
-        } else if (a.dtype() == DType::Float16) {
-            const Float16* a_data = a.data<Float16>();
-            const Float16* b_data = b.data<Float16>();
-            #pragma omp parallel for if(n > OMP_THRESHOLD_SIMPLE)
-            for (size_t i = 0; i < n; ++i) {
-                float af = static_cast<float>(a_data[i]);
-                float bf = static_cast<float>(b_data[i]);
-                c_data[i] = (af == bf) && !std::isnan(af) && !std::isnan(bf);
-            }
-        } else if (a.dtype() == DType::BFloat16) {
-            const BFloat16* a_data = a.data<BFloat16>();
-            const BFloat16* b_data = b.data<BFloat16>();
-            #pragma omp parallel for if(n > OMP_THRESHOLD_SIMPLE)
-            for (size_t i = 0; i < n; ++i) {
-                float af = static_cast<float>(a_data[i]);
-                float bf = static_cast<float>(b_data[i]);
-                c_data[i] = (af == bf) && !std::isnan(af) && !std::isnan(bf);
-            }
+        // Float16/BFloat16 are upcast to Float32 at function entry, so they can
+        // never reach this dispatch — no dedicated half-precision branch here.
         } else if (a.dtype() == DType::Bool) {
             const bool* a_data = a.data<bool>();
             const bool* b_data = b.data<bool>();
@@ -3677,24 +3667,8 @@ auto eq_kernel(const Tensor& a, const Tensor& b) -> Tensor {
             const int64_t* b_data = b.data<int64_t>();
             detail::broadcast_op<int64_t, bool>(a_data, b_data, c_data, shape_a_vec, shape_b_vec, output_shape,
                                 [](int64_t x, int64_t y) { return x == y; });
-        } else if (a.dtype() == DType::Float16) {
-            const Float16* a_data = a.data<Float16>();
-            const Float16* b_data = b.data<Float16>();
-            detail::broadcast_op<Float16, bool>(a_data, b_data, c_data, shape_a_vec, shape_b_vec, output_shape,
-                                [](Float16 x, Float16 y) {
-                                    float xf = static_cast<float>(x), yf = static_cast<float>(y);
-                                    if (std::isnan(xf) || std::isnan(yf)) return false;
-                                    return xf == yf;
-                                });
-        } else if (a.dtype() == DType::BFloat16) {
-            const BFloat16* a_data = a.data<BFloat16>();
-            const BFloat16* b_data = b.data<BFloat16>();
-            detail::broadcast_op<BFloat16, bool>(a_data, b_data, c_data, shape_a_vec, shape_b_vec, output_shape,
-                                [](BFloat16 x, BFloat16 y) {
-                                    float xf = static_cast<float>(x), yf = static_cast<float>(y);
-                                    if (std::isnan(xf) || std::isnan(yf)) return false;
-                                    return xf == yf;
-                                });
+        // Float16/BFloat16 are upcast to Float32 at function entry, so they can
+        // never reach this dispatch — no dedicated half-precision branch here.
         } else if (a.dtype() == DType::Bool) {
             const bool* a_data = a.data<bool>();
             const bool* b_data = b.data<bool>();
@@ -4203,6 +4177,10 @@ auto gt_kernel(const Tensor& a, const Tensor& b) -> Tensor {
 
 // Greater than or equal kernel
 auto ge_kernel(const Tensor& a, const Tensor& b) -> Tensor {
+    if (a.dtype() == DType::Float16 || a.dtype() == DType::BFloat16) {
+        return ge_kernel(a.to(DType::Float32), b.to(DType::Float32));
+    }
+
     detail::validate_elementwise(a, b);
 
     auto shape_a = a.shape();
@@ -7191,9 +7169,11 @@ auto index_add_kernel(const Tensor& input, int64_t dim, const Tensor& index, con
         auto r = index_add_kernel(f32_out, dim, index, f32_src);
         return r.to(output.dtype());
     }
-    TENZOR_DISPATCH_FLOATING_TYPES(output.dtype(), "index_add", [&]() {
-        scalar_t* out_data = output.data<scalar_t>();
-        const scalar_t* src_data = source.data<scalar_t>();
+    // Float16/BFloat16 are handled by the widening path above. Dispatch the
+    // remaining types over floating + integer macros (neither includes half),
+    // so the lambda is never instantiated for half (which lacks operator+=).
+    // Integer types keep exact += (no float widening, preserving int64 precision).
+    auto index_add_body = [&](auto* out_data, const auto* src_data) {
         for (int64_t o = 0; o < outer; o++) {
             for (int64_t k = 0; k < idx_n; k++) {
                 int64_t dst_idx = idx_data[k];
@@ -7203,7 +7183,16 @@ auto index_add_kernel(const Tensor& input, int64_t dim, const Tensor& index, con
                 }
             }
         }
-    });
+    };
+    if (output.dtype() == DType::Float32 || output.dtype() == DType::Float64) {
+        TENZOR_DISPATCH_FLOATING_TYPES(output.dtype(), "index_add", [&]() {
+            index_add_body(output.data<scalar_t>(), source.data<scalar_t>());
+        });
+    } else {
+        TENZOR_DISPATCH_INTEGER_TYPES(output.dtype(), "index_add", [&]() {
+            index_add_body(output.data<scalar_t>(), source.data<scalar_t>());
+        });
+    }
     return output;
 }
 
@@ -7227,7 +7216,7 @@ auto index_copy_kernel(const Tensor& input, int64_t dim, const Tensor& index, co
         auto r = index_copy_kernel(f32_out, dim, index, f32_src);
         return r.to(output.dtype());
     }
-    TENZOR_DISPATCH_FLOATING_TYPES(output.dtype(), "index_copy", [&]() {
+    TENZOR_DISPATCH_ALL_TYPES(output.dtype(), "index_copy", [&]() {
         scalar_t* out_data = output.data<scalar_t>();
         const scalar_t* src_data = source.data<scalar_t>();
         for (int64_t o = 0; o < outer; o++) {
@@ -7262,9 +7251,9 @@ auto index_fill_kernel(const Tensor& input, int64_t dim, const Tensor& index, do
         auto r = index_fill_kernel(f32_out, dim, index, value);
         return r.to(output.dtype());
     }
-    TENZOR_DISPATCH_FLOATING_TYPES(output.dtype(), "index_fill", [&]() {
-        scalar_t* out_data = output.data<scalar_t>();
-        scalar_t fill_val = static_cast<scalar_t>(static_cast<float>(value));
+    // Float16/BFloat16 handled by the widening path above; dispatch the rest over
+    // floating + integer macros (no half), avoiding the ambiguous half cast.
+    auto index_fill_body = [&](auto* out_data, auto fill_val) {
         for (int64_t o = 0; o < outer; o++) {
             for (int64_t k = 0; k < idx_n; k++) {
                 int64_t dst_idx = idx_data[k];
@@ -7273,7 +7262,16 @@ auto index_fill_kernel(const Tensor& input, int64_t dim, const Tensor& index, do
                 }
             }
         }
-    });
+    };
+    if (output.dtype() == DType::Float32 || output.dtype() == DType::Float64) {
+        TENZOR_DISPATCH_FLOATING_TYPES(output.dtype(), "index_fill", [&]() {
+            index_fill_body(output.data<scalar_t>(), static_cast<scalar_t>(value));
+        });
+    } else {
+        TENZOR_DISPATCH_INTEGER_TYPES(output.dtype(), "index_fill", [&]() {
+            index_fill_body(output.data<scalar_t>(), static_cast<scalar_t>(value));
+        });
+    }
     return output;
 }
 

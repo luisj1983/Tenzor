@@ -294,7 +294,11 @@ auto HistogramObserver::update_histogram(const Tensor& tensor) -> void {
 }
 
 auto HistogramObserver::compute_percentile(float percentile) const -> float {
-    int64_t target_count = static_cast<int64_t>(total_count_ * percentile);
+    // Compute the target cumulative count in double precision to avoid float
+    // rounding error for large total_count_, and floor at 1 so a truncated-to-zero
+    // target does not return at i=0 when bin 0 is empty (cumulative=0 >= 0).
+    int64_t target_count = std::max<int64_t>(
+        1, std::llround(static_cast<double>(total_count_) * percentile));
     int64_t cumulative = 0;
 
     for (int64_t i = 0; i < num_bins_; ++i) {

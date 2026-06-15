@@ -11,6 +11,7 @@
 #include <algorithm>
 #include <array>
 #include <cstring>
+#include <limits>
 #include <stdexcept>
 #include <iostream>
 #include <vector>
@@ -137,7 +138,12 @@ auto dispatch_scalar_binop(OpId op, const Tensor& a, double scalar) -> Tensor {
     DType rdt = a.dtype();
     const bool scalar_is_integral =
         std::isfinite(scalar) && scalar == std::floor(scalar);
-    if (is_integer_type(rdt) && !scalar_is_integral) {
+    // True division always yields a float (PyTorch `/` semantics): int / scalar
+    // must promote even for an integer-valued scalar, otherwise the Div kernel
+    // truncates (e.g. Int32 / 2.0 -> truncated quotient). Add/Sub/Mul keep the
+    // integer fast-path when the scalar is integral.
+    const bool promote_for_div = (op == OpId::Div) && is_integer_type(rdt);
+    if (is_integer_type(rdt) && (!scalar_is_integral || promote_for_div)) {
         rdt = DType::Float32;
     }
     Tensor a_use = (a.dtype() != rdt) ? a.to(rdt) : a;
@@ -862,9 +868,9 @@ auto renorm(const Tensor& input, double p, int64_t dim, double maxnorm) -> Tenso
 auto isclose(const Tensor& a, const Tensor& b, double rtol, double atol) -> Tensor {
     auto diff = tenzor::abs(tenzor::sub(a, b));
     auto tol = tenzor::add(
-        tenzor::full({1}, static_cast<float>(atol), a.dtype(), a.device()),
+        tenzor::full({1}, atol, a.dtype(), a.device()),
         tenzor::mul(
-            tenzor::full({1}, static_cast<float>(rtol), a.dtype(), a.device()),
+            tenzor::full({1}, rtol, a.dtype(), a.device()),
             tenzor::abs(b)));
     return tenzor::le(diff, tol);
 }
@@ -1149,8 +1155,24 @@ auto frexp(const Tensor& input) -> std::pair<Tensor, Tensor> {
     // mantissa in [0.5, 1.0), exponent is integer
     // Implemented via: exponent = floor(log2(|x|)) + 1, mantissa = x / 2^exponent
     Tensor abs_input = abs(input);
-    // Avoid log2(0) by clamping to tiny value
-    Tensor safe_abs = clamp_min(abs_input, 1e-38f);
+    // Avoid log2(0) by clamping to a tiny positive value. The clamp floor must
+    // be below any representable magnitude for the input dtype so it only
+    // affects exact zeros (already masked out below) and never rescales a
+    // legitimately small value. A fixed 1e-38f is the Float32 smallest-normal
+    // scale; for Float64 it would force magnitudes < 1e-38 (e.g. 1e-300) up to
+    // 1e-38, yielding exponent ~-126 instead of ~-996. Pick the floor from the
+    // compute dtype's smallest denormal instead.
+    double clamp_floor;
+    switch (input.dtype()) {
+        case DType::Float64:
+            clamp_floor = std::numeric_limits<double>::denorm_min();
+            break;
+        default:
+            // Float32 / Float16 / BFloat16 all widen into the Float32 range here.
+            clamp_floor = static_cast<double>(std::numeric_limits<float>::denorm_min());
+            break;
+    }
+    Tensor safe_abs = clamp_min(abs_input, clamp_floor);
     Tensor log2_val = log2(safe_abs);
     Tensor exponent_f = floor(log2_val) + ones_like(log2_val);
     // For zero input, exponent should be 0

@@ -180,7 +180,7 @@ private:
     /**
      * @brief Compute relative position bias matrix
      */
-    auto compute_bias(int64_t query_length, int64_t key_length) -> Tensor;
+    auto compute_bias(int64_t query_length, int64_t key_length) -> Variable;
 };
 
 /**

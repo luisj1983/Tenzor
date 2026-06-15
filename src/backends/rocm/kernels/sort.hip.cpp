@@ -389,40 +389,6 @@ auto sort_kernel(const Tensor& input, int64_t dim, bool descending,
 // ArgSort kernel
 // ============================================================================
 
-template<typename T>
-__global__ void argsort_bitonic_kernel(const T* input, int64_t* output, int64_t n, bool descending) {
-    int tid = threadIdx.x + blockIdx.x * blockDim.x;
-
-    if (tid < n) {
-        output[tid] = tid;
-    }
-    __syncthreads();
-
-    for (int64_t size = 2; size <= n; size *= 2) {
-        for (int64_t stride = size / 2; stride > 0; stride /= 2) {
-            if (tid < n) {
-                int64_t partner = tid ^ stride;
-                if (partner > tid && partner < n) {
-                    T val_tid = input[output[tid]];
-                    T val_partner = input[output[partner]];
-
-                    bool ascending_dir = ((tid & size) == 0);
-                    if (descending) ascending_dir = !ascending_dir;
-
-                    bool swap = ascending_dir ? (val_tid > val_partner) : (val_tid < val_partner);
-
-                    if (swap) {
-                        int64_t temp = output[tid];
-                        output[tid] = output[partner];
-                        output[partner] = temp;
-                    }
-                }
-            }
-            __syncthreads();
-        }
-    }
-}
-
 __global__ void iota_kernel(int64_t* output, int64_t n) {
     int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx < n) {
@@ -447,20 +413,11 @@ static void launch_argsort(const T* d_input, int64_t* d_output, int64_t n,
         return;
     }
 
-    constexpr int MAX_BLOCK_SIZE = 1024;
-
-    if (n <= MAX_BLOCK_SIZE) {
-        int block_size = 1;
-        while (block_size < n) block_size *= 2;
-        if (block_size > MAX_BLOCK_SIZE) block_size = MAX_BLOCK_SIZE;
-        hipLaunchKernelGGL(argsort_bitonic_kernel<T>,
-            dim3(1), dim3(block_size), 0, stream,
-            d_input, d_output, n, descending);
-        HIP_CHECK(hipGetLastError());
-        return;
-    }
-
-    // For larger arrays, use hipcub DeviceRadixSort with key-value pairs
+    // Always use hipcub DeviceRadixSort with key-value pairs. A previous
+    // single-block bitonic fast path for n<=1024 only sorted correctly when n
+    // was a power of two (the merge network requires it); for non-power-of-2
+    // lengths it returned a wrong permutation. DeviceRadixSort is correct for
+    // any length, so we route every n>1 through it.
     int64_t* d_indices_in = nullptr;
     HIP_CHECK(hipMalloc(&d_indices_in, n * sizeof(int64_t)));
 
@@ -497,6 +454,20 @@ static void launch_argsort(const T* d_input, int64_t* d_output, int64_t n,
     HIP_CHECK(hipFree(d_indices_in));
 }
 
+// Scatter per-slice local argsort indices (0..dim_size-1) back into the
+// strided output positions for one (outer, inner) lane.
+__global__ void scatter_argsort_slice_kernel(const int64_t* __restrict__ sorted_idx,
+                                             int64_t* __restrict__ out_idx,
+                                             int64_t dim_size, int64_t inner_size,
+                                             int64_t outer, int64_t inner)
+{
+    for (int64_t i = blockIdx.x * blockDim.x + threadIdx.x; i < dim_size;
+         i += gridDim.x * blockDim.x) {
+        int64_t offset = outer * dim_size * inner_size + i * inner_size + inner;
+        out_idx[offset] = sorted_idx[i];
+    }
+}
+
 auto argsort_kernel(const Tensor& input, int64_t dim, bool descending,
                     hipStream_t stream) -> Tensor
 {
@@ -507,36 +478,77 @@ auto argsort_kernel(const Tensor& input, int64_t dim, bool descending,
 
     const auto dtype = input.dtype();
     const auto& device = input.device();
-    const auto& input_shape = input.shape();
-    const int64_t n = input.numel();
+    const int64_t ndim = input.ndim();
 
-    Tensor output(std::vector<int64_t>(input_shape.begin(), input_shape.end()), DType::Int64, device);
+    // Normalize negative dim (the dispatcher passes dim through unmodified,
+    // defaulting to -1, so the kernel owns normalization here).
+    if (dim < 0) dim += ndim;
+    if (dim < 0 || dim >= ndim) {
+        throw std::out_of_range("argsort ROCm: dimension out of range");
+    }
+
+    Tensor input_cont = input.is_contiguous() ? input : input.contiguous();
+    const auto& shape = input_cont.shape();
+    const int64_t dim_size = shape[dim];
+
+    Tensor output(std::vector<int64_t>(shape.begin(), shape.end()), DType::Int64, device);
+
+    int64_t outer_size = 1;
+    for (int64_t i = 0; i < dim; ++i) outer_size *= shape[i];
+    int64_t inner_size = 1;
+    for (int64_t i = dim + 1; i < ndim; ++i) inner_size *= shape[i];
+
+    // Sort each [outer, inner] lane independently along `dim`. We extract the
+    // (strided) slice into a contiguous buffer, argsort it to get per-slice
+    // local indices, then scatter those indices back to the strided positions.
+    auto run = [&]<typename T>(const T* base_ptr) {
+        T* d_slice = nullptr;
+        int64_t* d_idx = nullptr;
+        HIP_CHECK(hipMalloc(&d_slice, dim_size * sizeof(T)));
+        HIP_CHECK(hipMalloc(&d_idx, dim_size * sizeof(int64_t)));
+
+        int block = 256;
+        int grid = std::min(int((dim_size + block - 1) / block), 1024);
+
+        for (int64_t outer = 0; outer < outer_size; ++outer) {
+            for (int64_t inner = 0; inner < inner_size; ++inner) {
+                hipLaunchKernelGGL(extract_slice_kernel<T>,
+                    dim3(grid), dim3(block), 0, stream,
+                    base_ptr, d_slice, dim_size, inner_size, outer, inner);
+                HIP_CHECK(hipGetLastError());
+
+                launch_argsort(d_slice, d_idx, dim_size, descending, stream);
+
+                hipLaunchKernelGGL(scatter_argsort_slice_kernel,
+                    dim3(grid), dim3(block), 0, stream,
+                    d_idx, output.data<int64_t>(),
+                    dim_size, inner_size, outer, inner);
+                HIP_CHECK(hipGetLastError());
+            }
+        }
+
+        HIP_CHECK(hipFree(d_slice));
+        HIP_CHECK(hipFree(d_idx));
+    };
 
     switch (dtype) {
         case DType::Float32:
-            launch_argsort(input.data<float>(), output.data<int64_t>(), n, descending, stream);
+            run.template operator()<float>(input_cont.data<float>());
             break;
         case DType::Float64:
-            launch_argsort(input.data<double>(), output.data<int64_t>(), n, descending, stream);
+            run.template operator()<double>(input_cont.data<double>());
             break;
         case DType::Float16: {
-            float* d_float_buf = nullptr;
-            HIP_CHECK(hipMalloc(&d_float_buf, n * sizeof(float)));
-            const __half* d_half = reinterpret_cast<const __half*>(input.data_ptr());
-            int blocks = get_num_blocks(n);
-            hipLaunchKernelGGL(half_to_float_kernel,
-                dim3(blocks), dim3(BLOCK_SIZE), 0, stream,
-                d_half, d_float_buf, n);
-            HIP_CHECK(hipGetLastError());
-            launch_argsort(d_float_buf, output.data<int64_t>(), n, descending, stream);
-            HIP_CHECK(hipFree(d_float_buf));
+            // Widen the whole tensor to Float32 once, then slice/sort lanes.
+            Tensor input_f32 = input_cont.to(DType::Float32);
+            run.template operator()<float>(input_f32.data<float>());
             break;
         }
         case DType::Int32:
-            launch_argsort(input.data<int32_t>(), output.data<int64_t>(), n, descending, stream);
+            run.template operator()<int32_t>(input_cont.data<int32_t>());
             break;
         case DType::Int64:
-            launch_argsort(input.data<int64_t>(), output.data<int64_t>(), n, descending, stream);
+            run.template operator()<int64_t>(input_cont.data<int64_t>());
             break;
         default:
             throw std::runtime_error("argsort ROCm: unsupported dtype");

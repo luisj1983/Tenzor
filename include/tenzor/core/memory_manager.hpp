@@ -315,7 +315,8 @@ private:
 
     // Tensor tracking
     std::unordered_map<Tensor*, TensorInfo> tensors_;  ///< All tracked tensors
-    std::unordered_map<Tensor*, LRUIterator> tensor_to_lru_;  ///< Tensor to LRU iterator
+    // Note: LRU lookups use the per-device DeviceMemory::lru_map (authoritative);
+    // there is intentionally no global tensor->LRU-iterator map.
 
     // Per-device memory tracking
     DeviceMemory cpu_memory_;                      ///< CPU memory tracking

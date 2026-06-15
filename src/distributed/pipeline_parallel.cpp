@@ -102,26 +102,69 @@ auto concat_microbatches(const std::vector<Variable>& microbatches) -> Variable 
     return tenzor::cat(microbatches, /*dim=*/0);
 }
 
+// Fixed-size activation metadata header exchanged before each activation so the
+// receiver can allocate a correctly-shaped/typed buffer without assuming the
+// upstream activation matches the schedule's input argument. The header is an
+// Int64 tensor of kMetaHeaderLen elements: [ndim, dtype, dim0, dim1, ...].
+// A fixed length keeps recv() able to pre-size its buffer (recv needs to know
+// the byte count in advance).
+constexpr int64_t kMetaHeaderLen = 16;          // 2 slots + up to 14 dims
+constexpr int64_t kMetaMaxDims   = kMetaHeaderLen - 2;
+
+auto encode_activation_meta(const Tensor& t) -> Tensor {
+    const auto& shape = t.shape();
+    if (static_cast<int64_t>(shape.size()) > kMetaMaxDims) {
+        throw std::runtime_error(
+            "pipeline_parallel: activation rank " + std::to_string(shape.size()) +
+            " exceeds metadata header capacity (" + std::to_string(kMetaMaxDims) + ")");
+    }
+    Tensor header = empty({kMetaHeaderLen}, DType::Int64, Device::cpu());
+    auto* h = static_cast<int64_t*>(header.data_ptr());
+    for (int64_t i = 0; i < kMetaHeaderLen; ++i) h[i] = 0;
+    h[0] = static_cast<int64_t>(shape.size());
+    h[1] = static_cast<int64_t>(t.dtype());
+    for (size_t d = 0; d < shape.size(); ++d) h[2 + d] = shape[d];
+    return header;
+}
+
 /**
  * @brief Send a Variable's tensor to dst_rank via point-to-point.
+ *
+ * Sends a fixed-size metadata header first (shape/dtype) so the receiver can
+ * allocate the matching buffer, then the activation payload itself.
  */
 auto send_activation(const Variable& var, int dst_rank, ProcessGroup& pg) -> void {
     Tensor t = var.tensor();  // copy handle (shallow)
+    Tensor header = encode_activation_meta(t);
+    pg.send(header, dst_rank);
     pg.send(t, dst_rank);
 }
 
 /**
- * @brief Receive a tensor from src_rank and wrap as Variable.
+ * @brief Receive a tensor from src_rank using the wire-supplied metadata.
  *
- * The caller must provide a template tensor with the expected shape/dtype/device
- * so we can pre-allocate the receive buffer.
+ * Reads the fixed-size header (shape/dtype) sent by send_activation(), allocates
+ * a buffer of exactly that shape/dtype on `device`, receives the payload, and
+ * wraps it as a Variable. Does NOT assume the activation matches any caller-side
+ * shape hint.
  */
-auto recv_activation(const Tensor& shape_template, int src_rank,
-                     ProcessGroup& pg, bool requires_grad) -> Variable
+auto recv_activation(int src_rank, ProcessGroup& pg, const Device& device,
+                     bool requires_grad) -> Variable
 {
-    auto shape = shape_template.shape();
-    Tensor buf = empty({shape.begin(), shape.end()}, shape_template.dtype(),
-                       shape_template.device());
+    Tensor header = empty({kMetaHeaderLen}, DType::Int64, Device::cpu());
+    pg.recv(header, src_rank);
+    const auto* h = static_cast<const int64_t*>(header.data_ptr());
+    int64_t ndim = h[0];
+    if (ndim < 0 || ndim > kMetaMaxDims) {
+        throw std::runtime_error(
+            "pipeline_parallel: received activation metadata with invalid rank " +
+            std::to_string(ndim));
+    }
+    auto dtype = static_cast<DType>(h[1]);
+    std::vector<int64_t> shape(static_cast<size_t>(ndim));
+    for (int64_t d = 0; d < ndim; ++d) shape[static_cast<size_t>(d)] = h[2 + d];
+
+    Tensor buf = empty(shape, dtype, device);
     pg.recv(buf, src_rank);
     return Variable(std::move(buf), requires_grad);
 }
@@ -158,23 +201,12 @@ auto GPipeSchedule::execute(PipelineStage& stage, const Variable& input,
         if (stage.is_first()) {
             mb_input = micro_inputs[mb];
         } else {
-            // Receive activation from previous stage.
-            // For the shape template we need the first micro-batch's expected
-            // shape. On non-first stages we receive from upstream, so we must
-            // do the first recv to discover the shape, then reuse it.
-            if (mb == 0) {
-                // We don't know the shape a priori on intermediate stages.
-                // Use a blocking recv that allocates based on the incoming data.
-                // The ProcessGroup::recv() is expected to handle this.
-                Tensor buf = input.tensor();  // use input as shape hint
-                pg.recv(buf, prev_rank);
-                mb_input = Variable(std::move(buf), /*requires_grad=*/true);
-            } else {
-                mb_input = recv_activation(
-                    stashed_inputs[0].tensor(), prev_rank, pg,
-                    /*requires_grad=*/true
-                );
-            }
+            // Receive activation from previous stage. Each recv reads a metadata
+            // header (shape/dtype) off the wire, so per-micro-batch shapes may
+            // differ and we never reuse the unrelated execute() input as a buffer
+            // or shape hint. The device is taken from the schedule's input arg.
+            mb_input = recv_activation(prev_rank, pg, input.tensor().device(),
+                                       /*requires_grad=*/true);
         }
 
         stashed_inputs.push_back(mb_input);
@@ -281,17 +313,11 @@ auto OneFOneBSchedule::execute(PipelineStage& stage, const Variable& input,
         if (stage.is_first()) {
             mb_input = micro_inputs[mb];
         } else {
-            if (mb == 0) {
-                // First recv: use input tensor as shape hint
-                Tensor buf = input.tensor();
-                pg.recv(buf, prev_rank);
-                mb_input = Variable(std::move(buf), /*requires_grad=*/true);
-            } else {
-                mb_input = recv_activation(
-                    stashed_inputs[0].tensor(), prev_rank, pg,
-                    /*requires_grad=*/true
-                );
-            }
+            // Receive activation using the wire metadata header (shape/dtype),
+            // so each micro-batch is sized correctly and the execute() input arg
+            // is never reused as a recv buffer.
+            mb_input = recv_activation(prev_rank, pg, input.tensor().device(),
+                                       /*requires_grad=*/true);
         }
 
         stashed_inputs[mb] = mb_input;

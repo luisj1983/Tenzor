@@ -19,6 +19,39 @@ namespace tenzor {
 namespace nn {
 namespace compression {
 
+namespace {
+
+// Threshold below which a weight is treated as pruned (== zero).
+constexpr float kSparsityEps = 1e-8f;
+
+// Count elements whose magnitude is below kSparsityEps using an on-device
+// reduction (abs -> lt -> count_nonzero) instead of copying the whole tensor to
+// the host and scanning element-by-element. Only the 1-element reduction result
+// is brought back to the host. The tensor is widened to Float32 on its current
+// device first so the comparison is well-defined for low-precision dtypes.
+auto count_below_eps(const Tensor& t) -> int64_t {
+    if (t.numel() == 0) {
+        return 0;
+    }
+    Tensor f32 = (t.dtype() == DType::Float32) ? t : t.to(DType::Float32);
+    Tensor mag = abs(f32);
+    Tensor below = lt(mag, full_like(mag, kSparsityEps));
+    // `below` is a Bool mask; count_nonzero rejects Bool, so sum the mask as
+    // Float32 (each true contributes 1) to get the count.
+    Tensor count = sum(below.to(DType::Float32));
+    // Bring the single scalar result back to the host as Float32 and round.
+    Tensor count_cpu = count;
+    if (count_cpu.device() != Device::cpu()) {
+        count_cpu = count_cpu.to(Device::cpu());
+    }
+    if (count_cpu.dtype() != DType::Float32) {
+        count_cpu = count_cpu.to(DType::Float32);
+    }
+    return static_cast<int64_t>(std::llround(count_cpu.data<float>()[0]));
+}
+
+} // namespace
+
 // =============================================================================
 // PruningMask Implementation
 // =============================================================================
@@ -58,11 +91,15 @@ auto PruningConfig::get_current_sparsity() const -> float {
         return target_sparsity;
     }
 
-    if (current_iteration >= num_iterations) {
+    if (current_iteration >= num_iterations || num_iterations <= 0) {
         return target_sparsity;
     }
 
-    float progress = static_cast<float>(current_iteration) / static_cast<float>(num_iterations);
+    // Use (current_iteration + 1) / num_iterations so the final in-range
+    // iteration (current_iteration == num_iterations - 1) actually reaches the
+    // target sparsity, rather than only hitting it via the >= short-circuit.
+    float progress = static_cast<float>(current_iteration + 1) /
+                     static_cast<float>(num_iterations);
 
     if (schedule == PruningSchedule::Iterative) {
         // Linear schedule
@@ -181,6 +218,16 @@ auto prune_unstructured(
         // Global pruning: compute threshold across all layers
         std::vector<float> all_importances;
 
+        // Reserve up front so the per-element fill loop below does not repeatedly
+        // reallocate. Sum the element counts of all "weight" params first.
+        int64_t total_importances = 0;
+        for (auto& [name, param] : named_params) {
+            if (name.find("weight") != std::string::npos) {
+                total_importances += param->tensor().numel();
+            }
+        }
+        all_importances.reserve(static_cast<size_t>(total_importances));
+
         // Collect all importance scores
         for (auto& [name, param] : named_params) {
             if (name.find("weight") != std::string::npos) {
@@ -201,8 +248,22 @@ auto prune_unstructured(
         }
 
         // Find global threshold
-        std::sort(all_importances.begin(), all_importances.end());
+        if (all_importances.empty()) {
+            // No "weight" parameters to prune; nothing to threshold against.
+            return config;
+        }
         int64_t threshold_idx = static_cast<int64_t>(all_importances.size() * sparsity);
+        // Clamp to the last valid index so sparsity == 1.0 (or rounding) cannot
+        // index one-past-the-end.
+        threshold_idx = std::min<int64_t>(
+            threshold_idx, static_cast<int64_t>(all_importances.size()) - 1);
+        threshold_idx = std::max<int64_t>(threshold_idx, 0);
+        // Only the element at threshold_idx is needed (the k-th smallest), so a
+        // partial partition via nth_element is enough — no full sort required.
+        std::nth_element(
+            all_importances.begin(),
+            all_importances.begin() + threshold_idx,
+            all_importances.end());
         float threshold = all_importances[threshold_idx];
 
         // Create masks based on global threshold
@@ -278,20 +339,23 @@ auto prune_iterative(
     config.num_iterations = num_iterations;
     config.current_iteration = 0;
 
-    // Initialize masks with zeros (no pruning yet)
+    // Build real masks for the current sparsity level instead of returning
+    // all-ones masks that never prune. The previous stub contradicted the
+    // documented behavior ("prune to current sparsity level", "return final
+    // pruned model") — it left every mask at 1.0, so the iterative pruner was
+    // a no-op. Compute per-layer importance and threshold at the schedule's
+    // current sparsity (config.get_current_sparsity()).
+    const float current_sparsity = config.get_current_sparsity();
     auto named_params = module->named_parameters();
     for (auto& [name, param] : named_params) {
         if (name.find("weight") != std::string::npos) {
-            // Convert std::span to std::vector for constructor
-            auto shape_span = param->tensor().shape();
-            std::vector<int64_t> shape_vec(shape_span.begin(), shape_span.end());
-            Tensor mask(shape_vec, param->tensor().dtype(), param->tensor().device());
-            mask.fill_(1.0f);  // Start with no pruning
+            auto importance = compute_importance(param->tensor(), criterion);
+            auto mask = create_mask_from_importance(importance, current_sparsity);
 
             PruningMask pm;
             pm.mask = mask;
             pm.layer_name = name;
-            pm.current_sparsity = 0.0f;
+            pm.current_sparsity = current_sparsity;
             config.masks[name] = pm;
         }
     }
@@ -393,22 +457,18 @@ auto prune_channels(
     }
     std::sort(keep_indices.begin(), keep_indices.end());
 
-    // Create new Conv2d with reduced out_channels
-    // Get original Conv2d parameters (need to extract from the module)
-    // Since we don't have direct access to internal params, we'll create with defaults
-    // and copy the weights manually
-
-    // Extract original parameters (we need to infer them from weight shape)
-    int64_t in_channels_total = in_channels_per_group; // assuming groups=1 for simplicity
-    int64_t groups = 1; // default
+    // Create new Conv2d with reduced out_channels, preserving the source
+    // convolution's real geometry (kernel/stride/padding/dilation/groups).
+    int64_t groups = conv->groups();
+    int64_t in_channels_total = in_channels_per_group * groups;
 
     auto pruned_conv = std::make_shared<Conv2d>(
         in_channels_total,
         channels_to_keep,
-        kernel_h,
-        1,  // stride (default)
-        0,  // padding (default)
-        1,  // dilation (default)
+        std::pair<int64_t, int64_t>{kernel_h, kernel_w},
+        std::pair<int64_t, int64_t>{conv->stride_h(), conv->stride_w()},
+        std::pair<int64_t, int64_t>{conv->padding_h(), conv->padding_w()},
+        std::pair<int64_t, int64_t>{conv->dilation_h(), conv->dilation_w()},
         groups,
         has_bias
     );
@@ -732,23 +792,8 @@ auto compute_sparsity(const std::shared_ptr<Module>& module) -> float {
     int64_t zero_params = 0;
 
     for (auto& param : params) {
-        // Move to CPU first if on GPU, then convert to Float32 for data access
-        Tensor tensor_cpu = param->tensor();
-        if (param->tensor().device() != Device::cpu()) {
-            tensor_cpu = param->tensor().to(Device::cpu());
-        }
-        if (tensor_cpu.dtype() != DType::Float32) {
-            tensor_cpu = tensor_cpu.to(DType::Float32);
-        }
-        auto data = tensor_cpu.data<float>();
-        int64_t numel = param->tensor().numel();
-        total_params += numel;
-
-        for (int64_t i = 0; i < numel; ++i) {
-            if (std::abs(data[i]) < 1e-8f) {
-                zero_params++;
-            }
-        }
+        total_params += param->tensor().numel();
+        zero_params += count_below_eps(param->tensor());
     }
 
     if (total_params == 0) return 0.0f;
@@ -762,25 +807,11 @@ auto analyze_layer_sparsity(
 
     auto named_params = module->named_parameters();
     for (auto& [name, param] : named_params) {
-        // Move to CPU first if on GPU, then convert to Float32 for data access
-        Tensor tensor_cpu = param->tensor();
-        if (param->tensor().device() != Device::cpu()) {
-            tensor_cpu = param->tensor().to(Device::cpu());
-        }
-        if (tensor_cpu.dtype() != DType::Float32) {
-            tensor_cpu = tensor_cpu.to(DType::Float32);
-        }
-        auto data = tensor_cpu.data<float>();
         int64_t numel = param->tensor().numel();
-        int64_t zeros = 0;
-
-        for (int64_t i = 0; i < numel; ++i) {
-            if (std::abs(data[i]) < 1e-8f) {
-                zeros++;
-            }
-        }
-
-        layer_sparsity[name] = static_cast<float>(zeros) / static_cast<float>(numel);
+        int64_t zeros = count_below_eps(param->tensor());
+        layer_sparsity[name] =
+            (numel == 0) ? 0.0f
+                         : static_cast<float>(zeros) / static_cast<float>(numel);
     }
 
     return layer_sparsity;
@@ -801,20 +832,8 @@ auto compute_compression_ratio(
     }
 
     for (auto& param : pruned_params) {
-        // Move to CPU first if on GPU, then convert to Float32 for data access
-        Tensor tensor_cpu = param->tensor();
-        if (param->tensor().device() != Device::cpu()) {
-            tensor_cpu = param->tensor().to(Device::cpu());
-        }
-        if (tensor_cpu.dtype() != DType::Float32) {
-            tensor_cpu = tensor_cpu.to(DType::Float32);
-        }
-        auto data = tensor_cpu.data<float>();
-        for (int64_t i = 0; i < param->tensor().numel(); ++i) {
-            if (std::abs(data[i]) >= 1e-8f) {
-                pruned_nonzero++;
-            }
-        }
+        // nonzero == total - (count of below-eps magnitudes), computed on-device.
+        pruned_nonzero += param->tensor().numel() - count_below_eps(param->tensor());
     }
 
     if (pruned_nonzero == 0) return INFINITY;
@@ -888,6 +907,11 @@ auto find_lottery_ticket(
     float target_sparsity,
     int num_rounds
 ) -> PruningConfig {
+    if (num_rounds <= 0) {
+        throw std::invalid_argument(
+            "find_lottery_ticket: num_rounds must be positive");
+    }
+
     PruningConfig config;
     config.target_sparsity = target_sparsity;
     config.schedule = PruningSchedule::Iterative;

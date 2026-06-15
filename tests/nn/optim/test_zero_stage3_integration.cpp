@@ -31,6 +31,9 @@
 #include <cmath>
 #include <filesystem>
 #include <unistd.h>  // W.24: getpid()
+#include <thread>
+#include <atomic>
+#include <chrono>
 
 namespace {
 // W.24: per-process + per-test path so parallel ctest runs never collide.
@@ -269,6 +272,53 @@ protected:
 
     Stage3Config default_config;
 };
+
+// ============================================================================
+// 0. Adaptive-tuning deadlock regression
+// ============================================================================
+
+// The adaptive-tuning entry points (update_prefetch_depth, adjust_bucket_size,
+// should_offload_parameter and the calculate_*/check_memory_pressure helpers)
+// each acquire the non-recursive adaptive_mutex_. Previously the public methods
+// called one another while holding the lock, self-deadlocking. The adaptive
+// flags default to enabled, so a plain call must complete. A detached worker +
+// timeout turns a regression into a test failure instead of hanging the runner.
+TEST_F(ZeROStage3IntegrationTest, AdaptiveTuningDoesNotDeadlock) {
+    auto model = std::make_shared<SimpleLinearModel>(64, 10);
+    auto params = model->parameters();
+    auto base_optimizer = std::make_unique<Adam>(params, 0.01);
+
+    ZeROStage3Optimizer optimizer(std::move(base_optimizer), default_config);
+    optimizer.register_model(*model);
+
+    std::atomic<bool> done{false};
+    std::thread worker([&]() {
+        optimizer.update_prefetch_depth();
+        (void)optimizer.calculate_optimal_prefetch_depth();
+        optimizer.adjust_bucket_size();
+        (void)optimizer.calculate_optimal_bucket_size();
+        (void)optimizer.check_memory_pressure();
+        if (!params.empty()) {
+            (void)optimizer.should_offload_parameter(&params[0]->tensor());
+        }
+        done.store(true);
+    });
+
+    for (int i = 0; i < 1000 && !done.load(); ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+
+    const bool completed = done.load();
+    if (completed) {
+        worker.join();
+    } else {
+        // Deadlocked: abandon the stuck thread so the runner can report failure.
+        worker.detach();
+    }
+    ASSERT_TRUE(completed)
+        << "Adaptive-tuning entry points deadlocked (recursive lock on "
+           "adaptive_mutex_)";
+}
 
 // ============================================================================
 // 1. Basic Training Tests (3 tests)

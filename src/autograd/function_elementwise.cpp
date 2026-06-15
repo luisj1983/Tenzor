@@ -74,34 +74,33 @@ auto SumBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tens
 
 auto SumBackward::backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> {
     // Sum backward is just expanding the gradient back to input shape.
-    // This operation doesn't depend on saved inputs, so we can use Tensor-level
-    // expand/reshape and wrap the result. The gradient Variable itself carries
-    // its computation graph for higher-order differentiation.
+    // Use the Variable-level autograd overloads of reshape/unsqueeze/expand so
+    // the returned gradient keeps a grad_fn chaining back to grad_outputs[0]'s
+    // producers. The adjoint of expand (a reduction) must propagate in
+    // double-backward/HVP where grad_output depends on parameters; using the
+    // Tensor-level ops here silently dropped the second-order contribution.
     const auto& input = saved_tensors_[0];
 
     TENZOR_CHECK_SHAPE(input.numel() > 0,
         "SumBackward: cannot compute gradient of sum over empty tensor");
 
     auto input_shape_vec = std::vector<int64_t>(input.shape().begin(), input.shape().end());
-    auto grad_tensor = grad_outputs[0].tensor();
 
     if (!dim_.has_value()) {
-        if (grad_tensor.ndim() > 0) {
-            grad_tensor = reshape(grad_tensor, {});
+        Variable grad = grad_outputs[0];
+        if (grad.tensor().ndim() > 0) {
+            grad = tenzor::reshape(grad, {});
         }
-        auto result = expand(grad_tensor, input_shape_vec);
-        // Wrap as Variable preserving requires_grad from the incoming gradient
-        return {Variable(result, grad_outputs[0].requires_grad())};
+        return {tenzor::expand(grad, input_shape_vec)};
     } else {
         int64_t dim = dim_.value();
         if (dim < 0) dim += input.shape().size();
 
-        auto grad = grad_tensor;
+        Variable grad = grad_outputs[0];
         if (!keepdim_) {
-            grad = unsqueeze(grad, dim);
+            grad = tenzor::unsqueeze(grad, dim);
         }
-        auto result = expand(grad, input_shape_vec);
-        return {Variable(result, grad_outputs[0].requires_grad())};
+        return {tenzor::expand(grad, input_shape_vec)};
     }
 }
 
@@ -206,25 +205,25 @@ auto MeanBackward::backward_with_variables(std::vector<Variable> grad_outputs) -
     // builds autograd graph when create_graph is active
     auto scaled_grad = grad_outputs[0] * scale;
 
-    // Now expand to input shape using Tensor-level operations
-    auto grad_tensor = scaled_grad.tensor();
-
+    // Expand to input shape via the Variable-level autograd overloads so the
+    // grad_fn chains through (expand's adjoint must propagate in double-backward
+    // when grad_output depends on parameters). Tensor-level expand here severed
+    // the second-order contribution.
     if (!dim_.has_value()) {
-        if (grad_tensor.ndim() > 0) {
-            grad_tensor = reshape(grad_tensor, {});
+        Variable grad = scaled_grad;
+        if (grad.tensor().ndim() > 0) {
+            grad = tenzor::reshape(grad, {});
         }
-        auto result = expand(grad_tensor, input_shape_vec);
-        return {Variable(result, scaled_grad.requires_grad())};
+        return {tenzor::expand(grad, input_shape_vec)};
     } else {
         int64_t dim = dim_.value();
         if (dim < 0) dim += input.shape().size();
 
-        auto grad = grad_tensor;
+        Variable grad = scaled_grad;
         if (!keepdim_) {
-            grad = unsqueeze(grad, dim);
+            grad = tenzor::unsqueeze(grad, dim);
         }
-        auto result = expand(grad, input_shape_vec);
-        return {Variable(result, scaled_grad.requires_grad())};
+        return {tenzor::expand(grad, input_shape_vec)};
     }
 }
 

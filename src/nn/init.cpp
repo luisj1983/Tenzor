@@ -85,6 +85,15 @@ void fill_tensor(Tensor& tensor, Generator gen) {
 
     int64_t numel = work_tensor.numel();
 
+    // The linear data<T>()[i] writes below assume a contiguous layout. All
+    // current callers pass freshly-allocated contiguous parameters, but guard
+    // explicitly so a non-contiguous (e.g. transposed/sliced) view fails loudly
+    // instead of silently corrupting memory through stride-ignoring writes.
+    if (!work_tensor.is_contiguous()) {
+        throw std::invalid_argument(
+            "fill_tensor: tensor must be contiguous");
+    }
+
     if (work_tensor.dtype() == DType::Float32) {
         float* data = work_tensor.data<float>();
         for (int64_t i = 0; i < numel; ++i) {

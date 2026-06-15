@@ -43,7 +43,8 @@ auto load_cifar_batch(const std::string& path, std::vector<uint8_t>& images,
 
 auto build_tensors(const std::vector<uint8_t>& img_data,
                    const std::vector<uint8_t>& lbl_data,
-                   int64_t n, bool normalize) -> std::pair<Tensor, Tensor> {
+                   int64_t n, bool normalize, int64_t num_classes)
+    -> std::pair<Tensor, Tensor> {
     // Images: stored as R plane, G plane, B plane (channel-first already)
     auto images = zeros({n, 3, 32, 32}, DType::Float32, Device::cpu());
     auto* dst = images.data<float>();
@@ -55,7 +56,14 @@ auto build_tensors(const std::vector<uint8_t>& img_data,
     auto labels = zeros({n}, DType::Int64, Device::cpu());
     auto* lbl_dst = labels.data<int64_t>();
     for (int64_t i = 0; i < n; ++i) {
-        lbl_dst[i] = static_cast<int64_t>(lbl_data[i]);
+        auto label = static_cast<int64_t>(lbl_data[i]);
+        if (label < 0 || label >= num_classes) {
+            throw std::runtime_error(
+                "CIFAR: label " + std::to_string(label) + " at index " +
+                std::to_string(i) + " is out of range [0, " +
+                std::to_string(num_classes) + ")");
+        }
+        lbl_dst[i] = label;
     }
 
     return {images, labels};
@@ -79,7 +87,8 @@ CIFAR10::CIFAR10(const std::string& root_dir, bool train, bool normalize) {
     }
 
     auto [imgs, lbls] = build_tensors(img_data, lbl_data,
-                                       static_cast<int64_t>(num_samples_), normalize);
+                                       static_cast<int64_t>(num_samples_), normalize,
+                                       /*num_classes=*/10);
     images_ = std::move(imgs);
     labels_ = std::move(lbls);
 }
@@ -134,7 +143,8 @@ CIFAR100::CIFAR100(const std::string& root_dir, bool train, bool normalize) {
     }
 
     auto [imgs, lbls] = build_tensors(img_data, lbl_data,
-                                       static_cast<int64_t>(num_samples_), normalize);
+                                       static_cast<int64_t>(num_samples_), normalize,
+                                       /*num_classes=*/100);
     images_ = std::move(imgs);
     labels_ = std::move(lbls);
 }

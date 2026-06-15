@@ -247,18 +247,19 @@ __global__ void ctc_forward_backward_kernel(
     __syncthreads();
 
     // Pass 1: accumulate log-posteriors per (t, c) in private scratch.
-    // Serialised per t over L_n positions (which is small), parallelised
-    // over t when L is small enough that no thread is the bottleneck.
-    // For simplicity we keep the proven single-thread accumulation over s
-    // (matches CPU reference exactly).
-    if (tid == 0) {
-        for (int64_t t = 0; t < T_n; ++t) {
-            for (int64_t s = 0; s < L_n; ++s) {
-                int32_t c = ext_label(s);
-                float posterior = alpha[t * L_max + s] + beta[t * L_max + s];
-                float& slot = post_n[t * C + c];
-                slot = log_add(slot, posterior);
-            }
+    // Parallelised over t across the block's threads: each t owns its own
+    // post_n[t, *] row, so distinct threads never touch the same slot and no
+    // synchronisation is needed within the loop. The inner s loop stays serial
+    // per t because several s can map to the same c (their log_add must be
+    // ordered), exactly matching the CPU reference's per-t accumulation.
+    for (int64_t t = tid; t < T_n; t += nthreads) {
+        float* post_t = post_n + t * C;
+        const float* alpha_t = alpha + t * L_max;
+        const float* beta_t = beta + t * L_max;
+        for (int64_t s = 0; s < L_n; ++s) {
+            int32_t c = ext_label(s);
+            float posterior = alpha_t[s] + beta_t[s];
+            post_t[c] = log_add(post_t[c], posterior);
         }
     }
     __syncthreads();

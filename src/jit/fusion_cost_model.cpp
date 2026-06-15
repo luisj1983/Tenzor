@@ -41,9 +41,14 @@ auto FusionCostModel::should_fuse(const FusionCandidate& candidate) const -> boo
         eliminated_accesses = candidate.num_memory_accesses - 2;
     }
 
-    double bytes_saved = static_cast<double>(eliminated_accesses)
-                       * static_cast<double>(candidate.total_elements)
-                       * bytes_per_element;
+    // total_elements < 0 is the "unknown element count" sentinel (a dynamic
+    // or invalid input dim): we cannot estimate memory-traffic savings, so be
+    // conservative and credit only the launch-overhead savings below.
+    double bytes_saved = candidate.total_elements < 0
+        ? 0.0
+        : static_cast<double>(eliminated_accesses)
+            * static_cast<double>(candidate.total_elements)
+            * bytes_per_element;
 
     // Convert bandwidth from GB/s to bytes/us: GB/s * 1e9 / 1e6 = GB/s * 1e3
     double bandwidth_bytes_per_us = bandwidth_gbps_ * 1e3;
@@ -86,6 +91,14 @@ auto FusionCostModel::estimate_speedup(const FusionCandidate& candidate) const -
             return 1.3;
         default:
             break;
+    }
+
+    // Unknown element count (dynamic/invalid input dim): the element-count
+    // heuristics below would multiply through a garbage value. Be conservative
+    // and report a neutral speedup so an unknown-size fusion is not greedily
+    // selected on a fabricated benefit.
+    if (candidate.total_elements < 0) {
+        return 1.0;
     }
 
     bool is_gpu = (device_type_ == Device::Type::CUDA ||

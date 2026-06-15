@@ -114,9 +114,12 @@ auto dispatch_flash_attention(const std::vector<::tenzor::Tensor>& inputs,
     const auto kv     = parse_backend_config(backend_config);
     const bool causal = parse_bool (kv.count("causal") ? kv.at("causal") : "",
                                     false);
-    float      scale  = parse_float(kv.count("scale")  ? kv.at("scale")  : "",
-                                    0.0f);
-    if (scale == 0.0f) {
+    float      scale  = 0.0f;
+    if (kv.count("scale")) {
+        // Caller supplied an explicit scale (including a legitimate 0).
+        scale = parse_float(kv.at("scale"), 0.0f);
+    } else {
+        // Not supplied: default to 1/sqrt(D) over the last (head) dim.
         const auto& q     = inputs[0];
         const auto rank   = q.shape().size();
         if (rank >= 1) {

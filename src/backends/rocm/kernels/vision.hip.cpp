@@ -475,7 +475,11 @@ auto unfold_kernel(const Tensor& input,
             .to(DType::BFloat16);
     }
 
-    auto shape = input.shape();
+    // The kernels index with dense NCHW offsets, so a non-contiguous view
+    // (transpose/slice/permute/channels-last) would read the wrong elements.
+    Tensor in = input.is_contiguous() ? input : input.contiguous();
+
+    auto shape = in.shape();
     int64_t batch = shape[0];
     int64_t channels = shape[1];
     int64_t height = shape[2];
@@ -488,26 +492,26 @@ auto unfold_kernel(const Tensor& input,
 
     // Create output tensor
     std::vector<int64_t> output_shape = {batch, channels * kernel_h * kernel_w, num_blocks};
-    Tensor output(output_shape, input.dtype(), input.device());
+    Tensor output(output_shape, in.dtype(), in.device());
 
     // Launch kernel
     int64_t total_elements = batch * channels * kernel_h * kernel_w * num_blocks;
     int num_blocks_kernel = get_num_blocks(total_elements);
 
-    if (input.dtype() == DType::Float32) {
+    if (in.dtype() == DType::Float32) {
         hipLaunchKernelGGL(unfold_kernel_hip<float>,
             dim3(num_blocks_kernel), dim3(BLOCK_SIZE), 0, stream,
-            input.data<float>(),
+            in.data<float>(),
             output.data<float>(),
             batch, channels, height, width,
             kernel_h, kernel_w, stride_h, stride_w,
             padding_h, padding_w, dilation_h, dilation_w,
             out_h, out_w
         );
-    } else if (input.dtype() == DType::Float64) {
+    } else if (in.dtype() == DType::Float64) {
         hipLaunchKernelGGL(unfold_kernel_hip<double>,
             dim3(num_blocks_kernel), dim3(BLOCK_SIZE), 0, stream,
-            input.data<double>(),
+            in.data<double>(),
             output.data<double>(),
             batch, channels, height, width,
             kernel_h, kernel_w, stride_h, stride_w,
@@ -550,7 +554,10 @@ auto fold_kernel(const Tensor& input,
             .to(DType::BFloat16);
     }
 
-    auto shape = input.shape();
+    // Kernels index with dense offsets; materialize a contiguous input first.
+    Tensor in = input.is_contiguous() ? input : input.contiguous();
+
+    auto shape = in.shape();
     int64_t batch = shape[0];
     int64_t col_channels = shape[1];
     int64_t num_blocks = shape[2];
@@ -565,30 +572,30 @@ auto fold_kernel(const Tensor& input,
 
     // Create output tensor (initialized to zero)
     std::vector<int64_t> output_shape = {batch, channels, height, width};
-    Tensor output(output_shape, input.dtype(), input.device());
+    Tensor output(output_shape, in.dtype(), in.device());
 
     // Initialize to zero
     HIP_CHECK(hipMemsetAsync(output.data_ptr(), 0,
-        output.numel() * dtype_size(input.dtype()), stream));
+        output.numel() * dtype_size(in.dtype()), stream));
 
     // Launch kernel
     int64_t total_elements = batch * col_channels * num_blocks;
     int num_blocks_kernel = get_num_blocks(total_elements);
 
-    if (input.dtype() == DType::Float32) {
+    if (in.dtype() == DType::Float32) {
         hipLaunchKernelGGL(fold_kernel_hip<float>,
             dim3(num_blocks_kernel), dim3(BLOCK_SIZE), 0, stream,
-            input.data<float>(),
+            in.data<float>(),
             output.data<float>(),
             batch, channels, height, width,
             kernel_h, kernel_w, stride_h, stride_w,
             padding_h, padding_w, dilation_h, dilation_w,
             out_h, out_w
         );
-    } else if (input.dtype() == DType::Float64) {
+    } else if (in.dtype() == DType::Float64) {
         hipLaunchKernelGGL(fold_kernel_hip<double>,
             dim3(num_blocks_kernel), dim3(BLOCK_SIZE), 0, stream,
-            input.data<double>(),
+            in.data<double>(),
             output.data<double>(),
             batch, channels, height, width,
             kernel_h, kernel_w, stride_h, stride_w,
@@ -621,7 +628,10 @@ auto interpolate_kernel(const Tensor& input,
             .to(DType::BFloat16);
     }
 
-    auto shape = input.shape();
+    // Kernels index with dense NCHW offsets; materialize contiguous input.
+    Tensor in = input.is_contiguous() ? input : input.contiguous();
+
+    auto shape = in.shape();
     int64_t batch = shape[0];
     int64_t channels = shape[1];
     int64_t in_h = shape[2];
@@ -631,24 +641,24 @@ auto interpolate_kernel(const Tensor& input,
 
     // Create output tensor
     std::vector<int64_t> output_shape = {batch, channels, out_h, out_w};
-    Tensor output(output_shape, input.dtype(), input.device());
+    Tensor output(output_shape, in.dtype(), in.device());
 
     // Launch kernel
     int64_t total_elements = batch * channels * out_h * out_w;
     int num_blocks = get_num_blocks(total_elements);
 
     if (mode == "nearest") {
-        if (input.dtype() == DType::Float32) {
+        if (in.dtype() == DType::Float32) {
             hipLaunchKernelGGL(interpolate_nearest_kernel_hip<float>,
                 dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
-                input.data<float>(),
+                in.data<float>(),
                 output.data<float>(),
                 batch, channels, in_h, in_w, out_h, out_w
             );
-        } else if (input.dtype() == DType::Float64) {
+        } else if (in.dtype() == DType::Float64) {
             hipLaunchKernelGGL(interpolate_nearest_kernel_hip<double>,
                 dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
-                input.data<double>(),
+                in.data<double>(),
                 output.data<double>(),
                 batch, channels, in_h, in_w, out_h, out_w
             );
@@ -656,18 +666,18 @@ auto interpolate_kernel(const Tensor& input,
             throw std::runtime_error("interpolate_kernel: Unsupported dtype");
         }
     } else if (mode == "bilinear") {
-        if (input.dtype() == DType::Float32) {
+        if (in.dtype() == DType::Float32) {
             hipLaunchKernelGGL(interpolate_bilinear_kernel_hip<float>,
                 dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
-                input.data<float>(),
+                in.data<float>(),
                 output.data<float>(),
                 batch, channels, in_h, in_w, out_h, out_w,
                 align_corners
             );
-        } else if (input.dtype() == DType::Float64) {
+        } else if (in.dtype() == DType::Float64) {
             hipLaunchKernelGGL(interpolate_bilinear_kernel_hip<double>,
                 dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
-                input.data<double>(),
+                in.data<double>(),
                 output.data<double>(),
                 batch, channels, in_h, in_w, out_h, out_w,
                 align_corners
@@ -676,18 +686,18 @@ auto interpolate_kernel(const Tensor& input,
             throw std::runtime_error("interpolate_kernel: Unsupported dtype");
         }
     } else if (mode == "bicubic") {
-        if (input.dtype() == DType::Float32) {
+        if (in.dtype() == DType::Float32) {
             hipLaunchKernelGGL(interpolate_bicubic_kernel_hip<float>,
                 dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
-                input.data<float>(),
+                in.data<float>(),
                 output.data<float>(),
                 batch, channels, in_h, in_w, out_h, out_w,
                 align_corners
             );
-        } else if (input.dtype() == DType::Float64) {
+        } else if (in.dtype() == DType::Float64) {
             hipLaunchKernelGGL(interpolate_bicubic_kernel_hip<double>,
                 dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
-                input.data<double>(),
+                in.data<double>(),
                 output.data<double>(),
                 batch, channels, in_h, in_w, out_h, out_w,
                 align_corners
@@ -1014,38 +1024,43 @@ __global__ void box_iou_kernel(
     output[i * M + j] = iou;
 }
 
-auto box_iou_hip(const Tensor& boxes1, const Tensor& boxes2, int iou_type) -> Tensor {
+auto box_iou_hip(const Tensor& boxes1, const Tensor& boxes2, int iou_type,
+                 hipStream_t stream) -> Tensor {
     // Float16 upcast: convert to Float32, compute, convert back
     if (boxes1.dtype() == DType::Float16) {
-        return box_iou_hip(boxes1.to(DType::Float32), boxes2.to(DType::Float32), iou_type)
+        return box_iou_hip(boxes1.to(DType::Float32), boxes2.to(DType::Float32), iou_type, stream)
             .to(DType::Float16);
     }
 
     // BFloat16 upcast: convert to Float32, compute, convert back
     if (boxes1.dtype() == DType::BFloat16) {
-        return box_iou_hip(boxes1.to(DType::Float32), boxes2.to(DType::Float32), iou_type)
+        return box_iou_hip(boxes1.to(DType::Float32), boxes2.to(DType::Float32), iou_type, stream)
             .to(DType::BFloat16);
     }
 
-    int64_t N = boxes1.shape()[0];
-    int64_t M = boxes2.shape()[0];
+    // Flat-index kernel requires contiguous storage; materialize views.
+    Tensor b1 = boxes1.is_contiguous() ? boxes1 : boxes1.contiguous();
+    Tensor b2 = boxes2.is_contiguous() ? boxes2 : boxes2.contiguous();
 
-    Tensor output({N, M}, boxes1.dtype(), boxes1.device());
+    int64_t N = b1.shape()[0];
+    int64_t M = b2.shape()[0];
+
+    Tensor output({N, M}, b1.dtype(), b1.device());
 
     int64_t total = N * M;
     if (total == 0) return output;
 
     int num_blocks = get_num_blocks(total);
 
-    if (boxes1.dtype() == DType::Float32) {
+    if (b1.dtype() == DType::Float32) {
         hipLaunchKernelGGL(box_iou_kernel<float>,
-            dim3(num_blocks), dim3(BLOCK_SIZE), 0, 0,
-            boxes1.data<float>(), boxes2.data<float>(), output.data<float>(),
+            dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
+            b1.data<float>(), b2.data<float>(), output.data<float>(),
             N, M, iou_type);
-    } else if (boxes1.dtype() == DType::Float64) {
+    } else if (b1.dtype() == DType::Float64) {
         hipLaunchKernelGGL(box_iou_kernel<double>,
-            dim3(num_blocks), dim3(BLOCK_SIZE), 0, 0,
-            boxes1.data<double>(), boxes2.data<double>(), output.data<double>(),
+            dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
+            b1.data<double>(), b2.data<double>(), output.data<double>(),
             N, M, iou_type);
     } else {
         throw std::runtime_error("box_iou_hip: unsupported dtype");

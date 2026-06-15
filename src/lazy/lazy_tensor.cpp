@@ -13,6 +13,34 @@
 namespace tenzor {
 namespace lazy {
 
+namespace {
+
+// Eager reduction dtype promotion (mirrors src/ops/reduction.cpp). These MUST
+// stay in lock-step with the eager paths so lazy recording, lazy materialization
+// and eager dispatch all agree on the output dtype.
+auto is_small_int_dtype(DType dt) -> bool {
+    return dt == DType::Int8 || dt == DType::UInt8 || dt == DType::Int16 ||
+           dt == DType::Int32 || dt == DType::UInt16 || dt == DType::UInt32 ||
+           dt == DType::Bool;
+}
+
+auto is_integer_dtype(DType dt) -> bool {
+    return dt == DType::Int8 || dt == DType::UInt8 || dt == DType::Int16 ||
+           dt == DType::Int32 || dt == DType::Int64 || dt == DType::Bool;
+}
+
+// sum() promotes small integer types to Int64 to prevent overflow.
+auto sum_out_dtype(DType in) -> DType {
+    return is_small_int_dtype(in) ? DType::Int64 : in;
+}
+
+// mean() promotes integer/bool inputs to Float32 (floating-point result).
+auto mean_out_dtype(DType in) -> DType {
+    return is_integer_dtype(in) ? DType::Float32 : in;
+}
+
+}  // namespace
+
 // ============================================================================
 // LazyNode
 // ============================================================================
@@ -193,6 +221,21 @@ auto LazyGraph::execute_node(const std::shared_ptr<LazyNode>& node) -> Tensor {
     // no CPU fallback. The OpId + OpAttributes pair stored on the node is
     // already in the form the dispatch table expects.
     auto op = *node->op();
+
+    // Mirror eager reduction promotion: eager sum()/mean() promote the input
+    // dtype before dispatch (sum: small-int -> Int64, mean: integer/bool ->
+    // Float32). execute_node dispatches OpId::Sum/Mean directly, so without this
+    // the lazy result would silently disagree with eager for integer inputs and
+    // diverge from the (now-promoted) recorded node dtype.
+    if ((op == OpId::Sum || op == OpId::Mean) && !input_tensors.empty()) {
+        const DType in = input_tensors[0].dtype();
+        const DType promoted =
+            (op == OpId::Sum) ? sum_out_dtype(in) : mean_out_dtype(in);
+        if (promoted != in) {
+            input_tensors[0] = input_tensors[0].to(promoted);
+        }
+    }
+
     try {
         auto outputs = tenzor::dispatch(op, input_tensors, node->attrs());
         if (outputs.empty()) {
@@ -438,6 +481,17 @@ auto reshape(const LazyTensor& a, std::vector<int64_t> shape) -> LazyTensor {
     if (neg_idx >= 0) {
         int64_t total = 1;
         for (auto d : a.shape()) total *= d;
+        if (known_product == 0) {
+            throw std::invalid_argument(
+                "LazyTensor::reshape: cannot infer -1 dimension when the "
+                "product of the other requested dimensions is zero");
+        }
+        if (total % known_product != 0) {
+            throw std::invalid_argument(
+                "LazyTensor::reshape: requested shape is not compatible with "
+                "the number of elements (" + std::to_string(total) +
+                " is not divisible by " + std::to_string(known_product) + ")");
+        }
         shape[neg_idx] = total / known_product;
     }
 
@@ -469,8 +523,12 @@ auto sum(const LazyTensor& a, std::optional<int64_t> dim) -> LazyTensor {
                           // default LLONG_MIN, no AttrKey::Dim needed.
     }
     attrs.set(AttrKey::Keepdim, false);
+    // Record the promoted output dtype (small-int -> Int64) so LazyTensor::dtype()
+    // and any downstream promote_types() match eager sum(); execute_node performs
+    // the matching input promotion at materialization.
     auto node = graph->add_node(OpId::Sum, {a.node()}, out_shape,
-                                a.dtype(), a.device(), std::move(attrs));
+                                sum_out_dtype(a.dtype()), a.device(),
+                                std::move(attrs));
     return LazyTensor(node, graph);
 }
 
@@ -492,8 +550,11 @@ auto mean(const LazyTensor& a, std::optional<int64_t> dim) -> LazyTensor {
         out_shape = {1};
     }
     attrs.set(AttrKey::Keepdim, false);
+    // Record the promoted output dtype (integer/bool -> Float32) so it matches
+    // eager mean(); execute_node performs the matching input promotion.
     auto node = graph->add_node(OpId::Mean, {a.node()}, out_shape,
-                                a.dtype(), a.device(), std::move(attrs));
+                                mean_out_dtype(a.dtype()), a.device(),
+                                std::move(attrs));
     return LazyTensor(node, graph);
 }
 

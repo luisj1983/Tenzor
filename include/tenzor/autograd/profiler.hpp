@@ -18,9 +18,11 @@
 
 #pragma once
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cstdint>
+#include <cstdio>
 #include <mutex>
 #include <optional>
 #include <string>
@@ -45,9 +47,6 @@ struct AutogradProfile {
     std::chrono::nanoseconds total_time{0};
     int64_t call_count{0};
 };
-
-/// Backward-compatible alias
-;
 
 /**
  * @brief A single trace event for Chrome Trace Event Format export.
@@ -106,11 +105,26 @@ public:
         return trace_enabled_.load(std::memory_order_acquire);
     }
 
+    /// Set the maximum number of trace events retained. When the buffer is full,
+    /// record_trace() drops the oldest event (ring-buffer semantics) so trace
+    /// mode can run for long sessions without unbounded memory growth. A value
+    /// of 0 means "unbounded" (the historical behaviour). The default cap is
+    /// kDefaultMaxTraceEvents.
+    auto set_max_trace_events(size_t max_events) -> void {
+        max_trace_events_.store(max_events, std::memory_order_release);
+    }
+
+    /// Current maximum trace-event retention (0 == unbounded).
+    [[nodiscard]] auto max_trace_events() const noexcept -> size_t {
+        return max_trace_events_.load(std::memory_order_acquire);
+    }
+
     /// Clear all recorded data (aggregate profiles and trace events).
     auto reset() -> void {
         std::lock_guard lock(mutex_);
         data_.clear();
         trace_events_.clear();
+        trace_write_pos_ = 0;
     }
 
     /// Record an operation execution (backward-compatible: defaults to Backward phase).
@@ -145,7 +159,17 @@ public:
         evt.thread_id = static_cast<uint32_t>(
             std::hash<std::thread::id>{}(std::this_thread::get_id()));
         std::lock_guard lock(mutex_);
-        trace_events_.push_back(std::move(evt));
+        const size_t cap = max_trace_events_.load(std::memory_order_acquire);
+        if (cap == 0 || trace_events_.size() < cap) {
+            // Unbounded mode, or still filling the buffer: append.
+            trace_events_.push_back(std::move(evt));
+        } else {
+            // Buffer full: overwrite the oldest event (ring buffer). Each event
+            // carries its absolute start time, so export still recovers the
+            // correct time origin via min_element regardless of slot order.
+            trace_events_[trace_write_pos_] = std::move(evt);
+            trace_write_pos_ = (trace_write_pos_ + 1) % cap;
+        }
     }
 
     /// Get all recorded profiles, sorted by total time descending.
@@ -213,13 +237,20 @@ public:
      */
     auto export_chrome_trace(const std::string& path) const -> void;
 
+    /// Default upper bound on retained trace events when trace mode is active.
+    /// Chosen large enough to capture a meaningful window of a training run
+    /// while preventing unbounded growth for long-lived sessions.
+    static constexpr size_t kDefaultMaxTraceEvents = 1'000'000;
+
 private:
     AutogradProfiler() = default;
     std::atomic<bool> enabled_{false};
     std::atomic<bool> trace_enabled_{false};
+    std::atomic<size_t> max_trace_events_{kDefaultMaxTraceEvents};
     mutable std::mutex mutex_;
     std::unordered_map<std::string, AutogradProfile> data_;
     std::vector<TraceEvent> trace_events_;
+    size_t trace_write_pos_{0};  // ring-buffer cursor once trace_events_ is full
 };
 
 /**

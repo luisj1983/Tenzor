@@ -15,7 +15,8 @@
 #include "tenzor/ops/indexing.hpp"
 #include "tenzor/ops/creation.hpp"
 #include "tenzor/ops/math.hpp"
-#include <chrono>
+// tenzor::get_global_seed() is declared in creation.hpp (included above) and
+// honors tenzor::manual_seed, falling back to a time-based seed when unset.
 
 namespace tenzor {
 
@@ -73,7 +74,13 @@ struct MultinomialSamplePC {
 };
 
 inline std::pair<uint32_t, uint32_t> seed_split() {
-    uint64_t s = std::chrono::high_resolution_clock::now().time_since_epoch().count();
+    // Derive the per-op seed from the global RNG stream so Bernoulli /
+    // Multinomial / Poisson / Normal / Exponential / Gamma honor
+    // tenzor::manual_seed and stay reproducible and consistent with the
+    // CPU/CUDA backends and the other Vulkan ops (vulkan_ops_misc.cpp).
+    // get_global_seed() itself falls back to a time-based seed when no
+    // manual seed has been set.
+    uint64_t s = ::tenzor::get_global_seed();
     return {static_cast<uint32_t>(s & 0xFFFFFFFFu),
             static_cast<uint32_t>(s >> 32)};
 }

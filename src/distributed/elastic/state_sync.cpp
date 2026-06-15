@@ -28,6 +28,17 @@ auto StateSync::sync_model(nn::Module& module, ProcessGroup& pg,
         Tensor& data = param->tensor();
         pg.broadcast(data, source_rank);
     }
+
+    // Also broadcast non-trainable buffers (e.g. BatchNorm running_mean/
+    // running_var). parameters() never touches the buffers_ map, so without
+    // this the in-memory recovery path would leave non-source ranks with stale/
+    // divergent running stats — inconsistent with the disk path, which uses
+    // state_dict() and DOES include buffers.
+    auto buffers = module.buffers();
+    for (auto& buffer : buffers) {
+        Tensor& data = buffer->tensor();
+        pg.broadcast(data, source_rank);
+    }
 }
 
 auto StateSync::save_checkpoint(const nn::Module& module,

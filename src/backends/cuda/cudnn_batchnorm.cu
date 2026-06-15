@@ -22,6 +22,18 @@
 namespace tenzor {
 namespace cuda {
 
+// RAII guard for a cuDNN tensor descriptor that, unlike TensorDescriptor, owns a
+// pre-existing handle (the BN parameter descriptor derived via
+// cudnnDeriveBNTensorDescriptor). Ensures the descriptor is destroyed even when
+// an intervening CUDNN_CHECK/CUDA_CHECK throws, preventing descriptor leaks.
+struct BNDescriptorGuard {
+    cudnnTensorDescriptor_t desc;
+    explicit BNDescriptorGuard(cudnnTensorDescriptor_t d) : desc(d) {}
+    ~BNDescriptorGuard() { if (desc) cudnnDestroyTensorDescriptor(desc); }
+    BNDescriptorGuard(const BNDescriptorGuard&) = delete;
+    BNDescriptorGuard& operator=(const BNDescriptorGuard&) = delete;
+};
+
 // Direct FP32->FP16 copy kernel — avoids intermediate tensor allocation
 __global__ void f32_to_half_kernel(const float* src, __half* dst, int64_t n) {
     int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
@@ -97,9 +109,12 @@ auto cudnn_batchnorm2d_forward_inference(
     input_desc.set(cudnn_dtype, N, C, H, W);
     output_desc.set(cudnn_dtype, N, C, H, W);
 
-    // Create BN parameter descriptor (derived from input descriptor)
+    // Create BN parameter descriptor (derived from input descriptor). Wrap the
+    // raw handle in an RAII guard so it is destroyed even if a later
+    // CUDNN_CHECK/CUDA_CHECK throws (a bare handle would leak the descriptor).
     cudnnTensorDescriptor_t bn_desc;
     CUDNN_CHECK(cudnnCreateTensorDescriptor(&bn_desc));
+    BNDescriptorGuard bn_desc_guard(bn_desc);
     CUDNN_CHECK(cudnnDeriveBNTensorDescriptor(
         bn_desc,
         input_desc.get(),
@@ -216,8 +231,7 @@ auto cudnn_batchnorm2d_forward_inference(
         ));
     }
 
-    // Cleanup
-    cudnnDestroyTensorDescriptor(bn_desc);
+    // bn_desc destroyed by bn_desc_guard (RAII)
 
     return output;
 }
@@ -279,6 +293,7 @@ auto cudnn_batchnorm2d_forward_training(
 
     cudnnTensorDescriptor_t bn_desc;
     CUDNN_CHECK(cudnnCreateTensorDescriptor(&bn_desc));
+    BNDescriptorGuard bn_desc_guard(bn_desc);  // RAII: destroy even on throw
     CUDNN_CHECK(cudnnDeriveBNTensorDescriptor(
         bn_desc,
         input_desc.get(),
@@ -437,7 +452,7 @@ auto cudnn_batchnorm2d_forward_training(
         CUDA_CHECK(cudaGetLastError());
     }
 
-    cudnnDestroyTensorDescriptor(bn_desc);
+    // bn_desc destroyed by bn_desc_guard (RAII)
 
     return {output, saved_mean, saved_inv_var};
 }
@@ -496,6 +511,7 @@ auto cudnn_batchnorm2d_backward(
 
     cudnnTensorDescriptor_t bn_desc;
     CUDNN_CHECK(cudnnCreateTensorDescriptor(&bn_desc));
+    BNDescriptorGuard bn_desc_guard(bn_desc);  // RAII: destroy even on throw
     CUDNN_CHECK(cudnnDeriveBNTensorDescriptor(
         bn_desc,
         input_desc.get(),
@@ -643,7 +659,7 @@ auto cudnn_batchnorm2d_backward(
         grad_beta = grad_beta_f32.to(DType::BFloat16);
     }
 
-    cudnnDestroyTensorDescriptor(bn_desc);
+    // bn_desc destroyed by bn_desc_guard (RAII)
 
     return {grad_input, grad_gamma, grad_beta};
 }

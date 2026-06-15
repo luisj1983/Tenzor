@@ -832,6 +832,14 @@ auto TransferEngine::record_transfer(
     stats_.total_transfers.fetch_add(1, std::memory_order_relaxed);
     stats_.bytes_transferred.fetch_add(bytes, std::memory_order_relaxed);
 
+    // Only transfers with a real (non-zero) measured duration contribute to the
+    // bandwidth average. Async/queued transfers record an empty timing window
+    // (time_ms ~= 0) and would otherwise add bytes against ~0 time, inflating
+    // the reported bandwidth.
+    if (time_ms > 0.0) {
+        stats_.timed_bytes_transferred.fetch_add(bytes, std::memory_order_relaxed);
+    }
+
     if (cpu_to_gpu) {
         stats_.cpu_to_gpu_count.fetch_add(1, std::memory_order_relaxed);
     } else {
@@ -1498,7 +1506,9 @@ auto TransferEngine::synchronize_stream(int stream_id) -> void {
 // ============================================================================
 
 auto TransferEngine::get_average_bandwidth_gbps() const -> float {
-    size_t total_bytes = stats_.bytes_transferred.load(std::memory_order_relaxed);
+    // Use only the bytes from transfers that recorded a real duration; async
+    // transfers contributed ~0 time and would otherwise skew the average.
+    size_t total_bytes = stats_.timed_bytes_transferred.load(std::memory_order_relaxed);
     double total_time_s = stats_.total_time_ms.load(std::memory_order_relaxed) / 1000.0;
 
     if (total_time_s <= 0.0) {
@@ -1523,6 +1533,7 @@ auto TransferEngine::get_statistics() const -> Statistics {
 auto TransferEngine::reset_statistics() -> void {
     stats_.total_transfers.store(0, std::memory_order_relaxed);
     stats_.bytes_transferred.store(0, std::memory_order_relaxed);
+    stats_.timed_bytes_transferred.store(0, std::memory_order_relaxed);
     stats_.cpu_to_gpu_count.store(0, std::memory_order_relaxed);
     stats_.gpu_to_cpu_count.store(0, std::memory_order_relaxed);
     stats_.total_time_ms.store(0.0, std::memory_order_relaxed);

@@ -21,6 +21,7 @@
  */
 
 #include "tenzor/distributed/rpc/rpc_agent.hpp"
+#include "tenzor/distributed/rpc/rref.hpp"
 #include "tenzor/core/tensor.hpp"
 #include "tenzor/core/device.hpp"
 #include <cstring>
@@ -109,6 +110,10 @@ std::optional<Tensor> read_tensor(int fd) {
     }
     uint64_t nbytes = 0;
     if (!read_exact(fd, &nbytes, sizeof(nbytes))) return std::nullopt;
+    // Reject out-of-range dtypes before constructing the Tensor: dtype_size()
+    // returns 0 only for an invalid DType, which would otherwise build a Tensor
+    // with a garbage enum that crashes downstream kernel dispatch.
+    if (dtype_size(static_cast<DType>(dtype)) == 0) return std::nullopt;
     Tensor t(shape, static_cast<DType>(dtype), Device::cpu());
     if (nbytes > 0) {
         if (!read_exact(fd, t.data_ptr(), nbytes)) return std::nullopt;
@@ -209,8 +214,14 @@ std::optional<Message> deserialize_message(int fd) {
         // off + nbytes, which wraps for nbytes near UINT64_MAX and bypassed the
         // bound, then memcpy'd ~exabytes out of buf).
         if (nbytes > buf.size() - off) return std::nullopt;
+        // Reject out-of-range dtypes: dtype_size() returns 0 only for an invalid
+        // DType. Without this, a peer sending an invalid dtype with nbytes==0
+        // would pass the size check below (expected==0) and construct a Tensor
+        // with a garbage enum, which then hits UB in downstream dispatch.
+        size_t elem_size = dtype_size(static_cast<DType>(dtype));
+        if (elem_size == 0) return std::nullopt;
         uint64_t expected = static_cast<uint64_t>(numel) *
-                            static_cast<uint64_t>(dtype_size(static_cast<DType>(dtype)));
+                            static_cast<uint64_t>(elem_size);
         if (nbytes != expected) return std::nullopt;
         Tensor t(shape, static_cast<DType>(dtype), Device::cpu());
         if (nbytes > 0) {
@@ -258,6 +269,47 @@ auto TcpRpcAgent::init(const std::vector<WorkerInfo>& all_workers) -> void {
             ack.dst_worker = msg.src_worker;
             return ack;
         });
+    // RRef remote-fetch: the rref_id rides in payload.bytes (8 bytes) because
+    // the wire's request_id field is reserved for request/response correlation
+    // and is rewritten by send(). The owner returns the stored tensor.
+    register_handler(MessageType::RREF_FETCH,
+        [this](const Message& msg) {
+            Message response;
+            response.type = MessageType::RPC_RESPONSE;
+            response.src_worker = self_.id;
+            response.dst_worker = msg.src_worker;
+            response.payload.request_id = msg.payload.request_id;
+            if (msg.payload.bytes.size() != sizeof(int64_t)) {
+                response.type = MessageType::RPC_ERROR;
+                response.payload.function_name = "RREF_FETCH: malformed rref id";
+                return response;
+            }
+            int64_t rref_id = 0;
+            std::memcpy(&rref_id, msg.payload.bytes.data(), sizeof(int64_t));
+            try {
+                response.payload.tensors.push_back(RRefStore::instance().fetch(rref_id));
+            } catch (const std::exception& e) {
+                response.type = MessageType::RPC_ERROR;
+                response.payload.function_name = e.what();
+            }
+            return response;
+        });
+    // RRef remote GC: delete the owner's stored tensor. Sent fire-and-forget via
+    // send_async; we still return an ack so the response path stays uniform.
+    register_handler(MessageType::RREF_DELETE,
+        [this](const Message& msg) {
+            Message response;
+            response.type = MessageType::RPC_RESPONSE;
+            response.src_worker = self_.id;
+            response.dst_worker = msg.src_worker;
+            response.payload.request_id = msg.payload.request_id;
+            if (msg.payload.bytes.size() == sizeof(int64_t)) {
+                int64_t rref_id = 0;
+                std::memcpy(&rref_id, msg.payload.bytes.data(), sizeof(int64_t));
+                RRefStore::instance().remove(rref_id);
+            }
+            return response;
+        });
 
 #if defined(__linux__) || defined(__APPLE__)
     // Start accept thread so we can receive inbound connections.
@@ -303,10 +355,7 @@ auto TcpRpcAgent::send(Message msg) -> Message {
     auto future = promise.get_future();
     {
         std::lock_guard<std::mutex> lock(pending_mutex_);
-        pending_[request_id] = PendingRequest{
-            std::move(promise),
-            std::chrono::steady_clock::now() + std::chrono::milliseconds(config_.timeout_ms)
-        };
+        pending_[request_id] = PendingRequest{std::move(promise)};
     }
 
     if (dst_worker == self_.id) {
@@ -335,11 +384,28 @@ auto TcpRpcAgent::send(Message msg) -> Message {
 }
 
 auto TcpRpcAgent::send_async(Message msg, std::function<void(Message)> callback) -> void {
-    // Simple implementation: run send() on a detached thread. For our test
-    // coverage this is sufficient; a production agent would pipeline writes.
+    // Run send() on a detached thread. The thread dereferences `this` for the
+    // full duration of a blocking send(), so we register it in inflight_async_
+    // BEFORE detaching and decrement+notify on exit; shutdown() drains this
+    // counter before members are destroyed to avoid a use-after-free.
+    {
+        std::lock_guard<std::mutex> lock(async_mutex_);
+        ++inflight_async_;
+    }
     const int64_t request_id = msg.payload.request_id;  // capture before move
     std::thread([this, msg = std::move(msg), callback = std::move(callback),
                  request_id]() mutable {
+        // Decrement and notify on every exit path so shutdown()'s drain wakes.
+        struct InflightGuard {
+            TcpRpcAgent* self;
+            ~InflightGuard() {
+                {
+                    std::lock_guard<std::mutex> lock(self->async_mutex_);
+                    --self->inflight_async_;
+                }
+                self->async_cv_.notify_all();
+            }
+        } guard{this};
         try {
             auto response = send(std::move(msg));
             callback(std::move(response));
@@ -387,24 +453,41 @@ auto TcpRpcAgent::shutdown() -> void {
     }
 #endif
 
+    // Wake up any stragglers that were waiting on promises FIRST, so that any
+    // in-flight send()/send_async() blocked on future.wait_for() returns
+    // immediately rather than blocking shutdown for the full timeout. This must
+    // precede the async drain below, otherwise a detached send_async thread
+    // waiting on its own pending promise would never complete.
+    {
+        std::lock_guard<std::mutex> lock(pending_mutex_);
+        for (auto& [_, req] : pending_) {
+            Message abort;
+            abort.type = MessageType::RPC_ERROR;
+            abort.payload.function_name = "agent shutdown";
+            try { req.promise.set_value(std::move(abort)); } catch (...) {}
+        }
+        pending_.clear();
+    }
+
+    // Drain detached async-send threads before destroying members. They
+    // dereference `this` until they finish, so this must complete before the
+    // destructor proceeds.
+    {
+        std::unique_lock<std::mutex> lock(async_mutex_);
+        async_cv_.wait(lock, [this] { return inflight_async_ == 0; });
+    }
+
     for (auto& t : io_threads_) {
         if (t.joinable()) t.join();
     }
     io_threads_.clear();
-    for (auto& t : worker_threads_) {
-        if (t.joinable()) t.join();
+    {
+        std::lock_guard<std::mutex> lock(threads_mutex_);
+        for (auto& t : worker_threads_) {
+            if (t.joinable()) t.join();
+        }
+        worker_threads_.clear();
     }
-    worker_threads_.clear();
-
-    // Wake up any stragglers that were waiting on promises.
-    std::lock_guard<std::mutex> lock(pending_mutex_);
-    for (auto& [_, req] : pending_) {
-        Message abort;
-        abort.type = MessageType::RPC_ERROR;
-        abort.payload.function_name = "agent shutdown";
-        try { req.promise.set_value(std::move(abort)); } catch (...) {}
-    }
-    pending_.clear();
 }
 
 auto TcpRpcAgent::register_handler(MessageType type,
@@ -457,7 +540,7 @@ auto TcpRpcAgent::dispatch_message(Message msg) -> void {
 }
 
 auto TcpRpcAgent::handle_rpc_call(const Message& msg) -> Message {
-    auto* fn = FunctionRegistry::instance().get_function(msg.payload.function_name);
+    auto fn = FunctionRegistry::instance().get_function(msg.payload.function_name);
 
     Message response;
     response.type = MessageType::RPC_RESPONSE;
@@ -571,7 +654,10 @@ int TcpRpcAgent::get_or_connect(int32_t peer_id) {
     }
 
     // Spawn a receive loop so responses come back in.
-    worker_threads_.emplace_back([this, fd, peer_id]() { receive_loop(fd, peer_id); });
+    {
+        std::lock_guard<std::mutex> lock(threads_mutex_);
+        worker_threads_.emplace_back([this, fd, peer_id]() { receive_loop(fd, peer_id); });
+    }
     return fd;
 }
 
@@ -608,6 +694,18 @@ void TcpRpcAgent::accept_loop() {
         int one_ = 1;
         ::setsockopt(cfd, IPPROTO_TCP, TCP_NODELAY, &one_, sizeof(one_));
 
+        // Bound the handshake read so a client that connects but sends nothing
+        // (or only a partial frame) cannot stall the single accept thread and
+        // block all further inbound connections. The per-connection
+        // receive_loop runs on its own thread, so this timeout only guards the
+        // handshake performed inline here.
+        {
+            struct timeval tv;
+            tv.tv_sec = static_cast<long>(config_.timeout_ms / 1000);
+            tv.tv_usec = static_cast<long>((config_.timeout_ms % 1000) * 1000);
+            ::setsockopt(cfd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+        }
+
         // Read the handshake message to learn peer id.
         auto hello = deserialize_message(cfd);
         if (!hello || hello->src_worker < 0) {
@@ -615,6 +713,15 @@ void TcpRpcAgent::accept_loop() {
             continue;
         }
         int32_t peer_id = hello->src_worker;
+
+        // Clear the handshake recv timeout so the long-lived receive_loop can
+        // block indefinitely between requests on an idle but healthy peer.
+        {
+            struct timeval tv0;
+            tv0.tv_sec = 0;
+            tv0.tv_usec = 0;
+            ::setsockopt(cfd, SOL_SOCKET, SO_RCVTIMEO, &tv0, sizeof(tv0));
+        }
 
         {
             std::lock_guard<std::mutex> lock(connections_mutex_);
@@ -630,7 +737,10 @@ void TcpRpcAgent::accept_loop() {
             inbound_connections_[peer_id] = cfd;
             fd_write_mutexes_[cfd] = std::make_shared<std::mutex>();
         }
-        worker_threads_.emplace_back([this, cfd, peer_id]() { receive_loop(cfd, peer_id); });
+        {
+            std::lock_guard<std::mutex> lock(threads_mutex_);
+            worker_threads_.emplace_back([this, cfd, peer_id]() { receive_loop(cfd, peer_id); });
+        }
     }
 }
 

@@ -63,11 +63,21 @@ class Categorical(Distribution):
         batch_size = int(np.prod(self._batch_shape)) if self._batch_shape else 1
         probs_2d = self._probs_np.reshape(batch_size, self._num_events)
         n_samples = int(np.prod(sample_shape)) if sample_shape else 1
-        out = np.empty((batch_size, n_samples), dtype=np.int64)
-        for b in range(batch_size):
-            out[b] = np.random.choice(self._num_events,
-                                      size=n_samples,
-                                      p=probs_2d[b])
+        # Vectorised inverse-CDF draw: build the per-row cumulative
+        # distribution once, then locate uniforms with searchsorted. This is a
+        # constant number of numpy calls instead of one np.random.choice per
+        # batch row.
+        cdf = np.cumsum(probs_2d.astype(np.float64), axis=-1)
+        # Guard against floating-point drift leaving the final bin < 1 so a
+        # uniform very close to 1 always lands in a valid class.
+        cdf[:, -1] = 1.0
+        u = np.random.random_sample((batch_size, n_samples))
+        # Inverse-CDF via a single broadcast compare-and-count over the event
+        # axis: index = number of cumulative thresholds the uniform exceeds.
+        # (batch, n_samples, 1) >= (batch, 1, K) -> sum over K.
+        out = (u[:, :, None] >= cdf[:, None, :]).sum(axis=-1).astype(np.int64)
+        # Clamp any index that rounded onto num_events (possible at u == 1.0).
+        np.clip(out, 0, self._num_events - 1, out=out)
         out_shape = sample_shape + self._batch_shape
         if out_shape:
             return _wrap_numpy_int(out.T.reshape(out_shape))

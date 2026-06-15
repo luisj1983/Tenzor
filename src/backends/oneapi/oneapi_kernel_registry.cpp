@@ -1010,6 +1010,44 @@ static sycl::queue& get_q_device(int32_t device_id) {
 }
 
 // ============================================================================
+// Strided scatter copy helper (SelectScatter / SliceScatter / DiagonalScatter)
+// ----------------------------------------------------------------------------
+// Copies `n` logical elements from a contiguous source into a (possibly
+// non-contiguous) destination view in a single device kernel, instead of one
+// blocking q.memcpy(...).wait() per element. `dst_shape`/`dst_strides` describe
+// the destination view in elements; the source is contiguous row-major over the
+// same shape. Each work-item decodes its row-major index into the destination's
+// strided byte offset and copies `elem_size` bytes.
+static void strided_scatter_copy(sycl::queue& q,
+                                 char* dst_base, const char* src_base,
+                                 const std::vector<int64_t>& dst_shape,
+                                 const std::vector<int64_t>& dst_strides,
+                                 int64_t elem_size, int64_t n) {
+    if (n <= 0) return;
+    const int64_t ndims = static_cast<int64_t>(dst_shape.size());
+    int64_t* d_shape = sycl::malloc_device<int64_t>(static_cast<size_t>(ndims), q);
+    int64_t* d_strides = sycl::malloc_device<int64_t>(static_cast<size_t>(ndims), q);
+    q.memcpy(d_shape, dst_shape.data(), ndims * sizeof(int64_t));
+    q.memcpy(d_strides, dst_strides.data(), ndims * sizeof(int64_t));
+    // In-order queue: the memcpys above complete before the kernel runs.
+    q.parallel_for(sycl::range<1>(static_cast<size_t>(n)), [=](sycl::id<1> id) {
+        int64_t flat = static_cast<int64_t>(id[0]);
+        int64_t byte_offset = 0;
+        int64_t tmp = flat;
+        for (int64_t d = ndims - 1; d >= 0; --d) {
+            int64_t coord = tmp % d_shape[d];
+            tmp /= d_shape[d];
+            byte_offset += coord * d_strides[d] * elem_size;
+        }
+        char* dst = dst_base + byte_offset;
+        const char* src = src_base + flat * elem_size;
+        for (int64_t b = 0; b < elem_size; ++b) dst[b] = src[b];
+    }).wait();
+    sycl::free(d_shape, q);
+    sycl::free(d_strides, q);
+}
+
+// ============================================================================
 // FP8 emulation helpers
 // ============================================================================
 static bool is_fp8(DType dt) {
@@ -3480,11 +3518,14 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
                         cols = tenzor::reshape(cols, {1, S_k});
                         Tensor causal_mask = tenzor::gt(cols.to(DType::Float64),
                                                          rows.to(DType::Float64));
+                        // Use where-based selection rather than scores + mask*(-inf):
+                        // for KEPT positions mask is 0.0 and 0.0 * -inf = NaN under
+                        // IEEE-754, which would poison every kept score before
+                        // softmax. where() selects -inf only where the mask is true.
                         Tensor neg_inf = tenzor::full(scores_shape,
                             -std::numeric_limits<double>::infinity(),
                             scores.dtype(), scores.device());
-                        scores = tenzor::add(scores,
-                                              tenzor::mul(causal_mask.to(scores.dtype()), neg_inf));
+                        scores = tenzor::where(causal_mask, neg_inf, scores);
                     }
                     NewOpAttributes sm_attrs;
                     sm_attrs.set(AttrKey::Dim, static_cast<int64_t>(-1));
@@ -3711,10 +3752,13 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
             Tensor half_t = tenzor::full({1}, static_cast<double>(half),
                                           abs_diff.dtype(), abs_diff.device());
             Tensor outside = tenzor::gt(abs_diff, half_t);
+            // where-based masking, not scores + outside*(-inf): for kept
+            // positions outside is 0.0 and 0.0 * -inf = NaN, which would
+            // corrupt every kept score before softmax.
             Tensor neg_inf = tenzor::full(scores_shape,
                 -std::numeric_limits<float>::infinity(),
                 scores.dtype(), scores.device());
-            scores = scores + (outside.to(scores.dtype()) * neg_inf);
+            scores = tenzor::where(outside, neg_inf, scores);
             NewOpAttributes sm_attrs;
             sm_attrs.set(AttrKey::Dim, static_cast<int64_t>(-1));
             std::vector<Tensor> sm_in = {scores};
@@ -3814,10 +3858,15 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
                 Tensor half_t = tenzor::full({1}, static_cast<double>(half),
                                               abs_diff.dtype(), abs_diff.device());
                 Tensor outside = tenzor::gt(abs_diff, half_t);
+                // where-based masking must mirror the forward exactly: kept
+                // positions keep their finite score (mask false), masked
+                // positions get -inf. The additive outside*(-inf) form yields
+                // 0.0 * -inf = NaN on kept positions and would propagate NaN
+                // into dQ/dK/dV.
                 Tensor neg_inf = tenzor::full(scores_shape,
                     -std::numeric_limits<float>::infinity(),
                     scores.dtype(), scores.device());
-                scores = scores + (outside.to(scores.dtype()) * neg_inf);
+                scores = tenzor::where(outside, neg_inf, scores);
             } else {
                 auto fn = tenzor::nn::find_registered_score_mod(score_mod_id);
                 if (!fn) {
@@ -5757,20 +5806,11 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
             } else {
                 auto dst_shape_v = dst_slice.shape();
                 auto dst_strides = dst_slice.strides();
-                int64_t ndims = static_cast<int64_t>(dst_shape_v.size());
-                std::vector<int64_t> coord(ndims, 0);
-                for (int64_t i = 0; i < n; i++) {
-                    int64_t byte_offset = 0;
-                    for (int64_t d = 0; d < ndims; d++) {
-                        byte_offset += coord[d] * dst_strides[d] * elem_size;
-                    }
-                    q.memcpy(dst_ptr + byte_offset, src_ptr + i * elem_size, elem_size).wait();
-                    for (int64_t d = ndims - 1; d >= 0; d--) {
-                        coord[d]++;
-                        if (coord[d] < dst_shape_v[d]) break;
-                        coord[d] = 0;
-                    }
-                }
+                strided_scatter_copy(
+                    q, dst_ptr, src_ptr,
+                    std::vector<int64_t>(dst_shape_v.begin(), dst_shape_v.end()),
+                    std::vector<int64_t>(dst_strides.begin(), dst_strides.end()),
+                    elem_size, n);
             }
             return {output};
         });
@@ -5809,20 +5849,11 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
             } else {
                 auto dst_shape_v = dst_slice.shape();
                 auto dst_strides = dst_slice.strides();
-                int64_t ndims = static_cast<int64_t>(dst_shape_v.size());
-                std::vector<int64_t> coord(ndims, 0);
-                for (int64_t i = 0; i < n; i++) {
-                    int64_t byte_offset = 0;
-                    for (int64_t d = 0; d < ndims; d++) {
-                        byte_offset += coord[d] * dst_strides[d] * elem_size;
-                    }
-                    q.memcpy(dst_ptr + byte_offset, src_ptr + i * elem_size, elem_size).wait();
-                    for (int64_t d = ndims - 1; d >= 0; d--) {
-                        coord[d]++;
-                        if (coord[d] < dst_shape_v[d]) break;
-                        coord[d] = 0;
-                    }
-                }
+                strided_scatter_copy(
+                    q, dst_ptr, src_ptr,
+                    std::vector<int64_t>(dst_shape_v.begin(), dst_shape_v.end()),
+                    std::vector<int64_t>(dst_strides.begin(), dst_strides.end()),
+                    elem_size, n);
             }
             return {output};
         });
@@ -5869,28 +5900,43 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
             }
 
             auto& q = oneapi_internal::get_queue(output.device().index);
+
+            // Precompute the destination element offset for every diagonal
+            // entry on the host (the diagonal is not a regular strided view, so
+            // strided_scatter_copy does not apply), then copy all of them in a
+            // single device kernel — src element b*diag_len+k -> dst offset[i].
+            // The previous code issued one blocking q.memcpy().wait() per entry.
+            const int64_t total = batch_size * diag_len;
+            std::vector<int64_t> dst_offsets(static_cast<size_t>(total));
             std::vector<int64_t> batch_coord(batch_dims.size(), 0);
+            const int64_t r0 = (offset >= 0) ? 0 : -offset;
+            const int64_t c0 = (offset >= 0) ? offset : 0;
+            int64_t pos = 0;
             for (int64_t b = 0; b < batch_size; b++) {
                 int64_t base = 0;
                 for (size_t i = 0; i < batch_dims.size(); i++) {
                     base += batch_coord[i] * strides[batch_dims[i]];
                 }
-
-                int64_t r0 = (offset >= 0) ? 0 : -offset;
-                int64_t c0 = (offset >= 0) ? offset : 0;
                 for (int64_t k = 0; k < diag_len; k++) {
-                    int64_t out_elem_offset = base + (r0 + k) * strides[dim1] + (c0 + k) * strides[dim2];
-                    int64_t src_elem_idx = b * diag_len + k;
-                    q.memcpy(out_ptr + out_elem_offset * elem_size,
-                             src_ptr + src_elem_idx * elem_size, elem_size).wait();
+                    dst_offsets[pos++] = base + (r0 + k) * strides[dim1] + (c0 + k) * strides[dim2];
                 }
-
                 for (int64_t i = static_cast<int64_t>(batch_dims.size()) - 1; i >= 0; i--) {
                     batch_coord[i]++;
                     if (batch_coord[i] < shape[batch_dims[i]]) break;
                     batch_coord[i] = 0;
                 }
             }
+
+            int64_t* d_offsets = sycl::malloc_device<int64_t>(static_cast<size_t>(total), q);
+            q.memcpy(d_offsets, dst_offsets.data(), total * sizeof(int64_t));
+            // In-order queue: the offset upload completes before the kernel.
+            q.parallel_for(sycl::range<1>(static_cast<size_t>(total)), [=](sycl::id<1> id) {
+                int64_t i = static_cast<int64_t>(id[0]);
+                char* dst = out_ptr + d_offsets[i] * elem_size;
+                const char* src = src_ptr + i * elem_size;
+                for (int64_t bb = 0; bb < elem_size; ++bb) dst[bb] = src[bb];
+            }).wait();
+            sycl::free(d_offsets, q);
             return {output};
         });
 

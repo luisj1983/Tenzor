@@ -10,6 +10,7 @@
 
 #include <cstdint>
 #include <cstddef>
+#include <vector>
 #include "int4_utils.hpp"
 
 namespace tenzor {
@@ -37,26 +38,43 @@ inline void fused_qlinear_dequant(
     float act_scale, float weight_scale) {
 
     const float combined_scale = act_scale * weight_scale;
+    const int64_t KN = K * N;
+    if (KN <= 0 || M <= 0) {
+        return;
+    }
 
+    // Pre-unpack the INT4 weight matrix into an int8 buffer [K x N] exactly
+    // once, instead of doing the nibble extract + sign-extend on every (m,n,k).
+    // Previously the unpack ran M times per element; now it runs a single pass,
+    // and the inner dot product becomes a plain int8 multiply-accumulate the
+    // compiler can auto-vectorize.
+    std::vector<int8_t> w_unpacked(static_cast<size_t>(KN));
+    {
+        const int64_t pairs = KN / 2;
+        for (int64_t p = 0; p < pairs; ++p) {
+            int8_t lo, hi;
+            unpack_int4(weights[p], lo, hi);
+            w_unpacked[static_cast<size_t>(2 * p)]     = lo;
+            w_unpacked[static_cast<size_t>(2 * p + 1)] = hi;
+        }
+        if (KN & 1) {
+            // Trailing odd nibble lives in the low half of the last byte.
+            int8_t lo, hi;
+            unpack_int4(weights[pairs], lo, hi);
+            w_unpacked[static_cast<size_t>(KN - 1)] = lo;
+        }
+    }
+
+    const int8_t* w_data = w_unpacked.data();
+
+    #pragma omp parallel for schedule(static) if(M * N * K > 4096)
     for (int64_t m = 0; m < M; ++m) {
+        const int8_t* act_row = act + m * K;
         for (int64_t n = 0; n < N; ++n) {
             int32_t acc = 0;
-
             for (int64_t k = 0; k < K; ++k) {
-                // Unpack INT4 weight on the fly
-                int64_t linear_idx = k * N + n;
-                int64_t byte_idx = linear_idx / 2;
-                uint8_t packed = weights[byte_idx];
-                int8_t w;
-                if (linear_idx % 2 == 0) {
-                    w = static_cast<int8_t>(packed & 0x0F);
-                    if (w & 0x08) w |= static_cast<int8_t>(0xF0);
-                } else {
-                    w = static_cast<int8_t>((packed >> 4) & 0x0F);
-                    if (w & 0x08) w |= static_cast<int8_t>(0xF0);
-                }
-
-                acc += static_cast<int32_t>(act[m * K + k]) * static_cast<int32_t>(w);
+                acc += static_cast<int32_t>(act_row[k]) *
+                       static_cast<int32_t>(w_data[k * N + n]);
             }
 
             float result = static_cast<float>(acc) * combined_scale;

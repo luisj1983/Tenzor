@@ -547,23 +547,38 @@ inline void lstm_forward(
     // Memory fence to ensure all prior operations are complete
     std::atomic_thread_fence(std::memory_order_seq_cst);
 
-    // Validate memory is accessible by reading from each buffer
-    // This forces page faults before MKL threads access the memory
-    volatile float check_input = input[0];
-    volatile float check_input_last = input[(seq_len * batch * input_size) - 1];
-    volatile float check_wih = W_ih[0];
-    volatile float check_wih_last = W_ih[(gate_size * input_size) - 1];
-    volatile float check_whh = W_hh[0];
-    volatile float check_whh_last = W_hh[(gate_size * hidden) - 1];
-    volatile float check_h0 = h0[0];
-    volatile float check_h0_last = h0[(batch * hidden) - 1];
-    volatile float check_c0 = c0[0];
-    volatile float check_c0_last = c0[(batch * hidden) - 1];
-    (void)check_input; (void)check_input_last;
-    (void)check_wih; (void)check_wih_last;
-    (void)check_whh; (void)check_whh_last;
-    (void)check_h0; (void)check_h0_last;
-    (void)check_c0; (void)check_c0_last;
+    // Validate memory is accessible by reading from each buffer.
+    // This forces page faults before MKL threads access the memory.
+    // Guard every read on a positive element count: a representable empty
+    // tensor (any dimension == 0) would otherwise index [-1] on a zero-length
+    // buffer (negative OOB read / UB).
+    const int64_t input_count = seq_len * batch * input_size;
+    const int64_t wih_count   = gate_size * input_size;
+    const int64_t whh_count   = gate_size * hidden;
+    const int64_t state_count = batch * hidden;
+    if (input_count > 0) {
+        volatile float check_input = input[0];
+        volatile float check_input_last = input[input_count - 1];
+        (void)check_input; (void)check_input_last;
+    }
+    if (wih_count > 0) {
+        volatile float check_wih = W_ih[0];
+        volatile float check_wih_last = W_ih[wih_count - 1];
+        (void)check_wih; (void)check_wih_last;
+    }
+    if (whh_count > 0) {
+        volatile float check_whh = W_hh[0];
+        volatile float check_whh_last = W_hh[whh_count - 1];
+        (void)check_whh; (void)check_whh_last;
+    }
+    if (state_count > 0) {
+        volatile float check_h0 = h0[0];
+        volatile float check_h0_last = h0[state_count - 1];
+        volatile float check_c0 = c0[0];
+        volatile float check_c0_last = c0[state_count - 1];
+        (void)check_h0; (void)check_h0_last;
+        (void)check_c0; (void)check_c0_last;
+    }
 
     // Thread-local cached buffers for LSTM workspace
     // This avoids repeated allocation overhead in the hot path

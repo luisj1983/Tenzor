@@ -3050,9 +3050,9 @@ auto rrelu_kernel(const Tensor& input, float lower, float upper, bool training, 
         float* out_ptr = get_data_ptr<float>(output);
 
         if (training) {
-            // Use a seed from host clock for per-element random slopes
-            uint64_t seed = static_cast<uint64_t>(
-                std::chrono::high_resolution_clock::now().time_since_epoch().count());
+            // Use the global RNG seed (respects manual_seed) for per-element
+            // random slopes, matching dropout_kernel and PyTorch reproducibility.
+            uint64_t seed = tenzor::get_global_seed();
 
             queue.parallel_for<RReLUTrainKernelFloat32>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
                 float x = in_ptr[idx];

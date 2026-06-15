@@ -145,6 +145,51 @@ auto is_int_dtype(::tenzor::DType d) -> bool {
            d == DType::UInt32 || d == DType::UInt64 || d == DType::Bool;
 }
 
+/// Emit the true representable minimum (want_max=false) or maximum
+/// (want_max=true) of an integer dtype as a decimal string. Used for
+/// max-reduction init values and saturating non-finite clamp bounds, both of
+/// which must stay inside the result dtype's range (a too-large/invalid splat
+/// constant fails MLIR parsing, and 32-bit literals are non-minimal for Int64).
+auto int_dtype_extreme_literal(::tenzor::DType d, bool want_max) -> std::string {
+    using ::tenzor::DType;
+    switch (d) {
+        case DType::Int8:
+            return std::to_string(want_max
+                       ? std::numeric_limits<int8_t>::max()
+                       : std::numeric_limits<int8_t>::min());
+        case DType::Int16:
+            return std::to_string(want_max
+                       ? std::numeric_limits<int16_t>::max()
+                       : std::numeric_limits<int16_t>::min());
+        case DType::Int32:
+            return std::to_string(want_max
+                       ? std::numeric_limits<int32_t>::max()
+                       : std::numeric_limits<int32_t>::min());
+        case DType::Int64:
+            return std::to_string(want_max
+                       ? std::numeric_limits<int64_t>::max()
+                       : std::numeric_limits<int64_t>::min());
+        case DType::UInt8:
+            return std::to_string(want_max
+                       ? std::numeric_limits<uint8_t>::max() : 0u);
+        case DType::UInt16:
+            return std::to_string(want_max
+                       ? std::numeric_limits<uint16_t>::max() : 0u);
+        case DType::UInt32:
+            return std::to_string(want_max
+                       ? std::numeric_limits<uint32_t>::max() : 0u);
+        case DType::UInt64:
+            return want_max
+                       ? std::to_string(std::numeric_limits<uint64_t>::max())
+                       : std::string("0");
+        case DType::Bool:
+            return want_max ? "true" : "false";
+        default:
+            throw std::runtime_error(
+                "GraphToMLIR: int_dtype_extreme_literal: non-integer DType");
+    }
+}
+
 /// Produce a textual `dense<scalar>` literal for a scalar value of the
 /// given dtype, matching the syntax StableHLO accepts as a splat constant.
 auto scalar_literal(double value, ::tenzor::DType d) -> std::string {
@@ -161,7 +206,12 @@ auto scalar_literal(double value, ::tenzor::DType d) -> std::string {
         return s.str();
     }
     if (is_int_dtype(d)) {
-        // Integer constants: emit as int literal (no decimal).
+        // Integer constants: emit as int literal (no decimal). Guard against
+        // non-finite inputs (e.g. ±inf clamp defaults) before the cast, which
+        // would otherwise be UB per [conv.fpint]; saturate to the dtype range.
+        if (!std::isfinite(value)) {
+            return int_dtype_extreme_literal(d, /*want_max=*/value > 0.0);
+        }
         s << static_cast<long long>(value);
         return s.str();
     }
@@ -533,17 +583,44 @@ auto handle_clamp(LoweringContext& ctx,
         max_name = ctx.name_for(node.inputs()[2]->id());
     } else if (node.inputs().size() == 1) {
         x_name = ctx.name_for(node.inputs()[0]->id());
-        float lo = get_attr_float(node, {"min"},
-                                  -std::numeric_limits<float>::infinity());
-        float hi = get_attr_float(node, {"max"},
-                                  std::numeric_limits<float>::infinity());
+        const bool has_lo = node.has_attr("min");
+        const bool has_hi = node.has_attr("max");
+        // For a missing bound, use the dtype's representable extreme rather than
+        // a float infinity: for integer dtypes scalar_literal cannot represent
+        // ±inf, and even for floats we want a valid in-dtype splat constant.
+        std::string lo_lit;
+        if (has_lo) {
+            lo_lit = scalar_literal(node.get_attr("min"), d);
+        } else if (is_int_dtype(d)) {
+            lo_lit = int_dtype_extreme_literal(d, /*want_max=*/false);
+        } else {
+            // -inf as the dtype's IEEE bit pattern.
+            switch (d) {
+                case ::tenzor::DType::Float64: lo_lit = "0xFFF0000000000000"; break;
+                case ::tenzor::DType::Float16: lo_lit = "0xFC00"; break;
+                case ::tenzor::DType::BFloat16: lo_lit = "0xFF80"; break;
+                default: lo_lit = "0xFF800000"; break;  // Float32
+            }
+        }
+        std::string hi_lit;
+        if (has_hi) {
+            hi_lit = scalar_literal(node.get_attr("max"), d);
+        } else if (is_int_dtype(d)) {
+            hi_lit = int_dtype_extreme_literal(d, /*want_max=*/true);
+        } else {
+            // +inf as the dtype's IEEE bit pattern.
+            switch (d) {
+                case ::tenzor::DType::Float64: hi_lit = "0x7FF0000000000000"; break;
+                case ::tenzor::DType::Float16: hi_lit = "0x7C00"; break;
+                case ::tenzor::DType::BFloat16: hi_lit = "0x7F80"; break;
+                default: hi_lit = "0x7F800000"; break;  // Float32
+            }
+        }
         auto lo_name = ctx.fresh_name();
         auto hi_name = ctx.fresh_name();
-        emit_stablehlo_splat_constant(body, lo_name, scalar_literal(lo, d),
-                                      shape, d);
+        emit_stablehlo_splat_constant(body, lo_name, lo_lit, shape, d);
         body << '\n';
-        emit_stablehlo_splat_constant(body, hi_name, scalar_literal(hi, d),
-                                      shape, d);
+        emit_stablehlo_splat_constant(body, hi_name, hi_lit, shape, d);
         body << '\n';
         min_name = lo_name;
         max_name = hi_name;
@@ -773,9 +850,9 @@ auto handle_max(LoweringContext& ctx,
     const auto& out_val = node.outputs()[0];
     auto [dims, keepdim] = resolve_reduce_dims(node, in_val->shape(),
                                                 out_val->shape());
-    // -inf init for float (hex bit pattern). For integers fall back to a
-    // very-negative integer; backing dtypes wider than int32 still get a
-    // valid (just non-minimal) lower bound.
+    // -inf init for float (hex bit pattern). For integers use the true
+    // per-dtype minimum (0 for unsigned), since a 32-bit literal is invalid
+    // for unsigned result dtypes and non-minimal for Int64.
     std::string init_lit;
     const auto d = out_val->dtype();
     if (d == ::tenzor::DType::Float32) {
@@ -789,7 +866,7 @@ auto handle_max(LoweringContext& ctx,
     } else if (is_float_dtype(d)) {
         init_lit = "0xFF800000";  // fallback
     } else {
-        init_lit = "-2147483648";
+        init_lit = int_dtype_extreme_literal(d, /*want_max=*/false);
     }
     auto out_name = emit_reduce_with_keepdim(
         ctx, body, ctx.name_for(in_val->id()), in_val->shape(),
@@ -1564,8 +1641,13 @@ auto handle_avg_pool2d(LoweringContext& ctx,
 }
 
 /// AdaptiveAvgPool2d: compute kernel/stride to bring (H_in, W_in) →
-/// (H_out, W_out). Uses the standard formula stride = floor(H_in/H_out),
-/// kernel = H_in - (H_out - 1) * stride.
+/// (H_out, W_out). Uses a single uniform window stride = H_in/H_out,
+/// kernel = H_in - (H_out - 1) * stride. This only matches PyTorch's
+/// per-output-cell windows (start=floor(i*H_in/H_out),
+/// end=ceil((i+1)*H_in/H_out)) when the input extent is an exact multiple of
+/// the output extent; otherwise the cell sizes/divisors vary per position and
+/// a uniform window silently diverges from eager. We therefore require exact
+/// divisibility and throw a clear error for the non-divisible case.
 auto handle_adaptive_avg_pool2d(LoweringContext& ctx,
                                 const ::tenzor::jit::Node& node,
                                 std::ostream& body) -> void {
@@ -1584,8 +1666,22 @@ auto handle_adaptive_avg_pool2d(LoweringContext& ctx,
     const auto d = out_val->dtype();
     const int64_t H_in = xs[2], W_in = xs[3];
     const int64_t H_out = os[2], W_out = os[3];
-    const int64_t sh = H_out > 0 ? H_in / H_out : H_in;
-    const int64_t sw = W_out > 0 ? W_in / W_out : W_in;
+    if (H_out <= 0 || W_out <= 0) {
+        throw std::runtime_error(
+            "GraphToMLIR: AdaptiveAvgPool2d requires positive output size");
+    }
+    if (H_in % H_out != 0 || W_in % W_out != 0) {
+        throw std::runtime_error(
+            "GraphToMLIR: AdaptiveAvgPool2d with non-divisible output size "
+            "(H_in=" + std::to_string(H_in) + ", H_out=" +
+            std::to_string(H_out) + ", W_in=" + std::to_string(W_in) +
+            ", W_out=" + std::to_string(W_out) +
+            ") is not supported by the JIT lowering; the uniform-window fast "
+            "path only matches eager when H_in/W_in are exact multiples of "
+            "H_out/W_out");
+    }
+    const int64_t sh = H_in / H_out;
+    const int64_t sw = W_in / W_out;
     const int64_t kh = H_in - (H_out - 1) * sh;
     const int64_t kw = W_in - (W_out - 1) * sw;
 

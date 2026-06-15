@@ -59,12 +59,12 @@ auto NeuralNetwork::train_step(const Variable& input, const Variable& target) ->
     const auto& loss_tensor = loss.tensor();
     if (loss_tensor.numel() == 1) {
         // Scalar loss - extract directly
-        return loss_tensor.item<float>();
+        return loss_tensor.to(DType::Float32).item<float>();
     } else {
         // Multi-element loss - compute mean using dispatched reduction
         // (safe for GPU tensors — avoids invalid data_ptr() access on device memory)
         auto mean_tensor = tenzor::mean(loss_tensor);
-        return mean_tensor.item<float>();
+        return mean_tensor.to(DType::Float32).item<float>();
     }
 }
 
@@ -88,11 +88,11 @@ auto NeuralNetwork::eval_step(const Variable& input, const Variable& target) -> 
     const auto& loss_tensor = loss.tensor();
     if (loss_tensor.numel() == 1) {
         // Scalar loss - extract directly
-        return loss_tensor.item<float>();
+        return loss_tensor.to(DType::Float32).item<float>();
     } else {
         // Multi-element loss - compute mean using dispatched reduction
         auto mean_tensor = tenzor::mean(loss_tensor);
-        return mean_tensor.item<float>();
+        return mean_tensor.to(DType::Float32).item<float>();
     }
 }
 
@@ -187,7 +187,7 @@ auto NeuralNetwork::fit(DataLoader& train_loader,
             for (auto& metric : metrics_) {
                 auto value = metric->compute();
                 std::cout << " " << metric->name() << "="
-                          << std::fixed << std::setprecision(4) << value.item<float>();
+                          << std::fixed << std::setprecision(4) << value.to(DType::Float32).item<float>();
                 metric->reset();
             }
             std::cout << std::endl;

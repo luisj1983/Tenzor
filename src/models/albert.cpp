@@ -152,8 +152,8 @@ auto AlbertPooler::forward_impl(const Variable& hidden_states) -> Variable {
     // Use tensor slicing instead of manual memory copies for device compatibility
 
     // Slice first token: [batch, seq_len, hidden_size] -> [batch, 1, hidden_size] -> [batch, hidden_size]
-    auto first_token_tensor = hidden_states.tensor().slice(1, 0, 1).squeeze(1);
-    Variable first_token(first_token_tensor, hidden_states.requires_grad());
+    // Use autograd-aware slice/squeeze so the grad_fn chain back into the encoder/embeddings is preserved.
+    auto first_token = tenzor::squeeze(tenzor::slice(hidden_states, 1, 0, 1), 1);
 
     // Apply linear transformation and tanh activation
     auto pooled = dense_->forward(first_token);

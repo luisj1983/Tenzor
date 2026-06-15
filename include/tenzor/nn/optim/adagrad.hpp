@@ -143,19 +143,19 @@ public:
     /**
      * @brief Zero all parameter gradients (QQ.14: see Optimizer::zero_grad).
      */
-    auto zero_grad(bool set_to_none = true) -> void;
+    auto zero_grad(bool set_to_none = true) -> void override;
 
     /**
      * @brief Set new learning rate
      * @param lr New learning rate
      */
-    auto set_lr(double lr) -> void;
+    auto set_lr(double lr) -> void override;
 
     /**
      * @brief Get current learning rate
      * @return Current learning rate (after decay)
      */
-    auto get_lr() const -> double;
+    auto get_lr() const -> double override;
 
     /**
      * @brief Get optimizer state for serialization

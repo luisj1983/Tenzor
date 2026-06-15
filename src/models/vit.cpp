@@ -157,25 +157,26 @@ auto ViTEmbeddings::forward_impl(const Variable& pixel_values) -> Variable {
     auto& cls_token = *parameters_["cls_token"];
 
     // Expand [CLS] token for batch: [1, 1, hidden_size] -> [batch, 1, hidden_size]
-    // We need to repeat the [CLS] token for each sample in the batch
-    // Use tensor operations to support both CPU and GPU devices
+    // We must keep this in the autograd graph so the learnable cls_token_ parameter
+    // actually receives gradients. cls_token is a registered leaf (grad_fn() == nullptr),
+    // so a tensor-level repeat + Variable(...) leaf would disconnect it from backward.
+    Variable cls_var = cls_token;
 
-    // First, ensure cls_token is on the same device and dtype as the input
-    Tensor cls_tensor = cls_token.tensor();
-    if (cls_tensor.device() != device) {
-        cls_tensor = cls_tensor.to(device);
+    // Ensure cls_token is on the same device and dtype as the input. Module::to()
+    // normally keeps these in sync, so these branches are usually no-ops; when they
+    // do fire we rewrap (device/dtype conversion is not part of the differentiable
+    // path here, the parameter itself is the leaf that must receive gradients).
+    if (cls_var.tensor().device() != device) {
+        cls_var = Variable(cls_var.tensor().to(device), cls_var.requires_grad());
     }
-    if (cls_tensor.dtype() != dtype) {
-        cls_tensor = cls_tensor.to(dtype);
+    if (cls_var.tensor().dtype() != dtype) {
+        cls_var = Variable(cls_var.tensor().to(dtype), cls_var.requires_grad());
     }
 
-    // Expand the [CLS] token to batch size using repeat (tensor-level op)
+    // Expand the [CLS] token to batch size using the autograd-aware repeat so the
+    // grad_fn chain back to cls_token_ is preserved.
     // [1, 1, hidden_size] -> [batch, 1, hidden_size]
-    Tensor cls_expanded = tenzor::repeat(cls_tensor, {batch_size, 1, 1});
-    Variable cls_tokens(cls_expanded, cls_token.requires_grad());
-    if (cls_token.grad_fn()) {
-        cls_tokens.set_grad_fn(cls_token.grad_fn());
-    }
+    Variable cls_tokens = tenzor::repeat(cls_var, {batch_size, 1, 1});
 
     // Concatenate [CLS] token with patch embeddings using autograd cat
     // This maintains the gradient chain for proper backpropagation

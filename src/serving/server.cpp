@@ -124,7 +124,21 @@ auto DynamicBatcher::execute_batch(
             // Batch multiple requests: concatenate along dim 0, single forward, split
             std::vector<Tensor> inputs;
             inputs.reserve(batch.size());
+            // Record each request's leading-dim row count BEFORE cat so the
+            // batched output can be split back by per-request section sizes.
+            // A request may legitimately carry >1 row (a client-side batch); a
+            // fixed split_size=1 would mis-map rows to requests, dropping rows
+            // or raising a spurious split mismatch.
+            std::vector<int64_t> row_counts;
+            row_counts.reserve(batch.size());
             for (auto& req : batch) {
+                const auto& in_shape = req->input.shape();
+                if (in_shape.empty()) {
+                    throw std::runtime_error(
+                        "DynamicBatcher: request input must have at least one "
+                        "(batch) dimension");
+                }
+                row_counts.push_back(in_shape[0]);
                 inputs.push_back(req->input);
             }
 
@@ -135,9 +149,10 @@ auto DynamicBatcher::execute_batch(
             tenzor::Variable batched_var(batched_input, false);
             auto batched_output = model_->forward(batched_var);
 
-            // Split output back into individual results
-            auto split_outputs = tenzor::split(batched_output.tensor(),
-                                               /*split_size=*/1, /*dim=*/0);
+            // Split the batched output by each request's actual row count so
+            // every request gets its full sub-tensor back.
+            auto split_outputs = tenzor::split_with_sizes(
+                batched_output.tensor(), row_counts, /*dim=*/0);
             for (size_t i = 0; i < batch.size(); ++i) {
                 if (i < split_outputs.size()) {
                     batch[i]->result.set_value(split_outputs[i]);
@@ -666,8 +681,18 @@ auto InferenceServer::serve_loop() -> void {
                                 : fs::path(config_.model_repository_path);
             fs::path root_canon = fs::weakly_canonical(root);
             fs::path resolved = fs::weakly_canonical(root / requested);
-            const std::string rc = root_canon.string();
-            if (resolved.string().compare(0, rc.size(), rc) != 0) {
+            // A raw string-prefix compare has no path-separator boundary, so a
+            // root of "/srv/models" would accept "/srv/models-evil/x" or
+            // "/srv/modelsX". Use fs::relative and reject if it escapes (empty,
+            // or a first component of ".."), which also accounts for symlinks
+            // resolved by weakly_canonical above.
+            std::error_code ec;
+            fs::path rel = fs::relative(resolved, root_canon, ec);
+            // Containment holds iff the relative path is non-empty and its FIRST
+            // component is not "..". (rel == "." means resolved == root_canon.)
+            bool escapes = ec || rel.empty() ||
+                           (rel.begin() != rel.end() && *rel.begin() == "..");
+            if (escapes) {
                 json_error(res, 400, "model_path escapes the model repository");
                 return;
             }
@@ -851,6 +876,13 @@ auto InferenceServer::serve_loop() -> void {
         double fraction_b = 0.1;
         if (body.contains("fraction_b") && body["fraction_b"].is_number()) {
             fraction_b = body["fraction_b"].get<double>();
+        }
+        // fraction_b is compared against a uniform [0,1) draw in select_model,
+        // so it must lie in [0,1]; a value outside that range silently routes
+        // all traffic to one model. Reject it instead of accepting garbage.
+        if (!(fraction_b >= 0.0 && fraction_b <= 1.0)) {
+            json_error(res, 400, "fraction_b must be in the range [0, 1]");
+            return;
         }
         traffic_router_.set_experiment(name, {model_a, model_b, fraction_b});
         res.set_content(json{{"success",true}}.dump(), "application/json");

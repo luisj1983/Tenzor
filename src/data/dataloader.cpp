@@ -16,8 +16,7 @@ DataLoader::DataLoader(std::shared_ptr<Dataset> dataset, const DataLoaderConfig&
       stop_workers_(false),
       epoch_done_(false),
       next_batch_idx_(0),
-      active_workers_(0),
-      new_epoch_ready_(false) {
+      active_workers_(0) {
 
     if (!dataset_) {
         throw std::invalid_argument("Dataset cannot be null");
@@ -57,8 +56,7 @@ DataLoader::DataLoader(std::shared_ptr<Dataset> dataset,
       stop_workers_(false),
       epoch_done_(false),
       next_batch_idx_(0),
-      active_workers_(0),
-      new_epoch_ready_(false) {
+      active_workers_(0) {
 
     if (!dataset_) {
         throw std::invalid_argument("Dataset cannot be null");
@@ -129,74 +127,31 @@ auto DataLoader::collate_samples(const std::vector<std::pair<Tensor, Tensor>>& s
     const auto& first_input = samples[0].first;
     const auto& first_target = samples[0].second;
 
-    // Create batch shape: [batch_size, ...]
-    auto input_shape_span = first_input.shape();
-    auto target_shape_span = first_target.shape();
-
-    // Convert spans to vectors so we can insert batch dimension
-    std::vector<int64_t> input_shape(input_shape_span.begin(), input_shape_span.end());
-    std::vector<int64_t> target_shape(target_shape_span.begin(), target_shape_span.end());
-
-    input_shape.insert(input_shape.begin(), samples.size());
-    target_shape.insert(target_shape.begin(), samples.size());
-
-    // Create batch tensors
-    Tensor batch_inputs = zeros(input_shape, first_input.dtype());
-    Tensor batch_targets = zeros(target_shape, first_target.dtype());
-
-    // Stack samples into batch
-    for (size_t i = 0; i < samples.size(); ++i) {
-        const auto& [input, target] = samples[i];
-
-        // Validate shapes match
-        auto input_shape = input.shape();
-        auto first_input_shape = first_input.shape();
-        bool shapes_match = (input_shape.size() == first_input_shape.size());
-        if (shapes_match) {
-            for (size_t j = 0; j < input_shape.size(); ++j) {
-                if (input_shape[j] != first_input_shape[j]) {
-                    shapes_match = false;
-                    break;
-                }
-            }
-        }
-        if (!shapes_match) {
-            throw std::runtime_error("All input samples must have same shape");
-        }
-
-        auto target_shape = target.shape();
-        auto first_target_shape = first_target.shape();
-        shapes_match = (target_shape.size() == first_target_shape.size());
-        if (shapes_match) {
-            for (size_t j = 0; j < target_shape.size(); ++j) {
-                if (target_shape[j] != first_target_shape[j]) {
-                    shapes_match = false;
-                    break;
-                }
-            }
-        }
-        if (!shapes_match) {
-            throw std::runtime_error("All target samples must have same shape");
-        }
-
-        // The stack-based path below is the canonical implementation —
-        // unsqueeze each sample to add a leading batch dim, then concat
-        // along that dim. The earlier "implement slice assignment"
-        // comment referred to an in-place alternative that was never
-        // wired in (and isn't needed: stack+cat is already O(N) and
-        // avoids the mutable-Tensor-view machinery slice assignment
-        // would require).
-    }
-
+    // Stack samples into batch: unsqueeze each sample to add a leading batch
+    // dim, then concat along that dim. cat() validates that all sections have
+    // matching shapes, so no separate pre-validation pass is needed here; we
+    // keep a cheap rank check only to surface a clearer error message. The
+    // stack+cat path is already O(N) and avoids the mutable-Tensor-view
+    // machinery an in-place slice-assignment path would require.
     std::vector<Tensor> input_list, target_list;
+    input_list.reserve(samples.size());
+    target_list.reserve(samples.size());
+    const size_t input_rank = first_input.shape().size();
+    const size_t target_rank = first_target.shape().size();
     for (const auto& [input, target] : samples) {
+        if (input.shape().size() != input_rank) {
+            throw std::runtime_error("All input samples must have same rank");
+        }
+        if (target.shape().size() != target_rank) {
+            throw std::runtime_error("All target samples must have same rank");
+        }
         input_list.push_back(unsqueeze(input, 0));
         target_list.push_back(unsqueeze(target, 0));
     }
 
-    // Concatenate along batch dimension
-    batch_inputs = cat(input_list, 0);
-    batch_targets = cat(target_list, 0);
+    // Concatenate along batch dimension (cat() validates per-section shapes).
+    Tensor batch_inputs = cat(input_list, 0);
+    Tensor batch_targets = cat(target_list, 0);
 
     // Audit J8: real memory pinning via Storage::pin().
     //
@@ -242,6 +197,17 @@ void DataLoader::worker_thread([[maybe_unused]] size_t worker_id) {
     // distributed launchers should set them via set_worker_info() before
     // constructing the DataLoader, or the Python layer handles it.
     set_worker_info(info);
+
+    // Each persistent worker tracks the last epoch generation it processed.
+    // reset() bumps epoch_generation_ once per epoch; a worker only re-runs
+    // when it observes a generation it has not yet handled. This avoids the
+    // one-shot-bool lost-wakeup where a single worker clears the flag before
+    // its peers re-check the predicate.
+    uint64_t last_seen_generation;
+    {
+        std::unique_lock<std::mutex> lock(queue_mutex_);
+        last_seen_generation = epoch_generation_;
+    }
 
     try {
         do {
@@ -304,12 +270,15 @@ void DataLoader::worker_thread([[maybe_unused]] size_t worker_id) {
             // Persistent workers: wait for next epoch instead of exiting
             if (config_.persistent_workers && !stop_workers_) {
                 std::unique_lock<std::mutex> lock(queue_mutex_);
-                epoch_start_cv_.wait(lock, [this] {
-                    return stop_workers_ || new_epoch_ready_.load();
+                epoch_start_cv_.wait(lock, [this, last_seen_generation] {
+                    return stop_workers_ ||
+                           epoch_generation_ != last_seen_generation;
                 });
                 if (stop_workers_) break;
-                // Reset the flag only once (first worker to wake clears it)
-                new_epoch_ready_ = false;
+                // Record the new generation so this worker waits for the NEXT
+                // epoch on its following pass; every waiter is released exactly
+                // once per epoch.
+                last_seen_generation = epoch_generation_;
                 continue;
             }
         } while (config_.persistent_workers && !stop_workers_);
@@ -468,10 +437,11 @@ void DataLoader::reset() {
             next_batch_idx_ = 0;
             active_workers_ = config_.num_workers;
 
-            // Signal workers to start new epoch
+            // Signal workers to start new epoch: bump the generation counter
+            // once under the lock so all N waiters are released exactly once.
             {
                 std::lock_guard<std::mutex> lock(queue_mutex_);
-                new_epoch_ready_ = true;
+                ++epoch_generation_;
             }
             epoch_start_cv_.notify_all();
         } else {

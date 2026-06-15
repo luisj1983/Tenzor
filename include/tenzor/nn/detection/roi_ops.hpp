@@ -52,7 +52,10 @@ public:
      *                       (e.g., 1/16 if feature map is 16x downsampled)
      * @param sampling_ratio Number of sampling points per bin dimension
      *                       (0 = adaptive based on bin size)
-     * @param aligned Use aligned coordinates: (x2-x1)/(output_w-1) vs (x2-x1)/output_w
+     * @param aligned Use aligned coordinates: when true, ROI coordinates are
+     *                shifted by -0.5 pixel before binning (the bin size is always
+     *                (x2-x1)/output_w in both modes). This removes the half-pixel
+     *                misalignment between input and output sampling grids.
      *                (default: true, matches PyTorch aligned=True)
      */
     ROIAlign(int64_t output_h, int64_t output_w, double spatial_scale,

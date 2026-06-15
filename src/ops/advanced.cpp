@@ -720,6 +720,13 @@ static auto parse_einsum_equation(const std::string& equation)
         for (char c : inputs_str) {
             if (c != ',' && c != ' ') counts[c]++;
         }
+        // NumPy/PyTorch emit every single-occurrence label in canonical order
+        // (uppercase A-Z before lowercase a-z). Scanning only 'a'..'z' would
+        // drop a free uppercase label, which would then be summed away as a
+        // contraction label and yield the wrong output rank.
+        for (char c = 'A'; c <= 'Z'; ++c) {
+            if (counts.count(c) && counts[c] == 1) output_str += c;
+        }
         for (char c = 'a'; c <= 'z'; ++c) {
             if (counts.count(c) && counts[c] == 1) output_str += c;
         }
@@ -792,17 +799,89 @@ auto einsum_composed(const std::string& equation,
     }
 
     // General path: use the transpose-reshape-contract approach
-    // 1. Build label→dimension size mapping
-    std::unordered_map<char, int64_t> label_sizes;
+    // 0. Validate subscript ranks against tensor ranks before any rewriting.
     for (size_t t = 0; t < tensors.size(); ++t) {
-        auto shape = tensors[t].shape();
         if (input_subs[t].size() != static_cast<size_t>(tensors[t].ndim())) {
             throw std::invalid_argument("einsum: subscript '" + input_subs[t] +
                 "' has " + std::to_string(input_subs[t].size()) +
                 " labels but tensor has " + std::to_string(tensors[t].ndim()) + " dims");
         }
-        for (size_t d = 0; d < input_subs[t].size(); ++d) {
-            char label = input_subs[t][d];
+    }
+
+    // 0b. Collapse repeated labels *within a single* input subscript by
+    //     extracting the diagonal so every label maps to exactly one axis.
+    //     align_tensor below relies on sub.find()/all_labels.find() which only
+    //     return the first occurrence; without this, a subscript like "ii" or
+    //     "iij" would carry two axes for one label, and reshape() would request
+    //     fewer elements than present (size-mismatch throw) or silently contract
+    //     the wrong thing. Collapse two equal-sized axes (a<b, same label) by
+    //     moving them to the trailing two positions, flattening that NxN block,
+    //     and index_select-ing the k*(N+1) diagonal entries.
+    auto collapse_diagonal = [](Tensor t, std::string& sub) {
+        bool changed = true;
+        while (changed) {
+            changed = false;
+            for (size_t a = 0; a < sub.size() && !changed; ++a) {
+                for (size_t b = a + 1; b < sub.size(); ++b) {
+                    if (sub[a] != sub[b]) continue;
+                    auto shape = t.shape();
+                    const int64_t na = shape[a];
+                    const int64_t nb = shape[b];
+                    if (na != nb) {
+                        throw std::invalid_argument(
+                            "einsum: repeated label '" + std::string(1, sub[a]) +
+                            "' refers to axes of differing size");
+                    }
+                    const int64_t ndim = t.ndim();
+                    // Move axes a,b to the last two positions (b last, a second-to-last).
+                    std::vector<int64_t> src = {static_cast<int64_t>(a), static_cast<int64_t>(b)};
+                    std::vector<int64_t> dst = {ndim - 2, ndim - 1};
+                    Tensor moved = movedim(t, src, dst).contiguous();
+                    // Flatten the trailing NxN block to N*N, then pick the diagonal.
+                    auto mshape = moved.shape();
+                    std::vector<int64_t> flat_shape(mshape.begin(), mshape.end() - 2);
+                    flat_shape.push_back(na * nb);
+                    Tensor flat = reshape(moved, flat_shape);
+                    // Diagonal offsets within the flattened NxN block are
+                    // k*(N+1) for k in [0,N): the arithmetic sequence
+                    // [0, N+1, 2(N+1), ...] of N elements (step N+1).
+                    Tensor idx_t = arange(0.0,
+                                          static_cast<double>(na) * static_cast<double>(nb + 1),
+                                          static_cast<double>(nb + 1),
+                                          DType::Int64, t.device());
+                    Tensor picked = index_select(flat, static_cast<int64_t>(flat_shape.size()) - 1, idx_t);
+                    // picked now has the merged label as its last axis; rewrite sub:
+                    // remove positions a and b, append the single merged label.
+                    char label = sub[a];
+                    std::string new_sub;
+                    for (size_t i = 0; i < sub.size(); ++i) {
+                        if (i == a || i == b) continue;
+                        new_sub += sub[i];
+                    }
+                    new_sub += label;
+                    sub = new_sub;
+                    t = picked;
+                    changed = true;
+                    break;
+                }
+            }
+        }
+        return t;
+    };
+
+    std::vector<Tensor> work_tensors;
+    work_tensors.reserve(tensors.size());
+    std::vector<std::string> work_subs = input_subs;
+    for (size_t t = 0; t < tensors.size(); ++t) {
+        work_tensors.push_back(collapse_diagonal(tensors[t], work_subs[t]));
+    }
+
+    // 1. Build label→dimension size mapping
+    std::unordered_map<char, int64_t> label_sizes;
+    for (size_t t = 0; t < work_tensors.size(); ++t) {
+        auto shape = work_tensors[t].shape();
+        for (size_t d = 0; d < work_subs[t].size(); ++d) {
+            char label = work_subs[t][d];
             if (label_sizes.count(label)) {
                 if (label_sizes[label] != shape[d]) {
                     throw std::invalid_argument("einsum: dimension mismatch for label '" +
@@ -856,9 +935,9 @@ auto einsum_composed(const std::string& equation,
     };
 
     // 5. Align all tensors, multiply element-wise, reduce contraction dims
-    Tensor result = align_tensor(tensors[0], input_subs[0]);
-    for (size_t t = 1; t < tensors.size(); ++t) {
-        Tensor aligned = align_tensor(tensors[t], input_subs[t]);
+    Tensor result = align_tensor(work_tensors[0], work_subs[0]);
+    for (size_t t = 1; t < work_tensors.size(); ++t) {
+        Tensor aligned = align_tensor(work_tensors[t], work_subs[t]);
         result = mul(result, aligned);
     }
 

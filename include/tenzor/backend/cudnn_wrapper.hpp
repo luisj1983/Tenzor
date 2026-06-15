@@ -146,6 +146,17 @@ private:
     // Caller must hold `mu_`.
     void resize_locked(size_t new_size) {
         if (buffer_) {
+            // Use-after-free hazard: the pointer returned by a previous `get()`
+            // may still be referenced by an in-flight cuDNN kernel on another
+            // stream. The `mu_` mutex only serialises `get()`/`resize_locked()`
+            // — it does NOT keep the old buffer alive for the consuming
+            // kernel's duration. Freeing here while that kernel still reads the
+            // old pointer yields a use-after-free / wrong results. Retire the
+            // old allocation only after all in-flight device work that could be
+            // holding the pointer has completed. cudaDeviceSynchronize is the
+            // same reliably-correct hammer used in the destructor; resizes are
+            // rare (grow-only, with 25% headroom) so the cost is amortised.
+            cudaDeviceSynchronize();
             cudaFree(buffer_);
             buffer_ = nullptr;
         }
@@ -428,6 +439,7 @@ public:
             case DType::Float32: return CUDNN_DATA_FLOAT;
             case DType::Float64: return CUDNN_DATA_DOUBLE;
             case DType::Float16: return CUDNN_DATA_HALF;
+            case DType::BFloat16: return CUDNN_DATA_BFLOAT16;
             case DType::Int32: return CUDNN_DATA_INT32;
             default:
                 throw std::runtime_error("Unsupported dtype for cuDNN");

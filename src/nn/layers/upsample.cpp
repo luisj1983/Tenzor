@@ -2,6 +2,7 @@
 #include "tenzor/autograd/function.hpp"
 #include "tenzor/autograd/ops.hpp"
 #include "tenzor/ops/vision.hpp"
+#include <algorithm>
 #include <cmath>
 #include <stdexcept>
 
@@ -64,6 +65,11 @@ Upsample::Upsample(std::optional<std::vector<int64_t>> size,
         throw std::invalid_argument(
             "Upsample: only one of 'size' or 'scale_factor' should be provided");
     }
+    if (scale_factor_.has_value() && scale_factor_.value() <= 0.0) {
+        throw std::invalid_argument(
+            "Upsample: scale_factor must be positive, got " +
+            std::to_string(scale_factor_.value()));
+    }
     if (mode != "nearest" && mode != "bilinear" && mode != "trilinear") {
         throw std::invalid_argument(
             "Upsample: mode must be 'nearest', 'bilinear', or 'trilinear', got '" +
@@ -90,12 +96,13 @@ auto Upsample::forward_impl(const Variable& input) -> Variable {
     if (size_.has_value()) {
         target_size = size_.value();
     } else {
-        // Compute from scale_factor
+        // Compute from scale_factor; clamp to at least 1 so a small scale
+        // factor cannot collapse a spatial dimension to zero.
         double sf = scale_factor_.value();
         size_t num_spatial = ndim - 2;
         for (size_t i = 0; i < num_spatial; ++i) {
-            target_size.push_back(
-                static_cast<int64_t>(std::floor(shape[2 + i] * sf)));
+            target_size.push_back(std::max<int64_t>(
+                1, static_cast<int64_t>(std::floor(shape[2 + i] * sf))));
         }
     }
 

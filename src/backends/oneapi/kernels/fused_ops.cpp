@@ -1064,6 +1064,22 @@ auto fused_matmul_add_kernel(
     out_shape.push_back(m);
     out_shape.push_back(n);
 
+    // Count of batched matrices (product of all leading dims of A). For rank-2
+    // inputs this is 1. The kernels below launch range<3>(batch, m, n) and
+    // offset each operand by its per-batch matrix stride so the entire output
+    // buffer (batch*m*n) is filled — previously only the first matrix was
+    // written, leaving the rest of the buffer uninitialised for rank>2 inputs.
+    int64_t batch = 1;
+    for (size_t i = 0; i + 2 < a_shape.size(); ++i) {
+        batch *= a_shape[i];
+    }
+    // B may be a single shared matrix (rank-2) broadcast across the batch, or
+    // batched with its own leading dims. Detect a batched B by rank.
+    const bool b_batched = (b_shape.size() > 2);
+    const int64_t a_batch_stride = m * k;
+    const int64_t b_batch_stride = b_batched ? (k * n) : 0;
+    const int64_t out_batch_stride = m * n;
+
     Tensor output(out_shape, a.dtype(), a.device());
 
     if (a.dtype() == DType::Float32) {
@@ -1073,18 +1089,22 @@ auto fused_matmul_add_kernel(
         float* out_ptr = get_data_ptr<float>(output);
 
         queue.parallel_for<FusedMatmulAddKernelFloat32>(
-            sycl::range<2>(m, n),
-            [=](sycl::id<2> idx) {
-                int64_t i = idx[0];
-                int64_t j = idx[1];
+            sycl::range<3>(batch, m, n),
+            [=](sycl::id<3> idx) {
+                int64_t bt = idx[0];
+                int64_t i = idx[1];
+                int64_t j = idx[2];
+
+                const float* a_mat = a_ptr + bt * a_batch_stride;
+                const float* b_mat = b_ptr + bt * b_batch_stride;
 
                 float sum = 0.0f;
                 for (int64_t p = 0; p < k; ++p) {
-                    sum += a_ptr[i * k + p] * b_ptr[p * n + j];
+                    sum += a_mat[i * k + p] * b_mat[p * n + j];
                 }
 
-                // Add bias (broadcast along the m dimension)
-                out_ptr[i * n + j] = sum + bias_ptr[j];
+                // Add bias (broadcast along the m and batch dimensions)
+                out_ptr[bt * out_batch_stride + i * n + j] = sum + bias_ptr[j];
             }
         );
     }
@@ -1095,17 +1115,21 @@ auto fused_matmul_add_kernel(
         double* out_ptr = get_data_ptr<double>(output);
 
         queue.parallel_for<FusedMatmulAddKernelFloat64>(
-            sycl::range<2>(m, n),
-            [=](sycl::id<2> idx) {
-                int64_t i = idx[0];
-                int64_t j = idx[1];
+            sycl::range<3>(batch, m, n),
+            [=](sycl::id<3> idx) {
+                int64_t bt = idx[0];
+                int64_t i = idx[1];
+                int64_t j = idx[2];
+
+                const double* a_mat = a_ptr + bt * a_batch_stride;
+                const double* b_mat = b_ptr + bt * b_batch_stride;
 
                 double sum = 0.0;
                 for (int64_t p = 0; p < k; ++p) {
-                    sum += a_ptr[i * k + p] * b_ptr[p * n + j];
+                    sum += a_mat[i * k + p] * b_mat[p * n + j];
                 }
 
-                out_ptr[i * n + j] = sum + bias_ptr[j];
+                out_ptr[bt * out_batch_stride + i * n + j] = sum + bias_ptr[j];
             }
         );
     }
@@ -1116,17 +1140,22 @@ auto fused_matmul_add_kernel(
         sycl::half* out_ptr = get_data_ptr<sycl::half>(output);
 
         queue.parallel_for<FusedMatmulAddKernelFloat16>(
-            sycl::range<2>(m, n),
-            [=](sycl::id<2> idx) {
-                int64_t i = idx[0];
-                int64_t j = idx[1];
+            sycl::range<3>(batch, m, n),
+            [=](sycl::id<3> idx) {
+                int64_t bt = idx[0];
+                int64_t i = idx[1];
+                int64_t j = idx[2];
+
+                const sycl::half* a_mat = a_ptr + bt * a_batch_stride;
+                const sycl::half* b_mat = b_ptr + bt * b_batch_stride;
 
                 float sum = 0.0f;
                 for (int64_t p = 0; p < k; ++p) {
-                    sum += static_cast<float>(a_ptr[i * k + p]) *
-                           static_cast<float>(b_ptr[p * n + j]);
+                    sum += static_cast<float>(a_mat[i * k + p]) *
+                           static_cast<float>(b_mat[p * n + j]);
                 }
-                out_ptr[i * n + j] = sycl::half(sum + static_cast<float>(bias_ptr[j]));
+                out_ptr[bt * out_batch_stride + i * n + j] =
+                    sycl::half(sum + static_cast<float>(bias_ptr[j]));
             }
         );
     }
@@ -1137,17 +1166,22 @@ auto fused_matmul_add_kernel(
         uint16_t* out_ptr = get_data_ptr<uint16_t>(output);
 
         queue.parallel_for<FusedMatmulAddKernelBFloat16>(
-            sycl::range<2>(m, n),
-            [=](sycl::id<2> idx) {
-                int64_t i = idx[0];
-                int64_t j = idx[1];
+            sycl::range<3>(batch, m, n),
+            [=](sycl::id<3> idx) {
+                int64_t bt = idx[0];
+                int64_t i = idx[1];
+                int64_t j = idx[2];
+
+                const uint16_t* a_mat = a_ptr + bt * a_batch_stride;
+                const uint16_t* b_mat = b_ptr + bt * b_batch_stride;
 
                 float sum = 0.0f;
                 for (int64_t p = 0; p < k; ++p) {
-                    sum += bf16_to_f32(a_ptr[i * k + p]) *
-                           bf16_to_f32(b_ptr[p * n + j]);
+                    sum += bf16_to_f32(a_mat[i * k + p]) *
+                           bf16_to_f32(b_mat[p * n + j]);
                 }
-                out_ptr[i * n + j] = f32_to_bf16(sum + bf16_to_f32(bias_ptr[j]));
+                out_ptr[bt * out_batch_stride + i * n + j] =
+                    f32_to_bf16(sum + bf16_to_f32(bias_ptr[j]));
             }
         );
     }

@@ -119,7 +119,7 @@ PinnedMemoryAllocator::~PinnedMemoryAllocator() {
     // Free all pools
     for (auto& pool : pools_) {
         try {
-            free_cuda_pinned(pool.base_ptr);
+            free_cuda_pinned(pool.base_ptr, pool.size);
         } catch (...) {
             // Ignore errors during cleanup
         }
@@ -152,7 +152,7 @@ PinnedMemoryAllocator& PinnedMemoryAllocator::operator=(PinnedMemoryAllocator&& 
             block_map_.clear();
             for (auto& pool : pools_) {
                 try {
-                    free_cuda_pinned(pool.base_ptr);
+                    free_cuda_pinned(pool.base_ptr, pool.size);
                 } catch (...) {}
             }
         }
@@ -632,28 +632,33 @@ auto PinnedMemoryAllocator::allocate_cuda_pinned(size_t size) -> void* {
 #endif
 }
 
-auto PinnedMemoryAllocator::free_cuda_pinned(void* ptr) -> void {
+auto PinnedMemoryAllocator::free_cuda_pinned(void* ptr, size_t size) -> void {
     if (!ptr) {
         return;
     }
 
 #ifdef TENZOR_USE_CUDA
+    (void)size;
     cudaError_t error = cudaFreeHost(ptr);
     check_cuda_error(error, "cudaFreeHost");
 #else
-    // Mirror the non-CUDA allocation path: unlock then free.  We don't
-    // track the original `aligned_size` here so we munlock(ptr, 1)
-    // which the kernel treats as "unlock the page containing ptr"; on
-    // Linux munlock then walks the VMA to unlock the whole locked
-    // region (see mlock(2)).  This is the same pattern PyTorch's
-    // pin_memory uses.
+    // Mirror the non-CUDA allocation path: unlock the WHOLE region then free.
+    // allocate_cuda_pinned() locked [ptr, ptr+aligned_size) with
+    // mlock/VirtualLock, so we must unlock the same span here. munlock(2) only
+    // unlocks the pages in [addr, addr+len); passing len==1 unlocks just the
+    // first page and leaves the rest locked, slowly draining the
+    // RLIMIT_MEMLOCK budget when free() returns the region to the heap
+    // free-list instead of unmapping it. Recompute the same page-aligned size
+    // the allocation used so the unlock span matches the lock span exactly.
+    const size_t page_size = static_cast<size_t>(::sysconf(_SC_PAGESIZE));
+    const size_t aligned_size = (size + page_size - 1) / page_size * page_size;
 #if defined(_WIN32)
     // VirtualUnlock undoes the VirtualLock; VirtualFree(_, 0, RELEASE)
     // releases the reservation regardless of size.
-    ::VirtualUnlock(ptr, 1);
+    ::VirtualUnlock(ptr, aligned_size);
     ::VirtualFree(ptr, 0, MEM_RELEASE);
 #else
-    ::munlock(ptr, 1);
+    ::munlock(ptr, aligned_size);
     std::free(ptr);
 #endif
 #endif
