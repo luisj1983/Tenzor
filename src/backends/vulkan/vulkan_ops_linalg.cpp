@@ -464,7 +464,7 @@ auto VulkanBackend::dispatchLinalgDet(const Tensor& input) -> Tensor {
         insertComputeOnlyBarrier(cmd);
         endSingleTimeCommands(cmd, device_id);
     } else {
-        // Tiled path (n > 128): blocked LU, then compute det from diagonal
+        // Tiled path (n > MAX_SMALL_LINALG_SIZE, i.e. n > 32): blocked LU, then compute det from diagonal
         Tensor A = dispatchClone(input.contiguous());
         Tensor pivots({batch_size, n}, DType::Int32, input.device());
 
@@ -576,7 +576,7 @@ auto VulkanBackend::dispatchLinalgInv(const Tensor& input) -> Tensor {
         return output;
     }
 
-    // Tiled path (n > 128): LU factorize on GPU, then backsolve on GPU via TRSM shader
+    // Tiled path (n > MAX_SMALL_LINALG_SIZE, i.e. n > 32): LU factorize on GPU, then backsolve on GPU via TRSM shader
     Tensor A = dispatchClone(input.contiguous());
     Tensor pivots({batch_size, n}, DType::Int32, input.device());
 
@@ -714,7 +714,7 @@ auto VulkanBackend::dispatchLinalgSolve(const Tensor& a, const Tensor& b) -> Ten
         return output;
     }
 
-    // Tiled path (n > 128): LU factorize on GPU, backsolve on GPU via TRSM shader
+    // Tiled path (n > MAX_SMALL_LINALG_SIZE, i.e. n > 32): LU factorize on GPU, backsolve on GPU via TRSM shader
     Tensor A = dispatchClone(a.contiguous());
     Tensor pivots({batch_size, n}, DType::Int32, a.device());
 
@@ -826,7 +826,7 @@ auto VulkanBackend::dispatchLinalgCholesky(const Tensor& input, bool upper) -> T
         return output;
     }
 
-    // Tiled path (n > 128): blocked Cholesky factorization
+    // Tiled path (n > MAX_SMALL_LINALG_SIZE, i.e. n > 32): blocked Cholesky factorization
     Tensor A = dispatchClone(input.contiguous());
 
     runBlockedCholesky(A, n, batch_size, device_id, is_f64, is_f16);

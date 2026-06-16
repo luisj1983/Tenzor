@@ -298,6 +298,25 @@ auto LazyGraph::execute_node(const std::shared_ptr<LazyNode>& node) -> Tensor {
         return tenzor::matmul(input_tensors[0], input_tensors[1]);
     }
 
+    // Mirror eager elementwise binary ops exactly. lazy::add/sub/mul/div record
+    // the output dtype via promote_types() (binary_lazy_op), but raw backend
+    // dispatch (e.g. cpu::add_kernel) performs NO dtype promotion and rejects
+    // non-contiguous inputs (validate_elementwise throws on dtype mismatch and
+    // on non-contiguous tensors). The eager helpers tenzor::add/sub/mul/div
+    // promote operands and contiguify before dispatch, so route through them to
+    // make materialization match both the recorded node dtype and the eager
+    // result for mixed-dtype (e.g. f16 + f32) and transpose-then-elementwise
+    // (non-contiguous) patterns.
+    if (input_tensors.size() == 2) {
+        switch (op) {
+            case OpId::Add: return tenzor::add(input_tensors[0], input_tensors[1]);
+            case OpId::Sub: return tenzor::sub(input_tensors[0], input_tensors[1]);
+            case OpId::Mul: return tenzor::mul(input_tensors[0], input_tensors[1]);
+            case OpId::Div: return tenzor::div(input_tensors[0], input_tensors[1]);
+            default: break;
+        }
+    }
+
     try {
         auto outputs = tenzor::dispatch(op, input_tensors, node->attrs());
         if (outputs.empty()) {

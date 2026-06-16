@@ -96,9 +96,12 @@ auto BCELoss::forward(const Variable& input, const Variable& target) -> Variable
         case Reduction::Sum:
             reduced = sum(loss);
             break;
-        case Reduction::BatchMean:
-            reduced = sum(loss) / static_cast<float>(loss.tensor().shape()[0]);
+        case Reduction::BatchMean: {
+            const auto& shp = loss.tensor().shape();
+            int64_t bs = (!shp.empty()) ? shp[0] : 0;
+            reduced = (bs > 0) ? (sum(loss) / static_cast<float>(bs)) : mean(loss);
             break;
+        }
     }
     if (needs_upcast) {
         reduced = tenzor::nn::variable_cast(reduced, orig_dtype);

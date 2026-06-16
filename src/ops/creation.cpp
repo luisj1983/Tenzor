@@ -89,6 +89,8 @@ static auto dtype_to_string(DType dtype) -> std::string {
         case DType::Complex128: return "complex128";
         case DType::FP8_E4M3: return "fp8_e4m3";
         case DType::FP8_E5M2: return "fp8_e5m2";
+        case DType::FP8_E4M3FNUZ: return "fp8_e4m3fnuz";
+        case DType::FP8_E5M2FNUZ: return "fp8_e5m2fnuz";
         case DType::QInt8: return "qint8";
         case DType::QUInt8: return "quint8";
         case DType::QInt4x2: return "qint4x2";
@@ -226,6 +228,14 @@ auto ones(std::vector<int64_t> shape, DType dtype, Device device) -> Tensor {
             parallel_fill_n(static_cast<FP8_E5M2*>(data), numel, FP8_E5M2(1.0f));
             break;
         }
+        case DType::FP8_E4M3FNUZ: {
+            parallel_fill_n(static_cast<FP8_E4M3FNUZ*>(data), numel, FP8_E4M3FNUZ(1.0f));
+            break;
+        }
+        case DType::FP8_E5M2FNUZ: {
+            parallel_fill_n(static_cast<FP8_E5M2FNUZ*>(data), numel, FP8_E5M2FNUZ(1.0f));
+            break;
+        }
         default:
             throw std::runtime_error("Unsupported dtype for ones()");
     }
@@ -341,6 +351,16 @@ auto full(std::vector<int64_t> shape, double value, DType dtype, Device device) 
         case DType::FP8_E5M2: {
             FP8_E5M2* ptr = static_cast<FP8_E5M2*>(data);
             std::fill(ptr, ptr + numel, FP8_E5M2(static_cast<float>(value)));
+            break;
+        }
+        case DType::FP8_E4M3FNUZ: {
+            FP8_E4M3FNUZ* ptr = static_cast<FP8_E4M3FNUZ*>(data);
+            std::fill(ptr, ptr + numel, FP8_E4M3FNUZ(static_cast<float>(value)));
+            break;
+        }
+        case DType::FP8_E5M2FNUZ: {
+            FP8_E5M2FNUZ* ptr = static_cast<FP8_E5M2FNUZ*>(data);
+            std::fill(ptr, ptr + numel, FP8_E5M2FNUZ(static_cast<float>(value)));
             break;
         }
         default:
@@ -1286,6 +1306,21 @@ auto randint(int64_t low, int64_t high, std::vector<int64_t> shape,
         case DType::Int64: {
             auto* ptr = static_cast<int64_t*>(data);
             for (size_t i = 0; i < numel; ++i) ptr[i] = dist(eng);
+            break;
+        }
+        case DType::Int16: {
+            auto* ptr = static_cast<int16_t*>(data);
+            for (size_t i = 0; i < numel; ++i) ptr[i] = static_cast<int16_t>(dist(eng));
+            break;
+        }
+        case DType::Int8: {
+            auto* ptr = static_cast<int8_t*>(data);
+            for (size_t i = 0; i < numel; ++i) ptr[i] = static_cast<int8_t>(dist(eng));
+            break;
+        }
+        case DType::UInt8: {
+            auto* ptr = static_cast<uint8_t*>(data);
+            for (size_t i = 0; i < numel; ++i) ptr[i] = static_cast<uint8_t>(dist(eng));
             break;
         }
         default:

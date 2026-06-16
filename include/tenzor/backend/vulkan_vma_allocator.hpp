@@ -127,8 +127,9 @@ public:
             ptr = reinterpret_cast<void*>(reinterpret_cast<uintptr_t>(allocation));
         }
 
-        // Track allocation for later deallocation
-        alloc_map_[ptr] = {buffer, allocation, device};
+        // Track allocation for later deallocation. Store base+size so view
+        // pointers (base + byte_offset) can be resolved by interval lookup.
+        alloc_map_[ptr] = {buffer, allocation, device, ptr, size};
 
         return ptr;
     }
@@ -158,6 +159,33 @@ public:
         auto it = alloc_map_.find(ptr);
         if (it == alloc_map_.end()) return VK_NULL_HANDLE;
         return it->second.buffer;
+    }
+
+    /**
+     * @brief Resolve a (possibly offset) view pointer to its owning buffer and
+     *        byte offset.
+     *
+     * A tensor view's data pointer is base + byte_offset, which is NOT a key in
+     * alloc_map_, so the exact-match get_buffer() misses on every sliced/
+     * narrowed/offset view. This interval lookup finds the allocation whose
+     * range [base, base + size) contains @p ptr and returns {buffer, ptr-base}.
+     * Works for both host-visible (real mapped base) and device-local
+     * (synthetic allocation-handle base) allocations, since views are computed
+     * as base + byte_offset in both cases.
+     *
+     * @return {buffer, byte_offset} on success, {VK_NULL_HANDLE, 0} on miss.
+     */
+    std::pair<VkBuffer, VkDeviceSize> find_buffer_and_offset(const void* ptr, int device = 0) const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        const auto* p = static_cast<const char*>(ptr);
+        for (const auto& [key, info] : alloc_map_) {
+            if (info.device != device) continue;
+            const auto* b = static_cast<const char*>(info.base);
+            if (p >= b && p < b + info.size) {
+                return {info.buffer, static_cast<VkDeviceSize>(p - b)};
+            }
+        }
+        return {VK_NULL_HANDLE, 0};
     }
 
     /**
@@ -248,6 +276,8 @@ private:
         VkBuffer buffer;
         VmaAllocation allocation;
         int device;
+        void* base;    // allocation base pointer (== map key); for interval lookup
+        size_t size;   // allocation size in bytes; for interval lookup
     };
 
     mutable std::mutex mutex_;

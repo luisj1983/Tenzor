@@ -1089,6 +1089,16 @@ auto fill_kernel(const Tensor& tensor, double value, sycl::queue& queue) -> Tens
         uint8_t byte; std::memcpy(&byte, &v, sizeof(uint8_t));
         queue.fill(get_data_ptr<uint8_t>(output), byte, count).wait();
     }
+    else if (tensor.dtype() == DType::FP8_E4M3FNUZ) {
+        FP8_E4M3FNUZ v(static_cast<float>(value));
+        uint8_t byte; std::memcpy(&byte, &v, sizeof(uint8_t));
+        queue.fill(get_data_ptr<uint8_t>(output), byte, count).wait();
+    }
+    else if (tensor.dtype() == DType::FP8_E5M2FNUZ) {
+        FP8_E5M2FNUZ v(static_cast<float>(value));
+        uint8_t byte; std::memcpy(&byte, &v, sizeof(uint8_t));
+        queue.fill(get_data_ptr<uint8_t>(output), byte, count).wait();
+    }
     else if (tensor.dtype() == DType::QInt8 || tensor.dtype() == DType::QUInt8 ||
              tensor.dtype() == DType::QInt4x2) {
         if (tensor.q_scale() == 0.0) {
@@ -2027,6 +2037,128 @@ auto cast_kernel(const Tensor& input, DType target_dtype, sycl::queue& queue) ->
             }
         });
         queue.wait_and_throw();
+    } else if ((src == DType::FP8_E4M3FNUZ || src == DType::FP8_E5M2FNUZ) && dst == DType::Float32) {
+        // FP8 FNUZ → Float32: device-side bit manipulation. FNUZ (AMD/GraphCore,
+        // ONNX FLOAT8E*FNUZ) differs from IEEE FP8: exponent bias is 8 (E4M3FNUZ)
+        // / 16 (E5M2FNUZ) instead of 7 / 15, there are NO infinities, and the
+        // only NaN is the encoding 0x80 (sign=1, exp=0, mantissa=0). There is no
+        // negative zero. A top exponent is a normal number, not inf/NaN.
+        const uint8_t* in = get_data_ptr<const uint8_t>(input);
+        float* out = get_data_ptr<float>(output);
+        bool is_e4m3 = (src == DType::FP8_E4M3FNUZ);
+        queue.parallel_for(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+            uint8_t bits = in[idx];
+            uint32_t f_sign, f_exp, f_mantissa;
+            if (is_e4m3) {
+                uint32_t sign = (bits >> 7) & 0x1;
+                uint32_t exp = (bits >> 3) & 0xF;
+                uint32_t mantissa = bits & 0x7;
+                f_sign = sign;
+                if (exp == 0) {
+                    if (mantissa == 0) {
+                        // 0x00 → +0. The 0x80 encoding (sign=1) is NaN.
+                        if (sign) { f_exp = 0xFF; f_mantissa = 0x400000; }
+                        else      { f_exp = 0;    f_mantissa = 0; }
+                    } else {
+                        // Subnormal: bias 8 → leading-1 position normalized.
+                        int e = -1; uint32_t m = mantissa;
+                        do { e++; m <<= 1; } while ((m & 0x8) == 0);
+                        f_exp = 127 - 8 - e; f_mantissa = (m & 0x7) << 20;
+                    }
+                } else {
+                    // Normal: no all-ones special case for FNUZ.
+                    f_exp = exp - 8 + 127; f_mantissa = mantissa << 20;
+                }
+            } else {
+                uint32_t sign = (bits >> 7) & 0x1;
+                uint32_t exp = (bits >> 2) & 0x1F;
+                uint32_t mantissa = bits & 0x3;
+                f_sign = sign;
+                if (exp == 0) {
+                    if (mantissa == 0) {
+                        if (sign) { f_exp = 0xFF; f_mantissa = 0x400000; }
+                        else      { f_exp = 0;    f_mantissa = 0; }
+                    } else {
+                        // Subnormal: bias 16.
+                        int e = -1; uint32_t m = mantissa;
+                        do { e++; m <<= 1; } while ((m & 0x4) == 0);
+                        f_exp = 127 - 16 - e; f_mantissa = (m & 0x3) << 21;
+                    }
+                } else {
+                    f_exp = exp - 16 + 127; f_mantissa = mantissa << 21;
+                }
+            }
+            uint32_t f_bits = (f_sign << 31) | (f_exp << 23) | f_mantissa;
+            out[idx] = sycl::bit_cast<float>(f_bits);
+        });
+        queue.wait_and_throw();
+    } else if (src == DType::Float32 && (dst == DType::FP8_E4M3FNUZ || dst == DType::FP8_E5M2FNUZ)) {
+        // Float32 → FP8 FNUZ: device-side bit manipulation. Bias 8 (E4M3FNUZ) /
+        // 16 (E5M2FNUZ); no inf (overflow saturates to max finite); the only NaN
+        // is 0x80, so NaN/Inf inputs map to 0x80. No negative zero (a signed zero
+        // result collapses to +0 = 0x00).
+        const float* in = get_data_ptr<const float>(input);
+        uint8_t* out = get_data_ptr<uint8_t>(output);
+        bool is_e4m3 = (dst == DType::FP8_E4M3FNUZ);
+        queue.parallel_for(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+            uint32_t f_bits = sycl::bit_cast<uint32_t>(in[idx]);
+            uint32_t sign = (f_bits >> 31) & 0x1;
+            uint32_t exp = (f_bits >> 23) & 0xFF;
+            uint32_t mantissa = f_bits & 0x7FFFFF;
+            if (is_e4m3) {
+                if (exp == 0xFF) {
+                    // Inf or NaN both map to the single FNUZ NaN encoding 0x80.
+                    out[idx] = 0x80;
+                    return;
+                }
+                uint8_t h_sign = static_cast<uint8_t>(sign);
+                uint8_t h_exp, h_mantissa;
+                if (exp == 0) { h_exp = 0; h_mantissa = 0; }
+                else {
+                    int32_t new_exp = static_cast<int32_t>(exp) - 127 + 8;
+                    // Max finite E4M3FNUZ exponent field is 0xF (15) with mantissa
+                    // 0x7 — there is no inf reserve, so saturate to that.
+                    if (new_exp >= 0xF) { h_exp = 0xF; h_mantissa = 0x7; }
+                    else if (new_exp <= 0) {
+                        if (new_exp >= -3) {
+                            uint32_t m = (mantissa | 0x800000) >> (1 - new_exp);
+                            h_mantissa = static_cast<uint8_t>((m >> 20) & 0x7); h_exp = 0;
+                        } else { h_exp = 0; h_mantissa = 0; }
+                    } else {
+                        h_exp = static_cast<uint8_t>(new_exp);
+                        h_mantissa = static_cast<uint8_t>((mantissa >> 20) & 0x7);
+                    }
+                }
+                uint8_t res = (h_sign << 7) | (h_exp << 3) | h_mantissa;
+                // No negative zero in FNUZ: collapse 0x80 (sign=1, zero) to +0.
+                out[idx] = (res == 0x80) ? 0x00 : res;
+            } else {
+                if (exp == 0xFF) {
+                    out[idx] = 0x80;
+                    return;
+                }
+                uint8_t h_sign = static_cast<uint8_t>(sign);
+                uint8_t h_exp, h_mantissa;
+                if (exp == 0) { h_exp = 0; h_mantissa = 0; }
+                else {
+                    int32_t new_exp = static_cast<int32_t>(exp) - 127 + 16;
+                    // Max finite E5M2FNUZ: exponent field 0x1F (31), mantissa 0x3.
+                    if (new_exp >= 0x1F) { h_exp = 0x1F; h_mantissa = 0x3; }
+                    else if (new_exp <= 0) {
+                        if (new_exp >= -2) {
+                            uint32_t m = (mantissa | 0x800000) >> (1 - new_exp);
+                            h_mantissa = static_cast<uint8_t>((m >> 21) & 0x3); h_exp = 0;
+                        } else { h_exp = 0; h_mantissa = 0; }
+                    } else {
+                        h_exp = static_cast<uint8_t>(new_exp);
+                        h_mantissa = static_cast<uint8_t>((mantissa >> 21) & 0x3);
+                    }
+                }
+                uint8_t res = (h_sign << 7) | (h_exp << 2) | h_mantissa;
+                out[idx] = (res == 0x80) ? 0x00 : res;
+            }
+        });
+        queue.wait_and_throw();
     } else if (src == DType::Float32 && dst == DType::Complex64) {
         // Real → complex: fill imaginary part with zeros. Complex64
         // storage is interleaved (re, im) float pairs.
@@ -2268,6 +2400,8 @@ auto strided_fill_kernel(Tensor& self, double value, sycl::queue& queue) -> void
             case DType::Complex128: strided_write_complex(static_cast<double>(value)); break;
             case DType::FP8_E4M3: { FP8_E4M3 v(static_cast<float>(value)); uint8_t b; std::memcpy(&b,&v,1); strided_write(b); break; }
             case DType::FP8_E5M2: { FP8_E5M2 v(static_cast<float>(value)); uint8_t b; std::memcpy(&b,&v,1); strided_write(b); break; }
+            case DType::FP8_E4M3FNUZ: { FP8_E4M3FNUZ v(static_cast<float>(value)); uint8_t b; std::memcpy(&b,&v,1); strided_write(b); break; }
+            case DType::FP8_E5M2FNUZ: { FP8_E5M2FNUZ v(static_cast<float>(value)); uint8_t b; std::memcpy(&b,&v,1); strided_write(b); break; }
             case DType::QInt8:
             case DType::QUInt8: {
                 if (self.q_scale() == 0.0)

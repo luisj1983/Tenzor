@@ -54,18 +54,44 @@ void main() {
             h_exp = 0xFu;
             h_mantissa = 0x6u;
         } else if (new_exp <= 0) {
-            // Denormalized or underflow
+            // Denormalized or underflow, round-to-nearest-even (matches CPU
+            // converter in src/core/dtype.cpp).
             if (new_exp >= -3) {
                 uint m = (mantissa | 0x800000u) >> uint(1 - new_exp);
-                h_mantissa = (m >> 20) & 0x7u;
-                h_exp = 0u;
+                uint kept = (m >> 20) & 0x7u;
+                uint remainder = m & 0xFFFFFu;        // low 20 bits
+                uint halfway = 0x80000u;              // 1 << 19
+                if (remainder > halfway || (remainder == halfway && (kept & 1u) != 0u)) {
+                    kept++;  // may carry subnormal -> smallest normal (exp field 1)
+                }
+                // kept can be 0x8 after carry: promotes to exp=1, mant=0, which
+                // the packed (h_exp<<3)|h_mantissa layout encodes naturally.
+                h_exp = kept >> 3;
+                h_mantissa = kept & 0x7u;
             } else {
                 h_exp = 0u;
                 h_mantissa = 0u;
             }
         } else {
-            h_exp = uint(new_exp);
-            h_mantissa = (mantissa >> 20) & 0x7u;
+            // Normalized, round-to-nearest-even on the 20 discarded mantissa bits.
+            uint kept = (mantissa >> 20) & 0x7u;
+            uint remainder = mantissa & 0xFFFFFu;     // low 20 bits
+            uint halfway = 0x80000u;                  // 1 << 19
+            // Pack so a mantissa carry propagates into the exponent.
+            uint packed = (uint(new_exp) << 3) | kept;
+            if (remainder > halfway || (remainder == halfway && (kept & 1u) != 0u)) {
+                packed++;
+            }
+            uint r_exp = packed >> 3;
+            uint r_mant = packed & 0x7u;
+            // Clamp to the max finite E4M3 value (exp=0xF, mant=0x6 = 448);
+            // exp==0xF with mant>=0x7 would be NaN, so saturate per NVIDIA RN.
+            if (r_exp > 0xFu || (r_exp == 0xFu && r_mant >= 0x7u)) {
+                r_exp = 0xFu;
+                r_mant = 0x6u;
+            }
+            h_exp = r_exp;
+            h_mantissa = r_mant;
         }
     }
 

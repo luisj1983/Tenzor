@@ -240,8 +240,11 @@ TEST_P(OptimizersExtendedTest, AdagradAccumulation) {
 TEST_P(OptimizersExtendedTest, AdagradLearningRateDecay) {
     auto optimizer = Adagrad(params_, 0.1, /*lr_decay=*/0.1);
 
-    // Initial learning rate
+    // get_lr() reports the BASE learning rate (matching set_lr's unit, per the
+    // optimizer base-class contract); the lr_decay-adjusted value is exposed
+    // separately via effective_lr(). The base lr never changes here.
     EXPECT_FLOAT_EQ(optimizer.get_lr(), 0.1);
+    EXPECT_FLOAT_EQ(optimizer.effective_lr(), 0.1);
 
     // After the first step the effective lr is lr / (1 + (step-1)*lr_decay)
     // = 0.1 / (1 + 0*0.1) = 0.1 — Adagrad applies no decay on the first step
@@ -249,13 +252,15 @@ TEST_P(OptimizersExtendedTest, AdagradLearningRateDecay) {
     param1_->set_grad(ones({2, 3}, DType::Float32, device));
     param2_->set_grad(ones({4}, DType::Float32, device));
     optimizer.step();
-    EXPECT_FLOAT_EQ(optimizer.get_lr(), 0.1);
+    EXPECT_FLOAT_EQ(optimizer.get_lr(), 0.1);          // base lr unchanged
+    EXPECT_FLOAT_EQ(optimizer.effective_lr(), 0.1);    // no decay on step 1
 
-    // After the second step decay kicks in: 0.1 / (1 + 1*0.1) ≈ 0.0909 < 0.1.
+    // After the second step the effective lr decays: 0.1 / (1 + 1*0.1) ≈ 0.0909.
     param1_->set_grad(ones({2, 3}, DType::Float32, device));
     param2_->set_grad(ones({4}, DType::Float32, device));
     optimizer.step();
-    EXPECT_LT(optimizer.get_lr(), 0.1);
+    EXPECT_FLOAT_EQ(optimizer.get_lr(), 0.1);          // base lr still unchanged
+    EXPECT_LT(optimizer.effective_lr(), 0.1);          // decay reflected here
 }
 
 TEST_P(OptimizersExtendedTest, AdagradInitialAccumulator) {

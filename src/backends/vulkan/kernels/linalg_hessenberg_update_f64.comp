@@ -40,7 +40,7 @@ void main() {
 
         float64_t dl = dot_left * tau_k;
 
-        for (uint r = col + 1 + tid; r < n; r += 256) {
+        for (uint r = col + 1 + tid; r < n; r += gl_WorkGroupSize.x) {
             float64_t v_r = (r == col + 1) ? 1.0lf : A[base + r * n + col];
             A[base + r * n + j] -= dl * v_r;
         }

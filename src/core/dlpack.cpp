@@ -36,6 +36,8 @@ auto dtype_to_dlpack(DType dt) -> DLDataType {
 
         case DType::FP8_E4M3:
         case DType::FP8_E5M2:
+        case DType::FP8_E4M3FNUZ:
+        case DType::FP8_E5M2FNUZ:
             throw std::runtime_error("to_dlpack: FP8 dtypes have no stable DLPack encoding");
 
         case DType::QInt8:

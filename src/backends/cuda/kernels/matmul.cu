@@ -1933,6 +1933,20 @@ auto matmul_kernel(const Tensor& a, const Tensor& b, cudaStream_t stream) -> Ten
         return result_f32.to(orig_dtype);
     }
 
+    // FNUZ FP8 dispatch: cuBLAS/cublasLt has NO native FNUZ data type and the
+    // FNUZ exponent bias differs from IEEE FP8, so these MUST NOT use the FP8
+    // Tensor Core path above (that would silently reinterpret with the wrong
+    // bias). Always emulate by widening to Float32 via Tensor::to() (which routes
+    // through the FNUZ cast kernels), GEMM, then narrow back.
+    if ((a.dtype() == DType::FP8_E4M3FNUZ || a.dtype() == DType::FP8_E5M2FNUZ) &&
+        (b.dtype() == DType::FP8_E4M3FNUZ || b.dtype() == DType::FP8_E5M2FNUZ)) {
+        DType orig_dtype = a.dtype();
+        Tensor a_f32 = a.to(DType::Float32);
+        Tensor b_f32 = b.to(DType::Float32);
+        Tensor result_f32 = matmul_kernel(a_f32, b_f32, stream);
+        return result_f32.to(orig_dtype);
+    }
+
     // Make tensors contiguous if needed (does not break autograd chain)
     Tensor a_contig = a.is_contiguous() ? a : a.contiguous();
     Tensor b_contig = b.is_contiguous() ? b : b.contiguous();

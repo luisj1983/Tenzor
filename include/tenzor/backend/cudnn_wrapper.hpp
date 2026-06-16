@@ -35,37 +35,78 @@ namespace cuda {
 // cuDNN Handle Manager (Singleton for performance)
 // ============================================================================
 
+// Per-thread, per-device cuDNN handle.
+//
+// Previously this was a single process-global handle created once on whichever
+// device was current at first use. Two threads issuing cuDNN ops on different
+// pooled streams would race on cudnnSetStream(handle, S) — thread A's binding
+// could be overwritten by thread B before A launched, so A's op ran on B's
+// stream and broke the per-stream ordering the design relies on. The single
+// handle was also bound to one device, so ops on tensors residing on device 1+
+// used a device-0 handle (illegal access on true multi-GPU).
+//
+// Mirroring CuBLASHandlePool/CuSOLVERHandlePool, each (thread, current-device)
+// pair now owns its own handle, created on the device that is current at first
+// touch. set_stream() therefore mutates a handle owned by the calling thread on
+// its own device, eliminating both the stream-binding race and the cross-device
+// handle reuse.
 class CuDNNHandle {
 public:
-    // Get the singleton cuDNN handle
+    // Get the cuDNN handle for the calling thread on the current device. The
+    // handle is created on the device that is current when first requested for
+    // that (thread, device) pair, so callers that have already cudaSetDevice'd
+    // to the tensor's device get a correctly-bound handle.
     static cudnnHandle_t get() {
-        static CuDNNHandle instance;
-        return instance.handle_;
+        int device = 0;
+        cudaGetDevice(&device);
+        // thread_local map: one handle per device, owned by this thread. The
+        // owning Registry destroys all handles when the thread exits.
+        thread_local Registry registry;
+        return registry.get_for_device(device);
     }
 
-    // Set stream on the singleton handle
+    // Set the stream on this thread's handle for the current device. Safe under
+    // concurrency because the handle is not shared across threads.
     static void set_stream(cudaStream_t stream) {
         CUDNN_CHECK(cudnnSetStream(get(), stream));
     }
 
-    // Non-copyable, non-movable singleton
     CuDNNHandle(const CuDNNHandle&) = delete;
     CuDNNHandle& operator=(const CuDNNHandle&) = delete;
     CuDNNHandle(CuDNNHandle&&) = delete;
     CuDNNHandle& operator=(CuDNNHandle&&) = delete;
 
 private:
-    CuDNNHandle() {
-        CUDNN_CHECK(cudnnCreate(&handle_));
-    }
+    // Owns this thread's handles, one per device. Created/destroyed with the
+    // thread (thread_local), so no cross-thread sharing and no locking needed.
+    struct Registry {
+        std::unordered_map<int, cudnnHandle_t> handles;
 
-    ~CuDNNHandle() {
-        if (handle_) {
-            cudnnDestroy(handle_);
+        cudnnHandle_t get_for_device(int device) {
+            auto it = handles.find(device);
+            if (it != handles.end()) {
+                return it->second;
+            }
+            cudnnHandle_t h = nullptr;
+            CUDNN_CHECK(cudnnCreate(&h));
+            handles.emplace(device, h);
+            return h;
         }
-    }
 
-    cudnnHandle_t handle_ = nullptr;
+        ~Registry() {
+            for (auto& [device, h] : handles) {
+                if (h) {
+                    // Make the handle's device current before destroying so the
+                    // destroy targets the device the handle was created on.
+                    int prev = 0;
+                    cudaGetDevice(&prev);
+                    cudaSetDevice(device);
+                    cudnnDestroy(h);
+                    cudaSetDevice(prev);
+                }
+            }
+        }
+    };
 };
 
 // ============================================================================

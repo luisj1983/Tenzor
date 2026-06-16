@@ -335,6 +335,12 @@ auto ROCmBackend::copy(void* dst, const void* src, size_t bytes, CopyKind kind) 
                     throw std::runtime_error(
                         std::string("HIP peer copy failed: ") + hipGetErrorString(perr));
                 }
+                hipError_t serr = hipStreamSynchronize(nullptr);
+                if (serr != hipSuccess) {
+                    throw std::runtime_error(
+                        std::string("HIP stream sync after peer copy failed: ") +
+                        hipGetErrorString(serr));
+                }
                 return;
             }
         }
@@ -344,7 +350,18 @@ auto ROCmBackend::copy(void* dst, const void* src, size_t bytes, CopyKind kind) 
             throw std::runtime_error(
                 std::string("HIP async copy failed: ") + hipGetErrorString(err));
         }
-        // H2D and D2D are async-by-design on the default stream; no sync here.
+        // Backend::copy() is documented synchronous (backend.hpp:197). For
+        // HostToDevice this is mandatory: Tensor::to() (tensor.cpp:729) passes
+        // the host storage of a temporary contiguous tensor as src and destroys
+        // it on return, so an unsynced async H2D would let the DMA read a freed
+        // host buffer (use-after-free). DeviceToDevice is synced too to honor
+        // the contract and order the copy against subsequent stream work.
+        hipError_t serr = hipStreamSynchronize(nullptr);
+        if (serr != hipSuccess) {
+            throw std::runtime_error(
+                std::string("HIP stream sync after device copy failed: ") +
+                hipGetErrorString(serr));
+        }
         return;
     }
 

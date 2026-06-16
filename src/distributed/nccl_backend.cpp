@@ -884,7 +884,18 @@ auto NCCLBackend::create_socket_connection(bool is_master) -> int {
             throw std::runtime_error("Failed to resolve master address: " + master_addr_);
         }
 
-        std::memcpy(&addr.sin_addr.s_addr, server->h_addr, server->h_length);
+        // Validate the resolver result before copying: a non-IPv4 record
+        // (AF_INET6, h_length==16) or a hostile DNS response would otherwise
+        // overflow the 4-byte sin_addr field.
+        if (server->h_addrtype != AF_INET ||
+            server->h_length != static_cast<int>(sizeof(struct in_addr)) ||
+            server->h_addr == nullptr) {
+            close(sockfd);
+            throw std::runtime_error(
+                "Resolver returned a non-IPv4 address for master: " + master_addr_);
+        }
+
+        std::memcpy(&addr.sin_addr.s_addr, server->h_addr, sizeof(struct in_addr));
 
         // Retry connection with exponential backoff
         int retries = 10;

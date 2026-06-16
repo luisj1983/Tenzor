@@ -20,6 +20,8 @@ struct Float16;
 struct BFloat16;
 struct FP8_E4M3;
 struct FP8_E5M2;
+struct FP8_E4M3FNUZ;
+struct FP8_E5M2FNUZ;
 
 /**
  * @brief Enumeration of supported tensor data types.
@@ -47,7 +49,11 @@ enum class DType : uint8_t {
     FP8_E5M2,   ///< 8-bit float (5 exponent, 2 mantissa) - Hopper Tensor Cores
     QInt8,      ///< Quantized 8-bit signed integer (with scale/zero_point)
     QUInt8,     ///< Quantized 8-bit unsigned integer (with scale/zero_point)
-    QInt4x2     ///< Quantized 4-bit packed (2 values per byte, with scale/zero_point)
+    QInt4x2,    ///< Quantized 4-bit packed (2 values per byte, with scale/zero_point)
+    // New dtypes MUST be appended at the end to keep existing uint8 enum values
+    // stable for on-disk serialization (checkpoints / .tzlite / safetensors).
+    FP8_E4M3FNUZ, ///< 8-bit float E4M3 "FNUZ" (bias 8, no inf, single NaN=0x80) - AMD/GraphCore
+    FP8_E5M2FNUZ  ///< 8-bit float E5M2 "FNUZ" (bias 16, no inf, single NaN=0x80) - AMD/GraphCore
 };
 
 /**
@@ -66,7 +72,9 @@ concept ScalarType = std::is_arithmetic_v<T> ||
                      std::is_same_v<T, Float16> ||
                      std::is_same_v<T, BFloat16> ||
                      std::is_same_v<T, FP8_E4M3> ||
-                     std::is_same_v<T, FP8_E5M2>;
+                     std::is_same_v<T, FP8_E5M2> ||
+                     std::is_same_v<T, FP8_E4M3FNUZ> ||
+                     std::is_same_v<T, FP8_E5M2FNUZ>;
 
 /**
  * @brief Concept for integral types.
@@ -267,15 +275,61 @@ struct FP8_E5M2 {
     auto operator!=(const FP8_E5M2& other) const -> bool { return bits != other.bits; }
 };
 
+/**
+ * @brief FP8 E4M3 "FNUZ" format (1 sign, 4 exponent, 3 mantissa bits)
+ *
+ * AMD/GraphCore variant (ONNX FLOAT8E4M3FNUZ): exponent bias 8 (not 7), NO
+ * infinities, and a single NaN encoding (0x80, the otherwise-unused negative
+ * zero). Positive zero is 0x00; there is no negative zero. Max finite = 240.
+ */
+struct FP8_E4M3FNUZ {
+    uint8_t bits{0};
+
+    FP8_E4M3FNUZ() = default;
+    explicit FP8_E4M3FNUZ(uint8_t b) : bits(b) {}
+    explicit FP8_E4M3FNUZ(float f);
+    explicit operator float() const;
+
+    auto operator==(const FP8_E4M3FNUZ& other) const -> bool { return bits == other.bits; }
+    auto operator!=(const FP8_E4M3FNUZ& other) const -> bool { return bits != other.bits; }
+};
+
+/**
+ * @brief FP8 E5M2 "FNUZ" format (1 sign, 5 exponent, 2 mantissa bits)
+ *
+ * AMD/GraphCore variant (ONNX FLOAT8E5M2FNUZ): exponent bias 16 (not 15), NO
+ * infinities, and a single NaN encoding (0x80). Positive zero is 0x00; there is
+ * no negative zero. Max finite = 57344.
+ */
+struct FP8_E5M2FNUZ {
+    uint8_t bits{0};
+
+    FP8_E5M2FNUZ() = default;
+    explicit FP8_E5M2FNUZ(uint8_t b) : bits(b) {}
+    explicit FP8_E5M2FNUZ(float f);
+    explicit operator float() const;
+
+    auto operator==(const FP8_E5M2FNUZ& other) const -> bool { return bits == other.bits; }
+    auto operator!=(const FP8_E5M2FNUZ& other) const -> bool { return bits != other.bits; }
+};
+
 /// @brief Specialization for FP8_E4M3
 template<> struct dtype_traits<DType::FP8_E4M3> { using type = FP8_E4M3; };
 /// @brief Specialization for FP8_E5M2
 template<> struct dtype_traits<DType::FP8_E5M2> { using type = FP8_E5M2; };
+/// @brief Specialization for FP8_E4M3FNUZ
+template<> struct dtype_traits<DType::FP8_E4M3FNUZ> { using type = FP8_E4M3FNUZ; };
+/// @brief Specialization for FP8_E5M2FNUZ
+template<> struct dtype_traits<DType::FP8_E5M2FNUZ> { using type = FP8_E5M2FNUZ; };
 
 /// @brief Reverse mapping for FP8_E4M3
 template<> struct type_to_dtype<FP8_E4M3> { static constexpr DType value = DType::FP8_E4M3; };
 /// @brief Reverse mapping for FP8_E5M2
 template<> struct type_to_dtype<FP8_E5M2> { static constexpr DType value = DType::FP8_E5M2; };
+/// @brief Reverse mapping for FP8_E4M3FNUZ
+template<> struct type_to_dtype<FP8_E4M3FNUZ> { static constexpr DType value = DType::FP8_E4M3FNUZ; };
+/// @brief Reverse mapping for FP8_E5M2FNUZ
+template<> struct type_to_dtype<FP8_E5M2FNUZ> { static constexpr DType value = DType::FP8_E5M2FNUZ; };
 
 /**
  * @brief Get the size in bytes of a data type.
@@ -309,6 +363,8 @@ constexpr auto dtype_size(DType dtype) -> size_t {
         case DType::QInt8: return 1;
         case DType::QUInt8: return 1;
         case DType::QInt4x2: return 1;  // 2 values per byte, but storage is per-byte
+        case DType::FP8_E4M3FNUZ: return 1;
+        case DType::FP8_E5M2FNUZ: return 1;
     }
     return 0;
 }
@@ -345,6 +401,8 @@ constexpr auto dtype_name(DType dtype) -> std::string_view {
         case DType::QInt8: return "qint8";
         case DType::QUInt8: return "quint8";
         case DType::QInt4x2: return "qint4x2";
+        case DType::FP8_E4M3FNUZ: return "fp8_e4m3fnuz";
+        case DType::FP8_E5M2FNUZ: return "fp8_e5m2fnuz";
     }
     return "unknown";
 }
@@ -365,7 +423,8 @@ constexpr auto is_quantized(DType dtype) -> bool {
 constexpr auto is_floating_type(DType dtype) -> bool {
     return dtype == DType::Float32 || dtype == DType::Float64 ||
            dtype == DType::Float16 || dtype == DType::BFloat16 ||
-           dtype == DType::FP8_E4M3 || dtype == DType::FP8_E5M2;
+           dtype == DType::FP8_E4M3 || dtype == DType::FP8_E5M2 ||
+           dtype == DType::FP8_E4M3FNUZ || dtype == DType::FP8_E5M2FNUZ;
 }
 
 /**
@@ -376,6 +435,22 @@ constexpr auto is_integer_type(DType dtype) -> bool {
            dtype == DType::Int32 || dtype == DType::Int64  ||
            dtype == DType::UInt8 || dtype == DType::UInt16 ||
            dtype == DType::UInt32 || dtype == DType::UInt64;
+}
+
+/**
+ * @brief Check if a dtype is an unsigned integer (UInt8/16/32/64).
+ */
+constexpr auto is_unsigned_integer_type(DType dtype) -> bool {
+    return dtype == DType::UInt8  || dtype == DType::UInt16 ||
+           dtype == DType::UInt32 || dtype == DType::UInt64;
+}
+
+/**
+ * @brief Check if a dtype is a signed integer (Int8/16/32/64).
+ */
+constexpr auto is_signed_integer_type(DType dtype) -> bool {
+    return dtype == DType::Int8  || dtype == DType::Int16 ||
+           dtype == DType::Int32 || dtype == DType::Int64;
 }
 
 /**
@@ -402,6 +477,8 @@ constexpr auto dtype_priority(DType dt) -> int {
         case DType::Int64:      return 8;
         case DType::FP8_E4M3:   return 8;   // FP8 types promote to Float32
         case DType::FP8_E5M2:   return 8;   // (same priority as narrow floats)
+        case DType::FP8_E4M3FNUZ: return 8;
+        case DType::FP8_E5M2FNUZ: return 8;
         case DType::Float16:    return 9;
         case DType::BFloat16:   return 10;
         case DType::Float32:    return 11;
@@ -520,6 +597,31 @@ constexpr auto promote_types(DType a, DType b) -> DType {
 
     // Both integer: promote to wider.
     if (is_integer_type(a) && is_integer_type(b)) {
+        // Mixed signed/unsigned of equal width: the signed type of that width
+        // cannot represent the full range of the unsigned operand, so promote
+        // to the next-wider signed type (matching torch.result_type):
+        //   UInt8/Int8   -> Int16
+        //   UInt16/Int16 -> Int32
+        //   UInt32/Int32 -> Int64
+        //   UInt64/Int64 -> Float64 (no wider signed integer exists)
+        // When the signed operand is strictly wider than the unsigned one, it
+        // already represents the unsigned range, so the wider signed type wins
+        // (handled by the priority fallback below).
+        const bool a_unsigned = is_unsigned_integer_type(a);
+        const bool b_unsigned = is_unsigned_integer_type(b);
+        if (a_unsigned != b_unsigned) {
+            const DType unsigned_dt = a_unsigned ? a : b;
+            const DType signed_dt   = a_unsigned ? b : a;
+            if (dtype_size(signed_dt) <= dtype_size(unsigned_dt)) {
+                switch (unsigned_dt) {
+                    case DType::UInt8:  return DType::Int16;
+                    case DType::UInt16: return DType::Int32;
+                    case DType::UInt32: return DType::Int64;
+                    case DType::UInt64: return DType::Float64;
+                    default: break;
+                }
+            }
+        }
         return detail::dtype_priority(a) >= detail::dtype_priority(b) ? a : b;
     }
 

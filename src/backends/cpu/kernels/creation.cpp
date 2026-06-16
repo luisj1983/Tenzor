@@ -136,6 +136,14 @@ auto ones_kernel(const std::vector<int64_t>& shape, DType dtype, const Device& d
             parallel_fill_n(result.data<FP8_E5M2>(), n, FP8_E5M2(1.0f));
             break;
         }
+        case DType::FP8_E4M3FNUZ: {
+            parallel_fill_n(result.data<FP8_E4M3FNUZ>(), n, FP8_E4M3FNUZ(1.0f));
+            break;
+        }
+        case DType::FP8_E5M2FNUZ: {
+            parallel_fill_n(result.data<FP8_E5M2FNUZ>(), n, FP8_E5M2FNUZ(1.0f));
+            break;
+        }
         default:
             throw std::runtime_error("ones operation: unsupported dtype " +
                 std::to_string(static_cast<int>(dtype)));
@@ -393,6 +401,16 @@ auto full_kernel(const std::vector<int64_t>& shape, double value, DType dtype, c
             std::fill_n(data, n, FP8_E5M2(static_cast<float>(value)));
             break;
         }
+        case DType::FP8_E4M3FNUZ: {
+            FP8_E4M3FNUZ* data = result.data<FP8_E4M3FNUZ>();
+            std::fill_n(data, n, FP8_E4M3FNUZ(static_cast<float>(value)));
+            break;
+        }
+        case DType::FP8_E5M2FNUZ: {
+            FP8_E5M2FNUZ* data = result.data<FP8_E5M2FNUZ>();
+            std::fill_n(data, n, FP8_E5M2FNUZ(static_cast<float>(value)));
+            break;
+        }
         default:
             throw std::runtime_error("full operation: unsupported dtype " +
                 std::to_string(static_cast<int>(dtype)));
@@ -629,6 +647,8 @@ auto eye_kernel(int64_t n, int64_t m, DType dtype, const Device& device) -> Tens
         case DType::Complex128: fill_eye<std::complex<double>>(result, n, m, std::complex<double>(1.0, 0.0)); break;
         case DType::FP8_E4M3:   fill_eye<FP8_E4M3>(result, n, m, FP8_E4M3(1.0f)); break;
         case DType::FP8_E5M2:   fill_eye<FP8_E5M2>(result, n, m, FP8_E5M2(1.0f)); break;
+        case DType::FP8_E4M3FNUZ: fill_eye<FP8_E4M3FNUZ>(result, n, m, FP8_E4M3FNUZ(1.0f)); break;
+        case DType::FP8_E5M2FNUZ: fill_eye<FP8_E5M2FNUZ>(result, n, m, FP8_E5M2FNUZ(1.0f)); break;
         default:
             throw std::runtime_error("eye operation: unsupported dtype " +
                 std::to_string(static_cast<int>(dtype)));

@@ -114,7 +114,8 @@ auto KLDivLoss::forward(const Variable& input, const Variable& target) -> Variab
             result = sum(loss_unreduced);
         } else { // batchmean
             auto summed = sum(loss_unreduced);
-            int64_t batch_size = input_f32.shape()[0];
+            const auto& shp = input_f32.shape();
+            int64_t batch_size = (!shp.empty()) ? shp[0] : 0;
             if (batch_size > 0) {
                 auto scale = 1.0f / static_cast<float>(batch_size);
                 auto scale_var = scalar_var(scale, summed);
@@ -138,7 +139,8 @@ auto KLDivLoss::forward(const Variable& input, const Variable& target) -> Variab
             result = sum(loss_unreduced);
         } else { // batchmean
             auto summed = sum(loss_unreduced);
-            int64_t batch_size = input_f32.shape()[0];
+            const auto& shp = input_f32.shape();
+            int64_t batch_size = (!shp.empty()) ? shp[0] : 0;
             if (batch_size > 0) {
                 auto scale = 1.0f / static_cast<float>(batch_size);
                 auto scale_var = scalar_var(scale, summed);

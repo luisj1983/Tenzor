@@ -79,6 +79,14 @@ struct ServerConfig {
     std::vector<std::string> api_keys;    ///< Valid API keys (Bearer tokens)
     std::string auth_header{"Authorization"}; ///< Header name for auth token
 
+    // gRPC transport security (PEM file paths). When tls_cert_path and
+    // tls_key_path are both set, the gRPC server uses SslServerCredentials
+    // instead of InsecureServerCredentials. Setting tls_client_ca_path
+    // additionally enables mutual-TLS (client certificate required & verified).
+    std::string tls_cert_path;            ///< Server certificate chain (PEM)
+    std::string tls_key_path;             ///< Server private key (PEM)
+    std::string tls_client_ca_path;       ///< Optional client CA for mTLS (PEM)
+
     // Rate limiting
     bool enable_rate_limit{false};        ///< Enable per-client rate limiting
     double rate_limit_rps{100.0};         ///< Max requests per second per client
@@ -339,6 +347,19 @@ private:
 
     auto serve_loop() -> void;
 };
+
+#ifdef TENZOR_HAS_GRPC
+/**
+ * @brief Run a blocking gRPC inference server until @p running is cleared.
+ *
+ * Mirrors the HTTP transport's security posture: API-key authentication and
+ * token-bucket rate limiting (derived from @p config) are enforced on every
+ * authenticated RPC, and TLS credentials are used when tls_cert_path/
+ * tls_key_path are configured.
+ */
+void start_grpc_server(ModelRepository& repository, const ServerConfig& config,
+                       std::atomic<bool>& running);
+#endif
 
 } // namespace serving
 } // namespace tenzor

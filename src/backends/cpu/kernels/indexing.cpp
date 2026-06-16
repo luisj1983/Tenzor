@@ -1474,10 +1474,30 @@ auto take_along_dim_kernel(const Tensor& input, const Tensor& indices, int64_t d
     auto idx_shape = indices.shape();
     int64_t ndim = in_shape.size();
 
+    // Index tensor must be Int64; otherwise data<int64_t>() reinterprets the
+    // raw buffer (e.g. pairs of Int32 read as one garbage Int64). Mirrors
+    // gather/scatter/index_select which reject non-Int64 indices.
+    if (indices.dtype() != DType::Int64) {
+        throw std::invalid_argument("take_along_dim: indices must have dtype Int64");
+    }
+
     // Normalize dim
     if (dim < 0) dim += ndim;
     if (dim < 0 || dim >= ndim) {
         throw std::out_of_range("take_along_dim: dim out of range");
+    }
+
+    // Index shape must be broadcastable against the input along every non-dim
+    // axis: idx_shape[d] <= in_shape[d]. Otherwise the offset computed below
+    // (which uses in_shape extents) runs past the input buffer.
+    if (static_cast<int64_t>(idx_shape.size()) != ndim) {
+        throw std::invalid_argument("take_along_dim: indices must have same rank as input");
+    }
+    for (int64_t d = 0; d < ndim; ++d) {
+        if (d == dim) continue;
+        if (idx_shape[d] > in_shape[d]) {
+            throw std::out_of_range("take_along_dim: index shape exceeds input shape on a non-dim axis");
+        }
     }
 
     // Output has same shape as indices
@@ -1496,6 +1516,17 @@ auto take_along_dim_kernel(const Tensor& input, const Tensor& indices, int64_t d
     for (int64_t d = dim + 1; d < ndim; ++d) inner_size *= idx_shape[d];
 
     const int64_t* idx_ptr = indices.data<int64_t>();
+
+    // Validate all indices up front, sequentially. Throwing inside an OMP
+    // parallel region is undefined behaviour, so the range check cannot live in
+    // the copy loop below. Mirrors gather_impl's pre-validation.
+    for (int64_t i = 0; i < numel; ++i) {
+        int64_t src_idx = idx_ptr[i];
+        if (src_idx < 0) src_idx += in_dim_size;
+        if (src_idx < 0 || src_idx >= in_dim_size) {
+            throw std::out_of_range("take_along_dim: index out of range for dim");
+        }
+    }
 
     auto copy_elements = [&](auto* in_ptr, auto* out_ptr) {
         #pragma omp parallel for if(numel > ::tenzor::OmpThresholds::simple())

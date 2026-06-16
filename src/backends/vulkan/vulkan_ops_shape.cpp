@@ -523,7 +523,8 @@ auto VulkanBackend::dispatchContiguous(const Tensor& input) -> Tensor {
         shader_name = "strided_copy_f16";
     } else if (input.dtype() == DType::UInt8 || input.dtype() == DType::Bool ||
                input.dtype() == DType::Int8 ||
-               input.dtype() == DType::FP8_E4M3 || input.dtype() == DType::FP8_E5M2) {
+               input.dtype() == DType::FP8_E4M3 || input.dtype() == DType::FP8_E5M2 ||
+               input.dtype() == DType::FP8_E4M3FNUZ || input.dtype() == DType::FP8_E5M2FNUZ) {
         // strided_copy_u8 moves raw bytes, so it serves all 1-byte dtypes.
         shader_name = "strided_copy_u8";
     } else if (input.dtype() == DType::Complex128) {

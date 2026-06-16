@@ -626,10 +626,22 @@ auto NCCLProcessGroup::bootstrap_unique_id(
                 master_addr);
         }
 
+        // Validate the resolver result before copying: gethostbyname can
+        // return an IPv6 (AF_INET6, h_length==16) or otherwise oversized
+        // record (e.g. from a hostile/compromised DNS response), and copying
+        // h_length bytes into the 4-byte sin_addr would overflow the struct.
+        if (server->h_addrtype != AF_INET ||
+            server->h_length != static_cast<int>(sizeof(struct in_addr)) ||
+            server->h_addr == nullptr) {
+            throw std::runtime_error(
+                "NCCLProcessGroup: resolver returned a non-IPv4 address for "
+                "master: " + master_addr);
+        }
+
         struct sockaddr_in addr{};
         addr.sin_family = AF_INET;
         std::memcpy(&addr.sin_addr.s_addr, server->h_addr,
-                     static_cast<size_t>(server->h_length));
+                     sizeof(struct in_addr));
         addr.sin_port = htons(static_cast<uint16_t>(master_port));
 
         constexpr int max_retries = 10;

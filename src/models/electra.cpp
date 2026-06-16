@@ -172,78 +172,44 @@ auto ElectraForPreTraining::forward(const Variable& input_ids,
         gen_probs_cpu = gen_probs.tensor().to(Device::cpu());
     }
 
-    // Create is_replaced on CPU
-    Tensor is_replaced_cpu(shape_vec, dtype, Device::cpu());
-    is_replaced_cpu.zero_();
+    // Widen generator probabilities to Float32 once and run a single
+    // dtype-generic sampling loop. This eliminates the previous per-dtype
+    // duplication (Float32/Float64/Float16) and, critically, the missing
+    // BFloat16 branch that silently left is_replaced all-zero and skipped the
+    // generator sampling step for BF16 models. is_replaced is built in Float32
+    // and cast back to the model dtype at the end, mirroring the widen-narrow
+    // policy used elsewhere.
+    if (gen_probs_cpu.dtype() != DType::Float32) {
+        gen_probs_cpu = gen_probs_cpu.to(DType::Float32);
+    }
+
+    // Create is_replaced on CPU in Float32 for the generic loop.
+    Tensor is_replaced_f32(shape_vec, DType::Float32, Device::cpu());
+    is_replaced_f32.zero_();
 
     const int64_t* mask_data = masked_positions_cpu.data<int64_t>();
     const int64_t* orig_data = original_tokens_cpu.data<int64_t>();
     int64_t* gen_data = generated_tokens_cpu.data<int64_t>();
+    float* repl_data = is_replaced_f32.data<float>();
+    const float* probs_data = gen_probs_cpu.data<const float>();
 
-    // Sample from generator for masked positions with dtype-specific handling
-    // For sampling, we convert probabilities to float32 as it doesn't require high precision
-    std::vector<float> float_probs(config_.vocab_size);
+    for (int64_t b = 0; b < batch_size; ++b) {
+        for (int64_t s = 0; s < seq_len; ++s) {
+            int64_t idx = b * seq_len + s;
 
-    if (dtype == DType::Float32) {
-        float* repl_data = is_replaced_cpu.data<float>();
-        auto probs_data = gen_probs_cpu.data<float>();
-
-        for (int64_t b = 0; b < batch_size; ++b) {
-            for (int64_t s = 0; s < seq_len; ++s) {
-                int64_t idx = b * seq_len + s;
-
-                if (mask_data[idx] == 1) {  // This position was masked
-                    const float* pos_probs = probs_data + idx * config_.vocab_size;
-                    int64_t sampled_token = sample_from_distribution(pos_probs, config_.vocab_size);
-                    gen_data[idx] = sampled_token;
-                    repl_data[idx] = (sampled_token != orig_data[idx]) ? 1.0f : 0.0f;
-                }
-            }
-        }
-    } else if (dtype == DType::Float64) {
-        double* repl_data = is_replaced_cpu.data<double>();
-        auto probs_data = gen_probs_cpu.data<double>();
-
-        for (int64_t b = 0; b < batch_size; ++b) {
-            for (int64_t s = 0; s < seq_len; ++s) {
-                int64_t idx = b * seq_len + s;
-
-                if (mask_data[idx] == 1) {
-                    // Convert double probabilities to float for sampling
-                    const double* pos_probs = probs_data + idx * config_.vocab_size;
-                    for (int64_t i = 0; i < config_.vocab_size; ++i) {
-                        float_probs[i] = static_cast<float>(pos_probs[i]);
-                    }
-                    int64_t sampled_token = sample_from_distribution(float_probs.data(), config_.vocab_size);
-                    gen_data[idx] = sampled_token;
-                    repl_data[idx] = (sampled_token != orig_data[idx]) ? 1.0 : 0.0;
-                }
-            }
-        }
-    } else if (dtype == DType::Float16) {
-        Float16* repl_data = is_replaced_cpu.data<Float16>();
-        auto probs_data = gen_probs_cpu.data<Float16>();
-        Float16 zero_f16(static_cast<uint16_t>(0x0000));  // Float16 representation of 0.0
-        Float16 one_f16(static_cast<uint16_t>(0x3C00));   // Float16 representation of 1.0
-
-        for (int64_t b = 0; b < batch_size; ++b) {
-            for (int64_t s = 0; s < seq_len; ++s) {
-                int64_t idx = b * seq_len + s;
-
-                if (mask_data[idx] == 1) {
-                    // Convert float16 probabilities to float for sampling
-                    const Float16* pos_probs = probs_data + idx * config_.vocab_size;
-                    for (int64_t i = 0; i < config_.vocab_size; ++i) {
-                        // Use Float16's conversion operator to float
-                        float_probs[i] = static_cast<float>(pos_probs[i]);
-                    }
-                    int64_t sampled_token = sample_from_distribution(float_probs.data(), config_.vocab_size);
-                    gen_data[idx] = sampled_token;
-                    repl_data[idx] = (sampled_token != orig_data[idx]) ? one_f16 : zero_f16;
-                }
+            if (mask_data[idx] == 1) {  // This position was masked
+                const float* pos_probs = probs_data + idx * config_.vocab_size;
+                int64_t sampled_token = sample_from_distribution(pos_probs, config_.vocab_size);
+                gen_data[idx] = sampled_token;
+                repl_data[idx] = (sampled_token != orig_data[idx]) ? 1.0f : 0.0f;
             }
         }
     }
+
+    // Cast is_replaced back to the model dtype.
+    Tensor is_replaced_cpu = (dtype == DType::Float32)
+        ? is_replaced_f32
+        : is_replaced_f32.to(dtype);
 
     // Transfer back to original device
     Tensor is_replaced = (target_device == Device::cpu())

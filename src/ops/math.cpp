@@ -866,12 +866,24 @@ auto renorm(const Tensor& input, double p, int64_t dim, double maxnorm) -> Tenso
 }
 
 auto isclose(const Tensor& a, const Tensor& b, double rtol, double atol) -> Tensor {
-    auto diff = tenzor::abs(tenzor::sub(a, b));
+    // For integral (or bool) inputs the rtol/atol scalars would be truncated to
+    // 0 in the input dtype, degenerating isclose into exact equality. Promote to
+    // a floating compute dtype (matching PyTorch) so tolerances are honoured.
+    Tensor ca = a;
+    Tensor cb = b;
+    if (!is_floating_type(a.dtype())) {
+        DType compute = (a.dtype() == DType::Float64 || b.dtype() == DType::Float64)
+                            ? DType::Float64
+                            : DType::Float32;
+        ca = a.to(compute);
+        cb = b.to(compute);
+    }
+    auto diff = tenzor::abs(tenzor::sub(ca, cb));
     auto tol = tenzor::add(
-        tenzor::full({1}, atol, a.dtype(), a.device()),
+        tenzor::full({1}, atol, ca.dtype(), ca.device()),
         tenzor::mul(
-            tenzor::full({1}, rtol, a.dtype(), a.device()),
-            tenzor::abs(b)));
+            tenzor::full({1}, rtol, ca.dtype(), ca.device()),
+            tenzor::abs(cb)));
     return tenzor::le(diff, tol);
 }
 
@@ -1002,10 +1014,42 @@ auto signbit(const Tensor& input) -> Tensor {
 }
 
 auto float_power(const Tensor& base, const Tensor& exponent) -> Tensor {
-    // Promote to Float64 for accuracy, then use exp(exponent * log(base))
+    // Promote to Float64 for accuracy. The magnitude is computed stably as
+    // |base|^exp = exp(exp * log|base|); we then restore the sign so that
+    // negative bases behave like PyTorch's torch.float_power:
+    //   - negative base, odd integer exponent  -> negative result
+    //   - negative base, even integer exponent  -> positive result
+    //   - negative base, non-integer exponent   -> NaN (real-valued result)
     auto base_f64 = base.to(DType::Float64);
     auto exp_f64 = exponent.to(DType::Float64);
-    return exp(exp_f64 * log(abs(base_f64)));
+
+    auto magnitude = exp(exp_f64 * log(abs(base_f64)));
+
+    Tensor zero = zeros_like(base_f64);
+    Tensor neg_mask = lt(base_f64, zero);  // base < 0
+
+    // Integer exponent? round(exp) == exp
+    Tensor exp_is_int = eq(round(exp_f64), exp_f64);
+    // Odd integer? fmod(exp, 2) != 0  (only meaningful when exp is integral)
+    Tensor two = full_like(exp_f64, 2.0);
+    Tensor exp_mod2 = fmod(exp_f64, two);
+    Tensor exp_is_odd = eq(abs(exp_mod2), full_like(exp_f64, 1.0));
+
+    // Sign for negative bases: -1 for odd-integer exponent, +1 for even-integer,
+    // NaN for non-integer exponent (real branch produces complex -> NaN).
+    Tensor nan_t = full_like(base_f64, std::numeric_limits<double>::quiet_NaN());
+    Tensor neg_one = full_like(base_f64, -1.0);
+    Tensor pos_one = ones_like(base_f64);
+
+    // sign_for_int: odd -> -1, even -> +1
+    Tensor sign_for_int = where(exp_is_odd, neg_one, pos_one);
+    // sign_for_neg_base: integer exponent -> sign_for_int, else NaN
+    Tensor sign_for_neg_base = where(exp_is_int, sign_for_int, nan_t);
+
+    // For non-negative bases the magnitude is already correct (sign = +1).
+    Tensor sign = where(neg_mask, sign_for_neg_base, pos_one);
+
+    return magnitude * sign;
 }
 
 auto xlog1py(const Tensor& x, const Tensor& y) -> Tensor {

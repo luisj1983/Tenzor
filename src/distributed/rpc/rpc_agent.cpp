@@ -652,32 +652,40 @@ int TcpRpcAgent::get_or_connect(int32_t peer_id) {
     }
     if (target.id != peer_id) return -1;
 
-    int fd = ::socket(AF_INET, SOCK_STREAM, 0);
-    if (fd < 0) return -1;
-
-    int one = 1;
-    ::setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
-
     sockaddr_in addr{};
     addr.sin_family = AF_INET;
     addr.sin_port = htons(static_cast<uint16_t>(target.port));
     if (::inet_pton(AF_INET, target.address.c_str(), &addr.sin_addr) != 1) {
-        ::close(fd);
         return -1;
     }
 
-    // Peer's listener may not be ready yet; retry for a few seconds.
+    // Peer's listener may not be ready yet; retry for a few seconds. Re-issuing
+    // ::connect() on the SAME blocking fd after a failed connect has
+    // undefined/portability-fragile behavior on Linux (the next call may return
+    // EALREADY/EISCONN/EADDRNOTAVAIL rather than cleanly retrying), and the
+    // SO_ERROR check can then read 0 on a socket that never finished
+    // connecting. Create a fresh socket per attempt and only keep an fd whose
+    // connect() actually returned 0 — matching RendezvousStore::connect_to_master
+    // and NCCLProcessGroup::bootstrap_unique_id.
+    int fd = -1;
     auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
-    while (std::chrono::steady_clock::now() < deadline) {
-        if (::connect(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) == 0) break;
-        std::this_thread::sleep_for(std::chrono::milliseconds(50));
-    }
-    // Verify connect succeeded.
-    int err = 0;
-    socklen_t errlen = sizeof(err);
-    if (::getsockopt(fd, SOL_SOCKET, SO_ERROR, &err, &errlen) != 0 || err != 0) {
+    for (;;) {
+        fd = ::socket(AF_INET, SOCK_STREAM, 0);
+        if (fd < 0) return -1;
+
+        int one = 1;
+        ::setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
+
+        if (::connect(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) == 0) {
+            break;  // connected
+        }
+
         ::close(fd);
-        return -1;
+        fd = -1;
+        if (std::chrono::steady_clock::now() >= deadline) {
+            return -1;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
     }
 
     {

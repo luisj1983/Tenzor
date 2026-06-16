@@ -1528,7 +1528,11 @@ void max_along_dim(const T* input_data,
     }
 }
 
-auto max_kernel(const Tensor& input, int64_t dim, bool keepdim) -> Tensor {
+auto max_kernel(const Tensor& input_raw, int64_t dim, bool keepdim) -> Tensor {
+    // Mirror sum_kernel: the REDUCE_ALL path reads input.data<T>()[i] assuming
+    // contiguous layout, which reads off a non-contiguous view's footprint.
+    // Materialize a contiguous copy once at entry so every dtype/dim path is safe.
+    auto input = input_raw.contiguous();
     const auto dtype = input.dtype();
     const auto& device = input.device();
     const auto& input_shape = input.shape();
@@ -1818,7 +1822,10 @@ void min_along_dim(const T* input_data,
     }
 }
 
-auto min_kernel(const Tensor& input, int64_t dim, bool keepdim) -> Tensor {
+auto min_kernel(const Tensor& input_raw, int64_t dim, bool keepdim) -> Tensor {
+    // Mirror sum_kernel: contiguify at entry so the REDUCE_ALL flat-pointer
+    // path does not read off a non-contiguous view's footprint.
+    auto input = input_raw.contiguous();
     const auto dtype = input.dtype();
     const auto& device = input.device();
     const auto& input_shape = input.shape();
@@ -2132,7 +2139,12 @@ void argmax_along_dim(const T* input_data,
     }
 }
 
-auto argmax_kernel(const Tensor& input, int64_t dim, bool keepdim) -> Tensor {
+auto argmax_kernel(const Tensor& input_raw, int64_t dim, bool keepdim) -> Tensor {
+    // Mirror sum_kernel: contiguify at entry. The REDUCE_ALL flat-pointer path
+    // (Float32/Float64/Int32/Int64/Float16/BFloat16 branches) previously read
+    // off a non-contiguous view's footprint; only some integer branches called
+    // .contiguous(). Doing it once here unifies every dtype/dim path.
+    auto input = input_raw.contiguous();
     // Argmax always returns Int64 indices
     auto input_shape_span = input.shape();
     std::vector<int64_t> input_shape_vec(input_shape_span.begin(), input_shape_span.end());
@@ -2190,9 +2202,15 @@ auto argmax_kernel(const Tensor& input, int64_t dim, bool keepdim) -> Tensor {
                         }
                         #pragma omp critical
                         {
-                            if (local_max > max_val || (local_max == max_val && local_idx < max_idx)) {
+                            // Deterministic tie-break: on equality keep the
+                            // lowest index regardless of thread merge order
+                            // (std::min is order-independent, unlike the prior
+                            // form that compared against the mutating max_idx).
+                            if (local_max > max_val) {
                                 max_val = local_max;
                                 max_idx = local_idx;
+                            } else if (local_max == max_val) {
+                                max_idx = std::min(max_idx, local_idx);
                             }
                         }
                     }
@@ -2435,7 +2453,10 @@ void argmin_along_dim(const T* input_data,
 }
 
 // Argmin kernel - returns indices of minimum values
-auto argmin_kernel(const Tensor& input, int64_t dim, bool keepdim) -> Tensor {
+auto argmin_kernel(const Tensor& input_raw, int64_t dim, bool keepdim) -> Tensor {
+    // Mirror sum_kernel: contiguify at entry so every dtype/dim path (including
+    // the REDUCE_ALL flat-pointer branches) is safe on non-contiguous views.
+    auto input = input_raw.contiguous();
     // Argmin always returns Int64 indices
     auto input_shape_span = input.shape();
     std::vector<int64_t> input_shape_vec(input_shape_span.begin(), input_shape_span.end());
@@ -2492,9 +2513,13 @@ auto argmin_kernel(const Tensor& input, int64_t dim, bool keepdim) -> Tensor {
                         }
                         #pragma omp critical
                         {
-                            if (local_min < min_val || (local_min == min_val && local_idx < min_idx)) {
+                            // Deterministic tie-break: on equality keep the
+                            // lowest index regardless of thread merge order.
+                            if (local_min < min_val) {
                                 min_val = local_min;
                                 min_idx = local_idx;
+                            } else if (local_min == min_val) {
+                                min_idx = std::min(min_idx, local_idx);
                             }
                         }
                     }
@@ -2576,9 +2601,13 @@ auto argmin_kernel(const Tensor& input, int64_t dim, bool keepdim) -> Tensor {
                         }
                         #pragma omp critical
                         {
-                            if (local_min < min_val || (local_min == min_val && local_idx < min_idx)) {
+                            // Deterministic tie-break: on equality keep the
+                            // lowest index regardless of thread merge order.
+                            if (local_min < min_val) {
                                 min_val = local_min;
                                 min_idx = local_idx;
+                            } else if (local_min == min_val) {
+                                min_idx = std::min(min_idx, local_idx);
                             }
                         }
                     }
@@ -3013,7 +3042,10 @@ void prod_along_dim(const T* input_data,
 }
 
 // Public API for product
-auto prod_kernel(const Tensor& input, int64_t dim, bool keepdim) -> Tensor {
+auto prod_kernel(const Tensor& input_raw, int64_t dim, bool keepdim) -> Tensor {
+    // Mirror sum_kernel: contiguify at entry so the REDUCE_ALL flat-pointer
+    // path does not read off a non-contiguous view's footprint.
+    auto input = input_raw.contiguous();
     auto shape_span = input.shape();
     std::vector<int64_t> input_shape(shape_span.begin(), shape_span.end());
     const int64_t ndim = static_cast<int64_t>(input_shape.size());
@@ -3162,7 +3194,10 @@ void var_along_dim(const T* input_data,
 }
 
 // Variance using two-pass algorithm for numerical stability
-auto var_kernel(const Tensor& input, int64_t dim, bool keepdim, int64_t correction) -> Tensor {
+auto var_kernel(const Tensor& input_raw, int64_t dim, bool keepdim, int64_t correction) -> Tensor {
+    // Mirror sum_kernel: contiguify at entry so the REDUCE_ALL full-reduction
+    // loop does not read off a non-contiguous view's footprint.
+    auto input = input_raw.contiguous();
     auto shape_span = input.shape();
     std::vector<int64_t> input_shape(shape_span.begin(), shape_span.end());
     const int64_t ndim = static_cast<int64_t>(input_shape.size());

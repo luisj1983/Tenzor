@@ -22,6 +22,14 @@ auto fp8_max_value(DType fp8_dtype) -> float {
         // E5M2: max = 2^(2^4 - 1) * (1 + 3/4) = 57344.0
         return 57344.0f;
     }
+    if (fp8_dtype == DType::FP8_E4M3FNUZ) {
+        // E4M3FNUZ: max = 2^(2^3 - 1) * (1 + 7/8) = 448.0
+        return 448.0f;
+    }
+    if (fp8_dtype == DType::FP8_E5M2FNUZ) {
+        // E5M2FNUZ: max = 2^(2^4 - 1) * (1 + 3/4) = 57344.0
+        return 57344.0f;
+    }
     throw std::invalid_argument(
         "fp8_max_value: expected FP8_E4M3 or FP8_E5M2, got " +
         std::string(dtype_name(fp8_dtype)));
@@ -48,7 +56,8 @@ auto compute_fp8_scale(float amax, DType fp8_dtype) -> float {
 auto quantize_to_fp8(const Tensor& input, DType fp8_dtype,
                      std::optional<float> scale,
                      bool stochastic_rounding) -> std::pair<Tensor, FP8ScalingParams> {
-    if (fp8_dtype != DType::FP8_E4M3 && fp8_dtype != DType::FP8_E5M2) {
+    if (fp8_dtype != DType::FP8_E4M3 && fp8_dtype != DType::FP8_E5M2 &&
+        fp8_dtype != DType::FP8_E4M3FNUZ && fp8_dtype != DType::FP8_E5M2FNUZ) {
         throw std::invalid_argument(
             "quantize_to_fp8: expected FP8_E4M3 or FP8_E5M2, got " +
             std::string(dtype_name(fp8_dtype)));

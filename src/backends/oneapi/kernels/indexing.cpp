@@ -1816,25 +1816,39 @@ auto scatter_reduce_kernel(const Tensor& input, int64_t dim, const Tensor& index
     int64_t ndim = output.shape().size();
     if (dim < 0) dim += ndim;
     auto shape = output.shape();
-    int64_t dim_size = shape[dim];
-    // Phase 7.6 2D scatter fix: idx_n must be the index tensor's size along
-    // the scatter dim, NOT the total numel. For 1D scatter these are equal.
-    int64_t idx_n = (index.shape().size() > static_cast<size_t>(dim))
-                  ? static_cast<int64_t>(index.shape()[dim])
-                  : index.numel();
 
-    int64_t outer = 1, inner = 1;
-    for (int64_t d = 0; d < dim; d++) outer *= shape[d];
-    for (int64_t d = dim + 1; d < ndim; d++) inner *= shape[d];
+    // index and source share the SAME (index) shape, which may have SMALLER
+    // trailing dims than self. We must therefore iterate index.numel() items
+    // and stride index/source by the INDEX shape, while the destination offset
+    // is computed with the OUTPUT (self) strides and the scatter-dim coordinate
+    // replaced by idx_ptr[flat]. Mirrors scatter_add_kernel / the CPU reference;
+    // deriving the iteration count or src indexing from self's collapsed
+    // outer/inner (the old code) over-reads index/source out of bounds.
+    Tensor index_c  = index.is_contiguous()  ? index  : index.contiguous();
+    Tensor source_c = source.is_contiguous() ? source : source.contiguous();
 
-    int64_t total = outer * idx_n * inner;
+    int64_t total = index_c.numel();
     if (total == 0) return output;
 
-    float* out_ptr = get_data_ptr<float>(output);
-    const float* src_ptr = get_data_ptr<const float>(source);
-    const int64_t* idx_ptr = get_data_ptr<const int64_t>(index);
+    auto idx_shape = index_c.shape();
+    std::vector<int64_t> idx_shape_vec(idx_shape.begin(), idx_shape.end());
 
-    // If !include_self, initialize touched positions to identity
+    // Output (self) strides and index strides, both row-major contiguous.
+    std::array<int64_t, 8> d_out_strides{}, d_idx_strides{};
+    { int64_t s = 1; for (int64_t i = ndim - 1; i >= 0; --i) { d_out_strides[i] = s; s *= shape[i]; } }
+    { int64_t s = 1; for (int64_t i = ndim - 1; i >= 0; --i) { d_idx_strides[i] = s; s *= idx_shape_vec[i]; } }
+
+    float* out_ptr = get_data_ptr<float>(output);
+    const float* src_ptr = get_data_ptr<const float>(source_c);
+    const int64_t* idx_ptr = get_data_ptr<const int64_t>(index_c);
+
+    // Decode the flat index-space position into the full output offset:
+    // for each dim, take the index-space coordinate, except along `dim` where
+    // the destination coordinate is idx_ptr[flat]. Defined as a device lambda
+    // re-derived inline in each kernel (SYCL lambdas cannot capture lambdas
+    // cleanly across kernels, so the body is duplicated per reduce mode).
+
+    // If !include_self, initialize touched positions to identity.
     if (!include_self) {
         float identity;
         if (reduce == "sum" || reduce == "mean") identity = 0.0f;
@@ -1844,21 +1858,21 @@ auto scatter_reduce_kernel(const Tensor& input, int64_t dim, const Tensor& index
         else throw std::invalid_argument("scatter_reduce: unknown reduce mode '" + reduce + "'");
 
         queue.parallel_for<ScatterReduceInitKernelF32>(sycl::range<1>(total), [=](sycl::id<1> tid) {
-            int64_t id = static_cast<int64_t>(tid);
-            int64_t o = id / (idx_n * inner);
-            int64_t k = (id / inner) % idx_n;
-            int64_t j = id % inner;
-            // Phase 7.6 2D scatter fix: index lookup must include outer/inner offsets.
-            int64_t idx_pos = (o * idx_n + k) * inner + j;
-            int64_t dst_offset = (o * dim_size + idx_ptr[idx_pos]) * inner + j;
+            int64_t flat = static_cast<int64_t>(tid[0]);
+            int64_t remaining = flat;
+            int64_t dst_offset = 0;
+            for (int64_t d = 0; d < ndim; ++d) {
+                int64_t coord = remaining / d_idx_strides[d];
+                remaining %= d_idx_strides[d];
+                dst_offset += (d == dim ? idx_ptr[flat] : coord) * d_out_strides[d];
+            }
             out_ptr[dst_offset] = identity;
         }).wait();
     }
 
-    // Allocate count buffer for mean mode
+    // Allocate count buffer for mean mode.
     int* count_ptr = nullptr;
     int64_t out_numel = output.numel();
-    float* count_buf = nullptr;
     int* count_alloc = nullptr;
     if (reduce == "mean") {
         count_alloc = sycl::malloc_device<int>(out_numel, queue);
@@ -1870,17 +1884,18 @@ auto scatter_reduce_kernel(const Tensor& input, int64_t dim, const Tensor& index
         int* cnt_ptr = count_ptr;
         bool is_mean = (reduce == "mean");
         queue.parallel_for<ScatterReduceSumKernelF32>(sycl::range<1>(total), [=](sycl::id<1> tid) {
-            int64_t id = static_cast<int64_t>(tid);
-            int64_t o = id / (idx_n * inner);
-            int64_t k = (id / inner) % idx_n;
-            int64_t j = id % inner;
-            // Phase 7.6 2D scatter fix: index lookup at the outer-aware offset.
-            int64_t src_offset = (o * idx_n + k) * inner + j;
-            int64_t dst_offset = (o * dim_size + idx_ptr[src_offset]) * inner + j;
+            int64_t flat = static_cast<int64_t>(tid[0]);
+            int64_t remaining = flat;
+            int64_t dst_offset = 0;
+            for (int64_t d = 0; d < ndim; ++d) {
+                int64_t coord = remaining / d_idx_strides[d];
+                remaining %= d_idx_strides[d];
+                dst_offset += (d == dim ? idx_ptr[flat] : coord) * d_out_strides[d];
+            }
             sycl::atomic_ref<float, sycl::memory_order::relaxed,
                              sycl::memory_scope::device,
                              sycl::access::address_space::global_space> ref(out_ptr[dst_offset]);
-            ref.fetch_add(src_ptr[src_offset]);
+            ref.fetch_add(src_ptr[flat]);
             if (is_mean && cnt_ptr) {
                 sycl::atomic_ref<int, sycl::memory_order::relaxed,
                                  sycl::memory_scope::device,
@@ -1890,14 +1905,15 @@ auto scatter_reduce_kernel(const Tensor& input, int64_t dim, const Tensor& index
         }).wait();
     } else if (reduce == "prod") {
         queue.parallel_for<ScatterReduceProdKernelF32>(sycl::range<1>(total), [=](sycl::id<1> tid) {
-            int64_t id = static_cast<int64_t>(tid);
-            int64_t o = id / (idx_n * inner);
-            int64_t k = (id / inner) % idx_n;
-            int64_t j = id % inner;
-            // Phase 7.6 2D scatter fix: index lookup at the outer-aware offset.
-            int64_t src_offset = (o * idx_n + k) * inner + j;
-            int64_t dst_offset = (o * dim_size + idx_ptr[src_offset]) * inner + j;
-            float val = src_ptr[src_offset];
+            int64_t flat = static_cast<int64_t>(tid[0]);
+            int64_t remaining = flat;
+            int64_t dst_offset = 0;
+            for (int64_t d = 0; d < ndim; ++d) {
+                int64_t coord = remaining / d_idx_strides[d];
+                remaining %= d_idx_strides[d];
+                dst_offset += (d == dim ? idx_ptr[flat] : coord) * d_out_strides[d];
+            }
+            float val = src_ptr[flat];
             sycl::atomic_ref<float, sycl::memory_order::relaxed,
                              sycl::memory_scope::device,
                              sycl::access::address_space::global_space> ref(out_ptr[dst_offset]);
@@ -1906,14 +1922,15 @@ auto scatter_reduce_kernel(const Tensor& input, int64_t dim, const Tensor& index
         }).wait();
     } else if (reduce == "amax") {
         queue.parallel_for<ScatterReduceAmaxKernelF32>(sycl::range<1>(total), [=](sycl::id<1> tid) {
-            int64_t id = static_cast<int64_t>(tid);
-            int64_t o = id / (idx_n * inner);
-            int64_t k = (id / inner) % idx_n;
-            int64_t j = id % inner;
-            // Phase 7.6 2D scatter fix: index lookup at the outer-aware offset.
-            int64_t src_offset = (o * idx_n + k) * inner + j;
-            int64_t dst_offset = (o * dim_size + idx_ptr[src_offset]) * inner + j;
-            float val = src_ptr[src_offset];
+            int64_t flat = static_cast<int64_t>(tid[0]);
+            int64_t remaining = flat;
+            int64_t dst_offset = 0;
+            for (int64_t d = 0; d < ndim; ++d) {
+                int64_t coord = remaining / d_idx_strides[d];
+                remaining %= d_idx_strides[d];
+                dst_offset += (d == dim ? idx_ptr[flat] : coord) * d_out_strides[d];
+            }
+            float val = src_ptr[flat];
             sycl::atomic_ref<float, sycl::memory_order::relaxed,
                              sycl::memory_scope::device,
                              sycl::access::address_space::global_space> ref(out_ptr[dst_offset]);
@@ -1924,14 +1941,15 @@ auto scatter_reduce_kernel(const Tensor& input, int64_t dim, const Tensor& index
         }).wait();
     } else if (reduce == "amin") {
         queue.parallel_for<ScatterReduceAminKernelF32>(sycl::range<1>(total), [=](sycl::id<1> tid) {
-            int64_t id = static_cast<int64_t>(tid);
-            int64_t o = id / (idx_n * inner);
-            int64_t k = (id / inner) % idx_n;
-            int64_t j = id % inner;
-            // Phase 7.6 2D scatter fix: index lookup at the outer-aware offset.
-            int64_t src_offset = (o * idx_n + k) * inner + j;
-            int64_t dst_offset = (o * dim_size + idx_ptr[src_offset]) * inner + j;
-            float val = src_ptr[src_offset];
+            int64_t flat = static_cast<int64_t>(tid[0]);
+            int64_t remaining = flat;
+            int64_t dst_offset = 0;
+            for (int64_t d = 0; d < ndim; ++d) {
+                int64_t coord = remaining / d_idx_strides[d];
+                remaining %= d_idx_strides[d];
+                dst_offset += (d == dim ? idx_ptr[flat] : coord) * d_out_strides[d];
+            }
+            float val = src_ptr[flat];
             sycl::atomic_ref<float, sycl::memory_order::relaxed,
                              sycl::memory_scope::device,
                              sycl::access::address_space::global_space> ref(out_ptr[dst_offset]);

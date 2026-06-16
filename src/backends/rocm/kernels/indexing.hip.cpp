@@ -776,98 +776,12 @@ __global__ void masked_select_count_kernel(
     }
 }
 
-template<typename T>
-__global__ void masked_select_kernel(
-    const T* input,
-    const bool* mask,
-    T* output,
-    int64_t* output_idx,
-    int64_t total_elements
-) {
-    HIP_KERNEL_LOOP(idx, total_elements) {
-        if (mask[idx]) {
-            int64_t out_idx = atomicAddHelper(output_idx, static_cast<int64_t>(1));
-            output[out_idx] = input[idx];
-        }
-    }
-}
-
-auto masked_select_hip(
-    const Tensor& input,
-    const Tensor& mask
-) -> Tensor {
-
-    int64_t total_elements = input.numel();
-
-    // First pass: count how many elements match the mask
-    int64_t* d_count;
-    HIP_CHECK(hipMalloc(&d_count, sizeof(int64_t)));
-    HIP_CHECK(hipMemset(d_count, 0, sizeof(int64_t)));
-
-    int threads = 256;
-    int blocks = (total_elements + threads - 1) / threads;
-
-    if (input.dtype() == DType::Float32) {
-        hipLaunchKernelGGL(masked_select_count_kernel<float>,
-            dim3(blocks), dim3(threads), 0, 0,
-            mask.data<bool>(),
-            d_count,
-            total_elements
-        );
-        HIP_POST_LAUNCH_CHECK();
-    } else if (input.dtype() == DType::Float64) {
-        hipLaunchKernelGGL(masked_select_count_kernel<double>,
-            dim3(blocks), dim3(threads), 0, 0,
-            mask.data<bool>(),
-            d_count,
-            total_elements
-        );
-        HIP_POST_LAUNCH_CHECK();
-    } else {
-        HIP_CHECK(hipFree(d_count));
-        throw std::runtime_error("masked_select_hip: Only Float32 and Float64 supported");
-    }
-
-    // Get count from device
-    int64_t h_count;
-    HIP_CHECK(hipMemcpy(&h_count, d_count, sizeof(int64_t), hipMemcpyDeviceToHost));
-
-    // Create output tensor
-    Tensor output = Tensor({h_count}, input.dtype(), input.device());
-
-    // Second pass: copy selected elements
-    int64_t* d_output_idx;
-    HIP_CHECK(hipMalloc(&d_output_idx, sizeof(int64_t)));
-    HIP_CHECK(hipMemset(d_output_idx, 0, sizeof(int64_t)));
-
-    if (input.dtype() == DType::Float32) {
-        hipLaunchKernelGGL(masked_select_kernel<float>,
-            dim3(blocks), dim3(threads), 0, 0,
-            input.data<float>(),
-            mask.data<bool>(),
-            output.data<float>(),
-            d_output_idx,
-            total_elements
-        );
-        HIP_POST_LAUNCH_CHECK();
-    } else if (input.dtype() == DType::Float64) {
-        hipLaunchKernelGGL(masked_select_kernel<double>,
-            dim3(blocks), dim3(threads), 0, 0,
-            input.data<double>(),
-            mask.data<bool>(),
-            output.data<double>(),
-            d_output_idx,
-            total_elements
-        );
-        HIP_POST_LAUNCH_CHECK();
-    }
-
-    HIP_CHECK(hipFree(d_count));
-    HIP_CHECK(hipFree(d_output_idx));
-    HIP_POST_LAUNCH_CHECK();
-
-    return output;
-}
+// Note: the order-preserving, all-dtype masked_select_hip(input, mask, stream)
+// lives further down (using hipcub DeviceSelect::Flagged). The previous
+// no-stream masked_select_hip + masked_select_kernel here were unreferenced
+// dead duplicates that launched on the default stream; removed to avoid
+// divergent edits. masked_select_count_kernel above is still used by the live
+// stream variant.
 
 // ==============================================================================
 // Take Operation (1D indexing)
@@ -896,67 +810,9 @@ __global__ void take_kernel(
     }
 }
 
-auto take_hip(
-    const Tensor& input,
-    const Tensor& indices
-) -> Tensor {
-
-    int64_t input_size = input.numel();
-    int64_t indices_size = indices.numel();
-
-    Tensor output = Tensor({indices_size}, input.dtype(), input.device());
-
-    int threads = 256;
-    int blocks = (indices_size + threads - 1) / threads;
-
-    if (input.dtype() == DType::Float32) {
-        hipLaunchKernelGGL(take_kernel<float>,
-            dim3(blocks), dim3(threads), 0, 0,
-            input.data<float>(),
-            indices.data<int64_t>(),
-            output.data<float>(),
-            input_size,
-            indices_size
-        );
-        HIP_POST_LAUNCH_CHECK();
-    } else if (input.dtype() == DType::Float64) {
-        hipLaunchKernelGGL(take_kernel<double>,
-            dim3(blocks), dim3(threads), 0, 0,
-            input.data<double>(),
-            indices.data<int64_t>(),
-            output.data<double>(),
-            input_size,
-            indices_size
-        );
-        HIP_POST_LAUNCH_CHECK();
-    } else if (input.dtype() == DType::Int32) {
-        hipLaunchKernelGGL(take_kernel<int32_t>,
-            dim3(blocks), dim3(threads), 0, 0,
-            input.data<int32_t>(),
-            indices.data<int64_t>(),
-            output.data<int32_t>(),
-            input_size,
-            indices_size
-        );
-        HIP_POST_LAUNCH_CHECK();
-    } else if (input.dtype() == DType::Int64) {
-        hipLaunchKernelGGL(take_kernel<int64_t>,
-            dim3(blocks), dim3(threads), 0, 0,
-            input.data<int64_t>(),
-            indices.data<int64_t>(),
-            output.data<int64_t>(),
-            input_size,
-            indices_size
-        );
-        HIP_POST_LAUNCH_CHECK();
-    } else {
-        throw std::runtime_error("take_hip: Unsupported dtype");
-    }
-
-    HIP_POST_LAUNCH_CHECK();
-
-    return output;
-}
+// Note: the live take_hip(input, indices, stream) overload lives further down
+// and reuses take_kernel above. The previous no-stream take_hip duplicate here
+// launched on the default stream and was unreferenced; removed.
 
 // ==============================================================================
 // Where Operation
@@ -3638,10 +3494,18 @@ template<typename T>
 __global__ void masked_scatter_write_hip_kernel(
     const T* __restrict__ input, const bool* __restrict__ mask,
     const T* __restrict__ source, const int64_t* __restrict__ prefix_sum,
-    T* __restrict__ output, int64_t numel)
+    T* __restrict__ output, int64_t numel, int64_t source_numel)
 {
     HIP_KERNEL_LOOP(i, numel) {
-        output[i] = mask[i] ? source[prefix_sum[i]] : input[i];
+        if (mask[i]) {
+            // Guard against a caller precondition violation (source has fewer
+            // elements than mask-true count): prefix_sum[i] could exceed
+            // source_numel and read out of bounds. Clamp the read instead.
+            int64_t s = prefix_sum[i];
+            output[i] = (s >= 0 && s < source_numel) ? source[s] : input[i];
+        } else {
+            output[i] = input[i];
+        }
     }
 }
 
@@ -3655,6 +3519,7 @@ __global__ void mask_to_int64_hip_kernel(const bool* __restrict__ mask, int64_t*
 auto masked_scatter_hip(const Tensor& input, const Tensor& mask,
                         const Tensor& source, hipStream_t stream) -> Tensor {
     int64_t numel = input.numel();
+    int64_t source_numel = source.numel();
     Tensor output(std::vector<int64_t>(input.shape().begin(), input.shape().end()),
                   input.dtype(), input.device());
     if (numel == 0) return output;
@@ -3683,22 +3548,22 @@ auto masked_scatter_hip(const Tensor& input, const Tensor& mask,
         case DType::Float32:
             masked_scatter_write_hip_kernel<float><<<blocks, BLOCK, 0, stream>>>(
                 input.data<float>(), mask.data<bool>(), source.data<float>(),
-                d_prefix, output.data<float>(), numel);
+                d_prefix, output.data<float>(), numel, source_numel);
             break;
         case DType::Float64:
             masked_scatter_write_hip_kernel<double><<<blocks, BLOCK, 0, stream>>>(
                 input.data<double>(), mask.data<bool>(), source.data<double>(),
-                d_prefix, output.data<double>(), numel);
+                d_prefix, output.data<double>(), numel, source_numel);
             break;
         case DType::Int32:
             masked_scatter_write_hip_kernel<int32_t><<<blocks, BLOCK, 0, stream>>>(
                 input.data<int32_t>(), mask.data<bool>(), source.data<int32_t>(),
-                d_prefix, output.data<int32_t>(), numel);
+                d_prefix, output.data<int32_t>(), numel, source_numel);
             break;
         case DType::Int64:
             masked_scatter_write_hip_kernel<int64_t><<<blocks, BLOCK, 0, stream>>>(
                 input.data<int64_t>(), mask.data<bool>(), source.data<int64_t>(),
-                d_prefix, output.data<int64_t>(), numel);
+                d_prefix, output.data<int64_t>(), numel, source_numel);
             break;
         default:
             HIP_CHECK(hipFree(d_prefix));

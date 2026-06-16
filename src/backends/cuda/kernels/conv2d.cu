@@ -1431,8 +1431,10 @@ __host__ __device__ inline int64_t calculate_transpose_output_size(
 }
 
 // ConvTranspose2d forward kernel using gather approach
-// Each thread computes one output element by gathering from all contributing input positions
-template<typename T>
+// Each thread computes one output element by gathering from all contributing input positions.
+// Acc is the accumulator type (defaults to T); Float32 dispatch uses Acc=double to match
+// conv3d's parity fix (a float accumulator drifts O(sqrt(N)) ULPs vs the CPU reference).
+template<typename T, typename Acc = T>
 __global__ void conv_transpose2d_forward_kernel_impl(
     const T* input,           // (batch, in_channels, in_h, in_w)
     const T* weight,          // (in_channels, out_channels/groups, kernel_h, kernel_w)
@@ -1472,8 +1474,8 @@ __global__ void conv_transpose2d_forward_kernel_impl(
         int64_t oc = c % out_channels_per_group;  // Output channel within group
         int64_t in_start = g * in_channels_per_group;
 
-        // Initialize accumulator using template type for proper precision
-        T sum = T(0);
+        // Initialize accumulator using the Acc type for proper precision
+        Acc sum = Acc(0);
 
         // Gather from all input positions that contribute to this output position
         for (int64_t ic = 0; ic < in_channels_per_group; ++ic) {
@@ -1509,7 +1511,7 @@ __global__ void conv_transpose2d_forward_kernel_impl(
                                                 kh * kernel_w + kw;
                             T weight_val = weight[weight_idx];
 
-                            sum += input_val * weight_val;
+                            sum += static_cast<Acc>(input_val) * static_cast<Acc>(weight_val);
                         }
                     }
                 }
@@ -1518,10 +1520,10 @@ __global__ void conv_transpose2d_forward_kernel_impl(
 
         // Add bias if present
         if (has_bias) {
-            sum += bias[c];
+            sum += static_cast<Acc>(bias[c]);
         }
 
-        output[idx] = sum;
+        output[idx] = static_cast<T>(sum);
     }
 }
 
@@ -1704,7 +1706,7 @@ auto conv_transpose2d_forward_kernel(
         const float* bias_ptr = has_bias ? bias->data<float>() : nullptr;
         float* output_ptr = output.data<float>();
 
-        conv_transpose2d_forward_kernel_impl<float><<<grid, block, 0, stream>>>(
+        conv_transpose2d_forward_kernel_impl<float, double><<<grid, block, 0, stream>>>(
             input_ptr, weight_ptr, bias_ptr, output_ptr,
             batch, in_channels, in_h, in_w,
             out_channels, out_h, out_w,
@@ -1981,6 +1983,25 @@ auto depthwise_conv2d_forward_kernel(
     int64_t dil_h, int64_t dil_w,
     cudaStream_t stream
 ) -> Tensor {
+    // BFloat16 has no dedicated depthwise kernel (only Float16 does). Widen to
+    // Float32, compute, then narrow back. Mirrors the widen path other conv2d
+    // entry points use; without this BF16 hit "unsupported dtype".
+    if (input.dtype() == DType::BFloat16) {
+        Tensor f_in = input.to(DType::Float32);
+        Tensor f_w = weight.to(DType::Float32);
+        if (bias != nullptr) {
+            Tensor f_bias = bias->to(DType::Float32);
+            return depthwise_conv2d_forward_kernel(
+                f_in, f_w, &f_bias,
+                stride_h, stride_w, pad_h, pad_w, dil_h, dil_w, stream
+            ).to(DType::BFloat16);
+        }
+        return depthwise_conv2d_forward_kernel(
+            f_in, f_w, nullptr,
+            stride_h, stride_w, pad_h, pad_w, dil_h, dil_w, stream
+        ).to(DType::BFloat16);
+    }
+
     auto input_shape = input.shape();
     auto weight_shape = weight.shape();
 

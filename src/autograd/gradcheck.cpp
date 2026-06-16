@@ -55,6 +55,28 @@ auto extract_scalar(const Tensor& tensor) -> double {
     throw std::runtime_error("Cannot extract scalar from non-scalar tensor");
 }
 
+/**
+ * @brief Extract a real scalar from a (possibly complex) scalar tensor.
+ *
+ * For real dtypes this is identical to extract_scalar. For complex dtypes it
+ * mirrors the first-order gradcheck contraction L = Σ Re(y) + Σ Im(y): a
+ * scalar complex output y is reduced to Re(y) + Im(y). This lets the
+ * second-order finite-difference path in gradgradcheck_detailed evaluate
+ * complex-valued scalar functions instead of throwing in extract_scalar.
+ */
+auto extract_scalar_real_contraction(const Tensor& tensor) -> double {
+    if (tensor.ndim() == 0 || tensor.numel() == 1) {
+        if (tensor.dtype() == DType::Complex64) {
+            auto v = tensor.item<std::complex<float>>();
+            return static_cast<double>(v.real()) + static_cast<double>(v.imag());
+        } else if (tensor.dtype() == DType::Complex128) {
+            auto v = tensor.item<std::complex<double>>();
+            return v.real() + v.imag();
+        }
+    }
+    return extract_scalar(tensor);
+}
+
 } // anonymous namespace
 
 auto numerical_gradient(
@@ -643,7 +665,7 @@ auto gradgradcheck_detailed(
             Variable xv(input_cpu, false);
             Variable fv = scalar_func(xv);
             auto fv_cpu = fv.tensor().to(Device::cpu());
-            f_center = extract_scalar(fv_cpu);
+            f_center = extract_scalar_real_contraction(fv_cpu);
         }
 
         std::vector<double> h_direct(n);
@@ -661,8 +683,8 @@ auto gradgradcheck_detailed(
             Variable fm = scalar_func(Variable(minus, false));
             auto fp_t = fp.tensor().to(Device::cpu());
             auto fm_t = fm.tensor().to(Device::cpu());
-            double fp_v = extract_scalar(fp_t);
-            double fm_v = extract_scalar(fm_t);
+            double fp_v = extract_scalar_real_contraction(fp_t);
+            double fm_v = extract_scalar_real_contraction(fm_t);
             h_direct[i] = (fp_v - 2.0 * f_center + fm_v) / (eps * eps);
         }
 

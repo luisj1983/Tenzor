@@ -2194,10 +2194,18 @@ __global__ void put_kernel_impl<int8_t>(
         }
         if (target_idx >= 0 && target_idx < total_size) {
             if (accumulate) {
-                // CAS loop on the aligned 32-bit word containing this byte
-                unsigned int byte_offset = static_cast<unsigned int>(target_idx) & 3u;
+                // CAS loop on the aligned 32-bit word containing this byte. The
+                // word base is shifted down so the 4-byte access never runs past
+                // the buffer end when total_size % 4 != 0 and target_idx is in the
+                // last 1-3 bytes (previously a 3-byte heap OOB read+write).
+                int64_t word_base = target_idx & ~static_cast<int64_t>(3);
+                if (word_base + 4 > total_size) {
+                    word_base = total_size - 4;
+                }
+                if (word_base < 0) word_base = 0;  // buffer smaller than 4 bytes
+                unsigned int byte_offset = static_cast<unsigned int>(target_idx - word_base);
                 unsigned int* addr = reinterpret_cast<unsigned int*>(
-                    reinterpret_cast<char*>(output) + (target_idx - byte_offset));
+                    reinterpret_cast<char*>(output) + word_base);
                 unsigned int old_val, new_val;
                 do {
                     old_val = atomicCAS(addr, 0u, 0u);  // Atomic initial read
@@ -2230,9 +2238,16 @@ __global__ void put_kernel_impl<uint8_t>(
         }
         if (target_idx >= 0 && target_idx < total_size) {
             if (accumulate) {
-                unsigned int byte_offset = static_cast<unsigned int>(target_idx) & 3u;
+                // Shift the aligned word base down so the 4-byte access never
+                // runs past the buffer end (see int8_t specialization).
+                int64_t word_base = target_idx & ~static_cast<int64_t>(3);
+                if (word_base + 4 > total_size) {
+                    word_base = total_size - 4;
+                }
+                if (word_base < 0) word_base = 0;  // buffer smaller than 4 bytes
+                unsigned int byte_offset = static_cast<unsigned int>(target_idx - word_base);
                 unsigned int* addr = reinterpret_cast<unsigned int*>(
-                    reinterpret_cast<char*>(output) + (target_idx - byte_offset));
+                    reinterpret_cast<char*>(output) + word_base);
                 unsigned int old_val, new_val;
                 do {
                     old_val = atomicCAS(addr, 0u, 0u);  // Atomic initial read
@@ -2534,6 +2549,19 @@ auto embedding_bag_forward_kernel(const Tensor& embeddings, const Tensor& offset
 
     bool is_mean = (mode == "mean");
     bool is_max = (mode == "max");
+
+    // sum/mean over a half-precision bag must accumulate in Float32 (matches the
+    // CPU reference, which upcasts Float16/BFloat16, accumulates in Float32, then
+    // downcasts). A half accumulator loses precision and overflows to inf far
+    // sooner. Widen here, run the Float32 sum kernel, then narrow the output.
+    // Max mode is fine in half (no accumulation), so it is left on the native path.
+    if (!is_max && (embeddings.dtype() == DType::Float16 || embeddings.dtype() == DType::BFloat16)) {
+        auto widened = embedding_bag_forward_kernel(
+            embeddings.to(DType::Float32), offsets, mode, embedding_dim,
+            include_last_offset, stream);
+        widened[0] = widened[0].to(embeddings.dtype());
+        return widened;
+    }
 
     if (num_bags <= 0) {
         return {tenzor::zeros({0, embedding_dim}, embeddings.dtype(), embeddings.device()),

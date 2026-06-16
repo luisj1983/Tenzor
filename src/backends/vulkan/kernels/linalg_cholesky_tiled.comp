@@ -23,7 +23,7 @@ void main() {
     uint panel_rows = n - col_start;
 
     // Load panel into shared memory
-    for (uint r = tid; r < panel_rows; r += 256) {
+    for (uint r = tid; r < panel_rows; r += gl_WorkGroupSize.x) {
         for (uint c = 0; c < panel_cols; c++) {
             panel[r][c] = A[base + (col_start + r) * n + (col_start + c)];
         }
@@ -46,7 +46,7 @@ void main() {
         float inv_diag = 1.0 / diag;
 
         // Compute sub-diagonal elements in column k
-        for (uint r = k + 1 + tid; r < panel_rows; r += 256) {
+        for (uint r = k + 1 + tid; r < panel_rows; r += gl_WorkGroupSize.x) {
             float sum = panel[r][k];
             for (uint j = 0; j < k; j++) {
                 sum -= panel[r][j] * panel[k][j];
@@ -57,7 +57,7 @@ void main() {
     }
 
     // Write panel back
-    for (uint r = tid; r < panel_rows; r += 256) {
+    for (uint r = tid; r < panel_rows; r += gl_WorkGroupSize.x) {
         for (uint c = 0; c < panel_cols; c++) {
             A[base + (col_start + r) * n + (col_start + c)] = panel[r][c];
         }

@@ -31,19 +31,29 @@ float readBF16(uint element_idx) {
     return uintBitsToFloat(bits << 16u);
 }
 
+// Write a single BF16 element via a bounded atomicCompSwap loop. The output
+// buffer is packed 2 x bf16 per uint32 and adjacent output elements (handled by
+// different workgroups running concurrently) share a word, so a plain
+// read-modify-write would race and clobber the neighbouring half-word.
 void writeBF16(uint element_idx, float value) {
     uint word_idx = element_idx / 2u;
     uint word_offset = element_idx % 2u;
     uint v = floatBitsToUint(value);
     // Round-to-nearest-even when truncating from float32 to bf16.
-    uint bits = ((v + 0x7FFFu + ((v >> 16) & 1u)) >> 16);
-    if (word_offset == 0u) {
-        uint existing = output_data[word_idx] & 0xFFFF0000u;
-        output_data[word_idx] = existing | bits;
-    } else {
-        uint existing = output_data[word_idx] & 0x0000FFFFu;
-        output_data[word_idx] = existing | (bits << 16u);
+    uint bits = ((v + 0x7FFFu + ((v >> 16) & 1u)) >> 16) & 0xFFFFu;
+    uint shift = word_offset * 16u;
+    uint mask = 0xFFFFu << shift;
+
+    uint old_val = output_data[word_idx];
+    uint new_val, expected;
+    for (uint iter = 0u; iter < 65536u; iter++) {
+        expected = old_val;
+        new_val = (expected & ~mask) | (bits << shift);
+        old_val = atomicCompSwap(output_data[word_idx], expected, new_val);
+        if (old_val == expected) return;
     }
+    // Saturation: do NOT fall back to a non-atomic store — it would clobber
+    // the neighbouring packed half-word written by the adjacent workgroup.
 }
 
 void welford_merge(inout double meanA, inout double m2A, inout uint countA,

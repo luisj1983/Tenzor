@@ -13,6 +13,7 @@
 #include <cmath>
 #include <stdexcept>
 #include <algorithm>
+#include <random>
 
 namespace tenzor {
 namespace models {
@@ -681,7 +682,8 @@ auto T5ForConditionalGeneration::load_pretrained(const std::string& path, bool s
 auto T5ForConditionalGeneration::generate(const Variable& input_ids,
                                            int64_t max_length,
                                            double temperature,
-                                           int64_t bos_token_id) -> Tensor {
+                                           int64_t bos_token_id,
+                                           const Tensor& attention_mask) -> Tensor {
     // Simple greedy generation (can be extended with beam search, sampling, etc.)
     auto batch_size = input_ids.shape()[0];
     auto device = input_ids.tensor().device();
@@ -705,7 +707,7 @@ auto T5ForConditionalGeneration::generate(const Variable& input_ids,
     // encoder ONCE up front and feed the cached memory into the decoder every
     // step. Previously generate() called the combined encoder-decoder forward
     // each iteration, re-running the full encoder O(max_length) times.
-    auto encoder_output = t5_->encoder()->forward(input_ids, Tensor{});
+    auto encoder_output = t5_->encoder()->forward(input_ids, attention_mask);
     auto decoder = t5_->decoder();
 
     // Per-row EOS early-stop. Once a row emits eos_token_id it is "finished";
@@ -719,7 +721,7 @@ auto T5ForConditionalGeneration::generate(const Variable& input_ids,
         Variable decoder_ids(generated, false);
         // Decode against the cached encoder memory, then project with the LM
         // head — equivalent to the combined forward() but without re-encoding.
-        auto decoder_output = decoder->forward(decoder_ids, encoder_output, Tensor{}, Tensor{});
+        auto decoder_output = decoder->forward(decoder_ids, encoder_output, Tensor{}, attention_mask);
         auto logits = lm_head_->forward(decoder_output);
 
         // Get logits for last position
@@ -779,17 +781,25 @@ auto T5ForConditionalGeneration::generate(const Variable& input_ids,
             }
         }
 
-        // Greedy: argmax (host-side over CPU last_logits)
+        // Widen the (temperature-scaled) last logits to Float32 once for a
+        // dtype-generic selection step.
+        Tensor last_logits_f32 = (logits_dtype == DType::Float32)
+            ? last_logits
+            : last_logits.to(DType::Float32);
+        const float* logits_data = last_logits_f32.data<const float>();
+
         Tensor next_tokens({batch_size, 1}, DType::Int64, Device::cpu());
         auto* tokens_data = next_tokens.data<int64_t>();
 
-        if (logits_dtype == DType::Float16) {
-            auto* logits_data = last_logits.data<Float16>();
+        if (temperature == 1.0) {
+            // Greedy: argmax (host-side over CPU last_logits). argmax is
+            // invariant to a positive temperature scale, so the only honest
+            // greedy path is temperature == 1.0.
             for (int64_t b = 0; b < batch_size; ++b) {
                 int64_t max_idx = 0;
-                float max_val = float(logits_data[b * vocab_size]);
+                float max_val = logits_data[b * vocab_size];
                 for (int64_t v = 1; v < vocab_size; ++v) {
-                    float val = float(logits_data[b * vocab_size + v]);
+                    float val = logits_data[b * vocab_size + v];
                     if (val > max_val) {
                         max_val = val;
                         max_idx = v;
@@ -797,31 +807,35 @@ auto T5ForConditionalGeneration::generate(const Variable& input_ids,
                 }
                 tokens_data[b] = max_idx;
             }
-        } else if (logits_dtype == DType::Float32) {
-            auto* logits_data = last_logits.data<float>();
+        } else {
+            // True temperature sampling: softmax over the temperature-scaled
+            // logits (the scaling was applied above) followed by a categorical
+            // draw, so temperature actually changes the produced tokens.
+            static thread_local std::mt19937 rng{std::random_device{}()};
+            std::uniform_real_distribution<float> uniform(0.0f, 1.0f);
             for (int64_t b = 0; b < batch_size; ++b) {
-                int64_t max_idx = 0;
-                float max_val = logits_data[b * vocab_size];
+                const float* row = logits_data + b * vocab_size;
+                // Numerically stable softmax.
+                float max_val = row[0];
                 for (int64_t v = 1; v < vocab_size; ++v) {
-                    if (logits_data[b * vocab_size + v] > max_val) {
-                        max_val = logits_data[b * vocab_size + v];
-                        max_idx = v;
+                    if (row[v] > max_val) max_val = row[v];
+                }
+                float sum_exp = 0.0f;
+                for (int64_t v = 0; v < vocab_size; ++v) {
+                    sum_exp += std::exp(row[v] - max_val);
+                }
+                // Inverse-CDF categorical sample.
+                float threshold = uniform(rng) * sum_exp;
+                float cumulative = 0.0f;
+                int64_t sampled = vocab_size - 1;
+                for (int64_t v = 0; v < vocab_size; ++v) {
+                    cumulative += std::exp(row[v] - max_val);
+                    if (cumulative >= threshold) {
+                        sampled = v;
+                        break;
                     }
                 }
-                tokens_data[b] = max_idx;
-            }
-        } else if (logits_dtype == DType::Float64) {
-            auto* logits_data = last_logits.data<double>();
-            for (int64_t b = 0; b < batch_size; ++b) {
-                int64_t max_idx = 0;
-                double max_val = logits_data[b * vocab_size];
-                for (int64_t v = 1; v < vocab_size; ++v) {
-                    if (logits_data[b * vocab_size + v] > max_val) {
-                        max_val = logits_data[b * vocab_size + v];
-                        max_idx = v;
-                    }
-                }
-                tokens_data[b] = max_idx;
+                tokens_data[b] = sampled;
             }
         }
 

@@ -15,7 +15,9 @@ layout(push_constant) uniform PushConstants {
     uint n_cols;
 };
 
-shared float partial_sums[256];
+// Sized to the maximum supported workgroup size (optimalWorkgroupSize caps at
+// 1024). The actual workgroup size is the runtime spec constant gl_WorkGroupSize.x.
+shared float partial_sums[1024];
 
 void main() {
     uint row = gl_WorkGroupID.x;
@@ -26,9 +28,10 @@ void main() {
     uint row_end = uint(row_offsets[row + 1]);
     uint row_nnz = row_end - row_start;
 
-    // Each thread accumulates partial products
+    // Each thread accumulates partial products, striding by the actual
+    // workgroup size (not a hardcoded 256) so every lane gets distinct work.
     float sum = 0.0;
-    for (uint i = tid; i < row_nnz; i += 256) {
+    for (uint i = tid; i < row_nnz; i += gl_WorkGroupSize.x) {
         uint idx = row_start + i;
         sum += values[idx] * x[col_indices[idx]];
     }
@@ -36,9 +39,14 @@ void main() {
     partial_sums[tid] = sum;
     barrier();
 
-    // Parallel reduction
-    for (uint stride = 128; stride > 0; stride >>= 1) {
-        if (tid < stride) {
+    // Parallel reduction over all active lanes. Start at the largest power of
+    // two >= workgroup size so lanes >= the first power-of-two boundary are
+    // folded in; entries at/above gl_WorkGroupSize.x are treated as 0.
+    uint stride = 1u;
+    while (stride < gl_WorkGroupSize.x) stride <<= 1;
+    stride >>= 1;
+    for (; stride > 0u; stride >>= 1) {
+        if (tid < stride && (tid + stride) < gl_WorkGroupSize.x) {
             partial_sums[tid] += partial_sums[tid + stride];
         }
         barrier();

@@ -17,6 +17,12 @@
 
 namespace tenzor::core {
 
+struct MemoryBlock;
+
+/// Size-ordered index of free blocks: size -> block, enabling O(log N)
+/// best-fit lookup instead of an O(N) scan over every (free + allocated) block.
+using FreeBlockIndex = std::multimap<size_t, MemoryBlock*>;
+
 /**
  * @brief Memory block metadata for free-list management
  */
@@ -26,6 +32,12 @@ struct MemoryBlock {
     bool is_free;           // Whether this block is available
     MemoryBlock* next;      // Next block in list
     MemoryBlock* prev;      // Previous block in list
+
+    // When is_free is true, this iterator points at this block's entry in the
+    // allocator's free_blocks_ index; otherwise it is unset (== index end()).
+    // Stored per-block so the index entry can be erased/updated in O(log N).
+    FreeBlockIndex::iterator free_it{};
+    bool indexed{false};    // Whether free_it currently references a live entry
 
     MemoryBlock(void* p, size_t s, bool free = true)
         : ptr(p), size(s), is_free(free), next(nullptr), prev(nullptr) {}
@@ -50,13 +62,13 @@ struct PinnedMemoryStats {
  * @brief Fast pinned memory allocator for CPU<->GPU transfers
  *
  * Uses cudaHostAlloc to pre-allocate a large pool of pinned (page-locked)
- * memory. Provides allocation using a best-fit free-list algorithm
- * (an O(n) scan over block_map_ for the smallest fitting free block, with an
- * early exit on an exact-size match).
+ * memory. Provides allocation using a best-fit free-list algorithm backed by a
+ * size-ordered index of free blocks (free_blocks_), giving O(log N) best-fit
+ * lookup instead of an O(N) scan over every block.
  * Thread-safe with automatic coalescing of adjacent free blocks.
  *
  * Key features:
- * - Best-fit allocation from a pre-allocated pool (O(n) scan over block_map_)
+ * - Best-fit allocation from a pre-allocated pool (O(log N) via free_blocks_)
  * - Automatic coalescing of adjacent free blocks
  * - Thread-safe operations
  * - Defragmentation support
@@ -205,6 +217,23 @@ private:
     auto find_best_fit(size_t size) -> MemoryBlock*;
 
     /**
+     * @brief Register a block in the size-ordered free index.
+     *
+     * Marks the block as free and inserts it into free_blocks_ so subsequent
+     * best-fit lookups can find it in O(log N). Safe to call when already
+     * indexed (no-op re-insert is avoided via the indexed flag).
+     */
+    auto index_free_block(MemoryBlock* block) -> void;
+
+    /**
+     * @brief Remove a block from the size-ordered free index.
+     *
+     * Erases the block's entry from free_blocks_ (O(log N)) if it is present.
+     * Does not change block->is_free; callers update that as appropriate.
+     */
+    auto unindex_free_block(MemoryBlock* block) -> void;
+
+    /**
      * @brief Split block into allocated and free portions
      * @param block Block to split
      * @param size Size to allocate from block
@@ -263,6 +292,11 @@ private:
     // Free list management
     MemoryBlock* free_list_head_;            // Head of global free list
     std::map<void*, std::unique_ptr<MemoryBlock>> block_map_; // Map pointer -> block (owns lifetime)
+
+    // Size-ordered index of free blocks for O(log N) best-fit allocation.
+    // Mirrors the free subset of block_map_; kept in sync via
+    // index_free_block() / unindex_free_block().
+    FreeBlockIndex free_blocks_;
 
     // Statistics tracking
     std::atomic<size_t> total_allocated_;    // Total bytes allocated

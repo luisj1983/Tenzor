@@ -90,7 +90,7 @@ void main() {
 
         float dot = dot_val;
 
-        for (uint r = col + 1 + tid; r < n; r += 256) {
+        for (uint r = col + 1 + tid; r < n; r += gl_WorkGroupSize.x) {
             float v_r = readF16(elem_base + r * n + col);
             float cur = readF16(elem_base + r * n + j);
             writeF16(elem_base + r * n + j, cur - left_tau * v_r * dot);
@@ -121,7 +121,7 @@ void main() {
 
         float dot = dot_val;
 
-        for (uint c = col + 2 + tid; c < n; c += 256) {
+        for (uint c = col + 2 + tid; c < n; c += gl_WorkGroupSize.x) {
             float v_r = readF16(elem_base + col * n + c);
             float cur = readF16(elem_base + j * n + c);
             writeF16(elem_base + j * n + c, cur - right_tau * dot * v_r);

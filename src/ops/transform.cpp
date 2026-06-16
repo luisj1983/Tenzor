@@ -1067,6 +1067,9 @@ auto dstack(const std::vector<Tensor>& tensors) -> Tensor {
 }
 
 auto tensor_split(const Tensor& input, int64_t sections, int64_t dim) -> std::vector<Tensor> {
+    if (sections <= 0) {
+        throw std::invalid_argument("tensor_split: number of sections must be positive");
+    }
     const auto& shape = input.shape();
     int64_t ndim = static_cast<int64_t>(shape.size());
     if (dim < 0) dim += ndim;

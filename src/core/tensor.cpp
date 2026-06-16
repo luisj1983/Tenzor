@@ -897,10 +897,12 @@ auto Tensor::to(DType dtype) const -> Tensor {
                 } else {
                     dst_ptr[i] = static_cast<DstT>(intermediate);
                 }
-            } else if constexpr (std::is_same_v<SrcT, FP8_E4M3> || std::is_same_v<SrcT, FP8_E5M2>) {
+            } else if constexpr (std::is_same_v<SrcT, FP8_E4M3> || std::is_same_v<SrcT, FP8_E5M2> ||
+                                 std::is_same_v<SrcT, FP8_E4M3FNUZ> || std::is_same_v<SrcT, FP8_E5M2FNUZ>) {
                 // Convert FP8 to float, then to target type
                 float intermediate = static_cast<float>(src_ptr[i]);
-                if constexpr (std::is_same_v<DstT, FP8_E4M3> || std::is_same_v<DstT, FP8_E5M2>) {
+                if constexpr (std::is_same_v<DstT, FP8_E4M3> || std::is_same_v<DstT, FP8_E5M2> ||
+                              std::is_same_v<DstT, FP8_E4M3FNUZ> || std::is_same_v<DstT, FP8_E5M2FNUZ>) {
                     dst_ptr[i] = DstT(intermediate);
                 } else if constexpr (std::is_same_v<DstT, Float16> || std::is_same_v<DstT, BFloat16>) {
                     dst_ptr[i] = DstT(intermediate);
@@ -911,7 +913,8 @@ auto Tensor::to(DType dtype) const -> Tensor {
                 } else {
                     dst_ptr[i] = static_cast<DstT>(intermediate);
                 }
-            } else if constexpr (std::is_same_v<DstT, FP8_E4M3> || std::is_same_v<DstT, FP8_E5M2>) {
+            } else if constexpr (std::is_same_v<DstT, FP8_E4M3> || std::is_same_v<DstT, FP8_E5M2> ||
+                                 std::is_same_v<DstT, FP8_E4M3FNUZ> || std::is_same_v<DstT, FP8_E5M2FNUZ>) {
                 // Convert source to float, then to FP8
                 float intermediate;
                 if constexpr (std::is_same_v<SrcT, std::complex<float>>) {
@@ -974,6 +977,8 @@ auto Tensor::to(DType dtype) const -> Tensor {
                 case DType::Complex128: convert_elements.template operator()<SrcT, std::complex<double>>(); break; \
                 case DType::FP8_E4M3: convert_elements.template operator()<SrcT, FP8_E4M3>(); break; \
                 case DType::FP8_E5M2: convert_elements.template operator()<SrcT, FP8_E5M2>(); break; \
+                case DType::FP8_E4M3FNUZ: convert_elements.template operator()<SrcT, FP8_E4M3FNUZ>(); break; \
+                case DType::FP8_E5M2FNUZ: convert_elements.template operator()<SrcT, FP8_E5M2FNUZ>(); break; \
                 default: break; \
             } \
             break; \
@@ -998,6 +1003,8 @@ auto Tensor::to(DType dtype) const -> Tensor {
         DISPATCH_SRC_DTYPE(DType::Complex128, std::complex<double>)
         DISPATCH_SRC_DTYPE(DType::FP8_E4M3, FP8_E4M3)
         DISPATCH_SRC_DTYPE(DType::FP8_E5M2, FP8_E5M2)
+        DISPATCH_SRC_DTYPE(DType::FP8_E4M3FNUZ, FP8_E4M3FNUZ)
+        DISPATCH_SRC_DTYPE(DType::FP8_E5M2FNUZ, FP8_E5M2FNUZ)
         // Quantized source/dest pairs are rejected at the top of Tensor::to(DType)
         // so no case for QInt8/QUInt8/QInt4x2 is reachable here.
         default:
@@ -1262,6 +1269,8 @@ auto Tensor::fill_(double value) -> Tensor& {
                 case DType::Complex128: *reinterpret_cast<std::complex<double>*>(base + offset) = std::complex<double>(static_cast<double>(value), 0.0); break;
                 case DType::FP8_E4M3: *reinterpret_cast<FP8_E4M3*>(base + offset) = FP8_E4M3(static_cast<float>(value)); break;
                 case DType::FP8_E5M2: *reinterpret_cast<FP8_E5M2*>(base + offset) = FP8_E5M2(static_cast<float>(value)); break;
+                case DType::FP8_E4M3FNUZ: *reinterpret_cast<FP8_E4M3FNUZ*>(base + offset) = FP8_E4M3FNUZ(static_cast<float>(value)); break;
+                case DType::FP8_E5M2FNUZ: *reinterpret_cast<FP8_E5M2FNUZ*>(base + offset) = FP8_E5M2FNUZ(static_cast<float>(value)); break;
                 case DType::QInt8:
                     if (q_scale() == 0.0) {
                         throw std::runtime_error(
@@ -1381,6 +1390,8 @@ auto Tensor::fill_(double value) -> Tensor& {
         case DType::Complex128: std::fill_n(data<std::complex<double>>(), n, std::complex<double>(static_cast<double>(value), 0.0)); break;
         case DType::FP8_E4M3: std::fill_n(data<FP8_E4M3>(), n, FP8_E4M3(static_cast<float>(value))); break;
         case DType::FP8_E5M2: std::fill_n(data<FP8_E5M2>(), n, FP8_E5M2(static_cast<float>(value))); break;
+        case DType::FP8_E4M3FNUZ: std::fill_n(data<FP8_E4M3FNUZ>(), n, FP8_E4M3FNUZ(static_cast<float>(value))); break;
+        case DType::FP8_E5M2FNUZ: std::fill_n(data<FP8_E5M2FNUZ>(), n, FP8_E5M2FNUZ(static_cast<float>(value))); break;
         case DType::QInt8:
             if (q_scale() == 0.0) {
                 throw std::runtime_error(

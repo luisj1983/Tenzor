@@ -1454,6 +1454,14 @@ auto linalg_inv_kernel(const Tensor& A, cudaStream_t stream) -> Tensor {
 // ============================================================================
 
 auto linalg_solve_kernel(const Tensor& A, const Tensor& B, cudaStream_t stream) -> Tensor {
+    // cuSOLVER getrf/getrs only support Float32/Float64/Complex64/Complex128.
+    // Widen Float16/BFloat16 to Float32, solve, then narrow back to the
+    // original dtype. Mirrors linalg_cholesky/lu/lu_solve/solve_triangular and
+    // the !TENZOR_HAS_CUSOLVER fallback; without this the half buffer was
+    // returned unsolved (silent wrong result).
+    if (A.dtype() == DType::Float16 || A.dtype() == DType::BFloat16) {
+        return linalg_solve_kernel(A.to(DType::Float32), B.to(DType::Float32), stream).to(A.dtype());
+    }
     // cuSolver interprets inputs column-major. Tenzor stores row-major.
     // Transposing via .transpose(-1,-2).contiguous() produces row-major
     // storage of A^T, which cuSolver reads as col-major equal to A. Solve
@@ -1546,6 +1554,8 @@ auto linalg_solve_kernel(const Tensor& A, const Tensor& B, cudaStream_t stream) 
                 a_mat, n, d_ipiv, b_mat, n, d_info.ptr));
             check_cusolver_info(d_info.ptr, "solve");
         }
+    } else {
+        throw std::invalid_argument("linalg::solve: unsupported dtype");
     }
 
     // (Phase 7.2) Redundant trailing sync removed; check_cusolver_info above

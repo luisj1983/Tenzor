@@ -21,7 +21,8 @@ namespace cpu {
 
 /// Returns true if the dtype is an FP8 type.
 inline bool is_fp8(DType dt) {
-    return dt == DType::FP8_E4M3 || dt == DType::FP8_E5M2;
+    return dt == DType::FP8_E4M3 || dt == DType::FP8_E5M2 ||
+           dt == DType::FP8_E4M3FNUZ || dt == DType::FP8_E5M2FNUZ;
 }
 
 /**

@@ -50,7 +50,9 @@ auto VulkanBackend::dispatchBinaryOp(const std::string& op_name,
     // FP8 has insufficient precision for direct math; upcast to Float32, compute,
     // then downcast back. The native shaders have no FP8 paths.
     if (a.dtype() == DType::FP8_E4M3 || a.dtype() == DType::FP8_E5M2 ||
-        b.dtype() == DType::FP8_E4M3 || b.dtype() == DType::FP8_E5M2) {
+        a.dtype() == DType::FP8_E4M3FNUZ || a.dtype() == DType::FP8_E5M2FNUZ ||
+        b.dtype() == DType::FP8_E4M3 || b.dtype() == DType::FP8_E5M2 ||
+        b.dtype() == DType::FP8_E4M3FNUZ || b.dtype() == DType::FP8_E5M2FNUZ) {
         DType orig = a.dtype();
         Tensor a_f32 = (a.dtype() == DType::Float32) ? a : a.to(DType::Float32);
         Tensor b_f32 = (b.dtype() == DType::Float32) ? b : b.to(DType::Float32);
@@ -114,6 +116,11 @@ auto VulkanBackend::dispatchBinaryOp(const std::string& op_name,
 
         if (!same_shape) {
             // Broadcasting path: use complex_math_broadcast / complex_math_broadcast_f64 shaders
+            // The broadcast push-constant block holds strides_a[8]/strides_b[8]/
+            // shape_out[8]; reject >8-D inputs that would overflow those arrays.
+            if (output_shape.size() > 8 || shape_a_vec.size() > 8 || shape_b_vec.size() > 8) {
+                throw std::runtime_error("Vulkan broadcast supports at most 8 dimensions");
+            }
             std::string shader_name = is_complex128 ? "complex_math_broadcast_f64" : "complex_math_broadcast";
             auto* pipeline = getPipeline(shader_name, device_id);
 
@@ -319,6 +326,12 @@ auto VulkanBackend::dispatchBinaryOp(const std::string& op_name,
         return output;
     } else {
         // Broadcasting path: use math_broadcast shader
+        // The broadcast push-constant block holds strides_a[8]/strides_b[8]/
+        // shape_out[8]; tensors with more than 8 dimensions would set ndim>8
+        // while the arrays silently truncate, producing wrong index decoding.
+        if (output_shape.size() > 8 || shape_a_vec.size() > 8 || shape_b_vec.size() > 8) {
+            throw std::runtime_error("Vulkan broadcast supports at most 8 dimensions");
+        }
         // Select shader based on dtype
         bool is_float64 = (a.dtype() == DType::Float64);
         bool is_float16 = (a.dtype() == DType::Float16);
@@ -1686,7 +1699,8 @@ auto VulkanBackend::dispatchMatmul(const Tensor& a_raw, const Tensor& b_raw) -> 
     }
 
     // FP8: no native FP8 matmul shader; widen to Float32 and downcast result
-    if (a.dtype() == DType::FP8_E4M3 || a.dtype() == DType::FP8_E5M2) {
+    if (a.dtype() == DType::FP8_E4M3 || a.dtype() == DType::FP8_E5M2 ||
+        a.dtype() == DType::FP8_E4M3FNUZ || a.dtype() == DType::FP8_E5M2FNUZ) {
         DType orig_dtype = a.dtype();
         auto a_f32 = a.to(DType::Float32);
         auto b_f32 = b.to(DType::Float32);

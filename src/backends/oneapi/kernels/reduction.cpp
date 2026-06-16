@@ -609,7 +609,9 @@ auto mean_kernel(const Tensor& input, int64_t dim, bool keepdim, sycl::queue& qu
         // Full reduction: mean of all elements
         const int64_t total_size = in_cont.numel();
 
-        // Handle empty tensor: mean of empty = NaN (0/0)
+        // Handle empty tensor: mean of empty = NaN (0/0). The caching allocator
+        // does not zero memory, so every floating/complex dtype must explicitly
+        // write NaN (PyTorch parity) rather than leaving garbage.
         if (total_size == 0) {
             if (in_cont.dtype() == DType::Float32) {
                 float* out_ptr = get_data_ptr<float>(output);
@@ -619,6 +621,24 @@ auto mean_kernel(const Tensor& input, int64_t dim, bool keepdim, sycl::queue& qu
                 double* out_ptr = get_data_ptr<double>(output);
                 double nan_val = std::numeric_limits<double>::quiet_NaN();
                 queue.memcpy(out_ptr, &nan_val, sizeof(double)).wait();
+            } else if (in_cont.dtype() == DType::Float16) {
+                // IEEE-754 half quiet-NaN bit pattern (sign 0, exp all 1s, msb of mantissa set)
+                uint16_t nan_bits = 0x7E00;
+                queue.memcpy(get_data_ptr<sycl::half>(output), &nan_bits, sizeof(uint16_t)).wait();
+            } else if (in_cont.dtype() == DType::BFloat16) {
+                // bfloat16 quiet-NaN bit pattern (exp all 1s, msb of mantissa set)
+                uint16_t nan_bits = 0x7FC0;
+                queue.memcpy(get_data_ptr<uint16_t>(output), &nan_bits, sizeof(uint16_t)).wait();
+            } else if (in_cont.dtype() == DType::Complex64) {
+                float* out_ptr = get_data_ptr<float>(output);
+                float nan_pair[2] = {std::numeric_limits<float>::quiet_NaN(),
+                                     std::numeric_limits<float>::quiet_NaN()};
+                queue.memcpy(out_ptr, nan_pair, 2 * sizeof(float)).wait();
+            } else if (in_cont.dtype() == DType::Complex128) {
+                double* out_ptr = get_data_ptr<double>(output);
+                double nan_pair[2] = {std::numeric_limits<double>::quiet_NaN(),
+                                      std::numeric_limits<double>::quiet_NaN()};
+                queue.memcpy(out_ptr, nan_pair, 2 * sizeof(double)).wait();
             }
             return output;
         }

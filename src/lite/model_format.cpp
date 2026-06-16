@@ -85,7 +85,7 @@ auto read_pod(const uint8_t* buffer, size_t size, size_t& offset, T& out) -> voi
 
 auto read_bytes(const uint8_t* buffer, size_t size, size_t& offset,
                 void* dst, size_t n) -> void {
-    if (offset + n > size) {
+    if (offset > size || n > size - offset) {
         throw std::runtime_error("TZLiteReader: unexpected end of buffer");
     }
     std::memcpy(dst, buffer + offset, n);

@@ -41,7 +41,7 @@ void main() {
 
         float64_t dot = dot_val;
 
-        for (uint r = k + 1 + tid; r < panel_rows; r += 256) {
+        for (uint r = k + 1 + tid; r < panel_rows; r += gl_WorkGroupSize.x) {
             A[base + (col_start + r) * n + j] -= tau_k * A[base + (col_start + r) * n + col] * dot;
         }
         if (tid == 0) {

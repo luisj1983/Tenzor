@@ -70,6 +70,31 @@ auto checked_dtype(uint32_t raw, const std::string& name) -> DType {
     return dt;
 }
 
+// Two checkpoint tensors are "byte identical" when they share dtype, shape,
+// and raw contiguous bytes. Used to distinguish a replicated parameter (FSDP/
+// DDP saves the same tensor into every rank's shard — e.g. norm weights,
+// biases, buffers) from a genuinely dim-0-sharded parameter. Tensors come
+// straight out of deserialize_state(), which always builds contiguous CPU
+// tensors, so a flat memcmp over numel*elem_size bytes is valid.
+auto tensors_byte_identical(const Tensor& a, const Tensor& b) -> bool {
+    if (a.dtype() != b.dtype()) {
+        return false;
+    }
+    if (a.ndim() != b.ndim()) {
+        return false;
+    }
+    for (int64_t d = 0; d < a.ndim(); ++d) {
+        if (a.shape()[d] != b.shape()[d]) {
+            return false;
+        }
+    }
+    auto nbytes = static_cast<size_t>(a.numel()) * dtype_size(a.dtype());
+    if (nbytes == 0) {
+        return true;  // both empty with matching shape/dtype
+    }
+    return std::memcmp(a.data_ptr(), b.data_ptr(), nbytes) == 0;
+}
+
 } // anonymous namespace
 
 // ============================================================================
@@ -236,20 +261,43 @@ auto DistributedCheckpoint::load(
 
     // Gather all parameter names from the first shard
     for (auto& [name, tensor] : all_shards[0]) {
-        // Check if this is a sharded parameter (present in all shards
-        // with matching shapes except dim 0)
-        bool is_sharded = true;
+        // A parameter is a candidate for dim-0 resharding only when it is
+        // present in EVERY shard file. If it is missing from any shard it
+        // cannot have been row-sharded across all ranks, so this rank just
+        // takes shard 0's copy.
+        bool present_in_all = true;
         for (size_t i = 1; i < all_shards.size(); ++i) {
-            auto it = all_shards[i].find(name);
-            if (it == all_shards[i].end()) {
-                is_sharded = false;
+            if (!all_shards[i].contains(name)) {
+                present_in_all = false;
                 break;
             }
         }
 
-        if (!is_sharded || all_shards.size() == 1) {
-            // Not sharded or only one shard — this rank takes it as-is
-            // For replicated tensors, just copy from shard 0
+        // Presence-in-all-shards is NOT sufficient to conclude the parameter
+        // is row-sharded: FSDP/DDP write replicated tensors (norm weights,
+        // biases, buffers) identically into every rank's shard. Treating those
+        // as dim-0 sharded would cat() world_size× too many rows and then slice
+        // a 1/world_size band back out — silently corrupting both data and
+        // shape. Distinguish the two by content: a replicated parameter is
+        // byte-identical across all shards, a row-sharded one is not (the rows
+        // differ, or the per-rank dim-0 lengths differ).
+        bool is_sharded = present_in_all && all_shards.size() > 1;
+        if (is_sharded) {
+            for (size_t i = 1; i < all_shards.size(); ++i) {
+                if (!tensors_byte_identical(tensor, all_shards[i].at(name))) {
+                    break;  // genuinely sharded: contents/shape differ
+                }
+                if (i + 1 == all_shards.size()) {
+                    // Reached the last shard with every comparison identical →
+                    // replicated, not sharded.
+                    is_sharded = false;
+                }
+            }
+        }
+
+        if (!is_sharded) {
+            // Replicated, single-shard, or not-present-in-all — this rank
+            // takes the parameter as-is from shard 0.
             result[name] = tensor;
             continue;
         }

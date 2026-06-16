@@ -46,6 +46,11 @@
 namespace tenzor {
 namespace onnx {
 
+// Forward declaration: defined below at namespace scope but used by
+// proto_to_ir_tensor (in the anonymous namespace) to size sub-32-bit
+// int32_data initializers.
+auto onnx_to_dtype(ONNXDataType onnx_dtype) -> DType;
+
 // ============================================================================
 // Protobuf → Internal IR conversion
 // ============================================================================
@@ -186,9 +191,31 @@ auto proto_to_ir_tensor(const tenzor_onnx::TensorProto& t,
         std::memcpy(tensor.raw_data.data(), t.float_data().data(),
                     tensor.raw_data.size());
     } else if (!t.int32_data().empty()) {
-        tensor.raw_data.resize(static_cast<size_t>(t.int32_data_size()) * sizeof(int32_t));
-        std::memcpy(tensor.raw_data.data(), t.int32_data().data(),
-                    tensor.raw_data.size());
+        // Per the ONNX TensorProto spec, the int32_data field stores one logical
+        // value per int32 not only for INT32, but also for the sub-32-bit dtypes
+        // FLOAT16, BFLOAT16, INT8, INT16, UINT8, UINT16, BOOL and the FP8
+        // variants (each packed into the low bits of an int32). When the target
+        // element is narrower than 4 bytes we must narrow each value to its real
+        // storage width, otherwise to_tensor() rejects the 4-bytes-per-element
+        // blob as a size mismatch.
+        const size_t count = static_cast<size_t>(t.int32_data_size());
+        const size_t elem_size = dtype_size(onnx_to_dtype(tensor.dtype));
+        tensor.raw_data.resize(count * elem_size);
+        const auto& src = t.int32_data();
+        if (elem_size == sizeof(int32_t)) {
+            std::memcpy(tensor.raw_data.data(), src.data(), tensor.raw_data.size());
+        } else {
+            // Little-endian: the low `elem_size` bytes of each int32 hold the
+            // narrowed value (e.g. uint16 bit pattern for Float16/BFloat16/Int16,
+            // uint8 for Int8/UInt8/Bool/FP8).
+            for (size_t i = 0; i < count; ++i) {
+                const auto v = static_cast<uint32_t>(src[static_cast<int>(i)]);
+                for (size_t b = 0; b < elem_size; ++b) {
+                    tensor.raw_data[i * elem_size + b] =
+                        static_cast<uint8_t>((v >> (8 * b)) & 0xFFu);
+                }
+            }
+        }
     } else if (!t.int64_data().empty()) {
         tensor.raw_data.resize(static_cast<size_t>(t.int64_data_size()) * sizeof(int64_t));
         std::memcpy(tensor.raw_data.data(), t.int64_data().data(),
@@ -336,14 +363,17 @@ auto onnx_to_dtype(ONNXDataType onnx_dtype) -> DType {
         case ONNXDataType::INT64: return DType::Int64;
         case ONNXDataType::UINT8: return DType::UInt8;
         case ONNXDataType::BOOL: return DType::Bool;
-        // ONNX opset 20+ Float8 variants. FNUZ ("no negative zero / finite,
-        // unsigned zero") share the same underlying bit width as the IEEE
-        // E4M3FN / E5M2 encodings; Tenzor's FP8 types carry the bit pattern
-        // verbatim, so we map both ONNX flavours to the matching Tenzor dtype.
+        // ONNX opset 20+ Float8 variants. The IEEE FN encodings (E4M3FN /
+        // E5M2) share Tenzor's FP8 bit layout, so the 8-bit pattern can be
+        // carried verbatim. The FNUZ variants ("finite, unsigned zero") use a
+        // DIFFERENT exponent bias and have no signed zero / no infinity, so the
+        // same 8-bit pattern denotes a different numeric value. Aliasing them to
+        // the IEEE FN dtypes would silently misinterpret every stored value, so
+        // we reject them explicitly rather than import corrupted data.
         case ONNXDataType::FLOAT8E4M3FN:   return DType::FP8_E4M3;
-        case ONNXDataType::FLOAT8E4M3FNUZ: return DType::FP8_E4M3;
         case ONNXDataType::FLOAT8E5M2:     return DType::FP8_E5M2;
-        case ONNXDataType::FLOAT8E5M2FNUZ: return DType::FP8_E5M2;
+        case ONNXDataType::FLOAT8E4M3FNUZ: return DType::FP8_E4M3FNUZ;
+        case ONNXDataType::FLOAT8E5M2FNUZ: return DType::FP8_E5M2FNUZ;
         default:
             throw std::runtime_error("Unsupported ONNX data type for import");
     }
@@ -2152,8 +2182,11 @@ auto ONNXImporter::convert_maxpool(const ONNXImportNode& node) -> std::shared_pt
     if (kernel_shape.size() == 2) {
         // Per-axis kernel/stride/pad — anisotropic pooling must not be
         // collapsed to the H-axis values only.
+        // ONNX-spec default for 'strides' is 1 along each spatial axis (NOT
+        // kernel_shape; that is PyTorch MaxPool2d's default). Models that omit
+        // strides expect a stride-1 sliding window.
         auto strides = node.get_attr("strides").value_or(ONNXAttribute{}).get_ints(
-            {kernel_shape[0], kernel_shape[1]});
+            std::vector<int64_t>(kernel_shape.size(), 1));
         auto pads = node.get_attr("pads").value_or(ONNXAttribute{}).get_ints({0, 0, 0, 0});
         bool ceil_mode = node.get_attr("ceil_mode").value_or(ONNXAttribute{}).get_int(0) != 0;
 
@@ -2184,8 +2217,10 @@ auto ONNXImporter::convert_avgpool(const ONNXImportNode& node) -> std::shared_pt
     }
 
     if (kernel_shape.size() == 2) {
+        // ONNX-spec default for 'strides' is 1 along each spatial axis (NOT
+        // kernel_shape; that is PyTorch AvgPool2d's default).
         auto strides = node.get_attr("strides").value_or(ONNXAttribute{}).get_ints(
-            {kernel_shape[0], kernel_shape[1]});
+            std::vector<int64_t>(kernel_shape.size(), 1));
         auto pads = node.get_attr("pads").value_or(ONNXAttribute{}).get_ints({0, 0, 0, 0});
         // ONNX default count_include_pad is 0 (exclude pad), unlike PyTorch's
         // AvgPool2d default of true.
@@ -2975,6 +3010,8 @@ auto ONNXImporter::convert_quantize_linear(const ONNXImportNode& node) -> void {
             // Saturating-cast to the FP8 dtype after clamping the rounded value.
             case DType::FP8_E4M3: sat_lo =     -448.0; sat_hi =     448.0; break;
             case DType::FP8_E5M2: sat_lo =   -57344.0; sat_hi =   57344.0; break;
+            case DType::FP8_E4M3FNUZ: sat_lo =   -240.0; sat_hi =     240.0; break;
+            case DType::FP8_E5M2FNUZ: sat_lo = -57344.0; sat_hi =   57344.0; break;
             default:
                 throw std::runtime_error(
                     std::string("ONNX QuantizeLinear: output dtype ") +
@@ -2983,8 +3020,12 @@ auto ONNXImporter::convert_quantize_linear(const ONNXImportNode& node) -> void {
         }
     }
 
-    auto result = clamp(rounded, static_cast<float>(sat_lo),
-                                  static_cast<float>(sat_hi)).to(out_dtype);
+    // Pass the saturation bounds as double (clamp's native parameter type) and
+    // do NOT narrow them through float first: static_cast<float>(2147483647.0)
+    // rounds up to 2147483648.0f (24-bit float mantissa), which would clamp the
+    // Int32 max to a value that overflows INT32_MAX and wraps to INT32_MIN on
+    // the subsequent .to(Int32) cast.
+    auto result = clamp(rounded, sat_lo, sat_hi).to(out_dtype);
     register_output(node.outputs[0], result);
     log(std::string("Converted QuantizeLinear: ") + node.outputs[0] +
         " (output dtype " + std::string(dtype_name(out_dtype)) + ")");

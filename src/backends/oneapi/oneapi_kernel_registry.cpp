@@ -1051,13 +1051,27 @@ static void strided_scatter_copy(sycl::queue& q,
 // FP8 emulation helpers
 // ============================================================================
 static bool is_fp8(DType dt) {
-    return dt == DType::FP8_E4M3 || dt == DType::FP8_E5M2;
+    return dt == DType::FP8_E4M3 || dt == DType::FP8_E5M2 ||
+           dt == DType::FP8_E4M3FNUZ || dt == DType::FP8_E5M2FNUZ;
+}
+
+static bool is_fp8_fnuz(DType dt) {
+    return dt == DType::FP8_E4M3FNUZ || dt == DType::FP8_E5M2FNUZ;
 }
 
 static DType fp8_result_dtype(DType a, DType b) {
     // Type promotion: FP8 + FP8 → wider FP8, FP8 + Float → Float
     if (!is_fp8(a)) return a;
     if (!is_fp8(b)) return b;
+    // FNUZ and IEEE FP8 are distinct families (different exponent bias); keep
+    // promotion within a family. A mixed IEEE/FNUZ pair has no shared FP8
+    // representation, so widen to the common Float32 compute type.
+    if (is_fp8_fnuz(a) != is_fp8_fnuz(b)) return DType::Float32;
+    if (is_fp8_fnuz(a)) {
+        // E5M2FNUZ has wider range than E4M3FNUZ.
+        if (a == DType::FP8_E5M2FNUZ || b == DType::FP8_E5M2FNUZ) return DType::FP8_E5M2FNUZ;
+        return DType::FP8_E4M3FNUZ;
+    }
     // E5M2 has wider range than E4M3
     if (a == DType::FP8_E5M2 || b == DType::FP8_E5M2) return DType::FP8_E5M2;
     return DType::FP8_E4M3;
@@ -1097,6 +1111,8 @@ static DType parse_dtype(const OpAttributes& attrs) {
     if (s == "complex128") return DType::Complex128;
     if (s == "fp8_e4m3")   return DType::FP8_E4M3;
     if (s == "fp8_e5m2")   return DType::FP8_E5M2;
+    if (s == "fp8_e4m3fnuz") return DType::FP8_E4M3FNUZ;
+    if (s == "fp8_e5m2fnuz") return DType::FP8_E5M2FNUZ;
     if (s == "qint8")      return DType::QInt8;
     if (s == "quint8")     return DType::QUInt8;
     if (s == "qint4x2")    return DType::QInt4x2;

@@ -112,6 +112,9 @@ private:
 // Cache for SDPA graph plans to avoid rebuilding for same shapes
 // ============================================================================
 struct SDPACacheKey {
+    int device;        // cuDNN frontend execution plans are bound to the handle/
+                       // device they were built on; key per device so a graph
+                       // built for device 0 is never executed on device 1's handle.
     int64_t batch;
     int64_t num_heads;
     int64_t seq_len_q;
@@ -122,7 +125,8 @@ struct SDPACacheKey {
     bool causal;       // M4: causal flag is part of the graph build, must key the cache.
 
     bool operator==(const SDPACacheKey& other) const {
-        return batch == other.batch && num_heads == other.num_heads &&
+        return device == other.device &&
+               batch == other.batch && num_heads == other.num_heads &&
                seq_len_q == other.seq_len_q && seq_len_k == other.seq_len_k &&
                head_dim == other.head_dim && dtype == other.dtype &&
                scale == other.scale && causal == other.causal;
@@ -131,15 +135,16 @@ struct SDPACacheKey {
 
 struct SDPACacheKeyHash {
     size_t operator()(const SDPACacheKey& k) const {
-        // Simple hash combining all dimensions, dtype, scale, and causal flag.
-        size_t h = std::hash<int64_t>{}(k.batch);
-        h ^= std::hash<int64_t>{}(k.num_heads) << 1;
-        h ^= std::hash<int64_t>{}(k.seq_len_q) << 2;
-        h ^= std::hash<int64_t>{}(k.seq_len_k) << 3;
-        h ^= std::hash<int64_t>{}(k.head_dim) << 4;
-        h ^= std::hash<uint8_t>{}(static_cast<uint8_t>(k.dtype)) << 5;
-        h ^= std::hash<float>{}(k.scale) << 6;
-        h ^= std::hash<bool>{}(k.causal) << 7;
+        // Simple hash combining device, all dimensions, dtype, scale, and causal.
+        size_t h = std::hash<int>{}(k.device);
+        h ^= std::hash<int64_t>{}(k.batch) << 1;
+        h ^= std::hash<int64_t>{}(k.num_heads) << 2;
+        h ^= std::hash<int64_t>{}(k.seq_len_q) << 3;
+        h ^= std::hash<int64_t>{}(k.seq_len_k) << 4;
+        h ^= std::hash<int64_t>{}(k.head_dim) << 5;
+        h ^= std::hash<uint8_t>{}(static_cast<uint8_t>(k.dtype)) << 6;
+        h ^= std::hash<float>{}(k.scale) << 7;
+        h ^= std::hash<bool>{}(k.causal) << 8;
         return h;
     }
 };
@@ -544,7 +549,11 @@ auto cudnn_sdpa_forward(
     // Key for this exact shape + dtype + scale + causal. The causal flag changes
     // the cuDNN graph (mask op fused into softmax), so it must key the cache to
     // avoid silently reusing a non-causal graph for a causal call.
-    SDPACacheKey cache_key{batch, num_heads, seq_len_q, seq_len_k, head_dim, Q.dtype(), scale, causal};
+    // Include the device index: cuDNN frontend execution plans (and the
+    // check_support/build negative-cache result, which can differ per arch) are
+    // tied to the handle/device they were built on, so an identical shape on a
+    // different GPU must get its own cache entry.
+    SDPACacheKey cache_key{Q.device().index, batch, num_heads, seq_len_q, seq_len_k, head_dim, Q.dtype(), scale, causal};
 
     // Negative cache: if cuDNN previously failed validation/build for THIS exact
     // shape, skip the (expensive) graph build and fall back to the custom kernel.

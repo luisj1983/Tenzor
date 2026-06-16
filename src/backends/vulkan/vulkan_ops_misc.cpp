@@ -52,7 +52,8 @@ auto VulkanBackend::dispatchFull(const std::vector<int64_t>& shape, double value
     bool is_complex64 = (dtype == DType::Complex64);
     bool is_complex128 = (dtype == DType::Complex128);
     // FP8 (1 byte) reuses the 4-per-word byte-packing shader (full_i8).
-    bool is_fp8 = (dtype == DType::FP8_E4M3 || dtype == DType::FP8_E5M2);
+    bool is_fp8 = (dtype == DType::FP8_E4M3 || dtype == DType::FP8_E5M2 ||
+                   dtype == DType::FP8_E4M3FNUZ || dtype == DType::FP8_E5M2FNUZ);
 
     // R.13: gate FP64 dispatch on shaderFloat64 device support.
     if (is_float64 || is_complex128) {
@@ -192,6 +193,10 @@ auto VulkanBackend::dispatchFull(const std::vector<int64_t>& shape, double value
             byte_value = FP8_E4M3(static_cast<float>(value)).bits;
         } else if (dtype == DType::FP8_E5M2) {
             byte_value = FP8_E5M2(static_cast<float>(value)).bits;
+        } else if (dtype == DType::FP8_E4M3FNUZ) {
+            byte_value = FP8_E4M3FNUZ(static_cast<float>(value)).bits;
+        } else if (dtype == DType::FP8_E5M2FNUZ) {
+            byte_value = FP8_E5M2FNUZ(static_cast<float>(value)).bits;
         } else {
             byte_value = static_cast<uint8_t>(static_cast<int8_t>(value));
         }
@@ -472,6 +477,8 @@ auto VulkanBackend::dispatchOnes(const std::vector<int64_t>& shape, DType dtype)
         case DType::Complex128:
         case DType::FP8_E4M3:
         case DType::FP8_E5M2:
+        case DType::FP8_E4M3FNUZ:
+        case DType::FP8_E5M2FNUZ:
         case DType::QInt8:
         case DType::QUInt8:
         case DType::QInt4x2:
@@ -1005,6 +1012,12 @@ auto VulkanBackend::dispatchMaskedSelect(const Tensor& input, const Tensor& mask
         // 8-byte dtypes gather bit-exact through the f64 mover (Complex64 must
         // not widen through Float32 — that would drop the imaginary part).
         gather_shader = "masked_select_gather_f64";
+    } else if (input.dtype() == DType::Complex128) {
+        // 16-byte dtype: gather whole elements bit-exact through the c128 mover.
+        // Widening through Float32 would drop the imaginary part and truncate
+        // the real part to single precision.
+        vulkan::ensure_fp64_supported(input.device().index, "MaskedSelect");
+        gather_shader = "masked_select_gather_c128";
     } else if (input.dtype() == DType::Int8 || input.dtype() == DType::UInt8) {
         // Cast to Int32, do masked_select, cast back
         DType orig_dtype = input.dtype();
@@ -1196,10 +1209,15 @@ auto VulkanBackend::dispatchWhere(const Tensor& condition, const Tensor& x, cons
     // whole 8-byte elements bit-exact, so route Complex64 through it WITHOUT
     // converting to Float32 (which would drop the imaginary part).
     bool is_c64 = (target_dtype == DType::Complex64);
+    // Complex128 is two float64 lanes (16 bytes); the where_c128 shader selects
+    // whole 16-byte elements bit-exact. Routing it through the Float32 path
+    // would drop the imaginary part AND truncate the real part to single
+    // precision, so it must use its own 16-byte mover.
+    bool is_c128 = (target_dtype == DType::Complex128);
 
-    // R.13: gate FP64 dispatch on shaderFloat64 device support (the 8-byte
-    // where_f64 path uses a float64-typed buffer to move 8-byte elements).
-    if (is_f64 || is_c64) {
+    // R.13: gate FP64 dispatch on shaderFloat64 device support (the 8/16-byte
+    // movers use float64-typed buffers to move elements).
+    if (is_f64 || is_c64 || is_c128) {
         vulkan::ensure_fp64_supported(x.device().index, "Where");
     }
 
@@ -1213,6 +1231,10 @@ auto VulkanBackend::dispatchWhere(const Tensor& condition, const Tensor& x, cons
         // Keep raw Complex64 storage; the 8-byte mover preserves both lanes.
         x_work = (x.dtype() == DType::Complex64) ? x : x.to(DType::Complex64);
         y_work = (y.dtype() == DType::Complex64) ? y : y.to(DType::Complex64);
+    } else if (is_c128) {
+        // Keep raw Complex128 storage; the 16-byte mover preserves both lanes.
+        x_work = (x.dtype() == DType::Complex128) ? x : x.to(DType::Complex128);
+        y_work = (y.dtype() == DType::Complex128) ? y : y.to(DType::Complex128);
     } else {
         x_work = (x.dtype() == DType::Float32) ? x : x.to(DType::Float32);
         y_work = (y.dtype() == DType::Float32) ? y : y.to(DType::Float32);
@@ -1223,19 +1245,19 @@ auto VulkanBackend::dispatchWhere(const Tensor& condition, const Tensor& x, cons
     if (!y_work.is_contiguous())  y_work  = y_work.contiguous();
 
     int32_t device_id = x.device().index;
-    auto* pipeline = getPipeline((is_f64 || is_c64) ? "where_f64" : "where", device_id);
+    auto* pipeline = getPipeline(is_c128 ? "where_c128" : ((is_f64 || is_c64) ? "where_f64" : "where"), device_id);
 
     std::vector<int64_t> out_shape(cond_shape.begin(), cond_shape.end());
     Tensor out_work(out_shape,
-                    is_f64 ? DType::Float64 : (is_c64 ? DType::Complex64 : DType::Float32),
+                    is_f64 ? DType::Float64 : (is_c64 ? DType::Complex64 : (is_c128 ? DType::Complex128 : DType::Float32)),
                     x.device());
 
     uint32_t n = static_cast<uint32_t>(out_work.numel());
     struct { uint32_t num_elements; } pc;
     pc.num_elements = n;
 
-    // Complex64 is bound as 8-byte elements (one float64-sized slot each).
-    size_t elem_size = (is_f64 || is_c64) ? 8 : sizeof(float);
+    // Complex64 is bound as 8-byte elements; Complex128 as 16-byte elements.
+    size_t elem_size = is_c128 ? 16 : ((is_f64 || is_c64) ? 8 : sizeof(float));
     size_t data_size = static_cast<size_t>(n) * elem_size;
     size_t bool_size = static_cast<size_t>(n) * sizeof(uint8_t);
 
@@ -1973,6 +1995,25 @@ auto VulkanBackend::dispatchCast(const Tensor& input, DType target_dtype) -> Ten
         return input;  // No-op
     }
 
+    // FNUZ FP8 (E4M3FNUZ / E5M2FNUZ) have no native Vulkan cast shaders. Their
+    // exponent bias differs from the IEEE FP8 variants (E4M3FNUZ bias 8 vs
+    // E4M3FN bias 7; E5M2FNUZ bias 16 vs E5M2 bias 15) and they encode a single
+    // NaN with no infinities, so the IEEE cast_*_fp8e4m3 / cast_*_fp8e5m2 shaders
+    // cannot be reused. Route any cast touching an FNUZ dtype through the host
+    // (CPU) backend, which implements bias-correct FNUZ conversions, then move
+    // the result back to this device. Mirrors how unsupported-on-device dtypes
+    // are handled elsewhere in this backend.
+    {
+        auto is_fnuz = [](DType d) {
+            return d == DType::FP8_E4M3FNUZ || d == DType::FP8_E5M2FNUZ;
+        };
+        if (is_fnuz(input.dtype()) || is_fnuz(target_dtype)) {
+            Tensor host_in = input.to(Device::cpu());
+            Tensor host_out = host_in.to(target_dtype);
+            return host_out.to(input.device());
+        }
+    }
+
     DType src_dtype = input.dtype();
     int32_t device_id = input.device().index;
     int64_t numel = input.numel();
@@ -2338,6 +2379,7 @@ auto VulkanBackend::dispatchCast(const Tensor& input, DType target_dtype) -> Ten
         size_t raw = static_cast<size_t>(numel) * dtype_size(dtype);
         if (dtype == DType::Bool || dtype == DType::Int8 || dtype == DType::UInt8 ||
             dtype == DType::FP8_E4M3 || dtype == DType::FP8_E5M2 ||
+            dtype == DType::FP8_E4M3FNUZ || dtype == DType::FP8_E5M2FNUZ ||
             dtype == DType::Int16) {
             return (raw + 3) & ~size_t(3);  // Round up to 4-byte boundary
         }
@@ -3014,6 +3056,7 @@ auto VulkanBackend::dispatchStridedFill(Tensor& input, double value) -> void {
     // 8-bit: Int8 / UInt8 / Bool / FP8 / quantized (host-encoded byte).
     if (dt == DType::Int8 || dt == DType::UInt8 || dt == DType::Bool ||
         dt == DType::FP8_E4M3 || dt == DType::FP8_E5M2 ||
+        dt == DType::FP8_E4M3FNUZ || dt == DType::FP8_E5M2FNUZ ||
         dt == DType::QInt8 || dt == DType::QUInt8 || dt == DType::QInt4x2) {
         uint8_t byte_val;
         if (dt == DType::QInt8 || dt == DType::QUInt8 || dt == DType::QInt4x2) {
@@ -3039,6 +3082,10 @@ auto VulkanBackend::dispatchStridedFill(Tensor& input, double value) -> void {
             byte_val = FP8_E4M3(static_cast<float>(value)).bits;
         } else if (dt == DType::FP8_E5M2) {
             byte_val = FP8_E5M2(static_cast<float>(value)).bits;
+        } else if (dt == DType::FP8_E4M3FNUZ) {
+            byte_val = FP8_E4M3FNUZ(static_cast<float>(value)).bits;
+        } else if (dt == DType::FP8_E5M2FNUZ) {
+            byte_val = FP8_E5M2FNUZ(static_cast<float>(value)).bits;
         } else if (dt == DType::UInt8) {
             byte_val = static_cast<uint8_t>(value);
         } else {  // Int8

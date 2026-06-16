@@ -1043,7 +1043,7 @@ SparseTensor cuda_coalesce(const SparseTensor& sparse) {
     } else {
         throw std::runtime_error(
             "cuda_coalesce: unsupported value dtype (supported: Float32, Float64, "
-            "Int32, Int64, Complex64, Complex128)");
+            "Int32, Int64)");
     }
 
     // Detect unique keys and sum duplicates using thrust::reduce_by_key
@@ -1226,6 +1226,20 @@ SparseTensor cuda_coo_to_csc(const SparseTensor& sparse) {
                        thrust::device_pointer_cast(perm_ptr + nnz),
                        thrust::device_pointer_cast(values.data<double>()),
                        thrust::device_pointer_cast(sorted_vals.data<double>()));
+    } else if (values.dtype() == DType::Int32) {
+        thrust::gather(thrust::cuda::par,
+                       thrust::device_pointer_cast(perm_ptr),
+                       thrust::device_pointer_cast(perm_ptr + nnz),
+                       thrust::device_pointer_cast(values.data<int32_t>()),
+                       thrust::device_pointer_cast(sorted_vals.data<int32_t>()));
+    } else if (values.dtype() == DType::Int64) {
+        thrust::gather(thrust::cuda::par,
+                       thrust::device_pointer_cast(perm_ptr),
+                       thrust::device_pointer_cast(perm_ptr + nnz),
+                       thrust::device_pointer_cast(values.data<int64_t>()),
+                       thrust::device_pointer_cast(sorted_vals.data<int64_t>()));
+    } else {
+        throw std::runtime_error("cuda_coo_to_csc: unsupported value dtype");
     }
 
     return SparseTensor::sparse_csc(ccol, sorted_rows, sorted_vals,

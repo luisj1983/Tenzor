@@ -16,7 +16,9 @@ layout(push_constant) uniform PushConstants {
     uint n_cols;
 };
 
-shared float64_t partial_sums[256];
+// Sized to the maximum supported workgroup size (optimalWorkgroupSize caps at
+// 1024). The actual workgroup size is the runtime spec constant gl_WorkGroupSize.x.
+shared float64_t partial_sums[1024];
 
 void main() {
     uint row = gl_WorkGroupID.x;
@@ -28,7 +30,7 @@ void main() {
     uint row_nnz = row_end - row_start;
 
     float64_t sum = 0.0lf;
-    for (uint i = tid; i < row_nnz; i += 256) {
+    for (uint i = tid; i < row_nnz; i += gl_WorkGroupSize.x) {
         uint idx = row_start + i;
         sum += values[idx] * x[col_indices[idx]];
     }
@@ -36,8 +38,13 @@ void main() {
     partial_sums[tid] = sum;
     barrier();
 
-    for (uint stride = 128; stride > 0; stride >>= 1) {
-        if (tid < stride) {
+    // Parallel reduction over all active lanes. Start at the largest power of
+    // two >= workgroup size; entries at/above gl_WorkGroupSize.x are treated 0.
+    uint stride = 1u;
+    while (stride < gl_WorkGroupSize.x) stride <<= 1;
+    stride >>= 1;
+    for (; stride > 0u; stride >>= 1) {
+        if (tid < stride && (tid + stride) < gl_WorkGroupSize.x) {
             partial_sums[tid] += partial_sums[tid + stride];
         }
         barrier();

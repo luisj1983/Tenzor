@@ -149,6 +149,24 @@ struct SummaryWriter::Impl {
         auto microseconds = std::chrono::duration_cast<std::chrono::microseconds>(duration - seconds);
         return seconds.count() + microseconds.count() / 1e6;
     }
+
+    // A flush is due when either the in-memory event queue has reached max_queue,
+    // OR (for a positive flush_secs) at least flush_secs of wall time has elapsed
+    // since the last flush. The latter bounds how long buffered events can sit in
+    // the ofstream buffer and be lost on a crash, honoring the documented
+    // periodic-flush contract.
+    bool maybe_flush_due() const {
+        if (event_count >= max_queue) {
+            return true;
+        }
+        if (flush_secs > 0) {
+            auto elapsed = std::chrono::steady_clock::now() - last_flush;
+            if (elapsed >= std::chrono::seconds(flush_secs)) {
+                return true;
+            }
+        }
+        return false;
+    }
 };
 
 SummaryWriter::SummaryWriter(std::string_view log_dir, int max_queue, int flush_secs)
@@ -210,7 +228,7 @@ auto SummaryWriter::add_scalar(std::string_view tag, float value, int64_t step) 
 
     // Auto-flush if needed
     impl_->event_count++;
-    if (impl_->event_count >= impl_->max_queue) {
+    if (impl_->maybe_flush_due()) {
         flush();
         impl_->event_count = 0;
     }
@@ -248,7 +266,7 @@ auto SummaryWriter::add_histogram(std::string_view tag,
     write_event(tag, data, step);
 
     impl_->event_count++;
-    if (impl_->event_count >= impl_->max_queue) {
+    if (impl_->maybe_flush_due()) {
         flush();
         impl_->event_count = 0;
     }
@@ -293,7 +311,7 @@ auto SummaryWriter::add_image(std::string_view tag,
     write_event(tag, data, step);
 
     impl_->event_count++;
-    if (impl_->event_count >= impl_->max_queue) {
+    if (impl_->maybe_flush_due()) {
         flush();
         impl_->event_count = 0;
     }

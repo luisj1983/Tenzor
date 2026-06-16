@@ -508,15 +508,24 @@ public:
      *
      * @param input_ids Encoder input [batch, source_seq_len]
      * @param max_length Maximum generation length
-     * @param temperature Sampling temperature (default: 1.0)
+     * @param temperature Sampling temperature (default: 1.0). At 1.0 the decode
+     *        is plain greedy argmax; for any other value the next token is drawn
+     *        from a categorical over the temperature-scaled softmax (true
+     *        temperature sampling, not a no-op argmax).
      * @param bos_token_id Explicit decoder start token; -1 (default) uses
      *        `config.decoder_start_token_id`.
+     * @param attention_mask Optional encoder-input attention mask
+     *        [batch, src_len]; pass an empty Tensor{} (default) for no masking.
+     *        When provided it is threaded into both the cached encoder forward
+     *        and the decoder's cross-attention mask so padded inputs are not
+     *        attended to.
      * @return Generated token IDs [batch, max_length]
      */
     auto generate(const Variable& input_ids,
                  int64_t max_length,
                  double temperature = 1.0,
-                 int64_t bos_token_id = -1) -> Tensor;
+                 int64_t bos_token_id = -1,
+                 const Tensor& attention_mask = Tensor{}) -> Tensor;
 
     /// Load pretrained weights via ModelHub (audit H4). See AlbertModel.
     auto load_pretrained(const std::string& path, bool strict = true) -> void;

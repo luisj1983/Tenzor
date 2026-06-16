@@ -334,11 +334,21 @@ auto RendezvousStore::connect_to_master() -> void {
         throw std::runtime_error("Failed to resolve address: " + master_addr_);
     }
 
+    // Validate the resolver result before copying: a non-IPv4 record
+    // (AF_INET6, h_length==16) or a hostile DNS response would otherwise
+    // overflow the 4-byte sin_addr field.
+    if (server->h_addrtype != AF_INET ||
+        server->h_length != static_cast<int>(sizeof(struct in_addr)) ||
+        server->h_addr == nullptr) {
+        throw std::runtime_error(
+            "Resolver returned a non-IPv4 address for: " + master_addr_);
+    }
+
     struct sockaddr_in addr;
     std::memset(&addr, 0, sizeof(addr));
     addr.sin_family = AF_INET;
     addr.sin_port = htons(master_port_);
-    std::memcpy(&addr.sin_addr.s_addr, server->h_addr, server->h_length);
+    std::memcpy(&addr.sin_addr.s_addr, server->h_addr, sizeof(struct in_addr));
 
     // Retry with backoff: the server may be starting in another thread/process,
     // or briefly busy handling the previous one-shot connection.
@@ -965,7 +975,16 @@ auto GlooBackend::connect_to_rank(int peer_rank) -> std::shared_ptr<TCPConnectio
             ::close(sockfd);
             throw std::runtime_error("Invalid address: " + master_addr_);
         }
-        std::memcpy(&addr.sin_addr, he->h_addr_list[0], he->h_length);
+        // Validate the resolver result before copying: a non-IPv4 record
+        // (AF_INET6, h_length==16) would overflow the 4-byte sin_addr.
+        if (he->h_addrtype != AF_INET ||
+            he->h_length != static_cast<int>(sizeof(struct in_addr)) ||
+            he->h_addr_list[0] == nullptr) {
+            ::close(sockfd);
+            throw std::runtime_error(
+                "Resolver returned a non-IPv4 address for: " + master_addr_);
+        }
+        std::memcpy(&addr.sin_addr, he->h_addr_list[0], sizeof(struct in_addr));
     }
 
     // Retry connection with exponential backoff

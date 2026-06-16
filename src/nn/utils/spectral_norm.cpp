@@ -88,9 +88,19 @@ auto SpectralNorm::apply(std::shared_ptr<Module> module,
         w_dim *= wshape[i];
     }
 
+    // Power iteration accumulates matmul/norm/div over h*w_dim elements; a
+    // narrow mantissa (Float16/BFloat16) underflows the sigma estimate, so run
+    // the whole iteration in Float32 when the weight is half precision, matching
+    // WeightNorm's widen-narrow policy. compute_weight_variable() casts sigma
+    // back to the weight's dtype, so the reparameterised weight keeps its dtype.
+    DType iter_dtype = (weight.dtype() == DType::Float16 ||
+                        weight.dtype() == DType::BFloat16)
+                           ? DType::Float32
+                           : weight.dtype();
+
     // Initialise u, v with random unit vectors (raw Tensor, no autograd).
-    sn->u_ = randn({h}, weight.dtype(), weight.device());
-    sn->v_ = randn({w_dim}, weight.dtype(), weight.device());
+    sn->u_ = randn({h}, iter_dtype, weight.device());
+    sn->v_ = randn({w_dim}, iter_dtype, weight.device());
 
     auto unit_normalise = [](Tensor& vec) {
         Tensor n = norm(vec);
@@ -103,7 +113,7 @@ auto SpectralNorm::apply(std::shared_ptr<Module> module,
     unit_normalise(sn->u_);
     unit_normalise(sn->v_);
 
-    sn->sigma_ = ones({1}, weight.dtype(), weight.device());
+    sn->sigma_ = ones({1}, iter_dtype, weight.device());
 
     // Run a few warm-up power iterations for a better initial sigma.
     Tensor weight_2d = reshape(weight, {h, w_dim});
@@ -163,7 +173,13 @@ auto SpectralNorm::apply(std::shared_ptr<Module> module,
     return sn;
 }
 
-auto SpectralNorm::power_iteration(const Tensor& weight_2d) -> void {
+auto SpectralNorm::power_iteration(const Tensor& weight_2d_in) -> void {
+    // Run the iteration in u_'s dtype (Float32 when the weight is half
+    // precision, see apply()), widening the incoming weight to match so the
+    // matmul/norm/div chain does not lose precision at F16/BF16.
+    Tensor weight_2d = (weight_2d_in.dtype() != u_.dtype())
+                           ? weight_2d_in.to(u_.dtype())
+                           : weight_2d_in;
     // weight_2d is (h, w)
     Tensor wt = transpose(weight_2d, 0, 1);  // (w, h)
 

@@ -458,7 +458,11 @@ auto SvdBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tens
     auto K = S.shape()[S.ndim() - 1];
 
     // Construct diagonal matrix from S
-    auto S_diag = diag(S);  // (..., K, K)
+    // diag_embed is batch-aware: for S shaped (..., K) it builds (..., K, K)
+    // with S on the main diagonal. The plain diag() threw "diag: input must
+    // be 1D or 2D" on batched (ndim > 2) input, breaking first-order batched
+    // SVD backward (matches the EighBackward / EigvalshBackward fix).
+    auto S_diag = linalg::diag_embed(S, 0, -2, -1);  // (..., K, K)
 
     // U^T and V (= Vh^T)
     auto Ut = transpose(U, ndim - 2, ndim - 1);
@@ -563,7 +567,7 @@ auto SvdBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tens
     auto F_UtgU = mul(F, skew_U);
     auto F_gVhV = mul(F, skew_V);
 
-    auto term1 = diag(grad_S);             // diag(grad_S), (K, K)
+    auto term1 = linalg::diag_embed(grad_S, 0, -2, -1);  // diag(grad_S), (..., K, K)
     auto term2 = matmul(F_UtgU, S_diag);   // F*(skew_U) @ S
     auto term3 = matmul(S_diag, F_gVhV);   // S @ F*(skew_V)
 
@@ -577,7 +581,7 @@ auto SvdBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tens
     int64_t M = U.shape()[ndim - 2];
     int64_t N = Vh.shape()[Vh.ndim() - 1];
     auto S_inv = reciprocal(S);
-    auto S_inv_diag = diag(S_inv);
+    auto S_inv_diag = linalg::diag_embed(S_inv, 0, -2, -1);  // (..., K, K)
     if (M > K) {
         // (I - U U^T) is (M, M)
         auto eye_M = eye(M, std::nullopt, U.dtype(), U.device());

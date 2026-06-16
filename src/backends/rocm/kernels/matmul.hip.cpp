@@ -654,7 +654,8 @@ auto matmul_kernel(const Tensor& a, const Tensor& b, hipStream_t stream) -> Tens
     }
 
     // FP8 emulation: widen to Float32, matmul, narrow back
-    if (a_contig.dtype() == DType::FP8_E4M3 || a_contig.dtype() == DType::FP8_E5M2) {
+    if (a_contig.dtype() == DType::FP8_E4M3 || a_contig.dtype() == DType::FP8_E5M2 ||
+        a_contig.dtype() == DType::FP8_E4M3FNUZ || a_contig.dtype() == DType::FP8_E5M2FNUZ) {
         DType orig = a_contig.dtype();
         auto a_f32 = cast_kernel(a_contig, DType::Float32, stream);
         auto b_f32 = cast_kernel(b_contig, DType::Float32, stream);

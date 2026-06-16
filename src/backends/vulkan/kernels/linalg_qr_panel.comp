@@ -18,7 +18,9 @@ layout(push_constant) uniform PushConstants {
     uint batch_idx;
 };
 
-shared float col_data[256];  // column data for norm computation
+// Sized to the maximum supported workgroup size (optimalWorkgroupSize caps at
+// 1024). The actual workgroup size is the runtime spec constant gl_WorkGroupSize.x.
+shared float col_data[1024];  // per-lane partial sums for reductions
 shared float norm_sq;
 shared float alpha;
 shared float tau_k;
@@ -32,21 +34,30 @@ void main() {
     for (uint k = 0; k < panel_cols; k++) {
         uint col = col_start + k;
 
-        // norm_sq is computed serially from global A below; the previous
-        // parallel pre-load into col_data was dead (local_sum was never read)
-        // and contained an unsynchronized many-writer race on col_data[0]
-        // for panel_rows > 256, so it has been removed.
+        // Compute the column 2-norm in parallel: each lane sums a strided
+        // subset of rows [k, panel_rows) into col_data[tid], then a shared
+        // tree reduction combines them. This replaces the previous serial
+        // tid==0 loop and is safe for any panel_rows.
+        float local_nsq = 0.0;
+        for (uint r = k + tid; r < panel_rows; r += gl_WorkGroupSize.x) {
+            float v = A[base + (col_start + r) * n + col];
+            local_nsq += v * v;
+        }
+        col_data[tid] = local_nsq;
+        barrier();
+        {
+            uint s0 = 1u;
+            while (s0 < gl_WorkGroupSize.x) s0 <<= 1;
+            for (s0 >>= 1; s0 > 0u; s0 >>= 1) {
+                if (tid < s0 && (tid + s0) < gl_WorkGroupSize.x) {
+                    col_data[tid] += col_data[tid + s0];
+                }
+                barrier();
+            }
+        }
+
         if (tid == 0) {
-            norm_sq = 0.0;
-            for (uint r = k; r < min(panel_rows, 256u); r++) {
-                float v = A[base + (col_start + r) * n + col];
-                norm_sq += v * v;
-            }
-            // Handle rows > 256 (rare for 256x256 panels)
-            for (uint r = 256; r < panel_rows; r++) {
-                float v = A[base + (col_start + r) * n + col];
-                norm_sq += v * v;
-            }
+            norm_sq = col_data[0];
 
             alpha = -sign(A[base + (col_start + k) * n + col]) * sqrt(norm_sq);
             float v_k = A[base + (col_start + k) * n + col] - alpha;
@@ -75,7 +86,7 @@ void main() {
         // tau was derived for this v[k]=1 convention, and Ormqr reads the
         // stored sub-diagonal as v[k+1:]; without this division the reflectors
         // were inconsistent with tau (Q@R did not reconstruct A).
-        for (uint r = k + 1 + tid; r < panel_rows; r += 256) {
+        for (uint r = k + 1 + tid; r < panel_rows; r += gl_WorkGroupSize.x) {
             A[base + (col_start + r) * n + col] /= vhead;
         }
         barrier();
@@ -87,7 +98,7 @@ void main() {
             // so thread 0 adds the head term A[k,j]), then a shared-memory tree
             // reduction combines them.
             float local_dot = 0.0;
-            for (uint r = k + 1 + tid; r < panel_rows; r += 256) {
+            for (uint r = k + 1 + tid; r < panel_rows; r += gl_WorkGroupSize.x) {
                 float v_r = A[base + (col_start + r) * n + col];
                 local_dot += v_r * A[base + (col_start + r) * n + j];
             }
@@ -98,22 +109,25 @@ void main() {
             col_data[tid] = local_dot;
             barrier();
 
-            // Tree reduction over the workgroup. Round the active extent up to
-            // a power of two so non-power-of-two workgroup sizes still reduce
-            // correctly; entries at/above gl_WorkGroupSize.x are treated as 0.
-            for (uint s = 256u / 2u; s > 0u; s >>= 1) {
-                if (tid < s) {
-                    float other = (tid + s < gl_WorkGroupSize.x) ? col_data[tid + s] : 0.0;
-                    col_data[tid] += other;
+            // Tree reduction over the workgroup. Start at the largest power of
+            // two >= workgroup size so all active lanes are folded in; entries
+            // at/above gl_WorkGroupSize.x are treated as 0.
+            {
+                uint s = 1u;
+                while (s < gl_WorkGroupSize.x) s <<= 1;
+                for (s >>= 1; s > 0u; s >>= 1) {
+                    if (tid < s && (tid + s) < gl_WorkGroupSize.x) {
+                        col_data[tid] += col_data[tid + s];
+                    }
+                    barrier();
                 }
-                barrier();
             }
 
             float dot = col_data[0];
             barrier();
 
             // Update: A[r,j] -= tau * v[r] * dot
-            for (uint r = k + 1 + tid; r < panel_rows; r += 256) {
+            for (uint r = k + 1 + tid; r < panel_rows; r += gl_WorkGroupSize.x) {
                 float v_r = A[base + (col_start + r) * n + col];
                 A[base + (col_start + r) * n + j] -= tau_k * v_r * dot;
             }

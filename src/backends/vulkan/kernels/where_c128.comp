@@ -1,0 +1,33 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_int8 : enable
+#extension GL_EXT_shader_explicit_arithmetic_types_float64 : require
+
+// Where (Complex128) — output[i] = cond[i] ? x[i] : y[i]
+// Each Complex128 element is two float64 lanes (re, im) = 16 bytes; this shader
+// selects whole 16-byte elements bit-exact so neither the imaginary part nor
+// the high-precision bits are lost (routing Complex128 through the Float32
+// where shader would drop the imaginary lane and truncate precision).
+// Condition stored as uint8_t (0 = false, non-zero = true).
+// All three inputs must have identical shape and be contiguous.
+layout(local_size_x_id = 0) in;
+
+layout(binding = 0) readonly buffer Condition { uint8_t cond_data[]; };
+layout(binding = 1) readonly buffer X         { float64_t x_data[]; };   // 2 per element
+layout(binding = 2) readonly buffer Y         { float64_t y_data[]; };   // 2 per element
+layout(binding = 3) writeonly buffer Output   { float64_t out_data[]; }; // 2 per element
+
+layout(push_constant) uniform PushConstants {
+    uint num_elements;
+} params;
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= params.num_elements) return;
+    if (cond_data[idx] != uint8_t(0)) {
+        out_data[2u * idx]      = x_data[2u * idx];
+        out_data[2u * idx + 1u] = x_data[2u * idx + 1u];
+    } else {
+        out_data[2u * idx]      = y_data[2u * idx];
+        out_data[2u * idx + 1u] = y_data[2u * idx + 1u];
+    }
+}

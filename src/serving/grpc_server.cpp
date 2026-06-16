@@ -10,6 +10,8 @@
 
 #include <filesystem>
 #include "tenzor/serving/server.hpp"
+#include "tenzor/serving/auth.hpp"
+#include "tenzor/serving/rate_limiter.hpp"
 #include "tenzor/autograd/variable.hpp"
 #include "tenzor/ops/creation.hpp"
 #include "tenzor/core/dtype.hpp"
@@ -18,9 +20,13 @@
 #include <grpcpp/grpcpp.h>
 #include "tenzor_serving.grpc.pb.h"
 
+#include <algorithm>
+#include <cctype>
 #include <chrono>
+#include <fstream>
 #include <iostream>
 #include <memory>
+#include <sstream>
 #include <string>
 #include <stdexcept>
 
@@ -45,11 +51,16 @@ std::string dtype_to_string(DType dt) {
 
 class TenzorServingImpl final : public tenzor::serving::TenzorServing::Service {
 public:
-    explicit TenzorServingImpl(ModelRepository& repo) : repository_(repo) {}
+    TenzorServingImpl(ModelRepository& repo, AuthConfig auth, RateLimitConfig rl)
+        : repository_(repo),
+          auth_(std::move(auth)),
+          rate_limiter_(std::make_unique<TokenBucketRateLimiter>(rl)) {}
 
-    grpc::Status Predict(grpc::ServerContext* /*context*/,
+    grpc::Status Predict(grpc::ServerContext* context,
                          const PredictRequest* request,
                          PredictResponse* response) override {
+        if (auto st = enforce_access(context); !st.ok()) return st;
+
         auto start = std::chrono::high_resolution_clock::now();
 
         auto model = repository_.get_model(request->model_name());
@@ -143,9 +154,11 @@ public:
         }
     }
 
-    grpc::Status GetModelStatus(grpc::ServerContext* /*context*/,
+    grpc::Status GetModelStatus(grpc::ServerContext* context,
                                 const ModelStatusRequest* request,
                                 ModelStatusResponse* response) override {
+        if (auto st = enforce_access(context); !st.ok()) return st;
+
         auto model = repository_.get_model(request->model_name());
         if (!model) {
             return grpc::Status(grpc::StatusCode::NOT_FOUND, "Model not found");
@@ -165,9 +178,11 @@ public:
         return grpc::Status::OK;
     }
 
-    grpc::Status LoadModel(grpc::ServerContext* /*context*/,
+    grpc::Status LoadModel(grpc::ServerContext* context,
                            const LoadModelRequest* request,
                            LoadModelResponse* response) override {
+        if (auto st = enforce_access(context); !st.ok()) return st;
+
         try {
             // Confine the client-supplied path to the repository root via the
             // SAME helper the HTTP handler uses (single source of truth), so a
@@ -198,9 +213,11 @@ public:
         }
     }
 
-    grpc::Status UnloadModel(grpc::ServerContext* /*context*/,
+    grpc::Status UnloadModel(grpc::ServerContext* context,
                              const UnloadModelRequest* request,
                              UnloadModelResponse* response) override {
+        if (auto st = enforce_access(context); !st.ok()) return st;
+
         try {
             repository_.unload_model(request->model_name());
             response->set_success(true);
@@ -223,15 +240,126 @@ public:
 
 private:
     ModelRepository& repository_;
+    AuthConfig auth_;
+    std::unique_ptr<TokenBucketRateLimiter> rate_limiter_;
+
+    /// Resolve the client identity used for per-client rate limiting. Prefer the
+    /// peer URI (e.g. "ipv4:1.2.3.4:5678") which the gRPC core fills from the
+    /// transport; strip the trailing ":port" so all connections from one host
+    /// share a bucket, matching the HTTP path's per-IP keying.
+    static std::string client_id(grpc::ServerContext* context) {
+        std::string peer = context->peer(); // "ipv4:host:port" / "ipv6:[..]:port"
+        auto last_colon = peer.rfind(':');
+        if (last_colon != std::string::npos) {
+            return peer.substr(0, last_colon);
+        }
+        return peer;
+    }
+
+    /// Shared gate applied to every authenticated RPC: API-key validation
+    /// (reusing validate_token/ct_eq from serving/auth.hpp) followed by token
+    /// bucket rate limiting (serving/rate_limiter.hpp). This brings the gRPC
+    /// transport to parity with the HTTP path, which previously enforced both
+    /// while gRPC enforced neither.
+    grpc::Status enforce_access(grpc::ServerContext* context) {
+        // ---- Authentication ----
+        if (auth_.enabled && !auth_.api_keys.empty()) {
+            // gRPC metadata keys are lowercased by the core; look up the
+            // configured header in lowercase. The token is sent verbatim
+            // (optionally "Bearer "-prefixed), matching the HTTP Authorization
+            // header so a single client can use either transport.
+            std::string key = auth_.header_name;
+            std::transform(key.begin(), key.end(), key.begin(),
+                           [](unsigned char c) { return std::tolower(c); });
+            const auto& md = context->client_metadata();
+            auto it = md.find(key);
+            if (it == md.end()) {
+                return grpc::Status(grpc::StatusCode::UNAUTHENTICATED,
+                                    "missing authentication metadata");
+            }
+            std::string header_value(it->second.data(), it->second.size());
+            if (!validate_token(auth_, header_value)) {
+                auto& metrics = MetricsRegistry::instance().get_metrics("_auth");
+                metrics.error_count.fetch_add(1, std::memory_order_relaxed);
+                return grpc::Status(grpc::StatusCode::PERMISSION_DENIED,
+                                    "invalid api key");
+            }
+        }
+
+        // ---- Rate limiting ----
+        if (rate_limiter_ && !rate_limiter_->allow(client_id(context))) {
+            return grpc::Status(grpc::StatusCode::RESOURCE_EXHAUSTED,
+                                "rate limit exceeded");
+        }
+
+        return grpc::Status::OK;
+    }
 };
 
+namespace {
+
+/// Read an entire file into a string (used for TLS cert/key material).
+std::string read_file(const std::string& path) {
+    std::ifstream f(path, std::ios::binary);
+    if (!f) {
+        throw std::runtime_error("gRPC TLS: cannot open credential file: " + path);
+    }
+    std::ostringstream ss;
+    ss << f.rdbuf();
+    return ss.str();
+}
+
+/// Build server credentials from the configuration. TLS is used whenever a
+/// certificate/key pair is configured (the secure default once auth is on);
+/// otherwise we fall back to insecure credentials. When auth is enabled but no
+/// TLS material is supplied we WARN loudly, because API keys travel in cleartext
+/// metadata over an insecure channel.
+std::shared_ptr<grpc::ServerCredentials> make_credentials(const ServerConfig& config) {
+    if (!config.tls_cert_path.empty() && !config.tls_key_path.empty()) {
+        grpc::SslServerCredentialsOptions ssl_opts;
+        grpc::SslServerCredentialsOptions::PemKeyCertPair pair;
+        pair.private_key = read_file(config.tls_key_path);
+        pair.cert_chain = read_file(config.tls_cert_path);
+        ssl_opts.pem_key_cert_pairs.push_back(std::move(pair));
+        if (!config.tls_client_ca_path.empty()) {
+            ssl_opts.pem_root_certs = read_file(config.tls_client_ca_path);
+            ssl_opts.client_certificate_request =
+                GRPC_SSL_REQUEST_AND_REQUIRE_CLIENT_CERTIFICATE_AND_VERIFY;
+        }
+        return grpc::SslServerCredentials(ssl_opts);
+    }
+    if (config.enable_auth && !config.api_keys.empty()) {
+        std::cerr << "[TenzorServing] WARNING: gRPC auth is enabled but no TLS "
+                     "cert/key configured; API keys will be sent in cleartext. "
+                     "Set tls_cert_path/tls_key_path."
+                  << std::endl;
+    }
+    return grpc::InsecureServerCredentials();
+}
+
+} // namespace
+
 // Standalone function to start a gRPC server (called from InferenceServer if configured)
-void start_grpc_server(ModelRepository& repository, int port, std::atomic<bool>& running) {
-    std::string server_address = "0.0.0.0:" + std::to_string(port);
-    TenzorServingImpl service(repository);
+void start_grpc_server(ModelRepository& repository, const ServerConfig& config,
+                       std::atomic<bool>& running) {
+    std::string server_address = "0.0.0.0:" + std::to_string(config.grpc_port);
+
+    // Mirror the HTTP path's security posture: validate the same API keys and
+    // apply the same token-bucket rate limit inside every authenticated RPC.
+    AuthConfig auth;
+    auth.enabled = config.enable_auth;
+    auth.api_keys = config.api_keys;
+    auth.header_name = config.auth_header;
+
+    RateLimitConfig rl;
+    rl.enabled = config.enable_rate_limit;
+    rl.requests_per_second = config.rate_limit_rps;
+    rl.burst_size = config.rate_limit_burst;
+
+    TenzorServingImpl service(repository, std::move(auth), rl);
 
     grpc::ServerBuilder builder;
-    builder.AddListeningPort(server_address, grpc::InsecureServerCredentials());
+    builder.AddListeningPort(server_address, make_credentials(config));
     builder.RegisterService(&service);
 
     auto server = builder.BuildAndStart();

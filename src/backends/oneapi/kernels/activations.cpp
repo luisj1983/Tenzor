@@ -3054,16 +3054,20 @@ auto instance_norm_backward_kernel(const Tensor& grad_output, const Tensor& inpu
 
 // RReLU forward (eval mode: deterministic midpoint slope; train mode: per-element random slope)
 auto rrelu_kernel(const Tensor& input, float lower, float upper, bool training, sycl::queue& queue) -> Tensor {
-    Tensor output(std::vector<int64_t>(input.shape().begin(), input.shape().end()),
-                  input.dtype(), input.device());
+    // Flat indexing below assumes contiguous storage; materialize a contiguous
+    // copy for transpose/permute/slice/broadcast views (mirrors gelu/leaky_relu).
+    Tensor in_cont = input.is_contiguous() ? input : contiguous_kernel(input, queue);
 
-    const int64_t numel = input.numel();
+    Tensor output(std::vector<int64_t>(in_cont.shape().begin(), in_cont.shape().end()),
+                  in_cont.dtype(), in_cont.device());
+
+    const int64_t numel = in_cont.numel();
     if (numel == 0) return output;
 
     const float mid = (lower + upper) / 2.0f;
 
-    if (input.dtype() == DType::Float32) {
-        const float* in_ptr = get_data_ptr<const float>(input);
+    if (in_cont.dtype() == DType::Float32) {
+        const float* in_ptr = get_data_ptr<const float>(in_cont);
         float* out_ptr = get_data_ptr<float>(output);
 
         if (training) {
@@ -3091,8 +3095,8 @@ auto rrelu_kernel(const Tensor& input, float lower, float upper, bool training, 
             });
         }
     }
-    else if (input.dtype() == DType::Float64) {
-        const double* in_ptr = get_data_ptr<const double>(input);
+    else if (in_cont.dtype() == DType::Float64) {
+        const double* in_ptr = get_data_ptr<const double>(in_cont);
         double* out_ptr = get_data_ptr<double>(output);
         const double mid_d = static_cast<double>(mid);
 
@@ -3117,8 +3121,8 @@ auto rrelu_kernel(const Tensor& input, float lower, float upper, bool training, 
             });
         }
     }
-    else if (input.dtype() == DType::Float16) {
-        const sycl::half* in_ptr = get_data_ptr<const sycl::half>(input);
+    else if (in_cont.dtype() == DType::Float16) {
+        const sycl::half* in_ptr = get_data_ptr<const sycl::half>(in_cont);
         sycl::half* out_ptr = get_data_ptr<sycl::half>(output);
 
         if (training) {
@@ -3142,8 +3146,8 @@ auto rrelu_kernel(const Tensor& input, float lower, float upper, bool training, 
             });
         }
     }
-    else if (input.dtype() == DType::BFloat16) {
-        const uint16_t* in_ptr = get_data_ptr<const uint16_t>(input);
+    else if (in_cont.dtype() == DType::BFloat16) {
+        const uint16_t* in_ptr = get_data_ptr<const uint16_t>(in_cont);
         uint16_t* out_ptr = get_data_ptr<uint16_t>(output);
 
         if (training) {
@@ -3177,26 +3181,31 @@ auto rrelu_kernel(const Tensor& input, float lower, float upper, bool training, 
 // RReLU backward: grad * (input >= 0 ? 1 : slope) where slope = (lower+upper)/2
 auto rrelu_backward_kernel(const Tensor& grad_output, const Tensor& input,
                            float lower, float upper, sycl::queue& queue) -> Tensor {
-    Tensor grad_input(std::vector<int64_t>(input.shape().begin(), input.shape().end()),
-                      input.dtype(), input.device());
+    // Flat indexing assumes contiguous storage; materialize contiguous copies
+    // for non-contiguous views (mirrors gelu_backward/leaky_relu_backward).
+    Tensor grad_cont = grad_output.is_contiguous() ? grad_output : contiguous_kernel(grad_output, queue);
+    Tensor in_cont = input.is_contiguous() ? input : contiguous_kernel(input, queue);
 
-    const int64_t numel = input.numel();
+    Tensor grad_input(std::vector<int64_t>(in_cont.shape().begin(), in_cont.shape().end()),
+                      in_cont.dtype(), in_cont.device());
+
+    const int64_t numel = in_cont.numel();
     if (numel == 0) return grad_input;
 
     const float mid = (lower + upper) / 2.0f;
 
-    if (input.dtype() == DType::Float32) {
-        const float* grad_out_ptr = get_data_ptr<const float>(grad_output);
-        const float* in_ptr = get_data_ptr<const float>(input);
+    if (in_cont.dtype() == DType::Float32) {
+        const float* grad_out_ptr = get_data_ptr<const float>(grad_cont);
+        const float* in_ptr = get_data_ptr<const float>(in_cont);
         float* grad_in_ptr = get_data_ptr<float>(grad_input);
 
         queue.parallel_for<RReLUBackwardKernelFloat32>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
             grad_in_ptr[idx] = (in_ptr[idx] >= 0.0f) ? grad_out_ptr[idx] : mid * grad_out_ptr[idx];
         });
     }
-    else if (input.dtype() == DType::Float64) {
-        const double* grad_out_ptr = get_data_ptr<const double>(grad_output);
-        const double* in_ptr = get_data_ptr<const double>(input);
+    else if (in_cont.dtype() == DType::Float64) {
+        const double* grad_out_ptr = get_data_ptr<const double>(grad_cont);
+        const double* in_ptr = get_data_ptr<const double>(in_cont);
         double* grad_in_ptr = get_data_ptr<double>(grad_input);
         const double mid_d = static_cast<double>(mid);
 
@@ -3204,9 +3213,9 @@ auto rrelu_backward_kernel(const Tensor& grad_output, const Tensor& input,
             grad_in_ptr[idx] = (in_ptr[idx] >= 0.0) ? grad_out_ptr[idx] : mid_d * grad_out_ptr[idx];
         });
     }
-    else if (input.dtype() == DType::Float16) {
-        const sycl::half* grad_out_ptr = get_data_ptr<const sycl::half>(grad_output);
-        const sycl::half* in_ptr = get_data_ptr<const sycl::half>(input);
+    else if (in_cont.dtype() == DType::Float16) {
+        const sycl::half* grad_out_ptr = get_data_ptr<const sycl::half>(grad_cont);
+        const sycl::half* in_ptr = get_data_ptr<const sycl::half>(in_cont);
         sycl::half* grad_in_ptr = get_data_ptr<sycl::half>(grad_input);
 
         queue.parallel_for<RReLUBackwardKernelFloat16>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
@@ -3215,9 +3224,9 @@ auto rrelu_backward_kernel(const Tensor& grad_output, const Tensor& input,
             grad_in_ptr[idx] = sycl::half((in_val >= 0.0f) ? g_out : mid * g_out);
         });
     }
-    else if (input.dtype() == DType::BFloat16) {
-        const uint16_t* grad_out_ptr = get_data_ptr<const uint16_t>(grad_output);
-        const uint16_t* in_ptr = get_data_ptr<const uint16_t>(input);
+    else if (in_cont.dtype() == DType::BFloat16) {
+        const uint16_t* grad_out_ptr = get_data_ptr<const uint16_t>(grad_cont);
+        const uint16_t* in_ptr = get_data_ptr<const uint16_t>(in_cont);
         uint16_t* grad_in_ptr = get_data_ptr<uint16_t>(grad_input);
 
         queue.parallel_for<RReLUBackwardKernelBFloat16>(sycl::range<1>(numel), [=](sycl::id<1> idx) {

@@ -413,11 +413,17 @@ auto SliceBackward::backward_with_variables(std::vector<Variable> grad_outputs) 
     }
     const Variable& grad_out_var = grad_outputs[0];
     const Tensor& grad_output_raw = grad_out_var.tensor();
-    Tensor grad_t = grad_output_raw.is_contiguous() ? grad_output_raw
-                                                   : grad_output_raw.contiguous();
-    Variable grad_var = grad_t.data_ptr() == grad_output_raw.data_ptr()
-                            ? grad_out_var
-                            : Variable(grad_t, grad_out_var.requires_grad());
+    // When grad_output is non-contiguous (e.g. a slice view produced by
+    // CatBackward in a chained slice+cat graph such as CircularPad2d/3d) we
+    // must materialise contiguous storage before scatter. Use the
+    // Variable-level identity op `clone` rather than a raw
+    // `grad_output_raw.contiguous()` rewrapped in a fresh Variable: the raw
+    // rewrap severed grad_fn and silently dropped the second-order
+    // contribution from grad_output's producers under create_graph=true.
+    // This mirrors the NarrowBackward / IndexSelectBackward sibling fixes.
+    Variable grad_var = grad_output_raw.is_contiguous() ? grad_out_var
+                                                        : clone(grad_out_var);
+    const Tensor& grad_t = grad_var.tensor();
 
     // S.2 — reuse the cached Int64 index tensor keyed by
     // (shape, dim, start, end, step, device) so backward only pays the

@@ -50,17 +50,35 @@ void main() {
             h_exp = 0x1Fu;
             h_mantissa = 0u;
         } else if (new_exp <= 0) {
+            // Denormalized or underflow, round-to-nearest-even (matches CPU
+            // converter in src/core/dtype.cpp).
             if (new_exp >= -2) {
                 uint m = (mantissa | 0x800000u) >> uint(1 - new_exp);
-                h_mantissa = (m >> 21) & 0x3u;
-                h_exp = 0u;
+                uint kept = (m >> 21) & 0x3u;
+                uint remainder = m & 0x1FFFFFu;       // low 21 bits
+                uint halfway = 0x100000u;             // 1 << 20
+                if (remainder > halfway || (remainder == halfway && (kept & 1u) != 0u)) {
+                    kept++;  // may carry subnormal -> smallest normal (exp field 1)
+                }
+                h_exp = kept >> 2;
+                h_mantissa = kept & 0x3u;
             } else {
                 h_exp = 0u;
                 h_mantissa = 0u;
             }
         } else {
-            h_exp = uint(new_exp);
-            h_mantissa = (mantissa >> 21) & 0x3u;
+            // Normalized, round-to-nearest-even on the 21 discarded mantissa bits.
+            uint kept = (mantissa >> 21) & 0x3u;
+            uint remainder = mantissa & 0x1FFFFFu;    // low 21 bits
+            uint halfway = 0x100000u;                 // 1 << 20
+            // Pack so a mantissa carry propagates into the exponent; if it pushes
+            // the exponent to 0x1F (mantissa 0) the result is correctly infinity.
+            uint packed = (uint(new_exp) << 2) | kept;
+            if (remainder > halfway || (remainder == halfway && (kept & 1u) != 0u)) {
+                packed++;
+            }
+            h_exp = packed >> 2;
+            h_mantissa = packed & 0x3u;
         }
     }
 

@@ -881,14 +881,27 @@ __global__ void interpolate_bicubic_backward_kernel(
         int64_t c  = temp % channels; temp /= channels;
         int64_t b  = temp;
 
-        float scale_h = (align_corners && out_h > 1) ? static_cast<float>(in_h - 1) / (out_h - 1)
-                                                     : static_cast<float>(in_h) / out_h;
-        float scale_w = (align_corners && out_w > 1) ? static_cast<float>(in_w - 1) / (out_w - 1)
-                                                     : static_cast<float>(in_w) / out_w;
-        float src_h = align_corners ? oh * scale_h : (oh + 0.5f) * scale_h - 0.5f;
-        float src_w = align_corners ? ow * scale_w : (ow + 0.5f) * scale_w - 0.5f;
-        int64_t hi = static_cast<int64_t>(floorf(src_h));
-        int64_t wi = static_cast<int64_t>(floorf(src_w));
+        // Must use the EXACT coordinate convention of the forward kernel so the
+        // analytic gradient matches: forward clamps the continuous coord to
+        // [0,in-1] BEFORE flooring (here truncating, identical for the clamped
+        // non-negative value) and derives the 4x4 neighborhood from that. Without
+        // the clamp, non-align_corners border pixels (src<0) floored to -1 scatter
+        // to a different neighborhood with different fractional offsets — gradcheck
+        // divergence at edges.
+        float src_h, src_w;
+        if (align_corners) {
+            src_h = (out_h > 1) ? oh * static_cast<float>(in_h - 1) / (out_h - 1) : 0.0f;
+            src_w = (out_w > 1) ? ow * static_cast<float>(in_w - 1) / (out_w - 1) : 0.0f;
+        } else {
+            float scale_h = static_cast<float>(in_h) / out_h;
+            float scale_w = static_cast<float>(in_w) / out_w;
+            src_h = (oh + 0.5f) * scale_h - 0.5f;
+            src_w = (ow + 0.5f) * scale_w - 0.5f;
+        }
+        src_h = fmaxf(0.0f, fminf(src_h, static_cast<float>(in_h - 1)));
+        src_w = fmaxf(0.0f, fminf(src_w, static_cast<float>(in_w - 1)));
+        int64_t hi = static_cast<int64_t>(src_h);
+        int64_t wi = static_cast<int64_t>(src_w);
 
         float g = static_cast<float>(grad_out[idx]);
         int64_t base = b * (channels * in_h * in_w) + c * (in_h * in_w);

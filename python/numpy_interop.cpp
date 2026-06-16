@@ -114,6 +114,8 @@ auto dtype_to_numpy_format(DType dtype) -> std::string {
         case DType::Complex128: return py::format_descriptor<std::complex<double>>::format();
         case DType::FP8_E4M3:
         case DType::FP8_E5M2:
+        case DType::FP8_E4M3FNUZ:
+        case DType::FP8_E5M2FNUZ:
             // R.26: FP8 is a sub-byte float, not a quantized integer — there is
             // no .dequantize() on FP8. Point at the .to(Float32).numpy() path
             // which is the correct (and only) lossless route.
@@ -165,6 +167,14 @@ auto numpy_dtype_to_tenzor(const py::array& arr) -> DType {
     if (kind == 'V' && itemsize == 1) {
         try {
             auto ml_dtypes = py::module_::import("ml_dtypes");
+            auto e4m3fnuz = ml_dtypes.attr("float8_e4m3fnuz");
+            if (dtype.equal(py::dtype::from_args(e4m3fnuz))) {
+                return DType::FP8_E4M3FNUZ;
+            }
+            auto e5m2fnuz = ml_dtypes.attr("float8_e5m2fnuz");
+            if (dtype.equal(py::dtype::from_args(e5m2fnuz))) {
+                return DType::FP8_E5M2FNUZ;
+            }
             auto e4m3 = ml_dtypes.attr("float8_e4m3fn");
             if (dtype.equal(py::dtype::from_args(e4m3))) {
                 return DType::FP8_E4M3;
@@ -175,7 +185,16 @@ auto numpy_dtype_to_tenzor(const py::array& arr) -> DType {
             }
         } catch (const py::error_already_set&) {
             // ml_dtypes not available — fall back to dtype-name string match.
+            // Match the FNUZ variants first: their names contain the
+            // "float8_e4m3"/"float8_e5m2" substrings, so the generic checks
+            // below would otherwise swallow them.
             std::string dtype_name = py::str(dtype);
+            if (dtype_name.find("float8_e4m3fnuz") != std::string::npos) {
+                return DType::FP8_E4M3FNUZ;
+            }
+            if (dtype_name.find("float8_e5m2fnuz") != std::string::npos) {
+                return DType::FP8_E5M2FNUZ;
+            }
             if (dtype_name.find("float8_e4m3") != std::string::npos) {
                 return DType::FP8_E4M3;
             }

@@ -113,10 +113,12 @@ auto SparseTensor::sparse_csr(const Tensor& crow_indices, const Tensor& col_indi
             std::to_string(nnz) + ")");
     }
 
-    // Bounds-check on CPU
-    if (crow_indices.device().type == Device::Type::CPU && nnz > 0) {
+    // Bounds-check on CPU. Structural validation of crow_indices (monotonicity,
+    // crow[0]==0, crow[nrows]==nnz) must run for any nnz, including nnz==0, so a
+    // malformed crow array is still rejected when there are no values. Only the
+    // per-element column-bounds loop is gated on nnz>0.
+    if (crow_indices.device().type == Device::Type::CPU) {
         auto* crow_ptr = crow_indices.data<int64_t>();
-        auto* col_ptr = col_indices.data<int64_t>();
 
         // Monotonicity check on crow_indices
         for (int64_t i = 0; i < nrows; ++i) {
@@ -133,11 +135,14 @@ auto SparseTensor::sparse_csr(const Tensor& crow_indices, const Tensor& col_indi
                 std::to_string(nnz) + ")");
         }
 
-        // Column bounds check
-        for (int64_t i = 0; i < nnz; ++i) {
-            if (col_ptr[i] < 0 || col_ptr[i] >= ncols) {
-                throw std::runtime_error("sparse_csr: col_index " + std::to_string(col_ptr[i]) +
-                    " out of bounds for ncols=" + std::to_string(ncols));
+        // Column bounds check (only meaningful when there are stored values)
+        if (nnz > 0) {
+            auto* col_ptr = col_indices.data<int64_t>();
+            for (int64_t i = 0; i < nnz; ++i) {
+                if (col_ptr[i] < 0 || col_ptr[i] >= ncols) {
+                    throw std::runtime_error("sparse_csr: col_index " + std::to_string(col_ptr[i]) +
+                        " out of bounds for ncols=" + std::to_string(ncols));
+                }
             }
         }
     }
@@ -832,7 +837,8 @@ auto SparseTensor::coalesce() const -> SparseTensor {
         DType vd = values_.dtype();
         std::optional<DType> widen_to;
         if (vd == DType::Float16 || vd == DType::BFloat16 ||
-            vd == DType::FP8_E4M3 || vd == DType::FP8_E5M2) {
+            vd == DType::FP8_E4M3 || vd == DType::FP8_E5M2 ||
+            vd == DType::FP8_E4M3FNUZ || vd == DType::FP8_E5M2FNUZ) {
             widen_to = DType::Float32;
         } else if (vd == DType::Int8 || vd == DType::UInt8 || vd == DType::Bool) {
             widen_to = DType::Int32;

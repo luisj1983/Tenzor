@@ -76,7 +76,7 @@ void main() {
         // Step 2: Apply from left: A = H * A (= (I - tau*v*v^T) * A)
         // Affects rows col+1:n, all columns col:n
         // v[col+1] = 1, v[col+2:n] stored in A[col+2:n, col]
-        for (uint j = col + tid; j < n; j += 256) {
+        for (uint j = col + tid; j < n; j += gl_WorkGroupSize.x) {
             // Compute dot = v^T * A[:, j] for rows col+1:n
             float dot = A[base + (col + 1) * n + j]; // v[col+1] = 1
             for (uint r = col + 2; r < n; r++) {
@@ -94,7 +94,7 @@ void main() {
 
         // Step 3: Apply from right: A = A * H^T (= A * (I - tau*v*v^T))
         // Affects all rows 0:n, columns col+1:n
-        for (uint i = tid; i < n; i += 256) {
+        for (uint i = tid; i < n; i += gl_WorkGroupSize.x) {
             // Compute dot = A[i, :] * v for cols col+1:n
             float dot = A[base + i * n + (col + 1)]; // v[col+1] = 1
             for (uint c = col + 2; c < n; c++) {

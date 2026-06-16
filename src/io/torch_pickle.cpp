@@ -618,7 +618,7 @@ private:
         return static_cast<uint8_t>(data_[cursor_++]);
     }
     void read_into(void* dst, size_t n) {
-        if (cursor_ + n > data_.size()) {
+        if (n > data_.size() || cursor_ > data_.size() - n) {
             throw std::runtime_error("torch_pickle: read past EOF");
         }
         std::memcpy(dst, data_.data() + cursor_, n);
@@ -658,7 +658,7 @@ private:
         throw std::runtime_error("torch_pickle: unterminated line");
     }
     auto read_string(size_t n) -> std::string {
-        if (cursor_ + n > data_.size()) {
+        if (n > data_.size() || cursor_ > data_.size() - n) {
             throw std::runtime_error("torch_pickle: string read past EOF");
         }
         std::string s(data_.data() + cursor_, n);

@@ -118,6 +118,18 @@ auto fill_kernel(const Tensor& input, float value) -> Tensor {
         for (int64_t i = 0; i < total_elements; ++i) {
             data[i] = val;
         }
+    } else if (input.dtype() == DType::FP8_E4M3FNUZ) {
+        auto* data = result.data<FP8_E4M3FNUZ>();
+        FP8_E4M3FNUZ val(value);
+        for (int64_t i = 0; i < total_elements; ++i) {
+            data[i] = val;
+        }
+    } else if (input.dtype() == DType::FP8_E5M2FNUZ) {
+        auto* data = result.data<FP8_E5M2FNUZ>();
+        FP8_E5M2FNUZ val(value);
+        for (int64_t i = 0; i < total_elements; ++i) {
+            data[i] = val;
+        }
     } else if (input.dtype() == DType::QInt8) {
         if (input.q_scale() == 0.0) {
             throw std::runtime_error(

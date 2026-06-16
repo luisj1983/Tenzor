@@ -361,6 +361,11 @@ namespace oneapi_internal {
         g_queue_getter = fn;
     }
     sycl::queue& get_queue(int32_t device_id) {
+        if (g_queue_getter == nullptr || g_backend_ptr == nullptr) {
+            throw std::runtime_error(
+                "OneAPI queue provider is not installed (backend not initialized "
+                "or already destroyed); cannot obtain SYCL queue");
+        }
         return g_queue_getter(g_backend_ptr, device_id);
     }
 } // namespace oneapi_internal
@@ -558,6 +563,13 @@ public:
     }
 
     ~OneAPIBackend() override {
+        // Clear the global queue provider FIRST so any kernel dispatched after
+        // (or during) teardown sees a null provider and throws a clear error
+        // via oneapi_internal::get_queue() instead of static_cast-ing and
+        // dereferencing this soon-to-be-freed object (use-after-free).
+        oneapi_internal::set_backend_queue_provider(nullptr);
+        oneapi_internal::set_queue_getter(nullptr);
+
         // Wait for all in-flight work to finish. A pending async SYCL error
         // would be rethrown by wait_and_throw(); since destructors are
         // implicitly noexcept, an escaping throw would call std::terminate()
@@ -608,8 +620,11 @@ public:
 
     auto get_device_info(int32_t device_id) const -> tenzor::DeviceInfo override {
         if (device_id < 0 || device_id >= static_cast<int32_t>(devices_.size())) {
+            std::string range = devices_.empty()
+                ? "(no OneAPI devices available)"
+                : "(available: 0-" + std::to_string(devices_.size() - 1) + ")";
             throw std::out_of_range("Invalid OneAPI device ID: " + std::to_string(device_id) +
-                                    " (available: 0-" + std::to_string(devices_.size() - 1) + ")");
+                                    " " + range);
         }
 
         const auto& dev = devices_[device_id];
@@ -704,7 +719,12 @@ public:
         // Feature support
         info.supports_fp16 = dev.device.has(sycl::aspect::fp16);
         info.supports_fp64 = dev.device.has(sycl::aspect::fp64);
-        info.supports_int8 = true;  // Generally supported
+        // SYCL exposes no portable aspect for 8-bit integer compute. Every
+        // conformant SYCL device supports sycl::char/int8 arithmetic as part of
+        // the core data types, and Tenzor's int8 kernels widen to int32 for the
+        // accumulation anyway, so this is an unconditional (and safe) assumption
+        // rather than a queried capability like fp16/fp64 above.
+        info.supports_int8 = true;
 
         // Device type
         info.is_integrated = !dev.device.is_gpu() ||
@@ -872,7 +892,12 @@ public:
 
         try {
             auto& device = devices_[device_id].device;
-            auto* queue = new sycl::queue(device,
+            // Share the device's existing SYCL context so USM pointers allocated
+            // by OneAPICachingAllocator (bound to the main queue's context) are
+            // valid on this stream queue. Constructing without the context would
+            // create a fresh one, making backend-allocated tensors invalid here.
+            auto context = devices_[device_id].queue->get_context();
+            auto* queue = new sycl::queue(context, device,
                 [this](sycl::exception_list elist) {
                     std::lock_guard<std::mutex> lock(async_errors_mutex_);
                     for (auto& e : elist) {
@@ -1085,9 +1110,11 @@ private:
 
     auto validate_device_id(int32_t device_id) const -> void {
         if (device_id < 0 || device_id >= static_cast<int32_t>(devices_.size())) {
+            std::string range = devices_.empty()
+                ? "(no OneAPI devices available)"
+                : "(available: 0-" + std::to_string(devices_.size() - 1) + ")";
             throw std::invalid_argument(
-                "Invalid device ID " + std::to_string(device_id) +
-                " (available: 0-" + std::to_string(devices_.size() - 1) + ")"
+                "Invalid device ID " + std::to_string(device_id) + " " + range
             );
         }
     }

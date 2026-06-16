@@ -184,14 +184,17 @@ void batchnorm_mean_var_impl(const T* input,
             for (int64_t hw = 0; hw < spatial_size; hw++) {
                 ++count;
                 T delta = ch_ptr[hw] - channel_mean;
-                channel_mean += delta / T(static_cast<float>(count));
+                // Divide in T precision; casting count through float first
+                // rounds integer counts > 2^24, silently degrading the
+                // Float64 (T=double) path on large per-channel element counts.
+                channel_mean += delta / static_cast<T>(count);
                 T delta2 = ch_ptr[hw] - channel_mean;
                 m2 += delta * delta2;
             }
         }
 
         mean[c] = channel_mean;
-        variance[c] = m2 / T(static_cast<float>(total_elements));
+        variance[c] = m2 / static_cast<T>(total_elements);
     }
 }
 

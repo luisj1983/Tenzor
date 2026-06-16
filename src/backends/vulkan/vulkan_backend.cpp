@@ -1185,12 +1185,22 @@ std::pair<VkBuffer, VkDeviceSize> VulkanBackend::getVulkanBufferAndOffset(const 
     }
 
 #ifdef TENZOR_HAS_VMA
-    // VMA path: look up buffer via VMA allocator
+    // VMA path: look up buffer via VMA allocator. Exact base-pointer hits
+    // return offset 0; view pointers (base + byte_offset) are resolved through
+    // the allocator's interval lookup so sliced/narrowed/offset operands work
+    // the same way as the non-VMA path (otherwise the exact-match get_buffer()
+    // misses every view and the function throws "buffer not tracked").
     auto& vma_alloc = backend::VulkanVMAAllocator::get();
     for (int32_t device_id = 0; device_id < device_count(); ++device_id) {
         VkBuffer buffer = vma_alloc.get_buffer(const_cast<void*>(ptr), device_id);
         if (buffer != VK_NULL_HANDLE) {
             return {buffer, 0};
+        }
+    }
+    for (int32_t device_id = 0; device_id < device_count(); ++device_id) {
+        auto [buffer, offset] = vma_alloc.find_buffer_and_offset(ptr, device_id);
+        if (buffer != VK_NULL_HANDLE) {
+            return {buffer, offset};
         }
     }
 #else

@@ -257,6 +257,11 @@ auto PatternMatcher::match_layer_norm(const Graph& graph, size_t start_idx,
     auto& n1 = nodes[start_idx + 1];
     if (n1->op_type() != OpType::Sub || used.count(n1.get())) return std::nullopt;
     if (!has_single_use(n0)) return std::nullopt;
+    // Require a real data edge n0->n1 (mirrors match_softmax/match_swiglu) so a
+    // positionally-adjacent but data-independent chain does not spuriously
+    // match; extended_codegen replaces a LayerNorm match with hardcoded
+    // LayerNorm math, so a false match yields silently wrong results.
+    if (!consumes_output(n0, n1)) return std::nullopt;
 
     // After sub(input, mean), look for variance computation:
     // Pow(2) or Mul(self, self) -> Mean -> Add(eps) -> Sqrt -> Div
@@ -264,11 +269,13 @@ auto PatternMatcher::match_layer_norm(const Graph& graph, size_t start_idx,
     auto& n2 = nodes[start_idx + 2];
     if ((n2->op_type() != OpType::Pow && n2->op_type() != OpType::Mul) ||
         used.count(n2.get())) return std::nullopt;
+    if (!consumes_output(n1, n2)) return std::nullopt;
 
     // Mean of squared differences
     if (start_idx + 3 >= nodes.size()) return std::nullopt;
     auto& n3 = nodes[start_idx + 3];
     if (n3->op_type() != OpType::Mean || used.count(n3.get())) return std::nullopt;
+    if (!consumes_output(n2, n3)) return std::nullopt;
 
     // Look for the remaining chain: could be Add(eps) -> Sqrt -> Div -> Mul(gamma) -> Add(beta)
     // or variations. Collect contiguous matching nodes.
@@ -281,8 +288,11 @@ auto PatternMatcher::match_layer_norm(const Graph& graph, size_t start_idx,
         if (used.count(nk.get())) break;
 
         auto op = nk->op_type();
+        // Require a real data edge from the previously matched node into nk so
+        // an unrelated tail of arithmetic ops is not absorbed into the match.
         if (op == OpType::Add || op == OpType::Sqrt || op == OpType::Div ||
             op == OpType::Mul || op == OpType::Neg) {
+            if (!consumes_output(matched.back(), nk)) break;
             matched.push_back(nk);
             ++idx;
 
@@ -331,20 +341,26 @@ auto PatternMatcher::match_rms_norm(const Graph& graph, size_t start_idx,
     auto& n1 = nodes[start_idx + 1];
     if (n1->op_type() != OpType::Mean || used.count(n1.get())) return std::nullopt;
     if (!has_single_use(n0)) return std::nullopt;
+    // Require a real data edge n0->n1 (mirrors match_softmax/match_swiglu);
+    // extended_codegen replaces an RMSNorm match with hardcoded RMSNorm math,
+    // so a spurious match of an unrelated Pow/Mean chain is silently wrong.
+    if (!consumes_output(n0, n1)) return std::nullopt;
 
     // Add(eps) or directly Sqrt/Rsqrt
     size_t next = start_idx + 2;
     std::vector<std::shared_ptr<Node>> matched = {n0, n1};
 
     if (next < nodes.size() && nodes[next]->op_type() == OpType::Add &&
-        !used.count(nodes[next].get())) {
+        !used.count(nodes[next].get()) &&
+        consumes_output(matched.back(), nodes[next])) {
         matched.push_back(nodes[next]);
         ++next;
     }
 
     // Sqrt or Rsqrt (which is Div(1, Sqrt) or Pow(-0.5))
     if (next < nodes.size() && nodes[next]->op_type() == OpType::Sqrt &&
-        !used.count(nodes[next].get())) {
+        !used.count(nodes[next].get()) &&
+        consumes_output(matched.back(), nodes[next])) {
         matched.push_back(nodes[next]);
         ++next;
     }
@@ -352,14 +368,16 @@ auto PatternMatcher::match_rms_norm(const Graph& graph, size_t start_idx,
     // Div (input / sqrt_result) or Mul (input * rsqrt_result)
     if (next < nodes.size() &&
         (nodes[next]->op_type() == OpType::Div || nodes[next]->op_type() == OpType::Mul) &&
-        !used.count(nodes[next].get())) {
+        !used.count(nodes[next].get()) &&
+        consumes_output(matched.back(), nodes[next])) {
         matched.push_back(nodes[next]);
         ++next;
     }
 
     // Optional: Mul(gamma)
     if (next < nodes.size() && nodes[next]->op_type() == OpType::Mul &&
-        !used.count(nodes[next].get())) {
+        !used.count(nodes[next].get()) &&
+        consumes_output(matched.back(), nodes[next])) {
         matched.push_back(nodes[next]);
     }
 

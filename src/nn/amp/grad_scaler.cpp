@@ -307,21 +307,21 @@ auto GradScaler::clip_grad_norm_(optim::Optimizer& optimizer, double max_norm, d
 
     // BB.13: Y.32 introduced the F32 unscaled-grad side-table that
     // ``check_inf_nan_`` consults when the param's grad is F16/BF16. The
-    // clip utility just mutated ``param->grad()`` in place — the F32 entry
-    // now holds the pre-clip value and would either (a) report a stale
-    // overflow that was actually clipped away, or (b) hide a freshly
-    // introduced clipped-to-inf value. Re-sync the side-table from the
-    // post-clip grad so check_inf_nan_ sees the same numbers the optimizer
-    // will step against.
+    // clip utility just mutated ``param->grad()`` in place IN THE GRAD'S OWN
+    // (half) dtype, so reading it back into F32 would re-introduce the very
+    // half-precision saturation the side-table exists to avoid. Instead, apply
+    // the SAME clip transform that clip_grad_norm_ applied to the half grads
+    // directly to the F32 side-table entries: norm clipping multiplies every
+    // grad by clip_coef = max_norm/(total_norm+1e-6) iff that coefficient < 1.
+    // (See nn/utils/clip_grad.cpp.) total_norm is the returned ``result``.
     auto opt_it = f32_unscaled_grads_.find(&optimizer);
     if (opt_it != f32_unscaled_grads_.end()) {
-        auto& opt_unscaled = opt_it->second;
-        for (auto& param : optimizer.parameters()) {
-            if (!param || !param->has_grad()) continue;
-            if (opt_unscaled.find(param.get()) == opt_unscaled.end()) {
-                continue;
+        const double clip_coef = max_norm / (result + 1e-6);
+        if (clip_coef < 1.0) {
+            auto& opt_unscaled = opt_it->second;
+            for (auto& [key, f32_grad] : opt_unscaled) {
+                f32_grad = tenzor::mul(f32_grad, clip_coef);
             }
-            opt_unscaled[param.get()] = param->grad().value().to(DType::Float32);
         }
     }
 
@@ -341,17 +341,15 @@ auto GradScaler::clip_grad_value_(optim::Optimizer& optimizer, double clip_value
         clip_value
     );
 
-    // BB.13: re-sync the F32 side-table after the in-place value clip — see
-    // the comment in clip_grad_norm_ above for the rationale.
+    // BB.13: apply the value clamp to the F32 side-table directly rather than
+    // reading back the in-place-clipped half grad (which would re-saturate it).
+    // clip_grad_value_ clamps every grad to [-clip_value, clip_value]; mirror
+    // that on the genuine F32 values. See clip_grad_norm_ above for rationale.
     auto opt_it = f32_unscaled_grads_.find(&optimizer);
     if (opt_it != f32_unscaled_grads_.end()) {
         auto& opt_unscaled = opt_it->second;
-        for (auto& param : optimizer.parameters()) {
-            if (!param || !param->has_grad()) continue;
-            if (opt_unscaled.find(param.get()) == opt_unscaled.end()) {
-                continue;
-            }
-            opt_unscaled[param.get()] = param->grad().value().to(DType::Float32);
+        for (auto& [key, f32_grad] : opt_unscaled) {
+            f32_grad = tenzor::clamp(f32_grad, -clip_value, clip_value);
         }
     }
 }

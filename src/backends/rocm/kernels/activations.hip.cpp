@@ -38,9 +38,14 @@ namespace rocm {
 // Optimal block size for element-wise operations
 constexpr int BLOCK_SIZE = 256;
 
-// Calculate grid size for element-wise operations
+// Calculate grid size for element-wise operations.
+// Clamp to at least 1 block: HIP rejects zero-grid launches with
+// hipErrorInvalidConfiguration, so for n==0 we still launch a single block.
+// The grid-stride loop bodies do no work when n==0, yielding a correct
+// empty result instead of throwing on legitimately-empty tensors.
 inline int get_num_blocks(int64_t n, int block_size = BLOCK_SIZE) {
-    return (n + block_size - 1) / block_size;
+    int blocks = static_cast<int>((n + block_size - 1) / block_size);
+    return blocks > 0 ? blocks : 1;
 }
 
 // ============================================================================

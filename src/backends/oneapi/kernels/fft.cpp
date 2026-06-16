@@ -2073,11 +2073,19 @@ auto irfft_kernel(const Tensor& input, int64_t dim, int64_t n,
                     d_buf[dst]     = d_in[src];
                     d_buf[dst + 1] = d_in[src + 1];
                 } else {
-                    // Conjugate symmetry: X[k] = conj(X[N-k])
+                    // Conjugate symmetry: X[k] = conj(X[N-k]). When an explicit
+                    // output length n >= 2*complex_len was requested, the mirror
+                    // bin lands beyond the provided complex_len bins (zero-pad
+                    // region); read only when mirror is in range, else write 0.
                     int64_t mirror = output_len - k;
-                    int64_t src = (b * complex_len + mirror) * 2;
-                    d_buf[dst]     = d_in[src];
-                    d_buf[dst + 1] = -d_in[src + 1];
+                    if (mirror < complex_len) {
+                        int64_t src = (b * complex_len + mirror) * 2;
+                        d_buf[dst]     = d_in[src];
+                        d_buf[dst + 1] = -d_in[src + 1];
+                    } else {
+                        d_buf[dst]     = 0.0f;
+                        d_buf[dst + 1] = 0.0f;
+                    }
                 }
             }).wait();
 
@@ -2123,10 +2131,17 @@ auto irfft_kernel(const Tensor& input, int64_t dim, int64_t n,
                     d_full[dst]     = d_in[src];
                     d_full[dst + 1] = d_in[src + 1];
                 } else {
+                    // Conjugate symmetry; zero-pad bins beyond complex_len when
+                    // an explicit n >= 2*complex_len was requested.
                     int64_t mirror = output_len - k;
-                    int64_t src = (b * complex_len * inner_size + mirror * inner_size + inner) * 2;
-                    d_full[dst]     = d_in[src];
-                    d_full[dst + 1] = -d_in[src + 1];
+                    if (mirror < complex_len) {
+                        int64_t src = (b * complex_len * inner_size + mirror * inner_size + inner) * 2;
+                        d_full[dst]     = d_in[src];
+                        d_full[dst + 1] = -d_in[src + 1];
+                    } else {
+                        d_full[dst]     = 0.0f;
+                        d_full[dst + 1] = 0.0f;
+                    }
                 }
             }).wait();
 
@@ -2175,10 +2190,17 @@ auto irfft_kernel(const Tensor& input, int64_t dim, int64_t n,
                     d_buf[dst]     = d_in[src];
                     d_buf[dst + 1] = d_in[src + 1];
                 } else {
+                    // Conjugate symmetry; zero-pad bins beyond complex_len when
+                    // an explicit n >= 2*complex_len was requested.
                     int64_t mirror = output_len - k;
-                    int64_t src = (b * complex_len + mirror) * 2;
-                    d_buf[dst]     = d_in[src];
-                    d_buf[dst + 1] = -d_in[src + 1];
+                    if (mirror < complex_len) {
+                        int64_t src = (b * complex_len + mirror) * 2;
+                        d_buf[dst]     = d_in[src];
+                        d_buf[dst + 1] = -d_in[src + 1];
+                    } else {
+                        d_buf[dst]     = 0.0;
+                        d_buf[dst + 1] = 0.0;
+                    }
                 }
             }).wait();
 
@@ -2220,10 +2242,17 @@ auto irfft_kernel(const Tensor& input, int64_t dim, int64_t n,
                     d_full[dst]     = d_in[src];
                     d_full[dst + 1] = d_in[src + 1];
                 } else {
+                    // Conjugate symmetry; zero-pad bins beyond complex_len when
+                    // an explicit n >= 2*complex_len was requested.
                     int64_t mirror = output_len - k;
-                    int64_t src = (b * complex_len * inner_size + mirror * inner_size + inner) * 2;
-                    d_full[dst]     = d_in[src];
-                    d_full[dst + 1] = -d_in[src + 1];
+                    if (mirror < complex_len) {
+                        int64_t src = (b * complex_len * inner_size + mirror * inner_size + inner) * 2;
+                        d_full[dst]     = d_in[src];
+                        d_full[dst + 1] = -d_in[src + 1];
+                    } else {
+                        d_full[dst]     = 0.0;
+                        d_full[dst + 1] = 0.0;
+                    }
                 }
             }).wait();
 

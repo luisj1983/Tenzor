@@ -104,7 +104,7 @@ void main() {
 
     if (mode == 0) {
         // Build U
-        for (uint r = tid; r < n; r += 256) {
+        for (uint r = tid; r < n; r += gl_WorkGroupSize.x) {
             writeF16U(elem_base + r * n + j, (r == j) ? 1.0 : 0.0);
         }
         barrier();
@@ -125,7 +125,7 @@ void main() {
 
             float dot = dot_val;
 
-            for (uint r = col + 1 + tid; r < n; r += 256) {
+            for (uint r = col + 1 + tid; r < n; r += gl_WorkGroupSize.x) {
                 float v_r = readF16A(elem_base + r * n + col);
                 float cur = readF16U(elem_base + r * n + j);
                 writeF16U(elem_base + r * n + j, cur - left_tau * v_r * dot);
@@ -138,7 +138,7 @@ void main() {
         }
     } else {
         // Build Vt
-        for (uint c = tid; c < n; c += 256) {
+        for (uint c = tid; c < n; c += gl_WorkGroupSize.x) {
             writeF16Vt(elem_base + j * n + c, (j == c) ? 1.0 : 0.0);
         }
         barrier();
@@ -160,7 +160,7 @@ void main() {
 
             float dot = dot_val;
 
-            for (uint c = col + 2 + tid; c < n; c += 256) {
+            for (uint c = col + 2 + tid; c < n; c += gl_WorkGroupSize.x) {
                 float v_r = readF16A(elem_base + col * n + c);
                 float cur = readF16Vt(elem_base + j * n + c);
                 writeF16Vt(elem_base + j * n + c, cur - right_tau * dot * v_r);

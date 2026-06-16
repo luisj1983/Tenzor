@@ -79,6 +79,10 @@ auto Stat::get() const -> double {
         case Aggregation::Count:
             return static_cast<double>(count_.load(std::memory_order_acquire));
         case Aggregation::MinMax:
+            // Before any add(), max_ holds numeric_limits::lowest() (~-1.8e308),
+            // a sentinel that would leak to telemetry consumers. Return the
+            // neutral empty value 0.0, mirroring the count==0 guard in Mean.
+            if (count_.load(std::memory_order_acquire) == 0) return 0.0;
             return max_.load(std::memory_order_acquire);
         case Aggregation::Value:
             return value_.load(std::memory_order_acquire);
@@ -87,6 +91,9 @@ auto Stat::get() const -> double {
 }
 
 auto Stat::get_min() const -> double {
+    // Before any add(), min_ holds numeric_limits::max() (~1.8e308), a sentinel
+    // that would leak to telemetry consumers. Return the neutral empty value 0.0.
+    if (count_.load(std::memory_order_acquire) == 0) return 0.0;
     return min_.load(std::memory_order_acquire);
 }
 

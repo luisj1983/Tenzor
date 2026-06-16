@@ -96,7 +96,12 @@ static void merge_adjacent_in_map(
                 block.ptr = candidate.ptr;
             }
             block.size        = new_size;
-            block.allocated_size = root.size;
+            // Do NOT reassign allocated_size here. It is documented as the
+            // ORIGINAL root allocation extent (before split). After
+            // evict_partial_free_ranges() shrinks root.size, stamping it here
+            // would record the shrunken size instead of the true cudaMalloc/
+            // posix_memalign extent, corrupting the field for any future code
+            // that trusts it to recover the root extent.
             block.is_split    = (new_size < root.size);
 
             free_map.erase(it);
@@ -625,7 +630,12 @@ auto CPUCachingAllocator::try_allocate_local(size_t bytes) -> void* {
         {
             std::lock_guard<std::mutex> slock(stats_mutex_);
             global_stats_.num_splits++;
-            global_stats_.cached_bytes += remainder;
+            // NOTE: do NOT add `remainder` to global cached_bytes here. The
+            // full block's bytes were already counted in cached_bytes when it
+            // was freed. The common `cached_bytes -= block.size` below (with
+            // block.size now == bytes) correctly drops the region's cached
+            // contribution by exactly `bytes`, leaving `remainder` cached.
+            // Adding remainder here double-counts it (region -> 2*remainder).
         }
     }
 
@@ -698,7 +708,11 @@ auto CPUCachingAllocator::try_allocate_global(size_t bytes) -> void* {
         {
             std::lock_guard<std::mutex> slock(stats_mutex_);
             global_stats_.num_splits++;
-            global_stats_.cached_bytes += remainder;
+            // NOTE: do NOT add `remainder` to global cached_bytes here (same
+            // reasoning as try_allocate_local): the full block was already
+            // counted at free time, so the common `cached_bytes -= block.size`
+            // below (block.size == bytes) leaves exactly `remainder` cached.
+            // Adding it again double-counts the remainder.
         }
     }
 

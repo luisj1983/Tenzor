@@ -123,7 +123,7 @@ void main() {
         if (abs(tau_k) < 1e-10) continue;
 
         // Compute p = tau * A * v
-        for (uint r = col + 1 + tid; r < n; r += 256) {
+        for (uint r = col + 1 + tid; r < n; r += gl_WorkGroupSize.x) {
             float sum = f16_load(base + r * n + (col + 1));
             for (uint c = col + 2; c < n; c++) {
                 sum += f16_load(base + r * n + c) * f16_load(base + c * n + col);
@@ -141,14 +141,14 @@ void main() {
         }
         barrier();
 
-        for (uint r = col + 1 + tid; r < n; r += 256) {
+        for (uint r = col + 1 + tid; r < n; r += gl_WorkGroupSize.x) {
             float v_r = (r == col + 1) ? 1.0 : f16_load(base + r * n + col);
             float w_val = work_load(work_base + r) - dot_val * v_r;
             work_store(work_base + r, w_val);
         }
         barrier();
 
-        for (uint r = col + 1 + tid; r < n; r += 256) {
+        for (uint r = col + 1 + tid; r < n; r += gl_WorkGroupSize.x) {
             float v_r = (r == col + 1) ? 1.0 : f16_load(base + r * n + col);
             float w_r = work_load(work_base + r);
             for (uint c = col + 1; c <= r; c++) {

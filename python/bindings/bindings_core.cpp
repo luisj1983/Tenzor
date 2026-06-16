@@ -723,7 +723,9 @@ void register_core(py::module_& m) {
         .value("quint8", tenzor::DType::QUInt8)
         .value("qint4x2", tenzor::DType::QInt4x2)
         .value("fp8_e4m3", tenzor::DType::FP8_E4M3)
-        .value("fp8_e5m2", tenzor::DType::FP8_E5M2);
+        .value("fp8_e5m2", tenzor::DType::FP8_E5M2)
+        .value("fp8_e4m3fnuz", tenzor::DType::FP8_E4M3FNUZ)
+        .value("fp8_e5m2fnuz", tenzor::DType::FP8_E5M2FNUZ);
 
     // Quantization functions
     m.def("quantize_per_tensor", &tenzor::quantize_per_tensor,

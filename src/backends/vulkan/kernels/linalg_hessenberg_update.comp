@@ -48,7 +48,7 @@ void main() {
         float dl = dot_left * tau_k;
 
         // Update column j rows
-        for (uint r = col + 1 + tid; r < n; r += 256) {
+        for (uint r = col + 1 + tid; r < n; r += gl_WorkGroupSize.x) {
             float v_r = (r == col + 1) ? 1.0 : A[base + r * n + col];
             A[base + r * n + j] -= dl * v_r;
         }

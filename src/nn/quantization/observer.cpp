@@ -418,9 +418,18 @@ auto PerChannelHistogramObserver::observe(const Tensor& tensor) -> void {
         }
     }
 
+    // Bring the channel axis to the front so each channel's elements are
+    // contiguous, mirroring MinMaxObserver's per-channel path. Indexing the
+    // raw buffer with `c * channel_size + i` is only valid when the channel
+    // axis is already dim 0; for any axis_ != 0 we must transpose first,
+    // otherwise the per-channel histograms gather the wrong (strided) elements.
+    Tensor channel_first = (ax == 0)
+        ? tensor_f32
+        : tensor_f32.transpose(0, ax).contiguous();
+
     // Extract and observe each channel
-    int64_t channel_size = tensor_f32.numel() / num_channels;
-    const float* data = tensor_f32.data<const float>();
+    int64_t channel_size = channel_first.numel() / num_channels;
+    const float* data = channel_first.data<const float>();
 
     for (int64_t c = 0; c < num_channels; ++c) {
         // Create temporary tensor for this channel on CPU

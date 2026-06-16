@@ -43,6 +43,8 @@ auto SafeTensorsSerializer::dtype_to_st_string(DType dtype) -> std::string {
         case DType::Complex128: return "C128";  // Tenzor extension
         case DType::FP8_E4M3:   return "F8_E4M3";
         case DType::FP8_E5M2:   return "F8_E5M2";
+        case DType::FP8_E4M3FNUZ: return "F8_E4M3FNUZ"; // Tenzor extension (no standard ST code)
+        case DType::FP8_E5M2FNUZ: return "F8_E5M2FNUZ"; // Tenzor extension (no standard ST code)
         case DType::QInt8:      return "QI8";   // Tenzor extension (raw int8 + qparams)
         case DType::QUInt8:     return "QU8";   // Tenzor extension
         case DType::QInt4x2:    return "QI4X2"; // Tenzor extension (4-bit packed)
@@ -66,6 +68,8 @@ auto SafeTensorsSerializer::st_string_to_dtype(const std::string& s) -> DType {
     if (s == "BOOL")     return DType::Bool;
     if (s == "F8_E4M3")  return DType::FP8_E4M3;
     if (s == "F8_E5M2")  return DType::FP8_E5M2;
+    if (s == "F8_E4M3FNUZ") return DType::FP8_E4M3FNUZ; // Tenzor extension
+    if (s == "F8_E5M2FNUZ") return DType::FP8_E5M2FNUZ; // Tenzor extension
     // Audit item I.13 — Tenzor-specific dtype extensions.  Non-Tenzor
     // readers may not recognise these; that is the documented contract.
     if (s == "C64")      return DType::Complex64;

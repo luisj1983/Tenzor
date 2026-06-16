@@ -1264,7 +1264,8 @@ auto add_kernel(const Tensor& a_in, const Tensor& b_in, hipStream_t stream) -> T
                 reinterpret_cast<const double*>(a.data_ptr()),
                 reinterpret_cast<const double*>(b.data_ptr()),
                 reinterpret_cast<double*>(result.data_ptr()), n);
-        } else if (a.dtype() == DType::FP8_E4M3 || a.dtype() == DType::FP8_E5M2) {
+        } else if (a.dtype() == DType::FP8_E4M3 || a.dtype() == DType::FP8_E5M2 ||
+                   a.dtype() == DType::FP8_E4M3FNUZ || a.dtype() == DType::FP8_E5M2FNUZ) {
             // FP8 emulation: widen to Float32, add, narrow back
             DType orig = a.dtype();
             auto a_f32 = cast_kernel(a, DType::Float32, stream);
@@ -1370,7 +1371,8 @@ auto add_kernel(const Tensor& a_in, const Tensor& b_in, hipStream_t stream) -> T
             reinterpret_cast<const double*>(b.data_ptr()),
             reinterpret_cast<double*>(result.data_ptr()),
             d_strides_a, d_strides_b, d_output_shape, ndim, n);
-    } else if (a.dtype() == DType::FP8_E4M3 || a.dtype() == DType::FP8_E5M2) {
+    } else if (a.dtype() == DType::FP8_E4M3 || a.dtype() == DType::FP8_E5M2 ||
+               a.dtype() == DType::FP8_E4M3FNUZ || a.dtype() == DType::FP8_E5M2FNUZ) {
         DType orig = a.dtype();
         auto a_f32 = cast_kernel(a, DType::Float32, stream);
         auto b_f32 = cast_kernel(b, DType::Float32, stream);
@@ -1473,7 +1475,8 @@ auto sub_kernel(const Tensor& a_in, const Tensor& b_in, hipStream_t stream) -> T
                 reinterpret_cast<const double*>(a.data_ptr()),
                 reinterpret_cast<const double*>(b.data_ptr()),
                 reinterpret_cast<double*>(result.data_ptr()), n);
-        } else if (a.dtype() == DType::FP8_E4M3 || a.dtype() == DType::FP8_E5M2) {
+        } else if (a.dtype() == DType::FP8_E4M3 || a.dtype() == DType::FP8_E5M2 ||
+                   a.dtype() == DType::FP8_E4M3FNUZ || a.dtype() == DType::FP8_E5M2FNUZ) {
             DType orig = a.dtype();
             auto a_f32 = cast_kernel(a, DType::Float32, stream);
             auto b_f32 = cast_kernel(b, DType::Float32, stream);
@@ -1571,7 +1574,8 @@ auto sub_kernel(const Tensor& a_in, const Tensor& b_in, hipStream_t stream) -> T
             reinterpret_cast<const double*>(b.data_ptr()),
             reinterpret_cast<double*>(result.data_ptr()),
             d_strides_a, d_strides_b, d_output_shape, ndim, n);
-    } else if (a.dtype() == DType::FP8_E4M3 || a.dtype() == DType::FP8_E5M2) {
+    } else if (a.dtype() == DType::FP8_E4M3 || a.dtype() == DType::FP8_E5M2 ||
+               a.dtype() == DType::FP8_E4M3FNUZ || a.dtype() == DType::FP8_E5M2FNUZ) {
         DType orig = a.dtype();
         auto a_f32 = cast_kernel(a, DType::Float32, stream);
         auto b_f32 = cast_kernel(b, DType::Float32, stream);
@@ -1676,7 +1680,8 @@ auto mul_kernel(const Tensor& a_in, const Tensor& b_in, hipStream_t stream) -> T
                 reinterpret_cast<const double*>(a.data_ptr()),
                 reinterpret_cast<const double*>(b.data_ptr()),
                 reinterpret_cast<double*>(result.data_ptr()), n);
-        } else if (a.dtype() == DType::FP8_E4M3 || a.dtype() == DType::FP8_E5M2) {
+        } else if (a.dtype() == DType::FP8_E4M3 || a.dtype() == DType::FP8_E5M2 ||
+                   a.dtype() == DType::FP8_E4M3FNUZ || a.dtype() == DType::FP8_E5M2FNUZ) {
             DType orig = a.dtype();
             auto a_f32 = cast_kernel(a, DType::Float32, stream);
             auto b_f32 = cast_kernel(b, DType::Float32, stream);
@@ -1779,7 +1784,8 @@ auto mul_kernel(const Tensor& a_in, const Tensor& b_in, hipStream_t stream) -> T
             reinterpret_cast<const double*>(b.data_ptr()),
             reinterpret_cast<double*>(result.data_ptr()),
             d_strides_a, d_strides_b, d_output_shape, ndim, n);
-    } else if (a.dtype() == DType::FP8_E4M3 || a.dtype() == DType::FP8_E5M2) {
+    } else if (a.dtype() == DType::FP8_E4M3 || a.dtype() == DType::FP8_E5M2 ||
+               a.dtype() == DType::FP8_E4M3FNUZ || a.dtype() == DType::FP8_E5M2FNUZ) {
         DType orig = a.dtype();
         auto a_f32 = cast_kernel(a, DType::Float32, stream);
         auto b_f32 = cast_kernel(b, DType::Float32, stream);
@@ -1877,7 +1883,8 @@ auto div_kernel(const Tensor& a_in, const Tensor& b_in, hipStream_t stream) -> T
                 reinterpret_cast<const double*>(a.data_ptr()),
                 reinterpret_cast<const double*>(b.data_ptr()),
                 reinterpret_cast<double*>(result.data_ptr()), n);
-        } else if (a.dtype() == DType::FP8_E4M3 || a.dtype() == DType::FP8_E5M2) {
+        } else if (a.dtype() == DType::FP8_E4M3 || a.dtype() == DType::FP8_E5M2 ||
+                   a.dtype() == DType::FP8_E4M3FNUZ || a.dtype() == DType::FP8_E5M2FNUZ) {
             DType orig = a.dtype();
             auto a_f32 = cast_kernel(a, DType::Float32, stream);
             auto b_f32 = cast_kernel(b, DType::Float32, stream);
@@ -1967,7 +1974,8 @@ auto div_kernel(const Tensor& a_in, const Tensor& b_in, hipStream_t stream) -> T
             reinterpret_cast<const double*>(b.data_ptr()),
             reinterpret_cast<double*>(result.data_ptr()),
             d_strides_a, d_strides_b, d_output_shape, ndim, n);
-    } else if (a.dtype() == DType::FP8_E4M3 || a.dtype() == DType::FP8_E5M2) {
+    } else if (a.dtype() == DType::FP8_E4M3 || a.dtype() == DType::FP8_E5M2 ||
+               a.dtype() == DType::FP8_E4M3FNUZ || a.dtype() == DType::FP8_E5M2FNUZ) {
         DType orig = a.dtype();
         auto a_f32 = cast_kernel(a, DType::Float32, stream);
         auto b_f32 = cast_kernel(b, DType::Float32, stream);

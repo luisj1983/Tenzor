@@ -1035,7 +1035,7 @@ auto bilinear_interpolate(const T* data, int64_t height, int64_t width,
 template<typename T>
 void roi_align_forward_impl(
     const T* feat_data, const T* roi_data, T* out_data,
-    int64_t num_rois, int64_t channels, int64_t height, int64_t width,
+    int64_t num_rois, int64_t batch_size, int64_t channels, int64_t height, int64_t width,
     int64_t output_h, int64_t output_w,
     float spatial_scale_f, int64_t sampling_ratio, bool aligned)
 {
@@ -1046,6 +1046,19 @@ void roi_align_forward_impl(
     #pragma omp parallel for if(num_rois > 16)
     for (int64_t n = 0; n < num_rois; ++n) {
         int64_t batch_idx = static_cast<int64_t>(roi_data[n * 5 + 0]);
+        // batch_idx comes from the ROIs tensor (e.g. RPN output) and is not
+        // guaranteed in-range. Indexing features with an OOB batch_idx is a
+        // heap over-read; skip the ROI and zero its output block instead.
+        if (batch_idx < 0 || batch_idx >= batch_size) {
+            for (int64_t c = 0; c < channels; ++c) {
+                for (int64_t ph = 0; ph < output_h; ++ph) {
+                    for (int64_t pw = 0; pw < output_w; ++pw) {
+                        out_data[((n * channels + c) * output_h + ph) * output_w + pw] = T(0);
+                    }
+                }
+            }
+            continue;
+        }
         Compute roi_x1 = static_cast<Compute>(roi_data[n * 5 + 1]) * spatial_scale - offset;
         Compute roi_y1 = static_cast<Compute>(roi_data[n * 5 + 2]) * spatial_scale - offset;
         Compute roi_x2 = static_cast<Compute>(roi_data[n * 5 + 3]) * spatial_scale - offset;
@@ -1098,7 +1111,7 @@ void roi_align_forward_impl(
 template<typename T>
 void roi_align_backward_impl(
     const T* go_data, const T* roi_data, T* gi_data,
-    int64_t num_rois, int64_t channels, int64_t feat_height, int64_t feat_width,
+    int64_t num_rois, int64_t batch_size, int64_t channels, int64_t feat_height, int64_t feat_width,
     int64_t output_h, int64_t output_w,
     float spatial_scale_f, int64_t sampling_ratio, bool aligned)
 {
@@ -1109,6 +1122,11 @@ void roi_align_backward_impl(
     #pragma omp parallel for if(num_rois > 16)
     for (int64_t n = 0; n < num_rois; ++n) {
         int64_t batch_idx = static_cast<int64_t>(roi_data[n * 5 + 0]);
+        // Guard against OOB batch_idx from the ROIs tensor: an out-of-range
+        // value would drive an out-of-bounds WRITE into gi_data. Skip the ROI.
+        if (batch_idx < 0 || batch_idx >= batch_size) {
+            continue;
+        }
         Compute roi_x1 = static_cast<Compute>(roi_data[n * 5 + 1]) * spatial_scale - offset;
         Compute roi_y1 = static_cast<Compute>(roi_data[n * 5 + 2]) * spatial_scale - offset;
         Compute roi_x2 = static_cast<Compute>(roi_data[n * 5 + 3]) * spatial_scale - offset;
@@ -1200,6 +1218,7 @@ auto roi_align_forward_kernel(const Tensor& features, const Tensor& rois,
     // features: (N, C, H, W)
     // rois: (num_rois, 5) where each row is [batch_idx, x1, y1, x2, y2]
     const auto& feat_shape = features.shape();
+    int64_t batch_size = feat_shape[0];
     int64_t channels = feat_shape[1];
     int64_t height   = feat_shape[2];
     int64_t width    = feat_shape[3];
@@ -1212,13 +1231,13 @@ auto roi_align_forward_kernel(const Tensor& features, const Tensor& rois,
         case DType::Float32:
             roi_align_forward_impl<float>(
                 features.data<float>(), rois.data<float>(), output.data<float>(),
-                num_rois, channels, height, width, output_h, output_w,
+                num_rois, batch_size, channels, height, width, output_h, output_w,
                 spatial_scale, sampling_ratio, aligned);
             break;
         case DType::Float64:
             roi_align_forward_impl<double>(
                 features.data<double>(), rois.data<double>(), output.data<double>(),
-                num_rois, channels, height, width, output_h, output_w,
+                num_rois, batch_size, channels, height, width, output_h, output_w,
                 spatial_scale, sampling_ratio, aligned);
             break;
         case DType::Float16:
@@ -1257,13 +1276,13 @@ auto roi_align_backward_kernel(const Tensor& grad_output, const Tensor& rois,
         case DType::Float32:
             roi_align_backward_impl<float>(
                 grad_output.data<float>(), rois.data<float>(), grad_input.data<float>(),
-                num_rois, channels, feat_height, feat_width, output_h, output_w,
+                num_rois, batch_size, channels, feat_height, feat_width, output_h, output_w,
                 spatial_scale, sampling_ratio, aligned);
             break;
         case DType::Float64:
             roi_align_backward_impl<double>(
                 grad_output.data<double>(), rois.data<double>(), grad_input.data<double>(),
-                num_rois, channels, feat_height, feat_width, output_h, output_w,
+                num_rois, batch_size, channels, feat_height, feat_width, output_h, output_w,
                 spatial_scale, sampling_ratio, aligned);
             break;
         case DType::Float16:

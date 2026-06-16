@@ -35,6 +35,8 @@ inline DType dtype_from_string(std::string_view s, DType default_val = DType::Fl
     if (s == "complex128") return DType::Complex128;
     if (s == "fp8_e4m3") return DType::FP8_E4M3;
     if (s == "fp8_e5m2") return DType::FP8_E5M2;
+    if (s == "fp8_e4m3fnuz") return DType::FP8_E4M3FNUZ;
+    if (s == "fp8_e5m2fnuz") return DType::FP8_E5M2FNUZ;
     if (s == "qint8") return DType::QInt8;
     if (s == "quint8") return DType::QUInt8;
     if (s == "qint4x2") return DType::QInt4x2;

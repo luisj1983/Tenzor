@@ -530,6 +530,10 @@ auto lstm_multi_layer_forward_cuda(
             cudaMemcpyDeviceToDevice, stream));
     }
 
+    // Sync before returning so consumers on a different stream observe the
+    // async D2D copies into h_n/c_n (matches single-layer lstm_forward_cuda);
+    // the StreamGuard dtor only releases the slot, it does not synchronize.
+    TENZOR_CUDA_CHECK(cudaStreamSynchronize(stream));
     return {layer_input, h_n, c_n};
 }
 
@@ -574,6 +578,9 @@ auto gru_multi_layer_forward_cuda(
             cudaMemcpyDeviceToDevice, stream));
     }
 
+    // Sync before returning so consumers on a different stream observe the
+    // async D2D copies into h_n (matches single-layer gru_forward_cuda).
+    TENZOR_CUDA_CHECK(cudaStreamSynchronize(stream));
     return {layer_input, h_n};
 }
 
@@ -731,6 +738,9 @@ auto bilstm_forward_cuda(
                     bwd_result[2].data_ptr(),
                     state_bytes, cudaMemcpyDeviceToDevice, stream));
 
+    // Sync before returning so consumers on a different stream observe the
+    // async D2D copies into h_n/c_n (matches single-layer lstm_forward_cuda).
+    TENZOR_CUDA_CHECK(cudaStreamSynchronize(stream));
     return {output, h_n, c_n};
 }
 

@@ -1922,7 +1922,7 @@ auto GroupNorm::forward_impl(const Variable& input) -> Variable {
         // GroupNorm statistics (mean, variance) accumulate over group_size * spatial_size
         // elements; Float16's limited mantissa causes significant rounding errors.
         DType compute_dtype = original_dtype;
-        bool needs_upcast = (original_dtype == DType::Float16);
+        bool needs_upcast = (original_dtype == DType::Float16 || original_dtype == DType::BFloat16);
         if (needs_upcast) compute_dtype = DType::Float32;
 
         Tensor input_compute = needs_upcast ? input.tensor().to(DType::Float32) : input.tensor();

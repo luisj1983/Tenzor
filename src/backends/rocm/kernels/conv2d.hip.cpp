@@ -2063,66 +2063,72 @@ auto depthwise_conv2d_kernel(
 // Deformable Convolution v2 (DCNv2) - HIP Kernels
 // ==============================================================================
 
-// Device-side bilinear interpolation for deformable convolution.
-// Returns 0 for out-of-bounds positions.
+// DCN accumulator type: double for Float64 inputs, float otherwise (incl __half).
+// Keeps the Float64 forward/backward path at full double precision instead of
+// silently truncating to single precision.
 template <typename T>
-__device__ inline float dcn_bilinear_interpolate(
-    const T* data, int64_t H, int64_t W, float h, float w) {
-    if (h <= -1.0f || h >= static_cast<float>(H) ||
-        w <= -1.0f || w >= static_cast<float>(W))
-        return 0.0f;
+using DcnAcc = std::conditional_t<std::is_same_v<T, double>, double, float>;
 
-    int64_t h_low = static_cast<int64_t>(floorf(h));
-    int64_t w_low = static_cast<int64_t>(floorf(w));
+// Device-side bilinear interpolation for deformable convolution.
+// Returns 0 for out-of-bounds positions. Computes in accumulator type Acc.
+template <typename Acc, typename T>
+__device__ inline Acc dcn_bilinear_interpolate(
+    const T* data, int64_t H, int64_t W, Acc h, Acc w) {
+    if (h <= Acc(-1) || h >= static_cast<Acc>(H) ||
+        w <= Acc(-1) || w >= static_cast<Acc>(W))
+        return Acc(0);
+
+    int64_t h_low = static_cast<int64_t>(floor(h));
+    int64_t w_low = static_cast<int64_t>(floor(w));
     int64_t h_high = h_low + 1;
     int64_t w_high = w_low + 1;
 
-    float lh = h - static_cast<float>(h_low);
-    float lw = w - static_cast<float>(w_low);
-    float hh = 1.0f - lh;
-    float hw = 1.0f - lw;
+    Acc lh = h - static_cast<Acc>(h_low);
+    Acc lw = w - static_cast<Acc>(w_low);
+    Acc hh = Acc(1) - lh;
+    Acc hw = Acc(1) - lw;
 
-    float v00 = (h_low >= 0 && h_low < H && w_low >= 0 && w_low < W)
-                    ? static_cast<float>(data[h_low * W + w_low]) : 0.0f;
-    float v01 = (h_low >= 0 && h_low < H && w_high >= 0 && w_high < W)
-                    ? static_cast<float>(data[h_low * W + w_high]) : 0.0f;
-    float v10 = (h_high >= 0 && h_high < H && w_low >= 0 && w_low < W)
-                    ? static_cast<float>(data[h_high * W + w_low]) : 0.0f;
-    float v11 = (h_high >= 0 && h_high < H && w_high >= 0 && w_high < W)
-                    ? static_cast<float>(data[h_high * W + w_high]) : 0.0f;
+    Acc v00 = (h_low >= 0 && h_low < H && w_low >= 0 && w_low < W)
+                    ? static_cast<Acc>(data[h_low * W + w_low]) : Acc(0);
+    Acc v01 = (h_low >= 0 && h_low < H && w_high >= 0 && w_high < W)
+                    ? static_cast<Acc>(data[h_low * W + w_high]) : Acc(0);
+    Acc v10 = (h_high >= 0 && h_high < H && w_low >= 0 && w_low < W)
+                    ? static_cast<Acc>(data[h_high * W + w_low]) : Acc(0);
+    Acc v11 = (h_high >= 0 && h_high < H && w_high >= 0 && w_high < W)
+                    ? static_cast<Acc>(data[h_high * W + w_high]) : Acc(0);
 
     return hh * hw * v00 + hh * lw * v01 + lh * hw * v10 + lh * lw * v11;
 }
 
-// Device-side bilinear interpolation offset gradient (d/dh, d/dw).
-template <typename T>
+// Device-side bilinear interpolation offset gradient (d/dh, d/dw) in Acc.
+template <typename Acc, typename T>
 __device__ inline void dcn_bilinear_offset_gradient(
-    const T* data, int64_t H, int64_t W, float h, float w,
-    float& grad_h, float& grad_w) {
-    grad_h = 0.0f;
-    grad_w = 0.0f;
-    if (h <= -1.0f || h >= static_cast<float>(H) ||
-        w <= -1.0f || w >= static_cast<float>(W))
+    const T* data, int64_t H, int64_t W, Acc h, Acc w,
+    Acc& grad_h, Acc& grad_w) {
+    grad_h = Acc(0);
+    grad_w = Acc(0);
+    if (h <= Acc(-1) || h >= static_cast<Acc>(H) ||
+        w <= Acc(-1) || w >= static_cast<Acc>(W))
         return;
 
-    int64_t h_low = static_cast<int64_t>(floorf(h));
-    int64_t w_low = static_cast<int64_t>(floorf(w));
+    int64_t h_low = static_cast<int64_t>(floor(h));
+    int64_t w_low = static_cast<int64_t>(floor(w));
     int64_t h_high = h_low + 1;
     int64_t w_high = w_low + 1;
 
-    float lh = h - static_cast<float>(h_low);
-    float lw = w - static_cast<float>(w_low);
-    float hh = 1.0f - lh;
-    float hw = 1.0f - lw;
+    Acc lh = h - static_cast<Acc>(h_low);
+    Acc lw = w - static_cast<Acc>(w_low);
+    Acc hh = Acc(1) - lh;
+    Acc hw = Acc(1) - lw;
 
-    float v00 = (h_low >= 0 && h_low < H && w_low >= 0 && w_low < W)
-                    ? static_cast<float>(data[h_low * W + w_low]) : 0.0f;
-    float v01 = (h_low >= 0 && h_low < H && w_high >= 0 && w_high < W)
-                    ? static_cast<float>(data[h_low * W + w_high]) : 0.0f;
-    float v10 = (h_high >= 0 && h_high < H && w_low >= 0 && w_low < W)
-                    ? static_cast<float>(data[h_high * W + w_low]) : 0.0f;
-    float v11 = (h_high >= 0 && h_high < H && w_high >= 0 && w_high < W)
-                    ? static_cast<float>(data[h_high * W + w_high]) : 0.0f;
+    Acc v00 = (h_low >= 0 && h_low < H && w_low >= 0 && w_low < W)
+                    ? static_cast<Acc>(data[h_low * W + w_low]) : Acc(0);
+    Acc v01 = (h_low >= 0 && h_low < H && w_high >= 0 && w_high < W)
+                    ? static_cast<Acc>(data[h_low * W + w_high]) : Acc(0);
+    Acc v10 = (h_high >= 0 && h_high < H && w_low >= 0 && w_low < W)
+                    ? static_cast<Acc>(data[h_high * W + w_low]) : Acc(0);
+    Acc v11 = (h_high >= 0 && h_high < H && w_high >= 0 && w_high < W)
+                    ? static_cast<Acc>(data[h_high * W + w_high]) : Acc(0);
 
     // d(bilinear)/dh
     grad_h = -hw * v00 - lw * v01 + hw * v10 + lw * v11;
@@ -2150,6 +2156,7 @@ __global__ void dcn_forward_kernel(
     int64_t groups, int64_t offset_groups,
     bool use_mask)
 {
+    using Acc = DcnAcc<T>;
     int64_t total = N * C_out * H_out * W_out;
     int64_t channels_per_group = C_in / groups;
     int64_t out_channels_per_group = C_out / groups;
@@ -2163,7 +2170,7 @@ __global__ void dcn_forward_kernel(
 
         int64_t g = oc / out_channels_per_group;
 
-        float sum = 0.0f;
+        Acc sum = Acc(0);
 
         for (int64_t ic_local = 0; ic_local < channels_per_group; ++ic_local) {
             int64_t ic = g * channels_per_group + ic_local;
@@ -2177,39 +2184,39 @@ __global__ void dcn_forward_kernel(
                     int64_t k_linear = kh * kW + kw;
                     int64_t offset_base = og * 2 * kH * kW;
 
-                    float h_base = static_cast<float>(oh * stride_h - pad_h + kh * dil_h);
-                    float w_base = static_cast<float>(ow * stride_w - pad_w + kw * dil_w);
+                    Acc h_base = static_cast<Acc>(oh * stride_h - pad_h + kh * dil_h);
+                    Acc w_base = static_cast<Acc>(ow * stride_w - pad_w + kw * dil_w);
 
                     int64_t off_h_chan = offset_base + 2 * k_linear;
                     int64_t off_w_chan = offset_base + 2 * k_linear + 1;
 
-                    float h_off = static_cast<float>(
+                    Acc h_off = static_cast<Acc>(
                         offset[(n * offset_groups * 2 * kH * kW + off_h_chan) * H_out * W_out +
                                oh * W_out + ow]);
-                    float w_off = static_cast<float>(
+                    Acc w_off = static_cast<Acc>(
                         offset[(n * offset_groups * 2 * kH * kW + off_w_chan) * H_out * W_out +
                                oh * W_out + ow]);
 
-                    float h_loc = h_base + h_off;
-                    float w_loc = w_base + w_off;
+                    Acc h_loc = h_base + h_off;
+                    Acc w_loc = w_base + w_off;
 
-                    float val = dcn_bilinear_interpolate(input_plane, H, W, h_loc, w_loc);
+                    Acc val = dcn_bilinear_interpolate<Acc>(input_plane, H, W, h_loc, w_loc);
 
                     if (use_mask) {
                         int64_t mask_chan = og * kH * kW + k_linear;
-                        float m = static_cast<float>(
+                        Acc m = static_cast<Acc>(
                             mask[(n * offset_groups * kH * kW + mask_chan) * H_out * W_out +
                                  oh * W_out + ow]);
                         val *= m;
                     }
 
-                    sum += val * static_cast<float>(weight_plane[k_linear]);
+                    sum += val * static_cast<Acc>(weight_plane[k_linear]);
                 }
             }
         }
 
         if (bias) {
-            sum += static_cast<float>(bias[oc]);
+            sum += static_cast<Acc>(bias[oc]);
         }
 
         output[idx] = static_cast<T>(sum);
@@ -2239,6 +2246,7 @@ __global__ void dcn_backward_input_kernel(
     int64_t groups, int64_t offset_groups,
     bool use_mask)
 {
+    using Acc = DcnAcc<T>;
     int64_t total = N * C_out * H_out * W_out;
     int64_t channels_per_group = C_in / groups;
     int64_t out_channels_per_group = C_out / groups;
@@ -2252,7 +2260,7 @@ __global__ void dcn_backward_input_kernel(
 
         int64_t g = oc / out_channels_per_group;
 
-        float grad_out_val = static_cast<float>(
+        Acc grad_out_val = static_cast<Acc>(
             grad_output[(n * C_out + oc) * H_out * W_out + oh * W_out + ow]);
 
         for (int64_t ic_local = 0; ic_local < channels_per_group; ++ic_local) {
@@ -2267,8 +2275,8 @@ __global__ void dcn_backward_input_kernel(
                     int64_t k_linear = kh * kW + kw;
                     int64_t offset_base = og * 2 * kH * kW;
 
-                    float h_base = static_cast<float>(oh * stride_h - pad_h + kh * dil_h);
-                    float w_base = static_cast<float>(ow * stride_w - pad_w + kw * dil_w);
+                    Acc h_base = static_cast<Acc>(oh * stride_h - pad_h + kh * dil_h);
+                    Acc w_base = static_cast<Acc>(ow * stride_w - pad_w + kw * dil_w);
 
                     int64_t off_h_chan = offset_base + 2 * k_linear;
                     int64_t off_w_chan = offset_base + 2 * k_linear + 1;
@@ -2278,36 +2286,36 @@ __global__ void dcn_backward_input_kernel(
                     int64_t off_w_idx = (n * offset_groups * 2 * kH * kW + off_w_chan) * H_out * W_out +
                                         oh * W_out + ow;
 
-                    float h_off = static_cast<float>(offset[off_h_idx]);
-                    float w_off = static_cast<float>(offset[off_w_idx]);
+                    Acc h_off = static_cast<Acc>(offset[off_h_idx]);
+                    Acc w_off = static_cast<Acc>(offset[off_w_idx]);
 
-                    float h_loc = h_base + h_off;
-                    float w_loc = w_base + w_off;
+                    Acc h_loc = h_base + h_off;
+                    Acc w_loc = w_base + w_off;
 
-                    float w_val = static_cast<float>(weight_plane[k_linear]);
-                    float m_val = 1.0f;
+                    Acc w_val = static_cast<Acc>(weight_plane[k_linear]);
+                    Acc m_val = Acc(1);
                     if (use_mask) {
                         int64_t mask_chan = og * kH * kW + k_linear;
                         int64_t mask_idx = (n * offset_groups * kH * kW + mask_chan) * H_out * W_out +
                                            oh * W_out + ow;
-                        m_val = static_cast<float>(mask[mask_idx]);
+                        m_val = static_cast<Acc>(mask[mask_idx]);
                     }
 
-                    float top_grad = grad_out_val * w_val * m_val;
+                    Acc top_grad = grad_out_val * w_val * m_val;
 
                     // --- grad_input: scatter through bilinear interpolation ---
-                    if (h_loc > -1.0f && h_loc < static_cast<float>(H) &&
-                        w_loc > -1.0f && w_loc < static_cast<float>(W)) {
+                    if (h_loc > Acc(-1) && h_loc < static_cast<Acc>(H) &&
+                        w_loc > Acc(-1) && w_loc < static_cast<Acc>(W)) {
 
-                        int64_t h_low = static_cast<int64_t>(floorf(h_loc));
-                        int64_t w_low = static_cast<int64_t>(floorf(w_loc));
+                        int64_t h_low = static_cast<int64_t>(floor(h_loc));
+                        int64_t w_low = static_cast<int64_t>(floor(w_loc));
                         int64_t h_high = h_low + 1;
                         int64_t w_high = w_low + 1;
 
-                        float lh = h_loc - static_cast<float>(h_low);
-                        float lw = w_loc - static_cast<float>(w_low);
-                        float hh_val = 1.0f - lh;
-                        float hw_val = 1.0f - lw;
+                        Acc lh = h_loc - static_cast<Acc>(h_low);
+                        Acc lw = w_loc - static_cast<Acc>(w_low);
+                        Acc hh_val = Acc(1) - lh;
+                        Acc hw_val = Acc(1) - lw;
 
                         T* gi_plane = grad_input + (n * C_in + ic) * H * W;
                         if (h_low >= 0 && h_low < H && w_low >= 0 && w_low < W)
@@ -2321,17 +2329,17 @@ __global__ void dcn_backward_input_kernel(
                     }
 
                     // --- grad_offset ---
-                    float gh, gw;
-                    dcn_bilinear_offset_gradient(input_plane, H, W, h_loc, w_loc, gh, gw);
-                    float off_grad_h = grad_out_val * w_val * m_val * gh;
-                    float off_grad_w = grad_out_val * w_val * m_val * gw;
+                    Acc gh, gw;
+                    dcn_bilinear_offset_gradient<Acc>(input_plane, H, W, h_loc, w_loc, gh, gw);
+                    Acc off_grad_h = grad_out_val * w_val * m_val * gh;
+                    Acc off_grad_w = grad_out_val * w_val * m_val * gw;
                     atomicAdd(&grad_offset[off_h_idx], static_cast<T>(off_grad_h));
                     atomicAdd(&grad_offset[off_w_idx], static_cast<T>(off_grad_w));
 
                     // --- grad_mask ---
                     if (use_mask && grad_mask) {
-                        float interp_val = dcn_bilinear_interpolate(input_plane, H, W, h_loc, w_loc);
-                        float mask_grad = grad_out_val * w_val * interp_val;
+                        Acc interp_val = dcn_bilinear_interpolate<Acc>(input_plane, H, W, h_loc, w_loc);
+                        Acc mask_grad = grad_out_val * w_val * interp_val;
                         int64_t mask_chan = og * kH * kW + k_linear;
                         int64_t mi = (n * offset_groups * kH * kW + mask_chan) * H_out * W_out +
                                      oh * W_out + ow;
@@ -2363,6 +2371,7 @@ __global__ void dcn_backward_weight_kernel(
     int64_t groups, int64_t offset_groups,
     bool use_mask)
 {
+    using Acc = DcnAcc<T>;
     int64_t channels_per_group = C_in / groups;
     int64_t out_channels_per_group = C_out / groups;
     int64_t channels_per_offset_group = C_in / offset_groups;
@@ -2381,40 +2390,40 @@ __global__ void dcn_backward_weight_kernel(
         int64_t offset_base = og * 2 * kH * kW;
         int64_t mask_base = og * kH * kW;
 
-        float sum = 0.0f;
+        Acc sum = Acc(0);
 
         for (int64_t n = 0; n < N; ++n) {
             const T* input_plane = input + (n * C_in + ic) * H * W;
 
             for (int64_t oh = 0; oh < H_out; ++oh) {
                 for (int64_t ow = 0; ow < W_out; ++ow) {
-                    float h_base = static_cast<float>(oh * stride_h - pad_h + kh_idx * dil_h);
-                    float w_base = static_cast<float>(ow * stride_w - pad_w + kw_idx * dil_w);
+                    Acc h_base = static_cast<Acc>(oh * stride_h - pad_h + kh_idx * dil_h);
+                    Acc w_base = static_cast<Acc>(ow * stride_w - pad_w + kw_idx * dil_w);
 
                     int64_t off_h_chan = offset_base + 2 * k_linear;
                     int64_t off_w_chan = offset_base + 2 * k_linear + 1;
 
-                    float h_off = static_cast<float>(
+                    Acc h_off = static_cast<Acc>(
                         offset[(n * offset_groups * 2 * kH * kW + off_h_chan) * H_out * W_out +
                                oh * W_out + ow]);
-                    float w_off = static_cast<float>(
+                    Acc w_off = static_cast<Acc>(
                         offset[(n * offset_groups * 2 * kH * kW + off_w_chan) * H_out * W_out +
                                oh * W_out + ow]);
 
-                    float h_loc = h_base + h_off;
-                    float w_loc = w_base + w_off;
+                    Acc h_loc = h_base + h_off;
+                    Acc w_loc = w_base + w_off;
 
-                    float val = dcn_bilinear_interpolate(input_plane, H, W, h_loc, w_loc);
+                    Acc val = dcn_bilinear_interpolate<Acc>(input_plane, H, W, h_loc, w_loc);
 
                     if (use_mask) {
                         int64_t mask_chan = mask_base + k_linear;
-                        float m = static_cast<float>(
+                        Acc m = static_cast<Acc>(
                             mask[(n * offset_groups * kH * kW + mask_chan) * H_out * W_out +
                                  oh * W_out + ow]);
                         val *= m;
                     }
 
-                    float go = static_cast<float>(
+                    Acc go = static_cast<Acc>(
                         grad_output[(n * C_out + oc) * H_out * W_out + oh * W_out + ow]);
                     sum += go * val;
                 }

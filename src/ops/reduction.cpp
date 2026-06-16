@@ -164,7 +164,14 @@ auto has_inf_nan(const Tensor& input) -> Tensor {
     return dispatch(OpId::HasInfNan, inputs, attrs)[0];
 }
 
-auto logsumexp(const Tensor& input, int64_t dim, bool keepdim) -> Tensor {
+auto logsumexp(const Tensor& input_arg, int64_t dim, bool keepdim) -> Tensor {
+    // logsumexp produces a floating-point result. Promote integer/bool inputs to
+    // a float compute dtype so the (possibly -inf) result is representable and the
+    // exp/log composite path operates in floating arithmetic (matches PyTorch).
+    Tensor input = is_floating_type(input_arg.dtype())
+                       ? input_arg
+                       : input_arg.to(DType::Float32);
+
     // Empty tensor: return empty with appropriate shape
     if (input.numel() == 0) {
         // For empty input, result shape collapses dim to 1 (keepdim) or removes it

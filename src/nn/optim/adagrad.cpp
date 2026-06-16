@@ -323,7 +323,11 @@ auto Adagrad::set_lr(double lr) -> void {
 }
 
 auto Adagrad::get_lr() const -> double {
-    return effective_lr();
+    // Return the BASE lr_ to match set_lr's unit and all sibling optimizers
+    // (SGD/RMSprop/Adadelta/ASGD/Rprop/AdamAtan2). The time-decayed value is
+    // available separately via effective_lr(). Returning the decayed value here
+    // corrupts ReduceLROnPlateau/cyclic scheduler reductions when lr_decay>0.
+    return lr_;
 }
 
 // Audit item D.5: persist hyperparams and use Int64 for step_count to

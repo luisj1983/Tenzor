@@ -63,6 +63,8 @@ auto dtype_to_onnx(DType dtype) -> ONNXDataType {
         // Inf-D3: native 8-bit float types — ONNX opset 19+.
         case DType::FP8_E4M3: return ONNXDataType::FLOAT8E4M3FN;
         case DType::FP8_E5M2: return ONNXDataType::FLOAT8E5M2;
+        case DType::FP8_E4M3FNUZ: return ONNXDataType::FLOAT8E4M3FNUZ;
+        case DType::FP8_E5M2FNUZ: return ONNXDataType::FLOAT8E5M2FNUZ;
         // Inf-D3: quantized 8-bit storage codes; per-tensor scale/zero_point
         // travel via QLinearMatMul / QLinearConv input slots at op level.
         case DType::QInt8: return ONNXDataType::INT8;

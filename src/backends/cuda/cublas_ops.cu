@@ -1240,31 +1240,47 @@ auto linear_backward_kernel(
 
 namespace {
 
-/// Thread-safe cublasLt handle (one per process, safe for multi-stream use)
+/// Thread-safe cublasLt handle, cached per device. One handle per device keyed
+/// by the device that is current at call time, so FP8 matmuls targeting a
+/// different GPU on a heterogeneous box get a handle created on that GPU rather
+/// than reusing the first-touched device's handle.
 cublasLtHandle_t get_cublaslt_handle() {
-    static cublasLtHandle_t handle = nullptr;
-    static std::once_flag init_flag;
-    std::call_once(init_flag, [] {
-        auto status = cublasLtCreate(&handle);
-        if (status != CUBLAS_STATUS_SUCCESS) {
-            throw std::runtime_error("Failed to create cublasLt handle");
-        }
-    });
+    int device = 0;
+    cudaGetDevice(&device);
+    static std::unordered_map<int, cublasLtHandle_t> handles;
+    static std::mutex handles_mutex;
+    std::lock_guard<std::mutex> lock(handles_mutex);
+    auto it = handles.find(device);
+    if (it != handles.end()) {
+        return it->second;
+    }
+    cublasLtHandle_t handle = nullptr;
+    auto status = cublasLtCreate(&handle);
+    if (status != CUBLAS_STATUS_SUCCESS) {
+        throw std::runtime_error("Failed to create cublasLt handle");
+    }
+    handles.emplace(device, handle);
     return handle;
 }
 
-/// Query compute capability of the current device
+/// Query compute capability of the current device, cached per device. Querying
+/// at call time (not a single process-global std::call_once) ensures the FP8 SM
+/// gate reflects the device actually in use on a heterogeneous multi-GPU box.
 int get_compute_capability() {
-    static int cc = -1;
-    static std::once_flag cc_flag;
-    std::call_once(cc_flag, [] {
-        int device;
-        cudaGetDevice(&device);
-        int major, minor;
-        cudaDeviceGetAttribute(&major, cudaDevAttrComputeCapabilityMajor, device);
-        cudaDeviceGetAttribute(&minor, cudaDevAttrComputeCapabilityMinor, device);
-        cc = major * 10 + minor;
-    });
+    int device = 0;
+    cudaGetDevice(&device);
+    static std::unordered_map<int, int> cc_by_device;
+    static std::mutex cc_mutex;
+    std::lock_guard<std::mutex> lock(cc_mutex);
+    auto it = cc_by_device.find(device);
+    if (it != cc_by_device.end()) {
+        return it->second;
+    }
+    int major = 0, minor = 0;
+    cudaDeviceGetAttribute(&major, cudaDevAttrComputeCapabilityMajor, device);
+    cudaDeviceGetAttribute(&minor, cudaDevAttrComputeCapabilityMinor, device);
+    int cc = major * 10 + minor;
+    cc_by_device.emplace(device, cc);
     return cc;
 }
 

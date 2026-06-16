@@ -51,7 +51,7 @@ void main() {
         float dot = dot_val;
 
         // Update: A[r,j] -= tau_L * v_L[r] * dot
-        for (uint r = col + 1 + tid; r < n; r += 256) {
+        for (uint r = col + 1 + tid; r < n; r += gl_WorkGroupSize.x) {
             A[base + r * n + j] -= left_tau * A[base + r * n + col] * dot;
         }
         if (tid == 0) {
@@ -83,7 +83,7 @@ void main() {
         float dot = dot_val;
 
         // Update: A[j,c] -= tau_R * dot * v_R[c]
-        for (uint c = col + 2 + tid; c < n; c += 256) {
+        for (uint c = col + 2 + tid; c < n; c += gl_WorkGroupSize.x) {
             A[base + j * n + c] -= right_tau * dot * A[base + col * n + c];
         }
         if (tid == 0) {

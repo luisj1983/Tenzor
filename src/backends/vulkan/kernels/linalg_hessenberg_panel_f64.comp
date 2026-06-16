@@ -66,7 +66,7 @@ void main() {
         if (abs(tau_k) < 1e-60lf) continue;
 
         // Apply from left: A = H * A
-        for (uint j = col + tid; j < n; j += 256) {
+        for (uint j = col + tid; j < n; j += gl_WorkGroupSize.x) {
             float64_t dot = A[base + (col + 1) * n + j];
             for (uint r = col + 2; r < n; r++) {
                 dot += A[base + r * n + col] * A[base + r * n + j];
@@ -81,7 +81,7 @@ void main() {
         barrier();
 
         // Apply from right: A = A * H^T
-        for (uint i = tid; i < n; i += 256) {
+        for (uint i = tid; i < n; i += gl_WorkGroupSize.x) {
             float64_t dot = A[base + i * n + (col + 1)];
             for (uint c = col + 2; c < n; c++) {
                 dot += A[base + i * n + c] * A[base + c * n + col];

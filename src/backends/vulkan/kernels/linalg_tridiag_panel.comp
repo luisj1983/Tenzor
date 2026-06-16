@@ -84,7 +84,7 @@ void main() {
         // where w = A * v - (tau/2) * (v^T * A * v) * v
 
         // Compute p = A * v (only rows col+1:n, using cols col+1:n of symmetric A)
-        for (uint r = col + 1 + tid; r < n; r += 256) {
+        for (uint r = col + 1 + tid; r < n; r += gl_WorkGroupSize.x) {
             float sum = A[base + r * n + (col + 1)]; // v[col+1] = 1
             for (uint c = col + 2; c < n; c++) {
                 sum += A[base + r * n + c] * A[base + c * n + col]; // v stored in A[c, col]
@@ -104,14 +104,14 @@ void main() {
         barrier();
 
         // w = p - beta * v
-        for (uint r = col + 1 + tid; r < n; r += 256) {
+        for (uint r = col + 1 + tid; r < n; r += gl_WorkGroupSize.x) {
             float v_r = (r == col + 1) ? 1.0 : A[base + r * n + col];
             work[work_base + r] -= dot_val * v_r;
         }
         barrier();
 
         // Update A: A[i,j] -= v[i]*w[j] + w[i]*v[j] for i,j in [col+1, n)
-        for (uint r = col + 1 + tid; r < n; r += 256) {
+        for (uint r = col + 1 + tid; r < n; r += gl_WorkGroupSize.x) {
             float v_r = (r == col + 1) ? 1.0 : A[base + r * n + col];
             float w_r = work[work_base + r];
             for (uint c = col + 1; c <= r; c++) {
@@ -127,7 +127,7 @@ void main() {
         barrier();
 
         // Zero out the entries below the sub-diagonal in column col
-        for (uint r = col + 2 + tid; r < n; r += 256) {
+        for (uint r = col + 2 + tid; r < n; r += gl_WorkGroupSize.x) {
             // Keep Householder vector stored in A[r, col] but zero A[col, r] (symmetric cleanup)
             // Actually, for tridiagonal: the sub-diagonal entries beyond col+1 should be zero
             // The Householder vectors are stored in the zeroed-out region

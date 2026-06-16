@@ -3989,6 +3989,12 @@ static void register_cpu_kernels_creation(BackendDispatchTable& table) {
                 case DType::FP8_E5M2:
                     *reinterpret_cast<FP8_E5M2*>(ptr) = FP8_E5M2(static_cast<float>(value));
                     break;
+                case DType::FP8_E4M3FNUZ:
+                    *reinterpret_cast<FP8_E4M3FNUZ*>(ptr) = FP8_E4M3FNUZ(static_cast<float>(value));
+                    break;
+                case DType::FP8_E5M2FNUZ:
+                    *reinterpret_cast<FP8_E5M2FNUZ*>(ptr) = FP8_E5M2FNUZ(static_cast<float>(value));
+                    break;
                 case DType::QInt8: {
                     if (self.q_scale() == 0.0)
                         throw std::runtime_error("StridedFill: quantized tensor requires "

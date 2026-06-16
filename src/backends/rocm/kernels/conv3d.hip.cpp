@@ -962,9 +962,16 @@ __global__ void conv_transpose3d_forward_kernel(
     int64_t stride_d, int64_t stride_h, int64_t stride_w,
     int64_t pad_d, int64_t pad_h, int64_t pad_w,
     int64_t out_pad_d, int64_t out_pad_h, int64_t out_pad_w,
-    int64_t dil_d, int64_t dil_h, int64_t dil_w
+    int64_t dil_d, int64_t dil_h, int64_t dil_w,
+    int64_t groups
 ) {
     int64_t total_elements = batch * out_channels * out_d * out_h * out_w;
+
+    // Grouped transposed conv: weight is [in_channels, out_channels/groups, kD,kH,kW].
+    // Each output channel only sees its own group's input channels. groups==1
+    // reproduces the dense behaviour (in_cpg==in_channels, out_cpg==out_channels).
+    const int64_t out_cpg = out_channels / groups;
+    const int64_t in_cpg  = in_channels / groups;
 
     HIP_KERNEL_LOOP_CONV3D(idx, total_elements) {
         int64_t ow = idx % out_w;
@@ -973,9 +980,13 @@ __global__ void conv_transpose3d_forward_kernel(
         int64_t oc = (idx / (out_w * out_h * out_d)) % out_channels;
         int64_t n = idx / (out_w * out_h * out_d * out_channels);
 
+        int64_t g = oc / out_cpg;          // group of this output channel
+        int64_t oc_in_g = oc % out_cpg;    // its index within the group
+
         T sum = bias ? bias[oc] : T(0);
 
-        for (int64_t ic = 0; ic < in_channels; ++ic) {
+        for (int64_t ic_local = 0; ic_local < in_cpg; ++ic_local) {
+            int64_t ic = g * in_cpg + ic_local;
             for (int64_t kd = 0; kd < kD; ++kd) {
                 for (int64_t kh = 0; kh < kH; ++kh) {
                     for (int64_t kw = 0; kw < kW; ++kw) {
@@ -994,9 +1005,9 @@ __global__ void conv_transpose3d_forward_kernel(
                         if (id >= 0 && id < in_d && ih >= 0 && ih < in_h && iw >= 0 && iw < in_w) {
                             int64_t input_idx = n * (in_channels * in_d * in_h * in_w) +
                                                ic * (in_d * in_h * in_w) + id * (in_h * in_w) + ih * in_w + iw;
-                            // Weight: [in_channels, out_channels, kD, kH, kW]
-                            int64_t weight_idx = ic * (out_channels * kD * kH * kW) +
-                                                oc * (kD * kH * kW) + kd * (kH * kW) + kh * kW + kw;
+                            // Weight: [in_channels, out_channels/groups, kD, kH, kW]
+                            int64_t weight_idx = ic * (out_cpg * kD * kH * kW) +
+                                                oc_in_g * (kD * kH * kW) + kd * (kH * kW) + kh * kW + kw;
                             sum += input[input_idx] * weight[weight_idx];
                         }
                     }
@@ -1039,7 +1050,11 @@ auto conv_transpose3d_forward_hip(
     const int64_t H_in = input_shape[3];
     const int64_t W_in = input_shape[4];
 
-    const int64_t C_out = weight_shape[1];
+    // ConvTranspose weight layout is [in_channels, out_channels/groups, kD,kH,kW],
+    // so the true output-channel count is weight_shape[1] * groups. Using
+    // weight_shape[1] directly produced out_channels/groups channels and ignored
+    // grouping (mirrors the conv2d transpose fix at conv2d.hip.cpp:1862).
+    const int64_t C_out = weight_shape[1] * groups;
     const int64_t kD = weight_shape[2];
     const int64_t kH = weight_shape[3];
     const int64_t kW = weight_shape[4];
@@ -1081,7 +1096,7 @@ auto conv_transpose3d_forward_hip(
             N, C_in, D_in, H_in, W_in, C_out, D_out, H_out, W_out,
             kD, kH, kW, stride_d, stride_h, stride_w,
             pad_d, pad_h, pad_w, out_pad_d, out_pad_h, out_pad_w,
-            dil_d, dil_h, dil_w);
+            dil_d, dil_h, dil_w, groups);
     } else if (input.dtype() == DType::Float64) {
         hipLaunchKernelGGL(conv_transpose3d_forward_kernel<double>,
             dim3(blocks), dim3(threads), 0, stream,
@@ -1091,7 +1106,7 @@ auto conv_transpose3d_forward_hip(
             N, C_in, D_in, H_in, W_in, C_out, D_out, H_out, W_out,
             kD, kH, kW, stride_d, stride_h, stride_w,
             pad_d, pad_h, pad_w, out_pad_d, out_pad_h, out_pad_w,
-            dil_d, dil_h, dil_w);
+            dil_d, dil_h, dil_w, groups);
     } else if (input.dtype() == DType::Float16) {
         hipLaunchKernelGGL(conv_transpose3d_forward_kernel<__half>,
             dim3(blocks), dim3(threads), 0, stream,
@@ -1102,7 +1117,7 @@ auto conv_transpose3d_forward_hip(
             N, C_in, D_in, H_in, W_in, C_out, D_out, H_out, W_out,
             kD, kH, kW, stride_d, stride_h, stride_w,
             pad_d, pad_h, pad_w, out_pad_d, out_pad_h, out_pad_w,
-            dil_d, dil_h, dil_w);
+            dil_d, dil_h, dil_w, groups);
     } else {
         throw std::runtime_error("ConvTranspose3d forward: unsupported dtype");
     }

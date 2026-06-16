@@ -57,7 +57,7 @@ void main() {
 
         // Normalize the below-diagonal Householder entries: v[r] = x[r]/(x[k]-alpha),
         // v[k]=1 implicit — matches tau's convention and what Ormqr reads back.
-        for (uint r = k + 1 + tid; r < panel_rows; r += 256) {
+        for (uint r = k + 1 + tid; r < panel_rows; r += gl_WorkGroupSize.x) {
             A[base + (col_start + r) * n + col] /= vhead;
         }
         barrier();
@@ -75,7 +75,7 @@ void main() {
 
             float64_t dot = col_data[0];
 
-            for (uint r = k + 1 + tid; r < panel_rows; r += 256) {
+            for (uint r = k + 1 + tid; r < panel_rows; r += gl_WorkGroupSize.x) {
                 float64_t v_r = A[base + (col_start + r) * n + col];
                 A[base + (col_start + r) * n + j] -= tau_k * v_r * dot;
             }

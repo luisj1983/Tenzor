@@ -20,7 +20,7 @@ void main() {
     uint base = batch_idx * n * n;
     uint panel_rows = n - col_start;
 
-    for (uint r = tid; r < panel_rows; r += 256) {
+    for (uint r = tid; r < panel_rows; r += gl_WorkGroupSize.x) {
         for (uint c = 0; c < panel_cols; c++) {
             panel[r][c] = A[base + (col_start + r) * n + (col_start + c)];
         }
@@ -40,7 +40,7 @@ void main() {
         float64_t diag = panel[k][k];
         float64_t inv_diag = 1.0lf / diag;
 
-        for (uint r = k + 1 + tid; r < panel_rows; r += 256) {
+        for (uint r = k + 1 + tid; r < panel_rows; r += gl_WorkGroupSize.x) {
             float64_t sum = panel[r][k];
             for (uint j = 0; j < k; j++) {
                 sum -= panel[r][j] * panel[k][j];
@@ -50,7 +50,7 @@ void main() {
         barrier();
     }
 
-    for (uint r = tid; r < panel_rows; r += 256) {
+    for (uint r = tid; r < panel_rows; r += gl_WorkGroupSize.x) {
         for (uint c = 0; c < panel_cols; c++) {
             A[base + (col_start + r) * n + (col_start + c)] = panel[r][c];
         }

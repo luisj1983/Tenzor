@@ -17,6 +17,29 @@
 namespace tenzor {
 namespace jit {
 
+namespace {
+// Compute the byte size of a tensor given its shape and per-element size,
+// guarding every multiplication against size_t overflow. Returns 0 (which all
+// callers treat as "cannot plan this value statically") on a non-positive dim
+// or on overflow. Shapes loaded from an untrusted .graph file are only
+// validated non-negative in serialization, not bounded for the planner, so a
+// large-but-positive shape product could otherwise silently wrap to a tiny
+// size and under-allocate a buffer slot.
+inline auto checked_byte_size(const std::vector<int64_t>& shape,
+                              size_t elem_size) -> size_t {
+    size_t numel = 1;
+    for (int64_t dim : shape) {
+        if (dim <= 0) return 0;  // dynamic or invalid dimension
+        if (__builtin_mul_overflow(numel, static_cast<size_t>(dim), &numel)) {
+            return 0;  // overflow: skip planning this value
+        }
+    }
+    size_t bytes = 0;
+    if (__builtin_mul_overflow(numel, elem_size, &bytes)) return 0;
+    return bytes;
+}
+}  // namespace
+
 // ============================================================================
 // MemoryPlanner - Main entry point
 // ============================================================================
@@ -153,16 +176,7 @@ auto MemoryPlanner::compute_value_size(const Value& value) -> size_t {
         return dtype_size(value.dtype());
     }
 
-    size_t numel = 1;
-    for (int64_t dim : shape) {
-        if (dim <= 0) {
-            // Dynamic or invalid dimension: cannot plan statically
-            return 0;
-        }
-        numel *= static_cast<size_t>(dim);
-    }
-
-    return numel * dtype_size(value.dtype());
+    return checked_byte_size(shape, dtype_size(value.dtype()));
 }
 
 // ============================================================================
@@ -446,15 +460,7 @@ auto RematerializationPlanner::find_candidates(
             // Compute memory cost
             const auto& shape = output->shape();
             if (shape.empty()) continue;
-            size_t numel = 1;
-            bool valid = true;
-            for (int64_t dim : shape) {
-                if (dim <= 0) { valid = false; break; }
-                numel *= static_cast<size_t>(dim);
-            }
-            if (!valid) continue;
-
-            size_t mem_bytes = numel * dtype_size(output->dtype());
+            size_t mem_bytes = checked_byte_size(shape, dtype_size(output->dtype()));
             if (mem_bytes == 0) continue;
 
             double flops = estimate_flops(node->op_type(), shape);
@@ -618,15 +624,8 @@ auto MemorySwapPlanner::plan(const Graph& graph) -> std::vector<SwapSchedule> {
             // Compute value size
             const auto& shape = output->shape();
             if (shape.empty()) continue;
-            size_t numel = 1;
-            bool valid = true;
-            for (int64_t dim : shape) {
-                if (dim <= 0) { valid = false; break; }
-                numel *= static_cast<size_t>(dim);
-            }
-            if (!valid) continue;
-
-            size_t size_bytes = numel * dtype_size(output->dtype());
+            size_t size_bytes = checked_byte_size(shape, dtype_size(output->dtype()));
+            if (size_bytes == 0) continue;  // invalid dim or overflow: skip
             if (size_bytes < swap_threshold_) continue;
 
             // Compute live range

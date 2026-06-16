@@ -324,7 +324,8 @@ auto cat_kernel(std::span<const Tensor> tensors, int64_t dim, sycl::queue& queue
         }
         else if (dtype == DType::Complex64 || dtype == DType::Complex128 ||
                  dtype == DType::UInt16 || dtype == DType::UInt32 || dtype == DType::UInt64 ||
-                 dtype == DType::FP8_E4M3 || dtype == DType::FP8_E5M2) {
+                 dtype == DType::FP8_E4M3 || dtype == DType::FP8_E5M2 ||
+                 dtype == DType::FP8_E4M3FNUZ || dtype == DType::FP8_E5M2FNUZ) {
             // Generic fixed-width element copy (pure data movement). Each logical
             // element is dtype_size() bytes; reinterpret to the matching POD width.
             const int64_t src_slice_stride = elements_per_slice * tensor_size_in_dim;

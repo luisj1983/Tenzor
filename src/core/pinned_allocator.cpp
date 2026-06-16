@@ -89,6 +89,7 @@ PinnedMemoryAllocator::PinnedMemoryAllocator(const Config& config)
         auto* initial_block_raw = initial_block.get();
         free_list_head_ = initial_block_raw;
         block_map_[base_ptr] = std::move(initial_block);
+        index_free_block(initial_block_raw);
 
         // Store pool region
         PoolRegion region;
@@ -114,6 +115,7 @@ PinnedMemoryAllocator::~PinnedMemoryAllocator() {
     std::lock_guard<std::mutex> lock(mutex_);
 
     // unique_ptr handles block deallocation when map is cleared
+    free_blocks_.clear();
     block_map_.clear();
 
     // Free all pools
@@ -135,6 +137,7 @@ PinnedMemoryAllocator::PinnedMemoryAllocator(PinnedMemoryAllocator&& other) noex
     , pools_(std::move(other.pools_))
     , free_list_head_(other.free_list_head_)
     , block_map_(std::move(other.block_map_))
+    , free_blocks_(std::move(other.free_blocks_))
     , total_allocated_(other.total_allocated_.load())
     , num_allocations_(other.num_allocations_.load())
     , peak_allocated_(other.peak_allocated_.load())
@@ -149,6 +152,7 @@ PinnedMemoryAllocator& PinnedMemoryAllocator::operator=(PinnedMemoryAllocator&& 
     if (this != &other) {
         // Clean up current resources
         if (is_initialized_) {
+            free_blocks_.clear();
             block_map_.clear();
             for (auto& pool : pools_) {
                 try {
@@ -162,6 +166,7 @@ PinnedMemoryAllocator& PinnedMemoryAllocator::operator=(PinnedMemoryAllocator&& 
         pools_ = std::move(other.pools_);
         free_list_head_ = other.free_list_head_;
         block_map_ = std::move(other.block_map_);
+        free_blocks_ = std::move(other.free_blocks_);
         total_allocated_ = other.total_allocated_.load();
         num_allocations_ = other.num_allocations_.load();
         peak_allocated_ = other.peak_allocated_.load();
@@ -214,6 +219,10 @@ auto PinnedMemoryAllocator::allocate(size_t bytes) -> void* {
             return nullptr;  // Out of memory
         }
     }
+
+    // Remove the chosen block from the free index before mutating its size
+    // (split_block) or its free state below.
+    unindex_free_block(block);
 
     // Split block if it's significantly larger than needed
     if (block->size > aligned_size + config_.min_block_size) {
@@ -279,30 +288,39 @@ auto PinnedMemoryAllocator::defragment() -> size_t {
 
     size_t coalesce_count = 0;
 
-    // Sort blocks by address for each pool
-    for (auto& pool : pools_) {
-        std::vector<MemoryBlock*> sorted_blocks;
-        for (auto& [ptr, block] : block_map_) {
-            // Check if block belongs to this pool
+    // Bucket every block into its owning pool in a SINGLE pass over block_map_
+    // (O(N)), rather than rescanning the whole map once per pool (O(pools*N)).
+    // block_map_ is keyed by pointer, so each pool's bucket is already sorted
+    // by address on insertion.
+    std::vector<std::vector<MemoryBlock*>> pool_blocks(pools_.size());
+    for (auto& [ptr, block] : block_map_) {
+        for (size_t p = 0; p < pools_.size(); ++p) {
+            const auto& pool = pools_[p];
             if (block->ptr >= pool.base_ptr &&
                 block->ptr < static_cast<char*>(pool.base_ptr) + pool.size) {
-                sorted_blocks.push_back(block.get());
+                pool_blocks[p].push_back(block.get());
+                break;
             }
         }
+    }
 
-        std::sort(sorted_blocks.begin(), sorted_blocks.end(),
-                  [](const MemoryBlock* a, const MemoryBlock* b) {
-                      return a->ptr < b->ptr;
-                  });
-
-        // Coalesce adjacent free blocks
-        for (size_t i = 0; i + 1 < sorted_blocks.size(); ++i) {
+    for (auto& sorted_blocks : pool_blocks) {
+        // Coalesce adjacent free blocks. `current` always survives a merge, so
+        // advancing only when no merge happened lets a run of free blocks fold
+        // into a single block.
+        for (size_t i = 0; i + 1 < sorted_blocks.size(); ) {
             auto* current = sorted_blocks[i];
             auto* next = sorted_blocks[i + 1];
 
+            bool merged = false;
             if (current->is_free && next->is_free) {
                 void* current_end = static_cast<char*>(current->ptr) + current->size;
                 if (current_end == next->ptr) {
+                    // Both neighbours are indexed; drop their stale entries
+                    // before mutating sizes, then re-index the survivor.
+                    unindex_free_block(current);
+                    unindex_free_block(next);
+
                     // Coalesce: merge next into current
                     current->size += next->size;
                     current->next = next->next;
@@ -314,8 +332,18 @@ auto PinnedMemoryAllocator::defragment() -> size_t {
                     void* next_ptr = next->ptr;
                     block_map_.erase(next_ptr);
 
+                    index_free_block(current);
+
+                    // Drop `next` from the local bucket and retry merging
+                    // `current` with the following block.
+                    sorted_blocks.erase(sorted_blocks.begin() +
+                                        static_cast<std::ptrdiff_t>(i + 1));
                     coalesce_count++;
+                    merged = true;
                 }
+            }
+            if (!merged) {
+                ++i;
             }
         }
     }
@@ -340,7 +368,8 @@ auto PinnedMemoryAllocator::reset() -> void {
         pool_bases.push_back(pool.base_ptr);
     }
 
-    // Clear block map (unique_ptr handles deallocation)
+    // Clear block map (unique_ptr handles deallocation) and the free index.
+    free_blocks_.clear();
     block_map_.clear();
 
     // Recreate initial blocks for each pool
@@ -351,6 +380,7 @@ auto PinnedMemoryAllocator::reset() -> void {
         auto block = std::make_unique<MemoryBlock>(pool.base_ptr, pool.size, true);
         auto* block_raw = block.get();
         block_map_[pool.base_ptr] = std::move(block);
+        index_free_block(block_raw);
         pool.head = block_raw;
 
         if (prev_block) {
@@ -391,6 +421,7 @@ auto PinnedMemoryAllocator::grow_pool(size_t additional_bytes) -> bool {
         auto new_block = std::make_unique<MemoryBlock>(new_ptr, additional_bytes, true);
         auto* new_block_raw = new_block.get();
         block_map_[new_ptr] = std::move(new_block);
+        index_free_block(new_block_raw);
 
         // Add to free list
         if (free_list_head_) {
@@ -475,27 +506,30 @@ auto PinnedMemoryAllocator::is_valid() const -> bool {
 // Internal Implementation
 // =============================================================================
 
-auto PinnedMemoryAllocator::find_best_fit(size_t size) -> MemoryBlock* {
-    MemoryBlock* best_fit = nullptr;
-    size_t min_size_diff = SIZE_MAX;
-
-    // Search all free blocks for best fit
-    for (auto& [ptr, block] : block_map_) {
-        if (block->is_free && block->size >= size) {
-            size_t size_diff = block->size - size;
-            if (size_diff < min_size_diff) {
-                min_size_diff = size_diff;
-                best_fit = block.get();
-
-                // Perfect fit, stop searching
-                if (size_diff == 0) {
-                    break;
-                }
-            }
-        }
+auto PinnedMemoryAllocator::index_free_block(MemoryBlock* block) -> void {
+    if (block == nullptr || block->indexed) {
+        return;
     }
+    block->free_it = free_blocks_.emplace(block->size, block);
+    block->indexed = true;
+}
 
-    return best_fit;
+auto PinnedMemoryAllocator::unindex_free_block(MemoryBlock* block) -> void {
+    if (block == nullptr || !block->indexed) {
+        return;
+    }
+    free_blocks_.erase(block->free_it);
+    block->indexed = false;
+}
+
+auto PinnedMemoryAllocator::find_best_fit(size_t size) -> MemoryBlock* {
+    // free_blocks_ is ordered by block size, so the first entry whose key is
+    // >= size is the smallest free block that fits (best fit) -- O(log N).
+    auto it = free_blocks_.lower_bound(size);
+    if (it == free_blocks_.end()) {
+        return nullptr;
+    }
+    return it->second;
 }
 
 auto PinnedMemoryAllocator::split_block(MemoryBlock* block, size_t size) -> MemoryBlock* {
@@ -527,6 +561,9 @@ auto PinnedMemoryAllocator::split_block(MemoryBlock* block, size_t size) -> Memo
     // Add to block map (unique_ptr handles lifetime)
     block_map_[remainder_ptr] = std::move(remainder);
 
+    // The remainder is free -- register it in the size-ordered free index.
+    index_free_block(remainder_raw);
+
     return remainder_raw;
 }
 
@@ -535,11 +572,21 @@ auto PinnedMemoryAllocator::coalesce_block(MemoryBlock* block) -> void {
         return;
     }
 
+    // The incoming `block` must NOT be present in free_blocks_ when this is
+    // called (deallocate marks it free but leaves it unindexed). We merge any
+    // adjacent free neighbours -- each of which IS indexed -- removing their
+    // index entries as they are absorbed, then index the final merged block
+    // exactly once at the end. This keeps free_blocks_ consistent with a single
+    // O(log N) update per merge instead of an O(N) rebuild.
+
     // Coalesce with next block
     while (block->next && block->next->is_free) {
         void* expected_next = static_cast<char*>(block->ptr) + block->size;
         if (expected_next == block->next->ptr) {
             MemoryBlock* next = block->next;
+
+            // Drop the absorbed neighbour from the size-ordered free index.
+            unindex_free_block(next);
 
             // Merge next into block
             block->size += next->size;
@@ -562,6 +609,10 @@ auto PinnedMemoryAllocator::coalesce_block(MemoryBlock* block) -> void {
         if (expected_next == block->ptr) {
             MemoryBlock* prev = block->prev;
 
+            // The surviving block becomes `prev`; remove its stale index entry
+            // since its size is about to change.
+            unindex_free_block(prev);
+
             // Merge block into prev
             prev->size += block->size;
             prev->next = block->next;
@@ -578,6 +629,9 @@ auto PinnedMemoryAllocator::coalesce_block(MemoryBlock* block) -> void {
             break;  // Not adjacent
         }
     }
+
+    // Index the final merged block under its final size.
+    index_free_block(block);
 }
 
 auto PinnedMemoryAllocator::find_block(void* ptr) -> MemoryBlock* {

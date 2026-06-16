@@ -88,7 +88,7 @@ void main() {
         float dot = dot_val;
 
         // Update: A[r,j] -= tau * v[r] * dot
-        for (uint r = k + 1 + tid; r < panel_rows; r += 256) {
+        for (uint r = k + 1 + tid; r < panel_rows; r += gl_WorkGroupSize.x) {
             float v_r = readF16(elem_base + (col_start + r) * n + col);
             float cur = readF16(elem_base + (col_start + r) * n + j);
             writeF16(elem_base + (col_start + r) * n + j, cur - tau_k * v_r * dot);

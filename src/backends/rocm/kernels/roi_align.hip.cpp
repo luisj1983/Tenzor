@@ -72,7 +72,7 @@ __global__ void roi_align_forward_kernel(
     float* output,          // (num_rois, C, output_h, output_w)
     int64_t num_rois, int64_t channels, int64_t feat_height, int64_t feat_width,
     int64_t output_h, int64_t output_w, float spatial_scale,
-    int64_t sampling_ratio, bool aligned) {
+    int64_t sampling_ratio, bool aligned, int64_t batch_size) {
 
     // Global thread index
     const int64_t index = blockIdx.x * blockDim.x + threadIdx.x;
@@ -89,6 +89,13 @@ __global__ void roi_align_forward_kernel(
     // Get ROI
     const float* roi = rois + roi_idx * 5;
     const int64_t batch_idx = static_cast<int64_t>(roi[0]);
+
+    // Guard against malformed ROIs: a batch index outside [0, batch_size) would
+    // index features out of bounds. Emit 0 for such elements instead of an OOB read.
+    if (batch_idx < 0 || batch_idx >= batch_size) {
+        output[index] = 0.0f;
+        return;
+    }
 
     // Scale ROI coordinates
     float roi_x1 = roi[1] * spatial_scale;
@@ -152,7 +159,7 @@ __global__ void roi_align_backward_kernel(
     float* grad_features,      // (N, C, H, W)
     int64_t num_rois, int64_t channels, int64_t feat_height, int64_t feat_width,
     int64_t output_h, int64_t output_w, float spatial_scale,
-    int64_t sampling_ratio, bool aligned) {
+    int64_t sampling_ratio, bool aligned, int64_t batch_size) {
 
     const int64_t index = blockIdx.x * blockDim.x + threadIdx.x;
     const int64_t total_grads = num_rois * channels * output_h * output_w;
@@ -168,6 +175,10 @@ __global__ void roi_align_backward_kernel(
     // Get ROI
     const float* roi = rois + roi_idx * 5;
     const int64_t batch_idx = static_cast<int64_t>(roi[0]);
+
+    // Guard against malformed ROIs: an out-of-range batch index would scatter
+    // gradient via atomicAdd into out-of-bounds memory. Skip such elements.
+    if (batch_idx < 0 || batch_idx >= batch_size) return;
 
     float roi_x1 = roi[1] * spatial_scale;
     float roi_y1 = roi[2] * spatial_scale;
@@ -292,7 +303,7 @@ auto roi_align_forward(const Tensor& features, const Tensor& rois,
     hipLaunchKernelGGL(roi_align_forward_kernel, dim3(blocks), dim3(threads), 0, stream,
                       features.data<float>(), rois_ptr, output.data<float>(),
                       num_rois, channels, feat_height, feat_width,
-                      output_h, output_w, spatial_scale, sampling_ratio, aligned);
+                      output_h, output_w, spatial_scale, sampling_ratio, aligned, batch_size);
 
     HIP_ROI_CHECK(hipGetLastError());
     return output;
@@ -345,7 +356,7 @@ auto roi_align_backward(const Tensor& grad_output, const Tensor& rois,
     hipLaunchKernelGGL(roi_align_backward_kernel, dim3(blocks), dim3(threads), 0, stream,
                       grad_f32.data<float>(), rois_ptr, grad_features.data<float>(),
                       num_rois, channels, feat_height, feat_width,
-                      output_h, output_w, spatial_scale, sampling_ratio, aligned);
+                      output_h, output_w, spatial_scale, sampling_ratio, aligned, batch_size);
 
     HIP_ROI_CHECK(hipGetLastError());
     return grad_features;

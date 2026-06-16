@@ -463,7 +463,17 @@ auto FuseConvBatchNormPass::run(Graph& graph) -> bool {
         if (node1->op_type() == OpType::Conv2d && node2->op_type() == OpType::BatchNorm2d) {
             // Check if conv output is only used by batchnorm
             bool can_fuse = true;
-            if (!node1->outputs().empty()) {
+            // Data-flow guard: the BN node must actually consume the conv
+            // output (mirrors FuseConvBatchNormReluPass). Without this check a
+            // positionally-adjacent but data-independent (Conv, BN) pair would
+            // have its conv weights folded with BN stats and BN's real
+            // consumers redirected to the unmodified conv output — silently
+            // wrong results.
+            if (node1->outputs().empty() || node2->inputs().empty() ||
+                node1->outputs()[0]->id() != node2->inputs()[0]->id()) {
+                can_fuse = false;
+            }
+            if (can_fuse) {
                 auto conv_out = node1->outputs()[0];
                 if (conv_out->uses().size() > 1) {
                     can_fuse = false;
@@ -565,8 +575,18 @@ auto FuseConvReluPass::run(Graph& graph) -> bool {
         auto& node2 = graph.nodes()[i + 1];
 
         if (node1->op_type() == OpType::Conv2d && node2->op_type() == OpType::ReLU) {
-            if (fuse_pair(node1, node2, graph)) {
-                modified = true;
+            // Data-flow guard: the ReLU must consume the conv output and the
+            // conv output must have a single use (mirrors FuseMatMulAddPass /
+            // FuseConvBatchNormReluPass). Otherwise a positionally-adjacent but
+            // data-independent (Conv, ReLU) pair would attach an unwanted ReLU
+            // to the conv output and redirect the real ReLU's consumers to the
+            // conv output, dropping the genuine ReLU — silently wrong results.
+            if (!node1->outputs().empty() && !node2->inputs().empty() &&
+                node1->outputs()[0]->id() == node2->inputs()[0]->id() &&
+                node1->outputs()[0]->uses().size() == 1) {
+                if (fuse_pair(node1, node2, graph)) {
+                    modified = true;
+                }
             }
         }
     }
@@ -601,8 +621,18 @@ auto FuseLinearReluPass::run(Graph& graph) -> bool {
         auto& node2 = graph.nodes()[i + 1];
 
         if (node1->op_type() == OpType::Linear && node2->op_type() == OpType::ReLU) {
-            if (fuse_pair(node1, node2, graph)) {
-                modified = true;
+            // Data-flow guard: the ReLU must consume the linear output and the
+            // linear output must have a single use (mirrors FuseMatMulAddPass /
+            // FuseConvBatchNormReluPass). Otherwise a positionally-adjacent but
+            // data-independent (Linear, ReLU) pair would attach an unwanted
+            // ReLU to the linear output and redirect the real ReLU's consumers
+            // to the linear output, dropping the genuine ReLU.
+            if (!node1->outputs().empty() && !node2->inputs().empty() &&
+                node1->outputs()[0]->id() == node2->inputs()[0]->id() &&
+                node1->outputs()[0]->uses().size() == 1) {
+                if (fuse_pair(node1, node2, graph)) {
+                    modified = true;
+                }
             }
         }
     }
@@ -2446,11 +2476,19 @@ auto DTypeOptimizationPass::run(Graph& graph) -> bool {
     // Apply input-side cast insertions (downcast-to-target for compute-heavy
     // ops + upcast-to-Float32 for stability-critical ops). Output-side casts
     // are handled separately above.
+    size_t cast_uid = 0;
     for (auto& ins : insertions) {
         if (!ins.consumer) continue;  // Output-only entries: handled above.
 
+        // Make the cast value id unique per insertion. When one source value
+        // feeds several compute-heavy consumers, this loop emits one cast per
+        // (value, consumer); a shared "<id>_cast" id would collide so that
+        // GraphWriter::write_values (which dedups Values by id) collapses the
+        // distinct casts into one record, breaking save/load of dtype-optimized
+        // graphs ("references input value that does not exist"). Suffix with an
+        // incrementing counter to guarantee uniqueness.
         auto cast_output = std::make_shared<Value>(
-            ins.value->id() + "_cast",
+            ins.value->id() + "_cast_" + std::to_string(cast_uid++),
             ins.value->shape(),
             ins.target_dtype,
             ins.value->device());

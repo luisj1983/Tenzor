@@ -422,6 +422,214 @@ FP8_E5M2::operator float() const {
 }
 
 // ============================================================================
+// FP8 E4M3FNUZ Conversions (1 sign, 4 exponent, 3 mantissa) — AMD/GraphCore
+//   bias 8 (not 7), NO infinities, single NaN = 0x80 (otherwise -0), max = 240.
+//   Matches ONNX FLOAT8E4M3FNUZ / torch.float8_e4m3fnuz.
+// ============================================================================
+FP8_E4M3FNUZ::FP8_E4M3FNUZ(float f) {
+    uint32_t f_bits;
+    std::memcpy(&f_bits, &f, sizeof(float));
+
+    uint32_t sign = (f_bits >> 31) & 0x1;
+    uint32_t exp = (f_bits >> 23) & 0xFF;
+    uint32_t mantissa = f_bits & 0x7FFFFF;
+
+    // FNUZ has no infinity; both Inf and NaN map to the single NaN encoding.
+    if (exp == 0xFF) { bits = 0x80; return; }
+
+    uint8_t h_sign = static_cast<uint8_t>(sign);
+    uint8_t h_exp;
+    uint8_t h_mantissa;
+
+    if (exp == 0) {
+        h_exp = 0;
+        h_mantissa = 0;  // zero or float32 subnormal -> zero
+    } else {
+        int32_t new_exp = static_cast<int32_t>(exp) - 127 + 8;  // bias 8
+
+        if (new_exp >= 0x10) {
+            // Overflow: saturate to max finite (exp=0xF, mant=0x7 = 240). Unlike
+            // IEEE E4M3, exp=0xF/mant=0x7 is a finite value here, not NaN.
+            h_exp = 0xF;
+            h_mantissa = 0x7;
+        } else if (new_exp <= 0) {
+            if (new_exp >= -3) {
+                uint32_t m = (mantissa | 0x800000) >> (1 - new_exp);
+                uint32_t kept = (m >> 20) & 0x7;
+                uint32_t remainder = m & 0xFFFFF;
+                uint32_t halfway = 0x80000;
+                if (remainder > halfway || (remainder == halfway && (kept & 1))) {
+                    kept++;  // may carry subnormal -> smallest normal (exp field 1)
+                }
+                h_exp = static_cast<uint8_t>(kept >> 3);
+                h_mantissa = static_cast<uint8_t>(kept & 0x7);
+            } else {
+                h_exp = 0;
+                h_mantissa = 0;
+            }
+        } else {
+            uint32_t kept = (mantissa >> 20) & 0x7;
+            uint32_t remainder = mantissa & 0xFFFFF;
+            uint32_t halfway = 0x80000;
+            uint32_t packed = (static_cast<uint32_t>(new_exp) << 3) | kept;
+            if (remainder > halfway || (remainder == halfway && (kept & 1))) {
+                packed++;
+            }
+            uint32_t r_exp = packed >> 3;
+            uint32_t r_mant = packed & 0x7;
+            if (r_exp >= 0x10) {  // rounding carry past max finite -> saturate
+                r_exp = 0xF;
+                r_mant = 0x7;
+            }
+            h_exp = static_cast<uint8_t>(r_exp);
+            h_mantissa = static_cast<uint8_t>(r_mant);
+        }
+    }
+
+    bits = (h_sign << 7) | (h_exp << 3) | h_mantissa;
+    // 0x80 (sign=1, exp=0, mant=0) is NaN, not -0: flush negative zero to +0.
+    if (bits == 0x80) bits = 0x00;
+}
+
+FP8_E4M3FNUZ::operator float() const {
+    if (bits == 0x80) {  // the single NaN encoding
+        uint32_t nan_bits = 0x7FC00000;
+        float r; std::memcpy(&r, &nan_bits, sizeof(float)); return r;
+    }
+    uint32_t sign = (bits >> 7) & 0x1;
+    uint32_t exp = (bits >> 3) & 0xF;
+    uint32_t mantissa = bits & 0x7;
+
+    uint32_t f_sign = sign;
+    uint32_t f_exp;
+    uint32_t f_mantissa;
+
+    if (exp == 0) {
+        if (mantissa == 0) {
+            f_exp = 0;
+            f_mantissa = 0;
+        } else {
+            int e = -1;
+            uint32_t m = mantissa;
+            do { e++; m <<= 1; } while ((m & 0x8) == 0);
+            f_exp = 127 - 8 - e;  // bias 8
+            f_mantissa = (m & 0x7) << 20;
+        }
+    } else {
+        // exp=0xF is a normal finite value (no NaN reservation in FNUZ).
+        f_exp = exp - 8 + 127;  // bias 8
+        f_mantissa = mantissa << 20;
+    }
+
+    uint32_t f_bits = (f_sign << 31) | (f_exp << 23) | f_mantissa;
+    float result;
+    std::memcpy(&result, &f_bits, sizeof(float));
+    return result;
+}
+
+// ============================================================================
+// FP8 E5M2FNUZ Conversions (1 sign, 5 exponent, 2 mantissa) — AMD/GraphCore
+//   bias 16 (not 15), NO infinities, single NaN = 0x80, max = 57344.
+//   Matches ONNX FLOAT8E5M2FNUZ / torch.float8_e5m2fnuz.
+// ============================================================================
+FP8_E5M2FNUZ::FP8_E5M2FNUZ(float f) {
+    uint32_t f_bits;
+    std::memcpy(&f_bits, &f, sizeof(float));
+
+    uint32_t sign = (f_bits >> 31) & 0x1;
+    uint32_t exp = (f_bits >> 23) & 0xFF;
+    uint32_t mantissa = f_bits & 0x7FFFFF;
+
+    if (exp == 0xFF) { bits = 0x80; return; }  // Inf/NaN -> single NaN
+
+    uint8_t h_sign = static_cast<uint8_t>(sign);
+    uint8_t h_exp;
+    uint8_t h_mantissa;
+
+    if (exp == 0) {
+        h_exp = 0;
+        h_mantissa = 0;
+    } else {
+        int32_t new_exp = static_cast<int32_t>(exp) - 127 + 16;  // bias 16
+
+        if (new_exp >= 0x20) {
+            // Saturate to max finite (exp=0x1F, mant=0x3 = 57344); no infinity.
+            h_exp = 0x1F;
+            h_mantissa = 0x3;
+        } else if (new_exp <= 0) {
+            if (new_exp >= -2) {
+                uint32_t m = (mantissa | 0x800000) >> (1 - new_exp);
+                uint32_t kept = (m >> 21) & 0x3;
+                uint32_t remainder = m & 0x1FFFFF;
+                uint32_t halfway = 0x100000;
+                if (remainder > halfway || (remainder == halfway && (kept & 1))) {
+                    kept++;
+                }
+                h_exp = static_cast<uint8_t>(kept >> 2);
+                h_mantissa = static_cast<uint8_t>(kept & 0x3);
+            } else {
+                h_exp = 0;
+                h_mantissa = 0;
+            }
+        } else {
+            uint32_t kept = (mantissa >> 21) & 0x3;
+            uint32_t remainder = mantissa & 0x1FFFFF;
+            uint32_t halfway = 0x100000;
+            uint32_t packed = (static_cast<uint32_t>(new_exp) << 2) | kept;
+            if (remainder > halfway || (remainder == halfway && (kept & 1))) {
+                packed++;
+            }
+            uint32_t r_exp = packed >> 2;
+            uint32_t r_mant = packed & 0x3;
+            if (r_exp >= 0x20) {  // rounding carry past max finite -> saturate
+                r_exp = 0x1F;
+                r_mant = 0x3;
+            }
+            h_exp = static_cast<uint8_t>(r_exp);
+            h_mantissa = static_cast<uint8_t>(r_mant);
+        }
+    }
+
+    bits = (h_sign << 7) | (h_exp << 2) | h_mantissa;
+    if (bits == 0x80) bits = 0x00;  // negative zero is NaN in FNUZ -> +0
+}
+
+FP8_E5M2FNUZ::operator float() const {
+    if (bits == 0x80) {
+        uint32_t nan_bits = 0x7FC00000;
+        float r; std::memcpy(&r, &nan_bits, sizeof(float)); return r;
+    }
+    uint32_t sign = (bits >> 7) & 0x1;
+    uint32_t exp = (bits >> 2) & 0x1F;
+    uint32_t mantissa = bits & 0x3;
+
+    uint32_t f_sign = sign;
+    uint32_t f_exp;
+    uint32_t f_mantissa;
+
+    if (exp == 0) {
+        if (mantissa == 0) {
+            f_exp = 0;
+            f_mantissa = 0;
+        } else {
+            int e = -1;
+            uint32_t m = mantissa;
+            do { e++; m <<= 1; } while ((m & 0x4) == 0);
+            f_exp = 127 - 16 - e;  // bias 16
+            f_mantissa = (m & 0x3) << 21;
+        }
+    } else {
+        f_exp = exp - 16 + 127;  // bias 16; exp=0x1F is a normal finite value
+        f_mantissa = mantissa << 21;
+    }
+
+    uint32_t f_bits = (f_sign << 31) | (f_exp << 23) | f_mantissa;
+    float result;
+    std::memcpy(&result, &f_bits, sizeof(float));
+    return result;
+}
+
+// ============================================================================
 // Helper conversion functions
 // ============================================================================
 
@@ -440,6 +648,10 @@ auto convert_dtype(From value) -> To {
         return FP8_E4M3(static_cast<float>(value));
     } else if constexpr (std::is_same_v<To, FP8_E5M2>) {
         return FP8_E5M2(static_cast<float>(value));
+    } else if constexpr (std::is_same_v<To, FP8_E4M3FNUZ>) {
+        return FP8_E4M3FNUZ(static_cast<float>(value));
+    } else if constexpr (std::is_same_v<To, FP8_E5M2FNUZ>) {
+        return FP8_E5M2FNUZ(static_cast<float>(value));
     } else if constexpr (std::is_same_v<From, Float16>) {
         return static_cast<To>(static_cast<float>(value));
     } else if constexpr (std::is_same_v<From, BFloat16>) {
@@ -447,6 +659,10 @@ auto convert_dtype(From value) -> To {
     } else if constexpr (std::is_same_v<From, FP8_E4M3>) {
         return static_cast<To>(static_cast<float>(value));
     } else if constexpr (std::is_same_v<From, FP8_E5M2>) {
+        return static_cast<To>(static_cast<float>(value));
+    } else if constexpr (std::is_same_v<From, FP8_E4M3FNUZ>) {
+        return static_cast<To>(static_cast<float>(value));
+    } else if constexpr (std::is_same_v<From, FP8_E5M2FNUZ>) {
         return static_cast<To>(static_cast<float>(value));
     } else {
         return static_cast<To>(value);
@@ -470,5 +686,13 @@ template auto convert_dtype<double, FP8_E4M3>(FP8_E4M3) -> double;
 template auto convert_dtype<double, FP8_E5M2>(FP8_E5M2) -> double;
 template auto convert_dtype<FP8_E4M3, double>(double) -> FP8_E4M3;
 template auto convert_dtype<FP8_E5M2, double>(double) -> FP8_E5M2;
+template auto convert_dtype<float, FP8_E4M3FNUZ>(FP8_E4M3FNUZ) -> float;
+template auto convert_dtype<float, FP8_E5M2FNUZ>(FP8_E5M2FNUZ) -> float;
+template auto convert_dtype<FP8_E4M3FNUZ, float>(float) -> FP8_E4M3FNUZ;
+template auto convert_dtype<FP8_E5M2FNUZ, float>(float) -> FP8_E5M2FNUZ;
+template auto convert_dtype<double, FP8_E4M3FNUZ>(FP8_E4M3FNUZ) -> double;
+template auto convert_dtype<double, FP8_E5M2FNUZ>(FP8_E5M2FNUZ) -> double;
+template auto convert_dtype<FP8_E4M3FNUZ, double>(double) -> FP8_E4M3FNUZ;
+template auto convert_dtype<FP8_E5M2FNUZ, double>(double) -> FP8_E5M2FNUZ;
 
 } // namespace tenzor

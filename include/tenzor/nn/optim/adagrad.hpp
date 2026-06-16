@@ -152,10 +152,16 @@ public:
     auto set_lr(double lr) -> void override;
 
     /**
-     * @brief Get current learning rate
-     * @return Current learning rate (after decay)
+     * @brief Get the base learning rate (matches set_lr's unit; not decayed)
+     * @return Base learning rate
      */
     auto get_lr() const -> double override;
+
+    /**
+     * @brief Compute the effective (lr_decay-adjusted) learning rate
+     * @return lr / (1 + (step_count - 1) * lr_decay)
+     */
+    auto effective_lr() const -> double;
 
     /**
      * @brief Get optimizer state for serialization
@@ -192,12 +198,6 @@ private:
      * @brief Initialize accumulator buffers to initial_accumulator_value
      */
     auto initialize_buffers() -> void;
-
-    /**
-     * @brief Compute effective learning rate with decay
-     * @return lr / (1 + (step_count - 1) * lr_decay)
-     */
-    auto effective_lr() const -> double;
 };
 
 } // namespace optim

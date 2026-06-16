@@ -993,9 +993,11 @@ auto add(const SparseTensor& sparse, const Tensor& dense) -> Tensor {
     // Promote dtypes if they don't match
     DType common_dtype = promote_types(sparse.dtype(), dense.dtype());
     if (sparse.dtype() != common_dtype || dense.dtype() != common_dtype) {
+        // with_values() preserves the layout and its index members for every
+        // layout (COO/CSR/CSC/BSR); sparse.indices() is only populated for COO,
+        // so the old COO reconstruction crashed for CSR/CSC/BSR inputs.
         auto sparse_promoted = (sparse.dtype() != common_dtype)
-            ? SparseTensor::sparse_coo(sparse.indices(), sparse.values().to(common_dtype),
-                std::vector<int64_t>(sparse.shape().begin(), sparse.shape().end()))
+            ? sparse.with_values(sparse.values().to(common_dtype))
             : sparse;
         auto dense_promoted = (dense.dtype() != common_dtype) ? dense.to(common_dtype) : dense;
         return add(sparse_promoted, dense_promoted);

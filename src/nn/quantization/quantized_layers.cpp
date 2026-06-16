@@ -95,7 +95,29 @@ auto QuantizedLinear::forward_impl(const Variable& input) -> Variable {
 
 auto QuantizedLinear::forward_quantized(const QuantizedTensor& input) -> Tensor {
     auto input_shape = input.shape();
-    int64_t batch_size = input_shape[0];
+    // Support rank>=2 activations (e.g. transformer [B, S, in_features]) by
+    // flattening all leading dims into the effective batch dimension. The
+    // kernels iterate `batch_size` rows of `in_features` contiguous elements,
+    // so rows = numel()/in_features is the correct row count. The trailing
+    // feature dimension must match in_features_.
+    if (input_shape.empty()) {
+        throw std::runtime_error(
+            "QuantizedLinear::forward_quantized: input must have rank >= 1");
+    }
+    if (input_shape.back() != in_features_) {
+        throw std::runtime_error(
+            "QuantizedLinear::forward_quantized: last input dim (" +
+            std::to_string(input_shape.back()) + ") != in_features (" +
+            std::to_string(in_features_) + ")");
+    }
+    int64_t batch_size = 1;
+    for (size_t i = 0; i + 1 < input_shape.size(); ++i) {
+        batch_size *= input_shape[i];
+    }
+    // Output shape preserves the leading dims and replaces in_features with
+    // out_features: input_shape[:-1] + [out_features].
+    std::vector<int64_t> out_shape(input_shape.begin(), input_shape.end() - 1);
+    out_shape.push_back(out_features_);
 
     auto original_device = input.device();
 
@@ -137,8 +159,14 @@ auto QuantizedLinear::forward_quantized(const QuantizedTensor& input) -> Tensor 
             attrs.set(AttrKey::InputZeroPoint,  static_cast<int64_t>(in_zp));
             attrs.set(AttrKey::WeightZeroPoint, static_cast<int64_t>(wt_zp));
 
+            // Flatten leading dims to a 2D [rows, in_features] view so the
+            // backend kernel processes every row of a rank>=3 activation.
+            Tensor input_2d = (input.data().shape().size() == 2)
+                ? input.data()
+                : input.data().reshape({batch_size, in_features_});
+
             std::vector<Tensor> inputs_vec;
-            inputs_vec.push_back(input.data());
+            inputs_vec.push_back(input_2d);
             inputs_vec.push_back(weight_.data());
             if (bias_.has_value()) {
                 Tensor bias_dev = *bias_;
@@ -146,7 +174,13 @@ auto QuantizedLinear::forward_quantized(const QuantizedTensor& input) -> Tensor 
                 if (bias_dev.device() != original_device) bias_dev = bias_dev.to(original_device);
                 inputs_vec.push_back(bias_dev);
             }
-            return dispatch<OpId::QuantizedLinear>(inputs_vec, attrs)[0];
+            Tensor disp_out = dispatch<OpId::QuantizedLinear>(inputs_vec, attrs)[0];
+            // Restore the original leading dims: [rows, out_features] ->
+            // input_shape[:-1] + [out_features].
+            if (out_shape.size() != 2) {
+                disp_out = disp_out.reshape(out_shape);
+            }
+            return disp_out;
         }
     }
 
@@ -217,6 +251,7 @@ auto QuantizedLinear::forward_quantized(const QuantizedTensor& input) -> Tensor 
             input_data, weight_packed, bias_data, output_data,
             batch_size, out_features_, in_features_,
             input_scale, weight_scale);
+        if (out_shape.size() != 2) output = output.reshape(out_shape);
         return output.to(original_device);
     }
 
@@ -244,7 +279,8 @@ auto QuantizedLinear::forward_quantized(const QuantizedTensor& input) -> Tensor 
         );
     }
 
-    // Move output back to original device
+    // Restore original leading dims, then move output back to original device.
+    if (out_shape.size() != 2) output = output.reshape(out_shape);
     return output.to(original_device);
 }
 
@@ -508,7 +544,9 @@ auto QuantizedConv2d::from_float(const Conv2d& fp_conv, const QConfig& qconfig)
     // Extract Conv2d parameters from weight shape
     auto weight_shape = fp_weight.shape();
     int64_t out_channels = weight_shape[0];
-    int64_t in_channels = weight_shape[1];
+    // Conv2d weight is [out_channels, in_channels/groups, kH, kW]; recover the
+    // true in_channels by multiplying by groups (matches QuantizedConv2dBnReLU).
+    int64_t in_channels = weight_shape[1] * fp_conv.groups();
     int64_t kernel_h = weight_shape[2];
     int64_t kernel_w = weight_shape[3];
     if (kernel_h != kernel_w) {
@@ -931,7 +969,9 @@ auto QuantizedConv2dReLU::from_float(const Conv2d& fp_conv, const QConfig& qconf
     // Extract Conv2d parameters from weight shape
     auto weight_shape = fp_weight.shape();
     int64_t out_channels = weight_shape[0];
-    int64_t in_channels = weight_shape[1];
+    // Conv2d weight is [out_channels, in_channels/groups, kH, kW]; recover the
+    // true in_channels by multiplying by groups (matches QuantizedConv2dBnReLU).
+    int64_t in_channels = weight_shape[1] * fp_conv.groups();
     int64_t kernel_h = weight_shape[2];
 
     // Create QuantizedConv2dReLU with actual parameters from source Conv2d

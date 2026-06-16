@@ -204,6 +204,7 @@ auto contiguous_kernel(const Tensor& input, cudaStream_t stream) -> Tensor {
             meta, ndim, total_elements);
             CUDA_CHECK(cudaGetLastError());
     } else if (input.dtype() == DType::FP8_E4M3 || input.dtype() == DType::FP8_E5M2 ||
+               input.dtype() == DType::FP8_E4M3FNUZ || input.dtype() == DType::FP8_E5M2FNUZ ||
                input.dtype() == DType::QInt8 || input.dtype() == DType::QUInt8 ||
                input.dtype() == DType::QInt4x2) {
         // All 1-byte storage types: contiguous copy is a pure byte move.
