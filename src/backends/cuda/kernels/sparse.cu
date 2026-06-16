@@ -18,6 +18,7 @@
 #include "tenzor/sparse/sparse_tensor.hpp"
 #include "../cusparse_handle_pool.hpp"
 #include "cuda_common.cuh"  // For TENZOR_CUDA_CHECK (K.3 hygiene)
+#include "cuda_launch_utils.cuh"  // tenzor::cuda::CudaDeviceGuard
 
 #include <cusparse.h>
 #include <cuda_runtime.h>
@@ -57,17 +58,7 @@ namespace {
     } while (0)
 #endif
 
-/// RAII wrapper for CUDA device memory (exception-safe cudaMalloc/cudaFree).
-struct CudaBuffer {
-    void* ptr = nullptr;
-    explicit CudaBuffer(size_t bytes) {
-        if (bytes > 0) CUDA_CHECK_SPARSE(cudaMalloc(&ptr, bytes));
-    }
-    ~CudaBuffer() { if (ptr) cudaFree(ptr); }
-    CudaBuffer(const CudaBuffer&) = delete;
-    CudaBuffer& operator=(const CudaBuffer&) = delete;
-    template<typename T> T* as() { return static_cast<T*>(ptr); }
-};
+// CudaBuffer (RAII cudaMalloc/cudaFree) is provided by cuda_launch_utils.cuh.
 
 /// RAII guard for cuSPARSE sparse matrix descriptor.
 struct SpMatGuard {
@@ -298,6 +289,11 @@ SparseTensor ensure_csr_on_gpu(const SparseTensor& sparse, cudaStream_t stream =
 } // anonymous namespace
 
 Tensor cuda_spmm_kernel(const SparseTensor& sparse, const Tensor& dense, cudaStream_t stream = 0) {
+    // Make the operands' CUDA device current so the device-keyed cuSPARSE handle
+    // and any widen/narrow kernel launches target the correct GPU. Restored on
+    // scope exit. (The dispatch path does not set the device.)
+    CudaDeviceGuard dev_guard(dense.device().type == Device::Type::CUDA
+                              ? dense.device().index : Device::cuda().index);
     auto sp_shape = sparse.shape();
     if (sp_shape.size() != 2 || dense.ndim() != 2) {
         throw std::runtime_error("cuda_spmm: both inputs must be 2D");
@@ -436,6 +432,8 @@ Tensor cuda_spmm_kernel(const SparseTensor& sparse, const Tensor& dense, cudaStr
 }
 
 Tensor cuda_spmv_kernel(const SparseTensor& sparse, const Tensor& vec, cudaStream_t stream = 0) {
+    CudaDeviceGuard dev_guard(vec.device().type == Device::Type::CUDA
+                              ? vec.device().index : Device::cuda().index);
     auto sp_shape = sparse.shape();
     if (sp_shape.size() != 2 || vec.ndim() != 1) {
         throw std::runtime_error("cuda_spmv: sparse must be 2D, vec must be 1D");
@@ -605,6 +603,8 @@ SparseTensor cuda_spgemm_kernel(const SparseTensor& a, const SparseTensor& b,
     // in as a void*. cudaStream_t is a typedef for `CUstream_st*` — a
     // pointer — so this cast is ABI-safe.
     cudaStream_t stream = static_cast<cudaStream_t>(stream_opaque);
+    CudaDeviceGuard dev_guard(a.device().type == Device::Type::CUDA
+                              ? a.device().index : Device::cuda().index);
     auto a_shape = a.shape();
     auto b_shape = b.shape();
     if (a_shape.size() != 2 || b_shape.size() != 2) {
@@ -760,6 +760,8 @@ struct SpSVDescrGuard {
 Tensor cuda_sparse_trsv_kernel(const SparseTensor& L, const Tensor& b,
                                 bool upper, void* stream_opaque) {
     cudaStream_t stream = static_cast<cudaStream_t>(stream_opaque);
+    CudaDeviceGuard dev_guard(b.device().type == Device::Type::CUDA
+                              ? b.device().index : Device::cuda().index);
     auto L_shape = L.shape();
     if (L_shape.size() != 2 || L_shape[0] != L_shape[1]) {
         throw std::runtime_error("cuda_sparse_trsv: L must be square 2D");
@@ -861,6 +863,8 @@ Tensor cuda_sparse_trsv_kernel(const SparseTensor& L, const Tensor& b,
 Tensor cuda_sparse_trsm_kernel(const SparseTensor& L, const Tensor& B,
                                 bool upper, void* stream_opaque) {
     cudaStream_t stream = static_cast<cudaStream_t>(stream_opaque);
+    CudaDeviceGuard dev_guard(B.device().type == Device::Type::CUDA
+                              ? B.device().index : Device::cuda().index);
     auto L_shape = L.shape();
     if (L_shape.size() != 2 || L_shape[0] != L_shape[1]) {
         throw std::runtime_error("cuda_sparse_trsm: L must be square 2D");

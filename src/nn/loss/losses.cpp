@@ -456,8 +456,16 @@ auto NLLLoss::forward(const Variable& input, const Tensor& target) -> Variable {
         }
         case Reduction::Sum:
             return finalize(sum(neg_loss));
-        case Reduction::BatchMean:
-            return finalize(sum(neg_loss) / static_cast<float>(neg_loss.tensor().shape()[0]));
+        case Reduction::BatchMean: {
+            // Guard against a scalar/empty batch: shape()[0] would be OOB on a
+            // 0-d tensor and div-by-zero on an empty batch. Mirror the sibling
+            // losses' guarded BatchMean pattern (e.g. line ~99 above).
+            const auto& shp = neg_loss.tensor().shape();
+            int64_t bs = (!shp.empty()) ? shp[0] : 0;
+            return finalize((bs > 0)
+                                ? (sum(neg_loss) / static_cast<float>(bs))
+                                : mean(neg_loss));
+        }
     }
     return finalize(neg_loss);
 }

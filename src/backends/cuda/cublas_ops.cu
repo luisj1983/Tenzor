@@ -22,6 +22,7 @@
 #include "tenzor/core/dtype.hpp"
 #include "tenzor/backend/cuda_config.hpp"
 #include "kernels/cuda_common.cuh"
+#include "kernels/cuda_launch_utils.cuh"  // tenzor::cuda::CudaDeviceGuard
 #include "cublas_handle_pool.hpp"
 
 namespace tenzor {
@@ -411,6 +412,9 @@ auto cublas_batched_matmul_scaled(const Tensor& a, const Tensor& b, float scale)
 
     Tensor result({batch_size, M, N}, a.dtype(), a.device());
 
+    // Make the tensors' device current so the device-keyed cuBLAS handle is
+    // fetched on the GPU the GEMM runs on. Restored on scope exit.
+    CudaDeviceGuard dev_guard(a.device().index);
     cublas_batched_gemm_scaled(
         a.data_ptr(), b.data_ptr(), result.data_ptr(),
         batch_size, M, N, K, scale, a.dtype()
@@ -452,6 +456,7 @@ auto cublas_matmul(const Tensor& a, const Tensor& b) -> Tensor {
     void* c_ptr = result.data_ptr();
 
     // Perform matrix multiplication with Tensor Core acceleration
+    CudaDeviceGuard dev_guard(a.device().index);
     cublas_gemm_ex(a_ptr, b_ptr, c_ptr, M, N, K, a.dtype());
 
     return result;
@@ -495,6 +500,7 @@ auto cublas_batched_matmul(const Tensor& a, const Tensor& b) -> Tensor {
     void* c_ptr = result.data_ptr();
 
     // Perform batched matrix multiplication with Tensor Core acceleration
+    CudaDeviceGuard dev_guard(a.device().index);
     cublas_batched_gemm_ex(a_ptr, b_ptr, c_ptr, batch_size, M, N, K, a.dtype());
 
     return result;
@@ -719,6 +725,8 @@ auto linear_kernel(
     // Create output tensor
     Tensor output(out_shape, input_c.dtype(), input_c.device());
 
+    // Make the tensors' device current for the device-keyed cuBLAS handle.
+    CudaDeviceGuard dev_guard(input_c.device().index);
     // Get cuBLAS handle and set stream
     cublasHandle_t handle = CuBLASHandlePool::get(stream);
 
@@ -981,6 +989,7 @@ auto linear_backward_kernel(
     Tensor grad_weight({out_features, in_features}, weight_c.dtype(), weight_c.device());
     Tensor grad_bias({out_features}, grad_out_c.dtype(), grad_out_c.device());
 
+    CudaDeviceGuard dev_guard(input_c.device().index);
     cublasHandle_t handle = CuBLASHandlePool::get(stream);
 
     if (input_c.dtype() == DType::Float32) {
@@ -1499,6 +1508,8 @@ auto cublas_fp8_matmul(
 
     Tensor result({M, N}, out_dtype, a.device());
 
+    // Make the tensors' device current for the device-keyed cublasLt handle.
+    CudaDeviceGuard dev_guard(a.device().index);
     cublas_fp8_gemm(
         a.data_ptr(), b.data_ptr(), result.data_ptr(),
         M, N, K,

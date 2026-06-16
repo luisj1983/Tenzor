@@ -13,6 +13,7 @@
 #include <cuda_runtime.h>
 #include <stdexcept>
 #include <string>
+#include <unordered_map>
 
 namespace tenzor {
 namespace cuda {
@@ -61,9 +62,15 @@ private:
             }
         }
     };
+    // Per-thread, per-device handle cache. A cuSPARSE handle is bound to the
+    // device current at cusparseCreate() time; reusing a single handle after
+    // the thread switches devices runs the sparse op on the wrong GPU. Key by
+    // the current device.
     static HandleGuard& guard() {
-        static thread_local HandleGuard g;
-        return g;
+        static thread_local std::unordered_map<int, HandleGuard> guards;
+        int device = 0;
+        cudaGetDevice(&device);
+        return guards[device];
     }
     static cusparseHandle_t& handle() { return guard().handle; }
     static cudaStream_t& last_stream() { return guard().last_stream; }

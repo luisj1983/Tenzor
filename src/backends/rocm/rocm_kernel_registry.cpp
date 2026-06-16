@@ -4900,6 +4900,7 @@ void register_rocm_kernels(BackendDispatchTable& table) {
             int64_t dim = attrs.get_int(AttrKey::Dim, 0);
             int64_t index = attrs.get_int(AttrKey::Index, 0);
 
+            hipStream_t stream = get_hip_stream(attrs);
             auto output = input.clone();
             int64_t ndim = static_cast<int64_t>(output.shape().size());
             if (dim < 0) dim += ndim;
@@ -4913,7 +4914,7 @@ void register_rocm_kernels(BackendDispatchTable& table) {
             auto* dst_ptr = static_cast<char*>(dst_slice.data_ptr());
             const auto* src_ptr = static_cast<const char*>(src_reshaped.data_ptr());
             if (dst_slice.is_contiguous()) {
-                hipMemcpy(dst_ptr, src_ptr, n * elem_size, hipMemcpyDeviceToDevice);
+                hipMemcpyAsync(dst_ptr, src_ptr, n * elem_size, hipMemcpyDeviceToDevice, stream);
             } else {
                 auto dst_shape_v = dst_slice.shape();
                 auto dst_strides = dst_slice.strides();
@@ -4924,7 +4925,7 @@ void register_rocm_kernels(BackendDispatchTable& table) {
                     for (int64_t d = 0; d < ndims; d++) {
                         byte_offset += coord[d] * dst_strides[d] * elem_size;
                     }
-                    hipMemcpy(dst_ptr + byte_offset, src_ptr + i * elem_size, elem_size, hipMemcpyDeviceToDevice);
+                    hipMemcpyAsync(dst_ptr + byte_offset, src_ptr + i * elem_size, elem_size, hipMemcpyDeviceToDevice, stream);
                     for (int64_t d = ndims - 1; d >= 0; d--) {
                         coord[d]++;
                         if (coord[d] < dst_shape_v[d]) break;
@@ -4932,6 +4933,9 @@ void register_rocm_kernels(BackendDispatchTable& table) {
                     }
                 }
             }
+            // src_reshaped is a local temporary; sync so its buffer outlives
+            // the stream-ordered copies before it is destroyed.
+            hipStreamSynchronize(stream);
             return output;
         });
 
@@ -4945,6 +4949,7 @@ void register_rocm_kernels(BackendDispatchTable& table) {
             int64_t end = attrs.get_int(AttrKey::End, -1);
             int64_t step = attrs.get_int(AttrKey::Step, 1);
 
+            hipStream_t stream = get_hip_stream(attrs);
             auto output = input.clone();
             int64_t ndim = static_cast<int64_t>(output.shape().size());
             if (dim < 0) dim += ndim;
@@ -4964,7 +4969,7 @@ void register_rocm_kernels(BackendDispatchTable& table) {
             auto* dst_ptr = static_cast<char*>(dst_slice.data_ptr());
             const auto* src_ptr = static_cast<const char*>(src_reshaped.data_ptr());
             if (dst_slice.is_contiguous()) {
-                hipMemcpy(dst_ptr, src_ptr, n * elem_size, hipMemcpyDeviceToDevice);
+                hipMemcpyAsync(dst_ptr, src_ptr, n * elem_size, hipMemcpyDeviceToDevice, stream);
             } else {
                 auto dst_shape_v = dst_slice.shape();
                 auto dst_strides = dst_slice.strides();
@@ -4975,7 +4980,7 @@ void register_rocm_kernels(BackendDispatchTable& table) {
                     for (int64_t d = 0; d < ndims; d++) {
                         byte_offset += coord[d] * dst_strides[d] * elem_size;
                     }
-                    hipMemcpy(dst_ptr + byte_offset, src_ptr + i * elem_size, elem_size, hipMemcpyDeviceToDevice);
+                    hipMemcpyAsync(dst_ptr + byte_offset, src_ptr + i * elem_size, elem_size, hipMemcpyDeviceToDevice, stream);
                     for (int64_t d = ndims - 1; d >= 0; d--) {
                         coord[d]++;
                         if (coord[d] < dst_shape_v[d]) break;
@@ -4983,6 +4988,9 @@ void register_rocm_kernels(BackendDispatchTable& table) {
                     }
                 }
             }
+            // src_reshaped is a local temporary; sync so its buffer outlives
+            // the stream-ordered copies before it is destroyed.
+            hipStreamSynchronize(stream);
             return output;
         });
 
@@ -4995,6 +5003,7 @@ void register_rocm_kernels(BackendDispatchTable& table) {
             int64_t dim1 = attrs.get_int(AttrKey::Dim1, 0);
             int64_t dim2 = attrs.get_int(AttrKey::Dim2, 1);
 
+            hipStream_t stream = get_hip_stream(attrs);
             auto output = input.clone();
             int64_t ndim = static_cast<int64_t>(output.shape().size());
             if (dim1 < 0) dim1 += ndim;
@@ -5039,8 +5048,9 @@ void register_rocm_kernels(BackendDispatchTable& table) {
                 for (int64_t k = 0; k < diag_len; k++) {
                     int64_t out_elem_offset = base + (r0 + k) * strides[dim1] + (c0 + k) * strides[dim2];
                     int64_t src_elem_idx = b * diag_len + k;
-                    hipMemcpy(out_ptr + out_elem_offset * elem_size,
-                              src_ptr + src_elem_idx * elem_size, elem_size, hipMemcpyDeviceToDevice);
+                    hipMemcpyAsync(out_ptr + out_elem_offset * elem_size,
+                                   src_ptr + src_elem_idx * elem_size, elem_size,
+                                   hipMemcpyDeviceToDevice, stream);
                 }
 
                 for (int64_t i = static_cast<int64_t>(batch_dims.size()) - 1; i >= 0; i--) {
@@ -5049,6 +5059,9 @@ void register_rocm_kernels(BackendDispatchTable& table) {
                     batch_coord[i] = 0;
                 }
             }
+            // src is a local contiguous temporary; sync so its buffer outlives
+            // the stream-ordered copies before it is destroyed.
+            hipStreamSynchronize(stream);
             return output;
         });
 

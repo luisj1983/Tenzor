@@ -1,4 +1,5 @@
 #include "vulkan_ops_common.hpp"
+#include <cstdint>
 
 namespace tenzor {
 
@@ -551,6 +552,22 @@ auto VulkanBackend::dispatchContiguous(const Tensor& input) -> Tensor {
             max_offset += (shape[dim] - 1) * std::abs(strides[dim]);
         }
     }
+    // The strided_copy shaders accumulate the source offset in a signed 32-bit
+    // int (`int src_offset`) and address the output via a 32-bit `uint` flat
+    // index. A tensor whose largest reachable source offset exceeds INT32_MAX
+    // would overflow src_offset to negative and read out of bounds; an output
+    // with >UINT32_MAX elements would wrap the flat index. The shader has no
+    // 64-bit path (shaderInt64 is not enabled on the device), so reject such
+    // tensors up front with a clear message rather than corrupt memory.
+    if (max_offset > static_cast<int64_t>(INT32_MAX) ||
+        total_elements > static_cast<int64_t>(UINT32_MAX)) {
+        throw std::runtime_error(
+            "Vulkan strided copy: tensor too large for 32-bit indexing "
+            "(max source offset " + std::to_string(max_offset) +
+            ", elements " + std::to_string(total_elements) +
+            "); exceeds INT32_MAX/UINT32_MAX");
+    }
+
     size_t input_buffer_size = (max_offset + 1) * input.dtype_size();
     size_t output_buffer_size = total_elements * input.dtype_size();
 

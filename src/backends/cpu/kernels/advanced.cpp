@@ -1322,15 +1322,21 @@ auto histc_kernel(const Tensor& input, int64_t bins, double min_val, double max_
             hi = lo + T(1);
         }
 
-        std::memset(out_data, 0, bins * sizeof(T));
         T bin_width = (hi - lo) / static_cast<T>(bins);
 
+        // Accumulate counts in int64 so the bin totals stay integer-exact: a
+        // running ``out_data[bin] += T(1)`` in Float32 stops incrementing past
+        // 2^24 elements per bin and would silently undercount large inputs.
+        std::vector<int64_t> counts(static_cast<size_t>(bins), 0);
         for (int64_t i = 0; i < n; ++i) {
             T val = data[i];
             if (val < lo || val > hi) continue;
             int64_t bin = static_cast<int64_t>((val - lo) / bin_width);
             if (bin >= bins) bin = bins - 1;  // clamp right edge
-            out_data[bin] += T(1);
+            ++counts[static_cast<size_t>(bin)];
+        }
+        for (int64_t b = 0; b < bins; ++b) {
+            out_data[b] = static_cast<T>(counts[static_cast<size_t>(b)]);
         }
     };
 

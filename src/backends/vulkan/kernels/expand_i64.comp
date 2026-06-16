@@ -24,6 +24,11 @@ void main() {
     uint idx = gl_GlobalInvocationID.x;
     if (idx >= params.n_elements) return;
 
+    // Reject rank >8: push-constant shape/stride arrays hold at most 8 dims;
+    // a higher rank would read the uninitialized tail and index OOB. The host
+    // (dispatchExpand) also rejects this.
+    if (params.output_ndim > 8u || params.input_ndim > 8u) return;
+
     uint out_indices[8];
     uint temp = idx;
     for (int i = int(params.output_ndim) - 1; i >= 0; i--) {

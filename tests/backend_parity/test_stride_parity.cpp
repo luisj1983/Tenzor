@@ -387,7 +387,7 @@ TEST(StrideParity, MatMulTransposedB) {
 
     test_operation_parity(
         [](const std::vector<Tensor>& in) { return tenzor::matmul(in[0], in[1]); },
-        {a, b_t}, kStrideRtol, kStrideAtol, "MatMulTransposedB");
+        {a, b_t}, parity::MATMUL_RTOL, parity::MATMUL_ATOL, "MatMulTransposedB");
 }
 
 TEST(StrideParity, MatMulTransposedA) {
@@ -398,7 +398,7 @@ TEST(StrideParity, MatMulTransposedA) {
 
     test_operation_parity(
         [](const std::vector<Tensor>& in) { return tenzor::matmul(in[0], in[1]); },
-        {a_t, b}, kStrideRtol, kStrideAtol, "MatMulTransposedA");
+        {a_t, b}, parity::MATMUL_RTOL, parity::MATMUL_ATOL, "MatMulTransposedA");
 }
 
 TEST(StrideParity, MatMulBothTransposed) {
@@ -409,7 +409,7 @@ TEST(StrideParity, MatMulBothTransposed) {
         [](const std::vector<Tensor>& in) {
             return tenzor::matmul(in[0].transpose(-1, -2), in[1].transpose(-1, -2));
         },
-        {a, b}, kStrideRtol, kStrideAtol, "MatMulBothTransposed");
+        {a, b}, parity::MATMUL_RTOL, parity::MATMUL_ATOL, "MatMulBothTransposed");
 }
 
 // ============================================================================

@@ -3494,15 +3494,21 @@ template<typename T>
 __global__ void masked_scatter_write_hip_kernel(
     const T* __restrict__ input, const bool* __restrict__ mask,
     const T* __restrict__ source, const int64_t* __restrict__ prefix_sum,
-    T* __restrict__ output, int64_t numel, int64_t source_numel)
+    T* __restrict__ output, int64_t numel, int64_t source_numel,
+    int* __restrict__ error_flag)
 {
     HIP_KERNEL_LOOP(i, numel) {
         if (mask[i]) {
-            // Guard against a caller precondition violation (source has fewer
-            // elements than mask-true count): prefix_sum[i] could exceed
-            // source_numel and read out of bounds. Clamp the read instead.
+            // PyTorch raises when the number of mask-true positions exceeds
+            // source.numel(). Flag the error (host throws after sync) and read
+            // safely in-bounds to avoid an OOB device read meanwhile.
             int64_t s = prefix_sum[i];
-            output[i] = (s >= 0 && s < source_numel) ? source[s] : input[i];
+            if (s >= 0 && s < source_numel) {
+                output[i] = source[s];
+            } else {
+                atomicOr(error_flag, 1);
+                output[i] = input[i];
+            }
         } else {
             output[i] = input[i];
         }
@@ -3544,33 +3550,51 @@ auto masked_scatter_hip(const Tensor& input, const Tensor& mask,
     HIP_CHECK(hipFree(d_temp));
     HIP_CHECK(hipFree(d_int_mask));
 
+    // Device error flag: set when the mask-true count exceeds source.numel()
+    // (PyTorch raises in that case). Checked host-side after a sync.
+    int* d_error_flag = nullptr;
+    HIP_CHECK(hipMalloc(&d_error_flag, sizeof(int)));
+    HIP_CHECK(hipMemsetAsync(d_error_flag, 0, sizeof(int), stream));
+
     switch (input.dtype()) {
         case DType::Float32:
             masked_scatter_write_hip_kernel<float><<<blocks, BLOCK, 0, stream>>>(
                 input.data<float>(), mask.data<bool>(), source.data<float>(),
-                d_prefix, output.data<float>(), numel, source_numel);
+                d_prefix, output.data<float>(), numel, source_numel, d_error_flag);
             break;
         case DType::Float64:
             masked_scatter_write_hip_kernel<double><<<blocks, BLOCK, 0, stream>>>(
                 input.data<double>(), mask.data<bool>(), source.data<double>(),
-                d_prefix, output.data<double>(), numel, source_numel);
+                d_prefix, output.data<double>(), numel, source_numel, d_error_flag);
             break;
         case DType::Int32:
             masked_scatter_write_hip_kernel<int32_t><<<blocks, BLOCK, 0, stream>>>(
                 input.data<int32_t>(), mask.data<bool>(), source.data<int32_t>(),
-                d_prefix, output.data<int32_t>(), numel, source_numel);
+                d_prefix, output.data<int32_t>(), numel, source_numel, d_error_flag);
             break;
         case DType::Int64:
             masked_scatter_write_hip_kernel<int64_t><<<blocks, BLOCK, 0, stream>>>(
                 input.data<int64_t>(), mask.data<bool>(), source.data<int64_t>(),
-                d_prefix, output.data<int64_t>(), numel, source_numel);
+                d_prefix, output.data<int64_t>(), numel, source_numel, d_error_flag);
             break;
         default:
             HIP_CHECK(hipFree(d_prefix));
+            HIP_CHECK(hipFree(d_error_flag));
             throw std::runtime_error("masked_scatter ROCm: unsupported dtype");
     }
     HIP_CHECK(hipGetLastError());
     HIP_CHECK(hipFree(d_prefix));
+
+    int host_error = 0;
+    HIP_CHECK(hipMemcpyAsync(&host_error, d_error_flag, sizeof(int),
+                             hipMemcpyDeviceToHost, stream));
+    HIP_CHECK(hipStreamSynchronize(stream));
+    HIP_CHECK(hipFree(d_error_flag));
+    if (host_error != 0) {
+        throw std::runtime_error(
+            "masked_scatter ROCm: number of mask-true positions exceeds "
+            "source.numel()");
+    }
     return output;
 }
 

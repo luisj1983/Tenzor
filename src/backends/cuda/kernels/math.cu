@@ -5806,6 +5806,12 @@ static std::pair<cudaStream_t, cuda::StreamGuard> get_dispatch_stream(
     if (!attrs.empty() && attrs.has(AttrKey::Stream)) {
         auto stream = reinterpret_cast<cudaStream_t>(
             static_cast<uint64_t>(attrs.get_int(AttrKey::Stream, 0)));
+        // The caller-supplied stream lives on the tensor's device; make that
+        // device current so the dispatched kernel launches on the right GPU.
+        // (The pool-acquire path below already sets the device in acquire().)
+        if (ref_tensor.device().type == Device::Type::CUDA) {
+            cudaSetDevice(ref_tensor.device().index);
+        }
         return {stream, cuda::StreamGuard{}};
     }
     int device_id = ref_tensor.device().index;

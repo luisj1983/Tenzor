@@ -49,7 +49,7 @@ auto VulkanBackend::dispatchStack(std::span<const Tensor> inputs, int64_t dim) -
         {
             VkCommandBuffer cmdBuffer = beginSingleTimeCommands(device_id);
             for (int64_t t = 0; t < num_tensors_i; ++t) {
-                auto src = inputs[t].is_contiguous() ? inputs[t] : inputs[t].contiguous();
+                auto src = (inputs[t].is_contiguous() && inputs[t].offset() == 0) ? inputs[t] : dispatchContiguous(inputs[t]);
                 auto [src_vk_buffer, src_offset] = getVulkanBufferAndOffset(src.data_ptr());
                 size_t chunk_bytes = static_cast<size_t>(elements_per_tensor_i) * elem_bytes;
                 VkBufferCopy copyRegion{};
@@ -139,7 +139,7 @@ auto VulkanBackend::dispatchStack(std::span<const Tensor> inputs, int64_t dim) -
     {
         VkCommandBuffer cmdBuffer = beginSingleTimeCommands(device_id);
         for (int64_t t = 0; t < num_tensors; ++t) {
-            auto src = inputs[t].is_contiguous() ? inputs[t] : inputs[t].contiguous();
+            auto src = (inputs[t].is_contiguous() && inputs[t].offset() == 0) ? inputs[t] : dispatchContiguous(inputs[t]);
             auto [src_vk_buffer, src_offset] = getVulkanBufferAndOffset(src.data_ptr());
             size_t chunk_bytes = static_cast<size_t>(elements_per_tensor) * elem_bytes;
 
@@ -360,7 +360,7 @@ auto VulkanBackend::dispatchTile(const Tensor& input, const std::vector<int64_t>
         pc.output_numel = static_cast<uint32_t>(out_numel);
         pc.ndims = static_cast<uint32_t>(nd);
 
-        auto in_cont = input.is_contiguous() ? input : input.contiguous();
+        auto in_cont = (input.is_contiguous() && input.offset() == 0) ? input : dispatchContiguous(input);
 
         // F16 packed buffer sizes: round up to 4-byte boundaries
         size_t in_bsz = (static_cast<size_t>(in_cont.numel()) + 1) / 2 * 4;
@@ -462,7 +462,7 @@ auto VulkanBackend::dispatchTile(const Tensor& input, const std::vector<int64_t>
     pushConstants.output_numel = static_cast<uint32_t>(output_numel);
     pushConstants.ndims = static_cast<uint32_t>(ndims);
 
-    auto input_cont = input.is_contiguous() ? input : input.contiguous();
+    auto input_cont = (input.is_contiguous() && input.offset() == 0) ? input : dispatchContiguous(input);
 
     const void* buffer_in = input_cont.data_ptr();
     const void* buffer_out = output.data_ptr();

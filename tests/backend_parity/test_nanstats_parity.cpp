@@ -170,7 +170,9 @@ TEST_P(NanStatsParity, Cov_2DMatrix) {
     auto x = randn({4, 32}, DType::Float32, Device::cpu());
     test_operation_parity_single([](const std::vector<Tensor>& in) {
         return cov(in[0], /*correction=*/1);
-    }, {x}, device, 1e-4f, 1e-5f, "Cov_2D");
+        // cov computes X @ X^T internally (src/ops/reduction.cpp:527) so it
+        // inherits the FP32 cross-device GEMM floor; see parity::MATMUL_*.
+    }, {x}, device, parity::MATMUL_RTOL, parity::MATMUL_ATOL, "Cov_2D");
 }
 
 TEST_P(NanStatsParity, Corrcoef_2DMatrix) {

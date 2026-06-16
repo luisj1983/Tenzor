@@ -55,9 +55,13 @@ TEST(BackendStress, LargeTensor_MatMul) {
     // must absorb that (TF32 is already disabled via EnsureInitialized in main,
     // so this is genuine FP32 rounding, not a tensor-core downgrade). Matches
     // the atol the BackendStressParity.LargeTensor_MatMul sibling uses for K=1024.
+    // rtol uses the shared FP32 GEMM floor (parity::MATMUL_RTOL); atol is kept
+    // at 5e-4 (looser than parity::MATMUL_ATOL) because K=2048 here is far
+    // larger than the small-matrix cases — the forward-error bound grows with K
+    // and the measured cuBLAS-vs-MKL near-zero divergence is 2.05e-4.
     test_operation_parity([](const std::vector<Tensor>& inputs) {
         return matmul(inputs[0], inputs[1]);
-    }, {a, b}, 1e-3f, 5e-4f, "Large MatMul 2048x2048");
+    }, {a, b}, parity::MATMUL_RTOL, 5e-4f, "Large MatMul 2048x2048");
 }
 
 // II.16: LargeBatch_Conv2d, DeepGraph_100Layers, DeepGraph_Residual,
@@ -159,7 +163,9 @@ TEST(BackendStress, ComplexChain_MathOps) {
         auto mm = matmul(inputs[0], inputs[1]);
         auto added = mm + inputs[2];
         return clamp(added, -6.0f, 6.0f);  // ReLU6-like
-    }, {a, b, c}, 1e-4f, 1e-6f, "Complex Math Chain");
+        // The matmul dominates the error budget of this chain, so it inherits
+        // the FP32 cross-device GEMM floor (parity::MATMUL_*).
+    }, {a, b, c}, parity::MATMUL_RTOL, parity::MATMUL_ATOL, "Complex Math Chain");
 }
 
 TEST(BackendStress, ComplexChain_Reductions) {
@@ -207,9 +213,12 @@ TEST_P(BackendStressParity, LargeTensor_MatMul) {
     // different blocked order legitimately differ by ~1e-4 on near-zero
     // (catastrophically cancelled) outputs, where rtol gives no slack.
     // atol must absorb that: 1e-5 flagged oneMKL-vs-MKL at 9.2e-5.
+    // rtol uses the shared FP32 GEMM floor (parity::MATMUL_RTOL); atol kept at
+    // 5e-4 because K=1024 here exceeds the small-matrix cases and the forward-
+    // error bound grows with K (measured oneMKL-vs-MKL near-zero diff ~9.2e-5).
     test_operation_parity_single([](const std::vector<Tensor>& inputs) {
         return matmul(inputs[0], inputs[1]);
-    }, {a, b}, device, 1e-3f, 5e-4f, "Stress LargeMatMul 1024x1024");
+    }, {a, b}, device, parity::MATMUL_RTOL, 5e-4f, "Stress LargeMatMul 1024x1024");
 }
 
 TEST_P(BackendStressParity, LargeBatch_Conv2d) {
@@ -250,7 +259,8 @@ TEST_P(BackendStressParity, ComplexChain_MathOps) {
         auto mm = matmul(inputs[0], inputs[1]);
         auto added = mm + inputs[2];
         return clamp(added, -6.0f, 6.0f);
-    }, {a, b, c}, device, 1e-4f, 1e-6f, "Stress Complex Math Chain");
+        // matmul dominates the chain's error budget → FP32 GEMM floor.
+    }, {a, b, c}, device, parity::MATMUL_RTOL, parity::MATMUL_ATOL, "Stress Complex Math Chain");
 }
 
 TEST_P(BackendStressParity, ComplexChain_Reductions) {

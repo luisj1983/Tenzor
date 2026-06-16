@@ -232,8 +232,14 @@ auto VulkanBackend::dispatchCDist(const Tensor& x1, const Tensor& x2, double p) 
 auto VulkanBackend::dispatchHistogram(const Tensor& input, int64_t bins,
                                       double min_val, double max_val)
     -> std::pair<Tensor, Tensor> {
-    Tensor in_f32 = (input.dtype() == DType::Float32) ? input.contiguous()
-                                                       : dispatchCast(input.contiguous(), DType::Float32);
+    // in_f32 is bound directly into STORAGE_BUFFER descriptors below. A tensor
+    // view with a non-zero storage offset (e.g. a slice) would trip the
+    // descriptor-offset alignment guard, because Tensor::contiguous() does NOT
+    // reset the offset — only dispatchContiguous guarantees offset()==0.
+    Tensor in_f32 = (input.dtype() == DType::Float32) ? input
+                                                       : dispatchCast(input, DType::Float32);
+    in_f32 = (in_f32.is_contiguous() && in_f32.offset() == 0) ? in_f32
+                                                              : dispatchContiguous(in_f32);
     int64_t n = in_f32.numel();
     int32_t device_id = input.device().index;
 
@@ -247,8 +253,21 @@ auto VulkanBackend::dispatchHistogram(const Tensor& input, int64_t bins,
         // the histogram dispatch and the edges shader from a 3-float device
         // buffer (no D2H readback).
         auto [min_t, max_t] = tenzor::aminmax(in_f32);
-        Tensor min_dev = min_t.reshape({1}).contiguous();
-        Tensor max_dev = max_t.reshape({1}).contiguous();
+        // aminmax returns min/max as slices of a single 2-element [min,max]
+        // buffer: min_t is output.slice(0,0,1) (storage offset 0) but max_t is
+        // output.slice(0,1,2) (storage offset = 1 float = 4 bytes). Neither
+        // reshape({1}) nor .contiguous() resets that storage offset (both are
+        // no-ops on an already-contiguous {1} view), so max_dev.data_ptr() would
+        // land at byte offset 4 and trip the storage-buffer descriptor-offset
+        // alignment guard (minStorageBufferOffsetAlignment 16) when bound into
+        // histogram_pack_range below. dispatchContiguous is the only path that
+        // guarantees offset()==0; route both operands through it.
+        Tensor min_r = min_t.reshape({1});
+        Tensor max_r = max_t.reshape({1});
+        Tensor min_dev = (min_r.is_contiguous() && min_r.offset() == 0) ? min_r
+                                                                        : dispatchContiguous(min_r);
+        Tensor max_dev = (max_r.is_contiguous() && max_r.offset() == 0) ? max_r
+                                                                        : dispatchContiguous(max_r);
         Tensor range_buf({3}, DType::Float32, input.device());
 
         // Pack: (min, max, bin_width) into range_buf
@@ -386,8 +405,13 @@ auto VulkanBackend::dispatchHistogramdd(const Tensor& input,
         throw std::runtime_error("dispatchHistogramdd: bins length must equal D");
     }
 
-    Tensor in_f32 = (input.dtype() == DType::Float32) ? input.contiguous()
-                                                       : dispatchCast(input.contiguous(), DType::Float32);
+    // in_f32 is bound directly into STORAGE_BUFFER descriptors below; route
+    // views through dispatchContiguous so offset()==0 (Tensor::contiguous()
+    // alone does not reset the storage offset).
+    Tensor in_f32 = (input.dtype() == DType::Float32) ? input
+                                                       : dispatchCast(input, DType::Float32);
+    in_f32 = (in_f32.is_contiguous() && in_f32.offset() == 0) ? in_f32
+                                                              : dispatchContiguous(in_f32);
     int32_t device_id = input.device().index;
 
     // Auto-detect ranges from data if not provided.

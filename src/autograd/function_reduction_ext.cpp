@@ -71,8 +71,12 @@ auto MinBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tens
         }
         auto epsilon = full(input_shape_vec, eps_val, input.dtype(), input.device());
         auto mask_bool = lt(abs_diff, epsilon);
-        auto ones_tensor = ones(input_shape_vec, input.dtype(), input.device());
-        auto zeros_tensor = zeros(input_shape_vec, input.dtype(), input.device());
+        // Build mask + tie_count in Float32: in Float16/BFloat16 the running
+        // sum saturates past 2048 ties (and 1/tie_count underflows), silently
+        // mis-normalising the gradient. Narrow the final grad back.
+        const bool is_half = (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16);
+        auto ones_tensor = ones(input_shape_vec, DType::Float32, input.device());
+        auto zeros_tensor = zeros(input_shape_vec, DType::Float32, input.device());
         auto mask = where(mask_bool, ones_tensor, zeros_tensor);
 
         // Normalize mask by tie count
@@ -86,8 +90,11 @@ auto MinBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tens
             grad_reshaped = reshape(grad_output, ones_shape);
         }
         auto grad_broadcasted = expand(grad_reshaped, input_shape_vec);
+        auto grad_f32 = is_half ? grad_broadcasted.to(DType::Float32) : grad_broadcasted;
+        auto grad_input = mul(grad_f32, mask);
+        if (is_half) grad_input = grad_input.to(input.dtype());
 
-        return {mul(grad_broadcasted, mask)};
+        return {grad_input};
     } else {
         // Dimension-specific min
         int64_t dim = saved_tensors_[2].data<int64_t>()[0];
@@ -165,12 +172,16 @@ auto MinBackward::backward_with_variables(std::vector<Variable> grad_outputs) ->
         }
         auto epsilon = full(input_shape_vec, eps_val, input.dtype(), input.device());
         auto mask_bool = lt(abs_diff, epsilon);
-        auto ones_tensor = ones(input_shape_vec, input.dtype(), input.device());
-        auto zeros_tensor = zeros(input_shape_vec, input.dtype(), input.device());
+        // Build mask + tie_count in Float32 so the sum doesn't saturate in
+        // half precision; narrow the normalized mask back to input dtype.
+        const bool is_half = (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16);
+        auto ones_tensor = ones(input_shape_vec, DType::Float32, input.device());
+        auto zeros_tensor = zeros(input_shape_vec, DType::Float32, input.device());
         auto mask = where(mask_bool, ones_tensor, zeros_tensor);
 
         auto tie_count = sum(mask);
         mask = div(mask, tie_count);
+        if (is_half) mask = mask.to(input.dtype());
 
         auto grad_v = grad_var;
         if (grad_var.tensor().ndim() == 0) {
@@ -226,9 +237,15 @@ auto StdBackward::forward(std::vector<Variable>) -> std::vector<Variable> {
 }
 
 auto StdBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> {
-    const auto& grad = grad_outputs[0];
-    const auto& input = saved_tensors_[0];
-    const auto& std_out = saved_tensors_[1];  // std(x)
+    // Widen Float16/BFloat16 to Float32 for the (input-mean)/(denom*std)
+    // arithmetic: half precision saturates / loses the subtractive cancellation
+    // in (input - mean). Compute in Float32 and narrow grad_input back.
+    const auto orig_dtype = saved_tensors_[0].dtype();
+    const bool is_half = (orig_dtype == DType::Float16 || orig_dtype == DType::BFloat16);
+
+    const Tensor grad = is_half ? grad_outputs[0].to(DType::Float32) : grad_outputs[0];
+    const Tensor input = is_half ? saved_tensors_[0].to(DType::Float32) : saved_tensors_[0];
+    const Tensor std_out = is_half ? saved_tensors_[1].to(DType::Float32) : saved_tensors_[1];  // std(x)
 
     auto input_shape_vec = std::vector<int64_t>(input.shape().begin(), input.shape().end());
 
@@ -286,6 +303,7 @@ auto StdBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tens
     auto n_std = mul(std_expanded, denom);
     auto grad_input = div(mul(grad_expanded, diff), n_std);
 
+    if (is_half) grad_input = grad_input.to(orig_dtype);
     return {grad_input};
 }
 
@@ -348,9 +366,15 @@ auto VarBackward::forward(std::vector<Variable>) -> std::vector<Variable> {
 }
 
 auto VarBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> {
-    const auto& grad = grad_outputs[0];
-    const auto& input = saved_tensors_[0];
-    const auto& var_out = saved_tensors_[1];
+    // Widen Float16/BFloat16 to Float32 for the 2*(input-mean)/denom
+    // arithmetic; half precision loses the subtractive cancellation in
+    // (input - mean). Compute in Float32 and narrow grad_input back.
+    const auto orig_dtype = saved_tensors_[0].dtype();
+    const bool is_half = (orig_dtype == DType::Float16 || orig_dtype == DType::BFloat16);
+
+    const Tensor grad = is_half ? grad_outputs[0].to(DType::Float32) : grad_outputs[0];
+    const Tensor input = is_half ? saved_tensors_[0].to(DType::Float32) : saved_tensors_[0];
+    const Tensor var_out = is_half ? saved_tensors_[1].to(DType::Float32) : saved_tensors_[1];
 
     auto input_shape_vec = std::vector<int64_t>(input.shape().begin(), input.shape().end());
 
@@ -397,6 +421,7 @@ auto VarBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tens
     auto scale = 2.0 / denom;
     auto grad_input = mul(mul(grad_expanded, diff), scale);
 
+    if (is_half) grad_input = grad_input.to(orig_dtype);
     return {grad_input};
 }
 

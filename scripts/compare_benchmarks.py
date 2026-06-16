@@ -5,8 +5,8 @@ Usage:
     python scripts/compare_benchmarks.py baseline.json current.json
 
 Compares each benchmark by name, computing speedup/regression percentage.
-Flags >10% regressions with WARNING and exits with code 1 if any >15%
-regression is found.
+Flags >5% regressions with WARNING and exits with code 1 if any >7%
+regression is found (override with --threshold).
 
 Output format: Markdown table suitable for CI comments.
 """
@@ -16,8 +16,8 @@ import sys
 from pathlib import Path
 
 
-WARNING_THRESHOLD = 10.0   # Percentage regression to flag as WARNING
-FAILURE_THRESHOLD = 15.0   # Percentage regression to fail the build
+WARNING_THRESHOLD = 5.0    # Percentage regression to flag as WARNING
+FAILURE_THRESHOLD = 7.0    # Percentage regression to fail the build
 
 
 def load_benchmarks(filepath: str) -> dict[str, dict]:
@@ -147,7 +147,7 @@ def format_markdown(results: list[dict], has_failure: bool) -> str:
 
     if has_failure:
         lines.append(
-            "**Performance regression detected (>15%).** "
+            f"**Performance regression detected (>{FAILURE_THRESHOLD:g}%).** "
             "Review the benchmarks below.\n"
         )
 

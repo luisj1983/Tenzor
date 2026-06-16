@@ -13,6 +13,7 @@
 #include <cuda_runtime.h>
 #include <stdexcept>
 #include <string>
+#include <unordered_map>
 
 #include "tenzor/backend/cuda_config.hpp"
 
@@ -68,9 +69,17 @@ private:
             }
         }
     };
+    // Per-thread, per-device handle cache. A single thread_local handle is
+    // wrong on multi-GPU: a cuBLAS handle is bound to the device that was
+    // current at cublasCreate() time, so reusing it after the thread switches
+    // devices runs the GEMM on the wrong GPU (or fails). Key by the current
+    // device, mirroring the device-keyed cublasLt/compute-capability caches in
+    // cublas_ops.cu.
     static HandleGuard& guard() {
-        static thread_local HandleGuard g;
-        return g;
+        static thread_local std::unordered_map<int, HandleGuard> guards;
+        int device = 0;
+        cudaGetDevice(&device);
+        return guards[device];
     }
     static cublasHandle_t& handle() { return guard().handle; }
     static cudaStream_t& last_stream() { return guard().last_stream; }

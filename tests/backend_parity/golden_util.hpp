@@ -39,6 +39,7 @@
 #include <system_error>
 #include <string>
 #include <vector>
+#include <unistd.h>  // getpid (per-process coverage report filename)
 
 namespace tenzor {
 namespace testing {
@@ -53,6 +54,52 @@ inline bool env_flag(const char* name) {
 
 inline bool recording_enabled() { return env_flag("TENZOR_RECORD_GOLDENS"); }
 inline bool require_multi_backend() { return env_flag("TENZOR_REQUIRE_MULTI_BACKEND"); }
+
+// -- Coverage accounting -----------------------------------------------------
+//
+// CPU-only CI shards (.github/workflows/ci.yml -> full-cpu-tests/backend_parity)
+// run the parity suite against committed goldens. Without a counter, a host
+// where every golden fingerprint mis-matches (e.g. goldens were never recorded
+// or the input generator changed) silently degrades to zero real comparisons
+// while still reporting "PASS" — exactly the rot this gate is meant to catch.
+//
+// `note_comparison()` is called once per *real* recorded-golden comparison
+// (CPU output actually checked against a loaded golden). When
+// TENZOR_GOLDEN_COVERAGE_REPORT names a file, the process-exit hook writes the
+// running tally there so a CI post-step can assert a coverage floor. The
+// counter is process-local and append-safe: each test binary writes its own
+// count, and the CI step sums the files.
+inline int& comparison_counter() {
+    static int count = 0;
+    return count;
+}
+
+// Flush the comparison count to $TENZOR_GOLDEN_COVERAGE_REPORT (if set).
+// Multiple parity test binaries run in one CI step and would clobber a shared
+// path, so each process writes to "<report>.<pid>" — the CI step globs and
+// SUMS them. Registered via atexit on first note_comparison() so it fires
+// exactly once after RUN_ALL_TESTS().
+inline void flush_coverage_report() {
+    const char* path = std::getenv("TENZOR_GOLDEN_COVERAGE_REPORT");
+    if (!path || !*path) return;
+    std::string per_pid = std::string(path) + "." +
+                          std::to_string(static_cast<long>(::getpid()));
+    std::ofstream os(per_pid, std::ios::trunc);
+    if (os) os << comparison_counter() << "\n";
+}
+
+inline void note_comparison() {
+    static bool registered = [] {
+        // Only arm the flush when a report path is requested; avoids touching
+        // the filesystem for ordinary local runs.
+        if (const char* p = std::getenv("TENZOR_GOLDEN_COVERAGE_REPORT"); p && *p) {
+            std::atexit(&flush_coverage_report);
+        }
+        return true;
+    }();
+    (void)registered;
+    ++comparison_counter();
+}
 
 /**
  * Directory containing recorded goldens.
@@ -145,8 +192,15 @@ inline bool write_golden(const std::string& path, const Tensor& t) {
     namespace fs = std::filesystem;
     std::error_code ec;
     fs::create_directories(fs::path(path).parent_path(), ec);
-    // Move to CPU, ensure contiguous, canonical dtype-sized bytes.
+    // Move to CPU, ensure contiguous, canonical dtype-sized bytes. The
+    // contiguify is REQUIRED: view-producing ops (transpose/permute/chunk)
+    // return non-contiguous tensors whose data_ptr() walks the underlying
+    // storage in physical order, not logical order. Serializing those raw
+    // bytes with the logical shape header would store transposed/permuted data
+    // in the wrong order, so the golden would mismatch the (correctly
+    // contiguified) live result on load.
     Tensor cpu = t.device().type == Device::Type::CPU ? t : t.to(Device::cpu());
+    if (!cpu.is_contiguous()) cpu = cpu.contiguous();
     std::ofstream os(path, std::ios::binary | std::ios::trunc);
     if (!os) return false;
     uint32_t magic = kMagic;
@@ -207,6 +261,18 @@ inline std::string maybe_record(std::string_view test_name,
                                 const std::vector<Tensor>& inputs,
                                 const Tensor& result) {
     if (!recording_enabled()) return "";
+    // Do NOT record goldens for very large tensors. Goldens exist to give
+    // CPU-only CI hosts a committed correctness reference for the small,
+    // representative parity cases — not to store multi-MB/GB stress-test blobs
+    // in git (GitHub warns >50MB and hard-rejects >100MB; a 2048x2048 f32
+    // tensor is already 16MB, a 1GB stress tensor is 1GB). Large/stress tests
+    // still compare LIVE across backends on a multi-backend host; they simply
+    // skip the CPU-vs-golden fallback.
+    constexpr std::size_t kMaxGoldenBytes = 8u * 1024u * 1024u;  // 8 MiB
+    if (static_cast<std::size_t>(result.numel()) * ::tenzor::dtype_size(result.dtype())
+            > kMaxGoldenBytes) {
+        return "";
+    }
     uint64_t fp = fingerprint_inputs(test_name, inputs);
     std::string path = golden_path(test_name, fp);
     if (!write_golden(path, result)) return "";

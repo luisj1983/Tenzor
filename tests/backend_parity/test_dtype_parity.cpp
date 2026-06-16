@@ -45,7 +45,7 @@ TEST_P(DTypeParity, Float32_MatMul) {
 
     test_operation_parity_single([](const std::vector<Tensor>& inputs) {
         return matmul(inputs[0], inputs[1]);
-    }, {a, b}, device, 1e-4f, 1e-6f, "Float32 MatMul");
+    }, {a, b}, device, parity::MATMUL_RTOL, parity::MATMUL_ATOL, "Float32 MatMul");
 }
 
 // ============================================================================

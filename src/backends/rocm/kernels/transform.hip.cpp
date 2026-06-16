@@ -502,6 +502,14 @@ auto flip_kernel(const Tensor& input_orig, int64_t dim, hipStream_t stream) -> T
     // wrong elements. Materialize a contiguous copy first.
     Tensor input = input_orig.is_contiguous() ? input_orig : input_orig.contiguous();
     auto input_shape = input.shape();
+
+    // Normalize negative dim (PyTorch semantics) before indexing shape[dim].
+    int64_t ndim = static_cast<int64_t>(input_shape.size());
+    if (dim < 0) dim += ndim;
+    if (dim < 0 || dim >= ndim) {
+        throw std::out_of_range("flip: dim out of range");
+    }
+
     Tensor result(std::vector<int64_t>(input_shape.begin(), input_shape.end()),
                   input.dtype(), input.device());
 
@@ -520,6 +528,8 @@ auto flip_kernel(const Tensor& input_orig, int64_t dim, hipStream_t stream) -> T
 
     int64_t total_elements = input.numel();
     int num_blocks = get_num_blocks(total_elements);
+    // Empty output: a zero-grid launch is rejected by HIP; return as-is.
+    if (num_blocks == 0) return result;
 
     if (input.dtype() == DType::Float32) {
         hipLaunchKernelGGL(flip_kernel_impl<float>,
@@ -1237,6 +1247,13 @@ auto roll_kernel(const Tensor& input, int64_t shift, int64_t dim, hipStream_t st
 
     int64_t total = input.numel();
     if (total == 0) return output;
+
+    // Normalize negative dim (PyTorch semantics) before indexing shape[dim].
+    int64_t ndim = static_cast<int64_t>(shape.size());
+    if (dim < 0) dim += ndim;
+    if (dim < 0 || dim >= ndim) {
+        throw std::out_of_range("roll: dim out of range");
+    }
 
     int64_t dim_size = shape[dim];
     int64_t inner_size = 1;
@@ -3296,6 +3313,11 @@ auto repeat_interleave_scalar_kernel(const Tensor& input, int64_t repeats, int64
     auto cont = input.is_contiguous() ? input : input.contiguous();
 
     int64_t ndim = shape.size();
+    // Normalize negative dim (PyTorch semantics) before indexing shape[dim].
+    if (dim < 0) dim += ndim;
+    if (dim < 0 || dim >= ndim) {
+        throw std::out_of_range("repeat_interleave: dim out of range");
+    }
     int64_t in_dim_size = shape[dim];
     int64_t out_dim_size = in_dim_size * repeats;
 
@@ -3368,6 +3390,11 @@ auto repeat_interleave_tensor_kernel(const Tensor& input, const Tensor& repeats_
     auto cont = input.is_contiguous() ? input : input.contiguous();
 
     int64_t ndim = shape.size();
+    // Normalize negative dim (PyTorch semantics) before indexing shape[dim].
+    if (dim < 0) dim += ndim;
+    if (dim < 0 || dim >= ndim) {
+        throw std::out_of_range("repeat_interleave: dim out of range");
+    }
     int64_t in_dim_size = shape[dim];
 
     // Convert repeats to int64 on device (no CPU roundtrip)

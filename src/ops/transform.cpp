@@ -392,7 +392,11 @@ auto repeat(const Tensor& input, std::vector<int64_t> repeats) -> Tensor {
         }
         int64_t in_idx = 0;
         for (int64_t i = 0; i < ndim; ++i) {
-            int64_t in_coord = out_coords[i] / repeats[i];
+            // TILE semantics (torch.Tensor.repeat / numpy.tile): the whole input
+            // block is tiled `repeats[i]` times along axis i, so the source
+            // coordinate wraps with modulo. (`/ repeats[i]` would be interleave,
+            // which is repeat_interleave's semantics, not repeat's.)
+            int64_t in_coord = out_coords[i] % shape[i];
             in_idx += in_coord * in_strides[i];
         }
         std::memcpy(out_base + static_cast<size_t>(out_idx) * esz,
@@ -1016,6 +1020,9 @@ auto unflatten(const Tensor& input, int64_t dim, std::vector<int64_t> sizes) -> 
     const auto& shape = input.shape();
     int64_t ndim = static_cast<int64_t>(shape.size());
     if (dim < 0) dim += ndim;
+    if (dim < 0 || dim >= ndim) {
+        throw std::out_of_range("unflatten: dim out of range");
+    }
 
     std::vector<int64_t> new_shape;
     for (int64_t i = 0; i < ndim; i++) {
@@ -1073,6 +1080,9 @@ auto tensor_split(const Tensor& input, int64_t sections, int64_t dim) -> std::ve
     const auto& shape = input.shape();
     int64_t ndim = static_cast<int64_t>(shape.size());
     if (dim < 0) dim += ndim;
+    if (dim < 0 || dim >= ndim) {
+        throw std::out_of_range("tensor_split: dim out of range");
+    }
     int64_t dim_size = shape[dim];
     int64_t chunk_size = (dim_size + sections - 1) / sections;
 
@@ -1090,6 +1100,9 @@ auto tensor_split(const Tensor& input, std::vector<int64_t> indices, int64_t dim
     const auto& shape = input.shape();
     int64_t ndim = static_cast<int64_t>(shape.size());
     if (dim < 0) dim += ndim;
+    if (dim < 0 || dim >= ndim) {
+        throw std::out_of_range("tensor_split: dim out of range");
+    }
     int64_t dim_size = shape[dim];
 
     std::vector<Tensor> result;
@@ -1129,6 +1142,9 @@ auto unbind(const Tensor& input, int64_t dim) -> std::vector<Tensor> {
     const auto& shape = input.shape();
     int64_t ndim = static_cast<int64_t>(shape.size());
     if (dim < 0) dim += ndim;
+    if (dim < 0 || dim >= ndim) {
+        throw std::out_of_range("unbind: dim out of range");
+    }
     int64_t n = shape[dim];
 
     std::vector<Tensor> result;
@@ -1327,10 +1343,18 @@ auto as_strided(const Tensor& self, std::span<const int64_t> size,
     return result;
 }
 
-auto view_as_real(const Tensor& t) -> Tensor {
-    if (t.dtype() != DType::Complex64 && t.dtype() != DType::Complex128) {
+auto view_as_real(const Tensor& t_in) -> Tensor {
+    if (t_in.dtype() != DType::Complex64 && t_in.dtype() != DType::Complex128) {
         throw std::runtime_error("view_as_real: input must be complex");
     }
+
+    // The real view stacks each (real,imag) pair contiguously: new strides are
+    // old_stride*2 with a trailing unit stride. That layout is only valid when
+    // the complex elements are packed (unit inner stride). A non-contiguous
+    // complex tensor (e.g. a transposed view) would otherwise alias the wrong
+    // storage slots. Contiguify defensively — the inverse view_as_complex makes
+    // the analogous unit-inner-stride demand.
+    Tensor t = t_in.is_contiguous() ? t_in : t_in.contiguous();
 
     DType real_dtype = (t.dtype() == DType::Complex64) ? DType::Float32 : DType::Float64;
 

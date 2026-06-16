@@ -329,6 +329,80 @@ invoked in CI; use them locally to preview coverage deltas.
 For behavior changes on an existing op, still run both audit scripts and
 re-record any affected goldens.
 
+## Required status checks & branch protection
+
+The cross-backend **parity** and **perf** gates only protect `main` if branch
+protection lists them as *required status checks*. Branch protection lives in
+GitHub repo settings, **not** in the repo, so it has to be configured once via
+the UI or the API — adding a job to `ci.yml` alone does not make it gating.
+
+### Required check names
+
+Use the job **`name:`** values from `.github/workflows/ci.yml` (GitHub keys
+required checks by the displayed check name):
+
+| Job key (yaml)   | Required check name                | Gates on            |
+|------------------|------------------------------------|---------------------|
+| `build-and-smoke`| `Build & Smoke Tests`              | every PR            |
+| `full-cpu-tests` | `CPU Tests (backend_parity)`       | every PR (golden floor) |
+| `gpu-smoke`      | `GPU Smoke (self-hosted)`          | every PR            |
+| `gpu-parity`     | `GPU Backend Parity (self-hosted)` | every PR (fast tier)|
+| `python-tests`   | `Python Tests`                     | every PR            |
+| `macos-mps`      | `macOS MPS Backend`                | every PR            |
+
+> The two GPU jobs require a **registered self-hosted runner** with labels
+> `self-hosted, linux, gpu` that has CUDA + ROCm + Vulkan + OneAPI installed
+> (repo **Settings → Actions → Runners**). Until that runner exists the GPU
+> checks stay pending; do not mark them required before the runner is online,
+> or every PR will block forever.
+
+### Configure with `gh api`
+
+```bash
+# Requires: gh auth login  (admin on the repo)
+OWNER=your-org REPO=tenzor BRANCH=main
+
+gh api -X PUT \
+  "repos/$OWNER/$REPO/branches/$BRANCH/protection" \
+  -H "Accept: application/vnd.github+json" \
+  --input - <<'JSON'
+{
+  "required_status_checks": {
+    "strict": true,
+    "checks": [
+      { "context": "Build & Smoke Tests" },
+      { "context": "CPU Tests (backend_parity)" },
+      { "context": "GPU Smoke (self-hosted)" },
+      { "context": "GPU Backend Parity (self-hosted)" },
+      { "context": "Python Tests" },
+      { "context": "macOS MPS Backend" }
+    ]
+  },
+  "enforce_admins": true,
+  "required_pull_request_reviews": { "required_approving_review_count": 1 },
+  "restrictions": null,
+  "required_linear_history": true,
+  "allow_force_pushes": false,
+  "allow_deletions": false
+}
+JSON
+```
+
+> `strict: true` means a PR must be up to date with `main` before merge, so a
+> green parity run can't be invalidated by an interim merge. Drop the GPU rows
+> from the `checks` list if you need to land changes before the self-hosted
+> runner is registered, then add them back.
+
+### Perf and benchmark gates
+
+* **Cross-backend perf regression** (`tests/backend_parity/`): enforced inside
+  `gpu-parity` on the full/main tier via `TENZOR_PERF_ENFORCE=1` against the
+  per-host entry in `tests/backend_parity/baselines/perf_baseline.json`.
+  Regenerate per host with `scripts/test_all_backends.sh --perf-baseline`.
+* **Nightly benchmarks** (`benchmarks`): `scripts/compare_benchmarks.py` fails
+  on a >7% regression against the committed `benchmarks/baselines/<host>.json`.
+  Refresh the floor via a reviewed PR (see `benchmarks/baselines/README.md`).
+
 ## License
 
 By contributing, you agree that your contributions will be licensed under the MIT License.

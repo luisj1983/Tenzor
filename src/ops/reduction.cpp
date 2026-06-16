@@ -23,12 +23,26 @@ static bool is_integer_dtype(DType dt) {
            dt == DType::Int32 || dt == DType::Int64 || dt == DType::Bool;
 }
 
+// audit-5 Y.7: normalise a (possibly negative) reduction dim against ndim so
+// that ROCm / OneAPI / CUDA backends (which use the attribute raw) don't
+// underflow on `shape[dim]`. Mirrors the inline prologue used by cummax/cummin/
+// kthvalue. The op name is threaded through for a precise out-of-range message.
+static int64_t normalize_reduce_dim(int64_t dim, int64_t ndim, const char* op) {
+    if (dim < 0) dim += ndim;
+    if (dim < 0 || dim >= ndim) {
+        throw std::out_of_range(std::string(op) + ": dim out of range");
+    }
+    return dim;
+}
+
 auto sum(const Tensor& input, std::optional<int64_t> dim, bool keepdim) -> Tensor {
     TENZOR_PROFILE_RANGE("sum");
     // Promote small integer types to Int64 to prevent overflow
     Tensor promoted = is_small_int_dtype(input.dtype()) ? input.to(DType::Int64) : input;
     NewOpAttributes attrs;
-    if (dim.has_value()) attrs.set(AttrKey::Dim, *dim);
+    if (dim.has_value()) {
+        attrs.set(AttrKey::Dim, normalize_reduce_dim(*dim, static_cast<int64_t>(input.shape().size()), "sum"));
+    }
     attrs.set(AttrKey::Keepdim, keepdim);
     std::vector<Tensor> inputs = {promoted};
     return dispatch(OpId::Sum, inputs, attrs)[0];
@@ -38,7 +52,9 @@ auto mean(const Tensor& input, std::optional<int64_t> dim, bool keepdim) -> Tens
     // Integer/bool mean must produce floating-point results
     Tensor promoted = is_integer_dtype(input.dtype()) ? input.to(DType::Float32) : input;
     NewOpAttributes attrs;
-    if (dim.has_value()) attrs.set(AttrKey::Dim, *dim);
+    if (dim.has_value()) {
+        attrs.set(AttrKey::Dim, normalize_reduce_dim(*dim, static_cast<int64_t>(input.shape().size()), "mean"));
+    }
     attrs.set(AttrKey::Keepdim, keepdim);
     std::vector<Tensor> inputs = {promoted};
     return dispatch(OpId::Mean, inputs, attrs)[0];
@@ -98,7 +114,9 @@ auto std(const Tensor& input, std::optional<int64_t> dim, bool keepdim, bool unb
     // Integer/bool std must produce floating-point results
     Tensor promoted = is_integer_dtype(input.dtype()) ? input.to(DType::Float32) : input;
     NewOpAttributes attrs;
-    if (dim.has_value()) attrs.set(AttrKey::Dim, *dim);
+    if (dim.has_value()) {
+        attrs.set(AttrKey::Dim, normalize_reduce_dim(*dim, static_cast<int64_t>(input.shape().size()), "std"));
+    }
     attrs.set(AttrKey::Keepdim, keepdim);
     // Set BOTH AttrKey::Unbiased (bool) and AttrKey::Correction (int):
     // the CPU kernel reads Correction with default 1 (→ N-1), while the
@@ -116,7 +134,9 @@ auto var(const Tensor& input, std::optional<int64_t> dim, bool keepdim, bool unb
     // Integer/bool var must produce floating-point results
     Tensor promoted = is_integer_dtype(input.dtype()) ? input.to(DType::Float32) : input;
     NewOpAttributes attrs;
-    if (dim.has_value()) attrs.set(AttrKey::Dim, *dim);
+    if (dim.has_value()) {
+        attrs.set(AttrKey::Dim, normalize_reduce_dim(*dim, static_cast<int64_t>(input.shape().size()), "var"));
+    }
     attrs.set(AttrKey::Keepdim, keepdim);
     attrs.set(AttrKey::Unbiased, unbiased);
     attrs.set(AttrKey::Correction, static_cast<int64_t>(unbiased ? 1 : 0));
@@ -136,7 +156,9 @@ auto norm(const Tensor& input, float p, std::optional<int64_t> dim, bool keepdim
     }
     NewOpAttributes attrs;
     attrs.set(AttrKey::P, static_cast<double>(p));
-    if (dim.has_value()) attrs.set(AttrKey::Dim, *dim);
+    if (dim.has_value()) {
+        attrs.set(AttrKey::Dim, normalize_reduce_dim(*dim, static_cast<int64_t>(input.shape().size()), "norm"));
+    }
     attrs.set(AttrKey::Keepdim, keepdim);
     std::vector<Tensor> inputs = {promoted};
     return dispatch(OpId::Norm, inputs, attrs)[0];
@@ -285,14 +307,18 @@ auto histogramdd(const Tensor& input, std::vector<int64_t> bins,
 auto count_nonzero(const Tensor& input, std::optional<int64_t> dim) -> Tensor {
     std::array<Tensor, 1> inputs = {input.contiguous()};
     NewOpAttributes attrs;
-    if (dim.has_value()) attrs.set(AttrKey::Dim, dim.value());
+    if (dim.has_value()) {
+        attrs.set(AttrKey::Dim, normalize_reduce_dim(dim.value(), static_cast<int64_t>(input.shape().size()), "count_nonzero"));
+    }
     return dispatch<OpId::CountNonzero>(inputs, attrs)[0];
 }
 
 auto nansum(const Tensor& input, std::optional<int64_t> dim, bool keepdim) -> Tensor {
     std::array<Tensor, 1> inputs = {input.contiguous()};
     NewOpAttributes attrs;
-    if (dim.has_value()) attrs.set(AttrKey::Dim, dim.value());
+    if (dim.has_value()) {
+        attrs.set(AttrKey::Dim, normalize_reduce_dim(dim.value(), static_cast<int64_t>(input.shape().size()), "nansum"));
+    }
     attrs.set(AttrKey::Keepdim, keepdim);
     return dispatch<OpId::Nansum>(inputs, attrs)[0];
 }
@@ -300,7 +326,9 @@ auto nansum(const Tensor& input, std::optional<int64_t> dim, bool keepdim) -> Te
 auto nanmean(const Tensor& input, std::optional<int64_t> dim, bool keepdim) -> Tensor {
     std::array<Tensor, 1> inputs = {input.contiguous()};
     NewOpAttributes attrs;
-    if (dim.has_value()) attrs.set(AttrKey::Dim, dim.value());
+    if (dim.has_value()) {
+        attrs.set(AttrKey::Dim, normalize_reduce_dim(dim.value(), static_cast<int64_t>(input.shape().size()), "nanmean"));
+    }
     attrs.set(AttrKey::Keepdim, keepdim);
     return dispatch<OpId::Nanmean>(inputs, attrs)[0];
 }
@@ -315,9 +343,13 @@ auto nanvar(const Tensor& input, std::optional<int64_t> dim, bool keepdim, int64
     // Replace NaN-originated values with 0
     Tensor clean = where(nan_mask, zeros_like(diff_sq), diff_sq);
     Tensor sum_sq = nansum(clean, dim, keepdim);
-    // Count valid (non-NaN) elements
+    // Count valid (non-NaN) elements. Accumulate the count in a wide float
+    // dtype (Float64 for Float64 input, Float32 otherwise) so half-precision
+    // inputs don't saturate the count — mirrors mean's integer->Float32
+    // promotion convention.
+    DType count_dtype = (input.dtype() == DType::Float64) ? DType::Float64 : DType::Float32;
     Tensor valid_mask = logical_not(nan_mask);
-    Tensor count = sum(valid_mask.to(input.dtype()), dim, keepdim);
+    Tensor count = sum(valid_mask.to(count_dtype), dim, keepdim);
     Tensor denom = count - static_cast<float>(correction);
     return sum_sq / denom;
 }

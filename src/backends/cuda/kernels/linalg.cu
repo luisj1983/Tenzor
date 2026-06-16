@@ -20,6 +20,7 @@
 #include "tenzor/backend/caching_allocator.hpp"
 #include "../cusolver_handle_pool.hpp"
 #include "../cublas_handle_pool.hpp"
+#include "cuda_launch_utils.cuh"  // tenzor::cuda::CudaDeviceGuard
 
 #include "tenzor/ops/creation.hpp"
 #include "tenzor/ops/linalg.hpp"
@@ -1227,6 +1228,10 @@ inline std::pair<double, double> eig_symmetry_metrics(const T* d_A,
 // ============================================================================
 
 auto linalg_det_kernel(const Tensor& A, cudaStream_t stream) -> Tensor {
+    // Make the tensor's device current so the device-keyed cuSOLVER/cuBLAS
+    // handles and any helper kernel launches target the correct GPU. Restored
+    // on scope exit. (The dispatch path does not set the device.)
+    CudaDeviceGuard dev_guard(A.device().index);
     // cuSOLVER LU only supports Float32 / Float64. Widen Float16 / BFloat16
     // to Float32 for the computation, then narrow the result back.
     if (A.dtype() == DType::Float16) {
@@ -1309,6 +1314,7 @@ auto linalg_det_kernel(const Tensor& A, cudaStream_t stream) -> Tensor {
 // ============================================================================
 
 auto linalg_inv_kernel(const Tensor& A, cudaStream_t stream) -> Tensor {
+    CudaDeviceGuard dev_guard(A.device().index);
     // cuSOLVER getrf/getrs only support Float32/Float64/Complex. Widen
     // Float16/BFloat16 to Float32, invert, then narrow back — mirroring the
     // det kernel (1232) and the non-cuSOLVER fallback (4638). Without this the
@@ -1454,6 +1460,7 @@ auto linalg_inv_kernel(const Tensor& A, cudaStream_t stream) -> Tensor {
 // ============================================================================
 
 auto linalg_solve_kernel(const Tensor& A, const Tensor& B, cudaStream_t stream) -> Tensor {
+    CudaDeviceGuard dev_guard(A.device().index);
     // cuSOLVER getrf/getrs only support Float32/Float64/Complex64/Complex128.
     // Widen Float16/BFloat16 to Float32, solve, then narrow back to the
     // original dtype. Mirrors linalg_cholesky/lu/lu_solve/solve_triangular and
@@ -1570,6 +1577,7 @@ auto linalg_solve_kernel(const Tensor& A, const Tensor& B, cudaStream_t stream) 
 
 auto linalg_svd_kernel(const Tensor& A, bool full_matrices, cudaStream_t stream)
     -> std::tuple<Tensor, Tensor, Tensor> {
+    CudaDeviceGuard dev_guard(A.device().index);
     // Widen Float16/BFloat16 to Float32 up-front (cuSOLVER has no half path and
     // Tensor::data<double>() below would throw on a half input). Mirrors the
     // !TENZOR_HAS_CUSOLVER fallback and the cuSOLVER det/cholesky kernels.
@@ -1737,6 +1745,7 @@ auto linalg_svd_kernel(const Tensor& A, bool full_matrices, cudaStream_t stream)
 
 auto linalg_qr_kernel(const Tensor& A, cudaStream_t stream)
     -> std::tuple<Tensor, Tensor> {
+    CudaDeviceGuard dev_guard(A.device().index);
     // Widen Float16/BFloat16 to Float32 (cuSOLVER has no half path; the
     // double-typed data accessors below would throw on a half input). Mirrors
     // the !TENZOR_HAS_CUSOLVER fallback and the cuSOLVER det/cholesky kernels.
@@ -1871,6 +1880,7 @@ auto linalg_qr_kernel(const Tensor& A, cudaStream_t stream)
 
 auto linalg_eigh_kernel(const Tensor& A, cudaStream_t stream)
     -> std::tuple<Tensor, Tensor> {
+    CudaDeviceGuard dev_guard(A.device().index);
     // Widen Float16/BFloat16 to Float32 (cuSOLVER has no half path; the
     // double-typed data accessors below would throw on a half input). Mirrors
     // the !TENZOR_HAS_CUSOLVER fallback and the cuSOLVER det/cholesky kernels.
@@ -1955,6 +1965,7 @@ auto linalg_eigh_kernel(const Tensor& A, cudaStream_t stream)
 
 auto linalg_eig_kernel(const Tensor& A, cudaStream_t stream)
     -> std::tuple<Tensor, Tensor, Tensor> {
+    CudaDeviceGuard dev_guard(A.device().index);
     // Non-symmetric eigendecomposition.
     //
     // Exactly-symmetric inputs are routed to `eigh` (real eigenvalues,
@@ -2064,6 +2075,7 @@ auto linalg_eig_kernel(const Tensor& A, cudaStream_t stream)
 // ============================================================================
 
 auto linalg_cholesky_kernel(const Tensor& A, bool upper, cudaStream_t stream) -> Tensor {
+    CudaDeviceGuard dev_guard(A.device().index);
     // cuSOLVER potrf only supports Float32/Float64. Widen Float16/BFloat16 to
     // Float32, factor, then narrow back to the original dtype (without this the
     // Float16 buffer was read as double -> type-mismatch throw).
@@ -2136,6 +2148,7 @@ auto linalg_cholesky_kernel(const Tensor& A, bool upper, cudaStream_t stream) ->
 
 auto linalg_lu_kernel(const Tensor& A, cudaStream_t stream)
     -> std::tuple<Tensor, Tensor, Tensor> {
+    CudaDeviceGuard dev_guard(A.device().index);
     // Validate dtype: support Float32/Float64 directly, upcast Float16/BFloat16.
     auto original_dtype = A.dtype();
     if (original_dtype == DType::Float16 || original_dtype == DType::BFloat16) {
@@ -2227,6 +2240,7 @@ auto linalg_lu_kernel(const Tensor& A, cudaStream_t stream)
 
 auto linalg_lu_solve_kernel(const Tensor& LU_data, const Tensor& pivots,
                              const Tensor& B, cudaStream_t stream) -> Tensor {
+    CudaDeviceGuard dev_guard(LU_data.device().index);
     auto original_dtype = B.dtype();
     if (original_dtype == DType::Float16 || original_dtype == DType::BFloat16) {
         return linalg_lu_solve_kernel(
@@ -2304,6 +2318,7 @@ auto linalg_lu_solve_kernel(const Tensor& LU_data, const Tensor& pivots,
 auto linalg_solve_triangular_kernel(const Tensor& A, const Tensor& B,
                                      bool upper, bool unitriangular,
                                      cudaStream_t stream) -> Tensor {
+    CudaDeviceGuard dev_guard(A.device().index);
     auto original_dtype = A.dtype();
     if (original_dtype == DType::Float16 || original_dtype == DType::BFloat16) {
         return linalg_solve_triangular_kernel(
@@ -2366,6 +2381,7 @@ auto linalg_solve_triangular_kernel(const Tensor& A, const Tensor& B,
 
 auto linalg_geqrf_kernel(const Tensor& A, cudaStream_t stream)
     -> std::tuple<Tensor, Tensor> {
+    CudaDeviceGuard dev_guard(A.device().index);
     auto shape = A.shape();
     auto a_ndim = static_cast<int64_t>(shape.size());
     if (a_ndim < 2) throw std::invalid_argument("linalg::geqrf: input must be at least 2D");
@@ -2444,6 +2460,7 @@ auto linalg_ormqr_kernel(const Tensor& reflectors, const Tensor& tau,
                           const Tensor& C, bool left, bool transpose_q,
                           cudaStream_t stream) -> Tensor {
     (void)stream;
+    CudaDeviceGuard dev_guard(C.device().index);
     // Apply Q (from the QR Householder reflectors) to C. The previous cuSOLVER
     // ormqr path assumed a column-major packed layout; geqrf now returns
     // row-major packed (LAPACK convention, consistent with householder_product),
@@ -2460,6 +2477,7 @@ auto linalg_ormqr_kernel(const Tensor& reflectors, const Tensor& tau,
 // =========================================================================
 auto linalg_ldl_factor_kernel(const Tensor& A, cudaStream_t stream)
     -> std::tuple<Tensor, Tensor> {
+    CudaDeviceGuard dev_guard(A.device().index);
     auto original_dtype = A.dtype();
     if (original_dtype == DType::Float16 || original_dtype == DType::BFloat16) {
         auto [LD32, piv] = linalg_ldl_factor_kernel(A.to(DType::Float32), stream);
@@ -2702,6 +2720,7 @@ __global__ void ldl_solve_bk_kernel(
 
 auto linalg_ldl_solve_kernel(const Tensor& LD, const Tensor& pivots,
                               const Tensor& B, cudaStream_t stream) -> Tensor {
+    CudaDeviceGuard dev_guard(LD.device().index);
     auto original_dtype = LD.dtype();
     if (original_dtype == DType::Float16 || original_dtype == DType::BFloat16) {
         auto result = linalg_ldl_solve_kernel(LD.to(DType::Float32), pivots,
@@ -2749,6 +2768,7 @@ auto linalg_ldl_solve_kernel(const Tensor& LD, const Tensor& pivots,
 // =========================================================================
 auto linalg_householder_kernel(const Tensor& input, const Tensor& tau,
                                 cudaStream_t stream) -> Tensor {
+    CudaDeviceGuard dev_guard(input.device().index);
     // Apply Householder reflectors to I[:, :n]: Q = H(0)*H(1)*...*H(k-1) @ I[:m,:n]
     //
     // LAPACK's sorgqr (used by the CPU path) produces an m×n matrix — the
@@ -5558,6 +5578,7 @@ auto linalg_geqrf_kernel(const Tensor& A, cudaStream_t stream)
 auto linalg_ormqr_kernel(const Tensor& reflectors, const Tensor& tau,
                           const Tensor& C, bool left, bool transpose_q,
                           cudaStream_t stream) -> Tensor {
+    CudaDeviceGuard dev_guard(C.device().index);
     validate_linalg_dtype(C, "ormqr");
     if (C.dtype() == DType::Float16) {
         return linalg_ormqr_kernel(reflectors.to(DType::Float32), tau.to(DType::Float32),
@@ -5912,6 +5933,7 @@ __global__ void ldl_bk_solve_kernel(
 // =========================================================================
 auto linalg_ldl_factor_kernel(const Tensor& A, cudaStream_t stream)
     -> std::tuple<Tensor, Tensor> {
+    CudaDeviceGuard dev_guard(A.device().index);
     auto original_dtype = A.dtype();
     if (original_dtype == DType::Float16 || original_dtype == DType::BFloat16) {
         auto [LD32, piv] = linalg_ldl_factor_kernel(A.to(DType::Float32), stream);
@@ -5958,6 +5980,7 @@ auto linalg_ldl_factor_kernel(const Tensor& A, cudaStream_t stream)
 // =========================================================================
 auto linalg_ldl_solve_kernel(const Tensor& LD, const Tensor& pivots,
                               const Tensor& B, cudaStream_t stream) -> Tensor {
+    CudaDeviceGuard dev_guard(LD.device().index);
     auto original_dtype = LD.dtype();
     if (original_dtype == DType::Float16 || original_dtype == DType::BFloat16) {
         auto result = linalg_ldl_solve_kernel(LD.to(DType::Float32), pivots,
@@ -6007,6 +6030,7 @@ auto linalg_ldl_solve_kernel(const Tensor& LD, const Tensor& pivots,
 // =========================================================================
 auto linalg_householder_kernel(const Tensor& input, const Tensor& tau,
                                 cudaStream_t stream) -> Tensor {
+    CudaDeviceGuard dev_guard(input.device().index);
     auto shape = input.shape();
     auto ndim = static_cast<int64_t>(shape.size());
     int64_t m = shape[ndim - 2];

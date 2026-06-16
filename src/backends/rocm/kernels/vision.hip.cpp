@@ -745,6 +745,13 @@ __global__ void interpolate_bicubic_backward_kernel_hip(
         float scale_w = (align_corners && out_w > 1) ? static_cast<float>(in_w - 1) / (out_w - 1) : static_cast<float>(in_w) / out_w;
         float src_h = align_corners ? oh * scale_h : (oh + 0.5f) * scale_h - 0.5f;
         float src_w = align_corners ? ow * scale_w : (ow + 0.5f) * scale_w - 0.5f;
+        // Mirror the forward kernel EXACTLY: clamp the continuous source coord to
+        // [0,in-1] BEFORE taking the integer base, so the 4x4 neighborhood and
+        // fractional offsets match the forward (and CPU reference) at the borders.
+        // Without this clamp, non-align_corners border pixels (src<0) floor to -1
+        // and scatter to a different neighborhood -> parity divergence at edges.
+        src_h = fmaxf(0.0f, fminf(src_h, static_cast<float>(in_h - 1)));
+        src_w = fmaxf(0.0f, fminf(src_w, static_cast<float>(in_w - 1)));
         int64_t hi = static_cast<int64_t>(floorf(src_h));
         int64_t wi = static_cast<int64_t>(floorf(src_w));
         float g = static_cast<float>(grad_out[idx]);

@@ -126,6 +126,13 @@ option(TENZOR_BUILD_EXAMPLES "Build examples" ON)
 option(TENZOR_BUILD_MODEL_HUB "Build model hub (requires CURL and OpenSSL)" ON)
 option(TENZOR_BUILD_SERVING "Build inference serving (requires gRPC for full support)" OFF)
 option(TENZOR_BUILD_LITE "Build lightweight mobile/embedded inference runtime" OFF)
+# PyTorch interop (python/torch_interop.cpp) is OFF by default: it #includes
+# <torch/torch.h> and would otherwise make libtorch a hard dependency of the
+# core Python module. When ON, we locate Torch and compile the interop TU into
+# the module, defining TENZOR_HAS_TORCH so the `torch_interop` submodule is
+# registered. When OFF, importing `tenzor.torch_interop` raises a clear
+# ImportError pointing at this flag (see python/tenzor/__init__.py).
+option(TENZOR_BUILD_TORCH_INTEROP "Build optional PyTorch interop (requires libtorch)" OFF)
 option(TENZOR_REQUIRE_MKL "Require Intel MKL (FATAL_ERROR if not found)" OFF)
 option(TENZOR_ENABLE_PROFILING "Enable NVTX/ROCTX profiling annotations" OFF)
 
@@ -489,6 +496,20 @@ if(TENZOR_BUILD_PYTHON)
         )
 
         target_link_libraries(tenzor_python PRIVATE tenzor_core tenzor_backend_cpu)
+
+        # Optional PyTorch interop. Compiled into the module only when
+        # TENZOR_BUILD_TORCH_INTEROP=ON and libtorch is discoverable. Keeps
+        # libtorch out of the default CPU wheel; bindings.cpp gates the
+        # `torch_interop` submodule on TENZOR_HAS_TORCH.
+        if(TENZOR_BUILD_TORCH_INTEROP)
+            find_package(Torch REQUIRED)
+            target_sources(tenzor_python PRIVATE python/torch_interop.cpp)
+            target_link_libraries(tenzor_python PRIVATE "${TORCH_LIBRARIES}")
+            target_include_directories(tenzor_python PRIVATE ${TORCH_INCLUDE_DIRS})
+            target_compile_definitions(tenzor_python PRIVATE TENZOR_HAS_TORCH)
+            message(STATUS "  PyTorch interop:      ON (libtorch found)")
+        endif()
+
         if(TENZOR_USE_MLIR_JIT)
             # bindings/bindings_jit.cpp uses TENZOR_HAS_MLIR_JIT-guarded code
             # (cache_stats / reset_cache_stats) so propagate the define.

@@ -20,6 +20,13 @@ void main() {
     uint idx = gl_GlobalInvocationID.x;
     if (idx >= params.n_elements) return;
 
+    // Push-constant shape/stride arrays hold at most 8 dims. A rank >8 expand
+    // (reachable when a complex expand recurses with an appended dim-2, turning
+    // an 8-D complex expand into 9-D real) would read the uninitialized
+    // push-constant tail and index out of bounds. The host also rejects >8-D
+    // (dispatchExpand); guard here as defense-in-depth.
+    if (params.output_ndim > 8u || params.input_ndim > 8u) return;
+
     // Decode output flat index to multi-dimensional indices
     uint out_indices[8];
     uint temp = idx;

@@ -99,7 +99,11 @@ TEST_P(NNLinearEmbParity, Bilinear) {
             auto output = layer_dev.forward(Variable(in1_dev, false),
                                              Variable(in2_dev, false)).tensor();
             backends[i].synchronize();
-            EXPECT_TENSORS_CLOSE(ref, output, 1e-3f, 1e-3f);
+            // Bilinear forward is an outer-product @ weight matmul
+            // (src/nn/layers/linear.cpp:288) → FP32 cross-device GEMM floor on
+            // rtol (parity::MATMUL_RTOL). atol kept at 1e-3: the outer product
+            // accumulates one extra reduction stage beyond a plain GEMM.
+            EXPECT_TENSORS_CLOSE(ref, output, parity::MATMUL_RTOL, 1e-3f);
         } catch (const std::exception& e) {
             std::cerr << "Skipped on " << backend_name(backends[i]) << ": " << e.what() << std::endl;
         }

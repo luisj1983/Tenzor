@@ -75,7 +75,7 @@ TEST_P(MathOperationParity, MatMul_Small) {
 
     test_operation_parity_single([](const std::vector<Tensor>& inputs) {
         return matmul(inputs[0], inputs[1]);
-    }, {a, b}, device, 1e-4f, 1e-5f, "MatMul 32x32");
+    }, {a, b}, device, parity::MATMUL_RTOL, parity::MATMUL_ATOL, "MatMul 32x32");
 }
 
 TEST_P(MathOperationParity, MatMul_Medium) {

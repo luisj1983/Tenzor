@@ -981,7 +981,7 @@ auto scatter_add_kernel(const Tensor& input, int64_t dim, const Tensor& index,
                     d_temp, temp_storage_bytes,
                     flat_indices_buf.as<int64_t>(), sorted_indices_buf.as<int64_t>(),
                     static_cast<const ValT*>(src_vals), sorted_vals_buf.as<ValT>(),
-                    static_cast<int>(total_scatter), 0, static_cast<int>(sizeof(int64_t) * 8), stream);
+                    total_scatter, 0, static_cast<int>(sizeof(int64_t) * 8), stream);
             }
 
             CudaBuffer temp_storage(temp_storage_bytes);
@@ -990,7 +990,7 @@ auto scatter_add_kernel(const Tensor& input, int64_t dim, const Tensor& index,
                 temp_storage.as<void>(), temp_storage_bytes,
                 flat_indices_buf.as<int64_t>(), sorted_indices_buf.as<int64_t>(),
                 src_vals, sorted_vals_buf.as<ValT>(),
-                static_cast<int>(total_scatter), 0, static_cast<int>(sizeof(int64_t) * 8), stream);
+                total_scatter, 0, static_cast<int>(sizeof(int64_t) * 8), stream);
             CUDA_CHECK(cudaGetLastError());
 
             // Step 3: Deterministic segment accumulate
@@ -1164,8 +1164,11 @@ auto masked_select_kernel(const Tensor& input, const Tensor& mask,
 
     // Allocate max-size temp output buffer and device counter for num_selected
     backend::CachedMemoryGuard d_out_guard(n * elem_size);
-    backend::CachedMemoryGuard d_num_selected_guard(sizeof(int));
-    auto* d_num_selected = static_cast<int*>(d_num_selected_guard.get());
+    // num_selected is 64-bit; passing the int64_t `n` selects CUB's 64-bit
+    // NumItemsT DeviceSelect::Flagged overload so a >2^31-element input does
+    // not silently truncate.
+    backend::CachedMemoryGuard d_num_selected_guard(sizeof(int64_t));
+    auto* d_num_selected = static_cast<int64_t*>(d_num_selected_guard.get());
 
     // Use CUB DeviceSelect::Flagged — single optimized pass replaces
     // count_true_kernel + compute_positions_kernel + masked_select_kernel_impl
@@ -1176,12 +1179,12 @@ auto masked_select_kernel(const Tensor& input, const Tensor& mask,
         size_t temp_bytes = 0; \
         cub::DeviceSelect::Flagged(d_temp, temp_bytes, \
             d_in, d_flags, d_output, d_num_selected, \
-            static_cast<int>(n), stream); \
+            n, stream); \
         backend::CachedMemoryGuard d_temp_guard(temp_bytes); \
         d_temp = d_temp_guard.get(); \
         cub::DeviceSelect::Flagged(d_temp, temp_bytes, \
             d_in, d_flags, d_output, d_num_selected, \
-            static_cast<int>(n), stream); \
+            n, stream); \
     } while(0)
 
     switch (input.dtype()) {
@@ -1207,8 +1210,8 @@ auto masked_select_kernel(const Tensor& input, const Tensor& mask,
 
     // D2H sync — unavoidable for dynamic output size, but now happens after
     // a single optimized CUB operation instead of 3 separate kernel launches
-    int h_count;
-    CUDA_CHECK(cudaMemcpyAsync(&h_count, d_num_selected, sizeof(int), cudaMemcpyDeviceToHost, stream));
+    int64_t h_count;
+    CUDA_CHECK(cudaMemcpyAsync(&h_count, d_num_selected, sizeof(int64_t), cudaMemcpyDeviceToHost, stream));
     CUDA_CHECK(cudaStreamSynchronize(stream));
 
     if (h_count == 0) {
@@ -1216,7 +1219,7 @@ auto masked_select_kernel(const Tensor& input, const Tensor& mask,
     }
 
     // Create properly-sized output and D2D copy from temp buffer
-    Tensor output({static_cast<int64_t>(h_count)}, input.dtype(), input.device());
+    Tensor output({h_count}, input.dtype(), input.device());
     CUDA_CHECK(cudaMemcpyAsync(output.data_ptr(), d_out_guard.get(),
                                 h_count * elem_size, cudaMemcpyDeviceToDevice, stream));
 
@@ -2027,23 +2030,26 @@ auto nonzero_kernel(const Tensor& input, cudaStream_t stream) -> Tensor {
     backend::CachedMemoryGuard d_flat_indices_guard(n * sizeof(int64_t));
     auto* d_flat_indices = static_cast<int64_t*>(d_flat_indices_guard.get());
 
-    backend::CachedMemoryGuard d_num_selected_guard(sizeof(int));
-    auto* d_num_selected = static_cast<int*>(d_num_selected_guard.get());
+    // num_selected and the element count are 64-bit so a >2^31-element input
+    // (and its nonzero count) cannot silently truncate. Passing the int64_t `n`
+    // selects CUB's 64-bit NumItemsT DeviceSelect::Flagged overload.
+    backend::CachedMemoryGuard d_num_selected_guard(sizeof(int64_t));
+    auto* d_num_selected = static_cast<int64_t*>(d_num_selected_guard.get());
 
     void* d_temp = nullptr;
     size_t temp_bytes = 0;
     cub::DeviceSelect::Flagged(d_temp, temp_bytes,
         iota, d_flags, d_flat_indices, d_num_selected,
-        static_cast<int>(n), stream);
+        n, stream);
     backend::CachedMemoryGuard d_temp_guard(temp_bytes);
     d_temp = d_temp_guard.get();
     cub::DeviceSelect::Flagged(d_temp, temp_bytes,
         iota, d_flags, d_flat_indices, d_num_selected,
-        static_cast<int>(n), stream);
+        n, stream);
 
     // Single D2H sync to get count (replaces two syncs in the old code)
-    int total_nonzero;
-    CUDA_CHECK(cudaMemcpyAsync(&total_nonzero, d_num_selected, sizeof(int), cudaMemcpyDeviceToHost, stream));
+    int64_t total_nonzero;
+    CUDA_CHECK(cudaMemcpyAsync(&total_nonzero, d_num_selected, sizeof(int64_t), cudaMemcpyDeviceToHost, stream));
     CUDA_CHECK(cudaStreamSynchronize(stream));
 
     if (total_nonzero == 0) {
@@ -2051,7 +2057,7 @@ auto nonzero_kernel(const Tensor& input, cudaStream_t stream) -> Tensor {
     }
 
     // Allocate output tensor and decompose flat indices to multi-dim
-    Tensor output({static_cast<int64_t>(total_nonzero), ndim}, DType::Int64, input.device());
+    Tensor output({total_nonzero, ndim}, DType::Int64, input.device());
 
     backend::CachedMemoryGuard d_shape_guard(ndim * sizeof(int64_t));
     auto* d_shape = static_cast<int64_t*>(d_shape_guard.get());
@@ -2848,7 +2854,8 @@ auto embedding_bag_backward_kernel(const Tensor& grad_output,
 template<typename T>
 __global__ void take_along_dim_cuda_kernel(
     const T* __restrict__ input, const int64_t* __restrict__ indices, T* __restrict__ output,
-    int64_t numel, int64_t in_dim_size, int64_t idx_dim_size, int64_t inner_size)
+    int64_t numel, int64_t in_dim_size, int64_t idx_dim_size, int64_t inner_size,
+    int* error_flag)
 {
     int64_t i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= numel) return;
@@ -2859,6 +2866,12 @@ __global__ void take_along_dim_cuda_kernel(
 
     int64_t src_idx = indices[i];
     if (src_idx < 0) src_idx += in_dim_size;
+    if (src_idx < 0 || src_idx >= in_dim_size) {
+        // Record the error and clamp to a valid offset so the access stays
+        // memory-safe; the host wrapper surfaces std::out_of_range.
+        atomicExch(error_flag, 1);
+        src_idx = (src_idx < 0) ? 0 : (in_dim_size - 1);
+    }
 
     int64_t in_offset = outer * (in_dim_size * inner_size) + src_idx * inner_size + inner;
     output[i] = input[in_offset];
@@ -2886,43 +2899,56 @@ auto take_along_dim_kernel(const Tensor& input, const Tensor& indices, int64_t d
     int blocks = get_num_blocks(numel);
     const int64_t* idx_ptr = indices.data<int64_t>();
 
+    CudaBuffer error_buf(sizeof(int));
+    CUDA_CHECK(cudaMemsetAsync(error_buf.as<int>(), 0, sizeof(int), stream));
+    int* error_flag = error_buf.as<int>();
+
     switch (input.dtype()) {
         case DType::Float32:
             take_along_dim_cuda_kernel<float><<<blocks, BLOCK_SIZE, 0, stream>>>(
                 input.data<float>(), idx_ptr, output.data<float>(),
-                numel, in_dim_size, idx_dim_size, inner_size);
+                numel, in_dim_size, idx_dim_size, inner_size, error_flag);
             break;
         case DType::Float64:
             take_along_dim_cuda_kernel<double><<<blocks, BLOCK_SIZE, 0, stream>>>(
                 input.data<double>(), idx_ptr, output.data<double>(),
-                numel, in_dim_size, idx_dim_size, inner_size);
+                numel, in_dim_size, idx_dim_size, inner_size, error_flag);
             break;
         case DType::Int32:
             take_along_dim_cuda_kernel<int32_t><<<blocks, BLOCK_SIZE, 0, stream>>>(
                 input.data<int32_t>(), idx_ptr, output.data<int32_t>(),
-                numel, in_dim_size, idx_dim_size, inner_size);
+                numel, in_dim_size, idx_dim_size, inner_size, error_flag);
             break;
         case DType::Int64:
             take_along_dim_cuda_kernel<int64_t><<<blocks, BLOCK_SIZE, 0, stream>>>(
                 input.data<int64_t>(), idx_ptr, output.data<int64_t>(),
-                numel, in_dim_size, idx_dim_size, inner_size);
+                numel, in_dim_size, idx_dim_size, inner_size, error_flag);
             break;
         case DType::Float16:
             take_along_dim_cuda_kernel<__half><<<blocks, BLOCK_SIZE, 0, stream>>>(
                 reinterpret_cast<const __half*>(input.data_ptr()), idx_ptr,
                 reinterpret_cast<__half*>(output.data_ptr()),
-                numel, in_dim_size, idx_dim_size, inner_size);
+                numel, in_dim_size, idx_dim_size, inner_size, error_flag);
             break;
         case DType::BFloat16:
             take_along_dim_cuda_kernel<__nv_bfloat16><<<blocks, BLOCK_SIZE, 0, stream>>>(
                 reinterpret_cast<const __nv_bfloat16*>(input.data_ptr()), idx_ptr,
                 reinterpret_cast<__nv_bfloat16*>(output.data_ptr()),
-                numel, in_dim_size, idx_dim_size, inner_size);
+                numel, in_dim_size, idx_dim_size, inner_size, error_flag);
             break;
         default:
             throw std::runtime_error("take_along_dim CUDA: unsupported dtype");
     }
     CUDA_CHECK(cudaGetLastError());
+
+    int host_error = 0;
+    CUDA_CHECK(cudaMemcpyAsync(&host_error, error_buf.as<int>(), sizeof(int),
+                               cudaMemcpyDeviceToHost, stream));
+    CUDA_CHECK(cudaStreamSynchronize(stream));
+    if (host_error) {
+        throw std::out_of_range("take_along_dim: index out of range");
+    }
+
     return output;
 }
 

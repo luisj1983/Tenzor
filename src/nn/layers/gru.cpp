@@ -10,6 +10,7 @@
 #include "tenzor/backend/fast_dispatch.hpp"
 #include "tenzor/backend/op_attributes.hpp"
 #include "tenzor/ops/op_id.hpp"
+#include "tenzor/nn/utils/variable_cast.hpp"
 #include <stdexcept>
 #include <sstream>
 #include <iostream>
@@ -75,6 +76,21 @@ auto GRUCell::forward(const Variable& input, const Variable& hx) -> Variable {
         throw std::runtime_error("GRUCell: invalid hidden state shape");
     }
 
+    // For Float16/BFloat16, run the gate matmuls, sigmoid/tanh, reset/update
+    // gating, and the new-state combine in Float32, then cast the new hidden
+    // state back to the original dtype. Half-precision gate activations and the
+    // recurrence lose precision and some elementwise kernels lack half dispatch.
+    // Widening input/h to Float32 makes the Linear layers cast their weights to
+    // Float32 to match (Linear's compute dtype follows input), so the whole cell
+    // — including the mode-0 re-run of weight_hh_ on (r_t ⊙ h) — runs at Float32.
+    const DType orig_dtype = input.dtype();
+    const bool needs_upcast =
+        (orig_dtype == DType::Float16 || orig_dtype == DType::BFloat16);
+    Variable input_c = needs_upcast ? variable_cast(input, DType::Float32) : input;
+    if (needs_upcast) {
+        h = variable_cast(h, DType::Float32);
+    }
+
     // Compute combined gates efficiently (2 linear calls instead of 6)
     // gates_ih: (batch, 3 * hidden_size) = [r_i | z_i | n_i]
     // gates_hh: (batch, 3 * hidden_size) = [r_h | z_h | n_h]
@@ -82,8 +98,8 @@ auto GRUCell::forward(const Variable& input, const Variable& hx) -> Variable {
     // IMPORTANT: stay on the autograd-aware Variable path. Extracting
     // .tensor() and re-wrapping with `Variable(t, true)` would create orphan
     // Variables with no grad_fn, so backward() couldn't reach `input`/`hx`.
-    auto gates_ih = weight_ih_->forward(input);  // (batch, 3*hidden_size)
-    auto gates_hh = weight_hh_->forward(h);      // (batch, 3*hidden_size)
+    auto gates_ih = weight_ih_->forward(input_c);  // (batch, 3*hidden_size)
+    auto gates_hh = weight_hh_->forward(h);        // (batch, 3*hidden_size)
 
     // Slice each gates tensor into 3 sub-variables (r, z, n) along dim=1.
     // (autograd::chunk does not exist yet — use slice which is autograd-aware.)
@@ -128,8 +144,8 @@ auto GRUCell::forward(const Variable& input, const Variable& hx) -> Variable {
     //  / Variable + Variable, all of which are autograd-aware)
     auto h_new = n_t + z_t * (h - n_t);
 
-
-    return h_new;
+    // Narrow the new hidden state back to the caller's original dtype.
+    return needs_upcast ? variable_cast(h_new, orig_dtype) : h_new;
 }
 
 auto GRUCell::forward_with_precomputed_ih(const Tensor& gates_ih, const Variable& hx) -> Variable {

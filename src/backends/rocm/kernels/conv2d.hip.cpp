@@ -144,6 +144,42 @@ __global__ void conv_nhwc_to_nchw_kernel(
 }
 
 // ============================================================================
+// NCHW → NHWC permute for conv2d backward.
+//
+// The exact inverse of conv_nhwc_to_nchw_kernel. The backward GEMMs feed
+// grad_output to rocBLAS as op(B) read column-major [K×M] with ld=K, i.e.
+// rocBLAS sees element (k,m) at grad_out[m*K + k] = row-major [col_row][oc]
+// = [b][oh][ow][oc] (NHWC). But grad_output's real memory is NCHW
+// [b][oc][oh][ow]. This kernel gathers the per-group NCHW grad_output into
+// a contiguous NHWC temp buffer (batch * out_h * out_w, channels_per_group)
+// so the backward consumes exactly the layout the forward produced.
+// ============================================================================
+template<typename T>
+__global__ void conv_nchw_to_nhwc_kernel(
+    const T* __restrict__ nchw,   // shape: (batch, out_channels, out_h, out_w)
+    T* __restrict__ nhwc_out,     // shape: (batch * out_h * out_w, channels_per_group)
+    int64_t batch,
+    int64_t out_h,
+    int64_t out_w,
+    int64_t out_channels,         // total output channels (across all groups)
+    int64_t channels_per_group,
+    int64_t channel_offset        // group's first channel in the global output
+) {
+    int64_t total_spatial = batch * out_h * out_w;
+    HIP_KERNEL_LOOP(idx, total_spatial * channels_per_group) {
+        int64_t c = idx % channels_per_group;
+        int64_t spatial_idx = idx / channels_per_group;
+        int64_t b = spatial_idx / (out_h * out_w);
+        int64_t hw = spatial_idx % (out_h * out_w);
+        int64_t h = hw / out_w;
+        int64_t w = hw % out_w;
+        int64_t global_c = channel_offset + c;
+        int64_t nchw_idx = ((b * out_channels + global_c) * out_h + h) * out_w + w;
+        nhwc_out[idx] = nchw[nchw_idx];
+    }
+}
+
+// ============================================================================
 // im2col HIP Kernel - Optimized for AMD GPUs
 // ============================================================================
 
@@ -1262,9 +1298,24 @@ auto conv2d_backward_kernel(
                 rocblas_half alpha_h{static_cast<uint16_t>(0x3C00)};  // 1.0 in FP16
                 rocblas_half beta_h{static_cast<uint16_t>(0x0000)};   // 0.0 in FP16
 
+                // rocBLAS reads grad_out as op(B) column-major [K×M] with ld=K,
+                // i.e. row-major [col_row][oc] = NHWC. For an NCHW tensor we
+                // must permute the grad_output into a contiguous NHWC temp
+                // first; an NHWC tensor is already [col_row][oc] row-major.
+                HipBuffer grad_out_nhwc_buf(0);
                 const rocblas_half* grad_out_ptr;
                 if (layout == DataLayout::NCHW) {
-                    grad_out_ptr = reinterpret_cast<const rocblas_half*>(grad_output.data<Float16>()) + out_start * out_h * out_w;
+                    grad_out_nhwc_buf = HipBuffer(col_rows * out_channels_per_group * sizeof(rocblas_half));
+                    rocblas_half* grad_out_nhwc = grad_out_nhwc_buf.as<rocblas_half>();
+                    dim3 p_grid, p_block;
+                    compute_launch_config_1d(col_rows * out_channels_per_group, p_grid, p_block);
+                    conv_nchw_to_nhwc_kernel<__half><<<p_grid, p_block, 0, stream>>>(
+                        reinterpret_cast<const __half*>(grad_output.data<Float16>()),
+                        reinterpret_cast<__half*>(grad_out_nhwc),
+                        batch, out_h, out_w, out_channels, out_channels_per_group, out_start
+                    );
+                    HIP_CHECK(hipGetLastError());
+                    grad_out_ptr = grad_out_nhwc;
                 } else {
                     grad_out_ptr = reinterpret_cast<const rocblas_half*>(grad_output.data<Float16>()) + out_start;
                 }
@@ -1311,9 +1362,22 @@ auto conv2d_backward_kernel(
                 double alpha = 1.0;
                 double beta = 0.0;
 
+                // rocBLAS reads grad_out as op(B) column-major [K×M] with ld=K,
+                // i.e. row-major [col_row][oc] = NHWC. Permute NCHW grad_output
+                // into a contiguous NHWC temp; NHWC is already that layout.
+                HipBuffer grad_out_nhwc_buf(0);
                 const double* grad_out_ptr;
                 if (layout == DataLayout::NCHW) {
-                    grad_out_ptr = grad_output.data<double>() + out_start * out_h * out_w;
+                    grad_out_nhwc_buf = HipBuffer(col_rows * out_channels_per_group * sizeof(double));
+                    double* grad_out_nhwc = grad_out_nhwc_buf.as<double>();
+                    dim3 p_grid, p_block;
+                    compute_launch_config_1d(col_rows * out_channels_per_group, p_grid, p_block);
+                    conv_nchw_to_nhwc_kernel<double><<<p_grid, p_block, 0, stream>>>(
+                        grad_output.data<double>(), grad_out_nhwc,
+                        batch, out_h, out_w, out_channels, out_channels_per_group, out_start
+                    );
+                    HIP_CHECK(hipGetLastError());
+                    grad_out_ptr = grad_out_nhwc;
                 } else {
                     grad_out_ptr = grad_output.data<double>() + out_start;
                 }
@@ -1360,9 +1424,22 @@ auto conv2d_backward_kernel(
                 float alpha = 1.0f;
                 float beta = 0.0f;
 
+                // rocBLAS reads grad_out as op(B) column-major [K×M] with ld=K,
+                // i.e. row-major [col_row][oc] = NHWC. Permute NCHW grad_output
+                // into a contiguous NHWC temp; NHWC is already that layout.
+                HipBuffer grad_out_nhwc_buf(0);
                 const float* grad_out_ptr;
                 if (layout == DataLayout::NCHW) {
-                    grad_out_ptr = grad_output.data<float>() + out_start * out_h * out_w;
+                    grad_out_nhwc_buf = HipBuffer(col_rows * out_channels_per_group * sizeof(float));
+                    float* grad_out_nhwc = grad_out_nhwc_buf.as<float>();
+                    dim3 p_grid, p_block;
+                    compute_launch_config_1d(col_rows * out_channels_per_group, p_grid, p_block);
+                    conv_nchw_to_nhwc_kernel<float><<<p_grid, p_block, 0, stream>>>(
+                        grad_output.data<float>(), grad_out_nhwc,
+                        batch, out_h, out_w, out_channels, out_channels_per_group, out_start
+                    );
+                    HIP_CHECK(hipGetLastError());
+                    grad_out_ptr = grad_out_nhwc;
                 } else {
                     grad_out_ptr = grad_output.data<float>() + out_start;
                 }
@@ -1443,9 +1520,23 @@ auto conv2d_backward_kernel(
                 rocblas_half alpha_h{static_cast<uint16_t>(0x3C00)};
                 rocblas_half beta_h{static_cast<uint16_t>(0x0000)};
 
+                // With op(B)=transpose, rocBLAS reads grad_out as stored [M×K]
+                // col-major ld=M => row-major [col_row][oc] = NHWC. Permute the
+                // NCHW grad_output into a contiguous NHWC temp first.
+                HipBuffer grad_out_nhwc_buf(0);
                 const rocblas_half* grad_out_ptr;
                 if (layout == DataLayout::NCHW) {
-                    grad_out_ptr = reinterpret_cast<const rocblas_half*>(grad_output.data<Float16>()) + out_start * out_h * out_w;
+                    grad_out_nhwc_buf = HipBuffer(col_rows * out_channels_per_group * sizeof(rocblas_half));
+                    rocblas_half* grad_out_nhwc = grad_out_nhwc_buf.as<rocblas_half>();
+                    dim3 p_grid, p_block;
+                    compute_launch_config_1d(col_rows * out_channels_per_group, p_grid, p_block);
+                    conv_nchw_to_nhwc_kernel<__half><<<p_grid, p_block, 0, stream>>>(
+                        reinterpret_cast<const __half*>(grad_output.data<Float16>()),
+                        reinterpret_cast<__half*>(grad_out_nhwc),
+                        batch, out_h, out_w, out_channels, out_channels_per_group, out_start
+                    );
+                    HIP_CHECK(hipGetLastError());
+                    grad_out_ptr = grad_out_nhwc;
                 } else {
                     grad_out_ptr = reinterpret_cast<const rocblas_half*>(grad_output.data<Float16>()) + out_start;
                 }
@@ -1495,9 +1586,22 @@ auto conv2d_backward_kernel(
                 double alpha = 1.0;
                 double beta = 0.0;
 
+                // With op(B)=transpose, rocBLAS reads grad_out as stored [M×K]
+                // col-major ld=M => row-major [col_row][oc] = NHWC. Permute the
+                // NCHW grad_output into a contiguous NHWC temp first.
+                HipBuffer grad_out_nhwc_buf(0);
                 const double* grad_out_ptr;
                 if (layout == DataLayout::NCHW) {
-                    grad_out_ptr = grad_output.data<double>() + out_start * out_h * out_w;
+                    grad_out_nhwc_buf = HipBuffer(col_rows * out_channels_per_group * sizeof(double));
+                    double* grad_out_nhwc = grad_out_nhwc_buf.as<double>();
+                    dim3 p_grid, p_block;
+                    compute_launch_config_1d(col_rows * out_channels_per_group, p_grid, p_block);
+                    conv_nchw_to_nhwc_kernel<double><<<p_grid, p_block, 0, stream>>>(
+                        grad_output.data<double>(), grad_out_nhwc,
+                        batch, out_h, out_w, out_channels, out_channels_per_group, out_start
+                    );
+                    HIP_CHECK(hipGetLastError());
+                    grad_out_ptr = grad_out_nhwc;
                 } else {
                     grad_out_ptr = grad_output.data<double>() + out_start;
                 }
@@ -1547,9 +1651,22 @@ auto conv2d_backward_kernel(
                 float alpha = 1.0f;
                 float beta = 0.0f;
 
+                // With op(B)=transpose, rocBLAS reads grad_out as stored [M×K]
+                // col-major ld=M => row-major [col_row][oc] = NHWC. Permute the
+                // NCHW grad_output into a contiguous NHWC temp first.
+                HipBuffer grad_out_nhwc_buf(0);
                 const float* grad_out_ptr;
                 if (layout == DataLayout::NCHW) {
-                    grad_out_ptr = grad_output.data<float>() + out_start * out_h * out_w;
+                    grad_out_nhwc_buf = HipBuffer(col_rows * out_channels_per_group * sizeof(float));
+                    float* grad_out_nhwc = grad_out_nhwc_buf.as<float>();
+                    dim3 p_grid, p_block;
+                    compute_launch_config_1d(col_rows * out_channels_per_group, p_grid, p_block);
+                    conv_nchw_to_nhwc_kernel<float><<<p_grid, p_block, 0, stream>>>(
+                        grad_output.data<float>(), grad_out_nhwc,
+                        batch, out_h, out_w, out_channels, out_channels_per_group, out_start
+                    );
+                    HIP_CHECK(hipGetLastError());
+                    grad_out_ptr = grad_out_nhwc;
                 } else {
                     grad_out_ptr = grad_output.data<float>() + out_start;
                 }
@@ -1872,6 +1989,8 @@ auto conv_transpose2d_forward_kernel(
     int64_t total_elements = output.numel();
     int threads = rocm::get_wavefront_size() * 4;  // 4 wavefronts per block
     int blocks = (total_elements + threads - 1) / threads;
+    // Empty output: a zero-grid launch is rejected by HIP; return as-is.
+    if (blocks == 0) return output;
 
     if (input.dtype() == DType::Float32) {
         hipLaunchKernelGGL(conv_transpose2d_forward_kernel<float>,
@@ -2019,6 +2138,8 @@ auto depthwise_conv2d_kernel(
     int64_t total_elements = output.numel();
     int threads = rocm::get_wavefront_size() * 4;  // 4 wavefronts per block
     int blocks = (total_elements + threads - 1) / threads;
+    // Empty output: a zero-grid launch is rejected by HIP; return as-is.
+    if (blocks == 0) return output;
 
     if (input.dtype() == DType::Float32) {
         hipLaunchKernelGGL(depthwise_conv2d_forward_kernel<float>,
@@ -2458,6 +2579,8 @@ auto deformable_conv2d_forward_kernel(
     Tensor output({N, C_out, H_out, W_out}, input.dtype(), input.device());
 
     int64_t total = N * C_out * H_out * W_out;
+    // Empty output: a zero-grid launch is rejected by HIP; return as-is.
+    if (total == 0) return output;
     dim3 grid, block;
     compute_launch_config_1d(total, grid, block);
 

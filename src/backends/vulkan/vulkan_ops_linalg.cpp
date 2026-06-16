@@ -1640,8 +1640,8 @@ auto VulkanBackend::dispatchSearchSorted(const Tensor& sorted, const Tensor& val
         bool is_bf16_ss = (sorted.dtype() == DType::BFloat16);
         int32_t dev_id = sorted.device().index;
 
-        auto sorted_cont = sorted.is_contiguous() ? sorted : dispatchContiguous(sorted);
-        auto values_cont = values.is_contiguous() ? values : dispatchContiguous(values);
+        auto sorted_cont = (sorted.is_contiguous() && sorted.offset() == 0) ? sorted : dispatchContiguous(sorted);
+        auto values_cont = (values.is_contiguous() && values.offset() == 0) ? values : dispatchContiguous(values);
 
         std::vector<int64_t> out_shape_f16(values.shape().begin(), values.shape().end());
         Tensor output_f16(out_shape_f16, DType::Int32, values.device());
@@ -1677,8 +1677,8 @@ auto VulkanBackend::dispatchSearchSorted(const Tensor& sorted, const Tensor& val
 
     int32_t device_id = sorted.device().index;
 
-    auto sorted_contig = sorted.is_contiguous() ? sorted : dispatchContiguous(sorted);
-    auto values_contig = values.is_contiguous() ? values : dispatchContiguous(values);
+    auto sorted_contig = (sorted.is_contiguous() && sorted.offset() == 0) ? sorted : dispatchContiguous(sorted);
+    auto values_contig = (values.is_contiguous() && values.offset() == 0) ? values : dispatchContiguous(values);
 
     std::vector<int64_t> out_shape(values.shape().begin(), values.shape().end());
     Tensor output(out_shape, DType::Int32, values.device());
@@ -1740,9 +1740,9 @@ auto VulkanBackend::dispatchQuantizedLinear(
 
     int32_t device_id = input.device().index;
 
-    auto input_contig = input.is_contiguous() ? input : dispatchContiguous(input);
-    auto weight_contig = weight.is_contiguous() ? weight : dispatchContiguous(weight);
-    auto bias_contig = bias.is_contiguous() ? bias : dispatchContiguous(bias);
+    auto input_contig = (input.is_contiguous() && input.offset() == 0) ? input : dispatchContiguous(input);
+    auto weight_contig = (weight.is_contiguous() && weight.offset() == 0) ? weight : dispatchContiguous(weight);
+    auto bias_contig = (bias.is_contiguous() && bias.offset() == 0) ? bias : dispatchContiguous(bias);
 
     Tensor output({M, N}, DType::Float32, input.device());
 
@@ -1819,9 +1819,9 @@ auto VulkanBackend::dispatchQuantizedConv2d(
 
     int32_t device_id = input.device().index;
 
-    auto input_contig = input.is_contiguous() ? input : dispatchContiguous(input);
-    auto weight_contig = weight.is_contiguous() ? weight : dispatchContiguous(weight);
-    auto bias_contig = bias.is_contiguous() ? bias : dispatchContiguous(bias);
+    auto input_contig = (input.is_contiguous() && input.offset() == 0) ? input : dispatchContiguous(input);
+    auto weight_contig = (weight.is_contiguous() && weight.offset() == 0) ? weight : dispatchContiguous(weight);
+    auto bias_contig = (bias.is_contiguous() && bias.offset() == 0) ? bias : dispatchContiguous(bias);
 
     Tensor output({batch, out_channels, h_out, w_out}, DType::Float32, input.device());
 
@@ -1921,9 +1921,9 @@ auto VulkanBackend::dispatchFlashAttention(
         // Q.reshape(...) on a possibly-permuted view (typical MHA pattern of
         // permute(0,2,1,3) on [B,S,H,D]), which silently throws or returns
         // a logically-wrong view (audit C4 Vulkan).
-        Tensor Q_c = Q.is_contiguous() ? Q : dispatchContiguous(Q);
-        Tensor K_c = K.is_contiguous() ? K : dispatchContiguous(K);
-        Tensor V_c = V.is_contiguous() ? V : dispatchContiguous(V);
+        Tensor Q_c = (Q.is_contiguous() && Q.offset() == 0) ? Q : dispatchContiguous(Q);
+        Tensor K_c = (K.is_contiguous() && K.offset() == 0) ? K : dispatchContiguous(K);
+        Tensor V_c = (V.is_contiguous() && V.offset() == 0) ? V : dispatchContiguous(V);
 
         batch_heads = q_shape[0] * q_shape[1];
         seq_len_q = q_shape[2];
@@ -1987,9 +1987,9 @@ auto VulkanBackend::dispatchFlashAttention(
                 "FlashAttention kernels).");
         }
 
-        Tensor q_contig = q_flat.is_contiguous() ? q_flat : dispatchContiguous(q_flat);
-        Tensor k_contig = k_flat.is_contiguous() ? k_flat : dispatchContiguous(k_flat);
-        Tensor v_contig = v_flat.is_contiguous() ? v_flat : dispatchContiguous(v_flat);
+        Tensor q_contig = (q_flat.is_contiguous() && q_flat.offset() == 0) ? q_flat : dispatchContiguous(q_flat);
+        Tensor k_contig = (k_flat.is_contiguous() && k_flat.offset() == 0) ? k_flat : dispatchContiguous(k_flat);
+        Tensor v_contig = (v_flat.is_contiguous() && v_flat.offset() == 0) ? v_flat : dispatchContiguous(v_flat);
 
         Tensor output_flat({batch_heads, seq_len_q, head_v},
                            DType::Float64, Q.device());
@@ -2065,9 +2065,9 @@ auto VulkanBackend::dispatchFlashAttention(
         && head_v <= kMaxHeadDimTiled
         && seq_len_q > 0 && seq_len_k > 0)
     {
-        Tensor q_contig = q_flat.is_contiguous() ? q_flat : dispatchContiguous(q_flat);
-        Tensor k_contig = k_flat.is_contiguous() ? k_flat : dispatchContiguous(k_flat);
-        Tensor v_contig = v_flat.is_contiguous() ? v_flat : dispatchContiguous(v_flat);
+        Tensor q_contig = (q_flat.is_contiguous() && q_flat.offset() == 0) ? q_flat : dispatchContiguous(q_flat);
+        Tensor k_contig = (k_flat.is_contiguous() && k_flat.offset() == 0) ? k_flat : dispatchContiguous(k_flat);
+        Tensor v_contig = (v_flat.is_contiguous() && v_flat.offset() == 0) ? v_flat : dispatchContiguous(v_flat);
 
         Tensor output_flat({batch_heads, seq_len_q, head_v},
                            DType::Float32, Q.device());
@@ -3110,8 +3110,8 @@ auto VulkanBackend::dispatchLinalgSolveTriangular(const Tensor& A, const Tensor&
     // strides. cholesky_inverse passes transpose(L) directly, which caused
     // the second solve to read L instead of L^T and produce zeros in the
     // upper triangle of the result. Materialize contiguous copies up front.
-    Tensor A_c = A.is_contiguous() ? A : A.contiguous();
-    Tensor B_c = B.is_contiguous() ? B : B.contiguous();
+    Tensor A_c = (A.is_contiguous() && A.offset() == 0) ? A : dispatchContiguous(A);
+    Tensor B_c = (B.is_contiguous() && B.offset() == 0) ? B : dispatchContiguous(B);
 
     int32_t device_id = A_c.device().index;
     bool is_f64 = (A_c.dtype() == DType::Float64);

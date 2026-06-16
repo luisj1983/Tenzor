@@ -81,7 +81,9 @@ TEST_P(SignalFullParity, MelScale_DefaultParams) {
 
     test_operation_parity_single([](const std::vector<Tensor>& inputs) {
         return fft::mel_scale(inputs[0], /*n_mels=*/64);
-    }, {spec}, device, 1e-4f, 1e-5f, "MelScale_F32");
+        // mel_scale applies a filterbank @ spectrogram matmul
+        // (src/ops/fft.cpp:1144) so it inherits the FP32 GEMM floor.
+    }, {spec}, device, parity::MATMUL_RTOL, parity::MATMUL_ATOL, "MelScale_F32");
 }
 
 TEST_P(SignalFullParity, MelScale_BatchedNonDefaultRate) {
@@ -91,7 +93,8 @@ TEST_P(SignalFullParity, MelScale_BatchedNonDefaultRate) {
         return fft::mel_scale(inputs[0], /*n_mels=*/40,
                               /*f_min=*/80.0, /*f_max=*/7600.0,
                               /*sample_rate=*/22050);
-    }, {spec}, device, 1e-4f, 1e-5f, "MelScale_22kHz_F32");
+        // Filterbank @ spectrogram matmul → FP32 GEMM floor (parity::MATMUL_*).
+    }, {spec}, device, parity::MATMUL_RTOL, parity::MATMUL_ATOL, "MelScale_22kHz_F32");
 }
 
 // ----------------------------------------------------------------------------

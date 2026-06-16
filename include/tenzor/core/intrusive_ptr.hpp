@@ -52,7 +52,7 @@ public:
     IntrusiveRefCounted& operator=(const IntrusiveRefCounted&) noexcept { return *this; }
 
     /// Get current reference count (for debugging/testing only)
-    auto use_count() const noexcept -> uint32_t {
+    auto use_count() const noexcept -> uint64_t {
         return refcount_.load(std::memory_order_relaxed);
     }
 
@@ -60,7 +60,10 @@ protected:
     virtual ~IntrusiveRefCounted() = default;
 
 private:
-    mutable std::atomic<uint32_t> refcount_{0};
+    // Pointer-width count (matching std::shared_ptr) so a long-lived process
+    // cannot wrap the refcount past 2^32 handles back to zero and trigger a
+    // use-after-free on the still-referenced object.
+    mutable std::atomic<uint64_t> refcount_{0};
 
     template<typename T>
     friend class intrusive_ptr;

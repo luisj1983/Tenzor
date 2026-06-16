@@ -21,17 +21,26 @@
 #include <cstdlib>
 #include <cstring>
 #include <random>
+#include <atomic>
 #include "tenzor/ops/fp8_scaling.hpp"
 
 namespace tenzor::cuda::matmul {
 
-// Thread-local configuration flags.
+// Process-global configuration flags.
 //
 // The TF32 default is read from TENZOR_DISABLE_TF32 on first access: set
 // this to 1 in the environment (or from a test main()) to force full
 // IEEE 754 FP32 on cuBLAS matmuls. This is needed for CPU↔CUDA parity
 // tests where the default TF32 path silently drops ~13 mantissa bits.
 // Once set, explicit set_allow_tf32() calls still override the default.
+//
+// IMPORTANT: these flags MUST be process-global (atomic), not thread_local.
+// cuBLAS calls dispatched from the runtime can execute on worker threads
+// distinct from the one that called set_allow_tf32() / set the env var, and
+// a thread_local flag would re-read its env default (TF32 *on*) on every such
+// thread — silently re-enabling TF32 and breaking CPU↔CUDA parity even after
+// the test fixture set TENZOR_DISABLE_TF32=1. A process-global atomic ensures
+// the disable is honored on every thread that issues a gemm.
 static auto tf32_default_from_env() -> bool {
     const char* v = std::getenv("TENZOR_DISABLE_TF32");
     if (v && (std::strcmp(v, "1") == 0 || std::strcmp(v, "true") == 0)) {
@@ -39,13 +48,31 @@ static auto tf32_default_from_env() -> bool {
     }
     return true;
 }
-static thread_local bool g_allow_tf32 = tf32_default_from_env();
-static thread_local bool g_warn_fp16_saturation = false;
+// Tri-state: -1 = unresolved (resolve from env on first read), 0 = TF32
+// disabled, 1 = TF32 allowed. Resolution is LAZY (on first allow_tf32() call,
+// i.e. the first gemm) rather than at static-init: the CUDA backend .so is
+// dlopen'd by tenzor::initialize(), and a test/process that sets
+// TENZOR_DISABLE_TF32=1 just before init would otherwise have the env read at
+// .so load time — which can precede the setenv — leaving TF32 silently on.
+// The first gemm always runs after any such setenv, so a lazy read is correct.
+static std::atomic<int> g_allow_tf32{-1};
+static std::atomic<bool> g_warn_fp16_saturation{false};
 
-auto allow_tf32() -> bool { return g_allow_tf32; }
-auto set_allow_tf32(bool value) -> void { g_allow_tf32 = value; }
-auto warn_fp16_saturation() -> bool { return g_warn_fp16_saturation; }
-auto set_warn_fp16_saturation(bool value) -> void { g_warn_fp16_saturation = value; }
+auto allow_tf32() -> bool {
+    int v = g_allow_tf32.load(std::memory_order_relaxed);
+    if (v < 0) {
+        v = tf32_default_from_env() ? 1 : 0;
+        int expected = -1;
+        // If another thread (or an explicit set_allow_tf32) resolved it first,
+        // keep that value rather than overwriting.
+        g_allow_tf32.compare_exchange_strong(expected, v, std::memory_order_relaxed);
+        v = g_allow_tf32.load(std::memory_order_relaxed);
+    }
+    return v != 0;
+}
+auto set_allow_tf32(bool value) -> void { g_allow_tf32.store(value ? 1 : 0, std::memory_order_relaxed); }
+auto warn_fp16_saturation() -> bool { return g_warn_fp16_saturation.load(std::memory_order_relaxed); }
+auto set_warn_fp16_saturation(bool value) -> void { g_warn_fp16_saturation.store(value, std::memory_order_relaxed); }
 
 } // namespace tenzor::cuda::matmul
 
@@ -123,7 +150,7 @@ static void saturate_fp16(__half* data, int64_t n, cudaStream_t stream) {
     if (n <= 0) return;
 
     unsigned long long* d_count = nullptr;
-    bool do_warn = matmul::g_warn_fp16_saturation;
+    bool do_warn = matmul::warn_fp16_saturation();
 
     if (do_warn) {
         TENZOR_CUDA_CHECK(cudaMallocAsync(&d_count, sizeof(unsigned long long), stream));
@@ -1079,7 +1106,7 @@ void matmul_cublas_f32(
         A, CUDA_R_32F, K,   // A matrix with leading dimension K
         &beta,
         C, CUDA_R_32F, N,   // C matrix with leading dimension N
-        matmul::g_allow_tf32 ? CUBLAS_COMPUTE_32F_FAST_TF32 : CUBLAS_COMPUTE_32F,
+        matmul::allow_tf32() ? CUBLAS_COMPUTE_32F_FAST_TF32 : CUBLAS_COMPUTE_32F,
         CUBLAS_GEMM_DEFAULT
     );
 
@@ -1140,7 +1167,7 @@ void batched_matmul_cublas_f32(
         &beta,
         C, CUDA_R_32F, N, stride_c,   // C matrix
         batch_size,
-        matmul::g_allow_tf32 ? CUBLAS_COMPUTE_32F_FAST_TF32 : CUBLAS_COMPUTE_32F,
+        matmul::allow_tf32() ? CUBLAS_COMPUTE_32F_FAST_TF32 : CUBLAS_COMPUTE_32F,
         CUBLAS_GEMM_DEFAULT           // Let cuBLAS pick best algorithm
     );
 
@@ -2270,7 +2297,7 @@ auto addmm_kernel(const Tensor& input, const Tensor& mat1, const Tensor& mat2,
             a_cont.data<float>(), CUDA_R_32F, K,
             &beta_f,
             output.data<float>(), CUDA_R_32F, N,
-            matmul::g_allow_tf32 ? CUBLAS_COMPUTE_32F_FAST_TF32 : CUBLAS_COMPUTE_32F,
+            matmul::allow_tf32() ? CUBLAS_COMPUTE_32F_FAST_TF32 : CUBLAS_COMPUTE_32F,
             CUBLAS_GEMM_DEFAULT
         );
         if (status != CUBLAS_STATUS_SUCCESS) {
@@ -2442,7 +2469,7 @@ auto baddbmm_kernel(const Tensor& input, const Tensor& batch1, const Tensor& bat
             &beta_f,
             output.data<float>(), CUDA_R_32F, N, stride_c,
             B,
-            matmul::g_allow_tf32 ? CUBLAS_COMPUTE_32F_FAST_TF32 : CUBLAS_COMPUTE_32F,
+            matmul::allow_tf32() ? CUBLAS_COMPUTE_32F_FAST_TF32 : CUBLAS_COMPUTE_32F,
             CUBLAS_GEMM_DEFAULT
         );
         if (status != CUBLAS_STATUS_SUCCESS) {

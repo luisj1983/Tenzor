@@ -112,6 +112,13 @@ public:
         ensure_initialized(device_id);
         auto& pool = device_pools_[device_id];
 
+        // Make the requested device current before returning a stream from it.
+        // Op wrappers launch kernels and create library handles immediately
+        // after acquire(); without this, work targeting a non-default device
+        // would land on whatever device happened to be current on this thread,
+        // corrupting multi-GPU execution.
+        cudaSetDevice(device_id);
+
         for (size_t i = 0; i < pool.streams.size(); ++i) {
             if (pool.available[i]) {
                 pool.available[i] = false;

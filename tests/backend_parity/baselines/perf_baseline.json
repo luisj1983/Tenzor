@@ -1,43 +1,164 @@
 {
     "_comment": [
         "Performance baseline for tests/backend_parity/test_performance_regression.cpp.",
-        "Format: { '<op>_<size>': { '<backend>:<index>': { 'median_ms': X, 'p99_ms': Y } } }.",
-        "Values are populated by `tools/regen_perf_baseline.py` after a known-good run.",
-        "Until a real baseline is recorded the regression check will SKIP rather than fail \u2014",
-        "see test_performance_regression.cpp::BaselineRegression_MatMul.",
+        "HOST-KEYED map: { 'hosts': { '<hostname>': { 'ops': { '<op>_<size>':",
+        "{ '<backend>': { 'median_ms': X, 'p99_ms': Y } } } } } }.",
+        "Each host keeps its own block so a CI self-hosted runner and a developer",
+        "laptop can both commit numbers without clobbering each other.",
+        "",
+        "Values are (re)generated per host by `python tools/regen_perf_baseline.py`,",
+        "which rewrites ONLY the current host's entry (other hosts are preserved).",
+        "",
+        "Enforcement (EXPECT_LT) engages when TENZOR_PERF_ENFORCE=1 OR the running",
+        "host (gethostname) has an entry under 'hosts'. Otherwise timings are",
+        "printed and the check SKIPs.",
         "",
         "Tolerance (env-tunable):",
-        "  TENZOR_PERF_REGRESSION_RTOL \u2014 multiplicative tolerance on median (default: 1.25).",
-        "  TENZOR_PERF_REGRESSION_P99_RTOL \u2014 multiplicative tolerance on p99 (default: 1.50).",
+        "  TENZOR_PERF_REGRESSION_RTOL      \u2014 multiplier on median (default 1.15).",
+        "  TENZOR_PERF_REGRESSION_P99_RTOL  \u2014 multiplier on p99    (default 1.50).",
         "",
-        "Hardware identity is captured in the 'host' field below; running the regression",
-        "check on a different host will SKIP rather than fail (different hardware \u21d2 different",
-        "baseline expectations)."
+        "NOTE: the numbers below were captured on host 'leeslappy' under the OLD",
+        "single-op format and are RETAINED for that host only as a starting point.",
+        "On-device follow-up: regenerate for each real host (CI runner + laptops)",
+        "with `python tools/regen_perf_baseline.py` so every op below has values."
     ],
-    "host": "leeslappy",
-    "tenzor_version": "unknown",
-    "captured_at_iso8601": "2026-05-02T12:45:33.698064Z",
-    "ops": {
-        "MatMul_512x512": {
-            "cpu": {
-                "median_ms": 0.448,
-                "p99_ms": 0.477
-            },
-            "cuda:0": {
-                "median_ms": 0.024,
-                "p99_ms": 0.029
-            },
-            "oneapi:0": {
-                "median_ms": 1.439,
-                "p99_ms": 2.878
-            },
-            "vulkan:0": {
-                "median_ms": 0.215,
-                "p99_ms": 0.228
-            },
-            "rocm:0": {
-                "median_ms": 0.356,
-                "p99_ms": 0.4
+    "hosts": {
+        "leeslappy": {
+            "tenzor_version": "unknown",
+            "captured_at_iso8601": "2026-06-16T19:42:21.415105Z",
+            "ops": {
+                "MatMul_512x512": {
+                    "cpu": {
+                        "median_ms": 0.687,
+                        "p99_ms": 0.693
+                    },
+                    "cuda:0": {
+                        "median_ms": 0.036,
+                        "p99_ms": 0.036
+                    },
+                    "oneapi:0": {
+                        "median_ms": 1.421,
+                        "p99_ms": 4.21
+                    },
+                    "vulkan:0": {
+                        "median_ms": 0.212,
+                        "p99_ms": 0.217
+                    },
+                    "rocm:0": {
+                        "median_ms": 0.279,
+                        "p99_ms": 0.376
+                    }
+                },
+                "ElementwiseAdd_1024x1024": {
+                    "cpu": {
+                        "median_ms": 0.143,
+                        "p99_ms": 0.36
+                    },
+                    "cuda:0": {
+                        "median_ms": 0.014,
+                        "p99_ms": 0.016
+                    },
+                    "oneapi:0": {
+                        "median_ms": 0.11,
+                        "p99_ms": 0.147
+                    },
+                    "vulkan:0": {
+                        "median_ms": 0.053,
+                        "p99_ms": 0.067
+                    },
+                    "rocm:0": {
+                        "median_ms": 0.233,
+                        "p99_ms": 0.339
+                    }
+                },
+                "ReductionSum_2048x2048": {
+                    "cpu": {
+                        "median_ms": 0.125,
+                        "p99_ms": 0.147
+                    },
+                    "cuda:0": {
+                        "median_ms": 0.016,
+                        "p99_ms": 0.021
+                    },
+                    "oneapi:0": {
+                        "median_ms": 0.197,
+                        "p99_ms": 0.241
+                    },
+                    "vulkan:0": {
+                        "median_ms": 0.473,
+                        "p99_ms": 0.496
+                    },
+                    "rocm:0": {
+                        "median_ms": 0.245,
+                        "p99_ms": 0.298
+                    }
+                },
+                "Softmax_512x1024": {
+                    "cpu": {
+                        "median_ms": 0.122,
+                        "p99_ms": 0.141
+                    },
+                    "cuda:0": {
+                        "median_ms": 0.015,
+                        "p99_ms": 0.017
+                    },
+                    "oneapi:0": {
+                        "median_ms": 0.764,
+                        "p99_ms": 0.872
+                    },
+                    "vulkan:0": {
+                        "median_ms": 0.08,
+                        "p99_ms": 0.086
+                    },
+                    "rocm:0": {
+                        "median_ms": 0.101,
+                        "p99_ms": 0.119
+                    }
+                },
+                "LayerNorm_512x1024": {
+                    "cpu": {
+                        "median_ms": 0.079,
+                        "p99_ms": 7.307
+                    },
+                    "cuda:0": {
+                        "median_ms": 0.015,
+                        "p99_ms": 0.016
+                    },
+                    "oneapi:0": {
+                        "median_ms": 0.174,
+                        "p99_ms": 0.205
+                    },
+                    "vulkan:0": {
+                        "median_ms": 0.085,
+                        "p99_ms": 0.096
+                    },
+                    "rocm:0": {
+                        "median_ms": 0.119,
+                        "p99_ms": 0.133
+                    }
+                },
+                "Conv2d_8x32x32x32": {
+                    "cpu": {
+                        "median_ms": 0.733,
+                        "p99_ms": 0.899
+                    },
+                    "cuda:0": {
+                        "median_ms": 0.066,
+                        "p99_ms": 0.067
+                    },
+                    "oneapi:0": {
+                        "median_ms": 47.511,
+                        "p99_ms": 59.983
+                    },
+                    "vulkan:0": {
+                        "median_ms": 0.223,
+                        "p99_ms": 0.227
+                    },
+                    "rocm:0": {
+                        "median_ms": 1.274,
+                        "p99_ms": 1.305
+                    }
+                }
             }
         }
     }

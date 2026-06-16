@@ -1,10 +1,19 @@
 """Type stubs for tenzor.torch_interop module (PyTorch tensor interoperability).
 
 S23: this stub is *conditional* — the underlying C++ binding is only
-registered when the extension was built with ``TENZOR_HAS_TORCH``
-defined (PyTorch headers available at configure time). When the
-extension is built WITHOUT torch support, ``import tenzor.torch_interop``
-raises ``ModuleNotFoundError`` at runtime. The drift checker
+registered when the extension was built with PyTorch interop enabled
+(CMake option ``TENZOR_BUILD_TORCH_INTEROP=ON``, which defines
+``TENZOR_HAS_TORCH`` and links libtorch). The option is OFF by default so
+the core CPU wheel does not depend on libtorch.
+
+When the extension is built WITHOUT torch support, ``tenzor.torch_interop``
+still resolves to an object, but accessing any attribute on it raises a
+clear ``ImportError``:
+
+    "Tenzor was built without PyTorch interop; rebuild with
+     TENZOR_BUILD_TORCH_INTEROP=ON ..."
+
+(rather than a bare ``AttributeError``). The drift checker
 (``tools/check_pyi_parity.py``) skips this stub in that case via its
 OPTIONAL_RUNTIME_STUBS list, so type-checking-only consumers can still
 see the signatures.

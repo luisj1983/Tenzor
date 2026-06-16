@@ -6,6 +6,7 @@
 #include "tenzor/ops/transform.hpp"
 #include "tenzor/autograd/function.hpp"
 #include "tenzor/autograd/ops.hpp"
+#include "tenzor/nn/utils/variable_cast.hpp"
 #include <stdexcept>
 #include <sstream>
 
@@ -103,13 +104,27 @@ auto RNNCell::forward(const Variable& input, const Variable& hx) -> Variable {
         throw std::runtime_error("RNNCell: invalid hidden state shape");
     }
 
+    // For Float16/BFloat16, run the whole recurrence (gate matmuls + activation)
+    // in Float32, then cast the new hidden state back to the original dtype.
+    // The per-timestep cell math (sigmoid/tanh/state update) loses precision in
+    // half and some elementwise kernels lack half dispatch. Widening input and
+    // hidden to Float32 makes the Linear layers cast their weights to Float32 to
+    // match (Linear uses input.dtype() as the compute dtype), so the entire
+    // recurrence executes at Float32. Mirrors the attention half-widening.
+    const DType orig_dtype = input.dtype();
+    const bool needs_upcast =
+        (orig_dtype == DType::Float16 || orig_dtype == DType::BFloat16);
+    Variable x_c = needs_upcast ? variable_cast(input, DType::Float32) : input;
+    Variable h_c = needs_upcast ? variable_cast(h, DType::Float32) : h;
+
     // Compute: h_new = activation(W_ih @ x + W_hh @ h + b)
-    auto i_out = input_layer_->forward(input);
-    auto h_out = hidden_layer_->forward(h);
+    auto i_out = input_layer_->forward(x_c);
+    auto h_out = hidden_layer_->forward(h_c);
     auto combined = i_out + h_out;
 
     // Apply activation (supports the full ONNX RNN activation set).
-    return apply_rnn_activation(nonlinearity_, combined);
+    auto h_new = apply_rnn_activation(nonlinearity_, combined);
+    return needs_upcast ? variable_cast(h_new, orig_dtype) : h_new;
 }
 
 auto RNNCell::forward_with_precomputed_ih(const Tensor& precomputed_ih, const Variable& hx) -> Variable {

@@ -33,7 +33,16 @@ struct BinaryPushConstants {
 // Promote input to Float32 if necessary; returns the promoted tensor and a
 // flag indicating whether the caller should cast the result back.
 inline Tensor maybe_promote(const Tensor& input, DType original_dtype, VulkanBackend* backend) {
-    if (original_dtype == DType::Float32) return input;
+    if (original_dtype == DType::Float32) {
+        // Materialize a packed, offset-0 buffer for the no-cast path. A
+        // stride-contiguous outer-dim slice has offset()!=0 yet reports
+        // is_contiguous()==true; binding it as a descriptor read operand can
+        // violate minStorageBufferOffsetAlignment. dispatchCast (used below)
+        // already returns a fresh offset-0 tensor, so only this branch needs it.
+        return (input.is_contiguous() && input.offset() == 0)
+                   ? input
+                   : backend->dispatchContiguous(input);
+    }
     return backend->dispatchCast(input, DType::Float32);
 }
 
@@ -134,9 +143,9 @@ auto VulkanBackend::dispatchSpecialMathBinary(const Tensor& a, const Tensor& b, 
     // logaddexp / beta / etc.).
     bool is_f64 = (orig_dtype == DType::Float64);
 
-    Tensor work_a = is_f64 ? (a.is_contiguous() ? a : a.contiguous())
+    Tensor work_a = is_f64 ? ((a.is_contiguous() && a.offset() == 0) ? a : dispatchContiguous(a))
                            : maybe_promote(a, orig_dtype, this);
-    Tensor work_b = is_f64 ? (b.is_contiguous() ? b : b.contiguous())
+    Tensor work_b = is_f64 ? ((b.is_contiguous() && b.offset() == 0) ? b : dispatchContiguous(b))
                            : maybe_promote(b, orig_dtype, this);
 
     DType work_dtype = is_f64 ? DType::Float64 : DType::Float32;
@@ -207,9 +216,9 @@ auto VulkanBackend::dispatchSpecialMathTernary(const Tensor& a, const Tensor& b,
     Tensor compute_a, compute_b, compute_x;
     Tensor output;
     if (is_f64_path) {
-        compute_a = a.contiguous();
-        compute_b = b.contiguous();
-        compute_x = x.contiguous();
+        compute_a = (a.is_contiguous() && a.offset() == 0) ? a : dispatchContiguous(a);
+        compute_b = (b.is_contiguous() && b.offset() == 0) ? b : dispatchContiguous(b);
+        compute_x = (x.is_contiguous() && x.offset() == 0) ? x : dispatchContiguous(x);
         std::vector<int64_t> shape(compute_a.shape().begin(), compute_a.shape().end());
         output = Tensor(shape, DType::Float64, compute_a.device());
     } else {

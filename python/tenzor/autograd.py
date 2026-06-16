@@ -108,6 +108,12 @@ gradgradcheck = _autograd_cpp.gradgradcheck
 # at runtime so `tenzor.autograd.no_grad` works and check_pyi_drift passes.
 no_grad = _core.no_grad
 enable_grad = _core.enable_grad
+# inference_mode is a C++ context-manager class registered on the root module
+# (tenzor_core.inference_mode, backed by tenzor::InferenceModeGuard — stronger
+# than no_grad: it also elides in-place version-counter bumps). Mirror no_grad /
+# enable_grad and re-export it at the autograd submodule level so
+# ``tenzor.autograd.inference_mode`` works and matches the stubs.
+inference_mode = _core.inference_mode
 
 # audit-10 OO.12: expose the graph utilities (make_dot / optimize_graph)
 # that the C++ side registers under tenzor_core.autograd but the Python
@@ -128,6 +134,7 @@ __all__ = [
     "make_dot",
     "no_grad",
     "enable_grad",
+    "inference_mode",
     "optimize_graph",
 ]
 

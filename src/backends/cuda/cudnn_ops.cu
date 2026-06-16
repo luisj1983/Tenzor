@@ -12,7 +12,9 @@
 #include <cuda_fp16.h>
 #include <cuda_bf16.h>
 #include <algorithm>
+#include <functional>
 #include <mutex>
+#include <unordered_map>
 #include <limits>
 #include <optional>
 #include <stdexcept>
@@ -531,6 +533,9 @@ auto cudnn_conv2d_forward(
     std::vector<int64_t> output_shape = {batch, out_channels, out_h, out_w};
     Tensor output(output_shape, input.dtype(), input.device());
 
+    // Make the tensor's device current so the (device-keyed) cuDNN handle and
+    // workspace are fetched/allocated on the GPU the op runs on. Restored on exit.
+    CudaDeviceGuard dev_guard(input.device().index);
     // Use singleton cuDNN handle (much faster than creating new one each time)
     cudnnHandle_t handle = CuDNNHandle::get();
     CuDNNHandle::set_stream(stream);
@@ -975,6 +980,7 @@ auto cudnn_fused_conv2d_activation_forward(
     std::vector<int64_t> output_shape = {batch, out_channels, out_h, out_w};
     Tensor output(output_shape, input.dtype(), input.device());
 
+    CudaDeviceGuard dev_guard(input.device().index);
     cudnnHandle_t handle = CuDNNHandle::get();
     CuDNNHandle::set_stream(stream);
 
@@ -1248,6 +1254,7 @@ auto cudnn_conv2d_backward(
     Tensor grad_weight({out_channels, in_channels / groups, kernel_h, kernel_w}, weight.dtype(), weight.device());
     Tensor grad_bias({out_channels}, weight.dtype(), weight.device());
 
+    CudaDeviceGuard dev_guard(input.device().index);
     // Use singleton cuDNN handle
     cudnnHandle_t handle = CuDNNHandle::get();
     CuDNNHandle::set_stream(stream);
@@ -1799,6 +1806,7 @@ auto cudnn_conv2d_forward_nhwc(
     output_nhwc.mutable_shape() = {batch, out_channels, out_h, out_w};
     output_nhwc.mutable_strides() = {out_h * out_w * out_channels, 1, out_w * out_channels, out_channels};
 
+    CudaDeviceGuard dev_guard(input.device().index);
     // Use singleton cuDNN handle
     cudnnHandle_t handle = CuDNNHandle::get();
     CuDNNHandle::set_stream(stream);
@@ -2096,6 +2104,7 @@ auto cudnn_conv2d_backward_nhwc(
     Tensor weight_nhwc = filter_nchw_to_nhwc(weight, stream);
     Tensor grad_output_nhwc = nchw_to_nhwc(grad_output, stream);
 
+    CudaDeviceGuard dev_guard(input.device().index);
     // Use singleton cuDNN handle
     cudnnHandle_t handle = CuDNNHandle::get();
     CuDNNHandle::set_stream(stream);
@@ -2436,6 +2445,7 @@ auto cudnn_maxpool2d_forward(
     // cuDNN doesn't return indices directly, we'll compute them separately if needed
     Tensor indices({batch, channels, out_h, out_w}, DType::Int64, input.device());
 
+    CudaDeviceGuard dev_guard(input.device().index);
     cudnnHandle_t handle = CuDNNHandle::get();
     CuDNNHandle::set_stream(stream);
 
@@ -2529,6 +2539,7 @@ auto cudnn_maxpool2d_backward(
 
     Tensor grad_input({batch, channels, height, width}, input.dtype(), input.device());
 
+    CudaDeviceGuard dev_guard(input.device().index);
     cudnnHandle_t handle = CuDNNHandle::get();
     CuDNNHandle::set_stream(stream);
 
@@ -2627,6 +2638,7 @@ auto cudnn_avgpool2d_forward(
 
     Tensor output({batch, channels, out_h, out_w}, input.dtype(), input.device());
 
+    CudaDeviceGuard dev_guard(input.device().index);
     cudnnHandle_t handle = CuDNNHandle::get();
     CuDNNHandle::set_stream(stream);
 
@@ -2720,6 +2732,7 @@ auto cudnn_avgpool2d_backward(
 
     Tensor grad_input({batch, channels, height, width}, input.dtype(), input.device());
 
+    CudaDeviceGuard dev_guard(input.device().index);
     cudnnHandle_t handle = CuDNNHandle::get();
     CuDNNHandle::set_stream(stream);
 
@@ -2803,6 +2816,7 @@ auto cudnn_softmax_forward(
     // view) would be read with the wrong strides — the stride-from-shape audit
     // bug. Materialise a contiguous copy so the descriptor matches the data.
     const Tensor input_c = input.contiguous();
+    CudaDeviceGuard dev_guard(input.device().index);
 
     // Calculate sizes before and after the softmax dimension
     int64_t outer_size = 1;
@@ -2884,6 +2898,7 @@ auto cudnn_softmax_backward(
     // non-contiguous inputs would be mis-read (stride-from-shape audit bug).
     const Tensor output_c = output.contiguous();
     const Tensor grad_output_c = grad_output.contiguous();
+    CudaDeviceGuard dev_guard(output.device().index);
 
     int64_t outer_size = 1;
     for (int64_t i = 0; i < dim; ++i) outer_size *= shape[i];
@@ -2965,6 +2980,7 @@ auto cudnn_log_softmax_forward(
     // Contiguous copy so cuDNN's [outer, dim, inner] descriptor matches the
     // buffer layout (stride-from-shape audit bug for transposed views).
     const Tensor input_c = input.contiguous();
+    CudaDeviceGuard dev_guard(input.device().index);
 
     int64_t outer_size = 1;
     for (int64_t i = 0; i < dim; ++i) outer_size *= shape[i];
@@ -3052,6 +3068,7 @@ auto cudnn_log_softmax_backward(
     // buffer layout (stride-from-shape audit bug for transposed views).
     const Tensor output_c = output.contiguous();
     const Tensor grad_output_c = grad_output.contiguous();
+    CudaDeviceGuard dev_guard(output.device().index);
 
     Tensor grad_input = Tensor(std::vector<int64_t>(shape.begin(), shape.end()), output_c.dtype(), output_c.device());
 
@@ -3706,6 +3723,7 @@ auto cudnn_layer_norm_forward(
     Tensor weight_c = weight.is_contiguous() ? weight : weight.contiguous();
     Tensor bias_c = bias.is_contiguous() ? bias : bias.contiguous();
 
+    CudaDeviceGuard dev_guard(input.device().index);
     cudnnHandle_t handle = CuDNNHandle::get();
     if (stream) {
         CuDNNHandle::set_stream(stream);
@@ -4174,6 +4192,121 @@ struct CudnnConvNdDesc {
     }
 };
 
+// ============================================================================
+// Conv3d forward algorithm cache
+//
+// Mirrors Conv2dAlgoCache (include/tenzor/backend/cudnn_wrapper.hpp) but keyed
+// on the full 5D (N,C,D,H,W) problem with per-axis D/H/W stride, padding and
+// dilation. Without this cache cudnn_conv3d_forward called
+// cudnnGetConvolutionForwardAlgorithm_v7 fresh on every call and picked the
+// lowest heuristic-estimated-time algo. Heuristic ties reorder between runs,
+// so for FP32 a TF32/Winograd algo could be chosen on some runs and diverge
+// past the parity tolerance — the source of the intermittent
+// NNConvParity.Conv3d_Basic/cuda failure. A shape+dtype-keyed cache makes the
+// same problem always resolve to the same algorithm.
+//
+// As in Conv2dCacheKey, prefer_precise_f32 is part of the key: a Winograd algo
+// cached when TF32 was allowed must not be reused after TF32 is disabled, and
+// vice versa.
+namespace {
+
+struct Conv3dCacheKey {
+    int64_t batch;
+    int64_t in_channels;
+    int64_t depth;
+    int64_t height;
+    int64_t width;
+    int64_t out_channels;
+    int64_t kernel_d;
+    int64_t kernel_h;
+    int64_t kernel_w;
+    int64_t stride_d;
+    int64_t stride_h;
+    int64_t stride_w;
+    int64_t pad_d;
+    int64_t pad_h;
+    int64_t pad_w;
+    int64_t dil_d;
+    int64_t dil_h;
+    int64_t dil_w;
+    int64_t groups;
+    cudnnDataType_t dtype;
+    bool prefer_precise_f32 = false;
+
+    bool operator==(const Conv3dCacheKey& o) const {
+        return batch == o.batch && in_channels == o.in_channels &&
+               depth == o.depth && height == o.height && width == o.width &&
+               out_channels == o.out_channels &&
+               kernel_d == o.kernel_d && kernel_h == o.kernel_h && kernel_w == o.kernel_w &&
+               stride_d == o.stride_d && stride_h == o.stride_h && stride_w == o.stride_w &&
+               pad_d == o.pad_d && pad_h == o.pad_h && pad_w == o.pad_w &&
+               dil_d == o.dil_d && dil_h == o.dil_h && dil_w == o.dil_w &&
+               groups == o.groups && dtype == o.dtype &&
+               prefer_precise_f32 == o.prefer_precise_f32;
+    }
+};
+
+struct Conv3dCacheKeyHash {
+    size_t operator()(const Conv3dCacheKey& k) const {
+        size_t h = 0;
+        auto hash_combine = [&h](auto val) {
+            h ^= std::hash<decltype(val)>{}(val) + 0x9e3779b9 + (h << 6) + (h >> 2);
+        };
+        hash_combine(k.batch);
+        hash_combine(k.in_channels);
+        hash_combine(k.depth);
+        hash_combine(k.height);
+        hash_combine(k.width);
+        hash_combine(k.out_channels);
+        hash_combine(k.kernel_d);
+        hash_combine(k.kernel_h);
+        hash_combine(k.kernel_w);
+        hash_combine(k.stride_d);
+        hash_combine(k.stride_h);
+        hash_combine(k.stride_w);
+        hash_combine(k.pad_d);
+        hash_combine(k.pad_h);
+        hash_combine(k.pad_w);
+        hash_combine(k.dil_d);
+        hash_combine(k.dil_h);
+        hash_combine(k.dil_w);
+        hash_combine(k.groups);
+        hash_combine(static_cast<int>(k.dtype));
+        hash_combine(static_cast<int>(k.prefer_precise_f32));
+        return h;
+    }
+};
+
+// Thread-safe forward-algorithm cache. Reuses CachedFwdAlgo from the header.
+class Conv3dAlgoCache {
+public:
+    static Conv3dAlgoCache& instance() {
+        static Conv3dAlgoCache cache;
+        return cache;
+    }
+
+    bool get_fwd(const Conv3dCacheKey& key, CachedFwdAlgo& result) {
+        std::lock_guard<std::mutex> lock(fwd_mutex_);
+        auto it = fwd_cache_.find(key);
+        if (it != fwd_cache_.end()) {
+            result = it->second;
+            return true;
+        }
+        return false;
+    }
+
+    void set_fwd(const Conv3dCacheKey& key, const CachedFwdAlgo& algo) {
+        std::lock_guard<std::mutex> lock(fwd_mutex_);
+        fwd_cache_[key] = algo;
+    }
+
+private:
+    std::mutex fwd_mutex_;
+    std::unordered_map<Conv3dCacheKey, CachedFwdAlgo, Conv3dCacheKeyHash> fwd_cache_;
+};
+
+} // anonymous namespace
+
 auto cudnn_conv3d_forward(
     const Tensor& input,
     const Tensor& weight,
@@ -4206,6 +4339,7 @@ auto cudnn_conv3d_forward(
     std::vector<int64_t> output_shape = {batch, out_channels, out_d, out_h, out_w};
     Tensor output(output_shape, input.dtype(), input.device());
 
+    CudaDeviceGuard dev_guard(input.device().index);
     cudnnHandle_t handle = CuDNNHandle::get();
     CuDNNHandle::set_stream(stream);
 
@@ -4258,39 +4392,87 @@ auto cudnn_conv3d_forward(
     }
     #endif
 
-    // Find algorithm using heuristic
-    constexpr int kMaxAlgos = 8;
-    int returned_algo_count = 0;
-    cudnnConvolutionFwdAlgoPerf_t perf_results[kMaxAlgos];
-
-    CUDNN_CHECK(cudnnGetConvolutionForwardAlgorithm_v7(
-        handle, input_desc.desc, filter_desc.desc, conv_desc.handle(),
-        output_desc.desc, kMaxAlgos, &returned_algo_count, perf_results));
-
+    // Algorithm selection. Mirrors cudnn_conv2d_forward: shape+dtype-keyed
+    // cache for deterministic algo reuse, plus a Winograd exclusion for
+    // precise FP32 (TF32 disabled) so the chosen accumulator order matches
+    // the implicit-GEMM order used by the other backends and stays inside
+    // the tight Float32 parity tolerance.
     const size_t kMaxWorkspaceSize = CuDNNWorkspace::max_workspace_size();
-    cudnnConvolutionFwdAlgo_t algo = perf_results[0].algo;
+
+    // Same precise-FP32 source of truth as the math-type block above and as
+    // Conv2d: an FP32 input with TF32 disabled wants Winograd excluded.
+    const bool prefer_precise_f32 =
+        (cudnn_dtype == CUDNN_DATA_FLOAT) &&
+        !::tenzor::cuda::matmul::allow_tf32();
+
+    Conv3dCacheKey cache_key{
+        batch, in_channels, depth, height, width,
+        out_channels, kernel_d, kernel_h, kernel_w,
+        stride[0], stride[1], stride[2],
+        padding[0], padding[1], padding[2],
+        dilation[0], dilation[1], dilation[2],
+        groups, cudnn_dtype, prefer_precise_f32
+    };
+
+    cudnnConvolutionFwdAlgo_t algo;
     size_t workspace_size = 0;
 
-    // Pick fastest algorithm that fits in workspace
-    float best_time = std::numeric_limits<float>::max();
-    for (int i = 0; i < returned_algo_count; ++i) {
-        if (perf_results[i].status != CUDNN_STATUS_SUCCESS) continue;
-        size_t ws_size = 0;
-        cudnnStatus_t ws_status = cudnnGetConvolutionForwardWorkspaceSize(
+    CachedFwdAlgo cached;
+    if (Conv3dAlgoCache::instance().get_fwd(cache_key, cached)) {
+        // Cache hit — same problem always resolves to the same algorithm.
+        algo = cached.algo;
+        workspace_size = cached.workspace_size;
+    } else {
+        constexpr int kMaxAlgos = 8;
+        int returned_algo_count = 0;
+        cudnnConvolutionFwdAlgoPerf_t perf_results[kMaxAlgos];
+
+        CUDNN_CHECK(cudnnGetConvolutionForwardAlgorithm_v7(
             handle, input_desc.desc, filter_desc.desc, conv_desc.handle(),
-            output_desc.desc, perf_results[i].algo, &ws_size);
-        if (ws_status == CUDNN_STATUS_SUCCESS && ws_size <= kMaxWorkspaceSize) {
-            if (perf_results[i].time < best_time) {
-                best_time = perf_results[i].time;
-                algo = perf_results[i].algo;
-                workspace_size = ws_size;
+            output_desc.desc, kMaxAlgos, &returned_algo_count, perf_results));
+
+        algo = perf_results[0].algo;
+
+        // Pick fastest algorithm that fits in workspace, excluding Winograd
+        // variants when precise FP32 is requested.
+        float best_time = std::numeric_limits<float>::max();
+        for (int i = 0; i < returned_algo_count; ++i) {
+            if (perf_results[i].status != CUDNN_STATUS_SUCCESS) continue;
+
+            if (prefer_precise_f32) {
+                cudnnConvolutionFwdAlgo_t candidate = perf_results[i].algo;
+                if (candidate == CUDNN_CONVOLUTION_FWD_ALGO_WINOGRAD ||
+                    candidate == CUDNN_CONVOLUTION_FWD_ALGO_WINOGRAD_NONFUSED) {
+                    continue;
+                }
+            }
+
+            size_t ws_size = 0;
+            cudnnStatus_t ws_status = cudnnGetConvolutionForwardWorkspaceSize(
+                handle, input_desc.desc, filter_desc.desc, conv_desc.handle(),
+                output_desc.desc, perf_results[i].algo, &ws_size);
+            if (ws_status == CUDNN_STATUS_SUCCESS && ws_size <= kMaxWorkspaceSize) {
+                if (perf_results[i].time < best_time) {
+                    best_time = perf_results[i].time;
+                    algo = perf_results[i].algo;
+                    workspace_size = ws_size;
+                }
             }
         }
-    }
-    if (best_time == std::numeric_limits<float>::max()) {
-        CUDNN_CHECK(cudnnGetConvolutionForwardWorkspaceSize(
-            handle, input_desc.desc, filter_desc.desc, conv_desc.handle(),
-            output_desc.desc, algo, &workspace_size));
+        if (best_time == std::numeric_limits<float>::max()) {
+            // Nothing viable survived. For precise FP32, fall back to the
+            // deterministic implicit-precomp-GEMM (matches Conv2d) rather
+            // than whatever heuristic ordering left in perf_results[0],
+            // which could be a Winograd variant.
+            if (prefer_precise_f32) {
+                algo = CUDNN_CONVOLUTION_FWD_ALGO_IMPLICIT_PRECOMP_GEMM;
+            }
+            CUDNN_CHECK(cudnnGetConvolutionForwardWorkspaceSize(
+                handle, input_desc.desc, filter_desc.desc, conv_desc.handle(),
+                output_desc.desc, algo, &workspace_size));
+        }
+
+        Conv3dAlgoCache::instance().set_fwd(cache_key, {algo, workspace_size});
     }
 
     void* workspace = CuDNNWorkspace::get(workspace_size);
@@ -4356,6 +4538,7 @@ auto cudnn_conv3d_backward(
     Tensor grad_weight({out_channels, in_channels / groups, kernel_d, kernel_h, kernel_w}, weight.dtype(), weight.device());
     Tensor grad_bias({out_channels}, weight.dtype(), weight.device());
 
+    CudaDeviceGuard dev_guard(input.device().index);
     cudnnHandle_t handle = CuDNNHandle::get();
     CuDNNHandle::set_stream(stream);
 
@@ -4540,6 +4723,7 @@ auto cudnn_conv_transpose3d_forward(
     std::vector<int64_t> output_shape = {batch, out_channels, d_out, h_out, w_out};
     Tensor output(output_shape, input.dtype(), input.device());
 
+    CudaDeviceGuard dev_guard(input.device().index);
     cudnnHandle_t handle = CuDNNHandle::get();
     CuDNNHandle::set_stream(stream);
 
@@ -4691,6 +4875,7 @@ auto cudnn_conv_transpose3d_backward(
     Tensor grad_weight({in_channels, out_channels / groups, kernel_d, kernel_h, kernel_w}, weight.dtype(), weight.device());
     Tensor grad_bias({out_channels}, weight.dtype(), weight.device());
 
+    CudaDeviceGuard dev_guard(input.device().index);
     cudnnHandle_t handle = CuDNNHandle::get();
     CuDNNHandle::set_stream(stream);
 

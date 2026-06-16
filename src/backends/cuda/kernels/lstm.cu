@@ -16,7 +16,12 @@ namespace cuda {
 constexpr int BLOCK_SIZE = 256;
 
 inline int get_num_blocks(int64_t n, int block_size = BLOCK_SIZE) {
-    return (n + block_size - 1) / block_size;
+    // Clamp to the CUDA grid x-dimension limit (2^31-1) and compute the count in
+    // 64-bit so a >2^31-element launch does not silently truncate to a wrong int.
+    int64_t blocks = (n + block_size - 1) / block_size;
+    if (blocks < 1) blocks = 1;
+    if (blocks > 2147483647LL) blocks = 2147483647LL;
+    return static_cast<int>(blocks);
 }
 
 // Numerically stable sigmoid: clamp input to [-20, 20] to prevent exp overflow

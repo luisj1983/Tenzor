@@ -845,12 +845,28 @@ auto VulkanBackend::dispatchExpand(const Tensor& input_in, const std::vector<int
         }
     }
 
+    // The expand shaders carry input/output shape & stride in fixed [8] push-
+    // constant arrays. A rank >8 (output or input) would index past those arrays
+    // in-shader (reading the uninitialized tail → OOB). This is reachable via the
+    // complex-expand recursion below, which appends a trailing dim-2 and re-enters
+    // with a real shape of rank+1 (an 8-D complex expand becomes 9-D real). Reject
+    // up front with a clear message instead of silently corrupting output.
+    if (shape.size() > 8 || input_in.shape().size() > 8) {
+        throw std::runtime_error(
+            "Vulkan expand supports at most 8 dimensions (got output rank "
+            + std::to_string(shape.size()) + ", input rank "
+            + std::to_string(input_in.shape().size()) + ")");
+    }
+
     // The shader below receives input strides computed from the input shape
     // (contiguous assumption). If the caller passed a non-contiguous view
     // (e.g. permute + unsqueeze) those computed strides would not match the
     // actual memory layout and the shader would read wrong elements.
-    // Materialize to contiguous first, matching CPU semantics.
-    Tensor input = input_in.is_contiguous() ? input_in : input_in.contiguous();
+    // Materialize to contiguous first, matching CPU semantics. Use
+    // dispatchContiguous (not .contiguous()): a stride-contiguous offset view is
+    // left untouched by .contiguous() and would later trip the descriptor offset
+    // guard; dispatchContiguous guarantees packed storage at offset 0.
+    Tensor input = dispatchContiguous(input_in);
     int32_t device_id = input.device().index;
 
     // Complex dtypes: expand by treating the complex element as two adjacent
@@ -1139,12 +1155,25 @@ auto VulkanBackend::dispatchCat(const std::vector<Tensor>& inputs, int64_t dim) 
  * @brief Clamp tensor values to [min, max] range
  */
 auto VulkanBackend::dispatchClamp(const Tensor& input, double min_value, double max_value) -> Tensor {
+    // Complex clamp has no defined ordering, so it is meaningless — the CPU
+    // clamp_kernel throws on complex. Without this guard, Complex64/Complex128
+    // fall through the int/f64/f16/bf16 branches into the 32-bit float `clamp`
+    // shader, which reinterprets interleaved real/imag pairs as scalars and
+    // corrupts the data. Reject up front to match CPU semantics.
+    if (input.dtype() == DType::Complex64 || input.dtype() == DType::Complex128) {
+        throw std::invalid_argument("clamp: not supported for complex dtypes");
+    }
+
     // Handle empty tensors - no work to do
     if (input.numel() == 0) {
         auto input_shape = input.shape();
         std::vector<int64_t> output_shape(input_shape.begin(), input_shape.end());
         return Tensor(output_shape, input.dtype(), input.device());
     }
+
+    // Materialize the read operand to a packed offset-0 buffer before any
+    // descriptor binding below. dispatchContiguous is a no-op when already so.
+    const Tensor input_c = dispatchContiguous(input);
 
     // Integer clamp: dedicated by-byte-width shaders (the float clamp shaders
     // would reinterpret integer storage as float and corrupt it). ±inf bounds
@@ -1198,7 +1227,7 @@ auto VulkanBackend::dispatchClamp(const Tensor& input, double min_value, double 
             const size_t buf = ((static_cast<size_t>(numel) * elem_bytes + 3) / 4) * 4;
 
             std::vector<std::pair<uint32_t, const void*>> bindings = {
-                {0, input.data_ptr()}, {1, output.data_ptr()}};
+                {0, input_c.data_ptr()}, {1, output.data_ptr()}};
             std::vector<size_t> sizes = {buf, buf};
             VkDescriptorSet descriptorSet =
                 allocateAndWriteDescriptorSet(device_id, pipeline, bindings, sizes);
@@ -1254,7 +1283,7 @@ auto VulkanBackend::dispatchClamp(const Tensor& input, double min_value, double 
     std::vector<int64_t> output_shape(input_shape.begin(), input_shape.end());
     Tensor output(output_shape, input.dtype(), input.device());
 
-    const void* buffer_in = input.data_ptr();
+    const void* buffer_in = input_c.data_ptr();
     const void* buffer_out = output.data_ptr();
     size_t buffer_size_in, buffer_size_out;
     if (is_float16 || is_bfloat16) {
@@ -1342,8 +1371,11 @@ auto VulkanBackend::dispatchActivation([[maybe_unused]] const std::string& op_na
                                         const Tensor& input_raw,
                                         uint32_t opcode,
                                         double param) -> Tensor {
-    // audit-2026-05-03 bug #15 mirror: ensure contiguous input.
-    auto input = input_raw.contiguous();
+    // audit-2026-05-03 bug #15 mirror: ensure contiguous input. Use
+    // dispatchContiguous (not .contiguous()): a stride-contiguous offset view is
+    // left untouched by .contiguous() and would trip the descriptor offset
+    // guard; dispatchContiguous guarantees packed storage at offset 0.
+    auto input = dispatchContiguous(input_raw);
     // Handle empty tensors - no GPU work needed
     if (input.numel() == 0) {
         auto input_shape = input.shape();
@@ -1470,9 +1502,12 @@ auto VulkanBackend::dispatchActivationBackward([[maybe_unused]] const std::strin
                                                 const Tensor& input_or_output_raw,
                                                 uint32_t opcode,
                                                 double param) -> Tensor {
-    // audit-2026-05-03 bug #15 mirror: ensure contiguous inputs.
-    auto grad_output = grad_output_raw.contiguous();
-    auto input_or_output = input_or_output_raw.contiguous();
+    // audit-2026-05-03 bug #15 mirror: ensure contiguous inputs. Use
+    // dispatchContiguous (not .contiguous()): a stride-contiguous offset view is
+    // left untouched by .contiguous() and would trip the descriptor offset
+    // guard; dispatchContiguous guarantees packed storage at offset 0.
+    auto grad_output = dispatchContiguous(grad_output_raw);
+    auto input_or_output = dispatchContiguous(input_or_output_raw);
     int32_t device_id = grad_output.device().index;
 
     // Select correct pipeline based on dtype
@@ -1626,9 +1661,13 @@ auto VulkanBackend::dispatchSwishBackward(const Tensor& grad_output,
 
     push_constants.n = static_cast<uint32_t>(grad_output.numel());
 
+    // Materialize read operands to packed offset-0 buffers before binding.
+    const Tensor grad_output_c = dispatchContiguous(grad_output);
+    const Tensor input_c = dispatchContiguous(input);
+
     // Get VkBuffer handles
-    const void* buffer_grad_out = grad_output.data_ptr();
-    const void* buffer_input = input.data_ptr();
+    const void* buffer_grad_out = grad_output_c.data_ptr();
+    const void* buffer_input = input_c.data_ptr();
     const void* buffer_grad_in = grad_input.data_ptr();
 
     // Calculate buffer sizes
@@ -1727,7 +1766,9 @@ auto VulkanBackend::dispatchRReLU(const Tensor& input,
     pc.seed = training ? static_cast<uint32_t>(
         std::chrono::high_resolution_clock::now().time_since_epoch().count() & 0xFFFFFFFF) : 0u;
 
-    const void* buffer_in = input.data_ptr();
+    // Materialize the read operand to a packed offset-0 buffer before binding.
+    const Tensor input_c = dispatchContiguous(input);
+    const void* buffer_in = input_c.data_ptr();
     const void* buffer_out = output.data_ptr();
     size_t buffer_size_in = input.numel() * input.dtype_size();
     size_t buffer_size_out = output.numel() * output.dtype_size();
@@ -1793,8 +1834,11 @@ auto VulkanBackend::dispatchRReLUBackward(const Tensor& grad_output,
     pc.num_elements = static_cast<uint32_t>(grad_output.numel());
     pc.slope = slope;
 
-    const void* buffer_grad_out = grad_output.data_ptr();
-    const void* buffer_input = input.data_ptr();
+    // Materialize read operands to packed offset-0 buffers before binding.
+    const Tensor grad_output_c = dispatchContiguous(grad_output);
+    const Tensor input_c = dispatchContiguous(input);
+    const void* buffer_grad_out = grad_output_c.data_ptr();
+    const void* buffer_input = input_c.data_ptr();
     const void* buffer_grad_in = grad_input.data_ptr();
 
     size_t buffer_size_grad_out = grad_output.numel() * grad_output.dtype_size();
@@ -1861,8 +1905,11 @@ auto VulkanBackend::dispatchLogSigmoidBackward(const Tensor& grad_output,
 
     pc.num_elements = static_cast<uint32_t>(grad_output.numel());
 
-    const void* buffer_grad_out = grad_output.data_ptr();
-    const void* buffer_input = input.data_ptr();
+    // Materialize read operands to packed offset-0 buffers before binding.
+    const Tensor grad_output_c = dispatchContiguous(grad_output);
+    const Tensor input_c = dispatchContiguous(input);
+    const void* buffer_grad_out = grad_output_c.data_ptr();
+    const void* buffer_input = input_c.data_ptr();
     const void* buffer_grad_in = grad_input.data_ptr();
 
     size_t buffer_size_grad_out = grad_output.numel() * grad_output.dtype_size();
@@ -1958,9 +2005,12 @@ auto VulkanBackend::dispatchSoftmaxBackward(const Tensor& grad_output,
     push_constants.dim_size = static_cast<uint32_t>(dim_size);
     push_constants.inner_size = static_cast<uint32_t>(inner_size);
 
+    // Materialize read operands to packed offset-0 buffers before binding.
+    const Tensor grad_output_c = dispatchContiguous(grad_output);
+    const Tensor output_c = dispatchContiguous(output);
     // Get VkBuffer handles
-    const void* buffer_grad_out = grad_output.data_ptr();
-    const void* buffer_output = output.data_ptr();
+    const void* buffer_grad_out = grad_output_c.data_ptr();
+    const void* buffer_output = output_c.data_ptr();
     const void* buffer_grad_in = grad_input.data_ptr();
 
     // Calculate buffer sizes
@@ -2045,9 +2095,12 @@ auto VulkanBackend::dispatchLogSoftmaxBackward(const Tensor& grad_output,
     push_constants.dim_size = static_cast<uint32_t>(dim_size);
     push_constants.inner_size = static_cast<uint32_t>(inner_size);
 
+    // Materialize read operands to packed offset-0 buffers before binding.
+    const Tensor grad_output_c = dispatchContiguous(grad_output);
+    const Tensor output_c = dispatchContiguous(output);
     // Get VkBuffer handles
-    const void* buffer_grad_out = grad_output.data_ptr();
-    const void* buffer_output = output.data_ptr();
+    const void* buffer_grad_out = grad_output_c.data_ptr();
+    const void* buffer_output = output_c.data_ptr();
     const void* buffer_grad_in = grad_input.data_ptr();
 
     // Calculate buffer sizes

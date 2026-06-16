@@ -476,17 +476,29 @@ auto VulkanBackend::dispatchBinaryOp(const std::string& op_name,
 }
 
 auto VulkanBackend::dispatchUnaryOp(const std::string& op_name,
-                                    const Tensor& input) -> Tensor {
+                                    const Tensor& input_in) -> Tensor {
     // Handle empty tensors - no GPU work needed
-    if (input.numel() == 0) {
-        auto input_shape = input.shape();
+    if (input_in.numel() == 0) {
+        auto input_shape = input_in.shape();
         std::vector<int64_t> output_shape(input_shape.begin(), input_shape.end());
         // abs(complex) produces a real-valued output even for empty inputs.
-        DType empty_out_dtype = input.dtype();
-        if (op_name == "abs" && input.dtype() == DType::Complex64)  empty_out_dtype = DType::Float32;
-        if (op_name == "abs" && input.dtype() == DType::Complex128) empty_out_dtype = DType::Float64;
-        return Tensor(output_shape, empty_out_dtype, input.device());
+        DType empty_out_dtype = input_in.dtype();
+        if (op_name == "abs" && input_in.dtype() == DType::Complex64)  empty_out_dtype = DType::Float32;
+        if (op_name == "abs" && input_in.dtype() == DType::Complex128) empty_out_dtype = DType::Float64;
+        return Tensor(output_shape, empty_out_dtype, input_in.device());
     }
+
+    // Every shader below indexes its input buffer from element 0 (no per-binding
+    // byte offset is plumbed into the descriptor or push constants). A sliced /
+    // narrowed view carries a non-zero storage offset() and/or non-contiguous
+    // strides; binding its raw data_ptr() would (a) write a raw byte offset into
+    // the STORAGE_BUFFER descriptor — which Vulkan requires be a multiple of
+    // minStorageBufferOffsetAlignment — and (b) index the wrong physical
+    // elements. Materialize a contiguous, zero-offset operand first, mirroring
+    // the same-shape binary fast path (dispatchBinaryOp).
+    Tensor input = (input_in.offset() != 0 || !input_in.is_contiguous())
+                       ? dispatchContiguous(input_in)
+                       : input_in;
 
     int32_t device_id = input.device().index;
 
@@ -1320,7 +1332,7 @@ auto VulkanBackend::dispatchReduction(const std::string& op_name,
         return dispatchComplexTensor(re, im);
     }
 
-    Tensor input = input_orig.is_contiguous() ? input_orig : input_orig.contiguous();
+    Tensor input = (input_orig.is_contiguous() && input_orig.offset() == 0) ? input_orig : dispatchContiguous(input_orig);
     // Special case: handle empty tensors
     if (input.numel() == 0) {
         // For empty tensors, return identity value
@@ -1733,14 +1745,14 @@ auto VulkanBackend::dispatchMatmul(const Tensor& a_raw, const Tensor& b_raw) -> 
     }
 
     // Make A contiguous if needed (A is usually already contiguous)
-    Tensor a_contig = a.is_contiguous() ? a : dispatchContiguous(a);
+    Tensor a_contig = (a.is_contiguous() && a.offset() == 0) ? a : dispatchContiguous(a);
 
     // For B, check if it's a simple transpose - we can handle that without copying
     // This is common in linear layers: weight.transpose(0, 1)
     // Check if B is a simple transpose (common for linear layers: weight.T)
     // If so, we can use the _bt shader variant instead of making a contiguous copy
     bool b_is_transposed = !b.is_contiguous() && isSimpleTranspose2D(b);
-    Tensor b_for_compute = b_is_transposed ? b : (b.is_contiguous() ? b : dispatchContiguous(b));
+    Tensor b_for_compute = b_is_transposed ? b : ((b.is_contiguous() && b.offset() == 0) ? b : dispatchContiguous(b));
 
     auto a_shape = a_contig.shape();
     auto b_shape = b_for_compute.shape();
@@ -2207,6 +2219,20 @@ auto VulkanBackend::dispatchConv2dBackwardInput(
     int64_t kernel_h = weight_shape[2];
     int64_t kernel_w = weight_shape[3];
 
+    // The conv2d_backward_input shaders compute grad_output flat indices in
+    // 32-bit uint (e.g. conv2d_backward_input_f64.comp grad_out_idx); a tensor
+    // with >UINT32_MAX elements would wrap the index and read out of bounds.
+    // shaderInt64 is not enabled on the device, so reject up front.
+    int64_t grad_input_numel = 1;
+    for (int64_t d : input_shape) grad_input_numel *= d;
+    if (grad_output.numel() > static_cast<int64_t>(UINT32_MAX) ||
+        grad_input_numel > static_cast<int64_t>(UINT32_MAX)) {
+        throw std::runtime_error(
+            "Vulkan conv2d_backward_input: tensor too large for 32-bit indexing "
+            "(grad_output elements " + std::to_string(grad_output.numel()) +
+            ", grad_input elements " + std::to_string(grad_input_numel) + ")");
+    }
+
     int32_t device_id = grad_output.device().index;
 
     // Select shader based on dtype (F16 uses native shader with F32 accumulation)
@@ -2343,6 +2369,18 @@ auto VulkanBackend::dispatchConv2dBackwardWeight(
 
     int64_t kernel_h = weight_shape[2];
     int64_t kernel_w = weight_shape[3];
+
+    // The conv2d_backward_weight shaders compute grad_output/input flat indices
+    // in 32-bit uint; a tensor with >UINT32_MAX elements would wrap the index
+    // and read/write out of bounds. shaderInt64 is not enabled on the device, so
+    // reject oversized tensors up front rather than overflow silently.
+    if (grad_output.numel() > static_cast<int64_t>(UINT32_MAX) ||
+        input.numel() > static_cast<int64_t>(UINT32_MAX)) {
+        throw std::runtime_error(
+            "Vulkan conv2d_backward_weight: tensor too large for 32-bit indexing "
+            "(grad_output elements " + std::to_string(grad_output.numel()) +
+            ", input elements " + std::to_string(input.numel()) + ")");
+    }
 
     int32_t device_id = grad_output.device().index;
 

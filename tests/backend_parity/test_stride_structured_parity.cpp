@@ -129,7 +129,7 @@ TEST_P(StrideStructuredParity, MatMul_TransposedLHS) {
         [](const std::vector<Tensor>& inputs) {
             return matmul(inputs[0], inputs[1]);
         },
-        {lhs, rhs}, device, 1e-4f, 1e-6f, "MatMul transposed LHS");
+        {lhs, rhs}, device, parity::MATMUL_RTOL, parity::MATMUL_ATOL, "MatMul transposed LHS");
 }
 
 INSTANTIATE_BACKEND_TESTS(StrideStructuredParity);

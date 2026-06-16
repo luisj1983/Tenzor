@@ -80,17 +80,21 @@ void batchnorm_mean_var_f32(
         _mm512_store_ps(lane_means, vmean);
         _mm512_store_ps(lane_m2s, vm2);
 
-        float combined_mean = lane_means[0];
-        float combined_m2 = lane_m2s[0];
-        float combined_n = static_cast<float>(lane_count);
+        // The horizontal merge and final division run once per channel, so
+        // accumulate in double: float combined_n would round once the
+        // per-channel element count exceeds 2^24 and float division of the
+        // population variance would diverge from the scalar/double path.
+        double combined_mean = lane_means[0];
+        double combined_m2 = lane_m2s[0];
+        double combined_n = static_cast<double>(lane_count);
 
         for (int lane = 1; lane < 16; lane++) {
-            float n_b = static_cast<float>(lane_count);
-            float total_n = combined_n + n_b;
-            if (total_n == 0.0f) continue;
-            float delta = lane_means[lane] - combined_mean;
-            combined_mean = (combined_mean * combined_n + lane_means[lane] * n_b) / total_n;
-            combined_m2 = combined_m2 + lane_m2s[lane] + delta * delta * combined_n * n_b / total_n;
+            double n_b = static_cast<double>(lane_count);
+            double total_n = combined_n + n_b;
+            if (total_n == 0.0) continue;
+            double delta = static_cast<double>(lane_means[lane]) - combined_mean;
+            combined_mean = (combined_mean * combined_n + static_cast<double>(lane_means[lane]) * n_b) / total_n;
+            combined_m2 = combined_m2 + static_cast<double>(lane_m2s[lane]) + delta * delta * combined_n * n_b / total_n;
             combined_n = total_n;
         }
 
@@ -99,16 +103,16 @@ void batchnorm_mean_var_f32(
         for (int64_t n = 0; n < N; n++) {
             const float* ch_ptr = input + (n * C + c) * spatial_size;
             for (int64_t i = simd_covered; i < spatial_size; i++) {
-                combined_n += 1.0f;
-                float delta = ch_ptr[i] - combined_mean;
+                combined_n += 1.0;
+                double delta = static_cast<double>(ch_ptr[i]) - combined_mean;
                 combined_mean += delta / combined_n;
-                float delta2 = ch_ptr[i] - combined_mean;
+                double delta2 = static_cast<double>(ch_ptr[i]) - combined_mean;
                 combined_m2 += delta * delta2;
             }
         }
 
-        mean[c] = combined_mean;
-        variance[c] = (total_elements > 0) ? combined_m2 / static_cast<float>(total_elements) : 0.0f;
+        mean[c] = static_cast<float>(combined_mean);
+        variance[c] = (total_elements > 0) ? static_cast<float>(combined_m2 / static_cast<double>(total_elements)) : 0.0f;
     }
 }
 

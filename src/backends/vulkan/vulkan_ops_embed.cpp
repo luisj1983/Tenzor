@@ -39,13 +39,16 @@ auto VulkanBackend::dispatchInstanceNorm(const Tensor& input, const Tensor& weig
 
     bool has_affine = (weight.numel() > 0 && bias.numel() > 0);
 
+    // Materialize read operands to packed offset-0 buffers before binding.
+    const Tensor input_c = dispatchContiguous(input);
+
     // The _f16/_bf16 shader declares weight/bias as Float32 buffers. Always convert the
     // weight/bias to Float32 before dispatch so the binding stride matches the shader.
-    Tensor weight_f32 = weight;
-    Tensor bias_f32 = bias;
+    Tensor weight_f32 = dispatchContiguous(weight);
+    Tensor bias_f32 = dispatchContiguous(bias);
     if ((is_float16 || is_bfloat16) && has_affine) {
-        if (weight_f32.dtype() != DType::Float32) weight_f32 = weight_f32.to(DType::Float32);
-        if (bias_f32.dtype() != DType::Float32) bias_f32 = bias_f32.to(DType::Float32);
+        if (weight_f32.dtype() != DType::Float32) weight_f32 = dispatchContiguous(weight_f32.to(DType::Float32));
+        if (bias_f32.dtype() != DType::Float32) bias_f32 = dispatchContiguous(bias_f32.to(DType::Float32));
     }
 
     // Output tensors — mean/rstd are always Float32 for F16 shader
@@ -67,7 +70,7 @@ auto VulkanBackend::dispatchInstanceNorm(const Tensor& input, const Tensor& weig
 
     // Build bindings: input(0), output(1), weight(2), bias(3), mean(4), var(5)
     std::vector<std::pair<uint32_t, const void*>> bindings = {
-        {0, input.data_ptr()},
+        {0, input_c.data_ptr()},
         {1, output.data_ptr()}
     };
     std::vector<size_t> sizes = {input_buf_size, output_buf_size};
@@ -148,11 +151,17 @@ auto VulkanBackend::dispatchInstanceNormBackward(const Tensor& grad_output, cons
 
     bool has_affine = (weight.numel() > 0);
 
+    // Materialize read operands to packed offset-0 buffers before binding.
+    const Tensor grad_output_c = dispatchContiguous(grad_output);
+    const Tensor input_c = dispatchContiguous(input);
+    const Tensor mean_c = dispatchContiguous(mean);
+    const Tensor rstd_c = dispatchContiguous(rstd);
+
     // Align weight dtype with shader expectation: F16/BF16 backward shader reads
     // weight as Float32. Convert if needed so binding strides match.
-    Tensor weight_f32 = weight;
+    Tensor weight_f32 = dispatchContiguous(weight);
     if ((is_float16 || is_bfloat16) && has_affine && weight_f32.dtype() != DType::Float32) {
-        weight_f32 = weight_f32.to(DType::Float32);
+        weight_f32 = dispatchContiguous(weight_f32.to(DType::Float32));
     }
 
     size_t elem_size = input.dtype_size();
@@ -179,10 +188,10 @@ auto VulkanBackend::dispatchInstanceNormBackward(const Tensor& grad_output, cons
     // Bindings: grad_output(0), input(1), mean(2), rstd(3), weight(4),
     //           grad_input(5), grad_weight(6), grad_bias(7)
     std::vector<std::pair<uint32_t, const void*>> bindings = {
-        {0, grad_output.data_ptr()},
-        {1, input.data_ptr()},
-        {2, mean.data_ptr()},
-        {3, rstd.data_ptr()},
+        {0, grad_output_c.data_ptr()},
+        {1, input_c.data_ptr()},
+        {2, mean_c.data_ptr()},
+        {3, rstd_c.data_ptr()},
     };
     std::vector<size_t> sizes = {input_buf_size, input_buf_size, nc_buf_size, nc_buf_size};
 
@@ -250,6 +259,10 @@ auto VulkanBackend::dispatchEmbeddingBag(const Tensor& embeddings, const Tensor&
     }
     auto* pipeline = getPipeline(shader_name, device_id);
 
+    // Materialize read operands to packed offset-0 buffers before binding.
+    const Tensor embeddings_c = dispatchContiguous(embeddings);
+    const Tensor offsets_packed = dispatchContiguous(offsets);
+
     int64_t total_rows = embeddings.shape()[0];
     int64_t num_offsets_raw = offsets.numel();
     int64_t num_bags = include_last_offset ? (num_offsets_raw - 1) : num_offsets_raw;
@@ -265,13 +278,13 @@ auto VulkanBackend::dispatchEmbeddingBag(const Tensor& embeddings, const Tensor&
     }
 
     // Offsets must be Int32 for the shader
-    Tensor offsets_i32 = offsets;
+    Tensor offsets_i32 = offsets_packed;
     if (offsets.dtype() == DType::Int64) {
         std::vector<int64_t> offs_shape(offsets.shape().begin(), offsets.shape().end());
         offsets_i32 = Tensor(offs_shape, DType::Int32, offsets.device());
 
         auto* cast_pipeline = getPipeline("cast_int64_to_int32", device_id);
-        const void* buf_in = offsets.data_ptr();
+        const void* buf_in = offsets_packed.data_ptr();
         const void* buf_out = offsets_i32.data_ptr();
         size_t size_in = offsets.numel() * sizeof(int64_t);
         size_t size_out = offsets_i32.numel() * sizeof(int32_t);
@@ -309,7 +322,7 @@ auto VulkanBackend::dispatchEmbeddingBag(const Tensor& embeddings, const Tensor&
     size_t idx_buf_size = max_indices.numel() * sizeof(int64_t);
 
     std::vector<std::pair<uint32_t, const void*>> bindings = {
-        {0, embeddings.data_ptr()},
+        {0, embeddings_c.data_ptr()},
         {1, offsets_i32.data_ptr()},
         {2, output.data_ptr()},
         {3, max_indices.data_ptr()},
@@ -401,14 +414,18 @@ auto VulkanBackend::dispatchEmbeddingBagBackward(const Tensor& grad_output,
     if (mode == "mean") mode_int = 1;
     else if (mode == "max") mode_int = 2;
 
+    // Materialize read operands to packed offset-0 buffers before binding.
+    const Tensor indices_packed = dispatchContiguous(indices);
+    const Tensor offsets_packed = dispatchContiguous(offsets);
+
     // Indices must be Int32 for the shader
-    Tensor indices_i32 = indices;
+    Tensor indices_i32 = indices_packed;
     if (indices.dtype() == DType::Int64) {
         std::vector<int64_t> idx_shape(indices.shape().begin(), indices.shape().end());
         indices_i32 = Tensor(idx_shape, DType::Int32, indices.device());
 
         auto* cast_pipeline = getPipeline("cast_int64_to_int32", device_id);
-        const void* buf_in = indices.data_ptr();
+        const void* buf_in = indices_packed.data_ptr();
         const void* buf_out = indices_i32.data_ptr();
         size_t size_in = indices.numel() * sizeof(int64_t);
         size_t size_out = indices_i32.numel() * sizeof(int32_t);
@@ -433,13 +450,13 @@ auto VulkanBackend::dispatchEmbeddingBagBackward(const Tensor& grad_output,
     }
 
     // Offsets must be Int32 for the shader
-    Tensor offsets_i32 = offsets;
+    Tensor offsets_i32 = offsets_packed;
     if (offsets.dtype() == DType::Int64) {
         std::vector<int64_t> offs_shape(offsets.shape().begin(), offsets.shape().end());
         offsets_i32 = Tensor(offs_shape, DType::Int32, offsets.device());
 
         auto* cast_pipeline = getPipeline("cast_int64_to_int32", device_id);
-        const void* buf_in = offsets.data_ptr();
+        const void* buf_in = offsets_packed.data_ptr();
         const void* buf_out = offsets_i32.data_ptr();
         size_t size_in = offsets.numel() * sizeof(int64_t);
         size_t size_out = offsets_i32.numel() * sizeof(int32_t);
@@ -470,7 +487,8 @@ auto VulkanBackend::dispatchEmbeddingBagBackward(const Tensor& grad_output,
     // The bf16 shader reads grad_output as 32-bit float, so promote the bf16
     // grad_output to a Float32 staging buffer before binding. The f16 shader reads
     // packed float16_t directly, so f16 grad_output is bound as-is.
-    Tensor grad_output_bound = is_bf16 ? grad_output.to(DType::Float32) : grad_output;
+    Tensor grad_output_bound = is_bf16 ? dispatchContiguous(grad_output.to(DType::Float32))
+                                       : dispatchContiguous(grad_output);
 
     size_t go_elem_size = grad_output_bound.dtype_size();
     size_t gw_elem_size = grad_weight.dtype_size();

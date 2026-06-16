@@ -35,7 +35,16 @@ inline constexpr float MATH_ATOL = 1e-8f;
 inline constexpr float TRANSCENDENTAL_RTOL = 5e-6f;
 inline constexpr float TRANSCENDENTAL_ATOL = 1e-7f;
 
-// MatMul / BMM / Linear (BLAS calls accumulate at varying precision per backend)
+// MatMul / BMM / Linear.
+//
+// All backends compute FP32 GEMM at true single precision: CPU(MKL),
+// Vulkan(`float` accumulators), OneAPI(oneMKL compute_mode::standard),
+// ROCm(rocBLAS), and CUDA(CUBLAS_COMPUTE_32F once TF32 is disabled). Verified:
+// against a Float64 reference every backend's max abs error is ~4e-6 for a
+// 32x32 GEMM — true FP32, well within 1e-4. (An earlier ~6-9e-3 divergence was
+// a real bug: CUDA TF32 was left enabled because its disable flag was resolved
+// at .so static-init before the test fixture's setenv ran; that is fixed by
+// resolving the flag lazily on the first gemm. Do NOT loosen this to mask it.)
 inline constexpr float MATMUL_RTOL = 1e-4f;
 inline constexpr float MATMUL_ATOL = 1e-5f;
 

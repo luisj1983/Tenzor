@@ -12,39 +12,51 @@ namespace numpy {
 
 namespace {
 
-// Try to get ml_dtypes.bfloat16 numpy dtype. Returns the dtype object on
-// success, or py::none() if ml_dtypes is not installed.
+// Single, retry-capable cache for the ``ml_dtypes`` module, shared by both
+// interop directions (emit: tensor→numpy, and import: numpy→tensor).
 //
-// FF.19: the lazy probe is serialised through ``std::once_flag`` so two
-// Python threads (each released the GIL at some point during a CPU
-// transfer and then re-acquired it) cannot race on initialising the
-// static cache. ``std::call_once`` guarantees the probe body runs
-// exactly once across all threads; the cached ``py::object`` is then
-// safe to read concurrently because subsequent calls only observe the
-// resolved value.
+// Rationale (unifying FF.19 / CC.12): the previous emit path memoised a
+// *permanent negative* via ``std::call_once`` — if ``ml_dtypes`` was not yet
+// importable on the very first BFloat16 export, the negative was cached
+// forever and a later ``pip install ml_dtypes`` (or an indirect import by
+// JAX/Keras) was never picked up. Meanwhile the import path re-ran
+// ``py::module_::import("ml_dtypes")`` on every call, paying the import-system
+// lookup cost on the hot ``from_numpy`` void-dtype path.
 //
-// Note: this trades the previous CC.12 "retry on failure" behaviour for
-// thread safety. ml_dtypes must therefore be installed *before* the
-// first BFloat16 numpy interop call (a one-line ``pip install
-// ml_dtypes`` at process start); subsequent installs in the same
-// process will not be picked up. This matches PyTorch's behaviour and
-// avoids the race where two threads simultaneously enter the import
-// path and assign to ``cached``.
+// This cache resolves both: it memoises only the *positive* result (the
+// resolved module object), and on failure leaves the cache empty so the next
+// call retries the import. The GIL is held by every caller (these run only
+// while a py::object is being manipulated), so the plain ``static``
+// initialisation and the read/write of the cached handle are serialised — no
+// data race, and no permanent-negative.
+auto get_ml_dtypes_module() -> py::object {
+    static py::object cached_module;  // null until first successful import
+    if (cached_module && !cached_module.is_none()) {
+        return cached_module;
+    }
+    try {
+        cached_module = py::module_::import("ml_dtypes");
+    } catch (const py::error_already_set&) {
+        // Not installed (yet). Leave the cache empty so a subsequent call
+        // retries — a later `pip install ml_dtypes` is then picked up.
+        return py::none();
+    }
+    return cached_module;
+}
+
+// Resolve the ml_dtypes.bfloat16 NumPy dtype. Returns the dtype object on
+// success, or py::none() if ml_dtypes is not installed (retried on each call
+// via get_ml_dtypes_module()).
 auto get_ml_dtypes_bfloat16() -> py::object {
-    static std::once_flag probe_flag;
-    static py::object cached_bfloat16_dtype = py::none();
-    std::call_once(probe_flag, []() {
-        try {
-            auto ml_dtypes = py::module_::import("ml_dtypes");
-            cached_bfloat16_dtype = py::dtype::from_args(ml_dtypes.attr("bfloat16"));
-        } catch (const py::error_already_set&) {
-            // ml_dtypes not installed — cached stays py::none(). The
-            // emit-side fallback in apply_bfloat16_dtype() will surface
-            // a typed ValueError when the user actually tries to expose
-            // a BFloat16 tensor to NumPy.
-        }
-    });
-    return cached_bfloat16_dtype;
+    auto ml_dtypes = get_ml_dtypes_module();
+    if (ml_dtypes.is_none()) {
+        return py::none();
+    }
+    try {
+        return py::dtype::from_args(ml_dtypes.attr("bfloat16"));
+    } catch (const py::error_already_set&) {
+        return py::none();
+    }
 }
 
 // If the tensor dtype is BFloat16, reinterpret a uint16 NumPy array as
@@ -54,30 +66,20 @@ auto get_ml_dtypes_bfloat16() -> py::object {
 // would map kind='u', itemsize=2 to UInt16 rather than BFloat16, so the
 // dtype was lost without any user-visible error.
 //
-// CC.12: BEFORE raising the Z.19 ValueError we make one more lazy attempt
-// to import ml_dtypes — `get_ml_dtypes_bfloat16()` itself no longer caches
-// a negative result, but we keep the explicit second probe here so the
-// emit path makes the auto-detect intent visible at the use site and so
-// `import_module("ml_dtypes")` can be called from any GIL-held context
-// (mirrors the JAX/Keras coexistence pattern: the dependency may have
-// been imported indirectly between when Tenzor first ran and when the
-// user finally calls .numpy() on a BF16 tensor).
+// CC.12: `get_ml_dtypes_bfloat16()` is now backed by a retry-capable cache
+// (`get_ml_dtypes_module()` memoises only the positive result), so a single
+// probe per call auto-detects a late `pip install ml_dtypes` or an indirect
+// import by JAX/Keras between when Tenzor first ran and when the user finally
+// calls .numpy() on a BF16 tensor. Only if the import still fails do we raise
+// the typed Z.19 ValueError below.
 auto apply_bfloat16_dtype(py::array result, DType dtype) -> py::array {
     if (dtype != DType::BFloat16) {
         return result;
     }
+    // get_ml_dtypes_bfloat16() now retries the import on every call (it only
+    // memoises the positive result), so a single probe here is sufficient —
+    // the redundant second import attempt is gone.
     auto bf16_dtype = get_ml_dtypes_bfloat16();
-    if (bf16_dtype.is_none()) {
-        // Second, explicit attempt: probe ml_dtypes once more so the
-        // emit path itself doesn't depend on the cache's freshness.
-        try {
-            auto ml_dtypes = py::module_::import("ml_dtypes");
-            bf16_dtype = py::dtype::from_args(ml_dtypes.attr("bfloat16"));
-        } catch (const py::error_already_set&) {
-            // Genuinely not installed — fall through to the typed
-            // ValueError below.
-        }
-    }
     if (!bf16_dtype.is_none()) {
         // View the uint16 data as bfloat16 (same binary layout, zero-copy)
         return result.attr("view")(bf16_dtype);
@@ -135,7 +137,7 @@ auto dtype_to_numpy_format(DType dtype) -> std::string {
                 "must be dequantized before calling .numpy() — use "
                 "t.dequantize().numpy() or t.to(DType::Float32).numpy() first");
     }
-    throw std::runtime_error("Unsupported dtype for NumPy conversion: " +
+    throw ::tenzor::TypeError("Unsupported dtype for NumPy conversion: " +
                            std::string(dtype_name(dtype)));
 }
 
@@ -145,15 +147,21 @@ auto numpy_dtype_to_tenzor(const py::array& arr) -> DType {
     auto kind = dtype.kind();
     auto itemsize = dtype.itemsize();
 
-    // Check for BFloat16 (ml_dtypes.bfloat16 shows as kind='V', itemsize=2)
+    // Check for BFloat16 (ml_dtypes.bfloat16 shows as kind='V', itemsize=2).
+    // Uses the shared, memoised ml_dtypes module handle so this hot path does
+    // not re-run the import machinery on every from_numpy() call.
     if (kind == 'V' && itemsize == 2) {
-        try {
-            auto ml_dtypes = py::module_::import("ml_dtypes");
-            auto bf16_dtype = ml_dtypes.attr("bfloat16");
-            if (dtype.equal(py::dtype::from_args(bf16_dtype))) {
-                return DType::BFloat16;
+        auto ml_dtypes = get_ml_dtypes_module();
+        if (!ml_dtypes.is_none()) {
+            try {
+                auto bf16_dtype = ml_dtypes.attr("bfloat16");
+                if (dtype.equal(py::dtype::from_args(bf16_dtype))) {
+                    return DType::BFloat16;
+                }
+            } catch (const py::error_already_set&) {
+                PyErr_Clear();
             }
-        } catch (const py::error_already_set&) {
+        } else {
             // ml_dtypes not available — fall back to string matching
             std::string dtype_name = py::str(dtype);
             if (dtype_name.find("bfloat16") != std::string::npos) {
@@ -165,8 +173,9 @@ auto numpy_dtype_to_tenzor(const py::array& arr) -> DType {
     // R.26: detect ml_dtypes.float8_e4m3fn / float8_e5m2 (kind='V', itemsize=1).
     // Without this branch, FP8 NumPy arrays surface as "Unsupported NumPy dtype".
     if (kind == 'V' && itemsize == 1) {
-        try {
-            auto ml_dtypes = py::module_::import("ml_dtypes");
+        auto ml_dtypes = get_ml_dtypes_module();
+        if (!ml_dtypes.is_none()) {
+          try {
             auto e4m3fnuz = ml_dtypes.attr("float8_e4m3fnuz");
             if (dtype.equal(py::dtype::from_args(e4m3fnuz))) {
                 return DType::FP8_E4M3FNUZ;
@@ -183,7 +192,10 @@ auto numpy_dtype_to_tenzor(const py::array& arr) -> DType {
             if (dtype.equal(py::dtype::from_args(e5m2))) {
                 return DType::FP8_E5M2;
             }
-        } catch (const py::error_already_set&) {
+          } catch (const py::error_already_set&) {
+            PyErr_Clear();
+          }
+        } else {
             // ml_dtypes not available — fall back to dtype-name string match.
             // Match the FNUZ variants first: their names contain the
             // "float8_e4m3"/"float8_e5m2" substrings, so the generic checks
@@ -239,12 +251,12 @@ auto numpy_dtype_to_tenzor(const py::array& arr) -> DType {
     // numpy_to_tensor (see 5th-audit B'4); the rest get explicit messages
     // here so they surface even via direct numpy_dtype_to_tenzor() callers.
     if (kind == 'M') {
-        throw std::runtime_error(
+        throw ::tenzor::TypeError(
             "datetime64 arrays cannot be converted; convert to int64 "
             "nanoseconds first (`.view('int64')` or `.astype('int64')`)");
     }
     if (kind == 'm') {
-        throw std::runtime_error(
+        throw ::tenzor::TypeError(
             "timedelta64 arrays cannot be converted; convert to int64 "
             "microseconds/nanoseconds first");
     }
@@ -253,23 +265,23 @@ auto numpy_dtype_to_tenzor(const py::array& arr) -> DType {
         // bfloat16/fp8 at specific itemsizes, which are handled above —
         // anything reaching here is either a recarray/struct or an
         // itemsize we don't recognise).
-        throw std::runtime_error(
+        throw ::tenzor::TypeError(
             "structured dtypes (recarray/struct) are not supported; split "
             "fields and stack via np.stack(...)");
     }
     if (kind == 'U') {
-        throw std::runtime_error(
+        throw ::tenzor::TypeError(
             "unicode-string arrays are not supported; convert to int64 "
             "token ids or use a tokenizer");
     }
     if (kind == 'S') {
-        throw std::runtime_error(
+        throw ::tenzor::TypeError(
             "byte-string arrays are not supported");
     }
     std::ostringstream oss;
     oss << "Unsupported NumPy dtype: kind=" << kind << ", itemsize=" << itemsize
         << ", name=" << py::str(dtype).cast<std::string>();
-    throw std::runtime_error(oss.str());
+    throw ::tenzor::TypeError(oss.str());
 }
 
 auto get_numpy_itemsize(const py::array& arr) -> size_t {
@@ -450,7 +462,7 @@ auto numpy_to_tensor(py::array arr, Device device) -> Tensor {
     // deeper in the call would surface as "Unsupported NumPy dtype" without
     // context. Catch them here with a precise message.
     if (arr.dtype().kind() == 'O') {
-        throw std::invalid_argument(
+        throw ::tenzor::TypeError(
             "NumPy object-dtype arrays are not supported. Convert to a "
             "numeric dtype first (e.g. arr.astype(np.float32)).");
     }

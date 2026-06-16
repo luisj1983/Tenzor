@@ -61,7 +61,7 @@ pip install -e .
 
 - **CMake**: 3.25 or higher
 - **Ninja** (optional): 1.10+ for faster builds
-- **Python**: 3.8 - 3.13 (for Python bindings)
+- **Python**: 3.9 - 3.13 (for Python bindings; matches `requires-python = ">=3.9"` in `pyproject.toml`)
 
 ## Building from Source
 

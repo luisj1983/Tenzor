@@ -46,7 +46,9 @@ __device__ __host__ inline bool is_nan_bits(double x) {
 
 // Float16: exp == 0x1F, mantissa != 0 → NaN.
 __device__ __host__ inline bool is_nan_bits(__half x) {
-    uint16_t bits = *reinterpret_cast<uint16_t*>(&x);
+    union { __half h; uint16_t u; } pun;
+    pun.h = x;
+    uint16_t bits = pun.u;
     uint16_t exp  = (bits >> 10) & 0x1Fu;
     uint16_t mant =  bits        & 0x3FFu;
     return (exp == 0x1Fu) && (mant != 0u);
@@ -56,7 +58,9 @@ __device__ __host__ inline bool is_nan_bits(__half x) {
 // `hip_bfloat16` is the canonical name in the HIP headers; `__hip_bfloat16`
 // exists only on newer toolchains.
 __device__ __host__ inline bool is_nan_bits(hip_bfloat16 x) {
-    uint16_t bits = *reinterpret_cast<uint16_t*>(&x);
+    union { hip_bfloat16 b; uint16_t u; } pun;
+    pun.b = x;
+    uint16_t bits = pun.u;
     uint16_t exp  = (bits >> 7) & 0xFFu;
     uint16_t mant =  bits       & 0x7Fu;
     return (exp == 0xFFu) && (mant != 0u);
@@ -79,10 +83,9 @@ __device__ __host__ inline bool is_nan_bits(hip_bfloat16 x) {
 
 __device__ __host__ inline __half safe_f2h(float x) {
     if (is_nan_bits(x)) {
-        uint16_t nan_bits = 0x7E00u;   // canonical Float16 qNaN
-        __half h;
-        *reinterpret_cast<uint16_t*>(&h) = nan_bits;
-        return h;
+        union { __half h; uint16_t u; } pun;
+        pun.u = 0x7E00u;               // canonical Float16 qNaN
+        return pun.h;
     }
     return __float2half(x);
 }
@@ -98,10 +101,9 @@ __device__ __host__ inline float safe_h2f(__half x) {
 
 __device__ __host__ inline hip_bfloat16 safe_f2bf(float x) {
     if (is_nan_bits(x)) {
-        uint16_t nan_bits = 0x7FC0u;    // canonical bf16 qNaN
-        hip_bfloat16 b;
-        *reinterpret_cast<uint16_t*>(&b) = nan_bits;
-        return b;
+        union { hip_bfloat16 b; uint16_t u; } pun;
+        pun.u = 0x7FC0u;                // canonical bf16 qNaN
+        return pun.b;
     }
     // S.10 / R.11: round-to-nearest-even on float32 → bfloat16 instead of
     // the truncating `hip_bfloat16(float)` ctor. We inline the bit-twiddle
@@ -115,9 +117,9 @@ __device__ __host__ inline hip_bfloat16 safe_f2bf(float x) {
     uint32_t rounding_bias = 0x7fffu + lsb;
     bits += rounding_bias;
     uint16_t out_bits = static_cast<uint16_t>(bits >> 16);
-    hip_bfloat16 out;
-    *reinterpret_cast<uint16_t*>(&out) = out_bits;
-    return out;
+    union { hip_bfloat16 b; uint16_t u; } out;
+    out.u = out_bits;
+    return out.b;
 }
 
 __device__ __host__ inline float safe_bf2f(hip_bfloat16 x) {

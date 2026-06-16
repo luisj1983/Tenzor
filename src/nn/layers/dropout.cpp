@@ -103,16 +103,24 @@ auto Dropout::forward_impl(const Variable& input) -> Variable {
         // No dropout - mask is all ones
         mask_data = ones(shape_vec, input.tensor().dtype(), input.tensor().device());
     } else {
-        // Generate random tensor directly on target device
-        auto random_tensor = rand(shape_vec, input.tensor().dtype(), input.tensor().device());
+        // Generate the random tensor and run the threshold compare in Float32,
+        // then cast the resulting 0/1 mask to the input dtype. Generating the
+        // randoms directly in a half dtype quantizes both the uniform draw and
+        // the threshold compare, biasing the realised keep probability away from
+        // (1 - p). Float32 keeps the Bernoulli draw faithful (matches the
+        // VariationalDropout pattern below).
+        const auto in_dtype = input.tensor().dtype();
+        const auto in_device = input.tensor().device();
+        auto random_tensor = rand(shape_vec, DType::Float32, in_device);
 
         // Create binary mask using device-native comparison: mask = (random > p)
         auto threshold = full(shape_vec, static_cast<float>(p_),
-                             input.tensor().dtype(), input.tensor().device());
+                             DType::Float32, in_device);
         auto mask_bool = gt(random_tensor, threshold);
-        auto ones_tensor = ones(shape_vec, input.tensor().dtype(), input.tensor().device());
-        auto zeros_tensor = zeros(shape_vec, input.tensor().dtype(), input.tensor().device());
-        mask_data = where(mask_bool, ones_tensor, zeros_tensor);
+        auto ones_tensor = ones(shape_vec, DType::Float32, in_device);
+        auto zeros_tensor = zeros(shape_vec, DType::Float32, in_device);
+        auto mask_f32 = where(mask_bool, ones_tensor, zeros_tensor);
+        mask_data = (in_dtype == DType::Float32) ? mask_f32 : mask_f32.to(in_dtype);
     }
 
     // Apply inverted dropout: output = input * mask / (1 - p)
@@ -199,16 +207,22 @@ auto Dropout2d::forward_impl(const Variable& input) -> Variable {
         throw std::invalid_argument("Dropout2d input must be 2D, 3D or 4D");
     }
 
-    // Generate random values for each channel directly on target device
-    auto random_tensor = rand(mask_shape, input.tensor().dtype(), input.tensor().device());
+    // Generate randoms + threshold compare in Float32, then cast the 0/1 mask
+    // to the input dtype. A half-precision draw/compare biases the keep
+    // probability; Float32 keeps the Bernoulli draw faithful. (Mirrors Dropout.)
+    const auto in_dtype = input.tensor().dtype();
+    const auto in_device = input.tensor().device();
+    auto random_tensor = rand(mask_shape, DType::Float32, in_device);
 
     // Create binary mask using device-native comparison: mask = (random > p)
     auto threshold = full(mask_shape, static_cast<float>(p_),
-                         input.tensor().dtype(), input.tensor().device());
+                         DType::Float32, in_device);
     auto mask_bool = gt(random_tensor, threshold);
-    auto mask_ones = ones(mask_shape, input.tensor().dtype(), input.tensor().device());
-    auto mask_zeros = zeros(mask_shape, input.tensor().dtype(), input.tensor().device());
-    auto channel_mask = where(mask_bool, mask_ones, mask_zeros);
+    auto mask_ones = ones(mask_shape, DType::Float32, in_device);
+    auto mask_zeros = zeros(mask_shape, DType::Float32, in_device);
+    auto channel_mask_f32 = where(mask_bool, mask_ones, mask_zeros);
+    auto channel_mask = (in_dtype == DType::Float32)
+                            ? channel_mask_f32 : channel_mask_f32.to(in_dtype);
 
     // Expand channel mask to full input shape via broadcasting
     // mask_shape has trailing 1s (e.g., [N,C,1,1]) so expand() broadcasts to full [N,C,H,W]
@@ -288,13 +302,20 @@ auto Dropout3d::forward_impl(const Variable& input) -> Variable {
         throw std::invalid_argument("Dropout3d input must be 3D, 4D or 5D");
     }
 
-    auto random_tensor = rand(mask_shape, input.tensor().dtype(), input.tensor().device());
+    // Generate randoms + threshold compare in Float32, then cast the 0/1 mask
+    // to the input dtype. A half-precision draw/compare biases the keep
+    // probability; Float32 keeps the Bernoulli draw faithful. (Mirrors Dropout.)
+    const auto in_dtype = input.tensor().dtype();
+    const auto in_device = input.tensor().device();
+    auto random_tensor = rand(mask_shape, DType::Float32, in_device);
     auto threshold = full(mask_shape, static_cast<float>(p_),
-                         input.tensor().dtype(), input.tensor().device());
+                         DType::Float32, in_device);
     auto mask_bool = gt(random_tensor, threshold);
-    auto mask_ones = ones(mask_shape, input.tensor().dtype(), input.tensor().device());
-    auto mask_zeros = zeros(mask_shape, input.tensor().dtype(), input.tensor().device());
-    auto channel_mask = where(mask_bool, mask_ones, mask_zeros);
+    auto mask_ones = ones(mask_shape, DType::Float32, in_device);
+    auto mask_zeros = zeros(mask_shape, DType::Float32, in_device);
+    auto channel_mask_f32 = where(mask_bool, mask_ones, mask_zeros);
+    auto channel_mask = (in_dtype == DType::Float32)
+                            ? channel_mask_f32 : channel_mask_f32.to(in_dtype);
 
     double scale = 1.0 / (1.0 - p_);
     auto expanded_mask_final = expand(channel_mask, shape_vec);
@@ -414,15 +435,21 @@ auto AlphaDropout::forward_impl(const Variable& input) -> Variable {
     auto shape_span = input.tensor().shape();
     std::vector<int64_t> shape_vec(shape_span.begin(), shape_span.end());
 
-    auto random_tensor = rand(shape_vec, input.tensor().dtype(), input.tensor().device());
+    // Generate randoms + threshold compare in Float32, then cast the 0/1 mask
+    // to the input dtype. A half-precision draw/compare biases the keep
+    // probability; Float32 keeps the Bernoulli draw faithful. (Mirrors Dropout.)
+    const auto in_dtype = input.tensor().dtype();
+    const auto in_device = input.tensor().device();
+    auto random_tensor = rand(shape_vec, DType::Float32, in_device);
 
     // Create binary mask using device-native comparison: mask = (random > p)
     auto threshold = full(shape_vec, static_cast<float>(p_),
-                         input.tensor().dtype(), input.tensor().device());
+                         DType::Float32, in_device);
     auto mask_bool = gt(random_tensor, threshold);
-    auto mask_ones = ones(shape_vec, input.tensor().dtype(), input.tensor().device());
-    auto mask_zeros = zeros(shape_vec, input.tensor().dtype(), input.tensor().device());
-    auto mask_data = where(mask_bool, mask_ones, mask_zeros);
+    auto mask_ones = ones(shape_vec, DType::Float32, in_device);
+    auto mask_zeros = zeros(shape_vec, DType::Float32, in_device);
+    auto mask_f32 = where(mask_bool, mask_ones, mask_zeros);
+    auto mask_data = (in_dtype == DType::Float32) ? mask_f32 : mask_f32.to(in_dtype);
 
     // Create masked input: set dropped elements to alpha_p
     // masked_input = input * mask + alpha_p * (1 - mask)

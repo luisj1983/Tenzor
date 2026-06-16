@@ -21,7 +21,7 @@ auto VulkanBackend::dispatchSoftmax(const Tensor& input_orig, int64_t dim) -> Te
         return result.transpose(norm_dim, last).contiguous();
     }
 
-    Tensor input = input_orig.is_contiguous() ? input_orig : input_orig.contiguous();
+    Tensor input = (input_orig.is_contiguous() && input_orig.offset() == 0) ? input_orig : dispatchContiguous(input_orig);
     auto input_shape = input.shape();
     int32_t device_id = input.device().index;
 
@@ -130,7 +130,7 @@ auto VulkanBackend::dispatchLogSoftmax(const Tensor& input_orig, int64_t dim) ->
         return result.transpose(norm_dim, last).contiguous();
     }
 
-    Tensor input = input_orig.is_contiguous() ? input_orig : input_orig.contiguous();
+    Tensor input = (input_orig.is_contiguous() && input_orig.offset() == 0) ? input_orig : dispatchContiguous(input_orig);
     auto input_shape = input.shape();
     int32_t device_id = input.device().index;
 

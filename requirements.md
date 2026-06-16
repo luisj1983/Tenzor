@@ -110,7 +110,7 @@ Disabled with `-DTENZOR_BUILD_PYTHON=OFF`
 
 | Dependency | Manjaro Package | Notes |
 |---|---|---|
-| Python dev | `python` | Headers + interpreter |
+| Python dev | `python` | Headers + interpreter (3.9 - 3.13) |
 | pybind11 | `pybind11` | C++/Python bridge |
 
 ```bash

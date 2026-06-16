@@ -116,6 +116,29 @@ TENZOR_BUILD_TOOLS = "OFF"
 # IREE install discoverable per docs/jit-mlir-setup.md).
 TENZOR_USE_MLIR_JIT = "OFF"
 
+[tool.cibuildwheel]
+# CPU-only manylinux wheels for CPython 3.9 - 3.13. This is CONFIG ONLY: it
+# describes how a wheel build would run; it does not publish anything. The
+# default CMake defines under [tool.scikit-build.cmake.define] already pin a
+# CPU-only build (no CUDA/ROCm/Vulkan/OneAPI, no MLIR JIT), so the produced
+# wheels never bundle a GPU runtime.
+build = "cp39-* cp310-* cp311-* cp312-* cp313-*"
+# Skip musllinux (Alpine) and all 32-bit targets — Tenzor's C++23 SIMD/BLAS
+# stack targets 64-bit glibc Linux only.
+skip = "*-musllinux* *_i686 *-win32 *-win_amd64 *-macosx*"
+# manylinux_2_28 (AlmaLinux 8 toolchain) ships a GCC new enough for C++23.
+manylinux-x86-64-image = "manylinux_2_28"
+build-frontend = "build"
+
+# Smoke-test each built wheel: import the module, initialize, and run a trivial
+# CPU round-trip so a broken extension fails the build instead of shipping.
+test-requires = "numpy"
+test-command = "python -c \"import numpy as np, tenzor as tz; tz.initialize(); assert tz.from_numpy(np.ones((2,2), dtype=np.float32)).numpy().sum() == 4.0\""
+
+[tool.cibuildwheel.linux]
+# Force a CPU-only build inside the manylinux container regardless of host env.
+environment = { CMAKE_ARGS = "-DTENZOR_BUILD_CUDA=OFF -DTENZOR_BUILD_ROCM=OFF -DTENZOR_BUILD_VULKAN=OFF -DTENZOR_BUILD_ONEAPI=OFF -DTENZOR_BUILD_TORCH_INTEROP=OFF -DTENZOR_USE_MLIR_JIT=OFF" }
+
 [tool.black]
 line-length = 100
 target-version = ['py39', 'py310', 'py311', 'py312']

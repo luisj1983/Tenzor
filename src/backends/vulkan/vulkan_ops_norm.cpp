@@ -27,6 +27,16 @@ auto VulkanBackend::dispatchBatchNorm2dBackward(const Tensor& grad_out, const Te
 
     int32_t device_id = input.device().index;
 
+    // Materialize all read operands into packed, offset-0 buffers before they
+    // reach descriptor writes. A stride-contiguous outer-dim view (offset != 0)
+    // would otherwise trip the misaligned-descriptor guard. dispatchContiguous
+    // is a no-op when the tensor is already contiguous at offset 0.
+    const Tensor grad_out_c = dispatchContiguous(grad_out);
+    const Tensor input_c = dispatchContiguous(input);
+    const Tensor mean_c = dispatchContiguous(mean);
+    const Tensor var_c = dispatchContiguous(var);
+    const Tensor gamma_c = gamma ? dispatchContiguous(*gamma) : Tensor();
+
     // Select shader based on dtype
     std::string shader_name = "batchnorm2d_backward";
     bool is_f64_bn = (input.dtype() == DType::Float64);
@@ -55,17 +65,17 @@ auto VulkanBackend::dispatchBatchNorm2dBackward(const Tensor& grad_out, const Te
 
     // For Float16 input, cast gamma to Float32 if needed (shader expects Float32 stats)
     Tensor gamma_f32;
-    const Tensor* gamma_effective = gamma;
-    if (gamma && bn_is_half && gamma->dtype() != DType::Float32) {
-        gamma_f32 = gamma->to(DType::Float32);
+    const Tensor* gamma_effective = gamma ? &gamma_c : nullptr;
+    if (gamma && bn_is_half && gamma_c.dtype() != DType::Float32) {
+        gamma_f32 = dispatchContiguous(gamma_c.to(DType::Float32));
         gamma_effective = &gamma_f32;
     }
 
     // Get VkBuffer handles
-    const void* buffer_grad_out = grad_out.data_ptr();
-    const void* buffer_input = input.data_ptr();
-    const void* buffer_mean = mean.data_ptr();
-    const void* buffer_var = var.data_ptr();
+    const void* buffer_grad_out = grad_out_c.data_ptr();
+    const void* buffer_input = input_c.data_ptr();
+    const void* buffer_mean = mean_c.data_ptr();
+    const void* buffer_var = var_c.data_ptr();
     const void* buffer_grad_input = grad_input.data_ptr();
     const void* buffer_grad_gamma = grad_gamma.data_ptr();
     const void* buffer_grad_beta = grad_beta.data_ptr();
@@ -266,6 +276,13 @@ auto VulkanBackend::dispatchBatchNorm2dForward(const Tensor& input, const Tensor
 
     int32_t device_id = input.device().index;
 
+    // Materialize read operands to packed offset-0 buffers (see backward note).
+    const Tensor input_c = dispatchContiguous(input);
+    const Tensor mean_c = dispatchContiguous(mean);
+    const Tensor var_c = dispatchContiguous(var);
+    const Tensor gamma_c = gamma ? dispatchContiguous(*gamma) : Tensor();
+    const Tensor beta_c = beta ? dispatchContiguous(*beta) : Tensor();
+
     // Select shader based on dtype
     std::string shader_name = "batchnorm2d_forward";
     if (input.dtype() == DType::Float64) {
@@ -284,17 +301,17 @@ auto VulkanBackend::dispatchBatchNorm2dForward(const Tensor& input, const Tensor
     // For Float16/BFloat16 input, the shader expects mean/var as Float32 for numerical stability
     // Keep converted tensors alive in this scope so their buffers remain valid
     Tensor mean_f32, var_f32;
-    const Tensor* mean_ptr = &mean;
-    const Tensor* var_ptr = &var;
-    if ((input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) && mean.dtype() != DType::Float32) {
-        mean_f32 = mean.to(DType::Float32);
-        var_f32 = var.to(DType::Float32);
+    const Tensor* mean_ptr = &mean_c;
+    const Tensor* var_ptr = &var_c;
+    if ((input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) && mean_c.dtype() != DType::Float32) {
+        mean_f32 = dispatchContiguous(mean_c.to(DType::Float32));
+        var_f32 = dispatchContiguous(var_c.to(DType::Float32));
         mean_ptr = &mean_f32;
         var_ptr = &var_f32;
     }
 
     // Get VkBuffer handles
-    const void* buffer_input = input.data_ptr();
+    const void* buffer_input = input_c.data_ptr();
     const void* buffer_mean = mean_ptr->data_ptr();
     const void* buffer_var = var_ptr->data_ptr();
     const void* buffer_output = output.data_ptr();
@@ -324,13 +341,13 @@ auto VulkanBackend::dispatchBatchNorm2dForward(const Tensor& input, const Tensor
     // Keep cast tensors alive in this scope so their buffers remain valid
     Tensor gamma_f32, beta_f32;
     if (gamma && beta) {
-        const Tensor* gamma_ptr = gamma;
-        const Tensor* beta_ptr = beta;
+        const Tensor* gamma_ptr = &gamma_c;
+        const Tensor* beta_ptr = &beta_c;
 
         // For Float16 input, the shader expects gamma/beta as Float32 for numerical stability
-        if (input.dtype() == DType::Float16 && gamma->dtype() == DType::Float16) {
-            gamma_f32 = gamma->to(DType::Float32);
-            beta_f32 = beta->to(DType::Float32);
+        if (input.dtype() == DType::Float16 && gamma_c.dtype() == DType::Float16) {
+            gamma_f32 = dispatchContiguous(gamma_c.to(DType::Float32));
+            beta_f32 = dispatchContiguous(beta_c.to(DType::Float32));
             gamma_ptr = &gamma_f32;
             beta_ptr = &beta_f32;
         }
@@ -439,6 +456,9 @@ auto VulkanBackend::dispatchBatchNorm2dMeanVar(const Tensor& input) -> std::pair
     }
     auto* pipeline = getPipeline(shader_name, device_id);
 
+    // Materialize input to a packed offset-0 buffer before binding.
+    const Tensor input_c = dispatchContiguous(input);
+
     // Create output tensors - statistics are always Float32 (for F16 inputs) or same dtype
     // For F16: accumulation in Float32 for numerical stability, output as Float32
     DType stats_dtype = (input.dtype() == DType::Float16) ? DType::Float32 : input.dtype();
@@ -453,7 +473,7 @@ auto VulkanBackend::dispatchBatchNorm2dMeanVar(const Tensor& input) -> std::pair
     temp_sum = dispatchFill(temp_sum, 0.0f);
 
     // Get VkBuffer handles
-    const void* buffer_input = input.data_ptr();
+    const void* buffer_input = input_c.data_ptr();
     const void* buffer_mean = mean.data_ptr();
     const void* buffer_var = variance.data_ptr();
     const void* buffer_temp = temp_sum.data_ptr();
@@ -646,8 +666,13 @@ auto VulkanBackend::dispatchLayerNorm(const Tensor& input, int64_t normalized_sh
     Tensor rstd({batch_size}, stat_dtype, input.device());
     size_t stat_buffer_size = batch_size * (is_float64 ? sizeof(double) : sizeof(float));
 
+    // Materialize read operands to packed offset-0 buffers before binding.
+    const Tensor input_c = dispatchContiguous(input);
+    const Tensor gamma_c = gamma ? dispatchContiguous(*gamma) : Tensor();
+    const Tensor beta_c = beta ? dispatchContiguous(*beta) : Tensor();
+
     // Get VkBuffer handles
-    const void* buffer_input = input.data_ptr();
+    const void* buffer_input = input_c.data_ptr();
     const void* buffer_output = output.data_ptr();
     const void* buffer_mean = mean.data_ptr();
     const void* buffer_rstd = rstd.data_ptr();
@@ -665,8 +690,8 @@ auto VulkanBackend::dispatchLayerNorm(const Tensor& input, int64_t normalized_sh
     std::vector<size_t> sizes = {input_buffer_size, output_buffer_size};
 
     if (has_affine) {
-        const void* buffer_gamma = gamma->data_ptr();
-        const void* buffer_beta = beta->data_ptr();
+        const void* buffer_gamma = gamma_c.data_ptr();
+        const void* buffer_beta = beta_c.data_ptr();
         bindings.push_back({2, buffer_gamma});
         bindings.push_back({3, buffer_beta});
         sizes.push_back(norm_buffer_size);
@@ -782,8 +807,13 @@ auto VulkanBackend::dispatchGroupNorm(const Tensor& input, int64_t num_groups,
     size_t elem_size = input.dtype_size();
     size_t stats_elem_size = (stats_dtype == DType::Float64) ? sizeof(double) : sizeof(float);
 
+    // Materialize read operands to packed offset-0 buffers before binding.
+    const Tensor input_c = dispatchContiguous(input);
+    const Tensor gamma_c = gamma ? dispatchContiguous(*gamma) : Tensor();
+    const Tensor beta_c = beta ? dispatchContiguous(*beta) : Tensor();
+
     // Get VkBuffer handles
-    const void* buf_input = input.data_ptr();
+    const void* buf_input = input_c.data_ptr();
     const void* buf_output = output.data_ptr();
     const void* buf_mean = mean_out.data_ptr();
     const void* buf_inv_std = inv_std_out.data_ptr();
@@ -802,8 +832,8 @@ auto VulkanBackend::dispatchGroupNorm(const Tensor& input, int64_t num_groups,
     std::vector<size_t> sizes = {input_buf_size, output_buf_size};
 
     if (has_affine) {
-        const void* buf_gamma = gamma->data_ptr();
-        const void* buf_beta = beta->data_ptr();
+        const void* buf_gamma = gamma_c.data_ptr();
+        const void* buf_beta = beta_c.data_ptr();
         bindings.push_back({2, buf_gamma});
         bindings.push_back({3, buf_beta});
         // Gamma/beta are always Float32 for F16 shader, elem_size for F32/F64
@@ -902,6 +932,13 @@ auto VulkanBackend::dispatchLayerNormBackward(const Tensor& grad_output, const T
         if (rstd_use.dtype() != DType::Float64) rstd_use = rstd_use.to(DType::Float64);
     }
 
+    // Materialize read operands to packed offset-0 buffers before binding.
+    const Tensor grad_output_c = dispatchContiguous(grad_output);
+    const Tensor input_c = dispatchContiguous(input);
+    mean_use = dispatchContiguous(mean_use);
+    rstd_use = dispatchContiguous(rstd_use);
+    const Tensor weight_c = weight ? dispatchContiguous(*weight) : Tensor();
+
     int64_t batch_size = input.numel() / normalized_shape;
     bool has_affine = (weight != nullptr);
 
@@ -921,8 +958,8 @@ auto VulkanBackend::dispatchLayerNormBackward(const Tensor& grad_output, const T
     }
 
     // Get VkBuffer handles
-    const void* buf_grad_out = grad_output.data_ptr();
-    const void* buf_input = input.data_ptr();
+    const void* buf_grad_out = grad_output_c.data_ptr();
+    const void* buf_input = input_c.data_ptr();
     const void* buf_mean = mean_use.data_ptr();
     const void* buf_rstd = rstd_use.data_ptr();
     const void* buf_grad_input = grad_input.data_ptr();
@@ -943,7 +980,7 @@ auto VulkanBackend::dispatchLayerNormBackward(const Tensor& grad_output, const T
     std::vector<size_t> sizes = {input_buf_size, input_buf_size, stats_buf_size, stats_buf_size};
 
     if (has_affine) {
-        const void* buf_weight = weight->data_ptr();
+        const void* buf_weight = weight_c.data_ptr();
         bindings.push_back({4, buf_weight});
         sizes.push_back(norm_buf_size);
     } else {
@@ -1098,10 +1135,17 @@ auto VulkanBackend::dispatchGroupNormBackward(const Tensor& grad_output, const T
         partial_grad_bias_gn = Tensor({num_wg_gn * C}, DType::Float64, input.device());
     }
 
-    const void* buf_grad_out = grad_output.data_ptr();
-    const void* buf_input = input.data_ptr();
-    const void* buf_mean = mean.data_ptr();
-    const void* buf_rstd = rstd.data_ptr();
+    // Materialize read operands to packed offset-0 buffers before binding.
+    const Tensor grad_output_c = dispatchContiguous(grad_output);
+    const Tensor input_c = dispatchContiguous(input);
+    const Tensor mean_c = dispatchContiguous(mean);
+    const Tensor rstd_c = dispatchContiguous(rstd);
+    const Tensor weight_c = weight ? dispatchContiguous(*weight) : Tensor();
+
+    const void* buf_grad_out = grad_output_c.data_ptr();
+    const void* buf_input = input_c.data_ptr();
+    const void* buf_mean = mean_c.data_ptr();
+    const void* buf_rstd = rstd_c.data_ptr();
     const void* buf_grad_input = grad_input.data_ptr();
     const void* buf_grad_weight = grad_weight.data_ptr();
     const void* buf_grad_bias = grad_bias.data_ptr();
@@ -1115,7 +1159,7 @@ auto VulkanBackend::dispatchGroupNormBackward(const Tensor& grad_output, const T
     std::vector<size_t> sizes = {input_buf_size, input_buf_size, stats_buf_size, stats_buf_size};
 
     if (has_affine) {
-        const void* buf_weight = weight->data_ptr();
+        const void* buf_weight = weight_c.data_ptr();
         bindings.push_back({4, buf_weight});
         sizes.push_back(channel_buf_size);
     } else {
@@ -1238,6 +1282,11 @@ auto VulkanBackend::dispatchEmbeddingBackward(const Tensor& grad_output, const T
         return result_f32.to(orig_dtype);
     }
 
+    // Materialize read operands to packed offset-0 buffers before binding. All
+    // branches below bind grad_output / indices into descriptors.
+    const Tensor grad_output_c = dispatchContiguous(grad_output);
+    indices = dispatchContiguous(indices);
+
     // BFloat16: use native shader
     if (grad_output.dtype() == DType::BFloat16) {
         std::string shader_name = "embedding_backward_bf16";
@@ -1245,7 +1294,7 @@ auto VulkanBackend::dispatchEmbeddingBackward(const Tensor& grad_output, const T
 
         Tensor grad_weight = dispatchZeros({num_embeddings, embedding_dim}, DType::BFloat16, grad_output.device());
 
-        const void* buf_grad_out = grad_output.data_ptr();
+        const void* buf_grad_out = grad_output_c.data_ptr();
         const void* buf_indices = indices.data_ptr();
         const void* buf_grad_weight = grad_weight.data_ptr();
 
@@ -1298,7 +1347,7 @@ auto VulkanBackend::dispatchEmbeddingBackward(const Tensor& grad_output, const T
         // Output: grad_weight as uint64_t buffer (for CAS atomics), initialized to zero
         Tensor grad_weight = dispatchZeros({num_embeddings, embedding_dim}, DType::Float64, grad_output.device());
 
-        const void* buf_grad_out = grad_output.data_ptr();
+        const void* buf_grad_out = grad_output_c.data_ptr();
         const void* buf_indices = indices.data_ptr();
         const void* buf_grad_weight = grad_weight.data_ptr();
 
@@ -1350,7 +1399,7 @@ auto VulkanBackend::dispatchEmbeddingBackward(const Tensor& grad_output, const T
 
     size_t elem_size = grad_output.dtype_size();
 
-    const void* buf_grad_out = grad_output.data_ptr();
+    const void* buf_grad_out = grad_output_c.data_ptr();
     const void* buf_indices = indices.data_ptr();
     const void* buf_grad_weight = grad_weight.data_ptr();
 
@@ -1429,9 +1478,13 @@ auto VulkanBackend::dispatchRMSNorm(const Tensor& input, const Tensor& weight,
     size_t elem_size = input.dtype_size();
     size_t rrms_elem_size = rrms.dtype_size();
 
-    const void* buf_input = input.data_ptr();
+    // Materialize read operands to packed offset-0 buffers before binding.
+    const Tensor input_c = dispatchContiguous(input);
+    const Tensor weight_c = dispatchContiguous(weight);
+
+    const void* buf_input = input_c.data_ptr();
     const void* buf_output = output.data_ptr();
-    const void* buf_weight = weight.data_ptr();
+    const void* buf_weight = weight_c.data_ptr();
     const void* buf_rrms = rrms.data_ptr();
 
     size_t input_buf_size = input.numel() * elem_size;
@@ -1514,10 +1567,16 @@ auto VulkanBackend::dispatchRMSNormBackward(const Tensor& grad_output, const Ten
     size_t elem_size = input.dtype_size();
     size_t rrms_elem_size = rrms.dtype_size();
 
-    const void* buf_grad_out = grad_output.data_ptr();
-    const void* buf_input = input.data_ptr();
-    const void* buf_rrms = rrms.data_ptr();
-    const void* buf_weight = weight.data_ptr();
+    // Materialize read operands to packed offset-0 buffers before binding.
+    const Tensor grad_output_c = dispatchContiguous(grad_output);
+    const Tensor input_c = dispatchContiguous(input);
+    const Tensor rrms_c = dispatchContiguous(rrms);
+    const Tensor weight_c = dispatchContiguous(weight);
+
+    const void* buf_grad_out = grad_output_c.data_ptr();
+    const void* buf_input = input_c.data_ptr();
+    const void* buf_rrms = rrms_c.data_ptr();
+    const void* buf_weight = weight_c.data_ptr();
     const void* buf_grad_input = grad_input.data_ptr();
     const void* buf_grad_weight = grad_weight.data_ptr();
 

@@ -45,6 +45,11 @@ void main() {
         ? float(params.in_w - 1u) / float(params.out_w - 1u) : float(params.in_w) / float(params.out_w);
     float src_h = (params.align_corners != 0u) ? float(oh) * scale_h : (float(oh) + 0.5) * scale_h - 0.5;
     float src_w = (params.align_corners != 0u) ? float(ow) * scale_w : (float(ow) + 0.5) * scale_w - 0.5;
+    // Clamp the continuous source coord to [0,in-1] BEFORE flooring, exactly as the
+    // forward shader (bicubic_interpolate.comp) and the CPU reference do, so this
+    // scatter is the precise transpose of the forward at the borders.
+    src_h = clamp(src_h, 0.0, float(params.in_h) - 1.0);
+    src_w = clamp(src_w, 0.0, float(params.in_w) - 1.0);
     int hi = int(floor(src_h));
     int wi = int(floor(src_w));
 

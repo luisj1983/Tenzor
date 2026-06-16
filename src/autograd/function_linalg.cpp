@@ -506,9 +506,13 @@ auto SvdBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tens
         default:              rel_eps = 1e-6; break;  // Float32
     }
     auto abs_diffs = abs(diffs);
-    // Relative threshold scaled by the largest |s^2| so the clamp is
-    // dimensionally meaningful regardless of the singular-value magnitudes.
-    auto max_scale = tenzor::max(abs(S_sq));  // scalar, broadcasts over (..., K, K)
+    // Relative threshold scaled by the largest |s^2| of THIS matrix so the
+    // clamp is dimensionally meaningful regardless of the singular-value
+    // magnitudes. Reduce over only the trailing K dim (per matrix), keepdim,
+    // then unsqueeze to (..., 1, 1) so the tolerance broadcasts over the
+    // (..., K, K) comparison without coupling unrelated batch elements.
+    auto max_scale = tenzor::max(abs(S_sq), S_sq.ndim() - 1, /*keepdim=*/true);  // (..., 1)
+    max_scale = unsqueeze(max_scale, max_scale.ndim());  // (..., 1, 1)
     auto tol = add(mul(max_scale, rel_eps), rel_eps);  // rel_eps*(max|s^2| + 1)
     auto is_small = lt(abs_diffs, tol);
 
@@ -741,7 +745,11 @@ auto EighBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Ten
         default:              rel_eps = 1e-6; break;  // Float32
     }
     auto abs_diffs = abs(diffs);
-    auto max_scale = tenzor::max(abs(W));  // scalar, broadcasts over (..., N, N)
+    // Per-matrix relative tolerance: reduce |w| over only the trailing N dim
+    // (the eigenvalues of THIS matrix), keepdim, then unsqueeze to (..., 1, 1)
+    // so it broadcasts over (..., N, N) without coupling unrelated batches.
+    auto max_scale = tenzor::max(abs(W), W.ndim() - 1, /*keepdim=*/true);  // (..., 1)
+    max_scale = unsqueeze(max_scale, max_scale.ndim());  // (..., 1, 1)
     auto tol = add(mul(max_scale, rel_eps), rel_eps);  // rel_eps*(max|w| + 1)
     auto is_small = lt(abs_diffs, tol);
 
@@ -1138,7 +1146,11 @@ auto SvdBackward::backward_with_variables(std::vector<Variable> grad_outputs) ->
         default:              rel_eps = 1e-6; break;  // Float32
     }
     auto abs_diffs = abs(diffs);
-    auto max_scale = tenzor::max(abs(S_sq));  // scalar
+    // Per-matrix relative tolerance: reduce over only the trailing K dim,
+    // keepdim, then unsqueeze to (..., 1, 1) so unrelated batch matrices keep
+    // independent degeneracy thresholds.
+    auto max_scale = tenzor::max(abs(S_sq), S_sq.ndim() - 1, /*keepdim=*/true);  // (..., 1)
+    max_scale = unsqueeze(max_scale, max_scale.ndim());  // (..., 1, 1)
     auto tol = add(mul(max_scale, rel_eps), rel_eps);
     auto is_small = lt(abs_diffs, tol);
     auto ones_kk = ones({K, K}, S_tensor.dtype(), S_tensor.device());
@@ -1229,8 +1241,12 @@ auto QrBackward::backward_with_variables(std::vector<Variable> grad_outputs) -> 
         grad_Q_var = Variable(zeros_like(saved_tensors_[0]), false);
         grad_R_var = grad_outputs[0];
     } else {
-        grad_Q_var = grad_outputs[0];
-        grad_R_var = grad_outputs[1];
+        // Legacy combined path: only one factor may be differentiated, so
+        // grad_outputs[1] can be OOB — pad with zeros (mirrors SvdBackward).
+        grad_Q_var = grad_outputs.size() > 0 ? grad_outputs[0]
+                        : Variable(zeros_like(saved_tensors_[0]), false);
+        grad_R_var = grad_outputs.size() > 1 ? grad_outputs[1]
+                        : Variable(zeros_like(saved_tensors_[1]), false);
     }
 
     auto ndim = saved_tensors_[1].ndim();
@@ -1279,8 +1295,12 @@ auto EighBackward::backward_with_variables(std::vector<Variable> grad_outputs) -
         grad_W_var = Variable(zeros_like(W_tensor), false);
         grad_V_var = grad_outputs[0];
     } else {
-        grad_W_var = grad_outputs[0];
-        grad_V_var = grad_outputs[1];
+        // Legacy combined path: only one factor may be differentiated, so
+        // grad_outputs[1] can be OOB — pad with zeros (mirrors SvdBackward).
+        grad_W_var = grad_outputs.size() > 0 ? grad_outputs[0]
+                        : Variable(zeros_like(W_tensor), false);
+        grad_V_var = grad_outputs.size() > 1 ? grad_outputs[1]
+                        : Variable(zeros_like(V_tensor), false);
     }
 
     auto V = Variable(V_tensor, false);
@@ -1309,7 +1329,11 @@ auto EighBackward::backward_with_variables(std::vector<Variable> grad_outputs) -
         default:              rel_eps = 1e-6; break;  // Float32
     }
     auto abs_diffs = abs(diffs);
-    auto max_scale = tenzor::max(abs(W_tensor));  // scalar
+    // Per-matrix relative tolerance: reduce over only the trailing N dim,
+    // keepdim, then unsqueeze to (..., 1, 1) so unrelated batch matrices keep
+    // independent degeneracy thresholds.
+    auto max_scale = tenzor::max(abs(W_tensor), W_tensor.ndim() - 1, /*keepdim=*/true);  // (..., 1)
+    max_scale = unsqueeze(max_scale, max_scale.ndim());  // (..., 1, 1)
     auto tol = add(mul(max_scale, rel_eps), rel_eps);
     auto is_small = lt(abs_diffs, tol);
     auto ones_nn = ones({N, N}, W_tensor.dtype(), W_tensor.device());
@@ -1468,6 +1492,19 @@ auto LUBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tenso
 }
 
 auto LUBackward::backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> {
+    // audit-2026-06-16 — Variable-level adjoint mirroring LUBackward::backward.
+    //
+    // The previous body computed the JVP (forward differential)
+    //   grad_A = tril(grad_L,-1)·U + L·triu(grad_U)
+    // and used it as the VJP. That is only correct when L=U=I and it dropped
+    // the pivot permutation entirely. The correct adjoint is
+    //   Φ = tril(L^T grad_L, -1) + triu(grad_U U^T, 0)
+    //   grad_A = P^T · L^{-T} · Φ · U^{-T}
+    // computed here with Variable ops so higher-order gradients flow through
+    // grad_L / grad_U. L^{-T}/U^{-T} are realised via the differentiable
+    // tenzor::solve (general linear solve) used elsewhere in this file; the
+    // pivot permutation P^T is applied as a left matmul by a constant
+    // permutation matrix, which preserves the graph carried by grad_A.
     Variable L, U;
     if (has_saved_variables()) {
         require_saved_variables(2);
@@ -1479,13 +1516,99 @@ auto LUBackward::backward_with_variables(std::vector<Variable> grad_outputs) -> 
         U = Variable(saved_tensors_[1], false);
     }
 
-    // Strictly lower part of grad_L (L has unit diagonal, not differentiable there)
-    auto grad_L_strict = tenzor::tril(grad_outputs[0], -1);
-    auto grad_U_upper = tenzor::triu(grad_outputs[1]);
+    const Tensor& L_t = L.tensor();
+    const Tensor& U_t = U.tensor();
+    auto ndim = L_t.ndim();
 
-    auto term1 = tenzor::matmul(grad_L_strict, U);
-    auto term2 = tenzor::matmul(L, grad_U_upper);
-    auto grad_A = term1 + term2;
+    // Pad grad_outputs to length 2 (only one factor differentiated -> the
+    // other slot is OOB). Mirrors SvdBackward's Variable-path guard.
+    Variable grad_L_var, grad_U_var;
+    if (output_slot_ == 0) {
+        grad_L_var = grad_outputs[0];
+        grad_U_var = Variable(zeros_like(U_t), false);
+    } else if (output_slot_ == 1) {
+        grad_L_var = Variable(zeros_like(L_t), false);
+        grad_U_var = grad_outputs[0];
+    } else {
+        grad_L_var = grad_outputs.size() > 0 ? grad_outputs[0]
+                        : Variable(zeros_like(L_t), false);
+        grad_U_var = grad_outputs.size() > 1 ? grad_outputs[1]
+                        : Variable(zeros_like(U_t), false);
+    }
+
+    // Φ = tril(L^T grad_L, -1) + triu(grad_U U^T, 0)
+    auto LT = tenzor::transpose(L, ndim - 2, ndim - 1);
+    auto UT = tenzor::transpose(U, ndim - 2, ndim - 1);
+    auto phi_lower = tenzor::tril(tenzor::matmul(LT, grad_L_var), -1);
+    auto phi_upper = tenzor::triu(tenzor::matmul(grad_U_var, UT), 0);
+    auto phi = phi_lower + phi_upper;
+
+    // L^{-T} · Φ : solve(L^T, Φ) since (L^T) X = Φ  =>  X = L^{-T} Φ.
+    auto Linv_phi = tenzor::solve(LT, phi);
+
+    // (·) · U^{-T} : X U^T = RHS  =>  U X^T = RHS^T  =>  X^T = solve(U, RHS^T).
+    auto rhs_t = tenzor::transpose(Linv_phi, ndim - 2, ndim - 1);
+    auto solve_u = tenzor::solve(U, rhs_t);
+    auto grad_A = tenzor::transpose(solve_u, ndim - 2, ndim - 1);
+
+    // Apply P^T (= P^{-1}) if pivots were saved. Build a constant permutation
+    // matrix and left-multiply; this keeps the graph in grad_A intact so
+    // higher-order gradients still flow. Pivot encoding differs across
+    // backends (LAPACK/CPU 1-indexed; Vulkan 0-indexed) — detect & normalise
+    // exactly as the first-order backward does.
+    if (saved_tensors_.size() > 2) {
+        const auto& pivots = saved_tensors_[2];
+        Tensor pivots_cpu = pivots.to(Device::cpu()).contiguous();
+        if (pivots_cpu.ndim() == 1 && pivots_cpu.dtype() == DType::Int32) {
+            const int32_t* piv_data = pivots_cpu.data<int32_t>();
+            int64_t M = pivots_cpu.shape()[0];
+            int64_t Nn = L_t.shape().back();
+
+            bool one_indexed = false;
+            for (int64_t i = 0; i < M; ++i) {
+                if (piv_data[i] >= static_cast<int32_t>(Nn)) { one_indexed = true; break; }
+                if (piv_data[i] < 0) { one_indexed = true; break; }
+            }
+            std::vector<int32_t> piv0(M);
+            for (int64_t i = 0; i < M; ++i) {
+                piv0[i] = one_indexed ? (piv_data[i] - 1) : piv_data[i];
+            }
+
+            // Determine the row permutation produced by the first-order
+            // backward's do_swap (which applies swap(i, piv0[i]) for
+            // i = M-1 .. 0, i.e. P^T). Simulate it on an index array:
+            // src[r] is the original row index that lands in output row r.
+            std::vector<int64_t> src(Nn);
+            for (int64_t i = 0; i < Nn; ++i) src[i] = i;
+            for (int64_t i = M - 1; i >= 0; --i) {
+                int64_t target = static_cast<int64_t>(piv0[i]);
+                if (target != i && target >= 0 && target < Nn) {
+                    std::swap(src[i], src[target]);
+                }
+            }
+
+            bool identity = true;
+            for (int64_t i = 0; i < Nn; ++i) {
+                if (src[i] != i) { identity = false; break; }
+            }
+            if (!identity) {
+                // Build the permutation matrix Pt with (Pt M)[r] = M[src[r]],
+                // i.e. Pt[r, src[r]] = 1. Left-multiplying keeps grad_A's graph
+                // intact so higher-order gradients flow. This reproduces
+                // do_swap exactly (= P^T).
+                auto pt = zeros({Nn, Nn}, L_t.dtype(), Device::cpu());
+                if (L_t.dtype() == DType::Float64) {
+                    double* pd = pt.data<double>();
+                    for (int64_t r = 0; r < Nn; ++r) pd[r * Nn + src[r]] = 1.0;
+                } else {
+                    float* pd = pt.data<float>();
+                    for (int64_t r = 0; r < Nn; ++r) pd[r * Nn + src[r]] = 1.0f;
+                }
+                auto Pt = Variable(pt.to(L_t.device()), false);
+                grad_A = tenzor::matmul(Pt, grad_A);
+            }
+        }
+    }
 
     return {grad_A};
 }

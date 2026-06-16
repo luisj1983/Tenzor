@@ -12,6 +12,7 @@
 #include <tenzor/nn/functional.hpp>
 #include "../backend_test_fixture.hpp"
 #include "../grad_flow_helpers.hpp"
+#include "parity_tolerances.hpp"
 
 using namespace tenzor;
 using namespace tenzor::testing;
@@ -301,8 +302,11 @@ TEST_P(GradLinalgParityTest, BilinearBackward) {
 
     ASSERT_TRUE(x1_dev.has_grad());
     ASSERT_TRUE(x2_dev.has_grad());
-    compareGradientWithCPU(grad1_cpu, x1_dev.grad().value(), 1e-5f, 1e-3f);
-    compareGradientWithCPU(grad2_cpu, x2_dev.grad().value(), 1e-5f, 1e-3f);
+    // Bilinear backward flows through the same outer-product @ weight matmul as
+    // the forward, so the input grads inherit the FP32 cross-device GEMM floor
+    // (parity::MATMUL_RTOL). atol kept at 1e-3 for the extra reduction stage.
+    compareGradientWithCPU(grad1_cpu, x1_dev.grad().value(), parity::MATMUL_RTOL, 1e-3f);
+    compareGradientWithCPU(grad2_cpu, x2_dev.grad().value(), parity::MATMUL_RTOL, 1e-3f);
 }
 
 INSTANTIATE_BACKEND_TESTS(GradLinalgParityTest);

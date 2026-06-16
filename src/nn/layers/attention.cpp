@@ -418,11 +418,15 @@ auto MultiheadAttention::scaled_dot_product_attention(
     // Apply causal mask if is_causal_ is set (masks future tokens)
     if (is_causal_) {
         // Create rectangular causal mask on target device using tensor ops
-        // triu with diagonal=1 gives upper-triangular 1s above the main diagonal
+        // triu with diagonal=1 gives upper-triangular 1s above the main diagonal.
+        //
+        // Causal masking here always runs at Float32: needs_attn_upcast is true
+        // for Float16/BFloat16, so score_dtype is Float32 in the half case and
+        // -inf is representable and safe (softmax(-inf)=0, no overflow). The
+        // former -1e4 half sentinel branch was gated on
+        // `!needs_attn_upcast && (Float16||BFloat16)`, which is identically
+        // false (needs_attn_upcast == (Float16||BFloat16)) — dead code, removed.
         float neg_inf_val = -std::numeric_limits<float>::infinity();
-        if (!needs_attn_upcast && (orig_dtype == DType::Float16 || orig_dtype == DType::BFloat16)) {
-            neg_inf_val = -1e4f;
-        }
         auto causal = triu(ones({seq_len_q, seq_len_k}, score_dtype, query.device()), 1);
         causal = causal * full({1}, neg_inf_val, score_dtype, query.device());
         Variable causal_var(causal, false);

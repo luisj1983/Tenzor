@@ -19,6 +19,7 @@
 #include "tenzor/core/device.hpp"
 #include "cuda_error.hpp"
 #include "cuda_stream_pool.hpp"
+#include "kernels/cuda_launch_utils.cuh"  // tenzor::cuda::CudaDeviceGuard
 #include "tenzor/backend/cuda_config.hpp"
 
 #include <cuda_runtime.h>
@@ -532,6 +533,9 @@ ForwardResult run_forward(
     const Device device = input.device();
     const DType dtype = input.dtype();
 
+    // Make the tensor's device current so the device-keyed cuDNN handle and
+    // workspace are fetched/allocated on the correct GPU. Restored on exit.
+    CudaDeviceGuard dev_guard(device.index);
     auto handle = CuDNNHandle::get();
     CUDNN_CHECK(cudnnSetStream(handle, stream));
 
@@ -749,6 +753,9 @@ BackwardResult run_backward(
     const Device device = input.device();
     const DType dtype = input.dtype();
 
+    // Make the tensor's device current so the device-keyed cuDNN handle and
+    // workspace are fetched/allocated on the correct GPU. Restored on exit.
+    CudaDeviceGuard dev_guard(device.index);
     auto handle = CuDNNHandle::get();
     CUDNN_CHECK(cudnnSetStream(handle, stream));
 

@@ -779,29 +779,42 @@ auto masked_select_kernel(const Tensor& input, const Tensor& mask) -> Tensor {
 
     const int64_t numel = input.numel();
 
-    // Support both Bool dtype and Float32 dtype (CUDA may convert Bool to Float32 during device transfers)
+    // Support Bool dtype and any floating mask dtype. CUDA/device transfers may
+    // convert a Bool mask to Float32; a Float64/Float16/BFloat16 mask is treated
+    // the same way — any non-zero element selects. Non-Float32 floating masks are
+    // widened to Float32 so a single non-zero test covers every case.
+    Tensor mask_f32;
+    const bool mask_is_bool = (mask.dtype() == DType::Bool);
+    const bool mask_is_floating =
+        mask.dtype() == DType::Float32 || mask.dtype() == DType::Float64 ||
+        mask.dtype() == DType::Float16 || mask.dtype() == DType::BFloat16;
+    if (!mask_is_bool && !mask_is_floating) {
+        char msg[256];
+        snprintf(msg, sizeof(msg), "masked_select: mask tensor must have dtype Bool or a floating dtype, but got dtype %d",
+                 static_cast<int>(mask.dtype()));
+        throw std::invalid_argument(msg);
+    }
+
     int64_t true_count = 0;
-    const bool use_float_mask = (mask.dtype() == DType::Float32);
+    const bool use_float_mask = mask_is_floating;
     const bool* bool_mask_ptr = nullptr;
     const float* float_mask_ptr = nullptr;
 
-    if (mask.dtype() == DType::Bool) {
+    if (mask_is_bool) {
         bool_mask_ptr = mask.data<bool>();
         // First pass: count true values in mask
         for (int64_t i = 0; i < numel; ++i) {
             if (bool_mask_ptr[i]) ++true_count;
         }
-    } else if (use_float_mask) {
-        float_mask_ptr = mask.data<float>();
-        // First pass: count non-zero values (treating Float32 as boolean)
+    } else {
+        // Widen Float64/Float16/BFloat16 masks to Float32; a Float32 mask is
+        // already contiguous-friendly but .to() is a no-op copy at worst.
+        mask_f32 = (mask.dtype() == DType::Float32) ? mask : mask.to(DType::Float32);
+        float_mask_ptr = mask_f32.data<float>();
+        // First pass: count non-zero values (treating the mask as boolean)
         for (int64_t i = 0; i < numel; ++i) {
             if (float_mask_ptr[i] != 0.0f) ++true_count;
         }
-    } else {
-        char msg[256];
-        snprintf(msg, sizeof(msg), "masked_select: mask tensor must have dtype Bool or Float32, but got dtype %d",
-                 static_cast<int>(mask.dtype()));
-        throw std::invalid_argument(msg);
     }
 
     // Create output with size = number of true values
@@ -877,20 +890,30 @@ auto masked_fill_kernel(const Tensor& input, const Tensor& mask_in, float value)
     std::vector<int64_t> shape_vec(input_shape.begin(), input_shape.end());
     Tensor output(shape_vec, input.dtype(), input.device());
 
-    // Support both Bool dtype and Float32 dtype (for CUDA compatibility)
-    const bool use_float_mask = (mask.dtype() == DType::Float32);
+    // Support Bool dtype and any floating mask dtype (for CUDA compatibility and
+    // Float64/Float16/BFloat16 masks). Any non-zero element is treated as true.
+    const bool mask_is_bool = (mask.dtype() == DType::Bool);
+    const bool mask_is_floating =
+        mask.dtype() == DType::Float32 || mask.dtype() == DType::Float64 ||
+        mask.dtype() == DType::Float16 || mask.dtype() == DType::BFloat16;
+    if (!mask_is_bool && !mask_is_floating) {
+        char msg[256];
+        snprintf(msg, sizeof(msg), "masked_fill: mask tensor must have dtype Bool or a floating dtype, but got dtype %d",
+                 static_cast<int>(mask.dtype()));
+        throw std::invalid_argument(msg);
+    }
+
+    Tensor mask_f32;
+    const bool use_float_mask = mask_is_floating;
     const bool* bool_mask_ptr = nullptr;
     const float* float_mask_ptr = nullptr;
 
-    if (mask.dtype() == DType::Bool) {
+    if (mask_is_bool) {
         bool_mask_ptr = mask.data<bool>();
-    } else if (use_float_mask) {
-        float_mask_ptr = mask.data<float>();
     } else {
-        char msg[256];
-        snprintf(msg, sizeof(msg), "masked_fill: mask tensor must have dtype Bool or Float32, but got dtype %d",
-                 static_cast<int>(mask.dtype()));
-        throw std::invalid_argument(msg);
+        // Widen Float64/Float16/BFloat16 masks to Float32 (no-op for Float32).
+        mask_f32 = (mask.dtype() == DType::Float32) ? mask : mask.to(DType::Float32);
+        float_mask_ptr = mask_f32.data<float>();
     }
 
     // Helper to check mask value
@@ -1001,20 +1024,32 @@ auto where_kernel(const Tensor& condition, const Tensor& x, const Tensor& y) -> 
     std::vector<int64_t> shape_vec(x_shape.begin(), x_shape.end());
     Tensor output(shape_vec, x.dtype(), x.device());
 
-    // Support both Bool dtype and Float32 dtype for condition (for CUDA compatibility)
-    const bool use_float_cond = (condition.dtype() == DType::Float32);
+    // Support Bool dtype and any floating condition dtype (for CUDA
+    // compatibility and Float64/Float16/BFloat16 conditions). Any non-zero
+    // element is treated as true. Non-Float32 floating conditions are widened
+    // to Float32 so a single non-zero test covers every case.
+    const bool cond_is_bool = (condition.dtype() == DType::Bool);
+    const bool cond_is_floating =
+        condition.dtype() == DType::Float32 || condition.dtype() == DType::Float64 ||
+        condition.dtype() == DType::Float16 || condition.dtype() == DType::BFloat16;
+    if (!cond_is_bool && !cond_is_floating) {
+        char msg[256];
+        snprintf(msg, sizeof(msg), "where: condition tensor must have dtype Bool or a floating dtype, but got dtype %d",
+                 static_cast<int>(condition.dtype()));
+        throw std::invalid_argument(msg);
+    }
+
+    Tensor cond_f32;
+    const bool use_float_cond = cond_is_floating;
     const bool* bool_cond_ptr = nullptr;
     const float* float_cond_ptr = nullptr;
 
-    if (condition.dtype() == DType::Bool) {
+    if (cond_is_bool) {
         bool_cond_ptr = condition.data<bool>();
-    } else if (use_float_cond) {
-        float_cond_ptr = condition.data<float>();
     } else {
-        char msg[256];
-        snprintf(msg, sizeof(msg), "where: condition tensor must have dtype Bool or Float32, but got dtype %d",
-                 static_cast<int>(condition.dtype()));
-        throw std::invalid_argument(msg);
+        // Widen Float64/Float16/BFloat16 conditions to Float32 (no-op for Float32).
+        cond_f32 = (condition.dtype() == DType::Float32) ? condition : condition.to(DType::Float32);
+        float_cond_ptr = cond_f32.data<float>();
     }
 
     // Helper to check condition value
@@ -1470,14 +1505,20 @@ auto bincount_kernel(const Tensor& input, const Tensor* weights, int64_t minleng
 // =============================================================================
 
 auto take_along_dim_kernel(const Tensor& input, const Tensor& indices, int64_t dim) -> Tensor {
-    auto in_shape = input.shape();
-    auto idx_shape = indices.shape();
+    // This kernel addresses both buffers with flat, contiguous offsets, so a
+    // non-contiguous (transposed/sliced/permuted) input or index view would
+    // otherwise read the wrong storage elements. Materialize contiguous copies.
+    Tensor in_c = input.is_contiguous() ? input : input.contiguous();
+    Tensor idx_c = indices.is_contiguous() ? indices : indices.contiguous();
+
+    auto in_shape = in_c.shape();
+    auto idx_shape = idx_c.shape();
     int64_t ndim = in_shape.size();
 
     // Index tensor must be Int64; otherwise data<int64_t>() reinterprets the
     // raw buffer (e.g. pairs of Int32 read as one garbage Int64). Mirrors
     // gather/scatter/index_select which reject non-Int64 indices.
-    if (indices.dtype() != DType::Int64) {
+    if (idx_c.dtype() != DType::Int64) {
         throw std::invalid_argument("take_along_dim: indices must have dtype Int64");
     }
 
@@ -1487,9 +1528,8 @@ auto take_along_dim_kernel(const Tensor& input, const Tensor& indices, int64_t d
         throw std::out_of_range("take_along_dim: dim out of range");
     }
 
-    // Index shape must be broadcastable against the input along every non-dim
-    // axis: idx_shape[d] <= in_shape[d]. Otherwise the offset computed below
-    // (which uses in_shape extents) runs past the input buffer.
+    // Index must have the same rank as input; along every non-dim axis its
+    // extent must not exceed the input's (it selects a sub-block there).
     if (static_cast<int64_t>(idx_shape.size()) != ndim) {
         throw std::invalid_argument("take_along_dim: indices must have same rank as input");
     }
@@ -1502,20 +1542,26 @@ auto take_along_dim_kernel(const Tensor& input, const Tensor& indices, int64_t d
 
     // Output has same shape as indices
     Tensor output(std::vector<int64_t>(idx_shape.begin(), idx_shape.end()),
-                  input.dtype(), input.device());
+                  in_c.dtype(), in_c.device());
 
-    int64_t numel = indices.numel();
+    int64_t numel = idx_c.numel();
     if (numel == 0) return output;
 
-    // Compute outer_size (product of dims before dim), dim_size, inner_size (product of dims after dim)
-    int64_t outer_size = 1;
-    for (int64_t d = 0; d < dim; ++d) outer_size *= idx_shape[d];
-    int64_t idx_dim_size = idx_shape[dim];
     int64_t in_dim_size = in_shape[dim];
-    int64_t inner_size = 1;
-    for (int64_t d = dim + 1; d < ndim; ++d) inner_size *= idx_shape[d];
 
-    const int64_t* idx_ptr = indices.data<int64_t>();
+    // Contiguous strides of the INPUT. The iteration coordinate on every
+    // non-dim axis must be re-linearised against the input's own strides, which
+    // differ from the index's whenever the extents differ on that axis.
+    std::vector<int64_t> in_strides(ndim);
+    {
+        int64_t s = 1;
+        for (int64_t d = ndim - 1; d >= 0; --d) {
+            in_strides[d] = s;
+            s *= in_shape[d];
+        }
+    }
+
+    const int64_t* idx_ptr = idx_c.data<int64_t>();
 
     // Validate all indices up front, sequentially. Throwing inside an OMP
     // parallel region is undefined behaviour, so the range check cannot live in
@@ -1528,44 +1574,53 @@ auto take_along_dim_kernel(const Tensor& input, const Tensor& indices, int64_t d
         }
     }
 
+    // Map an output/index flat position i (row-major over idx_shape) to the
+    // matching input offset: decode each coordinate from idx_shape, substitute
+    // the gathered index for the `dim` coordinate, and re-linearise every
+    // coordinate against the input strides.
+    auto in_offset_of = [&](int64_t i) -> int64_t {
+        int64_t off = 0;
+        int64_t rem = i;
+        for (int64_t d = ndim - 1; d >= 0; --d) {
+            int64_t c = rem % idx_shape[d];
+            rem /= idx_shape[d];
+            if (d == dim) {
+                int64_t src_idx = idx_ptr[i];
+                if (src_idx < 0) src_idx += in_dim_size;
+                off += src_idx * in_strides[d];
+            } else {
+                off += c * in_strides[d];
+            }
+        }
+        return off;
+    };
+
     auto copy_elements = [&](auto* in_ptr, auto* out_ptr) {
         #pragma omp parallel for if(numel > ::tenzor::OmpThresholds::simple())
         for (int64_t i = 0; i < numel; ++i) {
-            int64_t outer = i / (idx_dim_size * inner_size);
-            int64_t rem = i % (idx_dim_size * inner_size);
-            int64_t inner = rem % inner_size;
-
-            int64_t src_idx = idx_ptr[i];
-            if (src_idx < 0) src_idx += in_dim_size;
-
-            int64_t in_offset = outer * (in_dim_size * inner_size) + src_idx * inner_size + inner;
-            out_ptr[i] = in_ptr[in_offset];
+            out_ptr[i] = in_ptr[in_offset_of(i)];
         }
     };
 
-    switch (input.dtype()) {
-        case DType::Float32: copy_elements(input.data<float>(), output.data<float>()); break;
-        case DType::Float64: copy_elements(input.data<double>(), output.data<double>()); break;
-        case DType::Int32:   copy_elements(input.data<int32_t>(), output.data<int32_t>()); break;
-        case DType::Int64:   copy_elements(input.data<int64_t>(), output.data<int64_t>()); break;
-        case DType::Int16:   copy_elements(input.data<int16_t>(), output.data<int16_t>()); break;
-        case DType::Int8:    copy_elements(input.data<int8_t>(), output.data<int8_t>()); break;
-        case DType::UInt8:   copy_elements(input.data<uint8_t>(), output.data<uint8_t>()); break;
-        case DType::Bool:    copy_elements(input.data<bool>(), output.data<bool>()); break;
+    switch (in_c.dtype()) {
+        case DType::Float32: copy_elements(in_c.data<float>(), output.data<float>()); break;
+        case DType::Float64: copy_elements(in_c.data<double>(), output.data<double>()); break;
+        case DType::Int32:   copy_elements(in_c.data<int32_t>(), output.data<int32_t>()); break;
+        case DType::Int64:   copy_elements(in_c.data<int64_t>(), output.data<int64_t>()); break;
+        case DType::Int16:   copy_elements(in_c.data<int16_t>(), output.data<int16_t>()); break;
+        case DType::Int8:    copy_elements(in_c.data<int8_t>(), output.data<int8_t>()); break;
+        case DType::UInt8:   copy_elements(in_c.data<uint8_t>(), output.data<uint8_t>()); break;
+        case DType::Bool:    copy_elements(in_c.data<bool>(), output.data<bool>()); break;
         default:
-            // Float16/BFloat16: use byte-level copy
+            // Float16/BFloat16 (and any other same-size dtype): byte-level copy.
             {
-                auto elem_size = input.dtype_size();
-                const uint8_t* in_bytes = static_cast<const uint8_t*>(input.data_ptr());
+                auto elem_size = in_c.dtype_size();
+                const uint8_t* in_bytes = static_cast<const uint8_t*>(in_c.data_ptr());
                 uint8_t* out_bytes = static_cast<uint8_t*>(output.data_ptr());
+                #pragma omp parallel for if(numel > ::tenzor::OmpThresholds::simple())
                 for (int64_t i = 0; i < numel; ++i) {
-                    int64_t outer = i / (idx_dim_size * inner_size);
-                    int64_t rem = i % (idx_dim_size * inner_size);
-                    int64_t inner = rem % inner_size;
-                    int64_t src_idx = idx_ptr[i];
-                    if (src_idx < 0) src_idx += in_dim_size;
-                    int64_t in_offset = outer * (in_dim_size * inner_size) + src_idx * inner_size + inner;
-                    std::memcpy(out_bytes + i * elem_size, in_bytes + in_offset * elem_size, elem_size);
+                    std::memcpy(out_bytes + i * elem_size,
+                                in_bytes + in_offset_of(i) * elem_size, elem_size);
                 }
             }
             break;

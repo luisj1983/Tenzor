@@ -2293,6 +2293,32 @@ __global__ void pow_int_kernel(const T* input, T* output, double e, int int_exp,
     }
 
 /**
+ * @brief Saturating host-side cast of a double scalar bound to an integer type.
+ *
+ * `static_cast<int64_t>(+inf)` (and any double outside the integer type's
+ * representable range) is undefined behaviour in C++ and on this hardware
+ * produces INT64_MIN. ClampMin/ClampMax pass +inf / -inf as the unused bound
+ * (registry: clamp_kernel(x, min, +inf) / clamp_kernel(x, -inf, max)), so the
+ * naive cast turned `clamp_min(int64_tensor, 0)` into an all-INT64_MIN result
+ * (it set hi = static_cast<int64_t>(+inf) = INT64_MIN, then v > hi was always
+ * true). This saturates: +inf / above-max -> type max, -inf / below-min ->
+ * type min, NaN -> 0, otherwise the truncated value — matching PyTorch's
+ * integer-clamp semantics with out-of-range bounds.
+ */
+template <typename T>
+static inline T saturate_double_to_int(double v) {
+    constexpr double lo = static_cast<double>(std::numeric_limits<T>::lowest());
+    constexpr double hi = static_cast<double>(std::numeric_limits<T>::max());
+    if (std::isnan(v)) return T(0);
+    if (v <= lo) return std::numeric_limits<T>::lowest();
+    // `hi` is rounded to the nearest double, which for 64-bit types is
+    // 2^63 (one past INT64_MAX); >= catches that boundary so we never cast a
+    // double that exceeds the representable range.
+    if (v >= hi) return std::numeric_limits<T>::max();
+    return static_cast<T>(v);
+}
+
+/**
  * @brief Power kernel launcher: output = input^exponent
  * @param input Input tensor (base)
  * @param exponent Power exponent
@@ -2374,10 +2400,15 @@ auto clamp_kernel(const Tensor& input, double min_val, double max_val, hipStream
         auto result_f32 = clamp_kernel(input_f32, min_val, max_val, stream);
         return result_f32.to(DType::BFloat16);
     } else {
+        // Saturate the double bounds into the integer range. clamp_min passes
+        // max_val = +inf and clamp_max passes min_val = -inf; a plain
+        // static_cast<T>(+/-inf) is UB and produced INT64_MIN, corrupting the
+        // whole result (e.g. clamp_min(int64, 0) -> all INT64_MIN).
         TENZOR_HIP_INT_DISPATCH(input.dtype(), "clamp",
             hipLaunchKernelGGL(clamp_int_kernel<T>, grid, block, 0, stream,
                 input.data<T>(), result.data<T>(),
-                static_cast<T>(min_val), static_cast<T>(max_val), n);)
+                saturate_double_to_int<T>(min_val),
+                saturate_double_to_int<T>(max_val), n);)
     }
 
     HIP_CHECK(hipGetLastError());

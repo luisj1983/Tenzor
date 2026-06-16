@@ -173,16 +173,15 @@ auto causal_score_mod() -> ScoreModFn {
         // write corrupted 2 storage elements; for GPU, dereferencing a
         // device pointer on host crashed. (#54)
         //
-        // For Float16 we use -1e4 (fits in Float16 range, ~max negative
-        // before overflow), for other dtypes -inf. softmax(-inf)=0 and
-        // softmax(-1e4 + anything reasonable)≈0 so behavior matches.
-        // LL.7: BF16 also overflows on -inf cast → must use -1e4 sentinel too.
-        bool use_neg_inf = (score.dtype() != DType::Float16 &&
-                            score.dtype() != DType::BFloat16);
-        double mask_val = use_neg_inf
-            ? -std::numeric_limits<double>::infinity()
-            : -1e4;
-
+        // Emit true -inf at masked (future) positions. flex_attention promotes
+        // scores to Float32 before the online-softmax loop and its
+        // fully-masked-row guards (block_max == -inf) fire only on true -inf.
+        // A -1e4 half sentinel would leave a fully-masked row summing to
+        // uniform attention instead of zero output; -inf makes the guard fire
+        // and the row correctly yields zero. (LL.7 / #54: build the mask in
+        // Float32 — the sole caller passes a Float32 score and reads it back via
+        // float*, and Float32 represents -inf exactly without the half overflow
+        // that motivated the old -1e4 sentinel.)
         Tensor row_idx = arange(q_start, q_start + q_len, 1,
                                 DType::Int32, score.device())
                         .reshape({q_len, 1});
@@ -193,10 +192,13 @@ auto causal_score_mod() -> ScoreModFn {
         Tensor col_exp = expand(col_idx, std::vector<int64_t>{q_len, kv_len});
         Tensor mask_bool = gt(col_exp, row_exp);  // true where future token
 
-        Tensor neg_large = full({q_len, kv_len}, mask_val,
-                                score.dtype(), score.device());
-        Tensor zeros_t = zeros({q_len, kv_len}, score.dtype(), score.device());
-        Tensor mask_tensor = where(mask_bool, neg_large, zeros_t);
+        const double neg_inf_val = -std::numeric_limits<double>::infinity();
+        Tensor neg_large = full({q_len, kv_len}, neg_inf_val,
+                                DType::Float32, score.device());
+        Tensor zeros_t = zeros({q_len, kv_len}, DType::Float32, score.device());
+        Tensor mask_f32 = where(mask_bool, neg_large, zeros_t);
+        Tensor mask_tensor = (score.dtype() == DType::Float32)
+                                 ? mask_f32 : mask_f32.to(score.dtype());
 
         return add(score, mask_tensor);
     };

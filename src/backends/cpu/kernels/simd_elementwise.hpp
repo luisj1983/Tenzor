@@ -24,6 +24,7 @@
 #include <omp.h>
 #include "tenzor/core/dtype.hpp"
 #include "tenzor/backend/omp_thresholds.hpp"
+#include "bfloat16_simd.hpp"  // NaN-safe F32<->BF16 SIMD conversion helpers
 
 #ifdef __AVX512F__
 #define TENZOR_HAS_AVX512 1
@@ -130,26 +131,9 @@ void elementwise_unary(const T* input, T* output, size_t n, Op op) {
                 _mm256_store_ps(tmp, fp32);
                 for (int j = 0; j < 8; ++j) tmp[j] = op(tmp[j]);
                 fp32 = _mm256_load_ps(tmp);
-                // F32 -> BF16: round-to-nearest-even + shift-right-16 + pack
-                __m256i bits = _mm256_castps_si256(fp32);
-                __m256i lsb = _mm256_and_si256(
-                    _mm256_srli_epi32(bits, 16), _mm256_set1_epi32(1));
-                __m256i bias = _mm256_add_epi32(
-                    _mm256_set1_epi32(0x7FFF), lsb);
-                __m256i rounded = _mm256_srli_epi32(
-                    _mm256_add_epi32(bits, bias), 16);
-                // Compact: extract low 16-bits of each 32-bit lane
-                __m256i shuf = _mm256_setr_epi8(
-                    0, 1, 4, 5, 8, 9, 12, 13,
-                    -1,-1,-1,-1,-1,-1,-1,-1,
-                    0, 1, 4, 5, 8, 9, 12, 13,
-                    -1,-1,-1,-1,-1,-1,-1,-1);
-                __m256i shuffled = _mm256_shuffle_epi8(rounded, shuf);
-                __m128i lo = _mm256_extracti128_si256(shuffled, 0);
-                __m128i hi = _mm256_extracti128_si256(shuffled, 1);
-                __m128i packed = _mm_unpacklo_epi64(lo, hi);
-                _mm_storeu_si128(
-                    reinterpret_cast<__m128i*>(out_u16 + i), packed);
+                // F32 -> BF16: use the shared NaN-safe converter (the inline
+                // round-bias+truncate could turn some NaNs into Inf).
+                bfloat16_simd::cvt_f32_to_bf16_avx2(fp32, out_u16 + i);
             }
             // Scalar tail
             for (; i < end; ++i) {
@@ -267,25 +251,9 @@ void elementwise_binary(const T* a, const T* b, T* output, size_t n, Op op) {
                 _mm256_store_ps(tb, fb);
                 for (int j = 0; j < 8; ++j) tc[j] = op(ta[j], tb[j]);
                 __m256 fc = _mm256_load_ps(tc);
-                // F32 -> BF16
-                __m256i bits = _mm256_castps_si256(fc);
-                __m256i lsb = _mm256_and_si256(
-                    _mm256_srli_epi32(bits, 16), _mm256_set1_epi32(1));
-                __m256i bias = _mm256_add_epi32(
-                    _mm256_set1_epi32(0x7FFF), lsb);
-                __m256i rounded = _mm256_srli_epi32(
-                    _mm256_add_epi32(bits, bias), 16);
-                __m256i shuf = _mm256_setr_epi8(
-                    0, 1, 4, 5, 8, 9, 12, 13,
-                    -1,-1,-1,-1,-1,-1,-1,-1,
-                    0, 1, 4, 5, 8, 9, 12, 13,
-                    -1,-1,-1,-1,-1,-1,-1,-1);
-                __m256i shuffled = _mm256_shuffle_epi8(rounded, shuf);
-                __m128i lo = _mm256_extracti128_si256(shuffled, 0);
-                __m128i hi = _mm256_extracti128_si256(shuffled, 1);
-                __m128i packed = _mm_unpacklo_epi64(lo, hi);
-                _mm_storeu_si128(
-                    reinterpret_cast<__m128i*>(out_u16 + i), packed);
+                // F32 -> BF16: use the shared NaN-safe converter (the inline
+                // round-bias+truncate could turn some NaNs into Inf).
+                bfloat16_simd::cvt_f32_to_bf16_avx2(fc, out_u16 + i);
             }
             for (; i < end; ++i) {
                 float va = static_cast<float>(a[i]);

@@ -8,6 +8,7 @@
 #include <ATen/ATen.h>
 #include <ATen/DLConvertor.h>   // Audit J7: at::toDLPack / at::fromDLPack
 #include <tenzor/core/dlpack.hpp>  // Audit J7: tenzor::to_dlpack / from_dlpack
+#include <tenzor/utils/error.hpp>  // typed exceptions that map to Pythonic types
 #include <c10/core/ScalarType.h>
 #include <stdexcept>
 #include <sstream>
@@ -97,7 +98,7 @@ auto dtype_to_torch(DType dtype) -> int {
         case DType::Complex128:
             return static_cast<int>(torch::kComplexDouble);
         default:
-            throw std::runtime_error("Unsupported DType for PyTorch conversion");
+            throw ::tenzor::TypeError("Unsupported DType for PyTorch conversion");
     }
 }
 
@@ -137,7 +138,7 @@ auto dtype_from_torch(int torch_dtype) -> DType {
         case torch::kComplexDouble:
             return DType::Complex128;
         default:
-            throw std::runtime_error("Unsupported PyTorch ScalarType for Tenzor");
+            throw ::tenzor::TypeError("Unsupported PyTorch ScalarType for Tenzor");
     }
 }
 
@@ -148,7 +149,7 @@ auto device_to_torch_string(const Device& device) -> std::string {
         case Device::Type::CUDA:
             return "cuda:" + std::to_string(device.index);
         default:
-            throw std::runtime_error("Unsupported device type for PyTorch");
+            throw ::tenzor::DeviceException("Unsupported device type for PyTorch");
     }
 }
 
@@ -165,7 +166,7 @@ auto device_from_torch_string(const std::string& device_str) -> Device {
         // get the documented exception that names the offending string.
         if (index_str.empty() ||
             index_str.find_first_not_of("0123456789") != std::string::npos) {
-            throw std::runtime_error("Unsupported PyTorch device string: " + device_str);
+            throw ::tenzor::DeviceException("Unsupported PyTorch device string: " + device_str);
         }
         int index = std::stoi(index_str);
         return Device::cuda(index);
@@ -175,7 +176,7 @@ auto device_from_torch_string(const std::string& device_str) -> Device {
         return Device::cuda(0);
     }
 
-    throw std::runtime_error("Unsupported PyTorch device string: " + device_str);
+    throw ::tenzor::DeviceException("Unsupported PyTorch device string: " + device_str);
 }
 
 auto tensor_to_torch(const Tensor& tensor, bool requires_grad) -> torch::Tensor {
@@ -279,7 +280,7 @@ auto tensor_to_torch(const Tensor& tensor, bool requires_grad) -> torch::Tensor 
                 cudaMemcpy(torch_tensor.data_ptr(), host.data_ptr(),
                            bytes, cudaMemcpyHostToDevice);
             } else {
-                throw std::runtime_error(
+                throw ::tenzor::DeviceException(
                     "tensor_to_torch: unsupported PyTorch target device for "
                     "non-CPU/non-CUDA Tenzor source");
             }
@@ -315,7 +316,7 @@ auto tensor_from_torch(const torch::Tensor& torch_tensor,
         } else if (torch_device.is_cuda()) {
             device = Device::cuda(torch_device.index());
         } else {
-            throw std::runtime_error("Unsupported PyTorch device type");
+            throw ::tenzor::DeviceException("Unsupported PyTorch device type");
         }
     }
 

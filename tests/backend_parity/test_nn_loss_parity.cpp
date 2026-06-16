@@ -313,7 +313,9 @@ TEST_P(NNLossParity, InfoNCELoss) {
         nn::InfoNCELoss loss(/*temperature=*/0.07);
         return loss.forward(Variable(in[0], false),
                             Variable(in[1], false)).tensor();
-    }, std::vector<Tensor>{queries, keys}, device, 1e-4f, 1e-5f, "InfoNCELoss");
+        // InfoNCE builds the similarity matrix via q @ k^T matmul
+        // (src/nn/loss/contrastive.cpp:69) → FP32 GEMM floor (parity::MATMUL_*).
+    }, std::vector<Tensor>{queries, keys}, device, parity::MATMUL_RTOL, parity::MATMUL_ATOL, "InfoNCELoss");
 }
 
 TEST_P(NNLossParity, NTXentLoss) {

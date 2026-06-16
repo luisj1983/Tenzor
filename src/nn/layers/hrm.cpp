@@ -959,13 +959,19 @@ auto HRM::forward_with_aux(const Variable& input, const Tensor& mask)
         stats_.avg_q_continue = q_stats.avg_q_continue;
     }
 
-    // Final output
-    Variable final_output;
-    if (aux_outputs.empty()) {
-        final_output = run_h_cycle(h_state, l_state, mask);
-    } else {
-        final_output = aux_outputs.back();
-    }
+    // Final output.
+    //
+    // Always recompute the final output with a fresh run_h_cycle on the
+    // (detached, grad-enabled) post-loop state, regardless of deep_supervision.
+    // Previously the deep_supervision branch returned aux_outputs.back() — the
+    // intermediate produced *inside* the last loop iteration, before that
+    // iteration's detach — while the non-supervision branch ran a fresh
+    // run_h_cycle here. Those are two different computations (the detach breaks
+    // the recurrence graph between them), so the returned "final" output and the
+    // gradient path differed depending on the flag. Unifying on the fresh
+    // run_h_cycle makes the final output consistent; the per-cycle intermediates
+    // remain available separately in aux_outputs for the deep-supervision loss.
+    Variable final_output = run_h_cycle(h_state, l_state, mask);
 
     return {final_output, aux_outputs};
 }

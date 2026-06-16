@@ -17,8 +17,8 @@ auto VulkanBackend::dispatchLinear(const Tensor& input, const Tensor& weight, co
     // footprint for no numerical win. Shader selection happens below via
     // `shader_name` so each dtype lands on its native-I/O variant.
 
-    Tensor input_contig = input.is_contiguous() ? input : dispatchContiguous(input);
-    Tensor weight_contig = weight.is_contiguous() ? weight : dispatchContiguous(weight);
+    Tensor input_contig = (input.is_contiguous() && input.offset() == 0) ? input : dispatchContiguous(input);
+    Tensor weight_contig = (weight.is_contiguous() && weight.offset() == 0) ? weight : dispatchContiguous(weight);
 
     auto input_shape = input_contig.shape();
     auto weight_shape = weight_contig.shape();
@@ -61,7 +61,7 @@ auto VulkanBackend::dispatchLinear(const Tensor& input, const Tensor& weight, co
     const void* bias_ptr_data;
     size_t bias_size;
     if (bias) {
-        Tensor bias_contig = bias->is_contiguous() ? *bias : dispatchContiguous(*bias);
+        Tensor bias_contig = (bias->is_contiguous() && bias->offset() == 0) ? *bias : dispatchContiguous(*bias);
         bias_ptr_data = bias_contig.data_ptr();
         bias_size = bias_contig.numel() * bias_contig.dtype_size();
     } else {
@@ -122,9 +122,9 @@ auto VulkanBackend::dispatchLinearBackward(const Tensor& grad_output, const Tens
     // grad_weight = grad_output^T @ input      (N,M) x (M,K) -> (N,K)
     // grad_bias   = sum(grad_output, dim=0)    (M,N) -> (N,)
 
-    Tensor go_contig = grad_output.is_contiguous() ? grad_output : dispatchContiguous(grad_output);
-    Tensor in_contig = input.is_contiguous() ? input : dispatchContiguous(input);
-    Tensor w_contig = weight.is_contiguous() ? weight : dispatchContiguous(weight);
+    Tensor go_contig = (grad_output.is_contiguous() && grad_output.offset() == 0) ? grad_output : dispatchContiguous(grad_output);
+    Tensor in_contig = (input.is_contiguous() && input.offset() == 0) ? input : dispatchContiguous(input);
+    Tensor w_contig = (weight.is_contiguous() && weight.offset() == 0) ? weight : dispatchContiguous(weight);
 
     auto go_shape = go_contig.shape();
     auto w_shape = w_contig.shape();
@@ -201,7 +201,7 @@ auto VulkanBackend::dispatchLinearBackward(const Tensor& grad_output, const Tens
     Tensor go_2d = go_contig.reshape({M, N});
     Tensor in_2d = in_contig.reshape({M, K});
     Tensor go_t = dispatchTranspose(go_2d, 0, 1);  // (N, M)
-    Tensor go_t_contig = go_t.is_contiguous() ? go_t : dispatchContiguous(go_t);
+    Tensor go_t_contig = (go_t.is_contiguous() && go_t.offset() == 0) ? go_t : dispatchContiguous(go_t);
     Tensor grad_weight = dispatchMatmul(go_t_contig, in_2d);  // (N, K)
 
     // 3. grad_bias = sum(grad_output, dim=0) -> (N,)
@@ -235,7 +235,7 @@ auto VulkanBackend::dispatchDropout(const Tensor& input, float p, bool training)
         return {output, mask};
     }
 
-    Tensor input_contig = input.is_contiguous() ? input : dispatchContiguous(input);
+    Tensor input_contig = (input.is_contiguous() && input.offset() == 0) ? input : dispatchContiguous(input);
 
     size_t numel = input_contig.numel();
     if (numel == 0) {
@@ -334,8 +334,8 @@ auto VulkanBackend::dispatchDropoutBackward(const Tensor& grad_output, const Ten
         return grad_output;
     }
 
-    Tensor go_contig = grad_output.is_contiguous() ? grad_output : dispatchContiguous(grad_output);
-    Tensor mask_contig = mask.is_contiguous() ? mask : dispatchContiguous(mask);
+    Tensor go_contig = (grad_output.is_contiguous() && grad_output.offset() == 0) ? grad_output : dispatchContiguous(grad_output);
+    Tensor mask_contig = (mask.is_contiguous() && mask.offset() == 0) ? mask : dispatchContiguous(mask);
 
     size_t numel = go_contig.numel();
     if (numel == 0) {

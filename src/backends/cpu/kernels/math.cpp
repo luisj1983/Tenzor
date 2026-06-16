@@ -2102,26 +2102,58 @@ auto bmm_kernel(const Tensor& a, const Tensor& b) -> Tensor {
     int64_t b_batch_stride = K * N;
     int64_t c_batch_stride = M * N;
 
+#ifdef TENZOR_USE_MKL
+    // cblas_*gemm_batch_strided takes MKL_INT (32-bit under the LP64 build) for
+    // the M/N/K, leading-dimension and batch-stride arguments. When any of
+    // those exceed INT_MAX the strided call would silently truncate them, so
+    // fall back to a per-batch single-GEMM loop (same MKL kernel, just one
+    // GEMM per batch with int64-safe pointer arithmetic). The leading
+    // dimensions of a per-batch GEMM are K/N/N, which are <= the strides, so
+    // this branch is valid whenever the strided one is not.
+    auto fits_mkl_int = [](int64_t v) {
+        return v <= static_cast<int64_t>(std::numeric_limits<MKL_INT>::max());
+    };
+    const bool use_strided_batch =
+        fits_mkl_int(M) && fits_mkl_int(N) && fits_mkl_int(K) &&
+        fits_mkl_int(batch_size) &&
+        fits_mkl_int(a_batch_stride) && fits_mkl_int(b_batch_stride) &&
+        fits_mkl_int(c_batch_stride);
+#endif
+
     if (a.dtype() == DType::Float32) {
         const float* a_data = a_cont.data<float>();
         const float* b_data = b_cont.data<float>();
         float* c_data = output.data<float>();
 
 #ifdef TENZOR_USE_MKL
-        // Use batch_strided for efficient batched GEMM
-        cblas_sgemm_batch_strided(
-            CblasRowMajor,
-            CblasNoTrans, CblasNoTrans,
-            static_cast<MKL_INT>(M),
-            static_cast<MKL_INT>(N),
-            static_cast<MKL_INT>(K),
-            1.0f,
-            a_data, static_cast<MKL_INT>(K), a_batch_stride,
-            b_data, static_cast<MKL_INT>(N), b_batch_stride,
-            0.0f,
-            c_data, static_cast<MKL_INT>(N), c_batch_stride,
-            static_cast<MKL_INT>(batch_size)
-        );
+        if (use_strided_batch) {
+            // Use batch_strided for efficient batched GEMM
+            cblas_sgemm_batch_strided(
+                CblasRowMajor,
+                CblasNoTrans, CblasNoTrans,
+                static_cast<MKL_INT>(M),
+                static_cast<MKL_INT>(N),
+                static_cast<MKL_INT>(K),
+                1.0f,
+                a_data, static_cast<MKL_INT>(K), static_cast<MKL_INT>(a_batch_stride),
+                b_data, static_cast<MKL_INT>(N), static_cast<MKL_INT>(b_batch_stride),
+                0.0f,
+                c_data, static_cast<MKL_INT>(N), static_cast<MKL_INT>(c_batch_stride),
+                static_cast<MKL_INT>(batch_size)
+            );
+        } else {
+            // Strides/dims exceed MKL_INT: one GEMM per batch with int64 offsets.
+            for (int64_t batch = 0; batch < batch_size; ++batch) {
+                cblas_sgemm(
+                    CblasRowMajor, CblasNoTrans, CblasNoTrans,
+                    static_cast<MKL_INT>(M), static_cast<MKL_INT>(N), static_cast<MKL_INT>(K),
+                    1.0f,
+                    a_data + batch * a_batch_stride, static_cast<MKL_INT>(K),
+                    b_data + batch * b_batch_stride, static_cast<MKL_INT>(N),
+                    0.0f,
+                    c_data + batch * c_batch_stride, static_cast<MKL_INT>(N));
+            }
+        }
 #else
         // Fallback: Parallelize across batches with optimized GEMM
         #pragma omp parallel for if(batch_size > 1)
@@ -2139,19 +2171,32 @@ auto bmm_kernel(const Tensor& a, const Tensor& b) -> Tensor {
         double* c_data = output.data<double>();
 
 #ifdef TENZOR_USE_MKL
-        cblas_dgemm_batch_strided(
-            CblasRowMajor,
-            CblasNoTrans, CblasNoTrans,
-            static_cast<MKL_INT>(M),
-            static_cast<MKL_INT>(N),
-            static_cast<MKL_INT>(K),
-            1.0,
-            a_data, static_cast<MKL_INT>(K), a_batch_stride,
-            b_data, static_cast<MKL_INT>(N), b_batch_stride,
-            0.0,
-            c_data, static_cast<MKL_INT>(N), c_batch_stride,
-            static_cast<MKL_INT>(batch_size)
-        );
+        if (use_strided_batch) {
+            cblas_dgemm_batch_strided(
+                CblasRowMajor,
+                CblasNoTrans, CblasNoTrans,
+                static_cast<MKL_INT>(M),
+                static_cast<MKL_INT>(N),
+                static_cast<MKL_INT>(K),
+                1.0,
+                a_data, static_cast<MKL_INT>(K), static_cast<MKL_INT>(a_batch_stride),
+                b_data, static_cast<MKL_INT>(N), static_cast<MKL_INT>(b_batch_stride),
+                0.0,
+                c_data, static_cast<MKL_INT>(N), static_cast<MKL_INT>(c_batch_stride),
+                static_cast<MKL_INT>(batch_size)
+            );
+        } else {
+            for (int64_t batch = 0; batch < batch_size; ++batch) {
+                cblas_dgemm(
+                    CblasRowMajor, CblasNoTrans, CblasNoTrans,
+                    static_cast<MKL_INT>(M), static_cast<MKL_INT>(N), static_cast<MKL_INT>(K),
+                    1.0,
+                    a_data + batch * a_batch_stride, static_cast<MKL_INT>(K),
+                    b_data + batch * b_batch_stride, static_cast<MKL_INT>(N),
+                    0.0,
+                    c_data + batch * c_batch_stride, static_cast<MKL_INT>(N));
+            }
+        }
 #else
         #pragma omp parallel for if(batch_size > 1)
         for (int64_t batch = 0; batch < batch_size; ++batch) {
@@ -2206,19 +2251,32 @@ auto bmm_kernel(const Tensor& a, const Tensor& b) -> Tensor {
         }
 
 #ifdef TENZOR_USE_MKL
-        cblas_sgemm_batch_strided(
-            CblasRowMajor,
-            CblasNoTrans, CblasNoTrans,
-            static_cast<MKL_INT>(M),
-            static_cast<MKL_INT>(N),
-            static_cast<MKL_INT>(K),
-            1.0f,
-            a_f32.data(), static_cast<MKL_INT>(K), a_batch_stride,
-            b_f32.data(), static_cast<MKL_INT>(N), b_batch_stride,
-            0.0f,
-            c_f32.data(), static_cast<MKL_INT>(N), c_batch_stride,
-            static_cast<MKL_INT>(batch_size)
-        );
+        if (use_strided_batch) {
+            cblas_sgemm_batch_strided(
+                CblasRowMajor,
+                CblasNoTrans, CblasNoTrans,
+                static_cast<MKL_INT>(M),
+                static_cast<MKL_INT>(N),
+                static_cast<MKL_INT>(K),
+                1.0f,
+                a_f32.data(), static_cast<MKL_INT>(K), static_cast<MKL_INT>(a_batch_stride),
+                b_f32.data(), static_cast<MKL_INT>(N), static_cast<MKL_INT>(b_batch_stride),
+                0.0f,
+                c_f32.data(), static_cast<MKL_INT>(N), static_cast<MKL_INT>(c_batch_stride),
+                static_cast<MKL_INT>(batch_size)
+            );
+        } else {
+            for (int64_t batch = 0; batch < batch_size; ++batch) {
+                cblas_sgemm(
+                    CblasRowMajor, CblasNoTrans, CblasNoTrans,
+                    static_cast<MKL_INT>(M), static_cast<MKL_INT>(N), static_cast<MKL_INT>(K),
+                    1.0f,
+                    a_f32.data() + batch * a_batch_stride, static_cast<MKL_INT>(K),
+                    b_f32.data() + batch * b_batch_stride, static_cast<MKL_INT>(N),
+                    0.0f,
+                    c_f32.data() + batch * c_batch_stride, static_cast<MKL_INT>(N));
+            }
+        }
 #else
         #pragma omp parallel for if(batch_size > 1)
         for (int64_t batch = 0; batch < batch_size; ++batch) {
@@ -2257,19 +2315,32 @@ auto bmm_kernel(const Tensor& a, const Tensor& b) -> Tensor {
         }
 
 #ifdef TENZOR_USE_MKL
-        cblas_sgemm_batch_strided(
-            CblasRowMajor,
-            CblasNoTrans, CblasNoTrans,
-            static_cast<MKL_INT>(M),
-            static_cast<MKL_INT>(N),
-            static_cast<MKL_INT>(K),
-            1.0f,
-            a_f32.data(), static_cast<MKL_INT>(K), a_batch_stride,
-            b_f32.data(), static_cast<MKL_INT>(N), b_batch_stride,
-            0.0f,
-            c_f32.data(), static_cast<MKL_INT>(N), c_batch_stride,
-            static_cast<MKL_INT>(batch_size)
-        );
+        if (use_strided_batch) {
+            cblas_sgemm_batch_strided(
+                CblasRowMajor,
+                CblasNoTrans, CblasNoTrans,
+                static_cast<MKL_INT>(M),
+                static_cast<MKL_INT>(N),
+                static_cast<MKL_INT>(K),
+                1.0f,
+                a_f32.data(), static_cast<MKL_INT>(K), static_cast<MKL_INT>(a_batch_stride),
+                b_f32.data(), static_cast<MKL_INT>(N), static_cast<MKL_INT>(b_batch_stride),
+                0.0f,
+                c_f32.data(), static_cast<MKL_INT>(N), static_cast<MKL_INT>(c_batch_stride),
+                static_cast<MKL_INT>(batch_size)
+            );
+        } else {
+            for (int64_t batch = 0; batch < batch_size; ++batch) {
+                cblas_sgemm(
+                    CblasRowMajor, CblasNoTrans, CblasNoTrans,
+                    static_cast<MKL_INT>(M), static_cast<MKL_INT>(N), static_cast<MKL_INT>(K),
+                    1.0f,
+                    a_f32.data() + batch * a_batch_stride, static_cast<MKL_INT>(K),
+                    b_f32.data() + batch * b_batch_stride, static_cast<MKL_INT>(N),
+                    0.0f,
+                    c_f32.data() + batch * c_batch_stride, static_cast<MKL_INT>(N));
+            }
+        }
 #else
         #pragma omp parallel for if(batch_size > 1)
         for (int64_t batch = 0; batch < batch_size; ++batch) {

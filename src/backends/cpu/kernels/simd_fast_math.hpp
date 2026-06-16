@@ -182,12 +182,19 @@ inline __m256 log_avx2(__m256 x) {
     __m256 u = _mm256_div_ps(_mm256_sub_ps(m, one), _mm256_add_ps(m, one));
     __m256 u2 = _mm256_mul_ps(u, u);
 
-    // Polynomial in u²
-    __m256 p = _mm256_set1_ps(0.2f);
+    // Polynomial in u²: log(m) = 2u (1 + u²/3 + u⁴/5 + u⁶/7 + u⁸/9 + ...).
+    // Carry the series out to the u⁸/9 term so the vectorized log matches
+    // std::log to within ~1 ULP over m ∈ [1/sqrt2, sqrt2] (|u| < ~0.172),
+    // preventing false gradcheck failures on log / log_softmax / pow.
+    __m256 p = _mm256_set1_ps(0.111111111111f);  // 1/9
 #ifdef TENZOR_FAST_MATH_FMA
-    p = _mm256_fmadd_ps(p, u2, _mm256_set1_ps(0.333333333333f));
+    p = _mm256_fmadd_ps(p, u2, _mm256_set1_ps(0.142857142857f));   // 1/7
+    p = _mm256_fmadd_ps(p, u2, _mm256_set1_ps(0.2f));              // 1/5
+    p = _mm256_fmadd_ps(p, u2, _mm256_set1_ps(0.333333333333f));   // 1/3
     p = _mm256_fmadd_ps(p, u2, one);
 #else
+    p = _mm256_add_ps(_mm256_mul_ps(p, u2), _mm256_set1_ps(0.142857142857f));
+    p = _mm256_add_ps(_mm256_mul_ps(p, u2), _mm256_set1_ps(0.2f));
     p = _mm256_add_ps(_mm256_mul_ps(p, u2), _mm256_set1_ps(0.333333333333f));
     p = _mm256_add_ps(_mm256_mul_ps(p, u2), one);
 #endif
@@ -294,6 +301,7 @@ inline __m256 pow_avx2(__m256 x, float y) {
  * when k is odd.
  */
 inline __m256 sin_avx2(__m256 x) {
+    const __m256 x_orig = x;  // retained for the large-argument scalar fallback
     __m256 inv_pi = _mm256_set1_ps(0.318309886183791f);   // 1/π
     __m256 pi     = _mm256_set1_ps(3.14159265358979f);    // π
 
@@ -346,6 +354,28 @@ inline __m256 sin_avx2(__m256 x) {
     // sign_bit = 0x80000000 where odd, 0 elsewhere — XOR-in the sign.
     __m256i sign_bit = _mm256_and_si256(odd_mask, _mm256_set1_epi32(0x80000000));
     result = _mm256_xor_ps(result, _mm256_castsi256_ps(sign_bit));
+
+    // Large-argument safety: for |x| above ~2^22·π the k = round(x/π) value no
+    // longer fits reliably in int32 (_mm256_cvtps_epi32 returns 0x80000000 for
+    // out-of-range inputs, which would corrupt the odd/even sign), and the
+    // single-step Cody-Waite reduction loses too much precision. Fall back to
+    // scalar std::sin for exactly those lanes; the fast path is unchanged for
+    // normal magnitudes.
+    constexpr float kSinCosSafe = 13176794.0f;  // ~2^22 · π
+    __m256 abs_x_orig = _mm256_and_ps(x_orig, _mm256_castsi256_ps(_mm256_set1_epi32(0x7fffffff)));
+    __m256 big_mask = _mm256_cmp_ps(abs_x_orig, _mm256_set1_ps(kSinCosSafe), _CMP_GT_OQ);
+    if (_mm256_movemask_ps(big_mask) != 0) {
+        alignas(32) float in_lanes[8];
+        alignas(32) float out_lanes[8];
+        _mm256_store_ps(in_lanes, x_orig);
+        _mm256_store_ps(out_lanes, result);
+        for (int lane = 0; lane < 8; ++lane) {
+            if (std::abs(in_lanes[lane]) > kSinCosSafe) {
+                out_lanes[lane] = std::sin(in_lanes[lane]);
+            }
+        }
+        result = _mm256_load_ps(out_lanes);
+    }
     return result;
 }
 
@@ -458,8 +488,13 @@ inline __m512 log_avx512(__m512 x) {
     __m512 u = _mm512_div_ps(_mm512_sub_ps(m, one), _mm512_add_ps(m, one));
     __m512 u2 = _mm512_mul_ps(u, u);
 
-    __m512 p = _mm512_set1_ps(0.2f);
-    p = _mm512_fmadd_ps(p, u2, _mm512_set1_ps(0.333333333333f));
+    // log(m) = 2u (1 + u²/3 + u⁴/5 + u⁶/7 + u⁸/9 + ...). Carry the series out
+    // to the u⁸/9 term so the vectorized log matches std::log to within ~1 ULP
+    // over the reduced range, preventing false gradcheck failures.
+    __m512 p = _mm512_set1_ps(0.111111111111f);  // 1/9
+    p = _mm512_fmadd_ps(p, u2, _mm512_set1_ps(0.142857142857f));   // 1/7
+    p = _mm512_fmadd_ps(p, u2, _mm512_set1_ps(0.2f));              // 1/5
+    p = _mm512_fmadd_ps(p, u2, _mm512_set1_ps(0.333333333333f));   // 1/3
     p = _mm512_fmadd_ps(p, u2, one);
 
     __m512 log_m = _mm512_mul_ps(_mm512_mul_ps(_mm512_set1_ps(2.0f), u), p);
@@ -542,6 +577,7 @@ inline __m512 pow_avx512(__m512 x, float y) {
  * ~9e-6 on the whole domain.
  */
 inline __m512 sin_avx512(__m512 x) {
+    const __m512 x_orig = x;  // retained for the large-argument scalar fallback
     __m512 inv_pi = _mm512_set1_ps(0.318309886183791f);  // 1/π
     __m512 pi     = _mm512_set1_ps(3.14159265358979f);   // π
 
@@ -572,6 +608,26 @@ inline __m512 sin_avx512(__m512 x) {
     // XOR in the sign bit for odd lanes.
     __m512 sign_flip = _mm512_castsi512_ps(_mm512_set1_epi32(0x80000000));
     result = _mm512_mask_xor_ps(result, odd_lanes, result, sign_flip);
+
+    // Large-argument safety: for |x| above ~2^22·π the k = round(x/π) value no
+    // longer fits reliably in int32 (_mm512_cvtps_epi32 saturates/returns the
+    // integer indefinite, corrupting the odd/even sign) and the single-step
+    // reduction loses precision. Fall back to scalar std::sin for those lanes.
+    constexpr float kSinCosSafe = 13176794.0f;  // ~2^22 · π
+    __m512 abs_x_orig = _mm512_abs_ps(x_orig);
+    __mmask16 big_lanes = _mm512_cmp_ps_mask(abs_x_orig, _mm512_set1_ps(kSinCosSafe), _CMP_GT_OQ);
+    if (big_lanes != 0) {
+        alignas(64) float in_lanes[16];
+        alignas(64) float out_lanes[16];
+        _mm512_store_ps(in_lanes, x_orig);
+        _mm512_store_ps(out_lanes, result);
+        for (int lane = 0; lane < 16; ++lane) {
+            if (std::abs(in_lanes[lane]) > kSinCosSafe) {
+                out_lanes[lane] = std::sin(in_lanes[lane]);
+            }
+        }
+        result = _mm512_load_ps(out_lanes);
+    }
     return result;
 }
 

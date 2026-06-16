@@ -1,6 +1,7 @@
 #include "vulkan_ops_common.hpp"
 #include "tenzor/backend/attr_macros.hpp"
 #include "tenzor/ops/creation.hpp"
+#include <cstdint>
 #include <memory>
 
 namespace tenzor {
@@ -77,11 +78,21 @@ auto VulkanBackend::dispatchConv2dForward(const Tensor& input, const Tensor& wei
     std::vector<int64_t> output_shape = {batch, out_channels, out_height, out_width};
     Tensor output(output_shape, input.dtype(), input.device());
 
+    // Materialize operands to zero-offset contiguous storage before binding.
+    // Tensor views (slice/narrow) carry a non-zero storage offset; the shaders
+    // index from element 0 and the descriptor-offset alignment guard rejects
+    // any non-aligned offset. dispatchContiguous returns the input unchanged
+    // when it is already contiguous and offset-0, so this is free for the
+    // common case.
+    Tensor input_c  = dispatchContiguous(input);
+    Tensor weight_c = dispatchContiguous(weight);
+    Tensor bias_c   = has_bias ? dispatchContiguous(*bias) : output;
+
     // Get VkBuffer handles
-    const void* buffer_input = input.data_ptr();
-    const void* buffer_weight = weight.data_ptr();
+    const void* buffer_input = input_c.data_ptr();
+    const void* buffer_weight = weight_c.data_ptr();
     const void* buffer_output = output.data_ptr();
-    const void* buffer_bias = has_bias ? bias->data_ptr() : buffer_output;
+    const void* buffer_bias = has_bias ? bias_c.data_ptr() : buffer_output;
 
     // Calculate buffer sizes. For packed 16-bit types (Float16, BFloat16),
     // round up to 4-byte boundary since the shaders access uint32 words.
@@ -228,8 +239,14 @@ auto VulkanBackend::dispatchConv2dWinograd(const Tensor& input, const Tensor& we
             std::vector<int64_t> in_ends    = {batch, (g + 1) * in_per_group,
                                                 in_height, in_width};
             std::vector<int64_t> in_steps   = {1, 1, 1, 1};
+            // dispatchContiguous (not Tensor::contiguous) — slicing the
+            // outermost dim yields a stride-contiguous view at a *non-zero*
+            // storage offset (e.g. weight group g=1 of [16,1,3,3] sits at
+            // element 9 / byte 36). Tensor::contiguous() returns such a view
+            // unchanged because is_contiguous() is true, so its offset would
+            // reach the descriptor write and trip the alignment guard.
             Tensor group_input =
-                dispatchSlice(input, in_starts, in_ends, in_steps).contiguous();
+                dispatchContiguous(dispatchSlice(input, in_starts, in_ends, in_steps));
 
             std::vector<int64_t> w_starts = {g * out_per_group, 0, 0, 0};
             std::vector<int64_t> w_ends   = {(g + 1) * out_per_group,
@@ -238,7 +255,7 @@ auto VulkanBackend::dispatchConv2dWinograd(const Tensor& input, const Tensor& we
                                               weight_shape[3]};
             std::vector<int64_t> w_steps  = {1, 1, 1, 1};
             Tensor group_weight =
-                dispatchSlice(weight, w_starts, w_ends, w_steps).contiguous();
+                dispatchContiguous(dispatchSlice(weight, w_starts, w_ends, w_steps));
 
             std::unique_ptr<Tensor> owned_group_bias;
             const Tensor* group_bias_ptr = nullptr;
@@ -247,7 +264,7 @@ auto VulkanBackend::dispatchConv2dWinograd(const Tensor& input, const Tensor& we
                 std::vector<int64_t> b_ends   = {(g + 1) * out_per_group};
                 std::vector<int64_t> b_steps  = {1};
                 owned_group_bias = std::make_unique<Tensor>(
-                    dispatchSlice(*bias, b_starts, b_ends, b_steps).contiguous());
+                    dispatchContiguous(dispatchSlice(*bias, b_starts, b_ends, b_steps)));
                 group_bias_ptr = owned_group_bias.get();
             }
 
@@ -260,6 +277,15 @@ auto VulkanBackend::dispatchConv2dWinograd(const Tensor& input, const Tensor& we
 
     // ---- Winograd F(2,3) path for groups=1 ----
 
+    // Materialize input/weight to zero-offset contiguous storage before binding.
+    // This path is reached directly from dispatchConv2dForward *before* its own
+    // contiguify step, so a sliced/offset view can arrive here; the filter- and
+    // input-transform shaders index from element 0 and a non-aligned descriptor
+    // offset would trip the alignment guard.
+    Tensor input_c  = dispatchContiguous(input);
+    Tensor weight_c = dispatchContiguous(weight);
+    Tensor bias_c   = has_bias ? dispatchContiguous(*bias) : Tensor();
+
     // Step 1: Transform filters  G * g * G^T -> U [16][K][C]
     uint32_t total_filters = static_cast<uint32_t>(out_channels * in_channels);
     // U is stored as [16][K*C] (16 = 4x4 Winograd domain elements)
@@ -268,7 +294,7 @@ auto VulkanBackend::dispatchConv2dWinograd(const Tensor& input, const Tensor& we
     {
         auto* filter_pipeline = getPipeline("winograd_filter_transform", device_id);
         std::vector<std::pair<uint32_t, const void*>> bindings = {
-            {0, weight.data_ptr()}, {1, U.data_ptr()}
+            {0, weight_c.data_ptr()}, {1, U.data_ptr()}
         };
         std::vector<size_t> sizes = {
             static_cast<size_t>(weight.numel() * weight.dtype_size()),
@@ -299,7 +325,7 @@ auto VulkanBackend::dispatchConv2dWinograd(const Tensor& input, const Tensor& we
     {
         auto* input_pipeline = getPipeline("winograd_input_transform", device_id);
         std::vector<std::pair<uint32_t, const void*>> bindings = {
-            {0, input.data_ptr()}, {1, V.data_ptr()}
+            {0, input_c.data_ptr()}, {1, V.data_ptr()}
         };
         std::vector<size_t> sizes = {
             static_cast<size_t>(input.numel() * input.dtype_size()),
@@ -414,7 +440,7 @@ auto VulkanBackend::dispatchConv2dWinograd(const Tensor& input, const Tensor& we
         auto* output_pipeline = getPipeline("winograd_output_transform", device_id);
         uint32_t total_out_tiles = static_cast<uint32_t>(batch * out_channels * tiles_h * tiles_w);
 
-        const void* buffer_bias_ptr = has_bias ? bias->data_ptr() : output.data_ptr();
+        const void* buffer_bias_ptr = has_bias ? bias_c.data_ptr() : output.data_ptr();
         size_t buffer_bias_size = has_bias ? (bias->numel() * bias->dtype_size()) : 4;
 
         std::vector<std::pair<uint32_t, const void*>> bindings = {
@@ -513,11 +539,18 @@ auto VulkanBackend::dispatchConvTranspose2dForward(const Tensor& input, const Te
     std::vector<int64_t> output_shape = {batch, out_channels, out_height, out_width};
     Tensor output(output_shape, input.dtype(), input.device());
 
+    // Materialize operands to zero-offset contiguous storage before binding
+    // (views with a non-zero storage offset would trip the descriptor-offset
+    // alignment guard; dispatchContiguous is a no-op when already contiguous).
+    Tensor input_c  = dispatchContiguous(input);
+    Tensor weight_c = dispatchContiguous(weight);
+    Tensor bias_c   = has_bias ? dispatchContiguous(*bias) : output;
+
     // Get VkBuffer handles
-    const void* buffer_input = input.data_ptr();
-    const void* buffer_weight = weight.data_ptr();
+    const void* buffer_input = input_c.data_ptr();
+    const void* buffer_weight = weight_c.data_ptr();
     const void* buffer_output = output.data_ptr();
-    const void* buffer_bias = has_bias ? bias->data_ptr() : buffer_output;
+    const void* buffer_bias = has_bias ? bias_c.data_ptr() : buffer_output;
 
     // Calculate buffer sizes
     size_t buffer_size_input = input.numel() * input.dtype_size();
@@ -687,11 +720,18 @@ auto VulkanBackend::dispatchConv3dForward(const Tensor& input, const Tensor& wei
     std::vector<int64_t> output_shape = {batch, out_channels, out_depth, out_height, out_width};
     Tensor output(output_shape, input.dtype(), input.device());
 
+    // Materialize operands to zero-offset contiguous storage before binding
+    // (views with a non-zero storage offset would trip the descriptor-offset
+    // alignment guard; dispatchContiguous is a no-op when already contiguous).
+    Tensor input_c  = dispatchContiguous(input);
+    Tensor weight_c = dispatchContiguous(weight);
+    Tensor bias_c   = has_bias ? dispatchContiguous(*bias) : output;
+
     // Get VkBuffer handles
-    const void* buffer_input = input.data_ptr();
-    const void* buffer_weight = weight.data_ptr();
+    const void* buffer_input = input_c.data_ptr();
+    const void* buffer_weight = weight_c.data_ptr();
     const void* buffer_output = output.data_ptr();
-    const void* buffer_bias = has_bias ? bias->data_ptr() : buffer_output;
+    const void* buffer_bias = has_bias ? bias_c.data_ptr() : buffer_output;
 
     // Calculate buffer sizes. The BFloat16 shader packs two elements per uint32
     // word, so round each buffer up to a 4-byte boundary. Float16 uses a native
@@ -847,9 +887,14 @@ auto VulkanBackend::dispatchConv3dBackwardInput(
     // Create gradient input tensor
     Tensor grad_input(input_shape, grad_output.dtype(), grad_output.device());
 
+    // Materialize read operands to zero-offset contiguous storage (views with a
+    // non-zero offset would trip the descriptor-offset alignment guard).
+    Tensor grad_output_c = dispatchContiguous(grad_output);
+    Tensor weight_c      = dispatchContiguous(weight);
+
     // Get VkBuffer handles
-    const void* buffer_grad_out = grad_output.data_ptr();
-    const void* buffer_weight = weight.data_ptr();
+    const void* buffer_grad_out = grad_output_c.data_ptr();
+    const void* buffer_weight = weight_c.data_ptr();
     const void* buffer_grad_in = grad_input.data_ptr();
 
     // Calculate buffer sizes (round up to 4-byte boundary for F16 packed uint32 access)
@@ -981,6 +1026,18 @@ auto VulkanBackend::dispatchConv3dBackwardWeight(
     int64_t kernel_h = weight_shape[3];
     int64_t kernel_w = weight_shape[4];
 
+    // The conv3d_backward_weight shaders compute grad_output/input flat indices
+    // in 32-bit uint; a tensor with >UINT32_MAX elements would wrap the index
+    // and read/write out of bounds. shaderInt64 is not enabled on the device,
+    // so reject oversized tensors up front rather than overflow silently.
+    if (grad_output.numel() > static_cast<int64_t>(UINT32_MAX) ||
+        input.numel() > static_cast<int64_t>(UINT32_MAX)) {
+        throw std::runtime_error(
+            "Vulkan conv3d_backward_weight: tensor too large for 32-bit indexing "
+            "(grad_output elements " + std::to_string(grad_output.numel()) +
+            ", input elements " + std::to_string(input.numel()) + ")");
+    }
+
     int32_t device_id = grad_output.device().index;
 
     // Select shader based on dtype (F16 uses native shader with F32 accumulation)
@@ -997,9 +1054,14 @@ auto VulkanBackend::dispatchConv3dBackwardWeight(
     // Create gradient weight tensor
     Tensor grad_weight(weight_shape, grad_output.dtype(), grad_output.device());
 
+    // Materialize read operands to zero-offset contiguous storage (views with a
+    // non-zero offset would trip the descriptor-offset alignment guard).
+    Tensor grad_output_c = dispatchContiguous(grad_output);
+    Tensor input_c       = dispatchContiguous(input);
+
     // Get VkBuffer handles
-    const void* buffer_grad_out = grad_output.data_ptr();
-    const void* buffer_input = input.data_ptr();
+    const void* buffer_grad_out = grad_output_c.data_ptr();
+    const void* buffer_input = input_c.data_ptr();
     const void* buffer_grad_weight = grad_weight.data_ptr();
 
     // Calculate buffer sizes (round up to 4-byte boundary for F16 packed uint32 access)
@@ -1131,8 +1193,12 @@ auto VulkanBackend::dispatchConv3dBackwardBias(const Tensor& grad_output) -> Ten
     std::vector<int64_t> bias_shape = {channels_out};
     Tensor grad_bias(bias_shape, grad_output.dtype(), grad_output.device());
 
+    // Materialize read operand to zero-offset contiguous storage (a view with a
+    // non-zero offset would trip the descriptor-offset alignment guard).
+    Tensor grad_output_c = dispatchContiguous(grad_output);
+
     // Get VkBuffer handles
-    const void* buffer_grad_out = grad_output.data_ptr();
+    const void* buffer_grad_out = grad_output_c.data_ptr();
     const void* buffer_grad_bias = grad_bias.data_ptr();
 
     // Calculate buffer sizes (round up to 4-byte boundary for F16 packed uint32 access)
@@ -1348,11 +1414,19 @@ auto VulkanBackend::dispatchDeformableConv2dForward(
     std::vector<int64_t> output_shape = {batch, out_channels, H_out, W_out};
     Tensor output(output_shape, input.dtype(), input.device());
 
-    const void* buffer_input  = input.data_ptr();
-    const void* buffer_offset = offset.data_ptr();
-    const void* buffer_weight = weight.data_ptr();
-    const void* buffer_bias   = bias.data_ptr();
-    const void* buffer_mask   = use_mask ? mask.data_ptr() : output.data_ptr();
+    // Materialize read operands to zero-offset contiguous storage (views with a
+    // non-zero offset would trip the descriptor-offset alignment guard).
+    Tensor input_c  = dispatchContiguous(input);
+    Tensor offset_c = dispatchContiguous(offset);
+    Tensor weight_c = dispatchContiguous(weight);
+    Tensor bias_c   = dispatchContiguous(bias);
+    Tensor mask_c   = use_mask ? dispatchContiguous(mask) : output;
+
+    const void* buffer_input  = input_c.data_ptr();
+    const void* buffer_offset = offset_c.data_ptr();
+    const void* buffer_weight = weight_c.data_ptr();
+    const void* buffer_bias   = bias_c.data_ptr();
+    const void* buffer_mask   = use_mask ? mask_c.data_ptr() : output.data_ptr();
     const void* buffer_output = output.data_ptr();
 
     size_t size_input  = input.numel()  * input.dtype_size();
@@ -1480,11 +1554,19 @@ auto VulkanBackend::dispatchDeformableConv2dBackwardInput(
         grad_mask_out = Tensor({1}, input.dtype(), input.device());  // dummy
     }
 
-    const void* buffer_go      = grad_output.data_ptr();
-    const void* buffer_input   = input.data_ptr();
-    const void* buffer_offset  = offset.data_ptr();
-    const void* buffer_weight  = weight.data_ptr();
-    const void* buffer_mask    = use_mask ? mask.data_ptr() : grad_mask_out.data_ptr();
+    // Materialize read operands to zero-offset contiguous storage (views with a
+    // non-zero offset would trip the descriptor-offset alignment guard).
+    Tensor grad_output_c = dispatchContiguous(grad_output);
+    Tensor input_c       = dispatchContiguous(input);
+    Tensor offset_c      = dispatchContiguous(offset);
+    Tensor weight_c      = dispatchContiguous(weight);
+    Tensor mask_c        = use_mask ? dispatchContiguous(mask) : grad_mask_out;
+
+    const void* buffer_go      = grad_output_c.data_ptr();
+    const void* buffer_input   = input_c.data_ptr();
+    const void* buffer_offset  = offset_c.data_ptr();
+    const void* buffer_weight  = weight_c.data_ptr();
+    const void* buffer_mask    = use_mask ? mask_c.data_ptr() : grad_mask_out.data_ptr();
     const void* buffer_gi      = grad_input.data_ptr();
     const void* buffer_g_off   = grad_offset.data_ptr();
     const void* buffer_g_mask  = grad_mask_out.data_ptr();
@@ -1610,10 +1692,17 @@ auto VulkanBackend::dispatchDeformableConv2dBackwardWeight(
 
     Tensor grad_weight(weight_shape, input.dtype(), input.device());
 
-    const void* buffer_go     = grad_output.data_ptr();
-    const void* buffer_input  = input.data_ptr();
-    const void* buffer_offset = offset.data_ptr();
-    const void* buffer_mask   = use_mask ? mask.data_ptr() : grad_weight.data_ptr();
+    // Materialize read operands to zero-offset contiguous storage (views with a
+    // non-zero offset would trip the descriptor-offset alignment guard).
+    Tensor grad_output_c = dispatchContiguous(grad_output);
+    Tensor input_c       = dispatchContiguous(input);
+    Tensor offset_c      = dispatchContiguous(offset);
+    Tensor mask_c        = use_mask ? dispatchContiguous(mask) : grad_weight;
+
+    const void* buffer_go     = grad_output_c.data_ptr();
+    const void* buffer_input  = input_c.data_ptr();
+    const void* buffer_offset = offset_c.data_ptr();
+    const void* buffer_mask   = use_mask ? mask_c.data_ptr() : grad_weight.data_ptr();
     const void* buffer_gw     = grad_weight.data_ptr();
 
     size_t size_go     = grad_output.numel() * grad_output.dtype_size();

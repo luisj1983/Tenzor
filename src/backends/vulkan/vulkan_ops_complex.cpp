@@ -38,7 +38,9 @@ auto VulkanBackend::dispatchConj(const Tensor& input) -> Tensor {
     struct { uint32_t num_elements; } pushConstants;
     pushConstants.num_elements = num_elements;
 
-    const void* buffer_in = input.data_ptr();
+    // Materialize input to a packed offset-0 buffer before binding.
+    const Tensor input_c = dispatchContiguous(input);
+    const void* buffer_in = input_c.data_ptr();
     const void* buffer_out = output.data_ptr();
 
     size_t buffer_size = input.numel() * input.dtype_size();
@@ -100,7 +102,10 @@ auto VulkanBackend::dispatchReal(const Tensor& input) -> Tensor {
         int64_t num_complex = input.numel();
         struct { uint32_t num_complex; } pc{static_cast<uint32_t>(num_complex)};
 
-        const void* buffer_in  = input.data_ptr();
+        // Materialize input to a packed offset-0 buffer before binding. Hold the
+        // result in a named local so its storage outlives the descriptor write.
+        const Tensor input_c = dispatchContiguous(input);
+        const void* buffer_in  = input_c.data_ptr();
         const void* buffer_out = output.data_ptr();
         size_t in_size  = input.numel()  * input.dtype_size();
         size_t out_size = output.numel() * output.dtype_size();
@@ -162,7 +167,10 @@ auto VulkanBackend::dispatchImag(const Tensor& input) -> Tensor {
         int64_t num_complex = input.numel();
         struct { uint32_t num_complex; } pc{static_cast<uint32_t>(num_complex)};
 
-        const void* buffer_in  = input.data_ptr();
+        // Materialize input to a packed offset-0 buffer before binding. Hold the
+        // result in a named local so its storage outlives the descriptor write.
+        const Tensor input_c = dispatchContiguous(input);
+        const void* buffer_in  = input_c.data_ptr();
         const void* buffer_out = output.data_ptr();
         size_t in_size  = input.numel()  * input.dtype_size();
         size_t out_size = output.numel() * output.dtype_size();
@@ -241,8 +249,10 @@ auto VulkanBackend::dispatchAngle(const Tensor& input) -> Tensor {
         size_t in_size  = input.numel()  * input.dtype_size();
         size_t out_size = output.numel() * output.dtype_size();
 
+        // Materialize input to a packed offset-0 buffer before binding.
+        const Tensor input_c = dispatchContiguous(input);
         std::vector<std::pair<uint32_t, const void*>> bindings = {
-            {0, input.data_ptr()}, {1, output.data_ptr()}
+            {0, input_c.data_ptr()}, {1, output.data_ptr()}
         };
         std::vector<size_t> sizes = {in_size, out_size};
         VkDescriptorSet ds = allocateAndWriteDescriptorSet(
@@ -298,9 +308,12 @@ auto VulkanBackend::dispatchPolar(const Tensor& abs, const Tensor& angle) -> Ten
         size_t real_size    = abs.numel()    * abs.dtype_size();
         size_t output_size  = output.numel() * output.dtype_size();
 
+        // Materialize read operands to packed offset-0 buffers before binding.
+        const Tensor abs_c = dispatchContiguous(abs);
+        const Tensor angle_c = dispatchContiguous(angle);
         std::vector<std::pair<uint32_t, const void*>> bindings = {
-            {0, abs.data_ptr()},
-            {1, angle.data_ptr()},
+            {0, abs_c.data_ptr()},
+            {1, angle_c.data_ptr()},
             {2, output.data_ptr()},
         };
         std::vector<size_t> sizes = {real_size, real_size, output_size};
@@ -368,9 +381,12 @@ auto VulkanBackend::dispatchComplexTensor(const Tensor& real, const Tensor& imag
     size_t in_size = num_elements * real.dtype_size();
     size_t out_size = num_elements * 2 * real.dtype_size();  // complex = 2x real size
 
+    // Materialize read operands to packed offset-0 buffers before binding.
+    const Tensor real_c = dispatchContiguous(real);
+    const Tensor imag_c = dispatchContiguous(imag);
     std::vector<std::pair<uint32_t, const void*>> bindings = {
-        {0, real.data_ptr()},
-        {1, imag.data_ptr()},
+        {0, real_c.data_ptr()},
+        {1, imag_c.data_ptr()},
         {2, output.data_ptr()}
     };
     std::vector<size_t> sizes_vec = {in_size, in_size, out_size};

@@ -124,9 +124,13 @@ auto MaxBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tens
         }
         auto epsilon = full(input_shape_vec, eps_val, input.dtype(), input.device());
         auto mask_bool = lt(abs_diff, epsilon);
-        // Convert boolean mask to float for gradient computation
-        auto ones_tensor = ones(input_shape_vec, input.dtype(), input.device());
-        auto zeros_tensor = zeros(input_shape_vec, input.dtype(), input.device());
+        // Convert boolean mask to float for gradient computation. Build the
+        // mask + tie_count in Float32: in Float16/BFloat16 the running sum
+        // saturates past 2048 ties (and 1/tie_count underflows), silently
+        // mis-normalising. Narrow the final grad back.
+        const bool is_half = (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16);
+        auto ones_tensor = ones(input_shape_vec, DType::Float32, input.device());
+        auto zeros_tensor = zeros(input_shape_vec, DType::Float32, input.device());
         auto mask = where(mask_bool, ones_tensor, zeros_tensor);
 
         // Normalize mask by tie count so gradient is split among tied elements
@@ -141,8 +145,11 @@ auto MaxBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tens
             grad_reshaped = reshape(grad_output, ones_shape);
         }
         auto grad_broadcasted = expand(grad_reshaped, input_shape_vec);
+        auto grad_f32 = is_half ? grad_broadcasted.to(DType::Float32) : grad_broadcasted;
+        auto grad_input = mul(grad_f32, mask);
+        if (is_half) grad_input = grad_input.to(input.dtype());
 
-        return {mul(grad_broadcasted, mask)};
+        return {grad_input};
     } else {
         // Dimension-specific max
         int64_t dim = dim_.value();
@@ -196,12 +203,16 @@ auto MaxBackward::backward_with_variables(std::vector<Variable> grad_outputs) ->
         }
         auto epsilon = full(input_shape_vec, eps_val, input.dtype(), input.device());
         auto mask_bool = lt(abs_diff, epsilon);
-        auto ones_tensor = ones(input_shape_vec, input.dtype(), input.device());
-        auto zeros_tensor = zeros(input_shape_vec, input.dtype(), input.device());
+        // Build mask + tie_count in Float32 so the sum doesn't saturate in
+        // half precision; narrow the normalized mask back to input dtype.
+        const bool is_half = (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16);
+        auto ones_tensor = ones(input_shape_vec, DType::Float32, input.device());
+        auto zeros_tensor = zeros(input_shape_vec, DType::Float32, input.device());
         auto mask = where(mask_bool, ones_tensor, zeros_tensor);
 
         auto tie_count = sum(mask);
         mask = div(mask, tie_count);
+        if (is_half) mask = mask.to(input.dtype());
 
         auto grad_v = grad_var;
         if (grad_var.tensor().ndim() == 0) {
@@ -269,8 +280,11 @@ auto MedianBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<T
         }
         auto epsilon = full(input_shape_vec, eps_val, input.dtype(), input.device());
         auto mask_bool = lt(abs_diff, epsilon);
-        auto ones_tensor = ones(input_shape_vec, input.dtype(), input.device());
-        auto zeros_tensor = zeros(input_shape_vec, input.dtype(), input.device());
+        // Build mask + tie_count in Float32 so the sum doesn't saturate past
+        // 2048 ties in half precision; narrow the final grad back.
+        const bool is_half = (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16);
+        auto ones_tensor = ones(input_shape_vec, DType::Float32, input.device());
+        auto zeros_tensor = zeros(input_shape_vec, DType::Float32, input.device());
         auto mask = where(mask_bool, ones_tensor, zeros_tensor);
 
         // Normalize mask by tie count so gradient is split among tied elements
@@ -284,8 +298,11 @@ auto MedianBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<T
             grad_reshaped = reshape(grad_output, ones_shape);
         }
         auto grad_broadcasted = expand(grad_reshaped, input_shape_vec);
+        auto grad_f32 = is_half ? grad_broadcasted.to(DType::Float32) : grad_broadcasted;
+        auto grad_input = mul(grad_f32, mask);
+        if (is_half) grad_input = grad_input.to(input.dtype());
 
-        return {mul(grad_broadcasted, mask)};
+        return {grad_input};
     } else {
         // Dimension-specific median
         int64_t dim = dim_.value();
@@ -360,12 +377,16 @@ auto MedianBackward::backward_with_variables(std::vector<Variable> grad_outputs)
         }
         auto epsilon = full(input_shape_vec, eps_val, input.dtype(), input.device());
         auto mask_bool = lt(abs_diff, epsilon);
-        auto ones_tensor = ones(input_shape_vec, input.dtype(), input.device());
-        auto zeros_tensor = zeros(input_shape_vec, input.dtype(), input.device());
+        // Build mask + tie_count in Float32 so the sum doesn't saturate in
+        // half precision; narrow the normalized mask back to input dtype.
+        const bool is_half = (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16);
+        auto ones_tensor = ones(input_shape_vec, DType::Float32, input.device());
+        auto zeros_tensor = zeros(input_shape_vec, DType::Float32, input.device());
         auto mask = where(mask_bool, ones_tensor, zeros_tensor);
 
         auto tie_count = sum(mask);
         mask = div(mask, tie_count);
+        if (is_half) mask = mask.to(input.dtype());
 
         // Variable-level: broadcast grad and multiply by mask
         auto grad_v = grad_var;
@@ -453,8 +474,11 @@ auto ModeBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Ten
         }
         auto epsilon = full(input_shape_vec, eps_val, input.dtype(), input.device());
         auto mask_bool = lt(abs_diff, epsilon);
-        auto ones_tensor = ones(input_shape_vec, input.dtype(), input.device());
-        auto zeros_tensor = zeros(input_shape_vec, input.dtype(), input.device());
+        // Build mask + tie_count in Float32 so the sum doesn't saturate past
+        // 2048 ties in half precision; narrow the final grad back.
+        const bool is_half = (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16);
+        auto ones_tensor = ones(input_shape_vec, DType::Float32, input.device());
+        auto zeros_tensor = zeros(input_shape_vec, DType::Float32, input.device());
         auto mask = where(mask_bool, ones_tensor, zeros_tensor);
 
         // Normalize mask by tie count so gradient is split among tied elements
@@ -468,8 +492,11 @@ auto ModeBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Ten
             grad_reshaped = reshape(grad_output, ones_shape);
         }
         auto grad_broadcasted = expand(grad_reshaped, input_shape_vec);
+        auto grad_f32 = is_half ? grad_broadcasted.to(DType::Float32) : grad_broadcasted;
+        auto grad_input = mul(grad_f32, mask);
+        if (is_half) grad_input = grad_input.to(input.dtype());
 
-        return {mul(grad_broadcasted, mask)};
+        return {grad_input};
     } else {
         // Dimension-specific mode
         int64_t dim = dim_.value();
@@ -542,12 +569,16 @@ auto ModeBackward::backward_with_variables(std::vector<Variable> grad_outputs) -
         }
         auto epsilon = full(input_shape_vec, eps_val, input.dtype(), input.device());
         auto mask_bool = lt(abs_diff, epsilon);
-        auto ones_tensor = ones(input_shape_vec, input.dtype(), input.device());
-        auto zeros_tensor = zeros(input_shape_vec, input.dtype(), input.device());
+        // Build mask + tie_count in Float32 so the sum doesn't saturate in
+        // half precision; narrow the normalized mask back to input dtype.
+        const bool is_half = (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16);
+        auto ones_tensor = ones(input_shape_vec, DType::Float32, input.device());
+        auto zeros_tensor = zeros(input_shape_vec, DType::Float32, input.device());
         auto mask = where(mask_bool, ones_tensor, zeros_tensor);
 
         auto tie_count = sum(mask);
         mask = div(mask, tie_count);
+        if (is_half) mask = mask.to(input.dtype());
 
         // Variable-level: broadcast grad and multiply by mask
         auto grad_v = grad_var;

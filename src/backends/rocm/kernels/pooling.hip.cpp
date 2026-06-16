@@ -435,7 +435,7 @@ __global__ void maxpool2d_forward_kernel(
             for (int64_t w = w_start; w < w_end; ++w) {
                 int64_t input_idx = ((n * channels + c) * input_h + h) * input_w + w;
                 T val = input[input_idx];
-                if (val > max_val) {
+                if (tenzor::rocm::is_nan_bits(val) || val > max_val) {
                     max_val = val;
                     max_idx = input_idx;
                 }
@@ -490,7 +490,7 @@ __global__ void maxpool2d_forward_kernel_fp16(
             for (int64_t w = w_start; w < w_end; ++w) {
                 int64_t input_idx = ((n * channels + c) * input_h + h) * input_w + w;
                 float val = tenzor::rocm::safe_h2f(input[input_idx]);
-                if (val > max_val) {
+                if (tenzor::rocm::is_nan_bits(val) || val > max_val) {
                     max_val = val;
                     max_idx = input_idx;
                 }
@@ -563,6 +563,8 @@ auto maxpool2d_forward_hip(
     int64_t total_elements = batch_size * channels * output_h * output_w;
     int threads = rocm::get_wavefront_size() * 4;  // 4 wavefronts per block
     int blocks = (total_elements + threads - 1) / threads;
+    // Empty output: a zero-grid launch is rejected by HIP; return as-is.
+    if (blocks == 0) return {output, indices};
 
     if (input.dtype() == DType::Float32) {
         hipLaunchKernelGGL(maxpool2d_forward_kernel<float>,
@@ -1270,7 +1272,7 @@ __global__ void adaptive_maxpool2d_kernel(
             for (int64_t w = w_start; w < w_end; ++w) {
                 int64_t input_idx = ((n * channels + c) * input_h + h) * input_w + w;
                 T val = input[input_idx];
-                if (val > max_val) {
+                if (tenzor::rocm::is_nan_bits(val) || val > max_val) {
                     max_val = val;
                     max_idx = input_idx;
                 }
@@ -1309,6 +1311,8 @@ auto adaptive_maxpool2d_hip(
     int64_t total_elements = batch_size * channels * output_h * output_w;
     int threads = rocm::get_wavefront_size() * 4;  // 4 wavefronts per block
     int blocks = (total_elements + threads - 1) / threads;
+    // Empty output: a zero-grid launch is rejected by HIP; return as-is.
+    if (blocks == 0) return {output, indices};
 
     if (input.dtype() == DType::Float32) {
         hipLaunchKernelGGL(adaptive_maxpool2d_kernel<float>,
@@ -1682,7 +1686,7 @@ __global__ void maxpool1d_forward_kernel(
 
         int64_t l_start = ol * stride - padding;
 
-        T max_val = T(-1e38);
+        T max_val = std::numeric_limits<T>::lowest();
         int64_t max_idx = 0;
 
         for (int64_t k = 0; k < kernel_size; ++k) {
@@ -1690,7 +1694,7 @@ __global__ void maxpool1d_forward_kernel(
             if (l >= 0 && l < L) {
                 int64_t in_idx = (n * C + c) * L + l;
                 T val = input[in_idx];
-                if (val > max_val) {
+                if (tenzor::rocm::is_nan_bits(val) || val > max_val) {
                     max_val = val;
                     max_idx = l;
                 }
@@ -1719,7 +1723,7 @@ __global__ void maxpool1d_forward_kernel_fp16(
 
         int64_t l_start = ol * stride - padding;
 
-        float max_val = -1e38f;
+        float max_val = std::numeric_limits<float>::lowest();
         int64_t max_idx = 0;
 
         for (int64_t k = 0; k < kernel_size; ++k) {
@@ -1727,7 +1731,7 @@ __global__ void maxpool1d_forward_kernel_fp16(
             if (l >= 0 && l < L) {
                 int64_t in_idx = (n * C + c) * L + l;
                 float val = tenzor::rocm::safe_h2f(input[in_idx]);
-                if (val > max_val) {
+                if (tenzor::rocm::is_nan_bits(val) || val > max_val) {
                     max_val = val;
                     max_idx = l;
                 }
@@ -2189,13 +2193,13 @@ __global__ void adaptive_maxpool1d_forward_kernel(
         int64_t l_start = (ol * L_in) / L_out;
         int64_t l_end   = ((ol + 1) * L_in) / L_out;
 
-        T max_val = T(-1e38);
+        T max_val = std::numeric_limits<T>::lowest();
         int64_t max_idx = l_start;
 
         for (int64_t l = l_start; l < l_end; ++l) {
             int64_t in_idx = (n * C + c) * L_in + l;
             T val = input[in_idx];
-            if (val > max_val) {
+            if (tenzor::rocm::is_nan_bits(val) || val > max_val) {
                 max_val = val;
                 max_idx = l;
             }
@@ -2222,13 +2226,13 @@ __global__ void adaptive_maxpool1d_forward_kernel_fp16(
         int64_t l_start = (ol * L_in) / L_out;
         int64_t l_end   = ((ol + 1) * L_in) / L_out;
 
-        float max_val = -1e38f;
+        float max_val = std::numeric_limits<float>::lowest();
         int64_t max_idx = l_start;
 
         for (int64_t l = l_start; l < l_end; ++l) {
             int64_t in_idx = (n * C + c) * L_in + l;
             float val = tenzor::rocm::safe_h2f(input[in_idx]);
-            if (val > max_val) {
+            if (tenzor::rocm::is_nan_bits(val) || val > max_val) {
                 max_val = val;
                 max_idx = l;
             }
@@ -2545,7 +2549,7 @@ __global__ void maxpool3d_forward_kernel(
         int64_t h_start = oh * sH - pH;
         int64_t w_start = ow * sW - pW;
 
-        T max_val = T(-1e38);
+        T max_val = std::numeric_limits<T>::lowest();
         int64_t max_idx = 0;
 
         for (int64_t kd = 0; kd < kD; ++kd) {
@@ -2558,7 +2562,7 @@ __global__ void maxpool3d_forward_kernel(
                     if (d >= 0 && d < D && h >= 0 && h < H && w >= 0 && w < W) {
                         int64_t in_idx = ((n * C + c) * D + d) * H * W + h * W + w;
                         T val = input[in_idx];
-                        if (val > max_val) {
+                        if (tenzor::rocm::is_nan_bits(val) || val > max_val) {
                             max_val = val;
                             max_idx = d * H * W + h * W + w;
                         }
@@ -2596,7 +2600,7 @@ __global__ void maxpool3d_forward_kernel_fp16(
         int64_t h_start = oh * sH - pH;
         int64_t w_start = ow * sW - pW;
 
-        float max_val = -1e38f;
+        float max_val = std::numeric_limits<float>::lowest();
         int64_t max_idx = 0;
 
         for (int64_t kd = 0; kd < kD; ++kd) {
@@ -2609,7 +2613,7 @@ __global__ void maxpool3d_forward_kernel_fp16(
                     if (d >= 0 && d < D && h >= 0 && h < H && w >= 0 && w < W) {
                         int64_t in_idx = ((n * C + c) * D + d) * H * W + h * W + w;
                         float val = tenzor::rocm::safe_h2f(input[in_idx]);
-                        if (val > max_val) {
+                        if (tenzor::rocm::is_nan_bits(val) || val > max_val) {
                             max_val = val;
                             max_idx = d * H * W + h * W + w;
                         }
@@ -2650,6 +2654,8 @@ auto maxpool3d_forward_hip(
     int64_t total = N * C * D_out * H_out * W_out;
     int threads = rocm::get_wavefront_size() * 4;  // 4 wavefronts per block
     int blocks = (total + threads - 1) / threads;
+    // Empty output: a zero-grid launch is rejected by HIP; return as-is.
+    if (blocks == 0) return {output, indices};
 
     if (input.dtype() == DType::Float32) {
         hipLaunchKernelGGL(maxpool3d_forward_kernel<float>,
@@ -3166,7 +3172,7 @@ __global__ void adaptive_maxpool3d_forward_kernel(
         int64_t w_start = (ow * W_in) / W_out;
         int64_t w_end   = ((ow + 1) * W_in) / W_out;
 
-        T max_val = T(-1e38);
+        T max_val = std::numeric_limits<T>::lowest();
         int64_t max_idx = d_start * H_in * W_in + h_start * W_in + w_start;
 
         for (int64_t d = d_start; d < d_end; ++d) {
@@ -3174,7 +3180,7 @@ __global__ void adaptive_maxpool3d_forward_kernel(
                 for (int64_t w = w_start; w < w_end; ++w) {
                     int64_t in_idx = ((n * C + c) * D_in + d) * H_in * W_in + h * W_in + w;
                     T val = input[in_idx];
-                    if (val > max_val) {
+                    if (tenzor::rocm::is_nan_bits(val) || val > max_val) {
                         max_val = val;
                         max_idx = d * H_in * W_in + h * W_in + w;
                     }
@@ -3211,7 +3217,7 @@ __global__ void adaptive_maxpool3d_forward_kernel_fp16(
         int64_t w_start = (ow * W_in) / W_out;
         int64_t w_end   = ((ow + 1) * W_in) / W_out;
 
-        float max_val = -1e38f;
+        float max_val = std::numeric_limits<float>::lowest();
         int64_t max_idx = d_start * H_in * W_in + h_start * W_in + w_start;
 
         for (int64_t d = d_start; d < d_end; ++d) {
@@ -3219,7 +3225,7 @@ __global__ void adaptive_maxpool3d_forward_kernel_fp16(
                 for (int64_t w = w_start; w < w_end; ++w) {
                     int64_t in_idx = ((n * C + c) * D_in + d) * H_in * W_in + h * W_in + w;
                     float val = tenzor::rocm::safe_h2f(input[in_idx]);
-                    if (val > max_val) {
+                    if (tenzor::rocm::is_nan_bits(val) || val > max_val) {
                         max_val = val;
                         max_idx = d * H_in * W_in + h * W_in + w;
                     }
@@ -3609,14 +3615,14 @@ __global__ void fractional_maxpool2d_forward_kernel_f32(
         h_end = min(h_end, H);
         w_end = min(w_end, W);
 
-        float max_val = -1e38f;
+        float max_val = std::numeric_limits<float>::lowest();
         int64_t max_idx = h_start * W + w_start;
 
         for (int64_t h = h_start; h < h_end; ++h) {
             for (int64_t w = w_start; w < w_end; ++w) {
                 int64_t in_idx = ((n * C + c) * H + h) * W + w;
                 float val = input[in_idx];
-                if (val > max_val) {
+                if (tenzor::rocm::is_nan_bits(val) || val > max_val) {
                     max_val = val;
                     max_idx = h * W + w;
                 }
@@ -3662,14 +3668,14 @@ __global__ void fractional_maxpool2d_forward_kernel_f64(
         h_end = min(h_end, H);
         w_end = min(w_end, W);
 
-        double max_val = -1e308;
+        double max_val = std::numeric_limits<double>::lowest();
         int64_t max_idx = h_start * W + w_start;
 
         for (int64_t h = h_start; h < h_end; ++h) {
             for (int64_t w = w_start; w < w_end; ++w) {
                 int64_t in_idx = ((n * C + c) * H + h) * W + w;
                 double val = input[in_idx];
-                if (val > max_val) {
+                if (tenzor::rocm::is_nan_bits(val) || val > max_val) {
                     max_val = val;
                     max_idx = h * W + w;
                 }
@@ -3880,7 +3886,7 @@ __global__ void fractional_maxpool3d_forward_kernel_f64(
         h_end = min(h_end, H);
         w_end = min(w_end, W);
 
-        double max_val = -1e308;
+        double max_val = std::numeric_limits<double>::lowest();
         int64_t max_idx = (d_start * H + h_start) * W + w_start;
 
         for (int64_t d = d_start; d < d_end; ++d) {
@@ -3888,7 +3894,7 @@ __global__ void fractional_maxpool3d_forward_kernel_f64(
                 for (int64_t w = w_start; w < w_end; ++w) {
                     int64_t in_idx = (((n * C + c) * D + d) * H + h) * W + w;
                     double val = input[in_idx];
-                    if (val > max_val) {
+                    if (tenzor::rocm::is_nan_bits(val) || val > max_val) {
                         max_val = val;
                         max_idx = (d * H + h) * W + w;
                     }
@@ -3944,7 +3950,7 @@ __global__ void fractional_maxpool3d_forward_kernel_f32(
         h_end = min(h_end, H);
         w_end = min(w_end, W);
 
-        float max_val = -1e38f;
+        float max_val = std::numeric_limits<float>::lowest();
         int64_t max_idx = (d_start * H + h_start) * W + w_start;
 
         for (int64_t d = d_start; d < d_end; ++d) {
@@ -3952,7 +3958,7 @@ __global__ void fractional_maxpool3d_forward_kernel_f32(
                 for (int64_t w = w_start; w < w_end; ++w) {
                     int64_t in_idx = (((n * C + c) * D + d) * H + h) * W + w;
                     float val = input[in_idx];
-                    if (val > max_val) {
+                    if (tenzor::rocm::is_nan_bits(val) || val > max_val) {
                         max_val = val;
                         max_idx = (d * H + h) * W + w;
                     }

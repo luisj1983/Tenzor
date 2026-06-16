@@ -31,14 +31,18 @@ auto VulkanBackend::dispatchEmbedding(const Tensor& weight, const Tensor& indice
         return output;
     }
 
+    // Materialize read operands to packed offset-0 buffers before binding.
+    const Tensor weight_c = dispatchContiguous(weight);
+    const Tensor indices_packed = dispatchContiguous(indices);
+
     // Convert Int64 indices to Int32 for shader compatibility
-    Tensor indices_i32 = indices;
+    Tensor indices_i32 = indices_packed;
     if (indices.dtype() == DType::Int64) {
         std::vector<int64_t> idx_shape(indices_shape.begin(), indices_shape.end());
         indices_i32 = Tensor(idx_shape, DType::Int32, indices.device());
 
         auto* cast_pipeline = getPipeline("cast_int64_to_int32", device_id);
-        const void* buf_in = indices.data_ptr();
+        const void* buf_in = indices_packed.data_ptr();
         const void* buf_out = indices_i32.data_ptr();
         size_t size_in = indices.numel() * sizeof(int64_t);
         size_t size_out = indices_i32.numel() * sizeof(int32_t);
@@ -70,7 +74,7 @@ auto VulkanBackend::dispatchEmbedding(const Tensor& weight, const Tensor& indice
     }
 
     // Get VkBuffer handles
-    const void* buf_weight = weight.data_ptr();
+    const void* buf_weight = weight_c.data_ptr();
     const void* buf_indices = indices_i32.data_ptr();
     const void* buf_output = output.data_ptr();
 
@@ -163,14 +167,18 @@ auto VulkanBackend::dispatchGather(const Tensor& input, int64_t dim, const Tenso
     std::vector<int64_t> out_shape(indices_shape.begin(), indices_shape.end());
     Tensor output(out_shape, input.dtype(), input.device());
 
+    // Materialize read operands to packed offset-0 buffers before binding.
+    const Tensor input_c = dispatchContiguous(input);
+    const Tensor indices_packed = dispatchContiguous(indices);
+
     // Convert Int64 indices to Int32 for shader compatibility
-    Tensor indices_int32 = indices;
+    Tensor indices_int32 = indices_packed;
     if (indices.dtype() == DType::Int64) {
         std::vector<int64_t> idx_shape(indices_shape.begin(), indices_shape.end());
         indices_int32 = Tensor(idx_shape, DType::Int32, indices.device());
 
         auto* cast_pipeline = getPipeline("cast_int64_to_int32", device_id);
-        const void* buf_in = indices.data_ptr();
+        const void* buf_in = indices_packed.data_ptr();
         const void* buf_out = indices_int32.data_ptr();
         size_t size_in = indices.numel() * sizeof(int64_t);
         size_t size_out = indices_int32.numel() * sizeof(int32_t);
@@ -196,7 +204,7 @@ auto VulkanBackend::dispatchGather(const Tensor& input, int64_t dim, const Tenso
     }
 
     // Get Vulkan buffers
-    const void* buffer_input = input.data_ptr();
+    const void* buffer_input = input_c.data_ptr();
     const void* buffer_indices = indices_int32.data_ptr();
     const void* buffer_output = output.data_ptr();
 
@@ -284,9 +292,14 @@ auto VulkanBackend::dispatchScatter(const Tensor& input_raw, int64_t dim, const 
                                     const Tensor& values_raw, int64_t reduction) -> Tensor {
     // audit-2026-05-03 bug #15 mirror: ensure all inputs are contiguous before
     // SSBO upload. Non-contiguous slice/expand views skip logical elements.
-    auto input = input_raw.contiguous();
-    auto indices = indices_raw.contiguous();
-    auto values = values_raw.contiguous();
+    // Use dispatchContiguous (not .contiguous()): a stride-contiguous offset
+    // view is left untouched by .contiguous() and would trip the descriptor
+    // offset guard. The scattered result is written to a freshly-allocated
+    // `output` below (not in place into `input`), so materializing these read
+    // operands is safe and does not discard any in-place update.
+    auto input = dispatchContiguous(input_raw);
+    auto indices = dispatchContiguous(indices_raw);
+    auto values = dispatchContiguous(values_raw);
     auto input_shape = input.shape();
 
     // Handle empty tensors - no GPU work needed
@@ -521,14 +534,18 @@ auto VulkanBackend::dispatchIndexSelect(const Tensor& input, int64_t dim, const 
 
     auto* pipeline = getPipeline(shader_name, device_id);
 
+    // Materialize read operands to packed offset-0 buffers before binding.
+    const Tensor input_c = dispatchContiguous(input);
+    const Tensor indices_packed = dispatchContiguous(indices);
+
     // Convert indices to Int32 if needed (shader expects int32, on-device)
-    Tensor indices_int32 = indices;
+    Tensor indices_int32 = indices_packed;
     if (indices.dtype() == DType::Int64) {
         std::vector<int64_t> idx_shape(indices.shape().begin(), indices.shape().end());
         indices_int32 = Tensor(idx_shape, DType::Int32, indices.device());
 
         auto* cast_pipeline = getPipeline("cast_int64_to_int32", device_id);
-        const void* buf_in = indices.data_ptr();
+        const void* buf_in = indices_packed.data_ptr();
         const void* buf_out = indices_int32.data_ptr();
         size_t size_in = indices.numel() * sizeof(int64_t);
         size_t size_out = indices_int32.numel() * sizeof(int32_t);
@@ -580,7 +597,7 @@ auto VulkanBackend::dispatchIndexSelect(const Tensor& input, int64_t dim, const 
     push_constants.outer_size = outer_size;
 
     // Get VkBuffer handles
-    const void* buffer_input = input.data_ptr();
+    const void* buffer_input = input_c.data_ptr();
     const void* buffer_indices = indices_int32.data_ptr();
     const void* buffer_output = output.data_ptr();
 

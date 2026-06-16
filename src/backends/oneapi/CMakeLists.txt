@@ -245,7 +245,15 @@ set(ONEAPI_SYCL_SOURCES
 set(ALL_OBJECTS "")
 
 foreach(SRC ${ONEAPI_SYCL_SOURCES})
-    tenzor_compile_sycl(${SRC} OBJ_FILE)
+    set(_fp_extra "")
+    if(SRC STREQUAL "kernels/activations.cpp" OR SRC STREQUAL "kernels/fused_ops.cpp")
+        # softmax exp / RMSNorm rsqrt feed attention/transformer/HRM forward.
+        # icpx defaults to -fp-model=fast (~1e-3 approximate transcendentals),
+        # which diverges ~3e-3 from the precise CPU/CUDA reference (cross-backend
+        # parity failure). Compile these with precise FP so they match.
+        set(_fp_extra EXTRA_FLAGS -fp-model=precise)
+    endif()
+    tenzor_compile_sycl(${SRC} OBJ_FILE ${_fp_extra})
     list(APPEND ALL_OBJECTS ${OBJ_FILE})
 endforeach()
 

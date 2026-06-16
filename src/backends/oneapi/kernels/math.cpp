@@ -1385,7 +1385,11 @@ auto matmul_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tens
                     b_ptr, m, // B matrix
                     a_ptr, n, // A vector
                     beta,
-                    out_ptr, m // output
+                    out_ptr, m, // output
+                    // Force full-FP32 compute: without this, oneMKL's default
+                    // compute_mode (unset) may use TF32/bf16x rounding for FP32
+                    // GEMM on capable hardware, diverging from CPU/CUDA/Vulkan.
+                    ::oneapi::mkl::blas::compute_mode::standard
                 );
                 queue.wait_and_throw();
             } catch (const ::oneapi::mkl::exception& e) {
@@ -1586,7 +1590,11 @@ auto matmul_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tens
                     d_b.get(), n,
                     d_a.get(), k,
                     beta,
-                    d_c.get(), n
+                    d_c.get(), n,
+                    // Force full-FP32 compute: without this, oneMKL's default
+                    // compute_mode (unset) may use TF32/bf16x rounding for FP32
+                    // GEMM on capable hardware, diverging from CPU/CUDA/Vulkan.
+                    ::oneapi::mkl::blas::compute_mode::standard
                 );
             } catch (const ::oneapi::mkl::exception& e) {
                 throw std::runtime_error(std::string("oneMKL GEMM (F32) failed: ") + e.what());
@@ -3683,7 +3691,8 @@ auto repeat_kernel(const Tensor& input_in, const std::vector<int64_t>& repeats, 
 
     // repeat is a pure element-wise memory remap (dtype-agnostic). Dispatch by element
     // byte size to a fixed-width copy so every dtype (incl. unsigned ints, bool, complex)
-    // is supported with one code path. Interleave semantics match CPU/CUDA/ROCm/Vulkan.
+    // is supported with one code path. TILE semantics (torch.Tensor.repeat / torch.tile)
+    // match the CPU ground truth: [a,b] repeated 2x -> [a,b,a,b].
     auto run_repeat = [&]<typename ElemT>() {
         const ElemT* in_ptr = reinterpret_cast<const ElemT*>(input.data_ptr());
         ElemT* out_ptr = reinterpret_cast<ElemT*>(output.data_ptr());
@@ -3704,7 +3713,9 @@ auto repeat_kernel(const Tensor& input_in, const std::vector<int64_t>& repeats, 
                 int64_t in_idx = 0;
                 for (int64_t d = 0; d < ndim; ++d) {
                     int64_t coord = (out_idx / out_strides_acc[d]) % out_shape_acc[d];
-                    int64_t in_coord = coord / (out_shape_acc[d] / shape_acc[d]);
+                    // TILE semantics: wrap the output coordinate modulo the input
+                    // extent (matches CPU repeat_kernel, torch.repeat).
+                    int64_t in_coord = coord % shape_acc[d];
                     in_idx += in_coord * in_strides_acc[d];
                 }
                 out_ptr[out_idx] = in_ptr[in_idx];

@@ -96,3 +96,6 @@ docs/superpowers/
 issues.txt
 currentfailures.txt
 profile_attention.py
+
+# Per-backend out-of-source build directories
+/build-*/

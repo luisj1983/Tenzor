@@ -11,6 +11,7 @@
 #include "tenzor/ops/creation.hpp"
 #include "tenzor/ops/indexing.hpp"
 #include "tenzor/autograd/ops.hpp"
+#include "tenzor/nn/utils/variable_cast.hpp"
 #include "attention_mask_utils.hpp"
 #include <cmath>
 #include <stdexcept>
@@ -147,13 +148,29 @@ auto GroupedQueryAttention::scaled_dot_product_attention(
     auto k_shape = key.shape();
     int64_t seq_len_k = k_shape[2];
 
+    // For Float16/BFloat16, upcast Q/K/V to Float32 for the entire
+    // bmm -> scale -> mask -> softmax -> bmm chain, then cast the attended
+    // output and attention weights back to the original dtype before
+    // returning. Half-precision softmax/scores overflow and lose precision;
+    // running the chain in Float32 mirrors MultiheadAttention::
+    // scaled_dot_product_attention and PyTorch's SDPA. All mask/scale tensors
+    // below are built in `compute_dtype` so the additive masks stay in the
+    // same (upcast) dtype as the scores.
+    DType orig_dtype = query.dtype();
+    bool needs_attn_upcast =
+        (orig_dtype == DType::Float16 || orig_dtype == DType::BFloat16);
+    DType compute_dtype = needs_attn_upcast ? DType::Float32 : orig_dtype;
+    Variable query_c = needs_attn_upcast ? variable_cast(query, DType::Float32) : query;
+    Variable key_c   = needs_attn_upcast ? variable_cast(key,   DType::Float32) : key;
+    Variable value_c = needs_attn_upcast ? variable_cast(value, DType::Float32) : value;
+
     // Compute scaling factor
     double scale = 1.0 / std::sqrt(static_cast<double>(h_dim));
 
     // Reshape to 3D for bmm: (batch*num_heads, seq_len, head_dim)
-    auto query_3d = autograd::reshape(query, {batch_size * n_heads, seq_len_q, h_dim});
-    auto key_3d = autograd::reshape(key, {batch_size * n_heads, seq_len_k, h_dim});
-    auto value_3d = autograd::reshape(value, {batch_size * n_heads, seq_len_k, h_dim});
+    auto query_3d = autograd::reshape(query_c, {batch_size * n_heads, seq_len_q, h_dim});
+    auto key_3d = autograd::reshape(key_c, {batch_size * n_heads, seq_len_k, h_dim});
+    auto value_3d = autograd::reshape(value_c, {batch_size * n_heads, seq_len_k, h_dim});
 
     // Transpose key for matmul
     auto key_transposed = autograd::permute(key_3d, {0, 2, 1});
@@ -165,40 +182,51 @@ auto GroupedQueryAttention::scaled_dot_product_attention(
     scores = autograd::reshape(scores, {batch_size, n_heads, seq_len_q, seq_len_k});
 
     // Scale
-    Tensor scale_tensor = full({1}, static_cast<float>(scale), query.dtype(), query.device());
+    Tensor scale_tensor = full({1}, static_cast<float>(scale), compute_dtype, query.device());
     Variable scale_var(scale_tensor, false);
     scores = scores * scale_var;
 
     // Apply causal mask if requested.
     //
-    // For self-attention (seq_q == seq_k) the standard upper-triangular mask
-    // applies with diagonal=1. For cross-attention with KV cache (seq_k > seq_q),
-    // the conventional contract is "token at q-position i can attend to all KV
-    // positions <= i + (seq_k - seq_q)" — i.e. all cached tokens, plus the
-    // first i+1 new tokens. Equivalent: triu with diagonal = 1 + (seq_k - seq_q),
-    // so the mask line aligns at the bottom-right.
+    // Bottom-right aligned causal mask. Query position i (0-based) may attend
+    // to KV positions j with  j <= i + offset,  where offset = seq_k - seq_q:
+    //   * self-attention (seq_q == seq_k): offset = 0, standard lower-triangular.
+    //   * KV-cache cross-attention (seq_k > seq_q): offset > 0, each query also
+    //     attends to all cached tokens (the bottom-right diagonal).
+    //   * seq_k < seq_q (offset < 0): the top queries have i + offset < 0 and
+    //     would attend to NO key — a fully-masked row whose softmax over all
+    //     -inf is NaN. We clamp the per-row allowed boundary to at least key 0
+    //     (boundary b_i = max(i + offset, 0)), so every query attends to at
+    //     least its aligned key. This keeps the mask well-defined and NaN-free
+    //     for arbitrary seq_q/seq_k.
     //
-    // The previous implementation built a (seq_q, seq_q) square mask and
-    // sliced columns to (seq_q, seq_q); the resulting mask had wrong column
-    // semantics (indexed an offset chunk of itself rather than the actual
-    // KV positions).
+    // Built from explicit row/col index tensors (rather than triu with a
+    // diagonal offset that underflows when seq_k < seq_q) so the alignment and
+    // the clamp are exact.
     if (is_causal_) {
-        // Use `where` instead of `triu_mask * neg_inf` because the
-        // multiplication produces NaN at the kept positions (0 * -inf =
-        // NaN). The window mask below uses the same pattern; this is
-        // the matching fix for the causal mask.
-        int64_t diag_offset = 1 + (seq_len_k - seq_len_q);
-        Tensor causal_ones = ones({seq_len_q, seq_len_k}, query.dtype(), query.device());
-        Tensor causal_triu = triu(causal_ones, diag_offset);
-        // Boolean tensor: true at masked-off positions (above-diagonal).
-        Tensor masked_off = ne(causal_triu,
-                               zeros({seq_len_q, seq_len_k},
-                                     query.dtype(), query.device()));
+        const int64_t offset = seq_len_k - seq_len_q;
+        // row_idx[i,j] = i, col_idx[i,j] = j  (Int64 broadcast grids)
+        Tensor row_idx = tenzor::arange(0, seq_len_q, 1, DType::Int64, query.device())
+                             .reshape({seq_len_q, 1});
+        Tensor col_idx = tenzor::arange(0, seq_len_k, 1, DType::Int64, query.device())
+                             .reshape({1, seq_len_k});
+        Tensor row_exp = expand(row_idx, std::vector<int64_t>{seq_len_q, seq_len_k});
+        Tensor col_exp = expand(col_idx, std::vector<int64_t>{seq_len_q, seq_len_k});
+        // Per-row allowed boundary b_i = max(i + offset, 0): queries may attend
+        // to columns j <= b_i. The clamp_min(0) is what prevents a fully-masked
+        // row when offset < 0 (seq_k < seq_q) — without it the top queries would
+        // have i + offset < 0 and mask every column, giving softmax(all -inf) =
+        // NaN. An upper clamp to seq_k-1 is unnecessary: col is always < seq_k,
+        // so `col > b_i` already handles the upper side.
+        Tensor boundary = tenzor::clamp_min(
+            tenzor::add(row_exp, static_cast<double>(offset)), 0.0);
+        // masked_off: true where col > boundary (future / disallowed key).
+        Tensor masked_off = gt(col_exp, boundary);
         Tensor neg_inf = full({seq_len_q, seq_len_k},
                               -std::numeric_limits<float>::infinity(),
-                              query.dtype(), query.device());
+                              compute_dtype, query.device());
         Tensor zero_mask = zeros({seq_len_q, seq_len_k},
-                                 query.dtype(), query.device());
+                                 compute_dtype, query.device());
         Tensor causal = where(masked_off, neg_inf, zero_mask);
         Variable mask_var(causal, false);
         scores = scores + mask_var;
@@ -221,18 +249,19 @@ auto GroupedQueryAttention::scaled_dot_product_attention(
         auto threshold = tenzor::full(std::vector<int64_t>(dist.shape().begin(), dist.shape().end()),
                                      static_cast<double>(half_window), DType::Float32, query.device());
         auto outside = tenzor::gt(dist, threshold);
-        // LL.8: -1e9 overflows to -inf in Float16/BFloat16 mask tensors; when
-        // all positions in a row are masked, softmax(-inf, -inf, ...) → NaN.
-        // Use -1e4 sentinel for half-precision (well within representable
-        // range) and true -inf only for Float32/Float64.
+        // The mask is built in compute_dtype (Float32 when Q/K/V were upcast),
+        // matching the scores' dtype for the additive combine. -1e9 overflows
+        // to -inf in Float16/BFloat16 mask tensors and a fully-masked row then
+        // softmaxes to NaN; use the -1e4 sentinel only when compute_dtype is
+        // actually half (i.e. no upcast happened), true -inf otherwise.
         double mask_fill =
-            (query.dtype() == DType::Float16 || query.dtype() == DType::BFloat16)
+            (compute_dtype == DType::Float16 || compute_dtype == DType::BFloat16)
                 ? -1e4
                 : -std::numeric_limits<double>::infinity();
         auto neg_large = full(std::vector<int64_t>(dist.shape().begin(), dist.shape().end()),
-                              mask_fill, query.dtype(), query.device());
+                              mask_fill, compute_dtype, query.device());
         auto zero_mask = zeros(std::vector<int64_t>(dist.shape().begin(), dist.shape().end()),
-                               query.dtype(), query.device());
+                               compute_dtype, query.device());
         auto window_mask = where(outside, neg_large, zero_mask);
         // window_mask is [seq_len_q, seq_len_k], broadcasts to [batch, heads, L, S]
         Variable window_var(window_mask, false);
@@ -246,6 +275,12 @@ auto GroupedQueryAttention::scaled_dot_product_attention(
         // Without this, `float scores + Bool mask` adds 1.0 at masked positions
         // instead of -inf, leaking attention. Mirrors V.28/AA.1/EE.11.
         Tensor normalised_mask = normalize_attn_mask(attn_mask);
+        // Match the (possibly upcast) score dtype so the additive combine stays
+        // in compute_dtype; a half float mask added to Float32 scores would
+        // otherwise mismatch.
+        if (normalised_mask.dtype() != compute_dtype) {
+            normalised_mask = normalised_mask.to(compute_dtype);
+        }
         Variable mask_var(normalised_mask, false);
         scores = scores + mask_var;
     }
@@ -266,6 +301,13 @@ auto GroupedQueryAttention::scaled_dot_product_attention(
 
     // Reshape back to 4D
     auto attended = autograd::reshape(attended_3d, {batch_size, n_heads, seq_len_q, h_dim});
+
+    // Cast the attended output and attention weights back to the caller's
+    // original dtype (Float16/BFloat16) after running the chain in Float32.
+    if (needs_attn_upcast) {
+        attended = variable_cast(attended, orig_dtype);
+        attn_weights = variable_cast(attn_weights, orig_dtype);
+    }
 
     return {attended, attn_weights};
 }

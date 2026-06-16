@@ -21,6 +21,7 @@
 #include "tenzor/core/tensor.hpp"
 #include "tenzor/backend/caching_allocator.hpp"
 #include "tenzor/backend/fused_ops.hpp"
+#include "kernels/cuda_launch_utils.cuh"  // tenzor::cuda::CudaDeviceGuard
 
 namespace fe = cudnn_frontend;
 
@@ -568,16 +569,10 @@ auto cudnn_sdpa_forward(
     // time and references the current device at execute time), fetch the
     // per-device handle, and restore the previous current device on exit.
     const int sdpa_device = Q.device().index;
-    int prev_device = 0;
-    TENZOR_SDPA_CUDA_CHECK(cudaGetDevice(&prev_device));
-    if (sdpa_device != prev_device) {
-        TENZOR_SDPA_CUDA_CHECK(cudaSetDevice(sdpa_device));
-    }
-    struct DeviceRestore {
-        int prev;
-        int cur;
-        ~DeviceRestore() { if (prev != cur) cudaSetDevice(prev); }
-    } device_restore{prev_device, sdpa_device};
+    // Shared RAII guard (one implementation in cuda_launch_utils.cuh): make the
+    // tensor's device current for the cuDNN graph build/execute and restore the
+    // previous device on scope exit.
+    tenzor::cuda::CudaDeviceGuard device_guard(sdpa_device);
 
     cudnnHandle_t handle = SDPACuDNNHandle::get(sdpa_device);
     // Bind the requested stream to the handle so the SDPA work and the output's

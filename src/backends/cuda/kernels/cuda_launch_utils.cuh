@@ -18,6 +18,45 @@ namespace tenzor {
 namespace cuda {
 
 /**
+ * @brief RAII guard that makes a CUDA device current and restores the previous
+ *        device on scope exit.
+ *
+ * Single shared implementation (extracted from cudnn_sdpa.cpp's DeviceRestore)
+ * used by every op wrapper that launches kernels or uses a library handle on a
+ * tensor's device. cuBLAS/cuSOLVER/cuSPARSE/cuDNN handles and per-device
+ * workspaces are keyed by the *current* device, so the wrapper must make the
+ * tensor's device current before fetching them — otherwise the op silently
+ * runs on whatever device happened to be current on the calling thread,
+ * corrupting multi-GPU execution.
+ *
+ * @code
+ * CudaDeviceGuard dev_guard(input.device().index);
+ * cublasHandle_t h = CuBLASHandlePool::get(stream);  // bound to the right GPU
+ * @endcode
+ */
+class CudaDeviceGuard {
+public:
+    explicit CudaDeviceGuard(int device) : prev_(0), cur_(device) {
+        cudaGetDevice(&prev_);
+        if (device >= 0 && device != prev_) {
+            cudaSetDevice(device);
+        }
+    }
+    ~CudaDeviceGuard() {
+        if (cur_ >= 0 && cur_ != prev_) {
+            cudaSetDevice(prev_);
+        }
+    }
+    CudaDeviceGuard(const CudaDeviceGuard&) = delete;
+    CudaDeviceGuard& operator=(const CudaDeviceGuard&) = delete;
+    CudaDeviceGuard(CudaDeviceGuard&&) = delete;
+    CudaDeviceGuard& operator=(CudaDeviceGuard&&) = delete;
+private:
+    int prev_;
+    int cur_;
+};
+
+/**
  * @brief Compute optimal grid and block dimensions using CUDA occupancy API.
  *
  * Uses cudaOccupancyMaxPotentialBlockSize to determine the block size

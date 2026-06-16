@@ -577,6 +577,13 @@ void VulkanBackend::createLogicalDevices() {
             ctx.maxComputeWorkGroupCount[1] = props.limits.maxComputeWorkGroupCount[1];
             ctx.maxComputeWorkGroupCount[2] = props.limits.maxComputeWorkGroupCount[2];
 
+            // Cache the storage-buffer offset alignment so descriptor writes can
+            // verify that any bound byte offset (from a tensor view) is legal.
+            ctx.minStorageBufferOffsetAlignment =
+                props.limits.minStorageBufferOffsetAlignment != 0
+                    ? props.limits.minStorageBufferOffsetAlignment
+                    : 1;
+
             switch (props.vendorID) {
                 case 0x10DE: ctx.vendor = GpuVendor::Nvidia;   break;
                 case 0x1002: ctx.vendor = GpuVendor::Amd;      break;
@@ -1338,8 +1345,25 @@ VkDescriptorSet VulkanBackend::allocateAndWriteDescriptorSet(
     std::vector<VkDescriptorBufferInfo> bufferInfos(bufferPtrs.size());
     std::vector<VkWriteDescriptorSet> writes(bufferPtrs.size());
 
+    const VkDeviceSize minAlign = ctx.minStorageBufferOffsetAlignment;
     for (size_t i = 0; i < bufferPtrs.size(); ++i) {
         auto [buffer, offset] = getVulkanBufferAndOffset(bufferPtrs[i].second);
+        // Vulkan requires VkDescriptorBufferInfo::offset for a STORAGE_BUFFER to
+        // be a multiple of minStorageBufferOffsetAlignment. A non-zero offset
+        // here means a tensor *view* (slice/narrow) reached the descriptor write
+        // without being materialized to a zero-offset contiguous buffer. The
+        // shaders index from element 0 and carry no residual-offset push
+        // constant, so binding an aligned-down base would silently read the
+        // wrong elements. Callers must route offset views through
+        // dispatchContiguous (as dispatchUnaryOp / dispatchBinaryOp do); fail
+        // loudly rather than emit a Vulkan validation error or corrupt output.
+        if (offset != 0 && (offset % minAlign) != 0) {
+            throw std::runtime_error(
+                "Vulkan: storage-buffer descriptor offset " + std::to_string(offset) +
+                " is not a multiple of minStorageBufferOffsetAlignment (" +
+                std::to_string(minAlign) + "); an unmaterialized tensor view "
+                "reached a descriptor write — route it through dispatchContiguous");
+        }
         bufferInfos[i].buffer = buffer;
         bufferInfos[i].offset = offset;
         // Round up to 4-byte boundary (minimum uint32 size for shader access).

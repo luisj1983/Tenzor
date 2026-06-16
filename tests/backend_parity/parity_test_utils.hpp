@@ -19,6 +19,7 @@
 #include <gtest/gtest.h>
 #include <tenzor/tenzor.hpp>
 #include "golden_util.hpp"
+#include "parity_tolerances.hpp"
 #include <cmath>
 #include <cstdlib>
 #include <functional>
@@ -505,6 +506,13 @@ inline float max_abs_diff(const Tensor& a, const Tensor& b) {
     auto a_cpu = a.device().type == Device::Type::CPU ? a : a.to(Device::cpu());
     auto b_cpu = b.device().type == Device::Type::CPU ? b : b.to(Device::cpu());
 
+    // Materialize contiguous copies so the flat data<>() iteration walks logical
+    // positions — matching tensors_close. Without this, a non-contiguous view
+    // (transpose/permute/chunk output) is read in raw storage order and reports
+    // a misleading 0 diff against a contiguous golden of the same logical values.
+    if (!a_cpu.is_contiguous()) a_cpu = a_cpu.contiguous();
+    if (!b_cpu.is_contiguous()) b_cpu = b_cpu.contiguous();
+
     // Promote half types
     if (a_cpu.dtype() == DType::Float16 || a_cpu.dtype() == DType::BFloat16) {
         a_cpu = a_cpu.to(DType::Float32);
@@ -777,6 +785,7 @@ void test_operation_parity_backends(Op operation,
             return;
         }
         if (auto golden_result = golden::maybe_load(test_name, inputs)) {
+            golden::note_comparison();
             if (!tensors_close(result, *golden_result, rtol, atol)) {
                 float max_diff = max_abs_diff(result, *golden_result);
                 FAIL() << test_name << " golden parity failed:\n"
@@ -896,6 +905,7 @@ void test_operation_parity_single(Op operation,
         // recorded golden if one exists. If not, either FAIL (when the caller
         // has asked for strict multi-backend coverage) or silently pass.
         if (auto golden_result = golden::maybe_load(test_name, cpu_inputs)) {
+            golden::note_comparison();
             if (!tensors_close(cpu_result, *golden_result, rtol, atol)) {
                 float max_diff = max_abs_diff(cpu_result, *golden_result);
                 FAIL() << test_name << " golden parity failed (CPU vs recorded):\n"

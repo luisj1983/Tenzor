@@ -115,28 +115,37 @@ private:
 
 class CuDNNWorkspace {
 public:
-    // Audit-6 AA.12: `get()` previously called `resize()` under no lock, so
-    // two streams hitting cuDNN concurrently could race: stream A's
-    // `cudaFree(buffer_)` would invalidate the pointer stream B's kernel
-    // was about to read. The cudaMalloc return code was also dropped, so
-    // OOM silently produced a nullptr that crashed deep in cuDNN.
+    // Per-thread, device-keyed workspace, mirroring SDPAWorkspace.
     //
-    // The immediate fix is a single mutex serialising both `get()` and
-    // `resize()` plus checked cudaMalloc. Stream-scoped workspaces and a
-    // proper retire-after-stream-sync are tracked as a follow-up; the
-    // mutex closes the wrong-math hazard now.
+    // Audit-6 AA.12: a single process-global buffer was shared by every thread
+    // and every device. Two streams hitting cuDNN concurrently raced — stream
+    // A's `cudaFree(buffer_)` during a resize would invalidate the pointer
+    // stream B's kernel was about to read — and the one buffer was not
+    // device-keyed, so a cuDNN op on device 1 received a buffer allocated on
+    // device 0.
+    //
+    // Making the instance `thread_local` removes all cross-thread sharing (each
+    // thread owns its workspace, so no two streams from different threads share
+    // the bytes). Keying the (re)allocation by the requested device makes the
+    // buffer valid on the device the cuDNN op actually runs on; switching
+    // devices reallocates, exactly like SDPAWorkspace. No mutex is needed
+    // because the instance is no longer shared across threads.
     static void* get(size_t required_size) {
-        static CuDNNWorkspace instance;
-        std::lock_guard<std::mutex> lock(instance.mu_);
-        if (required_size > instance.size_) {
-            instance.resize_locked(required_size);
+        // Key the workspace to the device that is current when requested,
+        // mirroring CuDNNHandle::get(). Callers (the cuDNN op wrappers) make the
+        // tensor's device current before requesting the handle/workspace, so
+        // this returns a buffer allocated on the device the cuDNN op runs on.
+        int device = 0;
+        cudaGetDevice(&device);
+        static thread_local CuDNNWorkspace instance;
+        if (device != instance.device_ || required_size > instance.size_) {
+            instance.resize(required_size, device);
         }
         return instance.buffer_;
     }
 
     static size_t current_size() {
-        static CuDNNWorkspace instance;
-        std::lock_guard<std::mutex> lock(instance.mu_);
+        static thread_local CuDNNWorkspace instance;
         return instance.size_;
     }
 
@@ -167,7 +176,7 @@ public:
     CuDNNWorkspace& operator=(const CuDNNWorkspace&) = delete;
 
 private:
-    CuDNNWorkspace() : buffer_(nullptr), size_(0) {}
+    CuDNNWorkspace() : buffer_(nullptr), size_(0), device_(-1) {}
 
     ~CuDNNWorkspace() {
         if (buffer_) {
@@ -177,30 +186,40 @@ private:
             // recorded by `get()` may itself be in the middle of destruction
             // (program exit / device teardown).  cudaDeviceSynchronize is the
             // only reliably-correct option in the destructor — it's a heavy
-            // hammer but the workspace is a singleton freed exactly once at
-            // shutdown so the cost is negligible.
+            // hammer but the workspace is freed exactly once per thread at
+            // teardown so the cost is negligible. Free on the device the buffer
+            // was allocated on.
+            int prev = 0;
+            cudaGetDevice(&prev);
+            if (device_ >= 0 && device_ != prev) cudaSetDevice(device_);
             cudaDeviceSynchronize();
             cudaFree(buffer_);
+            if (device_ >= 0 && device_ != prev) cudaSetDevice(prev);
         }
     }
 
-    // Caller must hold `mu_`.
-    void resize_locked(size_t new_size) {
+    // Reallocate the workspace for `device`, growing past `new_size`. The
+    // instance is thread_local so no lock is required; the previous buffer is
+    // retired after a device sync to avoid a use-after-free against any
+    // in-flight cuDNN kernel that may still hold the old pointer.
+    void resize(size_t new_size, int device) {
+        int prev = 0;
+        cudaGetDevice(&prev);
+        if (device != prev) cudaSetDevice(device);
+
         if (buffer_) {
             // Use-after-free hazard: the pointer returned by a previous `get()`
-            // may still be referenced by an in-flight cuDNN kernel on another
-            // stream. The `mu_` mutex only serialises `get()`/`resize_locked()`
-            // — it does NOT keep the old buffer alive for the consuming
-            // kernel's duration. Freeing here while that kernel still reads the
-            // old pointer yields a use-after-free / wrong results. Retire the
+            // may still be referenced by an in-flight cuDNN kernel. Retire the
             // old allocation only after all in-flight device work that could be
-            // holding the pointer has completed. cudaDeviceSynchronize is the
-            // same reliably-correct hammer used in the destructor; resizes are
-            // rare (grow-only, with 25% headroom) so the cost is amortised.
+            // holding the pointer has completed. Sync/free on the device the
+            // old buffer was allocated on.
+            if (device_ >= 0 && device_ != device) cudaSetDevice(device_);
             cudaDeviceSynchronize();
             cudaFree(buffer_);
             buffer_ = nullptr;
+            if (device_ >= 0 && device_ != device) cudaSetDevice(device);
         }
+        device_ = device;
         // Allocate with some extra headroom to reduce reallocations
         size_ = new_size + (new_size / 4);  // 25% extra
         cudaError_t err = cudaMalloc(&buffer_, size_);
@@ -209,16 +228,18 @@ private:
             buffer_ = nullptr;
             size_t failed_size = size_;
             size_ = 0;
+            if (device != prev) cudaSetDevice(prev);
             throw std::runtime_error(
                 std::string("CuDNNWorkspace: cudaMalloc(") +
                 std::to_string(failed_size) + ") failed: " +
                 cudaGetErrorString(err));
         }
+        if (device != prev) cudaSetDevice(prev);
     }
 
     void* buffer_;
     size_t size_;
-    std::mutex mu_;
+    int device_;
 };
 
 // ============================================================================

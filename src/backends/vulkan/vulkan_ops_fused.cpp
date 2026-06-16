@@ -7,6 +7,28 @@
 
 namespace tenzor {
 
+namespace {
+
+// Fused optimizer steps mutate param / momentum / exp_avg / exp_avg_sq IN PLACE
+// and return the same param storage. Such operands MUST NOT be replaced with a
+// throwaway dispatchContiguous() copy — that would write the update into a
+// discarded buffer and silently no-op the optimizer. Instead we require them to
+// already be packed at offset 0 (the optimizer owns these buffers, so they
+// normally are). A misaligned view here would otherwise trip the descriptor
+// guard with an opaque message; this gives a precise one.
+inline void require_inplace_contiguous(const Tensor& t, const char* op,
+                                       const char* name) {
+    if (!(t.is_contiguous() && t.offset() == 0)) {
+        throw std::runtime_error(
+            std::string("VulkanBackend::") + op + ": in-place operand '" + name +
+            "' must be contiguous at storage offset 0 (got offset " +
+            std::to_string(t.offset()) + "); an unmaterialized view cannot be "
+            "updated in place — materialize it in the caller before the step");
+    }
+}
+
+}  // namespace
+
 // ============================================================================
 // Fused SGD Step (OpId::FusedSGDStep, 219)
 // ============================================================================
@@ -36,6 +58,15 @@ auto VulkanBackend::dispatchFusedSGDStep(std::span<const Tensor> inputs,
 
     bool has_momentum = (inputs.size() > 2 && momentum > 0.0f);
 
+    // In-place operands: param (and momentum buffer when used) are updated in
+    // place and must stay on their own storage — require offset-0 contiguous.
+    require_inplace_contiguous(inputs[0], "FusedSGDStep", "param");
+    if (has_momentum) {
+        require_inplace_contiguous(inputs[2], "FusedSGDStep", "momentum_buf");
+    }
+    // grad is read-only; materialize it to a packed offset-0 buffer for binding.
+    const Tensor grad_c = dispatchContiguous(inputs[1]);
+
     // For F16/BF16: param/grad are packed uint32, momentum is Float32.
     // audit-10 MM.2: state_buf_size must be Float32-sized for BOTH F16 and
     // BF16 paths.  Previously is_bfloat16 fell into the `else` branch and
@@ -49,7 +80,7 @@ auto VulkanBackend::dispatchFusedSGDStep(std::span<const Tensor> inputs,
 
     // Bindings: grad(0), param(1), momentum_buf(2)
     std::vector<std::pair<uint32_t, const void*>> bindings = {
-        {0, inputs[1].data_ptr()},  // grad
+        {0, grad_c.data_ptr()},     // grad (read-only, materialized)
         {1, inputs[0].data_ptr()},  // param (modified in-place)
     };
     std::vector<size_t> sizes = {buf_size, buf_size};
@@ -144,6 +175,17 @@ auto VulkanBackend::dispatchFusedAdamStep(std::span<const Tensor> inputs,
                             : "fused_adam_step";
     auto* pipeline = getPipeline(adam_shader, device_id);
 
+    // In-place operands: param / exp_avg / exp_avg_sq (and max_exp_avg_sq when
+    // amsgrad) are updated in place and must stay on their own storage.
+    require_inplace_contiguous(inputs[0], "FusedAdamStep", "param");
+    require_inplace_contiguous(inputs[2], "FusedAdamStep", "exp_avg");
+    require_inplace_contiguous(inputs[3], "FusedAdamStep", "exp_avg_sq");
+    if (amsgrad && inputs.size() > 4) {
+        require_inplace_contiguous(inputs[4], "FusedAdamStep", "max_exp_avg_sq");
+    }
+    // grad is read-only; materialize it to a packed offset-0 buffer for binding.
+    const Tensor grad_c = dispatchContiguous(inputs[1]);
+
     size_t f16_buf_size = ((numel + 1) / 2) * 4;
     size_t param_buf_size = (is_float16 || is_bfloat16) ? f16_buf_size
                                                         : numel * inputs[0].dtype_size();
@@ -152,7 +194,7 @@ auto VulkanBackend::dispatchFusedAdamStep(std::span<const Tensor> inputs,
 
     // Bindings: grad(0), param(1), exp_avg(2), exp_avg_sq(3), max_exp_avg_sq(4)
     std::vector<std::pair<uint32_t, const void*>> bindings = {
-        {0, inputs[1].data_ptr()},  // grad
+        {0, grad_c.data_ptr()},     // grad (read-only, materialized)
         {1, inputs[0].data_ptr()},  // param
         {2, inputs[2].data_ptr()},  // exp_avg
         {3, inputs[3].data_ptr()},  // exp_avg_sq
@@ -247,12 +289,23 @@ auto VulkanBackend::dispatchFusedAdamAtan2Step(std::span<const Tensor> inputs,
                        : "fused_adam_atan2_step";
     auto* pipeline = getPipeline(shader, device_id);
 
+    // In-place operands: param / exp_avg / exp_avg_sq (and max_exp_avg_sq when
+    // amsgrad) are updated in place and must stay on their own storage.
+    require_inplace_contiguous(inputs[0], "FusedAdamAtan2Step", "param");
+    require_inplace_contiguous(inputs[2], "FusedAdamAtan2Step", "exp_avg");
+    require_inplace_contiguous(inputs[3], "FusedAdamAtan2Step", "exp_avg_sq");
+    if (amsgrad && inputs.size() > 4) {
+        require_inplace_contiguous(inputs[4], "FusedAdamAtan2Step", "max_exp_avg_sq");
+    }
+    // grad is read-only; materialize it to a packed offset-0 buffer for binding.
+    const Tensor grad_c = dispatchContiguous(inputs[1]);
+
     size_t f16_buf_size = ((numel + 1) / 2) * 4;
     size_t param_buf_size = (is_float16 || is_bfloat16) ? f16_buf_size : numel * inputs[0].dtype_size();
     size_t state_buf_size = (is_float16 || is_bfloat16) ? numel * sizeof(float) : param_buf_size;
 
     std::vector<std::pair<uint32_t, const void*>> bindings = {
-        {0, inputs[1].data_ptr()},  // grad
+        {0, grad_c.data_ptr()},     // grad (read-only, materialized)
         {1, inputs[0].data_ptr()},  // param
         {2, inputs[2].data_ptr()},  // exp_avg
         {3, inputs[3].data_ptr()},  // exp_avg_sq

@@ -181,6 +181,41 @@ if _os.path.exists(_func_transforms_path):
 from .tenzor_core import linalg
 _sys.modules['tenzor.linalg'] = linalg
 
+# PyTorch interop submodule (optional). The C++ ``tenzor_core.torch_interop``
+# submodule is only registered when the extension was compiled with
+# ``TENZOR_BUILD_TORCH_INTEROP=ON`` (which defines ``TENZOR_HAS_TORCH`` and
+# links libtorch). The shipped ``tenzor/torch_interop.pyi`` promises this API
+# unconditionally, so when the module was built WITHOUT torch support we expose
+# a proxy that raises a clear, actionable ``ImportError`` on any access — far
+# better than the bare ``AttributeError`` a missing attribute would otherwise
+# produce.
+from . import tenzor_core as _tenzor_core_mod
+if hasattr(_tenzor_core_mod, "torch_interop"):
+    torch_interop = _tenzor_core_mod.torch_interop
+    _sys.modules['tenzor.torch_interop'] = torch_interop
+else:
+    class _TorchInteropUnavailable:
+        """Placeholder for tenzor.torch_interop when built without libtorch.
+
+        Any attribute access raises ImportError naming the rebuild flag, so the
+        torch_interop.pyi promise resolves to a clear runtime error instead of
+        an AttributeError.
+        """
+
+        _MESSAGE = (
+            "Tenzor was built without PyTorch interop; rebuild with "
+            "TENZOR_BUILD_TORCH_INTEROP=ON "
+            "(e.g. CMAKE_ARGS=\"-DTENZOR_BUILD_TORCH_INTEROP=ON\" pip install .) "
+            "to enable tenzor.torch_interop."
+        )
+
+        def __getattr__(self, name):
+            if name.startswith("__") and name.endswith("__"):
+                raise AttributeError(name)
+            raise ImportError(self._MESSAGE)
+
+    torch_interop = _TorchInteropUnavailable()
+
 # Audit-8 II.12: expose ``tenzor.exceptions`` as a typed-namespace alias to
 # the C++ exception classes registered on ``tenzor_core``. This gives users a
 # stable ``except tenzor.exceptions.ValueError`` surface that doesn't depend
@@ -674,7 +709,20 @@ _TensorFacade.__name__ = "Tensor"
 _TensorFacade.__qualname__ = "Tensor"
 Tensor = _TensorFacade
 
-__version__ = "0.1.0"
+# Single source of truth for the version: read the installed distribution
+# metadata (populated from pyproject.toml's [project].version at build time)
+# rather than hardcoding a literal that silently drifts from the package
+# version. Falls back to a local-dev marker when the package is imported
+# from a source tree that was never `pip install`-ed.
+try:
+    from importlib.metadata import version as _pkg_version, PackageNotFoundError as _PkgNotFound
+    try:
+        __version__ = _pkg_version("tenzor")
+    except _PkgNotFound:
+        __version__ = "0.0.0+local"
+    del _pkg_version, _PkgNotFound
+except ImportError:  # pragma: no cover - importlib.metadata is stdlib on >=3.8
+    __version__ = "0.0.0+local"
 
 __all__ = [
     # Core
@@ -865,6 +913,8 @@ __all__ = [
     "cuda_is_available",
     "no_grad",
     "enable_grad",
+    "inference_mode",
+    "torch_interop",
     "initialize",
     "empty_cache",
     "memory_stats",

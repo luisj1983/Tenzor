@@ -264,12 +264,15 @@ void maxpool2d_forward_impl(const T* in_data, T* out_data, int64_t* idx_data,
     }
 }
 
-auto maxpool2d_forward_kernel(const Tensor& input,
+auto maxpool2d_forward_kernel(const Tensor& input_orig,
                                std::array<int64_t, 2> kernel_size,
                                std::array<int64_t, 2> stride,
                                std::array<int64_t, 2> padding,
                                std::array<int64_t, 2> dilation)
     -> std::pair<Tensor, Tensor> {
+    // Kernels index raw NCHW buffers via ((n*C+c)*H+h)*W+w, so the input must
+    // be contiguous for the linear offsets to be valid.
+    Tensor input = input_orig.is_contiguous() ? input_orig : input_orig.contiguous();
     auto shape = input.shape();
     int64_t N = shape[0];
     int64_t C = shape[1];
@@ -335,8 +338,10 @@ void maxpool2d_backward_impl(const T* grad_out_data, const int64_t* idx_data, T*
     }
 }
 
-auto maxpool2d_backward_kernel(const Tensor& grad_output, const Tensor& indices,
+auto maxpool2d_backward_kernel(const Tensor& grad_output_orig, const Tensor& indices_orig,
                                 const std::vector<int64_t>& input_shape) -> Tensor {
+    Tensor grad_output = grad_output_orig.is_contiguous() ? grad_output_orig : grad_output_orig.contiguous();
+    Tensor indices = indices_orig.is_contiguous() ? indices_orig : indices_orig.contiguous();
     int64_t N = input_shape[0];
     int64_t C = input_shape[1];
     int64_t H = input_shape[2];
@@ -417,11 +422,12 @@ void avgpool2d_forward_impl(const T* in_data, T* out_data,
     }
 }
 
-auto avgpool2d_forward_kernel(const Tensor& input,
+auto avgpool2d_forward_kernel(const Tensor& input_orig,
                                std::array<int64_t, 2> kernel_size,
                                std::array<int64_t, 2> stride,
                                std::array<int64_t, 2> padding,
                                bool count_include_pad) -> Tensor {
+    Tensor input = input_orig.is_contiguous() ? input_orig : input_orig.contiguous();
     auto shape = input.shape();
     int64_t N = shape[0];
     int64_t C = shape[1];
@@ -544,12 +550,13 @@ void avgpool2d_backward_impl(const T* grad_out_data, T* grad_in_data,
     }
 }
 
-auto avgpool2d_backward_kernel(const Tensor& grad_output,
+auto avgpool2d_backward_kernel(const Tensor& grad_output_orig,
                                 const std::vector<int64_t>& input_shape,
                                 std::array<int64_t, 2> kernel_size,
                                 std::array<int64_t, 2> stride,
                                 std::array<int64_t, 2> padding,
                                 bool count_include_pad) -> Tensor {
+    Tensor grad_output = grad_output_orig.is_contiguous() ? grad_output_orig : grad_output_orig.contiguous();
     int64_t N = input_shape[0];
     int64_t C = input_shape[1];
     int64_t H = input_shape[2];
@@ -616,8 +623,9 @@ void adaptive_avgpool2d_impl(const T* in_data, T* out_data,
     }
 }
 
-auto adaptive_avgpool2d_kernel(const Tensor& input, int64_t output_h,
+auto adaptive_avgpool2d_kernel(const Tensor& input_orig, int64_t output_h,
                                 int64_t output_w) -> Tensor {
+    Tensor input = input_orig.is_contiguous() ? input_orig : input_orig.contiguous();
     auto shape = input.shape();
     int64_t N = shape[0];
     int64_t C = shape[1];
@@ -679,8 +687,9 @@ void adaptive_avgpool2d_backward_impl(const T* grad_out_data, T* grad_in_data,
     }
 }
 
-auto adaptive_avgpool2d_backward_kernel(const Tensor& grad_output,
+auto adaptive_avgpool2d_backward_kernel(const Tensor& grad_output_orig,
                                          const std::vector<int64_t>& input_shape) -> Tensor {
+    Tensor grad_output = grad_output_orig.is_contiguous() ? grad_output_orig : grad_output_orig.contiguous();
     int64_t N = input_shape[0];
     int64_t C = input_shape[1];
     int64_t H = input_shape[2];
@@ -749,8 +758,9 @@ void adaptive_maxpool2d_impl(const T* in_data, T* out_data, int64_t* idx_data,
     }
 }
 
-auto adaptive_maxpool2d_kernel(const Tensor& input, int64_t output_h,
+auto adaptive_maxpool2d_kernel(const Tensor& input_orig, int64_t output_h,
                                 int64_t output_w) -> std::pair<Tensor, Tensor> {
+    Tensor input = input_orig.is_contiguous() ? input_orig : input_orig.contiguous();
     auto shape = input.shape();
     int64_t N = shape[0];
     int64_t C = shape[1];
@@ -803,8 +813,10 @@ void adaptive_maxpool2d_backward_impl(const T* grad_out_data, const int64_t* idx
     }
 }
 
-auto adaptive_maxpool2d_backward_kernel(const Tensor& grad_output, const Tensor& indices,
+auto adaptive_maxpool2d_backward_kernel(const Tensor& grad_output_orig, const Tensor& indices_orig,
                                          const std::vector<int64_t>& input_shape) -> Tensor {
+    Tensor grad_output = grad_output_orig.is_contiguous() ? grad_output_orig : grad_output_orig.contiguous();
+    Tensor indices = indices_orig.is_contiguous() ? indices_orig : indices_orig.contiguous();
     int64_t N = input_shape[0];
     int64_t C = input_shape[1];
     int64_t H = input_shape[2];
@@ -875,9 +887,10 @@ void maxpool1d_forward_impl(const T* in_data, T* out_data, int64_t* idx_data,
     }
 }
 
-auto maxpool1d_forward_kernel(const Tensor& input, int64_t kernel_size,
+auto maxpool1d_forward_kernel(const Tensor& input_orig, int64_t kernel_size,
                                int64_t stride, int64_t padding, int64_t dilation)
     -> std::pair<Tensor, Tensor> {
+    Tensor input = input_orig.is_contiguous() ? input_orig : input_orig.contiguous();
     auto shape = input.shape();
     int64_t N = shape[0];
     int64_t C = shape[1];
@@ -927,8 +940,10 @@ void maxpool1d_backward_impl(const T* grad_out_data, const int64_t* idx_data, T*
     }
 }
 
-auto maxpool1d_backward_kernel(const Tensor& grad_output, const Tensor& indices,
+auto maxpool1d_backward_kernel(const Tensor& grad_output_orig, const Tensor& indices_orig,
                                 const std::vector<int64_t>& input_shape) -> Tensor {
+    Tensor grad_output = grad_output_orig.is_contiguous() ? grad_output_orig : grad_output_orig.contiguous();
+    Tensor indices = indices_orig.is_contiguous() ? indices_orig : indices_orig.contiguous();
     int64_t N = input_shape[0];
     int64_t C = input_shape[1];
     int64_t L = input_shape[2];
@@ -992,9 +1007,10 @@ void avgpool1d_forward_impl(const T* in_data, T* out_data,
     }
 }
 
-auto avgpool1d_forward_kernel(const Tensor& input, int64_t kernel_size,
+auto avgpool1d_forward_kernel(const Tensor& input_orig, int64_t kernel_size,
                                int64_t stride, int64_t padding,
                                bool count_include_pad) -> Tensor {
+    Tensor input = input_orig.is_contiguous() ? input_orig : input_orig.contiguous();
     auto shape = input.shape();
     int64_t N = shape[0];
     int64_t C = shape[1];
@@ -1064,11 +1080,12 @@ void avgpool1d_backward_impl(const T* grad_out_data, T* grad_in_data,
     }
 }
 
-auto avgpool1d_backward_kernel(const Tensor& grad_output,
+auto avgpool1d_backward_kernel(const Tensor& grad_output_orig,
                                 const std::vector<int64_t>& input_shape,
                                 int64_t kernel_size, int64_t stride,
                                 int64_t padding,
                                 bool count_include_pad) -> Tensor {
+    Tensor grad_output = grad_output_orig.is_contiguous() ? grad_output_orig : grad_output_orig.contiguous();
     int64_t N = input_shape[0];
     int64_t C = input_shape[1];
     int64_t L = input_shape[2];
@@ -1131,7 +1148,8 @@ void adaptive_avgpool1d_impl(const T* in_data, T* out_data,
     }
 }
 
-auto adaptive_avgpool1d_kernel(const Tensor& input, int64_t output_size) -> Tensor {
+auto adaptive_avgpool1d_kernel(const Tensor& input_orig, int64_t output_size) -> Tensor {
+    Tensor input = input_orig.is_contiguous() ? input_orig : input_orig.contiguous();
     auto shape = input.shape();
     int64_t N = shape[0];
     int64_t C = shape[1];
@@ -1180,8 +1198,9 @@ void adaptive_avgpool1d_backward_impl(const T* grad_out_data, T* grad_in_data,
     }
 }
 
-auto adaptive_avgpool1d_backward_kernel(const Tensor& grad_output,
+auto adaptive_avgpool1d_backward_kernel(const Tensor& grad_output_orig,
                                          const std::vector<int64_t>& input_shape) -> Tensor {
+    Tensor grad_output = grad_output_orig.is_contiguous() ? grad_output_orig : grad_output_orig.contiguous();
     int64_t N = input_shape[0];
     int64_t C = input_shape[1];
     int64_t L = input_shape[2];
@@ -1242,8 +1261,9 @@ void adaptive_maxpool1d_impl(const T* in_data, T* out_data, int64_t* idx_data,
     }
 }
 
-auto adaptive_maxpool1d_kernel(const Tensor& input, int64_t output_size)
+auto adaptive_maxpool1d_kernel(const Tensor& input_orig, int64_t output_size)
     -> std::pair<Tensor, Tensor> {
+    Tensor input = input_orig.is_contiguous() ? input_orig : input_orig.contiguous();
     auto shape = input.shape();
     int64_t N = shape[0];
     int64_t C = shape[1];
@@ -1291,8 +1311,10 @@ void adaptive_maxpool1d_backward_impl(const T* grad_out_data, const int64_t* idx
     }
 }
 
-auto adaptive_maxpool1d_backward_kernel(const Tensor& grad_output, const Tensor& indices,
+auto adaptive_maxpool1d_backward_kernel(const Tensor& grad_output_orig, const Tensor& indices_orig,
                                          const std::vector<int64_t>& input_shape) -> Tensor {
+    Tensor grad_output = grad_output_orig.is_contiguous() ? grad_output_orig : grad_output_orig.contiguous();
+    Tensor indices = indices_orig.is_contiguous() ? indices_orig : indices_orig.contiguous();
     int64_t N = input_shape[0];
     int64_t C = input_shape[1];
     int64_t L = input_shape[2];
@@ -1377,12 +1399,13 @@ void maxpool3d_forward_impl(const T* in_data, T* out_data, int64_t* idx_data,
     }
 }
 
-auto maxpool3d_forward_kernel(const Tensor& input,
+auto maxpool3d_forward_kernel(const Tensor& input_orig,
                                std::array<int64_t, 3> kernel_size,
                                std::array<int64_t, 3> stride,
                                std::array<int64_t, 3> padding,
                                std::array<int64_t, 3> dilation)
     -> std::pair<Tensor, Tensor> {
+    Tensor input = input_orig.is_contiguous() ? input_orig : input_orig.contiguous();
     auto shape = input.shape();
     int64_t N = shape[0];
     int64_t C = shape[1];
@@ -1445,8 +1468,10 @@ void maxpool3d_backward_impl(const T* grad_out_data, const int64_t* idx_data, T*
     }
 }
 
-auto maxpool3d_backward_kernel(const Tensor& grad_output, const Tensor& indices,
+auto maxpool3d_backward_kernel(const Tensor& grad_output_orig, const Tensor& indices_orig,
                                 const std::vector<int64_t>& input_shape) -> Tensor {
+    Tensor grad_output = grad_output_orig.is_contiguous() ? grad_output_orig : grad_output_orig.contiguous();
+    Tensor indices = indices_orig.is_contiguous() ? indices_orig : indices_orig.contiguous();
     int64_t N = input_shape[0];
     int64_t C = input_shape[1];
     int64_t D = input_shape[2];
@@ -1532,11 +1557,12 @@ void avgpool3d_forward_impl(const T* in_data, T* out_data,
     }
 }
 
-auto avgpool3d_forward_kernel(const Tensor& input,
+auto avgpool3d_forward_kernel(const Tensor& input_orig,
                                std::array<int64_t, 3> kernel_size,
                                std::array<int64_t, 3> stride,
                                std::array<int64_t, 3> padding,
                                bool count_include_pad) -> Tensor {
+    Tensor input = input_orig.is_contiguous() ? input_orig : input_orig.contiguous();
     auto shape = input.shape();
     int64_t N = shape[0];
     int64_t C = shape[1];
@@ -1634,12 +1660,13 @@ void avgpool3d_backward_impl(const T* grad_out_data, T* grad_in_data,
     }
 }
 
-auto avgpool3d_backward_kernel(const Tensor& grad_output,
+auto avgpool3d_backward_kernel(const Tensor& grad_output_orig,
                                 const std::vector<int64_t>& input_shape,
                                 std::array<int64_t, 3> kernel_size,
                                 std::array<int64_t, 3> stride,
                                 std::array<int64_t, 3> padding,
                                 bool count_include_pad) -> Tensor {
+    Tensor grad_output = grad_output_orig.is_contiguous() ? grad_output_orig : grad_output_orig.contiguous();
     int64_t N = input_shape[0];
     int64_t C = input_shape[1];
     int64_t D = input_shape[2];
@@ -1724,9 +1751,10 @@ void adaptive_maxpool3d_impl(const T* in_data, T* out_data, int64_t* idx_data,
     }
 }
 
-auto adaptive_maxpool3d_kernel(const Tensor& input,
+auto adaptive_maxpool3d_kernel(const Tensor& input_orig,
                                 int64_t output_d, int64_t output_h, int64_t output_w)
     -> std::pair<Tensor, Tensor> {
+    Tensor input = input_orig.is_contiguous() ? input_orig : input_orig.contiguous();
     auto shape = input.shape();
     int64_t N = shape[0];
     int64_t C = shape[1];
@@ -1781,8 +1809,10 @@ void adaptive_maxpool3d_backward_impl(const T* grad_out_data, const int64_t* idx
     }
 }
 
-auto adaptive_maxpool3d_backward_kernel(const Tensor& grad_output, const Tensor& indices,
+auto adaptive_maxpool3d_backward_kernel(const Tensor& grad_output_orig, const Tensor& indices_orig,
                                          const std::vector<int64_t>& input_shape) -> Tensor {
+    Tensor grad_output = grad_output_orig.is_contiguous() ? grad_output_orig : grad_output_orig.contiguous();
+    Tensor indices = indices_orig.is_contiguous() ? indices_orig : indices_orig.contiguous();
     int64_t N = input_shape[0];
     int64_t C = input_shape[1];
     int64_t D = input_shape[2];
@@ -1855,8 +1885,9 @@ void adaptive_avgpool3d_impl(const T* in_data, T* out_data,
     }
 }
 
-auto adaptive_avgpool3d_kernel(const Tensor& input,
+auto adaptive_avgpool3d_kernel(const Tensor& input_orig,
                                 int64_t output_d, int64_t output_h, int64_t output_w) -> Tensor {
+    Tensor input = input_orig.is_contiguous() ? input_orig : input_orig.contiguous();
     auto shape = input.shape();
     int64_t N = shape[0];
     int64_t C = shape[1];
@@ -1925,8 +1956,9 @@ void adaptive_avgpool3d_backward_impl(const T* grad_out_data, T* grad_in_data,
     }
 }
 
-auto adaptive_avgpool3d_backward_kernel(const Tensor& grad_output,
+auto adaptive_avgpool3d_backward_kernel(const Tensor& grad_output_orig,
                                          const std::vector<int64_t>& input_shape) -> Tensor {
+    Tensor grad_output = grad_output_orig.is_contiguous() ? grad_output_orig : grad_output_orig.contiguous();
     int64_t N = input_shape[0];
     int64_t C = input_shape[1];
     int64_t D = input_shape[2];
@@ -2024,10 +2056,11 @@ void fractional_maxpool2d_impl(const T* in_data, T* out_data, int64_t* idx_data,
     }
 }
 
-auto fractional_maxpool2d_forward_kernel(const Tensor& input,
+auto fractional_maxpool2d_forward_kernel(const Tensor& input_orig,
                                          int64_t out_h, int64_t out_w,
                                          const Tensor* random_samples)
     -> std::pair<Tensor, Tensor> {
+    Tensor input = input_orig.is_contiguous() ? input_orig : input_orig.contiguous();
     auto shape = input.shape();
     int64_t N = shape[0];
     int64_t C = shape[1];
@@ -2038,9 +2071,11 @@ auto fractional_maxpool2d_forward_kernel(const Tensor& input,
     auto indices = Tensor::empty_uninitialized({N, C, out_h, out_w}, DType::Int64, input.device());
     int64_t* idx_data = indices.data<int64_t>();
 
+    Tensor samples_c;
     const float* samples_ptr = nullptr;
     if (random_samples && random_samples->numel() > 0) {
-        samples_ptr = random_samples->data<float>();
+        samples_c = random_samples->is_contiguous() ? *random_samples : random_samples->contiguous();
+        samples_ptr = samples_c.data<float>();
     }
 
     if (input.dtype() == DType::Float32) {
@@ -2088,8 +2123,10 @@ void fractional_maxpool2d_backward_impl(const T* grad_out_data, const int64_t* i
     }
 }
 
-auto fractional_maxpool2d_backward_kernel(const Tensor& grad_output, const Tensor& indices,
+auto fractional_maxpool2d_backward_kernel(const Tensor& grad_output_orig, const Tensor& indices_orig,
                                           const std::vector<int64_t>& input_shape) -> Tensor {
+    Tensor grad_output = grad_output_orig.is_contiguous() ? grad_output_orig : grad_output_orig.contiguous();
+    Tensor indices = indices_orig.is_contiguous() ? indices_orig : indices_orig.contiguous();
     auto grad_shape = grad_output.shape();
     int64_t N = input_shape[0];
     int64_t C = input_shape[1];
@@ -2189,10 +2226,11 @@ void fractional_maxpool3d_impl(const T* in_data, T* out_data, int64_t* idx_data,
     }
 }
 
-auto fractional_maxpool3d_forward_kernel(const Tensor& input,
+auto fractional_maxpool3d_forward_kernel(const Tensor& input_orig,
                                          int64_t out_d, int64_t out_h, int64_t out_w,
                                          const Tensor* random_samples)
     -> std::pair<Tensor, Tensor> {
+    Tensor input = input_orig.is_contiguous() ? input_orig : input_orig.contiguous();
     auto shape = input.shape();
     int64_t N = shape[0], C = shape[1], D = shape[2], H = shape[3], W = shape[4];
 
@@ -2200,9 +2238,11 @@ auto fractional_maxpool3d_forward_kernel(const Tensor& input,
     auto indices = Tensor::empty_uninitialized({N, C, out_d, out_h, out_w}, DType::Int64, input.device());
     int64_t* idx_data = indices.data<int64_t>();
 
+    Tensor samples_c;
     const float* samples_ptr = nullptr;
     if (random_samples && random_samples->numel() > 0) {
-        samples_ptr = random_samples->data<float>();
+        samples_c = random_samples->is_contiguous() ? *random_samples : random_samples->contiguous();
+        samples_ptr = samples_c.data<float>();
     }
 
     if (input.dtype() == DType::Float32) {
@@ -2250,8 +2290,10 @@ void fractional_maxpool3d_backward_impl(const T* grad_out_data, const int64_t* i
     }
 }
 
-auto fractional_maxpool3d_backward_kernel(const Tensor& grad_output, const Tensor& indices,
+auto fractional_maxpool3d_backward_kernel(const Tensor& grad_output_orig, const Tensor& indices_orig,
                                           const std::vector<int64_t>& input_shape) -> Tensor {
+    Tensor grad_output = grad_output_orig.is_contiguous() ? grad_output_orig : grad_output_orig.contiguous();
+    Tensor indices = indices_orig.is_contiguous() ? indices_orig : indices_orig.contiguous();
     auto grad_shape = grad_output.shape();
     int64_t N = input_shape[0], C = input_shape[1];
     int64_t D = input_shape[2], H = input_shape[3], W = input_shape[4];
@@ -2309,8 +2351,10 @@ void max_unpool2d_impl(const T* in_data, const int64_t* idx_data, T* out_data,
     }
 }
 
-auto max_unpool2d_forward_kernel(const Tensor& input, const Tensor& indices,
+auto max_unpool2d_forward_kernel(const Tensor& input_orig, const Tensor& indices_orig,
                                  int64_t out_h, int64_t out_w) -> Tensor {
+    Tensor input = input_orig.is_contiguous() ? input_orig : input_orig.contiguous();
+    Tensor indices = indices_orig.is_contiguous() ? indices_orig : indices_orig.contiguous();
     auto shape = input.shape();
     int64_t N = shape[0], C = shape[1], in_h = shape[2], in_w = shape[3];
 
@@ -2362,8 +2406,10 @@ void max_unpool2d_backward_impl(const T* grad_out_data, const int64_t* idx_data,
     }
 }
 
-auto max_unpool2d_backward_kernel(const Tensor& grad_output, const Tensor& indices,
+auto max_unpool2d_backward_kernel(const Tensor& grad_output_orig, const Tensor& indices_orig,
                                   const std::vector<int64_t>& input_shape) -> Tensor {
+    Tensor grad_output = grad_output_orig.is_contiguous() ? grad_output_orig : grad_output_orig.contiguous();
+    Tensor indices = indices_orig.is_contiguous() ? indices_orig : indices_orig.contiguous();
     auto grad_shape = grad_output.shape();
     int64_t N = input_shape[0], C = input_shape[1];
     int64_t in_h = input_shape[2], in_w = input_shape[3];
@@ -2399,8 +2445,10 @@ auto max_unpool2d_backward_kernel(const Tensor& grad_output, const Tensor& indic
 // by the matching MaxPool1d forward.
 // =====================================================================
 
-auto max_unpool1d_forward_kernel(const Tensor& input, const Tensor& indices,
+auto max_unpool1d_forward_kernel(const Tensor& input_orig, const Tensor& indices_orig,
                                  int64_t out_l) -> Tensor {
+    Tensor input = input_orig.is_contiguous() ? input_orig : input_orig.contiguous();
+    Tensor indices = indices_orig.is_contiguous() ? indices_orig : indices_orig.contiguous();
     auto shape = input.shape();
     int64_t N = shape[0], C = shape[1], in_l = shape[2];
 
@@ -2426,8 +2474,10 @@ auto max_unpool1d_forward_kernel(const Tensor& input, const Tensor& indices,
     return output;
 }
 
-auto max_unpool1d_backward_kernel(const Tensor& grad_output, const Tensor& indices,
+auto max_unpool1d_backward_kernel(const Tensor& grad_output_orig, const Tensor& indices_orig,
                                   const std::vector<int64_t>& input_shape) -> Tensor {
+    Tensor grad_output = grad_output_orig.is_contiguous() ? grad_output_orig : grad_output_orig.contiguous();
+    Tensor indices = indices_orig.is_contiguous() ? indices_orig : indices_orig.contiguous();
     auto grad_shape = grad_output.shape();
     int64_t N = input_shape[0], C = input_shape[1];
     int64_t in_l = input_shape[2];
@@ -2484,8 +2534,10 @@ void max_unpool3d_impl(const T* in_data, const int64_t* idx_data, T* out_data,
     }
 }
 
-auto max_unpool3d_forward_kernel(const Tensor& input, const Tensor& indices,
+auto max_unpool3d_forward_kernel(const Tensor& input_orig, const Tensor& indices_orig,
                                  int64_t out_d, int64_t out_h, int64_t out_w) -> Tensor {
+    Tensor input = input_orig.is_contiguous() ? input_orig : input_orig.contiguous();
+    Tensor indices = indices_orig.is_contiguous() ? indices_orig : indices_orig.contiguous();
     auto shape = input.shape();
     int64_t N = shape[0], C = shape[1], in_d = shape[2], in_h = shape[3], in_w = shape[4];
 
@@ -2537,8 +2589,10 @@ void max_unpool3d_backward_impl(const T* grad_out_data, const int64_t* idx_data,
     }
 }
 
-auto max_unpool3d_backward_kernel(const Tensor& grad_output, const Tensor& indices,
+auto max_unpool3d_backward_kernel(const Tensor& grad_output_orig, const Tensor& indices_orig,
                                   const std::vector<int64_t>& input_shape) -> Tensor {
+    Tensor grad_output = grad_output_orig.is_contiguous() ? grad_output_orig : grad_output_orig.contiguous();
+    Tensor indices = indices_orig.is_contiguous() ? indices_orig : indices_orig.contiguous();
     auto grad_shape = grad_output.shape();
     int64_t N = input_shape[0], C = input_shape[1];
     int64_t in_d = input_shape[2], in_h = input_shape[3], in_w = input_shape[4];

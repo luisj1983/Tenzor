@@ -941,19 +941,29 @@ auto VulkanBackend::dispatchRepeat(const Tensor& input, const std::vector<int64_
         output_shape[i] = input_shape[i] * padded_repeats[i];
     }
 
-    // Use expand-based implementation on GPU
-    // First unsqueeze to add repeat dimensions, then use expand
+    // Use expand-based implementation on GPU.
+    //
+    // TILE semantics (torch.Tensor.repeat / torch.tile, matching the CPU ground
+    // truth): [a,b] repeated 2x -> [a,b,a,b]. The repeat factor must be the
+    // OUTER (slower-varying) index when the two dims are merged, so the source
+    // sequence replays in full r times. We therefore unsqueeze at `dim` (a new
+    // leading axis of size 1), expand it to r, then flatten [r, S_d] -> [r*S_d].
+    //
+    // (Unsqueezing at dim+1 and expanding there would put the repeat factor as
+    // the INNER index, producing [a,a,b,b] — that is interleave semantics and is
+    // what repeat_interleave does, NOT repeat.)
     Tensor current = input;
     for (int64_t dim = ndim - 1; dim >= 0; --dim) {
         if (padded_repeats[dim] > 1) {
-            // Unsqueeze at dim+1, expand, then flatten back
-            current = current.unsqueeze(dim + 1);
+            // Insert a new axis of size 1 just before `dim`.
+            current = current.unsqueeze(dim);
             auto curr_shape = current.shape();
             std::vector<int64_t> expand_shape(curr_shape.begin(), curr_shape.end());
-            expand_shape[dim + 1] = padded_repeats[dim];
+            // Expand the new leading axis to the repeat factor.
+            expand_shape[dim] = padded_repeats[dim];
             current = dispatchExpand(current, expand_shape);
 
-            // Flatten the two dimensions back together
+            // Flatten [..., r, S_d, ...] -> [..., r*S_d, ...] (r is outer).
             auto curr_shape2 = current.shape();
             std::vector<int64_t> flatten_shape(curr_shape2.begin(), curr_shape2.end());
             flatten_shape[dim] = flatten_shape[dim] * flatten_shape[dim + 1];
@@ -2393,7 +2403,13 @@ auto VulkanBackend::dispatchCast(const Tensor& input, DType target_dtype) -> Ten
     std::vector<int64_t> out_shape(input.shape().begin(), input.shape().end());
     Tensor output(out_shape, target_dtype, input.device());
 
-    const void* buf_in = input.data_ptr();
+    // Materialize the input to zero-offset contiguous storage before binding.
+    // The cast shaders index from element 0 with no offset compensation, and a
+    // sliced/narrowed view carries a non-zero storage offset that would trip
+    // the descriptor-offset alignment guard. dispatchContiguous is a no-op when
+    // the input is already contiguous and offset-0.
+    Tensor input_c = dispatchContiguous(input);
+    const void* buf_in = input_c.data_ptr();
     const void* buf_out = output.data_ptr();
 
     std::vector<std::pair<uint32_t, const void*>> bindings = {
@@ -3881,8 +3897,13 @@ auto VulkanBackend::dispatchLogcumsumexp(const Tensor& input, int64_t dim) -> Te
 auto VulkanBackend::dispatchBincount(const Tensor& input, const std::optional<Tensor>& weights, int64_t minlength) -> Tensor {
     int32_t device_id = input.device().index;
 
-    // Input must be Int32 for the shader
+    // Input must be Int32 for the shader. int_input is bound directly into a
+    // STORAGE_BUFFER descriptor below, so a non-zero-offset view must be
+    // materialized (Tensor::contiguous() does not reset the storage offset).
     Tensor int_input = (input.dtype() != DType::Int32) ? dispatchCast(input, DType::Int32) : input;
+    int_input = (int_input.is_contiguous() && int_input.offset() == 0)
+                    ? int_input
+                    : dispatchContiguous(int_input);
 
     // Determine number of bins: max(max_val + 1, minlength)
     // We need the max value from the input. Use a reduction.
@@ -3923,6 +3944,11 @@ auto VulkanBackend::dispatchBincount(const Tensor& input, const std::optional<Te
     if (has_weights && w_tensor.dtype() != DType::Float32) {
         w_tensor = dispatchCast(w_tensor, DType::Float32);
     }
+    // w_tensor is bound directly into a STORAGE_BUFFER descriptor; route views
+    // through dispatchContiguous to guarantee offset()==0.
+    w_tensor = (w_tensor.is_contiguous() && w_tensor.offset() == 0)
+                   ? w_tensor
+                   : dispatchContiguous(w_tensor);
 
     auto* pipeline = getPipeline("bincount", device_id);
 
@@ -4163,7 +4189,7 @@ auto VulkanBackend::dispatchLerp(const Tensor& start, const Tensor& end,
             weight_broadcast = weight.reshape(padded);
         }
         weight_broadcast = dispatchExpand(weight_broadcast, target_shape);
-        weight_broadcast = weight_broadcast.is_contiguous() ? weight_broadcast : weight_broadcast.contiguous();
+        weight_broadcast = (weight_broadcast.is_contiguous() && weight_broadcast.offset() == 0) ? weight_broadcast : dispatchContiguous(weight_broadcast);
     }
 
     struct PushConstants {
@@ -5850,6 +5876,13 @@ auto VulkanBackend::dispatchNanmedian(const Tensor& input, int64_t dim) -> Tenso
 
 auto VulkanBackend::dispatchHistc(const Tensor& input, int64_t bins, double min_val, double max_val) -> Tensor {
     Tensor input_f32 = (input.dtype() != DType::Float32) ? input.to(DType::Float32) : input;
+    // input_f32 is bound directly into a STORAGE_BUFFER descriptor below; an
+    // unmaterialized view (non-contiguous or non-zero storage offset) would
+    // trip the descriptor-offset alignment guard. dispatchContiguous guarantees
+    // is_contiguous() && offset()==0 (Tensor::contiguous() does NOT reset offset).
+    input_f32 = (input_f32.is_contiguous() && input_f32.offset() == 0)
+                    ? input_f32
+                    : dispatchContiguous(input_f32);
     int32_t device_id = input.device().index;
 
     // Output is uint32 histogram, zero-initialized

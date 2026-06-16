@@ -230,7 +230,10 @@ auto VulkanBackend::dispatchArgmin(const Tensor& input, int64_t dim, bool keepdi
 auto VulkanBackend::dispatchVarianceWelford(
     const Tensor& input_orig, int64_t dim, bool unbiased, bool keepdim,
     bool compute_std) -> Tensor {
-    Tensor input = input_orig.is_contiguous() ? input_orig : input_orig.contiguous();
+    // dispatchContiguous (not .contiguous()): a stride-contiguous offset view
+    // is left untouched by .contiguous() and would trip the descriptor offset
+    // guard. dispatchContiguous guarantees packed storage at offset 0.
+    Tensor input = dispatchContiguous(input_orig);
     auto input_shape = input.shape();
     bool full_reduction = (dim < 0);
 
@@ -1011,7 +1014,10 @@ auto VulkanBackend::dispatchFlip(const Tensor& input_orig, int64_t dim) -> Tenso
     // using stride-from-shape. A non-contiguous input (e.g. a slice or
     // transpose) would therefore read the wrong elements. Materialize a
     // contiguous copy up front — same fix pattern as dispatchVariance.
-    Tensor input = input_orig.is_contiguous() ? input_orig : input_orig.contiguous();
+    // dispatchContiguous (not .contiguous()): a stride-contiguous offset view
+    // is left untouched by .contiguous() and would trip the descriptor offset
+    // guard. dispatchContiguous guarantees packed storage at offset 0.
+    Tensor input = dispatchContiguous(input_orig);
     auto input_shape = input.shape();
 
     if (input.numel() == 0) {

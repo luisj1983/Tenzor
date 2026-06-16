@@ -10,6 +10,7 @@
 #include "tenzor/backend/fast_dispatch.hpp"
 #include "tenzor/backend/op_attributes.hpp"
 #include "tenzor/ops/op_id.hpp"
+#include "tenzor/nn/utils/variable_cast.hpp"
 #include <stdexcept>
 #include <sstream>
 #include <iostream>
@@ -97,6 +98,21 @@ auto LSTMCell::forward(const Variable& input, const Variable& hx, const Variable
         throw std::runtime_error("LSTMCell: invalid cell state shape");
     }
 
+    // For Float16/BFloat16, run the gate matmuls, sigmoid/tanh, and cell/hidden
+    // state updates in Float32, then cast the new states back to the original
+    // dtype. Half-precision gate activations and state recurrence lose precision
+    // and some elementwise kernels lack half dispatch. Widening input/h/c to
+    // Float32 makes the Linear layers cast their weights to Float32 to match
+    // (Linear's compute dtype follows input), so the whole cell runs at Float32.
+    const DType orig_dtype = input.dtype();
+    const bool needs_upcast =
+        (orig_dtype == DType::Float16 || orig_dtype == DType::BFloat16);
+    Variable input_c = needs_upcast ? variable_cast(input, DType::Float32) : input;
+    if (needs_upcast) {
+        h = variable_cast(h, DType::Float32);
+        c = variable_cast(c, DType::Float32);
+    }
+
     // Compute combined gates: gates = W_ih @ input + W_hh @ hidden
     // gates shape: (batch, 4 * hidden_size)
     // gates = [input_gate | forget_gate | cell_gate | output_gate]
@@ -106,8 +122,8 @@ auto LSTMCell::forward(const Variable& input, const Variable& hx, const Variable
     // `Variable(t, true)` would create orphan Variables with no grad_fn,
     // breaking the chain back to `input`/`hx`/`cx` so backward() wouldn't
     // populate any input gradient.
-    auto gates_ih = weight_ih_->forward(input);  // (batch, 4*hidden_size)
-    auto gates_hh = weight_hh_->forward(h);      // (batch, 4*hidden_size)
+    auto gates_ih = weight_ih_->forward(input_c);  // (batch, 4*hidden_size)
+    auto gates_hh = weight_hh_->forward(h);        // (batch, 4*hidden_size)
     auto gates = gates_ih + gates_hh;            // Variable + Variable -> Variable
 
     // Sanity check shape
@@ -141,6 +157,11 @@ auto LSTMCell::forward(const Variable& input, const Variable& hx, const Variable
     // Update hidden state: h_t = o_t ⊙ tanh(c_t)
     auto h_new = o_t * ::tenzor::tanh(c_new);
 
+    // Narrow the new states back to the caller's original dtype.
+    if (needs_upcast) {
+        h_new = variable_cast(h_new, orig_dtype);
+        c_new = variable_cast(c_new, orig_dtype);
+    }
     return {h_new, c_new};
 }
 

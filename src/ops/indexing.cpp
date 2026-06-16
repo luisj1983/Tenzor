@@ -581,6 +581,12 @@ auto one_hot(const Tensor& input, int64_t num_classes) -> Tensor {
 }
 
 auto index_add(const Tensor& input, int64_t dim, const Tensor& index, const Tensor& source) -> Tensor {
+    // audit-6 BB.1: normalise negative dim at the dispatcher (mirrors Y.6).
+    const int64_t ndim = static_cast<int64_t>(input.shape().size());
+    if (dim < 0) dim += ndim;
+    if (dim < 0 || dim >= ndim) {
+        throw std::out_of_range("index_add: dim out of range");
+    }
     NewOpAttributes attrs;
     attrs.set(AttrKey::Dim, dim);
     std::vector<Tensor> inputs = {input.contiguous(), index.contiguous(), source.contiguous()};
@@ -588,6 +594,12 @@ auto index_add(const Tensor& input, int64_t dim, const Tensor& index, const Tens
 }
 
 auto index_copy(const Tensor& input, int64_t dim, const Tensor& index, const Tensor& source) -> Tensor {
+    // audit-6 BB.1: normalise negative dim at the dispatcher (mirrors Y.6).
+    const int64_t ndim = static_cast<int64_t>(input.shape().size());
+    if (dim < 0) dim += ndim;
+    if (dim < 0 || dim >= ndim) {
+        throw std::out_of_range("index_copy: dim out of range");
+    }
     NewOpAttributes attrs;
     attrs.set(AttrKey::Dim, dim);
     std::vector<Tensor> inputs = {input.contiguous(), index.contiguous(), source.contiguous()};
@@ -651,6 +663,13 @@ auto index_reduce(const Tensor& input, int64_t dim, const Tensor& index,
 }
 
 auto take_along_dim(const Tensor& input, const Tensor& indices, int64_t dim) -> Tensor {
+    // audit-6 BB.1: normalise negative dim at the dispatcher (mirrors Y.6) so
+    // backends that index `shape[dim]` raw don't underflow on negative dim.
+    const int64_t ndim = static_cast<int64_t>(input.shape().size());
+    if (dim < 0) dim += ndim;
+    if (dim < 0 || dim >= ndim) {
+        throw std::out_of_range("take_along_dim: dim out of range");
+    }
     NewOpAttributes attrs;
     attrs.set(AttrKey::Dim, dim);
     std::vector<Tensor> inputs = {input.contiguous(), indices.contiguous()};

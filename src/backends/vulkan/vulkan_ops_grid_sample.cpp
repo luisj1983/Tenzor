@@ -70,9 +70,13 @@ auto VulkanBackend::dispatchGridSample(const Tensor& input, const Tensor& grid,
     int32_t H_out = static_cast<int32_t>(grid_shape[1]);
     int32_t W_out = static_cast<int32_t>(grid_shape[2]);
 
+    // Materialize read operands to packed offset-0 buffers before binding.
+    // dispatchCast already returns fresh offset-0 storage; the Float32
+    // passthrough may still be an offset view, so route it through
+    // dispatchContiguous.
     DType orig_dtype = input.dtype();
-    Tensor input_f32 = (orig_dtype == DType::Float32) ? input : dispatchCast(input, DType::Float32);
-    Tensor grid_f32  = (grid.dtype() == DType::Float32) ? grid  : dispatchCast(grid,  DType::Float32);
+    Tensor input_f32 = (orig_dtype == DType::Float32) ? dispatchContiguous(input) : dispatchCast(input, DType::Float32);
+    Tensor grid_f32  = (grid.dtype() == DType::Float32) ? dispatchContiguous(grid)  : dispatchCast(grid,  DType::Float32);
 
     Tensor output_f32(std::vector<int64_t>{N, C, H_out, W_out},
                       DType::Float32, input.device());
@@ -147,10 +151,13 @@ auto VulkanBackend::dispatchGridSampleBackward(const Tensor& grad_output,
     DType in_dt = input.dtype();
     DType gr_dt = grid.dtype();
 
-    Tensor input_f32 = (in_dt == DType::Float32) ? input : dispatchCast(input, DType::Float32);
-    Tensor grid_f32  = (gr_dt == DType::Float32) ? grid  : dispatchCast(grid,  DType::Float32);
+    // Materialize read operands to packed offset-0 buffers before binding
+    // (Float32 passthrough may be an offset view; dispatchCast is already
+    // offset 0).
+    Tensor input_f32 = (in_dt == DType::Float32) ? dispatchContiguous(input) : dispatchCast(input, DType::Float32);
+    Tensor grid_f32  = (gr_dt == DType::Float32) ? dispatchContiguous(grid)  : dispatchCast(grid,  DType::Float32);
     Tensor go_f32    = (grad_output.dtype() == DType::Float32)
-                       ? grad_output : dispatchCast(grad_output, DType::Float32);
+                       ? dispatchContiguous(grad_output) : dispatchCast(grad_output, DType::Float32);
 
     Tensor gi_f32(std::vector<int64_t>{N, C, H_in, W_in},
                   DType::Float32, input.device());
@@ -261,7 +268,8 @@ auto VulkanBackend::dispatchAffineGridBackward(const Tensor& grad_grid,
     int32_t total = N * H * W;
 
     DType gr_dt = grad_grid.dtype();
-    Tensor gg_f32 = (gr_dt == DType::Float32) ? grad_grid : dispatchCast(grad_grid, DType::Float32);
+    // Materialize read operand to a packed offset-0 buffer before binding.
+    Tensor gg_f32 = (gr_dt == DType::Float32) ? dispatchContiguous(grad_grid) : dispatchCast(grad_grid, DType::Float32);
     Tensor gt_f32(std::vector<int64_t>{N, 2, 3}, DType::Float32, grad_grid.device());
 
     int32_t device_id = grad_grid.device().index;
@@ -344,7 +352,8 @@ auto VulkanBackend::dispatchAffineGrid(const Tensor& theta, const std::vector<in
     int32_t total = N * H * W;
 
     DType orig_dtype = theta.dtype();
-    Tensor theta_f32 = (orig_dtype == DType::Float32) ? theta : dispatchCast(theta, DType::Float32);
+    // Materialize read operand to a packed offset-0 buffer before binding.
+    Tensor theta_f32 = (orig_dtype == DType::Float32) ? dispatchContiguous(theta) : dispatchCast(theta, DType::Float32);
 
     Tensor grid(std::vector<int64_t>{N, H, W, 2}, DType::Float32, theta.device());
     if (total == 0) return (orig_dtype == DType::Float32) ? grid : dispatchCast(grid, orig_dtype);

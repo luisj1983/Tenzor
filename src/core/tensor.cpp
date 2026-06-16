@@ -36,6 +36,16 @@ TensorImpl::TensorImpl(std::vector<int64_t> shape_, DType dtype_, Device device_
     : shape(std::move(shape_)), dtype(dtype_), device(device_) {
     is_contiguous_cache_.store(1, std::memory_order_release);  // freshly constructed = contiguous
 
+    // Validate dims are non-negative before computing numel()/strides. A
+    // negative dim makes numel() negative, which slips past the `n > 0`
+    // overflow guard below and wraps size_bytes to a tiny value (or to a huge
+    // one), producing an under-allocated buffer. Mirrors from_blob().
+    for (auto dim : this->shape) {
+        if (dim < 0) {
+            throw std::invalid_argument("Tensor: shape dimensions must be non-negative");
+        }
+    }
+
     // Compute strides
     strides = compute_strides(this->shape);
 
@@ -1165,10 +1175,16 @@ auto operator*(double s, const Tensor& t) -> Tensor {
 }
 
 auto operator/(double s, const Tensor& t) -> Tensor {
+    // True division always yields a float (PyTorch `/` semantics): an integer
+    // denominator must promote, otherwise the Div kernel truncates toward zero
+    // (e.g. 2.0 / tensor([3]) would yield 0). Mirrors dispatch_scalar_binop's
+    // integer->Float32 promotion for the forward tensor/scalar path.
+    DType result_dtype = is_integer_type(t.dtype()) ? DType::Float32 : t.dtype();
     auto numerator = tenzor::full(
         std::vector<int64_t>(t.shape().begin(), t.shape().end()),
-        s, t.dtype(), t.device());
-    return tenzor::div(numerator, t);
+        s, result_dtype, t.device());
+    Tensor denom = (t.dtype() != result_dtype) ? t.to(result_dtype) : t;
+    return tenzor::div(numerator, denom);
 }
 
 // In-place operations — dispatch through in-place kernels so views/aliases see updates

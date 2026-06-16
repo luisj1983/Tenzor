@@ -300,6 +300,15 @@ auto fft_kernel(const Tensor& input, int64_t dim, int64_t n,
             std::vector<std::int64_t> fwd_strides = {0, 1};
             desc.set_value(dft::config_param::FWD_STRIDES, fwd_strides);
             desc.set_value(dft::config_param::FWD_DISTANCE, signal_len);
+            // For an in-place C2C transform the OUTPUT (backward domain) shares
+            // the same gathered, contiguous-per-transform layout as the input.
+            // BWD_DISTANCE defaults to 1, which would write the `total_transforms`
+            // results with the wrong inter-transform spacing and clobber each
+            // other (correct only when total_transforms == 1). Mirror the FWD
+            // layout so every non-last-dim batched transform lands correctly.
+            std::vector<std::int64_t> bwd_strides = {0, 1};
+            desc.set_value(dft::config_param::BWD_STRIDES, bwd_strides);
+            desc.set_value(dft::config_param::BWD_DISTANCE, signal_len);
             desc.set_value(dft::config_param::PLACEMENT, dft::config_value::INPLACE);
             desc.commit(queue);
 
@@ -375,6 +384,12 @@ auto fft_kernel(const Tensor& input, int64_t dim, int64_t n,
             std::vector<std::int64_t> fwd_strides = {0, 1};
             desc.set_value(dft::config_param::FWD_STRIDES, fwd_strides);
             desc.set_value(dft::config_param::FWD_DISTANCE, signal_len);
+            // In-place C2C: the backward (output) domain shares the gathered,
+            // contiguous-per-transform layout. Without BWD_DISTANCE the batched
+            // outputs overlap (defaults to 1). Mirror the FWD layout.
+            std::vector<std::int64_t> bwd_strides = {0, 1};
+            desc.set_value(dft::config_param::BWD_STRIDES, bwd_strides);
+            desc.set_value(dft::config_param::BWD_DISTANCE, signal_len);
             desc.set_value(dft::config_param::PLACEMENT, dft::config_value::INPLACE);
             desc.commit(queue);
 
@@ -478,6 +493,13 @@ auto ifft_kernel(const Tensor& input, int64_t dim, int64_t n,
         std::vector<std::int64_t> bwd_strides = {0, 1};
         desc.set_value(dft::config_param::BWD_STRIDES, bwd_strides);
         desc.set_value(dft::config_param::BWD_DISTANCE, signal_len);
+        // In-place C2C inverse: the forward (output) domain shares the gathered,
+        // contiguous-per-transform layout. FWD_DISTANCE defaults to 1, which
+        // would overlap the batched outputs for total_transforms > 1 (non-last
+        // dim). Mirror the BWD layout so each transform writes to its own slot.
+        std::vector<std::int64_t> fwd_strides = {0, 1};
+        desc.set_value(dft::config_param::FWD_STRIDES, fwd_strides);
+        desc.set_value(dft::config_param::FWD_DISTANCE, signal_len);
         desc.set_value(dft::config_param::PLACEMENT, dft::config_value::INPLACE);
         desc.commit(queue);
 
@@ -540,6 +562,11 @@ auto ifft_kernel(const Tensor& input, int64_t dim, int64_t n,
         std::vector<std::int64_t> bwd_strides = {0, 1};
         desc.set_value(dft::config_param::BWD_STRIDES, bwd_strides);
         desc.set_value(dft::config_param::BWD_DISTANCE, signal_len);
+        // In-place C2C inverse: mirror the layout to the forward (output) domain
+        // so the batched outputs don't overlap (FWD_DISTANCE defaults to 1).
+        std::vector<std::int64_t> fwd_strides = {0, 1};
+        desc.set_value(dft::config_param::FWD_STRIDES, fwd_strides);
+        desc.set_value(dft::config_param::FWD_DISTANCE, signal_len);
         desc.set_value(dft::config_param::PLACEMENT, dft::config_value::INPLACE);
         desc.commit(queue);
 

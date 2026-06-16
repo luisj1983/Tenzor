@@ -1546,6 +1546,10 @@ auto interpolate_kernel(
 
                     float h_real = align_corners ? h * h_scale : (h + 0.5f) * h_scale - 0.5f;
                     float w_real = align_corners ? w * w_scale : (w + 0.5f) * w_scale - 0.5f;
+                    // Clamp continuous coord to [0,in-1] BEFORE flooring to match the
+                    // CPU/CUDA/ROCm reference border convention (and the backward).
+                    h_real = sycl::clamp(h_real, 0.0f, static_cast<float>(H_in - 1));
+                    w_real = sycl::clamp(w_real, 0.0f, static_cast<float>(W_in - 1));
 
                     int64_t h_floor = static_cast<int64_t>(sycl::floor(h_real));
                     int64_t w_floor = static_cast<int64_t>(sycl::floor(w_real));
@@ -1601,6 +1605,10 @@ auto interpolate_kernel(
 
                     double h_real = align_corners ? h * h_scale : (h + 0.5) * h_scale - 0.5;
                     double w_real = align_corners ? w * w_scale : (w + 0.5) * w_scale - 0.5;
+                    // Clamp continuous coord to [0,in-1] BEFORE flooring to match the
+                    // CPU/CUDA/ROCm reference border convention (and the backward).
+                    h_real = sycl::clamp(h_real, 0.0, static_cast<double>(H_in - 1));
+                    w_real = sycl::clamp(w_real, 0.0, static_cast<double>(W_in - 1));
 
                     int64_t h_floor = static_cast<int64_t>(sycl::floor(h_real));
                     int64_t w_floor = static_cast<int64_t>(sycl::floor(w_real));
@@ -1656,6 +1664,10 @@ auto interpolate_kernel(
 
                     float h_real = align_corners ? h * h_scale : (h + 0.5f) * h_scale - 0.5f;
                     float w_real = align_corners ? w * w_scale : (w + 0.5f) * w_scale - 0.5f;
+                    // Clamp continuous coord to [0,in-1] BEFORE flooring to match the
+                    // CPU/CUDA/ROCm reference border convention (and the backward).
+                    h_real = sycl::clamp(h_real, 0.0f, static_cast<float>(H_in - 1));
+                    w_real = sycl::clamp(w_real, 0.0f, static_cast<float>(W_in - 1));
 
                     int64_t h_floor = static_cast<int64_t>(sycl::floor(h_real));
                     int64_t w_floor = static_cast<int64_t>(sycl::floor(w_real));
@@ -1711,6 +1723,10 @@ auto interpolate_kernel(
 
                     float h_real = align_corners ? h * h_scale : (h + 0.5f) * h_scale - 0.5f;
                     float w_real = align_corners ? w * w_scale : (w + 0.5f) * w_scale - 0.5f;
+                    // Clamp continuous coord to [0,in-1] BEFORE flooring to match the
+                    // CPU/CUDA/ROCm reference border convention (and the backward).
+                    h_real = sycl::clamp(h_real, 0.0f, static_cast<float>(H_in - 1));
+                    w_real = sycl::clamp(w_real, 0.0f, static_cast<float>(W_in - 1));
 
                     int64_t h_floor = static_cast<int64_t>(sycl::floor(h_real));
                     int64_t w_floor = static_cast<int64_t>(sycl::floor(w_real));
@@ -2176,6 +2192,11 @@ static void interp_bicubic_backward_dispatch(
         T scale_w = (align_corners && out_w > 1) ? static_cast<T>(in_w - 1) / static_cast<T>(out_w - 1) : static_cast<T>(in_w) / static_cast<T>(out_w);
         T src_h = align_corners ? static_cast<T>(oh) * scale_h : (static_cast<T>(oh) + T(0.5)) * scale_h - T(0.5);
         T src_w = align_corners ? static_cast<T>(ow) * scale_w : (static_cast<T>(ow) + T(0.5)) * scale_w - T(0.5);
+        // Clamp the continuous coord to [0,in-1] BEFORE flooring, exactly as the
+        // forward kernel and CPU reference do, so this scatter is the precise
+        // transpose of the forward at the borders (parity at edges).
+        src_h = sycl::clamp(src_h, T(0), static_cast<T>(in_h - 1));
+        src_w = sycl::clamp(src_w, T(0), static_cast<T>(in_w - 1));
         int64_t hi = static_cast<int64_t>(sycl::floor(src_h));
         int64_t wi = static_cast<int64_t>(sycl::floor(src_w));
         T g = grad_out_ptr[idx];

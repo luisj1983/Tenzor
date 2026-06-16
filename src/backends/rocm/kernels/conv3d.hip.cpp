@@ -71,6 +71,36 @@ __global__ void conv3d_ndhwc_to_ncdhw_kernel(
     }
 }
 
+// Inverse of conv3d_ndhwc_to_ncdhw_kernel. The Conv3d backward GEMMs feed
+// grad_output to rocBLAS in a layout that, decoded, is NDHWC
+// (batch*D_out*H_out*W_out, out_channels_per_group) row-major. But the
+// grad_output tensor's real memory is NCDHW. This kernel gathers the
+// per-group NCDHW grad_output into a contiguous NDHWC temp buffer so the
+// backward consumes exactly the layout the forward produced.
+template<typename T>
+__global__ void conv3d_ncdhw_to_ndhwc_kernel(
+    const T* __restrict__ ncdhw,
+    T* __restrict__ ndhwc_out,
+    int64_t batch, int64_t D_out, int64_t H_out, int64_t W_out,
+    int64_t out_channels, int64_t channels_per_group, int64_t channel_offset
+) {
+    int64_t total_spatial = batch * D_out * H_out * W_out;
+    int64_t total = total_spatial * channels_per_group;
+    HIP_KERNEL_LOOP_CONV3D(idx, total) {
+        int64_t c = idx % channels_per_group;
+        int64_t spatial_idx = idx / channels_per_group;
+        int64_t b = spatial_idx / (D_out * H_out * W_out);
+        int64_t dhw = spatial_idx % (D_out * H_out * W_out);
+        int64_t d = dhw / (H_out * W_out);
+        int64_t hw = dhw % (H_out * W_out);
+        int64_t h = hw / W_out;
+        int64_t w = hw % W_out;
+        int64_t global_c = channel_offset + c;
+        int64_t ncdhw_idx = (((b * out_channels + global_c) * D_out + d) * H_out + h) * W_out + w;
+        ndhwc_out[idx] = ncdhw[ncdhw_idx];
+    }
+}
+
 // ============================================================================
 // im3col HIP Kernel: Convert 5D input (N,C,D,H,W) to 2D for Conv3d GEMM
 // ============================================================================
@@ -597,7 +627,20 @@ auto conv3d_backward_input_hip(
             float* grad_col = grad_col_buf.as<float>();
 
             float alpha = 1.0f, beta = 0.0f;
-            const float* grad_out_ptr = grad_output.data<float>() + out_start * D_out * H_out * W_out;
+            // rocBLAS reads grad_out as op(B) column-major [K×M] with ld=K, i.e.
+            // row-major [col_row][oc] = NDHWC. Permute NCDHW grad_output first.
+            HipBuffer grad_out_ndhwc_buf(col_rows * C_out_per_group * sizeof(float));
+            float* grad_out_ndhwc = grad_out_ndhwc_buf.as<float>();
+            {
+                dim3 p_grid, p_block;
+                compute_launch_config_conv3d(col_rows * C_out_per_group, p_grid, p_block);
+                conv3d_ncdhw_to_ndhwc_kernel<float><<<p_grid, p_block, 0, stream>>>(
+                    grad_output.data<float>(), grad_out_ndhwc,
+                    N, D_out, H_out, W_out, C_out, C_out_per_group, out_start
+                );
+                HIP_CHECK(hipGetLastError());
+            }
+            const float* grad_out_ptr = grad_out_ndhwc;
             const float* weight_ptr = weight.data<float>() + out_start * C_in_per_group * kD * kH * kW;
 
             // rocBLAS col-major: C = A * B^T => row-major: C = B * A^T
@@ -634,7 +677,20 @@ auto conv3d_backward_input_hip(
             double* grad_col = grad_col_buf.as<double>();
 
             double alpha = 1.0, beta = 0.0;
-            const double* grad_out_ptr = grad_output.data<double>() + out_start * D_out * H_out * W_out;
+            // rocBLAS reads grad_out as op(B) column-major [K×M] with ld=K, i.e.
+            // row-major [col_row][oc] = NDHWC. Permute NCDHW grad_output first.
+            HipBuffer grad_out_ndhwc_buf(col_rows * C_out_per_group * sizeof(double));
+            double* grad_out_ndhwc = grad_out_ndhwc_buf.as<double>();
+            {
+                dim3 p_grid, p_block;
+                compute_launch_config_conv3d(col_rows * C_out_per_group, p_grid, p_block);
+                conv3d_ncdhw_to_ndhwc_kernel<double><<<p_grid, p_block, 0, stream>>>(
+                    grad_output.data<double>(), grad_out_ndhwc,
+                    N, D_out, H_out, W_out, C_out, C_out_per_group, out_start
+                );
+                HIP_CHECK(hipGetLastError());
+            }
+            const double* grad_out_ptr = grad_out_ndhwc;
             const double* weight_ptr = weight.data<double>() + out_start * C_in_per_group * kD * kH * kW;
 
             ROCBLAS_CHECK(rocblas_dgemm(
@@ -671,7 +727,21 @@ auto conv3d_backward_input_hip(
             rocblas_half alpha_h{static_cast<uint16_t>(0x3C00)};
             rocblas_half beta_h{static_cast<uint16_t>(0x0000)};
 
-            const rocblas_half* grad_out_ptr = reinterpret_cast<const rocblas_half*>(grad_output.data<Float16>()) + out_start * D_out * H_out * W_out;
+            // rocBLAS reads grad_out as op(B) column-major [K×M] with ld=K, i.e.
+            // row-major [col_row][oc] = NDHWC. Permute NCDHW grad_output first.
+            HipBuffer grad_out_ndhwc_buf(col_rows * C_out_per_group * sizeof(rocblas_half));
+            rocblas_half* grad_out_ndhwc = grad_out_ndhwc_buf.as<rocblas_half>();
+            {
+                dim3 p_grid, p_block;
+                compute_launch_config_conv3d(col_rows * C_out_per_group, p_grid, p_block);
+                conv3d_ncdhw_to_ndhwc_kernel<__half><<<p_grid, p_block, 0, stream>>>(
+                    reinterpret_cast<const __half*>(grad_output.data<Float16>()),
+                    reinterpret_cast<__half*>(grad_out_ndhwc),
+                    N, D_out, H_out, W_out, C_out, C_out_per_group, out_start
+                );
+                HIP_CHECK(hipGetLastError());
+            }
+            const rocblas_half* grad_out_ptr = grad_out_ndhwc;
             const rocblas_half* weight_ptr = reinterpret_cast<const rocblas_half*>(weight.data<Float16>()) + out_start * C_in_per_group * kD * kH * kW;
 
             ROCBLAS_CHECK(rocblas_hgemm(
@@ -808,7 +878,21 @@ auto conv3d_backward_weight_hip(
             HIP_CHECK(hipGetLastError());
 
             float alpha = 1.0f, beta = 0.0f;
-            const float* grad_out_ptr = grad_output.data<float>() + out_start * D_out * H_out * W_out;
+            // With op(B)=transpose, rocBLAS reads grad_out as stored [M×K]
+            // col-major ld=M => row-major [col_row][oc] = NDHWC. Permute the
+            // NCDHW grad_output into a contiguous NDHWC temp first.
+            HipBuffer grad_out_ndhwc_buf(col_rows * C_out_per_group * sizeof(float));
+            float* grad_out_ndhwc = grad_out_ndhwc_buf.as<float>();
+            {
+                dim3 p_grid, p_block;
+                compute_launch_config_conv3d(col_rows * C_out_per_group, p_grid, p_block);
+                conv3d_ncdhw_to_ndhwc_kernel<float><<<p_grid, p_block, 0, stream>>>(
+                    grad_output.data<float>(), grad_out_ndhwc,
+                    N, D_out, H_out, W_out, C_out, C_out_per_group, out_start
+                );
+                HIP_CHECK(hipGetLastError());
+            }
+            const float* grad_out_ptr = grad_out_ndhwc;
             float* grad_weight_ptr = grad_weight.data<float>() + out_start * C_in_per_group * kD * kH * kW;
 
             // Row-major: C = A^T * B
@@ -841,7 +925,21 @@ auto conv3d_backward_weight_hip(
             HIP_CHECK(hipGetLastError());
 
             double alpha = 1.0, beta = 0.0;
-            const double* grad_out_ptr = grad_output.data<double>() + out_start * D_out * H_out * W_out;
+            // With op(B)=transpose, rocBLAS reads grad_out as stored [M×K]
+            // col-major ld=M => row-major [col_row][oc] = NDHWC. Permute the
+            // NCDHW grad_output into a contiguous NDHWC temp first.
+            HipBuffer grad_out_ndhwc_buf(col_rows * C_out_per_group * sizeof(double));
+            double* grad_out_ndhwc = grad_out_ndhwc_buf.as<double>();
+            {
+                dim3 p_grid, p_block;
+                compute_launch_config_conv3d(col_rows * C_out_per_group, p_grid, p_block);
+                conv3d_ncdhw_to_ndhwc_kernel<double><<<p_grid, p_block, 0, stream>>>(
+                    grad_output.data<double>(), grad_out_ndhwc,
+                    N, D_out, H_out, W_out, C_out, C_out_per_group, out_start
+                );
+                HIP_CHECK(hipGetLastError());
+            }
+            const double* grad_out_ptr = grad_out_ndhwc;
             double* grad_weight_ptr = grad_weight.data<double>() + out_start * C_in_per_group * kD * kH * kW;
 
             ROCBLAS_CHECK(rocblas_dgemm(
@@ -874,7 +972,22 @@ auto conv3d_backward_weight_hip(
             rocblas_half alpha_h{static_cast<uint16_t>(0x3C00)};
             rocblas_half beta_h{static_cast<uint16_t>(0x0000)};
 
-            const rocblas_half* grad_out_ptr = reinterpret_cast<const rocblas_half*>(grad_output.data<Float16>()) + out_start * D_out * H_out * W_out;
+            // With op(B)=transpose, rocBLAS reads grad_out as stored [M×K]
+            // col-major ld=M => row-major [col_row][oc] = NDHWC. Permute the
+            // NCDHW grad_output into a contiguous NDHWC temp first.
+            HipBuffer grad_out_ndhwc_buf(col_rows * C_out_per_group * sizeof(rocblas_half));
+            rocblas_half* grad_out_ndhwc = grad_out_ndhwc_buf.as<rocblas_half>();
+            {
+                dim3 p_grid, p_block;
+                compute_launch_config_conv3d(col_rows * C_out_per_group, p_grid, p_block);
+                conv3d_ncdhw_to_ndhwc_kernel<__half><<<p_grid, p_block, 0, stream>>>(
+                    reinterpret_cast<const __half*>(grad_output.data<Float16>()),
+                    reinterpret_cast<__half*>(grad_out_ndhwc),
+                    N, D_out, H_out, W_out, C_out, C_out_per_group, out_start
+                );
+                HIP_CHECK(hipGetLastError());
+            }
+            const rocblas_half* grad_out_ptr = grad_out_ndhwc;
             rocblas_half* grad_weight_ptr = reinterpret_cast<rocblas_half*>(grad_weight.data<Float16>()) + out_start * C_in_per_group * kD * kH * kW;
 
             ROCBLAS_CHECK(rocblas_hgemm(
@@ -1084,6 +1197,8 @@ auto conv_transpose3d_forward_hip(
     int64_t total_elements = output.numel();
     int threads = 256;
     int blocks = static_cast<int>((total_elements + threads - 1) / threads);
+    // Empty output: a zero-grid launch is rejected by HIP; return as-is.
+    if (blocks == 0) return output;
 
     bool has_bias = bias.numel() > 0;
 
@@ -1257,6 +1372,8 @@ auto conv_transpose3d_backward_input_hip(
                       grad_output.dtype(), grad_output.device());
 
     int64_t total = grad_input.numel();
+    // Empty grad: a zero-grid launch is rejected by HIP; return as-is.
+    if (total == 0) return grad_input;
     dim3 grid, block;
     compute_launch_config_conv3d(total, grid, block);
 
@@ -1414,6 +1531,8 @@ auto conv_transpose3d_backward_weight_hip(
                        grad_output.dtype(), grad_output.device());
 
     int64_t total = grad_weight.numel();
+    // Empty grad: a zero-grid launch is rejected by HIP; return as-is.
+    if (total == 0) return grad_weight;
     dim3 grid, block;
     compute_launch_config_conv3d(total, grid, block);
 

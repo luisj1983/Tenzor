@@ -156,6 +156,42 @@ __global__ void check_i64_overflow(const int64_t* __restrict__ src,
     }
 }
 
+/// Device kernel: flag any column index outside [0, ncols).
+__global__ void check_col_range(const int64_t* __restrict__ src, int64_t n,
+                                int64_t ncols, int* range_flag) {
+    int64_t i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) {
+        if (src[i] < 0 || src[i] >= ncols) {
+            atomicOr(range_flag, 1);
+        }
+    }
+}
+
+/// Validate that all column indices lie in [0, ncols). Throws on failure.
+static void verify_col_in_range(const int64_t* d_data, int64_t n, int64_t ncols,
+                                hipStream_t stream = nullptr) {
+    if (n == 0) return;
+    HipBuffer flag_buf(sizeof(int));
+    int* d_flag = flag_buf.as<int>();
+    HIP_CHECK_SPARSE(hipMemsetAsync(d_flag, 0, sizeof(int), stream));
+
+    int threads = 256;
+    int blocks = static_cast<int>((n + threads - 1) / threads);
+    hipLaunchKernelGGL(check_col_range, dim3(blocks), dim3(threads),
+                       0, stream, d_data, n, ncols, d_flag);
+    HIP_CHECK_SPARSE(hipGetLastError());
+
+    int h_flag = 0;
+    HIP_CHECK_SPARSE(hipMemcpyAsync(&h_flag, d_flag, sizeof(int),
+                                     hipMemcpyDeviceToHost, stream));
+    HIP_CHECK_SPARSE(hipStreamSynchronize(stream));
+
+    if (h_flag != 0) {
+        throw std::out_of_range(
+            "rocm_sparse: COO column index out of range [0, ncols)");
+    }
+}
+
 /// Check that all int64 indices fit in int32. Throws std::overflow_error on failure.
 static void verify_i64_fits_i32(const int64_t* d_data, int64_t n,
                                  hipStream_t stream = nullptr) {
@@ -225,6 +261,10 @@ SparseTensor ensure_csr_on_gpu(const SparseTensor& sparse) {
         int blocks_crow = static_cast<int>((nrows + 1 + threads - 1) / threads);
         cast_i32_to_i64<<<blocks_crow, threads>>>(crow_i32_buf.as<int32_t>(), crow_indices.data<int64_t>(), nrows + 1);
         HIP_CHECK_SPARSE(hipGetLastError());
+
+        // Validate column indices before handing them to rocSPARSE; an
+        // out-of-range column would index the dense operand out of bounds.
+        verify_col_in_range(col_indices_ptr, nnz, ncols);
 
         // Copy col indices
         Tensor col_idx = zeros(std::vector<int64_t>{nnz}, DType::Int64, Device::rocm());
@@ -1444,7 +1484,7 @@ __global__ void csr_spmv_kernel(
     const T* __restrict__ val_ptr,
     const T* __restrict__ x_ptr,
     T* __restrict__ y_ptr,
-    int64_t nrows)
+    int64_t nrows, int64_t ncols)
 {
     int64_t row = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
     if (row >= nrows) return;
@@ -1453,11 +1493,11 @@ __global__ void csr_spmv_kernel(
     int64_t row_start = crow_ptr[row];
     int64_t row_end = crow_ptr[row + 1];
     for (int64_t j = row_start; j < row_end; ++j) {
-        // x_ptr has length == the CSR column count (trusted contract: col index
-        // < ncols). Guard the lower bound here; a negative col index would be an
-        // out-of-bounds device read of x_ptr.
+        // x_ptr has length == the CSR column count (ncols). Guard both bounds:
+        // an out-of-range col index would be an out-of-bounds device read of
+        // x_ptr.
         int64_t k = col_ptr[j];
-        if (k < 0) continue;
+        if (k < 0 || k >= ncols) continue;
         sum += val_ptr[j] * x_ptr[k];
     }
     y_ptr[row] = sum;
@@ -1471,7 +1511,7 @@ __global__ void csr_spmm_kernel(
     const T* __restrict__ val_ptr,
     const T* __restrict__ b_ptr,
     T* __restrict__ c_ptr,
-    int64_t nrows, int64_t ncols_b)
+    int64_t nrows, int64_t ncols_b, int64_t nrows_b)
 {
     int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
     int64_t row = idx / ncols_b;
@@ -1484,9 +1524,9 @@ __global__ void csr_spmm_kernel(
     for (int64_t j = row_start; j < row_end; ++j) {
         // Guard against malformed/untrusted CSR col indices: an out-of-range
         // column would be an out-of-bounds device read of b_ptr. The CSR column
-        // count equals B's row count (ncols_b's matrix has nrows_b == ncols_a).
+        // count equals B's row count (nrows_b == ncols_a).
         int64_t k = col_ptr[j];
-        if (k < 0) continue;
+        if (k < 0 || k >= nrows_b) continue;
         sum += val_ptr[j] * b_ptr[k * ncols_b + col];
     }
     c_ptr[row * ncols_b + col] = sum;
@@ -1602,11 +1642,11 @@ Tensor rocm_spmm_kernel(const SparseTensor& sparse, const Tensor& dense) {
     if (dtype == DType::Float32) {
         csr_spmm_kernel<float><<<blocks, threads>>>(
             crow.data<int64_t>(), col.data<int64_t>(), vals.data<float>(),
-            dense_gpu.data<float>(), result.data<float>(), M, N);
+            dense_gpu.data<float>(), result.data<float>(), M, N, K);
     } else if (dtype == DType::Float64) {
         csr_spmm_kernel<double><<<blocks, threads>>>(
             crow.data<int64_t>(), col.data<int64_t>(), vals.data<double>(),
-            dense_gpu.data<double>(), result.data<double>(), M, N);
+            dense_gpu.data<double>(), result.data<double>(), M, N, K);
     } else {
         throw std::runtime_error("rocm_spmm: only Float32 and Float64 supported, got "
             + std::string(dtype_name(dtype)));
@@ -1687,11 +1727,11 @@ Tensor rocm_spmv_kernel(const SparseTensor& sparse, const Tensor& vec) {
     if (dtype == DType::Float32) {
         csr_spmv_kernel<float><<<blocks, threads>>>(
             crow.data<int64_t>(), col.data<int64_t>(), vals.data<float>(),
-            vec_gpu.data<float>(), result.data<float>(), M);
+            vec_gpu.data<float>(), result.data<float>(), M, K);
     } else if (dtype == DType::Float64) {
         csr_spmv_kernel<double><<<blocks, threads>>>(
             crow.data<int64_t>(), col.data<int64_t>(), vals.data<double>(),
-            vec_gpu.data<double>(), result.data<double>(), M);
+            vec_gpu.data<double>(), result.data<double>(), M, K);
     } else {
         throw std::runtime_error("rocm_spmv: only Float32 and Float64 supported, got "
             + std::string(dtype_name(dtype)));

@@ -518,11 +518,11 @@ static void cumsum_slice_cub(const T* d_in, T* d_out, int64_t n, cudaStream_t st
     void* d_temp = nullptr;
     size_t temp_bytes = 0;
     cub::DeviceScan::InclusiveSum(d_temp, temp_bytes, d_in, d_out,
-                                  static_cast<int>(n), stream);
+                                  n, stream);
     backend::CachedMemoryGuard temp_guard(temp_bytes);
     d_temp = temp_guard.get();
     cub::DeviceScan::InclusiveSum(d_temp, temp_bytes, d_in, d_out,
-                                  static_cast<int>(n), stream);
+                                  n, stream);
 }
 
 auto cumsum_kernel(const Tensor& input, int64_t dim, cudaStream_t stream) -> Tensor
@@ -643,11 +643,11 @@ static void cumprod_slice_cub(const T* d_in, T* d_out, int64_t n, cudaStream_t s
     void* d_temp = nullptr;
     size_t temp_bytes = 0;
     cub::DeviceScan::InclusiveScan(d_temp, temp_bytes, d_in, d_out,
-                                   MultOp(), static_cast<int>(n), stream);
+                                   MultOp(), n, stream);
     backend::CachedMemoryGuard temp_guard(temp_bytes);
     d_temp = temp_guard.get();
     cub::DeviceScan::InclusiveScan(d_temp, temp_bytes, d_in, d_out,
-                                   MultOp(), static_cast<int>(n), stream);
+                                   MultOp(), n, stream);
 }
 
 auto cumprod_kernel(const Tensor& input, int64_t dim, cudaStream_t stream) -> Tensor
@@ -814,12 +814,12 @@ static auto unique_thrust(const Tensor& input, bool sorted_output,
     size_t temp_bytes = 0;
     cub::DeviceRunLengthEncode::Encode(
         d_temp, temp_bytes, d_sorted, d_unique, d_counts, d_num_runs,
-        static_cast<int>(numel), stream);
+        numel, stream);
     backend::CachedMemoryGuard temp_guard(temp_bytes);
     d_temp = temp_guard.get();
     cub::DeviceRunLengthEncode::Encode(
         d_temp, temp_bytes, d_sorted, d_unique, d_counts, d_num_runs,
-        static_cast<int>(numel), stream);
+        numel, stream);
 
     // Get num_unique on host
     int64_t num_unique = 0;
@@ -852,11 +852,11 @@ static auto unique_thrust(const Tensor& input, bool sorted_output,
         void* d_scan_temp = nullptr;
         size_t scan_temp_bytes = 0;
         cub::DeviceScan::ExclusiveSum(d_scan_temp, scan_temp_bytes, d_counts, d_offsets,
-                                      static_cast<int>(num_unique), stream);
+                                      num_unique, stream);
         backend::CachedMemoryGuard scan_temp_guard(scan_temp_bytes);
         d_scan_temp = scan_temp_guard.get();
         cub::DeviceScan::ExclusiveSum(d_scan_temp, scan_temp_bytes, d_counts, d_offsets,
-                                      static_cast<int>(num_unique), stream);
+                                      num_unique, stream);
 
         // For each position in the sorted array, find which unique group it belongs to
         // using binary search (or simpler: iterate groups and fill)
@@ -1906,18 +1906,18 @@ auto histogram_kernel(const Tensor& input, int64_t bins,
             // CUB Min reduction
             size_t temp_min = 0;
             cub::DeviceReduce::Min(nullptr, temp_min, in_contig.data<T>(), d_min_max,
-                                   static_cast<int>(n), stream);
+                                   n, stream);
             backend::CachedMemoryGuard min_temp_guard(temp_min);
             cub::DeviceReduce::Min(min_temp_guard.get(), temp_min, in_contig.data<T>(), d_min_max,
-                                   static_cast<int>(n), stream);
+                                   n, stream);
 
             // CUB Max reduction
             size_t temp_max = 0;
             cub::DeviceReduce::Max(nullptr, temp_max, in_contig.data<T>(), d_min_max + 1,
-                                   static_cast<int>(n), stream);
+                                   n, stream);
             backend::CachedMemoryGuard max_temp_guard(temp_max);
             cub::DeviceReduce::Max(max_temp_guard.get(), temp_max, in_contig.data<T>(), d_min_max + 1,
-                                   static_cast<int>(n), stream);
+                                   n, stream);
 
             // Scalar readback (2 values) — unavoidable to compute bin_width on host
             T h_min_max[2];
@@ -2138,7 +2138,8 @@ __global__ void advanced_index_gather_kernel(
     T* __restrict__ dst,
     const int64_t* __restrict__ const* __restrict__ idx_ptrs,  // [num_indices] pointers
     AdvancedIndexMeta meta,
-    int64_t total_out
+    int64_t total_out,
+    int* error_flag
 ) {
     int64_t out_idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
     if (out_idx >= total_out) return;
@@ -2153,11 +2154,13 @@ __global__ void advanced_index_gather_kernel(
         if (meta.is_indexed[i]) {
             int64_t idx_val = idx_ptrs[i][bc];
             if (idx_val < 0) idx_val += meta.src_shape[i];
-            // Clamp to a valid range to preserve memory safety: an out-of-range
-            // or still-negative user index would otherwise compute an arbitrary
-            // linear offset and read out of bounds.
-            if (idx_val < 0) idx_val = 0;
-            else if (idx_val >= meta.src_shape[i]) idx_val = meta.src_shape[i] - 1;
+            // Record an out-of-range (post-wrap) index; the host wrapper surfaces
+            // std::out_of_range. The clamp below is retained only as a memory
+            // backstop so the access stays in bounds before the error is reported.
+            if (idx_val < 0 || idx_val >= meta.src_shape[i]) {
+                atomicExch(error_flag, 1);
+                idx_val = (idx_val < 0) ? 0 : (meta.src_shape[i] - 1);
+            }
             src_offset += idx_val * meta.src_strides[i];
         }
     }
@@ -2182,7 +2185,8 @@ __global__ void advanced_index_put_kernel(
     const T* __restrict__ values,
     const int64_t* __restrict__ const* __restrict__ idx_ptrs,
     AdvancedIndexMeta meta,
-    int64_t total_out
+    int64_t total_out,
+    int* error_flag
 ) {
     int64_t out_idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
     if (out_idx >= total_out) return;
@@ -2195,9 +2199,12 @@ __global__ void advanced_index_put_kernel(
         if (meta.is_indexed[i]) {
             int64_t idx_val = idx_ptrs[i][bc];
             if (idx_val < 0) idx_val += meta.src_shape[i];
-            // Clamp to a valid range to preserve memory safety (see gather).
-            if (idx_val < 0) idx_val = 0;
-            else if (idx_val >= meta.src_shape[i]) idx_val = meta.src_shape[i] - 1;
+            // Record an out-of-range (post-wrap) index; the host wrapper surfaces
+            // std::out_of_range. The clamp is a memory backstop only (see gather).
+            if (idx_val < 0 || idx_val >= meta.src_shape[i]) {
+                atomicExch(error_flag, 1);
+                idx_val = (idx_val < 0) ? 0 : (meta.src_shape[i] - 1);
+            }
             dst_offset += idx_val * meta.src_strides[i];
         }
     }
@@ -2331,6 +2338,10 @@ auto launch_advanced_index_gather(
                     ptrs_bytes,
                     cudaMemcpyHostToDevice, stream));
 
+    backend::CachedMemoryGuard error_guard(sizeof(int));
+    auto* error_flag = static_cast<int*>(error_guard.get());
+    TENZOR_CUDA_CHECK(cudaMemsetAsync(error_flag, 0, sizeof(int), stream));
+
     int threads = 256;
     int blocks = static_cast<int>((prep.total + threads - 1) / threads);
     // Use data_ptr() + reinterpret_cast for CUDA-native types (__half, __nv_bfloat16)
@@ -2340,13 +2351,21 @@ auto launch_advanced_index_gather(
         reinterpret_cast<T*>(result.data_ptr()),
         d_idx_ptrs,
         prep.meta,
-        prep.total);
+        prep.total,
+        error_flag);
     TENZOR_CUDA_CHECK(cudaGetLastError());
+
+    int host_error = 0;
+    TENZOR_CUDA_CHECK(cudaMemcpyAsync(&host_error, error_flag, sizeof(int),
+                                      cudaMemcpyDeviceToHost, stream));
     // Synchronise before freeing pinned source — release happens after the
     // copy has issued, but cudaFreeHost is host-blocking and requires the
     // buffer not be referenced by any in-flight async copy.
     TENZOR_CUDA_CHECK(cudaStreamSynchronize(stream));
     TENZOR_CUDA_CHECK(cudaFreeHost(pinned_host_ptrs));
+    if (host_error) {
+        throw std::out_of_range("advanced_index (gather): index out of range");
+    }
     return result;
 }
 
@@ -2383,6 +2402,10 @@ auto launch_advanced_index_put(
                     ptrs_bytes,
                     cudaMemcpyHostToDevice, stream));
 
+    backend::CachedMemoryGuard error_guard(sizeof(int));
+    auto* error_flag = static_cast<int*>(error_guard.get());
+    TENZOR_CUDA_CHECK(cudaMemsetAsync(error_flag, 0, sizeof(int), stream));
+
     int threads = 256;
     int blocks = static_cast<int>((prep.total + threads - 1) / threads);
     // Use data_ptr() + reinterpret_cast for CUDA-native types (__half, __nv_bfloat16)
@@ -2392,11 +2415,19 @@ auto launch_advanced_index_put(
         reinterpret_cast<const T*>(values_contig.data_ptr()),
         d_idx_ptrs,
         prep.meta,
-        prep.total);
+        prep.total,
+        error_flag);
     TENZOR_CUDA_CHECK(cudaGetLastError());
+
+    int host_error = 0;
+    TENZOR_CUDA_CHECK(cudaMemcpyAsync(&host_error, error_flag, sizeof(int),
+                                      cudaMemcpyDeviceToHost, stream));
     // audit V.19: synchronize before releasing the pinned staging buffer.
     TENZOR_CUDA_CHECK(cudaStreamSynchronize(stream));
     TENZOR_CUDA_CHECK(cudaFreeHost(pinned_host_ptrs));
+    if (host_error) {
+        throw std::out_of_range("advanced_index (put): index out of range");
+    }
     return result_contig;
 }
 

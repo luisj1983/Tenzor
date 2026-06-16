@@ -163,6 +163,23 @@ auto sum_kernel(const Tensor& input, int64_t dim, bool keepdim, sycl::queue& que
                 output = Tensor({}, DType::Int64, output.device());
                 int64_t* out_ptr = get_data_ptr<int64_t>(output);
                 queue.single_task([=]() { out_ptr[0] = 0; });
+            } else if (in_cont.dtype() == DType::Float16) {
+                // Additive identity 0; IEEE-754 half +0.0 bit pattern. The caching
+                // allocator does not zero memory, so write it explicitly.
+                uint16_t zero_bits = 0x0000;
+                queue.memcpy(get_data_ptr<sycl::half>(output), &zero_bits, sizeof(uint16_t)).wait();
+            } else if (in_cont.dtype() == DType::BFloat16) {
+                // Additive identity 0; bfloat16 +0.0 bit pattern.
+                uint16_t zero_bits = 0x0000;
+                queue.memcpy(get_data_ptr<uint16_t>(output), &zero_bits, sizeof(uint16_t)).wait();
+            } else if (in_cont.dtype() == DType::Complex64) {
+                float* out_ptr = get_data_ptr<float>(output);
+                float zero_pair[2] = {0.0f, 0.0f};
+                queue.memcpy(out_ptr, zero_pair, 2 * sizeof(float)).wait();
+            } else if (in_cont.dtype() == DType::Complex128) {
+                double* out_ptr = get_data_ptr<double>(output);
+                double zero_pair[2] = {0.0, 0.0};
+                queue.memcpy(out_ptr, zero_pair, 2 * sizeof(double)).wait();
             }
             return output;
         }
@@ -899,6 +916,13 @@ auto max_kernel(const Tensor& input_raw, int64_t dim, bool keepdim, sycl::queue&
         // Full reduction: max of all elements
         const int64_t total_size = input.numel();
 
+        // max has no identity element; PyTorch raises on an empty input. Without
+        // this guard the single_task loop never runs, leaving the in-kernel
+        // sentinel / uninitialized USM garbage in out_ptr[0].
+        if (total_size == 0) {
+            throw std::runtime_error("max: cannot reduce empty tensor");
+        }
+
         if (input.dtype() == DType::Float32) {
             const float* in_ptr = get_data_ptr<const float>(input);
             float* out_ptr = get_data_ptr<float>(output);
@@ -1125,6 +1149,13 @@ auto min_kernel(const Tensor& input_raw, int64_t dim, bool keepdim, sycl::queue&
     if (is_full_reduction) {
         // Full reduction: min of all elements
         const int64_t total_size = input.numel();
+
+        // min has no identity element; PyTorch raises on an empty input. Without
+        // this guard the single_task loop never runs, leaving the in-kernel
+        // sentinel / uninitialized USM garbage in out_ptr[0].
+        if (total_size == 0) {
+            throw std::runtime_error("min: cannot reduce empty tensor");
+        }
 
         if (input.dtype() == DType::Float32) {
             const float* in_ptr = get_data_ptr<const float>(input);
@@ -1548,6 +1579,13 @@ auto argmax_kernel(const Tensor& input_raw, int64_t dim, bool keepdim, sycl::que
             total_size *= s;
         }
 
+        // argmax has no identity element; PyTorch raises on a full reduction of an
+        // empty tensor. The two-phase device reduction would otherwise write an
+        // uninitialized index into out_ptr[0].
+        if (total_size == 0) {
+            throw std::runtime_error("argmax: cannot reduce empty tensor");
+        }
+
         // Full reduction without keepdim yields a scalar (shape {}),
         // matching the CPU backend and PyTorch conventions.
         std::vector<int64_t> out_shape = keepdim ? std::vector<int64_t>(shape.size(), 1) : std::vector<int64_t>{};
@@ -1725,6 +1763,13 @@ auto argmin_kernel(const Tensor& input_raw, int64_t dim, bool keepdim, sycl::que
         int64_t total_size = 1;
         for (auto s : shape) {
             total_size *= s;
+        }
+
+        // argmin has no identity element; PyTorch raises on a full reduction of an
+        // empty tensor. The two-phase device reduction would otherwise write an
+        // uninitialized index into out_ptr[0].
+        if (total_size == 0) {
+            throw std::runtime_error("argmin: cannot reduce empty tensor");
         }
 
         // Full reduction without keepdim yields a scalar (shape {}),

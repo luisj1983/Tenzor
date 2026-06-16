@@ -343,6 +343,9 @@ auto linalg_det_kernel(const Tensor& A, hipStream_t stream) -> Tensor {
     for (size_t i = 0; i + 2 < shape.size(); i++) out_shape.push_back(shape[i]);
 
     auto result = zeros(out_shape, A.dtype(), A.device());
+    // Empty batch: nothing to factorize and a zero-grid launch would be
+    // rejected by HIP; return the (empty) result as-is.
+    if (nbatch == 0) return result;
     auto handle = RocSOLVERHandlePool::get(stream);
 
     // Allocate pivot array on device (via caching allocator)
@@ -608,14 +611,18 @@ auto linalg_lu_kernel(const Tensor& A, hipStream_t stream)
     int64_t total = nbatch * n * n;
     int threads = 256;
     int blocks = static_cast<int>((total + threads - 1) / threads);
-    if (original_dtype == DType::Float32) {
-        extract_lu_kernel_hip<float><<<blocks, threads, 0, stream>>>(
-            packed_rm.data<float>(), L.data<float>(), U.data<float>(), n, nbatch);
-    } else {
-        extract_lu_kernel_hip<double><<<blocks, threads, 0, stream>>>(
-            packed_rm.data<double>(), L.data<double>(), U.data<double>(), n, nbatch);
+    // Skip the extract launch on an empty problem; a zero-grid launch would be
+    // rejected by HIP. L/U are already zero-initialized.
+    if (blocks > 0) {
+        if (original_dtype == DType::Float32) {
+            extract_lu_kernel_hip<float><<<blocks, threads, 0, stream>>>(
+                packed_rm.data<float>(), L.data<float>(), U.data<float>(), n, nbatch);
+        } else {
+            extract_lu_kernel_hip<double><<<blocks, threads, 0, stream>>>(
+                packed_rm.data<double>(), L.data<double>(), U.data<double>(), n, nbatch);
+        }
+        HIP_CHECK_LINALG(hipGetLastError());
     }
-    HIP_CHECK_LINALG(hipGetLastError());
 
     // Step 4: copy pivots (rocSOLVER returns 1-based rocblas_int) into Int32 tensor.
     // rocblas_int is typedef'd to int32_t, but cast explicitly for clarity.
@@ -1870,6 +1877,9 @@ auto linalg_eig_kernel(const Tensor& A, hipStream_t stream)
     // non-symmetric eigenvalues AND eigenvectors, and bit-for-bit the same
     // algorithm/output packing as the CUDA/OneAPI/Vulkan backends — so the
     // library returns identical eigenpairs regardless of backend.
+    // Empty batch: a zero-grid launch is rejected by HIP; the (empty) result
+    // tensors are already allocated, so return them as-is.
+    if (nbatch == 0) return {WR, WI, V};
     auto vbuf = zeros({nbatch, n}, A.dtype(), A.device());
     int eblock = 256;
     int egrid = static_cast<int>((nbatch + eblock - 1) / eblock);

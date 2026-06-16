@@ -20,7 +20,11 @@ void index_to_coords(uint linear_idx, uint ndims, out int coords[8]) {
     // We need the output shape which is shape permuted
     int out_shape[8];
     for (uint i = 0; i < ndims && i < 8u; i++) {
-        out_shape[i] = max(shape[perm[i]], 1);  // Prevent division by zero
+        // perm[] comes from a host SSBO and is used as an index into shape[];
+        // a corrupt/out-of-range value would read OOB. Clamp invalid entries to
+        // size 1 (the main() guard rejects ndims>8 before this runs).
+        uint p = uint(perm[i]);
+        out_shape[i] = (perm[i] >= 0 && p < ndims && p < 8u) ? max(shape[p], 1) : 1;
     }
 
     for (int i = int(ndims) - 1; i >= 0; i--) {
@@ -58,7 +62,15 @@ void main() {
     // Permute coordinates to get input coordinates
     int in_coords[8];
     for (uint i = 0; i < params.ndim; i++) {
-        in_coords[perm[i]] = out_coords[i];
+        // perm[i] indexes in_coords[8]; an out-of-range value would be an OOB
+        // write. A valid permutation has every perm[i] in [0, ndim) and ndim<=8
+        // (guarded above), so a violation means corrupt input — abort the
+        // invocation rather than scribble outside the array.
+        uint p = uint(perm[i]);
+        if (perm[i] < 0 || p >= params.ndim || p >= 8u) {
+            return;
+        }
+        in_coords[p] = out_coords[i];
     }
 
     // Convert input coordinates to linear index

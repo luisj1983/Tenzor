@@ -47,12 +47,19 @@ void main() {
             f_exp = uint(127 - 7 - e);
             f_mantissa = (m & 0x7u) << 20;
         }
-    } else if (exp == 0xFu && mantissa != 0u) {
-        // NaN
+    } else if (exp == 0xFu && mantissa == 0x7u) {
+        // NaN — only this exact bit pattern (exp=0xF AND mantissa=0x7) is
+        // reserved for NaN in NVIDIA's / OCP E4M3. All other mantissa values at
+        // exp=0xF are valid FINITE numbers (the max finite is 0xF/0x6 = 448).
+        // The encoder saturates overflow to exactly (exp=0xF, mant=0x6) = 448,
+        // so a `mantissa != 0` NaN test here would map every saturated value to
+        // NaN and break the round-trip (root cause of the FP8 E4M3 NaN failure).
         f_exp = 0xFFu;
-        f_mantissa = mantissa << 20;
+        f_mantissa = 0x700000u;
     } else {
-        // Normalized (including exp=15 mantissa=0 which is 448, not infinity)
+        // Normalized. exp=0xF with mantissa < 0x7 is legal finite — the general
+        // exp-rebias formula handles it (f_exp = 15-7+127 = 135, value
+        // 2^8 * (1 + mantissa/8) covers 256, 288, ..., 448 as mantissa walks 0..6).
         f_exp = exp - 7u + 127u;
         f_mantissa = mantissa << 20;
     }

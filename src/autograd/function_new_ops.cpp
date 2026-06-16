@@ -1889,17 +1889,29 @@ auto BesselY1Backward::forward(std::vector<Variable>) -> std::vector<Variable> {
 auto BesselY1Backward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> {
     require_saved_tensors(1);
     const auto& input = saved_tensors_[0];
+    // Y_1 is defined for x > 0; guard the 1/x division against x == 0 so the
+    // gradient is not a raw 0/0 -> NaN (mirrors BesselJ1Backward).
+    auto input_shape = std::vector<int64_t>(input.shape().begin(), input.shape().end());
     auto y0v = tenzor::bessel_y0(input);
     auto y1v = tenzor::bessel_y1(input);
-    auto deriv = sub(y0v, div(y1v, input));
+    auto eps = full(input_shape, detail::dtype_epsilon(input.dtype()), input.dtype(), input.device());
+    auto zero_t = zeros(input_shape, input.dtype(), input.device());
+    auto x_is_zero = eq(input, zero_t);
+    auto safe_x = where(x_is_zero, eps, input);
+    auto deriv = sub(y0v, div(y1v, safe_x));
     return {mul(grad_outputs[0], deriv)};
 }
 auto BesselY1Backward::backward_with_variables(std::vector<Variable> grad_outputs) -> std::vector<Variable> {
     require_saved_tensors(1);
     const auto& input = saved_tensors_[0];
+    auto input_shape = std::vector<int64_t>(input.shape().begin(), input.shape().end());
     auto y0v = tenzor::bessel_y0(input);
     auto y1v = tenzor::bessel_y1(input);
-    Variable deriv_var(sub(y0v, div(y1v, input)), false);
+    auto eps = full(input_shape, detail::dtype_epsilon(input.dtype()), input.dtype(), input.device());
+    auto zero_t = zeros(input_shape, input.dtype(), input.device());
+    auto x_is_zero = eq(input, zero_t);
+    auto safe_x = where(x_is_zero, eps, input);
+    Variable deriv_var(sub(y0v, div(y1v, safe_x)), false);
     return {grad_outputs[0] * deriv_var};
 }
 
@@ -1956,9 +1968,15 @@ auto BetaIncBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<
     auto log_deriv = add(add(mul(am1, log_x), mul(bm1, log_1mx)), log_inv_beta);
     auto deriv = tenzor::exp(log_deriv);
 
-    auto grad_a = zeros(a_shape, a.dtype(), a.device());
-    auto grad_b = zeros(a_shape, b.dtype(), b.device());
-    auto grad_x = mul(grad_outputs[0], deriv);
+    // a and b are non-differentiable here; emit zeros shaped to each operand
+    // (the prior code shaped grad_b with a's shape, which is wrong under
+    // broadcasting when a and b differ in shape).
+    auto grad_a = zeros_like(a);
+    auto grad_b = zeros_like(b);
+    // grad_x picks up the broadcast shape of (a, b, x) via deriv; reduce it
+    // back to the saved x shape so broadcasting is honoured.
+    auto grad_x_full = mul(grad_outputs[0], deriv);
+    auto grad_x = reduce_grad_for_broadcasting(grad_x_full, x_shape);
 
     std::vector<Tensor> out;
     out.push_back(grad_a);
@@ -2465,6 +2483,18 @@ auto AddmvBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Te
     const auto& mat = saved_tensors_[0];
     const auto& vec = saved_tensors_[1];
     const auto& grad = grad_outputs[0];
+
+    // addmv is contractually 2D-only: the forward (ops/math.cpp) requires
+    // mat to be 2D (M, K) and vec to be 1D (K,), so grad is 1D (M,). The
+    // axis-0/1 unsqueezes below are correct only under that contract — assert
+    // it explicitly rather than silently produce shape-incoherent grads if a
+    // batched tensor ever reaches here.
+    TENZOR_CHECK_SHAPE(mat.shape().size() == 2,
+        "AddmvBackward: mat must be 2D (M, K), got ndim=" +
+        std::to_string(mat.shape().size()));
+    TENZOR_CHECK_SHAPE(vec.shape().size() == 1,
+        "AddmvBackward: vec must be 1D (K,), got ndim=" +
+        std::to_string(vec.shape().size()));
 
     auto grad_input_unreduced = mul(grad, beta_);
     auto grad_input = reduce_grad_for_broadcasting(grad_input_unreduced, input_shape_input_);

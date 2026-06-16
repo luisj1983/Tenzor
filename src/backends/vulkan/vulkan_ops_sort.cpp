@@ -318,7 +318,7 @@ auto VulkanBackend::dispatchSort(const Tensor& input, int64_t dim, bool descendi
     }
 
     // Ensure input is contiguous on the GPU for D2D slice copies.
-    Tensor input_contig = input.is_contiguous() ? input : dispatchContiguous(input);
+    Tensor input_contig = (input.is_contiguous() && input.offset() == 0) ? input : dispatchContiguous(input);
 
     // Create a GPU-side pad template: fill once, then D2D copy each iteration.
     // Allocated once outside the loop to avoid repeated alloc/dealloc which

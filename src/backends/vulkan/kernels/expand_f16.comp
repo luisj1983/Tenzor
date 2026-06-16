@@ -70,6 +70,13 @@ void main() {
         return;
     }
 
+    // Reject rank >8: push-constant shape/stride arrays hold at most 8 dims;
+    // a higher rank would read the uninitialized tail and index OOB. The host
+    // (dispatchExpand) also rejects this.
+    if (params.output_ndim > 8u || params.input_ndim > 8u) {
+        return;
+    }
+
     // Process first element
     uint input_idx0 = computeInputIdx(out_idx0);
     float16_t val0 = readInput(input_idx0);

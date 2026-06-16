@@ -757,46 +757,116 @@ PYBIND11_MODULE(tenzor_core, m) {
     init.def("calculate_gain", &tenzor::nn::init::calculate_gain,
              "Calculate recommended gain for a nonlinearity",
              py::arg("nonlinearity"), py::arg("param") = 0.01);
-    init.def("xavier_uniform_", &tenzor::nn::init::xavier_uniform_,
-             py::arg("tensor"), py::arg("gain") = 1.0, py::return_value_policy::reference);
-    init.def("xavier_normal_", &tenzor::nn::init::xavier_normal_,
-             py::arg("tensor"), py::arg("gain") = 1.0, py::return_value_policy::reference);
-    init.def("kaiming_uniform_", &tenzor::nn::init::kaiming_uniform_,
-             py::arg("tensor"), py::arg("a") = 0.0,
+
+    // In-place init functions: PyTorch-style *identity* semantics.
+    //
+    // The C++ signatures are `Tensor& f(Tensor&, ...)` returning the SAME
+    // tensor reference they mutated. The previous bindings used
+    // `return_value_policy::reference` on the raw function pointer. That is
+    // unsound here: a Python ``tz.Variable`` / ``Tensor`` argument is
+    // *converted* to a temporary ``Tensor&`` (the Variable→Tensor implicit
+    // conversion yields a by-value handle), so the returned reference points
+    // at that temporary. pybind then wraps it in a fresh Python object that
+    // does NOT keep the original C++ tensor alive — a dangling-alias wrapper.
+    //
+    // Fix: take the Python object directly, resolve the underlying mutable
+    // ``Tensor&`` (a ``Variable`` exposes it via ``.tensor()``; a raw
+    // ``Tensor`` is used as-is — both share storage, so the in-place mutation
+    // is visible through the original handle), run the init, and return the
+    // *same* ``py::object`` the caller passed in. This matches PyTorch, where
+    // ``nn.init.xavier_uniform_(w) is w`` holds.
+    auto init_tensor_ref = [](py::object& obj) -> tenzor::Tensor& {
+        if (py::isinstance<tenzor::Variable>(obj)) {
+            return obj.cast<tenzor::Variable&>().tensor();
+        }
+        return obj.cast<tenzor::Tensor&>();
+    };
+
+    init.def("xavier_uniform_",
+             [init_tensor_ref](py::object tensor, double gain) -> py::object {
+                 tenzor::nn::init::xavier_uniform_(init_tensor_ref(tensor), gain);
+                 return tensor;
+             }, py::arg("tensor"), py::arg("gain") = 1.0);
+    init.def("xavier_normal_",
+             [init_tensor_ref](py::object tensor, double gain) -> py::object {
+                 tenzor::nn::init::xavier_normal_(init_tensor_ref(tensor), gain);
+                 return tensor;
+             }, py::arg("tensor"), py::arg("gain") = 1.0);
+    init.def("kaiming_uniform_",
+             [init_tensor_ref](py::object tensor, double a,
+                               tenzor::nn::init::FanMode mode,
+                               const std::string& nonlinearity) -> py::object {
+                 tenzor::nn::init::kaiming_uniform_(init_tensor_ref(tensor), a, mode, nonlinearity);
+                 return tensor;
+             }, py::arg("tensor"), py::arg("a") = 0.0,
              py::arg("mode") = tenzor::nn::init::FanMode::FanIn,
-             py::arg("nonlinearity") = "leaky_relu",
-             py::return_value_policy::reference);
-    init.def("kaiming_normal_", &tenzor::nn::init::kaiming_normal_,
-             py::arg("tensor"), py::arg("a") = 0.0,
+             py::arg("nonlinearity") = "leaky_relu");
+    init.def("kaiming_normal_",
+             [init_tensor_ref](py::object tensor, double a,
+                               tenzor::nn::init::FanMode mode,
+                               const std::string& nonlinearity) -> py::object {
+                 tenzor::nn::init::kaiming_normal_(init_tensor_ref(tensor), a, mode, nonlinearity);
+                 return tensor;
+             }, py::arg("tensor"), py::arg("a") = 0.0,
              py::arg("mode") = tenzor::nn::init::FanMode::FanIn,
-             py::arg("nonlinearity") = "leaky_relu",
-             py::return_value_policy::reference);
-    init.def("lecun_uniform_", &tenzor::nn::init::lecun_uniform_,
-             py::arg("tensor"), py::return_value_policy::reference);
-    init.def("lecun_normal_", &tenzor::nn::init::lecun_normal_,
-             py::arg("tensor"), py::return_value_policy::reference);
-    init.def("orthogonal_", &tenzor::nn::init::orthogonal_,
-             py::arg("tensor"), py::arg("gain") = 1.0, py::return_value_policy::reference);
-    init.def("uniform_", &tenzor::nn::init::uniform_,
-             py::arg("tensor"), py::arg("low") = 0.0, py::arg("high") = 1.0,
-             py::return_value_policy::reference);
-    init.def("normal_", &tenzor::nn::init::normal_,
-             py::arg("tensor"), py::arg("mean") = 0.0, py::arg("std") = 1.0,
-             py::return_value_policy::reference);
-    init.def("constant_", &tenzor::nn::init::constant_,
-             py::arg("tensor"), py::arg("value"), py::return_value_policy::reference);
-    init.def("zeros_", &tenzor::nn::init::zeros_,
-             py::arg("tensor"), py::return_value_policy::reference);
-    init.def("ones_", &tenzor::nn::init::ones_,
-             py::arg("tensor"), py::return_value_policy::reference);
-    init.def("trunc_normal_", &tenzor::nn::init::trunc_normal_,
-             py::arg("tensor"), py::arg("mean") = 0.0, py::arg("std") = 1.0,
-             py::arg("a") = -2.0, py::arg("b") = 2.0, py::return_value_policy::reference);
-    init.def("dirac_", &tenzor::nn::init::dirac_,
-             py::arg("tensor"), py::arg("groups") = 1, py::return_value_policy::reference);
-    init.def("sparse_", &tenzor::nn::init::sparse_,
-             py::arg("tensor"), py::arg("sparsity"), py::arg("std") = 0.01,
-             py::return_value_policy::reference);
+             py::arg("nonlinearity") = "leaky_relu");
+    init.def("lecun_uniform_",
+             [init_tensor_ref](py::object tensor) -> py::object {
+                 tenzor::nn::init::lecun_uniform_(init_tensor_ref(tensor));
+                 return tensor;
+             }, py::arg("tensor"));
+    init.def("lecun_normal_",
+             [init_tensor_ref](py::object tensor) -> py::object {
+                 tenzor::nn::init::lecun_normal_(init_tensor_ref(tensor));
+                 return tensor;
+             }, py::arg("tensor"));
+    init.def("orthogonal_",
+             [init_tensor_ref](py::object tensor, double gain) -> py::object {
+                 tenzor::nn::init::orthogonal_(init_tensor_ref(tensor), gain);
+                 return tensor;
+             }, py::arg("tensor"), py::arg("gain") = 1.0);
+    init.def("uniform_",
+             [init_tensor_ref](py::object tensor, double low, double high) -> py::object {
+                 tenzor::nn::init::uniform_(init_tensor_ref(tensor), low, high);
+                 return tensor;
+             }, py::arg("tensor"), py::arg("low") = 0.0, py::arg("high") = 1.0);
+    init.def("normal_",
+             [init_tensor_ref](py::object tensor, double mean, double std) -> py::object {
+                 tenzor::nn::init::normal_(init_tensor_ref(tensor), mean, std);
+                 return tensor;
+             }, py::arg("tensor"), py::arg("mean") = 0.0, py::arg("std") = 1.0);
+    init.def("constant_",
+             [init_tensor_ref](py::object tensor, double value) -> py::object {
+                 tenzor::nn::init::constant_(init_tensor_ref(tensor), value);
+                 return tensor;
+             }, py::arg("tensor"), py::arg("value"));
+    init.def("zeros_",
+             [init_tensor_ref](py::object tensor) -> py::object {
+                 tenzor::nn::init::zeros_(init_tensor_ref(tensor));
+                 return tensor;
+             }, py::arg("tensor"));
+    init.def("ones_",
+             [init_tensor_ref](py::object tensor) -> py::object {
+                 tenzor::nn::init::ones_(init_tensor_ref(tensor));
+                 return tensor;
+             }, py::arg("tensor"));
+    init.def("trunc_normal_",
+             [init_tensor_ref](py::object tensor, double mean, double std,
+                               double a, double b) -> py::object {
+                 tenzor::nn::init::trunc_normal_(init_tensor_ref(tensor), mean, std, a, b);
+                 return tensor;
+             }, py::arg("tensor"), py::arg("mean") = 0.0, py::arg("std") = 1.0,
+             py::arg("a") = -2.0, py::arg("b") = 2.0);
+    init.def("dirac_",
+             [init_tensor_ref](py::object tensor, int64_t groups) -> py::object {
+                 tenzor::nn::init::dirac_(init_tensor_ref(tensor), groups);
+                 return tensor;
+             }, py::arg("tensor"), py::arg("groups") = 1);
+    init.def("sparse_",
+             [init_tensor_ref](py::object tensor, double sparsity, double std) -> py::object {
+                 tenzor::nn::init::sparse_(init_tensor_ref(tensor), sparsity, std);
+                 return tensor;
+             }, py::arg("tensor"), py::arg("sparsity"), py::arg("std") = 0.01);
 
     // Data loading utilities
     auto data_mod = m.def_submodule("data", "Data loading and dataset utilities");

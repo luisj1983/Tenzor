@@ -122,6 +122,15 @@ set_source_files_properties(kernels/math.hip.cpp
     PROPERTIES COMPILE_FLAGS "-fno-finite-math-only"
 )
 
+# activations.hip.cpp (softmax exp) and fused_ops.hip.cpp (RMSNorm rsqrt) feed
+# attention/transformer/HRM forward. -ffast-math substitutes ~1e-3-relative
+# approximate transcendentals, which makes these backends diverge ~3e-3 from the
+# precise CPU/CUDA reference (cross-backend parity failure). Compile them with
+# precise math so softmax/normalization match the reference.
+set_source_files_properties(kernels/activations.hip.cpp kernels/fused_ops.hip.cpp
+    PROPERTIES COMPILE_FLAGS "-fno-fast-math"
+)
+
 # Create HIP kernels library (static, internal use only)
 add_library(tenzor_rocm_kernels STATIC ${ROCM_HIP_SOURCES})
 

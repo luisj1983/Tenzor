@@ -18,13 +18,17 @@ env:
   CMAKE_GENERATOR: Ninja
 
   # GPU TESTING NOTE:
-  # GPU backends (CUDA, ROCm, Vulkan, OneAPI) are not tested in CI
-  # because GitHub-hosted runners don't have GPU hardware.
-  # To test GPU backends locally:
-  #   cd build && ninja && ctest -R "cuda|vulkan|rocm|oneapi" --output-on-failure
-  # For self-hosted GPU runners, add a separate job with:
-  #   runs-on: [self-hosted, gpu]
-  # and enable the corresponding CMake backend flags.
+  # GPU backends (CUDA, ROCm, Vulkan, OneAPI) are gated on a SELF-HOSTED
+  # runner (labels: self-hosted, linux, gpu) via two jobs:
+  #   * gpu-smoke  — fast CUDA+Vulkan sanity, every PR (~30 min)
+  #   * gpu-parity — cross-backend parity across CUDA+ROCm+Vulkan+OneAPI,
+  #                  every PR (fast tier) + full nightly sweep + perf gate.
+  # GitHub-hosted runners have no GPU, so those jobs stay pending until the
+  # self-hosted runner is registered (Settings > Actions > Runners). See
+  # CONTRIBUTING.md "Required status checks & branch protection" before
+  # marking the GPU checks as required.
+  # Local full matrix: scripts/test_all_backends.sh
+  # Vulkan-only software path (GitHub-hosted, lavapipe): vulkan-software job.
 
 jobs:
   # Tier 1: Fast smoke tests (~5 min)
@@ -235,9 +239,19 @@ jobs:
             --timeout 300
         timeout-minutes: 20
 
-  # Tier 1.75: GPU tests on self-hosted runner (when available)
-  gpu-tests:
-    name: GPU Backend Tests
+  # Tier 1.75: GPU SMOKE — fast per-PR GPU sanity on the self-hosted runner.
+  #
+  # REQUIRES a registered self-hosted runner with labels
+  # `self-hosted, linux, gpu` (Settings > Actions > Runners). This is the
+  # quick tier: build CUDA+Vulkan and run the CUDA/Vulkan-tagged tests so an
+  # obviously-broken GPU backend fails within ~30 min instead of waiting for
+  # the full parity sweep (gpu-parity).
+  #
+  # NOTE: this used to share the `gpu-tests` job key with the full parity job
+  # below — a YAML duplicate-key collision where one silently shadowed the
+  # other. They are now distinct jobs (gpu-smoke + gpu-parity) so both run.
+  gpu-smoke:
+    name: GPU Smoke (self-hosted)
     runs-on: [self-hosted, gpu, linux]
     needs: build-and-smoke
     if: github.event_name == 'pull_request'
@@ -502,6 +516,13 @@ jobs:
           ninja -C build
 
       - name: Run ${{ matrix.shard }} tests
+        env:
+          # For the backend_parity shard (CPU-only here): have the parity
+          # harness tally how many REAL recorded-golden comparisons ran, so
+          # the next step can assert a coverage floor instead of trusting a
+          # green run that may have silently degraded to zero comparisons
+          # (e.g. goldens never recorded / input generator drifted).
+          TENZOR_GOLDEN_COVERAGE_REPORT: ${{ github.workspace }}/build/golden_coverage.txt
         run: |
           cd build
           ctest --output-on-failure -j$(nproc) \
@@ -509,6 +530,38 @@ jobs:
             -E "cuda|vulkan|oneapi|rocm" \
             --timeout 300
         timeout-minutes: 30
+
+      # Coverage floor: fail the backend_parity shard if too few real
+      # golden comparisons actually executed. The parity harness writes a
+      # running tally to $TENZOR_GOLDEN_COVERAGE_REPORT (one file per test
+      # binary, last-writer-wins per binary); we sum all such files. A floor
+      # of 0 here would defeat the purpose, so we require a meaningful count.
+      #
+      # FLOOR is intentionally conservative — bump it as goldens are
+      # recorded (see scripts/test_all_backends.sh --record-goldens). If this
+      # fails with "0 comparisons", the committed goldens in
+      # tests/backend_parity/golden/ are missing or stale: regenerate them on
+      # a multi-backend host.
+      - name: Assert parity golden-coverage floor
+        if: matrix.shard == 'backend_parity'
+        run: |
+          FLOOR=25
+          total=0
+          shopt -s nullglob
+          # Harness writes one file per test process: golden_coverage.txt.<pid>
+          for f in build/golden_coverage.txt.*; do
+            n=$(tr -dc '0-9' < "$f" 2>/dev/null || echo 0)
+            n=${n:-0}
+            echo "  $f: $n comparisons"
+            total=$((total + n))
+          done
+          echo "Total recorded-golden parity comparisons: $total (floor: $FLOOR)"
+          if [ "$total" -lt "$FLOOR" ]; then
+            echo "::error::Only $total golden parity comparisons ran (< $FLOOR floor)."
+            echo "::error::Committed goldens in tests/backend_parity/golden/ are missing or stale."
+            echo "::error::Regenerate on a multi-backend host: scripts/test_all_backends.sh --record-goldens"
+            exit 1
+          fi
 
       - name: Collect coverage
         if: success() || failure()
@@ -600,20 +653,25 @@ jobs:
         run: bash scripts/ci_benchmark.sh
         timeout-minutes: 60
 
-      - name: Download previous benchmark results
-        id: previous
-        uses: actions/download-artifact@v4
-        with:
-          name: benchmark-results
-          path: previous_benchmark_results
-        continue-on-error: true
-
-      - name: Compare with previous run
-        if: steps.previous.outcome == 'success'
+      # Compare against the COMMITTED, version-controlled baseline for this
+      # runner host (benchmarks/baselines/<host>.json). Unlike the old
+      # ephemeral-artifact flow, this is reproducible and reviewable in the
+      # PR diff. compare_benchmarks.py exits non-zero on a >7% regression
+      # (default FAILURE_THRESHOLD) — and we DO NOT swallow that exit code,
+      # so the benchmark job now FAILS on regression. To refresh the floor,
+      # open a PR updating the baseline file (see benchmarks/baselines/README.md).
+      - name: Compare against committed baseline
+        id: bench_compare
         run: |
+          HOST="ubuntu-24.04"  # matches runs-on for this job
+          BASELINE="benchmarks/baselines/${HOST}.json"
+          if [ ! -f "$BASELINE" ]; then
+            echo "::warning::No committed baseline at $BASELINE — recording one is a follow-up."
+            echo "::warning::Seed it via: cp build/benchmark_results/all.json $BASELINE (in a PR)."
+            exit 0
+          fi
           python3 scripts/compare_benchmarks.py \
-            --threshold 10 \
-            previous_benchmark_results/all.json \
+            "$BASELINE" \
             build/benchmark_results/all.json \
             | tee benchmark_comparison.md
 
@@ -626,7 +684,7 @@ jobs:
           retention-days: 90
 
       - name: Upload comparison report
-        if: steps.previous.outcome == 'success'
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: benchmark-comparison
@@ -752,32 +810,45 @@ jobs:
         run: mypy python/tenzor/ --ignore-missing-imports
 
   # =========================================================================
-  # GPU Tests: full backend parity on a self-hosted runner. Label-gated so
-  # the runner only burns on PRs that opt in. Register a runner with
-  # `self-hosted, linux, gpu` labels via the repo Settings > Actions >
-  # Runners UI before enabling. Per CLAUDE.md testing constraints:
-  # always -j1, never parallelize ROCm tests across shells, keep scopes
-  # tight instead of running the full 15+ hour suite.
+  # GPU PARITY: cross-backend parity on a self-hosted runner. This is a
+  # GATING PR CHECK — it runs on EVERY pull_request (no opt-in label) and on
+  # main pushes, so cross-backend divergence cannot merge. The full nightly
+  # sweep runs on schedule.
+  #
+  # REQUIRES a registered self-hosted runner with labels
+  # `self-hosted, linux, gpu` (repo Settings > Actions > Runners). That
+  # machine must have CUDA + ROCm + Vulkan + OneAPI toolchains installed —
+  # this job builds all four so parity is checked across the full matrix
+  # (the committed goldens / per-backend numbers assume all are present).
+  #
+  # Per CLAUDE.md testing constraints: always -j1 (the AMD/ROCm driver is
+  # fragile under parallel test processes), and keep the PR tier scoped to a
+  # fast subset instead of the full 15+ hour suite. TENZOR_REQUIRE_MULTI_BACKEND=1
+  # turns silent "only one backend" skips into hard failures.
+  #
+  # To exclude a known-bad backend from a single run without code changes,
+  # set TENZOR_SKIP_BACKENDS=cuda,rocm (honored by the parity harness).
+  #
+  # NOTE: previously shared the `gpu-tests` job key with the smoke job above —
+  # a YAML duplicate-key collision. Now a distinct `gpu-parity` job.
   # =========================================================================
-  gpu-tests:
+  gpu-parity:
     name: GPU Backend Parity (self-hosted)
     runs-on: [self-hosted, linux, gpu]
     needs: build-and-smoke
-    if: |
-      github.event_name == 'pull_request' &&
-      contains(github.event.pull_request.labels.*.name, 'gpu-ci')
-    timeout-minutes: 120
+    if: github.event_name == 'pull_request' || github.event_name == 'schedule' || github.ref == 'refs/heads/main'
+    timeout-minutes: 240
     steps:
       - uses: actions/checkout@v4
 
-      - name: Configure with CUDA + ROCm backends
+      - name: Configure with CUDA + ROCm + Vulkan + OneAPI backends
         run: |
           cmake -B build -G Ninja \
             -DCMAKE_BUILD_TYPE=Release \
             -DTENZOR_BUILD_CUDA=ON \
             -DTENZOR_BUILD_ROCM=ON \
-            -DTENZOR_BUILD_VULKAN=OFF \
-            -DTENZOR_BUILD_ONEAPI=OFF \
+            -DTENZOR_BUILD_VULKAN=ON \
+            -DTENZOR_BUILD_ONEAPI=ON \
             -DTENZOR_BUILD_PYTHON=OFF \
             -DTENZOR_BUILD_TESTS=ON \
             -DTENZOR_BUILD_BENCHMARKS=OFF \
@@ -790,6 +861,35 @@ jobs:
         working-directory: build
         run: ctest -R "^test_(dtype_promotion|alias_detection|mutation_version|dispatch_interceptor_stack|view_tracking)$" --output-on-failure -j1
 
+      # ---- PR tier: fast cross-backend parity subset (gating) -------------
+      # Scoped to the high-signal parity labels. -j1 per ROCm fragility.
+      - name: Cross-backend parity (PR fast tier)
+        if: github.event_name == 'pull_request'
+        working-directory: build
+        env:
+          TENZOR_REQUIRE_MULTI_BACKEND: '1'
+        run: |
+          # --repeat until-pass:3 reruns ONLY a failed test up to 3x and passes
+          # if any attempt succeeds. This tolerates rare real-GPU transients
+          # (driver/ECC/thermal one-offs) WITHOUT masking regressions: a genuine
+          # divergence fails all 3 attempts and blocks the merge. Per-op
+          # tolerances are independently measured (not loosened) — e.g. conv3d
+          # GPU-vs-CPU max diff ~2.4e-6 over 40 runs vs a 1e-4 bound (240x
+          # margin); MFCC ~2.7e-5 vs 1e-2 (375x). So a failure here is a true
+          # regression or a rare hardware transient, and retry distinguishes them.
+          ctest -L backend_parity \
+            -R "operation|nn|gradient|stride|dtype|index|conv|norm|reduction" \
+            -j1 --output-on-failure --timeout 600 --repeat until-pass:3
+
+      # ---- Nightly / main tier: full parity sweep -------------------------
+      - name: Cross-backend parity (full sweep)
+        if: github.event_name == 'schedule' || github.ref == 'refs/heads/main'
+        working-directory: build
+        env:
+          TENZOR_REQUIRE_MULTI_BACKEND: '1'
+        run: |
+          ctest -L backend_parity -j1 --output-on-failure --timeout 900 --repeat until-pass:3
+
       - name: Run CUDA backend tests
         working-directory: build
         env:
@@ -801,6 +901,21 @@ jobs:
         env:
           TENZOR_REQUIRE_MULTI_BACKEND: '1'
         run: ctest -R "rocm|Rocm|hip|Hip" --output-on-failure -j1
+
+      # ---- Performance regression gate (enforced on the self-hosted host) -
+      # The host has a committed baseline entry in
+      # tests/backend_parity/baselines/perf_baseline.json, so enforcement
+      # engages. TENZOR_PERF_ENFORCE=1 is belt-and-suspenders.
+      - name: Performance regression check
+        if: github.event_name == 'schedule' || github.ref == 'refs/heads/main'
+        working-directory: build
+        env:
+          TENZOR_PERF_ENFORCE: '1'
+        run: |
+          ctest -R "BaselineRegressionCheck" -j1 --output-on-failure --timeout 900 \
+            || ./bin/test_performance_regression \
+                 --gtest_filter='*BaselineRegressionCheck*' \
+                 --gtest_also_run_disabled_tests
 
   # =========================================================================
   # GPU Compile Check: Verify CUDA backend compiles (no GPU needed)

@@ -16,6 +16,7 @@
 #include <tenzor/io/image.hpp>
 
 #include <tenzor/tenzor.hpp>
+#include <tenzor/utils/error.hpp>  // tenzor::RuntimeError (Variable __array__/__dlpack__ guards)
 #include <tenzor/autograd/ops.hpp>
 #include <tenzor/autograd/anomaly_mode.hpp>
 #include <tenzor/autograd/checkpoint.hpp>
@@ -51,6 +52,42 @@ namespace py = pybind11;
 namespace tenzor::python {
 
 namespace {
+
+// CPU-only-build diagnostic. When a GPU device is actually *used* (tensor
+// transfer / creation) but the backend .so was never built or is unavailable,
+// raise a clear, actionable error naming the exact rebuild flag instead of an
+// opaque "Backend not available". CPU and unknown/future device types are
+// left to downstream dispatch.
+inline void require_backend_for_device(const tenzor::Device& dev) {
+    const char* backend_name = nullptr;
+    const char* rebuild_flag = nullptr;
+    switch (dev.type) {
+        case tenzor::Device::Type::CPU:
+            return;
+        case tenzor::Device::Type::CUDA:
+            backend_name = "cuda";   rebuild_flag = "TENZOR_BUILD_CUDA";   break;
+        case tenzor::Device::Type::ROCm:
+            backend_name = "rocm";   rebuild_flag = "TENZOR_BUILD_ROCM";   break;
+        case tenzor::Device::Type::OneAPI:
+            backend_name = "oneapi"; rebuild_flag = "TENZOR_BUILD_ONEAPI"; break;
+        case tenzor::Device::Type::Vulkan:
+            backend_name = "vulkan"; rebuild_flag = "TENZOR_BUILD_VULKAN"; break;
+        default:
+            return;
+    }
+    auto& loader = tenzor::backend_registry();
+    auto* be = loader.get_backend(backend_name);
+    if (be == nullptr || !be->is_available()) {
+        throw tenzor::DeviceException(
+            std::string("Requested device '") + dev.to_string() +
+            "' but the '" + backend_name + "' backend is not available in this "
+            "build. If this is a CPU-only build, rebuild with the GPU backend "
+            "enabled, e.g. CMAKE_ARGS=\"-D" + rebuild_flag +
+            "=ON\" pip install . (or pass -D" + rebuild_flag +
+            "=ON to cmake). If the backend was built, the device or driver may "
+            "be missing/unavailable at runtime.");
+    }
+}
 
 // ----------------------------------------------------------------------------
 // Audit Q.14: Variable.__mod__ / __floordiv__ stop-gradient Function nodes.
@@ -647,6 +684,12 @@ void register_core(py::module_& m) {
         // Paired with py::implicitly_convertible below so every pybind
         // function that takes `const Device&` can be called with a Python
         // string transparently — matches PyTorch's Python API ergonomics.
+        //
+        // NOTE: construction does NOT check backend availability (mirrors
+        // PyTorch's ``torch.device('cuda')``, which is legal even with no
+        // GPU). The CPU-only-build diagnostic with the rebuild flag is raised
+        // when the device is actually *used* — see ``_require_backend`` below
+        // and the per-backend availability checks (e.g. PyEvent ctor).
         .def(py::init([](const std::string& s) {
             return tenzor::Device::from_string(s);
         }), py::arg("spec"))
@@ -1029,6 +1072,9 @@ Returns:
                         "Tensor.to: unexpected keyword argument '" + key +
                         "' (accepted: device, dtype, copy)");
                 }
+            }
+            if (target_device.has_value()) {
+                require_backend_for_device(*target_device);
             }
             tenzor::Tensor result;
             {
@@ -1502,6 +1548,20 @@ Returns:
                 //   honour ``False`` by exporting the underlying storage
                 //   directly (no copy). ``None`` (default) means "copy only
                 //   if needed", which equals "no copy" for our purposes.
+                //
+                //   READ-ONLY SAFETY: a DLPack export is always *writable* —
+                //   the consumer may write through the exported buffer. This is
+                //   safe because no Tensor reaching this code can alias
+                //   immutable host memory: the only Python-boundary path that
+                //   would wrap external memory zero-copy is
+                //   ``numpy_to_tensor`` / ``from_numpy``, and that path
+                //   explicitly rejects read-only NumPy arrays in
+                //   ``can_zero_copy_numpy_to_tensor`` (numpy_interop.cpp ~301)
+                //   and forces a private copy instead. Tenzor's own storage is
+                //   always owned and mutable, so there is no read-only flag to
+                //   propagate here. If a future code path ever wraps borrowed
+                //   read-only memory, it must force ``copy=True`` semantics on
+                //   export to preserve this invariant.
                 //
                 // ``max_version`` — highest DLPack protocol version the
                 //   consumer supports. We always emit the legacy v0.7
@@ -2252,9 +2312,10 @@ Returns:
              py::call_guard<py::gil_scoped_release>())
         // Device transfer with overloads
         .def("cuda", [](const tenzor::Tensor& t, int32_t device_id) {
+             require_backend_for_device(tenzor::Device::cuda(device_id));
+             py::gil_scoped_release release;
              return t.cuda(device_id);
-             }, py::arg("device_id")=0, "Move tensor to CUDA device",
-             py::call_guard<py::gil_scoped_release>())
+             }, py::arg("device_id")=0, "Move tensor to CUDA device")
         .def("cpu", [](const tenzor::Tensor& t) {
              return t.cpu();
              }, "Move tensor to CPU",
@@ -4820,14 +4881,16 @@ Returns:
         // Variable(tensor().to(device), ...) would sever grad_fn). Accepts
         // Device or string ("cuda:0") via implicitly_convertible.
         .def("to", [](const tenzor::Variable& self, tenzor::Device device) {
+            require_backend_for_device(device);
+            py::gil_scoped_release release;
             return tenzor::to_device(self, device);
         }, py::arg("device"),
-           py::call_guard<py::gil_scoped_release>(),
            "Move to device (autograd-aware); accepts Device or string like \"cuda:0\"")
         .def("cuda", [](const tenzor::Variable& self, int32_t index) {
+            require_backend_for_device(tenzor::Device::cuda(index));
+            py::gil_scoped_release release;
             return tenzor::to_device(self, tenzor::Device::cuda(index));
         }, py::arg("index") = 0,
-           py::call_guard<py::gil_scoped_release>(),
            "Move to CUDA device (autograd-aware)")
         .def("cpu", [](const tenzor::Variable& self) {
             return tenzor::to_device(self, tenzor::Device::cpu());
@@ -5682,23 +5745,35 @@ Returns:
         .def("__array__", [](const tenzor::Variable& self,
                              py::object dtype,
                              py::object copy) -> py::object {
-            PyErr_WarnEx(PyExc_UserWarning,
-                "Implicit detach of Variable for array/dlpack export — "
-                "gradients will not flow through this conversion.", 1);
+            // PyTorch contract: exporting a requires_grad tensor to NumPy /
+            // DLPack must NOT silently detach. Raise unless the user has
+            // explicitly opted out of autograd (inside no_grad / inference_mode)
+            // or called .detach() first.
+            if (self.requires_grad() && tenzor::is_grad_enabled()) {
+                throw tenzor::RuntimeError(
+                    "Can't call __array__() on a Variable that requires grad. "
+                    "Use var.detach().numpy() instead, or wrap the call in "
+                    "tz.no_grad() / tz.inference_mode() if you intend to leave "
+                    "the autograd graph.");
+            }
             auto& t = self.tensor();
             py::object py_t = py::cast(&t, py::return_value_policy::reference);
             return py_t.attr("__array__")(dtype, copy);
         }, py::arg("dtype") = py::none(), py::arg("copy") = py::none(),
-           "NumPy __array__ protocol on Variable. Implicitly detaches from "
-           "autograd graph (UserWarning).")
+           "NumPy __array__ protocol on Variable. Raises if the Variable "
+           "requires grad (call .detach() or use no_grad/inference_mode).")
         .def("__dlpack__", [](const tenzor::Variable& self,
                               py::object stream,
                               py::object max_version,
                               py::object dl_device,
                               py::object copy) -> py::object {
-            PyErr_WarnEx(PyExc_UserWarning,
-                "Implicit detach of Variable for array/dlpack export — "
-                "gradients will not flow through this conversion.", 1);
+            if (self.requires_grad() && tenzor::is_grad_enabled()) {
+                throw tenzor::RuntimeError(
+                    "Can't export a Variable that requires grad via DLPack. "
+                    "Use var.detach().__dlpack__() instead, or wrap the call in "
+                    "tz.no_grad() / tz.inference_mode() if you intend to leave "
+                    "the autograd graph.");
+            }
             auto& t = self.tensor();
             py::object py_t = py::cast(&t, py::return_value_policy::reference);
             return py_t.attr("__dlpack__")(
@@ -5710,17 +5785,17 @@ Returns:
            py::arg("max_version") = py::none(),
            py::arg("dl_device") = py::none(),
            py::arg("copy") = py::none(),
-           "DLPack producer hook on Variable. Implicitly detaches from "
-           "autograd graph (UserWarning).")
+           "DLPack producer hook on Variable. Raises if the Variable requires "
+           "grad (call .detach() or use no_grad/inference_mode).")
         .def("__dlpack_device__", [](const tenzor::Variable& self) -> py::object {
-            PyErr_WarnEx(PyExc_UserWarning,
-                "Implicit detach of Variable for array/dlpack export — "
-                "gradients will not flow through this conversion.", 1);
+            // __dlpack_device__ is pure metadata (device type + index) and
+            // never exposes the data buffer, so it is safe to answer even for
+            // a requires_grad Variable — the consumer pairs it with
+            // __dlpack__(), which performs the requires_grad guard above.
             auto& t = self.tensor();
             py::object py_t = py::cast(&t, py::return_value_policy::reference);
             return py_t.attr("__dlpack_device__")();
-        }, "DLPack device hook on Variable. Implicitly detaches from "
-           "autograd graph (UserWarning).")
+        }, "DLPack device hook on Variable (metadata only; no data export).")
         // Pickle support for model saving/loading
         .def(py::pickle(
             // __getstate__: serialize to (shape, dtype_int, device_str, requires_grad, bytes)

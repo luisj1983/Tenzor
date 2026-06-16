@@ -1497,20 +1497,20 @@ auto batchnorm2d_mean_var(const Tensor& input,
                           input.data<double>(), mean.data<double>(), variance.data<double>(), N, C, H, W);
         HIP_CHECK(hipGetLastError());
     } else if (input.dtype() == DType::Float16) {
-        // For Float16, use __half type
-        int shared_mem_size = (BATCHNORM_BLOCK_SIZE / MIN_WAVEFRONT_SIZE) * sizeof(__half);
-        hipLaunchKernelGGL(batchnorm_mean_kernel<__half>, dim3(C), dim3(BATCHNORM_BLOCK_SIZE),
-                          shared_mem_size, stream,
-                          reinterpret_cast<const __half*>(input.data<Float16>()),
-                          reinterpret_cast<__half*>(mean.data<Float16>()), N, C, H, W);
-        HIP_CHECK(hipGetLastError());
-
-        hipLaunchKernelGGL(batchnorm_variance_kernel<__half>, dim3(C), dim3(BATCHNORM_BLOCK_SIZE),
-                          shared_mem_size, stream,
-                          reinterpret_cast<const __half*>(input.data<Float16>()),
-                          reinterpret_cast<__half*>(mean.data<Float16>()),
-                          reinterpret_cast<__half*>(variance.data<Float16>()), N, C, H, W);
-        HIP_CHECK(hipGetLastError());
+        // Accumulating mean/variance in __half loses precision over many
+        // elements. Widen to Float32, compute, narrow back — mirrors the
+        // BFloat16 branch below.
+        auto input_f32 = input.to(DType::Float32);
+        Tensor mean_f32({mean.shape()[0]}, DType::Float32, mean.device());
+        Tensor var_f32({variance.shape()[0]}, DType::Float32, variance.device());
+        batchnorm2d_mean_var(input_f32, mean_f32, var_f32, stream);
+        // Copy results back to Float16
+        auto mean_f16 = mean_f32.to(DType::Float16);
+        auto var_f16 = var_f32.to(DType::Float16);
+        HIP_CHECK(hipMemcpyAsync(mean.data_ptr(), mean_f16.data_ptr(),
+            mean.numel() * dtype_size(DType::Float16), hipMemcpyDeviceToDevice, stream));
+        HIP_CHECK(hipMemcpyAsync(variance.data_ptr(), var_f16.data_ptr(),
+            variance.numel() * dtype_size(DType::Float16), hipMemcpyDeviceToDevice, stream));
     } else if (input.dtype() == DType::BFloat16) {
         auto input_f32 = input.to(DType::Float32);
         Tensor mean_f32({mean.shape()[0]}, DType::Float32, mean.device());

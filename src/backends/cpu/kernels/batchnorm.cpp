@@ -107,17 +107,21 @@ static void batchnorm_mean_var_simd_f32(
         _mm256_store_ps(lane_means, vmean);
         _mm256_store_ps(lane_m2s, vm2);
 
-        float combined_mean = lane_means[0];
-        float combined_m2 = lane_m2s[0];
-        float combined_n = static_cast<float>(lane_count);
+        // The horizontal merge and the final division run once per channel, so
+        // accumulate them in double: float combined_n would round once the
+        // per-channel element count exceeds 2^24 and float division of the
+        // population variance would diverge from the scalar/double path.
+        double combined_mean = lane_means[0];
+        double combined_m2 = lane_m2s[0];
+        double combined_n = static_cast<double>(lane_count);
 
         for (int lane = 1; lane < 8; lane++) {
-            float n_b = static_cast<float>(lane_count);
-            float total_n = combined_n + n_b;
-            if (total_n == 0.0f) continue;
-            float delta = lane_means[lane] - combined_mean;
-            combined_mean = (combined_mean * combined_n + lane_means[lane] * n_b) / total_n;
-            combined_m2 = combined_m2 + lane_m2s[lane] + delta * delta * combined_n * n_b / total_n;
+            double n_b = static_cast<double>(lane_count);
+            double total_n = combined_n + n_b;
+            if (total_n == 0.0) continue;
+            double delta = static_cast<double>(lane_means[lane]) - combined_mean;
+            combined_mean = (combined_mean * combined_n + static_cast<double>(lane_means[lane]) * n_b) / total_n;
+            combined_m2 = combined_m2 + static_cast<double>(lane_m2s[lane]) + delta * delta * combined_n * n_b / total_n;
             combined_n = total_n;
         }
 
@@ -126,17 +130,17 @@ static void batchnorm_mean_var_simd_f32(
         for (int64_t n = 0; n < N; n++) {
             const float* ch_ptr = input + (n * C + c) * spatial_size;
             for (int64_t i = simd_covered; i < spatial_size; i++) {
-                combined_n += 1.0f;
-                float delta = ch_ptr[i] - combined_mean;
+                combined_n += 1.0;
+                double delta = static_cast<double>(ch_ptr[i]) - combined_mean;
                 combined_mean += delta / combined_n;
-                float delta2 = ch_ptr[i] - combined_mean;
+                double delta2 = static_cast<double>(ch_ptr[i]) - combined_mean;
                 combined_m2 += delta * delta2;
             }
         }
 
-        mean[c] = combined_mean;
+        mean[c] = static_cast<float>(combined_mean);
         // BatchNorm uses population variance (divide by N, not N-1)
-        variance[c] = (total_elements > 0) ? combined_m2 / static_cast<float>(total_elements) : 0.0f;
+        variance[c] = (total_elements > 0) ? static_cast<float>(combined_m2 / static_cast<double>(total_elements)) : 0.0f;
     }
 }
 #endif
@@ -311,7 +315,10 @@ void batchnorm_mean_var_impl<BFloat16>(const BFloat16* input,
     }
 }
 
-auto batchnorm2d_mean_var_kernel(const Tensor& input) -> std::vector<Tensor> {
+auto batchnorm2d_mean_var_kernel(const Tensor& input_orig) -> std::vector<Tensor> {
+    // The mean/variance kernels index the raw NCHW buffer via (n*C+c)*H*W, so
+    // the input must be contiguous for the linear offsets to be valid.
+    Tensor input = input_orig.is_contiguous() ? input_orig : input_orig.contiguous();
     auto shape = input.shape();
     if (shape.size() != 4) {
         throw std::invalid_argument("batchnorm2d_mean_var expects 4D input (NCHW)");
@@ -416,10 +423,13 @@ void batchnorm_forward_impl(const T* input,
     }
 }
 
-auto batchnorm2d_forward_kernel(const Tensor& input,
-                               const Tensor& mean,
-                               const Tensor& variance,
+auto batchnorm2d_forward_kernel(const Tensor& input_orig,
+                               const Tensor& mean_orig,
+                               const Tensor& variance_orig,
                                float epsilon) -> Tensor {
+    Tensor input = input_orig.is_contiguous() ? input_orig : input_orig.contiguous();
+    Tensor mean = mean_orig.is_contiguous() ? mean_orig : mean_orig.contiguous();
+    Tensor variance = variance_orig.is_contiguous() ? variance_orig : variance_orig.contiguous();
     auto shape = input.shape();
     std::vector<int64_t> shape_vec(shape.begin(), shape.end());
     Tensor output(shape_vec, input.dtype(), input.device());
@@ -751,12 +761,20 @@ void batchnorm_forward_affine_impl(const T* input,
     }
 }
 
-auto batchnorm2d_forward_affine_kernel(const Tensor& input,
-                                       const Tensor& mean,
-                                       const Tensor& variance,
-                                       const Tensor& gamma,
-                                       const Tensor& beta,
+auto batchnorm2d_forward_affine_kernel(const Tensor& input_orig,
+                                       const Tensor& mean_orig,
+                                       const Tensor& variance_orig,
+                                       const Tensor& gamma_orig,
+                                       const Tensor& beta_orig,
                                        float epsilon) -> Tensor {
+    // Both the oneDNN path (which builds an nchw descriptor over the raw
+    // storage) and the scalar/SIMD paths index linear NCHW offsets, so all
+    // inputs must be contiguous.
+    Tensor input = input_orig.is_contiguous() ? input_orig : input_orig.contiguous();
+    Tensor mean = mean_orig.is_contiguous() ? mean_orig : mean_orig.contiguous();
+    Tensor variance = variance_orig.is_contiguous() ? variance_orig : variance_orig.contiguous();
+    Tensor gamma = gamma_orig.is_contiguous() ? gamma_orig : gamma_orig.contiguous();
+    Tensor beta = beta_orig.is_contiguous() ? beta_orig : beta_orig.contiguous();
     auto shape = input.shape();
     std::vector<int64_t> shape_vec(shape.begin(), shape.end());
     Tensor output(shape_vec, input.dtype(), input.device());
@@ -1029,12 +1047,19 @@ void batchnorm_backward_impl(const T* grad_output,
     }
 }
 
-auto batchnorm2d_backward_kernel(const Tensor& grad_output,
-                                 const Tensor& input,
-                                 const Tensor& mean,
-                                 const Tensor& variance,
-                                 const Tensor& gamma,
+auto batchnorm2d_backward_kernel(const Tensor& grad_output_orig,
+                                 const Tensor& input_orig,
+                                 const Tensor& mean_orig,
+                                 const Tensor& variance_orig,
+                                 const Tensor& gamma_orig,
                                  float epsilon) -> std::vector<Tensor> {
+    // Backward indexes grad_output/input as linear NCHW buffers and reads the
+    // per-channel stats by [c], so all operands must be contiguous.
+    Tensor grad_output = grad_output_orig.is_contiguous() ? grad_output_orig : grad_output_orig.contiguous();
+    Tensor input = input_orig.is_contiguous() ? input_orig : input_orig.contiguous();
+    Tensor mean = mean_orig.is_contiguous() ? mean_orig : mean_orig.contiguous();
+    Tensor variance = variance_orig.is_contiguous() ? variance_orig : variance_orig.contiguous();
+    Tensor gamma = gamma_orig.is_contiguous() ? gamma_orig : gamma_orig.contiguous();
     auto shape = input.shape();
     int64_t N = shape[0];
     int64_t C = shape[1];

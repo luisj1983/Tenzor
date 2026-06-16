@@ -627,8 +627,10 @@ __global__ void repeat_kernel_device(
             int64_t out_coord = temp % out_shape_i;
             temp /= out_shape_i;
 
-            // Map output coordinate to input coordinate
-            int64_t in_coord = out_coord / repeats[i];
+            // Map output coordinate to input coordinate using TILE semantics
+            // (torch.Tensor.repeat / torch.tile): [a,b] repeated 2x -> [a,b,a,b].
+            // This matches the CPU reference (in_coord = out_coord % input_shape).
+            int64_t in_coord = out_coord % input_shape[i];
             in_idx += in_coord * input_strides[i];
         }
 

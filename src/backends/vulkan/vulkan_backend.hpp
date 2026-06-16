@@ -158,6 +158,11 @@ private:
         uint32_t workgroupSize = 256;         // Optimal 1D workgroup size (power-of-2, from device limits)
         GpuVendor vendor = GpuVendor::Unknown; // Collapsed vendor classification (Phase 2.2)
         uint32_t maxComputeWorkGroupCount[3] = {65535, 65535, 65535};  // Vulkan minimum guaranteed
+        // VkPhysicalDeviceLimits::minStorageBufferOffsetAlignment — every byte
+        // offset written into a STORAGE_BUFFER descriptor must be a multiple of
+        // this. Cached at init; used to guard descriptor writes against
+        // unaligned view offsets (1 is a safe default per the Vulkan spec max).
+        VkDeviceSize minStorageBufferOffsetAlignment = 256;
         VkPipelineCache pipelineCache = VK_NULL_HANDLE;  // Persistent pipeline cache
 
         // Configurable fence timeout (default 30s, override with TENZOR_VULKAN_FENCE_TIMEOUT_S)
@@ -208,6 +213,7 @@ private:
             , workgroupSize(other.workgroupSize)
             , vendor(other.vendor)
             , maxComputeWorkGroupCount{other.maxComputeWorkGroupCount[0], other.maxComputeWorkGroupCount[1], other.maxComputeWorkGroupCount[2]}
+            , minStorageBufferOffsetAlignment(other.minStorageBufferOffsetAlignment)
             , pipelineCache(other.pipelineCache)
             , fence_timeout_ns(other.fence_timeout_ns)
             , pendingFence(other.pendingFence)
