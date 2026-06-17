@@ -531,7 +531,10 @@ __global__ void argmax_along_dim_kernel(
     int64_t indices[8];
     int64_t tmp = out_idx;
 
-    for (int64_t d = 0; d < ndim; d++) {
+    // Decompose the row-major output index from the LAST dimension inward
+    // (matches the CPU reference and the max/min/var/sum siblings). The previous
+    // ascending order transposed the output for ndim >= 3.
+    for (int64_t d = ndim - 1; d >= 0; --d) {
         if (d == dim) {
             indices[d] = 0;
             continue;
@@ -588,7 +591,10 @@ __global__ void argmin_along_dim_kernel(
     int64_t indices[8];
     int64_t tmp = out_idx;
 
-    for (int64_t d = 0; d < ndim; d++) {
+    // Decompose the row-major output index from the LAST dimension inward
+    // (matches the CPU reference and the max/min/var/sum siblings). The previous
+    // ascending order transposed the output for ndim >= 3.
+    for (int64_t d = ndim - 1; d >= 0; --d) {
         if (d == dim) {
             indices[d] = 0;
             continue;
@@ -645,7 +651,10 @@ __global__ void prod_along_dim_kernel(
     int64_t indices[8];
     int64_t tmp = out_idx;
 
-    for (int64_t d = 0; d < ndim; d++) {
+    // Decompose the row-major output index from the LAST dimension inward
+    // (matches the CPU reference and the max/min/var/sum siblings). The previous
+    // ascending order transposed the output for ndim >= 3.
+    for (int64_t d = ndim - 1; d >= 0; --d) {
         if (d == dim) {
             indices[d] = 0;
             continue;

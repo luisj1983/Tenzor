@@ -3457,7 +3457,8 @@ auto take_along_dim_hip(const Tensor& input, const Tensor& indices, int64_t dim,
     const int64_t* idx_ptr = indices.data<int64_t>();
     // Device flag for out-of-range indices; checked on the host after sync so we
     // can throw (matching the CPU reference) instead of silently returning 0.
-    Tensor err_tensor = create_hip_zeros({1}, DType::Int32, input.device());
+    Tensor err_tensor(std::vector<int64_t>{1}, DType::Int32, input.device());
+    HIP_CHECK(hipMemsetAsync(err_tensor.data_ptr(), 0, sizeof(int32_t), stream));
     int* err_ptr = err_tensor.data<int32_t>();
 
     switch (input.dtype()) {
