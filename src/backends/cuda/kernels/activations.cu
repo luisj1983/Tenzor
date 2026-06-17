@@ -890,6 +890,16 @@ __global__ void leaky_relu_forward_fp16_kernel(const __half* input, __half* outp
     }
 }
 
+// BFloat16 forward kernel: compute in Float32 so alpha is not pre-narrowed to
+// bf16 (matches CPU and the Float16 GPU path).
+__global__ void leaky_relu_forward_bf16_kernel(const __nv_bfloat16* input, __nv_bfloat16* output,
+                                               int64_t n, float alpha) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) {
+        float val = __bfloat162float(input[idx]);
+        output[idx] = __float2bfloat16(val > 0.0f ? val : alpha * val);
+    }
+}
+
 // Backward: grad_out * (1 if x > 0 else alpha)
 template<typename T>
 __global__ void leaky_relu_backward_kernel(const T* grad_output, const T* input,
@@ -906,6 +916,17 @@ __global__ void leaky_relu_backward_fp16_kernel(const __half* grad_output, const
         float grad = __half2float(grad_output[idx]);
         float val = __half2float(input[idx]);
         grad_input[idx] = float2half_sat(grad * (val > 0.0f ? 1.0f : alpha));
+    }
+}
+
+// BFloat16 backward kernel: compute in Float32 so alpha is not pre-narrowed to
+// bf16 (matches CPU and the Float16 GPU path).
+__global__ void leaky_relu_backward_bf16_kernel(const __nv_bfloat16* grad_output, const __nv_bfloat16* input,
+                                                __nv_bfloat16* grad_input, int64_t n, float alpha) {
+    TENZOR_CUDA_KERNEL_LOOP(idx, n) {
+        float grad = __bfloat162float(grad_output[idx]);
+        float val = __bfloat162float(input[idx]);
+        grad_input[idx] = __float2bfloat16(grad * (val > 0.0f ? 1.0f : alpha));
     }
 }
 
@@ -2749,9 +2770,9 @@ auto leaky_relu_kernel(const Tensor& input_raw, double alpha, cudaStream_t strea
         CUDA_CHECK(cudaGetLastError());
     } else if (input.dtype() == DType::BFloat16) {
         int num_blocks = get_num_blocks(n);
-        leaky_relu_forward_kernel<__nv_bfloat16><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
+        leaky_relu_forward_bf16_kernel<<<num_blocks, BLOCK_SIZE, 0, stream>>>(
             reinterpret_cast<const __nv_bfloat16*>(input.data_ptr()),
-            reinterpret_cast<__nv_bfloat16*>(result.data_ptr()), n, __float2bfloat16(alpha));
+            reinterpret_cast<__nv_bfloat16*>(result.data_ptr()), n, static_cast<float>(alpha));
         CUDA_CHECK(cudaGetLastError());
     } else {
         throw std::runtime_error("Leaky ReLU only supports Float32, Float64, Float16, and BFloat16 dtypes");
@@ -2827,10 +2848,10 @@ auto leaky_relu_backward_kernel(const Tensor& grad_output_raw, const Tensor& inp
         CUDA_CHECK(cudaGetLastError());
     } else if (input.dtype() == DType::BFloat16) {
         int num_blocks = get_num_blocks(n);
-        leaky_relu_backward_kernel<__nv_bfloat16><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
+        leaky_relu_backward_bf16_kernel<<<num_blocks, BLOCK_SIZE, 0, stream>>>(
             reinterpret_cast<const __nv_bfloat16*>(grad_output.data_ptr()),
             reinterpret_cast<const __nv_bfloat16*>(input.data_ptr()),
-            reinterpret_cast<__nv_bfloat16*>(result.data_ptr()), n, __float2bfloat16(alpha));
+            reinterpret_cast<__nv_bfloat16*>(result.data_ptr()), n, static_cast<float>(alpha));
         CUDA_CHECK(cudaGetLastError());
     } else {
         throw std::runtime_error("Leaky ReLU backward only supports Float32, Float64, Float16, and BFloat16 dtypes");
@@ -4559,7 +4580,7 @@ Tensor index_add_dispatch(std::span<const Tensor> inputs, const OpAttributes& at
 // Scatter-reduce modes: 0=sum, 1=prod, 2=mean, 3=amax, 4=amin
 __global__ void scatter_reduce_f32(float* output, const float* source, const int64_t* index,
                                     int64_t outer, int64_t dim_size, int64_t idx_n, int64_t inner,
-                                    int mode, int* counts) {
+                                    int mode, unsigned long long* counts) {
     int64_t tid = blockIdx.x * blockDim.x + threadIdx.x;
     int64_t total = outer * idx_n * inner;
     if (tid >= total) return;
@@ -4578,7 +4599,7 @@ __global__ void scatter_reduce_f32(float* output, const float* source, const int
     if (mode == 0 || mode == 2) {
         // sum / mean: atomic add
         atomicAdd(&output[out_pos], val);
-        if (mode == 2 && counts) atomicAdd(&counts[out_pos], 1);
+        if (mode == 2 && counts) atomicAdd(&counts[out_pos], 1ULL);
     } else if (mode == 1) {
         // prod: CAS loop
         unsigned int* addr = (unsigned int*)&output[out_pos];
@@ -4591,26 +4612,32 @@ __global__ void scatter_reduce_f32(float* output, const float* source, const int
             old_bits = atomicCAS(addr, assumed, new_bits);
         } while (assumed != old_bits);
     } else if (mode == 3) {
-        // amax: CAS loop
+        // amax: CAS loop. Propagate NaN to match CPU/PyTorch semantics: a NaN
+        // candidate always wins, and once the stored value is NaN nothing
+        // overwrites it. For finite values, replace only when val > old_val.
         unsigned int* addr = (unsigned int*)&output[out_pos];
         unsigned int old_bits = *addr;
         unsigned int assumed;
         do {
             assumed = old_bits;
             float old_val = __uint_as_float(assumed);
-            if (val <= old_val) break;
+            // Stop replacing if: stored is NaN (sticky), or candidate is finite
+            // and not strictly greater. A NaN candidate (val) always proceeds.
+            if (!isnan(val) && (isnan(old_val) || val <= old_val)) break;
             unsigned int new_bits = __float_as_uint(val);
             old_bits = atomicCAS(addr, assumed, new_bits);
         } while (assumed != old_bits);
     } else if (mode == 4) {
-        // amin: CAS loop
+        // amin: CAS loop. Propagate NaN to match CPU/PyTorch semantics: a NaN
+        // candidate always wins, and once the stored value is NaN nothing
+        // overwrites it. For finite values, replace only when val < old_val.
         unsigned int* addr = (unsigned int*)&output[out_pos];
         unsigned int old_bits = *addr;
         unsigned int assumed;
         do {
             assumed = old_bits;
             float old_val = __uint_as_float(assumed);
-            if (val >= old_val) break;
+            if (!isnan(val) && (isnan(old_val) || val >= old_val)) break;
             unsigned int new_bits = __float_as_uint(val);
             old_bits = atomicCAS(addr, assumed, new_bits);
         } while (assumed != old_bits);
@@ -4649,12 +4676,12 @@ __global__ void scatter_reduce_init_f32(float* output, const int64_t* index,
 // self). With include_self=false the accumulator is just `sum(scatters)`
 // and the divisor is `count`. Untouched positions (count=0) keep their
 // initial value and are skipped.
-__global__ void scatter_reduce_mean_div_f32(float* output, const int* counts, int64_t numel, int include_self) {
+__global__ void scatter_reduce_mean_div_f32(float* output, const unsigned long long* counts, int64_t numel, int include_self) {
     int64_t tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= numel) return;
-    int c = counts[tid];
-    if (c <= 0) return;  // untouched — leave the original value alone
-    float divisor = include_self ? static_cast<float>(c + 1) : static_cast<float>(c);
+    unsigned long long c = counts[tid];
+    if (c == 0ULL) return;  // untouched — leave the original value alone
+    float divisor = include_self ? static_cast<float>(c + 1ULL) : static_cast<float>(c);
     output[tid] /= divisor;
 }
 
@@ -4713,18 +4740,20 @@ Tensor scatter_reduce_dispatch(std::span<const Tensor> inputs, const OpAttribute
         CUDA_CHECK(cudaGetLastError());
     }
 
-    // Allocate count tensor for mean mode
+    // Allocate count tensor for mean mode. 64-bit to avoid overflow when the
+    // per-position fan-in exceeds 2^31 (extreme but possible for large scatters).
     Tensor count_tensor;
-    int* count_ptr = nullptr;
+    unsigned long long* count_ptr = nullptr;
     if (mode == 2) {
         int64_t out_numel = output.numel();
-        count_tensor = Tensor({out_numel}, DType::Int32, output.device());
+        count_tensor = Tensor({out_numel}, DType::UInt64, output.device());
         // Zero-initialize counts. counts[] holds ONLY the number of scattered
         // contributions per position; the +1 for include_self is applied in
         // scatter_reduce_mean_div_f32's divisor (c+1 vs c), so counts must NOT
         // be pre-seeded to 1 here (that would divide by c+2).
-        CUDA_CHECK(cudaMemsetAsync(count_tensor.data<int>(), 0, out_numel * sizeof(int), stream));
-        count_ptr = count_tensor.data<int>();
+        CUDA_CHECK(cudaMemsetAsync(count_tensor.data<uint64_t>(), 0,
+                                   out_numel * sizeof(uint64_t), stream));
+        count_ptr = reinterpret_cast<unsigned long long*>(count_tensor.data<uint64_t>());
     }
 
     scatter_reduce_f32<<<grid, block, 0, stream>>>(

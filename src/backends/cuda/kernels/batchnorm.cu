@@ -480,6 +480,27 @@ __global__ void batchnorm_update_running_stats_kernel(T* running_mean,
     }
 }
 
+// Float16 specialization: accumulate the EMA blend in Float32 to keep the
+// running statistics from drifting versus the CPU reference (which keeps
+// running stats in float). momentum is kept as a float scalar rather than
+// being narrowed to __half, and each blend loads/stores via widen-narrow.
+__global__ void batchnorm_update_running_stats_fp16_kernel(__half* running_mean,
+                                                           __half* running_var,
+                                                           const __half* batch_mean,
+                                                           const __half* batch_var,
+                                                           float momentum,
+                                                           int64_t C) {
+    TENZOR_CUDA_KERNEL_LOOP(c, C) {
+        float r_mean = __half2float(running_mean[c]);
+        float b_mean = __half2float(batch_mean[c]);
+        running_mean[c] = __float2half((1.0f - momentum) * r_mean + momentum * b_mean);
+
+        float r_var = __half2float(running_var[c]);
+        float b_var = __half2float(batch_var[c]);
+        running_var[c] = __float2half((1.0f - momentum) * r_var + momentum * b_var);
+    }
+}
+
 // ============================================================================
 // BatchNorm2d Backward Kernels
 // ============================================================================
@@ -957,12 +978,12 @@ auto batchnorm2d_update_running_stats(Tensor& running_mean,
         CUDA_CHECK(cudaGetLastError());
     } else if (running_mean.dtype() == DType::Float16) {
         int num_blocks = get_num_blocks(C);
-        batchnorm_update_running_stats_kernel<__half><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
+        batchnorm_update_running_stats_fp16_kernel<<<num_blocks, BLOCK_SIZE, 0, stream>>>(
             reinterpret_cast<__half*>(running_mean.data<Float16>()),
             reinterpret_cast<__half*>(running_var.data<Float16>()),
             reinterpret_cast<const __half*>(batch_mean.data<Float16>()),
             reinterpret_cast<const __half*>(batch_var.data<Float16>()),
-            __float2half(momentum), C);
+            momentum, C);
         CUDA_CHECK(cudaGetLastError());
     } else {
         throw std::runtime_error("BatchNorm2D only supports Float32, Float64, and Float16 dtypes");

@@ -13,6 +13,7 @@
 #include "tenzor/ops/creation.hpp"
 #include "tenzor/ops/indexing.hpp"
 #include "cuda_common.cuh"
+#include "cuda_launch_utils.cuh"  // CudaBuffer (device-side error flag)
 #include "../cublas_handle_pool.hpp"
 #include "../cuda_stream_pool.hpp"
 #include <stdexcept>
@@ -343,6 +344,23 @@ auto fused_batchnorm_relu_cuda(
         spatial_size *= input.shape()[i];
     }
 
+    // F16/BF16 host-level widen-narrow: normalization stats (var+eps, rsqrt)
+    // must be computed in Float32 to match the CPU reference, which computes
+    // inv_std and the normalization in float and narrows only on the final
+    // store. Computing (var+eps) and rsqrt in half (eps=1e-5) loses precision.
+    // Mirrors fused_layer_norm_cuda's widen-narrow for F16/BF16.
+    if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) {
+        DType orig = input.dtype();
+        auto in_f32 = input.to(DType::Float32);
+        auto mean_f32 = running_mean.to(DType::Float32);
+        auto var_f32 = running_var.to(DType::Float32);
+        auto wt_f32 = weight.to(DType::Float32);
+        auto bs_f32 = bias.to(DType::Float32);
+        auto out_f32 = fused_batchnorm_relu_cuda(
+            in_f32, mean_f32, var_f32, wt_f32, bs_f32, eps);
+        return out_f32.to(orig);
+    }
+
     int32_t device_id = input.device().index;
     auto stream_guard = cuda::CUDAStreamPool::instance().acquire_guard(device_id);
     cudaStream_t stream = stream_guard.get();
@@ -386,41 +404,8 @@ auto fused_batchnorm_relu_cuda(
             static_cast<double>(eps)
         );
         TENZOR_CUDA_POST_LAUNCH_CHECK();
-    } else if (input.dtype() == DType::Float16) {
-        cudaOccupancyMaxPotentialBlockSize(&min_grid_size, &block_size,
-                                           fused_batchnorm_relu_kernel<__half>, 0, 0);
-        int blocks = clamp_blocks((total_elements + block_size - 1) / block_size);
-        fused_batchnorm_relu_kernel<<<blocks, block_size, 0, stream>>>(
-            reinterpret_cast<const __half*>(input.data_ptr()),
-            reinterpret_cast<const __half*>(running_mean.data_ptr()),
-            reinterpret_cast<const __half*>(running_var.data_ptr()),
-            reinterpret_cast<const __half*>(weight.data_ptr()),
-            reinterpret_cast<const __half*>(bias.data_ptr()),
-            reinterpret_cast<__half*>(output.data_ptr()),
-            batch_size,
-            num_features,
-            spatial_size,
-            __float2half(eps)
-        );
-        TENZOR_CUDA_POST_LAUNCH_CHECK();
-    } else if (input.dtype() == DType::BFloat16) {
-        cudaOccupancyMaxPotentialBlockSize(&min_grid_size, &block_size,
-                                           fused_batchnorm_relu_kernel<__nv_bfloat16>, 0, 0);
-        int blocks = clamp_blocks((total_elements + block_size - 1) / block_size);
-        fused_batchnorm_relu_kernel<<<blocks, block_size, 0, stream>>>(
-            reinterpret_cast<const __nv_bfloat16*>(input.data_ptr()),
-            reinterpret_cast<const __nv_bfloat16*>(running_mean.data_ptr()),
-            reinterpret_cast<const __nv_bfloat16*>(running_var.data_ptr()),
-            reinterpret_cast<const __nv_bfloat16*>(weight.data_ptr()),
-            reinterpret_cast<const __nv_bfloat16*>(bias.data_ptr()),
-            reinterpret_cast<__nv_bfloat16*>(output.data_ptr()),
-            batch_size,
-            num_features,
-            spatial_size,
-            __float2bfloat16(eps)
-        );
-        TENZOR_CUDA_POST_LAUNCH_CHECK();
     } else {
+        // F16/BF16 are handled by the host widen-narrow path above.
         throw std::runtime_error("fused_batchnorm_relu_cuda: Unsupported dtype");
     }
 
@@ -445,7 +430,8 @@ __global__ void fused_softmax_cross_entropy_kernel(
     const int64_t* targets,
     T* losses,
     int64_t batch_size,
-    int64_t num_classes
+    int64_t num_classes,
+    int* error_flag
 ) {
     using Acc = typename fsce_acc_type<T>::type;
     int64_t b = blockIdx.x;
@@ -454,12 +440,14 @@ __global__ void fused_softmax_cross_entropy_kernel(
     const T* row = logits + b * num_classes;
     int64_t target = targets[b];
 
-    // Guard against out-of-range / sentinel (e.g. ignore_index = -100) labels.
-    // Reading row[target] unconditionally for such a target is an OOB device
-    // read; emit a zero loss for this element instead (matching ignore_index
-    // semantics) without touching out-of-bounds memory.
+    // Validate target range. The CPU reference throws on any out-of-range
+    // target (no ignore_index semantics), so we must NOT silently emit a zero
+    // loss here — that would diverge cross-backend and skew the mean. Signal
+    // the violation via the device error flag (checked on the host) and skip
+    // the OOB device read of row[target].
     if (target < 0 || target >= num_classes) {
         if (threadIdx.x == 0) {
+            atomicExch(error_flag, 1);
             losses[b] = static_cast<T>(0);
         }
         return;
@@ -527,14 +515,28 @@ auto fused_softmax_cross_entropy_cuda(
         Tensor losses = create_cuda_zeros({batch_size}, DType::Float64, logits.device());
         constexpr int BLOCK_SIZE = 256;
         int blocks = batch_size;
+        // Device-side out-of-range target flag (CPU reference throws on OOB).
+        CudaBuffer error_buf(sizeof(int));
+        TENZOR_CUDA_CHECK(cudaMemset(error_buf.as<int>(), 0, sizeof(int)));
         fused_softmax_cross_entropy_kernel<double, BLOCK_SIZE><<<blocks, BLOCK_SIZE>>>(
             logits.data<double>(),
             targets.data<int64_t>(),
             losses.data<double>(),
             batch_size,
-            num_classes
+            num_classes,
+            error_buf.as<int>()
         );
         TENZOR_CUDA_POST_LAUNCH_CHECK();
+        {
+            int host_error = 0;
+            TENZOR_CUDA_CHECK(cudaMemcpy(&host_error, error_buf.as<int>(), sizeof(int),
+                                         cudaMemcpyDeviceToHost));
+            if (host_error) {
+                throw std::runtime_error(
+                    "fused_softmax_cross_entropy: target index out of range [0, " +
+                    std::to_string(num_classes) + ")");
+            }
+        }
         if (reduction == "none") return losses;
         // Reduction via dispatch — works for any dtype the Sum kernel supports.
         // Avoid tenzor::mul/add (math.hpp) here because including math.hpp into
@@ -561,13 +563,19 @@ auto fused_softmax_cross_entropy_cuda(
     constexpr int BLOCK_SIZE = 256;
     int blocks = batch_size;
 
+    // Device-side out-of-range target flag (CPU reference throws on OOB; we
+    // must match that contract rather than silently zeroing the loss).
+    CudaBuffer error_buf(sizeof(int));
+    TENZOR_CUDA_CHECK(cudaMemset(error_buf.as<int>(), 0, sizeof(int)));
+
     if (logits.dtype() == DType::Float32) {
         fused_softmax_cross_entropy_kernel<float, BLOCK_SIZE><<<blocks, BLOCK_SIZE>>>(
             logits.data<float>(),
             targets.data<int64_t>(),
             losses.data<float>(),
             batch_size,
-            num_classes
+            num_classes,
+            error_buf.as<int>()
         );
         TENZOR_CUDA_POST_LAUNCH_CHECK();
     } else if (logits.dtype() == DType::Float16) {
@@ -576,7 +584,8 @@ auto fused_softmax_cross_entropy_cuda(
             targets.data<int64_t>(),
             reinterpret_cast<__half*>(losses.data<Float16>()),
             batch_size,
-            num_classes
+            num_classes,
+            error_buf.as<int>()
         );
         TENZOR_CUDA_POST_LAUNCH_CHECK();
     } else if (logits.dtype() == DType::BFloat16) {
@@ -585,7 +594,8 @@ auto fused_softmax_cross_entropy_cuda(
             targets.data<int64_t>(),
             reinterpret_cast<__nv_bfloat16*>(losses.data<BFloat16>()),
             batch_size,
-            num_classes
+            num_classes,
+            error_buf.as<int>()
         );
         TENZOR_CUDA_POST_LAUNCH_CHECK();
     } else {
@@ -594,6 +604,17 @@ auto fused_softmax_cross_entropy_cuda(
     }
 
     TENZOR_CUDA_POST_LAUNCH_CHECK();
+
+    {
+        int host_error = 0;
+        TENZOR_CUDA_CHECK(cudaMemcpy(&host_error, error_buf.as<int>(), sizeof(int),
+                                     cudaMemcpyDeviceToHost));
+        if (host_error) {
+            throw std::runtime_error(
+                "fused_softmax_cross_entropy: target index out of range [0, " +
+                std::to_string(num_classes) + ")");
+        }
+    }
 
     // Apply reduction — F32 uses cuda_sum_device fast path; F16/BF16 take
     // the dispatch-based reduction (cuda_sum_device internally requires F32).
@@ -869,12 +890,20 @@ __global__ void fused_layer_norm_kernel(
     const T* batch_in = input + b * norm_size;
     T* batch_out = output + b * norm_size;
 
-    __shared__ T shared_data[BLOCK_SIZE];
+    // Accumulate mean/variance stats in double to avoid catastrophic
+    // cancellation, matching the CPU reference (fused_ln_sum_f64 /
+    // fused_ln_sumsq_f64 always accumulate F32 LayerNorm stats in double).
+    // The F16/BF16 paths widen to Float32 at host level and thus instantiate
+    // this kernel with T=float, so a double accumulator here covers them too;
+    // the T=double instantiation is also exact. Only the final mean/inv_std
+    // and the normalization are narrowed back to T.
+    using Acc = double;
+    __shared__ Acc shared_data[BLOCK_SIZE];
 
     // Compute mean
-    T sum = 0;
+    Acc sum = 0;
     for (int64_t i = threadIdx.x; i < norm_size; i += blockDim.x) {
-        sum += batch_in[i];
+        sum += static_cast<Acc>(batch_in[i]);
     }
 
     shared_data[threadIdx.x] = sum;
@@ -887,13 +916,13 @@ __global__ void fused_layer_norm_kernel(
         __syncthreads();
     }
 
-    T mean = shared_data[0] / static_cast<T>(norm_size);
+    Acc mean = shared_data[0] / static_cast<Acc>(norm_size);
     __syncthreads();
 
     // Compute variance
-    T var_sum = 0;
+    Acc var_sum = 0;
     for (int64_t i = threadIdx.x; i < norm_size; i += blockDim.x) {
-        T diff = batch_in[i] - mean;
+        Acc diff = static_cast<Acc>(batch_in[i]) - mean;
         var_sum += diff * diff;
     }
 
@@ -907,19 +936,20 @@ __global__ void fused_layer_norm_kernel(
         __syncthreads();
     }
 
-    T variance = shared_data[0] / static_cast<T>(norm_size);
-    T inv_std = device_rsqrt(variance + eps);
+    Acc variance = shared_data[0] / static_cast<Acc>(norm_size);
+    Acc inv_std = rsqrt(variance + static_cast<Acc>(eps));
 
-    // Save mean and inv_std for backward pass
+    // Save mean and inv_std for backward pass (narrow to T)
     if (threadIdx.x == 0) {
-        mean_out[b] = mean;
-        inv_std_out[b] = inv_std;
+        mean_out[b] = static_cast<T>(mean);
+        inv_std_out[b] = static_cast<T>(inv_std);
     }
 
     // Normalize and scale
     for (int64_t i = threadIdx.x; i < norm_size; i += blockDim.x) {
-        T normalized = (batch_in[i] - mean) * inv_std;
-        batch_out[i] = normalized * weight[i] + bias[i];
+        Acc normalized = (static_cast<Acc>(batch_in[i]) - mean) * inv_std;
+        batch_out[i] = static_cast<T>(normalized * static_cast<Acc>(weight[i])
+                                      + static_cast<Acc>(bias[i]));
     }
 }
 
@@ -3889,18 +3919,22 @@ __global__ void fused_softmax_cross_entropy_kernel(
     T* __restrict__ grad_logits,     // (batch_size, num_classes) - optional
     int64_t batch_size,
     int64_t num_classes,
-    bool compute_grad) {
+    bool compute_grad,
+    int* __restrict__ error_flag) {
 
     int64_t b = blockIdx.x;
     if (b >= batch_size) return;
 
-    // Guard against out-of-range / sentinel (e.g. ignore_index = -100) labels.
-    // For such a target we must not read logits_row[target] (OOB device read);
-    // emit zero loss and, if requested, a zero gradient row for this element.
+    // Validate target range. The CPU reference throws on any out-of-range
+    // target (no ignore_index semantics), so signal the violation via the
+    // device error flag (checked on the host) rather than silently emitting a
+    // zero loss/grad, which would diverge cross-backend. Avoid the OOB device
+    // read of logits_row[target] by returning here.
     {
         int64_t target_check = targets[b];
         if (target_check < 0 || target_check >= num_classes) {
             if (threadIdx.x == 0) {
+                atomicExch(error_flag, 1);
                 loss[b] = static_cast<T>(0);
             }
             if (compute_grad && grad_logits) {
@@ -3995,25 +4029,42 @@ auto fused_softmax_cross_entropy_cuda(
 
     size_t shared_mem = block_size * dtype_size(logits.dtype());
 
+    // Device-side out-of-range target flag (CPU reference throws on OOB; match
+    // that contract rather than silently zeroing loss/grad).
+    CudaBuffer error_buf(sizeof(int));
+    TENZOR_CUDA_CHECK(cudaMemset(error_buf.as<int>(), 0, sizeof(int)));
+
     if (logits.dtype() == DType::Float32) {
         fused_softmax_cross_entropy_kernel<float><<<batch_size, block_size, shared_mem>>>(
             logits.data<float>(), targets.data<int64_t>(),
             loss.data<float>(),
             compute_grad ? grad_logits.data<float>() : nullptr,
-            batch_size, num_classes, compute_grad);
+            batch_size, num_classes, compute_grad, error_buf.as<int>());
         TENZOR_CUDA_POST_LAUNCH_CHECK();
     } else if (logits.dtype() == DType::Float64) {
         fused_softmax_cross_entropy_kernel<double><<<batch_size, block_size, shared_mem>>>(
             logits.data<double>(), targets.data<int64_t>(),
             loss.data<double>(),
             compute_grad ? grad_logits.data<double>() : nullptr,
-            batch_size, num_classes, compute_grad);
+            batch_size, num_classes, compute_grad, error_buf.as<int>());
         TENZOR_CUDA_POST_LAUNCH_CHECK();
     } else {
         throw std::runtime_error("fused_softmax_cross_entropy: unsupported dtype");
     }
 
     TENZOR_CUDA_POST_LAUNCH_CHECK();
+
+    {
+        int host_error = 0;
+        TENZOR_CUDA_CHECK(cudaMemcpy(&host_error, error_buf.as<int>(), sizeof(int),
+                                     cudaMemcpyDeviceToHost));
+        if (host_error) {
+            throw std::runtime_error(
+                "fused_softmax_cross_entropy: target index out of range [0, " +
+                std::to_string(num_classes) + ")");
+        }
+    }
+
     return {loss, grad_logits};
 }
 

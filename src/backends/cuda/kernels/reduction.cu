@@ -153,6 +153,81 @@ template<typename T> __device__ __forceinline__ T cuda_min_val(T a, T b) {
     else return (a < b) ? a : b;
 }
 
+// ----------------------------------------------------------------------------
+// NaN-aware argmax/argmin candidate predicates.
+//
+// PyTorch / CPU reference semantics: argmax/argmin propagate NaN — if any input
+// is NaN the returned index is that of the FIRST (lowest-index) NaN, because NaN
+// compares as the maximum (and the minimum) of the set. Plain `cand > best`
+// comparisons silently skip NaN (every comparison against NaN is false), so we
+// need explicit predicates.
+//
+// `arg_max_takes(cand, best)` returns true iff a `cand` value should replace the
+// current `best`:
+//   * a NaN cand beats any non-NaN best;
+//   * NaN vs NaN never replaces (keep the earlier index — first-NaN wins);
+//   * otherwise replace only on a strict numeric improvement.
+// Equivalent to: !isnan(best) && (isnan(cand) || cand > best).
+//
+// Callers MUST only replace on a true result (strict win), so that on ties the
+// pre-existing (lower-index) entry is retained. In the tree/warp combine steps
+// the left operand (shared[tid] / current lane) always carries the lower
+// original index, so "replace only on strict win" preserves lowest-index
+// semantics for NaN ties as well.
+template<typename T> __device__ __forceinline__ bool arg_max_takes(T cand, T best) {
+    if constexpr (std::is_floating_point_v<T>) {
+        return !isnan(best) && (isnan(cand) || cand > best);
+    } else {
+        return cand > best;
+    }
+}
+template<typename T> __device__ __forceinline__ bool arg_min_takes(T cand, T best) {
+    if constexpr (std::is_floating_point_v<T>) {
+        return !isnan(best) && (isnan(cand) || cand < best);
+    } else {
+        return cand < best;
+    }
+}
+// __half / __nv_bfloat16 overloads (use __hisnan; ordered compares via __hgt/__hlt).
+__device__ __forceinline__ bool arg_max_takes(__half cand, __half best) {
+    return !__hisnan(best) && (__hisnan(cand) || __hgt(cand, best));
+}
+__device__ __forceinline__ bool arg_min_takes(__half cand, __half best) {
+    return !__hisnan(best) && (__hisnan(cand) || __hlt(cand, best));
+}
+__device__ __forceinline__ bool arg_max_takes(__nv_bfloat16 cand, __nv_bfloat16 best) {
+    return !__hisnan(best) && (__hisnan(cand) || __hgt(cand, best));
+}
+__device__ __forceinline__ bool arg_min_takes(__nv_bfloat16 cand, __nv_bfloat16 best) {
+    return !__hisnan(best) && (__hisnan(cand) || __hlt(cand, best));
+}
+
+// NaN detection wrappers usable across real and half types.
+template<typename T> __device__ __forceinline__ bool arg_is_nan(T v) {
+    if constexpr (std::is_floating_point_v<T>) return isnan(v);
+    else return false;
+}
+__device__ __forceinline__ bool arg_is_nan(__half v) { return __hisnan(v); }
+__device__ __forceinline__ bool arg_is_nan(__nv_bfloat16 v) { return __hisnan(v); }
+
+// Index-aware variants for combine steps where the candidate may carry a LOWER
+// original index than the current best (e.g. combining unsorted block winners).
+// On a NaN-vs-NaN tie (or any exact tie), the lower original index wins so the
+// returned index matches the CPU "first NaN / first occurrence" reference.
+template<typename T>
+__device__ __forceinline__ bool arg_max_takes_idx(T cand, int64_t cand_idx, T best, int64_t best_idx) {
+    if (arg_max_takes(cand, best)) return true;
+    // Tie-break: equal NaNs -> keep lower original index.
+    if (arg_is_nan(cand) && arg_is_nan(best)) return cand_idx < best_idx;
+    return false;
+}
+template<typename T>
+__device__ __forceinline__ bool arg_min_takes_idx(T cand, int64_t cand_idx, T best, int64_t best_idx) {
+    if (arg_min_takes(cand, best)) return true;
+    if (arg_is_nan(cand) && arg_is_nan(best)) return cand_idx < best_idx;
+    return false;
+}
+
 // GPU-side scalar fill (replaces host_zero + cudaMemcpyAsync H2D pattern to avoid UB)
 template<typename T>
 __global__ void fill_scalar_kernel(T* dst, T value) { dst[0] = value; }
@@ -190,7 +265,7 @@ __global__ void argmax_final_kernel(const T* input, const int64_t* block_indices
     for (int i = tid + blockDim.x; i < num_blocks; i += blockDim.x) {
         int64_t idx = block_indices[i];
         T val = input[idx];
-        if (val > best_val) {
+        if (arg_max_takes_idx(val, idx, best_val, best_idx)) {
             best_val = val;
             best_idx = idx;
         }
@@ -202,7 +277,8 @@ __global__ void argmax_final_kernel(const T* input, const int64_t* block_indices
 
     for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
         if (tid < stride) {
-            if (shared_vals[tid + stride] > shared_vals[tid]) {
+            if (arg_max_takes_idx(shared_vals[tid + stride], shared_idxs[tid + stride],
+                                  shared_vals[tid], shared_idxs[tid])) {
                 shared_vals[tid] = shared_vals[tid + stride];
                 shared_idxs[tid] = shared_idxs[tid + stride];
             }
@@ -235,7 +311,7 @@ __global__ void argmin_final_kernel(const T* input, const int64_t* block_indices
     for (int i = tid + blockDim.x; i < num_blocks; i += blockDim.x) {
         int64_t idx = block_indices[i];
         T val = input[idx];
-        if (val < best_val) {
+        if (arg_min_takes_idx(val, idx, best_val, best_idx)) {
             best_val = val;
             best_idx = idx;
         }
@@ -247,7 +323,8 @@ __global__ void argmin_final_kernel(const T* input, const int64_t* block_indices
 
     for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
         if (tid < stride) {
-            if (shared_vals[tid + stride] < shared_vals[tid]) {
+            if (arg_min_takes_idx(shared_vals[tid + stride], shared_idxs[tid + stride],
+                                  shared_vals[tid], shared_idxs[tid])) {
                 shared_vals[tid] = shared_vals[tid + stride];
                 shared_idxs[tid] = shared_idxs[tid + stride];
             }
@@ -281,7 +358,7 @@ __global__ void argmax_final_kernel_half(const __half* input, const int64_t* blo
     for (int i = tid + blockDim.x; i < num_blocks; i += blockDim.x) {
         int64_t idx = block_indices[i];
         float val = __half2float(input[idx]);
-        if (val > best_val) {
+        if (arg_max_takes_idx(val, idx, best_val, best_idx)) {
             best_val = val;
             best_idx = idx;
         }
@@ -293,7 +370,8 @@ __global__ void argmax_final_kernel_half(const __half* input, const int64_t* blo
 
     for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
         if (tid < stride) {
-            if (shared_vals[tid + stride] > shared_vals[tid]) {
+            if (arg_max_takes_idx(shared_vals[tid + stride], shared_idxs[tid + stride],
+                                  shared_vals[tid], shared_idxs[tid])) {
                 shared_vals[tid] = shared_vals[tid + stride];
                 shared_idxs[tid] = shared_idxs[tid + stride];
             }
@@ -325,7 +403,7 @@ __global__ void argmin_final_kernel_half(const __half* input, const int64_t* blo
     for (int i = tid + blockDim.x; i < num_blocks; i += blockDim.x) {
         int64_t idx = block_indices[i];
         float val = __half2float(input[idx]);
-        if (val < best_val) {
+        if (arg_min_takes_idx(val, idx, best_val, best_idx)) {
             best_val = val;
             best_idx = idx;
         }
@@ -337,7 +415,8 @@ __global__ void argmin_final_kernel_half(const __half* input, const int64_t* blo
 
     for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
         if (tid < stride) {
-            if (shared_vals[tid + stride] < shared_vals[tid]) {
+            if (arg_min_takes_idx(shared_vals[tid + stride], shared_idxs[tid + stride],
+                                  shared_vals[tid], shared_idxs[tid])) {
                 shared_vals[tid] = shared_vals[tid + stride];
                 shared_idxs[tid] = shared_idxs[tid + stride];
             }
@@ -380,9 +459,24 @@ __device__ __forceinline__ __half half_pos_inf() {
 // Block-level reduction kernels (full reduction)
 // ============================================================================
 
-template<typename T>
-__global__ void sum_reduce_kernel(const T* input, T* output, int64_t n) {
-    using Acc = typename AccumType<T>::type;
+// Block-level sum reduction.
+//
+// Accumulation always happens in AccumType<InT>::type (float for __half /
+// __nv_bfloat16). The output element type OutT is parameterized separately so
+// the two-phase full-reduction path can keep per-block partials in the float
+// accumulator type between phases instead of narrowing to fp16/bf16 (which
+// would discard the float-accumulation benefit). Only the FINAL scalar is
+// narrowed to the storage type.
+//
+//   - Single-block path:    sum_reduce_kernel<T, T>      (read T,   write T)
+//   - Two-phase phase 1:    sum_reduce_kernel<T, Acc>    (read T,   write float)
+//   - Two-phase phase 2:    sum_reduce_kernel<Acc, T>    (read float, write T)
+//
+// For non-half T, Acc == T so all three instantiations behave identically to
+// the original single-type kernel.
+template<typename InT, typename OutT>
+__global__ void sum_reduce_kernel(const InT* input, OutT* output, int64_t n) {
+    using Acc = typename AccumType<InT>::type;
     __shared__ Acc shared[REDUCTION_BLOCK_SIZE];
 
     int tid = threadIdx.x;
@@ -413,7 +507,8 @@ __global__ void sum_reduce_kernel(const T* input, T* output, int64_t n) {
         val = warp_reduce_sum(val);
 
         if (tid == 0) {
-            output[blockIdx.x] = T(val);
+            // Narrow to the storage type only at the final store.
+            output[blockIdx.x] = OutT(val);
         }
     }
 }
@@ -766,7 +861,7 @@ __global__ void max_along_dim_kernel(
             in_idx += indices[d] * meta.strides[d];
         }
         T val = input[in_idx];
-        max_val = (val > max_val) ? val : max_val;
+        max_val = cuda_max_val(val, max_val);
     }
 
     output[out_idx] = max_val;
@@ -815,7 +910,7 @@ __global__ void min_along_dim_kernel(
             in_idx += indices[d] * meta.strides[d];
         }
         T val = input[in_idx];
-        min_val = (val < min_val) ? val : min_val;
+        min_val = cuda_min_val(val, min_val);
     }
 
     output[out_idx] = min_val;
@@ -1066,17 +1161,22 @@ static void launch_full_reduction_sum(const T* d_input, T* d_output, int64_t n, 
     int num_blocks = std::min<int>((n + REDUCTION_BLOCK_SIZE - 1) / REDUCTION_BLOCK_SIZE, 1024);
 
     if (num_blocks == 1) {
-        sum_reduce_kernel<<<1, REDUCTION_BLOCK_SIZE, 0, stream>>>(d_input, d_output, n);
+        sum_reduce_kernel<T, T><<<1, REDUCTION_BLOCK_SIZE, 0, stream>>>(d_input, d_output, n);
         CUDA_CHECK(cudaGetLastError());
     } else {
-        // Phase 1: Reduce to num_blocks intermediate results
-        backend::CachedMemoryGuard d_temp_guard(num_blocks * sizeof(T));
-        auto* d_temp = static_cast<T*>(d_temp_guard.get());
-        sum_reduce_kernel<<<num_blocks, REDUCTION_BLOCK_SIZE, 0, stream>>>(d_input, d_temp, n);
+        // Phase 1: Reduce to num_blocks intermediate results, kept in the
+        // accumulator type (float for __half / __nv_bfloat16) so the per-block
+        // partials are NOT narrowed to low precision between phases. CPU
+        // accumulates the whole reduction in float; this mirrors that.
+        using Acc = typename AccumType<T>::type;
+        backend::CachedMemoryGuard d_temp_guard(num_blocks * sizeof(Acc));
+        auto* d_temp = static_cast<Acc*>(d_temp_guard.get());
+        sum_reduce_kernel<T, Acc><<<num_blocks, REDUCTION_BLOCK_SIZE, 0, stream>>>(d_input, d_temp, n);
         CUDA_CHECK(cudaGetLastError());
 
-        // Phase 2: Final reduction
-        sum_reduce_kernel<<<1, REDUCTION_BLOCK_SIZE, 0, stream>>>(d_temp, d_output, num_blocks);
+        // Phase 2: Final reduction reads the float partials, accumulates in
+        // float, and narrows only the final scalar to the storage type T.
+        sum_reduce_kernel<Acc, T><<<1, REDUCTION_BLOCK_SIZE, 0, stream>>>(d_temp, d_output, num_blocks);
         CUDA_CHECK(cudaGetLastError());
     }
     // Check for any errors during synchronization
@@ -2035,10 +2135,10 @@ __global__ void argmax_full_kernel(const T* input, int64_t* output, int64_t n) {
     T thread_max = (idx < n) ? input[idx] : sentinel_lowest<T>();
     int64_t thread_idx = (idx < n) ? idx : 0;
 
-    // Grid-stride loop to find local maximum
+    // Grid-stride loop to find local maximum (NaN-aware, first-NaN/lowest-index)
     for (int64_t i = idx + grid_size; i < n; i += grid_size) {
         T val = input[i];
-        if (val > thread_max) {
+        if (arg_max_takes_idx(val, i, thread_max, thread_idx)) {
             thread_max = val;
             thread_idx = i;
         }
@@ -2051,7 +2151,8 @@ __global__ void argmax_full_kernel(const T* input, int64_t* output, int64_t n) {
     // Block-level reduction
     for (int stride = blockDim.x / 2; stride >= 32; stride >>= 1) {
         if (tid < stride) {
-            if (shared_vals[tid + stride] > shared_vals[tid]) {
+            if (arg_max_takes_idx(shared_vals[tid + stride], shared_idxs[tid + stride],
+                                  shared_vals[tid], shared_idxs[tid])) {
                 shared_vals[tid] = shared_vals[tid + stride];
                 shared_idxs[tid] = shared_idxs[tid + stride];
             }
@@ -2069,7 +2170,7 @@ __global__ void argmax_full_kernel(const T* input, int64_t* output, int64_t n) {
         for (int offset = 16; offset > 0; offset /= 2) {
             T other_val = __shfl_down_sync(0xffffffff, val, offset);
             int64_t other_idx = __shfl_down_sync(0xffffffff, val_idx, offset);
-            if (other_val > val) {
+            if (arg_max_takes_idx(other_val, other_idx, val, val_idx)) {
                 val = other_val;
                 val_idx = other_idx;
             }
@@ -2095,10 +2196,10 @@ __global__ void argmin_full_kernel(const T* input, int64_t* output, int64_t n) {
     T thread_min = (idx < n) ? input[idx] : sentinel_max<T>();
     int64_t thread_idx = (idx < n) ? idx : 0;
 
-    // Grid-stride loop to find local minimum
+    // Grid-stride loop to find local minimum (NaN-aware, first-NaN/lowest-index)
     for (int64_t i = idx + grid_size; i < n; i += grid_size) {
         T val = input[i];
-        if (val < thread_min) {
+        if (arg_min_takes_idx(val, i, thread_min, thread_idx)) {
             thread_min = val;
             thread_idx = i;
         }
@@ -2111,7 +2212,8 @@ __global__ void argmin_full_kernel(const T* input, int64_t* output, int64_t n) {
     // Block-level reduction
     for (int stride = blockDim.x / 2; stride >= 32; stride >>= 1) {
         if (tid < stride) {
-            if (shared_vals[tid + stride] < shared_vals[tid]) {
+            if (arg_min_takes_idx(shared_vals[tid + stride], shared_idxs[tid + stride],
+                                  shared_vals[tid], shared_idxs[tid])) {
                 shared_vals[tid] = shared_vals[tid + stride];
                 shared_idxs[tid] = shared_idxs[tid + stride];
             }
@@ -2129,7 +2231,7 @@ __global__ void argmin_full_kernel(const T* input, int64_t* output, int64_t n) {
         for (int offset = 16; offset > 0; offset /= 2) {
             T other_val = __shfl_down_sync(0xffffffff, val, offset);
             int64_t other_idx = __shfl_down_sync(0xffffffff, val_idx, offset);
-            if (other_val < val) {
+            if (arg_min_takes_idx(other_val, other_idx, val, val_idx)) {
                 val = other_val;
                 val_idx = other_idx;
             }
@@ -2185,7 +2287,7 @@ __global__ void argmax_along_dim_kernel(
             in_idx += indices[d] * meta.strides[d];
         }
         T val = input[in_idx];
-        if (val > max_val) {
+        if (arg_max_takes(val, max_val)) {
             max_val = val;
             max_idx = i;
         }
@@ -2238,7 +2340,7 @@ __global__ void argmin_along_dim_kernel(
             in_idx += indices[d] * meta.strides[d];
         }
         T val = input[in_idx];
-        if (val < min_val) {
+        if (arg_min_takes(val, min_val)) {
             min_val = val;
             min_idx = i;
         }
@@ -2264,10 +2366,10 @@ __global__ void argmax_full_kernel_half(const __half* input, int64_t* output, in
     __half thread_max = (idx < n) ? input[idx] : half_neg_inf();
     int64_t thread_idx = (idx < n) ? idx : 0;
 
-    // Grid-stride loop to find local maximum
+    // Grid-stride loop to find local maximum (NaN-aware, first-NaN/lowest-index)
     for (int64_t i = idx + grid_size; i < n; i += grid_size) {
         __half val = input[i];
-        if (__hgt(val, thread_max)) {
+        if (arg_max_takes_idx(val, i, thread_max, thread_idx)) {
             thread_max = val;
             thread_idx = i;
         }
@@ -2280,7 +2382,8 @@ __global__ void argmax_full_kernel_half(const __half* input, int64_t* output, in
     // Block-level reduction
     for (int stride = blockDim.x / 2; stride >= 32; stride >>= 1) {
         if (tid < stride) {
-            if (__hgt(shared_vals[tid + stride], shared_vals[tid])) {
+            if (arg_max_takes_idx(shared_vals[tid + stride], shared_idxs[tid + stride],
+                                  shared_vals[tid], shared_idxs[tid])) {
                 shared_vals[tid] = shared_vals[tid + stride];
                 shared_idxs[tid] = shared_idxs[tid + stride];
             }
@@ -2298,7 +2401,7 @@ __global__ void argmax_full_kernel_half(const __half* input, int64_t* output, in
         for (int offset = 16; offset > 0; offset /= 2) {
             __half other_val = __shfl_down_sync(0xffffffff, val, offset);
             int64_t other_idx = __shfl_down_sync(0xffffffff, val_idx, offset);
-            if (__hgt(other_val, val)) {
+            if (arg_max_takes_idx(other_val, other_idx, val, val_idx)) {
                 val = other_val;
                 val_idx = other_idx;
             }
@@ -2323,10 +2426,10 @@ __global__ void argmin_full_kernel_half(const __half* input, int64_t* output, in
     __half thread_min = (idx < n) ? input[idx] : half_pos_inf();
     int64_t thread_idx = (idx < n) ? idx : 0;
 
-    // Grid-stride loop to find local minimum
+    // Grid-stride loop to find local minimum (NaN-aware, first-NaN/lowest-index)
     for (int64_t i = idx + grid_size; i < n; i += grid_size) {
         __half val = input[i];
-        if (__hlt(val, thread_min)) {
+        if (arg_min_takes_idx(val, i, thread_min, thread_idx)) {
             thread_min = val;
             thread_idx = i;
         }
@@ -2339,7 +2442,8 @@ __global__ void argmin_full_kernel_half(const __half* input, int64_t* output, in
     // Block-level reduction
     for (int stride = blockDim.x / 2; stride >= 32; stride >>= 1) {
         if (tid < stride) {
-            if (__hlt(shared_vals[tid + stride], shared_vals[tid])) {
+            if (arg_min_takes_idx(shared_vals[tid + stride], shared_idxs[tid + stride],
+                                  shared_vals[tid], shared_idxs[tid])) {
                 shared_vals[tid] = shared_vals[tid + stride];
                 shared_idxs[tid] = shared_idxs[tid + stride];
             }
@@ -2357,7 +2461,7 @@ __global__ void argmin_full_kernel_half(const __half* input, int64_t* output, in
         for (int offset = 16; offset > 0; offset /= 2) {
             __half other_val = __shfl_down_sync(0xffffffff, val, offset);
             int64_t other_idx = __shfl_down_sync(0xffffffff, val_idx, offset);
-            if (__hlt(other_val, val)) {
+            if (arg_min_takes_idx(other_val, other_idx, val, val_idx)) {
                 val = other_val;
                 val_idx = other_idx;
             }
@@ -2412,7 +2516,7 @@ __global__ void argmax_along_dim_kernel_half(
             in_idx += indices[d] * meta.strides[d];
         }
         __half val = input[in_idx];
-        if (__hgt(val, max_val)) {
+        if (arg_max_takes(val, max_val)) {
             max_val = val;
             max_idx = i;
         }
@@ -2464,7 +2568,7 @@ __global__ void argmin_along_dim_kernel_half(
             in_idx += indices[d] * meta.strides[d];
         }
         __half val = input[in_idx];
-        if (__hlt(val, min_val)) {
+        if (arg_min_takes(val, min_val)) {
             min_val = val;
             min_idx = i;
         }
@@ -2497,7 +2601,7 @@ __global__ void argmax_final_kernel_bf16(const __nv_bfloat16* input, const int64
     for (int i = tid + blockDim.x; i < num_blocks; i += blockDim.x) {
         int64_t idx = block_indices[i];
         float val = __bfloat162float(input[idx]);
-        if (val > best_val) {
+        if (arg_max_takes_idx(val, idx, best_val, best_idx)) {
             best_val = val;
             best_idx = idx;
         }
@@ -2509,7 +2613,8 @@ __global__ void argmax_final_kernel_bf16(const __nv_bfloat16* input, const int64
 
     for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
         if (tid < stride) {
-            if (shared_vals[tid + stride] > shared_vals[tid]) {
+            if (arg_max_takes_idx(shared_vals[tid + stride], shared_idxs[tid + stride],
+                                  shared_vals[tid], shared_idxs[tid])) {
                 shared_vals[tid] = shared_vals[tid + stride];
                 shared_idxs[tid] = shared_idxs[tid + stride];
             }
@@ -2542,7 +2647,7 @@ __global__ void argmin_final_kernel_bf16(const __nv_bfloat16* input, const int64
     for (int i = tid + blockDim.x; i < num_blocks; i += blockDim.x) {
         int64_t idx = block_indices[i];
         float val = __bfloat162float(input[idx]);
-        if (val < best_val) {
+        if (arg_min_takes_idx(val, idx, best_val, best_idx)) {
             best_val = val;
             best_idx = idx;
         }
@@ -2554,7 +2659,8 @@ __global__ void argmin_final_kernel_bf16(const __nv_bfloat16* input, const int64
 
     for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
         if (tid < stride) {
-            if (shared_vals[tid + stride] < shared_vals[tid]) {
+            if (arg_min_takes_idx(shared_vals[tid + stride], shared_idxs[tid + stride],
+                                  shared_vals[tid], shared_idxs[tid])) {
                 shared_vals[tid] = shared_vals[tid + stride];
                 shared_idxs[tid] = shared_idxs[tid + stride];
             }
@@ -2580,10 +2686,10 @@ __global__ void argmax_full_kernel_bf16(const __nv_bfloat16* input, int64_t* out
     __nv_bfloat16 thread_max = (idx < n) ? input[idx] : bfloat16_neg_inf();
     int64_t thread_idx = (idx < n) ? idx : 0;
 
-    // Grid-stride loop to find local maximum
+    // Grid-stride loop to find local maximum (NaN-aware, first-NaN/lowest-index)
     for (int64_t i = idx + grid_size; i < n; i += grid_size) {
         __nv_bfloat16 val = input[i];
-        if (__hgt(val, thread_max)) {
+        if (arg_max_takes_idx(val, i, thread_max, thread_idx)) {
             thread_max = val;
             thread_idx = i;
         }
@@ -2596,7 +2702,8 @@ __global__ void argmax_full_kernel_bf16(const __nv_bfloat16* input, int64_t* out
     // Block-level reduction
     for (int stride = blockDim.x / 2; stride >= 32; stride >>= 1) {
         if (tid < stride) {
-            if (__hgt(shared_vals[tid + stride], shared_vals[tid])) {
+            if (arg_max_takes_idx(shared_vals[tid + stride], shared_idxs[tid + stride],
+                                  shared_vals[tid], shared_idxs[tid])) {
                 shared_vals[tid] = shared_vals[tid + stride];
                 shared_idxs[tid] = shared_idxs[tid + stride];
             }
@@ -2614,7 +2721,7 @@ __global__ void argmax_full_kernel_bf16(const __nv_bfloat16* input, int64_t* out
         for (int offset = 16; offset > 0; offset /= 2) {
             __nv_bfloat16 other_val = __shfl_down_sync(0xffffffff, val, offset);
             int64_t other_idx = __shfl_down_sync(0xffffffff, val_idx, offset);
-            if (__hgt(other_val, val)) {
+            if (arg_max_takes_idx(other_val, other_idx, val, val_idx)) {
                 val = other_val;
                 val_idx = other_idx;
             }
@@ -2639,10 +2746,10 @@ __global__ void argmin_full_kernel_bf16(const __nv_bfloat16* input, int64_t* out
     __nv_bfloat16 thread_min = (idx < n) ? input[idx] : bfloat16_pos_inf();
     int64_t thread_idx = (idx < n) ? idx : 0;
 
-    // Grid-stride loop to find local minimum
+    // Grid-stride loop to find local minimum (NaN-aware, first-NaN/lowest-index)
     for (int64_t i = idx + grid_size; i < n; i += grid_size) {
         __nv_bfloat16 val = input[i];
-        if (__hlt(val, thread_min)) {
+        if (arg_min_takes_idx(val, i, thread_min, thread_idx)) {
             thread_min = val;
             thread_idx = i;
         }
@@ -2655,7 +2762,8 @@ __global__ void argmin_full_kernel_bf16(const __nv_bfloat16* input, int64_t* out
     // Block-level reduction
     for (int stride = blockDim.x / 2; stride >= 32; stride >>= 1) {
         if (tid < stride) {
-            if (__hlt(shared_vals[tid + stride], shared_vals[tid])) {
+            if (arg_min_takes_idx(shared_vals[tid + stride], shared_idxs[tid + stride],
+                                  shared_vals[tid], shared_idxs[tid])) {
                 shared_vals[tid] = shared_vals[tid + stride];
                 shared_idxs[tid] = shared_idxs[tid + stride];
             }
@@ -2673,7 +2781,7 @@ __global__ void argmin_full_kernel_bf16(const __nv_bfloat16* input, int64_t* out
         for (int offset = 16; offset > 0; offset /= 2) {
             __nv_bfloat16 other_val = __shfl_down_sync(0xffffffff, val, offset);
             int64_t other_idx = __shfl_down_sync(0xffffffff, val_idx, offset);
-            if (__hlt(other_val, val)) {
+            if (arg_min_takes_idx(other_val, other_idx, val, val_idx)) {
                 val = other_val;
                 val_idx = other_idx;
             }
@@ -2728,7 +2836,7 @@ __global__ void argmax_along_dim_kernel_bf16(
             in_idx += indices[d] * meta.strides[d];
         }
         __nv_bfloat16 val = input[in_idx];
-        if (__hgt(val, max_val)) {
+        if (arg_max_takes(val, max_val)) {
             max_val = val;
             max_idx = i;
         }
@@ -2780,7 +2888,7 @@ __global__ void argmin_along_dim_kernel_bf16(
             in_idx += indices[d] * meta.strides[d];
         }
         __nv_bfloat16 val = input[in_idx];
-        if (__hlt(val, min_val)) {
+        if (arg_min_takes(val, min_val)) {
             min_val = val;
             min_idx = i;
         }

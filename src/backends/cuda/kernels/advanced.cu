@@ -3726,28 +3726,34 @@ auto quantile_kernel(const Tensor& input, double q, int64_t dim, bool keepdim,
         // per-slice thrust::sort, eliminating thousands of tiny launches.
         // Sort in place: a double buffer is required, so use a second workspace.
         Tensor sorted_ws({total_slices, dim_size}, dtype, device);
-        std::vector<int> offsets_h(total_slices + 1);
+        // int64 offsets/counts: total_elems = total_slices * dim_size can exceed
+        // INT_MAX (>~2.1B elements). The previous int32 offsets and int casts on
+        // num_items/num_segments overflowed, yielding wrapped/negative segment
+        // offsets, OOB reads, or silently wrong segments. CUB's SortKeys takes
+        // int64_t num_items/num_segments and a templated offset iterator, so an
+        // int64_t* offset buffer is accepted natively without narrowing.
+        std::vector<int64_t> offsets_h(total_slices + 1);
         for (int64_t s = 0; s <= total_slices; ++s) {
-            offsets_h[s] = static_cast<int>(s * dim_size);
+            offsets_h[s] = s * dim_size;
         }
-        backend::CachedMemoryGuard offsets_guard((total_slices + 1) * sizeof(int));
-        int* d_offsets = static_cast<int*>(offsets_guard.get());
+        backend::CachedMemoryGuard offsets_guard((total_slices + 1) * sizeof(int64_t));
+        int64_t* d_offsets = static_cast<int64_t*>(offsets_guard.get());
         TENZOR_CUDA_CHECK(cudaMemcpyAsync(d_offsets, offsets_h.data(),
-            (total_slices + 1) * sizeof(int), cudaMemcpyHostToDevice, stream));
+            (total_slices + 1) * sizeof(int64_t), cudaMemcpyHostToDevice, stream));
 
         void* d_temp = nullptr;
         size_t temp_bytes = 0;
         cub::DeviceSegmentedSort::SortKeys(
             d_temp, temp_bytes,
             workspace.data<T>(), sorted_ws.data<T>(),
-            static_cast<int>(total_elems), static_cast<int>(total_slices),
+            total_elems, total_slices,
             d_offsets, d_offsets + 1, stream);
         backend::CachedMemoryGuard temp_guard(temp_bytes);
         d_temp = temp_guard.get();
         cub::DeviceSegmentedSort::SortKeys(
             d_temp, temp_bytes,
             workspace.data<T>(), sorted_ws.data<T>(),
-            static_cast<int>(total_elems), static_cast<int>(total_slices),
+            total_elems, total_slices,
             d_offsets, d_offsets + 1, stream);
         TENZOR_CUDA_POST_LAUNCH_CHECK();
 
@@ -3916,17 +3922,23 @@ auto nanmedian_kernel(const Tensor& input, int64_t dim, bool keepdim,
 // Histc kernel — fixed-bin histogram using atomicAdd
 // ============================================================================
 
-__global__ void histc_kernel_f32(const float* __restrict__ input, float* __restrict__ output,
-                                  int64_t n, int64_t bins, float min_val, float max_val)
+// Templated on scalar type T (float or double) so Float64 input bins at native
+// precision, matching the CPU reference. The previous implementation downcast
+// Float64 input to Float32, which truncated bin assignment near edges. Mirrors
+// histogram_kernel_impl<T> above. Counts/edges (min_val, max_val, bin_width) are
+// all computed in T so Float64 retains double precision throughout.
+template<typename T>
+__global__ void histc_kernel_impl(const T* __restrict__ input, T* __restrict__ output,
+                                  int64_t n, int64_t bins, T min_val, T max_val)
 {
-    float bin_width = (max_val - min_val) / static_cast<float>(bins);
+    T bin_width = (max_val - min_val) / static_cast<T>(bins);
     for (int64_t idx = blockIdx.x * blockDim.x + threadIdx.x; idx < n;
          idx += blockDim.x * gridDim.x) {
-        float val = input[idx];
+        T val = input[idx];
         if (val >= min_val && val <= max_val) {
             int64_t bin = static_cast<int64_t>((val - min_val) / bin_width);
             if (bin >= bins) bin = bins - 1;
-            atomicAdd(&output[bin], 1.0f);
+            atomicAdd(&output[bin], static_cast<T>(1));
         }
     }
 }
@@ -3975,21 +3987,16 @@ auto histc_kernel(const Tensor& input, int64_t bins, double min_val, double max_
 
     switch (dtype) {
         case DType::Float32:
-            histc_kernel_f32<<<grid, block, 0, stream>>>(
+            histc_kernel_impl<float><<<grid, block, 0, stream>>>(
                 input_cont.data<float>(), output.data<float>(), n, bins,
                 static_cast<float>(min_val), static_cast<float>(max_val));
             break;
         case DType::Float64:
-            {
-                // Convert double input to float, run float32 histogram, then convert output
-                Tensor f32_input = input_cont.to(DType::Float32);
-                Tensor f32_output({bins}, DType::Float32, device);
-                TENZOR_CUDA_CHECK(cudaMemsetAsync(f32_output.data_ptr(), 0, bins * sizeof(float), stream));
-                histc_kernel_f32<<<grid, block, 0, stream>>>(
-                    f32_input.data<float>(), f32_output.data<float>(), n, bins,
-                    static_cast<float>(min_val), static_cast<float>(max_val));
-                output = f32_output.to(DType::Float64);
-            }
+            // Native double-precision histogram: bin_width and bin membership are
+            // computed in double, matching the CPU Float64 reference. No downcast.
+            histc_kernel_impl<double><<<grid, block, 0, stream>>>(
+                input_cont.data<double>(), output.data<double>(), n, bins,
+                min_val, max_val);
             break;
         default:
             throw std::runtime_error("histc CUDA: unsupported dtype (only float32/float64)");

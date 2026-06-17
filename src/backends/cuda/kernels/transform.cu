@@ -944,29 +944,27 @@ auto slice_kernel(
     int block_size = 256;
     int num_blocks = (total + block_size - 1) / block_size;
 
-    if (input.dtype() == DType::Float32) {
-        slice_kernel_impl<float><<<num_blocks, block_size, 0, stream>>>(
-            input.data<float>(), output.data<float>(), meta, ndim, total);
-            CUDA_CHECK(cudaGetLastError());
-    } else if (input.dtype() == DType::Float64) {
-        slice_kernel_impl<double><<<num_blocks, block_size, 0, stream>>>(
-            input.data<double>(), output.data<double>(), meta, ndim, total);
-            CUDA_CHECK(cudaGetLastError());
-    } else if (input.dtype() == DType::Float16) {
-        slice_kernel_impl<__half><<<num_blocks, block_size, 0, stream>>>(
-            reinterpret_cast<const __half*>(input.data_ptr()),
-            reinterpret_cast<__half*>(output.data_ptr()), meta, ndim, total);
-            CUDA_CHECK(cudaGetLastError());
-    } else if (input.dtype() == DType::Int32) {
-        slice_kernel_impl<int32_t><<<num_blocks, block_size, 0, stream>>>(
-            input.data<int32_t>(), output.data<int32_t>(), meta, ndim, total);
-            CUDA_CHECK(cudaGetLastError());
-    } else if (input.dtype() == DType::Int64) {
-        slice_kernel_impl<int64_t><<<num_blocks, block_size, 0, stream>>>(
-            input.data<int64_t>(), output.data<int64_t>(), meta, ndim, total);
-            CUDA_CHECK(cudaGetLastError());
-    } else {
-        throw std::runtime_error("slice: unsupported dtype");
+    // slice is pure data movement (index-based element copy), so dispatch by
+    // element size like tile/contiguous/cat rather than by semantic dtype.
+    // This makes slice — and split/chunk along non-zero dims and strided
+    // slices that fall back to it — work for every dtype (BFloat16, Int8,
+    // UInt8, Bool, Int16, UInt16/32/64, Complex64/128) just like the CPU
+    // reference, instead of throwing for the unlisted dtypes.
+    auto launch_slice = [&](auto* tag) {
+        using T = std::remove_pointer_t<decltype(tag)>;
+        slice_kernel_impl<T><<<num_blocks, block_size, 0, stream>>>(
+            reinterpret_cast<const T*>(input.data_ptr()),
+            reinterpret_cast<T*>(output.data_ptr()), meta, ndim, total);
+        CUDA_CHECK(cudaGetLastError());
+    };
+    switch (dtype_size(input.dtype())) {
+        case 1:  launch_slice(static_cast<uint8_t*>(nullptr));  break;   // Int8, UInt8, Bool
+        case 2:  launch_slice(static_cast<uint16_t*>(nullptr)); break;   // Float16, BFloat16, Int16, UInt16
+        case 4:  launch_slice(static_cast<uint32_t*>(nullptr)); break;   // Float32, Int32, UInt32
+        case 8:  launch_slice(static_cast<uint64_t*>(nullptr)); break;   // Float64, Int64, UInt64, Complex64
+        case 16: launch_slice(static_cast<double2*>(nullptr));  break;   // Complex128
+        default:
+            throw std::runtime_error("slice: unsupported element size");
     }
 
     cudaError_t err = cudaGetLastError();

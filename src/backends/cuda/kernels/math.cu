@@ -4346,6 +4346,22 @@ auto compare_kernel_launcher(const Tensor& a, const Tensor& b, cudaStream_t stre
             compare_kernel_device<<<grid, block, 0, stream>>>(
                 a.data<uint8_t>(), b.data<uint8_t>(), result.data<bool>(), n, op);
             CUDA_CHECK(cudaGetLastError());
+        } else if (a.dtype() == DType::Int16) {
+            compare_kernel_device<<<grid, block, 0, stream>>>(
+                a.data<int16_t>(), b.data<int16_t>(), result.data<bool>(), n, op);
+            CUDA_CHECK(cudaGetLastError());
+        } else if (a.dtype() == DType::UInt16) {
+            compare_kernel_device<<<grid, block, 0, stream>>>(
+                a.data<uint16_t>(), b.data<uint16_t>(), result.data<bool>(), n, op);
+            CUDA_CHECK(cudaGetLastError());
+        } else if (a.dtype() == DType::UInt32) {
+            compare_kernel_device<<<grid, block, 0, stream>>>(
+                a.data<uint32_t>(), b.data<uint32_t>(), result.data<bool>(), n, op);
+            CUDA_CHECK(cudaGetLastError());
+        } else if (a.dtype() == DType::UInt64) {
+            compare_kernel_device<<<grid, block, 0, stream>>>(
+                a.data<uint64_t>(), b.data<uint64_t>(), result.data<bool>(), n, op);
+            CUDA_CHECK(cudaGetLastError());
         } else if (a.dtype() == DType::Bool) {
             compare_kernel_device<<<grid, block, 0, stream>>>(
                 a.data<bool>(), b.data<bool>(), result.data<bool>(), n, op);
@@ -4420,6 +4436,26 @@ auto compare_kernel_launcher(const Tensor& a, const Tensor& b, cudaStream_t stre
     } else if (a.dtype() == DType::UInt8) {
         broadcast_compare_kernel<<<grid, block, 0, stream>>>(
             a.data<uint8_t>(), b.data<uint8_t>(), result.data<bool>(),
+            meta, ndim, n, op);
+        CUDA_CHECK(cudaGetLastError());
+    } else if (a.dtype() == DType::Int16) {
+        broadcast_compare_kernel<<<grid, block, 0, stream>>>(
+            a.data<int16_t>(), b.data<int16_t>(), result.data<bool>(),
+            meta, ndim, n, op);
+        CUDA_CHECK(cudaGetLastError());
+    } else if (a.dtype() == DType::UInt16) {
+        broadcast_compare_kernel<<<grid, block, 0, stream>>>(
+            a.data<uint16_t>(), b.data<uint16_t>(), result.data<bool>(),
+            meta, ndim, n, op);
+        CUDA_CHECK(cudaGetLastError());
+    } else if (a.dtype() == DType::UInt32) {
+        broadcast_compare_kernel<<<grid, block, 0, stream>>>(
+            a.data<uint32_t>(), b.data<uint32_t>(), result.data<bool>(),
+            meta, ndim, n, op);
+        CUDA_CHECK(cudaGetLastError());
+    } else if (a.dtype() == DType::UInt64) {
+        broadcast_compare_kernel<<<grid, block, 0, stream>>>(
+            a.data<uint64_t>(), b.data<uint64_t>(), result.data<bool>(),
             meta, ndim, n, op);
         CUDA_CHECK(cudaGetLastError());
     } else if (a.dtype() == DType::Bool) {
