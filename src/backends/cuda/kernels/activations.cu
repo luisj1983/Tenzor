@@ -2157,7 +2157,11 @@ auto sigmoid_kernel(const Tensor& input_raw, cudaStream_t stream) -> Tensor {
 }
 
 // Sigmoid backward wrapper - uses vectorized float4 for 4x memory throughput
-auto sigmoid_backward_kernel(const Tensor& grad_output, const Tensor& input, cudaStream_t stream) -> Tensor {
+auto sigmoid_backward_kernel(const Tensor& grad_output_raw, const Tensor& input_raw, cudaStream_t stream) -> Tensor {
+    // Materialize contiguous copies: the kernels index flat, so a strided/
+    // transposed grad_output/input would otherwise read the wrong elements.
+    auto grad_output = grad_output_raw.contiguous();
+    auto input = input_raw.contiguous();
     int64_t n = input.numel();
     std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
     Tensor result(shape, input.dtype(), input.device());
@@ -2233,7 +2237,8 @@ auto sigmoid_backward_kernel(const Tensor& grad_output, const Tensor& input, cud
 }
 
 // Swish wrapper - uses vectorized float4 for 4x memory throughput on Float32
-auto swish_kernel(const Tensor& input, cudaStream_t stream) -> Tensor {
+auto swish_kernel(const Tensor& input_raw, cudaStream_t stream) -> Tensor {
+    auto input = input_raw.contiguous();
     int64_t n = input.numel();
     std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
     Tensor result(shape, input.dtype(), input.device());
@@ -2304,7 +2309,11 @@ auto swish_kernel(const Tensor& input, cudaStream_t stream) -> Tensor {
 }
 
 // Swish backward wrapper - uses vectorized float4 for 4x memory throughput
-auto swish_backward_kernel(const Tensor& grad_output, const Tensor& input, cudaStream_t stream) -> Tensor {
+auto swish_backward_kernel(const Tensor& grad_output_raw, const Tensor& input_raw, cudaStream_t stream) -> Tensor {
+    // Materialize contiguous copies: the kernels index flat, so a strided/
+    // transposed grad_output/input would otherwise read the wrong elements.
+    auto grad_output = grad_output_raw.contiguous();
+    auto input = input_raw.contiguous();
     int64_t n = input.numel();
     std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
     Tensor result(shape, input.dtype(), input.device());
@@ -2453,7 +2462,11 @@ auto tanh_kernel(const Tensor& input_raw, cudaStream_t stream) -> Tensor {
 }
 
 // Tanh backward wrapper - uses vectorized float4 for 4x memory throughput
-auto tanh_backward_kernel(const Tensor& grad_output, const Tensor& input, cudaStream_t stream) -> Tensor {
+auto tanh_backward_kernel(const Tensor& grad_output_raw, const Tensor& input_raw, cudaStream_t stream) -> Tensor {
+    // Materialize contiguous copies: the kernels index flat, so a strided/
+    // transposed grad_output/input would otherwise read the wrong elements.
+    auto grad_output = grad_output_raw.contiguous();
+    auto input = input_raw.contiguous();
     int64_t n = input.numel();
     std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
     Tensor result(shape, input.dtype(), input.device());
@@ -2529,7 +2542,8 @@ auto tanh_backward_kernel(const Tensor& grad_output, const Tensor& input, cudaSt
 }
 
 // GELU wrapper - uses vectorized float4 for 4x memory throughput on Float32
-auto gelu_kernel(const Tensor& input, cudaStream_t stream) -> Tensor {
+auto gelu_kernel(const Tensor& input_raw, cudaStream_t stream) -> Tensor {
+    auto input = input_raw.contiguous();
     int64_t n = input.numel();
     std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
     Tensor result(shape, input.dtype(), input.device());
@@ -2600,7 +2614,11 @@ auto gelu_kernel(const Tensor& input, cudaStream_t stream) -> Tensor {
 }
 
 // GELU backward wrapper - uses vectorized float4 for 4x memory throughput
-auto gelu_backward_kernel(const Tensor& grad_output, const Tensor& input, cudaStream_t stream) -> Tensor {
+auto gelu_backward_kernel(const Tensor& grad_output_raw, const Tensor& input_raw, cudaStream_t stream) -> Tensor {
+    // Materialize contiguous copies: the kernels index flat, so a strided/
+    // transposed grad_output/input would otherwise read the wrong elements.
+    auto grad_output = grad_output_raw.contiguous();
+    auto input = input_raw.contiguous();
     int64_t n = input.numel();
     std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
     Tensor result(shape, input.dtype(), input.device());
@@ -2676,7 +2694,8 @@ auto gelu_backward_kernel(const Tensor& grad_output, const Tensor& input, cudaSt
 }
 
 // Leaky ReLU wrapper - uses vectorized float4 for 4x memory throughput on Float32
-auto leaky_relu_kernel(const Tensor& input, double alpha, cudaStream_t stream) -> Tensor {
+auto leaky_relu_kernel(const Tensor& input_raw, double alpha, cudaStream_t stream) -> Tensor {
+    auto input = input_raw.contiguous();
     int64_t n = input.numel();
     std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
     Tensor result(shape, input.dtype(), input.device());
@@ -2747,7 +2766,9 @@ auto leaky_relu_kernel(const Tensor& input, double alpha, cudaStream_t stream) -
 }
 
 // Leaky ReLU backward wrapper
-auto leaky_relu_backward_kernel(const Tensor& grad_output, const Tensor& input, double alpha, cudaStream_t stream) -> Tensor {
+auto leaky_relu_backward_kernel(const Tensor& grad_output_raw, const Tensor& input_raw, double alpha, cudaStream_t stream) -> Tensor {
+    auto grad_output = grad_output_raw.contiguous();
+    auto input = input_raw.contiguous();
     int64_t n = input.numel();
     std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
     Tensor result(shape, input.dtype(), input.device());
@@ -2824,7 +2845,8 @@ auto leaky_relu_backward_kernel(const Tensor& grad_output, const Tensor& input, 
 }
 
 // ELU wrapper
-auto elu_kernel(const Tensor& input, float alpha, cudaStream_t stream) -> Tensor {
+auto elu_kernel(const Tensor& input_raw, float alpha, cudaStream_t stream) -> Tensor {
+    auto input = input_raw.contiguous();
     int64_t n = input.numel();
     std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
     Tensor result(shape, input.dtype(), input.device());
@@ -2869,7 +2891,9 @@ auto elu_kernel(const Tensor& input, float alpha, cudaStream_t stream) -> Tensor
 }
 
 // ELU backward wrapper
-auto elu_backward_kernel(const Tensor& grad_output, const Tensor& input, float alpha, cudaStream_t stream) -> Tensor {
+auto elu_backward_kernel(const Tensor& grad_output_raw, const Tensor& input_raw, float alpha, cudaStream_t stream) -> Tensor {
+    auto grad_output = grad_output_raw.contiguous();
+    auto input = input_raw.contiguous();
     int64_t n = input.numel();
     std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
     Tensor result(shape, input.dtype(), input.device());
@@ -2916,7 +2940,8 @@ auto elu_backward_kernel(const Tensor& grad_output, const Tensor& input, float a
 }
 
 // SELU wrapper
-auto selu_kernel(const Tensor& input, cudaStream_t stream) -> Tensor {
+auto selu_kernel(const Tensor& input_raw, cudaStream_t stream) -> Tensor {
+    auto input = input_raw.contiguous();
     int64_t n = input.numel();
     std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
     Tensor result(shape, input.dtype(), input.device());
@@ -2961,7 +2986,11 @@ auto selu_kernel(const Tensor& input, cudaStream_t stream) -> Tensor {
 }
 
 // SELU backward wrapper
-auto selu_backward_kernel(const Tensor& grad_output, const Tensor& input, cudaStream_t stream) -> Tensor {
+auto selu_backward_kernel(const Tensor& grad_output_raw, const Tensor& input_raw, cudaStream_t stream) -> Tensor {
+    // Materialize contiguous copies: the kernels index flat, so a strided/
+    // transposed grad_output/input would otherwise read the wrong elements.
+    auto grad_output = grad_output_raw.contiguous();
+    auto input = input_raw.contiguous();
     int64_t n = input.numel();
     std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
     Tensor result(shape, input.dtype(), input.device());
@@ -3008,7 +3037,8 @@ auto selu_backward_kernel(const Tensor& grad_output, const Tensor& input, cudaSt
 }
 
 // Mish wrapper
-auto mish_kernel(const Tensor& input, cudaStream_t stream) -> Tensor {
+auto mish_kernel(const Tensor& input_raw, cudaStream_t stream) -> Tensor {
+    auto input = input_raw.contiguous();
     int64_t n = input.numel();
     std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
     Tensor result(shape, input.dtype(), input.device());
@@ -3053,7 +3083,11 @@ auto mish_kernel(const Tensor& input, cudaStream_t stream) -> Tensor {
 }
 
 // Mish backward wrapper
-auto mish_backward_kernel(const Tensor& grad_output, const Tensor& input, cudaStream_t stream) -> Tensor {
+auto mish_backward_kernel(const Tensor& grad_output_raw, const Tensor& input_raw, cudaStream_t stream) -> Tensor {
+    // Materialize contiguous copies: the kernels index flat, so a strided/
+    // transposed grad_output/input would otherwise read the wrong elements.
+    auto grad_output = grad_output_raw.contiguous();
+    auto input = input_raw.contiguous();
     int64_t n = input.numel();
     std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
     Tensor result(shape, input.dtype(), input.device());
@@ -3100,7 +3134,8 @@ auto mish_backward_kernel(const Tensor& grad_output, const Tensor& input, cudaSt
 }
 
 // Softplus wrapper
-auto softplus_kernel(const Tensor& input, float beta, float threshold, cudaStream_t stream) -> Tensor {
+auto softplus_kernel(const Tensor& input_raw, float beta, float threshold, cudaStream_t stream) -> Tensor {
+    auto input = input_raw.contiguous();
     int64_t n = input.numel();
     std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
     Tensor result(shape, input.dtype(), input.device());
@@ -3145,7 +3180,9 @@ auto softplus_kernel(const Tensor& input, float beta, float threshold, cudaStrea
 }
 
 // Softplus backward wrapper
-auto softplus_backward_kernel(const Tensor& grad_output, const Tensor& input, float beta, float threshold, cudaStream_t stream) -> Tensor {
+auto softplus_backward_kernel(const Tensor& grad_output_raw, const Tensor& input_raw, float beta, float threshold, cudaStream_t stream) -> Tensor {
+    auto grad_output = grad_output_raw.contiguous();
+    auto input = input_raw.contiguous();
     int64_t n = input.numel();
     std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
     Tensor result(shape, input.dtype(), input.device());
@@ -3628,7 +3665,8 @@ __global__ void hardsigmoid_forward_kernel(const T* input, T* output, int64_t n)
     }
 }
 
-auto hardswish_kernel(const Tensor& input, cudaStream_t stream) -> Tensor {
+auto hardswish_kernel(const Tensor& input_raw, cudaStream_t stream) -> Tensor {
+    auto input = input_raw.contiguous();
     int64_t n = input.numel();
     std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
     Tensor result(shape, input.dtype(), input.device());
@@ -3655,7 +3693,8 @@ auto hardswish_kernel(const Tensor& input, cudaStream_t stream) -> Tensor {
     return result;
 }
 
-auto hardsigmoid_kernel(const Tensor& input, cudaStream_t stream) -> Tensor {
+auto hardsigmoid_kernel(const Tensor& input_raw, cudaStream_t stream) -> Tensor {
+    auto input = input_raw.contiguous();
     int64_t n = input.numel();
     std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
     Tensor result(shape, input.dtype(), input.device());
