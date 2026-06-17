@@ -60,7 +60,9 @@ void main() {
 
                 if (value > max_val) {
                     max_val = value;
-                    max_idx = int(input_idx);
+                    // Plane-local index (in_y*W + in_x): matches CPU/PyTorch and
+                    // max_unpool; the backward reconstructs the global offset.
+                    max_idx = int(uint(in_y) * params.in_width + uint(in_x));
                 }
             }
         }

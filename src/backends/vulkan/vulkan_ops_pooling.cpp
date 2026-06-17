@@ -1182,10 +1182,14 @@ auto VulkanBackend::dispatchMaxPool2dBackwardWithIndices(const Tensor& grad_outp
     struct PushConstants {
         uint32_t n_elements;
         uint32_t grad_input_size;
+        uint32_t out_plane;   // H_out * W_out
+        uint32_t in_plane;    // H_in * W_in
     } push_constants;
 
     push_constants.n_elements = static_cast<uint32_t>(grad_out_numel);
     push_constants.grad_input_size = static_cast<uint32_t>(grad_in_numel);
+    push_constants.out_plane = static_cast<uint32_t>(grad_out_shape[2] * grad_out_shape[3]);
+    push_constants.in_plane = static_cast<uint32_t>(H_in * W_in);
 
     VkCommandBuffer cmdBuffer = beginSingleTimeCommands(device_id);
     vkCmdBindPipeline(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());

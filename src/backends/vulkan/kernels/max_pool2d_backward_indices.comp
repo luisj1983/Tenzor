@@ -13,6 +13,8 @@ layout(binding = 2) buffer GradInput { float grad_input[]; };     // (N, C, H, W
 layout(push_constant) uniform PushConstants {
     uint n_elements;          // Total output gradient elements (N * C * H_out * W_out)
     uint grad_input_size;     // Total input gradient elements (N * C * H * W)
+    uint out_plane;           // H_out * W_out
+    uint in_plane;            // H * W
 } params;
 
 void main() {
@@ -24,7 +26,11 @@ void main() {
 
     // Get gradient and target index
     float grad = grad_output[idx];
-    int target_idx = int(indices[idx]);
+    // indices are plane-local (in_y*W + in_x); reconstruct the global input
+    // offset via the per-(n,c) plane base.
+    int plane_local = int(indices[idx]);
+    uint nc = idx / params.out_plane;
+    int target_idx = int(nc * params.in_plane) + plane_local;
 
     // Bounds check and scatter gradient
     if (target_idx >= 0 && target_idx < int(params.grad_input_size)) {

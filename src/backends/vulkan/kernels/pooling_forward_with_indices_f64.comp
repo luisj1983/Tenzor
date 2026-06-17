@@ -57,7 +57,7 @@ void main() {
 
                 if (value > max_val) {
                     max_val = value;
-                    max_idx = int(input_idx);
+                    max_idx = int(uint(in_y) * params.in_width + uint(in_x));  // plane-local (see non-f64 variant)
                 }
             }
         }
