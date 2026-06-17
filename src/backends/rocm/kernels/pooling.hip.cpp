@@ -437,7 +437,9 @@ __global__ void maxpool2d_forward_kernel(
                 T val = input[input_idx];
                 if (tenzor::rocm::is_nan_bits(val) || val > max_val) {
                     max_val = val;
-                    max_idx = input_idx;
+                    // Store the plane-local index (h*W + w) to match CPU/PyTorch
+                    // and the 1D/3D kernels; the backward re-adds the (n,c) base.
+                    max_idx = h * input_w + w;
                 }
             }
         }
@@ -492,7 +494,8 @@ __global__ void maxpool2d_forward_kernel_fp16(
                 float val = tenzor::rocm::safe_h2f(input[input_idx]);
                 if (tenzor::rocm::is_nan_bits(val) || val > max_val) {
                     max_val = val;
-                    max_idx = input_idx;
+                    // Plane-local index (h*W + w); backward re-adds the (n,c) base.
+                    max_idx = h * input_w + w;
                 }
             }
         }
@@ -621,10 +624,15 @@ __global__ void maxpool2d_backward_kernel(
     const T* grad_output,
     const int64_t* indices,
     T* grad_input,
-    int64_t total_elements
+    int64_t total_elements,
+    int64_t out_plane,   // output_h * output_w
+    int64_t in_plane     // input_h * input_w
 ) {
     HIP_KERNEL_LOOP(idx, total_elements) {
-        int64_t input_idx = indices[idx];
+        // indices store the plane-local argmax (h*W + w); reconstruct the global
+        // input offset by adding the per-(n,c) plane base.
+        int64_t nc = idx / out_plane;
+        int64_t input_idx = nc * in_plane + indices[idx];
         atomicAdd(&grad_input[input_idx], grad_output[idx]);
     }
 }
@@ -634,10 +642,14 @@ __global__ void maxpool2d_backward_kernel_fp16(
     const __half* grad_output,
     const int64_t* indices,
     float* grad_input_f32,
-    int64_t total_elements
+    int64_t total_elements,
+    int64_t out_plane,   // output_h * output_w
+    int64_t in_plane     // input_h * input_w
 ) {
     HIP_KERNEL_LOOP(idx, total_elements) {
-        int64_t input_idx = indices[idx];
+        // Plane-local index -> global offset (see maxpool2d_backward_kernel).
+        int64_t nc = idx / out_plane;
+        int64_t input_idx = nc * in_plane + indices[idx];
         atomicAdd(&grad_input_f32[input_idx], tenzor::rocm::safe_h2f(grad_output[idx]));
     }
 }
@@ -671,6 +683,11 @@ auto maxpool2d_backward_hip(
 
     int64_t total_elements = grad_output.numel();
     int threads = rocm::get_wavefront_size() * 4;  // 4 wavefronts per block
+    // Plane sizes for the plane-local -> global index reconstruction in the kernel.
+    int64_t in_plane = input_shape[input_shape.size() - 2] * input_shape[input_shape.size() - 1];
+    auto go_shape = grad_output.shape();
+    int64_t out_plane = go_shape[go_shape.size() - 2] * go_shape[go_shape.size() - 1];
+
     int blocks = (total_elements + threads - 1) / threads;
 
     if (grad_output.dtype() == DType::Float32) {
@@ -679,7 +696,7 @@ auto maxpool2d_backward_hip(
             grad_output.data<float>(),
             indices.data<int64_t>(),
             grad_input.data<float>(),
-            total_elements
+            total_elements, out_plane, in_plane
         );
         HIP_POST_LAUNCH_CHECK();
     } else if (grad_output.dtype() == DType::Float64) {
@@ -688,7 +705,7 @@ auto maxpool2d_backward_hip(
             grad_output.data<double>(),
             indices.data<int64_t>(),
             grad_input.data<double>(),
-            total_elements
+            total_elements, out_plane, in_plane
         );
         HIP_POST_LAUNCH_CHECK();
     } else if (grad_output.dtype() == DType::Float16) {
@@ -703,7 +720,7 @@ auto maxpool2d_backward_hip(
             reinterpret_cast<const __half*>(grad_output.data<Float16>()),
             indices.data<int64_t>(),
             grad_input_f32.data<float>(),
-            total_elements
+            total_elements, out_plane, in_plane
         );
         HIP_POST_LAUNCH_CHECK();
 
