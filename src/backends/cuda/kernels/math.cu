@@ -868,7 +868,8 @@ __global__ void pow_kernel_f64(const double* input, double* output, double expon
 __global__ void clamp_kernel_f32(const float* input, float* output, float min_val, float max_val, int64_t n) {
     TENZOR_CUDA_KERNEL_LOOP(idx, n) {
         float val = input[idx];
-        output[idx] = fminf(fmaxf(val, min_val), max_val);
+        // Preserve NaN (CPU/PyTorch semantics); fminf/fmaxf would collapse it to min_val.
+        output[idx] = ::isnan(val) ? val : fminf(fmaxf(val, min_val), max_val);
     }
 }
 
@@ -876,7 +877,8 @@ __global__ void clamp_kernel_f32(const float* input, float* output, float min_va
 __global__ void clamp_kernel_f64(const double* input, double* output, double min_val, double max_val, int64_t n) {
     TENZOR_CUDA_KERNEL_LOOP(idx, n) {
         double val = input[idx];
-        output[idx] = fmin(fmax(val, min_val), max_val);
+        // Preserve NaN (CPU/PyTorch semantics).
+        output[idx] = ::isnan(val) ? val : fmin(fmax(val, min_val), max_val);
     }
 }
 
@@ -1111,9 +1113,16 @@ __global__ void complex_div_kernel(const T* a, const T* b, T* c, int64_t n) {
         int64_t base = idx * 2;
         T ar = a[base], ai = a[base + 1];
         T br = b[base], bi = b[base + 1];
-        T denom = br * br + bi * bi;
-        c[base]     = (ar * br + ai * bi) / denom;
-        c[base + 1] = (ai * br - ar * bi) / denom;
+        // Smith's algorithm: avoids overflow in br*br+bi*bi (matches std::complex/CPU).
+        if (fabs(static_cast<double>(br)) >= fabs(static_cast<double>(bi))) {
+            T r = bi / br; T d = br + bi * r;
+            c[base]     = (ar + ai * r) / d;
+            c[base + 1] = (ai - ar * r) / d;
+        } else {
+            T r = br / bi; T d = bi + br * r;
+            c[base]     = (ar * r + ai) / d;
+            c[base + 1] = (ai * r - ar) / d;
+        }
     }
 }
 
@@ -1146,9 +1155,16 @@ struct ComplexDivOp {
     __device__ void operator()(const T* a, const T* b, T* c, int64_t a_base, int64_t b_base, int64_t c_base) const {
         T ar = a[a_base], ai = a[a_base + 1];
         T br = b[b_base], bi = b[b_base + 1];
-        T denom = br * br + bi * bi;
-        c[c_base]     = (ar * br + ai * bi) / denom;
-        c[c_base + 1] = (ai * br - ar * bi) / denom;
+        // Smith's algorithm (matches std::complex/CPU, avoids denom overflow).
+        if (fabs(static_cast<double>(br)) >= fabs(static_cast<double>(bi))) {
+            T r = bi / br; T d = br + bi * r;
+            c[c_base]     = (ar + ai * r) / d;
+            c[c_base + 1] = (ai - ar * r) / d;
+        } else {
+            T r = br / bi; T d = bi + br * r;
+            c[c_base]     = (ar * r + ai) / d;
+            c[c_base + 1] = (ai * r - ar) / d;
+        }
     }
 };
 

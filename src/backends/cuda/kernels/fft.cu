@@ -1314,10 +1314,14 @@ template<typename T>
 __global__ void generate_chirp_kernel(T* chirp, int64_t N, T angle_sign) {
     int64_t k = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
     if (k >= N) return;
-    constexpr T PI = static_cast<T>(3.14159265358979323846);
-    T angle = angle_sign * PI * static_cast<T>(k) * static_cast<T>(k) / static_cast<T>(N);
-    chirp[2 * k]     = cos(angle);
-    chirp[2 * k + 1] = sin(angle);
+    // Compute the chirp phase in double with argument reduction (k^2 mod 2N) so
+    // large non-power-of-2 sizes do not lose float phase precision. Matches the
+    // standard Bluestein phase computation.
+    constexpr double PI = 3.14159265358979323846;
+    double phase = fmod(static_cast<double>(k) * static_cast<double>(k), 2.0 * static_cast<double>(N));
+    double angle = static_cast<double>(angle_sign) * PI * phase / static_cast<double>(N);
+    chirp[2 * k]     = static_cast<T>(cos(angle));
+    chirp[2 * k + 1] = static_cast<T>(sin(angle));
 }
 
 /// Build convolution kernel b: b[k] = conj(chirp[k]) for k=0..N-1

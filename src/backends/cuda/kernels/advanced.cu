@@ -301,14 +301,16 @@ static void sort_1d_thrust(const T* input, T* values, int64_t* indices_out,
                      thrust::device_pointer_cast(indices_out + n), int64_t(0));
 
     // Sort by key (values are keys, indices are values)
+    // stable_sort_by_key: equal keys keep ascending original-index order, matching
+    // the CPU std::stable_sort (and PyTorch's stable sort indices).
     if (descending) {
-        thrust::sort_by_key(policy,
+        thrust::stable_sort_by_key(policy,
             thrust::device_pointer_cast(values),
             thrust::device_pointer_cast(values + n),
             thrust::device_pointer_cast(indices_out),
             thrust::greater<T>());
     } else {
-        thrust::sort_by_key(policy,
+        thrust::stable_sort_by_key(policy,
             thrust::device_pointer_cast(values),
             thrust::device_pointer_cast(values + n),
             thrust::device_pointer_cast(indices_out));

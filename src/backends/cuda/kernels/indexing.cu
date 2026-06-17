@@ -1901,7 +1901,12 @@ auto one_hot_kernel(const Tensor& indices, int64_t num_classes,
                     cudaStream_t stream) -> Tensor {
     int64_t batch_size = indices.numel();
 
-    Tensor output({batch_size, num_classes}, DType::Float32, indices.device());
+    // Output shape is the index shape with num_classes appended (matches CPU),
+    // not a flat 2-D [batch, num_classes]. The kernel flattens rows row-major,
+    // so the flat launch is unchanged.
+    std::vector<int64_t> out_shape(indices.shape().begin(), indices.shape().end());
+    out_shape.push_back(num_classes);
+    Tensor output(out_shape, DType::Float32, indices.device());
 
     if (batch_size == 0) return output;
 
