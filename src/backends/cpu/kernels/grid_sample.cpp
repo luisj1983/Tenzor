@@ -38,25 +38,32 @@ inline T denormalize(T coord, int64_t size, bool align_corners) {
     }
 }
 
+// Reflect a coordinate into the valid range using PyTorch's twice_low/twice_high
+// convention. align_corners=true reflects about [0, size-1]; align_corners=false
+// reflects about [-0.5, size-0.5] (period differs), matching reflect_coordinates.
+template <typename T>
+inline T reflect_coord_impl(T coord, int64_t size, bool align_corners) {
+    if (size <= 1) return T(0);
+    T twice_low  = align_corners ? T(0) : T(-1);
+    T twice_high = align_corners ? static_cast<T>(2 * (size - 1))
+                                 : static_cast<T>(2 * size - 1);
+    T mn = twice_low / T(2);
+    T span = (twice_high - twice_low) / T(2);
+    T c = std::fabs(coord - mn);
+    T extra = std::fmod(c, span);
+    int64_t flips = static_cast<int64_t>(std::floor(c / span));
+    T reflected = (flips % 2 == 0) ? (extra + mn) : (span - extra + mn);
+    // Clip to the sampleable range to guard FP edge cases.
+    return std::clamp(reflected, T(0), static_cast<T>(size - 1));
+}
+
 // Apply padding mode to compute effective coordinate
 template <typename T>
-inline T apply_padding(T coord, int64_t size, const std::string& padding_mode) {
+inline T apply_padding(T coord, int64_t size, const std::string& padding_mode, bool align_corners) {
     if (padding_mode == "border") {
         coord = std::clamp(coord, T(0), static_cast<T>(size - 1));
     } else if (padding_mode == "reflection") {
-        // Reflect coordinates to stay in [0, size-1]
-        if (size > 1) {
-            T max_val = static_cast<T>(size - 1);
-            // Map to [0, 2*max_val]
-            coord = std::fabs(coord);
-            T period = T(2) * max_val;
-            coord = std::fmod(coord, period);
-            if (coord > max_val) {
-                coord = period - coord;
-            }
-        } else {
-            coord = T(0);
-        }
+        coord = reflect_coord_impl<T>(coord, size, align_corners);
     }
     // "zeros" mode: out-of-bound coordinates will use zero values (handled in sampling)
     return coord;
@@ -124,8 +131,8 @@ auto grid_sample_forward_impl(const Tensor& input, const Tensor& grid,
             T iy = denormalize<T>(gy, H_in, align_corners);
 
             if (mode == "bilinear") {
-                T px = apply_padding<T>(ix, W_in, padding_mode);
-                T py = apply_padding<T>(iy, H_in, padding_mode);
+                T px = apply_padding<T>(ix, W_in, padding_mode, align_corners);
+                T py = apply_padding<T>(iy, H_in, padding_mode, align_corners);
 
                 int64_t x0 = static_cast<int64_t>(std::floor(px));
                 int64_t y0 = static_cast<int64_t>(std::floor(py));
@@ -217,9 +224,9 @@ auto grid_sample_forward_impl(const Tensor& input, const Tensor& grid,
                 }
             } else if (mode == "nearest") {
                 int64_t nx = static_cast<int64_t>(std::round(
-                    apply_padding<T>(ix, W_in, padding_mode)));
+                    apply_padding<T>(ix, W_in, padding_mode, align_corners)));
                 int64_t ny = static_cast<int64_t>(std::round(
-                    apply_padding<T>(iy, H_in, padding_mode)));
+                    apply_padding<T>(iy, H_in, padding_mode, align_corners)));
 
                 bool in_bounds = is_in_bounds<T>(static_cast<T>(ny), static_cast<T>(nx), H_in, W_in);
                 for (int64_t c = 0; c < C; ++c) {
@@ -234,8 +241,8 @@ auto grid_sample_forward_impl(const Tensor& input, const Tensor& grid,
                 // (a = -0.5) basis, matching PyTorch and the existing
                 // interpolate(mode='bicubic') kernel in vision.cpp. Padding is
                 // applied per-neighbour so all three modes work as in bilinear.
-                const T ix_pad = apply_padding<T>(ix, W_in, padding_mode);
-                const T iy_pad = apply_padding<T>(iy, H_in, padding_mode);
+                const T ix_pad = apply_padding<T>(ix, W_in, padding_mode, align_corners);
+                const T iy_pad = apply_padding<T>(iy, H_in, padding_mode, align_corners);
                 const int64_t ix_floor = static_cast<int64_t>(std::floor(ix_pad));
                 const int64_t iy_floor = static_cast<int64_t>(std::floor(iy_pad));
                 const T tx = ix_pad - static_cast<T>(ix_floor);
@@ -403,14 +410,8 @@ inline T denormalize_T(T coord, int64_t size, bool align_corners) {
 }
 
 template <typename T>
-inline T reflect_coord_T(T coord, int64_t size) {
-    if (size <= 1) return T(0);
-    T max_val = static_cast<T>(size - 1);
-    coord = std::fabs(coord);
-    T period = T(2) * max_val;
-    coord = std::fmod(coord, period);
-    if (coord > max_val) coord = period - coord;
-    return coord;
+inline T reflect_coord_T(T coord, int64_t size, bool align_corners) {
+    return reflect_coord_impl<T>(coord, size, align_corners);
 }
 
 // Full backward implementation for one dtype. Computes grad_input AND
@@ -470,8 +471,8 @@ void grid_sample_backward_impl(
                     ix = std::min(std::max(ix, T(0)), static_cast<T>(W_in - 1));
                     iy = std::min(std::max(iy, T(0)), static_cast<T>(H_in - 1));
                 } else if (padding_mode == "reflection") {
-                    ix = reflect_coord_T<T>(ix, W_in);
-                    iy = reflect_coord_T<T>(iy, H_in);
+                    ix = reflect_coord_T<T>(ix, W_in, align_corners);
+                    iy = reflect_coord_T<T>(iy, H_in, align_corners);
                 }
 
                 // d(ix)/d(gx), d(iy)/d(gy) — chain back to normalised grid.
