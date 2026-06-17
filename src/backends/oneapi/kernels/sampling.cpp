@@ -239,6 +239,9 @@ auto bucketize_kernel(const Tensor& input, const Tensor& boundaries,
 auto histogram_kernel(const Tensor& input, int64_t bins,
                       double min_val, double max_val,
                       sycl::queue& queue) -> std::pair<Tensor, Tensor> {
+    if (bins <= 0) {
+        throw std::invalid_argument("histogram: bins must be positive");
+    }
     auto in_contig = input.contiguous();
     if (in_contig.dtype() != DType::Float32) in_contig = in_contig.to(DType::Float32);
     int64_t n = in_contig.numel();

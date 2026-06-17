@@ -583,6 +583,9 @@ auto softmax_kernel(const Tensor& input, int64_t dim, sycl::queue& queue) -> Ten
     if (dim < 0) {
         dim += shape.size();
     }
+    if (dim < 0 || dim >= static_cast<int64_t>(shape.size())) {
+        throw std::runtime_error("Softmax dimension out of range");
+    }
 
     Tensor output(std::vector<int64_t>(shape.begin(), shape.end()),
                   in_cont.dtype(), in_cont.device());
@@ -730,6 +733,9 @@ auto softmax_backward_kernel(const Tensor& grad_output, const Tensor& output, in
     auto shape = out_cont.shape();
     if (dim < 0) {
         dim += shape.size();
+    }
+    if (dim < 0 || dim >= static_cast<int64_t>(shape.size())) {
+        throw std::runtime_error("softmax_backward dimension out of range");
     }
 
     Tensor grad_input(std::vector<int64_t>(shape.begin(), shape.end()),

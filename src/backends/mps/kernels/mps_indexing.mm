@@ -44,14 +44,55 @@ Tensor mps_cat_kernel(const std::vector<Tensor>& inputs, int64_t dim) {
 
     Tensor output(out_shape, inputs[0].dtype(), inputs[0].device());
 
-    // Copy each input into the correct offset
-    auto pipeline = get_pipeline(inputs[0].dtype() == DType::Float16 ? "cat_copy_kernel_f16" : "cat_copy_kernel");
-    uint32_t dst_offset = 0;
+    bool is_f16 = inputs[0].dtype() == DType::Float16;
 
-    // For last-dim cat on contiguous tensors, use flat copy
-    // General case: each element
+    // For dim==0 the concatenated contiguous blocks land back-to-back, which
+    // already matches the row-major output layout, so a flat copy is correct.
+    // For any inner dim (dim>0) the rows must be interleaved: use the strided
+    // shader, which maps each source element to its correct destination index
+    // (outer/axis/inner decomposition). A flat copy here would silently produce
+    // the wrong element ordering vs the CPU cat.
+    if (dim == 0) {
+        auto pipeline = get_pipeline(is_f16 ? "cat_copy_kernel_f16" : "cat_copy_kernel");
+        uint32_t dst_offset = 0;
+        for (const auto& inp : inputs) {
+            size_t numel = inp.numel();
+            id<MTLBuffer> buf_src = get_buffer(inp);
+            id<MTLBuffer> buf_dst = get_buffer(output);
+
+            id<MTLCommandBuffer> cmd = [g_command_queue commandBuffer];
+            id<MTLComputeCommandEncoder> encoder = [cmd computeCommandEncoder];
+            [encoder setComputePipelineState:pipeline];
+            [encoder setBuffer:buf_src offset:0 atIndex:0];
+            [encoder setBuffer:buf_dst offset:0 atIndex:1];
+            [encoder setBytes:&dst_offset length:sizeof(dst_offset) atIndex:2];
+
+            MTLSize grid = MTLSizeMake(numel, 1, 1);
+            NSUInteger tg = std::min(static_cast<NSUInteger>(pipeline.maxTotalThreadsPerThreadgroup),
+                                     static_cast<NSUInteger>(numel));
+            [encoder dispatchThreads:grid threadsPerThreadgroup:MTLSizeMake(tg, 1, 1)];
+            [encoder endEncoding];
+            [cmd commit];
+            [cmd waitUntilCompleted];
+            ::tenzor::mps::mps_cmd_check(cmd, __func__);
+
+            dst_offset += static_cast<uint32_t>(numel);
+        }
+        return output;
+    }
+
+    // Strided path for dim > 0.
+    uint32_t outer = 1;
+    for (int64_t d = 0; d < dim; ++d) outer *= static_cast<uint32_t>(base_shape[d]);
+    uint32_t inner = 1;
+    for (int64_t d = dim + 1; d < ndim; ++d) inner *= static_cast<uint32_t>(base_shape[d]);
+    uint32_t axis_out = static_cast<uint32_t>(out_shape[dim]);
+
+    auto pipeline = get_pipeline(is_f16 ? "cat_copy_strided_kernel_f16" : "cat_copy_strided_kernel");
+    uint32_t axis_base = 0;
     for (const auto& inp : inputs) {
         size_t numel = inp.numel();
+        uint32_t axis_in = static_cast<uint32_t>(inp.shape()[dim]);
         id<MTLBuffer> buf_src = get_buffer(inp);
         id<MTLBuffer> buf_dst = get_buffer(output);
 
@@ -60,7 +101,11 @@ Tensor mps_cat_kernel(const std::vector<Tensor>& inputs, int64_t dim) {
         [encoder setComputePipelineState:pipeline];
         [encoder setBuffer:buf_src offset:0 atIndex:0];
         [encoder setBuffer:buf_dst offset:0 atIndex:1];
-        [encoder setBytes:&dst_offset length:sizeof(dst_offset) atIndex:2];
+        [encoder setBytes:&outer length:sizeof(outer) atIndex:2];
+        [encoder setBytes:&axis_in length:sizeof(axis_in) atIndex:3];
+        [encoder setBytes:&inner length:sizeof(inner) atIndex:4];
+        [encoder setBytes:&axis_out length:sizeof(axis_out) atIndex:5];
+        [encoder setBytes:&axis_base length:sizeof(axis_base) atIndex:6];
 
         MTLSize grid = MTLSizeMake(numel, 1, 1);
         NSUInteger tg = std::min(static_cast<NSUInteger>(pipeline.maxTotalThreadsPerThreadgroup),
@@ -71,7 +116,7 @@ Tensor mps_cat_kernel(const std::vector<Tensor>& inputs, int64_t dim) {
         [cmd waitUntilCompleted];
         ::tenzor::mps::mps_cmd_check(cmd, __func__);
 
-        dst_offset += static_cast<uint32_t>(numel);
+        axis_base += axis_in;
     }
     return output;
 }
@@ -160,7 +205,11 @@ Tensor mps_index_select_kernel(const Tensor& input, int64_t dim, const Tensor& i
 
     auto pipeline = get_pipeline("index_select_kernel");
     id<MTLBuffer> buf_in = get_buffer(input);
-    id<MTLBuffer> buf_idx = get_buffer(indices);
+    // Index tensors are canonically Int64 (CPU reference), but the Metal indexing
+    // shaders read 32-bit `int`. Convert to Int32 to honor the kernel contract;
+    // index values are bounded by dimension sizes, which always fit in int32.
+    Tensor indices_i32 = indices.dtype() == DType::Int32 ? indices : indices.to(DType::Int32);
+    id<MTLBuffer> buf_idx = get_buffer(indices_i32);
     id<MTLBuffer> buf_out = get_buffer(output);
 
     uint32_t u_outer = static_cast<uint32_t>(outer);
@@ -211,7 +260,11 @@ Tensor mps_gather_kernel(const Tensor& input, int64_t dim, const Tensor& indices
 
     auto pipeline = get_pipeline("gather_kernel");
     id<MTLBuffer> buf_in = get_buffer(input);
-    id<MTLBuffer> buf_idx = get_buffer(indices);
+    // Index tensors are canonically Int64 (CPU reference), but the Metal indexing
+    // shaders read 32-bit `int`. Convert to Int32 to honor the kernel contract;
+    // index values are bounded by dimension sizes, which always fit in int32.
+    Tensor indices_i32 = indices.dtype() == DType::Int32 ? indices : indices.to(DType::Int32);
+    id<MTLBuffer> buf_idx = get_buffer(indices_i32);
     id<MTLBuffer> buf_out = get_buffer(output);
 
     uint32_t u_outer = static_cast<uint32_t>(outer);
@@ -265,7 +318,11 @@ Tensor mps_scatter_kernel(const Tensor& input, int64_t dim, const Tensor& indice
 
     auto pipeline = get_pipeline("scatter_kernel");
     id<MTLBuffer> buf_src = get_buffer(src);
-    id<MTLBuffer> buf_idx = get_buffer(indices);
+    // Index tensors are canonically Int64 (CPU reference), but the Metal indexing
+    // shaders read 32-bit `int`. Convert to Int32 to honor the kernel contract;
+    // index values are bounded by dimension sizes, which always fit in int32.
+    Tensor indices_i32 = indices.dtype() == DType::Int32 ? indices : indices.to(DType::Int32);
+    id<MTLBuffer> buf_idx = get_buffer(indices_i32);
     id<MTLBuffer> buf_out = get_buffer(output);
 
     uint32_t u_outer = static_cast<uint32_t>(outer);
@@ -315,7 +372,11 @@ Tensor mps_scatter_add_kernel(const Tensor& input, int64_t dim, const Tensor& in
 
     auto pipeline = get_pipeline("scatter_add_kernel");
     id<MTLBuffer> buf_src = get_buffer(src);
-    id<MTLBuffer> buf_idx = get_buffer(indices);
+    // Index tensors are canonically Int64 (CPU reference), but the Metal indexing
+    // shaders read 32-bit `int`. Convert to Int32 to honor the kernel contract;
+    // index values are bounded by dimension sizes, which always fit in int32.
+    Tensor indices_i32 = indices.dtype() == DType::Int32 ? indices : indices.to(DType::Int32);
+    id<MTLBuffer> buf_idx = get_buffer(indices_i32);
     id<MTLBuffer> buf_out = get_buffer(output);
 
     uint32_t u_outer = static_cast<uint32_t>(outer);
@@ -368,7 +429,11 @@ Tensor mps_index_add_kernel(const Tensor& input, int64_t dim, const Tensor& indi
     auto pipeline = get_pipeline("index_add_kernel");
     id<MTLBuffer> buf_out = get_buffer(output);
     id<MTLBuffer> buf_src = get_buffer(source);
-    id<MTLBuffer> buf_idx = get_buffer(indices);
+    // Index tensors are canonically Int64 (CPU reference), but the Metal indexing
+    // shaders read 32-bit `int`. Convert to Int32 to honor the kernel contract;
+    // index values are bounded by dimension sizes, which always fit in int32.
+    Tensor indices_i32 = indices.dtype() == DType::Int32 ? indices : indices.to(DType::Int32);
+    id<MTLBuffer> buf_idx = get_buffer(indices_i32);
 
     uint32_t u_outer = static_cast<uint32_t>(outer);
     uint32_t u_dim = static_cast<uint32_t>(shape[dim]);
@@ -416,7 +481,11 @@ Tensor mps_index_copy_kernel(const Tensor& input, int64_t dim, const Tensor& ind
     auto pipeline = get_pipeline("index_copy_kernel");
     id<MTLBuffer> buf_out = get_buffer(output);
     id<MTLBuffer> buf_src = get_buffer(source);
-    id<MTLBuffer> buf_idx = get_buffer(indices);
+    // Index tensors are canonically Int64 (CPU reference), but the Metal indexing
+    // shaders read 32-bit `int`. Convert to Int32 to honor the kernel contract;
+    // index values are bounded by dimension sizes, which always fit in int32.
+    Tensor indices_i32 = indices.dtype() == DType::Int32 ? indices : indices.to(DType::Int32);
+    id<MTLBuffer> buf_idx = get_buffer(indices_i32);
 
     uint32_t u_outer = static_cast<uint32_t>(outer);
     uint32_t u_dim = static_cast<uint32_t>(shape[dim]);
@@ -463,7 +532,11 @@ Tensor mps_index_fill_kernel(const Tensor& input, int64_t dim, const Tensor& ind
 
     auto pipeline = get_pipeline("index_fill_kernel");
     id<MTLBuffer> buf_out = get_buffer(output);
-    id<MTLBuffer> buf_idx = get_buffer(indices);
+    // Index tensors are canonically Int64 (CPU reference), but the Metal indexing
+    // shaders read 32-bit `int`. Convert to Int32 to honor the kernel contract;
+    // index values are bounded by dimension sizes, which always fit in int32.
+    Tensor indices_i32 = indices.dtype() == DType::Int32 ? indices : indices.to(DType::Int32);
+    id<MTLBuffer> buf_idx = get_buffer(indices_i32);
     float f_val = static_cast<float>(value);
 
     uint32_t u_outer = static_cast<uint32_t>(outer);
@@ -541,7 +614,11 @@ Tensor mps_take_kernel(const Tensor& input, const Tensor& indices) {
 
     auto pipeline = get_pipeline("take_kernel");
     id<MTLBuffer> buf_in = get_buffer(input);
-    id<MTLBuffer> buf_idx = get_buffer(indices);
+    // Index tensors are canonically Int64 (CPU reference), but the Metal indexing
+    // shaders read 32-bit `int`. Convert to Int32 to honor the kernel contract;
+    // index values are bounded by dimension sizes, which always fit in int32.
+    Tensor indices_i32 = indices.dtype() == DType::Int32 ? indices : indices.to(DType::Int32);
+    id<MTLBuffer> buf_idx = get_buffer(indices_i32);
     id<MTLBuffer> buf_out = get_buffer(output);
 
     id<MTLCommandBuffer> cmd = [g_command_queue commandBuffer];
@@ -572,7 +649,11 @@ Tensor mps_put_kernel(const Tensor& input, const Tensor& indices, const Tensor& 
 
     auto pipeline = get_pipeline("put_kernel");
     id<MTLBuffer> buf_src = get_buffer(source);
-    id<MTLBuffer> buf_idx = get_buffer(indices);
+    // Index tensors are canonically Int64 (CPU reference), but the Metal indexing
+    // shaders read 32-bit `int`. Convert to Int32 to honor the kernel contract;
+    // index values are bounded by dimension sizes, which always fit in int32.
+    Tensor indices_i32 = indices.dtype() == DType::Int32 ? indices : indices.to(DType::Int32);
+    id<MTLBuffer> buf_idx = get_buffer(indices_i32);
     id<MTLBuffer> buf_out = get_buffer(output);
 
     int64_t n = indices.numel();
@@ -797,35 +878,74 @@ Tensor mps_slice_kernel(const Tensor& input, int64_t dim, int64_t start, int64_t
 // Nonzero — shared memory approach (zero-copy on Apple Silicon)
 // ============================================================================
 
-Tensor mps_nonzero_kernel(const Tensor& input) {
-    size_t numel = input.numel();
-    const float* ptr = static_cast<const float*>(input.data_ptr());
+Tensor mps_nonzero_kernel(const Tensor& input_arg) {
+    // Apple unified memory lets the host read the buffer directly. The per-dim
+    // index math below assumes a contiguous (row-major) layout, so materialise
+    // contiguous first (no-op when already contiguous). Branch on dtype so the
+    // raw bytes are interpreted with the correct element type — reading every
+    // dtype as float (the old behaviour) mis-strides Int64/Float64 and
+    // mis-classifies integer/bool bit patterns. Mirrors the CPU nonzero kernel.
+    const Tensor input = input_arg.contiguous();
+    const int64_t numel = input.numel();
 
-    // Count nonzero
-    int64_t count = 0;
-    for (size_t i = 0; i < numel; ++i) {
-        if (ptr[i] != 0.0f) count++;
+    // Collect linear indices of nonzero elements.
+    std::vector<int64_t> nz_indices;
+
+    // Float types: widen to float for the zero test (matches CPU nonzero, and
+    // handles Float16/BFloat16 whose operator!= may be ambiguous).
+    auto scan_real = [&](auto* data) {
+        for (int64_t i = 0; i < numel; ++i) {
+            if (static_cast<float>(data[i]) != 0.0f) nz_indices.push_back(i);
+        }
+    };
+    // Integer/bool types: a value is nonzero iff it does not compare equal to 0.
+    auto scan_int = [&](auto* data) {
+        for (int64_t i = 0; i < numel; ++i) {
+            if (data[i] != 0) nz_indices.push_back(i);
+        }
+    };
+
+    switch (input.dtype()) {
+        case DType::Float32: scan_real(input.data<float>()); break;
+        case DType::Float64: scan_real(input.data<double>()); break;
+        case DType::Float16: scan_real(input.data<Float16>()); break;
+        case DType::BFloat16: scan_real(input.data<BFloat16>()); break;
+        case DType::Int32: scan_int(input.data<int32_t>()); break;
+        case DType::Int64: scan_int(input.data<int64_t>()); break;
+        case DType::Int8: scan_int(input.data<int8_t>()); break;
+        case DType::UInt8: scan_int(input.data<uint8_t>()); break;
+        case DType::Bool:
+            for (int64_t i = 0; i < numel; ++i) {
+                if (input.data<bool>()[i]) nz_indices.push_back(i);
+            }
+            break;
+        default:
+            throw std::runtime_error(
+                "MPS nonzero: unsupported dtype " +
+                std::string(dtype_name(input.dtype())));
     }
 
     auto shape = input.shape();
-    int64_t ndim = shape.size();
-    Tensor output({count, ndim}, DType::Int32, input.device());
-    int32_t* out_ptr = static_cast<int32_t*>(const_cast<void*>(output.data_ptr()));
+    int64_t ndim = static_cast<int64_t>(shape.size());
+    int64_t nnz = static_cast<int64_t>(nz_indices.size());
 
-    // Compute strides
+    // Output coordinates use Int64 to match the CPU/PyTorch convention and to
+    // avoid truncating indices for tensors with > 2^31 elements.
+    Tensor output({nnz, ndim}, DType::Int64, input.device());
+    int64_t* out_ptr = static_cast<int64_t*>(const_cast<void*>(output.data_ptr()));
+
+    // Row-major strides.
     std::vector<int64_t> strides(ndim);
-    strides[ndim - 1] = 1;
-    for (int64_t d = ndim - 2; d >= 0; --d) strides[d] = strides[d + 1] * shape[d + 1];
+    if (ndim > 0) {
+        strides[ndim - 1] = 1;
+        for (int64_t d = ndim - 2; d >= 0; --d) strides[d] = strides[d + 1] * shape[d + 1];
+    }
 
-    int64_t idx = 0;
-    for (size_t i = 0; i < numel; ++i) {
-        if (ptr[i] != 0.0f) {
-            int64_t remaining = static_cast<int64_t>(i);
-            for (int64_t d = 0; d < ndim; ++d) {
-                out_ptr[idx * ndim + d] = static_cast<int32_t>(remaining / strides[d]);
-                remaining %= strides[d];
-            }
-            idx++;
+    for (int64_t k = 0; k < nnz; ++k) {
+        int64_t remaining = nz_indices[k];
+        for (int64_t d = 0; d < ndim; ++d) {
+            out_ptr[k * ndim + d] = remaining / strides[d];
+            remaining %= strides[d];
         }
     }
     return output;

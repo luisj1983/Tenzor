@@ -1198,17 +1198,19 @@ auto one_hot_kernel(const Tensor& indices, int64_t num_classes) -> Tensor {
         const int64_t* idx_data = indices.data<int64_t>();
         for (int64_t i = 0; i < numel; ++i) {
             int64_t cls = idx_data[i];
-            if (cls >= 0 && cls < num_classes) {
-                out_data[i * num_classes + cls] = 1.0f;
+            if (cls < 0 || cls >= num_classes) {
+                throw std::out_of_range("one_hot: class index out of range [0, num_classes)");
             }
+            out_data[i * num_classes + cls] = 1.0f;
         }
     } else {
         const int32_t* idx_data = indices.data<int32_t>();
         for (int64_t i = 0; i < numel; ++i) {
             int64_t cls = static_cast<int64_t>(idx_data[i]);
-            if (cls >= 0 && cls < num_classes) {
-                out_data[i * num_classes + cls] = 1.0f;
+            if (cls < 0 || cls >= num_classes) {
+                throw std::out_of_range("one_hot: class index out of range [0, num_classes)");
             }
+            out_data[i * num_classes + cls] = 1.0f;
         }
     }
 

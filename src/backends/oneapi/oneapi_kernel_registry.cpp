@@ -29,6 +29,7 @@
 #include "tenzor/sparse/sparse_tensor.hpp"
 #include "tenzor/sparse/sparse_ops.hpp"
 #include "kernels/fp16_saturate.hpp"
+#include "sycl_buffer_guard.hpp"  // RAII for sycl::malloc_device (exception-safe)
 #include "tenzor/nn/layers/flex_attention.hpp"  // F14: process-wide score_mod registry
 #include "tenzor/ops/philox_dropout.hpp"        // F13/F22-followup: Philox-keyed dropout
 #include <climits>
@@ -702,7 +703,7 @@ namespace oneapi {
     // the prior CPU-host fallback in the FlashAttention composed-ops dropout path).
     auto philox_dropout_mask_kernel(const std::vector<int64_t>& shape,
                                      float p, uint64_t seed, uint64_t offset,
-                                     DType dtype, sycl::queue& queue) -> Tensor;
+                                     DType dtype, Device device, sycl::queue& queue) -> Tensor;
     // Phase 8.2: fused FlashAttention backward (Float32, head_dim ∈ {32, 64, 128}).
     auto flash_attention_backward_oneapi_f32(
         const Tensor& dO, const Tensor& Q, const Tensor& K, const Tensor& V,
@@ -1025,8 +1026,12 @@ static void strided_scatter_copy(sycl::queue& q,
                                  int64_t elem_size, int64_t n) {
     if (n <= 0) return;
     const int64_t ndims = static_cast<int64_t>(dst_shape.size());
-    int64_t* d_shape = sycl::malloc_device<int64_t>(static_cast<size_t>(ndims), q);
-    int64_t* d_strides = sycl::malloc_device<int64_t>(static_cast<size_t>(ndims), q);
+    // RAII-owned device scratch: frees on both normal return and the .wait()
+    // throw path, so an async SYCL exception can't leak these allocations.
+    tenzor::oneapi::SyclDeviceBuffer<int64_t> d_shape_buf(static_cast<size_t>(ndims), q);
+    tenzor::oneapi::SyclDeviceBuffer<int64_t> d_strides_buf(static_cast<size_t>(ndims), q);
+    int64_t* d_shape = d_shape_buf.get();
+    int64_t* d_strides = d_strides_buf.get();
     q.memcpy(d_shape, dst_shape.data(), ndims * sizeof(int64_t));
     q.memcpy(d_strides, dst_strides.data(), ndims * sizeof(int64_t));
     // In-order queue: the memcpys above complete before the kernel runs.
@@ -1043,8 +1048,6 @@ static void strided_scatter_copy(sycl::queue& q,
         const char* src = src_base + flat * elem_size;
         for (int64_t b = 0; b < elem_size; ++b) dst[b] = src[b];
     }).wait();
-    sycl::free(d_shape, q);
-    sycl::free(d_strides, q);
 }
 
 // ============================================================================
@@ -3459,7 +3462,7 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
                 std::vector<int64_t> attn_shape(attn.shape().begin(), attn.shape().end());
                 Tensor mask_dev = oneapi::philox_dropout_mask_kernel(
                     attn_shape, dropout_p, seed_v, offset_v,
-                    attn.dtype(), queue);
+                    attn.dtype(), attn.device(), queue);
                 Tensor attn_dropped = tenzor::mul(attn, mask_dev);
 
                 Tensor output_comp = tenzor::matmul(attn_dropped, V);
@@ -5943,7 +5946,10 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
                 }
             }
 
-            int64_t* d_offsets = sycl::malloc_device<int64_t>(static_cast<size_t>(total), q);
+            // RAII-owned device scratch: frees on both normal return and the
+            // .wait() throw path, so an async SYCL exception can't leak it.
+            tenzor::oneapi::SyclDeviceBuffer<int64_t> d_offsets_buf(static_cast<size_t>(total), q);
+            int64_t* d_offsets = d_offsets_buf.get();
             q.memcpy(d_offsets, dst_offsets.data(), total * sizeof(int64_t));
             // In-order queue: the offset upload completes before the kernel.
             q.parallel_for(sycl::range<1>(static_cast<size_t>(total)), [=](sycl::id<1> id) {
@@ -5952,7 +5958,6 @@ void register_oneapi_kernels(BackendDispatchTable& table) {
                 const char* src = src_ptr + i * elem_size;
                 for (int64_t bb = 0; bb < elem_size; ++bb) dst[bb] = src[bb];
             }).wait();
-            sycl::free(d_offsets, q);
             return {output};
         });
 

@@ -22,6 +22,7 @@ layout(push_constant) uniform PushConstants {
     uint spatial_scale_bits;  // spatial_scale as float reinterpreted as uint
     uint sampling_ratio;      // Number of sampling points per bin (0 = adaptive)
     uint aligned;             // 1 if aligned mode, 0 otherwise
+    uint batch_size;          // N (number of feature-map batches) for ROI bounds check
 } params;
 
 float bilinear_interpolate(uint base_offset, float y, float x) {
@@ -73,7 +74,17 @@ void main() {
 
     // Read ROI: [batch_idx, x1, y1, x2, y2]
     uint roi_base = roi_idx * 5;
-    uint batch_idx = uint(rois_data[roi_base]);
+    // Validate the ROI batch index before using it to index features. ROI batch
+    // ids come from upstream (e.g. RPN output) and are not guaranteed in range;
+    // an out-of-range/negative value would read arbitrary device memory. Match the
+    // CPU reference: zero this output element and return. Read as signed first so a
+    // negative float is caught rather than wrapping to a huge uint.
+    int batch_idx_signed = int(rois_data[roi_base]);
+    if (batch_idx_signed < 0 || uint(batch_idx_signed) >= params.batch_size) {
+        output_data[idx] = 0.0;
+        return;
+    }
+    uint batch_idx = uint(batch_idx_signed);
     float spatial_scale = uintBitsToFloat(params.spatial_scale_bits);
 
     float roi_x1 = rois_data[roi_base + 1] * spatial_scale;

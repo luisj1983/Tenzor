@@ -58,6 +58,24 @@ auto embedding_lookup_kernel(const Tensor& indices, const Tensor& weights,
 
     const int64_t* indices_ptr = get_data_ptr<const int64_t>(indices);
 
+    // Pre-validate indices host-side and throw for out-of-range values, matching
+    // the CPU reference (which normalizes negatives, then throws std::out_of_range).
+    // Throwing inside a SYCL kernel is not possible, so validation happens before
+    // launch. The kernels below normalize negatives identically.
+    if (num_indices > 0) {
+        std::vector<int64_t> host_indices(static_cast<size_t>(num_indices));
+        queue.memcpy(host_indices.data(), indices_ptr,
+                     static_cast<size_t>(num_indices) * sizeof(int64_t)).wait();
+        for (int64_t i = 0; i < num_indices; ++i) {
+            int64_t idx = host_indices[i];
+            if (idx < 0) idx += vocab_size;
+            if (idx < 0 || idx >= vocab_size) {
+                throw std::out_of_range("Embedding index " + std::to_string(host_indices[i]) +
+                    " out of range [0, " + std::to_string(vocab_size) + ")");
+            }
+        }
+    }
+
     if (weights.dtype() == DType::Float32) {
         const float* weights_ptr = get_data_ptr<const float>(weights);
         float* output_ptr = get_data_ptr<float>(output);
@@ -68,11 +86,11 @@ auto embedding_lookup_kernel(const Tensor& indices, const Tensor& weights,
                 int64_t index_idx = idx[0];
                 int64_t emb_dim_idx = idx[1];
                 int64_t vocab_idx = indices_ptr[index_idx];
+                if (vocab_idx < 0) vocab_idx += vocab_size;
 
-                if (vocab_idx == padding_idx) {
+                if (padding_idx >= 0 && vocab_idx == padding_idx) {
                     output_ptr[index_idx * embedding_dim + emb_dim_idx] = 0.0f;
                 } else {
-                    if (vocab_idx < 0 || vocab_idx >= vocab_size) vocab_idx = 0;
                     output_ptr[index_idx * embedding_dim + emb_dim_idx] =
                         weights_ptr[vocab_idx * embedding_dim + emb_dim_idx];
                 }
@@ -89,11 +107,11 @@ auto embedding_lookup_kernel(const Tensor& indices, const Tensor& weights,
                 int64_t index_idx = idx[0];
                 int64_t emb_dim_idx = idx[1];
                 int64_t vocab_idx = indices_ptr[index_idx];
+                if (vocab_idx < 0) vocab_idx += vocab_size;
 
-                if (vocab_idx == padding_idx) {
+                if (padding_idx >= 0 && vocab_idx == padding_idx) {
                     output_ptr[index_idx * embedding_dim + emb_dim_idx] = 0.0;
                 } else {
-                    if (vocab_idx < 0 || vocab_idx >= vocab_size) vocab_idx = 0;
                     output_ptr[index_idx * embedding_dim + emb_dim_idx] =
                         weights_ptr[vocab_idx * embedding_dim + emb_dim_idx];
                 }
@@ -110,11 +128,11 @@ auto embedding_lookup_kernel(const Tensor& indices, const Tensor& weights,
                 int64_t index_idx = idx[0];
                 int64_t emb_dim_idx = idx[1];
                 int64_t vocab_idx = indices_ptr[index_idx];
+                if (vocab_idx < 0) vocab_idx += vocab_size;
 
-                if (vocab_idx == padding_idx) {
+                if (padding_idx >= 0 && vocab_idx == padding_idx) {
                     output_ptr[index_idx * embedding_dim + emb_dim_idx] = sycl::half(0.0f);
                 } else {
-                    if (vocab_idx < 0 || vocab_idx >= vocab_size) vocab_idx = 0;
                     output_ptr[index_idx * embedding_dim + emb_dim_idx] =
                         weights_ptr[vocab_idx * embedding_dim + emb_dim_idx];
                 }
@@ -132,11 +150,11 @@ auto embedding_lookup_kernel(const Tensor& indices, const Tensor& weights,
                 int64_t index_idx = idx[0];
                 int64_t emb_dim_idx = idx[1];
                 int64_t vocab_idx = indices_ptr[index_idx];
+                if (vocab_idx < 0) vocab_idx += vocab_size;
 
-                if (vocab_idx == padding_idx) {
+                if (padding_idx >= 0 && vocab_idx == padding_idx) {
                     output_ptr[index_idx * embedding_dim + emb_dim_idx] = 0;
                 } else {
-                    if (vocab_idx < 0 || vocab_idx >= vocab_size) vocab_idx = 0;
                     output_ptr[index_idx * embedding_dim + emb_dim_idx] =
                         weights_ptr[vocab_idx * embedding_dim + emb_dim_idx];
                 }

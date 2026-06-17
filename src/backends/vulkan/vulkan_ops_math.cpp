@@ -1657,9 +1657,12 @@ auto VulkanBackend::dispatchReduction(const std::string& op_name,
                       VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pushConstants), &pushConstants);
 
     // Dispatch workgroups
-    // For Float16: each workgroup handles TWO adjacent output elements (one packed word)
+    // For Float16/BFloat16: each workgroup handles TWO adjacent output elements
+    // (one packed uint32 word). BFloat16 packs identically to Float16, so it must
+    // take the same halved workgroup count — otherwise it dispatches 2x workgroups
+    // and writes out of bounds.
     uint32_t workgroups;
-    if (is_float16) {
+    if (is_float16 || is_bfloat16) {
         workgroups = (pushConstants.outer_size + 1) / 2;
     } else {
         // Each workgroup has 256 threads and reduces one output element

@@ -1764,29 +1764,16 @@ auto batchnorm2d_backward(const Tensor& grad_output,
                           epsilon, N, C, H, W);
         HIP_CHECK(hipGetLastError());
     } else if (input.dtype() == DType::Float16) {
-        int shared_mem_size = (BATCHNORM_BLOCK_SIZE / MIN_WAVEFRONT_SIZE) * sizeof(__half);
-
-        // Compute grad_gamma and grad_beta
-        hipLaunchKernelGGL(batchnorm_backward_gamma_beta_kernel<__half>, dim3(C), dim3(BATCHNORM_BLOCK_SIZE),
-                          shared_mem_size, stream,
-                          reinterpret_cast<const __half*>(grad_output.data<Float16>()),
-                          reinterpret_cast<const __half*>(normalized.data<Float16>()),
-                          reinterpret_cast<__half*>(grad_gamma.data<Float16>()),
-                          reinterpret_cast<__half*>(grad_beta.data<Float16>()),
-                          N, C, H, W);
-        HIP_CHECK(hipGetLastError());
-
-        // Compute grad_input
-        hipLaunchKernelGGL(batchnorm_backward_input_kernel<__half>, dim3(C), dim3(BATCHNORM_BLOCK_SIZE),
-                          shared_mem_size, stream,
-                          reinterpret_cast<const __half*>(grad_output.data<Float16>()),
-                          reinterpret_cast<const __half*>(input.data<Float16>()),
-                          reinterpret_cast<__half*>(grad_input.data<Float16>()),
-                          reinterpret_cast<const __half*>(mean.data<Float16>()),
-                          reinterpret_cast<const __half*>(variance.data<Float16>()),
-                          reinterpret_cast<const __half*>(gamma.data<Float16>()),
-                          epsilon, N, C, H, W);
-        HIP_CHECK(hipGetLastError());
+        // Widen to Float32 for the reduction accumulators: a half-precision
+        // accumulator loses precision and diverges from CPU/PyTorch (which
+        // accumulate in Float32). Mirror the BFloat16 branch below.
+        auto grad_output_f32 = grad_output.to(DType::Float32);
+        auto input_f32 = input.to(DType::Float32);
+        auto mean_f32 = mean.to(DType::Float32);
+        auto variance_f32 = variance.to(DType::Float32);
+        auto gamma_f32 = gamma.to(DType::Float32);
+        auto [gi_f32, gg_f32, gb_f32] = batchnorm2d_backward(grad_output_f32, input_f32, mean_f32, variance_f32, gamma_f32, epsilon, stream);
+        return std::make_tuple(gi_f32.to(DType::Float16), gg_f32.to(DType::Float16), gb_f32.to(DType::Float16));
     } else if (input.dtype() == DType::BFloat16) {
         auto grad_output_f32 = grad_output.to(DType::Float32);
         auto input_f32 = input.to(DType::Float32);

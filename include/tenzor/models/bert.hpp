@@ -115,7 +115,7 @@ private:
     /**
      * @brief Create default position IDs [0, 1, 2, ..., seq_len-1]
      */
-    auto create_position_ids(const Tensor& input_ids) -> Tensor;
+    virtual auto create_position_ids(const Tensor& input_ids) -> Tensor;
 };
 
 /**

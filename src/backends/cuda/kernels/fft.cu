@@ -282,6 +282,7 @@ auto cuda_fft_kernel(const Tensor& input, int64_t dim, int64_t n,
     CuFFTPlan plan;
     plan.create();
     plan.set_stream(stream);
+    size_t cufft_ws = 0;  // workSize out-param for cufftMakePlan*
 
     int n_int = static_cast<int>(N_out);
     int inembed[] = {n_int};
@@ -303,10 +304,10 @@ auto cuda_fft_kernel(const Tensor& input, int64_t dim, int64_t n,
         int idist = n_int;
         int odist = n_int;
         int plan_batch = static_cast<int>(outer_size);
-        CUFFT_CHECK(cufftPlanMany(&plan.handle, 1, &n_int,
+        CUFFT_CHECK(cufftMakePlanMany(plan.handle, 1, &n_int,
                                   inembed, istride, idist,
                                   onembed, ostride, odist,
-                                  fft_type, plan_batch));
+                                  fft_type, plan_batch, &cufft_ws));
         CUFFT_CHECK(cufftSetStream(plan.handle, stream));
 
         if (is_float32) {
@@ -326,10 +327,10 @@ auto cuda_fft_kernel(const Tensor& input, int64_t dim, int64_t n,
         int idist = 1;
         int odist = 1;
         int plan_batch = static_cast<int>(inner_size);  // batches per outer block
-        CUFFT_CHECK(cufftPlanMany(&plan.handle, 1, &n_int,
+        CUFFT_CHECK(cufftMakePlanMany(plan.handle, 1, &n_int,
                                   inembed, istride, idist,
                                   onembed, ostride, odist,
-                                  fft_type, plan_batch));
+                                  fft_type, plan_batch, &cufft_ws));
         CUFFT_CHECK(cufftSetStream(plan.handle, stream));
 
         size_t outer_stride_elems = static_cast<size_t>(N_out) * static_cast<size_t>(inner_size);
@@ -417,6 +418,7 @@ auto cuda_ifft_kernel(const Tensor& input, int64_t dim, int64_t n,
     CuFFTPlan plan;
     plan.create();
     plan.set_stream(stream);
+    size_t cufft_ws = 0;  // workSize out-param for cufftMakePlan*
 
     int n_int = static_cast<int>(N_out);
     int inembed[] = {n_int};
@@ -430,10 +432,10 @@ auto cuda_ifft_kernel(const Tensor& input, int64_t dim, int64_t n,
         int idist = n_int;
         int odist = n_int;
         int plan_batch = static_cast<int>(outer_size);
-        CUFFT_CHECK(cufftPlanMany(&plan.handle, 1, &n_int,
+        CUFFT_CHECK(cufftMakePlanMany(plan.handle, 1, &n_int,
                                   inembed, istride, idist,
                                   onembed, ostride, odist,
-                                  fft_type, plan_batch));
+                                  fft_type, plan_batch, &cufft_ws));
         CUFFT_CHECK(cufftSetStream(plan.handle, stream));
 
         if (is_float32) {
@@ -454,10 +456,10 @@ auto cuda_ifft_kernel(const Tensor& input, int64_t dim, int64_t n,
         int idist = 1;
         int odist = 1;
         int plan_batch = static_cast<int>(inner_size);
-        CUFFT_CHECK(cufftPlanMany(&plan.handle, 1, &n_int,
+        CUFFT_CHECK(cufftMakePlanMany(plan.handle, 1, &n_int,
                                   inembed, istride, idist,
                                   onembed, ostride, odist,
-                                  fft_type, plan_batch));
+                                  fft_type, plan_batch, &cufft_ws));
         CUFFT_CHECK(cufftSetStream(plan.handle, stream));
 
         size_t outer_stride_elems = static_cast<size_t>(N_out) * static_cast<size_t>(inner_size);
@@ -557,11 +559,12 @@ auto cuda_rfft_kernel(const Tensor& input, int64_t dim, int64_t n,
     CuFFTPlan plan;
     plan.create();
     plan.set_stream(stream);
+    size_t cufft_ws = 0;  // workSize out-param for cufftMakePlan*
 
     int n_int = static_cast<int>(n);
     cufftType fft_type = is_float32 ? CUFFT_R2C : CUFFT_D2Z;
 
-    CUFFT_CHECK(cufftPlan1d(&plan.handle, n_int, fft_type, static_cast<int>(batch)));
+    CUFFT_CHECK(cufftMakePlan1d(plan.handle, n_int, fft_type, static_cast<int>(batch), &cufft_ws));
     CUFFT_CHECK(cufftSetStream(plan.handle, stream));
 
     if (is_float32) {
@@ -650,11 +653,12 @@ auto cuda_irfft_kernel(const Tensor& input_raw, int64_t dim, int64_t n,
     CuFFTPlan plan;
     plan.create();
     plan.set_stream(stream);
+    size_t cufft_ws = 0;  // workSize out-param for cufftMakePlan*
 
     int n_int = static_cast<int>(n);
     cufftType fft_type = is_float32 ? CUFFT_C2R : CUFFT_Z2D;
 
-    CUFFT_CHECK(cufftPlan1d(&plan.handle, n_int, fft_type, static_cast<int>(batch)));
+    CUFFT_CHECK(cufftMakePlan1d(plan.handle, n_int, fft_type, static_cast<int>(batch), &cufft_ws));
     CUFFT_CHECK(cufftSetStream(plan.handle, stream));
 
     if (is_float32) {
@@ -738,14 +742,15 @@ auto cuda_fft2_kernel(const Tensor& input, const std::vector<int64_t>& dims,
     CuFFTPlan plan;
     plan.create();
     plan.set_stream(stream);
+    size_t cufft_ws = 0;  // workSize out-param for cufftMakePlan*
 
     int n_arr[2] = {static_cast<int>(N0), static_cast<int>(N1)};
     cufftType fft_type = is_float32 ? CUFFT_C2C : CUFFT_Z2Z;
 
-    CUFFT_CHECK(cufftPlanMany(&plan.handle, 2, n_arr,
+    CUFFT_CHECK(cufftMakePlanMany(plan.handle, 2, n_arr,
                               nullptr, 1, static_cast<int>(N0 * N1),
                               nullptr, 1, static_cast<int>(N0 * N1),
-                              fft_type, static_cast<int>(batch)));
+                              fft_type, static_cast<int>(batch), &cufft_ws));
     CUFFT_CHECK(cufftSetStream(plan.handle, stream));
 
     if (is_float32) {
@@ -823,14 +828,15 @@ auto cuda_ifft2_kernel(const Tensor& input, const std::vector<int64_t>& dims,
     CuFFTPlan plan;
     plan.create();
     plan.set_stream(stream);
+    size_t cufft_ws = 0;  // workSize out-param for cufftMakePlan*
 
     int n_arr[2] = {static_cast<int>(N0), static_cast<int>(N1)};
     cufftType fft_type = is_float32 ? CUFFT_C2C : CUFFT_Z2Z;
 
-    CUFFT_CHECK(cufftPlanMany(&plan.handle, 2, n_arr,
+    CUFFT_CHECK(cufftMakePlanMany(plan.handle, 2, n_arr,
                               nullptr, 1, static_cast<int>(N0 * N1),
                               nullptr, 1, static_cast<int>(N0 * N1),
-                              fft_type, static_cast<int>(batch)));
+                              fft_type, static_cast<int>(batch), &cufft_ws));
     CUFFT_CHECK(cufftSetStream(plan.handle, stream));
 
     if (is_float32) {
@@ -934,6 +940,7 @@ auto cuda_fftn_kernel(const Tensor& input, const std::vector<int64_t>& dims,
     CuFFTPlan plan;
     plan.create();
     plan.set_stream(stream);
+    size_t cufft_ws = 0;  // workSize out-param for cufftMakePlan*
 
     std::vector<int> n_arr(rank);
     for (int64_t i = 0; i < rank; ++i) {
@@ -941,10 +948,10 @@ auto cuda_fftn_kernel(const Tensor& input, const std::vector<int64_t>& dims,
     }
 
     cufftType fft_type = is_float32 ? CUFFT_C2C : CUFFT_Z2Z;
-    CUFFT_CHECK(cufftPlanMany(&plan.handle, static_cast<int>(rank), n_arr.data(),
+    CUFFT_CHECK(cufftMakePlanMany(plan.handle, static_cast<int>(rank), n_arr.data(),
                               nullptr, 1, static_cast<int>(out_fft_size),
                               nullptr, 1, static_cast<int>(out_fft_size),
-                              fft_type, static_cast<int>(batch)));
+                              fft_type, static_cast<int>(batch), &cufft_ws));
     CUFFT_CHECK(cufftSetStream(plan.handle, stream));
 
     if (is_float32) {
@@ -1037,6 +1044,7 @@ auto cuda_ifftn_kernel(const Tensor& input, const std::vector<int64_t>& dims,
     CuFFTPlan plan;
     plan.create();
     plan.set_stream(stream);
+    size_t cufft_ws = 0;  // workSize out-param for cufftMakePlan*
 
     std::vector<int> n_arr(rank);
     for (int64_t i = 0; i < rank; ++i) {
@@ -1044,10 +1052,10 @@ auto cuda_ifftn_kernel(const Tensor& input, const std::vector<int64_t>& dims,
     }
 
     cufftType fft_type = is_float32 ? CUFFT_C2C : CUFFT_Z2Z;
-    CUFFT_CHECK(cufftPlanMany(&plan.handle, static_cast<int>(rank), n_arr.data(),
+    CUFFT_CHECK(cufftMakePlanMany(plan.handle, static_cast<int>(rank), n_arr.data(),
                               nullptr, 1, static_cast<int>(out_fft_size),
                               nullptr, 1, static_cast<int>(out_fft_size),
-                              fft_type, static_cast<int>(batch)));
+                              fft_type, static_cast<int>(batch), &cufft_ws));
     CUFFT_CHECK(cufftSetStream(plan.handle, stream));
 
     if (is_float32) {

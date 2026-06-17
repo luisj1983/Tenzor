@@ -1273,7 +1273,11 @@ auto masked_fill_kernel(const Tensor& input, const Tensor& mask, double value,
         }
         mask_broadcast = tenzor::broadcast_to(mask, input_shape_vec).contiguous();
     }
-    const bool* mask_ptr = reinterpret_cast<const bool*>(mask_broadcast.data_ptr());
+    // CPU semantics allow a non-bool mask (any nonzero is true). Reinterpreting a
+    // non-bool buffer as bool* reads garbage, so cast to Bool first.
+    Tensor mask_bool = (mask_broadcast.dtype() == DType::Bool)
+        ? mask_broadcast : mask_broadcast.to(DType::Bool).contiguous();
+    const bool* mask_ptr = reinterpret_cast<const bool*>(mask_bool.data_ptr());
 
     #define LAUNCH_MASKED_FILL(T, cast_val) do { \
         auto [grid_size, block_size] = optimal_launch_config( \
@@ -1367,7 +1371,11 @@ auto where_kernel(const Tensor& condition, const Tensor& x, const Tensor& y,
 
     if (n == 0) return output;
 
-    const bool* cond_ptr = reinterpret_cast<const bool*>(condition.data_ptr());
+    // CPU semantics allow a non-bool condition (any nonzero is true). Reinterpreting
+    // a non-bool buffer as bool* reads garbage, so cast to Bool first.
+    Tensor cond_bool = (condition.dtype() == DType::Bool)
+        ? condition : condition.to(DType::Bool).contiguous();
+    const bool* cond_ptr = reinterpret_cast<const bool*>(cond_bool.data_ptr());
 
     #define LAUNCH_WHERE(T) do { \
         auto [grid_size, block_size] = optimal_launch_config( \

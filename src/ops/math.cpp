@@ -609,14 +609,22 @@ auto remainder(const Tensor& a, const Tensor& b) -> Tensor {
 auto lerp(const Tensor& start, const Tensor& end, const Tensor& weight) -> Tensor {
     auto [sp, ep] = promote_inputs(start, end);
     Tensor wp = (weight.dtype() != sp.dtype()) ? weight.to(sp.dtype()) : weight;
-    std::vector<Tensor> inputs = {sp, ep, wp};
+    // Broadcast + contiguify all three operands; the Lerp kernels index
+    // elementwise and would otherwise read out of bounds on unequal shapes.
+    auto bshape = broadcast_shapes(sp.shape(), ep.shape());
+    bshape = broadcast_shapes(bshape, wp.shape());
+    std::vector<Tensor> inputs = {broadcast_to(sp, bshape).contiguous(),
+                                  broadcast_to(ep, bshape).contiguous(),
+                                  broadcast_to(wp, bshape).contiguous()};
     return dispatch(OpId::Lerp, inputs)[0];
 }
 
 auto lerp(const Tensor& start, const Tensor& end, double weight) -> Tensor {
     auto [sp, ep] = promote_inputs(start, end);
-    Tensor w = full({1}, weight, sp.dtype(), sp.device());
-    std::vector<Tensor> inputs = {sp, ep, w};
+    auto bshape = broadcast_shapes(sp.shape(), ep.shape());
+    Tensor w = full(bshape, weight, sp.dtype(), sp.device());
+    std::vector<Tensor> inputs = {broadcast_to(sp, bshape).contiguous(),
+                                  broadcast_to(ep, bshape).contiguous(), w};
     return dispatch(OpId::Lerp, inputs)[0];
 }
 
@@ -945,7 +953,13 @@ auto lcm(const Tensor& a, const Tensor& b) -> Tensor {
 
 auto addcmul(const Tensor& input, const Tensor& tensor1, const Tensor& tensor2,
              double value) -> Tensor {
-    std::array<Tensor, 3> inputs = {input.contiguous(), tensor1.contiguous(), tensor2.contiguous()};
+    // Broadcast all three operands to their common shape; the backend kernels
+    // index elementwise and would read out of bounds on unequal shapes.
+    auto bshape = broadcast_shapes(input.shape(), tensor1.shape());
+    bshape = broadcast_shapes(bshape, tensor2.shape());
+    std::array<Tensor, 3> inputs = {broadcast_to(input, bshape).contiguous(),
+                                    broadcast_to(tensor1, bshape).contiguous(),
+                                    broadcast_to(tensor2, bshape).contiguous()};
     NewOpAttributes attrs;
     attrs.set(AttrKey::Alpha, value);
     return dispatch<OpId::Addcmul>(inputs, attrs)[0];
@@ -953,7 +967,12 @@ auto addcmul(const Tensor& input, const Tensor& tensor1, const Tensor& tensor2,
 
 auto addcdiv(const Tensor& input, const Tensor& tensor1, const Tensor& tensor2,
              double value) -> Tensor {
-    std::array<Tensor, 3> inputs = {input.contiguous(), tensor1.contiguous(), tensor2.contiguous()};
+    // Broadcast all three operands to their common shape (see addcmul).
+    auto bshape = broadcast_shapes(input.shape(), tensor1.shape());
+    bshape = broadcast_shapes(bshape, tensor2.shape());
+    std::array<Tensor, 3> inputs = {broadcast_to(input, bshape).contiguous(),
+                                    broadcast_to(tensor1, bshape).contiguous(),
+                                    broadcast_to(tensor2, bshape).contiguous()};
     NewOpAttributes attrs;
     attrs.set(AttrKey::Alpha, value);
     return dispatch<OpId::Addcdiv>(inputs, attrs)[0];

@@ -411,13 +411,19 @@ void batchnorm_forward_impl(const T* input,
     #pragma omp parallel for collapse(2) num_threads(final_threads) if(should_parallelize)
     for (int64_t n = 0; n < N; n++) {
         for (int64_t c = 0; c < C; c++) {
-            T channel_mean = mean[c];
-            T channel_var = variance[c];
-            T invstd = T(1.0f) / safe_sqrt(channel_var + epsilon);
+            // Compute invstd and normalize in a float accumulator for half types
+            // (Float16/BFloat16); narrowing invstd to half diverges from the CPU
+            // float reference. For float/double, Acc == T (behavior unchanged).
+            using Acc = std::conditional_t<
+                std::is_same_v<T, Float16> || std::is_same_v<T, BFloat16>, float, T>;
+            Acc channel_mean = static_cast<Acc>(mean[c]);
+            Acc channel_var = static_cast<Acc>(variance[c]);
+            Acc invstd = Acc(1.0) / safe_sqrt(channel_var + static_cast<Acc>(epsilon));
 
             int64_t base_idx = (n * C + c) * spatial_size;
             for (int64_t hw = 0; hw < spatial_size; hw++) {
-                output[base_idx + hw] = (input[base_idx + hw] - channel_mean) * invstd;
+                output[base_idx + hw] = static_cast<T>(
+                    (static_cast<Acc>(input[base_idx + hw]) - channel_mean) * invstd);
             }
         }
     }
@@ -728,11 +734,15 @@ void batchnorm_forward_affine_impl(const T* input,
 
     // Precompute per-channel scale and bias: y = scale * x + bias
     // where scale = gamma / sqrt(var + eps), bias = beta - mean * scale
-    std::vector<T> scale(C), bias(C);
+    // Compute scale/bias in a float accumulator for half types (Float16/BFloat16);
+    // half-precision invstd/scale/bias diverge from the CPU float reference.
+    using Acc = std::conditional_t<
+        std::is_same_v<T, Float16> || std::is_same_v<T, BFloat16>, float, T>;
+    std::vector<Acc> scale(C), bias(C);
     for (int64_t c = 0; c < C; c++) {
-        T invstd = T(1.0f) / safe_sqrt(variance[c] + epsilon);
-        scale[c] = gamma[c] * invstd;
-        bias[c] = beta[c] - mean[c] * scale[c];
+        Acc invstd = Acc(1.0) / safe_sqrt(static_cast<Acc>(variance[c]) + static_cast<Acc>(epsilon));
+        scale[c] = static_cast<Acc>(gamma[c]) * invstd;
+        bias[c] = static_cast<Acc>(beta[c]) - static_cast<Acc>(mean[c]) * scale[c];
     }
 
     // Use fewer threads for memory-bound operations
@@ -749,13 +759,13 @@ void batchnorm_forward_affine_impl(const T* input,
     #pragma omp parallel for collapse(2) num_threads(final_threads) if(total_size > ::tenzor::OmpThresholds::medium())
     for (int64_t n = 0; n < N; n++) {
         for (int64_t c = 0; c < C; c++) {
-            T sc = scale[c];
-            T bi = bias[c];
+            Acc sc = scale[c];
+            Acc bi = bias[c];
             int64_t base_idx = (n * C + c) * spatial_size;
 
             // Simple fused multiply-add over spatial dimensions
             for (int64_t hw = 0; hw < spatial_size; hw++) {
-                output[base_idx + hw] = sc * input[base_idx + hw] + bi;
+                output[base_idx + hw] = static_cast<T>(sc * static_cast<Acc>(input[base_idx + hw]) + bi);
             }
         }
     }

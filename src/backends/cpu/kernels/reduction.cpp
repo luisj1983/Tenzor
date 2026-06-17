@@ -4088,7 +4088,7 @@ static void logsumexp_along_dim(
         }
 
         // Handle inf
-        if (std::isinf(static_cast<float>(m))) {
+        if (std::isinf(m)) {  // test on the accumulator type; casting double->float spuriously overflows finite large Float64
             output_data[out_idx] = T(m);
             continue;
         }

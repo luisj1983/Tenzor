@@ -1274,7 +1274,9 @@ __global__ void adaptive_maxpool2d_kernel(
                 T val = input[input_idx];
                 if (tenzor::rocm::is_nan_bits(val) || val > max_val) {
                     max_val = val;
-                    max_idx = input_idx;
+                    // Plane-local index (h*W + w) to match CPU/PyTorch and the backward
+                    // kernel, which re-adds the (n,c) base exactly once.
+                    max_idx = h * input_w + w;
                 }
             }
         }

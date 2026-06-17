@@ -442,6 +442,12 @@ auto NCCLBackend::reduce_scatter(const std::vector<Tensor>& tensors, Tensor& out
     ));
 
     GPU_CHECK(cudaDeviceSynchronize());
+
+    // NCCL has no native AVG reduce op (ReduceOp::AVG maps to ncclSum); divide by
+    // world size afterwards, mirroring NCCLBackend::all_reduce.
+    if (op == ReduceOp::AVG) {
+        output = output / static_cast<float>(world_size_);
+    }
 #else
     throw NotImplementedError("NCCLBackend: NCCL not available");
 #endif

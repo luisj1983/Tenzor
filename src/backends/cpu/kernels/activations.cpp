@@ -569,7 +569,9 @@ auto sigmoid_kernel(const Tensor& input_raw) -> Tensor {
 }
 
 // Backward: grad_out * sigmoid(x) * (1 - sigmoid(x))
-auto sigmoid_backward_kernel(const Tensor& grad_output, const Tensor& input) -> Tensor {
+auto sigmoid_backward_kernel(const Tensor& grad_output_raw, const Tensor& input_raw) -> Tensor {
+    auto grad_output = grad_output_raw.contiguous();
+    auto input = input_raw.contiguous();
     auto grad_input = zeros_like(input);
 
     if (input.dtype() == DType::Float32) {
@@ -799,7 +801,9 @@ auto tanh_kernel(const Tensor& input_raw) -> Tensor {
 }
 
 // Backward: grad_out * (1 - tanh(x)^2)
-auto tanh_backward_kernel(const Tensor& grad_output, const Tensor& input) -> Tensor {
+auto tanh_backward_kernel(const Tensor& grad_output_raw, const Tensor& input_raw) -> Tensor {
+    auto grad_output = grad_output_raw.contiguous();
+    auto input = input_raw.contiguous();
     auto grad_input = zeros_like(input);
 
     if (input.dtype() == DType::Float32) {
@@ -1223,7 +1227,9 @@ auto leaky_relu_kernel(const Tensor& input_raw, double alpha) -> Tensor {
 }
 
 // Backward: grad_out * (1 if x > 0 else alpha)
-auto leaky_relu_backward_kernel(const Tensor& grad_output, const Tensor& input, double alpha) -> Tensor {
+auto leaky_relu_backward_kernel(const Tensor& grad_output_raw, const Tensor& input_raw, double alpha) -> Tensor {
+    auto grad_output = grad_output_raw.contiguous();
+    auto input = input_raw.contiguous();
     auto grad_input = zeros_like(input);
 
     if (input.dtype() == DType::Float32) {
@@ -2656,7 +2662,9 @@ auto softplus_kernel(const Tensor& input_raw, float beta, float threshold) -> Te
     return output;
 }
 
-auto softplus_backward_kernel(const Tensor& grad_output, const Tensor& input, float beta, float threshold) -> Tensor {
+auto softplus_backward_kernel(const Tensor& grad_output_raw, const Tensor& input_raw, float beta, float threshold) -> Tensor {
+    auto grad_output = grad_output_raw.contiguous();
+    auto input = input_raw.contiguous();
     auto shape_vec = std::vector<int64_t>(input.shape().begin(), input.shape().end());
     Tensor grad_input = empty(shape_vec, input.dtype(), input.device());
 

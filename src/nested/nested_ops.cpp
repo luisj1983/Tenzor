@@ -586,7 +586,9 @@ auto nested_dropout(const NestedTensor& input, double p,
 
     // Apply dropout to the entire values buffer
     OpAttributes attrs;
-    attrs.set(AttrKey::DropoutP, p);
+    // The Dropout kernel reads AttrKey::P (not DropoutP); using the wrong key
+    // silently dropped the requested probability and defaulted to ~0.5.
+    attrs.set(AttrKey::P, p);
     attrs.set(AttrKey::Training, training);
     std::vector<Tensor> inputs = {input.values()};
     auto dropped = dispatch_single(OpId::Dropout, inputs, attrs);

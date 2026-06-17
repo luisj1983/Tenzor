@@ -126,6 +126,7 @@ auto philox_dropout_mask_kernel(const std::vector<int64_t>& shape,
                                  uint64_t seed,
                                  uint64_t offset,
                                  DType dtype,
+                                 Device device,
                                  sycl::queue& queue) -> Tensor {
     if (p < 0.0f || p >= 1.0f) {
         throw std::invalid_argument(
@@ -149,12 +150,12 @@ auto philox_dropout_mask_kernel(const std::vector<int64_t>& shape,
         sk = shape[2];
     }
 
-    // Allocate output on the OneAPI device — Tensor ctor picks the device
-    // from the queue's device index implicitly via the registered backend
-    // allocator; we use the queue's associated `Device::oneapi(...)` here.
-    auto device_index = 0;  // single-device OneAPI build (matches the rest of the registry)
+    // Allocate output on the SAME OneAPI device the `queue` is bound to. The
+    // caller passes that device (derived from an input tensor on the queue's
+    // device), so on a multi-GPU system the allocation lives on the device the
+    // kernel actually writes through — never a hardcoded index 0.
     Tensor out(std::vector<int64_t>(shape.begin(), shape.end()),
-                dtype, Device{Device::Type::OneAPI, device_index});
+                dtype, device);
 
     const uint32_t seed_low = static_cast<uint32_t>(seed & 0xFFFFFFFFu);
     const uint32_t off_low  = static_cast<uint32_t>(offset & 0xFFFFFFFFu);
@@ -179,7 +180,7 @@ auto philox_dropout_mask_kernel(const std::vector<int64_t>& shape,
         // itself runs on the OneAPI device, so this is still a fully
         // on-device path (no CPU fallback).
         Tensor mask_f32 = philox_dropout_mask_kernel(shape, p, seed, offset,
-                                                       DType::Float32, queue);
+                                                       DType::Float32, device, queue);
         return mask_f32.to(DType::BFloat16);
     } else {
         throw std::runtime_error(

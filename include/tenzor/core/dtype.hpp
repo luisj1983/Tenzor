@@ -562,18 +562,29 @@ constexpr auto promote_types(DType a, DType b) -> DType {
     // - FP8 + same FP8 -> same FP8 (handled by a == b above)
     // - FP8_E4M3 + FP8_E5M2 -> FP8_E5M2 (wider dynamic range)
     // - FP8 + non-FP8 -> Float32 (or wider if the other type is wider)
-    if (a == DType::FP8_E4M3 || a == DType::FP8_E5M2) {
-        if (b == DType::Float64) return DType::Float64;
-        if (b == DType::FP8_E4M3 || b == DType::FP8_E5M2) {
-            return DType::FP8_E5M2;  // mixed FP8 -> wider range
+    {
+        const bool a_fp8 = (a == DType::FP8_E4M3 || a == DType::FP8_E5M2 ||
+                            a == DType::FP8_E4M3FNUZ || a == DType::FP8_E5M2FNUZ);
+        const bool b_fp8 = (b == DType::FP8_E4M3 || b == DType::FP8_E5M2 ||
+                            b == DType::FP8_E4M3FNUZ || b == DType::FP8_E5M2FNUZ);
+        if (a_fp8 || b_fp8) {
+            const bool a_fnuz = (a == DType::FP8_E4M3FNUZ || a == DType::FP8_E5M2FNUZ);
+            const bool b_fnuz = (b == DType::FP8_E4M3FNUZ || b == DType::FP8_E5M2FNUZ);
+            if (a_fp8 && b_fp8) {
+                // a == b already handled above. Mixed FP8 within the same family
+                // widens to the E5M2 variant (wider dynamic range); cross-family
+                // (FNUZ vs IEEE) has no common FP8 type, so promote to Float32.
+                if (a_fnuz && b_fnuz) return DType::FP8_E5M2FNUZ;
+                if (!a_fnuz && !b_fnuz) return DType::FP8_E5M2;
+                return DType::Float32;
+            }
+            // FP8 + non-FP8: keep the other type if it is already >= Float32
+            // (Float64 stays Float64), else promote to Float32.
+            const DType other = a_fp8 ? b : a;
+            if (other == DType::Float64) return DType::Float64;
+            if (detail::dtype_priority(other) >= detail::dtype_priority(DType::Float32)) return other;
+            return DType::Float32;
         }
-        if (detail::dtype_priority(b) >= detail::dtype_priority(DType::Float32)) return b;
-        return DType::Float32;
-    }
-    if (b == DType::FP8_E4M3 || b == DType::FP8_E5M2) {
-        if (a == DType::Float64) return DType::Float64;
-        if (detail::dtype_priority(a) >= detail::dtype_priority(DType::Float32)) return a;
-        return DType::Float32;
     }
 
     // Float wins over integer.

@@ -430,6 +430,12 @@ auto MPIBackend::reduce_scatter(const std::vector<Tensor>& tensors,
     ));
 
     copy_back_if_staged(output, recv_host_buf);
+
+    // MPI has no AVG collective (ReduceOp::AVG maps to MPI_SUM); divide by world
+    // size afterwards, mirroring MPIBackend::all_reduce.
+    if (op == ReduceOp::AVG) {
+        output = output / static_cast<float>(world_size_);
+    }
 }
 
 auto MPIBackend::barrier() -> void {

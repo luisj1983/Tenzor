@@ -331,14 +331,28 @@ Tensor mps_clamp_kernel(const Tensor& input, float min_val, float max_val) {
 Tensor mps_matmul_kernel(const Tensor& a, const Tensor& b) {
     ensure_initialized();
 
+    // Match the CPU MatMul contract: OpId::MatMul is strictly 2D. Higher-rank
+    // operands must route through BatchMatMul. A single MPSMatrixMultiplication
+    // over the whole buffer would silently compute only the first matrix slice,
+    // so reject >2D rather than mis-compute.
+    if (a.ndim() != 2 || b.ndim() != 2) {
+        throw std::runtime_error("MPS matmul requires 2D tensors (matrices)");
+    }
+
     auto a_shape = a.shape();
     auto b_shape = b.shape();
-    int64_t M = a_shape[a_shape.size() - 2];
-    int64_t K = a_shape[a_shape.size() - 1];
-    int64_t N = b_shape[b_shape.size() - 1];
+    int64_t M = a_shape[0];
+    int64_t K = a_shape[1];
+    int64_t K2 = b_shape[0];
+    int64_t N = b_shape[1];
 
-    std::vector<int64_t> out_shape(a_shape.begin(), a_shape.end());
-    out_shape.back() = N;
+    if (K != K2) {
+        throw std::runtime_error(
+            "MPS matmul: inner dimensions must match (got " + std::to_string(K) +
+            " vs " + std::to_string(K2) + ")");
+    }
+
+    std::vector<int64_t> out_shape{M, N};
     Tensor output(out_shape, a.dtype(), a.device());
 
     // Use MPSMatrixMultiplication for optimal performance
@@ -387,9 +401,22 @@ Tensor mps_matmul_kernel(const Tensor& a, const Tensor& b) {
 
 // Linear = matmul + bias
 Tensor mps_linear_kernel(const Tensor& input, const Tensor& weight, const Tensor& bias) {
-    auto output = mps_matmul_kernel(input, weight);
-    // Broadcast-add bias
-    return mps_add_kernel(output, bias);
+    // mps_matmul_kernel is strictly 2D (matching the CPU MatMul contract), so
+    // flatten any leading dims of the input to a single batch dimension, run the
+    // 2D matmul, then restore the original leading shape on the output.
+    if (input.ndim() == 2) {
+        auto output = mps_matmul_kernel(input, weight);
+        return mps_add_kernel(output, bias);
+    }
+    auto in_shape = input.shape();
+    int64_t in_features = in_shape.back();
+    int64_t out_features = weight.shape().back();
+    Tensor flat = input.reshape({-1, in_features});
+    Tensor flat_out = mps_matmul_kernel(flat, weight);
+    Tensor flat_biased = mps_add_kernel(flat_out, bias);
+    std::vector<int64_t> out_shape(in_shape.begin(), in_shape.end() - 1);
+    out_shape.push_back(out_features);
+    return flat_biased.reshape(out_shape);
 }
 
 // ============================================================================
@@ -409,7 +436,10 @@ Tensor mps_embedding_kernel(const Tensor& weight, const Tensor& indices) {
 
     auto pipeline = get_pipeline("embedding_kernel");
     id<MTLBuffer> buf_weight = get_buffer(weight);
-    id<MTLBuffer> buf_indices = get_buffer(indices);
+    // Index tensors are canonically Int64; the embedding Metal shader reads 32-bit
+    // `int`. Convert to Int32 (index values fit int32: bounded by vocab size).
+    Tensor indices_i32 = indices.dtype() == DType::Int32 ? indices : indices.to(DType::Int32);
+    id<MTLBuffer> buf_indices = get_buffer(indices_i32);
     id<MTLBuffer> buf_out = get_buffer(output);
     uint32_t dim = static_cast<uint32_t>(embedding_dim);
 
@@ -442,6 +472,12 @@ Tensor mps_softmax_kernel(const Tensor& input, int64_t dim) {
     ensure_initialized();
 
     auto shape = input.shape();
+    // Normalize a negative dim before indexing shape[dim] (shape() is an
+    // unchecked span; shape[-1] would read out of bounds). Matches the CPU path.
+    int64_t ndim = static_cast<int64_t>(shape.size());
+    if (dim < 0) dim += ndim;
+    if (dim < 0 || dim >= ndim)
+        throw std::invalid_argument("mps_softmax: dim out of range");
     // Flatten to 2D: rows x cols where cols is the softmax dimension
     int64_t rows = 1;
     for (size_t i = 0; i < shape.size(); ++i) {
@@ -847,7 +883,6 @@ Tensor mps_max_kernel(const Tensor& input, int64_t dim, bool keepdim,
 
     ensure_initialized();
     auto shape = input.shape();
-    int64_t ndim = shape.size();
     int64_t reduce_size = shape[ndim - 1];
     int64_t num_rows = input.numel() / reduce_size;
     uint32_t rsize = static_cast<uint32_t>(reduce_size);
@@ -1154,6 +1189,10 @@ Tensor mps_softmax_backward_kernel(const Tensor& grad_output, const Tensor& soft
                                     int64_t dim) {
     ensure_initialized();
     auto shape = grad_output.shape();
+    int64_t ndim = static_cast<int64_t>(shape.size());
+    if (dim < 0) dim += ndim;
+    if (dim < 0 || dim >= ndim)
+        throw std::invalid_argument("mps_softmax_backward: dim out of range");
     int64_t rows = 1;
     for (size_t i = 0; i < shape.size(); ++i) {
         if (static_cast<int64_t>(i) != dim) rows *= shape[i];
@@ -1189,6 +1228,10 @@ Tensor mps_softmax_backward_kernel(const Tensor& grad_output, const Tensor& soft
 Tensor mps_logsoftmax_kernel(const Tensor& input, int64_t dim) {
     ensure_initialized();
     auto shape = input.shape();
+    int64_t ndim = static_cast<int64_t>(shape.size());
+    if (dim < 0) dim += ndim;
+    if (dim < 0 || dim >= ndim)
+        throw std::invalid_argument("mps_logsoftmax: dim out of range");
     int64_t rows = 1;
     for (size_t i = 0; i < shape.size(); ++i) {
         if (static_cast<int64_t>(i) != dim) rows *= shape[i];
@@ -1223,6 +1266,10 @@ Tensor mps_logsoftmax_backward_kernel(const Tensor& grad_output, const Tensor& l
                                        int64_t dim) {
     ensure_initialized();
     auto shape = grad_output.shape();
+    int64_t ndim = static_cast<int64_t>(shape.size());
+    if (dim < 0) dim += ndim;
+    if (dim < 0 || dim >= ndim)
+        throw std::invalid_argument("mps_logsoftmax_backward: dim out of range");
     int64_t rows = 1;
     for (size_t i = 0; i < shape.size(); ++i) {
         if (static_cast<int64_t>(i) != dim) rows *= shape[i];
@@ -1278,7 +1325,10 @@ Tensor mps_embedding_backward_kernel(const Tensor& grad_output, const Tensor& in
 
     auto pipeline = get_pipeline("embedding_backward_kernel");
     id<MTLBuffer> buf_grad = get_buffer(grad_output);
-    id<MTLBuffer> buf_idx = get_buffer(indices);
+    // Index tensors are canonically Int64; embedding_backward_kernel reads 32-bit
+    // `int`. Convert to Int32 (index values fit int32: bounded by vocab size).
+    Tensor indices_i32 = indices.dtype() == DType::Int32 ? indices : indices.to(DType::Int32);
+    id<MTLBuffer> buf_idx = get_buffer(indices_i32);
     id<MTLBuffer> buf_out = get_buffer(grad_weight);
 
     id<MTLCommandBuffer> cmd = [g_command_queue commandBuffer];
@@ -1794,18 +1844,6 @@ Tensor mps_isinf_kernel(const Tensor& input) {
 
 Tensor mps_isfinite_kernel(const Tensor& input) {
     return dispatch_unary("isfinite_kernel", input);
-}
-
-Tensor mps_rsqrt_kernel(const Tensor& input) {
-    return dispatch_unary("rsqrt_kernel", input);
-}
-
-Tensor mps_square_kernel(const Tensor& input) {
-    return dispatch_unary("square_kernel", input);
-}
-
-Tensor mps_reciprocal_kernel(const Tensor& input) {
-    return dispatch_unary("reciprocal_kernel", input);
 }
 
 Tensor mps_deg2rad_kernel(const Tensor& input) {

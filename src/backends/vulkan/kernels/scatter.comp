@@ -60,6 +60,9 @@ void main() {
 
     // Get the scatter destination index
     int scatter_idx = indices[idx];
+    // Normalize negative indices like the CPU reference (idx += dim) before the
+    // bounds check, so a valid negative index wraps instead of being silently dropped.
+    if (scatter_idx < 0) scatter_idx += int(params.dim_size);
 
     // Bounds check
     if (scatter_idx < 0 || scatter_idx >= int(params.dim_size)) {

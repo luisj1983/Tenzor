@@ -72,9 +72,10 @@ void main() {
               - params.weight_zero_point * sum_x
               + params.input_zero_point * params.weight_zero_point * int(K - uint(pad_count));
 
-    // Padded positions: (0 - input_zp) * (w - weight_zp) already handled by not
-    // including them in acc/sum_x/sum_w, but zero-point self-interaction still applies
-    acc += params.input_zero_point * params.weight_zero_point * pad_count;
+    // Padded taps contribute exactly 0 (input is padded with the input zero-point,
+    // so (input_zp - input_zp) * (w - weight_zp) == 0). They are correctly excluded
+    // from acc/sum_x/sum_w and the (K - pad_count) term above, so no extra term is
+    // added here — matching the CPU/CUDA references.
 
     // Dequantize to float and add bias
     float result = float(acc) * params.input_scale * params.weight_scale;

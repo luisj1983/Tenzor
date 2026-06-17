@@ -847,7 +847,7 @@ inline void where_batch_avx2(const float* cond, const float* x, const float* y,
         __m256 vy = _mm256_loadu_ps(y + i);
 
         // cond != 0 means true
-        __m256 mask = _mm256_cmp_ps(c, zero, _CMP_NEQ_OQ);
+        __m256 mask = _mm256_cmp_ps(c, zero, _CMP_NEQ_UQ);
         __m256 r = _mm256_blendv_ps(vy, vx, mask);
 
         _mm256_storeu_ps(output + i, r);
@@ -877,7 +877,7 @@ inline void where_batch_avx512(const float* cond, const float* x, const float* y
         __m512 vx = _mm512_loadu_ps(x + i);
         __m512 vy = _mm512_loadu_ps(y + i);
 
-        __mmask16 mask = _mm512_cmp_ps_mask(c, zero, _CMP_NEQ_OQ);
+        __mmask16 mask = _mm512_cmp_ps_mask(c, zero, _CMP_NEQ_UQ);
         __m512 r = _mm512_mask_blend_ps(mask, vy, vx);
 
         _mm512_storeu_ps(output + i, r);

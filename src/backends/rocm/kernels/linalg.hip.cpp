@@ -4232,7 +4232,8 @@ auto linalg_det_kernel(const Tensor& A, hipStream_t stream) -> Tensor {
     std::vector<int64_t> out_shape;
     auto shape = A.shape();
     for (size_t i = 0; i + 2 < shape.size(); i++) out_shape.push_back(shape[i]);
-    if (out_shape.empty()) out_shape.push_back(1);
+    // A plain 2D matrix yields a 0-D scalar determinant (matching torch.linalg.det,
+    // the rocSOLVER path, and the CUDA fallback). Do NOT force shape {1}.
 
     auto result = zeros(out_shape, A.dtype(), A.device());
 
@@ -4411,13 +4412,12 @@ auto linalg_solve_kernel(const Tensor& A, const Tensor& B, hipStream_t stream) -
 auto linalg_svd_kernel(const Tensor& A, bool full_matrices, hipStream_t stream)
     -> std::tuple<Tensor, Tensor, Tensor> {
     validate_linalg_dtype(A, "svd");
-    if (A.dtype() == DType::Float16) {
+    if (A.dtype() == DType::Float16 || A.dtype() == DType::BFloat16) {
+        // Narrow results back to the input dtype (matches the CUDA fallback and the
+        // rocSOLVER path); returning Float32 diverges from the input contract.
+        DType orig = A.dtype();
         auto [U, S, Vt] = linalg_svd_kernel(A.to(DType::Float32), full_matrices, stream);
-        return {U, S, Vt};  // Keep as Float32
-    }
-    if (A.dtype() == DType::BFloat16) {
-        auto [U, S, Vt] = linalg_svd_kernel(A.to(DType::Float32), full_matrices, stream);
-        return {U, S, Vt};
+        return {U.to(orig), S.to(orig), Vt.to(orig)};
     }
 
     auto work = A.contiguous().clone();
@@ -4482,13 +4482,11 @@ auto linalg_svd_kernel(const Tensor& A, bool full_matrices, hipStream_t stream)
 auto linalg_qr_kernel(const Tensor& A, hipStream_t stream)
     -> std::tuple<Tensor, Tensor> {
     validate_linalg_dtype(A, "qr");
-    if (A.dtype() == DType::Float16) {
+    if (A.dtype() == DType::Float16 || A.dtype() == DType::BFloat16) {
+        // Narrow results back to the input dtype (matches CUDA fallback / rocSOLVER).
+        DType orig = A.dtype();
         auto [Q, R] = linalg_qr_kernel(A.to(DType::Float32), stream);
-        return {Q, R};
-    }
-    if (A.dtype() == DType::BFloat16) {
-        auto [Q, R] = linalg_qr_kernel(A.to(DType::Float32), stream);
-        return {Q, R};
+        return {Q.to(orig), R.to(orig)};
     }
 
     auto work = A.contiguous().clone();
@@ -4542,13 +4540,11 @@ auto linalg_qr_kernel(const Tensor& A, hipStream_t stream)
 auto linalg_eigh_kernel(const Tensor& A, hipStream_t stream)
     -> std::tuple<Tensor, Tensor> {
     validate_linalg_dtype(A, "eigh");
-    if (A.dtype() == DType::Float16) {
+    if (A.dtype() == DType::Float16 || A.dtype() == DType::BFloat16) {
+        // Narrow results back to the input dtype (matches CUDA fallback / rocSOLVER).
+        DType orig = A.dtype();
         auto [W, V] = linalg_eigh_kernel(A.to(DType::Float32), stream);
-        return {W, V};
-    }
-    if (A.dtype() == DType::BFloat16) {
-        auto [W, V] = linalg_eigh_kernel(A.to(DType::Float32), stream);
-        return {W, V};
+        return {W.to(orig), V.to(orig)};
     }
 
     auto work = A.contiguous().clone();
@@ -4593,13 +4589,11 @@ auto linalg_eigh_kernel(const Tensor& A, hipStream_t stream)
 auto linalg_eig_kernel(const Tensor& A, hipStream_t stream)
     -> std::tuple<Tensor, Tensor, Tensor> {
     validate_linalg_dtype(A, "eig");
-    if (A.dtype() == DType::Float16) {
+    if (A.dtype() == DType::Float16 || A.dtype() == DType::BFloat16) {
+        // Narrow results back to the input dtype (matches CUDA fallback / rocSOLVER).
+        DType orig = A.dtype();
         auto [wr, wi, V] = linalg_eig_kernel(A.to(DType::Float32), stream);
-        return {wr, wi, V};
-    }
-    if (A.dtype() == DType::BFloat16) {
-        auto [wr, wi, V] = linalg_eig_kernel(A.to(DType::Float32), stream);
-        return {wr, wi, V};
+        return {wr.to(orig), wi.to(orig), V.to(orig)};
     }
 
     auto work = A.contiguous().clone();

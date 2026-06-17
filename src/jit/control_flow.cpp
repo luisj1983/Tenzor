@@ -28,7 +28,9 @@ auto cond(const Tensor& condition,
     }
 
     // Eager mode: evaluate condition and call appropriate branch
-    bool cond_val = condition.item<float>() != 0.0f;
+    // Convert to Float32 first: the condition's natural dtype is often Bool/Int,
+    // and item<float>() requires a Float32 tensor.
+    bool cond_val = condition.to(DType::Float32).item<float>() != 0.0f;
 
     if (cond_val) {
         return then_fn(args);
@@ -85,7 +87,7 @@ auto while_loop(int64_t max_iter,
     for (int64_t i = 0; i < max_iter; ++i) {
         // Check condition
         Tensor cond_result = cond_fn(state);
-        if (cond_result.item<float>() == 0.0f) {
+        if (cond_result.to(DType::Float32).item<float>() == 0.0f) {
             break;
         }
 

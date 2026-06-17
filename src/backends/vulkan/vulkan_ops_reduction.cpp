@@ -3,7 +3,11 @@
 namespace tenzor {
 
 // Advanced reduction operations implementation
-auto VulkanBackend::dispatchArgmax(const Tensor& input, int64_t dim, bool keepdim) -> Tensor {
+auto VulkanBackend::dispatchArgmax(const Tensor& input_orig, int64_t dim, bool keepdim) -> Tensor {
+    // Materialize to packed, zero-offset storage: a transposed/permuted offset-0
+    // view passes the descriptor-offset guard but would be read with
+    // stride-from-shape, indexing the wrong elements (matches dispatchVariance).
+    Tensor input = dispatchContiguous(input_orig);
     // Small integer / Bool dtypes: widen to Int32 (exact, order-preserving) so
     // argmax_argmin_i32 handles them — the generic float shader would misread
     // narrow integer storage as float32 and return wrong indices.
@@ -112,7 +116,9 @@ auto VulkanBackend::dispatchArgmax(const Tensor& input, int64_t dim, bool keepdi
     return output;
 }
 
-auto VulkanBackend::dispatchArgmin(const Tensor& input, int64_t dim, bool keepdim) -> Tensor {
+auto VulkanBackend::dispatchArgmin(const Tensor& input_orig, int64_t dim, bool keepdim) -> Tensor {
+    // Materialize to packed, zero-offset storage (see dispatchArgmax).
+    Tensor input = dispatchContiguous(input_orig);
     // Small integer / Bool dtypes: widen to Int32 (exact, order-preserving) so
     // argmax_argmin_i32 handles them — the generic float shader would misread
     // narrow integer storage as float32 and return wrong indices.
@@ -402,7 +408,10 @@ auto VulkanBackend::dispatchNorm(const Tensor& input, float p, int64_t dim, bool
     }
 }
 
-auto VulkanBackend::dispatchProd(const Tensor& input, int64_t dim, bool keepdim) -> Tensor {
+auto VulkanBackend::dispatchProd(const Tensor& input_orig, int64_t dim, bool keepdim) -> Tensor {
+    // Materialize to packed, zero-offset storage (see dispatchArgmax). A
+    // transposed offset-0 view would otherwise be read with stride-from-shape.
+    Tensor input = dispatchContiguous(input_orig);
     int32_t device_id = input.device().index;
 
     // Types without a dedicated prod shader: upcast, compute in a wider type,
@@ -528,8 +537,10 @@ auto VulkanBackend::dispatchProd(const Tensor& input, int64_t dim, bool keepdim)
 }
 
 auto VulkanBackend::dispatchBooleanReduction(const std::string& op_name,
-                                              const Tensor& input,
+                                              const Tensor& input_orig,
                                               int64_t dim, bool keepdim) -> Tensor {
+    // Materialize to packed, zero-offset storage (see dispatchArgmax).
+    Tensor input = dispatchContiguous(input_orig);
     // Handle empty tensors
     if (input.numel() == 0) {
         // any of empty = false, all of empty = true
@@ -667,7 +678,9 @@ auto VulkanBackend::dispatchAny(const Tensor& input, int64_t dim, bool keepdim) 
     return dispatchBooleanReduction("any", input, dim, keepdim);
 }
 
-auto VulkanBackend::dispatchLogSumExp(const Tensor& input, int64_t dim, bool keepdim) -> Tensor {
+auto VulkanBackend::dispatchLogSumExp(const Tensor& input_orig, int64_t dim, bool keepdim) -> Tensor {
+    // Materialize to packed, zero-offset storage (see dispatchArgmax).
+    Tensor input = dispatchContiguous(input_orig);
     // Empty tensor: return -inf (log of 0)
     if (input.numel() == 0) {
         std::vector<int64_t> out_shape;

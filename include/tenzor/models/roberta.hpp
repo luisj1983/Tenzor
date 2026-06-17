@@ -104,6 +104,13 @@ public:
      * @param config RoBERTa configuration
      */
     explicit RobertaEmbeddings(const RobertaConfig& config);
+
+    /**
+     * @brief RoBERTa position IDs: padding_idx+1 plus the cumulative count of
+     * non-padding tokens, matching HF create_position_ids_from_input_ids
+     * (padding positions map to padding_idx). RoBERTa pad_token_id = 1.
+     */
+    auto create_position_ids(const Tensor& input_ids) -> Tensor override;
 };
 
 /**

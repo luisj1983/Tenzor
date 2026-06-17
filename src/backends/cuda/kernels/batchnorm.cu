@@ -743,60 +743,17 @@ auto batchnorm2d_mean_var(const Tensor& input,
             CUDA_CHECK(cudaGetLastError());
         }
     } else if (input.dtype() == DType::Float16) {
-        if (use_chunked) {
-            auto [grid_cm, bs_cm] = optimal_launch_config(
-                batchnorm_mean_chunked_kernel<__half>, N * H * W, (256 / 32) * sizeof(__half));
-            auto [grid_cv, bs_cv] = optimal_launch_config(
-                batchnorm_variance_chunked_kernel<__half>, N * H * W, (256 / 32) * sizeof(__half));
-            int bn_bs = std::max(32, std::min(std::min(bs_cm, bs_cv), 1024));
-            bn_bs = (bn_bs / 32) * 32;
-            int shared_mem_size = (bn_bs / 32) * sizeof(__half);
-
-            int64_t spatial_chunk_size = static_cast<int64_t>(bn_bs) * 4;
-            int64_t spatial_chunks = (total_elements + spatial_chunk_size - 1) / spatial_chunk_size;
-            dim3 grid(C, spatial_chunks);
-
-            CUDA_CHECK(cudaMemsetAsync(mean.data<Float16>(), 0, C * sizeof(__half), stream));
-            batchnorm_mean_chunked_kernel<__half><<<grid, bn_bs, shared_mem_size, stream>>>(
-                reinterpret_cast<const __half*>(input.data<Float16>()),
-                reinterpret_cast<__half*>(mean.data<Float16>()),
-                N, C, H, W, spatial_chunk_size);
-            CUDA_CHECK(cudaGetLastError());
-            int finalize_blocks = (C + 255) / 256;
-            batchnorm_finalize_mean_kernel<__half><<<finalize_blocks, 256, 0, stream>>>(
-                reinterpret_cast<__half*>(mean.data<Float16>()), C, total_elements);
-            CUDA_CHECK(cudaGetLastError());
-
-            CUDA_CHECK(cudaMemsetAsync(variance.data<Float16>(), 0, C * sizeof(__half), stream));
-            batchnorm_variance_chunked_kernel<__half><<<grid, bn_bs, shared_mem_size, stream>>>(
-                reinterpret_cast<const __half*>(input.data<Float16>()),
-                reinterpret_cast<const __half*>(mean.data<Float16>()),
-                reinterpret_cast<__half*>(variance.data<Float16>()),
-                N, C, H, W, spatial_chunk_size);
-            CUDA_CHECK(cudaGetLastError());
-            batchnorm_finalize_mean_kernel<__half><<<finalize_blocks, 256, 0, stream>>>(
-                reinterpret_cast<__half*>(variance.data<Float16>()), C, total_elements);
-            CUDA_CHECK(cudaGetLastError());
-        } else {
-            auto [grid_m, bs_m] = optimal_launch_config(
-                batchnorm_mean_kernel<__half>, N * H * W, (256 / 32) * sizeof(__half));
-            auto [grid_v, bs_v] = optimal_launch_config(
-                batchnorm_variance_kernel<__half>, N * H * W, (256 / 32) * sizeof(__half));
-            int bn_bs = std::max(32, std::min(std::min(bs_m, bs_v), 1024));
-            bn_bs = (bn_bs / 32) * 32;
-            int shared_mem_size = (bn_bs / 32) * sizeof(__half);
-
-            batchnorm_mean_kernel<__half><<<C, bn_bs, shared_mem_size, stream>>>(
-                reinterpret_cast<const __half*>(input.data<Float16>()),
-                reinterpret_cast<__half*>(mean.data<Float16>()), N, C, H, W);
-            CUDA_CHECK(cudaGetLastError());
-
-            batchnorm_variance_kernel<__half><<<C, bn_bs, shared_mem_size, stream>>>(
-                reinterpret_cast<const __half*>(input.data<Float16>()),
-                reinterpret_cast<const __half*>(mean.data<Float16>()),
-                reinterpret_cast<__half*>(variance.data<Float16>()), N, C, H, W);
-            CUDA_CHECK(cudaGetLastError());
-        }
+        // Compute statistics in Float32 to avoid a half-precision accumulator,
+        // which loses precision / overflows and diverges from the CPU/PyTorch
+        // reference. This runs on the GPU (widen the input, reuse the Float32
+        // reduction path, narrow the resulting stats back to Float16) — it is NOT
+        // a CPU fallback. Mirrors the ROCm BatchNorm widen-narrow pattern.
+        Tensor input_f32 = input.to(DType::Float32);
+        Tensor mean_f32 = mean.to(DType::Float32);
+        Tensor variance_f32 = variance.to(DType::Float32);
+        batchnorm2d_mean_var(input_f32, mean_f32, variance_f32, stream);
+        mean = mean_f32.to(DType::Float16);
+        variance = variance_f32.to(DType::Float16);
     } else {
         throw std::runtime_error("BatchNorm2D only supports Float32, Float64, and Float16 dtypes");
     }

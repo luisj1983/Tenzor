@@ -1490,9 +1490,15 @@ auto VulkanBackend::dispatchROIAlignForward(const Tensor& features, const Tensor
     std::vector<int64_t> output_shape = {num_rois, channels, output_h, output_w};
     Tensor output(output_shape, features.dtype(), features.device());
 
+    // Materialize read operands to zero-offset contiguous storage; a tensor view
+    // with a non-16-byte-aligned descriptor offset would otherwise trip the
+    // descriptor-offset alignment guard (matches the deformable-conv path).
+    Tensor features_c = dispatchContiguous(features);
+    Tensor rois_c = dispatchContiguous(rois);
+
     // Get VkBuffer handles
-    const void* buffer_features = features.data_ptr();
-    const void* buffer_rois = rois.data_ptr();
+    const void* buffer_features = features_c.data_ptr();
+    const void* buffer_rois = rois_c.data_ptr();
     const void* buffer_output = output.data_ptr();
 
     // BFloat16 packs two elements per uint32 word, so round each buffer up to a
@@ -1519,7 +1525,7 @@ auto VulkanBackend::dispatchROIAlignForward(const Tensor& features, const Tensor
     vkCmdBindDescriptorSets(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE,
                            pipeline->layout(), 0, 1, &descriptorSet, 0, nullptr);
 
-    // Push constants: 10 uint32_t values = 40 bytes
+    // Push constants: 11 uint32_t values = 44 bytes
     struct PushConstants {
         uint32_t n_elements;
         uint32_t num_rois;
@@ -1531,6 +1537,7 @@ auto VulkanBackend::dispatchROIAlignForward(const Tensor& features, const Tensor
         uint32_t spatial_scale_bits;
         uint32_t sampling_ratio;
         uint32_t aligned;
+        uint32_t batch_size;
     } push_constants;
 
     push_constants.n_elements = static_cast<uint32_t>(output.numel());
@@ -1546,6 +1553,7 @@ auto VulkanBackend::dispatchROIAlignForward(const Tensor& features, const Tensor
     push_constants.spatial_scale_bits = scale_bits;
     push_constants.sampling_ratio = static_cast<uint32_t>(sampling_ratio);
     push_constants.aligned = aligned ? 1u : 0u;
+    push_constants.batch_size = static_cast<uint32_t>(features.shape()[0]);
 
     vkCmdPushConstants(cmdBuffer, pipeline->layout(),
                       VK_SHADER_STAGE_COMPUTE_BIT,
@@ -1638,8 +1646,14 @@ auto VulkanBackend::dispatchROIAlignBackward(const Tensor& grad_output, const Te
     // Zero-initialize grad_features (atomicAdd accumulates into it)
     grad_features = dispatchFill(grad_features, 0.0f);
 
-    const void* buffer_grad_output = grad_output.data_ptr();
-    const void* buffer_rois = rois.data_ptr();
+    // Materialize read operands to zero-offset contiguous storage (view operands
+    // would trip the descriptor-offset alignment guard). grad_features is freshly
+    // allocated and zero-initialized above, so it is already contiguous.
+    Tensor grad_output_c = dispatchContiguous(grad_output);
+    Tensor rois_c = dispatchContiguous(rois);
+
+    const void* buffer_grad_output = grad_output_c.data_ptr();
+    const void* buffer_rois = rois_c.data_ptr();
     const void* buffer_grad_features = grad_features.data_ptr();
 
     size_t buffer_size_grad_output = grad_output.numel() * grad_output.dtype_size();

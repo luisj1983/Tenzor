@@ -899,8 +899,10 @@ auto VulkanBackend::dispatchLayerNormBackward(const Tensor& grad_output, const T
                                                -> std::tuple<Tensor, Tensor, Tensor> {
     int32_t device_id = input.device().index;
 
-    // For Float16, upcast to Float32 for numerical stability
-    if (input.dtype() == DType::Float16) {
+    // For Float16/BFloat16, upcast to Float32. Besides numerical stability, this
+    // avoids the bf16 backward shader reading the Float32 saved mean/rstd (the
+    // forward saved-stats contract) as packed BF16, which corrupts grad_input.
+    if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) {
         DType orig_dtype = input.dtype();
         auto go_f32 = grad_output.to(DType::Float32);
         auto in_f32 = input.to(DType::Float32);

@@ -64,7 +64,10 @@ auto VulkanBackend::dispatchRadixSort(const Tensor& input, bool descending) -> s
         {
             struct { uint32_t n; uint32_t digit; uint32_t n_wgs; } pc;
             pc.n = static_cast<uint32_t>(n);
-            pc.digit = descending ? (num_passes - 1 - digit) : digit;
+            // LSD radix sort must process digits least-significant-first regardless
+            // of direction; descending order is realized by the final dispatchFlip
+            // below. Reversing the pass order here corrupts multi-pass (>1 digit) sorts.
+            pc.digit = digit;
             pc.n_wgs = n_wgs;
 
             std::vector<std::pair<uint32_t, const void*>> bindings = {
@@ -110,7 +113,10 @@ auto VulkanBackend::dispatchRadixSort(const Tensor& input, bool descending) -> s
         {
             struct { uint32_t n; uint32_t digit; uint32_t n_wgs; } pc;
             pc.n = static_cast<uint32_t>(n);
-            pc.digit = descending ? (num_passes - 1 - digit) : digit;
+            // LSD radix sort must process digits least-significant-first regardless
+            // of direction; descending order is realized by the final dispatchFlip
+            // below. Reversing the pass order here corrupts multi-pass (>1 digit) sorts.
+            pc.digit = digit;
             pc.n_wgs = n_wgs;
 
             std::vector<std::pair<uint32_t, const void*>> bindings = {

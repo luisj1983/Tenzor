@@ -311,18 +311,36 @@ auto Tensor::dequantize() const -> Tensor {
     auto float_tensor = zeros(std::vector<int64_t>(impl_->shape), DType::Float32, Device::cpu());
     size_t n = numel();
     float* out = float_tensor.data<float>();
-    double scale = impl_->q_scale_;
-    int64_t zp = impl_->q_zero_point_;
 
-    if (impl_->dtype == DType::QUInt8) {
-        const uint8_t* in = int_tensor.data<uint8_t>();
+    const bool quint8 = (impl_->dtype == DType::QUInt8);
+    const uint8_t* in_u = quint8 ? int_tensor.data<uint8_t>() : nullptr;
+    const int8_t*  in_s = quint8 ? nullptr : int_tensor.data<int8_t>();
+    auto raw = [&](size_t i) -> int64_t {
+        return quint8 ? static_cast<int64_t>(in_u[i]) : static_cast<int64_t>(in_s[i]);
+    };
+
+    if (is_per_channel_quantized()) {
+        // Per-channel: each slice along the quantization axis has its own
+        // scale/zero_point. Ignoring these (the old scalar path) produced
+        // all-zeros because the scalar q_scale_ defaults to 0.0.
+        const std::vector<double>& scales = q_per_channel_scales();
+        const std::vector<int64_t>& zps = q_per_channel_zero_points();
+        std::vector<int64_t> shp(impl_->shape);
+        int64_t ndim = static_cast<int64_t>(shp.size());
+        int64_t axis = q_per_channel_axis();
+        if (axis < 0) axis += ndim;
+        int64_t axis_size = (axis >= 0 && axis < ndim) ? shp[axis] : 1;
+        int64_t inner = 1;
+        for (int64_t d = axis + 1; d < ndim; ++d) inner *= shp[d];
         for (size_t i = 0; i < n; ++i) {
-            out[i] = static_cast<float>((static_cast<int64_t>(in[i]) - zp) * scale);
+            int64_t chan = inner > 0 ? (static_cast<int64_t>(i) / inner) % axis_size : 0;
+            out[i] = static_cast<float>((raw(i) - zps[chan]) * scales[chan]);
         }
     } else {
-        const int8_t* in = int_tensor.data<int8_t>();
+        double scale = impl_->q_scale_;
+        int64_t zp = impl_->q_zero_point_;
         for (size_t i = 0; i < n; ++i) {
-            out[i] = static_cast<float>((static_cast<int64_t>(in[i]) - zp) * scale);
+            out[i] = static_cast<float>((raw(i) - zp) * scale);
         }
     }
 

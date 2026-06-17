@@ -533,6 +533,9 @@ auto VulkanBackend::dispatchConvTranspose2dForward(const Tensor& input, const Te
     std::string shader_name = "conv_transpose2d_forward";
     if (input.dtype() == DType::Float64) shader_name = "conv_transpose2d_forward_f64";
     else if (input.dtype() == DType::Float16) shader_name = "conv_transpose2d_forward_f16";
+    // BFloat16 has a dedicated packed shader; without this branch it falls through
+    // to the F32 shader, which reinterprets the packed BF16 buffer and corrupts output.
+    else if (input.dtype() == DType::BFloat16) shader_name = "conv_transpose2d_forward_bf16";
     auto* pipeline = getPipeline(shader_name, device_id);
 
     // Create output tensor
@@ -1419,7 +1422,8 @@ auto VulkanBackend::dispatchDeformableConv2dForward(
     Tensor input_c  = dispatchContiguous(input);
     Tensor offset_c = dispatchContiguous(offset);
     Tensor weight_c = dispatchContiguous(weight);
-    Tensor bias_c   = dispatchContiguous(bias);
+    bool use_bias   = bias.numel() > 0;
+    Tensor bias_c   = use_bias ? dispatchContiguous(bias) : output;
     Tensor mask_c   = use_mask ? dispatchContiguous(mask) : output;
 
     const void* buffer_input  = input_c.data_ptr();
@@ -1432,7 +1436,7 @@ auto VulkanBackend::dispatchDeformableConv2dForward(
     size_t size_input  = input.numel()  * input.dtype_size();
     size_t size_offset = offset.numel() * offset.dtype_size();
     size_t size_weight = weight.numel() * weight.dtype_size();
-    size_t size_bias   = bias.numel()   * bias.dtype_size();
+    size_t size_bias   = use_bias ? (bias.numel() * bias.dtype_size()) : 4;
     size_t size_mask   = use_mask ? (mask.numel() * mask.dtype_size()) : 4;
     size_t size_output = output.numel() * output.dtype_size();
 
@@ -1452,7 +1456,7 @@ auto VulkanBackend::dispatchDeformableConv2dForward(
     struct PushConstants {
         uint32_t batch, in_channels, out_channels, H, W, kH, kW;
         uint32_t H_out, W_out, stride_h, stride_w, pad_h, pad_w;
-        uint32_t dil_h, dil_w, groups, offset_groups, use_mask, n_elements;
+        uint32_t dil_h, dil_w, groups, offset_groups, use_mask, use_bias, n_elements;
     } pc;
 
     pc.batch        = static_cast<uint32_t>(batch);
@@ -1473,6 +1477,7 @@ auto VulkanBackend::dispatchDeformableConv2dForward(
     pc.groups        = static_cast<uint32_t>(groups);
     pc.offset_groups = static_cast<uint32_t>(offset_groups);
     pc.use_mask      = use_mask ? 1u : 0u;
+    pc.use_bias      = use_bias ? 1u : 0u;
     pc.n_elements    = static_cast<uint32_t>(output.numel());
 
     vkCmdPushConstants(cmdBuffer, pipeline->layout(),

@@ -1698,12 +1698,30 @@ auto index_add_kernel(const Tensor& input, int64_t dim, const Tensor& index,
     const float* src_ptr = get_data_ptr<const float>(source);
     const int64_t* idx_ptr = get_data_ptr<const int64_t>(index);
 
+    // Validate indices host-side (normalize negatives, throw on out-of-range)
+    // matching the CPU reference, then normalize again inside the kernel.
+    if (idx_n > 0) {
+        std::vector<int64_t> host_idx(static_cast<size_t>(idx_n));
+        queue.memcpy(host_idx.data(), idx_ptr,
+                     static_cast<size_t>(idx_n) * sizeof(int64_t)).wait();
+        for (int64_t i = 0; i < idx_n; ++i) {
+            int64_t di = host_idx[i];
+            if (di < 0) di += dim_size;
+            if (di < 0 || di >= dim_size) {
+                throw std::out_of_range("index_add: index " + std::to_string(host_idx[i]) +
+                    " out of range [0, " + std::to_string(dim_size) + ")");
+            }
+        }
+    }
+
     queue.parallel_for<IndexAddKernelF32>(sycl::range<1>(total), [=](sycl::id<1> tid) {
         int64_t id = static_cast<int64_t>(tid);
         int64_t o = id / (idx_n * inner);
         int64_t k = (id / inner) % idx_n;
         int64_t j = id % inner;
-        int64_t dst_offset = (o * dim_size + idx_ptr[k]) * inner + j;
+        int64_t di = idx_ptr[k];
+        if (di < 0) di += dim_size;
+        int64_t dst_offset = (o * dim_size + di) * inner + j;
         int64_t src_offset = (o * idx_n + k) * inner + j;
         sycl::atomic_ref<float, sycl::memory_order::relaxed,
                          sycl::memory_scope::device,
@@ -1745,12 +1763,30 @@ auto index_copy_kernel(const Tensor& input, int64_t dim, const Tensor& index,
     const float* src_ptr = get_data_ptr<const float>(source);
     const int64_t* idx_ptr = get_data_ptr<const int64_t>(index);
 
+    // Validate indices host-side (normalize negatives, throw on out-of-range)
+    // matching the CPU reference, then normalize again inside the kernel.
+    if (idx_n > 0) {
+        std::vector<int64_t> host_idx(static_cast<size_t>(idx_n));
+        queue.memcpy(host_idx.data(), idx_ptr,
+                     static_cast<size_t>(idx_n) * sizeof(int64_t)).wait();
+        for (int64_t i = 0; i < idx_n; ++i) {
+            int64_t di = host_idx[i];
+            if (di < 0) di += dim_size;
+            if (di < 0 || di >= dim_size) {
+                throw std::out_of_range("index_copy: index " + std::to_string(host_idx[i]) +
+                    " out of range [0, " + std::to_string(dim_size) + ")");
+            }
+        }
+    }
+
     queue.parallel_for<IndexCopyKernelF32>(sycl::range<1>(total), [=](sycl::id<1> tid) {
         int64_t id = static_cast<int64_t>(tid);
         int64_t o = id / (idx_n * inner);
         int64_t k = (id / inner) % idx_n;
         int64_t j = id % inner;
-        out_ptr[(o * dim_size + idx_ptr[k]) * inner + j] =
+        int64_t di = idx_ptr[k];
+        if (di < 0) di += dim_size;
+        out_ptr[(o * dim_size + di) * inner + j] =
             src_ptr[(o * idx_n + k) * inner + j];
     }).wait();
 
@@ -1787,12 +1823,30 @@ auto index_fill_kernel(const Tensor& input, int64_t dim, const Tensor& index,
     const int64_t* idx_ptr = get_data_ptr<const int64_t>(index);
     float fill_val = value;
 
+    // Validate indices host-side (normalize negatives, throw on out-of-range)
+    // matching the CPU reference, then normalize again inside the kernel.
+    if (idx_n > 0) {
+        std::vector<int64_t> host_idx(static_cast<size_t>(idx_n));
+        queue.memcpy(host_idx.data(), idx_ptr,
+                     static_cast<size_t>(idx_n) * sizeof(int64_t)).wait();
+        for (int64_t i = 0; i < idx_n; ++i) {
+            int64_t di = host_idx[i];
+            if (di < 0) di += dim_size;
+            if (di < 0 || di >= dim_size) {
+                throw std::out_of_range("index_fill: index " + std::to_string(host_idx[i]) +
+                    " out of range for dim of size " + std::to_string(dim_size));
+            }
+        }
+    }
+
     queue.parallel_for<IndexFillKernelF32>(sycl::range<1>(total), [=](sycl::id<1> tid) {
         int64_t id = static_cast<int64_t>(tid);
         int64_t o = id / (idx_n * inner);
         int64_t k = (id / inner) % idx_n;
         int64_t j = id % inner;
-        out_ptr[(o * dim_size + idx_ptr[k]) * inner + j] = fill_val;
+        int64_t di = idx_ptr[k];
+        if (di < 0) di += dim_size;
+        out_ptr[(o * dim_size + di) * inner + j] = fill_val;
     }).wait();
 
     return output;
@@ -2009,69 +2063,101 @@ auto take_along_dim_kernel(const Tensor& input, const Tensor& indices, int64_t d
     int64_t ndim = in_shape.size();
     if (dim < 0) dim += ndim;
 
+    if (ndim > 8) {
+        throw std::runtime_error("take_along_dim OneAPI: max 8 dimensions supported");
+    }
+
     Tensor output(std::vector<int64_t>(idx_shape.begin(), idx_shape.end()),
                   input.dtype(), input.device());
     int64_t numel = indices.numel();
     if (numel == 0) return output;
 
-    int64_t idx_dim_size = idx_shape[dim];
     int64_t in_dim_size = in_shape[dim];
-    int64_t inner_size = 1;
-    for (int64_t d = dim + 1; d < ndim; ++d) inner_size *= idx_shape[d];
+
+    // Per-dimension decode requires the index shape and the INPUT's own
+    // contiguous strides: input and index may differ on non-dim axes (PyTorch
+    // broadcasts the index against the input), so every non-dim coordinate must
+    // be re-linearised against the input strides — not the index extents.
+    // Mirrors the CPU reference.
+    std::array<int64_t, 8> idx_shape_arr{};
+    std::array<int64_t, 8> in_strides{};
+    {
+        int64_t s = 1;
+        for (int64_t d = ndim - 1; d >= 0; --d) {
+            in_strides[d] = s;
+            s *= in_shape[d];
+        }
+        for (int64_t d = 0; d < ndim; ++d) idx_shape_arr[d] = idx_shape[d];
+    }
 
     const int64_t* idx_ptr = indices.data<int64_t>();
+
+    // Validate indices host-side (normalize negatives, throw on out-of-range),
+    // matching the CPU reference (throwing inside a SYCL kernel is not possible).
+    {
+        std::vector<int64_t> host_idx(static_cast<size_t>(numel));
+        queue.memcpy(host_idx.data(), idx_ptr,
+                     static_cast<size_t>(numel) * sizeof(int64_t)).wait();
+        for (int64_t i = 0; i < numel; ++i) {
+            int64_t src_idx = host_idx[i];
+            if (src_idx < 0) src_idx += in_dim_size;
+            if (src_idx < 0 || src_idx >= in_dim_size) {
+                throw std::out_of_range("take_along_dim: index out of range for dim");
+            }
+        }
+    }
+
+    const int64_t nd = ndim;
+    const int64_t the_dim = dim;
+
+    // Map an output/index flat position i (row-major over idx_shape) to the
+    // matching input offset: decode each coordinate from idx_shape, substitute
+    // the gathered index for the `dim` coordinate, and re-linearise every
+    // coordinate against the input strides.
+    auto in_offset_of = [=](int64_t i) {
+        int64_t off = 0;
+        int64_t rem = i;
+        for (int64_t d = nd - 1; d >= 0; --d) {
+            int64_t c = rem % idx_shape_arr[d];
+            rem /= idx_shape_arr[d];
+            if (d == the_dim) {
+                int64_t src_idx = idx_ptr[i];
+                if (src_idx < 0) src_idx += in_dim_size;
+                off += src_idx * in_strides[d];
+            } else {
+                off += c * in_strides[d];
+            }
+        }
+        return off;
+    };
 
     if (input.dtype() == DType::Float32) {
         const float* in_ptr = input.data<float>();
         float* out_ptr = output.data<float>();
         queue.parallel_for<TakeAlongDimKernelF32>(sycl::range<1>(numel), [=](sycl::id<1> tid) {
             int64_t i = static_cast<int64_t>(tid);
-            int64_t outer = i / (idx_dim_size * inner_size);
-            int64_t rem = i % (idx_dim_size * inner_size);
-            int64_t inner = rem % inner_size;
-            int64_t src_idx = idx_ptr[i];
-            if (src_idx < 0) src_idx += in_dim_size;
-            int64_t in_offset = outer * (in_dim_size * inner_size) + src_idx * inner_size + inner;
-            out_ptr[i] = in_ptr[in_offset];
+            out_ptr[i] = in_ptr[in_offset_of(i)];
         }).wait();
     } else if (input.dtype() == DType::Float64) {
         const double* in_ptr = input.data<double>();
         double* out_ptr = output.data<double>();
         queue.parallel_for<TakeAlongDimKernelF64>(sycl::range<1>(numel), [=](sycl::id<1> tid) {
             int64_t i = static_cast<int64_t>(tid);
-            int64_t outer = i / (idx_dim_size * inner_size);
-            int64_t rem = i % (idx_dim_size * inner_size);
-            int64_t inner = rem % inner_size;
-            int64_t src_idx = idx_ptr[i];
-            if (src_idx < 0) src_idx += in_dim_size;
-            int64_t in_offset = outer * (in_dim_size * inner_size) + src_idx * inner_size + inner;
-            out_ptr[i] = in_ptr[in_offset];
+            out_ptr[i] = in_ptr[in_offset_of(i)];
         }).wait();
     } else if (input.dtype() == DType::Int32) {
         const int32_t* in_ptr = input.data<int32_t>();
         int32_t* out_ptr = output.data<int32_t>();
         queue.parallel_for<TakeAlongDimKernelI32>(sycl::range<1>(numel), [=](sycl::id<1> tid) {
             int64_t i = static_cast<int64_t>(tid);
-            int64_t outer = i / (idx_dim_size * inner_size);
-            int64_t rem = i % (idx_dim_size * inner_size);
-            int64_t inner = rem % inner_size;
-            int64_t src_idx = idx_ptr[i];
-            if (src_idx < 0) src_idx += in_dim_size;
-            int64_t in_offset = outer * (in_dim_size * inner_size) + src_idx * inner_size + inner;
-            out_ptr[i] = in_ptr[in_offset];
+            out_ptr[i] = in_ptr[in_offset_of(i)];
         }).wait();
     } else if (input.dtype() == DType::Int64) {
         const int64_t* in_ptr = input.data<int64_t>();
         int64_t* out_ptr = output.data<int64_t>();
         queue.parallel_for<TakeAlongDimKernelI64>(sycl::range<1>(numel), [=](sycl::id<1> tid) {
             int64_t i = static_cast<int64_t>(tid);
-            int64_t outer = i / (idx_dim_size * inner_size);
-            int64_t rem = i % (idx_dim_size * inner_size);
-            int64_t inner = rem % inner_size;
-            int64_t src_idx = idx_ptr[i];
-            if (src_idx < 0) src_idx += in_dim_size;
-            int64_t in_offset = outer * (in_dim_size * inner_size) + src_idx * inner_size + inner;
-            out_ptr[i] = in_ptr[in_offset];
+            out_ptr[i] = in_ptr[in_offset_of(i)];
         }).wait();
     } else {
         throw std::runtime_error("take_along_dim OneAPI: unsupported dtype");
@@ -2158,6 +2244,21 @@ auto masked_scatter_kernel(const Tensor& input, const Tensor& mask,
 
         sycl::free(block_totals, queue);
         sycl::free(block_offsets, queue);
+    }
+
+    // Total number of true mask entries = exclusive_prefix[last] + mask[last].
+    // PyTorch / the CPU reference treat a source with fewer elements than the
+    // true count as an error, so check before scattering.
+    {
+        int32_t last_prefix = 0, last_mask = 0;
+        queue.memcpy(&last_prefix, prefix_sum + (numel - 1), sizeof(int32_t)).wait();
+        queue.memcpy(&last_mask, mask_int + (numel - 1), sizeof(int32_t)).wait();
+        int64_t true_count = static_cast<int64_t>(last_prefix) + static_cast<int64_t>(last_mask);
+        if (true_count > src_numel) {
+            sycl::free(mask_int, queue);
+            sycl::free(prefix_sum, queue);
+            throw std::runtime_error("masked_scatter: source has fewer elements than mask true count");
+        }
     }
 
     // Step 3: Scatter source values using prefix sum indices

@@ -164,6 +164,11 @@ auto DistributedSampler::reset(int64_t epoch) -> void {
                 all_indices.push_back(all_indices[i % dataset_size_]);
             }
         }
+    } else {
+        // drop_last: truncate to a multiple of num_replicas so every rank yields
+        // exactly the same number of samples (matching PyTorch DistributedSampler).
+        size_t per_rank = all_indices.size() / static_cast<size_t>(num_replicas_);
+        all_indices.resize(per_rank * static_cast<size_t>(num_replicas_));
     }
 
     // Slice: take every num_replicas-th element starting at rank

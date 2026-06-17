@@ -188,6 +188,21 @@ public:
                                 config.max_retries,
                                 curl_easy_strerror(res));
                 std::this_thread::sleep_for(std::chrono::seconds(1 << (retries - 1)));  // Exponential backoff
+
+                // Reset the output file to its pre-attempt size before retrying.
+                // The failed attempt may have written partial bytes; without this
+                // the retry (server resends from start_offset) appends to that
+                // partial data and corrupts the cached file. Truncate back to
+                // start_offset and reopen so the retry overwrites cleanly.
+                outfile.close();
+                std::error_code ec;
+                fs::resize_file(dest_path, start_offset, ec);
+                outfile.open(dest_path, mode);
+                if (!outfile) {
+                    curl_easy_cleanup(curl);
+                    throw std::runtime_error("Failed to reopen output file for retry: " + dest_path);
+                }
+                curl_easy_setopt(curl, CURLOPT_WRITEDATA, &outfile);
             }
         }
 

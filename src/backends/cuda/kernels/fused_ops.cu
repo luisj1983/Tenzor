@@ -1134,6 +1134,19 @@ auto fused_layer_norm_backward_cuda(
 
     int64_t batch_size = input.numel() / norm_size;
 
+    // F16/BF16: accumulate in Float32. A half-precision accumulator corrupts
+    // grad_weight/grad_bias and diverges from the CPU (double/Float32) reference,
+    // so widen, run the Float32 path, then narrow back — mirroring the forward
+    // (fused_layer_norm_cuda) and the RMSNorm backward.
+    if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) {
+        DType orig = input.dtype();
+        auto [gi, gw, gb] = fused_layer_norm_backward_cuda(
+            grad_output.to(DType::Float32), input.to(DType::Float32),
+            weight.to(DType::Float32), mean.to(DType::Float32),
+            inv_std.to(DType::Float32), normalized_shape);
+        return {gi.to(orig), gw.to(orig), gb.to(orig)};
+    }
+
     // Allocate output tensors
     Tensor grad_input = create_cuda_zeros(to_vector(input.shape()), input.dtype(), input.device());
     Tensor grad_weight = create_cuda_zeros({norm_size}, input.dtype(), input.device());
@@ -1248,16 +1261,22 @@ __global__ void fused_rms_norm_kernel(
     // overflow F16's max (65504) for moderate norm_size.
     Acc sum_sq = 0;
     if constexpr (std::is_same_v<T, float>) {
-        const int vec_size = 4;
-        int64_t vec_norm_size = norm_size / vec_size;
-        const float4* batch_in_vec = reinterpret_cast<const float4*>(batch_in);
-        for (int64_t i = threadIdx.x; i < vec_norm_size; i += blockDim.x) {
-            float4 v = batch_in_vec[i];
-            sum_sq += v.x * v.x + v.y * v.y + v.z * v.z + v.w * v.w;
-        }
-        for (int64_t i = vec_norm_size * vec_size + threadIdx.x; i < norm_size; i += blockDim.x) {
-            Acc val = static_cast<Acc>(batch_in[i]);
-            sum_sq += val * val;
+        // float4 requires every row offset (b*norm_size) to be 16-byte aligned,
+        // which holds only when norm_size % 4 == 0; otherwise a misaligned float4
+        // load is UB. Fall back to the scalar path for unaligned norm_size.
+        if (norm_size % 4 == 0) {
+            const int vec_size = 4;
+            int64_t vec_norm_size = norm_size / vec_size;
+            const float4* batch_in_vec = reinterpret_cast<const float4*>(batch_in);
+            for (int64_t i = threadIdx.x; i < vec_norm_size; i += blockDim.x) {
+                float4 v = batch_in_vec[i];
+                sum_sq += v.x * v.x + v.y * v.y + v.z * v.z + v.w * v.w;
+            }
+        } else {
+            for (int64_t i = threadIdx.x; i < norm_size; i += blockDim.x) {
+                Acc val = static_cast<Acc>(batch_in[i]);
+                sum_sq += val * val;
+            }
         }
     } else {
         for (int64_t i = threadIdx.x; i < norm_size; i += blockDim.x) {
@@ -1303,24 +1322,28 @@ __global__ void fused_rms_norm_kernel(
     Acc rrms = shared_rrms;
 
     if constexpr (std::is_same_v<T, float>) {
-        const int vec_size = 4;
-        int64_t vec_norm_size = norm_size / vec_size;
-        float4* batch_out_vec = reinterpret_cast<float4*>(batch_out);
-        const float4* batch_in_vec = reinterpret_cast<const float4*>(batch_in);
-        const float4* weight_vec = reinterpret_cast<const float4*>(weight);
-
-        for (int64_t i = threadIdx.x; i < vec_norm_size; i += blockDim.x) {
-            float4 v = batch_in_vec[i];
-            float4 w = weight_vec[i];
-            float4 out;
-            out.x = v.x * rrms * w.x;
-            out.y = v.y * rrms * w.y;
-            out.z = v.z * rrms * w.z;
-            out.w = v.w * rrms * w.w;
-            batch_out_vec[i] = out;
-        }
-        for (int64_t i = vec_norm_size * vec_size + threadIdx.x; i < norm_size; i += blockDim.x) {
-            batch_out[i] = batch_in[i] * static_cast<T>(rrms) * weight[i];
+        // float4 only when norm_size % 4 == 0 (every row offset 16-byte aligned);
+        // otherwise scalar to avoid a misaligned float4 store/load.
+        if (norm_size % 4 == 0) {
+            const int vec_size = 4;
+            int64_t vec_norm_size = norm_size / vec_size;
+            float4* batch_out_vec = reinterpret_cast<float4*>(batch_out);
+            const float4* batch_in_vec = reinterpret_cast<const float4*>(batch_in);
+            const float4* weight_vec = reinterpret_cast<const float4*>(weight);
+            for (int64_t i = threadIdx.x; i < vec_norm_size; i += blockDim.x) {
+                float4 v = batch_in_vec[i];
+                float4 w = weight_vec[i];
+                float4 out;
+                out.x = v.x * rrms * w.x;
+                out.y = v.y * rrms * w.y;
+                out.z = v.z * rrms * w.z;
+                out.w = v.w * rrms * w.w;
+                batch_out_vec[i] = out;
+            }
+        } else {
+            for (int64_t i = threadIdx.x; i < norm_size; i += blockDim.x) {
+                batch_out[i] = batch_in[i] * static_cast<T>(rrms) * weight[i];
+            }
         }
     } else {
         for (int64_t i = threadIdx.x; i < norm_size; i += blockDim.x) {

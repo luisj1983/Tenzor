@@ -44,7 +44,13 @@ void main() {
 
     // Read ROI
     uint roi_base = roi_idx * 5;
-    uint batch_idx = uint(rois_data[roi_base]);
+    // Validate ROI batch index before scattering grad into features (unguarded
+    // atomicAdd at an out-of-range batch_idx is an out-of-bounds device write).
+    int batch_idx_signed = int(rois_data[roi_base]);
+    if (batch_idx_signed < 0 || uint(batch_idx_signed) >= params.batch_size) {
+        return;
+    }
+    uint batch_idx = uint(batch_idx_signed);
     float spatial_scale = uintBitsToFloat(params.spatial_scale_bits);
 
     float roi_x1 = rois_data[roi_base + 1] * spatial_scale;

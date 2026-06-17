@@ -85,7 +85,13 @@ static std::string norm_shader_for_dtype(const std::string& base, DType dtype) {
     switch (dtype) {
         case DType::Float32: return base;
         case DType::Float16: return base + "_f16";
-        default:             return base;
+        default:
+            // Do NOT silently fall back to the Float32 shader: dispatching it
+            // over a BFloat16/integer buffer reinterprets the raw bytes and
+            // produces garbage. Fail loudly, mirroring the elementwise helper.
+            throw std::runtime_error(
+                "MPS normalization: unsupported dtype " +
+                std::string(dtype_name(dtype)));
     }
 }
 

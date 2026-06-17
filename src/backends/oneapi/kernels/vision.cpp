@@ -402,6 +402,14 @@ auto roi_align_kernel(
                 // Get ROI
                 const float* roi = rois_ptr + n * 5;
                 int64_t batch_idx = static_cast<int64_t>(roi[0]);
+                // batch_idx comes from untrusted upstream (e.g. RPN output) and
+                // is not guaranteed in-range. Skip and zero the output element
+                // for an OOB batch index, matching the CPU reference and
+                // avoiding a device heap over-read.
+                if (batch_idx < 0 || batch_idx >= batch_size) {
+                    output_ptr[idx] = 0;
+                    return;
+                }
                 float roi_x1 = roi[1] * spatial_scale - offset;
                 float roi_y1 = roi[2] * spatial_scale - offset;
                 float roi_x2 = roi[3] * spatial_scale - offset;
@@ -504,6 +512,14 @@ auto roi_align_kernel(
 
                 const double* roi = rois_ptr + n * 5;
                 int64_t batch_idx = static_cast<int64_t>(roi[0]);
+                // batch_idx comes from untrusted upstream (e.g. RPN output) and
+                // is not guaranteed in-range. Skip and zero the output element
+                // for an OOB batch index, matching the CPU reference and
+                // avoiding a device heap over-read.
+                if (batch_idx < 0 || batch_idx >= batch_size) {
+                    output_ptr[idx] = 0;
+                    return;
+                }
                 double roi_x1 = roi[1] * spatial_scale - offset;
                 double roi_y1 = roi[2] * spatial_scale - offset;
                 double roi_x2 = roi[3] * spatial_scale - offset;
@@ -587,207 +603,9 @@ auto roi_align_kernel(
             }
         );
     }
-    else if (features.dtype() == DType::Float16) {
-        const sycl::half* features_ptr = get_data_ptr<const sycl::half>(features);
-        const sycl::half* rois_ptr = get_data_ptr<const sycl::half>(rois);
-        sycl::half* output_ptr = get_data_ptr<sycl::half>(output);
-
-        const float offset = aligned ? 0.5f : 0.0f;
-
-        queue.parallel_for<ROIAlignKernelFloat16>(
-            sycl::range<1>(total_elements),
-            [=](sycl::id<1> idx) {
-                int64_t pw = idx % output_width;
-                int64_t ph = (idx / output_width) % output_height;
-                int64_t c = (idx / output_width / output_height) % channels;
-                int64_t n = idx / output_width / output_height / channels;
-
-                const sycl::half* roi = rois_ptr + n * 5;
-                int64_t batch_idx = static_cast<int64_t>(float(roi[0]));
-                float roi_x1 = float(roi[1]) * spatial_scale - offset;
-                float roi_y1 = float(roi[2]) * spatial_scale - offset;
-                float roi_x2 = float(roi[3]) * spatial_scale - offset;
-                float roi_y2 = float(roi[4]) * spatial_scale - offset;
-
-                float roi_width = roi_x2 - roi_x1;
-                float roi_height = roi_y2 - roi_y1;
-                if (!aligned) {
-                    roi_width = sycl::fmax(roi_width, 1.0f);
-                    roi_height = sycl::fmax(roi_height, 1.0f);
-                }
-
-                float bin_size_h = roi_height / static_cast<float>(output_height);
-                float bin_size_w = roi_width / static_cast<float>(output_width);
-
-                int64_t roi_bin_grid_h = sampling_ratio > 0 ? sampling_ratio
-                    : static_cast<int64_t>(sycl::ceil(roi_height / output_height));
-                int64_t roi_bin_grid_w = sampling_ratio > 0 ? sampling_ratio
-                    : static_cast<int64_t>(sycl::ceil(roi_width / output_width));
-
-                // Clamp each bin grid to at least 1 so a zero-area / inverted
-                // ROI (possible when aligned=true skips the roi_w/h clamp)
-                // never yields count==0 and a divide-by-zero NaN/Inf, matching
-                // the CPU reference and PyTorch.
-                roi_bin_grid_h = sycl::max(roi_bin_grid_h, int64_t(1));
-                roi_bin_grid_w = sycl::max(roi_bin_grid_w, int64_t(1));
-                const float count = roi_bin_grid_h * roi_bin_grid_w;
-
-                float output_val = 0.0f;
-
-                for (int64_t iy = 0; iy < roi_bin_grid_h; ++iy) {
-                    float y = roi_y1 + ph * bin_size_h + (iy + 0.5f) * bin_size_h / roi_bin_grid_h;
-
-                    for (int64_t ix = 0; ix < roi_bin_grid_w; ++ix) {
-                        float x = roi_x1 + pw * bin_size_w + (ix + 0.5f) * bin_size_w / roi_bin_grid_w;
-
-                        if (y < -1.0f || y > height || x < -1.0f || x > width) {
-                            continue;
-                        }
-
-                        y = sycl::fmax(y, 0.0f);
-                        x = sycl::fmax(x, 0.0f);
-
-                        int64_t y_low = static_cast<int64_t>(y);
-                        int64_t x_low = static_cast<int64_t>(x);
-                        int64_t y_high = y_low + 1;
-                        int64_t x_high = x_low + 1;
-
-                        if (y_low >= height - 1) {
-                            y_high = y_low = height - 1;
-                            y = static_cast<float>(y_low);
-                        }
-                        if (x_low >= width - 1) {
-                            x_high = x_low = width - 1;
-                            x = static_cast<float>(x_low);
-                        }
-
-                        float ly = y - y_low;
-                        float lx = x - x_low;
-                        float hy = 1.0f - ly;
-                        float hx = 1.0f - lx;
-
-                        int64_t base = batch_idx * channels * height * width + c * height * width;
-
-                        float v1 = float(features_ptr[base + y_low * width + x_low]);
-                        float v2 = float(features_ptr[base + y_low * width + x_high]);
-                        float v3 = float(features_ptr[base + y_high * width + x_low]);
-                        float v4 = float(features_ptr[base + y_high * width + x_high]);
-
-                        float w1 = hy * hx;
-                        float w2 = hy * lx;
-                        float w3 = ly * hx;
-                        float w4 = ly * lx;
-
-                        output_val += w1 * v1 + w2 * v2 + w3 * v3 + w4 * v4;
-                    }
-                }
-                output_val /= count;
-
-                output_ptr[idx] = sycl::half(output_val);
-            }
-        );
-    }
-    else if (features.dtype() == DType::BFloat16) {
-        const uint16_t* features_ptr = get_data_ptr<const uint16_t>(features);
-        const uint16_t* rois_ptr = get_data_ptr<const uint16_t>(rois);
-        uint16_t* output_ptr = get_data_ptr<uint16_t>(output);
-
-        const float offset = aligned ? 0.5f : 0.0f;
-
-        queue.parallel_for<ROIAlignKernelBFloat16>(
-            sycl::range<1>(total_elements),
-            [=](sycl::id<1> idx) {
-                int64_t pw = idx % output_width;
-                int64_t ph = (idx / output_width) % output_height;
-                int64_t c = (idx / output_width / output_height) % channels;
-                int64_t n = idx / output_width / output_height / channels;
-
-                const uint16_t* roi = rois_ptr + n * 5;
-                int64_t batch_idx = static_cast<int64_t>(bf16_to_f32(roi[0]));
-                float roi_x1 = bf16_to_f32(roi[1]) * spatial_scale - offset;
-                float roi_y1 = bf16_to_f32(roi[2]) * spatial_scale - offset;
-                float roi_x2 = bf16_to_f32(roi[3]) * spatial_scale - offset;
-                float roi_y2 = bf16_to_f32(roi[4]) * spatial_scale - offset;
-
-                float roi_width = roi_x2 - roi_x1;
-                float roi_height = roi_y2 - roi_y1;
-                if (!aligned) {
-                    roi_width = sycl::fmax(roi_width, 1.0f);
-                    roi_height = sycl::fmax(roi_height, 1.0f);
-                }
-
-                float bin_size_h = roi_height / static_cast<float>(output_height);
-                float bin_size_w = roi_width / static_cast<float>(output_width);
-
-                int64_t roi_bin_grid_h = sampling_ratio > 0 ? sampling_ratio
-                    : static_cast<int64_t>(sycl::ceil(roi_height / output_height));
-                int64_t roi_bin_grid_w = sampling_ratio > 0 ? sampling_ratio
-                    : static_cast<int64_t>(sycl::ceil(roi_width / output_width));
-
-                // Clamp each bin grid to at least 1 so a zero-area / inverted
-                // ROI (possible when aligned=true skips the roi_w/h clamp)
-                // never yields count==0 and a divide-by-zero NaN/Inf, matching
-                // the CPU reference and PyTorch.
-                roi_bin_grid_h = sycl::max(roi_bin_grid_h, int64_t(1));
-                roi_bin_grid_w = sycl::max(roi_bin_grid_w, int64_t(1));
-                const float count = roi_bin_grid_h * roi_bin_grid_w;
-
-                float output_val = 0.0f;
-
-                for (int64_t iy = 0; iy < roi_bin_grid_h; ++iy) {
-                    float y = roi_y1 + ph * bin_size_h + (iy + 0.5f) * bin_size_h / roi_bin_grid_h;
-
-                    for (int64_t ix = 0; ix < roi_bin_grid_w; ++ix) {
-                        float x = roi_x1 + pw * bin_size_w + (ix + 0.5f) * bin_size_w / roi_bin_grid_w;
-
-                        if (y < -1.0f || y > height || x < -1.0f || x > width) {
-                            continue;
-                        }
-
-                        y = sycl::fmax(y, 0.0f);
-                        x = sycl::fmax(x, 0.0f);
-
-                        int64_t y_low = static_cast<int64_t>(y);
-                        int64_t x_low = static_cast<int64_t>(x);
-                        int64_t y_high = y_low + 1;
-                        int64_t x_high = x_low + 1;
-
-                        if (y_low >= height - 1) {
-                            y_high = y_low = height - 1;
-                            y = static_cast<float>(y_low);
-                        }
-                        if (x_low >= width - 1) {
-                            x_high = x_low = width - 1;
-                            x = static_cast<float>(x_low);
-                        }
-
-                        float ly = y - y_low;
-                        float lx = x - x_low;
-                        float hy = 1.0f - ly;
-                        float hx = 1.0f - lx;
-
-                        int64_t base = batch_idx * channels * height * width + c * height * width;
-
-                        float v1 = bf16_to_f32(features_ptr[base + y_low * width + x_low]);
-                        float v2 = bf16_to_f32(features_ptr[base + y_low * width + x_high]);
-                        float v3 = bf16_to_f32(features_ptr[base + y_high * width + x_low]);
-                        float v4 = bf16_to_f32(features_ptr[base + y_high * width + x_high]);
-
-                        float w1 = hy * hx;
-                        float w2 = hy * lx;
-                        float w3 = ly * hx;
-                        float w4 = ly * lx;
-
-                        output_val += w1 * v1 + w2 * v2 + w3 * v3 + w4 * v4;
-                    }
-                }
-                output_val /= count;
-
-                output_ptr[idx] = f32_to_bf16(output_val);
-            }
-        );
-    }
     else {
+        // Float16/BFloat16 are handled by the widen-to-Float32 recursion at the
+        // top of this function, so only Float32/Float64 reach the native paths.
         throw std::runtime_error("roi_align: unsupported dtype");
     }
 
@@ -896,6 +714,13 @@ auto roi_align_backward_kernel(
 
                 const float* roi = rois_ptr + n * 5;
                 int64_t batch_idx = static_cast<int64_t>(roi[0]);
+                // batch_idx comes from untrusted upstream (e.g. RPN output) and
+                // is not guaranteed in-range. Skip the ROI for an OOB batch
+                // index, matching the CPU reference and avoiding an OOB device
+                // atomic write (grad_features is already zero-filled).
+                if (batch_idx < 0 || batch_idx >= batch_size) {
+                    return;
+                }
                 float roi_x1 = roi[1] * spatial_scale - offset;
                 float roi_y1 = roi[2] * spatial_scale - offset;
                 float roi_x2 = roi[3] * spatial_scale - offset;
@@ -989,6 +814,13 @@ auto roi_align_backward_kernel(
 
                 const double* roi = rois_ptr + n * 5;
                 int64_t batch_idx = static_cast<int64_t>(roi[0]);
+                // batch_idx comes from untrusted upstream (e.g. RPN output) and
+                // is not guaranteed in-range. Skip the ROI for an OOB batch
+                // index, matching the CPU reference and avoiding an OOB device
+                // atomic write (grad_features is already zero-filled).
+                if (batch_idx < 0 || batch_idx >= batch_size) {
+                    return;
+                }
                 double roi_x1 = roi[1] * spatial_scale - offset;
                 double roi_y1 = roi[2] * spatial_scale - offset;
                 double roi_x2 = roi[3] * spatial_scale - offset;

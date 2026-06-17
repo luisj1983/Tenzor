@@ -184,8 +184,8 @@ auto T5Attention::forward(const Variable& hidden_states,
 
     // Reshape scores back to 4D: [batch, num_heads, seq_len, kv_seq_len]
     scores = scores.reshape(std::vector<int64_t>{batch_size, config_.num_heads, seq_len, kv_seq_len});
-    double scale = 1.0 / std::sqrt(static_cast<double>(config_.d_kv));
-    scores = scores * scale;
+    // T5 does NOT scale attention scores by 1/sqrt(d_kv) (unlike standard
+    // scaled-dot-product attention); HuggingFace T5Attention uses raw Q·Kᵀ.
 
     // Add relative position bias.
     //

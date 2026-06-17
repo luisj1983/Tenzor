@@ -31,6 +31,9 @@ void main() {
 
     // Get the index to select
     int select_idx = indices[index_pos];
+    // Normalize negative indices like the CPU reference (idx += dim) before the
+    // bounds check, so a valid negative index wraps instead of being zeroed.
+    if (select_idx < 0) select_idx += int(params.dim_size);
 
     // Bounds check
     if (select_idx < 0 || select_idx >= int(params.dim_size)) {

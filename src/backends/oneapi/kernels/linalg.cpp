@@ -1136,10 +1136,17 @@ auto linalg_eig_kernel(const Tensor& input, sycl::queue& queue) -> std::tuple<Te
 
     // Approximate-symmetry check (per-batch). gradcheck perturbs SPD
     // inputs by ε≈1e-6 — that breaks strict symmetry but each element is
-    // very close. Within 1e-3 relative is treated as "intended symmetric,
+    // very close. A near-symmetric input is treated as "intended symmetric,
     // perturbed by noise" and routed through `eigh` on the SYMMETRIZED
     // matrix. Sum-of-eigenvalues equals trace, which is preserved by
     // symmetrization, so the numerical gradient matches the analytical.
+    //
+    // The relative threshold is dtype-dependent and deliberately looser for
+    // Float32: machine epsilon is ~1e-7 for F32 vs ~2e-16 for F64, and the
+    // ~1e-6 gradcheck perturbation is proportionally far larger relative to
+    // F32 precision. We therefore use 1e-2 (relative) for Float32 and 1e-3
+    // for Float64 so a genuinely-symmetric F32 matrix perturbed by noise is
+    // still recognised as symmetric. Keep code and these constants in sync.
     if (input.dtype() == DType::Float32 || input.dtype() == DType::Float64) {
         auto A_cont = input.contiguous();
         bool is_near_symmetric = true;

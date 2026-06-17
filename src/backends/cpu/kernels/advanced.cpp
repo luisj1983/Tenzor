@@ -312,6 +312,9 @@ auto decompose_dim(const Tensor& t, int64_t dim) -> DimDecomp {
 
 auto topk_kernel(const Tensor& input, int64_t k, int64_t dim,
                  bool largest, bool sorted) -> std::pair<Tensor, Tensor> {
+    if (k < 0) {
+        throw std::runtime_error("topk: k must be non-negative");
+    }
     if (dim < 0) dim += input.ndim();
     auto [outer_size, dim_size, inner_size] = decompose_dim(input, dim);
 

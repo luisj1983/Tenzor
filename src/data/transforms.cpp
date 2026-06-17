@@ -195,9 +195,11 @@ auto ColorJitter::operator()(const Tensor& input, const Tensor& target)
     // host first (data_ptr() is a device pointer otherwise → segfault) and the
     // result moved back to the original device at the end.
     const Device orig_device = input.device();
+    // clone() (not the bare input) so the pixel math below does not mutate the
+    // caller's storage in place, and so a non-contiguous CPU input is packed.
     Tensor output = (orig_device.type != Device::Type::CPU)
         ? input.to(Device::cpu()).contiguous()
-        : input;
+        : input.clone();
     float* data = static_cast<float*>(output.data_ptr());
     int64_t numel = output.numel();
 

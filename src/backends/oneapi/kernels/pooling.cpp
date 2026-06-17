@@ -3917,8 +3917,61 @@ auto fractional_maxpool2d_forward_kernel(const Tensor& input,
             out_ptr[out_idx] = sycl::half(max_val);
             idx_ptr[out_idx] = max_idx;
         }).wait();
+    } else if (input.dtype() == DType::BFloat16) {
+        const uint16_t* in_ptr = get_data_ptr<const uint16_t>(input);
+        uint16_t* out_ptr = get_data_ptr<uint16_t>(output);
+        int64_t* idx_ptr = get_data_ptr<int64_t>(indices);
+        const float* sp = dev_samples;
+
+        queue.parallel_for<class FractionalMaxPool2dForwardBFloat16>(
+            sycl::range<1>(total_out), [=](sycl::id<1> gid) {
+            int64_t linear = gid;
+            int64_t ow_idx = linear % out_w; linear /= out_w;
+            int64_t oh_idx = linear % out_h; linear /= out_h;
+            int64_t c = linear % C;
+            int64_t n = linear / C;
+
+            float sample_h = sp ? sp[(n * C + c) * 2 + 0] : 0.5f;
+            float sample_w = sp ? sp[(n * C + c) * 2 + 1] : 0.5f;
+            float ratio_h = static_cast<float>(H) / static_cast<float>(out_h);
+            float ratio_w = static_cast<float>(W) / static_cast<float>(out_w);
+
+            int64_t h_start = static_cast<int64_t>(sycl::floor(
+                (oh_idx + sample_h) * ratio_h - sample_h));
+            int64_t h_end = static_cast<int64_t>(sycl::floor(
+                (oh_idx + 1 + sample_h) * ratio_h - sample_h));
+            int64_t w_start = static_cast<int64_t>(sycl::floor(
+                (ow_idx + sample_w) * ratio_w - sample_w));
+            int64_t w_end = static_cast<int64_t>(sycl::floor(
+                (ow_idx + 1 + sample_w) * ratio_w - sample_w));
+
+            h_start = sycl::max(h_start, int64_t{0});
+            h_end = sycl::min(h_end, H);
+            w_start = sycl::max(w_start, int64_t{0});
+            w_end = sycl::min(w_end, W);
+            if (h_end <= h_start) h_end = sycl::min(h_start + 1, H);
+            if (w_end <= w_start) w_end = sycl::min(w_start + 1, W);
+
+            float max_val = -3.4028235e+38f;
+            int64_t max_idx = h_start * W + w_start;
+
+            for (int64_t h = h_start; h < h_end; ++h) {
+                for (int64_t w = w_start; w < w_end; ++w) {
+                    int64_t in_idx = ((n * C + c) * H + h) * W + w;
+                    float val = bf16_to_f32(in_ptr[in_idx]);
+                    if (val > max_val) {
+                        max_val = val;
+                        max_idx = h * W + w;
+                    }
+                }
+            }
+
+            int64_t out_idx = ((n * C + c) * out_h + oh_idx) * out_w + ow_idx;
+            out_ptr[out_idx] = f32_to_bf16(max_val);
+            idx_ptr[out_idx] = max_idx;
+        }).wait();
     } else {
-        throw std::runtime_error("FractionalMaxPool2d forward OneAPI: unsupported dtype (Float32/Float64/Float16 supported)");
+        throw std::runtime_error("FractionalMaxPool2d forward OneAPI: unsupported dtype (Float32/Float64/Float16/BFloat16 supported)");
     }
 
     return {output, indices};
@@ -3971,27 +4024,22 @@ auto fractional_maxpool2d_backward_kernel(const Tensor& grad_output,
         const double* go = get_data_ptr<const double>(grad_output);
         const int64_t* idx = get_data_ptr<const int64_t>(indices);
 
-        // For Float64, use float accumulator + atomic since some devices lack f64 atomics.
-        // No need to pre-zero `gi`: the acc->gi copy below writes every element.
-        float* acc = sycl::malloc_device<float>(in_size, queue);
-        queue.fill(acc, 0.0f, in_size).wait();
+        // Accumulate directly in double precision using native f64 atomics
+        // (matching avg_pool2d_backward's F64 path in this file). A float
+        // scratch would truncate ~7 decimal digits and diverge from the CPU
+        // reference, which keeps full double precision.
+        queue.fill(gi, 0.0, in_size).wait();
 
         queue.parallel_for<FractionalMaxPool2dBackwardFloat64>(
             sycl::range<1>(out_size), [=](sycl::id<1> gid) {
             int64_t linear = gid;
             int64_t nc = linear / out_spatial;
             int64_t max_idx = idx[linear];
-            sycl::atomic_ref<float, sycl::memory_order::relaxed,
+            sycl::atomic_ref<double, sycl::memory_order::relaxed,
                              sycl::memory_scope::device,
-                             sycl::access::address_space::global_space> ar(acc[nc * in_spatial + max_idx]);
-            ar.fetch_add(static_cast<float>(go[linear]));
+                             sycl::access::address_space::global_space> ar(gi[nc * in_spatial + max_idx]);
+            ar.fetch_add(go[linear]);
         }).wait();
-
-        // Copy accumulator back to double
-        queue.parallel_for(sycl::range<1>(in_size), [=](sycl::id<1> i) {
-            gi[i] = static_cast<double>(acc[i]);
-        }).wait();
-        sycl::free(acc, queue);
     } else if (grad_output.dtype() == DType::Float16) {
         sycl::half* gi = get_data_ptr<sycl::half>(grad_input);
         const sycl::half* go = get_data_ptr<const sycl::half>(grad_output);
@@ -4014,6 +4062,30 @@ auto fractional_maxpool2d_backward_kernel(const Tensor& grad_output,
 
         queue.parallel_for(sycl::range<1>(in_size), [=](sycl::id<1> i) {
             gi[i] = sycl::half(acc[i]);
+        }).wait();
+        sycl::free(acc, queue);
+    } else if (grad_output.dtype() == DType::BFloat16) {
+        uint16_t* gi = get_data_ptr<uint16_t>(grad_input);
+        const uint16_t* go = get_data_ptr<const uint16_t>(grad_output);
+        const int64_t* idx = get_data_ptr<const int64_t>(indices);
+
+        // No need to pre-zero `gi`: the acc->gi copy below writes every element.
+        float* acc = sycl::malloc_device<float>(in_size, queue);
+        queue.fill(acc, 0.0f, in_size).wait();
+
+        queue.parallel_for<class FractionalMaxPool2dBackwardBFloat16>(
+            sycl::range<1>(out_size), [=](sycl::id<1> gid) {
+            int64_t linear = gid;
+            int64_t nc = linear / out_spatial;
+            int64_t max_idx = idx[linear];
+            sycl::atomic_ref<float, sycl::memory_order::relaxed,
+                             sycl::memory_scope::device,
+                             sycl::access::address_space::global_space> ar(acc[nc * in_spatial + max_idx]);
+            ar.fetch_add(bf16_to_f32(go[linear]));
+        }).wait();
+
+        queue.parallel_for(sycl::range<1>(in_size), [=](sycl::id<1> i) {
+            gi[i] = f32_to_bf16(acc[i]);
         }).wait();
         sycl::free(acc, queue);
     } else {

@@ -2152,7 +2152,13 @@ __global__ void fused_rms_norm_kernel(
     __shared__ T shared_rrms;
     if (threadIdx.x == 0) {
         T mean_sq = shared_data[0] / norm_size;
-        shared_rrms = rsqrtf(mean_sq + eps);
+        // Use the double-precision rsqrt for T=double; rsqrtf would truncate the
+        // reciprocal-RMS to single precision and diverge from CPU/CUDA Float64.
+        if constexpr (std::is_same_v<T, double>) {
+            shared_rrms = rsqrt(mean_sq + static_cast<T>(eps));
+        } else {
+            shared_rrms = rsqrtf(mean_sq + static_cast<T>(eps));
+        }
         rrms_out[b] = shared_rrms;
     }
     __syncthreads();
@@ -2169,8 +2175,10 @@ auto fused_rms_norm_hip(
     const Tensor& weight,
     float eps
 ) -> std::pair<Tensor, Tensor> {
-    // Non-Float32: upcast to Float32, compute, convert back
-    if (input.dtype() != DType::Float32) {
+    // Float16/BFloat16: upcast to Float32, compute, convert back. Float64 is
+    // computed natively below — downcasting it to Float32 would lose precision
+    // and diverge from the CPU/CUDA native-FP64 path.
+    if (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16) {
         DType orig_dtype = input.dtype();
         auto input_f32 = input.to(DType::Float32);
         auto weight_f32 = weight.to(DType::Float32);
@@ -2204,8 +2212,20 @@ auto fused_rms_norm_hip(
             norm_size,
             eps
         );
+    } else if (input.dtype() == DType::Float64) {
+        hipLaunchKernelGGL(
+            HIP_KERNEL_NAME(fused_rms_norm_kernel<double, BLOCK_SIZE>),
+            dim3(blocks), dim3(BLOCK_SIZE), 0, 0,
+            input.data<double>(),
+            weight.data<double>(),
+            output.data<double>(),
+            rrms.data<double>(),
+            batch_size,
+            norm_size,
+            eps
+        );
     } else {
-        throw std::runtime_error("fused_rms_norm_hip: Only Float32 supported");
+        throw std::runtime_error("fused_rms_norm_hip: Only Float32/Float64 supported (Float16/BFloat16 widen above)");
     }
 
     HIP_CHECK(hipGetLastError());

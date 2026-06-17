@@ -1272,6 +1272,11 @@ Tensor mps_clamp_max_kernel(const Tensor& input, float max_val) {
 
 Tensor mps_log_softmax_kernel(const Tensor& input, int64_t dim) {
     auto shape = input.shape();
+    // Normalize a negative dim before indexing shape[dim] (unchecked span).
+    int64_t ndim = static_cast<int64_t>(shape.size());
+    if (dim < 0) dim += ndim;
+    if (dim < 0 || dim >= ndim)
+        throw std::invalid_argument("mps_log_softmax: dim out of range");
     std::vector<int64_t> shape_vec(shape.begin(), shape.end());
     Tensor output(shape_vec, input.dtype(), input.device());
 

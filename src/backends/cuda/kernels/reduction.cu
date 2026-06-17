@@ -4650,17 +4650,12 @@ static void launch_argsort(const T* d_input, int64_t* d_output, int64_t n, bool 
         return;
     }
 
-    // For small arrays, use the bitonic sort kernel
-    if (n <= MAX_BLOCK_SIZE) {
-        int block_size = 1;
-        while (block_size < n) block_size *= 2;
-        if (block_size > MAX_BLOCK_SIZE) block_size = MAX_BLOCK_SIZE;
-        argsort_kernel<<<1, block_size, 0, stream>>>(d_input, d_output, n, descending);
-        CUDA_CHECK(cudaGetLastError());
-        return;
-    }
+    // NOTE: the single-block bitonic argsort_kernel only sorts correctly when n is
+    // a power of two (the bitonic network is incomplete otherwise), so it is not
+    // used here. CUB DeviceRadixSort below is correct for any n and is used for all
+    // sizes (n==0 and n==1 are handled above).
 
-    // For larger arrays, use CUB DeviceRadixSort with key-value pairs
+    // Use CUB DeviceRadixSort with key-value pairs (correct for arbitrary n)
     backend::CachedMemoryGuard d_indices_in_guard(n * sizeof(int64_t));
     auto* d_indices_in = static_cast<int64_t*>(d_indices_in_guard.get());
 

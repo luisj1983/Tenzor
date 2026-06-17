@@ -21,6 +21,33 @@ kernel void cat_copy_kernel(
     dst[dst_offset + id] = src[id];
 }
 
+// Strided cat copy: places each element of one input into the correct
+// interleaved position of the output for concatenation along an inner dim.
+//   outer    = prod(shape[0:dim])
+//   axis_in  = this input's size along dim
+//   inner    = prod(shape[dim+1:])
+//   axis_out = output size along dim
+//   axis_base= running offset along dim for this input
+// Reduces to a flat copy when dim==0 (outer==1, axis_base*inner == dst_offset).
+kernel void cat_copy_strided_kernel(
+    device const float* src    [[buffer(0)]],
+    device float* dst          [[buffer(1)]],
+    constant uint& outer       [[buffer(2)]],
+    constant uint& axis_in     [[buffer(3)]],
+    constant uint& inner       [[buffer(4)]],
+    constant uint& axis_out    [[buffer(5)]],
+    constant uint& axis_base   [[buffer(6)]],
+    uint id                    [[thread_position_in_grid]])
+{
+    uint block = axis_in * inner;
+    uint o = id / block;
+    uint rem = id % block;
+    uint a = rem / inner;
+    uint i = rem % inner;
+    uint dst_idx = o * (axis_out * inner) + (axis_base + a) * inner + i;
+    dst[dst_idx] = src[id];
+}
+
 // ============================================================================
 // Slice
 // ============================================================================
@@ -532,6 +559,25 @@ kernel void cat_copy_kernel_f16(
     uint id                   [[thread_position_in_grid]])
 {
     dst[dst_offset + id] = src[id];
+}
+
+kernel void cat_copy_strided_kernel_f16(
+    device const half* src    [[buffer(0)]],
+    device half* dst          [[buffer(1)]],
+    constant uint& outer      [[buffer(2)]],
+    constant uint& axis_in    [[buffer(3)]],
+    constant uint& inner      [[buffer(4)]],
+    constant uint& axis_out   [[buffer(5)]],
+    constant uint& axis_base  [[buffer(6)]],
+    uint id                   [[thread_position_in_grid]])
+{
+    uint block = axis_in * inner;
+    uint o = id / block;
+    uint rem = id % block;
+    uint a = rem / inner;
+    uint i = rem % inner;
+    uint dst_idx = o * (axis_out * inner) + (axis_base + a) * inner + i;
+    dst[dst_idx] = src[id];
 }
 
 kernel void masked_fill_kernel_f16(

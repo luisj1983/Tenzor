@@ -2845,7 +2845,7 @@ auto logsumexp_kernel(const Tensor& input, int64_t dim, bool keepdim, sycl::queu
             float m = -std::numeric_limits<float>::infinity();
             for (int64_t d = 0; d < dim_size; ++d) {
                 float val = in_ptr[(o * dim_size + d) * inner + i];
-                m = sycl::fmax(m, val);
+                m = nan_fmax(m, val);
             }
             max_ptr[idx] = m;
         });
@@ -2879,7 +2879,7 @@ auto logsumexp_kernel(const Tensor& input, int64_t dim, bool keepdim, sycl::queu
             double m = -std::numeric_limits<double>::infinity();
             for (int64_t d = 0; d < dim_size; ++d) {
                 double val = in_ptr[(o * dim_size + d) * inner + i];
-                m = sycl::fmax(m, val);
+                m = nan_fmax(m, val);
             }
             max_ptr[idx] = m;
         });
@@ -2911,7 +2911,7 @@ auto logsumexp_kernel(const Tensor& input, int64_t dim, bool keepdim, sycl::queu
             float m = -std::numeric_limits<float>::infinity();
             for (int64_t d = 0; d < dim_size; ++d) {
                 float val = static_cast<float>(in_ptr[(o * dim_size + d) * inner + i]);
-                m = sycl::fmax(m, val);
+                m = nan_fmax(m, val);
             }
             max_ptr[idx] = m;
         });
@@ -2943,7 +2943,7 @@ auto logsumexp_kernel(const Tensor& input, int64_t dim, bool keepdim, sycl::queu
             float m = -std::numeric_limits<float>::infinity();
             for (int64_t d = 0; d < dim_size; ++d) {
                 float val = bf16_to_f32(in_ptr[(o * dim_size + d) * inner + i]);
-                m = sycl::fmax(m, val);
+                m = nan_fmax(m, val);
             }
             max_ptr[idx] = m;
         });
@@ -3663,52 +3663,42 @@ auto aminmax_kernel(const Tensor& input, int64_t dim, bool keepdim, sycl::queue&
         Tensor min_out({1}, in_cont.dtype(), in_cont.device());
         Tensor max_out({1}, in_cont.dtype(), in_cont.device());
 
+        // NaN must propagate (PyTorch / CPU contract). The built-in
+        // sycl::minimum/maximum reduction operators drop NaNs, so use a
+        // single_task sequential pass with nan_fmin/nan_fmax, matching the
+        // full-reduction path of max_kernel/min_kernel in this file.
         if (in_cont.dtype() == DType::Float32) {
             const float* in_ptr = get_data_ptr<const float>(in_cont);
             float* min_ptr = get_data_ptr<float>(min_out);
             float* max_ptr = get_data_ptr<float>(max_out);
 
-            auto min_buf = sycl::malloc_shared<float>(1, queue);
-            auto max_buf = sycl::malloc_shared<float>(1, queue);
-            min_buf[0] = std::numeric_limits<float>::infinity();
-            max_buf[0] = -std::numeric_limits<float>::infinity();
-
-            queue.parallel_for<AminmaxKernelFloat32>(sycl::range<1>(total),
-                sycl::reduction(min_buf, sycl::minimum<float>()),
-                sycl::reduction(max_buf, sycl::maximum<float>()),
-                [=](sycl::id<1> idx, auto& mn, auto& mx) {
-                    float v = in_ptr[idx];
-                    mn.combine(v);
-                    mx.combine(v);
-                }).wait();
-
-            min_ptr[0] = min_buf[0];
-            max_ptr[0] = max_buf[0];
-            sycl::free(min_buf, queue);
-            sycl::free(max_buf, queue);
+            queue.single_task<AminmaxKernelFloat32>([=]() {
+                float mn = std::numeric_limits<float>::infinity();
+                float mx = -std::numeric_limits<float>::infinity();
+                for (int64_t i = 0; i < total; ++i) {
+                    float v = in_ptr[i];
+                    mn = nan_fmin(mn, v);
+                    mx = nan_fmax(mx, v);
+                }
+                min_ptr[0] = mn;
+                max_ptr[0] = mx;
+            }).wait();
         } else if (in_cont.dtype() == DType::Float64) {
             const double* in_ptr = get_data_ptr<const double>(in_cont);
             double* min_ptr = get_data_ptr<double>(min_out);
             double* max_ptr = get_data_ptr<double>(max_out);
 
-            auto min_buf = sycl::malloc_shared<double>(1, queue);
-            auto max_buf = sycl::malloc_shared<double>(1, queue);
-            min_buf[0] = std::numeric_limits<double>::infinity();
-            max_buf[0] = -std::numeric_limits<double>::infinity();
-
-            queue.parallel_for<AminmaxKernelFloat64>(sycl::range<1>(total),
-                sycl::reduction(min_buf, sycl::minimum<double>()),
-                sycl::reduction(max_buf, sycl::maximum<double>()),
-                [=](sycl::id<1> idx, auto& mn, auto& mx) {
-                    double v = in_ptr[idx];
-                    mn.combine(v);
-                    mx.combine(v);
-                }).wait();
-
-            min_ptr[0] = min_buf[0];
-            max_ptr[0] = max_buf[0];
-            sycl::free(min_buf, queue);
-            sycl::free(max_buf, queue);
+            queue.single_task<AminmaxKernelFloat64>([=]() {
+                double mn = std::numeric_limits<double>::infinity();
+                double mx = -std::numeric_limits<double>::infinity();
+                for (int64_t i = 0; i < total; ++i) {
+                    double v = in_ptr[i];
+                    mn = nan_fmin(mn, v);
+                    mx = nan_fmax(mx, v);
+                }
+                min_ptr[0] = mn;
+                max_ptr[0] = mx;
+            }).wait();
         } else {
             throw std::runtime_error("aminmax_kernel: unsupported dtype (expected floating type)");
         }
@@ -3746,8 +3736,8 @@ auto aminmax_kernel(const Tensor& input, int64_t dim, bool keepdim, sycl::queue&
                 float mn = in_ptr[base], mx = in_ptr[base];
                 for (int64_t r = 1; r < reduce_size; r++) {
                     float v = in_ptr[base + r * inner];
-                    mn = sycl::fmin(mn, v);
-                    mx = sycl::fmax(mx, v);
+                    mn = nan_fmin(mn, v);
+                    mx = nan_fmax(mx, v);
                 }
                 min_ptr[idx] = mn;
                 max_ptr[idx] = mx;
@@ -3765,8 +3755,8 @@ auto aminmax_kernel(const Tensor& input, int64_t dim, bool keepdim, sycl::queue&
                 double mn = in_ptr[base], mx = in_ptr[base];
                 for (int64_t r = 1; r < reduce_size; r++) {
                     double v = in_ptr[base + r * inner];
-                    mn = sycl::fmin(mn, v);
-                    mx = sycl::fmax(mx, v);
+                    mn = nan_fmin(mn, v);
+                    mx = nan_fmax(mx, v);
                 }
                 min_ptr[idx] = mn;
                 max_ptr[idx] = mx;

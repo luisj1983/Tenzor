@@ -3403,7 +3403,8 @@ auto advanced_index_put_rocm_kernel(
 template<typename T>
 __global__ void take_along_dim_hip_kernel(
     const T* __restrict__ input, const int64_t* __restrict__ indices, T* __restrict__ output,
-    int64_t numel, int64_t in_dim_size, int64_t idx_dim_size, int64_t inner_size)
+    int64_t numel, int64_t in_dim_size, int64_t idx_dim_size, int64_t inner_size,
+    int* error_flag)
 {
     HIP_KERNEL_LOOP(i, numel) {
         int64_t outer = i / (idx_dim_size * inner_size);
@@ -3416,6 +3417,9 @@ __global__ void take_along_dim_hip_kernel(
         // Bounds-check after negative normalization (matches gather/index_select):
         // an out-of-range index would otherwise be an out-of-bounds device read.
         if (src_idx < 0 || src_idx >= in_dim_size) {
+            // Flag the out-of-range index; the host throws after synchronizing
+            // (matches the CPU reference). Write 0 to stay memory-safe.
+            error_flag[0] = 1;
             output[i] = T(0);
             continue;
         }
@@ -3431,6 +3435,12 @@ auto take_along_dim_hip(const Tensor& input, const Tensor& indices, int64_t dim,
     auto idx_shape = indices.shape();
     int64_t ndim = in_shape.size();
     if (dim < 0) dim += ndim;
+    if (dim < 0 || dim >= ndim) {
+        throw std::out_of_range("take_along_dim ROCm: dim out of range");
+    }
+    if (indices.dtype() != DType::Int64) {
+        throw std::invalid_argument("take_along_dim ROCm: index tensor must have dtype Int64");
+    }
 
     Tensor output(std::vector<int64_t>(idx_shape.begin(), idx_shape.end()),
                   input.dtype(), input.device());
@@ -3445,44 +3455,52 @@ auto take_along_dim_hip(const Tensor& input, const Tensor& indices, int64_t dim,
     constexpr int BLOCK = 256;
     int blocks = (numel + BLOCK - 1) / BLOCK;
     const int64_t* idx_ptr = indices.data<int64_t>();
+    // Device flag for out-of-range indices; checked on the host after sync so we
+    // can throw (matching the CPU reference) instead of silently returning 0.
+    Tensor err_tensor = create_hip_zeros({1}, DType::Int32, input.device());
+    int* err_ptr = err_tensor.data<int32_t>();
 
     switch (input.dtype()) {
         case DType::Float32:
             take_along_dim_hip_kernel<float><<<blocks, BLOCK, 0, stream>>>(
                 input.data<float>(), idx_ptr, output.data<float>(),
-                numel, in_dim_size, idx_dim_size, inner_size);
+                numel, in_dim_size, idx_dim_size, inner_size, err_ptr);
             break;
         case DType::Float64:
             take_along_dim_hip_kernel<double><<<blocks, BLOCK, 0, stream>>>(
                 input.data<double>(), idx_ptr, output.data<double>(),
-                numel, in_dim_size, idx_dim_size, inner_size);
+                numel, in_dim_size, idx_dim_size, inner_size, err_ptr);
             break;
         case DType::Int32:
             take_along_dim_hip_kernel<int32_t><<<blocks, BLOCK, 0, stream>>>(
                 input.data<int32_t>(), idx_ptr, output.data<int32_t>(),
-                numel, in_dim_size, idx_dim_size, inner_size);
+                numel, in_dim_size, idx_dim_size, inner_size, err_ptr);
             break;
         case DType::Int64:
             take_along_dim_hip_kernel<int64_t><<<blocks, BLOCK, 0, stream>>>(
                 input.data<int64_t>(), idx_ptr, output.data<int64_t>(),
-                numel, in_dim_size, idx_dim_size, inner_size);
+                numel, in_dim_size, idx_dim_size, inner_size, err_ptr);
             break;
         case DType::Float16:
             take_along_dim_hip_kernel<__half><<<blocks, BLOCK, 0, stream>>>(
                 reinterpret_cast<const __half*>(input.data_ptr()), idx_ptr,
                 reinterpret_cast<__half*>(output.data_ptr()),
-                numel, in_dim_size, idx_dim_size, inner_size);
+                numel, in_dim_size, idx_dim_size, inner_size, err_ptr);
             break;
         case DType::BFloat16:
             take_along_dim_hip_kernel<hip_bfloat16><<<blocks, BLOCK, 0, stream>>>(
                 reinterpret_cast<const hip_bfloat16*>(input.data_ptr()), idx_ptr,
                 reinterpret_cast<hip_bfloat16*>(output.data_ptr()),
-                numel, in_dim_size, idx_dim_size, inner_size);
+                numel, in_dim_size, idx_dim_size, inner_size, err_ptr);
             break;
         default:
             throw std::runtime_error("take_along_dim ROCm: unsupported dtype");
     }
     HIP_CHECK(hipGetLastError());
+    HIP_CHECK(hipStreamSynchronize(stream));
+    if (err_tensor.to(Device::cpu()).data<int32_t>()[0] != 0) {
+        throw std::out_of_range("take_along_dim ROCm: index out of range");
+    }
     return output;
 }
 

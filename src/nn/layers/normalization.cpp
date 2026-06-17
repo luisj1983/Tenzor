@@ -712,9 +712,20 @@ auto LayerNormBackward::backward(std::vector<Tensor> grad_outputs) -> std::vecto
         }
     }
 
+    // grad_weight/grad_bias are accumulated flat as [N]. When normalized_shape is
+    // multi-dimensional the weight/bias parameters are multi-dimensional too, so
+    // reshape the grads to the parameter shape — otherwise gradient accumulation
+    // shape-mismatches and crashes. No-op for the common flat / affine-off case.
+    Tensor gw = grad_weight.contiguous();
+    Tensor gb = grad_bias.contiguous();
+    if (weight.ndim() > 1 && weight.numel() == N) {
+        std::vector<int64_t> param_shape(weight.shape().begin(), weight.shape().end());
+        gw = gw.reshape(param_shape);
+        gb = gb.reshape(param_shape);
+    }
     return {grad_input.contiguous().to(original_dtype),
-            grad_weight.contiguous().to(original_dtype),
-            grad_bias.contiguous().to(original_dtype)};
+            gw.to(original_dtype),
+            gb.to(original_dtype)};
 }
 
 // V.24: slot-3 contract for LayerNormBackward's saved buffers.

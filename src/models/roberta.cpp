@@ -25,6 +25,36 @@ RobertaEmbeddings::RobertaEmbeddings(const RobertaConfig& config)
     // - layer_norm_eps: 1e-5 (vs BERT's 1e-12)
 }
 
+auto RobertaEmbeddings::create_position_ids(const Tensor& input_ids) -> Tensor {
+    // RoBERTa derives position IDs from the input token IDs: each non-padding
+    // token gets position padding_idx + (its 1-based index among non-padding
+    // tokens), and padding tokens map to padding_idx. This differs from BERT's
+    // plain [0..seq_len-1] and matches HF create_position_ids_from_input_ids.
+    constexpr int64_t padding_idx = 1;  // RoBERTa pad_token_id
+
+    auto ids_cpu = input_ids.to(Device::cpu()).to(DType::Int64);
+    auto shape = ids_cpu.shape();
+    int64_t batch_size = shape[0];
+    int64_t seq_len = shape[1];
+    const int64_t* in = ids_cpu.data<int64_t>();
+
+    Tensor pos_cpu(std::vector<int64_t>{batch_size, seq_len}, DType::Int64, Device::cpu());
+    int64_t* out = pos_cpu.data<int64_t>();
+    for (int64_t b = 0; b < batch_size; ++b) {
+        int64_t cumulative = 0;
+        for (int64_t t = 0; t < seq_len; ++t) {
+            if (in[b * seq_len + t] != padding_idx) {
+                cumulative += 1;
+                out[b * seq_len + t] = cumulative + padding_idx;
+            } else {
+                out[b * seq_len + t] = padding_idx;
+            }
+        }
+    }
+
+    return (input_ids.device() == Device::cpu()) ? pos_cpu : pos_cpu.to(input_ids.device());
+}
+
 // ============================================================================
 // RobertaEncoder Implementation
 // ============================================================================

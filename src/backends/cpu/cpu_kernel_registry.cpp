@@ -1098,7 +1098,7 @@ static void register_cpu_kernels_elementwise_math(BackendDispatchTable& table) {
 
             // Normalize negative indices
             if (start < 0) start += dim_size;
-            if (end < 0) end += dim_size + 1; // -1 means end of dim
+            if (end < 0) end += dim_size;  // slice negative-index convention (matches slice_kernel)
             if (start < 0) start = 0;
             if (end > dim_size) end = dim_size;
 
