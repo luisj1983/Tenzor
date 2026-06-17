@@ -58,7 +58,11 @@ public:
         create_info.instance = instance;
         create_info.device = device;
         create_info.physicalDevice = physical_device;
-        create_info.flags = VMA_ALLOCATOR_CREATE_EXT_MEMORY_BUDGET_BIT;
+        // Do NOT request VMA_ALLOCATOR_CREATE_EXT_MEMORY_BUDGET_BIT: it requires
+        // the device to enable VK_EXT_memory_budget, which this backend does not.
+        // Setting it without the extension is undefined behaviour (crashes
+        // allocator creation). Budget tracking is an optional optimisation only.
+        create_info.flags = 0;
 
         VmaAllocator allocator = VK_NULL_HANDLE;
         VkResult result = vmaCreateAllocator(&create_info, &allocator);

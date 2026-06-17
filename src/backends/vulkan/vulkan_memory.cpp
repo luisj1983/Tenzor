@@ -11,6 +11,10 @@
 #include "vulkan_helpers.hpp"
 #include "tenzor/backend/vulkan_caching_allocator.hpp"
 #ifdef TENZOR_HAS_VMA
+// Emit the Vulkan Memory Allocator implementation in exactly this translation
+// unit. VMA is header-only; without VMA_IMPLEMENTATION the vma* symbols
+// (vmaCreateAllocator, ...) are undefined and the .so fails to load.
+#define VMA_IMPLEMENTATION
 #include "tenzor/backend/vulkan_vma_allocator.hpp"
 #endif
 

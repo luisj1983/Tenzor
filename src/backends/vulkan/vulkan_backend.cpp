@@ -76,6 +76,16 @@ VulkanBackend::~VulkanBackend() {
     //
     // NOTE: During static destruction, the allocator singleton may already be destroyed
     // (due to LIFO destruction order). Check is_alive() first to avoid crash.
+#ifdef TENZOR_HAS_VMA
+    // Shut down the VMA allocator per device while the VkDevice is still valid
+    // (frees outstanding buffers and destroys the allocator); without this the
+    // VMA destructor referenced an already-destroyed VkDevice (use-after-free).
+    for (size_t i = 0; i < devices_.size(); ++i) {
+        if (devices_[i].device != VK_NULL_HANDLE) {
+            backend::VulkanVMAAllocator::get().shutdown_device(static_cast<int>(i));
+        }
+    }
+#else
     if (backend::VulkanCachingAllocator::is_alive()) {
         for (size_t i = 0; i < devices_.size(); ++i) {
             if (devices_[i].device != VK_NULL_HANDLE) {
@@ -83,6 +93,7 @@ VulkanBackend::~VulkanBackend() {
             }
         }
     }
+#endif
 
     // Cleanup staging buffer pools
     stagingPools_.clear();
@@ -727,9 +738,16 @@ void VulkanBackend::createLogicalDevices() {
             }
         }
 
-        // Initialize VulkanCachingAllocator for this device
+        // Initialize the per-device allocator. With VMA (opt-in TENZOR_USE_VMA)
+        // the VMA allocator backs the buffer pool; otherwise the built-in caching
+        // allocator does. Without this init the VMA path threw on every alloc.
+#ifdef TENZOR_HAS_VMA
+        backend::VulkanVMAAllocator::get().initialize(
+            instance_, ctx.device, ctx.physicalDevice, static_cast<int>(device_idx));
+#else
         backend::VulkanCachingAllocator::get().initialize(
             ctx.device, ctx.physicalDevice, static_cast<int>(device_idx));
+#endif
 
         // Initialize caches and per-device structures
         stagingPools_.push_back({});
