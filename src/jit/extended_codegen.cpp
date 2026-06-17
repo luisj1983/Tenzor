@@ -6,6 +6,7 @@
 #include "tenzor/jit/extended_codegen.hpp"
 #include "tenzor/jit/codegen.hpp"
 #include <sstream>
+#include <algorithm>
 
 namespace tenzor {
 namespace jit {
@@ -102,16 +103,24 @@ auto ExtendedKernelCodegen::activation_expr(OpType act, const std::string& var,
 // ============================================================================
 
 auto ExtendedKernelCodegen::generate(const ExtendedFusionGroup& group) -> std::string {
+    std::string body;
     switch (group.kind) {
-        case FusionKind::Reduction:    return generate_reduction(group);
-        case FusionKind::GemmEpilogue: return generate_gemm_epilogue(group);
-        case FusionKind::Softmax:      return generate_softmax(group);
-        case FusionKind::LayerNorm:    return generate_layer_norm(group);
-        case FusionKind::RMSNorm:      return generate_rms_norm(group);
-        case FusionKind::SmallMLP:     return generate_small_mlp(group);
-        default:
-            return "";
+        case FusionKind::Reduction:    body = generate_reduction(group); break;
+        case FusionKind::GemmEpilogue: body = generate_gemm_epilogue(group); break;
+        case FusionKind::Softmax:      body = generate_softmax(group); break;
+        case FusionKind::LayerNorm:    body = generate_layer_norm(group); break;
+        case FusionKind::RMSNorm:      body = generate_rms_norm(group); break;
+        case FusionKind::SmallMLP:     body = generate_small_mlp(group); break;
+        default:                       return "";
     }
+    if (body.empty()) return "";
+    // NVRTC/hiprtc has no system headers, and the extended kernel signatures use
+    // int64_t (the element-wise codegen uses `long long`). Provide the typedefs
+    // so the generated source compiles at runtime.
+    static const char* kPreamble =
+        "typedef long long int64_t;\n"
+        "typedef unsigned long long uint64_t;\n";
+    return std::string(kPreamble) + body;
 }
 
 // ============================================================================
@@ -660,21 +669,116 @@ auto execute_extended_fused(const ExtendedFusionGroup& group,
         throw std::runtime_error("Extended codegen: no inputs provided");
     }
 
-    // Output shape depends on the fusion kind
-    auto output_shape_span = inputs[0].shape();
-    std::vector<int64_t> output_shape(output_shape_span.begin(), output_shape_span.end());
-    int64_t numel = inputs[0].numel();
+    // ---- Per-kind output shape, launch geometry, and argument layout ----
+    // The extended kernels do NOT share the element-wise [inputs..., output,
+    // numel] ABI: each has a distinct signature (GEMM-epilogue puts output
+    // first; norms take outer/norm_size+eps; reduction takes outer/reduce/inner;
+    // MLP takes weights/biases + four dims) and a distinct launch shape. Build
+    // the exact argument list and grid/block for each FusionKind.
+    auto in_shape = std::vector<int64_t>(inputs[0].shape().begin(), inputs[0].shape().end());
+    const int64_t ndim = static_cast<int64_t>(in_shape.size());
+    const int64_t total = inputs[0].numel();
+    auto axis_norm = [&](int axis) -> int64_t {
+        int64_t a = axis;
+        if (a < 0) a += ndim;
+        if (a < 0) a = 0;
+        if (a >= ndim) a = (ndim > 0 ? ndim - 1 : 0);
+        return a;
+    };
+    auto suffix_prod = [&](int64_t from) -> int64_t {
+        int64_t p = 1; for (int64_t d = from; d < ndim; ++d) p *= in_shape[d]; return p;
+    };
 
-    // Allocate output
-    Tensor output(output_shape, group.dtype, inputs[0].device());
+    constexpr int kBlock = 256;
+    Tensor output;
+    std::vector<const void*> ptrs;   // buffer args (fully populated before &-taken)
+    std::vector<int64_t> ivals;      // integer scalar args (fully populated first)
+    float eps_val = group.eps;
+    bool has_eps = false;
+    int grid = 1;
+    unsigned shared = 0;
 
-    // Build input pointer list
-    std::vector<const void*> input_ptrs;
-    for (auto& t : inputs) input_ptrs.push_back(t.data_ptr());
-    for (auto& t : params) input_ptrs.push_back(t.data_ptr());
+    switch (group.kind) {
+        case FusionKind::Softmax: {
+            int64_t cols = std::max<int64_t>(1, suffix_prod(axis_norm(group.softmax_dim)));
+            int64_t rows = total / cols;
+            output = Tensor(in_shape, group.dtype, inputs[0].device());
+            ptrs = {inputs[0].data_ptr(), output.data_ptr()};
+            ivals = {rows, cols};
+            grid = static_cast<int>(rows);
+            break;
+        }
+        case FusionKind::LayerNorm:
+        case FusionKind::RMSNorm: {
+            int64_t norm_size = std::max<int64_t>(1, suffix_prod(axis_norm(group.norm_axis)));
+            int64_t outer = total / norm_size;
+            output = Tensor(in_shape, group.dtype, inputs[0].device());
+            ptrs = {inputs[0].data_ptr(), output.data_ptr()};
+            if (group.has_affine) {
+                ptrs.push_back(params.at(0).data_ptr());           // gamma
+                if (group.kind == FusionKind::LayerNorm) {
+                    ptrs.push_back(params.at(1).data_ptr());       // beta
+                }
+            }
+            ivals = {outer, norm_size};
+            has_eps = true;
+            grid = static_cast<int>(outer);
+            break;
+        }
+        case FusionKind::Reduction: {
+            int64_t a = axis_norm(group.reduce_dim);
+            int64_t reduce_size = (ndim > 0) ? in_shape[a] : total;
+            int64_t outer = 1; for (int64_t d = 0; d < a; ++d) outer *= in_shape[d];
+            int64_t inner = suffix_prod(a + 1);
+            std::vector<int64_t> out_shape;
+            for (int64_t d = 0; d < ndim; ++d) {
+                if (d == a) { if (group.keepdim) out_shape.push_back(1); }
+                else out_shape.push_back(in_shape[d]);
+            }
+            output = Tensor(out_shape, group.dtype, inputs[0].device());
+            ptrs = {inputs[0].data_ptr(), output.data_ptr()};
+            ivals = {outer, reduce_size, inner};
+            grid = static_cast<int>(outer * inner);
+            break;
+        }
+        case FusionKind::GemmEpilogue: {
+            // In-place epilogue on the GEMM result: output starts as a copy of it.
+            output = inputs[0].clone();
+            int64_t cols = std::max<int64_t>(1, ndim > 0 ? in_shape[ndim - 1] : total);
+            int64_t rows = total / cols;
+            ptrs = {output.data_ptr()};                            // output FIRST
+            if (group.has_bias) ptrs.push_back(params.at(0).data_ptr());
+            ivals = {rows, cols};
+            grid = static_cast<int>((rows * cols + kBlock - 1) / kBlock);
+            break;
+        }
+        case FusionKind::SmallMLP: {
+            // params: {w1, b1, w2, b2}
+            int64_t in_dim = std::max<int64_t>(1, ndim > 0 ? in_shape[ndim - 1] : total);
+            int64_t batch = total / in_dim;
+            int64_t hidden_dim = group.hidden_dim;
+            int64_t out_dim = static_cast<int64_t>(params.at(3).numel());  // b2 = [out_dim]
+            output = Tensor({batch, out_dim}, group.dtype, inputs[0].device());
+            ptrs = {inputs[0].data_ptr(), params.at(0).data_ptr(), params.at(1).data_ptr(),
+                    params.at(2).data_ptr(), params.at(3).data_ptr(), output.data_ptr()};
+            ivals = {batch, in_dim, hidden_dim, out_dim};
+            grid = static_cast<int>(batch);
+            shared = static_cast<unsigned>(hidden_dim * static_cast<int64_t>(inputs[0].dtype_size()));
+            break;
+        }
+        default:
+            throw std::runtime_error("execute_extended_fused: unsupported fusion kind");
+    }
 
-    // Launch
-    kernel->launch(input_ptrs, output.data_ptr(), numel, nullptr);
+    // Build the kernel argument array (pointers to the stable ptr/dim values),
+    // in the order each kernel declares: buffers..., dims..., [eps].
+    std::vector<void*> args;
+    args.reserve(ptrs.size() + ivals.size() + 1);
+    for (auto& p : ptrs) args.push_back(static_cast<void*>(&p));
+    for (auto& v : ivals) args.push_back(static_cast<void*>(&v));
+    if (has_eps) args.push_back(static_cast<void*>(&eps_val));
+
+    kernel->launch_raw(args, grid, kBlock, shared, nullptr);
 
     return output;
 }

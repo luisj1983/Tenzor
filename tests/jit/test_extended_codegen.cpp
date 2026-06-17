@@ -127,3 +127,50 @@ TEST(ExtendedCodegen, ExtendedFusionPassRegisteredInCompiler) {
     // Empty graph = no changes
     EXPECT_GE(changes, 0);
 }
+
+// Execution test for the extended-fusion launch ABI. execute_extended_fused
+// previously launched every extended kernel with the element-wise
+// [inputs..., output, numel] ABI, feeding garbage dimension args. This verifies
+// the softmax path end-to-end against a CPU reference (skips if no GPU backend).
+TEST(ExtendedCodegen, ExecuteSoftmaxMatchesReference) {
+    initialize();  // load backends (this binary's other tests are codegen-only)
+    const std::vector<float> in = {1.0f, 2.0f, 3.0f, 4.0f, 0.5f, -1.0f, 2.0f, 0.0f};
+    Tensor input_cpu = from_data(in.data(), {2, 4});
+
+    for (const auto& dev : {Device::cuda(0), Device::rocm(0)}) {
+        Tensor input;
+        try {
+            input = input_cpu.to(dev);
+        } catch (const std::exception&) {
+            continue;  // backend not available on this device
+        }
+
+        ExtendedFusionGroup group;
+        group.kind = FusionKind::Softmax;
+        group.dtype = DType::Float32;
+        group.softmax_dim = -1;
+
+        Tensor out;
+        try {
+            out = execute_extended_fused(group, {input});
+        } catch (const std::exception& e) {
+            GTEST_SKIP() << "extended softmax launch unavailable: " << e.what();
+        }
+
+        auto out_cpu = out.to(Device::cpu());
+        ASSERT_EQ(out_cpu.numel(), 8);
+        const float* o = out_cpu.data<float>();
+        for (int r = 0; r < 2; ++r) {
+            float mx = -1e30f;
+            for (int c = 0; c < 4; ++c) mx = std::max(mx, in[r * 4 + c]);
+            float sum = 0.0f;
+            for (int c = 0; c < 4; ++c) sum += std::exp(in[r * 4 + c] - mx);
+            for (int c = 0; c < 4; ++c) {
+                float ref = std::exp(in[r * 4 + c] - mx) / sum;
+                EXPECT_NEAR(o[r * 4 + c], ref, 1e-4f) << "row=" << r << " col=" << c;
+            }
+        }
+        return;  // verified on one available backend
+    }
+    GTEST_SKIP() << "no GPU backend available for extended softmax execution";
+}

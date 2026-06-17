@@ -160,6 +160,24 @@ struct CompiledKernel {
      */
     auto launch(const std::vector<const void*>& input_ptrs,
                 void* output_ptr, int64_t numel, void* stream) -> void;
+
+    /**
+     * @brief Launch with a fully-built kernel-argument list and explicit grid/
+     * block geometry. Extended fusion kernels (softmax/reduction/layernorm/
+     * gemm-epilogue/mlp) have per-kind signatures and launch shapes that do NOT
+     * match the element-wise [inputs..., output, numel] convention, so the caller
+     * builds the exact argument pointers and the launch geometry here.
+     *
+     * @param kernel_args Pointers to each kernel argument value, in declaration
+     *        order. The pointed-to values must outlive this call.
+     * @param grid_size Number of blocks (x).
+     * @param block_size Threads per block (x).
+     * @param shared_bytes Dynamic shared-memory size in bytes.
+     * @param stream GPU stream.
+     */
+    auto launch_raw(const std::vector<void*>& kernel_args,
+                    int grid_size, int block_size, unsigned shared_bytes,
+                    void* stream) -> void;
 };
 
 // ============================================================================

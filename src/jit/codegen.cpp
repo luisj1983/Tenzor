@@ -302,6 +302,43 @@ auto CompiledKernel::launch(const std::vector<const void*>& input_ptrs,
 #endif
 }
 
+auto CompiledKernel::launch_raw(const std::vector<void*>& kernel_args,
+                                int grid_size, int block_size, unsigned shared_bytes,
+                                void* stream) -> void {
+#if CODEGEN_AVAILABLE
+    if (!function) {
+        throw std::runtime_error("CompiledKernel::launch_raw: kernel not compiled");
+    }
+    if (grid_size < 1) grid_size = 1;
+    if (block_size < 1) block_size = 1;
+    // cuLaunchKernel/hipModuleLaunchKernel want a non-const void** to the array
+    // of argument pointers; the pointed-to values are owned by the caller.
+    std::vector<void*> args = kernel_args;
+#if defined(TENZOR_USE_CUDA)
+    CU_CHECK(cuLaunchKernel(
+        static_cast<CUfunction>(function),
+        grid_size, 1, 1,
+        block_size, 1, 1,
+        shared_bytes,
+        static_cast<CUstream>(stream),
+        args.data(),
+        nullptr));
+#elif defined(TENZOR_USE_ROCM)
+    CU_CHECK(hipModuleLaunchKernel(
+        static_cast<hipFunction_t>(function),
+        grid_size, 1, 1,
+        block_size, 1, 1,
+        shared_bytes,
+        static_cast<hipStream_t>(stream),
+        args.data(),
+        nullptr));
+#endif
+#else
+    (void)kernel_args; (void)grid_size; (void)block_size; (void)shared_bytes; (void)stream;
+    throw NotImplementedError("GPU codegen not available (no CUDA/ROCm)");
+#endif
+}
+
 // ============================================================================
 // Kernel Cache
 // ============================================================================
