@@ -2338,13 +2338,19 @@ auto linalg_ldl_solve_kernel(const Tensor& LD, const Tensor& pivots,
     auto ld_shape = LD.shape();
     auto b_shape = B.shape();
     int64_t ld_ndim = static_cast<int64_t>(ld_shape.size());
+    int64_t b_ndim = static_cast<int64_t>(b_shape.size());
     int64_t n = ld_shape[ld_ndim - 1];
-    int64_t nrhs = b_shape[static_cast<int64_t>(b_shape.size()) - 1];
+    // A 1D RHS of shape (n,) represents a single right-hand side (nrhs=1),
+    // not n right-hand sides. Guard the rank like lu_solve does, and reshape
+    // 1D B to (n, 1) so shared-memory sizing and the solve are correct; the
+    // result is squeezed back to (n,) on return to match the input rank.
+    const bool b_is_1d = (b_ndim < 2);
+    int64_t nrhs = b_is_1d ? 1 : b_shape[b_ndim - 1];
     int64_t nbatch = 1;
     for (int64_t i = 0; i + 2 < ld_ndim; ++i) nbatch *= ld_shape[i];
 
     auto ld_cont = LD.contiguous();
-    auto work_b = B.contiguous().clone();
+    auto work_b = (b_is_1d ? B.reshape({n, 1}) : B).contiguous().clone();
 
     int threads = std::min(static_cast<int>(n), 128);
     if (threads < 1) threads = 1;
@@ -2364,6 +2370,10 @@ auto linalg_ldl_solve_kernel(const Tensor& LD, const Tensor& pivots,
     }
 
     HIP_CHECK_LINALG(hipStreamSynchronize(stream ? stream : nullptr));
+    // Restore the original 1D shape for a 1D RHS.
+    if (b_is_1d) {
+        return work_b.reshape({n});
+    }
     return work_b;
 }
 
@@ -4903,6 +4913,10 @@ auto linalg_solve_triangular_kernel(const Tensor& A, const Tensor& B,
     }
 
     HIP_CHECK_LINALG(hipStreamSynchronize(stream ? stream : nullptr));
+    // Restore the original 1D shape for a 1D RHS.
+    if (b_is_1d) {
+        return work_b.reshape({n});
+    }
     return work_b;
 }
 
@@ -5519,13 +5533,19 @@ auto linalg_ldl_solve_kernel(const Tensor& LD, const Tensor& pivots,
     auto ld_shape = LD.shape();
     auto b_shape = B.shape();
     int64_t ld_ndim = static_cast<int64_t>(ld_shape.size());
+    int64_t b_ndim = static_cast<int64_t>(b_shape.size());
     int64_t n = ld_shape[ld_ndim - 1];
-    int64_t nrhs = b_shape[static_cast<int64_t>(b_shape.size()) - 1];
+    // A 1D RHS of shape (n,) represents a single right-hand side (nrhs=1),
+    // not n right-hand sides. Guard the rank like lu_solve does, and reshape
+    // 1D B to (n, 1) so shared-memory sizing and the solve are correct; the
+    // result is squeezed back to (n,) on return to match the input rank.
+    const bool b_is_1d = (b_ndim < 2);
+    int64_t nrhs = b_is_1d ? 1 : b_shape[b_ndim - 1];
     int64_t nbatch = 1;
     for (int64_t i = 0; i + 2 < ld_ndim; ++i) nbatch *= ld_shape[i];
 
     auto ld_cont = LD.contiguous();
-    auto work_b = B.contiguous().clone();
+    auto work_b = (b_is_1d ? B.reshape({n, 1}) : B).contiguous().clone();
 
     int threads = std::min(static_cast<int>(n), 128);
     if (threads < 1) threads = 1;
@@ -5547,6 +5567,10 @@ auto linalg_ldl_solve_kernel(const Tensor& LD, const Tensor& pivots,
     }
 
     HIP_CHECK_LINALG(hipStreamSynchronize(stream ? stream : nullptr));
+    // Restore the original 1D shape for a 1D RHS.
+    if (b_is_1d) {
+        return work_b.reshape({n});
+    }
     return work_b;
 }
 

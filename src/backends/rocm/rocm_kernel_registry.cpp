@@ -1087,6 +1087,57 @@ namespace rocm {
  *
  * Each registration wraps a rocm::* kernel call with stream handling.
  */
+// Dim-aware nan-variance composed from primitives, mirroring the CPU formula:
+//   count = #non-NaN along dim; mean = sum(non-NaN)/max(count,1);
+//   sum_sq = sum((x-mean)^2 over non-NaN); denom = count - correction;
+//   var = denom > 0 ? sum_sq/denom : 0.
+// For the full-reduction shape (dim == INT64_MIN) we flatten to 1-D first.
+static Tensor rocm_compose_nanvar(const Tensor& x_in, int64_t dim, bool keepdim,
+                                  int64_t correction) {
+    // Float16/BFloat16 lack composed-op coverage in some primitives;
+    // widen to Float32, compute, narrow back (F16 widen-narrow).
+    bool narrow = (x_in.dtype() == DType::Float16 ||
+                   x_in.dtype() == DType::BFloat16);
+    Tensor x = narrow ? x_in.to(DType::Float32) : x_in;
+
+    bool full_reduce = (dim == std::numeric_limits<int64_t>::min());
+    Tensor work = x;
+    if (full_reduce) {
+        work = tenzor::reshape(x.contiguous(),
+                               std::vector<int64_t>{x.numel()});
+        dim = 0;
+    }
+
+    Tensor mask = tenzor::isnan(work);                       // bool, NaN==true
+    Tensor valid = tenzor::logical_not(mask).to(work.dtype());
+    Tensor cleaned = tenzor::where(mask, tenzor::zeros_like(work), work);
+
+    Tensor count_kd = tenzor::sum(valid, dim, /*keepdim=*/true);
+    Tensor one_kd = tenzor::ones_like(count_kd);
+    Tensor safe_count = tenzor::where(tenzor::gt(count_kd, tenzor::zeros_like(count_kd)),
+                                      count_kd, one_kd);
+    Tensor numer = tenzor::sum(cleaned, dim, /*keepdim=*/true);
+    Tensor mean_kd = tenzor::div(numer, safe_count);         // broadcastable
+
+    Tensor diff = tenzor::sub(work, mean_kd);                // broadcasts mean
+    Tensor diff_valid = tenzor::where(mask, tenzor::zeros_like(diff), diff);
+    Tensor sq = tenzor::mul(diff_valid, diff_valid);
+    Tensor sum_sq = tenzor::sum(sq, dim, keepdim);
+
+    Tensor count = tenzor::sum(valid, dim, keepdim);
+    Tensor corr = tenzor::full(
+        std::vector<int64_t>(count.shape().begin(), count.shape().end()),
+        static_cast<double>(correction), count.dtype(), count.device());
+    Tensor denom = tenzor::sub(count, corr);
+    Tensor safe_denom = tenzor::where(tenzor::gt(denom, tenzor::zeros_like(denom)),
+                                      denom, tenzor::ones_like(denom));
+    Tensor var = tenzor::div(sum_sq, safe_denom);
+    var = tenzor::where(tenzor::gt(denom, tenzor::zeros_like(denom)),
+                        var, tenzor::zeros_like(var));
+
+    return narrow ? var.to(x_in.dtype()) : var;
+}
+
 void register_rocm_kernels(BackendDispatchTable& table) {
     // ========================================================================
     // Binary Operations
@@ -2366,11 +2417,17 @@ void register_rocm_kernels(BackendDispatchTable& table) {
                 // Per attention-contract.md sentinel rule: -INFINITY, not -1e9
                 // (FP16 saturates the latter to -65504, leaks gradient mass
                 // through softmax — Systemic #3).
-                int64_t seq_len = scores_shape[scores_shape.size() - 1];
-                Tensor rows = tenzor::arange(0, seq_len, 1, DType::Int64, scores.device());
-                Tensor cols = tenzor::arange(0, seq_len, 1, DType::Int64, scores.device());
-                rows = tenzor::reshape(rows, {seq_len, 1});
-                cols = tenzor::reshape(cols, {1, seq_len});
+                // scores is [BH, S_q, S_k]; the causal mask must be [S_q, S_k]
+                // (rows index query positions, cols index key positions). Using
+                // S_k for both dimensions silently assumes Sq == Sk and yields a
+                // wrong/mis-shaped mask when they differ — mirror the forward
+                // FP64 composed path which uses S_q (=[-2]) and S_k (=[-1]).
+                int64_t S_q = scores_shape[scores_shape.size() - 2];
+                int64_t S_k = scores_shape[scores_shape.size() - 1];
+                Tensor rows = tenzor::arange(0, S_q, 1, DType::Int64, scores.device());
+                Tensor cols = tenzor::arange(0, S_k, 1, DType::Int64, scores.device());
+                rows = tenzor::reshape(rows, {S_q, 1});
+                cols = tenzor::reshape(cols, {1, S_k});
                 Tensor causal_mask = tenzor::gt(cols.to(DType::Float32), rows.to(DType::Float32));
                 Tensor neg_inf = tenzor::full(scores_shape,
                                               -std::numeric_limits<float>::infinity(),
@@ -5420,13 +5477,51 @@ void register_rocm_kernels(BackendDispatchTable& table) {
     });
 
     // --- NaN-aware reductions: NanVar, NanStd ---
+    //
+    // The native HIP nanvar_kernel/nanstd_kernel only implement the
+    // full-reduction (scalar) form parameterised by a single `unbiased`
+    // bool, so a user-supplied AttrKey::Dim was silently ignored (producing a
+    // scalar where a per-row vector was expected) and correction values other
+    // than 0/1 were impossible. The CPU/OneAPI references read
+    // AttrKey::Dim (default INT64_MIN), AttrKey::Keepdim and
+    // AttrKey::Correction and forward to a dim-aware kernel.
+    //
+    // Match that contract here:
+    //   * No Dim requested + correction in {0,1}: native scalar reducer
+    //     (unbiased == (correction == 1)).
+    //   * Otherwise (Dim requested, or an arbitrary correction): compose the
+    //     dim-aware nan-variance from sum/isnan/where/logical_not, mirroring
+    //     the CPU formula exactly:
+    //         count   = #non-NaN along dim
+    //         mean    = sum(non-NaN) / max(count, 1)
+    //         sum_sq  = sum((x - mean)^2 over non-NaN)
+    //         denom   = count - correction
+    //         var     = denom > 0 ? sum_sq / denom : 0
+    //     For the full-reduction shape (no Dim) we collapse over all dims by
+    //     flattening to 1-D first so the same composed path applies.
     table.register_single_output_kernel(OpId::NanVar, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
-        bool unbiased = attrs.get_bool(AttrKey::Unbiased, true);
-        return rocm::nanvar_kernel(inputs[0], unbiased, get_hip_stream(attrs));
+        int64_t dim = attrs.get_int(AttrKey::Dim, std::numeric_limits<int64_t>::min());
+        bool keepdim = attrs.get_bool(AttrKey::Keepdim, false);
+        int64_t correction = attrs.get_int(AttrKey::Correction, 1);
+        bool full_reduce = (dim == std::numeric_limits<int64_t>::min());
+        if (full_reduce && (correction == 0 || correction == 1)) {
+            // Native scalar reducer honours correction via the unbiased flag.
+            bool unbiased = (correction == 1);
+            return rocm::nanvar_kernel(inputs[0], unbiased, get_hip_stream(attrs));
+        }
+        return rocm_compose_nanvar(inputs[0], dim, keepdim, correction);
     });
     table.register_single_output_kernel(OpId::NanStd, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
-        bool unbiased = attrs.get_bool(AttrKey::Unbiased, true);
-        return rocm::nanstd_kernel(inputs[0], unbiased, get_hip_stream(attrs));
+        int64_t dim = attrs.get_int(AttrKey::Dim, std::numeric_limits<int64_t>::min());
+        bool keepdim = attrs.get_bool(AttrKey::Keepdim, false);
+        int64_t correction = attrs.get_int(AttrKey::Correction, 1);
+        bool full_reduce = (dim == std::numeric_limits<int64_t>::min());
+        if (full_reduce && (correction == 0 || correction == 1)) {
+            bool unbiased = (correction == 1);
+            return rocm::nanstd_kernel(inputs[0], unbiased, get_hip_stream(attrs));
+        }
+        // NanStd = sqrt(NanVar) with the same dim/keepdim/correction.
+        return tenzor::sqrt(rocm_compose_nanvar(inputs[0], dim, keepdim, correction));
     });
 
     // =========================================================================

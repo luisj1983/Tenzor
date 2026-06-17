@@ -2897,37 +2897,65 @@ auto log_sigmoid_backward_kernel(const Tensor& grad_output, const Tensor& input,
 // ============================================================================
 
 __global__ void index_add_f32_kernel(float* output, const float* source, const int64_t* index,
-                                     int64_t outer, int64_t dim_size, int64_t idx_n, int64_t inner) {
+                                     int64_t outer, int64_t dim_size, int64_t idx_n, int64_t inner,
+                                     int* error_flag) {
     int64_t tid = blockIdx.x * blockDim.x + threadIdx.x;
     int64_t total = outer * idx_n * inner;
     if (tid >= total) return;
     int64_t j = tid % inner;
     int64_t k = (tid / inner) % idx_n;
     int64_t o = tid / (inner * idx_n);
-    atomicAdd(&output[(o * dim_size + index[k]) * inner + j],
+    // Bounds-check the gathered index before using it as a device offset; an
+    // out-of-range index would otherwise be an OOB read/write. The host throws
+    // after synchronizing (matching the CPU reference, which throws
+    // std::out_of_range).
+    int64_t ix = index[k];
+    if (ix < 0 || ix >= dim_size) {
+        atomicOr(error_flag, 1);
+        return;
+    }
+    atomicAdd(&output[(o * dim_size + ix) * inner + j],
               source[(o * idx_n + k) * inner + j]);
 }
 
 __global__ void index_copy_f32_kernel(float* output, const float* source, const int64_t* index,
-                                      int64_t outer, int64_t dim_size, int64_t idx_n, int64_t inner) {
+                                      int64_t outer, int64_t dim_size, int64_t idx_n, int64_t inner,
+                                      int* error_flag) {
     int64_t tid = blockIdx.x * blockDim.x + threadIdx.x;
     int64_t total = outer * idx_n * inner;
     if (tid >= total) return;
     int64_t j = tid % inner;
     int64_t k = (tid / inner) % idx_n;
     int64_t o = tid / (inner * idx_n);
-    output[(o * dim_size + index[k]) * inner + j] = source[(o * idx_n + k) * inner + j];
+    // Bounds-check the gathered index before using it as a device offset; an
+    // out-of-range index would otherwise be an OOB write. The host throws after
+    // synchronizing (matching the CPU reference, which throws std::out_of_range).
+    int64_t ix = index[k];
+    if (ix < 0 || ix >= dim_size) {
+        atomicOr(error_flag, 1);
+        return;
+    }
+    output[(o * dim_size + ix) * inner + j] = source[(o * idx_n + k) * inner + j];
 }
 
 __global__ void index_fill_f32_kernel(float* output, const int64_t* index, float value,
-                                      int64_t outer, int64_t dim_size, int64_t idx_n, int64_t inner) {
+                                      int64_t outer, int64_t dim_size, int64_t idx_n, int64_t inner,
+                                      int* error_flag) {
     int64_t tid = blockIdx.x * blockDim.x + threadIdx.x;
     int64_t total = outer * idx_n * inner;
     if (tid >= total) return;
     int64_t j = tid % inner;
     int64_t k = (tid / inner) % idx_n;
     int64_t o = tid / (inner * idx_n);
-    output[(o * dim_size + index[k]) * inner + j] = value;
+    // Bounds-check the gathered index before using it as a device offset; an
+    // out-of-range index would otherwise be an OOB write. The host throws after
+    // synchronizing (matching the CPU reference, which throws std::out_of_range).
+    int64_t ix = index[k];
+    if (ix < 0 || ix >= dim_size) {
+        atomicOr(error_flag, 1);
+        return;
+    }
+    output[(o * dim_size + ix) * inner + j] = value;
 }
 
 auto index_add_kernel(const Tensor& self, const Tensor& index, const Tensor& source,
@@ -2948,18 +2976,26 @@ auto index_add_kernel(const Tensor& self, const Tensor& index, const Tensor& sou
 
     if (output.dtype() == DType::Float32) {
         int num_blocks = get_num_blocks(total);
+        // Device flag for out-of-range indices; checked on the host after sync so
+        // we can throw (matching the CPU reference) instead of an OOB write.
+        Tensor err_tensor(std::vector<int64_t>{1}, DType::Int32, output.device());
+        HIP_CHECK(hipMemsetAsync(err_tensor.data_ptr(), 0, sizeof(int32_t), stream));
+        int* err_ptr = err_tensor.data<int32_t>();
         hipLaunchKernelGGL(index_add_f32_kernel, dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
                           output.data<float>(), source.data<float>(), index.data<int64_t>(),
-                          outer, dim_size, idx_n, inner);
+                          outer, dim_size, idx_n, inner, err_ptr);
+        HIP_CHECK(hipGetLastError());
+        HIP_CHECK(hipStreamSynchronize(stream));
+        if (err_tensor.to(Device::cpu()).data<int32_t>()[0] != 0) {
+            throw std::out_of_range("index_add ROCm: index out of range");
+        }
+        return output;
     } else {
         auto f32_self = self.to(DType::Float32);
         auto f32_src = source.to(DType::Float32);
         auto result = index_add_kernel(f32_self, index, f32_src, dim, stream);
         return result.to(self.dtype());
     }
-
-    HIP_CHECK(hipGetLastError());
-    return output;
 }
 
 auto index_copy_kernel(const Tensor& self, const Tensor& index, const Tensor& source,
@@ -2980,18 +3016,26 @@ auto index_copy_kernel(const Tensor& self, const Tensor& index, const Tensor& so
 
     if (output.dtype() == DType::Float32) {
         int num_blocks = get_num_blocks(total);
+        // Device flag for out-of-range indices; checked on the host after sync so
+        // we can throw (matching the CPU reference) instead of an OOB write.
+        Tensor err_tensor(std::vector<int64_t>{1}, DType::Int32, output.device());
+        HIP_CHECK(hipMemsetAsync(err_tensor.data_ptr(), 0, sizeof(int32_t), stream));
+        int* err_ptr = err_tensor.data<int32_t>();
         hipLaunchKernelGGL(index_copy_f32_kernel, dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
                           output.data<float>(), source.data<float>(), index.data<int64_t>(),
-                          outer, dim_size, idx_n, inner);
+                          outer, dim_size, idx_n, inner, err_ptr);
+        HIP_CHECK(hipGetLastError());
+        HIP_CHECK(hipStreamSynchronize(stream));
+        if (err_tensor.to(Device::cpu()).data<int32_t>()[0] != 0) {
+            throw std::out_of_range("index_copy ROCm: index out of range");
+        }
+        return output;
     } else {
         auto f32_self = self.to(DType::Float32);
         auto f32_src = source.to(DType::Float32);
         auto result = index_copy_kernel(f32_self, index, f32_src, dim, stream);
         return result.to(self.dtype());
     }
-
-    HIP_CHECK(hipGetLastError());
-    return output;
 }
 
 auto index_fill_kernel(const Tensor& self, const Tensor& index,
@@ -3012,17 +3056,25 @@ auto index_fill_kernel(const Tensor& self, const Tensor& index,
 
     if (output.dtype() == DType::Float32) {
         int num_blocks = get_num_blocks(total);
+        // Device flag for out-of-range indices; checked on the host after sync so
+        // we can throw (matching the CPU reference) instead of an OOB write.
+        Tensor err_tensor(std::vector<int64_t>{1}, DType::Int32, output.device());
+        HIP_CHECK(hipMemsetAsync(err_tensor.data_ptr(), 0, sizeof(int32_t), stream));
+        int* err_ptr = err_tensor.data<int32_t>();
         hipLaunchKernelGGL(index_fill_f32_kernel, dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
                           output.data<float>(), index.data<int64_t>(), static_cast<float>(value),
-                          outer, dim_size, idx_n, inner);
+                          outer, dim_size, idx_n, inner, err_ptr);
+        HIP_CHECK(hipGetLastError());
+        HIP_CHECK(hipStreamSynchronize(stream));
+        if (err_tensor.to(Device::cpu()).data<int32_t>()[0] != 0) {
+            throw std::out_of_range("index_fill ROCm: index out of range");
+        }
+        return output;
     } else {
         auto f32_self = self.to(DType::Float32);
         auto result = index_fill_kernel(f32_self, index, dim, value, stream);
         return result.to(self.dtype());
     }
-
-    HIP_CHECK(hipGetLastError());
-    return output;
 }
 
 // ============================================================================
@@ -3032,7 +3084,7 @@ auto index_fill_kernel(const Tensor& self, const Tensor& index,
 // Scatter-reduce modes: 0=sum, 1=prod, 2=mean, 3=amax, 4=amin
 __global__ void scatter_reduce_f32_kernel(float* output, const float* source, const int64_t* index,
                                            int64_t outer, int64_t dim_size, int64_t idx_n, int64_t inner,
-                                           int mode, int* counts) {
+                                           int mode, int* counts, int* error_flag) {
     int64_t tid = blockIdx.x * blockDim.x + threadIdx.x;
     int64_t total = outer * idx_n * inner;
     if (tid >= total) return;
@@ -3041,7 +3093,16 @@ __global__ void scatter_reduce_f32_kernel(float* output, const float* source, co
     int64_t o = tid / (inner * idx_n);
     // Phase 7.6 2D scatter fix: index lookup must include outer/inner offsets.
     int64_t idx_pos = (o * idx_n + k) * inner + j;
-    int64_t out_pos = (o * dim_size + index[idx_pos]) * inner + j;
+    // Bounds-check the gathered index before using it as a device offset; an
+    // out-of-range index would otherwise be an OOB atomic write. The host throws
+    // after synchronizing (matching the CPU reference, which throws
+    // std::out_of_range).
+    int64_t ix = index[idx_pos];
+    if (ix < 0 || ix >= dim_size) {
+        atomicOr(error_flag, 1);
+        return;
+    }
+    int64_t out_pos = (o * dim_size + ix) * inner + j;
     int64_t src_pos = idx_pos;
     float val = source[src_pos];
 
@@ -3079,7 +3140,7 @@ __global__ void scatter_reduce_f32_kernel(float* output, const float* source, co
 
 __global__ void scatter_reduce_init_f32_kernel(float* output, const int64_t* index,
                                                 int64_t outer, int64_t dim_size, int64_t idx_n, int64_t inner,
-                                                int mode) {
+                                                int mode, int* error_flag) {
     int64_t tid = blockIdx.x * blockDim.x + threadIdx.x;
     int64_t total = outer * idx_n * inner;
     if (tid >= total) return;
@@ -3088,7 +3149,15 @@ __global__ void scatter_reduce_init_f32_kernel(float* output, const int64_t* ind
     int64_t o = tid / (inner * idx_n);
     // Phase 7.6 2D scatter fix: index lookup must include outer/inner offsets.
     int64_t idx_pos = (o * idx_n + k) * inner + j;
-    int64_t out_pos = (o * dim_size + index[idx_pos]) * inner + j;
+    // Bounds-check the gathered index before using it as a device offset; an
+    // out-of-range index would otherwise be an OOB write. The host throws after
+    // synchronizing (matching the CPU reference, which throws std::out_of_range).
+    int64_t ix = index[idx_pos];
+    if (ix < 0 || ix >= dim_size) {
+        atomicOr(error_flag, 1);
+        return;
+    }
+    int64_t out_pos = (o * dim_size + ix) * inner + j;
 
     float identity;
     if (mode == 0 || mode == 2) identity = 0.0f;
@@ -3152,10 +3221,17 @@ auto scatter_reduce_kernel(const Tensor& self, const Tensor& index, const Tensor
 
     int num_blocks = get_num_blocks(total);
 
+    // Device flag for out-of-range indices; checked on the host after sync so we
+    // can throw (matching the CPU reference, which throws std::out_of_range)
+    // instead of an OOB atomic write. Shared by the init and reduce kernels.
+    Tensor err_tensor(std::vector<int64_t>{1}, DType::Int32, output.device());
+    HIP_CHECK(hipMemsetAsync(err_tensor.data_ptr(), 0, sizeof(int32_t), stream));
+    int* err_ptr = err_tensor.data<int32_t>();
+
     if (!include_self) {
         hipLaunchKernelGGL(scatter_reduce_init_f32_kernel, dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
                           output.data<float>(), index.data<int64_t>(),
-                          outer, dim_size, idx_n, inner, mode);
+                          outer, dim_size, idx_n, inner, mode, err_ptr);
     }
 
     // Allocate count tensor for mean mode
@@ -3170,7 +3246,7 @@ auto scatter_reduce_kernel(const Tensor& self, const Tensor& index, const Tensor
 
     hipLaunchKernelGGL(scatter_reduce_f32_kernel, dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
                       output.data<float>(), source.data<float>(), index.data<int64_t>(),
-                      outer, dim_size, idx_n, inner, mode, count_ptr);
+                      outer, dim_size, idx_n, inner, mode, count_ptr, err_ptr);
 
     if (mode == 2) {
         int64_t out_numel = output.numel();
@@ -3180,6 +3256,10 @@ auto scatter_reduce_kernel(const Tensor& self, const Tensor& index, const Tensor
     }
 
     HIP_CHECK(hipGetLastError());
+    HIP_CHECK(hipStreamSynchronize(stream));
+    if (err_tensor.to(Device::cpu()).data<int32_t>()[0] != 0) {
+        throw std::out_of_range("scatter_reduce ROCm: index out of range");
+    }
     return output;
 }
 

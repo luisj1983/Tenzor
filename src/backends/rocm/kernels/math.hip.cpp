@@ -3560,7 +3560,8 @@ auto dot_kernel(const Tensor& a, const Tensor& b, hipStream_t stream) -> Tensor 
         auto a_f32 = cast_kernel(a, DType::Float32, stream);
         auto b_f32 = cast_kernel(b, DType::Float32, stream);
         return cast_kernel(dot_kernel(a_f32, b_f32, stream), DType::BFloat16, stream);
-    } else if (a.dtype() == DType::Int16 || a.dtype() == DType::Int32 ||
+    } else if (a.dtype() == DType::Int8 || a.dtype() == DType::UInt8 ||
+               a.dtype() == DType::Int16 || a.dtype() == DType::Int32 ||
                a.dtype() == DType::UInt16 || a.dtype() == DType::UInt32 ||
                a.dtype() == DType::UInt64) {
         // Integer dot: accumulate in Int64 to avoid overflow, narrow to input dtype.
@@ -5898,6 +5899,7 @@ auto conj_kernel(const Tensor& input, hipStream_t stream) -> Tensor {
 
     if (input.dtype() == DType::Complex64) {
         Tensor result(shape, DType::Complex64, input.device());
+        if (n == 0) return result;  // empty tensor: zero-grid launch would fail on HIP
         dim3 grid, block;
         compute_launch_config_1d(n, grid, block);
         hipLaunchKernelGGL(conj_kernel_c64, grid, block, 0, stream,
@@ -5907,6 +5909,7 @@ auto conj_kernel(const Tensor& input, hipStream_t stream) -> Tensor {
         return result;
     } else if (input.dtype() == DType::Complex128) {
         Tensor result(shape, DType::Complex128, input.device());
+        if (n == 0) return result;  // empty tensor: zero-grid launch would fail on HIP
         dim3 grid, block;
         compute_launch_config_1d(n, grid, block);
         hipLaunchKernelGGL(conj_kernel_c128, grid, block, 0, stream,
@@ -5940,6 +5943,7 @@ auto real_kernel(const Tensor& input, hipStream_t stream) -> Tensor {
 
     if (input.dtype() == DType::Complex64) {
         Tensor result(shape, DType::Float32, input.device());
+        if (n == 0) return result;  // empty tensor: zero-grid launch would fail on HIP
         dim3 grid, block;
         compute_launch_config_1d(n, grid, block);
         hipLaunchKernelGGL(real_kernel_c64, grid, block, 0, stream,
@@ -5949,6 +5953,7 @@ auto real_kernel(const Tensor& input, hipStream_t stream) -> Tensor {
         return result;
     } else if (input.dtype() == DType::Complex128) {
         Tensor result(shape, DType::Float64, input.device());
+        if (n == 0) return result;  // empty tensor: zero-grid launch would fail on HIP
         dim3 grid, block;
         compute_launch_config_1d(n, grid, block);
         hipLaunchKernelGGL(real_kernel_c128, grid, block, 0, stream,
@@ -5982,6 +5987,7 @@ auto imag_kernel(const Tensor& input, hipStream_t stream) -> Tensor {
 
     if (input.dtype() == DType::Complex64) {
         Tensor result(shape, DType::Float32, input.device());
+        if (n == 0) return result;  // empty tensor: zero-grid launch would fail on HIP
         dim3 grid, block;
         compute_launch_config_1d(n, grid, block);
         hipLaunchKernelGGL(imag_kernel_c64, grid, block, 0, stream,
@@ -5991,6 +5997,7 @@ auto imag_kernel(const Tensor& input, hipStream_t stream) -> Tensor {
         return result;
     } else if (input.dtype() == DType::Complex128) {
         Tensor result(shape, DType::Float64, input.device());
+        if (n == 0) return result;  // empty tensor: zero-grid launch would fail on HIP
         dim3 grid, block;
         compute_launch_config_1d(n, grid, block);
         hipLaunchKernelGGL(imag_kernel_c128, grid, block, 0, stream,
@@ -6035,6 +6042,7 @@ auto angle_kernel(const Tensor& input, hipStream_t stream) -> Tensor {
 
     if (input.dtype() == DType::Complex64) {
         Tensor result(shape, DType::Float32, input.device());
+        if (n == 0) return result;  // empty tensor: zero-grid launch would fail on HIP
         hipLaunchKernelGGL(angle_kernel_c64, grid, block, 0, stream,
             reinterpret_cast<const float*>(input.data_ptr()),
             result.data<float>(), n);
@@ -6042,6 +6050,7 @@ auto angle_kernel(const Tensor& input, hipStream_t stream) -> Tensor {
         return result;
     } else if (input.dtype() == DType::Complex128) {
         Tensor result(shape, DType::Float64, input.device());
+        if (n == 0) return result;  // empty tensor: zero-grid launch would fail on HIP
         hipLaunchKernelGGL(angle_kernel_c128, grid, block, 0, stream,
             reinterpret_cast<const double*>(input.data_ptr()),
             result.data<double>(), n);
@@ -6049,12 +6058,14 @@ auto angle_kernel(const Tensor& input, hipStream_t stream) -> Tensor {
         return result;
     } else if (input.dtype() == DType::Float32) {
         Tensor result(shape, DType::Float32, input.device());
+        if (n == 0) return result;  // empty tensor: zero-grid launch would fail on HIP
         hipLaunchKernelGGL(angle_kernel_f32, grid, block, 0, stream,
             input.data<float>(), result.data<float>(), n);
         HIP_CHECK(hipGetLastError());
         return result;
     } else if (input.dtype() == DType::Float64) {
         Tensor result(shape, DType::Float64, input.device());
+        if (n == 0) return result;  // empty tensor: zero-grid launch would fail on HIP
         hipLaunchKernelGGL(angle_kernel_f64, grid, block, 0, stream,
             input.data<double>(), result.data<double>(), n);
         HIP_CHECK(hipGetLastError());

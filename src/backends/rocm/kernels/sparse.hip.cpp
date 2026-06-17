@@ -72,6 +72,14 @@ namespace {
 
 // ROCSPARSE_CHECK is provided by rocsparse_handle_pool.hpp
 
+// Forward declaration: rocm_coalesce is defined later in this file (it relies
+// on the thrust helpers and is part of the public tenzor::rocm namespace), but
+// ensure_csr_on_gpu below needs to call it to sum duplicate COO entries before
+// the COO->CSR conversion so results match the CPU reference.
+} // anonymous namespace
+SparseTensor rocm_coalesce(const SparseTensor& sparse);
+namespace {
+
 /// Convert span to vector (HIP compiler may not do implicit span->vector).
 std::vector<int64_t> to_vec(std::span<const int64_t> s) {
     return {s.begin(), s.end()};
@@ -115,9 +123,11 @@ struct SpMVDescrGuard {
     SpMVDescrGuard& operator=(const SpMVDescrGuard&) = delete;
 };
 
-/// Per-thread rocSPARSE handle — forwards to the shared pool.
-inline rocsparse_handle get_rocsparse_handle() {
-    return RocSPARSEHandlePool::get();
+/// Per-thread rocSPARSE handle — forwards to the shared pool, binding it to
+/// the given stream so all rocSPARSE work and the surrounding cast kernels /
+/// copies are stream-ordered together. Defaults to the default stream.
+inline rocsparse_handle get_rocsparse_handle(hipStream_t stream = nullptr) {
+    return RocSPARSEHandlePool::get(stream);
 }
 
 /// Get rocSPARSE data type from DType.
@@ -218,12 +228,22 @@ static void verify_i64_fits_i32(const int64_t* d_data, int64_t n,
 }
 
 /// Helper to build a CSR SparseTensor on GPU from a COO SparseTensor.
-SparseTensor ensure_csr_on_gpu(const SparseTensor& sparse) {
+SparseTensor ensure_csr_on_gpu(const SparseTensor& sparse, hipStream_t stream = nullptr) {
     auto sp = (sparse.device().type != Device::Type::ROCm)
               ? sparse.to(Device::rocm())
               : sparse;
 
     if (sp.layout() == SparseLayout::COO) {
+        // Coalesce duplicate (row,col) entries first. rocsparse_coo2csr does
+        // not sum duplicates, so un-coalesced COO would produce a CSR with
+        // repeated columns in a row, which rocSPARSE double-counts or orders
+        // undefined — diverging from the CPU reference, which sums duplicates.
+        // rocm_coalesce sorts + reduces by linearized key and returns a new
+        // coalesced COO tensor; skip the work when already coalesced.
+        if (!sp.is_coalesced()) {
+            sp = rocm_coalesce(sp);
+        }
+
         auto sp_shape = sp.shape();
         int64_t nrows = sp_shape[0];
         int64_t ncols = sp_shape[1];
@@ -242,8 +262,8 @@ SparseTensor ensure_csr_on_gpu(const SparseTensor& sparse) {
 
         int threads = 256;
         int blocks_nnz = static_cast<int>((nnz + threads - 1) / threads);
-        verify_i64_fits_i32(row_indices_ptr, nnz);
-        cast_i64_to_i32<<<blocks_nnz, threads>>>(row_indices_ptr, row_i32_buf.as<int32_t>(), nnz);
+        verify_i64_fits_i32(row_indices_ptr, nnz, stream);
+        cast_i64_to_i32<<<blocks_nnz, threads, 0, stream>>>(row_indices_ptr, row_i32_buf.as<int32_t>(), nnz);
         HIP_CHECK_SPARSE(hipGetLastError());
 
         // Convert COO row indices to CSR row pointers on GPU
@@ -251,7 +271,10 @@ SparseTensor ensure_csr_on_gpu(const SparseTensor& sparse) {
             throw std::overflow_error("rocm_sparse: nnz exceeds int32 range for rocsparse_coo2csr");
         if (nrows > static_cast<int64_t>(std::numeric_limits<int>::max()))
             throw std::overflow_error("rocm_sparse: nrows exceeds int32 range for rocsparse_coo2csr");
-        rocsparse_handle handle = get_rocsparse_handle();
+        // Bind the handle (and thus rocsparse_coo2csr) to the same stream the
+        // cast kernels and copies run on, so the COO->CSR conversion is ordered
+        // after the row-index cast.
+        rocsparse_handle handle = get_rocsparse_handle(stream);
         ROCSPARSE_CHECK(rocsparse_coo2csr(
             handle, row_i32_buf.as<int32_t>(), static_cast<int>(nnz), static_cast<int>(nrows),
             crow_i32_buf.as<int32_t>(), rocsparse_index_base_zero));
@@ -259,17 +282,17 @@ SparseTensor ensure_csr_on_gpu(const SparseTensor& sparse) {
         // Convert Int32 crow_indices back to Int64 on GPU
         Tensor crow_indices = zeros(std::vector<int64_t>{nrows + 1}, DType::Int64, Device::rocm());
         int blocks_crow = static_cast<int>((nrows + 1 + threads - 1) / threads);
-        cast_i32_to_i64<<<blocks_crow, threads>>>(crow_i32_buf.as<int32_t>(), crow_indices.data<int64_t>(), nrows + 1);
+        cast_i32_to_i64<<<blocks_crow, threads, 0, stream>>>(crow_i32_buf.as<int32_t>(), crow_indices.data<int64_t>(), nrows + 1);
         HIP_CHECK_SPARSE(hipGetLastError());
 
         // Validate column indices before handing them to rocSPARSE; an
         // out-of-range column would index the dense operand out of bounds.
-        verify_col_in_range(col_indices_ptr, nnz, ncols);
+        verify_col_in_range(col_indices_ptr, nnz, ncols, stream);
 
         // Copy col indices
         Tensor col_idx = zeros(std::vector<int64_t>{nnz}, DType::Int64, Device::rocm());
-        HIP_CHECK_SPARSE(hipMemcpy(col_idx.data<int64_t>(), col_indices_ptr,
-                                   nnz * sizeof(int64_t), hipMemcpyDeviceToDevice));
+        HIP_CHECK_SPARSE(hipMemcpyAsync(col_idx.data<int64_t>(), col_indices_ptr,
+                                        nnz * sizeof(int64_t), hipMemcpyDeviceToDevice, stream));
 
         return SparseTensor::sparse_csr(
             crow_indices, col_idx, values,
@@ -607,7 +630,11 @@ Tensor rocm_spmm_kernel(const SparseTensor& sparse, const Tensor& dense) {
             + std::string(dtype_name(dtype)));
     }
 
-    auto csr = ensure_csr_on_gpu(sparse);
+    // Thread one stream object through the COO->CSR conversion (cast kernels,
+    // verify probes, col-index copy) and the rocSPARSE handle so they are
+    // strictly ordered. These kernels run on the default stream (nullptr).
+    hipStream_t stream = nullptr;
+    auto csr = ensure_csr_on_gpu(sparse, stream);
     int64_t nnz = csr.nnz();
 
     auto dense_gpu = (dense.device().type != Device::Type::ROCm)
@@ -616,7 +643,7 @@ Tensor rocm_spmm_kernel(const SparseTensor& sparse, const Tensor& dense) {
 
     auto result = zeros({M, N}, dtype, Device::rocm());
 
-    rocsparse_handle handle = get_rocsparse_handle();
+    rocsparse_handle handle = get_rocsparse_handle(stream);
     rocsparse_datatype roc_dtype = get_rocsparse_data_type(dtype);
 
     auto crow = csr.crow_indices().contiguous();
@@ -789,7 +816,11 @@ Tensor rocm_spmv_kernel(const SparseTensor& sparse, const Tensor& vec) {
             + std::string(dtype_name(dtype)));
     }
 
-    auto csr = ensure_csr_on_gpu(sparse);
+    // Thread one stream object through the COO->CSR conversion (cast kernels,
+    // verify probes, col-index copy) and the rocSPARSE handle so they are
+    // strictly ordered. These kernels run on the default stream (nullptr).
+    hipStream_t stream = nullptr;
+    auto csr = ensure_csr_on_gpu(sparse, stream);
     int64_t nnz = csr.nnz();
 
     auto vec_gpu = (vec.device().type != Device::Type::ROCm)
@@ -798,7 +829,7 @@ Tensor rocm_spmv_kernel(const SparseTensor& sparse, const Tensor& vec) {
 
     auto result = zeros({M}, dtype, Device::rocm());
 
-    rocsparse_handle handle = get_rocsparse_handle();
+    rocsparse_handle handle = get_rocsparse_handle(stream);
     rocsparse_datatype roc_dtype = get_rocsparse_data_type(dtype);
 
     auto crow = csr.crow_indices().contiguous();

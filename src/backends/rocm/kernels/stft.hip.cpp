@@ -48,6 +48,18 @@ auto rocm_irfft_kernel(const Tensor& input, int64_t dim, int64_t n,
 auto rocm_ifft_kernel(const Tensor& input, int64_t dim, int64_t n,
                       const std::string& norm, hipStream_t stream) -> Tensor;
 
+// Fills `count` floats starting at `dst` with `value` (device-side, no host
+// staging buffer). Used for the default all-ones window fallback so we avoid a
+// fragile pageable-host hipMemcpyAsync whose source could leave scope while the
+// async copy is still queued on the stream.
+__global__ void fill_window_ones_kernel_hip(
+    float* __restrict__ dst, float value, int64_t count
+) {
+    int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (idx >= count) return;
+    dst[idx] = value;
+}
+
 __global__ void stft_frame_window_kernel_hip(
     const float* __restrict__ signal,
     const float* __restrict__ window,
@@ -119,11 +131,16 @@ auto stft_kernel(const Tensor& input, int64_t n_fft,
                                   win_length * sizeof(float),
                                   hipMemcpyDeviceToDevice, stream));
     } else {
-        std::vector<float> host_ones(win_length, 1.0f);
-        HIP_CHECK(hipMemcpyAsync(static_cast<float*>(window_dev.data_ptr()) + win_offset,
-                                  host_ones.data(),
-                                  win_length * sizeof(float),
-                                  hipMemcpyHostToDevice, stream));
+        // Default all-ones window: fill on-device to avoid an async copy from a
+        // pageable host buffer (host_ones) that may go out of scope before the
+        // queued copy completes.
+        int fill_threads = 256;
+        int fill_blocks = static_cast<int>((win_length + fill_threads - 1) / fill_threads);
+        hipLaunchKernelGGL(fill_window_ones_kernel_hip,
+            dim3(fill_blocks), dim3(fill_threads), 0, stream,
+            static_cast<float*>(window_dev.data_ptr()) + win_offset,
+            1.0f, win_length);
+        HIP_CHECK(hipGetLastError());
     }
 
     Tensor framed({batch_size, num_frames, n_fft}, DType::Float32, input.device());
@@ -237,11 +254,16 @@ auto istft_kernel(const Tensor& input, int64_t n_fft,
                                   win_length * sizeof(float),
                                   hipMemcpyDeviceToDevice, stream));
     } else {
-        std::vector<float> host_ones(win_length, 1.0f);
-        HIP_CHECK(hipMemcpyAsync(static_cast<float*>(window_dev.data_ptr()) + win_offset,
-                                  host_ones.data(),
-                                  win_length * sizeof(float),
-                                  hipMemcpyHostToDevice, stream));
+        // Default all-ones window: fill on-device to avoid an async copy from a
+        // pageable host buffer (host_ones) that may go out of scope before the
+        // queued copy completes.
+        int fill_threads = 256;
+        int fill_blocks = static_cast<int>((win_length + fill_threads - 1) / fill_threads);
+        hipLaunchKernelGGL(fill_window_ones_kernel_hip,
+            dim3(fill_blocks), dim3(fill_threads), 0, stream,
+            static_cast<float*>(window_dev.data_ptr()) + win_offset,
+            1.0f, win_length);
+        HIP_CHECK(hipGetLastError());
     }
 
     Tensor output_buf({batch_size, expected_length}, DType::Float32, input.device());

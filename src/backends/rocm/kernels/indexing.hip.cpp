@@ -3400,17 +3400,26 @@ auto advanced_index_put_rocm_kernel(
 // take_along_dim kernel
 // ============================================================================
 
+namespace {
+constexpr int MAX_TAKE_ALONG_DIM_DIMS = 16;
+}
+
+// Per-dimension metadata for take_along_dim: the index shape (used to decode the
+// flat output coordinate per axis) and the INPUT's contiguous strides (used to
+// re-linearise each decoded coordinate). These differ from the index strides
+// whenever the index extent is smaller than the input on a non-dim axis.
+struct TakeAlongDimMeta {
+    int64_t idx_shape[MAX_TAKE_ALONG_DIM_DIMS];
+    int64_t in_strides[MAX_TAKE_ALONG_DIM_DIMS];
+};
+
 template<typename T>
 __global__ void take_along_dim_hip_kernel(
     const T* __restrict__ input, const int64_t* __restrict__ indices, T* __restrict__ output,
-    int64_t numel, int64_t in_dim_size, int64_t idx_dim_size, int64_t inner_size,
-    int* error_flag)
+    int64_t numel, int64_t in_dim_size, int ndim, int dim,
+    TakeAlongDimMeta meta, int* error_flag)
 {
     HIP_KERNEL_LOOP(i, numel) {
-        int64_t outer = i / (idx_dim_size * inner_size);
-        int64_t rem = i % (idx_dim_size * inner_size);
-        int64_t inner = rem % inner_size;
-
         int64_t src_idx = indices[i];
         if (src_idx < 0) src_idx += in_dim_size;
 
@@ -3424,75 +3433,127 @@ __global__ void take_along_dim_hip_kernel(
             continue;
         }
 
-        int64_t in_offset = outer * (in_dim_size * inner_size) + src_idx * inner_size + inner;
+        // Decode the flat output position i per-dimension from idx_shape, then
+        // re-linearise against the INPUT's contiguous strides. The collapsed
+        // outer/inner formula is only correct when input and index share extents
+        // on every non-dim axis; PyTorch/CPU allow the index extent to be smaller
+        // on a non-dim axis (selecting a sub-block), which requires this per-dim
+        // decode (mirrors the CPU in_offset_of lambda in indexing.cpp).
+        int64_t in_offset = 0;
+        int64_t rem = i;
+        for (int d = ndim - 1; d >= 0; --d) {
+            int64_t c = rem % meta.idx_shape[d];
+            rem /= meta.idx_shape[d];
+            if (d == dim) {
+                in_offset += src_idx * meta.in_strides[d];
+            } else {
+                in_offset += c * meta.in_strides[d];
+            }
+        }
         output[i] = input[in_offset];
     }
 }
 
 auto take_along_dim_hip(const Tensor& input, const Tensor& indices, int64_t dim,
                         hipStream_t stream) -> Tensor {
-    auto in_shape = input.shape();
-    auto idx_shape = indices.shape();
+    // The kernel addresses the input with contiguous strides, so a non-contiguous
+    // (transposed/sliced/permuted) input view would otherwise read the wrong
+    // storage elements. Materialize contiguous copies (matches the CPU reference).
+    Tensor in_c = input.is_contiguous() ? input : input.contiguous();
+    Tensor idx_c = indices.is_contiguous() ? indices : indices.contiguous();
+
+    auto in_shape = in_c.shape();
+    auto idx_shape = idx_c.shape();
     int64_t ndim = in_shape.size();
     if (dim < 0) dim += ndim;
     if (dim < 0 || dim >= ndim) {
         throw std::out_of_range("take_along_dim ROCm: dim out of range");
     }
-    if (indices.dtype() != DType::Int64) {
+    if (idx_c.dtype() != DType::Int64) {
         throw std::invalid_argument("take_along_dim ROCm: index tensor must have dtype Int64");
     }
 
+    // Index must have the same rank as input; along every non-dim axis its extent
+    // must not exceed the input's (it selects a sub-block there). Mirrors CPU.
+    if (static_cast<int64_t>(idx_shape.size()) != ndim) {
+        throw std::invalid_argument("take_along_dim ROCm: indices must have same rank as input");
+    }
+    if (ndim > MAX_TAKE_ALONG_DIM_DIMS) {
+        throw std::runtime_error("take_along_dim ROCm: ndim exceeds MAX_TAKE_ALONG_DIM_DIMS");
+    }
+    for (int64_t d = 0; d < ndim; ++d) {
+        if (d == dim) continue;
+        if (idx_shape[d] > in_shape[d]) {
+            throw std::out_of_range(
+                "take_along_dim ROCm: index shape exceeds input shape on a non-dim axis");
+        }
+    }
+
     Tensor output(std::vector<int64_t>(idx_shape.begin(), idx_shape.end()),
-                  input.dtype(), input.device());
-    int64_t numel = indices.numel();
+                  in_c.dtype(), in_c.device());
+    int64_t numel = idx_c.numel();
     if (numel == 0) return output;
 
-    int64_t idx_dim_size = idx_shape[dim];
     int64_t in_dim_size = in_shape[dim];
-    int64_t inner_size = 1;
-    for (int64_t d = dim + 1; d < ndim; ++d) inner_size *= idx_shape[d];
+
+    // Per-dim metadata: index shape (to decode each output coordinate) and the
+    // INPUT's contiguous strides (to re-linearise every non-dim coordinate and
+    // the substituted index on the `dim` axis). The collapsed outer/inner formula
+    // cannot reproduce this when index and input differ on a non-dim extent.
+    TakeAlongDimMeta meta{};
+    {
+        int64_t s = 1;
+        for (int64_t d = ndim - 1; d >= 0; --d) {
+            meta.idx_shape[d] = idx_shape[d];
+            meta.in_strides[d] = s;
+            s *= in_shape[d];
+        }
+    }
 
     constexpr int BLOCK = 256;
     int blocks = (numel + BLOCK - 1) / BLOCK;
-    const int64_t* idx_ptr = indices.data<int64_t>();
+    const int64_t* idx_ptr = idx_c.data<int64_t>();
     // Device flag for out-of-range indices; checked on the host after sync so we
     // can throw (matching the CPU reference) instead of silently returning 0.
-    Tensor err_tensor(std::vector<int64_t>{1}, DType::Int32, input.device());
+    Tensor err_tensor(std::vector<int64_t>{1}, DType::Int32, in_c.device());
     HIP_CHECK(hipMemsetAsync(err_tensor.data_ptr(), 0, sizeof(int32_t), stream));
     int* err_ptr = err_tensor.data<int32_t>();
 
-    switch (input.dtype()) {
+    int ndim_i = static_cast<int>(ndim);
+    int dim_i = static_cast<int>(dim);
+
+    switch (in_c.dtype()) {
         case DType::Float32:
             take_along_dim_hip_kernel<float><<<blocks, BLOCK, 0, stream>>>(
-                input.data<float>(), idx_ptr, output.data<float>(),
-                numel, in_dim_size, idx_dim_size, inner_size, err_ptr);
+                in_c.data<float>(), idx_ptr, output.data<float>(),
+                numel, in_dim_size, ndim_i, dim_i, meta, err_ptr);
             break;
         case DType::Float64:
             take_along_dim_hip_kernel<double><<<blocks, BLOCK, 0, stream>>>(
-                input.data<double>(), idx_ptr, output.data<double>(),
-                numel, in_dim_size, idx_dim_size, inner_size, err_ptr);
+                in_c.data<double>(), idx_ptr, output.data<double>(),
+                numel, in_dim_size, ndim_i, dim_i, meta, err_ptr);
             break;
         case DType::Int32:
             take_along_dim_hip_kernel<int32_t><<<blocks, BLOCK, 0, stream>>>(
-                input.data<int32_t>(), idx_ptr, output.data<int32_t>(),
-                numel, in_dim_size, idx_dim_size, inner_size, err_ptr);
+                in_c.data<int32_t>(), idx_ptr, output.data<int32_t>(),
+                numel, in_dim_size, ndim_i, dim_i, meta, err_ptr);
             break;
         case DType::Int64:
             take_along_dim_hip_kernel<int64_t><<<blocks, BLOCK, 0, stream>>>(
-                input.data<int64_t>(), idx_ptr, output.data<int64_t>(),
-                numel, in_dim_size, idx_dim_size, inner_size, err_ptr);
+                in_c.data<int64_t>(), idx_ptr, output.data<int64_t>(),
+                numel, in_dim_size, ndim_i, dim_i, meta, err_ptr);
             break;
         case DType::Float16:
             take_along_dim_hip_kernel<__half><<<blocks, BLOCK, 0, stream>>>(
-                reinterpret_cast<const __half*>(input.data_ptr()), idx_ptr,
+                reinterpret_cast<const __half*>(in_c.data_ptr()), idx_ptr,
                 reinterpret_cast<__half*>(output.data_ptr()),
-                numel, in_dim_size, idx_dim_size, inner_size, err_ptr);
+                numel, in_dim_size, ndim_i, dim_i, meta, err_ptr);
             break;
         case DType::BFloat16:
             take_along_dim_hip_kernel<hip_bfloat16><<<blocks, BLOCK, 0, stream>>>(
-                reinterpret_cast<const hip_bfloat16*>(input.data_ptr()), idx_ptr,
+                reinterpret_cast<const hip_bfloat16*>(in_c.data_ptr()), idx_ptr,
                 reinterpret_cast<hip_bfloat16*>(output.data_ptr()),
-                numel, in_dim_size, idx_dim_size, inner_size, err_ptr);
+                numel, in_dim_size, ndim_i, dim_i, meta, err_ptr);
             break;
         default:
             throw std::runtime_error("take_along_dim ROCm: unsupported dtype");

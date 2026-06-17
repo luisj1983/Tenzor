@@ -1187,6 +1187,44 @@ __global__ void adaptive_avgpool2d_kernel(
     }
 }
 
+__global__ void adaptive_avgpool2d_kernel_fp16(
+    const __half* input,
+    __half* output,
+    int64_t batch_size,
+    int64_t channels,
+    int64_t input_h,
+    int64_t input_w,
+    int64_t output_h,
+    int64_t output_w
+) {
+    int64_t total_elements = batch_size * channels * output_h * output_w;
+
+    HIP_KERNEL_LOOP(idx, total_elements) {
+        int64_t ow = idx % output_w;
+        int64_t oh = (idx / output_w) % output_h;
+        int64_t c = (idx / (output_w * output_h)) % channels;
+        int64_t n = idx / (output_w * output_h * channels);
+
+        int64_t h_start = (oh * input_h) / output_h;
+        int64_t h_end = ((oh + 1) * input_h) / output_h;
+        int64_t w_start = (ow * input_w) / output_w;
+        int64_t w_end = ((ow + 1) * input_w) / output_w;
+
+        float sum = 0.0f;
+        int64_t count = 0;
+
+        for (int64_t h = h_start; h < h_end; ++h) {
+            for (int64_t w = w_start; w < w_end; ++w) {
+                int64_t input_idx = ((n * channels + c) * input_h + h) * input_w + w;
+                sum += tenzor::rocm::safe_h2f(input[input_idx]);
+                count++;
+            }
+        }
+
+        output[idx] = tenzor::rocm::safe_f2h(sum / static_cast<float>(count));
+    }
+}
+
 auto adaptive_avgpool2d_hip(
     const Tensor& input,
     int64_t output_h,
@@ -1226,7 +1264,7 @@ auto adaptive_avgpool2d_hip(
         );
         HIP_POST_LAUNCH_CHECK();
     } else if (input.dtype() == DType::Float16) {
-        hipLaunchKernelGGL(adaptive_avgpool2d_kernel<__half>,
+        hipLaunchKernelGGL(adaptive_avgpool2d_kernel_fp16,
             dim3(blocks), dim3(threads), 0, stream,
             reinterpret_cast<const __half*>(input.data<Float16>()),
             reinterpret_cast<__half*>(output.data<Float16>()),
@@ -1245,7 +1283,6 @@ auto adaptive_avgpool2d_hip(
     HIP_POST_LAUNCH_CHECK();
 
     if (input.dtype() == DType::Float16) {
-        hipStream_t stream = nullptr;
         fp16_saturate(output.data_ptr(), output.numel(), stream);
     }
 
@@ -1615,7 +1652,7 @@ auto adaptive_avgpool2d_forward(
             N, C, H_in, W_in, output_h, output_w);
         HIP_POST_LAUNCH_CHECK();
     } else if (input.dtype() == DType::Float16) {
-        hipLaunchKernelGGL(adaptive_avgpool2d_kernel<__half>,
+        hipLaunchKernelGGL(adaptive_avgpool2d_kernel_fp16,
             dim3(blocks), dim3(threads), 0, stream,
             reinterpret_cast<const __half*>(input.data<Float16>()),
             reinterpret_cast<__half*>(output.data<Float16>()),

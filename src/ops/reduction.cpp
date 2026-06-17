@@ -335,10 +335,15 @@ auto nanmean(const Tensor& input, std::optional<int64_t> dim, bool keepdim) -> T
 
 auto nanvar(const Tensor& input, std::optional<int64_t> dim, bool keepdim, int64_t correction) -> Tensor {
     // Composition: nanvar = sum((x - nanmean(x))^2, ignoring NaN) / (N_valid - correction)
-    Tensor mean = nanmean(input, dim, /*keepdim=*/true);
-    Tensor diff = input - mean;
+    // Half precision: widen to Float32 for the reduction (avoids catastrophic
+    // F16 rounding in the squared differences) and narrow the result back so
+    // nanvar(Float16) returns Float16, matching mean/var dtype conventions.
+    const bool half = (input.dtype() == DType::Float16 || input.dtype() == DType::BFloat16);
+    Tensor x = half ? input.to(DType::Float32) : input;
+    Tensor mean = nanmean(x, dim, /*keepdim=*/true);
+    Tensor diff = x - mean;
     // Zero out NaN positions so they don't contribute
-    Tensor nan_mask = isnan(input);
+    Tensor nan_mask = isnan(x);
     Tensor diff_sq = diff * diff;
     // Replace NaN-originated values with 0
     Tensor clean = where(nan_mask, zeros_like(diff_sq), diff_sq);
@@ -347,11 +352,12 @@ auto nanvar(const Tensor& input, std::optional<int64_t> dim, bool keepdim, int64
     // dtype (Float64 for Float64 input, Float32 otherwise) so half-precision
     // inputs don't saturate the count — mirrors mean's integer->Float32
     // promotion convention.
-    DType count_dtype = (input.dtype() == DType::Float64) ? DType::Float64 : DType::Float32;
+    DType count_dtype = (x.dtype() == DType::Float64) ? DType::Float64 : DType::Float32;
     Tensor valid_mask = logical_not(nan_mask);
     Tensor count = sum(valid_mask.to(count_dtype), dim, keepdim);
     Tensor denom = count - static_cast<float>(correction);
-    return sum_sq / denom;
+    Tensor result = sum_sq / denom;
+    return half ? result.to(input.dtype()) : result;
 }
 
 auto nanstd(const Tensor& input, std::optional<int64_t> dim, bool keepdim, int64_t correction) -> Tensor {

@@ -30,6 +30,7 @@
 #include <vector>
 #include <string>
 #include <cmath>
+#include <limits>
 #include <mutex>
 #include <memory>
 #include <list>
@@ -252,7 +253,9 @@ void apply_normalization_complex(Tensor& output, double scale, bool is_float32, 
     int64_t numel = output.numel();
     int64_t total_reals = numel * 2;
     constexpr int block_size = 256;
-    int grid_size = static_cast<int>((total_reals + block_size - 1) / block_size);
+    int64_t grid_size = (total_reals + block_size - 1) / block_size;
+    if (grid_size > static_cast<int64_t>(std::numeric_limits<int>::max()))
+        throw std::runtime_error("FFT normalization grid exceeds device limit");
 
     if (is_float32) {
         float s = static_cast<float>(scale);
@@ -272,7 +275,9 @@ void apply_normalization_real(Tensor& output, double scale, bool is_float32, hip
 
     int64_t numel = output.numel();
     constexpr int block_size = 256;
-    int grid_size = static_cast<int>((numel + block_size - 1) / block_size);
+    int64_t grid_size = (numel + block_size - 1) / block_size;
+    if (grid_size > static_cast<int64_t>(std::numeric_limits<int>::max()))
+        throw std::runtime_error("FFT normalization grid exceeds device limit");
 
     if (is_float32) {
         float s = static_cast<float>(scale);
@@ -1197,6 +1202,7 @@ auto rocm_ifftn_kernel(const Tensor& input, const std::vector<int64_t>& dims,
 #include <vector>
 #include <string>
 #include <cmath>
+#include <limits>
 
 namespace tenzor {
 namespace rocm {
@@ -1275,7 +1281,9 @@ template<typename T>
 void launch_scale(T* data, int64_t numel, T scale, hipStream_t stream) {
     if (numel == 0) return;
     constexpr int block = 256;
-    int grid = static_cast<int>((numel + block - 1) / block);
+    int64_t grid = (numel + block - 1) / block;
+    if (grid > static_cast<int64_t>(std::numeric_limits<int>::max()))
+        throw std::runtime_error("FFT normalization grid exceeds device limit");
     native_scale_kernel<T><<<grid, block, 0, stream>>>(data, numel, scale);
     HIP_CHECK(hipGetLastError());
 }

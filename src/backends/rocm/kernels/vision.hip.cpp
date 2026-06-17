@@ -350,14 +350,19 @@ __global__ void interpolate_nearest_backward_kernel_hip(
         int64_t c  = temp % channels; temp /= channels;
         int64_t b  = temp;
 
-        // PyTorch nearest-mode forward maps `oh -> floor(oh * in_h / out_h)`
-        // (no half-pixel offset, no align_corners — the nearest mode in
-        // PyTorch ignores align_corners). The backward scatters the gradient
-        // to that same input pixel.
-        int64_t y = (oh * in_h) / out_h;
-        int64_t x = (ow * in_w) / out_w;
-        if (y > in_h - 1) y = in_h - 1;
-        if (x > in_w - 1) x = in_w - 1;
+        // PyTorch nearest-mode forward maps `oh -> floor(oh * scale_h)` using a
+        // float scale (no half-pixel offset, no align_corners — the nearest
+        // mode in PyTorch ignores align_corners). The backward MUST mirror the
+        // forward's float computation exactly: integer `(oh * in_h) / out_h`
+        // disagrees with `(int64_t)(oh * (float)in_h / out_h)` at integer
+        // boundaries due to float rounding, which would scatter gradient to a
+        // different input pixel than the forward gathered from.
+        float scale_h = static_cast<float>(in_h) / out_h;
+        float scale_w = static_cast<float>(in_w) / out_w;
+        int64_t y = static_cast<int64_t>(oh * scale_h);
+        int64_t x = static_cast<int64_t>(ow * scale_w);
+        y = min(max(y, int64_t(0)), in_h - 1);
+        x = min(max(x, int64_t(0)), in_w - 1);
 
         int64_t base_idx = b * (channels * in_h * in_w) + c * (in_h * in_w);
         atomicAdd(&grad_in[base_idx + y * in_w + x], grad_out[idx]);
