@@ -60,6 +60,12 @@ const std::set<OpId> kExportSkipList = {
     // (ONNX has no CTC primitive); it never appears in an exported inference
     // graph, so it is skip-listed rather than mapped.
     OpId::CTCLossForward,
+    // cuDNN training-mode RNN forwards emit extra reserve-space / weight-space
+    // outputs consumed only by their matching cuDNN backward. They are a
+    // backend-internal training variant — inference export goes through the
+    // standard LSTM/GRU layer decomposition — so they are skip-listed.
+    OpId::LSTMCudnnTrainForward,
+    OpId::GRUCudnnTrainForward,
 };
 
 // Backward / Inplace OpIds and unnamed enum-gap entries are filtered out

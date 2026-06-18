@@ -14,6 +14,7 @@
 #include "../../include/tenzor/nn/layers/conv.hpp"
 #include "../../include/tenzor/utils/error.hpp"
 #include "../../include/tenzor/utils/logging.hpp"
+#include <cstddef>
 #include <cstring>
 #include <filesystem>
 #include <sstream>
@@ -199,6 +200,7 @@ auto ONNXExporter::op_to_onnx(OpId op) -> std::string {
 
         // Convolution operations
         case OpId::Conv2dForward:            return "Conv";
+        case OpId::ConvTranspose1dForward:   return "ConvTranspose";
         case OpId::ConvTranspose2dForward:   return "ConvTranspose";
         case OpId::Conv3dForward:            return "Conv";
 
@@ -518,6 +520,7 @@ auto ONNXExporter::op_to_onnx(OpId op) -> std::string {
         case OpId::NormalSample:     return "RandomNormal";
         case OpId::PoissonSample:    return "PoissonSample"; // tenzor custom
         case OpId::ExponentialSample: return "ExponentialSample"; // tenzor custom
+        case OpId::GammaSample:      return "GammaSample"; // tenzor custom
         case OpId::GumbelSoftmax:    return "GumbelSoftmax"; // tenzor custom
 
         // Complex / FFT block.
@@ -1698,40 +1701,47 @@ auto ONNXExporter::export_lstm(const Tensor& input,
     // Helper lambda to reorder gates from Tenzor [i,f,g,o] -> ONNX [i,o,f,c]
     // Given a flat tensor of shape (4*H, *), reorder the H-sized row blocks
     auto reorder_lstm_gates = [&](const Tensor& w) -> Tensor {
+        // Dtype-agnostic gate reorder: operate on raw bytes keyed on the
+        // tensor's element size, preserving the original dtype. RNN weights
+        // may be Float32/Float64/Float16/BFloat16 (all supported by
+        // dtype_to_onnx); using data<float>()/sizeof(float) would either trip
+        // the dtype assertion or reinterpret bytes at the wrong element width.
         Tensor cpu_w = w.cpu().contiguous();
         auto shape = cpu_w.shape();
         int64_t H = hidden_size;
         int64_t cols = (shape.size() > 1) ? shape[1] : 1;
         bool is_1d = (shape.size() == 1);
+        const size_t esize = cpu_w.element_size();
 
-        // Create output tensor with same shape
+        // Create output tensor with same shape and dtype
         std::vector<int64_t> shape_vec(shape.begin(), shape.end());
         Tensor reordered(shape_vec, cpu_w.dtype(), Device::cpu());
 
-        const auto* src = cpu_w.data<float>();
-        auto* dst = reordered.data<float>();
+        const auto* src = static_cast<const std::byte*>(cpu_w.data_ptr());
+        auto* dst = static_cast<std::byte*>(reordered.data_ptr());
 
         if (is_1d) {
-            // 1D bias: (4*H,)
+            // 1D bias: (4*H,) — copy one H-sized block per gate.
+            const size_t block_bytes = static_cast<size_t>(H) * esize;
             // Copy i (src[0..H)) -> dst[0..H)     (i -> i)
-            std::memcpy(dst + 0 * H, src + 0 * H, H * sizeof(float));
+            std::memcpy(dst + 0 * block_bytes, src + 0 * block_bytes, block_bytes);
             // Copy o (src[3*H..4*H)) -> dst[H..2H) (o -> o)
-            std::memcpy(dst + 1 * H, src + 3 * H, H * sizeof(float));
+            std::memcpy(dst + 1 * block_bytes, src + 3 * block_bytes, block_bytes);
             // Copy f (src[H..2H)) -> dst[2H..3H)   (f -> f)
-            std::memcpy(dst + 2 * H, src + 1 * H, H * sizeof(float));
+            std::memcpy(dst + 2 * block_bytes, src + 1 * block_bytes, block_bytes);
             // Copy g (src[2H..3H)) -> dst[3H..4H)  (g -> c)
-            std::memcpy(dst + 3 * H, src + 2 * H, H * sizeof(float));
+            std::memcpy(dst + 3 * block_bytes, src + 2 * block_bytes, block_bytes);
         } else {
-            // 2D weight: (4*H, cols)
-            size_t row_bytes = cols * sizeof(float);
+            // 2D weight: (4*H, cols) — copy one H-row block per gate.
+            const size_t block_bytes = static_cast<size_t>(H) * static_cast<size_t>(cols) * esize;
             // i -> i
-            std::memcpy(dst + 0 * H * cols, src + 0 * H * cols, H * row_bytes);
+            std::memcpy(dst + 0 * block_bytes, src + 0 * block_bytes, block_bytes);
             // o -> o
-            std::memcpy(dst + 1 * H * cols, src + 3 * H * cols, H * row_bytes);
+            std::memcpy(dst + 1 * block_bytes, src + 3 * block_bytes, block_bytes);
             // f -> f
-            std::memcpy(dst + 2 * H * cols, src + 1 * H * cols, H * row_bytes);
+            std::memcpy(dst + 2 * block_bytes, src + 1 * block_bytes, block_bytes);
             // g -> c
-            std::memcpy(dst + 3 * H * cols, src + 2 * H * cols, H * row_bytes);
+            std::memcpy(dst + 3 * block_bytes, src + 2 * block_bytes, block_bytes);
         }
         return reordered;
     };
@@ -1746,17 +1756,18 @@ auto ONNXExporter::export_lstm(const Tensor& input,
     // For single direction, add the leading dimension
     std::string w_name = context_.generate_name("lstm_W");
     {
-        Tensor w_3d({num_directions, 4 * hidden_size, input_size}, DType::Float32, Device::cpu());
-        std::memcpy(w_3d.data<float>(), w_ih_reordered.data<float>(),
-                     4 * hidden_size * input_size * sizeof(float));
+        // Preserve the source dtype; copy raw bytes (numel * element_size).
+        Tensor w_3d({num_directions, 4 * hidden_size, input_size}, w_ih_reordered.dtype(), Device::cpu());
+        std::memcpy(w_3d.data_ptr(), w_ih_reordered.data_ptr(),
+                     w_ih_reordered.numel() * w_ih_reordered.element_size());
         add_initializer_tensor(w_3d, w_name);
     }
 
     std::string r_name = context_.generate_name("lstm_R");
     {
-        Tensor r_3d({num_directions, 4 * hidden_size, hidden_size}, DType::Float32, Device::cpu());
-        std::memcpy(r_3d.data<float>(), w_hh_reordered.data<float>(),
-                     4 * hidden_size * hidden_size * sizeof(float));
+        Tensor r_3d({num_directions, 4 * hidden_size, hidden_size}, w_hh_reordered.dtype(), Device::cpu());
+        std::memcpy(r_3d.data_ptr(), w_hh_reordered.data_ptr(),
+                     w_hh_reordered.numel() * w_hh_reordered.element_size());
         add_initializer_tensor(r_3d, r_name);
     }
 
@@ -1774,11 +1785,12 @@ auto ONNXExporter::export_lstm(const Tensor& input,
         Tensor b_ih_reordered = reorder_lstm_gates(bias_ih.value());
         Tensor b_hh_reordered = reorder_lstm_gates(bias_hh.value());
 
-        Tensor bias_combined({num_directions, 8 * hidden_size}, DType::Float32, Device::cpu());
-        auto* dst = bias_combined.data<float>();
-        std::memcpy(dst, b_ih_reordered.data<float>(), 4 * hidden_size * sizeof(float));
-        std::memcpy(dst + 4 * hidden_size, b_hh_reordered.data<float>(),
-                     4 * hidden_size * sizeof(float));
+        Tensor bias_combined({num_directions, 8 * hidden_size}, b_ih_reordered.dtype(), Device::cpu());
+        const size_t esize = bias_combined.element_size();
+        const size_t half_bytes = static_cast<size_t>(4 * hidden_size) * esize;
+        auto* dst = static_cast<std::byte*>(bias_combined.data_ptr());
+        std::memcpy(dst, b_ih_reordered.data_ptr(), half_bytes);
+        std::memcpy(dst + half_bytes, b_hh_reordered.data_ptr(), half_bytes);
 
         std::string bias_name = context_.generate_name("lstm_B");
         add_initializer_tensor(bias_combined, bias_name);
@@ -1837,40 +1849,42 @@ auto ONNXExporter::export_gru(const Tensor& input,
 
     // Helper lambda to reorder gates from Tenzor [r,z,n] -> ONNX [z,r,h]
     auto reorder_gru_gates = [&](const Tensor& w) -> Tensor {
-        // The reorder/memcpy below reads and writes raw float. GRU weights may
-        // be Float64/Float16/BFloat16; data<float>() enforces the dtype and
-        // would throw. Convert to Float32 (the export element type) first so
-        // the read, the reordered buffer, and the emitted initializer are all
-        // consistently Float32.
-        Tensor cpu_w = w.cpu().contiguous().to(DType::Float32);
+        // Dtype-agnostic gate reorder: operate on raw bytes keyed on the
+        // tensor's element size, preserving the original dtype. GRU weights
+        // may be Float32/Float64/Float16/BFloat16 (all supported by
+        // dtype_to_onnx); using data<float>()/sizeof(float) would either trip
+        // the dtype assertion or reinterpret bytes at the wrong element width.
+        Tensor cpu_w = w.cpu().contiguous();
         auto shape = cpu_w.shape();
         int64_t H = hidden_size;
         int64_t cols = (shape.size() > 1) ? shape[1] : 1;
         bool is_1d = (shape.size() == 1);
+        const size_t esize = cpu_w.element_size();
 
         std::vector<int64_t> shape_vec(shape.begin(), shape.end());
-        Tensor reordered(shape_vec, DType::Float32, Device::cpu());
+        Tensor reordered(shape_vec, cpu_w.dtype(), Device::cpu());
 
-        const auto* src = cpu_w.data<float>();
-        auto* dst = reordered.data<float>();
+        const auto* src = static_cast<const std::byte*>(cpu_w.data_ptr());
+        auto* dst = static_cast<std::byte*>(reordered.data_ptr());
 
         if (is_1d) {
-            // 1D bias: (3*H,)
+            // 1D bias: (3*H,) — copy one H-sized block per gate.
+            const size_t block_bytes = static_cast<size_t>(H) * esize;
             // z (src[H..2H)) -> dst[0..H)
-            std::memcpy(dst + 0 * H, src + 1 * H, H * sizeof(float));
+            std::memcpy(dst + 0 * block_bytes, src + 1 * block_bytes, block_bytes);
             // r (src[0..H)) -> dst[H..2H)
-            std::memcpy(dst + 1 * H, src + 0 * H, H * sizeof(float));
+            std::memcpy(dst + 1 * block_bytes, src + 0 * block_bytes, block_bytes);
             // n/h (src[2H..3H)) -> dst[2H..3H)
-            std::memcpy(dst + 2 * H, src + 2 * H, H * sizeof(float));
+            std::memcpy(dst + 2 * block_bytes, src + 2 * block_bytes, block_bytes);
         } else {
-            // 2D weight: (3*H, cols)
-            size_t row_bytes = cols * sizeof(float);
+            // 2D weight: (3*H, cols) — copy one H-row block per gate.
+            const size_t block_bytes = static_cast<size_t>(H) * static_cast<size_t>(cols) * esize;
             // z -> first block
-            std::memcpy(dst + 0 * H * cols, src + 1 * H * cols, H * row_bytes);
+            std::memcpy(dst + 0 * block_bytes, src + 1 * block_bytes, block_bytes);
             // r -> second block
-            std::memcpy(dst + 1 * H * cols, src + 0 * H * cols, H * row_bytes);
+            std::memcpy(dst + 1 * block_bytes, src + 0 * block_bytes, block_bytes);
             // n/h -> third block
-            std::memcpy(dst + 2 * H * cols, src + 2 * H * cols, H * row_bytes);
+            std::memcpy(dst + 2 * block_bytes, src + 2 * block_bytes, block_bytes);
         }
         return reordered;
     };
@@ -1882,17 +1896,18 @@ auto ONNXExporter::export_gru(const Tensor& input,
     // ONNX expects R shape: [num_directions, 3*hidden_size, hidden_size]
     std::string w_name = context_.generate_name("gru_W");
     {
-        Tensor w_3d({num_directions, 3 * hidden_size, input_size}, DType::Float32, Device::cpu());
-        std::memcpy(w_3d.data<float>(), w_ih_reordered.data<float>(),
-                     3 * hidden_size * input_size * sizeof(float));
+        // Preserve the source dtype; copy raw bytes (numel * element_size).
+        Tensor w_3d({num_directions, 3 * hidden_size, input_size}, w_ih_reordered.dtype(), Device::cpu());
+        std::memcpy(w_3d.data_ptr(), w_ih_reordered.data_ptr(),
+                     w_ih_reordered.numel() * w_ih_reordered.element_size());
         add_initializer_tensor(w_3d, w_name);
     }
 
     std::string r_name = context_.generate_name("gru_R");
     {
-        Tensor r_3d({num_directions, 3 * hidden_size, hidden_size}, DType::Float32, Device::cpu());
-        std::memcpy(r_3d.data<float>(), w_hh_reordered.data<float>(),
-                     3 * hidden_size * hidden_size * sizeof(float));
+        Tensor r_3d({num_directions, 3 * hidden_size, hidden_size}, w_hh_reordered.dtype(), Device::cpu());
+        std::memcpy(r_3d.data_ptr(), w_hh_reordered.data_ptr(),
+                     w_hh_reordered.numel() * w_hh_reordered.element_size());
         add_initializer_tensor(r_3d, r_name);
     }
 
@@ -1910,11 +1925,12 @@ auto ONNXExporter::export_gru(const Tensor& input,
         Tensor b_ih_reordered = reorder_gru_gates(bias_ih.value());
         Tensor b_hh_reordered = reorder_gru_gates(bias_hh.value());
 
-        Tensor bias_combined({num_directions, 6 * hidden_size}, DType::Float32, Device::cpu());
-        auto* dst = bias_combined.data<float>();
-        std::memcpy(dst, b_ih_reordered.data<float>(), 3 * hidden_size * sizeof(float));
-        std::memcpy(dst + 3 * hidden_size, b_hh_reordered.data<float>(),
-                     3 * hidden_size * sizeof(float));
+        Tensor bias_combined({num_directions, 6 * hidden_size}, b_ih_reordered.dtype(), Device::cpu());
+        const size_t esize = bias_combined.element_size();
+        const size_t half_bytes = static_cast<size_t>(3 * hidden_size) * esize;
+        auto* dst = static_cast<std::byte*>(bias_combined.data_ptr());
+        std::memcpy(dst, b_ih_reordered.data_ptr(), half_bytes);
+        std::memcpy(dst + half_bytes, b_hh_reordered.data_ptr(), half_bytes);
 
         std::string bias_name = context_.generate_name("gru_B");
         add_initializer_tensor(bias_combined, bias_name);

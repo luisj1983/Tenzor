@@ -2061,6 +2061,92 @@ auto ExtendedFusionPass::run(Graph& graph) -> bool {
             if (momentum_val != 0.0f) fused_node->set_attr("momentum", momentum_val);
         }
 
+        // ------------------------------------------------------------------
+        // Propagate the structural attributes that the extended codegen reads
+        // off the reconstructed ExtendedFusionGroup. Without these the executor
+        // would build a default group (dim=-1, no affine/bias, ReLU activation,
+        // Sum reduction) and silently generate the wrong kernel — e.g. a Mean
+        // fusion emitted as a plain Sum, a non-trailing softmax run over the
+        // wrong axis, or a GEMM epilogue that drops its bias/activation.
+        //
+        // Attr name -> ExtendedFusionGroup field mapping:
+        //   fused_reduce_dim       -> reduce_dim / softmax_dim / norm_axis
+        //   fused_keepdim          -> keepdim
+        //   fused_reduce_kind      -> reduce_kind (OpType of the reduction op)
+        //   fused_has_affine       -> has_affine
+        //   fused_has_bias         -> has_bias
+        //   fused_has_activation   -> has_activation
+        //   fused_activation_type  -> activation_type (OpType of the activation)
+        // ------------------------------------------------------------------
+        auto is_reduction_op = [](OpType op) {
+            return op == OpType::Sum || op == OpType::Mean ||
+                   op == OpType::Max || op == OpType::Min;
+        };
+        auto is_activation_op = [](OpType op) {
+            return op == OpType::ReLU || op == OpType::Sigmoid ||
+                   op == OpType::Tanh || op == OpType::GELU;
+        };
+
+        switch (match.kind) {
+            case FusionKind::Reduction:
+            case FusionKind::Softmax:
+            case FusionKind::LayerNorm:
+            case FusionKind::RMSNorm: {
+                // Find the reduction/normalization op in the matched chain and
+                // copy its dim/keepdim and (for plain reductions) its op kind.
+                for (auto& node : match.nodes) {
+                    OpType op = node->op_type();
+                    bool is_norm = (op == OpType::LayerNorm || op == OpType::Softmax);
+                    if (is_reduction_op(op) || is_norm) {
+                        if (node->has_attr("dim")) {
+                            fused_node->set_int_attr("fused_reduce_dim",
+                                                     node->get_int_attr("dim"));
+                        }
+                        if (node->has_attr("keepdim")) {
+                            fused_node->set_bool_attr("fused_keepdim",
+                                                      node->get_bool_attr("keepdim"));
+                        }
+                        if (is_reduction_op(op)) {
+                            fused_node->set_int_attr("fused_reduce_kind",
+                                                     static_cast<int64_t>(op));
+                        }
+                        break;
+                    }
+                }
+                // LayerNorm/RMSNorm affine presence: gamma/beta arrive as extra
+                // external inputs beyond the single normalized tensor.
+                if (match.kind == FusionKind::LayerNorm ||
+                    match.kind == FusionKind::RMSNorm) {
+                    fused_node->set_bool_attr("fused_has_affine",
+                                              match.inputs.size() > 1);
+                }
+                break;
+            }
+            case FusionKind::GemmEpilogue: {
+                bool has_bias = false;
+                bool has_activation = false;
+                OpType act_type = OpType::ReLU;
+                for (auto& node : match.nodes) {
+                    OpType op = node->op_type();
+                    if (op == OpType::Add) {
+                        has_bias = true;
+                    } else if (is_activation_op(op)) {
+                        has_activation = true;
+                        act_type = op;
+                    }
+                }
+                fused_node->set_bool_attr("fused_has_bias", has_bias);
+                fused_node->set_bool_attr("fused_has_activation", has_activation);
+                if (has_activation) {
+                    fused_node->set_int_attr("fused_activation_type",
+                                             static_cast<int64_t>(act_type));
+                }
+                break;
+            }
+            default:
+                break;
+        }
+
         // Replace first matched node with fused node, remove the rest
         graph.replace_node(match.nodes[0], fused_node);
         for (size_t i = 1; i < match.nodes.size(); ++i) {

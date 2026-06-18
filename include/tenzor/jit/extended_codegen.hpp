@@ -42,6 +42,10 @@ struct ExtendedFusionGroup {
     // --- Reduction fields ---
     int reduce_dim{-1};                  ///< Dimension to reduce over
     bool keepdim{false};
+    /// Reduction operator the fused kernel must finalize as. Sum is the raw
+    /// accumulator; Mean additionally divides by reduce_size; Max/Min use a
+    /// max/min accumulation+reduction instead of a sum.
+    OpType reduce_kind{OpType::Sum};
     std::vector<ElemStep> pre_ops;       ///< Element-wise ops before reduction
     std::vector<ElemStep> post_ops;      ///< Element-wise ops after reduction
     int num_inputs{1};

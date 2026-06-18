@@ -5,6 +5,7 @@
 
 #include "tenzor/jit/extended_codegen.hpp"
 #include "tenzor/jit/codegen.hpp"
+#include "tenzor/ops/math.hpp"   // tenzor::matmul for the GEMM-epilogue fusion
 #include <sstream>
 #include <algorithm>
 
@@ -21,7 +22,8 @@ auto ExtendedFusionGroup::compute_signature() -> std::string {
 
     switch (kind) {
         case FusionKind::Reduction:
-            ss << "_dim" << reduce_dim << "_pre" << pre_ops.size()
+            ss << "_dim" << reduce_dim << "_rk" << static_cast<int>(reduce_kind)
+               << "_pre" << pre_ops.size()
                << "_post" << post_ops.size();
             for (auto& op : pre_ops) ss << "_" << static_cast<int>(op.op);
             for (auto& op : post_ops) ss << "_" << static_cast<int>(op.op);
@@ -134,7 +136,27 @@ auto ExtendedKernelCodegen::generate_reduction(const ExtendedFusionGroup& group)
     const std::string abs_fn = fn_for("fabs", group.dtype);
     const std::string exp_fn = fn_for("exp", group.dtype);
     const std::string sqrt_fn = fn_for("sqrt", group.dtype);
+    const std::string max_fn = fn_for("fmax", group.dtype);
+    const std::string min_fn = fn_for("fmin", group.dtype);
     std::ostringstream ss;
+
+    // Reduction kind drives the accumulator identity, the per-element combine,
+    // the warp/block tree-reduction step, and the finalization. Sum/Mean fold
+    // with addition (Mean additionally divides by reduce_size); Max/Min fold
+    // with fmax/fmin from a -inf/+inf identity.
+    const bool is_max = (group.reduce_kind == OpType::Max);
+    const bool is_min = (group.reduce_kind == OpType::Min);
+    const bool is_mean = (group.reduce_kind == OpType::Mean);
+    const std::string ident =
+        is_max ? std::string("-1e30") + F :
+        is_min ? std::string("1e30") + F  :
+                 std::string("0");
+    // combine(acc, x) -> updated acc, for the element loop and the tree steps.
+    auto combine = [&](const std::string& acc, const std::string& x) -> std::string {
+        if (is_max) return acc + " = " + max_fn + "(" + acc + ", " + x + ");";
+        if (is_min) return acc + " = " + min_fn + "(" + acc + ", " + x + ");";
+        return acc + " += " + x + ";";
+    };
 
     ss << R"(
 extern "C" __global__ void fused_reduction_kernel(
@@ -150,7 +172,7 @@ extern "C" __global__ void fused_reduction_kernel(
 
     // Each block reduces one (outer, inner) slice. Accumulate in the compute
     // type (float for the 16-bit storage types) and narrow to T only on store.
-    )" << C << R"( sum = 0;
+    )" << C << R"( sum = )" << ident << R"(;
     for (int r = threadIdx.x; r < reduce_size; r += blockDim.x) {
         )" << C << R"( val = static_cast<)" << C << R"(>(input[outer * reduce_size * inner_size + r * inner_size + inner]);
 )";
@@ -168,13 +190,14 @@ extern "C" __global__ void fused_reduction_kernel(
         }
     }
 
-    ss << R"(        sum += val;
-    }
+    ss << "        " << combine("sum", "val") << "\n";
+    ss << R"(    }
 
     // Warp-level reduction
     for (int offset = warpSize / 2; offset > 0; offset >>= 1) {
-        sum += __shfl_down_sync(0xffffffff, sum, offset);
-    }
+)";
+    ss << "        " << combine("sum", "__shfl_down_sync(0xffffffff, sum, offset)") << "\n";
+    ss << R"(    }
 
     // Block-level reduction via shared memory
     __shared__ )" << C << R"( shared[32];
@@ -185,15 +208,20 @@ extern "C" __global__ void fused_reduction_kernel(
     __syncthreads();
 
     if (warp_id == 0) {
-        sum = (lane < blockDim.x / warpSize) ? shared[lane] : 0;
+        sum = (lane < blockDim.x / warpSize) ? shared[lane] : )" << ident << R"(;
         for (int offset = warpSize / 2; offset > 0; offset >>= 1) {
-            sum += __shfl_down_sync(0xffffffff, sum, offset);
-        }
+)";
+    ss << "            " << combine("sum", "__shfl_down_sync(0xffffffff, sum, offset)") << "\n";
+    ss << R"(        }
     }
 
     if (threadIdx.x == 0) {
         )" << C << R"( result = sum;
 )";
+    // Mean finalizes the summed accumulator by dividing by the element count.
+    if (is_mean) {
+        ss << "        result = result / static_cast<" << C << ">(reduce_size);\n";
+    }
 
     // Inline post-reduction element-wise ops
     for (auto& op : group.post_ops) {
@@ -742,10 +770,24 @@ auto execute_extended_fused(const ExtendedFusionGroup& group,
             break;
         }
         case FusionKind::GemmEpilogue: {
-            // In-place epilogue on the GEMM result: output starts as a copy of it.
-            output = inputs[0].clone();
-            int64_t cols = std::max<int64_t>(1, ndim > 0 ? in_shape[ndim - 1] : total);
-            int64_t rows = total / cols;
+            // The epilogue kernel reads/writes a buffer that ALREADY holds the
+            // GEMM result (it only adds bias + applies the activation). So we
+            // must compute A @ B here and hand the product to the kernel as the
+            // output buffer; the kernel then fuses bias/activation in place.
+            // inputs[0] = A (lhs), inputs[1] = B (rhs); bias (if any) is a param.
+            if (inputs.size() < 2) {
+                throw std::runtime_error(
+                    "execute_extended_fused: GemmEpilogue requires two matmul inputs (A, B)");
+            }
+            output = tenzor::matmul(inputs[0], inputs[1]);
+            // Geometry is derived from the GEMM RESULT, not from inputs[0]:
+            // the kernel grids over rows*cols of the product and indexes bias by
+            // the last (column) dimension.
+            auto out_shape = output.shape();
+            const int64_t out_ndim = static_cast<int64_t>(out_shape.size());
+            const int64_t out_total = output.numel();
+            int64_t cols = std::max<int64_t>(1, out_ndim > 0 ? out_shape[out_ndim - 1] : out_total);
+            int64_t rows = out_total / cols;
             ptrs = {output.data_ptr()};                            // output FIRST
             if (group.has_bias) ptrs.push_back(params.at(0).data_ptr());
             ivals = {rows, cols};
