@@ -3,6 +3,7 @@
 #include <memory>
 #include <vector>
 #include <queue>
+#include <map>
 #include <thread>
 #include <mutex>
 #include <condition_variable>
@@ -184,7 +185,12 @@ private:
 
     // Multi-threading
     std::vector<std::thread> workers_;
-    std::queue<Batch> batch_queue_;
+    // Workers push (batch_idx, batch) in completion order; the consumer
+    // reorders them into ascending batch_idx via reorder_buffer_ so iteration
+    // is deterministic regardless of which worker finished first.
+    std::queue<std::pair<size_t, Batch>> batch_queue_;
+    std::map<size_t, Batch> reorder_buffer_;  ///< out-of-order completed batches awaiting in-order emit
+    size_t next_output_idx_{0};               ///< next batch index the consumer will emit
     std::mutex queue_mutex_;
     std::condition_variable queue_cv_;
     std::condition_variable worker_cv_;

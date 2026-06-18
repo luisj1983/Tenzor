@@ -262,7 +262,7 @@ void DataLoader::worker_thread([[maybe_unused]] size_t worker_id) {
                         break;
                     }
 
-                    batch_queue_.push(std::move(batch));
+                    batch_queue_.push({batch_idx, std::move(batch)});
                     queue_cv_.notify_one();
                 }
             }
@@ -369,30 +369,52 @@ auto DataLoader::get_next_batch_single_threaded() -> Batch {
 auto DataLoader::get_next_batch_multi_threaded() -> Batch {
     std::unique_lock<std::mutex> lock(queue_mutex_);
 
-    // Wait for batch or epoch done
-    queue_cv_.wait(lock, [this] {
-        return !batch_queue_.empty() || epoch_done_;
-    });
+    // Emit batches in ascending batch_idx order even though workers complete
+    // out of order. Each pass drains the bounded completion queue into the
+    // reorder buffer (freeing queue space so a worker holding the next-needed
+    // batch can never deadlock against backpressure), then emits if the next
+    // expected index is available.
+    for (;;) {
+        // Drain everything currently completed into the reorder buffer.
+        bool drained = false;
+        while (!batch_queue_.empty()) {
+            auto& front = batch_queue_.front();
+            reorder_buffer_.emplace(front.first, std::move(front.second));
+            batch_queue_.pop();
+            drained = true;
+        }
+        if (drained) {
+            // Freed queue capacity — let backpressured workers proceed.
+            worker_cv_.notify_all();
+        }
 
-    // Rethrow worker exception on the consumer thread
-    if (worker_exception_) {
-        auto ex = worker_exception_;
-        worker_exception_ = nullptr;
-        std::rethrow_exception(ex);
+        // Rethrow worker exception on the consumer thread.
+        if (worker_exception_) {
+            auto ex = worker_exception_;
+            worker_exception_ = nullptr;
+            std::rethrow_exception(ex);
+        }
+
+        // Emit the next in-order batch if we have it.
+        auto it = reorder_buffer_.find(next_output_idx_);
+        if (it != reorder_buffer_.end()) {
+            Batch batch = std::move(it->second);
+            reorder_buffer_.erase(it);
+            ++next_output_idx_;
+            worker_cv_.notify_all();
+            return batch;
+        }
+
+        // Nothing more will ever arrive: workers done and nothing buffered.
+        if (epoch_done_ && batch_queue_.empty() && reorder_buffer_.empty()) {
+            return Batch{};  // Empty batch signals end of epoch
+        }
+
+        // Wait for a worker to push the next batch (or finish the epoch).
+        queue_cv_.wait(lock, [this] {
+            return !batch_queue_.empty() || epoch_done_;
+        });
     }
-
-    if (batch_queue_.empty()) {
-        return Batch{};  // Empty batch signals end
-    }
-
-    // Get batch from queue
-    Batch batch = std::move(batch_queue_.front());
-    batch_queue_.pop();
-
-    // Notify workers that queue has space
-    worker_cv_.notify_one();
-
-    return batch;
 }
 
 // Begin iterator
@@ -425,11 +447,13 @@ void DataLoader::reset() {
             // Clear any stored worker exception from previous epoch
             worker_exception_ = nullptr;
 
-            // Clear queue
+            // Clear queue + reorder state
             {
                 std::lock_guard<std::mutex> lock(queue_mutex_);
-                std::queue<Batch> empty_queue;
+                std::queue<std::pair<size_t, Batch>> empty_queue;
                 std::swap(batch_queue_, empty_queue);
+                reorder_buffer_.clear();
+                next_output_idx_ = 0;
             }
 
             // Reset state for new epoch
@@ -451,9 +475,11 @@ void DataLoader::reset() {
             // Clear any stored worker exception from previous epoch
             worker_exception_ = nullptr;
 
-            // Clear queue
-            std::queue<Batch> empty_queue;
+            // Clear queue + reorder state
+            std::queue<std::pair<size_t, Batch>> empty_queue;
             std::swap(batch_queue_, empty_queue);
+            reorder_buffer_.clear();
+            next_output_idx_ = 0;
 
             start_workers();
         }

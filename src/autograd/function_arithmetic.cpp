@@ -531,15 +531,29 @@ auto LinearBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<T
     const Tensor xf = fb_half ? x.to(DType::Float32) : x;
     const Tensor wf = fb_half ? w.to(DType::Float32) : w;
 
-    // grad_input = grad_out @ W
-    auto grad_x = matmul(go, wf);
+    // Collapse any leading batch dims to a single row dim so the math is the
+    // same for 2D (batch, in) and >2D (e.g. (B, T, in)) Linear. The previous
+    // transpose(go, 0, 1) / sum(go, 0) only handled rank-2 and produced a
+    // shape mismatch / wrong grads for batched (>2D) inputs.
+    auto go_shape = go.shape();
+    auto x_shape = xf.shape();
+    const int64_t out_features = go_shape.back();
+    const int64_t in_features = x_shape.back();
+    const int64_t rows = go.numel() / out_features;  // product of leading dims
+    auto go_2d = tenzor::reshape(go, {rows, out_features});
+    auto xf_2d = tenzor::reshape(xf, {rows, in_features});
 
-    // grad_weight = grad_out.T @ x
-    auto grad_out_t = transpose(go, 0, 1);  // (out, batch)
-    auto grad_w = matmul(grad_out_t, xf);   // (out, in)
+    // grad_input = grad_out @ W, restored to the original input shape.
+    auto grad_x_2d = matmul(go_2d, wf);     // (rows, in)
+    auto grad_x = tenzor::reshape(grad_x_2d,
+                                  std::vector<int64_t>(x_shape.begin(), x_shape.end()));
 
-    // grad_bias = sum(grad_out, dim=0)
-    auto grad_b = tenzor::sum(go, 0, false);  // (out,)
+    // grad_weight = grad_out.T @ x  (summed over all batch rows)
+    auto grad_out_t = transpose(go_2d, 0, 1);  // (out, rows)
+    auto grad_w = matmul(grad_out_t, xf_2d);   // (out, in)
+
+    // grad_bias = sum over all batch rows
+    auto grad_b = tenzor::sum(go_2d, 0, false);  // (out,)
 
     if (fb_half) {
         grad_x = grad_x.to(fb_dt);
