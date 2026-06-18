@@ -3539,7 +3539,8 @@ auto nanmean_kernel(const Tensor& input, int64_t dim, bool keepdim, sycl::queue&
                     if (!sycl::isnan(v)) cnt.combine(int64_t(1));
                 }).wait();
 
-            out_ptr[0] = cnt_buf[0] > 0 ? sum_buf[0] / static_cast<float>(cnt_buf[0]) : 0.0f;
+            out_ptr[0] = cnt_buf[0] > 0 ? sum_buf[0] / static_cast<float>(cnt_buf[0])
+                                        : std::numeric_limits<float>::quiet_NaN();
             sycl::free(sum_buf, queue);
             sycl::free(cnt_buf, queue);
         } else if (in_cont.dtype() == DType::Float64) {
@@ -3565,7 +3566,8 @@ auto nanmean_kernel(const Tensor& input, int64_t dim, bool keepdim, sycl::queue&
                     if (!sycl::isnan(v)) cnt.combine(int64_t(1));
                 }).wait();
 
-            out_ptr[0] = cnt_buf[0] > 0 ? sum_buf[0] / static_cast<double>(cnt_buf[0]) : 0.0;
+            out_ptr[0] = cnt_buf[0] > 0 ? sum_buf[0] / static_cast<double>(cnt_buf[0])
+                                        : std::numeric_limits<double>::quiet_NaN();
             sycl::free(sum_buf, queue);
             sycl::free(cnt_buf, queue);
         } else {
@@ -3606,7 +3608,8 @@ auto nanmean_kernel(const Tensor& input, int64_t dim, bool keepdim, sycl::queue&
                     float v = in_ptr[src];
                     if (!sycl::isnan(v)) { acc += v; count++; }
                 }
-                out_ptr[idx] = count > 0 ? acc / static_cast<float>(count) : 0.0f;
+                out_ptr[idx] = count > 0 ? acc / static_cast<float>(count)
+                                         : std::numeric_limits<float>::quiet_NaN();
             }).wait();
     } else if (in_cont.dtype() == DType::Float64) {
         const double* in_ptr = get_data_ptr<const double>(in_cont);
@@ -3623,7 +3626,8 @@ auto nanmean_kernel(const Tensor& input, int64_t dim, bool keepdim, sycl::queue&
                     double v = in_ptr[src];
                     if (!sycl::isnan(v)) { acc += v; count++; }
                 }
-                out_ptr[idx] = count > 0 ? acc / static_cast<double>(count) : 0.0;
+                out_ptr[idx] = count > 0 ? acc / static_cast<double>(count)
+                                         : std::numeric_limits<double>::quiet_NaN();
             }).wait();
     } else {
         throw std::runtime_error("nanmean_kernel: unsupported dtype (expected floating type)");
@@ -3841,7 +3845,8 @@ auto nanvar_kernel(const Tensor& input, int64_t dim, bool keepdim, int64_t corre
                 }).wait();
 
             int64_t denom = count - correction;
-            out_ptr[0] = denom > 0 ? dev_buf[0] / static_cast<float>(denom) : 0.0f;
+            out_ptr[0] = denom > 0 ? dev_buf[0] / static_cast<float>(denom)
+                                   : std::numeric_limits<float>::quiet_NaN();
 
             sycl::free(sum_buf, queue);
             sycl::free(cnt_buf, queue);
@@ -3886,7 +3891,8 @@ auto nanvar_kernel(const Tensor& input, int64_t dim, bool keepdim, int64_t corre
                 }).wait();
 
             int64_t denom = count - correction;
-            out_ptr[0] = denom > 0 ? dev_buf[0] / static_cast<double>(denom) : 0.0;
+            out_ptr[0] = denom > 0 ? dev_buf[0] / static_cast<double>(denom)
+                                   : std::numeric_limits<double>::quiet_NaN();
 
             sycl::free(sum_buf, queue);
             sycl::free(cnt_buf, queue);
@@ -3943,7 +3949,8 @@ auto nanvar_kernel(const Tensor& input, int64_t dim, bool keepdim, int64_t corre
                     }
                 }
                 int64_t denom = count - corr;
-                out_ptr[idx] = denom > 0 ? dev_sum / static_cast<float>(denom) : 0.0f;
+                out_ptr[idx] = denom > 0 ? dev_sum / static_cast<float>(denom)
+                                         : std::numeric_limits<float>::quiet_NaN();
             }).wait();
     } else if (in_cont.dtype() == DType::Float64) {
         const double* in_ptr = get_data_ptr<const double>(in_cont);
@@ -3972,7 +3979,8 @@ auto nanvar_kernel(const Tensor& input, int64_t dim, bool keepdim, int64_t corre
                     }
                 }
                 int64_t denom = count - corr;
-                out_ptr[idx] = denom > 0 ? dev_sum / static_cast<double>(denom) : 0.0;
+                out_ptr[idx] = denom > 0 ? dev_sum / static_cast<double>(denom)
+                                         : std::numeric_limits<double>::quiet_NaN();
             }).wait();
     } else {
         throw std::runtime_error("nanvar_kernel: unsupported dtype (expected floating type)");
