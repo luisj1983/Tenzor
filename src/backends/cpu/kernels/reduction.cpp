@@ -2012,6 +2012,25 @@ auto min_kernel(const Tensor& input_raw, int64_t dim, bool keepdim) -> Tensor {
     return output;
 }
 
+// NaN test that is a no-op for non-floating types (integers have no NaN).
+template<typename T>
+inline bool arg_isnan(T v) {
+    if constexpr (std::is_floating_point_v<T>) return std::isnan(v);
+    else return false;
+}
+// NaN-aware argmax/argmin "should (cand) replace (best)?" PyTorch returns the
+// index of the FIRST NaN (NaN sorts as the extreme). Iterating ascending and
+// never replacing once `best` is NaN keeps that first-NaN index; strict
+// comparison keeps the lowest index on value ties.
+template<typename T>
+inline bool arg_takes_max(T cand, T best) {
+    return !arg_isnan(best) && (arg_isnan(cand) || cand > best);
+}
+template<typename T>
+inline bool arg_takes_min(T cand, T best) {
+    return !arg_isnan(best) && (arg_isnan(cand) || cand < best);
+}
+
 // Template for argmax reduction - returns index of maximum value
 template<typename T>
 auto argmax_impl(const T* input_data, int64_t n) -> int64_t {
@@ -2022,7 +2041,7 @@ auto argmax_impl(const T* input_data, int64_t n) -> int64_t {
         int64_t max_idx = 0;
         T max_val = input_data[0];
         for (int64_t i = 1; i < n; i++) {
-            if (input_data[i] > max_val) {
+            if (arg_takes_max(input_data[i], max_val)) {
                 max_val = input_data[i];
                 max_idx = i;
             }
@@ -2060,7 +2079,7 @@ auto argmax_impl(const T* input_data, int64_t n) -> int64_t {
         int64_t local_idx = (start < end) ? start : 0;
 
         for (int64_t i = start + 1; i < end; i++) {
-            if (input_data[i] > local_val) {
+            if (arg_takes_max(input_data[i], local_val)) {
                 local_val = input_data[i];
                 local_idx = i;
             }
@@ -2073,7 +2092,7 @@ auto argmax_impl(const T* input_data, int64_t n) -> int64_t {
     int64_t max_idx = thread_max[0].idx;
     T       max_val = thread_max[0].val;
     for (int t = 1; t < max_threads; t++) {
-        if (thread_max[t].val > max_val) {
+        if (arg_takes_max(thread_max[t].val, max_val)) {
             max_val = thread_max[t].val;
             max_idx = thread_max[t].idx;
         }
@@ -2129,7 +2148,7 @@ void argmax_along_dim(const T* input_data,
                 in_idx += indices[d] * input_strides[d];
             }
 
-            if (input_data[in_idx] > max_val) {
+            if (arg_takes_max(input_data[in_idx], max_val)) {
                 max_val = input_data[in_idx];
                 max_idx = i;
             }
@@ -2176,94 +2195,23 @@ auto argmax_kernel(const Tensor& input_raw, int64_t dim, bool keepdim) -> Tensor
             }
             break;
         }
-        case DType::Float16: {
-            auto* input_data = input.data<Float16>();
+        case DType::Float16:
+        case DType::BFloat16: {
+            // Widen to Float32 for a NaN-aware comparison: argmax_impl /
+            // argmax_along_dim propagate NaN like PyTorch (return the index of
+            // the first NaN). The half types have no std::isnan and the prior
+            // inline loops silently skipped NaN. (This also adds the
+            // previously-missing BFloat16 argmax path.)
+            auto input_f32 = input.to(DType::Float32);
+            auto* input_data = input_f32.data<float>();
             if (dim == REDUCE_ALL) {
-                // Convert to Float32 comparison with OpenMP
-                const int64_t n = input.numel();
-                if (n == 0) throw std::runtime_error("argmax: input tensor is empty");
-                int64_t max_idx = 0;
-                float max_val = static_cast<float>(input_data[0]);
-
-                #ifdef _OPENMP
-                if (n > REDUCTION_OMP_THRESHOLD) {
-                    // Parallel reduction: each thread finds local max, then combine
-                    #pragma omp parallel
-                    {
-                        int64_t local_idx = 0;
-                        float local_max = static_cast<float>(input_data[0]);
-                        #pragma omp for nowait
-                        for (int64_t i = 1; i < n; i++) {
-                            float val = static_cast<float>(input_data[i]);
-                            if (val > local_max) {
-                                local_max = val;
-                                local_idx = i;
-                            }
-                        }
-                        #pragma omp critical
-                        {
-                            // Deterministic tie-break: on equality keep the
-                            // lowest index regardless of thread merge order
-                            // (std::min is order-independent, unlike the prior
-                            // form that compared against the mutating max_idx).
-                            if (local_max > max_val) {
-                                max_val = local_max;
-                                max_idx = local_idx;
-                            } else if (local_max == max_val) {
-                                max_idx = std::min(max_idx, local_idx);
-                            }
-                        }
-                    }
-                } else
-                #endif
-                {
-                    for (int64_t i = 1; i < n; i++) {
-                        float val = static_cast<float>(input_data[i]);
-                        if (val > max_val) {
-                            max_val = val;
-                            max_idx = i;
-                        }
-                    }
-                }
-                output_data[0] = max_idx;
+                output_data[0] = argmax_impl(input_data, input_f32.numel());
             } else {
-                // Dimensional argmax
-                const int64_t dim_size = input_shape[dim];
-                const int64_t output_size = output.numel();
-
-                #pragma omp parallel for if(output_size > ::tenzor::OmpThresholds::matmul())
-                for (int64_t out_idx = 0; out_idx < output_size; out_idx++) {
-                    std::vector<int64_t> indices(ndim, 0);
-                    int64_t tmp = out_idx;
-                    for (int64_t d = ndim - 1; d >= 0; --d) {
-                        if (d == dim) continue;
-                        indices[d] = tmp % input_shape[d];
-                        tmp /= input_shape[d];
-                    }
-
-                    indices[dim] = 0;
-                    int64_t in_idx = 0;
-                    for (int64_t d = 0; d < ndim; d++) {
-                        in_idx += indices[d] * input_strides[d];
-                    }
-
-                    float max_val = static_cast<float>(input_data[in_idx]);
-                    int64_t max_idx = 0;
-
-                    for (int64_t i = 1; i < dim_size; i++) {
-                        indices[dim] = i;
-                        in_idx = 0;
-                        for (int64_t d = 0; d < ndim; d++) {
-                            in_idx += indices[d] * input_strides[d];
-                        }
-                        float val = static_cast<float>(input_data[in_idx]);
-                        if (val > max_val) {
-                            max_val = val;
-                            max_idx = i;
-                        }
-                    }
-                    output_data[out_idx] = max_idx;
-                }
+                auto f32_strides = input_f32.strides();
+                argmax_along_dim(input_data, output_data,
+                               std::vector<int64_t>(input_shape.begin(), input_shape.end()),
+                               std::vector<int64_t>(f32_strides.begin(), f32_strides.end()),
+                               dim);
             }
             break;
         }
@@ -2385,7 +2333,7 @@ auto argmin_impl(const T* input_data, int64_t n) -> int64_t {
     T min_val = input_data[0];
 
     for (int64_t i = 1; i < n; i++) {
-        if (input_data[i] < min_val) {
+        if (arg_takes_min(input_data[i], min_val)) {
             min_val = input_data[i];
             min_idx = i;
         }
@@ -2442,7 +2390,7 @@ void argmin_along_dim(const T* input_data,
                 in_idx += indices[d] * input_strides[d];
             }
 
-            if (input_data[in_idx] < min_val) {
+            if (arg_takes_min(input_data[in_idx], min_val)) {
                 min_val = input_data[in_idx];
                 min_idx = i;
             }
@@ -2488,179 +2436,22 @@ auto argmin_kernel(const Tensor& input_raw, int64_t dim, bool keepdim) -> Tensor
             }
             break;
         }
-        case DType::Float16: {
-            auto* input_data = input.data<Float16>();
-            if (dim == REDUCE_ALL) {
-                // Convert to Float32 comparison
-                const int64_t n = input.numel();
-                if (n == 0) throw std::runtime_error("argmin: input tensor is empty");
-                int64_t min_idx = 0;
-                float min_val = static_cast<float>(input_data[0]);
-
-                #ifdef _OPENMP
-                if (n > REDUCTION_OMP_THRESHOLD) {
-                    #pragma omp parallel
-                    {
-                        int64_t local_idx = 0;
-                        float local_min = static_cast<float>(input_data[0]);
-                        #pragma omp for nowait
-                        for (int64_t i = 1; i < n; i++) {
-                            float val = static_cast<float>(input_data[i]);
-                            if (val < local_min) {
-                                local_min = val;
-                                local_idx = i;
-                            }
-                        }
-                        #pragma omp critical
-                        {
-                            // Deterministic tie-break: on equality keep the
-                            // lowest index regardless of thread merge order.
-                            if (local_min < min_val) {
-                                min_val = local_min;
-                                min_idx = local_idx;
-                            } else if (local_min == min_val) {
-                                min_idx = std::min(min_idx, local_idx);
-                            }
-                        }
-                    }
-                } else
-                #endif
-                {
-                    for (int64_t i = 1; i < n; i++) {
-                        float val = static_cast<float>(input_data[i]);
-                        if (val < min_val) {
-                            min_val = val;
-                            min_idx = i;
-                        }
-                    }
-                }
-                output_data[0] = min_idx;
-            } else {
-                // Dimensional argmin
-                const int64_t dim_size = input_shape[dim];
-                const int64_t output_size = output.numel();
-
-                #pragma omp parallel for if(output_size > ::tenzor::OmpThresholds::matmul())
-                for (int64_t out_idx = 0; out_idx < output_size; out_idx++) {
-                    std::vector<int64_t> indices(ndim, 0);
-                    int64_t tmp = out_idx;
-                    for (int64_t d = ndim - 1; d >= 0; --d) {
-                        if (d == dim) continue;
-                        indices[d] = tmp % input_shape[d];
-                        tmp /= input_shape[d];
-                    }
-
-                    indices[dim] = 0;
-                    int64_t in_idx = 0;
-                    for (int64_t d = 0; d < ndim; d++) {
-                        in_idx += indices[d] * input_strides[d];
-                    }
-
-                    float min_val = static_cast<float>(input_data[in_idx]);
-                    int64_t min_idx = 0;
-
-                    for (int64_t i = 1; i < dim_size; i++) {
-                        indices[dim] = i;
-                        in_idx = 0;
-                        for (int64_t d = 0; d < ndim; d++) {
-                            in_idx += indices[d] * input_strides[d];
-                        }
-                        float val = static_cast<float>(input_data[in_idx]);
-                        if (val < min_val) {
-                            min_val = val;
-                            min_idx = i;
-                        }
-                    }
-                    output_data[out_idx] = min_idx;
-                }
-            }
-            break;
-        }
+        case DType::Float16:
         case DType::BFloat16: {
-            auto* input_data = input.data<BFloat16>();
+            // Widen to Float32 for a NaN-aware comparison: argmin_impl /
+            // argmin_along_dim propagate NaN like PyTorch (return the index of
+            // the first NaN). The half types have no std::isnan and the prior
+            // inline loops silently skipped NaN.
+            auto input_f32 = input.to(DType::Float32);
+            auto* input_data = input_f32.data<float>();
             if (dim == REDUCE_ALL) {
-                // Convert to Float32 comparison
-                const int64_t n = input.numel();
-                if (n == 0) throw std::runtime_error("argmin: input tensor is empty");
-                int64_t min_idx = 0;
-                float min_val = static_cast<float>(input_data[0]);
-
-                #ifdef _OPENMP
-                if (n > REDUCTION_OMP_THRESHOLD) {
-                    #pragma omp parallel
-                    {
-                        int64_t local_idx = 0;
-                        float local_min = static_cast<float>(input_data[0]);
-                        #pragma omp for nowait
-                        for (int64_t i = 1; i < n; i++) {
-                            float val = static_cast<float>(input_data[i]);
-                            if (val < local_min) {
-                                local_min = val;
-                                local_idx = i;
-                            }
-                        }
-                        #pragma omp critical
-                        {
-                            // Deterministic tie-break: on equality keep the
-                            // lowest index regardless of thread merge order.
-                            if (local_min < min_val) {
-                                min_val = local_min;
-                                min_idx = local_idx;
-                            } else if (local_min == min_val) {
-                                min_idx = std::min(min_idx, local_idx);
-                            }
-                        }
-                    }
-                } else
-                #endif
-                {
-                    for (int64_t i = 1; i < n; i++) {
-                        float val = static_cast<float>(input_data[i]);
-                        if (val < min_val) {
-                            min_val = val;
-                            min_idx = i;
-                        }
-                    }
-                }
-                output_data[0] = min_idx;
+                output_data[0] = argmin_impl(input_data, input_f32.numel());
             } else {
-                // Dimensional argmin
-                const int64_t dim_size = input_shape[dim];
-                const int64_t output_size = output.numel();
-
-                #pragma omp parallel for if(output_size > ::tenzor::OmpThresholds::matmul())
-                for (int64_t out_idx = 0; out_idx < output_size; out_idx++) {
-                    std::vector<int64_t> indices(ndim, 0);
-                    int64_t tmp = out_idx;
-                    for (int64_t d = ndim - 1; d >= 0; --d) {
-                        if (d == dim) continue;
-                        indices[d] = tmp % input_shape[d];
-                        tmp /= input_shape[d];
-                    }
-
-                    indices[dim] = 0;
-                    int64_t in_idx = 0;
-                    for (int64_t d = 0; d < ndim; d++) {
-                        in_idx += indices[d] * input_strides[d];
-                    }
-
-                    float min_val = static_cast<float>(input_data[in_idx]);
-                    int64_t min_idx = 0;
-
-                    for (int64_t i = 1; i < dim_size; i++) {
-                        indices[dim] = i;
-                        in_idx = 0;
-                        for (int64_t d = 0; d < ndim; d++) {
-                            in_idx += indices[d] * input_strides[d];
-                        }
-                        float val = static_cast<float>(input_data[in_idx]);
-                        if (val < min_val) {
-                            min_val = val;
-                            min_idx = i;
-                        }
-                    }
-                    output_data[out_idx] = min_idx;
-                }
+                auto f32_strides = input_f32.strides();
+                argmin_along_dim(input_data, output_data,
+                               std::vector<int64_t>(input_shape.begin(), input_shape.end()),
+                               std::vector<int64_t>(f32_strides.begin(), f32_strides.end()),
+                               dim);
             }
             break;
         }
