@@ -872,163 +872,21 @@ void conv2d_forward_impl(
     // Reduces multiplications from 9 to 4 per 2x2 output tile
     // =========================================================================
     if (symmetric && kernel_h == 3 && kernel_w == 3 && stride == 1 && dilation == 1 && groups == 1) {
-        const T* input_data = input.data<T>();
-        const T* weight_data = weight.data<T>();
-        T* output_data = output.data<T>();
-
-        // Winograd F(2,3): transforms 4x4 input tile -> 4x4, 3x3 filter -> 4x4
-        // Element-wise multiply in transform domain, then inverse transform to 2x2 output
-
-        // Number of 2x2 output tiles
-        int64_t tile_h = (out_h + 1) / 2;
-        int64_t tile_w = (out_w + 1) / 2;
-        int64_t num_tiles = tile_h * tile_w;
-
-        // Pre-transform all filters: G * g * G^T for each (oc, ic) pair
-        // G is the 4x3 filter transform matrix for F(2,3):
-        // G = [[1,    0,    0   ],
-        //      [0.5,  0.5,  0.5 ],
-        //      [0.5, -0.5,  0.5 ],
-        //      [0,    0,    1   ]]
-        int64_t C_in = in_channels;
-        int64_t C_out = out_channels;
-        std::vector<T> U(C_out * C_in * 16);  // 4x4 per filter
-
-        #pragma omp parallel for collapse(2) if(C_out * C_in > 64)
-        for (int64_t oc = 0; oc < C_out; ++oc) {
-            for (int64_t ic = 0; ic < C_in; ++ic) {
-                const T* g_ptr = weight_data + (oc * C_in + ic) * 9;
-                T* u_ptr = U.data() + (oc * C_in + ic) * 16;
-
-                // g is 3x3 filter: g[r][s]
-                // Compute temp = G * g  (4x3 * 3x3 = 4x3)
-                T temp[4][3];
-                for (int s = 0; s < 3; ++s) {
-                    temp[0][s] = g_ptr[0 * 3 + s];
-                    temp[1][s] = static_cast<T>(0.5) * (g_ptr[0 * 3 + s] + g_ptr[1 * 3 + s] + g_ptr[2 * 3 + s]);
-                    temp[2][s] = static_cast<T>(0.5) * (g_ptr[0 * 3 + s] - g_ptr[1 * 3 + s] + g_ptr[2 * 3 + s]);
-                    temp[3][s] = g_ptr[2 * 3 + s];
-                }
-                // Compute U = temp * G^T  (4x3 * 3x4 = 4x4)
-                for (int r = 0; r < 4; ++r) {
-                    u_ptr[r * 4 + 0] = temp[r][0];
-                    u_ptr[r * 4 + 1] = static_cast<T>(0.5) * (temp[r][0] + temp[r][1] + temp[r][2]);
-                    u_ptr[r * 4 + 2] = static_cast<T>(0.5) * (temp[r][0] - temp[r][1] + temp[r][2]);
-                    u_ptr[r * 4 + 3] = temp[r][2];
-                }
-            }
-        }
-
-        // Process each batch
-        #pragma omp parallel if(batch * num_tiles > 64)
-        {
-            // Per-thread buffers
-            std::vector<T> V(C_in * 16);   // Transformed input tiles for one tile position
-            std::vector<T> M(C_out * 16);  // Element-wise product result
-
-            #pragma omp for
-            for (int64_t b = 0; b < batch; ++b) {
-                for (int64_t th = 0; th < tile_h; ++th) {
-                    for (int64_t tw = 0; tw < tile_w; ++tw) {
-                        // Extract and transform 4x4 input tile for each input channel
-                        // B^T * d * B where B^T is the 4x4 input transform:
-                        // B^T = [[1,  0, -1,  0],
-                        //        [0,  1,  1,  0],
-                        //        [0, -1,  1,  0],
-                        //        [0,  1,  0, -1]]
-                        int64_t tile_start_h = th * 2 - padding;
-                        int64_t tile_start_w = tw * 2 - padding;
-
-                        for (int64_t ic = 0; ic < C_in; ++ic) {
-                            // Load 4x4 tile from input (with zero-padding for out-of-bounds)
-                            T d[4][4];
-                            for (int r = 0; r < 4; ++r) {
-                                for (int s = 0; s < 4; ++s) {
-                                    int64_t ih = tile_start_h + r;
-                                    int64_t iw = tile_start_w + s;
-                                    if (ih >= 0 && ih < height && iw >= 0 && iw < width) {
-                                        d[r][s] = input_data[b * (C_in * height * width) +
-                                                            ic * (height * width) +
-                                                            ih * width + iw];
-                                    } else {
-                                        d[r][s] = T{};
-                                    }
-                                }
-                            }
-
-                            // Compute B^T * d (4x4 * 4x4 = 4x4)
-                            T temp[4][4];
-                            for (int s = 0; s < 4; ++s) {
-                                temp[0][s] = d[0][s] - d[2][s];
-                                temp[1][s] = d[1][s] + d[2][s];
-                                temp[2][s] = -d[1][s] + d[2][s];
-                                temp[3][s] = d[1][s] - d[3][s];
-                            }
-                            // Compute V = temp * B (4x4 * 4x4 = 4x4)
-                            T* v_ptr = V.data() + ic * 16;
-                            for (int r = 0; r < 4; ++r) {
-                                v_ptr[r * 4 + 0] = temp[r][0] - temp[r][2];
-                                v_ptr[r * 4 + 1] = temp[r][1] + temp[r][2];
-                                v_ptr[r * 4 + 2] = -temp[r][1] + temp[r][2];
-                                v_ptr[r * 4 + 3] = temp[r][1] - temp[r][3];
-                            }
-                        }
-
-                        // Element-wise multiply and accumulate: M[oc][i] = sum_ic U[oc][ic][i] * V[ic][i]
-                        for (int64_t oc = 0; oc < C_out; ++oc) {
-                            T* m_ptr = M.data() + oc * 16;
-                            for (int i = 0; i < 16; ++i) {
-                                m_ptr[i] = T{};
-                            }
-                            for (int64_t ic = 0; ic < C_in; ++ic) {
-                                const T* u_ptr = U.data() + (oc * C_in + ic) * 16;
-                                const T* v_ptr = V.data() + ic * 16;
-                                for (int i = 0; i < 16; ++i) {
-                                    m_ptr[i] += u_ptr[i] * v_ptr[i];
-                                }
-                            }
-                        }
-
-                        // Inverse transform: A^T * M * A  -> 2x2 output tile
-                        // A^T = [[1, 1,  1, 0],
-                        //        [0, 1, -1, -1]]
-                        for (int64_t oc = 0; oc < C_out; ++oc) {
-                            T* m_ptr = M.data() + oc * 16;
-
-                            // Compute A^T * M (2x4 * 4x4 = 2x4)
-                            T temp2[2][4];
-                            for (int s = 0; s < 4; ++s) {
-                                temp2[0][s] = m_ptr[0 * 4 + s] + m_ptr[1 * 4 + s] + m_ptr[2 * 4 + s];
-                                temp2[1][s] = m_ptr[1 * 4 + s] - m_ptr[2 * 4 + s] - m_ptr[3 * 4 + s];
-                            }
-                            // Compute output = temp2 * A (2x4 * 4x2 = 2x2)
-                            T out[2][2];
-                            out[0][0] = temp2[0][0] + temp2[0][1] + temp2[0][2];
-                            out[0][1] = temp2[0][1] - temp2[0][2] - temp2[0][3];
-                            out[1][0] = temp2[1][0] + temp2[1][1] + temp2[1][2];
-                            out[1][1] = temp2[1][1] - temp2[1][2] - temp2[1][3];
-
-                            // Write output tile (handle boundary for odd output sizes)
-                            for (int r = 0; r < 2; ++r) {
-                                for (int s = 0; s < 2; ++s) {
-                                    int64_t oh = th * 2 + r;
-                                    int64_t ow = tw * 2 + s;
-                                    if (oh < out_h && ow < out_w) {
-                                        output_data[b * (C_out * out_h * out_w) +
-                                                   oc * (out_h * out_w) +
-                                                   oh * out_w + ow] = out[r][s];
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
+        // Single source of truth: delegate to the shared, canonical
+        // Winograd F(2x2, 3x3) transform in winograd.hpp (templated on T).
+        // This is the ONLY Winograd path for Float64 (and the Float32-widened
+        // Float16/BFloat16 path), so there is no divergent inline copy to keep
+        // in sync. Float32 isotropic convs are routed through the same function
+        // by conv2d_forward_kernel before ever reaching here.
+        winograd_conv2d_f2x3<T>(
+            input.data<T>(), weight.data<T>(), output.data<T>(),
+            batch, in_channels, height, width, out_channels, out_h, out_w,
+            padding, padding);
 
         // Add bias if present
         if (bias) {
             const T* bias_data = bias->data<T>();
+            T* output_data = output.data<T>();
             int64_t spatial = out_h * out_w;
             #pragma omp parallel for collapse(3) if(batch * out_channels * spatial > OmpThresholds::medium())
             for (int64_t b = 0; b < batch; ++b) {

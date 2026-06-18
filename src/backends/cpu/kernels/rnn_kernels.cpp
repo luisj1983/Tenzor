@@ -1214,13 +1214,17 @@ auto gru_forward_kernel(
         const float* bias_ih_ptr = bias_ih.numel() > 0 ? bias_ih_contig.data<float>() : nullptr;
         const float* bias_hh_ptr = bias_hh.numel() > 0 ? bias_hh_contig.data<float>() : nullptr;
 
-        if (!bias_ih_ptr && !bias_hh_ptr) {
 #ifdef TENZOR_USE_ONEDNN
+        // The oneDNN GRU path uses the LBR (linear_before_reset=1) primitive and
+        // maps bias_ih / bias_hh into oneDNN's 4-term LBR bias, so it is exact
+        // for biased GRUs too — no need to gate on the no-bias case anymore.
+        {
             bool onednn_success = rnn_onednn::gru_forward_onednn(
                 input_contig.data<float>(),
                 W_ih_contig.data<float>(),
                 W_hh_contig.data<float>(),
-                nullptr,
+                bias_ih_ptr,
+                bias_hh_ptr,
                 h0_contig.data<float>(),
                 output.data<float>(),
                 h_n.data<float>(),
@@ -1229,8 +1233,8 @@ auto gru_forward_kernel(
             if (onednn_success) {
                 return {output, h_n};
             }
-#endif
         }
+#endif
 
         lstm::gru_forward(
             input_contig.data<float>(),

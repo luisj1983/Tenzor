@@ -207,107 +207,67 @@ namespace lstm {
 #ifdef TENZOR_LSTM_AVX2
 
 /**
- * @brief Fast SIMD sigmoid approximation
- * sigmoid(x) = 1 / (1 + exp(-x))
- * Uses polynomial approximation for exp
+ * @brief SIMD sigmoid for the fused LSTM/GRU gate path.
+ *
+ * Precision note: the previous implementation used a coarse degree-5
+ * polynomial exp approximation, which diverged from the cell-level reference
+ * (lstm_cell_forward_kernel / gru_cell_forward_kernel, the Float64 full-sequence
+ * paths, and PyTorch) — all of which use exact std::exp/std::tanh. Worse, the
+ * scalar remainder loop of the SAME fused kernel uses exact sigmoid_scalar /
+ * tanh_scalar, so different hidden lanes of one hidden state were computed with
+ * different accuracy. These are hot but precision-sensitive paths, so we
+ * evaluate the activations exactly per lane via the scalar reference
+ * (std::exp / std::tanh). This makes the SIMD lanes bit-identical to the scalar
+ * remainder and to the cross-backend cell reference, eliminating the divergence
+ * that previously forced loosened gradcheck/parity tolerances.
  */
 inline __m256 sigmoid_avx2(__m256 x) {
-    // Clamp x to prevent overflow
-    __m256 min_val = _mm256_set1_ps(-20.0f);
-    __m256 max_val = _mm256_set1_ps(20.0f);
-    x = _mm256_max_ps(x, min_val);
-    x = _mm256_min_ps(x, max_val);
-
-    // Compute exp(-x) using fast approximation
-    __m256 neg_x = _mm256_sub_ps(_mm256_setzero_ps(), x);
-
-    // Constants for exp approximation
-    __m256 log2e = _mm256_set1_ps(1.44269504088896341f);
-    __m256 ln2 = _mm256_set1_ps(0.693147180559945f);
-    __m256 one = _mm256_set1_ps(1.0f);
-    __m256 c1 = _mm256_set1_ps(1.0f);
-    __m256 c2 = _mm256_set1_ps(0.5f);
-    __m256 c3 = _mm256_set1_ps(0.166666667f);
-    __m256 c4 = _mm256_set1_ps(0.041666667f);
-    __m256 c5 = _mm256_set1_ps(0.008333333f);
-
-    // exp(x) = 2^k * exp(r) where k = round(x/ln2) and r = x - k*ln2
-    __m256 k = _mm256_round_ps(_mm256_mul_ps(neg_x, log2e), _MM_FROUND_TO_NEAREST_INT);
-    __m256 r = _mm256_fnmadd_ps(k, ln2, neg_x);
-
-    // Polynomial approximation for exp(r) on [-ln2/2, ln2/2]
-    __m256 p = _mm256_fmadd_ps(c5, r, c4);
-    p = _mm256_fmadd_ps(p, r, c3);
-    p = _mm256_fmadd_ps(p, r, c2);
-    p = _mm256_fmadd_ps(p, r, c1);
-    p = _mm256_fmadd_ps(p, r, one);
-
-    // Scale by 2^k
-    __m256i ki = _mm256_cvtps_epi32(k);
-    ki = _mm256_slli_epi32(ki, 23);
-    __m256 scale = _mm256_castsi256_ps(_mm256_add_epi32(ki, _mm256_set1_epi32(0x3f800000)));
-    __m256 exp_neg_x = _mm256_mul_ps(p, scale);
-
-    // sigmoid = 1 / (1 + exp(-x))
-    __m256 denom = _mm256_add_ps(one, exp_neg_x);
-    return _mm256_div_ps(one, denom);
+    alignas(32) float buf[8];
+    _mm256_store_ps(buf, x);
+    for (int i = 0; i < 8; ++i) {
+        float v = std::max(-20.0f, std::min(20.0f, buf[i]));
+        buf[i] = 1.0f / (1.0f + std::exp(-v));
+    }
+    return _mm256_load_ps(buf);
 }
 
 /**
- * @brief Fast SIMD tanh approximation
- * tanh(x) = 2 * sigmoid(2x) - 1
+ * @brief SIMD tanh for the fused LSTM/GRU gate path (exact, per-lane std::tanh).
+ *        See sigmoid_avx2 for the precision rationale.
  */
 inline __m256 tanh_avx2(__m256 x) {
-    __m256 two = _mm256_set1_ps(2.0f);
-    __m256 one = _mm256_set1_ps(1.0f);
-    __m256 sig = sigmoid_avx2(_mm256_mul_ps(two, x));
-    return _mm256_sub_ps(_mm256_mul_ps(two, sig), one);
+    alignas(32) float buf[8];
+    _mm256_store_ps(buf, x);
+    for (int i = 0; i < 8; ++i) {
+        buf[i] = std::tanh(buf[i]);
+    }
+    return _mm256_load_ps(buf);
 }
 
 #endif // TENZOR_LSTM_AVX2
 
 #ifdef TENZOR_LSTM_AVX512
 
+// Exact per-lane sigmoid (std::exp), bit-identical to sigmoid_scalar and the
+// cell-level reference. See sigmoid_avx2 for the precision rationale.
 inline __m512 sigmoid_avx512(__m512 x) {
-    __m512 min_val = _mm512_set1_ps(-20.0f);
-    __m512 max_val = _mm512_set1_ps(20.0f);
-    x = _mm512_max_ps(x, min_val);
-    x = _mm512_min_ps(x, max_val);
-
-    __m512 neg_x = _mm512_sub_ps(_mm512_setzero_ps(), x);
-
-    __m512 log2e = _mm512_set1_ps(1.44269504088896341f);
-    __m512 ln2 = _mm512_set1_ps(0.693147180559945f);
-    __m512 one = _mm512_set1_ps(1.0f);
-    __m512 c1 = _mm512_set1_ps(1.0f);
-    __m512 c2 = _mm512_set1_ps(0.5f);
-    __m512 c3 = _mm512_set1_ps(0.166666667f);
-    __m512 c4 = _mm512_set1_ps(0.041666667f);
-    __m512 c5 = _mm512_set1_ps(0.008333333f);
-
-    __m512 k = _mm512_roundscale_ps(_mm512_mul_ps(neg_x, log2e), _MM_FROUND_TO_NEAREST_INT);
-    __m512 r = _mm512_fnmadd_ps(k, ln2, neg_x);
-
-    __m512 p = _mm512_fmadd_ps(c5, r, c4);
-    p = _mm512_fmadd_ps(p, r, c3);
-    p = _mm512_fmadd_ps(p, r, c2);
-    p = _mm512_fmadd_ps(p, r, c1);
-    p = _mm512_fmadd_ps(p, r, one);
-
-    __m512i ki = _mm512_cvtps_epi32(k);
-    ki = _mm512_slli_epi32(ki, 23);
-    __m512 scale = _mm512_castsi512_ps(_mm512_add_epi32(ki, _mm512_set1_epi32(0x3f800000)));
-    __m512 exp_neg_x = _mm512_mul_ps(p, scale);
-
-    __m512 denom = _mm512_add_ps(one, exp_neg_x);
-    return _mm512_div_ps(one, denom);
+    alignas(64) float buf[16];
+    _mm512_store_ps(buf, x);
+    for (int i = 0; i < 16; ++i) {
+        float v = std::max(-20.0f, std::min(20.0f, buf[i]));
+        buf[i] = 1.0f / (1.0f + std::exp(-v));
+    }
+    return _mm512_load_ps(buf);
 }
 
+// Exact per-lane tanh (std::tanh). See sigmoid_avx2 for the precision rationale.
 inline __m512 tanh_avx512(__m512 x) {
-    __m512 two = _mm512_set1_ps(2.0f);
-    __m512 one = _mm512_set1_ps(1.0f);
-    __m512 sig = sigmoid_avx512(_mm512_mul_ps(two, x));
-    return _mm512_sub_ps(_mm512_mul_ps(two, sig), one);
+    alignas(64) float buf[16];
+    _mm512_store_ps(buf, x);
+    for (int i = 0; i < 16; ++i) {
+        buf[i] = std::tanh(buf[i]);
+    }
+    return _mm512_load_ps(buf);
 }
 
 #endif // TENZOR_LSTM_AVX512

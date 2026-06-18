@@ -759,8 +759,15 @@ inline bool bilstm_forward_onednn(
 // ============================================================================
 
 struct GRUCachedPrimitive {
-    dnnl::gru_forward prim;
-    dnnl::gru_forward::primitive_desc pd;
+    // LBR (linear-before-reset) GRU. Tenzor's GRU reference (and PyTorch's
+    // default) is linear_before_reset=1: the reset gate multiplies the
+    // hidden-state linear transform AFTER its matmul+bias, i.e.
+    //   n = tanh(W_in·x + b_in + r·(W_hn·h + b_hn)).
+    // oneDNN exposes this as the separate dnnl::lbr_gru primitive (vanilla
+    // dnnl::gru_forward is linear_before_reset=0 and gives a DIFFERENT result
+    // whenever the recurrent new-gate bias is nonzero).
+    dnnl::lbr_gru_forward prim;
+    dnnl::lbr_gru_forward::primitive_desc pd;
 
     dnnl::memory::desc src_layer_md;
     dnnl::memory::desc src_iter_md;
@@ -804,17 +811,29 @@ inline std::shared_ptr<GRUCachedPrimitive>& get_gru_cached() {
 /**
  * @brief Reorder GRU weights from PyTorch format to oneDNN ldigo format
  */
+// Reorder Tenzor GRU weights (gate-major rows [reset, update, new], i.e. the
+// PyTorch [r, z, n] order) into oneDNN's LDIGO layout.
+//
+// IMPORTANT — gate order: oneDNN's GRU weight gate order is [update, reset,
+// output] (u, r, o), per the oneDNN RNN spec. Tenzor/PyTorch store gates as
+// [reset, update, new] (r, z, n). So oneDNN gate 0 (u) must be fed Tenzor's
+// update gate (index 1) and oneDNN gate 1 (r) must be fed Tenzor's reset gate
+// (index 0); the new/output gate (index 2) is unchanged. The mapping below
+// (kGruGateToTenzor) performs that reset<->update swap. Without it the GRU
+// output is silently wrong even with no bias.
 inline void reorder_gru_weights_to_ldigo(
     const float* src,
     float* dst,
     int64_t in_features,
     int64_t hidden_size
 ) {
+    // oneDNN-gate g -> Tenzor source-gate index.
+    static constexpr int kGruGateToTenzor[3] = {1 /*u<-z*/, 0 /*r<-r*/, 2 /*o<-n*/};
     constexpr int64_t BLOCK = 32;
     for (int64_t i_block = 0; i_block < in_features; i_block += BLOCK) {
         int64_t i_end = std::min(i_block + BLOCK, in_features);
         for (int64_t g = 0; g < 3; ++g) {
-            const float* src_gate = src + g * hidden_size * in_features;
+            const float* src_gate = src + kGruGateToTenzor[g] * hidden_size * in_features;
             for (int64_t h = 0; h < hidden_size; ++h) {
                 const float* src_row = src_gate + h * in_features;
                 for (int64_t i = i_block; i < i_end; ++i) {
@@ -825,14 +844,55 @@ inline void reorder_gru_weights_to_ldigo(
     }
 }
 
+// Pack a oneDNN LBR-GRU bias tensor in LDGO layout from Tenzor's [r, z, n]
+// gate-ordered bias_ih / bias_hh (either may be null).
+//
+// LBR GRU expects 4 bias sub-tensors per (layer,direction) in the order
+//   [b_u, b_r, b_{c_x}, b_{c_h}]
+// (oneDNN RNN spec: bias gate order is u, r, o and u'). The LBR new-gate math is
+//   c = tanh(W_c·x + b_{c_x} + r·(U_c·h + b_{c_h})),
+// which matches Tenzor's reference exactly when:
+//   b_u    = bias_ih[z] + bias_hh[z]   (update gate, Tenzor index 1)
+//   b_r    = bias_ih[r] + bias_hh[r]   (reset  gate, Tenzor index 0)
+//   b_{c_x}= bias_ih[n]                (new-gate input  bias, outside reset mul)
+//   b_{c_h}= bias_hh[n]                (new-gate hidden bias, inside  reset mul)
+// `dst` must hold 4 * hidden_size floats (zeroed for absent biases).
+inline void pack_lbr_gru_bias(
+    const float* bias_ih,   // (3*hidden) [r,z,n] or nullptr
+    const float* bias_hh,   // (3*hidden) [r,z,n] or nullptr
+    float* dst,             // (4*hidden) [b_u, b_r, b_cx, b_ch]
+    int64_t hidden_size
+) {
+    const int64_t H = hidden_size;
+    for (int64_t h = 0; h < H; ++h) {
+        const float ih_r = bias_ih ? bias_ih[0 * H + h] : 0.0f;
+        const float ih_z = bias_ih ? bias_ih[1 * H + h] : 0.0f;
+        const float ih_n = bias_ih ? bias_ih[2 * H + h] : 0.0f;
+        const float hh_r = bias_hh ? bias_hh[0 * H + h] : 0.0f;
+        const float hh_z = bias_hh ? bias_hh[1 * H + h] : 0.0f;
+        const float hh_n = bias_hh ? bias_hh[2 * H + h] : 0.0f;
+        dst[0 * H + h] = ih_z + hh_z;  // b_u
+        dst[1 * H + h] = ih_r + hh_r;  // b_r
+        dst[2 * H + h] = ih_n;         // b_{c_x}
+        dst[3 * H + h] = hh_n;         // b_{c_h}
+    }
+}
+
 /**
- * @brief Optimized oneDNN GRU forward pass
+ * @brief Optimized oneDNN GRU forward pass (linear-before-reset / LBR GRU).
+ *
+ * @param bias_ih (3*hidden) input-to-hidden bias in Tenzor [r,z,n] order, or
+ *                nullptr. @param bias_hh recurrent bias, same layout, or
+ *                nullptr. The two are mapped into oneDNN's 4-term LBR bias so
+ *                the recurrent new-gate bias stays INSIDE the reset multiply
+ *                (see pack_lbr_gru_bias), matching the CPU reference.
  */
 inline bool gru_forward_onednn(
     const float* input,     // (seq_len, batch, input_size)
     const float* W_ih,      // (3*hidden, input_size)
     const float* W_hh,      // (3*hidden, hidden)
-    const float* bias,      // (3*hidden) or nullptr
+    const float* bias_ih,   // (3*hidden) [r,z,n] or nullptr
+    const float* bias_hh,   // (3*hidden) [r,z,n] or nullptr
     const float* h0,        // (batch, hidden)
     float* output,          // (seq_len, batch, hidden)
     float* h_n,             // (batch, hidden)
@@ -846,7 +906,7 @@ inline bool gru_forward_onednn(
         auto& stream = get_stream();
         auto& cached = get_gru_cached();
 
-        bool has_bias = (bias != nullptr);
+        bool has_bias = (bias_ih != nullptr) || (bias_hh != nullptr);
 
         // GRU has 3 gates: W_ih is (3*hidden, input), W_hh is (3*hidden, hidden).
         const uint64_t weight_fp = compute_weight_fingerprint(
@@ -872,7 +932,8 @@ inline bool gru_forward_onednn(
             dnnl::memory::dims src_iter_dims = {1, 1, batch, hidden_size};
             dnnl::memory::dims weights_layer_dims = {1, 1, input_size, 3, hidden_size};
             dnnl::memory::dims weights_iter_dims = {1, 1, hidden_size, 3, hidden_size};
-            dnnl::memory::dims bias_dims = {1, 1, 3, hidden_size};
+            // LBR GRU bias has 4 sub-tensors: [b_u, b_r, b_{c_x}, b_{c_h}].
+            dnnl::memory::dims bias_dims = {1, 1, 4, hidden_size};
             dnnl::memory::dims dst_layer_dims = {seq_len, batch, hidden_size};
             dnnl::memory::dims dst_iter_dims = {1, 1, batch, hidden_size};
 
@@ -893,7 +954,7 @@ inline bool gru_forward_onednn(
             auto bias_md = dnnl::memory::desc(bias_dims, dnnl::memory::data_type::f32,
                                                dnnl::memory::format_tag::ldgo);
 
-            cached->pd = dnnl::gru_forward::primitive_desc(
+            cached->pd = dnnl::lbr_gru_forward::primitive_desc(
                 engine,
                 dnnl::prop_kind::forward_inference,
                 dnnl::rnn_direction::unidirectional_left2right,
@@ -906,7 +967,7 @@ inline bool gru_forward_onednn(
                 cached->dst_iter_md
             );
 
-            cached->prim = dnnl::gru_forward(cached->pd);
+            cached->prim = dnnl::lbr_gru_forward(cached->pd);
 
             cached->weights_layer_mem = dnnl::memory(cached->pd.weights_layer_desc(), engine);
             cached->weights_iter_mem = dnnl::memory(cached->pd.weights_iter_desc(), engine);
@@ -947,10 +1008,15 @@ inline bool gru_forward_onednn(
                            w_iter_ldigo.data(), w_iter_ldigo.size() * sizeof(float));
             }
 
+            // LBR GRU always consumes a 4-term bias; pack (or zero) it from the
+            // Tenzor [r,z,n] bias_ih / bias_hh so the recurrent new-gate bias
+            // lands inside the reset multiply.
             if (has_bias) {
-                std::memcpy(cached->bias_mem.get_data_handle(), bias, 3 * hidden_size * sizeof(float));
+                pack_lbr_gru_bias(bias_ih, bias_hh,
+                                  static_cast<float*>(cached->bias_mem.get_data_handle()),
+                                  hidden_size);
             } else {
-                std::memset(cached->bias_mem.get_data_handle(), 0, 3 * hidden_size * sizeof(float));
+                std::memset(cached->bias_mem.get_data_handle(), 0, 4 * hidden_size * sizeof(float));
             }
 
             stream.wait();
@@ -1208,9 +1274,10 @@ struct GRUMultiLayerCachedPrimitive {
     // For layer 0 (potentially different input_size)
     std::shared_ptr<GRUCachedPrimitive> layer0_cache;
 
-    // For layers 1+ (fused, all have hidden_size as input)
-    dnnl::gru_forward prim;
-    dnnl::gru_forward::primitive_desc pd;
+    // For layers 1+ (fused, all have hidden_size as input).
+    // LBR GRU (linear_before_reset=1) — see GRUCachedPrimitive for rationale.
+    dnnl::lbr_gru_forward prim;
+    dnnl::lbr_gru_forward::primitive_desc pd;
     bool has_fused_layers = false;
 
     dnnl::memory weights_layer_mem;
@@ -1301,10 +1368,14 @@ inline bool gru_multilayer_forward_onednn(
         return false;
     }
 
-    // For single layer, delegate to optimized single-layer kernel
+    // For single layer, delegate to optimized single-layer kernel.
+    // The multi-layer caller carries only a single (fused) bias per layer in
+    // bias_list (the input-to-hidden bias); there is no separate recurrent
+    // bias_hh at this entry point, so pass nullptr for bias_hh.
     if (num_layers == 1) {
         return gru_forward_onednn(
-            input, W_ih_list[0], W_hh_list[0], bias_list.empty() ? nullptr : bias_list[0],
+            input, W_ih_list[0], W_hh_list[0],
+            bias_list.empty() ? nullptr : bias_list[0], nullptr,
             h0, output, h_n, seq_len, batch, input_size, hidden_size
         );
     }
@@ -1358,7 +1429,8 @@ inline bool gru_multilayer_forward_onednn(
                 dnnl::memory::dims src_iter_dims = {fused_layers, 1, batch, hidden_size};
                 dnnl::memory::dims weights_layer_dims = {fused_layers, 1, fused_input_size, 3, hidden_size};
                 dnnl::memory::dims weights_iter_dims = {fused_layers, 1, hidden_size, 3, hidden_size};
-                dnnl::memory::dims bias_dims = {fused_layers, 1, 3, hidden_size};
+                // LBR GRU bias has 4 sub-tensors per layer: [b_u, b_r, b_cx, b_ch].
+                dnnl::memory::dims bias_dims = {fused_layers, 1, 4, hidden_size};
                 dnnl::memory::dims dst_layer_dims = {seq_len, batch, hidden_size};
                 dnnl::memory::dims dst_iter_dims = {fused_layers, 1, batch, hidden_size};
 
@@ -1378,7 +1450,7 @@ inline bool gru_multilayer_forward_onednn(
                 auto dst_iter_md = dnnl::memory::desc(dst_iter_dims, dnnl::memory::data_type::f32,
                                                        dnnl::memory::format_tag::ldnc);
 
-                cached->pd = dnnl::gru_forward::primitive_desc(
+                cached->pd = dnnl::lbr_gru_forward::primitive_desc(
                     engine,
                     dnnl::prop_kind::forward_inference,
                     dnnl::rnn_direction::unidirectional_left2right,
@@ -1387,7 +1459,7 @@ inline bool gru_multilayer_forward_onednn(
                     dst_layer_md, dst_iter_md
                 );
 
-                cached->prim = dnnl::gru_forward(cached->pd);
+                cached->prim = dnnl::lbr_gru_forward(cached->pd);
 
                 // Allocate memories
                 cached->weights_layer_mem = dnnl::memory(cached->pd.weights_layer_desc(), engine);
@@ -1407,7 +1479,8 @@ inline bool gru_multilayer_forward_onednn(
 
                 std::vector<float> w_layer_packed(fused_layers * w_layer_size);
                 std::vector<float> w_iter_packed(fused_layers * w_iter_size);
-                std::vector<float> bias_packed(fused_layers * 3 * hidden_size);
+                // LBR GRU bias is 4 sub-tensors per layer.
+                std::vector<float> bias_packed(fused_layers * 4 * hidden_size);
 
                 for (int64_t l = 0; l < fused_layers; ++l) {
                     int64_t src_layer = start_layer + l;
@@ -1425,13 +1498,14 @@ inline bool gru_multilayer_forward_onednn(
                         hidden_size, hidden_size
                     );
 
-                    // Pack bias
-                    if (has_bias) {
-                        std::memcpy(bias_packed.data() + l * 3 * hidden_size,
-                                   bias_list[src_layer], 3 * hidden_size * sizeof(float));
+                    // Pack the LBR 4-term bias from this layer's [r,z,n] bias_ih.
+                    // The multi-layer entry point has no separate recurrent
+                    // bias_hh, so b_{c_h} packs to zero (bias_hh=nullptr).
+                    float* dst_bias = bias_packed.data() + l * 4 * hidden_size;
+                    if (has_bias && bias_list[src_layer] != nullptr) {
+                        pack_lbr_gru_bias(bias_list[src_layer], nullptr, dst_bias, hidden_size);
                     } else {
-                        std::memset(bias_packed.data() + l * 3 * hidden_size,
-                                   0, 3 * hidden_size * sizeof(float));
+                        std::memset(dst_bias, 0, 4 * hidden_size * sizeof(float));
                     }
                 }
 
@@ -1483,7 +1557,7 @@ inline bool gru_multilayer_forward_onednn(
             bool layer0_ok = gru_forward_onednn(
                 input,
                 W_ih_list[0], W_hh_list[0],
-                has_bias ? bias_list[0] : nullptr,
+                has_bias ? bias_list[0] : nullptr, nullptr,
                 h0,  // First layer's h0
                 intermediate_output.data(),
                 intermediate_h.data(),

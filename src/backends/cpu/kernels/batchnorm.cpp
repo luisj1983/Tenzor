@@ -177,28 +177,35 @@ void batchnorm_mean_var_impl(const T* input,
 
     // Compute mean and variance for each channel using Welford's online algorithm.
     // Single-pass, numerically stable (no catastrophic cancellation for large N*H*W).
+    // Accumulate Welford's stats in a float accumulator for half types
+    // (Float16/BFloat16); running the mean/variance recurrence in half loses
+    // precision and can overflow (Float16 max ~65504), diverging from the CPU
+    // float reference. For float/double, Acc == T (behavior unchanged).
+    using Acc = std::conditional_t<
+        std::is_same_v<T, Float16> || std::is_same_v<T, BFloat16>, float, T>;
+
     #pragma omp parallel for num_threads(final_threads) if(C > 1)
     for (int64_t c = 0; c < C; c++) {
-        T channel_mean = T(0);
-        T m2 = T(0);  // sum of squared deviations from running mean
+        Acc channel_mean = Acc(0);
+        Acc m2 = Acc(0);  // sum of squared deviations from running mean
         int64_t count = 0;
 
         for (int64_t n = 0; n < N; n++) {
             const T* ch_ptr = input + (n * C + c) * spatial_size;
             for (int64_t hw = 0; hw < spatial_size; hw++) {
                 ++count;
-                T delta = ch_ptr[hw] - channel_mean;
-                // Divide in T precision; casting count through float first
+                Acc delta = static_cast<Acc>(ch_ptr[hw]) - channel_mean;
+                // Divide in Acc precision; casting count through float first
                 // rounds integer counts > 2^24, silently degrading the
                 // Float64 (T=double) path on large per-channel element counts.
-                channel_mean += delta / static_cast<T>(count);
-                T delta2 = ch_ptr[hw] - channel_mean;
+                channel_mean += delta / static_cast<Acc>(count);
+                Acc delta2 = static_cast<Acc>(ch_ptr[hw]) - channel_mean;
                 m2 += delta * delta2;
             }
         }
 
-        mean[c] = channel_mean;
-        variance[c] = m2 / static_cast<T>(total_elements);
+        mean[c] = static_cast<T>(channel_mean);
+        variance[c] = static_cast<T>(m2 / static_cast<Acc>(total_elements));
     }
 }
 
