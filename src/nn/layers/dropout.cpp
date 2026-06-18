@@ -427,9 +427,13 @@ auto AlphaDropout::forward_impl(const Variable& input) -> Variable {
     const double scale = 1.0507009873554804934193349852946;
     const double alpha_p = -alpha * scale;  // approximately -1.7581
 
-    // Affine transformation parameters to maintain mean=0, var=1
-    const double a = std::sqrt((1.0 - p_) * (1.0 + p_ * alpha_p * alpha_p));
-    const double b = -a * alpha_p * p_ / (1.0 - p_);
+    // Affine transformation parameters to maintain mean=0, var=1.
+    // At p == 1.0 every unit is dropped: a = sqrt(0) = 0 and the b expression
+    // would divide by (1 - p) == 0. Guard it so the degenerate all-dropped
+    // output is the finite constant a*alpha_p + b = 0 (zeros) instead of NaN.
+    const double keep = 1.0 - p_;
+    const double a = std::sqrt(keep * (1.0 + p_ * alpha_p * alpha_p));
+    const double b = (keep > 0.0) ? (-a * alpha_p * p_ / keep) : 0.0;
 
     // Generate random mask directly on target device
     auto shape_span = input.tensor().shape();

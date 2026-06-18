@@ -214,6 +214,13 @@ auto NCCLBackend::reduce(Tensor& tensor, int dst_rank, ReduceOp op) -> void {
     ));
 
     GPU_CHECK(cudaDeviceSynchronize());
+
+    // NCCL has no native AVG op (ReduceOp::AVG maps to ncclSum); only the
+    // destination rank holds the reduced result, so divide there to get the
+    // mean. Non-root ranks keep their unchanged local tensor.
+    if (op == ReduceOp::AVG && rank_ == dst_rank) {
+        tensor = tensor / static_cast<float>(world_size_);
+    }
 #else
     throw NotImplementedError("NCCLBackend: NCCL not available");
 #endif

@@ -1027,9 +1027,10 @@ auto logit(const Tensor& input, double eps) -> Tensor {
 }
 
 auto signbit(const Tensor& input) -> Tensor {
-    // Returns true for negative values (including -0.0)
-    Tensor zero = zeros_like(input);
-    return lt(input, zero);
+    // Reflects the sign BIT, not value < 0: signbit(-0.0) is true and
+    // signbit(negative NaN) is true, neither of which `lt(input, 0)` captures.
+    // Dispatch the dedicated Signbit kernel (std::signbit semantics).
+    return detail::unary_op<OpId::Signbit>(input);
 }
 
 auto float_power(const Tensor& base, const Tensor& exponent) -> Tensor {

@@ -212,6 +212,13 @@ auto MPIBackend::reduce(Tensor& tensor, int dst_rank, ReduceOp op) -> void {
     }
 
     copy_back_if_staged(tensor, host_buf);
+
+    // MPI has no AVG collective (ReduceOp::AVG maps to MPI_SUM); only the
+    // destination rank holds the reduced result, so divide there to get the
+    // mean. Non-root ranks keep their unchanged local tensor.
+    if (op == ReduceOp::AVG && rank_ == dst_rank) {
+        tensor = tensor / static_cast<float>(world_size_);
+    }
 }
 
 auto MPIBackend::all_gather(const Tensor& tensor, std::vector<Tensor>& output) -> void {
