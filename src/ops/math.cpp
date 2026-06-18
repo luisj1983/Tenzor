@@ -1243,9 +1243,29 @@ auto frexp(const Tensor& input) -> std::pair<Tensor, Tensor> {
     Tensor is_zero = eq(input, zeros_like(input));
     exponent_f = where(is_zero, zeros_like(exponent_f), exponent_f);
 
-    Tensor exponent = exponent_f.to(DType::Int32);
     // mantissa = x * 2^(-exponent)
     Tensor mantissa = input * exp2(neg(exponent_f));
+
+    // log2-based reconstruction can land mantissa exactly on a boundary for
+    // values near a power of two (e.g. log2(4.0) rounding to 1.9999999 yields
+    // floor=1, exponent=2, mantissa=1.0). std::frexp guarantees the mantissa
+    // magnitude lies in [0.5, 1.0); correct the boundary cases so we match.
+    //   |mantissa| >= 1.0  -> mantissa /= 2, exponent += 1
+    //   0 < |mantissa| < 0.5 -> mantissa *= 2, exponent -= 1
+    Tensor abs_mant = abs(mantissa);
+    Tensor too_big = ge(abs_mant, full_like(abs_mant, 1.0));
+    mantissa = where(too_big, mantissa * full_like(mantissa, 0.5), mantissa);
+    exponent_f = where(too_big, exponent_f + ones_like(exponent_f), exponent_f);
+
+    abs_mant = abs(mantissa);
+    Tensor too_small = logical_and(lt(abs_mant, full_like(abs_mant, 0.5)),
+                                   logical_not(is_zero));
+    mantissa = where(too_small, mantissa * full_like(mantissa, 2.0), mantissa);
+    exponent_f = where(too_small, exponent_f - ones_like(exponent_f), exponent_f);
+
+    // For zero input, exponent and mantissa should be 0
+    exponent_f = where(is_zero, zeros_like(exponent_f), exponent_f);
+    Tensor exponent = exponent_f.to(DType::Int32);
     // For zero input, mantissa should be 0
     mantissa = where(is_zero, zeros_like(mantissa), mantissa);
 

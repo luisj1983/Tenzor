@@ -341,22 +341,28 @@ void fallback_csr_spmm(const int64_t* crow_ptr, const int64_t* col_ptr,
             }
         }
     } else {
-        // Half-precision path: per-row F32 scratch accumulator (per-element
-        // allocation on stack via a small heap buffer for the row); narrow to
-        // T at end-of-row. This is the standard half-precision sparse pattern.
-        #pragma omp parallel for schedule(static) if(M > 64)
-        for (int64_t row = 0; row < M; ++row) {
-            T* c_row = C + row * N;
-            std::vector<Acc> acc(N, Acc(0));
-            for (int64_t j = crow_ptr[row]; j < crow_ptr[row + 1]; ++j) {
-                int64_t col = col_ptr[j];
-                Acc val = static_cast<Acc>(vals[j]);
-                const T* b_row = B + col * N;
-                for (int64_t n = 0; n < N; ++n) {
-                    acc[n] += val * static_cast<Acc>(b_row[n]);
+        // Half-precision path: accumulate each row in an F32 scratch buffer and
+        // narrow to T at end-of-row. Allocate ONE scratch buffer per thread
+        // outside the row loop (mirroring the COO SpMM half-path), zeroing it at
+        // the start of each row — rather than heap-allocating a std::vector per
+        // row, which would be M allocations of size N on the hot path.
+        #pragma omp parallel
+        {
+            std::vector<Acc> acc(static_cast<size_t>(N), Acc(0));
+            #pragma omp for schedule(static)
+            for (int64_t row = 0; row < M; ++row) {
+                T* c_row = C + row * N;
+                for (int64_t n = 0; n < N; ++n) acc[static_cast<size_t>(n)] = Acc(0);
+                for (int64_t j = crow_ptr[row]; j < crow_ptr[row + 1]; ++j) {
+                    int64_t col = col_ptr[j];
+                    Acc val = static_cast<Acc>(vals[j]);
+                    const T* b_row = B + col * N;
+                    for (int64_t n = 0; n < N; ++n) {
+                        acc[static_cast<size_t>(n)] += val * static_cast<Acc>(b_row[n]);
+                    }
                 }
+                for (int64_t n = 0; n < N; ++n) c_row[n] = static_cast<T>(acc[static_cast<size_t>(n)]);
             }
-            for (int64_t n = 0; n < N; ++n) c_row[n] = static_cast<T>(acc[n]);
         }
     }
 }
@@ -1009,6 +1015,22 @@ auto add(const SparseTensor& sparse, const Tensor& dense) -> Tensor {
     // the dense operand's device (or sparse's if dense is on CPU) so GPU
     // dense tensors don't silently get added to CPU sparse densifications.
     if (common_dtype == DType::Float16 || common_dtype == DType::BFloat16) {
+        // Reject shape-mismatched operands here too. tenzor::add broadcasts
+        // NumPy-style, so without this guard a mismatched dense operand would
+        // silently broadcast — accepting shapes that every other dtype rejects
+        // via the CPU path's numel check below.
+        const auto& sp_shape_chk = sparse.shape();
+        auto dn_shape_chk = dense.shape();
+        bool shape_eq = (static_cast<int64_t>(sp_shape_chk.size()) ==
+                         static_cast<int64_t>(dn_shape_chk.size()));
+        if (shape_eq) {
+            for (size_t i = 0; i < sp_shape_chk.size(); ++i) {
+                if (sp_shape_chk[i] != dn_shape_chk[i]) { shape_eq = false; break; }
+            }
+        }
+        if (!shape_eq) {
+            throw std::runtime_error("sparse::add: shape mismatch");
+        }
         Device target_dev = (dense.device().type != Device::Type::CPU)
                                 ? dense.device()
                                 : sparse.device();
@@ -1774,7 +1796,12 @@ auto sparse_softmax(const SparseTensor& sparse) -> SparseTensor {
         throw std::runtime_error("sparse_softmax: unsupported dtype");
     }
 
-    return SparseTensor::sparse_csr(crow, col, out_vals, shape);
+    // Return the contiguous crow that was actually used for the compute and a
+    // contiguous col, so value index j aligns positionally with column j and
+    // sparse_csr validation reads row-major-contiguous memory. Returning the
+    // original (possibly non-contiguous) crow/col would mis-align out_vals
+    // (laid out in compacted element order) against the column indices.
+    return SparseTensor::sparse_csr(crow_cpu, col.contiguous(), out_vals, shape);
 }
 
 // ============================================================================
@@ -1880,7 +1907,12 @@ auto sparse_log_softmax(const SparseTensor& sparse) -> SparseTensor {
         throw std::runtime_error("sparse_log_softmax: unsupported dtype");
     }
 
-    return SparseTensor::sparse_csr(crow, col, out_vals, shape);
+    // Return the contiguous crow that was actually used for the compute and a
+    // contiguous col, so value index j aligns positionally with column j and
+    // sparse_csr validation reads row-major-contiguous memory. Returning the
+    // original (possibly non-contiguous) crow/col would mis-align out_vals
+    // (laid out in compacted element order) against the column indices.
+    return SparseTensor::sparse_csr(crow_cpu, col.contiguous(), out_vals, shape);
 }
 
 } // namespace sparse

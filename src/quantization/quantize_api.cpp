@@ -399,39 +399,14 @@ auto calibrate(
         auto output = model.forward(Variable(calibration_data[i], false));
     }
 
-    // Extract quantization parameters from FakeQuantize observer modules
-    // Traverse submodules to find FakeQuantize instances
-    auto submodules = model.get_submodules();
-    for (const auto& [name, submodule] : submodules) {
-        if (auto fq = std::dynamic_pointer_cast<nn::quantization::FakeQuantize>(submodule)) {
-            if (fq->observer() && fq->observer()->has_data()) {
-                auto qparams = fq->observer()->calculate_qparams(
-                    nn::quantization::QuantDType::INT8,
-                    nn::quantization::QuantizationScheme::PerTensorSymmetric
-                );
-                params_map.insert_or_assign(name, std::move(qparams));
-            }
-        }
-        // Recurse into Sequential containers
-        if (auto seq = std::dynamic_pointer_cast<nn::Sequential>(submodule)) {
-            int idx = 0;
-            for (const auto& child : seq->modules()) {
-                if (auto fq = std::dynamic_pointer_cast<nn::quantization::FakeQuantize>(child)) {
-                    if (fq->observer() && fq->observer()->has_data()) {
-                        auto qparams = fq->observer()->calculate_qparams(
-                            nn::quantization::QuantDType::INT8,
-                            nn::quantization::QuantizationScheme::PerTensorSymmetric
-                        );
-                        std::string key = name + "." + std::to_string(idx);
-                        params_map.insert_or_assign(key, std::move(qparams));
-                    }
-                }
-                ++idx;
-            }
-        }
-    }
-
-    // Also check if model itself is Sequential
+    // Extract quantization parameters from FakeQuantize observer modules.
+    // Pick exactly ONE traversal source so each FakeQuantize observer is
+    // recorded under a single key. If the model itself is a Sequential, iterate
+    // its children positionally; otherwise walk the registered submodule map
+    // (recursing into any Sequential children). Previously both ran for a
+    // Sequential model, recording every FakeQuantize twice under unrelated keys
+    // (e.g. both "module_3" and "3"), inflating the count and making lookups
+    // ambiguous.
     if (auto* seq = dynamic_cast<nn::Sequential*>(&model)) {
         int idx = 0;
         for (const auto& child : seq->modules()) {
@@ -445,6 +420,36 @@ auto calibrate(
                 }
             }
             ++idx;
+        }
+    } else {
+        auto submodules = model.get_submodules();
+        for (const auto& [name, submodule] : submodules) {
+            if (auto fq = std::dynamic_pointer_cast<nn::quantization::FakeQuantize>(submodule)) {
+                if (fq->observer() && fq->observer()->has_data()) {
+                    auto qparams = fq->observer()->calculate_qparams(
+                        nn::quantization::QuantDType::INT8,
+                        nn::quantization::QuantizationScheme::PerTensorSymmetric
+                    );
+                    params_map.insert_or_assign(name, std::move(qparams));
+                }
+            }
+            // Recurse into Sequential containers
+            if (auto seq = std::dynamic_pointer_cast<nn::Sequential>(submodule)) {
+                int idx = 0;
+                for (const auto& child : seq->modules()) {
+                    if (auto fq = std::dynamic_pointer_cast<nn::quantization::FakeQuantize>(child)) {
+                        if (fq->observer() && fq->observer()->has_data()) {
+                            auto qparams = fq->observer()->calculate_qparams(
+                                nn::quantization::QuantDType::INT8,
+                                nn::quantization::QuantizationScheme::PerTensorSymmetric
+                            );
+                            std::string key = name + "." + std::to_string(idx);
+                            params_map.insert_or_assign(key, std::move(qparams));
+                        }
+                    }
+                    ++idx;
+                }
+            }
         }
     }
 

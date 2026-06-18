@@ -164,10 +164,13 @@ extern "C" __global__ void fused_reduction_kernel(
     )" << T << R"(* __restrict__ output,
     int64_t outer_size, int64_t reduce_size, int64_t inner_size) {
 
-    // Grid: (outer_size * inner_size) blocks, 256 threads each
-    int idx = blockIdx.x;
-    int outer = idx / inner_size;
-    int inner = idx % inner_size;
+    // Grid: (outer_size * inner_size) blocks, 256 threads each. Decode the block
+    // index in int64_t: outer_size*inner_size can exceed INT_MAX, and a 32-bit
+    // idx would wrap and select the wrong (outer, inner) slice. The 2D term keeps
+    // the decode correct even if the grid is launched as (gridDim.x, gridDim.y).
+    int64_t idx = static_cast<int64_t>(blockIdx.x) + static_cast<int64_t>(gridDim.x) * blockIdx.y;
+    int64_t outer = idx / inner_size;
+    int64_t inner = idx % inner_size;
     if (outer >= outer_size) return;
 
     // Each block reduces one (outer, inner) slice. Accumulate in the compute
@@ -345,11 +348,14 @@ extern "C" __global__ void fused_softmax_kernel(
     __syncthreads();
     )" << C << R"( row_max = shared_max[0];
 
-    // Pass 2: compute exp(x - max) and sum
+    // Pass 2: compute exp(x - max) and sum. Do NOT stage the exp() numerators
+    // through the (possibly fp16) output buffer: truncating exp(x-max) to T and
+    // reading it back in pass 3 would normalize an already-rounded numerator and
+    // diverge from the float reference. Keep the running sum in the compute type
+    // and recompute exp() from the untouched input in pass 3.
     )" << C << R"( thread_sum = 0;
     for (int c = threadIdx.x; c < cols; c += blockDim.x) {
         )" << C << R"( val = )" << exp_fn << R"((static_cast<)" << C << R"(>(row_input[c]) - row_max);
-        row_output[c] = static_cast<)" << T << R"(>(val);  // Store intermediate exp values
         thread_sum += val;
     }
 
@@ -372,9 +378,11 @@ extern "C" __global__ void fused_softmax_kernel(
     __syncthreads();
     )" << C << R"( inv_sum = 1.0)" << F << R"( / shared_sum[0];
 
-    // Pass 3: normalize
+    // Pass 3: recompute exp(x - max) in the compute type and normalize. The
+    // numerator stays in C until the single final narrowing store to T.
     for (int c = threadIdx.x; c < cols; c += blockDim.x) {
-        row_output[c] = static_cast<)" << T << R"(>(static_cast<)" << C << R"(>(row_output[c]) * inv_sum);
+        )" << C << R"( val = )" << exp_fn << R"((static_cast<)" << C << R"(>(row_input[c]) - row_max);
+        row_output[c] = static_cast<)" << T << R"(>(val * inv_sum);
     }
 }
 )";

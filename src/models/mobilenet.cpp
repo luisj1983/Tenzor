@@ -96,14 +96,19 @@ InvertedResidual::InvertedResidual(int64_t in_channels,
                                    int64_t kernel_size,
                                    bool use_se,
                                    bool use_hs,
-                                   int64_t dilation)
+                                   int64_t dilation,
+                                   int64_t hidden_dim_arg)
     // Atrous trick: when dilation > 1 the effective stride is *always* 1
     // (the dilation replaces the stride), so the spatial size is preserved.
     // The residual path is therefore safe to use as long as channel counts
     // match — same condition as a regular stride-1 block.
     : use_residual_(((dilation > 1) ? 1 : stride) == 1 && in_channels == out_channels) {
 
-    int64_t hidden_dim = in_channels * expand_ratio;
+    // Use the explicit expanded width when provided (hidden_dim_arg > 0); this
+    // preserves the intended channel schedule even when the expanded size is not
+    // an exact multiple of in_channels. Otherwise derive it from the ratio.
+    int64_t hidden_dim = (hidden_dim_arg > 0) ? hidden_dim_arg
+                                              : in_channels * expand_ratio;
     // For atrous convs the receptive field grows: padding must be
     // dilation * (k-1) / 2 to keep the output spatial size unchanged.
     int64_t effective_stride = (dilation > 1) ? 1 : stride;
@@ -111,8 +116,11 @@ InvertedResidual::InvertedResidual(int64_t in_channels,
 
     conv_ = std::make_shared<nn::Sequential>();
 
-    // Expansion phase (only if expand_ratio != 1)
-    if (expand_ratio != 1) {
+    // Expansion phase (only when the hidden dim actually widens the input).
+    // Using hidden_dim != in_channels covers both the ratio-derived path
+    // (expand_ratio == 1 => hidden_dim == in_channels) and the explicit
+    // hidden_dim path.
+    if (hidden_dim != in_channels) {
         // 1×1 pointwise conv
         auto pw_conv = std::make_shared<nn::Conv2d>(
             in_channels, hidden_dim, 1, 1, 0, 1, 1, false);
@@ -444,11 +452,18 @@ MobileNetV3::MobileNetV3(int64_t num_classes,
         bool use_hs = layer_config[4] != 0;
         int64_t stride = layer_config[5];
 
+        // expand_ratio is kept only for the expansion-vs-passthrough decision
+        // path inside the block; the actual expanded width is threaded through
+        // explicitly as hidden_dim so it equals make_divisible(exp_size*width_mult, 8)
+        // exactly, rather than in_channels*floor(exp_size/in_channels) which
+        // truncates whenever exp_size is not an exact multiple of input_channels
+        // (any width_mult != 1.0).
         int64_t expand_ratio = exp_size / input_channels;
 
         auto block = std::make_shared<InvertedResidual>(
             input_channels, out_channels, stride,
-            expand_ratio, kernel, use_se, use_hs);
+            expand_ratio, kernel, use_se, use_hs,
+            /*dilation=*/1, /*hidden_dim=*/exp_size);
         features_->add_module(block);
 
         input_channels = out_channels;

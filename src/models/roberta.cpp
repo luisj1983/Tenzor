@@ -247,48 +247,15 @@ auto RobertaForQuestionAnswering::forward(const Variable& input_ids,
     // Predict start and end logits
     auto logits = qa_outputs_->forward(sequence_output);
 
-    // Split into start and end logits while preserving gradients
-    // logits: [batch, seq_len, 2]
-    auto shape = logits.shape();
-    int64_t batch_size = shape[0];
-    int64_t seq_len = shape[1];
-
-    // Reshape to [batch * seq_len, 2]
-    auto reshaped = tenzor::reshape(logits, {batch_size * seq_len, 2});
-
-    // Create selection matrices to extract start and end logits
-    // Use the same dtype as logits for consistency
-    auto dtype = logits.tensor().dtype();
-
-    // Start logits: multiply by [1, 0]
-    // Create selector in Float32 then convert to target dtype for Float16 compatibility
-    Tensor start_selector(std::vector<int64_t>{2, 1}, DType::Float32, Device::cpu());
-    start_selector.zero_();
-    start_selector.data<float>()[0] = 1.0f;
-    if (dtype != DType::Float32) {
-        start_selector = start_selector.to(dtype);
-    }
-    start_selector = start_selector.to(logits.tensor().device());
-
-    // End logits: multiply by [0, 1]
-    Tensor end_selector(std::vector<int64_t>{2, 1}, DType::Float32, Device::cpu());
-    end_selector.zero_();
-    end_selector.data<float>()[1] = 1.0f;
-    if (dtype != DType::Float32) {
-        end_selector = end_selector.to(dtype);
-    }
-    end_selector = end_selector.to(logits.tensor().device());
-
-    // Use matmul to select: [batch*seq_len, 2] @ [2, 1] = [batch*seq_len, 1]
-    Variable start_selector_var(start_selector, false);
-    Variable end_selector_var(end_selector, false);
-
-    auto start_flat = tenzor::matmul(reshaped, start_selector_var);  // [batch*seq_len, 1]
-    auto end_flat = tenzor::matmul(reshaped, end_selector_var);      // [batch*seq_len, 1]
-
-    // Reshape back to [batch, seq_len]
-    auto start_logits = tenzor::reshape(start_flat, {batch_size, seq_len});
-    auto end_logits = tenzor::reshape(end_flat, {batch_size, seq_len});
+    // Split into start and end logits while preserving gradients.
+    // logits: [batch, seq_len, 2]. Extract channel 0 (start) and channel 1
+    // (end) via autograd-aware slice + squeeze on the last dim. This preserves
+    // the grad_fn chain and sidesteps the old selection-matrix path (which only
+    // filled Float32/Float64/Float16 selectors, produced an all-zero selector
+    // for BFloat16, and added an unnecessary matmul) — matching the sibling
+    // BertForQuestionAnswering / ElectraForQuestionAnswering heads.
+    auto start_logits = tenzor::squeeze(tenzor::slice(logits, 2, 0, 1), 2);  // [batch, seq_len]
+    auto end_logits   = tenzor::squeeze(tenzor::slice(logits, 2, 1, 2), 2);  // [batch, seq_len]
 
     // Call forward post-hooks (enables CPU-start offloading)
     call_forward_post_hooks();

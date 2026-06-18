@@ -62,7 +62,7 @@ auto mean(const Tensor& input, std::optional<int64_t> dim, bool keepdim) -> Tens
 
 auto max(const Tensor& input, std::optional<int64_t> dim, bool keepdim) -> Tensor {
     NewOpAttributes attrs;
-    if (dim.has_value()) attrs.set(AttrKey::Dim, *dim);
+    if (dim.has_value()) attrs.set(AttrKey::Dim, normalize_reduce_dim(*dim, static_cast<int64_t>(input.shape().size()), "max"));
     attrs.set(AttrKey::Keepdim, keepdim);
     std::vector<Tensor> inputs = {input};
     return dispatch(OpId::Max, inputs, attrs)[0];
@@ -70,7 +70,7 @@ auto max(const Tensor& input, std::optional<int64_t> dim, bool keepdim) -> Tenso
 
 auto min(const Tensor& input, std::optional<int64_t> dim, bool keepdim) -> Tensor {
     NewOpAttributes attrs;
-    if (dim.has_value()) attrs.set(AttrKey::Dim, *dim);
+    if (dim.has_value()) attrs.set(AttrKey::Dim, normalize_reduce_dim(*dim, static_cast<int64_t>(input.shape().size()), "min"));
     attrs.set(AttrKey::Keepdim, keepdim);
     std::vector<Tensor> inputs = {input};
     return dispatch(OpId::Min, inputs, attrs)[0];
@@ -78,7 +78,7 @@ auto min(const Tensor& input, std::optional<int64_t> dim, bool keepdim) -> Tenso
 
 auto argmax(const Tensor& input, std::optional<int64_t> dim, bool keepdim) -> Tensor {
     NewOpAttributes attrs;
-    if (dim.has_value()) attrs.set(AttrKey::Dim, *dim);
+    if (dim.has_value()) attrs.set(AttrKey::Dim, normalize_reduce_dim(*dim, static_cast<int64_t>(input.shape().size()), "argmax"));
     attrs.set(AttrKey::Keepdim, keepdim);
     std::vector<Tensor> inputs = {input};
     return dispatch(OpId::ArgMax, inputs, attrs)[0];
@@ -86,7 +86,7 @@ auto argmax(const Tensor& input, std::optional<int64_t> dim, bool keepdim) -> Te
 
 auto argmin(const Tensor& input, std::optional<int64_t> dim, bool keepdim) -> Tensor {
     NewOpAttributes attrs;
-    if (dim.has_value()) attrs.set(AttrKey::Dim, *dim);
+    if (dim.has_value()) attrs.set(AttrKey::Dim, normalize_reduce_dim(*dim, static_cast<int64_t>(input.shape().size()), "argmin"));
     attrs.set(AttrKey::Keepdim, keepdim);
     std::vector<Tensor> inputs = {input};
     return dispatch(OpId::ArgMin, inputs, attrs)[0];
@@ -104,7 +104,7 @@ auto prod(const Tensor& input, std::optional<int64_t> dim, bool keepdim) -> Tens
     // Promote small integer types to Int64 to prevent overflow
     Tensor promoted = is_small_int_dtype(input.dtype()) ? input.to(DType::Int64) : input;
     NewOpAttributes attrs;
-    if (dim.has_value()) attrs.set(AttrKey::Dim, *dim);
+    if (dim.has_value()) attrs.set(AttrKey::Dim, normalize_reduce_dim(*dim, static_cast<int64_t>(input.shape().size()), "prod"));
     attrs.set(AttrKey::Keepdim, keepdim);
     std::vector<Tensor> inputs = {promoted};
     return dispatch(OpId::Prod, inputs, attrs)[0];
@@ -166,7 +166,7 @@ auto norm(const Tensor& input, float p, std::optional<int64_t> dim, bool keepdim
 
 auto any(const Tensor& input, std::optional<int64_t> dim, bool keepdim) -> Tensor {
     NewOpAttributes attrs;
-    if (dim.has_value()) attrs.set(AttrKey::Dim, *dim);
+    if (dim.has_value()) attrs.set(AttrKey::Dim, normalize_reduce_dim(*dim, static_cast<int64_t>(input.shape().size()), "any"));
     attrs.set(AttrKey::Keepdim, keepdim);
     std::vector<Tensor> inputs = {input};
     return dispatch(OpId::Any, inputs, attrs)[0];
@@ -174,7 +174,7 @@ auto any(const Tensor& input, std::optional<int64_t> dim, bool keepdim) -> Tenso
 
 auto all(const Tensor& input, std::optional<int64_t> dim, bool keepdim) -> Tensor {
     NewOpAttributes attrs;
-    if (dim.has_value()) attrs.set(AttrKey::Dim, *dim);
+    if (dim.has_value()) attrs.set(AttrKey::Dim, normalize_reduce_dim(*dim, static_cast<int64_t>(input.shape().size()), "all"));
     attrs.set(AttrKey::Keepdim, keepdim);
     std::vector<Tensor> inputs = {input};
     return dispatch(OpId::All, inputs, attrs)[0];
@@ -194,14 +194,16 @@ auto logsumexp(const Tensor& input_arg, int64_t dim, bool keepdim) -> Tensor {
                        ? input_arg
                        : input_arg.to(DType::Float32);
 
+    // Normalize the (possibly negative) reduction dim once up front so every
+    // downstream consumer — the fused-kernel dispatch (which passes dim raw to
+    // backends that assume non-negative) and the composite fallback — sees a
+    // guaranteed in-range axis.
+    dim = normalize_reduce_dim(dim, static_cast<int64_t>(input.shape().size()), "logsumexp");
+
     // Empty tensor: return empty with appropriate shape
     if (input.numel() == 0) {
         // For empty input, result shape collapses dim to 1 (keepdim) or removes it
         auto shape = std::vector<int64_t>(input.shape().begin(), input.shape().end());
-        if (dim < 0) dim += static_cast<int64_t>(shape.size());
-        if (dim < 0 || dim >= static_cast<int64_t>(shape.size())) {
-            throw std::out_of_range("logsumexp: dim out of range");
-        }
         if (keepdim) {
             shape[dim] = 1;
         } else {

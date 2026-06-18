@@ -191,6 +191,13 @@ public:
      *                 atrous convolution and force the effective spatial stride
      *                 to 1 (DeepLab-style trick — receptive field grows while
      *                 the feature-map resolution is preserved).
+     * @param hidden_dim Explicit expanded ("hidden") channel count. When 0
+     *                 (default) the hidden dim is derived as
+     *                 in_channels * expand_ratio. Pass the exact target width
+     *                 here when the schedule's expanded size is not an integer
+     *                 multiple of in_channels (e.g. MobileNetV3 with
+     *                 width_mult != 1.0, where independent make_divisible
+     *                 rounding breaks exact divisibility).
      */
     InvertedResidual(int64_t in_channels,
                      int64_t out_channels,
@@ -199,7 +206,8 @@ public:
                      int64_t kernel_size = 3,
                      bool use_se = false,
                      bool use_hs = false,
-                     int64_t dilation = 1);
+                     int64_t dilation = 1,
+                     int64_t hidden_dim = 0);
 
     auto forward_impl(const Variable& input) -> Variable override;
 

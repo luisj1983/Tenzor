@@ -469,8 +469,15 @@ auto CosineSimilarityBackward::backward(std::vector<Tensor> grad_outputs) -> std
 
     auto eps_t = full(std::vector<int64_t>(n1_sq.shape().begin(), n1_sq.shape().end()),
                       eps_, n1_sq.dtype(), n1_sq.device());
-    auto n1 = sqrt(tenzor::where(gt(n1_sq, eps_t), n1_sq, eps_t));
-    auto n2 = sqrt(tenzor::where(gt(n2_sq, eps_t), n2_sq, eps_t));
+    // Clamp the squared norms once, then derive BOTH the norms (sqrt path) and
+    // the squared-norm denominators from the same clamped values. Using the raw
+    // n1_sq/n2_sq in the `output * x / n_sq` term divides by ~0 for degenerate
+    // zero/near-zero rows and produces Inf/NaN gradients, diverging from the
+    // PyTorch reference which keeps everything consistently clamped.
+    auto n1_sq_c = tenzor::where(gt(n1_sq, eps_t), n1_sq, eps_t);
+    auto n2_sq_c = tenzor::where(gt(n2_sq, eps_t), n2_sq, eps_t);
+    auto n1 = sqrt(n1_sq_c);
+    auto n2 = sqrt(n2_sq_c);
     auto n1n2 = mul(n1, n2);
 
     // Expand grad and output to input shape
@@ -484,8 +491,8 @@ auto CosineSimilarityBackward::backward(std::vector<Tensor> grad_outputs) -> std
     output_expanded = expand(output_expanded, x1_shape);
 
     auto n1n2_expanded = expand(n1n2, x1_shape);
-    auto n1_sq_expanded = expand(n1_sq, x1_shape);
-    auto n2_sq_expanded = expand(n2_sq, x1_shape);
+    auto n1_sq_expanded = expand(n1_sq_c, x1_shape);
+    auto n2_sq_expanded = expand(n2_sq_c, x1_shape);
 
     // grad_x1 = grad * (x2 / (n1*n2) - cos_sim * x1 / n1^2)
     auto grad_x1 = mul(grad_expanded,
@@ -520,8 +527,12 @@ auto CosineSimilarityBackward::backward_with_variables(std::vector<Variable> gra
     auto n2_sq = tenzor::sum(mul(x2, x2), dim_, true);
     auto eps_t = full(std::vector<int64_t>(n1_sq.shape().begin(), n1_sq.shape().end()),
                       eps_, n1_sq.dtype(), n1_sq.device());
-    auto n1 = sqrt(tenzor::where(gt(n1_sq, eps_t), n1_sq, eps_t));
-    auto n2 = sqrt(tenzor::where(gt(n2_sq, eps_t), n2_sq, eps_t));
+    // Clamp squared norms once; derive both the sqrt norms and the squared-norm
+    // denominators from the clamped values (see CosineSimilarityBackward::backward).
+    auto n1_sq_c = tenzor::where(gt(n1_sq, eps_t), n1_sq, eps_t);
+    auto n2_sq_c = tenzor::where(gt(n2_sq, eps_t), n2_sq, eps_t);
+    auto n1 = sqrt(n1_sq_c);
+    auto n2 = sqrt(n2_sq_c);
     auto n1n2 = mul(n1, n2);
     auto output_expanded = output;
     if (output.ndim() < x1.ndim()) {
@@ -529,8 +540,8 @@ auto CosineSimilarityBackward::backward_with_variables(std::vector<Variable> gra
     }
     output_expanded = expand(output_expanded, x1_shape);
     auto n1n2_expanded = expand(n1n2, x1_shape);
-    auto n1_sq_expanded = expand(n1_sq, x1_shape);
-    auto n2_sq_expanded = expand(n2_sq, x1_shape);
+    auto n1_sq_expanded = expand(n1_sq_c, x1_shape);
+    auto n2_sq_expanded = expand(n2_sq_c, x1_shape);
 
     auto deriv1 = sub(div(x2, n1n2_expanded),
                       mul(output_expanded, div(x1, n1_sq_expanded)));

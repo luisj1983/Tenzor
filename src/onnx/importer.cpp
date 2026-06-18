@@ -362,6 +362,12 @@ auto onnx_to_dtype(ONNXDataType onnx_dtype) -> DType {
         case ONNXDataType::INT32: return DType::Int32;
         case ONNXDataType::INT64: return DType::Int64;
         case ONNXDataType::UINT8: return DType::UInt8;
+        // Symmetric with dtype_to_onnx, which emits UINT16/UINT32/UINT64 for the
+        // corresponding DTypes. Without these cases a model Tenzor itself
+        // exported with an unsigned dtype could not be round-tripped back.
+        case ONNXDataType::UINT16: return DType::UInt16;
+        case ONNXDataType::UINT32: return DType::UInt32;
+        case ONNXDataType::UINT64: return DType::UInt64;
         case ONNXDataType::BOOL: return DType::Bool;
         // ONNX opset 20+ Float8 variants. The IEEE FN encodings (E4M3FN /
         // E5M2) share Tenzor's FP8 bit layout, so the 8-bit pattern can be
