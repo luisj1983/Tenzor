@@ -2161,11 +2161,15 @@ void register_cuda_kernels(BackendDispatchTable& table) {
                 // never -1e9. The latter saturates to -65504 in FP16, leaving
                 // exp(-65504 + something) > 0 after softmax — leaks gradient
                 // mass through masked positions (audit Systemic #3, Vulkan C15).
-                int64_t seq_len = scores_shape[scores_shape.size() - 1];
-                Tensor rows = tenzor::arange(0, seq_len, 1, DType::Int64, scores.device());
-                Tensor cols = tenzor::arange(0, seq_len, 1, DType::Int64, scores.device());
-                rows = tenzor::reshape(rows, {seq_len, 1});
-                cols = tenzor::reshape(cols, {1, seq_len});
+                // scores is [BH, S_q, S_k]; use separate query/key extents so
+                // the causal mask is [S_q, S_k] (cross-attention / KV-cache
+                // decode have S_q != S_k). Mirrors the forward composed path.
+                int64_t S_q = scores_shape[scores_shape.size() - 2];
+                int64_t S_k = scores_shape[scores_shape.size() - 1];
+                Tensor rows = tenzor::arange(0, S_q, 1, DType::Int64, scores.device());
+                Tensor cols = tenzor::arange(0, S_k, 1, DType::Int64, scores.device());
+                rows = tenzor::reshape(rows, {S_q, 1});
+                cols = tenzor::reshape(cols, {1, S_k});
                 Tensor causal_mask = tenzor::gt(cols.to(DType::Float32), rows.to(DType::Float32));
                 Tensor neg_inf = tenzor::full(scores_shape,
                                               -std::numeric_limits<float>::infinity(),

@@ -44,6 +44,11 @@
 namespace tenzor {
 namespace cuda {
 
+// Defined later in this TU; declared here so ensure_csr_on_gpu (in the
+// anonymous namespace below) can coalesce duplicate COO coordinates before
+// coo2csr, matching the CPU reference's duplicate-summing semantics.
+SparseTensor cuda_coalesce(const SparseTensor& sparse);
+
 namespace {
 
 #ifndef CUDA_CHECK_SPARSE
@@ -239,6 +244,14 @@ SparseTensor ensure_csr_on_gpu(const SparseTensor& sparse, cudaStream_t stream =
 
     // Convert to CSR if in COO format — directly on GPU
     if (sp.layout() == SparseLayout::COO) {
+        // Coalesce duplicate (row,col) entries first. cusparseXcoo2csr does not
+        // merge duplicates, so an un-coalesced COO would yield a CSR with
+        // repeated columns in a row and rocSPARSE/cuSPARSE would double-count or
+        // produce undefined ordering — diverging from the CPU reference which
+        // sums duplicates.
+        if (!sp.is_coalesced()) {
+            sp = cuda_coalesce(sp);
+        }
         auto sp_shape = sp.shape();
         int64_t nrows = sp_shape[0];
         int64_t ncols = sp_shape[1];
