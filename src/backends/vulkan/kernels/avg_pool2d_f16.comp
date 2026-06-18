@@ -9,7 +9,7 @@
 // uint32 that straddles the logical tensor end. Writes outputs via a
 // pair-packed uint32[] view; one thread handles TWO packed output elements
 // so the final store is always a full-word write (caller pads the output
-// buffer by one F16 when `logical_numel` is odd, see dispatchAvgPool2d).
+// buffer by one F16 when `logical_numel` is odd, see dispatchAvgPool2dForward).
 //
 // Both quirks surfaced only after enabling VK_KHR_shader_float16_int8 and
 // VK_KHR_16bit_storage in the device creation (we queried shaderFloat16

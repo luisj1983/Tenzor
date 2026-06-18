@@ -35,6 +35,30 @@ auto VulkanBackend::dispatchEmbedding(const Tensor& weight, const Tensor& indice
     const Tensor weight_c = dispatchContiguous(weight);
     const Tensor indices_packed = dispatchContiguous(indices);
 
+    // Validate indices host-side so genuinely buggy user code raises the same
+    // std::out_of_range as the CPU reference (nn_kernels.cpp) instead of the
+    // shader silently writing zero rows. Negative indices are normalized
+    // (-1 -> num_embeddings-1) exactly as the CPU path and the shader do.
+    {
+        Tensor idx_host = indices_packed.to(Device::cpu());
+        auto check_range = [&](int64_t raw) {
+            int64_t v = raw;
+            if (v < 0) v += static_cast<int64_t>(num_embeddings);
+            if (v < 0 || v >= static_cast<int64_t>(num_embeddings)) {
+                throw std::out_of_range(
+                    "Embedding index " + std::to_string(raw) + " out of range [0, " +
+                    std::to_string(num_embeddings) + ")");
+            }
+        };
+        if (indices.dtype() == DType::Int64) {
+            const int64_t* p = idx_host.data<int64_t>();
+            for (uint32_t i = 0; i < num_indices; ++i) check_range(p[i]);
+        } else {
+            const int32_t* p = idx_host.data<int32_t>();
+            for (uint32_t i = 0; i < num_indices; ++i) check_range(static_cast<int64_t>(p[i]));
+        }
+    }
+
     // Convert Int64 indices to Int32 for shader compatibility
     Tensor indices_i32 = indices_packed;
     if (indices.dtype() == DType::Int64) {

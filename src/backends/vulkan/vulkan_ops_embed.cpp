@@ -17,7 +17,7 @@ auto VulkanBackend::dispatchInstanceNorm(const Tensor& input, const Tensor& weig
     auto input_shape = input.shape();
     int32_t device_id = input.device().index;
 
-    // Require 4D input (N, C, H, W)
+    // Require at least 3D input (N, C, spatial...)
     if (input.ndim() < 3) {
         throw std::invalid_argument("InstanceNorm requires at least 3D input, got " +
                                     std::to_string(input.ndim()) + "D");

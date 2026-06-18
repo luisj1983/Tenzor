@@ -219,9 +219,12 @@ auto VulkanBackend::dispatchLinearBackward(const Tensor& grad_output, const Tens
 auto VulkanBackend::dispatchDropout(const Tensor& input, float p, bool training) -> std::pair<Tensor, Tensor> {
     // If not training or p == 0, return input unchanged with all-ones mask
     if (!training || p == 0.0f) {
-        Tensor mask = dispatchFull(
+        // Allocate the ones mask on the input's device (dispatchFull hardcodes
+        // Vulkan device 0, which would straddle devices on a multi-GPU setup;
+        // the p>=1 branch below already passes input.device() via dispatchZeros).
+        Tensor mask = tenzor::full(
             std::vector<int64_t>(input.shape().begin(), input.shape().end()),
-            1.0f, input.dtype());
+            1.0, input.dtype(), input.device());
         return {input, mask};
     }
 

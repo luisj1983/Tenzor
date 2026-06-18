@@ -522,8 +522,12 @@ auto VulkanBackend::dispatchProd(const Tensor& input_orig, int64_t dim, bool kee
 
     endSingleTimeCommands(cmdBuffer, device_id);
 
-    // Synchronize to ensure GPU has completed before reading results
-    synchronize(device_id);
+    // No host synchronize here: prod's result is a device tensor. The optional
+    // .to(orig_dtype) below and any subsequent dispatch sequence correctly
+    // through normal backend dependency tracking (matching
+    // dispatchVarianceWelford). Forcing a blocking synchronize on this hot path
+    // would stall the queue and serialize pipelined reductions for no benefit;
+    // callers that need a host scalar already perform their own readback.
 
     // Convert back to original dtype if we did an Int64->Float64 conversion
     Tensor result = output;

@@ -363,6 +363,18 @@ void VulkanBackend::createLogicalDevices() {
         // Device features
         VkPhysicalDeviceFeatures deviceFeatures{};
         deviceFeatures.shaderFloat64 = VK_TRUE;
+        // Enable 64-bit integer arithmetic (core Vulkan 1.0 feature) when the
+        // device supports it. Required by the quantized Int8 GEMM/conv shaders,
+        // which accumulate in int64 to avoid silent INT32 wraparound on wide
+        // layers (matching the CUDA quantized reference). Querying first avoids
+        // a validation error when requesting an unsupported feature.
+        {
+            VkPhysicalDeviceFeatures supportedFeatures{};
+            vkGetPhysicalDeviceFeatures(ctx.physicalDevice, &supportedFeatures);
+            if (supportedFeatures.shaderInt64 == VK_TRUE) {
+                deviceFeatures.shaderInt64 = VK_TRUE;
+            }
+        }
 
         // Check for VK_KHR_shader_float_controls extension support
         uint32_t extensionCount = 0;

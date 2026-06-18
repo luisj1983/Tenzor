@@ -1,7 +1,11 @@
 #version 450
 #extension GL_EXT_shader_8bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
 
-// Quantized Conv2d: Int8 convolution with Int32 accumulation, dequantize to Float32
+// Quantized Conv2d: Int8 convolution with int64 accumulation, dequantize to
+// Float32. The running total (and the input_zp*weight_zp*K correction term) can
+// exceed INT32_MAX for wide layers, so accumulate in int64 to avoid silent
+// wraparound, matching the CUDA quantized reference.
 // Each thread computes one output element: output[n][oc][oh][ow]
 layout(local_size_x = 256) in;
 
@@ -39,9 +43,9 @@ void main() {
     uint oc = temp % params.out_channels;
     uint n  = temp / params.out_channels;
 
-    int acc = 0;
-    int sum_x = 0;
-    int sum_w = 0;
+    int64_t acc = 0;
+    int64_t sum_x = 0;
+    int64_t sum_w = 0;
     int pad_count = 0;
 
     for (uint ic = 0; ic < params.in_channels; ++ic) {
@@ -54,8 +58,8 @@ void main() {
                     uint input_idx = ((n * params.in_channels + ic) * params.h_in + uint(ih)) * params.w_in + uint(iw);
                     uint weight_idx = ((oc * params.in_channels + ic) * params.kernel_size + kh) * params.kernel_size + kw;
 
-                    int iv = int(input_data[input_idx]);
-                    int wv = int(weight_data[weight_idx]);
+                    int64_t iv = int64_t(input_data[input_idx]);
+                    int64_t wv = int64_t(weight_data[weight_idx]);
                     acc += iv * wv;
                     sum_x += iv;
                     sum_w += wv;
@@ -68,9 +72,10 @@ void main() {
 
     // Zero-point correction for non-padded positions
     uint K = params.in_channels * params.kernel_size * params.kernel_size;
-    acc = acc - params.input_zero_point * sum_w
-              - params.weight_zero_point * sum_x
-              + params.input_zero_point * params.weight_zero_point * int(K - uint(pad_count));
+    acc = acc - int64_t(params.input_zero_point) * sum_w
+              - int64_t(params.weight_zero_point) * sum_x
+              + int64_t(params.input_zero_point) * int64_t(params.weight_zero_point)
+                * int64_t(int(K) - pad_count);
 
     // Padded taps contribute exactly 0 (input is padded with the input zero-point,
     // so (input_zp - input_zp) * (w - weight_zp) == 0). They are correctly excluded

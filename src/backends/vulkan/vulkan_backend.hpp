@@ -467,9 +467,6 @@ public:
                           int64_t stride_h, int64_t stride_w,
                           int64_t padding_h, int64_t padding_w,
                           int64_t dilation_h = 1, int64_t dilation_w = 1) -> std::pair<Tensor, Tensor>;
-    auto dispatchAvgPool2d(const Tensor& input, int64_t kernel_h, int64_t kernel_w,
-                          int64_t stride_h, int64_t stride_w,
-                          int64_t padding_h, int64_t padding_w) -> Tensor;
     auto dispatchAdaptiveMaxPool2d(const Tensor& input, int64_t out_h, int64_t out_w) -> std::pair<Tensor, Tensor>;
     auto dispatchAdaptiveAvgPool2d(const Tensor& input, int64_t out_h, int64_t out_w) -> Tensor;
     auto dispatchAdaptiveAvgPool2dBackward(const Tensor& grad_output, int64_t H_in, int64_t W_in) -> Tensor;
