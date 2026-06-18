@@ -298,6 +298,20 @@ auto LazyGraph::execute_node(const std::shared_ptr<LazyNode>& node) -> Tensor {
         return tenzor::matmul(input_tensors[0], input_tensors[1]);
     }
 
+    // Mirror eager reshape exactly. Eager Tensor::reshape (tensor.cpp) forces a
+    // contiguous copy of a non-contiguous input before dispatching OpId::Reshape,
+    // because the raw reshape kernel merely reinterprets the SAME storage with a
+    // new shape and assumes a contiguous, row-major layout. execute_node would
+    // otherwise dispatch OpId::Reshape on the raw materialized input — so a lazy
+    // reshape of a non-contiguous tensor (e.g. the output of transpose()) would
+    // reinterpret a strided buffer as contiguous, silently corrupting data or
+    // reading out of bounds. Route through tenzor::reshape (which contiguifies)
+    // so materialization matches the eager result. Use the node's resolved
+    // output shape (already has -1 inferred and validated).
+    if (op == OpId::Reshape && input_tensors.size() == 1) {
+        return tenzor::reshape(input_tensors[0], node->shape());
+    }
+
     // Mirror eager elementwise binary ops exactly. lazy::add/sub/mul/div record
     // the output dtype via promote_types() (binary_lazy_op), but raw backend
     // dispatch (e.g. cpu::add_kernel) performs NO dtype promotion and rejects
