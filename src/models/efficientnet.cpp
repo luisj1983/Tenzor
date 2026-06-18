@@ -125,8 +125,10 @@ int64_t EfficientNetConfig::round_layers(double layers) {
 // SqueezeExcitation Implementation
 // ============================================================================
 
-EfficientNetSqueezeExcitation::EfficientNetSqueezeExcitation(int64_t channels, double reduction_ratio)
-    : reduced_channels_(std::max(1L, static_cast<int64_t>(channels * reduction_ratio))) {
+EfficientNetSqueezeExcitation::EfficientNetSqueezeExcitation(int64_t channels, double reduction_ratio,
+                                                             int64_t reduction_base_channels)
+    : reduced_channels_(std::max(1L, static_cast<int64_t>(
+          (reduction_base_channels > 0 ? reduction_base_channels : channels) * reduction_ratio))) {
 
     // Global average pooling
     pool_ = std::make_shared<nn::AdaptiveAvgPool2d>(1);
@@ -197,7 +199,9 @@ MBConvBlock::MBConvBlock(int64_t in_channels,
 
     // Squeeze-and-Excitation
     if (use_se) {
-        se_ = std::make_shared<EfficientNetSqueezeExcitation>(conv_channels, se_ratio);
+        // SE bottleneck width reduces relative to the block INPUT channels
+        // (EfficientNet/torchvision), while the SE convs run on conv_channels.
+        se_ = std::make_shared<EfficientNetSqueezeExcitation>(conv_channels, se_ratio, in_channels);
         register_module("se", se_);
     }
 

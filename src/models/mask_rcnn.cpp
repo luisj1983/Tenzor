@@ -1485,7 +1485,13 @@ auto mask_rcnn_resnet50_fpn(int64_t num_classes, bool pretrained)
         0.7, 0.05, 0.5, 100);
 
     if (pretrained) {
-        // Full-model COCO weights (backbone + FPN + RPN + ROI box head + mask head).
+        // NOTE: there is no safetensors mirror of the torchvision Mask R-CNN
+        // COCO checkpoint, so this path does NOT silently return ImageNet/random
+        // weights — download_pretrained_safetensors() throws a descriptive error
+        // (the hub lists mask_rcnn_resnet50_fpn in removed_pretrained_reasons:
+        // "torchvision detection checkpoint — no safetensors mirror"). When a
+        // mirror becomes available this will load the full-model COCO weights
+        // (backbone + FPN + RPN + ROI box head + mask head).
         auto path = ModelHub::download_pretrained_safetensors("mask_rcnn_resnet50_fpn");
         ModelHub::load_pretrained_weights(*model, path, /*strict=*/false);
     }

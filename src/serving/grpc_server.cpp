@@ -35,16 +35,12 @@ namespace serving {
 
 namespace {
 
-// Convert DType enum to string
+// Convert DType enum to its canonical string name (round-trips through
+// tenzor::dtype_from_string on the input side). Use the central dtype_name()
+// so every dtype — bfloat16/int8/uint8/int16/bool/complex/... — is labeled
+// correctly instead of being silently mislabeled as "float32".
 std::string dtype_to_string(DType dt) {
-    switch (dt) {
-        case DType::Float32: return "float32";
-        case DType::Float64: return "float64";
-        case DType::Float16: return "float16";
-        case DType::Int32: return "int32";
-        case DType::Int64: return "int64";
-        default: return "float32";
-    }
+    return std::string(tenzor::dtype_name(dt));
 }
 
 } // anonymous namespace

@@ -117,7 +117,13 @@ public:
      * @param channels Number of input channels
      * @param reduction_ratio Reduction ratio (channels / reduced_channels)
      */
-    EfficientNetSqueezeExcitation(int64_t channels, double reduction_ratio = 0.25);
+    // `channels` is the (expanded) feature-map channel count the SE convs
+    // operate on. `reduction_base_channels`, when > 0, is the block's INPUT
+    // channel count that the squeezed (bottleneck) width is computed from —
+    // the EfficientNet/torchvision convention reduces relative to block input,
+    // not the expanded channels. Defaults to `channels` for backward compat.
+    EfficientNetSqueezeExcitation(int64_t channels, double reduction_ratio = 0.25,
+                                  int64_t reduction_base_channels = -1);
 
     auto forward_impl(const Variable& input) -> Variable override;
 
